@@ -1,0 +1,59 @@
+# ==================== 编译输出和本地生成状态 ====================
+build/
+out/
+x64/
+.vs/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.dir/
+
+# ==================== 运行时/编辑器临时文件 ====================
+*.log
+*.tmp
+*.userprefs
+
+# ==================== Python / 工具缓存 ====================
+__pycache__/
+*.pyc
+
+# ==================== NuGet 包（构建时自动还原）====================
+packages/
+
+# ==================== OpenCV 源码下载和编译中间件 ====================
+Xen/modules/opencv/src/
+Xen/modules/_downloads/
+Xen/modules/opencv/build/ocv-cuda/
+
+# ==================== serial 子模块 Git 元数据 ====================
+Xen/modules/serial/.git/
+
+# ==================== TensorRT SDK（自行下载，文件太大不提交）====================
+Xen/modules/TensorRT-*/
+
+# ==================== 运行时 DLL（构建时自动复制到 x64/）====================
+# 排除所有非源码目录中的 .dll，保留 Xen 源码目录下的手动管理 DLL
+*.dll
+!Xen/*.dll
+!Xen/**/*.dll
+
+
+# ==================== VS 项目用户配置 ====================
+*.vcxproj.user
+*.sln.docstates
+
+# ==================== JetBrains / ReSharper ====================
+*.DotSettings
+*.DotSettings.user
+_ReSharper*/
+
+# ==================== 操作系统文件 ====================
+Thumbs.db
+.DS_Store
+desktop.ini
+*.swp
+*.swo
+
+# ==================== 配置备份 ====================
+*.ini.bak
+*.bak

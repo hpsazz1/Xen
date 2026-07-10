@@ -1,0 +1,1024 @@
+﻿#define WIN32_LEAN_AND_MEAN
+#define _WINSOCKAPI_
+#include <windows.h>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <string>
+#include <filesystem>
+#include <unordered_map>
+#include <algorithm>
+
+#include "config.h"
+#include "modules/SimpleIni.h"
+
+/**
+ * splitString - 按分隔符分割字符串，并去除每个token的前后空白
+ * @param str       待分割的字符串
+ * @param delimiter 分隔符字符
+ * @return 分割并清理后的字符串列表
+ */
+std::vector<std::string> Config::splitString(const std::string& str, char delimiter)
+{
+    std::vector<std::string> tokens;
+    std::stringstream ss(str);
+    std::string item;
+    while (std::getline(ss, item, delimiter))
+    {
+        // 移除前导空白
+        while (!item.empty() && (item.front() == ' ' || item.front() == '\t'))
+            item.erase(item.begin());
+        // 移除尾部空白
+        while (!item.empty() && (item.back() == ' ' || item.back() == '\t'))
+            item.pop_back();
+
+        tokens.push_back(item);
+    }
+    return tokens;
+}
+
+/**
+ * joinStrings - 将字符串列表用指定分隔符拼接
+ * @param vec       待拼接的字符串列表
+ * @param delimiter 分隔符
+ * @return 拼接后的字符串
+ */
+std::string Config::joinStrings(const std::vector<std::string>& vec, const std::string& delimiter)
+{
+    std::ostringstream oss;
+    for (size_t i = 0; i < vec.size(); ++i)
+    {
+        if (i != 0) oss << delimiter;
+        oss << vec[i];
+    }
+    return oss.str();
+}
+
+bool Config::loadConfig(const std::string& filename)
+{
+    // 确定目标配置文件路径
+    std::string target = filename.empty() ? "config.ini" : filename;
+    std::error_code absEc;
+    std::filesystem::path absPath = std::filesystem::absolute(target, absEc);
+    config_path = absEc ? target : absPath.string();
+
+    // 如果配置文件不存在，创建含有默认值的配置文件并保存
+    if (!std::filesystem::exists(target))
+    {
+        std::cerr << "[Config] Config file does not exist, creating default config: " << target << std::endl;
+
+        // === 画面捕获设置 ===
+        capture_method = "duplication_api";              // 画面捕获方式：duplication_api (Windows桌面复制)
+        capture_target = "monitor";                      // 捕获目标：monitor（显示器）或 window（窗口）
+        capture_window_title = "";                       // 捕获窗口标题（空表示不指定）
+        udp_ip = "0.0.0.0";                              // UDP 画面传输接收端 IP
+        udp_port = 1234;                                 // UDP 端口
+        ndi_source_name = "Auto";                        // NDI 源名称
+        detection_resolution = 320;                      // AI 检测分辨率（160/320/640）
+        capture_fps = 60;                                // 画面捕获帧率上限
+        monitor_idx = 0;                                 // 显示器索引
+        circle_fov_enabled = true;                       // 是否启用圆形视场限制
+        circle_fov_radius_percent = 100;                 // 圆形 FOV 半径百分比
+        circle_fov_show_preview = true;                  // 是否显示 FOV 预览
+        capture_borders = true;                          // 是否捕获窗口边框
+        capture_cursor = true;                           // 是否捕获鼠标光标
+        virtual_camera_name = "None";                    // 虚拟摄像头名称
+        virtual_camera_width = 1920;                     // 虚拟摄像头宽度
+        virtual_camera_heigth = 1080;                    // 虚拟摄像头高度
+
+        // === 瞄准目标设置 ===
+        disable_headshot = false;                        // 是否禁用头部瞄准
+        body_y_offset = 0.15f;                           // 身体瞄准点 Y 偏移
+        head_y_offset = 0.05f;                           // 头部瞄准点 Y 偏移
+        auto_aim = false;                                // 是否自动瞄准（无需按键）
+        tracker_enabled = true;                          // 是否启用目标追踪器
+        tracker_overlay_table_enabled = true;            // 是否显示追踪器表格
+
+        // === 鼠标移动设置 ===
+        fovX = 106;                                      // 水平视野（度）
+        fovY = 74;                                       // 垂直视野（度）
+        minSpeedMultiplier = 0.1f;                       // 鼠标最小速度倍率
+        maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
+
+        predictionInterval = 0.01f;                      // 位置预测间隔（秒）
+        prediction_futurePositions = 20;                 // 预测的未来位置点数
+        draw_futurePositions = true;                     // 是否绘制预测轨迹点
+        kalman_enabled = true;                           // 是否启用卡尔曼滤波
+        kalman_process_noise_position = 40.0f;           // 卡尔曼滤波：位置过程噪声
+        kalman_process_noise_velocity = 1800.0f;         // 卡尔曼滤波：速度过程噪声
+        kalman_measurement_noise = 35.0f;                // 卡尔曼滤波：测量噪声
+        kalman_velocity_damping = 0.08f;                 // 卡尔曼滤波：速度阻尼
+        kalman_max_velocity = 20000.0f;                  // 卡尔曼滤波：最大速度
+        kalman_warmup_frames = 2;                        // 卡尔曼滤波：预热帧数
+        kalman_compensate_detection_delay = true;        // 是否补偿检测延迟
+        kalman_additional_prediction_ms = 0.0f;          // 额外预测时间（毫秒）
+        kalman_reset_timeout_sec = 0.5f;                 // 卡尔曼重置超时（秒）
+
+        snapRadius = 1.5f;                               // 瞄准吸附半径
+        nearRadius = 25.0f;                              // "近距离"半径阈值
+        speedCurveExponent = 3.0f;                       // 速度曲线指数（控制鼠标移动曲线）
+        snapBoostFactor = 1.15f;                         // 吸附增强因子
+
+        easynorecoil = false;                            // 是否启用简易无后座力
+        easynorecoilstrength = 0.0f;                     // 无后座力强度
+        input_method = "WIN32";                          // 输入方法
+
+        // === 轨迹模拟（模拟自然鼠标移动） ===
+        wind_mouse_enabled = false;
+        wind_G = 18.0f;                                  // 鼠标移速系数
+        wind_W = 15.0f;                                  // 轨迹摆动幅度
+        wind_M = 10.0f;                                  // 单步移动上限
+        wind_D = 8.0f;                                   // 微调距离阈值
+
+        // === Arduino 硬件输入 ===
+        arduino_baudrate = 115200;                       // 串口波特率
+        arduino_port = "COM0";                           // 串口号
+        arduino_16_bit_mouse = false;                    // 是否 16 位鼠标精度
+        arduino_enable_keys = false;                     // 是否启用按键
+
+        // === RP2350 硬件输入 ===
+        rp2350_baudrate = 115200;
+        rp2350_port = "COM0";
+        rp2350_16_bit_mouse = true;
+        rp2350_enable_keys = false;
+
+        // === Teensy 4.1 RawHID 通用鼠标桥接 ===
+        teensy_hid_serial = "AUTO";                      // 串行号（自动检测）
+        teensy_hid_vid_filter = "AUTO";                  // VID 过滤
+        teensy_hid_pid_filter = "AUTO";                  // PID 过滤
+        teensy_hid_usage_page = 65451;                   // HID 使用页
+        teensy_hid_usage_id = 512;                       // HID 使用 ID
+        teensy_hid_open_index = 0;                       // 设备打开索引
+        teensy_hid_packet_timeout_ms = 2;                // 数据包超时（毫秒）
+        teensy_hid_reconnect_interval_ms = 500;          // 重连间隔（毫秒）
+
+        // === kmbox_net 网络输入 ===
+        kmbox_net_ip = "10.42.42.42";
+        kmbox_net_port = "1984";
+        kmbox_net_uuid = "DEADC0DE";
+
+        // === kmbox_a 输入 ===
+        kmbox_a_pidvid = "";
+
+        // === MAKCU 输入 ===
+        makcu_baudrate = 115200;
+        makcu_port = "COM0";
+
+        // === 鼠标自动射击 ===
+        auto_shoot = false;
+        bScope_multiplier = 1.0f;                        // 开镜倍率
+
+        // === AI 推理设置 ===
+#ifdef USE_CUDA
+        backend = "TRT";                                 // 使用 TensorRT 后端
+#else
+        backend = "DML";                                 // 使用 DirectML 后端
+        dml_device_id = 0;                               // DirectML 设备 ID
+#endif
+
+#ifdef USE_CUDA
+        ai_model = "sunxds_0.5.6.engine";                // TensorRT 引擎模型
+#else
+        ai_model = "sunxds_0.5.6.onnx";                  // ONNX 模型
+#endif
+
+        confidence_threshold = 0.10f;                    // 检测置信度阈值
+        nms_threshold = 0.50f;                           // NMS IoU 阈值
+        max_detections = 100;                            // 最大检测数
+#ifdef USE_CUDA
+        export_enable_fp8 = false;                       // 导出时启用 FP8
+        export_enable_fp16 = true;                       // 导出时启用 FP16
+#endif
+        fixed_input_size = false;                        // 模型是否为固定输入尺寸
+
+        // === CUDA 设置 ===
+#ifdef USE_CUDA
+        use_cuda_graph = false;                          // 是否使用 CUDA Graph
+        use_pinned_memory = false;                       // 是否使用锁页内存
+        gpuMemoryReserveMB = 2048;                       // GPU 预留显存（MB）
+        enableGpuExclusiveMode = true;                   // 是否 GPU 独占模式
+        capture_use_cuda = true;                         // 捕获是否使用 CUDA
+#endif
+
+        // === 系统资源设置 ===
+        cpuCoreReserveCount = 4;                         // 预留 CPU 核心数
+        systemMemoryReserveMB = 2048;                    // 系统预留内存（MB）
+
+        // === 热键绑定 ===
+        button_targeting = splitString("RightMouseButton"); // 瞄准键
+        button_shoot = splitString("LeftMouseButton");      // 射击键
+        button_zoom = splitString("RightMouseButton");      // 缩放键
+        button_exit = splitString("F2");                    // 退出键
+        button_pause = splitString("F3");                   // 暂停键
+        button_reload_config = splitString("F4");           // 重载配置键
+        button_open_overlay = splitString("Home");          // 打开覆盖层键
+        enable_arrows_settings = false;                     // 是否启用方向键调整
+
+        // === 程序覆盖层（UI） ===
+        overlay_opacity = 225;                           // 覆盖层透明度
+        overlay_ui_scale = 1.0f;                         // 覆盖层缩放比例
+        overlay_exclude_from_capture = true;             // 排除覆盖层窗口
+        overlay_x = 0;                                   // 覆盖层窗口 X 位置
+        overlay_y = 0;                                   // 覆盖层窗口 Y 位置
+        overlay_width = 860;                             // 覆盖层窗口宽度
+        overlay_height = 526;                            // 覆盖层窗口高度
+
+        // === 深度估计 ===
+        depth_inference_enabled = true;                  // 启用深度推理
+        depth_model_path = "depth_anything_v2.engine";   // 深度模型路径
+        depth_fps = 100;                                 // 深度推理帧率
+        depth_colormap = 18;                             // 深度伪彩色方案
+        depth_mask_enabled = false;                      // 是否启用深度掩码
+        depth_mask_fps = 5;                              // 掩码更新帧率
+        depth_mask_near_percent = 20;                    // 近处百分比
+        depth_mask_expand = 0;                           // 掩码扩展像素
+        depth_mask_hold_frames = 0;                      // 掩码保持帧数
+        depth_mask_alpha = 90;                           // 掩码透明度
+        depth_mask_invert = false;                       // 反转掩码
+        depth_debug_overlay_enabled = false;             // 深度调试覆盖层
+
+        // === 游戏覆盖层（叠加在游戏画面上） ===
+        game_overlay_enabled = false;                    // 启用游戏覆盖层
+        game_overlay_max_fps = 0;                        // 覆盖层最大帧率（0=不限）
+        game_overlay_draw_boxes = true;                  // 绘制检测框
+        game_overlay_compensate_latency = true;          // 延迟补偿
+        game_overlay_draw_future = true;                 // 绘制预测位置
+        game_overlay_draw_wind_tail = true;              // 绘制轨迹模拟轨迹
+        game_overlay_draw_frame = true;                  // 绘制边框
+        game_overlay_draw_circle_fov = true;             // 绘制圆形 FOV
+        game_overlay_show_target_correction = true;      // 显示目标修正
+        game_overlay_box_a = 255;                        // 检测框透明度
+        game_overlay_box_r = 0;                          // 检测框红色分量
+        game_overlay_box_g = 255;                        // 检测框绿色分量
+        game_overlay_box_b = 0;                          // 检测框蓝色分量
+        game_overlay_frame_a = 180;                      // 边框透明度
+        game_overlay_frame_r = 255;                      // 边框红色分量
+        game_overlay_frame_g = 255;                      // 边框绿色分量
+        game_overlay_frame_b = 255;                      // 边框蓝色分量
+        game_overlay_box_thickness = 2.0f;               // 检测框线条粗细
+        game_overlay_frame_thickness = 1.5f;             // 边框线条粗细
+        game_overlay_future_point_radius = 5.0f;         // 预测点半径
+        game_overlay_future_alpha_falloff = 1.0f;        // 预测点透明度衰减
+
+        // 覆盖层图标
+        game_overlay_icon_enabled = false;
+        game_overlay_icon_path = "icon.png";
+        game_overlay_icon_width = 64;
+        game_overlay_icon_height = 64;
+        game_overlay_icon_offset_x = 0.0f;
+        game_overlay_icon_offset_y = 0.0f;
+        game_overlay_icon_anchor = "center";
+        game_overlay_icon_class = -1;
+
+        // === 数据采集 ===
+        collect_data_while_playing = false;              // 游戏时采集数据
+        collect_only_when_aimbot_running = false;        // 仅自瞄运行时采集
+        collect_only_when_targets_present = true;        // 仅目标存在时采集
+        collect_save_every_n_frames = 15;                // 每 N 帧保存一次
+        collect_jpeg_quality = 95;                       // JPEG 压缩质量
+        collect_output_dir.clear();                      // 输出目录
+        auto_label_data = true;                          // 自动标注数据
+        auto_label_min_conf = 0.30f;                     // 自动标注最小置信度
+        auto_label_max_boxes = 20;                       // 自动标注最大框数
+        auto_label_record_classes.clear();               // 自动标注记录类别
+
+        // === 类 ID 映射 ===
+        class_player = 0;                                // 玩家类 ID
+        class_head = 1;                                  // 头部类 ID
+
+        // === 调试 ===
+        show_window = true;                              // 显示程序窗口
+        show_fps = false;                                // 显示帧率
+        screenshot_button = splitString("None");         // 截屏快捷键
+        screenshot_delay = 500;                          // 截屏延迟（毫秒）
+        verbose = false;                                 // 详细日志输出
+
+        // === 游戏配置文件 ===
+        game_profiles.clear();
+        GameProfile uni;
+        uni.name = "UNIFIED";                            // 默认统一配置文件
+        uni.sens = 1.0;                                   // 鼠标灵敏度
+        uni.yaw = 0.022;                                  // 水平 yaw 值
+        uni.pitch = uni.yaw;                              // 垂直 pitch 值
+        uni.fovScaled = false;                            // 是否按 FOV 缩放
+        uni.baseFOV = 0.0;                                // 基准 FOV
+        game_profiles[uni.name] = uni;
+        active_game = uni.name;
+
+        saveConfig(target);                              // 保存默认配置到文件
+        return true;
+    }
+
+    // === 使用 SimpleIni 库解析已存在的 INI 文件 ===
+    CSimpleIniA ini;
+    ini.SetUnicode();
+    SI_Error rc = ini.LoadFile(target.c_str());
+    if (rc < 0)
+    {
+        std::cerr << "[Config] Error parsing INI file: " << target << std::endl;
+        return false;
+    }
+
+    // 辅助 lambda：从 INI 读取字符串值
+    auto get_string = [&](const char* key, const std::string& defval)
+    {
+        const char* val = ini.GetValue("", key, defval.c_str());
+        return val ? std::string(val) : defval;
+    };
+
+    // 辅助 lambda：从 INI 读取布尔值
+    auto get_bool = [&](const char* key, bool defval)
+        {
+            return ini.GetBoolValue("", key, defval);
+        };
+
+    // 辅助 lambda：从 INI 读取整数值
+    auto get_long = [&](const char* key, long defval)
+        {
+            return (int)ini.GetLongValue("", key, defval);
+        };
+
+    // 辅助 lambda：从 INI 读取浮点值
+    auto get_double = [&](const char* key, double defval)
+        {
+            return ini.GetDoubleValue("", key, defval);
+        };
+
+    // === 游戏配置项读入 ===
+    game_profiles.clear();
+
+    CSimpleIniA::TNamesDepend keys;
+    ini.GetAllKeys("Games", keys);
+
+    // 遍历 [Games] 段的所有键，解析每条游戏配置
+    // 格式: GameName = sens, yaw, pitch(可选), fovScaled(可选), baseFOV(可选)
+    for (const auto& k : keys)
+    {
+        std::string name = k.pItem;
+        std::string val = ini.GetValue("Games", k.pItem, "");
+        auto parts = splitString(val, ',');
+
+        try
+        {
+            if (parts.size() < 2)
+                throw std::runtime_error("not enough values");
+
+            GameProfile gp;
+            gp.name = name;
+            gp.sens = std::stod(parts[0]);
+            gp.yaw = std::stod(parts[1]);
+            gp.pitch = parts.size() > 2 ? std::stod(parts[2]) : gp.yaw;
+            gp.fovScaled = parts.size() > 3 && (parts[3] == "true" || parts[3] == "1");
+            gp.baseFOV = parts.size() > 4 ? std::stod(parts[4]) : 0.0;
+
+            game_profiles[name] = gp;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[Config] Failed to parse profile: " << name
+                << " = " << val << " (" << e.what() << ")" << std::endl;
+        }
+    }
+
+    // 确保 UNIFIED 配置文件始终存在
+    if (!game_profiles.count("UNIFIED"))
+    {
+        GameProfile uni;
+        uni.name = "UNIFIED";
+        uni.sens = 1.0;
+        uni.yaw = 0.022;
+        uni.pitch = uni.yaw;
+        uni.fovScaled = false;
+        uni.baseFOV = 0.0;
+        game_profiles[uni.name] = uni;
+    }
+
+    // 读取当前激活的游戏配置，如果不存在则选用第一个
+    active_game = get_string("active_game", active_game);
+    if (!game_profiles.count(active_game) && !game_profiles.empty())
+        active_game = game_profiles.begin()->first;
+
+    // === 画面捕获配置 ===
+    capture_method = get_string("capture_method", "duplication_api");
+    capture_target = get_string("capture_target", "monitor");
+    capture_window_title = get_string("capture_window_title", "");
+    udp_ip = get_string("udp_ip", "0.0.0.0");
+    udp_port = get_long("udp_port", 1234);
+    if (udp_port < 1 || udp_port > 65535)
+        udp_port = 1234;
+    ndi_source_name = get_string("ndi_source_name", "Auto");
+    detection_resolution = get_long("detection_resolution", 320);
+    if (detection_resolution != 160 && detection_resolution != 320 && detection_resolution != 640)
+        detection_resolution = 320;
+
+    capture_fps = get_long("capture_fps", 60);
+    monitor_idx = get_long("monitor_idx", 0);
+    circle_fov_enabled = get_bool("circle_fov_enabled", true);
+    circle_fov_radius_percent = get_long("circle_fov_radius_percent", 100);
+    if (circle_fov_radius_percent < 1) circle_fov_radius_percent = 1;
+    if (circle_fov_radius_percent > 100) circle_fov_radius_percent = 100;
+    circle_fov_show_preview = get_bool("circle_fov_show_preview", true);
+    capture_borders = get_bool("capture_borders", true);
+    capture_cursor = get_bool("capture_cursor", true);
+    virtual_camera_name = get_string("virtual_camera_name", "None");
+    virtual_camera_width = get_long("virtual_camera_width", 1920);
+    virtual_camera_heigth = get_long("virtual_camera_heigth", 1080);
+
+    // === 瞄准目标配置 ===
+    disable_headshot = get_bool("disable_headshot", false);
+    body_y_offset = (float)get_double("body_y_offset", 0.15);
+    head_y_offset = (float)get_double("head_y_offset", 0.05);
+    auto_aim = get_bool("auto_aim", false);
+    tracker_enabled = get_bool("tracker_enabled", true);
+    tracker_overlay_table_enabled = get_bool("tracker_overlay_table_enabled", true);
+
+    // === 鼠标控制配置 ===
+    fovX = get_long("fovX", 106);
+    fovY = get_long("fovY", 74);
+    minSpeedMultiplier = (float)get_double("minSpeedMultiplier", 0.1);
+    maxSpeedMultiplier = (float)get_double("maxSpeedMultiplier", 0.1);
+
+    predictionInterval = (float)get_double("predictionInterval", 0.01);
+    prediction_futurePositions = get_long("prediction_futurePositions", 20);
+    draw_futurePositions = get_bool("draw_futurePositions", true);
+    kalman_enabled = get_bool("kalman_enabled", true);
+    kalman_process_noise_position = (float)get_double("kalman_process_noise_position", 40.0);
+    kalman_process_noise_velocity = (float)get_double("kalman_process_noise_velocity", 1800.0);
+    kalman_measurement_noise = (float)get_double("kalman_measurement_noise", 35.0);
+    kalman_velocity_damping = (float)get_double("kalman_velocity_damping", 0.08);
+    kalman_max_velocity = (float)get_double("kalman_max_velocity", 20000.0);
+    kalman_warmup_frames = get_long("kalman_warmup_frames", 2);
+    kalman_compensate_detection_delay = get_bool("kalman_compensate_detection_delay", true);
+    kalman_additional_prediction_ms = (float)get_double("kalman_additional_prediction_ms", 0.0);
+    kalman_reset_timeout_sec = (float)get_double("kalman_reset_timeout_sec", 0.5);
+
+    snapRadius = (float)get_double("snapRadius", 1.5);
+    nearRadius = (float)get_double("nearRadius", 25.0);
+    speedCurveExponent = (float)get_double("speedCurveExponent", 3.0);
+    snapBoostFactor = (float)get_double("snapBoostFactor", 1.15);
+
+    easynorecoil = get_bool("easynorecoil", false);
+    easynorecoilstrength = (float)get_double("easynorecoilstrength", 0.0);
+    input_method = get_string("input_method", "WIN32");
+
+    // === 轨迹模拟配置 ===
+    wind_mouse_enabled = get_bool("wind_mouse_enabled", false);
+    wind_G = (float)get_double("wind_G", 18.0f);       // 鼠标移速系数
+    wind_W = (float)get_double("wind_W", 15.0f);       // 轨迹摆动幅度
+    wind_M = (float)get_double("wind_M", 10.0f);       // 单步移动上限
+    wind_D = (float)get_double("wind_D", 8.0f);        // 微调距离阈值
+
+    // === Arduino 输入设备 ===
+    arduino_baudrate = get_long("arduino_baudrate", 115200);
+    arduino_port = get_string("arduino_port", "COM0");
+    arduino_16_bit_mouse = get_bool("arduino_16_bit_mouse", false);
+    arduino_enable_keys = get_bool("arduino_enable_keys", false);
+
+    // === RP2350 输入设备 ===
+    rp2350_baudrate = get_long("rp2350_baudrate", 115200);
+    rp2350_port = get_string("rp2350_port", "COM0");
+    rp2350_16_bit_mouse = get_bool("rp2350_16_bit_mouse", true);
+    rp2350_enable_keys = get_bool("rp2350_enable_keys", false);
+
+    // === Teensy 4.1 RawHID 通用鼠标桥接 ===
+    teensy_hid_serial = get_string("teensy_hid_serial", "AUTO");
+    teensy_hid_vid_filter = get_string("teensy_hid_vid_filter", "AUTO");
+    teensy_hid_pid_filter = get_string("teensy_hid_pid_filter", "AUTO");
+    teensy_hid_usage_page = get_long("teensy_hid_usage_page", 65451);
+    teensy_hid_usage_id = get_long("teensy_hid_usage_id", 512);
+    teensy_hid_open_index = get_long("teensy_hid_open_index", 0);
+    teensy_hid_packet_timeout_ms = get_long("teensy_hid_packet_timeout_ms", 2);
+    teensy_hid_reconnect_interval_ms = get_long("teensy_hid_reconnect_interval_ms", 500);
+
+    // === kmbox_net 输入 ===
+    kmbox_net_ip = get_string("kmbox_net_ip", "10.42.42.42");
+    kmbox_net_port = get_string("kmbox_net_port", "1984");
+    kmbox_net_uuid = get_string("kmbox_net_uuid", "DEADC0DE");
+
+    // === kmbox_a 输入 ===
+    kmbox_a_pidvid = get_string("kmbox_a_pidvid", "");
+
+    // === MAKCU 输入 ===
+    makcu_baudrate = get_long("makcu_baudrate", 115200);
+    makcu_port = get_string("makcu_port", "COM0");
+
+    // === 鼠标自动射击 ===
+    auto_shoot = get_bool("auto_shoot", false);
+    bScope_multiplier = (float)get_double("bScope_multiplier", 1.2);
+
+    // === AI 推理配置 ===
+#ifdef USE_CUDA
+    backend = "TRT";
+#else
+    backend = "DML";
+    dml_device_id = get_long("dml_device_id", 0);
+#endif
+
+#ifdef USE_CUDA
+    ai_model = get_string("ai_model", "sunxds_0.8.0.engine");
+#else
+    ai_model = get_string("ai_model", "sunxds_0.8.0.onnx");
+#endif
+    confidence_threshold = (float)get_double("confidence_threshold", 0.15);
+    nms_threshold = (float)get_double("nms_threshold", 0.50);
+    max_detections = get_long("max_detections", 20);
+#ifdef USE_CUDA
+    export_enable_fp8 = get_bool("export_enable_fp8", true);
+    export_enable_fp16 = get_bool("export_enable_fp16", true);
+#endif
+
+    // === CUDA 配置 ===
+#ifdef USE_CUDA
+    use_cuda_graph = get_bool("use_cuda_graph", false);
+    use_pinned_memory = get_bool("use_pinned_memory", true);
+    gpuMemoryReserveMB = get_long("gpuMemoryReserveMB", 2048);
+    enableGpuExclusiveMode = get_bool("enableGpuExclusiveMode", true);
+    capture_use_cuda = get_bool("capture_use_cuda", true);
+#endif
+
+    // === 系统资源配置 ===
+    cpuCoreReserveCount = get_long("cpuCoreReserveCount", 4);
+    systemMemoryReserveMB = get_long("systemMemoryReserveMB", 2048);
+
+    // === 热键绑定配置 ===
+    button_targeting = splitString(get_string("button_targeting", "RightMouseButton"));
+    button_shoot = splitString(get_string("button_shoot", "LeftMouseButton"));
+    button_zoom = splitString(get_string("button_zoom", "RightMouseButton"));
+    button_exit = splitString(get_string("button_exit", "F2"));
+    button_pause = splitString(get_string("button_pause", "F3"));
+    button_reload_config = splitString(get_string("button_reload_config", "F4"));
+    button_open_overlay = splitString(get_string("button_open_overlay", "Home"));
+    enable_arrows_settings = get_bool("enable_arrows_settings", false);
+
+    // === 覆盖层配置 ===
+    overlay_opacity = get_long("overlay_opacity", 225);
+    overlay_ui_scale = (float)get_double("overlay_ui_scale", 1.0);
+    overlay_exclude_from_capture = get_bool("overlay_exclude_from_capture", true);
+    overlay_x = get_long("overlay_x", 0);
+    overlay_y = get_long("overlay_y", 0);
+    overlay_width = get_long("overlay_width", 860);
+    overlay_height = get_long("overlay_height", 526);
+
+    // === 深度估计配置 ===
+    depth_inference_enabled = get_bool("depth_inference_enabled", true);
+    depth_model_path = get_string("depth_model_path", "depth_anything_v2.engine");
+    depth_fps = get_long("depth_fps", 100);
+    if (depth_fps < 0) depth_fps = 0;
+    depth_colormap = get_long("depth_colormap", 18);
+    if (depth_colormap < 0 || depth_colormap > 21) depth_colormap = 18;
+    depth_mask_enabled = get_bool("depth_mask_enabled", false);
+    depth_mask_fps = get_long("depth_mask_fps", 5);
+    if (depth_mask_fps < 0) depth_mask_fps = 0;
+    depth_mask_near_percent = get_long("depth_mask_near_percent", 20);
+    if (depth_mask_near_percent < 1) depth_mask_near_percent = 1;
+    if (depth_mask_near_percent > 100) depth_mask_near_percent = 100;
+    depth_mask_expand = get_long("depth_mask_expand", 0);
+    if (depth_mask_expand < 0) depth_mask_expand = 0;
+    if (depth_mask_expand > 128) depth_mask_expand = 128;
+    depth_mask_hold_frames = get_long("depth_mask_hold_frames", 0);
+    if (depth_mask_hold_frames < 0) depth_mask_hold_frames = 0;
+    if (depth_mask_hold_frames > 120) depth_mask_hold_frames = 120;
+    depth_mask_alpha = get_long("depth_mask_alpha", 90);
+    if (depth_mask_alpha < 0) depth_mask_alpha = 0;
+    if (depth_mask_alpha > 255) depth_mask_alpha = 255;
+    depth_mask_invert = get_bool("depth_mask_invert", false);
+    depth_debug_overlay_enabled = get_bool("depth_debug_overlay_enabled", false);
+
+    // === 游戏覆盖层配置 ===
+    game_overlay_enabled = get_bool("game_overlay_enabled", false);
+    game_overlay_max_fps = get_long("game_overlay_max_fps", 0);
+    game_overlay_draw_boxes = get_bool("game_overlay_draw_boxes", true);
+    game_overlay_compensate_latency = get_bool("game_overlay_compensate_latency", true);
+    game_overlay_draw_future = get_bool("game_overlay_draw_future", true);
+    game_overlay_draw_wind_tail = get_bool("game_overlay_draw_wind_tail", true);
+    game_overlay_draw_frame = get_bool("game_overlay_draw_frame", true);
+    game_overlay_draw_circle_fov = get_bool("game_overlay_draw_circle_fov", true);
+    game_overlay_show_target_correction = get_bool("game_overlay_show_target_correction", true);
+    game_overlay_box_a = get_long("game_overlay_box_a", 255);
+    game_overlay_box_r = get_long("game_overlay_box_r", 0);
+    game_overlay_box_g = get_long("game_overlay_box_g", 255);
+    game_overlay_box_b = get_long("game_overlay_box_b", 0);
+    game_overlay_frame_a = get_long("game_overlay_frame_a", 180);
+    game_overlay_frame_r = get_long("game_overlay_frame_r", 255);
+    game_overlay_frame_g = get_long("game_overlay_frame_g", 255);
+    game_overlay_frame_b = get_long("game_overlay_frame_b", 255);
+    game_overlay_box_thickness = (float)get_double("game_overlay_box_thickness", 2.0);
+    game_overlay_frame_thickness = (float)get_double("game_overlay_frame_thickness", 1.5);
+    game_overlay_future_point_radius = (float)get_double("game_overlay_future_point_radius", 5.0);
+    game_overlay_future_alpha_falloff = (float)get_double("game_overlay_future_alpha_falloff", 1.0);
+    clampGameOverlayColor();
+
+    game_overlay_icon_enabled = get_bool("game_overlay_icon_enabled", false);
+    game_overlay_icon_path = get_string("game_overlay_icon_path", "icon.png");
+    game_overlay_icon_width = get_long("game_overlay_icon_width", 64);
+    game_overlay_icon_height = get_long("game_overlay_icon_height", 64);
+    game_overlay_icon_offset_x = (float)get_double("game_overlay_icon_offset_x", 0.0f);
+    game_overlay_icon_offset_y = (float)get_double("game_overlay_icon_offset_y", 0.0f);
+    game_overlay_icon_anchor = get_string("game_overlay_icon_anchor", "center");
+    game_overlay_icon_class = get_long("game_overlay_icon_class", -1);
+
+    // === 数据采集配置 ===
+    collect_data_while_playing = get_bool("collect_data_while_playing", false);
+    collect_only_when_aimbot_running = get_bool("collect_only_when_aimbot_running", false);
+    collect_only_when_targets_present = get_bool("collect_only_when_targets_present", true);
+    collect_save_every_n_frames = get_long("collect_save_every_n_frames", 15);
+    collect_output_dir = get_string("collect_output_dir", "");
+    collect_jpeg_quality = get_long("collect_jpeg_quality", 95);
+    auto_label_data = get_bool("auto_label_data", true);
+    auto_label_min_conf = (float)get_double("auto_label_min_conf", 0.30);
+    auto_label_max_boxes = get_long("auto_label_max_boxes", 20);
+    auto_label_record_classes = get_string("auto_label_record_classes", "");
+
+    // === 卡尔曼滤波参数范围校验 ===
+    if (kalman_process_noise_position < 0.0001f) kalman_process_noise_position = 0.0001f;
+    if (kalman_process_noise_position > 5000.0f) kalman_process_noise_position = 5000.0f;
+    if (kalman_process_noise_velocity < 0.0001f) kalman_process_noise_velocity = 0.0001f;
+    if (kalman_process_noise_velocity > 50000.0f) kalman_process_noise_velocity = 50000.0f;
+    if (kalman_measurement_noise < 0.0001f) kalman_measurement_noise = 0.0001f;
+    if (kalman_measurement_noise > 5000.0f) kalman_measurement_noise = 5000.0f;
+    if (kalman_velocity_damping < 0.0f) kalman_velocity_damping = 0.0f;
+    if (kalman_velocity_damping > 3.0f) kalman_velocity_damping = 3.0f;
+    if (kalman_max_velocity < 100.0f) kalman_max_velocity = 100.0f;
+    if (kalman_max_velocity > 60000.0f) kalman_max_velocity = 60000.0f;
+    if (kalman_warmup_frames < 0) kalman_warmup_frames = 0;
+    if (kalman_warmup_frames > 20) kalman_warmup_frames = 20;
+    if (kalman_additional_prediction_ms < -80.0f) kalman_additional_prediction_ms = -80.0f;
+    if (kalman_additional_prediction_ms > 120.0f) kalman_additional_prediction_ms = 120.0f;
+    if (kalman_reset_timeout_sec < 0.05f) kalman_reset_timeout_sec = 0.05f;
+    if (kalman_reset_timeout_sec > 3.0f) kalman_reset_timeout_sec = 3.0f;
+
+    // === 覆盖层尺寸范围校验 ===
+    if (overlay_width < 560) overlay_width = 560;
+    if (overlay_width > 3840) overlay_width = 3840;
+    if (overlay_height < 340) overlay_height = 340;
+    if (overlay_height > 2160) overlay_height = 2160;
+
+    // === 数据采集参数范围校验 ===
+    if (collect_save_every_n_frames < 1) collect_save_every_n_frames = 1;
+    if (collect_save_every_n_frames > 600) collect_save_every_n_frames = 600;
+    if (collect_jpeg_quality < 50) collect_jpeg_quality = 50;
+    if (collect_jpeg_quality > 100) collect_jpeg_quality = 100;
+    if (auto_label_min_conf < 0.01f) auto_label_min_conf = 0.01f;
+    if (auto_label_min_conf > 0.99f) auto_label_min_conf = 0.99f;
+    if (auto_label_max_boxes < 1) auto_label_max_boxes = 1;
+    if (auto_label_max_boxes > 200) auto_label_max_boxes = 200;
+
+    // === 类别 ID 映射 ===
+    class_player = get_long("class_player", 0);
+    class_head = get_long("class_head", 1);
+
+    // === 调试窗口配置 ===
+    show_window = get_bool("show_window", true);
+    show_fps = get_bool("show_fps", false);
+    screenshot_button = splitString(get_string("screenshot_button", "None"));
+    screenshot_delay = get_long("screenshot_delay", 500);
+    verbose = get_bool("verbose", false);
+
+    return true;
+}
+
+/**
+ * saveConfig - 将当前配置写入 INI 文件
+ * @param filename 输出文件名，为空则默认使用 "config.ini"
+ * @return 写入成功返回 true，否则返回 false
+ *
+ * 将 Config 结构体中的所有字段按分组写入 INI 格式文件，
+ * 包括游戏配置表 [Games] 段。
+ */
+bool Config::saveConfig(const std::string& filename)
+{
+    std::string target = filename.empty() ? "config.ini" : filename;
+    if (target == "config.ini" && !config_path.empty())
+    {
+        target = config_path;
+    }
+
+    std::ofstream file(target);
+    if (!file.is_open())
+    {
+        std::cerr << "Error opening config for writing: " << target << std::endl;
+        return false;
+    }
+
+    // 保存时输出的是 UTF-8 编码（MSVC /utf-8 标志使字符串常量为 UTF-8），
+    // Windows 记事本 / VS 等编辑器能自动识别 UTF-8 并正常显示中文。
+    // 如果终端使用 CP_UTF8（65001）或 Windows Terminal，控制台 cat/type 也能正常显示。
+
+    // 文件头注释
+    file << "# An explanation of the options can be found at:\n";
+    file << "# https://github.com/hpsazz1/Xen/blob/main/docs/config.md\n\n";
+
+    // ========== 画面捕获设置 ==========
+    file << "# Capture\n"
+        << "capture_method = " << capture_method << "\n"
+        << "capture_target = " << capture_target << "\n"
+        << "capture_window_title = " << capture_window_title << "\n"
+        << "udp_ip = " << udp_ip << "\n"
+        << "udp_port = " << udp_port << "\n"
+        << "ndi_source_name = " << ndi_source_name << "\n"
+        << "detection_resolution = " << detection_resolution << "\n"
+        << "capture_fps = " << capture_fps << "\n"
+        << "monitor_idx = " << monitor_idx << "\n"
+        << "circle_fov_enabled = " << (circle_fov_enabled ? "true" : "false") << "\n"
+        << "circle_fov_radius_percent = " << circle_fov_radius_percent << "\n"
+        << "circle_fov_show_preview = " << (circle_fov_show_preview ? "true" : "false") << "\n"
+        << "capture_borders = " << (capture_borders ? "true" : "false") << "\n"
+        << "capture_cursor = " << (capture_cursor ? "true" : "false") << "\n"
+        << "virtual_camera_name = " << virtual_camera_name << "\n"
+        << "virtual_camera_width = " << virtual_camera_width << "\n"
+        << "virtual_camera_heigth = " << virtual_camera_heigth << "\n\n";
+
+    // === 瞄准 / 目标设置 ===
+    file << "# Target\n"
+        << "disable_headshot = " << (disable_headshot ? "true" : "false") << "\n"
+        << std::fixed << std::setprecision(2)
+        << "body_y_offset = " << body_y_offset << "\n"
+        << "head_y_offset = " << head_y_offset << "\n"
+        << "auto_aim = " << (auto_aim ? "true" : "false") << "\n"
+        << "tracker_enabled = " << (tracker_enabled ? "true" : "false") << "\n"
+        << "tracker_overlay_table_enabled = " << (tracker_overlay_table_enabled ? "true" : "false") << "\n\n";
+
+    // === 鼠标移动设置 ===
+    file << "# Mouse move\n"
+        << "# WIN32, GHUB, RAZER, ARDUINO, RP2350, TEENSY41, TEENSY41_HID, KMBOX_NET, KMBOX_A, MAKCU\n"
+        << "fovX = " << fovX << "\n"
+        << "fovY = " << fovY << "\n"
+        << "minSpeedMultiplier = " << minSpeedMultiplier << "\n"
+        << "maxSpeedMultiplier = " << maxSpeedMultiplier << "\n"
+
+        << std::fixed << std::setprecision(2)
+        << "predictionInterval = " << predictionInterval << "\n"
+        << "prediction_futurePositions = " << prediction_futurePositions << "\n"
+        << "draw_futurePositions = " << (draw_futurePositions ? "true" : "false") << "\n"
+        << "kalman_enabled = " << (kalman_enabled ? "true" : "false") << "\n"
+        << "kalman_process_noise_position = " << kalman_process_noise_position << "\n"
+        << "kalman_process_noise_velocity = " << kalman_process_noise_velocity << "\n"
+        << "kalman_measurement_noise = " << kalman_measurement_noise << "\n"
+        << "kalman_velocity_damping = " << kalman_velocity_damping << "\n"
+        << "kalman_max_velocity = " << kalman_max_velocity << "\n"
+        << std::setprecision(0)
+        << "kalman_warmup_frames = " << kalman_warmup_frames << "\n"
+        << "kalman_compensate_detection_delay = " << (kalman_compensate_detection_delay ? "true" : "false") << "\n"
+        << std::fixed << std::setprecision(2)
+        << "kalman_additional_prediction_ms = " << kalman_additional_prediction_ms << "\n"
+        << "kalman_reset_timeout_sec = " << kalman_reset_timeout_sec << "\n"
+
+        << "snapRadius = " << snapRadius << "\n"
+        << "nearRadius = " << nearRadius << "\n"
+        << "speedCurveExponent = " << speedCurveExponent << "\n"
+        << std::fixed << std::setprecision(2)
+        << "snapBoostFactor = " << snapBoostFactor << "\n"
+
+        << "easynorecoil = " << (easynorecoil ? "true" : "false") << "\n"
+        << std::fixed << std::setprecision(1)
+        << "easynorecoilstrength = " << easynorecoilstrength << "\n"
+        << "input_method = " << input_method << "\n\n";
+
+    // === 轨迹模拟（模拟自然鼠标移动） ===
+    file << "# Wind mouse\n"
+        << "wind_mouse_enabled = " << (wind_mouse_enabled ? "true" : "false") << "\n"
+        << "wind_G = " << wind_G << "\n"
+        << "wind_W = " << wind_W << "\n"
+        << "wind_M = " << wind_M << "\n"
+        << "wind_D = " << wind_D << "\n\n";
+
+    // === Arduino 硬件输入 ===
+    file << "# Arduino\n"
+        << "arduino_baudrate = " << arduino_baudrate << "\n"
+        << "arduino_port = " << arduino_port << "\n"
+        << "arduino_16_bit_mouse = " << (arduino_16_bit_mouse ? "true" : "false") << "\n"
+        << "arduino_enable_keys = " << (arduino_enable_keys ? "true" : "false") << "\n\n";
+
+    // === RP2350 硬件输入 ===
+    file << "# RP2350\n"
+        << "rp2350_baudrate = " << rp2350_baudrate << "\n"
+        << "rp2350_port = " << rp2350_port << "\n"
+        << "rp2350_16_bit_mouse = " << (rp2350_16_bit_mouse ? "true" : "false") << "\n"
+        << "rp2350_enable_keys = " << (rp2350_enable_keys ? "true" : "false") << "\n\n";
+
+    // === Teensy 4.1 RawHID 通用鼠标桥接 ===
+    file << "# Teensy 4.1 RawHID generic mouse bridge\n"
+        << "teensy_hid_serial = " << teensy_hid_serial << "\n"
+        << "teensy_hid_vid_filter = " << teensy_hid_vid_filter << "\n"
+        << "teensy_hid_pid_filter = " << teensy_hid_pid_filter << "\n"
+        << "teensy_hid_usage_page = " << teensy_hid_usage_page << "\n"
+        << "teensy_hid_usage_id = " << teensy_hid_usage_id << "\n"
+        << "teensy_hid_open_index = " << teensy_hid_open_index << "\n"
+        << "teensy_hid_packet_timeout_ms = " << teensy_hid_packet_timeout_ms << "\n"
+        << "teensy_hid_reconnect_interval_ms = " << teensy_hid_reconnect_interval_ms << "\n\n";
+
+    // === kmbox_net 网络输入 ===
+    file << "# Kmbox_net\n"
+        << "kmbox_net_ip = " << kmbox_net_ip << "\n"
+        << "kmbox_net_port = " << kmbox_net_port << "\n"
+        << "kmbox_net_uuid = " << kmbox_net_uuid << "\n\n";
+
+    // === kmbox_a 输入 ===
+    file << "# Kmbox_a\n"
+        << "kmbox_a_pidvid = " << kmbox_a_pidvid << "\n\n";
+
+    // === MAKCU 输入 ===
+    file << "# Makcu\n"
+        << "makcu_baudrate = " << makcu_baudrate << "\n"
+        << "makcu_port = " << makcu_port << "\n\n";
+
+    // === 鼠标自动射击 ===
+    file << "# Mouse shooting\n"
+        << "auto_shoot = " << (auto_shoot ? "true" : "false") << "\n"
+        << std::fixed << std::setprecision(1)
+        << "bScope_multiplier = " << bScope_multiplier << "\n\n";
+
+    // === AI 推理设置 ===
+    file << "# AI\n"
+        << "backend = " << backend << "\n";
+#ifndef USE_CUDA
+    file << "dml_device_id = " << dml_device_id << "\n";
+#endif
+    file << "ai_model = " << ai_model << "\n"
+        << std::fixed << std::setprecision(2)
+        << "confidence_threshold = " << confidence_threshold << "\n"
+        << "nms_threshold = " << nms_threshold << "\n"
+        << std::setprecision(0)
+        << "max_detections = " << max_detections << "\n"
+#ifdef USE_CUDA
+        << "export_enable_fp8 = " << (export_enable_fp8 ? "true" : "false") << "\n"
+        << "export_enable_fp16 = " << (export_enable_fp16 ? "true" : "false") << "\n"
+#endif
+        ;
+
+    // === CUDA 设置 ===
+#ifdef USE_CUDA
+    file << "# CUDA\n"
+        << "use_cuda_graph = " << (use_cuda_graph ? "true" : "false") << "\n"
+        << "use_pinned_memory = " << (use_pinned_memory ? "true" : "false") << "\n"
+        << "gpuMemoryReserveMB = " << gpuMemoryReserveMB << "\n"
+        << "enableGpuExclusiveMode = " << (enableGpuExclusiveMode ? "true" : "false") << "\n"
+        << "capture_use_cuda = " << (capture_use_cuda ? "true" : "false") << "\n\n";
+#endif
+
+    // === 系统资源设置 ===
+    file << "# System\n"
+        << "cpuCoreReserveCount = " << cpuCoreReserveCount << "\n"
+        << "systemMemoryReserveMB = " << systemMemoryReserveMB << "\n\n";
+
+    // === 热键绑定 ===
+    file << "# Buttons\n"
+        << "button_targeting = " << joinStrings(button_targeting) << "\n"
+        << "button_shoot = " << joinStrings(button_shoot) << "\n"
+        << "button_zoom = " << joinStrings(button_zoom) << "\n"
+        << "button_exit = " << joinStrings(button_exit) << "\n"
+        << "button_pause = " << joinStrings(button_pause) << "\n"
+        << "button_reload_config = " << joinStrings(button_reload_config) << "\n"
+        << "button_open_overlay = " << joinStrings(button_open_overlay) << "\n"
+        << "enable_arrows_settings = " << (enable_arrows_settings ? "true" : "false") << "\n\n";
+
+    // === 覆盖层 UI 设置 ===
+    file << "# Overlay\n"
+        << "overlay_opacity = " << overlay_opacity << "\n"
+        << std::fixed << std::setprecision(2)
+        << "overlay_ui_scale = " << overlay_ui_scale << "\n"
+        << "overlay_exclude_from_capture = " << (overlay_exclude_from_capture ? "true" : "false") << "\n"
+        << std::setprecision(0)
+        << "overlay_x = " << overlay_x << "\n"
+        << "overlay_y = " << overlay_y << "\n"
+        << "overlay_width = " << overlay_width << "\n"
+        << "overlay_height = " << overlay_height << "\n\n";
+
+    // === 深度估计设置 ===
+    file << "# Depth\n"
+        << "depth_inference_enabled = " << (depth_inference_enabled ? "true" : "false") << "\n"
+        << "depth_model_path = " << depth_model_path << "\n"
+        << "depth_fps = " << depth_fps << "\n"
+        << "depth_colormap = " << depth_colormap << "\n"
+        << "depth_mask_enabled = " << (depth_mask_enabled ? "true" : "false") << "\n"
+        << "depth_mask_fps = " << depth_mask_fps << "\n"
+        << "depth_mask_near_percent = " << depth_mask_near_percent << "\n"
+        << "depth_mask_expand = " << depth_mask_expand << "\n"
+        << "depth_mask_hold_frames = " << depth_mask_hold_frames << "\n"
+        << "depth_mask_alpha = " << depth_mask_alpha << "\n"
+        << "depth_mask_invert = " << (depth_mask_invert ? "true" : "false") << "\n"
+        << "depth_debug_overlay_enabled = " << (depth_debug_overlay_enabled ? "true" : "false") << "\n\n";
+
+    // === 游戏覆盖层（叠加在游戏画面上） ===
+    file << "# Game Overlay\n"
+        << "game_overlay_enabled = " << (game_overlay_enabled ? "true" : "false") << "\n"
+        << "game_overlay_max_fps = " << game_overlay_max_fps << "\n"
+        << "game_overlay_draw_boxes = " << (game_overlay_draw_boxes ? "true" : "false") << "\n"
+        << "game_overlay_compensate_latency = " << (game_overlay_compensate_latency ? "true" : "false") << "\n"
+        << "game_overlay_draw_future = " << (game_overlay_draw_future ? "true" : "false") << "\n"
+        << "game_overlay_draw_wind_tail = " << (game_overlay_draw_wind_tail ? "true" : "false") << "\n"
+        << "game_overlay_draw_frame = " << (game_overlay_draw_frame ? "true" : "false") << "\n"
+        << "game_overlay_draw_circle_fov = " << (game_overlay_draw_circle_fov ? "true" : "false") << "\n"
+        << "game_overlay_show_target_correction = " << (game_overlay_show_target_correction ? "true" : "false") << "\n"
+        << "game_overlay_box_a = " << game_overlay_box_a << "\n"
+        << "game_overlay_box_r = " << game_overlay_box_r << "\n"
+        << "game_overlay_box_g = " << game_overlay_box_g << "\n"
+        << "game_overlay_box_b = " << game_overlay_box_b << "\n"
+        << "game_overlay_frame_a = " << game_overlay_frame_a << "\n"
+        << "game_overlay_frame_r = " << game_overlay_frame_r << "\n"
+        << "game_overlay_frame_g = " << game_overlay_frame_g << "\n"
+        << "game_overlay_frame_b = " << game_overlay_frame_b << "\n"
+        << std::fixed << std::setprecision(2)
+        << "game_overlay_box_thickness = " << game_overlay_box_thickness << "\n"
+        << "game_overlay_frame_thickness = " << game_overlay_frame_thickness << "\n"
+        << "game_overlay_future_point_radius = " << game_overlay_future_point_radius << "\n"
+        << "game_overlay_future_alpha_falloff = " << game_overlay_future_alpha_falloff << "\n\n";
+
+    file << "game_overlay_icon_enabled = " << (game_overlay_icon_enabled ? "true" : "false") << "\n"
+        << "game_overlay_icon_path = " << game_overlay_icon_path << "\n"
+        << "game_overlay_icon_width = " << game_overlay_icon_width << "\n"
+        << "game_overlay_icon_height = " << game_overlay_icon_height << "\n"
+        << std::fixed << std::setprecision(2)
+        << "game_overlay_icon_offset_x = " << game_overlay_icon_offset_x << "\n"
+        << std::fixed << std::setprecision(2)
+        << "game_overlay_icon_offset_y = " << game_overlay_icon_offset_y << "\n"
+        << "game_overlay_icon_anchor = " << game_overlay_icon_anchor << "\n"
+        << "game_overlay_icon_class = " << game_overlay_icon_class << "\n\n";
+
+    // === 数据采集 ===
+    file << "# Data Collection\n"
+        << "collect_data_while_playing = " << (collect_data_while_playing ? "true" : "false") << "\n"
+        << "collect_only_when_aimbot_running = " << (collect_only_when_aimbot_running ? "true" : "false") << "\n"
+        << "collect_only_when_targets_present = " << (collect_only_when_targets_present ? "true" : "false") << "\n"
+        << "collect_save_every_n_frames = " << collect_save_every_n_frames << "\n"
+        << "collect_jpeg_quality = " << collect_jpeg_quality << "\n"
+        << "collect_output_dir = " << collect_output_dir << "\n"
+        << "auto_label_data = " << (auto_label_data ? "true" : "false") << "\n"
+        << std::fixed << std::setprecision(2)
+        << "auto_label_min_conf = " << auto_label_min_conf << "\n"
+        << std::setprecision(0)
+        << "auto_label_max_boxes = " << auto_label_max_boxes << "\n"
+        << "auto_label_record_classes = " << auto_label_record_classes << "\n\n";
+
+    // === 自定义类别映射 ===
+    file << "# Custom Classes\n"
+        << "class_player = " << class_player << "\n"
+        << "class_head = " << class_head << "\n\n";
+
+    // === 调试设置 ===
+    file << "# Debug\n"
+        << "show_window = " << (show_window ? "true" : "false") << "\n"
+        << "show_fps = " << (show_fps ? "true" : "false") << "\n"
+        << "screenshot_button = " << joinStrings(screenshot_button) << "\n"
+        << "screenshot_delay = " << screenshot_delay << "\n"
+        << "verbose = " << (verbose ? "true" : "false") << "\n\n";
+
+    // === 当前激活的游戏配置 ===
+    file << "# Active game profile\n";
+    file << "active_game = " << active_game << "\n\n";
+    file << std::defaultfloat << std::setprecision(6);
+    file << "[Games]\n";
+    for (auto& kv : game_profiles)
+    {
+        auto & gp = kv.second;
+        file << gp.name << " = "
+             << gp.sens << "," << gp.yaw;
+        file << "," << gp.pitch;
+        if (gp.fovScaled)
+            file << ",true," << gp.baseFOV;
+        file << "\n";
+    }
+
+    file.close();
+    return true;
+}
+
+/**
+ * currentProfile - 获取当前激活的游戏配置
+ * @return 当前激活的 GameProfile 引用
+ * @throws std::runtime_error 如果找不到当前激活的游戏配置
+ */
+const Config::GameProfile& Config::currentProfile() const
+{
+    auto it = game_profiles.find(active_game);
+    if (it != game_profiles.end()) return it->second;
+    throw std::runtime_error("Active game profile not found: " + active_game);
+}
+
+/**
+ * degToCounts - 将角度转换为鼠标计数（DPI counts）
+ *
+ * 根据当前游戏配置的灵敏度（sens）和 yaw/pitch 值，将瞄准偏差角度
+ * 转换为鼠标需要移动的计数（counts）。
+ * 如果游戏配置启用了 FOV 缩放，还会根据当前 FOV 进行比例调整。
+ *
+ * @param degX    水平方向的角度偏差（度）
+ * @param degY    垂直方向的角度偏差（度）
+ * @param fovNow  当前 FOV（用于 FOV 缩放计算）
+ * @return 鼠标移动计数 (countsX, countsY)
+ *         计算公式: counts = deg / (sens * yaw/pitch * scale)
+ */
+std::pair<double, double> Config::degToCounts(double degX, double degY, double fovNow) const
+{
+    const auto& gp = currentProfile();
+    // 如果启用了 FOV 缩放且有基准 FOV，计算缩放比例
+    double scale = (gp.fovScaled && gp.baseFOV > 1.0) ? (fovNow / gp.baseFOV) : 1.0;
+
+    if (gp.sens == 0.0 || gp.yaw == 0.0 || gp.pitch == 0.0)
+        return { 0.0, 0.0 };
+
+    double cx = degX / (gp.sens * gp.yaw * scale);
+    double cy = degY / (gp.sens * gp.pitch * scale);
+    return { cx, cy };
+}

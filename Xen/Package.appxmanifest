@@ -1,0 +1,4 @@
+<Capabilities xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
+  <rescap:Capability Name="graphicsCapture"/>
+  <rescap:Capability Name="graphicsCaptureWithoutBorder"/>
+</Capabilities>

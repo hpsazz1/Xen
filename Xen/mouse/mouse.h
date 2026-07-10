@@ -1,0 +1,249 @@
+﻿#ifndef MOUSE_H
+#define MOUSE_H
+
+#define WIN32_LEAN_AND_MEAN
+#define _WINSOCKAPI_
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <Windows.h>
+
+#include <mutex>
+#include <atomic>
+#include <chrono>
+#include <vector>
+#include <utility>
+#include <queue>
+#include <thread>
+#include <condition_variable>
+#include <deque>
+#include <random>
+
+#include "AimbotTarget.h"
+#include "MouseInput.h"
+#include "aim_kalman.h"
+
+/**
+ * @brief 鼠标控制主线程类
+ *
+ * 负责管理鼠标移动、瞄准预测、轨迹模拟算法等功能。
+ * 通过独立的线程处理鼠标指令队列，支持多种鼠标输入设备。
+ */
+class MouseThread
+{
+private:
+    // ==================== 配置参数 ====================
+    double screen_width;             ///< 屏幕宽度（像素）
+    double screen_height;            ///< 屏幕高度（像素）
+    double prediction_interval;      ///< 预测时间间隔（秒）
+    double fov_x;                    ///< 水平视野（像素）
+    double fov_y;                    ///< 垂直视野（像素）
+    double max_distance;             ///< 最大瞄准距离（像素）
+    double min_speed_multiplier;     ///< 最小速度倍率
+    double max_speed_multiplier;     ///< 最大速度倍率
+    double center_x;                 ///< 屏幕中心 X
+    double center_y;                 ///< 屏幕中心 Y
+    bool   auto_shoot;               ///< 是否启用自动射击
+    float  bScope_multiplier;        ///< 瞄准镜倍率补偿
+
+    // ==================== 运动状态 ====================
+    double prev_x, prev_y;                                        ///< 上一帧目标位置
+    double prev_velocity_x, prev_velocity_y;                       ///< 上一帧目标速度
+    std::chrono::time_point<std::chrono::steady_clock> prev_time; ///< 上一帧时间戳
+    std::chrono::steady_clock::time_point last_target_time;        ///< 最后检测到目标的时间
+    std::atomic<bool> target_detected{ false };                   ///< 是否检测到目标
+    std::atomic<bool> mouse_pressed{ false };                     ///< 鼠标是否按下
+
+    IMouseInput* mouseInput;  ///< 鼠标输入设备接口指针
+
+    /** @brief 向驱动程序发送鼠标移动数据 */
+    void sendMovementToDriver(int dx, int dy);
+
+    /** @brief 鼠标移动指令结构 */
+    struct Move { int dx; int dy; };
+
+    // ==================== 移动指令队列 ====================
+    std::queue<Move>              moveQueue;     ///< 移动指令队列
+    std::mutex                    queueMtx;      ///< 队列互斥锁
+    std::condition_variable       queueCv;       ///< 队列条件变量
+    const size_t                  queueLimit = 5;///< 队列最大长度
+    std::thread                   moveWorker;    ///< 移动工作线程
+    std::atomic<bool>             workerStop{ false };  ///< 工作线程停止标志
+
+    // ==================== 目标预测 ====================
+    std::vector<std::pair<double, double>> futurePositions;  ///< 未来预测位置列表
+    std::mutex                    futurePositionsMutex;      ///< 未来位置互斥锁
+    aim::AimKalman2D              targetKalman;              ///< 目标卡尔曼滤波器
+    aim::AimKalmanTelemetry       lastKalmanTelemetry;       ///< 上次卡尔曼遥测数据
+    double                        lastPredictionLookaheadSec = 0.0;  ///< 上次预测前瞻时间（秒）
+    double                        lastDetectionDelaySec = 0.0;      ///< 上次检测延迟（秒）
+
+    /** @brief 移动工作线程主循环 */
+    void moveWorkerLoop();
+    /** @brief 向队列添加移动指令 */
+    void queueMove(int dx, int dy);
+
+    // ==================== 轨迹模拟 ====================
+    bool   wind_mouse_enabled = true;   ///< 是否启用轨迹模拟
+    double wind_G, wind_W, wind_M, wind_D;  ///< 鼠标移速、轨迹摆动、单步上限、微调距离
+    void   windMouseMoveRelative(int dx, int dy);  ///< 轨迹模拟相对移动
+    void   resetWindState();              ///< 重置轨迹模拟状态
+    void   appendWindDebugStep(int dx, int dy);  ///< 追加轨迹模拟调试步进
+    void   pruneWindDebugTrailLocked(const std::chrono::steady_clock::time_point& now);  ///< 修剪轨迹模拟调试轨迹
+    std::pair<double, double> mouseCountsToScreenPixels(int dx, int dy) const;  ///< 鼠标计数转屏幕像素
+
+    /** @brief 轨迹模拟调试点结构 */
+    struct WindDebugPoint
+    {
+        double x = 0.0;                                   ///< X 坐标
+        double y = 0.0;                                   ///< Y 坐标
+        std::chrono::steady_clock::time_point t{};         ///< 时间戳
+    };
+
+    // 持久轨迹模拟状态，避免每帧出现"重置"感
+    double windCarryX = 0.0;      ///< 轨迹模拟携带量 X
+    double windCarryY = 0.0;      ///< 轨迹模拟携带量 Y
+    double windVelX = 0.0;        ///< 轨迹模拟速度 X
+    double windVelY = 0.0;        ///< 轨迹模拟速度 Y
+    double windNoiseX = 0.0;      ///< 轨迹模拟噪声 X
+    double windNoiseY = 0.0;      ///< 轨迹模拟噪声 Y
+    double windFracX = 0.0;       ///< 轨迹模拟分数 X
+    double windFracY = 0.0;       ///< 轨迹模拟分数 Y
+    double windPatternX = 0.0;    ///< 轨迹模拟模式 X
+    double windPatternY = 0.0;    ///< 轨迹模拟模式 Y
+    double windPatternPhaseA = 0.0;  ///< 轨迹模拟模式相位 A
+    double windPatternPhaseB = 0.0;  ///< 轨迹模拟模式相位 B
+    double windPatternRateA = 0.0;   ///< 轨迹模拟模式速率 A
+    double windPatternRateB = 0.0;   ///< 轨迹模拟模式速率 B
+    std::mt19937 windRng{ std::random_device{}() };  ///< 轨迹模拟随机数生成器
+
+    std::deque<WindDebugPoint> windDebugTrail;       ///< 轨迹模拟调试轨迹
+    std::mutex                             windDebugTrailMutex;  ///< 轨迹模拟调试轨迹互斥锁
+    double                                 windDebugCursorX = 0.0;  ///< 轨迹模拟调试光标 X
+    double                                 windDebugCursorY = 0.0;  ///< 轨迹模拟调试光标 Y
+
+    // ==================== 运动补偿 ====================
+    /** @brief 运动补偿采样点结构 */
+    struct MotionCompensationSample
+    {
+        double x = 0.0;                                   ///< X 偏移
+        double y = 0.0;                                   ///< Y 偏移
+        std::chrono::steady_clock::time_point t{};         ///< 时间戳
+    };
+
+    mutable std::mutex motionCompensationMutex;                   ///< 运动补偿互斥锁
+    std::deque<MotionCompensationSample> motionCompensationTrail; ///< 运动补偿轨迹
+    void recordMotionCompensationStep(int dx, int dy);            ///< 记录运动补偿步进
+    void pruneMotionCompensationTrailLocked(const std::chrono::steady_clock::time_point& now);  ///< 修剪运动补偿轨迹
+
+    /** @brief 计算从当前位置到目标位置的移动量 */
+    std::pair<double, double> calc_movement(double target_x, double target_y);
+    /** @brief 根据距离计算速度倍率 */
+    double calculate_speed_multiplier(double distance);
+    /** @brief 计算当前检测延迟（秒） */
+    double currentDetectionDelaySec(double observationAgeSec = -1.0) const;
+    /** @brief 根据检测延迟计算预测前瞻时间（秒） */
+    double currentPredictionLookaheadSec(double detectionDelaySec) const;
+
+public:
+    std::mutex input_method_mutex;  ///< 输入方法互斥锁
+
+    /**
+     * @brief 构造函数
+     * @param resolution 屏幕分辨率
+     * @param fovX 水平视野
+     * @param fovY 垂直视野
+     * @param minSpeedMultiplier 最小速度倍率
+     * @param maxSpeedMultiplier 最大速度倍率
+     * @param predictionInterval 预测间隔
+     * @param auto_shoot 自动射击
+     * @param bScope_multiplier 瞄准镜倍率
+     * @param mouseInputDevice 鼠标输入设备
+     */
+    MouseThread(
+        int  resolution,
+        int  fovX,
+        int  fovY,
+        double minSpeedMultiplier,
+        double maxSpeedMultiplier,
+        double predictionInterval,
+        bool auto_shoot,
+        float bScope_multiplier,
+        IMouseInput* mouseInputDevice = nullptr
+    );
+    ~MouseThread();
+
+    /**
+     * @brief 更新配置参数
+     */
+    void updateConfig(
+        int resolution,
+        int fovX,
+        int fovY,
+        double minSpeedMultiplier,
+        double maxSpeedMultiplier,
+        double predictionInterval,
+        bool auto_shoot,
+        float bScope_multiplier
+    );
+
+    /**
+     * @brief 以目标枢轴点为中心移动鼠标（追踪瞄准）
+     * @param pivotX 枢轴 X
+     * @param pivotY 枢轴 Y
+     * @param observationTime 观测时间戳
+     */
+    void moveMousePivot(
+        double pivotX,
+        double pivotY,
+        std::chrono::steady_clock::time_point observationTime = {});
+    /** @brief 相对移动鼠标 */
+    void moveRelative(int dx, int dy);
+    /** @brief 清除所有排队中的移动指令 */
+    void clearQueuedMoves();
+    /** @brief 预测目标未来位置 */
+    std::pair<double, double> predict_target_position(
+        double target_x,
+        double target_y,
+        std::chrono::steady_clock::time_point observationTime = {});
+    /** @brief 执行鼠标移动（对目标） */
+    void moveMouse(const AimbotTarget& target);
+    /** @brief 按下鼠标（射击） */
+    void pressMouse(const AimbotTarget& target);
+    /** @brief 释放鼠标 */
+    void releaseMouse();
+    /** @brief 重置预测状态 */
+    void resetPrediction();
+    /** @brief 检查并重置预测（当目标丢失时） */
+    void checkAndResetPredictions();
+    /** @brief 检查目标是否在准星范围内 */
+    bool check_target_in_scope(double target_x, double target_y,
+        double target_w, double target_h, double reduction_factor);
+
+    /** @brief 预测未来 N 帧的目标位置序列 */
+    std::vector<std::pair<double, double>> predictFuturePositions(double pivotX, double pivotY, int frames);
+    /** @brief 存储未来预测位置 */
+    void storeFuturePositions(const std::vector<std::pair<double, double>>& positions);
+    /** @brief 清除未来位置 */
+    void clearFuturePositions();
+    /** @brief 获取未来预测位置 */
+    std::vector<std::pair<double, double>> getFuturePositions();
+    /** @brief 清除轨迹模拟调试轨迹 */
+    void clearWindDebugTrail();
+    /** @brief 获取轨迹模拟调试轨迹 */
+    std::vector<std::pair<double, double>> getWindDebugTrail();
+    /** @brief 获取自指定时间起的运动补偿量 */
+    std::pair<double, double> getMotionCompensationSince(
+        std::chrono::steady_clock::time_point since) const;
+
+    /** @brief 设置鼠标输入设备 */
+    void setMouseInput(IMouseInput* newMouseInput);
+
+    /** @brief 设置目标检测状态 */
+    void setTargetDetected(bool detected) { target_detected.store(detected); }
+    /** @brief 设置最后检测到目标的时间 */
+    void setLastTargetTime(const std::chrono::steady_clock::time_point& t) { last_target_time = t; }
+};
+
+#endif // MOUSE_H
