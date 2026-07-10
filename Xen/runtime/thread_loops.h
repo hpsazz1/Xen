@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -10,7 +11,7 @@
 class MouseThread;
 class Game_overlay;
 
-extern Game_overlay* gameOverlayPtr;            ///< 全局游戏覆盖层指针
+extern std::unique_ptr<Game_overlay> gameOverlayPtr;  ///< 全局游戏覆盖层指针
 extern std::thread gameOverlayThread;            ///< 覆盖层渲染线程
 extern std::atomic<bool> gameOverlayShouldExit;  ///< 覆盖层线程退出标志
 

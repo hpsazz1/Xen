@@ -29,6 +29,7 @@ float prev_minSpeedMultiplier = config.minSpeedMultiplier;
 float prev_maxSpeedMultiplier = config.maxSpeedMultiplier;
 // 预测
 float prev_predictionInterval = config.predictionInterval;
+std::string prev_prediction_mode = config.prediction_mode;
 // 卡尔曼滤波
 bool  prev_kalman_enabled = config.kalman_enabled;
 float prev_kalman_process_noise_position = config.kalman_process_noise_position;
@@ -57,22 +58,41 @@ float prev_wind_D = config.wind_D;
 bool prev_auto_shoot = config.auto_shoot;
 float prev_bScope_multiplier = config.bScope_multiplier;
 
+// Bezier / EMA / 开火拟人化 / 急停 / 解锁Y / 射击修正
+bool  prev_bezier_enabled = config.bezier_enabled;
+float prev_bezier_strength = config.bezier_strength;
+bool  prev_move_ema_enabled = config.move_ema_enabled;
+float prev_move_ema_alpha = config.move_ema_alpha;
+int   prev_trigger_stable_frames = config.trigger_stable_frames;
+float prev_trigger_random_delay_ms = config.trigger_random_delay_ms;
+float prev_trigger_delay_jitter_ms = config.trigger_delay_jitter_ms;
+float prev_trigger_hold_ms = config.trigger_hold_ms;
+float prev_trigger_hold_jitter_ms = config.trigger_hold_jitter_ms;
+float prev_trigger_shot_cooldown_ms = config.trigger_shot_cooldown_ms;
+bool  prev_auto_stop_enabled = config.auto_stop_enabled;
+float prev_auto_stop_hold_ms = config.auto_stop_hold_ms;
+bool  prev_unlock_y_enabled = config.unlock_y_enabled;
+float prev_unlock_y_threshold_ms = config.unlock_y_threshold_ms;
+float prev_unlock_y_strength = config.unlock_y_strength;
+float prev_fire_correction_strength = config.fire_correction_strength;
+
 namespace
 {
-// 鼠标设置页面枚举，用于控制绘制哪个子页面
-// draw_mouse() 传入 All 绘制全部，各个公开包装函数传入对应页
+// 鼠标设置页面枚举
 enum class MouseSettingsPage
 {
-    All,        // 所有页面
-    Movement,   // 移动相关（FOV、速度倍率、目标修正、轨迹模拟）
-    Prediction, // 预测（预测间隔 + 卡尔曼滤波）
-    Assist,     // 辅助（Easy No Recoil + Auto Shoot）
-    Profiles,   // 配置文件管理（Game Profile + Manage Profiles）
-    Input       // 输入法（WIN32 / GHUB / RAZER / ARDUINO / RP2350 / TEENSY41 / TEENSY41_HID / KMBOX_NET / KMBOX_A / MAKCU）
+    All,         // 所有页面
+    Movement,    // 移动相关（FOV、速度倍率、目标修正）
+    Trajectory,  // 轨迹相关（Wind Mouse、Bezier、EMA）
+    Prediction,  // 预测（预测间隔 + 卡尔曼滤波）
+    Assist,      // 辅助（自动射击 / 开火拟人 / 急停 / 解锁Y / 射击修正）
+    Profiles,    // 配置文件管理（Game Profile + Manage Profiles）
+    Input        // 输入法
 };
 
-// 判断是否应该绘制指定子页面
-// 当 current == All 或 current == wanted 时返回 true
+// 辅助页子页签
+enum class AssistSubPage { Shooting, Tactical };
+
 bool shouldDrawMousePage(MouseSettingsPage current, MouseSettingsPage wanted)
 {
     return current == MouseSettingsPage::All || current == wanted;
@@ -104,102 +124,56 @@ static void draw_mouse_page(MouseSettingsPage page)
     }
 
     // ========== Prediction（预测）设置 ==========
-    // 包含基础预测间隔（位置插值）和卡尔曼滤波器的全部参数
     if (shouldDrawMousePage(page, MouseSettingsPage::Prediction) &&
-        OverlayUI::BeginSection("预测", "mouse_section_prediction"))
+        OverlayUI::BeginSection("预测模式", "mouse_section_prediction_mode"))
     {
-        // 预测间隔：设为 0 时禁用预测
-        OverlayUI::SliderFloatRow("预测间隔", &config.predictionInterval, 0.00f, 0.5f, "%.2f");
-        if (config.predictionInterval == 0.00f)
-        {
-            OverlayUI::TextRow("预测已禁用。", IM_COL32(255, 108, 108, 255));
-        }
+        const char* predModes[]  = { "关闭", "仅延迟补偿", "线性预测", "卡尔曼滤波" };
+        const char* predKeys[]   = { "off", "delay", "linear", "kalman" };
+        int curMode = 0;
+        for (int i = 0; i < 4; ++i)
+            if (config.prediction_mode == predKeys[i]) { curMode = i; break; }
 
-        // 以下（未来位置绘制相关）仅在预测开启时可编辑
-        const bool predictionEnabled = (config.predictionInterval > 0.0f);
-        if (!predictionEnabled)
+        if (OverlayUI::ComboRow("预测模式", &curMode, predModes, 4))
         {
-            ImGui::BeginDisabled();
-        }
-
-        if (OverlayUI::SliderIntRow("未来位置数", &config.prediction_futurePositions, 1, 40))
-        {
+            config.prediction_mode = predKeys[curMode];
             OverlayConfig_MarkDirty();
         }
+        OverlayUI::EndSection();
+    }
 
-        if (OverlayUI::CheckboxRow("绘制未来位置", &config.draw_futurePositions))
-        {
-            OverlayConfig_MarkDirty();
-        }
+    // ========== 预测参数 ==========
+    if (shouldDrawMousePage(page, MouseSettingsPage::Prediction) &&
+        OverlayUI::BeginSection("预测参数", "mouse_section_prediction"))
+    {
+        bool predActive = (config.prediction_mode != "off");
 
-        if (!predictionEnabled)
-        {
-            ImGui::EndDisabled();
-            ImGui::TextDisabled("启用预测间隔（> 0）后才能编辑此区域。");
-        }
+        OverlayUI::SliderFloatRow("预测前瞻(s)", &config.predictionInterval, 0.0f, 0.12f, "%.3f");
+        if (!predActive) ImGui::BeginDisabled();
 
-        // ===== 卡尔曼滤波器子区域 =====
-        // 用于对检测到的目标位置进行平滑和速度估计，补偿检测延迟
-        ImGui::Separator();
+        OverlayUI::SliderIntRow("预测点数", &config.prediction_futurePositions, 4, 30);
+        OverlayUI::CheckboxRow("绘制预测点", &config.draw_futurePositions);
+
+        if (!predActive) { ImGui::EndDisabled(); }
+
+        OverlayUI::EndSection();
+    }
+
+    // ========== 卡尔曼高级参数（仅在 kalman 模式显示）==========
+    if (config.prediction_mode == "kalman" &&
+        shouldDrawMousePage(page, MouseSettingsPage::Prediction) &&
+        OverlayUI::BeginSection("卡尔曼滤波", "mouse_section_kalman"))
+    {
         if (OverlayUI::CheckboxRow("启用卡尔曼滤波", &config.kalman_enabled))
-        {
             OverlayConfig_MarkDirty();
-        }
-
-        // 过程噪声 - 位置：位置估计的信任度（越小越平滑）
-        if (OverlayUI::SliderFloatRow("卡尔曼过程噪声(位置)", &config.kalman_process_noise_position, 0.001f, 5000.0f, "%.3f"))
-        {
-            OverlayConfig_MarkDirty();
-        }
-
-        // 过程噪声 - 速度：速度估计的信任度
-        if (OverlayUI::SliderFloatRow("卡尔曼过程噪声(速度)", &config.kalman_process_noise_velocity, 0.001f, 50000.0f, "%.3f"))
-        {
-            OverlayConfig_MarkDirty();
-        }
-
-        // 测量噪声：观测值信任度（越大越依赖预测）
-        if (OverlayUI::SliderFloatRow("卡尔曼测量噪声", &config.kalman_measurement_noise, 0.001f, 5000.0f, "%.3f"))
-        {
-            OverlayConfig_MarkDirty();
-        }
-
-        // 速度阻尼：对估计速度的衰减系数
-        if (OverlayUI::SliderFloatRow("卡尔曼速度阻尼", &config.kalman_velocity_damping, 0.0f, 3.0f, "%.3f"))
-        {
-            OverlayConfig_MarkDirty();
-        }
-
-        // 最大速度：速度估计的钳位上限（像素/秒）
-        if (OverlayUI::SliderFloatRow("卡尔曼最大速度", &config.kalman_max_velocity, 100.0f, 60000.0f, "%.0f"))
-        {
-            OverlayConfig_MarkDirty();
-        }
-
-        // 预热帧数：滤波器启动后前 N 帧不使用估计值
-        if (OverlayUI::SliderIntRow("卡尔曼预热帧数", &config.kalman_warmup_frames, 0, 20))
-        {
-            OverlayConfig_MarkDirty();
-        }
-
-        // 补偿推理延迟：将目标检测的延迟纳入状态估计
-        if (OverlayUI::CheckboxRow("卡尔曼补偿推理延迟", &config.kalman_compensate_detection_delay))
-        {
-            OverlayConfig_MarkDirty();
-        }
-
-        // 额外预测时间（毫秒）：在卡尔曼估计的速度基础上额外外推
-        if (OverlayUI::SliderFloatRow("卡尔曼额外预测(毫秒)", &config.kalman_additional_prediction_ms, -80.0f, 120.0f, "%.1f"))
-        {
-            OverlayConfig_MarkDirty();
-        }
-
-        // 重置超时：无新观测时自动重置滤波器状态
-        if (OverlayUI::SliderFloatRow("卡尔曼重置超时(秒)", &config.kalman_reset_timeout_sec, 0.05f, 3.0f, "%.2f"))
-        {
-            OverlayConfig_MarkDirty();
-        }
-
+        OverlayUI::SliderFloatRow("过程噪声(位置)", &config.kalman_process_noise_position, 0.001f, 5000.0f, "%.1f");
+        OverlayUI::SliderFloatRow("过程噪声(速度)", &config.kalman_process_noise_velocity, 0.001f, 50000.0f, "%.1f");
+        OverlayUI::SliderFloatRow("测量噪声", &config.kalman_measurement_noise, 0.001f, 5000.0f, "%.1f");
+        OverlayUI::SliderFloatRow("速度阻尼", &config.kalman_velocity_damping, 0.0f, 3.0f, "%.3f");
+        OverlayUI::SliderFloatRow("最大速度", &config.kalman_max_velocity, 100.0f, 60000.0f, "%.0f");
+        OverlayUI::SliderIntRow("预热帧数", &config.kalman_warmup_frames, 0, 20);
+        OverlayUI::CheckboxRow("补偿推理延迟", &config.kalman_compensate_detection_delay);
+        OverlayUI::SliderFloatRow("额外预测(ms)", &config.kalman_additional_prediction_ms, -80.0f, 120.0f, "%.1f");
+        OverlayUI::SliderFloatRow("重置超时(秒)", &config.kalman_reset_timeout_sec, 0.05f, 3.0f, "%.2f");
         OverlayUI::EndSection();
     }
 
@@ -374,70 +348,126 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayUI::EndSection();
     }
 
-    // ========== Easy No Recoil（简易压枪辅助）设置 ==========
-    if (shouldDrawMousePage(page, MouseSettingsPage::Assist) &&
-        OverlayUI::BeginSection("简易压枪", "mouse_section_easy_no_recoil"))
+    // ================================================================
+    // 辅助页：子页签切换（射击 / 战术）
+    // ================================================================
+    if (shouldDrawMousePage(page, MouseSettingsPage::Assist))
     {
-        // 启用/禁用压枪辅助
-        if (OverlayUI::CheckboxRow("简易压枪", &config.easynorecoil))
+        static AssistSubPage assistTab = AssistSubPage::Shooting;
+
+        ImGui::Spacing();
+        ImGui::Indent(4.0f);
+        // 子页签按钮行 —— 类似浏览器 tab
         {
-            OverlayConfig_MarkDirty();
+            bool isShooting = (assistTab == AssistSubPage::Shooting);
+            bool isTactical = (assistTab == AssistSubPage::Tactical);
+
+            ImGui::PushStyleColor(ImGuiCol_Button,        isShooting ? ImVec4(0.22f, 0.30f, 0.22f, 1.0f) : ImVec4(0.15f, 0.15f, 0.15f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.28f, 0.36f, 0.28f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.18f, 0.24f, 0.18f, 1.0f));
+            if (ImGui::SmallButton("射击"))
+                assistTab = AssistSubPage::Shooting;
+            ImGui::PopStyleColor(3);
+
+            ImGui::SameLine(0.0f, 2.0f);
+
+            ImGui::PushStyleColor(ImGuiCol_Button,        isTactical ? ImVec4(0.22f, 0.30f, 0.22f, 1.0f) : ImVec4(0.15f, 0.15f, 0.15f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.28f, 0.36f, 0.28f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.18f, 0.24f, 0.18f, 1.0f));
+            if (ImGui::SmallButton("战术"))
+                assistTab = AssistSubPage::Tactical;
+            ImGui::PopStyleColor(3);
+        }
+        ImGui::Unindent(4.0f);
+        ImGui::Spacing();
+
+        // ── 射击子页：Auto Shoot + 开火拟人化 ──
+        bool showShooting = (assistTab == AssistSubPage::Shooting);
+
+        if (showShooting && OverlayUI::BeginSection("自动射击", "mouse_section_auto_shoot"))
+        {
+            OverlayUI::CheckboxRow("自动射击", &config.auto_shoot);
+            if (!config.auto_shoot) ImGui::BeginDisabled();
+            OverlayUI::SliderFloatRow("机瞄倍率", &config.bScope_multiplier, 0.5f, 2.0f, "%.1f");
+            if (!config.auto_shoot) { ImGui::EndDisabled(); ImGui::TextDisabled("启用自动射击后才能编辑设置。"); }
+            OverlayUI::EndSection();
         }
 
-        // 仅在启用时可编辑压枪强度
-        if (!config.easynorecoil)
+        if (showShooting && OverlayUI::BeginSection("开火拟人化", "mouse_section_trigger_humanize"))
         {
-            ImGui::BeginDisabled();
+            if (!config.auto_shoot) ImGui::BeginDisabled();
+            OverlayUI::SliderIntRow("确认帧数", &config.trigger_stable_frames, 0, 10);
+            OverlayUI::SliderFloatRow("反应延迟(ms)", &config.trigger_random_delay_ms, 0.0f, 200.0f, "%.0f");
+            OverlayUI::SliderFloatRow("延迟抖动(ms)", &config.trigger_delay_jitter_ms, 0.0f, 80.0f, "%.0f");
+            OverlayUI::SliderFloatRow("按下时长(ms)", &config.trigger_hold_ms, 1.0f, 100.0f, "%.0f");
+            OverlayUI::SliderFloatRow("时长抖动(ms)", &config.trigger_hold_jitter_ms, 0.0f, 50.0f, "%.0f");
+            OverlayUI::SliderFloatRow("冷却间隔(ms)", &config.trigger_shot_cooldown_ms, 0.0f, 300.0f, "%.0f");
+            if (!config.auto_shoot) ImGui::EndDisabled();
+            OverlayUI::EndSection();
         }
 
-        // 压枪强度：数值越大下压补偿越强
-        if (OverlayUI::SliderFloatRow("压枪强度", &config.easynorecoilstrength, 0.1f, 500.0f, "%.1f"))
+        // ── 战术子页：简易压枪 + 自动急停 + 解锁Y + 射击修正（均独立于 auto_shoot）──
+        bool showTactical = (assistTab == AssistSubPage::Tactical);
+
+        if (showTactical && OverlayUI::BeginSection("简易压枪", "mouse_section_easy_no_recoil"))
         {
-            OverlayConfig_MarkDirty();
+            if (OverlayUI::CheckboxRow("简易压枪", &config.easynorecoil)) OverlayConfig_MarkDirty();
+            if (!config.easynorecoil) ImGui::BeginDisabled();
+            if (OverlayUI::SliderFloatRow("压枪强度", &config.easynorecoilstrength, 0.1f, 500.0f, "%.1f")) OverlayConfig_MarkDirty();
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "左右方向键：以10为单位调节压枪强度");
+            if (config.easynorecoilstrength >= 100.0f)
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "警告：高强度压枪可能被检测。");
+            if (!config.easynorecoil) { ImGui::EndDisabled(); ImGui::TextDisabled("启用简易压枪后才能编辑设置。"); }
+            OverlayUI::EndSection();
         }
 
-        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "左右方向键：以10为单位调节压枪强度");
-
-        // 高强度警告
-        if (config.easynorecoilstrength >= 100.0f)
+        if (showTactical && OverlayUI::BeginSection("自动急停 (KMBOX)", "mouse_section_auto_stop"))
         {
-            ImGui::TextColored(ImVec4(255, 255, 0, 255), "警告：高强度压枪可能被检测。");
+            OverlayUI::CheckboxRow("启用自动急停", &config.auto_stop_enabled);
+            OverlayUI::SliderFloatRow("急停保持(ms)", &config.auto_stop_hold_ms, 20.0f, 200.0f, "%.0f");
+            OverlayUI::EndSection();
         }
 
-        if (!config.easynorecoil)
+        if (showTactical && OverlayUI::BeginSection("开火解锁Y轴", "mouse_section_unlock_y"))
         {
-            ImGui::EndDisabled();
-            ImGui::TextDisabled("启用简易压枪后才能编辑设置。");
+            OverlayUI::CheckboxRow("启用解锁Y轴", &config.unlock_y_enabled);
+            OverlayUI::SliderFloatRow("解锁阈值(ms)", &config.unlock_y_threshold_ms, 0.0f, 500.0f, "%.0f");
+            OverlayUI::SliderFloatRow("解锁强度", &config.unlock_y_strength, 0.0f, 1.0f, "%.2f");
+            OverlayUI::EndSection();
         }
 
-        OverlayUI::EndSection();
+        if (showTactical && OverlayUI::BeginSection("射击修正", "mouse_section_fire_correction"))
+        {
+            OverlayUI::SliderFloatRow("修正强度", &config.fire_correction_strength, 0.0f, 3.0f, "%.2f");
+            OverlayUI::EndSection();
+        }
     }
 
-    // ========== Auto Shoot（自动射击）设置 ==========
-    if (shouldDrawMousePage(page, MouseSettingsPage::Assist) &&
-        OverlayUI::BeginSection("自动射击", "mouse_section_auto_shoot"))
+    // ========== 参数预设（一键调参，仅配置页和全部页可见） ==========
+    if (shouldDrawMousePage(page, MouseSettingsPage::Profiles))
     {
-        OverlayUI::CheckboxRow("自动射击", &config.auto_shoot);
-        if (!config.auto_shoot)
-        {
-            ImGui::BeginDisabled();
-        }
+        if (OverlayUI::BeginSection("参数预设", "mouse_section_presets"))
+    {
+        const char* presetItems[] = { "自定义", "稳定", "均衡", "激进", "快速" };
+        const char* presetKeys[]  = { "custom", "stable", "balanced", "aggressive", "fast" };
+        int curIdx = 0;
+        for (int i = 0; i < 5; ++i)
+            if (config.preset_style == presetKeys[i]) { curIdx = i; break; }
 
-        // 机瞄/低倍镜倍率：不同瞄准镜下的补偿缩放系数
-        OverlayUI::SliderFloatRow("机瞄倍率", &config.bScope_multiplier, 0.5f, 2.0f, "%.1f");
-
-        if (!config.auto_shoot)
+        if (OverlayUI::ComboRow("预设风格", &curIdx, presetItems, 5))
         {
-            ImGui::EndDisabled();
-            ImGui::TextDisabled("启用自动射击后才能编辑设置。");
+            config.preset_style = presetKeys[curIdx];
+            MouseThread::applyPreset(presetKeys[curIdx]);
+            OverlayConfig_MarkDirty();
         }
 
         OverlayUI::EndSection();
+        }
     }
 
     // ========== 轨迹模拟设置 ==========
     // 模拟人手移动鼠标的自然轨迹，使鼠标运动更真实
-    if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
+    if (shouldDrawMousePage(page, MouseSettingsPage::Trajectory) &&
         OverlayUI::BeginSection("轨迹模拟", "mouse_section_wind_mouse"))
     {
         // 启用/禁用轨迹模拟算法
@@ -490,6 +520,22 @@ static void draw_mouse_page(MouseSettingsPage page)
             ImGui::EndDisabled();
             ImGui::TextDisabled("启用轨迹模拟后才能编辑设置。");
         }
+
+        OverlayUI::EndSection();
+    }
+
+    // ========== Bezier + EMA 设置 ==========
+    if (shouldDrawMousePage(page, MouseSettingsPage::Trajectory) &&
+        OverlayUI::BeginSection("Bezier / EMA", "mouse_section_bezier_ema"))
+    {
+        if (OverlayUI::CheckboxRow("启用 Bezier", &config.bezier_enabled))
+            OverlayConfig_MarkDirty();
+        OverlayUI::SliderFloatRow("Bezier 弧度", &config.bezier_strength, 0.0f, 1.0f, "%.2f");
+
+        ImGui::Spacing();
+        if (OverlayUI::CheckboxRow("启用 EMA 平滑", &config.move_ema_enabled))
+            OverlayConfig_MarkDirty();
+        OverlayUI::SliderFloatRow("EMA 平滑系数", &config.move_ema_alpha, 0.1f, 1.0f, "%.2f");
 
         OverlayUI::EndSection();
     }
@@ -1110,12 +1156,16 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayConfig_MarkDirty();
     }
 
-    // ===== 脏检测块 2：轨迹模拟 =====
+    // ===== 脏检测块 2：轨迹模拟 + Bezier + EMA =====
     if (prev_wind_mouse_enabled != config.wind_mouse_enabled ||
         prev_wind_G != config.wind_G ||
         prev_wind_W != config.wind_W ||
         prev_wind_M != config.wind_M ||
-        prev_wind_D != config.wind_D)
+        prev_wind_D != config.wind_D ||
+        prev_bezier_enabled != config.bezier_enabled ||
+        prev_bezier_strength != config.bezier_strength ||
+        prev_move_ema_enabled != config.move_ema_enabled ||
+        prev_move_ema_alpha != config.move_ema_alpha)
     {
         // 同步轨迹模拟参数
         prev_wind_mouse_enabled = config.wind_mouse_enabled;
@@ -1123,6 +1173,10 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_wind_W = config.wind_W;
         prev_wind_M = config.wind_M;
         prev_wind_D = config.wind_D;
+        prev_bezier_enabled = config.bezier_enabled;
+        prev_bezier_strength = config.bezier_strength;
+        prev_move_ema_enabled = config.move_ema_enabled;
+        prev_move_ema_alpha = config.move_ema_alpha;
 
         globalMouseThread->updateConfig(
             config.detection_resolution,
@@ -1137,12 +1191,36 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayConfig_MarkDirty();
     }
 
-    // ===== 脏检测块 3：Auto Shoot =====
+    // ===== 脏检测块 3：Auto Shoot + 开火拟人 + 急停 + 解锁Y + 射击修正 =====
     if (prev_auto_shoot != config.auto_shoot ||
-        prev_bScope_multiplier != config.bScope_multiplier)
+        prev_bScope_multiplier != config.bScope_multiplier ||
+        prev_trigger_stable_frames != config.trigger_stable_frames ||
+        prev_trigger_random_delay_ms != config.trigger_random_delay_ms ||
+        prev_trigger_delay_jitter_ms != config.trigger_delay_jitter_ms ||
+        prev_trigger_hold_ms != config.trigger_hold_ms ||
+        prev_trigger_hold_jitter_ms != config.trigger_hold_jitter_ms ||
+        prev_trigger_shot_cooldown_ms != config.trigger_shot_cooldown_ms ||
+        prev_auto_stop_enabled != config.auto_stop_enabled ||
+        prev_auto_stop_hold_ms != config.auto_stop_hold_ms ||
+        prev_unlock_y_enabled != config.unlock_y_enabled ||
+        prev_unlock_y_threshold_ms != config.unlock_y_threshold_ms ||
+        prev_unlock_y_strength != config.unlock_y_strength ||
+        prev_fire_correction_strength != config.fire_correction_strength)
     {
         prev_auto_shoot = config.auto_shoot;
         prev_bScope_multiplier = config.bScope_multiplier;
+        prev_trigger_stable_frames = config.trigger_stable_frames;
+        prev_trigger_random_delay_ms = config.trigger_random_delay_ms;
+        prev_trigger_delay_jitter_ms = config.trigger_delay_jitter_ms;
+        prev_trigger_hold_ms = config.trigger_hold_ms;
+        prev_trigger_hold_jitter_ms = config.trigger_hold_jitter_ms;
+        prev_trigger_shot_cooldown_ms = config.trigger_shot_cooldown_ms;
+        prev_auto_stop_enabled = config.auto_stop_enabled;
+        prev_auto_stop_hold_ms = config.auto_stop_hold_ms;
+        prev_unlock_y_enabled = config.unlock_y_enabled;
+        prev_unlock_y_threshold_ms = config.unlock_y_threshold_ms;
+        prev_unlock_y_strength = config.unlock_y_strength;
+        prev_fire_correction_strength = config.fire_correction_strength;
 
         globalMouseThread->updateConfig(
             config.detection_resolution,
@@ -1183,6 +1261,12 @@ void draw_mouse_prediction()
 void draw_mouse_assist()
 {
     draw_mouse_page(MouseSettingsPage::Assist);
+}
+
+// 仅绘制轨迹设置（Wind Mouse + Bezier + EMA）
+void draw_mouse_trajectory()
+{
+    draw_mouse_page(MouseSettingsPage::Trajectory);
 }
 
 // 仅绘制配置文件管理（Game Profile + Manage Profiles）

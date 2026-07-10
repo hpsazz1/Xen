@@ -133,4 +133,28 @@ struct DetectionBuffer
         if (outPublishTimestamp)
             *outPublishTimestamp = publishTimestamp;
     }
+
+    /**
+     * swapLocked - 在已持有 mutex 的前提下，通过 std::swap 将缓冲区数据移动到调用者的向量中
+     * 比逐元素拷贝更快：锁内仅做指针交换（O(1)），真正的数据在锁外由调用者持有。
+     * 注意：调用者必须已持有 mutex，否则产生数据竞争。
+     * @param outBoxes          [输出] 检测框列表（与缓冲区交换）
+     * @param outClasses        [输出] 类别 ID 列表
+     * @param outConfidences    [输出] 置信度列表
+     * @param outVersion        [输出] 当前版本号
+     * @param outFrameTimestamp [输出] 输入帧时间戳
+     */
+    void swapLocked(
+        std::vector<cv::Rect>& outBoxes,
+        std::vector<int>& outClasses,
+        std::vector<float>& outConfidences,
+        int& outVersion,
+        std::chrono::steady_clock::time_point& outFrameTimestamp)
+    {
+        std::swap(outBoxes, boxes);
+        std::swap(outClasses, classes);
+        std::swap(outConfidences, confidences);
+        outVersion = version;
+        outFrameTimestamp = frameTimestamp;
+    }
 };

@@ -13,6 +13,8 @@ void draw_tracker();
 void draw_mouse();
 /** @brief 绘制鼠标移动曲线 */
 void draw_mouse_movement();
+/** @brief 绘制鼠标轨迹设置 */
+void draw_mouse_trajectory();
 /** @brief 绘制鼠标预测信息 */
 void draw_mouse_prediction();
 /** @brief 绘制鼠标辅助功能 */

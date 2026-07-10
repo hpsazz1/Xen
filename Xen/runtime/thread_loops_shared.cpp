@@ -1,8 +1,9 @@
 ﻿#include "runtime/thread_loops.h"
 #include "Game_overlay.h"
+#include <memory>
 
 // 全局游戏覆盖层指针，用于在渲染线程中访问覆盖层实例
-Game_overlay* gameOverlayPtr = nullptr;
+std::unique_ptr<Game_overlay> gameOverlayPtr;
 // 游戏覆盖层独立线程，负责覆盖层的渲染循环
 std::thread gameOverlayThread;
 // 原子退出标志，通知覆盖层线程安全退出

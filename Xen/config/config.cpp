@@ -101,8 +101,9 @@ bool Config::loadConfig(const std::string& filename)
         minSpeedMultiplier = 0.1f;                       // 鼠标最小速度倍率
         maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
 
-        predictionInterval = 0.01f;                      // 位置预测间隔（秒）
-        prediction_futurePositions = 20;                 // 预测的未来位置点数
+        predictionInterval = 0.020f;                     // 位置预测间隔（秒）
+        prediction_futurePositions = 12;                 // 预测的未来位置点数
+        prediction_mode = "linear";                      // 预测模式: off / delay / linear / kalman
         draw_futurePositions = true;                     // 是否绘制预测轨迹点
         kalman_enabled = true;                           // 是否启用卡尔曼滤波
         kalman_process_noise_position = 40.0f;           // 卡尔曼滤波：位置过程噪声
@@ -123,6 +124,15 @@ bool Config::loadConfig(const std::string& filename)
         easynorecoil = false;                            // 是否启用简易无后座力
         easynorecoilstrength = 0.0f;                     // 无后座力强度
         input_method = "WIN32";                          // 输入方法
+
+        // === 贝塞尔轨迹曲线 ===
+        bezier_enabled = false;                          // 是否启用 Bezier 弧线
+        bezier_strength = 0.35f;                         // 曲线弧度 (0=直线 1=大弧)
+        preset_style = "custom";                         // 预设风格
+
+        // === 移动输出平滑 ===
+        move_ema_enabled = false;                        // 是否启用 EMA 平滑
+        move_ema_alpha = 0.60f;                          // 平滑系数 (越小越平滑)
 
         // === 轨迹模拟（模拟自然鼠标移动） ===
         wind_mouse_enabled = false;
@@ -167,7 +177,27 @@ bool Config::loadConfig(const std::string& filename)
 
         // === 鼠标自动射击 ===
         auto_shoot = false;
-        bScope_multiplier = 1.0f;                        // 开镜倍率
+        bScope_multiplier = 1.2f;                        // 开镜倍率
+
+        // === 开火拟人化 ===
+        trigger_stable_frames = 3;                       // 连续确认帧数
+        trigger_random_delay_ms = 45.0f;                 // 反应延迟均值
+        trigger_delay_jitter_ms = 13.0f;                 // 反应延迟抖动
+        trigger_hold_ms = 16.0f;                         // 按键时长均值
+        trigger_hold_jitter_ms = 14.0f;                  // 按键时长抖动
+        trigger_shot_cooldown_ms = 54.0f;                // 两发最小间隔
+
+        // === 自动急停 ===
+        auto_stop_enabled = false;                       // 开火时释放 WASD
+        auto_stop_hold_ms = 70.0f;                       // 急停最短保持时间
+
+        // === 开火解锁 Y 轴 ===
+        unlock_y_enabled = false;                        // 启用开火 Y 轴解锁
+        unlock_y_threshold_ms = 200.0f;                  // 按住多久后解锁
+        unlock_y_strength = 0.5f;                        // 解锁强度 (0=完全解锁 1=不锁)
+
+        // === AI 射击修正 ===
+        fire_correction_strength = 0.0f;                 // 射击修正强度 (0=关闭)
 
         // === AI 推理设置 ===
 #ifdef USE_CUDA
@@ -178,16 +208,16 @@ bool Config::loadConfig(const std::string& filename)
 #endif
 
 #ifdef USE_CUDA
-        ai_model = "sunxds_0.5.6.engine";                // TensorRT 引擎模型
+        ai_model = "sunxds_0.8.0.engine";                // TensorRT 引擎模型
 #else
-        ai_model = "sunxds_0.5.6.onnx";                  // ONNX 模型
+        ai_model = "sunxds_0.8.0.onnx";                  // ONNX 模型
 #endif
 
-        confidence_threshold = 0.10f;                    // 检测置信度阈值
+        confidence_threshold = 0.15f;                    // 检测置信度阈值
         nms_threshold = 0.50f;                           // NMS IoU 阈值
-        max_detections = 100;                            // 最大检测数
+        max_detections = 20;                             // 最大检测数
 #ifdef USE_CUDA
-        export_enable_fp8 = false;                       // 导出时启用 FP8
+        export_enable_fp8 = true;                        // 导出时启用 FP8
         export_enable_fp16 = true;                       // 导出时启用 FP16
 #endif
         fixed_input_size = false;                        // 模型是否为固定输入尺寸
@@ -195,7 +225,7 @@ bool Config::loadConfig(const std::string& filename)
         // === CUDA 设置 ===
 #ifdef USE_CUDA
         use_cuda_graph = false;                          // 是否使用 CUDA Graph
-        use_pinned_memory = false;                       // 是否使用锁页内存
+        use_pinned_memory = true;                        // 是否使用锁页内存
         gpuMemoryReserveMB = 2048;                       // GPU 预留显存（MB）
         enableGpuExclusiveMode = true;                   // 是否 GPU 独占模式
         capture_use_cuda = true;                         // 捕获是否使用 CUDA
@@ -439,8 +469,9 @@ bool Config::loadConfig(const std::string& filename)
     minSpeedMultiplier = (float)get_double("minSpeedMultiplier", 0.1);
     maxSpeedMultiplier = (float)get_double("maxSpeedMultiplier", 0.1);
 
-    predictionInterval = (float)get_double("predictionInterval", 0.01);
-    prediction_futurePositions = get_long("prediction_futurePositions", 20);
+    predictionInterval = (float)get_double("predictionInterval", 0.020);
+    prediction_futurePositions = get_long("prediction_futurePositions", 12);
+    prediction_mode = get_string("prediction_mode", "linear");
     draw_futurePositions = get_bool("draw_futurePositions", true);
     kalman_enabled = get_bool("kalman_enabled", true);
     kalman_process_noise_position = (float)get_double("kalman_process_noise_position", 40.0);
@@ -461,6 +492,13 @@ bool Config::loadConfig(const std::string& filename)
     easynorecoil = get_bool("easynorecoil", false);
     easynorecoilstrength = (float)get_double("easynorecoilstrength", 0.0);
     input_method = get_string("input_method", "WIN32");
+
+    // === 贝塞尔轨迹 + 输出平滑 ===
+    bezier_enabled = get_bool("bezier_enabled", false);
+    bezier_strength = (float)get_double("bezier_strength", 0.35);
+    preset_style = get_string("preset_style", "custom");
+    move_ema_enabled = get_bool("move_ema_enabled", false);
+    move_ema_alpha = (float)get_double("move_ema_alpha", 0.60);
 
     // === 轨迹模拟配置 ===
     wind_mouse_enabled = get_bool("wind_mouse_enabled", false);
@@ -506,6 +544,26 @@ bool Config::loadConfig(const std::string& filename)
     // === 鼠标自动射击 ===
     auto_shoot = get_bool("auto_shoot", false);
     bScope_multiplier = (float)get_double("bScope_multiplier", 1.2);
+
+    // === 开火拟人化 ===
+    trigger_stable_frames = get_long("trigger_stable_frames", 3);
+    trigger_random_delay_ms = (float)get_double("trigger_random_delay_ms", 45.0);
+    trigger_delay_jitter_ms = (float)get_double("trigger_delay_jitter_ms", 13.0);
+    trigger_hold_ms = (float)get_double("trigger_hold_ms", 16.0);
+    trigger_hold_jitter_ms = (float)get_double("trigger_hold_jitter_ms", 14.0);
+    trigger_shot_cooldown_ms = (float)get_double("trigger_shot_cooldown_ms", 54.0);
+
+    // === 自动急停 ===
+    auto_stop_enabled = get_bool("auto_stop_enabled", false);
+    auto_stop_hold_ms = (float)get_double("auto_stop_hold_ms", 70.0);
+
+    // === 开火解锁 Y 轴 ===
+    unlock_y_enabled = get_bool("unlock_y_enabled", false);
+    unlock_y_threshold_ms = (float)get_double("unlock_y_threshold_ms", 200.0);
+    unlock_y_strength = (float)get_double("unlock_y_strength", 0.5);
+
+    // === AI 射击修正 ===
+    fire_correction_strength = (float)get_double("fire_correction_strength", 0.0);
 
     // === AI 推理配置 ===
 #ifdef USE_CUDA
@@ -750,6 +808,7 @@ bool Config::saveConfig(const std::string& filename)
         << std::fixed << std::setprecision(2)
         << "predictionInterval = " << predictionInterval << "\n"
         << "prediction_futurePositions = " << prediction_futurePositions << "\n"
+        << "prediction_mode = " << prediction_mode << "\n"
         << "draw_futurePositions = " << (draw_futurePositions ? "true" : "false") << "\n"
         << "kalman_enabled = " << (kalman_enabled ? "true" : "false") << "\n"
         << "kalman_process_noise_position = " << kalman_process_noise_position << "\n"
@@ -774,6 +833,15 @@ bool Config::saveConfig(const std::string& filename)
         << std::fixed << std::setprecision(1)
         << "easynorecoilstrength = " << easynorecoilstrength << "\n"
         << "input_method = " << input_method << "\n\n";
+
+    // === 贝塞尔轨迹 + 输出平滑 ===
+    file << "# Bezier & EMA\n"
+        << "bezier_enabled = " << (bezier_enabled ? "true" : "false") << "\n"
+        << std::fixed << std::setprecision(2)
+        << "bezier_strength = " << bezier_strength << "\n"
+        << "preset_style = " << preset_style << "\n"
+        << "move_ema_enabled = " << (move_ema_enabled ? "true" : "false") << "\n"
+        << "move_ema_alpha = " << move_ema_alpha << "\n\n";
 
     // === 轨迹模拟（模拟自然鼠标移动） ===
     file << "# Wind mouse\n"
@@ -827,7 +895,34 @@ bool Config::saveConfig(const std::string& filename)
     file << "# Mouse shooting\n"
         << "auto_shoot = " << (auto_shoot ? "true" : "false") << "\n"
         << std::fixed << std::setprecision(1)
-        << "bScope_multiplier = " << bScope_multiplier << "\n\n";
+        << "bScope_multiplier = " << bScope_multiplier << "\n";
+
+    // === 开火拟人化 ===
+    file << "# Firing humanization\n"
+        << "trigger_stable_frames = " << trigger_stable_frames << "\n"
+        << std::fixed << std::setprecision(1)
+        << "trigger_random_delay_ms = " << trigger_random_delay_ms << "\n"
+        << "trigger_delay_jitter_ms = " << trigger_delay_jitter_ms << "\n"
+        << "trigger_hold_ms = " << trigger_hold_ms << "\n"
+        << "trigger_hold_jitter_ms = " << trigger_hold_jitter_ms << "\n"
+        << "trigger_shot_cooldown_ms = " << trigger_shot_cooldown_ms << "\n";
+
+    // === 自动急停 ===
+    file << "# Auto stop\n"
+        << "auto_stop_enabled = " << (auto_stop_enabled ? "true" : "false") << "\n"
+        << "auto_stop_hold_ms = " << auto_stop_hold_ms << "\n";
+
+    // === 开火解锁 Y 轴 ===
+    file << "# Unlock Y\n"
+        << "unlock_y_enabled = " << (unlock_y_enabled ? "true" : "false") << "\n"
+        << "unlock_y_threshold_ms = " << unlock_y_threshold_ms << "\n"
+        << std::fixed << std::setprecision(1)
+        << "unlock_y_strength = " << unlock_y_strength << "\n";
+
+    // === AI 射击修正 ===
+    file << "# Fire correction\n"
+        << std::fixed << std::setprecision(2)
+        << "fire_correction_strength = " << fire_correction_strength << "\n\n";
 
     // === AI 推理设置 ===
     file << "# AI\n"

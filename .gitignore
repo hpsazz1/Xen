@@ -53,6 +53,8 @@ Thumbs.db
 desktop.ini
 *.swp
 *.swo
+.zcode
+.vs
 
 # ==================== 配置备份 ====================
 *.ini.bak

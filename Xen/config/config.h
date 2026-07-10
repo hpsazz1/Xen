@@ -44,10 +44,13 @@ public:
     float minSpeedMultiplier;
     float maxSpeedMultiplier;
 
-    // ========== 目标预测（含卡尔曼滤波）==========
-    float predictionInterval;
-    int prediction_futurePositions;
-    bool draw_futurePositions;
+    // ========== 目标预测 ==========
+    std::string prediction_mode;   // 预测模式: off / delay / linear / kalman
+    float predictionInterval;       // 预测前瞻时间（秒）
+    int prediction_futurePositions; // 预测未来位置点数
+    bool draw_futurePositions;      // 是否绘制预测点
+
+    // ========== 卡尔曼滤波（prediction_mode=kalman 时生效） ==========
     bool kalman_enabled;
     float kalman_process_noise_position;
     float kalman_process_noise_velocity;
@@ -67,6 +70,17 @@ public:
     bool easynorecoil; // 简易压枪
     float easynorecoilstrength; // 压枪强度
     std::string input_method; // 输入方式："WIN32", "GHUB", "RAZER", "ARDUINO", "RP2350", "TEENSY41", "TEENSY41_HID", "KMBOX_NET", "KMBOX_A", "MAKCU"
+
+    // ========== 贝塞尔轨迹曲线 ==========
+    bool bezier_enabled;       // 是否启用 Bezier 弧线轨迹
+    float bezier_strength;     // Bezier 弧度大小 (0=直线, 1=大弧)
+
+    // ========== 预设风格 ==========
+    std::string preset_style;  // 参数预设风格：custom / stable / balanced / aggressive / fast
+
+    // ========== 输出平滑 ==========
+    bool move_ema_enabled;     // 是否启用移动输出 EMA 平滑
+    float move_ema_alpha;      // EMA 平滑系数 (0~1, 越小越平滑)
 
     // ========== 轨迹模拟 ==========
     bool wind_mouse_enabled;  // 是否启用轨迹模拟
@@ -112,6 +126,26 @@ public:
     // ========== 开火与缩放设置 ==========
     bool auto_shoot;
     float bScope_multiplier;
+
+    // ========== 开火拟人化 ==========
+    int trigger_stable_frames;       // 连续确认帧数（防误射）
+    float trigger_random_delay_ms;   // 随机开火延迟均值
+    float trigger_delay_jitter_ms;   // 随机开火延迟抖动
+    float trigger_hold_ms;           // 按键时长均值
+    float trigger_hold_jitter_ms;    // 按键时长抖动
+    float trigger_shot_cooldown_ms;  // 两发最小冷却间隔
+
+    // ========== 自动急停 (仅 KMBOX_NET) ==========
+    bool auto_stop_enabled;          // 是否启用自动急停
+    float auto_stop_hold_ms;         // 急停保持时长
+
+    // ========== 开火解锁 Y 轴 ==========
+    bool unlock_y_enabled;           // 是否启用开火解锁 Y 轴
+    float unlock_y_threshold_ms;     // 按住多久后解锁 (ms)
+    float unlock_y_strength;         // 解锁强度 (0=完全解锁, 1=不锁)
+
+    // ========== AI 射击修正 ==========
+    float fire_correction_strength;  // 射击修正强度 (0=关闭)
 
     // ========== AI 推理设置 ==========
     std::string backend;

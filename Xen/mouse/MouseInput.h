@@ -66,6 +66,10 @@ public:
     virtual bool hasPhysicalButtonState() const { return false; }
     /** @brief 指定按键是否被按下 */
     virtual bool keyPressed(const std::string& keyName) { (void)keyName; return false; }
+    /** @brief 模拟按下按键（仅硬件设备支持，如 KMBOX） */
+    virtual bool keyDown(int /*vkey*/) { return false; }
+    /** @brief 模拟释放按键（仅硬件设备支持，如 KMBOX） */
+    virtual bool keyUp(int /*vkey*/) { return false; }
     /** @brief 是否正在瞄准 */
     virtual bool aimingActive() const { return false; }
     /** @brief 是否正在射击 */

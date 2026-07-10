@@ -625,6 +625,20 @@ public:
         std::lock_guard<std::mutex> lock(state_->mutex);
         return state_->device.get();
     }
+    bool keyDown(int vkey) override
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (!state_->device) return false;
+        state_->device->keyDown(vkey);
+        return true;
+    }
+    bool keyUp(int vkey) override
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (!state_->device) return false;
+        state_->device->keyUp(vkey);
+        return true;
+    }
 
 private:
     // State — 异步连接共享状态结构体

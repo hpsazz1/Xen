@@ -66,7 +66,6 @@ namespace
         std::vector<std::string> buttonExit;
         std::vector<std::string> buttonPause;
         std::vector<std::string> buttonReloadConfig;
-        std::vector<std::string> buttonOpenOverlay;
     };
 
     /**
@@ -87,7 +86,6 @@ namespace
         snapshot.buttonExit = config.button_exit;
         snapshot.buttonPause = config.button_pause;
         snapshot.buttonReloadConfig = config.button_reload_config;
-        snapshot.buttonOpenOverlay = config.button_open_overlay;
         return snapshot;
     }
 
@@ -353,20 +351,6 @@ void keyboardListener()
         else
         {
             reloadPressed = false;
-        }
-
-        // === 打开覆盖层面板（仅 Win32，边缘触发） ===
-        static bool overlayPressed = false;
-        if (isAnyKeyPressedWin32Only(cfg.buttonOpenOverlay))
-        {
-            if (!overlayPressed)
-            {
-                overlayPressed = true;
-            }
-        }
-        else
-        {
-            overlayPressed = false;
         }
 
         // === 方向键调整配置（仅 Win32） ===

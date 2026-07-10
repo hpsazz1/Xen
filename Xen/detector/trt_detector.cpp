@@ -37,12 +37,6 @@ extern std::atomic<bool> detectionPaused;
  */
 int model_quant;
 
-/*
- * 全局变量：存储原始检测输出数据
- * 在后处理之前保存从 GPU 拷贝回主机的模型推理结果
- */
-std::vector<float> outputData;
-
 extern std::atomic<bool> detector_model_changed;
 extern std::atomic<bool> detection_resolution_changed;
 
@@ -218,7 +212,11 @@ TrtDetector::TrtDetector()
     numClasses(0)
 {
     stream = nullptr;
-    cudaStreamCreate(&stream);
+    if (cudaStreamCreate(&stream) != cudaSuccess)
+    {
+        std::cerr << "[Detector] cudaStreamCreate failed; stream is null" << std::endl;
+        stream = nullptr;
+    }
 }
 
 /*
@@ -362,16 +360,23 @@ void TrtDetector::captureCudaGraph()
         return;
     }
 
-    context->enqueueV3(stream);
+    if (!context->enqueueV3(stream))
+    {
+        std::cerr << "[Detector] enqueueV3 failed during graph capture" << std::endl;
+        cudaStreamEndCapture(stream, &cudaGraph);
+        if (cudaGraph) { cudaGraphDestroy(cudaGraph); cudaGraph = nullptr; }
+        return;
+    }
     cudaEventRecord(inferenceCompleteEvent, stream);
 
     for (const auto& name : outputNames)
         if (pinnedOutputBuffers.count(name))
-            cudaMemcpyAsync(pinnedOutputBuffers[name],
-                outputBindings[name],
-                outputSizes[name],
-                cudaMemcpyDeviceToHost,
-                stream);
+            if (cudaMemcpyAsync(pinnedOutputBuffers[name],
+                    outputBindings[name],
+                    outputSizes[name],
+                    cudaMemcpyDeviceToHost,
+                    stream) != cudaSuccess)
+                std::cerr << "[Detector] cudaMemcpyAsync(output) failed during capture: " << name << std::endl;
 
     st = cudaStreamEndCapture(stream, &cudaGraph);
     if (st != cudaSuccess) {
@@ -888,7 +893,11 @@ std::vector<Detection> TrtDetector::detect(const cv::Mat& frame)
     }
     else
     {
-        context->enqueueV3(stream);
+        if (!context->enqueueV3(stream))
+        {
+            std::cerr << "[Detector] enqueueV3 failed in detect()" << std::endl;
+            return latestDetections;
+        }
         cudaEventRecord(inferenceCompleteEvent, stream);
 
         for (const auto& name : outputNames)
@@ -899,12 +908,15 @@ std::vector<Detection> TrtDetector::detect(const cv::Mat& frame)
             if (itPinned == pinnedOutputBuffers.end() || !itPinned->second)
                 continue;
 
-            cudaMemcpyAsync(
+            cudaError_t cpyErr = cudaMemcpyAsync(
                 itPinned->second,
                 outputBindings[name],
                 size,
                 cudaMemcpyDeviceToHost,
                 stream);
+            if (cpyErr != cudaSuccess)
+                std::cerr << "[Detector] cudaMemcpyAsync(output) failed in detect(): "
+                          << cudaGetErrorString(cpyErr) << std::endl;
         }
 
         cudaEventRecord(copyCompleteEvent, stream);
@@ -1101,7 +1113,13 @@ void TrtDetector::inferenceThread()
                 }
                 else
                 {
-                    context->enqueueV3(stream);
+                    if (!context->enqueueV3(stream))
+                    {
+                        std::cerr << "[Detector] enqueueV3 failed in inference thread, skip frame" << std::endl;
+                        cudaEventRecord(copyCompleteEvent, stream);
+                        cudaEventSynchronize(copyCompleteEvent);
+                        continue;
+                    }
                     cudaEventRecord(inferenceCompleteEvent, stream);
 
                     for (const auto& name : outputNames)
@@ -1112,13 +1130,16 @@ void TrtDetector::inferenceThread()
                         if (itPinned == pinnedOutputBuffers.end() || !itPinned->second)
                             continue;
 
-                        cudaMemcpyAsync(
+                        cudaError_t cpyErr = cudaMemcpyAsync(
                             itPinned->second,
                             outputBindings[name],
                             size,
                             cudaMemcpyDeviceToHost,
                             stream
                         );
+                        if (cpyErr != cudaSuccess)
+                            std::cerr << "[Detector] cudaMemcpyAsync(output) failed in inference thread: "
+                                      << cudaGetErrorString(cpyErr) << std::endl;
                     }
 
                     cudaEventRecord(copyCompleteEvent, stream);

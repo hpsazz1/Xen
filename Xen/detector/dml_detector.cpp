@@ -39,6 +39,28 @@ extern std::atomic<bool> detectionPaused;
 namespace
 {
     /**
+     * utf8ToWide - 将 UTF-8 字符串正确转换为 UTF-16 宽字符串。
+     * 不能使用逐字节扩展（wstring(begin, end)），那样会损坏非 ASCII 路径。
+     * @param utf8 输入的 UTF-8 字符串
+     * @return 转换后的 std::wstring
+     */
+    std::wstring utf8ToWide(const std::string& utf8)
+    {
+        if (utf8.empty())
+            return std::wstring();
+
+        int required = MultiByteToWideChar(
+            CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), nullptr, 0);
+        if (required <= 0)
+            return std::wstring();
+
+        std::wstring wide(static_cast<size_t>(required), L'\0');
+        MultiByteToWideChar(
+            CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), &wide[0], required);
+        return wide;
+    }
+
+    /**
      * tryInt64ToInt - 安全地将 int64_t 转换为 int，检查是否超出 int 范围
      * @param value  输入的 int64_t 值
      * @param out    [输出] 转换后的 int 值
@@ -535,7 +557,7 @@ bool DirectMLDetector::tryInitializeModel(
     try
     {
         Ort::SessionOptions options = createSessionOptions(useDirectML, graphOptimizationLevel);
-        std::wstring model_path_wide(model_path.begin(), model_path.end());
+        std::wstring model_path_wide = utf8ToWide(model_path);
         Ort::Session newSession(env, model_path_wide.c_str(), options);
 
         // 读取输入张量名称和形状

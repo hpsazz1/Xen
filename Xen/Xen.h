@@ -26,7 +26,7 @@ extern Config config;
 #ifdef USE_CUDA
 extern TrtDetector trt_detector;
 #else
-extern DirectMLDetector* dml_detector;
+extern std::unique_ptr<DirectMLDetector> dml_detector;
 #endif
 // 检测结果环形缓冲区
 extern DetectionBuffer detectionBuffer;

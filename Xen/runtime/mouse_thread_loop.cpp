@@ -94,17 +94,49 @@ void assignInputDevices();
  */
 void handleEasyNoRecoil(MouseThread& mouseThread)
 {
+    static double emaRecoil = 0.0;
+    static std::mt19937 rng(std::random_device{}());
+
     bool easyNoRecoil = false;
-    int recoil_compensation = 0;
+    float recoilStrength = 0.0f;
+    float fireCorrection = 0.0f;
     {
         std::lock_guard<std::mutex> cfgLock(configMutex);
         easyNoRecoil = config.easynorecoil;
-        recoil_compensation = static_cast<int>(config.easynorecoilstrength);
+        recoilStrength = config.easynorecoilstrength;
+        fireCorrection = config.fire_correction_strength;
     }
 
     if (easyNoRecoil && shooting.load() && zooming.load())
     {
-        mouseThread.moveRelative(0, recoil_compensation);
+        // 优先使用新的 AI 射击修正（EMA 平滑 + 随机微扰）
+        if (fireCorrection > 0.0f)
+        {
+            double raw = static_cast<double>(recoilStrength) * static_cast<double>(fireCorrection);
+
+            // 随机微扰（±10% 高斯噪声，模拟人手压枪不均匀）
+            std::normal_distribution<double> jitter(0.0, raw * 0.03);
+            raw += jitter(rng);
+
+            // EMA 平滑
+            const double alpha = 0.35;
+            emaRecoil = emaRecoil * alpha + raw * (1.0 - alpha);
+
+            int compensated = static_cast<int>(std::round(emaRecoil));
+            if (compensated > 0)
+                mouseThread.moveRelative(0, compensated);
+        }
+        else
+        {
+            // 回退到旧版：固定强度垂直下移
+            int recoil = static_cast<int>(recoilStrength);
+            mouseThread.moveRelative(0, recoil);
+        }
+    }
+    else
+    {
+        // 不在射击状态时重置 EMA
+        emaRecoil = 0.0;
     }
 }
 
@@ -196,10 +228,8 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
             if (detectionBuffer.version > lastVersion)
             {
-                boxes = detectionBuffer.boxes;
-                classes = detectionBuffer.classes;
-                detectionTimestamp = detectionBuffer.frameTimestamp;
-                lastVersion = detectionBuffer.version;
+                std::vector<float> dummyConf;
+                detectionBuffer.swapLocked(boxes, classes, dummyConf, lastVersion, detectionTimestamp);
                 hasNewDetection = true;
             }
         }
@@ -334,13 +364,12 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     g_trackerLockedId = -1;
                 }
 
-                std::unique_ptr<AimbotTarget> selected(
-                    sortTargets(
+                auto selected = sortTargets(
                         boxes,
                         classes,
                         detectionResolution,
                         detectionResolution,
-                        disableHeadshot));
+                        disableHeadshot);
                 lastTrackerUpdate = std::chrono::steady_clock::now();
 
                 if (selected)

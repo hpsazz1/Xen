@@ -162,14 +162,98 @@ MouseThread::MouseThread(
     }
     resetWindState();
     clearWindDebugTrail();
-    targetKalman.setSettings(buildKalmanSettingsFromConfig());
+    cachedKalmanSettings = buildKalmanSettingsFromConfig();
+    targetKalman.setSettings(cachedKalmanSettings);
     targetKalman.reset();
     lastKalmanTelemetry = {};
     lastPredictionLookaheadSec = 0.0;
     lastDetectionDelaySec = 0.0;
+    refreshGameProfileCache();
 
     // 启动后台工作线程，负责从队列中取出移动指令并发送到驱动
     moveWorker = std::thread(&MouseThread::moveWorkerLoop, this);
+}
+
+// ============================================================
+// 参数预设定义
+// ============================================================
+namespace {
+
+struct ParamPreset
+{
+    const char* name;
+    float speedCurveExponent, snapRadius, nearRadius, minSpeed, maxSpeed, snapBoost;
+    bool bezier, ema; float bezierStr, emaAlpha;
+    bool wind; float windG, windW, windM, windD;
+    float predInterval; int futurePos;
+    float kalmanProcNoise, kalmanMeasNoise, kalmanVelDamping;
+    int stableFrames; float trigDelay, trigJitter, trigHold, trigHoldJitter, fireCorr;
+};
+
+const ParamPreset kPresets[] = {
+    // name        spdCurve snap near minSpd maxSpd snapBst  bez ema bezStr emaA  wind windG windW windM windD  predInt futP kalPN  kalMN  kalVD  stblF trigDel trigJit trigHld trigHldJ fireCor
+    { "custom",     3.0f,  1.5f,25.0f,0.10f,0.10f,1.15f, 0,  0,  0.35f,0.60f,1,  18,   15,   10,   8,     0.020f,12,  40.0f, 35.0f, 0.08f, 3,    45.0f,  13.0f,  16.0f,   14.0f,    0.0f },
+    { "stable",     2.5f,  2.0f,30.0f,0.05f,0.08f,1.00f, 1,  1,  0.45f,0.35f,1,  22,   10,   7,    12,     0.015f, 8,  20.0f, 55.0f, 0.12f, 5,    55.0f,  18.0f,  20.0f,   16.0f,    0.8f },
+    { "balanced",   3.0f,  1.5f,25.0f,0.10f,0.10f,1.15f, 1,  1,  0.35f,0.60f,1,  18,   15,   10,   8,     0.025f,12,  35.0f, 40.0f, 0.08f, 3,    45.0f,  13.0f,  16.0f,   14.0f,    0.5f },
+    { "aggressive", 4.0f,  1.0f,20.0f,0.15f,0.15f,1.50f, 1,  1,  0.25f,0.75f,1,  14,   18,   12,   5,     0.035f,15,  45.0f, 35.0f, 0.06f, 2,    35.0f,  10.0f,  12.0f,   10.0f,    0.3f },
+    { "fast",       2.0f,  0.5f,15.0f,0.25f,0.30f,2.00f, 0,  0,  0.10f,0.90f,1,  8,    22,   16,   3,     0.045f,18,  55.0f, 30.0f, 0.04f, 1,    25.0f,  8.0f,   8.0f,    6.0f,     0.0f },
+};
+
+constexpr int kPresetCount = sizeof(kPresets) / sizeof(kPresets[0]);
+
+} // namespace
+
+void MouseThread::applyPreset(const char* presetName)
+{
+    const ParamPreset* p = nullptr;
+    for (int i = 0; i < kPresetCount; ++i)
+    {
+        if (std::strcmp(kPresets[i].name, presetName) == 0)
+        {
+            p = &kPresets[i];
+            break;
+        }
+    }
+    if (!p || std::strcmp(p->name, "custom") == 0) return;
+
+    // 写入 config
+    config.speedCurveExponent   = p->speedCurveExponent;
+    config.snapRadius           = p->snapRadius;
+    config.nearRadius           = p->nearRadius;
+    config.minSpeedMultiplier   = p->minSpeed;
+    config.maxSpeedMultiplier   = p->maxSpeed;
+    config.snapBoostFactor      = p->snapBoost;
+    config.bezier_enabled       = p->bezier;
+    config.bezier_strength      = p->bezierStr;
+    config.move_ema_enabled     = p->ema;
+    config.move_ema_alpha       = p->emaAlpha;
+    config.wind_mouse_enabled   = p->wind;
+    config.wind_G               = p->windG;
+    config.wind_W               = p->windW;
+    config.wind_M               = p->windM;
+    config.wind_D               = p->windD;
+    config.prediction_mode           = "linear";  // 所有预设统一用线性预测
+    config.predictionInterval       = p->predInterval;
+    config.prediction_futurePositions   = p->futurePos;
+    config.kalman_process_noise_position = p->kalmanProcNoise;
+    config.kalman_measurement_noise      = p->kalmanMeasNoise;
+    config.kalman_velocity_damping       = p->kalmanVelDamping;
+    config.trigger_stable_frames     = p->stableFrames;
+    config.trigger_random_delay_ms   = p->trigDelay;
+    config.trigger_delay_jitter_ms   = p->trigJitter;
+    config.trigger_hold_ms           = p->trigHold;
+    config.trigger_hold_jitter_ms    = p->trigHoldJitter;
+    config.fire_correction_strength  = p->fireCorr;
+    config.preset_style = presetName;
+
+    // 同步到 mouseThread
+    if (globalMouseThread)
+    {
+        globalMouseThread->updateConfig(
+            config.detection_resolution, config.fovX, config.fovY,
+            config.minSpeedMultiplier, config.maxSpeedMultiplier,
+            config.predictionInterval, config.auto_shoot, config.bScope_multiplier);
+    }
 }
 
 /**
@@ -215,11 +299,37 @@ void MouseThread::updateConfig(
     wind_M = config.wind_M; wind_D = config.wind_D;
     resetWindState();
     clearWindDebugTrail();
-    targetKalman.setSettings(buildKalmanSettingsFromConfigUnlocked());
+
+    // 贝塞尔轨迹 + EMA 平滑
+    bezier_enabled = config.bezier_enabled;
+    bezier_strength = config.bezier_strength;
+    move_ema_enabled = config.move_ema_enabled;
+    move_ema_alpha = config.move_ema_alpha;
+    predictionMode = config.prediction_mode;
+
+    // 开火拟人化
+    trigger_stable_frames = config.trigger_stable_frames;
+    trigger_random_delay_ms = config.trigger_random_delay_ms;
+    trigger_delay_jitter_ms = config.trigger_delay_jitter_ms;
+    trigger_hold_ms = config.trigger_hold_ms;
+    trigger_hold_jitter_ms = config.trigger_hold_jitter_ms;
+    trigger_shot_cooldown_ms = config.trigger_shot_cooldown_ms;
+
+    // 自动急停 / 解锁Y / 射击修正
+    auto_stop_enabled = config.auto_stop_enabled;
+    auto_stop_hold_ms = config.auto_stop_hold_ms;
+    unlock_y_enabled = config.unlock_y_enabled;
+    unlock_y_threshold_ms = config.unlock_y_threshold_ms;
+    unlock_y_strength = config.unlock_y_strength;
+    fire_correction_strength = config.fire_correction_strength;
+
+    cachedKalmanSettings = buildKalmanSettingsFromConfigUnlocked();
+    targetKalman.setSettings(cachedKalmanSettings);
     targetKalman.reset();
     lastKalmanTelemetry = {};
     lastPredictionLookaheadSec = 0.0;
     lastDetectionDelaySec = 0.0;
+    refreshGameProfileCache();
 }
 
 /**
@@ -353,6 +463,66 @@ void MouseThread::moveWorkerLoop()
  *   wind_M: 单步移动上限（M越大每帧能移动的像素越多）
  *   wind_D: 微调距离阈值（靠近目标后切换为精细微调的距离）
  */
+void MouseThread::bezierMoveRelative(int dx, int dy)
+{
+    if (dx == 0 && dy == 0) return;
+
+    static int frameCounter = 0;
+    frameCounter++;
+
+    const double dist = std::hypot(dx, dy);
+    int steps = std::max(3, static_cast<int>(std::ceil(dist / 6.0)));
+    steps = std::min(steps, 14);
+
+    // Perlin 风格平滑噪声：相邻帧的随机值连续，避免逐帧跳跃
+    auto smoothNoise = [](int frame, double freq) -> double {
+        double t = static_cast<double>(frame) * freq * 0.1;
+        int i = static_cast<int>(std::floor(t));
+        double f = t - i;
+        f = f * f * (3.0 - 2.0 * f); // smoothstep
+        auto hash = [](int n) -> double {
+            n = (n << 13) ^ n;
+            return (1.0 - static_cast<double>(
+                (n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0);
+        };
+        return hash(i) * (1.0 - f) + hash(i + 1) * f;
+    };
+
+    double nx = -dy / dist;
+    double ny =  dx / dist;
+    double offset = dist * static_cast<double>(bezier_strength) * 0.65;
+
+    // 两个独立控制点，使用不同频率的 Perlin 噪声
+    double side1 = smoothNoise(frameCounter, 1.7);
+    double side2 = smoothNoise(frameCounter, 2.3);
+
+    // 三次贝塞尔: P0=(0,0), CP1, CP2, P3=(dx,dy)
+    double cp1x = dx * 0.33 + nx * offset * side1;
+    double cp1y = dy * 0.33 + ny * offset * side1;
+    double cp2x = dx * 0.67 + nx * offset * side2;
+    double cp2y = dy * 0.67 + ny * offset * side2;
+
+    for (int i = 1; i <= steps; ++i)
+    {
+        double t = static_cast<double>(i) / steps;
+        double t2 = t * t, t3 = t2 * t;
+        double mt = 1.0 - t, mt2 = mt * mt, mt3 = mt2 * mt;
+        double bx = 3.0 * mt2 * t * cp1x + 3.0 * mt * t2 * cp2x + t3 * dx;
+        double by = 3.0 * mt2 * t * cp1y + 3.0 * mt * t2 * cp2y + t3 * dy;
+
+        double pt = static_cast<double>(i - 1) / steps;
+        double pt2 = pt * pt, pt3 = pt2 * pt;
+        double pmt = 1.0 - pt, pmt2 = pmt * pmt, pmt3 = pmt2 * pmt;
+        double pbx = 3.0 * pmt2 * pt * cp1x + 3.0 * pmt * pt2 * cp2x + pt3 * dx;
+        double pby = 3.0 * pmt2 * pt * cp1y + 3.0 * pmt * pt2 * cp2y + pt3 * dy;
+
+        int stepX = static_cast<int>(std::round(bx - pbx));
+        int stepY = static_cast<int>(std::round(by - pby));
+        if (stepX != 0 || stepY != 0)
+            queueMove(stepX, stepY);
+    }
+}
+
 void MouseThread::windMouseMoveRelative(int dx, int dy)
 {
     if (dx == 0 && dy == 0)
@@ -388,10 +558,12 @@ void MouseThread::windMouseMoveRelative(int dx, int dy)
 
         // 将距离归一化到 [0, 1]，用于参数插值
         const double normDist = std::clamp(dist / baseD, 0.0, 1.0);
+        // 微扰尾段归零：贴近目标时自动削弱噪声，杜绝死锁颤抖
+        const double zeroFactor = (dist < 3.0) ? 0.0 : std::min(dist / 50.0, 1.0);
         // 拉力增益：距离越近增益越大，范围 [0.25, 1.0] * baseG
         const double pullGain = baseG * (0.25 + 0.75 * normDist);
         // 噪声幅度：距离越近噪声越大，范围 [0.15, 0.85] * baseW
-        const double noiseAmp = baseW * (0.15 + 0.85 * normDist);
+        const double noiseAmp = baseW * (0.15 + 0.85 * normDist) * zeroFactor;
 
         // 计算指向目标方向的拉力向量
         double pullX = 0.0;
@@ -575,6 +747,36 @@ void MouseThread::pruneWindDebugTrailLocked(const std::chrono::steady_clock::tim
 }
 
 /**
+ * refreshGameProfileCache - 刷新缓存的游戏配置值
+ *
+ * 从 config 中读取当前活跃游戏的灵敏度、yaw/pitch、FOV 缩放参数，
+ * 缓存到成员变量中，避免 mouseCountsToScreenPixels 每次移动都加锁查询。
+ * 调用者必须已持有 configMutex。
+ */
+void MouseThread::refreshGameProfileCache()
+{
+    const Config::GameProfile* gpPtr = nullptr;
+    auto activeIt = config.game_profiles.find(config.active_game);
+    if (activeIt != config.game_profiles.end())
+        gpPtr = &activeIt->second;
+    else
+    {
+        auto unifiedIt = config.game_profiles.find("UNIFIED");
+        if (unifiedIt != config.game_profiles.end())
+            gpPtr = &unifiedIt->second;
+    }
+
+    if (gpPtr)
+    {
+        cachedGameSens = gpPtr->sens;
+        cachedGameYaw = gpPtr->yaw;
+        cachedGamePitch = gpPtr->pitch;
+        cachedGameFovScaled = gpPtr->fovScaled;
+        cachedGameBaseFOV = gpPtr->baseFOV;
+    }
+}
+
+/**
  * mouseCountsToScreenPixels
  *
  * 将鼠标计数（counts）转换为屏幕像素坐标。
@@ -599,41 +801,20 @@ std::pair<double, double> MouseThread::mouseCountsToScreenPixels(int dx, int dy)
     double deltaPxX = static_cast<double>(dx);
     double deltaPxY = static_cast<double>(dy);
 
+    if (cachedGameSens != 0.0 && cachedGameYaw != 0.0 && cachedGamePitch != 0.0)
     {
-        std::lock_guard<std::mutex> cfgLock(configMutex);
-        const Config::GameProfile* gpPtr = nullptr;
+        const double fovNow = std::max(1.0, fov_x);
+        const double fovScale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0) ? (fovNow / cachedGameBaseFOV) : 1.0;
+        const double degX = static_cast<double>(dx) * cachedGameSens * cachedGameYaw * fovScale;
+        const double degY = static_cast<double>(dy) * cachedGameSens * cachedGamePitch * fovScale;
 
-        // 优先使用当前活跃游戏配置
-        auto activeIt = config.game_profiles.find(config.active_game);
-        if (activeIt != config.game_profiles.end())
-            gpPtr = &activeIt->second;
-        else
+        const double degPerPxX = fov_x / std::max(1.0, screen_width);
+        const double degPerPxY = fov_y / std::max(1.0, screen_height);
+
+        if (std::abs(degPerPxX) > 1e-8 && std::abs(degPerPxY) > 1e-8)
         {
-            // 回退到 UNIFIED 配置
-            auto unifiedIt = config.game_profiles.find("UNIFIED");
-            if (unifiedIt != config.game_profiles.end())
-                gpPtr = &unifiedIt->second;
-        }
-
-        if (gpPtr && gpPtr->sens != 0.0 && gpPtr->yaw != 0.0 && gpPtr->pitch != 0.0)
-        {
-            const double fovNow = std::max(1.0, fov_x);
-            // FOV 缩放系数：如果启用 FOV 缩放，使用当前 FOV 与基准 FOV 的比值
-            const double fovScale = (gpPtr->fovScaled && gpPtr->baseFOV > 1.0) ? (fovNow / gpPtr->baseFOV) : 1.0;
-            // counts -> 角度（度）
-            const double degX = static_cast<double>(dx) * gpPtr->sens * gpPtr->yaw * fovScale;
-            const double degY = static_cast<double>(dy) * gpPtr->sens * gpPtr->pitch * fovScale;
-
-            // 每像素对应角度
-            const double degPerPxX = fov_x / std::max(1.0, screen_width);
-            const double degPerPxY = fov_y / std::max(1.0, screen_height);
-
-            // 角度 -> 像素
-            if (std::abs(degPerPxX) > 1e-8 && std::abs(degPerPxY) > 1e-8)
-            {
-                deltaPxX = degX / degPerPxX;
-                deltaPxY = degY / degPerPxY;
-            }
+            deltaPxX = degX / degPerPxX;
+            deltaPxY = degY / degPerPxY;
         }
     }
 
@@ -821,9 +1002,78 @@ std::pair<double, double> MouseThread::predict_target_position(
     if (!std::isfinite(observationAgeSec) || observationAgeSec < 0.0)
         observationAgeSec = 0.0;
 
-    targetKalman.setSettings(buildKalmanSettingsFromConfig());
+    // ── 模式：关闭 ──
+    if (predictionMode == "off")
+    {
+        prev_x = target_x; prev_y = target_y;
+        prev_time = observationTime;
+        return { target_x, target_y };
+    }
 
-    // 首次检测或预测被重置：初始化状态，不做预测
+    // ── 模式：仅延迟补偿 ──
+    if (predictionMode == "delay")
+    {
+        // 只补偿推理延迟，不做未来预测
+        double delaySec = currentDetectionDelaySec(observationAgeSec);
+        double dx = (prev_time.time_since_epoch().count() != 0)
+            ? (target_x - prev_x) : 0.0;
+        double dy = (prev_time.time_since_epoch().count() != 0)
+            ? (target_y - prev_y) : 0.0;
+        prev_x = target_x; prev_y = target_y;
+        prev_time = observationTime;
+        double px = target_x + dx * delaySec / std::max(0.001, currentFrameIntervalSec());
+        double py = target_y + dy * delaySec / std::max(0.001, currentFrameIntervalSec());
+        return { px, py };
+    }
+
+    // ── 模式：线性预测（EMA 平滑速度 + 匀速外推）──
+    if (predictionMode == "linear")
+    {
+        if (prev_time.time_since_epoch().count() == 0 || !target_detected.load())
+        {
+            prev_x = target_x; prev_y = target_y;
+            prev_time = observationTime;
+            smoothedVelX = 0.0; smoothedVelY = 0.0;
+            return { target_x, target_y };
+        }
+
+        double dt = std::chrono::duration<double>(observationTime - prev_time).count();
+        if (dt <= 0.0) dt = currentFrameIntervalSec();
+        dt = std::clamp(dt, 1.0 / 500.0, 0.25);
+
+        // EMA 平滑速度（alpha=0.25 平衡响应与抗抖）
+        double rawVx = (target_x - prev_x) / dt;
+        double rawVy = (target_y - prev_y) / dt;
+
+        // 死区过滤：位移 < 2px 视为检测框抖动，不更新速度
+        double rawDisp = std::hypot(target_x - prev_x, target_y - prev_y);
+        if (rawDisp < 2.0)
+        {
+            rawVx = 0.0;
+            rawVy = 0.0;
+        }
+
+        const double velAlpha = 0.25;
+        smoothedVelX = smoothedVelX * velAlpha + rawVx * (1.0 - velAlpha);
+        smoothedVelY = smoothedVelY * velAlpha + rawVy * (1.0 - velAlpha);
+
+        prev_x = target_x; prev_y = target_y;
+        prev_time = observationTime;
+
+        double delaySec = currentDetectionDelaySec(observationAgeSec);
+        double lookahead = std::max(0.0, static_cast<double>(prediction_interval));
+        if (config.kalman_compensate_detection_delay)
+            lookahead += std::max(0.0, delaySec);
+        lookahead = std::clamp(lookahead, 0.0, 1.5);
+
+        double px = target_x + smoothedVelX * lookahead;
+        double py = target_y + smoothedVelY * lookahead;
+        return { px, py };
+    }
+
+    // ── 模式：卡尔曼（原逻辑）──
+    targetKalman.setSettings(cachedKalmanSettings);
+
     if (prev_time.time_since_epoch().count() == 0 || !target_detected.load())
     {
         prev_time = observationTime;
@@ -840,10 +1090,8 @@ std::pair<double, double> MouseThread::predict_target_position(
         return { target_x, target_y };
     }
 
-    // 计算两次观测之间的时间间隔
     double dt = std::chrono::duration<double>(observationTime - prev_time).count();
-    if (!std::isfinite(dt) || dt <= 0.0)
-        dt = currentFrameIntervalSec();
+    if (!std::isfinite(dt) || dt <= 0.0) dt = currentFrameIntervalSec();
     dt = std::clamp(dt, 1.0 / 500.0, 0.25);
 
     prev_time = observationTime;
@@ -1014,7 +1262,7 @@ double MouseThread::calculate_speed_multiplier(double distance)
     if (nearRadius > 0.0f && distance < nearRadius)
     {
         double t = distance / nearRadius;
-        double curve = 1.0 - std::pow(1.0 - t, speedCurveExponent);
+        double curve = 1.0 - std::pow(1.0 - t, static_cast<double>(speedCurveExponent));
         return min_speed_multiplier +
             (max_speed_multiplier - min_speed_multiplier) * curve;
     }
@@ -1115,15 +1363,83 @@ void MouseThread::moveMousePivot(
 
     auto predicted = predict_target_position(pivotX, pivotY, observationTime);
     auto mv = calc_movement(predicted.first, predicted.second);
-    int mx = static_cast<int>(mv.first);
-    int my = static_cast<int>(mv.second);
+    double move_x = mv.first;
+    double move_y = mv.second;
+
+    // === EMA 输出平滑 ===
+    if (move_ema_enabled)
+    {
+        double a = static_cast<double>(move_ema_alpha);
+        move_x = prev_ema_move_x * a + move_x * (1.0 - a);
+        move_y = prev_ema_move_y * a + move_y * (1.0 - a);
+        prev_ema_move_x = move_x;
+        prev_ema_move_y = move_y;
+    }
+
+    // === 开火解锁 Y 轴 ===
+    if (unlock_y_enabled && mouse_pressed.load())
+    {
+        auto now = std::chrono::steady_clock::now();
+        auto heldMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - leftPressStartTime).count();
+        if (heldMs > static_cast<long long>(unlock_y_threshold_ms))
+        {
+            // ramp: 在 threshold 之后 gradual 释放 Y 轴
+            double yFactor = 1.0 - static_cast<double>(unlock_y_strength);
+            if (yFactor < 0.0) yFactor = 0.0;
+            move_y *= yFactor;
+        }
+    }
+
+    // === 惯性过冲模拟 (Overshoot) ===
+    // 仅在长距离甩枪时偶尔触发（追踪时不触发），模拟真人惯性过头
+    if (bezier_enabled || wind_mouse_enabled)
+    {
+        double totalDist = std::hypot(move_x, move_y);
+        // 只在大幅度拉枪（> 50px）且非贴脸追踪时触发
+        if (totalDist > 50.0)
+        {
+            static int osCounter = 0;
+            static int osCooldown = 0;
+            osCounter++;
+            // 冷却：每次触发后跳过 8-15 帧，避免连续抖动
+            if (osCooldown > 0) { osCooldown--; }
+            else
+            {
+                double osRoll = [](int f) {
+                    double t = f * 0.17;
+                    int i = (int)std::floor(t);
+                    double fr = t - i; fr = fr * fr * (3.0 - 2.0 * fr);
+                    auto h = [](int n){ n=(n<<13)^n; return (1.0-((n*(n*n*15731+789221)+1376312589)&0x7fffffff)/1073741824.0); };
+                    return h(i)*(1.0-fr)+h(i+1)*fr;
+                }(osCounter);
+
+                if (osRoll > 0.72)  // ~14% chance per eligible frame
+                {
+                    double osFactor = 1.02 + (osRoll - 0.72) * 0.28;  // 1.02 ~ 1.08
+                    if (osFactor > 1.08) osFactor = 1.08;
+                    move_x *= osFactor;
+                    move_y *= osFactor;
+                    osCooldown = 10 + static_cast<int>((osRoll + 1.0) * 10.0);  // 10-30 frame cooldown
+                }
+            }
+        }
+    }
+
+    int mx = static_cast<int>(std::round(move_x));
+    int my = static_cast<int>(std::round(move_y));
 
     if (mx == 0 && my == 0)
     {
         return;
     }
 
-    if (wind_mouse_enabled)
+    // === 轨迹分发 ===
+    if (bezier_enabled)
+    {
+        bezierMoveRelative(mx, my);
+    }
+    else if (wind_mouse_enabled)
     {
         // 使用轨迹模拟算法产生类人曲线轨迹
         windMouseMoveRelative(mx, my);
@@ -1166,29 +1482,111 @@ void MouseThread::clearQueuedMoves()
  */
 void MouseThread::pressMouse(const AimbotTarget& target)
 {
+    auto now = std::chrono::steady_clock::now();
     bool bScope = check_target_in_scope(target.x, target.y, target.w, target.h, bScope_multiplier);
-    if (bScope && !mouse_pressed)
+
+    // === 开火拟人化：确认帧数 ===
+    if (bScope && trigger_stable_frames > 0)
+    {
+        stableFrameCount++;
+        if (stableFrameCount < trigger_stable_frames)
+            return; // 等待更多帧确认
+    }
+    else if (!bScope)
+    {
+        stableFrameCount = 0;
+        // 目标脱锁，取消所有待执行的开火计划
+        fireScheduled = false;
+        holdScheduled = false;
+    }
+
+    // === 冷却检查 ===
+    if (bScope && trigger_shot_cooldown_ms > 0.0f && lastShotTime.time_since_epoch().count() != 0)
+    {
+        auto sinceLast = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastShotTime).count();
+        if (sinceLast < static_cast<long long>(trigger_shot_cooldown_ms))
+            return;
+    }
+
+    // === 计划延时开火 ===
+    if (bScope && !mouse_pressed && !fireScheduled)
+    {
+        // 生成随机延迟
+        double delay = std::max(0.0, static_cast<double>(trigger_random_delay_ms)
+            + (trigger_delay_jitter_ms > 0.0f
+                ? std::normal_distribution<double>(0.0, static_cast<double>(trigger_delay_jitter_ms))(windRng)
+                : 0.0));
+        fireScheduleTime = now + std::chrono::microseconds(static_cast<long long>(delay * 1000.0));
+        fireScheduled = true;
+
+        // 生成随机保持时长
+        double hold = std::max(1.0, static_cast<double>(trigger_hold_ms)
+            + (trigger_hold_jitter_ms > 0.0f
+                ? std::normal_distribution<double>(0.0, static_cast<double>(trigger_hold_jitter_ms))(windRng)
+                : 0.0));
+        holdReleaseTime = fireScheduleTime + std::chrono::microseconds(static_cast<long long>(hold * 1000.0));
+        holdScheduled = true;
+    }
+
+    // === 执行开火 ===
+    if (fireScheduled && !mouse_pressed && now >= fireScheduleTime)
     {
         std::lock_guard<std::mutex> lock(inputDevicesMutex);
-        if (!mouseInput)
+        if (!mouseInput) return;
+
+        // 自动急停：开火前释放 WASD
+        if (auto_stop_enabled && !wasdReleased)
         {
-            return;
+            mouseInput->keyDown(0x1A); // W
+            mouseInput->keyDown(0x04); // A
+            mouseInput->keyDown(0x16); // S
+            mouseInput->keyDown(0x07); // D
+            wasdReleased = true;
         }
 
         if (mouseInput->leftDown())
+        {
             mouse_pressed = true;
+            leftPressStartTime = now;
+            fireScheduled = false;
+        }
     }
-    else if (!bScope && mouse_pressed)
+
+    // === 自动松开 (单发模式) ===
+    if (holdScheduled && mouse_pressed && now >= holdReleaseTime)
     {
         std::lock_guard<std::mutex> lock(inputDevicesMutex);
-        if (!mouseInput)
+        if (!mouseInput) { mouse_pressed = false; return; }
+
+        if (mouseInput->leftUp())
         {
             mouse_pressed = false;
-            return;
+            holdScheduled = false;
+            lastShotTime = now;
+            stableFrameCount = 0;
         }
+    }
+
+    // === 脱锁时释放 ===
+    if (!bScope && mouse_pressed)
+    {
+        std::lock_guard<std::mutex> lock(inputDevicesMutex);
+        if (!mouseInput) { mouse_pressed = false; return; }
 
         if (mouseInput->leftUp())
             mouse_pressed = false;
+
+        // 恢复 WASD
+        if (wasdReleased)
+        {
+            mouseInput->keyUp(0x1A); mouseInput->keyUp(0x04);
+            mouseInput->keyUp(0x16); mouseInput->keyUp(0x07);
+            wasdReleased = false;
+        }
+
+        fireScheduled = false;
+        holdScheduled = false;
+        stableFrameCount = 0;
     }
 }
 
@@ -1212,6 +1610,16 @@ void MouseThread::releaseMouse()
 
         if (mouseInput->leftUp())
             mouse_pressed = false;
+
+        // 恢复 WASD（自动急停结束）
+        if (wasdReleased)
+        {
+            mouseInput->keyUp(0x1A); // W
+            mouseInput->keyUp(0x04); // A
+            mouseInput->keyUp(0x16); // S
+            mouseInput->keyUp(0x07); // D
+            wasdReleased = false;
+        }
     }
 }
 
@@ -1298,7 +1706,7 @@ std::vector<std::pair<double, double>> MouseThread::predictFuturePositions(doubl
 
     const double frame_time = currentFrameIntervalSec();
 
-    targetKalman.setSettings(buildKalmanSettingsFromConfig());
+    targetKalman.setSettings(cachedKalmanSettings);
     if (targetKalman.initialized())
     {
         const double detectionDelaySec = (lastDetectionDelaySec > 0.0)

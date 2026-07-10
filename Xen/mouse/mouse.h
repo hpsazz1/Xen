@@ -46,6 +46,28 @@ private:
     double center_y;                 ///< 屏幕中心 Y
     bool   auto_shoot;               ///< 是否启用自动射击
     float  bScope_multiplier;        ///< 瞄准镜倍率补偿
+    bool   auto_stop_enabled;        ///< 开火时释放 WASD（仅 KMBOX_NET）
+    float  auto_stop_hold_ms;        ///< 急停最短保持时间
+    bool   unlock_y_enabled;         ///< 开火解锁 Y 轴
+    float  unlock_y_threshold_ms;    ///< 按住多久后解锁
+    float  unlock_y_strength;        ///< 解锁强度
+    float  fire_correction_strength; ///< 射击修正强度
+
+    // ==================== 开火拟人化状态 ====================
+    int    trigger_stable_frames;       ///< 连续确认帧数
+    float  trigger_random_delay_ms;     ///< 反应延迟均值
+    float  trigger_delay_jitter_ms;     ///< 反应延迟抖动
+    float  trigger_hold_ms;             ///< 按键时长均值
+    float  trigger_hold_jitter_ms;      ///< 按键时长抖动
+    float  trigger_shot_cooldown_ms;    ///< 两发最小间隔
+    int    stableFrameCount = 0;        ///< 当前连续确认计数
+    std::chrono::steady_clock::time_point lastShotTime{};     ///< 上次开火时间
+    std::chrono::steady_clock::time_point leftPressStartTime{}; ///< 左键按下时间 (用于急停/解锁Y)
+    bool   fireScheduled = false;       ///< 是否有待执行的开火
+    std::chrono::steady_clock::time_point fireScheduleTime{};  ///< 计划开火时间
+    bool   holdScheduled = false;       ///< 是否有待执行的松开
+    std::chrono::steady_clock::time_point holdReleaseTime{};   ///< 计划松开时间
+    bool   wasdReleased = false;        ///< 当前是否已释放 WASD
 
     // ==================== 运动状态 ====================
     double prev_x, prev_y;                                        ///< 上一帧目标位置
@@ -75,9 +97,18 @@ private:
     std::vector<std::pair<double, double>> futurePositions;  ///< 未来预测位置列表
     std::mutex                    futurePositionsMutex;      ///< 未来位置互斥锁
     aim::AimKalman2D              targetKalman;              ///< 目标卡尔曼滤波器
+    aim::AimKalmanSettings        cachedKalmanSettings;      ///< 缓存的卡尔曼设置，updateConfig 时刷新
     aim::AimKalmanTelemetry       lastKalmanTelemetry;       ///< 上次卡尔曼遥测数据
     double                        lastPredictionLookaheadSec = 0.0;  ///< 上次预测前瞻时间（秒）
     double                        lastDetectionDelaySec = 0.0;      ///< 上次检测延迟（秒）
+
+    // ==================== 游戏配置缓存 ====================
+    // 缓存活跃游戏配置的静态值，避免每次鼠标移动都加锁查询 map
+    double                        cachedGameSens = 1.0;
+    double                        cachedGameYaw = 0.022;
+    double                        cachedGamePitch = 0.022;
+    bool                          cachedGameFovScaled = false;
+    double                        cachedGameBaseFOV = 0.0;
 
     /** @brief 移动工作线程主循环 */
     void moveWorkerLoop();
@@ -87,7 +118,19 @@ private:
     // ==================== 轨迹模拟 ====================
     bool   wind_mouse_enabled = true;   ///< 是否启用轨迹模拟
     double wind_G, wind_W, wind_M, wind_D;  ///< 鼠标移速、轨迹摆动、单步上限、微调距离
+    bool   bezier_enabled = false;      ///< 是否启用贝塞尔弧线轨迹
+    float  bezier_strength = 0.35f;     ///< 贝塞尔弧度
+    bool   move_ema_enabled = false;    ///< 是否启用 EMA 平滑
+    float  move_ema_alpha = 0.60f;      ///< EMA 平滑系数
+    double prev_ema_move_x = 0.0;       ///< 上帧 EMA 平滑后 X
+    double prev_ema_move_y = 0.0;
+
+    // ==================== 预测模式 ====================
+    std::string predictionMode = "linear";
+    double smoothedVelX = 0.0, smoothedVelY = 0.0;
+
     void   windMouseMoveRelative(int dx, int dy);  ///< 轨迹模拟相对移动
+    void   bezierMoveRelative(int dx, int dy);     ///< 贝塞尔弧线轨迹移动
     void   resetWindState();              ///< 重置轨迹模拟状态
     void   appendWindDebugStep(int dx, int dy);  ///< 追加轨迹模拟调试步进
     void   pruneWindDebugTrailLocked(const std::chrono::steady_clock::time_point& now);  ///< 修剪轨迹模拟调试轨迹
@@ -146,6 +189,9 @@ private:
     /** @brief 根据检测延迟计算预测前瞻时间（秒） */
     double currentPredictionLookaheadSec(double detectionDelaySec) const;
 
+    /** @brief 刷新缓存的游戏配置值（在 updateConfig 和构造函数中调用） */
+    void refreshGameProfileCache();
+
 public:
     std::mutex input_method_mutex;  ///< 输入方法互斥锁
 
@@ -187,6 +233,9 @@ public:
         bool auto_shoot,
         float bScope_multiplier
     );
+
+    /** @brief 应用参数预设（stable/balanced/aggressive/fast），一键设置所有相关参数 */
+    static void applyPreset(const char* presetName);
 
     /**
      * @brief 以目标枢轴点为中心移动鼠标（追踪瞄准）

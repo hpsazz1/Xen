@@ -202,15 +202,6 @@ static void ApplyRuntimeUiScale()
 // 尝试自动调整叠加层窗口大小
 // 当前实现为空（保持尺寸稳定），仅保留扩展点。
 // extraContentWidth: 内容区域水平滚动宽度（预留参数）
-static void TryAutoResizeOverlay(float extraContentWidth)
-{
-    IM_UNUSED(extraContentWidth);
-    if (!g_hwnd || !g_autoResizeEnabled)
-        return;
-
-    // 保持编辑器尺寸稳定。长模型名和组合弹出框应裁剪/滚动，
-    // 而不是让叠加层框架满屏增长。
-}
 
 // 设置叠加层窗口的不透明度
 // opacity255: 不透明度值（0-255），实际强制下限为 MIN_EDITOR_OPACITY=252
@@ -484,9 +475,10 @@ static const OverlayTabItem kOverlayTabs[] = {
     { "目标",          "Aim",     "目标选择和瞄准点偏移。",                     draw_target,                  SidebarIconKind::Crosshair },
     { "追踪器",        "Aim",     "当前锁定目标身份追踪状态。",                 draw_tracker,                 SidebarIconKind::Crosshair },
     { "移动",          "Aim",     "视野、速度、目标修正和运动配置。",            draw_mouse_movement,          SidebarIconKind::Move },
+    { "轨迹",          "Aim",     "Wind Mouse、Bezier、EMA 等轨迹手感参数。",      draw_mouse_trajectory,        SidebarIconKind::Curve },
     { "预测",          "Aim",     "预测点和卡尔曼滤波调参。",                   draw_mouse_prediction,        SidebarIconKind::Curve },
     { "辅助",          "Aim",     "自动射击、后坐力补偿和辅助开关。",            draw_mouse_assist,            SidebarIconKind::Spark },
-    { "配置",          "Aim",     "每游戏灵敏度和配置文件管理。",               draw_mouse_profiles,          SidebarIconKind::User },
+    { "配置",          "Aim",     "参数预设、游戏灵敏度和配置文件管理。",          draw_mouse_profiles,          SidebarIconKind::User },
 
     { "输入设备",      "Control", "鼠标后端、设备连接和重连数据。",              draw_mouse_input,             SidebarIconKind::Mouse },
     { "热键",          "Control", "瞄准、射击和运行时操作的按键绑定。",          draw_buttons,                 SidebarIconKind::Keyboard },
@@ -1474,9 +1466,7 @@ void SetupImGui()
         font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\msyhbd.ttc", 16.5f, &fontConfig);
     if (!font) // 方法3：simsun
         font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\simsun.ttc", 16.0f, &fontConfig);
-    if (!font) // 方法4：获取系统目录
-        font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\msyh.ttc", 16.5f, &fontConfig); // 再次尝试
-    if (!font) // 方法5：seguisb
+    if (!font) // 方法4：seguisb
         font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 16.5f, &fontConfig);
     if (!font)
         io.Fonts->AddFontDefault();
@@ -1723,7 +1713,6 @@ static HRESULT RenderOverlayFrame(bool allowAutoResize, bool allowConfigSave)
         ImGui::SameLine(0.0f, 12.0f);
 
         // ---- 右侧：选项卡内容区域 ----
-        float contentExtraW = 0.0f;
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0, 0, 0, 0));
@@ -1735,15 +1724,9 @@ static HRESULT RenderOverlayFrame(bool allowAutoResize, bool allowConfigSave)
         // 调用当前选项卡的绘制函数
         kOverlayTabs[g_activeOverlayTab].draw();
 
-        // 记录横向滚动宽度，用于自动调整窗口大小
-        contentExtraW = ImGui::GetScrollMaxX();
         ImGui::EndChild();
         ImGui::PopStyleColor(2);
         ImGui::PopStyleVar();
-
-        // 自动调整窗口尺寸
-        if (allowAutoResize)
-            TryAutoResizeOverlay(contentExtraW);
 
         // 如果允许，尝试保存配置（仅在更改时写入）
         if (allowConfigSave)

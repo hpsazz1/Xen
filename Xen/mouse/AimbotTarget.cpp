@@ -7,6 +7,7 @@
 #include <limits>
 #include <algorithm>
 #include <numeric>
+#include <memory>
 #include <mutex>
 #include <opencv2/opencv.hpp>
 
@@ -62,9 +63,9 @@ AimbotTarget::AimbotTarget(int x_, int y_, int w_, int h_, int cls, double px, d
  * @param screenWidth    屏幕宽度（像素），用于计算屏幕中心点
  * @param screenHeight   屏幕高度（像素）
  * @param disableHeadshot 是否禁用爆头模式（true=仅瞄准身体）
- * @return               指向选中目标的 AimbotTarget 指针，若无合适目标则返回 nullptr
+ * @return               指向选中目标的 unique_ptr，若无合适目标则返回 nullptr
  */
-AimbotTarget* sortTargets(
+std::unique_ptr<AimbotTarget> sortTargets(
     const std::vector<cv::Rect>& boxes,
     const std::vector<int>& classes,
     int screenWidth,
@@ -106,7 +107,9 @@ AimbotTarget* sortTargets(
             {
                 int headOffsetY = static_cast<int>(boxes[i].height * headOffset);
                 cv::Point targetPoint(boxes[i].x + boxes[i].width / 2, boxes[i].y + headOffsetY);
-                double distance = std::pow(targetPoint.x - center.x, 2) + std::pow(targetPoint.y - center.y, 2);
+                double dx = targetPoint.x - center.x;
+                double dy = targetPoint.y - center.y;
+                double distance = dx * dx + dy * dy;
                 if (distance < minDistance)
                 {
                     minDistance = distance;
@@ -133,7 +136,9 @@ AimbotTarget* sortTargets(
             {
                 int offsetY = static_cast<int>(boxes[i].height * bodyOffset);
                 cv::Point targetPoint(boxes[i].x + boxes[i].width / 2, boxes[i].y + offsetY);
-                double distance = std::pow(targetPoint.x - center.x, 2) + std::pow(targetPoint.y - center.y, 2);
+                double dx = targetPoint.x - center.x;
+                double dy = targetPoint.y - center.y;
+                double distance = dx * dx + dy * dy;
                 if (distance < minDistance)
                 {
                     minDistance = distance;
@@ -170,7 +175,7 @@ AimbotTarget* sortTargets(
     double pivotX = finalX + (finalW / 2.0);
     double pivotY = finalY + (finalH / 2.0);
 
-    return new AimbotTarget(finalX, finalY, finalW, finalH, finalClass, pivotX, pivotY);
+    return std::make_unique<AimbotTarget>(finalX, finalY, finalW, finalH, finalClass, pivotX, pivotY);
 }
 
 /**

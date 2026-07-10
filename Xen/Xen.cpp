@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <deque>
 #include <random>
@@ -59,7 +60,7 @@ std::mutex inputDevicesMutex;
 TrtDetector trt_detector;
 #else
 // DirectML 目标检测器（非 CUDA 后端），使用 DirectX ML 进行推理
-DirectMLDetector* dml_detector = nullptr;
+std::unique_ptr<DirectMLDetector> dml_detector;
 #endif
 
 // 全局鼠标线程指针，用于控制鼠标移动和点击
@@ -449,11 +450,9 @@ int main(int argc, char** argv)
 #else
         // 创建 DirectML 检测器并启动其推理线程
         std::thread dml_detThread;
-        DirectMLDetector* newDmlDetector = nullptr;
         try
         {
-            newDmlDetector = new DirectMLDetector("models/" + config.ai_model);
-            dml_detector = newDmlDetector;
+            dml_detector = std::make_unique<DirectMLDetector>("models/" + config.ai_model);
             std::cout << "[MAIN] DML detector created"
                       << (dml_detector->isReady() ? "." : ", but no active model.") << std::endl;
             dml_detThread = StartThreadGuarded("DmlDetector", [] {
@@ -462,19 +461,13 @@ int main(int argc, char** argv)
         }
         catch (const std::exception& e)
         {
-            if (dml_detector == newDmlDetector)
-                dml_detector = nullptr;
-            delete newDmlDetector;
             std::cerr << "[MAIN] DML detector is unavailable: " << e.what()
                       << ". The application will continue without DML inference." << std::endl;
         }
         catch (...)
         {
-            if (dml_detector == newDmlDetector)
-                dml_detector = nullptr;
-            delete newDmlDetector;
             std::cerr << "[MAIN] DML detector is unavailable: unknown exception."
-                      << " The application will continue without DML inference." << std::endl;
+                      << ". The application will continue without DML inference." << std::endl;
         }
 #endif
 
@@ -555,8 +548,7 @@ int main(int argc, char** argv)
         // 清理 DirectML 检测器
         if (dml_detector)
         {
-            delete dml_detector;
-            dml_detector = nullptr;
+            dml_detector.reset();
         }
 #endif
 
@@ -564,8 +556,7 @@ int main(int argc, char** argv)
         if (gameOverlayPtr)
         {
             gameOverlayPtr->Stop();
-            delete gameOverlayPtr;
-            gameOverlayPtr = nullptr;
+            gameOverlayPtr.reset();
         }
 
         return 0;

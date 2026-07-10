@@ -274,8 +274,7 @@ void gameOverlayRenderLoop()
             if (gameOverlayPtr)
             {
                 gameOverlayPtr->Stop();
-                delete gameOverlayPtr;
-                gameOverlayPtr = nullptr;
+                gameOverlayPtr.reset();
                 resetGameOverlayIconCache();
             }
 #ifdef USE_CUDA
@@ -310,8 +309,7 @@ void gameOverlayRenderLoop()
         if (overlayMonitorChanged && gameOverlayPtr)
         {
             gameOverlayPtr->Stop();
-            delete gameOverlayPtr;
-            gameOverlayPtr = nullptr;
+            gameOverlayPtr.reset();
             resetGameOverlayIconCache();
         }
 
@@ -322,7 +320,7 @@ void gameOverlayRenderLoop()
         // ---- 创建或重启覆盖层窗口 ----
         if (!gameOverlayPtr)
         {
-            gameOverlayPtr = new Game_overlay();
+            gameOverlayPtr = std::make_unique<Game_overlay>();
             gameOverlayPtr->SetWindowBounds(pr.left, pr.top, pw, ph);
             gameOverlayPtr->SetMaxFPS(config.game_overlay_max_fps > 0 ? (unsigned)config.game_overlay_max_fps : 0);
             gameOverlayPtr->SetExcludeFromCapture(config.overlay_exclude_from_capture);
@@ -376,16 +374,14 @@ void gameOverlayRenderLoop()
         std::chrono::steady_clock::time_point detectionTimestamp{};
         int detectionVersion = lastDetectionVersion;
         {
-            std::unique_lock<std::mutex> lk(detectionBuffer.mutex);
             const unsigned fpsCap = (unsigned)config.game_overlay_max_fps;
             const int waitMs = (fpsCap > 0) ? static_cast<int>(std::max(1u, 1000u / fpsCap)) : 8;
+            std::unique_lock<std::mutex> lk(detectionBuffer.mutex);
             detectionBuffer.cv.wait_for(lk, std::chrono::milliseconds(waitMs), [&] {
                 return detectionBuffer.version != lastDetectionVersion || gameOverlayShouldExit.load();
             });
-            boxesCopy = detectionBuffer.boxes;
-            classesCopy = detectionBuffer.classes;
-            detectionTimestamp = detectionBuffer.frameTimestamp;
-            detectionVersion = detectionBuffer.version;
+            std::vector<float> dummyConf;
+            detectionBuffer.swapLocked(boxesCopy, classesCopy, dummyConf, detectionVersion, detectionTimestamp);
         }
         lastDetectionVersion = detectionVersion;
 
@@ -1163,13 +1159,9 @@ void gameOverlayRenderLoop()
         if (config.game_overlay_show_target_correction)
         {
             draw_target_correction_demo_game_overlay(
-                gameOverlayPtr,
+                gameOverlayPtr.get(),
                 static_cast<float>(baseX) + regionW * 0.5f,
                 static_cast<float>(baseY) + regionH * 0.5f);
-        }
-
-        else
-        {
         }
 
         // ========== 14. 结束帧渲染 ==========
@@ -1182,8 +1174,7 @@ void gameOverlayRenderLoop()
     if (gameOverlayPtr)
     {
         gameOverlayPtr->Stop();
-        delete gameOverlayPtr;
-        gameOverlayPtr = nullptr;
+        gameOverlayPtr.reset();
     }
 }
 

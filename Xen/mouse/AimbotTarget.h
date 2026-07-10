@@ -40,9 +40,9 @@ public:
  * @param screenWidth 屏幕宽度
  * @param screenHeight 屏幕高度
  * @param disableHeadshot 是否禁用爆头瞄准
- * @return 指向最佳目标的指针，若无合适目标则返回 nullptr
+ * @return 指向最佳目标的 unique_ptr，若无合适目标则返回 nullptr
  */
-AimbotTarget* sortTargets(
+std::unique_ptr<AimbotTarget> sortTargets(
     const std::vector<cv::Rect>& boxes,
     const std::vector<int>& classes,
     int screenWidth,
