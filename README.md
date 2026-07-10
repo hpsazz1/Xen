@@ -203,64 +203,65 @@ Xen 提供两种 Windows 运行时方案：
 ## 模块关系图
 
 ```
-                          ┌─────────────────────────────┐
-                          │         main()               │
-                          │       Xen.cpp                │
-                          │  线程创建 / 设备初始化 / 主循环  │
-                          └──────┬──────────┬───────────┘
-                                 │          │
-                    ┌────────────┘          └────────────┐
-                    ▼                                    ▼
-        ┌───────────────────┐                ┌───────────────────┐
-        │   capture\        │                │   keyboard\       │
-        │   画面帧采集        │                │   键盘快捷键 + 状态  │
-        │   capture.cpp     │                │   keyboard_*.cpp  │
-        └────────┬──────────┘                └────────┬──────────┘
-                 │  cv::Mat                           │  aiming / shooting
-                 ▼                                    ▼
-        ┌───────────────────┐                ┌───────────────────┐
-        │   detector\       │                │   mouse\          │
-        │   AI 目标检测      │──── Detection ──→│   鼠标控制         │
-        │   dml/trt_*.cpp   │    缓冲区        │   mouse.cpp       │
-        └────────┬──────────┘                │   ├─ 卡尔曼预测     │
-                 │                            │   ├─ 轨迹模拟      │
-                 │ 深度推理请求                  │   ├─ 目标修正      │
-                 ▼                            │   └─ 速度曲线      │
-        ┌───────────────────┐                │                   │
-        │   depth\          │                │   设备驱动层        │
-        │   深度估计 + 遮罩   │                │   MouseInput.cpp   │
-        │   depth_*_trt.cpp │                │   ┌──────┬──────┐ │
-        └───────────────────┘                │   │GHUB  │Razer │ │
-                                             │   ├──────┼──────┤ │
-        ┌───────────────────┐                │   │KmboxA│KmboxN│ │
-        │   tensorrt\       │                │   ├──────┼──────┤ │
-        │   引擎构建/加载/推理 │                │   │Arduin│RP2350│ │
-        │   nvinf.cpp        │                │   ├──────┼──────┤ │
-        └───────────────────┘                │   │Teensy│Makcu │ │
-                                             │   └──────┴──────┘ │
-        ┌───────────────────┐                │   └─ 物理鼠标移动命令
-        │   overlay\        │                └───────────────────┘
-        │   UI 渲染 (ImGui)  │
-        │   overlay.cpp      │ ◀── 所有面板读写 config
-        │   ├─ draw_ai       │
-        │   ├─ draw_mouse    │        ┌───────────────────┐
-        │   ├─ draw_capture  │        │   config\         │
-        │   ├─ draw_target   │──读写──→│   config.ini      │
-        │   ├─ draw_depth    │        │   config.cpp      │
-        │   ├─ draw_stats    │        └───────────────────┘
-        │   ├─ draw_debug    │
-        │   ├─ draw_buttons  │        ┌───────────────────┐
-        │   ├─ draw_overlay  │        │   runtime\        │
-        │   │                │        │   线程调度循环      │
-        │   └─ Game_overlay  │        │   mouse_thread_*  │
-        └───────────────────┘        │   game_overlay_*  │
-                                     └───────────────────┘
+                          ┌──────────────────────────┐
+                          │          main()           │
+                          │        Xen.cpp            │
+                          │ 线程创建/设备初始化/主循环  │
+                          └──────┬─────────┬──────────┘
+                                 │         │
+                    ┌────────────┘         └────────────┐
+                    ▼                                   ▼
+        ┌────────────────────┐              ┌────────────────────┐
+        │      capture\      │              │     keyboard\      │
+        │      画面帧采集     │              │   键盘快捷键 + 状态  │
+        │    capture.cpp     │              │  keyboard_*.cpp    │
+        └────────┬───────────┘              └────────┬───────────┘
+                 │ cv::Mat                          │ aiming/shooting
+                 ▼                                  ▼
+        ┌────────────────────┐              ┌────────────────────┐
+        │     detector\      │──DetectBuf──▶│      mouse\        │
+        │     AI 目标检测     │              │      鼠标控制       │
+        │   dml/trt_*.cpp    │              │    mouse.cpp       │
+        └────────┬───────────┘              │  ├─ 卡尔曼预测      │
+                 │                          │  ├─ 轨迹模拟       │
+                 │ 深度推理                  │  ├─ 目标修正       │
+                 ▼                          │  └─ 速度曲线       │
+        ┌────────────────────┐              │                    │
+        │      depth\        │              │    设备驱动层       │
+        │    深度估计 + 遮罩   │              │  MouseInput.cpp    │
+        │  depth_*_trt.cpp   │              │  ┌─────┬─────┐    │
+        └────────────────────┘              │  │GHUB │Razer│    │
+                                            │  ├─────┼─────┤    │
+        ┌────────────────────┐              │  │Kmbox│Kmbox│    │
+        │     tensorrt\      │              │  │  A  │ Net │    │
+        │  引擎构建/加载/推理  │              │  ├─────┼─────┤    │
+        │    nvinf.cpp       │              │  │Ardu │RP23 │    │
+        └────────────────────┘              │  │ino  │ 50  │    │
+                                            │  ├─────┼─────┤    │
+        ┌────────────────────┐              │  │Teen │Makc │    │
+        │     overlay\       │              │  │ sy  │  u  │    │
+        │   UI 渲染 (ImGui)   │              │  └─────┴─────┘    │
+        │   overlay.cpp      │──读写──┐     │   └─ 物理鼠标移动   │
+        │  ├─ draw_ai        │        │     └────────────────────┘
+        │  ├─ draw_mouse     │        │
+        │  ├─ draw_capture   │  ┌─────┴──────────┐
+        │  ├─ draw_target    │  │     config\     │
+        │  ├─ draw_depth     │  │   config.ini    │
+        │  ├─ draw_stats     │  │   config.cpp    │
+        │  ├─ draw_debug     │  └────────────────┘
+        │  ├─ draw_buttons   │
+        │  ├─ draw_overlay   │  ┌────────────────┐
+        │  └─ Game_overlay   │  │    runtime\     │
+        └────────────────────┘  │   线程调度循环    │
+                                │ mouse_thread_*  │
+                                │ game_overlay_*  │
+                                └────────────────┘
 
-        数据流: capture → detector → mouse → 设备 → 游戏
-        控制流: keyboard / overlay → config → 各模块
+数据流: capture → detector → mouse → 设备 → 游戏
+控制流: keyboard / overlay → config → 各模块
 ```
 
-### 外部链接
+## 外部链接
 
 - [TensorRT 文档](https://docs.nvidia.com/deeplearning/tensorrt/)
 - [OpenCV 文档](https://docs.opencv.org/4.x/d1/dfb/intro.html)
