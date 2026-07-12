@@ -30,72 +30,9 @@
 #include "mouse.h"
 #include "capture.h"
 #include "Xen.h"
-
-namespace
-{
-/**
- * buildKalmanSettingsFromConfigUnlocked
- *
- * 从全局配置构建卡尔曼滤波器参数结构体（无锁版本）。
- * 调用者必须已持有 configMutex 锁。
- *
- * 配置项包括：
- *   - kalman_enabled: 卡尔曼滤波器启用开关
- *   - process_noise_position: 位置过程噪声，控制滤波器对目标位置变化的信任度
- *   - process_noise_velocity: 速度过程噪声，控制对速度变化的跟踪灵敏度
- *   - measurement_noise: 测量噪声，控制对检测结果的信任度（越大越平滑）
- *   - velocity_damping: 速度阻尼系数，抑制速度突变
- *   - max_velocity: 最大允许速度，防止异常跳变
- *   - warmup_frames: 预热帧数，在达到该帧数前滤波器输出未完全收敛
- */
-aim::AimKalmanSettings buildKalmanSettingsFromConfigUnlocked()
-{
-    aim::AimKalmanSettings settings;
-    settings.enabled = config.kalman_enabled;
-    settings.process_noise_position = static_cast<double>(config.kalman_process_noise_position);
-    settings.process_noise_velocity = static_cast<double>(config.kalman_process_noise_velocity);
-    settings.measurement_noise = static_cast<double>(config.kalman_measurement_noise);
-    settings.velocity_damping = static_cast<double>(config.kalman_velocity_damping);
-    settings.max_velocity = static_cast<double>(config.kalman_max_velocity);
-    settings.warmup_frames = config.kalman_warmup_frames;
-    return settings;
-}
-
-/**
- * buildKalmanSettingsFromConfig
- *
- * 从全局配置构建卡尔曼滤波器参数（加锁版本）。
- * 内部持有 configMutex 后委托给 buildKalmanSettingsFromConfigUnlocked。
- */
-aim::AimKalmanSettings buildKalmanSettingsFromConfig()
-{
-    std::lock_guard<std::mutex> lock(configMutex);
-    return buildKalmanSettingsFromConfigUnlocked();
-}
-
-/**
- * currentFrameIntervalSec
- *
- * 计算当前每帧的时间间隔（秒）。
- * 优先使用 captureFps 原子变量中的实时 FPS；
- * 若 FPS 无效（<=0），则回退到配置中的 capture_fps；
- * 最终将 FPS 钳位在 [15, 500] 范围内以防止极端值。
- *
- * @return 帧间隔时间（秒），例如 60 FPS 时返回约 0.0167
- */
-double currentFrameIntervalSec()
-{
-    double fps = static_cast<double>(captureFps.load());
-    if (fps <= 0.0)
-    {
-        std::lock_guard<std::mutex> lock(configMutex);
-        fps = (config.capture_fps > 0) ? static_cast<double>(config.capture_fps) : 60.0;
-    }
-
-    fps = std::clamp(fps, 15.0, 500.0);
-    return 1.0 / fps;
-}
-}
+#include "debug/pipeline_tracer.h"
+#include "runtime/speed_curve.h"
+#include "runtime/thread_loops.h"
 
 /**
  * MouseThread 构造函数
@@ -159,101 +96,18 @@ MouseThread::MouseThread(
         wind_W = config.wind_W;   // 轨迹摆动幅度
         wind_M = config.wind_M;   // 单步移动上限
         wind_D = config.wind_D;   // 微调距离阈值
+
+        refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
     }
     resetWindState();
     clearWindDebugTrail();
-    cachedKalmanSettings = buildKalmanSettingsFromConfig();
-    targetKalman.setSettings(cachedKalmanSettings);
-    targetKalman.reset();
-    lastKalmanTelemetry = {};
-    lastPredictionLookaheadSec = 0.0;
-    lastDetectionDelaySec = 0.0;
-    refreshGameProfileCache();
+
+    // 初始化 PurePursuit 控制器（默认参数，updateConfig 会覆盖）
+    purePursuitController = execution::PurePursuitController(0.85, 60.0, 25.0, 0.6, 2.0, 0.8);
+    purePursuitController.setFeedforwardCoeff(prediction_interval);
 
     // 启动后台工作线程，负责从队列中取出移动指令并发送到驱动
     moveWorker = std::thread(&MouseThread::moveWorkerLoop, this);
-}
-
-// ============================================================
-// 参数预设定义
-// ============================================================
-namespace {
-
-struct ParamPreset
-{
-    const char* name;
-    float speedCurveExponent, snapRadius, nearRadius, minSpeed, maxSpeed, snapBoost;
-    bool bezier, ema; float bezierStr, emaAlpha;
-    bool wind; float windG, windW, windM, windD;
-    float predInterval; int futurePos;
-    float kalmanProcNoise, kalmanMeasNoise, kalmanVelDamping;
-    int stableFrames; float trigDelay, trigJitter, trigHold, trigHoldJitter, fireCorr;
-};
-
-const ParamPreset kPresets[] = {
-    // name        spdCurve snap near minSpd maxSpd snapBst  bez ema bezStr emaA  wind windG windW windM windD  predInt futP kalPN  kalMN  kalVD  stblF trigDel trigJit trigHld trigHldJ fireCor
-    { "custom",     3.0f,  1.5f,25.0f,0.10f,0.10f,1.15f, 0,  0,  0.35f,0.60f,1,  18,   15,   10,   8,     0.020f,12,  40.0f, 35.0f, 0.08f, 3,    45.0f,  13.0f,  16.0f,   14.0f,    0.0f },
-    { "stable",     2.5f,  2.0f,30.0f,0.05f,0.08f,1.00f, 1,  1,  0.45f,0.35f,1,  22,   10,   7,    12,     0.015f, 8,  20.0f, 55.0f, 0.12f, 5,    55.0f,  18.0f,  20.0f,   16.0f,    0.8f },
-    { "balanced",   3.0f,  1.5f,25.0f,0.10f,0.10f,1.15f, 1,  1,  0.35f,0.60f,1,  18,   15,   10,   8,     0.025f,12,  35.0f, 40.0f, 0.08f, 3,    45.0f,  13.0f,  16.0f,   14.0f,    0.5f },
-    { "aggressive", 4.0f,  1.0f,20.0f,0.15f,0.15f,1.50f, 1,  1,  0.25f,0.75f,1,  14,   18,   12,   5,     0.035f,15,  45.0f, 35.0f, 0.06f, 2,    35.0f,  10.0f,  12.0f,   10.0f,    0.3f },
-    { "fast",       2.0f,  0.5f,15.0f,0.25f,0.30f,2.00f, 0,  0,  0.10f,0.90f,1,  8,    22,   16,   3,     0.045f,18,  55.0f, 30.0f, 0.04f, 1,    25.0f,  8.0f,   8.0f,    6.0f,     0.0f },
-};
-
-constexpr int kPresetCount = sizeof(kPresets) / sizeof(kPresets[0]);
-
-} // namespace
-
-void MouseThread::applyPreset(const char* presetName)
-{
-    const ParamPreset* p = nullptr;
-    for (int i = 0; i < kPresetCount; ++i)
-    {
-        if (std::strcmp(kPresets[i].name, presetName) == 0)
-        {
-            p = &kPresets[i];
-            break;
-        }
-    }
-    if (!p || std::strcmp(p->name, "custom") == 0) return;
-
-    // 写入 config
-    config.speedCurveExponent   = p->speedCurveExponent;
-    config.snapRadius           = p->snapRadius;
-    config.nearRadius           = p->nearRadius;
-    config.minSpeedMultiplier   = p->minSpeed;
-    config.maxSpeedMultiplier   = p->maxSpeed;
-    config.snapBoostFactor      = p->snapBoost;
-    config.bezier_enabled       = p->bezier;
-    config.bezier_strength      = p->bezierStr;
-    config.move_ema_enabled     = p->ema;
-    config.move_ema_alpha       = p->emaAlpha;
-    config.wind_mouse_enabled   = p->wind;
-    config.wind_G               = p->windG;
-    config.wind_W               = p->windW;
-    config.wind_M               = p->windM;
-    config.wind_D               = p->windD;
-    config.prediction_mode           = "linear";  // 所有预设统一用线性预测
-    config.predictionInterval       = p->predInterval;
-    config.prediction_futurePositions   = p->futurePos;
-    config.kalman_process_noise_position = p->kalmanProcNoise;
-    config.kalman_measurement_noise      = p->kalmanMeasNoise;
-    config.kalman_velocity_damping       = p->kalmanVelDamping;
-    config.trigger_stable_frames     = p->stableFrames;
-    config.trigger_random_delay_ms   = p->trigDelay;
-    config.trigger_delay_jitter_ms   = p->trigJitter;
-    config.trigger_hold_ms           = p->trigHold;
-    config.trigger_hold_jitter_ms    = p->trigHoldJitter;
-    config.fire_correction_strength  = p->fireCorr;
-    config.preset_style = presetName;
-
-    // 同步到 mouseThread
-    if (globalMouseThread)
-    {
-        globalMouseThread->updateConfig(
-            config.detection_resolution, config.fovX, config.fovY,
-            config.minSpeedMultiplier, config.maxSpeedMultiplier,
-            config.predictionInterval, config.auto_shoot, config.bScope_multiplier);
-    }
 }
 
 /**
@@ -282,6 +136,9 @@ void MouseThread::updateConfig(
     float bScope_multiplier
 )
 {
+    // 注意：调用者（keyboard_listener / mouse_thread_loop / 构造函数）必须已持有 configMutex
+    // 此处不再重复加锁，避免 std::mutex 同一线程重入导致未定义行为
+
     screen_width = screen_height = resolution;
     fov_x = fovX;  fov_y = fovY;
     min_speed_multiplier = minSpeedMultiplier;
@@ -305,7 +162,29 @@ void MouseThread::updateConfig(
     bezier_strength = config.bezier_strength;
     move_ema_enabled = config.move_ema_enabled;
     move_ema_alpha = config.move_ema_alpha;
-    predictionMode = config.prediction_mode;
+
+    // 移动控制库执行控制器（统一使用 Pure Pursuit，参数自动推导）
+    motionChangeProtection = config.motion_change_protection;
+    {
+        // 自动推导执行器参数（基于分辨率）
+        double res = static_cast<double>(resolution);
+        double autoGain = 0.85;
+        double autoDeadZone = std::max(1.0, res / 320.0);
+        double autoSmoothing = 0.8;
+        // 用户可在高级参数中覆盖，若配置值与自动值偏差很小则使用自动值
+        bool useAuto = (std::abs(config.pure_pursuit_gain - autoGain) < 0.01f &&
+                        std::abs(config.pure_pursuit_dead_zone - autoDeadZone) < 0.1f &&
+                        std::abs(config.pure_pursuit_smoothing - autoSmoothing) < 0.01f);
+        double gain = useAuto ? autoGain : static_cast<double>(config.pure_pursuit_gain);
+        double dz   = useAuto ? autoDeadZone : static_cast<double>(config.pure_pursuit_dead_zone);
+        double sm   = useAuto ? autoSmoothing : static_cast<double>(config.pure_pursuit_smoothing);
+        purePursuitController = execution::PurePursuitController(
+            gain, 60.0, 25.0, 0.6, dz, sm);
+        // 启用速度前馈：基于预测时间的前馈系数，补偿目标自身运动
+        purePursuitController.setFeedforwardCoeff(
+            static_cast<double>(config.predictionInterval));
+    }
+    purePursuitController.reset();
 
     // 开火拟人化
     trigger_stable_frames = config.trigger_stable_frames;
@@ -323,12 +202,6 @@ void MouseThread::updateConfig(
     unlock_y_strength = config.unlock_y_strength;
     fire_correction_strength = config.fire_correction_strength;
 
-    cachedKalmanSettings = buildKalmanSettingsFromConfigUnlocked();
-    targetKalman.setSettings(cachedKalmanSettings);
-    targetKalman.reset();
-    lastKalmanTelemetry = {};
-    lastPredictionLookaheadSec = 0.0;
-    lastDetectionDelaySec = 0.0;
     refreshGameProfileCache();
 }
 
@@ -365,6 +238,10 @@ void MouseThread::queueMove(int dx, int dy)
     {
         return;
     }
+
+    // Worker 线程已崩溃，丢弃移动指令避免队列无限积压
+    if (!workerRunning.load())
+        return;
 
     std::lock_guard lg(queueMtx);
     if (moveQueue.size() >= queueLimit) moveQueue.pop();  // 队列满时丢弃最旧指令
@@ -406,10 +283,12 @@ void MouseThread::moveWorkerLoop()
     }
     catch (const std::exception& e)
     {
+        workerRunning.store(false);
         std::cerr << "[Mouse] Move worker crashed: " << e.what() << std::endl;
     }
     catch (...)
     {
+        workerRunning.store(false);
         std::cerr << "[Mouse] Move worker crashed: unknown exception." << std::endl;
     }
 }
@@ -474,27 +353,13 @@ void MouseThread::bezierMoveRelative(int dx, int dy)
     int steps = std::max(3, static_cast<int>(std::ceil(dist / 6.0)));
     steps = std::min(steps, 14);
 
-    // Perlin 风格平滑噪声：相邻帧的随机值连续，避免逐帧跳跃
-    auto smoothNoise = [](int frame, double freq) -> double {
-        double t = static_cast<double>(frame) * freq * 0.1;
-        int i = static_cast<int>(std::floor(t));
-        double f = t - i;
-        f = f * f * (3.0 - 2.0 * f); // smoothstep
-        auto hash = [](int n) -> double {
-            n = (n << 13) ^ n;
-            return (1.0 - static_cast<double>(
-                (n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0);
-        };
-        return hash(i) * (1.0 - f) + hash(i + 1) * f;
-    };
+    // 使用共享的 Perlin 风格平滑噪声
+    double side1 = filters::perlinNoise(frameCounter, 1.7);
+    double side2 = filters::perlinNoise(frameCounter, 2.3);
 
     double nx = -dy / dist;
     double ny =  dx / dist;
     double offset = dist * static_cast<double>(bezier_strength) * 0.65;
-
-    // 两个独立控制点，使用不同频率的 Perlin 噪声
-    double side1 = smoothNoise(frameCounter, 1.7);
-    double side2 = smoothNoise(frameCounter, 2.3);
 
     // 三次贝塞尔: P0=(0,0), CP1, CP2, P3=(dx,dy)
     double cp1x = dx * 0.33 + nx * offset * side1;
@@ -516,10 +381,17 @@ void MouseThread::bezierMoveRelative(int dx, int dy)
         double pbx = 3.0 * pmt2 * pt * cp1x + 3.0 * pmt * pt2 * cp2x + pt3 * dx;
         double pby = 3.0 * pmt2 * pt * cp1y + 3.0 * pmt * pt2 * cp2y + pt3 * dy;
 
-        int stepX = static_cast<int>(std::round(bx - pbx));
-        int stepY = static_cast<int>(std::round(by - pby));
+        // 亚像素累积：将浮点差值累加到余量缓冲区，跨整数阈值时发出
+        bezierFracX += (bx - pbx);
+        bezierFracY += (by - pby);
+        int stepX = static_cast<int>(std::round(bezierFracX));
+        int stepY = static_cast<int>(std::round(bezierFracY));
         if (stepX != 0 || stepY != 0)
+        {
+            bezierFracX -= static_cast<double>(stepX);
+            bezierFracY -= static_cast<double>(stepY);
             queueMove(stepX, stepY);
+        }
     }
 }
 
@@ -538,10 +410,42 @@ void MouseThread::windMouseMoveRelative(int dx, int dy)
     const double baseM = std::max(1.0, wind_M);
     const double baseD = std::max(1.0, wind_D);
 
+    // ---- 算法常数（WindMouse 仿真模型经验参数）----
+    // 拉力: pullGainMin/Max 控制子步向目标的牵引力度
+    constexpr double kPullGainMin = 0.25, kPullGainMax = 0.75;
+    // 噪声: 幅度范围 [0.15, 0.85]*baseW, 衰减因子控制随机漫步平滑度
+    constexpr double kNoiseAmpMin = 0.15, kNoiseAmpMax = 0.85;
+    constexpr double kNoiseSmooth = 0.72, kNoiseBlend = 0.28;
+    // 缓动区间: 距目标 <3px 时零噪声防止终点死锁抖动; <50px 线性削弱
+    constexpr double kNoiseZeroDist = 3.0, kNoiseRampDist = 50.0;
+    // 模式振荡: blend 范围 [0.12, 0.20]; 模式融合比 0.42 (噪声+模式)
+    constexpr double kPatternBlendMin = 0.12, kPatternBlendMax = 0.20;
+    constexpr double kPatternMix = 0.42;
+    // 振荡幅度: [0.05, 0.55]*baseW; 频率随机漂移 ±0.004; 频率范围 [0.025, 0.280]
+    constexpr double kOscAmpMin = 0.05, kOscAmpMax = 0.55;
+    constexpr double kRateDrift = 0.004, kRateMin = 0.025, kRateMax = 0.280;
+    // 步调: [0.20, 0.95] 控制频率随距离变化
+    constexpr double kTempoMin = 0.20, kTempoMax = 0.95;
+    // 速度阻尼: [0.82, 0.92] 距离越近阻尼越大; 上限 [0.30, 0.70]*baseM, 最低 0.65
+    constexpr double kDragMin = 0.82, kDragMax = 0.92, kDragExtra = 0.10;
+    constexpr double kCapMin = 0.65, kCapScaleMin = 0.30, kCapScaleMax = 0.70;
+    // 相位偏移: 0.79/1.17/0.35/0.48 调谐双正弦相位差
+    constexpr double kPhaseAmpA = 0.79, kPhaseAmpB = 1.17;
+    constexpr double kPhaseOffA = 0.35, kPhaseOffB = 0.48;
+    constexpr double kOscBScale = 0.58;   // oscBX 和 oscBY 的叠加权重
+    // 子步数映射: floor(mag*0.24)+1, 最多 5 步; 终止阈值 0.20/0.12
+    constexpr double kSubstepScale = 0.24;
+    constexpr int    kSubstepMax = 5;
+    constexpr double kStopDist = 0.20, kStopVel = 0.12;
+    // 累积安全帽: 500 counts ≈ 大角度拉枪上限
+    constexpr double kCarryCap = 500.0;
+    // 黄金比例: 1.618... 用于双正弦频率偏移; 2*pi
+    constexpr double kGoldenRatio = 1.61803398875;
+    constexpr double kTwoPi = 6.28318530717958647692;
+
     // 随机分布生成器
-    std::uniform_real_distribution<double> noiseDist(-1.0, 1.0);
-    std::uniform_real_distribution<double> clipDist(0.55, 1.0);
-    constexpr double twoPi = 6.28318530717958647692;
+    static thread_local std::uniform_real_distribution<double> noiseDist(-1.0, 1.0);
+    static thread_local std::uniform_real_distribution<double> clipDist(0.55, 1.0);
 
     // 根据累积位移幅度计算子步数，步数 = max(1, min(5, floor(mag * 0.24) + 1))
     const double carryMag = std::hypot(windCarryX, windCarryY);
@@ -552,9 +456,21 @@ void MouseThread::windMouseMoveRelative(int dx, int dy)
         const double dist = std::hypot(windCarryX, windCarryY);
         const double velMag = std::hypot(windVelX, windVelY);
 
-        // 剩余距离和速度都很小时提前结束
+        // 剩余距离和速度都很小时提前结束，但先刷新已累积的亚像素余量
         if (dist < 0.20 && velMag < 0.12)
+        {
+            int flushX = static_cast<int>(std::round(windFracX));
+            int flushY = static_cast<int>(std::round(windFracY));
+            if (flushX != 0 || flushY != 0)
+            {
+                windFracX -= static_cast<double>(flushX);
+                windFracY -= static_cast<double>(flushY);
+                windCarryX -= static_cast<double>(flushX);
+                windCarryY -= static_cast<double>(flushY);
+                queueMove(flushX, flushY);
+            }
             break;
+        }
 
         // 将距离归一化到 [0, 1]，用于参数插值
         const double normDist = std::clamp(dist / baseD, 0.0, 1.0);
@@ -582,8 +498,8 @@ void MouseThread::windMouseMoveRelative(int dx, int dy)
         const double stepTempo = 0.20 + 0.95 * normDist;
         windPatternPhaseA += windPatternRateA * stepTempo;
         windPatternPhaseB += windPatternRateB * stepTempo;
-        if (windPatternPhaseA > twoPi) windPatternPhaseA = std::fmod(windPatternPhaseA, twoPi);
-        if (windPatternPhaseB > twoPi) windPatternPhaseB = std::fmod(windPatternPhaseB, twoPi);
+        if (windPatternPhaseA > kTwoPi) windPatternPhaseA = std::fmod(windPatternPhaseA, kTwoPi);
+        if (windPatternPhaseB > kTwoPi) windPatternPhaseB = std::fmod(windPatternPhaseB, kTwoPi);
 
         // 双正弦波模式振荡，使用黄金比例（1.618...）偏移产生非重复波形
         const double oscAX = std::sin(windPatternPhaseA);
@@ -643,8 +559,10 @@ void MouseThread::windMouseMoveRelative(int dx, int dy)
         queueMove(stepX, stepY);  // 投递到工作队列
     }
 
-    // 最终限幅：防止累积位移无限增长，上限 120
-    const double carryCap = 120.0;
+    // 最终限幅：防止极端情况下累积位移无限增长。
+    // 上限 500 counts ≈ 一次大角度拉枪的合理上限，超出部分等比缩小。
+    // 注意：正常帧间位移远低于此值，此处仅作安全网。
+    const double carryCap = 500.0;
     const double finalCarryMag = std::hypot(windCarryX, windCarryY);
     if (finalCarryMag > carryCap)
     {
@@ -669,9 +587,10 @@ void MouseThread::windMouseMoveRelative(int dx, int dy)
  */
 void MouseThread::resetWindState()
 {
-    constexpr double twoPi = 6.28318530717958647692;
-    std::uniform_real_distribution<double> phaseDist(0.0, twoPi);
-    std::uniform_real_distribution<double> rateDist(0.04, 0.16);
+    constexpr double kTwoPi = 6.28318530717958647692;
+    constexpr double kRateMin = 0.025;
+    std::uniform_real_distribution<double> phaseDist(0.0, kTwoPi);
+    std::uniform_real_distribution<double> rateDist(kRateMin * 1.6, kRateMin * 4.0);
 
     windCarryX = 0.0;
     windCarryY = 0.0;
@@ -687,6 +606,8 @@ void MouseThread::resetWindState()
     windPatternPhaseB = phaseDist(windRng);  // 随机初始化相位 B
     windPatternRateA = rateDist(windRng);    // 随机初始化频率 A
     windPatternRateB = rateDist(windRng);    // 随机初始化频率 B
+    bezierFracX = 0.0;                       // 重置贝塞尔亚像素余量
+    bezierFracY = 0.0;
 }
 
 /**
@@ -755,6 +676,7 @@ void MouseThread::pruneWindDebugTrailLocked(const std::chrono::steady_clock::tim
  */
 void MouseThread::refreshGameProfileCache()
 {
+    // 注意：调用者（构造函数/updateConfig）必须已持有 configMutex
     const Config::GameProfile* gpPtr = nullptr;
     auto activeIt = config.game_profiles.find(config.active_game);
     if (activeIt != config.game_profiles.end())
@@ -774,6 +696,19 @@ void MouseThread::refreshGameProfileCache()
         cachedGameFovScaled = gpPtr->fovScaled;
         cachedGameBaseFOV = gpPtr->baseFOV;
     }
+
+    // 同时缓存预测配置（避免 predict_target_position 每次加锁）
+    cachedPredictionEnabled     = config.prediction_enabled;
+    cachedPredictionInterval    = static_cast<double>(config.predictionInterval);
+    cachedPredictionTau         = static_cast<double>(config.prediction_tau);
+    cachedPredictionCompensateDelay = config.prediction_compensate_delay;
+    cachedPredictionResetTimeout    = static_cast<double>(config.prediction_reset_timeout_sec);
+
+    // 缓存速度曲线参数（避免 calculate_speed_multiplier 每帧加锁）
+    cachedSnapRadius        = config.snapRadius;
+    cachedNearRadius        = config.nearRadius;
+    cachedSpeedCurveExponent = config.speedCurveExponent;
+    cachedSnapBoostFactor   = config.snapBoostFactor;
 }
 
 /**
@@ -847,7 +782,13 @@ void MouseThread::recordMotionCompensationStep(int dx, int dy)
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(motionCompensationMutex);
     pruneMotionCompensationTrailLocked(now);
-    motionCompensationTrail.push_back({ delta.first, delta.second, now });
+
+    double cumX = motionCompensationTrail.empty() ? 0.0
+        : motionCompensationTrail.back().cumX;
+    double cumY = motionCompensationTrail.empty() ? 0.0
+        : motionCompensationTrail.back().cumY;
+    motionCompensationTrail.push_back(
+        { delta.first, delta.second, cumX + delta.first, cumY + delta.second, now });
 
     constexpr size_t maxSamples = 512;
     while (motionCompensationTrail.size() > maxSamples)
@@ -884,114 +825,44 @@ std::pair<double, double> MouseThread::getMotionCompensationSince(
     if (since.time_since_epoch().count() == 0)
         return { 0.0, 0.0 };
 
-    double x = 0.0;
-    double y = 0.0;
     std::lock_guard<std::mutex> lock(motionCompensationMutex);
-    for (const auto& sample : motionCompensationTrail)
-    {
-        if (sample.t >= since)
-        {
-            x += sample.x;
-            y += sample.y;
-        }
-    }
+    if (motionCompensationTrail.empty())
+        return { 0.0, 0.0 };
 
-    return { x, y };
-}
+    // 二分查找第一个 t >= since 的采样（前缀和 O(log n) + O(1)）
+    auto it = std::lower_bound(
+        motionCompensationTrail.begin(), motionCompensationTrail.end(), since,
+        [](const MotionCompensationSample& s, const std::chrono::steady_clock::time_point& t) {
+            return s.t < t;
+        });
+    if (it == motionCompensationTrail.end())
+        return { 0.0, 0.0 };  // 无采样 >= since
 
-/**
- * currentDetectionDelaySec
- *
- * 估算当前检测延迟（秒），即从画面捕获到目标检测完成的时间。
- *
- * 计算优先级：
- *   1. 如果 observationAgeSec 有效且 >= 0，直接使用它
- *   2. 否则根据编译配置（USE_CUDA / DML）读取检测器的最新推理时间
- *   3. 默认兜底值为 0.05 秒（50ms）
- *
- * 结果被钳位在 [0, 0.35] 秒范围内。
- *
- * @param observationAgeSec 观测数据的时间年龄（可选），若无效则使用推理时间
- * @return 检测延迟（秒）
- */
-double MouseThread::currentDetectionDelaySec(double observationAgeSec) const
-{
-    double detectionDelaySec = 0.05;
-    if (std::isfinite(observationAgeSec) && observationAgeSec >= 0.0)
-    {
-        detectionDelaySec = observationAgeSec;
-    }
-    else
-    {
-        // 使用检测器最新推理时间作为延迟估计
-#ifdef USE_CUDA
-        detectionDelaySec = trt_detector.lastInferenceTime.count() * 0.001;
-#else
-        if (dml_detector)
-            detectionDelaySec = dml_detector->lastInferenceTimeDML.count() * 0.001;
-#endif
-    }
-    if (!std::isfinite(detectionDelaySec))
-        detectionDelaySec = 0.05;
-    return std::clamp(detectionDelaySec, 0.0, 0.35);
-}
-
-/**
- * currentPredictionLookaheadSec
- *
- * 计算当前预测前瞻时间（秒）。卡尔曼滤波器将在这个时间点之后
- * 预测目标位置，以补偿检测延迟、网络延迟和运动滞后。
- *
- * 计算公式：
- *   前瞻时间 = max(0, prediction_interval)
- *              + (若补偿检测延迟开启) max(0, detectionDelaySec)
- *              + additionalPredictionMs 转换为秒
- *
- * 结果被钳位在 [0, 1.5] 秒范围内。
- *
- * @param detectionDelaySec 当前的检测延迟
- * @return 预测前瞻时间（秒）
- */
-double MouseThread::currentPredictionLookaheadSec(double detectionDelaySec) const
-{
-    double lookahead = std::max(0.0, prediction_interval);
-    bool compensateDetectionDelay = false;
-    float additionalPredictionMs = 0.0f;
-    {
-        std::lock_guard<std::mutex> lock(configMutex);
-        compensateDetectionDelay = config.kalman_compensate_detection_delay;
-        additionalPredictionMs = config.kalman_additional_prediction_ms;
-    }
-
-    if (compensateDetectionDelay)
-        lookahead += std::max(0.0, detectionDelaySec);
-    lookahead += static_cast<double>(additionalPredictionMs) * 0.001;
-    return std::clamp(lookahead, 0.0, 1.5);
+    const double totalX = motionCompensationTrail.back().cumX;
+    const double totalY = motionCompensationTrail.back().cumY;
+    const double prevX = (it != motionCompensationTrail.begin()) ? (it - 1)->cumX : 0.0;
+    const double prevY = (it != motionCompensationTrail.begin()) ? (it - 1)->cumY : 0.0;
+    return { totalX - prevX, totalY - prevY };
 }
 
 /**
  * predict_target_position
  *
- * 使用卡尔曼滤波器预测目标在当前帧的未来位置。
- * 这是自瞄精度的核心 —— 通过历史轨迹预测目标在检测延迟之后的位置。
+ * 统一预测流水线。自适应选择最优速度源，单一路径完成：
+ *   速度估计 (外部SOT > 帧间差分) → 时间校正EMA滤波 → 常速外推 → 自适应钳位
  *
- * 处理流程：
- *   1. 计算观测数据的年龄（自观测到当前的时间差）
- *   2. 首次检测或重置后，初始化状态并返回原始坐标
- *   3. 计算时间步长 dt（两次观测的时间差），钳位在 [1/500, 0.25] 秒
- *   4. 更新前存储当前速度和位置作为上一帧值
- *   5. 计算检测延迟和前瞻时间
- *   6. 调用卡尔曼滤波器 update，获得预测后的目标位置
- *   7. 对预测结果进行有限性检查，无效时回退到原始坐标
+ * 四项优化：
+ *   1. 时间校正 EMA — α = 1-exp(-dt/τ)，跨帧率一致响应
+ *   2. 自适应钳位 — 基于目标速度动态计算预测上限
+ *   3. 按轴死区 — 逐轴判定，省 hypot + 更精确
+ *   4. 热路径内联 — 无函数调用 + 零锁读取
  *
- * @param target_x        检测到的目标中心 X 坐标
- * @param target_y        检测到的目标中心 Y 坐标
- * @param observationTime 观测时间点（检测完成的时间戳）
- * @return 预测后的目标位置 (predictedX, predictedY)
+ * @param target_x,y      检测到的目标坐标
+ * @param observationTime 观测时间戳
+ * @return                预测后的目标位置
  */
 std::pair<double, double> MouseThread::predict_target_position(
-    double target_x,
-    double target_y,
+    double target_x, double target_y,
     std::chrono::steady_clock::time_point observationTime)
 {
     auto current_time = std::chrono::steady_clock::now();
@@ -1002,118 +873,138 @@ std::pair<double, double> MouseThread::predict_target_position(
     if (!std::isfinite(observationAgeSec) || observationAgeSec < 0.0)
         observationAgeSec = 0.0;
 
-    // ── 模式：关闭 ──
-    if (predictionMode == "off")
+    // ===== 预测关闭 =====
+    if (!cachedPredictionEnabled)
     {
         prev_x = target_x; prev_y = target_y;
         prev_time = observationTime;
         return { target_x, target_y };
     }
 
-    // ── 模式：仅延迟补偿 ──
-    if (predictionMode == "delay")
+    // ===== 首帧 / 目标丢失后初始化 =====
+    if (prev_time.time_since_epoch().count() == 0 || !target_detected.load())
     {
-        // 只补偿推理延迟，不做未来预测
-        double delaySec = currentDetectionDelaySec(observationAgeSec);
-        double dx = (prev_time.time_since_epoch().count() != 0)
-            ? (target_x - prev_x) : 0.0;
-        double dy = (prev_time.time_since_epoch().count() != 0)
-            ? (target_y - prev_y) : 0.0;
-        prev_x = target_x; prev_y = target_y;
         prev_time = observationTime;
-        double px = target_x + dx * delaySec / std::max(0.001, currentFrameIntervalSec());
-        double py = target_y + dy * delaySec / std::max(0.001, currentFrameIntervalSec());
-        return { px, py };
+        prev_x = target_x; prev_y = target_y;
+        prev_velocity_x = 0.0; prev_velocity_y = 0.0;
+        emaVelX.reset(0.0); emaVelY.reset(0.0);
+        emaPosX.reset(target_x); emaPosY.reset(target_y);
+        hasExternalVelocity = false;
+        return { target_x, target_y };
     }
 
-    // ── 模式：线性预测（EMA 平滑速度 + 匀速外推）──
-    if (predictionMode == "linear")
+    // ===== 帧间隔 dt =====
+    double dt = std::chrono::duration<double>(observationTime - prev_time).count();
+    if (!std::isfinite(dt) || dt <= 0.0) dt = frameIntervalSec(captureFps.load());
+    dt = std::clamp(dt, 1.0 / 500.0, 0.25);
+
+    // ===== 优化1: 时间校正 EMA 系数（dt 缓存: 仅变化 >10% 时重算） =====
+    double alphaVel, alphaPos;
+    if (std::abs(dt - cachedDtExp) / std::max(dt, 1e-9) > 0.1)
     {
-        if (prev_time.time_since_epoch().count() == 0 || !target_detected.load())
+        const double tauVel = cachedPredictionTau;
+        const double tauPos = cachedPredictionTau * 2.0;
+        cachedAlphaVel = 1.0 - std::exp(-dt / tauVel);
+        cachedAlphaPos = 1.0 - std::exp(-dt / tauPos);
+        cachedDtExp = dt;
+    }
+    alphaVel = cachedAlphaVel;
+    alphaPos = cachedAlphaPos;
+
+    // ===== 速度估计 (自动选最优源) =====
+    double velX = 0.0, velY = 0.0;  // 默认零初始化，防止 NaN 分支未赋值
+    if (hasExternalVelocity)
+    {
+        // 优先: SOT Kalman 外部速度（已是 px/sec，由 mouse_thread_loop 转换）
+        // NaN/Inf 防护：异常外部速度清零并回退到帧间差分估计
+        if (std::isfinite(externalTargetVelX) && std::isfinite(externalTargetVelY))
         {
-            prev_x = target_x; prev_y = target_y;
-            prev_time = observationTime;
-            smoothedVelX = 0.0; smoothedVelY = 0.0;
-            return { target_x, target_y };
+            velX = externalTargetVelX;
+            velY = externalTargetVelY;
+            // 同步更新 EMA 滤波器，保持状态最新；回退时无需重置
+            emaVelX.setAlpha(alphaVel);
+            emaVelY.setAlpha(alphaVel);
+            emaVelX.update(velX);
+            emaVelY.update(velY);
         }
+        else
+        {
+            hasExternalVelocity = false; // 异常数据，放弃本次外部速度
+            // velX/velY 保持 0.0，下一帧通过帧间差分恢复
+        }
+    }
+    else
+    {
+        double dispX = target_x - prev_x;
+        double dispY = target_y - prev_y;
 
-        double dt = std::chrono::duration<double>(observationTime - prev_time).count();
-        if (dt <= 0.0) dt = currentFrameIntervalSec();
-        dt = std::clamp(dt, 1.0 / 500.0, 0.25);
-
-        // EMA 平滑速度（alpha=0.25 平衡响应与抗抖）
-        double rawVx = (target_x - prev_x) / dt;
-        double rawVy = (target_y - prev_y) / dt;
-
-        // 死区过滤：位移 < 2px 视为检测框抖动，不更新速度
-        double rawDisp = std::hypot(target_x - prev_x, target_y - prev_y);
-        if (rawDisp < 2.0)
+        // ===== 优化3: 径向死区 — 位移<2px时整帧速度清零，保留对角线方向 =====
+        double rawVx, rawVy;
+        double disp = std::hypot(dispX, dispY);
+        if (disp < 2.0)
         {
             rawVx = 0.0;
             rawVy = 0.0;
         }
+        else
+        {
+            rawVx = dispX / dt;
+            rawVy = dispY / dt;
+        }
 
-        const double velAlpha = 0.25;
-        smoothedVelX = smoothedVelX * velAlpha + rawVx * (1.0 - velAlpha);
-        smoothedVelY = smoothedVelY * velAlpha + rawVy * (1.0 - velAlpha);
+        // 跳变保护: 位移异常大 → 重置
+        if (disp > 800.0)
+        {
+            prev_time = observationTime;
+            prev_x = target_x; prev_y = target_y;
+            emaVelX.reset(0.0); emaVelY.reset(0.0);
+            emaPosX.reset(target_x); emaPosY.reset(target_y);
+            hasExternalVelocity = false;
+            return { target_x, target_y };
+        }
 
-        prev_x = target_x; prev_y = target_y;
-        prev_time = observationTime;
-
-        double delaySec = currentDetectionDelaySec(observationAgeSec);
-        double lookahead = std::max(0.0, static_cast<double>(prediction_interval));
-        if (config.kalman_compensate_detection_delay)
-            lookahead += std::max(0.0, delaySec);
-        lookahead = std::clamp(lookahead, 0.0, 1.5);
-
-        double px = target_x + smoothedVelX * lookahead;
-        double py = target_y + smoothedVelY * lookahead;
-        return { px, py };
+        emaVelX.setAlpha(alphaVel);
+        emaVelY.setAlpha(alphaVel);
+        velX = emaVelX.update(rawVx);
+        velY = emaVelY.update(rawVy);
     }
 
-    // ── 模式：卡尔曼（原逻辑）──
-    targetKalman.setSettings(cachedKalmanSettings);
+    // ===== 位置滤波 =====
+    emaPosX.setAlpha(alphaPos);
+    emaPosY.setAlpha(alphaPos);
+    double filteredX = emaPosX.update(target_x);
+    double filteredY = emaPosY.update(target_y);
 
-    if (prev_time.time_since_epoch().count() == 0 || !target_detected.load())
-    {
-        prev_time = observationTime;
-        prev_x = target_x;
-        prev_y = target_y;
-        prev_velocity_x = 0.0;
-        prev_velocity_y = 0.0;
-        targetKalman.reset();
-        const double detectionDelaySec = currentDetectionDelaySec(observationAgeSec);
-        const double lookaheadSec = currentPredictionLookaheadSec(detectionDelaySec);
-        lastKalmanTelemetry = targetKalman.update(target_x, target_y, currentFrameIntervalSec(), lookaheadSec);
-        lastDetectionDelaySec = detectionDelaySec;
-        lastPredictionLookaheadSec = lookaheadSec;
-        return { target_x, target_y };
-    }
-
-    double dt = std::chrono::duration<double>(observationTime - prev_time).count();
-    if (!std::isfinite(dt) || dt <= 0.0) dt = currentFrameIntervalSec();
-    dt = std::clamp(dt, 1.0 / 500.0, 0.25);
-
-    prev_time = observationTime;
+    // ===== 存储状态 =====
+    prev_velocity_x = velX;
+    prev_velocity_y = velY;
     prev_x = target_x;
     prev_y = target_y;
+    prev_time = observationTime;
 
-    const double detectionDelaySec = currentDetectionDelaySec(observationAgeSec);
-    const double lookaheadSec = currentPredictionLookaheadSec(detectionDelaySec);
-    lastDetectionDelaySec = detectionDelaySec;
-    lastPredictionLookaheadSec = lookaheadSec;
+    // ===== 优化4: 热路径内联延迟计算 =====
+    double totalDelay = cachedPredictionInterval;
+    if (cachedPredictionCompensateDelay && observationAgeSec > 0.0)
+        totalDelay += std::clamp(observationAgeSec, 0.0, 0.35);
+    totalDelay = std::clamp(totalDelay, 0.0, 1.5);
 
-    // 执行卡尔曼滤波器更新和预测
-    lastKalmanTelemetry = targetKalman.update(target_x, target_y, dt, lookaheadSec);
-    prev_velocity_x = lastKalmanTelemetry.velocity_x;
-    prev_velocity_y = lastKalmanTelemetry.velocity_y;
+    // ===== 常速外推 =====
+    double predX = filteredX + velX * totalDelay;
+    double predY = filteredY + velY * totalDelay;
 
-    double predictedX = lastKalmanTelemetry.predicted_x;
-    double predictedY = lastKalmanTelemetry.predicted_y;
-    if (!std::isfinite(predictedX)) predictedX = target_x;  // 防 NaN 回退
-    if (!std::isfinite(predictedY)) predictedY = target_y;
+    // ===== 优化2: 自适应钳位 — 基于速度动态计算 =====
+    double speed = std::hypot(velX, velY);
+    double maxOffset = speed * totalDelay * 1.5;
+    maxOffset = std::clamp(maxOffset, 50.0, 800.0);
 
-    return { predictedX, predictedY };
+    predX = std::clamp(predX, target_x - maxOffset, target_x + maxOffset);
+    predY = std::clamp(predY, target_y - maxOffset, target_y + maxOffset);
+
+    // ===== NaN 回退 =====
+    if (!std::isfinite(predX)) predX = target_x;
+    if (!std::isfinite(predY)) predY = target_y;
+
+    return { predX, predY };
 }
 
 /**
@@ -1157,15 +1048,15 @@ void MouseThread::sendMovementToDriver(int dx, int dy)
 /**
  * moveRelative
  *
- * 简单的相对移动封装，直接将移动发送到底层驱动。
- * 不经过轨迹模拟算法或队列（直接发送），适用于不需要平滑处理的场景。
+ * 简单的相对移动封装，通过队列投递到工作线程。
+ * 与 moveMousePivot 使用同一条队列，保证移动指令全局有序。
  *
  * @param dx 水平移动量
  * @param dy 垂直移动量
  */
 void MouseThread::moveRelative(int dx, int dy)
 {
-    sendMovementToDriver(dx, dy);
+    queueMove(dx, dy);
 }
 
 /**
@@ -1201,20 +1092,70 @@ std::pair<double, double> MouseThread::calc_movement(double tx, double ty)
     double mmx = offx * degPerPxX;
     double mmy = offy * degPerPxY;
 
-    // 帧率补偿：以 30 FPS 为基准，高帧率时缩减移动量
+    // 帧率补偿：以 30 FPS 为基准，高帧率时缩减，低帧率时放大
     double corr = 1.0;
     double fps = static_cast<double>(captureFps.load());
+    fps = std::clamp(fps, 1.0, 500.0);  // 与 frameIntervalSec 一致的钳位
     if (fps > 30.0) corr = 30.0 / fps;
+    else if (fps > 0.0 && fps < 30.0) corr = 30.0 / fps;
 
-    std::pair<double, double> counts_pair;
-    {
-        std::lock_guard<std::mutex> lock(configMutex);
-        counts_pair = config.degToCounts(mmx, mmy, fov_x);  // 角度 -> 鼠标计数
-    }
-    double move_x = counts_pair.first * speed * corr;
-    double move_y = counts_pair.second * speed * corr;
+    // 使用缓存的游戏配置计算 counts（避免每帧加锁 configMutex）
+    double scale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0) ? (fov_x / cachedGameBaseFOV) : 1.0;
+    double cx = mmx / (cachedGameSens * cachedGameYaw * scale);
+    double cy = mmy / (cachedGameSens * cachedGamePitch * scale);
+    double move_x = cx * speed * corr;
+    double move_y = cy * speed * corr;
 
     return { move_x, move_y };
+}
+
+/**
+ * pixelDeltaToCounts
+ *
+ * 将像素空间的位移增量转换为鼠标计数（counts）。
+ * 这是 calc_movement 中坐标转换链的复用：像素 → 角度 → 计数。
+ * 与 calc_movement 的区别：输入是增量而非绝对坐标，且速度曲线由调用者传入。
+ *
+ * 转换步骤：
+ *   1. 像素增量 × 每像素角度 = 角度偏移（度）
+ *   2. 角度偏移 / (灵敏度 × yaw/pitch × FOV缩放) = 鼠标计数
+ *   3. 乘以速度曲线倍率和帧率修正
+ *
+ * @param dpx                水平像素增量
+ * @param dpy                垂直像素增量
+ * @param speedCurveMultiplier 速度曲线倍率（由 calculate_speed_multiplier 预计算）
+ * @return 对应的鼠标计数 (countX, countY)
+ */
+std::pair<double, double> MouseThread::pixelDeltaToCounts(
+    double dpx, double dpy, double speedCurveMultiplier)
+{
+    // 每像素对应的角度（度）
+    double degPerPxX = fov_x / std::max(1.0, screen_width);
+    double degPerPxY = fov_y / std::max(1.0, screen_height);
+
+    // 像素增量 → 角度增量
+    double degX = dpx * degPerPxX;
+    double degY = dpy * degPerPxY;
+
+    // 帧率补偿：以 30 FPS 为基准，高帧率时缩减，低帧率时放大
+    double corr = 1.0;
+    double fps = static_cast<double>(captureFps.load());
+    fps = std::clamp(fps, 1.0, 500.0);  // 与 frameIntervalSec 一致的钳位
+    if (fps > 30.0) corr = 30.0 / fps;
+    else if (fps > 0.0 && fps < 30.0) corr = 30.0 / fps;  // 低帧率时放大补偿
+
+    // FOV 缩放修正
+    double scale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0)
+        ? (fov_x / cachedGameBaseFOV) : 1.0;
+
+    // 角度 → 鼠标计数
+    double cx = degX / (cachedGameSens * cachedGameYaw * scale);
+    double cy = degY / (cachedGameSens * cachedGamePitch * scale);
+
+    cx *= speedCurveMultiplier * corr;
+    cy *= speedCurveMultiplier * corr;
+
+    return { cx, cy };
 }
 
 /**
@@ -1242,35 +1183,10 @@ std::pair<double, double> MouseThread::calc_movement(double tx, double ty)
  */
 double MouseThread::calculate_speed_multiplier(double distance)
 {
-    float snapRadius = 0.0f;
-    float nearRadius = 0.0f;
-    float speedCurveExponent = 1.0f;
-    float snapBoostFactor = 1.0f;
-    {
-        std::lock_guard<std::mutex> lock(configMutex);
-        snapRadius = config.snapRadius;
-        nearRadius = config.nearRadius;
-        speedCurveExponent = config.speedCurveExponent;
-        snapBoostFactor = config.snapBoostFactor;
-    }
-
-    // 吸附区域：目标很近时使用最小速度（精确微调）乘以加成系数
-    if (distance < snapRadius)
-        return min_speed_multiplier * snapBoostFactor;
-
-    // 近端区域：指数曲线插值
-    if (nearRadius > 0.0f && distance < nearRadius)
-    {
-        double t = distance / nearRadius;
-        double curve = 1.0 - std::pow(1.0 - t, static_cast<double>(speedCurveExponent));
-        return min_speed_multiplier +
-            (max_speed_multiplier - min_speed_multiplier) * curve;
-    }
-
-    // 远端区域：线性映射到 [min, max]
-    double norm = std::clamp(distance / max_distance, 0.0, 1.0);
-    return min_speed_multiplier +
-        (max_speed_multiplier - min_speed_multiplier) * norm;
+    return computeSpeedMultiplier(
+        distance, max_distance,
+        cachedSnapRadius, cachedNearRadius, cachedSpeedCurveExponent, cachedSnapBoostFactor,
+        min_speed_multiplier, max_speed_multiplier);
 }
 
 /**
@@ -1309,13 +1225,15 @@ bool MouseThread::check_target_in_scope(double target_x, double target_y, double
 /**
  * moveMouse
  *
- * 自瞄主入口：根据 AimbotTarget 执行一次鼠标移动。
+ * 自瞄主入口（非 pivot 路径）：根据 AimbotTarget 执行一次鼠标移动。
+ * 注意：此路径不经过 PurePursuit 控制器，也不支持运动补偿。
+ * 当前主循环使用 moveMousePivot（完整管线），此函数为简化备用路径。
  *
  * 流程：
  *   1. 锁定输入方法互斥锁
  *   2. 计算目标中心坐标
- *   3. 使用卡尔曼滤波预测目标位置
- *   4. 计算所需移动量
+ *   3. 使用 EMA 滤波预测目标位置
+ *   4. 计算所需移动量（像素→counts，含灵敏度/FOV/帧率修正）
  *   5. 投递到工作队列
  *
  * @param target 目标检测结果（包含包围盒和位置信息）
@@ -1330,18 +1248,26 @@ void MouseThread::moveMouse(const AimbotTarget& target)
 
     auto mv = calc_movement(predicted.first, predicted.second);
     queueMove(static_cast<int>(mv.first), static_cast<int>(mv.second));
+
+    // 消费外部速度标志（moveMouse 不使用 PurePursuit 前馈）
+    hasExternalVelocity = false;
 }
 
 /**
  * moveMousePivot
  *
- * 基于旋转支点（pivot）的自瞄移动。相比 moveMouse，额外支持：
+ * 基于旋转支点（pivot）的自瞄移动。数据流：
  *
- *   1. 运动补偿：如果提供了观测时间，减去自该时间以来相机移动造成的偏移，
- *      从而分离"目标自身移动"和"自瞄旋转导致的视差变化"。
- *   2. 轨迹模拟支持：如果启用了轨迹模拟，将移动指令交由
- *      windMouseMoveRelative 处理，产生类人曲线轨迹；
- *      否则直接投递到队列。
+ *   1. 运动补偿：减去自观测时间以来自瞄自身旋转造成的屏幕偏移
+ *   2. 目标预测：EMA + 常速外推，补偿检测延迟
+ *   3. 速度曲线：基于目标距离预计算三段式速度倍率
+ *   4. PurePursuit 控制器：像素空间误差 → 像素空间增量（含增益/死区/平滑/前馈）
+ *   5. 坐标转换（pixelDeltaToCounts）：像素增量 → 鼠标计数
+ *      （应用灵敏度/FOV缩放/帧率补偿/速度曲线）
+ *   6. EMA 输出平滑（可选）
+ *   7. 开火解锁 Y 轴（可选）
+ *   8. 惯性过冲模拟（可选）
+ *   9. 轨迹分发：Bezier / WindMouse / 直通
  *
  * @param pivotX        目标 pivot 点 X 坐标
  * @param pivotY        目标 pivot 点 Y 坐标
@@ -1350,30 +1276,135 @@ void MouseThread::moveMouse(const AimbotTarget& target)
 void MouseThread::moveMousePivot(
     double pivotX,
     double pivotY,
-    std::chrono::steady_clock::time_point observationTime)
+    std::chrono::steady_clock::time_point observationTime,
+    int targetClassId)
 {
     std::lock_guard lg(input_method_mutex);
+
+    // ===== 流水线追踪：Stage 1 原始目标 =====
+    PipelineFrame* pf = nullptr;
+    if (g_pipelineTracer.isEnabled())
+    {
+        pf = &g_pipelineTracer.beginFrame(static_cast<int>(screen_width));
+        pf->rawPivotX = pivotX;
+        pf->rawPivotY = pivotY;
+        pf->targetClassId = targetClassId;
+        pf->targetDetected = true;
+        pf->fpsValue = static_cast<double>(captureFps.load());
+    }
+
+    // ===== 运动补偿 =====
+    double mcDeltaX = 0.0, mcDeltaY = 0.0;
     if (observationTime.time_since_epoch().count() != 0)
     {
         // 运动补偿：减去自瞄自身旋转导致的屏幕偏移
         auto cameraDelta = getMotionCompensationSince(observationTime);
-        pivotX -= cameraDelta.first;
-        pivotY -= cameraDelta.second;
+        mcDeltaX = cameraDelta.first;
+        mcDeltaY = cameraDelta.second;
+        pivotX -= mcDeltaX;
+        pivotY -= mcDeltaY;
+    }
+
+    // ===== 流水线追踪：Stage 2 运动补偿后 =====
+    if (pf)
+    {
+        pf->mcPivotX = pivotX;
+        pf->mcPivotY = pivotY;
+        pf->mcDeltaX = mcDeltaX;
+        pf->mcDeltaY = mcDeltaY;
+        auto now = std::chrono::steady_clock::now();
+        if (observationTime.time_since_epoch().count() != 0)
+        {
+            double age = std::chrono::duration<double>(now - observationTime).count();
+            if (std::isfinite(age) && age >= 0.0)
+                pf->observationAgeSec = age;
+        }
     }
 
     auto predicted = predict_target_position(pivotX, pivotY, observationTime);
-    auto mv = calc_movement(predicted.first, predicted.second);
-    double move_x = mv.first;
-    double move_y = mv.second;
+
+    // ===== 流水线追踪：Stage 3 预测后 =====
+    if (pf)
+    {
+        pf->predX = predicted.first;
+        pf->predY = predicted.second;
+        pf->velocityX = prev_velocity_x;
+        pf->velocityY = prev_velocity_y;
+        pf->hasExternalVel = hasExternalVelocity;
+    }
+
+    // 预计算速度曲线倍率（基于目标到屏幕中心的像素距离）
+    double offx = predicted.first - center_x;
+    double offy = predicted.second - center_y;
+    double distToTarget = std::hypot(offx, offy);
+    double speedCurve = calculate_speed_multiplier(distToTarget);
+
+    // ===== 流水线追踪：Stage 4 速度曲线 =====
+    if (pf)
+    {
+        pf->distToTarget = distToTarget;
+        pf->speedMultiplier = speedCurve;
+    }
+
+    // ==================== 统一执行控制器（Pure Pursuit，像素空间） ====================
+    double move_x = 0.0, move_y = 0.0;
+    double ppDxOut = 0.0, ppDyOut = 0.0;
+    {
+        // PurePursuit 模式：基于屏幕像素坐标计算 2D 移动（输出为像素空间增量）
+        double screenCx = screen_width / 2.0;
+        double screenCy = screen_height / 2.0;
+        double targetVx = 0.0, targetVy = 0.0;
+
+        if (hasExternalVelocity)
+        {
+            // SOT Kalman 速度 (px/sec)，用于 PurePursuit 前馈补偿目标自身运动
+            targetVx = externalTargetVelX;
+            targetVy = externalTargetVelY;
+        }
+
+        double dxOut = 0.0, dyOut = 0.0;
+        purePursuitController.computeMovement2D(
+            predicted.first, predicted.second,
+            screenCx, screenCy,
+            dxOut, dyOut,
+            true, targetVx, targetVy);
+
+        ppDxOut = dxOut;
+        ppDyOut = dyOut;
+
+        // ===== 像素空间增量 → 鼠标计数（含灵敏度/FOV/帧率修正+速度曲线） =====
+        auto counts = pixelDeltaToCounts(dxOut, dyOut, speedCurve);
+        move_x = counts.first;
+        move_y = counts.second;
+
+        // 外部速度已同时用于预测和 PurePursuit 前馈，在此统一消费
+        hasExternalVelocity = false;
+    }
+
+    // ===== 流水线追踪：Stage 5 Pure Pursuit + Stage 6 Counts =====
+    if (pf)
+    {
+        pf->ppDx = ppDxOut;
+        pf->ppDy = ppDyOut;
+        pf->countsX = move_x;
+        pf->countsY = move_y;
+    }
 
     // === EMA 输出平滑 ===
     if (move_ema_enabled)
     {
         double a = static_cast<double>(move_ema_alpha);
-        move_x = prev_ema_move_x * a + move_x * (1.0 - a);
-        move_y = prev_ema_move_y * a + move_y * (1.0 - a);
+        move_x = move_x * a + prev_ema_move_x * (1.0 - a);
+        move_y = move_y * a + prev_ema_move_y * (1.0 - a);
         prev_ema_move_x = move_x;
         prev_ema_move_y = move_y;
+    }
+
+    // ===== 流水线追踪：Stage 7 EMA 平滑后 =====
+    if (pf)
+    {
+        pf->emaCountsX = move_x;
+        pf->emaCountsY = move_y;
     }
 
     // === 开火解锁 Y 轴 ===
@@ -1384,7 +1415,6 @@ void MouseThread::moveMousePivot(
             now - leftPressStartTime).count();
         if (heldMs > static_cast<long long>(unlock_y_threshold_ms))
         {
-            // ramp: 在 threshold 之后 gradual 释放 Y 轴
             double yFactor = 1.0 - static_cast<double>(unlock_y_strength);
             if (yFactor < 0.0) yFactor = 0.0;
             move_y *= yFactor;
@@ -1392,35 +1422,25 @@ void MouseThread::moveMousePivot(
     }
 
     // === 惯性过冲模拟 (Overshoot) ===
-    // 仅在长距离甩枪时偶尔触发（追踪时不触发），模拟真人惯性过头
     if (bezier_enabled || wind_mouse_enabled)
     {
         double totalDist = std::hypot(move_x, move_y);
-        // 只在大幅度拉枪（> 50px）且非贴脸追踪时触发
         if (totalDist > 50.0)
         {
-            static int osCounter = 0;
-            static int osCooldown = 0;
-            osCounter++;
-            // 冷却：每次触发后跳过 8-15 帧，避免连续抖动
             if (osCooldown > 0) { osCooldown--; }
             else
             {
-                double osRoll = [](int f) {
-                    double t = f * 0.17;
-                    int i = (int)std::floor(t);
-                    double fr = t - i; fr = fr * fr * (3.0 - 2.0 * fr);
-                    auto h = [](int n){ n=(n<<13)^n; return (1.0-((n*(n*n*15731+789221)+1376312589)&0x7fffffff)/1073741824.0); };
-                    return h(i)*(1.0-fr)+h(i+1)*fr;
-                }(osCounter);
+                std::uniform_real_distribution<double> osDist(0.0, 1.0);
+                double osRoll = osDist(windRng);
 
-                if (osRoll > 0.72)  // ~14% chance per eligible frame
+                if (osRoll > 0.86)
                 {
-                    double osFactor = 1.02 + (osRoll - 0.72) * 0.28;  // 1.02 ~ 1.08
+                    double osFactor = 1.02 + osRoll * 0.06;
                     if (osFactor > 1.08) osFactor = 1.08;
                     move_x *= osFactor;
                     move_y *= osFactor;
-                    osCooldown = 10 + static_cast<int>((osRoll + 1.0) * 10.0);  // 10-30 frame cooldown
+                    std::uniform_int_distribution<int> cooldownDist(10, 30);
+                    osCooldown = cooldownDist(windRng);
                 }
             }
         }
@@ -1428,6 +1448,13 @@ void MouseThread::moveMousePivot(
 
     int mx = static_cast<int>(std::round(move_x));
     int my = static_cast<int>(std::round(move_y));
+
+    // ===== 流水线追踪：Stage 8 最终输出 =====
+    if (pf)
+    {
+        pf->finalMx = mx;
+        pf->finalMy = my;
+    }
 
     if (mx == 0 && my == 0)
     {
@@ -1441,7 +1468,6 @@ void MouseThread::moveMousePivot(
     }
     else if (wind_mouse_enabled)
     {
-        // 使用轨迹模拟算法产生类人曲线轨迹
         windMouseMoveRelative(mx, my);
     }
     else
@@ -1511,19 +1537,31 @@ void MouseThread::pressMouse(const AimbotTarget& target)
     // === 计划延时开火 ===
     if (bScope && !mouse_pressed && !fireScheduled)
     {
-        // 生成随机延迟
-        double delay = std::max(0.0, static_cast<double>(trigger_random_delay_ms)
-            + (trigger_delay_jitter_ms > 0.0f
-                ? std::normal_distribution<double>(0.0, static_cast<double>(trigger_delay_jitter_ms))(windRng)
-                : 0.0));
+        // 对数正态分布生成反应延迟（人类反应时间服从正偏态/长尾分布）
+        // delay = baseDelay * exp(N(0, cv)), 其中 cv = jitter / baseDelay
+        // 始终为正、右偏，更贴近真实反应时间分布
+        double baseDelay = static_cast<double>(trigger_random_delay_ms);
+        double delay = baseDelay;
+        if (trigger_delay_jitter_ms > 0.0f && baseDelay > 0.0)
+        {
+            double cv = static_cast<double>(trigger_delay_jitter_ms) / baseDelay;
+            std::lognormal_distribution<double> delayDist(0.0, std::clamp(cv, 0.01, 1.5));
+            delay = baseDelay * delayDist(windRng);
+            delay = std::clamp(delay, 5.0, 500.0);  // 硬钳位防极端值
+        }
         fireScheduleTime = now + std::chrono::microseconds(static_cast<long long>(delay * 1000.0));
         fireScheduled = true;
 
-        // 生成随机保持时长
-        double hold = std::max(1.0, static_cast<double>(trigger_hold_ms)
-            + (trigger_hold_jitter_ms > 0.0f
-                ? std::normal_distribution<double>(0.0, static_cast<double>(trigger_hold_jitter_ms))(windRng)
-                : 0.0));
+        // 对数正态分布生成随机保持时长
+        double baseHold = static_cast<double>(trigger_hold_ms);
+        double hold = baseHold;
+        if (trigger_hold_jitter_ms > 0.0f && baseHold > 0.0)
+        {
+            double cv = static_cast<double>(trigger_hold_jitter_ms) / baseHold;
+            std::lognormal_distribution<double> holdDist(0.0, std::clamp(cv, 0.01, 1.5));
+            hold = baseHold * holdDist(windRng);
+            hold = std::clamp(hold, 2.0, 300.0);
+        }
         holdReleaseTime = fireScheduleTime + std::chrono::microseconds(static_cast<long long>(hold * 1000.0));
         holdScheduled = true;
     }
@@ -1534,7 +1572,8 @@ void MouseThread::pressMouse(const AimbotTarget& target)
         std::lock_guard<std::mutex> lock(inputDevicesMutex);
         if (!mouseInput) return;
 
-        // 自动急停：开火前释放 WASD
+        // 自动急停：开火前同时按下 WASD 四键，利用方向键互相抵消实现急停
+        // （KMBOX NET 发送虚拟键盘 HID 报告，与物理按键叠加后各方向抵消）
         if (auto_stop_enabled && !wasdReleased)
         {
             mouseInput->keyDown(0x1A); // W
@@ -1576,7 +1615,7 @@ void MouseThread::pressMouse(const AimbotTarget& target)
         if (mouseInput->leftUp())
             mouse_pressed = false;
 
-        // 恢复 WASD
+        // 恢复 WASD：释放虚拟按键，物理按键继续生效
         if (wasdReleased)
         {
             mouseInput->keyUp(0x1A); mouseInput->keyUp(0x04);
@@ -1599,6 +1638,11 @@ void MouseThread::pressMouse(const AimbotTarget& target)
  */
 void MouseThread::releaseMouse()
 {
+    // 取消所有待执行的开火计划，防止再次开镜时立即无条件开火
+    fireScheduled = false;
+    holdScheduled = false;
+    stableFrameCount = 0;
+
     if (mouse_pressed)
     {
         std::lock_guard<std::mutex> lock(inputDevicesMutex);
@@ -1611,7 +1655,7 @@ void MouseThread::releaseMouse()
         if (mouseInput->leftUp())
             mouse_pressed = false;
 
-        // 恢复 WASD（自动急停结束）
+        // 恢复 WASD：释放虚拟按键，物理按键继续生效（自动急停结束）
         if (wasdReleased)
         {
             mouseInput->keyUp(0x1A); // W
@@ -1626,12 +1670,11 @@ void MouseThread::releaseMouse()
 /**
  * resetPrediction
  *
- * 完全重置卡尔曼预测状态。包括：
+ * 完全重置预测状态。包括：
  *   - 清空移动指令队列
  *   - 重置上一帧时间和位置
  *   - 重置速度
- *   - 重置卡尔曼滤波器内部状态
- *   - 清空遥测数据
+ *   - 重置 EMA 滤波器状态
  *   - 清除目标检测标志
  *
  * 通常由 checkAndResetPredictions 在目标长时间丢失时自动触发。
@@ -1644,11 +1687,16 @@ void MouseThread::resetPrediction()
     prev_y = 0;
     prev_velocity_x = 0;
     prev_velocity_y = 0;
-    targetKalman.reset();
-    lastKalmanTelemetry = {};
-    lastPredictionLookaheadSec = 0.0;
-    lastDetectionDelaySec = 0.0;
+    emaVelX.reset(0.0);
+    emaVelY.reset(0.0);
+    emaPosX.reset(0.0);
+    emaPosY.reset(0.0);
+    hasExternalVelocity = false;
     target_detected.store(false);
+    // 目标切换时重置确认帧计数，避免新目标跳过确认延迟
+    stableFrameCount = 0;
+    fireScheduled = false;
+    holdScheduled = false;
 }
 
 /**
@@ -1657,20 +1705,14 @@ void MouseThread::resetPrediction()
  * 检查自上一次目标检测以来经过的时间，如果超过超时阈值，
  * 则自动重置预测状态。
  *
- * 超时时间从配置中读取（kalman_reset_timeout_sec），
- * 钳位在 [0.05, 3.0] 秒范围内。默认通常为 0.5 秒。
- *
- * 防止目标已离开但滤波器仍输出旧轨迹的问题。
+ * 超时时间从配置中读取，钳位在 [0.05, 3.0] 秒范围内。默认通常为 0.5 秒。
+ * 防止目标已离开但预测器仍输出旧轨迹的问题。
  */
 void MouseThread::checkAndResetPredictions()
 {
     auto current_time = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(current_time - last_target_time).count();
-    double resetTimeoutSec = 0.5;
-    {
-        std::lock_guard<std::mutex> lock(configMutex);
-        resetTimeoutSec = static_cast<double>(config.kalman_reset_timeout_sec);
-    }
+    double resetTimeoutSec = cachedPredictionResetTimeout;
     const double timeoutSec = std::clamp(resetTimeoutSec, 0.05, 3.0);
 
     if (elapsed > timeoutSec && target_detected.load())
@@ -1683,13 +1725,7 @@ void MouseThread::checkAndResetPredictions()
  * predictFuturePositions
  *
  * 预测未来多帧的目标位置，用于可视化显示。
- *
- * 首选方案（卡尔曼已初始化）：
- *   在 baseLookaheadSec 基础上依次累加帧间隔时间，
- *   调用卡尔曼滤波器的 predict 方法获取各帧预测位置。
- *
- * 回退方案（卡尔曼未初始化）：
- *   使用上一帧的速度进行简单的线性外推。
+ * 基于当前速度和位置进行线性外推。
  *
  * @param pivotX 当前目标 X 坐标
  * @param pivotY 当前目标 Y 坐标
@@ -1704,45 +1740,26 @@ std::vector<std::pair<double, double>> MouseThread::predictFuturePositions(doubl
 
     result.reserve(frames);
 
-    const double frame_time = currentFrameIntervalSec();
-
-    targetKalman.setSettings(cachedKalmanSettings);
-    if (targetKalman.initialized())
-    {
-        const double detectionDelaySec = (lastDetectionDelaySec > 0.0)
-            ? lastDetectionDelaySec
-            : currentDetectionDelaySec();
-        const double baseLookaheadSec = currentPredictionLookaheadSec(detectionDelaySec);
-        for (int i = 1; i <= frames; ++i)
-        {
-            const double t = baseLookaheadSec + frame_time * i;
-            auto predicted = targetKalman.predict(t);
-            if (!std::isfinite(predicted.first) || !std::isfinite(predicted.second))
-                continue;
-            result.push_back(predicted);
-        }
-
-        if (!result.empty())
-            return result;
-    }
-
-    // 回退方案：线性外推
-    auto current_time = std::chrono::steady_clock::now();
-    double dt = std::chrono::duration<double>(current_time - prev_time).count();
-
-    if (prev_time.time_since_epoch().count() == 0 || dt > 0.5)
-    {
-        return result;
-    }
+    const double frame_time = frameIntervalSec(captureFps.load());
 
     double vx = prev_velocity_x;
     double vy = prev_velocity_y;
+
+    // 检查速度是否有效 (零速度意味着目标静止，仍输出同位置)
+    auto current_time = std::chrono::steady_clock::now();
+    double dtSinceLast = std::chrono::duration<double>(current_time - prev_time).count();
+    if (prev_time.time_since_epoch().count() == 0 || dtSinceLast > 0.5)
+    {
+        return result;
+    }
 
     for (int i = 1; i <= frames; i++)
     {
         double t = frame_time * i;
         double px = pivotX + vx * t;
         double py = pivotY + vy * t;
+        if (!std::isfinite(px) || !std::isfinite(py))
+            continue;
         result.push_back({ px, py });
     }
 

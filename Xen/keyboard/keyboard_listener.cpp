@@ -1,6 +1,6 @@
 ﻿// keyboard_listener.cpp - 键盘/鼠标按键监听线程
 // 提供键盘监听功能，实时检测用户按键状态并更新程序的全局状态。
-// 支持多种按键输入源：Win32 API、外部输入设备（arduino/RP2350等）。
+// 支持多种按键输入源：Win32 API、外部输入设备（KMBOX/Makcu等）。
 // 还通过方向键提供运行时调整配置参数的功能。
 
 #define WIN32_LEAN_AND_MEAN
@@ -123,7 +123,7 @@ namespace
      * isAnyKeyPressedInternal - 检查一组按键中是否有任意一个被按下
      *
      * 支持两种按键检测方式：
-     * 1. 外部输入设备（如 Arduino/RP2350） - 通过设备接口查询
+     * 1. 外部输入设备（如 KMBOX / Makcu） - 通过设备接口查询
      * 2. Win32 API GetAsyncKeyState - 通过系统 API 实时检测
      *
      * 对于鼠标按键，如果外部输入设备支持物理按键状态，则优先使用设备检测。
@@ -264,89 +264,107 @@ void keyboardListener()
         static bool reloadPressed = false;
         if (isAnyKeyPressedWin32Only(cfg.buttonReloadConfig))
         {
-            if (!reloadPressed)
-            {
-                {
-                    std::lock_guard<std::mutex> lock(configMutex);
-                    // 保存旧配置用于对比，仅在有变化时通知相应模块
-                    const int oldDetectionResolution = config.detection_resolution;
-                    const int oldCaptureFps = config.capture_fps;
-                    const std::string oldCaptureMethod = config.capture_method;
-                    const std::string oldCaptureTarget = config.capture_target;
-                    const std::string oldCaptureWindowTitle = config.capture_window_title;
-                    const int oldMonitorIdx = config.monitor_idx;
-                    const bool oldCaptureBorders = config.capture_borders;
-                    const bool oldCaptureCursor = config.capture_cursor;
-                    const std::string oldVirtualCameraName = config.virtual_camera_name;
-                    const int oldVirtualCameraWidth = config.virtual_camera_width;
-                    const int oldVirtualCameraHeight = config.virtual_camera_heigth;
-                    const std::string oldUdpIp = config.udp_ip;
-                    const int oldUdpPort = config.udp_port;
-                    const std::string oldBackend = config.backend;
-                    const std::string oldAiModel = config.ai_model;
-                    const std::string oldInputMethod = config.input_method;
+	            if (!reloadPressed)
+	            {
+	                try
+	                {
+	                    {
+	                        std::lock_guard<std::mutex> lock(configMutex);
+	                        // 保存旧配置用于对比，仅在有变化时通知相应模块
+	                        const int oldDetectionResolution = config.detection_resolution;
+	                        const int oldCaptureFps = config.capture_fps;
+	                        const std::string oldCaptureMethod = config.capture_method;
+	                        const std::string oldCaptureTarget = config.capture_target;
+	                        const std::string oldCaptureWindowTitle = config.capture_window_title;
+	                        const int oldMonitorIdx = config.monitor_idx;
+	                        const bool oldCaptureBorders = config.capture_borders;
+	                        const bool oldCaptureCursor = config.capture_cursor;
+	                        const std::string oldVirtualCameraName = config.virtual_camera_name;
+	                        const int oldVirtualCameraWidth = config.virtual_camera_width;
+	                        const int oldVirtualCameraHeight = config.virtual_camera_height;
+	                        const std::string oldUdpIp = config.udp_ip;
+	                        const int oldUdpPort = config.udp_port;
+	                        const std::string oldBackend = config.backend;
+	                        const std::string oldAiModel = config.ai_model;
+	                        const std::string oldInputMethod = config.input_method;
 
-                    config.loadConfig();
+	                        if (!config.loadConfig())
+	                        {
+	                            std::cerr << "[Reload] Failed to parse config.ini, keeping previous configuration." << std::endl;
+	                            reloadPressed = true;
+	                            continue;
+	                        }
 
-                    // 检测分辨率变化 -> 需要重载模型
-                    if (config.detection_resolution != oldDetectionResolution)
-                    {
-                        detection_resolution_changed.store(true);
-                        detector_model_changed.store(true);
-                    }
+	                        // 检测分辨率变化 -> 需要重载模型
+	                        if (config.detection_resolution != oldDetectionResolution)
+	                        {
+	                            detection_resolution_changed.store(true);
+	                            detector_model_changed.store(true);
+	                        }
 
-                    // 帧率变化
-                    if (config.capture_fps != oldCaptureFps)
-                        capture_fps_changed.store(true);
+	                        // 帧率变化
+	                        if (config.capture_fps != oldCaptureFps)
+	                            capture_fps_changed.store(true);
 
-                    // 捕获方式或目标变化
-                    if (config.capture_method != oldCaptureMethod ||
-                        config.capture_target != oldCaptureTarget ||
-                        config.capture_window_title != oldCaptureWindowTitle ||
-                        config.monitor_idx != oldMonitorIdx ||
-                        config.virtual_camera_name != oldVirtualCameraName ||
-                        config.virtual_camera_width != oldVirtualCameraWidth ||
-                        config.virtual_camera_heigth != oldVirtualCameraHeight ||
-                        config.udp_ip != oldUdpIp ||
-                        config.udp_port != oldUdpPort)
-                    {
-                        capture_method_changed.store(true);
-                        capture_window_changed.store(true);
-                    }
+	                        // 捕获方式或目标变化
+	                        if (config.capture_method != oldCaptureMethod ||
+	                            config.capture_target != oldCaptureTarget ||
+	                            config.capture_window_title != oldCaptureWindowTitle ||
+	                            config.monitor_idx != oldMonitorIdx ||
+	                            config.virtual_camera_name != oldVirtualCameraName ||
+	                            config.virtual_camera_width != oldVirtualCameraWidth ||
+	                            config.virtual_camera_height != oldVirtualCameraHeight ||
+	                            config.udp_ip != oldUdpIp ||
+	                            config.udp_port != oldUdpPort)
+	                        {
+	                            capture_method_changed.store(true);
+	                            capture_window_changed.store(true);
+	                        }
 
-                    // 窗口边框设置变化
-                    if (config.capture_borders != oldCaptureBorders)
-                        capture_borders_changed.store(true);
+	                        // 窗口边框设置变化
+	                        if (config.capture_borders != oldCaptureBorders)
+	                            capture_borders_changed.store(true);
 
-                    // 鼠标光标设置变化
-                    if (config.capture_cursor != oldCaptureCursor)
-                        capture_cursor_changed.store(true);
+	                        // 鼠标光标设置变化
+	                        if (config.capture_cursor != oldCaptureCursor)
+	                            capture_cursor_changed.store(true);
 
-                    // AI 后端或模型变化
-                    if (config.backend != oldBackend || config.ai_model != oldAiModel)
-                        detector_model_changed.store(true);
+	                        // AI 后端或模型变化
+	                        if (config.backend != oldBackend || config.ai_model != oldAiModel)
+	                            detector_model_changed.store(true);
 
-                    // 输入方法变化
-                    if (config.input_method != oldInputMethod)
-                        input_method_changed.store(true);
+	                        // 输入方法变化
+	                        if (config.input_method != oldInputMethod)
+	                            input_method_changed.store(true);
 
-                    // 通知鼠标线程更新配置
-                    if (globalMouseThread)
-                    {
-                        globalMouseThread->updateConfig(
-                            config.detection_resolution,
-                            config.fovX,
-                            config.fovY,
-                            config.minSpeedMultiplier,
-                            config.maxSpeedMultiplier,
-                            config.predictionInterval,
-                            config.auto_shoot,
-                            config.bScope_multiplier
-                        );
-                    }
-                }
-                reloadPressed = true;
-            }
+	                        // 通知鼠标线程更新配置
+	                        if (globalMouseThread)
+	                        {
+	                            globalMouseThread->updateConfig(
+	                                config.detection_resolution,
+	                                config.fovX,
+	                                config.fovY,
+	                                config.minSpeedMultiplier,
+	                                config.maxSpeedMultiplier,
+	                                config.predictionInterval,
+	                                config.auto_shoot,
+	                                config.bScope_multiplier
+	                            );
+	                        }
+	                    }
+	                    std::cout << "[Reload] Configuration reloaded successfully." << std::endl;
+	                }
+	                catch (const std::exception& e)
+	                {
+	                    std::cerr << "[Reload] Error reloading config: " << e.what()
+	                              << ". Keeping previous configuration." << std::endl;
+	                }
+	                catch (...)
+	                {
+	                    std::cerr << "[Reload] Unknown error reloading config. Keeping previous configuration." << std::endl;
+	                }
+	                reloadPressed = true;
+	            }
         }
         else
         {
