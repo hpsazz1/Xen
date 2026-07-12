@@ -665,7 +665,7 @@ namespace makcu {
         // 这防止监控线程看到不一致的状态
         try {
             m_impl->monitoringThread = std::thread(&Impl::connectionMonitoringLoop, m_impl.get());
-        } catch (const std::system_error& e) {
+        } catch (const std::system_error&) {
             // 线程创建失败 - 清理并返回错误
             m_impl->connected.store(false, std::memory_order_release);
             m_impl->atomicStatus.store(ConnectionStatus::CONNECTION_ERROR, std::memory_order_release);

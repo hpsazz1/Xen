@@ -25,7 +25,7 @@
 
 | 指南 | 适用场景 |
 |---|---|
-| [输入方式](guides/input-methods.md) | 正在设置 Win32、雷蛇、Teensy 或其他控制路径。 |
+| [输入方式](guides/input-methods.md) | 正在设置 Win32、雷蛇、KMBOX 或其他控制路径。 |
 | [界面和 GUI 行为](guides/overlay.md) | 正在调整预览、游戏覆盖或延迟补偿。 |
 
 ## 开发

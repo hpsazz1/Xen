@@ -138,7 +138,7 @@ void draw_stats()
     // ================================================================
     // 区块一：Time Breakdown — 各阶段耗时折线图
     // ================================================================
-    if (OverlayUI::BeginSection("时间分解", "stats_section_time_breakdown"))
+    if (OverlayUI::BeginSection("耗时分解", "stats_section_time_breakdown"))
     {
         // ---- 预处理耗时折线图（范围 0-20 ms） ----
         ImGui::PlotLines("预处理", preprocess_times, IM_ARRAYSIZE(preprocess_times), index_inf, nullptr, 0.0f, 20.0f, ImVec2(0, 40));
@@ -178,7 +178,7 @@ void draw_stats()
     // ================================================================
     // 区块二：Capture FPS — 采集帧率折线图及显示器负载
     // ================================================================
-    if (OverlayUI::BeginSection("捕获帧率", "stats_section_capture_fps"))
+    if (OverlayUI::BeginSection("帧率监控", "stats_section_capture_fps"))
     {
         // ---- 帧率折线图：纵轴上限跟随显示器刷新率（有缓存时）或默认 360 FPS ----
         const float fpsPlotMax = (captureUsesMonitorRefresh && cachedMonitorRefreshHz > 1.0)
@@ -248,7 +248,7 @@ void draw_stats()
         captureSource =
             "Camera: " + config.virtual_camera_name + " (" +
             std::to_string(config.virtual_camera_width) + "x" +
-            std::to_string(config.virtual_camera_heigth) + ")";
+            std::to_string(config.virtual_camera_height) + ")";
         sourceSizeLabel = "摄像头尺寸";
     }
     else if (config.capture_method == "udp_capture")
@@ -258,7 +258,7 @@ void draw_stats()
     }
 
     // ---- 区块三：Capture Details — 采集详情与 GPU 统计 ----
-    if (OverlayUI::BeginSection("捕获详情", "stats_section_capture_details"))
+    if (OverlayUI::BeginSection("采集详情", "stats_section_capture_details"))
     {
         // ---- 采集方法、后端引擎、数据源描述 ----
         ImGui::Text("采集方式：%s", config.capture_method.c_str());

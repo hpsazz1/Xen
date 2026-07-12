@@ -11,8 +11,6 @@
 #endif
 #include "mouse.h"
 #include "MouseInput.h"
-#include "Arduino.h"
-#include "RP2350.h"
 #include "detection_buffer.h"
 #include "KmboxNetConnection.h"
 #include "KmboxAConnection.h"
@@ -35,8 +33,6 @@ extern MouseThread* globalMouseThread;
 // 各鼠标输入设备实例
 extern GhubMouse* gHub;
 extern RzctlMouse* razerControl;
-extern Arduino* arduinoSerial;
-extern RP2350* rp2350Serial;
 extern KmboxNetConnection* kmboxNetSerial;
 extern KmboxAConnection* kmboxASerial;
 extern MakcuConnection* makcuSerial;

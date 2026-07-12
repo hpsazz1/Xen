@@ -96,7 +96,7 @@ inline ImU32 LerpColor(ImU32 a, ImU32 b, float t) noexcept
  * @param controlRatio 控件宽度比例（默认 0.44）
  * @return 设置行布局信息
  */
-inline SettingRow BeginSettingRow(const char* label, float height = 58.0f, float controlRatio = 0.44f) noexcept
+inline SettingRow BeginSettingRow(const char* label, float height = 52.0f, float controlRatio = 0.44f) noexcept
 {
     ImGui::PushID(label);
 
@@ -109,12 +109,24 @@ inline SettingRow BeginSettingRow(const char* label, float height = 58.0f, float
     const float hoverAnim = AnimateFloat("##row_hover_anim", hovered ? 1.0f : 0.0f, 16.0f, 0.0f);
 
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(rowMin, rowMax, LerpColor(IM_COL32(37, 39, 44, 232), IM_COL32(45, 47, 52, 238), hoverAnim), 3.0f);
-    draw->AddRect(rowMin, rowMax, IM_COL32(255, 255, 255, static_cast<int>(6.0f + 8.0f * hoverAnim)), 3.0f, 0, 1.0f);
+    // 行背景：深色面板色 + 悬停时微亮
+    draw->AddRectFilled(rowMin, rowMax,
+        LerpColor(IM_COL32(16, 20, 30, 220), IM_COL32(22, 28, 40, 238), hoverAnim), 4.0f);
+    // 悬停时右侧边缘青色辉光
+    if (hoverAnim > 0.01f)
+    {
+        const float glowW = 3.0f;
+        const ImU32 glowCol = ImGui::ColorConvertFloat4ToU32(
+            ImVec4(0.0f, 0.90f, 1.0f, 0.12f * hoverAnim));
+        draw->AddRectFilled(ImVec2(rowMax.x - glowW, rowMin.y), rowMax, glowCol);
+    }
+    draw->AddRect(rowMin, rowMax,
+        IM_COL32(30, 38, 54, static_cast<int>(40.0f + 30.0f * hoverAnim)), 4.0f, 0, 1.0f);
 
     const ImVec2 labelSize = ImGui::CalcTextSize(label);
     const float labelY = rowMin.y + (height - labelSize.y) * 0.5f;
-    draw->AddText(ImVec2(rowMin.x + 15.0f, labelY), IM_COL32(232, 232, 236, 245), label);
+    // 标签文字使用次色调
+    draw->AddText(ImVec2(rowMin.x + 15.0f, labelY), IM_COL32(176, 184, 200, 240), label);
 
     const float maxControlW = std::min(320.0f, std::max(180.0f, avail - 205.0f));
     const float minControlW = std::min(210.0f, maxControlW);
@@ -135,28 +147,34 @@ inline void EndSettingRow(const SettingRow& row) noexcept
 }
 
 /** @brief 复选框设置行 */
-inline bool CheckboxRow(const char* label, bool* value, const char* id = "##value") noexcept
+inline bool CheckboxRow(const char* label, bool* value, const char* id = "##value", const char* tooltip = nullptr) noexcept
 {
     const SettingRow row = BeginSettingRow(label);
     const bool changed = ImGui::Checkbox(id, value);
+    if (tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", tooltip);
     EndSettingRow(row);
     return changed;
 }
 
 /** @brief 整数滑块设置行 */
-inline bool SliderIntRow(const char* label, int* value, int minValue, int maxValue, const char* format = "%d", const char* id = "##value") noexcept
+inline bool SliderIntRow(const char* label, int* value, int minValue, int maxValue, const char* format = "%d", const char* id = "##value", const char* tooltip = nullptr) noexcept
 {
     const SettingRow row = BeginSettingRow(label);
     const bool changed = ImGui::SliderInt(id, value, minValue, maxValue, format);
+    if (tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", tooltip);
     EndSettingRow(row);
     return changed;
 }
 
 /** @brief 浮点滑块设置行 */
-inline bool SliderFloatRow(const char* label, float* value, float minValue, float maxValue, const char* format = "%.3f", const char* id = "##value") noexcept
+inline bool SliderFloatRow(const char* label, float* value, float minValue, float maxValue, const char* format = "%.3f", const char* id = "##value", const char* tooltip = nullptr) noexcept
 {
     const SettingRow row = BeginSettingRow(label);
     const bool changed = ImGui::SliderFloat(id, value, minValue, maxValue, format);
+    if (tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", tooltip);
     EndSettingRow(row);
     return changed;
 }
@@ -200,13 +218,14 @@ inline bool ComboRow(const char* label, int* currentItem, const char* const item
 }
 
 /** @brief 纯文本提示行 */
-inline void TextRow(const char* text, ImU32 color = IM_COL32(255, 236, 86, 255), float height = 32.0f) noexcept
+inline void TextRow(const char* text, ImU32 color = IM_COL32(255, 180, 60, 255), float height = 30.0f) noexcept
 {
     const float avail = ImGui::GetContentRegionAvail().x;
     const ImVec2 rowMin = ImGui::GetCursorScreenPos();
     const ImVec2 rowMax(rowMin.x + avail, rowMin.y + height);
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(rowMin, rowMax, IM_COL32(37, 39, 44, 145), 3.0f);
+    draw->AddRectFilled(rowMin, rowMax, IM_COL32(16, 20, 30, 145), 4.0f);
+    draw->AddRect(rowMin, rowMax, IM_COL32(30, 38, 54, 80), 4.0f, 0, 1.0f);
     const ImVec2 textSize = ImGui::CalcTextSize(text);
     draw->AddText(ImVec2(rowMin.x + 14.0f, rowMin.y + (height - textSize.y) * 0.5f), color, text);
     ImGui::Dummy(ImVec2(avail, height + 6.0f));
@@ -229,21 +248,31 @@ inline void DrawSectionHeader(const char* label, bool subsection = false) noexce
 {
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const float avail = ImGui::GetContentRegionAvail().x;
-    const float height = subsection ? 26.0f : 29.0f;
+    const float height = subsection ? 26.0f : 30.0f;
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     const ImVec2 max(pos.x + avail, pos.y + height);
 
     ImGui::InvisibleButton(subsection ? "##subsection_header" : "##section_header", ImVec2(avail, height));
     const bool hovered = ImGui::IsItemHovered();
-    const ImU32 bg = hovered ? IM_COL32(46, 47, 52, 232) : IM_COL32(38, 39, 44, 220);
-    const ImU32 border = IM_COL32(255, 255, 255, subsection ? 30 : 42);
-    const float rounding = subsection ? 5.0f : 6.0f;
+    const ImU32 bg = hovered
+        ? IM_COL32(22, 28, 42, 240)
+        : IM_COL32(16, 22, 32, 225);
+    const ImU32 border = IM_COL32(30, 38, 54, subsection ? 100 : 140);
+    const float rounding = subsection ? 4.0f : 4.0f;
     drawList->AddRectFilled(pos, max, bg, rounding);
     drawList->AddRect(pos, max, border, rounding, 0, 1.0f);
 
+    // 左侧青色强调条
+    const float barW = 3.0f;
+    drawList->AddRectFilled(
+        ImVec2(pos.x + 2.0f, pos.y + 4.0f),
+        ImVec2(pos.x + 2.0f + barW, max.y - 4.0f),
+        IM_COL32(0, 229, 255, subsection ? 160 : 210), 2.0f);
+
     const ImVec2 textSize = ImGui::CalcTextSize(label);
     const float textY = pos.y + (height - textSize.y) * 0.5f;
-    drawList->AddText(ImVec2(pos.x + 15.0f, textY), subsection ? IM_COL32(218, 218, 222, 245) : IM_COL32(235, 235, 238, 250), label);
+    drawList->AddText(ImVec2(pos.x + 16.0f, textY),
+        subsection ? IM_COL32(200, 205, 215, 240) : IM_COL32(0, 229, 255, 245), label);
 }
 
 /** @brief 开始主体分组（设置样式和间距） */
@@ -253,10 +282,10 @@ inline void BeginBodyGroup(bool subsection = false) noexcept
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(7.0f, subsection ? 5.0f : 6.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9.0f, 5.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(47, 47, 47, 255));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(57, 57, 57, 255));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(67, 67, 67, 255));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(22, 27, 40, 255));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(28, 35, 53, 255));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(36, 48, 74, 255));
     ImGui::PushItemWidth(AdaptiveItemWidth(subsection ? 0.68f : 0.64f));
     ImGui::Dummy(ImVec2(0.0f, subsection ? 4.0f : 6.0f));
 }

@@ -1,5 +1,7 @@
 ﻿#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -146,7 +148,7 @@ struct CaptureThreadConfig
     std::string capture_window_title;    // WinRT 窗口捕获的目标窗口标题
     std::string virtual_camera_name;     // 虚拟摄像头名称
     int virtual_camera_width = 0;        // 虚拟摄像头宽度
-    int virtual_camera_heigth = 0;       // 虚拟摄像头高度
+    int virtual_camera_height = 0;       // 虚拟摄像头高度
     std::string udp_ip;                  // UDP 捕获的 IP 地址
     int udp_port = 0;                    // UDP 捕获的端口
     std::string ndi_source_name;         // NDI 源名称
@@ -184,7 +186,7 @@ CaptureThreadConfig SnapshotCaptureConfig()
     snapshot.capture_window_title = config.capture_window_title;
     snapshot.virtual_camera_name = config.virtual_camera_name;
     snapshot.virtual_camera_width = config.virtual_camera_width;
-    snapshot.virtual_camera_heigth = config.virtual_camera_heigth;
+    snapshot.virtual_camera_height = config.virtual_camera_height;
     snapshot.udp_ip = config.udp_ip;
     snapshot.udp_port = config.udp_port;
     snapshot.ndi_source_name = config.ndi_source_name;
@@ -583,7 +585,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                         std::cout << "[Capture] Using virtual camera" << std::endl;
                     return std::make_unique<VirtualCameraCapture>(
                         cfg.virtual_camera_width,
-                        cfg.virtual_camera_heigth,
+                        cfg.virtual_camera_height,
                         cfg.virtual_camera_name,
                         cfg.capture_fps,
                         cfg.verbose
@@ -1165,57 +1167,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                             {
                                 const int nearPercent = std::clamp(currentCfg.depth_mask_near_percent, 1, 100);
                                 const bool invertMask = currentCfg.depth_mask_invert;
-                                const int total = depthLocal.rows * depthLocal.cols;
-                                if (total > 0)
-                                {
-                                    int hist[256] = {};
-                                    for (int y = 0; y < depthLocal.rows; ++y)
-                                    {
-                                        const uint8_t* row = depthLocal.ptr<uint8_t>(y);
-                                        for (int x = 0; x < depthLocal.cols; ++x)
-                                            hist[row[x]]++;
-                                    }
-
-                                    const int target = std::max(1, (total * nearPercent) / 100);
-                                    int threshold = 0;
-                                    if (!invertMask)
-                                    {
-                                        int count = 0;
-                                        for (int i = 0; i < 256; ++i)
-                                        {
-                                            count += hist[i];
-                                            if (count >= target)
-                                            {
-                                                threshold = i;
-                                                break;
-                                            }
-                                        }
-                                        cv::compare(depthLocal, threshold, mask, cv::CMP_LE);
-                                    }
-                                    else
-                                    {
-                                        int count = 0;
-                                        for (int i = 255; i >= 0; --i)
-                                        {
-                                            count += hist[i];
-                                            if (count >= target)
-                                            {
-                                                threshold = i;
-                                                break;
-                                            }
-                                        }
-                                        cv::compare(depthLocal, threshold, mask, cv::CMP_GE);
-                                    }
-
-                                    const int expand = std::clamp(currentCfg.depth_mask_expand, 0, 128);
-                                    if (expand > 0)
-                                    {
-                                        const int kernelSize = 2 * expand + 1;
-                                        cv::Mat kernel = cv::getStructuringElement(
-                                            cv::MORPH_ELLIPSE, cv::Size(kernelSize, kernelSize));
-                                        cv::dilate(mask, mask, kernel);
-                                    }
-                                }
+                                mask = depth_anything::generateDepthMaskFallback(
+                                    depthLocal, nearPercent, currentCfg.depth_mask_expand, invertMask);
                             }
                         }
                     }

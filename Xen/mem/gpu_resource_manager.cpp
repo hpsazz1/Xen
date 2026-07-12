@@ -52,3 +52,13 @@ bool GPUResourceManager::setGPUExclusiveMode()
     }
     return true;
 }
+
+void GPUResourceManager::releaseReservation()
+{
+    if (reservedBuffer)
+    {
+        cudaFree(reservedBuffer);
+        reservedBuffer = nullptr;
+        reservedSize = 0;
+    }
+}

@@ -8,6 +8,7 @@
 
 // 项目配置类，存储所有可配置参数
 // 通过 config.ini 文件加载/保存，涵盖捕获、目标、鼠标、AI 等全部模块的设置
+
 class Config
 {
 public:
@@ -27,7 +28,7 @@ public:
     bool capture_cursor;
     std::string virtual_camera_name;
     int virtual_camera_width;
-    int virtual_camera_heigth;
+    int virtual_camera_height;
     std::string ndi_source_name;
 
     // ========== 目标设置 ==========
@@ -38,6 +39,27 @@ public:
     bool tracker_enabled;
     bool tracker_overlay_table_enabled;
 
+    // ========== 跟踪器参数（统一使用 motion_lib 引擎） ==========
+    bool   auto_derive_tracker_params;     // 是否根据分辨率/帧率自动推导跟踪器参数 (默认 true)
+    int    ml_confirm_threshold;         // MOT 确认帧数 (默认 2)
+    int    ml_termination_frames;        // MOT 终止帧数 (默认 8)
+    float  ml_noise_vx;                  // 速度 X 过程噪声 (默认 1.0)
+    float  ml_noise_vy;                  // 速度 Y 过程噪声 (默认 1.0)
+    float  ml_noise_w;                   // 宽度过程噪声 (默认 0.01)
+    float  ml_noise_h;                   // 高度过程噪声 (默认 0.01)
+    float  ml_measurement_stddev;        // 测量标准差 (默认 5.0)
+    int    ml_coast_frames;              // SOT 滑行帧数限制 (默认 15)
+    std::string ml_selection_strategy;   // SOT 选择策略（固定 "nearest"，历史保留）
+    float  ml_recapture_iou;             // 重捕获 IoU 阈值 (默认 0.3)
+    float  ml_recapture_distance_mult;   // 重捕获距离乘数 (默认 2.5)
+    float  ml_coast_velocity_decay;      // 滑行速度衰减 (默认 1.0)
+
+    // ========== 执行控制器参数（统一使用 Pure Pursuit） ==========
+    float  pure_pursuit_gain;            // PurePursuit 比例增益 (默认 0.85)
+    float  pure_pursuit_dead_zone;       // PurePursuit 死区 (默认 2.0)
+    float  pure_pursuit_smoothing;       // PurePursuit 平滑系数 (默认 0.8)
+    bool   motion_change_protection;     // 是否启用运动突变保护 (默认 false)
+
     // ========== FOV 与速度设置 ==========
     int fovX;
     int fovY;
@@ -45,22 +67,13 @@ public:
     float maxSpeedMultiplier;
 
     // ========== 目标预测 ==========
-    std::string prediction_mode;   // 预测模式: off / delay / linear / kalman
-    float predictionInterval;       // 预测前瞻时间（秒）
-    int prediction_futurePositions; // 预测未来位置点数
-    bool draw_futurePositions;      // 是否绘制预测点
-
-    // ========== 卡尔曼滤波（prediction_mode=kalman 时生效） ==========
-    bool kalman_enabled;
-    float kalman_process_noise_position;
-    float kalman_process_noise_velocity;
-    float kalman_measurement_noise;
-    float kalman_velocity_damping;
-    float kalman_max_velocity;
-    int kalman_warmup_frames;
-    bool kalman_compensate_detection_delay;
-    float kalman_additional_prediction_ms;
-    float kalman_reset_timeout_sec;
+    bool  prediction_enabled = true;              // 预测总开关
+    float predictionInterval;                     // 预测前瞻时间（秒）— 核心调参项
+    int   prediction_futurePositions;             // 预测未来位置点数（可视化用）
+    bool  draw_futurePositions;                   // 是否绘制预测点
+    float prediction_tau = 0.05f;                 // EMA 时间常数（秒），越小响应越快
+    bool  prediction_compensate_delay = true;     // 是否补偿检测延迟
+    float prediction_reset_timeout_sec = 0.5f;    // 预测重置超时（秒）
 
     float snapRadius;
     float nearRadius;
@@ -69,18 +82,15 @@ public:
 
     bool easynorecoil; // 简易压枪
     float easynorecoilstrength; // 压枪强度
-    std::string input_method; // 输入方式："WIN32", "GHUB", "RAZER", "ARDUINO", "RP2350", "TEENSY41", "TEENSY41_HID", "KMBOX_NET", "KMBOX_A", "MAKCU"
+    std::string input_method; // 输入方式："WIN32", "GHUB", "RAZER", "KMBOX_NET", "KMBOX_A", "MAKCU"
 
     // ========== 贝塞尔轨迹曲线 ==========
     bool bezier_enabled;       // 是否启用 Bezier 弧线轨迹
     float bezier_strength;     // Bezier 弧度大小 (0=直线, 1=大弧)
 
-    // ========== 预设风格 ==========
-    std::string preset_style;  // 参数预设风格：custom / stable / balanced / aggressive / fast
-
     // ========== 输出平滑 ==========
     bool move_ema_enabled;     // 是否启用移动输出 EMA 平滑
-    float move_ema_alpha;      // EMA 平滑系数 (0~1, 越小越平滑)
+    float move_ema_alpha;      // EMA 新值权重 (0~1, 越小越平滑, 0.3=强平滑 0.6=中等)
 
     // ========== 轨迹模拟 ==========
     bool wind_mouse_enabled;  // 是否启用轨迹模拟
@@ -88,28 +98,6 @@ public:
     float wind_W;             // 轨迹摆动幅度
     float wind_M;             // 单步移动上限
     float wind_D;             // 微调距离阈值
-
-    // ========== Arduino 串口鼠标 ==========
-    int arduino_baudrate;
-    std::string arduino_port;
-    bool arduino_16_bit_mouse;
-    bool arduino_enable_keys;
-
-    // ========== RP2350 串口鼠标 ==========
-    int rp2350_baudrate;
-    std::string rp2350_port;
-    bool rp2350_16_bit_mouse;
-    bool rp2350_enable_keys;
-
-    // ========== Teensy 4.1 RawHID 通用鼠标桥接 ==========
-    std::string teensy_hid_serial;
-    std::string teensy_hid_vid_filter;
-    std::string teensy_hid_pid_filter;
-    int teensy_hid_usage_page;
-    int teensy_hid_usage_id;
-    int teensy_hid_open_index;
-    int teensy_hid_packet_timeout_ms;
-    int teensy_hid_reconnect_interval_ms;
 
     // ========== Kmbox Net 网络串口 ==========
     std::string kmbox_net_ip;
@@ -129,10 +117,10 @@ public:
 
     // ========== 开火拟人化 ==========
     int trigger_stable_frames;       // 连续确认帧数（防误射）
-    float trigger_random_delay_ms;   // 随机开火延迟均值
-    float trigger_delay_jitter_ms;   // 随机开火延迟抖动
-    float trigger_hold_ms;           // 按键时长均值
-    float trigger_hold_jitter_ms;    // 按键时长抖动
+    float trigger_random_delay_ms;   // 反应延迟中位数 (ms, 对数正态分布)
+    float trigger_delay_jitter_ms;   // 延迟散布系数 (cv, 越大延迟越分散)
+    float trigger_hold_ms;           // 按键时长中位数 (ms, 对数正态分布)
+    float trigger_hold_jitter_ms;    // 按键时长散布系数
     float trigger_shot_cooldown_ms;  // 两发最小冷却间隔
 
     // ========== 自动急停 (仅 KMBOX_NET) ==========
@@ -275,6 +263,10 @@ public:
     int screenshot_delay;
     bool verbose;
 
+    // ========== 流水线追踪 ==========
+    bool pipeline_tracer_enabled = false;  ///< 是否启用流水线追踪
+    int  pipeline_tracer_max_frames = 300; ///< 环形缓冲最大帧数
+
     // 游戏配置文件结构体
     struct GameProfile
     {
@@ -294,6 +286,9 @@ public:
 
     bool loadConfig(const std::string& filename = "config.ini");
     bool saveConfig(const std::string& filename = "config.ini");
+
+    /** @brief 根据检测分辨率和捕获帧率自动推导跟踪器/执行器最优参数 */
+    void applyAutoDerivedTrackerParams(int detectionResolution, int captureFps);
 
     std::string joinStrings(const std::vector<std::string>& vec, const std::string& delimiter = ",");
 private:

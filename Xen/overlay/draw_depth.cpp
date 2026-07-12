@@ -112,7 +112,15 @@ void draw_depth()
     }
 
     // 获取可用的深度模型列表
-    std::vector<std::string> availableDepthModels = getAvailableDepthModels();
+    // 缓存深度模型列表（每 60 帧刷新一次，避免每帧扫描文件系统）
+    static std::vector<std::string> cachedDepthModels;
+    static int depthModelRefreshCounter = 0;
+    if (++depthModelRefreshCounter >= 60 || cachedDepthModels.empty())
+    {
+        cachedDepthModels = getAvailableDepthModels();
+        depthModelRefreshCounter = 0;
+    }
+    const std::vector<std::string>& availableDepthModels = cachedDepthModels;
     std::string selectedModel;
     bool hasModels = !availableDepthModels.empty();
 

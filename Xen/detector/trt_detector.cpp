@@ -29,6 +29,7 @@
 #include "capture.h"
 #include "capture/circle_fov.h"
 #include "scr/data_collector.h"
+#include "detection_filters.h"
 
 extern std::atomic<bool> detectionPaused;
 /*
@@ -78,120 +79,6 @@ bool tryGetPositiveDimInt(int64_t value, int* out)
     return tryGetDimInt(value, out);
 }
 
-/*
- * 判断检测框与深度掩码是否有重叠
- * 先取检测框与图像边界的交集，然后检查中心点及整个区域内是否有非零掩码像素
- *
- * @param box  检测框（像素坐标）
- * @param mask 深度掩码（CV_8UC1，非零区域表示需要抑制的目标区域）
- * @return 存在重叠返回 true，否则返回 false
- */
-bool intersectsDepthMask(const cv::Rect& box, const cv::Mat& mask)
-{
-    if (box.width <= 0 || box.height <= 0 || mask.empty() || mask.type() != CV_8UC1)
-        return false;
-
-    const cv::Rect imageBounds(0, 0, mask.cols, mask.rows);
-    const cv::Rect clipped = box & imageBounds;
-    if (clipped.width <= 0 || clipped.height <= 0)
-        return false;
-
-    const int cx = clipped.x + clipped.width / 2;
-    const int cy = clipped.y + clipped.height / 2;
-    if (mask.at<uint8_t>(cy, cx) != 0)
-        return true;
-
-    const cv::Mat roi = mask(clipped);
-    return cv::countNonZero(roi) > 0;
-}
-
-/*
- * 根据深度掩码过滤检测结果
- * 移除所有与深度抑制掩码相交的检测框。支持帧维持（hold）机制，
- * 使掩码在指定帧数内持续生效。
- * - 若 holdFrames <= 0，直接使用当前帧的深度掩码
- * - 若 holdFrames > 0，使用帧计数器保持掩码生效指定的帧数
- *
- * @param detections 待过滤的检测结果列表（会被直接修改）
- */
-void filterDetectionsByDepthMask(std::vector<Detection>& detections)
-{
-    static cv::Mat holdTtl;
-
-    if (detections.empty())
-        return;
-
-    if (!config.depth_inference_enabled || !config.depth_mask_enabled)
-    {
-        holdTtl.release();
-        return;
-    }
-
-    const int holdFrames = std::clamp(config.depth_mask_hold_frames, 0, 120);
-    cv::Mat currentMask = getCurrentDetectionSuppressionMask();
-    cv::Mat suppressionMask;
-
-    if (holdFrames <= 0)
-    {
-        holdTtl.release();
-        suppressionMask = currentMask;
-    }
-    else
-    {
-        if (!currentMask.empty() && currentMask.type() == CV_8UC1)
-        {
-            if (holdTtl.empty() || holdTtl.size() != currentMask.size())
-                holdTtl = cv::Mat::zeros(currentMask.size(), CV_16UC1);
-            cv::subtract(holdTtl, cv::Scalar(1), holdTtl);
-            holdTtl.setTo(cv::Scalar(static_cast<uint16_t>(holdFrames)), currentMask);
-        }
-        else if (!holdTtl.empty())
-        {
-            cv::subtract(holdTtl, cv::Scalar(1), holdTtl);
-        }
-
-        if (!holdTtl.empty() && cv::countNonZero(holdTtl) > 0)
-        {
-            cv::compare(holdTtl, cv::Scalar(0), suppressionMask, cv::CMP_GT);
-        }
-        else
-        {
-            suppressionMask.release();
-        }
-    }
-
-    if (suppressionMask.empty() || suppressionMask.type() != CV_8UC1)
-        return;
-
-    detections.erase(
-        std::remove_if(detections.begin(), detections.end(),
-            [&suppressionMask](const Detection& det) { return intersectsDepthMask(det.box, suppressionMask); }),
-        detections.end());
-}
-
-/*
- * 根据圆形视场角（Circle FOV）过滤检测结果
- * 移除所有中心点位于圆形有效区域之外的检测框，用于鱼眼或全景摄像头的有效区域裁剪
- *
- * @param detections 待过滤的检测结果列表（会被直接修改）
- */
-void filterDetectionsByCircleFov(std::vector<Detection>& detections)
-{
-    if (detections.empty() || !config.circle_fov_enabled)
-        return;
-
-    const cv::Size detectionSize(config.detection_resolution, config.detection_resolution);
-    detections.erase(
-        std::remove_if(detections.begin(), detections.end(),
-            [&detectionSize](const Detection& det)
-            {
-                const cv::Point2f center(
-                    static_cast<float>(det.box.x) + static_cast<float>(det.box.width) * 0.5f,
-                    static_cast<float>(det.box.y) + static_cast<float>(det.box.height) * 0.5f);
-                return !pointInsideCircleFov(center, detectionSize, config.circle_fov_radius_percent);
-            }),
-        detections.end());
-}
 } // namespace
 
 /*
@@ -925,6 +812,7 @@ std::vector<Detection> TrtDetector::detect(const cv::Mat& frame)
 
     auto tPostStart = std::chrono::steady_clock::now();
 
+    latestDetections.clear();  // 多输出模型拼接所有 head
     for (const auto& name : outputNames)
     {
         const auto itPinned = pinnedOutputBuffers.find(name);
@@ -941,15 +829,19 @@ std::vector<Detection> TrtDetector::detect(const cv::Mat& frame)
             if (outputDataFloat.size() != numElements)
                 outputDataFloat.resize(numElements);
 
+            // TODO: FP16→FP32 转换移到 GPU（CUDA kernel 或 cublas）。
+            // 当前 CPU 串行循环 ~700K 元素耗时 2-5ms/帧。
             for (size_t i = 0; i < numElements; ++i)
                 outputDataFloat[i] = __half2float(halfPtr[i]);
 
-            latestDetections = postProcess(outputDataFloat.data(), name, &lastNmsTime);
+            auto dets = postProcess(outputDataFloat.data(), name, &lastNmsTime);
+            latestDetections.insert(latestDetections.end(), dets.begin(), dets.end());
         }
         else if (dtype == nvinfer1::DataType::kFLOAT)
         {
             const float* floatPtr = reinterpret_cast<const float*>(itPinned->second);
-            latestDetections = postProcess(floatPtr, name, &lastNmsTime);
+            auto dets = postProcess(floatPtr, name, &lastNmsTime);
+            latestDetections.insert(latestDetections.end(), dets.begin(), dets.end());
         }
     }
 
@@ -1020,6 +912,8 @@ void TrtDetector::inferenceThread()
                 pendingFrameType = PendingFrameType::None;
             }
             initialize("models/" + config.ai_model);
+            // 上下文重建后 CUDA Graph 失效, 下次推理前自动重新捕获
+            cudaGraphCaptured = false;
             detection_resolution_changed.store(true);
             detector_model_changed.store(false);
         }
@@ -1033,6 +927,16 @@ void TrtDetector::inferenceThread()
             }
             else if (context)
             {
+                captureCudaGraph();
+            }
+        }
+
+        // dynamic-shape 模型: 分辨率变更时 CUDA Graph 需重新捕获
+        if (cudaGraphCaptured && detection_resolution_changed.exchange(false))
+        {
+            if (!config.fixed_input_size)
+            {
+                destroyCudaGraph();
                 captureCudaGraph();
             }
         }
@@ -1168,15 +1072,19 @@ void TrtDetector::inferenceThread()
                         if (outputDataFloat.size() != numElements)
                             outputDataFloat.resize(numElements);
 
-                        for (size_t i = 0; i < numElements; ++i)
+                        // TODO: FP16→FP32 转换移到 GPU（CUDA kernel 或 cublas）。
+            // 当前 CPU 串行循环 ~700K 元素耗时 2-5ms/帧。
+            for (size_t i = 0; i < numElements; ++i)
                             outputDataFloat[i] = __half2float(halfPtr[i]);
 
-                        latestDetections = postProcess(outputDataFloat.data(), name, &lastNmsTime);
+                        auto dets = postProcess(outputDataFloat.data(), name, &lastNmsTime);
+            latestDetections.insert(latestDetections.end(), dets.begin(), dets.end());
                     }
                     else if (dtype == nvinfer1::DataType::kFLOAT)
                     {
                         const float* floatPtr = reinterpret_cast<const float*>(itPinned->second);
-                        latestDetections = postProcess(floatPtr, name, &lastNmsTime);
+                        auto dets = postProcess(floatPtr, name, &lastNmsTime);
+            latestDetections.insert(latestDetections.end(), dets.begin(), dets.end());
                     }
                 }
 
@@ -1472,7 +1380,8 @@ std::vector<Detection> TrtDetector::postProcess(const float* output, const std::
         config.confidence_threshold,
         config.nms_threshold,
         std::max(1, config.max_detections),
-        nmsTime
+        nmsTime,
+        img_scale
     );
     filterDetectionsByDepthMask(detections);
     filterDetectionsByCircleFov(detections);

@@ -18,7 +18,6 @@
 #include <random>
 #include <array>
 #include <cwchar>
-#include <memory>
 
 #include <opencv2/core/utils/logger.hpp>
 
@@ -34,6 +33,7 @@
 #include "mem/cpu_affinity_manager.h"
 #include "runtime/thread_loops.h"
 #include "benchmarks/provider_benchmark.h"
+#include "debug/pipeline_tracer.h"
 
 #ifdef USE_CUDA
 #include "mem/gpu_resource_manager.h"
@@ -73,10 +73,6 @@ Config config;
 GhubMouse* gHub = nullptr;
 // 雷蛇鼠标设备接口（通过 rzctl 控制）
 RzctlMouse* razerControl = nullptr;
-// Arduino 串口鼠标设备接口
-Arduino* arduinoSerial = nullptr;
-// RP2350 串口鼠标设备接口
-RP2350* rp2350Serial = nullptr;
 // Kmbox Net 网络鼠标设备接口
 KmboxNetConnection* kmboxNetSerial = nullptr;
 // Kmbox A 型串口鼠标设备接口
@@ -220,31 +216,17 @@ void createInputDevices()
     if (globalMouseThread)
         globalMouseThread->setMouseInput(nullptr);
 
-    std::unique_ptr<IMouseInput> oldMouseInputOwner;
-    {
-        std::lock_guard<std::mutex> deviceLock(inputDevicesMutex);
-        oldMouseInputOwner = std::move(activeMouseInputOwner);
-        arduinoSerial = nullptr;
-        rp2350Serial = nullptr;
-        gHub = nullptr;
-        razerControl = nullptr;
-        kmboxNetSerial = nullptr;
-        kmboxASerial = nullptr;
-        makcuSerial = nullptr;
-    }
-    oldMouseInputOwner.reset();
-
+    // 先获取配置快照
     Config cfgSnapshot;
     {
         std::lock_guard<std::mutex> cfgLock(configMutex);
         cfgSnapshot = config;
     }
 
+    // 基于快照创建新设备
     auto newMouseInputOwner = CreateMouseInputDevice(cfgSnapshot);
     IMouseInput* newMouseInput = newMouseInputOwner.get();
 
-    Arduino* newArduinoSerial = newMouseInput ? newMouseInput->arduino() : nullptr;
-    RP2350* newRp2350Serial = newMouseInput ? newMouseInput->rp2350() : nullptr;
     GhubMouse* newGHub = newMouseInput ? newMouseInput->ghub() : nullptr;
     RzctlMouse* newRazerControl = newMouseInput ? newMouseInput->razer() : nullptr;
     KmboxNetConnection* newKmboxNetSerial = newMouseInput ? newMouseInput->kmboxNet() : nullptr;
@@ -255,17 +237,19 @@ void createInputDevices()
     if (!newMouseInput || !newMouseInput->isOpen())
         message += " Device not connected; input disabled until the method becomes available.";
 
+    // 原子替换：移出旧设备后立即用新设备替换（锁外析构旧设备，避免阻塞）
+    std::unique_ptr<IMouseInput> oldOwner;
     {
         std::lock_guard<std::mutex> deviceLock(inputDevicesMutex);
+        oldOwner = std::move(activeMouseInputOwner);
         activeMouseInputOwner = std::move(newMouseInputOwner);
-        arduinoSerial = newArduinoSerial;
-        rp2350Serial = newRp2350Serial;
         gHub = newGHub;
         razerControl = newRazerControl;
         kmboxNetSerial = newKmboxNetSerial;
         kmboxASerial = newKmboxASerial;
         makcuSerial = newMakcuSerial;
     }
+    // oldOwner 在此作用域结束时析构（锁外），避免串口关闭等阻塞操作持有锁
 
     std::cout << message << std::endl;
 }
@@ -305,6 +289,13 @@ int main(int argc, char** argv)
         std::cin.get();
         return -1;
     }
+
+    // 根据当前分辨率和帧率自动推导跟踪器/执行器最优参数（可通过 auto_derive_tracker_params 禁用）
+    config.applyAutoDerivedTrackerParams(config.detection_resolution, config.capture_fps);
+
+    // 同步流水线追踪器配置
+    g_pipelineTracer.setEnabled(config.pipeline_tracer_enabled);
+    g_pipelineTracer.setMaxFrames(static_cast<size_t>(config.pipeline_tracer_max_frames));
 
     // 系统资源预留管理
     CPUAffinityManager cpuManager;
@@ -425,7 +416,7 @@ int main(int argc, char** argv)
             return -1;
         }
 
-        // 创建鼠标输入设备（根据配置选择 Arduino / GHUB / 雷蛇 / Kmbox 等）
+        // 创建鼠标输入设备（根据配置选择 GHUB / 雷蛇 / Kmbox 等）
         createInputDevices();
 
         // 鼠标线程，负责 AI 预测后的鼠标移动和点击控制
@@ -535,8 +526,6 @@ int main(int argc, char** argv)
         {
             std::lock_guard<std::mutex> deviceLock(inputDevicesMutex);
             activeMouseInputOwner.reset();
-            arduinoSerial = nullptr;
-            rp2350Serial = nullptr;
             gHub = nullptr;
             razerControl = nullptr;
             kmboxNetSerial = nullptr;

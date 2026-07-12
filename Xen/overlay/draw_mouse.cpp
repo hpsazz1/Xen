@@ -27,25 +27,23 @@ int prev_fovY = config.fovY;
 // 速度倍率
 float prev_minSpeedMultiplier = config.minSpeedMultiplier;
 float prev_maxSpeedMultiplier = config.maxSpeedMultiplier;
-// 预测
-float prev_predictionInterval = config.predictionInterval;
-std::string prev_prediction_mode = config.prediction_mode;
-// 卡尔曼滤波
-bool  prev_kalman_enabled = config.kalman_enabled;
-float prev_kalman_process_noise_position = config.kalman_process_noise_position;
-float prev_kalman_process_noise_velocity = config.kalman_process_noise_velocity;
-float prev_kalman_measurement_noise = config.kalman_measurement_noise;
-float prev_kalman_velocity_damping = config.kalman_velocity_damping;
-float prev_kalman_max_velocity = config.kalman_max_velocity;
-int   prev_kalman_warmup_frames = config.kalman_warmup_frames;
-bool  prev_kalman_compensate_detection_delay = config.kalman_compensate_detection_delay;
-float prev_kalman_additional_prediction_ms = config.kalman_additional_prediction_ms;
-float prev_kalman_reset_timeout_sec = config.kalman_reset_timeout_sec;
+	// 预测
+	float prev_predictionInterval = config.predictionInterval;
+	bool  prev_prediction_enabled = config.prediction_enabled;
+	float prev_prediction_tau = config.prediction_tau;
+	bool  prev_prediction_compensate_delay = config.prediction_compensate_delay;
+	float prev_prediction_reset_timeout_sec = config.prediction_reset_timeout_sec;
 // 目标修正（吸附半径、近距半径、速度曲线、吸附增益）
 float prev_snapRadius = config.snapRadius;
 float prev_nearRadius = config.nearRadius;
 float prev_speedCurveExponent = config.speedCurveExponent;
 float prev_snapBoostFactor = config.snapBoostFactor;
+
+// 执行控制器（Pure Pursuit / 运动突变保护）
+float prev_pure_pursuit_gain = config.pure_pursuit_gain;
+float prev_pure_pursuit_dead_zone = config.pure_pursuit_dead_zone;
+float prev_pure_pursuit_smoothing = config.pure_pursuit_smoothing;
+bool  prev_motion_change_protection = config.motion_change_protection;
 
 // 轨迹模拟
 bool  prev_wind_mouse_enabled = config.wind_mouse_enabled;
@@ -107,7 +105,7 @@ static void draw_mouse_page(MouseSettingsPage page)
 {
     // ========== FOV（视野）设置 ==========
     if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
-        OverlayUI::BeginSection("视野(FOV)", "mouse_section_fov"))
+        OverlayUI::BeginSection("视野范围", "mouse_section_fov"))
     {
         OverlayUI::SliderIntRow("水平视野(FOV X)", &config.fovX, 10, 120);
         OverlayUI::SliderIntRow("垂直视野(FOV Y)", &config.fovY, 10, 120);
@@ -120,60 +118,77 @@ static void draw_mouse_page(MouseSettingsPage page)
     {
         OverlayUI::SliderFloatRow("最小速度倍率", &config.minSpeedMultiplier, 0.1f, 5.0f, "%.1f");
         OverlayUI::SliderFloatRow("最大速度倍率", &config.maxSpeedMultiplier, 0.1f, 5.0f, "%.1f");
+        // 确保 min ≤ max，防止速度曲线计算异常
+        if (config.minSpeedMultiplier > config.maxSpeedMultiplier)
+            config.maxSpeedMultiplier = config.minSpeedMultiplier;
         OverlayUI::EndSection();
     }
 
     // ========== Prediction（预测）设置 ==========
     if (shouldDrawMousePage(page, MouseSettingsPage::Prediction) &&
-        OverlayUI::BeginSection("预测模式", "mouse_section_prediction_mode"))
+        OverlayUI::BeginSection("预判参数", "mouse_section_prediction"))
     {
-        const char* predModes[]  = { "关闭", "仅延迟补偿", "线性预测", "卡尔曼滤波" };
-        const char* predKeys[]   = { "off", "delay", "linear", "kalman" };
-        int curMode = 0;
-        for (int i = 0; i < 4; ++i)
-            if (config.prediction_mode == predKeys[i]) { curMode = i; break; }
-
-        if (OverlayUI::ComboRow("预测模式", &curMode, predModes, 4))
-        {
-            config.prediction_mode = predKeys[curMode];
+        if (OverlayUI::CheckboxRow("启用预测", &config.prediction_enabled, "##pred_enabled",
+            "预测总开关。\n"
+            "开启：根据目标运动轨迹推算未来位置，提前瞄准\n"
+            "关闭：直接瞄准当前检测位置，无提前量\n"
+            "推荐：始终开启"))
             OverlayConfig_MarkDirty();
-        }
+
+        if (!config.prediction_enabled) ImGui::BeginDisabled();
+
+        OverlayUI::SliderFloatRow("预测前瞻(s)", &config.predictionInterval, 0.0f, 0.12f, "%.3f", "##pred_interval",
+            "预测前瞻时间 — 核心调参项\n"
+            "沿目标运动方向外推的最大时间。\n"
+            "增大 → 打更远的提前量，适合快速移动/远距离目标\n"
+            "减小 → 更保守的瞄准，适合近距离/慢速目标\n"
+            "推荐：0.015~0.035s（游戏不同需微调）");
+
+        OverlayUI::SliderFloatRow("响应时间常数(s)", &config.prediction_tau, 0.005f, 0.50f, "%.3f", "##pred_tau",
+            "EMA 滤波器的时间常数 — 控制速度和平滑的响应速度\n"
+            "减小 → 响应更快，紧跟目标急停/变向，但可能更抖\n"
+            "增大 → 更平滑稳定，但目标突然变向时会短暂滞后\n"
+            "推荐：stable=0.08 / balanced=0.05 / aggressive=0.03 / fast=0.02\n"
+            "注意：此值自动适配帧率，无需担心 FPS 变化");
+
+        OverlayUI::CheckboxRow("补偿检测延迟", &config.prediction_compensate_delay, "##pred_comp_delay",
+            "是否额外补偿 YOLO 推理延迟（~20-50ms）。\n"
+            "开启：预测时间 = 前瞻 + 推理延迟，更精确但预测距离更大\n"
+            "关闭：仅使用前瞻时间，更保守\n"
+            "推荐：开启（对高 FPS 设备效果显著）");
+
+        OverlayUI::SliderFloatRow("重置超时(s)", &config.prediction_reset_timeout_sec, 0.05f, 3.0f, "%.2f", "##pred_reset",
+            "目标短暂丢失后，保留预测状态的最大时间。\n"
+            "减小 → 目标消失后快速重置，防止预测\"鬼影\"\n"
+            "增大 → 短暂遮挡/丢帧时保持预测连续性\n"
+            "推荐：0.3~0.8s");
+
+        OverlayUI::SliderIntRow("预测点数", &config.prediction_futurePositions, 4, 30, "%d", "##pred_future_pos",
+            "可视化预测轨迹的点数（仅影响显示）。\n"
+            "点数越多 → 屏幕上显示的预测线越长\n"
+            "推荐：8~15");
+
+        OverlayUI::CheckboxRow("绘制预测点", &config.draw_futurePositions, "##pred_draw",
+            "是否在覆盖层上绘制预测轨迹线。\n"
+            "开启：绿色圆点显示未来预测位置\n"
+            "关闭：隐藏预测可视化\n"
+            "推荐：开启（方便观察预测效果）");
+
+        if (!config.prediction_enabled) { ImGui::EndDisabled(); }
+
         OverlayUI::EndSection();
     }
 
-    // ========== 预测参数 ==========
-    if (shouldDrawMousePage(page, MouseSettingsPage::Prediction) &&
-        OverlayUI::BeginSection("预测参数", "mouse_section_prediction"))
+    // ========== 跟踪强度 ==========
+    if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
+        OverlayUI::BeginSection("跟踪强度", "mouse_section_tracking_strength"))
     {
-        bool predActive = (config.prediction_mode != "off");
-
-        OverlayUI::SliderFloatRow("预测前瞻(s)", &config.predictionInterval, 0.0f, 0.12f, "%.3f");
-        if (!predActive) ImGui::BeginDisabled();
-
-        OverlayUI::SliderIntRow("预测点数", &config.prediction_futurePositions, 4, 30);
-        OverlayUI::CheckboxRow("绘制预测点", &config.draw_futurePositions);
-
-        if (!predActive) { ImGui::EndDisabled(); }
-
-        OverlayUI::EndSection();
-    }
-
-    // ========== 卡尔曼高级参数（仅在 kalman 模式显示）==========
-    if (config.prediction_mode == "kalman" &&
-        shouldDrawMousePage(page, MouseSettingsPage::Prediction) &&
-        OverlayUI::BeginSection("卡尔曼滤波", "mouse_section_kalman"))
-    {
-        if (OverlayUI::CheckboxRow("启用卡尔曼滤波", &config.kalman_enabled))
-            OverlayConfig_MarkDirty();
-        OverlayUI::SliderFloatRow("过程噪声(位置)", &config.kalman_process_noise_position, 0.001f, 5000.0f, "%.1f");
-        OverlayUI::SliderFloatRow("过程噪声(速度)", &config.kalman_process_noise_velocity, 0.001f, 50000.0f, "%.1f");
-        OverlayUI::SliderFloatRow("测量噪声", &config.kalman_measurement_noise, 0.001f, 5000.0f, "%.1f");
-        OverlayUI::SliderFloatRow("速度阻尼", &config.kalman_velocity_damping, 0.0f, 3.0f, "%.3f");
-        OverlayUI::SliderFloatRow("最大速度", &config.kalman_max_velocity, 100.0f, 60000.0f, "%.0f");
-        OverlayUI::SliderIntRow("预热帧数", &config.kalman_warmup_frames, 0, 20);
-        OverlayUI::CheckboxRow("补偿推理延迟", &config.kalman_compensate_detection_delay);
-        OverlayUI::SliderFloatRow("额外预测(ms)", &config.kalman_additional_prediction_ms, -80.0f, 120.0f, "%.1f");
-        OverlayUI::SliderFloatRow("重置超时(秒)", &config.kalman_reset_timeout_sec, 0.05f, 3.0f, "%.2f");
+        OverlayUI::SliderFloatRow("跟踪强度", &config.pure_pursuit_gain, 0.1f, 3.0f, "%.2f",
+            "##track_strength",
+            "控制鼠标跟踪目标的力度。\n"
+            "增大 → 更激进地咬住目标，适合快速移动目标\n"
+            "减小 → 更平滑柔和，适合慢速/远距离目标\n"
+            "推荐：0.70~1.00（自动根据分辨率推导默认值）");
         OverlayUI::EndSection();
     }
 
@@ -196,7 +211,7 @@ static void draw_mouse_page(MouseSettingsPage page)
     // ========== Game Profile（游戏配置文件）设置 ==========
     // 每个游戏可以独立保存灵敏度、Yaw、Pitch、FOV 缩放等参数
     if (shouldDrawMousePage(page, MouseSettingsPage::Profiles) &&
-        OverlayUI::BeginSection("游戏配置文件", "mouse_section_game_profile"))
+        OverlayUI::BeginSection("游戏配置", "mouse_section_game_profile"))
     {
         // 收集所有配置文件名并排序
         std::vector<std::string> profile_names;
@@ -224,7 +239,8 @@ static void draw_mouse_page(MouseSettingsPage page)
         {
             config.active_game = profile_names[selected_index];
             OverlayConfig_MarkDirty();
-            globalMouseThread->updateConfig(
+            if (globalMouseThread)
+                globalMouseThread->updateConfig(
                 config.detection_resolution,
                 config.fovX,
                 config.fovY,
@@ -289,7 +305,7 @@ static void draw_mouse_page(MouseSettingsPage page)
     // ========== Manage Profiles（管理配置文件） ==========
     // 支持添加新配置文件、删除已有配置
     if (shouldDrawMousePage(page, MouseSettingsPage::Profiles) &&
-        OverlayUI::BeginSection("管理配置文件", "mouse_section_manage_profiles"))
+        OverlayUI::BeginSection("配置管理", "mouse_section_manage_profiles"))
     {
         // 添加新配置文件的输入框 + 按钮
         static char new_profile_name[64] = "";
@@ -393,15 +409,15 @@ static void draw_mouse_page(MouseSettingsPage page)
             OverlayUI::EndSection();
         }
 
-        if (showShooting && OverlayUI::BeginSection("开火拟人化", "mouse_section_trigger_humanize"))
+        if (showShooting && OverlayUI::BeginSection("射击拟人化", "mouse_section_trigger_humanize"))
         {
             if (!config.auto_shoot) ImGui::BeginDisabled();
             OverlayUI::SliderIntRow("确认帧数", &config.trigger_stable_frames, 0, 10);
-            OverlayUI::SliderFloatRow("反应延迟(ms)", &config.trigger_random_delay_ms, 0.0f, 200.0f, "%.0f");
-            OverlayUI::SliderFloatRow("延迟抖动(ms)", &config.trigger_delay_jitter_ms, 0.0f, 80.0f, "%.0f");
-            OverlayUI::SliderFloatRow("按下时长(ms)", &config.trigger_hold_ms, 1.0f, 100.0f, "%.0f");
-            OverlayUI::SliderFloatRow("时长抖动(ms)", &config.trigger_hold_jitter_ms, 0.0f, 50.0f, "%.0f");
-            OverlayUI::SliderFloatRow("冷却间隔(ms)", &config.trigger_shot_cooldown_ms, 0.0f, 300.0f, "%.0f");
+            OverlayUI::SliderFloatRow("反应延迟(ms)", &config.trigger_random_delay_ms, 0.0f, 500.0f, "%.0f");
+            OverlayUI::SliderFloatRow("延迟抖动(ms)", &config.trigger_delay_jitter_ms, 0.0f, 200.0f, "%.0f");
+            OverlayUI::SliderFloatRow("按下时长(ms)", &config.trigger_hold_ms, 1.0f, 300.0f, "%.0f");
+            OverlayUI::SliderFloatRow("时长抖动(ms)", &config.trigger_hold_jitter_ms, 0.0f, 150.0f, "%.0f");
+            OverlayUI::SliderFloatRow("冷却间隔(ms)", &config.trigger_shot_cooldown_ms, 0.0f, 500.0f, "%.0f");
             if (!config.auto_shoot) ImGui::EndDisabled();
             OverlayUI::EndSection();
         }
@@ -409,7 +425,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         // ── 战术子页：简易压枪 + 自动急停 + 解锁Y + 射击修正（均独立于 auto_shoot）──
         bool showTactical = (assistTab == AssistSubPage::Tactical);
 
-        if (showTactical && OverlayUI::BeginSection("简易压枪", "mouse_section_easy_no_recoil"))
+        if (showTactical && OverlayUI::BeginSection("后坐力控制", "mouse_section_easy_no_recoil"))
         {
             if (OverlayUI::CheckboxRow("简易压枪", &config.easynorecoil)) OverlayConfig_MarkDirty();
             if (!config.easynorecoil) ImGui::BeginDisabled();
@@ -421,14 +437,14 @@ static void draw_mouse_page(MouseSettingsPage page)
             OverlayUI::EndSection();
         }
 
-        if (showTactical && OverlayUI::BeginSection("自动急停 (KMBOX)", "mouse_section_auto_stop"))
+        if (showTactical && OverlayUI::BeginSection("自动急停", "mouse_section_auto_stop"))
         {
             OverlayUI::CheckboxRow("启用自动急停", &config.auto_stop_enabled);
             OverlayUI::SliderFloatRow("急停保持(ms)", &config.auto_stop_hold_ms, 20.0f, 200.0f, "%.0f");
             OverlayUI::EndSection();
         }
 
-        if (showTactical && OverlayUI::BeginSection("开火解锁Y轴", "mouse_section_unlock_y"))
+        if (showTactical && OverlayUI::BeginSection("解锁Y轴", "mouse_section_unlock_y"))
         {
             OverlayUI::CheckboxRow("启用解锁Y轴", &config.unlock_y_enabled);
             OverlayUI::SliderFloatRow("解锁阈值(ms)", &config.unlock_y_threshold_ms, 0.0f, 500.0f, "%.0f");
@@ -440,28 +456,6 @@ static void draw_mouse_page(MouseSettingsPage page)
         {
             OverlayUI::SliderFloatRow("修正强度", &config.fire_correction_strength, 0.0f, 3.0f, "%.2f");
             OverlayUI::EndSection();
-        }
-    }
-
-    // ========== 参数预设（一键调参，仅配置页和全部页可见） ==========
-    if (shouldDrawMousePage(page, MouseSettingsPage::Profiles))
-    {
-        if (OverlayUI::BeginSection("参数预设", "mouse_section_presets"))
-    {
-        const char* presetItems[] = { "自定义", "稳定", "均衡", "激进", "快速" };
-        const char* presetKeys[]  = { "custom", "stable", "balanced", "aggressive", "fast" };
-        int curIdx = 0;
-        for (int i = 0; i < 5; ++i)
-            if (config.preset_style == presetKeys[i]) { curIdx = i; break; }
-
-        if (OverlayUI::ComboRow("预设风格", &curIdx, presetItems, 5))
-        {
-            config.preset_style = presetKeys[curIdx];
-            MouseThread::applyPreset(presetKeys[curIdx]);
-            OverlayConfig_MarkDirty();
-        }
-
-        OverlayUI::EndSection();
         }
     }
 
@@ -482,25 +476,25 @@ static void draw_mouse_page(MouseSettingsPage page)
         }
 
         // G - 鼠标移速（越大移向目标越快越直）
-        if (OverlayUI::SliderFloatRow("鼠标移速（越大移向目标越快越直）", &config.wind_G, 4.00f, 40.00f, "%.2f"))
+        if (OverlayUI::SliderFloatRow("鼠标移速（越大移向目标越快越直）", &config.wind_G, 0.05f, 50.0f, "%.2f"))
         {
             OverlayConfig_MarkDirty();
         }
 
         // W - 轨迹摆动（越小移动路径越直）
-        if (OverlayUI::SliderFloatRow("轨迹摆动（越小移动路径越直）", &config.wind_W, 1.00f, 40.00f, "%.2f"))
+        if (OverlayUI::SliderFloatRow("轨迹摆动（越小移动路径越直）", &config.wind_W, 0.0f, 80.0f, "%.2f"))
         {
             OverlayConfig_MarkDirty();
         }
 
         // M - 单步上限（每帧最大移动像素数）
-        if (OverlayUI::SliderFloatRow("单步上限（每帧最大移动像素数）", &config.wind_M, 1.00f, 40.00f, "%.2f"))
+        if (OverlayUI::SliderFloatRow("单步上限（每帧最大移动像素数）", &config.wind_M, 1.00f, 80.00f, "%.2f"))
         {
             OverlayConfig_MarkDirty();
         }
 
         // D - 微调距离（靠近目标后切精细微调模式的距离）
-        if (OverlayUI::SliderFloatRow("微调距离（靠近目标后切精细模式的距离）", &config.wind_D, 1.00f, 40.00f, "%.2f"))
+        if (OverlayUI::SliderFloatRow("微调距离（靠近目标后切精细模式的距离）", &config.wind_D, 1.00f, 80.00f, "%.2f"))
         {
             OverlayConfig_MarkDirty();
         }
@@ -541,12 +535,11 @@ static void draw_mouse_page(MouseSettingsPage page)
     }
 
     // ========== Input Method（输入法）设置 ==========
-    // 支持多种鼠标输入方式：WIN32 / GHUB / RAZER / ARDUINO / RP2350 /
-    // TEENSY41 / TEENSY41_HID / KMBOX_NET / KMBOX_A / MAKCU
+    // 支持多种鼠标输入方式：WIN32 / GHUB / RAZER / KMBOX_NET / KMBOX_A / MAKCU
     if (shouldDrawMousePage(page, MouseSettingsPage::Input) &&
-        OverlayUI::BeginSection("输入方式", "mouse_section_input_method"))
+        OverlayUI::BeginSection("设备连接", "mouse_section_input_method"))
     {
-        std::vector<std::string> input_methods = { "WIN32", "GHUB", "RAZER", "ARDUINO", "RP2350", "TEENSY41", "TEENSY41_HID", "KMBOX_NET", "KMBOX_A", "MAKCU" };
+        std::vector<std::string> input_methods = { "WIN32", "GHUB", "RAZER", "KMBOX_NET", "KMBOX_A", "MAKCU" };
 
         std::vector<const char*> method_items;
         method_items.reserve(input_methods.size());
@@ -579,317 +572,9 @@ static void draw_mouse_page(MouseSettingsPage page)
             }
         }
 
-        // ===== ARDUINO / TEENSY41（串口方式）=====
-        if (config.input_method == "ARDUINO" || config.input_method == "TEENSY41")
-        {
-            // 显示串口连接状态
-            if (arduinoSerial)
-            {
-                if (arduinoSerial->isOpen())
-                {
-                    ImGui::TextColored(ImVec4(0, 255, 0, 255), config.input_method == "TEENSY41" ? "Teensy 4.1 已连接" : "Arduino 已连接");
-                }
-                else
-                {
-                    ImGui::TextColored(ImVec4(255, 0, 0, 255), config.input_method == "TEENSY41" ? "Teensy 4.1 未连接" : "Arduino 未连接");
-                }
-            }
-
-            // 串口号 COM1 ~ COM30 选择
-            std::vector<std::string> port_list;
-            for (int i = 1; i <= 30; ++i)
-            {
-                port_list.push_back("COM" + std::to_string(i));
-            }
-
-            std::vector<const char*> port_items;
-            port_items.reserve(port_list.size());
-            for (const auto& port : port_list)
-            {
-                port_items.push_back(port.c_str());
-            }
-
-            int port_index = 0;
-            for (size_t i = 0; i < port_list.size(); ++i)
-            {
-                if (port_list[i] == config.arduino_port)
-                {
-                    port_index = static_cast<int>(i);
-                    break;
-                }
-            }
-
-            if (OverlayUI::ComboRow(config.input_method == "TEENSY41" ? "Teensy端口" : "Arduino端口", &port_index, port_items.data(), static_cast<int>(port_items.size())))
-            {
-                config.arduino_port = port_list[port_index];
-                OverlayConfig_MarkDirty();
-                input_method_changed.store(true);
-            }
-
-            // 波特率选择（9600 ~ 115200）
-            std::vector<int> baud_rate_list = { 9600, 19200, 38400, 57600, 115200 };
-            std::vector<std::string> baud_rate_str_list;
-            for (const auto& rate : baud_rate_list)
-            {
-                baud_rate_str_list.push_back(std::to_string(rate));
-            }
-
-            std::vector<const char*> baud_rate_items;
-            baud_rate_items.reserve(baud_rate_str_list.size());
-            for (const auto& rate_str : baud_rate_str_list)
-            {
-                baud_rate_items.push_back(rate_str.c_str());
-            }
-
-            int baud_rate_index = 0;
-            for (size_t i = 0; i < baud_rate_list.size(); ++i)
-            {
-                if (baud_rate_list[i] == config.arduino_baudrate)
-                {
-                    baud_rate_index = static_cast<int>(i);
-                    break;
-                }
-            }
-
-            if (OverlayUI::ComboRow(config.input_method == "TEENSY41" ? "Teensy波特率" : "Arduino波特率", &baud_rate_index, baud_rate_items.data(), static_cast<int>(baud_rate_items.size())))
-            {
-                config.arduino_baudrate = baud_rate_list[baud_rate_index];
-                OverlayConfig_MarkDirty();
-                input_method_changed.store(true);
-            }
-
-            // Teensy41 串口模式和 Arduino 模式有不同的额外选项
-            if (config.input_method == "TEENSY41")
-            {
-                ImGui::TextDisabled("使用 Teensy 4.1 串口鼠标桥协议。");
-            }
-            else
-            {
-                // Arduino 专用：16位移位模式、按键传递
-                if (OverlayUI::CheckboxRow("Arduino 16位鼠标", &config.arduino_16_bit_mouse))
-                {
-                    OverlayConfig_MarkDirty();
-                    input_method_changed.store(true);
-                }
-                if (OverlayUI::CheckboxRow("Arduino 启用按键", &config.arduino_enable_keys))
-                {
-                    OverlayConfig_MarkDirty();
-                    input_method_changed.store(true);
-                }
-            }
-        }
-        // ===== RP2350（树莓派 Pico 串口）=====
-        else if (config.input_method == "RP2350")
-        {
-            if (rp2350Serial)
-            {
-                if (rp2350Serial->isOpen())
-                {
-                    ImGui::TextColored(ImVec4(0, 255, 0, 255), "RP2350 已连接");
-                }
-                else
-                {
-                    ImGui::TextColored(ImVec4(255, 0, 0, 255), "RP2350 未连接");
-                }
-            }
-
-            // COMn 端口选择
-            std::vector<std::string> port_list;
-            for (int i = 1; i <= 30; ++i)
-            {
-                port_list.push_back("COM" + std::to_string(i));
-            }
-
-            std::vector<const char*> port_items;
-            port_items.reserve(port_list.size());
-            for (const auto& port : port_list)
-            {
-                port_items.push_back(port.c_str());
-            }
-
-            int port_index = 0;
-            for (size_t i = 0; i < port_list.size(); ++i)
-            {
-                if (port_list[i] == config.rp2350_port)
-                {
-                    port_index = static_cast<int>(i);
-                    break;
-                }
-            }
-
-            if (OverlayUI::ComboRow("RP2350端口", &port_index, port_items.data(), static_cast<int>(port_items.size())))
-            {
-                config.rp2350_port = port_list[port_index];
-                OverlayConfig_MarkDirty();
-                input_method_changed.store(true);
-            }
-
-            // RP2350 支持更高的波特率（最高 921600）
-            std::vector<int> baud_rate_list = { 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600 };
-            std::vector<std::string> baud_rate_str_list;
-            for (const auto& rate : baud_rate_list)
-            {
-                baud_rate_str_list.push_back(std::to_string(rate));
-            }
-
-            std::vector<const char*> baud_rate_items;
-            baud_rate_items.reserve(baud_rate_str_list.size());
-            for (const auto& rate_str : baud_rate_str_list)
-            {
-                baud_rate_items.push_back(rate_str.c_str());
-            }
-
-            int baud_rate_index = 0;
-            for (size_t i = 0; i < baud_rate_list.size(); ++i)
-            {
-                if (baud_rate_list[i] == config.rp2350_baudrate)
-                {
-                    baud_rate_index = static_cast<int>(i);
-                    break;
-                }
-            }
-
-            if (OverlayUI::ComboRow("RP2350波特率", &baud_rate_index, baud_rate_items.data(), static_cast<int>(baud_rate_items.size())))
-            {
-                config.rp2350_baudrate = baud_rate_list[baud_rate_index];
-                OverlayConfig_MarkDirty();
-                input_method_changed.store(true);
-            }
-
-            if (OverlayUI::CheckboxRow("RP2350 16位鼠标", &config.rp2350_16_bit_mouse))
-            {
-                OverlayConfig_MarkDirty();
-                input_method_changed.store(true);
-            }
-            if (OverlayUI::CheckboxRow("RP2350 启用按键", &config.rp2350_enable_keys))
-            {
-                OverlayConfig_MarkDirty();
-                input_method_changed.store(true);
-            }
-        }
-        // ===== GHUB（罗技 G Hub 驱动注入）=====
-        else if (config.input_method == "GHUB")
-        {
-            // 检查 GHUB 版本是否匹配
-            if (ghub_version == "13.1.4")
-            {
-                std::string ghub_version_label = "已安装正确版本的GHUB: " + ghub_version;
-                ImGui::Text(ghub_version_label.c_str());
-            }
-            else
-            {
-                ImGui::Text("安装的GHUB版本不正确或路径未设置。\n默认系统路径：C:\\Program Files\\LGHUB");
-                if (OverlayUI::ButtonRow("GHub", "打开GHUB文档", "ghub_docs"))
-                {
-                    ShellExecute(0, 0, L"https://github.com/hpsazz1/Xen/blob/main/docs/guides.md#g-hub-input-method", 0, 0, SW_SHOW);
-                }
-            }
-
-            ImGui::TextColored(ImVec4(255, 0, 0, 255), "风险自负，该方法在某些游戏中可能被检测。");
-        }
-        // ===== TEENSY41_HID（Teensy 4.1 RawHID 模式）=====
-        else if (config.input_method == "TEENSY41_HID")
-        {
-            bool teensy41Connected = false;
-            {
-                std::lock_guard<std::mutex> lock(inputDevicesMutex);
-                teensy41Connected = activeMouseInputOwner && activeMouseInputOwner->isOpen();
-            }
-
-            if (teensy41Connected)
-            {
-                ImGui::TextColored(ImVec4(0, 255, 0, 255), "Teensy 4.1 RawHID 已连接");
-            }
-            else
-            {
-                ImGui::TextColored(ImVec4(255, 0, 0, 255), "Teensy 4.1 RawHID 未连接");
-            }
-
-            // 本地静态缓存，非持久化；用于编辑后点击"Save & Reconnect"才写入配置
-            static char serial[64] = "";
-            static char vid[16] = "";
-            static char pid[16] = "";
-            static std::string last_serial;
-            static std::string last_vid;
-            static std::string last_pid;
-            static int usage_page = 0;
-            static int usage_id = 0;
-            static int open_index = 0;
-            static int timeout_ms = 0;
-            static int reconnect_ms = 0;
-
-            // 当配置持久化值与静态缓存不一致时重新同步
-            if (last_serial != config.teensy_hid_serial ||
-                last_vid != config.teensy_hid_vid_filter ||
-                last_pid != config.teensy_hid_pid_filter ||
-                usage_page != config.teensy_hid_usage_page ||
-                usage_id != config.teensy_hid_usage_id ||
-                open_index != config.teensy_hid_open_index ||
-                timeout_ms != config.teensy_hid_packet_timeout_ms ||
-                reconnect_ms != config.teensy_hid_reconnect_interval_ms)
-            {
-                strncpy(serial, config.teensy_hid_serial.c_str(), sizeof(serial));
-                strncpy(vid, config.teensy_hid_vid_filter.c_str(), sizeof(vid));
-                strncpy(pid, config.teensy_hid_pid_filter.c_str(), sizeof(pid));
-                serial[sizeof(serial) - 1] = '\0';
-                vid[sizeof(vid) - 1] = '\0';
-                pid[sizeof(pid) - 1] = '\0';
-                last_serial = config.teensy_hid_serial;
-                last_vid = config.teensy_hid_vid_filter;
-                last_pid = config.teensy_hid_pid_filter;
-                usage_page = config.teensy_hid_usage_page;
-                usage_id = config.teensy_hid_usage_id;
-                open_index = config.teensy_hid_open_index;
-                timeout_ms = config.teensy_hid_packet_timeout_ms;
-                reconnect_ms = config.teensy_hid_reconnect_interval_ms;
-            }
-
-            // HID 参数编辑：序列号、VID/PID 过滤、Usage Page/ID、打开索引、超时与重连
-            OverlayUI::InputTextRow("序列号", serial, sizeof(serial));
-            OverlayUI::InputTextRow("VID过滤", vid, sizeof(vid));
-            OverlayUI::InputTextRow("PID过滤", pid, sizeof(pid));
-            OverlayUI::InputIntRow("用途页面", &usage_page);
-            OverlayUI::InputIntRow("用途ID", &usage_id);
-            OverlayUI::InputIntRow("打开索引", &open_index);
-            OverlayUI::InputIntRow("数据包超时(毫秒)", &timeout_ms);
-            OverlayUI::InputIntRow("重连间隔(毫秒)", &reconnect_ms);
-
-            // 保存并重连按钮
-            if (OverlayUI::ButtonRow("Teensy HID", "保存并重连", "teensy_hid_save_reconnect"))
-            {
-                config.teensy_hid_serial = serial;
-                config.teensy_hid_vid_filter = vid;
-                config.teensy_hid_pid_filter = pid;
-                config.teensy_hid_usage_page = usage_page;
-                config.teensy_hid_usage_id = usage_id;
-                config.teensy_hid_open_index = open_index;
-                config.teensy_hid_packet_timeout_ms = timeout_ms;
-                config.teensy_hid_reconnect_interval_ms = reconnect_ms;
-                last_serial = config.teensy_hid_serial;
-                last_vid = config.teensy_hid_vid_filter;
-                last_pid = config.teensy_hid_pid_filter;
-                OverlayConfig_MarkDirty();
-                input_method_changed.store(true);
-            }
-        }
-        // ===== RAZER（雷蛇 rzctl 驱动注入）=====
-        else if (config.input_method == "RAZER")
-        {
-            if (razerControl && razerControl->isOpen())
-            {
-                ImGui::TextColored(ImVec4(0, 255, 0, 255), "雷蛇 rzctl 已连接");
-            }
-            else
-            {
-                ImGui::TextColored(ImVec4(255, 0, 0, 255), "雷蛇 rzctl 未连接");
-            }
-            ImGui::Text("需要 rzctl.dll 与 Xen.exe 放在同一目录。");
-            ImGui::TextColored(ImVec4(255, 0, 0, 255), "风险自负，该方法在某些游戏中可能被检测。");
-        }
-        // ===== WIN32（标准 Windows API 鼠标输入）=====
         else if (config.input_method == "WIN32")
         {
-            ImGui::TextColored(ImVec4(255, 255, 255, 255), "这是标准鼠标输入方式，可能不适用于大多数游戏。请使用 GHUB、RAZER、ARDUINO、RP2350、TEENSY41 或 TEENSY41_HID。");
+            ImGui::TextColored(ImVec4(255, 255, 255, 255), "这是标准鼠标输入方式，可能不适用于大多数游戏。请使用 GHUB、RAZER、KMBOX_NET、KMBOX_A 或 MAKCU。");
             ImGui::TextColored(ImVec4(255, 0, 0, 255), "风险自负，该方法在某些游戏中可能被检测。");
         }
         // ===== KMBOX_NET（网络版 KMBOX）=====
@@ -1095,27 +780,25 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayUI::EndSection();
     }
 
-    // ===== 脏检测块 1：FOV / 速度倍率 / 预测 / 卡尔曼 / 目标修正 =====
+    // ===== 脏检测块 1：FOV / 速度倍率 / 预测 / 目标修正 =====
     // 检测上述配置项是否有变化，如有则同步 prev 变量、更新 mouseThread 并标记配置脏
     if (prev_fovX != config.fovX ||
         prev_fovY != config.fovY ||
         prev_minSpeedMultiplier != config.minSpeedMultiplier ||
         prev_maxSpeedMultiplier != config.maxSpeedMultiplier ||
         prev_predictionInterval != config.predictionInterval ||
-        prev_kalman_enabled != config.kalman_enabled ||
-        prev_kalman_process_noise_position != config.kalman_process_noise_position ||
-        prev_kalman_process_noise_velocity != config.kalman_process_noise_velocity ||
-        prev_kalman_measurement_noise != config.kalman_measurement_noise ||
-        prev_kalman_velocity_damping != config.kalman_velocity_damping ||
-        prev_kalman_max_velocity != config.kalman_max_velocity ||
-        prev_kalman_warmup_frames != config.kalman_warmup_frames ||
-        prev_kalman_compensate_detection_delay != config.kalman_compensate_detection_delay ||
-        prev_kalman_additional_prediction_ms != config.kalman_additional_prediction_ms ||
-        prev_kalman_reset_timeout_sec != config.kalman_reset_timeout_sec ||
+        prev_prediction_enabled != config.prediction_enabled ||
+        prev_prediction_tau != config.prediction_tau ||
+        prev_prediction_compensate_delay != config.prediction_compensate_delay ||
+        prev_prediction_reset_timeout_sec != config.prediction_reset_timeout_sec ||
         prev_snapRadius != config.snapRadius ||
         prev_nearRadius != config.nearRadius ||
         prev_speedCurveExponent != config.speedCurveExponent ||
-        prev_snapBoostFactor != config.snapBoostFactor)
+        prev_snapBoostFactor != config.snapBoostFactor ||
+        prev_pure_pursuit_gain != config.pure_pursuit_gain ||
+        prev_pure_pursuit_dead_zone != config.pure_pursuit_dead_zone ||
+        prev_pure_pursuit_smoothing != config.pure_pursuit_smoothing ||
+        prev_motion_change_protection != config.motion_change_protection)
     {
         // 同步 FOV
         prev_fovX = config.fovX;
@@ -1125,25 +808,23 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_maxSpeedMultiplier = config.maxSpeedMultiplier;
         // 同步预测
         prev_predictionInterval = config.predictionInterval;
-        // 同步卡尔曼参数
-        prev_kalman_enabled = config.kalman_enabled;
-        prev_kalman_process_noise_position = config.kalman_process_noise_position;
-        prev_kalman_process_noise_velocity = config.kalman_process_noise_velocity;
-        prev_kalman_measurement_noise = config.kalman_measurement_noise;
-        prev_kalman_velocity_damping = config.kalman_velocity_damping;
-        prev_kalman_max_velocity = config.kalman_max_velocity;
-        prev_kalman_warmup_frames = config.kalman_warmup_frames;
-        prev_kalman_compensate_detection_delay = config.kalman_compensate_detection_delay;
-        prev_kalman_additional_prediction_ms = config.kalman_additional_prediction_ms;
-        prev_kalman_reset_timeout_sec = config.kalman_reset_timeout_sec;
+        prev_prediction_enabled = config.prediction_enabled;
+        prev_prediction_tau = config.prediction_tau;
+        prev_prediction_compensate_delay = config.prediction_compensate_delay;
+        prev_prediction_reset_timeout_sec = config.prediction_reset_timeout_sec;
         // 同步目标修正
         prev_snapRadius = config.snapRadius;
         prev_nearRadius = config.nearRadius;
         prev_speedCurveExponent = config.speedCurveExponent;
         prev_snapBoostFactor = config.snapBoostFactor;
+        // 同步执行控制器
+        prev_pure_pursuit_gain = config.pure_pursuit_gain;
+        prev_pure_pursuit_dead_zone = config.pure_pursuit_dead_zone;
+        prev_pure_pursuit_smoothing = config.pure_pursuit_smoothing;
+        prev_motion_change_protection = config.motion_change_protection;
 
         // 通知 mouseThread 重新加载配置
-        globalMouseThread->updateConfig(
+        if (globalMouseThread) globalMouseThread->updateConfig(
             config.detection_resolution,
             config.fovX,
             config.fovY,
@@ -1178,7 +859,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_move_ema_enabled = config.move_ema_enabled;
         prev_move_ema_alpha = config.move_ema_alpha;
 
-        globalMouseThread->updateConfig(
+        if (globalMouseThread) globalMouseThread->updateConfig(
             config.detection_resolution,
             config.fovX,
             config.fovY,
@@ -1222,7 +903,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_unlock_y_strength = config.unlock_y_strength;
         prev_fire_correction_strength = config.fire_correction_strength;
 
-        globalMouseThread->updateConfig(
+        if (globalMouseThread) globalMouseThread->updateConfig(
             config.detection_resolution,
             config.fovX,
             config.fovY,

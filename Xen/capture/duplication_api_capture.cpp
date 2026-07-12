@@ -1,5 +1,7 @@
 ﻿#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #define _WINSOCKAPI_
 #include <winsock2.h>
 #include <Windows.h>

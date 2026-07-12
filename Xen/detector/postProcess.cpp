@@ -695,13 +695,10 @@ void NMS(std::vector<Detection>& detections, float nmsThreshold, std::chrono::du
     }
 }
 
-#ifdef USE_CUDA
 /**
- * postProcessYolo - TensorRT 路径的 YOLO 后处理入口
+ * postProcessYolo - YOLO 后处理统一入口
  *
- * 包装 DecodeYoloOutput 函数，使用 TrtDetector 的图像缩放因子。
- * 该函数从全局 trt_detector 获取 img_scale，确保检测框坐标
- * 从模型输入空间映射到检测分辨率空间。
+ * 包装 DecodeYoloOutput 函数，TRT/DML 路径共享。
  *
  * @param output         模型输出数据指针
  * @param shape          输出张量形状
@@ -710,6 +707,7 @@ void NMS(std::vector<Detection>& detections, float nmsThreshold, std::chrono::du
  * @param nmsThreshold   NMS 的 IoU 阈值
  * @param maxDetections  最大检测数
  * @param nmsTime        [输出] NMS 耗时
+ * @param scale          坐标缩放因子（TRT 传入 img_scale，DML 使用默认值 1.0）
  * @return 检测结果列表
  */
 std::vector<Detection> postProcessYolo(
@@ -719,56 +717,12 @@ std::vector<Detection> postProcessYolo(
     float confThreshold,
     float nmsThreshold,
     int maxDetections,
-    std::chrono::duration<double, std::milli>* nmsTime
+    std::chrono::duration<double, std::milli>* nmsTime,
+    float scale
 )
 {
     return DecodeYoloOutput(
-        output,
-        shape,
-        numClasses,
-        confThreshold,
-        nmsThreshold,
-        maxDetections,
-        trt_detector.img_scale,
-        nmsTime);
+        output, shape, numClasses,
+        confThreshold, nmsThreshold, maxDetections,
+        scale, nmsTime);
 }
-#endif
-
-#ifndef USE_CUDA
-/**
- * postProcessYoloDML - DirectML 路径的 YOLO 后处理入口
- *
- * 包装 DecodeYoloOutput 函数，缩放因子固定为 1.0。
- * DirectML 后端在预处理阶段已将图像缩放到检测分辨率，
- * 因此后处理无需额外缩放。
- *
- * @param output         模型输出数据指针
- * @param shape          输出张量形状
- * @param numClasses     类别数
- * @param confThreshold  置信度阈值
- * @param nmsThreshold   NMS 的 IoU 阈值
- * @param maxDetections  最大检测数
- * @param nmsTime        [输出] NMS 耗时
- * @return 检测结果列表
- */
-std::vector<Detection> postProcessYoloDML(
-    const float* output,
-    const std::vector<int64_t>& shape,
-    int numClasses,
-    float confThreshold,
-    float nmsThreshold,
-    int maxDetections,
-    std::chrono::duration<double, std::milli>* nmsTime
-)
-{
-    return DecodeYoloOutput(
-        output,
-        shape,
-        numClasses,
-        confThreshold,
-        nmsThreshold,
-        maxDetections,
-        1.0f,
-        nmsTime);
-}
-#endif

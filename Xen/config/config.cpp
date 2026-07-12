@@ -7,11 +7,14 @@
 #include <iomanip>
 #include <string>
 #include <filesystem>
+#include <mutex>
 #include <unordered_map>
 #include <algorithm>
 
 #include "config.h"
 #include "modules/SimpleIni.h"
+
+extern std::mutex configMutex;
 
 /**
  * splitString - 按分隔符分割字符串，并去除每个token的前后空白
@@ -85,7 +88,7 @@ bool Config::loadConfig(const std::string& filename)
         capture_cursor = true;                           // 是否捕获鼠标光标
         virtual_camera_name = "None";                    // 虚拟摄像头名称
         virtual_camera_width = 1920;                     // 虚拟摄像头宽度
-        virtual_camera_heigth = 1080;                    // 虚拟摄像头高度
+        virtual_camera_height = 1080;                    // 虚拟摄像头高度
 
         // === 瞄准目标设置 ===
         disable_headshot = false;                        // 是否禁用头部瞄准
@@ -95,26 +98,40 @@ bool Config::loadConfig(const std::string& filename)
         tracker_enabled = true;                          // 是否启用目标追踪器
         tracker_overlay_table_enabled = true;            // 是否显示追踪器表格
 
+        // === 跟踪器参数 ===
+        auto_derive_tracker_params = true;               // 自动推导开关（默认启用）
+        ml_confirm_threshold = 2;                        // MOT 确认帧数
+        ml_termination_frames = 8;                       // MOT 终止帧数
+        ml_noise_vx = 1.0f;                              // 速度 X 过程噪声
+        ml_noise_vy = 1.0f;                              // 速度 Y 过程噪声
+        ml_noise_w = 0.01f;                              // 宽度过程噪声
+        ml_noise_h = 0.01f;                              // 高度过程噪声
+        ml_measurement_stddev = 5.0f;                    // 测量标准差
+        ml_coast_frames = 15;                            // SOT 滑行帧数
+        ml_selection_strategy = "nearest";               // SOT 选择策略
+        ml_recapture_iou = 0.3f;                         // 重捕获 IoU 阈值
+        ml_recapture_distance_mult = 2.5f;               // 重捕获距离乘数
+        ml_coast_velocity_decay = 1.0f;                  // 滑行速度衰减
+
+        // === 执行控制器 ===
+        pure_pursuit_gain = 0.85f;
+        pure_pursuit_dead_zone = 2.0f;
+        pure_pursuit_smoothing = 0.8f;
+        motion_change_protection = false;
+
         // === 鼠标移动设置 ===
         fovX = 106;                                      // 水平视野（度）
         fovY = 74;                                       // 垂直视野（度）
         minSpeedMultiplier = 0.1f;                       // 鼠标最小速度倍率
         maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
 
+        prediction_enabled = true;                       // 预测总开关
         predictionInterval = 0.020f;                     // 位置预测间隔（秒）
         prediction_futurePositions = 12;                 // 预测的未来位置点数
-        prediction_mode = "linear";                      // 预测模式: off / delay / linear / kalman
         draw_futurePositions = true;                     // 是否绘制预测轨迹点
-        kalman_enabled = true;                           // 是否启用卡尔曼滤波
-        kalman_process_noise_position = 40.0f;           // 卡尔曼滤波：位置过程噪声
-        kalman_process_noise_velocity = 1800.0f;         // 卡尔曼滤波：速度过程噪声
-        kalman_measurement_noise = 35.0f;                // 卡尔曼滤波：测量噪声
-        kalman_velocity_damping = 0.08f;                 // 卡尔曼滤波：速度阻尼
-        kalman_max_velocity = 20000.0f;                  // 卡尔曼滤波：最大速度
-        kalman_warmup_frames = 2;                        // 卡尔曼滤波：预热帧数
-        kalman_compensate_detection_delay = true;        // 是否补偿检测延迟
-        kalman_additional_prediction_ms = 0.0f;          // 额外预测时间（毫秒）
-        kalman_reset_timeout_sec = 0.5f;                 // 卡尔曼重置超时（秒）
+        prediction_tau = 0.05f;                          // EMA 时间常数（秒）
+        prediction_compensate_delay = true;              // 是否补偿检测延迟
+        prediction_reset_timeout_sec = 0.5f;             // 预测重置超时（秒）
 
         snapRadius = 1.5f;                               // 瞄准吸附半径
         nearRadius = 25.0f;                              // "近距离"半径阈值
@@ -128,7 +145,6 @@ bool Config::loadConfig(const std::string& filename)
         // === 贝塞尔轨迹曲线 ===
         bezier_enabled = false;                          // 是否启用 Bezier 弧线
         bezier_strength = 0.35f;                         // 曲线弧度 (0=直线 1=大弧)
-        preset_style = "custom";                         // 预设风格
 
         // === 移动输出平滑 ===
         move_ema_enabled = false;                        // 是否启用 EMA 平滑
@@ -140,28 +156,6 @@ bool Config::loadConfig(const std::string& filename)
         wind_W = 15.0f;                                  // 轨迹摆动幅度
         wind_M = 10.0f;                                  // 单步移动上限
         wind_D = 8.0f;                                   // 微调距离阈值
-
-        // === Arduino 硬件输入 ===
-        arduino_baudrate = 115200;                       // 串口波特率
-        arduino_port = "COM0";                           // 串口号
-        arduino_16_bit_mouse = false;                    // 是否 16 位鼠标精度
-        arduino_enable_keys = false;                     // 是否启用按键
-
-        // === RP2350 硬件输入 ===
-        rp2350_baudrate = 115200;
-        rp2350_port = "COM0";
-        rp2350_16_bit_mouse = true;
-        rp2350_enable_keys = false;
-
-        // === Teensy 4.1 RawHID 通用鼠标桥接 ===
-        teensy_hid_serial = "AUTO";                      // 串行号（自动检测）
-        teensy_hid_vid_filter = "AUTO";                  // VID 过滤
-        teensy_hid_pid_filter = "AUTO";                  // PID 过滤
-        teensy_hid_usage_page = 65451;                   // HID 使用页
-        teensy_hid_usage_id = 512;                       // HID 使用 ID
-        teensy_hid_open_index = 0;                       // 设备打开索引
-        teensy_hid_packet_timeout_ms = 2;                // 数据包超时（毫秒）
-        teensy_hid_reconnect_interval_ms = 500;          // 重连间隔（毫秒）
 
         // === kmbox_net 网络输入 ===
         kmbox_net_ip = "10.42.42.42";
@@ -180,11 +174,13 @@ bool Config::loadConfig(const std::string& filename)
         bScope_multiplier = 1.2f;                        // 开镜倍率
 
         // === 开火拟人化 ===
+        // 反应延迟和按键时长使用对数正态分布（正偏态/长尾），
+        // 更接近真实人类反应时间分布（始终为正，右侧长尾）
         trigger_stable_frames = 3;                       // 连续确认帧数
-        trigger_random_delay_ms = 45.0f;                 // 反应延迟均值
-        trigger_delay_jitter_ms = 13.0f;                 // 反应延迟抖动
-        trigger_hold_ms = 16.0f;                         // 按键时长均值
-        trigger_hold_jitter_ms = 14.0f;                  // 按键时长抖动
+        trigger_random_delay_ms = 45.0f;                 // 反应延迟中位数 (ms)
+        trigger_delay_jitter_ms = 13.0f;                 // 延迟散布系数 (cv=jitter/delay, 越大越分散)
+        trigger_hold_ms = 16.0f;                         // 按键时长中位数 (ms)
+        trigger_hold_jitter_ms = 14.0f;                  // 按键时长散布系数
         trigger_shot_cooldown_ms = 54.0f;                // 两发最小间隔
 
         // === 自动急停 ===
@@ -323,6 +319,8 @@ bool Config::loadConfig(const std::string& filename)
         screenshot_button = splitString("None");         // 截屏快捷键
         screenshot_delay = 500;                          // 截屏延迟（毫秒）
         verbose = false;                                 // 详细日志输出
+        pipeline_tracer_enabled = false;                 // 流水线追踪开关
+        pipeline_tracer_max_frames = 300;                // 追踪缓冲帧数
 
         // === 游戏配置文件 ===
         game_profiles.clear();
@@ -453,7 +451,7 @@ bool Config::loadConfig(const std::string& filename)
     capture_cursor = get_bool("capture_cursor", true);
     virtual_camera_name = get_string("virtual_camera_name", "None");
     virtual_camera_width = get_long("virtual_camera_width", 1920);
-    virtual_camera_heigth = get_long("virtual_camera_heigth", 1080);
+    virtual_camera_height = get_long("virtual_camera_heigth", 1080);
 
     // === 瞄准目标配置 ===
     disable_headshot = get_bool("disable_headshot", false);
@@ -463,6 +461,27 @@ bool Config::loadConfig(const std::string& filename)
     tracker_enabled = get_bool("tracker_enabled", true);
     tracker_overlay_table_enabled = get_bool("tracker_overlay_table_enabled", true);
 
+    // === 跟踪器参数 ===
+    auto_derive_tracker_params = get_bool("auto_derive_tracker_params", true);
+    ml_confirm_threshold = get_long("ml_confirm_threshold", 2);
+    ml_termination_frames = get_long("ml_termination_frames", 8);
+    ml_noise_vx = (float)get_double("ml_noise_vx", 1.0);
+    ml_noise_vy = (float)get_double("ml_noise_vy", 1.0);
+    ml_noise_w = (float)get_double("ml_noise_w", 0.01);
+    ml_noise_h = (float)get_double("ml_noise_h", 0.01);
+    ml_measurement_stddev = (float)get_double("ml_measurement_stddev", 5.0);
+    ml_coast_frames = get_long("ml_coast_frames", 15);
+    ml_selection_strategy = get_string("ml_selection_strategy", "nearest");
+    ml_recapture_iou = (float)get_double("ml_recapture_iou", 0.3);
+    ml_recapture_distance_mult = (float)get_double("ml_recapture_distance_mult", 2.5);
+    ml_coast_velocity_decay = (float)get_double("ml_coast_velocity_decay", 1.0);
+
+    // === 执行控制器 ===
+    pure_pursuit_gain = (float)get_double("pure_pursuit_gain", 0.85);
+    pure_pursuit_dead_zone = (float)get_double("pure_pursuit_dead_zone", 2.0);
+    pure_pursuit_smoothing = (float)get_double("pure_pursuit_smoothing", 0.8);
+    motion_change_protection = get_bool("motion_change_protection", false);
+
     // === 鼠标控制配置 ===
     fovX = get_long("fovX", 106);
     fovY = get_long("fovY", 74);
@@ -471,18 +490,11 @@ bool Config::loadConfig(const std::string& filename)
 
     predictionInterval = (float)get_double("predictionInterval", 0.020);
     prediction_futurePositions = get_long("prediction_futurePositions", 12);
-    prediction_mode = get_string("prediction_mode", "linear");
+    prediction_enabled = get_bool("prediction_enabled", true);
     draw_futurePositions = get_bool("draw_futurePositions", true);
-    kalman_enabled = get_bool("kalman_enabled", true);
-    kalman_process_noise_position = (float)get_double("kalman_process_noise_position", 40.0);
-    kalman_process_noise_velocity = (float)get_double("kalman_process_noise_velocity", 1800.0);
-    kalman_measurement_noise = (float)get_double("kalman_measurement_noise", 35.0);
-    kalman_velocity_damping = (float)get_double("kalman_velocity_damping", 0.08);
-    kalman_max_velocity = (float)get_double("kalman_max_velocity", 20000.0);
-    kalman_warmup_frames = get_long("kalman_warmup_frames", 2);
-    kalman_compensate_detection_delay = get_bool("kalman_compensate_detection_delay", true);
-    kalman_additional_prediction_ms = (float)get_double("kalman_additional_prediction_ms", 0.0);
-    kalman_reset_timeout_sec = (float)get_double("kalman_reset_timeout_sec", 0.5);
+    prediction_tau = (float)get_double("prediction_tau", 0.05);
+    prediction_compensate_delay = get_bool("prediction_compensate_delay", true);
+    prediction_reset_timeout_sec = (float)get_double("prediction_reset_timeout_sec", 0.5);
 
     snapRadius = (float)get_double("snapRadius", 1.5);
     nearRadius = (float)get_double("nearRadius", 25.0);
@@ -496,7 +508,6 @@ bool Config::loadConfig(const std::string& filename)
     // === 贝塞尔轨迹 + 输出平滑 ===
     bezier_enabled = get_bool("bezier_enabled", false);
     bezier_strength = (float)get_double("bezier_strength", 0.35);
-    preset_style = get_string("preset_style", "custom");
     move_ema_enabled = get_bool("move_ema_enabled", false);
     move_ema_alpha = (float)get_double("move_ema_alpha", 0.60);
 
@@ -506,28 +517,6 @@ bool Config::loadConfig(const std::string& filename)
     wind_W = (float)get_double("wind_W", 15.0f);       // 轨迹摆动幅度
     wind_M = (float)get_double("wind_M", 10.0f);       // 单步移动上限
     wind_D = (float)get_double("wind_D", 8.0f);        // 微调距离阈值
-
-    // === Arduino 输入设备 ===
-    arduino_baudrate = get_long("arduino_baudrate", 115200);
-    arduino_port = get_string("arduino_port", "COM0");
-    arduino_16_bit_mouse = get_bool("arduino_16_bit_mouse", false);
-    arduino_enable_keys = get_bool("arduino_enable_keys", false);
-
-    // === RP2350 输入设备 ===
-    rp2350_baudrate = get_long("rp2350_baudrate", 115200);
-    rp2350_port = get_string("rp2350_port", "COM0");
-    rp2350_16_bit_mouse = get_bool("rp2350_16_bit_mouse", true);
-    rp2350_enable_keys = get_bool("rp2350_enable_keys", false);
-
-    // === Teensy 4.1 RawHID 通用鼠标桥接 ===
-    teensy_hid_serial = get_string("teensy_hid_serial", "AUTO");
-    teensy_hid_vid_filter = get_string("teensy_hid_vid_filter", "AUTO");
-    teensy_hid_pid_filter = get_string("teensy_hid_pid_filter", "AUTO");
-    teensy_hid_usage_page = get_long("teensy_hid_usage_page", 65451);
-    teensy_hid_usage_id = get_long("teensy_hid_usage_id", 512);
-    teensy_hid_open_index = get_long("teensy_hid_open_index", 0);
-    teensy_hid_packet_timeout_ms = get_long("teensy_hid_packet_timeout_ms", 2);
-    teensy_hid_reconnect_interval_ms = get_long("teensy_hid_reconnect_interval_ms", 500);
 
     // === kmbox_net 输入 ===
     kmbox_net_ip = get_string("kmbox_net_ip", "10.42.42.42");
@@ -688,23 +677,11 @@ bool Config::loadConfig(const std::string& filename)
     auto_label_max_boxes = get_long("auto_label_max_boxes", 20);
     auto_label_record_classes = get_string("auto_label_record_classes", "");
 
-    // === 卡尔曼滤波参数范围校验 ===
-    if (kalman_process_noise_position < 0.0001f) kalman_process_noise_position = 0.0001f;
-    if (kalman_process_noise_position > 5000.0f) kalman_process_noise_position = 5000.0f;
-    if (kalman_process_noise_velocity < 0.0001f) kalman_process_noise_velocity = 0.0001f;
-    if (kalman_process_noise_velocity > 50000.0f) kalman_process_noise_velocity = 50000.0f;
-    if (kalman_measurement_noise < 0.0001f) kalman_measurement_noise = 0.0001f;
-    if (kalman_measurement_noise > 5000.0f) kalman_measurement_noise = 5000.0f;
-    if (kalman_velocity_damping < 0.0f) kalman_velocity_damping = 0.0f;
-    if (kalman_velocity_damping > 3.0f) kalman_velocity_damping = 3.0f;
-    if (kalman_max_velocity < 100.0f) kalman_max_velocity = 100.0f;
-    if (kalman_max_velocity > 60000.0f) kalman_max_velocity = 60000.0f;
-    if (kalman_warmup_frames < 0) kalman_warmup_frames = 0;
-    if (kalman_warmup_frames > 20) kalman_warmup_frames = 20;
-    if (kalman_additional_prediction_ms < -80.0f) kalman_additional_prediction_ms = -80.0f;
-    if (kalman_additional_prediction_ms > 120.0f) kalman_additional_prediction_ms = 120.0f;
-    if (kalman_reset_timeout_sec < 0.05f) kalman_reset_timeout_sec = 0.05f;
-    if (kalman_reset_timeout_sec > 3.0f) kalman_reset_timeout_sec = 3.0f;
+    // === 预测参数范围校验 ===
+    if (prediction_tau < 0.005f) prediction_tau = 0.005f;
+    if (prediction_tau > 0.50f) prediction_tau = 0.50f;
+    if (prediction_reset_timeout_sec < 0.05f) prediction_reset_timeout_sec = 0.05f;
+    if (prediction_reset_timeout_sec > 3.0f) prediction_reset_timeout_sec = 3.0f;
 
     // === 覆盖层尺寸范围校验 ===
     if (overlay_width < 560) overlay_width = 560;
@@ -732,6 +709,8 @@ bool Config::loadConfig(const std::string& filename)
     screenshot_button = splitString(get_string("screenshot_button", "None"));
     screenshot_delay = get_long("screenshot_delay", 500);
     verbose = get_bool("verbose", false);
+    pipeline_tracer_enabled = get_bool("pipeline_tracer_enabled", false);
+    pipeline_tracer_max_frames = get_long("pipeline_tracer_max_frames", 300);
 
     return true;
 }
@@ -785,7 +764,7 @@ bool Config::saveConfig(const std::string& filename)
         << "capture_cursor = " << (capture_cursor ? "true" : "false") << "\n"
         << "virtual_camera_name = " << virtual_camera_name << "\n"
         << "virtual_camera_width = " << virtual_camera_width << "\n"
-        << "virtual_camera_heigth = " << virtual_camera_heigth << "\n\n";
+        << "virtual_camera_heigth = " << virtual_camera_height << "\n\n";
 
     // === 瞄准 / 目标设置 ===
     file << "# Target\n"
@@ -795,11 +774,28 @@ bool Config::saveConfig(const std::string& filename)
         << "head_y_offset = " << head_y_offset << "\n"
         << "auto_aim = " << (auto_aim ? "true" : "false") << "\n"
         << "tracker_enabled = " << (tracker_enabled ? "true" : "false") << "\n"
-        << "tracker_overlay_table_enabled = " << (tracker_overlay_table_enabled ? "true" : "false") << "\n\n";
+        << "tracker_overlay_table_enabled = " << (tracker_overlay_table_enabled ? "true" : "false") << "\n"
+        << "auto_derive_tracker_params = " << (auto_derive_tracker_params ? "true" : "false") << "\n"
+        << "ml_confirm_threshold = " << ml_confirm_threshold << "\n"
+        << "ml_termination_frames = " << ml_termination_frames << "\n"
+        << "ml_noise_vx = " << ml_noise_vx << "\n"
+        << "ml_noise_vy = " << ml_noise_vy << "\n"
+        << "ml_noise_w = " << ml_noise_w << "\n"
+        << "ml_noise_h = " << ml_noise_h << "\n"
+        << "ml_measurement_stddev = " << ml_measurement_stddev << "\n"
+        << "ml_coast_frames = " << ml_coast_frames << "\n"
+        << "ml_selection_strategy = " << ml_selection_strategy << "\n"
+        << "ml_recapture_iou = " << ml_recapture_iou << "\n"
+        << "ml_recapture_distance_mult = " << ml_recapture_distance_mult << "\n"
+        << "ml_coast_velocity_decay = " << ml_coast_velocity_decay << "\n"
+        << "pure_pursuit_gain = " << pure_pursuit_gain << "\n"
+        << "pure_pursuit_dead_zone = " << pure_pursuit_dead_zone << "\n"
+        << "pure_pursuit_smoothing = " << pure_pursuit_smoothing << "\n"
+        << "motion_change_protection = " << (motion_change_protection ? "true" : "false") << "\n\n";
 
     // === 鼠标移动设置 ===
     file << "# Mouse move\n"
-        << "# WIN32, GHUB, RAZER, ARDUINO, RP2350, TEENSY41, TEENSY41_HID, KMBOX_NET, KMBOX_A, MAKCU\n"
+        << "# WIN32, GHUB, RAZER, KMBOX_NET, KMBOX_A, MAKCU\n"
         << "fovX = " << fovX << "\n"
         << "fovY = " << fovY << "\n"
         << "minSpeedMultiplier = " << minSpeedMultiplier << "\n"
@@ -808,20 +804,11 @@ bool Config::saveConfig(const std::string& filename)
         << std::fixed << std::setprecision(2)
         << "predictionInterval = " << predictionInterval << "\n"
         << "prediction_futurePositions = " << prediction_futurePositions << "\n"
-        << "prediction_mode = " << prediction_mode << "\n"
+        << "prediction_enabled = " << (prediction_enabled ? "true" : "false") << "\n"
         << "draw_futurePositions = " << (draw_futurePositions ? "true" : "false") << "\n"
-        << "kalman_enabled = " << (kalman_enabled ? "true" : "false") << "\n"
-        << "kalman_process_noise_position = " << kalman_process_noise_position << "\n"
-        << "kalman_process_noise_velocity = " << kalman_process_noise_velocity << "\n"
-        << "kalman_measurement_noise = " << kalman_measurement_noise << "\n"
-        << "kalman_velocity_damping = " << kalman_velocity_damping << "\n"
-        << "kalman_max_velocity = " << kalman_max_velocity << "\n"
-        << std::setprecision(0)
-        << "kalman_warmup_frames = " << kalman_warmup_frames << "\n"
-        << "kalman_compensate_detection_delay = " << (kalman_compensate_detection_delay ? "true" : "false") << "\n"
-        << std::fixed << std::setprecision(2)
-        << "kalman_additional_prediction_ms = " << kalman_additional_prediction_ms << "\n"
-        << "kalman_reset_timeout_sec = " << kalman_reset_timeout_sec << "\n"
+        << "prediction_tau = " << prediction_tau << "\n"
+        << "prediction_compensate_delay = " << (prediction_compensate_delay ? "true" : "false") << "\n"
+        << "prediction_reset_timeout_sec = " << prediction_reset_timeout_sec << "\n"
 
         << "snapRadius = " << snapRadius << "\n"
         << "nearRadius = " << nearRadius << "\n"
@@ -839,7 +826,6 @@ bool Config::saveConfig(const std::string& filename)
         << "bezier_enabled = " << (bezier_enabled ? "true" : "false") << "\n"
         << std::fixed << std::setprecision(2)
         << "bezier_strength = " << bezier_strength << "\n"
-        << "preset_style = " << preset_style << "\n"
         << "move_ema_enabled = " << (move_ema_enabled ? "true" : "false") << "\n"
         << "move_ema_alpha = " << move_ema_alpha << "\n\n";
 
@@ -850,31 +836,6 @@ bool Config::saveConfig(const std::string& filename)
         << "wind_W = " << wind_W << "\n"
         << "wind_M = " << wind_M << "\n"
         << "wind_D = " << wind_D << "\n\n";
-
-    // === Arduino 硬件输入 ===
-    file << "# Arduino\n"
-        << "arduino_baudrate = " << arduino_baudrate << "\n"
-        << "arduino_port = " << arduino_port << "\n"
-        << "arduino_16_bit_mouse = " << (arduino_16_bit_mouse ? "true" : "false") << "\n"
-        << "arduino_enable_keys = " << (arduino_enable_keys ? "true" : "false") << "\n\n";
-
-    // === RP2350 硬件输入 ===
-    file << "# RP2350\n"
-        << "rp2350_baudrate = " << rp2350_baudrate << "\n"
-        << "rp2350_port = " << rp2350_port << "\n"
-        << "rp2350_16_bit_mouse = " << (rp2350_16_bit_mouse ? "true" : "false") << "\n"
-        << "rp2350_enable_keys = " << (rp2350_enable_keys ? "true" : "false") << "\n\n";
-
-    // === Teensy 4.1 RawHID 通用鼠标桥接 ===
-    file << "# Teensy 4.1 RawHID generic mouse bridge\n"
-        << "teensy_hid_serial = " << teensy_hid_serial << "\n"
-        << "teensy_hid_vid_filter = " << teensy_hid_vid_filter << "\n"
-        << "teensy_hid_pid_filter = " << teensy_hid_pid_filter << "\n"
-        << "teensy_hid_usage_page = " << teensy_hid_usage_page << "\n"
-        << "teensy_hid_usage_id = " << teensy_hid_usage_id << "\n"
-        << "teensy_hid_open_index = " << teensy_hid_open_index << "\n"
-        << "teensy_hid_packet_timeout_ms = " << teensy_hid_packet_timeout_ms << "\n"
-        << "teensy_hid_reconnect_interval_ms = " << teensy_hid_reconnect_interval_ms << "\n\n";
 
     // === kmbox_net 网络输入 ===
     file << "# Kmbox_net\n"
@@ -1057,7 +1018,9 @@ bool Config::saveConfig(const std::string& filename)
         << "show_fps = " << (show_fps ? "true" : "false") << "\n"
         << "screenshot_button = " << joinStrings(screenshot_button) << "\n"
         << "screenshot_delay = " << screenshot_delay << "\n"
-        << "verbose = " << (verbose ? "true" : "false") << "\n\n";
+        << "verbose = " << (verbose ? "true" : "false") << "\n"
+        << "pipeline_tracer_enabled = " << (pipeline_tracer_enabled ? "true" : "false") << "\n"
+        << "pipeline_tracer_max_frames = " << pipeline_tracer_max_frames << "\n\n";
 
     // === 当前激活的游戏配置 ===
     file << "# Active game profile\n";
@@ -1116,4 +1079,31 @@ std::pair<double, double> Config::degToCounts(double degX, double degY, double f
     double cx = degX / (gp.sens * gp.yaw * scale);
     double cy = degY / (gp.sens * gp.pitch * scale);
     return { cx, cy };
+}
+
+void Config::applyAutoDerivedTrackerParams(int detectionResolution, int captureFps)
+{
+    if (!auto_derive_tracker_params)
+        return;
+
+    std::lock_guard<std::mutex> cfgLock(configMutex);  // 保护对 config 字段的写入
+
+    const double scale = static_cast<double>(detectionResolution) / 640.0;
+    const int clampedFps = std::clamp(captureFps, 15, 500);
+
+    ml_confirm_threshold   = 2;
+    ml_termination_frames  = std::max(5, clampedFps / 8);
+    ml_noise_vx            = static_cast<float>(1.0 * scale);
+    ml_noise_vy            = static_cast<float>(1.0 * scale);
+    ml_noise_w             = 0.01f;
+    ml_noise_h             = 0.01f;
+    ml_measurement_stddev  = static_cast<float>(5.0 * scale);
+    ml_coast_frames        = std::max(8, clampedFps / 4);
+    pure_pursuit_dead_zone = static_cast<float>(std::max(1.0, detectionResolution / 320.0));
+    pure_pursuit_smoothing = 0.8f;
+    pure_pursuit_gain      = 0.85f;  // 统一自动推导，与 mouse.cpp 中 autoGain 保持一致
+    ml_recapture_iou       = 0.3f;
+    ml_recapture_distance_mult = 2.5f;
+    ml_coast_velocity_decay    = 1.0f;
+    // motion_change_protection 由用户手动控制，自动推导不覆盖
 }

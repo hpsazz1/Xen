@@ -179,7 +179,7 @@ void drawBindingRowsAndMarkDirty(const char* rowLabel, std::vector<std::string>&
 void draw_buttons()
 {
     // 开始 "热键" 章节（带可折叠功能）
-    if (OverlayUI::BeginSection("热键", "buttons_section_hotkeys"))
+    if (OverlayUI::BeginSection("按键绑定", "buttons_section_hotkeys"))
     {
         // 为各个按钮动作绘制绑定行，每个动作支持单键或多键绑定
         drawBindingRowsAndMarkDirty("瞄准", config.button_targeting);

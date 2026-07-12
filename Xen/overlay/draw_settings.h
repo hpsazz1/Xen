@@ -47,5 +47,7 @@ void draw_game_overlay_general();
 void draw_game_overlay_visuals();
 /** @brief 绘制游戏覆盖层图标设置 */
 void draw_game_overlay_icon();
+/** @brief 绘制流水线追踪面板 */
+void draw_pipeline_tracer();
 
 #endif // DRAW_SETTINGS_H

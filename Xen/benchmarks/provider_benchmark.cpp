@@ -1385,18 +1385,18 @@ std::vector<std::filesystem::path> CollectModelCandidates(const CliOptions& opti
     std::filesystem::path modelsDir("models");
     if (std::filesystem::exists(modelsDir))
     {
-        // 注意：这里 shadow 了外部 candidates，但后续通过 addCandidate 写入的是外部 vector
-        std::vector<std::filesystem::path> candidates;
+        // 临时列表收集 ONNX 文件，排序后加入外部 candidates
+        std::vector<std::filesystem::path> onnxFiles;
         for (const auto& entry : std::filesystem::directory_iterator(modelsDir))
         {
             if (entry.is_regular_file() && ToLower(entry.path().extension().string()) == ".onnx")
-                candidates.push_back(entry.path());
+                onnxFiles.push_back(entry.path());
         }
 
-        if (!candidates.empty())
+        if (!onnxFiles.empty())
         {
-            std::sort(candidates.begin(), candidates.end());
-            for (const auto& candidate : candidates)
+            std::sort(onnxFiles.begin(), onnxFiles.end());
+            for (const auto& candidate : onnxFiles)
                 addCandidate(candidate);
         }
     }
@@ -1795,7 +1795,7 @@ size_t PostprocessOutputs(
     {
         const float* ptr = outData + static_cast<size_t>(b) * frameOutputSize;
         std::vector<int64_t> shape2d = { rows, cols };
-        auto detections = postProcessYoloDML(ptr, shape2d, numClasses, confThreshold, nmsThreshold);
+        auto detections = postProcessYolo(ptr, shape2d, numClasses, confThreshold, nmsThreshold);
 
         // 如果模型输出分辨率与目标分辨率不同，进行坐标缩放
         if (targetW != outputResolution || targetH != outputResolution)

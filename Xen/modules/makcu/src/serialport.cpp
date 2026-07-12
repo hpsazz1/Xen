@@ -361,7 +361,7 @@ namespace makcu {
                 }
 
             }
-            catch (const std::exception& e) {
+            catch (const std::exception&) {
                 // 记录特定异常用于调试，但继续运行
                 // 在生产环境中，建议使用适当的日志框架
                 #ifdef DEBUG

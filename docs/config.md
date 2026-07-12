@@ -13,7 +13,7 @@
 - 按键列表以逗号分隔，例如 `RightMouseButton,LeftShift`。
 - 路径可以是相对于可执行文件夹的路径。
 - 如果某个值超出其可接受范围，应用会将其限制在范围内或回退到有效的默认值。
-- Razer 和 Teensy 控制方式在被选中时不会回退到其他方式。
+- Razer 控制方式在被选中时不会回退到其他方式。
 
 以下默认值是针对全新配置生成的默认值。源代码中有少量旧版缺失键的回退值因向后兼容而不同；这些差异已在相关位置标注。
 
@@ -131,7 +131,6 @@ capture_fps = 60
 有效值：
 
 ```text
-WIN32, GHUB, RAZER, ARDUINO, RP2350, TEENSY41, TEENSY41_HID, KMBOX_NET, KMBOX_A, MAKCU
 ```
 
 | 方式 | 说明 |
@@ -139,17 +138,12 @@ WIN32, GHUB, RAZER, ARDUINO, RP2350, TEENSY41, TEENSY41_HID, KMBOX_NET, KMBOX_A,
 | `WIN32` | 标准 Windows 鼠标事件。 |
 | `GHUB` | 使用 GHub DLL 输出（如果可用）。 |
 | `RAZER` | 通过 `rzctl.dll` 使用 Razer 控制 DLL 输出。 |
-| `ARDUINO` | 串行 Arduino 鼠标桥接。 |
-| `RP2350` | 串行 RP2350 鼠标桥接。 |
-| `TEENSY41` | Teensy 4.1 串行鼠标桥接。 |
-| `TEENSY41_HID` | Teensy 4.1 RawHID 控制路径。 |
 | `KMBOX_NET` | 网络 kmbox 控制。 |
 | `KMBOX_A` | kmbox A 串行/HID 风格控制。 |
 | `MAKCU` | MAKCU 串行控制。 |
 
-`WIN32` 是最简单的首次测试方式，但它使用的是标准 Windows 合成鼠标事件。某些游戏会忽略或阻止该输入路径。如果检测框可见但游戏未对瞄准移动或自动射击做出反应，请切换到支持的运行时或外部输入设备（如 G HUB、Razer、Arduino/RP2350/Teensy、KMBOX 或 MAKCU），并确认该设备已连接。
 
-当选择硬件方式时，应用期望该方式正常工作。Razer 和 Teensy 是明确指定且不会静默回退到 Win32 或其他备用方式的。
+当选择硬件方式时，应用期望该方式正常工作。Razer 是明确指定且不会静默回退到 Win32 或其他备用方式的。
 
 ## 轨迹模拟
 
@@ -162,45 +156,6 @@ WIN32, GHUB, RAZER, ARDUINO, RP2350, TEENSY41, TEENSY41_HID, KMBOX_NET, KMBOX_A,
 | `wind_D` | `8.0` | 微调距离阈值，靠近目标后切换为精细微调模式。 |
 
 ## 设备控制章节
-
-### Arduino
-
-| 键 | 默认值 | 说明 |
-|---|---:|---|
-| `arduino_baudrate` | `115200` | 串行波特率。 |
-| `arduino_port` | `COM0` | 串行端口。 |
-| `arduino_16_bit_mouse` | `false` | 使用 16 位鼠标移动协议。 |
-| `arduino_enable_keys` | `false` | 允许通过 Arduino 处理按键/按钮。 |
-
-### RP2350
-
-| 键 | 默认值 | 说明 |
-|---|---:|---|
-| `rp2350_baudrate` | `115200` | 串行波特率。 |
-| `rp2350_port` | `COM0` | 串行端口。 |
-| `rp2350_16_bit_mouse` | `true` | 使用 16 位鼠标移动协议。 |
-| `rp2350_enable_keys` | `false` | 允许通过 RP2350 处理按键/按钮。 |
-
-### Teensy 4.1 RawHID
-
-仅在使用以下配置时使用此章节：
-
-```ini
-input_method = TEENSY41_HID
-```
-
-| 键 | 默认值 | 说明 |
-|---|---:|---|
-| `teensy_hid_serial` | `AUTO` | 串行过滤。使用 `AUTO` 跳过串行过滤。 |
-| `teensy_hid_vid_filter` | `AUTO` | 供应商 ID 过滤。使用 `AUTO` 跳过 VID 过滤。 |
-| `teensy_hid_pid_filter` | `AUTO` | 产品 ID 过滤。使用 `AUTO` 跳过 PID 过滤。 |
-| `teensy_hid_usage_page` | `65451` | HID 用法页，十进制形式为 `0xFFAB`。 |
-| `teensy_hid_usage_id` | `512` | HID 用法 ID，十进制形式为 `0x0200`。 |
-| `teensy_hid_open_index` | `0` | 当多个 HID 设备匹配时，打开哪一个。 |
-| `teensy_hid_packet_timeout_ms` | `2` | 数据包写入/读取超时。 |
-| `teensy_hid_reconnect_interval_ms` | `500` | 设备断开后的重连间隔。 |
-
-Teensy 路径发送带报告 ID 前缀的 64 字节数据包，需要匹配的固件。
 
 ### Kmbox Net
 

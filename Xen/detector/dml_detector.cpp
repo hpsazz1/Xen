@@ -31,6 +31,7 @@
 #ifdef USE_CUDA
 #include "depth/depth_mask.h"
 #endif
+#include "detection_filters.h"
 
 extern std::atomic<bool> detector_model_changed;
 extern std::atomic<bool> detection_resolution_changed;
@@ -318,136 +319,7 @@ namespace
         return detections;
     }
 
-#ifdef USE_CUDA
-    /**
-     * intersectsDepthMask - 判断检测框是否与深度掩码区域相交
-     * 先检查检测框中心点是否在掩码区域内，再检查整个 ROI 是否有非零像素。
-     * @param box  检测框
-     * @param mask 深度掩码（单通道 8 位图像，非零表示需要抑制的区域）
-     * @return 相交返回 true
-     */
-    bool intersectsDepthMask(const cv::Rect& box, const cv::Mat& mask)
-    {
-        if (box.width <= 0 || box.height <= 0 || mask.empty() || mask.type() != CV_8UC1)
-            return false;
-
-        const cv::Rect imageBounds(0, 0, mask.cols, mask.rows);
-        const cv::Rect clipped = box & imageBounds;
-        if (clipped.width <= 0 || clipped.height <= 0)
-            return false;
-
-        // 检查检测框中心点
-        const int cx = clipped.x + clipped.width / 2;
-        const int cy = clipped.y + clipped.height / 2;
-        if (mask.at<uint8_t>(cy, cx) != 0)
-            return true;
-
-        // 检查整个 ROI
-        const cv::Mat roi = mask(clipped);
-        return cv::countNonZero(roi) > 0;
-    }
-
-    /**
-     * filterDetectionsByDepthMask - 使用深度掩码过滤检测结果
-     *
-     * 深度掩码用于抑制特定深度范围内的检测结果（如排除背景或前景）。
-     * 支持帧保持（hold）机制：通过 holdTtl 掩码将深度抑制状态
-     * 维持若干帧，防止因深度推理帧率低于检测帧率导致的闪烁。
-     *
-     * @param detections 检测结果列表（会被原地修改）
-     */
-    void filterDetectionsByDepthMask(std::vector<Detection>& detections)
-    {
-        static cv::Mat holdTtl;
-
-        if (detections.empty())
-            return;
-
-        if (!config.depth_inference_enabled || !config.depth_mask_enabled)
-        {
-            holdTtl.release();
-            return;
-        }
-
-        const int holdFrames = std::clamp(config.depth_mask_hold_frames, 0, 120);
-        cv::Mat currentMask = getCurrentDetectionSuppressionMask();
-        cv::Mat suppressionMask;
-
-        if (holdFrames <= 0)
-        {
-            // 无保持帧：直接使用当前深度掩码
-            holdTtl.release();
-            suppressionMask = currentMask;
-        }
-        else
-        {
-            // 有保持帧：更新 holdTtl，每帧减 1，在掩码区域重置为 holdFrames
-            if (!currentMask.empty() && currentMask.type() == CV_8UC1)
-            {
-                if (holdTtl.empty() || holdTtl.size() != currentMask.size())
-                    holdTtl = cv::Mat::zeros(currentMask.size(), CV_16UC1);
-                cv::subtract(holdTtl, cv::Scalar(1), holdTtl);
-                holdTtl.setTo(cv::Scalar(static_cast<uint16_t>(holdFrames)), currentMask);
-            }
-            else if (!holdTtl.empty())
-            {
-                cv::subtract(holdTtl, cv::Scalar(1), holdTtl);
-            }
-
-            // 从 holdTtl 生成抑制掩码（TTL > 0 的像素）
-            if (!holdTtl.empty() && cv::countNonZero(holdTtl) > 0)
-            {
-                cv::compare(holdTtl, cv::Scalar(0), suppressionMask, cv::CMP_GT);
-            }
-            else
-            {
-                suppressionMask.release();
-            }
-        }
-
-        if (suppressionMask.empty() || suppressionMask.type() != CV_8UC1)
-            return;
-
-        // 移除与深度掩码相交的检测结果
-        detections.erase(
-            std::remove_if(detections.begin(), detections.end(),
-                [&suppressionMask](const Detection& det) { return intersectsDepthMask(det.box, suppressionMask); }),
-            detections.end());
-    }
-#else
-    /**
-     * filterDetectionsByDepthMask - 非 CUDA 编译时空实现
-     * 深度掩码功能仅在 CUDA 路径中可用。
-     */
-    void filterDetectionsByDepthMask(std::vector<Detection>&)
-    {
-    }
-#endif
-}
-
-/**
- * filterDetectionsByCircleFov - 使用圆形视野（FOV）过滤检测结果
- * 移除所有中心点位于圆形 FOV 区域之外的检测框。
- * @param detections 检测结果列表（会被原地修改）
- */
-void filterDetectionsByCircleFov(std::vector<Detection>& detections)
-{
-    if (detections.empty() || !config.circle_fov_enabled)
-        return;
-
-    const cv::Size detectionSize(config.detection_resolution, config.detection_resolution);
-    detections.erase(
-        std::remove_if(detections.begin(), detections.end(),
-            [&detectionSize](const Detection& det)
-            {
-                const cv::Point2f center(
-                    static_cast<float>(det.box.x) + static_cast<float>(det.box.width) * 0.5f,
-                    static_cast<float>(det.box.y) + static_cast<float>(det.box.height) * 0.5f);
-                return !pointInsideCircleFov(center, detectionSize, config.circle_fov_radius_percent);
-            }),
-        detections.end());
-}
-
+// filterDetectionsByCircleFov 已移至 detection_filters.cpp（共享实现）
 /**
  * GetDMLDeviceName - 通过 DXGI API 获取 DirectML 设备的名称
  * @param deviceId 设备索引
@@ -470,6 +342,8 @@ std::string GetDMLDeviceName(int deviceId)
     std::wstring wname(desc.Description);
     return WideToUtf8(wname);
 }
+
+} // namespace
 
 /**
  * DirectMLDetector 构造函数
@@ -1022,7 +896,7 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
         std::vector<Detection> detections;
 
         std::vector<int64_t> shp = { static_cast<int64_t>(rows), static_cast<int64_t>(cols) };
-        detections = postProcessYoloDML(ptr, shp, num_classes, conf_thr, nms_thr, max_detections, &nmsTimeTmp);
+        detections = postProcessYolo(ptr, shp, num_classes, conf_thr, nms_thr, max_detections, &nmsTimeTmp);
 
         // 缩放检测框（如果使用了固定输入尺寸）
         if (useFixed && (target_w != config.detection_resolution || target_h != config.detection_resolution))

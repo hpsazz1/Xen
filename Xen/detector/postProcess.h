@@ -24,8 +24,8 @@ void NMS(
     std::chrono::duration<double, std::milli>* nmsTime = nullptr
 );
 
-#ifdef USE_CUDA
-// TensorRT 后处理：将模型原始输出解析为 Detection 列表
+// 统一 YOLO 后处理：将模型原始输出解析为 Detection 列表
+// scale: TRT 后端传 img_scale, DML 后端传 1.0f（预处理已缩放到检测分辨率）
 std::vector<Detection> postProcessYolo(
     const float* output,
     const std::vector<int64_t>& shape,
@@ -33,20 +33,7 @@ std::vector<Detection> postProcessYolo(
     float confThreshold,
     float nmsThreshold,
     int maxDetections = 100,
-    std::chrono::duration<double, std::milli>* nmsTime = nullptr
+    std::chrono::duration<double, std::milli>* nmsTime = nullptr,
+    float scale = 1.0f
 );
-#endif
-
-#ifndef USE_CUDA
-// DirectML 后处理：将 ONNX Runtime 输出解析为 Detection 列表
-std::vector<Detection> postProcessYoloDML(
-    const float* output,
-    const std::vector<int64_t>& shape,
-    int numClasses,
-    float confThreshold,
-    float nmsThreshold,
-    int maxDetections = 100,
-    std::chrono::duration<double, std::milli>* nmsTime = nullptr
-);
-#endif
 #endif // POSTPROCESS_H

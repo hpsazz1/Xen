@@ -36,9 +36,9 @@ public:
     /** @brief 鼠标相对移动 (x, y) */
     void move(int x, int y);
 
-    bool aiming_active;    ///< 是否正在瞄准
-    bool shooting_active;  ///< 是否正在射击
-    bool zooming_active;   ///< 是否正在缩放
+    std::atomic<bool> aiming_active{false};    ///< 是否正在瞄准 (callback 线程写, 主线程读)
+    std::atomic<bool> shooting_active{false};  ///< 是否正在射击
+    std::atomic<bool> zooming_active{false};   ///< 是否正在缩放
 
 private:
     /** @brief 按钮回调函数，处理设备上报的按钮事件 */

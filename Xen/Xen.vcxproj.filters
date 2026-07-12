@@ -12,9 +12,6 @@
     <ClCompile Include="mouse\MouseInput.cpp" />
     <ClCompile Include="mouse\mouse.cpp" />
     <ClCompile Include="mouse\rzctl.cpp" />
-    <ClCompile Include="mouse\Teensy41RawHid.cpp" />
-    <ClCompile Include="mouse\Arduino.cpp" />
-    <ClCompile Include="mouse\RP2350.cpp" />
     <ClCompile Include="mouse\AimbotTarget.cpp" />
     <ClCompile Include="detector\trt_detector.cpp" />
     <ClCompile Include="tensorrt\nvinf.cpp" />
@@ -38,10 +35,12 @@
     <ClCompile Include="overlay\draw_ai.cpp" />
     <ClCompile Include="overlay\draw_buttons.cpp" />
     <ClCompile Include="overlay\draw_overlay.cpp" />
+    <ClCompile Include="overlay\draw_pipeline_tracer.cpp" />
     <ClCompile Include="overlay\draw_debug.cpp" />
     <ClCompile Include="detector\dml_detector.cpp" />
     <ClCompile Include="overlay\draw_stats.cpp" />
     <ClCompile Include="detector\detection_buffer.cpp" />
+    <ClCompile Include="detector\detection_filters.cpp" />
     <ClCompile Include="mouse\kmbox_net\kmboxNet.cpp" />
     <ClCompile Include="mouse\kmboxNetConnection.cpp" />
     <ClCompile Include="overlay\Game_overlay.cpp" />
@@ -49,12 +48,10 @@
     <ClCompile Include="overlay\config_dirty.cpp" />
     <ClCompile Include="mem\gpu_resource_manager.cpp" />
     <ClCompile Include="mem\cpu_affinity_manager.cpp" />
+    <ClCompile Include="debug\pipeline_tracer.cpp" />
     <ClCompile Include="capture\udp_capture.cpp" />
     <ClCompile Include="capture\ndi_capture.cpp" />
     <ClCompile Include="modules\makcu\src\makcu.cpp" />
-    <ClCompile Include="modules\serial\src\serial.cc" />
-    <ClCompile Include="modules\serial\src\impl\win.cc" />
-    <ClCompile Include="modules\serial\src\impl\list_ports\list_ports_win.cc" />
     <ClCompile Include="modules\makcu\src\serialport.cpp" />
     <ClCompile Include="mouse\Makcu.cpp" />
     <ClCompile Include="depth\depth_anything_trt.cpp" />
@@ -87,9 +84,6 @@
     <ClInclude Include="mouse\MouseInput.h" />
     <ClInclude Include="mouse\mouse.h" />
     <ClInclude Include="mouse\rzctl.h" />
-    <ClInclude Include="mouse\Teensy41RawHid.h" />
-    <ClInclude Include="mouse\Arduino.h" />
-    <ClInclude Include="mouse\RP2350.h" />
     <ClInclude Include="mouse\AimbotTarget.h" />
     <ClInclude Include="detector\trt_detector.h" />
     <ClInclude Include="tensorrt\nvinf.h" />
@@ -113,6 +107,7 @@
     <ClInclude Include="detector\dml_detector.h" />
     <ClInclude Include="tensorrt\trt_monitor.h" />
     <ClInclude Include="detector\detection_buffer.h" />
+    <ClInclude Include="detector\detection_filters.h" />
     <ClInclude Include="mouse\kmbox_net\HidTable.h" />
     <ClInclude Include="mouse\kmbox_net\kmboxNet.h" />
     <ClInclude Include="mouse\kmbox_net\picture.h" />
@@ -121,6 +116,7 @@
     <ClInclude Include="overlay\config_dirty.h" />
     <ClInclude Include="mem\gpu_resource_manager.h" />
     <ClInclude Include="mem\cpu_affinity_manager.h" />
+    <ClInclude Include="debug\pipeline_tracer.h" />
     <ClInclude Include="detector\cuda_preprocess.h" />
     <ClInclude Include="overlay\draw_settings.h" />
     <ClInclude Include="capture\udp_capture.h" />

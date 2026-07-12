@@ -99,155 +99,333 @@ nvinfer1::ICudaEngine* loadEngineFromFile(const std::string& engineFile, nvinfer
     return engine;
 }
 
-// 完整ONNX到引擎的构建流程：解析ONNX，配置优化配置文件（静态/动态），
-// FP16/FP8标志，构建序列化网络，反序列化，保存到.engine文件
-nvinfer1::ICudaEngine* buildEngineFromOnnx(const std::string& onnxFile, nvinfer1::ILogger& logger)
-{
-    nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(logger);
-    const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-    nvinfer1::INetworkDefinition* network = builder->createNetworkV2(explicitBatch);
+	// ========================================================================
+	// peekOnnxInputInfo — 轻量级探测 ONNX 第一个输入的名称和维度
+	// ========================================================================
+	bool peekOnnxInputInfo(const std::string& onnxFile, nvinfer1::ILogger& logger,
+	                       std::string& outName, nvinfer1::Dims& outDims)
+	{
+	    nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(logger);
+	    if (!builder)
+	        return false;
 
-    nvinfer1::IBuilderConfig* cfg = builder->createBuilderConfig();
+	    const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+	    nvinfer1::INetworkDefinition* network = builder->createNetworkV2(explicitBatch);
+	    nvinfer1::IBuilderConfig* bcfg = builder->createBuilderConfig();
+	    if (!network || !bcfg)
+	    {
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return false;
+	    }
 
-    nvonnxparser::IParser* parser = nvonnxparser::createParser(*network, logger);
+	    nvonnxparser::IParser* parser = nvonnxparser::createParser(*network, logger);
+	    if (!parser)
+	    {
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return false;
+	    }
 
-    ImGuiProgressMonitor progressMonitor;
-    cfg->setProgressMonitor(&progressMonitor);
-    TrtExportResetState();
-    gIsTrtExporting = true;
-    struct ScopedExportState
-    {
-        ~ScopedExportState()
-        {
-            std::lock_guard<std::mutex> lock(gProgressMutex);
-            gProgressPhases.clear();
-            gIsTrtExporting = false;
-            gTrtExportCancelRequested = false;
-            gTrtExportLastUpdateMs = TrtNowMs();
-        }
-    } exportState;
+	    if (!parser->parseFromFile(onnxFile.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING)))
+	    {
+	        delete parser;
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return false;
+	    }
 
-    if (!parser->parseFromFile(onnxFile.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING)))
-    {
-        std::cerr << "[TensorRT] ERROR: Error parsing the ONNX file: " << onnxFile << std::endl;
-        delete parser;
-        delete network;
-        delete builder;
-        delete cfg;
-        return nullptr;
-    }
+	    nvinfer1::ITensor* inputTensor = network->getInput(0);
+	    if (!inputTensor)
+	    {
+	        delete parser;
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return false;
+	    }
 
-    nvinfer1::ITensor* inputTensor = network->getInput(0);
-    const char* inName = inputTensor->getName();
-    nvinfer1::Dims inDims = inputTensor->getDimensions();
-    int H = (inDims.nbDims >= 4) ? inDims.d[2] : -1;
-    int W = (inDims.nbDims >= 4) ? inDims.d[3] : -1;
+	    outName = inputTensor->getName();
+	    outDims = inputTensor->getDimensions();
 
-    bool fixedByModel = (H > 0 && W > 0);
-    bool fixedByConfig = config.fixed_input_size;
-    bool makeStatic = fixedByModel || fixedByConfig;
+	    delete parser;
+	    delete bcfg;
+	    delete network;
+	    delete builder;
+	    return true;
+	}
 
-    if (fixedByConfig && (H <= 0 || W <= 0))
-        H = W = config.detection_resolution;
+	// ========================================================================
+	// buildEngine — 统一引擎构建函数
+	// ========================================================================
+	nvinfer1::ICudaEngine* buildEngine(const BuildConfig& cfg, nvinfer1::IRuntime** outRuntime)
+	{
+	    if (!cfg.logger)
+	    {
+	        std::cerr << "[TensorRT] ERROR: Logger is required for engine build." << std::endl;
+	        return nullptr;
+	    }
 
-    nvinfer1::IOptimizationProfile* profile = builder->createOptimizationProfile();
-    if (makeStatic)
-    {
-        nvinfer1::Dims4 d{ 1, 3, H, W };
-        profile->setDimensions(inName, nvinfer1::OptProfileSelector::kMIN, d);
-        profile->setDimensions(inName, nvinfer1::OptProfileSelector::kOPT, d);
-        profile->setDimensions(inName, nvinfer1::OptProfileSelector::kMAX, d);
-        if (config.verbose)
-            std::cout << "[TensorRT] Static profile " << H << "x" << W << std::endl;
-    }
-    else
-    {
-        profile->setDimensions(inName, nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ 1, 3, 160, 160 });
-        profile->setDimensions(inName, nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ 1, 3, 320, 320 });
-        profile->setDimensions(inName, nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ 1, 3, 640, 640 });
-        if (config.verbose)
-            std::cout << "[TensorRT] Dynamic profile 160/320/640" << std::endl;
-    }
+	    // ---- 创建 builder / network / config ----
+	    nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(*cfg.logger);
+	    if (!builder)
+	    {
+	        std::cerr << "[TensorRT] ERROR: Failed to create TensorRT builder." << std::endl;
+	        return nullptr;
+	    }
 
-    cfg->addOptimizationProfile(profile);
+	    const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+	    nvinfer1::INetworkDefinition* network = builder->createNetworkV2(explicitBatch);
+	    nvinfer1::IBuilderConfig* bcfg = builder->createBuilderConfig();
+	    if (!network || !bcfg)
+	    {
+	        std::cerr << "[TensorRT] ERROR: Failed to create network or builder config." << std::endl;
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return nullptr;
+	    }
 
+	    // ---- 创建 ONNX 解析器 ----
+	    nvonnxparser::IParser* parser = nvonnxparser::createParser(*network, *cfg.logger);
+	    if (!parser)
+	    {
+	        std::cerr << "[TensorRT] ERROR: Failed to create ONNX parser." << std::endl;
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return nullptr;
+	    }
 
-    if (config.export_enable_fp16)
-    {
-        if (config.verbose)
-            std::cout << "[TensorRT] Set FP16" << std::endl;
-        cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
-    }
-    if (config.export_enable_fp8)
-    {
-        if (config.verbose)
-            std::cout << "[TensorRT] Set FP8" << std::endl;
-        cfg->setFlag(nvinfer1::BuilderFlag::kFP8);
-    }
+	    // ---- 进度监视器 ----
+	    ImGuiProgressMonitor defaultMonitor;
+	    nvinfer1::IProgressMonitor* monitor = cfg.progressMonitor ? cfg.progressMonitor : &defaultMonitor;
+	    bcfg->setProgressMonitor(monitor);
+	    TrtExportResetState();
+	    gIsTrtExporting = true;
+	    struct ScopedExportState
+	    {
+	        ~ScopedExportState()
+	        {
+	            std::lock_guard<std::mutex> lock(gProgressMutex);
+	            gProgressPhases.clear();
+	            gIsTrtExporting = false;
+	            gTrtExportCancelRequested = false;
+	            gTrtExportLastUpdateMs = TrtNowMs();
+	        }
+	    } exportState;
 
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
+	    // ---- 解析 ONNX ----
+	    if (!parser->parseFromFile(cfg.onnxPath.c_str(), static_cast<int>(cfg.parserSeverity)))
+	    {
+	        std::cerr << "[TensorRT] ERROR: Error parsing the ONNX file: " << cfg.onnxPath << std::endl;
+	        delete parser;
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return nullptr;
+	    }
 
-    std::cout << "[TensorRT] Building engine (this may take several minutes)..." << std::endl;
+	    // ---- 确定输入张量名称 ----
+	    std::string inName = cfg.inputName;
+	    if (inName.empty())
+	    {
+	        nvinfer1::ITensor* inputTensor = network->getInput(0);
+	        if (inputTensor)
+	            inName = inputTensor->getName();
+	    }
 
-    auto plan = builder->buildSerializedNetwork(*network, *cfg);
-    if (!plan)
-    {
-        std::cerr << "[TensorRT] ERROR: Could not build the engine" << std::endl;
-        cudaStreamDestroy(stream);
-        delete parser;
-        delete network;
-        delete builder;
-        delete cfg;
-        return nullptr;
-    }
+	    // ---- 优化配置文件（仅当维度已指定时） ----
+	    if (cfg.inputDimsMin.d[2] > 0 || cfg.inputDimsMin.d[3] > 0)
+	    {
+	        nvinfer1::IOptimizationProfile* profile = builder->createOptimizationProfile();
+	        profile->setDimensions(inName.c_str(), nvinfer1::OptProfileSelector::kMIN, cfg.inputDimsMin);
+	        profile->setDimensions(inName.c_str(), nvinfer1::OptProfileSelector::kOPT, cfg.inputDimsOpt);
+	        profile->setDimensions(inName.c_str(), nvinfer1::OptProfileSelector::kMAX, cfg.inputDimsMax);
+	        bcfg->addOptimizationProfile(profile);
 
-    nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(logger);
-    nvinfer1::ICudaEngine* engine = runtime->deserializeCudaEngine(plan->data(), plan->size());
+	        if (cfg.verbose)
+	        {
+	            bool isStatic = (cfg.inputDimsMin.d[2] == cfg.inputDimsMax.d[2] &&
+	                             cfg.inputDimsMin.d[3] == cfg.inputDimsMax.d[3]);
+	            if (isStatic)
+	                std::cout << "[TensorRT] Static profile " << cfg.inputDimsMin.d[2] << "x" << cfg.inputDimsMin.d[3] << std::endl;
+	            else
+	                std::cout << "[TensorRT] Dynamic profile "
+	                          << cfg.inputDimsMin.d[2] << "/" << cfg.inputDimsOpt.d[2] << "/" << cfg.inputDimsMax.d[2] << std::endl;
+	        }
+	    }
 
-    cudaStreamSynchronize(stream);
-    cudaStreamDestroy(stream);
+	    // ---- 精度标志 ----
+	    if (cfg.enableFp16)
+	    {
+	        if (cfg.verbose)
+	            std::cout << "[TensorRT] Set FP16" << std::endl;
+	        bcfg->setFlag(nvinfer1::BuilderFlag::kFP16);
+	    }
+	    if (cfg.enableFp8)
+	    {
+	        if (cfg.verbose)
+	            std::cout << "[TensorRT] Set FP8" << std::endl;
+	        bcfg->setFlag(nvinfer1::BuilderFlag::kFP8);
+	    }
 
-    if (!engine)
-    {
-        std::cerr << "[TensorRT] ERROR: Could not create engine" << std::endl;
-        delete plan;
-        delete runtime;
-        delete parser;
-        delete network;
-        delete builder;
-        delete cfg;
-        return nullptr;
-    }
+	    // ---- 工作空间（仅当显式指定时） ----
+	    if (cfg.workspaceSize > 0)
+	    {
+	        bcfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, cfg.workspaceSize);
+	    }
 
-    nvinfer1::IHostMemory* serializedModel = engine->serialize();
-    std::string engineFile = onnxFile.substr(0, onnxFile.find_last_of('.')) + ".engine";
-    std::ofstream p(engineFile, std::ios::binary);
-    if (!p)
-    {
-        std::cerr << "[TensorRT] ERROR: Could not open file to write: " << engineFile << std::endl;
-        delete serializedModel;
-        delete engine;
-        delete plan;
-        delete runtime;
-        delete parser;
-        delete network;
-        delete builder;
-        delete cfg;
-        return nullptr;
-    }
-    p.write(static_cast<const char*>(plan->data()), plan->size());
-    p.close();
+	    // ---- 可选 CUDA 流 ----
+	    cudaStream_t stream = nullptr;
+	    if (cfg.syncStream)
+	        cudaStreamCreate(&stream);
 
-    delete plan;
-    delete serializedModel;
-    delete runtime;
-    delete parser;
-    delete network;
-    delete cfg;
-    delete builder;
+	    std::cout << "[TensorRT] Building engine (this may take several minutes)..." << std::endl;
 
-    std::cout << "[TensorRT] The engine was built and saved to the file: " << engineFile << std::endl;
-    return engine;
-}
+	    // ---- 构建序列化网络 ----
+	    nvinfer1::IHostMemory* plan = builder->buildSerializedNetwork(*network, *bcfg);
+	    if (!plan)
+	    {
+	        std::cerr << "[TensorRT] ERROR: Could not build the engine" << std::endl;
+	        if (cfg.syncStream)
+	            cudaStreamDestroy(stream);
+	        delete parser;
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return nullptr;
+	    }
+
+	    // ---- 反序列化引擎 ----
+	    nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(*cfg.logger);
+	    if (!runtime)
+	    {
+	        std::cerr << "[TensorRT] ERROR: Could not create inference runtime" << std::endl;
+	        if (cfg.syncStream)
+	        {
+	            cudaStreamSynchronize(stream);
+	            cudaStreamDestroy(stream);
+	        }
+	        delete plan;
+	        delete parser;
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return nullptr;
+	    }
+	    nvinfer1::ICudaEngine* engine = runtime->deserializeCudaEngine(plan->data(), plan->size());
+
+	    if (cfg.syncStream)
+	    {
+	        cudaStreamSynchronize(stream);
+	        cudaStreamDestroy(stream);
+	    }
+
+	    if (!engine)
+	    {
+	        std::cerr << "[TensorRT] ERROR: Could not create engine" << std::endl;
+	        delete runtime;
+	        delete plan;
+	        delete parser;
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return nullptr;
+	    }
+
+	    // ---- 保存引擎文件 ----
+	    std::string engineFile = cfg.enginePath;
+	    if (engineFile.empty())
+	    {
+	        engineFile = cfg.onnxPath.substr(0, cfg.onnxPath.find_last_of('.')) + ".engine";
+	    }
+
+	    std::ofstream p(engineFile, std::ios::binary);
+	    if (!p)
+	    {
+	        std::cerr << "[TensorRT] ERROR: Could not open file to write: " << engineFile << std::endl;
+	        delete engine;
+	        delete runtime;
+	        delete plan;
+	        delete parser;
+	        delete bcfg;
+	        delete network;
+	        delete builder;
+	        return nullptr;
+	    }
+	    p.write(static_cast<const char*>(plan->data()), plan->size());
+	    p.close();
+
+	    if (outRuntime)
+	        *outRuntime = runtime;
+	    // NOTE: do NOT delete runtime — ICudaEngine in TensorRT 10 may internally
+	    // reference runtime resources. Caller assumes ownership via engine (and
+	    // optionally via outRuntime).
+	    delete plan;
+	    delete parser;
+	    delete bcfg;
+	    delete network;
+	    delete builder;
+
+	    if (cfg.verbose)
+	        std::cout << "[TensorRT] The engine was built and saved to the file: " << engineFile << std::endl;
+	    return engine;
+	}
+
+	// ========================================================================
+	// buildEngineFromOnnx — 薄封装，保持与原有调用者的兼容性
+	// ========================================================================
+	nvinfer1::ICudaEngine* buildEngineFromOnnx(const std::string& onnxFile, nvinfer1::ILogger& logger)
+	{
+	    // ---- 探测模型输入维度以决定静态/动态配置 ----
+	    std::string inName;
+	    nvinfer1::Dims inDims{};
+	    int H = -1, W = -1;
+
+	    if (peekOnnxInputInfo(onnxFile, logger, inName, inDims))
+	    {
+	        if (inDims.nbDims >= 4)
+	        {
+	            H = (inDims.d[2] > 0) ? static_cast<int>(inDims.d[2]) : -1;
+	            W = (inDims.d[3] > 0) ? static_cast<int>(inDims.d[3]) : -1;
+	        }
+	    }
+
+	    bool fixedByModel  = (H > 0 && W > 0);
+	    bool fixedByConfig = config.fixed_input_size;
+	    bool makeStatic    = fixedByModel || fixedByConfig;
+
+	    if (fixedByConfig && (H <= 0 || W <= 0))
+	        H = W = config.detection_resolution;
+
+	    // ---- 填充 BuildConfig ----
+	    BuildConfig bcfg;
+	    bcfg.onnxPath       = onnxFile;
+	    bcfg.logger         = &logger;
+	    bcfg.inputName      = inName;
+	    bcfg.enableFp16     = config.export_enable_fp16;
+	    bcfg.enableFp8      = config.export_enable_fp8;
+	    bcfg.syncStream     = true;
+	    bcfg.verbose        = config.verbose;
+
+	    if (makeStatic)
+	    {
+	        bcfg.inputDimsMin = nvinfer1::Dims4{ 1, 3, H, W };
+	        bcfg.inputDimsOpt = nvinfer1::Dims4{ 1, 3, H, W };
+	        bcfg.inputDimsMax = nvinfer1::Dims4{ 1, 3, H, W };
+	    }
+	    else
+	    {
+	        bcfg.inputDimsMin = nvinfer1::Dims4{ 1, 3, 160, 160 };
+	        bcfg.inputDimsOpt = nvinfer1::Dims4{ 1, 3, 320, 320 };
+	        bcfg.inputDimsMax = nvinfer1::Dims4{ 1, 3, 640, 640 };
+	    }
+
+	    // ---- 委托给统一构建函数 ----
+	    return buildEngine(bcfg, nullptr);
+	}
 #endif

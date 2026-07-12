@@ -17,7 +17,7 @@ void draw_overlay()
     constexpr int kMinReadableOpacity = 252;
 
     // 进入"Visual（视觉）"设置分区，对应界面上方的视觉分类标签
-    if (OverlayUI::BeginSection("视觉", "overlay_section_visual"))
+    if (OverlayUI::BeginSection("面板外观", "overlay_section_visual"))
     {
         // --- 叠加层透明度滑块 ---
         {

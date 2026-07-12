@@ -4,10 +4,6 @@
 // 本文件实现了针对所有受支持的鼠标硬件设备的 IMouseInput 接口，
 // 涵盖以下设备类型：
 //   - Win32      : Windows 原生 SendInput API（默认方案）
-//   - Arduino    : 串口连接的 Arduino 设备（传统 / Teensy 4.1 协议）
-//   - RP2350     : 串口连接的 RP2350 微控制器设备
-//   - Teensy41   : 串口连接的 Teensy 4.1 设备（Arduino 协议的变体）
-//   - Teensy41_HID : 通过 RawHID 接口通信的 Teensy 4.1 设备
 //   - GHub       : Logitech G Hub 游戏鼠标（ghub_mouse.dll）
 //   - Razer      : Razer 游戏鼠标（rzctl.dll）
 //   - Kmbox Net  : 基于网络（TCP）连接的 Kmbox 设备
@@ -34,13 +30,11 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
-#include "Arduino.h"
 #include "KmboxAConnection.h"
 #include "KmboxNetConnection.h"
 #include "Makcu.h"
-#include "RP2350.h"
-#include "Teensy41RawHid.h"
 #include "config.h"
 #include "ghub.h"
 #include "rzctl.h"
@@ -126,6 +120,31 @@ bool sendWin32Click(DWORD flag)
 }
 
 // ============================================================================
+// SerialMouseInputBase — 串口/硬件设备包装器模板基类
+//
+// 统一处理 isOpen/move/leftDown/leftUp 转发，子类只需定义 name()、
+// 构造函数和特定于设备的访问器方法。
+// 适用于 KmboxA 等具有统一 press()/release()/move() 接口的设备。
+// Makcu 使用 press(0)/release(0) 需覆写 leftDown/leftUp。
+// ============================================================================
+template <typename Device>
+class SerialMouseInputBase : public IMouseInput
+{
+public:
+    bool isOpen() const override { return device_ && device_->isOpen(); }
+    bool move(int dx, int dy) override
+    {
+        if (!isOpen()) return false;
+        device_->move(dx, dy);
+        return true;
+    }
+    Device* devicePtr() { return device_.get(); }
+
+protected:
+    std::unique_ptr<Device> device_;
+};
+
+// ============================================================================
 // Win32MouseInput — Windows 默认鼠标输入实现
 //
 // 封装 Win32 的 SendInput API 实现最基本的鼠标移动与点击操作。
@@ -145,265 +164,6 @@ public:
     bool move(int dx, int dy) override { return sendWin32Move(dx, dy); }
     bool leftDown() override { return sendWin32Click(MOUSEEVENTF_LEFTDOWN); }
     bool leftUp() override { return sendWin32Click(MOUSEEVENTF_LEFTUP); }
-};
-
-// ============================================================================
-// ArduinoMouseInput — Arduino 串口鼠标输入实现（传统协议）
-//
-// 通过串口连接 Arduino 微控制器，使用指定的 ArduinoProtocol 协议
-// （通常为 Legacy 协议）进行通信。Arduino 作为 USB HID 桥接器，
-// 接收串口指令并模拟鼠标操作。
-//
-// 特性说明:
-//   - 初始化时需指定串口名称（如 "COM3"）、波特率及协议版本
-//   - 支持可选的物理按键状态上报（useButtonState_ 为 true 时启用）
-//   - 按键状态通过逻辑映射函数 logicalButtonPressed() 将硬件按钮
-//     状态（shooting_active / zooming_active / aiming_active）映射为按键名
-//   - 提供 arduino() 方法允许外部直接访问底层 Arduino 对象
-// ============================================================================
-class ArduinoMouseInput final : public IMouseInput
-{
-public:
-    // 构造函数：创建 Arduino 串口连接
-    // 参数:
-    //   port           - 串口名称（如 "COM3"）
-    //   baudrate       - 串口波特率（如 115200）
-    //   useButtonState - 是否启用物理按键状态上报功能
-    //   protocol       - Arduino 通信协议版本（默认 Legacy）
-    ArduinoMouseInput(
-        const std::string& port,
-        unsigned int baudrate,
-        bool useButtonState,
-        ArduinoProtocol protocol = ArduinoProtocol::Legacy)
-        : device_(std::make_unique<Arduino>(port, baudrate, protocol)),
-          useButtonState_(useButtonState)
-    {
-    }
-
-    const char* name() const override { return "ARDUINO"; }
-    bool isOpen() const override { return device_ && device_->isOpen(); }
-    bool move(int dx, int dy) override
-    {
-        if (!isOpen())
-            return false;
-        device_->move(dx, dy);
-        return true;
-    }
-    bool leftDown() override
-    {
-        if (!isOpen())
-            return false;
-        device_->press();
-        return true;
-    }
-    bool leftUp() override
-    {
-        if (!isOpen())
-            return false;
-        device_->release();
-        return true;
-    }
-    bool hasPhysicalButtonState() const override { return useButtonState_; }
-    bool keyPressed(const std::string& keyName) override
-    {
-        return isOpen() && useButtonState_ &&
-            logicalButtonPressed(keyName, shootingActive(), zoomingActive(), aimingActive());
-    }
-    bool aimingActive() const override { return useButtonState_ && device_ && device_->aiming_active; }
-    bool shootingActive() const override { return useButtonState_ && device_ && device_->shooting_active; }
-    bool zoomingActive() const override { return useButtonState_ && device_ && device_->zooming_active; }
-    Arduino* arduino() override { return device_.get(); }
-
-private:
-    std::unique_ptr<Arduino> device_;       // 底层 Arduino 串口设备实例
-    bool useButtonState_ = false;           // 是否启用物理按键状态上报
-};
-
-// ============================================================================
-// RP2350MouseInput — RP2350 微控制器串口鼠标输入实现
-//
-// 通过串口连接 RP2350（树莓派 Pico 2 等）微控制器设备。
-// 与 ArduinoMouseInput 结构类似，但内部使用 RP2350 驱动类，
-// 且原子状态变量（std::atomic<bool>）适用于多线程环境。
-//
-// 特性说明:
-//   - 初始化时需指定串口名称与波特率
-//   - 支持可选的物理按键状态上报（useButtonState_ 控制开关）
-//   - 状态变量（shooting_active 等）使用 std::atomic 保证线程安全
-//   - 提供 rp2350() 方法允许外部直接访问底层 RP2350 对象
-// ============================================================================
-class RP2350MouseInput final : public IMouseInput
-{
-public:
-    // 构造函数：创建 RP2350 串口连接
-    // 参数:
-    //   port           - 串口名称（如 "COM5"）
-    //   baudrate       - 串口波特率
-    //   useButtonState - 是否启用物理按键状态上报
-    RP2350MouseInput(const std::string& port, unsigned int baudrate, bool useButtonState)
-        : device_(std::make_unique<RP2350>(port, baudrate)),
-          useButtonState_(useButtonState)
-    {
-    }
-
-    const char* name() const override { return "RP2350"; }
-    bool isOpen() const override { return device_ && device_->isOpen(); }
-    bool move(int dx, int dy) override
-    {
-        if (!isOpen())
-            return false;
-        device_->move(dx, dy);
-        return true;
-    }
-    bool leftDown() override
-    {
-        if (!isOpen())
-            return false;
-        device_->press();
-        return true;
-    }
-    bool leftUp() override
-    {
-        if (!isOpen())
-            return false;
-        device_->release();
-        return true;
-    }
-    bool hasPhysicalButtonState() const override { return useButtonState_; }
-    bool keyPressed(const std::string& keyName) override
-    {
-        return isOpen() && useButtonState_ &&
-            logicalButtonPressed(keyName, shootingActive(), zoomingActive(), aimingActive());
-    }
-    bool aimingActive() const override { return useButtonState_ && device_ && device_->aiming_active.load(); }
-    bool shootingActive() const override { return useButtonState_ && device_ && device_->shooting_active.load(); }
-    bool zoomingActive() const override { return useButtonState_ && device_ && device_->zooming_active.load(); }
-    RP2350* rp2350() override { return device_.get(); }
-
-private:
-    std::unique_ptr<RP2350> device_;        // 底层 RP2350 串口设备实例
-    bool useButtonState_ = false;           // 是否启用物理按键状态上报
-};
-
-// ============================================================================
-// Teensy41MouseInput — Teensy 4.1 串口鼠标输入实现
-//
-// 使用 Arduino 协议但指定协议版本为 ArduinoProtocol::Teensy41，
-// 通过串口连接 PJRC Teensy 4.1 开发板。Teensy 4.1 作为 USB HID
-// 设备接收串口指令模拟鼠标操作。
-//
-// 特性说明:
-//   - 底层复用了 Arduino 驱动类，但使用 Teensy41 专属协议
-//   - 始终启用物理按键状态上报（hasPhysicalButtonState 返回 true）
-//   - 串口端口与波特率通过构造函数参数传入
-//   - 提供 arduino() 方法允许外部访问底层的 Arduino 对象
-// ============================================================================
-class Teensy41MouseInput final : public IMouseInput
-{
-public:
-    // 构造函数：创建 Teensy 4.1 串口连接（复用 Arduino 驱动，使用 Teensy41 协议）
-    // 参数:
-    //   port     - 串口名称
-    //   baudrate - 串口波特率
-    Teensy41MouseInput(const std::string& port, unsigned int baudrate)
-        : device_(std::make_unique<Arduino>(port, baudrate, ArduinoProtocol::Teensy41))
-    {
-    }
-
-    const char* name() const override { return "TEENSY41"; }
-    bool isOpen() const override { return device_ && device_->isOpen(); }
-    bool move(int dx, int dy) override
-    {
-        if (!isOpen())
-            return false;
-        device_->move(dx, dy);
-        return true;
-    }
-    bool leftDown() override
-    {
-        if (!isOpen())
-            return false;
-        device_->press();
-        return true;
-    }
-    bool leftUp() override
-    {
-        if (!isOpen())
-            return false;
-        device_->release();
-        return true;
-    }
-    bool hasPhysicalButtonState() const override { return true; }
-    bool keyPressed(const std::string& keyName) override
-    {
-        return isOpen() &&
-            logicalButtonPressed(keyName, shootingActive(), zoomingActive(), aimingActive());
-    }
-    bool aimingActive() const override { return device_ && device_->aiming_active; }
-    bool shootingActive() const override { return device_ && device_->shooting_active; }
-    bool zoomingActive() const override { return device_ && device_->zooming_active; }
-    Arduino* arduino() override { return device_.get(); }
-
-private:
-    std::unique_ptr<Arduino> device_;       // 底层 Arduino 串口设备实例（Teensy41 协议模式）
-};
-
-// ============================================================================
-// Teensy41RawHidMouseInput — Teensy 4.1 RawHID 鼠标输入实现
-//
-// 通过 RawHID（原始 HID）协议与 Teensy 4.1 设备通信，区别于传统的串口方式。
-// RawHID 使用 USB HID 原生通道，可能具有更低的延迟和更高的可靠性。
-//
-// 特性说明:
-//   - 初始化时接收完整的 Config 结构体，从中提取 RawHID 所需参数
-//   - 始终启用物理按键状态上报（hasPhysicalButtonState 返回 true）
-//   - 所有操作（move / press / release）均返回 bool 表示成功与否
-//   - 提供 teensy41RawHid() 方法允许外部访问底层 RawHID 对象
-// ============================================================================
-class Teensy41RawHidMouseInput final : public IMouseInput
-{
-public:
-    // 构造函数：创建 Teensy 4.1 RawHID 连接
-    // 参数:
-    //   config - 应用配置对象，包含 RawHID 通信所需的所有参数
-    explicit Teensy41RawHidMouseInput(const Config& config)
-        : device_(std::make_unique<Teensy41RawHid>(config))
-    {
-    }
-
-    const char* name() const override { return "TEENSY41_HID"; }
-    bool isOpen() const override { return device_ && device_->isOpen(); }
-    bool move(int dx, int dy) override
-    {
-        if (!isOpen())
-            return false;
-        return device_->move(dx, dy);
-    }
-    bool leftDown() override
-    {
-        if (!isOpen())
-            return false;
-        return device_->press();
-    }
-    bool leftUp() override
-    {
-        if (!isOpen())
-            return false;
-        return device_->release();
-    }
-    bool hasPhysicalButtonState() const override { return true; }
-    bool keyPressed(const std::string& keyName) override
-    {
-        return isOpen() &&
-            logicalButtonPressed(keyName, shootingActive(), zoomingActive(), aimingActive());
-    }
-    bool aimingActive() const override { return device_ && device_->aimingActive(); }
-    bool shootingActive() const override { return device_ && device_->shootingActive(); }
-    bool zoomingActive() const override { return device_ && device_->zoomingActive(); }
-    Teensy41RawHid* teensy41RawHid() override { return device_.get(); }
-
-private:
-    std::unique_ptr<Teensy41RawHid> device_;    // 底层 Teensy 4.1 RawHID 设备实例
 };
 
 // ============================================================================
@@ -620,6 +380,9 @@ public:
         std::lock_guard<std::mutex> lock(state_->mutex);
         return state_->device && state_->device->zooming_active.load();
     }
+    // NOTE: 返回的原始指针仅在 inputDevicesMutex 持锁期间有效。
+    // 外部全局变量 (kmboxNetSerial 等) 在 Xen.cpp 中通过锁保护赋值，
+    // 但调用者必须确保设备生命周期内指针有效。
     KmboxNetConnection* kmboxNet() override
     {
         std::lock_guard<std::mutex> lock(state_->mutex);
@@ -657,103 +420,37 @@ private:
 
 // ============================================================================
 // KmboxAMouseInput — Kmbox A（USB HID）鼠标输入实现
-//
-// 通过 USB HID 直连方式与 Kmbox A 设备通信。Kmbox A 以 USB HID
-// 设备的形式连接到主机，通过 HID 报告（report）收发鼠标指令，
-// 无需网络协议栈参与。
-//
-// 特性说明:
-//   - 初始化时需指定 USB 设备的 VID:PID 标识符（如 "1234:5678"）
-//   - 不支持物理按键状态查询（未重写相关方法）
-//   - 提供 kmboxA() 方法允许外部直接访问底层 KmboxAConnection 对象
 // ============================================================================
-class KmboxAMouseInput final : public IMouseInput
+class KmboxAMouseInput final : public SerialMouseInputBase<KmboxAConnection>
 {
 public:
-    // 构造函数：通过 USB VID:PID 创建 Kmbox A HID 连接
-    // 参数:
-    //   pidvid - USB 设备的 VID:PID 字符串（如 "046D:C077"）
     explicit KmboxAMouseInput(const std::string& pidvid)
-        : device_(std::make_unique<KmboxAConnection>(pidvid))
     {
+        device_ = std::make_unique<KmboxAConnection>(pidvid);
     }
 
     const char* name() const override { return "KMBOX_A"; }
-    bool isOpen() const override { return device_ && device_->isOpen(); }
-    bool move(int dx, int dy) override
-    {
-        if (!isOpen())
-            return false;
-        device_->move(dx, dy);
-        return true;
-    }
-    bool leftDown() override
-    {
-        if (!isOpen())
-            return false;
-        device_->leftDown();
-        return true;
-    }
-    bool leftUp() override
-    {
-        if (!isOpen())
-            return false;
-        device_->leftUp();
-        return true;
-    }
+    // KmboxA 使用 leftDown/leftUp 而非 press/release
+    bool leftDown() override { if (!isOpen()) return false; device_->leftDown(); return true; }
+    bool leftUp() override { if (!isOpen()) return false; device_->leftUp(); return true; }
     KmboxAConnection* kmboxA() override { return device_.get(); }
-
-private:
-    std::unique_ptr<KmboxAConnection> device_;      // 底层 Kmbox A HID 连接实例
 };
 
 // ============================================================================
 // MakcuMouseInput — Makcu 串口鼠标输入实现
-//
-// 通过串口连接 Makcu 品牌设备。与 Arduino 类似，Makcu 也是
-// 基于串行通信的鼠标模拟硬件，但使用专有的 MakcuConnection 驱动类。
-//
-// 特性说明:
-//   - 初始化时需指定串口名称与波特率
-//   - 始终启用物理按键状态上报（hasPhysicalButtonState 返回 true）
-//   - 左键点击通过 press(index) / release(index) 方法，索引 0 表示左键
-//   - 提供 makcu() 方法允许外部直接访问底层 MakcuConnection 对象
 // ============================================================================
-class MakcuMouseInput final : public IMouseInput
+class MakcuMouseInput final : public SerialMouseInputBase<MakcuConnection>
 {
 public:
-    // 构造函数：创建 Makcu 串口连接
-    // 参数:
-    //   port     - 串口名称（如 "COM7"）
-    //   baudrate - 串口波特率
     MakcuMouseInput(const std::string& port, unsigned int baudrate)
-        : device_(std::make_unique<MakcuConnection>(port, baudrate))
     {
+        device_ = std::make_unique<MakcuConnection>(port, baudrate);
     }
 
     const char* name() const override { return "MAKCU"; }
-    bool isOpen() const override { return device_ && device_->isOpen(); }
-    bool move(int dx, int dy) override
-    {
-        if (!isOpen())
-            return false;
-        device_->move(dx, dy);
-        return true;
-    }
-    bool leftDown() override
-    {
-        if (!isOpen())
-            return false;
-        device_->press(0);
-        return true;
-    }
-    bool leftUp() override
-    {
-        if (!isOpen())
-            return false;
-        device_->release(0);
-        return true;
-    }
+    // Makcu 使用 press(index)/release(index)，索引 0 = 左键
+    bool leftDown() override { if (!isOpen()) return false; device_->press(0); return true; }
+    bool leftUp() override { if (!isOpen()) return false; device_->release(0); return true; }
     bool hasPhysicalButtonState() const override { return true; }
     bool keyPressed(const std::string& keyName) override
     {
@@ -764,9 +461,6 @@ public:
     bool shootingActive() const override { return device_ && device_->shooting_active; }
     bool zoomingActive() const override { return device_ && device_->zooming_active; }
     MakcuConnection* makcu() override { return device_.get(); }
-
-private:
-    std::unique_ptr<MakcuConnection> device_;       // 底层 Makcu 串口连接实例
 };
 
 }   // namespace
@@ -779,8 +473,7 @@ private:
 // MouseInputMethodName() 的输出完全一致。
 //
 // 支持的输入字符串：
-//   "WIN32", "GHUB", "RAZER", "ARDUINO", "RP2350",
-//   "TEENSY41", "TEENSY41_HID", "KMBOX_NET", "KMBOX_A", "MAKCU"
+//   "WIN32", "GHUB", "RAZER", "KMBOX_NET", "KMBOX_A", "MAKCU"
 //
 // 参数:
 //   method - 鼠标输入方法名称字符串（全大写，不含空格）
@@ -791,27 +484,16 @@ private:
 // ============================================================================
 std::optional<MouseInputMethod> ParseMouseInputMethod(const std::string& method)
 {
-    if (method == "WIN32")
-        return MouseInputMethod::Win32;
-    if (method == "GHUB")
-        return MouseInputMethod::GHub;
-    if (method == "RAZER")
-        return MouseInputMethod::Razer;
-    if (method == "ARDUINO")
-        return MouseInputMethod::Arduino;
-    if (method == "RP2350")
-        return MouseInputMethod::RP2350;
-    if (method == "TEENSY41")
-        return MouseInputMethod::Teensy41;
-    if (method == "TEENSY41_HID")
-        return MouseInputMethod::Teensy41Hid;
-    if (method == "KMBOX_NET")
-        return MouseInputMethod::KmboxNet;
-    if (method == "KMBOX_A")
-        return MouseInputMethod::KmboxA;
-    if (method == "MAKCU")
-        return MouseInputMethod::Makcu;
-    return std::nullopt;
+    static const std::unordered_map<std::string, MouseInputMethod> kMap = {
+        {"WIN32",     MouseInputMethod::Win32},
+        {"GHUB",      MouseInputMethod::GHub},
+        {"RAZER",     MouseInputMethod::Razer},
+        {"KMBOX_NET", MouseInputMethod::KmboxNet},
+        {"KMBOX_A",   MouseInputMethod::KmboxA},
+        {"MAKCU",     MouseInputMethod::Makcu},
+    };
+    auto it = kMap.find(method);
+    return it != kMap.end() ? std::optional{it->second} : std::nullopt;
 }
 
 // ============================================================================
@@ -832,17 +514,12 @@ std::string MouseInputMethodName(MouseInputMethod method)
     {
     case MouseInputMethod::GHub: return "GHUB";
     case MouseInputMethod::Razer: return "RAZER";
-    case MouseInputMethod::Arduino: return "ARDUINO";
-    case MouseInputMethod::RP2350: return "RP2350";
-    case MouseInputMethod::Teensy41: return "TEENSY41";
-    case MouseInputMethod::Teensy41Hid: return "TEENSY41_HID";
     case MouseInputMethod::KmboxNet: return "KMBOX_NET";
     case MouseInputMethod::KmboxA: return "KMBOX_A";
     case MouseInputMethod::Makcu: return "MAKCU";
-    case MouseInputMethod::Win32:
-    default:
-        return "WIN32";
+    case MouseInputMethod::Win32: return "WIN32";
     }
+    return "WIN32";  // 编译期可达性保障
 }
 
 // ============================================================================
@@ -870,20 +547,6 @@ std::unique_ptr<IMouseInput> CreateMouseInputDevice(const Config& config)
     const MouseInputMethod method = ParseMouseInputMethod(config.input_method).value_or(MouseInputMethod::Win32);
     switch (method)
     {
-    case MouseInputMethod::Arduino:
-        return std::make_unique<ArduinoMouseInput>(
-            config.arduino_port,
-            static_cast<unsigned int>(config.arduino_baudrate),
-            config.arduino_enable_keys);
-    case MouseInputMethod::RP2350:
-        return std::make_unique<RP2350MouseInput>(
-            config.rp2350_port,
-            static_cast<unsigned int>(config.rp2350_baudrate),
-            config.rp2350_enable_keys);
-    case MouseInputMethod::Teensy41:
-        return std::make_unique<Teensy41MouseInput>(config.arduino_port, static_cast<unsigned int>(config.arduino_baudrate));
-    case MouseInputMethod::Teensy41Hid:
-        return std::make_unique<Teensy41RawHidMouseInput>(config);
     case MouseInputMethod::GHub:
         return std::make_unique<GHubMouseInput>();
     case MouseInputMethod::Razer:

@@ -56,7 +56,7 @@ void draw_target()
 {
     // ---- Targeting 区 ----
     // 基本瞄准功能开关：禁用爆头（关闭头部锁定）、自动瞄准（自动对准目标）
-    if (OverlayUI::BeginSection("目标瞄准", "target_section_targeting"))
+    if (OverlayUI::BeginSection("目标选择", "target_section_targeting"))
     {
         OverlayUI::CheckboxRow("禁用爆头", &config.disable_headshot);
         OverlayUI::CheckboxRow("自动瞄准", &config.auto_aim);
@@ -68,7 +68,7 @@ void draw_target()
     // body_y_offset: 身体部位瞄准点的垂直偏移（归一化 0~1）
     // head_y_offset: 头部瞄准点的垂直偏移（归一化 0~1）
     // 提示文本说明：方向键单独调整身体偏移，Shift+方向键调整头部偏移。
-    if (OverlayUI::BeginSection("偏移量", "target_section_offsets"))
+    if (OverlayUI::BeginSection("瞄准偏移", "target_section_offsets"))
     {
         ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "方向键：调节身体偏移");
         ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Shift+方向键：调节头部偏移");
@@ -186,7 +186,7 @@ void draw_tracker()
     //   Runtime             — 当前生效的运行时策略（Tracker / Nearest Target）
     //   Locked Track ID     — 当前锁定的追踪目标 ID（-1 表示未锁定）
     //   Active Tracks       — 当前活跃的追踪目标数量
-    if (OverlayUI::BeginSection("状态", "tracker_section_status"))
+    if (OverlayUI::BeginSection("追踪状态", "tracker_section_status"))
     {
         changed |= OverlayUI::CheckboxRow("启用追踪器", &config.tracker_enabled);
         changed |= OverlayUI::CheckboxRow("显示目标表格", &config.tracker_overlay_table_enabled);
@@ -197,7 +197,7 @@ void draw_tracker()
         OverlayUI::EndSection();
     }
 
-    if (config.tracker_overlay_table_enabled && OverlayUI::BeginSection("追踪列表", "tracker_section_tracks"))
+    if (config.tracker_overlay_table_enabled && OverlayUI::BeginSection("活跃目标", "tracker_section_tracks"))
     {
         // ---- Tracks 区（追踪详细信息表格） ----
         // 仅在 tracker_overlay_table_enabled 为 true 时渲染。

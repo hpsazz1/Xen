@@ -18,6 +18,7 @@
 #include "mouse.h"
 #include "other_tools.h"
 #include "runtime/thread_loops.h"
+#include "runtime/speed_curve.h"
 #include "Xen.h"
 
 #ifdef USE_CUDA
@@ -195,29 +196,13 @@ static void draw_target_correction_demo_game_overlay(Game_overlay* overlay, floa
     if (dist_px <= 0.0f || dist_px > near_px)
         dist_px = near_px;
 
-    // 根据距离计算速度倍率，模拟实际瞄准的速度曲线
+    // 根据距离计算速度倍率，使用统一的共享速度曲线
     double dist_units = dist_px / scale;
-    double speed_mult;
-    if (dist_units < config.snapRadius)
-    {
-        // 在内圈（吸附区）：使用最低速度 × 吸附增强因子
-        speed_mult = config.minSpeedMultiplier * config.snapBoostFactor;
-    }
-    else if (dist_units < config.nearRadius)
-    {
-        // 在接近区到吸附区之间：使用指数曲线平滑过渡
-        double t = dist_units / config.nearRadius;
-        double crv = 1.0 - std::pow(1.0 - t, config.speedCurveExponent);
-        speed_mult = config.minSpeedMultiplier +
-            (config.maxSpeedMultiplier - config.minSpeedMultiplier) * crv;
-    }
-    else
-    {
-        // 在接近区之外：线性插值
-        double norm = std::max(0.0, std::min(dist_units / config.nearRadius, 1.0));
-        speed_mult = config.minSpeedMultiplier +
-            (config.maxSpeedMultiplier - config.minSpeedMultiplier) * norm;
-    }
+    double speed_mult = computeSpeedMultiplier(
+        dist_units, static_cast<double>(config.nearRadius) * 5.0,  // maxDistance 估计值
+        config.snapRadius, config.nearRadius, config.speedCurveExponent,
+        config.snapBoostFactor,
+        config.minSpeedMultiplier, config.maxSpeedMultiplier);
 
     // 计算模拟点每帧移动距离，并更新位置
     float max_multiplier = std::max(0.1f, config.maxSpeedMultiplier);
@@ -318,18 +303,19 @@ void gameOverlayRenderLoop()
         lastOverlayMonitorStateValid = true;
 
         // ---- 创建或重启覆盖层窗口 ----
+        const unsigned overlayMaxFps = config.game_overlay_max_fps > 0 ? (unsigned)config.game_overlay_max_fps : 0;
         if (!gameOverlayPtr)
         {
             gameOverlayPtr = std::make_unique<Game_overlay>();
             gameOverlayPtr->SetWindowBounds(pr.left, pr.top, pw, ph);
-            gameOverlayPtr->SetMaxFPS(config.game_overlay_max_fps > 0 ? (unsigned)config.game_overlay_max_fps : 0);
+            gameOverlayPtr->SetMaxFPS(overlayMaxFps);
             gameOverlayPtr->SetExcludeFromCapture(config.overlay_exclude_from_capture);
             gameOverlayPtr->Start();
         }
         else if (!gameOverlayPtr->IsRunning())
         {
             gameOverlayPtr->SetWindowBounds(pr.left, pr.top, pw, ph);
-            gameOverlayPtr->SetMaxFPS(config.game_overlay_max_fps > 0 ? (unsigned)config.game_overlay_max_fps : 0);
+            gameOverlayPtr->SetMaxFPS(overlayMaxFps);
             gameOverlayPtr->SetExcludeFromCapture(config.overlay_exclude_from_capture);
             gameOverlayPtr->Start();
         }
@@ -342,7 +328,7 @@ void gameOverlayRenderLoop()
         }
 
         // ---- 更新覆盖层的 FPS 和排除捕获设置 ----
-        gameOverlayPtr->SetMaxFPS(config.game_overlay_max_fps > 0 ? (unsigned)config.game_overlay_max_fps : 0);
+        gameOverlayPtr->SetMaxFPS(overlayMaxFps);
         gameOverlayPtr->SetExcludeFromCapture(config.overlay_exclude_from_capture);
 
         // ---- 计算检测区域在覆盖层中的位置和缩放 ----
@@ -742,60 +728,8 @@ void gameOverlayRenderLoop()
                                 {
                                     const int nearPercent = std::clamp(config.depth_mask_near_percent, 1, 100);
                                     const bool invertMask = config.depth_mask_invert;
-                                    const int total = depthLocal.rows * depthLocal.cols;
-                                    if (total > 0)
-                                    {
-                                        // 计算深度直方图
-                                        int hist[256] = {};
-                                        for (int y = 0; y < depthLocal.rows; ++y)
-                                        {
-                                            const uint8_t* row = depthLocal.ptr<uint8_t>(y);
-                                            for (int x = 0; x < depthLocal.cols; ++x)
-                                                hist[row[x]]++;
-                                        }
-
-                                        // 根据近端百分比确定深度阈值
-                                        const int target = std::max(1, (total * nearPercent) / 100);
-                                        int threshold = 0;
-                                        if (!invertMask)
-                                        {
-                                            int count = 0;
-                                            for (int i = 0; i < 256; ++i)
-                                            {
-                                                count += hist[i];
-                                                if (count >= target)
-                                                {
-                                                    threshold = i;
-                                                    break;
-                                                }
-                                            }
-                                            cv::compare(depthLocal, threshold, mask, cv::CMP_LE);
-                                        }
-                                        else
-                                        {
-                                            int count = 0;
-                                            for (int i = 255; i >= 0; --i)
-                                            {
-                                                count += hist[i];
-                                                if (count >= target)
-                                                {
-                                                    threshold = i;
-                                                    break;
-                                                }
-                                            }
-                                            cv::compare(depthLocal, threshold, mask, cv::CMP_GE);
-                                        }
-
-                                        // 对遮罩进行膨胀扩展
-                                        const int expand = std::clamp(config.depth_mask_expand, 0, 128);
-                                        if (expand > 0)
-                                        {
-                                            const int kernelSize = 2 * expand + 1;
-                                            cv::Mat kernel = cv::getStructuringElement(
-                                                cv::MORPH_ELLIPSE, cv::Size(kernelSize, kernelSize));
-                                            cv::dilate(mask, mask, kernel);
-                                        }
-                                    }
+                                    mask = depth_anything::generateDepthMaskFallback(
+                                        depthLocal, nearPercent, config.depth_mask_expand, invertMask);
                                 }
                             }
                         }
@@ -875,17 +809,11 @@ void gameOverlayRenderLoop()
 
         if (config.game_overlay_draw_frame)
         {
-            int A = config.game_overlay_frame_a;
-            int R = config.game_overlay_frame_r;
-            int G = config.game_overlay_frame_g;
-            int B = config.game_overlay_frame_b;
-            auto clamp255 = [](int& v) { if (v < 0) v = 0; else if (v > 255) v = 255; };
-            clamp255(A); clamp255(R); clamp255(G); clamp255(B);
-            const uint32_t col =
-                (uint32_t(A) << 24) |
-                (uint32_t(R) << 16) |
-                (uint32_t(G) << 8) |
-                uint32_t(B);
+            int A = std::clamp(config.game_overlay_frame_a, 0, 255);
+            int R = std::clamp(config.game_overlay_frame_r, 0, 255);
+            int G = std::clamp(config.game_overlay_frame_g, 0, 255);
+            int B = std::clamp(config.game_overlay_frame_b, 0, 255);
+            const uint32_t col = (uint32_t(A) << 24) | (uint32_t(R) << 16) | (uint32_t(G) << 8) | uint32_t(B);
 
             float thickness = config.game_overlay_frame_thickness;
             if (thickness <= 0.f) thickness = 1.f;
@@ -902,17 +830,11 @@ void gameOverlayRenderLoop()
 
         if (config.circle_fov_enabled && config.game_overlay_draw_circle_fov)
         {
-            int A = config.game_overlay_frame_a;
-            int R = config.game_overlay_frame_r;
-            int G = config.game_overlay_frame_g;
-            int B = config.game_overlay_frame_b;
-            auto clamp255 = [](int& v) { if (v < 0) v = 0; else if (v > 255) v = 255; };
-            clamp255(A); clamp255(R); clamp255(G); clamp255(B);
-            const uint32_t col =
-                (uint32_t(A) << 24) |
-                (uint32_t(R) << 16) |
-                (uint32_t(G) << 8) |
-                uint32_t(B);
+            int A = std::clamp(config.game_overlay_frame_a, 0, 255);
+            int R = std::clamp(config.game_overlay_frame_r, 0, 255);
+            int G = std::clamp(config.game_overlay_frame_g, 0, 255);
+            int B = std::clamp(config.game_overlay_frame_b, 0, 255);
+            const uint32_t col = (uint32_t(A) << 24) | (uint32_t(R) << 16) | (uint32_t(G) << 8) | uint32_t(B);
 
             float thickness = config.game_overlay_frame_thickness;
             if (thickness <= 0.f) thickness = 1.f;
@@ -930,17 +852,11 @@ void gameOverlayRenderLoop()
 
         if (config.game_overlay_draw_boxes && (!boxesCopy.empty() || !trackDebugCopy.empty()))
         {
-            int A = config.game_overlay_box_a;
-            int R = config.game_overlay_box_r;
-            int G = config.game_overlay_box_g;
-            int B = config.game_overlay_box_b;
-            auto clamp255 = [](int& v) { if (v < 0) v = 0; else if (v > 255) v = 255; };
-            clamp255(A); clamp255(R); clamp255(G); clamp255(B);
-            const uint32_t col =
-                (uint32_t(A) << 24) |
-                (uint32_t(R) << 16) |
-                (uint32_t(G) << 8) |
-                uint32_t(B);
+            int A = std::clamp(config.game_overlay_box_a, 0, 255);
+            int R = std::clamp(config.game_overlay_box_r, 0, 255);
+            int G = std::clamp(config.game_overlay_box_g, 0, 255);
+            int B = std::clamp(config.game_overlay_box_b, 0, 255);
+            const uint32_t col = (uint32_t(A) << 24) | (uint32_t(R) << 16) | (uint32_t(G) << 8) | uint32_t(B);
 
             float thickness = config.game_overlay_box_thickness;
             if (thickness <= 0.f) thickness = 1.f;

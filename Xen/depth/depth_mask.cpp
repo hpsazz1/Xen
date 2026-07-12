@@ -1,5 +1,10 @@
 ﻿#ifdef USE_CUDA
 
+#define WIN32_LEAN_AND_MEAN
+#define _WINSOCKAPI_
+#include <winsock2.h>
+#include <Windows.h>
+
 #include "depth_mask.h"
 
 #include <algorithm>
@@ -72,7 +77,7 @@ namespace depth_anything
     cv::Mat DepthMaskGenerator::getMask() const
     {
         std::lock_guard<std::mutex> lk(state_mutex);
-        return mask_binary.clone();
+        return mask_binary;  // cv::Mat 引用计数共享数据，避免 clone() 深拷贝
     }
 
     // 主更新循环：模型初始化、深度推理、直方图阈值分割、形态学膨胀、全帧/空帧保护
@@ -92,6 +97,11 @@ namespace depth_anything
             return;
         }
 
+        // 快照初始化状态，在锁外执行耗时的 init/inference
+        bool needInit = false;
+        std::string pathSnapshot;
+
+        {
         std::lock_guard<std::mutex> lk(state_mutex);
         last_attempt = now;
         last_frame_w = frame.cols;
@@ -106,34 +116,50 @@ namespace depth_anything
             return;
         }
 
-        if (!initialized || modelPath != last_model_path || !model->ready())
-        {
-            if (!model->initialize(modelPath, logger))
-            {
-                last_error = model->lastError();
-                initialized = false;
-                return;
-            }
-            last_model_path = modelPath;
-            initialized = true;
-            last_error.clear();
-        }
+        needInit = (!initialized || modelPath != last_model_path || !model->ready());
+        pathSnapshot = modelPath;
+        } // 释放 state_mutex
 
+    // ---- 锁外：耗时初始化（可长达数秒）----
+    if (needInit)
+    {
+        if (!model->initialize(pathSnapshot, logger))
+        {
+            std::lock_guard<std::mutex> lk(state_mutex);
+            last_error = model->lastError();
+            initialized = false;
+            return;
+        }
+        std::lock_guard<std::mutex> lk(state_mutex);
+        last_model_path = pathSnapshot;
+        initialized = true;
+        last_error.clear();
+    }
+
+    // 帧率节流（检查时间戳）
+    {
+        std::lock_guard<std::mutex> lk(state_mutex);
         const int fps = options.fps > 0 ? options.fps : 5;
         const auto interval = std::chrono::milliseconds(1000 / fps);
         if (now - last_update < interval)
             return;
-
         last_update = now;
+    }
 
-        cv::Mat depth_norm = model->predictDepth(frame);
-        if (depth_norm.empty())
-        {
-            last_error = model->lastError();
-            if (last_error.empty())
-                last_error = "Depth mask inference returned empty output.";
-            return;
-        }
+    // ---- 锁外：GPU 推理（10-50ms）----
+    cv::Mat depth_norm = model->predictDepth(frame);
+    if (depth_norm.empty())
+    {
+        std::lock_guard<std::mutex> lk(state_mutex);
+        last_error = model->lastError();
+        if (last_error.empty())
+            last_error = "Depth mask inference returned empty output.";
+        return;
+    }
+
+    // ---- 锁内：后处理和状态更新 ----
+    {
+        std::lock_guard<std::mutex> lk(state_mutex);
 
         // 计算近景百分比，限制在有效范围(1~100)内
         int near_percent = std::clamp(options.near_percent, 1, 100);
@@ -197,10 +223,17 @@ namespace depth_anything
         const int expand = std::clamp(options.expand, 0, 128);
         if (expand > 0)
         {
-            const int kernelSize = 2 * expand + 1;
-            cv::Mat kernel = cv::getStructuringElement(
-                cv::MORPH_ELLIPSE, cv::Size(kernelSize, kernelSize));
-            cv::dilate(mask, mask, kernel);
+            // 缓存膨胀核：expand 通常不变，避免每帧重建
+            static int cachedExpand = -1;
+            static cv::Mat cachedKernel;
+            if (expand != cachedExpand)
+            {
+                const int kernelSize = 2 * expand + 1;
+                cachedKernel = cv::getStructuringElement(
+                    cv::MORPH_ELLIPSE, cv::Size(kernelSize, kernelSize));
+                cachedExpand = expand;
+            }
+            cv::dilate(mask, mask, cachedKernel);
         }
 
         // 全帧/空帧保护：
@@ -224,6 +257,8 @@ namespace depth_anything
 
         mask_binary = std::move(mask);
     }
+
+    } // DepthMaskGenerator::update
 
     // 单例访问接口
     DepthMaskGenerator& GetDepthMaskGenerator()

@@ -122,7 +122,7 @@ void draw_capture_settings()
             current_resolution_idx = i;
 
     // ========== 通用捕获设置 ==========
-    if (OverlayUI::BeginSection("通用捕获设置", "capture_section_general"))
+    if (OverlayUI::BeginSection("采集参数", "capture_section_general"))
     {
         // 检测分辨率下拉框
         {
@@ -520,7 +520,7 @@ void draw_capture_settings()
             // 虚拟摄像头输出高度
             {
                 const auto row = OverlayUI::BeginSettingRow("虚拟摄像头高度");
-                if (ImGui::SliderInt("##value", &config.virtual_camera_heigth, 128, 2160))
+                if (ImGui::SliderInt("##value", &config.virtual_camera_height, 128, 2160))
                 {
                     OverlayConfig_MarkDirty();
                     capture_method_changed.store(true);

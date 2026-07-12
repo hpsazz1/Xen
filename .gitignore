@@ -2,11 +2,11 @@
 build/
 out/
 x64/
-.vs/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 *.dir/
+CTestTestfile.cmake
 
 # ==================== 运行时/编辑器临时文件 ====================
 *.log
@@ -37,7 +37,6 @@ Xen/modules/TensorRT-*/
 !Xen/*.dll
 !Xen/**/*.dll
 
-
 # ==================== VS 项目用户配置 ====================
 *.vcxproj.user
 *.sln.docstates
@@ -46,6 +45,13 @@ Xen/modules/TensorRT-*/
 *.DotSettings
 *.DotSettings.user
 _ReSharper*/
+
+# ==================== 编译产物 ====================
+*.pdb
+*.ilk
+*.aps
+*.ipch
+.vscode/
 
 # ==================== 操作系统文件 ====================
 Thumbs.db

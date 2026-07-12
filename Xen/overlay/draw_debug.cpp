@@ -200,14 +200,20 @@ static void uploadDebugFrame(const cv::Mat& bgr)
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-        g_pd3dDevice->CreateTexture2D(&td, nullptr, &g_debugTex);
+        HRESULT hr = g_pd3dDevice->CreateTexture2D(&td, nullptr, &g_debugTex);
+        if (FAILED(hr) || !g_debugTex) return;
 
-        // 创建对应的着色器资源视图
         D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
         sd.Format = td.Format;
         sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         sd.Texture2D.MipLevels = 1;
-        g_pd3dDevice->CreateShaderResourceView(g_debugTex, &sd, &g_debugSRV);
+        hr = g_pd3dDevice->CreateShaderResourceView(g_debugTex, &sd, &g_debugSRV);
+        if (FAILED(hr) || !g_debugSRV)
+        {
+            g_debugTex->Release();
+            g_debugTex = nullptr;
+            return;
+        }
     }
 
     // BGR转RGBA后拷贝到D3D纹理
@@ -280,7 +286,7 @@ static bool drawDataCollectionSection()
     syncDebugTextBuffer(g_collectClassFilterBuffer, sizeof(g_collectClassFilterBuffer), g_collectClassFilterMirror, config.auto_label_record_classes);
 
     bool changed = false;
-    if (!OverlayUI::BeginSection("数据收集", "debug_section_data_collection"))
+    if (!OverlayUI::BeginSection("数据采集", "debug_section_data_collection"))
         return false;
 
     // 数据收集条件选项
@@ -309,7 +315,7 @@ static bool drawDataCollectionSection()
         changed |= applyDebugTextBuffer(config.collect_output_dir, g_collectOutputDirMirror, g_collectOutputDirBuffer);
 
     // ===== 自动标注子章节 =====
-    if (OverlayUI::BeginSubsection("自动标注"))
+    if (OverlayUI::BeginSubsection("YOLO 标注"))
     {
         changed |= OverlayUI::CheckboxRow("写入YOLO标签文件", &config.auto_label_data);
 
@@ -498,7 +504,7 @@ void draw_debug_frame()
 // 绘制捕获预览章节（显示预览窗口开关和调试帧）
 void draw_capture_preview()
 {
-    if (OverlayUI::BeginSection("捕获预览", "capture_section_preview"))
+    if (OverlayUI::BeginSection("采集预览", "capture_section_preview"))
     {
         // 预览窗口开关
         {
@@ -526,7 +532,7 @@ void draw_debug()
     bool changed = false;
 
     // ========== 截图按键配置 ==========
-    if (OverlayUI::BeginSection("截图按键", "debug_section_screenshot_buttons"))
+    if (OverlayUI::BeginSection("截图绑定", "debug_section_screenshot_buttons"))
     {
         if (drawScreenshotButtonRows())
             changed = true;

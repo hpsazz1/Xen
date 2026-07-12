@@ -267,7 +267,7 @@ static hid_device *new_hid_device()
 	dev->read_pending = FALSE;
 	dev->read_buf = NULL;
 	memset(&dev->ol, 0, sizeof(dev->ol));
-	dev->ol.hEvent = CreateEvent(NULL, FALSE, FALSE /*初始状态为无信号*/, NULL);
+		dev->ol.hEvent = CreateEvent(NULL, TRUE, FALSE /*初始状态为无信号*/, NULL);  // TRUE=手动重置, 避免重叠I/O信号丢失
 
 	return dev;
 }

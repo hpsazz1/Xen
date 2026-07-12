@@ -36,6 +36,65 @@ namespace depth_anything
 
         return std::make_tuple(out, xOffset, yOffset);
     }
+
+    cv::Mat generateDepthMaskFallback(
+        const cv::Mat& depthGray,
+        int nearPercent,
+        int expandPixels,
+        bool invert)
+    {
+        cv::Mat mask;
+        if (depthGray.empty())
+            return mask;
+
+        const int total = depthGray.rows * depthGray.cols;
+        if (total <= 0)
+            return mask;
+
+        // 计算深度直方图
+        int hist[256] = {};
+        for (int y = 0; y < depthGray.rows; ++y)
+        {
+            const uint8_t* row = depthGray.ptr<uint8_t>(y);
+            for (int x = 0; x < depthGray.cols; ++x)
+                hist[row[x]]++;
+        }
+
+        // 根据近端百分比确定深度阈值
+        const int target = std::max(1, (total * nearPercent) / 100);
+        int threshold = 0;
+        if (!invert)
+        {
+            int count = 0;
+            for (int i = 0; i < 256; ++i)
+            {
+                count += hist[i];
+                if (count >= target) { threshold = i; break; }
+            }
+            cv::compare(depthGray, threshold, mask, cv::CMP_LE);
+        }
+        else
+        {
+            int count = 0;
+            for (int i = 255; i >= 0; --i)
+            {
+                count += hist[i];
+                if (count >= target) { threshold = i; break; }
+            }
+            cv::compare(depthGray, threshold, mask, cv::CMP_GE);
+        }
+
+        // 对遮罩进行椭圆膨胀扩展
+        if (expandPixels > 0)
+        {
+            const int kernelSize = 2 * expandPixels + 1;
+            cv::Mat kernel = cv::getStructuringElement(
+                cv::MORPH_ELLIPSE, cv::Size(kernelSize, kernelSize));
+            cv::dilate(mask, mask, kernel);
+        }
+
+        return mask;
+    }
 }
 
 #endif

@@ -11,6 +11,8 @@ public:
     bool reserveSystemMemory(size_t reservedMemoryMB);
 
 private:
-    DWORD_PTR originalMask;         // 保存原始 CPU 亲和性掩码以便恢复
+    DWORD_PTR originalMask;         // 保存原始 CPU 亲和性掩码
+    // 注：亲和性和预留内存在进程生命周期内有意不恢复，以保证实时性能
+    // DWORD_PTR 在 >64 逻辑处理器系统上有限制（单处理器组）
     void* reservedMemory = nullptr; // 预留内存的指针
 };

@@ -5,35 +5,27 @@
 #include <optional>
 #include <string>
 
-class Arduino;
 class Config;
 class GhubMouse;
 class KmboxAConnection;
 class KmboxNetConnection;
 class MakcuConnection;
-class RP2350;
 class RzctlMouse;
-class Teensy41RawHid;
 
 /**
  * @brief 鼠标输入方法枚举
  *
  * 定义程序支持的所有鼠标输入方式，包括：
- * Win32 API、罗技 G Hub、雷蛇、Arduino、RP2350、
- * Teensy 4.1、Kmbox Net/A 以及 Makcu。
+ * Win32 API、罗技 G Hub、雷蛇、Kmbox Net/A 以及 Makcu。
  */
 enum class MouseInputMethod
 {
-    Win32,       ///< Win32 API 鼠标输入
-    GHub,        ///< 罗技 G Hub 鼠标输入
-    Razer,       ///< 雷蛇鼠标输入
-    Arduino,     ///< Arduino 串口鼠标控制
-    RP2350,      ///< RP2350 串口鼠标控制
-    Teensy41,    ///< Teensy 4.1 串口控制
-    Teensy41Hid, ///< Teensy 4.1 Raw HID 控制
-    KmboxNet,    ///< Kmbox Net 网络鼠标控制
-    KmboxA,      ///< Kmbox A 型鼠标控制
-    Makcu        ///< Makcu 设备鼠标控制
+    Win32,    ///< Win32 API 鼠标输入
+    GHub,     ///< 罗技 G Hub 鼠标输入
+    Razer,    ///< 雷蛇鼠标输入
+    KmboxNet, ///< Kmbox Net 网络鼠标控制
+    KmboxA,   ///< Kmbox A 型鼠标控制
+    Makcu     ///< Makcu 设备鼠标控制
 };
 
 /** @brief 将字符串解析为 MouseInputMethod 枚举值 */
@@ -77,10 +69,6 @@ public:
     /** @brief 是否正在缩放（开镜） */
     virtual bool zoomingActive() const { return false; }
 
-    /** @brief 获取 Arduino 设备指针（如适用） */
-    virtual Arduino* arduino() { return nullptr; }
-    /** @brief 获取 RP2350 设备指针（如适用） */
-    virtual RP2350* rp2350() { return nullptr; }
     /** @brief 获取 G Hub 鼠标指针（如适用） */
     virtual GhubMouse* ghub() { return nullptr; }
     /** @brief 获取雷蛇鼠标指针（如适用） */
@@ -91,8 +79,6 @@ public:
     virtual KmboxAConnection* kmboxA() { return nullptr; }
     /** @brief 获取 Makcu 连接指针（如适用） */
     virtual MakcuConnection* makcu() { return nullptr; }
-    /** @brief 获取 Teensy 4.1 Raw HID 指针（如适用） */
-    virtual Teensy41RawHid* teensy41RawHid() { return nullptr; }
 };
 
 /**

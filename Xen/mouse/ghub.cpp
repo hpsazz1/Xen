@@ -122,6 +122,13 @@ GhubMouse::GhubMouse()
         else
         {
             gmok = mouse_open();
+            if (gmok)
+            {
+                // 构造时一次性解析所有热路径函数指针
+                pfnMoveR   = reinterpret_cast<MoveFn>(GetProcAddress(gm, "moveR"));
+                pfnPress   = reinterpret_cast<PressFn>(GetProcAddress(gm, "press"));
+                pfnRelease = reinterpret_cast<ReleaseFn>(GetProcAddress(gm, "release"));
+            }
         }
     }
 }
@@ -155,10 +162,9 @@ bool GhubMouse::mouse_xy(int x, int y)
 {
     if (gmok)
     {
-        auto moveR = reinterpret_cast<bool(*)(int, int)>(GetProcAddress(gm, "moveR"));
-        if (moveR != NULL)
+        if (pfnMoveR)
         {
-            return moveR(x, y);
+            return pfnMoveR(x, y);
         }
     }
     INPUT input = _ghub_Mouse(MOUSEEVENTF_MOVE, x, y);
@@ -179,10 +185,9 @@ bool GhubMouse::mouse_down(int key)
 {
     if (gmok)
     {
-        auto press = reinterpret_cast<bool(*)(int)>(GetProcAddress(gm, "press"));
-        if (press != NULL)
+        if (pfnPress)
         {
-            return press(key);
+            return pfnPress(key);
         }
     }
     DWORD flag = (key == 1) ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_RIGHTDOWN;
@@ -204,10 +209,9 @@ bool GhubMouse::mouse_up(int key)
 {
     if (gmok)
     {
-        auto release = reinterpret_cast<bool(*)()>(GetProcAddress(gm, "release"));
-        if (release != NULL)
+        if (pfnRelease)
         {
-            return release();
+            return pfnRelease();
         }
     }
     DWORD flag = (key == 1) ? MOUSEEVENTF_LEFTUP : MOUSEEVENTF_RIGHTUP;

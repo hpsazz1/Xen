@@ -26,6 +26,7 @@
     <ClCompile Include="depth\depth_mask.cpp" />
     <ClCompile Include="depth\depth_utils.cpp" />
     <ClCompile Include="detector\detection_buffer.cpp" />
+    <ClCompile Include="detector\detection_filters.cpp" />
     <ClCompile Include="detector\trt_detector.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DML|x64'">true</ExcludedFromBuild>
     </ClCompile>
@@ -44,15 +45,13 @@
     <ClCompile Include="keyboard\keyboard_listener.cpp" />
     <ClCompile Include="keyboard\keycodes.cpp" />
     <ClCompile Include="mem\cpu_affinity_manager.cpp" />
+    <ClCompile Include="debug\pipeline_tracer.cpp" />
     <ClCompile Include="mem\gpu_resource_manager.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DML|x64'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="modules\makcu\src\makcu.cpp">
       <ObjectFileName>$(IntDir)makcu_lib.obj</ObjectFileName>
     </ClCompile>
-    <ClCompile Include="modules\serial\src\serial.cc" />
-    <ClCompile Include="modules\serial\src\impl\win.cc" />
-    <ClCompile Include="modules\serial\src\impl\list_ports\list_ports_win.cc" />
     <ClCompile Include="modules\makcu\src\serialport.cpp" />
     <ClCompile Include="mouse\ghub.cpp" />
     <ClCompile Include="mouse\hid.c" />
@@ -64,9 +63,6 @@
     <ClCompile Include="mouse\MouseInput.cpp" />
     <ClCompile Include="mouse\mouse.cpp" />
     <ClCompile Include="mouse\rzctl.cpp" />
-    <ClCompile Include="mouse\Teensy41RawHid.cpp" />
-    <ClCompile Include="mouse\Arduino.cpp" />
-    <ClCompile Include="mouse\RP2350.cpp" />
     <ClCompile Include="mouse\AimbotTarget.cpp" />
     <ClCompile Include="overlay\draw_ai.cpp" />
     <ClCompile Include="overlay\draw_buttons.cpp" />
@@ -77,6 +73,7 @@
     <ClCompile Include="overlay\draw_game_overlay.cpp" />
     <ClCompile Include="overlay\draw_mouse.cpp" />
     <ClCompile Include="overlay\draw_overlay.cpp" />
+    <ClCompile Include="overlay\draw_pipeline_tracer.cpp" />
     <ClCompile Include="overlay\draw_stats.cpp" />
     <ClCompile Include="overlay\draw_target.cpp" />
     <ClCompile Include="overlay\Game_overlay.cpp" />
@@ -104,6 +101,7 @@
     <ClInclude Include="depth\depth_utils.h" />
     <ClInclude Include="detector\cuda_preprocess.h" />
     <ClInclude Include="detector\detection_buffer.h" />
+    <ClInclude Include="detector\detection_filters.h" />
     <ClInclude Include="detector\trt_detector.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DML|x64'">true</ExcludedFromBuild>
     </ClInclude>
@@ -124,6 +122,7 @@
     <ClInclude Include="keyboard\keyboard_listener.h" />
     <ClInclude Include="keyboard\keycodes.h" />
     <ClInclude Include="mem\cpu_affinity_manager.h" />
+    <ClInclude Include="debug\pipeline_tracer.h" />
     <ClInclude Include="mem\gpu_resource_manager.h" />
     <ClInclude Include="modules\makcu\include\makcu.h" />
     <ClInclude Include="modules\makcu\include\serialport.h" />
@@ -139,9 +138,6 @@
     <ClInclude Include="mouse\MouseInput.h" />
     <ClInclude Include="mouse\mouse.h" />
     <ClInclude Include="mouse\rzctl.h" />
-    <ClInclude Include="mouse\Teensy41RawHid.h" />
-    <ClInclude Include="mouse\Arduino.h" />
-    <ClInclude Include="mouse\RP2350.h" />
     <ClInclude Include="mouse\AimbotTarget.h" />
     <ClInclude Include="overlay\config_dirty.h" />
     <ClInclude Include="overlay\draw_settings.h" />
@@ -156,6 +152,10 @@
     <ClInclude Include="tensorrt\trt_monitor.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DML|x64'">true</ExcludedFromBuild>
     </ClInclude>
+    <ClInclude Include="runtime\speed_curve.h" />
+    <ClInclude Include="third_party\motion_control\estimation.h" />
+    <ClInclude Include="third_party\motion_control\execution.h" />
+    <ClInclude Include="third_party\motion_control\filters.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -230,12 +230,14 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='CUDA|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <DisableSpecificWarnings>4819</DisableSpecificWarnings>
+      <AdditionalOptions>/wd4819 %(AdditionalOptions)</AdditionalOptions>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;USE_CUDA;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\modules\stb;$(MSBuildProjectDirectory)\modules\imgui-1.92.8\backends;$(MSBuildProjectDirectory)\modules\imgui-1.92.8;$(MSBuildProjectDirectory)\modules\opencv\build\dml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\modules\stb;$(MSBuildProjectDirectory)\modules\imgui-1.92.8\backends;$(MSBuildProjectDirectory)\modules\imgui-1.92.8;$(MSBuildProjectDirectory)\modules\opencv\build\dml\include;$(MSBuildProjectDirectory)\third_party\motion_control;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -260,18 +262,20 @@
     </Manifest>
     <CudaCompile>
       <Include>$(MSBuildProjectDirectory)\modules\opencv\build\cuda\include;%(Include)</Include>
-      <AdditionalOptions>-allow-unsupported-compiler %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>-allow-unsupported-compiler -Xcompiler /wd4819 %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DML|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <DisableSpecificWarnings>4819</DisableSpecificWarnings>
+      <AdditionalOptions>/wd4819 %(AdditionalOptions)</AdditionalOptions>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\modules\stb;$(MSBuildProjectDirectory)\modules\imgui-1.92.8\backends;$(MSBuildProjectDirectory)\modules\imgui-1.92.8;$(MSBuildProjectDirectory)\modules\opencv\build\dml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\modules\stb;$(MSBuildProjectDirectory)\modules\imgui-1.92.8\backends;$(MSBuildProjectDirectory)\modules\imgui-1.92.8;$(MSBuildProjectDirectory)\modules\opencv\build\dml\include;$(MSBuildProjectDirectory)\third_party\motion_control;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>

@@ -252,6 +252,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/capture/ndi_capture.cpp"
     "${SRC_DIR}/config/config.cpp"
     "${SRC_DIR}/detector/detection_buffer.cpp"
+    "${SRC_DIR}/detector/detection_filters.cpp"
     "${SRC_DIR}/detector/postProcess.cpp"
     "${SRC_DIR}/imgui/imgui.cpp"
     "${SRC_DIR}/imgui/imgui_draw.cpp"
@@ -262,6 +263,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/keyboard/keyboard_listener.cpp"
     "${SRC_DIR}/keyboard/keycodes.cpp"
     "${SRC_DIR}/mem/cpu_affinity_manager.cpp"
+    "${SRC_DIR}/debug/pipeline_tracer.cpp"
     "${SRC_DIR}/modules/makcu/src/makcu.cpp"
     "${SRC_DIR}/modules/makcu/src/serialport.cpp"
     "${SRC_DIR}/mouse/ghub.cpp"
@@ -274,9 +276,6 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/mouse/MouseInput.cpp"
     "${SRC_DIR}/mouse/mouse.cpp"
     "${SRC_DIR}/mouse/rzctl.cpp"
-    "${SRC_DIR}/mouse/Teensy41RawHid.cpp"
-    "${SRC_DIR}/mouse/Arduino.cpp"
-    "${SRC_DIR}/mouse/RP2350.cpp"
     "${SRC_DIR}/mouse/AimbotTarget.cpp"
     "${SRC_DIR}/overlay/draw_ai.cpp"
     "${SRC_DIR}/overlay/draw_buttons.cpp"
@@ -287,6 +286,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/overlay/draw_game_overlay.cpp"
     "${SRC_DIR}/overlay/draw_mouse.cpp"
     "${SRC_DIR}/overlay/draw_overlay.cpp"
+    "${SRC_DIR}/overlay/draw_pipeline_tracer.cpp"
     "${SRC_DIR}/overlay/draw_stats.cpp"
     "${SRC_DIR}/overlay/draw_target.cpp"
     "${SRC_DIR}/overlay/Game_overlay.cpp"
@@ -323,22 +323,20 @@ else()
     )
 endif()
 
-add_library(serial_embedded STATIC
-    "${SRC_DIR}/modules/serial/src/serial.cc"
-    "${SRC_DIR}/modules/serial/src/impl/win.cc"
-    "${SRC_DIR}/modules/serial/src/impl/list_ports/list_ports_win.cc"
-)
-
-target_include_directories(serial_embedded PUBLIC "${SRC_DIR}/modules/serial/include")
-target_link_libraries(serial_embedded PUBLIC setupapi)
-
-if(MSVC)
-    set_target_properties(serial_embedded PROPERTIES
-        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
-    )
-endif()
-
 add_executable(ai ${AIMBOT_SOURCES})
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(xen_algorithm_tests
+        "${CMAKE_SOURCE_DIR}/tests/speed_curve_tests.cpp"
+    )
+    target_include_directories(xen_algorithm_tests PRIVATE "${SRC_DIR}")
+    target_compile_features(xen_algorithm_tests PRIVATE cxx_std_17)
+    if(MSVC)
+        target_compile_options(xen_algorithm_tests PRIVATE /utf-8 /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME xen.algorithm.speed_curve COMMAND xen_algorithm_tests)
+endif()
 
 set_target_properties(ai PROPERTIES
     OUTPUT_NAME "Xen"
@@ -371,10 +369,10 @@ target_include_directories(ai PRIVATE
     "${SRC_DIR}/overlay"
     "${SRC_DIR}/scr"
     "${SRC_DIR}/modules/makcu/include"
-    "${SRC_DIR}/modules/serial/include"
     "${SRC_DIR}/modules/stb"
     "${SRC_DIR}/modules/imgui-1.92.8"
     "${SRC_DIR}/modules/imgui-1.92.8/backends"
+    "${SRC_DIR}/third_party/motion_control"
 )
 
 target_compile_definitions(ai PRIVATE
@@ -393,6 +391,7 @@ if(MSVC)
         $<$<COMPILE_LANGUAGE:CXX>:/sdl>
         $<$<COMPILE_LANGUAGE:CXX>:/permissive->
         $<$<COMPILE_LANGUAGE:CXX>:/EHsc>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4819>
     )
 endif()
 
@@ -451,7 +450,6 @@ if(NOT AIMBOT_USE_CUDA)
 endif()
 
 target_link_libraries(ai PRIVATE
-    serial_embedded
     "${AIMBOT_OPENCV_LIBRARY}"
     d3d11
     dxgi

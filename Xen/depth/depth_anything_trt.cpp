@@ -1,5 +1,10 @@
 ﻿#ifdef USE_CUDA
 
+#define WIN32_LEAN_AND_MEAN
+#define _WINSOCKAPI_
+#include <winsock2.h>
+#include <Windows.h>
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -14,6 +19,7 @@
 #include <system_error>
 
 #include "other_tools.h"
+#include "tensorrt/nvinf.h"
 #include "tensorrt/trt_monitor.h"
 
 namespace depth_anything
@@ -488,7 +494,10 @@ namespace depth_anything
             return false;
         }
 
-        return saveEngine(resolvedPath, enginePath);
+        // Engine file already written by unified buildEngine
+        if (enginePath)
+            *enginePath = MakeEnginePathFromOnnx(resolvedPath);
+        return true;
     }
 
     // 预处理输入图像
@@ -710,11 +719,8 @@ namespace depth_anything
     {
         if (OtherTools::HasExtensionCaseInsensitive(modelPath, ".onnx"))
         {
+            // buildEngine (via unified buildEngine) already writes the .engine file
             if (!buildEngine(modelPath, logger))
-            {
-                return false;
-            }
-            if (!saveEngine(modelPath))
             {
                 return false;
             }
@@ -768,148 +774,60 @@ namespace depth_anything
         return true;
     }
 
-    // 从 ONNX 文件构建 TensorRT engine
-    // 流程：创建 builder/network/config → 解析 ONNX → 设置优化配置
-    //       → 构建序列化 network → 反序列化创建 engine/context
+    // 从 ONNX 文件构建 TensorRT engine（委托给统一构建函数）
     bool DepthAnythingTrt::buildEngine(const std::string& onnxPath, nvinfer1::ILogger& logger)
     {
-        auto builder = nvinfer1::createInferBuilder(logger);
-        if (!builder)
-        {
-            last_error = "Failed to create TensorRT builder.";
-            return false;
-        }
+        // ---- 探测模型输入维度以判断动态/静态 ----
+        std::string inName;
+        nvinfer1::Dims inDims{};
+        bool has_dynamic = true;  // 安全默认值：假定为动态
 
-        const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-        nvinfer1::INetworkDefinition* network = builder->createNetworkV2(explicitBatch);
-        nvinfer1::IBuilderConfig* config = builder->createBuilderConfig();
-        if (!network || !config)
+        if (peekOnnxInputInfo(onnxPath, logger, inName, inDims))
         {
-            last_error = "Failed to create TensorRT network or config.";
-            delete config;
-            delete network;
-            delete builder;
-            return false;
-        }
-
-        ImGuiProgressMonitor progressMonitor;
-        config->setProgressMonitor(&progressMonitor);
-        TrtExportResetState();
-        gIsTrtExporting = true;
-
-        struct ScopedExportState
-        {
-            ~ScopedExportState()
+            has_dynamic = false;
+            for (int i = 0; i < inDims.nbDims; i++)
             {
-                std::lock_guard<std::mutex> lock(gProgressMutex);
-                gProgressPhases.clear();
-                gIsTrtExporting = false;
-                gTrtExportCancelRequested = false;
-                gTrtExportLastUpdateMs = TrtNowMs();
-            }
-        } exportState;
-
-        if (kEnableFp16)
-        {
-            config->setFlag(nvinfer1::BuilderFlag::kFP16);
-        }
-
-        nvonnxparser::IParser* parser = nvonnxparser::createParser(*network, logger);
-        if (!parser)
-        {
-            last_error = "Failed to create ONNX parser.";
-            delete config;
-            delete network;
-            delete builder;
-            return false;
-        }
-        if (!parser->parseFromFile(onnxPath.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kINFO)))
-        {
-            last_error = "Failed to parse depth ONNX model.";
-            delete parser;
-            delete config;
-            delete network;
-            delete builder;
-            return false;
-        }
-
-        auto input = network->getInput(0);
-        if (input)
-        {
-            auto input_dims = input->getDimensions();
-            bool has_dynamic = false;
-            for (int i = 0; i < input_dims.nbDims; i++)
-            {
-                if (input_dims.d[i] == -1)
+                if (inDims.d[i] == -1)
                 {
                     has_dynamic = true;
                     break;
                 }
             }
-
-            if (has_dynamic)
-            {
-                auto profile = builder->createOptimizationProfile();
-                int opt_size = std::clamp(kOptInputSize, kMinInputSize, kMaxInputSize);
-                const char* input_tensor_name = input->getName();
-                bool ok = profile->setDimensions(input_tensor_name, nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{ 1, 3, kMinInputSize, kMinInputSize });
-                ok = ok && profile->setDimensions(input_tensor_name, nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{ 1, 3, opt_size, opt_size });
-                ok = ok && profile->setDimensions(input_tensor_name, nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{ 1, 3, kMaxInputSize, kMaxInputSize });
-                if (!ok || !profile->isValid())
-                {
-                    last_error = "Failed to set depth input optimization profile.";
-                    delete parser;
-                    delete config;
-                    delete network;
-                    delete builder;
-                    return false;
-                }
-                config->addOptimizationProfile(profile);
-            }
         }
 
-        nvinfer1::IHostMemory* plan = builder->buildSerializedNetwork(*network, *config);
-        if (!plan)
+        // ---- 填充 BuildConfig ----
+        BuildConfig cfg;
+        cfg.onnxPath       = onnxPath;
+        cfg.enginePath     = MakeEnginePathFromOnnx(onnxPath);
+        cfg.logger         = &logger;
+        cfg.inputName      = inName;
+        cfg.enableFp16     = kEnableFp16;
+        cfg.parserSeverity = nvinfer1::ILogger::Severity::kINFO;
+
+        if (has_dynamic)
         {
-            last_error = gTrtExportCancelRequested.load()
-                ? "Depth export canceled."
-                : "Failed to build depth engine from ONNX.";
-            delete parser;
-            delete config;
-            delete network;
-            delete builder;
+            int opt_size = std::clamp(kOptInputSize, kMinInputSize, kMaxInputSize);
+            cfg.inputDimsMin = nvinfer1::Dims4{ 1, 3, kMinInputSize, kMinInputSize };
+            cfg.inputDimsOpt = nvinfer1::Dims4{ 1, 3, opt_size, opt_size };
+            cfg.inputDimsMax = nvinfer1::Dims4{ 1, 3, kMaxInputSize, kMaxInputSize };
+        }
+        // 静态模型：维度保持为零（哨兵值），跳过优化配置文件 —— 与原始行为一致
+
+        // ---- 委托给统一构建函数 ----
+        nvinfer1::IRuntime* rawRuntime = nullptr;
+        nvinfer1::ICudaEngine* rawEngine = ::buildEngine(cfg, &rawRuntime);
+        if (!rawEngine)
+        {
+            if (gTrtExportCancelRequested.load())
+                last_error = "Depth export canceled.";
+            else if (last_error.empty())
+                last_error = "Failed to build depth engine from ONNX.";
             return false;
         }
 
-        runtime.reset(nvinfer1::createInferRuntime(logger));
-        if (!runtime)
-        {
-            last_error = "Failed to create depth runtime.";
-            delete plan;
-            delete parser;
-            delete config;
-            delete network;
-            delete builder;
-            return false;
-        }
-        engine.reset(runtime->deserializeCudaEngine(plan->data(), plan->size()));
-        if (!engine)
-        {
-            last_error = "Failed to deserialize depth engine.";
-            delete plan;
-            delete parser;
-            delete config;
-            delete network;
-            delete builder;
-            return false;
-        }
+        engine.reset(rawEngine);
+        runtime.reset(rawRuntime);
         context.reset(engine->createExecutionContext());
-
-        delete plan;
-        delete parser;
-        delete config;
-        delete network;
-        delete builder;
 
         if (!engine || !context)
         {

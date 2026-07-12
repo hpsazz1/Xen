@@ -30,6 +30,14 @@ private:
     HMODULE gm;                     ///< G Hub DLL 模块句柄
     bool gmok;                      ///< DLL 是否加载成功
 
+    // 缓存的函数指针（构造时解析一次，避免热路径 GetProcAddress）
+    using MoveFn   = bool(*)(int, int);
+    using PressFn  = bool(*)(int);
+    using ReleaseFn = bool(*)();
+    MoveFn   pfnMoveR = nullptr;
+    PressFn  pfnPress = nullptr;
+    ReleaseFn pfnRelease = nullptr;
+
     /** @brief 封装 SendInput 调用，通过 G Hub 发送输入 */
     static UINT _ghub_SendInput(UINT nInputs, LPINPUT pInputs);
     /** @brief 将 MOUSEINPUT 转换为 INPUT 结构 */

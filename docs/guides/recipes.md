@@ -49,15 +49,6 @@ input_method = RAZER
 Xen
 ```
 
-## Teensy 控制测试
-
-```ini
-input_method = TEENSY41_HID
-teensy_hid_serial = AUTO
-teensy_hid_vid_filter = AUTO
-teensy_hid_pid_filter = AUTO
-```
-
 从 `AUTO` 开始广泛搜索，确认设备后缩小过滤器范围。
 
 相关文档：

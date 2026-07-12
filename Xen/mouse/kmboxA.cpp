@@ -183,7 +183,7 @@ int KM_keyboard(unsigned char ctrButton,unsigned char *key)
 		data_keyboard.data[i]=key[i];
 	}
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_keyboard,65);
-	if(i==65) Sleep(1);
+	// Sleep(1) removed — unnecessary HID delay (was adding ~15ms per report)
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }
@@ -221,7 +221,7 @@ int KM_mouse(unsigned char lmr_side,short x,short y,unsigned char wheel)
 	data_mouse.y=y;
 	data_mouse.wheel=wheel;
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_mouse,65);
-	if(i==65) Sleep(1);
+	// Sleep(1) removed — unnecessary HID delay (was adding ~15ms per report)
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }
@@ -277,7 +277,7 @@ int KM_down(unsigned char vk_key)
 	}
 KM_down_send:
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_keyboard,65);
-	if(i==65) Sleep(1);
+	// Sleep(1) removed — unnecessary HID delay (was adding ~15ms per report)
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }
@@ -323,7 +323,7 @@ int KM_up(unsigned char vk_key)
 	}
 KM_up_send:
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_keyboard,65);
-	if(i==65) Sleep(1);
+	// Sleep(1) removed — unnecessary HID delay (was adding ~15ms per report)
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }
@@ -368,7 +368,7 @@ int KM_left(unsigned char vk_key)
 	data_mouse.y=0;
 	data_mouse.wheel=0;
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_mouse,65);
-	if(i==65) Sleep(1);
+	// Sleep(1) removed — unnecessary HID delay (was adding ~15ms per report)
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }
@@ -395,7 +395,7 @@ int KM_middle(unsigned char vk_key)
 	data_mouse.y=0;
 	data_mouse.wheel=0;
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_mouse,65);
-	if(i==65) Sleep(1);
+	// Sleep(1) removed — unnecessary HID delay (was adding ~15ms per report)
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }
@@ -423,7 +423,7 @@ int KM_right(unsigned char vk_key)
 	data_mouse.y=0;
 	data_mouse.wheel=0;
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_mouse,65);
-	if(i==65) Sleep(1);
+	// Sleep(1) removed — unnecessary HID delay (was adding ~15ms per report)
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }
@@ -448,7 +448,7 @@ int KM_move(short x,short y)
 	data_mouse.y=y;
 	data_mouse.wheel=0;
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_mouse,65);
-	if(i==65) Sleep(1);
+	// Sleep(1) removed — unnecessary HID delay (was adding ~15ms per report)
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }
@@ -473,7 +473,7 @@ int KM_wheel(unsigned char  w)
 	data_mouse.y=0;
 	data_mouse.wheel=w;
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_mouse,65);
-	if(i==65)Sleep(1);
+	// Sleep(1) removed
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }
@@ -501,7 +501,7 @@ int KM_side1(unsigned char  w)
 	data_mouse.y=0;
 	data_mouse.wheel=0;
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_mouse,65);
-	if(i==65) Sleep(1);
+	// Sleep(1) removed — unnecessary HID delay (was adding ~15ms per report)
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }
@@ -529,7 +529,7 @@ int KM_side2(unsigned char  w)
 	data_mouse.y=0;
 	data_mouse.wheel=0;
 	i=hid_write(fd_kmbox,(const unsigned char *)&data_mouse,65);
-	if(i==65) Sleep(1);
+	// Sleep(1) removed — unnecessary HID delay (was adding ~15ms per report)
 	ReleaseMutex(m_hMutex_lock);
 	return i==65?0:-1;
 }

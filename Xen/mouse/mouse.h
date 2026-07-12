@@ -22,7 +22,9 @@
 
 #include "AimbotTarget.h"
 #include "MouseInput.h"
-#include "aim_kalman.h"
+#include "execution.h"
+#include "filters.h"
+#include "trajectory.h"  // 轨迹模拟纯算法提取 (Trajectory::windMouseMove / bezierMove)
 
 /**
  * @brief 鼠标控制主线程类
@@ -67,15 +69,15 @@ private:
     std::chrono::steady_clock::time_point fireScheduleTime{};  ///< 计划开火时间
     bool   holdScheduled = false;       ///< 是否有待执行的松开
     std::chrono::steady_clock::time_point holdReleaseTime{};   ///< 计划松开时间
-    bool   wasdReleased = false;        ///< 当前是否已释放 WASD
+    bool   wasdReleased = false;        ///< 是否已激活 WASD 互相抵消（开火急停）
 
     // ==================== 运动状态 ====================
     double prev_x, prev_y;                                        ///< 上一帧目标位置
     double prev_velocity_x, prev_velocity_y;                       ///< 上一帧目标速度
     std::chrono::time_point<std::chrono::steady_clock> prev_time; ///< 上一帧时间戳
     std::chrono::steady_clock::time_point last_target_time;        ///< 最后检测到目标的时间
-    std::atomic<bool> target_detected{ false };                   ///< 是否检测到目标
-    std::atomic<bool> mouse_pressed{ false };                     ///< 鼠标是否按下
+    std::atomic<bool> target_detected{ false };                   ///< 是否检测到目标（atomic 为未来多线程访问预留）
+    std::atomic<bool> mouse_pressed{ false };                     ///< 鼠标是否按下（atomic，与 leftPressStartTime 同线程访问）
 
     IMouseInput* mouseInput;  ///< 鼠标输入设备接口指针
 
@@ -89,26 +91,48 @@ private:
     std::queue<Move>              moveQueue;     ///< 移动指令队列
     std::mutex                    queueMtx;      ///< 队列互斥锁
     std::condition_variable       queueCv;       ///< 队列条件变量
-    const size_t                  queueLimit = 5;///< 队列最大长度
+    std::mutex                    input_method_mutex;  ///< 输入方法互斥锁（保护 moveMouse/moveMousePivot 并发调用）
+    const size_t                  queueLimit = 20;///< 队列最大长度（需容纳 Bezier 14步 + Wind 5步）
     std::thread                   moveWorker;    ///< 移动工作线程
     std::atomic<bool>             workerStop{ false };  ///< 工作线程停止标志
+    std::atomic<bool>             workerRunning{ true }; ///< 工作线程健康标志（异常退出时置false）
 
     // ==================== 目标预测 ====================
     std::vector<std::pair<double, double>> futurePositions;  ///< 未来预测位置列表
     std::mutex                    futurePositionsMutex;      ///< 未来位置互斥锁
-    aim::AimKalman2D              targetKalman;              ///< 目标卡尔曼滤波器
-    aim::AimKalmanSettings        cachedKalmanSettings;      ///< 缓存的卡尔曼设置，updateConfig 时刷新
-    aim::AimKalmanTelemetry       lastKalmanTelemetry;       ///< 上次卡尔曼遥测数据
-    double                        lastPredictionLookaheadSec = 0.0;  ///< 上次预测前瞻时间（秒）
-    double                        lastDetectionDelaySec = 0.0;      ///< 上次检测延迟（秒）
+    filters::ExponentialMovingAverage emaVelX{0.25};         ///< 速度 EMA 平滑 (X)
+    filters::ExponentialMovingAverage emaVelY{0.25};         ///< 速度 EMA 平滑 (Y)
+    filters::ExponentialMovingAverage emaPosX{0.50};         ///< 位置 EMA 平滑 (X)
+    filters::ExponentialMovingAverage emaPosY{0.50};         ///< 位置 EMA 平滑 (Y)
+    // 外部速度注入（来自 SOT Kalman 跟踪器）
+    // 注意：当前由主循环线程独占访问，若未来多线程访问需改为 std::atomic
+    double                        externalTargetVelX = 0.0;  ///< 外部注入的目标速度 X（来自 SOT）
+    double                        externalTargetVelY = 0.0;  ///< 外部注入的目标速度 Y（来自 SOT）
+    bool                          hasExternalVelocity = false; ///< 是否有外部速度注入
 
-    // ==================== 游戏配置缓存 ====================
+    // ==================== 配置缓存 ====================
     // 缓存活跃游戏配置的静态值，避免每次鼠标移动都加锁查询 map
     double                        cachedGameSens = 1.0;
     double                        cachedGameYaw = 0.022;
     double                        cachedGamePitch = 0.022;
     bool                          cachedGameFovScaled = false;
     double                        cachedGameBaseFOV = 0.0;
+    // 缓存预测配置（避免 predict_target_position 每帧加锁）
+    double                        cachedPredictionInterval = 0.020;
+    double                        cachedPredictionTau = 0.05;
+    bool                          cachedPredictionEnabled = true;
+    bool                          cachedPredictionCompensateDelay = true;
+    double                        cachedPredictionResetTimeout = 0.5;
+    // 缓存速度曲线参数（避免 calculate_speed_multiplier 每帧加锁）
+    float                         cachedSnapRadius = 1.5f;
+    float                         cachedNearRadius = 25.0f;
+    float                         cachedSpeedCurveExponent = 3.0f;
+    float                         cachedSnapBoostFactor = 1.15f;
+
+    // EMA alpha 缓存: 仅 dt 变化 >10% 时重算 std::exp(-dt/tau)
+    double                        cachedDtExp = 0.0;
+    double                        cachedAlphaVel = 0.0;
+    double                        cachedAlphaPos = 0.0;
 
     /** @brief 移动工作线程主循环 */
     void moveWorkerLoop();
@@ -120,14 +144,20 @@ private:
     double wind_G, wind_W, wind_M, wind_D;  ///< 鼠标移速、轨迹摆动、单步上限、微调距离
     bool   bezier_enabled = false;      ///< 是否启用贝塞尔弧线轨迹
     float  bezier_strength = 0.35f;     ///< 贝塞尔弧度
+    double bezierFracX = 0.0;           ///< 贝塞尔亚像素余量 X
+    double bezierFracY = 0.0;           ///< 贝塞尔亚像素余量 Y
     bool   move_ema_enabled = false;    ///< 是否启用 EMA 平滑
     float  move_ema_alpha = 0.60f;      ///< EMA 平滑系数
     double prev_ema_move_x = 0.0;       ///< 上帧 EMA 平滑后 X
     double prev_ema_move_y = 0.0;
 
-    // ==================== 预测模式 ====================
-    std::string predictionMode = "linear";
-    double smoothedVelX = 0.0, smoothedVelY = 0.0;
+    // ==================== 过冲模拟状态 ====================
+    int    osCooldown = 0;              ///< 过冲冷却帧计数
+
+    // ==================== 移动控制库执行控制器 ====================
+    execution::PurePursuitController purePursuitController;           ///< Pure Pursuit 控制器（统一执行层）
+    filters::MotionChangeDetector motionChangeDetector;               ///< 运动突变检测器
+    bool motionChangeProtection = false;                              ///< 是否启用运动突变保护
 
     void   windMouseMoveRelative(int dx, int dy);  ///< 轨迹模拟相对移动
     void   bezierMoveRelative(int dx, int dy);     ///< 贝塞尔弧线轨迹移动
@@ -172,6 +202,8 @@ private:
     {
         double x = 0.0;                                   ///< X 偏移
         double y = 0.0;                                   ///< Y 偏移
+        double cumX = 0.0;                                ///< 累计 X（前缀和，O(1) 查询用）
+        double cumY = 0.0;                                ///< 累计 Y（前缀和）
         std::chrono::steady_clock::time_point t{};         ///< 时间戳
     };
 
@@ -180,21 +212,17 @@ private:
     void recordMotionCompensationStep(int dx, int dy);            ///< 记录运动补偿步进
     void pruneMotionCompensationTrailLocked(const std::chrono::steady_clock::time_point& now);  ///< 修剪运动补偿轨迹
 
-    /** @brief 计算从当前位置到目标位置的移动量 */
+    /** @brief 计算从当前位置到目标位置的移动量（像素→counts，含速度曲线+FPS修正） */
     std::pair<double, double> calc_movement(double target_x, double target_y);
+    /** @brief 像素位移增量 → 鼠标计数（含灵敏度/FOV/帧率修正，速度曲线由调用者传入） */
+    std::pair<double, double> pixelDeltaToCounts(double dpx, double dpy, double speedCurveMultiplier);
     /** @brief 根据距离计算速度倍率 */
     double calculate_speed_multiplier(double distance);
-    /** @brief 计算当前检测延迟（秒） */
-    double currentDetectionDelaySec(double observationAgeSec = -1.0) const;
-    /** @brief 根据检测延迟计算预测前瞻时间（秒） */
-    double currentPredictionLookaheadSec(double detectionDelaySec) const;
 
     /** @brief 刷新缓存的游戏配置值（在 updateConfig 和构造函数中调用） */
     void refreshGameProfileCache();
 
 public:
-    std::mutex input_method_mutex;  ///< 输入方法互斥锁
-
     /**
      * @brief 构造函数
      * @param resolution 屏幕分辨率
@@ -234,9 +262,6 @@ public:
         float bScope_multiplier
     );
 
-    /** @brief 应用参数预设（stable/balanced/aggressive/fast），一键设置所有相关参数 */
-    static void applyPreset(const char* presetName);
-
     /**
      * @brief 以目标枢轴点为中心移动鼠标（追踪瞄准）
      * @param pivotX 枢轴 X
@@ -246,7 +271,8 @@ public:
     void moveMousePivot(
         double pivotX,
         double pivotY,
-        std::chrono::steady_clock::time_point observationTime = {});
+        std::chrono::steady_clock::time_point observationTime = {},
+        int targetClassId = -1);
     /** @brief 相对移动鼠标 */
     void moveRelative(int dx, int dy);
     /** @brief 清除所有排队中的移动指令 */
@@ -293,6 +319,10 @@ public:
     void setTargetDetected(bool detected) { target_detected.store(detected); }
     /** @brief 设置最后检测到目标的时间 */
     void setLastTargetTime(const std::chrono::steady_clock::time_point& t) { last_target_time = t; }
+    /** @brief 从外部注入目标速度估计（来自 SOT Kalman，px/sec） */
+    void setExternalTargetVelocity(double vx, double vy) {
+        externalTargetVelX = vx; externalTargetVelY = vy; hasExternalVelocity = true;
+    }
 };
 
 #endif // MOUSE_H

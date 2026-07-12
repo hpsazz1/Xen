@@ -42,7 +42,7 @@ static void draw_game_overlay_page(GameOverlaySettingsPage page)
     // ========== 常规设置（General） ==========
     // 包含启用开关、最大帧率、检测框、延迟补偿、未来位置、轨迹模拟调试尾迹及目标修正等选项
     if (shouldDrawGameOverlayPage(page, GameOverlaySettingsPage::General) &&
-        OverlayUI::BeginSection("常规", "game_overlay_section_general"))
+        OverlayUI::BeginSection("叠加开关", "game_overlay_section_general"))
     {
         if (OverlayUI::CheckboxRow("启用", &config.game_overlay_enabled))
             OverlayConfig_MarkDirty();
@@ -71,7 +71,7 @@ static void draw_game_overlay_page(GameOverlaySettingsPage page)
     // ========== 方框颜色（Box Color） ==========
     // 调整检测框的 ARGB 颜色分量及边框粗细
     if (shouldDrawGameOverlayPage(page, GameOverlaySettingsPage::Visuals) &&
-        OverlayUI::BeginSection("方框颜色", "game_overlay_section_box_color"))
+        OverlayUI::BeginSection("检测框样式", "game_overlay_section_box_color"))
     {
         // 标记颜色值是否发生变化，若变化则调用 clampGameOverlayColor 确保分量在合法范围内
         bool colorChanged = false;
@@ -96,7 +96,7 @@ static void draw_game_overlay_page(GameOverlaySettingsPage page)
     // ========== 捕获框（Capture Frame） ==========
     // 控制捕获框与圆形辅助线的绘制开关、帧颜色 ARGB 分量及帧边框粗细
     if (shouldDrawGameOverlayPage(page, GameOverlaySettingsPage::Visuals) &&
-        OverlayUI::BeginSection("捕获框", "game_overlay_section_capture_frame"))
+        OverlayUI::BeginSection("捕获框样式", "game_overlay_section_capture_frame"))
     {
         if (OverlayUI::CheckboxRow("绘制捕获框", &config.game_overlay_draw_frame))
             OverlayConfig_MarkDirty();
@@ -126,7 +126,7 @@ static void draw_game_overlay_page(GameOverlaySettingsPage page)
     // ========== 未来位置点样式（Future Point Style） ==========
     // 调整预测轨迹点的半径大小及透明度随步数的衰减速度
     if (shouldDrawGameOverlayPage(page, GameOverlaySettingsPage::Visuals) &&
-        OverlayUI::BeginSection("未来点样式", "game_overlay_section_future_style"))
+        OverlayUI::BeginSection("预测点样式", "game_overlay_section_future_style"))
     {
         if (OverlayUI::SliderFloatRow("点半径", &config.game_overlay_future_point_radius, 1.0f, 20.0f, "%.1f"))
             OverlayConfig_MarkDirty();
@@ -141,7 +141,7 @@ static void draw_game_overlay_page(GameOverlaySettingsPage page)
     // 配置图标叠加层的启用开关、图标路径、大小、偏移量、过滤类别及锚点位置
     // 当图标叠加未启用时，该区域内的所有控件将被禁用（灰色不可操作状态）
     if (shouldDrawGameOverlayPage(page, GameOverlaySettingsPage::Icon) &&
-        OverlayUI::BeginSection("图标叠加", "game_overlay_section_icon"))
+        OverlayUI::BeginSection("图标设置", "game_overlay_section_icon"))
     {
         if (OverlayUI::CheckboxRow("启用图标叠加", &config.game_overlay_icon_enabled))
             OverlayConfig_MarkDirty();

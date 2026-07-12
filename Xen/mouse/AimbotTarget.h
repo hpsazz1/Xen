@@ -4,6 +4,9 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <chrono>
+#include <string>
+
+#include "estimation.h"
 
 /**
  * @brief 瞄准目标数据结构
@@ -84,25 +87,75 @@ struct TrackDebugInfo
 };
 
 /**
- * @brief 多目标跟踪器类
- *
- * 负责在帧之间关联检测到的目标，维持目标 ID 的一致性，
- * 并通过帧间匹配实现目标锁定和跟踪。
+ * @brief 检测候选结构（跟踪器内部使用，头-身合并的中间表示）
  */
-class MultiTargetTracker
+struct DetectionCandidate
+{
+    cv::Rect2f box;                              ///< 边界框
+    int classId = -1;                             ///< 类别 ID
+    double pivotX = 0.0;                          ///< 枢轴点 X
+    double pivotY = 0.0;                          ///< 枢轴点 Y
+};
+
+/**
+ * @brief 头-身合并逻辑（共享函数）
+ *
+ * 当头部检测框落在对应身体检测框的容忍区域内时，认为两者属于同一实体。
+ * 剔除冗余的头部候选，将瞄准支点迁移至身体候选上（使用头部支点位置）。
+ *
+ * @param dets          检测候选列表（原地修改）
+ * @param classPlayer   身体类别 ID
+ * @param classHead     头部类别 ID
+ * @param headOffset    头部 Y 偏移比例
+ * @param disableHeadshot 是否禁用爆头
+ */
+void mergeHeadToPlayer(
+    std::vector<DetectionCandidate>& dets,
+    int classPlayer, int classHead,
+    float headOffset, bool disableHeadshot);
+
+/**
+ * @brief 基于移动控制库的多目标跟踪器包装类
+ *
+ * 内部使用 estimation::MultiTargetTracker（匈牙利匹配 + 7状态卡尔曼）
+ * 和 estimation::SingleTargetTracker（SOT 状态机：Locked→Coasting→Unlocked）。
+ *
+ * 特性：
+ *   - 匈牙利全局最优匹配（而非贪心 IoU）
+ *   - SOT 状态机支持遮挡滑行和重捕获评分
+ *   - 7 状态 Kalman 滤波（vs 旧版简单 EMA 速度估计）
+ *   - 多策略目标选择（最近/最高置信度/指定 ID）
+ */
+class MotionLibTargetTracker
 {
 public:
+    MotionLibTargetTracker();
+
+    /** @brief 从配置初始化跟踪器参数 */
+    void configure(
+        int confirmThreshold,
+        int terminationFrames,
+        float noiseVx, float noiseVy,
+        float noiseW, float noiseH,
+        float measurementStdDev,
+        int coastFramesLimit,
+        const std::string& selectionStrategy,
+        float recaptureIoUThreshold,
+        float recaptureDistanceMultiplier,
+        float coastVelocityDecay);
+
     /** @brief 重置跟踪器状态 */
     void reset();
+
     /**
-     * @brief 更新跟踪器状态
-     * @param boxes 当前帧检测到的边界框
-     * @param classes 对应的类别 ID
+     * @brief 更新跟踪器状态（与旧 MultiTargetTracker 接口兼容）
+     * @param boxes 当前帧的检测框列表
+     * @param classes 每个检测框的类别ID
      * @param screenWidth 屏幕宽度
      * @param screenHeight 屏幕高度
-     * @param disableHeadshot 是否禁用爆头
-     * @param keepCurrentLock 是否保持当前锁定目标
-     * @param observationTime 观测时间戳
+     * @param disableHeadshot 是否禁用爆头模式
+     * @param keepCurrentLock 是否保持当前锁定目标不变
+     * @param observationTime 可选的时间戳
      */
     void update(
         const std::vector<cv::Rect>& boxes,
@@ -111,57 +164,59 @@ public:
         int screenHeight,
         bool disableHeadshot,
         bool keepCurrentLock,
-        std::chrono::steady_clock::time_point observationTime = {}
-    );
+        std::chrono::steady_clock::time_point observationTime = {});
+
     /** @brief 获取当前锁定的目标信息，返回是否成功 */
     bool getLockedTarget(LockedTargetInfo& out) const;
+
     /** @brief 获取当前锁定目标的跟踪 ID */
     int getLockedTrackId() const { return lockedTrackId_; }
+
     /** @brief 获取所有跟踪轨道的调试信息 */
     std::vector<TrackDebugInfo> getDebugTracks() const;
 
+    /** @brief 获取 SOT 估计的速度（用于外部预测），返回 (vx, vy) 像素/秒 */
+    std::pair<float, float> getLockedVelocity() const;
+
+    /** @brief 是否已初始化 */
+    bool isConfigured() const { return configured_; }
+
 private:
-    /** @brief 内部跟踪轨道状态 */
-    struct TrackState
-    {
-        int id = -1;                                  ///< 跟踪 ID
-        cv::Rect2f box;                              ///< 边界框
-        cv::Point2f velocity = { 0.0f, 0.0f };       ///< 速度
-        int classId = -1;                             ///< 类别 ID
-        int hits = 0;                                 ///< 命中次数
-        int missed = 0;                               ///< 丢失次数
-        bool observedThisFrame = false;               ///< 本帧是否观测到
-        double pivotX = 0.0;                          ///< 枢轴点 X
-        double pivotY = 0.0;                          ///< 枢轴点 Y
-        std::chrono::steady_clock::time_point lastUpdate;  ///< 最后更新时间
-    };
+    // 内部移动控制库跟踪器实例
+    estimation::MultiTargetTracker motTracker_;
+    estimation::SingleTargetTracker sotTracker_;
+    bool configured_ = false;
 
-    /** @brief 检测候选结构 */
-    struct DetectionCandidate
-    {
-        cv::Rect2f box;                              ///< 边界框
-        int classId = -1;                             ///< 类别 ID
-        double pivotX = 0.0;                          ///< 枢轴点 X
-        double pivotY = 0.0;                          ///< 枢轴点 Y
-    };
+    // 缓存的锁定状态（预留：未来可用于 getLockedTarget 惰性缓存优化）
+    int lockedTrackId_ = -1;
+    mutable LockedTargetInfo cachedLockedTarget_;
 
-    /** @brief 计算两个边界框的交并比 (IoU) */
-    static float iou(const cv::Rect2f& a, const cv::Rect2f& b);
-    /** @brief 根据 ID 查找跟踪轨道索引 */
-    int findTrackIndexById(int id) const;
-    /** @brief 根据屏幕中心选择最佳跟踪轨道 */
-    int chooseBestTrack(int screenWidth, int screenHeight) const;
-    /** @brief 计算允许的最大丢失帧数 */
-    int allowedMissedFrames(const TrackState& t) const;
-    /** @brief 清除已死亡的跟踪轨道 */
-    void pruneDeadTracks();
+    // 配置参数
+    int confirmThreshold_ = 2;
+    int terminationFrames_ = 8;
+    float noiseVx_ = 1.0f, noiseVy_ = 1.0f;
+    float noiseW_ = 0.01f, noiseH_ = 0.01f;
+    float measurementStdDev_ = 5.0f;
+    int coastFramesLimit_ = 15;
+    float recaptureIoUThreshold_ = 0.3f;
+    float recaptureDistanceMultiplier_ = 2.5f;
+    float coastVelocityDecay_ = 1.0f;
 
-    std::vector<TrackState> tracks_;                ///< 所有跟踪轨道
-    int nextId_ = 1;                                 ///< 下一个可用 ID
-    int lockedTrackId_ = -1;                          ///< 当前锁定目标的跟踪 ID
-    int maxMissedFrames_ = 6;                        ///< 最大允许丢失帧数
-    double frameDtMeanSec_ = 1.0 / 60.0;            ///< 帧间平均时间（秒）
-    std::chrono::steady_clock::time_point lastTrackerFrameTime_{};  ///< 上一帧跟踪时间
+    // 缓存的类别/偏移配置（避免 update() 每帧加锁 configMutex）
+    int cachedClassPlayer_ = 0;
+    int cachedClassHead_ = 1;
+    float cachedBodyOffset_ = 0.15f;
+    float cachedHeadOffset_ = 0.05f;
+
+    // 帧时间跟踪
+    std::chrono::steady_clock::time_point lastUpdateTime_{};
+    double frameDtMeanSec_ = 1.0 / 60.0;
+
+    /** @brief 将 cv::Rect 转换为 estimation::BoundingBox */
+    static estimation::BoundingBox toBoundingBox(const cv::Rect& r);
+
+    /** @brief 将 estimation::DetectedObject 转换为 AimbotTarget */
+    static AimbotTarget toAimbotTarget(const estimation::DetectedObject& obj);
 };
 
 #endif // AIMBOTTARGET_H

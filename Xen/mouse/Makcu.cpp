@@ -45,9 +45,6 @@
 //=====================================================================
 MakcuConnection::MakcuConnection(const std::string& port, unsigned int baud_rate)
     : is_open_(false)
-    , aiming_active(false)
-    , shooting_active(false)
-    , zooming_active(false)
 {
     try
     {
@@ -286,7 +283,7 @@ void MakcuConnection::onButtonCallback(makcu::MouseButton button, bool pressed)
         // 左键 → 射击状态
         // 物理左键被按下 → 角色开始射击
         // 物理左键被释放 → 角色停止射击
-        shooting_active = pressed;
+        shooting_active.store(pressed);
         shooting.store(pressed);
         break;
 
@@ -294,7 +291,7 @@ void MakcuConnection::onButtonCallback(makcu::MouseButton button, bool pressed)
         // 右键 → 缩放状态
         // 物理右键被按下 → 进入瞄准镜/缩放模式
         // 物理右键被释放 → 退出瞄准镜/缩放模式
-        zooming_active = pressed;
+        zooming_active.store(pressed);
         zooming.store(pressed);
         break;
 
@@ -312,7 +309,7 @@ void MakcuConnection::onButtonCallback(makcu::MouseButton button, bool pressed)
         // 侧键2（鼠标第5键/前进键）→ 瞄准状态
         // 物理侧键2被按下 → 角色进入机械瞄准/腰射状态
         // 物理侧键2被释放 → 角色退出瞄准状态
-        aiming_active = pressed;
+        aiming_active.store(pressed);
         aiming.store(pressed);
         break;
     }
