@@ -3,6 +3,7 @@
 #include "runtime/basic_target_filter.h"
 #include "debug/pipeline_tracer.h"
 #include "capture/ndi_frame_geometry.h"
+#include "capture/network_frame_geometry.h"
 #include "runtime/frame_rate_counter.h"
 #include "runtime/latest_frame_queue.h"
 
@@ -86,6 +87,19 @@ int main()
     expectTrue(!ndiSafeGeometry.fromMetadata && !ndiSafeGeometry.fromConfig,
                "ndi rejects invalid source geometry");
     expectNear(ndiSafeGeometry.sourceWidth, 320.0, 0.0, "ndi falls back to encoded width");
+
+    const auto udpConfiguredGeometry = ResolveConfiguredNetworkFrameGeometry(
+        320, 320, 2560, 1440);
+    expectTrue(udpConfiguredGeometry.fromConfig, "udp roi uses configured full fov geometry");
+    expectNear(udpConfiguredGeometry.sourceWidth, 2560.0, 0.0,
+               "udp roi reports full fov width");
+    expectNear(udpConfiguredGeometry.sourceHeight, 1440.0, 0.0,
+               "udp roi reports full fov height");
+    const auto udpInvalidGeometry = ResolveConfiguredNetworkFrameGeometry(
+        320, 320, 2560, 100);
+    expectTrue(!udpInvalidGeometry.fromConfig, "udp rejects undersized source geometry");
+    expectNear(udpInvalidGeometry.sourceWidth, 320.0, 0.0,
+               "udp invalid geometry falls back to encoded width");
 
     const double sourceSpan = AimCoordinateSpace::resolveFovPixelSpan(2560, 320.0);
     const double fallbackSpan = AimCoordinateSpace::resolveFovPixelSpan(0, 320.0);

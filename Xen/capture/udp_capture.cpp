@@ -1,14 +1,18 @@
 ﻿#include "udp_capture.h"
 
+#include "capture/network_frame_geometry.h"
 #include "runtime/latest_frame_queue.h"
 
 #include <chrono>
 #include <iostream>
 
 // 构造函数：初始化 UDP 套接字并开始接收线程
-UDPCapture::UDPCapture(int width, int height, const std::string& ip, int port)
+UDPCapture::UDPCapture(int width, int height, const std::string& ip, int port,
+                       int sourceWidth, int sourceHeight)
     : width_(width)
     , height_(height)
+    , configured_source_width_(sourceWidth)
+    , configured_source_height_(sourceHeight)
     , ip_(ip)
     , port_(port)
     , socket_(INVALID_SOCKET)
@@ -206,13 +210,16 @@ void UDPCapture::ReceiveThread()
             {
                 if (!frame.empty())
                 {
-                    const int sourceWidth = frame.cols;
-                    const int sourceHeight = frame.rows;
-                    RecordSourceFrame(0.0, sourceWidth, sourceHeight);
-                    const int cropWidth = std::min(width_, sourceWidth);
-                    const int cropHeight = std::min(height_, sourceHeight);
-                    const int cropX = std::max(0, (sourceWidth - cropWidth) / 2);
-                    const int cropY = std::max(0, (sourceHeight - cropHeight) / 2);
+                    const int encodedWidth = frame.cols;
+                    const int encodedHeight = frame.rows;
+                    const NetworkFrameGeometry geometry = ResolveConfiguredNetworkFrameGeometry(
+                        encodedWidth, encodedHeight,
+                        configured_source_width_, configured_source_height_);
+                    RecordSourceFrame(0.0, geometry.sourceWidth, geometry.sourceHeight);
+                    const int cropWidth = std::min(width_, encodedWidth);
+                    const int cropHeight = std::min(height_, encodedHeight);
+                    const int cropX = std::max(0, (encodedWidth - cropWidth) / 2);
+                    const int cropY = std::max(0, (encodedHeight - cropHeight) / 2);
                     cv::Mat detectionFrame = frame(
                         cv::Rect(cropX, cropY, cropWidth, cropHeight)).clone();
                     if (cropWidth != width_ || cropHeight != height_)
@@ -222,7 +229,7 @@ void UDPCapture::ReceiveThread()
                     // UDP 与 NDI 使用相同的低延迟最新帧语义：新帧到达时替换尚未消费的旧帧。
                     const uint64_t superseded = ReplaceWithLatestFrame(
                         frame_queue_, NetworkFrame{
-                            std::move(detectionFrame), sourceWidth, sourceHeight });
+                            std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight });
                     if (superseded > 0)
                     {
                         dropped_frames_.fetch_add(static_cast<int>(superseded), std::memory_order_relaxed);

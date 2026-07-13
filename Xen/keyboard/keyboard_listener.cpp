@@ -282,6 +282,8 @@ void keyboardListener()
 	                        const int oldVirtualCameraHeight = config.virtual_camera_height;
 	                        const std::string oldUdpIp = config.udp_ip;
 	                        const int oldUdpPort = config.udp_port;
+	                        const int oldUdpSourceWidth = config.udp_source_width;
+	                        const int oldUdpSourceHeight = config.udp_source_height;
 	                        const std::string oldNdiSourceName = config.ndi_source_name;
 	                        const int oldNdiSourceWidth = config.ndi_source_width;
 	                        const int oldNdiSourceHeight = config.ndi_source_height;
@@ -317,6 +319,8 @@ void keyboardListener()
 	                            config.virtual_camera_height != oldVirtualCameraHeight ||
 	                            config.udp_ip != oldUdpIp ||
 	                            config.udp_port != oldUdpPort ||
+	                            config.udp_source_width != oldUdpSourceWidth ||
+	                            config.udp_source_height != oldUdpSourceHeight ||
 	                            config.ndi_source_name != oldNdiSourceName ||
 	                            config.ndi_source_width != oldNdiSourceWidth ||
 	                            config.ndi_source_height != oldNdiSourceHeight)

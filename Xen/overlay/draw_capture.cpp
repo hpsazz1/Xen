@@ -40,7 +40,7 @@ static char capture_window_filter_buf[128] = "";
 // UDP IP地址输入缓冲区
 static char udp_ip_buf[64] = "";
 // UDP端口号输入缓冲区
-static int udp_port_buf = 1234;
+static int udp_port_buf = 2333;
 // NDI源列表缓存
 static std::vector<std::string> ndi_sources;
 // NDI源筛选输入缓冲区
@@ -595,6 +595,28 @@ void draw_capture_settings()
             {
                 const auto row = OverlayUI::BeginSettingRow("UDP端口");
                 ImGui::InputInt("##value", &udp_port_buf);
+                OverlayUI::EndSettingRow(row);
+            }
+            // 发送端只传输中心 ROI 时，必须声明该 ROI 所属的完整游戏坐标空间；否则 320 宽
+            // 会被误当作完整 FOV，鼠标 counts/pixel 被放大约 8 倍。
+            {
+                const auto row = OverlayUI::BeginSettingRow("完整FOV宽度");
+                if (ImGui::InputInt("##value", &config.udp_source_width))
+                {
+                    config.udp_source_width = std::clamp(config.udp_source_width, 0, 16384);
+                    OverlayConfig_MarkDirty();
+                    capture_method_changed.store(true);
+                }
+                OverlayUI::EndSettingRow(row);
+            }
+            {
+                const auto row = OverlayUI::BeginSettingRow("完整FOV高度");
+                if (ImGui::InputInt("##value", &config.udp_source_height))
+                {
+                    config.udp_source_height = std::clamp(config.udp_source_height, 0, 16384);
+                    OverlayConfig_MarkDirty();
+                    capture_method_changed.store(true);
+                }
                 OverlayUI::EndSettingRow(row);
             }
             // 应用UDP设置按钮

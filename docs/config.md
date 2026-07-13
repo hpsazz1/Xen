@@ -49,11 +49,13 @@ capture_use_cuda = true
 | `capture_method` | `duplication_api` | 捕获源。常用值有 `duplication_api`、`winrt`、`virtual_camera`、`udp_capture` 和 `ndi`。 |
 | `capture_target` | `monitor` | 捕获目标类型。通常为 `monitor`。 |
 | `capture_window_title` | 空 | 选择窗口捕获目标时使用的窗口标题。 |
-| `ndi_source_name` | `Auto` | NDI 源名称。设为 `Auto` 自动连接第一个发现的 NDI 源，或指定具体源名称。 |
-| `ndi_source_width` | `0` | NDI 预裁剪 ROI 对应的完整游戏 FOV 宽度。`0` 表示使用 Xen 帧元数据或视频帧宽度。 |
-| `ndi_source_height` | `0` | NDI 预裁剪 ROI 对应的完整游戏 FOV 高度。必须与宽度成对设置。 |
-| `udp_ip` | `0.0.0.0` | UDP 捕获的发送端 IP 过滤。使用 `0.0.0.0` 接受来自任何发送端的帧。 |
-| `udp_port` | `1234` | UDP 捕获端口。 |
+| `ndi_source_name` | `HPSAZZ (main)` | NDI 完整源名称；也可设为 `Auto` 自动连接第一个发现的源。 |
+| `ndi_source_width` | `2560` | NDI 预裁剪 ROI 对应的完整游戏 FOV 宽度。`0` 表示使用 Xen 帧元数据或视频帧宽度。 |
+| `ndi_source_height` | `1440` | NDI 预裁剪 ROI 对应的完整游戏 FOV 高度。必须与宽度成对设置。 |
+| `udp_ip` | `192.168.3.10` | UDP 捕获的发送端 IP 过滤；诊断时可使用 `0.0.0.0` 接受任意发送端。 |
+| `udp_port` | `2333` | UDP 捕获端口。 |
+| `udp_source_width` | `2560` | UDP 预裁剪 ROI 对应的完整游戏 FOV 宽度；发送完整画面或未知时设为 `0`。 |
+| `udp_source_height` | `1440` | UDP 预裁剪 ROI 对应的完整游戏 FOV 高度；必须与宽度成对设置。 |
 | `detection_resolution` | `320` | 方形推理/捕获处理尺寸。有效值为 `160`、`320` 和 `640`。值越高可提升细节，但会消耗更多性能。 |
 | `capture_fps` | `60` | 请求的捕获帧率。 |
 | `monitor_idx` | `0` | 显示器捕获的显示器索引。 |
@@ -72,8 +74,10 @@ capture_use_cuda = true
 
 ```ini
 capture_method = udp_capture
-udp_ip = 0.0.0.0
-udp_port = 1234
+udp_ip = 192.168.3.10
+udp_port = 2333
+udp_source_width = 2560
+udp_source_height = 1440
 detection_resolution = 320
 capture_fps = 60
 ```
@@ -166,9 +170,9 @@ capture_fps = 60
 
 | 键 | 默认值 | 说明 |
 |---|---:|---|
-| `kmbox_net_ip` | `10.42.42.42` | 设备 IP 地址。 |
-| `kmbox_net_port` | `1984` | 设备端口。 |
-| `kmbox_net_uuid` | `DEADC0DE` | 设备 UUID/令牌。 |
+| `kmbox_net_ip` | `192.168.2.188` | 设备 IP 地址。 |
+| `kmbox_net_port` | `13384` | 设备端口。 |
+| `kmbox_net_uuid` | `7679E04E` | 设备 UUID/令牌。 |
 
 ### Kmbox A
 
@@ -337,13 +341,14 @@ capture_fps = 60
 激活的配置文件通过以下方式选择：
 
 ```ini
-active_game = UNIFIED
+active_game = CS
 ```
 
 配置文件存储在 `[Games]` 下：
 
 ```ini
 [Games]
+CS = 1.4,0.022,0.022
 UNIFIED = 1,0.022,0.022
 ```
 
@@ -357,8 +362,9 @@ name = sensitivity,yaw,pitch[,fovScaled,baseFOV]
 
 ```ini
 [Games]
+CS = 1.4,0.022,0.022
 UNIFIED = 1,0.022,0.022
 MY_GAME = 2.5,0.02,0.02,true,90
 ```
 
-如果 `active_game` 缺失或无效，应用会回退到可用的配置文件。
+如果 `active_game` 缺失或无效，应用优先回退到内置 `CS`，再回退到 `UNIFIED`。

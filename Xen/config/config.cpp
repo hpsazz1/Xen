@@ -78,11 +78,13 @@ bool Config::loadConfig(const std::string& filename)
         capture_method = "duplication_api";              // 画面捕获方式：duplication_api (Windows桌面复制)
         capture_target = "monitor";                      // 捕获目标：monitor（显示器）或 window（窗口）
         capture_window_title = "";                       // 捕获窗口标题（空表示不指定）
-        udp_ip = "0.0.0.0";                              // UDP 画面传输接收端 IP
-        udp_port = 1234;                                 // UDP 端口
-        ndi_source_name = "Auto";                        // NDI 源名称
-        ndi_source_width = 0;                            // NDI 完整游戏 FOV 宽度（0=自动）
-        ndi_source_height = 0;                           // NDI 完整游戏 FOV 高度（0=自动）
+        udp_ip = "192.168.3.10";                         // UDP 发送端 IP 过滤
+        udp_port = 2333;                                 // UDP 接收端口
+        udp_source_width = 2560;                         // UDP 320 ROI 对应的完整游戏 FOV 宽度
+        udp_source_height = 1440;                        // UDP 320 ROI 对应的完整游戏 FOV 高度
+        ndi_source_name = "HPSAZZ (main)";               // NDI 完整源名称
+        ndi_source_width = 2560;                         // NDI 320 ROI 对应的完整游戏 FOV 宽度
+        ndi_source_height = 1440;                        // NDI 320 ROI 对应的完整游戏 FOV 高度
         detection_resolution = 320;                      // AI 检测分辨率（160/320/640）
         capture_fps = 60;                                // 画面捕获帧率上限
         monitor_idx = 0;                                 // 显示器索引
@@ -165,9 +167,9 @@ bool Config::loadConfig(const std::string& filename)
         wind_D = 8.0f;                                   // 微调距离阈值
 
         // === kmbox_net 网络输入 ===
-        kmbox_net_ip = "10.42.42.42";
-        kmbox_net_port = "1984";
-        kmbox_net_uuid = "DEADC0DE";
+        kmbox_net_ip = "192.168.2.188";
+        kmbox_net_port = "13384";
+        kmbox_net_uuid = "7679E04E";
 
         // === kmbox_a 输入 ===
         kmbox_a_pidvid = "";
@@ -327,7 +329,7 @@ bool Config::loadConfig(const std::string& filename)
         screenshot_delay = 500;                          // 截屏延迟（毫秒）
         verbose = false;                                 // 详细日志输出
         pipeline_tracer_enabled = false;                 // 流水线追踪开关
-        pipeline_tracer_max_frames = 300;                // 追踪缓冲帧数
+        pipeline_tracer_max_frames = 1000;               // 三次九点方位复测需要保留超过 300 帧
 
         // === 游戏配置文件 ===
         game_profiles.clear();
@@ -339,7 +341,15 @@ bool Config::loadConfig(const std::string& filename)
         uni.fovScaled = false;                            // 是否按 FOV 缩放
         uni.baseFOV = 0.0;                                // 基准 FOV
         game_profiles[uni.name] = uni;
-        active_game = uni.name;
+        GameProfile cs;
+        cs.name = "CS";
+        cs.sens = 1.4;
+        cs.yaw = 0.022;
+        cs.pitch = 0.022;
+        cs.fovScaled = false;
+        cs.baseFOV = 0.0;
+        game_profiles[cs.name] = cs;
+        active_game = cs.name;
 
         saveConfig(target);                              // 保存默认配置到文件
         return true;
@@ -429,22 +439,46 @@ bool Config::loadConfig(const std::string& filename)
         game_profiles[uni.name] = uni;
     }
 
+    // 项目默认使用 CS 实测灵敏度；旧配置缺少该项时补齐，但不覆盖用户已保存的同名配置。
+    if (!game_profiles.count("CS"))
+    {
+        GameProfile cs;
+        cs.name = "CS";
+        cs.sens = 1.4;
+        cs.yaw = 0.022;
+        cs.pitch = 0.022;
+        cs.fovScaled = false;
+        cs.baseFOV = 0.0;
+        game_profiles[cs.name] = cs;
+    }
+
     // 读取当前激活的游戏配置，如果不存在则选用第一个
-    active_game = get_string("active_game", active_game);
-    if (!game_profiles.count(active_game) && !game_profiles.empty())
-        active_game = game_profiles.begin()->first;
+    active_game = get_string("active_game", "CS");
+    if (!game_profiles.count(active_game))
+        active_game = game_profiles.count("CS") ? "CS" : "UNIFIED";
 
     // === 画面捕获配置 ===
     capture_method = get_string("capture_method", "duplication_api");
     capture_target = get_string("capture_target", "monitor");
     capture_window_title = get_string("capture_window_title", "");
-    udp_ip = get_string("udp_ip", "0.0.0.0");
-    udp_port = get_long("udp_port", 1234);
+    udp_ip = get_string("udp_ip", "192.168.3.10");
+    udp_port = get_long("udp_port", 2333);
     if (udp_port < 1 || udp_port > 65535)
-        udp_port = 1234;
-    ndi_source_name = get_string("ndi_source_name", "Auto");
-    ndi_source_width = get_long("ndi_source_width", 0);
-    ndi_source_height = get_long("ndi_source_height", 0);
+        udp_port = 2333;
+    udp_source_width = get_long("udp_source_width", 2560);
+    udp_source_height = get_long("udp_source_height", 1440);
+    if (udp_source_width < 0 || udp_source_width > 16384)
+        udp_source_width = 0;
+    if (udp_source_height < 0 || udp_source_height > 16384)
+        udp_source_height = 0;
+    if ((udp_source_width == 0) != (udp_source_height == 0))
+    {
+        udp_source_width = 0;
+        udp_source_height = 0;
+    }
+    ndi_source_name = get_string("ndi_source_name", "HPSAZZ (main)");
+    ndi_source_width = get_long("ndi_source_width", 2560);
+    ndi_source_height = get_long("ndi_source_height", 1440);
     if (ndi_source_width < 0 || ndi_source_width > 16384)
         ndi_source_width = 0;
     if (ndi_source_height < 0 || ndi_source_height > 16384)
@@ -540,9 +574,9 @@ bool Config::loadConfig(const std::string& filename)
     wind_D = (float)get_double("wind_D", 8.0f);        // 微调距离阈值
 
     // === kmbox_net 输入 ===
-    kmbox_net_ip = get_string("kmbox_net_ip", "10.42.42.42");
-    kmbox_net_port = get_string("kmbox_net_port", "1984");
-    kmbox_net_uuid = get_string("kmbox_net_uuid", "DEADC0DE");
+    kmbox_net_ip = get_string("kmbox_net_ip", "192.168.2.188");
+    kmbox_net_port = get_string("kmbox_net_port", "13384");
+    kmbox_net_uuid = get_string("kmbox_net_uuid", "7679E04E");
 
     // === kmbox_a 输入 ===
     kmbox_a_pidvid = get_string("kmbox_a_pidvid", "");
@@ -735,7 +769,8 @@ bool Config::loadConfig(const std::string& filename)
     screenshot_delay = get_long("screenshot_delay", 500);
     verbose = get_bool("verbose", false);
     pipeline_tracer_enabled = get_bool("pipeline_tracer_enabled", false);
-    pipeline_tracer_max_frames = get_long("pipeline_tracer_max_frames", 300);
+    pipeline_tracer_max_frames = get_long("pipeline_tracer_max_frames", 1000);
+    pipeline_tracer_max_frames = std::clamp(pipeline_tracer_max_frames, 100, 10000);
 
     return true;
 }
@@ -778,6 +813,8 @@ bool Config::saveConfig(const std::string& filename)
         << "capture_window_title = " << capture_window_title << "\n"
         << "udp_ip = " << udp_ip << "\n"
         << "udp_port = " << udp_port << "\n"
+        << "udp_source_width = " << udp_source_width << "\n"
+        << "udp_source_height = " << udp_source_height << "\n"
         << "ndi_source_name = " << ndi_source_name << "\n"
         << "ndi_source_width = " << ndi_source_width << "\n"
         << "ndi_source_height = " << ndi_source_height << "\n"

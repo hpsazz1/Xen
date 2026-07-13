@@ -163,6 +163,8 @@ struct CaptureThreadConfig
     int virtual_camera_height = 0;       // 虚拟摄像头高度
     std::string udp_ip;                  // UDP 捕获的 IP 地址
     int udp_port = 0;                    // UDP 捕获的端口
+    int udp_source_width = 0;            // UDP 预裁剪 ROI 对应的完整游戏 FOV 宽度
+    int udp_source_height = 0;           // UDP 预裁剪 ROI 对应的完整游戏 FOV 高度
     std::string ndi_source_name;         // NDI 源名称
     int ndi_source_width = 0;            // NDI 预裁剪 ROI 对应的完整游戏 FOV 宽度
     int ndi_source_height = 0;           // NDI 预裁剪 ROI 对应的完整游戏 FOV 高度
@@ -203,6 +205,8 @@ CaptureThreadConfig SnapshotCaptureConfig()
     snapshot.virtual_camera_height = config.virtual_camera_height;
     snapshot.udp_ip = config.udp_ip;
     snapshot.udp_port = config.udp_port;
+    snapshot.udp_source_width = config.udp_source_width;
+    snapshot.udp_source_height = config.udp_source_height;
     snapshot.ndi_source_name = config.ndi_source_name;
     snapshot.ndi_source_width = config.ndi_source_width;
     snapshot.ndi_source_height = config.ndi_source_height;
@@ -619,7 +623,9 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 
                 if (cfg.verbose)
                     std::cout << "[Capture] Using UDP capture" << std::endl;
-                auto capture = std::make_unique<UDPCapture>(width, height, cfg.udp_ip, cfg.udp_port);
+                auto capture = std::make_unique<UDPCapture>(
+                    width, height, cfg.udp_ip, cfg.udp_port,
+                    cfg.udp_source_width, cfg.udp_source_height);
                 if (!capture->isInitialized())
                     return nullptr;
                 return capture;

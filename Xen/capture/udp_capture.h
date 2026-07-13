@@ -22,7 +22,8 @@
 class UDPCapture : public IScreenCapture
 {
 public:
-    UDPCapture(int width, int height, const std::string& ip = "0.0.0.0", int port = 1234);
+    UDPCapture(int width, int height, const std::string& ip = "192.168.3.10", int port = 2333,
+               int sourceWidth = 0, int sourceHeight = 0);
     ~UDPCapture();
 
     cv::Mat GetNextFrameCpu() override;
@@ -43,8 +44,8 @@ private:
     struct NetworkFrame
     {
         cv::Mat image;       ///< 已按 1:1 像素中心裁剪的检测帧
-        int sourceWidth = 0; ///< JPEG 解码后的完整传输画面宽度
-        int sourceHeight = 0;///< JPEG 解码后的完整传输画面高度
+        int sourceWidth = 0; ///< 检测 ROI 对应的完整游戏 FOV 宽度
+        int sourceHeight = 0;///< 检测 ROI 对应的完整游戏 FOV 高度
     };
     // UDP 接收线程
     void ReceiveThread();
@@ -53,6 +54,8 @@ private:
 
     int width_;
     int height_;
+    int configured_source_width_;  ///< 预裁剪 UDP ROI 对应的完整游戏 FOV 宽度
+    int configured_source_height_; ///< 预裁剪 UDP ROI 对应的完整游戏 FOV 高度
     std::string ip_;
     int port_;
 

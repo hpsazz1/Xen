@@ -18,6 +18,8 @@ public:
     std::string capture_window_title;
     std::string udp_ip;
     int udp_port;
+    int udp_source_width;  // UDP 预裁剪 ROI 对应的完整游戏 FOV 宽度；0 表示使用 JPEG 编码宽度
+    int udp_source_height; // UDP 预裁剪 ROI 对应的完整游戏 FOV 高度；0 表示使用 JPEG 编码高度
     int detection_resolution;
     int capture_fps;
     int monitor_idx;
@@ -270,7 +272,7 @@ public:
 
     // ========== 流水线追踪 ==========
     bool pipeline_tracer_enabled = false;  ///< 是否启用流水线追踪
-    int  pipeline_tracer_max_frames = 300; ///< 环形缓冲最大帧数
+    int  pipeline_tracer_max_frames = 1000; ///< 环形缓冲最大帧数；可完整保留三次九点方位复测
 
     // 游戏配置文件结构体
     struct GameProfile

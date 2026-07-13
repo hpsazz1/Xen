@@ -8,16 +8,18 @@ UDP 采集从另一台 PC 或进程接收 MJPEG 字节流。发送端通过 UDP 
 
 ```ini
 capture_method = udp_capture
-udp_ip = 0.0.0.0
-udp_port = 1234
-detection_resolution = 640
+udp_ip = 192.168.3.10
+udp_port = 2333
+udp_source_width = 2560
+udp_source_height = 1440
+detection_resolution = 320
 capture_fps = 60
 ```
 
 2. 在 Windows 防火墙中打开 UDP 端口。以管理员身份运行 PowerShell：
 
 ```powershell
-New-NetFirewallRule -DisplayName "Ashfiexe UDP Capture 1234" -Direction Inbound -Protocol UDP -LocalPort 1234 -Action Allow
+New-NetFirewallRule -DisplayName "Xen UDP Capture 2333" -Direction Inbound -Protocol UDP -LocalPort 2333 -Action Allow
 ```
 
 3. 找到接收端 PC 的本地 IP 地址：
@@ -33,18 +35,18 @@ ipconfig
 桌面采集：
 
 ```bash
-ffmpeg -f gdigrab -framerate 60 -i desktop -vcodec mjpeg -q:v 5 -f mjpeg udp://RECEIVER_IP:1234
+ffmpeg -f gdigrab -framerate 60 -i desktop -vcodec mjpeg -q:v 5 -f mjpeg udp://RECEIVER_IP:2333
 ```
 
-接收端会从完整网络帧中心按 1:1 像素裁出 `detection_resolution`，不会再把 16:9 画面拉伸为正方形。裸 MJPEG 没有源画面元数据，因此不要在发送端预先只发送中心 ROI；否则接收端无法知道该 ROI 原本属于多大的完整 FOV。
+接收端会从完整网络帧中心按 1:1 像素裁出 `detection_resolution`，不会再把 16:9 画面拉伸为正方形。若发送端为降低带宽只发送中心 320×320 ROI，必须把 `udp_source_width/udp_source_height` 设置为该 ROI 所属的完整游戏分辨率，例如 `2560/1440`；否则程序会把320宽误当成完整 FOV，使 counts/pixel 放大8倍。
 
 OBS 虚拟摄像头：
 
 ```bash
-ffmpeg -f dshow -i video="OBS Virtual Camera" -vf scale=640:640 -vcodec mjpeg -q:v 5 -f mjpeg udp://RECEIVER_IP:1234
+ffmpeg -f dshow -i video="OBS Virtual Camera" -vf scale=640:640 -vcodec mjpeg -q:v 5 -f mjpeg udp://RECEIVER_IP:2333
 ```
 
-有效的检测分辨率为 `160`、`320` 和 `640`；不支持的值将回退为 `320`。为降低带宽而缩小完整帧时必须保持原宽高比，例如 2560×1440 可缩放为 1280×720，禁止缩放为 320×320。
+有效的检测分辨率为 `160`、`320` 和 `640`；不支持的值将回退为 `320`。发送完整画面但降低分辨率时必须保持原宽高比；发送1:1中心预裁剪 ROI 时则保留像素比例，并通过 `udp_source_width/height` 声明完整坐标空间。
 
 ## UDP 帧率诊断
 
