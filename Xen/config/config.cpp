@@ -124,6 +124,8 @@ bool Config::loadConfig(const std::string& filename)
         fovY = 74;                                       // 垂直视野（度）
         minSpeedMultiplier = 0.1f;                       // 鼠标最小速度倍率
         maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
+        move_response_ms = 80.0f;                        // 基础控制响应时间（毫秒）
+        move_max_speed_cps = 240.0f;                     // 基础控制最大设备速度（counts/sec）
 
         prediction_enabled = true;                       // 预测总开关
         predictionInterval = 0.020f;                     // 位置预测间隔（秒）
@@ -487,6 +489,8 @@ bool Config::loadConfig(const std::string& filename)
     fovY = get_long("fovY", 74);
     minSpeedMultiplier = (float)get_double("minSpeedMultiplier", 0.1);
     maxSpeedMultiplier = (float)get_double("maxSpeedMultiplier", 0.1);
+    move_response_ms = (float)get_double("move_response_ms", 80.0);
+    move_max_speed_cps = (float)get_double("move_max_speed_cps", 240.0);
 
     predictionInterval = (float)get_double("predictionInterval", 0.020);
     prediction_futurePositions = get_long("prediction_futurePositions", 12);
@@ -677,7 +681,11 @@ bool Config::loadConfig(const std::string& filename)
     auto_label_max_boxes = get_long("auto_label_max_boxes", 20);
     auto_label_record_classes = get_string("auto_label_record_classes", "");
 
-    // === 预测参数范围校验 ===
+    // === 基础移动参数范围校验 ===
+    move_response_ms = std::clamp(move_response_ms, 20.0f, 300.0f);
+    move_max_speed_cps = std::clamp(move_max_speed_cps, 30.0f, 2000.0f);
+
+    // === 旧预测参数范围校验（仅兼容旧配置，当前基础链路不使用） ===
     if (prediction_tau < 0.005f) prediction_tau = 0.005f;
     if (prediction_tau > 0.50f) prediction_tau = 0.50f;
     if (prediction_reset_timeout_sec < 0.05f) prediction_reset_timeout_sec = 0.05f;
@@ -787,55 +795,19 @@ bool Config::saveConfig(const std::string& filename)
         << "ml_selection_strategy = " << ml_selection_strategy << "\n"
         << "ml_recapture_iou = " << ml_recapture_iou << "\n"
         << "ml_recapture_distance_mult = " << ml_recapture_distance_mult << "\n"
-        << "ml_coast_velocity_decay = " << ml_coast_velocity_decay << "\n"
-        << "pure_pursuit_gain = " << pure_pursuit_gain << "\n"
-        << "pure_pursuit_dead_zone = " << pure_pursuit_dead_zone << "\n"
-        << "pure_pursuit_smoothing = " << pure_pursuit_smoothing << "\n"
-        << "motion_change_protection = " << (motion_change_protection ? "true" : "false") << "\n\n";
+        << "ml_coast_velocity_decay = " << ml_coast_velocity_decay << "\n\n";
 
     // === 鼠标移动设置 ===
     file << "# Mouse move\n"
         << "# WIN32, GHUB, RAZER, KMBOX_NET, KMBOX_A, MAKCU\n"
         << "fovX = " << fovX << "\n"
         << "fovY = " << fovY << "\n"
-        << "minSpeedMultiplier = " << minSpeedMultiplier << "\n"
-        << "maxSpeedMultiplier = " << maxSpeedMultiplier << "\n"
-
-        << std::fixed << std::setprecision(2)
-        << "predictionInterval = " << predictionInterval << "\n"
-        << "prediction_futurePositions = " << prediction_futurePositions << "\n"
-        << "prediction_enabled = " << (prediction_enabled ? "true" : "false") << "\n"
-        << "draw_futurePositions = " << (draw_futurePositions ? "true" : "false") << "\n"
-        << "prediction_tau = " << prediction_tau << "\n"
-        << "prediction_compensate_delay = " << (prediction_compensate_delay ? "true" : "false") << "\n"
-        << "prediction_reset_timeout_sec = " << prediction_reset_timeout_sec << "\n"
-
-        << "snapRadius = " << snapRadius << "\n"
-        << "nearRadius = " << nearRadius << "\n"
-        << "speedCurveExponent = " << speedCurveExponent << "\n"
-        << std::fixed << std::setprecision(2)
-        << "snapBoostFactor = " << snapBoostFactor << "\n"
-
+        << "move_response_ms = " << move_response_ms << "\n"
+        << "move_max_speed_cps = " << move_max_speed_cps << "\n"
         << "easynorecoil = " << (easynorecoil ? "true" : "false") << "\n"
         << std::fixed << std::setprecision(1)
         << "easynorecoilstrength = " << easynorecoilstrength << "\n"
         << "input_method = " << input_method << "\n\n";
-
-    // === 贝塞尔轨迹 + 输出平滑 ===
-    file << "# Bezier & EMA\n"
-        << "bezier_enabled = " << (bezier_enabled ? "true" : "false") << "\n"
-        << std::fixed << std::setprecision(2)
-        << "bezier_strength = " << bezier_strength << "\n"
-        << "move_ema_enabled = " << (move_ema_enabled ? "true" : "false") << "\n"
-        << "move_ema_alpha = " << move_ema_alpha << "\n\n";
-
-    // === 轨迹模拟（模拟自然鼠标移动） ===
-    file << "# Wind mouse\n"
-        << "wind_mouse_enabled = " << (wind_mouse_enabled ? "true" : "false") << "\n"
-        << "wind_G = " << wind_G << "\n"
-        << "wind_W = " << wind_W << "\n"
-        << "wind_M = " << wind_M << "\n"
-        << "wind_D = " << wind_D << "\n\n";
 
     // === kmbox_net 网络输入 ===
     file << "# Kmbox_net\n"
@@ -1105,5 +1077,8 @@ void Config::applyAutoDerivedTrackerParams(int detectionResolution, int captureF
     ml_recapture_iou       = 0.3f;
     ml_recapture_distance_mult = 2.5f;
     ml_coast_velocity_decay    = 1.0f;
+    move_response_ms = 80.0f;
+    // Device rate is expressed per second, so it must remain independent of FPS.
+    move_max_speed_cps = 240.0f;
     // motion_change_protection 由用户手动控制，自动推导不覆盖
 }

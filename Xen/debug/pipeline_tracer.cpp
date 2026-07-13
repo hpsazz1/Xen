@@ -21,28 +21,33 @@ void PipelineTracer::setMaxFrames(size_t n)
 {
     if (n < 10) n = 10;
     if (n > 10000) n = 10000;
-    maxFrames = n;
-
-    // 立即裁剪现有数据
     std::lock_guard<std::mutex> lock(mutex);
+    maxFrames = n;
     while (ringBuffer.size() > maxFrames)
         ringBuffer.pop_front();
 }
 
-PipelineFrame& PipelineTracer::beginFrame(int resolution)
+size_t PipelineTracer::getMaxFrames() const
 {
     std::lock_guard<std::mutex> lock(mutex);
+    return maxFrames;
+}
 
-    if (ringBuffer.size() >= maxFrames)
-        ringBuffer.pop_front();
-
+PipelineFrame PipelineTracer::beginFrame(int resolution)
+{
     PipelineFrame frame;
     frame.frameId = frameCounter.fetch_add(1, std::memory_order_relaxed);
     frame.timestamp = std::chrono::steady_clock::now();
     frame.resolution = resolution;
+    return frame;
+}
 
+void PipelineTracer::commitFrame(PipelineFrame frame)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    if (ringBuffer.size() >= maxFrames)
+        ringBuffer.pop_front();
     ringBuffer.push_back(std::move(frame));
-    return ringBuffer.back();
 }
 
 std::vector<PipelineFrame> PipelineTracer::getFrames() const
@@ -83,13 +88,11 @@ bool PipelineTracer::exportCSV(const std::string& path) const
     file << "FrameID,Timestamp,Resolution,FPS,TargetDetected,ObservationAgeSec,"
          << "TargetClassID,"
          << "RawPivotX,RawPivotY,"
-         << "McPivotX,McPivotY,McDeltaX,McDeltaY,"
-         << "PredX,PredY,VelocityX,VelocityY,HasExternalVel,"
-         << "DistToTarget,SpeedMultiplier,"
-         << "PpDx,PpDy,"
-         << "CountsX,CountsY,"
-         << "EmaCountsX,EmaCountsY,"
-         << "FinalMx,FinalMy\n";
+         << "FilteredX,FilteredY,ObservedSpeed,FilterResidual,"
+         << "ErrorX,ErrorY,ErrorDistance,"
+         << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,"
+         << "FinalMx,FinalMy,"
+         << "ResponseSeconds,MaxCountsPerSecond,FrameCountLimit,Settled,QueuedMoveCount\n";
 
     for (const auto& f : frames)
     {
@@ -105,17 +108,15 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.observationAgeSec << ','
              << f.targetClassId << ','
              << f.rawPivotX << ',' << f.rawPivotY << ','
-             << f.mcPivotX << ',' << f.mcPivotY << ','
-             << f.mcDeltaX << ',' << f.mcDeltaY << ','
-             << f.predX << ',' << f.predY << ','
-             << f.velocityX << ',' << f.velocityY << ','
-             << (f.hasExternalVel ? '1' : '0') << ','
-             << f.distToTarget << ','
-             << f.speedMultiplier << ','
-             << f.ppDx << ',' << f.ppDy << ','
-             << f.countsX << ',' << f.countsY << ','
-             << f.emaCountsX << ',' << f.emaCountsY << ','
-             << f.finalMx << ',' << f.finalMy << '\n';
+             << f.filteredX << ',' << f.filteredY << ','
+             << f.observedSpeed << ',' << f.filterResidual << ','
+             << f.errorX << ',' << f.errorY << ',' << f.errorDistance << ','
+             << f.requestedPixelX << ',' << f.requestedPixelY << ','
+             << f.requestedCountsX << ',' << f.requestedCountsY << ','
+             << f.finalMx << ',' << f.finalMy << ','
+             << f.responseSeconds << ',' << f.maxCountsPerSecond << ','
+             << f.frameCountLimit << ',' << (f.settled ? '1' : '0') << ','
+             << f.queuedMoveCount << '\n';
     }
 
     file.close();

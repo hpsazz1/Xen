@@ -13,7 +13,6 @@ class MouseThread;
 class Game_overlay;
 
 extern std::unique_ptr<Game_overlay> gameOverlayPtr;  ///< 全局游戏覆盖层指针
-extern std::thread gameOverlayThread;            ///< 覆盖层渲染线程
 extern std::atomic<bool> gameOverlayShouldExit;  ///< 覆盖层线程退出标志
 
 extern std::mutex g_trackerDebugMutex;           ///< 跟踪器调试信息互斥锁

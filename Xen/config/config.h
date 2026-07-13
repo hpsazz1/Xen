@@ -65,6 +65,9 @@ public:
     int fovY;
     float minSpeedMultiplier;
     float maxSpeedMultiplier;
+    // 基础移动控制（当前主链路）。旧速度倍率仅用于配置迁移，不再参与运行。
+    float move_response_ms;            // 误差响应时间，毫秒
+    float move_max_speed_cps;          // 设备最大速度，counts/sec
 
     // ========== 目标预测 ==========
     bool  prediction_enabled = true;              // 预测总开关

@@ -137,9 +137,6 @@ void draw_capture_settings()
                     config.detection_resolution,
                     config.fovX,
                     config.fovY,
-                    config.minSpeedMultiplier,
-                    config.maxSpeedMultiplier,
-                    config.predictionInterval,
                     config.auto_shoot,
                     config.bScope_multiplier);
                 OverlayConfig_MarkDirty();

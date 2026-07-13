@@ -61,6 +61,7 @@ desktop.ini
 *.swo
 .zcode
 .vs
+.agents
 
 # ==================== 配置备份 ====================
 *.ini.bak

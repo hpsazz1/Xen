@@ -205,13 +205,13 @@ void bezierMove(int dx, int dy, float bezierStrength,
     {
         double t = static_cast<double>(i) / steps;
         double t2 = t * t, t3 = t2 * t;
-        double mt = 1.0 - t, mt2 = mt * mt, mt3 = mt2 * mt;
+        double mt = 1.0 - t, mt2 = mt * mt;
         double bx = 3.0 * mt2 * t * cp1x + 3.0 * mt * t2 * cp2x + t3 * dx;
         double by = 3.0 * mt2 * t * cp1y + 3.0 * mt * t2 * cp2y + t3 * dy;
 
         double pt = static_cast<double>(i - 1) / steps;
         double pt2 = pt * pt, pt3 = pt2 * pt;
-        double pmt = 1.0 - pt, pmt2 = pmt * pmt, pmt3 = pmt2 * pmt;
+        double pmt = 1.0 - pt, pmt2 = pmt * pmt;
         double pbx = 3.0 * pmt2 * pt * cp1x + 3.0 * pmt * pt2 * cp2x + pt3 * dx;
         double pby = 3.0 * pmt2 * pt * cp1y + 3.0 * pmt * pt2 * cp2y + pt3 * dy;
 

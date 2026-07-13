@@ -368,7 +368,12 @@ DirectMLDetector::DirectMLDetector(const std::string& model_path)
  */
 DirectMLDetector::~DirectMLDetector()
 {
-    shouldExit = true;
+    requestStop();
+}
+
+void DirectMLDetector::requestStop() noexcept
+{
+    shouldExit.store(true);
     inferenceCV.notify_all();
 }
 

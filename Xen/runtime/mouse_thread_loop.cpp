@@ -16,43 +16,6 @@
 
 namespace
 {
-// 纯预测移动的宽容帧数：允许目标短暂丢失时继续预测
-constexpr int kPredictedOnlyMoveGraceFrames = 3;
-// 宽容帧数对应的秒数（基于60fps计算）
-constexpr double kPredictedOnlyMoveGraceSec =
-    static_cast<double>(kPredictedOnlyMoveGraceFrames) / 60.0;
-// 预测移动超时附加填充时间（毫秒），补偿检测延迟
-constexpr int kPredictedOnlyMoveStalePadMs = 16;
-
-/**
- * 判断是否允许基于预测的纯移动（目标被短暂遮挡时继续追踪）
- * 当目标跟踪ID与锁定ID一致、存在有效目标且错过帧数大于0时，
- * 若错过时间在宽容范围内则允许预测移动
- *
- * @param activeTrackId 当前激活的跟踪ID
- * @param hasActiveTarget 是否存在激活目标
- * @param lockInfo 锁定目标信息（包含错过帧数）
- * @param captureFpsValue 捕获帧率
- * @return true 表示允许基于预测的纯移动
- */
-bool allowPredictedOnlyMove(
-    int activeTrackId,
-    bool hasActiveTarget,
-    const LockedTargetInfo& lockInfo,
-    int captureFpsValue)
-{
-    if (activeTrackId != lockInfo.trackId ||
-        !hasActiveTarget ||
-        lockInfo.missedFrames <= 0)
-    {
-        return false;
-    }
-
-    const double frameDtSec = frameIntervalSec(captureFpsValue);
-    const double missedSec = static_cast<double>(lockInfo.missedFrames) * frameDtSec;
-    return missedSec <= kPredictedOnlyMoveGraceSec + frameDtSec * 0.51;
-}
-
 /**
  * 计算目标跟踪的过期间隔（毫秒）
  * 基于帧率和宽容时间综合判断目标何时被视为过期
@@ -63,10 +26,7 @@ int trackerStaleTimeoutMs(int captureFpsValue)
 {
     const int fps = std::max(1, captureFpsValue);
     const int frameBasedMs = 2000 / fps;
-    const int graceBasedMs =
-        static_cast<int>(kPredictedOnlyMoveGraceSec * 1000.0 + 0.5) +
-        kPredictedOnlyMoveStalePadMs;
-    return std::clamp(std::max(frameBasedMs, graceBasedMs), 25, 180);
+    return std::clamp(frameBasedMs, 25, 100);
 }
 }
 
@@ -145,8 +105,8 @@ void mouseThreadFunction(MouseThread& mouseThread)
     std::vector<int> classes;
     // 当前帧检测的时间戳
     std::chrono::steady_clock::time_point detectionTimestamp{};
-    // 移动控制库跟踪器实例（统一跟踪层）
-    MotionLibTargetTracker motionLibTracker;
+    // 基础观测锁定器：不做速度预测或丢失滑行
+    BasicTargetTracker motionLibTracker;
     // 当前选中的瞄准目标（可选）
     std::optional<AimbotTarget> activeTarget;
     // 当前激活的跟踪ID（非"无跟踪器"模式下使用）
@@ -165,14 +125,13 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
     /**
      * 重置激活目标——清除当前瞄准目标、跟踪ID和观测状态，
-     * 同时清空鼠标线程中的未来位置缓存和预测状态
+     * 同时重置基础目标滤波和控制状态
      */
     auto resetActiveTarget = [&]() {
         activeTarget.reset();
         activeTrackId = -1;
         activeTargetObserved = false;
-        mouseThread.clearFuturePositions();
-        mouseThread.resetPrediction();
+        mouseThread.resetTracking();
     };
 
     // ========== 主循环：持续处理检测结果和执行瞄准 ==========
@@ -184,90 +143,58 @@ void mouseThreadFunction(MouseThread& mouseThread)
         int detectionResolution = 0;
         bool disableHeadshot = false;
         bool trackerEnabled = true;
-        int predictionFuturePositions = 0;
         bool autoShoot = false;
-
-        // 当前 ML 参数指纹（与下方跟踪器参数检测共用锁）
-        struct MlFingerprint {
-            int confirm_threshold, termination_frames, coast_frames;
-            float noise_vx, noise_vy, noise_w, noise_h, measurement_stddev;
-            float recapture_iou, recapture_distance_mult, coast_velocity_decay;
-            bool operator==(const MlFingerprint& o) const {
-                return confirm_threshold == o.confirm_threshold
-                    && termination_frames == o.termination_frames
-                    && coast_frames == o.coast_frames
-                    && noise_vx == o.noise_vx
-                    && noise_vy == o.noise_vy
-                    && noise_w == o.noise_w
-                    && noise_h == o.noise_h
-                    && measurement_stddev == o.measurement_stddev
-                    && recapture_iou == o.recapture_iou
-                    && recapture_distance_mult == o.recapture_distance_mult
-                    && coast_velocity_decay == o.coast_velocity_decay;
-            }
-        };
-        MlFingerprint mlFingerprint{};
+        bool autoDeriveTrackerParams = true;
+        std::vector<float> confidences;
 
         {
             std::lock_guard<std::mutex> cfgLock(configMutex);
             detectionResolution = config.detection_resolution;
             disableHeadshot = config.disable_headshot;
             trackerEnabled = config.tracker_enabled;
-            predictionFuturePositions = config.prediction_futurePositions;
             autoShoot = config.auto_shoot;
+            autoDeriveTrackerParams = config.auto_derive_tracker_params;
 
-            mlFingerprint.confirm_threshold    = config.ml_confirm_threshold;
-            mlFingerprint.termination_frames   = config.ml_termination_frames;
-            mlFingerprint.noise_vx             = config.ml_noise_vx;
-            mlFingerprint.noise_vy             = config.ml_noise_vy;
-            mlFingerprint.noise_w              = config.ml_noise_w;
-            mlFingerprint.noise_h              = config.ml_noise_h;
-            mlFingerprint.measurement_stddev   = config.ml_measurement_stddev;
-            mlFingerprint.coast_frames         = config.ml_coast_frames;
-            mlFingerprint.recapture_iou        = config.ml_recapture_iou;
-            mlFingerprint.recapture_distance_mult = config.ml_recapture_distance_mult;
-            mlFingerprint.coast_velocity_decay = config.ml_coast_velocity_decay;
         }
 
-        // ---- 检测跟踪器参数变化，更新时重新配置并重置 ----
-        // 首次运行时应用自动推导参数（由 Config::applyAutoDerivedTrackerParams 在加载时处理）
+        // ---- 自动推导基础移动参数 ----
         {
-            static bool autoDerived = false;
-            if (!autoDerived || detectionResolution != appliedDetectionResolution)
+            static int lastDerivedResolution = -1;
+            static int lastDerivedFps = -1;
+            static bool lastAutoDerive = false;
+            int fps = captureFps.load();
+            if (fps <= 0) fps = 60;
+            const int stableFps = std::clamp(((fps + 5) / 10) * 10, 20, 500);
+            if (autoDeriveTrackerParams &&
+                (detectionResolution != lastDerivedResolution ||
+                 stableFps != lastDerivedFps || !lastAutoDerive))
             {
-                autoDerived = true;
-                int fps = captureFps.load();
-                if (fps <= 0) fps = 60;
-                config.applyAutoDerivedTrackerParams(detectionResolution, fps);
-            }
-            
-            static MlFingerprint lastMlFingerprint{};
-            
-            if (!(mlFingerprint == lastMlFingerprint) || !motionLibTracker.isConfigured())
-            {
-                lastMlFingerprint = mlFingerprint;
-                
+                float previousResponseMs = 0.0f;
+                float previousMaxCps = 0.0f;
                 {
                     std::lock_guard<std::mutex> cfgLock(configMutex);
-                    motionLibTracker.configure(
-                        config.ml_confirm_threshold,
-                        config.ml_termination_frames,
-                        config.ml_noise_vx, config.ml_noise_vy,
-                        config.ml_noise_w, config.ml_noise_h,
-                        config.ml_measurement_stddev,
-                        config.ml_coast_frames,
-                        "nearest",
-                        config.ml_recapture_iou,
-                        config.ml_recapture_distance_mult,
-                        config.ml_coast_velocity_decay);
+                    previousResponseMs = config.move_response_ms;
+                    previousMaxCps = config.move_max_speed_cps;
                 }
+                config.applyAutoDerivedTrackerParams(detectionResolution, stableFps);
                 {
-                    std::lock_guard<std::mutex> lk(g_trackerDebugMutex);
-                    g_trackerDebugTracks.clear();
-                    g_trackerLockedId = -1;
+                    std::lock_guard<std::mutex> cfgLock(configMutex);
+                    if (previousResponseMs != config.move_response_ms ||
+                        previousMaxCps != config.move_max_speed_cps)
+                    {
+                        mouseThread.updateConfig(
+                            config.detection_resolution,
+                            config.fovX,
+                            config.fovY,
+                            config.auto_shoot,
+                            config.bScope_multiplier);
+                    }
                 }
-                resetActiveTarget();
+                lastDerivedResolution = detectionResolution;
+                lastDerivedFps = stableFps;
             }
+            lastAutoDerive = autoDeriveTrackerParams;
+
         }
 
         // ---- 检测开镜状态变化，切换瞄准状态时重置目标 ----
@@ -290,8 +217,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
             if (detectionBuffer.version > lastVersion)
             {
-                std::vector<float> dummyConf;
-                detectionBuffer.swapLocked(boxes, classes, dummyConf, lastVersion, detectionTimestamp);
+                detectionBuffer.swapLocked(boxes, classes, confidences, lastVersion, detectionTimestamp);
                 hasNewDetection = true;
             }
         }
@@ -314,9 +240,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 config.detection_resolution,
                 config.fovX,
                 config.fovY,
-                config.minSpeedMultiplier,
-                config.maxSpeedMultiplier,
-                config.predictionInterval,
                 config.auto_shoot,
                 config.bScope_multiplier
             );
@@ -350,9 +273,9 @@ void mouseThreadFunction(MouseThread& mouseThread)
             {
                 // === 统一跟踪器（motion_lib）路径 ===
                 motionLibTracker.update(
-                    boxes, classes,
+                    boxes, classes, confidences,
                     detectionResolution, detectionResolution,
-                    disableHeadshot, aimingNow, detectionTimestamp);
+                    disableHeadshot, detectionTimestamp);
 
                 lastTrackerUpdate = std::chrono::steady_clock::now();
                 {
@@ -366,13 +289,10 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
                 if (hasLock)
                 {
-                    const int previousActiveTrackId = activeTrackId;
-                    const bool hadActiveTarget = activeTarget.has_value();
-                    // 跟踪ID切换时重置预测状态
+                    // 跟踪ID切换时重置基础滤波与控制状态
                     if (activeTrackId != -1 && activeTrackId != lockInfo.trackId)
                     {
-                        mouseThread.resetPrediction();
-                        mouseThread.clearFuturePositions();
+                        mouseThread.resetTracking();
                     }
 
                     activeTarget = lockInfo.target;
@@ -380,37 +300,13 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     activeTargetObserved = lockInfo.observedThisFrame;
                     mouseThread.setTargetDetected(true);
 
-                    // 向 MouseThread 注入外部速度估计（来自 SOT Kalman）
-                    // 注意: SOT Kalman 速度为 px/frame，此处转换为 px/sec
-                    // 以便 predict_target_position 做时间外推和 PurePursuit 做速度前馈
-                    // 即使目标未被直接观测（滑行中），SOT 仍提供速度估计
-                    {
-                        auto [vx, vy] = motionLibTracker.getLockedVelocity();
-                        double fps = static_cast<double>(std::max(1, captureFps.load()));
-                        mouseThread.setExternalTargetVelocity(
-                            static_cast<double>(vx) * fps,   // px/frame → px/sec
-                            static_cast<double>(vy) * fps);
-                    }
-
-                    // 当前帧观测到目标或短暂丢失在宽容期内：更新预测
+                    // 基础阶段只接受真实检测观测；SOT 滑行帧仅维持锁定，
+                    // 不生成鼠标移动，避免把预测数据混入控制测试。
                     const bool observed = lockInfo.observedThisFrame;
-                    const bool predictedOk = !observed && allowPredictedOnlyMove(
-                        previousActiveTrackId, hadActiveTarget, lockInfo, captureFps.load());
-
-                    if (observed || predictedOk)
+                    if (observed)
                     {
                         hasAimObservation = true;
-                        // 观测到目标或预测移动有效时都更新时间戳，
-                        // 防止 SOT 滑行期间预测超时误重置
-                        if (observed || predictedOk)
-                            mouseThread.setLastTargetTime(std::chrono::steady_clock::now());
-
-                        auto futurePositions = mouseThread.predictFuturePositions(
-                            activeTarget->pivotX,
-                            activeTarget->pivotY,
-                            predictionFuturePositions
-                        );
-                        mouseThread.storeFuturePositions(futurePositions);
+                        mouseThread.setLastTargetTime(std::chrono::steady_clock::now());
                     }
                 }
                 else
@@ -445,12 +341,6 @@ void mouseThreadFunction(MouseThread& mouseThread)
                     mouseThread.setTargetDetected(true);
                     mouseThread.setLastTargetTime(std::chrono::steady_clock::now());
 
-                    auto futurePositions = mouseThread.predictFuturePositions(
-                        activeTarget->pivotX,
-                        activeTarget->pivotY,
-                        predictionFuturePositions
-                    );
-                    mouseThread.storeFuturePositions(futurePositions);
                 }
                 else
                 {
@@ -518,9 +408,5 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // ---- 简易无后坐力补偿（射击+开镜时自动下移鼠标） ----
         handleEasyNoRecoil(mouseThread);
 
-        // ---- 检查并重置过期的预测状态 ----
-        mouseThread.checkAndResetPredictions();
     }
 }
-
-

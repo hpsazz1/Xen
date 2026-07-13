@@ -215,6 +215,7 @@ void mergeHeadToPlayer(
     std::vector<double> playerHeadPivotX(dets.size(), 0.0);
     std::vector<double> playerHeadPivotY(dets.size(), 0.0);
     std::vector<double> playerHeadPivotDist(dets.size(), std::numeric_limits<double>::max());
+    std::vector<float> playerHeadConfidence(dets.size(), 0.0f);
 
     // 对每个头部检测，寻找包含它的最近身体检测
     for (size_t hi = 0; hi < dets.size(); ++hi)
@@ -261,6 +262,7 @@ void mergeHeadToPlayer(
                 playerHeadPivotDist[bestPlayer] = bestDist;
                 playerHeadPivotX[bestPlayer] = h.box.x + h.box.width * 0.5;
                 playerHeadPivotY[bestPlayer] = h.box.y + h.box.height * headOffset;
+                playerHeadConfidence[bestPlayer] = h.confidence;
             }
         }
     }
@@ -279,11 +281,156 @@ void mergeHeadToPlayer(
         {
             d.pivotX = playerHeadPivotX[i];
             d.pivotY = playerHeadPivotY[i];
+            d.confidence = std::max(d.confidence, playerHeadConfidence[i]);
         }
         filtered.push_back(d);
     }
 
     dets.swap(filtered);
+}
+
+void BasicTargetTracker::update(
+    const std::vector<cv::Rect>& boxes,
+    const std::vector<int>& classes,
+    const std::vector<float>& confidences,
+    int screenWidth,
+    int screenHeight,
+    bool disableHeadshot,
+    std::chrono::steady_clock::time_point observationTime)
+{
+    int classPlayer = 0;
+    int classHead = 1;
+    float bodyOffset = 0.15f;
+    float headOffset = 0.05f;
+    {
+        std::lock_guard<std::mutex> lock(configMutex);
+        classPlayer = config.class_player;
+        classHead = config.class_head;
+        bodyOffset = config.body_y_offset;
+        headOffset = config.head_y_offset;
+    }
+
+    std::vector<DetectionCandidate> candidates;
+    const size_t count = std::min(boxes.size(), classes.size());
+    candidates.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+        const int cls = classes[i];
+        if ((disableHeadshot && cls != classPlayer) ||
+            (!disableHeadshot && cls != classPlayer && cls != classHead))
+            continue;
+        const auto& box = boxes[i];
+        if (box.width <= 0 || box.height <= 0)
+            continue;
+
+        DetectionCandidate candidate;
+        candidate.box = cv::Rect2f(
+            static_cast<float>(box.x), static_cast<float>(box.y),
+            static_cast<float>(box.width), static_cast<float>(box.height));
+        candidate.classId = cls;
+        const float confidence = i < confidences.size() ? confidences[i] : 1.0f;
+        candidate.confidence = std::isfinite(confidence)
+            ? std::clamp(confidence, 0.0f, 1.0f) : 0.0f;
+        candidate.pivotX = box.x + box.width * 0.5;
+        candidate.pivotY = box.y + box.height * (cls == classHead ? headOffset : bodyOffset);
+        candidates.push_back(candidate);
+    }
+
+    mergeHeadToPlayer(candidates, classPlayer, classHead, headOffset, disableHeadshot);
+    if (candidates.empty())
+    {
+        reset();
+        return;
+    }
+
+    size_t selected = candidates.size();
+    if (locked_)
+    {
+        double bestDistance = std::numeric_limits<double>::max();
+        const double gate = std::max(
+            12.0, 1.5 * std::max(lockedCandidate_.box.width, lockedCandidate_.box.height));
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            const double distance = std::hypot(
+                candidates[i].pivotX - lockedCandidate_.pivotX,
+                candidates[i].pivotY - lockedCandidate_.pivotY);
+            if (distance <= gate && distance < bestDistance)
+            {
+                bestDistance = distance;
+                selected = i;
+            }
+        }
+    }
+
+    if (selected == candidates.size())
+    {
+        const double centerX = screenWidth * 0.5;
+        const double centerY = screenHeight * 0.5;
+        double bestScore = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            const double distance = std::hypot(
+                candidates[i].pivotX - centerX, candidates[i].pivotY - centerY);
+            const double score = distance * (1.0 + 0.20 * (1.0 - candidates[i].confidence));
+            if (score < bestScore)
+            {
+                bestScore = score;
+                selected = i;
+            }
+        }
+        trackId_ = nextTrackId_++;
+    }
+
+    lockedCandidate_ = candidates[selected];
+    locked_ = true;
+    lastUpdate_ = observationTime.time_since_epoch().count() != 0
+        ? observationTime : std::chrono::steady_clock::now();
+}
+
+void BasicTargetTracker::reset()
+{
+    locked_ = false;
+    trackId_ = -1;
+    lockedCandidate_ = {};
+    lastUpdate_ = {};
+}
+
+bool BasicTargetTracker::getLockedTarget(LockedTargetInfo& out) const
+{
+    if (!locked_)
+        return false;
+    out.trackId = trackId_;
+    out.observedThisFrame = true;
+    out.missedFrames = 0;
+    out.target = AimbotTarget(
+        static_cast<int>(std::lround(lockedCandidate_.box.x)),
+        static_cast<int>(std::lround(lockedCandidate_.box.y)),
+        static_cast<int>(std::lround(lockedCandidate_.box.width)),
+        static_cast<int>(std::lround(lockedCandidate_.box.height)),
+        lockedCandidate_.classId,
+        lockedCandidate_.pivotX,
+        lockedCandidate_.pivotY);
+    return true;
+}
+
+std::vector<TrackDebugInfo> BasicTargetTracker::getDebugTracks() const
+{
+    if (!locked_)
+        return {};
+    TrackDebugInfo info;
+    info.trackId = trackId_;
+    info.classId = lockedCandidate_.classId;
+    info.box = cv::Rect(
+        static_cast<int>(std::lround(lockedCandidate_.box.x)),
+        static_cast<int>(std::lround(lockedCandidate_.box.y)),
+        static_cast<int>(std::lround(lockedCandidate_.box.width)),
+        static_cast<int>(std::lround(lockedCandidate_.box.height)));
+    info.pivotX = lockedCandidate_.pivotX;
+    info.pivotY = lockedCandidate_.pivotY;
+    info.lastUpdate = lastUpdate_;
+    info.observedThisFrame = true;
+    info.isLocked = true;
+    return { info };
 }
 
 // ============================================================================
@@ -420,6 +567,7 @@ AimbotTarget MotionLibTargetTracker::toAimbotTarget(const estimation::DetectedOb
 void MotionLibTargetTracker::update(
     const std::vector<cv::Rect>& boxes,
     const std::vector<int>& classes,
+    const std::vector<float>& confidences,
     int screenWidth,
     int screenHeight,
     bool disableHeadshot,
@@ -476,6 +624,10 @@ void MotionLibTargetTracker::update(
             static_cast<float>(b.x), static_cast<float>(b.y),
             static_cast<float>(b.width), static_cast<float>(b.height));
         d.classId = cls;
+        const float rawConfidence = (i < confidences.size()) ? confidences[i] : 1.0f;
+        d.confidence = std::isfinite(rawConfidence)
+            ? std::clamp(rawConfidence, 0.0f, 1.0f)
+            : 0.0f;
         d.pivotX = b.x + b.width * 0.5;
         d.pivotY = b.y + b.height * yOffset;
         dets.push_back(d);
@@ -492,13 +644,13 @@ void MotionLibTargetTracker::update(
         estimation::DetectedObject obj;
         obj.box = { d.box.x, d.box.y, d.box.width, d.box.height };
         obj.classId = d.classId;
-        obj.confidence = 1.0f;  // Xen 当前不传递置信度
+        obj.confidence = d.confidence;
         motInput.push_back(obj);
     }
 
     // MOT 预测+更新（匈牙利匹配 + 7状态 Kalman）
     std::vector<estimation::DetectedObject> motOutput;
-    motTracker_.predictAndUpdate(motInput, motOutput, frameDtMeanSec_);
+    motTracker_.predictAndUpdate(motInput, motOutput, static_cast<float>(frameDtMeanSec_));
 
     // SOT 更新
     if (sotTracker_.hasTarget())
@@ -511,7 +663,12 @@ void MotionLibTargetTracker::update(
         {
             if (obj.trackId == sotId)
             {
-                sotTracker_.setExternalVelocity(obj.velocityX, obj.velocityY, true);
+                // MOT state velocity is pixels/second because its prediction
+                // step uses seconds. SOT coasting advances once per frame.
+                sotTracker_.setExternalVelocity(
+                    obj.velocityX * static_cast<float>(frameDtMeanSec_),
+                    obj.velocityY * static_cast<float>(frameDtMeanSec_),
+                    true);
                 foundInMot = true;
                 break;
             }
@@ -631,11 +788,11 @@ std::vector<TrackDebugInfo> MotionLibTargetTracker::getDebugTracks() const
 }
 
 /**
- * getLockedVelocity — 获取 SOT 估计的速度（像素/秒）
+ * getLockedVelocity — 获取 SOT 估计的速度（像素/帧）
  *
  * 用于外部预测模块。
  *
- * @return (velocityX, velocityY) 像素/秒
+ * @return (velocityX, velocityY) 像素/帧
  */
 std::pair<float, float> MotionLibTargetTracker::getLockedVelocity() const
 {

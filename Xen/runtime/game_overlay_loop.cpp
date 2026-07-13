@@ -18,7 +18,6 @@
 #include "mouse.h"
 #include "other_tools.h"
 #include "runtime/thread_loops.h"
-#include "runtime/speed_curve.h"
 #include "Xen.h"
 
 #ifdef USE_CUDA
@@ -158,9 +157,7 @@ bool detectionRepresentedByTrack(
 }
 }
 /**
- * 目标校正演示覆盖层——可视化瞄准校正速度和区域
- * 在覆盖层上绘制内圈（吸附半径）和外圈（接近半径），
- * 并显示一个沿校正方向运动的模拟点，用于实时展示速度曲线
+ * 基础控制演示覆盖层——只显示自动推导的稳定/释放半径。
  *
  * @param overlay 游戏覆盖层指针
  * @param centerX 演示中心X坐标（屏幕像素）
@@ -171,50 +168,11 @@ static void draw_target_correction_demo_game_overlay(Game_overlay* overlay, floa
     if (!overlay)
         return;
 
-    // 按缩放比例放大绘制，便于观察
     const float scale = 4.0f;
-    float near_px = config.nearRadius * scale;
-    float snap_px = config.snapRadius * scale;
-    near_px = std::max(10.0f, near_px);
-    snap_px = std::max(6.0f, std::min(snap_px, near_px - 4.0f));
-
-    // 绘制外圈（接近半径，蓝色）和内圈（吸附半径，红色）
-    overlay->AddCircle({ centerX, centerY, near_px }, ARGB(180, 80, 120, 255), 2.0f);
-    overlay->AddCircle({ centerX, centerY, snap_px }, ARGB(180, 255, 100, 100), 2.0f);
-
-    // 模拟点距离和速度的持久状态
-    static float dist_px = 0.0f;
-    static float vel_px = 0.0f;
-    static auto last_t = std::chrono::steady_clock::now();
-
-    auto now = std::chrono::steady_clock::now();
-    double dt = std::chrono::duration<double>(now - last_t).count();
-    last_t = now;
-    dt = std::max(0.0, std::min(dt, 0.1));
-
-    // 距离归零时重置到外圈起始位置
-    if (dist_px <= 0.0f || dist_px > near_px)
-        dist_px = near_px;
-
-    // 根据距离计算速度倍率，使用统一的共享速度曲线
-    double dist_units = dist_px / scale;
-    double speed_mult = computeSpeedMultiplier(
-        dist_units, static_cast<double>(config.nearRadius) * 5.0,  // maxDistance 估计值
-        config.snapRadius, config.nearRadius, config.speedCurveExponent,
-        config.snapBoostFactor,
-        config.minSpeedMultiplier, config.maxSpeedMultiplier);
-
-    // 计算模拟点每帧移动距离，并更新位置
-    float max_multiplier = std::max(0.1f, config.maxSpeedMultiplier);
-    float demo_duration_s = std::max(0.6f, std::min(2.2f / max_multiplier, 3.0f));
-    float base_px_s = near_px / demo_duration_s;
-    vel_px = base_px_s * static_cast<float>(speed_mult);
-    dist_px -= vel_px * static_cast<float>(dt);
-    if (dist_px <= 0.0f)
-        dist_px = near_px;
-
-    // 绘制模拟点（白色圆点）
-    overlay->FillCircle({ centerX - dist_px, centerY, 4.0f }, ARGB(255, 255, 255, 80));
+    const float settle = std::max(2.0f, config.detection_resolution / 64.0f) * scale;
+    const float release = settle * 1.6f;
+    overlay->AddCircle({ centerX, centerY, release }, ARGB(180, 80, 120, 255), 2.0f);
+    overlay->AddCircle({ centerX, centerY, settle }, ARGB(180, 255, 100, 100), 2.0f);
 }
 
 /**
@@ -1093,4 +1051,3 @@ void gameOverlayRenderLoop()
         gameOverlayPtr.reset();
     }
 }
-

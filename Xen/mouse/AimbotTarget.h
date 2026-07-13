@@ -93,6 +93,7 @@ struct DetectionCandidate
 {
     cv::Rect2f box;                              ///< 边界框
     int classId = -1;                             ///< 类别 ID
+    float confidence = 1.0f;                     ///< 归一化观测置信度
     double pivotX = 0.0;                          ///< 枢轴点 X
     double pivotY = 0.0;                          ///< 枢轴点 Y
 };
@@ -113,6 +114,34 @@ void mergeHeadToPlayer(
     std::vector<DetectionCandidate>& dets,
     int classPlayer, int classHead,
     float headOffset, bool disableHeadshot);
+
+/**
+ * @brief 基础观测锁定器：只关联当前检测，不做速度预测或丢失滑行。
+ */
+class BasicTargetTracker
+{
+public:
+    void update(
+        const std::vector<cv::Rect>& boxes,
+        const std::vector<int>& classes,
+        const std::vector<float>& confidences,
+        int screenWidth,
+        int screenHeight,
+        bool disableHeadshot,
+        std::chrono::steady_clock::time_point observationTime = {});
+
+    void reset();
+    bool getLockedTarget(LockedTargetInfo& out) const;
+    int getLockedTrackId() const { return locked_ ? trackId_ : -1; }
+    std::vector<TrackDebugInfo> getDebugTracks() const;
+
+private:
+    bool locked_ = false;
+    int trackId_ = -1;
+    int nextTrackId_ = 1;
+    DetectionCandidate lockedCandidate_{};
+    std::chrono::steady_clock::time_point lastUpdate_{};
+};
 
 /**
  * @brief 基于移动控制库的多目标跟踪器包装类
@@ -160,6 +189,7 @@ public:
     void update(
         const std::vector<cv::Rect>& boxes,
         const std::vector<int>& classes,
+        const std::vector<float>& confidences,
         int screenWidth,
         int screenHeight,
         bool disableHeadshot,
@@ -175,7 +205,7 @@ public:
     /** @brief 获取所有跟踪轨道的调试信息 */
     std::vector<TrackDebugInfo> getDebugTracks() const;
 
-    /** @brief 获取 SOT 估计的速度（用于外部预测），返回 (vx, vy) 像素/秒 */
+    /** @brief 获取 SOT 估计的速度，返回 (vx, vy) 像素/帧。 */
     std::pair<float, float> getLockedVelocity() const;
 
     /** @brief 是否已初始化 */

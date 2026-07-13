@@ -434,7 +434,12 @@ public:
                 const float ap = states_[i][3] * states_[i][4];
                 const float am = measurements_[j][3] * measurements_[j][4];
                 const float c_shape = std::fabs(ap - am) / std::max(ap, am);
-                costMatrix_[i * m + j] = 0.1f * c_iou + 0.7f * c_dist + 0.2f * c_shape;
+                const float c_confidence = 1.f - std::clamp(confidences_[j], 0.f, 1.f);
+                costMatrix_[i * m + j] =
+                    0.10f * c_iou +
+                    0.60f * c_dist +
+                    0.15f * c_shape +
+                    0.15f * c_confidence;
             }
         }
 

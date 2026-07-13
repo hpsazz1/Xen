@@ -81,14 +81,11 @@ std::vector<float> extractSeries(
 // 字段提取器
 double getRawX(const PipelineFrame& f)  { return f.rawPivotX; }
 double getRawY(const PipelineFrame& f)  { return f.rawPivotY; }
-double getMcX(const PipelineFrame& f)   { return f.mcPivotX; }
-double getMcY(const PipelineFrame& f)   { return f.mcPivotY; }
-double getPredX(const PipelineFrame& f) { return f.predX; }
-double getPredY(const PipelineFrame& f) { return f.predY; }
-double getVelMag(const PipelineFrame& f){ return std::hypot(f.velocityX, f.velocityY); }
-double getSpeedMul(const PipelineFrame& f) { return f.speedMultiplier; }
-double getDist(const PipelineFrame& f)  { return f.distToTarget; }
-double getCountsMag(const PipelineFrame& f) { return std::hypot(f.countsX, f.countsY); }
+double getFilteredX(const PipelineFrame& f) { return f.filteredX; }
+double getFilteredY(const PipelineFrame& f) { return f.filteredY; }
+double getObservedSpeed(const PipelineFrame& f) { return f.observedSpeed; }
+double getDist(const PipelineFrame& f)  { return f.errorDistance; }
+double getCountsMag(const PipelineFrame& f) { return std::hypot(f.requestedCountsX, f.requestedCountsY); }
 
 /** @brief 截断显示坐标值（保留 1 位小数） */
 const char* fmtCoord(double v)
@@ -156,33 +153,31 @@ void drawStageTable(const PipelineFrame& pf)
         return std::make_pair(x, y);
     };
 
-    // 前 4 个阶段是绝对坐标
+    // 观测与基础滤波坐标
     auto p0 = std::make_pair(0.0, 0.0);
     auto p1 = row(u8"原始目标",  pf.rawPivotX, pf.rawPivotY, p0.first, p0.second);
-    auto p2 = row(u8"运动补偿",  pf.mcPivotX,  pf.mcPivotY,  p1.first, p1.second);
-    auto p3 = row(u8"预测外推",  pf.predX,      pf.predY,      p2.first, p2.second);
+    auto p2 = row(u8"基础滤波",  pf.filteredX, pf.filteredY, p1.first, p1.second);
 
-    // Stage 4: 速度曲线 (显示倍率，非坐标)
+    // 中心误差
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
-    ImGui::TextUnformatted(u8"距离/倍率");
+    ImGui::TextUnformatted(u8"中心误差");
     ImGui::TableSetColumnIndex(1);
-    ImGui::Text("%.1f px", pf.distToTarget);
+    ImGui::Text("%+.2f", pf.errorX);
     ImGui::TableSetColumnIndex(2);
-    ImGui::Text("%.3fx", pf.speedMultiplier);
+    ImGui::Text("%+.2f", pf.errorY);
     ImGui::TableSetColumnIndex(3);
-    ImGui::TextUnformatted("-");
+    ImGui::Text("%.2f", pf.errorDistance);
 
-    // 后 4 个阶段是增量 (delta)
+    // 基础控制器输出
     auto p4 = std::make_pair(0.0, 0.0);
-    auto p5 = row(u8"PurePursuit(Δ)", pf.ppDx,     pf.ppDy,     p4.first, p4.second);
-    auto p6 = row(u8"→Counts",       pf.countsX,   pf.countsY,   p5.first, p5.second);
-    auto p7 = row(u8"→EMA平滑",      pf.emaCountsX, pf.emaCountsY, p6.first, p6.second);
+    auto p5 = row(u8"请求像素(Δ)", pf.requestedPixelX, pf.requestedPixelY, p4.first, p4.second);
+    auto p6 = row(u8"请求Counts", pf.requestedCountsX, pf.requestedCountsY, p5.first, p5.second);
 
     // Stage 8: 最终输出 (整数)
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
-    ImGui::TextUnformatted(u8"最终输出(int)");
+    ImGui::TextUnformatted(u8"请求输出(int)");
     ImGui::TableSetColumnIndex(1);
     ImGui::TextUnformatted(fmtInt(pf.finalMx));
     ImGui::TableSetColumnIndex(2);
@@ -281,14 +276,13 @@ void draw_pipeline_tracer()
     if (OverlayUI::BeginSection(u8"X 坐标 — 各阶段对比", "pt_x_coord"))
     {
         auto rawSeries  = extractSeries(frames, getRawX,  kMaxPlotPoints);
-        auto mcSeries   = extractSeries(frames, getMcX,   kMaxPlotPoints);
-        auto predSeries = extractSeries(frames, getPredX, kMaxPlotPoints);
+        auto filteredSeries = extractSeries(frames, getFilteredX, kMaxPlotPoints);
 
         if (!rawSeries.empty())
         {
             // 计算 Y 轴范围
             float allMin = rawSeries[0], allMax = rawSeries[0];
-            for (auto* s : { &rawSeries, &mcSeries, &predSeries })
+            for (auto* s : { &rawSeries, &filteredSeries })
                 for (float v : *s)
                 { if (v < allMin) allMin = v; if (v > allMax) allMax = v; }
             float range = allMax - allMin;
@@ -296,10 +290,8 @@ void draw_pipeline_tracer()
 
             ImGui::PlotLines("##plot_x_raw",  rawSeries.data(),  static_cast<int>(rawSeries.size()),  0, nullptr, allMin, allMax, ImVec2(0, 80));
             ImGui::SameLine(); ImGui::TextDisabled(u8"原始");
-            ImGui::PlotLines("##plot_x_mc",   mcSeries.data(),   static_cast<int>(mcSeries.size()),   0, nullptr, allMin, allMax, ImVec2(0, 80));
-            ImGui::SameLine(); ImGui::TextDisabled(u8"补偿");
-            ImGui::PlotLines("##plot_x_pred", predSeries.data(), static_cast<int>(predSeries.size()), 0, nullptr, allMin, allMax, ImVec2(0, 80));
-            ImGui::SameLine(); ImGui::TextDisabled(u8"预测");
+            ImGui::PlotLines("##plot_x_filtered", filteredSeries.data(), static_cast<int>(filteredSeries.size()), 0, nullptr, allMin, allMax, ImVec2(0, 80));
+            ImGui::SameLine(); ImGui::TextDisabled(u8"基础滤波");
         }
         OverlayUI::EndSection();
     }
@@ -308,13 +300,12 @@ void draw_pipeline_tracer()
     if (OverlayUI::BeginSection(u8"Y 坐标 — 各阶段对比", "pt_y_coord"))
     {
         auto rawSeries  = extractSeries(frames, getRawY,  kMaxPlotPoints);
-        auto mcSeries   = extractSeries(frames, getMcY,   kMaxPlotPoints);
-        auto predSeries = extractSeries(frames, getPredY, kMaxPlotPoints);
+        auto filteredSeries = extractSeries(frames, getFilteredY, kMaxPlotPoints);
 
         if (!rawSeries.empty())
         {
             float allMin = rawSeries[0], allMax = rawSeries[0];
-            for (auto* s : { &rawSeries, &mcSeries, &predSeries })
+            for (auto* s : { &rawSeries, &filteredSeries })
                 for (float v : *s)
                 { if (v < allMin) allMin = v; if (v > allMax) allMax = v; }
             float range = allMax - allMin;
@@ -322,19 +313,16 @@ void draw_pipeline_tracer()
 
             ImGui::PlotLines("##plot_y_raw",  rawSeries.data(),  static_cast<int>(rawSeries.size()),  0, nullptr, allMin, allMax, ImVec2(0, 80));
             ImGui::SameLine(); ImGui::TextDisabled(u8"原始");
-            ImGui::PlotLines("##plot_y_mc",   mcSeries.data(),   static_cast<int>(mcSeries.size()),   0, nullptr, allMin, allMax, ImVec2(0, 80));
-            ImGui::SameLine(); ImGui::TextDisabled(u8"补偿");
-            ImGui::PlotLines("##plot_y_pred", predSeries.data(), static_cast<int>(predSeries.size()), 0, nullptr, allMin, allMax, ImVec2(0, 80));
-            ImGui::SameLine(); ImGui::TextDisabled(u8"预测");
+            ImGui::PlotLines("##plot_y_filtered", filteredSeries.data(), static_cast<int>(filteredSeries.size()), 0, nullptr, allMin, allMax, ImVec2(0, 80));
+            ImGui::SameLine(); ImGui::TextDisabled(u8"基础滤波");
         }
         OverlayUI::EndSection();
     }
 
-    // ========== 速度与倍率时序图 ==========
-    if (OverlayUI::BeginSection(u8"速度与倍率", "pt_speed"))
+    // ========== 观测速度与误差 ==========
+    if (OverlayUI::BeginSection(u8"观测速度与误差", "pt_speed"))
     {
-        auto velSeries = extractSeries(frames, getVelMag,    kMaxPlotPoints);
-        auto mulSeries = extractSeries(frames, getSpeedMul,  kMaxPlotPoints);
+        auto velSeries = extractSeries(frames, getObservedSpeed, kMaxPlotPoints);
         auto distSeries = extractSeries(frames, getDist,     kMaxPlotPoints);
 
         if (!velSeries.empty())
@@ -346,10 +334,12 @@ void draw_pipeline_tracer()
             ImGui::PlotLines("##plot_vel", velSeries.data(), static_cast<int>(velSeries.size()), 0,
                 u8"速度(px/s)", 0.0f, velMax, ImVec2(0, 60));
         }
-        if (!mulSeries.empty())
+        if (!distSeries.empty())
         {
-            ImGui::PlotLines("##plot_mul", mulSeries.data(), static_cast<int>(mulSeries.size()), 0,
-                u8"速度倍率", 0.0f, 1.0f, ImVec2(0, 60));
+            float maxDistance = 10.0f;
+            for (float v : distSeries) maxDistance = std::max(maxDistance, v);
+            ImGui::PlotLines("##plot_error", distSeries.data(), static_cast<int>(distSeries.size()), 0,
+                u8"中心误差(px)", 0.0f, maxDistance, ImVec2(0, 60));
         }
         OverlayUI::EndSection();
     }
@@ -357,13 +347,18 @@ void draw_pipeline_tracer()
     // ========== 最新帧阶段明细表 ==========
     if (OverlayUI::BeginSection(u8"最新帧阶段明细", "pt_stage_table"))
     {
-        ImGui::TextDisabled(u8"帧 #%lld | 分辨率 %d | FPS %.1f | 延迟 %.1fms | 类别 %d | 外部速度 %s",
+        ImGui::TextDisabled(u8"帧 #%lld | 分辨率 %d | FPS %.1f | 观测年龄 %.1fms | 类别 %d",
             static_cast<long long>(latest.frameId),
             latest.resolution,
             latest.fpsValue,
             latest.observationAgeSec * 1000.0,
-            latest.targetClassId,
-            latest.hasExternalVel ? u8"是" : u8"否");
+            latest.targetClassId);
+        ImGui::TextDisabled(u8"响应 %.0fms | 最大 %.0f counts/s | 帧上限 %.2f | 已稳定 %s | 队列 %zu",
+            latest.responseSeconds * 1000.0,
+            latest.maxCountsPerSecond,
+            latest.frameCountLimit,
+            latest.settled ? u8"是" : u8"否",
+            latest.queuedMoveCount);
 
         ImGui::Spacing();
         drawStageTable(latest);
@@ -373,22 +368,20 @@ void draw_pipeline_tracer()
     // ========== 统计摘要 ==========
     if (OverlayUI::BeginSection(u8"统计摘要", "pt_stats"))
     {
-        double sumVel = 0.0, sumSpeedMul = 0.0, sumDist = 0.0, sumDelay = 0.0;
+        double sumVel = 0.0, sumDist = 0.0, sumDelay = 0.0;
         double maxVel = 0.0;
         int velCount = 0;
 
         for (const auto& f : frames)
         {
-            double v = std::hypot(f.velocityX, f.velocityY);
+            double v = f.observedSpeed;
             if (v > 0.0) { sumVel += v; velCount++; if (v > maxVel) maxVel = v; }
-            sumSpeedMul += f.speedMultiplier;
-            sumDist += f.distToTarget;
+            sumDist += f.errorDistance;
             sumDelay += f.observationAgeSec;
         }
 
         size_t n = frames.size();
         double avgVel = velCount > 0 ? sumVel / velCount : 0.0;
-        double avgSpeedMul = n > 0 ? sumSpeedMul / n : 0.0;
         double avgDist = n > 0 ? sumDist / n : 0.0;
         double avgDelayMs = n > 0 ? (sumDelay / n) * 1000.0 : 0.0;
 
@@ -396,7 +389,8 @@ void draw_pipeline_tracer()
         ImGui::Text(u8"平均速度: %.1f px/s", avgVel);
         ImGui::Text(u8"峰值速度: %.1f px/s", maxVel);
         ImGui::Text(u8"平均距离: %.1f px", avgDist);
-        ImGui::Text(u8"平均倍率: %.3f", avgSpeedMul);
+        ImGui::Text(u8"稳定帧: %zu", static_cast<size_t>(std::count_if(
+            frames.begin(), frames.end(), [](const PipelineFrame& f) { return f.settled; })));
         ImGui::Text(u8"平均延迟: %.1f ms", avgDelayMs);
 
         // 统计 Counts 输出幅度

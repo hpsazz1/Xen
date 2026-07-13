@@ -292,6 +292,10 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/overlay/Game_overlay.cpp"
     "${SRC_DIR}/overlay/overlay.cpp"
     "${SRC_DIR}/runtime/thread_loops_shared.cpp"
+    "${SRC_DIR}/runtime/application_shutdown.cpp"
+    "${SRC_DIR}/runtime/application_threads.cpp"
+    "${SRC_DIR}/runtime/startup_helpers.cpp"
+    "${SRC_DIR}/runtime/input_device_manager.cpp"
     "${SRC_DIR}/runtime/mouse_thread_loop.cpp"
     "${SRC_DIR}/runtime/game_overlay_loop.cpp"
     "${SRC_DIR}/scr/data_collector.cpp"
@@ -329,13 +333,14 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(xen_algorithm_tests
         "${CMAKE_SOURCE_DIR}/tests/speed_curve_tests.cpp"
+        "${SRC_DIR}/debug/pipeline_tracer.cpp"
     )
     target_include_directories(xen_algorithm_tests PRIVATE "${SRC_DIR}")
     target_compile_features(xen_algorithm_tests PRIVATE cxx_std_17)
     if(MSVC)
         target_compile_options(xen_algorithm_tests PRIVATE /utf-8 /W4 /permissive- /EHsc)
     endif()
-    add_test(NAME xen.algorithm.speed_curve COMMAND xen_algorithm_tests)
+    add_test(NAME xen.algorithm.basic_tracking COMMAND xen_algorithm_tests)
 endif()
 
 set_target_properties(ai PROPERTIES

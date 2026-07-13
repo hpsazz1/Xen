@@ -79,6 +79,10 @@
     <ClCompile Include="overlay\Game_overlay.cpp" />
     <ClCompile Include="overlay\overlay.cpp" />
     <ClCompile Include="runtime\thread_loops_shared.cpp" />
+    <ClCompile Include="runtime\application_shutdown.cpp" />
+    <ClCompile Include="runtime\application_threads.cpp" />
+    <ClCompile Include="runtime\startup_helpers.cpp" />
+    <ClCompile Include="runtime\input_device_manager.cpp" />
     <ClCompile Include="runtime\mouse_thread_loop.cpp" />
     <ClCompile Include="runtime\game_overlay_loop.cpp" />
     <ClCompile Include="scr\data_collector.cpp" />
@@ -146,13 +150,17 @@
     <ClInclude Include="scr\data_collector.h" />
     <ClInclude Include="Xen.h" />
     <ClInclude Include="runtime\thread_loops.h" />
+    <ClInclude Include="runtime\application_shutdown.h" />
+    <ClInclude Include="runtime\application_threads.h" />
+    <ClInclude Include="runtime\startup_helpers.h" />
     <ClInclude Include="tensorrt\nvinf.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DML|x64'">true</ExcludedFromBuild>
     </ClInclude>
     <ClInclude Include="tensorrt\trt_monitor.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DML|x64'">true</ExcludedFromBuild>
     </ClInclude>
-    <ClInclude Include="runtime\speed_curve.h" />
+    <ClInclude Include="runtime\basic_aim_controller.h" />
+    <ClInclude Include="runtime\basic_target_filter.h" />
     <ClInclude Include="third_party\motion_control\estimation.h" />
     <ClInclude Include="third_party\motion_control\execution.h" />
     <ClInclude Include="third_party\motion_control\filters.h" />

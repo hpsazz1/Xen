@@ -32,6 +32,9 @@
 #include "virtual_camera.h"
 #include "mem/cpu_affinity_manager.h"
 #include "runtime/thread_loops.h"
+#include "runtime/application_shutdown.h"
+#include "runtime/application_threads.h"
+#include "runtime/startup_helpers.h"
 #include "benchmarks/provider_benchmark.h"
 #include "debug/pipeline_tracer.h"
 
@@ -112,81 +115,12 @@ std::atomic<bool> shooting(false);
 // 图标加载错误信息的存储字符串
 std::string g_iconLastError;
 
-// 打印致命错误消息并等待用户按回车后退出，返回 -1
-static int FatalExit(const std::string& message)
-{
-    std::cerr << message << std::endl;
-    std::cout << "Press Enter to exit...";
-    std::cin.get();
-    return -1;
-}
-
-// 将工作目录设置为可执行文件所在目录，确保相对路径资源（模型、配置等）可被正确加载
-static void SetWorkingDirectoryToExecutable()
-{
-    wchar_t exePath[MAX_PATH]{};
-    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0)
-    {
-        std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
-        std::error_code ec;
-        std::filesystem::current_path(exeDir, ec);
-        if (ec && config.verbose)
-        {
-            std::cout << "[Config] Failed to set working dir: " << exeDir.u8string()
-                      << " (" << ec.message() << ")" << std::endl;
-        }
-    }
-}
-
-// 选择与当前后端兼容的 AI 模型。优先使用 config.ai_model 指定的模型；
-// 若不可用则自动选择 models 目录下第一个兼容的模型并更新配置
-static bool SelectCompatibleAiModel()
-{
-    std::vector<std::string> availableModels = getAvailableModels();
-    if (!config.ai_model.empty())
-    {
-        const std::string modelPath = "models/" + config.ai_model;
-        if (!std::filesystem::exists(modelPath))
-        {
-            std::cerr << "[MAIN] Specified model does not exist: " << modelPath << std::endl;
-        }
-        else if (std::find(availableModels.begin(), availableModels.end(), config.ai_model) != availableModels.end())
-        {
-            return true;
-        }
-        else
-        {
-            std::cerr << "[MAIN] Specified model is not compatible with backend "
-                      << config.backend << ": " << config.ai_model << std::endl;
-        }
-    }
-
-    if (availableModels.empty())
-    {
-        std::cerr << "[MAIN] No compatible AI models found in 'models' directory for backend "
-                  << config.backend << "." << std::endl;
-        return false;
-    }
-
-    config.ai_model = availableModels[0];
-    config.saveConfig("config.ini");
-    std::cout << "[MAIN] Loaded first compatible " << config.backend
-              << " 模型： " << config.ai_model << std::endl;
-    return true;
-}
-
 // 处理线程崩溃：记录崩溃信息和线程名，设置退出标志，通知所有等待的线程
 static void HandleThreadCrash(const char* name, const std::exception* ex)
 {
     std::cerr << "[Thread] " << name << " thread crashed: "
               << (ex ? ex->what() : "unknown exception") << std::endl;
-    shouldExit = true;
-    gameOverlayShouldExit.store(true);
-#ifdef USE_CUDA
-    trt_detector.requestStop();
-#endif
-    frameCV.notify_all();
-    detectionBuffer.cv.notify_all();
+    RequestApplicationShutdown();
 }
 
 // 创建一个受异常保护的线程包装函数。若线程内抛出异常，自动调用 HandleThreadCrash 处理
@@ -208,61 +142,6 @@ static std::thread StartThreadGuarded(const char* name, Func func)
         }
         });
 }
-
-// 创建/重建所有输入设备（鼠标）。先释放旧设备，然后根据当前配置创建新设备实例，
-// 并更新全局设备指针（受 inputDevicesMutex 保护）
-void createInputDevices()
-{
-    if (globalMouseThread)
-        globalMouseThread->setMouseInput(nullptr);
-
-    // 先获取配置快照
-    Config cfgSnapshot;
-    {
-        std::lock_guard<std::mutex> cfgLock(configMutex);
-        cfgSnapshot = config;
-    }
-
-    // 基于快照创建新设备
-    auto newMouseInputOwner = CreateMouseInputDevice(cfgSnapshot);
-    IMouseInput* newMouseInput = newMouseInputOwner.get();
-
-    GhubMouse* newGHub = newMouseInput ? newMouseInput->ghub() : nullptr;
-    RzctlMouse* newRazerControl = newMouseInput ? newMouseInput->razer() : nullptr;
-    KmboxNetConnection* newKmboxNetSerial = newMouseInput ? newMouseInput->kmboxNet() : nullptr;
-    KmboxAConnection* newKmboxASerial = newMouseInput ? newMouseInput->kmboxA() : nullptr;
-    MakcuConnection* newMakcuSerial = newMouseInput ? newMouseInput->makcu() : nullptr;
-
-    std::string message = std::string("[Mouse] Using ") + (newMouseInput ? newMouseInput->name() : "unknown") + " input.";
-    if (!newMouseInput || !newMouseInput->isOpen())
-        message += " Device not connected; input disabled until the method becomes available.";
-
-    // 原子替换：移出旧设备后立即用新设备替换（锁外析构旧设备，避免阻塞）
-    std::unique_ptr<IMouseInput> oldOwner;
-    {
-        std::lock_guard<std::mutex> deviceLock(inputDevicesMutex);
-        oldOwner = std::move(activeMouseInputOwner);
-        activeMouseInputOwner = std::move(newMouseInputOwner);
-        gHub = newGHub;
-        razerControl = newRazerControl;
-        kmboxNetSerial = newKmboxNetSerial;
-        kmboxASerial = newKmboxASerial;
-        makcuSerial = newMakcuSerial;
-    }
-    // oldOwner 在此作用域结束时析构（锁外），避免串口关闭等阻塞操作持有锁
-
-    std::cout << message << std::endl;
-}
-
-// 将当前活动鼠标输入设备绑定到全局鼠标线程
-void assignInputDevices()
-{
-    if (globalMouseThread)
-    {
-        globalMouseThread->setMouseInput(activeMouseInputOwner.get());
-    }
-}
-
 
 // 程序入口点。初始化控制台、加载配置、创建各模块线程，进入主循环等待线程结束
 int main(int argc, char** argv)
@@ -424,9 +303,6 @@ int main(int argc, char** argv)
             config.detection_resolution,
             config.fovX,
             config.fovY,
-            config.minSpeedMultiplier,
-            config.maxSpeedMultiplier,
-            config.predictionInterval,
             config.auto_shoot,
             config.bScope_multiplier,
             activeMouseInputOwner.get()
@@ -435,18 +311,19 @@ int main(int argc, char** argv)
         globalMouseThread = &mouseThread;
         assignInputDevices();
 
+        ApplicationThreads threads;
+
 #ifdef USE_CUDA
         // 初始化 TensorRT 检测器并加载模型
         trt_detector.initialize("models/" + config.ai_model);
 #else
         // 创建 DirectML 检测器并启动其推理线程
-        std::thread dml_detThread;
         try
         {
             dml_detector = std::make_unique<DirectMLDetector>("models/" + config.ai_model);
             std::cout << "[MAIN] DML detector created"
                       << (dml_detector->isReady() ? "." : ", but no active model.") << std::endl;
-            dml_detThread = StartThreadGuarded("DmlDetector", [] {
+            threads.detector = StartThreadGuarded("DmlDetector", [] {
                 dml_detector->dmlInferenceThread();
                 });
         }
@@ -466,32 +343,32 @@ int main(int argc, char** argv)
 
         // 启动各工作线程
         // 键盘监听线程：处理快捷键、配置热切换等
-        std::thread keyThread = StartThreadGuarded("KeyboardListener", [] {
+        threads.keyboard = StartThreadGuarded("KeyboardListener", [] {
             keyboardListener();
             });
         // 屏幕捕获线程：从屏幕/摄像头/网络等源采集帧
-        std::thread capThread = StartThreadGuarded("CaptureThread", [] {
+        threads.capture = StartThreadGuarded("CaptureThread", [] {
             captureThread(config.detection_resolution, config.detection_resolution);
             });
 
 #ifdef USE_CUDA
         // TensorRT 推理线程（CUDA 后端）
-        std::thread trt_detThread = StartThreadGuarded("TrtDetector", [] {
+        threads.detector = StartThreadGuarded("TrtDetector", [] {
             trt_detector.inferenceThread();
             });
 #endif
         // 鼠标控制线程：执行瞄准和射击
-        std::thread mouseMovThread = StartThreadGuarded("MouseThread", [&mouseThread] {
+        threads.mouse = StartThreadGuarded("MouseThread", [&mouseThread] {
             mouseThreadFunction(mouseThread);
             });
         // 桌面叠加层 UI 线程
-        std::thread overlayThread = StartThreadGuarded("OverlayThread", [] {
+        threads.overlay = StartThreadGuarded("OverlayThread", [] {
             OverlayThread();
             });
 
         // 游戏内叠加层 UI 线程（使用 DirectX 渲染）
         gameOverlayShouldExit.store(false);
-        gameOverlayThread = StartThreadGuarded("GameOverlay", [] {
+        threads.gameOverlay = StartThreadGuarded("GameOverlay", [] {
             gameOverlayRenderLoop();
             });
 
@@ -499,28 +376,21 @@ int main(int argc, char** argv)
         welcome_message();
 
         // 等待各线程退出
-        keyThread.join();
-        capThread.join();
+        if (threads.keyboard.joinable()) threads.keyboard.join();
+        if (threads.capture.joinable()) threads.capture.join();
 #ifdef USE_CUDA
-        trt_detector.requestStop();
-        trt_detThread.join();
+        RequestApplicationShutdown();
+        if (threads.detector.joinable()) threads.detector.join();
 #else
-        if (dml_detThread.joinable())
+        if (threads.detector.joinable())
         {
-            if (dml_detector)
-            {
-                dml_detector->shouldExit = true;
-                dml_detector->inferenceCV.notify_all();
-            }
-            dml_detThread.join();
+            RequestApplicationShutdown();
+            threads.detector.join();
         }
 #endif
 
-        gameOverlayShouldExit.store(true);
-        if (gameOverlayThread.joinable()) gameOverlayThread.join();
-
-        mouseMovThread.join();
-        overlayThread.join();
+        RequestApplicationShutdown();
+        threads.joinAll();
 
         // 清理鼠标设备
         {

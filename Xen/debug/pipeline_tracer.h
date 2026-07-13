@@ -13,7 +13,7 @@
  * @brief 单帧流水线追踪记录
  *
  * 记录瞄准流水线中目标坐标经过每个处理阶段的变化，
- * 从原始检测输出到最终鼠标计数，共 8 个阶段。
+ * 从原始检测输出到最终鼠标计数，仅记录当前基础链路。
  * 所有坐标均为检测分辨率像素空间（如 320×320）。
  */
 struct PipelineFrame
@@ -27,38 +27,33 @@ struct PipelineFrame
     double rawPivotY = 0.0;    ///< 原始 pivot Y
     int    targetClassId = -1; ///< 目标类别（0=body, 1=head, -1=未知）
 
-    // ========== Stage 2: 运动补偿后 ==========
-    double mcPivotX = 0.0;     ///< 减去自瞄自身旋转偏移后的 X
-    double mcPivotY = 0.0;     ///< 减去自瞄自身旋转偏移后的 Y
-    double mcDeltaX = 0.0;     ///< 运动补偿量 X
-    double mcDeltaY = 0.0;     ///< 运动补偿量 Y
+    // ========== Stage 2: 基础观测滤波（无未来预测） ==========
+    double filteredX = 0.0;
+    double filteredY = 0.0;
+    double observedSpeed = 0.0; ///< 相邻原始观测速度，仅用于诊断
+    double filterResidual = 0.0;
 
-    // ========== Stage 3: 预测后（EMA 滤波 + 常速外推） ==========
-    double predX = 0.0;        ///< 预测后 X
-    double predY = 0.0;        ///< 预测后 Y
-    double velocityX = 0.0;    ///< 估计速度 X（px/sec）
-    double velocityY = 0.0;    ///< 估计速度 Y（px/sec）
-    bool   hasExternalVel = false; ///< 是否使用 SOT Kalman 外部速度
+    // ========== Stage 3: 中心误差 ==========
+    double errorX = 0.0;
+    double errorY = 0.0;
+    double errorDistance = 0.0;
 
-    // ========== Stage 4: 速度曲线 ==========
-    double distToTarget = 0.0;    ///< 目标到屏幕中心的距离（像素）
-    double speedMultiplier = 0.0; ///< 三段式速度倍率
+    // ========== Stage 4: 基础控制器请求 ==========
+    double requestedPixelX = 0.0;
+    double requestedPixelY = 0.0;
+    double requestedCountsX = 0.0;
+    double requestedCountsY = 0.0;
 
-    // ========== Stage 5: Pure Pursuit 控制器输出（像素空间增量） ==========
-    double ppDx = 0.0;         ///< Pure Pursuit 输出 Δx（像素）
-    double ppDy = 0.0;         ///< Pure Pursuit 输出 Δy（像素）
+    // ========== Stage 5: 请求输出（尚不代表驱动已实际发送） ==========
+    int    finalMx = 0;        ///< 请求的水平移动量（counts）
+    int    finalMy = 0;        ///< 请求的垂直移动量（counts）
 
-    // ========== Stage 6: 像素 → 鼠标计数 ==========
-    double countsX = 0.0;      ///< mouse counts X（含灵敏度/FOV/帧率修正）
-    double countsY = 0.0;      ///< mouse counts Y
-
-    // ========== Stage 7: EMA 输出平滑后（若未启用则与 Stage 6 相同） ==========
-    double emaCountsX = 0.0;   ///< EMA 平滑后 counts X
-    double emaCountsY = 0.0;   ///< EMA 平滑后 counts Y
-
-    // ========== Stage 8: 最终输出（四舍五入取整） ==========
-    int    finalMx = 0;        ///< 最终水平移动量（counts）
-    int    finalMy = 0;        ///< 最终垂直移动量（counts）
+    // ========== 控制器诊断 ==========
+    double responseSeconds = 0.0;
+    double maxCountsPerSecond = 0.0;
+    double frameCountLimit = 0.0;
+    bool   settled = false;
+    size_t queuedMoveCount = 0;     ///< 请求入队后的待发送命令数
 
     // ========== 元数据 ==========
     bool   targetDetected = false;     ///< 本帧是否检测到目标
@@ -94,16 +89,19 @@ public:
     void setMaxFrames(size_t n);
 
     /** @brief 获取当前缓冲区最大帧数 */
-    size_t getMaxFrames() const { return maxFrames; }
+    size_t getMaxFrames() const;
 
     // ========== 数据写入（MouseThread 调用） ==========
 
     /**
      * @brief 开始记录一帧
      * @param resolution 当前检测分辨率
-     * @return 新帧的引用，调用者直接写入各字段
+     * @return 可在调用线程安全填写的本地帧；填写完后调用 commitFrame。
      */
-    PipelineFrame& beginFrame(int resolution);
+    PipelineFrame beginFrame(int resolution);
+
+    /** @brief 提交一条完整的帧记录到环形缓冲区。 */
+    void commitFrame(PipelineFrame frame);
 
     // ========== 数据读取（覆盖层线程调用） ==========
 

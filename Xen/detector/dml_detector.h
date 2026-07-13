@@ -28,6 +28,8 @@ public:
 
     // DML 推理线程入口（异步模式）
     void dmlInferenceThread();
+    // 请求停止推理线程，并唤醒条件变量等待。
+    void requestStop() noexcept;
     // 向推理线程提交一帧进行处理
     void processFrame(
         const cv::Mat& detection_frame,
@@ -44,11 +46,10 @@ public:
     std::chrono::duration<double, std::milli> lastPostprocessTimeDML;
     std::chrono::duration<double, std::milli> lastNmsTimeDML;
 
-    // 推理线程同步条件变量
+private:
+    // 推理线程同步状态仅由检测器自身管理。
     std::condition_variable inferenceCV;
     std::atomic<bool> shouldExit = false;
-
-private:
     Ort::Env env;                              // ONNX Runtime 环境
     Ort::Session session{ nullptr };           // ONNX Runtime 会话
     Ort::AllocatorWithDefaultOptions allocator;

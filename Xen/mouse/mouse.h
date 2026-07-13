@@ -22,14 +22,13 @@
 
 #include "AimbotTarget.h"
 #include "MouseInput.h"
-#include "execution.h"
-#include "filters.h"
-#include "trajectory.h"  // 轨迹模拟纯算法提取 (Trajectory::windMouseMove / bezierMove)
+#include "runtime/basic_aim_controller.h"
+#include "runtime/basic_target_filter.h"
 
 /**
  * @brief 鼠标控制主线程类
  *
- * 负责管理鼠标移动、瞄准预测、轨迹模拟算法等功能。
+ * 负责管理基础目标滤波、误差控制和鼠标设备输出。
  * 通过独立的线程处理鼠标指令队列，支持多种鼠标输入设备。
  */
 class MouseThread
@@ -38,12 +37,11 @@ private:
     // ==================== 配置参数 ====================
     double screen_width;             ///< 屏幕宽度（像素）
     double screen_height;            ///< 屏幕高度（像素）
-    double prediction_interval;      ///< 预测时间间隔（秒）
     double fov_x;                    ///< 水平视野（像素）
     double fov_y;                    ///< 垂直视野（像素）
     double max_distance;             ///< 最大瞄准距离（像素）
-    double min_speed_multiplier;     ///< 最小速度倍率
-    double max_speed_multiplier;     ///< 最大速度倍率
+    double move_response_seconds = 0.080; ///< 基础控制响应时间
+    double move_max_speed_cps = 240.0;    ///< 设备最大速度（counts/sec）
     double center_x;                 ///< 屏幕中心 X
     double center_y;                 ///< 屏幕中心 Y
     bool   auto_shoot;               ///< 是否启用自动射击
@@ -72,9 +70,9 @@ private:
     bool   wasdReleased = false;        ///< 是否已激活 WASD 互相抵消（开火急停）
 
     // ==================== 运动状态 ====================
-    double prev_x, prev_y;                                        ///< 上一帧目标位置
-    double prev_velocity_x, prev_velocity_y;                       ///< 上一帧目标速度
-    std::chrono::time_point<std::chrono::steady_clock> prev_time; ///< 上一帧时间戳
+    BasicTargetFilter targetFilter;                                ///< 基础观测滤波（不做未来预测）
+    BasicAimController aimController;                              ///< 帧率无关的基础误差控制器
+    BasicTargetFilter::Result lastFilterResult{};                  ///< 流水线诊断快照
     std::chrono::steady_clock::time_point last_target_time;        ///< 最后检测到目标的时间
     std::atomic<bool> target_detected{ false };                   ///< 是否检测到目标（atomic 为未来多线程访问预留）
     std::atomic<bool> mouse_pressed{ false };                     ///< 鼠标是否按下（atomic，与 leftPressStartTime 同线程访问）
@@ -97,19 +95,6 @@ private:
     std::atomic<bool>             workerStop{ false };  ///< 工作线程停止标志
     std::atomic<bool>             workerRunning{ true }; ///< 工作线程健康标志（异常退出时置false）
 
-    // ==================== 目标预测 ====================
-    std::vector<std::pair<double, double>> futurePositions;  ///< 未来预测位置列表
-    std::mutex                    futurePositionsMutex;      ///< 未来位置互斥锁
-    filters::ExponentialMovingAverage emaVelX{0.25};         ///< 速度 EMA 平滑 (X)
-    filters::ExponentialMovingAverage emaVelY{0.25};         ///< 速度 EMA 平滑 (Y)
-    filters::ExponentialMovingAverage emaPosX{0.50};         ///< 位置 EMA 平滑 (X)
-    filters::ExponentialMovingAverage emaPosY{0.50};         ///< 位置 EMA 平滑 (Y)
-    // 外部速度注入（来自 SOT Kalman 跟踪器）
-    // 注意：当前由主循环线程独占访问，若未来多线程访问需改为 std::atomic
-    double                        externalTargetVelX = 0.0;  ///< 外部注入的目标速度 X（来自 SOT）
-    double                        externalTargetVelY = 0.0;  ///< 外部注入的目标速度 Y（来自 SOT）
-    bool                          hasExternalVelocity = false; ///< 是否有外部速度注入
-
     // ==================== 配置缓存 ====================
     // 缓存活跃游戏配置的静态值，避免每次鼠标移动都加锁查询 map
     double                        cachedGameSens = 1.0;
@@ -117,28 +102,19 @@ private:
     double                        cachedGamePitch = 0.022;
     bool                          cachedGameFovScaled = false;
     double                        cachedGameBaseFOV = 0.0;
-    // 缓存预测配置（避免 predict_target_position 每帧加锁）
-    double                        cachedPredictionInterval = 0.020;
-    double                        cachedPredictionTau = 0.05;
-    bool                          cachedPredictionEnabled = true;
-    bool                          cachedPredictionCompensateDelay = true;
-    double                        cachedPredictionResetTimeout = 0.5;
     // 缓存速度曲线参数（避免 calculate_speed_multiplier 每帧加锁）
     float                         cachedSnapRadius = 1.5f;
     float                         cachedNearRadius = 25.0f;
     float                         cachedSpeedCurveExponent = 3.0f;
     float                         cachedSnapBoostFactor = 1.15f;
 
-    // EMA alpha 缓存: 仅 dt 变化 >10% 时重算 std::exp(-dt/tau)
-    double                        cachedDtExp = 0.0;
-    double                        cachedAlphaVel = 0.0;
-    double                        cachedAlphaPos = 0.0;
 
     /** @brief 移动工作线程主循环 */
     void moveWorkerLoop();
     /** @brief 向队列添加移动指令 */
     void queueMove(int dx, int dy);
 
+#if 0 // Trajectory simulation will be reintroduced only after the base stage is validated.
     // ==================== 轨迹模拟 ====================
     bool   wind_mouse_enabled = true;   ///< 是否启用轨迹模拟
     double wind_G, wind_W, wind_M, wind_D;  ///< 鼠标移速、轨迹摆动、单步上限、微调距离
@@ -146,6 +122,8 @@ private:
     float  bezier_strength = 0.35f;     ///< 贝塞尔弧度
     double bezierFracX = 0.0;           ///< 贝塞尔亚像素余量 X
     double bezierFracY = 0.0;           ///< 贝塞尔亚像素余量 Y
+    Trajectory::BezierState trajectoryBezierState;
+    int trajectoryFrameCounter = 0;
     bool   move_ema_enabled = false;    ///< 是否启用 EMA 平滑
     float  move_ema_alpha = 0.60f;      ///< EMA 平滑系数
     double prev_ema_move_x = 0.0;       ///< 上帧 EMA 平滑后 X
@@ -189,12 +167,17 @@ private:
     double windPatternPhaseB = 0.0;  ///< 轨迹模拟模式相位 B
     double windPatternRateA = 0.0;   ///< 轨迹模拟模式速率 A
     double windPatternRateB = 0.0;   ///< 轨迹模拟模式速率 B
+    Trajectory::WindState trajectoryWindState;
     std::mt19937 windRng{ std::random_device{}() };  ///< 轨迹模拟随机数生成器
 
     std::deque<WindDebugPoint> windDebugTrail;       ///< 轨迹模拟调试轨迹
     std::mutex                             windDebugTrailMutex;  ///< 轨迹模拟调试轨迹互斥锁
     double                                 windDebugCursorX = 0.0;  ///< 轨迹模拟调试光标 X
     double                                 windDebugCursorY = 0.0;  ///< 轨迹模拟调试光标 Y
+#endif
+
+    std::mt19937 behaviorRng{ std::random_device{}() }; ///< 射击时序随机源，与移动轨迹无关
+    std::pair<double, double> mouseCountsToScreenPixels(int dx, int dy) const;
 
     // ==================== 运动补偿 ====================
     /** @brief 运动补偿采样点结构 */
@@ -228,9 +211,6 @@ public:
      * @param resolution 屏幕分辨率
      * @param fovX 水平视野
      * @param fovY 垂直视野
-     * @param minSpeedMultiplier 最小速度倍率
-     * @param maxSpeedMultiplier 最大速度倍率
-     * @param predictionInterval 预测间隔
      * @param auto_shoot 自动射击
      * @param bScope_multiplier 瞄准镜倍率
      * @param mouseInputDevice 鼠标输入设备
@@ -239,9 +219,6 @@ public:
         int  resolution,
         int  fovX,
         int  fovY,
-        double minSpeedMultiplier,
-        double maxSpeedMultiplier,
-        double predictionInterval,
         bool auto_shoot,
         float bScope_multiplier,
         IMouseInput* mouseInputDevice = nullptr
@@ -255,9 +232,6 @@ public:
         int resolution,
         int fovX,
         int fovY,
-        double minSpeedMultiplier,
-        double maxSpeedMultiplier,
-        double predictionInterval,
         bool auto_shoot,
         float bScope_multiplier
     );
@@ -277,8 +251,9 @@ public:
     void moveRelative(int dx, int dy);
     /** @brief 清除所有排队中的移动指令 */
     void clearQueuedMoves();
-    /** @brief 预测目标未来位置 */
-    std::pair<double, double> predict_target_position(
+    size_t pendingMoveCount();
+    /** @brief 对检测观测进行基础滤波（不做未来外推） */
+    std::pair<double, double> filter_target_position(
         double target_x,
         double target_y,
         std::chrono::steady_clock::time_point observationTime = {});
@@ -288,10 +263,8 @@ public:
     void pressMouse(const AimbotTarget& target);
     /** @brief 释放鼠标 */
     void releaseMouse();
-    /** @brief 重置预测状态 */
-    void resetPrediction();
-    /** @brief 检查并重置预测（当目标丢失时） */
-    void checkAndResetPredictions();
+    /** @brief 重置基础跟踪与控制状态 */
+    void resetTracking();
     /** @brief 检查目标是否在准星范围内 */
     bool check_target_in_scope(double target_x, double target_y,
         double target_w, double target_h, double reduction_factor);
@@ -319,10 +292,6 @@ public:
     void setTargetDetected(bool detected) { target_detected.store(detected); }
     /** @brief 设置最后检测到目标的时间 */
     void setLastTargetTime(const std::chrono::steady_clock::time_point& t) { last_target_time = t; }
-    /** @brief 从外部注入目标速度估计（来自 SOT Kalman，px/sec） */
-    void setExternalTargetVelocity(double vx, double vy) {
-        externalTargetVelX = vx; externalTargetVelY = vy; hasExternalVelocity = true;
-    }
 };
 
 #endif // MOUSE_H

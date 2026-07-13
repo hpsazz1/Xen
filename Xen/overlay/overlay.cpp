@@ -33,6 +33,7 @@
 #include "config.h"
 #include "keycodes.h"
 #include "keyboard_listener.h"
+#include "runtime/application_shutdown.h"
 
 #ifdef USE_CUDA
 #include "trt_detector.h"
@@ -441,9 +442,7 @@ static const OverlayTabItem kOverlayTabs[] = {
 
     { "目标偏移",      "Aim",         "身体/头部 Y 偏移量、自动瞄准开关。",             draw_target,                  SidebarIconKind::Crosshair },
     { "追踪状态",      "Aim",         "活跃追踪列表、ID/类别/丢失帧统计。",             draw_tracker,                 SidebarIconKind::Crosshair },
-    { "移动参数",      "Aim",         "FOV、速度倍率、吸附半径、跟踪强度。",            draw_mouse_movement,          SidebarIconKind::Move },
-    { "轨迹模拟",      "Aim",         "Wind Mouse / Bezier / EMA 轨迹参数。",           draw_mouse_trajectory,        SidebarIconKind::Curve },
-    { "预判补偿",      "Aim",         "卡尔曼预测 + 检测延迟补偿。",                    draw_mouse_prediction,        SidebarIconKind::Curve },
+    { "移动参数",      "Aim",         "基础滤波、响应时间、设备最大计数速度。",          draw_mouse_movement,          SidebarIconKind::Move },
     { "射击辅助",      "Aim",         "自动射击、压枪、急停、解锁Y轴。",                draw_mouse_assist,            SidebarIconKind::Spark },
     { "灵敏度配置",    "Aim",         "游戏灵敏度、偏航/俯仰、FOV缩放预设。",           draw_mouse_profiles,          SidebarIconKind::User },
 
@@ -1454,7 +1453,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     // 窗口销毁：触发退出流程
     case WM_DESTROY:
-        shouldExit = true;
+        RequestApplicationShutdown();
         ::PostQuitMessage(0);
         return 0;
 
@@ -1831,7 +1830,7 @@ void OverlayThread()
             ::DispatchMessage(&msg);
             if (msg.message == WM_QUIT)
             {
-                shouldExit = true;
+                RequestApplicationShutdown();
                 break;
             }
         }
@@ -1925,4 +1924,3 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
     overlay.join();
     return 0;
 }
-

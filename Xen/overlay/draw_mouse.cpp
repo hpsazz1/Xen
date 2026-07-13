@@ -27,6 +27,8 @@ int prev_fovY = config.fovY;
 // 速度倍率
 float prev_minSpeedMultiplier = config.minSpeedMultiplier;
 float prev_maxSpeedMultiplier = config.maxSpeedMultiplier;
+float prev_move_response_ms = config.move_response_ms;
+float prev_move_max_speed_cps = config.move_max_speed_cps;
 	// 预测
 	float prev_predictionInterval = config.predictionInterval;
 	bool  prev_prediction_enabled = config.prediction_enabled;
@@ -112,22 +114,41 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayUI::EndSection();
     }
 
-    // ========== Speed Multiplier（速度倍率）设置 ==========
+    // ========== 基础移动控制 ==========
     if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
-        OverlayUI::BeginSection("速度倍率", "mouse_section_speed_multiplier"))
+        OverlayUI::BeginSection("基础移动", "mouse_section_basic_movement"))
     {
-        OverlayUI::SliderFloatRow("最小速度倍率", &config.minSpeedMultiplier, 0.1f, 5.0f, "%.1f");
-        OverlayUI::SliderFloatRow("最大速度倍率", &config.maxSpeedMultiplier, 0.1f, 5.0f, "%.1f");
-        // 确保 min ≤ max，防止速度曲线计算异常
-        if (config.minSpeedMultiplier > config.maxSpeedMultiplier)
-            config.maxSpeedMultiplier = config.minSpeedMultiplier;
+        if (OverlayUI::CheckboxRow("自动优化参数", &config.auto_derive_tracker_params,
+            "##auto_derive_basic",
+            "根据检测分辨率和捕获帧率自动设置基础跟踪与设备速度。"))
+            OverlayConfig_MarkDirty();
+        if (config.auto_derive_tracker_params)
+        {
+            ImGui::TextDisabled("响应 %.0f ms | 最大速度 %.0f counts/s",
+                config.move_response_ms, config.move_max_speed_cps);
+        }
+        else
+        {
+            OverlayUI::SliderFloatRow("响应时间(ms)", &config.move_response_ms,
+                20.0f, 300.0f, "%.0f", "##move_response",
+                "越小越快，越大越柔和。该参数不随 FPS 改变含义。");
+            OverlayUI::SliderFloatRow("最大设备速度", &config.move_max_speed_cps,
+                30.0f, 1200.0f, "%.0f counts/s", "##move_max_cps",
+                "限制每秒发送的鼠标计数，替代旧的最小/最大速度倍率。");
+        }
         OverlayUI::EndSection();
     }
 
     // ========== Prediction（预测）设置 ==========
-    if (shouldDrawMousePage(page, MouseSettingsPage::Prediction) &&
+    if (false && shouldDrawMousePage(page, MouseSettingsPage::Prediction) &&
         OverlayUI::BeginSection("预判参数", "mouse_section_prediction"))
     {
+        if (OverlayUI::CheckboxRow("自动优化参数", &config.auto_derive_tracker_params,
+            "##auto_derive_control",
+            "根据检测分辨率和实际捕获帧率自动推导跟踪、预测与目标修正参数。\n"
+            "推荐保持开启，仅需配置游戏灵敏度与视野。"))
+            OverlayConfig_MarkDirty();
+
         if (OverlayUI::CheckboxRow("启用预测", &config.prediction_enabled, "##pred_enabled",
             "预测总开关。\n"
             "开启：根据目标运动轨迹推算未来位置，提前瞄准\n"
@@ -136,6 +157,15 @@ static void draw_mouse_page(MouseSettingsPage page)
             OverlayConfig_MarkDirty();
 
         if (!config.prediction_enabled) ImGui::BeginDisabled();
+
+        if (config.auto_derive_tracker_params)
+        {
+            ImGui::TextDisabled("自动：前瞻 %.3fs  响应 %.3fs  重置 %.2fs",
+                config.prediction_tau,
+                config.prediction_reset_timeout_sec);
+        }
+        else
+        {
 
         OverlayUI::SliderFloatRow("预测前瞻(s)", &config.predictionInterval, 0.0f, 0.12f, "%.3f", "##pred_interval",
             "预测前瞻时间 — 核心调参项\n"
@@ -167,6 +197,7 @@ static void draw_mouse_page(MouseSettingsPage page)
             "可视化预测轨迹的点数（仅影响显示）。\n"
             "点数越多 → 屏幕上显示的预测线越长\n"
             "推荐：8~15");
+        }
 
         OverlayUI::CheckboxRow("绘制预测点", &config.draw_futurePositions, "##pred_draw",
             "是否在覆盖层上绘制预测轨迹线。\n"
@@ -180,7 +211,8 @@ static void draw_mouse_page(MouseSettingsPage page)
     }
 
     // ========== 跟踪强度 ==========
-    if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
+    if (false && shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
+        !config.auto_derive_tracker_params &&
         OverlayUI::BeginSection("跟踪强度", "mouse_section_tracking_strength"))
     {
         OverlayUI::SliderFloatRow("跟踪强度", &config.pure_pursuit_gain, 0.1f, 3.0f, "%.2f",
@@ -194,7 +226,8 @@ static void draw_mouse_page(MouseSettingsPage page)
 
     // ========== Target Correction（目标修正）设置 ==========
     // 控制鼠标在目标周围的吸附行为：吸附半径、近距过渡、速度曲线、吸附增强
-    if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
+    if (false && shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
+        !config.auto_derive_tracker_params &&
         OverlayUI::BeginSection("目标修正", "mouse_section_target_correction"))
     {
         // 吸附半径：鼠标距离目标小于此值时触发吸附
@@ -244,9 +277,6 @@ static void draw_mouse_page(MouseSettingsPage page)
                 config.detection_resolution,
                 config.fovX,
                 config.fovY,
-                config.minSpeedMultiplier,
-                config.maxSpeedMultiplier,
-                config.predictionInterval,
                 config.auto_shoot,
                 config.bScope_multiplier
             );
@@ -461,7 +491,7 @@ static void draw_mouse_page(MouseSettingsPage page)
 
     // ========== 轨迹模拟设置 ==========
     // 模拟人手移动鼠标的自然轨迹，使鼠标运动更真实
-    if (shouldDrawMousePage(page, MouseSettingsPage::Trajectory) &&
+    if (false && shouldDrawMousePage(page, MouseSettingsPage::Trajectory) &&
         OverlayUI::BeginSection("轨迹模拟", "mouse_section_wind_mouse"))
     {
         // 启用/禁用轨迹模拟算法
@@ -519,7 +549,7 @@ static void draw_mouse_page(MouseSettingsPage page)
     }
 
     // ========== Bezier + EMA 设置 ==========
-    if (shouldDrawMousePage(page, MouseSettingsPage::Trajectory) &&
+    if (false && shouldDrawMousePage(page, MouseSettingsPage::Trajectory) &&
         OverlayUI::BeginSection("Bezier / EMA", "mouse_section_bezier_ema"))
     {
         if (OverlayUI::CheckboxRow("启用 Bezier", &config.bezier_enabled))
@@ -784,6 +814,8 @@ static void draw_mouse_page(MouseSettingsPage page)
     // 检测上述配置项是否有变化，如有则同步 prev 变量、更新 mouseThread 并标记配置脏
     if (prev_fovX != config.fovX ||
         prev_fovY != config.fovY ||
+        prev_move_response_ms != config.move_response_ms ||
+        prev_move_max_speed_cps != config.move_max_speed_cps ||
         prev_minSpeedMultiplier != config.minSpeedMultiplier ||
         prev_maxSpeedMultiplier != config.maxSpeedMultiplier ||
         prev_predictionInterval != config.predictionInterval ||
@@ -803,6 +835,8 @@ static void draw_mouse_page(MouseSettingsPage page)
         // 同步 FOV
         prev_fovX = config.fovX;
         prev_fovY = config.fovY;
+        prev_move_response_ms = config.move_response_ms;
+        prev_move_max_speed_cps = config.move_max_speed_cps;
         // 同步速度倍率
         prev_minSpeedMultiplier = config.minSpeedMultiplier;
         prev_maxSpeedMultiplier = config.maxSpeedMultiplier;
@@ -828,9 +862,6 @@ static void draw_mouse_page(MouseSettingsPage page)
             config.detection_resolution,
             config.fovX,
             config.fovY,
-            config.minSpeedMultiplier,
-            config.maxSpeedMultiplier,
-            config.predictionInterval,
             config.auto_shoot,
             config.bScope_multiplier);
 
@@ -863,9 +894,6 @@ static void draw_mouse_page(MouseSettingsPage page)
             config.detection_resolution,
             config.fovX,
             config.fovY,
-            config.minSpeedMultiplier,
-            config.maxSpeedMultiplier,
-            config.predictionInterval,
             config.auto_shoot,
             config.bScope_multiplier);
 
@@ -907,9 +935,6 @@ static void draw_mouse_page(MouseSettingsPage page)
             config.detection_resolution,
             config.fovX,
             config.fovY,
-            config.minSpeedMultiplier,
-            config.maxSpeedMultiplier,
-            config.predictionInterval,
             config.auto_shoot,
             config.bScope_multiplier);
 

@@ -1,15 +1,12 @@
 ﻿// ============================================================================
 // mouse.cpp — Xen 鼠标控制核心模块
 //
-// 本文件是 Xen 自瞄辅助功能的鼠标运动控制中枢，负责：
-//   - 轨迹模拟算法：模拟人类鼠标操作的类自然位移算法，包含累积、
-//     子步分解、拉力趋向目标、随机扰动、双正弦波黄金比例模式振荡
-//   - 卡尔曼滤波预测：基于目标历史位置进行卡尔曼滤波，预测目标未来位置，
-//     并补偿检测延迟和网络延迟
+// 本文件是 Xen 基础鼠标控制模块，当前主链路只负责：
+//   - 检测观测的自适应滤波（不做未来位置预测）
+//   - 帧率无关的误差响应与设备计数限速
 //   - 运动补偿：记录已发送的鼠标移动，用于补偿因自瞄自身移动造成的视差变化
 //   - 多鼠标设备支持：通过 IMouseInput 接口抽象，支持多种底层鼠标驱动
 //     （物理鼠标、虚拟驱动、原始输入等），支持运行时热切换
-//   - 速度曲线：根据目标距离动态调整移动速度，支持 snap 半径、近端半径和曲线指数
 //   - 线程安全：移动指令通过队列投递到后台工作线程，避免阻塞主循环
 // ============================================================================
 
@@ -31,7 +28,6 @@
 #include "capture.h"
 #include "Xen.h"
 #include "debug/pipeline_tracer.h"
-#include "runtime/speed_curve.h"
 #include "runtime/thread_loops.h"
 
 /**
@@ -42,7 +38,6 @@
  *   - resolution / screen_width / screen_height: 屏幕分辨率，用于坐标归一化
  *   - fovX / fovY: 视场角（度），用于屏幕像素与游戏内角度的换算
  *   - min/maxSpeedMultiplier: 速度曲线的最小/最大倍率
- *   - predictionInterval: 预测前瞻时间（秒），卡尔曼滤波预测目标未来的偏移量
  *   - auto_shoot: 自瞄时是否自动开火
  *   - bScope_multiplier: 瞄准范围判定系数，用于目标在准星内的检测
  *   - mouseInputDevice: 鼠标输入设备接口（支持运行时热切换）
@@ -58,53 +53,28 @@ MouseThread::MouseThread(
     int resolution,
     int fovX,
     int fovY,
-    double minSpeedMultiplier,
-    double maxSpeedMultiplier,
-    double predictionInterval,
     bool auto_shoot,
     float bScope_multiplier,
     IMouseInput* mouseInputDevice)
     : screen_width(resolution),
     screen_height(resolution),
-    prediction_interval(predictionInterval),
     fov_x(fovX),
     fov_y(fovY),
     max_distance(std::hypot(resolution, resolution) / 2.0),
-    min_speed_multiplier(minSpeedMultiplier),
-    max_speed_multiplier(maxSpeedMultiplier),
     center_x(resolution / 2.0),
     center_y(resolution / 2.0),
     auto_shoot(auto_shoot),
     bScope_multiplier(bScope_multiplier),
-    mouseInput(mouseInputDevice),
-
-    // 卡尔曼预测的上一次速度（用于速度平滑和趋势推算）
-    prev_velocity_x(0.0),
-    prev_velocity_y(0.0),
-    // 卡尔曼预测的上一次目标位置
-    prev_x(0.0),
-    prev_y(0.0)
+    mouseInput(mouseInputDevice)
 {
-    prev_time = std::chrono::steady_clock::time_point();
     last_target_time = std::chrono::steady_clock::now();
 
     {
         std::lock_guard<std::mutex> lock(configMutex);
-        // 从配置加载轨迹模拟参数
-        wind_mouse_enabled = config.wind_mouse_enabled;
-        wind_G = config.wind_G;   // 鼠标移速系数
-        wind_W = config.wind_W;   // 轨迹摆动幅度
-        wind_M = config.wind_M;   // 单步移动上限
-        wind_D = config.wind_D;   // 微调距离阈值
-
+        move_response_seconds = static_cast<double>(config.move_response_ms) / 1000.0;
+        move_max_speed_cps = static_cast<double>(config.move_max_speed_cps);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
     }
-    resetWindState();
-    clearWindDebugTrail();
-
-    // 初始化 PurePursuit 控制器（默认参数，updateConfig 会覆盖）
-    purePursuitController = execution::PurePursuitController(0.85, 60.0, 25.0, 0.6, 2.0, 0.8);
-    purePursuitController.setFeedforwardCoeff(prediction_interval);
 
     // 启动后台工作线程，负责从队列中取出移动指令并发送到驱动
     moveWorker = std::thread(&MouseThread::moveWorkerLoop, this);
@@ -119,9 +89,6 @@ MouseThread::MouseThread(
  * @param resolution  屏幕分辨率（宽=高，假设方形）
  * @param fovX        水平视场角
  * @param fovY        垂直视场角
- * @param minSpeedMultiplier  最小速度倍率
- * @param maxSpeedMultiplier  最大速度倍率
- * @param predictionInterval  预测前瞻时间
  * @param auto_shoot          是否自动开火
  * @param bScope_multiplier   瞄准范围系数
  */
@@ -129,9 +96,6 @@ void MouseThread::updateConfig(
     int resolution,
     int fovX,
     int fovY,
-    double minSpeedMultiplier,
-    double maxSpeedMultiplier,
-    double predictionInterval,
     bool auto_shoot,
     float bScope_multiplier
 )
@@ -141,50 +105,17 @@ void MouseThread::updateConfig(
 
     screen_width = screen_height = resolution;
     fov_x = fovX;  fov_y = fovY;
-    min_speed_multiplier = minSpeedMultiplier;
-    max_speed_multiplier = maxSpeedMultiplier;
-    prediction_interval = predictionInterval;
+    move_response_seconds = std::clamp(
+        static_cast<double>(config.move_response_ms) / 1000.0, 0.020, 0.300);
+    move_max_speed_cps = std::clamp(
+        static_cast<double>(config.move_max_speed_cps), 30.0, 2000.0);
     this->auto_shoot = auto_shoot;
     this->bScope_multiplier = bScope_multiplier;
 
     center_x = center_y = resolution / 2.0;
     max_distance = std::hypot(resolution, resolution) / 2.0;
 
-    // 重新加载轨迹模拟参数并重置状态
-    wind_mouse_enabled = config.wind_mouse_enabled;
-    wind_G = config.wind_G; wind_W = config.wind_W;
-    wind_M = config.wind_M; wind_D = config.wind_D;
-    resetWindState();
-    clearWindDebugTrail();
-
-    // 贝塞尔轨迹 + EMA 平滑
-    bezier_enabled = config.bezier_enabled;
-    bezier_strength = config.bezier_strength;
-    move_ema_enabled = config.move_ema_enabled;
-    move_ema_alpha = config.move_ema_alpha;
-
-    // 移动控制库执行控制器（统一使用 Pure Pursuit，参数自动推导）
-    motionChangeProtection = config.motion_change_protection;
-    {
-        // 自动推导执行器参数（基于分辨率）
-        double res = static_cast<double>(resolution);
-        double autoGain = 0.85;
-        double autoDeadZone = std::max(1.0, res / 320.0);
-        double autoSmoothing = 0.8;
-        // 用户可在高级参数中覆盖，若配置值与自动值偏差很小则使用自动值
-        bool useAuto = (std::abs(config.pure_pursuit_gain - autoGain) < 0.01f &&
-                        std::abs(config.pure_pursuit_dead_zone - autoDeadZone) < 0.1f &&
-                        std::abs(config.pure_pursuit_smoothing - autoSmoothing) < 0.01f);
-        double gain = useAuto ? autoGain : static_cast<double>(config.pure_pursuit_gain);
-        double dz   = useAuto ? autoDeadZone : static_cast<double>(config.pure_pursuit_dead_zone);
-        double sm   = useAuto ? autoSmoothing : static_cast<double>(config.pure_pursuit_smoothing);
-        purePursuitController = execution::PurePursuitController(
-            gain, 60.0, 25.0, 0.6, dz, sm);
-        // 启用速度前馈：基于预测时间的前馈系数，补偿目标自身运动
-        purePursuitController.setFeedforwardCoeff(
-            static_cast<double>(config.predictionInterval));
-    }
-    purePursuitController.reset();
+    resetTracking();
 
     // 开火拟人化
     trigger_stable_frames = config.trigger_stable_frames;
@@ -276,7 +207,6 @@ void MouseThread::moveWorkerLoop()
                 moveQueue.pop();
                 ul.unlock();                      // 发送时释放锁，允许继续入队
                 sendMovementToDriver(m.dx, m.dy);
-                appendWindDebugStep(m.dx, m.dy);  // 记录调试轨迹
                 ul.lock();
             }
         }
@@ -342,8 +272,20 @@ void MouseThread::moveWorkerLoop()
  *   wind_M: 单步移动上限（M越大每帧能移动的像素越多）
  *   wind_D: 微调距离阈值（靠近目标后切换为精细微调的距离）
  */
+#if 0 // Trajectory simulation is intentionally excluded from the basic stage.
 void MouseThread::bezierMoveRelative(int dx, int dy)
 {
+    ++trajectoryFrameCounter;
+    Trajectory::bezierMove(
+        dx,
+        dy,
+        bezier_strength,
+        trajectoryBezierState,
+        trajectoryFrameCounter,
+        [this](int stepX, int stepY) { queueMove(stepX, stepY); });
+    return;
+
+#if 0 // Legacy inline implementation retained temporarily for review; trajectory.h is authoritative.
     if (dx == 0 && dy == 0) return;
 
     static int frameCounter = 0;
@@ -393,10 +335,23 @@ void MouseThread::bezierMoveRelative(int dx, int dy)
             queueMove(stepX, stepY);
         }
     }
+#endif
 }
 
 void MouseThread::windMouseMoveRelative(int dx, int dy)
 {
+    Trajectory::windMouseMove(
+        dx,
+        dy,
+        wind_G,
+        wind_W,
+        wind_M,
+        wind_D,
+        trajectoryWindState,
+        [this](int stepX, int stepY) { queueMove(stepX, stepY); });
+    return;
+
+#if 0 // Legacy inline implementation retained temporarily for review; trajectory.h is authoritative.
     if (dx == 0 && dy == 0)
         return;
 
@@ -570,6 +525,7 @@ void MouseThread::windMouseMoveRelative(int dx, int dy)
         windCarryX *= s;
         windCarryY *= s;
     }
+#endif
 }
 
 /**
@@ -591,6 +547,14 @@ void MouseThread::resetWindState()
     constexpr double kRateMin = 0.025;
     std::uniform_real_distribution<double> phaseDist(0.0, kTwoPi);
     std::uniform_real_distribution<double> rateDist(kRateMin * 1.6, kRateMin * 4.0);
+
+    trajectoryWindState = Trajectory::WindState{};
+    trajectoryWindState.patternPhaseA = phaseDist(trajectoryWindState.rng);
+    trajectoryWindState.patternPhaseB = phaseDist(trajectoryWindState.rng);
+    trajectoryWindState.patternRateA = rateDist(trajectoryWindState.rng);
+    trajectoryWindState.patternRateB = rateDist(trajectoryWindState.rng);
+    trajectoryBezierState = Trajectory::BezierState{};
+    trajectoryFrameCounter = 0;
 
     windCarryX = 0.0;
     windCarryY = 0.0;
@@ -666,6 +630,7 @@ void MouseThread::pruneWindDebugTrailLocked(const std::chrono::steady_clock::tim
     while (!windDebugTrail.empty() && (now - windDebugTrail.front().t) > windTrailLifetime)
         windDebugTrail.pop_front();
 }
+#endif
 
 /**
  * refreshGameProfileCache - 刷新缓存的游戏配置值
@@ -697,18 +662,10 @@ void MouseThread::refreshGameProfileCache()
         cachedGameBaseFOV = gpPtr->baseFOV;
     }
 
-    // 同时缓存预测配置（避免 predict_target_position 每次加锁）
-    cachedPredictionEnabled     = config.prediction_enabled;
-    cachedPredictionInterval    = static_cast<double>(config.predictionInterval);
-    cachedPredictionTau         = static_cast<double>(config.prediction_tau);
-    cachedPredictionCompensateDelay = config.prediction_compensate_delay;
-    cachedPredictionResetTimeout    = static_cast<double>(config.prediction_reset_timeout_sec);
-
-    // 缓存速度曲线参数（避免 calculate_speed_multiplier 每帧加锁）
-    cachedSnapRadius        = config.snapRadius;
-    cachedNearRadius        = config.nearRadius;
-    cachedSpeedCurveExponent = config.speedCurveExponent;
-    cachedSnapBoostFactor   = config.snapBoostFactor;
+    move_response_seconds = std::clamp(
+        static_cast<double>(config.move_response_ms) / 1000.0, 0.020, 0.300);
+    move_max_speed_cps = std::clamp(
+        static_cast<double>(config.move_max_speed_cps), 30.0, 2000.0);
 }
 
 /**
@@ -845,166 +802,14 @@ std::pair<double, double> MouseThread::getMotionCompensationSince(
     return { totalX - prevX, totalY - prevY };
 }
 
-/**
- * predict_target_position
- *
- * 统一预测流水线。自适应选择最优速度源，单一路径完成：
- *   速度估计 (外部SOT > 帧间差分) → 时间校正EMA滤波 → 常速外推 → 自适应钳位
- *
- * 四项优化：
- *   1. 时间校正 EMA — α = 1-exp(-dt/τ)，跨帧率一致响应
- *   2. 自适应钳位 — 基于目标速度动态计算预测上限
- *   3. 按轴死区 — 逐轴判定，省 hypot + 更精确
- *   4. 热路径内联 — 无函数调用 + 零锁读取
- *
- * @param target_x,y      检测到的目标坐标
- * @param observationTime 观测时间戳
- * @return                预测后的目标位置
- */
-std::pair<double, double> MouseThread::predict_target_position(
+std::pair<double, double> MouseThread::filter_target_position(
     double target_x, double target_y,
     std::chrono::steady_clock::time_point observationTime)
 {
-    auto current_time = std::chrono::steady_clock::now();
-    if (observationTime.time_since_epoch().count() == 0)
-        observationTime = current_time;
-
-    double observationAgeSec = std::chrono::duration<double>(current_time - observationTime).count();
-    if (!std::isfinite(observationAgeSec) || observationAgeSec < 0.0)
-        observationAgeSec = 0.0;
-
-    // ===== 预测关闭 =====
-    if (!cachedPredictionEnabled)
-    {
-        prev_x = target_x; prev_y = target_y;
-        prev_time = observationTime;
-        return { target_x, target_y };
-    }
-
-    // ===== 首帧 / 目标丢失后初始化 =====
-    if (prev_time.time_since_epoch().count() == 0 || !target_detected.load())
-    {
-        prev_time = observationTime;
-        prev_x = target_x; prev_y = target_y;
-        prev_velocity_x = 0.0; prev_velocity_y = 0.0;
-        emaVelX.reset(0.0); emaVelY.reset(0.0);
-        emaPosX.reset(target_x); emaPosY.reset(target_y);
-        hasExternalVelocity = false;
-        return { target_x, target_y };
-    }
-
-    // ===== 帧间隔 dt =====
-    double dt = std::chrono::duration<double>(observationTime - prev_time).count();
-    if (!std::isfinite(dt) || dt <= 0.0) dt = frameIntervalSec(captureFps.load());
-    dt = std::clamp(dt, 1.0 / 500.0, 0.25);
-
-    // ===== 优化1: 时间校正 EMA 系数（dt 缓存: 仅变化 >10% 时重算） =====
-    double alphaVel, alphaPos;
-    if (std::abs(dt - cachedDtExp) / std::max(dt, 1e-9) > 0.1)
-    {
-        const double tauVel = cachedPredictionTau;
-        const double tauPos = cachedPredictionTau * 2.0;
-        cachedAlphaVel = 1.0 - std::exp(-dt / tauVel);
-        cachedAlphaPos = 1.0 - std::exp(-dt / tauPos);
-        cachedDtExp = dt;
-    }
-    alphaVel = cachedAlphaVel;
-    alphaPos = cachedAlphaPos;
-
-    // ===== 速度估计 (自动选最优源) =====
-    double velX = 0.0, velY = 0.0;  // 默认零初始化，防止 NaN 分支未赋值
-    if (hasExternalVelocity)
-    {
-        // 优先: SOT Kalman 外部速度（已是 px/sec，由 mouse_thread_loop 转换）
-        // NaN/Inf 防护：异常外部速度清零并回退到帧间差分估计
-        if (std::isfinite(externalTargetVelX) && std::isfinite(externalTargetVelY))
-        {
-            velX = externalTargetVelX;
-            velY = externalTargetVelY;
-            // 同步更新 EMA 滤波器，保持状态最新；回退时无需重置
-            emaVelX.setAlpha(alphaVel);
-            emaVelY.setAlpha(alphaVel);
-            emaVelX.update(velX);
-            emaVelY.update(velY);
-        }
-        else
-        {
-            hasExternalVelocity = false; // 异常数据，放弃本次外部速度
-            // velX/velY 保持 0.0，下一帧通过帧间差分恢复
-        }
-    }
-    else
-    {
-        double dispX = target_x - prev_x;
-        double dispY = target_y - prev_y;
-
-        // ===== 优化3: 径向死区 — 位移<2px时整帧速度清零，保留对角线方向 =====
-        double rawVx, rawVy;
-        double disp = std::hypot(dispX, dispY);
-        if (disp < 2.0)
-        {
-            rawVx = 0.0;
-            rawVy = 0.0;
-        }
-        else
-        {
-            rawVx = dispX / dt;
-            rawVy = dispY / dt;
-        }
-
-        // 跳变保护: 位移异常大 → 重置
-        if (disp > 800.0)
-        {
-            prev_time = observationTime;
-            prev_x = target_x; prev_y = target_y;
-            emaVelX.reset(0.0); emaVelY.reset(0.0);
-            emaPosX.reset(target_x); emaPosY.reset(target_y);
-            hasExternalVelocity = false;
-            return { target_x, target_y };
-        }
-
-        emaVelX.setAlpha(alphaVel);
-        emaVelY.setAlpha(alphaVel);
-        velX = emaVelX.update(rawVx);
-        velY = emaVelY.update(rawVy);
-    }
-
-    // ===== 位置滤波 =====
-    emaPosX.setAlpha(alphaPos);
-    emaPosY.setAlpha(alphaPos);
-    double filteredX = emaPosX.update(target_x);
-    double filteredY = emaPosY.update(target_y);
-
-    // ===== 存储状态 =====
-    prev_velocity_x = velX;
-    prev_velocity_y = velY;
-    prev_x = target_x;
-    prev_y = target_y;
-    prev_time = observationTime;
-
-    // ===== 优化4: 热路径内联延迟计算 =====
-    double totalDelay = cachedPredictionInterval;
-    if (cachedPredictionCompensateDelay && observationAgeSec > 0.0)
-        totalDelay += std::clamp(observationAgeSec, 0.0, 0.35);
-    totalDelay = std::clamp(totalDelay, 0.0, 1.5);
-
-    // ===== 常速外推 =====
-    double predX = filteredX + velX * totalDelay;
-    double predY = filteredY + velY * totalDelay;
-
-    // ===== 优化2: 自适应钳位 — 基于速度动态计算 =====
-    double speed = std::hypot(velX, velY);
-    double maxOffset = speed * totalDelay * 1.5;
-    maxOffset = std::clamp(maxOffset, 50.0, 800.0);
-
-    predX = std::clamp(predX, target_x - maxOffset, target_x + maxOffset);
-    predY = std::clamp(predY, target_y - maxOffset, target_y + maxOffset);
-
-    // ===== NaN 回退 =====
-    if (!std::isfinite(predX)) predX = target_x;
-    if (!std::isfinite(predY)) predY = target_y;
-
-    return { predX, predY };
+    lastFilterResult = targetFilter.update(
+        target_x, target_y, observationTime,
+        frameIntervalSec(captureFps.load()), screen_width);
+    return { lastFilterResult.x, lastFilterResult.y };
 }
 
 /**
@@ -1059,6 +864,7 @@ void MouseThread::moveRelative(int dx, int dy)
     queueMove(dx, dy);
 }
 
+#if 0 // Legacy speed-multiplier conversion removed from the active base controller.
 /**
  * calc_movement
  *
@@ -1092,19 +898,18 @@ std::pair<double, double> MouseThread::calc_movement(double tx, double ty)
     double mmx = offx * degPerPxX;
     double mmy = offy * degPerPxY;
 
-    // 帧率补偿：以 30 FPS 为基准，高帧率时缩减，低帧率时放大
-    double corr = 1.0;
-    double fps = static_cast<double>(captureFps.load());
-    fps = std::clamp(fps, 1.0, 500.0);  // 与 frameIntervalSec 一致的钳位
-    if (fps > 30.0) corr = 30.0 / fps;
-    else if (fps > 0.0 && fps < 30.0) corr = 30.0 / fps;
+    // The controller runs once per captured frame. Normalize the legacy
+    // absolute-position path to a 30 FPS reference so higher capture rates do
+    // not multiply the total movement per second.
+    const double fps = std::clamp(static_cast<double>(captureFps.load()), 1.0, 500.0);
+    const double frameScale = 30.0 / fps;
 
     // 使用缓存的游戏配置计算 counts（避免每帧加锁 configMutex）
     double scale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0) ? (fov_x / cachedGameBaseFOV) : 1.0;
     double cx = mmx / (cachedGameSens * cachedGameYaw * scale);
     double cy = mmy / (cachedGameSens * cachedGamePitch * scale);
-    double move_x = cx * speed * corr;
-    double move_y = cy * speed * corr;
+    double move_x = cx * speed * frameScale;
+    double move_y = cy * speed * frameScale;
 
     return { move_x, move_y };
 }
@@ -1137,12 +942,9 @@ std::pair<double, double> MouseThread::pixelDeltaToCounts(
     double degX = dpx * degPerPxX;
     double degY = dpy * degPerPxY;
 
-    // 帧率补偿：以 30 FPS 为基准，高帧率时缩减，低帧率时放大
-    double corr = 1.0;
-    double fps = static_cast<double>(captureFps.load());
-    fps = std::clamp(fps, 1.0, 500.0);  // 与 frameIntervalSec 一致的钳位
-    if (fps > 30.0) corr = 30.0 / fps;
-    else if (fps > 0.0 && fps < 30.0) corr = 30.0 / fps;  // 低帧率时放大补偿
+    // Keep output rate stable when the control loop runs at different FPS.
+    const double fps = std::clamp(static_cast<double>(captureFps.load()), 1.0, 500.0);
+    const double frameScale = 30.0 / fps;
 
     // FOV 缩放修正
     double scale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0)
@@ -1152,8 +954,8 @@ std::pair<double, double> MouseThread::pixelDeltaToCounts(
     double cx = degX / (cachedGameSens * cachedGameYaw * scale);
     double cy = degY / (cachedGameSens * cachedGamePitch * scale);
 
-    cx *= speedCurveMultiplier * corr;
-    cy *= speedCurveMultiplier * corr;
+    cx *= speedCurveMultiplier * frameScale;
+    cy *= speedCurveMultiplier * frameScale;
 
     return { cx, cy };
 }
@@ -1188,6 +990,7 @@ double MouseThread::calculate_speed_multiplier(double distance)
         cachedSnapRadius, cachedNearRadius, cachedSpeedCurveExponent, cachedSnapBoostFactor,
         min_speed_multiplier, max_speed_multiplier);
 }
+#endif
 
 /**
  * check_target_in_scope
@@ -1240,17 +1043,9 @@ bool MouseThread::check_target_in_scope(double target_x, double target_y, double
  */
 void MouseThread::moveMouse(const AimbotTarget& target)
 {
-    std::lock_guard lg(input_method_mutex);
-
-    auto predicted = predict_target_position(
+    moveMousePivot(
         target.x + target.w / 2.0,
         target.y + target.h / 2.0);
-
-    auto mv = calc_movement(predicted.first, predicted.second);
-    queueMove(static_cast<int>(mv.first), static_cast<int>(mv.second));
-
-    // 消费外部速度标志（moveMouse 不使用 PurePursuit 前馈）
-    hasExternalVelocity = false;
 }
 
 /**
@@ -1281,17 +1076,116 @@ void MouseThread::moveMousePivot(
 {
     std::lock_guard lg(input_method_mutex);
 
-    // ===== 流水线追踪：Stage 1 原始目标 =====
+    PipelineFrame traceFrame;
     PipelineFrame* pf = nullptr;
     if (g_pipelineTracer.isEnabled())
     {
-        pf = &g_pipelineTracer.beginFrame(static_cast<int>(screen_width));
+        traceFrame = g_pipelineTracer.beginFrame(static_cast<int>(screen_width));
+        pf = &traceFrame;
+        pf->rawPivotX = pivotX;
+        pf->rawPivotY = pivotY;
+        pf->targetClassId = targetClassId;
+        pf->targetDetected = true;
+        pf->fpsValue = static_cast<double>(captureFps.load());
+        if (observationTime.time_since_epoch().count() != 0)
+        {
+            const double age = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - observationTime).count();
+            if (std::isfinite(age) && age >= 0.0)
+                pf->observationAgeSec = age;
+        }
+    }
+    auto commitTrace = [&]() {
+        if (pf)
+        {
+            g_pipelineTracer.commitFrame(std::move(traceFrame));
+            pf = nullptr;
+        }
+    };
+
+    const auto filtered = filter_target_position(pivotX, pivotY, observationTime);
+    const double errorX = filtered.first - center_x;
+    const double errorY = filtered.second - center_y;
+
+    const double fovScale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0)
+        ? (fov_x / cachedGameBaseFOV) : 1.0;
+    const double degPerPixelX = fov_x / std::max(1.0, screen_width);
+    const double degPerPixelY = fov_y / std::max(1.0, screen_height);
+    const double horizontalDenominator = cachedGameSens * cachedGameYaw * fovScale;
+    const double verticalDenominator = cachedGameSens * cachedGamePitch * fovScale;
+    const double countsPerPixelX = std::abs(horizontalDenominator) > 1e-9
+        ? degPerPixelX / horizontalDenominator : 1.0;
+    const double countsPerPixelY = std::abs(verticalDenominator) > 1e-9
+        ? degPerPixelY / verticalDenominator : 1.0;
+
+    BasicAimController::Settings settings;
+    settings.responseSeconds = move_response_seconds;
+    settings.maxCountsPerSecond = move_max_speed_cps;
+    settings.settleRadiusPixels = std::max(2.0, screen_width / 64.0);
+    settings.releaseRadiusPixels = settings.settleRadiusPixels * 1.6;
+    const double dt = frameIntervalSec(captureFps.load());
+    const auto output = aimController.update(
+        errorX, errorY, dt, countsPerPixelX, countsPerPixelY, settings);
+
+    int mx = static_cast<int>(std::round(output.countsX));
+    int my = static_cast<int>(std::round(output.countsY));
+    if (output.settled)
+    {
+        mx = 0;
+        my = 0;
+        clearQueuedMoves();
+    }
+
+    if (pf)
+    {
+        pf->filteredX = filtered.first;
+        pf->filteredY = filtered.second;
+        pf->observedSpeed = lastFilterResult.observedSpeed;
+        pf->filterResidual = lastFilterResult.residual;
+        pf->errorX = errorX;
+        pf->errorY = errorY;
+        pf->errorDistance = output.errorDistance;
+        pf->requestedPixelX = output.requestedPixelX;
+        pf->requestedPixelY = output.requestedPixelY;
+        pf->requestedCountsX = output.countsX;
+        pf->requestedCountsY = output.countsY;
+        pf->finalMx = mx;
+        pf->finalMy = my;
+        pf->responseSeconds = settings.responseSeconds;
+        pf->maxCountsPerSecond = settings.maxCountsPerSecond;
+        pf->frameCountLimit = output.frameCountLimit;
+        pf->settled = output.settled;
+    }
+
+    if (mx != 0 || my != 0)
+        queueMove(mx, my);
+    if (pf)
+        pf->queuedMoveCount = pendingMoveCount();
+    commitTrace();
+    return;
+
+#if 0 // Removed base-pipeline stages: prediction, speed curve, PurePursuit and trajectory shaping.
+
+    // ===== 流水线追踪：Stage 1 原始目标 =====
+    PipelineFrame traceFrame;
+    PipelineFrame* pf = nullptr;
+    if (g_pipelineTracer.isEnabled())
+    {
+        traceFrame = g_pipelineTracer.beginFrame(static_cast<int>(screen_width));
+        pf = &traceFrame;
         pf->rawPivotX = pivotX;
         pf->rawPivotY = pivotY;
         pf->targetClassId = targetClassId;
         pf->targetDetected = true;
         pf->fpsValue = static_cast<double>(captureFps.load());
     }
+    auto commitTrace = [&]() {
+        if (pf)
+        {
+            g_pipelineTracer.commitFrame(std::move(traceFrame));
+            pf = nullptr;
+        }
+    };
 
     // ===== 运动补偿 =====
     double mcDeltaX = 0.0, mcDeltaY = 0.0;
@@ -1328,9 +1222,9 @@ void MouseThread::moveMousePivot(
     {
         pf->predX = predicted.first;
         pf->predY = predicted.second;
-        pf->velocityX = prev_velocity_x;
-        pf->velocityY = prev_velocity_y;
-        pf->hasExternalVel = hasExternalVelocity;
+        pf->velocityX = motionEstimator.velocityX();
+        pf->velocityY = motionEstimator.velocityY();
+        pf->hasExternalVel = motionEstimator.lastUsedExternalVelocity();
     }
 
     // 预计算速度曲线倍率（基于目标到屏幕中心的像素距离）
@@ -1338,6 +1232,41 @@ void MouseThread::moveMousePivot(
     double offy = predicted.second - center_y;
     double distToTarget = std::hypot(offx, offy);
     double speedCurve = calculate_speed_multiplier(distToTarget);
+
+    // A stationary target inside the settle radius should not be chased by
+    // detector jitter or residual controller state. Moving targets bypass this
+    // gate so they remain responsive near the crosshair.
+    const double targetSpeed = std::hypot(motionEstimator.velocityX(), motionEstimator.velocityY());
+    const double settleRadius = std::max(1.5, screen_width / 320.0);
+    // Detector pivot quantization can leave a static target reporting a small
+    // apparent speed near the crosshair. Treat that low-speed range as
+    // precision mode so one-count corrections cannot alternate forever.
+    // The detector/SOT pair can still report roughly 55 px/sec while a
+    // stationary target is settling because the camera is responding to our
+    // own prior one-count commands. Use a resolution-scaled 64 px/sec band
+    // only inside the near-center precision path; this removes that feedback
+    // loop without limiting normal target pursuit at meaningful distances.
+    const double staticSpeedThreshold = std::max(18.0, screen_width * 0.20);
+    const bool precisionMode = targetSpeed <= staticSpeedThreshold &&
+        distToTarget <= std::max(static_cast<double>(cachedNearRadius), settleRadius);
+    if (pf)
+        pf->precisionMode = precisionMode;
+    if (distToTarget <= settleRadius && targetSpeed <= staticSpeedThreshold)
+    {
+        purePursuitController.reset();
+        clearQueuedMoves();
+        prev_ema_move_x = 0.0;
+        prev_ema_move_y = 0.0;
+        if (pf)
+        {
+            pf->controllerLimitPx = 0.0;
+            pf->finalMx = 0;
+            pf->finalMy = 0;
+            pf->queuedMoveCount = pendingMoveCount();
+        }
+        commitTrace();
+        return;
+    }
 
     // ===== 流水线追踪：Stage 4 速度曲线 =====
     if (pf)
@@ -1353,21 +1282,22 @@ void MouseThread::moveMousePivot(
         // PurePursuit 模式：基于屏幕像素坐标计算 2D 移动（输出为像素空间增量）
         double screenCx = screen_width / 2.0;
         double screenCy = screen_height / 2.0;
-        double targetVx = 0.0, targetVy = 0.0;
-
-        if (hasExternalVelocity)
-        {
-            // SOT Kalman 速度 (px/sec)，用于 PurePursuit 前馈补偿目标自身运动
-            targetVx = externalTargetVelX;
-            targetVy = externalTargetVelY;
-        }
-
+        const double controlDt = frameIntervalSec(captureFps.load());
+        const double baseLimit = std::clamp(screen_width * 2.25 * controlDt, 2.0, 14.0);
+        // 速度只用于给移动目标增加有限的单帧余量。不能让单次检测速度
+        // 突刺把静止目标的输出上限抬到 18 px，导致越过目标后反向振荡。
+        const double speedForLimit = std::min(targetSpeed, screen_width * 0.60);
+        const double dynamicLimit = std::clamp(
+            baseLimit + speedForLimit * controlDt * 0.75, 2.0, 12.0);
+        purePursuitController.setOutputLimit(dynamicLimit);
+        if (pf)
+            pf->controllerLimitPx = dynamicLimit;
         double dxOut = 0.0, dyOut = 0.0;
         purePursuitController.computeMovement2D(
             predicted.first, predicted.second,
             screenCx, screenCy,
             dxOut, dyOut,
-            true, targetVx, targetVy);
+            false);
 
         ppDxOut = dxOut;
         ppDyOut = dyOut;
@@ -1377,8 +1307,8 @@ void MouseThread::moveMousePivot(
         move_x = counts.first;
         move_y = counts.second;
 
-        // 外部速度已同时用于预测和 PurePursuit 前馈，在此统一消费
-        hasExternalVelocity = false;
+        // External velocity has been consumed by the single prediction stage.
+        motionEstimator.clearExternalVelocity();
     }
 
     // ===== 流水线追踪：Stage 5 Pure Pursuit + Stage 6 Counts =====
@@ -1422,7 +1352,7 @@ void MouseThread::moveMousePivot(
     }
 
     // === 惯性过冲模拟 (Overshoot) ===
-    if (bezier_enabled || wind_mouse_enabled)
+    if (!precisionMode && (bezier_enabled || wind_mouse_enabled))
     {
         double totalDist = std::hypot(move_x, move_y);
         if (totalDist > 50.0)
@@ -1449,6 +1379,22 @@ void MouseThread::moveMousePivot(
     int mx = static_cast<int>(std::round(move_x));
     int my = static_cast<int>(std::round(move_y));
 
+    // At 320 px detection resolution, a static target near the center can
+    // alternate between adjacent detector pixels. Suppress only the final
+    // one-count correction inside a resolution-scaled micro-settle zone;
+    // meaningful movement and faster targets still use the normal path.
+    const double microSettleRadius = std::max(3.0, screen_width / 53.3333333333);
+    if (precisionMode && distToTarget <= microSettleRadius &&
+        std::abs(mx) <= 1 && std::abs(my) <= 1)
+    {
+        purePursuitController.reset();
+        clearQueuedMoves();
+        prev_ema_move_x = 0.0;
+        prev_ema_move_y = 0.0;
+        mx = 0;
+        my = 0;
+    }
+
     // ===== 流水线追踪：Stage 8 最终输出 =====
     if (pf)
     {
@@ -1458,11 +1404,18 @@ void MouseThread::moveMousePivot(
 
     if (mx == 0 && my == 0)
     {
+        if (pf)
+            pf->queuedMoveCount = pendingMoveCount();
+        commitTrace();
         return;
     }
 
     // === 轨迹分发 ===
-    if (bezier_enabled)
+    if (precisionMode)
+    {
+        queueMove(mx, my);
+    }
+    else if (bezier_enabled)
     {
         bezierMoveRelative(mx, my);
     }
@@ -1474,22 +1427,31 @@ void MouseThread::moveMousePivot(
     {
         queueMove(mx, my);
     }
+
+    if (pf)
+        pf->queuedMoveCount = pendingMoveCount();
+
+    commitTrace();
+#endif
 }
 
 /**
  * clearQueuedMoves
  *
  * 清空所有待处理的鼠标移动指令队列。
- * 同时重置轨迹模拟状态，确保后续运动从干净状态开始。
- *
- * 在预测重置、目标丢失或参数变更时调用。
+ * 在基础跟踪重置、目标丢失或参数变更时调用。
  */
 void MouseThread::clearQueuedMoves()
 {
     std::lock_guard<std::mutex> lock(queueMtx);
     std::queue<Move> empty;
     moveQueue.swap(empty);  // 高效清空队列
-    resetWindState();
+}
+
+size_t MouseThread::pendingMoveCount()
+{
+    std::lock_guard<std::mutex> lock(queueMtx);
+    return moveQueue.size();
 }
 
 /**
@@ -1546,7 +1508,7 @@ void MouseThread::pressMouse(const AimbotTarget& target)
         {
             double cv = static_cast<double>(trigger_delay_jitter_ms) / baseDelay;
             std::lognormal_distribution<double> delayDist(0.0, std::clamp(cv, 0.01, 1.5));
-            delay = baseDelay * delayDist(windRng);
+            delay = baseDelay * delayDist(behaviorRng);
             delay = std::clamp(delay, 5.0, 500.0);  // 硬钳位防极端值
         }
         fireScheduleTime = now + std::chrono::microseconds(static_cast<long long>(delay * 1000.0));
@@ -1559,7 +1521,7 @@ void MouseThread::pressMouse(const AimbotTarget& target)
         {
             double cv = static_cast<double>(trigger_hold_jitter_ms) / baseHold;
             std::lognormal_distribution<double> holdDist(0.0, std::clamp(cv, 0.01, 1.5));
-            hold = baseHold * holdDist(windRng);
+            hold = baseHold * holdDist(behaviorRng);
             hold = std::clamp(hold, 2.0, 300.0);
         }
         holdReleaseTime = fireScheduleTime + std::chrono::microseconds(static_cast<long long>(hold * 1000.0));
@@ -1679,19 +1641,12 @@ void MouseThread::releaseMouse()
  *
  * 通常由 checkAndResetPredictions 在目标长时间丢失时自动触发。
  */
-void MouseThread::resetPrediction()
+void MouseThread::resetTracking()
 {
     clearQueuedMoves();
-    prev_time = std::chrono::steady_clock::time_point();
-    prev_x = 0;
-    prev_y = 0;
-    prev_velocity_x = 0;
-    prev_velocity_y = 0;
-    emaVelX.reset(0.0);
-    emaVelY.reset(0.0);
-    emaPosX.reset(0.0);
-    emaPosY.reset(0.0);
-    hasExternalVelocity = false;
+    targetFilter.reset();
+    aimController.reset();
+    lastFilterResult = {};
     target_detected.store(false);
     // 目标切换时重置确认帧计数，避免新目标跳过确认延迟
     stableFrameCount = 0;
@@ -1708,19 +1663,6 @@ void MouseThread::resetPrediction()
  * 超时时间从配置中读取，钳位在 [0.05, 3.0] 秒范围内。默认通常为 0.5 秒。
  * 防止目标已离开但预测器仍输出旧轨迹的问题。
  */
-void MouseThread::checkAndResetPredictions()
-{
-    auto current_time = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration<double>(current_time - last_target_time).count();
-    double resetTimeoutSec = cachedPredictionResetTimeout;
-    const double timeoutSec = std::clamp(resetTimeoutSec, 0.05, 3.0);
-
-    if (elapsed > timeoutSec && target_detected.load())
-    {
-        resetPrediction();
-    }
-}
-
 /**
  * predictFuturePositions
  *
@@ -1734,36 +1676,10 @@ void MouseThread::checkAndResetPredictions()
  */
 std::vector<std::pair<double, double>> MouseThread::predictFuturePositions(double pivotX, double pivotY, int frames)
 {
-    std::vector<std::pair<double, double>> result;
-    if (frames <= 0)
-        return result;
-
-    result.reserve(frames);
-
-    const double frame_time = frameIntervalSec(captureFps.load());
-
-    double vx = prev_velocity_x;
-    double vy = prev_velocity_y;
-
-    // 检查速度是否有效 (零速度意味着目标静止，仍输出同位置)
-    auto current_time = std::chrono::steady_clock::now();
-    double dtSinceLast = std::chrono::duration<double>(current_time - prev_time).count();
-    if (prev_time.time_since_epoch().count() == 0 || dtSinceLast > 0.5)
-    {
-        return result;
-    }
-
-    for (int i = 1; i <= frames; i++)
-    {
-        double t = frame_time * i;
-        double px = pivotX + vx * t;
-        double py = pivotY + vy * t;
-        if (!std::isfinite(px) || !std::isfinite(py))
-            continue;
-        result.push_back({ px, py });
-    }
-
-    return result;
+    (void)pivotX;
+    (void)pivotY;
+    (void)frames;
+    return {};
 }
 
 /**
@@ -1776,8 +1692,7 @@ std::vector<std::pair<double, double>> MouseThread::predictFuturePositions(doubl
  */
 void MouseThread::storeFuturePositions(const std::vector<std::pair<double, double>>& positions)
 {
-    std::lock_guard<std::mutex> lock(futurePositionsMutex);
-    futurePositions = positions;
+    (void)positions;
 }
 
 /**
@@ -1787,8 +1702,6 @@ void MouseThread::storeFuturePositions(const std::vector<std::pair<double, doubl
  */
 void MouseThread::clearFuturePositions()
 {
-    std::lock_guard<std::mutex> lock(futurePositionsMutex);
-    futurePositions.clear();
 }
 
 /**
@@ -1801,8 +1714,7 @@ void MouseThread::clearFuturePositions()
  */
 std::vector<std::pair<double, double>> MouseThread::getFuturePositions()
 {
-    std::lock_guard<std::mutex> lock(futurePositionsMutex);
-    return futurePositions;
+    return {};
 }
 
 /**
@@ -1812,10 +1724,6 @@ std::vector<std::pair<double, double>> MouseThread::getFuturePositions()
  */
 void MouseThread::clearWindDebugTrail()
 {
-    std::lock_guard<std::mutex> lock(windDebugTrailMutex);
-    windDebugTrail.clear();
-    windDebugCursorX = center_x;
-    windDebugCursorY = center_y;
 }
 
 /**
@@ -1829,15 +1737,7 @@ void MouseThread::clearWindDebugTrail()
  */
 std::vector<std::pair<double, double>> MouseThread::getWindDebugTrail()
 {
-    std::lock_guard<std::mutex> lock(windDebugTrailMutex);
-    const auto now = std::chrono::steady_clock::now();
-    pruneWindDebugTrailLocked(now);
-
-    std::vector<std::pair<double, double>> out;
-    out.reserve(windDebugTrail.size());
-    for (const auto& p : windDebugTrail)
-        out.emplace_back(p.x, p.y);
-    return out;
+    return {};
 }
 
 /**

@@ -21,6 +21,7 @@
 #include "Xen.h"
 #include "capture.h"
 #include "runtime/thread_loops.h"
+#include "runtime/application_shutdown.h"
 
 extern std::atomic<bool> shouldExit;
 extern std::atomic<bool> aiming;
@@ -239,10 +240,7 @@ void keyboardListener()
         // === 退出程序（仅 Win32） ===
         if (isAnyKeyPressedWin32Only(cfg.buttonExit))
         {
-            shouldExit = true;
-            gameOverlayShouldExit.store(true);
-            detectionBuffer.cv.notify_all();
-            frameCV.notify_all();
+            RequestApplicationShutdown();
         }
 
         // === 暂停检测（仅 Win32，边缘触发） ===
@@ -344,9 +342,6 @@ void keyboardListener()
 	                                config.detection_resolution,
 	                                config.fovX,
 	                                config.fovY,
-	                                config.minSpeedMultiplier,
-	                                config.maxSpeedMultiplier,
-	                                config.predictionInterval,
 	                                config.auto_shoot,
 	                                config.bScope_multiplier
 	                            );

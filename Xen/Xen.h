@@ -51,4 +51,7 @@ extern std::mutex configMutex;
 // 输入设备列表互斥锁
 extern std::mutex inputDevicesMutex;
 
+void createInputDevices();
+void assignInputDevices();
+
 #endif // XEN_H

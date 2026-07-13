@@ -59,6 +59,10 @@
     <ClCompile Include="depth\depth_utils.cpp" />
     <ClCompile Include="overlay\draw_depth.cpp" />
     <ClCompile Include="runtime\thread_loops_shared.cpp" />
+    <ClCompile Include="runtime\application_shutdown.cpp" />
+    <ClCompile Include="runtime\application_threads.cpp" />
+    <ClCompile Include="runtime\startup_helpers.cpp" />
+    <ClCompile Include="runtime\input_device_manager.cpp" />
     <ClCompile Include="runtime\mouse_thread_loop.cpp" />
     <ClCompile Include="runtime\game_overlay_loop.cpp" />
     <ClCompile Include="benchmarks\provider_benchmark.cpp" />
@@ -104,6 +108,9 @@
     <ClInclude Include="capture\virtual_camera.h" />
     <ClInclude Include="Xen.h" />
     <ClInclude Include="runtime\thread_loops.h" />
+    <ClInclude Include="runtime\application_shutdown.h" />
+    <ClInclude Include="runtime\application_threads.h" />
+    <ClInclude Include="runtime\startup_helpers.h" />
     <ClInclude Include="detector\dml_detector.h" />
     <ClInclude Include="tensorrt\trt_monitor.h" />
     <ClInclude Include="detector\detection_buffer.h" />
