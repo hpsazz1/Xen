@@ -18,7 +18,8 @@ capture_fps = 60
 ```
 
 - `ndi_source_name` — 设置为 `Auto` 自动连接第一个发现的 NDI 源，或指定具体源名称。
-- `detection_resolution` 和 `capture_fps` — NDI 采集会自动应用这两个配置，对原始 NDI 帧进行缩放和帧率控制。
+- `detection_resolution` — 从 NDI 完整帧中心按 1:1 像素裁出的正方形检测区域，不会拉伸完整画面。
+- `capture_fps` — 辅机处理帧率上限；控制器实际使用相邻有效观测的时间间隔。
 
 ## 接收端设置
 
@@ -52,7 +53,7 @@ NDI 的带宽消耗取决于传输分辨率：
 
 - 使用**千兆网络**（1000 Mbps），这是基本要求。
 - 在发送端（如 OBS）降低输出分辨率，或降低帧率到 30fps。
-- NDI 采集内部会根据 `detection_resolution` 对接收到的帧进行缩放，因此发送端输出 1080p 但设置 `detection_resolution = 640` 时，接收端会自动缩放到 640，减少后续处理负载。
+- NDI 接收端读取视频帧自身的分辨率，并从中心裁出检测区域。辅机本地显示器分辨率不参与 FOV 或鼠标换算。
 
 相关文档：
 

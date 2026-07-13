@@ -38,6 +38,12 @@ public:
     static std::vector<std::string> GetAvailableSources();
 
 private:
+    struct NetworkFrame
+    {
+        cv::Mat image;       ///< 已按 1:1 像素中心裁剪的检测帧
+        int sourceWidth = 0; ///< NDI 视频帧报告的完整传输宽度
+        int sourceHeight = 0;///< NDI 视频帧报告的完整传输高度
+    };
     // NDI 接收线程
     void ReceiveThread();
 
@@ -59,7 +65,7 @@ private:
 
     std::thread receive_thread_;
     std::mutex frame_mutex_;
-    std::queue<cv::Mat> frame_queue_;
+    std::queue<NetworkFrame> frame_queue_;
 
     static const int MAX_QUEUE_SIZE = 5;  // 最大帧队列长度
 };

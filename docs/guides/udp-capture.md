@@ -33,14 +33,10 @@ ipconfig
 桌面采集：
 
 ```bash
-ffmpeg -f gdigrab -framerate 60 -i desktop -vf scale=640:640 -vcodec mjpeg -q:v 5 -f mjpeg udp://RECEIVER_IP:1234
+ffmpeg -f gdigrab -framerate 60 -i desktop -vcodec mjpeg -q:v 5 -f mjpeg udp://RECEIVER_IP:1234
 ```
 
-较低带宽或较弱发送端 PC。配合 `detection_resolution = 320` 使用：
-
-```bash
-ffmpeg -f gdigrab -framerate 30 -i desktop -vf scale=320:320 -vcodec mjpeg -q:v 7 -f mjpeg udp://RECEIVER_IP:1234
-```
+接收端会从完整网络帧中心按 1:1 像素裁出 `detection_resolution`，不会再把 16:9 画面拉伸为正方形。裸 MJPEG 没有源画面元数据，因此不要在发送端预先只发送中心 ROI；否则接收端无法知道该 ROI 原本属于多大的完整 FOV。
 
 OBS 虚拟摄像头：
 
@@ -48,7 +44,7 @@ OBS 虚拟摄像头：
 ffmpeg -f dshow -i video="OBS Virtual Camera" -vf scale=640:640 -vcodec mjpeg -q:v 5 -f mjpeg udp://RECEIVER_IP:1234
 ```
 
-尽可能将 FFmpeg 的 `scale` 大小与 `detection_resolution` 匹配。有效的检测分辨率为 `160`、`320` 和 `640`；不支持的值将回退为 `320`。
+有效的检测分辨率为 `160`、`320` 和 `640`；不支持的值将回退为 `320`。为降低带宽而缩小完整帧时必须保持原宽高比，例如 2560×1440 可缩放为 1280×720，禁止缩放为 320×320。
 
 ## UDP 采集收不到帧
 

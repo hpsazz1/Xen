@@ -1136,7 +1136,20 @@ void MouseThread::moveMousePivot(
     settings.maxCountsPerSecond = move_max_speed_cps;
     settings.settleRadiusPixels = std::max(2.0, screen_width / 64.0);
     settings.releaseRadiusPixels = settings.settleRadiusPixels * 1.6;
-    const double dt = frameIntervalSec(captureFps.load());
+    // 网络捕获的到帧间隔可能抖动，优先使用相邻有效观测的真实时间差。
+    // 捕获窗 FPS 只作为首帧或无时间戳时的回退，避免一秒平均值掩盖 UDP/NDI 抖动。
+    double dt = frameIntervalSec(captureFps.load());
+    if (observationTime.time_since_epoch().count() != 0)
+    {
+        if (lastControlObservationTime.time_since_epoch().count() != 0 &&
+            observationTime > lastControlObservationTime)
+        {
+            dt = std::clamp(
+                std::chrono::duration<double>(observationTime - lastControlObservationTime).count(),
+                1.0 / 1000.0, 0.050);
+        }
+        lastControlObservationTime = observationTime;
+    }
     const auto output = aimController.update(
         errorX, errorY, dt, countsPerPixelX, countsPerPixelY, settings);
 
@@ -1660,6 +1673,7 @@ void MouseThread::resetTracking()
     targetFilter.reset();
     aimController.reset();
     lastFilterResult = {};
+    lastControlObservationTime = {};
     target_detected.store(false);
     // 目标切换时重置确认帧计数，避免新目标跳过确认延迟
     stableFrameCount = 0;

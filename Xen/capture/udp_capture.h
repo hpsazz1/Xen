@@ -40,6 +40,12 @@ public:
     int GetDroppedFrames() const { return dropped_frames_.load(); }
 
 private:
+    struct NetworkFrame
+    {
+        cv::Mat image;       ///< 已按 1:1 像素中心裁剪的检测帧
+        int sourceWidth = 0; ///< JPEG 解码后的完整传输画面宽度
+        int sourceHeight = 0;///< JPEG 解码后的完整传输画面高度
+    };
     // UDP 接收线程
     void ReceiveThread();
     // 解析 MJPEG 帧数据
@@ -61,7 +67,7 @@ private:
 
     std::thread receive_thread_;
     std::mutex frame_mutex_;
-    std::queue<cv::Mat> frame_queue_;
+    std::queue<NetworkFrame> frame_queue_;
 
     static const int MAX_FRAME_SIZE = 1024 * 1024;  // 最大帧字节数
     static const int MAX_QUEUE_SIZE = 5;              // 最大帧队列长度

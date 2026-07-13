@@ -73,6 +73,7 @@ private:
     BasicTargetFilter targetFilter;                                ///< 基础观测滤波（不做未来预测）
     BasicAimController aimController;                              ///< 帧率无关的基础误差控制器
     BasicTargetFilter::Result lastFilterResult{};                  ///< 流水线诊断快照
+    std::chrono::steady_clock::time_point lastControlObservationTime{}; ///< 上一有效观测时间，用于网络抖动下逐帧计算 dt
     std::chrono::steady_clock::time_point last_target_time;        ///< 最后检测到目标的时间
     std::atomic<bool> target_detected{ false };                   ///< 是否检测到目标（atomic 为未来多线程访问预留）
     std::atomic<bool> mouse_pressed{ false };                     ///< 鼠标是否按下（atomic，与 leftPressStartTime 同线程访问）

@@ -16,8 +16,6 @@ UDPCapture::UDPCapture(int width, int height, const std::string& ip, int port)
     , received_frames_(0)
     , dropped_frames_(0)
 {
-    SetSourceDimensions(width_, height_);
-
     // 初始化 Winsock
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
@@ -140,9 +138,11 @@ cv::Mat UDPCapture::GetNextFrameCpu()
     if (frame_queue_.empty())
         return cv::Mat();
 
-    cv::Mat frame = frame_queue_.front();
-    frame_queue_.pop();
-    return frame;
+    NetworkFrame latest = std::move(frame_queue_.back());
+    while (!frame_queue_.empty())
+        frame_queue_.pop();
+    SetSourceDimensions(latest.sourceWidth, latest.sourceHeight);
+    return latest.image;
 }
 
 // UDP 接收线程：持续接收数据包，拼接 MJPEG 流并解码为 cv::Mat
@@ -201,8 +201,16 @@ void UDPCapture::ReceiveThread()
             {
                 if (!frame.empty())
                 {
-                    if (frame.cols != width_ || frame.rows != height_)
-                        cv::resize(frame, frame, cv::Size(width_, height_));
+                    const int sourceWidth = frame.cols;
+                    const int sourceHeight = frame.rows;
+                    const int cropWidth = std::min(width_, sourceWidth);
+                    const int cropHeight = std::min(height_, sourceHeight);
+                    const int cropX = std::max(0, (sourceWidth - cropWidth) / 2);
+                    const int cropY = std::max(0, (sourceHeight - cropHeight) / 2);
+                    cv::Mat detectionFrame = frame(
+                        cv::Rect(cropX, cropY, cropWidth, cropHeight)).clone();
+                    if (cropWidth != width_ || cropHeight != height_)
+                        cv::resize(detectionFrame, detectionFrame, cv::Size(width_, height_));
 
                     std::lock_guard<std::mutex> lock(frame_mutex_);
                     while (frame_queue_.size() >= MAX_QUEUE_SIZE)
@@ -211,7 +219,7 @@ void UDPCapture::ReceiveThread()
                         dropped_frames_++;
                     }
 
-                    frame_queue_.push(frame.clone());
+                    frame_queue_.push({ std::move(detectionFrame), sourceWidth, sourceHeight });
                     received_frames_++;
                 }
 

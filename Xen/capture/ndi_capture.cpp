@@ -31,7 +31,6 @@ NDICapture::NDICapture(int width, int height, const std::string& sourceName, int
     , received_frames_(0)
     , dropped_frames_(0)
 {
-    SetSourceDimensions(width_, height_);
     Initialize();
 }
 
@@ -198,9 +197,11 @@ cv::Mat NDICapture::GetNextFrameCpu()
     if (frame_queue_.empty())
         return cv::Mat();
 
-    cv::Mat frame = frame_queue_.front();
-    frame_queue_.pop();
-    return frame;
+    NetworkFrame latest = std::move(frame_queue_.back());
+    while (!frame_queue_.empty())
+        frame_queue_.pop();
+    SetSourceDimensions(latest.sourceWidth, latest.sourceHeight);
+    return latest.image;
 }
 
 // NDI 接收线程：持续发现和连接 NDI 源，接收视频帧并放入帧队列
@@ -280,12 +281,18 @@ void NDICapture::ReceiveThread()
                     cv::Mat frame;
                     cv::cvtColor(ndiFrame, frame, cv::COLOR_BGRA2BGR);
 
-                    // 按需调整帧尺寸
-                    if (width_ > 0 && height_ > 0 &&
-                        (videoFrame.xres != width_ || videoFrame.yres != height_))
-                    {
-                        cv::resize(frame, frame, cv::Size(width_, height_));
-                    }
+                    // 网络完整帧与本地桌面捕获保持同一契约：从画面中心按 1:1 像素裁出检测区域。
+                    // 禁止把 16:9 完整帧拉伸为正方形，否则会破坏 FOV、目标形状和鼠标坐标比例。
+                    const int sourceWidth = frame.cols;
+                    const int sourceHeight = frame.rows;
+                    const int cropWidth = std::min(width_, sourceWidth);
+                    const int cropHeight = std::min(height_, sourceHeight);
+                    const int cropX = std::max(0, (sourceWidth - cropWidth) / 2);
+                    const int cropY = std::max(0, (sourceHeight - cropHeight) / 2);
+                    cv::Mat detectionFrame = frame(
+                        cv::Rect(cropX, cropY, cropWidth, cropHeight)).clone();
+                    if (cropWidth != width_ || cropHeight != height_)
+                        cv::resize(detectionFrame, detectionFrame, cv::Size(width_, height_));
 
                     {
                         std::lock_guard<std::mutex> lock(frame_mutex_);
@@ -294,7 +301,7 @@ void NDICapture::ReceiveThread()
                             frame_queue_.pop();
                             dropped_frames_++;
                         }
-                        frame_queue_.push(frame);
+                        frame_queue_.push({ std::move(detectionFrame), sourceWidth, sourceHeight });
                         received_frames_++;
                     }
                 }
