@@ -45,6 +45,14 @@ public:
 
         const double settleRadius = std::max(0.0, settings.settleRadiusPixels);
         const double releaseRadius = std::max(settleRadius, settings.releaseRadiusPixels);
+        const double errorMotion = hasPreviousError_
+            ? std::hypot(errorX - previousErrorX_, errorY - previousErrorY_) : 0.0;
+        // PI 静止锁存只应用于误差基本不变的目标。启用积分后，如果相邻有效观测的误差
+        // 变化达到稳定半径的四分之一（320 检测区域默认 1.25 px），说明目标仍在移动；
+        // 即使尚未越过 8 px 释放半径也要立即恢复控制，避免高频换向时连续停发。
+        const double settleMotionThreshold = std::max(1.0, settleRadius * 0.25);
+        const bool movingInsideSettle = integralTime > 0.0 && hasPreviousError_ &&
+            errorMotion >= settleMotionThreshold;
 
         // 匀速跟踪时 PI 可能在中心附近产生亚像素级越心，这只是积分自然回调，不能等同于
         // 目标反转。只有误差已位于旧积分反方向且扩大到稳定半径，才撤销该轴旧积分；
@@ -68,18 +76,20 @@ public:
 
         if (settled_)
         {
-            if (out.errorDistance <= releaseRadius && !hasActionableIntegral)
+            if (out.errorDistance <= releaseRadius && !hasActionableIntegral && !movingInsideSettle)
             {
                 clearIntegralState();
+                rememberError(errorX, errorY);
                 out.settled = true;
                 return out;
             }
             settled_ = false;
         }
-        if (out.errorDistance <= settleRadius && !hasActionableIntegral)
+        if (out.errorDistance <= settleRadius && !hasActionableIntegral && !movingInsideSettle)
         {
             settled_ = true;
             clearIntegralState();
+            rememberError(errorX, errorY);
             out.settled = true;
             return out;
         }
@@ -141,6 +151,7 @@ public:
             integralCountErrorX_ = candidateIntegralX;
             integralCountErrorY_ = candidateIntegralY;
         }
+        rememberError(errorX, errorY);
         return out;
     }
 
@@ -148,6 +159,9 @@ public:
     {
         settled_ = false;
         clearIntegralState();
+        previousErrorX_ = 0.0;
+        previousErrorY_ = 0.0;
+        hasPreviousError_ = false;
     }
     bool settled() const { return settled_; }
 
@@ -158,7 +172,17 @@ private:
         integralCountErrorY_ = 0.0;
     }
 
+    void rememberError(double errorX, double errorY)
+    {
+        previousErrorX_ = errorX;
+        previousErrorY_ = errorY;
+        hasPreviousError_ = true;
+    }
+
     bool settled_ = false;
     double integralCountErrorX_ = 0.0;
     double integralCountErrorY_ = 0.0;
+    double previousErrorX_ = 0.0;
+    double previousErrorY_ = 0.0;
+    bool hasPreviousError_ = false;
 };

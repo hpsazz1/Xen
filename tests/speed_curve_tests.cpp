@@ -317,8 +317,30 @@ int main()
                "opposite error outside settle radius unwinds old integral");
     const auto returnedToCenter = centerHoldController.update(
         -4.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
-    expectTrue(returnedToCenter.settled,
-               "unwound static overshoot can enter settle state");
+    expectTrue(!returnedToCenter.settled,
+               "rapid static return remains active for the current frame");
+    const auto quietAfterReturn = centerHoldController.update(
+        -4.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
+    expectTrue(quietAfterReturn.settled,
+               "unwound static overshoot settles after error stops changing");
+
+    // 高频换向目标可能在稳定回差内部快速移动。PI 模式下误差单帧变化超过默认
+    // 1.25 px 时必须立即解除锁存；静止检测的小幅量化变化仍应保持停止。
+    BasicAimController fastSettleReleaseController;
+    const auto initialSettle = fastSettleReleaseController.update(
+        1.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
+    expectTrue(initialSettle.settled, "pi controller initially settles a quiet center target");
+    const auto movingInsideRelease = fastSettleReleaseController.update(
+        3.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
+    expectTrue(!movingInsideRelease.settled && movingInsideRelease.countsX > 0.0,
+               "fast error motion releases pi settle latch inside hysteresis");
+
+    BasicAimController quietSettleController;
+    quietSettleController.update(1.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
+    const auto detectorJitter = quietSettleController.update(
+        1.5, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
+    expectTrue(detectorJitter.settled,
+               "subpixel detector jitter keeps pi controller settled");
 
     // 积分候选必须保持静止闭环安全：大误差阶段受设备限速时禁止 wind-up，
     // 接近中心后进入既有 5 px 稳定半径并清空积分，不得跨越目标持续反向输出。

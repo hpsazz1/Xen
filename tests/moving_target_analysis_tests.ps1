@@ -22,13 +22,13 @@ try {
     $csvPath = Join-Path $dataDirectory 'horizontal_reverse.csv'
     @'
 Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeSec,ErrorX,ErrorY,ErrorDistance,FilterResidual,ObservedVelocityX,ObservedVelocityY,RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,FinalMx,FinalMy,SpeedLimited,QueuedMoveCount
-1000,2560,1440,120,240,0.010,12,1,12.04,2,100,0,1,0,1.344,0,1,0,0,1
-1010,2560,1440,120,240,0.010,11,1,11.05,2,100,0,1,0,1.344,0,1,0,0,1
+1000,2560,1440,120,240,0.010,13,1,13.04,2,100,0,1,0,1.344,0,1,0,0,1
+1010,2560,1440,120,240,0.010,14,1,14.04,2,100,0,1,0,1.344,0,1,0,0,1
 1020,2560,1440,120,240,0.010,20,1,20.02,3,-100,0,1,0,1.344,0,1,0,1,1
 1030,2560,1440,120,240,0.010,7,1,7.07,2,-100,0,1,0,1.344,0,1,0,0,1
 1040,2560,1440,120,240,0.010,0,1,1.00,1,-100,0,1,0,1.344,0,1,0,0,0
-1050,2560,1440,120,240,0.010,-10,1,10.05,1,-100,0,-1,0,-1.344,0,-1,0,0,0
-1060,2560,1440,120,240,0.010,-12,1,12.04,1,-100,0,-1,0,-1.344,0,-1,0,0,0
+1050,2560,1440,120,240,0.010,-13,1,13.04,1,-100,0,-1,0,-1.344,0,-1,0,0,0
+1060,2560,1440,120,240,0.010,-14,1,14.04,1,-100,0,-1,0,-1.344,0,-1,0,0,0
 1300,2560,1440,120,240,0.010,-9,1,9.06,2,-80,0,-1,0,-1.344,0,-1,0,0,1
 1310,2560,1440,120,240,0.010,-8,1,8.06,2,-80,0,-1,0,-1.344,0,-1,0,0,1
 1320,2560,1440,120,240,0.010,-7,1,7.07,2,-80,0,-1,0,-1.344,0,-1,0,0,0
@@ -62,6 +62,10 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     $filteredMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $temporaryRoot -WarmupMs 0 -MinTrialDurationMs 50 -MinTrialSamples 5 -PassThru -WarningAction SilentlyContinue)
     $filteredTrials = @($filteredMetrics | Where-Object { $_.Level -eq 'Trial' })
     Assert-Equal 2 $filteredTrials.Count 'Short moving fragments must be excluded from scenario metrics.'
+
+    $defaultThresholdMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $temporaryRoot -WarmupMs 0 -MinTrialDurationMs 0 -MinTrialSamples 1 -ReversalConfirmFrames 2 -RecoveryConfirmFrames 2 -PassThru)
+    $defaultReverseTrial = @($defaultThresholdMetrics | Where-Object { $_.Level -eq 'Trial' -and $_.Scenario -eq 'horizontal_reverse' })[0]
+    Assert-Equal 1 $defaultReverseTrial.ReversalCount 'Default reversal threshold must detect moderate high-frequency swings.'
 }
 finally {
     if (Test-Path -LiteralPath $temporaryRoot) {
