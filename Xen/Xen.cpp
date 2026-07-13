@@ -171,7 +171,7 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    // 根据当前分辨率和帧率自动推导跟踪器/执行器最优参数（可通过 auto_derive_tracker_params 禁用）
+    // 根据当前分辨率和帧率自动推导目标跟踪参数；用户标定的移动响应和设备上限保持不变。
     config.applyAutoDerivedTrackerParams(config.detection_resolution, config.capture_fps);
 
     // 同步流水线追踪器配置

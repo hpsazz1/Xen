@@ -157,7 +157,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
         }
 
-        // ---- 自动推导基础移动参数 ----
+        // ---- 自动推导目标跟踪参数；不得覆盖用户标定的移动执行参数 ----
         {
             static int lastDerivedResolution = -1;
             static int lastDerivedFps = -1;

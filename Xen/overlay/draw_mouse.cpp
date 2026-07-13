@@ -118,24 +118,17 @@ static void draw_mouse_page(MouseSettingsPage page)
     if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
         OverlayUI::BeginSection("基础移动", "mouse_section_basic_movement"))
     {
-        if (OverlayUI::CheckboxRow("自动优化参数", &config.auto_derive_tracker_params,
+        if (OverlayUI::CheckboxRow("自动优化跟踪参数", &config.auto_derive_tracker_params,
             "##auto_derive_basic",
-            "根据检测分辨率和捕获帧率自动设置基础跟踪与设备速度。"))
+            "根据检测分辨率和实际捕获帧率自动设置目标跟踪参数；不会覆盖下方移动参数。"))
             OverlayConfig_MarkDirty();
-        if (config.auto_derive_tracker_params)
-        {
-            ImGui::TextDisabled("响应 %.0f ms | 最大速度 %.0f counts/s",
-                config.move_response_ms, config.move_max_speed_cps);
-        }
-        else
-        {
-            OverlayUI::SliderFloatRow("响应时间(ms)", &config.move_response_ms,
-                20.0f, 300.0f, "%.0f", "##move_response",
-                "越小越快，越大越柔和。该参数不随 FPS 改变含义。");
-            OverlayUI::SliderFloatRow("最大设备速度", &config.move_max_speed_cps,
-                30.0f, 2000.0f, "%.0f counts/s", "##move_max_cps",
-                "限制每秒发送的鼠标计数，替代旧的最小/最大速度倍率。");
-        }
+        // 移动参数来源于用户配置和实测标定，即使启用自动跟踪优化也必须保持可见、可编辑。
+        OverlayUI::SliderFloatRow("响应时间(ms)", &config.move_response_ms,
+            20.0f, 300.0f, "%.0f", "##move_response",
+            "越小越快，越大越柔和。该参数不随 FPS 改变含义，也不会被自动跟踪优化覆盖。");
+        OverlayUI::SliderFloatRow("最大设备速度", &config.move_max_speed_cps,
+            30.0f, 2000.0f, "%.0f counts/s", "##move_max_cps",
+            "限制每秒发送的鼠标计数；按实际观测间隔换算单帧预算，不会被自动跟踪优化覆盖。");
         OverlayUI::EndSection();
     }
 

@@ -343,6 +343,17 @@ if(BUILD_TESTING)
         target_compile_options(xen_algorithm_tests PRIVATE /utf-8 /W4 /permissive- /EHsc)
     endif()
     add_test(NAME xen.algorithm.basic_tracking COMMAND xen_algorithm_tests)
+
+    add_executable(xen_config_tests
+        "${CMAKE_SOURCE_DIR}/tests/config_tests.cpp"
+        "${SRC_DIR}/config/config.cpp"
+    )
+    target_include_directories(xen_config_tests PRIVATE "${SRC_DIR}")
+    target_compile_features(xen_config_tests PRIVATE cxx_std_17)
+    if(MSVC)
+        target_compile_options(xen_config_tests PRIVATE /utf-8 /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME xen.config.auto_derive_preserves_movement COMMAND xen_config_tests)
 endif()
 
 set_target_properties(ai PROPERTIES

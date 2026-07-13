@@ -1,5 +1,8 @@
 ﻿#define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <iostream>
 #include <fstream>
@@ -1093,10 +1096,6 @@ void Config::applyAutoDerivedTrackerParams(int detectionResolution, int captureF
     ml_recapture_iou       = 0.3f;
     ml_recapture_distance_mult = 2.5f;
     ml_coast_velocity_decay    = 1.0f;
-    move_response_ms = 80.0f;
-    // 设备速率按秒表达；控制器读取捕获窗统计 FPS 换算单帧预算，不绑定捕获方式或固定帧率。
-    // 1200 counts/s 来自 NDI 320 检测分辨率的九段静止目标复测：960 cps 下约 44%~50%
-    // 的未稳定帧触发限速，而稳定后最大误差仍小于 5 px。只提高远距设备上限，不改变近中心响应形态。
-    move_max_speed_cps = 1200.0f;
-    // motion_change_protection 由用户手动控制，自动推导不覆盖
+    // 移动响应时间、最大设备速率和运动变化保护均属于用户/实测参数，不能由分辨率或 FPS
+    // 自动覆盖。控制器会把每秒速率按真实观测 dt 换算为单帧预算，无需在此重新推导。
 }

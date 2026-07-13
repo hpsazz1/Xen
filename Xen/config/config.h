@@ -292,7 +292,7 @@ public:
     bool loadConfig(const std::string& filename = "config.ini");
     bool saveConfig(const std::string& filename = "config.ini");
 
-    /** @brief 根据检测分辨率和捕获帧率自动推导跟踪器/执行器最优参数 */
+    /** @brief 根据检测分辨率和捕获帧率自动推导跟踪器参数；不覆盖用户配置的移动执行参数 */
     void applyAutoDerivedTrackerParams(int detectionResolution, int captureFps);
 
     std::string joinStrings(const std::vector<std::string>& vec, const std::string& delimiter = ",");
