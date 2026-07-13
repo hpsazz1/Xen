@@ -9,6 +9,7 @@
 #include <Processing.NDI.Lib.h>
 
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -35,8 +36,8 @@ public:
     bool IsConnected() const { return is_connected_.load(); }
     std::string GetConnectedSourceName() const { return connected_source_name_; }
 
-    // 获取可用 NDI 源列表
-    static std::vector<std::string> GetAvailableSources();
+    // 获取可用 NDI 源列表。新建发现器需要等待 mDNS 首次返回，timeoutMs 为最长等待时间。
+    static std::vector<std::string> GetAvailableSources(uint32_t timeoutMs = 1500);
 
 private:
     struct NetworkFrame

@@ -343,16 +343,15 @@ void NDICapture::ReceiveThread()
 
 // 静态方法：获取当前可用的所有 NDI 源名称列表
 // 用于 UI 下拉菜单或自动选择
-std::vector<std::string> NDICapture::GetAvailableSources()
+std::vector<std::string> NDICapture::GetAvailableSources(uint32_t timeoutMs)
 {
     std::vector<std::string> sources;
 
-    // 使用轻量级发现实例用于 UI 查询。
-    // 无阻塞睡眠 - get_current_sources 立即返回。
-    // 如果源尚未被发现，返回空列表，用户可点击刷新。
+    // UI 使用独立发现实例，避免与捕获线程共享 finder 并触发 SDK 对同一 finder 的并发读取限制。
+    // 新建 finder 的 mDNS 列表通常尚未就绪，必须等待首次变化后再读取；等待发生在 UI 异步任务中。
     NDIlib_find_instance_t pFind = nullptr;
-
-    if (NDIlib_initialize())
+    const bool sdkInitialized = NDIlib_initialize();
+    if (sdkInitialized)
     {
         NDIlib_find_create_t findDesc = { 0 };
         findDesc.show_local_sources = true;
@@ -361,13 +360,19 @@ std::vector<std::string> NDICapture::GetAvailableSources()
 
     if (!pFind)
     {
-        NDIlib_destroy();
+        if (sdkInitialized)
+            NDIlib_destroy();
         return sources;
     }
 
-    // 非阻塞：返回当前已发现的所有源
+    // 先读一次缓存；新建 finder 尚无结果时，最多等待 timeoutMs 让 mDNS/额外 IP 完成首轮发现。
     uint32_t numSources = 0;
     const NDIlib_source_t* pSources = NDIlib_find_get_current_sources(pFind, &numSources);
+    if (numSources == 0 && timeoutMs > 0)
+    {
+        NDIlib_find_wait_for_sources(pFind, timeoutMs);
+        pSources = NDIlib_find_get_current_sources(pFind, &numSources);
+    }
 
     sources.reserve(numSources);
     for (uint32_t i = 0; i < numSources; ++i)
@@ -375,6 +380,10 @@ std::vector<std::string> NDICapture::GetAvailableSources()
         if (pSources[i].p_ndi_name)
             sources.push_back(pSources[i].p_ndi_name);
     }
+
+    // 发现协议可能通过多个网卡返回重复源，UI 只展示稳定、排序后的唯一名称。
+    std::sort(sources.begin(), sources.end());
+    sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
 
     NDIlib_find_destroy(pFind);
     NDIlib_destroy();

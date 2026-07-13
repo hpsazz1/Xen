@@ -5,6 +5,9 @@
 
 #include <string.h>
 #include <algorithm>
+#include <chrono>
+#include <future>
+#include <iostream>
 #include <vector>
 
 #include <imgui/imgui.h>
@@ -44,6 +47,9 @@ static std::vector<std::string> ndi_sources;
 static char ndi_source_filter_buf[128] = "";
 // 标记NDI源列表是否已加载
 static bool ndi_sources_loaded = false;
+// NDI 首轮 mDNS 发现可能需要约 1 秒，必须放到后台任务，避免阻塞 ImGui 渲染和捕获预览。
+static bool ndi_source_refreshing = false;
+static std::future<std::vector<std::string>> ndi_source_refresh_future;
 // 标记窗口列表是否已加载
 static bool capture_windows_loaded = false;
 // 标记UDP设置是否已初始化
@@ -61,6 +67,39 @@ static void refreshCaptureWindowList()
 {
     capture_windows = EnumerateCaptureWindows();
     capture_windows_loaded = true;
+}
+
+// 启动一次 NDI 源发现。正在刷新时忽略重复点击，防止并发创建多个 finder 和重复占用网络。
+static void startNdiSourceRefresh()
+{
+    if (ndi_source_refreshing)
+        return;
+
+    ndi_source_refreshing = true;
+    ndi_source_refresh_future = std::async(std::launch::async, []()
+    {
+        return NDICapture::GetAvailableSources(1500);
+    });
+}
+
+// 每个 UI 帧非阻塞检查发现结果；空结果也标记为已完成，避免旧逻辑每帧重启发现。
+static void pollNdiSourceRefresh()
+{
+    if (!ndi_source_refreshing || !ndi_source_refresh_future.valid() ||
+        ndi_source_refresh_future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+        return;
+
+    try
+    {
+        ndi_sources = ndi_source_refresh_future.get();
+    }
+    catch (const std::exception& e)
+    {
+        ndi_sources.clear();
+        std::cerr << "[NDI] Source refresh failed: " << e.what() << std::endl;
+    }
+    ndi_sources_loaded = true;
+    ndi_source_refreshing = false;
 }
 
 // 判断指定窗口是否匹配给定的标题字符串（支持精确匹配、子串匹配和不区分大小写匹配）
@@ -581,17 +620,19 @@ void draw_capture_settings()
     {
         if (OverlayUI::BeginSection("NDI", "capture_section_ndi"))
         {
-            // 首次打开时刷新源列表，避免UI卡顿不自动轮询
-            if (!ndi_sources_loaded)
-            {
-                ndi_sources = NDICapture::GetAvailableSources();
-                ndi_sources_loaded = true;
-            }
+            // 首次打开或手动点击都走异步发现，捕获预览在 mDNS 等待期间继续刷新。
+            if (!ndi_sources_loaded && !ndi_source_refreshing)
+                startNdiSourceRefresh();
+            pollNdiSourceRefresh();
 
             // NDI源选择下拉框
             {
                 const auto row = OverlayUI::BeginSettingRow("NDI源");
-                if (ndi_sources.empty())
+                if (ndi_sources.empty() && ndi_source_refreshing)
+                {
+                    ImGui::TextColored(ImColor(180, 180, 180), "正在搜索NDI源...");
+                }
+                else if (ndi_sources.empty())
                 {
                     ImGui::TextColored(ImColor(180, 180, 180), "未找到NDI源");
                 }
@@ -633,11 +674,12 @@ void draw_capture_settings()
             // 手动刷新NDI源按钮
             {
                 const auto row = OverlayUI::BeginSettingRow("");
-                if (ImGui::Button("刷新NDI源", ImVec2(row.controlWidth, 0.0f)))
-                {
-                    ndi_sources = NDICapture::GetAvailableSources();
-                    ndi_sources_loaded = !ndi_sources.empty();
-                }
+                ImGui::BeginDisabled(ndi_source_refreshing);
+                if (ImGui::Button(
+                        ndi_source_refreshing ? "正在刷新..." : "刷新NDI源",
+                        ImVec2(row.controlWidth, 0.0f)))
+                    startNdiSourceRefresh();
+                ImGui::EndDisabled();
                 OverlayUI::EndSettingRow(row);
             }
 
