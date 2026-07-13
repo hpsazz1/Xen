@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cmath>
 
+// 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
+// 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
+inline constexpr int kBasicAimControllerRevision = 4;
+
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
 class BasicAimController
@@ -27,8 +31,11 @@ public:
         double integralCountsY = 0.0;
         double errorDistance = 0.0;
         double frameCountLimit = 0.0;
+        double errorMotion = 0.0;
+        double settleMotionThreshold = 0.0;
         bool settled = false;
         bool speedLimited = false; // 本次输出是否被最大设备速率截断
+        bool movingInsideSettle = false;
     };
 
     Output update(double errorX, double errorY, double dt,
@@ -53,6 +60,9 @@ public:
         const double settleMotionThreshold = std::max(1.0, settleRadius * 0.25);
         const bool movingInsideSettle = integralTime > 0.0 && hasPreviousError_ &&
             errorMotion >= settleMotionThreshold;
+        out.errorMotion = errorMotion;
+        out.settleMotionThreshold = settleMotionThreshold;
+        out.movingInsideSettle = movingInsideSettle;
 
         // 匀速跟踪时 PI 可能在中心附近产生亚像素级越心，这只是积分自然回调，不能等同于
         // 目标反转。只有误差已位于旧积分反方向且扩大到稳定半径，才撤销该轴旧积分；

@@ -40,6 +40,9 @@ $selectedPath = Select-VisualStudioEnvironmentPath -Candidates @(
 )
 Assert-Equal 'C:\Visual Studio\VC\Tools\MSVC\14.51\bin\Hostx64\x64;C:\Windows\System32' $selectedPath 'VsDevCmd PATH must win over a duplicate stale Path variable.'
 
+$expectedLegacyDml = Join-Path (Get-RepoRoot) 'x64\DML\Xen.exe'
+Assert-Equal $expectedLegacyDml (Get-LegacyExecutablePath -Backend DML) 'Legacy DML executable detection must use the historical x64 path.'
+
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('xen-cuda-arch-test-' + [guid]::NewGuid().ToString('N'))
 try {
     New-Item -ItemType Directory -Path $temporaryRoot | Out-Null

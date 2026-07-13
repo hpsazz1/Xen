@@ -197,6 +197,15 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             throw "CSV is missing required moving-target column '$column': $($csvFile.FullName)"
         }
     }
+    $hasBuildIdentity = $rows[0].PSObject.Properties.Name -contains 'BuildRevision' -and
+        $rows[0].PSObject.Properties.Name -contains 'ControllerRevision'
+    if (-not $hasBuildIdentity) {
+        Write-Warning "Legacy moving CSV has no build/controller identity and cannot prove the tested executable: $($csvFile.FullName)"
+    }
+    $buildBackend = if ($hasBuildIdentity) { [string]$rows[0].BuildBackend } else { 'legacy' }
+    $buildRevision = if ($hasBuildIdentity) { [string]$rows[0].BuildRevision } else { 'legacy' }
+    $buildTimestampUtc = if ($hasBuildIdentity) { [string]$rows[0].BuildTimestampUtc } else { 'legacy' }
+    $controllerRevision = if ($hasBuildIdentity) { [int]$rows[0].ControllerRevision } else { 0 }
 
     $trials = @(Split-MovingTrials -Rows $rows -GapMs $TrialGapMs)
     for ($trialIndex = 0; $trialIndex -lt $trials.Count; ++$trialIndex) {
@@ -227,6 +236,10 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         $axisSpeeds = @($samples | ForEach-Object { [math]::Abs([double]$_.$velocityColumn) })
         $residuals = @($samples | ForEach-Object { [double]$_.FilterResidual })
         $limitedRows = @($samples | Where-Object { [int]$_.SpeedLimited -eq 1 }).Count
+        $movingInsideSettleRows = if ($rows[0].PSObject.Properties.Name -contains 'MovingInsideSettle') {
+            @($samples | Where-Object { [int]$_.MovingInsideSettle -eq 1 }).Count
+        }
+        else { 0 }
         $sampleDurationSeconds = (
             [double]$samples[-1].Timestamp - [double]$samples[0].Timestamp) / 1000.0
         $signedOutputCounts = [double]($samples | Measure-Object $finalMoveColumn -Sum).Sum
@@ -283,6 +296,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             EstimatedCountsPerPixel = [math]::Round($estimatedCountsPerPixel, 4)
             ApproxClosedLoopLagMs = [math]::Round($approxClosedLoopLagMs, 1)
             SpeedLimitedPct = [math]::Round(100.0 * $limitedRows / [math]::Max(1, $samples.Count), 1)
+            MovingInsideSettlePct = [math]::Round(100.0 * $movingInsideSettleRows / [math]::Max(1, $samples.Count), 1)
             InferenceFps = [math]::Round([double]($samples | Measure-Object InferenceFPS -Average).Average, 1)
             SourceReceiveFps = [math]::Round([double]($samples | Measure-Object SourceReceiveFPS -Average).Average, 1)
             ObservationAgeAvgMs = [math]::Round(1000.0 * [double]($samples | Measure-Object ObservationAgeSec -Average).Average, 1)
@@ -293,6 +307,10 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             RecoveryMeanMs = $reversals.RecoveryMeanMs
             RecoveryP95Ms = $reversals.RecoveryP95Ms
             SourceGeometry = "$($trial[0].SourceWidth)x$($trial[0].SourceHeight)"
+            BuildBackend = $buildBackend
+            BuildRevision = $buildRevision
+            BuildTimestampUtc = $buildTimestampUtc
+            ControllerRevision = $controllerRevision
         })
     }
 }
@@ -322,6 +340,7 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         MeanAbsOutputCountsPerSecond = [math]::Round([double]($group | Measure-Object MeanAbsOutputCountsPerSecond -Average).Average, 1)
         MeanApproxClosedLoopLagMs = [math]::Round([double]($group | Measure-Object ApproxClosedLoopLagMs -Average).Average, 1)
         SpeedLimitedPct = [math]::Round([double](($group | ForEach-Object { $_.SpeedLimitedPct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
+        MovingInsideSettlePct = [math]::Round([double](($group | ForEach-Object { $_.MovingInsideSettlePct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         ReversalCount = [int]($group | Measure-Object ReversalCount -Sum).Sum
         RecoveredReversals = $recoveredCount
         RecoveryMeanMs = if ($recoveredCount -eq 0) { $null } else {
@@ -329,6 +348,10 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         }
         MaxQueuedMoves = [int]($group | Measure-Object MaxQueuedMoves -Maximum).Maximum
         SourceGeometry = $group[0].SourceGeometry
+        BuildBackend = (@($group.BuildBackend | Select-Object -Unique) -join ';')
+        BuildRevision = (@($group.BuildRevision | Select-Object -Unique) -join ';')
+        BuildTimestampUtc = (@($group.BuildTimestampUtc | Select-Object -Unique) -join ';')
+        ControllerRevision = (@($group.ControllerRevision | Select-Object -Unique) -join ';')
     }
 })
 
@@ -347,10 +370,10 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'MeanP95ErrorDistancePx', 'MaxErrorDistancePx', 'P50ObservedAxisSpeed',
         'P95ObservedAxisSpeed', 'P95FilterResidualPx', 'SignedOutputCountsPerSecond',
         'MeanAbsOutputCountsPerSecond', 'EstimatedCountsPerPixel', 'ApproxClosedLoopLagMs',
-        'MeanApproxClosedLoopLagMs', 'SpeedLimitedPct', 'InferenceFps',
+        'MeanApproxClosedLoopLagMs', 'SpeedLimitedPct', 'MovingInsideSettlePct', 'InferenceFps',
         'SourceReceiveFps', 'ObservationAgeAvgMs', 'ObservationAgeP95Ms', 'MaxQueuedMoves',
         'ReversalCount', 'RecoveredReversals', 'RecoveryMeanMs', 'RecoveryP95Ms',
-        'SourceGeometry'
+        'SourceGeometry', 'BuildBackend', 'BuildRevision', 'BuildTimestampUtc', 'ControllerRevision'
     )
     $allMetrics | Select-Object -Property $exportColumns |
         Export-Csv -LiteralPath $resolvedOutput -NoTypeInformation -Encoding UTF8

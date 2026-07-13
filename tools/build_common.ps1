@@ -890,6 +890,31 @@ function Write-DependencyResolution {
     return $path
 }
 
+function Get-LegacyExecutablePath {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('CUDA', 'DML')]
+        [string]$Backend
+    )
+    return Resolve-RepoPath ("x64\$Backend\Xen.exe")
+}
+
+function Write-LegacyExecutableWarning {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('CUDA', 'DML')]
+        [string]$Backend,
+        [Parameter(Mandatory)][string]$CanonicalExecutable
+    )
+    $legacyExecutable = Get-LegacyExecutablePath -Backend $Backend
+    if (Test-Path -LiteralPath $legacyExecutable -PathType Leaf) {
+        $legacyTime = (Get-Item -LiteralPath $legacyExecutable).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
+        Write-Warning (
+            "[$Backend] Legacy executable exists at '$legacyExecutable' (modified $legacyTime). " +
+            "Do not use it for validation; run '$CanonicalExecutable'.")
+    }
+}
+
 function Get-OpenCvWorldLayout {
     param(
         [Parameter(Mandatory)][string]$Root,

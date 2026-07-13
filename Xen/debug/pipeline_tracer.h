@@ -57,8 +57,11 @@ struct PipelineFrame
     double integralTimeSeconds = 0.0;
     double maxCountsPerSecond = 0.0;
     double frameCountLimit = 0.0;
+    double errorMotion = 0.0;          ///< 相邻有效控制观测的二维误差变化，px/observation
+    double settleMotionThreshold = 0.0;///< PI 稳定锁存快速释放阈值，px/observation
     bool   speedLimited = false;      ///< 本帧控制请求是否触发最大设备速率限制
     bool   settled = false;
+    bool   movingInsideSettle = false;///< 回差内误差变化是否阻止或释放稳定锁存
     size_t queuedMoveCount = 0;     ///< 请求入队后的待发送命令数
 
     // ========== 元数据 ==========

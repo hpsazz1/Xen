@@ -141,8 +141,22 @@ int main()
         "basic pipeline contains generic source fps diagnostics");
     expectTrue(traceHeader.find("NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
                "basic pipeline keeps ndi compatibility diagnostics");
-    expectTrue(traceHeader.find("FrameCountLimit,SpeedLimited,Settled") != std::string::npos,
+    expectTrue(traceHeader.find("FrameCountLimit,ErrorMotion") != std::string::npos &&
+               traceHeader.find("SpeedLimited,Settled") != std::string::npos,
                "basic pipeline reports controller speed limiting");
+    expectTrue(traceHeader.find(
+        "FrameID,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision") != std::string::npos,
+        "basic pipeline identifies the executable and controller revision");
+    expectTrue(traceHeader.find(
+        "ErrorMotion,SettleMotionThreshold,MovingInsideSettle") != std::string::npos,
+        "basic pipeline reports settle motion release diagnostics");
+    std::string traceRow;
+    std::getline(traceFile, traceRow);
+    expectTrue(traceRow.find(",DML,") != std::string::npos ||
+               traceRow.find(",CUDA,") != std::string::npos,
+               "basic pipeline writes the configured build backend");
+    expectTrue(traceRow.find(",unknown,") == std::string::npos,
+               "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
@@ -334,6 +348,9 @@ int main()
         3.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
     expectTrue(!movingInsideRelease.settled && movingInsideRelease.countsX > 0.0,
                "fast error motion releases pi settle latch inside hysteresis");
+    expectTrue(movingInsideRelease.movingInsideSettle &&
+               movingInsideRelease.errorMotion > movingInsideRelease.settleMotionThreshold,
+               "fast settle release exposes auditable motion diagnostics");
 
     BasicAimController quietSettleController;
     quietSettleController.update(1.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);

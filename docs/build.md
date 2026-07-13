@@ -173,6 +173,8 @@ build\dml\Release\Xen.exe
 build\cuda\Release\Xen.exe
 ```
 
+这两个 `build` 路径是唯一规范的测试与发布产物。历史 `x64\DML\Xen.exe`、`x64\CUDA\Xen.exe` 不会由当前构建脚本更新，不得用于复测。构建脚本发现历史副本时会输出警告；流水线CSV中的 `BuildBackend/BuildRevision/BuildTimestampUtc/ControllerRevision` 用于确认实际运行版本。
+
 启动时，`Xen.exe` 会将工作目录切换到自身所在文件夹，并创建运行时目录，例如：
 
 ```text

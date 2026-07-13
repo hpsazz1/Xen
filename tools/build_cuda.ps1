@@ -219,7 +219,12 @@ try {
         "--parallel"
     ) -DryRun:$DryRun
 
-    Write-BuildStep "Done: $BuildDir\$Configuration\Xen.exe" "cuda"
+    $canonicalExecutable = Join-Path $buildPath "$Configuration\Xen.exe"
+    if (-not $DryRun -and -not (Test-Path -LiteralPath $canonicalExecutable -PathType Leaf)) {
+        throw "CUDA build completed without the canonical executable: $canonicalExecutable"
+    }
+    Write-LegacyExecutableWarning -Backend CUDA -CanonicalExecutable $canonicalExecutable
+    Write-BuildStep "Done: $canonicalExecutable" "cuda"
 }
 finally {
     if ($pushedLocation) {

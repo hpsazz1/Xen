@@ -21,6 +21,34 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(AIMBOT_USE_CUDA "Enable CUDA backend (USE_CUDA)" OFF)
 option(AIMBOT_COPY_RUNTIME_DLLS "Copy required runtime DLLs next to Xen.exe after build" ON)
 
+# 每次正式配置都生成可写入诊断 CSV 的构建身份。Git 工作区有未提交修改时追加
+# -dirty，避免现场数据只凭目录名猜测实际运行版本。
+find_package(Git QUIET)
+set(AIMBOT_BUILD_REVISION "unknown")
+if(GIT_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE AIMBOT_BUILD_REVISION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" status --porcelain
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE _aimbot_git_status
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(NOT "${_aimbot_git_status}" STREQUAL "")
+        string(APPEND AIMBOT_BUILD_REVISION "-dirty")
+    endif()
+endif()
+string(TIMESTAMP AIMBOT_BUILD_TIMESTAMP_UTC "%Y%m%dT%H%M%SZ" UTC)
+if(AIMBOT_USE_CUDA)
+    set(AIMBOT_BUILD_BACKEND "CUDA")
+else()
+    set(AIMBOT_BUILD_BACKEND "DML")
+endif()
+
 if(AIMBOT_USE_CUDA)
     unset(AIMBOT_PACKAGES_DIR CACHE)
     unset(AIMBOT_OPENCV_DML_ROOT CACHE)
@@ -253,6 +281,11 @@ if(NOT AIMBOT_USE_CUDA)
 endif()
 
 set(SRC_DIR "${CMAKE_SOURCE_DIR}/Xen")
+set_property(SOURCE "${SRC_DIR}/debug/pipeline_tracer.cpp" APPEND PROPERTY COMPILE_DEFINITIONS
+    AIMBOT_BUILD_BACKEND="${AIMBOT_BUILD_BACKEND}"
+    AIMBOT_BUILD_REVISION="${AIMBOT_BUILD_REVISION}"
+    AIMBOT_BUILD_TIMESTAMP_UTC="${AIMBOT_BUILD_TIMESTAMP_UTC}"
+)
 
 set(AIMBOT_SOURCES
     "${SRC_DIR}/benchmarks/provider_benchmark.cpp"

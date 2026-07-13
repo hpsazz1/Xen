@@ -21,17 +21,17 @@ try {
     New-Item -ItemType Directory -Path $dataDirectory | Out-Null
     $csvPath = Join-Path $dataDirectory 'horizontal_reverse.csv'
     @'
-Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeSec,ErrorX,ErrorY,ErrorDistance,FilterResidual,ObservedVelocityX,ObservedVelocityY,RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,FinalMx,FinalMy,SpeedLimited,QueuedMoveCount
-1000,2560,1440,120,240,0.010,13,1,13.04,2,100,0,1,0,1.344,0,1,0,0,1
-1010,2560,1440,120,240,0.010,14,1,14.04,2,100,0,1,0,1.344,0,1,0,0,1
-1020,2560,1440,120,240,0.010,20,1,20.02,3,-100,0,1,0,1.344,0,1,0,1,1
-1030,2560,1440,120,240,0.010,7,1,7.07,2,-100,0,1,0,1.344,0,1,0,0,1
-1040,2560,1440,120,240,0.010,0,1,1.00,1,-100,0,1,0,1.344,0,1,0,0,0
-1050,2560,1440,120,240,0.010,-13,1,13.04,1,-100,0,-1,0,-1.344,0,-1,0,0,0
-1060,2560,1440,120,240,0.010,-14,1,14.04,1,-100,0,-1,0,-1.344,0,-1,0,0,0
-1300,2560,1440,120,240,0.010,-9,1,9.06,2,-80,0,-1,0,-1.344,0,-1,0,0,1
-1310,2560,1440,120,240,0.010,-8,1,8.06,2,-80,0,-1,0,-1.344,0,-1,0,0,1
-1320,2560,1440,120,240,0.010,-7,1,7.07,2,-80,0,-1,0,-1.344,0,-1,0,0,0
+Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeSec,ErrorX,ErrorY,ErrorDistance,FilterResidual,ObservedVelocityX,ObservedVelocityY,RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,FinalMx,FinalMy,SpeedLimited,QueuedMoveCount,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision,MovingInsideSettle
+1000,2560,1440,120,240,0.010,13,1,13.04,2,100,0,1,0,1.344,0,1,0,0,1,CUDA,test-revision,20260714T010000Z,4,0
+1010,2560,1440,120,240,0.010,14,1,14.04,2,100,0,1,0,1.344,0,1,0,0,1,CUDA,test-revision,20260714T010000Z,4,1
+1020,2560,1440,120,240,0.010,20,1,20.02,3,-100,0,1,0,1.344,0,1,0,1,1,CUDA,test-revision,20260714T010000Z,4,1
+1030,2560,1440,120,240,0.010,7,1,7.07,2,-100,0,1,0,1.344,0,1,0,0,1,CUDA,test-revision,20260714T010000Z,4,0
+1040,2560,1440,120,240,0.010,0,1,1.00,1,-100,0,1,0,1.344,0,1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
+1050,2560,1440,120,240,0.010,-13,1,13.04,1,-100,0,-1,0,-1.344,0,-1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
+1060,2560,1440,120,240,0.010,-14,1,14.04,1,-100,0,-1,0,-1.344,0,-1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
+1300,2560,1440,120,240,0.010,-9,1,9.06,2,-80,0,-1,0,-1.344,0,-1,0,0,1,CUDA,test-revision,20260714T010000Z,4,0
+1310,2560,1440,120,240,0.010,-8,1,8.06,2,-80,0,-1,0,-1.344,0,-1,0,0,1,CUDA,test-revision,20260714T010000Z,4,0
+1320,2560,1440,120,240,0.010,-7,1,7.07,2,-80,0,-1,0,-1.344,0,-1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
 '@ | Set-Content -LiteralPath $csvPath -Encoding UTF8
 
     $singleDirectionPath = Join-Path $dataDirectory 'horizontal_right.csv'
@@ -50,6 +50,9 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 10 $reverseTrials[0].RecoveryMeanMs 'Recovery time must start at the first opposite-direction sample.'
     Assert-Equal 0 $singleDirectionTrials[0].ReversalCount 'Single-direction scenarios must not report reversal metrics.'
     Assert-Equal 1.344 $reverseTrials[0].EstimatedCountsPerPixel 'Counts-per-pixel must be derived from exported requests.'
+    Assert-Equal test-revision $reverseTrials[0].BuildRevision 'Build revision must be preserved in trial metrics.'
+    Assert-Equal 4 $reverseTrials[0].ControllerRevision 'Controller revision must be preserved in trial metrics.'
+    Assert-Equal 28.6 $reverseTrials[0].MovingInsideSettlePct 'Settle motion diagnostics must be summarized per trial.'
     Assert-Equal 2 $scenario.Count 'Each scenario file must create one summary.'
     Assert-Equal 2 $scenario[0].Trials 'Scenario summary must report both trials.'
     Assert-Equal 1 $scenario[0].MaxQueuedMoves 'Scenario summary must preserve maximum queue depth.'
