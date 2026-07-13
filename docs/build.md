@@ -259,3 +259,9 @@ yolo export model=your_model.pt format=onnx simplify=true
 | `rzctl.dll` 缺失 | 保持 `Xen\rzctl.dll` 在仓库中，或将其复制到 `Xen.exe` 旁边。 |
 | DML 运行但无法检测 | 确认所选模型为 `.onnx`，降低 `confidence_threshold`，并验证类别 ID。 |
 | CUDA 引擎加载失败 | 删除旧的 `.engine`，选择 `.onnx`，让 CUDA 后端为当前 TensorRT/CUDA 环境重新构建引擎。 |
+
+## 12. Release 运行时依赖清理
+
+Release 输出采用后端独立的运行时清单。构建会从当前 CUDA Toolkit、TensorRT、Visual Studio Redistributable 或 DML/ONNX Runtime 包复制必需 DLL，并删除旧后端 DLL、未使用的 CUDA/cuDNN/TensorRT 插件以及链接和测试产物。不要把两个后端目录中的 DLL 混合复制。
+
+CUDA 目录中的 `nvinfer_builder_resource_*.dll` 用于在目标电脑上从 ONNX 构建 TensorRT engine，属于当前完整功能所需文件；目标电脑的 `nvcuda.dll` 则由 NVIDIA 驱动提供，不应随程序复制。完整依赖依据、保留清单和验证流程见 `docs/013CUDA发布依赖清理20260713.md`。

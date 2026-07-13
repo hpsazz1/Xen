@@ -145,6 +145,18 @@ function(aimbot_copy_if_exists target path)
     endif()
 endfunction()
 
+# 发布目录必须由可追溯的依赖清单生成，不能依赖构建目录里碰巧存在的旧 DLL。
+# 这里对跨设备运行必需的文件采用强校验：源文件缺失时立即停止配置，避免产出残缺发布包。
+function(aimbot_copy_required_runtime target path description)
+    aimbot_require_file("${path}" "${description}")
+    add_custom_command(
+        TARGET ${target}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${path}" "$<TARGET_FILE_DIR:${target}>"
+        VERBATIM
+    )
+endfunction()
+
 function(aimbot_remove_runtime_files target)
     set(_script "${CMAKE_CURRENT_BINARY_DIR}/${target}_remove_stale_runtime.cmake")
     file(WRITE "${_script}" "if(NOT DEFINED TARGET_DIR)\n  message(FATAL_ERROR \"TARGET_DIR is not set\")\nendif()\nset(_patterns\n")
@@ -342,6 +354,8 @@ if(BUILD_TESTING)
         "${SRC_DIR}/debug/pipeline_tracer.cpp"
         "${SRC_DIR}/capture/ndi_frame_geometry.cpp"
     )
+    set_target_properties(xen_algorithm_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
     target_include_directories(xen_algorithm_tests PRIVATE "${SRC_DIR}")
     target_compile_features(xen_algorithm_tests PRIVATE cxx_std_17)
     if(MSVC)
@@ -353,6 +367,8 @@ if(BUILD_TESTING)
         "${CMAKE_SOURCE_DIR}/tests/config_tests.cpp"
         "${SRC_DIR}/config/config.cpp"
     )
+    set_target_properties(xen_config_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
     target_include_directories(xen_config_tests PRIVATE "${SRC_DIR}")
     target_compile_features(xen_config_tests PRIVATE cxx_std_17)
     if(MSVC)
@@ -363,6 +379,8 @@ endif()
 
 set_target_properties(ai PROPERTIES
     OUTPUT_NAME "Xen"
+    # Xen.exe 导出的导入库和 .exp 仅供链接使用，不属于可复制到其他电脑的运行目录。
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<CONFIG>"
 )
 
 if(MSVC)
@@ -502,6 +520,32 @@ endif()
 if(AIMBOT_USE_CUDA)
     find_package(CUDAToolkit REQUIRED)
 
+    # CUDA 13.2 将 Windows 运行库放在 bin/x64；兼容旧工具包仍直接放在 bin 的布局。
+    set(_cuda_runtime_dirs
+        "${CUDAToolkit_BIN_DIR}/x64"
+        "${CUDAToolkit_BIN_DIR}"
+        "${CUDAToolkit_LIBRARY_DIR}/../../bin/x64")
+    set(_cuda_runtime_dir "")
+    foreach(_candidate IN LISTS _cuda_runtime_dirs)
+        if(EXISTS "${_candidate}/cublas64_13.dll")
+            cmake_path(NORMAL_PATH _candidate OUTPUT_VARIABLE _cuda_runtime_dir)
+            break()
+        endif()
+    endforeach()
+    if(_cuda_runtime_dir STREQUAL "")
+        message(FATAL_ERROR "CUDA runtime directory containing cublas64_13.dll was not found.")
+    endif()
+
+    # OpenCV CUDA 的 PE 依赖包含动态 MSVC CRT；应用自身使用 /MT 不代表 OpenCV 不需要这些 DLL。
+    file(GLOB _msvc_redist_candidates LIST_DIRECTORIES true
+        "$ENV{ProgramW6432}/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT"
+        "$ENV{ProgramFiles}/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT")
+    if(NOT _msvc_redist_candidates)
+        message(FATAL_ERROR "Microsoft VC143 x64 redistributable directory was not found.")
+    endif()
+    list(SORT _msvc_redist_candidates COMPARE NATURAL ORDER DESCENDING)
+    list(GET _msvc_redist_candidates 0 _msvc_redist_dir)
+
     aimbot_require_file("${AIMBOT_TENSORRT_ROOT}/include/NvInfer.h" "TensorRT headers")
     aimbot_require_file("${AIMBOT_TENSORRT_ROOT}/lib/nvinfer_10.lib" "TensorRT nvinfer_10.lib")
     aimbot_require_file("${AIMBOT_TENSORRT_ROOT}/lib/nvonnxparser_10.lib" "TensorRT nvonnxparser_10.lib")
@@ -534,28 +578,93 @@ if(AIMBOT_COPY_RUNTIME_DLLS)
 
     if(AIMBOT_USE_CUDA)
         file(GLOB _tensorrt_builder_resources "${AIMBOT_TENSORRT_ROOT}/bin/nvinfer_builder_resource_*.dll")
+        if(NOT _tensorrt_builder_resources)
+            message(FATAL_ERROR "TensorRT builder resource DLLs were not found in ${AIMBOT_TENSORRT_ROOT}/bin.")
+        endif()
         foreach(_resource IN LISTS _tensorrt_builder_resources)
-            aimbot_copy_if_exists(ai "${_resource}")
+            aimbot_copy_required_runtime(ai "${_resource}" "TensorRT builder resource")
         endforeach()
 
         # TensorRT core DLLs (from project modules)
         aimbot_copy_if_exists(ai "${AIMBOT_TENSORRT_ROOT}/bin/nvinfer_10.dll")
         aimbot_copy_if_exists(ai "${AIMBOT_TENSORRT_ROOT}/bin/nvonnxparser_10.dll")
+
+        # 这些文件来自 Xen.exe、OpenCV CUDA 及其二级 PE 依赖的实测闭包。
+        foreach(_cuda_dll IN ITEMS
+                cublas64_13.dll
+                cublasLt64_13.dll
+                cufft64_12.dll
+                nppc64_13.dll
+                nppial64_13.dll
+                nppicc64_13.dll
+                nppidei64_13.dll
+                nppig64_13.dll
+                nppist64_13.dll
+                nppitc64_13.dll)
+            aimbot_copy_required_runtime(ai "${_cuda_runtime_dir}/${_cuda_dll}" "CUDA/OpenCV runtime ${_cuda_dll}")
+        endforeach()
+        foreach(_msvc_dll IN ITEMS
+                concrt140.dll
+                msvcp140.dll
+                vcruntime140.dll
+                vcruntime140_1.dll)
+            aimbot_copy_required_runtime(ai "${_msvc_redist_dir}/${_msvc_dll}" "MSVC runtime ${_msvc_dll}")
+        endforeach()
     endif()
 endif()
 
 if(AIMBOT_USE_CUDA)
     aimbot_remove_runtime_files(ai
+        "Xen.exp"
+        "Xen.lib"
+        "xen_*_tests.exe"
         "DirectML.dll"
         "onnxruntime.dll"
-        "onnxruntime_providers_*.dll")
+        "onnxruntime_providers_*.dll"
+        "cpbox_mouse_dll.dll"
+        "cudart*.dll"
+        "cudnn*.dll"
+        "cufftw*.dll"
+        "nppif*.dll"
+        "nppim*.dll"
+        "nppisu*.dll"
+        "npps*.dll"
+        "nvinfer_dispatch*.dll"
+        "nvinfer_lean*.dll"
+        "nvinfer_plugin*.dll"
+        "nvinfer_vc_plugin*.dll"
+        "nvJitLink*.dll"
+        "nvrtc*.dll"
+        "msvcp140_1.dll"
+        "msvcp140_2.dll"
+        "msvcp140_atomic_wait.dll"
+        "msvcp140_codecvt_ids.dll"
+        "vccorlib140.dll"
+        "vcruntime140_threads.dll")
 else()
     aimbot_remove_runtime_files(ai
+        "Xen.exp"
+        "Xen.lib"
+        "xen_*_tests.exe"
         "cudart*.dll"
         "cudnn*.dll"
         "nvinfer*.dll"
         "nvonnxparser*.dll"
         "onnxruntime_providers_cuda.dll")
+endif()
+
+if(BUILD_TESTING)
+    if(AIMBOT_USE_CUDA)
+        set(_release_backend "CUDA")
+    else()
+        set(_release_backend "DML")
+    endif()
+    add_test(
+        NAME xen.release.runtime_layout
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_SOURCE_DIR}/tests/release_runtime_tests.ps1"
+            -Backend "${_release_backend}"
+            -ReleaseDir "$<TARGET_FILE_DIR:ai>")
 endif()
 
 if(AIMBOT_USE_CUDA)
