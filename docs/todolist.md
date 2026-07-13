@@ -12,7 +12,7 @@
 
 - [ ] 建立可重复移动脚本：固定检测分辨率320、完整源2560×1440、目标移动速度约470 counts/s、单向试次4秒、高频反转10秒，并固定左右起始误差绝对值为40±2 px。价值是消除本轮左右起点和轨迹不同造成的整段P95偏差；脚本无法重复时暂停参数比较，不继续调参。
 - [ ] 执行320/240 ms积分时间ABBA单变量对照：保持 `move_response_ms=80`、`move_max_speed_cps=1440` 和其他配置不变，按 `320→240→240→320` 顺序采集，降低设备温度、网络和人为顺序偏差。两档数据分别放入 `XenMovingPI320/DML/ndi` 与 `XenMovingPI240/DML/ndi`，每档包含 `horizontal_left.csv`、`horizontal_right.csv`、`horizontal_reverse.csv`。
-- [ ] 每份CSV采集前核对UI标题和首行身份：`BuildBackend=DML`、UI短提交与 `BuildRevision` 一致、`ControllerRevision=4`、无 `-dirty`；任一身份不一致则整组作废。价值是确保A/B只比较配置，不混入程序版本差异。
+- [ ] 每份CSV采集前核对UI标题和首行身份：`BuildBackend=DML`、UI短提交与 `BuildRevision` 一致、`ControllerRevision=4`、无 `-dirty`；320/240两档及全部ABBA轮次必须使用同一 `BuildRevision`。纯非代码提交后允许该版本早于仓库当前 `HEAD`，无需重建；只有身份互相不一致、带 `-dirty`，或版本早于最近一次程序相关变更时才判定整组作废。价值是确保A/B只比较配置，不混入程序版本差异。
 - [ ] 单向场景每档左右各完成3轮，每轮持续4秒、轮间松开瞄准至少300 ms；主要比较 `MeanSteadyP95AbsAxisErrorPx`，辅助比较整段P95、闭环滞后、`MovingInsideSettlePct`、限速和队列。240 ms只有在左右稳态P95平均至少改善10%，且任一方向不回退超过10%时才进入下一验收阶段。
 - [ ] 高频反转每档连续10秒并保持同一频率、幅度和相位，目标约25次反转；要求 `RecoveredReversals=ReversalCount`、`MovingInsideSettle=1` 时不得同时 `Settled=1`、队列最大深度不超过1。240 ms需使恢复P95或高频P95至少一项改善10%，另一项不得回退超过10%。
 - [ ] 对通过移动门槛的积分档位执行DML+NDI静止冒烟：上中、左下、右下各3轮；要求稳定态退出为0、稳定后最大误差不超过8 px、无持续反向积分。240 ms若静止任一项失败，则保持320 ms，不再通过调整稳定半径掩盖回归。
