@@ -4,7 +4,7 @@ param(
     [ValidateSet('X', 'Y')][string]$Axis = 'X',
     [double]$TrialGapMs = 150.0,
     [double]$WarmupMs = 200.0,
-    [double]$ReversalVelocityThreshold = 60.0,
+    [double]$ReversalErrorThresholdPx = 20.0,
     [ValidateRange(1, 20)][int]$ReversalConfirmFrames = 3,
     [double]$RecoveryRadiusPx = 8.0,
     [ValidateRange(1, 20)][int]$RecoveryConfirmFrames = 3,
@@ -57,21 +57,21 @@ function Split-MovingTrials {
 function Get-ReversalMetrics {
     param(
         [Parameter(Mandatory)][object[]]$Rows,
-        [Parameter(Mandatory)][string]$VelocityColumn,
         [Parameter(Mandatory)][string]$ErrorColumn,
-        [Parameter(Mandatory)][double]$VelocityThreshold,
+        [Parameter(Mandatory)][double]$ErrorThreshold,
         [Parameter(Mandatory)][int]$DirectionConfirmFrames,
         [Parameter(Mandatory)][double]$RecoveryRadius,
         [Parameter(Mandatory)][int]$RecoveryFrames
     )
-    $direction = 0
+    $errorSide = 0
     $candidateDirection = 0
     $candidateStart = -1
     $candidateCount = 0
-    $reversalStarts = [System.Collections.Generic.List[int]]::new()
+    $lastConfirmedIndex = 0
+    $transitions = [System.Collections.Generic.List[object]]::new()
     for ($index = 0; $index -lt $Rows.Count; ++$index) {
-        $velocity = [double]$Rows[$index].$VelocityColumn
-        $sampleDirection = if ($velocity -ge $VelocityThreshold) { 1 } elseif ($velocity -le -$VelocityThreshold) { -1 } else { 0 }
+        $error = [double]$Rows[$index].$ErrorColumn
+        $sampleDirection = if ($error -ge $ErrorThreshold) { 1 } elseif ($error -le -$ErrorThreshold) { -1 } else { 0 }
         if ($sampleDirection -eq 0) {
             $candidateDirection = 0
             $candidateStart = -1
@@ -89,29 +89,48 @@ function Get-ReversalMetrics {
         if ($candidateCount -lt $DirectionConfirmFrames) {
             continue
         }
-        if ($direction -eq 0) {
-            $direction = $candidateDirection
+        if ($errorSide -eq 0) {
+            $errorSide = $candidateDirection
+            $lastConfirmedIndex = $candidateStart
         }
-        elseif ($candidateDirection -ne $direction) {
-            $reversalStarts.Add($candidateStart)
-            $direction = $candidateDirection
+        elseif ($candidateDirection -ne $errorSide) {
+            # 目标反转后，闭环误差会从旧方向的稳态极值穿过中心并进入另一侧。
+            # 从上一个确认方向到新方向起点寻找极值，作为反转响应开始的可重复近似。
+            $extremeIndex = $lastConfirmedIndex
+            for ($searchIndex = $lastConfirmedIndex; $searchIndex -le $candidateStart; ++$searchIndex) {
+                $searchError = [double]$Rows[$searchIndex].$ErrorColumn
+                $extremeError = [double]$Rows[$extremeIndex].$ErrorColumn
+                if (($errorSide -gt 0 -and $searchError -gt $extremeError) -or
+                    ($errorSide -lt 0 -and $searchError -lt $extremeError)) {
+                    $extremeIndex = $searchIndex
+                }
+            }
+            $transitions.Add([pscustomobject]@{
+                StartIndex = $extremeIndex
+                EndIndex = $candidateStart
+            })
+            $errorSide = $candidateDirection
+            $lastConfirmedIndex = $candidateStart
+        }
+        else {
+            $lastConfirmedIndex = $candidateStart
         }
         $candidateCount = 0
         $candidateStart = -1
     }
 
     $recoveryTimes = [System.Collections.Generic.List[double]]::new()
-    foreach ($reversalStart in $reversalStarts) {
+    foreach ($transition in $transitions) {
         $stableCount = 0
         $stableStart = -1
-        for ($index = $reversalStart; $index -lt $Rows.Count; ++$index) {
+        for ($index = $transition.StartIndex; $index -le $transition.EndIndex; ++$index) {
             if ([math]::Abs([double]$Rows[$index].$ErrorColumn) -le $RecoveryRadius) {
                 if ($stableCount -eq 0) {
                     $stableStart = $index
                 }
                 ++$stableCount
                 if ($stableCount -ge $RecoveryFrames) {
-                    $recoveryTimes.Add([double]$Rows[$stableStart].Timestamp - [double]$Rows[$reversalStart].Timestamp)
+                    $recoveryTimes.Add([double]$Rows[$stableStart].Timestamp - [double]$Rows[$transition.StartIndex].Timestamp)
                     break
                 }
             }
@@ -123,7 +142,7 @@ function Get-ReversalMetrics {
     }
 
     return [pscustomobject]@{
-        ReversalCount = $reversalStarts.Count
+        ReversalCount = $transitions.Count
         RecoveredReversals = $recoveryTimes.Count
         RecoveryMeanMs = if ($recoveryTimes.Count -eq 0) { $null } else {
             [math]::Round([double]($recoveryTimes | Measure-Object -Average).Average, 1)
@@ -140,10 +159,15 @@ if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
 }
 $velocityColumn = if ($Axis -eq 'X') { 'ObservedVelocityX' } else { 'ObservedVelocityY' }
 $errorColumn = if ($Axis -eq 'X') { 'ErrorX' } else { 'ErrorY' }
+$finalMoveColumn = if ($Axis -eq 'X') { 'FinalMx' } else { 'FinalMy' }
+$requestedPixelColumn = if ($Axis -eq 'X') { 'RequestedPixelX' } else { 'RequestedPixelY' }
+$requestedCountsColumn = if ($Axis -eq 'X') { 'RequestedCountsX' } else { 'RequestedCountsY' }
 $requiredColumns = @(
     'Timestamp', 'SourceWidth', 'SourceHeight', 'InferenceFPS', 'SourceReceiveFPS',
     'ObservationAgeSec', 'ErrorX', 'ErrorY', 'ErrorDistance', 'FilterResidual',
-    'ObservedVelocityX', 'ObservedVelocityY', 'SpeedLimited', 'QueuedMoveCount'
+    'ObservedVelocityX', 'ObservedVelocityY', 'RequestedPixelX', 'RequestedPixelY',
+    'RequestedCountsX', 'RequestedCountsY', 'FinalMx', 'FinalMy', 'SpeedLimited',
+    'QueuedMoveCount'
 )
 $trialMetrics = [System.Collections.Generic.List[object]]::new()
 $rootPrefix = $resolvedRoot.TrimEnd(
@@ -156,7 +180,12 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
     }
     $relativePath = $csvFile.FullName.Substring($rootPrefix.Length)
     $parts = $relativePath -split '[\\/]'
-    $chain = if ($parts.Count -ge 3) { "$($parts[0])+$($parts[1])" } else { $csvFile.Directory.Name }
+    # 根目录下的 moving_summary.csv 是分析产物，不是原始试次；只接受
+    # <backend>/<transport>/<scenario>.csv 三层数据，保证重复执行不会导入自身输出。
+    if ($parts.Count -lt 3) {
+        continue
+    }
+    $chain = "$($parts[0])+$($parts[1])"
     $rows = @(Import-Csv -LiteralPath $csvFile.FullName)
     if ($rows.Count -eq 0) {
         continue
@@ -181,7 +210,25 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         $axisSpeeds = @($samples | ForEach-Object { [math]::Abs([double]$_.$velocityColumn) })
         $residuals = @($samples | ForEach-Object { [double]$_.FilterResidual })
         $limitedRows = @($samples | Where-Object { [int]$_.SpeedLimited -eq 1 }).Count
-        $reversals = Get-ReversalMetrics -Rows $samples -VelocityColumn $velocityColumn -ErrorColumn $errorColumn -VelocityThreshold $ReversalVelocityThreshold -DirectionConfirmFrames $ReversalConfirmFrames -RecoveryRadius $RecoveryRadiusPx -RecoveryFrames $RecoveryConfirmFrames
+        $sampleDurationSeconds = (
+            [double]$samples[-1].Timestamp - [double]$samples[0].Timestamp) / 1000.0
+        $signedOutputCounts = [double]($samples | Measure-Object $finalMoveColumn -Sum).Sum
+        $absoluteOutputCounts = [double](($samples | ForEach-Object {
+            [math]::Abs([double]$_.$finalMoveColumn)
+        } | Measure-Object -Sum).Sum)
+        $countsPerPixelSamples = @($samples | Where-Object {
+            [math]::Abs([double]$_.$requestedPixelColumn) -gt 0.000001
+        } | ForEach-Object {
+            [math]::Abs([double]$_.$requestedCountsColumn / [double]$_.$requestedPixelColumn)
+        })
+        $estimatedCountsPerPixel = Get-PercentileValue -Values $countsPerPixelSamples -Percentile 0.50
+        $signedOutputCps = $signedOutputCounts / [math]::Max(0.001, $sampleDurationSeconds)
+        $absoluteOutputCps = $absoluteOutputCounts / [math]::Max(0.001, $sampleDurationSeconds)
+        # 匀速单向场景中，平均误差乘 counts/px 后除以实际输出 counts/s，
+        # 可得到闭环滞后的近似时间；该值用于辨别响应时间而非速度上限瓶颈。
+        $approxClosedLoopLagMs = 1000.0 * [double]($axisAbsErrors | Measure-Object -Average).Average *
+            $estimatedCountsPerPixel / [math]::Max(1.0, $absoluteOutputCps)
+        $reversals = Get-ReversalMetrics -Rows $samples -ErrorColumn $errorColumn -ErrorThreshold $ReversalErrorThresholdPx -DirectionConfirmFrames $ReversalConfirmFrames -RecoveryRadius $RecoveryRadiusPx -RecoveryFrames $RecoveryConfirmFrames
 
         $trialMetrics.Add([pscustomobject]@{
             Level = 'Trial'
@@ -191,6 +238,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             Rows = $trial.Count
             Samples = $samples.Count
             DurationMs = [math]::Round([double]$trial[-1].Timestamp - $firstTimestamp, 1)
+            MeanAxisErrorPx = [math]::Round([double]($samples | Measure-Object $errorColumn -Average).Average, 2)
             MeanAbsAxisErrorPx = [math]::Round([double]($axisAbsErrors | Measure-Object -Average).Average, 2)
             P50AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $axisAbsErrors -Percentile 0.50), 2)
             P95AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $axisAbsErrors -Percentile 0.95), 2)
@@ -200,6 +248,10 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             P50ObservedAxisSpeed = [math]::Round((Get-PercentileValue -Values $axisSpeeds -Percentile 0.50), 1)
             P95ObservedAxisSpeed = [math]::Round((Get-PercentileValue -Values $axisSpeeds -Percentile 0.95), 1)
             P95FilterResidualPx = [math]::Round((Get-PercentileValue -Values $residuals -Percentile 0.95), 2)
+            SignedOutputCountsPerSecond = [math]::Round($signedOutputCps, 1)
+            MeanAbsOutputCountsPerSecond = [math]::Round($absoluteOutputCps, 1)
+            EstimatedCountsPerPixel = [math]::Round($estimatedCountsPerPixel, 4)
+            ApproxClosedLoopLagMs = [math]::Round($approxClosedLoopLagMs, 1)
             SpeedLimitedPct = [math]::Round(100.0 * $limitedRows / [math]::Max(1, $samples.Count), 1)
             InferenceFps = [math]::Round([double]($samples | Measure-Object InferenceFPS -Average).Average, 1)
             SourceReceiveFps = [math]::Round([double]($samples | Measure-Object SourceReceiveFPS -Average).Average, 1)
@@ -237,6 +289,8 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         MeanP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object P95AbsAxisErrorPx -Average).Average, 2)
         WorstP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object P95AbsAxisErrorPx -Maximum).Maximum, 2)
         MeanP95ErrorDistancePx = [math]::Round([double]($group | Measure-Object P95ErrorDistancePx -Average).Average, 2)
+        MeanAbsOutputCountsPerSecond = [math]::Round([double]($group | Measure-Object MeanAbsOutputCountsPerSecond -Average).Average, 1)
+        MeanApproxClosedLoopLagMs = [math]::Round([double]($group | Measure-Object ApproxClosedLoopLagMs -Average).Average, 1)
         SpeedLimitedPct = [math]::Round([double](($group | ForEach-Object { $_.SpeedLimitedPct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         ReversalCount = [int]($group | Measure-Object ReversalCount -Sum).Sum
         RecoveredReversals = $recoveredCount
@@ -258,10 +312,12 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
     # 试次与场景汇总字段不同，显式使用联合列，确保机器可读导出不会丢失汇总指标。
     $exportColumns = @(
         'Level', 'Chain', 'Scenario', 'Trial', 'Trials', 'Rows', 'Samples', 'DurationMs',
-        'MeanAbsAxisErrorPx', 'P50AbsAxisErrorPx', 'P95AbsAxisErrorPx', 'P99AbsAxisErrorPx',
+        'MeanAxisErrorPx', 'MeanAbsAxisErrorPx', 'P50AbsAxisErrorPx', 'P95AbsAxisErrorPx', 'P99AbsAxisErrorPx',
         'MeanP95AbsAxisErrorPx', 'WorstP95AbsAxisErrorPx', 'P95ErrorDistancePx',
         'MeanP95ErrorDistancePx', 'MaxErrorDistancePx', 'P50ObservedAxisSpeed',
-        'P95ObservedAxisSpeed', 'P95FilterResidualPx', 'SpeedLimitedPct', 'InferenceFps',
+        'P95ObservedAxisSpeed', 'P95FilterResidualPx', 'SignedOutputCountsPerSecond',
+        'MeanAbsOutputCountsPerSecond', 'EstimatedCountsPerPixel', 'ApproxClosedLoopLagMs',
+        'MeanApproxClosedLoopLagMs', 'SpeedLimitedPct', 'InferenceFps',
         'SourceReceiveFps', 'ObservationAgeAvgMs', 'ObservationAgeP95Ms', 'MaxQueuedMoves',
         'ReversalCount', 'RecoveredReversals', 'RecoveryMeanMs', 'RecoveryP95Ms',
         'SourceGeometry'
@@ -276,6 +332,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, P95ErrorDistancePx, SpeedLimitedPct, ReversalCount, RecoveryMeanMs, MaxQueuedMoves -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, ApproxClosedLoopLagMs, SpeedLimitedPct, ReversalCount, RecoveryMeanMs, MaxQueuedMoves -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, WorstP95AbsAxisErrorPx, SpeedLimitedPct, ReversalCount, RecoveredReversals, RecoveryMeanMs, MaxQueuedMoves -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, MeanApproxClosedLoopLagMs, SpeedLimitedPct, ReversalCount, RecoveredReversals, RecoveryMeanMs, MaxQueuedMoves -AutoSize

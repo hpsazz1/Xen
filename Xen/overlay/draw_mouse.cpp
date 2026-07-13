@@ -29,6 +29,7 @@ float prev_minSpeedMultiplier = config.minSpeedMultiplier;
 float prev_maxSpeedMultiplier = config.maxSpeedMultiplier;
 float prev_move_response_ms = config.move_response_ms;
 float prev_move_max_speed_cps = config.move_max_speed_cps;
+float prev_move_integral_time_ms = config.move_integral_time_ms;
 	// 预测
 	float prev_predictionInterval = config.predictionInterval;
 	bool  prev_prediction_enabled = config.prediction_enabled;
@@ -129,6 +130,14 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayUI::SliderFloatRow("最大设备速度", &config.move_max_speed_cps,
             30.0f, 2000.0f, "%.0f counts/s", "##move_max_cps",
             "限制每秒发送的鼠标计数；按实际观测间隔换算单帧预算，不会被自动跟踪优化覆盖。");
+        if (OverlayUI::SliderFloatRow("移动积分时间(ms)", &config.move_integral_time_ms,
+            0.0f, 1000.0f, "%.0f", "##move_integral_time",
+            "0为关闭，非零最小50 ms。用于消除匀速移动目标的固定滞后；时间越小积分越强，需同时验证静止稳定和方向反转。"))
+        {
+            if (config.move_integral_time_ms > 0.0f && config.move_integral_time_ms < 50.0f)
+                config.move_integral_time_ms = 50.0f;
+            OverlayConfig_MarkDirty();
+        }
         OverlayUI::EndSection();
     }
 
@@ -809,6 +818,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_fovY != config.fovY ||
         prev_move_response_ms != config.move_response_ms ||
         prev_move_max_speed_cps != config.move_max_speed_cps ||
+        prev_move_integral_time_ms != config.move_integral_time_ms ||
         prev_minSpeedMultiplier != config.minSpeedMultiplier ||
         prev_maxSpeedMultiplier != config.maxSpeedMultiplier ||
         prev_predictionInterval != config.predictionInterval ||
@@ -830,6 +840,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_fovY = config.fovY;
         prev_move_response_ms = config.move_response_ms;
         prev_move_max_speed_cps = config.move_max_speed_cps;
+        prev_move_integral_time_ms = config.move_integral_time_ms;
         // 同步速度倍率
         prev_minSpeedMultiplier = config.minSpeedMultiplier;
         prev_maxSpeedMultiplier = config.maxSpeedMultiplier;

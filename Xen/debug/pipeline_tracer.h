@@ -45,6 +45,8 @@ struct PipelineFrame
     double requestedPixelY = 0.0;
     double requestedCountsX = 0.0;
     double requestedCountsY = 0.0;
+    double integralCountsX = 0.0; ///< 本帧积分补偿计数；限速时按相同比例缩放
+    double integralCountsY = 0.0;
 
     // ========== Stage 5: 请求输出（尚不代表驱动已实际发送） ==========
     int    finalMx = 0;        ///< 请求的水平移动量（counts）
@@ -52,6 +54,7 @@ struct PipelineFrame
 
     // ========== 控制器诊断 ==========
     double responseSeconds = 0.0;
+    double integralTimeSeconds = 0.0;
     double maxCountsPerSecond = 0.0;
     double frameCountLimit = 0.0;
     bool   speedLimited = false;      ///< 本帧控制请求是否触发最大设备速率限制

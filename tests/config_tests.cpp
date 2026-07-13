@@ -38,12 +38,15 @@ int main()
     config.auto_derive_tracker_params = true;
     config.move_response_ms = 73.0f;
     config.move_max_speed_cps = 1337.0f;
+    config.move_integral_time_ms = 333.0f;
 
     config.applyAutoDerivedTrackerParams(320, 240);
     expectNear(config.move_response_ms, 73.0, 0.0,
                "auto derive preserves configured response time");
     expectNear(config.move_max_speed_cps, 1337.0, 0.0,
                "auto derive preserves configured maximum speed");
+    expectNear(config.move_integral_time_ms, 333.0, 0.0,
+               "auto derive preserves configured moving integral time");
     expectNear(config.ml_termination_frames, 30.0, 0.0,
                "auto derive still updates fps-dependent tracker lifetime");
     expectNear(config.ml_coast_frames, 60.0, 0.0,
@@ -55,6 +58,8 @@ int main()
                "runtime re-derive preserves configured response time");
     expectNear(config.move_max_speed_cps, 1337.0, 0.0,
                "runtime re-derive preserves configured maximum speed");
+    expectNear(config.move_integral_time_ms, 333.0, 0.0,
+               "runtime re-derive preserves configured moving integral time");
     expectNear(config.ml_termination_frames, 62.0, 0.0,
                "runtime re-derive applies updated fps to tracker");
     expectNear(config.ml_measurement_stddev, 5.0, 1e-6,
@@ -82,6 +87,8 @@ int main()
         expectNear(defaults.detection_resolution, 320.0, 0.0, "default detection resolution");
         expectNear(defaults.move_max_speed_cps, 1440.0, 0.0,
                    "default maximum speed uses four-chain nine-grid result");
+        expectNear(defaults.move_integral_time_ms, 0.0, 0.0,
+                   "moving integral remains disabled before field validation");
         expectString(defaults.kmbox_net_ip, "192.168.2.188", "default kmbox net ip");
         expectString(defaults.kmbox_net_port, "13384", "default kmbox net port");
         expectString(defaults.kmbox_net_uuid, "7679E04E", "default kmbox net uuid");

@@ -111,6 +111,8 @@ void MouseThread::updateConfig(
         static_cast<double>(config.move_response_ms) / 1000.0, 0.020, 0.300);
     move_max_speed_cps = std::clamp(
         static_cast<double>(config.move_max_speed_cps), 30.0, 2000.0);
+    move_integral_time_seconds = std::clamp(
+        static_cast<double>(config.move_integral_time_ms) / 1000.0, 0.0, 1.0);
     this->auto_shoot = auto_shoot;
     this->bScope_multiplier = bScope_multiplier;
 
@@ -668,6 +670,8 @@ void MouseThread::refreshGameProfileCache()
         static_cast<double>(config.move_response_ms) / 1000.0, 0.020, 0.300);
     move_max_speed_cps = std::clamp(
         static_cast<double>(config.move_max_speed_cps), 30.0, 2000.0);
+    move_integral_time_seconds = std::clamp(
+        static_cast<double>(config.move_integral_time_ms) / 1000.0, 0.0, 1.0);
 }
 
 /**
@@ -1146,6 +1150,7 @@ void MouseThread::moveMousePivot(
     BasicAimController::Settings settings;
     settings.responseSeconds = move_response_seconds;
     settings.maxCountsPerSecond = move_max_speed_cps;
+    settings.integralTimeSeconds = move_integral_time_seconds;
     settings.settleRadiusPixels = std::max(2.0, screen_width / 64.0);
     settings.releaseRadiusPixels = settings.settleRadiusPixels * 1.6;
     // 网络捕获的到帧间隔可能抖动，优先使用相邻有效观测的真实时间差。
@@ -1189,9 +1194,12 @@ void MouseThread::moveMousePivot(
         pf->requestedPixelY = output.requestedPixelY;
         pf->requestedCountsX = output.countsX;
         pf->requestedCountsY = output.countsY;
+        pf->integralCountsX = output.integralCountsX;
+        pf->integralCountsY = output.integralCountsY;
         pf->finalMx = mx;
         pf->finalMy = my;
         pf->responseSeconds = settings.responseSeconds;
+        pf->integralTimeSeconds = settings.integralTimeSeconds;
         pf->maxCountsPerSecond = settings.maxCountsPerSecond;
         pf->frameCountLimit = output.frameCountLimit;
         pf->speedLimited = output.speedLimited;

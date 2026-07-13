@@ -42,6 +42,7 @@ private:
     double max_distance;             ///< 最大瞄准距离（像素）
     double move_response_seconds = 0.080; ///< 基础控制响应时间
     double move_max_speed_cps = 1440.0;   ///< 设备最大速度（counts/sec）；四链路九宫格复测后按真实观测 dt 动态换算单帧预算
+    double move_integral_time_seconds = 0.0; ///< 匀速移动目标积分时间；0 表示关闭实验性 PI 补偿
     double center_x;                 ///< 屏幕中心 X
     double center_y;                 ///< 屏幕中心 Y
     bool   auto_shoot;               ///< 是否启用自动射击

@@ -143,6 +143,9 @@ int main()
                "basic pipeline keeps ndi compatibility diagnostics");
     expectTrue(traceHeader.find("FrameCountLimit,SpeedLimited,Settled") != std::string::npos,
                "basic pipeline reports controller speed limiting");
+    expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
+               traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
+               "basic pipeline reports moving-target integral diagnostics");
     expectTrue(traceHeader.find("PredX") == std::string::npos,
                "basic pipeline excludes prediction stage");
     traceFile.close();
@@ -232,6 +235,60 @@ int main()
                "far response remains explicitly speed limited");
     expectNear(optimizedFarOutput.frameCountLimit / baselineFarOutput.frameCountLimit,
                1.2, 1e-12, "far frame budget increases by twenty percent");
+
+    // 匀速目标是斜坡输入，纯比例控制必然保留“目标速度 × 响应时间”的固定滞后。
+    // 现场六轮数据折算闭环滞后约 84~85 ms，即使把 UI 响应压到 20 ms 也不能归零。
+    // 使用标准 PI 积分后，设备需求仍低于 1440 cps 时应消除该结构性稳态误差。
+    auto simulateMovingTarget = [](double integralTimeSeconds) {
+        BasicAimController movingController;
+        BasicAimController::Settings movingSettings;
+        movingSettings.responseSeconds = 0.080;
+        movingSettings.maxCountsPerSecond = 1440.0;
+        movingSettings.integralTimeSeconds = integralTimeSeconds;
+        movingSettings.settleRadiusPixels = 0.0;
+        movingSettings.releaseRadiusPixels = 0.0;
+        constexpr double dt = 1.0 / 120.0;
+        constexpr double countsPerPixel = 1.344;
+        constexpr double targetCountsPerSecond = 800.0;
+        double targetPixels = 0.0;
+        double cameraPixels = 0.0;
+        for (int frame = 0; frame < 480; ++frame)
+        {
+            targetPixels += targetCountsPerSecond / countsPerPixel * dt;
+            const auto output = movingController.update(
+                targetPixels - cameraPixels, 0.0, dt,
+                countsPerPixel, countsPerPixel, movingSettings);
+            cameraPixels += output.countsX / countsPerPixel;
+        }
+        return targetPixels - cameraPixels;
+    };
+    const double proportionalRampError = simulateMovingTarget(0.0);
+    const double integralRampError = simulateMovingTarget(0.320);
+    expectTrue(std::abs(proportionalRampError) > 35.0,
+               "proportional controller keeps ramp steady-state error");
+    expectTrue(std::abs(integralRampError) < 5.0,
+               "pi controller removes moving-target steady-state error");
+
+    // 积分候选必须保持静止闭环安全：大误差阶段受设备限速时禁止 wind-up，
+    // 接近中心后进入既有 5 px 稳定半径并清空积分，不得跨越目标持续反向输出。
+    BasicAimController staticIntegralController;
+    BasicAimController::Settings staticIntegralSettings;
+    staticIntegralSettings.responseSeconds = 0.080;
+    staticIntegralSettings.maxCountsPerSecond = 1440.0;
+    staticIntegralSettings.integralTimeSeconds = 0.320;
+    double staticCameraPixels = 0.0;
+    bool staticSettled = false;
+    for (int frame = 0; frame < 480; ++frame)
+    {
+        const auto output = staticIntegralController.update(
+            140.0 - staticCameraPixels, 0.0, 1.0 / 120.0,
+            1.344, 1.344, staticIntegralSettings);
+        staticCameraPixels += output.countsX / 1.344;
+        staticSettled = staticSettled || output.settled;
+    }
+    expectTrue(staticSettled, "pi controller settles a static step");
+    expectTrue(std::abs(140.0 - staticCameraPixels) <= 5.0,
+               "pi controller keeps static step inside settle radius");
 
     if (failures != 0)
     {

@@ -92,9 +92,9 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "RawPivotX,RawPivotY,"
          << "FilteredX,FilteredY,ObservedVelocityX,ObservedVelocityY,ObservedSpeed,FilterResidual,"
          << "ErrorX,ErrorY,ErrorDistance,"
-         << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,"
+         << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
          << "FinalMx,FinalMy,"
-         << "ResponseSeconds,MaxCountsPerSecond,FrameCountLimit,SpeedLimited,Settled,QueuedMoveCount\n";
+         << "ResponseSeconds,IntegralTimeSeconds,MaxCountsPerSecond,FrameCountLimit,SpeedLimited,Settled,QueuedMoveCount\n";
 
     for (const auto& f : frames)
     {
@@ -122,8 +122,10 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.errorX << ',' << f.errorY << ',' << f.errorDistance << ','
              << f.requestedPixelX << ',' << f.requestedPixelY << ','
              << f.requestedCountsX << ',' << f.requestedCountsY << ','
+             << f.integralCountsX << ',' << f.integralCountsY << ','
              << f.finalMx << ',' << f.finalMy << ','
-             << f.responseSeconds << ',' << f.maxCountsPerSecond << ','
+             << f.responseSeconds << ',' << f.integralTimeSeconds << ','
+             << f.maxCountsPerSecond << ','
              << f.frameCountLimit << ',' << (f.speedLimited ? '1' : '0') << ','
              << (f.settled ? '1' : '0') << ','
              << f.queuedMoveCount << '\n';

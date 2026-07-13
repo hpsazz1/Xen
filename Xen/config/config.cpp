@@ -133,6 +133,7 @@ bool Config::loadConfig(const std::string& filename)
         maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
         move_response_ms = 80.0f;                        // 基础控制响应时间（毫秒）
         move_max_speed_cps = 1440.0f;                    // 四链路九宫格复测值；1200 cps 下约八成远距帧仍受限
+        move_integral_time_ms = 0.0f;                    // 默认关闭；320 ms 候选需先通过移动与静止复测
 
         prediction_enabled = true;                       // 预测总开关
         predictionInterval = 0.020f;                     // 位置预测间隔（秒）
@@ -542,6 +543,7 @@ bool Config::loadConfig(const std::string& filename)
     maxSpeedMultiplier = (float)get_double("maxSpeedMultiplier", 0.1);
     move_response_ms = (float)get_double("move_response_ms", 80.0);
     move_max_speed_cps = (float)get_double("move_max_speed_cps", 1440.0);
+    move_integral_time_ms = (float)get_double("move_integral_time_ms", 0.0);
 
     predictionInterval = (float)get_double("predictionInterval", 0.020);
     prediction_futurePositions = get_long("prediction_futurePositions", 12);
@@ -735,6 +737,9 @@ bool Config::loadConfig(const std::string& filename)
     // === 基础移动参数范围校验 ===
     move_response_ms = std::clamp(move_response_ms, 20.0f, 300.0f);
     move_max_speed_cps = std::clamp(move_max_speed_cps, 30.0f, 2000.0f);
+    move_integral_time_ms = std::clamp(move_integral_time_ms, 0.0f, 1000.0f);
+    if (move_integral_time_ms > 0.0f && move_integral_time_ms < 50.0f)
+        move_integral_time_ms = 50.0f;
 
     // === 旧预测参数范围校验（仅兼容旧配置，当前基础链路不使用） ===
     if (prediction_tau < 0.005f) prediction_tau = 0.005f;
@@ -860,6 +865,7 @@ bool Config::saveConfig(const std::string& filename)
         << "fovY = " << fovY << "\n"
         << "move_response_ms = " << move_response_ms << "\n"
         << "move_max_speed_cps = " << move_max_speed_cps << "\n"
+        << "move_integral_time_ms = " << move_integral_time_ms << "\n"
         << "easynorecoil = " << (easynorecoil ? "true" : "false") << "\n"
         << std::fixed << std::setprecision(1)
         << "easynorecoilstrength = " << easynorecoilstrength << "\n"
