@@ -14,6 +14,8 @@ public:
     {
         double x = 0.0;
         double y = 0.0;
+        double observedVelocityX = 0.0; // 相邻原始观测的水平速度，px/sec；保留符号用于识别移动方向
+        double observedVelocityY = 0.0; // 相邻原始观测的垂直速度，px/sec；保留符号用于识别移动方向
         double observedSpeed = 0.0; // 仅用于诊断的相邻观测速度，px/sec
         double residual = 0.0;      // 原始观测到滤波位置的距离，px
     };
@@ -24,7 +26,7 @@ public:
                   double screenWidth)
     {
         if (!std::isfinite(x) || !std::isfinite(y))
-            return { filteredX_, filteredY_, 0.0, 0.0 };
+            return { filteredX_, filteredY_, 0.0, 0.0, 0.0, 0.0 };
 
         if (observationTime.time_since_epoch().count() == 0)
             observationTime = std::chrono::steady_clock::now();
@@ -32,7 +34,7 @@ public:
         if (!initialized_)
         {
             initialize(x, y, observationTime);
-            return { x, y, 0.0, 0.0 };
+            return { x, y, 0.0, 0.0, 0.0, 0.0 };
         }
 
         double dt = std::chrono::duration<double>(observationTime - previousTime_).count();
@@ -42,15 +44,17 @@ public:
 
         const double rawDx = x - previousRawX_;
         const double rawDy = y - previousRawY_;
+        const double observedVelocityX = rawDx / dt;
+        const double observedVelocityY = rawDy / dt;
+        const double observedSpeed = std::hypot(observedVelocityX, observedVelocityY);
         const double rawDistance = std::hypot(rawDx, rawDy);
-        const double observedSpeed = rawDistance / dt;
 
         // 大幅跳变代表新目标或新轨迹，旧滤波状态不能跨目标延续；
         // 目标身份由本模块上游的锁定器负责。
         if (rawDistance > std::max(24.0, screenWidth * 0.20))
         {
             initialize(x, y, observationTime);
-            return { x, y, observedSpeed, 0.0 };
+            return { x, y, observedVelocityX, observedVelocityY, observedSpeed, 0.0 };
         }
 
         const double residualX = x - filteredX_;
@@ -74,7 +78,11 @@ public:
         previousRawX_ = x;
         previousRawY_ = y;
         previousTime_ = observationTime;
-        return { filteredX_, filteredY_, observedSpeed, residual };
+        return {
+            filteredX_, filteredY_,
+            observedVelocityX, observedVelocityY,
+            observedSpeed, residual
+        };
     }
 
     void reset()

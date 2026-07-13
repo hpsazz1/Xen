@@ -1178,6 +1178,8 @@ void MouseThread::moveMousePivot(
     {
         pf->filteredX = filtered.first;
         pf->filteredY = filtered.second;
+        pf->observedVelocityX = lastFilterResult.observedVelocityX;
+        pf->observedVelocityY = lastFilterResult.observedVelocityY;
         pf->observedSpeed = lastFilterResult.observedSpeed;
         pf->filterResidual = lastFilterResult.residual;
         pf->errorX = errorX;

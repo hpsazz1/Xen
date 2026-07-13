@@ -132,6 +132,8 @@ int main()
         traceHeader.erase(0, 3);
     expectTrue(traceHeader.find("FilteredX") != std::string::npos,
                "basic pipeline contains filtered observation");
+    expectTrue(traceHeader.find("ObservedVelocityX,ObservedVelocityY,ObservedSpeed") != std::string::npos,
+               "basic pipeline contains signed target velocity diagnostics");
     expectTrue(traceHeader.find("SourceWidth,SourceHeight") != std::string::npos,
                "basic pipeline contains capture source dimensions");
     expectTrue(traceHeader.find(
@@ -161,6 +163,13 @@ int main()
         168.0, 160.0, t0 + std::chrono::milliseconds(16), 1.0 / 120.0, 320.0);
     expectTrue(filteredMove.x > filteredNoise.x, "basic filter follows movement");
     expectTrue(filteredMove.x <= 168.0, "basic filter does not predict future position");
+    expectNear(filteredMove.observedVelocityX, 962.5, 1e-9,
+               "basic filter reports signed horizontal observation velocity");
+    expectNear(filteredMove.observedVelocityY, 25.0, 1e-9,
+               "basic filter reports signed vertical observation velocity");
+    expectNear(filteredMove.observedSpeed,
+               std::hypot(filteredMove.observedVelocityX, filteredMove.observedVelocityY),
+               1e-9, "basic filter speed matches signed velocity magnitude");
 
     BasicAimController controller;
     BasicAimController::Settings controllerSettings;

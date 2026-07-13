@@ -30,6 +30,8 @@ struct PipelineFrame
     // ========== Stage 2: 基础观测滤波（无未来预测） ==========
     double filteredX = 0.0;
     double filteredY = 0.0;
+    double observedVelocityX = 0.0; ///< 相邻原始观测水平速度，px/sec；正值向右
+    double observedVelocityY = 0.0; ///< 相邻原始观测垂直速度，px/sec；正值向下
     double observedSpeed = 0.0; ///< 相邻原始观测速度，仅用于诊断
     double filterResidual = 0.0;
 

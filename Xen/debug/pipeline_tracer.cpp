@@ -90,7 +90,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames,TargetDetected,ObservationAgeSec,"
          << "TargetClassID,"
          << "RawPivotX,RawPivotY,"
-         << "FilteredX,FilteredY,ObservedSpeed,FilterResidual,"
+         << "FilteredX,FilteredY,ObservedVelocityX,ObservedVelocityY,ObservedSpeed,FilterResidual,"
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,"
          << "FinalMx,FinalMy,"
@@ -117,6 +117,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.targetClassId << ','
              << f.rawPivotX << ',' << f.rawPivotY << ','
              << f.filteredX << ',' << f.filteredY << ','
+             << f.observedVelocityX << ',' << f.observedVelocityY << ','
              << f.observedSpeed << ',' << f.filterResidual << ','
              << f.errorX << ',' << f.errorY << ',' << f.errorDistance << ','
              << f.requestedPixelX << ',' << f.requestedPixelY << ','

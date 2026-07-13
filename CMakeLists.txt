@@ -352,6 +352,10 @@ if(BUILD_TESTING)
         NAME xen.analysis.nine_grid
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/nine_grid_analysis_tests.ps1"
     )
+    add_test(
+        NAME xen.analysis.moving_target
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/moving_target_analysis_tests.ps1"
+    )
 
     add_executable(xen_algorithm_tests
         "${CMAKE_SOURCE_DIR}/tests/speed_curve_tests.cpp"

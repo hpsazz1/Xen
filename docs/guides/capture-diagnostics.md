@@ -27,6 +27,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_nine_grid.ps1 
 
 四链路基线建立后，日常静止目标调参可只执行 CUDA 环境下的 NDI、UDP 完整九宫格；CUDA 的较高推理吞吐更容易暴露传输差异和高频近中心边界。发布前仍需 DML UDP 的上中、左下、右下三点冒烟以及 DML/CUDA 双后端 Release 构建。修改推理、捕获、坐标、控制器或输入队列时必须恢复四链路完整九宫格，详细判定见 `docs/015四链路复测与最小测试矩阵20260713.md`。
 
+移动目标CSV额外提供 `ObservedVelocityX/ObservedVelocityY` 有符号相对观测速度。CUDA环境下的NDI/UDP移动数据使用以下命令统一分析：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_moving_target.ps1 -DataRoot C:\Users\User\Desktop\XenMoving -Axis X
+```
+
+首轮只采集水平向左、水平向右和左右反转三个固定脚本场景，保持80 ms与1440 counts/s静止基线不变。指标定义、目录结构和决策顺序见 `docs/016移动目标测试方案20260713.md`。
+
 当诊断日志输出类似以下行时：
 
 ```text
