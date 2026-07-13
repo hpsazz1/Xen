@@ -60,6 +60,8 @@ struct PipelineFrame
     double observationAgeSec = 0.0;    ///< 检测延迟（秒）
     double fpsValue = 0.0;            ///< 当前帧率
     int    resolution = 0;            ///< 检测分辨率
+    int    sourceWidth = 0;            ///< 捕获后端报告的完整源宽度，用于 FOV 换算审计
+    int    sourceHeight = 0;           ///< 捕获后端报告的完整源高度，用于 FOV 换算审计
 };
 
 /**

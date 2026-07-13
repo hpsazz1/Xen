@@ -1,4 +1,5 @@
 #include "runtime/basic_aim_controller.h"
+#include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_target_filter.h"
 #include "debug/pipeline_tracer.h"
 
@@ -33,6 +34,17 @@ void expectTrue(bool condition, const char* name)
 
 int main()
 {
+    const double sourceSpan = AimCoordinateSpace::resolveFovPixelSpan(2560, 320.0);
+    const double fallbackSpan = AimCoordinateSpace::resolveFovPixelSpan(0, 320.0);
+    expectNear(sourceSpan, 2560.0, 0.0, "aim conversion uses capture source width");
+    expectNear(fallbackSpan, 320.0, 0.0, "aim conversion falls back to detection width");
+    const double sourceCountsPerPixel = AimCoordinateSpace::countsPerSourcePixel(
+        106.0, sourceSpan, 1.4 * 0.022);
+    const double wrongCropCountsPerPixel = AimCoordinateSpace::countsPerSourcePixel(
+        106.0, 320.0, 1.4 * 0.022);
+    expectNear(wrongCropCountsPerPixel / sourceCountsPerPixel, 8.0, 1e-9,
+               "center crop must not multiply counts per pixel");
+
     PipelineTracer tracer;
     tracer.setMaxFrames(10);
     PipelineFrame pending = tracer.beginFrame(320);
@@ -53,6 +65,8 @@ int main()
         traceHeader.erase(0, 3);
     expectTrue(traceHeader.find("FilteredX") != std::string::npos,
                "basic pipeline contains filtered observation");
+    expectTrue(traceHeader.find("SourceWidth,SourceHeight") != std::string::npos,
+               "basic pipeline contains capture source dimensions");
     expectTrue(traceHeader.find("PredX") == std::string::npos,
                "basic pipeline excludes prediction stage");
     traceFile.close();

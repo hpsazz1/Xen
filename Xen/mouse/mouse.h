@@ -35,10 +35,10 @@ class MouseThread
 {
 private:
     // ==================== 配置参数 ====================
-    double screen_width;             ///< 屏幕宽度（像素）
-    double screen_height;            ///< 屏幕高度（像素）
-    double fov_x;                    ///< 水平视野（像素）
-    double fov_y;                    ///< 垂直视野（像素）
+    double screen_width;             ///< 检测裁剪宽度（像素），用于目标中心和检测空间阈值
+    double screen_height;            ///< 检测裁剪高度（像素），用于目标中心和检测空间阈值
+    double fov_x;                    ///< 水平完整视场角（度）
+    double fov_y;                    ///< 垂直完整视场角（度）
     double max_distance;             ///< 最大瞄准距离（像素）
     double move_response_seconds = 0.080; ///< 基础控制响应时间
     double move_max_speed_cps = 960.0;    ///< 设备最大速度（counts/sec）；按捕获窗统计 FPS 动态换算单帧预算

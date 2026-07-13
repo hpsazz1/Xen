@@ -28,6 +28,7 @@
 #include "capture.h"
 #include "Xen.h"
 #include "debug/pipeline_tracer.h"
+#include "runtime/aim_coordinate_space.h"
 #include "runtime/thread_loops.h"
 
 /**
@@ -35,7 +36,7 @@
  *
  * 初始化鼠标控制线程的核心参数：
  *
- *   - resolution / screen_width / screen_height: 屏幕分辨率，用于坐标归一化
+ *   - resolution / screen_width / screen_height: 检测裁剪分辨率，用于目标中心和稳定半径
  *   - fovX / fovY: 视场角（度），用于屏幕像素与游戏内角度的换算
  *   - min/maxSpeedMultiplier: 速度曲线的最小/最大倍率
  *   - auto_shoot: 自瞄时是否自动开火
@@ -700,8 +701,14 @@ std::pair<double, double> MouseThread::mouseCountsToScreenPixels(int dx, int dy)
         const double degX = static_cast<double>(dx) * cachedGameSens * cachedGameYaw * fovScale;
         const double degY = static_cast<double>(dy) * cachedGameSens * cachedGamePitch * fovScale;
 
-        const double degPerPxX = fov_x / std::max(1.0, screen_width);
-        const double degPerPxY = fov_y / std::max(1.0, screen_height);
+        // 检测画面是原始源画面的中心裁剪，单个检测像素仍对应一个源像素。
+        // FOV 覆盖的是完整源画面，不能用 320 等检测裁剪宽度换算，否则会把 counts/px 高估数倍。
+        const double sourcePixelWidth = AimCoordinateSpace::resolveFovPixelSpan(
+            ::screenWidth.load(std::memory_order_relaxed), screen_width);
+        const double sourcePixelHeight = AimCoordinateSpace::resolveFovPixelSpan(
+            ::screenHeight.load(std::memory_order_relaxed), screen_height);
+        const double degPerPxX = fov_x / sourcePixelWidth;
+        const double degPerPxY = fov_y / sourcePixelHeight;
 
         if (std::abs(degPerPxX) > 1e-8 && std::abs(degPerPxY) > 1e-8)
         {
@@ -1087,6 +1094,8 @@ void MouseThread::moveMousePivot(
         pf->targetClassId = targetClassId;
         pf->targetDetected = true;
         pf->fpsValue = static_cast<double>(captureFps.load());
+        pf->sourceWidth = ::screenWidth.load(std::memory_order_relaxed);
+        pf->sourceHeight = ::screenHeight.load(std::memory_order_relaxed);
         if (observationTime.time_since_epoch().count() != 0)
         {
             const double age = std::chrono::duration<double>(
@@ -1109,14 +1118,18 @@ void MouseThread::moveMousePivot(
 
     const double fovScale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0)
         ? (fov_x / cachedGameBaseFOV) : 1.0;
-    const double degPerPixelX = fov_x / std::max(1.0, screen_width);
-    const double degPerPixelY = fov_y / std::max(1.0, screen_height);
+    // FOV 属于捕获源完整画面；检测坐标只是该画面的中心裁剪且保持 1:1 像素映射。
+    // 使用捕获后端动态发布的源尺寸，可避免把 2560 等实际源宽误按 320 宽检测区域换算。
+    const double sourcePixelWidth = AimCoordinateSpace::resolveFovPixelSpan(
+        ::screenWidth.load(std::memory_order_relaxed), screen_width);
+    const double sourcePixelHeight = AimCoordinateSpace::resolveFovPixelSpan(
+        ::screenHeight.load(std::memory_order_relaxed), screen_height);
     const double horizontalDenominator = cachedGameSens * cachedGameYaw * fovScale;
     const double verticalDenominator = cachedGameSens * cachedGamePitch * fovScale;
-    const double countsPerPixelX = std::abs(horizontalDenominator) > 1e-9
-        ? degPerPixelX / horizontalDenominator : 1.0;
-    const double countsPerPixelY = std::abs(verticalDenominator) > 1e-9
-        ? degPerPixelY / verticalDenominator : 1.0;
+    const double countsPerPixelX = AimCoordinateSpace::countsPerSourcePixel(
+        fov_x, sourcePixelWidth, horizontalDenominator);
+    const double countsPerPixelY = AimCoordinateSpace::countsPerSourcePixel(
+        fov_y, sourcePixelHeight, verticalDenominator);
 
     BasicAimController::Settings settings;
     settings.responseSeconds = move_response_seconds;
