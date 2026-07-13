@@ -6,6 +6,7 @@
 
 #include "ndi_capture.h"
 #include "ndi_frame_geometry.h"
+#include "runtime/frame_rate_counter.h"
 
 #include <Processing.NDI.Lib.h>
 
@@ -16,6 +17,13 @@
 #include <set>
 
 #pragma comment(lib, "Processing.NDI.Lib.x64.lib")
+
+std::atomic<double> NDICapture::global_declared_fps_{ 0.0 };
+std::atomic<int> NDICapture::global_receive_fps_{ 0 };
+std::atomic<uint64_t> NDICapture::global_received_frames_{ 0 };
+std::atomic<uint64_t> NDICapture::global_dropped_frames_{ 0 };
+std::atomic<int> NDICapture::global_encoded_width_{ 0 };
+std::atomic<int> NDICapture::global_encoded_height_{ 0 };
 
 // 构造函数：保存参数，初始化 NDI SDK 并启动接收线程
 NDICapture::NDICapture(int width, int height, const std::string& sourceName, int frameRate,
@@ -35,6 +43,13 @@ NDICapture::NDICapture(int width, int height, const std::string& sourceName, int
     , received_frames_(0)
     , dropped_frames_(0)
 {
+    // 新捕获会话从零开始统计，避免热重载后沿用上一个源的帧率和丢帧累计值。
+    global_declared_fps_.store(0.0, std::memory_order_relaxed);
+    global_receive_fps_.store(0, std::memory_order_relaxed);
+    global_received_frames_.store(0, std::memory_order_relaxed);
+    global_dropped_frames_.store(0, std::memory_order_relaxed);
+    global_encoded_width_.store(0, std::memory_order_relaxed);
+    global_encoded_height_.store(0, std::memory_order_relaxed);
     Initialize();
 }
 
@@ -72,40 +87,8 @@ bool NDICapture::Initialize()
         return false;
     }
 
-    // 如果指定了源名称，尝试立即连接
-    if (!source_name_.empty() && source_name_ != "None" && source_name_ != "Auto")
-    {
-        uint32_t numSources = 0;
-        const NDIlib_source_t* sources = NDIlib_find_get_current_sources(ndi_find_, &numSources);
-
-        for (uint32_t i = 0; i < numSources; ++i)
-        {
-            if (source_name_ == sources[i].p_ndi_name)
-            {
-                NDIlib_recv_create_v3_t recvDesc = { 0 };
-                recvDesc.source_to_connect_to = sources[i];
-                recvDesc.p_ndi_recv_name = "Xen NDI Receiver";
-                recvDesc.color_format = NDIlib_recv_color_format_BGRX_BGRA;
-                recvDesc.bandwidth = NDIlib_recv_bandwidth_highest;
-                recvDesc.allow_video_fields = false;
-
-                ndi_recv_ = NDIlib_recv_create_v3(&recvDesc);
-                if (ndi_recv_)
-                {
-                    is_connected_ = true;
-                    connected_source_name_ = source_name_;
-                    std::cout << "[NDI] Connected to source: " << source_name_ << std::endl;
-                }
-                break;
-            }
-        }
-
-        if (!ndi_recv_)
-        {
-            std::cerr << "[NDI] Specified source '" << source_name_ << "' not found. Will retry in receive thread." << std::endl;
-        }
-    }
-
+    // 源发现是异步的。立即读取新 finder 几乎必然为空，因此统一交给接收线程等待 mDNS 首轮结果，
+    // 避免正常启动被误报为“指定源不存在”。
     should_stop_ = false;
     receive_thread_ = std::thread(&NDICapture::ReceiveThread, this);
 
@@ -143,6 +126,12 @@ void NDICapture::Cleanup()
     }
 
     connected_source_name_.clear();
+    global_declared_fps_.store(0.0, std::memory_order_relaxed);
+    global_receive_fps_.store(0, std::memory_order_relaxed);
+    global_received_frames_.store(0, std::memory_order_relaxed);
+    global_dropped_frames_.store(0, std::memory_order_relaxed);
+    global_encoded_width_.store(0, std::memory_order_relaxed);
+    global_encoded_height_.store(0, std::memory_order_relaxed);
 }
 
 // 动态切换 NDI 源（在当前会话中）
@@ -215,6 +204,8 @@ void NDICapture::ReceiveThread()
     {
         NDIlib_video_frame_v2_t videoFrame;
         int discoveryCounter = 0;
+        FrameRateCounter receiveRate;
+        receiveRate.reset();
 
         while (!should_stop_)
         {
@@ -224,6 +215,8 @@ void NDICapture::ReceiveThread()
                 // 每 30 次循环（约 3 秒）执行一次源发现
                 if (discoveryCounter % 30 == 0)
                 {
+                    // 首次发现和后续重试都允许 finder 等待短时间；该等待只发生在 NDI 后台线程。
+                    NDIlib_find_wait_for_sources(ndi_find_, discoveryCounter == 0 ? 1000u : 100u);
                     uint32_t numSources = 0;
                     const NDIlib_source_t* sources = NDIlib_find_get_current_sources(ndi_find_, &numSources);
 
@@ -261,6 +254,7 @@ void NDICapture::ReceiveThread()
                                 connected_source_name_ = sources[sourceIndex].p_ndi_name;
                                 is_connected_ = true;
                                 std::cout << "[NDI] Connected to source: " << connected_source_name_ << std::endl;
+                                receiveRate.reset();
                             }
                         }
                     }
@@ -279,6 +273,18 @@ void NDICapture::ReceiveThread()
             {
                 if (videoFrame.xres > 0 && videoFrame.yres > 0)
                 {
+                    const double declaredFps = videoFrame.frame_rate_D > 0
+                        ? static_cast<double>(videoFrame.frame_rate_N) /
+                            static_cast<double>(videoFrame.frame_rate_D)
+                        : 0.0;
+                    global_declared_fps_.store(declaredFps, std::memory_order_relaxed);
+                    global_encoded_width_.store(videoFrame.xres, std::memory_order_relaxed);
+                    global_encoded_height_.store(videoFrame.yres, std::memory_order_relaxed);
+                    global_received_frames_.fetch_add(1, std::memory_order_relaxed);
+                    const auto receiveNow = std::chrono::steady_clock::now();
+                    global_receive_fps_.store(
+                        receiveRate.addFrame(receiveNow), std::memory_order_relaxed);
+
                     // 将 NDI 帧从 BGRA 转换为 BGR 格式
                     cv::Mat ndiFrame(videoFrame.yres, videoFrame.xres, CV_8UC4, videoFrame.p_data);
 
@@ -310,6 +316,7 @@ void NDICapture::ReceiveThread()
                         {
                             frame_queue_.pop();
                             dropped_frames_++;
+                            global_dropped_frames_.fetch_add(1, std::memory_order_relaxed);
                         }
                         frame_queue_.push({
                             std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight });
@@ -325,10 +332,18 @@ void NDICapture::ReceiveThread()
                 NDIlib_recv_destroy(ndi_recv_);
                 ndi_recv_ = nullptr;
                 is_connected_ = false;
+                global_receive_fps_.store(0, std::memory_order_relaxed);
+                receiveRate.reset();
                 connected_source_name_.clear();
                 discoveryCounter = 0;
             }
-            // 超时或收到音频/元数据 -> 继续循环
+            else
+            {
+                // 超时或只收到音频/元数据时刷新过期判断，断流两秒后不再显示旧接收 FPS。
+                global_receive_fps_.store(
+                    receiveRate.value(std::chrono::steady_clock::now()),
+                    std::memory_order_relaxed);
+            }
         }
     }
     catch (const std::exception& e)
@@ -339,6 +354,18 @@ void NDICapture::ReceiveThread()
     {
         std::cerr << "[NDI] Receive thread crashed: unknown exception." << std::endl;
     }
+}
+
+NdiCaptureDiagnostics NDICapture::GetDiagnostics()
+{
+    NdiCaptureDiagnostics diagnostics;
+    diagnostics.declaredFps = global_declared_fps_.load(std::memory_order_relaxed);
+    diagnostics.receiveFps = global_receive_fps_.load(std::memory_order_relaxed);
+    diagnostics.receivedFrames = global_received_frames_.load(std::memory_order_relaxed);
+    diagnostics.droppedFrames = global_dropped_frames_.load(std::memory_order_relaxed);
+    diagnostics.encodedWidth = global_encoded_width_.load(std::memory_order_relaxed);
+    diagnostics.encodedHeight = global_encoded_height_.load(std::memory_order_relaxed);
+    return diagnostics;
 }
 
 // 静态方法：获取当前可用的所有 NDI 源名称列表

@@ -3,6 +3,7 @@
 #include "runtime/basic_target_filter.h"
 #include "debug/pipeline_tracer.h"
 #include "capture/ndi_frame_geometry.h"
+#include "runtime/frame_rate_counter.h"
 
 #include <cmath>
 #include <cstdio>
@@ -35,6 +36,18 @@ void expectTrue(bool condition, const char* name)
 
 int main()
 {
+    FrameRateCounter rateCounter;
+    const auto rateStart = FrameRateCounter::TimePoint(std::chrono::milliseconds(1000));
+    rateCounter.reset(rateStart);
+    for (int frame = 1; frame <= 240; ++frame)
+    {
+        rateCounter.addFrame(rateStart + std::chrono::microseconds(frame * 1000000 / 240));
+    }
+    expectNear(rateCounter.value(rateStart + std::chrono::seconds(1)), 240.0, 0.0,
+               "frame rate counter measures real event cadence");
+    expectNear(rateCounter.value(rateStart + std::chrono::seconds(4)), 0.0, 0.0,
+               "frame rate counter expires stale rate");
+
     const auto ndiMetadataGeometry = ResolveNdiFrameGeometry(
         320, 320, "<xen source_width=\"2560\" source_height=\"1440\" roi_x=\"1120\" roi_y=\"560\"/>",
         1920, 1080);
@@ -86,6 +99,8 @@ int main()
                "basic pipeline contains filtered observation");
     expectTrue(traceHeader.find("SourceWidth,SourceHeight") != std::string::npos,
                "basic pipeline contains capture source dimensions");
+    expectTrue(traceHeader.find("InferenceFPS,NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
+               "basic pipeline contains ndi and inference fps diagnostics");
     expectTrue(traceHeader.find("PredX") == std::string::npos,
                "basic pipeline excludes prediction stage");
     traceFile.close();

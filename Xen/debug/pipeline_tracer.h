@@ -59,6 +59,11 @@ struct PipelineFrame
     bool   targetDetected = false;     ///< 本帧是否检测到目标
     double observationAgeSec = 0.0;    ///< 检测延迟（秒）
     double fpsValue = 0.0;            ///< 当前帧率
+    int    inferenceFps = 0;           ///< 检测器实际结果发布帧率
+    double ndiDeclaredFps = 0.0;       ///< NDI 发送端帧头声明帧率
+    int    ndiReceiveFps = 0;          ///< NDI 接收线程实际收到的帧率
+    uint64_t ndiReceivedFrames = 0;    ///< 当前 NDI 会话累计收到的视频帧数
+    uint64_t ndiDroppedFrames = 0;     ///< NDI 接收队列累计丢弃的旧帧数
     int    resolution = 0;            ///< 检测分辨率
     int    sourceWidth = 0;            ///< 捕获后端报告的完整源宽度，用于 FOV 换算审计
     int    sourceHeight = 0;           ///< 捕获后端报告的完整源高度，用于 FOV 换算审计

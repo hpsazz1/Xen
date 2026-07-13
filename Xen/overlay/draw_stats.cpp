@@ -17,6 +17,7 @@
 #include "Xen.h"
 #include "overlay.h"
 #include "capture.h"
+#include "capture/ndi_capture.h"
 #include "other_tools.h"
 #include "overlay/ui_sections.h"
 
@@ -221,6 +222,8 @@ void draw_stats()
     const float avgFrameTimeMs = (avg_fps_cached > 0.01f) ? (1000.0f / avg_fps_cached) : 0.0f;
     const int sourceWidth = screenWidth.load(std::memory_order_relaxed);
     const int sourceHeight = screenHeight.load(std::memory_order_relaxed);
+    const NdiCaptureDiagnostics ndiDiagnostics = NDICapture::GetDiagnostics();
+    const int inferenceFps = detectionBuffer.getPublishFps();
 
     // ---- 根据配置的采集方法构建采集源描述文本 ----
     std::string captureSource = "Unknown";
@@ -255,6 +258,11 @@ void draw_stats()
     {
         captureSource = "UDP " + config.udp_ip + ":" + std::to_string(config.udp_port);
         sourceSizeLabel = "流尺寸";
+    }
+    else if (config.capture_method == "ndi")
+    {
+        captureSource = "NDI: " + config.ndi_source_name;
+        sourceSizeLabel = "完整FOV";
     }
 
     // ---- 区块三：Capture Details — 采集详情与 GPU 统计 ----
@@ -292,6 +300,21 @@ void draw_stats()
             ImGui::Text("捕获帧率上限：%d", captureFpsLimit);
         else
             ImGui::Text("捕获帧率上限：不限");
+
+        if (config.capture_method == "ndi")
+        {
+            if (ndiDiagnostics.declaredFps > 0.0)
+                ImGui::Text("NDI源声明FPS：%.3f", ndiDiagnostics.declaredFps);
+            else
+                ImGui::TextDisabled("NDI源声明FPS：N/A");
+            ImGui::Text("NDI实际接收FPS：%d", ndiDiagnostics.receiveFps);
+            ImGui::Text("捕获处理FPS：%d | 检测发布FPS：%d", captureFps.load(), inferenceFps);
+            ImGui::Text("NDI编码帧：%dx%d | 累计接收：%llu | 接收队列丢帧：%llu",
+                ndiDiagnostics.encodedWidth,
+                ndiDiagnostics.encodedHeight,
+                static_cast<unsigned long long>(ndiDiagnostics.receivedFrames),
+                static_cast<unsigned long long>(ndiDiagnostics.droppedFrames));
+        }
 
         // ---- 当前帧和平均帧间隔时间 ----
         if (currentFrameTimeMs > 0.0f || avgFrameTimeMs > 0.0f)

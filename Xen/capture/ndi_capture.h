@@ -16,6 +16,22 @@
 #include <thread>
 #include <vector>
 
+/**
+ * @brief NDI 链路实时诊断快照
+ *
+ * declaredFps 来自发送端写入每个视频帧头的 frame_rate_N/frame_rate_D；receiveFps 是本机
+ * 实际收到并解码的视频帧数。两者分离后可以判断瓶颈位于 OBS/发送器还是网络/接收器。
+ */
+struct NdiCaptureDiagnostics
+{
+    double declaredFps = 0.0;
+    int receiveFps = 0;
+    uint64_t receivedFrames = 0;
+    uint64_t droppedFrames = 0;
+    int encodedWidth = 0;
+    int encodedHeight = 0;
+};
+
 class NDICapture : public IScreenCapture
 {
 public:
@@ -38,6 +54,8 @@ public:
 
     // 获取可用 NDI 源列表。新建发现器需要等待 mDNS 首次返回，timeoutMs 为最长等待时间。
     static std::vector<std::string> GetAvailableSources(uint32_t timeoutMs = 1500);
+    // 获取当前活动 NDI 接收器发布的无锁诊断快照。
+    static NdiCaptureDiagnostics GetDiagnostics();
 
 private:
     struct NetworkFrame
@@ -72,6 +90,13 @@ private:
     std::queue<NetworkFrame> frame_queue_;
 
     static const int MAX_QUEUE_SIZE = 5;  // 最大帧队列长度
+
+    static std::atomic<double> global_declared_fps_;
+    static std::atomic<int> global_receive_fps_;
+    static std::atomic<uint64_t> global_received_frames_;
+    static std::atomic<uint64_t> global_dropped_frames_;
+    static std::atomic<int> global_encoded_width_;
+    static std::atomic<int> global_encoded_height_;
 };
 
 #endif // NDI_CAPTURE_H

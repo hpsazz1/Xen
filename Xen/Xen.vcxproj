@@ -152,6 +152,7 @@
     <ClInclude Include="scr\data_collector.h" />
     <ClInclude Include="Xen.h" />
     <ClInclude Include="runtime\thread_loops.h" />
+    <ClInclude Include="runtime\frame_rate_counter.h" />
     <ClInclude Include="runtime\application_shutdown.h" />
     <ClInclude Include="runtime\application_threads.h" />
     <ClInclude Include="runtime\startup_helpers.h" />

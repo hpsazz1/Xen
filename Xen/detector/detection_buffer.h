@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <opencv2/opencv.hpp>
+#include "runtime/frame_rate_counter.h"
 
 /**
  * DetectionBuffer - 线程安全的检测结果缓冲区
@@ -31,6 +32,7 @@ struct DetectionBuffer
     std::vector<float> confidences;
     std::chrono::steady_clock::time_point frameTimestamp{};
     std::chrono::steady_clock::time_point publishTimestamp{};
+    FrameRateCounter publishFpsCounter; ///< 只按真实检测结果发布事件统计，不使用线程轮询次数
 
     /**
      * set - 写入检测结果到缓冲区（无置信度版本）
@@ -63,8 +65,16 @@ struct DetectionBuffer
         confidences = newConfidences;
         frameTimestamp = (newFrameTimestamp.time_since_epoch().count() != 0) ? newFrameTimestamp : now;
         publishTimestamp = now;
+        publishFpsCounter.addFrame(now);
         ++version;
         cv.notify_all();
+    }
+
+    /** @brief 获取实际检测结果发布 FPS；超过两秒无发布时返回 0，避免显示过期值。 */
+    int getPublishFps()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return publishFpsCounter.value();
     }
 
     /**
@@ -81,6 +91,7 @@ struct DetectionBuffer
         confidences.clear();
         frameTimestamp = now;
         publishTimestamp = now;
+        publishFpsCounter.reset(now);
         ++version;
         cv.notify_all();
     }

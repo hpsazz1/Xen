@@ -26,6 +26,7 @@
 
 #include "mouse.h"
 #include "capture.h"
+#include "capture/ndi_capture.h"
 #include "Xen.h"
 #include "debug/pipeline_tracer.h"
 #include "runtime/aim_coordinate_space.h"
@@ -1094,6 +1095,12 @@ void MouseThread::moveMousePivot(
         pf->targetClassId = targetClassId;
         pf->targetDetected = true;
         pf->fpsValue = static_cast<double>(captureFps.load());
+        pf->inferenceFps = detectionBuffer.getPublishFps();
+        const NdiCaptureDiagnostics ndiDiagnostics = NDICapture::GetDiagnostics();
+        pf->ndiDeclaredFps = ndiDiagnostics.declaredFps;
+        pf->ndiReceiveFps = ndiDiagnostics.receiveFps;
+        pf->ndiReceivedFrames = ndiDiagnostics.receivedFrames;
+        pf->ndiDroppedFrames = ndiDiagnostics.droppedFrames;
         pf->sourceWidth = ::screenWidth.load(std::memory_order_relaxed);
         pf->sourceHeight = ::screenHeight.load(std::memory_order_relaxed);
         if (observationTime.time_since_epoch().count() != 0)

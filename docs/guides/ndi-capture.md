@@ -12,14 +12,14 @@ NDI 采集通过网络从另一台 PC 或同一台 PC 上的 NDI 源接收视频
 
 ```ini
 capture_method = ndi
-ndi_source_name = HPSAZZ (OBS PGM)
+ndi_source_name = HPSAZZ (main)
 ndi_source_width = 2560
 ndi_source_height = 1440
 detection_resolution = 320
 capture_fps = 0
 ```
 
-- `ndi_source_name` — 必须填写发现列表显示的完整名称。例如 `HPSAZZ (OBS PGM)` 中主机名和括号内节目名都属于名称，不能只填其中一段。
+- `ndi_source_name` — 必须填写发现列表显示的完整名称。例如 `HPSAZZ (main)` 中主机名和括号内节目名都属于名称，不能只填其中一段。
 - `ndi_source_width/height` — OBS 发送 1:1 中心预裁剪 ROI 时，填写游戏完整 FOV 尺寸。收到合法 Xen 帧元数据时元数据优先；设为 `0/0` 时回退为 NDI 视频帧尺寸。
 - `detection_resolution` — 从 NDI 完整帧中心按 1:1 像素裁出的正方形检测区域，不会拉伸完整画面。
 - `capture_fps` — 辅机处理帧率上限；控制器实际使用相邻有效观测的时间间隔。
@@ -33,6 +33,11 @@ capture_fps = 0
 1. OBS 的 320×320 输出是主画面中心的 1:1 像素裁剪，不是把完整 2560×1440 缩放或挤压成正方形。
 2. 接收端设置 `ndi_source_width = 2560`、`ndi_source_height = 1440`。这两个值只影响 FOV/鼠标换算，不会放大网络图像或增加 NDI 带宽。
 3. CSV 验收时 `Resolution` 应为 320，`SourceWidth/SourceHeight` 应为 2560/1440。
+
+本场景的中心裁剪参数必须是 `x=1120`、`y=560`、`width=320`、`height=320`：
+`(2560-320)/2=1120`，`(1440-320)/2=560`。这证明 ROI 中心与游戏准星中心一致。
+
+“采集详情”会分别显示 NDI 帧头声明 FPS、实际接收 FPS、捕获处理 FPS、检测发布 FPS、累计接收和接收队列丢帧。CSV 也记录 `InferenceFPS/NdiDeclaredFPS/NdiReceiveFPS/NdiReceivedFrames/NdiDroppedFrames`。若声明 FPS 已是 240 而实际接收明显较低，重点检查发送器和网络；若接收 FPS 接近 240 而捕获或检测 FPS 较低，瓶颈在辅机解码、颜色转换或推理。
 
 接收端还支持视频帧 XML 元数据：
 

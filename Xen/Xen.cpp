@@ -150,6 +150,8 @@ int main(int argc, char** argv)
     SetConsoleOutputCP(CP_UTF8);
     // 设置随机控制台标题，防止被简单检测
     SetRandomConsoleTitle();
+    if (!InstallConsoleShutdownHandler())
+        std::cerr << "[Shutdown] Failed to install console close handler." << std::endl;
     // 抑制 OpenCV 日志输出，仅显示致命错误
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_FATAL);
     // 将工作目录设为 exe 所在目录
@@ -339,8 +341,6 @@ int main(int argc, char** argv)
         }
 #endif
 
-        detection_resolution_changed.store(true);
-
         // 启动各工作线程
         // 键盘监听线程：处理快捷键、配置热切换等
         threads.keyboard = StartThreadGuarded("KeyboardListener", [] {
@@ -418,6 +418,7 @@ int main(int argc, char** argv)
             gameOverlayPtr.reset();
         }
 
+        MarkApplicationShutdownComplete();
         return 0;
     }
     catch (const std::exception& e)
@@ -425,6 +426,7 @@ int main(int argc, char** argv)
         std::cerr << "[MAIN] An error has occurred in the main stream: " << e.what() << std::endl;
         std::cout << "Press Enter to exit...";
         std::cin.get();
+        MarkApplicationShutdownComplete();
         return -1;
     }
 }
