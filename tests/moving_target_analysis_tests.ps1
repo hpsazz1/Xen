@@ -38,7 +38,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Copy-Item -LiteralPath $csvPath -Destination $singleDirectionPath
 
     $outputCsv = Join-Path $temporaryRoot 'summary.csv'
-    $metrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $temporaryRoot -WarmupMs 0 -ReversalErrorThresholdPx 8 -ReversalConfirmFrames 2 -RecoveryConfirmFrames 2 -OutputCsv $outputCsv -PassThru)
+    $metrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $temporaryRoot -WarmupMs 0 -MinTrialDurationMs 0 -MinTrialSamples 1 -ReversalErrorThresholdPx 8 -ReversalConfirmFrames 2 -RecoveryConfirmFrames 2 -OutputCsv $outputCsv -PassThru)
     $trials = @($metrics | Where-Object { $_.Level -eq 'Trial' })
     $scenario = @($metrics | Where-Object { $_.Level -eq 'Scenario' })
 
@@ -56,8 +56,12 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     $exportedRows = @(Import-Csv -LiteralPath $outputCsv)
     Assert-Equal 6 $exportedRows.Count 'CSV export must include trials and scenario summaries.'
     Assert-Equal 2 $exportedRows[-1].Trials 'CSV export must retain scenario-only summary columns.'
-    $rerunMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $temporaryRoot -WarmupMs 0 -ReversalErrorThresholdPx 8 -ReversalConfirmFrames 2 -RecoveryConfirmFrames 2 -OutputCsv $outputCsv -PassThru)
+    $rerunMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $temporaryRoot -WarmupMs 0 -MinTrialDurationMs 0 -MinTrialSamples 1 -ReversalErrorThresholdPx 8 -ReversalConfirmFrames 2 -RecoveryConfirmFrames 2 -OutputCsv $outputCsv -PassThru)
     Assert-Equal 6 $rerunMetrics.Count 'Repeated analysis must ignore its own root-level summary CSV.'
+
+    $filteredMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $temporaryRoot -WarmupMs 0 -MinTrialDurationMs 50 -MinTrialSamples 5 -PassThru -WarningAction SilentlyContinue)
+    $filteredTrials = @($filteredMetrics | Where-Object { $_.Level -eq 'Trial' })
+    Assert-Equal 2 $filteredTrials.Count 'Short moving fragments must be excluded from scenario metrics.'
 }
 finally {
     if (Test-Path -LiteralPath $temporaryRoot) {

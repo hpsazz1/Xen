@@ -35,7 +35,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_moving_target.
 
 首轮只采集水平向左、水平向右和左右反转三个固定脚本场景，保持80 ms与1440 counts/s静止基线不变。指标定义、目录结构和决策顺序见 `docs/016移动目标测试方案20260713.md`。
 
-分析器使用 `FinalMx/My` 计算实际输出counts/s，并从请求像素与请求计数恢复counts/px，输出 `ApproxClosedLoopLagMs`。只有文件名包含 `reverse` 或 `reversal` 的往返场景才统计持续误差侧翻转和±8 px中心恢复，单向场景固定不报告反转。首轮数据结论与PI候选见 `docs/017移动目标首轮分析与PI候选20260713.md`，复测发现的PI稳定态冲突与DML+NDI验收方法见 `docs/018移动PI稳定态冲突修复20260714.md`。
+分析器使用 `FinalMx/My` 计算实际输出counts/s，并从请求像素与请求计数恢复counts/px，输出 `ApproxClosedLoopLagMs`。只有文件名包含 `reverse` 或 `reversal` 的往返场景才统计持续误差侧翻转和±8 px中心恢复，单向场景固定不报告反转。默认剔除不足500 ms或预热后少于30个有效样本的碎片，可用 `MinTrialDurationMs/MinTrialSamples` 调整。首轮数据结论与PI候选见 `docs/017移动目标首轮分析与PI候选20260713.md`，两轮中心停发与DML积分解卷绕见 `docs/018移动PI稳定态冲突修复20260714.md`、`docs/019DML移动复测与积分解卷绕20260714.md`。
 
 当诊断日志输出类似以下行时：
 

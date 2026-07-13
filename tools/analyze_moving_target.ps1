@@ -4,6 +4,8 @@ param(
     [ValidateSet('X', 'Y')][string]$Axis = 'X',
     [double]$TrialGapMs = 150.0,
     [double]$WarmupMs = 200.0,
+    [ValidateRange(0.0, 60000.0)][double]$MinTrialDurationMs = 500.0,
+    [ValidateRange(1, 10000)][int]$MinTrialSamples = 30,
     [double]$ReversalErrorThresholdPx = 20.0,
     [ValidateRange(1, 20)][int]$ReversalConfirmFrames = 3,
     [double]$RecoveryRadiusPx = 8.0,
@@ -200,9 +202,24 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
     for ($trialIndex = 0; $trialIndex -lt $trials.Count; ++$trialIndex) {
         $trial = @($trials[$trialIndex])
         $firstTimestamp = [double]$trial[0].Timestamp
+        $trialDurationMs = [double]$trial[-1].Timestamp - $firstTimestamp
+        if ($trialDurationMs -lt $MinTrialDurationMs) {
+            Write-Warning (
+                "Skipping short moving trial: chain=$chain scenario=$($csvFile.BaseName) " +
+                "trial=$($trialIndex + 1) duration_ms=$([math]::Round($trialDurationMs, 1)) " +
+                "rows=$($trial.Count)")
+            continue
+        }
         $samples = @($trial | Where-Object { ([double]$_.Timestamp - $firstTimestamp) -ge $WarmupMs })
         if ($samples.Count -eq 0) {
             $samples = $trial
+        }
+        if ($samples.Count -lt $MinTrialSamples) {
+            Write-Warning (
+                "Skipping sparse moving trial: chain=$chain scenario=$($csvFile.BaseName) " +
+                "trial=$($trialIndex + 1) effective_samples=$($samples.Count) " +
+                "required_samples=$MinTrialSamples")
+            continue
         }
 
         $axisAbsErrors = @($samples | ForEach-Object { [math]::Abs([double]$_.$errorColumn) })
@@ -250,7 +267,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             Trial = $trialIndex + 1
             Rows = $trial.Count
             Samples = $samples.Count
-            DurationMs = [math]::Round([double]$trial[-1].Timestamp - $firstTimestamp, 1)
+            DurationMs = [math]::Round($trialDurationMs, 1)
             MeanAxisErrorPx = [math]::Round([double]($samples | Measure-Object $errorColumn -Average).Average, 2)
             MeanAbsAxisErrorPx = [math]::Round([double]($axisAbsErrors | Measure-Object -Average).Average, 2)
             P50AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $axisAbsErrors -Percentile 0.50), 2)

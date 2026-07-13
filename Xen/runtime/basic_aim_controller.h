@@ -43,13 +43,17 @@ public:
         const double integralTime = settings.integralTimeSeconds > 0.0
             ? std::clamp(settings.integralTimeSeconds, 0.050, 1.0) : 0.0;
 
-        // 积分启用时，误差换向必须先于稳定态判定清理对应轴。这样静止目标越过中心后
-        // 能立即撤销旧方向积分，而匀速目标在同侧接近中心时仍可保留维持目标速度所需的输出。
-        if (integralTime > 0.0 && hasPreviousError_)
+        const double settleRadius = std::max(0.0, settings.settleRadiusPixels);
+        const double releaseRadius = std::max(settleRadius, settings.releaseRadiusPixels);
+
+        // 匀速跟踪时 PI 可能在中心附近产生亚像素级越心，这只是积分自然回调，不能等同于
+        // 目标反转。只有误差已位于旧积分反方向且扩大到稳定半径，才撤销该轴旧积分；
+        // 这样小幅越心仍保留维持速度，静止过冲或真实反转又能在 5 px 边界内完成解卷绕。
+        if (integralTime > 0.0)
         {
-            if (errorX * previousErrorX_ < 0.0)
+            if (errorX * integralCountErrorX_ < 0.0 && std::abs(errorX) >= settleRadius)
                 integralCountErrorX_ = 0.0;
-            if (errorY * previousErrorY_ < 0.0)
+            if (errorY * integralCountErrorY_ < 0.0 && std::abs(errorY) >= settleRadius)
                 integralCountErrorY_ = 0.0;
         }
 
@@ -62,8 +66,6 @@ public:
         const bool hasActionableIntegral =
             std::hypot(retainedIntegralCountsX, retainedIntegralCountsY) >= 0.5;
 
-        const double settleRadius = std::max(0.0, settings.settleRadiusPixels);
-        const double releaseRadius = std::max(settleRadius, settings.releaseRadiusPixels);
         if (settled_)
         {
             if (out.errorDistance <= releaseRadius && !hasActionableIntegral)
@@ -139,12 +141,6 @@ public:
             integralCountErrorX_ = candidateIntegralX;
             integralCountErrorY_ = candidateIntegralY;
         }
-        if (integralTime > 0.0)
-        {
-            previousErrorX_ = errorX;
-            previousErrorY_ = errorY;
-            hasPreviousError_ = true;
-        }
         return out;
     }
 
@@ -160,15 +156,9 @@ private:
     {
         integralCountErrorX_ = 0.0;
         integralCountErrorY_ = 0.0;
-        previousErrorX_ = 0.0;
-        previousErrorY_ = 0.0;
-        hasPreviousError_ = false;
     }
 
     bool settled_ = false;
     double integralCountErrorX_ = 0.0;
     double integralCountErrorY_ = 0.0;
-    double previousErrorX_ = 0.0;
-    double previousErrorY_ = 0.0;
-    bool hasPreviousError_ = false;
 };

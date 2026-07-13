@@ -297,8 +297,8 @@ int main()
     expectTrue(std::abs(dmlTargetPixels - dmlCameraPixels) < 5.0,
                "pi controller tracks a moving target at dml inference rate");
 
-    // 同侧进入中心应保留有效积分；真正越过中心时必须先清除旧方向积分，随后允许
-    // 静止稳定逻辑接管，兼顾移动目标零稳态误差与静止目标不过冲。
+    // 同侧进入中心和亚像素级越心都应保留有效积分；只有反向误差扩大到稳定半径，
+    // 才能判定旧积分不再代表持续目标速度并开始解卷绕。
     BasicAimController centerHoldController;
     BasicAimController::Settings centerHoldSettings = dmlRateSettings;
     for (int frame = 0; frame < 20; ++frame)
@@ -309,8 +309,16 @@ int main()
                "actionable integral survives same-side center entry");
     const auto crossedCenter = centerHoldController.update(
         -1.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
-    expectTrue(crossedCenter.settled,
-               "error sign reversal clears integral before static settling");
+    expectTrue(!crossedCenter.settled && crossedCenter.integralCountsX > 0.5,
+               "subpixel center crossing preserves moving integral");
+    const auto oppositeOutsideSettle = centerHoldController.update(
+        -6.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
+    expectTrue(oppositeOutsideSettle.integralCountsX <= 0.0,
+               "opposite error outside settle radius unwinds old integral");
+    const auto returnedToCenter = centerHoldController.update(
+        -4.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
+    expectTrue(returnedToCenter.settled,
+               "unwound static overshoot can enter settle state");
 
     // 积分候选必须保持静止闭环安全：大误差阶段受设备限速时禁止 wind-up，
     // 接近中心后进入既有 5 px 稳定半径并清空积分，不得跨越目标持续反向输出。
