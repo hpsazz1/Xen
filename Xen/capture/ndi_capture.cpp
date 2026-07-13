@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include "ndi_capture.h"
+#include "ndi_frame_geometry.h"
 
 #include <Processing.NDI.Lib.h>
 
@@ -17,10 +18,13 @@
 #pragma comment(lib, "Processing.NDI.Lib.x64.lib")
 
 // 构造函数：保存参数，初始化 NDI SDK 并启动接收线程
-NDICapture::NDICapture(int width, int height, const std::string& sourceName, int frameRate)
+NDICapture::NDICapture(int width, int height, const std::string& sourceName, int frameRate,
+                       int sourceWidth, int sourceHeight)
     : width_(width)
     , height_(height)
     , frame_rate_(std::max(1, std::min(120, frameRate)))
+    , configured_source_width_(sourceWidth)
+    , configured_source_height_(sourceHeight)
     , source_name_(sourceName)
     , ndi_find_(nullptr)
     , ndi_recv_(nullptr)
@@ -283,12 +287,18 @@ void NDICapture::ReceiveThread()
 
                     // 网络完整帧与本地桌面捕获保持同一契约：从画面中心按 1:1 像素裁出检测区域。
                     // 禁止把 16:9 完整帧拉伸为正方形，否则会破坏 FOV、目标形状和鼠标坐标比例。
-                    const int sourceWidth = frame.cols;
-                    const int sourceHeight = frame.rows;
-                    const int cropWidth = std::min(width_, sourceWidth);
-                    const int cropHeight = std::min(height_, sourceHeight);
-                    const int cropX = std::max(0, (sourceWidth - cropWidth) / 2);
-                    const int cropY = std::max(0, (sourceHeight - cropHeight) / 2);
+                    const int encodedWidth = frame.cols;
+                    const int encodedHeight = frame.rows;
+                    const std::string_view metadata = videoFrame.p_metadata
+                        ? std::string_view(videoFrame.p_metadata)
+                        : std::string_view();
+                    const NdiFrameGeometry geometry = ResolveNdiFrameGeometry(
+                        encodedWidth, encodedHeight, metadata,
+                        configured_source_width_, configured_source_height_);
+                    const int cropWidth = std::min(width_, encodedWidth);
+                    const int cropHeight = std::min(height_, encodedHeight);
+                    const int cropX = std::max(0, (encodedWidth - cropWidth) / 2);
+                    const int cropY = std::max(0, (encodedHeight - cropHeight) / 2);
                     cv::Mat detectionFrame = frame(
                         cv::Rect(cropX, cropY, cropWidth, cropHeight)).clone();
                     if (cropWidth != width_ || cropHeight != height_)
@@ -301,7 +311,8 @@ void NDICapture::ReceiveThread()
                             frame_queue_.pop();
                             dropped_frames_++;
                         }
-                        frame_queue_.push({ std::move(detectionFrame), sourceWidth, sourceHeight });
+                        frame_queue_.push({
+                            std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight });
                         received_frames_++;
                     }
                 }

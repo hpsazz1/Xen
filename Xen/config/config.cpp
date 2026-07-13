@@ -78,6 +78,8 @@ bool Config::loadConfig(const std::string& filename)
         udp_ip = "0.0.0.0";                              // UDP 画面传输接收端 IP
         udp_port = 1234;                                 // UDP 端口
         ndi_source_name = "Auto";                        // NDI 源名称
+        ndi_source_width = 0;                            // NDI 完整游戏 FOV 宽度（0=自动）
+        ndi_source_height = 0;                           // NDI 完整游戏 FOV 高度（0=自动）
         detection_resolution = 320;                      // AI 检测分辨率（160/320/640）
         capture_fps = 60;                                // 画面捕获帧率上限
         monitor_idx = 0;                                 // 显示器索引
@@ -438,6 +440,18 @@ bool Config::loadConfig(const std::string& filename)
     if (udp_port < 1 || udp_port > 65535)
         udp_port = 1234;
     ndi_source_name = get_string("ndi_source_name", "Auto");
+    ndi_source_width = get_long("ndi_source_width", 0);
+    ndi_source_height = get_long("ndi_source_height", 0);
+    if (ndi_source_width < 0 || ndi_source_width > 16384)
+        ndi_source_width = 0;
+    if (ndi_source_height < 0 || ndi_source_height > 16384)
+        ndi_source_height = 0;
+    // 宽高必须成对启用，避免只修正一个轴导致移动比例不一致。
+    if ((ndi_source_width == 0) != (ndi_source_height == 0))
+    {
+        ndi_source_width = 0;
+        ndi_source_height = 0;
+    }
     detection_resolution = get_long("detection_resolution", 320);
     if (detection_resolution != 160 && detection_resolution != 320 && detection_resolution != 640)
         detection_resolution = 320;
@@ -762,6 +776,8 @@ bool Config::saveConfig(const std::string& filename)
         << "udp_ip = " << udp_ip << "\n"
         << "udp_port = " << udp_port << "\n"
         << "ndi_source_name = " << ndi_source_name << "\n"
+        << "ndi_source_width = " << ndi_source_width << "\n"
+        << "ndi_source_height = " << ndi_source_height << "\n"
         << "detection_resolution = " << detection_resolution << "\n"
         << "capture_fps = " << capture_fps << "\n"
         << "monitor_idx = " << monitor_idx << "\n"

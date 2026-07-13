@@ -21,6 +21,7 @@
     <ClCompile Include="capture\virtual_camera.cpp" />
     <ClCompile Include="capture\winrt_capture.cpp" />
     <ClCompile Include="capture\ndi_capture.cpp" />
+    <ClCompile Include="capture\ndi_frame_geometry.cpp" />
     <ClCompile Include="config\config.cpp" />
     <ClCompile Include="depth\depth_anything_trt.cpp" />
     <ClCompile Include="depth\depth_mask.cpp" />
@@ -99,6 +100,7 @@
     <ClInclude Include="capture\virtual_camera.h" />
     <ClInclude Include="capture\winrt_capture.h" />
     <ClInclude Include="capture\ndi_capture.h" />
+    <ClInclude Include="capture\ndi_frame_geometry.h" />
     <ClInclude Include="config\config.h" />
     <ClInclude Include="depth\depth_anything_trt.h" />
     <ClInclude Include="depth\depth_mask.h" />

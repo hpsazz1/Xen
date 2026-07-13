@@ -50,6 +50,8 @@ capture_use_cuda = true
 | `capture_target` | `monitor` | 捕获目标类型。通常为 `monitor`。 |
 | `capture_window_title` | 空 | 选择窗口捕获目标时使用的窗口标题。 |
 | `ndi_source_name` | `Auto` | NDI 源名称。设为 `Auto` 自动连接第一个发现的 NDI 源，或指定具体源名称。 |
+| `ndi_source_width` | `0` | NDI 预裁剪 ROI 对应的完整游戏 FOV 宽度。`0` 表示使用 Xen 帧元数据或视频帧宽度。 |
+| `ndi_source_height` | `0` | NDI 预裁剪 ROI 对应的完整游戏 FOV 高度。必须与宽度成对设置。 |
 | `udp_ip` | `0.0.0.0` | UDP 捕获的发送端 IP 过滤。使用 `0.0.0.0` 接受来自任何发送端的帧。 |
 | `udp_port` | `1234` | UDP 捕获端口。 |
 | `detection_resolution` | `320` | 方形推理/捕获处理尺寸。有效值为 `160`、`320` 和 `640`。值越高可提升细节，但会消耗更多性能。 |

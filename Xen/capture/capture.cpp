@@ -152,6 +152,8 @@ struct CaptureThreadConfig
     std::string udp_ip;                  // UDP 捕获的 IP 地址
     int udp_port = 0;                    // UDP 捕获的端口
     std::string ndi_source_name;         // NDI 源名称
+    int ndi_source_width = 0;            // NDI 预裁剪 ROI 对应的完整游戏 FOV 宽度
+    int ndi_source_height = 0;           // NDI 预裁剪 ROI 对应的完整游戏 FOV 高度
     std::string backend;                 // AI 推理后端：TRT / DML
     std::vector<std::string> screenshot_button; // 截图快捷键按键列表
     int screenshot_delay = 0;            // 截图最小间隔（毫秒）
@@ -190,6 +192,8 @@ CaptureThreadConfig SnapshotCaptureConfig()
     snapshot.udp_ip = config.udp_ip;
     snapshot.udp_port = config.udp_port;
     snapshot.ndi_source_name = config.ndi_source_name;
+    snapshot.ndi_source_width = config.ndi_source_width;
+    snapshot.ndi_source_height = config.ndi_source_height;
     snapshot.backend = config.backend;
     snapshot.screenshot_button = config.screenshot_button;
     snapshot.screenshot_delay = config.screenshot_delay;
@@ -596,7 +600,9 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 {
                     if (cfg.verbose)
                         std::cout << "[Capture] Using NDI: " << cfg.ndi_source_name << std::endl;
-                    return std::make_unique<NDICapture>(width, height, cfg.ndi_source_name, cfg.capture_fps);
+                    return std::make_unique<NDICapture>(
+                        width, height, cfg.ndi_source_name, cfg.capture_fps,
+                        cfg.ndi_source_width, cfg.ndi_source_height);
                 }
 
                 if (cfg.verbose)

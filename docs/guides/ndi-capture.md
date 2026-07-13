@@ -12,14 +12,36 @@ NDI 采集通过网络从另一台 PC 或同一台 PC 上的 NDI 源接收视频
 
 ```ini
 capture_method = ndi
-ndi_source_name = Auto
-detection_resolution = 640
-capture_fps = 60
+ndi_source_name = HPSAZZ (OBS PGM)
+ndi_source_width = 2560
+ndi_source_height = 1440
+detection_resolution = 320
+capture_fps = 0
 ```
 
-- `ndi_source_name` — 设置为 `Auto` 自动连接第一个发现的 NDI 源，或指定具体源名称。
+- `ndi_source_name` — 必须填写发现列表显示的完整名称。例如 `HPSAZZ (OBS PGM)` 中主机名和括号内节目名都属于名称，不能只填其中一段。
+- `ndi_source_width/height` — OBS 发送 1:1 中心预裁剪 ROI 时，填写游戏完整 FOV 尺寸。收到合法 Xen 帧元数据时元数据优先；设为 `0/0` 时回退为 NDI 视频帧尺寸。
 - `detection_resolution` — 从 NDI 完整帧中心按 1:1 像素裁出的正方形检测区域，不会拉伸完整画面。
 - `capture_fps` — 辅机处理帧率上限；控制器实际使用相邻有效观测的时间间隔。
+
+## OBS 低延迟 320×320 方案
+
+完整 2560×1440 NDI 通常需要显著更高的编码、内存复制和网络带宽，链路接近带宽或编解码能力上限时会增加排队和延迟。延迟是否增加取决于 OBS 输出帧率、NDI 模式、网卡和接收端性能，不能只按像素数断定；应以发送时间码和接收统计实测。
+
+当前推荐保持 320×320 传输，但 OBS 场景必须满足以下约束：
+
+1. OBS 的 320×320 输出是主画面中心的 1:1 像素裁剪，不是把完整 2560×1440 缩放或挤压成正方形。
+2. 接收端设置 `ndi_source_width = 2560`、`ndi_source_height = 1440`。这两个值只影响 FOV/鼠标换算，不会放大网络图像或增加 NDI 带宽。
+3. CSV 验收时 `Resolution` 应为 320，`SourceWidth/SourceHeight` 应为 2560/1440。
+
+接收端还支持视频帧 XML 元数据：
+
+```xml
+<xen source_width="2560" source_height="1440"
+     roi_x="1120" roi_y="560" roi_width="320" roi_height="320" />
+```
+
+现有 OBS NDI 插件通常不会自动注入这段 Xen 自定义元数据，因此本配置采用宽高字段回退。以后更换可注入元数据的发送器后，无需删除配置；合法帧元数据始终优先。
 
 ## 接收端设置
 

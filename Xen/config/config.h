@@ -30,6 +30,8 @@ public:
     int virtual_camera_width;
     int virtual_camera_height;
     std::string ndi_source_name;
+    int ndi_source_width;  // NDI 预裁剪 ROI 对应的完整游戏 FOV 宽度；0 表示使用帧尺寸/元数据
+    int ndi_source_height; // NDI 预裁剪 ROI 对应的完整游戏 FOV 高度；0 表示使用帧尺寸/元数据
 
     // ========== 目标设置 ==========
     bool disable_headshot;

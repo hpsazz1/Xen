@@ -641,6 +641,29 @@ void draw_capture_settings()
                 OverlayUI::EndSettingRow(row);
             }
 
+            // OBS 发送 1:1 中心预裁剪 ROI 时，NDI 视频帧本身只有 ROI 尺寸。
+            // 这里声明游戏完整 FOV 尺寸，供鼠标角度换算使用；0/0 表示优先使用帧元数据或帧尺寸。
+            {
+                const auto row = OverlayUI::BeginSettingRow("完整FOV宽度");
+                if (ImGui::InputInt("##value", &config.ndi_source_width))
+                {
+                    config.ndi_source_width = std::clamp(config.ndi_source_width, 0, 16384);
+                    OverlayConfig_MarkDirty();
+                    capture_method_changed.store(true);
+                }
+                OverlayUI::EndSettingRow(row);
+            }
+            {
+                const auto row = OverlayUI::BeginSettingRow("完整FOV高度");
+                if (ImGui::InputInt("##value", &config.ndi_source_height))
+                {
+                    config.ndi_source_height = std::clamp(config.ndi_source_height, 0, 16384);
+                    OverlayConfig_MarkDirty();
+                    capture_method_changed.store(true);
+                }
+                OverlayUI::EndSettingRow(row);
+            }
+
             OverlayUI::EndSection();
         }
     }

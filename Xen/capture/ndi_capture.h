@@ -18,7 +18,8 @@
 class NDICapture : public IScreenCapture
 {
 public:
-    NDICapture(int width, int height, const std::string& sourceName = "", int frameRate = 60);
+    NDICapture(int width, int height, const std::string& sourceName = "", int frameRate = 60,
+               int sourceWidth = 0, int sourceHeight = 0);
     ~NDICapture();
 
     cv::Mat GetNextFrameCpu() override;
@@ -50,6 +51,8 @@ private:
     int width_;
     int height_;
     int frame_rate_;
+    int configured_source_width_;  ///< OBS 预裁剪 ROI 未携带元数据时的完整游戏 FOV 宽度
+    int configured_source_height_; ///< OBS 预裁剪 ROI 未携带元数据时的完整游戏 FOV 高度
     std::string source_name_;
     std::string connected_source_name_;
 

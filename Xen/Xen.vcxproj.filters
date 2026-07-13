@@ -51,6 +51,7 @@
     <ClCompile Include="debug\pipeline_tracer.cpp" />
     <ClCompile Include="capture\udp_capture.cpp" />
     <ClCompile Include="capture\ndi_capture.cpp" />
+    <ClCompile Include="capture\ndi_frame_geometry.cpp" />
     <ClCompile Include="modules\makcu\src\makcu.cpp" />
     <ClCompile Include="modules\makcu\src\serialport.cpp" />
     <ClCompile Include="mouse\Makcu.cpp" />
@@ -128,6 +129,7 @@
     <ClInclude Include="overlay\draw_settings.h" />
     <ClInclude Include="capture\udp_capture.h" />
     <ClInclude Include="capture\ndi_capture.h" />
+    <ClInclude Include="capture\ndi_frame_geometry.h" />
     <ClInclude Include="modules\makcu\include\makcu.h" />
     <ClInclude Include="modules\makcu\include\serialport.h" />
     <ClInclude Include="mouse\Makcu.h" />

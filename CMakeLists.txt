@@ -250,6 +250,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/capture/virtual_camera.cpp"
     "${SRC_DIR}/capture/winrt_capture.cpp"
     "${SRC_DIR}/capture/ndi_capture.cpp"
+    "${SRC_DIR}/capture/ndi_frame_geometry.cpp"
     "${SRC_DIR}/config/config.cpp"
     "${SRC_DIR}/detector/detection_buffer.cpp"
     "${SRC_DIR}/detector/detection_filters.cpp"
@@ -334,6 +335,7 @@ if(BUILD_TESTING)
     add_executable(xen_algorithm_tests
         "${CMAKE_SOURCE_DIR}/tests/speed_curve_tests.cpp"
         "${SRC_DIR}/debug/pipeline_tracer.cpp"
+        "${SRC_DIR}/capture/ndi_frame_geometry.cpp"
     )
     target_include_directories(xen_algorithm_tests PRIVATE "${SRC_DIR}")
     target_compile_features(xen_algorithm_tests PRIVATE cxx_std_17)

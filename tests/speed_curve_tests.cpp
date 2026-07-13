@@ -2,6 +2,7 @@
 #include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_target_filter.h"
 #include "debug/pipeline_tracer.h"
+#include "capture/ndi_frame_geometry.h"
 
 #include <cmath>
 #include <cstdio>
@@ -34,6 +35,24 @@ void expectTrue(bool condition, const char* name)
 
 int main()
 {
+    const auto ndiMetadataGeometry = ResolveNdiFrameGeometry(
+        320, 320, "<xen source_width=\"2560\" source_height=\"1440\" roi_x=\"1120\" roi_y=\"560\"/>",
+        1920, 1080);
+    expectTrue(ndiMetadataGeometry.fromMetadata, "ndi metadata has priority");
+    expectNear(ndiMetadataGeometry.sourceWidth, 2560.0, 0.0, "ndi metadata source width");
+    expectNear(ndiMetadataGeometry.sourceHeight, 1440.0, 0.0, "ndi metadata source height");
+
+    const auto ndiConfigGeometry = ResolveNdiFrameGeometry(
+        320, 320, "<ndi source_width=\"9999\" source_height=\"9999\"/>", 2560, 1440);
+    expectTrue(ndiConfigGeometry.fromConfig, "ndi config fallback for obs roi");
+    expectNear(ndiConfigGeometry.sourceWidth, 2560.0, 0.0, "ndi config source width");
+
+    const auto ndiSafeGeometry = ResolveNdiFrameGeometry(
+        320, 320, "<xen source_width=\"100\" source_height=\"100\"/>", 0, 0);
+    expectTrue(!ndiSafeGeometry.fromMetadata && !ndiSafeGeometry.fromConfig,
+               "ndi rejects invalid source geometry");
+    expectNear(ndiSafeGeometry.sourceWidth, 320.0, 0.0, "ndi falls back to encoded width");
+
     const double sourceSpan = AimCoordinateSpace::resolveFovPixelSpan(2560, 320.0);
     const double fallbackSpan = AimCoordinateSpace::resolveFovPixelSpan(0, 320.0);
     expectNear(sourceSpan, 2560.0, 0.0, "aim conversion uses capture source width");
