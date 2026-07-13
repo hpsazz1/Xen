@@ -52,6 +52,7 @@ struct PipelineFrame
     double responseSeconds = 0.0;
     double maxCountsPerSecond = 0.0;
     double frameCountLimit = 0.0;
+    bool   speedLimited = false;      ///< 本帧控制请求是否触发最大设备速率限制
     bool   settled = false;
     size_t queuedMoveCount = 0;     ///< 请求入队后的待发送命令数
 

@@ -107,6 +107,8 @@ capture_fps = 60
 | `fovY` | `74` | 用于移动转换的垂直游戏 FOV。 |
 | `minSpeedMultiplier` | `0.1` | 最小移动倍率。 |
 | `maxSpeedMultiplier` | `0.1` | 最大移动倍率。 |
+| `move_response_ms` | `80` | 基础控制响应时间，单位毫秒；决定未限速阶段的收敛形态。 |
+| `move_max_speed_cps` | `1200` | 设备最大移动速度，单位 counts/s；程序按捕获窗实际 FPS 对应的帧间隔换算单帧预算。 |
 | `predictionInterval` | `0.01` | 预测时间步长。 |
 | `prediction_futurePositions` | `20` | 保留/绘制的预测未来位置数量。 |
 | `draw_futurePositions` | `true` | 在支持的 overlay 中绘制预测的未来位置。 |

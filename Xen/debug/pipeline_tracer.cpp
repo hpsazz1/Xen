@@ -94,7 +94,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,"
          << "FinalMx,FinalMy,"
-         << "ResponseSeconds,MaxCountsPerSecond,FrameCountLimit,Settled,QueuedMoveCount\n";
+         << "ResponseSeconds,MaxCountsPerSecond,FrameCountLimit,SpeedLimited,Settled,QueuedMoveCount\n";
 
     for (const auto& f : frames)
     {
@@ -123,7 +123,8 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.requestedCountsX << ',' << f.requestedCountsY << ','
              << f.finalMx << ',' << f.finalMy << ','
              << f.responseSeconds << ',' << f.maxCountsPerSecond << ','
-             << f.frameCountLimit << ',' << (f.settled ? '1' : '0') << ','
+             << f.frameCountLimit << ',' << (f.speedLimited ? '1' : '0') << ','
+             << (f.settled ? '1' : '0') << ','
              << f.queuedMoveCount << '\n';
     }
 

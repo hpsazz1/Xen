@@ -125,6 +125,8 @@ int main()
         "basic pipeline contains generic source fps diagnostics");
     expectTrue(traceHeader.find("NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
                "basic pipeline keeps ndi compatibility diagnostics");
+    expectTrue(traceHeader.find("FrameCountLimit,SpeedLimited,Settled") != std::string::npos,
+               "basic pipeline reports controller speed limiting");
     expectTrue(traceHeader.find("PredX") == std::string::npos,
                "basic pipeline excludes prediction stage");
     traceFile.close();
@@ -157,17 +159,20 @@ int main()
     expectTrue(farOutput.countsX < 0.0, "basic controller direction");
     expectTrue(std::hypot(farOutput.countsX, farOutput.countsY) <= 2.0 + 1e-9,
                "basic controller frame-rate speed limit");
+    expectTrue(farOutput.speedLimited, "basic controller reports speed limiting");
     const auto settledOutput = controller.update(
         3.0, -2.0, 1.0 / 120.0, 15.0, 15.0, controllerSettings);
     expectTrue(settledOutput.settled, "basic controller settle state");
     expectNear(settledOutput.countsX, 0.0, 0.0, "basic controller settled x");
 
     // 生产速率必须使用捕获窗统计出的实际 FPS 换算单帧预算，而不是绑定某个设备或固定帧率。
-    // 选取本轮 CSV 的约 131/155 FPS 和未来可能出现的 240 FPS，验证每秒总预算始终一致。
+    // 选取本轮 CSV 的约 127/143 FPS 和未来可能出现的 240 FPS，验证每秒总预算始终一致。
     BasicAimController::Settings productionSettings;
     productionSettings.settleRadiusPixels = 0.0;
     productionSettings.releaseRadiusPixels = 0.0;
-    for (const double actualFps : { 131.0, 155.0, 240.0 })
+    expectNear(productionSettings.maxCountsPerSecond, 1200.0, 0.0,
+               "production max speed uses latest ndi static-target result");
+    for (const double actualFps : { 127.0, 143.0, 240.0 })
     {
         BasicAimController actualFpsController;
         const auto actualFpsOutput = actualFpsController.update(

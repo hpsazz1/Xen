@@ -11,7 +11,7 @@ public:
     struct Settings
     {
         double responseSeconds = 0.080;
-        double maxCountsPerSecond = 960.0; // 物理设备速率；单帧预算使用捕获窗实际 FPS 对应的 dt
+        double maxCountsPerSecond = 1200.0; // NDI 静止目标复测上调后的设备速率；单帧预算仍按真实 dt 换算
         double settleRadiusPixels = 5.0;
         double releaseRadiusPixels = 8.0;
     };
@@ -25,6 +25,7 @@ public:
         double errorDistance = 0.0;
         double frameCountLimit = 0.0;
         bool settled = false;
+        bool speedLimited = false; // 本次输出是否被最大设备速率截断
     };
 
     Output update(double errorX, double errorY, double dt,
@@ -64,6 +65,7 @@ public:
         const double magnitude = std::hypot(out.countsX, out.countsY);
         if (magnitude > out.frameCountLimit && magnitude > 0.0)
         {
+            out.speedLimited = true;
             const double scale = out.frameCountLimit / magnitude;
             out.countsX *= scale;
             out.countsY *= scale;
