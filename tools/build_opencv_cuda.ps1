@@ -1,4 +1,4 @@
-[CmdletBinding(PositionalBinding = $false)]
+﻿[CmdletBinding(PositionalBinding = $false)]
 param(
     [string]$RepoRoot = "",
     [string]$OpenCvVersion = "4.13.0",
@@ -353,14 +353,14 @@ try {
             Write-Step "Detected CUDA_ARCH_BIN from nvidia-smi: $CudaArchBin"
         }
     }
-    if (-not [string]::IsNullOrWhiteSpace($CudaArchBin) -and $CudaArchBin.Trim().ToLowerInvariant() -eq "all") {
-        # Broad NVIDIA compatibility set: Turing, Ampere/Ada, Hopper, and Blackwell variants.
-        $CudaArchBin = "7.5;8.0;8.6;8.7;8.8;8.9;9.0;10.0;10.3;11.0;12.0;12.1"
-        Write-Step "Using CUDA_ARCH_BIN preset 'all': $CudaArchBin"
-    }
     if ([string]::IsNullOrWhiteSpace($CudaArchBin)) {
         $CudaArchBin = "8.6"
         Write-Warning "[opencv-cuda] CUDA_ARCH_BIN is not set; using default value '$CudaArchBin'. Use -CudaArchBin to override."
+    }
+    $architectureSelection = Resolve-CudaArchitectureSelection -Value $CudaArchBin
+    $CudaArchBin = $architectureSelection.OpenCv
+    if ($architectureSelection.IsPortablePreset) {
+        Write-Step "Using CUDA_ARCH_BIN preset 'all': $CudaArchBin"
     }
     if (-not [string]::IsNullOrWhiteSpace($BuildList)) {
         $buildListModules = @($BuildList -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -442,6 +442,10 @@ try {
         "-DBUILD_opencv_world=ON",
         "-DWITH_NVCUVENC=OFF",
         "-DWITH_NVCUVID=OFF",
+        # UDP 与 NDI 均由项目自己的采集器提供帧，不依赖 OpenCV FFmpeg；IPP 也不是
+        # CUDA 推理必需项。关闭二者可避免发布构建被可选二进制下载阻塞。
+        "-DWITH_FFMPEG=OFF",
+        "-DWITH_IPP=OFF",
         "-DBUILD_TESTS=OFF",
         "-DBUILD_PERF_TESTS=OFF",
         "-DBUILD_EXAMPLES=OFF",
@@ -518,7 +522,7 @@ try {
         Invoke-External "cmake" $cmakeBuildInstallArgs
     }
 
-    if (-not $DryRun) {
+    if (-not $DryRun -and $runInstall) {
         $installedLibDir = Join-Path $InstallPrefix "x64\vc18\lib"
         if (-not (Test-Path -LiteralPath $installedLibDir)) {
             $x64InstallDir = Join-Path $InstallPrefix "x64"
@@ -540,6 +544,19 @@ try {
                 Write-Warning "[opencv-cuda] Build completed, but opencv_world*.lib was not found in $installedLibDir"
             }
         }
+
+        # 清单与安装产物放在同一根目录，主构建据此验证架构后才允许复用 OpenCV。
+        # 这比读取某个临时 CMakeCache 更可靠，也适用于复制后的依赖目录。
+        $manifestPath = Get-OpenCvCudaArchitectureManifestPath -Root $InstallPrefix
+        [pscustomobject]@{
+            schemaVersion = 1
+            openCvVersion = $OpenCvVersion
+            cudaToolkit = $CudaPath
+            cudaArchBin = $CudaArchBin
+            cmakeCudaArchitectures = $architectureSelection.CMake
+            configuration = $Configuration
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+        Write-Step "CUDA architecture manifest written: $manifestPath"
     }
 }
 catch {

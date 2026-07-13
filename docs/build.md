@@ -90,11 +90,17 @@ cuDNN 对本项目是可选的。CUDA OpenCV 助手默认禁用 OpenCV DNN 的 C
 .\build_cuda.bat -SkipOpenCvBuild -OpenCvAlreadyBuilt $true
 ```
 
+CUDA Release 构建默认使用 `-CudaArchBin all`。该选项同时控制 OpenCV CUDA 内核与主程序的 `cuda_preprocess.cu`，不能只覆盖其中一处。
+
 `-CudaArchBin all` 展开为：
 
 ```text
 7.5;8.0;8.6;8.7;8.8;8.9;9.0;10.0;10.3;11.0;12.0;12.1
 ```
+
+OpenCV 安装完成后会在 `Xen\modules\opencv\build\cuda\opencv-cuda-build.json` 写入架构清单。后续构建只有在清单与请求架构完全一致时才复用 OpenCV；旧依赖没有清单、清单损坏或架构不一致时会自动清洁重建。`-SkipOpenCvBuild` 遇到不兼容清单会直接失败，避免生成只能在构建机显卡上运行的发布包。
+
+CUDA 13.2 的此处 `all` 是项目支持的 Turing 及更新架构集合，并不包含 Pascal `6.1` 等旧架构。旧显卡应使用兼容的旧 CUDA 工具链，或运行 DML 后端。
 
 对于发布版本构建，建议保留多架构 CUDA 集，但将 OpenCV 限制为应用实际使用的模块，并降低 OpenCV 构建并行度：
 
@@ -102,7 +108,13 @@ cuDNN 对本项目是可选的。CUDA OpenCV 助手默认禁用 OpenCV DNN 的 C
 .\build_cuda.bat -CudaArchBin all -OpenCvAlreadyBuilt $false -DownloadOrUpdateNeeded $true -OpenCvBuildList cudev,core,imgproc,imgcodecs,videoio,highgui,dnn,cudaarithm,cudaimgproc,cudawarping -OpenCvMaxCpuCount 2 -OpenCvCleanBuild
 ```
 
-这样仍会为 `all` 架构预设生成 CUDA OpenCV 构建，但避免编译未使用的 contrib CUDA 模块（如 `cudafilters`）。更改 OpenCV 模块列表时请使用 `-OpenCvCleanBuild`，防止旧 CMake 缓存保留过时的模块状态。
+这样会为 OpenCV 和主程序生成同一套 `all` 架构，同时避免编译未使用的 contrib CUDA 模块（如 `cudafilters`）。更改 OpenCV 模块列表时请使用 `-OpenCvCleanBuild`，防止旧 CMake 缓存保留过时的模块状态。
+
+构建脚本单元测试：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\build_script_tests.ps1
+```
 
 ## 4. 快速本地重新构建
 

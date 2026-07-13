@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 Set-StrictMode -Version Latest
@@ -35,6 +35,99 @@ function New-DirectoryIfMissing {
 function ConvertTo-CMakePath {
     param([Parameter(Mandatory)][string]$Path)
     return ($Path -replace '\\', '/')
+}
+
+function Resolve-CudaArchitectureSelection {
+    param(
+        [Parameter(Mandatory)][string]$Value
+    )
+
+    # CUDA 13.2 的 nvcc 从 Turing 7.5 起提供离线编译支持。这里显式维护发布架构，
+    # 避免 CMake 或 OpenCV 根据构建机显卡自动选择单一架构，导致发布包换机后无法执行内核。
+    $allArchitectures = @('7.5', '8.0', '8.6', '8.7', '8.8', '8.9', '9.0', '10.0', '10.3', '11.0', '12.0', '12.1')
+    $trimmedValue = $Value.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmedValue)) {
+        throw 'CUDA architecture cannot be empty.'
+    }
+
+    $architectures = if ($trimmedValue.ToLowerInvariant() -eq 'all') {
+        $allArchitectures
+    }
+    else {
+        @($trimmedValue -split '[;,\s]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+
+    $normalized = [System.Collections.Generic.List[string]]::new()
+    foreach ($architecture in $architectures) {
+        if ($architecture -notmatch '^(\d+)\.(\d+)$') {
+            throw "Invalid CUDA architecture '$architecture'. Use values such as 8.6, a semicolon-separated list, or all."
+        }
+
+        $canonical = ([int]$Matches[1]).ToString() + '.' + ([int]$Matches[2]).ToString()
+        if (-not $normalized.Contains($canonical)) {
+            $normalized.Add($canonical)
+        }
+    }
+
+    if ($normalized.Count -eq 0) {
+        throw 'At least one CUDA architecture is required.'
+    }
+
+    # OpenCV 的旧 FindCUDA 接口使用带小数点的 CUDA_ARCH_BIN；现代 CMake 的
+    # CMAKE_CUDA_ARCHITECTURES 使用不带小数点的整数。两者必须来自同一份选择。
+    $cmakeArchitectures = @($normalized | ForEach-Object { $_ -replace '\.', '' })
+    return [pscustomobject]@{
+        Requested = $trimmedValue
+        OpenCv = ($normalized -join ';')
+        CMake = ($cmakeArchitectures -join ';')
+        Items = @($normalized)
+        IsPortablePreset = ($trimmedValue.ToLowerInvariant() -eq 'all')
+    }
+}
+
+function Get-OpenCvCudaArchitectureManifestPath {
+    param([Parameter(Mandatory)][string]$Root)
+    return (Join-Path $Root 'opencv-cuda-build.json')
+}
+
+function Read-OpenCvCudaArchitectureManifest {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $path = Get-OpenCvCudaArchitectureManifestPath -Root $Root
+    if (-not (Test-Path -LiteralPath $path)) {
+        return $null
+    }
+
+    try {
+        return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
+    }
+    catch {
+        Write-Warning "[cuda] Invalid OpenCV CUDA build manifest '$path': $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Test-OpenCvCudaArchitectureCompatible {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$ExpectedOpenCvArchitectures
+    )
+
+    # 不根据 DLL 是否存在推断 CUDA 架构。旧构建没有清单时按不兼容处理并重建，
+    # 因为单架构 DLL 在构建机上可正常加载，却会在其他显卡执行时才延迟失败。
+    $manifest = Read-OpenCvCudaArchitectureManifest -Root $Root
+    if (-not $manifest -or -not $manifest.cudaArchBin) {
+        return $false
+    }
+
+    try {
+        $actual = Resolve-CudaArchitectureSelection -Value ([string]$manifest.cudaArchBin)
+        $expected = Resolve-CudaArchitectureSelection -Value $ExpectedOpenCvArchitectures
+        return $actual.OpenCv -eq $expected.OpenCv
+    }
+    catch {
+        return $false
+    }
 }
 
 function Confirm-YesNo {
@@ -188,6 +281,21 @@ function Get-VisualStudioInstallation {
     }
 }
 
+function Select-VisualStudioEnvironmentPath {
+    param([Parameter(Mandatory)][string[]]$Candidates)
+
+    # 某些宿主进程会同时注入 PATH 与 Path。cmd.exe 能保留两行，而 PowerShell/.NET
+    # 按大小写不敏感方式写回时会互相覆盖；优先保留 VsDevCmd 注入了 MSVC 的那一项。
+    $developerPath = $Candidates |
+        Where-Object { $_ -match '\\VC\\Tools\\MSVC\\' } |
+        Sort-Object Length -Descending |
+        Select-Object -First 1
+    if ($developerPath) {
+        return $developerPath
+    }
+    return ($Candidates | Sort-Object Length -Descending | Select-Object -First 1)
+}
+
 function Import-VisualStudioEnvironment {
     param(
         [string]$Architecture = 'x64',
@@ -224,10 +332,21 @@ function Import-VisualStudioEnvironment {
         throw 'VsDevCmd.bat failed to initialize the compiler environment.'
     }
 
+    $pathCandidates = [System.Collections.Generic.List[string]]::new()
     foreach ($line in $envLines) {
         if ($line -match '^([^=]+)=(.*)$') {
-            [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+            $name = $Matches[1]
+            $value = $Matches[2]
+            if ($name.Equals('Path', [System.StringComparison]::OrdinalIgnoreCase)) {
+                $pathCandidates.Add($value)
+                continue
+            }
+            [Environment]::SetEnvironmentVariable($name, $value, 'Process')
         }
+    }
+    if ($pathCandidates.Count -gt 0) {
+        $developerPath = Select-VisualStudioEnvironmentPath -Candidates @($pathCandidates)
+        [Environment]::SetEnvironmentVariable('Path', $developerPath, 'Process')
     }
 
     $missingTools = @($requiredTools | Where-Object { -not (Get-CommandPath $_) })
@@ -836,4 +955,4 @@ function Get-OpenCvWorldLayout {
     }
 
     return $null
-} 
+}

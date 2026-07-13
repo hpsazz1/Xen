@@ -10,7 +10,7 @@ param(
     [switch]$UseLatestPackages,
     [switch]$OpenBrowserForDownloads,
     [switch]$SkipOpenCvBuild,
-    [string]$CudaArchBin = "",
+    [string]$CudaArchBin = "all",
     [string]$OpenCvBuildList = "",
     [ValidateRange(0, 256)]
     [int]$OpenCvMaxCpuCount = 0,
@@ -43,9 +43,9 @@ try {
     Ensure-CoreSourceModules -AllowDownload:$allowDownloads -DryRun:$DryRun
 
     $resolution = Get-BestCompatibleCudaDependencySet
-    if (-not [string]::IsNullOrWhiteSpace($CudaArchBin)) {
-        $resolution.CudaArchBin = $CudaArchBin
-    }
+    $architectureSelection = Resolve-CudaArchitectureSelection -Value $CudaArchBin
+    $resolution.CudaArchBin = $architectureSelection.OpenCv
+    Write-BuildStep "CUDA architectures: OpenCV=$($architectureSelection.OpenCv); application=$($architectureSelection.CMake)" "cuda"
     $effectiveOpenCvBuildList = $OpenCvBuildList
     if (-not [string]::IsNullOrWhiteSpace($effectiveOpenCvBuildList)) {
         $opencvBuildModules = @($effectiveOpenCvBuildList -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -125,6 +125,17 @@ try {
     $opencvCudaInstall = Resolve-RepoPath "Xen\modules\opencv\build\cuda"
     $opencvLayout = Get-OpenCvWorldLayout -Root $opencvCudaInstall -Configuration $Configuration
     $opencvBuilt = Resolve-OpenCvAlreadyBuilt -Value $OpenCvAlreadyBuilt -Backend "cuda" -Layout $opencvLayout -NonInteractive:$NonInteractive
+    $opencvArchitectureCompatible = $opencvLayout -and (Test-OpenCvCudaArchitectureCompatible `
+        -Root $opencvCudaInstall `
+        -ExpectedOpenCvArchitectures $architectureSelection.OpenCv)
+    if ($opencvBuilt -and -not $opencvArchitectureCompatible) {
+        if ($SkipOpenCvBuild) {
+            throw "Installed CUDA OpenCV does not declare the requested architectures '$($architectureSelection.OpenCv)'. Rebuild it without -SkipOpenCvBuild."
+        }
+        Write-BuildStep "Installed OpenCV CUDA architecture manifest is missing or incompatible; a clean rebuild is required." "cuda"
+        $opencvBuilt = $false
+        $OpenCvCleanBuild = $true
+    }
     if (-not $opencvBuilt -or -not $opencvLayout) {
         if ($SkipOpenCvBuild) {
             throw "CUDA OpenCV layout is missing or invalid: $opencvCudaInstall"
@@ -139,7 +150,7 @@ try {
             "-NinjaPath", $ninja,
             "-Configuration", $Configuration,
             "-CudaPath", $resolution.CudaRoot,
-            "-CudaArchBin", $resolution.CudaArchBin,
+            "-CudaArchBin", $architectureSelection.OpenCv,
             "-DisableCuDNN"
         )
         if (-not [string]::IsNullOrWhiteSpace($effectiveOpenCvBuildList)) {
@@ -171,7 +182,8 @@ try {
         ninja = $ninja
         cudaRoot = $resolution.CudaRoot
         cudaVersion = $resolution.CudaVersion
-        cudaArchBin = $resolution.CudaArchBin
+        cudaArchBin = $architectureSelection.OpenCv
+        cmakeCudaArchitectures = $architectureSelection.CMake
         tensorRtRoot = $resolution.TensorRtRoot
         cudnnRoot = $resolution.CudnnRoot
         useCudnnForOpenCvDnn = $false
@@ -186,6 +198,7 @@ try {
         "-DCMAKE_MAKE_PROGRAM=$(ConvertTo-CMakePath $ninja)",
         "-DAIMBOT_USE_CUDA=ON",
         "-DAIMBOT_TENSORRT_ROOT=$(ConvertTo-CMakePath $resolution.TensorRtRoot)",
+        "-DCMAKE_CUDA_ARCHITECTURES=$($architectureSelection.CMake)",
         "-DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler",
         "-DCUDA_NVCC_FLAGS=--allow-unsupported-compiler"
     )

@@ -54,5 +54,6 @@ echo Defaults:
 echo   BuildDir=build\cuda
 echo   Configuration=Release
 echo   Generator=Ninja Multi-Config
+echo   CudaArchBin=all (portable CUDA 13.2 architecture set)
 echo   NonInteractive dependency checks enabled by this wrapper
 exit /b 0
