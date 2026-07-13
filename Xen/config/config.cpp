@@ -125,7 +125,7 @@ bool Config::loadConfig(const std::string& filename)
         minSpeedMultiplier = 0.1f;                       // 鼠标最小速度倍率
         maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
         move_response_ms = 80.0f;                        // 基础控制响应时间（毫秒）
-        move_max_speed_cps = 240.0f;                     // 基础控制最大设备速度（counts/sec）
+        move_max_speed_cps = 960.0f;                     // 静止目标实测设备速率；每帧预算由捕获窗实际 FPS 动态换算
 
         prediction_enabled = true;                       // 预测总开关
         predictionInterval = 0.020f;                     // 位置预测间隔（秒）
@@ -490,7 +490,7 @@ bool Config::loadConfig(const std::string& filename)
     minSpeedMultiplier = (float)get_double("minSpeedMultiplier", 0.1);
     maxSpeedMultiplier = (float)get_double("maxSpeedMultiplier", 0.1);
     move_response_ms = (float)get_double("move_response_ms", 80.0);
-    move_max_speed_cps = (float)get_double("move_max_speed_cps", 240.0);
+    move_max_speed_cps = (float)get_double("move_max_speed_cps", 960.0);
 
     predictionInterval = (float)get_double("predictionInterval", 0.020);
     prediction_futurePositions = get_long("prediction_futurePositions", 12);
@@ -1078,7 +1078,8 @@ void Config::applyAutoDerivedTrackerParams(int detectionResolution, int captureF
     ml_recapture_distance_mult = 2.5f;
     ml_coast_velocity_decay    = 1.0f;
     move_response_ms = 80.0f;
-    // Device rate is expressed per second, so it must remain independent of FPS.
-    move_max_speed_cps = 240.0f;
+    // 设备速率按秒表达；控制器读取捕获窗统计 FPS 换算单帧预算，不绑定捕获方式或固定帧率。
+    // 960 counts/s 来自 320 检测分辨率的静止目标实测，可把约 115~206 counts 的主移动段压缩到约 0.12~0.22 秒。
+    move_max_speed_cps = 960.0f;
     // motion_change_protection 由用户手动控制，自动推导不覆盖
 }

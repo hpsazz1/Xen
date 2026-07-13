@@ -41,7 +41,7 @@ private:
     double fov_y;                    ///< 垂直视野（像素）
     double max_distance;             ///< 最大瞄准距离（像素）
     double move_response_seconds = 0.080; ///< 基础控制响应时间
-    double move_max_speed_cps = 240.0;    ///< 设备最大速度（counts/sec）
+    double move_max_speed_cps = 960.0;    ///< 设备最大速度（counts/sec）；按捕获窗统计 FPS 动态换算单帧预算
     double center_x;                 ///< 屏幕中心 X
     double center_y;                 ///< 屏幕中心 Y
     bool   auto_shoot;               ///< 是否启用自动射击

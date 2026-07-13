@@ -11,7 +11,7 @@ public:
     struct Settings
     {
         double responseSeconds = 0.080;
-        double maxCountsPerSecond = 240.0;
+        double maxCountsPerSecond = 960.0; // 物理设备速率；单帧预算使用捕获窗实际 FPS 对应的 dt
         double settleRadiusPixels = 5.0;
         double releaseRadiusPixels = 8.0;
     };

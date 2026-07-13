@@ -90,6 +90,21 @@ int main()
     expectTrue(settledOutput.settled, "basic controller settle state");
     expectNear(settledOutput.countsX, 0.0, 0.0, "basic controller settled x");
 
+    // 生产速率必须使用捕获窗统计出的实际 FPS 换算单帧预算，而不是绑定某个设备或固定帧率。
+    // 选取本轮 CSV 的约 131/155 FPS 和未来可能出现的 240 FPS，验证每秒总预算始终一致。
+    BasicAimController::Settings productionSettings;
+    productionSettings.settleRadiusPixels = 0.0;
+    productionSettings.releaseRadiusPixels = 0.0;
+    for (const double actualFps : { 131.0, 155.0, 240.0 })
+    {
+        BasicAimController actualFpsController;
+        const auto actualFpsOutput = actualFpsController.update(
+            1000.0, 0.0, 1.0 / actualFps, 15.0, 15.0, productionSettings);
+        expectNear(actualFpsOutput.frameCountLimit * actualFps,
+                   productionSettings.maxCountsPerSecond, 1e-9,
+                   "production speed follows capture-window fps");
+    }
+
     if (failures != 0)
     {
         std::cerr << failures << " basic algorithm test(s) failed\n";

@@ -133,7 +133,7 @@ static void draw_mouse_page(MouseSettingsPage page)
                 20.0f, 300.0f, "%.0f", "##move_response",
                 "越小越快，越大越柔和。该参数不随 FPS 改变含义。");
             OverlayUI::SliderFloatRow("最大设备速度", &config.move_max_speed_cps,
-                30.0f, 1200.0f, "%.0f counts/s", "##move_max_cps",
+                30.0f, 2000.0f, "%.0f counts/s", "##move_max_cps",
                 "限制每秒发送的鼠标计数，替代旧的最小/最大速度倍率。");
         }
         OverlayUI::EndSection();
