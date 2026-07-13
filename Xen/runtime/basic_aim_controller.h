@@ -39,11 +39,34 @@ public:
         out.errorDistance = std::hypot(errorX, errorY);
         dt = std::clamp(dt, 1.0 / 500.0, 0.05);
 
+        const double response = std::clamp(settings.responseSeconds, 0.010, 0.500);
+        const double integralTime = settings.integralTimeSeconds > 0.0
+            ? std::clamp(settings.integralTimeSeconds, 0.050, 1.0) : 0.0;
+
+        // 积分启用时，误差换向必须先于稳定态判定清理对应轴。这样静止目标越过中心后
+        // 能立即撤销旧方向积分，而匀速目标在同侧接近中心时仍可保留维持目标速度所需的输出。
+        if (integralTime > 0.0 && hasPreviousError_)
+        {
+            if (errorX * previousErrorX_ < 0.0)
+                integralCountErrorX_ = 0.0;
+            if (errorY * previousErrorY_ < 0.0)
+                integralCountErrorY_ = 0.0;
+        }
+
+        const double retainedIntegralCountsX = integralTime > 0.0
+            ? integralCountErrorX_ * dt / (response * integralTime) : 0.0;
+        const double retainedIntegralCountsY = integralTime > 0.0
+            ? integralCountErrorY_ * dt / (response * integralTime) : 0.0;
+        // 设备最终发送整数 counts；至少半个 count 的保留积分代表当前帧仍有可执行的
+        // 持续运动需求。此时不能把“进入中心”误判成静止并清空 PI 前馈能力。
+        const bool hasActionableIntegral =
+            std::hypot(retainedIntegralCountsX, retainedIntegralCountsY) >= 0.5;
+
         const double settleRadius = std::max(0.0, settings.settleRadiusPixels);
         const double releaseRadius = std::max(settleRadius, settings.releaseRadiusPixels);
         if (settled_)
         {
-            if (out.errorDistance <= releaseRadius)
+            if (out.errorDistance <= releaseRadius && !hasActionableIntegral)
             {
                 clearIntegralState();
                 out.settled = true;
@@ -51,7 +74,7 @@ public:
             }
             settled_ = false;
         }
-        if (out.errorDistance <= settleRadius)
+        if (out.errorDistance <= settleRadius && !hasActionableIntegral)
         {
             settled_ = true;
             clearIntegralState();
@@ -59,29 +82,16 @@ public:
             return out;
         }
 
-        const double response = std::clamp(settings.responseSeconds, 0.010, 0.500);
         const double responseFraction = 1.0 - std::exp(-dt / response);
         const double proportionalCountsX = errorX * responseFraction * countsPerPixelX;
         const double proportionalCountsY = errorY * responseFraction * countsPerPixelY;
 
-        const double integralTime = settings.integralTimeSeconds > 0.0
-            ? std::clamp(settings.integralTimeSeconds, 0.050, 1.0) : 0.0;
         double candidateIntegralX = integralCountErrorX_;
         double candidateIntegralY = integralCountErrorY_;
         if (integralTime > 0.0)
         {
             // 匀速目标对纯比例控制形成固定滞后。积分项累计 counts 误差并提供持续速度，
             // 使系统能够消除斜坡输入的稳态误差；误差换向时清零，避免反转后旧积分拖拽。
-            if (hasPreviousError_ && errorX * previousErrorX_ < 0.0)
-            {
-                integralCountErrorX_ = 0.0;
-                candidateIntegralX = 0.0;
-            }
-            if (hasPreviousError_ && errorY * previousErrorY_ < 0.0)
-            {
-                integralCountErrorY_ = 0.0;
-                candidateIntegralY = 0.0;
-            }
             candidateIntegralX += errorX * countsPerPixelX * dt;
             candidateIntegralY += errorY * countsPerPixelY * dt;
 

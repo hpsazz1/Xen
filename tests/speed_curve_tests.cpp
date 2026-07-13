@@ -269,6 +269,49 @@ int main()
     expectTrue(std::abs(integralRampError) < 5.0,
                "pi controller removes moving-target steady-state error");
 
+    // DML 推理帧率较低时单帧积分输出更大，PI 追进 5 px 中心区后必须继续保留
+    // 匀速目标所需的整数 count 输出，不能被静止目标稳定分支反复清零。
+    BasicAimController dmlRateController;
+    BasicAimController::Settings dmlRateSettings;
+    dmlRateSettings.responseSeconds = 0.080;
+    dmlRateSettings.maxCountsPerSecond = 1440.0;
+    dmlRateSettings.integralTimeSeconds = 0.320;
+    constexpr double dmlDt = 1.0 / 60.0;
+    constexpr double dmlCountsPerPixel = 1.344;
+    constexpr double dmlTargetCountsPerSecond = 800.0;
+    double dmlTargetPixels = 0.0;
+    double dmlCameraPixels = 0.0;
+    int dmlSettledMovingFrames = 0;
+    for (int frame = 0; frame < 360; ++frame)
+    {
+        dmlTargetPixels += dmlTargetCountsPerSecond / dmlCountsPerPixel * dmlDt;
+        const auto output = dmlRateController.update(
+            dmlTargetPixels - dmlCameraPixels, 0.0, dmlDt,
+            dmlCountsPerPixel, dmlCountsPerPixel, dmlRateSettings);
+        dmlCameraPixels += output.countsX / dmlCountsPerPixel;
+        if (frame >= 120 && output.settled)
+            ++dmlSettledMovingFrames;
+    }
+    expectTrue(dmlSettledMovingFrames == 0,
+               "pi controller does not settle and clear integral on a moving target");
+    expectTrue(std::abs(dmlTargetPixels - dmlCameraPixels) < 5.0,
+               "pi controller tracks a moving target at dml inference rate");
+
+    // 同侧进入中心应保留有效积分；真正越过中心时必须先清除旧方向积分，随后允许
+    // 静止稳定逻辑接管，兼顾移动目标零稳态误差与静止目标不过冲。
+    BasicAimController centerHoldController;
+    BasicAimController::Settings centerHoldSettings = dmlRateSettings;
+    for (int frame = 0; frame < 20; ++frame)
+        centerHoldController.update(20.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
+    const auto sameSideCenter = centerHoldController.update(
+        4.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
+    expectTrue(!sameSideCenter.settled && std::abs(sameSideCenter.integralCountsX) >= 0.5,
+               "actionable integral survives same-side center entry");
+    const auto crossedCenter = centerHoldController.update(
+        -1.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
+    expectTrue(crossedCenter.settled,
+               "error sign reversal clears integral before static settling");
+
     // 积分候选必须保持静止闭环安全：大误差阶段受设备限速时禁止 wind-up，
     // 接近中心后进入既有 5 px 稳定半径并清空积分，不得跨越目标持续反向输出。
     BasicAimController staticIntegralController;

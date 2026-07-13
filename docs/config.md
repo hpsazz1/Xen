@@ -113,7 +113,7 @@ capture_fps = 60
 | `maxSpeedMultiplier` | `0.1` | 最大移动倍率。 |
 | `move_response_ms` | `80` | 基础控制响应时间，单位毫秒；决定未限速阶段的收敛形态。 |
 | `move_max_speed_cps` | `1440` | 设备最大移动速度，单位 counts/s；程序按相邻有效观测的真实间隔换算单帧预算。四链路九宫格复测显示 1200 下约八成远距帧仍受限，因此仅将远距预算提高 20%，近中心响应不变。 |
-| `move_integral_time_ms` | `0` | 移动目标PI积分时间，单位毫秒；0为关闭，非零最小50 ms。用于消除匀速目标的比例稳态误差，当前源码默认关闭，仅在现场候选配置中使用320 ms。 |
+| `move_integral_time_ms` | `0` | 移动目标PI积分时间，单位毫秒；0为关闭，非零最小50 ms。用于消除匀速目标的比例稳态误差；有效积分输出在进入中心区时会继续保持，误差换向后清除对应轴积分。当前源码默认关闭，仅在现场候选配置中使用320 ms。 |
 | `auto_derive_tracker_params` | `true` | 按检测分辨率和实际捕获 FPS 自动推导目标跟踪参数；不会覆盖 `move_response_ms` 或 `move_max_speed_cps`。 |
 | `predictionInterval` | `0.01` | 预测时间步长。 |
 | `prediction_futurePositions` | `20` | 保留/绘制的预测未来位置数量。 |

@@ -228,7 +228,20 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         # 可得到闭环滞后的近似时间；该值用于辨别响应时间而非速度上限瓶颈。
         $approxClosedLoopLagMs = 1000.0 * [double]($axisAbsErrors | Measure-Object -Average).Average *
             $estimatedCountsPerPixel / [math]::Max(1.0, $absoluteOutputCps)
-        $reversals = Get-ReversalMetrics -Rows $samples -ErrorColumn $errorColumn -ErrorThreshold $ReversalErrorThresholdPx -DirectionConfirmFrames $ReversalConfirmFrames -RecoveryRadius $RecoveryRadiusPx -RecoveryFrames $RecoveryConfirmFrames
+        # 单向文件的起停、目标切换或短暂过冲不属于测试脚本反转。只有文件名明确标记
+        # reverse/reversal 的往返场景才计算恢复指标，避免把单向质量数据误报为反转。
+        $isReversalScenario = $csvFile.BaseName -match '(?i)reverse|reversal'
+        $reversals = if ($isReversalScenario) {
+            Get-ReversalMetrics -Rows $samples -ErrorColumn $errorColumn -ErrorThreshold $ReversalErrorThresholdPx -DirectionConfirmFrames $ReversalConfirmFrames -RecoveryRadius $RecoveryRadiusPx -RecoveryFrames $RecoveryConfirmFrames
+        }
+        else {
+            [pscustomobject]@{
+                ReversalCount = 0
+                RecoveredReversals = 0
+                RecoveryMeanMs = $null
+                RecoveryP95Ms = $null
+            }
+        }
 
         $trialMetrics.Add([pscustomobject]@{
             Level = 'Trial'
