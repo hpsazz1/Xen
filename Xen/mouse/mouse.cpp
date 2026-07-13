@@ -1096,6 +1096,11 @@ void MouseThread::moveMousePivot(
         pf->targetDetected = true;
         pf->fpsValue = static_cast<double>(captureFps.load());
         pf->inferenceFps = detectionBuffer.getPublishFps();
+        const CaptureSourceDiagnostics sourceDiagnostics = GetCaptureSourceDiagnostics();
+        pf->sourceDeclaredFps = sourceDiagnostics.declaredFps;
+        pf->sourceReceiveFps = sourceDiagnostics.receiveFps;
+        pf->sourceReceivedFrames = sourceDiagnostics.receivedFrames;
+        pf->sourceDroppedFrames = sourceDiagnostics.droppedFrames;
         const NdiCaptureDiagnostics ndiDiagnostics = NDICapture::GetDiagnostics();
         pf->ndiDeclaredFps = ndiDiagnostics.declaredFps;
         pf->ndiReceiveFps = ndiDiagnostics.receiveFps;

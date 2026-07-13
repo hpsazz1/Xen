@@ -89,8 +89,6 @@ private:
     std::mutex frame_mutex_;
     std::queue<NetworkFrame> frame_queue_;
 
-    static const int MAX_QUEUE_SIZE = 5;  // 最大帧队列长度
-
     static std::atomic<double> global_declared_fps_;
     static std::atomic<int> global_receive_fps_;
     static std::atomic<uint64_t> global_received_frames_;

@@ -86,6 +86,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
 
     // CSV 表头
     file << "FrameID,Timestamp,Resolution,SourceWidth,SourceHeight,FPS,InferenceFPS,"
+         << "SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames,"
          << "NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames,TargetDetected,ObservationAgeSec,"
          << "TargetClassID,"
          << "RawPivotX,RawPivotY,"
@@ -106,7 +107,10 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.resolution << ','
              << f.sourceWidth << ',' << f.sourceHeight << ','
              << std::fixed << std::setprecision(3) << f.fpsValue << ','
-             << f.inferenceFps << ',' << f.ndiDeclaredFps << ','
+             << f.inferenceFps << ','
+             << f.sourceDeclaredFps << ',' << f.sourceReceiveFps << ','
+             << f.sourceReceivedFrames << ',' << f.sourceDroppedFrames << ','
+             << f.ndiDeclaredFps << ','
              << f.ndiReceiveFps << ',' << f.ndiReceivedFrames << ',' << f.ndiDroppedFrames << ','
              << (f.targetDetected ? '1' : '0') << ','
              << f.observationAgeSec << ','

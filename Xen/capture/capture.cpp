@@ -58,6 +58,18 @@ std::atomic<int> captureFps(0);
 // FPS 统计周期的起始时间
 std::chrono::time_point<std::chrono::high_resolution_clock> captureFpsStartTime;
 
+namespace
+{
+std::mutex g_captureSourceDiagnosticsMutex;
+CaptureSourceDiagnostics g_captureSourceDiagnostics;
+}
+
+CaptureSourceDiagnostics GetCaptureSourceDiagnostics()
+{
+    std::lock_guard<std::mutex> lock(g_captureSourceDiagnosticsMutex);
+    return g_captureSourceDiagnostics;
+}
+
 // WinRT 捕获性能统计计数器（用于诊断和调优）
 
 // WinRT TryGetNextFrame 的总调用次数
@@ -638,11 +650,23 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             }
         };
 
+        // 将捕获对象内部的输入侧统计发布给 UI 和流水线追踪线程。
+        // 捕获对象只由本线程持有，其他线程始终读取这一份值语义快照。
+        auto publishCaptureSourceDiagnostics = [](const IScreenCapture* capture)
+        {
+            const CaptureSourceDiagnostics diagnostics = capture
+                ? capture->GetSourceDiagnostics()
+                : CaptureSourceDiagnostics{};
+            std::lock_guard<std::mutex> lock(g_captureSourceDiagnosticsMutex);
+            g_captureSourceDiagnostics = diagnostics;
+        };
+
         std::string desiredCaptureMethod = NormalizeCaptureMethod(currentCfg.capture_method);
         winrtApartment.Ensure(desiredCaptureMethod == "winrt");
 
         std::unique_ptr<IScreenCapture> capturer = createCapturer(currentCfg, captureWidth, captureHeight);
         publishCaptureSourceSize(capturer.get());
+        publishCaptureSourceDiagnostics(capturer.get());
         std::string activeCapturerMethod = capturer ? desiredCaptureMethod : std::string();
         auto lastCapturerCreateAttempt = std::chrono::steady_clock::now();
         bool waitingForWinrtWindowTarget = !capturer && IsWinrtWindowTargetMissing(currentCfg);
@@ -755,6 +779,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
             {
                 // 1. 快照当前配置
                 currentCfg = SnapshotCaptureConfig();
+                publishCaptureSourceDiagnostics(capturer.get());
 
             // 2. 检查是否需要重新初始化捕获后端
             if (capture_fps_changed.exchange(false))
@@ -800,6 +825,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 {
                     const bool activeWasWinrt = (activeCapturerMethod == "winrt");
                     capturer.reset();
+                    publishCaptureSourceDiagnostics(nullptr);
                     activeCapturerMethod.clear();
                     if (activeWasWinrt && !nextNeedsWinrt)
                         winrtApartment.Ensure(false);
@@ -814,6 +840,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 // 创建新捕获后端
                 capturer = createCapturer(currentCfg, captureWidth, captureHeight);
                 publishCaptureSourceSize(capturer.get());
+                publishCaptureSourceDiagnostics(capturer.get());
                 if (capturer)
                     activeCapturerMethod = nextMethod;
                 else
@@ -852,6 +879,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 
                     capturer = createCapturer(currentCfg, captureWidth, captureHeight);
                     publishCaptureSourceSize(capturer.get());
+                    publishCaptureSourceDiagnostics(capturer.get());
                     lastCapturerCreateAttempt = now;
 
                     if (capturer)
@@ -1262,6 +1290,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 std::cerr << "[Capture] Loop exception: " << e.what() << std::endl;
                 capturer.reset();
                 publishCaptureSourceSize(nullptr);
+                publishCaptureSourceDiagnostics(nullptr);
                 activeCapturerMethod.clear();
                 winrtApartment.Ensure(false);
                 setCaptureUnavailable();
@@ -1272,6 +1301,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 std::cerr << "[Capture] Loop exception: unknown." << std::endl;
                 capturer.reset();
                 publishCaptureSourceSize(nullptr);
+                publishCaptureSourceDiagnostics(nullptr);
                 activeCapturerMethod.clear();
                 winrtApartment.Ensure(false);
                 setCaptureUnavailable();

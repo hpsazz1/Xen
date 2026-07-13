@@ -8,6 +8,7 @@
 #include <dshow.h>
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
@@ -453,6 +454,10 @@ VirtualCameraCapture::VirtualCameraCapture(
     if (captureFps_ > 0)
         cap_->set(cv::CAP_PROP_FPS, captureFps_);
 
+    declaredFps_ = cap_->get(cv::CAP_PROP_FPS);
+    if (!std::isfinite(declaredFps_) || declaredFps_ <= 0.0)
+        declaredFps_ = 0.0;
+
     cap_->set(cv::CAP_PROP_BUFFERSIZE, 1);
 
     roiW_ = even(std::max(2, w));
@@ -464,7 +469,7 @@ VirtualCameraCapture::VirtualCameraCapture(
         std::cout << "[VirtualCamera] Selected camera: " << selectedCameraName_ << std::endl;
         std::cout << "[VirtualCamera] Actual capture: "
                   << roiW_ << 'x' << roiH_ << " @ "
-                  << cap_->get(cv::CAP_PROP_FPS) << " FPS" << std::endl;
+                  << declaredFps_ << " FPS" << std::endl;
     }
 }
 
@@ -511,6 +516,7 @@ cv::Mat VirtualCameraCapture::GetNextFrameCpu()
     if (targetWidth_ > 0 && targetHeight_ > 0 && !frameCpu.empty())
         cv::resize(frameCpu, frameCpu, cv::Size(targetWidth_, targetHeight_));
 
+    RecordSourceFrame(declaredFps_, roiW_, roiH_);
     return frameCpu.clone();
 }
 

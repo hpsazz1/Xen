@@ -438,6 +438,9 @@ cv::Mat DuplicationAPIScreenCapture::GetNextFrameCpu()
     }
 
     d3dContext->Unmap(stagingTextureCPU, 0);
+    RecordSourceFrame(0.0, screenWidth, screenHeight);
+    if (frameCtx.accumulatedFrames > 1)
+        RecordSourceDroppedFrames(static_cast<uint64_t>(frameCtx.accumulatedFrames - 1));
     return cpuFrame;
 }
 
@@ -622,6 +625,9 @@ bool DuplicationAPIScreenCapture::GetNextFrameGpu(
     }
 
     SetGpuCaptureStatus(status, GpuCaptureStatus::Captured);
+    RecordSourceFrame(0.0, screenWidth, screenHeight);
+    if (frameCtx.accumulatedFrames > 1)
+        RecordSourceDroppedFrames(static_cast<uint64_t>(frameCtx.accumulatedFrames - 1));
     if (accumulatedFrames)
         *accumulatedFrames = frameCtx.accumulatedFrames;
     SetDdaCaptureFrameInfo(frameInfo, frameCtx);

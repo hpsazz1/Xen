@@ -12,6 +12,24 @@
 #include <deque>
 #include <cstdint>
 
+#include "runtime/frame_rate_counter.h"
+
+/**
+ * @brief 各采集后端统一发布的输入源诊断
+ *
+ * declaredFps 只表示设备或协议声明值；receiveFps 按真实到达事件计数。droppedFrames
+ * 表示应用尚未消费便被较新帧替换的旧帧，或桌面复制接口报告的累积遗漏帧。
+ */
+struct CaptureSourceDiagnostics
+{
+    double declaredFps = 0.0;
+    int receiveFps = 0;
+    uint64_t receivedFrames = 0;
+    uint64_t droppedFrames = 0;
+    int encodedWidth = 0;
+    int encodedHeight = 0;
+};
+
 // 捕获参数变化标志
 extern std::atomic<bool> detection_resolution_changed;
 extern std::atomic<bool> capture_method_changed;
@@ -32,6 +50,9 @@ extern std::atomic<int> screenHeight;
 extern std::atomic<int> captureFrameCount;
 extern std::atomic<int> captureFps;
 extern std::chrono::time_point<std::chrono::high_resolution_clock> captureFpsStartTime;
+
+// 获取当前活动采集后端的统一输入源诊断快照。
+CaptureSourceDiagnostics GetCaptureSourceDiagnostics();
 
 // WinRT 捕获性能统计
 extern std::atomic<uint64_t> captureWinrtPollAttemptsTotal;
@@ -57,6 +78,25 @@ public:
     virtual ~IScreenCapture() {}
     // 获取下一帧（CPU 内存），由子类实现
     virtual cv::Mat GetNextFrameCpu() = 0;
+    // 获取后端输入侧统计；与捕获处理 FPS、检测发布 FPS 分层展示。
+    virtual CaptureSourceDiagnostics GetSourceDiagnostics() const
+    {
+        CaptureSourceDiagnostics diagnostics;
+        diagnostics.declaredFps = sourceDeclaredFps_.load(std::memory_order_relaxed);
+        diagnostics.receiveFps = sourceReceiveFps_.load(std::memory_order_relaxed);
+        diagnostics.receivedFrames = sourceReceivedFrames_.load(std::memory_order_relaxed);
+        diagnostics.droppedFrames = sourceDroppedFrames_.load(std::memory_order_relaxed);
+        diagnostics.encodedWidth = sourceEncodedWidth_.load(std::memory_order_relaxed);
+        diagnostics.encodedHeight = sourceEncodedHeight_.load(std::memory_order_relaxed);
+
+        const int64_t lastFrameNs = sourceLastFrameNs_.load(std::memory_order_relaxed);
+        const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        constexpr int64_t staleAfterNs = 2'000'000'000LL;
+        if (lastFrameNs <= 0 || nowNs - lastFrameNs > staleAfterNs)
+            diagnostics.receiveFps = 0;
+        return diagnostics;
+    }
     // 获取源图像尺寸
     bool GetSourceDimensions(int& width, int& height) const
     {
@@ -73,9 +113,42 @@ protected:
         sourceHeight_ = height;
     }
 
+    /** @brief 记录一个真实到达或成功取得的源帧。仅允许对应后端的单一生产线程调用。 */
+    void RecordSourceFrame(double declaredFps, int encodedWidth, int encodedHeight)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (declaredFps > 0.0)
+            sourceDeclaredFps_.store(declaredFps, std::memory_order_relaxed);
+        if (encodedWidth > 0 && encodedHeight > 0)
+        {
+            sourceEncodedWidth_.store(encodedWidth, std::memory_order_relaxed);
+            sourceEncodedHeight_.store(encodedHeight, std::memory_order_relaxed);
+        }
+        sourceReceivedFrames_.fetch_add(1, std::memory_order_relaxed);
+        sourceReceiveFps_.store(sourceRateCounter_.addFrame(now), std::memory_order_relaxed);
+        sourceLastFrameNs_.store(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(),
+            std::memory_order_relaxed);
+    }
+
+    /** @brief 累加应用淘汰或采集 API 明确报告的遗漏帧。 */
+    void RecordSourceDroppedFrames(uint64_t count)
+    {
+        if (count > 0)
+            sourceDroppedFrames_.fetch_add(count, std::memory_order_relaxed);
+    }
+
 private:
     int sourceWidth_ = 0;
     int sourceHeight_ = 0;
+    FrameRateCounter sourceRateCounter_;
+    std::atomic<double> sourceDeclaredFps_{ 0.0 };
+    std::atomic<int> sourceReceiveFps_{ 0 };
+    std::atomic<uint64_t> sourceReceivedFrames_{ 0 };
+    std::atomic<uint64_t> sourceDroppedFrames_{ 0 };
+    std::atomic<int> sourceEncodedWidth_{ 0 };
+    std::atomic<int> sourceEncodedHeight_{ 0 };
+    std::atomic<int64_t> sourceLastFrameNs_{ 0 };
 };
 
 #ifdef USE_CUDA

@@ -1,5 +1,7 @@
 ﻿#include "udp_capture.h"
 
+#include "runtime/latest_frame_queue.h"
+
 #include <chrono>
 #include <iostream>
 
@@ -135,12 +137,15 @@ void UDPCapture::SetUDPParams(const std::string& ip, int port)
 cv::Mat UDPCapture::GetNextFrameCpu()
 {
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    if (frame_queue_.empty())
+    NetworkFrame latest;
+    uint64_t skipped = 0;
+    if (!TakeLatestFrame(frame_queue_, latest, skipped))
         return cv::Mat();
-
-    NetworkFrame latest = std::move(frame_queue_.back());
-    while (!frame_queue_.empty())
-        frame_queue_.pop();
+    if (skipped > 0)
+    {
+        dropped_frames_.fetch_add(static_cast<int>(skipped), std::memory_order_relaxed);
+        RecordSourceDroppedFrames(skipped);
+    }
     SetSourceDimensions(latest.sourceWidth, latest.sourceHeight);
     return latest.image;
 }
@@ -203,6 +208,7 @@ void UDPCapture::ReceiveThread()
                 {
                     const int sourceWidth = frame.cols;
                     const int sourceHeight = frame.rows;
+                    RecordSourceFrame(0.0, sourceWidth, sourceHeight);
                     const int cropWidth = std::min(width_, sourceWidth);
                     const int cropHeight = std::min(height_, sourceHeight);
                     const int cropX = std::max(0, (sourceWidth - cropWidth) / 2);
@@ -213,13 +219,15 @@ void UDPCapture::ReceiveThread()
                         cv::resize(detectionFrame, detectionFrame, cv::Size(width_, height_));
 
                     std::lock_guard<std::mutex> lock(frame_mutex_);
-                    while (frame_queue_.size() >= MAX_QUEUE_SIZE)
+                    // UDP 与 NDI 使用相同的低延迟最新帧语义：新帧到达时替换尚未消费的旧帧。
+                    const uint64_t superseded = ReplaceWithLatestFrame(
+                        frame_queue_, NetworkFrame{
+                            std::move(detectionFrame), sourceWidth, sourceHeight });
+                    if (superseded > 0)
                     {
-                        frame_queue_.pop();
-                        dropped_frames_++;
+                        dropped_frames_.fetch_add(static_cast<int>(superseded), std::memory_order_relaxed);
+                        RecordSourceDroppedFrames(superseded);
                     }
-
-                    frame_queue_.push({ std::move(detectionFrame), sourceWidth, sourceHeight });
                     received_frames_++;
                 }
 

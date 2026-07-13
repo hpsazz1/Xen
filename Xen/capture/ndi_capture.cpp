@@ -7,6 +7,7 @@
 #include "ndi_capture.h"
 #include "ndi_frame_geometry.h"
 #include "runtime/frame_rate_counter.h"
+#include "runtime/latest_frame_queue.h"
 
 #include <Processing.NDI.Lib.h>
 
@@ -187,12 +188,16 @@ void NDICapture::SetSource(const std::string& sourceName)
 cv::Mat NDICapture::GetNextFrameCpu()
 {
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    if (frame_queue_.empty())
+    NetworkFrame latest;
+    uint64_t skipped = 0;
+    if (!TakeLatestFrame(frame_queue_, latest, skipped))
         return cv::Mat();
-
-    NetworkFrame latest = std::move(frame_queue_.back());
-    while (!frame_queue_.empty())
-        frame_queue_.pop();
+    if (skipped > 0)
+    {
+        dropped_frames_.fetch_add(static_cast<int>(skipped), std::memory_order_relaxed);
+        global_dropped_frames_.fetch_add(skipped, std::memory_order_relaxed);
+        RecordSourceDroppedFrames(skipped);
+    }
     SetSourceDimensions(latest.sourceWidth, latest.sourceHeight);
     return latest.image;
 }
@@ -284,6 +289,7 @@ void NDICapture::ReceiveThread()
                     const auto receiveNow = std::chrono::steady_clock::now();
                     global_receive_fps_.store(
                         receiveRate.addFrame(receiveNow), std::memory_order_relaxed);
+                    RecordSourceFrame(declaredFps, videoFrame.xres, videoFrame.yres);
 
                     // 将 NDI 帧从 BGRA 转换为 BGR 格式
                     cv::Mat ndiFrame(videoFrame.yres, videoFrame.xres, CV_8UC4, videoFrame.p_data);
@@ -312,14 +318,17 @@ void NDICapture::ReceiveThread()
 
                     {
                         std::lock_guard<std::mutex> lock(frame_mutex_);
-                        while (frame_queue_.size() >= MAX_QUEUE_SIZE)
+                        // 网络接收速度可能高于推理消费速度。这里只保留最新帧，避免排队增加观测延迟；
+                        // 被替换的旧帧必须计入丢弃数，不能再显示为“0 丢帧”。
+                        const uint64_t superseded = ReplaceWithLatestFrame(
+                            frame_queue_, NetworkFrame{
+                                std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight });
+                        if (superseded > 0)
                         {
-                            frame_queue_.pop();
-                            dropped_frames_++;
-                            global_dropped_frames_.fetch_add(1, std::memory_order_relaxed);
+                            dropped_frames_.fetch_add(static_cast<int>(superseded), std::memory_order_relaxed);
+                            global_dropped_frames_.fetch_add(superseded, std::memory_order_relaxed);
+                            RecordSourceDroppedFrames(superseded);
                         }
-                        frame_queue_.push({
-                            std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight });
                         received_frames_++;
                     }
                 }

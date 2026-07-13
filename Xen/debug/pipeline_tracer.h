@@ -60,6 +60,10 @@ struct PipelineFrame
     double observationAgeSec = 0.0;    ///< 检测延迟（秒）
     double fpsValue = 0.0;            ///< 当前帧率
     int    inferenceFps = 0;           ///< 检测器实际结果发布帧率
+    double sourceDeclaredFps = 0.0;    ///< 当前采集源/设备声明帧率；协议不提供时为 0
+    int    sourceReceiveFps = 0;       ///< 当前采集后端真实取得或收到的输入帧率
+    uint64_t sourceReceivedFrames = 0; ///< 当前采集会话累计取得或收到的源帧数
+    uint64_t sourceDroppedFrames = 0;  ///< 累计被新帧替换或由采集 API 报告遗漏的源帧数
     double ndiDeclaredFps = 0.0;       ///< NDI 发送端帧头声明帧率
     int    ndiReceiveFps = 0;          ///< NDI 接收线程实际收到的帧率
     uint64_t ndiReceivedFrames = 0;    ///< 当前 NDI 会话累计收到的视频帧数

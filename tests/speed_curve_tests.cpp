@@ -4,11 +4,13 @@
 #include "debug/pipeline_tracer.h"
 #include "capture/ndi_frame_geometry.h"
 #include "runtime/frame_rate_counter.h"
+#include "runtime/latest_frame_queue.h"
 
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <queue>
 #include <string>
 
 namespace
@@ -47,6 +49,25 @@ int main()
                "frame rate counter measures real event cadence");
     expectNear(rateCounter.value(rateStart + std::chrono::seconds(4)), 0.0, 0.0,
                "frame rate counter expires stale rate");
+
+    std::queue<int> latestFrames;
+    expectTrue(ReplaceWithLatestFrame(latestFrames, 1) == 0,
+               "latest frame queue accepts first frame");
+    expectTrue(ReplaceWithLatestFrame(latestFrames, 2) == 1,
+               "latest frame queue counts superseded frame");
+    int latestValue = 0;
+    uint64_t skippedFrames = 0;
+    expectTrue(TakeLatestFrame(latestFrames, latestValue, skippedFrames),
+               "latest frame queue returns pending frame");
+    expectNear(latestValue, 2.0, 0.0, "latest frame queue returns newest value");
+    expectTrue(skippedFrames == 0, "latest frame queue has no hidden backlog");
+    latestFrames.push(3);
+    latestFrames.push(4);
+    latestFrames.push(5);
+    expectTrue(TakeLatestFrame(latestFrames, latestValue, skippedFrames),
+               "latest frame queue drains defensive backlog");
+    expectNear(latestValue, 5.0, 0.0, "latest frame queue selects newest backlog value");
+    expectTrue(skippedFrames == 2, "latest frame queue reports defensive backlog");
 
     const auto ndiMetadataGeometry = ResolveNdiFrameGeometry(
         320, 320, "<xen source_width=\"2560\" source_height=\"1440\" roi_x=\"1120\" roi_y=\"560\"/>",
@@ -99,8 +120,11 @@ int main()
                "basic pipeline contains filtered observation");
     expectTrue(traceHeader.find("SourceWidth,SourceHeight") != std::string::npos,
                "basic pipeline contains capture source dimensions");
-    expectTrue(traceHeader.find("InferenceFPS,NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
-               "basic pipeline contains ndi and inference fps diagnostics");
+    expectTrue(traceHeader.find(
+        "InferenceFPS,SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames") != std::string::npos,
+        "basic pipeline contains generic source fps diagnostics");
+    expectTrue(traceHeader.find("NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
+               "basic pipeline keeps ndi compatibility diagnostics");
     expectTrue(traceHeader.find("PredX") == std::string::npos,
                "basic pipeline excludes prediction stage");
     traceFile.close();

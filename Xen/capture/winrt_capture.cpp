@@ -309,6 +309,7 @@ cv::Mat WinRTScreenCapture::GetNextFrameCpu()
         std::memory_order_relaxed);
     captureWinrtFramesReturnedTotal.fetch_add(1, std::memory_order_relaxed);
 
+    RecordSourceFrame(0.0, screenWidth, screenHeight);
     return cpuFrame;
 }
 

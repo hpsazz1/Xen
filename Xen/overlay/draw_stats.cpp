@@ -17,7 +17,6 @@
 #include "Xen.h"
 #include "overlay.h"
 #include "capture.h"
-#include "capture/ndi_capture.h"
 #include "other_tools.h"
 #include "overlay/ui_sections.h"
 
@@ -222,7 +221,7 @@ void draw_stats()
     const float avgFrameTimeMs = (avg_fps_cached > 0.01f) ? (1000.0f / avg_fps_cached) : 0.0f;
     const int sourceWidth = screenWidth.load(std::memory_order_relaxed);
     const int sourceHeight = screenHeight.load(std::memory_order_relaxed);
-    const NdiCaptureDiagnostics ndiDiagnostics = NDICapture::GetDiagnostics();
+    const CaptureSourceDiagnostics sourceDiagnostics = GetCaptureSourceDiagnostics();
     const int inferenceFps = detectionBuffer.getPublishFps();
 
     // ---- 根据配置的采集方法构建采集源描述文本 ----
@@ -301,20 +300,22 @@ void draw_stats()
         else
             ImGui::Text("捕获帧率上限：不限");
 
-        if (config.capture_method == "ndi")
-        {
-            if (ndiDiagnostics.declaredFps > 0.0)
-                ImGui::Text("NDI源声明FPS：%.3f", ndiDiagnostics.declaredFps);
-            else
-                ImGui::TextDisabled("NDI源声明FPS：N/A");
-            ImGui::Text("NDI实际接收FPS：%d", ndiDiagnostics.receiveFps);
-            ImGui::Text("捕获处理FPS：%d | 检测发布FPS：%d", captureFps.load(), inferenceFps);
-            ImGui::Text("NDI编码帧：%dx%d | 累计接收：%llu | 接收队列丢帧：%llu",
-                ndiDiagnostics.encodedWidth,
-                ndiDiagnostics.encodedHeight,
-                static_cast<unsigned long long>(ndiDiagnostics.receivedFrames),
-                static_cast<unsigned long long>(ndiDiagnostics.droppedFrames));
-        }
+        // 所有采集方式使用相同的四级判断：声明值、真实输入、捕获处理、检测发布。
+        // 桌面复制和 WinRT 不提供可靠的声明帧率，因此明确显示 N/A，而不是拿显示器刷新率代替。
+        if (sourceDiagnostics.declaredFps > 0.0)
+            ImGui::Text("输入源声明FPS：%.3f", sourceDiagnostics.declaredFps);
+        else
+            ImGui::TextDisabled("输入源声明FPS：N/A");
+        ImGui::Text("输入源实际到达FPS：%d", sourceDiagnostics.receiveFps);
+        ImGui::Text("捕获处理FPS：%d | 检测发布FPS：%d", captureFps.load(), inferenceFps);
+
+        if (sourceDiagnostics.encodedWidth > 0 && sourceDiagnostics.encodedHeight > 0)
+            ImGui::Text("输入编码帧：%dx%d", sourceDiagnostics.encodedWidth, sourceDiagnostics.encodedHeight);
+        else
+            ImGui::TextDisabled("输入编码帧：N/A");
+        ImGui::Text("累计输入：%llu | 源帧淘汰：%llu",
+            static_cast<unsigned long long>(sourceDiagnostics.receivedFrames),
+            static_cast<unsigned long long>(sourceDiagnostics.droppedFrames));
 
         // ---- 当前帧和平均帧间隔时间 ----
         if (currentFrameTimeMs > 0.0f || avgFrameTimeMs > 0.0f)

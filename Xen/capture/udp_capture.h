@@ -70,7 +70,6 @@ private:
     std::queue<NetworkFrame> frame_queue_;
 
     static const int MAX_FRAME_SIZE = 1024 * 1024;  // 最大帧字节数
-    static const int MAX_QUEUE_SIZE = 5;              // 最大帧队列长度
 };
 
 #endif // UDP_CAPTURE_H

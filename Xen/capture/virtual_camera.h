@@ -29,6 +29,7 @@ private:
     int targetHeight_{ 0 };
     std::string selectedCameraName_;
     int captureFps_{ 0 };
+    double declaredFps_{ 0.0 }; // 设备驱动在打开后实际报告的帧率；0 表示不可用
     bool verbose_{ false };
 
     int roiW_{ 0 }, roiH_{ 0 };  // ROI 裁剪尺寸

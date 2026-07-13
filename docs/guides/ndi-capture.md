@@ -37,7 +37,9 @@ capture_fps = 0
 本场景的中心裁剪参数必须是 `x=1120`、`y=560`、`width=320`、`height=320`：
 `(2560-320)/2=1120`，`(1440-320)/2=560`。这证明 ROI 中心与游戏准星中心一致。
 
-“采集详情”会分别显示 NDI 帧头声明 FPS、实际接收 FPS、捕获处理 FPS、检测发布 FPS、累计接收和接收队列丢帧。CSV 也记录 `InferenceFPS/NdiDeclaredFPS/NdiReceiveFPS/NdiReceivedFrames/NdiDroppedFrames`。若声明 FPS 已是 240 而实际接收明显较低，重点检查发送器和网络；若接收 FPS 接近 240 而捕获或检测 FPS 较低，瓶颈在辅机解码、颜色转换或推理。
+“采集详情”使用所有后端共用的四级统计：输入源声明 FPS、输入源实际到达 FPS、捕获处理 FPS、检测发布 FPS。CSV 的统一字段为 `SourceDeclaredFPS/SourceReceiveFPS/SourceReceivedFrames/SourceDroppedFrames`，原 `NdiDeclaredFPS/NdiReceiveFPS/NdiReceivedFrames/NdiDroppedFrames` 暂时保留兼容。若声明 FPS 已是 240 而实际到达明显较低，重点检查发送器、网络和解码；若实际到达接近 240 而捕获或检测 FPS 较低，瓶颈在辅机消费或推理。
+
+NDI 接收端采用最新帧邮箱：新帧到达时会替换尚未消费的旧帧并增加 `SourceDroppedFrames`。该值表示应用为降低延迟而主动淘汰旧画面，不等同于网络丢包；判断网络质量应优先比较声明 FPS 与实际到达 FPS。
 
 接收端还支持视频帧 XML 元数据：
 

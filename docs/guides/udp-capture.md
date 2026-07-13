@@ -46,6 +46,12 @@ ffmpeg -f dshow -i video="OBS Virtual Camera" -vf scale=640:640 -vcodec mjpeg -q
 
 有效的检测分辨率为 `160`、`320` 和 `640`；不支持的值将回退为 `320`。为降低带宽而缩小完整帧时必须保持原宽高比，例如 2560×1440 可缩放为 1280×720，禁止缩放为 320×320。
 
+## UDP 帧率诊断
+
+UDP MJPEG 不携带发送端声明帧率，因此 `SourceDeclaredFPS` 显示为 `N/A`。`SourceReceiveFPS` 是成功拼接并解码的 JPEG 帧率，`FPS` 是提交给检测器的捕获处理帧率，`InferenceFPS` 是检测结果发布帧率。
+
+接收速度高于消费速度时，程序只保留最新帧并增加 `SourceDroppedFrames`，避免队列积压造成画面过期。该数字表示应用主动淘汰的旧帧，不等同于 UDP 网络层丢包；当前裸 MJPEG 协议没有包序号，无法可靠统计网络包丢失。
+
 ## UDP 采集收不到帧
 
 首先检查以下项目：
