@@ -1,6 +1,7 @@
 ﻿#include "pipeline_tracer.h"
 
 #include "runtime/basic_aim_controller.h"
+#include "runtime/build_identity.h"
 
 #include <algorithm>
 #include <chrono>
@@ -9,16 +10,6 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
-
-#ifndef AIMBOT_BUILD_BACKEND
-#define AIMBOT_BUILD_BACKEND "unknown"
-#endif
-#ifndef AIMBOT_BUILD_REVISION
-#define AIMBOT_BUILD_REVISION "unknown"
-#endif
-#ifndef AIMBOT_BUILD_TIMESTAMP_UTC
-#define AIMBOT_BUILD_TIMESTAMP_UTC "unknown"
-#endif
 
 // ============================================================================
 // 全局单例
@@ -117,9 +108,9 @@ bool PipelineTracer::exportCSV(const std::string& path) const
             f.timestamp.time_since_epoch()).count();
 
         file << f.frameId << ','
-             << AIMBOT_BUILD_BACKEND << ','
-             << AIMBOT_BUILD_REVISION << ','
-             << AIMBOT_BUILD_TIMESTAMP_UTC << ','
+             << BuildIdentity::backend() << ','
+             << BuildIdentity::revision() << ','
+             << BuildIdentity::timestampUtc() << ','
              << kBasicAimControllerRevision << ','
              << ms << ','
              << f.resolution << ','

@@ -281,7 +281,7 @@ if(NOT AIMBOT_USE_CUDA)
 endif()
 
 set(SRC_DIR "${CMAKE_SOURCE_DIR}/Xen")
-set_property(SOURCE "${SRC_DIR}/debug/pipeline_tracer.cpp" APPEND PROPERTY COMPILE_DEFINITIONS
+set_property(SOURCE "${SRC_DIR}/runtime/build_identity.cpp" APPEND PROPERTY COMPILE_DEFINITIONS
     AIMBOT_BUILD_BACKEND="${AIMBOT_BUILD_BACKEND}"
     AIMBOT_BUILD_REVISION="${AIMBOT_BUILD_REVISION}"
     AIMBOT_BUILD_TIMESTAMP_UTC="${AIMBOT_BUILD_TIMESTAMP_UTC}"
@@ -338,6 +338,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/overlay/Game_overlay.cpp"
     "${SRC_DIR}/overlay/overlay.cpp"
     "${SRC_DIR}/runtime/thread_loops_shared.cpp"
+    "${SRC_DIR}/runtime/build_identity.cpp"
     "${SRC_DIR}/runtime/application_shutdown.cpp"
     "${SRC_DIR}/runtime/application_threads.cpp"
     "${SRC_DIR}/runtime/startup_helpers.cpp"
@@ -394,6 +395,7 @@ if(BUILD_TESTING)
         "${CMAKE_SOURCE_DIR}/tests/speed_curve_tests.cpp"
         "${SRC_DIR}/debug/pipeline_tracer.cpp"
         "${SRC_DIR}/capture/ndi_frame_geometry.cpp"
+        "${SRC_DIR}/runtime/build_identity.cpp"
     )
     set_target_properties(xen_algorithm_tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")

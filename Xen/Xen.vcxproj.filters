@@ -60,6 +60,7 @@
     <ClCompile Include="depth\depth_utils.cpp" />
     <ClCompile Include="overlay\draw_depth.cpp" />
     <ClCompile Include="runtime\thread_loops_shared.cpp" />
+    <ClCompile Include="runtime\build_identity.cpp" />
     <ClCompile Include="runtime\application_shutdown.cpp" />
     <ClCompile Include="runtime\application_threads.cpp" />
     <ClCompile Include="runtime\startup_helpers.cpp" />
@@ -109,6 +110,7 @@
     <ClInclude Include="capture\virtual_camera.h" />
     <ClInclude Include="Xen.h" />
     <ClInclude Include="runtime\thread_loops.h" />
+    <ClInclude Include="runtime\build_identity.h" />
     <ClInclude Include="runtime\frame_rate_counter.h" />
     <ClInclude Include="runtime\latest_frame_queue.h" />
     <ClInclude Include="runtime\application_shutdown.h" />

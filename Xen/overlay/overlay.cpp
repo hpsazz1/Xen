@@ -34,6 +34,7 @@
 #include "keycodes.h"
 #include "keyboard_listener.h"
 #include "runtime/application_shutdown.h"
+#include "runtime/build_identity.h"
 
 #ifdef USE_CUDA
 #include "trt_detector.h"
@@ -531,11 +532,11 @@ static void DrawSidebarTitle()
     draw->AddText(ImVec2(titleX, titleY), IM_COL32(0, 229, 255, 255), title);
 
     // 版本副标题
-    const char* version = "v2.0";
-    const ImVec2 verDim = ImGui::CalcTextSize(version);
+    const std::string version = BuildIdentity::displayLabel();
+    const ImVec2 verDim = ImGui::CalcTextSize(version.c_str());
     draw->AddText(
         ImVec2(titleX + titleDim.x + 6.0f, titleY + titleDim.y - verDim.y),
-        IM_COL32(100, 110, 128, 200), version);
+        IM_COL32(100, 110, 128, 200), version.c_str());
 
     // 标题下方分隔线 — 青色渐变
     const float sepY = titleY + titleDim.y + 8.0f;

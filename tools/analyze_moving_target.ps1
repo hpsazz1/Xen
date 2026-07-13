@@ -4,6 +4,7 @@ param(
     [ValidateSet('X', 'Y')][string]$Axis = 'X',
     [double]$TrialGapMs = 150.0,
     [double]$WarmupMs = 200.0,
+    [ValidateRange(100.0, 10000.0)][double]$SteadyWindowMs = 1000.0,
     [ValidateRange(0.0, 60000.0)][double]$MinTrialDurationMs = 500.0,
     [ValidateRange(1, 10000)][int]$MinTrialSamples = 30,
     [double]$ReversalErrorThresholdPx = 12.0,
@@ -232,6 +233,9 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         }
 
         $axisAbsErrors = @($samples | ForEach-Object { [math]::Abs([double]$_.$errorColumn) })
+        $steadyWindowStart = [double]$samples[-1].Timestamp - $SteadyWindowMs
+        $steadySamples = @($samples | Where-Object { [double]$_.Timestamp -ge $steadyWindowStart })
+        $steadyAxisAbsErrors = @($steadySamples | ForEach-Object { [math]::Abs([double]$_.$errorColumn) })
         $distanceErrors = @($samples | ForEach-Object { [double]$_.ErrorDistance })
         $axisSpeeds = @($samples | ForEach-Object { [math]::Abs([double]$_.$velocityColumn) })
         $residuals = @($samples | ForEach-Object { [double]$_.FilterResidual })
@@ -286,6 +290,9 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             P50AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $axisAbsErrors -Percentile 0.50), 2)
             P95AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $axisAbsErrors -Percentile 0.95), 2)
             P99AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $axisAbsErrors -Percentile 0.99), 2)
+            SteadySamples = $steadySamples.Count
+            SteadyMeanAbsAxisErrorPx = [math]::Round([double]($steadyAxisAbsErrors | Measure-Object -Average).Average, 2)
+            SteadyP95AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $steadyAxisAbsErrors -Percentile 0.95), 2)
             P95ErrorDistancePx = [math]::Round((Get-PercentileValue -Values $distanceErrors -Percentile 0.95), 2)
             MaxErrorDistancePx = [math]::Round([double]($distanceErrors | Measure-Object -Maximum).Maximum, 2)
             P50ObservedAxisSpeed = [math]::Round((Get-PercentileValue -Values $axisSpeeds -Percentile 0.50), 1)
@@ -336,6 +343,8 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         Samples = $sampleCount
         MeanP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object P95AbsAxisErrorPx -Average).Average, 2)
         WorstP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object P95AbsAxisErrorPx -Maximum).Maximum, 2)
+        MeanSteadyMeanAbsAxisErrorPx = [math]::Round([double]($group | Measure-Object SteadyMeanAbsAxisErrorPx -Average).Average, 2)
+        MeanSteadyP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object SteadyP95AbsAxisErrorPx -Average).Average, 2)
         MeanP95ErrorDistancePx = [math]::Round([double]($group | Measure-Object P95ErrorDistancePx -Average).Average, 2)
         MeanAbsOutputCountsPerSecond = [math]::Round([double]($group | Measure-Object MeanAbsOutputCountsPerSecond -Average).Average, 1)
         MeanApproxClosedLoopLagMs = [math]::Round([double]($group | Measure-Object ApproxClosedLoopLagMs -Average).Average, 1)
@@ -366,7 +375,9 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
     $exportColumns = @(
         'Level', 'Chain', 'Scenario', 'Trial', 'Trials', 'Rows', 'Samples', 'DurationMs',
         'MeanAxisErrorPx', 'MeanAbsAxisErrorPx', 'P50AbsAxisErrorPx', 'P95AbsAxisErrorPx', 'P99AbsAxisErrorPx',
+        'SteadySamples', 'SteadyMeanAbsAxisErrorPx', 'SteadyP95AbsAxisErrorPx',
         'MeanP95AbsAxisErrorPx', 'WorstP95AbsAxisErrorPx', 'P95ErrorDistancePx',
+        'MeanSteadyMeanAbsAxisErrorPx', 'MeanSteadyP95AbsAxisErrorPx',
         'MeanP95ErrorDistancePx', 'MaxErrorDistancePx', 'P50ObservedAxisSpeed',
         'P95ObservedAxisSpeed', 'P95FilterResidualPx', 'SignedOutputCountsPerSecond',
         'MeanAbsOutputCountsPerSecond', 'EstimatedCountsPerPixel', 'ApproxClosedLoopLagMs',
@@ -385,6 +396,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, ApproxClosedLoopLagMs, SpeedLimitedPct, ReversalCount, RecoveryMeanMs, MaxQueuedMoves -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, SteadyP95AbsAxisErrorPx, ApproxClosedLoopLagMs, SpeedLimitedPct, ReversalCount, RecoveryMeanMs, MaxQueuedMoves -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, MeanApproxClosedLoopLagMs, SpeedLimitedPct, ReversalCount, RecoveredReversals, RecoveryMeanMs, MaxQueuedMoves -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, MeanSteadyP95AbsAxisErrorPx, MeanApproxClosedLoopLagMs, SpeedLimitedPct, ReversalCount, RecoveredReversals, RecoveryMeanMs, MaxQueuedMoves -AutoSize

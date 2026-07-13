@@ -80,6 +80,7 @@
     <ClCompile Include="overlay\Game_overlay.cpp" />
     <ClCompile Include="overlay\overlay.cpp" />
     <ClCompile Include="runtime\thread_loops_shared.cpp" />
+    <ClCompile Include="runtime\build_identity.cpp" />
     <ClCompile Include="runtime\application_shutdown.cpp" />
     <ClCompile Include="runtime\application_threads.cpp" />
     <ClCompile Include="runtime\startup_helpers.cpp" />
@@ -164,6 +165,7 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DML|x64'">true</ExcludedFromBuild>
     </ClInclude>
     <ClInclude Include="runtime\basic_aim_controller.h" />
+    <ClInclude Include="runtime\build_identity.h" />
     <ClInclude Include="runtime\basic_target_filter.h" />
     <ClInclude Include="third_party\motion_control\estimation.h" />
     <ClInclude Include="third_party\motion_control\execution.h" />

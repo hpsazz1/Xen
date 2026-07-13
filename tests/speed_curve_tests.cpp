@@ -6,6 +6,7 @@
 #include "capture/network_frame_geometry.h"
 #include "runtime/frame_rate_counter.h"
 #include "runtime/latest_frame_queue.h"
+#include "runtime/build_identity.h"
 
 #include <cmath>
 #include <cstdio>
@@ -157,6 +158,8 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
+    expectTrue(BuildIdentity::displayLabel().find(" r4") != std::string::npos,
+               "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
