@@ -80,6 +80,8 @@ int main()
         expectNear(defaults.ndi_source_width, 2560.0, 0.0, "default ndi full fov width");
         expectNear(defaults.ndi_source_height, 1440.0, 0.0, "default ndi full fov height");
         expectNear(defaults.detection_resolution, 320.0, 0.0, "default detection resolution");
+        expectNear(defaults.move_max_speed_cps, 1440.0, 0.0,
+                   "default maximum speed uses four-chain nine-grid result");
         expectString(defaults.kmbox_net_ip, "192.168.2.188", "default kmbox net ip");
         expectString(defaults.kmbox_net_port, "13384", "default kmbox net port");
         expectString(defaults.kmbox_net_uuid, "7679E04E", "default kmbox net uuid");

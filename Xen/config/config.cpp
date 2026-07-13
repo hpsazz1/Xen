@@ -132,7 +132,7 @@ bool Config::loadConfig(const std::string& filename)
         minSpeedMultiplier = 0.1f;                       // 鼠标最小速度倍率
         maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
         move_response_ms = 80.0f;                        // 基础控制响应时间（毫秒）
-        move_max_speed_cps = 1200.0f;                    // NDI 多段静止目标复测值；约半数远距帧曾受 960 cps 限制
+        move_max_speed_cps = 1440.0f;                    // 四链路九宫格复测值；1200 cps 下约八成远距帧仍受限
 
         prediction_enabled = true;                       // 预测总开关
         predictionInterval = 0.020f;                     // 位置预测间隔（秒）
@@ -541,7 +541,7 @@ bool Config::loadConfig(const std::string& filename)
     minSpeedMultiplier = (float)get_double("minSpeedMultiplier", 0.1);
     maxSpeedMultiplier = (float)get_double("maxSpeedMultiplier", 0.1);
     move_response_ms = (float)get_double("move_response_ms", 80.0);
-    move_max_speed_cps = (float)get_double("move_max_speed_cps", 1200.0);
+    move_max_speed_cps = (float)get_double("move_max_speed_cps", 1440.0);
 
     predictionInterval = (float)get_double("predictionInterval", 0.020);
     prediction_futurePositions = get_long("prediction_futurePositions", 12);

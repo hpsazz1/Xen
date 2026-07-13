@@ -348,6 +348,10 @@ if(BUILD_TESTING)
         NAME xen.build.cuda_architecture
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/build_script_tests.ps1"
     )
+    add_test(
+        NAME xen.analysis.nine_grid
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/nine_grid_analysis_tests.ps1"
+    )
 
     add_executable(xen_algorithm_tests
         "${CMAKE_SOURCE_DIR}/tests/speed_curve_tests.cpp"

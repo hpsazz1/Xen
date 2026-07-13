@@ -11,7 +11,7 @@ public:
     struct Settings
     {
         double responseSeconds = 0.080;
-        double maxCountsPerSecond = 1200.0; // NDI 静止目标复测上调后的设备速率；单帧预算仍按真实 dt 换算
+        double maxCountsPerSecond = 1440.0; // 四链路九宫格复测值；仅放宽远距限速，单帧预算仍按真实 dt 换算
         double settleRadiusPixels = 5.0;
         double releaseRadiusPixels = 8.0;
     };

@@ -184,8 +184,8 @@ int main()
     BasicAimController::Settings productionSettings;
     productionSettings.settleRadiusPixels = 0.0;
     productionSettings.releaseRadiusPixels = 0.0;
-    expectNear(productionSettings.maxCountsPerSecond, 1200.0, 0.0,
-               "production max speed uses latest ndi static-target result");
+    expectNear(productionSettings.maxCountsPerSecond, 1440.0, 0.0,
+               "production max speed uses four-chain nine-grid result");
     for (const double actualFps : { 127.0, 143.0, 240.0 })
     {
         BasicAimController actualFpsController;
@@ -195,6 +195,34 @@ int main()
                    productionSettings.maxCountsPerSecond, 1e-9,
                    "production speed follows capture-window fps");
     }
+
+    // 本轮只放宽远距离设备速率上限。近中心未触发限速时，两档速度必须产生完全相同的
+    // 一阶响应，证明优化不会改变已经通过 36 段实测验证的稳定半径与近中心收敛形态。
+    BasicAimController baselineNearController;
+    BasicAimController optimizedNearController;
+    BasicAimController::Settings baselineSettings = productionSettings;
+    baselineSettings.maxCountsPerSecond = 1200.0;
+    const auto baselineNearOutput = baselineNearController.update(
+        12.0, 0.0, 1.0 / 120.0, 1.344, 1.668, baselineSettings);
+    const auto optimizedNearOutput = optimizedNearController.update(
+        12.0, 0.0, 1.0 / 120.0, 1.344, 1.668, productionSettings);
+    expectTrue(!baselineNearOutput.speedLimited && !optimizedNearOutput.speedLimited,
+               "near-center response remains outside speed limiting");
+    expectNear(optimizedNearOutput.countsX, baselineNearOutput.countsX, 1e-12,
+               "max speed optimization preserves near-center response");
+
+    // 远距离请求在两档速度下均受限，1440 cps 的单帧预算应严格比 1200 cps 高 20%，
+    // 从而只缩短大误差阶段，不通过修改响应时间或稳定回差掩盖问题。
+    BasicAimController baselineFarController;
+    BasicAimController optimizedFarController;
+    const auto baselineFarOutput = baselineFarController.update(
+        160.0, 0.0, 1.0 / 120.0, 1.344, 1.668, baselineSettings);
+    const auto optimizedFarOutput = optimizedFarController.update(
+        160.0, 0.0, 1.0 / 120.0, 1.344, 1.668, productionSettings);
+    expectTrue(baselineFarOutput.speedLimited && optimizedFarOutput.speedLimited,
+               "far response remains explicitly speed limited");
+    expectNear(optimizedFarOutput.frameCountLimit / baselineFarOutput.frameCountLimit,
+               1.2, 1e-12, "far frame budget increases by twenty percent");
 
     if (failures != 0)
     {

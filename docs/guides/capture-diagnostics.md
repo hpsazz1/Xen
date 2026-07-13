@@ -17,6 +17,14 @@
 
 移动诊断另提供 `FrameCountLimit` 和 `SpeedLimited`。前者是按本帧真实时间间隔换算出的设备计数预算，后者为 `1` 时表示请求被最大设备速率截断。连续大量出现 `SpeedLimited=1` 且稳定后无越界，才构成提高 `move_max_speed_cps` 的数据依据。
 
+四链路九宫格数据可使用正式脚本统一分析，目录结构应为 `<CUDA|DML>/<ndi|udp>/<左|上|右>.csv`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_nine_grid.ps1 -DataRoot C:\Users\User\Desktop\Xen
+```
+
+脚本按相邻记录超过 100 ms 自动分段，左右文件依次映射为上、中、下，上方文件依次映射为左、中、右，并汇总首次稳定时间、稳定后最大误差、稳定态退出、主轴越心、限速比例、帧率、观测年龄和输出队列深度。需要留存机器可读结果时传入 `-OutputCsv <路径>`。
+
 当诊断日志输出类似以下行时：
 
 ```text
