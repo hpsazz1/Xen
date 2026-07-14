@@ -160,16 +160,29 @@ public:
             sampleVelocityX, sampleVelocityY, reliableMotion, span, observationTime);
         const bool oscillationSuppressed =
             observationTime < oscillationSuppressedUntil_;
-        // DML约93 FPS下，jump的高速且高加速度阶段连续两轮都放大P95；稳定高速直线
-        // 仍符合常速度模型，不能仅因速度快而误杀。速度与加速度同时越界才跟随观测框。
+        // 稳定高速直线仍符合常速度模型，不能仅因速度快而误杀；速度与加速度同时越界
+        // 表示常速度假设可能失效。已持续预测且当前原始位移与稳健方向同向时，首帧即可
+        // 确认是真实加速；单帧反向跳点、停止和刚重建方向仍保留连续三帧保护。
+        const double fittedSpeed = std::hypot(velocityX_, velocityY_);
+        const double sampleSpeed = std::hypot(sampleVelocityX, sampleVelocityY);
+        const double sampleFitAlignment = fittedSpeed > 1e-9 && sampleSpeed > 1e-9
+            ? (sampleVelocityX * velocityX_ + sampleVelocityY * velocityY_) /
+                (sampleSpeed * fittedSpeed)
+            : -1.0;
         const bool highSpeedTransient = directionLocked_ &&
-            std::hypot(velocityX_, velocityY_) > span * 1.25 &&
+            fittedSpeed > span * 1.25 &&
             std::hypot(accelerationX_, accelerationY_) > span * 5.0;
         if (highSpeedTransient)
             ++highSpeedTransientSamples_;
         else
             highSpeedTransientSamples_ = 0;
-        // 单帧反向检测跳点同样会产生高加速度；连续三个观测才认定为真实高速瞬态。
+        const bool confidentlyAccelerating = highSpeedTransient && reliableMotion &&
+            predictionEstablished_ && continuousPredictionFrames_ > 0 &&
+            sampleFitAlignment > 0.50;
+        // 可信首帧命中后直接进入确认态；否则下一帧会因预测已撤销而失去
+        // continuousPredictionFrames_，在三帧确认完成前重新释放一次提前量。
+        if (confidentlyAccelerating)
+            highSpeedTransientSamples_ = std::max(highSpeedTransientSamples_, 3);
         const bool highSpeedSuppressed = highSpeedTransientSamples_ >= 3;
         if (directionLocked_ && predictionEstablished_ &&
             !suppressPrediction_ && !oscillationSuppressed && !highSpeedSuppressed)
@@ -247,11 +260,11 @@ public:
         selfMotionSuppressionFramesRemaining_ = 0;
         selfMotionRearmPending_ = false;
         continuousPredictionFrames_ = 0;
+        highSpeedTransientSamples_ = 0;
         directionReversalTimes_.clear();
         oscillationSuppressedUntil_ = {};
         hasCommittedDirection_ = false;
         committedDirectionX_ = committedDirectionY_ = 0.0;
-        highSpeedTransientSamples_ = 0;
         observations_.clear();
         previousObservationTime_ = {};
     }
@@ -610,7 +623,7 @@ private:
     bool hasCommittedDirection_ = false; // 是否存在跨解锁保留的最后可靠方向
     double committedDirectionX_ = 0.0;
     double committedDirectionY_ = 0.0;
-    int highSpeedTransientSamples_ = 0; // 连续高速高加速度观测数，隔离单帧跳点
+    int highSpeedTransientSamples_ = 0; // 不确定高速瞬态仍需三帧确认，可信同向加速可首帧门控
     std::deque<Observation> observations_;
     TimePoint previousObservationTime_{};
 };
