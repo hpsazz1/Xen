@@ -175,7 +175,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r28") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r29") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -544,6 +544,7 @@ int main()
 
     TargetPredictor highSpeedPredictor;
     TargetPredictor::Result highSpeedPrediction{};
+    bool observedModerateSpeedAcceleration = false;
     bool observedHighSpeedTransient = false;
     double highSpeedX = 100.0;
     for (int sample = 0; sample < 18; ++sample)
@@ -564,10 +565,23 @@ int main()
         highSpeedPrediction = highSpeedPredictor.update(
             highSpeedX, 100.0, time, time,
             320.0, predictionSettings);
+        const double fittedSpeed = std::hypot(
+            highSpeedPrediction.velocityX, highSpeedPrediction.velocityY);
+        const double fittedAcceleration = std::hypot(
+            highSpeedPrediction.accelerationX, highSpeedPrediction.accelerationY);
+        const bool currentModerateSpeedAcceleration =
+            highSpeedPrediction.directionLocked &&
+            fittedSpeed > 400.0 && fittedSpeed <= 640.0 &&
+            fittedAcceleration > 1600.0;
+        if (currentModerateSpeedAcceleration)
+        {
+            observedModerateSpeedAcceleration = true;
+            expectTrue(!highSpeedPrediction.highSpeedSuppressed,
+                       "moderate stable tracking speed ignores regression acceleration noise");
+        }
         const bool currentHighSpeedTransient =
             highSpeedPrediction.directionLocked &&
-            std::hypot(highSpeedPrediction.velocityX, highSpeedPrediction.velocityY) > 400.0 &&
-            std::hypot(highSpeedPrediction.accelerationX, highSpeedPrediction.accelerationY) > 1600.0;
+            fittedSpeed > 640.0 && fittedAcceleration > 1600.0;
         if (currentHighSpeedTransient)
         {
             observedHighSpeedTransient = true;
@@ -576,7 +590,7 @@ int main()
                        "first aligned acceleration after mature prediction withdraws constant-velocity lead");
         }
     }
-    expectTrue(observedHighSpeedTransient,
+    expectTrue(observedModerateSpeedAcceleration && observedHighSpeedTransient,
                "high-speed acceleration sequence enters the guarded transient envelope");
 
     TargetPredictor reversalPredictor;

@@ -169,8 +169,11 @@ public:
             ? (sampleVelocityX * velocityX_ + sampleVelocityY * velocityY_) /
                 (sampleSpeed * fittedSpeed)
             : -1.0;
+        // r28单向复测中，left/right在约462~474 px/s稳定速度下因回归加速度抖动
+        // 反复命中旧400 px/s门槛；jump速度P95为1908~2103 px/s。速度门槛提高到
+        // 检测跨度2倍/秒，隔离普通单向跟随，同时仍覆盖真正的快速横跳。
         const bool highSpeedTransient = directionLocked_ &&
-            fittedSpeed > span * 1.25 &&
+            fittedSpeed > span * 2.0 &&
             std::hypot(accelerationX_, accelerationY_) > span * 5.0;
         if (highSpeedTransient)
             ++highSpeedTransientSamples_;
