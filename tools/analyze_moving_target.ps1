@@ -270,14 +270,33 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         }
         else { 0.0 }
         $predictionSideFlipCount = 0
+        $predictionInterruptionCount = 0
+        $predictionActiveRunFrames = [System.Collections.Generic.List[double]]::new()
+        $activeRunFrames = 0
+        $wasPredictionActive = $false
         $lastPredictionSide = 0
         if ($hasKinematicPrediction) {
-            foreach ($sample in $predictionRows) {
+            foreach ($sample in $samples) {
                 $offset = if ($Axis -eq 'X') {
                     [double]$sample.PredictionOffsetX
                 }
                 else {
                     [double]$sample.PredictionOffsetY
+                }
+                $isPredictionActive =
+                    [int]$sample.PredictionDirectionLocked -eq 1 -and
+                    [math]::Abs($offset) -gt 0.001
+                if ($isPredictionActive) {
+                    ++$activeRunFrames
+                }
+                elseif ($wasPredictionActive) {
+                    ++$predictionInterruptionCount
+                    $predictionActiveRunFrames.Add($activeRunFrames)
+                    $activeRunFrames = 0
+                }
+                $wasPredictionActive = $isPredictionActive
+                if (-not $isPredictionActive) {
+                    continue
                 }
                 $side = if ($offset -gt 0.0) { 1 } elseif ($offset -lt 0.0) { -1 } else { 0 }
                 if ($side -ne 0 -and $lastPredictionSide -ne 0 -and $side -ne $lastPredictionSide) {
@@ -287,7 +306,14 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
                     $lastPredictionSide = $side
                 }
             }
+            if ($activeRunFrames -gt 0) {
+                $predictionActiveRunFrames.Add($activeRunFrames)
+            }
         }
+        $predictionActiveRunP50Frames = if ($predictionActiveRunFrames.Count -gt 0) {
+            Get-PercentileValue -Values @($predictionActiveRunFrames) -Percentile 0.50
+        }
+        else { 0.0 }
         $movingInsideSettleRows = if ($rows[0].PSObject.Properties.Name -contains 'MovingInsideSettle') {
             @($samples | Where-Object { [int]$_.MovingInsideSettle -eq 1 }).Count
         }
@@ -357,6 +383,8 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             P50PredictionLeadPx = [math]::Round($predictionLeadP50, 2)
             P95PredictionLeadPx = [math]::Round($predictionLeadP95, 2)
             PredictionSideFlipCount = $predictionSideFlipCount
+            PredictionInterruptionCount = $predictionInterruptionCount
+            P50PredictionActiveRunFrames = [math]::Round($predictionActiveRunP50Frames, 1)
             MovingInsideSettlePct = [math]::Round(100.0 * $movingInsideSettleRows / [math]::Max(1, $samples.Count), 1)
             InferenceFps = [math]::Round([double]($samples | Measure-Object InferenceFPS -Average).Average, 1)
             SourceReceiveFps = [math]::Round([double]($samples | Measure-Object SourceReceiveFPS -Average).Average, 1)
@@ -415,6 +443,9 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         MeanP95PredictionLeadPx = [math]::Round(
             [double]($group | Measure-Object P95PredictionLeadPx -Average).Average, 2)
         PredictionSideFlipCount = [int]($group | Measure-Object PredictionSideFlipCount -Sum).Sum
+        PredictionInterruptionCount = [int]($group | Measure-Object PredictionInterruptionCount -Sum).Sum
+        MeanP50PredictionActiveRunFrames = [math]::Round(
+            [double]($group | Measure-Object P50PredictionActiveRunFrames -Average).Average, 1)
         MovingInsideSettlePct = [math]::Round([double](($group | ForEach-Object { $_.MovingInsideSettlePct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         ReversalCount = [int]($group | Measure-Object ReversalCount -Sum).Sum
         ReversalRateHz = [math]::Round(
@@ -457,7 +488,8 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'MeanAbsOutputCountsPerSecond', 'EstimatedCountsPerPixel', 'ApproxClosedLoopLagMs',
         'MeanApproxClosedLoopLagMs', 'SpeedLimitedPct', 'PredictionActivePct',
         'P50PredictionLeadPx', 'P95PredictionLeadPx', 'MeanP50PredictionLeadPx', 'MeanP95PredictionLeadPx',
-        'PredictionSideFlipCount',
+        'PredictionSideFlipCount', 'PredictionInterruptionCount',
+        'P50PredictionActiveRunFrames', 'MeanP50PredictionActiveRunFrames',
         'MovingInsideSettlePct', 'InferenceFps',
         'SourceReceiveFps', 'ObservationAgeAvgMs', 'ObservationAgeP95Ms', 'MaxQueuedMoves',
         'ReversalCount', 'ReversalRateHz', 'RecoveredReversals', 'RecoveryMeanMs', 'RecoveryP95Ms',
@@ -473,6 +505,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, PredictionActivePct, P50PredictionLeadPx, P95PredictionLeadPx, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, PredictionActivePct, P50PredictionLeadPx, P95PredictionLeadPx, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, PredictionActivePct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, PredictionActivePct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize

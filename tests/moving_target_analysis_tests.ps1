@@ -79,6 +79,8 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 28.6 $reverseTrials[0].MovingInsideSettlePct 'Settle motion diagnostics must be summarized per trial.'
     Assert-Equal 71.4 $reverseTrials[0].PredictionActivePct 'Kinematic prediction activation must be summarized.'
     Assert-Equal 30 $reverseTrials[0].P50PredictionLeadPx 'Kinematic median lead must use active prediction offsets.'
+    Assert-Equal 1 $reverseTrials[0].PredictionInterruptionCount 'Prediction active-to-inactive interruptions must be counted.'
+    Assert-Equal 2 $reverseTrials[0].P50PredictionActiveRunFrames 'Prediction active run length must expose one-frame gating churn.'
     Assert-Equal 1 $reverseTrials[0].PredictionSideFlipCount 'Prediction side changes must remain independently auditable.'
     Assert-Equal $reverseTrials[0].P95AbsAxisErrorPx $reverseTrials[0].SteadyP95AbsAxisErrorPx 'Short synthetic trials must use all samples as the steady window.'
     Assert-Equal 2 $scenario.Count 'Each scenario file must create one summary.'

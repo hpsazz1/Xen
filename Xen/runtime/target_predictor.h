@@ -116,6 +116,7 @@ public:
         hasVelocity_ = false;
         directionLocked_ = false;
         suppressPrediction_ = false;
+        predictionEstablished_ = false;
         previousX_ = previousY_ = 0.0;
         velocityX_ = velocityY_ = 0.0;
         accelerationX_ = accelerationY_ = 0.0;
@@ -123,6 +124,8 @@ public:
         pendingDirectionX_ = pendingDirectionY_ = 0.0;
         pendingDirectionSamples_ = 0;
         stationarySamples_ = 0;
+        unreliableSamples_ = 0;
+        reliableDirectionSamples_ = 0;
         observations_.clear();
         previousObservationTime_ = {};
     }
@@ -226,31 +229,35 @@ private:
         else if (std::abs(fittedVelocityX) < std::abs(fittedVelocityY) * 0.35)
             fittedVelocityX = 0.0;
 
-        const double previousVelocityX = velocityX_;
-        const double previousVelocityY = velocityY_;
-        velocityX_ = fittedVelocityX;
-        velocityY_ = fittedVelocityY;
-        if (hasVelocity_)
-        {
-            accelerationX_ = (velocityX_ - previousVelocityX) / dt;
-            accelerationY_ = (velocityY_ - previousVelocityY) / dt;
-            clampVector(accelerationX_, accelerationY_, span * 30.0);
-        }
-        else
-        {
-            accelerationX_ = accelerationY_ = 0.0;
-            hasVelocity_ = true;
-        }
-
         const double netDisplacement = std::hypot(
             observations_.back().x - observations_.front().x,
             observations_.back().y - observations_.front().y);
         const double linearity = pathLength > 1e-9 ? netDisplacement / pathLength : 0.0;
         const double activationDisplacement = std::max(3.0, span * 0.0125);
         const double activationSpeed = std::max(50.0, span * 0.20);
-        return netDisplacement >= activationDisplacement &&
-               std::hypot(velocityX_, velocityY_) >= activationSpeed &&
-               linearity >= 0.65;
+        const bool reliableMotion =
+            netDisplacement >= activationDisplacement &&
+            std::hypot(fittedVelocityX, fittedVelocityY) >= activationSpeed &&
+            linearity >= 0.65;
+
+        // 不可靠窗口只更新噪声诊断，不覆盖最后一次可靠控制速度，避免提前量单帧归零或翻向。
+        if (hasVelocity_)
+        {
+            accelerationX_ = (fittedVelocityX - velocityX_) / dt;
+            accelerationY_ = (fittedVelocityY - velocityY_) / dt;
+            clampVector(accelerationX_, accelerationY_, span * 30.0);
+        }
+        else
+        {
+            accelerationX_ = accelerationY_ = 0.0;
+        }
+        if (reliableMotion)
+        {
+            velocityX_ = fittedVelocityX;
+            velocityY_ = fittedVelocityY;
+            hasVelocity_ = true;
+        }
+        return reliableMotion;
     }
 
     void updateDirection(double sampleVelocityX, double sampleVelocityY,
@@ -262,44 +269,37 @@ private:
         if (sampleSpeed < activationSpeed * 0.50)
         {
             ++stationarySamples_;
-            suppressPrediction_ = true;
+            unreliableSamples_ = 0;
             pendingDirectionSamples_ = 0;
-            if (stationarySamples_ >= 2)
-                directionLocked_ = false;
-            return;
-        }
-
-        // 已锁定方向时，当前单帧明确反向必须立即撤销提前，避免准星越过目标后左右横跳。
-        if (directionLocked_ && sampleSpeed >= activationSpeed)
-        {
-            const double rawDirectionX = sampleVelocityX / sampleSpeed;
-            const double rawDirectionY = sampleVelocityY / sampleSpeed;
-            const double rawAlignment =
-                rawDirectionX * directionX_ + rawDirectionY * directionY_;
-            if (rawAlignment < -0.25)
-            {
+            // 一帧低速常由检测框量化造成；连续两帧才撤销，第三帧才释放方向锁定。
+            if (!predictionEstablished_ || stationarySamples_ >= 2)
                 suppressPrediction_ = true;
-                stationarySamples_ = 0;
-                accumulatePendingDirection(rawDirectionX, rawDirectionY);
-                if (pendingDirectionSamples_ >= 3)
-                {
-                    lockPendingDirection();
-                    suppressPrediction_ = false;
-                }
-                return;
-            }
-        }
-
-        if (!reliableMotion)
-        {
-            ++stationarySamples_;
-            suppressPrediction_ = true;
-            pendingDirectionSamples_ = 0;
-            if (stationarySamples_ >= 2)
+            if (stationarySamples_ >= 3)
+            {
                 directionLocked_ = false;
+                predictionEstablished_ = false;
+                reliableDirectionSamples_ = 0;
+            }
             return;
         }
         stationarySamples_ = 0;
+
+        if (!reliableMotion)
+        {
+            ++unreliableSamples_;
+            pendingDirectionSamples_ = 0;
+            // 已锁定后容忍最多两帧窗口退化，使用最后可靠速度维持连续提前。
+            if (!directionLocked_ || !predictionEstablished_ || unreliableSamples_ >= 3)
+                suppressPrediction_ = true;
+            if (unreliableSamples_ >= 5)
+            {
+                directionLocked_ = false;
+                predictionEstablished_ = false;
+                reliableDirectionSamples_ = 0;
+            }
+            return;
+        }
+        unreliableSamples_ = 0;
 
         const double fittedSpeed = std::hypot(velocityX_, velocityY_);
         const double sampleDirectionX = velocityX_ / fittedSpeed;
@@ -319,10 +319,28 @@ private:
 
         const double alignment =
             sampleDirectionX * directionX_ + sampleDirectionY * directionY_;
+        if (alignment < -0.25)
+        {
+            // 反向必须由稳健回归窗口确认；单帧坐标差分不再直接关闭预测。
+            suppressPrediction_ = true;
+            predictionEstablished_ = false;
+            reliableDirectionSamples_ = 0;
+            accumulatePendingDirection(sampleDirectionX, sampleDirectionY);
+            if (pendingDirectionSamples_ >= 2)
+            {
+                lockPendingDirection();
+                suppressPrediction_ = false;
+            }
+            return;
+        }
+
         pendingDirectionSamples_ = 0;
         suppressPrediction_ = alignment < 0.50;
         if (!suppressPrediction_)
         {
+            ++reliableDirectionSamples_;
+            if (reliableDirectionSamples_ >= 3)
+                predictionEstablished_ = true;
             directionX_ = directionX_ * 0.85 + sampleDirectionX * 0.15;
             directionY_ = directionY_ * 0.85 + sampleDirectionY * 0.15;
             normalize(directionX_, directionY_);
@@ -351,6 +369,8 @@ private:
         directionY_ = pendingDirectionY_;
         normalize(directionX_, directionY_);
         directionLocked_ = true;
+        predictionEstablished_ = false;
+        reliableDirectionSamples_ = 0;
         pendingDirectionSamples_ = 0;
     }
 
@@ -380,6 +400,7 @@ private:
     bool hasVelocity_ = false;
     bool directionLocked_ = false;
     bool suppressPrediction_ = false;
+    bool predictionEstablished_ = false;
     double previousX_ = 0.0;
     double previousY_ = 0.0;
     double velocityX_ = 0.0;
@@ -392,6 +413,8 @@ private:
     double pendingDirectionY_ = 0.0;
     int pendingDirectionSamples_ = 0;
     int stationarySamples_ = 0;
+    int unreliableSamples_ = 0;
+    int reliableDirectionSamples_ = 0;
     std::deque<Observation> observations_;
     TimePoint previousObservationTime_{};
 };

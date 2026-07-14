@@ -164,7 +164,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r8") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r9") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
@@ -345,32 +345,35 @@ int main()
     const auto reversalPending = reversalPredictor.update(
         132.0, 100.0, t0 + std::chrono::milliseconds(48), t0 + std::chrono::milliseconds(48),
         320.0, predictionSettings);
-    expectTrue(reversalPending.directionLocked && reversalPending.x == 132.0,
-               "first reverse observation withdraws lead without flipping sides");
-    reversalPredictor.update(
-        124.0, 100.0, t0 + std::chrono::milliseconds(56), t0 + std::chrono::milliseconds(56),
-        320.0, predictionSettings);
-    const auto reversalConfirmed = reversalPredictor.update(
-        116.0, 100.0, t0 + std::chrono::milliseconds(64), t0 + std::chrono::milliseconds(64),
-        320.0, predictionSettings);
-    expectTrue(reversalConfirmed.x <= 116.0,
-               "confirmed reverse observations never retain the old prediction side");
+    expectTrue(reversalPending.directionLocked && reversalPending.x > 132.0,
+               "single reverse coordinate outlier keeps the robust forward lead");
 
-    TargetPredictor::Result leftPrediction;
-    for (int sample = 1; sample <= 6; ++sample)
+    bool withdrewOldLead = false;
+    bool acquiredReverseLead = false;
+    TargetPredictor::Result leftPrediction{};
+    for (int sample = 2; sample <= 10; ++sample)
     {
-        const auto time = t0 + std::chrono::milliseconds(64 + sample * 8);
+        const auto time = t0 + std::chrono::milliseconds(40 + sample * 8);
         leftPrediction = reversalPredictor.update(
-            116.0 - sample * 8.0, 100.0, time, time, 320.0, predictionSettings);
+            140.0 - sample * 8.0, 100.0, time, time, 320.0, predictionSettings);
+        withdrewOldLead = withdrewOldLead || leftPrediction.offsetX == 0.0;
+        acquiredReverseLead = acquiredReverseLead || leftPrediction.offsetX < 0.0;
     }
-    expectTrue(leftPrediction.directionLocked && leftPrediction.x < 68.0,
-               "stable reverse movement reacquires a forward lead on the new side");
+    expectTrue(withdrewOldLead,
+               "robustly confirmed reversal withdraws the old prediction side");
+    expectTrue(acquiredReverseLead && leftPrediction.directionLocked,
+               "stable reverse movement reacquires a continuous lead on the new side");
 
-    const auto stoppedPrediction = reversalPredictor.update(
-        68.0, 100.0, t0 + std::chrono::milliseconds(120), t0 + std::chrono::milliseconds(120),
+    const auto firstStationaryPrediction = reversalPredictor.update(
+        60.0, 100.0, t0 + std::chrono::milliseconds(128), t0 + std::chrono::milliseconds(128),
         320.0, predictionSettings);
-    expectTrue(stoppedPrediction.x == 68.0,
-               "first stationary observation immediately withdraws lead");
+    expectTrue(firstStationaryPrediction.offsetX < 0.0,
+               "single stationary observation does not interrupt an established lead");
+    const auto confirmedStopPrediction = reversalPredictor.update(
+        60.0, 100.0, t0 + std::chrono::milliseconds(136), t0 + std::chrono::milliseconds(136),
+        320.0, predictionSettings);
+    expectTrue(confirmedStopPrediction.x == 60.0,
+               "two stationary observations withdraw the prediction lead");
 
     expectNear(predictionMoving.offsetX,
                predictionMoving.velocityX * predictionMoving.leadSeconds *
