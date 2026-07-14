@@ -172,7 +172,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r19") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r20") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
@@ -277,7 +277,7 @@ int main()
         100.0, 100.0, t0, t0, 320.0, predictionSettings);
     expectTrue(!predictionFirst.applied && predictionFirst.x == 100.0,
                "prediction waits for a velocity observation");
-    for (int sample = 1; sample <= 7; ++sample)
+    for (int sample = 1; sample <= 8; ++sample)
     {
         const auto time = t0 + std::chrono::milliseconds(sample * 8);
         movingPredictor.update(
@@ -285,8 +285,8 @@ int main()
             320.0, predictionSettings);
     }
     const auto predictionMoving = movingPredictor.update(
-        164.0, 100.0, t0 + std::chrono::milliseconds(64),
-        t0 + std::chrono::milliseconds(74), 320.0, predictionSettings);
+        172.0, 100.0, t0 + std::chrono::milliseconds(72),
+        t0 + std::chrono::milliseconds(82), 320.0, predictionSettings);
     expectTrue(predictionMoving.applied && predictionMoving.directionLocked &&
                predictionMoving.x > 140.0,
                "confirmed movement produces a forward constant-velocity lead");

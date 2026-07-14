@@ -157,7 +157,7 @@ public:
         const double leadSeconds = std::clamp(
             observationAge + settings.additionalLeadSeconds, 0.0, 0.120);
 
-        // 方向锁定只代表回归窗口初步同向；继续收到三次可靠方向后才释放提前量。
+        // 方向锁定只代表回归窗口初步同向；继续收到四次可靠方向后才释放提前量。
         // static实测的补偿残差通常仅维持1~3帧，会在输出前被停止或自运动门控撤销。
         if (!directionLocked_ || !predictionEstablished_ || suppressPrediction_)
         {
@@ -441,7 +441,7 @@ private:
         if (!suppressPrediction_)
         {
             ++reliableDirectionSamples_;
-            if (reliableDirectionSamples_ >= 3)
+            if (reliableDirectionSamples_ >= 4)
                 predictionEstablished_ = true;
             directionX_ = directionX_ * 0.85 + sampleDirectionX * 0.15;
             directionY_ = directionY_ * 0.85 + sampleDirectionY * 0.15;
