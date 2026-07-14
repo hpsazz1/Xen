@@ -115,19 +115,9 @@ capture_fps = 60
 | `move_max_speed_cps` | `1440` | 设备最大移动速度，单位 counts/s；程序按相邻有效观测的真实间隔换算单帧预算。四链路九宫格复测显示 1200 下约八成远距帧仍受限，因此仅将远距预算提高 20%，近中心响应不变。 |
 | `move_integral_time_ms` | `0` | 移动目标PI积分时间，单位毫秒；0为关闭，非零最小50 ms。用于消除匀速目标的比例稳态误差；有效积分输出在进入中心区及轻微越心时继续保持，反向误差达到稳定半径后清除对应轴旧积分。源码默认关闭供未标定部署使用；当前已验证现场基线冻结为320 ms。 |
 | `auto_derive_tracker_params` | `true` | 按检测分辨率和实际捕获 FPS 自动推导目标跟踪参数；不会覆盖 `move_response_ms` 或 `move_max_speed_cps`。 |
-| `predictionInterval` | `0.01` | 预测时间步长。 |
-| `prediction_futurePositions` | `20` | 保留/绘制的预测未来位置数量。 |
-| `draw_futurePositions` | `true` | 在支持的 overlay 中绘制预测的未来位置。 |
-| `kalman_enabled` | `true` | 启用卡尔曼平滑/跟踪。 |
-| `kalman_process_noise_position` | `40.0` | 位置过程噪声。值越高反应越快，但可能稳定性较差。 |
-| `kalman_process_noise_velocity` | `1800.0` | 速度过程噪声。值越高能更激进地跟随快速移动。 |
-| `kalman_measurement_noise` | `35.0` | 检测测量噪声。值越高则对检测结果的信任度越低。 |
-| `kalman_velocity_damping` | `0.08` | 随时间衰减速度。 |
-| `kalman_max_velocity` | `20000.0` | 限制估算速度的上限。 |
-| `kalman_warmup_frames` | `2` | 卡尔曼输出被认为已预热所需的帧数。 |
-| `kalman_compensate_detection_delay` | `true` | 补偿捕获/推理延迟。 |
-| `kalman_additional_prediction_ms` | `0.0` | 额外的预测时间，单位为毫秒。 |
-| `kalman_reset_timeout_sec` | `0.5` | 在此时间内未检测到目标时重置跟踪。 |
+| `prediction_enabled` | `true` | 启用连续真实观测预测。关闭时预测器完全旁路，基础滤波位置直接进入控制器。 |
+| `prediction_lead_ms` | `20` | 在自动补偿观测年龄之外增加的固定前瞻时间，范围0~100 ms。 |
+| `prediction_velocity_tau_ms` | `35` | 目标速度低通时间常数，范围5~250 ms；按真实检测时间戳计算，不绑定固定帧率。 |
 | `snapRadius` | `1.5` | 近距离目标吸附半径。 |
 | `nearRadius` | `25.0` | 近距离目标行为开始的半径。 |
 | `speedCurveExponent` | `3.0` | 速度缩放的曲线形状。 |
@@ -283,7 +273,6 @@ capture_fps = 60
 | `game_overlay_max_fps` | `0` | Overlay 帧率上限。`0` 表示无上限/默认行为。 |
 | `game_overlay_draw_boxes` | `true` | 绘制检测框。 |
 | `game_overlay_compensate_latency` | `true` | 根据帧龄和捕获后记录的鼠标移动来偏移 overlay 框/图标。 |
-| `game_overlay_draw_future` | `true` | 绘制预测的未来位置。 |
 | `game_overlay_draw_wind_tail` | `true` | 绘制轨迹模拟的移动轨迹。 |
 | `game_overlay_draw_frame` | `true` | 绘制帧边框。 |
 | `game_overlay_draw_circle_fov` | `true` | 在游戏 overlay 中绘制圆形 FOV。 |
@@ -292,8 +281,6 @@ capture_fps = 60
 | `game_overlay_frame_a/r/g/b` | `180/255/255/255` | 帧颜色，格式为 alpha/红/绿/蓝。 |
 | `game_overlay_box_thickness` | `2.0` | 检测框线条粗细。 |
 | `game_overlay_frame_thickness` | `1.5` | 帧线条粗细。 |
-| `game_overlay_future_point_radius` | `5.0` | 未来位置点的半径。 |
-| `game_overlay_future_alpha_falloff` | `1.0` | 未来位置点的 alpha 衰减。 |
 | `game_overlay_icon_enabled` | `false` | 启用绘制图标标记。 |
 | `game_overlay_icon_path` | `icon.png` | 图标文件路径。 |
 | `game_overlay_icon_width` | `64` | 图标宽度。 |

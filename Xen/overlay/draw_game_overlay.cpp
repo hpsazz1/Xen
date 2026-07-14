@@ -56,9 +56,6 @@ static void draw_game_overlay_page(GameOverlaySettingsPage page)
         if (OverlayUI::CheckboxRow("补偿叠加延迟", &config.game_overlay_compensate_latency))
             OverlayConfig_MarkDirty();
 
-        if (OverlayUI::CheckboxRow("绘制未来位置", &config.game_overlay_draw_future))
-            OverlayConfig_MarkDirty();
-
         if (OverlayUI::CheckboxRow("绘制轨迹模拟调试尾迹", &config.game_overlay_draw_wind_tail))
             OverlayConfig_MarkDirty();
 
@@ -119,20 +116,6 @@ static void draw_game_overlay_page(GameOverlaySettingsPage page)
             config.clampGameOverlayColor();
             OverlayConfig_MarkDirty();
         }
-
-        OverlayUI::EndSection();
-    }
-
-    // ========== 未来位置点样式（Future Point Style） ==========
-    // 调整预测轨迹点的半径大小及透明度随步数的衰减速度
-    if (shouldDrawGameOverlayPage(page, GameOverlaySettingsPage::Visuals) &&
-        OverlayUI::BeginSection("预测点样式", "game_overlay_section_future_style"))
-    {
-        if (OverlayUI::SliderFloatRow("点半径", &config.game_overlay_future_point_radius, 1.0f, 20.0f, "%.1f"))
-            OverlayConfig_MarkDirty();
-
-        if (OverlayUI::SliderFloatRow("逐点透明度衰减", &config.game_overlay_future_alpha_falloff, 0.1f, 5.0f, "%.2f"))
-            OverlayConfig_MarkDirty();
 
         OverlayUI::EndSection();
     }

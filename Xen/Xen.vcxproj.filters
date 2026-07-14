@@ -113,6 +113,7 @@
     <ClInclude Include="runtime\build_identity.h" />
     <ClInclude Include="runtime\frame_rate_counter.h" />
     <ClInclude Include="runtime\latest_frame_queue.h" />
+    <ClInclude Include="runtime\target_predictor.h" />
     <ClInclude Include="runtime\application_shutdown.h" />
     <ClInclude Include="runtime\application_threads.h" />
     <ClInclude Include="runtime\startup_helpers.h" />

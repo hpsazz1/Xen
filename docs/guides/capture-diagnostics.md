@@ -29,6 +29,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_nine_grid.ps1 
 
 移动目标CSV额外提供 `ObservedVelocityX/ObservedVelocityY` 有符号相对观测速度。CUDA环境下的NDI/UDP移动数据使用以下命令统一分析：
 
+预测阶段另提供 `PredictionApplied`、`PredictionVelocityX/Y`、`PredictionLeadMs` 和 `PredictedX/Y`。`PredictionApplied=1` 只表示本行由两个以上连续真实观测形成了有效速度和前瞻；无目标、跟踪器滑行帧、目标ID切换或瞄准状态切换不会生成预测控制行，并会立即清空预测状态。对照测试必须先核对 `ControllerRevision=5`。
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_moving_target.ps1 -DataRoot C:\Users\User\Desktop\XenMoving -Axis X
 ```
@@ -39,7 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_moving_target.
 
 试次汇总额外输出 `StartAbsAxisErrorPx`，场景汇总输出起始误差均值、最小值和最大值；反转场景同时输出 `ReversalRateHz`。A/B调参前应先确认有效试次数相同、起始误差位于测试方案范围内、反转速率差不超过5%，再比较控制指标。
 
-DML性能CSV提供 `DmlModel` 和 `DmlPreprocessMs/DmlTensorSetupMs/DmlInferenceMs/DmlCopyMs/DmlPostprocessMs/DmlNmsMs/DmlTotalMs`。使用以下正式脚本汇总模型身份、阶段均值、P95、推理占比和理论吞吐：
+DML性能CSV提供 `DmlModel`、`DmlInputWidth/DmlInputHeight` 和 `DmlPreprocessMs/DmlTensorSetupMs/DmlInferenceMs/DmlCopyMs/DmlPostprocessMs/DmlNmsMs/DmlTotalMs`。使用以下正式脚本汇总模型身份、输入尺寸、阶段均值、P95、推理占比和理论吞吐：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_dml_performance.ps1 -DataRoot C:\Users\User\Desktop\XenDmlPerformance -OutputCsv C:\Users\User\Desktop\XenDmlPerformance\dml_performance_summary.csv

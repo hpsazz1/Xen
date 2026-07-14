@@ -1,6 +1,7 @@
 #include "runtime/basic_aim_controller.h"
 #include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_target_filter.h"
+#include "runtime/target_predictor.h"
 #include "debug/pipeline_tracer.h"
 #include "capture/ndi_frame_geometry.h"
 #include "capture/network_frame_geometry.h"
@@ -141,7 +142,7 @@ int main()
         "SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames") != std::string::npos,
         "basic pipeline contains generic source fps diagnostics");
     expectTrue(traceHeader.find(
-        "DmlModel,DmlPreprocessMs,DmlTensorSetupMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs") != std::string::npos,
+        "DmlModel,DmlInputWidth,DmlInputHeight,DmlPreprocessMs,DmlTensorSetupMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs") != std::string::npos,
         "basic pipeline contains dml stage timing diagnostics");
     expectTrue(traceHeader.find("NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
                "basic pipeline keeps ndi compatibility diagnostics");
@@ -161,13 +162,14 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r4") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r5") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
-    expectTrue(traceHeader.find("PredX") == std::string::npos,
-               "basic pipeline excludes prediction stage");
+    expectTrue(traceHeader.find(
+        "PredictionApplied,PredictionVelocityX,PredictionVelocityY,PredictionLeadMs,PredictedX,PredictedY") != std::string::npos,
+        "basic pipeline reports prediction diagnostics");
     traceFile.close();
     std::remove(tracePath);
 
@@ -193,6 +195,79 @@ int main()
     expectNear(filteredMove.observedSpeed,
                std::hypot(filteredMove.observedVelocityX, filteredMove.observedVelocityY),
                1e-9, "basic filter speed matches signed velocity magnitude");
+
+    TargetPredictor::Settings predictionSettings;
+    predictionSettings.additionalLeadSeconds = 0.020;
+    predictionSettings.velocityTimeConstantSeconds = 0.035;
+
+    TargetPredictor movingPredictor;
+    const auto predictionFirst = movingPredictor.update(
+        100.0, 100.0, t0, t0, 320.0, predictionSettings);
+    expectTrue(!predictionFirst.applied && predictionFirst.x == 100.0,
+               "prediction waits for a velocity observation");
+    const auto predictionMoving = movingPredictor.update(
+        108.0, 100.0, t0 + std::chrono::milliseconds(8),
+        t0 + std::chrono::milliseconds(18), 320.0, predictionSettings);
+    expectTrue(predictionMoving.applied && predictionMoving.x > 108.0,
+               "continuous moving observation predicts forward");
+    expectNear(predictionMoving.velocityX, 1000.0, 1e-9,
+               "prediction velocity uses observation timestamps");
+    expectNear(predictionMoving.leadSeconds, 0.030, 1e-9,
+               "prediction adds observation age to fixed lead");
+
+    TargetPredictor staticPredictor;
+    staticPredictor.update(160.0, 160.0, t0, t0, 320.0, predictionSettings);
+    const auto predictionStatic = staticPredictor.update(
+        160.0, 160.0, t0 + std::chrono::milliseconds(17),
+        t0 + std::chrono::milliseconds(27), 320.0, predictionSettings);
+    expectTrue(predictionStatic.applied, "static target keeps prediction stage active");
+    expectNear(predictionStatic.x, 160.0, 0.0, "static prediction does not drift horizontally");
+    expectNear(predictionStatic.y, 160.0, 0.0, "static prediction does not drift vertically");
+
+    TargetPredictor irregularPredictor;
+    irregularPredictor.update(50.0, 50.0, t0, t0, 320.0, predictionSettings);
+    const auto predictionIrregular = irregularPredictor.update(
+        60.0, 50.0, t0 + std::chrono::milliseconds(20),
+        t0 + std::chrono::milliseconds(25), 320.0, predictionSettings);
+    expectNear(predictionIrregular.velocityX, 500.0, 1e-9,
+               "prediction remains frame-rate independent under irregular dml cadence");
+
+    TargetPredictor youngObservationPredictor;
+    TargetPredictor oldObservationPredictor;
+    youngObservationPredictor.update(100.0, 100.0, t0, t0, 320.0, predictionSettings);
+    oldObservationPredictor.update(100.0, 100.0, t0, t0, 320.0, predictionSettings);
+    const auto youngObservation = youngObservationPredictor.update(
+        108.0, 100.0, t0 + std::chrono::milliseconds(8),
+        t0 + std::chrono::milliseconds(8), 320.0, predictionSettings);
+    const auto oldObservation = oldObservationPredictor.update(
+        108.0, 100.0, t0 + std::chrono::milliseconds(8),
+        t0 + std::chrono::milliseconds(28), 320.0, predictionSettings);
+    expectTrue(oldObservation.x > youngObservation.x,
+               "older observation receives more automatic latency compensation");
+
+    movingPredictor.reset();
+    const auto predictionAfterLoss = movingPredictor.update(
+        200.0, 100.0, t0 + std::chrono::milliseconds(30),
+        t0 + std::chrono::milliseconds(30), 320.0, predictionSettings);
+    expectTrue(!predictionAfterLoss.applied && predictionAfterLoss.velocityX == 0.0,
+               "target loss reset prevents stale prediction output");
+
+    TargetPredictor jumpPredictor;
+    jumpPredictor.update(10.0, 10.0, t0, t0, 320.0, predictionSettings);
+    const auto boundedJump = jumpPredictor.update(
+        310.0, 310.0, t0 + std::chrono::milliseconds(8),
+        t0 + std::chrono::milliseconds(200), 320.0, predictionSettings);
+    expectTrue(std::hypot(boundedJump.x - 310.0, boundedJump.y - 310.0) <= 32.0 + 1e-9,
+               "abnormal target jump has bounded prediction distance");
+
+    TargetPredictor disabledPredictor;
+    TargetPredictor::Settings disabledPredictionSettings = predictionSettings;
+    disabledPredictionSettings.enabled = false;
+    const auto disabledPrediction = disabledPredictor.update(
+        123.0, 87.0, t0, t0, 320.0, disabledPredictionSettings);
+    expectTrue(!disabledPrediction.applied &&
+               disabledPrediction.x == 123.0 && disabledPrediction.y == 87.0,
+               "disabled prediction preserves base target position exactly");
 
     BasicAimController controller;
     BasicAimController::Settings controllerSettings;

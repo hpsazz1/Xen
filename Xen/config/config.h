@@ -75,13 +75,9 @@ public:
     float move_integral_time_ms;        // 移动目标积分时间，毫秒；0 表示关闭
 
     // ========== 目标预测 ==========
-    bool  prediction_enabled = true;              // 预测总开关
-    float predictionInterval;                     // 预测前瞻时间（秒）— 核心调参项
-    int   prediction_futurePositions;             // 预测未来位置点数（可视化用）
-    bool  draw_futurePositions;                   // 是否绘制预测点
-    float prediction_tau = 0.05f;                 // EMA 时间常数（秒），越小响应越快
-    bool  prediction_compensate_delay = true;     // 是否补偿检测延迟
-    float prediction_reset_timeout_sec = 0.5f;    // 预测重置超时（秒）
+    bool  prediction_enabled = true;              // 连续真实观测预测总开关
+    float prediction_lead_ms = 20.0f;             // 观测年龄之外的固定前瞻，毫秒
+    float prediction_velocity_tau_ms = 35.0f;     // 目标速度低通时间常数，毫秒
 
     float snapRadius;
     float nearRadius;
@@ -207,7 +203,6 @@ public:
     int game_overlay_max_fps;
     bool game_overlay_draw_boxes;
     bool game_overlay_compensate_latency;
-    bool game_overlay_draw_future;
     bool game_overlay_draw_wind_tail;
     bool game_overlay_draw_frame;
     bool game_overlay_draw_circle_fov;
@@ -222,8 +217,6 @@ public:
     int game_overlay_frame_b;
     float game_overlay_box_thickness;
     float game_overlay_frame_thickness;
-    float game_overlay_future_point_radius;
-    float game_overlay_future_alpha_falloff;
 
     bool game_overlay_icon_enabled;
     std::string game_overlay_icon_path;

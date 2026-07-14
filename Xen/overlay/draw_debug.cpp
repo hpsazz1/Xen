@@ -459,46 +459,6 @@ void draw_debug_frame()
         }
     }
 
-    // 绘制鼠标未来轨迹预测点（从红到蓝渐变）
-    if (config.draw_futurePositions && globalMouseThread)
-    {
-        auto futurePts = globalMouseThread->getFuturePositions();
-        if (!futurePts.empty())
-        {
-            // 将检测分辨率坐标映射到显示尺寸
-            float scale_x = static_cast<float>(texW) / config.detection_resolution;
-            float scale_y = static_cast<float>(texH) / config.detection_resolution;
-
-            // 裁剪到图像区域
-            ImVec2 clip_min = image_pos;
-            ImVec2 clip_max = ImVec2(image_pos.x + texW * debug_scale,
-                image_pos.y + texH * debug_scale);
-            draw_list->PushClipRect(clip_min, clip_max, true);
-
-            int totalPts = static_cast<int>(futurePts.size());
-            for (size_t i = 0; i < futurePts.size(); ++i)
-            {
-                int px = static_cast<int>(futurePts[i].first * scale_x);
-                int py = static_cast<int>(futurePts[i].second * scale_y);
-                ImVec2 pt(image_pos.x + px * debug_scale,
-                    image_pos.y + py * debug_scale);
-
-                // 颜色渐变：早期为蓝色，后期为红色
-                int b = static_cast<int>(255 - (i * 255.0 / totalPts));
-                int r = static_cast<int>(i * 255.0 / totalPts);
-                int g = 50;
-
-                ImU32 fillColor = IM_COL32(r, g, b, 255);
-                ImU32 outlineColor = IM_COL32(255, 255, 255, 255);
-
-                // 绘制实心圆点和白色边框
-                draw_list->AddCircleFilled(pt, 4.0f * debug_scale, fillColor);
-                draw_list->AddCircle(pt, 4.0f * debug_scale, outlineColor, 0, 1.0f);
-            }
-
-            draw_list->PopClipRect();
-        }
-    }
 }
 
 // 绘制捕获预览章节（显示预览窗口开关和调试帧）

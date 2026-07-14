@@ -31,11 +31,9 @@ float prev_move_response_ms = config.move_response_ms;
 float prev_move_max_speed_cps = config.move_max_speed_cps;
 float prev_move_integral_time_ms = config.move_integral_time_ms;
 	// 预测
-	float prev_predictionInterval = config.predictionInterval;
 	bool  prev_prediction_enabled = config.prediction_enabled;
-	float prev_prediction_tau = config.prediction_tau;
-	bool  prev_prediction_compensate_delay = config.prediction_compensate_delay;
-	float prev_prediction_reset_timeout_sec = config.prediction_reset_timeout_sec;
+	float prev_prediction_lead_ms = config.prediction_lead_ms;
+	float prev_prediction_velocity_tau_ms = config.prediction_velocity_tau_ms;
 // 目标修正（吸附半径、近距半径、速度曲线、吸附增益）
 float prev_snapRadius = config.snapRadius;
 float prev_nearRadius = config.nearRadius;
@@ -160,52 +158,15 @@ static void draw_mouse_page(MouseSettingsPage page)
 
         if (!config.prediction_enabled) ImGui::BeginDisabled();
 
-        if (config.auto_derive_tracker_params)
-        {
-            ImGui::TextDisabled("自动：前瞻 %.3fs  响应 %.3fs  重置 %.2fs",
-                config.prediction_tau,
-                config.prediction_reset_timeout_sec);
-        }
-        else
-        {
+        OverlayUI::SliderFloatRow("额外前瞻(ms)", &config.prediction_lead_ms, 0.0f, 100.0f, "%.0f", "##pred_lead_ms",
+            "在自动补偿真实观测年龄之外增加的固定前瞻时间。\n"
+            "数值越大，移动目标提前量越大；建议先使用20ms基线复测。");
 
-        OverlayUI::SliderFloatRow("预测前瞻(s)", &config.predictionInterval, 0.0f, 0.12f, "%.3f", "##pred_interval",
-            "预测前瞻时间 — 核心调参项\n"
-            "沿目标运动方向外推的最大时间。\n"
-            "增大 → 打更远的提前量，适合快速移动/远距离目标\n"
-            "减小 → 更保守的瞄准，适合近距离/慢速目标\n"
-            "推荐：0.015~0.035s（游戏不同需微调）");
+        OverlayUI::SliderFloatRow("速度平滑(ms)", &config.prediction_velocity_tau_ms, 5.0f, 250.0f, "%.0f", "##pred_velocity_tau_ms",
+            "目标速度估计的时间常数，按真实检测时间戳自动适配帧率。\n"
+            "数值越小变向响应越快，数值越大速度越平稳；建议35ms。");
 
-        OverlayUI::SliderFloatRow("响应时间常数(s)", &config.prediction_tau, 0.005f, 0.50f, "%.3f", "##pred_tau",
-            "EMA 滤波器的时间常数 — 控制速度和平滑的响应速度\n"
-            "减小 → 响应更快，紧跟目标急停/变向，但可能更抖\n"
-            "增大 → 更平滑稳定，但目标突然变向时会短暂滞后\n"
-            "推荐：stable=0.08 / balanced=0.05 / aggressive=0.03 / fast=0.02\n"
-            "注意：此值自动适配帧率，无需担心 FPS 变化");
-
-        OverlayUI::CheckboxRow("补偿检测延迟", &config.prediction_compensate_delay, "##pred_comp_delay",
-            "是否额外补偿 YOLO 推理延迟（~20-50ms）。\n"
-            "开启：预测时间 = 前瞻 + 推理延迟，更精确但预测距离更大\n"
-            "关闭：仅使用前瞻时间，更保守\n"
-            "推荐：开启（对高 FPS 设备效果显著）");
-
-        OverlayUI::SliderFloatRow("重置超时(s)", &config.prediction_reset_timeout_sec, 0.05f, 3.0f, "%.2f", "##pred_reset",
-            "目标短暂丢失后，保留预测状态的最大时间。\n"
-            "减小 → 目标消失后快速重置，防止预测\"鬼影\"\n"
-            "增大 → 短暂遮挡/丢帧时保持预测连续性\n"
-            "推荐：0.3~0.8s");
-
-        OverlayUI::SliderIntRow("预测点数", &config.prediction_futurePositions, 4, 30, "%d", "##pred_future_pos",
-            "可视化预测轨迹的点数（仅影响显示）。\n"
-            "点数越多 → 屏幕上显示的预测线越长\n"
-            "推荐：8~15");
-        }
-
-        OverlayUI::CheckboxRow("绘制预测点", &config.draw_futurePositions, "##pred_draw",
-            "是否在覆盖层上绘制预测轨迹线。\n"
-            "开启：绿色圆点显示未来预测位置\n"
-            "关闭：隐藏预测可视化\n"
-            "推荐：开启（方便观察预测效果）");
+        ImGui::TextDisabled("仅真实检测观测驱动；目标丢失或切换时立即清零");
 
         if (!config.prediction_enabled) { ImGui::EndDisabled(); }
 
@@ -821,11 +782,9 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_move_integral_time_ms != config.move_integral_time_ms ||
         prev_minSpeedMultiplier != config.minSpeedMultiplier ||
         prev_maxSpeedMultiplier != config.maxSpeedMultiplier ||
-        prev_predictionInterval != config.predictionInterval ||
         prev_prediction_enabled != config.prediction_enabled ||
-        prev_prediction_tau != config.prediction_tau ||
-        prev_prediction_compensate_delay != config.prediction_compensate_delay ||
-        prev_prediction_reset_timeout_sec != config.prediction_reset_timeout_sec ||
+        prev_prediction_lead_ms != config.prediction_lead_ms ||
+        prev_prediction_velocity_tau_ms != config.prediction_velocity_tau_ms ||
         prev_snapRadius != config.snapRadius ||
         prev_nearRadius != config.nearRadius ||
         prev_speedCurveExponent != config.speedCurveExponent ||
@@ -845,11 +804,9 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_minSpeedMultiplier = config.minSpeedMultiplier;
         prev_maxSpeedMultiplier = config.maxSpeedMultiplier;
         // 同步预测
-        prev_predictionInterval = config.predictionInterval;
         prev_prediction_enabled = config.prediction_enabled;
-        prev_prediction_tau = config.prediction_tau;
-        prev_prediction_compensate_delay = config.prediction_compensate_delay;
-        prev_prediction_reset_timeout_sec = config.prediction_reset_timeout_sec;
+        prev_prediction_lead_ms = config.prediction_lead_ms;
+        prev_prediction_velocity_tau_ms = config.prediction_velocity_tau_ms;
         // 同步目标修正
         prev_snapRadius = config.snapRadius;
         prev_nearRadius = config.nearRadius;

@@ -35,12 +35,20 @@ struct PipelineFrame
     double observedSpeed = 0.0; ///< 相邻原始观测速度，仅用于诊断
     double filterResidual = 0.0;
 
-    // ========== Stage 3: 中心误差 ==========
+    // ========== Stage 3: 连续观测预测 ==========
+    bool predictionApplied = false;
+    double predictionVelocityX = 0.0;
+    double predictionVelocityY = 0.0;
+    double predictionLeadMs = 0.0;
+    double predictedX = 0.0;
+    double predictedY = 0.0;
+
+    // ========== Stage 4: 中心误差 ==========
     double errorX = 0.0;
     double errorY = 0.0;
     double errorDistance = 0.0;
 
-    // ========== Stage 4: 基础控制器请求 ==========
+    // ========== Stage 5: 基础控制器请求 ==========
     double requestedPixelX = 0.0;
     double requestedPixelY = 0.0;
     double requestedCountsX = 0.0;
@@ -48,7 +56,7 @@ struct PipelineFrame
     double integralCountsX = 0.0; ///< 本帧积分补偿计数；限速时按相同比例缩放
     double integralCountsY = 0.0;
 
-    // ========== Stage 5: 请求输出（尚不代表驱动已实际发送） ==========
+    // ========== Stage 6: 请求输出（尚不代表驱动已实际发送） ==========
     int    finalMx = 0;        ///< 请求的水平移动量（counts）
     int    finalMy = 0;        ///< 请求的垂直移动量（counts）
 
@@ -77,6 +85,8 @@ struct PipelineFrame
     double dmlNmsMs = 0.0;             ///< 后处理内NMS耗时，已包含在后处理耗时中
     double dmlTotalMs = 0.0;           ///< 预处理、推理、交接和后处理总耗时
     std::string dmlModel;               ///< DML会话实际加载的模型路径
+    int dmlInputWidth = 0;              ///< DML模型实际输入宽度
+    int dmlInputHeight = 0;             ///< DML模型实际输入高度
     double sourceDeclaredFps = 0.0;    ///< 当前采集源/设备声明帧率；协议不提供时为 0
     int    sourceReceiveFps = 0;       ///< 当前采集后端真实取得或收到的输入帧率
     uint64_t sourceReceivedFrames = 0; ///< 当前采集会话累计取得或收到的源帧数

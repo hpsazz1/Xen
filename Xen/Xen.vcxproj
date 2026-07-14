@@ -167,6 +167,7 @@
     <ClInclude Include="runtime\basic_aim_controller.h" />
     <ClInclude Include="runtime\build_identity.h" />
     <ClInclude Include="runtime\basic_target_filter.h" />
+    <ClInclude Include="runtime\target_predictor.h" />
     <ClInclude Include="third_party\motion_control\estimation.h" />
     <ClInclude Include="third_party\motion_control\execution.h" />
     <ClInclude Include="third_party\motion_control\filters.h" />

@@ -412,6 +412,8 @@ void DirectMLDetector::publishTimingSnapshot(
 
     std::lock_guard<std::mutex> lock(timingMutex);
     snapshot.modelPath = activeModelPath;
+    snapshot.inputWidth = activeInputWidth;
+    snapshot.inputHeight = activeInputHeight;
     timingSnapshot = snapshot;
 }
 
@@ -534,8 +536,12 @@ bool DirectMLDetector::tryInitializeModel(
         {
             std::lock_guard<std::mutex> lock(timingMutex);
             activeModelPath = model_path;
+            activeInputWidth = model_input_w > 0 ? model_input_w : config.detection_resolution;
+            activeInputHeight = model_input_h > 0 ? model_input_h : config.detection_resolution;
             timingSnapshot = TimingSnapshot{};
             timingSnapshot.modelPath = activeModelPath;
+            timingSnapshot.inputWidth = activeInputWidth;
+            timingSnapshot.inputHeight = activeInputHeight;
         }
 
         // 自动设置 fixed_input_size，并通知其他模块重新加载

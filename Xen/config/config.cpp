@@ -135,13 +135,9 @@ bool Config::loadConfig(const std::string& filename)
         move_max_speed_cps = 1440.0f;                    // 四链路九宫格复测值；1200 cps 下约八成远距帧仍受限
         move_integral_time_ms = 0.0f;                    // 默认关闭；320 ms 候选需先通过移动与静止复测
 
-        prediction_enabled = true;                       // 预测总开关
-        predictionInterval = 0.020f;                     // 位置预测间隔（秒）
-        prediction_futurePositions = 12;                 // 预测的未来位置点数
-        draw_futurePositions = true;                     // 是否绘制预测轨迹点
-        prediction_tau = 0.05f;                          // EMA 时间常数（秒）
-        prediction_compensate_delay = true;              // 是否补偿检测延迟
-        prediction_reset_timeout_sec = 0.5f;             // 预测重置超时（秒）
+        prediction_enabled = true;                       // 连续真实观测预测总开关
+        prediction_lead_ms = 20.0f;                      // 观测年龄之外的固定前瞻（毫秒）
+        prediction_velocity_tau_ms = 35.0f;              // 速度低通时间常数（毫秒）
 
         snapRadius = 1.5f;                               // 瞄准吸附半径
         nearRadius = 25.0f;                              // "近距离"半径阈值
@@ -279,7 +275,6 @@ bool Config::loadConfig(const std::string& filename)
         game_overlay_max_fps = 0;                        // 覆盖层最大帧率（0=不限）
         game_overlay_draw_boxes = true;                  // 绘制检测框
         game_overlay_compensate_latency = true;          // 延迟补偿
-        game_overlay_draw_future = true;                 // 绘制预测位置
         game_overlay_draw_wind_tail = true;              // 绘制轨迹模拟轨迹
         game_overlay_draw_frame = true;                  // 绘制边框
         game_overlay_draw_circle_fov = true;             // 绘制圆形 FOV
@@ -294,8 +289,6 @@ bool Config::loadConfig(const std::string& filename)
         game_overlay_frame_b = 255;                      // 边框蓝色分量
         game_overlay_box_thickness = 2.0f;               // 检测框线条粗细
         game_overlay_frame_thickness = 1.5f;             // 边框线条粗细
-        game_overlay_future_point_radius = 5.0f;         // 预测点半径
-        game_overlay_future_alpha_falloff = 1.0f;        // 预测点透明度衰减
 
         // 覆盖层图标
         game_overlay_icon_enabled = false;
@@ -545,13 +538,16 @@ bool Config::loadConfig(const std::string& filename)
     move_max_speed_cps = (float)get_double("move_max_speed_cps", 1440.0);
     move_integral_time_ms = (float)get_double("move_integral_time_ms", 0.0);
 
-    predictionInterval = (float)get_double("predictionInterval", 0.020);
-    prediction_futurePositions = get_long("prediction_futurePositions", 12);
     prediction_enabled = get_bool("prediction_enabled", true);
-    draw_futurePositions = get_bool("draw_futurePositions", true);
-    prediction_tau = (float)get_double("prediction_tau", 0.05);
-    prediction_compensate_delay = get_bool("prediction_compensate_delay", true);
-    prediction_reset_timeout_sec = (float)get_double("prediction_reset_timeout_sec", 0.5);
+    const bool hasPredictionLeadMs = ini.GetValue("", "prediction_lead_ms", nullptr) != nullptr;
+    prediction_lead_ms = hasPredictionLeadMs
+        ? (float)get_double("prediction_lead_ms", 20.0)
+        : (float)(get_double("predictionInterval", 0.020) * 1000.0);
+    const bool hasPredictionVelocityTauMs =
+        ini.GetValue("", "prediction_velocity_tau_ms", nullptr) != nullptr;
+    prediction_velocity_tau_ms = hasPredictionVelocityTauMs
+        ? (float)get_double("prediction_velocity_tau_ms", 35.0)
+        : (float)(get_double("prediction_tau", 0.035) * 1000.0);
 
     snapRadius = (float)get_double("snapRadius", 1.5);
     nearRadius = (float)get_double("nearRadius", 25.0);
@@ -694,7 +690,6 @@ bool Config::loadConfig(const std::string& filename)
     game_overlay_max_fps = get_long("game_overlay_max_fps", 0);
     game_overlay_draw_boxes = get_bool("game_overlay_draw_boxes", true);
     game_overlay_compensate_latency = get_bool("game_overlay_compensate_latency", true);
-    game_overlay_draw_future = get_bool("game_overlay_draw_future", true);
     game_overlay_draw_wind_tail = get_bool("game_overlay_draw_wind_tail", true);
     game_overlay_draw_frame = get_bool("game_overlay_draw_frame", true);
     game_overlay_draw_circle_fov = get_bool("game_overlay_draw_circle_fov", true);
@@ -709,8 +704,6 @@ bool Config::loadConfig(const std::string& filename)
     game_overlay_frame_b = get_long("game_overlay_frame_b", 255);
     game_overlay_box_thickness = (float)get_double("game_overlay_box_thickness", 2.0);
     game_overlay_frame_thickness = (float)get_double("game_overlay_frame_thickness", 1.5);
-    game_overlay_future_point_radius = (float)get_double("game_overlay_future_point_radius", 5.0);
-    game_overlay_future_alpha_falloff = (float)get_double("game_overlay_future_alpha_falloff", 1.0);
     clampGameOverlayColor();
 
     game_overlay_icon_enabled = get_bool("game_overlay_icon_enabled", false);
@@ -741,11 +734,9 @@ bool Config::loadConfig(const std::string& filename)
     if (move_integral_time_ms > 0.0f && move_integral_time_ms < 50.0f)
         move_integral_time_ms = 50.0f;
 
-    // === 旧预测参数范围校验（仅兼容旧配置，当前基础链路不使用） ===
-    if (prediction_tau < 0.005f) prediction_tau = 0.005f;
-    if (prediction_tau > 0.50f) prediction_tau = 0.50f;
-    if (prediction_reset_timeout_sec < 0.05f) prediction_reset_timeout_sec = 0.05f;
-    if (prediction_reset_timeout_sec > 3.0f) prediction_reset_timeout_sec = 3.0f;
+    // === 连续观测预测参数范围校验 ===
+    prediction_lead_ms = std::clamp(prediction_lead_ms, 0.0f, 100.0f);
+    prediction_velocity_tau_ms = std::clamp(prediction_velocity_tau_ms, 5.0f, 250.0f);
 
     // === 覆盖层尺寸范围校验 ===
     if (overlay_width < 560) overlay_width = 560;
@@ -866,6 +857,9 @@ bool Config::saveConfig(const std::string& filename)
         << "move_response_ms = " << move_response_ms << "\n"
         << "move_max_speed_cps = " << move_max_speed_cps << "\n"
         << "move_integral_time_ms = " << move_integral_time_ms << "\n"
+        << "prediction_enabled = " << (prediction_enabled ? "true" : "false") << "\n"
+        << "prediction_lead_ms = " << prediction_lead_ms << "\n"
+        << "prediction_velocity_tau_ms = " << prediction_velocity_tau_ms << "\n"
         << "easynorecoil = " << (easynorecoil ? "true" : "false") << "\n"
         << std::fixed << std::setprecision(1)
         << "easynorecoilstrength = " << easynorecoilstrength << "\n"
@@ -996,7 +990,6 @@ bool Config::saveConfig(const std::string& filename)
         << "game_overlay_max_fps = " << game_overlay_max_fps << "\n"
         << "game_overlay_draw_boxes = " << (game_overlay_draw_boxes ? "true" : "false") << "\n"
         << "game_overlay_compensate_latency = " << (game_overlay_compensate_latency ? "true" : "false") << "\n"
-        << "game_overlay_draw_future = " << (game_overlay_draw_future ? "true" : "false") << "\n"
         << "game_overlay_draw_wind_tail = " << (game_overlay_draw_wind_tail ? "true" : "false") << "\n"
         << "game_overlay_draw_frame = " << (game_overlay_draw_frame ? "true" : "false") << "\n"
         << "game_overlay_draw_circle_fov = " << (game_overlay_draw_circle_fov ? "true" : "false") << "\n"
@@ -1011,9 +1004,7 @@ bool Config::saveConfig(const std::string& filename)
         << "game_overlay_frame_b = " << game_overlay_frame_b << "\n"
         << std::fixed << std::setprecision(2)
         << "game_overlay_box_thickness = " << game_overlay_box_thickness << "\n"
-        << "game_overlay_frame_thickness = " << game_overlay_frame_thickness << "\n"
-        << "game_overlay_future_point_radius = " << game_overlay_future_point_radius << "\n"
-        << "game_overlay_future_alpha_falloff = " << game_overlay_future_alpha_falloff << "\n\n";
+        << "game_overlay_frame_thickness = " << game_overlay_frame_thickness << "\n\n";
 
     file << "game_overlay_icon_enabled = " << (game_overlay_icon_enabled ? "true" : "false") << "\n"
         << "game_overlay_icon_path = " << game_overlay_icon_path << "\n"

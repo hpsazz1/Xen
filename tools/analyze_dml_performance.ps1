@@ -60,6 +60,8 @@ function New-PerformanceSummary {
         SourceReceiveFps = [math]::Round([double]($Rows | Measure-Object SourceReceiveFPS -Average).Average, 1)
         ObservationAgeP95Ms = [math]::Round((Get-PercentileValue -Values $observationAges -Percentile 0.95), 1)
         DmlModel = (@($Rows.DmlModel | Select-Object -Unique) -join ';')
+        DmlInputWidth = (@($Rows.DmlInputWidth | Select-Object -Unique) -join ';')
+        DmlInputHeight = (@($Rows.DmlInputHeight | Select-Object -Unique) -join ';')
         BuildRevision = (@($Rows.BuildRevision | Select-Object -Unique) -join ';')
     }
 }
@@ -70,7 +72,8 @@ if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
 }
 
 $requiredColumns = @(
-    'BuildBackend', 'BuildRevision', 'DmlModel', 'InferenceFPS', 'SourceReceiveFPS', 'ObservationAgeSec',
+    'BuildBackend', 'BuildRevision', 'DmlModel', 'DmlInputWidth', 'DmlInputHeight',
+    'InferenceFPS', 'SourceReceiveFPS', 'ObservationAgeSec',
     'DmlPreprocessMs', 'DmlTensorSetupMs', 'DmlInferenceMs', 'DmlCopyMs',
     'DmlPostprocessMs', 'DmlNmsMs', 'DmlTotalMs'
 )

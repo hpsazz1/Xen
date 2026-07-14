@@ -28,6 +28,8 @@ public:
         double nmsMs = 0.0;         // 后处理内NMS子阶段耗时，已包含在postprocessMs内
         double totalMs = 0.0;       // 从预处理开始到后处理结束的完整墙钟耗时，不重复累加nmsMs
         std::string modelPath;       // 实际加载的模型相对或绝对路径，用于现场A/B身份核对
+        int inputWidth = 0;          // 实际模型输入宽度；动态输入使用当前检测分辨率
+        int inputHeight = 0;         // 实际模型输入高度；动态输入使用当前检测分辨率
     };
 
     DirectMLDetector(const std::string& model_path);
@@ -88,6 +90,8 @@ private:
     mutable std::mutex timingMutex; // 保护一次推理对应的完整阶段快照
     TimingSnapshot timingSnapshot;  // 最近一次成功完成后处理的推理耗时
     std::string activeModelPath;     // 最近一次成功初始化的会话模型路径
+    int activeInputWidth = 0;        // 最近会话实际使用的模型输入宽度
+    int activeInputHeight = 0;       // 最近会话实际使用的模型输入高度
     cv::Mat currentFrame;
     cv::Mat currentSourceFrame;
     std::chrono::steady_clock::time_point currentFrameTimestamp{};

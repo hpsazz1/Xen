@@ -90,12 +90,13 @@ bool PipelineTracer::exportCSV(const std::string& path) const
     // CSV 表头
     file << "FrameID,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision,"
          << "Timestamp,Resolution,SourceWidth,SourceHeight,FPS,InferenceFPS,"
-         << "DmlModel,DmlPreprocessMs,DmlTensorSetupMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs,"
+         << "DmlModel,DmlInputWidth,DmlInputHeight,DmlPreprocessMs,DmlTensorSetupMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs,"
          << "SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames,"
          << "NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames,TargetDetected,ObservationAgeSec,"
          << "TargetClassID,"
          << "RawPivotX,RawPivotY,"
          << "FilteredX,FilteredY,ObservedVelocityX,ObservedVelocityY,ObservedSpeed,FilterResidual,"
+         << "PredictionApplied,PredictionVelocityX,PredictionVelocityY,PredictionLeadMs,PredictedX,PredictedY,"
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
          << "FinalMx,FinalMy,"
@@ -118,7 +119,8 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.sourceWidth << ',' << f.sourceHeight << ','
              << std::fixed << std::setprecision(3) << f.fpsValue << ','
              << f.inferenceFps << ','
-             << f.dmlModel << ',' << f.dmlPreprocessMs << ',' << f.dmlTensorSetupMs << ',' << f.dmlInferenceMs << ','
+             << f.dmlModel << ',' << f.dmlInputWidth << ',' << f.dmlInputHeight << ','
+             << f.dmlPreprocessMs << ',' << f.dmlTensorSetupMs << ',' << f.dmlInferenceMs << ','
              << f.dmlCopyMs << ',' << f.dmlPostprocessMs << ','
              << f.dmlNmsMs << ',' << f.dmlTotalMs << ','
              << f.sourceDeclaredFps << ',' << f.sourceReceiveFps << ','
@@ -132,6 +134,9 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.filteredX << ',' << f.filteredY << ','
              << f.observedVelocityX << ',' << f.observedVelocityY << ','
              << f.observedSpeed << ',' << f.filterResidual << ','
+             << (f.predictionApplied ? '1' : '0') << ','
+             << f.predictionVelocityX << ',' << f.predictionVelocityY << ','
+             << f.predictionLeadMs << ',' << f.predictedX << ',' << f.predictedY << ','
              << f.errorX << ',' << f.errorY << ',' << f.errorDistance << ','
              << f.requestedPixelX << ',' << f.requestedPixelY << ','
              << f.requestedCountsX << ',' << f.requestedCountsY << ','

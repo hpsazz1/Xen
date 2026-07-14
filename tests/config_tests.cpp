@@ -2,7 +2,9 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <string>
 
@@ -28,6 +30,15 @@ void expectString(const std::string& actual, const std::string& expected, const 
         return;
 
     std::cerr << name << ": expected " << expected << ", got " << actual << '\n';
+    ++failures;
+}
+
+void expectTrue(bool condition, const char* name)
+{
+    if (condition)
+        return;
+
+    std::cerr << name << ": condition was false\n";
     ++failures;
 }
 }
@@ -89,6 +100,10 @@ int main()
                    "default maximum speed uses four-chain nine-grid result");
         expectNear(defaults.move_integral_time_ms, 0.0, 0.0,
                    "moving integral remains disabled before field validation");
+        expectNear(defaults.prediction_lead_ms, 20.0, 0.0,
+                   "default prediction uses minimal fixed lead");
+        expectNear(defaults.prediction_velocity_tau_ms, 35.0, 0.0,
+                   "default prediction uses frame-rate independent velocity smoothing");
         expectString(defaults.kmbox_net_ip, "192.168.2.188", "default kmbox net ip");
         expectString(defaults.kmbox_net_port, "13384", "default kmbox net port");
         expectString(defaults.kmbox_net_uuid, "7679E04E", "default kmbox net uuid");
@@ -105,6 +120,40 @@ int main()
                    "default pipeline trace capacity");
     }
     std::filesystem::remove(defaultsPath, removeError);
+
+    const std::filesystem::path legacyPath = "xen_config_legacy_prediction_test.ini";
+    {
+        std::ofstream legacyFile(legacyPath);
+        legacyFile << "prediction_enabled = true\n"
+                   << "predictionInterval = 0.027\n"
+                   << "prediction_tau = 0.042\n";
+    }
+    Config migrated{};
+    if (!migrated.loadConfig(legacyPath.string()))
+    {
+        std::cerr << "legacy prediction config migration failed\n";
+        ++failures;
+    }
+    else
+    {
+        expectNear(migrated.prediction_lead_ms, 27.0, 1e-6,
+                   "legacy prediction interval migrates to milliseconds");
+        expectNear(migrated.prediction_velocity_tau_ms, 42.0, 1e-6,
+                   "legacy prediction tau migrates to milliseconds");
+        expectTrue(migrated.saveConfig(legacyPath.string()),
+                   "migrated prediction config saves successfully");
+        std::ifstream migratedFile(legacyPath);
+        const std::string migratedText(
+            (std::istreambuf_iterator<char>(migratedFile)),
+            std::istreambuf_iterator<char>());
+        expectTrue(migratedText.find("prediction_lead_ms = 27") != std::string::npos,
+                   "saved config writes new prediction lead key");
+        expectTrue(migratedText.find("prediction_velocity_tau_ms = 42") != std::string::npos,
+                   "saved config writes new prediction smoothing key");
+        expectTrue(migratedText.find("predictionInterval") == std::string::npos,
+                   "saved config removes legacy prediction interval key");
+    }
+    std::filesystem::remove(legacyPath, removeError);
 
     if (failures != 0)
     {

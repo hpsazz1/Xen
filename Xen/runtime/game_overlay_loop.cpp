@@ -329,11 +329,7 @@ void gameOverlayRenderLoop()
         }
         lastDetectionVersion = detectionVersion;
 
-        // ---- 获取预测未来轨迹点和风偏调试数据 ----
-        decltype(globalMouseThread->getFuturePositions()) futurePts;
-        if (config.game_overlay_draw_future && globalMouseThread)
-            futurePts = globalMouseThread->getFuturePositions();
-
+        // ---- 获取风偏调试数据 ----
         std::vector<std::pair<double, double>> windTailPts;
         if (config.game_overlay_draw_wind_tail && globalMouseThread)
             windTailPts = globalMouseThread->getWindDebugTrail();
@@ -889,42 +885,6 @@ void gameOverlayRenderLoop()
                     15.0f,
                     textCol
                 );
-            }
-        }
-
-        // ========== 10. 未来轨迹点绘制（带 Alpha 衰减） ==========
-
-        if (config.game_overlay_draw_future && !futurePts.empty())
-        {
-            const int total = static_cast<int>(futurePts.size());
-            const int baseA = std::max(5, std::min(255, config.game_overlay_box_a));
-
-            for (int i = 0; i < total; ++i)
-            {
-                // 根据点序列位置计算指数衰减透明度
-                float alphaFactor =
-                    std::exp(-config.game_overlay_future_alpha_falloff *
-                        (static_cast<float>(i) / static_cast<float>(total)));
-
-                int a = static_cast<int>(baseA * alphaFactor);
-                if (a < 12) a = 12;
-
-                // 颜色从红渐变到蓝（随时间推移）
-                const uint32_t col =
-                    (uint32_t(a) << 24) |
-                    (uint32_t(255 - (i * 255 / total)) << 16) |
-                    (uint32_t(50) << 8) |
-                    (uint32_t(i * 255 / total));
-
-                float px = static_cast<float>(baseX) + static_cast<float>(futurePts[i].first) * scaleX;
-                float py = static_cast<float>(baseY) + static_cast<float>(futurePts[i].second) * scaleY;
-
-                // 超出可见区域时跳过绘制
-                if (px < baseX - 40 || py < baseY - 40 ||
-                    px > baseX + regionW + 40 || py > baseY + regionH + 40)
-                    continue;
-
-                gameOverlayPtr->FillCircle({ px, py, config.game_overlay_future_point_radius }, col);
             }
         }
 

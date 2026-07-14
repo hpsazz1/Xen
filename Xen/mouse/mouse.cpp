@@ -75,6 +75,11 @@ MouseThread::MouseThread(
         std::lock_guard<std::mutex> lock(configMutex);
         move_response_seconds = static_cast<double>(config.move_response_ms) / 1000.0;
         move_max_speed_cps = static_cast<double>(config.move_max_speed_cps);
+        predictionSettings.enabled = config.prediction_enabled;
+        predictionSettings.additionalLeadSeconds =
+            static_cast<double>(config.prediction_lead_ms) / 1000.0;
+        predictionSettings.velocityTimeConstantSeconds =
+            static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0;
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
     }
 
@@ -113,6 +118,11 @@ void MouseThread::updateConfig(
         static_cast<double>(config.move_max_speed_cps), 30.0, 2000.0);
     move_integral_time_seconds = std::clamp(
         static_cast<double>(config.move_integral_time_ms) / 1000.0, 0.0, 1.0);
+    predictionSettings.enabled = config.prediction_enabled;
+    predictionSettings.additionalLeadSeconds = std::clamp(
+        static_cast<double>(config.prediction_lead_ms) / 1000.0, 0.0, 0.100);
+    predictionSettings.velocityTimeConstantSeconds = std::clamp(
+        static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0, 0.005, 0.250);
     this->auto_shoot = auto_shoot;
     this->bScope_multiplier = bScope_multiplier;
 
@@ -1112,6 +1122,8 @@ void MouseThread::moveMousePivot(
             pf->dmlNmsMs = timing.nmsMs;
             pf->dmlTotalMs = timing.totalMs;
             pf->dmlModel = timing.modelPath;
+            pf->dmlInputWidth = timing.inputWidth;
+            pf->dmlInputHeight = timing.inputHeight;
         }
 #endif
         const CaptureSourceDiagnostics sourceDiagnostics = GetCaptureSourceDiagnostics();
@@ -1143,8 +1155,11 @@ void MouseThread::moveMousePivot(
     };
 
     const auto filtered = filter_target_position(pivotX, pivotY, observationTime);
-    const double errorX = filtered.first - center_x;
-    const double errorY = filtered.second - center_y;
+    lastPredictionResult = targetPredictor.update(
+        filtered.first, filtered.second, observationTime,
+        std::chrono::steady_clock::now(), screen_width, predictionSettings);
+    const double errorX = lastPredictionResult.x - center_x;
+    const double errorY = lastPredictionResult.y - center_y;
 
     const double fovScale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0)
         ? (fov_x / cachedGameBaseFOV) : 1.0;
@@ -1201,6 +1216,12 @@ void MouseThread::moveMousePivot(
         pf->observedVelocityY = lastFilterResult.observedVelocityY;
         pf->observedSpeed = lastFilterResult.observedSpeed;
         pf->filterResidual = lastFilterResult.residual;
+        pf->predictionApplied = lastPredictionResult.applied;
+        pf->predictionVelocityX = lastPredictionResult.velocityX;
+        pf->predictionVelocityY = lastPredictionResult.velocityY;
+        pf->predictionLeadMs = lastPredictionResult.leadSeconds * 1000.0;
+        pf->predictedX = lastPredictionResult.x;
+        pf->predictedY = lastPredictionResult.y;
         pf->errorX = errorX;
         pf->errorY = errorY;
         pf->errorDistance = output.errorDistance;
@@ -1696,92 +1717,25 @@ void MouseThread::releaseMouse()
 }
 
 /**
- * resetPrediction
+ * resetTracking
  *
- * 完全重置预测状态。包括：
- *   - 清空移动指令队列
- *   - 重置上一帧时间和位置
- *   - 重置速度
- *   - 重置 EMA 滤波器状态
- *   - 清除目标检测标志
- *
- * 通常由 checkAndResetPredictions 在目标长时间丢失时自动触发。
+ * 目标丢失、身份切换或瞄准状态变化时统一清空队列、滤波、预测和控制器状态。
+ * 预测器不保留滑行状态，因此重置后必须重新收到两个连续真实观测才会产生前瞻。
  */
 void MouseThread::resetTracking()
 {
     clearQueuedMoves();
     targetFilter.reset();
+    targetPredictor.reset();
     aimController.reset();
     lastFilterResult = {};
+    lastPredictionResult = {};
     lastControlObservationTime = {};
     target_detected.store(false);
     // 目标切换时重置确认帧计数，避免新目标跳过确认延迟
     stableFrameCount = 0;
     fireScheduled = false;
     holdScheduled = false;
-}
-
-/**
- * checkAndResetPredictions
- *
- * 检查自上一次目标检测以来经过的时间，如果超过超时阈值，
- * 则自动重置预测状态。
- *
- * 超时时间从配置中读取，钳位在 [0.05, 3.0] 秒范围内。默认通常为 0.5 秒。
- * 防止目标已离开但预测器仍输出旧轨迹的问题。
- */
-/**
- * predictFuturePositions
- *
- * 预测未来多帧的目标位置，用于可视化显示。
- * 基于当前速度和位置进行线性外推。
- *
- * @param pivotX 当前目标 X 坐标
- * @param pivotY 当前目标 Y 坐标
- * @param frames 需要预测的帧数
- * @return 未来各帧的预测位置列表，每项为 (x, y)
- */
-std::vector<std::pair<double, double>> MouseThread::predictFuturePositions(double pivotX, double pivotY, int frames)
-{
-    (void)pivotX;
-    (void)pivotY;
-    (void)frames;
-    return {};
-}
-
-/**
- * storeFuturePositions
- *
- * 存储预测的未来帧位置，供可视化模块（叠加显示）使用。
- * 线程安全，内部持有 futurePositionsMutex。
- *
- * @param positions 未来位置列表
- */
-void MouseThread::storeFuturePositions(const std::vector<std::pair<double, double>>& positions)
-{
-    (void)positions;
-}
-
-/**
- * clearFuturePositions
- *
- * 清空未来位置预测数据。
- */
-void MouseThread::clearFuturePositions()
-{
-}
-
-/**
- * getFuturePositions
- *
- * 获取存储的未来帧位置预测数据。
- * 返回副本而非引用，确保线程安全。
- *
- * @return 未来位置列表
- */
-std::vector<std::pair<double, double>> MouseThread::getFuturePositions()
-{
-    return {};
 }
 
 /**

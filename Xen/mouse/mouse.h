@@ -24,6 +24,7 @@
 #include "MouseInput.h"
 #include "runtime/basic_aim_controller.h"
 #include "runtime/basic_target_filter.h"
+#include "runtime/target_predictor.h"
 
 /**
  * @brief 鼠标控制主线程类
@@ -72,8 +73,11 @@ private:
 
     // ==================== 运动状态 ====================
     BasicTargetFilter targetFilter;                                ///< 基础观测滤波（不做未来预测）
+    TargetPredictor targetPredictor;                               ///< 仅连续真实观测生效的前瞻预测器
     BasicAimController aimController;                              ///< 帧率无关的基础误差控制器
     BasicTargetFilter::Result lastFilterResult{};                  ///< 流水线诊断快照
+    TargetPredictor::Result lastPredictionResult{};                ///< 流水线预测诊断快照
+    TargetPredictor::Settings predictionSettings{};                ///< 运行时预测配置缓存
     std::chrono::steady_clock::time_point lastControlObservationTime{}; ///< 上一有效观测时间，用于网络抖动下逐帧计算 dt
     std::chrono::steady_clock::time_point last_target_time;        ///< 最后检测到目标的时间
     std::atomic<bool> target_detected{ false };                   ///< 是否检测到目标（atomic 为未来多线程访问预留）
@@ -271,14 +275,6 @@ public:
     bool check_target_in_scope(double target_x, double target_y,
         double target_w, double target_h, double reduction_factor);
 
-    /** @brief 预测未来 N 帧的目标位置序列 */
-    std::vector<std::pair<double, double>> predictFuturePositions(double pivotX, double pivotY, int frames);
-    /** @brief 存储未来预测位置 */
-    void storeFuturePositions(const std::vector<std::pair<double, double>>& positions);
-    /** @brief 清除未来位置 */
-    void clearFuturePositions();
-    /** @brief 获取未来预测位置 */
-    std::vector<std::pair<double, double>> getFuturePositions();
     /** @brief 清除轨迹模拟调试轨迹 */
     void clearWindDebugTrail();
     /** @brief 获取轨迹模拟调试轨迹 */
