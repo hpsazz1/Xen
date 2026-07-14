@@ -158,7 +158,8 @@ static void draw_mouse_page(MouseSettingsPage page)
 
         OverlayUI::SliderFloatRow("速度平滑(ms)", &config.prediction_velocity_tau_ms, 5.0f, 250.0f, "%.0f", "##pred_velocity_tau_ms",
             "目标速度估计的时间常数，按真实检测时间戳自动适配帧率。\n"
-            "数值越小变向响应越快，数值越大速度越平稳；建议35ms。");
+            "数值越小变向响应越快，数值越大速度越平稳。\n"
+            "本轮标准视频模拟候选为75ms，需通过实机验证后再确定默认值。");
 
         ImGui::TextDisabled("仅真实检测观测驱动；目标丢失或切换时立即清零");
 

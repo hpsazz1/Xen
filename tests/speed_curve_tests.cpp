@@ -2,6 +2,7 @@
 #include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_target_filter.h"
 #include "runtime/target_predictor.h"
+#include "runtime/video_replay_math.h"
 #include "debug/pipeline_tracer.h"
 #include "capture/ndi_frame_geometry.h"
 #include "capture/network_frame_geometry.h"
@@ -268,6 +269,20 @@ int main()
     expectTrue(!disabledPrediction.applied &&
                disabledPrediction.x == 123.0 && disabledPrediction.y == 87.0,
                "disabled prediction preserves base target position exactly");
+
+    expectNear(VideoReplay::ObservedCoordinate(1400.0, 24.0, 1120.0), 256.0, 0.0,
+               "video replay applies virtual camera offset before fixed crop");
+    std::vector<VideoReplay::TrajectoryPoint> replayPoints{
+        { 0.0, 1280.0, 720.0, true },
+        { 0.010, 1290.0, 720.0, true }
+    };
+    expectNear(VideoReplay::InterpolateCoordinate(replayPoints, 0, 0.005, true), 1285.0, 1e-9,
+               "video replay interpolates target position during observation age");
+    expectTrue(!VideoReplay::IsNewTrajectorySegment(replayPoints[0], replayPoints[1]),
+               "video replay keeps continuous motion in one trial");
+    const VideoReplay::TrajectoryPoint replayReset{ 0.020, 1500.0, 720.0, true };
+    expectTrue(VideoReplay::IsNewTrajectorySegment(replayPoints[1], replayReset),
+               "video replay splits target teleport into an independent trial");
 
     BasicAimController controller;
     BasicAimController::Settings controllerSettings;

@@ -342,6 +342,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/runtime/application_shutdown.cpp"
     "${SRC_DIR}/runtime/application_threads.cpp"
     "${SRC_DIR}/runtime/startup_helpers.cpp"
+    "${SRC_DIR}/runtime/video_replay_cli.cpp"
     "${SRC_DIR}/runtime/input_device_manager.cpp"
     "${SRC_DIR}/runtime/mouse_thread_loop.cpp"
     "${SRC_DIR}/runtime/game_overlay_loop.cpp"

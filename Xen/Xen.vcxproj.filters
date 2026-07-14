@@ -64,6 +64,7 @@
     <ClCompile Include="runtime\application_shutdown.cpp" />
     <ClCompile Include="runtime\application_threads.cpp" />
     <ClCompile Include="runtime\startup_helpers.cpp" />
+    <ClCompile Include="runtime\video_replay_cli.cpp" />
     <ClCompile Include="runtime\input_device_manager.cpp" />
     <ClCompile Include="runtime\mouse_thread_loop.cpp" />
     <ClCompile Include="runtime\game_overlay_loop.cpp" />
@@ -114,6 +115,8 @@
     <ClInclude Include="runtime\frame_rate_counter.h" />
     <ClInclude Include="runtime\latest_frame_queue.h" />
     <ClInclude Include="runtime\target_predictor.h" />
+    <ClInclude Include="runtime\video_replay_cli.h" />
+    <ClInclude Include="runtime\video_replay_math.h" />
     <ClInclude Include="runtime\application_shutdown.h" />
     <ClInclude Include="runtime\application_threads.h" />
     <ClInclude Include="runtime\startup_helpers.h" />

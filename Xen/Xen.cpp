@@ -35,6 +35,7 @@
 #include "runtime/application_shutdown.h"
 #include "runtime/application_threads.h"
 #include "runtime/startup_helpers.h"
+#include "runtime/video_replay_cli.h"
 #include "benchmarks/provider_benchmark.h"
 #include "debug/pipeline_tracer.h"
 
@@ -170,6 +171,9 @@ int main(int argc, char** argv)
         std::cin.get();
         return -1;
     }
+
+    if (VideoReplay::IsRequested(argc, argv))
+        return VideoReplay::Run(argc, argv);
 
     // 根据当前分辨率和帧率自动推导目标跟踪参数；用户标定的移动响应和设备上限保持不变。
     config.applyAutoDerivedTrackerParams(config.detection_resolution, config.capture_fps);
