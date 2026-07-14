@@ -172,13 +172,13 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r21") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r22") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
     expectTrue(traceHeader.find(
-        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictedX,PredictedY") != std::string::npos,
+        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictedX,PredictedY") != std::string::npos,
         "basic pipeline reports prediction diagnostics");
     traceFile.close();
     std::remove(tracePath);
@@ -500,8 +500,27 @@ int main()
             10.0 + sample * 16.0, 10.0, time, time,
             320.0, predictionSettings);
     }
-    expectNear(std::hypot(boundedJump.offsetX, boundedJump.offsetY), 64.0, 1e-9,
-               "mature abnormal high-speed prediction is capped at twenty percent span");
+    expectNear(std::hypot(boundedJump.offsetX, boundedJump.offsetY), 24.0, 1e-9,
+               "mature abnormal high-speed prediction is capped at seven point five percent span");
+
+    TargetPredictor oscillatingPredictor;
+    TargetPredictor::Result oscillatingPrediction{};
+    double oscillatingX = 100.0;
+    int oscillatingSample = 0;
+    for (int segment = 0; segment < 5; ++segment)
+    {
+        const double step = segment % 2 == 0 ? 4.0 : -4.0;
+        for (int frame = 0; frame < 14; ++frame)
+        {
+            oscillatingX += step;
+            const auto time = t0 + std::chrono::milliseconds(oscillatingSample++ * 8);
+            oscillatingPrediction = oscillatingPredictor.update(
+                oscillatingX, 100.0, time, time, 320.0, predictionSettings);
+        }
+    }
+    expectTrue(oscillatingPrediction.oscillationSuppressed &&
+               oscillatingPrediction.offsetX == 0.0,
+               "three reliable reversals inside one point five seconds keep aim on the observed target");
 
     TargetPredictor reversalPredictor;
     for (int sample = 0; sample < 10; ++sample)

@@ -1250,6 +1250,8 @@ void MouseThread::moveMousePivot(
         pf->viewMotionY = viewAtControl.second - viewAtObservation.second;
         pf->predictionDirectionLocked = lastPredictionResult.directionLocked;
         pf->predictionSelfMotionSuppressed = lastPredictionResult.selfMotionSuppressed;
+        pf->predictionOscillationSuppressed =
+            lastPredictionResult.oscillationSuppressed;
         pf->predictedX = lastPredictionResult.x;
         pf->predictedY = lastPredictionResult.y;
         pf->errorX = errorX;

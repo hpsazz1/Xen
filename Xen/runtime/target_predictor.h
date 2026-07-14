@@ -32,6 +32,7 @@ public:
         bool directionLocked = false;
         bool applied = false;
         bool selfMotionSuppressed = false;
+        bool oscillationSuppressed = false; // 高频往返模式仅关闭提前量，基础跟踪保持生效
     };
 
     // 静止目标被程序拉向中心时，补偿残差可能表现为“预测速度继续向误差外侧”。
@@ -139,8 +140,12 @@ public:
 
         const bool reliableMotion = updateMotion(
             x, y, observationTime, dt, span, settings);
-        updateDirection(sampleVelocityX, sampleVelocityY, reliableMotion, span);
-        if (directionLocked_ && predictionEstablished_ && !suppressPrediction_)
+        updateDirection(
+            sampleVelocityX, sampleVelocityY, reliableMotion, span, observationTime);
+        const bool oscillationSuppressed =
+            observationTime < oscillationSuppressedUntil_;
+        if (directionLocked_ && predictionEstablished_ &&
+            !suppressPrediction_ && !oscillationSuppressed)
             ++continuousPredictionFrames_;
         else
             continuousPredictionFrames_ = 0;
@@ -159,12 +164,15 @@ public:
 
         // 方向锁定只代表回归窗口初步同向；继续收到四次可靠方向后才释放提前量。
         // static实测的补偿残差通常仅维持1~3帧，会在输出前被停止或自运动门控撤销。
-        if (!directionLocked_ || !predictionEstablished_ || suppressPrediction_)
+        if (!directionLocked_ || !predictionEstablished_ ||
+            suppressPrediction_ || oscillationSuppressed)
         {
-            return {
+            Result result{
                 x, y, velocityX_, velocityY_, accelerationX_, accelerationY_,
                 leadSeconds, 0.0, 0.0, directionLocked_, true
             };
+            result.oscillationSuppressed = oscillationSuppressed;
+            return result;
         }
 
         const double speedAlongDirection = std::max(
@@ -177,9 +185,9 @@ public:
         const double leadReleaseScale = std::min(
             1.0, continuousPredictionFrames_ /
                 static_cast<double>(kFullLeadReleaseFrames));
-        // 普通left/right实测提前P95约20 px，不受此上限影响；异常高速jump原112 px
-        // 提前会远离目标框并消耗设备速度预算，限制为检测跨度20%（320区域为64 px）。
-        const double maxPredictionDistance = std::max(12.0, span * 0.20);
+        // r21将jump上限降至64 px后仍明显远离目标框；反事实回放显示24 px兼顾
+        // 追赶收益与框内稳定。限制为检测跨度7.5%，普通left/right约20 px提前基本不受影响。
+        const double maxPredictionDistance = std::max(12.0, span * 0.075);
         const double predictionDistance = std::clamp(
             speedAlongDirection * leadSeconds * strength * leadReleaseScale,
             0.0, maxPredictionDistance);
@@ -211,6 +219,8 @@ public:
         selfMotionSuppressionFramesRemaining_ = 0;
         selfMotionRearmPending_ = false;
         continuousPredictionFrames_ = 0;
+        directionReversalTimes_.clear();
+        oscillationSuppressedUntil_ = {};
         observations_.clear();
         previousObservationTime_ = {};
     }
@@ -372,7 +382,7 @@ private:
     }
 
     void updateDirection(double sampleVelocityX, double sampleVelocityY,
-                         bool reliableMotion, double span)
+                         bool reliableMotion, double span, TimePoint observationTime)
     {
         const double sampleSpeed = std::hypot(sampleVelocityX, sampleVelocityY);
         const double activationSpeed = std::max(50.0, span * 0.20);
@@ -439,6 +449,7 @@ private:
             accumulatePendingDirection(sampleDirectionX, sampleDirectionY);
             if (pendingDirectionSamples_ >= 2)
             {
+                recordDirectionReversal(observationTime);
                 lockPendingDirection();
                 suppressPrediction_ = false;
             }
@@ -486,6 +497,27 @@ private:
         selfMotionRearmPending_ = false;
     }
 
+    void recordDirectionReversal(TimePoint observationTime)
+    {
+        constexpr double kOscillationWindowSeconds = 1.5;
+        directionReversalTimes_.push_back(observationTime);
+        while (!directionReversalTimes_.empty() &&
+               std::chrono::duration<double>(
+                   observationTime - directionReversalTimes_.front()).count() >
+                   kOscillationWindowSeconds)
+        {
+            directionReversalTimes_.pop_front();
+        }
+        // r21实测reverse有38组三次换向不超过1.5秒，jump最短为1.847秒。
+        // 命中后每次新反转都延长保持；停止高频往返1.5秒后自动恢复普通预测。
+        if (directionReversalTimes_.size() >= 3)
+        {
+            oscillationSuppressedUntil_ = observationTime +
+                std::chrono::duration_cast<TimePoint::duration>(
+                    std::chrono::duration<double>(kOscillationWindowSeconds));
+        }
+    }
+
     static void clampVector(double& x, double& y, double maximumLength)
     {
         const double length = std::hypot(x, y);
@@ -530,6 +562,8 @@ private:
     int selfMotionSuppressionFramesRemaining_ = 0; // 自运动伪迹命中后的剩余抑制观测帧数
     bool selfMotionRearmPending_ = false; // 保持结束后是否仍需更强净位移证据
     int continuousPredictionFrames_ = 0; // 当前方向连续有效预测帧数，用于识别真实持续运动
+    std::deque<TimePoint> directionReversalTimes_; // 最近可靠换向时间，用于识别高频小幅往返
+    TimePoint oscillationSuppressedUntil_{}; // 高频往返停止后的自动恢复时刻
     std::deque<Observation> observations_;
     TimePoint previousObservationTime_{};
 };
