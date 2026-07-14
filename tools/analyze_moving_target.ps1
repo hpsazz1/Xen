@@ -7,7 +7,7 @@ param(
     [ValidateRange(100.0, 10000.0)][double]$SteadyWindowMs = 1000.0,
     [ValidateRange(0.0, 60000.0)][double]$MinTrialDurationMs = 500.0,
     [ValidateRange(1, 10000)][int]$MinTrialSamples = 30,
-    [double]$ReversalErrorThresholdPx = 12.0,
+    [double]$ReversalErrorThresholdPx = 10.0,
     [ValidateRange(1, 20)][int]$ReversalConfirmFrames = 3,
     [double]$RecoveryRadiusPx = 8.0,
     [ValidateRange(1, 20)][int]$RecoveryConfirmFrames = 3,

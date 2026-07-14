@@ -35,7 +35,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_moving_target.
 
 首轮只采集水平向左、水平向右和左右反转三个固定脚本场景，保持80 ms与1440 counts/s静止基线不变。指标定义、目录结构和决策顺序见 `docs/016移动目标测试方案20260713.md`。
 
-分析器使用 `FinalMx/My` 计算实际输出counts/s，并从请求像素与请求计数恢复counts/px，输出 `ApproxClosedLoopLagMs`。只有文件名包含 `reverse` 或 `reversal` 的往返场景才统计持续误差侧翻转和±8 px中心恢复，单向场景固定不报告反转。默认反转误差侧阈值为12 px，可用 `ReversalErrorThresholdPx` 覆盖；默认剔除不足500 ms或预热后少于30个有效样本的碎片，可用 `MinTrialDurationMs/MinTrialSamples` 调整。持续移动另使用默认1000 ms的 `SteadyWindowMs` 输出末尾稳态均值和P95。新CSV还提供 `BuildBackend/BuildRevision/BuildTimestampUtc/ControllerRevision` 以及 `ErrorMotion/SettleMotionThreshold/MovingInsideSettle`；缺少构建身份的旧CSV只作历史参考。版本确认后的分析与UI标题规则见 `docs/022版本确认后的持续与高频复测20260714.md`。
+分析器使用 `FinalMx/My` 计算实际输出counts/s，并从请求像素与请求计数恢复counts/px，输出 `ApproxClosedLoopLagMs`。只有文件名包含 `reverse` 或 `reversal` 的往返场景才统计持续误差侧翻转和±8 px中心恢复，单向场景固定不报告反转。默认反转误差侧阈值为10 px，并要求连续3帧确认；该阈值高于8 px恢复半径，同时能覆盖P95约13 px的中等摆幅，可用 `ReversalErrorThresholdPx` 覆盖。默认剔除不足500 ms或预热后少于30个有效样本的碎片，可用 `MinTrialDurationMs/MinTrialSamples` 调整。持续移动另使用默认1000 ms的 `SteadyWindowMs` 输出末尾稳态均值和P95。新CSV还提供 `BuildBackend/BuildRevision/BuildTimestampUtc/ControllerRevision` 以及 `ErrorMotion/SettleMotionThreshold/MovingInsideSettle`；缺少构建身份的旧CSV只作历史参考。版本确认后的分析与UI标题规则见 `docs/022版本确认后的持续与高频复测20260714.md`。
 
 当诊断日志输出类似以下行时：
 

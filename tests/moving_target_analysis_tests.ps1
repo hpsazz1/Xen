@@ -22,13 +22,13 @@ try {
     $csvPath = Join-Path $dataDirectory 'horizontal_reverse.csv'
     @'
 Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeSec,ErrorX,ErrorY,ErrorDistance,FilterResidual,ObservedVelocityX,ObservedVelocityY,RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,FinalMx,FinalMy,SpeedLimited,QueuedMoveCount,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision,MovingInsideSettle
-1000,2560,1440,120,240,0.010,13,1,13.04,2,100,0,1,0,1.344,0,1,0,0,1,CUDA,test-revision,20260714T010000Z,4,0
-1010,2560,1440,120,240,0.010,14,1,14.04,2,100,0,1,0,1.344,0,1,0,0,1,CUDA,test-revision,20260714T010000Z,4,1
-1020,2560,1440,120,240,0.010,20,1,20.02,3,-100,0,1,0,1.344,0,1,0,1,1,CUDA,test-revision,20260714T010000Z,4,1
+1000,2560,1440,120,240,0.010,11,1,11.05,2,100,0,1,0,1.344,0,1,0,0,1,CUDA,test-revision,20260714T010000Z,4,0
+1010,2560,1440,120,240,0.010,11,1,11.05,2,100,0,1,0,1.344,0,1,0,0,1,CUDA,test-revision,20260714T010000Z,4,1
+1020,2560,1440,120,240,0.010,11,1,11.05,3,-100,0,1,0,1.344,0,1,0,1,1,CUDA,test-revision,20260714T010000Z,4,1
 1030,2560,1440,120,240,0.010,7,1,7.07,2,-100,0,1,0,1.344,0,1,0,0,1,CUDA,test-revision,20260714T010000Z,4,0
 1040,2560,1440,120,240,0.010,0,1,1.00,1,-100,0,1,0,1.344,0,1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
-1050,2560,1440,120,240,0.010,-13,1,13.04,1,-100,0,-1,0,-1.344,0,-1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
-1060,2560,1440,120,240,0.010,-14,1,14.04,1,-100,0,-1,0,-1.344,0,-1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
+1050,2560,1440,120,240,0.010,-11,1,11.05,1,-100,0,-1,0,-1.344,0,-1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
+1060,2560,1440,120,240,0.010,-11,1,11.05,1,-100,0,-1,0,-1.344,0,-1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
 1300,2560,1440,120,240,0.010,-9,1,9.06,2,-80,0,-1,0,-1.344,0,-1,0,0,1,CUDA,test-revision,20260714T010000Z,4,0
 1310,2560,1440,120,240,0.010,-8,1,8.06,2,-80,0,-1,0,-1.344,0,-1,0,0,1,CUDA,test-revision,20260714T010000Z,4,0
 1320,2560,1440,120,240,0.010,-7,1,7.07,2,-80,0,-1,0,-1.344,0,-1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
@@ -47,7 +47,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     $singleDirectionTrials = @($trials | Where-Object { $_.Scenario -eq 'horizontal_right' })
     Assert-Equal 1 $reverseTrials[0].ReversalCount 'Persistent tracking-error side reversal must be counted.'
     Assert-Equal 1 $reverseTrials[0].RecoveredReversals 'Reversal recovery inside the radius must be counted.'
-    Assert-Equal 10 $reverseTrials[0].RecoveryMeanMs 'Recovery time must start at the first opposite-direction sample.'
+    Assert-Equal 30 $reverseTrials[0].RecoveryMeanMs 'Recovery time must start at the confirmed positive peak.'
     Assert-Equal $true ([double]$reverseTrials[0].RecoveryMeanMs -ge 0) 'Reversal recovery time must never be negative.'
     Assert-Equal 0 $singleDirectionTrials[0].ReversalCount 'Single-direction scenarios must not report reversal metrics.'
     Assert-Equal 1.344 $reverseTrials[0].EstimatedCountsPerPixel 'Counts-per-pixel must be derived from exported requests.'
@@ -58,7 +58,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 2 $scenario.Count 'Each scenario file must create one summary.'
     Assert-Equal 2 $scenario[0].Trials 'Scenario summary must report both trials.'
     Assert-Equal 1 $scenario[0].MaxQueuedMoves 'Scenario summary must preserve maximum queue depth.'
-    Assert-Equal 10 $scenario[0].RecoveryP95Ms 'Scenario summary must preserve the worst trial recovery P95.'
+    Assert-Equal 30 $scenario[0].RecoveryP95Ms 'Scenario summary must preserve the worst trial recovery P95.'
     $exportedRows = @(Import-Csv -LiteralPath $outputCsv)
     Assert-Equal 6 $exportedRows.Count 'CSV export must include trials and scenario summaries.'
     Assert-Equal 2 $exportedRows[-1].Trials 'CSV export must retain scenario-only summary columns.'
@@ -71,7 +71,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
 
     $defaultThresholdMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $temporaryRoot -WarmupMs 0 -MinTrialDurationMs 0 -MinTrialSamples 1 -ReversalConfirmFrames 2 -RecoveryConfirmFrames 2 -PassThru)
     $defaultReverseTrial = @($defaultThresholdMetrics | Where-Object { $_.Level -eq 'Trial' -and $_.Scenario -eq 'horizontal_reverse' })[0]
-    Assert-Equal 1 $defaultReverseTrial.ReversalCount 'Default reversal threshold must detect moderate high-frequency swings.'
+    Assert-Equal 1 $defaultReverseTrial.ReversalCount 'Default 10 px reversal threshold must detect moderate high-frequency swings.'
 }
 finally {
     if (Test-Path -LiteralPath $temporaryRoot) {
