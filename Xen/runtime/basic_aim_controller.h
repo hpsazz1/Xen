@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 15;
+inline constexpr int kBasicAimControllerRevision = 16;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -19,6 +19,7 @@ public:
         double integralTimeSeconds = 0.0;   // 0 表示关闭；现场移动目标复测通过后再推广默认值
         double settleRadiusPixels = 5.0;
         double releaseRadiusPixels = 8.0;
+        bool preserveMovingIntegral = false; // 预测已确认持续移动时，越心误差不代表目标反向
     };
 
     struct Output
@@ -69,9 +70,11 @@ public:
         // 这样小幅越心仍保留维持速度，静止过冲或真实反转又能在 5 px 边界内完成解卷绕。
         if (integralTime > 0.0)
         {
-            if (errorX * integralCountErrorX_ < 0.0 && std::abs(errorX) >= settleRadius)
+            if (!settings.preserveMovingIntegral &&
+                errorX * integralCountErrorX_ < 0.0 && std::abs(errorX) >= settleRadius)
                 integralCountErrorX_ = 0.0;
-            if (errorY * integralCountErrorY_ < 0.0 && std::abs(errorY) >= settleRadius)
+            if (!settings.preserveMovingIntegral &&
+                errorY * integralCountErrorY_ < 0.0 && std::abs(errorY) >= settleRadius)
                 integralCountErrorY_ = 0.0;
         }
 

@@ -1189,6 +1189,11 @@ void MouseThread::moveMousePivot(
     settings.integralTimeSeconds = move_integral_time_seconds;
     settings.settleRadiusPixels = std::max(2.0, screen_width / 64.0);
     settings.releaseRadiusPixels = settings.settleRadiusPixels * 1.6;
+    // 持续预测已提供目标运动方向；此时预测点的小幅越心是正常闭环修正，
+    // 保留积分可维持目标速度。停止或反向时预测偏移先归零，下一帧恢复原清零规则。
+    settings.preserveMovingIntegral =
+        std::abs(lastPredictionResult.offsetX) +
+        std::abs(lastPredictionResult.offsetY) > 1e-6;
     // 网络捕获的到帧间隔可能抖动，优先使用相邻有效观测的真实时间差。
     // 捕获窗 FPS 只作为首帧或无时间戳时的回退，避免一秒平均值掩盖 UDP/NDI 抖动。
     double dt = frameIntervalSec(captureFps.load());

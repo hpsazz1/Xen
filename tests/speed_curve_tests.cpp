@@ -171,7 +171,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r15") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r16") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
@@ -662,6 +662,22 @@ int main()
         -6.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
     expectTrue(oppositeOutsideSettle.integralCountsX <= 0.0,
                "opposite error outside settle radius unwinds old integral");
+
+    BasicAimController predictedMotionController;
+    BasicAimController::Settings predictedMotionSettings = dmlRateSettings;
+    for (int frame = 0; frame < 20; ++frame)
+        predictedMotionController.update(
+            20.0, 0.0, dmlDt, 1.344, 1.344, predictedMotionSettings);
+    predictedMotionSettings.preserveMovingIntegral = true;
+    const auto predictedPointCrossing = predictedMotionController.update(
+        -6.0, 0.0, dmlDt, 1.344, 1.344, predictedMotionSettings);
+    expectTrue(predictedPointCrossing.integralCountsX > 0.5,
+               "active prediction preserves moving integral across aim-point crossing");
+    predictedMotionSettings.preserveMovingIntegral = false;
+    const auto predictionWithdrawn = predictedMotionController.update(
+        -6.0, 0.0, dmlDt, 1.344, 1.344, predictedMotionSettings);
+    expectTrue(predictionWithdrawn.integralCountsX <= 0.0,
+               "withdrawing prediction restores opposite-error integral unwind");
     const auto returnedToCenter = centerHoldController.update(
         -4.0, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
     expectTrue(!returnedToCenter.settled,
