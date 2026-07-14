@@ -26,6 +26,7 @@ function New-PerformanceSummary {
         [Parameter(Mandatory)][object[]]$Rows
     )
     $preprocess = @($Rows | ForEach-Object { [double]$_.DmlPreprocessMs })
+    $tensorSetup = @($Rows | ForEach-Object { [double]$_.DmlTensorSetupMs })
     $inference = @($Rows | ForEach-Object { [double]$_.DmlInferenceMs })
     $copy = @($Rows | ForEach-Object { [double]$_.DmlCopyMs })
     $postprocess = @($Rows | ForEach-Object { [double]$_.DmlPostprocessMs })
@@ -41,6 +42,8 @@ function New-PerformanceSummary {
         Samples = $Rows.Count
         MeanPreprocessMs = [math]::Round([double]($preprocess | Measure-Object -Average).Average, 3)
         P95PreprocessMs = [math]::Round((Get-PercentileValue -Values $preprocess -Percentile 0.95), 3)
+        MeanTensorSetupMs = [math]::Round([double]($tensorSetup | Measure-Object -Average).Average, 3)
+        P95TensorSetupMs = [math]::Round((Get-PercentileValue -Values $tensorSetup -Percentile 0.95), 3)
         MeanInferenceMs = [math]::Round($meanInference, 3)
         P95InferenceMs = [math]::Round((Get-PercentileValue -Values $inference -Percentile 0.95), 3)
         MeanCopyMs = [math]::Round([double]($copy | Measure-Object -Average).Average, 3)
@@ -56,6 +59,7 @@ function New-PerformanceSummary {
         PublishedInferenceFps = [math]::Round([double]($Rows | Measure-Object InferenceFPS -Average).Average, 1)
         SourceReceiveFps = [math]::Round([double]($Rows | Measure-Object SourceReceiveFPS -Average).Average, 1)
         ObservationAgeP95Ms = [math]::Round((Get-PercentileValue -Values $observationAges -Percentile 0.95), 1)
+        DmlModel = (@($Rows.DmlModel | Select-Object -Unique) -join ';')
         BuildRevision = (@($Rows.BuildRevision | Select-Object -Unique) -join ';')
     }
 }
@@ -66,8 +70,9 @@ if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
 }
 
 $requiredColumns = @(
-    'BuildBackend', 'BuildRevision', 'InferenceFPS', 'SourceReceiveFPS', 'ObservationAgeSec',
-    'DmlPreprocessMs', 'DmlInferenceMs', 'DmlCopyMs', 'DmlPostprocessMs', 'DmlNmsMs', 'DmlTotalMs'
+    'BuildBackend', 'BuildRevision', 'DmlModel', 'InferenceFPS', 'SourceReceiveFPS', 'ObservationAgeSec',
+    'DmlPreprocessMs', 'DmlTensorSetupMs', 'DmlInferenceMs', 'DmlCopyMs',
+    'DmlPostprocessMs', 'DmlNmsMs', 'DmlTotalMs'
 )
 $fileSummaries = [System.Collections.Generic.List[object]]::new()
 $allRows = [System.Collections.Generic.List[object]]::new()
@@ -125,4 +130,4 @@ if ($PassThru) {
     return
 }
 
-$metrics | Format-Table Level, Source, Samples, MeanPreprocessMs, MeanInferenceMs, MeanPostprocessMs, MeanTotalMs, P95TotalMs, InferenceSharePct, ImpliedPipelineFps -AutoSize
+$metrics | Format-Table Level, Source, Samples, MeanPreprocessMs, MeanTensorSetupMs, MeanInferenceMs, MeanPostprocessMs, MeanTotalMs, P95TotalMs, InferenceSharePct, ImpliedPipelineFps -AutoSize

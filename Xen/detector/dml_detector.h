@@ -21,11 +21,13 @@ public:
     struct TimingSnapshot
     {
         double preprocessMs = 0.0;  // CPU缩放、归一化和NCHW重排耗时，毫秒
+        double tensorSetupMs = 0.0; // 输入形状和Ort::Value张量包装耗时，毫秒
         double inferenceMs = 0.0;   // 同步session.Run耗时，包含DirectML执行与ORT内部同步，毫秒
         double copyMs = 0.0;        // ORT返回后到后处理计时起点的交接耗时，毫秒
         double postprocessMs = 0.0; // 输出解码、筛选、NMS和坐标缩放总耗时，毫秒
         double nmsMs = 0.0;         // 后处理内NMS子阶段耗时，已包含在postprocessMs内
-        double totalMs = 0.0;       // 前四个互斥阶段之和，不重复累加nmsMs
+        double totalMs = 0.0;       // 从预处理开始到后处理结束的完整墙钟耗时，不重复累加nmsMs
+        std::string modelPath;       // 实际加载的模型相对或绝对路径，用于现场A/B身份核对
     };
 
     DirectMLDetector(const std::string& model_path);
@@ -85,6 +87,7 @@ private:
     std::mutex inferenceMutex;
     mutable std::mutex timingMutex; // 保护一次推理对应的完整阶段快照
     TimingSnapshot timingSnapshot;  // 最近一次成功完成后处理的推理耗时
+    std::string activeModelPath;     // 最近一次成功初始化的会话模型路径
     cv::Mat currentFrame;
     cv::Mat currentSourceFrame;
     std::chrono::steady_clock::time_point currentFrameTimestamp{};
@@ -105,10 +108,12 @@ private:
     // 仅在一次推理完成全部后处理后发布，失败或提前返回不覆盖上一份有效快照。
     void publishTimingSnapshot(
         std::chrono::duration<double, std::milli> preprocess,
+        std::chrono::duration<double, std::milli> tensorSetup,
         std::chrono::duration<double, std::milli> inference,
         std::chrono::duration<double, std::milli> copy,
         std::chrono::duration<double, std::milli> postprocess,
-        std::chrono::duration<double, std::milli> nms);
+        std::chrono::duration<double, std::milli> nms,
+        std::chrono::duration<double, std::milli> total);
     Ort::MemoryInfo memory_info;
 };
 

@@ -141,7 +141,7 @@ int main()
         "SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames") != std::string::npos,
         "basic pipeline contains generic source fps diagnostics");
     expectTrue(traceHeader.find(
-        "DmlPreprocessMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs") != std::string::npos,
+        "DmlModel,DmlPreprocessMs,DmlTensorSetupMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs") != std::string::npos,
         "basic pipeline contains dml stage timing diagnostics");
     expectTrue(traceHeader.find("NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
                "basic pipeline keeps ndi compatibility diagnostics");

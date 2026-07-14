@@ -394,21 +394,24 @@ DirectMLDetector::TimingSnapshot DirectMLDetector::getTimingSnapshot() const
 
 void DirectMLDetector::publishTimingSnapshot(
     std::chrono::duration<double, std::milli> preprocess,
+    std::chrono::duration<double, std::milli> tensorSetup,
     std::chrono::duration<double, std::milli> inference,
     std::chrono::duration<double, std::milli> copy,
     std::chrono::duration<double, std::milli> postprocess,
-    std::chrono::duration<double, std::milli> nms)
+    std::chrono::duration<double, std::milli> nms,
+    std::chrono::duration<double, std::milli> total)
 {
     TimingSnapshot snapshot;
     snapshot.preprocessMs = preprocess.count();
+    snapshot.tensorSetupMs = tensorSetup.count();
     snapshot.inferenceMs = inference.count();
     snapshot.copyMs = copy.count();
     snapshot.postprocessMs = postprocess.count();
     snapshot.nmsMs = nms.count();
-    snapshot.totalMs = snapshot.preprocessMs + snapshot.inferenceMs +
-        snapshot.copyMs + snapshot.postprocessMs;
+    snapshot.totalMs = total.count();
 
     std::lock_guard<std::mutex> lock(timingMutex);
+    snapshot.modelPath = activeModelPath;
     timingSnapshot = snapshot;
 }
 
@@ -528,6 +531,12 @@ bool DirectMLDetector::tryInitializeModel(
         sunpoint_raw_output = newSunpointRawOutput;
         using_directml_provider = useDirectML;
         model_ready.store(true);
+        {
+            std::lock_guard<std::mutex> lock(timingMutex);
+            activeModelPath = model_path;
+            timingSnapshot = TimingSnapshot{};
+            timingSnapshot.modelPath = activeModelPath;
+        }
 
         // 自动设置 fixed_input_size，并通知其他模块重新加载
         if (isStatic != config.fixed_input_size)
@@ -894,7 +903,7 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
         }
 
         auto t5 = std::chrono::steady_clock::now();
-        publishTimingSnapshot(t1 - t0, t3 - t2, t4 - t3, t5 - t4, nmsTimeTmp);
+        publishTimingSnapshot(t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, nmsTimeTmp, t5 - t0);
         return batchDetections;
     }
 
@@ -943,7 +952,7 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
     }
     auto t5 = std::chrono::steady_clock::now();
 
-    publishTimingSnapshot(t1 - t0, t3 - t2, t4 - t3, t5 - t4, nmsTimeTmp);
+    publishTimingSnapshot(t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, nmsTimeTmp, t5 - t0);
 
     return batchDetections;
 }

@@ -1105,11 +1105,13 @@ void MouseThread::moveMousePivot(
         {
             const DirectMLDetector::TimingSnapshot timing = dml_detector->getTimingSnapshot();
             pf->dmlPreprocessMs = timing.preprocessMs;
+            pf->dmlTensorSetupMs = timing.tensorSetupMs;
             pf->dmlInferenceMs = timing.inferenceMs;
             pf->dmlCopyMs = timing.copyMs;
             pf->dmlPostprocessMs = timing.postprocessMs;
             pf->dmlNmsMs = timing.nmsMs;
             pf->dmlTotalMs = timing.totalMs;
+            pf->dmlModel = timing.modelPath;
         }
 #endif
         const CaptureSourceDiagnostics sourceDiagnostics = GetCaptureSourceDiagnostics();

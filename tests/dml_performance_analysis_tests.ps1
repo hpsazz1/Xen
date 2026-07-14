@@ -17,10 +17,10 @@ try {
     New-Item -ItemType Directory -Path $dataDirectory | Out-Null
     $csvPath = Join-Path $dataDirectory 'performance.csv'
     @'
-BuildBackend,BuildRevision,InferenceFPS,SourceReceiveFPS,ObservationAgeSec,DmlPreprocessMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs
-DML,test-revision,100,220,0.010,1,7,0.1,1.9,0.4,10
-DML,test-revision,100,220,0.012,2,8,0.2,1.8,0.5,12
-DML,test-revision,100,220,0.014,3,9,0.3,1.7,0.6,14
+BuildBackend,BuildRevision,DmlModel,InferenceFPS,SourceReceiveFPS,ObservationAgeSec,DmlPreprocessMs,DmlTensorSetupMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs
+DML,test-revision,models/test_fp16.onnx,100,220,0.010,1,0.5,7,0.1,1.9,0.4,10.5
+DML,test-revision,models/test_fp16.onnx,100,220,0.012,2,0.6,8,0.2,1.8,0.5,12.6
+DML,test-revision,models/test_fp16.onnx,100,220,0.014,3,0.7,9,0.3,1.7,0.6,14.7
 '@ | Set-Content -LiteralPath $csvPath -Encoding UTF8
 
     $outputCsv = Join-Path $temporaryRoot 'dml_performance_summary.csv'
@@ -29,12 +29,14 @@ DML,test-revision,100,220,0.014,3,9,0.3,1.7,0.6,14
     $overall = @($metrics | Where-Object Level -eq 'Overall')[0]
     Assert-Equal 3 $overall.Samples 'Overall summary must retain all valid rows.'
     Assert-Equal 2 $overall.MeanPreprocessMs 'Mean preprocess time must be correct.'
+    Assert-Equal 0.6 $overall.MeanTensorSetupMs 'Mean tensor setup time must be correct.'
     Assert-Equal 8 $overall.MeanInferenceMs 'Mean inference time must be correct.'
-    Assert-Equal 12 $overall.MeanTotalMs 'Mean total time must be correct.'
-    Assert-Equal 12 $overall.P95TotalMs 'Floor percentile must be deterministic for three samples.'
-    Assert-Equal 66.7 $overall.InferenceSharePct 'Inference share must use total pipeline time.'
-    Assert-Equal 83.3 $overall.ImpliedPipelineFps 'Implied throughput must derive from mean total time.'
+    Assert-Equal 12.6 $overall.MeanTotalMs 'Mean total time must be correct.'
+    Assert-Equal 12.6 $overall.P95TotalMs 'Floor percentile must be deterministic for three samples.'
+    Assert-Equal 63.5 $overall.InferenceSharePct 'Inference share must use total pipeline time.'
+    Assert-Equal 79.4 $overall.ImpliedPipelineFps 'Implied throughput must derive from mean total time.'
     Assert-Equal 12 $overall.ObservationAgeP95Ms 'Observation age P95 must use the deterministic floor percentile.'
+    Assert-Equal models/test_fp16.onnx $overall.DmlModel 'Loaded DML model path must be preserved.'
     Assert-Equal test-revision $overall.BuildRevision 'Build revision must be preserved.'
     Assert-Equal 2 @(Import-Csv -LiteralPath $outputCsv).Count 'Machine-readable export must include both summaries.'
 }
