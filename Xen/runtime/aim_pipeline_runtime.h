@@ -4,6 +4,7 @@
 #include <string>
 
 #include "aim_pipeline_types.h"
+#include "relative_los_kalman.h"
 
 // P0-0 影子运行时：只接收同帧观测并生成诊断快照，绝不直接访问设备队列。
 class AimPipelineRuntime
@@ -27,6 +28,7 @@ private:
     uint64_t resetGeneration_ = 0;
     uint64_t observationSequence_ = 0;
     AimPipelineFrameState frame_{};
+    RelativeLosKalman relativeLosKalman_{};
 };
 
 AimPipelineMode parseAimPipelineMode(const std::string& value);

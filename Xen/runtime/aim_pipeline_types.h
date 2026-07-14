@@ -122,10 +122,14 @@ struct LosEstimate
     double rateY = 0.0;
     double covarianceX = 0.0;
     double covarianceY = 0.0;
+    double innovationVarianceX = 0.0;
+    double innovationVarianceY = 0.0;
     double innovationX = 0.0;
     double innovationY = 0.0;
     double nisX = 0.0;
     double nisY = 0.0;
+    double measurementConfidence = 0.0;
+    double feedforwardConfidence = 0.0;
 };
 
 // 新控制器的可审计分解；P0-0 默认全部为零且不参与旧控制器输出。

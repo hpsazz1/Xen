@@ -1200,6 +1200,7 @@ void MouseThread::moveMousePivot(
         shadowObservation.timing.sourceHeight = ::screenHeight.load(std::memory_order_relaxed);
     shadowObservation.trackId = targetTrackId;
     shadowObservation.classId = target.classId;
+    shadowObservation.confidence = target.confidence;
     shadowObservation.pivotX = pivotX;
     shadowObservation.pivotY = pivotY;
     shadowObservation.boxX = target.x;

@@ -19,6 +19,7 @@ public:
     AimbotTarget();
     int x, y, w, h;         ///< 目标边界框（左上角坐标和宽高）
     int classId;             ///< 目标类别 ID
+    float confidence = 1.0f; ///< 当前目标观测置信度，范围0~1
 
     double pivotX;           ///< 瞄准枢轴点 X（目标上的瞄准参考点）
     double pivotY;           ///< 瞄准枢轴点 Y
@@ -33,7 +34,8 @@ public:
      * @param pivotX 枢轴点 X（默认中心）
      * @param pivotY 枢轴点 Y（默认中心）
      */
-    AimbotTarget(int x, int y, int w, int h, int classId, double pivotX = 0.0, double pivotY = 0.0);
+    AimbotTarget(int x, int y, int w, int h, int classId, double pivotX = 0.0,
+        double pivotY = 0.0, float confidence = 1.0f);
 };
 
 /**

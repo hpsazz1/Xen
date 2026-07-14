@@ -20,7 +20,7 @@
  * 初始化所有成员变量为零值或默认值。
  */
 AimbotTarget::AimbotTarget()
-    : x(0), y(0), w(0), h(0), classId(0), pivotX(0.0), pivotY(0.0)
+    : x(0), y(0), w(0), h(0), classId(0), confidence(1.0f), pivotX(0.0), pivotY(0.0)
 {
 }
 
@@ -36,8 +36,10 @@ AimbotTarget::AimbotTarget()
  * @param px   瞄准支点 X 坐标（用于计算瞄准向量）
  * @param py   瞄准支点 Y 坐标
  */
-AimbotTarget::AimbotTarget(int x_, int y_, int w_, int h_, int cls, double px, double py)
-    : x(x_), y(y_), w(w_), h(h_), classId(cls), pivotX(px), pivotY(py)
+AimbotTarget::AimbotTarget(int x_, int y_, int w_, int h_, int cls, double px, double py,
+    float confidence_)
+    : x(x_), y(y_), w(w_), h(h_), classId(cls),
+      confidence(std::clamp(confidence_, 0.0f, 1.0f)), pivotX(px), pivotY(py)
 {
 }
 
@@ -409,7 +411,8 @@ bool BasicTargetTracker::getLockedTarget(LockedTargetInfo& out) const
         static_cast<int>(std::lround(lockedCandidate_.box.height)),
         lockedCandidate_.classId,
         lockedCandidate_.pivotX,
-        lockedCandidate_.pivotY);
+        lockedCandidate_.pivotY,
+        lockedCandidate_.confidence);
     return true;
 }
 
@@ -548,7 +551,8 @@ AimbotTarget MotionLibTargetTracker::toAimbotTarget(const estimation::DetectedOb
         static_cast<int>(std::lround(obj.box.h)),
         obj.classId,
         obj.box.x + obj.box.w * 0.5f,  // pivotX = 框中心 X
-        obj.box.y + obj.box.h * 0.5f   // pivotY = 框中心 Y
+        obj.box.y + obj.box.h * 0.5f,  // pivotY = 框中心 Y
+        obj.confidence
     );
 }
 
@@ -739,7 +743,8 @@ bool MotionLibTargetTracker::getLockedTarget(LockedTargetInfo& out) const
         static_cast<int>(std::lround(h)),
         sotTracker_.classId(),
         static_cast<double>(cx),
-        static_cast<double>(cy)
+        static_cast<double>(cy),
+        sotTracker_.confidence()
     );
 
     return true;

@@ -176,6 +176,9 @@ bool PipelineTracer::exportCSV(const std::string& path) const
     file << "FrameID,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision,"
          << "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed,AimPipelineResetGeneration,AimPipelineObservationSequence,"
          << "AimPipelineTargetId,AimPipelineClassId,AimPipelineConfidence,AimPipelineRawPivotX,AimPipelineRawPivotY,AimPipelineEstimateValid,"
+         << "AimPipelineAngleX,AimPipelineAngleY,AimPipelineRateX,AimPipelineRateY,AimPipelineCovarianceX,AimPipelineCovarianceY,"
+         << "AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY,"
+         << "AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence,"
          << "AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadReferenceX,AimPipelineLeadReferenceY,"
          << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
          << "ViewMotionShadowValid,CommandToFrameDelayMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
@@ -237,6 +240,14 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << ap.observation.confidence << ','
              << ap.observation.pivotX << ',' << ap.observation.pivotY << ','
              << (ap.estimate.valid ? '1' : '0') << ','
+             << ap.estimate.angleX << ',' << ap.estimate.angleY << ','
+             << ap.estimate.rateX << ',' << ap.estimate.rateY << ','
+             << ap.estimate.covarianceX << ',' << ap.estimate.covarianceY << ','
+             << ap.estimate.innovationVarianceX << ',' << ap.estimate.innovationVarianceY << ','
+             << ap.estimate.innovationX << ',' << ap.estimate.innovationY << ','
+             << ap.estimate.nisX << ',' << ap.estimate.nisY << ','
+             << ap.estimate.measurementConfidence << ','
+             << ap.estimate.feedforwardConfidence << ','
              << ap.control.feedbackX << ',' << ap.control.feedbackY << ','
              << ap.control.trackingFeedforwardX << ',' << ap.control.trackingFeedforwardY << ','
              << ap.control.leadReferenceX << ',' << ap.control.leadReferenceY << ','

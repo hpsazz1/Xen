@@ -48,6 +48,7 @@ void AimPipelineRuntime::reset()
     frame_.activeAvailable = false;
     frame_.commandSuppressed = true;
     frame_.resetGeneration = resetGeneration_;
+    relativeLosKalman_.reset();
 }
 
 AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observation)
@@ -60,6 +61,16 @@ AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observat
     frame_.resetGeneration = resetGeneration_;
     if (effectiveMode_ == AimPipelineMode::Legacy)
         return frame_;
+
+    const bool targetChanged = frame_.observation.valid && observation.valid &&
+        frame_.observation.trackId != observation.trackId;
+    if (targetChanged)
+    {
+        ++resetGeneration_;
+        observationSequence_ = 0;
+        relativeLosKalman_.reset();
+        frame_.resetGeneration = resetGeneration_;
+    }
 
     frame_.shadowProcessed = true;
     frame_.observationSequence = ++observationSequence_;
@@ -80,4 +91,29 @@ void AimPipelineRuntime::setViewMotionDiagnostics(
     const ViewMotionShadowDiagnostics& diagnostics)
 {
     frame_.viewMotion = diagnostics;
+    if (!diagnostics.valid || effectiveMode_ == AimPipelineMode::Legacy)
+        return;
+
+    relativeLosKalman_.update(
+        diagnostics.stabilizedLosYawDegrees,
+        diagnostics.stabilizedLosPitchDownDegrees,
+        frame_.observation.confidence,
+        frame_.observation.timing.observationTime,
+        frame_.observation.timing.controlTime);
+    const RelativeLosKalmanEstimate& estimate = relativeLosKalman_.estimate();
+    frame_.estimate.valid = estimate.x.valid && estimate.y.valid;
+    frame_.estimate.angleX = estimate.x.angleDegrees;
+    frame_.estimate.angleY = estimate.y.angleDegrees;
+    frame_.estimate.rateX = estimate.x.rateDegreesPerSecond;
+    frame_.estimate.rateY = estimate.y.rateDegreesPerSecond;
+    frame_.estimate.covarianceX = estimate.x.angleVariance;
+    frame_.estimate.covarianceY = estimate.y.angleVariance;
+    frame_.estimate.innovationVarianceX = estimate.x.innovationVariance;
+    frame_.estimate.innovationVarianceY = estimate.y.innovationVariance;
+    frame_.estimate.innovationX = estimate.x.innovationDegrees;
+    frame_.estimate.innovationY = estimate.y.innovationDegrees;
+    frame_.estimate.nisX = estimate.x.nis;
+    frame_.estimate.nisY = estimate.y.nis;
+    frame_.estimate.measurementConfidence = estimate.measurementConfidence;
+    frame_.estimate.feedforwardConfidence = estimate.feedforwardConfidence;
 }

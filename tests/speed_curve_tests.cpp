@@ -1,6 +1,7 @@
 #include "runtime/basic_aim_controller.h"
 #include "runtime/aim_pipeline_runtime.h"
 #include "runtime/applied_view_motion_model.h"
+#include "runtime/relative_los_kalman.h"
 #include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_target_filter.h"
 #include "runtime/target_predictor.h"
@@ -151,6 +152,9 @@ int main()
     shadowObservation.classId = 1;
     shadowObservation.pivotX = 123.0;
     shadowObservation.pivotY = 77.0;
+    shadowObservation.confidence = 0.9f;
+    shadowObservation.timing.observationTime = timingBase + std::chrono::milliseconds(20);
+    shadowObservation.timing.controlTime = timingBase + std::chrono::milliseconds(30);
     newPipeline.configure("shadow");
     const AimPipelineFrameState shadowFrame = newPipeline.observe(shadowObservation);
     expectTrue(shadowFrame.shadowProcessed && shadowFrame.commandSuppressed,
@@ -159,6 +163,20 @@ int main()
                shadowFrame.trajectoryOutput.outputCountsY == 0 &&
                shadowFrame.trajectoryOutput.commandSuppressed,
                "shadow pipeline never produces a queued device command");
+    ViewMotionShadowDiagnostics shadowDiagnostics;
+    shadowDiagnostics.valid = true;
+    shadowDiagnostics.stabilizedLosYawDegrees = 2.0;
+    shadowDiagnostics.stabilizedLosPitchDownDegrees = -1.0;
+    newPipeline.setViewMotionDiagnostics(shadowDiagnostics);
+    const AimPipelineFrameState kalmanFrame = newPipeline.snapshot();
+    expectTrue(kalmanFrame.estimate.valid &&
+               kalmanFrame.estimate.measurementConfidence > 0.89 &&
+               kalmanFrame.estimate.feedforwardConfidence > 0.0,
+               "shadow pipeline updates relative LOS Kalman with detection confidence");
+    expectNear(kalmanFrame.estimate.angleX, 2.0, 1e-9,
+               "first relative LOS Kalman observation anchors the yaw angle");
+    expectNear(kalmanFrame.estimate.angleY, -1.0, 1e-9,
+               "first relative LOS Kalman observation anchors the pitch angle");
     expectTrue(shadowFrame.observation.trackId == 7 &&
                shadowFrame.observationSequence == 1,
                "shadow pipeline preserves target identity and observation sequence");
@@ -182,6 +200,40 @@ int main()
     newPipeline.configure("invalid-mode");
     expectTrue(newPipeline.effectiveMode() == AimPipelineMode::Legacy,
                "invalid new pipeline mode falls back to legacy");
+
+    RelativeLosKalman constantVelocityKalman;
+    const auto kalmanStart = timingBase + std::chrono::seconds(2);
+    for (int sample = 0; sample <= 30; ++sample)
+    {
+        const auto sampleTime = kalmanStart + std::chrono::milliseconds(sample * 10);
+        constantVelocityKalman.update(
+            sample * 0.05, sample * -0.02, 1.0f, sampleTime, sampleTime);
+    }
+    const RelativeLosKalmanEstimate constantVelocityEstimate =
+        constantVelocityKalman.estimate();
+    expectNear(constantVelocityEstimate.x.rateDegreesPerSecond, 5.0, 0.35,
+               "relative LOS Kalman converges to horizontal constant angular rate");
+    expectNear(constantVelocityEstimate.y.rateDegreesPerSecond, -2.0, 0.35,
+               "relative LOS Kalman converges to vertical constant angular rate");
+    expectTrue(constantVelocityEstimate.x.angleVariance > 0.0 &&
+               constantVelocityEstimate.x.innovationVariance > 0.0,
+               "relative LOS Kalman exposes positive covariance diagnostics");
+
+    RelativeLosKalman highConfidenceKalman;
+    RelativeLosKalman lowConfidenceKalman;
+    highConfidenceKalman.update(0.0, 0.0, 1.0f, kalmanStart, kalmanStart);
+    lowConfidenceKalman.update(0.0, 0.0, 1.0f, kalmanStart, kalmanStart);
+    const auto confidenceTime = kalmanStart + std::chrono::milliseconds(16);
+    highConfidenceKalman.update(1.0, 0.0, 1.0f, confidenceTime, confidenceTime);
+    lowConfidenceKalman.update(1.0, 0.0, 0.2f, confidenceTime, confidenceTime);
+    expectTrue(lowConfidenceKalman.estimate().x.innovationVariance >
+                   highConfidenceKalman.estimate().x.innovationVariance &&
+               lowConfidenceKalman.estimate().measurementConfidence <
+                   highConfidenceKalman.estimate().measurementConfidence,
+               "lower detection confidence increases Kalman measurement uncertainty");
+    expectTrue(lowConfidenceKalman.estimate().feedforwardConfidence <
+                   highConfidenceKalman.estimate().feedforwardConfidence,
+               "lower detection confidence reduces feedforward confidence");
 
     FrameRateCounter rateCounter;
     const auto rateStart = FrameRateCounter::TimePoint(std::chrono::milliseconds(1000));
@@ -509,6 +561,11 @@ int main()
     expectTrue(traceHeader.find(
         "ViewMotionShadowValid,CommandToFrameDelayMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees") != std::string::npos,
         "basic pipeline records delayed applied-view angle diagnostics");
+    expectTrue(traceHeader.find(
+        "AimPipelineAngleX,AimPipelineAngleY,AimPipelineRateX,AimPipelineRateY,AimPipelineCovarianceX,AimPipelineCovarianceY") != std::string::npos &&
+        traceHeader.find("AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY") != std::string::npos &&
+        traceHeader.find("AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence") != std::string::npos,
+        "basic pipeline records relative LOS Kalman diagnostics");
     expectTrue(traceHeader.find(
         "CaptureFrameSequence,BackendReceiveNs,CaptureSubmitNs,InferenceStartNs,InferencePublishNs,ControlTimeNs") != std::string::npos &&
         traceHeader.find("BackendQueueMs,SubmitToInferenceMs,InferenceToPublishMs,PublishToControlMs,LocalObservationAgeMs") != std::string::npos,
