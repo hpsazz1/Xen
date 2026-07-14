@@ -1227,6 +1227,7 @@ void MouseThread::moveMousePivot(
         pf->observedVelocityX = lastFilterResult.observedVelocityX;
         pf->observedVelocityY = lastFilterResult.observedVelocityY;
         pf->observedSpeed = lastFilterResult.observedSpeed;
+        pf->filterTrendSpeed = lastFilterResult.motionTrendSpeed;
         pf->filterResidual = lastFilterResult.residual;
         pf->predictionApplied = lastPredictionResult.applied;
         pf->predictionEnabled = predictionSettings.enabled;

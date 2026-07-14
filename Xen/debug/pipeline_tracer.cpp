@@ -95,7 +95,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames,TargetDetected,ObservationAgeSec,"
          << "TargetClassID,"
          << "RawPivotX,RawPivotY,TargetBoxX,TargetBoxY,TargetBoxWidth,TargetBoxHeight,"
-         << "FilteredX,FilteredY,ObservedVelocityX,ObservedVelocityY,ObservedSpeed,FilterResidual,"
+         << "FilteredX,FilteredY,ObservedVelocityX,ObservedVelocityY,ObservedSpeed,FilterTrendSpeed,FilterResidual,"
          << "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,"
          << "PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,"
          << "PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,"
@@ -138,7 +138,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.targetBoxWidth << ',' << f.targetBoxHeight << ','
              << f.filteredX << ',' << f.filteredY << ','
              << f.observedVelocityX << ',' << f.observedVelocityY << ','
-             << f.observedSpeed << ',' << f.filterResidual << ','
+             << f.observedSpeed << ',' << f.filterTrendSpeed << ',' << f.filterResidual << ','
              << (f.predictionApplied ? '1' : '0') << ','
              << (f.predictionEnabled ? '1' : '0') << ','
              << f.predictionAdditionalLeadMs << ',' << f.predictionVelocityTauMs << ','

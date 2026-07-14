@@ -37,6 +37,7 @@ struct PipelineFrame
     double observedVelocityX = 0.0; ///< 相邻原始观测水平速度，px/sec；正值向右
     double observedVelocityY = 0.0; ///< 相邻原始观测垂直速度，px/sec；正值向下
     double observedSpeed = 0.0; ///< 相邻原始观测速度，仅用于诊断
+    double filterTrendSpeed = 0.0; ///< 有符号速度趋势模长，px/sec；控制移动滤波响应
     double filterResidual = 0.0;
 
     // ========== Stage 3: 连续观测预测 ==========

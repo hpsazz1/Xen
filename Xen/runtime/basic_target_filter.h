@@ -17,6 +17,7 @@ public:
         double observedVelocityX = 0.0; // 相邻原始观测的水平速度，px/sec；保留符号用于识别移动方向
         double observedVelocityY = 0.0; // 相邻原始观测的垂直速度，px/sec；保留符号用于识别移动方向
         double observedSpeed = 0.0; // 仅用于诊断的相邻观测速度，px/sec
+        double motionTrendSpeed = 0.0; // 约30 ms有符号速度趋势的模长，控制移动滤波响应
         double residual = 0.0;      // 原始观测到滤波位置的距离，px
     };
 
@@ -26,7 +27,8 @@ public:
                   double screenWidth)
     {
         if (!std::isfinite(x) || !std::isfinite(y))
-            return { filteredX_, filteredY_, 0.0, 0.0, 0.0, 0.0 };
+            return { filteredX_, filteredY_, 0.0, 0.0, 0.0,
+                     std::hypot(trendVelocityX_, trendVelocityY_), 0.0 };
 
         if (observationTime.time_since_epoch().count() == 0)
             observationTime = std::chrono::steady_clock::now();
@@ -34,7 +36,7 @@ public:
         if (!initialized_)
         {
             initialize(x, y, observationTime);
-            return { x, y, 0.0, 0.0, 0.0, 0.0 };
+            return { x, y, 0.0, 0.0, 0.0, 0.0, 0.0 };
         }
 
         double dt = std::chrono::duration<double>(observationTime - previousTime_).count();
@@ -54,8 +56,16 @@ public:
         if (rawDistance > std::max(24.0, screenWidth * 0.20))
         {
             initialize(x, y, observationTime);
-            return { x, y, observedVelocityX, observedVelocityY, observedSpeed, 0.0 };
+            return { x, y, observedVelocityX, observedVelocityY,
+                     observedSpeed, 0.0, 0.0 };
         }
+
+        // 单帧检测中心跳变会产生很高的瞬时速度，但相邻帧常反向抵消；
+        // 先对有符号速度做约30 ms趋势回归，只有持续同向运动才放宽滤波响应。
+        const double trendAlpha = 1.0 - std::exp(-dt / 0.030);
+        trendVelocityX_ += (observedVelocityX - trendVelocityX_) * trendAlpha;
+        trendVelocityY_ += (observedVelocityY - trendVelocityY_) * trendAlpha;
+        const double motionTrendSpeed = std::hypot(trendVelocityX_, trendVelocityY_);
 
         const double residualX = x - filteredX_;
         const double residualY = y - filteredY_;
@@ -64,7 +74,7 @@ public:
         // 静止时约 30 ms 时间常数用于抑制检测量化；观测速度升高时
         // 连续降低到约 6 ms，减少移动目标的相位滞后。
         const double motionRatio = std::clamp(
-            observedSpeed / std::max(120.0, screenWidth * 1.25), 0.0, 1.0);
+            motionTrendSpeed / std::max(120.0, screenWidth * 1.25), 0.0, 1.0);
         const double tau = 0.030 + (0.006 - 0.030) * motionRatio;
         double alpha = 1.0 - std::exp(-dt / tau);
 
@@ -81,7 +91,7 @@ public:
         return {
             filteredX_, filteredY_,
             observedVelocityX, observedVelocityY,
-            observedSpeed, residual
+            observedSpeed, motionTrendSpeed, residual
         };
     }
 
@@ -90,6 +100,7 @@ public:
         initialized_ = false;
         filteredX_ = filteredY_ = 0.0;
         previousRawX_ = previousRawY_ = 0.0;
+        trendVelocityX_ = trendVelocityY_ = 0.0;
         previousTime_ = {};
     }
 
@@ -99,6 +110,7 @@ private:
         initialized_ = true;
         filteredX_ = previousRawX_ = x;
         filteredY_ = previousRawY_ = y;
+        trendVelocityX_ = trendVelocityY_ = 0.0;
         previousTime_ = time;
     }
 
@@ -107,5 +119,7 @@ private:
     double filteredY_ = 0.0;
     double previousRawX_ = 0.0;
     double previousRawY_ = 0.0;
+    double trendVelocityX_ = 0.0;
+    double trendVelocityY_ = 0.0;
     std::chrono::steady_clock::time_point previousTime_{};
 };
