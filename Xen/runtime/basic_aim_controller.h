@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 25;
+inline constexpr int kBasicAimControllerRevision = 26;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -57,14 +57,17 @@ public:
 
         const double settleRadius = std::max(0.0, settings.settleRadiusPixels);
         const double releaseRadius = std::max(settleRadius, settings.releaseRadiusPixels);
-        // jump在r24仍有72.6 px水平框中心P95，而总速度限速仅5.7%；瓶颈仍是80 ms比例响应。
-        // 任一轴误差达到至少16 px时仅缩短该轴比例响应；进入中心后自动恢复，
+        // r25已降低jump P95，但X轴P99仍达77.9 px且总速度限速仅2.8%。
+        // 任一轴误差达到16 px时使用半响应，达到32 px时使用四分之一响应；进入中心后恢复，
         // 积分、二维总速度预算和小误差稳定区完全不变。
         const double catchUpThreshold = std::max(16.0, releaseRadius * 2.0);
+        const double aggressiveCatchUpThreshold = catchUpThreshold * 2.0;
         out.horizontalCatchUp = std::abs(errorX) >= catchUpThreshold;
         out.verticalCatchUp = std::abs(errorY) >= catchUpThreshold;
-        out.effectiveResponseSecondsX = out.horizontalCatchUp ? response * 0.5 : response;
-        out.effectiveResponseSecondsY = out.verticalCatchUp ? response * 0.5 : response;
+        out.effectiveResponseSecondsX = std::abs(errorX) >= aggressiveCatchUpThreshold
+            ? response * 0.25 : (out.horizontalCatchUp ? response * 0.5 : response);
+        out.effectiveResponseSecondsY = std::abs(errorY) >= aggressiveCatchUpThreshold
+            ? response * 0.25 : (out.verticalCatchUp ? response * 0.5 : response);
         const double errorMotion = hasPreviousError_
             ? std::hypot(errorX - previousErrorX_, errorY - previousErrorY_) : 0.0;
         // PI 静止锁存只应用于误差基本不变的目标。启用积分后，如果相邻有效观测的误差

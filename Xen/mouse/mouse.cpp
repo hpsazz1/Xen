@@ -1174,7 +1174,8 @@ void MouseThread::moveMousePivot(
         const double viewDeltaX = viewAtObservation.first - viewAtControl.first;
         const double viewDeltaY = viewAtObservation.second - viewAtControl.second;
         lastPredictionResult.x = TargetPredictor::boxHoldCoordinate(
-            center_x, target.x + viewDeltaX, target.w);
+            center_x, target.x + viewDeltaX, target.w,
+            std::max(2.0, target.w * 0.25));
         lastPredictionResult.y = TargetPredictor::boxHoldCoordinate(
             center_y, target.y + viewDeltaY, target.h);
     }
