@@ -187,11 +187,16 @@ void NDICapture::SetSource(const std::string& sourceName)
 // 获取下一帧：从帧队列取出最早的一帧并返回
 cv::Mat NDICapture::GetNextFrameCpu()
 {
+    return GetNextFrameTimed().image;
+}
+
+CapturedFrame NDICapture::GetNextFrameTimed()
+{
     std::lock_guard<std::mutex> lock(frame_mutex_);
     NetworkFrame latest;
     uint64_t skipped = 0;
     if (!TakeLatestFrame(frame_queue_, latest, skipped))
-        return cv::Mat();
+        return {};
     if (skipped > 0)
     {
         dropped_frames_.fetch_add(static_cast<int>(skipped), std::memory_order_relaxed);
@@ -199,7 +204,7 @@ cv::Mat NDICapture::GetNextFrameCpu()
         RecordSourceDroppedFrames(skipped);
     }
     SetSourceDimensions(latest.sourceWidth, latest.sourceHeight);
-    return latest.image;
+    return { std::move(latest.image), latest.timing };
 }
 
 // NDI 接收线程：持续发现和连接 NDI 源，接收视频帧并放入帧队列
@@ -289,7 +294,8 @@ void NDICapture::ReceiveThread()
                     const auto receiveNow = std::chrono::steady_clock::now();
                     global_receive_fps_.store(
                         receiveRate.addFrame(receiveNow), std::memory_order_relaxed);
-                    RecordSourceFrame(declaredFps, videoFrame.xres, videoFrame.yres);
+                    const uint64_t frameSequence = RecordSourceFrame(
+                        declaredFps, videoFrame.xres, videoFrame.yres, receiveNow);
 
                     // 将 NDI 帧从 BGRA 转换为 BGR 格式
                     cv::Mat ndiFrame(videoFrame.yres, videoFrame.xres, CV_8UC4, videoFrame.p_data);
@@ -316,13 +322,28 @@ void NDICapture::ReceiveThread()
                     if (cropWidth != width_ || cropHeight != height_)
                         cv::resize(detectionFrame, detectionFrame, cv::Size(width_, height_));
 
+                    FrameTiming timing;
+                    timing.backendReceiveTime = receiveNow;
+                    timing.frameSequence = frameSequence;
+                    timing.sourceWidth = geometry.sourceWidth;
+                    timing.sourceHeight = geometry.sourceHeight;
+                    timing.roiX = cropX;
+                    timing.roiY = cropY;
+                    timing.roiWidth = cropWidth;
+                    timing.roiHeight = cropHeight;
+                    timing.sourceTimestamp = videoFrame.timestamp;
+                    timing.sourceTimecode = videoFrame.timecode;
+                    timing.sourceTimestampAvailable = videoFrame.timestamp != 0;
+                    timing.sourceTimecodeAvailable = videoFrame.timecode != 0;
+                    timing.sourceTimestampMapped = false;
+
                     {
                         std::lock_guard<std::mutex> lock(frame_mutex_);
                         // 网络接收速度可能高于推理消费速度。这里只保留最新帧，避免排队增加观测延迟；
                         // 被替换的旧帧必须计入丢弃数，不能再显示为“0 丢帧”。
                         const uint64_t superseded = ReplaceWithLatestFrame(
                             frame_queue_, NetworkFrame{
-                                std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight });
+                                std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight, timing });
                         if (superseded > 0)
                         {
                             dropped_frames_.fetch_add(static_cast<int>(superseded), std::memory_order_relaxed);

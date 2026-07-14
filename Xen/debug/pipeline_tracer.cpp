@@ -16,6 +16,53 @@
 // ============================================================================
 PipelineTracer g_pipelineTracer;
 
+namespace
+{
+void mergeCommandResult(ViewCommandSample& destination, const ViewCommandSample& source)
+{
+    if (source.sequence == 0 || destination.sequence != source.sequence)
+        return;
+    if (source.enqueueTime.time_since_epoch().count() != 0)
+        destination.enqueueTime = source.enqueueTime;
+    if (source.requestedCountsX != 0.0 || source.requestedCountsY != 0.0)
+    {
+        destination.requestedCountsX = source.requestedCountsX;
+        destination.requestedCountsY = source.requestedCountsY;
+    }
+    destination.enqueueSucceeded = destination.enqueueSucceeded || source.enqueueSucceeded;
+    destination.sendAttempted = destination.sendAttempted || source.sendAttempted;
+    destination.sendSucceeded = destination.sendSucceeded || source.sendSucceeded;
+    destination.droppedBeforeSend = destination.droppedBeforeSend || source.droppedBeforeSend;
+    if (source.sendSucceeded)
+    {
+        destination.appliedCountsX = source.appliedCountsX;
+        destination.appliedCountsY = source.appliedCountsY;
+        destination.deviceSendTime = source.deviceSendTime;
+    }
+}
+
+std::string steadyTimeNs(FrameTiming::Clock::time_point time)
+{
+    if (!frameTimeKnown(time))
+        return {};
+    return std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        time.time_since_epoch()).count());
+}
+
+std::string signedDurationMs(
+    FrameTiming::Clock::time_point start,
+    FrameTiming::Clock::time_point end)
+{
+    const std::optional<double> duration = frameSignedDurationMs(start, end);
+    if (!duration)
+        return {};
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3)
+           << *duration;
+    return stream.str();
+}
+}
+
 // ============================================================================
 // PipelineTracer 实现
 // ============================================================================
@@ -48,9 +95,46 @@ PipelineFrame PipelineTracer::beginFrame(int resolution)
 void PipelineTracer::commitFrame(PipelineFrame frame)
 {
     std::lock_guard<std::mutex> lock(mutex);
+    if (frame.commandSample.sequence != 0)
+    {
+        const auto pending = pendingCommandResults.find(frame.commandSample.sequence);
+        if (pending != pendingCommandResults.end())
+        {
+            mergeCommandResult(frame.commandSample, pending->second);
+            pendingCommandResults.erase(pending);
+        }
+    }
     if (ringBuffer.size() >= maxFrames)
         ringBuffer.pop_front();
     ringBuffer.push_back(std::move(frame));
+}
+
+void PipelineTracer::recordCommandResult(const ViewCommandSample& sample)
+{
+    if (!isEnabled() || sample.sequence == 0)
+        return;
+    std::lock_guard<std::mutex> lock(mutex);
+    for (auto frame = ringBuffer.rbegin(); frame != ringBuffer.rend(); ++frame)
+    {
+        if (frame->commandSample.sequence == sample.sequence)
+        {
+            mergeCommandResult(frame->commandSample, sample);
+            return;
+        }
+    }
+    pendingCommandResults[sample.sequence] = sample;
+    if (pendingCommandResults.size() > 512)
+        pendingCommandResults.erase(pendingCommandResults.begin());
+}
+
+void PipelineTracer::recordCommandDropped(uint64_t sequence)
+{
+    if (sequence == 0)
+        return;
+    ViewCommandSample sample;
+    sample.sequence = sequence;
+    sample.droppedBeforeSend = true;
+    recordCommandResult(sample);
 }
 
 std::vector<PipelineFrame> PipelineTracer::getFrames() const
@@ -63,6 +147,7 @@ void PipelineTracer::clear()
 {
     std::lock_guard<std::mutex> lock(mutex);
     ringBuffer.clear();
+    pendingCommandResults.clear();
 }
 
 size_t PipelineTracer::size() const
@@ -93,6 +178,10 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "AimPipelineTargetId,AimPipelineClassId,AimPipelineConfidence,AimPipelineRawPivotX,AimPipelineRawPivotY,AimPipelineEstimateValid,"
          << "AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadReferenceX,AimPipelineLeadReferenceY,"
          << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
+         << "CaptureFrameSequence,BackendReceiveNs,CaptureSubmitNs,InferenceStartNs,InferencePublishNs,ControlTimeNs,"
+         << "SourceTimestampAvailable,SourceTimestamp,SourceTimecodeAvailable,SourceTimecode,SourceTimestampMapped,"
+         << "CaptureRoiX,CaptureRoiY,CaptureRoiWidth,CaptureRoiHeight,TimingComplete,TimingOrderValid,TimingAnomaly,"
+         << "BackendQueueMs,SubmitToInferenceMs,InferenceToPublishMs,PublishToControlMs,LocalObservationAgeMs,"
          << "Timestamp,Resolution,SourceWidth,SourceHeight,FPS,InferenceFPS,"
          << "DmlModel,DmlInputWidth,DmlInputHeight,DmlPreprocessMs,DmlTensorSetupMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs,"
          << "SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames,"
@@ -107,6 +196,8 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
          << "FinalMx,FinalMy,"
+         << "CommandSequence,CommandEnqueueSucceeded,CommandEnqueueNs,CommandSendAttempted,CommandSendSucceeded,CommandDeviceSendNs,CommandDroppedBeforeSend,"
+         << "CommandRequestedCountsX,CommandRequestedCountsY,CommandAppliedCountsX,CommandAppliedCountsY,CommandQueueAgeMs,"
          << "ProfileCalibrationEnabled,ProfileCalibrationValidX,ProfileCalibrationValidY,"
          << "ProfileCalibrationPixelsPerCountX,ProfileCalibrationPixelsPerCountY,"
          << "ProfileCalibrationDegreesPerCountX,ProfileCalibrationDegreesPerCountY,"
@@ -124,6 +215,10 @@ bool PipelineTracer::exportCSV(const std::string& path) const
             f.timestamp.time_since_epoch()).count();
 
         const AimPipelineFrameState& ap = f.aimPipeline;
+        const FrameTiming& timing = f.frameTiming;
+        const ViewCommandSample& command = f.commandSample;
+        const bool timingComplete = frameTimingComplete(timing);
+        const bool timingOrdered = frameTimingOrdered(timing);
         file << f.frameId << ','
              << BuildIdentity::backend() << ','
              << BuildIdentity::revision() << ','
@@ -145,6 +240,27 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << ap.control.requestedCountsX << ',' << ap.control.requestedCountsY << ','
              << ap.trajectoryOutput.outputCountsX << ',' << ap.trajectoryOutput.outputCountsY << ','
              << (ap.trajectoryOutput.commandSuppressed ? '1' : '0') << ','
+             << timing.frameSequence << ','
+             << steadyTimeNs(timing.backendReceiveTime) << ','
+             << steadyTimeNs(timing.captureSubmitTime) << ','
+             << steadyTimeNs(timing.inferenceStartTime) << ','
+             << steadyTimeNs(timing.inferencePublishTime) << ','
+             << steadyTimeNs(timing.controlTime) << ','
+             << (timing.sourceTimestampAvailable ? '1' : '0') << ','
+             << timing.sourceTimestamp << ','
+             << (timing.sourceTimecodeAvailable ? '1' : '0') << ','
+             << timing.sourceTimecode << ','
+             << (timing.sourceTimestampMapped ? '1' : '0') << ','
+             << timing.roiX << ',' << timing.roiY << ','
+             << timing.roiWidth << ',' << timing.roiHeight << ','
+             << (timingComplete ? '1' : '0') << ','
+             << (timingOrdered ? '1' : '0') << ','
+             << (timingComplete && !timingOrdered ? '1' : '0') << ','
+             << signedDurationMs(timing.backendReceiveTime, timing.captureSubmitTime) << ','
+             << signedDurationMs(timing.captureSubmitTime, timing.inferenceStartTime) << ','
+             << signedDurationMs(timing.inferenceStartTime, timing.inferencePublishTime) << ','
+             << signedDurationMs(timing.inferencePublishTime, timing.controlTime) << ','
+             << signedDurationMs(timing.backendReceiveTime, timing.controlTime) << ','
              << ms << ','
              << f.resolution << ','
              << f.sourceWidth << ',' << f.sourceHeight << ','
@@ -186,6 +302,16 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.requestedCountsX << ',' << f.requestedCountsY << ','
              << f.integralCountsX << ',' << f.integralCountsY << ','
              << f.finalMx << ',' << f.finalMy << ','
+             << command.sequence << ','
+             << (command.enqueueSucceeded ? '1' : '0') << ','
+             << steadyTimeNs(command.enqueueTime) << ','
+             << (command.sendAttempted ? '1' : '0') << ','
+             << (command.sendSucceeded ? '1' : '0') << ','
+             << steadyTimeNs(command.deviceSendTime) << ','
+             << (command.droppedBeforeSend ? '1' : '0') << ','
+             << command.requestedCountsX << ',' << command.requestedCountsY << ','
+             << command.appliedCountsX << ',' << command.appliedCountsY << ','
+             << signedDurationMs(command.enqueueTime, command.deviceSendTime) << ','
              << (f.profileCalibrationEnabled ? '1' : '0') << ','
              << (f.profileCalibrationValidX ? '1' : '0') << ','
              << (f.profileCalibrationValidY ? '1' : '0') << ','

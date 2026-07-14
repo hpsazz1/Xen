@@ -39,6 +39,8 @@ struct FrameContext
     uint32_t accumulatedFrames = 0;                   // 自从上次处理后累积的帧数
     bool hasLastPresentTime = false;                   // 是否存在上一次 Present 时间戳
     bool hasLastMouseUpdateTime = false;               // 是否存在上一次鼠标更新时间戳
+    int64_t lastPresentTime = 0;                       // DXGI原始QPC值，不直接参与本机年龄计算
+    int64_t lastMouseUpdateTime = 0;                   // DXGI原始鼠标更新时间
     bool pointerVisible = false;                       // 鼠标指针是否可见
     bool rectsCoalesced = false;                       // 脏矩形是否被合并
     uint32_t totalMetadataBufferSize = 0;              // 总元数据缓冲区大小
@@ -244,6 +246,8 @@ public:
         frameCtx.accumulatedFrames = frameInfo.AccumulatedFrames;
         frameCtx.hasLastPresentTime = frameInfo.LastPresentTime.QuadPart != 0;
         frameCtx.hasLastMouseUpdateTime = frameInfo.LastMouseUpdateTime.QuadPart != 0;
+        frameCtx.lastPresentTime = frameInfo.LastPresentTime.QuadPart;
+        frameCtx.lastMouseUpdateTime = frameInfo.LastMouseUpdateTime.QuadPart;
         frameCtx.pointerVisible = frameInfo.PointerPosition.Visible != FALSE;
         frameCtx.rectsCoalesced = frameInfo.RectsCoalesced != FALSE;
         frameCtx.totalMetadataBufferSize = frameInfo.TotalMetadataBufferSize;
@@ -438,7 +442,9 @@ cv::Mat DuplicationAPIScreenCapture::GetNextFrameCpu()
     }
 
     d3dContext->Unmap(stagingTextureCPU, 0);
-    RecordSourceFrame(0.0, screenWidth, screenHeight);
+    RecordSourceFrame(
+        0.0, screenWidth, screenHeight, FrameTiming::Clock::now(),
+        frameCtx.lastPresentTime, frameCtx.hasLastPresentTime);
     if (frameCtx.accumulatedFrames > 1)
         RecordSourceDroppedFrames(static_cast<uint64_t>(frameCtx.accumulatedFrames - 1));
     return cpuFrame;
@@ -461,6 +467,8 @@ static void SetDdaCaptureFrameInfo(DdaCaptureFrameInfo* outInfo, const FrameCont
     outInfo->accumulatedFrames = frameCtx.accumulatedFrames;
     outInfo->hasLastPresentTime = frameCtx.hasLastPresentTime;
     outInfo->hasLastMouseUpdateTime = frameCtx.hasLastMouseUpdateTime;
+    outInfo->lastPresentTime = frameCtx.lastPresentTime;
+    outInfo->lastMouseUpdateTime = frameCtx.lastMouseUpdateTime;
     outInfo->pointerVisible = frameCtx.pointerVisible;
     outInfo->rectsCoalesced = frameCtx.rectsCoalesced;
     outInfo->totalMetadataBufferSize = frameCtx.totalMetadataBufferSize;
@@ -625,7 +633,9 @@ bool DuplicationAPIScreenCapture::GetNextFrameGpu(
     }
 
     SetGpuCaptureStatus(status, GpuCaptureStatus::Captured);
-    RecordSourceFrame(0.0, screenWidth, screenHeight);
+    RecordSourceFrame(
+        0.0, screenWidth, screenHeight, FrameTiming::Clock::now(),
+        frameCtx.lastPresentTime, frameCtx.hasLastPresentTime);
     if (frameCtx.accumulatedFrames > 1)
         RecordSourceDroppedFrames(static_cast<uint64_t>(frameCtx.accumulatedFrames - 1));
     if (accumulatedFrames)

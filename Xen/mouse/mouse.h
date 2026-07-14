@@ -98,11 +98,16 @@ private:
 
     IMouseInput* mouseInput;  ///< 鼠标输入设备接口指针
 
-    /** @brief 向驱动程序发送鼠标移动数据 */
-    void sendMovementToDriver(int dx, int dy);
-
     /** @brief 鼠标移动指令结构 */
-    struct Move { int dx; int dy; };
+    struct Move
+    {
+        int dx = 0;
+        int dy = 0;
+        ViewCommandSample timing{};
+    };
+
+    /** @brief 向驱动程序发送鼠标移动数据并记录设备确认。 */
+    void sendMovementToDriver(Move move);
 
     // ==================== 移动指令队列 ====================
     std::queue<Move>              moveQueue;     ///< 移动指令队列
@@ -113,6 +118,7 @@ private:
     std::thread                   moveWorker;    ///< 移动工作线程
     std::atomic<bool>             workerStop{ false };  ///< 工作线程停止标志
     std::atomic<bool>             workerRunning{ true }; ///< 工作线程健康标志（异常退出时置false）
+    std::atomic<uint64_t>         moveSequence{ 0 };    ///< 所有设备移动请求共享的单调序号
 
     // ==================== 配置缓存 ====================
     // 缓存活跃游戏配置的静态值，避免每次鼠标移动都加锁查询 map
@@ -131,7 +137,7 @@ private:
     /** @brief 移动工作线程主循环 */
     void moveWorkerLoop();
     /** @brief 向队列添加移动指令 */
-    void queueMove(int dx, int dy);
+    ViewCommandSample queueMove(int dx, int dy);
 
 #if 0 // Trajectory simulation will be reintroduced only after the base stage is validated.
     // ==================== 轨迹模拟 ====================
@@ -259,7 +265,7 @@ public:
      */
     void moveMousePivot(
         const AimbotTarget& target,
-        std::chrono::steady_clock::time_point observationTime = {},
+        FrameTiming frameTiming = {},
         int targetTrackId = -1);
     /** @brief 相对移动鼠标 */
     void moveRelative(int dx, int dy);

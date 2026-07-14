@@ -140,18 +140,23 @@ void UDPCapture::SetUDPParams(const std::string& ip, int port)
 // 获取下一帧：从帧队列取出最早的一帧并返回
 cv::Mat UDPCapture::GetNextFrameCpu()
 {
+    return GetNextFrameTimed().image;
+}
+
+CapturedFrame UDPCapture::GetNextFrameTimed()
+{
     std::lock_guard<std::mutex> lock(frame_mutex_);
     NetworkFrame latest;
     uint64_t skipped = 0;
     if (!TakeLatestFrame(frame_queue_, latest, skipped))
-        return cv::Mat();
+        return {};
     if (skipped > 0)
     {
         dropped_frames_.fetch_add(static_cast<int>(skipped), std::memory_order_relaxed);
         RecordSourceDroppedFrames(skipped);
     }
     SetSourceDimensions(latest.sourceWidth, latest.sourceHeight);
-    return latest.image;
+    return { std::move(latest.image), latest.timing };
 }
 
 // UDP 接收线程：持续接收数据包，拼接 MJPEG 流并解码为 cv::Mat
@@ -210,12 +215,14 @@ void UDPCapture::ReceiveThread()
             {
                 if (!frame.empty())
                 {
+                    const auto receiveNow = FrameTiming::Clock::now();
                     const int encodedWidth = frame.cols;
                     const int encodedHeight = frame.rows;
                     const NetworkFrameGeometry geometry = ResolveConfiguredNetworkFrameGeometry(
                         encodedWidth, encodedHeight,
                         configured_source_width_, configured_source_height_);
-                    RecordSourceFrame(0.0, geometry.sourceWidth, geometry.sourceHeight);
+                    const uint64_t frameSequence = RecordSourceFrame(
+                        0.0, geometry.sourceWidth, geometry.sourceHeight, receiveNow);
                     const int cropWidth = std::min(width_, encodedWidth);
                     const int cropHeight = std::min(height_, encodedHeight);
                     const int cropX = std::max(0, (encodedWidth - cropWidth) / 2);
@@ -225,11 +232,21 @@ void UDPCapture::ReceiveThread()
                     if (cropWidth != width_ || cropHeight != height_)
                         cv::resize(detectionFrame, detectionFrame, cv::Size(width_, height_));
 
+                    FrameTiming timing;
+                    timing.backendReceiveTime = receiveNow;
+                    timing.frameSequence = frameSequence;
+                    timing.sourceWidth = geometry.sourceWidth;
+                    timing.sourceHeight = geometry.sourceHeight;
+                    timing.roiX = cropX;
+                    timing.roiY = cropY;
+                    timing.roiWidth = cropWidth;
+                    timing.roiHeight = cropHeight;
+
                     std::lock_guard<std::mutex> lock(frame_mutex_);
                     // UDP 与 NDI 使用相同的低延迟最新帧语义：新帧到达时替换尚未消费的旧帧。
                     const uint64_t superseded = ReplaceWithLatestFrame(
                         frame_queue_, NetworkFrame{
-                            std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight });
+                            std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight, timing });
                     if (superseded > 0)
                     {
                         dropped_frames_.fetch_add(static_cast<int>(superseded), std::memory_order_relaxed);

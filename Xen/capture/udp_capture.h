@@ -27,6 +27,7 @@ public:
     ~UDPCapture();
 
     cv::Mat GetNextFrameCpu() override;
+    CapturedFrame GetNextFrameTimed() override;
 
     // 初始化 UDP 接收端
     bool Initialize();
@@ -46,6 +47,7 @@ private:
         cv::Mat image;       ///< 已按 1:1 像素中心裁剪的检测帧
         int sourceWidth = 0; ///< 检测 ROI 对应的完整游戏 FOV 宽度
         int sourceHeight = 0;///< 检测 ROI 对应的完整游戏 FOV 高度
+        FrameTiming timing{};///< JPEG完整组帧后的本机时间，与图像一同进入最新帧队列
     };
     // UDP 接收线程
     void ReceiveThread();

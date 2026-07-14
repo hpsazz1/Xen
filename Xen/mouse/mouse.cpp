@@ -187,21 +187,32 @@ MouseThread::~MouseThread()
  * @param dx 水平移动量（鼠标计数）
  * @param dy 垂直移动量（鼠标计数）
  */
-void MouseThread::queueMove(int dx, int dy)
+ViewCommandSample MouseThread::queueMove(int dx, int dy)
 {
+    ViewCommandSample sample;
+    sample.requestedCountsX = dx;
+    sample.requestedCountsY = dy;
     if (dx == 0 && dy == 0)
     {
-        return;
+        return sample;
     }
 
     // Worker 线程已崩溃，丢弃移动指令避免队列无限积压
     if (!workerRunning.load())
-        return;
+        return sample;
 
     std::lock_guard lg(queueMtx);
-    if (moveQueue.size() >= queueLimit) moveQueue.pop();  // 队列满时丢弃最旧指令
-    moveQueue.push({ dx,dy });
+    if (moveQueue.size() >= queueLimit)
+    {
+        g_pipelineTracer.recordCommandDropped(moveQueue.front().timing.sequence);
+        moveQueue.pop();
+    }
+    sample.sequence = moveSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+    sample.enqueueTime = FrameTiming::Clock::now();
+    sample.enqueueSucceeded = true;
+    moveQueue.push({ dx, dy, sample });
     queueCv.notify_one();
+    return sample;
 }
 
 /**
@@ -230,7 +241,7 @@ void MouseThread::moveWorkerLoop()
                 Move m = moveQueue.front();
                 moveQueue.pop();
                 ul.unlock();                      // 发送时释放锁，允许继续入队
-                sendMovementToDriver(m.dx, m.dy);
+                sendMovementToDriver(std::move(m));
                 ul.lock();
             }
         }
@@ -821,10 +832,12 @@ std::pair<double, double> MouseThread::filter_target_position(
  * @param dx 水平移动量（鼠标计数）
  * @param dy 垂直移动量（鼠标计数）
  */
-void MouseThread::sendMovementToDriver(int dx, int dy)
+void MouseThread::sendMovementToDriver(Move move)
 {
-    if (dx == 0 && dy == 0)
+    move.timing.sendAttempted = true;
+    if (move.dx == 0 && move.dy == 0)
     {
+        g_pipelineTracer.recordCommandResult(move.timing);
         return;
     }
 
@@ -833,18 +846,25 @@ void MouseThread::sendMovementToDriver(int dx, int dy)
 
         if (!mouseInput)
         {
+            g_pipelineTracer.recordCommandResult(move.timing);
             return;
         }
 
-        if (!mouseInput->move(dx, dy))
+        if (!mouseInput->move(move.dx, move.dy))
         {
+            g_pipelineTracer.recordCommandResult(move.timing);
             return;
         }
     }
 
     const auto sendTime = std::chrono::steady_clock::now();
-    profileCalibrator.recordCommand(dx, dy, sendTime);
-    recordMotionCompensationStep(dx, dy, sendTime);
+    move.timing.deviceSendTime = sendTime;
+    move.timing.appliedCountsX = move.dx;
+    move.timing.appliedCountsY = move.dy;
+    move.timing.sendSucceeded = true;
+    profileCalibrator.recordCommand(move.dx, move.dy, sendTime);
+    recordMotionCompensationStep(move.dx, move.dy, sendTime);
+    g_pipelineTracer.recordCommandResult(move.timing);
 }
 
 PassiveProfileCalibrator::Snapshot MouseThread::getProfileCalibrationSnapshot() const
@@ -1074,13 +1094,14 @@ void MouseThread::moveMouse(const AimbotTarget& target)
  */
 void MouseThread::moveMousePivot(
     const AimbotTarget& target,
-    std::chrono::steady_clock::time_point observationTime,
+    FrameTiming frameTiming,
     int targetTrackId)
 {
     std::lock_guard lg(input_method_mutex);
 
     const double pivotX = target.pivotX;
     const double pivotY = target.pivotY;
+    const auto observationTime = frameTiming.backendReceiveTime;
 
     PipelineFrame traceFrame;
     PipelineFrame* pf = nullptr;
@@ -1145,11 +1166,21 @@ void MouseThread::moveMousePivot(
     const auto controlTime = std::chrono::steady_clock::now();
     const auto effectiveObservationTime = observationTime.time_since_epoch().count() == 0
         ? controlTime : observationTime;
+    frameTiming.observationTime = effectiveObservationTime;
+    frameTiming.controlTime = controlTime;
+    if (pf)
+    {
+        pf->frameTiming = frameTiming;
+        if (frameTiming.backendReceiveTime.time_since_epoch().count() != 0)
+            pf->observationAgeSec = std::chrono::duration<double>(
+                controlTime - frameTiming.backendReceiveTime).count();
+    }
     AimObservation shadowObservation;
-    shadowObservation.timing.observationTime = effectiveObservationTime;
-    shadowObservation.timing.controlTime = controlTime;
-    shadowObservation.timing.sourceWidth = ::screenWidth.load(std::memory_order_relaxed);
-    shadowObservation.timing.sourceHeight = ::screenHeight.load(std::memory_order_relaxed);
+    shadowObservation.timing = frameTiming;
+    if (shadowObservation.timing.sourceWidth <= 0)
+        shadowObservation.timing.sourceWidth = ::screenWidth.load(std::memory_order_relaxed);
+    if (shadowObservation.timing.sourceHeight <= 0)
+        shadowObservation.timing.sourceHeight = ::screenHeight.load(std::memory_order_relaxed);
     shadowObservation.trackId = targetTrackId;
     shadowObservation.classId = target.classId;
     shadowObservation.pivotX = pivotX;
@@ -1362,8 +1393,11 @@ void MouseThread::moveMousePivot(
         pf->settled = output.settled;
     }
 
+    ViewCommandSample commandSample;
     if (mx != 0 || my != 0)
-        queueMove(mx, my);
+        commandSample = queueMove(mx, my);
+    if (pf)
+        pf->commandSample = commandSample;
     if (pf)
         pf->queuedMoveCount = pendingMoveCount();
     commitTrace();
@@ -1649,8 +1683,13 @@ void MouseThread::moveMousePivot(
 void MouseThread::clearQueuedMoves()
 {
     std::lock_guard<std::mutex> lock(queueMtx);
+    while (!moveQueue.empty())
+    {
+        g_pipelineTracer.recordCommandDropped(moveQueue.front().timing.sequence);
+        moveQueue.pop();
+    }
     std::queue<Move> empty;
-    moveQueue.swap(empty);  // 高效清空队列
+    moveQueue.swap(empty);
 }
 
 size_t MouseThread::pendingMoveCount()

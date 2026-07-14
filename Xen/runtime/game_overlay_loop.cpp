@@ -315,7 +315,7 @@ void gameOverlayRenderLoop()
 
         std::vector<cv::Rect> boxesCopy;
         std::vector<int> classesCopy;
-        std::chrono::steady_clock::time_point detectionTimestamp{};
+        FrameTiming detectionTiming;
         int detectionVersion = lastDetectionVersion;
         {
             const unsigned fpsCap = (unsigned)config.game_overlay_max_fps;
@@ -325,9 +325,10 @@ void gameOverlayRenderLoop()
                 return detectionBuffer.version != lastDetectionVersion || gameOverlayShouldExit.load();
             });
             std::vector<float> dummyConf;
-            detectionBuffer.swapLocked(boxesCopy, classesCopy, dummyConf, detectionVersion, detectionTimestamp);
+            detectionBuffer.swapLocked(boxesCopy, classesCopy, dummyConf, detectionVersion, detectionTiming);
         }
         lastDetectionVersion = detectionVersion;
+        const auto detectionTimestamp = detectionTiming.backendReceiveTime;
 
         // ---- 获取风偏调试数据 ----
         std::vector<std::pair<double, double>> windTailPts;

@@ -7,6 +7,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "runtime/aim_pipeline_types.h"
@@ -23,7 +24,9 @@ struct PipelineFrame
     // ========== 帧标识 ==========
     int64_t                                   frameId = 0;   ///< 单调递增帧序号
     std::chrono::steady_clock::time_point     timestamp{};    ///< 记录时间戳
+    FrameTiming                              frameTiming{};   ///< 从捕获到控制消费的同帧时间契约
     AimPipelineFrameState                    aimPipeline{};   ///< 与旧链路同帧记录的P0影子状态
+    ViewCommandSample                        commandSample{}; ///< 请求入队至设备确认的命令生命周期
 
     // ========== Stage 1: 原始目标（tracker/sorter 输出的 pivot 坐标） ==========
     double rawPivotX = 0.0;    ///< 原始 pivot X（检测分辨率像素）
@@ -192,6 +195,10 @@ public:
     /** @brief 提交一条完整的帧记录到环形缓冲区。 */
     void commitFrame(PipelineFrame frame);
 
+    /** @brief 设备线程按命令序号异步回填成功、失败或队列淘汰结果。 */
+    void recordCommandResult(const ViewCommandSample& sample);
+    void recordCommandDropped(uint64_t sequence);
+
     // ========== 数据读取（覆盖层线程调用） ==========
 
     /** @brief 获取所有已记录帧的快照 */
@@ -217,6 +224,7 @@ private:
     size_t                    maxFrames = 300;     ///< 最大帧数
     std::atomic<int64_t>      frameCounter{ 0 };   ///< 全局帧序号
     std::atomic<bool>         enabled{ false };    ///< 是否启用
+    std::unordered_map<uint64_t, ViewCommandSample> pendingCommandResults; ///< 发送快于帧提交时的短期回填缓存
 };
 
 /** @brief 全局流水线追踪器单例 */

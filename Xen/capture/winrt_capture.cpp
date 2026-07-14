@@ -228,6 +228,9 @@ cv::Mat WinRTScreenCapture::GetNextFrameCpu()
         return cv::Mat();
     }
     captureWinrtFramesDrainedTotal.fetch_add(1, std::memory_order_relaxed);
+    const auto systemRelativeTime = lastFrame.SystemRelativeTime();
+    const int64_t systemRelativeTicks = systemRelativeTime.count();
+    const bool hasSystemRelativeTime = systemRelativeTicks != 0;
 
     const auto contentSize = lastFrame.ContentSize();
     if (contentSize.Width > 0 && contentSize.Height > 0 &&
@@ -309,7 +312,9 @@ cv::Mat WinRTScreenCapture::GetNextFrameCpu()
         std::memory_order_relaxed);
     captureWinrtFramesReturnedTotal.fetch_add(1, std::memory_order_relaxed);
 
-    RecordSourceFrame(0.0, screenWidth, screenHeight);
+    RecordSourceFrame(
+        0.0, screenWidth, screenHeight, FrameTiming::Clock::now(),
+        systemRelativeTicks, hasSystemRelativeTime);
     return cpuFrame;
 }
 

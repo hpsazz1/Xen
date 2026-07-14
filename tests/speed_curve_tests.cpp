@@ -6,6 +6,8 @@
 #include "runtime/video_replay_math.h"
 #include "runtime/view_motion_history.h"
 #include "debug/pipeline_tracer.h"
+#include "detector/detection_buffer.h"
+#include "capture/capture.h"
 #include "capture/ndi_frame_geometry.h"
 #include "capture/network_frame_geometry.h"
 #include "runtime/frame_rate_counter.h"
@@ -23,6 +25,25 @@
 namespace
 {
 int failures = 0;
+
+class TimedFakeCapture final : public IScreenCapture
+{
+public:
+    explicit TimedFakeCapture(FrameTiming::Clock::time_point receiveTime)
+        : receiveTime_(receiveTime)
+    {
+        SetSourceDimensions(1920, 1080);
+    }
+
+    cv::Mat GetNextFrameCpu() override
+    {
+        RecordSourceFrame(60.0, 1920, 1080, receiveTime_);
+        return cv::Mat(2, 3, CV_8UC3, cv::Scalar(0, 0, 0));
+    }
+
+private:
+    FrameTiming::Clock::time_point receiveTime_{};
+};
 
 void expectNear(double actual, double expected, double tolerance, const char* name)
 {
@@ -45,6 +66,70 @@ void expectTrue(bool condition, const char* name)
 
 int main()
 {
+    const auto timingBase = FrameTiming::Clock::time_point(std::chrono::seconds(10));
+    TimedFakeCapture fakeCapture(timingBase);
+    CapturedFrame captured = fakeCapture.GetNextFrameTimed();
+    expectTrue(!captured.image.empty() &&
+               captured.timing.backendReceiveTime == timingBase &&
+               captured.timing.frameSequence == 1,
+               "default capture timing follows the successful backend frame");
+    expectTrue(captured.timing.sourceWidth == 1920 &&
+               captured.timing.sourceHeight == 1080 &&
+               captured.timing.roiWidth == 3 && captured.timing.roiHeight == 2,
+               "default capture timing preserves source and roi dimensions");
+
+    std::queue<CapturedFrame> timedFrames;
+    CapturedFrame olderFrame;
+    olderFrame.timing.frameSequence = 10;
+    olderFrame.timing.backendReceiveTime = timingBase;
+    CapturedFrame newerFrame;
+    newerFrame.timing.frameSequence = 11;
+    newerFrame.timing.backendReceiveTime = timingBase + std::chrono::milliseconds(4);
+    expectTrue(ReplaceWithLatestFrame(timedFrames, std::move(olderFrame)) == 0,
+               "timed latest-frame queue accepts the first frame");
+    expectTrue(ReplaceWithLatestFrame(timedFrames, std::move(newerFrame)) == 1,
+               "timed latest-frame queue replaces the unconsumed frame");
+    CapturedFrame latestTimedFrame;
+    uint64_t skippedTimedFrames = 0;
+    expectTrue(TakeLatestFrame(timedFrames, latestTimedFrame, skippedTimedFrames) &&
+               latestTimedFrame.timing.frameSequence == 11 &&
+               latestTimedFrame.timing.backendReceiveTime == timingBase + std::chrono::milliseconds(4),
+               "latest-frame replacement moves image timing with the selected frame");
+
+    FrameTiming detectionTiming;
+    detectionTiming.backendReceiveTime = timingBase;
+    detectionTiming.captureSubmitTime = timingBase + std::chrono::milliseconds(1);
+    detectionTiming.inferenceStartTime = timingBase + std::chrono::milliseconds(2);
+    detectionTiming.frameSequence = 17;
+    DetectionBuffer localDetectionBuffer;
+    localDetectionBuffer.set(
+        { cv::Rect(1, 2, 3, 4) }, { 5 }, { 0.75f }, detectionTiming);
+    std::vector<cv::Rect> timingBoxes;
+    std::vector<int> timingClasses;
+    std::vector<float> timingConfidences;
+    int timingVersion = 0;
+    FrameTiming roundTripTiming;
+    {
+        std::lock_guard<std::mutex> lock(localDetectionBuffer.mutex);
+        localDetectionBuffer.swapLocked(
+            timingBoxes, timingClasses, timingConfidences, timingVersion, roundTripTiming);
+    }
+    expectTrue(timingVersion == 1 && roundTripTiming.frameSequence == 17 &&
+               roundTripTiming.backendReceiveTime == timingBase &&
+               roundTripTiming.captureSubmitTime == timingBase + std::chrono::milliseconds(1) &&
+               roundTripTiming.inferenceStartTime == timingBase + std::chrono::milliseconds(2) &&
+               roundTripTiming.inferencePublishTime >= roundTripTiming.inferenceStartTime,
+               "detection buffer round-trips the complete frame timing contract");
+    FrameTiming anomalousTiming = roundTripTiming;
+    anomalousTiming.inferencePublishTime = timingBase + std::chrono::milliseconds(5);
+    anomalousTiming.controlTime = timingBase + std::chrono::milliseconds(4);
+    expectTrue(frameTimingComplete(anomalousTiming) && !frameTimingOrdered(anomalousTiming),
+               "complete but out-of-order timing is marked anomalous");
+    const auto signedAnomalyMs = frameSignedDurationMs(
+        anomalousTiming.inferencePublishTime, anomalousTiming.controlTime);
+    expectTrue(signedAnomalyMs.has_value() && *signedAnomalyMs < 0.0,
+               "timing anomalies preserve signed negative duration instead of clipping to zero");
+
     AimObservation defaultObservation;
     expectTrue(!defaultObservation.valid && defaultObservation.trackId == -1,
                "new pipeline observation defaults are invalid and untracked");
@@ -235,19 +320,68 @@ int main()
                "disabled passive calibration ignores samples");
 
     PipelineTracer tracer;
+    tracer.setEnabled(true);
     tracer.setMaxFrames(10);
     PipelineFrame pending = tracer.beginFrame(320);
     pending.rawPivotX = 123.0;
     pending.finalMx = 17;
     pending.finalMy = -3;
     pending.aimPipeline = shadowFrame;
+    pending.frameTiming.backendReceiveTime = timingBase;
+    pending.frameTiming.captureSubmitTime = timingBase + std::chrono::milliseconds(1);
+    pending.frameTiming.inferenceStartTime = timingBase + std::chrono::milliseconds(2);
+    pending.frameTiming.inferencePublishTime = timingBase + std::chrono::milliseconds(5);
+    pending.frameTiming.controlTime = timingBase + std::chrono::milliseconds(7);
+    pending.frameTiming.frameSequence = 21;
+    pending.commandSample.sequence = 42;
+    pending.commandSample.requestedCountsX = 17;
+    pending.commandSample.requestedCountsY = -3;
+    pending.commandSample.enqueueTime = timingBase + std::chrono::milliseconds(8);
+    pending.commandSample.enqueueSucceeded = true;
     expectTrue(pending.finalMx == 17 && pending.finalMy == -3,
                "shadow diagnostics do not alter legacy final output");
     expectTrue(tracer.getFrames().empty(), "trace frame is invisible before commit");
     tracer.commitFrame(std::move(pending));
+    ViewCommandSample successfulCommand;
+    successfulCommand.sequence = 42;
+    successfulCommand.sendAttempted = true;
+    successfulCommand.sendSucceeded = true;
+    successfulCommand.appliedCountsX = 17;
+    successfulCommand.appliedCountsY = -3;
+    successfulCommand.deviceSendTime = timingBase + std::chrono::milliseconds(9);
+    tracer.recordCommandResult(successfulCommand);
     const auto committed = tracer.getFrames();
     expectTrue(committed.size() == 1, "trace frame commit count");
     expectNear(committed.front().rawPivotX, 123.0, 0.0, "trace frame committed value");
+    expectTrue(committed.front().commandSample.sendSucceeded &&
+               committed.front().commandSample.appliedCountsX == 17 &&
+               committed.front().commandSample.deviceSendTime ==
+                   timingBase + std::chrono::milliseconds(9),
+               "successful device command updates the matching trace frame");
+
+    PipelineFrame failedCommandFrame = tracer.beginFrame(320);
+    failedCommandFrame.commandSample.sequence = 43;
+    failedCommandFrame.commandSample.enqueueSucceeded = true;
+    tracer.commitFrame(std::move(failedCommandFrame));
+    ViewCommandSample failedCommand;
+    failedCommand.sequence = 43;
+    failedCommand.sendAttempted = true;
+    tracer.recordCommandResult(failedCommand);
+    auto commandFrames = tracer.getFrames();
+    expectTrue(commandFrames.back().commandSample.sendAttempted &&
+               !commandFrames.back().commandSample.sendSucceeded &&
+               commandFrames.back().commandSample.deviceSendTime.time_since_epoch().count() == 0,
+               "failed device command keeps send time and applied counts empty");
+
+    PipelineFrame droppedCommandFrame = tracer.beginFrame(320);
+    droppedCommandFrame.commandSample.sequence = 44;
+    droppedCommandFrame.commandSample.enqueueSucceeded = true;
+    tracer.commitFrame(std::move(droppedCommandFrame));
+    tracer.recordCommandDropped(44);
+    commandFrames = tracer.getFrames();
+    expectTrue(commandFrames.back().commandSample.droppedBeforeSend &&
+               !commandFrames.back().commandSample.sendAttempted,
+               "cleared or superseded queue command is marked dropped before send");
 
     const char* tracePath = "xen_basic_pipeline_test.csv";
     expectTrue(tracer.exportCSV(tracePath), "basic pipeline csv export");
@@ -284,6 +418,13 @@ int main()
     expectTrue(traceHeader.find(
         "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed") != std::string::npos,
         "basic pipeline records same-frame new pipeline mode diagnostics");
+    expectTrue(traceHeader.find(
+        "CaptureFrameSequence,BackendReceiveNs,CaptureSubmitNs,InferenceStartNs,InferencePublishNs,ControlTimeNs") != std::string::npos &&
+        traceHeader.find("BackendQueueMs,SubmitToInferenceMs,InferenceToPublishMs,PublishToControlMs,LocalObservationAgeMs") != std::string::npos,
+        "basic pipeline records complete local timing stages and signed segment ages");
+    expectTrue(traceHeader.find(
+        "CommandSequence,CommandEnqueueSucceeded,CommandEnqueueNs,CommandSendAttempted,CommandSendSucceeded,CommandDeviceSendNs,CommandDroppedBeforeSend") != std::string::npos,
+        "basic pipeline records command enqueue and device acknowledgement lifecycle");
     expectTrue(traceHeader.find(
         "ErrorMotion,SettleMotionThreshold,MovingInsideSettle") != std::string::npos,
         "basic pipeline reports settle motion release diagnostics");

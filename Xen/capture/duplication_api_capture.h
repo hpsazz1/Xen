@@ -21,6 +21,8 @@ struct DdaCaptureFrameInfo
     uint32_t accumulatedFrames = 0;           // 累积帧数
     bool hasLastPresentTime = false;          // 是否有上次呈现时间
     bool hasLastMouseUpdateTime = false;      // 是否有上次鼠标更新时间
+    int64_t lastPresentTime = 0;              // DXGI原始LastPresentTime，未映射到steady_clock
+    int64_t lastMouseUpdateTime = 0;          // DXGI原始LastMouseUpdateTime
     bool pointerVisible = false;              // 鼠标指针是否可见
     bool rectsCoalesced = false;              // 脏矩形是否已合并
     uint32_t totalMetadataBufferSize = 0;     // 元数据缓冲区总大小

@@ -13,6 +13,14 @@
 #include <cstdint>
 
 #include "runtime/frame_rate_counter.h"
+#include "runtime/aim_pipeline_types.h"
+
+/** @brief 捕获图像与其本机时间/源元数据的不可分割快照。 */
+struct CapturedFrame
+{
+    cv::Mat image;
+    FrameTiming timing{};
+};
 
 /**
  * @brief 各采集后端统一发布的输入源诊断
@@ -78,6 +86,18 @@ public:
     virtual ~IScreenCapture() {}
     // 获取下一帧（CPU 内存），由子类实现
     virtual cv::Mat GetNextFrameCpu() = 0;
+    // 获取带时间契约的CPU帧。网络后端覆盖此方法以保证队列中的图像与到达时间严格配对。
+    virtual CapturedFrame GetNextFrameTimed()
+    {
+        CapturedFrame frame;
+        frame.image = GetNextFrameCpu();
+        if (frame.image.empty())
+            return frame;
+        frame.timing = GetLastSourceFrameTiming();
+        frame.timing.roiWidth = frame.image.cols;
+        frame.timing.roiHeight = frame.image.rows;
+        return frame;
+    }
     // 获取后端输入侧统计；与捕获处理 FPS、检测发布 FPS 分层展示。
     virtual CaptureSourceDiagnostics GetSourceDiagnostics() const
     {
@@ -105,6 +125,12 @@ public:
         return width > 0 && height > 0;
     }
 
+    /** @brief 获取最近成功取得帧的本机时间和序号；GPU DDA路径在返回后立即读取。 */
+    FrameTiming GetLastCapturedFrameTiming() const
+    {
+        return GetLastSourceFrameTiming();
+    }
+
 protected:
     // 设置源图像尺寸（供子类调用）
     void SetSourceDimensions(int width, int height)
@@ -114,9 +140,16 @@ protected:
     }
 
     /** @brief 记录一个真实到达或成功取得的源帧。仅允许对应后端的单一生产线程调用。 */
-    void RecordSourceFrame(double declaredFps, int encodedWidth, int encodedHeight)
+    uint64_t RecordSourceFrame(
+        double declaredFps,
+        int encodedWidth,
+        int encodedHeight,
+        FrameTiming::Clock::time_point receiveTime = {},
+        int64_t sourceTimestamp = 0,
+        bool sourceTimestampAvailable = false)
     {
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = receiveTime.time_since_epoch().count() != 0
+            ? receiveTime : FrameTiming::Clock::now();
         if (declaredFps > 0.0)
             sourceDeclaredFps_.store(declaredFps, std::memory_order_relaxed);
         if (encodedWidth > 0 && encodedHeight > 0)
@@ -129,6 +162,26 @@ protected:
         sourceLastFrameNs_.store(
             std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(),
             std::memory_order_relaxed);
+        sourceTimestamp_.store(sourceTimestamp, std::memory_order_relaxed);
+        sourceTimestampAvailable_.store(sourceTimestampAvailable, std::memory_order_relaxed);
+        return sourceFrameSequence_.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+
+    /** @brief 读取最近一次由当前线程成功取得的源帧时间；网络后端不得用它替代逐帧队列时间。 */
+    FrameTiming GetLastSourceFrameTiming() const
+    {
+        FrameTiming timing;
+        const int64_t receiveNs = sourceLastFrameNs_.load(std::memory_order_relaxed);
+        if (receiveNs > 0)
+            timing.backendReceiveTime = FrameTiming::Clock::time_point(
+                std::chrono::nanoseconds(receiveNs));
+        timing.frameSequence = sourceFrameSequence_.load(std::memory_order_relaxed);
+        timing.sourceTimestamp = sourceTimestamp_.load(std::memory_order_relaxed);
+        timing.sourceTimestampAvailable = sourceTimestampAvailable_.load(std::memory_order_relaxed);
+        timing.sourceTimestampMapped = false;
+        timing.sourceWidth = sourceWidth_;
+        timing.sourceHeight = sourceHeight_;
+        return timing;
     }
 
     /** @brief 累加应用淘汰或采集 API 明确报告的遗漏帧。 */
@@ -149,6 +202,9 @@ private:
     std::atomic<int> sourceEncodedWidth_{ 0 };
     std::atomic<int> sourceEncodedHeight_{ 0 };
     std::atomic<int64_t> sourceLastFrameNs_{ 0 };
+    std::atomic<uint64_t> sourceFrameSequence_{ 0 };
+    std::atomic<int64_t> sourceTimestamp_{ 0 };
+    std::atomic<bool> sourceTimestampAvailable_{ false };
 };
 
 #ifdef USE_CUDA

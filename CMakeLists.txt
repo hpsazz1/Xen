@@ -410,7 +410,15 @@ if(BUILD_TESTING)
     )
     set_target_properties(xen_algorithm_tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
-    target_include_directories(xen_algorithm_tests PRIVATE "${SRC_DIR}")
+    target_include_directories(xen_algorithm_tests PRIVATE
+        "${SRC_DIR}"
+        "${AIMBOT_OPENCV_INCLUDE_DIR}")
+    target_link_libraries(xen_algorithm_tests PRIVATE "${AIMBOT_OPENCV_LIBRARY}")
+    add_custom_command(TARGET xen_algorithm_tests POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${AIMBOT_OPENCV_DLL}"
+            "$<TARGET_FILE_DIR:xen_algorithm_tests>"
+        COMMENT "Copying OpenCV runtime for algorithm timing tests")
     target_compile_features(xen_algorithm_tests PRIVATE cxx_std_17)
     if(MSVC)
         target_compile_options(xen_algorithm_tests PRIVATE /utf-8 /W4 /permissive- /EHsc)

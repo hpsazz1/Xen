@@ -1008,12 +1008,12 @@ int DirectMLDetector::getNumberOfClasses()
  *
  * @param detection_frame 用于检测的图像帧（已缩放到检测分辨率）
  * @param source_frame     原始源帧（用于数据采集和覆盖层绘制）
- * @param frameTimestamp   帧时间戳
+ * @param frameTiming      捕获与提交阶段时间契约
  */
 void DirectMLDetector::processFrame(
     const cv::Mat& detection_frame,
     const cv::Mat& source_frame,
-    std::chrono::steady_clock::time_point frameTimestamp)
+    FrameTiming frameTiming)
 {
     if (detectionPaused)
     {
@@ -1023,9 +1023,7 @@ void DirectMLDetector::processFrame(
     std::unique_lock<std::mutex> lock(inferenceMutex);
     currentFrame = detection_frame;
     currentSourceFrame = source_frame.empty() ? detection_frame : source_frame;
-    currentFrameTimestamp = (frameTimestamp.time_since_epoch().count() != 0)
-        ? frameTimestamp
-        : std::chrono::steady_clock::now();
+    currentFrameTiming = frameTiming;
     frameReady = true;
     inferenceCV.notify_one();
 }
@@ -1088,7 +1086,7 @@ void DirectMLDetector::dmlInferenceThread()
             // 等待并获取新帧
             cv::Mat frame;
             cv::Mat sourceFrame;
-            std::chrono::steady_clock::time_point frameTimestamp{};
+            FrameTiming frameTiming;
             bool hasNewFrame = false;
             {
                 std::unique_lock<std::mutex> lock(inferenceMutex);
@@ -1101,7 +1099,8 @@ void DirectMLDetector::dmlInferenceThread()
                 {
                     frame = std::move(currentFrame);
                     sourceFrame = std::move(currentSourceFrame);
-                    frameTimestamp = currentFrameTimestamp;
+                    frameTiming = currentFrameTiming;
+                    frameTiming.inferenceStartTime = FrameTiming::Clock::now();
                     frameReady = false;
                     hasNewFrame = true;
                 }
@@ -1135,7 +1134,7 @@ void DirectMLDetector::dmlInferenceThread()
                     confidences.push_back(d.confidence);
                 }
 
-                detectionBuffer.set(boxes, classes, confidences, frameTimestamp);
+                detectionBuffer.set(boxes, classes, confidences, frameTiming);
 
                 // 数据采集
                 const cv::Mat& frameForCollection = sourceFrame.empty() ? frame : sourceFrame;

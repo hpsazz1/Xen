@@ -21,6 +21,7 @@
 #include <cuda_runtime_api.h>
 
 #include "postProcess.h"
+#include "runtime/aim_pipeline_types.h"
 
 class TrtDetector
 {
@@ -33,11 +34,11 @@ public:
     void processFrame(
         const cv::Mat& detection_frame,
         const cv::Mat& source_frame = cv::Mat(),
-        std::chrono::steady_clock::time_point frameTimestamp = {});
+        FrameTiming frameTiming = {});
     // 提交 GPU 帧进行推理（异步，避免 CPU-GPU 传输）
     void processFrameGpu(
         const cv::cuda::GpuMat& frame,
-        std::chrono::steady_clock::time_point frameTimestamp = {});
+        FrameTiming frameTiming = {});
     // 推理线程入口
     void inferenceThread();
     // 请求停止推理线程
@@ -87,7 +88,7 @@ private:
     cv::Mat currentFrame;
     cv::Mat currentSourceFrame;
     cv::cuda::GpuMat currentFrameGpu;
-    std::chrono::steady_clock::time_point currentFrameTimestamp{};
+    FrameTiming currentFrameTiming{};
     bool frameReady;
 
     // 待处理帧类型枚举

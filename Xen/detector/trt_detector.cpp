@@ -692,12 +692,12 @@ void TrtDetector::loadEngine(const std::string& modelFile)
  * @param detection_frame  待检测的 BGR 图像
  * @param source_frame     原始分辨率源图像（用于数据收集），
  *                         若为空则使用 detection_frame
- * @param frameTimestamp   帧的时间戳
+ * @param frameTiming      捕获与提交阶段时间契约
  */
 void TrtDetector::processFrame(
     const cv::Mat& detection_frame,
     const cv::Mat& source_frame,
-    std::chrono::steady_clock::time_point frameTimestamp)
+    FrameTiming frameTiming)
 {
     if (detectionPaused)
     {
@@ -709,9 +709,7 @@ void TrtDetector::processFrame(
     currentFrame = detection_frame;
     currentSourceFrame = source_frame.empty() ? detection_frame : source_frame;
     currentFrameGpu.release();
-    currentFrameTimestamp = (frameTimestamp.time_since_epoch().count() != 0)
-        ? frameTimestamp
-        : std::chrono::steady_clock::now();
+    currentFrameTiming = frameTiming;
     pendingFrameType = PendingFrameType::Cpu;
     frameReady = true;
     inferenceCV.notify_one();
@@ -722,11 +720,11 @@ void TrtDetector::processFrame(
  * 直接使用 GPU 上的 GpuMat，避免 CPU-GPU 传输，适用于已在 GPU 上的帧
  *
  * @param frame           位于 GPU 上的待检测图像
- * @param frameTimestamp  帧的时间戳
+ * @param frameTiming     捕获与提交阶段时间契约
  */
 void TrtDetector::processFrameGpu(
     const cv::cuda::GpuMat& frame,
-    std::chrono::steady_clock::time_point frameTimestamp)
+    FrameTiming frameTiming)
 {
     if (detectionPaused)
     {
@@ -738,9 +736,7 @@ void TrtDetector::processFrameGpu(
     currentFrame.release();
     currentSourceFrame.release();
     currentFrameGpu = frame;
-    currentFrameTimestamp = (frameTimestamp.time_since_epoch().count() != 0)
-        ? frameTimestamp
-        : std::chrono::steady_clock::now();
+    currentFrameTiming = frameTiming;
     pendingFrameType = PendingFrameType::Gpu;
     frameReady = true;
     inferenceCV.notify_one();
@@ -944,7 +940,7 @@ void TrtDetector::inferenceThread()
         cv::Mat frame;
         cv::Mat sourceFrame;
         cv::cuda::GpuMat frameGpu;
-        std::chrono::steady_clock::time_point frameTimestamp{};
+        FrameTiming frameTiming;
         PendingFrameType frameType = PendingFrameType::None;
         bool hasNewFrame = false;
 
@@ -958,7 +954,8 @@ void TrtDetector::inferenceThread()
             if (frameReady)
             {
                 frameType = pendingFrameType;
-                frameTimestamp = currentFrameTimestamp;
+                frameTiming = currentFrameTiming;
+                frameTiming.inferenceStartTime = FrameTiming::Clock::now();
                 if (frameType == PendingFrameType::Gpu)
                 {
                     frameGpu = currentFrameGpu;
@@ -1101,7 +1098,7 @@ void TrtDetector::inferenceThread()
                     confidences.push_back(det.confidence);
                 }
 
-                detectionBuffer.set(boxes, classes, confidences, frameTimestamp);
+                detectionBuffer.set(boxes, classes, confidences, frameTiming);
 
                 if (hasGpuFrame)
                 {

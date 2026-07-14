@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "postProcess.h"
+#include "runtime/aim_pipeline_types.h"
 
 class DirectMLDetector
 {
@@ -48,7 +49,7 @@ public:
     void processFrame(
         const cv::Mat& detection_frame,
         const cv::Mat& source_frame = cv::Mat(),
-        std::chrono::steady_clock::time_point frameTimestamp = {});
+        FrameTiming frameTiming = {});
 
     int getNumberOfClasses();
     bool isReady() const;
@@ -94,7 +95,7 @@ private:
     int activeInputHeight = 0;       // 最近会话实际使用的模型输入高度
     cv::Mat currentFrame;
     cv::Mat currentSourceFrame;
-    std::chrono::steady_clock::time_point currentFrameTimestamp{};
+    FrameTiming currentFrameTiming{};
     bool frameReady = false;
 
     bool initializeModel(const std::string& model_path);

@@ -928,7 +928,7 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 
             cv::Mat screenshotCpu;
             cv::Mat detectionFrame;
-            std::chrono::steady_clock::time_point frameTimestamp{};
+            FrameTiming frameTiming;
             bool frameSubmittedToDetector = false;
             bool skipCpuFallbackThisFrame = false;
             bool keepCaptureAliveThisFrame = false;
@@ -1013,8 +1013,11 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                         captureGpuAccumulatedFramesTotal.fetch_add(accumulated, std::memory_order_relaxed);
                         captureGpuMissedFramesTotal.fetch_add(missed, std::memory_order_relaxed);
                         countDdaFrameInfo(ddaFrameInfo);
-                        frameTimestamp = std::chrono::steady_clock::now();
-                        trt_detector.processFrameGpu(screenshotGpu, frameTimestamp);
+                        frameTiming = duplicationCapture->GetLastCapturedFrameTiming();
+                        frameTiming.roiWidth = screenshotGpu.cols;
+                        frameTiming.roiHeight = screenshotGpu.rows;
+                        frameTiming.captureSubmitTime = FrameTiming::Clock::now();
+                        trt_detector.processFrameGpu(screenshotGpu, frameTiming);
                         cudaDiag.gpuSubmitted++;
                         frameSubmittedToDetector = true;
 
@@ -1084,8 +1087,9 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                 }
 #endif
                 // 从捕获后端获取 CPU 帧
-                screenshotCpu = capturer->GetNextFrameCpu();
-                frameTimestamp = std::chrono::steady_clock::now();
+                CapturedFrame capturedFrame = capturer->GetNextFrameTimed();
+                screenshotCpu = std::move(capturedFrame.image);
+                frameTiming = capturedFrame.timing;
 
                 // CPU 帧为空时的处理
                 if (screenshotCpu.empty())
@@ -1145,6 +1149,8 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
                     {
                         screenshotCpu = centered;
                     }
+                    frameTiming.roiWidth = screenshotCpu.cols;
+                    frameTiming.roiHeight = screenshotCpu.rows;
                 }
 
                 detectionFrame = screenshotCpu;
@@ -1230,13 +1236,15 @@ void captureThread(int CAPTURE_WIDTH, int CAPTURE_HEIGHT)
 #ifdef USE_CUDA
                 if (currentCfg.backend == "TRT")
                 {
-                    trt_detector.processFrame(detectionFrame, screenshotCpu, frameTimestamp);
+                    frameTiming.captureSubmitTime = FrameTiming::Clock::now();
+                    trt_detector.processFrame(detectionFrame, screenshotCpu, frameTiming);
                     cudaDiag.trtCpuSubmitted++;
                 }
 #else
                 if (dml_detector)
                 {
-                    dml_detector->processFrame(detectionFrame, screenshotCpu, frameTimestamp);
+                    frameTiming.captureSubmitTime = FrameTiming::Clock::now();
+                    dml_detector->processFrame(detectionFrame, screenshotCpu, frameTiming);
                 }
 #endif
             }

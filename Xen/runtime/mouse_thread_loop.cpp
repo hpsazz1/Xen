@@ -104,7 +104,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
     // 当前帧的检测类别列表
     std::vector<int> classes;
     // 当前帧检测的时间戳
-    std::chrono::steady_clock::time_point detectionTimestamp{};
+    FrameTiming detectionTiming;
     // 基础观测锁定器：不做速度预测或丢失滑行
     BasicTargetTracker motionLibTracker;
     // 当前选中的瞄准目标（可选）
@@ -217,7 +217,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
             if (detectionBuffer.version > lastVersion)
             {
-                detectionBuffer.swapLocked(boxes, classes, confidences, lastVersion, detectionTimestamp);
+                detectionBuffer.swapLocked(boxes, classes, confidences, lastVersion, detectionTiming);
                 hasNewDetection = true;
             }
         }
@@ -275,7 +275,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 motionLibTracker.update(
                     boxes, classes, confidences,
                     detectionResolution, detectionResolution,
-                    disableHeadshot, detectionTimestamp);
+                    disableHeadshot, detectionTiming.backendReceiveTime);
 
                 lastTrackerUpdate = std::chrono::steady_clock::now();
                 {
@@ -365,7 +365,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
             // 有有效目标且本帧有观测：执行瞄准移动和自动射击
             if (activeTarget && hasAimObservation)
             {
-                mouseThread.moveMousePivot(*activeTarget, detectionTimestamp, activeTrackId);
+                mouseThread.moveMousePivot(*activeTarget, detectionTiming, activeTrackId);
 
                 if (autoShoot)
                 {

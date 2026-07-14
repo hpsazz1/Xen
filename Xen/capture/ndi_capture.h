@@ -40,6 +40,7 @@ public:
     ~NDICapture();
 
     cv::Mat GetNextFrameCpu() override;
+    CapturedFrame GetNextFrameTimed() override;
 
     // 初始化 NDI 接收器
     bool Initialize();
@@ -63,6 +64,7 @@ private:
         cv::Mat image;       ///< 已按 1:1 像素中心裁剪的检测帧
         int sourceWidth = 0; ///< NDI 视频帧报告的完整传输宽度
         int sourceHeight = 0;///< NDI 视频帧报告的完整传输高度
+        FrameTiming timing{};///< 与本图像同队列移动的本机到达时间和协议原值
     };
     // NDI 接收线程
     void ReceiveThread();

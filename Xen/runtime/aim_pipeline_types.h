@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 
 // P0-0 的运行模式只描述新链路的生命周期，不改变现有 r30 输出。
 enum class AimPipelineMode
@@ -34,10 +35,50 @@ struct FrameTiming
     Clock::time_point observationTime{};
     Clock::time_point controlTime{};
     uint64_t frameSequence = 0;
+    int64_t sourceTimestamp = 0;
+    int64_t sourceTimecode = 0;
     int sourceWidth = 0;
     int sourceHeight = 0;
+    int roiX = 0;
+    int roiY = 0;
+    int roiWidth = 0;
+    int roiHeight = 0;
+    bool sourceTimestampAvailable = false;
+    bool sourceTimecodeAvailable = false;
     bool sourceTimestampMapped = false;
 };
+
+inline bool frameTimeKnown(FrameTiming::Clock::time_point time)
+{
+    return time.time_since_epoch().count() != 0;
+}
+
+inline bool frameTimingComplete(const FrameTiming& timing)
+{
+    return frameTimeKnown(timing.backendReceiveTime) &&
+        frameTimeKnown(timing.captureSubmitTime) &&
+        frameTimeKnown(timing.inferenceStartTime) &&
+        frameTimeKnown(timing.inferencePublishTime) &&
+        frameTimeKnown(timing.controlTime);
+}
+
+inline bool frameTimingOrdered(const FrameTiming& timing)
+{
+    return frameTimingComplete(timing) &&
+        timing.backendReceiveTime <= timing.captureSubmitTime &&
+        timing.captureSubmitTime <= timing.inferenceStartTime &&
+        timing.inferenceStartTime <= timing.inferencePublishTime &&
+        timing.inferencePublishTime <= timing.controlTime;
+}
+
+inline std::optional<double> frameSignedDurationMs(
+    FrameTiming::Clock::time_point start,
+    FrameTiming::Clock::time_point end)
+{
+    if (!frameTimeKnown(start) || !frameTimeKnown(end))
+        return std::nullopt;
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
 
 // 统一目标观测契约；P0-0 只传递原始值，不在此处进行角度转换或滤波。
 struct AimObservation
@@ -65,7 +106,10 @@ struct ViewCommandSample
     int appliedCountsY = 0;
     FrameTiming::Clock::time_point enqueueTime{};
     FrameTiming::Clock::time_point deviceSendTime{};
+    bool enqueueSucceeded = false;
+    bool sendAttempted = false;
     bool sendSucceeded = false;
+    bool droppedBeforeSend = false;
 };
 
 // 后续 P0-2/P0-3 填充角度、角速度及统计量；当前阶段保持无效，避免伪造新估计。

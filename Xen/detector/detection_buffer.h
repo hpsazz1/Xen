@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <opencv2/opencv.hpp>
+#include "runtime/aim_pipeline_types.h"
 #include "runtime/frame_rate_counter.h"
 
 /**
@@ -19,8 +20,7 @@
  *   boxes          - 检测框列表，每个框用 cv::Rect 表示 (x, y, width, height)
  *   classes        - 类别 ID 列表，与 boxes 一一对应（如 0=玩家, 1=头部）
  *   confidences    - 置信度列表，与 boxes 一一对应，范围为 [0.0, 1.0]
- *   frameTimestamp - 检测帧的时间戳（输入帧的采集时间）
- *   publishTimestamp - 结果发布的时间戳（检测完成写入缓冲区的时间）
+ *   timing         - 捕获、提交、推理开始和发布的完整本机时间契约
  */
 struct DetectionBuffer
 {
@@ -30,8 +30,7 @@ struct DetectionBuffer
     std::vector<cv::Rect> boxes;
     std::vector<int> classes;
     std::vector<float> confidences;
-    std::chrono::steady_clock::time_point frameTimestamp{};
-    std::chrono::steady_clock::time_point publishTimestamp{};
+    FrameTiming timing{};
     FrameRateCounter publishFpsCounter; ///< 只按真实检测结果发布事件统计，不使用线程轮询次数
 
     /**
@@ -41,7 +40,7 @@ struct DetectionBuffer
      */
     void set(const std::vector<cv::Rect>& newBoxes, const std::vector<int>& newClasses)
     {
-        set(newBoxes, newClasses, std::vector<float>(), {});
+        set(newBoxes, newClasses, std::vector<float>(), FrameTiming{});
     }
 
     /**
@@ -50,21 +49,21 @@ struct DetectionBuffer
      * @param newBoxes          检测框列表
      * @param newClasses        类别 ID 列表
      * @param newConfidences    置信度列表
-     * @param newFrameTimestamp 输入帧的时间戳（如果为默认值则使用当前时间）
+     * @param newTiming         与输入图像同帧传递的时间契约
      */
     void set(
         const std::vector<cv::Rect>& newBoxes,
         const std::vector<int>& newClasses,
         const std::vector<float>& newConfidences,
-        std::chrono::steady_clock::time_point newFrameTimestamp = {})
+        FrameTiming newTiming = {})
     {
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(mutex);
         boxes = newBoxes;
         classes = newClasses;
         confidences = newConfidences;
-        frameTimestamp = (newFrameTimestamp.time_since_epoch().count() != 0) ? newFrameTimestamp : now;
-        publishTimestamp = now;
+        newTiming.inferencePublishTime = now;
+        timing = newTiming;
         publishFpsCounter.addFrame(now);
         ++version;
         cv.notify_all();
@@ -89,8 +88,7 @@ struct DetectionBuffer
         boxes.clear();
         classes.clear();
         confidences.clear();
-        frameTimestamp = now;
-        publishTimestamp = now;
+        timing = {};
         publishFpsCounter.reset(now);
         ++version;
         cv.notify_all();
@@ -102,18 +100,16 @@ struct DetectionBuffer
      * @param outBoxes              [输出] 检测框列表
      * @param outClasses            [输出] 类别 ID 列表
      * @param outVersion            [输出] 当前版本号
-     * @param outFrameTimestamp     [输出] 输入帧时间戳（可选）
-     * @param outPublishTimestamp   [输出] 结果发布时间戳（可选）
+     * @param outTiming             [输出] 完整时间契约（可选）
      */
     void get(
         std::vector<cv::Rect>& outBoxes,
         std::vector<int>& outClasses,
         int& outVersion,
-        std::chrono::steady_clock::time_point* outFrameTimestamp = nullptr,
-        std::chrono::steady_clock::time_point* outPublishTimestamp = nullptr)
+        FrameTiming* outTiming = nullptr)
     {
         std::vector<float> ignoredConfidences;
-        get(outBoxes, outClasses, ignoredConfidences, outVersion, outFrameTimestamp, outPublishTimestamp);
+        get(outBoxes, outClasses, ignoredConfidences, outVersion, outTiming);
     }
 
     /**
@@ -123,26 +119,22 @@ struct DetectionBuffer
      * @param outClasses            [输出] 类别 ID 列表
      * @param outConfidences        [输出] 置信度列表
      * @param outVersion            [输出] 当前版本号
-     * @param outFrameTimestamp     [输出] 输入帧时间戳（可选）
-     * @param outPublishTimestamp   [输出] 结果发布时间戳（可选）
+     * @param outTiming             [输出] 完整时间契约（可选）
      */
     void get(
         std::vector<cv::Rect>& outBoxes,
         std::vector<int>& outClasses,
         std::vector<float>& outConfidences,
         int& outVersion,
-        std::chrono::steady_clock::time_point* outFrameTimestamp = nullptr,
-        std::chrono::steady_clock::time_point* outPublishTimestamp = nullptr)
+        FrameTiming* outTiming = nullptr)
     {
         std::lock_guard<std::mutex> lock(mutex);
         outBoxes = boxes;
         outClasses = classes;
         outConfidences = confidences;
         outVersion = version;
-        if (outFrameTimestamp)
-            *outFrameTimestamp = frameTimestamp;
-        if (outPublishTimestamp)
-            *outPublishTimestamp = publishTimestamp;
+        if (outTiming)
+            *outTiming = timing;
     }
 
     /**
@@ -153,19 +145,19 @@ struct DetectionBuffer
      * @param outClasses        [输出] 类别 ID 列表
      * @param outConfidences    [输出] 置信度列表
      * @param outVersion        [输出] 当前版本号
-     * @param outFrameTimestamp [输出] 输入帧时间戳
+     * @param outTiming         [输出] 完整时间契约
      */
     void swapLocked(
         std::vector<cv::Rect>& outBoxes,
         std::vector<int>& outClasses,
         std::vector<float>& outConfidences,
         int& outVersion,
-        std::chrono::steady_clock::time_point& outFrameTimestamp)
+        FrameTiming& outTiming)
     {
         std::swap(outBoxes, boxes);
         std::swap(outClasses, classes);
         std::swap(outConfidences, confidences);
         outVersion = version;
-        outFrameTimestamp = frameTimestamp;
+        outTiming = timing;
     }
 };
