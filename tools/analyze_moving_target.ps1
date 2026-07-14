@@ -119,6 +119,9 @@ function Get-ReversalMetrics {
             $lastConfirmedIndex = $candidateStart
         }
         $candidateCount = 0
+        # 确认一次方向后必须清空候选方向；否则下一帧会沿用旧方向并让
+        # candidateStart=-1 参与索引，导致反转起点回跳到文件末尾。
+        $candidateDirection = 0
         $candidateStart = -1
     }
 
@@ -354,6 +357,10 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         RecoveredReversals = $recoveredCount
         RecoveryMeanMs = if ($recoveredCount -eq 0) { $null } else {
             [math]::Round($weightedRecoveryTotal / $recoveredCount, 1)
+        }
+        RecoveryP95Ms = if ($recoveredCount -eq 0) { $null } else {
+            # 多试次场景取各试次恢复P95的最大值，避免把高频反转的最差试次平均掉。
+            [math]::Round([double](($group | Measure-Object RecoveryP95Ms -Maximum).Maximum), 1)
         }
         MaxQueuedMoves = [int]($group | Measure-Object MaxQueuedMoves -Maximum).Maximum
         SourceGeometry = $group[0].SourceGeometry

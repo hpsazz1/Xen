@@ -48,6 +48,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 1 $reverseTrials[0].ReversalCount 'Persistent tracking-error side reversal must be counted.'
     Assert-Equal 1 $reverseTrials[0].RecoveredReversals 'Reversal recovery inside the radius must be counted.'
     Assert-Equal 10 $reverseTrials[0].RecoveryMeanMs 'Recovery time must start at the first opposite-direction sample.'
+    Assert-Equal $true ([double]$reverseTrials[0].RecoveryMeanMs -ge 0) 'Reversal recovery time must never be negative.'
     Assert-Equal 0 $singleDirectionTrials[0].ReversalCount 'Single-direction scenarios must not report reversal metrics.'
     Assert-Equal 1.344 $reverseTrials[0].EstimatedCountsPerPixel 'Counts-per-pixel must be derived from exported requests.'
     Assert-Equal test-revision $reverseTrials[0].BuildRevision 'Build revision must be preserved in trial metrics.'
@@ -57,6 +58,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 2 $scenario.Count 'Each scenario file must create one summary.'
     Assert-Equal 2 $scenario[0].Trials 'Scenario summary must report both trials.'
     Assert-Equal 1 $scenario[0].MaxQueuedMoves 'Scenario summary must preserve maximum queue depth.'
+    Assert-Equal 10 $scenario[0].RecoveryP95Ms 'Scenario summary must preserve the worst trial recovery P95.'
     $exportedRows = @(Import-Csv -LiteralPath $outputCsv)
     Assert-Equal 6 $exportedRows.Count 'CSV export must include trials and scenario summaries.'
     Assert-Equal 2 $exportedRows[-1].Trials 'CSV export must retain scenario-only summary columns.'
