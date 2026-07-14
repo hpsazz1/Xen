@@ -137,9 +137,12 @@ int main()
                "basic pipeline contains signed target velocity diagnostics");
     expectTrue(traceHeader.find("SourceWidth,SourceHeight") != std::string::npos,
                "basic pipeline contains capture source dimensions");
-    expectTrue(traceHeader.find(
-        "InferenceFPS,SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames") != std::string::npos,
+    expectTrue(traceHeader.find("InferenceFPS") != std::string::npos && traceHeader.find(
+        "SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames") != std::string::npos,
         "basic pipeline contains generic source fps diagnostics");
+    expectTrue(traceHeader.find(
+        "DmlPreprocessMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs") != std::string::npos,
+        "basic pipeline contains dml stage timing diagnostics");
     expectTrue(traceHeader.find("NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
                "basic pipeline keeps ndi compatibility diagnostics");
     expectTrue(traceHeader.find("FrameCountLimit,ErrorMotion") != std::string::npos &&

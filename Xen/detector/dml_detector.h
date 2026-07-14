@@ -18,6 +18,16 @@
 class DirectMLDetector
 {
 public:
+    struct TimingSnapshot
+    {
+        double preprocessMs = 0.0;  // CPU缩放、归一化和NCHW重排耗时，毫秒
+        double inferenceMs = 0.0;   // 同步session.Run耗时，包含DirectML执行与ORT内部同步，毫秒
+        double copyMs = 0.0;        // ORT返回后到后处理计时起点的交接耗时，毫秒
+        double postprocessMs = 0.0; // 输出解码、筛选、NMS和坐标缩放总耗时，毫秒
+        double nmsMs = 0.0;         // 后处理内NMS子阶段耗时，已包含在postprocessMs内
+        double totalMs = 0.0;       // 前四个互斥阶段之和，不重复累加nmsMs
+    };
+
     DirectMLDetector(const std::string& model_path);
     ~DirectMLDetector();
 
@@ -38,13 +48,8 @@ public:
 
     int getNumberOfClasses();
     bool isReady() const;
-
-    // 各阶段耗时统计（毫秒）
-    std::chrono::duration<double, std::milli> lastInferenceTimeDML;
-    std::chrono::duration<double, std::milli> lastPreprocessTimeDML;
-    std::chrono::duration<double, std::milli> lastCopyTimeDML;
-    std::chrono::duration<double, std::milli> lastPostprocessTimeDML;
-    std::chrono::duration<double, std::milli> lastNmsTimeDML;
+    // 跨推理线程和UI/控制线程读取同一完整发布快照，避免混合不同推理帧。
+    TimingSnapshot getTimingSnapshot() const;
 
 private:
     // 推理线程同步状态仅由检测器自身管理。
@@ -78,6 +83,8 @@ private:
     cv::Mat preprocessGrayFloatBuffer;
 
     std::mutex inferenceMutex;
+    mutable std::mutex timingMutex; // 保护一次推理对应的完整阶段快照
+    TimingSnapshot timingSnapshot;  // 最近一次成功完成后处理的推理耗时
     cv::Mat currentFrame;
     cv::Mat currentSourceFrame;
     std::chrono::steady_clock::time_point currentFrameTimestamp{};
@@ -95,6 +102,13 @@ private:
         GraphOptimizationLevel graphOptimizationLevel);
     // 将输入帧预处理为模型张量
     void preprocessFrameToTensor(const cv::Mat& frame, float* dst, int target_w, int target_h);
+    // 仅在一次推理完成全部后处理后发布，失败或提前返回不覆盖上一份有效快照。
+    void publishTimingSnapshot(
+        std::chrono::duration<double, std::milli> preprocess,
+        std::chrono::duration<double, std::milli> inference,
+        std::chrono::duration<double, std::milli> copy,
+        std::chrono::duration<double, std::milli> postprocess,
+        std::chrono::duration<double, std::milli> nms);
     Ort::MemoryInfo memory_info;
 };
 

@@ -1100,6 +1100,18 @@ void MouseThread::moveMousePivot(
         pf->targetDetected = true;
         pf->fpsValue = static_cast<double>(captureFps.load());
         pf->inferenceFps = detectionBuffer.getPublishFps();
+#ifndef USE_CUDA
+        if (dml_detector)
+        {
+            const DirectMLDetector::TimingSnapshot timing = dml_detector->getTimingSnapshot();
+            pf->dmlPreprocessMs = timing.preprocessMs;
+            pf->dmlInferenceMs = timing.inferenceMs;
+            pf->dmlCopyMs = timing.copyMs;
+            pf->dmlPostprocessMs = timing.postprocessMs;
+            pf->dmlNmsMs = timing.nmsMs;
+            pf->dmlTotalMs = timing.totalMs;
+        }
+#endif
         const CaptureSourceDiagnostics sourceDiagnostics = GetCaptureSourceDiagnostics();
         pf->sourceDeclaredFps = sourceDiagnostics.declaredFps;
         pf->sourceReceiveFps = sourceDiagnostics.receiveFps;

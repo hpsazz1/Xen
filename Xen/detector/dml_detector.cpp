@@ -386,6 +386,32 @@ bool DirectMLDetector::isReady() const
     return model_ready.load();
 }
 
+DirectMLDetector::TimingSnapshot DirectMLDetector::getTimingSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(timingMutex);
+    return timingSnapshot;
+}
+
+void DirectMLDetector::publishTimingSnapshot(
+    std::chrono::duration<double, std::milli> preprocess,
+    std::chrono::duration<double, std::milli> inference,
+    std::chrono::duration<double, std::milli> copy,
+    std::chrono::duration<double, std::milli> postprocess,
+    std::chrono::duration<double, std::milli> nms)
+{
+    TimingSnapshot snapshot;
+    snapshot.preprocessMs = preprocess.count();
+    snapshot.inferenceMs = inference.count();
+    snapshot.copyMs = copy.count();
+    snapshot.postprocessMs = postprocess.count();
+    snapshot.nmsMs = nms.count();
+    snapshot.totalMs = snapshot.preprocessMs + snapshot.inferenceMs +
+        snapshot.copyMs + snapshot.postprocessMs;
+
+    std::lock_guard<std::mutex> lock(timingMutex);
+    timingSnapshot = snapshot;
+}
+
 /**
  * createSessionOptions - 创建 ONNX Runtime 会话配置选项
  * @param useDirectML             是否使用 DirectML 执行提供程序
@@ -868,11 +894,7 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
         }
 
         auto t5 = std::chrono::steady_clock::now();
-        lastPreprocessTimeDML = t1 - t0;
-        lastInferenceTimeDML = t3 - t2;
-        lastCopyTimeDML = t4 - t3;
-        lastPostprocessTimeDML = t5 - t4;
-        lastNmsTimeDML = nmsTimeTmp;
+        publishTimingSnapshot(t1 - t0, t3 - t2, t4 - t3, t5 - t4, nmsTimeTmp);
         return batchDetections;
     }
 
@@ -921,11 +943,7 @@ std::vector<std::vector<Detection>> DirectMLDetector::detectBatch(const std::vec
     }
     auto t5 = std::chrono::steady_clock::now();
 
-    lastPreprocessTimeDML = t1 - t0;
-    lastInferenceTimeDML = t3 - t2;
-    lastCopyTimeDML = t4 - t3;
-    lastPostprocessTimeDML = t5 - t4;
-    lastNmsTimeDML = nmsTimeTmp;
+    publishTimingSnapshot(t1 - t0, t3 - t2, t4 - t3, t5 - t4, nmsTimeTmp);
 
     return batchDetections;
 }

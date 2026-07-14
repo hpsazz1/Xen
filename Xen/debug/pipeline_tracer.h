@@ -69,6 +69,12 @@ struct PipelineFrame
     double observationAgeSec = 0.0;    ///< 检测延迟（秒）
     double fpsValue = 0.0;            ///< 当前帧率
     int    inferenceFps = 0;           ///< 检测器实际结果发布帧率
+    double dmlPreprocessMs = 0.0;      ///< DML CPU预处理耗时
+    double dmlInferenceMs = 0.0;       ///< ONNX Runtime DirectML同步推理耗时
+    double dmlCopyMs = 0.0;            ///< ORT返回到后处理开始之间的交接耗时
+    double dmlPostprocessMs = 0.0;     ///< 输出解码、筛选和坐标缩放耗时
+    double dmlNmsMs = 0.0;             ///< 后处理内NMS耗时，已包含在后处理耗时中
+    double dmlTotalMs = 0.0;           ///< 预处理、推理、交接和后处理总耗时
     double sourceDeclaredFps = 0.0;    ///< 当前采集源/设备声明帧率；协议不提供时为 0
     int    sourceReceiveFps = 0;       ///< 当前采集后端真实取得或收到的输入帧率
     uint64_t sourceReceivedFrames = 0; ///< 当前采集会话累计取得或收到的源帧数

@@ -70,11 +70,12 @@ void draw_stats()
     // WinRT / DirectML 路径：从 dml_detector 中读取各阶段计时
     if (dml_detector)
     {
-        current_preprocess = static_cast<float>(dml_detector->lastPreprocessTimeDML.count());
-        current_inference = static_cast<float>(dml_detector->lastInferenceTimeDML.count());
-        current_copy = static_cast<float>(dml_detector->lastCopyTimeDML.count());
-        current_post = static_cast<float>(dml_detector->lastPostprocessTimeDML.count());
-        current_nms = static_cast<float>(dml_detector->lastNmsTimeDML.count());
+        const DirectMLDetector::TimingSnapshot timing = dml_detector->getTimingSnapshot();
+        current_preprocess = static_cast<float>(timing.preprocessMs);
+        current_inference = static_cast<float>(timing.inferenceMs);
+        current_copy = static_cast<float>(timing.copyMs);
+        current_post = static_cast<float>(timing.postprocessMs);
+        current_nms = static_cast<float>(timing.nmsMs);
     }
 #endif
 
