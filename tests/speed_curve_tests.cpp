@@ -171,7 +171,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r11") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r12") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
@@ -296,6 +296,42 @@ int main()
     expectTrue(!TargetPredictor::isSelfMotionArtifact(
                    50.0, 0.0, 5.0, 0.0, 10.0, 0.0, 300.0, 0.0),
                "real outward target motion remains eligible for prediction");
+
+    TargetPredictor selfMotionHoldPredictor;
+    TargetPredictor::Result artifactResult{
+        170.0, 160.0, 200.0, 0.0, 0.0, 0.0,
+        0.05, 10.0, 0.0, true, true
+    };
+    selfMotionHoldPredictor.applySelfMotionSuppression(artifactResult, true);
+    expectTrue(artifactResult.selfMotionSuppressed && artifactResult.x == 160.0 &&
+               artifactResult.offsetX == 0.0,
+               "detected self-motion artifact withdraws the current lead");
+    for (int frame = 0; frame < 4; ++frame)
+    {
+        TargetPredictor::Result heldResult{
+            170.0, 160.0, 200.0, 0.0, 0.0, 0.0,
+            0.05, 10.0, 0.0, true, true
+        };
+        selfMotionHoldPredictor.applySelfMotionSuppression(heldResult, false);
+        expectTrue(heldResult.selfMotionSuppressed && heldResult.x == 160.0,
+                   "self-motion suppression covers the four-frame response tail");
+    }
+    TargetPredictor::Result recoveredResult{
+        170.0, 160.0, 200.0, 0.0, 0.0, 0.0,
+        0.05, 10.0, 0.0, true, true
+    };
+    selfMotionHoldPredictor.applySelfMotionSuppression(recoveredResult, false);
+    expectTrue(!recoveredResult.selfMotionSuppressed && recoveredResult.offsetX == 10.0,
+               "prediction resumes after the bounded self-motion hold");
+    selfMotionHoldPredictor.applySelfMotionSuppression(recoveredResult, true);
+    selfMotionHoldPredictor.reset();
+    TargetPredictor::Result resetResult{
+        170.0, 160.0, 200.0, 0.0, 0.0, 0.0,
+        0.05, 10.0, 0.0, true, true
+    };
+    selfMotionHoldPredictor.applySelfMotionSuppression(resetResult, false);
+    expectTrue(!resetResult.selfMotionSuppressed,
+               "tracking reset clears the self-motion suppression hold");
 
     TargetPredictor irregularPredictor;
     irregularPredictor.update(

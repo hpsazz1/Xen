@@ -67,6 +67,27 @@ public:
                screenViewAlignment < -0.35;
     }
 
+    // 自运动伪迹通常不会只持续一个观测帧。门控命中后继续撤销四个后续观测，
+    // 覆盖约100 FPS下40 ms的控制响应尾迹，同时不清空真实目标的稳健速度与方向状态。
+    void applySelfMotionSuppression(Result& result, bool artifactDetected)
+    {
+        constexpr int kHoldFrames = 4;
+        if (artifactDetected)
+            selfMotionSuppressionFramesRemaining_ = kHoldFrames;
+
+        if (!artifactDetected && selfMotionSuppressionFramesRemaining_ <= 0)
+            return;
+
+        result.x -= result.offsetX;
+        result.y -= result.offsetY;
+        result.offsetX = 0.0;
+        result.offsetY = 0.0;
+        result.selfMotionSuppressed = true;
+
+        if (!artifactDetected)
+            --selfMotionSuppressionFramesRemaining_;
+    }
+
     Result update(double x, double y,
                   std::chrono::steady_clock::time_point observationTime,
                   std::chrono::steady_clock::time_point controlTime,
@@ -160,6 +181,7 @@ public:
         stationarySamples_ = 0;
         unreliableSamples_ = 0;
         reliableDirectionSamples_ = 0;
+        selfMotionSuppressionFramesRemaining_ = 0;
         observations_.clear();
         previousObservationTime_ = {};
     }
@@ -449,6 +471,7 @@ private:
     int stationarySamples_ = 0;
     int unreliableSamples_ = 0;
     int reliableDirectionSamples_ = 0;
+    int selfMotionSuppressionFramesRemaining_ = 0; // 自运动伪迹命中后的剩余抑制观测帧数
     std::deque<Observation> observations_;
     TimePoint previousObservationTime_{};
 };

@@ -1135,6 +1135,7 @@ void MouseThread::moveMousePivot(
         controlTime, screen_width, predictionSettings);
     const double observedScreenAtObservationX = filtered.first - viewAtObservation.first;
     const double observedScreenAtObservationY = filtered.second - viewAtObservation.second;
+    bool selfMotionArtifactDetected = false;
     if (predictionObservationHistory.size() >= 3 && lastPredictionResult.directionLocked)
     {
         const auto& historyStart = predictionObservationHistory.front();
@@ -1144,21 +1145,16 @@ void MouseThread::moveMousePivot(
             observedScreenAtObservationY - historyStart.screenY;
         const double viewDeltaX = viewAtObservation.first - historyStart.viewX;
         const double viewDeltaY = viewAtObservation.second - historyStart.viewY;
-        if (TargetPredictor::isSelfMotionArtifact(
-                observedScreenAtObservationX - center_x,
-                observedScreenAtObservationY - center_y,
-                screenDeltaX, screenDeltaY,
-                viewDeltaX, viewDeltaY,
-                lastPredictionResult.velocityX,
-                lastPredictionResult.velocityY))
-        {
-            lastPredictionResult.x = filtered.first;
-            lastPredictionResult.y = filtered.second;
-            lastPredictionResult.offsetX = 0.0;
-            lastPredictionResult.offsetY = 0.0;
-            lastPredictionResult.selfMotionSuppressed = true;
-        }
+        selfMotionArtifactDetected = TargetPredictor::isSelfMotionArtifact(
+            observedScreenAtObservationX - center_x,
+            observedScreenAtObservationY - center_y,
+            screenDeltaX, screenDeltaY,
+            viewDeltaX, viewDeltaY,
+            lastPredictionResult.velocityX,
+            lastPredictionResult.velocityY);
     }
+    targetPredictor.applySelfMotionSuppression(
+        lastPredictionResult, selfMotionArtifactDetected);
     predictionObservationHistory.push_back({
         observedScreenAtObservationX, observedScreenAtObservationY,
         viewAtObservation.first, viewAtObservation.second
