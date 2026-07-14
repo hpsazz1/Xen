@@ -171,7 +171,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r13") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r14") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
@@ -351,12 +351,25 @@ int main()
             148.0 - frame * 4.0, 100.0, time, time, 320.0, predictionSettings);
         selfMotionRearmPredictor.applySelfMotionSuppression(rearmPrediction, false);
     }
-    const auto firstPostHoldPrediction = selfMotionRearmPredictor.update(
-        128.0, 100.0, t0 + std::chrono::milliseconds(88),
-        t0 + std::chrono::milliseconds(88), 320.0, predictionSettings);
-    expectTrue(!firstPostHoldPrediction.directionLocked &&
-               firstPostHoldPrediction.offsetX == 0.0,
-               "self-motion response tail cannot immediately rearm a reverse prediction");
+    const double reboundPositions[] = { 130.5, 129.0, 127.5, 126.5 };
+    TargetPredictor::Result reboundPrediction{};
+    for (int sample = 0; sample < 4; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(88 + sample * 8);
+        reboundPrediction = selfMotionRearmPredictor.update(
+            reboundPositions[sample], 100.0, time, time, 320.0, predictionSettings);
+        expectTrue(!reboundPrediction.directionLocked && reboundPrediction.offsetX == 0.0,
+                   "sub-eight-pixel self-motion rebound cannot rearm prediction");
+    }
+    selfMotionRearmPredictor.update(
+        123.0, 100.0, t0 + std::chrono::milliseconds(120),
+        t0 + std::chrono::milliseconds(120), 320.0, predictionSettings);
+    const auto confirmedPostHoldMovement = selfMotionRearmPredictor.update(
+        119.0, 100.0, t0 + std::chrono::milliseconds(128),
+        t0 + std::chrono::milliseconds(128), 320.0, predictionSettings);
+    expectTrue(confirmedPostHoldMovement.directionLocked &&
+               confirmedPostHoldMovement.offsetX < 0.0,
+               "post-hold movement beyond eight pixels can rearm prediction");
 
     TargetPredictor irregularPredictor;
     irregularPredictor.update(

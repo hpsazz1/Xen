@@ -188,6 +188,7 @@ public:
         unreliableSamples_ = 0;
         reliableDirectionSamples_ = 0;
         selfMotionSuppressionFramesRemaining_ = 0;
+        selfMotionRearmPending_ = false;
         observations_.clear();
         previousObservationTime_ = {};
     }
@@ -230,6 +231,7 @@ private:
         stationarySamples_ = 0;
         unreliableSamples_ = 0;
         reliableDirectionSamples_ = 0;
+        selfMotionRearmPending_ = true;
         observations_.clear();
         if (initialized_)
             observations_.push_back({ previousX_, previousY_, previousObservationTime_ });
@@ -314,7 +316,12 @@ private:
             observations_.back().x - observations_.front().x,
             observations_.back().y - observations_.front().y);
         const double linearity = pathLength > 1e-9 ? netDisplacement / pathLength : 0.0;
-        const double activationDisplacement = std::max(3.0, span * 0.0125);
+        const double normalActivationDisplacement = std::max(3.0, span * 0.0125);
+        // 自运动保持后的约4~6 px越心回弹在实测中仍可能形成稳定回归；
+        // 重新武装阶段要求至少2.5%检测跨度的净位移，普通首次预测门槛保持不变。
+        const double activationDisplacement = selfMotionRearmPending_
+            ? std::max(normalActivationDisplacement, span * 0.025)
+            : normalActivationDisplacement;
         const double activationSpeed = std::max(50.0, span * 0.20);
         const bool reliableMotion =
             netDisplacement >= activationDisplacement &&
@@ -453,6 +460,7 @@ private:
         predictionEstablished_ = false;
         reliableDirectionSamples_ = 0;
         pendingDirectionSamples_ = 0;
+        selfMotionRearmPending_ = false;
     }
 
     static void clampVector(double& x, double& y, double maximumLength)
@@ -497,6 +505,7 @@ private:
     int unreliableSamples_ = 0;
     int reliableDirectionSamples_ = 0;
     int selfMotionSuppressionFramesRemaining_ = 0; // 自运动伪迹命中后的剩余抑制观测帧数
+    bool selfMotionRearmPending_ = false; // 保持结束后是否仍需更强净位移证据
     std::deque<Observation> observations_;
     TimePoint previousObservationTime_{};
 };
