@@ -9,11 +9,13 @@
 #include <string>
 #include <vector>
 
+#include "runtime/aim_pipeline_types.h"
+
 /**
  * @brief 单帧流水线追踪记录
  *
  * 记录瞄准流水线中目标坐标经过每个处理阶段的变化，
- * 从原始检测输出到最终鼠标计数，仅记录当前基础链路。
+ * 从原始检测输出到最终鼠标计数，同时记录P0并行影子链路快照。
  * 所有坐标均为检测分辨率像素空间（如 320×320）。
  */
 struct PipelineFrame
@@ -21,6 +23,7 @@ struct PipelineFrame
     // ========== 帧标识 ==========
     int64_t                                   frameId = 0;   ///< 单调递增帧序号
     std::chrono::steady_clock::time_point     timestamp{};    ///< 记录时间戳
+    AimPipelineFrameState                    aimPipeline{};   ///< 与旧链路同帧记录的P0影子状态
 
     // ========== Stage 1: 原始目标（tracker/sorter 输出的 pivot 坐标） ==========
     double rawPivotX = 0.0;    ///< 原始 pivot X（检测分辨率像素）

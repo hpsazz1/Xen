@@ -1,4 +1,5 @@
 #include "runtime/basic_aim_controller.h"
+#include "runtime/aim_pipeline_runtime.h"
 #include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_target_filter.h"
 #include "runtime/target_predictor.h"
@@ -44,6 +45,58 @@ void expectTrue(bool condition, const char* name)
 
 int main()
 {
+    AimObservation defaultObservation;
+    expectTrue(!defaultObservation.valid && defaultObservation.trackId == -1,
+               "new pipeline observation defaults are invalid and untracked");
+    expectNear(defaultObservation.pivotX, 0.0, 0.0,
+               "new pipeline observation default pivot is zero");
+
+    AimPipelineRuntime newPipeline;
+    expectTrue(newPipeline.requestedMode() == AimPipelineMode::Legacy &&
+               newPipeline.effectiveMode() == AimPipelineMode::Legacy,
+               "new pipeline defaults to legacy mode");
+    const AimPipelineFrameState legacyFrame = newPipeline.observe(AimObservation{});
+    expectTrue(!legacyFrame.shadowProcessed && legacyFrame.observationSequence == 0,
+               "legacy mode does not advance shadow observations");
+
+    AimObservation shadowObservation;
+    shadowObservation.valid = true;
+    shadowObservation.trackId = 7;
+    shadowObservation.classId = 1;
+    shadowObservation.pivotX = 123.0;
+    shadowObservation.pivotY = 77.0;
+    newPipeline.configure("shadow");
+    const AimPipelineFrameState shadowFrame = newPipeline.observe(shadowObservation);
+    expectTrue(shadowFrame.shadowProcessed && shadowFrame.commandSuppressed,
+               "shadow pipeline processes diagnostics and suppresses commands");
+    expectTrue(shadowFrame.trajectoryOutput.outputCountsX == 0 &&
+               shadowFrame.trajectoryOutput.outputCountsY == 0 &&
+               shadowFrame.trajectoryOutput.commandSuppressed,
+               "shadow pipeline never produces a queued device command");
+    expectTrue(shadowFrame.observation.trackId == 7 &&
+               shadowFrame.observationSequence == 1,
+               "shadow pipeline preserves target identity and observation sequence");
+
+    const uint64_t generationBeforeSwitch = newPipeline.resetGeneration();
+    newPipeline.reset();
+    const AimPipelineFrameState resetFrame = newPipeline.snapshot();
+    expectTrue(resetFrame.resetGeneration == generationBeforeSwitch + 1 &&
+               resetFrame.observationSequence == 0 && !resetFrame.observation.valid,
+               "target loss reset clears the independent shadow state");
+    const AimPipelineFrameState switchedTargetFrame = newPipeline.observe(shadowObservation);
+    expectTrue(switchedTargetFrame.observationSequence == 1,
+               "target id switch restarts the shadow observation sequence");
+
+    newPipeline.configure("active");
+    const AimPipelineFrameState deferredActiveFrame = newPipeline.observe(shadowObservation);
+    expectTrue(deferredActiveFrame.requestedMode == AimPipelineMode::Active &&
+               deferredActiveFrame.effectiveMode == AimPipelineMode::Shadow &&
+               !deferredActiveFrame.activeAvailable && deferredActiveFrame.commandSuppressed,
+               "P0 active request safely degrades to command-suppressed shadow mode");
+    newPipeline.configure("invalid-mode");
+    expectTrue(newPipeline.effectiveMode() == AimPipelineMode::Legacy,
+               "invalid new pipeline mode falls back to legacy");
+
     FrameRateCounter rateCounter;
     const auto rateStart = FrameRateCounter::TimePoint(std::chrono::milliseconds(1000));
     rateCounter.reset(rateStart);
@@ -185,6 +238,11 @@ int main()
     tracer.setMaxFrames(10);
     PipelineFrame pending = tracer.beginFrame(320);
     pending.rawPivotX = 123.0;
+    pending.finalMx = 17;
+    pending.finalMy = -3;
+    pending.aimPipeline = shadowFrame;
+    expectTrue(pending.finalMx == 17 && pending.finalMy == -3,
+               "shadow diagnostics do not alter legacy final output");
     expectTrue(tracer.getFrames().empty(), "trace frame is invisible before commit");
     tracer.commitFrame(std::move(pending));
     const auto committed = tracer.getFrames();
@@ -224,6 +282,9 @@ int main()
         "FrameID,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision") != std::string::npos,
         "basic pipeline identifies the executable and controller revision");
     expectTrue(traceHeader.find(
+        "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed") != std::string::npos,
+        "basic pipeline records same-frame new pipeline mode diagnostics");
+    expectTrue(traceHeader.find(
         "ErrorMotion,SettleMotionThreshold,MovingInsideSettle") != std::string::npos,
         "basic pipeline reports settle motion release diagnostics");
     std::string traceRow;
@@ -233,6 +294,8 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
+    expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
+               "basic pipeline writes command-suppressed shadow state in the legacy frame");
     expectTrue(BuildIdentity::displayLabel().find(" r30") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&

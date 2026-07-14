@@ -73,6 +73,8 @@ public:
     float move_response_ms;            // 误差响应时间，毫秒
     float move_max_speed_cps;          // 设备最大速度，counts/sec
     float move_integral_time_ms;        // 移动目标积分时间，毫秒；0 表示关闭
+    // 新旧链路迁移模式：legacy 正式旧链路，shadow 同帧诊断但不接管设备，active 在 P0 阶段安全降级为 shadow。
+    std::string aim_pipeline_mode = "legacy";
 
     // ========== 目标预测 ==========
     bool  prediction_enabled = true;              // 连续真实观测预测总开关

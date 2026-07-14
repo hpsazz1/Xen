@@ -100,6 +100,8 @@ int main()
                    "default maximum speed uses four-chain nine-grid result");
         expectNear(defaults.move_integral_time_ms, 0.0, 0.0,
                    "moving integral remains disabled before field validation");
+        expectString(defaults.aim_pipeline_mode, "legacy",
+                     "new pipeline defaults to legacy mode");
         expectNear(defaults.prediction_lead_ms, 50.0, 0.0,
                    "default prediction uses kinematic replay lead");
         expectNear(defaults.prediction_velocity_tau_ms, 50.0, 0.0,
@@ -158,6 +160,8 @@ int main()
                    "legacy config receives bounded constant-velocity prediction strength");
         expectTrue(migratedText.find("profile_calibration_enabled = false") != std::string::npos,
                    "saved config persists passive profile calibration state");
+        expectTrue(migratedText.find("aim_pipeline_mode = legacy") != std::string::npos,
+                   "saved config persists the safe new pipeline mode");
         expectTrue(migratedText.find("predictionInterval") == std::string::npos,
                    "saved config removes legacy prediction interval key");
     }
@@ -187,6 +191,18 @@ int main()
     expectTrue(enabledCalibration.profile_calibration_enabled,
                "passive profile calibration enabled state is restored");
     std::filesystem::remove(calibrationConfigPath, removeError);
+
+    const std::filesystem::path shadowModePath = "xen_config_shadow_mode_test.ini";
+    {
+        std::ofstream shadowModeFile(shadowModePath);
+        shadowModeFile << "aim_pipeline_mode = shadow\n";
+    }
+    Config shadowMode{};
+    expectTrue(shadowMode.loadConfig(shadowModePath.string()),
+               "shadow pipeline config loads successfully");
+    expectString(shadowMode.aim_pipeline_mode, "shadow",
+                 "shadow pipeline config state is restored");
+    std::filesystem::remove(shadowModePath, removeError);
 
     const std::filesystem::path speedLimitPath = "xen_config_speed_limit_test.ini";
     {

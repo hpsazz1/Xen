@@ -24,6 +24,7 @@
 #include "MouseInput.h"
 #include "runtime/basic_aim_controller.h"
 #include "runtime/basic_target_filter.h"
+#include "runtime/aim_pipeline_runtime.h"
 #include "runtime/passive_profile_calibrator.h"
 #include "runtime/target_predictor.h"
 #include "runtime/view_motion_history.h"
@@ -77,6 +78,7 @@ private:
     BasicTargetFilter targetFilter;                                ///< 基础观测滤波（不做未来预测）
     TargetPredictor targetPredictor;                               ///< 仅连续真实观测生效的前瞻预测器
     BasicAimController aimController;                              ///< 帧率无关的基础误差控制器
+    AimPipelineRuntime aimPipelineRuntime;                         ///< P0并行影子链；不持有或访问设备队列
     BasicTargetFilter::Result lastFilterResult{};                  ///< 流水线诊断快照
     TargetPredictor::Result lastPredictionResult{};                ///< 流水线预测诊断快照
     TargetPredictor::Settings predictionSettings{};                ///< 运行时预测配置缓存
@@ -257,7 +259,8 @@ public:
      */
     void moveMousePivot(
         const AimbotTarget& target,
-        std::chrono::steady_clock::time_point observationTime = {});
+        std::chrono::steady_clock::time_point observationTime = {},
+        int targetTrackId = -1);
     /** @brief 相对移动鼠标 */
     void moveRelative(int dx, int dy);
     /** @brief 清除所有排队中的移动指令 */

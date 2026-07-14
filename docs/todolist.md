@@ -103,7 +103,7 @@
 - [x] 补充角色平移参照系分析：确认当前只补偿程序鼠标引起的相机旋转，角色WASD平移与目标平移必须按`Vtarget−Vself`合成为相对视线运动；状态和前馈统一定义为`relativeLosRate`，WASD只作诊断上下文，详见`docs/065角色平移与相对视线运动分析20260714.md`。
 - [x] 明确profile来源与无profile降级：现有`config.ini [Games]`保留为用户坐标初值，设备/后端响应进入独立可失效标定缓存，会话运动统计不写入硬配置；缺失或失配时按完整角度控制、保守角度控制、归一化图像控制、安全直追四级降级，详见`docs/066配置Profile与无Profile降级设计20260714.md`。
 - [x] 在不改变r30控制行为的前提下实现首版被动Profile标定：使用设备实际成功发送时间与raw pivot观测时间，稳健估算X/Y `px/count`、`degrees/count`、单次command-to-frame延迟、漂移、RMSE、相关性和可信度；UI与CSV只读展示，不覆盖配置，详见`docs/067被动Profile自动标定实现20260714.md`。
-- [ ] **[P0-0] 建立并行重构骨架：** 新增统一观测/状态/控制数据结构与`legacy/shadow/active`模式；r30保持正式输出，shadow逐帧写入同一CSV且绝不入队，详见`docs/068基础移动与预测重构复核计划20260714.md`。
+- [x] **[P0-0] 建立并行重构骨架：** 新增统一观测/状态/控制/轨迹数据结构与`legacy/shadow/active`请求模式；P0期间`active`安全降级为`shadow`，r30保持正式输出，shadow逐帧写入同一CSV且绝不访问设备队列，详见`docs/069P0-0影子链路骨架实现20260715.md`。
 - [ ] **[P0-1] 贯通完整时间轴：** 让NDI/UDP/DDA/WinRT/虚拟摄像头真实取得帧时间、检测提交/开始/发布、控制消费、命令入队和设备成功发送时间完整随数据流传递；先修复NDI `receiveNow`在`NetworkFrame`中丢失和`DetectionBuffer::swapLocked()`未返回发布时间的问题。
 - [ ] **[P0-2] 实现角度坐标与延迟相机响应：** 使用完整源HFOV/VFOV把raw pivot转为yaw/pitch；新增只用于新链路的实际成功counts历史和固定`commandToFrameDelayMs`响应核，禁止继续按发送时刻立即补偿画面。
 - [ ] **[P0-3] 建立相对视线Kalman影子链：** 状态为`[losAngle,relativeLosRate]`，贯通检测置信度并输出协方差、innovation、NIS和前馈可信度；One Euro与Alpha-Beta只在回放器中作对照，不与Kalman串联。

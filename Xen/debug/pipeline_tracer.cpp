@@ -89,6 +89,10 @@ bool PipelineTracer::exportCSV(const std::string& path) const
 
     // CSV 表头
     file << "FrameID,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision,"
+         << "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed,AimPipelineResetGeneration,AimPipelineObservationSequence,"
+         << "AimPipelineTargetId,AimPipelineClassId,AimPipelineConfidence,AimPipelineRawPivotX,AimPipelineRawPivotY,AimPipelineEstimateValid,"
+         << "AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadReferenceX,AimPipelineLeadReferenceY,"
+         << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
          << "Timestamp,Resolution,SourceWidth,SourceHeight,FPS,InferenceFPS,"
          << "DmlModel,DmlInputWidth,DmlInputHeight,DmlPreprocessMs,DmlTensorSetupMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs,"
          << "SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames,"
@@ -119,11 +123,28 @@ bool PipelineTracer::exportCSV(const std::string& path) const
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             f.timestamp.time_since_epoch()).count();
 
+        const AimPipelineFrameState& ap = f.aimPipeline;
         file << f.frameId << ','
              << BuildIdentity::backend() << ','
              << BuildIdentity::revision() << ','
              << BuildIdentity::timestampUtc() << ','
              << kBasicAimControllerRevision << ','
+             << aimPipelineModeName(ap.requestedMode) << ','
+             << aimPipelineModeName(ap.effectiveMode) << ','
+             << (ap.activeAvailable ? '1' : '0') << ','
+             << (ap.shadowProcessed ? '1' : '0') << ','
+             << (ap.commandSuppressed ? '1' : '0') << ','
+             << ap.resetGeneration << ',' << ap.observationSequence << ','
+             << ap.observation.trackId << ',' << ap.observation.classId << ','
+             << ap.observation.confidence << ','
+             << ap.observation.pivotX << ',' << ap.observation.pivotY << ','
+             << (ap.estimate.valid ? '1' : '0') << ','
+             << ap.control.feedbackX << ',' << ap.control.feedbackY << ','
+             << ap.control.trackingFeedforwardX << ',' << ap.control.trackingFeedforwardY << ','
+             << ap.control.leadReferenceX << ',' << ap.control.leadReferenceY << ','
+             << ap.control.requestedCountsX << ',' << ap.control.requestedCountsY << ','
+             << ap.trajectoryOutput.outputCountsX << ',' << ap.trajectoryOutput.outputCountsY << ','
+             << (ap.trajectoryOutput.commandSuppressed ? '1' : '0') << ','
              << ms << ','
              << f.resolution << ','
              << f.sourceWidth << ',' << f.sourceHeight << ','

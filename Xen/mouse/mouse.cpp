@@ -82,6 +82,7 @@ MouseThread::MouseThread(
             static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0;
         predictionSettings.predictionStrength =
             static_cast<double>(config.prediction_strength);
+        aimPipelineRuntime.configure(config.aim_pipeline_mode);
         profileCalibrator.setEnabled(config.profile_calibration_enabled);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
     }
@@ -128,6 +129,7 @@ void MouseThread::updateConfig(
         static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0, 0.040, 0.120);
     predictionSettings.predictionStrength = std::clamp(
         static_cast<double>(config.prediction_strength), 0.0, 4.0);
+    aimPipelineRuntime.configure(config.aim_pipeline_mode);
     profileCalibrator.setEnabled(config.profile_calibration_enabled);
     if (config.profile_calibration_enabled)
         profileCalibrator.reset();
@@ -1072,7 +1074,8 @@ void MouseThread::moveMouse(const AimbotTarget& target)
  */
 void MouseThread::moveMousePivot(
     const AimbotTarget& target,
-    std::chrono::steady_clock::time_point observationTime)
+    std::chrono::steady_clock::time_point observationTime,
+    int targetTrackId)
 {
     std::lock_guard lg(input_method_mutex);
 
@@ -1142,6 +1145,23 @@ void MouseThread::moveMousePivot(
     const auto controlTime = std::chrono::steady_clock::now();
     const auto effectiveObservationTime = observationTime.time_since_epoch().count() == 0
         ? controlTime : observationTime;
+    AimObservation shadowObservation;
+    shadowObservation.timing.observationTime = effectiveObservationTime;
+    shadowObservation.timing.controlTime = controlTime;
+    shadowObservation.timing.sourceWidth = ::screenWidth.load(std::memory_order_relaxed);
+    shadowObservation.timing.sourceHeight = ::screenHeight.load(std::memory_order_relaxed);
+    shadowObservation.trackId = targetTrackId;
+    shadowObservation.classId = target.classId;
+    shadowObservation.pivotX = pivotX;
+    shadowObservation.pivotY = pivotY;
+    shadowObservation.boxX = target.x;
+    shadowObservation.boxY = target.y;
+    shadowObservation.boxWidth = target.w;
+    shadowObservation.boxHeight = target.h;
+    shadowObservation.valid = true;
+    const AimPipelineFrameState shadowFrame = aimPipelineRuntime.observe(shadowObservation);
+    if (pf)
+        pf->aimPipeline = shadowFrame;
     const double calibrationSourceWidth = AimCoordinateSpace::resolveFovPixelSpan(
         ::screenWidth.load(std::memory_order_relaxed), screen_width);
     const double calibrationSourceHeight = AimCoordinateSpace::resolveFovPixelSpan(
@@ -1826,6 +1846,7 @@ void MouseThread::resetTracking()
     targetFilter.reset();
     targetPredictor.reset();
     aimController.reset();
+    aimPipelineRuntime.reset();
     lastFilterResult = {};
     lastPredictionResult = {};
     lastControlObservationTime = {};

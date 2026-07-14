@@ -365,7 +365,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
             // 有有效目标且本帧有观测：执行瞄准移动和自动射击
             if (activeTarget && hasAimObservation)
             {
-                mouseThread.moveMousePivot(*activeTarget, detectionTimestamp);
+                mouseThread.moveMousePivot(*activeTarget, detectionTimestamp, activeTrackId);
 
                 if (autoShoot)
                 {
