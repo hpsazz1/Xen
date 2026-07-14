@@ -1173,9 +1173,11 @@ void MouseThread::moveMousePivot(
     {
         const double viewDeltaX = viewAtObservation.first - viewAtControl.first;
         const double viewDeltaY = viewAtObservation.second - viewAtControl.second;
+        // reverse实测中央50%仍有69.9%帧不输出，目标中心误差在抑制后扩大近一倍。
+        // 水平只保留中央20%走廊以持续跟住框体，同时不恢复逐帧追逐检测pivot。
         lastPredictionResult.x = TargetPredictor::boxHoldCoordinate(
             center_x, target.x + viewDeltaX, target.w,
-            std::max(2.0, target.w * 0.25));
+            std::max(2.0, target.w * 0.40));
         lastPredictionResult.y = TargetPredictor::boxHoldCoordinate(
             center_y, target.y + viewDeltaY, target.h);
     }

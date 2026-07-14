@@ -175,7 +175,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r26") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r27") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -539,8 +539,8 @@ int main()
                "oscillation box hold returns only to the nearest inset edge");
     expectNear(TargetPredictor::boxHoldCoordinate(160.0, 80.0, 50.0), 128.0, 0.0,
                "oscillation box hold handles the opposite outside edge");
-    expectNear(TargetPredictor::boxHoldCoordinate(160.0, 170.0, 50.0, 12.5), 182.5, 0.0,
-               "oscillation horizontal corridor follows the central half of the box");
+    expectNear(TargetPredictor::boxHoldCoordinate(160.0, 170.0, 50.0, 20.0), 190.0, 0.0,
+               "oscillation horizontal corridor follows the central fifth of the box");
 
     TargetPredictor highSpeedPredictor;
     TargetPredictor::Result highSpeedPrediction{};
@@ -671,8 +671,8 @@ int main()
         0.0, 20.0, 0.010, 1.0, 1.0, verticalCatchUpSettings);
     expectTrue(!normalVerticalOutput.verticalCatchUp && catchUpVerticalOutput.verticalCatchUp,
                "vertical catch-up activates only outside the sixteen-pixel threshold");
-    expectNear(catchUpVerticalOutput.effectiveResponseSecondsY, 0.040, 1e-12,
-               "vertical catch-up halves the proportional response time");
+    expectNear(catchUpVerticalOutput.effectiveResponseSecondsY, 0.0375, 1e-12,
+               "vertical catch-up follows the continuous response curve");
     expectTrue(catchUpVerticalOutput.countsY / 20.0 > normalVerticalOutput.countsY / 15.0,
                "vertical catch-up increases per-pixel response without changing max speed");
     verticalCatchUpController.reset();
@@ -681,16 +681,21 @@ int main()
     expectTrue(catchUpHorizontalOutput.horizontalCatchUp &&
                !catchUpHorizontalOutput.verticalCatchUp,
                "horizontal catch-up activates independently for jump lateral error");
-    expectNear(catchUpHorizontalOutput.effectiveResponseSecondsX, 0.040, 1e-12,
-               "horizontal catch-up halves only the horizontal response time");
+    expectNear(catchUpHorizontalOutput.effectiveResponseSecondsX, 0.0375, 1e-12,
+               "horizontal catch-up follows the continuous response independently");
     verticalCatchUpController.reset();
-    const auto aggressiveHorizontalOutput = verticalCatchUpController.update(
+    const auto transitionalHorizontalOutput = verticalCatchUpController.update(
+        24.0, 0.0, 0.010, 1.0, 1.0, verticalCatchUpSettings);
+    expectNear(transitionalHorizontalOutput.effectiveResponseSecondsX, 0.035, 1e-12,
+               "jump catch-up changes continuously between sixteen and thirty-two pixels");
+    verticalCatchUpController.reset();
+    const auto largeHorizontalOutput = verticalCatchUpController.update(
         40.0, 0.0, 0.010, 1.0, 1.0, verticalCatchUpSettings);
-    expectNear(aggressiveHorizontalOutput.effectiveResponseSecondsX, 0.020, 1e-12,
-               "very large jump error uses the twenty-millisecond catch-up tier");
-    expectTrue(aggressiveHorizontalOutput.countsX / 40.0 >
+    expectNear(largeHorizontalOutput.effectiveResponseSecondsX, 0.030, 1e-12,
+               "very large jump error keeps the thirty-millisecond response floor");
+    expectTrue(largeHorizontalOutput.countsX / 40.0 >
                    catchUpHorizontalOutput.countsX / 20.0,
-               "aggressive catch-up further increases per-pixel response for extreme jumps");
+               "continuous catch-up still increases per-pixel response for extreme jumps");
 
     // 生产速率必须使用捕获窗统计出的实际 FPS 换算单帧预算，而不是绑定某个设备或固定帧率。
     // 选取本轮 CSV 的约 127/143 FPS 和未来可能出现的 240 FPS，验证每秒总预算始终一致。

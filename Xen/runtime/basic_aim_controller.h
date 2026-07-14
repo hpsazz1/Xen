@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 26;
+inline constexpr int kBasicAimControllerRevision = 27;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -57,17 +57,22 @@ public:
 
         const double settleRadius = std::max(0.0, settings.settleRadiusPixels);
         const double releaseRadius = std::max(settleRadius, settings.releaseRadiusPixels);
-        // r25已降低jump P95，但X轴P99仍达77.9 px且总速度限速仅2.8%。
-        // 任一轴误差达到16 px时使用半响应，达到32 px时使用四分之一响应；进入中心后恢复，
-        // 积分、二维总速度预算和小误差稳定区完全不变。
+        // r26在32 px处直接从40 ms切到20 ms，实测该档68.3%的观测撞到速度上限，
+        // 既没有形成可控的额外追赶，还会在阈值附近产生增益跳变。16~32 px改为从半响应
+        // 连续缩短到八分之三响应，32 px以上保持该下限；积分、二维速度预算和稳定区不变。
         const double catchUpThreshold = std::max(16.0, releaseRadius * 2.0);
-        const double aggressiveCatchUpThreshold = catchUpThreshold * 2.0;
         out.horizontalCatchUp = std::abs(errorX) >= catchUpThreshold;
         out.verticalCatchUp = std::abs(errorY) >= catchUpThreshold;
-        out.effectiveResponseSecondsX = std::abs(errorX) >= aggressiveCatchUpThreshold
-            ? response * 0.25 : (out.horizontalCatchUp ? response * 0.5 : response);
-        out.effectiveResponseSecondsY = std::abs(errorY) >= aggressiveCatchUpThreshold
-            ? response * 0.25 : (out.verticalCatchUp ? response * 0.5 : response);
+        const auto catchUpResponse = [response, catchUpThreshold](double error)
+        {
+            const double catchUpProgress = std::clamp(
+                (std::abs(error) - catchUpThreshold) / catchUpThreshold, 0.0, 1.0);
+            return response * (0.5 - catchUpProgress * 0.125);
+        };
+        out.effectiveResponseSecondsX = out.horizontalCatchUp
+            ? catchUpResponse(errorX) : response;
+        out.effectiveResponseSecondsY = out.verticalCatchUp
+            ? catchUpResponse(errorY) : response;
         const double errorMotion = hasPreviousError_
             ? std::hypot(errorX - previousErrorX_, errorY - previousErrorY_) : 0.0;
         // PI 静止锁存只应用于误差基本不变的目标。启用积分后，如果相邻有效观测的误差
