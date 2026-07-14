@@ -288,6 +288,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             Rows = $trial.Count
             Samples = $samples.Count
             DurationMs = [math]::Round($trialDurationMs, 1)
+            StartAbsAxisErrorPx = [math]::Round([math]::Abs([double]$trial[0].$errorColumn), 2)
             MeanAxisErrorPx = [math]::Round([double]($samples | Measure-Object $errorColumn -Average).Average, 2)
             MeanAbsAxisErrorPx = [math]::Round([double]($axisAbsErrors | Measure-Object -Average).Average, 2)
             P50AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $axisAbsErrors -Percentile 0.50), 2)
@@ -316,6 +317,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             RecoveredReversals = $reversals.RecoveredReversals
             RecoveryMeanMs = $reversals.RecoveryMeanMs
             RecoveryP95Ms = $reversals.RecoveryP95Ms
+            ReversalRateHz = [math]::Round($reversals.ReversalCount / [math]::Max(0.001, $sampleDurationSeconds), 2)
             SourceGeometry = "$($trial[0].SourceWidth)x$($trial[0].SourceHeight)"
             BuildBackend = $buildBackend
             BuildRevision = $buildRevision
@@ -344,6 +346,9 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         Scenario = $group[0].Scenario
         Trials = $group.Count
         Samples = $sampleCount
+        MeanStartAbsAxisErrorPx = [math]::Round([double]($group | Measure-Object StartAbsAxisErrorPx -Average).Average, 2)
+        MinStartAbsAxisErrorPx = [math]::Round([double]($group | Measure-Object StartAbsAxisErrorPx -Minimum).Minimum, 2)
+        MaxStartAbsAxisErrorPx = [math]::Round([double]($group | Measure-Object StartAbsAxisErrorPx -Maximum).Maximum, 2)
         MeanP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object P95AbsAxisErrorPx -Average).Average, 2)
         WorstP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object P95AbsAxisErrorPx -Maximum).Maximum, 2)
         MeanSteadyMeanAbsAxisErrorPx = [math]::Round([double]($group | Measure-Object SteadyMeanAbsAxisErrorPx -Average).Average, 2)
@@ -354,6 +359,9 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         SpeedLimitedPct = [math]::Round([double](($group | ForEach-Object { $_.SpeedLimitedPct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         MovingInsideSettlePct = [math]::Round([double](($group | ForEach-Object { $_.MovingInsideSettlePct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         ReversalCount = [int]($group | Measure-Object ReversalCount -Sum).Sum
+        ReversalRateHz = [math]::Round(
+            [double]($group | Measure-Object ReversalCount -Sum).Sum /
+            [math]::Max(0.001, [double]($group | Measure-Object DurationMs -Sum).Sum / 1000.0), 2)
         RecoveredReversals = $recoveredCount
         RecoveryMeanMs = if ($recoveredCount -eq 0) { $null } else {
             [math]::Round($weightedRecoveryTotal / $recoveredCount, 1)
@@ -381,6 +389,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
     # 试次与场景汇总字段不同，显式使用联合列，确保机器可读导出不会丢失汇总指标。
     $exportColumns = @(
         'Level', 'Chain', 'Scenario', 'Trial', 'Trials', 'Rows', 'Samples', 'DurationMs',
+        'StartAbsAxisErrorPx', 'MeanStartAbsAxisErrorPx', 'MinStartAbsAxisErrorPx', 'MaxStartAbsAxisErrorPx',
         'MeanAxisErrorPx', 'MeanAbsAxisErrorPx', 'P50AbsAxisErrorPx', 'P95AbsAxisErrorPx', 'P99AbsAxisErrorPx',
         'SteadySamples', 'SteadyMeanAbsAxisErrorPx', 'SteadyP95AbsAxisErrorPx',
         'MeanP95AbsAxisErrorPx', 'WorstP95AbsAxisErrorPx', 'P95ErrorDistancePx',
@@ -390,7 +399,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'MeanAbsOutputCountsPerSecond', 'EstimatedCountsPerPixel', 'ApproxClosedLoopLagMs',
         'MeanApproxClosedLoopLagMs', 'SpeedLimitedPct', 'MovingInsideSettlePct', 'InferenceFps',
         'SourceReceiveFps', 'ObservationAgeAvgMs', 'ObservationAgeP95Ms', 'MaxQueuedMoves',
-        'ReversalCount', 'RecoveredReversals', 'RecoveryMeanMs', 'RecoveryP95Ms',
+        'ReversalCount', 'ReversalRateHz', 'RecoveredReversals', 'RecoveryMeanMs', 'RecoveryP95Ms',
         'SourceGeometry', 'BuildBackend', 'BuildRevision', 'BuildTimestampUtc', 'ControllerRevision'
     )
     $allMetrics | Select-Object -Property $exportColumns |

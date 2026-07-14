@@ -46,6 +46,8 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     $reverseTrials = @($trials | Where-Object { $_.Scenario -eq 'horizontal_reverse' })
     $singleDirectionTrials = @($trials | Where-Object { $_.Scenario -eq 'horizontal_right' })
     Assert-Equal 1 $reverseTrials[0].ReversalCount 'Persistent tracking-error side reversal must be counted.'
+    Assert-Equal 11 $reverseTrials[0].StartAbsAxisErrorPx 'Trial metrics must preserve the initial absolute axis error.'
+    Assert-Equal 16.67 $reverseTrials[0].ReversalRateHz 'Trial reversal rate must use the effective trial duration.'
     Assert-Equal 1 $reverseTrials[0].RecoveredReversals 'Reversal recovery inside the radius must be counted.'
     Assert-Equal 30 $reverseTrials[0].RecoveryMeanMs 'Recovery time must start at the confirmed positive peak.'
     Assert-Equal $true ([double]$reverseTrials[0].RecoveryMeanMs -ge 0) 'Reversal recovery time must never be negative.'
@@ -57,6 +59,10 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal $reverseTrials[0].P95AbsAxisErrorPx $reverseTrials[0].SteadyP95AbsAxisErrorPx 'Short synthetic trials must use all samples as the steady window.'
     Assert-Equal 2 $scenario.Count 'Each scenario file must create one summary.'
     Assert-Equal 2 $scenario[0].Trials 'Scenario summary must report both trials.'
+    Assert-Equal 10 $scenario[0].MeanStartAbsAxisErrorPx 'Scenario summary must report the mean trial start error.'
+    Assert-Equal 9 $scenario[0].MinStartAbsAxisErrorPx 'Scenario summary must report the minimum trial start error.'
+    Assert-Equal 11 $scenario[0].MaxStartAbsAxisErrorPx 'Scenario summary must report the maximum trial start error.'
+    Assert-Equal 12.5 $scenario[0].ReversalRateHz 'Scenario reversal rate must use total valid duration.'
     Assert-Equal 1 $scenario[0].MaxQueuedMoves 'Scenario summary must preserve maximum queue depth.'
     Assert-Equal 30 $scenario[0].RecoveryP95Ms 'Scenario summary must preserve the worst trial recovery P95.'
     $exportedRows = @(Import-Csv -LiteralPath $outputCsv)
