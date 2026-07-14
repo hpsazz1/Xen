@@ -137,8 +137,8 @@ bool Config::loadConfig(const std::string& filename)
 
         prediction_enabled = true;                       // 连续真实观测预测总开关
         prediction_lead_ms = 50.0f;                      // 观测年龄之外的基础前瞻（毫秒）
-        prediction_velocity_tau_ms = 15.0f;              // 速度低通时间常数（毫秒）
-        prediction_strength = 1.0f;                      // 运动学提前总强度
+        prediction_velocity_tau_ms = 50.0f;              // 稳健速度回归窗口（毫秒）
+        prediction_strength = 1.0f;                      // 常速度提前总强度
 
         snapRadius = 1.5f;                               // 瞄准吸附半径
         nearRadius = 25.0f;                              // "近距离"半径阈值
@@ -547,7 +547,7 @@ bool Config::loadConfig(const std::string& filename)
     const bool hasPredictionVelocityTauMs =
         ini.GetValue("", "prediction_velocity_tau_ms", nullptr) != nullptr;
     prediction_velocity_tau_ms = hasPredictionVelocityTauMs
-        ? (float)get_double("prediction_velocity_tau_ms", 15.0)
+        ? (float)get_double("prediction_velocity_tau_ms", 50.0)
         : (float)(get_double("prediction_tau", 0.035) * 1000.0);
     prediction_strength = (float)get_double("prediction_strength", 1.0);
 
@@ -738,7 +738,7 @@ bool Config::loadConfig(const std::string& filename)
 
     // === 连续观测预测参数范围校验 ===
     prediction_lead_ms = std::clamp(prediction_lead_ms, 0.0f, 100.0f);
-    prediction_velocity_tau_ms = std::clamp(prediction_velocity_tau_ms, 5.0f, 250.0f);
+    prediction_velocity_tau_ms = std::clamp(prediction_velocity_tau_ms, 40.0f, 120.0f);
     prediction_strength = std::clamp(prediction_strength, 0.0f, 4.0f);
 
     // === 覆盖层尺寸范围校验 ===

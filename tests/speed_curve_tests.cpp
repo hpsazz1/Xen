@@ -164,7 +164,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r7") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r8") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
@@ -216,7 +216,7 @@ int main()
 
     TargetPredictor::Settings predictionSettings;
     predictionSettings.additionalLeadSeconds = 0.020;
-    predictionSettings.velocityTimeConstantSeconds = 0.035;
+    predictionSettings.velocityTimeConstantSeconds = 0.050;
     predictionSettings.predictionStrength = 2.0;
 
     TargetPredictor movingPredictor;
@@ -224,18 +224,19 @@ int main()
         100.0, 100.0, t0, t0, 320.0, predictionSettings);
     expectTrue(!predictionFirst.applied && predictionFirst.x == 100.0,
                "prediction waits for a velocity observation");
-    movingPredictor.update(
-        108.0, 100.0, t0 + std::chrono::milliseconds(8), t0 + std::chrono::milliseconds(18),
-        320.0, predictionSettings);
-    movingPredictor.update(
-        116.0, 100.0, t0 + std::chrono::milliseconds(16), t0 + std::chrono::milliseconds(26),
-        320.0, predictionSettings);
+    for (int sample = 1; sample <= 4; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        movingPredictor.update(
+            100.0 + sample * 8.0, 100.0, time, time + std::chrono::milliseconds(10),
+            320.0, predictionSettings);
+    }
     const auto predictionMoving = movingPredictor.update(
-        124.0, 100.0, t0 + std::chrono::milliseconds(24), t0 + std::chrono::milliseconds(34),
-        320.0, predictionSettings);
+        140.0, 100.0, t0 + std::chrono::milliseconds(40),
+        t0 + std::chrono::milliseconds(50), 320.0, predictionSettings);
     expectTrue(predictionMoving.applied && predictionMoving.directionLocked &&
-               predictionMoving.x > 124.0,
-               "confirmed movement produces a forward kinematic lead");
+               predictionMoving.x > 140.0,
+               "confirmed movement produces a forward constant-velocity lead");
     expectNear(predictionMoving.velocityX, 1000.0, 1e-9,
                "prediction velocity uses observation timestamps");
     expectNear(predictionMoving.leadSeconds, 0.030, 1e-9,
@@ -253,18 +254,53 @@ int main()
     expectNear(predictionStatic.x, 160.0, 0.0, "static prediction does not drift horizontally");
     expectNear(predictionStatic.y, 160.0, 0.0, "static prediction does not drift vertically");
 
+    TargetPredictor detectorNoisePredictor;
+    for (int sample = 0; sample < 10; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        const double noiseX = sample % 2 == 0 ? 161.2 : 158.8;
+        const double noiseY = sample % 3 == 0 ? 161.0 : 159.0;
+        const auto noisyPrediction = detectorNoisePredictor.update(
+            noiseX, noiseY, time, time, 320.0, predictionSettings);
+        expectTrue(!noisyPrediction.directionLocked &&
+                   noisyPrediction.offsetX == 0.0 && noisyPrediction.offsetY == 0.0,
+                   "oscillating detector noise never activates prediction");
+    }
+
+    TargetPredictor horizontalPredictor;
+    TargetPredictor::Result horizontalPrediction;
+    for (int sample = 0; sample < 7; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        horizontalPrediction = horizontalPredictor.update(
+            100.0 + sample * 8.0, 100.0 + (sample % 2 == 0 ? 1.0 : -1.0),
+            time, time, 320.0, predictionSettings);
+    }
+    expectTrue(horizontalPrediction.directionLocked && horizontalPrediction.offsetX > 0.0,
+               "consistent horizontal movement activates prediction");
+    expectNear(horizontalPrediction.velocityY, 0.0, 0.0,
+               "minor non-dominant vertical noise is suppressed");
+    expectNear(horizontalPrediction.offsetY, 0.0, 0.0,
+               "horizontal movement never creates vertical prediction lead");
+
     TargetPredictor irregularPredictor;
     irregularPredictor.update(
         50.0, 50.0, t0, t0, 320.0, predictionSettings);
-    const auto predictionIrregular = irregularPredictor.update(
-        60.0, 50.0, t0 + std::chrono::milliseconds(20),
+    irregularPredictor.update(55.0, 50.0, t0 + std::chrono::milliseconds(10),
+        t0 + std::chrono::milliseconds(15), 320.0, predictionSettings);
+    irregularPredictor.update(60.0, 50.0, t0 + std::chrono::milliseconds(20),
         t0 + std::chrono::milliseconds(25), 320.0, predictionSettings);
+    irregularPredictor.update(65.0, 50.0, t0 + std::chrono::milliseconds(30),
+        t0 + std::chrono::milliseconds(35), 320.0, predictionSettings);
+    const auto predictionIrregular = irregularPredictor.update(
+        70.0, 50.0, t0 + std::chrono::milliseconds(40),
+        t0 + std::chrono::milliseconds(45), 320.0, predictionSettings);
     expectNear(predictionIrregular.velocityX, 500.0, 1e-9,
                "prediction remains frame-rate independent under irregular dml cadence");
 
     TargetPredictor youngObservationPredictor;
     TargetPredictor oldObservationPredictor;
-    for (int sample = 0; sample < 3; ++sample)
+    for (int sample = 0; sample < 6; ++sample)
     {
         const double x = 100.0 + sample * 8.0;
         const auto time = t0 + std::chrono::milliseconds(sample * 8);
@@ -274,11 +310,11 @@ int main()
             x, 100.0, time, time, 320.0, predictionSettings);
     }
     const auto youngObservation = youngObservationPredictor.update(
-        124.0, 100.0, t0 + std::chrono::milliseconds(24),
-        t0 + std::chrono::milliseconds(24), 320.0, predictionSettings);
+        148.0, 100.0, t0 + std::chrono::milliseconds(48),
+        t0 + std::chrono::milliseconds(48), 320.0, predictionSettings);
     const auto oldObservation = oldObservationPredictor.update(
-        124.0, 100.0, t0 + std::chrono::milliseconds(24),
-        t0 + std::chrono::milliseconds(44), 320.0, predictionSettings);
+        148.0, 100.0, t0 + std::chrono::milliseconds(48),
+        t0 + std::chrono::milliseconds(68), 320.0, predictionSettings);
     expectTrue(oldObservation.x > youngObservation.x,
                "older observation receives more automatic latency compensation");
 
@@ -299,7 +335,7 @@ int main()
                "abnormal target jump has bounded prediction distance");
 
     TargetPredictor reversalPredictor;
-    for (int sample = 0; sample < 4; ++sample)
+    for (int sample = 0; sample < 6; ++sample)
     {
         const double x = 100.0 + sample * 8.0;
         const auto time = t0 + std::chrono::milliseconds(sample * 8);
@@ -307,34 +343,39 @@ int main()
             x, 100.0, time, time, 320.0, predictionSettings);
     }
     const auto reversalPending = reversalPredictor.update(
-        116.0, 100.0, t0 + std::chrono::milliseconds(32), t0 + std::chrono::milliseconds(32),
+        132.0, 100.0, t0 + std::chrono::milliseconds(48), t0 + std::chrono::milliseconds(48),
         320.0, predictionSettings);
-    expectTrue(reversalPending.directionLocked && reversalPending.x == 116.0,
+    expectTrue(reversalPending.directionLocked && reversalPending.x == 132.0,
                "first reverse observation withdraws lead without flipping sides");
-    const auto reversalConfirmed = reversalPredictor.update(
-        108.0, 100.0, t0 + std::chrono::milliseconds(40), t0 + std::chrono::milliseconds(40),
+    reversalPredictor.update(
+        124.0, 100.0, t0 + std::chrono::milliseconds(56), t0 + std::chrono::milliseconds(56),
         320.0, predictionSettings);
-    expectTrue(reversalConfirmed.directionLocked && reversalConfirmed.x < 108.0,
-               "second consistent reverse observation switches prediction side");
+    const auto reversalConfirmed = reversalPredictor.update(
+        116.0, 100.0, t0 + std::chrono::milliseconds(64), t0 + std::chrono::milliseconds(64),
+        320.0, predictionSettings);
+    expectTrue(reversalConfirmed.x <= 116.0,
+               "confirmed reverse observations never retain the old prediction side");
+
+    TargetPredictor::Result leftPrediction;
+    for (int sample = 1; sample <= 6; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(64 + sample * 8);
+        leftPrediction = reversalPredictor.update(
+            116.0 - sample * 8.0, 100.0, time, time, 320.0, predictionSettings);
+    }
+    expectTrue(leftPrediction.directionLocked && leftPrediction.x < 68.0,
+               "stable reverse movement reacquires a forward lead on the new side");
 
     const auto stoppedPrediction = reversalPredictor.update(
-        108.0, 100.0, t0 + std::chrono::milliseconds(48), t0 + std::chrono::milliseconds(48),
+        68.0, 100.0, t0 + std::chrono::milliseconds(120), t0 + std::chrono::milliseconds(120),
         320.0, predictionSettings);
-    expectTrue(stoppedPrediction.x == 108.0,
+    expectTrue(stoppedPrediction.x == 68.0,
                "first stationary observation immediately withdraws lead");
 
-    TargetPredictor acceleratingPredictor;
-    acceleratingPredictor.update(100.0, 100.0, t0, t0, 320.0, predictionSettings);
-    acceleratingPredictor.update(102.0, 100.0, t0 + std::chrono::milliseconds(8),
-        t0 + std::chrono::milliseconds(8), 320.0, predictionSettings);
-    acceleratingPredictor.update(106.0, 100.0, t0 + std::chrono::milliseconds(16),
-        t0 + std::chrono::milliseconds(16), 320.0, predictionSettings);
-    const auto acceleratingPrediction = acceleratingPredictor.update(
-        112.0, 100.0, t0 + std::chrono::milliseconds(24),
-        t0 + std::chrono::milliseconds(34), 320.0, predictionSettings);
-    expectTrue(acceleratingPrediction.accelerationX > 0.0 &&
-               acceleratingPrediction.offsetX > 0.0,
-               "positive acceleration automatically increases forward lead");
+    expectNear(predictionMoving.offsetX,
+               predictionMoving.velocityX * predictionMoving.leadSeconds *
+                   predictionSettings.predictionStrength,
+               1e-9, "acceleration diagnostics never alter constant-velocity lead");
 
     TargetPredictor disabledPredictor;
     TargetPredictor::Settings disabledPredictionSettings = predictionSettings;

@@ -3,9 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <deque>
 
-// 基于连续真实检测观测的运动学预测器。
-// 输入坐标必须先补偿程序自身视角运动；模块不使用不可靠的目标框测距或武器弹速假设。
+// 基于连续真实检测观测的稳健常速度预测器。
+// 输入坐标必须先补偿程序自身已经发送的视角运动；模块不使用目标框测距或武器弹速假设。
 class TargetPredictor
 {
 public:
@@ -13,17 +14,17 @@ public:
     {
         bool enabled = true;
         double additionalLeadSeconds = 0.050; // 除检测观测年龄外的基础前瞻时间
-        double velocityTimeConstantSeconds = 0.015; // 目标自身速度低通时间常数
-        double predictionStrength = 1.0; // 运动学提前总强度；0关闭位移但保留诊断
+        double velocityTimeConstantSeconds = 0.050; // 兼容旧配置名，实际表示稳健速度回归窗口
+        double predictionStrength = 1.0; // 常速度提前总强度；0关闭位移但保留诊断
     };
 
     struct Result
     {
         double x = 0.0;
         double y = 0.0;
-        double velocityX = 0.0; // 已补偿自身视角运动的目标速度，px/sec
+        double velocityX = 0.0; // 已补偿自身视角运动并通过稳健回归的目标速度，px/sec
         double velocityY = 0.0;
-        double accelerationX = 0.0; // 平滑目标加速度，px/sec^2
+        double accelerationX = 0.0; // 仅供诊断，不参与控制输出，px/sec^2
         double accelerationY = 0.0;
         double leadSeconds = 0.0;
         double offsetX = 0.0;
@@ -69,8 +70,9 @@ public:
         double sampleVelocityY = (y - previousY_) / dt;
         clampVector(sampleVelocityX, sampleVelocityY, span * 6.0);
 
-        updateMotion(sampleVelocityX, sampleVelocityY, dt, span, settings);
-        updateDirection(sampleVelocityX, sampleVelocityY, span);
+        const bool reliableMotion = updateMotion(
+            x, y, observationTime, dt, span, settings);
+        updateDirection(sampleVelocityX, sampleVelocityY, reliableMotion, span);
 
         previousX_ = x;
         previousY_ = y;
@@ -94,16 +96,11 @@ public:
 
         const double speedAlongDirection = std::max(
             0.0, velocityX_ * directionX_ + velocityY_ * directionY_);
-        const double accelerationAlongDirection =
-            accelerationX_ * directionX_ + accelerationY_ * directionY_;
-        const double kinematicDistance = std::max(
-            0.0,
-            speedAlongDirection * leadSeconds +
-            0.5 * accelerationAlongDirection * leadSeconds * leadSeconds);
         const double strength = std::clamp(settings.predictionStrength, 0.0, 4.0);
         const double maxPredictionDistance = std::max(12.0, span * 0.35);
         const double predictionDistance = std::clamp(
-            kinematicDistance * strength, 0.0, maxPredictionDistance);
+            speedAlongDirection * leadSeconds * strength,
+            0.0, maxPredictionDistance);
         const double offsetX = directionX_ * predictionDistance;
         const double offsetY = directionY_ * predictionDistance;
         return {
@@ -117,7 +114,6 @@ public:
     {
         initialized_ = false;
         hasVelocity_ = false;
-        hasAcceleration_ = false;
         directionLocked_ = false;
         suppressPrediction_ = false;
         previousX_ = previousY_ = 0.0;
@@ -127,85 +123,193 @@ public:
         pendingDirectionX_ = pendingDirectionY_ = 0.0;
         pendingDirectionSamples_ = 0;
         stationarySamples_ = 0;
+        observations_.clear();
         previousObservationTime_ = {};
     }
 
 private:
+    using TimePoint = std::chrono::steady_clock::time_point;
+
+    struct Observation
+    {
+        double x = 0.0;
+        double y = 0.0;
+        TimePoint time{};
+    };
+
     static Result baseResult(double x, double y)
     {
         return { x, y, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false };
     }
 
-    void initialize(double x, double y, std::chrono::steady_clock::time_point observationTime)
+    void initialize(double x, double y, TimePoint observationTime)
     {
         initialized_ = true;
         previousX_ = x;
         previousY_ = y;
         previousObservationTime_ = observationTime;
+        observations_.push_back({ x, y, observationTime });
     }
 
-    void updateMotion(double sampleVelocityX, double sampleVelocityY,
+    bool updateMotion(double x, double y, TimePoint observationTime,
                       double dt, double span, const Settings& settings)
     {
-        if (!hasVelocity_)
+        observations_.push_back({ x, y, observationTime });
+
+        // 低于40 ms的窗口在约100 FPS实测中通常只有两三帧，无法区分检测抖动与真实移动。
+        const double windowSeconds = std::clamp(
+            settings.velocityTimeConstantSeconds, 0.040, 0.120);
+        while (observations_.size() > 2 &&
+               std::chrono::duration<double>(
+                   observationTime - observations_[1].time).count() >= windowSeconds)
         {
-            velocityX_ = sampleVelocityX;
-            velocityY_ = sampleVelocityY;
-            hasVelocity_ = true;
-            return;
+            observations_.pop_front();
         }
+        while (observations_.size() > 16)
+            observations_.pop_front();
+
+        const double duration = std::chrono::duration<double>(
+            observations_.back().time - observations_.front().time).count();
+        if (observations_.size() < 4 || duration < 0.025)
+        {
+            velocityX_ = velocityY_ = 0.0;
+            accelerationX_ = accelerationY_ = 0.0;
+            hasVelocity_ = false;
+            return false;
+        }
+
+        // 对窗口内全部坐标做最小二乘直线拟合，避免单帧差分把框抖动放大成数百px/s。
+        double meanTime = 0.0;
+        double meanX = 0.0;
+        double meanY = 0.0;
+        for (const auto& observation : observations_)
+        {
+            meanTime += std::chrono::duration<double>(
+                observation.time - observations_.front().time).count();
+            meanX += observation.x;
+            meanY += observation.y;
+        }
+        const double sampleCount = static_cast<double>(observations_.size());
+        meanTime /= sampleCount;
+        meanX /= sampleCount;
+        meanY /= sampleCount;
+
+        double timeVariance = 0.0;
+        double covarianceX = 0.0;
+        double covarianceY = 0.0;
+        double pathLength = 0.0;
+        for (size_t index = 0; index < observations_.size(); ++index)
+        {
+            const double relativeTime = std::chrono::duration<double>(
+                observations_[index].time - observations_.front().time).count();
+            const double centeredTime = relativeTime - meanTime;
+            timeVariance += centeredTime * centeredTime;
+            covarianceX += centeredTime * (observations_[index].x - meanX);
+            covarianceY += centeredTime * (observations_[index].y - meanY);
+            if (index > 0)
+            {
+                pathLength += std::hypot(
+                    observations_[index].x - observations_[index - 1].x,
+                    observations_[index].y - observations_[index - 1].y);
+            }
+        }
+        if (timeVariance <= 1e-9)
+            return false;
+
+        double fittedVelocityX = covarianceX / timeVariance;
+        double fittedVelocityY = covarianceY / timeVariance;
+        clampVector(fittedVelocityX, fittedVelocityY, span * 6.0);
+
+        // 明显单轴运动时吸附到主轴，避免横移把检测框高度抖动转换成垂直准星摆动。
+        if (std::abs(fittedVelocityY) < std::abs(fittedVelocityX) * 0.35)
+            fittedVelocityY = 0.0;
+        else if (std::abs(fittedVelocityX) < std::abs(fittedVelocityY) * 0.35)
+            fittedVelocityX = 0.0;
 
         const double previousVelocityX = velocityX_;
         const double previousVelocityY = velocityY_;
-        const double velocityTau = std::clamp(
-            settings.velocityTimeConstantSeconds, 0.005, 0.250);
-        const double velocityAlpha = 1.0 - std::exp(-dt / velocityTau);
-        velocityX_ += (sampleVelocityX - velocityX_) * velocityAlpha;
-        velocityY_ += (sampleVelocityY - velocityY_) * velocityAlpha;
-
-        double sampleAccelerationX = (velocityX_ - previousVelocityX) / dt;
-        double sampleAccelerationY = (velocityY_ - previousVelocityY) / dt;
-        clampVector(sampleAccelerationX, sampleAccelerationY, span * 30.0);
-        if (!hasAcceleration_)
+        velocityX_ = fittedVelocityX;
+        velocityY_ = fittedVelocityY;
+        if (hasVelocity_)
         {
-            accelerationX_ = sampleAccelerationX;
-            accelerationY_ = sampleAccelerationY;
-            hasAcceleration_ = true;
-            return;
+            accelerationX_ = (velocityX_ - previousVelocityX) / dt;
+            accelerationY_ = (velocityY_ - previousVelocityY) / dt;
+            clampVector(accelerationX_, accelerationY_, span * 30.0);
+        }
+        else
+        {
+            accelerationX_ = accelerationY_ = 0.0;
+            hasVelocity_ = true;
         }
 
-        const double accelerationTau = std::clamp(velocityTau * 0.60, 0.015, 0.100);
-        const double accelerationAlpha = 1.0 - std::exp(-dt / accelerationTau);
-        accelerationX_ += (sampleAccelerationX - accelerationX_) * accelerationAlpha;
-        accelerationY_ += (sampleAccelerationY - accelerationY_) * accelerationAlpha;
+        const double netDisplacement = std::hypot(
+            observations_.back().x - observations_.front().x,
+            observations_.back().y - observations_.front().y);
+        const double linearity = pathLength > 1e-9 ? netDisplacement / pathLength : 0.0;
+        const double activationDisplacement = std::max(3.0, span * 0.0125);
+        const double activationSpeed = std::max(50.0, span * 0.20);
+        return netDisplacement >= activationDisplacement &&
+               std::hypot(velocityX_, velocityY_) >= activationSpeed &&
+               linearity >= 0.65;
     }
 
-    void updateDirection(double sampleVelocityX, double sampleVelocityY, double span)
+    void updateDirection(double sampleVelocityX, double sampleVelocityY,
+                         bool reliableMotion, double span)
     {
         const double sampleSpeed = std::hypot(sampleVelocityX, sampleVelocityY);
-        const double activationSpeed = std::max(40.0, span * 0.15);
+        const double activationSpeed = std::max(50.0, span * 0.20);
+
         if (sampleSpeed < activationSpeed * 0.50)
         {
             ++stationarySamples_;
             suppressPrediction_ = true;
             pendingDirectionSamples_ = 0;
             if (stationarySamples_ >= 2)
-            {
                 directionLocked_ = false;
-                velocityX_ = velocityY_ = 0.0;
-                accelerationX_ = accelerationY_ = 0.0;
+            return;
+        }
+
+        // 已锁定方向时，当前单帧明确反向必须立即撤销提前，避免准星越过目标后左右横跳。
+        if (directionLocked_ && sampleSpeed >= activationSpeed)
+        {
+            const double rawDirectionX = sampleVelocityX / sampleSpeed;
+            const double rawDirectionY = sampleVelocityY / sampleSpeed;
+            const double rawAlignment =
+                rawDirectionX * directionX_ + rawDirectionY * directionY_;
+            if (rawAlignment < -0.25)
+            {
+                suppressPrediction_ = true;
+                stationarySamples_ = 0;
+                accumulatePendingDirection(rawDirectionX, rawDirectionY);
+                if (pendingDirectionSamples_ >= 3)
+                {
+                    lockPendingDirection();
+                    suppressPrediction_ = false;
+                }
+                return;
             }
+        }
+
+        if (!reliableMotion)
+        {
+            ++stationarySamples_;
+            suppressPrediction_ = true;
+            pendingDirectionSamples_ = 0;
+            if (stationarySamples_ >= 2)
+                directionLocked_ = false;
             return;
         }
         stationarySamples_ = 0;
 
-        const double sampleDirectionX = sampleVelocityX / sampleSpeed;
-        const double sampleDirectionY = sampleVelocityY / sampleSpeed;
+        const double fittedSpeed = std::hypot(velocityX_, velocityY_);
+        const double sampleDirectionX = velocityX_ / fittedSpeed;
+        const double sampleDirectionY = velocityY_ / fittedSpeed;
         if (!directionLocked_)
         {
             accumulatePendingDirection(sampleDirectionX, sampleDirectionY);
             suppressPrediction_ = true;
-            if (pendingDirectionSamples_ >= 3)
+            // 回归窗口本身已包含至少四帧，再确认两次即可形成至少五帧的连续运动证据。
+            if (pendingDirectionSamples_ >= 2)
             {
                 lockPendingDirection();
                 suppressPrediction_ = false;
@@ -215,27 +319,12 @@ private:
 
         const double alignment =
             sampleDirectionX * directionX_ + sampleDirectionY * directionY_;
-        if (alignment < -0.25)
-        {
-            suppressPrediction_ = true;
-            accumulatePendingDirection(sampleDirectionX, sampleDirectionY);
-            if (pendingDirectionSamples_ >= 2)
-            {
-                lockPendingDirection();
-                velocityX_ = sampleVelocityX;
-                velocityY_ = sampleVelocityY;
-                accelerationX_ = accelerationY_ = 0.0;
-                suppressPrediction_ = false;
-            }
-            return;
-        }
-
         pendingDirectionSamples_ = 0;
-        suppressPrediction_ = alignment < 0.20;
+        suppressPrediction_ = alignment < 0.50;
         if (!suppressPrediction_)
         {
-            directionX_ = directionX_ * 0.80 + sampleDirectionX * 0.20;
-            directionY_ = directionY_ * 0.80 + sampleDirectionY * 0.20;
+            directionX_ = directionX_ * 0.85 + sampleDirectionX * 0.15;
+            directionY_ = directionY_ * 0.85 + sampleDirectionY * 0.15;
             normalize(directionX_, directionY_);
         }
     }
@@ -243,7 +332,7 @@ private:
     void accumulatePendingDirection(double x, double y)
     {
         if (pendingDirectionSamples_ == 0 ||
-            x * pendingDirectionX_ + y * pendingDirectionY_ < 0.70)
+            x * pendingDirectionX_ + y * pendingDirectionY_ < 0.80)
         {
             pendingDirectionX_ = x;
             pendingDirectionY_ = y;
@@ -289,7 +378,6 @@ private:
 
     bool initialized_ = false;
     bool hasVelocity_ = false;
-    bool hasAcceleration_ = false;
     bool directionLocked_ = false;
     bool suppressPrediction_ = false;
     double previousX_ = 0.0;
@@ -304,5 +392,6 @@ private:
     double pendingDirectionY_ = 0.0;
     int pendingDirectionSamples_ = 0;
     int stationarySamples_ = 0;
-    std::chrono::steady_clock::time_point previousObservationTime_{};
+    std::deque<Observation> observations_;
+    TimePoint previousObservationTime_{};
 };

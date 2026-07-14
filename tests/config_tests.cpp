@@ -102,10 +102,10 @@ int main()
                    "moving integral remains disabled before field validation");
         expectNear(defaults.prediction_lead_ms, 50.0, 0.0,
                    "default prediction uses kinematic replay lead");
-        expectNear(defaults.prediction_velocity_tau_ms, 15.0, 0.0,
-                   "default prediction uses frame-rate independent velocity smoothing");
+        expectNear(defaults.prediction_velocity_tau_ms, 50.0, 0.0,
+                   "default prediction uses robust velocity regression window");
         expectNear(defaults.prediction_strength, 1.0, 0.0,
-                   "default prediction uses bounded kinematic strength");
+                   "default prediction uses bounded constant-velocity strength");
         expectString(defaults.kmbox_net_ip, "192.168.2.188", "default kmbox net ip");
         expectString(defaults.kmbox_net_port, "13384", "default kmbox net port");
         expectString(defaults.kmbox_net_uuid, "7679E04E", "default kmbox net uuid");
@@ -151,13 +151,25 @@ int main()
         expectTrue(migratedText.find("prediction_lead_ms = 27") != std::string::npos,
                    "saved config writes new prediction lead key");
         expectTrue(migratedText.find("prediction_velocity_tau_ms = 42") != std::string::npos,
-                   "saved config writes new prediction smoothing key");
+                   "saved config writes compatible prediction window key");
         expectTrue(migratedText.find("prediction_strength = 1") != std::string::npos,
-                   "legacy config receives bounded kinematic prediction strength");
+                   "legacy config receives bounded constant-velocity prediction strength");
         expectTrue(migratedText.find("predictionInterval") == std::string::npos,
                    "saved config removes legacy prediction interval key");
     }
     std::filesystem::remove(legacyPath, removeError);
+
+    const std::filesystem::path unsafeWindowPath = "xen_config_prediction_window_test.ini";
+    {
+        std::ofstream unsafeWindowFile(unsafeWindowPath);
+        unsafeWindowFile << "prediction_velocity_tau_ms = 15\n";
+    }
+    Config clampedWindow{};
+    expectTrue(clampedWindow.loadConfig(unsafeWindowPath.string()),
+               "previous prediction window config loads successfully");
+    expectNear(clampedWindow.prediction_velocity_tau_ms, 40.0, 0.0,
+               "unsafe two-frame prediction window migrates to robust minimum");
+    std::filesystem::remove(unsafeWindowPath, removeError);
 
     if (failures != 0)
     {

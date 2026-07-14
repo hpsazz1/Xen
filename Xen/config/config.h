@@ -77,8 +77,8 @@ public:
     // ========== 目标预测 ==========
     bool  prediction_enabled = true;              // 连续真实观测预测总开关
     float prediction_lead_ms = 50.0f;             // 观测年龄之外的基础前瞻，毫秒
-    float prediction_velocity_tau_ms = 15.0f;     // 目标速度低通时间常数，毫秒
-    float prediction_strength = 1.0f;             // 速度与加速度运动学提前总强度
+    float prediction_velocity_tau_ms = 50.0f;     // 兼容旧键名，实际为稳健速度回归窗口，毫秒
+    float prediction_strength = 1.0f;             // 常速度提前总强度
 
     float snapRadius;
     float nearRadius;

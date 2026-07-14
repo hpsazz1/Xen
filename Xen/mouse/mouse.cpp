@@ -124,7 +124,7 @@ void MouseThread::updateConfig(
     predictionSettings.additionalLeadSeconds = std::clamp(
         static_cast<double>(config.prediction_lead_ms) / 1000.0, 0.0, 0.100);
     predictionSettings.velocityTimeConstantSeconds = std::clamp(
-        static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0, 0.005, 0.250);
+        static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0, 0.040, 0.120);
     predictionSettings.predictionStrength = std::clamp(
         static_cast<double>(config.prediction_strength), 0.0, 4.0);
     this->auto_shoot = auto_shoot;

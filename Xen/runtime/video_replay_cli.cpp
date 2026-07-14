@@ -554,10 +554,10 @@ namespace
         std::vector<Candidate> result;
         for (double maxCountsPerSecond : speedLimits)
         {
-            result.push_back({ false, 0.0, 35.0, maxCountsPerSecond, 0.0 });
+            result.push_back({ false, 0.0, 50.0, maxCountsPerSecond, 0.0 });
             for (double lead : { 0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 50.0 })
             {
-                for (double tau : { 15.0, 25.0, 35.0, 50.0, 75.0 })
+                for (double tau : { 40.0, 50.0, 60.0, 75.0, 100.0 })
                 {
                     for (double strength : { 1.0, 1.5, 2.0, 2.5, 3.0 })
                         result.push_back({ true, lead, tau, maxCountsPerSecond, strength });

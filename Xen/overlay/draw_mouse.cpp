@@ -156,16 +156,15 @@ static void draw_mouse_page(MouseSettingsPage page)
 
         OverlayUI::SliderFloatRow("额外前瞻(ms)", &config.prediction_lead_ms, 0.0f, 100.0f, "%.0f", "##pred_lead_ms",
             "在自动补偿真实观测年龄之外增加的固定前瞻时间。\n"
-            "新运动学模型视频候选为50ms；最终位移仍会随目标速度和加速度自动变化。");
+            "稳健常速度模型默认50ms；最终位移随已确认的目标速度自动变化。");
 
-        OverlayUI::SliderFloatRow("速度平滑(ms)", &config.prediction_velocity_tau_ms, 5.0f, 250.0f, "%.0f", "##pred_velocity_tau_ms",
-            "目标速度估计的时间常数，按真实检测时间戳自动适配帧率。\n"
-            "数值越小变向响应越快，数值越大速度越平稳。\n"
-            "新运动学模型视频候选为15ms，需通过实机验证后再确定默认值。");
+        OverlayUI::SliderFloatRow("速度窗口(ms)", &config.prediction_velocity_tau_ms, 40.0f, 120.0f, "%.0f", "##pred_velocity_tau_ms",
+            "使用窗口内全部真实时间戳观测回归目标速度。\n"
+            "数值越小变向响应越快，数值越大越能抑制检测框抖动；默认50ms。");
 
         OverlayUI::SliderFloatRow("预测强度", &config.prediction_strength, 0.0f, 4.0f, "%.2f", "##pred_strength",
-            "缩放速度与加速度共同计算出的自动提前距离。\n"
-            "目标越快或持续加速，提前量自动增大；减速、停止或疑似变向时自动收回。\n"
+            "缩放已确认速度计算出的自动提前距离。\n"
+            "目标越快，提前量越大；停止、轨迹不稳定或疑似变向时立即收回。\n"
             "不使用目标框尺寸估算距离，也不假设具体武器弹速。");
 
         ImGui::TextDisabled("仅真实检测观测驱动；目标丢失或切换时立即清零");
