@@ -337,6 +337,10 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             @($samples | Where-Object { [int]$_.VerticalCatchUp -eq 1 }).Count
         }
         else { 0 }
+        $horizontalCatchUpRows = if ($rows[0].PSObject.Properties.Name -contains 'HorizontalCatchUp') {
+            @($samples | Where-Object { [int]$_.HorizontalCatchUp -eq 1 }).Count
+        }
+        else { 0 }
         $sampleDurationSeconds = (
             [double]$samples[-1].Timestamp - [double]$samples[0].Timestamp) / 1000.0
         $signedOutputCounts = [double]($samples | Measure-Object $finalMoveColumn -Sum).Sum
@@ -416,6 +420,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             PredictionInterruptionCount = $predictionInterruptionCount
             P50PredictionActiveRunFrames = [math]::Round($predictionActiveRunP50Frames, 1)
             MovingInsideSettlePct = [math]::Round(100.0 * $movingInsideSettleRows / [math]::Max(1, $samples.Count), 1)
+            HorizontalCatchUpPct = [math]::Round(100.0 * $horizontalCatchUpRows / [math]::Max(1, $samples.Count), 1)
             VerticalCatchUpPct = [math]::Round(100.0 * $verticalCatchUpRows / [math]::Max(1, $samples.Count), 1)
             InferenceFps = [math]::Round([double]($samples | Measure-Object InferenceFPS -Average).Average, 1)
             SourceReceiveFps = [math]::Round([double]($samples | Measure-Object SourceReceiveFPS -Average).Average, 1)
@@ -487,6 +492,7 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         MeanP50PredictionActiveRunFrames = [math]::Round(
             [double]($group | Measure-Object P50PredictionActiveRunFrames -Average).Average, 1)
         MovingInsideSettlePct = [math]::Round([double](($group | ForEach-Object { $_.MovingInsideSettlePct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
+        HorizontalCatchUpPct = [math]::Round([double](($group | ForEach-Object { $_.HorizontalCatchUpPct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         VerticalCatchUpPct = [math]::Round([double](($group | ForEach-Object { $_.VerticalCatchUpPct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         ReversalCount = [int]($group | Measure-Object ReversalCount -Sum).Sum
         ReversalRateHz = [math]::Round(
@@ -532,7 +538,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'P50PredictionLeadPx', 'P95PredictionLeadPx', 'MeanP50PredictionLeadPx', 'MeanP95PredictionLeadPx',
         'PredictionSideFlipCount', 'PredictionInterruptionCount',
         'P50PredictionActiveRunFrames', 'MeanP50PredictionActiveRunFrames',
-        'MovingInsideSettlePct', 'VerticalCatchUpPct', 'InferenceFps',
+        'MovingInsideSettlePct', 'HorizontalCatchUpPct', 'VerticalCatchUpPct', 'InferenceFps',
         'SourceReceiveFps', 'ObservationAgeAvgMs', 'ObservationAgeP95Ms', 'MaxQueuedMoves',
         'ReversalCount', 'ReversalRateHz', 'RecoveredReversals', 'RecoveryMeanMs', 'RecoveryP95Ms',
         'SourceGeometry', 'BuildBackend', 'BuildRevision', 'BuildTimestampUtc', 'ControllerRevision'
@@ -547,6 +553,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize

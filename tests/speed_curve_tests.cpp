@@ -157,10 +157,11 @@ int main()
     expectTrue(traceHeader.find("NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
                "basic pipeline keeps ndi compatibility diagnostics");
     expectTrue(traceHeader.find("FrameCountLimit,ErrorMotion") != std::string::npos &&
-               traceHeader.find("MovingInsideSettle,VerticalCatchUp,SpeedLimited,Settled") != std::string::npos,
+               traceHeader.find("MovingInsideSettle,HorizontalCatchUp,VerticalCatchUp,SpeedLimited,Settled") != std::string::npos,
                "basic pipeline reports controller speed limiting");
-    expectTrue(traceHeader.find("ResponseSeconds,EffectiveResponseSecondsY") != std::string::npos,
-               "basic pipeline reports effective vertical catch-up response");
+    expectTrue(traceHeader.find(
+        "ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY") != std::string::npos,
+        "basic pipeline reports effective per-axis catch-up response");
     expectTrue(traceHeader.find(
         "FrameID,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision") != std::string::npos,
         "basic pipeline identifies the executable and controller revision");
@@ -174,10 +175,10 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r24") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r25") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
-               traceHeader.find("ResponseSeconds,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
+               traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
     expectTrue(traceHeader.find(
         "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictedX,PredictedY") != std::string::npos,
@@ -532,6 +533,12 @@ int main()
     expectTrue(oscillatingPrediction.oscillationSuppressed &&
                oscillatingPrediction.offsetX == 0.0,
                "three reliable reversals inside one point five seconds keep aim on the observed target");
+    expectNear(TargetPredictor::boxHoldCoordinate(160.0, 140.0, 50.0), 160.0, 0.0,
+               "oscillation box hold stops moving while the crosshair is inside");
+    expectNear(TargetPredictor::boxHoldCoordinate(160.0, 170.0, 50.0), 172.0, 0.0,
+               "oscillation box hold returns only to the nearest inset edge");
+    expectNear(TargetPredictor::boxHoldCoordinate(160.0, 80.0, 50.0), 128.0, 0.0,
+               "oscillation box hold handles the opposite outside edge");
 
     TargetPredictor highSpeedPredictor;
     TargetPredictor::Result highSpeedPrediction{};
@@ -666,6 +673,14 @@ int main()
                "vertical catch-up halves the proportional response time");
     expectTrue(catchUpVerticalOutput.countsY / 20.0 > normalVerticalOutput.countsY / 15.0,
                "vertical catch-up increases per-pixel response without changing max speed");
+    verticalCatchUpController.reset();
+    const auto catchUpHorizontalOutput = verticalCatchUpController.update(
+        20.0, 0.0, 0.010, 1.0, 1.0, verticalCatchUpSettings);
+    expectTrue(catchUpHorizontalOutput.horizontalCatchUp &&
+               !catchUpHorizontalOutput.verticalCatchUp,
+               "horizontal catch-up activates independently for jump lateral error");
+    expectNear(catchUpHorizontalOutput.effectiveResponseSecondsX, 0.040, 1e-12,
+               "horizontal catch-up halves only the horizontal response time");
 
     // 生产速率必须使用捕获窗统计出的实际 FPS 换算单帧预算，而不是绑定某个设备或固定帧率。
     // 选取本轮 CSV 的约 127/143 FPS 和未来可能出现的 240 FPS，验证每秒总预算始终一致。
@@ -740,8 +755,9 @@ int main()
     };
     const double proportionalRampError = simulateMovingTarget(0.0);
     const double integralRampError = simulateMovingTarget(0.320);
-    expectTrue(std::abs(proportionalRampError) > 35.0,
-               "proportional controller keeps ramp steady-state error");
+    expectTrue(std::abs(proportionalRampError) > 10.0 &&
+               std::abs(proportionalRampError) > std::abs(integralRampError) * 2.0,
+               "catch-up reduces but does not eliminate proportional ramp steady-state error");
     expectTrue(std::abs(integralRampError) < 5.0,
                "pi controller removes moving-target steady-state error");
 

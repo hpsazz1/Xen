@@ -1169,6 +1169,15 @@ void MouseThread::moveMousePivot(
     const double filteredScreenY = filtered.second - viewAtControl.second;
     lastPredictionResult.x -= viewAtControl.first;
     lastPredictionResult.y -= viewAtControl.second;
+    if (lastPredictionResult.oscillationSuppressed)
+    {
+        const double viewDeltaX = viewAtObservation.first - viewAtControl.first;
+        const double viewDeltaY = viewAtObservation.second - viewAtControl.second;
+        lastPredictionResult.x = TargetPredictor::boxHoldCoordinate(
+            center_x, target.x + viewDeltaX, target.w);
+        lastPredictionResult.y = TargetPredictor::boxHoldCoordinate(
+            center_y, target.y + viewDeltaY, target.h);
+    }
     const double errorX = lastPredictionResult.x - center_x;
     const double errorY = lastPredictionResult.y - center_y;
 
@@ -1268,6 +1277,7 @@ void MouseThread::moveMousePivot(
         pf->finalMx = mx;
         pf->finalMy = my;
         pf->responseSeconds = settings.responseSeconds;
+        pf->effectiveResponseSecondsX = output.effectiveResponseSecondsX;
         pf->effectiveResponseSecondsY = output.effectiveResponseSecondsY;
         pf->integralTimeSeconds = settings.integralTimeSeconds;
         pf->maxCountsPerSecond = settings.maxCountsPerSecond;
@@ -1275,6 +1285,7 @@ void MouseThread::moveMousePivot(
         pf->errorMotion = output.errorMotion;
         pf->settleMotionThreshold = output.settleMotionThreshold;
         pf->movingInsideSettle = output.movingInsideSettle;
+        pf->horizontalCatchUp = output.horizontalCatchUp;
         pf->verticalCatchUp = output.verticalCatchUp;
         pf->speedLimited = output.speedLimited;
         pf->settled = output.settled;

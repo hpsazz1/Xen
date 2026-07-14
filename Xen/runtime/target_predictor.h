@@ -69,6 +69,21 @@ public:
                screenViewAlignment < -0.35;
     }
 
+    // 高频往返模式不再追逐框内pivot；准星已在框内时目标坐标固定为准星中心，
+    // 越界时只追到带少量内缩的最近边缘，避免在目标框左右两侧持续摆动。
+    static double boxHoldCoordinate(
+        double aimCenter, double boxStart, double boxLength, double inset = 2.0)
+    {
+        if (!std::isfinite(aimCenter) || !std::isfinite(boxStart) ||
+            !std::isfinite(boxLength) || boxLength <= 0.0)
+        {
+            return aimCenter;
+        }
+        const double safeInset = std::clamp(inset, 0.0, boxLength * 0.5);
+        return std::clamp(
+            aimCenter, boxStart + safeInset, boxStart + boxLength - safeInset);
+    }
+
     // 自运动伪迹通常不会只持续一个观测帧。门控命中后继续撤销四个后续观测，
     // 覆盖约100 FPS下40 ms的控制响应尾迹，同时不清空真实目标的稳健速度与方向状态。
     void applySelfMotionSuppression(Result& result, bool artifactDetected)

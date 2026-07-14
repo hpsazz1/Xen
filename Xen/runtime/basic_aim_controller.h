@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 24;
+inline constexpr int kBasicAimControllerRevision = 25;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -34,10 +34,12 @@ public:
         double frameCountLimit = 0.0;
         double errorMotion = 0.0;
         double settleMotionThreshold = 0.0;
+        double effectiveResponseSecondsX = 0.0;
         double effectiveResponseSecondsY = 0.0;
         bool settled = false;
         bool speedLimited = false; // 本次输出是否被最大设备速率截断
         bool movingInsideSettle = false;
+        bool horizontalCatchUp = false; // 水平大误差是否使用短时快速比例响应
         bool verticalCatchUp = false; // 垂直大误差是否使用短时快速比例响应
     };
 
@@ -55,11 +57,13 @@ public:
 
         const double settleRadius = std::max(0.0, settings.settleRadiusPixels);
         const double releaseRadius = std::max(settleRadius, settings.releaseRadiusPixels);
-        // jump是突发垂直位移，r22实测仅2.4%帧触发总速度上限，瓶颈来自80 ms比例响应。
-        // 仅当Y误差达到至少16 px时把Y比例响应缩短一半；进入中心后自动恢复，
-        // X轴、积分、总速度预算和小误差稳定区完全不变。
-        const double verticalCatchUpThreshold = std::max(16.0, releaseRadius * 2.0);
-        out.verticalCatchUp = std::abs(errorY) >= verticalCatchUpThreshold;
+        // jump在r24仍有72.6 px水平框中心P95，而总速度限速仅5.7%；瓶颈仍是80 ms比例响应。
+        // 任一轴误差达到至少16 px时仅缩短该轴比例响应；进入中心后自动恢复，
+        // 积分、二维总速度预算和小误差稳定区完全不变。
+        const double catchUpThreshold = std::max(16.0, releaseRadius * 2.0);
+        out.horizontalCatchUp = std::abs(errorX) >= catchUpThreshold;
+        out.verticalCatchUp = std::abs(errorY) >= catchUpThreshold;
+        out.effectiveResponseSecondsX = out.horizontalCatchUp ? response * 0.5 : response;
         out.effectiveResponseSecondsY = out.verticalCatchUp ? response * 0.5 : response;
         const double errorMotion = hasPreviousError_
             ? std::hypot(errorX - previousErrorX_, errorY - previousErrorY_) : 0.0;
@@ -115,7 +119,8 @@ public:
             return out;
         }
 
-        const double responseFractionX = 1.0 - std::exp(-dt / response);
+        const double responseFractionX =
+            1.0 - std::exp(-dt / out.effectiveResponseSecondsX);
         const double responseFractionY =
             1.0 - std::exp(-dt / out.effectiveResponseSecondsY);
         const double proportionalCountsX = errorX * responseFractionX * countsPerPixelX;
