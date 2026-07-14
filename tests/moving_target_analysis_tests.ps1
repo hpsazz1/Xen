@@ -81,6 +81,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 71.4 $reverseTrials[0].PredictionActivePct 'Kinematic prediction activation must be summarized.'
     Assert-Equal 0 $reverseTrials[0].PredictionSelfMotionSuppressedPct 'Legacy CSV without self-motion gate diagnostics must remain compatible.'
     Assert-Equal 0 $reverseTrials[0].PredictionOscillationSuppressedPct 'Legacy CSV without oscillation gate diagnostics must remain compatible.'
+    Assert-Equal 0 $reverseTrials[0].PredictionHighSpeedSuppressedPct 'Legacy CSV without high-speed gate diagnostics must remain compatible.'
     Assert-Equal 30 $reverseTrials[0].P50PredictionLeadPx 'Kinematic median lead must use active prediction offsets.'
     Assert-Equal 1 $reverseTrials[0].PredictionInterruptionCount 'Prediction active-to-inactive interruptions must be counted.'
     Assert-Equal 2 $reverseTrials[0].P50PredictionActiveRunFrames 'Prediction active run length must expose one-frame gating churn.'

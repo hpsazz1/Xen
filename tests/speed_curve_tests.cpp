@@ -174,13 +174,13 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r23") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r24") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
     expectTrue(traceHeader.find(
-        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictedX,PredictedY") != std::string::npos,
+        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictedX,PredictedY") != std::string::npos,
         "basic pipeline reports prediction diagnostics");
     traceFile.close();
     std::remove(tracePath);
@@ -511,7 +511,7 @@ int main()
     int oscillatingSample = 0;
     for (int segment = 0; segment < 5; ++segment)
     {
-        const double step = segment % 2 == 0 ? 4.0 : -4.0;
+        const double step = segment % 2 == 0 ? 2.0 : -2.0;
         for (int frame = 0; frame < 14; ++frame)
         {
             oscillatingX += step;
@@ -532,6 +532,21 @@ int main()
     expectTrue(oscillatingPrediction.oscillationSuppressed &&
                oscillatingPrediction.offsetX == 0.0,
                "three reliable reversals inside one point five seconds keep aim on the observed target");
+
+    TargetPredictor highSpeedPredictor;
+    TargetPredictor::Result highSpeedPrediction{};
+    double highSpeedX = 100.0;
+    for (int sample = 0; sample < 18; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        highSpeedX += 2.0 + sample * 0.5;
+        highSpeedPrediction = highSpeedPredictor.update(
+            highSpeedX, 100.0, time, time,
+            320.0, predictionSettings);
+    }
+    expectTrue(highSpeedPrediction.highSpeedSuppressed &&
+               highSpeedPrediction.offsetX == 0.0,
+               "high-speed accelerating motion outside the constant-velocity envelope follows the observed box");
 
     TargetPredictor reversalPredictor;
     for (int sample = 0; sample < 10; ++sample)

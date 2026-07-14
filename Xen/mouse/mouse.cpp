@@ -1252,6 +1252,8 @@ void MouseThread::moveMousePivot(
         pf->predictionSelfMotionSuppressed = lastPredictionResult.selfMotionSuppressed;
         pf->predictionOscillationSuppressed =
             lastPredictionResult.oscillationSuppressed;
+        pf->predictionHighSpeedSuppressed =
+            lastPredictionResult.highSpeedSuppressed;
         pf->predictedX = lastPredictionResult.x;
         pf->predictedY = lastPredictionResult.y;
         pf->errorX = errorX;

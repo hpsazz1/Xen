@@ -33,6 +33,7 @@ public:
         bool applied = false;
         bool selfMotionSuppressed = false;
         bool oscillationSuppressed = false; // 高频往返模式仅关闭提前量，基础跟踪保持生效
+        bool highSpeedSuppressed = false; // 超出已验证常速度范围时撤销不可信外推
     };
 
     // 静止目标被程序拉向中心时，补偿残差可能表现为“预测速度继续向误差外侧”。
@@ -144,8 +145,19 @@ public:
             sampleVelocityX, sampleVelocityY, reliableMotion, span, observationTime);
         const bool oscillationSuppressed =
             observationTime < oscillationSuppressedUntil_;
+        // DML约93 FPS下，jump的高速且高加速度阶段连续两轮都放大P95；稳定高速直线
+        // 仍符合常速度模型，不能仅因速度快而误杀。速度与加速度同时越界才跟随观测框。
+        const bool highSpeedTransient = directionLocked_ &&
+            std::hypot(velocityX_, velocityY_) > span * 1.25 &&
+            std::hypot(accelerationX_, accelerationY_) > span * 5.0;
+        if (highSpeedTransient)
+            ++highSpeedTransientSamples_;
+        else
+            highSpeedTransientSamples_ = 0;
+        // 单帧反向检测跳点同样会产生高加速度；连续三个观测才认定为真实高速瞬态。
+        const bool highSpeedSuppressed = highSpeedTransientSamples_ >= 3;
         if (directionLocked_ && predictionEstablished_ &&
-            !suppressPrediction_ && !oscillationSuppressed)
+            !suppressPrediction_ && !oscillationSuppressed && !highSpeedSuppressed)
             ++continuousPredictionFrames_;
         else
             continuousPredictionFrames_ = 0;
@@ -165,13 +177,14 @@ public:
         // 方向锁定只代表回归窗口初步同向；继续收到四次可靠方向后才释放提前量。
         // static实测的补偿残差通常仅维持1~3帧，会在输出前被停止或自运动门控撤销。
         if (!directionLocked_ || !predictionEstablished_ ||
-            suppressPrediction_ || oscillationSuppressed)
+            suppressPrediction_ || oscillationSuppressed || highSpeedSuppressed)
         {
             Result result{
                 x, y, velocityX_, velocityY_, accelerationX_, accelerationY_,
                 leadSeconds, 0.0, 0.0, directionLocked_, true
             };
             result.oscillationSuppressed = oscillationSuppressed;
+            result.highSpeedSuppressed = highSpeedSuppressed;
             return result;
         }
 
@@ -223,6 +236,7 @@ public:
         oscillationSuppressedUntil_ = {};
         hasCommittedDirection_ = false;
         committedDirectionX_ = committedDirectionY_ = 0.0;
+        highSpeedTransientSamples_ = 0;
         observations_.clear();
         previousObservationTime_ = {};
     }
@@ -267,6 +281,7 @@ private:
         reliableDirectionSamples_ = 0;
         selfMotionRearmPending_ = true;
         continuousPredictionFrames_ = 0;
+        highSpeedTransientSamples_ = 0;
         observations_.clear();
         if (initialized_)
             observations_.push_back({ previousX_, previousY_, previousObservationTime_ });
@@ -434,7 +449,7 @@ private:
             // 回归窗口本身已包含至少四帧，再确认两次即可形成至少五帧的连续运动证据。
             if (pendingDirectionSamples_ >= 2)
             {
-                lockPendingDirection(observationTime);
+                lockPendingDirection(observationTime, span);
                 suppressPrediction_ = false;
             }
             return;
@@ -451,7 +466,7 @@ private:
             accumulatePendingDirection(sampleDirectionX, sampleDirectionY);
             if (pendingDirectionSamples_ >= 2)
             {
-                lockPendingDirection(observationTime);
+                lockPendingDirection(observationTime, span);
                 suppressPrediction_ = false;
             }
             return;
@@ -486,11 +501,12 @@ private:
         ++pendingDirectionSamples_;
     }
 
-    void lockPendingDirection(TimePoint observationTime)
+    void lockPendingDirection(TimePoint observationTime, double span)
     {
         if (hasCommittedDirection_ &&
             pendingDirectionX_ * committedDirectionX_ +
-                pendingDirectionY_ * committedDirectionY_ < -0.25)
+                pendingDirectionY_ * committedDirectionY_ < -0.25 &&
+            std::hypot(velocityX_, velocityY_) <= span)
         {
             // reverse实测常先因低速或窗口退化解锁，再从相反方向重新建立。
             // 在统一锁定入口比较最后一次可靠方向，避免只统计“锁定状态内直接翻转”。
@@ -579,6 +595,7 @@ private:
     bool hasCommittedDirection_ = false; // 是否存在跨解锁保留的最后可靠方向
     double committedDirectionX_ = 0.0;
     double committedDirectionY_ = 0.0;
+    int highSpeedTransientSamples_ = 0; // 连续高速高加速度观测数，隔离单帧跳点
     std::deque<Observation> observations_;
     TimePoint previousObservationTime_{};
 };

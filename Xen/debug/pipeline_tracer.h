@@ -59,6 +59,7 @@ struct PipelineFrame
     bool predictionDirectionLocked = false;
     bool predictionSelfMotionSuppressed = false;
     bool predictionOscillationSuppressed = false; ///< 高频可靠换向门控是否撤销框外提前量
+    bool predictionHighSpeedSuppressed = false; ///< 高速高加速度是否超出常速度可信范围
     double predictedX = 0.0;
     double predictedY = 0.0;
 
