@@ -140,7 +140,7 @@ public:
         const bool reliableMotion = updateMotion(
             x, y, observationTime, dt, span, settings);
         updateDirection(sampleVelocityX, sampleVelocityY, reliableMotion, span);
-        if (directionLocked_ && !suppressPrediction_)
+        if (directionLocked_ && predictionEstablished_ && !suppressPrediction_)
             ++continuousPredictionFrames_;
         else
             continuousPredictionFrames_ = 0;
@@ -157,7 +157,9 @@ public:
         const double leadSeconds = std::clamp(
             observationAge + settings.additionalLeadSeconds, 0.0, 0.120);
 
-        if (!directionLocked_ || suppressPrediction_)
+        // 方向锁定只代表回归窗口初步同向；继续收到三次可靠方向后才释放提前量。
+        // static实测的补偿残差通常仅维持1~3帧，会在输出前被停止或自运动门控撤销。
+        if (!directionLocked_ || !predictionEstablished_ || suppressPrediction_)
         {
             return {
                 x, y, velocityX_, velocityY_, accelerationX_, accelerationY_,
