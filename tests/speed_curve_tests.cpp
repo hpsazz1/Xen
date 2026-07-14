@@ -171,7 +171,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r12") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r13") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
@@ -332,6 +332,31 @@ int main()
     selfMotionHoldPredictor.applySelfMotionSuppression(resetResult, false);
     expectTrue(!resetResult.selfMotionSuppressed,
                "tracking reset clears the self-motion suppression hold");
+
+    TargetPredictor selfMotionRearmPredictor;
+    TargetPredictor::Result rearmPrediction{};
+    for (int sample = 0; sample < 7; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        rearmPrediction = selfMotionRearmPredictor.update(
+            100.0 + sample * 8.0, 100.0, time, time, 320.0, predictionSettings);
+    }
+    expectTrue(rearmPrediction.directionLocked && rearmPrediction.offsetX > 0.0,
+               "self-motion rearm test starts from an established prediction");
+    selfMotionRearmPredictor.applySelfMotionSuppression(rearmPrediction, true);
+    for (int frame = 1; frame <= 4; ++frame)
+    {
+        const auto time = t0 + std::chrono::milliseconds((6 + frame) * 8);
+        rearmPrediction = selfMotionRearmPredictor.update(
+            148.0 - frame * 4.0, 100.0, time, time, 320.0, predictionSettings);
+        selfMotionRearmPredictor.applySelfMotionSuppression(rearmPrediction, false);
+    }
+    const auto firstPostHoldPrediction = selfMotionRearmPredictor.update(
+        128.0, 100.0, t0 + std::chrono::milliseconds(88),
+        t0 + std::chrono::milliseconds(88), 320.0, predictionSettings);
+    expectTrue(!firstPostHoldPrediction.directionLocked &&
+               firstPostHoldPrediction.offsetX == 0.0,
+               "self-motion response tail cannot immediately rearm a reverse prediction");
 
     TargetPredictor irregularPredictor;
     irregularPredictor.update(

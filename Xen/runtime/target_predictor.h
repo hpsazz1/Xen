@@ -85,7 +85,13 @@ public:
         result.selfMotionSuppressed = true;
 
         if (!artifactDetected)
+        {
             --selfMotionSuppressionFramesRemaining_;
+            // 保持期内的坐标变化主要来自控制器过冲和检测框回弹，不能作为真实反向运动证据。
+            // 尾帧结束时只丢弃运动学证据，保留当前观测基点，让后续新观测重新确认方向。
+            if (selfMotionSuppressionFramesRemaining_ == 0)
+                discardMotionEvidence();
+        }
     }
 
     Result update(double x, double y,
@@ -208,6 +214,25 @@ private:
         previousY_ = y;
         previousObservationTime_ = observationTime;
         observations_.push_back({ x, y, observationTime });
+    }
+
+    void discardMotionEvidence()
+    {
+        hasVelocity_ = false;
+        directionLocked_ = false;
+        suppressPrediction_ = false;
+        predictionEstablished_ = false;
+        velocityX_ = velocityY_ = 0.0;
+        accelerationX_ = accelerationY_ = 0.0;
+        directionX_ = directionY_ = 0.0;
+        pendingDirectionX_ = pendingDirectionY_ = 0.0;
+        pendingDirectionSamples_ = 0;
+        stationarySamples_ = 0;
+        unreliableSamples_ = 0;
+        reliableDirectionSamples_ = 0;
+        observations_.clear();
+        if (initialized_)
+            observations_.push_back({ previousX_, previousY_, previousObservationTime_ });
     }
 
     bool updateMotion(double x, double y, TimePoint observationTime,
