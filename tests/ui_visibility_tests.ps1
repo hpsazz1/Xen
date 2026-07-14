@@ -1,0 +1,26 @@
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$mouseUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_mouse.cpp') -Raw -Encoding UTF8
+$overlayUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\overlay.cpp') -Raw -Encoding UTF8
+
+if ($mouseUi -match 'false\s*&&\s*shouldDrawMousePage\(page,\s*MouseSettingsPage::Prediction\)') {
+    throw 'Prediction settings page is compile-time hidden.'
+}
+if ($mouseUi -notmatch 'shouldDrawMousePage\(page,\s*MouseSettingsPage::Prediction\)\s*&&') {
+    throw 'Prediction settings page has no active draw condition.'
+}
+foreach ($control in @('##pred_enabled', '##pred_lead_ms', '##pred_velocity_tau_ms')) {
+    if ($mouseUi -notmatch $control) {
+        throw "Prediction settings control is missing: $control"
+    }
+}
+if ($overlayUi -notmatch '\{[^\r\n]*draw_mouse_prediction[^\r\n]*SidebarIconKind::Curve\s*\}') {
+    throw 'Prediction settings page is not registered in the sidebar.'
+}
+
+Write-Output 'prediction ui visibility tests passed'

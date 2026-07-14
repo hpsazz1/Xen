@@ -83,7 +83,7 @@ enum class MouseSettingsPage
     All,         // 所有页面
     Movement,    // 移动相关（FOV、速度倍率、目标修正）
     Trajectory,  // 轨迹相关（Wind Mouse、Bezier、EMA）
-    Prediction,  // 预测（预测间隔 + 卡尔曼滤波）
+    Prediction,  // 连续真实观测预测
     Assist,      // 辅助（自动射击 / 开火拟人 / 急停 / 解锁Y / 射击修正）
     Profiles,    // 配置文件管理（Game Profile + Manage Profiles）
     Input        // 输入法
@@ -140,15 +140,9 @@ static void draw_mouse_page(MouseSettingsPage page)
     }
 
     // ========== Prediction（预测）设置 ==========
-    if (false && shouldDrawMousePage(page, MouseSettingsPage::Prediction) &&
+    if (shouldDrawMousePage(page, MouseSettingsPage::Prediction) &&
         OverlayUI::BeginSection("预判参数", "mouse_section_prediction"))
     {
-        if (OverlayUI::CheckboxRow("自动优化参数", &config.auto_derive_tracker_params,
-            "##auto_derive_control",
-            "根据检测分辨率和实际捕获帧率自动推导跟踪、预测与目标修正参数。\n"
-            "推荐保持开启，仅需配置游戏灵敏度与视野。"))
-            OverlayConfig_MarkDirty();
-
         if (OverlayUI::CheckboxRow("启用预测", &config.prediction_enabled, "##pred_enabled",
             "预测总开关。\n"
             "开启：根据目标运动轨迹推算未来位置，提前瞄准\n"
@@ -918,7 +912,7 @@ void draw_mouse_movement()
     draw_mouse_page(MouseSettingsPage::Movement);
 }
 
-// 仅绘制预测设置（预测间隔 + 卡尔曼滤波）
+// 仅绘制连续真实观测预测设置
 void draw_mouse_prediction()
 {
     draw_mouse_page(MouseSettingsPage::Prediction);

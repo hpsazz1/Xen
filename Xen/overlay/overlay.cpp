@@ -444,6 +444,7 @@ static const OverlayTabItem kOverlayTabs[] = {
     { "目标偏移",      "Aim",         "身体/头部 Y 偏移量、自动瞄准开关。",             draw_target,                  SidebarIconKind::Crosshair },
     { "追踪状态",      "Aim",         "活跃追踪列表、ID/类别/丢失帧统计。",             draw_tracker,                 SidebarIconKind::Crosshair },
     { "移动参数",      "Aim",         "基础滤波、响应时间、设备最大计数速度。",          draw_mouse_movement,          SidebarIconKind::Move },
+    { "预测参数",      "Aim",         "连续观测预测开关、额外前瞻和速度平滑。",          draw_mouse_prediction,        SidebarIconKind::Curve },
     { "射击辅助",      "Aim",         "自动射击、压枪、急停、解锁Y轴。",                draw_mouse_assist,            SidebarIconKind::Spark },
     { "灵敏度配置",    "Aim",         "游戏灵敏度、偏航/俯仰、FOV缩放预设。",           draw_mouse_profiles,          SidebarIconKind::User },
 
@@ -452,7 +453,7 @@ static const OverlayTabItem kOverlayTabs[] = {
     { "面板外观",      "Control",     "透明度、UI缩放、录屏隐藏。",                     draw_overlay,                 SidebarIconKind::Sliders },
 
     { "游戏叠加",      "Display",     "游戏内覆盖层开关与绘制项。",                     draw_game_overlay_general,    SidebarIconKind::Monitor },
-    { "绘制样式",      "Display",     "方框/捕获框/未来点的颜色与粗细。",              draw_game_overlay_visuals,    SidebarIconKind::Palette },
+    { "绘制样式",      "Display",     "方框与捕获框的颜色、透明度和粗细。",             draw_game_overlay_visuals,    SidebarIconKind::Palette },
     { "目标标记",      "Display",     "图标路径/尺寸/锚点/类别筛选。",                 draw_game_overlay_icon,       SidebarIconKind::Image },
 
     { "性能统计",      "System",      "预处理/推理/NMS 耗时图表与采集详情。",          draw_stats,                   SidebarIconKind::Bars },

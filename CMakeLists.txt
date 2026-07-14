@@ -394,6 +394,10 @@ if(BUILD_TESTING)
         NAME xen.analysis.dml_performance
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/dml_performance_analysis_tests.ps1"
     )
+    add_test(
+        NAME xen.ui.prediction_visibility
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/ui_visibility_tests.ps1"
+    )
 
     add_executable(xen_algorithm_tests
         "${CMAKE_SOURCE_DIR}/tests/speed_curve_tests.cpp"
