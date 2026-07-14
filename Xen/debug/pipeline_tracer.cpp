@@ -103,8 +103,8 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
          << "FinalMx,FinalMy,"
-         << "ResponseSeconds,IntegralTimeSeconds,MaxCountsPerSecond,FrameCountLimit,"
-         << "ErrorMotion,SettleMotionThreshold,MovingInsideSettle,SpeedLimited,Settled,QueuedMoveCount\n";
+         << "ResponseSeconds,EffectiveResponseSecondsY,IntegralTimeSeconds,MaxCountsPerSecond,FrameCountLimit,"
+         << "ErrorMotion,SettleMotionThreshold,MovingInsideSettle,VerticalCatchUp,SpeedLimited,Settled,QueuedMoveCount\n";
 
     for (const auto& f : frames)
     {
@@ -157,11 +157,13 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.requestedCountsX << ',' << f.requestedCountsY << ','
              << f.integralCountsX << ',' << f.integralCountsY << ','
              << f.finalMx << ',' << f.finalMy << ','
-             << f.responseSeconds << ',' << f.integralTimeSeconds << ','
+             << f.responseSeconds << ',' << f.effectiveResponseSecondsY << ','
+             << f.integralTimeSeconds << ','
              << f.maxCountsPerSecond << ','
              << f.frameCountLimit << ','
              << f.errorMotion << ',' << f.settleMotionThreshold << ','
              << (f.movingInsideSettle ? '1' : '0') << ','
+             << (f.verticalCatchUp ? '1' : '0') << ','
              << (f.speedLimited ? '1' : '0') << ','
              << (f.settled ? '1' : '0') << ','
              << f.queuedMoveCount << '\n';

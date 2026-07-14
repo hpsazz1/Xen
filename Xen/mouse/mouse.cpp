@@ -1266,12 +1266,14 @@ void MouseThread::moveMousePivot(
         pf->finalMx = mx;
         pf->finalMy = my;
         pf->responseSeconds = settings.responseSeconds;
+        pf->effectiveResponseSecondsY = output.effectiveResponseSecondsY;
         pf->integralTimeSeconds = settings.integralTimeSeconds;
         pf->maxCountsPerSecond = settings.maxCountsPerSecond;
         pf->frameCountLimit = output.frameCountLimit;
         pf->errorMotion = output.errorMotion;
         pf->settleMotionThreshold = output.settleMotionThreshold;
         pf->movingInsideSettle = output.movingInsideSettle;
+        pf->verticalCatchUp = output.verticalCatchUp;
         pf->speedLimited = output.speedLimited;
         pf->settled = output.settled;
     }

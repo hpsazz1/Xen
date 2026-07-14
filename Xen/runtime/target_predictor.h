@@ -221,6 +221,8 @@ public:
         continuousPredictionFrames_ = 0;
         directionReversalTimes_.clear();
         oscillationSuppressedUntil_ = {};
+        hasCommittedDirection_ = false;
+        committedDirectionX_ = committedDirectionY_ = 0.0;
         observations_.clear();
         previousObservationTime_ = {};
     }
@@ -432,7 +434,7 @@ private:
             // 回归窗口本身已包含至少四帧，再确认两次即可形成至少五帧的连续运动证据。
             if (pendingDirectionSamples_ >= 2)
             {
-                lockPendingDirection();
+                lockPendingDirection(observationTime);
                 suppressPrediction_ = false;
             }
             return;
@@ -449,8 +451,7 @@ private:
             accumulatePendingDirection(sampleDirectionX, sampleDirectionY);
             if (pendingDirectionSamples_ >= 2)
             {
-                recordDirectionReversal(observationTime);
-                lockPendingDirection();
+                lockPendingDirection(observationTime);
                 suppressPrediction_ = false;
             }
             return;
@@ -485,11 +486,22 @@ private:
         ++pendingDirectionSamples_;
     }
 
-    void lockPendingDirection()
+    void lockPendingDirection(TimePoint observationTime)
     {
+        if (hasCommittedDirection_ &&
+            pendingDirectionX_ * committedDirectionX_ +
+                pendingDirectionY_ * committedDirectionY_ < -0.25)
+        {
+            // reverse实测常先因低速或窗口退化解锁，再从相反方向重新建立。
+            // 在统一锁定入口比较最后一次可靠方向，避免只统计“锁定状态内直接翻转”。
+            recordDirectionReversal(observationTime);
+        }
         directionX_ = pendingDirectionX_;
         directionY_ = pendingDirectionY_;
         normalize(directionX_, directionY_);
+        committedDirectionX_ = directionX_;
+        committedDirectionY_ = directionY_;
+        hasCommittedDirection_ = true;
         directionLocked_ = true;
         predictionEstablished_ = false;
         reliableDirectionSamples_ = 0;
@@ -564,6 +576,9 @@ private:
     int continuousPredictionFrames_ = 0; // 当前方向连续有效预测帧数，用于识别真实持续运动
     std::deque<TimePoint> directionReversalTimes_; // 最近可靠换向时间，用于识别高频小幅往返
     TimePoint oscillationSuppressedUntil_{}; // 高频往返停止后的自动恢复时刻
+    bool hasCommittedDirection_ = false; // 是否存在跨解锁保留的最后可靠方向
+    double committedDirectionX_ = 0.0;
+    double committedDirectionY_ = 0.0;
     std::deque<Observation> observations_;
     TimePoint previousObservationTime_{};
 };

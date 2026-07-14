@@ -157,8 +157,10 @@ int main()
     expectTrue(traceHeader.find("NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
                "basic pipeline keeps ndi compatibility diagnostics");
     expectTrue(traceHeader.find("FrameCountLimit,ErrorMotion") != std::string::npos &&
-               traceHeader.find("SpeedLimited,Settled") != std::string::npos,
+               traceHeader.find("MovingInsideSettle,VerticalCatchUp,SpeedLimited,Settled") != std::string::npos,
                "basic pipeline reports controller speed limiting");
+    expectTrue(traceHeader.find("ResponseSeconds,EffectiveResponseSecondsY") != std::string::npos,
+               "basic pipeline reports effective vertical catch-up response");
     expectTrue(traceHeader.find(
         "FrameID,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision") != std::string::npos,
         "basic pipeline identifies the executable and controller revision");
@@ -172,10 +174,10 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r22") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r23") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
-               traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
+               traceHeader.find("ResponseSeconds,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
     expectTrue(traceHeader.find(
         "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictedX,PredictedY") != std::string::npos,
@@ -517,6 +519,15 @@ int main()
             oscillatingPrediction = oscillatingPredictor.update(
                 oscillatingX, 100.0, time, time, 320.0, predictionSettings);
         }
+        if (segment < 4)
+        {
+            for (int frame = 0; frame < 3; ++frame)
+            {
+                const auto time = t0 + std::chrono::milliseconds(oscillatingSample++ * 8);
+                oscillatingPrediction = oscillatingPredictor.update(
+                    oscillatingX, 100.0, time, time, 320.0, predictionSettings);
+            }
+        }
     }
     expectTrue(oscillatingPrediction.oscillationSuppressed &&
                oscillatingPrediction.offsetX == 0.0,
@@ -622,6 +633,24 @@ int main()
         3.0, -2.0, 1.0 / 120.0, 15.0, 15.0, controllerSettings);
     expectTrue(settledOutput.settled, "basic controller settle state");
     expectNear(settledOutput.countsX, 0.0, 0.0, "basic controller settled x");
+
+    BasicAimController verticalCatchUpController;
+    BasicAimController::Settings verticalCatchUpSettings;
+    verticalCatchUpSettings.responseSeconds = 0.080;
+    verticalCatchUpSettings.maxCountsPerSecond = 3200.0;
+    verticalCatchUpSettings.settleRadiusPixels = 5.0;
+    verticalCatchUpSettings.releaseRadiusPixels = 8.0;
+    const auto normalVerticalOutput = verticalCatchUpController.update(
+        0.0, 15.0, 0.010, 1.0, 1.0, verticalCatchUpSettings);
+    verticalCatchUpController.reset();
+    const auto catchUpVerticalOutput = verticalCatchUpController.update(
+        0.0, 20.0, 0.010, 1.0, 1.0, verticalCatchUpSettings);
+    expectTrue(!normalVerticalOutput.verticalCatchUp && catchUpVerticalOutput.verticalCatchUp,
+               "vertical catch-up activates only outside the sixteen-pixel threshold");
+    expectNear(catchUpVerticalOutput.effectiveResponseSecondsY, 0.040, 1e-12,
+               "vertical catch-up halves the proportional response time");
+    expectTrue(catchUpVerticalOutput.countsY / 20.0 > normalVerticalOutput.countsY / 15.0,
+               "vertical catch-up increases per-pixel response without changing max speed");
 
     // 生产速率必须使用捕获窗统计出的实际 FPS 换算单帧预算，而不是绑定某个设备或固定帧率。
     // 选取本轮 CSV 的约 127/143 FPS 和未来可能出现的 240 FPS，验证每秒总预算始终一致。

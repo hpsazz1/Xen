@@ -81,6 +81,7 @@ struct PipelineFrame
 
     // ========== 控制器诊断 ==========
     double responseSeconds = 0.0;
+    double effectiveResponseSecondsY = 0.0; ///< 当前帧Y轴实际比例响应时间
     double integralTimeSeconds = 0.0;
     double maxCountsPerSecond = 0.0;
     double frameCountLimit = 0.0;
@@ -89,6 +90,7 @@ struct PipelineFrame
     bool   speedLimited = false;      ///< 本帧控制请求是否触发最大设备速率限制
     bool   settled = false;
     bool   movingInsideSettle = false;///< 回差内误差变化是否阻止或释放稳定锁存
+    bool   verticalCatchUp = false;   ///< 垂直大误差是否启用快速追赶响应
     size_t queuedMoveCount = 0;     ///< 请求入队后的待发送命令数
 
     // ========== 元数据 ==========
