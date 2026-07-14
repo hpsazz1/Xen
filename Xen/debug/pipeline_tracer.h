@@ -44,16 +44,17 @@ struct PipelineFrame
     bool predictionEnabled = false;
     double predictionAdditionalLeadMs = 0.0;
     double predictionVelocityTauMs = 0.0;
-    double predictionOutsideBoxScale = 0.0;
+    double predictionStrength = 0.0;
     double predictionVelocityX = 0.0;
     double predictionVelocityY = 0.0;
+    double predictionAccelerationX = 0.0;
+    double predictionAccelerationY = 0.0;
     double predictionLeadMs = 0.0;
     double predictionOffsetX = 0.0;
     double predictionOffsetY = 0.0;
     double viewMotionX = 0.0;
     double viewMotionY = 0.0;
     bool predictionDirectionLocked = false;
-    bool predictionOutsideApplied = false;
     double predictedX = 0.0;
     double predictedY = 0.0;
 

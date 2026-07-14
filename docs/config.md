@@ -116,9 +116,9 @@ capture_fps = 60
 | `move_integral_time_ms` | `0` | 移动目标PI积分时间，单位毫秒；0为关闭，非零最小50 ms。用于消除匀速目标的比例稳态误差；有效积分输出在进入中心区及轻微越心时继续保持，反向误差达到稳定半径后清除对应轴旧积分。源码默认关闭供未标定部署使用；当前已验证现场基线冻结为320 ms。 |
 | `auto_derive_tracker_params` | `true` | 按检测分辨率和实际捕获 FPS 自动推导目标跟踪参数；不会覆盖 `move_response_ms` 或 `move_max_speed_cps`。 |
 | `prediction_enabled` | `true` | 启用连续真实观测预测。关闭时预测器完全旁路，基础滤波位置直接进入控制器。 |
-| `prediction_lead_ms` | `20` | 在自动补偿观测年龄之外增加的固定前瞻时间，范围0~100 ms。 |
-| `prediction_velocity_tau_ms` | `35` | 目标速度低通时间常数，范围5~250 ms；按真实检测时间戳计算，不绑定固定帧率。 |
-| `prediction_outside_box_scale` | `0.50` | 沿已确认移动方向越过目标框边缘后继续前置的目标投影身位数，范围0~2；0仅使用时间前瞻，1表示框外再前置一个目标投影宽度。 |
+| `prediction_lead_ms` | `50` | 在自动补偿观测年龄之外增加的基础运动学前瞻时间，范围0~100 ms。 |
+| `prediction_velocity_tau_ms` | `15` | 目标速度低通时间常数，范围5~250 ms；更小值提高加速和变向响应。 |
+| `prediction_strength` | `1.0` | 对“速度×时间＋二分之一加速度×时间平方”的自动提前距离做统一缩放，范围0~4。 |
 | `snapRadius` | `1.5` | 近距离目标吸附半径。 |
 | `nearRadius` | `25.0` | 近距离目标行为开始的半径。 |
 | `speedCurveExponent` | `3.0` | 速度缩放的曲线形状。 |
@@ -127,9 +127,9 @@ capture_fps = 60
 | `easynorecoilstrength` | `0.0` | 后坐力补偿强度。 |
 | `input_method` | `WIN32` | 输出/控制方式。见下文。 |
 
-四个预测项位于UI侧栏“瞄准 → 预测参数”。关闭“启用预测”后，三个数值项会置灰但仍保持可见，便于按关闭/开启顺序执行A/B测试。框外提前不依据准星位于目标哪一侧翻向：程序先补偿自身视角运动，再连续确认目标方向；停止或疑似反向的第一帧立即撤销框外提前，连续确认反向后才切换预测侧。
+四个预测项位于UI侧栏“瞄准 → 预测参数”。关闭“启用预测”后，三个数值项会置灰但仍保持可见。程序先补偿自身视角运动，再使用目标速度与加速度计算连续提前量；停止或疑似反向的第一帧立即撤销，连续确认反向后才切换预测侧。目标框尺寸不参与距离或提前量计算。
 
-加入快速横跳视频和首轮实机数据后的基础候选为 `move_max_speed_cps=2000`、`prediction_lead_ms=10`、`prediction_velocity_tau_ms=75`。框外预测首轮从 `prediction_outside_box_scale=0.50` 开始，只扫描这一项；基础移动三项保持不变。
+五段固定视频按106 FPS及10/15/20 ms观测年龄联合搜索后的候选为 `move_max_speed_cps=2000`、`prediction_lead_ms=50`、`prediction_velocity_tau_ms=15`、`prediction_strength=1.0`。该候选只补偿可观测运动，不估算目标距离或武器弹道。
 
 ## 输入方式
 

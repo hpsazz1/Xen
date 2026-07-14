@@ -246,56 +246,33 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         $axisSpeeds = @($samples | ForEach-Object { [math]::Abs([double]$_.$velocityColumn) })
         $residuals = @($samples | ForEach-Object { [double]$_.FilterResidual })
         $limitedRows = @($samples | Where-Object { [int]$_.SpeedLimited -eq 1 }).Count
-        $hasOutsidePrediction =
-            $rows[0].PSObject.Properties.Name -contains 'PredictionOutsideApplied' -and
-            $rows[0].PSObject.Properties.Name -contains 'PredictionOffsetX' -and
-            $rows[0].PSObject.Properties.Name -contains 'TargetBoxWidth'
-        $outsideRows = if ($hasOutsidePrediction) {
-            @($samples | Where-Object { [int]$_.PredictionOutsideApplied -eq 1 }).Count
-        }
-        else { 0 }
-        $outsideLeadDistances = if ($hasOutsidePrediction) {
-            @($samples | Where-Object { [int]$_.PredictionOutsideApplied -eq 1 } | ForEach-Object {
-                if ($Axis -eq 'X') {
-                    $offset = [double]$_.PredictionOffsetX
-                    $viewMotion = [double]$_.ViewMotionX
-                    if ($offset -gt 0.0) {
-                        [math]::Max(0.0, [double]$_.PredictedX -
-                            ([double]$_.TargetBoxX - $viewMotion + [double]$_.TargetBoxWidth))
-                    }
-                    elseif ($offset -lt 0.0) {
-                        [math]::Max(0.0, [double]$_.TargetBoxX - $viewMotion - [double]$_.PredictedX)
-                    }
-                }
-                else {
-                    $offset = [double]$_.PredictionOffsetY
-                    $viewMotion = [double]$_.ViewMotionY
-                    if ($offset -gt 0.0) {
-                        [math]::Max(0.0, [double]$_.PredictedY -
-                            ([double]$_.TargetBoxY - $viewMotion + [double]$_.TargetBoxHeight))
-                    }
-                    elseif ($offset -lt 0.0) {
-                        [math]::Max(0.0, [double]$_.TargetBoxY - $viewMotion - [double]$_.PredictedY)
-                    }
-                }
-            } | Where-Object { $null -ne $_ })
+        $hasKinematicPrediction =
+            $rows[0].PSObject.Properties.Name -contains 'PredictionDirectionLocked' -and
+            $rows[0].PSObject.Properties.Name -contains 'PredictionOffsetX'
+        $predictionRows = if ($hasKinematicPrediction) {
+            @($samples | Where-Object {
+                [int]$_.PredictionDirectionLocked -eq 1 -and
+                [math]::Abs([double]$(if ($Axis -eq 'X') { $_.PredictionOffsetX } else { $_.PredictionOffsetY })) -gt 0.001
+            })
         }
         else { @() }
-        $outsideLeadP50 = if (@($outsideLeadDistances).Count -gt 0) {
-            Get-PercentileValue -Values @($outsideLeadDistances) -Percentile 0.50
+        $predictionRows = @($predictionRows)
+        $predictionLeadDistances = @($predictionRows | ForEach-Object {
+            if ($Axis -eq 'X') { [math]::Abs([double]$_.PredictionOffsetX) }
+            else { [math]::Abs([double]$_.PredictionOffsetY) }
+        })
+        $predictionLeadP50 = if ($predictionLeadDistances.Count -gt 0) {
+            Get-PercentileValue -Values $predictionLeadDistances -Percentile 0.50
         }
         else { 0.0 }
-        $outsideLeadP95 = if (@($outsideLeadDistances).Count -gt 0) {
-            Get-PercentileValue -Values @($outsideLeadDistances) -Percentile 0.95
+        $predictionLeadP95 = if ($predictionLeadDistances.Count -gt 0) {
+            Get-PercentileValue -Values $predictionLeadDistances -Percentile 0.95
         }
         else { 0.0 }
         $predictionSideFlipCount = 0
         $lastPredictionSide = 0
-        if ($hasOutsidePrediction) {
-            foreach ($sample in $samples) {
-                if ([int]$sample.PredictionOutsideApplied -ne 1) {
-                    continue
-                }
+        if ($hasKinematicPrediction) {
+            foreach ($sample in $predictionRows) {
                 $offset = if ($Axis -eq 'X') {
                     [double]$sample.PredictionOffsetX
                 }
@@ -375,10 +352,10 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             EstimatedCountsPerPixel = [math]::Round($estimatedCountsPerPixel, 4)
             ApproxClosedLoopLagMs = [math]::Round($approxClosedLoopLagMs, 1)
             SpeedLimitedPct = [math]::Round(100.0 * $limitedRows / [math]::Max(1, $samples.Count), 1)
-            PredictionOutsideAppliedPct = [math]::Round(
-                100.0 * $outsideRows / [math]::Max(1, $samples.Count), 1)
-            P50OutsideLeadPx = [math]::Round($outsideLeadP50, 2)
-            P95OutsideLeadPx = [math]::Round($outsideLeadP95, 2)
+            PredictionActivePct = [math]::Round(
+                100.0 * $predictionRows.Count / [math]::Max(1, $samples.Count), 1)
+            P50PredictionLeadPx = [math]::Round($predictionLeadP50, 2)
+            P95PredictionLeadPx = [math]::Round($predictionLeadP95, 2)
             PredictionSideFlipCount = $predictionSideFlipCount
             MovingInsideSettlePct = [math]::Round(100.0 * $movingInsideSettleRows / [math]::Max(1, $samples.Count), 1)
             InferenceFps = [math]::Round([double]($samples | Measure-Object InferenceFPS -Average).Average, 1)
@@ -430,13 +407,13 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         MeanAbsOutputCountsPerSecond = [math]::Round([double]($group | Measure-Object MeanAbsOutputCountsPerSecond -Average).Average, 1)
         MeanApproxClosedLoopLagMs = [math]::Round([double]($group | Measure-Object ApproxClosedLoopLagMs -Average).Average, 1)
         SpeedLimitedPct = [math]::Round([double](($group | ForEach-Object { $_.SpeedLimitedPct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
-        PredictionOutsideAppliedPct = [math]::Round([double](($group | ForEach-Object {
-            $_.PredictionOutsideAppliedPct * $_.Samples
+        PredictionActivePct = [math]::Round([double](($group | ForEach-Object {
+            $_.PredictionActivePct * $_.Samples
         } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
-        MeanP50OutsideLeadPx = [math]::Round(
-            [double]($group | Measure-Object P50OutsideLeadPx -Average).Average, 2)
-        MeanP95OutsideLeadPx = [math]::Round(
-            [double]($group | Measure-Object P95OutsideLeadPx -Average).Average, 2)
+        MeanP50PredictionLeadPx = [math]::Round(
+            [double]($group | Measure-Object P50PredictionLeadPx -Average).Average, 2)
+        MeanP95PredictionLeadPx = [math]::Round(
+            [double]($group | Measure-Object P95PredictionLeadPx -Average).Average, 2)
         PredictionSideFlipCount = [int]($group | Measure-Object PredictionSideFlipCount -Sum).Sum
         MovingInsideSettlePct = [math]::Round([double](($group | ForEach-Object { $_.MovingInsideSettlePct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         ReversalCount = [int]($group | Measure-Object ReversalCount -Sum).Sum
@@ -478,8 +455,8 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'MeanP95ErrorDistancePx', 'MaxErrorDistancePx', 'P50ObservedAxisSpeed',
         'P95ObservedAxisSpeed', 'P95FilterResidualPx', 'SignedOutputCountsPerSecond',
         'MeanAbsOutputCountsPerSecond', 'EstimatedCountsPerPixel', 'ApproxClosedLoopLagMs',
-        'MeanApproxClosedLoopLagMs', 'SpeedLimitedPct', 'PredictionOutsideAppliedPct',
-        'P50OutsideLeadPx', 'P95OutsideLeadPx', 'MeanP50OutsideLeadPx', 'MeanP95OutsideLeadPx',
+        'MeanApproxClosedLoopLagMs', 'SpeedLimitedPct', 'PredictionActivePct',
+        'P50PredictionLeadPx', 'P95PredictionLeadPx', 'MeanP50PredictionLeadPx', 'MeanP95PredictionLeadPx',
         'PredictionSideFlipCount',
         'MovingInsideSettlePct', 'InferenceFps',
         'SourceReceiveFps', 'ObservationAgeAvgMs', 'ObservationAgeP95Ms', 'MaxQueuedMoves',
@@ -496,6 +473,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, PredictionOutsideAppliedPct, P50OutsideLeadPx, P95OutsideLeadPx, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, PredictionActivePct, P50PredictionLeadPx, P95PredictionLeadPx, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, PredictionOutsideAppliedPct, MeanP50OutsideLeadPx, MeanP95OutsideLeadPx, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, PredictionActivePct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize

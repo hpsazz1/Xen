@@ -96,9 +96,10 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "TargetClassID,"
          << "RawPivotX,RawPivotY,TargetBoxX,TargetBoxY,TargetBoxWidth,TargetBoxHeight,"
          << "FilteredX,FilteredY,ObservedVelocityX,ObservedVelocityY,ObservedSpeed,FilterResidual,"
-         << "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionOutsideBoxScale,"
-         << "PredictionVelocityX,PredictionVelocityY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,"
-         << "ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionOutsideApplied,PredictedX,PredictedY,"
+         << "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,"
+         << "PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,"
+         << "PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,"
+         << "ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictedX,PredictedY,"
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
          << "FinalMx,FinalMy,"
@@ -141,12 +142,12 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << (f.predictionApplied ? '1' : '0') << ','
              << (f.predictionEnabled ? '1' : '0') << ','
              << f.predictionAdditionalLeadMs << ',' << f.predictionVelocityTauMs << ','
-             << f.predictionOutsideBoxScale << ','
+             << f.predictionStrength << ','
              << f.predictionVelocityX << ',' << f.predictionVelocityY << ','
+             << f.predictionAccelerationX << ',' << f.predictionAccelerationY << ','
              << f.predictionLeadMs << ',' << f.predictionOffsetX << ',' << f.predictionOffsetY << ','
              << f.viewMotionX << ',' << f.viewMotionY << ','
              << (f.predictionDirectionLocked ? '1' : '0') << ','
-             << (f.predictionOutsideApplied ? '1' : '0') << ','
              << f.predictedX << ',' << f.predictedY << ','
              << f.errorX << ',' << f.errorY << ',' << f.errorDistance << ','
              << f.requestedPixelX << ',' << f.requestedPixelY << ','

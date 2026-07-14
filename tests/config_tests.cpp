@@ -100,12 +100,12 @@ int main()
                    "default maximum speed uses four-chain nine-grid result");
         expectNear(defaults.move_integral_time_ms, 0.0, 0.0,
                    "moving integral remains disabled before field validation");
-        expectNear(defaults.prediction_lead_ms, 20.0, 0.0,
-                   "default prediction uses minimal fixed lead");
-        expectNear(defaults.prediction_velocity_tau_ms, 35.0, 0.0,
+        expectNear(defaults.prediction_lead_ms, 50.0, 0.0,
+                   "default prediction uses kinematic replay lead");
+        expectNear(defaults.prediction_velocity_tau_ms, 15.0, 0.0,
                    "default prediction uses frame-rate independent velocity smoothing");
-        expectNear(defaults.prediction_outside_box_scale, 0.50, 0.0,
-                   "default prediction leads half a projected body beyond the box");
+        expectNear(defaults.prediction_strength, 1.0, 0.0,
+                   "default prediction uses bounded kinematic strength");
         expectString(defaults.kmbox_net_ip, "192.168.2.188", "default kmbox net ip");
         expectString(defaults.kmbox_net_port, "13384", "default kmbox net port");
         expectString(defaults.kmbox_net_uuid, "7679E04E", "default kmbox net uuid");
@@ -152,8 +152,8 @@ int main()
                    "saved config writes new prediction lead key");
         expectTrue(migratedText.find("prediction_velocity_tau_ms = 42") != std::string::npos,
                    "saved config writes new prediction smoothing key");
-        expectTrue(migratedText.find("prediction_outside_box_scale = 0.5") != std::string::npos,
-                   "legacy config receives bounded outside-box lead default");
+        expectTrue(migratedText.find("prediction_strength = 1") != std::string::npos,
+                   "legacy config receives bounded kinematic prediction strength");
         expectTrue(migratedText.find("predictionInterval") == std::string::npos,
                    "saved config removes legacy prediction interval key");
     }

@@ -29,7 +29,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_nine_grid.ps1 
 
 移动目标CSV额外提供 `ObservedVelocityX/ObservedVelocityY` 有符号相对观测速度。CUDA环境下的NDI/UDP移动数据使用以下命令统一分析：
 
-预测阶段另提供目标框、`PredictionOutsideBoxScale`、`PredictionOffsetX/Y`、`ViewMotionX/Y`、`PredictionDirectionLocked`、`PredictionOutsideApplied` 和 `PredictedX/Y`。`ObservedVelocityX/Y` 与 `PredictionVelocityX/Y` 已扣除程序自身鼠标输出造成的视角运动；`PredictionOutsideApplied=1` 表示本行预测点已按确认方向落到目标框外。分析器同时输出框外生效比例、框外距离P50/P95及预测侧翻转次数。无目标、跟踪器滑行帧、目标ID切换或瞄准状态切换会立即清空预测状态。新模型对照测试必须核对 `ControllerRevision=6`。
+预测阶段提供 `PredictionStrength`、`PredictionVelocityX/Y`、`PredictionAccelerationX/Y`、`PredictionOffsetX/Y`、`ViewMotionX/Y`、`PredictionDirectionLocked` 和 `PredictedX/Y`。速度与加速度已扣除程序自身鼠标输出造成的视角运动；分析器输出运动学预测生效比例、提前距离P50/P95及预测侧翻转次数。目标框仅作原始检测审计，不参与提前量计算。无目标、跟踪器滑行帧、目标ID切换或瞄准状态切换会立即清空预测状态。新模型测试必须核对 `ControllerRevision=7`。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_moving_target.ps1 -DataRoot C:\Users\User\Desktop\XenMoving -Axis X

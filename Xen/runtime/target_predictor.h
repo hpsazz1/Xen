@@ -3,27 +3,18 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <limits>
 
-// 基于连续真实检测观测的目标运动预测器。
-// 输入坐标必须先补偿自瞄自身视角运动；调用方负责目标身份和丢失生命周期。
+// 基于连续真实检测观测的运动学预测器。
+// 输入坐标必须先补偿程序自身视角运动；模块不使用不可靠的目标框测距或武器弹速假设。
 class TargetPredictor
 {
 public:
-    struct Bounds
-    {
-        double x = 0.0;
-        double y = 0.0;
-        double width = 0.0;
-        double height = 0.0;
-    };
-
     struct Settings
     {
         bool enabled = true;
-        double additionalLeadSeconds = 0.020; // 除检测观测年龄外的固定前瞻时间
-        double velocityTimeConstantSeconds = 0.035; // 目标自身速度低通时间常数
-        double outsideBoxScale = 0.50; // 越过目标框边缘后继续前置的目标投影身位数
+        double additionalLeadSeconds = 0.050; // 除检测观测年龄外的基础前瞻时间
+        double velocityTimeConstantSeconds = 0.015; // 目标自身速度低通时间常数
+        double predictionStrength = 1.0; // 运动学提前总强度；0关闭位移但保留诊断
     };
 
     struct Result
@@ -32,16 +23,16 @@ public:
         double y = 0.0;
         double velocityX = 0.0; // 已补偿自身视角运动的目标速度，px/sec
         double velocityY = 0.0;
+        double accelerationX = 0.0; // 平滑目标加速度，px/sec^2
+        double accelerationY = 0.0;
         double leadSeconds = 0.0;
         double offsetX = 0.0;
         double offsetY = 0.0;
         bool directionLocked = false;
-        bool outsideApplied = false;
         bool applied = false;
     };
 
     Result update(double x, double y,
-                  const Bounds& bounds,
                   std::chrono::steady_clock::time_point observationTime,
                   std::chrono::steady_clock::time_point controlTime,
                   double detectionSpan,
@@ -73,20 +64,13 @@ public:
             return baseResult(x, y);
         }
 
+        const double span = std::max(1.0, detectionSpan);
         double sampleVelocityX = (x - previousX_) / dt;
         double sampleVelocityY = (y - previousY_) / dt;
-        const double span = std::max(1.0, detectionSpan);
-        const double maxVelocity = span * 6.0;
-        const double sampleSpeed = std::hypot(sampleVelocityX, sampleVelocityY);
-        if (sampleSpeed > maxVelocity)
-        {
-            const double scale = maxVelocity / sampleSpeed;
-            sampleVelocityX *= scale;
-            sampleVelocityY *= scale;
-        }
+        clampVector(sampleVelocityX, sampleVelocityY, span * 6.0);
 
-        updateVelocity(sampleVelocityX, sampleVelocityY, dt, settings);
-        updateDirection(sampleVelocityX, sampleVelocityY, bounds);
+        updateMotion(sampleVelocityX, sampleVelocityY, dt, span, settings);
+        updateDirection(sampleVelocityX, sampleVelocityY, span);
 
         previousX_ = x;
         previousY_ = y;
@@ -103,38 +87,29 @@ public:
         if (!directionLocked_ || suppressPrediction_)
         {
             return {
-                x, y, velocityX_, velocityY_, leadSeconds,
-                0.0, 0.0, directionLocked_, false, true
+                x, y, velocityX_, velocityY_, accelerationX_, accelerationY_,
+                leadSeconds, 0.0, 0.0, directionLocked_, true
             };
         }
 
         const double speedAlongDirection = std::max(
             0.0, velocityX_ * directionX_ + velocityY_ * directionY_);
-        double predictionDistance = speedAlongDirection * leadSeconds;
-        bool outsideApplied = false;
-        if (settings.outsideBoxScale > 0.0 && validBounds(bounds))
-        {
-            const double edgeDistance = distanceToBoxEdge(x, y, bounds, directionX_, directionY_);
-            const double projectedSpan =
-                std::abs(directionX_) * bounds.width +
-                std::abs(directionY_) * bounds.height;
-            const double outsideDistance = std::clamp(
-                settings.outsideBoxScale, 0.0, 2.0) * projectedSpan;
-            predictionDistance = std::max(
-                predictionDistance, edgeDistance + outsideDistance);
-            outsideApplied = true;
-        }
-
-        const double maxPredictionDistance = outsideApplied
-            ? std::max(16.0, span * 0.45)
-            : std::max(8.0, span * 0.10);
-        predictionDistance = std::clamp(predictionDistance, 0.0, maxPredictionDistance);
+        const double accelerationAlongDirection =
+            accelerationX_ * directionX_ + accelerationY_ * directionY_;
+        const double kinematicDistance = std::max(
+            0.0,
+            speedAlongDirection * leadSeconds +
+            0.5 * accelerationAlongDirection * leadSeconds * leadSeconds);
+        const double strength = std::clamp(settings.predictionStrength, 0.0, 4.0);
+        const double maxPredictionDistance = std::max(12.0, span * 0.35);
+        const double predictionDistance = std::clamp(
+            kinematicDistance * strength, 0.0, maxPredictionDistance);
         const double offsetX = directionX_ * predictionDistance;
         const double offsetY = directionY_ * predictionDistance;
         return {
             x + offsetX, y + offsetY,
-            velocityX_, velocityY_, leadSeconds,
-            offsetX, offsetY, true, outsideApplied, true
+            velocityX_, velocityY_, accelerationX_, accelerationY_,
+            leadSeconds, offsetX, offsetY, true, true
         };
     }
 
@@ -142,10 +117,12 @@ public:
     {
         initialized_ = false;
         hasVelocity_ = false;
+        hasAcceleration_ = false;
         directionLocked_ = false;
         suppressPrediction_ = false;
         previousX_ = previousY_ = 0.0;
         velocityX_ = velocityY_ = 0.0;
+        accelerationX_ = accelerationY_ = 0.0;
         directionX_ = directionY_ = 0.0;
         pendingDirectionX_ = pendingDirectionY_ = 0.0;
         pendingDirectionSamples_ = 0;
@@ -156,7 +133,7 @@ public:
 private:
     static Result baseResult(double x, double y)
     {
-        return { x, y, 0.0, 0.0, 0.0, 0.0, 0.0, false, false, false };
+        return { x, y, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false };
     }
 
     void initialize(double x, double y, std::chrono::steady_clock::time_point observationTime)
@@ -167,8 +144,8 @@ private:
         previousObservationTime_ = observationTime;
     }
 
-    void updateVelocity(double sampleVelocityX, double sampleVelocityY,
-                        double dt, const Settings& settings)
+    void updateMotion(double sampleVelocityX, double sampleVelocityY,
+                      double dt, double span, const Settings& settings)
     {
         if (!hasVelocity_)
         {
@@ -178,20 +155,35 @@ private:
             return;
         }
 
-        const double tau = std::clamp(
+        const double previousVelocityX = velocityX_;
+        const double previousVelocityY = velocityY_;
+        const double velocityTau = std::clamp(
             settings.velocityTimeConstantSeconds, 0.005, 0.250);
-        const double alpha = 1.0 - std::exp(-dt / tau);
-        velocityX_ += (sampleVelocityX - velocityX_) * alpha;
-        velocityY_ += (sampleVelocityY - velocityY_) * alpha;
+        const double velocityAlpha = 1.0 - std::exp(-dt / velocityTau);
+        velocityX_ += (sampleVelocityX - velocityX_) * velocityAlpha;
+        velocityY_ += (sampleVelocityY - velocityY_) * velocityAlpha;
+
+        double sampleAccelerationX = (velocityX_ - previousVelocityX) / dt;
+        double sampleAccelerationY = (velocityY_ - previousVelocityY) / dt;
+        clampVector(sampleAccelerationX, sampleAccelerationY, span * 30.0);
+        if (!hasAcceleration_)
+        {
+            accelerationX_ = sampleAccelerationX;
+            accelerationY_ = sampleAccelerationY;
+            hasAcceleration_ = true;
+            return;
+        }
+
+        const double accelerationTau = std::clamp(velocityTau * 0.60, 0.015, 0.100);
+        const double accelerationAlpha = 1.0 - std::exp(-dt / accelerationTau);
+        accelerationX_ += (sampleAccelerationX - accelerationX_) * accelerationAlpha;
+        accelerationY_ += (sampleAccelerationY - accelerationY_) * accelerationAlpha;
     }
 
-    void updateDirection(double sampleVelocityX, double sampleVelocityY, const Bounds& bounds)
+    void updateDirection(double sampleVelocityX, double sampleVelocityY, double span)
     {
         const double sampleSpeed = std::hypot(sampleVelocityX, sampleVelocityY);
-        const double targetMinorSpan = validBounds(bounds)
-            ? std::max(1.0, std::min(bounds.width, bounds.height)) : 24.0;
-        const double activationSpeed = std::max(40.0, targetMinorSpan * 1.5);
-
+        const double activationSpeed = std::max(40.0, span * 0.15);
         if (sampleSpeed < activationSpeed * 0.50)
         {
             ++stationarySamples_;
@@ -201,6 +193,7 @@ private:
             {
                 directionLocked_ = false;
                 velocityX_ = velocityY_ = 0.0;
+                accelerationX_ = accelerationY_ = 0.0;
             }
             return;
         }
@@ -231,6 +224,7 @@ private:
                 lockPendingDirection();
                 velocityX_ = sampleVelocityX;
                 velocityY_ = sampleVelocityY;
+                accelerationX_ = accelerationY_ = 0.0;
                 suppressPrediction_ = false;
             }
             return;
@@ -256,7 +250,6 @@ private:
             pendingDirectionSamples_ = 1;
             return;
         }
-
         pendingDirectionX_ += x;
         pendingDirectionY_ += y;
         normalize(pendingDirectionX_, pendingDirectionY_);
@@ -272,26 +265,14 @@ private:
         pendingDirectionSamples_ = 0;
     }
 
-    static bool validBounds(const Bounds& bounds)
+    static void clampVector(double& x, double& y, double maximumLength)
     {
-        return std::isfinite(bounds.x) && std::isfinite(bounds.y) &&
-            std::isfinite(bounds.width) && std::isfinite(bounds.height) &&
-            bounds.width > 1.0 && bounds.height > 1.0;
-    }
-
-    static double distanceToBoxEdge(
-        double x, double y, const Bounds& bounds, double directionX, double directionY)
-    {
-        double distance = std::numeric_limits<double>::infinity();
-        if (directionX > 1e-6)
-            distance = std::min(distance, (bounds.x + bounds.width - x) / directionX);
-        else if (directionX < -1e-6)
-            distance = std::min(distance, (bounds.x - x) / directionX);
-        if (directionY > 1e-6)
-            distance = std::min(distance, (bounds.y + bounds.height - y) / directionY);
-        else if (directionY < -1e-6)
-            distance = std::min(distance, (bounds.y - y) / directionY);
-        return std::isfinite(distance) ? std::max(0.0, distance) : 0.0;
+        const double length = std::hypot(x, y);
+        if (length <= maximumLength || length <= 1e-9)
+            return;
+        const double scale = maximumLength / length;
+        x *= scale;
+        y *= scale;
     }
 
     static void normalize(double& x, double& y)
@@ -308,12 +289,15 @@ private:
 
     bool initialized_ = false;
     bool hasVelocity_ = false;
+    bool hasAcceleration_ = false;
     bool directionLocked_ = false;
     bool suppressPrediction_ = false;
     double previousX_ = 0.0;
     double previousY_ = 0.0;
     double velocityX_ = 0.0;
     double velocityY_ = 0.0;
+    double accelerationX_ = 0.0;
+    double accelerationY_ = 0.0;
     double directionX_ = 0.0;
     double directionY_ = 0.0;
     double pendingDirectionX_ = 0.0;

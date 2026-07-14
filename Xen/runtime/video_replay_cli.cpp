@@ -84,6 +84,7 @@ namespace
         double leadMs = 0.0;
         double tauMs = 35.0;
         double maxCountsPerSecond = 1440.0;
+        double predictionStrength = 0.0;
     };
 
     struct CandidateResult
@@ -397,9 +398,7 @@ namespace
         predictorSettings.enabled = candidate.enabled;
         predictorSettings.additionalLeadSeconds = candidate.leadMs / 1000.0;
         predictorSettings.velocityTimeConstantSeconds = candidate.tauMs / 1000.0;
-        // 现有回放评分以准星贴合目标中心为基准，不适合评价主动框外提前；
-        // 框外身位参数使用新增实机CSV诊断单独验收。
-        predictorSettings.outsideBoxScale = 0.0;
+        predictorSettings.predictionStrength = candidate.predictionStrength;
         BasicAimController::Settings controllerSettings;
         controllerSettings.responseSeconds = options.responseMs / 1000.0;
         controllerSettings.maxCountsPerSecond = candidate.maxCountsPerSecond;
@@ -502,8 +501,7 @@ namespace
                 point.globalX, point.globalY,
                 observationTime, fallbackSeconds, options.cropWidth);
             const auto predicted = predictor.update(
-                filtered.x, filtered.y, TargetPredictor::Bounds{},
-                observationTime, controlTime,
+                filtered.x, filtered.y, observationTime, controlTime,
                 options.cropWidth, predictorSettings);
 
             double dt = fallbackSeconds;
@@ -556,11 +554,14 @@ namespace
         std::vector<Candidate> result;
         for (double maxCountsPerSecond : speedLimits)
         {
-            result.push_back({ false, 0.0, 35.0, maxCountsPerSecond });
+            result.push_back({ false, 0.0, 35.0, maxCountsPerSecond, 0.0 });
             for (double lead : { 0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 50.0 })
             {
                 for (double tau : { 15.0, 25.0, 35.0, 50.0, 75.0 })
-                    result.push_back({ true, lead, tau, maxCountsPerSecond });
+                {
+                    for (double strength : { 1.0, 1.5, 2.0, 2.5, 3.0 })
+                        result.push_back({ true, lead, tau, maxCountsPerSecond, strength });
+                }
             }
         }
         return result;
@@ -655,7 +656,7 @@ int Run(int argc, char** argv)
         }
 
         std::ofstream grid(options.outputRoot / "prediction_grid.csv");
-        grid << "Enabled,LeadMs,TauMs,MaxCountsPerSecond,ObservationAgeMs,Scenario,Samples,OutsideCrop,MeanAbsX,P95AbsX,MeanAbsY,P95AbsY\n";
+        grid << "Enabled,LeadMs,TauMs,MaxCountsPerSecond,PredictionStrength,ObservationAgeMs,Scenario,Samples,OutsideCrop,MeanAbsX,P95AbsX,MeanAbsY,P95AbsY\n";
         std::vector<CandidateResult> results;
         for (const Candidate& candidate : candidates(options.maxCountsPerSecond))
         {
@@ -669,7 +670,8 @@ int Run(int argc, char** argv)
                     const std::string scenario = scenarioKey(trajectory.name);
                     updateWorst(result.worstByScenario[scenario], metrics);
                     grid << (candidate.enabled ? 1 : 0) << ',' << candidate.leadMs << ',' << candidate.tauMs << ','
-                         << candidate.maxCountsPerSecond << ',' << ageMs << ',' << scenario << ','
+                         << candidate.maxCountsPerSecond << ',' << candidate.predictionStrength << ','
+                         << ageMs << ',' << scenario << ','
                          << metrics.samples << ',' << metrics.outsideCrop << ','
                          << metrics.meanAbsX << ',' << metrics.p95AbsX << ','
                          << metrics.meanAbsY << ',' << metrics.p95AbsY << '\n';
@@ -737,6 +739,7 @@ int Run(int argc, char** argv)
                     << "RecommendedLeadMs=" << best->candidate.leadMs << '\n'
                     << "RecommendedTauMs=" << best->candidate.tauMs << '\n'
                     << "RecommendedMaxCountsPerSecond=" << best->candidate.maxCountsPerSecond << '\n'
+                    << "RecommendedPredictionStrength=" << best->candidate.predictionStrength << '\n'
                     << "MovingP95=" << best->movingP95 << '\n'
                     << "ReverseP95=" << best->reverseP95 << '\n'
                     << "StaticP95X=" << best->staticP95X << '\n'
@@ -750,6 +753,7 @@ int Run(int argc, char** argv)
             std::cout << "[VideoReplay] Recommended lead=" << best->candidate.leadMs
                       << " ms tau=" << best->candidate.tauMs
                       << " ms max_cps=" << best->candidate.maxCountsPerSecond
+                      << " strength=" << best->candidate.predictionStrength
                       << " counts/s, moving improvement=" << best->improvementPercent << "%" << std::endl;
         }
         else

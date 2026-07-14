@@ -34,7 +34,7 @@ float prev_move_integral_time_ms = config.move_integral_time_ms;
 	bool  prev_prediction_enabled = config.prediction_enabled;
 	float prev_prediction_lead_ms = config.prediction_lead_ms;
 	float prev_prediction_velocity_tau_ms = config.prediction_velocity_tau_ms;
-	float prev_prediction_outside_box_scale = config.prediction_outside_box_scale;
+	float prev_prediction_strength = config.prediction_strength;
 // 目标修正（吸附半径、近距半径、速度曲线、吸附增益）
 float prev_snapRadius = config.snapRadius;
 float prev_nearRadius = config.nearRadius;
@@ -156,17 +156,17 @@ static void draw_mouse_page(MouseSettingsPage page)
 
         OverlayUI::SliderFloatRow("额外前瞻(ms)", &config.prediction_lead_ms, 0.0f, 100.0f, "%.0f", "##pred_lead_ms",
             "在自动补偿真实观测年龄之外增加的固定前瞻时间。\n"
-            "数值越大，移动目标提前量越大；新增jump视频联合模拟候选为10ms。");
+            "新运动学模型视频候选为50ms；最终位移仍会随目标速度和加速度自动变化。");
 
         OverlayUI::SliderFloatRow("速度平滑(ms)", &config.prediction_velocity_tau_ms, 5.0f, 250.0f, "%.0f", "##pred_velocity_tau_ms",
             "目标速度估计的时间常数，按真实检测时间戳自动适配帧率。\n"
             "数值越小变向响应越快，数值越大速度越平稳。\n"
-            "本轮标准视频模拟候选为75ms，需通过实机验证后再确定默认值。");
+            "新运动学模型视频候选为15ms，需通过实机验证后再确定默认值。");
 
-        OverlayUI::SliderFloatRow("框外提前(身位)", &config.prediction_outside_box_scale, 0.0f, 2.0f, "%.2f", "##pred_outside_box_scale",
-            "沿已确认的目标移动方向，越过目标框边缘后继续前置的距离。\n"
-            "1.00表示再前置一个目标在该方向上的投影宽度；0仅使用时间前瞻。\n"
-            "停止或疑似变向时会立即撤销框外提前，连续确认新方向后才切换预测侧。");
+        OverlayUI::SliderFloatRow("预测强度", &config.prediction_strength, 0.0f, 4.0f, "%.2f", "##pred_strength",
+            "缩放速度与加速度共同计算出的自动提前距离。\n"
+            "目标越快或持续加速，提前量自动增大；减速、停止或疑似变向时自动收回。\n"
+            "不使用目标框尺寸估算距离，也不假设具体武器弹速。");
 
         ImGui::TextDisabled("仅真实检测观测驱动；目标丢失或切换时立即清零");
 
@@ -787,7 +787,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_prediction_enabled != config.prediction_enabled ||
         prev_prediction_lead_ms != config.prediction_lead_ms ||
         prev_prediction_velocity_tau_ms != config.prediction_velocity_tau_ms ||
-        prev_prediction_outside_box_scale != config.prediction_outside_box_scale ||
+        prev_prediction_strength != config.prediction_strength ||
         prev_snapRadius != config.snapRadius ||
         prev_nearRadius != config.nearRadius ||
         prev_speedCurveExponent != config.speedCurveExponent ||
@@ -810,7 +810,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_prediction_enabled = config.prediction_enabled;
         prev_prediction_lead_ms = config.prediction_lead_ms;
         prev_prediction_velocity_tau_ms = config.prediction_velocity_tau_ms;
-        prev_prediction_outside_box_scale = config.prediction_outside_box_scale;
+        prev_prediction_strength = config.prediction_strength;
         // 同步目标修正
         prev_snapRadius = config.snapRadius;
         prev_nearRadius = config.nearRadius;

@@ -80,8 +80,8 @@ MouseThread::MouseThread(
             static_cast<double>(config.prediction_lead_ms) / 1000.0;
         predictionSettings.velocityTimeConstantSeconds =
             static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0;
-        predictionSettings.outsideBoxScale =
-            static_cast<double>(config.prediction_outside_box_scale);
+        predictionSettings.predictionStrength =
+            static_cast<double>(config.prediction_strength);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
     }
 
@@ -125,8 +125,8 @@ void MouseThread::updateConfig(
         static_cast<double>(config.prediction_lead_ms) / 1000.0, 0.0, 0.100);
     predictionSettings.velocityTimeConstantSeconds = std::clamp(
         static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0, 0.005, 0.250);
-    predictionSettings.outsideBoxScale = std::clamp(
-        static_cast<double>(config.prediction_outside_box_scale), 0.0, 2.0);
+    predictionSettings.predictionStrength = std::clamp(
+        static_cast<double>(config.prediction_strength), 0.0, 4.0);
     this->auto_shoot = auto_shoot;
     this->bScope_multiplier = bScope_multiplier;
 
@@ -1134,15 +1134,9 @@ void MouseThread::moveMousePivot(
     const double stabilizedPivotY = pivotY + viewAtObservation.second;
     const auto filtered = filter_target_position(
         stabilizedPivotX, stabilizedPivotY, effectiveObservationTime);
-    const TargetPredictor::Bounds stabilizedBounds{
-        target.x + viewAtObservation.first,
-        target.y + viewAtObservation.second,
-        static_cast<double>(target.w),
-        static_cast<double>(target.h)
-    };
     lastPredictionResult = targetPredictor.update(
-        filtered.first, filtered.second, stabilizedBounds,
-        effectiveObservationTime, controlTime, screen_width, predictionSettings);
+        filtered.first, filtered.second, effectiveObservationTime,
+        controlTime, screen_width, predictionSettings);
     const double filteredScreenX = filtered.first - viewAtControl.first;
     const double filteredScreenY = filtered.second - viewAtControl.second;
     lastPredictionResult.x -= viewAtControl.first;
@@ -1209,16 +1203,17 @@ void MouseThread::moveMousePivot(
         pf->predictionEnabled = predictionSettings.enabled;
         pf->predictionAdditionalLeadMs = predictionSettings.additionalLeadSeconds * 1000.0;
         pf->predictionVelocityTauMs = predictionSettings.velocityTimeConstantSeconds * 1000.0;
-        pf->predictionOutsideBoxScale = predictionSettings.outsideBoxScale;
+        pf->predictionStrength = predictionSettings.predictionStrength;
         pf->predictionVelocityX = lastPredictionResult.velocityX;
         pf->predictionVelocityY = lastPredictionResult.velocityY;
+        pf->predictionAccelerationX = lastPredictionResult.accelerationX;
+        pf->predictionAccelerationY = lastPredictionResult.accelerationY;
         pf->predictionLeadMs = lastPredictionResult.leadSeconds * 1000.0;
         pf->predictionOffsetX = lastPredictionResult.offsetX;
         pf->predictionOffsetY = lastPredictionResult.offsetY;
         pf->viewMotionX = viewAtControl.first - viewAtObservation.first;
         pf->viewMotionY = viewAtControl.second - viewAtObservation.second;
         pf->predictionDirectionLocked = lastPredictionResult.directionLocked;
-        pf->predictionOutsideApplied = lastPredictionResult.outsideApplied;
         pf->predictedX = lastPredictionResult.x;
         pf->predictedY = lastPredictionResult.y;
         pf->errorX = errorX;
