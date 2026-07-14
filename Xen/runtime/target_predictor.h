@@ -170,9 +170,18 @@ public:
         const double speedAlongDirection = std::max(
             0.0, velocityX_ * directionX_ + velocityY_ * directionY_);
         const double strength = std::clamp(settings.predictionStrength, 0.0, 4.0);
-        const double maxPredictionDistance = std::max(12.0, span * 0.35);
+        // 方向刚建立或刚完成反转时，完整提前量会把短暂可靠窗口放大成左右脉冲。
+        // 用七个有效预测帧渐进释放：约100 FPS下70 ms即可恢复全额持续提前，
+        // 高频反转和跳跃的2~3帧短段只获得部分提前，不改变方向确认与失效规则。
+        constexpr int kFullLeadReleaseFrames = 7;
+        const double leadReleaseScale = std::min(
+            1.0, continuousPredictionFrames_ /
+                static_cast<double>(kFullLeadReleaseFrames));
+        // 普通left/right实测提前P95约20 px，不受此上限影响；异常高速jump原112 px
+        // 提前会远离目标框并消耗设备速度预算，限制为检测跨度20%（320区域为64 px）。
+        const double maxPredictionDistance = std::max(12.0, span * 0.20);
         const double predictionDistance = std::clamp(
-            speedAlongDirection * leadSeconds * strength,
+            speedAlongDirection * leadSeconds * strength * leadReleaseScale,
             0.0, maxPredictionDistance);
         const double offsetX = directionX_ * predictionDistance;
         const double offsetY = directionY_ * predictionDistance;

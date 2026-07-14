@@ -172,7 +172,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r20") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r21") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
@@ -288,8 +288,8 @@ int main()
         172.0, 100.0, t0 + std::chrono::milliseconds(72),
         t0 + std::chrono::milliseconds(82), 320.0, predictionSettings);
     expectTrue(predictionMoving.applied && predictionMoving.directionLocked &&
-               predictionMoving.x > 140.0,
-               "confirmed movement produces a forward constant-velocity lead");
+               predictionMoving.x > 172.0,
+               "confirmed movement progressively releases a forward constant-velocity lead");
     expectNear(predictionMoving.velocityX, 1000.0, 1e-9,
                "prediction velocity uses observation timestamps");
     expectNear(predictionMoving.leadSeconds, 0.030, 1e-9,
@@ -492,13 +492,16 @@ int main()
                "target loss reset prevents stale prediction output");
 
     TargetPredictor jumpPredictor;
-    jumpPredictor.update(
-        10.0, 10.0, t0, t0, 320.0, predictionSettings);
-    const auto boundedJump = jumpPredictor.update(
-        310.0, 310.0, t0 + std::chrono::milliseconds(8),
-        t0 + std::chrono::milliseconds(200), 320.0, predictionSettings);
-    expectTrue(std::hypot(boundedJump.x - 310.0, boundedJump.y - 310.0) <= 112.0 + 1e-9,
-               "abnormal target jump has bounded prediction distance");
+    TargetPredictor::Result boundedJump{};
+    for (int sample = 0; sample < 18; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        boundedJump = jumpPredictor.update(
+            10.0 + sample * 16.0, 10.0, time, time,
+            320.0, predictionSettings);
+    }
+    expectNear(std::hypot(boundedJump.offsetX, boundedJump.offsetY), 64.0, 1e-9,
+               "mature abnormal high-speed prediction is capped at twenty percent span");
 
     TargetPredictor reversalPredictor;
     for (int sample = 0; sample < 10; ++sample)
@@ -541,10 +544,25 @@ int main()
     expectTrue(confirmedStopPrediction.x == 68.0,
                "two stationary observations withdraw the prediction lead");
 
-    expectNear(predictionMoving.offsetX,
-               predictionMoving.velocityX * predictionMoving.leadSeconds *
+    TargetPredictor matureLeadPredictor;
+    TargetPredictor::Result matureLeadPrediction{};
+    TargetPredictor::Result firstReleasedLead{};
+    for (int sample = 0; sample < 18; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        matureLeadPrediction = matureLeadPredictor.update(
+            100.0 + sample * 4.0, 100.0, time, time,
+            320.0, predictionSettings);
+        if (firstReleasedLead.offsetX == 0.0 && matureLeadPrediction.offsetX > 0.0)
+            firstReleasedLead = matureLeadPrediction;
+    }
+    expectTrue(firstReleasedLead.offsetX > 0.0 &&
+               firstReleasedLead.offsetX < matureLeadPrediction.offsetX,
+               "newly confirmed direction ramps lead instead of emitting a full pulse");
+    expectNear(matureLeadPrediction.offsetX,
+               matureLeadPrediction.velocityX * matureLeadPrediction.leadSeconds *
                    predictionSettings.predictionStrength,
-               1e-9, "acceleration diagnostics never alter constant-velocity lead");
+               1e-9, "seven stable prediction frames restore the full constant-velocity lead");
 
     TargetPredictor disabledPredictor;
     TargetPredictor::Settings disabledPredictionSettings = predictionSettings;
