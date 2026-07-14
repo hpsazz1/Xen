@@ -14,6 +14,7 @@ public:
     void configure(const std::string& requestedMode);
     void reset();
     AimPipelineFrameState observe(const AimObservation& observation);
+    void setViewMotionDiagnostics(const ViewMotionShadowDiagnostics& diagnostics);
 
     const AimPipelineFrameState& snapshot() const { return frame_; }
     AimPipelineMode requestedMode() const { return requestedMode_; }

@@ -7,6 +7,18 @@ namespace AimCoordinateSpace
 {
 inline constexpr double kPi = 3.14159265358979323846;
 
+struct LosAngles
+{
+    double yawDegrees = 0.0;       // 正值表示目标位于准星右侧
+    double pitchDownDegrees = 0.0; // 正值表示目标位于准星下方，与屏幕Y和设备counts方向一致
+};
+
+struct SourcePixelOffset
+{
+    double x = 0.0;
+    double y = 0.0;
+};
+
 inline double degreesToRadians(double degrees)
 {
     return degrees * kPi / 180.0;
@@ -64,6 +76,36 @@ inline double sourcePixelDeltaForAngleDegrees(
     const double halfFovRadians = degreesToRadians(safeFovDegrees) * 0.5;
     return std::tan(degreesToRadians(angleDegrees)) /
         std::tan(halfFovRadians) * safePixelSpan * 0.5;
+}
+
+/** @brief 将完整源画面中心坐标系中的二维像素偏移转换为yaw/向下pitch。 */
+inline LosAngles pixelOffsetToLosAngles(
+    double pixelOffsetX,
+    double pixelOffsetY,
+    double horizontalFovDegrees,
+    double verticalFovDegrees,
+    double sourceWidth,
+    double sourceHeight)
+{
+    return {
+        angleDegreesForSourcePixelDelta(pixelOffsetX, horizontalFovDegrees, sourceWidth),
+        angleDegreesForSourcePixelDelta(pixelOffsetY, verticalFovDegrees, sourceHeight)
+    };
+}
+
+/** @brief 将yaw/向下pitch转换回完整源画面中心坐标系中的二维像素偏移。 */
+inline SourcePixelOffset losAnglesToPixelOffset(
+    double yawDegrees,
+    double pitchDownDegrees,
+    double horizontalFovDegrees,
+    double verticalFovDegrees,
+    double sourceWidth,
+    double sourceHeight)
+{
+    return {
+        sourcePixelDeltaForAngleDegrees(yawDegrees, horizontalFovDegrees, sourceWidth),
+        sourcePixelDeltaForAngleDegrees(pitchDownDegrees, verticalFovDegrees, sourceHeight)
+    };
 }
 
 /**

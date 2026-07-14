@@ -135,6 +135,7 @@ bool Config::loadConfig(const std::string& filename)
         move_max_speed_cps = 1440.0f;                    // 四链路九宫格复测值；1200 cps 下约八成远距帧仍受限
         move_integral_time_ms = 0.0f;                    // 默认关闭；320 ms 候选需先通过移动与静止复测
         aim_pipeline_mode = "legacy";                   // P0-0 默认保持 r30 正式输出
+        aim_shadow_command_to_frame_delay_ms = 60.0f;    // 显式shadow候选，不自动采用被动标定结果
 
         prediction_enabled = true;                       // 连续真实观测预测总开关
         prediction_lead_ms = 50.0f;                      // 观测年龄之外的基础前瞻（毫秒）
@@ -541,6 +542,8 @@ bool Config::loadConfig(const std::string& filename)
     move_max_speed_cps = (float)get_double("move_max_speed_cps", 1440.0);
     move_integral_time_ms = (float)get_double("move_integral_time_ms", 0.0);
     aim_pipeline_mode = get_string("aim_pipeline_mode", "legacy");
+    aim_shadow_command_to_frame_delay_ms = (float)get_double(
+        "aim_shadow_command_to_frame_delay_ms", 60.0);
 
     prediction_enabled = get_bool("prediction_enabled", true);
     const bool hasPredictionLeadMs = ini.GetValue("", "prediction_lead_ms", nullptr) != nullptr;
@@ -744,6 +747,8 @@ bool Config::loadConfig(const std::string& filename)
     prediction_lead_ms = std::clamp(prediction_lead_ms, 0.0f, 100.0f);
     prediction_velocity_tau_ms = std::clamp(prediction_velocity_tau_ms, 40.0f, 120.0f);
     prediction_strength = std::clamp(prediction_strength, 0.0f, 4.0f);
+    aim_shadow_command_to_frame_delay_ms = std::clamp(
+        aim_shadow_command_to_frame_delay_ms, 0.0f, 250.0f);
 
     // === 覆盖层尺寸范围校验 ===
     if (overlay_width < 560) overlay_width = 560;
@@ -865,6 +870,7 @@ bool Config::saveConfig(const std::string& filename)
         << "move_max_speed_cps = " << move_max_speed_cps << "\n"
         << "move_integral_time_ms = " << move_integral_time_ms << "\n"
         << "aim_pipeline_mode = " << aim_pipeline_mode << "\n"
+        << "aim_shadow_command_to_frame_delay_ms = " << aim_shadow_command_to_frame_delay_ms << "\n"
         << "prediction_enabled = " << (prediction_enabled ? "true" : "false") << "\n"
         << "prediction_lead_ms = " << prediction_lead_ms << "\n"
         << "prediction_velocity_tau_ms = " << prediction_velocity_tau_ms << "\n"

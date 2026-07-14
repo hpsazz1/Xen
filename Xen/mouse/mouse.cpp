@@ -83,6 +83,7 @@ MouseThread::MouseThread(
         predictionSettings.predictionStrength =
             static_cast<double>(config.prediction_strength);
         aimPipelineRuntime.configure(config.aim_pipeline_mode);
+        appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
         profileCalibrator.setEnabled(config.profile_calibration_enabled);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
     }
@@ -130,6 +131,7 @@ void MouseThread::updateConfig(
     predictionSettings.predictionStrength = std::clamp(
         static_cast<double>(config.prediction_strength), 0.0, 4.0);
     aimPipelineRuntime.configure(config.aim_pipeline_mode);
+    appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
     profileCalibrator.setEnabled(config.profile_calibration_enabled);
     if (config.profile_calibration_enabled)
         profileCalibrator.reset();
@@ -781,6 +783,16 @@ void MouseThread::recordMotionCompensationStep(
     motionCompensationHistory.add(delta.first, delta.second, sendTime);
 }
 
+std::pair<double, double> MouseThread::currentDegreesPerCount() const
+{
+    const double fovScale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0)
+        ? (fov_x / cachedGameBaseFOV) : 1.0;
+    return {
+        cachedGameSens * cachedGameYaw * fovScale,
+        cachedGameSens * cachedGamePitch * fovScale
+    };
+}
+
 /**
  * getMotionCompensationSince
  *
@@ -864,6 +876,11 @@ void MouseThread::sendMovementToDriver(Move move)
     move.timing.sendSucceeded = true;
     profileCalibrator.recordCommand(move.dx, move.dy, sendTime);
     recordMotionCompensationStep(move.dx, move.dy, sendTime);
+    const auto degreesPerCount = currentDegreesPerCount();
+    appliedViewMotionModel.addCommand(
+        move.dx, move.dy,
+        degreesPerCount.first, degreesPerCount.second,
+        sendTime);
     g_pipelineTracer.recordCommandResult(move.timing);
 }
 
@@ -1190,7 +1207,44 @@ void MouseThread::moveMousePivot(
     shadowObservation.boxWidth = target.w;
     shadowObservation.boxHeight = target.h;
     shadowObservation.valid = true;
-    const AimPipelineFrameState shadowFrame = aimPipelineRuntime.observe(shadowObservation);
+    aimPipelineRuntime.observe(shadowObservation);
+    if (aimPipelineRuntime.effectiveMode() == AimPipelineMode::Shadow)
+    {
+        const double sourceWidth = AimCoordinateSpace::resolveFovPixelSpan(
+            shadowObservation.timing.sourceWidth, screen_width);
+        const double sourceHeight = AimCoordinateSpace::resolveFovPixelSpan(
+            shadowObservation.timing.sourceHeight, screen_height);
+        const auto measuredLos = AimCoordinateSpace::pixelOffsetToLosAngles(
+            pivotX - center_x,
+            pivotY - center_y,
+            fov_x,
+            fov_y,
+            sourceWidth,
+            sourceHeight);
+        const auto cameraAtObservation = appliedViewMotionModel.at(effectiveObservationTime);
+        const auto cameraAtControl = appliedViewMotionModel.at(controlTime);
+        const auto degreesPerCount = currentDegreesPerCount();
+
+        ViewMotionShadowDiagnostics diagnostics;
+        diagnostics.valid = true;
+        diagnostics.commandToFrameDelayMs = appliedViewMotionModel.commandToFrameDelayMs();
+        diagnostics.degreesPerCountX = degreesPerCount.first;
+        diagnostics.degreesPerCountY = degreesPerCount.second;
+        diagnostics.measuredLosYawDegrees = measuredLos.yawDegrees;
+        diagnostics.measuredLosPitchDownDegrees = measuredLos.pitchDownDegrees;
+        diagnostics.appliedCameraYawAtObservationDegrees = cameraAtObservation.first;
+        diagnostics.appliedCameraPitchAtObservationDegrees = cameraAtObservation.second;
+        diagnostics.appliedCameraYawAtControlDegrees = cameraAtControl.first;
+        diagnostics.appliedCameraPitchAtControlDegrees = cameraAtControl.second;
+        diagnostics.stabilizedLosYawDegrees = measuredLos.yawDegrees + cameraAtObservation.first;
+        diagnostics.stabilizedLosPitchDownDegrees = measuredLos.pitchDownDegrees + cameraAtObservation.second;
+        diagnostics.relativeErrorYawDegrees =
+            diagnostics.stabilizedLosYawDegrees - cameraAtControl.first;
+        diagnostics.relativeErrorPitchDownDegrees =
+            diagnostics.stabilizedLosPitchDownDegrees - cameraAtControl.second;
+        aimPipelineRuntime.setViewMotionDiagnostics(diagnostics);
+    }
+    const AimPipelineFrameState shadowFrame = aimPipelineRuntime.snapshot();
     if (pf)
         pf->aimPipeline = shadowFrame;
     const double calibrationSourceWidth = AimCoordinateSpace::resolveFovPixelSpan(

@@ -105,7 +105,7 @@
 - [x] 在不改变r30控制行为的前提下实现首版被动Profile标定：使用设备实际成功发送时间与raw pivot观测时间，稳健估算X/Y `px/count`、`degrees/count`、单次command-to-frame延迟、漂移、RMSE、相关性和可信度；UI与CSV只读展示，不覆盖配置，详见`docs/067被动Profile自动标定实现20260714.md`。
 - [x] **[P0-0] 建立并行重构骨架：** 新增统一观测/状态/控制/轨迹数据结构与`legacy/shadow/active`请求模式；P0期间`active`安全降级为`shadow`，r30保持正式输出，shadow逐帧写入同一CSV且绝不访问设备队列，详见`docs/069P0-0影子链路骨架实现20260715.md`。
 - [x] **[P0-1] 贯通完整时间轴：** 让NDI/UDP/DDA/WinRT/虚拟摄像头真实取得帧时间、检测提交/开始/发布、控制消费、命令入队和设备成功发送时间完整随数据流传递；NDI `receiveNow`已随`NetworkFrame`保存，`DetectionBuffer::swapLocked()`已返回完整时间契约，CSV保留未知/乱序标记而不裁剪年龄，详见`docs/070P0-1完整时间轴贯通20260715.md`。
-- [ ] **[P0-2] 实现角度坐标与延迟相机响应：** 使用完整源HFOV/VFOV把raw pivot转为yaw/pitch；新增只用于新链路的实际成功counts历史和固定`commandToFrameDelayMs`响应核，禁止继续按发送时刻立即补偿画面。
+- [x] **[P0-2] 实现角度坐标与延迟相机响应：** 使用完整源HFOV/VFOV把raw pivot转为yaw/pitch；新增只用于新链路的实际成功counts历史和固定`commandToFrameDelayMs`响应核，禁止继续按发送时刻立即补偿画面；当前只输出shadow诊断并保持r30控制不变，详见`docs/071P0-2角度坐标与延迟相机响应20260715.md`。
 - [ ] **[P0-3] 建立相对视线Kalman影子链：** 状态为`[losAngle,relativeLosRate]`，贯通检测置信度并输出协方差、innovation、NIS和前馈可信度；One Euro与Alpha-Beta只在回放器中作对照，不与Kalman串联。
 - [ ] **[P0-4A] 拆分新控制器：** 依次验证角误差P反馈、相对视线角速度前馈、角度PI抗饱和，最后才启用独立的`leadHorizon/leadStrength`经验提前参考；保持二维counts限速、目标丢失立即停止和一键回退r30。
 - [ ] **[P0-4B] 重构轨迹执行层：** 以确定性的在线速度/加速度/jerk约束替换当前已停用的WindMouse、随机Perlin、固定端点Bezier和输出EMA；先做pass-through与梯形基线，再评估本地Ruckig两自由度velocity-control。每周期只发一个二维命令，新观测在线重规划，丢失/切换单周期清空，实际整形后counts进入相机响应模型，详见068文档。

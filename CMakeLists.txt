@@ -339,6 +339,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/overlay/overlay.cpp"
     "${SRC_DIR}/runtime/thread_loops_shared.cpp"
     "${SRC_DIR}/runtime/aim_pipeline_runtime.cpp"
+    "${SRC_DIR}/runtime/applied_view_motion_model.cpp"
     "${SRC_DIR}/runtime/build_identity.cpp"
     "${SRC_DIR}/runtime/application_shutdown.cpp"
     "${SRC_DIR}/runtime/application_threads.cpp"
@@ -406,6 +407,7 @@ if(BUILD_TESTING)
         "${SRC_DIR}/debug/pipeline_tracer.cpp"
         "${SRC_DIR}/capture/ndi_frame_geometry.cpp"
         "${SRC_DIR}/runtime/aim_pipeline_runtime.cpp"
+        "${SRC_DIR}/runtime/applied_view_motion_model.cpp"
         "${SRC_DIR}/runtime/build_identity.cpp"
     )
     set_target_properties(xen_algorithm_tests PROPERTIES

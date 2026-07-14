@@ -72,5 +72,12 @@ AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observat
     frame_.trajectoryState = {};
     frame_.trajectoryOutput = {};
     frame_.trajectoryOutput.commandSuppressed = true;
+    frame_.viewMotion = {};
     return frame_;
+}
+
+void AimPipelineRuntime::setViewMotionDiagnostics(
+    const ViewMotionShadowDiagnostics& diagnostics)
+{
+    frame_.viewMotion = diagnostics;
 }

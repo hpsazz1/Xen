@@ -178,6 +178,9 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "AimPipelineTargetId,AimPipelineClassId,AimPipelineConfidence,AimPipelineRawPivotX,AimPipelineRawPivotY,AimPipelineEstimateValid,"
          << "AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadReferenceX,AimPipelineLeadReferenceY,"
          << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
+         << "ViewMotionShadowValid,CommandToFrameDelayMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
+         << "AppliedCameraYawAtObservationDegrees,AppliedCameraPitchAtObservationDegrees,AppliedCameraYawAtControlDegrees,AppliedCameraPitchAtControlDegrees,"
+         << "StabilizedLosYawDegrees,StabilizedLosPitchDownDegrees,RelativeErrorYawDegrees,RelativeErrorPitchDownDegrees,"
          << "CaptureFrameSequence,BackendReceiveNs,CaptureSubmitNs,InferenceStartNs,InferencePublishNs,ControlTimeNs,"
          << "SourceTimestampAvailable,SourceTimestamp,SourceTimecodeAvailable,SourceTimecode,SourceTimestampMapped,"
          << "CaptureRoiX,CaptureRoiY,CaptureRoiWidth,CaptureRoiHeight,TimingComplete,TimingOrderValid,TimingAnomaly,"
@@ -240,6 +243,19 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << ap.control.requestedCountsX << ',' << ap.control.requestedCountsY << ','
              << ap.trajectoryOutput.outputCountsX << ',' << ap.trajectoryOutput.outputCountsY << ','
              << (ap.trajectoryOutput.commandSuppressed ? '1' : '0') << ','
+             << (ap.viewMotion.valid ? '1' : '0') << ','
+             << ap.viewMotion.commandToFrameDelayMs << ','
+             << ap.viewMotion.degreesPerCountX << ',' << ap.viewMotion.degreesPerCountY << ','
+             << ap.viewMotion.measuredLosYawDegrees << ','
+             << ap.viewMotion.measuredLosPitchDownDegrees << ','
+             << ap.viewMotion.appliedCameraYawAtObservationDegrees << ','
+             << ap.viewMotion.appliedCameraPitchAtObservationDegrees << ','
+             << ap.viewMotion.appliedCameraYawAtControlDegrees << ','
+             << ap.viewMotion.appliedCameraPitchAtControlDegrees << ','
+             << ap.viewMotion.stabilizedLosYawDegrees << ','
+             << ap.viewMotion.stabilizedLosPitchDownDegrees << ','
+             << ap.viewMotion.relativeErrorYawDegrees << ','
+             << ap.viewMotion.relativeErrorPitchDownDegrees << ','
              << timing.frameSequence << ','
              << steadyTimeNs(timing.backendReceiveTime) << ','
              << steadyTimeNs(timing.captureSubmitTime) << ','

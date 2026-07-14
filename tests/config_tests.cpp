@@ -102,6 +102,8 @@ int main()
                    "moving integral remains disabled before field validation");
         expectString(defaults.aim_pipeline_mode, "legacy",
                      "new pipeline defaults to legacy mode");
+        expectNear(defaults.aim_shadow_command_to_frame_delay_ms, 60.0, 0.0,
+                   "shadow applied-view model uses explicit fixed delay");
         expectNear(defaults.prediction_lead_ms, 50.0, 0.0,
                    "default prediction uses kinematic replay lead");
         expectNear(defaults.prediction_velocity_tau_ms, 50.0, 0.0,
@@ -162,6 +164,8 @@ int main()
                    "saved config persists passive profile calibration state");
         expectTrue(migratedText.find("aim_pipeline_mode = legacy") != std::string::npos,
                    "saved config persists the safe new pipeline mode");
+        expectTrue(migratedText.find("aim_shadow_command_to_frame_delay_ms = 60") != std::string::npos,
+                   "saved config persists the explicit shadow delay");
         expectTrue(migratedText.find("predictionInterval") == std::string::npos,
                    "saved config removes legacy prediction interval key");
     }
@@ -203,6 +207,18 @@ int main()
     expectString(shadowMode.aim_pipeline_mode, "shadow",
                  "shadow pipeline config state is restored");
     std::filesystem::remove(shadowModePath, removeError);
+
+    const std::filesystem::path unsafeDelayPath = "xen_config_shadow_delay_test.ini";
+    {
+        std::ofstream unsafeDelayFile(unsafeDelayPath);
+        unsafeDelayFile << "aim_shadow_command_to_frame_delay_ms = 999\n";
+    }
+    Config clampedDelay{};
+    expectTrue(clampedDelay.loadConfig(unsafeDelayPath.string()),
+               "shadow delay config loads successfully");
+    expectNear(clampedDelay.aim_shadow_command_to_frame_delay_ms, 250.0, 0.0,
+               "shadow delay remains bounded by the documented safety maximum");
+    std::filesystem::remove(unsafeDelayPath, removeError);
 
     const std::filesystem::path speedLimitPath = "xen_config_speed_limit_test.ini";
     {

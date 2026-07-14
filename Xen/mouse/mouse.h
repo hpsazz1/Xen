@@ -25,6 +25,7 @@
 #include "runtime/basic_aim_controller.h"
 #include "runtime/basic_target_filter.h"
 #include "runtime/aim_pipeline_runtime.h"
+#include "runtime/applied_view_motion_model.h"
 #include "runtime/passive_profile_calibrator.h"
 #include "runtime/target_predictor.h"
 #include "runtime/view_motion_history.h"
@@ -79,6 +80,7 @@ private:
     TargetPredictor targetPredictor;                               ///< 仅连续真实观测生效的前瞻预测器
     BasicAimController aimController;                              ///< 帧率无关的基础误差控制器
     AimPipelineRuntime aimPipelineRuntime;                         ///< P0并行影子链；不持有或访问设备队列
+    AppliedViewMotionModel appliedViewMotionModel;                 ///< 成功counts按固定延迟生效的角度影子模型
     BasicTargetFilter::Result lastFilterResult{};                  ///< 流水线诊断快照
     TargetPredictor::Result lastPredictionResult{};                ///< 流水线预测诊断快照
     TargetPredictor::Settings predictionSettings{};                ///< 运行时预测配置缓存
@@ -212,6 +214,7 @@ private:
         std::chrono::steady_clock::time_point sendTime);          ///< 使用设备实际发送时刻记录运动补偿步进
     std::pair<double, double> getMotionCompensationAt(
         std::chrono::steady_clock::time_point time) const;        ///< 查询指定时刻累计自身视角位移
+    std::pair<double, double> currentDegreesPerCount() const;      ///< 当前游戏Profile的X/Y轴角度比例
 
     /** @brief 计算从当前位置到目标位置的移动量（像素→counts，含速度曲线+FPS修正） */
     std::pair<double, double> calc_movement(double target_x, double target_y);

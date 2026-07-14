@@ -1,5 +1,6 @@
 #include "runtime/basic_aim_controller.h"
 #include "runtime/aim_pipeline_runtime.h"
+#include "runtime/applied_view_motion_model.h"
 #include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_target_filter.h"
 #include "runtime/target_predictor.h"
@@ -261,6 +262,91 @@ int main()
     expectNear(AimCoordinateSpace::sourcePixelDeltaForAngleDegrees(
         projectedAngle, 106.0, sourceSpan), 160.0, 1e-9,
         "perspective pixel and angle conversions round trip exactly");
+    const auto losAngles = AimCoordinateSpace::pixelOffsetToLosAngles(
+        160.0, -90.0, 106.0, 74.0, 2560.0, 1440.0);
+    const auto losPixels = AimCoordinateSpace::losAnglesToPixelOffset(
+        losAngles.yawDegrees, losAngles.pitchDownDegrees,
+        106.0, 74.0, 2560.0, 1440.0);
+    expectNear(losPixels.x, 160.0, 1e-9,
+               "yaw angle conversion round trips source pixel offset");
+    expectNear(losPixels.y, -90.0, 1e-9,
+               "pitch angle conversion round trips source pixel offset");
+
+    AppliedViewMotionModel appliedViewModel;
+    appliedViewModel.configure(50.0);
+    const auto commandStart = timingBase + std::chrono::seconds(1);
+    appliedViewModel.addCommand(10, -4, 0.03, 0.02, commandStart);
+    expectNear(appliedViewModel.at(commandStart + std::chrono::milliseconds(49)).first,
+               0.0, 1e-12, "delayed view command is not applied before response delay");
+    expectNear(appliedViewModel.at(commandStart + std::chrono::milliseconds(50)).first,
+               0.30, 1e-12, "delayed view command applies horizontal angle at delay");
+    expectNear(appliedViewModel.at(commandStart + std::chrono::milliseconds(50)).second,
+               -0.08, 1e-12, "delayed view command applies vertical angle at delay");
+    appliedViewModel.addCommand(-2, 1, 0.03, 0.02,
+        commandStart + std::chrono::milliseconds(10));
+    expectNear(appliedViewModel.at(commandStart + std::chrono::milliseconds(60)).first,
+               0.24, 1e-12, "view model accumulates signed delayed commands");
+    for (int sample = 0; sample < 520; ++sample)
+    {
+        appliedViewModel.addCommand(1, 0, 0.01, 0.02,
+            commandStart + std::chrono::milliseconds(100 + sample));
+    }
+    expectTrue(appliedViewModel.sampleCount() <= 512,
+               "view model prunes history to a bounded sample count");
+    expectNear(appliedViewModel.at(commandStart + std::chrono::milliseconds(2000)).first,
+               5.44, 1e-9,
+               "view model pruning preserves the cumulative angle baseline");
+
+    AppliedViewMotionModel trueCameraModel;
+    AppliedViewMotionModel alignedCameraModel;
+    AppliedViewMotionModel wrongDelayCameraModel;
+    trueCameraModel.configure(60.0);
+    alignedCameraModel.configure(60.0);
+    wrongDelayCameraModel.configure(0.0);
+    for (int command = 0; command < 4; ++command)
+    {
+        const int signedCounts = (command % 2 == 0) ? 8 : -5;
+        const auto sendTime = commandStart + std::chrono::milliseconds(80 + command * 90);
+        trueCameraModel.addCommand(signedCounts, 0, 0.03, 0.02, sendTime);
+        alignedCameraModel.addCommand(signedCounts, 0, 0.03, 0.02, sendTime);
+        wrongDelayCameraModel.addCommand(signedCounts, 0, 0.03, 0.02, sendTime);
+    }
+    constexpr double staticWorldYaw = 1.25;
+    double alignedSquaredError = 0.0;
+    double wrongSquaredError = 0.0;
+    double maximumAlignedRate = 0.0;
+    double previousAlignedYaw = staticWorldYaw;
+    int syntheticSamples = 0;
+    for (int milliseconds = 0; milliseconds <= 500; milliseconds += 10)
+    {
+        const auto observationTime = commandStart + std::chrono::milliseconds(milliseconds);
+        const double measuredRelativeYaw =
+            staticWorldYaw - trueCameraModel.at(observationTime).first;
+        const double alignedYaw =
+            measuredRelativeYaw + alignedCameraModel.at(observationTime).first;
+        const double wrongYaw =
+            measuredRelativeYaw + wrongDelayCameraModel.at(observationTime).first;
+        const double alignedError = alignedYaw - staticWorldYaw;
+        const double wrongError = wrongYaw - staticWorldYaw;
+        alignedSquaredError += alignedError * alignedError;
+        wrongSquaredError += wrongError * wrongError;
+        if (syntheticSamples > 0)
+        {
+            maximumAlignedRate = std::max(
+                maximumAlignedRate,
+                std::abs((alignedYaw - previousAlignedYaw) / 0.010));
+        }
+        previousAlignedYaw = alignedYaw;
+        ++syntheticSamples;
+    }
+    const double alignedRmse = std::sqrt(alignedSquaredError / syntheticSamples);
+    const double wrongDelayRmse = std::sqrt(wrongSquaredError / syntheticSamples);
+    expectNear(alignedRmse, 0.0, 1e-12,
+               "delay-aligned static camera motion has zero stabilized angle rmse");
+    expectNear(maximumAlignedRate, 0.0, 1e-9,
+               "delay-aligned static camera motion has zero stabilized angular rate");
+    expectTrue(wrongDelayRmse > alignedRmse + 0.05,
+               "deliberately wrong camera delay increases stabilized angle rmse");
 
     PassiveProfileCalibrator calibrator;
     const auto calibrationStart = PassiveProfileCalibrator::TimePoint(
@@ -327,6 +413,8 @@ int main()
     pending.finalMx = 17;
     pending.finalMy = -3;
     pending.aimPipeline = shadowFrame;
+    pending.aimPipeline.viewMotion.valid = true;
+    pending.aimPipeline.viewMotion.commandToFrameDelayMs = 50.0;
     pending.frameTiming.backendReceiveTime = timingBase;
     pending.frameTiming.captureSubmitTime = timingBase + std::chrono::milliseconds(1);
     pending.frameTiming.inferenceStartTime = timingBase + std::chrono::milliseconds(2);
@@ -418,6 +506,9 @@ int main()
     expectTrue(traceHeader.find(
         "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed") != std::string::npos,
         "basic pipeline records same-frame new pipeline mode diagnostics");
+    expectTrue(traceHeader.find(
+        "ViewMotionShadowValid,CommandToFrameDelayMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees") != std::string::npos,
+        "basic pipeline records delayed applied-view angle diagnostics");
     expectTrue(traceHeader.find(
         "CaptureFrameSequence,BackendReceiveNs,CaptureSubmitNs,InferenceStartNs,InferencePublishNs,ControlTimeNs") != std::string::npos &&
         traceHeader.find("BackendQueueMs,SubmitToInferenceMs,InferenceToPublishMs,PublishToControlMs,LocalObservationAgeMs") != std::string::npos,

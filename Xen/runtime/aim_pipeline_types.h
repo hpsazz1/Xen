@@ -166,6 +166,24 @@ struct TrajectoryOutput
     FrameTiming::Clock::time_point outputTickTime{};
 };
 
+struct ViewMotionShadowDiagnostics
+{
+    bool valid = false;
+    double commandToFrameDelayMs = 0.0;
+    double degreesPerCountX = 0.0;
+    double degreesPerCountY = 0.0;
+    double measuredLosYawDegrees = 0.0;
+    double measuredLosPitchDownDegrees = 0.0;
+    double appliedCameraYawAtObservationDegrees = 0.0;
+    double appliedCameraPitchAtObservationDegrees = 0.0;
+    double appliedCameraYawAtControlDegrees = 0.0;
+    double appliedCameraPitchAtControlDegrees = 0.0;
+    double stabilizedLosYawDegrees = 0.0;
+    double stabilizedLosPitchDownDegrees = 0.0;
+    double relativeErrorYawDegrees = 0.0;
+    double relativeErrorPitchDownDegrees = 0.0;
+};
+
 // 单帧新链路快照，直接嵌入旧 PipelineFrame，保证同帧对照。
 struct AimPipelineFrameState
 {
@@ -182,6 +200,7 @@ struct AimPipelineFrameState
     TrajectoryRequest trajectoryRequest{};
     TrajectoryState trajectoryState{};
     TrajectoryOutput trajectoryOutput{};
+    ViewMotionShadowDiagnostics viewMotion{};
 };
 
 #endif
