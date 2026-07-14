@@ -1133,6 +1133,38 @@ void MouseThread::moveMousePivot(
     lastPredictionResult = targetPredictor.update(
         filtered.first, filtered.second, effectiveObservationTime,
         controlTime, screen_width, predictionSettings);
+    const double observedScreenAtObservationX = filtered.first - viewAtObservation.first;
+    const double observedScreenAtObservationY = filtered.second - viewAtObservation.second;
+    if (predictionObservationHistory.size() >= 3 && lastPredictionResult.directionLocked)
+    {
+        const auto& historyStart = predictionObservationHistory.front();
+        const double screenDeltaX =
+            observedScreenAtObservationX - historyStart.screenX;
+        const double screenDeltaY =
+            observedScreenAtObservationY - historyStart.screenY;
+        const double viewDeltaX = viewAtObservation.first - historyStart.viewX;
+        const double viewDeltaY = viewAtObservation.second - historyStart.viewY;
+        if (TargetPredictor::isSelfMotionArtifact(
+                observedScreenAtObservationX - center_x,
+                observedScreenAtObservationY - center_y,
+                screenDeltaX, screenDeltaY,
+                viewDeltaX, viewDeltaY,
+                lastPredictionResult.velocityX,
+                lastPredictionResult.velocityY))
+        {
+            lastPredictionResult.x = filtered.first;
+            lastPredictionResult.y = filtered.second;
+            lastPredictionResult.offsetX = 0.0;
+            lastPredictionResult.offsetY = 0.0;
+            lastPredictionResult.selfMotionSuppressed = true;
+        }
+    }
+    predictionObservationHistory.push_back({
+        observedScreenAtObservationX, observedScreenAtObservationY,
+        viewAtObservation.first, viewAtObservation.second
+    });
+    while (predictionObservationHistory.size() > 3)
+        predictionObservationHistory.pop_front();
     const double filteredScreenX = filtered.first - viewAtControl.first;
     const double filteredScreenY = filtered.second - viewAtControl.second;
     lastPredictionResult.x -= viewAtControl.first;
@@ -1210,6 +1242,7 @@ void MouseThread::moveMousePivot(
         pf->viewMotionX = viewAtControl.first - viewAtObservation.first;
         pf->viewMotionY = viewAtControl.second - viewAtObservation.second;
         pf->predictionDirectionLocked = lastPredictionResult.directionLocked;
+        pf->predictionSelfMotionSuppressed = lastPredictionResult.selfMotionSuppressed;
         pf->predictedX = lastPredictionResult.x;
         pf->predictedY = lastPredictionResult.y;
         pf->errorX = errorX;
@@ -1721,6 +1754,7 @@ void MouseThread::resetTracking()
     lastFilterResult = {};
     lastPredictionResult = {};
     lastControlObservationTime = {};
+    predictionObservationHistory.clear();
     target_detected.store(false);
     // 目标切换时重置确认帧计数，避免新目标跳过确认延迟
     stableFrameCount = 0;

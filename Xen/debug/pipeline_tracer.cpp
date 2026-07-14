@@ -99,7 +99,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,"
          << "PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,"
          << "PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,"
-         << "ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictedX,PredictedY,"
+         << "ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictedX,PredictedY,"
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
          << "FinalMx,FinalMy,"
@@ -148,6 +148,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.predictionLeadMs << ',' << f.predictionOffsetX << ',' << f.predictionOffsetY << ','
              << f.viewMotionX << ',' << f.viewMotionY << ','
              << (f.predictionDirectionLocked ? '1' : '0') << ','
+             << (f.predictionSelfMotionSuppressed ? '1' : '0') << ','
              << f.predictedX << ',' << f.predictedY << ','
              << f.errorX << ',' << f.errorY << ',' << f.errorDistance << ','
              << f.requestedPixelX << ',' << f.requestedPixelY << ','

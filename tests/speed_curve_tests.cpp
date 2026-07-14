@@ -171,13 +171,13 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r10") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r11") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
     expectTrue(traceHeader.find(
-        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictedX,PredictedY") != std::string::npos,
+        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictedX,PredictedY") != std::string::npos,
         "basic pipeline reports prediction diagnostics");
     traceFile.close();
     std::remove(tracePath);
@@ -289,6 +289,13 @@ int main()
                "minor non-dominant vertical noise is suppressed");
     expectNear(horizontalPrediction.offsetY, 0.0, 0.0,
                "horizontal movement never creates vertical prediction lead");
+
+    expectTrue(TargetPredictor::isSelfMotionArtifact(
+                   50.0, 0.0, -8.0, 0.0, 10.0, 0.0, 200.0, 0.0),
+               "self-driven screen convergence suppresses outward prediction residual");
+    expectTrue(!TargetPredictor::isSelfMotionArtifact(
+                   50.0, 0.0, 5.0, 0.0, 10.0, 0.0, 300.0, 0.0),
+               "real outward target motion remains eligible for prediction");
 
     TargetPredictor irregularPredictor;
     irregularPredictor.update(

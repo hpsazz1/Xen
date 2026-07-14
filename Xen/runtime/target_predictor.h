@@ -31,7 +31,41 @@ public:
         double offsetY = 0.0;
         bool directionLocked = false;
         bool applied = false;
+        bool selfMotionSuppressed = false;
     };
+
+    // 静止目标被程序拉向中心时，补偿残差可能表现为“预测速度继续向误差外侧”。
+    // 只有自身视角与误差同向、屏幕目标明确向中心收敛且预测速度反而向外时才判为伪迹。
+    static bool isSelfMotionArtifact(
+        double errorX, double errorY,
+        double screenDeltaX, double screenDeltaY,
+        double viewDeltaX, double viewDeltaY,
+        double velocityX, double velocityY)
+    {
+        const double errorLength = std::hypot(errorX, errorY);
+        const double screenLength = std::hypot(screenDeltaX, screenDeltaY);
+        const double viewLength = std::hypot(viewDeltaX, viewDeltaY);
+        const double velocityLength = std::hypot(velocityX, velocityY);
+        if (errorLength < 4.0 || screenLength < 0.5 || viewLength < 1.0 ||
+            velocityLength < 64.0)
+        {
+            return false;
+        }
+
+        const double viewErrorAlignment =
+            (viewDeltaX * errorX + viewDeltaY * errorY) / (viewLength * errorLength);
+        const double screenErrorAlignment =
+            (screenDeltaX * errorX + screenDeltaY * errorY) / (screenLength * errorLength);
+        const double velocityErrorAlignment =
+            (velocityX * errorX + velocityY * errorY) / (velocityLength * errorLength);
+        const double screenViewAlignment =
+            (screenDeltaX * viewDeltaX + screenDeltaY * viewDeltaY) /
+            (screenLength * viewLength);
+        return viewErrorAlignment > 0.50 &&
+               screenErrorAlignment < -0.35 &&
+               velocityErrorAlignment > 0.70 &&
+               screenViewAlignment < -0.35;
+    }
 
     Result update(double x, double y,
                   std::chrono::steady_clock::time_point observationTime,

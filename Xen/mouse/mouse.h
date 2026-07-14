@@ -80,6 +80,14 @@ private:
     TargetPredictor::Result lastPredictionResult{};                ///< 流水线预测诊断快照
     TargetPredictor::Settings predictionSettings{};                ///< 运行时预测配置缓存
     std::chrono::steady_clock::time_point lastControlObservationTime{}; ///< 上一有效观测时间，用于网络抖动下逐帧计算 dt
+    struct PredictionObservationContext
+    {
+        double screenX = 0.0;
+        double screenY = 0.0;
+        double viewX = 0.0;
+        double viewY = 0.0;
+    };
+    std::deque<PredictionObservationContext> predictionObservationHistory; ///< 最近三帧屏幕与自身视角观测
     std::chrono::steady_clock::time_point last_target_time;        ///< 最后检测到目标的时间
     std::atomic<bool> target_detected{ false };                   ///< 是否检测到目标（atomic 为未来多线程访问预留）
     std::atomic<bool> mouse_pressed{ false };                     ///< 鼠标是否按下（atomic，与 leftPressStartTime 同线程访问）

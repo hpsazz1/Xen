@@ -55,6 +55,7 @@ struct PipelineFrame
     double viewMotionX = 0.0;
     double viewMotionY = 0.0;
     bool predictionDirectionLocked = false;
+    bool predictionSelfMotionSuppressed = false;
     double predictedX = 0.0;
     double predictedY = 0.0;
 

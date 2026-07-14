@@ -78,6 +78,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 4 $reverseTrials[0].ControllerRevision 'Controller revision must be preserved in trial metrics.'
     Assert-Equal 28.6 $reverseTrials[0].MovingInsideSettlePct 'Settle motion diagnostics must be summarized per trial.'
     Assert-Equal 71.4 $reverseTrials[0].PredictionActivePct 'Kinematic prediction activation must be summarized.'
+    Assert-Equal 0 $reverseTrials[0].PredictionSelfMotionSuppressedPct 'Legacy CSV without self-motion gate diagnostics must remain compatible.'
     Assert-Equal 30 $reverseTrials[0].P50PredictionLeadPx 'Kinematic median lead must use active prediction offsets.'
     Assert-Equal 1 $reverseTrials[0].PredictionInterruptionCount 'Prediction active-to-inactive interruptions must be counted.'
     Assert-Equal 2 $reverseTrials[0].P50PredictionActiveRunFrames 'Prediction active run length must expose one-frame gating churn.'
