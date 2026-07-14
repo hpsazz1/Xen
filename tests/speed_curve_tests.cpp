@@ -175,7 +175,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r29") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r30") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -533,6 +533,24 @@ int main()
     expectTrue(oscillatingPrediction.oscillationSuppressed &&
                oscillatingPrediction.offsetX == 0.0,
                "three reliable reversals inside one point five seconds keep aim on the observed target");
+
+    TargetPredictor shortReboundPredictor;
+    TargetPredictor::Result shortReboundPrediction{};
+    double shortReboundX = 100.0;
+    int shortReboundSample = 0;
+    for (const double step : { 2.0, -2.0, 2.0, -2.0 })
+    {
+        const int frames = step > 0.0 && shortReboundSample == 0 ? 20 : 8;
+        for (int frame = 0; frame < frames; ++frame)
+        {
+            shortReboundX += step;
+            const auto time = t0 + std::chrono::milliseconds(shortReboundSample++ * 8);
+            shortReboundPrediction = shortReboundPredictor.update(
+                shortReboundX, 100.0, time, time, 320.0, predictionSettings);
+        }
+    }
+    expectTrue(!shortReboundPrediction.oscillationSuppressed,
+               "sub-eighty-millisecond rebound and recovery do not form high-frequency oscillation");
     expectNear(TargetPredictor::boxHoldCoordinate(160.0, 140.0, 50.0), 160.0, 0.0,
                "oscillation box hold stops moving while the crosshair is inside");
     expectNear(TargetPredictor::boxHoldCoordinate(160.0, 170.0, 50.0), 172.0, 0.0,

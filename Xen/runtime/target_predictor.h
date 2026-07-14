@@ -267,6 +267,7 @@ public:
         directionReversalTimes_.clear();
         oscillationSuppressedUntil_ = {};
         hasCommittedDirection_ = false;
+        committedDirectionSince_ = {};
         committedDirectionX_ = committedDirectionY_ = 0.0;
         observations_.clear();
         previousObservationTime_ = {};
@@ -534,15 +535,26 @@ private:
 
     void lockPendingDirection(TimePoint observationTime, double span)
     {
-        if (hasCommittedDirection_ &&
-            pendingDirectionX_ * committedDirectionX_ +
-                pendingDirectionY_ * committedDirectionY_ < -0.25 &&
+        constexpr double kMinimumCommittedDirectionSeconds = 0.080;
+        const double committedAlignment = hasCommittedDirection_
+            ? pendingDirectionX_ * committedDirectionX_ +
+                pendingDirectionY_ * committedDirectionY_
+            : 1.0;
+        const double committedDirectionSeconds = hasCommittedDirection_
+            ? std::chrono::duration<double>(
+                observationTime - committedDirectionSince_).count()
+            : 0.0;
+        if (hasCommittedDirection_ && committedAlignment < -0.25 &&
+            committedDirectionSeconds >= kMinimumCommittedDirectionSeconds &&
             std::hypot(velocityX_, velocityY_) <= span)
         {
             // reverse实测常先因低速或窗口退化解锁，再从相反方向重新建立。
-            // 在统一锁定入口比较最后一次可靠方向，避免只统计“锁定状态内直接翻转”。
+            // r29 right出现43~49 ms短反向及恢复，连续记为两次换向并误触抑制；
+            // 新方向至少保持80 ms才允许再次计数，真实reverse每段持续时间远高于该值。
             recordDirectionReversal(observationTime);
         }
+        if (!hasCommittedDirection_ || committedAlignment < 0.50)
+            committedDirectionSince_ = observationTime;
         directionX_ = pendingDirectionX_;
         directionY_ = pendingDirectionY_;
         normalize(directionX_, directionY_);
@@ -624,6 +636,7 @@ private:
     std::deque<TimePoint> directionReversalTimes_; // 最近可靠换向时间，用于识别高频小幅往返
     TimePoint oscillationSuppressedUntil_{}; // 高频往返停止后的自动恢复时刻
     bool hasCommittedDirection_ = false; // 是否存在跨解锁保留的最后可靠方向
+    TimePoint committedDirectionSince_{}; // 当前可靠方向的建立时刻，用于过滤短回摆及其恢复
     double committedDirectionX_ = 0.0;
     double committedDirectionY_ = 0.0;
     int highSpeedTransientSamples_ = 0; // 不确定高速瞬态仍需三帧确认，可信同向加速可首帧门控
