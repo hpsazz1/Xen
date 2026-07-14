@@ -791,11 +791,12 @@ std::pair<double, double> MouseThread::getMotionCompensationAt(
 
 std::pair<double, double> MouseThread::filter_target_position(
     double target_x, double target_y,
-    std::chrono::steady_clock::time_point observationTime)
+    std::chrono::steady_clock::time_point observationTime,
+    bool useMotionTrend)
 {
     lastFilterResult = targetFilter.update(
         target_x, target_y, observationTime,
-        frameIntervalSec(captureFps.load()), screen_width);
+        frameIntervalSec(captureFps.load()), screen_width, useMotionTrend);
     return { lastFilterResult.x, lastFilterResult.y };
 }
 
@@ -1128,8 +1129,11 @@ void MouseThread::moveMousePivot(
     const auto viewAtControl = getMotionCompensationAt(controlTime);
     const double stabilizedPivotX = pivotX + viewAtObservation.first;
     const double stabilizedPivotY = pivotY + viewAtObservation.second;
+    const bool useMotionTrend =
+        std::abs(lastPredictionResult.offsetX) +
+        std::abs(lastPredictionResult.offsetY) > 1e-6;
     const auto filtered = filter_target_position(
-        stabilizedPivotX, stabilizedPivotY, effectiveObservationTime);
+        stabilizedPivotX, stabilizedPivotY, effectiveObservationTime, useMotionTrend);
     lastPredictionResult = targetPredictor.update(
         filtered.first, filtered.second, effectiveObservationTime,
         controlTime, screen_width, predictionSettings);
@@ -1228,6 +1232,7 @@ void MouseThread::moveMousePivot(
         pf->observedVelocityY = lastFilterResult.observedVelocityY;
         pf->observedSpeed = lastFilterResult.observedSpeed;
         pf->filterTrendSpeed = lastFilterResult.motionTrendSpeed;
+        pf->filterTrendActive = lastFilterResult.motionTrendActive;
         pf->filterResidual = lastFilterResult.residual;
         pf->predictionApplied = lastPredictionResult.applied;
         pf->predictionEnabled = predictionSettings.enabled;

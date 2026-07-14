@@ -259,7 +259,8 @@ public:
     std::pair<double, double> filter_target_position(
         double target_x,
         double target_y,
-        std::chrono::steady_clock::time_point observationTime = {});
+        std::chrono::steady_clock::time_point observationTime = {},
+        bool useMotionTrend = false);
     /** @brief 执行鼠标移动（对目标） */
     void moveMouse(const AimbotTarget& target);
     /** @brief 按下鼠标（射击） */

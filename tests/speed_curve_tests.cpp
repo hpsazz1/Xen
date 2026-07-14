@@ -144,7 +144,7 @@ int main()
     expectTrue(traceHeader.find("FilteredX") != std::string::npos,
                "basic pipeline contains filtered observation");
     expectTrue(traceHeader.find(
-        "ObservedVelocityX,ObservedVelocityY,ObservedSpeed,FilterTrendSpeed") != std::string::npos,
+        "ObservedVelocityX,ObservedVelocityY,ObservedSpeed,FilterTrendSpeed,FilterTrendActive") != std::string::npos,
                "basic pipeline contains signed target velocity diagnostics");
     expectTrue(traceHeader.find("SourceWidth,SourceHeight") != std::string::npos,
                "basic pipeline contains capture source dimensions");
@@ -172,7 +172,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r17") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r18") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
@@ -232,7 +232,7 @@ int main()
         const auto time = t0 + std::chrono::milliseconds(sample * 10);
         alternatingJitter = alternatingJitterFilter.update(
             sample % 2 == 0 ? 163.0 : 157.0, 160.0,
-            time, 0.010, 320.0);
+            time, 0.010, 320.0, true);
         if (sample > 10)
         {
             jitterMinimum = std::min(jitterMinimum, alternatingJitter.x);
@@ -243,6 +243,8 @@ int main()
                "alternating high-speed detector jitter keeps a narrow filtered range");
     expectTrue(alternatingJitter.motionTrendSpeed < 120.0,
                "alternating detector jitter does not become sustained motion trend");
+    expectTrue(alternatingJitter.motionTrendActive,
+               "confirmed prediction enables motion-trend filtering");
 
     BasicTargetFilter sustainedMotionFilter;
     sustainedMotionFilter.update(160.0, 160.0, t0, 0.010, 320.0);
@@ -251,12 +253,19 @@ int main()
     {
         const auto time = t0 + std::chrono::milliseconds(sample * 10);
         sustainedFiltered = sustainedMotionFilter.update(
-            160.0 + sample * 3.0, 160.0, time, 0.010, 320.0);
+            160.0 + sample * 3.0, 160.0, time, 0.010, 320.0, true);
     }
     expectTrue(220.0 - sustainedFiltered.x < 8.0,
                "sustained horizontal motion retains bounded filter lag");
     expectTrue(sustainedFiltered.motionTrendSpeed > 250.0,
                "sustained horizontal motion opens the adaptive filter");
+
+    BasicTargetFilter convergenceFilter;
+    convergenceFilter.update(100.0, 100.0, t0, 0.010, 320.0);
+    const auto convergenceResponse = convergenceFilter.update(
+        108.0, 100.0, t0 + std::chrono::milliseconds(10), 0.010, 320.0, false);
+    expectTrue(!convergenceResponse.motionTrendActive && convergenceResponse.x > 105.0,
+               "pre-prediction convergence keeps the instantaneous responsive filter");
 
     TargetPredictor::Settings predictionSettings;
     predictionSettings.additionalLeadSeconds = 0.020;
