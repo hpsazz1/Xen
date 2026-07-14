@@ -72,6 +72,12 @@ public:
     void applySelfMotionSuppression(Result& result, bool artifactDetected)
     {
         constexpr int kHoldFrames = 4;
+        constexpr int kSustainedMotionFrames = 5;
+        // static实测的伪预测只持续1~2帧；真实left/right一旦连续预测满5帧，
+        // 屏幕收敛与自身视角同向是正常闭环跟随，不再允许自运动门控反复打断。
+        if (artifactDetected && continuousPredictionFrames_ >= kSustainedMotionFrames)
+            return;
+
         if (artifactDetected)
             selfMotionSuppressionFramesRemaining_ = kHoldFrames;
 
@@ -134,6 +140,10 @@ public:
         const bool reliableMotion = updateMotion(
             x, y, observationTime, dt, span, settings);
         updateDirection(sampleVelocityX, sampleVelocityY, reliableMotion, span);
+        if (directionLocked_ && !suppressPrediction_)
+            ++continuousPredictionFrames_;
+        else
+            continuousPredictionFrames_ = 0;
 
         previousX_ = x;
         previousY_ = y;
@@ -189,6 +199,7 @@ public:
         reliableDirectionSamples_ = 0;
         selfMotionSuppressionFramesRemaining_ = 0;
         selfMotionRearmPending_ = false;
+        continuousPredictionFrames_ = 0;
         observations_.clear();
         previousObservationTime_ = {};
     }
@@ -232,6 +243,7 @@ private:
         unreliableSamples_ = 0;
         reliableDirectionSamples_ = 0;
         selfMotionRearmPending_ = true;
+        continuousPredictionFrames_ = 0;
         observations_.clear();
         if (initialized_)
             observations_.push_back({ previousX_, previousY_, previousObservationTime_ });
@@ -506,6 +518,7 @@ private:
     int reliableDirectionSamples_ = 0;
     int selfMotionSuppressionFramesRemaining_ = 0; // 自运动伪迹命中后的剩余抑制观测帧数
     bool selfMotionRearmPending_ = false; // 保持结束后是否仍需更强净位移证据
+    int continuousPredictionFrames_ = 0; // 当前方向连续有效预测帧数，用于识别真实持续运动
     std::deque<Observation> observations_;
     TimePoint previousObservationTime_{};
 };

@@ -171,7 +171,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r14") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r15") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
@@ -370,6 +370,36 @@ int main()
     expectTrue(confirmedPostHoldMovement.directionLocked &&
                confirmedPostHoldMovement.offsetX < 0.0,
                "post-hold movement beyond eight pixels can rearm prediction");
+
+    TargetPredictor sustainedMotionPredictor;
+    TargetPredictor::Result sustainedPrediction{};
+    int activePredictionFrames = 0;
+    for (int sample = 0; sample < 16 && activePredictionFrames < 5; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        sustainedPrediction = sustainedMotionPredictor.update(
+            100.0 + sample * 6.0, 100.0, time, time, 320.0, predictionSettings);
+        if (sustainedPrediction.offsetX > 0.0)
+            ++activePredictionFrames;
+    }
+    expectTrue(activePredictionFrames == 5 && sustainedPrediction.offsetX > 0.0,
+               "five continuous prediction frames establish sustained target motion");
+    sustainedMotionPredictor.applySelfMotionSuppression(sustainedPrediction, true);
+    expectTrue(!sustainedPrediction.selfMotionSuppressed && sustainedPrediction.offsetX > 0.0,
+               "sustained target motion is exempt from self-motion artifact suppression");
+    for (int sample = 16; sample < 20; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        sustainedPrediction = sustainedMotionPredictor.update(
+            190.0, 100.0, time, time, 320.0, predictionSettings);
+    }
+    TargetPredictor::Result stoppedArtifactResult{
+        170.0, 160.0, 200.0, 0.0, 0.0, 0.0,
+        0.05, 10.0, 0.0, true, true
+    };
+    sustainedMotionPredictor.applySelfMotionSuppression(stoppedArtifactResult, true);
+    expectTrue(stoppedArtifactResult.selfMotionSuppressed && stoppedArtifactResult.offsetX == 0.0,
+               "stopping clears the sustained-motion suppression exemption");
 
     TargetPredictor irregularPredictor;
     irregularPredictor.update(
