@@ -127,9 +127,9 @@ static void draw_mouse_page(MouseSettingsPage page)
             20.0f, 300.0f, "%.0f", "##move_response",
             "越小越快，越大越柔和。该参数不随 FPS 改变含义，也不会被自动跟踪优化覆盖。");
         OverlayUI::SliderFloatRow("最大设备速度", &config.move_max_speed_cps,
-            30.0f, 2000.0f, "%.0f counts/s", "##move_max_cps",
+            30.0f, 4000.0f, "%.0f counts/s", "##move_max_cps",
             "限制每秒发送的鼠标计数；按实际观测间隔换算单帧预算，不会被自动跟踪优化覆盖。\n"
-            "新增jump视频模拟候选为2000 counts/s，需同时复测普通移动与静止稳定。\n");
+            "320裁剪的jump下一轮建议3200 counts/s，需同时复测普通移动与静止稳定。\n");
         if (OverlayUI::SliderFloatRow("移动积分时间(ms)", &config.move_integral_time_ms,
             0.0f, 1000.0f, "%.0f", "##move_integral_time",
             "0为关闭，非零最小50 ms。用于消除匀速移动目标的固定滞后；时间越小积分越强，需同时验证静止稳定和方向反转。"))

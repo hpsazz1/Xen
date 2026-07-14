@@ -171,6 +171,18 @@ int main()
                "unsafe two-frame prediction window migrates to robust minimum");
     std::filesystem::remove(unsafeWindowPath, removeError);
 
+    const std::filesystem::path speedLimitPath = "xen_config_speed_limit_test.ini";
+    {
+        std::ofstream speedLimitFile(speedLimitPath);
+        speedLimitFile << "move_max_speed_cps = 5000\n";
+    }
+    Config clampedSpeed{};
+    expectTrue(clampedSpeed.loadConfig(speedLimitPath.string()),
+               "expanded movement speed config loads successfully");
+    expectNear(clampedSpeed.move_max_speed_cps, 4000.0, 0.0,
+               "movement speed remains bounded by the documented safety maximum");
+    std::filesystem::remove(speedLimitPath, removeError);
+
     if (failures != 0)
     {
         std::cerr << failures << " config test(s) failed\n";

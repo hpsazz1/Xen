@@ -731,7 +731,7 @@ bool Config::loadConfig(const std::string& filename)
 
     // === 基础移动参数范围校验 ===
     move_response_ms = std::clamp(move_response_ms, 20.0f, 300.0f);
-    move_max_speed_cps = std::clamp(move_max_speed_cps, 30.0f, 2000.0f);
+    move_max_speed_cps = std::clamp(move_max_speed_cps, 30.0f, 4000.0f);
     move_integral_time_ms = std::clamp(move_integral_time_ms, 0.0f, 1000.0f);
     if (move_integral_time_ms > 0.0f && move_integral_time_ms < 50.0f)
         move_integral_time_ms = 50.0f;

@@ -117,7 +117,7 @@ void MouseThread::updateConfig(
     move_response_seconds = std::clamp(
         static_cast<double>(config.move_response_ms) / 1000.0, 0.020, 0.300);
     move_max_speed_cps = std::clamp(
-        static_cast<double>(config.move_max_speed_cps), 30.0, 2000.0);
+        static_cast<double>(config.move_max_speed_cps), 30.0, 4000.0);
     move_integral_time_seconds = std::clamp(
         static_cast<double>(config.move_integral_time_ms) / 1000.0, 0.0, 1.0);
     predictionSettings.enabled = config.prediction_enabled;
@@ -683,7 +683,7 @@ void MouseThread::refreshGameProfileCache()
     move_response_seconds = std::clamp(
         static_cast<double>(config.move_response_ms) / 1000.0, 0.020, 0.300);
     move_max_speed_cps = std::clamp(
-        static_cast<double>(config.move_max_speed_cps), 30.0, 2000.0);
+        static_cast<double>(config.move_max_speed_cps), 30.0, 4000.0);
     move_integral_time_seconds = std::clamp(
         static_cast<double>(config.move_integral_time_ms) / 1000.0, 0.0, 1.0);
 }
@@ -726,14 +726,10 @@ std::pair<double, double> MouseThread::mouseCountsToScreenPixels(int dx, int dy)
             ::screenWidth.load(std::memory_order_relaxed), screen_width);
         const double sourcePixelHeight = AimCoordinateSpace::resolveFovPixelSpan(
             ::screenHeight.load(std::memory_order_relaxed), screen_height);
-        const double degPerPxX = fov_x / sourcePixelWidth;
-        const double degPerPxY = fov_y / sourcePixelHeight;
-
-        if (std::abs(degPerPxX) > 1e-8 && std::abs(degPerPxY) > 1e-8)
-        {
-            deltaPxX = degX / degPerPxX;
-            deltaPxY = degY / degPerPxY;
-        }
+        deltaPxX = AimCoordinateSpace::sourcePixelDeltaForAngleDegrees(
+            degX, fov_x, sourcePixelWidth);
+        deltaPxY = AimCoordinateSpace::sourcePixelDeltaForAngleDegrees(
+            degY, fov_y, sourcePixelHeight);
     }
 
     return { deltaPxX, deltaPxY };

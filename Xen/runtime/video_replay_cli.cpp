@@ -544,9 +544,9 @@ namespace
     {
         std::vector<double> speedLimits{
             baselineMaxCountsPerSecond,
-            std::min(2000.0, baselineMaxCountsPerSecond * 7.0 / 6.0),
-            std::min(2000.0, baselineMaxCountsPerSecond * 1.25),
-            2000.0
+            std::min(4000.0, baselineMaxCountsPerSecond * 1.25),
+            3200.0,
+            4000.0
         };
         std::sort(speedLimits.begin(), speedLimits.end());
         speedLimits.erase(std::unique(speedLimits.begin(), speedLimits.end()), speedLimits.end());

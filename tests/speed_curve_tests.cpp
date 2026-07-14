@@ -113,8 +113,15 @@ int main()
         106.0, sourceSpan, 1.4 * 0.022);
     const double wrongCropCountsPerPixel = AimCoordinateSpace::countsPerSourcePixel(
         106.0, 320.0, 1.4 * 0.022);
-    expectNear(wrongCropCountsPerPixel / sourceCountsPerPixel, 8.0, 1e-9,
+    expectNear(sourceCountsPerPixel, 1.92862318033702, 1e-12,
+               "aim conversion uses perspective projection at the source center");
+    expectTrue(wrongCropCountsPerPixel / sourceCountsPerPixel > 7.99,
                "center crop must not multiply counts per pixel");
+    const double projectedAngle = AimCoordinateSpace::angleDegreesForSourcePixelDelta(
+        160.0, 106.0, sourceSpan);
+    expectNear(AimCoordinateSpace::sourcePixelDeltaForAngleDegrees(
+        projectedAngle, 106.0, sourceSpan), 160.0, 1e-9,
+        "perspective pixel and angle conversions round trip exactly");
 
     PipelineTracer tracer;
     tracer.setMaxFrames(10);
@@ -164,7 +171,7 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
-    expectTrue(BuildIdentity::displayLabel().find(" r9") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r10") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,IntegralTimeSeconds") != std::string::npos,
