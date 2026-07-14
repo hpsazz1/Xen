@@ -296,6 +296,64 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayUI::EndSection();
     }
 
+    if (shouldDrawMousePage(page, MouseSettingsPage::Profiles) &&
+        OverlayUI::BeginSection("被动Profile标定", "mouse_section_profile_calibration"))
+    {
+        bool calibrationChanged = OverlayUI::CheckboxRow(
+            "启用被动标定##profile_calibration_enabled",
+            &config.profile_calibration_enabled);
+        if (calibrationChanged)
+        {
+            OverlayConfig_MarkDirty();
+            if (globalMouseThread)
+            {
+                globalMouseThread->updateConfig(
+                    config.detection_resolution,
+                    config.fovX,
+                    config.fovY,
+                    config.auto_shoot,
+                    config.bScope_multiplier);
+            }
+        }
+
+        ImGui::TextWrapped(
+            "标定时让目标与角色保持静止，并正常锁定数秒。模块只读取已成功发送的鼠标counts和后续raw pivot，不会主动移动鼠标，也不会自动修改当前Profile。");
+
+        PassiveProfileCalibrator::Snapshot calibration;
+        if (globalMouseThread)
+            calibration = globalMouseThread->getProfileCalibrationSnapshot();
+
+        ImGui::SeparatorText("标定结果##profile_calibration_results");
+        ImGui::Text("状态：%s", !calibration.enabled ? "未启用" :
+            (calibration.valid ? "已有可用估算" : "正在收集有效激励"));
+        ImGui::Text("观测 / 命令：%zu / %zu",
+            calibration.observationCount, calibration.commandCount);
+        ImGui::Text("X：%.4f px/count，%.6f deg/count，延迟 %.1f ms",
+            calibration.x.pixelsPerCount, calibration.x.degreesPerCount,
+            calibration.x.delayMs);
+        ImGui::Text("Y：%.4f px/count，%.6f deg/count，延迟 %.1f ms",
+            calibration.y.pixelsPerCount, calibration.y.degreesPerCount,
+            calibration.y.delayMs);
+        ImGui::Text("X拟合：漂移 %.2f px/s，RMSE %.3f px，相关 %.3f，可信度 %.0f%%，有效样本 %zu",
+            calibration.x.driftPixelsPerSecond,
+            calibration.x.rmsePixels, calibration.x.correlation,
+            calibration.x.confidence * 100.0, calibration.x.activeSampleCount);
+        ImGui::Text("Y拟合：漂移 %.2f px/s，RMSE %.3f px，相关 %.3f，可信度 %.0f%%，有效样本 %zu",
+            calibration.y.driftPixelsPerSecond,
+            calibration.y.rmsePixels, calibration.y.correlation,
+            calibration.y.confidence * 100.0, calibration.y.activeSampleCount);
+        ImGui::Text("综合可信度：%.0f%%", calibration.overallConfidence * 100.0);
+
+        if (OverlayUI::ButtonRow(
+                "标定样本", "重置标定", "reset_profile_calibration") &&
+            globalMouseThread)
+        {
+            globalMouseThread->resetProfileCalibration();
+        }
+
+        OverlayUI::EndSection();
+    }
+
     // ========== Manage Profiles（管理配置文件） ==========
     // 支持添加新配置文件、删除已有配置
     if (shouldDrawMousePage(page, MouseSettingsPage::Profiles) &&

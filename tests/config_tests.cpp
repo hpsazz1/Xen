@@ -106,6 +106,8 @@ int main()
                    "default prediction uses robust velocity regression window");
         expectNear(defaults.prediction_strength, 1.0, 0.0,
                    "default prediction uses bounded constant-velocity strength");
+        expectTrue(!defaults.profile_calibration_enabled,
+                   "passive profile calibration defaults to disabled");
         expectString(defaults.kmbox_net_ip, "192.168.2.188", "default kmbox net ip");
         expectString(defaults.kmbox_net_port, "13384", "default kmbox net port");
         expectString(defaults.kmbox_net_uuid, "7679E04E", "default kmbox net uuid");
@@ -154,6 +156,8 @@ int main()
                    "saved config writes compatible prediction window key");
         expectTrue(migratedText.find("prediction_strength = 1") != std::string::npos,
                    "legacy config receives bounded constant-velocity prediction strength");
+        expectTrue(migratedText.find("profile_calibration_enabled = false") != std::string::npos,
+                   "saved config persists passive profile calibration state");
         expectTrue(migratedText.find("predictionInterval") == std::string::npos,
                    "saved config removes legacy prediction interval key");
     }
@@ -170,6 +174,19 @@ int main()
     expectNear(clampedWindow.prediction_velocity_tau_ms, 40.0, 0.0,
                "unsafe two-frame prediction window migrates to robust minimum");
     std::filesystem::remove(unsafeWindowPath, removeError);
+
+    const std::filesystem::path calibrationConfigPath =
+        "xen_config_profile_calibration_test.ini";
+    {
+        std::ofstream calibrationConfigFile(calibrationConfigPath);
+        calibrationConfigFile << "profile_calibration_enabled = true\n";
+    }
+    Config enabledCalibration{};
+    expectTrue(enabledCalibration.loadConfig(calibrationConfigPath.string()),
+               "passive profile calibration config loads successfully");
+    expectTrue(enabledCalibration.profile_calibration_enabled,
+               "passive profile calibration enabled state is restored");
+    std::filesystem::remove(calibrationConfigPath, removeError);
 
     const std::filesystem::path speedLimitPath = "xen_config_speed_limit_test.ini";
     {

@@ -82,6 +82,7 @@ MouseThread::MouseThread(
             static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0;
         predictionSettings.predictionStrength =
             static_cast<double>(config.prediction_strength);
+        profileCalibrator.setEnabled(config.profile_calibration_enabled);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
     }
 
@@ -127,6 +128,9 @@ void MouseThread::updateConfig(
         static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0, 0.040, 0.120);
     predictionSettings.predictionStrength = std::clamp(
         static_cast<double>(config.prediction_strength), 0.0, 4.0);
+    profileCalibrator.setEnabled(config.profile_calibration_enabled);
+    if (config.profile_calibration_enabled)
+        profileCalibrator.reset();
     this->auto_shoot = auto_shoot;
     this->bScope_multiplier = bScope_multiplier;
 
@@ -749,7 +753,9 @@ std::pair<double, double> MouseThread::mouseCountsToScreenPixels(int dx, int dy)
  * @param dx 水平鼠标计数
  * @param dy 垂直鼠标计数
  */
-void MouseThread::recordMotionCompensationStep(int dx, int dy)
+void MouseThread::recordMotionCompensationStep(
+    int dx, int dy,
+    std::chrono::steady_clock::time_point sendTime)
 {
     if (dx == 0 && dy == 0)
         return;
@@ -758,9 +764,8 @@ void MouseThread::recordMotionCompensationStep(int dx, int dy)
     if (std::abs(delta.first) < 1e-8 && std::abs(delta.second) < 1e-8)
         return;
 
-    const auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(motionCompensationMutex);
-    motionCompensationHistory.add(delta.first, delta.second, now);
+    motionCompensationHistory.add(delta.first, delta.second, sendTime);
 }
 
 /**
@@ -835,7 +840,19 @@ void MouseThread::sendMovementToDriver(int dx, int dy)
         }
     }
 
-    recordMotionCompensationStep(dx, dy);  // 记录用于运动补偿
+    const auto sendTime = std::chrono::steady_clock::now();
+    profileCalibrator.recordCommand(dx, dy, sendTime);
+    recordMotionCompensationStep(dx, dy, sendTime);
+}
+
+PassiveProfileCalibrator::Snapshot MouseThread::getProfileCalibrationSnapshot() const
+{
+    return profileCalibrator.snapshot();
+}
+
+void MouseThread::resetProfileCalibration()
+{
+    profileCalibrator.reset();
 }
 
 /**
@@ -1125,6 +1142,15 @@ void MouseThread::moveMousePivot(
     const auto controlTime = std::chrono::steady_clock::now();
     const auto effectiveObservationTime = observationTime.time_since_epoch().count() == 0
         ? controlTime : observationTime;
+    const double calibrationSourceWidth = AimCoordinateSpace::resolveFovPixelSpan(
+        ::screenWidth.load(std::memory_order_relaxed), screen_width);
+    const double calibrationSourceHeight = AimCoordinateSpace::resolveFovPixelSpan(
+        ::screenHeight.load(std::memory_order_relaxed), screen_height);
+    profileCalibrator.addObservation(
+        pivotX, pivotY, effectiveObservationTime,
+        calibrationSourceWidth, calibrationSourceHeight, fov_x, fov_y);
+    const PassiveProfileCalibrator::Snapshot calibration =
+        profileCalibrator.snapshot();
     const auto viewAtObservation = getMotionCompensationAt(effectiveObservationTime);
     const auto viewAtControl = getMotionCompensationAt(controlTime);
     const double stabilizedPivotX = pivotX + viewAtObservation.first;
@@ -1279,6 +1305,28 @@ void MouseThread::moveMousePivot(
         pf->integralCountsY = output.integralCountsY;
         pf->finalMx = mx;
         pf->finalMy = my;
+        pf->profileCalibrationEnabled = calibration.enabled;
+        pf->profileCalibrationValidX = calibration.x.valid;
+        pf->profileCalibrationValidY = calibration.y.valid;
+        pf->profileCalibrationPixelsPerCountX = calibration.x.pixelsPerCount;
+        pf->profileCalibrationPixelsPerCountY = calibration.y.pixelsPerCount;
+        pf->profileCalibrationDegreesPerCountX = calibration.x.degreesPerCount;
+        pf->profileCalibrationDegreesPerCountY = calibration.y.degreesPerCount;
+        pf->profileCalibrationDelayMsX = calibration.x.delayMs;
+        pf->profileCalibrationDelayMsY = calibration.y.delayMs;
+        pf->profileCalibrationDriftX = calibration.x.driftPixelsPerSecond;
+        pf->profileCalibrationDriftY = calibration.y.driftPixelsPerSecond;
+        pf->profileCalibrationRmseX = calibration.x.rmsePixels;
+        pf->profileCalibrationRmseY = calibration.y.rmsePixels;
+        pf->profileCalibrationCorrelationX = calibration.x.correlation;
+        pf->profileCalibrationCorrelationY = calibration.y.correlation;
+        pf->profileCalibrationConfidenceX = calibration.x.confidence;
+        pf->profileCalibrationConfidenceY = calibration.y.confidence;
+        pf->profileCalibrationSamplesX = calibration.x.sampleCount;
+        pf->profileCalibrationSamplesY = calibration.y.sampleCount;
+        pf->profileCalibrationActiveSamplesX = calibration.x.activeSampleCount;
+        pf->profileCalibrationActiveSamplesY = calibration.y.activeSampleCount;
+        pf->profileCalibrationOverallConfidence = calibration.overallConfidence;
         pf->responseSeconds = settings.responseSeconds;
         pf->effectiveResponseSecondsX = output.effectiveResponseSecondsX;
         pf->effectiveResponseSecondsY = output.effectiveResponseSecondsY;

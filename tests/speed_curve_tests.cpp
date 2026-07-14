@@ -9,6 +9,7 @@
 #include "capture/network_frame_geometry.h"
 #include "runtime/frame_rate_counter.h"
 #include "runtime/latest_frame_queue.h"
+#include "runtime/passive_profile_calibrator.h"
 #include "runtime/build_identity.h"
 
 #include <cmath>
@@ -123,6 +124,63 @@ int main()
         projectedAngle, 106.0, sourceSpan), 160.0, 1e-9,
         "perspective pixel and angle conversions round trip exactly");
 
+    PassiveProfileCalibrator calibrator;
+    const auto calibrationStart = PassiveProfileCalibrator::TimePoint(
+        std::chrono::seconds(10));
+    calibrator.setEnabled(true);
+    double cumulativeX = 0.0;
+    double cumulativeY = 0.0;
+    std::vector<std::pair<double, double>> cumulativeCommands;
+    cumulativeCommands.reserve(260);
+    cumulativeCommands.push_back({ 0.0, 0.0 });
+    for (int frame = 1; frame <= 240; ++frame)
+    {
+        const auto frameTime = calibrationStart + std::chrono::milliseconds(frame * 4);
+        const int commandX = ((frame * 7) % 9) - 4;
+        const int commandY = ((frame * 5 + 2) % 7) - 3;
+        calibrator.recordCommand(commandX, commandY, frameTime);
+        cumulativeX += commandX;
+        cumulativeY += commandY;
+        cumulativeCommands.push_back({ cumulativeX, cumulativeY });
+
+        const int delayedFrame = std::max(0, frame - 15);
+        const double elapsedSeconds = frame * 0.004;
+        const double noiseX = ((frame % 5) - 2) * 0.01;
+        const double noiseY = ((frame % 7) - 3) * 0.008;
+        const double pivotX = 160.0 + 15.0 * elapsedSeconds -
+            0.52 * cumulativeCommands[delayedFrame].first + noiseX;
+        const double pivotY = 160.0 - 8.0 * elapsedSeconds -
+            0.51 * cumulativeCommands[delayedFrame].second + noiseY;
+        calibrator.addObservation(
+            pivotX, pivotY, frameTime, 2560.0, 1440.0, 106.0, 74.0);
+    }
+    const auto calibrationResult = calibrator.snapshot();
+    expectTrue(calibrationResult.x.valid && calibrationResult.y.valid,
+               "passive profile calibration recovers both axes");
+    expectNear(calibrationResult.x.pixelsPerCount, 0.52, 0.03,
+               "passive calibration recovers horizontal pixels per count");
+    expectNear(calibrationResult.y.pixelsPerCount, 0.51, 0.03,
+               "passive calibration recovers vertical pixels per count");
+    expectNear(calibrationResult.x.delayMs, 60.0, 6.0,
+               "passive calibration recovers horizontal command delay");
+    expectNear(calibrationResult.y.delayMs, 60.0, 6.0,
+               "passive calibration recovers vertical command delay");
+    expectTrue(calibrationResult.x.correlation < -0.8 &&
+               calibrationResult.y.correlation < -0.8,
+               "passive calibration reports inverse view correlation");
+    calibrator.reset();
+    expectTrue(calibrator.snapshot().observationCount == 0 &&
+               calibrator.snapshot().commandCount == 0,
+               "passive profile calibration reset clears samples");
+    calibrator.setEnabled(false);
+    calibrator.recordCommand(5, 5, calibrationStart + std::chrono::seconds(4));
+    calibrator.addObservation(
+        160.0, 160.0, calibrationStart + std::chrono::seconds(4),
+        2560.0, 1440.0, 106.0, 74.0);
+    expectTrue(calibrator.snapshot().observationCount == 0 &&
+               calibrator.snapshot().commandCount == 0,
+               "disabled passive calibration ignores samples");
+
     PipelineTracer tracer;
     tracer.setMaxFrames(10);
     PipelineFrame pending = tracer.beginFrame(320);
@@ -180,6 +238,10 @@ int main()
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
+    expectTrue(traceHeader.find(
+        "ProfileCalibrationEnabled,ProfileCalibrationValidX,ProfileCalibrationValidY") != std::string::npos &&
+        traceHeader.find("ProfileCalibrationOverallConfidence") != std::string::npos,
+        "basic pipeline reports passive profile calibration diagnostics");
     expectTrue(traceHeader.find(
         "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictedX,PredictedY") != std::string::npos,
         "basic pipeline reports prediction diagnostics");

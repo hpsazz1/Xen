@@ -24,6 +24,7 @@
 #include "MouseInput.h"
 #include "runtime/basic_aim_controller.h"
 #include "runtime/basic_target_filter.h"
+#include "runtime/passive_profile_calibrator.h"
 #include "runtime/target_predictor.h"
 #include "runtime/view_motion_history.h"
 
@@ -79,6 +80,7 @@ private:
     BasicTargetFilter::Result lastFilterResult{};                  ///< 流水线诊断快照
     TargetPredictor::Result lastPredictionResult{};                ///< 流水线预测诊断快照
     TargetPredictor::Settings predictionSettings{};                ///< 运行时预测配置缓存
+    PassiveProfileCalibrator profileCalibrator;                    ///< 真实发送counts与raw pivot的被动Profile标定器
     std::chrono::steady_clock::time_point lastControlObservationTime{}; ///< 上一有效观测时间，用于网络抖动下逐帧计算 dt
     struct PredictionObservationContext
     {
@@ -197,7 +199,9 @@ private:
     // ==================== 运动补偿 ====================
     mutable std::mutex motionCompensationMutex;                   ///< 运动补偿互斥锁
     ViewMotionHistory motionCompensationHistory;                  ///< 自身视角累计位移时间线
-    void recordMotionCompensationStep(int dx, int dy);            ///< 记录运动补偿步进
+    void recordMotionCompensationStep(
+        int dx, int dy,
+        std::chrono::steady_clock::time_point sendTime);          ///< 使用设备实际发送时刻记录运动补偿步进
     std::pair<double, double> getMotionCompensationAt(
         std::chrono::steady_clock::time_point time) const;        ///< 查询指定时刻累计自身视角位移
 
@@ -241,6 +245,10 @@ public:
         bool auto_shoot,
         float bScope_multiplier
     );
+    /** @brief 获取被动Profile标定的只读结果快照。 */
+    PassiveProfileCalibrator::Snapshot getProfileCalibrationSnapshot() const;
+    /** @brief 清空当前标定样本，保持标定开关不变。 */
+    void resetProfileCalibration();
 
     /**
      * @brief 根据目标框和枢轴点执行追踪瞄准

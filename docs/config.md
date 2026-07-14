@@ -119,6 +119,7 @@ capture_fps = 60
 | `prediction_lead_ms` | `50` | 在自动补偿观测年龄之外增加的常速度前瞻时间，范围0~100 ms。 |
 | `prediction_velocity_tau_ms` | `50` | 兼容旧配置键名，实际表示稳健速度回归窗口，范围40~120 ms；更小值提高变向响应，更大值增强抗检测抖动。 |
 | `prediction_strength` | `1.0` | 对“稳健速度×前瞻时间”的自动提前距离做统一缩放，范围0~4。 |
+| `profile_calibration_enabled` | `false` | 启用被动Profile标定。只读取设备实际成功发送的counts与后续raw pivot，展示实测比例、角度响应、延迟和可信度；不会主动移动鼠标、覆盖`[Games]`或保存机器缓存。 |
 | `snapRadius` | `1.5` | 近距离目标吸附半径。 |
 | `nearRadius` | `25.0` | 近距离目标行为开始的半径。 |
 | `speedCurveExponent` | `3.0` | 速度缩放的曲线形状。 |
@@ -132,6 +133,8 @@ capture_fps = 60
 r11额外使用最近三帧屏幕目标收敛、自身视角移动和预测方向联合识别静止收敛伪迹。该内部安全门控没有新增调参项；命中时仅撤销本帧提前，并通过流水线CSV字段 `PredictionSelfMotionSuppressed` 审计。
 
 首轮实机数据证明15 ms单帧速度与显式加速度会放大检测抖动，因此预测基线为 `prediction_lead_ms=50`、`prediction_velocity_tau_ms=50`、`prediction_strength=1.0`。r10使用透视投影统一像素、视角和设备计数；320裁剪jump速度复测将 `move_max_speed_cps` 提高到3200。该候选只补偿可靠的可观测运动，不估算目标距离或武器弹道。
+
+被动Profile标定位于UI“瞄准 → 游戏配置”。标定时保持目标与角色静止，目标初始位置应与准星有足够偏差以产生连续设备命令，且期间不要手动移动鼠标。X/Y独立判断有效；某轴缺少足够控制激励时，该轴会保持无效。详细设计、CSV字段和复测步骤见`docs/067被动Profile自动标定实现20260714.md`。
 
 ## 输入方式
 

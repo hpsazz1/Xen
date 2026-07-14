@@ -79,6 +79,7 @@ public:
     float prediction_lead_ms = 50.0f;             // 观测年龄之外的基础前瞻，毫秒
     float prediction_velocity_tau_ms = 50.0f;     // 兼容旧键名，实际为稳健速度回归窗口，毫秒
     float prediction_strength = 1.0f;             // 常速度提前总强度
+    bool profile_calibration_enabled = false;     // 被动Profile标定；只估算并展示，不自动覆盖配置
 
     float snapRadius;
     float nearRadius;

@@ -80,6 +80,30 @@ struct PipelineFrame
     int    finalMx = 0;        ///< 请求的水平移动量（counts）
     int    finalMy = 0;        ///< 请求的垂直移动量（counts）
 
+    // ========== 被动Profile标定 ==========
+    bool profileCalibrationEnabled = false; ///< 用户是否显式启用影子标定
+    bool profileCalibrationValidX = false;  ///< X轴比例、方向与拟合质量是否满足有效条件
+    bool profileCalibrationValidY = false;  ///< Y轴比例、方向与拟合质量是否满足有效条件
+    double profileCalibrationPixelsPerCountX = 0.0;  ///< X轴实测画面响应，px/count
+    double profileCalibrationPixelsPerCountY = 0.0;  ///< Y轴实测画面响应，px/count
+    double profileCalibrationDegreesPerCountX = 0.0; ///< X轴按完整源FOV换算的deg/count
+    double profileCalibrationDegreesPerCountY = 0.0; ///< Y轴按完整源FOV换算的deg/count
+    double profileCalibrationDelayMsX = 0.0; ///< X轴设备发送到raw pivot响应的最佳对齐延迟，ms
+    double profileCalibrationDelayMsY = 0.0; ///< Y轴设备发送到raw pivot响应的最佳对齐延迟，ms
+    double profileCalibrationDriftX = 0.0;   ///< 拟合吸收的X轴恒定目标漂移，px/s
+    double profileCalibrationDriftY = 0.0;   ///< 拟合吸收的Y轴恒定目标漂移，px/s
+    double profileCalibrationRmseX = 0.0;    ///< X轴稳健回归残差均方根，px
+    double profileCalibrationRmseY = 0.0;    ///< Y轴稳健回归残差均方根，px
+    double profileCalibrationCorrelationX = 0.0; ///< X轴counts与去漂移画面位移相关系数
+    double profileCalibrationCorrelationY = 0.0; ///< Y轴counts与去漂移画面位移相关系数
+    double profileCalibrationConfidenceX = 0.0;  ///< X轴综合可信度，范围0~1
+    double profileCalibrationConfidenceY = 0.0;  ///< Y轴综合可信度，范围0~1
+    size_t profileCalibrationSamplesX = 0;       ///< X轴参与最佳延迟拟合的全部区间数
+    size_t profileCalibrationSamplesY = 0;       ///< Y轴参与最佳延迟拟合的全部区间数
+    size_t profileCalibrationActiveSamplesX = 0; ///< X轴区间counts绝对值至少0.5的有效激励数
+    size_t profileCalibrationActiveSamplesY = 0; ///< Y轴区间counts绝对值至少0.5的有效激励数
+    double profileCalibrationOverallConfidence = 0.0; ///< 有效轴可信度的综合结果，范围0~1
+
     // ========== 控制器诊断 ==========
     double responseSeconds = 0.0;
     double effectiveResponseSecondsX = 0.0; ///< 当前帧X轴实际比例响应时间

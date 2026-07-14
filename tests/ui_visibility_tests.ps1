@@ -19,6 +19,11 @@ foreach ($control in @('##pred_enabled', '##pred_lead_ms', '##pred_velocity_tau_
         throw "Prediction settings control is missing: $control"
     }
 }
+foreach ($control in @('profile_calibration_enabled', 'profile_calibration_results', 'reset_profile_calibration')) {
+    if ($mouseUi -notmatch $control) {
+        throw "Passive profile calibration UI is missing: $control"
+    }
+}
 if ($overlayUi -notmatch '\{[^\r\n]*draw_mouse_prediction[^\r\n]*SidebarIconKind::Curve\s*\}') {
     throw 'Prediction settings page is not registered in the sidebar.'
 }

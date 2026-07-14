@@ -103,6 +103,13 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
          << "FinalMx,FinalMy,"
+         << "ProfileCalibrationEnabled,ProfileCalibrationValidX,ProfileCalibrationValidY,"
+         << "ProfileCalibrationPixelsPerCountX,ProfileCalibrationPixelsPerCountY,"
+         << "ProfileCalibrationDegreesPerCountX,ProfileCalibrationDegreesPerCountY,"
+         << "ProfileCalibrationDelayMsX,ProfileCalibrationDelayMsY,ProfileCalibrationDriftX,ProfileCalibrationDriftY,"
+         << "ProfileCalibrationRmseX,ProfileCalibrationRmseY,ProfileCalibrationCorrelationX,ProfileCalibrationCorrelationY,"
+         << "ProfileCalibrationConfidenceX,ProfileCalibrationConfidenceY,ProfileCalibrationSamplesX,ProfileCalibrationSamplesY,"
+         << "ProfileCalibrationActiveSamplesX,ProfileCalibrationActiveSamplesY,ProfileCalibrationOverallConfidence,"
          << "ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds,MaxCountsPerSecond,FrameCountLimit,"
          << "ErrorMotion,SettleMotionThreshold,MovingInsideSettle,HorizontalCatchUp,VerticalCatchUp,SpeedLimited,Settled,QueuedMoveCount\n";
 
@@ -158,6 +165,19 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.requestedCountsX << ',' << f.requestedCountsY << ','
              << f.integralCountsX << ',' << f.integralCountsY << ','
              << f.finalMx << ',' << f.finalMy << ','
+             << (f.profileCalibrationEnabled ? '1' : '0') << ','
+             << (f.profileCalibrationValidX ? '1' : '0') << ','
+             << (f.profileCalibrationValidY ? '1' : '0') << ','
+             << f.profileCalibrationPixelsPerCountX << ',' << f.profileCalibrationPixelsPerCountY << ','
+             << f.profileCalibrationDegreesPerCountX << ',' << f.profileCalibrationDegreesPerCountY << ','
+             << f.profileCalibrationDelayMsX << ',' << f.profileCalibrationDelayMsY << ','
+             << f.profileCalibrationDriftX << ',' << f.profileCalibrationDriftY << ','
+             << f.profileCalibrationRmseX << ',' << f.profileCalibrationRmseY << ','
+             << f.profileCalibrationCorrelationX << ',' << f.profileCalibrationCorrelationY << ','
+             << f.profileCalibrationConfidenceX << ',' << f.profileCalibrationConfidenceY << ','
+             << f.profileCalibrationSamplesX << ',' << f.profileCalibrationSamplesY << ','
+             << f.profileCalibrationActiveSamplesX << ',' << f.profileCalibrationActiveSamplesY << ','
+             << f.profileCalibrationOverallConfidence << ','
              << f.responseSeconds << ',' << f.effectiveResponseSecondsX << ','
              << f.effectiveResponseSecondsY << ','
              << f.integralTimeSeconds << ','
