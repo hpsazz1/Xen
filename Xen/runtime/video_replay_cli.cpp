@@ -83,6 +83,7 @@ namespace
         bool enabled = false;
         double leadMs = 0.0;
         double tauMs = 35.0;
+        double maxCountsPerSecond = 1440.0;
     };
 
     struct CandidateResult
@@ -93,7 +94,9 @@ namespace
         double reverseP95 = std::numeric_limits<double>::infinity();
         double staticP95X = std::numeric_limits<double>::infinity();
         double staticP95Y = std::numeric_limits<double>::infinity();
+        double jumpP95 = std::numeric_limits<double>::infinity();
         double improvementPercent = 0.0;
+        double jumpImprovementPercent = 0.0;
         bool valid = false;
         double score = std::numeric_limits<double>::infinity();
     };
@@ -396,7 +399,7 @@ namespace
         predictorSettings.velocityTimeConstantSeconds = candidate.tauMs / 1000.0;
         BasicAimController::Settings controllerSettings;
         controllerSettings.responseSeconds = options.responseMs / 1000.0;
-        controllerSettings.maxCountsPerSecond = options.maxCountsPerSecond;
+        controllerSettings.maxCountsPerSecond = candidate.maxCountsPerSecond;
         controllerSettings.integralTimeSeconds = options.integralMs / 1000.0;
         controllerSettings.settleRadiusPixels = std::max(2.0, options.cropWidth / 64.0);
         controllerSettings.releaseRadiusPixels = controllerSettings.settleRadiusPixels * 1.6;
@@ -534,13 +537,26 @@ namespace
         return metrics;
     }
 
-    std::vector<Candidate> candidates()
+    std::vector<Candidate> candidates(double baselineMaxCountsPerSecond)
     {
-        std::vector<Candidate> result{ { false, 0.0, 35.0 } };
-        for (double lead : { 0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 50.0 })
+        std::vector<double> speedLimits{
+            baselineMaxCountsPerSecond,
+            std::min(2000.0, baselineMaxCountsPerSecond * 7.0 / 6.0),
+            std::min(2000.0, baselineMaxCountsPerSecond * 1.25),
+            2000.0
+        };
+        std::sort(speedLimits.begin(), speedLimits.end());
+        speedLimits.erase(std::unique(speedLimits.begin(), speedLimits.end()), speedLimits.end());
+
+        std::vector<Candidate> result;
+        for (double maxCountsPerSecond : speedLimits)
         {
-            for (double tau : { 15.0, 25.0, 35.0, 50.0, 75.0 })
-                result.push_back({ true, lead, tau });
+            result.push_back({ false, 0.0, 35.0, maxCountsPerSecond });
+            for (double lead : { 0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 50.0 })
+            {
+                for (double tau : { 15.0, 25.0, 35.0, 50.0, 75.0 })
+                    result.push_back({ true, lead, tau, maxCountsPerSecond });
+            }
         }
         return result;
     }
@@ -549,6 +565,7 @@ namespace
     {
         if (name.find("static") != std::string::npos) return "static";
         if (name.find("reverse") != std::string::npos) return "reverse";
+        if (name.find("jump") != std::string::npos) return "jump";
         if (name.find("left") != std::string::npos) return "left";
         if (name.find("right") != std::string::npos) return "right";
         return name;
@@ -633,9 +650,9 @@ int Run(int argc, char** argv)
         }
 
         std::ofstream grid(options.outputRoot / "prediction_grid.csv");
-        grid << "Enabled,LeadMs,TauMs,ObservationAgeMs,Scenario,Samples,OutsideCrop,MeanAbsX,P95AbsX,MeanAbsY,P95AbsY\n";
+        grid << "Enabled,LeadMs,TauMs,MaxCountsPerSecond,ObservationAgeMs,Scenario,Samples,OutsideCrop,MeanAbsX,P95AbsX,MeanAbsY,P95AbsY\n";
         std::vector<CandidateResult> results;
-        for (const Candidate& candidate : candidates())
+        for (const Candidate& candidate : candidates(options.maxCountsPerSecond))
         {
             CandidateResult result;
             result.candidate = candidate;
@@ -647,7 +664,8 @@ int Run(int argc, char** argv)
                     const std::string scenario = scenarioKey(trajectory.name);
                     updateWorst(result.worstByScenario[scenario], metrics);
                     grid << (candidate.enabled ? 1 : 0) << ',' << candidate.leadMs << ',' << candidate.tauMs << ','
-                         << ageMs << ',' << scenario << ',' << metrics.samples << ',' << metrics.outsideCrop << ','
+                         << candidate.maxCountsPerSecond << ',' << ageMs << ',' << scenario << ','
+                         << metrics.samples << ',' << metrics.outsideCrop << ','
                          << metrics.meanAbsX << ',' << metrics.p95AbsX << ','
                          << metrics.meanAbsY << ',' << metrics.p95AbsY << '\n';
                 }
@@ -658,16 +676,20 @@ int Run(int argc, char** argv)
             result.reverseP95 = metricP95(result, "reverse", true);
             result.staticP95X = metricP95(result, "static", true);
             result.staticP95Y = metricP95(result, "static", false);
+            result.jumpP95 = metricP95(result, "jump", true);
             results.push_back(result);
         }
 
         if (results.empty() || !std::isfinite(results.front().movingP95))
             throw std::runtime_error("Required static/left/right/reverse scenarios were not extracted.");
         const CandidateResult baseline = results.front();
+        const bool hasJumpScenario = std::isfinite(baseline.jumpP95);
         for (auto& result : results)
         {
             result.improvementPercent = baseline.movingP95 > 0.0
                 ? (baseline.movingP95 - result.movingP95) / baseline.movingP95 * 100.0 : 0.0;
+            result.jumpImprovementPercent = hasJumpScenario && baseline.jumpP95 > 0.0
+                ? (baseline.jumpP95 - result.jumpP95) / baseline.jumpP95 * 100.0 : 0.0;
             size_t outside = 0;
             for (const auto& item : result.worstByScenario)
                 outside += item.second.outsideCrop;
@@ -676,12 +698,14 @@ int Run(int argc, char** argv)
                 baselineOutside += item.second.outsideCrop;
             result.valid = std::isfinite(result.movingP95) &&
                 result.improvementPercent >= 10.0 &&
+                (!hasJumpScenario || result.jumpImprovementPercent >= 10.0) &&
                 result.staticP95X <= baseline.staticP95X + 0.5 &&
                 result.staticP95Y <= baseline.staticP95Y + 0.5 &&
                 result.reverseP95 <= baseline.reverseP95 * 1.10 &&
                 outside <= baselineOutside;
             result.score = result.valid
                 ? result.movingP95 + result.reverseP95 * 0.5 +
+                  (hasJumpScenario ? result.jumpP95 * 0.5 : 0.0) +
                   result.staticP95X + result.staticP95Y : std::numeric_limits<double>::infinity();
         }
         const auto best = std::min_element(results.begin() + 1, results.end(), [](const auto& left, const auto& right) {
@@ -700,18 +724,28 @@ int Run(int argc, char** argv)
                 << "BaselineReverseP95=" << baseline.reverseP95 << '\n'
                 << "BaselineStaticP95X=" << baseline.staticP95X << '\n'
                 << "BaselineStaticP95Y=" << baseline.staticP95Y << '\n';
+        if (hasJumpScenario)
+            summary << "BaselineJumpP95=" << baseline.jumpP95 << '\n';
         if (best != results.end() && best->valid && std::isfinite(best->score))
         {
-            summary << "RecommendedLeadMs=" << best->candidate.leadMs << '\n'
+            summary << "RecommendedPredictionEnabled=" << (best->candidate.enabled ? 1 : 0) << '\n'
+                    << "RecommendedLeadMs=" << best->candidate.leadMs << '\n'
                     << "RecommendedTauMs=" << best->candidate.tauMs << '\n'
+                    << "RecommendedMaxCountsPerSecond=" << best->candidate.maxCountsPerSecond << '\n'
                     << "MovingP95=" << best->movingP95 << '\n'
                     << "ReverseP95=" << best->reverseP95 << '\n'
                     << "StaticP95X=" << best->staticP95X << '\n'
                     << "StaticP95Y=" << best->staticP95Y << '\n'
                     << "MovingImprovementPercent=" << best->improvementPercent << '\n';
+            if (hasJumpScenario)
+            {
+                summary << "JumpP95=" << best->jumpP95 << '\n'
+                        << "JumpImprovementPercent=" << best->jumpImprovementPercent << '\n';
+            }
             std::cout << "[VideoReplay] Recommended lead=" << best->candidate.leadMs
                       << " ms tau=" << best->candidate.tauMs
-                      << " ms moving improvement=" << best->improvementPercent << "%" << std::endl;
+                      << " ms max_cps=" << best->candidate.maxCountsPerSecond
+                      << " counts/s, moving improvement=" << best->improvementPercent << "%" << std::endl;
         }
         else
         {

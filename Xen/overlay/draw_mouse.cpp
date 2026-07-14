@@ -127,7 +127,8 @@ static void draw_mouse_page(MouseSettingsPage page)
             "越小越快，越大越柔和。该参数不随 FPS 改变含义，也不会被自动跟踪优化覆盖。");
         OverlayUI::SliderFloatRow("最大设备速度", &config.move_max_speed_cps,
             30.0f, 2000.0f, "%.0f counts/s", "##move_max_cps",
-            "限制每秒发送的鼠标计数；按实际观测间隔换算单帧预算，不会被自动跟踪优化覆盖。");
+            "限制每秒发送的鼠标计数；按实际观测间隔换算单帧预算，不会被自动跟踪优化覆盖。\n"
+            "新增jump视频模拟候选为2000 counts/s，需同时复测普通移动与静止稳定。\n");
         if (OverlayUI::SliderFloatRow("移动积分时间(ms)", &config.move_integral_time_ms,
             0.0f, 1000.0f, "%.0f", "##move_integral_time",
             "0为关闭，非零最小50 ms。用于消除匀速移动目标的固定滞后；时间越小积分越强，需同时验证静止稳定和方向反转。"))
@@ -154,7 +155,7 @@ static void draw_mouse_page(MouseSettingsPage page)
 
         OverlayUI::SliderFloatRow("额外前瞻(ms)", &config.prediction_lead_ms, 0.0f, 100.0f, "%.0f", "##pred_lead_ms",
             "在自动补偿真实观测年龄之外增加的固定前瞻时间。\n"
-            "数值越大，移动目标提前量越大；建议先使用20ms基线复测。");
+            "数值越大，移动目标提前量越大；新增jump视频联合模拟候选为10ms。");
 
         OverlayUI::SliderFloatRow("速度平滑(ms)", &config.prediction_velocity_tau_ms, 5.0f, 250.0f, "%.0f", "##pred_velocity_tau_ms",
             "目标速度估计的时间常数，按真实检测时间戳自动适配帧率。\n"

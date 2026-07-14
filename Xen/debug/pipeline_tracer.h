@@ -37,6 +37,9 @@ struct PipelineFrame
 
     // ========== Stage 3: 连续观测预测 ==========
     bool predictionApplied = false;
+    bool predictionEnabled = false;
+    double predictionAdditionalLeadMs = 0.0;
+    double predictionVelocityTauMs = 0.0;
     double predictionVelocityX = 0.0;
     double predictionVelocityY = 0.0;
     double predictionLeadMs = 0.0;

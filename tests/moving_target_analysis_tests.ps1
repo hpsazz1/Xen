@@ -19,6 +19,9 @@ $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('xen-moving-test-'
 try {
     $dataDirectory = Join-Path $temporaryRoot 'CUDA\udp'
     New-Item -ItemType Directory -Path $dataDirectory | Out-Null
+    $unrelatedDirectory = Join-Path $temporaryRoot 'Video\analysis'
+    New-Item -ItemType Directory -Path $unrelatedDirectory -Force | Out-Null
+    'LeadMs,P95AbsX`n20,12.5' | Set-Content -LiteralPath (Join-Path $unrelatedDirectory 'prediction_grid.csv') -Encoding UTF8
     $csvPath = Join-Path $dataDirectory 'horizontal_reverse.csv'
     @'
 Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeSec,ErrorX,ErrorY,ErrorDistance,FilterResidual,ObservedVelocityX,ObservedVelocityY,RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,FinalMx,FinalMy,SpeedLimited,QueuedMoveCount,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision,MovingInsideSettle

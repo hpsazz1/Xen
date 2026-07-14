@@ -191,6 +191,9 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
     if ($parts.Count -lt 3) {
         continue
     }
+    if ($parts[0] -notin @('CUDA', 'DML') -or $parts[1] -notin @('ndi', 'udp')) {
+        continue
+    }
     $chain = "$($parts[0])+$($parts[1])"
     $rows = @(Import-Csv -LiteralPath $csvFile.FullName)
     if ($rows.Count -eq 0) {
