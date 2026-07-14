@@ -37,6 +37,25 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
 1320,2560,1440,120,240,0.010,-7,1,7.07,2,-80,0,-1,0,-1.344,0,-1,0,0,0,CUDA,test-revision,20260714T010000Z,4,0
 '@ | Set-Content -LiteralPath $csvPath -Encoding UTF8
 
+    $augmentedRows = @(Import-Csv -LiteralPath $csvPath)
+    foreach ($row in $augmentedRows) {
+        $timestamp = [double]$row.Timestamp
+        $outsideApplied = $timestamp -in @(1000, 1010, 1020, 1050, 1060)
+        $offset = if ($timestamp -in @(1000, 1010, 1020)) { 30.0 }
+            elseif ($timestamp -in @(1050, 1060)) { -20.0 }
+            else { 0.0 }
+        $predictedX = 100.0 + $offset
+        foreach ($property in @{
+            TargetBoxX = 100.0; TargetBoxY = 80.0; TargetBoxWidth = 20.0; TargetBoxHeight = 40.0
+            PredictionOutsideApplied = $(if ($outsideApplied) { 1 } else { 0 })
+            PredictionOffsetX = $offset; PredictionOffsetY = 0.0
+            PredictedX = $predictedX; PredictedY = 100.0; ViewMotionX = 0.0; ViewMotionY = 0.0
+        }.GetEnumerator()) {
+            $row | Add-Member -NotePropertyName $property.Key -NotePropertyValue $property.Value
+        }
+    }
+    $augmentedRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+
     $singleDirectionPath = Join-Path $dataDirectory 'horizontal_right.csv'
     Copy-Item -LiteralPath $csvPath -Destination $singleDirectionPath
 
@@ -59,6 +78,9 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal test-revision $reverseTrials[0].BuildRevision 'Build revision must be preserved in trial metrics.'
     Assert-Equal 4 $reverseTrials[0].ControllerRevision 'Controller revision must be preserved in trial metrics.'
     Assert-Equal 28.6 $reverseTrials[0].MovingInsideSettlePct 'Settle motion diagnostics must be summarized per trial.'
+    Assert-Equal 71.4 $reverseTrials[0].PredictionOutsideAppliedPct 'Outside-box prediction activation must be summarized.'
+    Assert-Equal 10 $reverseTrials[0].P50OutsideLeadPx 'Outside-box median distance must use the active movement side.'
+    Assert-Equal 1 $reverseTrials[0].PredictionSideFlipCount 'Prediction side changes must remain independently auditable.'
     Assert-Equal $reverseTrials[0].P95AbsAxisErrorPx $reverseTrials[0].SteadyP95AbsAxisErrorPx 'Short synthetic trials must use all samples as the steady window.'
     Assert-Equal 2 $scenario.Count 'Each scenario file must create one summary.'
     Assert-Equal 2 $scenario[0].Trials 'Scenario summary must report both trials.'

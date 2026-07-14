@@ -14,7 +14,7 @@ if ($mouseUi -match 'false\s*&&\s*shouldDrawMousePage\(page,\s*MouseSettingsPage
 if ($mouseUi -notmatch 'shouldDrawMousePage\(page,\s*MouseSettingsPage::Prediction\)\s*&&') {
     throw 'Prediction settings page has no active draw condition.'
 }
-foreach ($control in @('##pred_enabled', '##pred_lead_ms', '##pred_velocity_tau_ms')) {
+foreach ($control in @('##pred_enabled', '##pred_lead_ms', '##pred_velocity_tau_ms', '##pred_outside_box_scale')) {
     if ($mouseUi -notmatch $control) {
         throw "Prediction settings control is missing: $control"
     }

@@ -118,6 +118,7 @@ capture_fps = 60
 | `prediction_enabled` | `true` | 启用连续真实观测预测。关闭时预测器完全旁路，基础滤波位置直接进入控制器。 |
 | `prediction_lead_ms` | `20` | 在自动补偿观测年龄之外增加的固定前瞻时间，范围0~100 ms。 |
 | `prediction_velocity_tau_ms` | `35` | 目标速度低通时间常数，范围5~250 ms；按真实检测时间戳计算，不绑定固定帧率。 |
+| `prediction_outside_box_scale` | `0.50` | 沿已确认移动方向越过目标框边缘后继续前置的目标投影身位数，范围0~2；0仅使用时间前瞻，1表示框外再前置一个目标投影宽度。 |
 | `snapRadius` | `1.5` | 近距离目标吸附半径。 |
 | `nearRadius` | `25.0` | 近距离目标行为开始的半径。 |
 | `speedCurveExponent` | `3.0` | 速度缩放的曲线形状。 |
@@ -126,9 +127,9 @@ capture_fps = 60
 | `easynorecoilstrength` | `0.0` | 后坐力补偿强度。 |
 | `input_method` | `WIN32` | 输出/控制方式。见下文。 |
 
-三个预测项位于UI侧栏“瞄准 → 预测参数”。关闭“启用预测”后，两个数值项会置灰但仍保持可见，便于按关闭/开启顺序执行A/B测试。
+四个预测项位于UI侧栏“瞄准 → 预测参数”。关闭“启用预测”后，三个数值项会置灰但仍保持可见，便于按关闭/开启顺序执行A/B测试。框外提前不依据准星位于目标哪一侧翻向：程序先补偿自身视角运动，再连续确认目标方向；停止或疑似反向的第一帧立即撤销框外提前，连续确认反向后才切换预测侧。
 
-加入快速横跳视频和首轮实机数据后的联合候选为 `move_max_speed_cps=2000`、`prediction_lead_ms=10`、`prediction_velocity_tau_ms=75`。源码仍保留通用默认值，避免在实机验收前把场景候选直接升级为所有部署的默认配置。
+加入快速横跳视频和首轮实机数据后的基础候选为 `move_max_speed_cps=2000`、`prediction_lead_ms=10`、`prediction_velocity_tau_ms=75`。框外预测首轮从 `prediction_outside_box_scale=0.50` 开始，只扫描这一项；基础移动三项保持不变。
 
 ## 输入方式
 

@@ -397,6 +397,9 @@ namespace
         predictorSettings.enabled = candidate.enabled;
         predictorSettings.additionalLeadSeconds = candidate.leadMs / 1000.0;
         predictorSettings.velocityTimeConstantSeconds = candidate.tauMs / 1000.0;
+        // 现有回放评分以准星贴合目标中心为基准，不适合评价主动框外提前；
+        // 框外身位参数使用新增实机CSV诊断单独验收。
+        predictorSettings.outsideBoxScale = 0.0;
         BasicAimController::Settings controllerSettings;
         controllerSettings.responseSeconds = options.responseMs / 1000.0;
         controllerSettings.maxCountsPerSecond = candidate.maxCountsPerSecond;
@@ -496,9 +499,11 @@ namespace
                 std::chrono::duration<double, std::milli>(observationAgeMs));
             const double fallbackSeconds = 1.0 / std::max(1.0, options.inferenceFps);
             const auto filtered = filter.update(
-                rawX, rawY, observationTime, fallbackSeconds, options.cropWidth);
+                point.globalX, point.globalY,
+                observationTime, fallbackSeconds, options.cropWidth);
             const auto predicted = predictor.update(
-                filtered.x, filtered.y, observationTime, controlTime,
+                filtered.x, filtered.y, TargetPredictor::Bounds{},
+                observationTime, controlTime,
                 options.cropWidth, predictorSettings);
 
             double dt = fallbackSeconds;
@@ -506,8 +511,8 @@ namespace
                 dt = std::clamp(point.timeSeconds - previousObservationTime, 1.0 / 1000.0, 0.050);
             previousObservationTime = point.timeSeconds;
             const auto output = controller.update(
-                predicted.x - options.cropWidth * 0.5,
-                predicted.y - options.cropHeight * 0.5,
+                predicted.x - cameraX - (options.cropX + options.cropWidth * 0.5),
+                predicted.y - cameraY - (options.cropY + options.cropHeight * 0.5),
                 dt, countsPerPixelX, countsPerPixelY, controllerSettings);
 
             const double currentTime = point.timeSeconds + observationAgeMs / 1000.0;

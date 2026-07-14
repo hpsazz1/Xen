@@ -25,6 +25,10 @@ struct PipelineFrame
     // ========== Stage 1: 原始目标（tracker/sorter 输出的 pivot 坐标） ==========
     double rawPivotX = 0.0;    ///< 原始 pivot X（检测分辨率像素）
     double rawPivotY = 0.0;    ///< 原始 pivot Y
+    double targetBoxX = 0.0;
+    double targetBoxY = 0.0;
+    double targetBoxWidth = 0.0;
+    double targetBoxHeight = 0.0;
     int    targetClassId = -1; ///< 目标类别（0=body, 1=head, -1=未知）
 
     // ========== Stage 2: 基础观测滤波（无未来预测） ==========
@@ -40,9 +44,16 @@ struct PipelineFrame
     bool predictionEnabled = false;
     double predictionAdditionalLeadMs = 0.0;
     double predictionVelocityTauMs = 0.0;
+    double predictionOutsideBoxScale = 0.0;
     double predictionVelocityX = 0.0;
     double predictionVelocityY = 0.0;
     double predictionLeadMs = 0.0;
+    double predictionOffsetX = 0.0;
+    double predictionOffsetY = 0.0;
+    double viewMotionX = 0.0;
+    double viewMotionY = 0.0;
+    bool predictionDirectionLocked = false;
+    bool predictionOutsideApplied = false;
     double predictedX = 0.0;
     double predictedY = 0.0;
 

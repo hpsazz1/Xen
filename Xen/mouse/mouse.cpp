@@ -80,6 +80,8 @@ MouseThread::MouseThread(
             static_cast<double>(config.prediction_lead_ms) / 1000.0;
         predictionSettings.velocityTimeConstantSeconds =
             static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0;
+        predictionSettings.outsideBoxScale =
+            static_cast<double>(config.prediction_outside_box_scale);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
     }
 
@@ -123,6 +125,8 @@ void MouseThread::updateConfig(
         static_cast<double>(config.prediction_lead_ms) / 1000.0, 0.0, 0.100);
     predictionSettings.velocityTimeConstantSeconds = std::clamp(
         static_cast<double>(config.prediction_velocity_tau_ms) / 1000.0, 0.005, 0.250);
+    predictionSettings.outsideBoxScale = std::clamp(
+        static_cast<double>(config.prediction_outside_box_scale), 0.0, 2.0);
     this->auto_shoot = auto_shoot;
     this->bScope_multiplier = bScope_multiplier;
 
@@ -760,33 +764,7 @@ void MouseThread::recordMotionCompensationStep(int dx, int dy)
 
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(motionCompensationMutex);
-    pruneMotionCompensationTrailLocked(now);
-
-    double cumX = motionCompensationTrail.empty() ? 0.0
-        : motionCompensationTrail.back().cumX;
-    double cumY = motionCompensationTrail.empty() ? 0.0
-        : motionCompensationTrail.back().cumY;
-    motionCompensationTrail.push_back(
-        { delta.first, delta.second, cumX + delta.first, cumY + delta.second, now });
-
-    constexpr size_t maxSamples = 512;
-    while (motionCompensationTrail.size() > maxSamples)
-        motionCompensationTrail.pop_front();
-}
-
-/**
- * pruneMotionCompensationTrailLocked
- *
- * 清理运动补偿轨迹中超过生命周期（2 秒）的旧采样。
- * 调用者必须已持有 motionCompensationMutex 锁。
- *
- * @param now 当前时间点
- */
-void MouseThread::pruneMotionCompensationTrailLocked(const std::chrono::steady_clock::time_point& now)
-{
-    constexpr auto motionTrailLifetime = std::chrono::seconds(2);
-    while (!motionCompensationTrail.empty() && (now - motionCompensationTrail.front().t) > motionTrailLifetime)
-        motionCompensationTrail.pop_front();
+    motionCompensationHistory.add(delta.first, delta.second, now);
 }
 
 /**
@@ -805,23 +783,14 @@ std::pair<double, double> MouseThread::getMotionCompensationSince(
         return { 0.0, 0.0 };
 
     std::lock_guard<std::mutex> lock(motionCompensationMutex);
-    if (motionCompensationTrail.empty())
-        return { 0.0, 0.0 };
+    return motionCompensationHistory.since(since);
+}
 
-    // 二分查找第一个 t >= since 的采样（前缀和 O(log n) + O(1)）
-    auto it = std::lower_bound(
-        motionCompensationTrail.begin(), motionCompensationTrail.end(), since,
-        [](const MotionCompensationSample& s, const std::chrono::steady_clock::time_point& t) {
-            return s.t < t;
-        });
-    if (it == motionCompensationTrail.end())
-        return { 0.0, 0.0 };  // 无采样 >= since
-
-    const double totalX = motionCompensationTrail.back().cumX;
-    const double totalY = motionCompensationTrail.back().cumY;
-    const double prevX = (it != motionCompensationTrail.begin()) ? (it - 1)->cumX : 0.0;
-    const double prevY = (it != motionCompensationTrail.begin()) ? (it - 1)->cumY : 0.0;
-    return { totalX - prevX, totalY - prevY };
+std::pair<double, double> MouseThread::getMotionCompensationAt(
+    std::chrono::steady_clock::time_point time) const
+{
+    std::lock_guard<std::mutex> lock(motionCompensationMutex);
+    return motionCompensationHistory.at(time);
 }
 
 std::pair<double, double> MouseThread::filter_target_position(
@@ -1065,9 +1034,7 @@ bool MouseThread::check_target_in_scope(double target_x, double target_y, double
  */
 void MouseThread::moveMouse(const AimbotTarget& target)
 {
-    moveMousePivot(
-        target.x + target.w / 2.0,
-        target.y + target.h / 2.0);
+    moveMousePivot(target);
 }
 
 /**
@@ -1086,17 +1053,17 @@ void MouseThread::moveMouse(const AimbotTarget& target)
  *   8. 惯性过冲模拟（可选）
  *   9. 轨迹分发：Bezier / WindMouse / 直通
  *
- * @param pivotX        目标 pivot 点 X 坐标
- * @param pivotY        目标 pivot 点 Y 坐标
+ * @param target        目标框、类别和 pivot 坐标
  * @param observationTime  检测观测时间戳（用于运动补偿）
  */
 void MouseThread::moveMousePivot(
-    double pivotX,
-    double pivotY,
-    std::chrono::steady_clock::time_point observationTime,
-    int targetClassId)
+    const AimbotTarget& target,
+    std::chrono::steady_clock::time_point observationTime)
 {
     std::lock_guard lg(input_method_mutex);
+
+    const double pivotX = target.pivotX;
+    const double pivotY = target.pivotY;
 
     PipelineFrame traceFrame;
     PipelineFrame* pf = nullptr;
@@ -1106,7 +1073,11 @@ void MouseThread::moveMousePivot(
         pf = &traceFrame;
         pf->rawPivotX = pivotX;
         pf->rawPivotY = pivotY;
-        pf->targetClassId = targetClassId;
+        pf->targetBoxX = target.x;
+        pf->targetBoxY = target.y;
+        pf->targetBoxWidth = target.w;
+        pf->targetBoxHeight = target.h;
+        pf->targetClassId = target.classId;
         pf->targetDetected = true;
         pf->fpsValue = static_cast<double>(captureFps.load());
         pf->inferenceFps = detectionBuffer.getPublishFps();
@@ -1154,10 +1125,28 @@ void MouseThread::moveMousePivot(
         }
     };
 
-    const auto filtered = filter_target_position(pivotX, pivotY, observationTime);
+    const auto controlTime = std::chrono::steady_clock::now();
+    const auto effectiveObservationTime = observationTime.time_since_epoch().count() == 0
+        ? controlTime : observationTime;
+    const auto viewAtObservation = getMotionCompensationAt(effectiveObservationTime);
+    const auto viewAtControl = getMotionCompensationAt(controlTime);
+    const double stabilizedPivotX = pivotX + viewAtObservation.first;
+    const double stabilizedPivotY = pivotY + viewAtObservation.second;
+    const auto filtered = filter_target_position(
+        stabilizedPivotX, stabilizedPivotY, effectiveObservationTime);
+    const TargetPredictor::Bounds stabilizedBounds{
+        target.x + viewAtObservation.first,
+        target.y + viewAtObservation.second,
+        static_cast<double>(target.w),
+        static_cast<double>(target.h)
+    };
     lastPredictionResult = targetPredictor.update(
-        filtered.first, filtered.second, observationTime,
-        std::chrono::steady_clock::now(), screen_width, predictionSettings);
+        filtered.first, filtered.second, stabilizedBounds,
+        effectiveObservationTime, controlTime, screen_width, predictionSettings);
+    const double filteredScreenX = filtered.first - viewAtControl.first;
+    const double filteredScreenY = filtered.second - viewAtControl.second;
+    lastPredictionResult.x -= viewAtControl.first;
+    lastPredictionResult.y -= viewAtControl.second;
     const double errorX = lastPredictionResult.x - center_x;
     const double errorY = lastPredictionResult.y - center_y;
 
@@ -1210,8 +1199,8 @@ void MouseThread::moveMousePivot(
 
     if (pf)
     {
-        pf->filteredX = filtered.first;
-        pf->filteredY = filtered.second;
+        pf->filteredX = filteredScreenX;
+        pf->filteredY = filteredScreenY;
         pf->observedVelocityX = lastFilterResult.observedVelocityX;
         pf->observedVelocityY = lastFilterResult.observedVelocityY;
         pf->observedSpeed = lastFilterResult.observedSpeed;
@@ -1220,9 +1209,16 @@ void MouseThread::moveMousePivot(
         pf->predictionEnabled = predictionSettings.enabled;
         pf->predictionAdditionalLeadMs = predictionSettings.additionalLeadSeconds * 1000.0;
         pf->predictionVelocityTauMs = predictionSettings.velocityTimeConstantSeconds * 1000.0;
+        pf->predictionOutsideBoxScale = predictionSettings.outsideBoxScale;
         pf->predictionVelocityX = lastPredictionResult.velocityX;
         pf->predictionVelocityY = lastPredictionResult.velocityY;
         pf->predictionLeadMs = lastPredictionResult.leadSeconds * 1000.0;
+        pf->predictionOffsetX = lastPredictionResult.offsetX;
+        pf->predictionOffsetY = lastPredictionResult.offsetY;
+        pf->viewMotionX = viewAtControl.first - viewAtObservation.first;
+        pf->viewMotionY = viewAtControl.second - viewAtObservation.second;
+        pf->predictionDirectionLocked = lastPredictionResult.directionLocked;
+        pf->predictionOutsideApplied = lastPredictionResult.outsideApplied;
         pf->predictedX = lastPredictionResult.x;
         pf->predictedY = lastPredictionResult.y;
         pf->errorX = errorX;

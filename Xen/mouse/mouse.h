@@ -25,6 +25,7 @@
 #include "runtime/basic_aim_controller.h"
 #include "runtime/basic_target_filter.h"
 #include "runtime/target_predictor.h"
+#include "runtime/view_motion_history.h"
 
 /**
  * @brief 鼠标控制主线程类
@@ -186,20 +187,11 @@ private:
     std::pair<double, double> mouseCountsToScreenPixels(int dx, int dy) const;
 
     // ==================== 运动补偿 ====================
-    /** @brief 运动补偿采样点结构 */
-    struct MotionCompensationSample
-    {
-        double x = 0.0;                                   ///< X 偏移
-        double y = 0.0;                                   ///< Y 偏移
-        double cumX = 0.0;                                ///< 累计 X（前缀和，O(1) 查询用）
-        double cumY = 0.0;                                ///< 累计 Y（前缀和）
-        std::chrono::steady_clock::time_point t{};         ///< 时间戳
-    };
-
     mutable std::mutex motionCompensationMutex;                   ///< 运动补偿互斥锁
-    std::deque<MotionCompensationSample> motionCompensationTrail; ///< 运动补偿轨迹
+    ViewMotionHistory motionCompensationHistory;                  ///< 自身视角累计位移时间线
     void recordMotionCompensationStep(int dx, int dy);            ///< 记录运动补偿步进
-    void pruneMotionCompensationTrailLocked(const std::chrono::steady_clock::time_point& now);  ///< 修剪运动补偿轨迹
+    std::pair<double, double> getMotionCompensationAt(
+        std::chrono::steady_clock::time_point time) const;        ///< 查询指定时刻累计自身视角位移
 
     /** @brief 计算从当前位置到目标位置的移动量（像素→counts，含速度曲线+FPS修正） */
     std::pair<double, double> calc_movement(double target_x, double target_y);
@@ -243,16 +235,13 @@ public:
     );
 
     /**
-     * @brief 以目标枢轴点为中心移动鼠标（追踪瞄准）
-     * @param pivotX 枢轴 X
-     * @param pivotY 枢轴 Y
+     * @brief 根据目标框和枢轴点执行追踪瞄准
+     * @param target 包含目标框、类别和枢轴点的真实检测目标
      * @param observationTime 观测时间戳
      */
     void moveMousePivot(
-        double pivotX,
-        double pivotY,
-        std::chrono::steady_clock::time_point observationTime = {},
-        int targetClassId = -1);
+        const AimbotTarget& target,
+        std::chrono::steady_clock::time_point observationTime = {});
     /** @brief 相对移动鼠标 */
     void moveRelative(int dx, int dy);
     /** @brief 清除所有排队中的移动指令 */

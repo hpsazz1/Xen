@@ -94,10 +94,11 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames,"
          << "NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames,TargetDetected,ObservationAgeSec,"
          << "TargetClassID,"
-         << "RawPivotX,RawPivotY,"
+         << "RawPivotX,RawPivotY,TargetBoxX,TargetBoxY,TargetBoxWidth,TargetBoxHeight,"
          << "FilteredX,FilteredY,ObservedVelocityX,ObservedVelocityY,ObservedSpeed,FilterResidual,"
-         << "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,"
-         << "PredictionVelocityX,PredictionVelocityY,PredictionLeadMs,PredictedX,PredictedY,"
+         << "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionOutsideBoxScale,"
+         << "PredictionVelocityX,PredictionVelocityY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,"
+         << "ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionOutsideApplied,PredictedX,PredictedY,"
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
          << "FinalMx,FinalMy,"
@@ -132,14 +133,21 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.observationAgeSec << ','
              << f.targetClassId << ','
              << f.rawPivotX << ',' << f.rawPivotY << ','
+             << f.targetBoxX << ',' << f.targetBoxY << ','
+             << f.targetBoxWidth << ',' << f.targetBoxHeight << ','
              << f.filteredX << ',' << f.filteredY << ','
              << f.observedVelocityX << ',' << f.observedVelocityY << ','
              << f.observedSpeed << ',' << f.filterResidual << ','
              << (f.predictionApplied ? '1' : '0') << ','
              << (f.predictionEnabled ? '1' : '0') << ','
              << f.predictionAdditionalLeadMs << ',' << f.predictionVelocityTauMs << ','
+             << f.predictionOutsideBoxScale << ','
              << f.predictionVelocityX << ',' << f.predictionVelocityY << ','
-             << f.predictionLeadMs << ',' << f.predictedX << ',' << f.predictedY << ','
+             << f.predictionLeadMs << ',' << f.predictionOffsetX << ',' << f.predictionOffsetY << ','
+             << f.viewMotionX << ',' << f.viewMotionY << ','
+             << (f.predictionDirectionLocked ? '1' : '0') << ','
+             << (f.predictionOutsideApplied ? '1' : '0') << ','
+             << f.predictedX << ',' << f.predictedY << ','
              << f.errorX << ',' << f.errorY << ',' << f.errorDistance << ','
              << f.requestedPixelX << ',' << f.requestedPixelY << ','
              << f.requestedCountsX << ',' << f.requestedCountsY << ','

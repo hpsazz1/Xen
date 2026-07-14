@@ -138,6 +138,7 @@ bool Config::loadConfig(const std::string& filename)
         prediction_enabled = true;                       // 连续真实观测预测总开关
         prediction_lead_ms = 20.0f;                      // 观测年龄之外的固定前瞻（毫秒）
         prediction_velocity_tau_ms = 35.0f;              // 速度低通时间常数（毫秒）
+        prediction_outside_box_scale = 0.50f;            // 框外继续前置半个目标投影身位
 
         snapRadius = 1.5f;                               // 瞄准吸附半径
         nearRadius = 25.0f;                              // "近距离"半径阈值
@@ -548,6 +549,8 @@ bool Config::loadConfig(const std::string& filename)
     prediction_velocity_tau_ms = hasPredictionVelocityTauMs
         ? (float)get_double("prediction_velocity_tau_ms", 35.0)
         : (float)(get_double("prediction_tau", 0.035) * 1000.0);
+    prediction_outside_box_scale =
+        (float)get_double("prediction_outside_box_scale", 0.50);
 
     snapRadius = (float)get_double("snapRadius", 1.5);
     nearRadius = (float)get_double("nearRadius", 25.0);
@@ -737,6 +740,7 @@ bool Config::loadConfig(const std::string& filename)
     // === 连续观测预测参数范围校验 ===
     prediction_lead_ms = std::clamp(prediction_lead_ms, 0.0f, 100.0f);
     prediction_velocity_tau_ms = std::clamp(prediction_velocity_tau_ms, 5.0f, 250.0f);
+    prediction_outside_box_scale = std::clamp(prediction_outside_box_scale, 0.0f, 2.0f);
 
     // === 覆盖层尺寸范围校验 ===
     if (overlay_width < 560) overlay_width = 560;
@@ -860,6 +864,7 @@ bool Config::saveConfig(const std::string& filename)
         << "prediction_enabled = " << (prediction_enabled ? "true" : "false") << "\n"
         << "prediction_lead_ms = " << prediction_lead_ms << "\n"
         << "prediction_velocity_tau_ms = " << prediction_velocity_tau_ms << "\n"
+        << "prediction_outside_box_scale = " << prediction_outside_box_scale << "\n"
         << "easynorecoil = " << (easynorecoil ? "true" : "false") << "\n"
         << std::fixed << std::setprecision(1)
         << "easynorecoilstrength = " << easynorecoilstrength << "\n"
