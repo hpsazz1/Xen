@@ -334,7 +334,12 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         } | ForEach-Object {
             [math]::Abs([double]$_.$requestedCountsColumn / [double]$_.$requestedPixelColumn)
         })
-        $estimatedCountsPerPixel = Get-PercentileValue -Values $countsPerPixelSamples -Percentile 0.50
+        # static 九段可能出现某一轴完全无需输出的有效试次。此时没有可用于反推
+        # counts/px 的样本，使用 0 表示“本试次不可估算”，避免把正常零位移误报为分析失败。
+        $estimatedCountsPerPixel = if ($countsPerPixelSamples.Count -gt 0) {
+            Get-PercentileValue -Values $countsPerPixelSamples -Percentile 0.50
+        }
+        else { 0.0 }
         $signedOutputCps = $signedOutputCounts / [math]::Max(0.001, $sampleDurationSeconds)
         $absoluteOutputCps = $absoluteOutputCounts / [math]::Max(0.001, $sampleDurationSeconds)
         # 匀速单向场景中，平均误差乘 counts/px 后除以实际输出 counts/s，

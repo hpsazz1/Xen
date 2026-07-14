@@ -105,6 +105,22 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     $defaultThresholdMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $temporaryRoot -WarmupMs 0 -MinTrialDurationMs 0 -MinTrialSamples 1 -ReversalConfirmFrames 2 -RecoveryConfirmFrames 2 -PassThru)
     $defaultReverseTrial = @($defaultThresholdMetrics | Where-Object { $_.Level -eq 'Trial' -and $_.Scenario -eq 'horizontal_reverse' })[0]
     Assert-Equal 1 $defaultReverseTrial.ReversalCount 'Default 10 px reversal threshold must detect moderate high-frequency swings.'
+
+    $zeroMotionRoot = Join-Path $temporaryRoot 'zero-motion-root'
+    $zeroMotionDirectory = Join-Path $zeroMotionRoot 'DML\ndi'
+    New-Item -ItemType Directory -Path $zeroMotionDirectory -Force | Out-Null
+    $zeroMotionPath = Join-Path $zeroMotionDirectory 'static.csv'
+    $zeroMotionRows = @(Import-Csv -LiteralPath $csvPath)
+    foreach ($row in $zeroMotionRows) {
+        $row.RequestedPixelX = 0
+        $row.RequestedCountsX = 0
+        $row.FinalMx = 0
+    }
+    $zeroMotionRows | Export-Csv -LiteralPath $zeroMotionPath -NoTypeInformation -Encoding UTF8
+    $zeroMotionMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $zeroMotionRoot -WarmupMs 0 -MinTrialDurationMs 0 -MinTrialSamples 1 -PassThru)
+    $zeroMotionTrial = @($zeroMotionMetrics | Where-Object { $_.Level -eq 'Trial' })[0]
+    Assert-Equal 0 $zeroMotionTrial.EstimatedCountsPerPixel 'A valid zero-motion axis must report unavailable counts-per-pixel as zero.'
+    Assert-Equal 0 $zeroMotionTrial.ApproxClosedLoopLagMs 'A valid zero-motion axis must not fabricate closed-loop lag.'
 }
 finally {
     if (Test-Path -LiteralPath $temporaryRoot) {
