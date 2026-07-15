@@ -496,7 +496,9 @@ private:
             predictionEstablished_ = false;
             reliableDirectionSamples_ = 0;
             accumulatePendingDirection(sampleDirectionX, sampleDirectionY);
-            if (pendingDirectionSamples_ >= 2)
+            // 已锁定方向的反转比初次建向更敏感；连续三次稳健回归同向后才换边，
+            // 避免 left/right 的短时闭环回弹在 30~70 ms 内反复重建预测侧。
+            if (pendingDirectionSamples_ >= 3)
             {
                 lockPendingDirection(observationTime, span);
                 suppressPrediction_ = false;
