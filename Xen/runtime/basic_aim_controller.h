@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 35;
+inline constexpr int kBasicAimControllerRevision = 36;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -175,6 +175,17 @@ public:
 
         out.countsX = proportionalCountsX + out.integralCountsX;
         out.countsY = proportionalCountsY + out.integralCountsY;
+        // 中心附近的 ±1/±2 counts 反向脉冲属于量化抖动，不应让设备在
+        // 两侧来回扫动；大于该阈值的真实 reverse/jump 修正保持原样。
+        constexpr double kSmallReverseCounts = 2.0;
+        if (std::abs(errorX) <= releaseRadius &&
+            out.countsX * previousOutputX_ < 0.0 &&
+            std::abs(out.countsX) <= kSmallReverseCounts)
+            out.countsX = 0.0;
+        if (std::abs(errorY) <= releaseRadius &&
+            out.countsY * previousOutputY_ < 0.0 &&
+            std::abs(out.countsY) <= kSmallReverseCounts)
+            out.countsY = 0.0;
         out.requestedPixelX = std::abs(countsPerPixelX) > 1e-12
             ? out.countsX / countsPerPixelX : 0.0;
         out.requestedPixelY = std::abs(countsPerPixelY) > 1e-12
@@ -199,6 +210,8 @@ public:
             integralCountErrorY_ = candidateIntegralY;
         }
         rememberError(errorX, errorY);
+        previousOutputX_ = out.countsX;
+        previousOutputY_ = out.countsY;
         return out;
     }
 
@@ -209,6 +222,8 @@ public:
         previousErrorX_ = 0.0;
         previousErrorY_ = 0.0;
         hasPreviousError_ = false;
+        previousOutputX_ = 0.0;
+        previousOutputY_ = 0.0;
     }
     bool settled() const { return settled_; }
 
@@ -232,4 +247,6 @@ private:
     double previousErrorX_ = 0.0;
     double previousErrorY_ = 0.0;
     bool hasPreviousError_ = false;
+    double previousOutputX_ = 0.0;
+    double previousOutputY_ = 0.0;
 };
