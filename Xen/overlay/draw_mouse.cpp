@@ -131,6 +131,35 @@ static void draw_mouse_page(MouseSettingsPage page)
     }
 
     if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
+        OverlayUI::BeginSection("新链路灰度模式", "mouse_section_aim_pipeline_mode"))
+    {
+        const char* pipelineModes[] = {
+            "正式旧链路(legacy)",
+            "仅影子诊断(shadow)",
+            "请求active(当前强制shadow)"
+        };
+        int pipelineModeIndex = 0;
+        if (config.aim_pipeline_mode == "shadow")
+            pipelineModeIndex = 1;
+        else if (config.aim_pipeline_mode == "active")
+            pipelineModeIndex = 2;
+        if (OverlayUI::ComboRow("运行模式", &pipelineModeIndex,
+            pipelineModes, IM_ARRAYSIZE(pipelineModes), "##aim_pipeline_mode"))
+        {
+            static constexpr const char* kPipelineModeValues[] = {
+                "legacy", "shadow", "active"
+            };
+            config.aim_pipeline_mode = kPipelineModeValues[pipelineModeIndex];
+            OverlayConfig_MarkDirty();
+        }
+        if (config.aim_pipeline_mode == "legacy")
+            ImGui::TextDisabled("r30旧链路正式输出；新估计与控制链不运行");
+        else
+            ImGui::TextDisabled("P0-5仍为HOLD_SHADOW：只写同帧诊断，设备命令始终抑制");
+        OverlayUI::EndSection();
+    }
+
+    if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
         OverlayUI::BeginSection("确定性轨迹影子参数", "mouse_section_shadow_trajectory"))
     {
         const char* trajectoryModes[] = { "透传(off)", "梯形/jerk约束(trapezoid)" };

@@ -796,6 +796,11 @@ bool Config::loadConfig(const std::string& filename)
     aim_shadow_integral_zone_deg = std::clamp(aim_shadow_integral_zone_deg, 0.0f, 10.0f);
     aim_shadow_lead_horizon_ms = std::clamp(aim_shadow_lead_horizon_ms, 0.0f, 250.0f);
     aim_shadow_lead_strength = std::clamp(aim_shadow_lead_strength, 0.0f, 4.0f);
+    // 灰度模式只接受三个可审计值。未知值必须回退正式旧链路，不能把配置拼写错误
+    // 静默解释成影子或未来的 active 行为。
+    if (aim_pipeline_mode != "legacy" && aim_pipeline_mode != "shadow" &&
+        aim_pipeline_mode != "active")
+        aim_pipeline_mode = "legacy";
     if (trajectory_shaper_mode != "trapezoid")
         trajectory_shaper_mode = "off";
     trajectory_output_hz = std::clamp(trajectory_output_hz, 30.0f, 1000.0f);

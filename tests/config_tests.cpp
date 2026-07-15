@@ -243,6 +243,19 @@ int main()
                  "shadow pipeline config state is restored");
     std::filesystem::remove(shadowModePath, removeError);
 
+    const std::filesystem::path invalidPipelineModePath =
+        "xen_config_invalid_pipeline_mode_test.ini";
+    {
+        std::ofstream invalidPipelineModeFile(invalidPipelineModePath);
+        invalidPipelineModeFile << "aim_pipeline_mode = typo\n";
+    }
+    Config invalidPipelineMode{};
+    expectTrue(invalidPipelineMode.loadConfig(invalidPipelineModePath.string()),
+               "invalid pipeline mode config loads safely");
+    expectString(invalidPipelineMode.aim_pipeline_mode, "legacy",
+                 "invalid pipeline mode falls back to the formal legacy chain");
+    std::filesystem::remove(invalidPipelineModePath, removeError);
+
     const std::filesystem::path unsafeDelayPath = "xen_config_shadow_delay_test.ini";
     {
         std::ofstream unsafeDelayFile(unsafeDelayPath);
