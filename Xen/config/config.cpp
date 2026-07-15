@@ -131,7 +131,7 @@ bool Config::loadConfig(const std::string& filename)
         fovY = 74;                                       // 垂直视野（度）
         minSpeedMultiplier = 0.1f;                       // 鼠标最小速度倍率
         maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
-        move_response_ms = 80.0f;                        // 基础控制响应时间（毫秒）
+        move_response_ms = 120.0f;                       // 五类NDI抗晃动响应时间（毫秒）
         move_max_speed_cps = 3200.0f;                    // 五类NDI移动目标标准，解除jump远距帧限速
         move_integral_time_ms = 500.0f;                  // 五类NDI移动目标抗晃动标准，降低积分累积斜率
         aim_pipeline_mode = "legacy";                   // P0-0 默认保持 r30 正式输出
@@ -554,7 +554,7 @@ bool Config::loadConfig(const std::string& filename)
     fovY = get_long("fovY", 74);
     minSpeedMultiplier = (float)get_double("minSpeedMultiplier", 0.1);
     maxSpeedMultiplier = (float)get_double("maxSpeedMultiplier", 0.1);
-    move_response_ms = (float)get_double("move_response_ms", 80.0);
+    move_response_ms = (float)get_double("move_response_ms", 120.0);
     move_max_speed_cps = (float)get_double("move_max_speed_cps", 3200.0);
     move_integral_time_ms = (float)get_double("move_integral_time_ms", 500.0);
     aim_pipeline_mode = get_string("aim_pipeline_mode", "legacy");
