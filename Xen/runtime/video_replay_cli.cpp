@@ -63,6 +63,8 @@ namespace
         double settleRateDegreesPerSecond = 1.200;
         double reverseConfirmationSeconds = 0.080;
         double feedforwardGain = 0.0;
+        double reversalFeedforwardBoost = 0.0;
+        double reversalFeedforwardSeconds = 0.0;
         TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
         double trajectoryOutputHz = 240.0;
         double trajectoryMaxAccelerationCountsPerSecond2 = 60000.0;
@@ -226,6 +228,11 @@ namespace
             options.reverseConfirmationSeconds * 1000.0) / 1000.0;
         options.feedforwardGain = optionDouble(
             argc, argv, "--feedforward-gain", options.feedforwardGain);
+        options.reversalFeedforwardBoost = optionDouble(
+            argc, argv, "--reversal-ff-boost", options.reversalFeedforwardBoost);
+        options.reversalFeedforwardSeconds = optionDouble(
+            argc, argv, "--reversal-ff-ms",
+            options.reversalFeedforwardSeconds * 1000.0) / 1000.0;
         if (const auto mode = optionValue(argc, argv, "--trajectory-mode"))
             options.trajectoryMode = parseTrajectoryShaperMode(*mode);
         options.trajectoryOutputHz = optionDouble(
@@ -726,6 +733,8 @@ int Run(int argc, char** argv)
             settings.settleRateDegreesPerSecond = options.settleRateDegreesPerSecond;
             settings.reverseConfirmationSeconds = options.reverseConfirmationSeconds;
             settings.feedforwardGain = options.feedforwardGain;
+            settings.reversalFeedforwardBoost = options.reversalFeedforwardBoost;
+            settings.reversalFeedforwardSeconds = options.reversalFeedforwardSeconds;
             settings.trajectoryMode = options.trajectoryMode;
             settings.trajectoryOutputHz = options.trajectoryOutputHz;
             settings.trajectoryMaxAccelerationCountsPerSecond2 =
@@ -768,6 +777,14 @@ int Run(int argc, char** argv)
             decision << "FeedforwardGain="
                      << (std::isfinite(options.feedforwardGain)
                              ? std::clamp(options.feedforwardGain, 0.0, 2.0)
+                             : 0.0) << '\n'
+                     << "ReversalFeedforwardBoost="
+                     << (std::isfinite(options.reversalFeedforwardBoost)
+                             ? std::clamp(options.reversalFeedforwardBoost, 0.0, 2.0)
+                             : 0.0) << '\n'
+                     << "ReversalFeedforwardMs="
+                     << (std::isfinite(options.reversalFeedforwardSeconds)
+                             ? std::clamp(options.reversalFeedforwardSeconds, 0.0, 0.500) * 1000.0
                              : 0.0) << '\n'
                      << "TrajectoryMode="
                      << trajectoryShaperModeName(options.trajectoryMode) << '\n'

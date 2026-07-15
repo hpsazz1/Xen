@@ -142,6 +142,7 @@ struct MetricCollector
     size_t diagnosticSamples = 0;
     size_t settledSamples = 0;
     size_t reverseSuppressedSamples = 0;
+    size_t reversalFeedforwardSamples = 0;
     size_t verticalCatchUpSamples = 0;
     size_t trajectoryVelocityLimitedSamples = 0;
     size_t trajectoryAccelerationLimitedSamples = 0;
@@ -214,6 +215,11 @@ struct MetricCollector
         reverseSuppressedSamples += suppressed ? 1U : 0U;
     }
 
+    void addReversalFeedforward(bool active)
+    {
+        reversalFeedforwardSamples += active ? 1U : 0U;
+    }
+
     void addVerticalCatchUp(bool active)
     {
         verticalCatchUpSamples += active ? 1U : 0U;
@@ -246,6 +252,8 @@ struct MetricCollector
             result.settledPercent = 100.0 * settledSamples / diagnosticSamples;
             result.reverseSuppressedPercent =
                 100.0 * reverseSuppressedSamples / diagnosticSamples;
+            result.reversalFeedforwardPercent =
+                100.0 * reversalFeedforwardSamples / diagnosticSamples;
             result.verticalCatchUpPercent =
                 100.0 * verticalCatchUpSamples / diagnosticSamples;
         }
@@ -313,6 +321,12 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     comparison.feedforwardGain = std::isfinite(settings.feedforwardGain)
         ? std::clamp(settings.feedforwardGain, 0.0, 2.0)
         : 0.0;
+    comparison.reversalFeedforwardBoost =
+        std::isfinite(settings.reversalFeedforwardBoost)
+            ? std::clamp(settings.reversalFeedforwardBoost, 0.0, 2.0) : 0.0;
+    comparison.reversalFeedforwardSeconds =
+        std::isfinite(settings.reversalFeedforwardSeconds)
+            ? std::clamp(settings.reversalFeedforwardSeconds, 0.0, 0.500) : 0.0;
     comparison.trajectoryMode = settings.trajectoryMode;
     // 回放参数可能来自命令行；非有限值回退到生产默认频率，有限值再限制到可验证范围。
     comparison.trajectoryOutputHz = std::isfinite(settings.trajectoryOutputHz)
@@ -347,6 +361,10 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         settings.verticalCatchUpErrorDegrees;
     candidateSettings.maxCountsPerSecond = settings.maxCountsPerSecond;
     candidateSettings.feedforwardGain = comparison.feedforwardGain;
+    candidateSettings.reversalFeedforwardBoost =
+        comparison.reversalFeedforwardBoost;
+    candidateSettings.reversalFeedforwardSeconds =
+        comparison.reversalFeedforwardSeconds;
     candidateSettings.integralTimeSeconds = settings.integralTimeSeconds;
     candidateSettings.integralZoneDegrees = settings.integralZoneDegrees;
     candidateSettings.settleErrorDegrees = settings.settleErrorDegrees;
@@ -372,7 +390,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         std::filesystem::create_directories(frameCsv.parent_path());
         frames.open(frameCsv, std::ios::app);
         if (frames.tellp() == 0)
-            frames << "Scenario,Variant,TimeSeconds,Detected,TruthYaw,TruthPitch,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
+            frames << "Scenario,Variant,TimeSeconds,Detected,TruthYaw,TruthPitch,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
     }
 
     const double dt = 1.0 / std::clamp(variant.replayFps, 10.0, 1000.0);
@@ -594,6 +612,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             candidateOutput.settled, candidateOutput.settleReleased);
         candidateMetrics.addReverseSuppression(
             candidateOutput.lowSpeedReverseSuppressed);
+        candidateMetrics.addReversalFeedforward(
+            candidateOutput.reversalFeedforwardActive);
         candidateMetrics.addVerticalCatchUp(candidateOutput.verticalCatchUpActive);
         candidateMetrics.result.requestedCounts += std::hypot(
             candidateOutput.limitedCountsX, candidateOutput.limitedCountsY);
@@ -620,6 +640,9 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                    << candidateOutput.settleConfirmationSamples << ','
                    << (candidateOutput.lowSpeedReverseSuppressed ? 1 : 0) << ','
                    << (candidateOutput.verticalCatchUpActive ? 1 : 0) << ','
+                   << (candidateOutput.reversalDetected ? 1 : 0) << ','
+                   << (candidateOutput.reversalFeedforwardActive ? 1 : 0) << ','
+                   << candidateOutput.effectiveFeedforwardGainX << ','
                    << candidateOutput.reverseConfirmationSeconds << ','
                    << candidateOutput.effectiveResponseSecondsY << ','
                    << candidateOutput.feedbackCountsX << ','
@@ -697,12 +720,14 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,FeedforwardGain,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,FeedforwardGain,ReversalFeedforwardBoost,ReversalFeedforwardMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
         output << item.scenario << ',' << item.variant.name << ','
                << item.feedforwardGain << ','
+               << item.reversalFeedforwardBoost << ','
+               << item.reversalFeedforwardSeconds * 1000.0 << ','
                << trajectoryShaperModeName(item.trajectoryMode) << ','
                << item.trajectoryOutputHz << ',' << item.candidate.samples << ','
                << item.legacy.errorP50Degrees << ',' << item.legacy.errorP95Degrees << ','
@@ -718,6 +743,7 @@ void WriteSummary(const std::filesystem::path& path,
                << item.candidate.meanFeedforwardConfidence << ',' << item.candidate.requestedCounts << ','
                << item.candidate.shapedCounts << ',' << item.candidate.sentCounts << ','
                << item.candidate.feedforwardCounts << ','
+               << item.candidate.reversalFeedforwardPercent << ','
                << item.candidate.settledPercent << ',' << item.candidate.settleReleases << ','
                << item.candidate.reverseSuppressedPercent << ','
                << item.candidate.verticalCatchUpPercent << ','

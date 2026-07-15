@@ -63,7 +63,7 @@
 DML构建可使用同一批视频并行评价r30与新角度链。命令返回0表示全部门槛通过；返回3（部分Windows调用环境显示为非零）表示结果已完整生成但必须保持shadow：
 
 ```powershell
-build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video --video-model build\dml\Release\models\yolo12n_cs2.onnx --video-output C:\Users\16143\Desktop\Xen\Video\analysis_p0_5 --crop-x 1120 --crop-y 560 --crop-width 320 --crop-height 320 --inference-fps 94 --fov-x 106 --fov-y 74 --sensitivity 1.4 --yaw 0.022 --pitch 0.022 --response-ms 80 --max-cps 1440 --settle-error-deg 0.08 --settle-rate-dps 1.2 --reverse-confirm-ms 80 --vertical-catch-up-deg 0.8
+build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video --video-model build\dml\Release\models\yolo12n_cs2.onnx --video-output C:\Users\16143\Desktop\Xen\Video\analysis_p0_5 --crop-x 1120 --crop-y 560 --crop-width 320 --crop-height 320 --inference-fps 94 --fov-x 106 --fov-y 74 --sensitivity 1.4 --yaw 0.022 --pitch 0.022 --response-ms 80 --max-cps 1440 --settle-error-deg 0.08 --settle-rate-dps 1.2 --reverse-confirm-ms 80 --vertical-catch-up-deg 0.8 --feedforward-gain 0.16 --reversal-ff-boost 0.08 --reversal-ff-ms 80
 ```
 
 先查看`cross_domain_decision.txt`，再按`cross_domain_summary.csv`的`Scenario/Variant/Passed/Reason`定位单一失败模块；不要只挑通过变体调参。`cross_domain_frames.csv`只包含基准域逐帧诊断，全矩阵指标均在summary中。

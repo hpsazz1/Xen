@@ -381,6 +381,54 @@ int main()
     expectTrue(!insignificantVerticalError.verticalCatchUpActive,
                "minor vertical residual cannot steal budget from unidirectional tracking");
 
+    LosAimController reversalFeedforwardController;
+    LosAimController::Settings reversalFeedforwardSettings = settleSettings;
+    reversalFeedforwardSettings.feedforwardGain = 0.16;
+    reversalFeedforwardSettings.reversalFeedforwardBoost = 0.08;
+    reversalFeedforwardSettings.reversalFeedforwardSeconds = 0.080;
+    LosAimController::Input reversalFeedforwardInput = losInput;
+    reversalFeedforwardInput.relativeLosRateDegreesPerSecondX = 2.0;
+    const auto initialMovingDirection = reversalFeedforwardController.update(
+        reversalFeedforwardInput, reversalFeedforwardSettings);
+    expectTrue(!initialMovingDirection.reversalDetected &&
+               !initialMovingDirection.reversalFeedforwardActive,
+               "initial reliable movement establishes direction without a false reversal");
+    reversalFeedforwardInput.relativeLosRateDegreesPerSecondX = -2.0;
+    const auto reliableReversal = reversalFeedforwardController.update(
+        reversalFeedforwardInput, reversalFeedforwardSettings);
+    expectTrue(reliableReversal.reversalDetected &&
+               reliableReversal.reversalFeedforwardActive,
+               "reliable horizontal rate sign change activates reversal feedforward");
+    expectNear(reliableReversal.effectiveFeedforwardGainX, 0.24, 1e-12,
+               "reversal feedforward adds its bounded gain only on the horizontal axis");
+    for (int sample = 0; sample < 7; ++sample)
+    {
+        const auto activeWindow = reversalFeedforwardController.update(
+            reversalFeedforwardInput, reversalFeedforwardSettings);
+        expectTrue(activeWindow.reversalFeedforwardActive,
+                   "reversal feedforward remains active for the configured real-time window");
+    }
+    const auto afterReversalWindow = reversalFeedforwardController.update(
+        reversalFeedforwardInput, reversalFeedforwardSettings);
+    expectTrue(!afterReversalWindow.reversalFeedforwardActive &&
+               afterReversalWindow.effectiveFeedforwardGainX == 0.16,
+               "reversal feedforward returns to the baseline gain after the window");
+
+    LosAimController lowRateReversalController;
+    lowRateReversalController.update(reversalFeedforwardInput, reversalFeedforwardSettings);
+    reversalFeedforwardInput.relativeLosRateDegreesPerSecondX = 0.79;
+    const auto lowRateSignNoise = lowRateReversalController.update(
+        reversalFeedforwardInput, reversalFeedforwardSettings);
+    expectTrue(!lowRateSignNoise.reversalDetected &&
+               !lowRateSignNoise.reversalFeedforwardActive,
+               "sub-settle-rate sign noise cannot activate reversal feedforward");
+    lowRateReversalController.reset();
+    reversalFeedforwardInput.relativeLosRateDegreesPerSecondX = 2.0;
+    const auto firstDirectionAfterReset = lowRateReversalController.update(
+        reversalFeedforwardInput, reversalFeedforwardSettings);
+    expectTrue(!firstDirectionAfterReset.reversalDetected,
+               "controller reset clears the accepted moving direction");
+
     losSettings.feedforwardGain = 1.0;
     losSettings.leadHorizonSeconds = 0.050;
     losSettings.leadStrength = 1.0;

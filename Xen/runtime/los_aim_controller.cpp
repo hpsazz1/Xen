@@ -104,6 +104,8 @@ LosAimController::Output LosAimController::update(
         pendingReverseX_ = 0.0;
         pendingReverseY_ = 0.0;
         pendingReverseSeconds_ = 0.0;
+        acceptedMovingRateSignX_ = 0;
+        reversalFeedforwardRemainingSeconds_ = 0.0;
         output.valid = true;
         output.frameCountLimit = maxCountsPerSecond * dt;
         return output;
@@ -119,8 +121,47 @@ LosAimController::Output LosAimController::update(
     // confidence 只缩放前馈和提前参考，低可信时 P 反馈仍可把准星拉回目标。
     const double feedforwardGain =
         clampFinite(settings.feedforwardGain, 0.0, 2.0, 0.0);
+    const double reversalFeedforwardBoost =
+        clampFinite(settings.reversalFeedforwardBoost, 0.0, 2.0, 0.0);
+    const double reversalFeedforwardSeconds =
+        clampFinite(settings.reversalFeedforwardSeconds, 0.0, 0.500, 0.0);
+    double effectiveFeedforwardGainX = feedforwardGain;
+    if (reversalFeedforwardBoost > 0.0 && reversalFeedforwardSeconds > 0.0 &&
+        settleRate > 0.0)
+    {
+        // 仅把超过静止速率边界的符号变化视为真实换向；低速估计抖动不会刷新方向。
+        // 事件窗口按真实时间递减，使 60/94/144 FPS 下的额外前馈持续时间一致。
+        const double movingRateThreshold = settleRate;
+        const double rateX = input.relativeLosRateDegreesPerSecondX;
+        const int movingRateSignX = std::abs(rateX) >= movingRateThreshold
+            ? ((rateX > 0.0) - (rateX < 0.0)) : 0;
+        if (movingRateSignX != 0)
+        {
+            if (acceptedMovingRateSignX_ != 0 &&
+                movingRateSignX != acceptedMovingRateSignX_)
+            {
+                reversalFeedforwardRemainingSeconds_ = reversalFeedforwardSeconds;
+                output.reversalDetected = true;
+            }
+            acceptedMovingRateSignX_ = movingRateSignX;
+        }
+        if (reversalFeedforwardRemainingSeconds_ > 0.0)
+        {
+            output.reversalFeedforwardActive = true;
+            effectiveFeedforwardGainX = std::min(
+                2.0, feedforwardGain + reversalFeedforwardBoost);
+            reversalFeedforwardRemainingSeconds_ = std::max(
+                0.0, reversalFeedforwardRemainingSeconds_ - dt);
+        }
+    }
+    else
+    {
+        acceptedMovingRateSignX_ = 0;
+        reversalFeedforwardRemainingSeconds_ = 0.0;
+    }
+    output.effectiveFeedforwardGainX = effectiveFeedforwardGainX;
     output.trackingFeedforwardCountsX =
-        input.relativeLosRateDegreesPerSecondX * dt * feedforwardGain * confidence /
+        input.relativeLosRateDegreesPerSecondX * dt * effectiveFeedforwardGainX * confidence /
         input.degreesPerCountX;
     output.trackingFeedforwardCountsY =
         input.relativeLosRateDegreesPerSecondY * dt * feedforwardGain * confidence /
@@ -273,6 +314,8 @@ void LosAimController::reset()
     pendingReverseX_ = 0.0;
     pendingReverseY_ = 0.0;
     pendingReverseSeconds_ = 0.0;
+    acceptedMovingRateSignX_ = 0;
+    reversalFeedforwardRemainingSeconds_ = 0.0;
     integralErrorDegreeSecondsX_ = 0.0;
     integralErrorDegreeSecondsY_ = 0.0;
 }

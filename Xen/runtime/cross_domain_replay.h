@@ -50,6 +50,8 @@ struct ControllerSettings
     double degreesPerCountX = 0.0308;
     double degreesPerCountY = 0.0308;
     double feedforwardGain = 0.0;
+    double reversalFeedforwardBoost = 0.0;
+    double reversalFeedforwardSeconds = 0.0;
     double integralTimeSeconds = 0.0;
     double integralZoneDegrees = 1.0;
     double settleErrorDegrees = 0.080;
@@ -83,6 +85,7 @@ struct Metrics
     double shapedCounts = 0.0;
     double sentCounts = 0.0;
     double feedforwardCounts = 0.0;
+    double reversalFeedforwardPercent = 0.0;
     double settledPercent = 0.0;
     size_t settleReleases = 0;
     double reverseSuppressedPercent = 0.0;
@@ -98,6 +101,8 @@ struct Comparison
     std::string scenario;
     Variant variant{};
     double feedforwardGain = 0.0;
+    double reversalFeedforwardBoost = 0.0;
+    double reversalFeedforwardSeconds = 0.0;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
     double trajectoryOutputHz = 0.0;
     Metrics legacy{};
