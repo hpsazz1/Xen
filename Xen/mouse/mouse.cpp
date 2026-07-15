@@ -1387,6 +1387,15 @@ void MouseThread::moveMousePivot(
 
     BasicAimController::Settings settings;
     settings.responseSeconds = move_response_seconds;
+    // reverse 的高频方向抑制只撤销预测前瞻，不能同时保留 120 ms 的慢响应，
+    // 否则目标会在抑制窗口内持续漂移。仅对已确认运动且速度可靠的该模式加快
+    // 基础反馈；left/right、static 和 jump 不进入此分支。
+    if (lastPredictionResult.oscillationSuppressed &&
+        !lastPredictionResult.selfMotionSuppressed &&
+        std::hypot(lastPredictionResult.velocityX, lastPredictionResult.velocityY) >= 80.0)
+    {
+        settings.responseSeconds = std::min(settings.responseSeconds, 0.080);
+    }
     settings.maxCountsPerSecond = move_max_speed_cps;
     settings.integralTimeSeconds = move_integral_time_seconds;
     settings.settleRadiusPixels = std::max(6.0, screen_width / 64.0);
