@@ -179,7 +179,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "AimPipelineAngleX,AimPipelineAngleY,AimPipelineRateX,AimPipelineRateY,AimPipelineCovarianceX,AimPipelineCovarianceY,"
          << "AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY,"
          << "AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence,"
-         << "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,"
+         << "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples,"
          << "AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadReferenceX,AimPipelineLeadReferenceY,"
          << "AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY,"
          << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit,"
@@ -258,6 +258,9 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << (ap.control.valid ? '1' : '0') << ','
              << (ap.control.speedLimited ? '1' : '0') << ','
              << (ap.control.integralFrozen ? '1' : '0') << ','
+             << (ap.control.settled ? '1' : '0') << ','
+             << (ap.control.settleReleased ? '1' : '0') << ','
+             << ap.control.settleConfirmationSamples << ','
              << ap.control.feedbackX << ',' << ap.control.feedbackY << ','
              << ap.control.trackingFeedforwardX << ',' << ap.control.trackingFeedforwardY << ','
              << ap.control.leadReferenceX << ',' << ap.control.leadReferenceY << ','

@@ -108,6 +108,10 @@ int main()
                    "shadow angle controller defaults to the P-only response baseline");
         expectNear(defaults.aim_shadow_feedforward_gain, 0.0, 0.0,
                    "shadow velocity feedforward remains disabled by default");
+        expectNear(defaults.aim_shadow_settle_error_deg, 0.08, 1e-6,
+                   "shadow settle uses the replay-derived angular error threshold");
+        expectNear(defaults.aim_shadow_settle_rate_dps, 1.2, 1e-6,
+                   "shadow settle uses the replay-derived relative LOS rate threshold");
         expectNear(defaults.aim_shadow_integral_time_ms, 0.0, 0.0,
                    "shadow angle integral remains disabled by default");
         expectNear(defaults.aim_shadow_lead_horizon_ms, 0.0, 0.0,
@@ -183,6 +187,8 @@ int main()
         expectTrue(migratedText.find("aim_shadow_command_to_frame_delay_ms = 60") != std::string::npos,
                    "saved config persists the explicit shadow delay");
         expectTrue(migratedText.find("aim_shadow_feedforward_gain = 0") != std::string::npos &&
+                   migratedText.find("aim_shadow_settle_error_deg = 0.08") != std::string::npos &&
+                   migratedText.find("aim_shadow_settle_rate_dps = 1.2") != std::string::npos &&
                    migratedText.find("aim_shadow_integral_time_ms = 0") != std::string::npos &&
                    migratedText.find("aim_shadow_lead_horizon_ms = 0") != std::string::npos,
                    "saved config persists independently disabled P0-4A controller terms");
@@ -251,6 +257,8 @@ int main()
             << "aim_shadow_response_ms = 1\n"
             << "aim_shadow_max_speed_cps = 9999\n"
             << "aim_shadow_feedforward_gain = 9\n"
+            << "aim_shadow_settle_error_deg = 9\n"
+            << "aim_shadow_settle_rate_dps = 99\n"
             << "aim_shadow_integral_time_ms = 1\n"
             << "aim_shadow_integral_zone_deg = 99\n"
             << "aim_shadow_lead_horizon_ms = 999\n"
@@ -265,6 +273,10 @@ int main()
                "shadow speed uses the device safety bound");
     expectNear(clampedShadowController.aim_shadow_feedforward_gain, 2.0, 0.0,
                "shadow feedforward gain remains bounded");
+    expectNear(clampedShadowController.aim_shadow_settle_error_deg, 1.0, 0.0,
+               "shadow settle error remains bounded");
+    expectNear(clampedShadowController.aim_shadow_settle_rate_dps, 20.0, 0.0,
+               "shadow settle rate remains bounded");
     expectNear(clampedShadowController.aim_shadow_integral_time_ms, 50.0, 0.0,
                "nonzero shadow integral time uses a stable minimum");
     expectNear(clampedShadowController.aim_shadow_integral_zone_deg, 10.0, 0.0,

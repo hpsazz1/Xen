@@ -140,6 +140,7 @@ struct MetricCollector
     double covarianceSum = 0.0;
     double confidenceSum = 0.0;
     size_t diagnosticSamples = 0;
+    size_t settledSamples = 0;
     Metrics result;
 
     void addError(double errorX, double errorY, double halfBoxX, double halfBoxY, bool late)
@@ -197,6 +198,12 @@ struct MetricCollector
         ++diagnosticSamples;
     }
 
+    void addSettle(bool settled, bool released)
+    {
+        settledSamples += settled ? 1U : 0U;
+        result.settleReleases += released ? 1U : 0U;
+    }
+
     Metrics finish()
     {
         result.samples = errors.size();
@@ -213,6 +220,7 @@ struct MetricCollector
             result.meanNis = nisSum / diagnosticSamples;
             result.meanCovariance = covarianceSum / diagnosticSamples;
             result.meanFeedforwardConfidence = confidenceSum / diagnosticSamples;
+            result.settledPercent = 100.0 * settledSamples / diagnosticSamples;
         }
         return result;
     }
@@ -306,6 +314,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     candidateSettings.feedforwardGain = settings.feedforwardGain;
     candidateSettings.integralTimeSeconds = settings.integralTimeSeconds;
     candidateSettings.integralZoneDegrees = settings.integralZoneDegrees;
+    candidateSettings.settleErrorDegrees = settings.settleErrorDegrees;
+    candidateSettings.settleRateDegreesPerSecond = settings.settleRateDegreesPerSecond;
     CommandTrajectoryShaper shaper;
     CommandTrajectoryShaper::Settings shaperSettings;
     shaperSettings.mode = TrajectoryShaperMode::Off;
@@ -322,7 +332,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         std::filesystem::create_directories(frameCsv.parent_path());
         frames.open(frameCsv, std::ios::app);
         if (frames.tellp() == 0)
-            frames << "Scenario,Variant,TimeSeconds,Detected,TruthYaw,TruthPitch,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
+            frames << "Scenario,Variant,TimeSeconds,Detected,TruthYaw,TruthPitch,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
     }
 
     const double dt = 1.0 / std::clamp(variant.replayFps, 10.0, 1000.0);
@@ -473,6 +483,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             truthRateX, truthRateY, std::max(estimate.x.nis, estimate.y.nis),
             std::max(estimate.x.angleVariance, estimate.y.angleVariance),
             estimate.feedforwardConfidence);
+        candidateMetrics.addSettle(
+            candidateOutput.settled, candidateOutput.settleReleased);
         candidateMetrics.result.requestedCounts += std::hypot(
             candidateOutput.limitedCountsX, candidateOutput.limitedCountsY);
         candidateMetrics.result.feedforwardCounts += std::hypot(
@@ -492,7 +504,9 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                    << estimate.y.rateDegreesPerSecond << ',' << estimate.x.innovationDegrees << ','
                    << estimate.y.innovationDegrees << ',' << estimate.x.nis << ',' << estimate.y.nis << ','
                    << estimate.x.angleVariance << ',' << estimate.y.angleVariance << ','
-                   << estimate.feedforwardConfidence << ',' << candidateOutput.feedbackCountsX << ','
+                   << estimate.feedforwardConfidence << ',' << (candidateOutput.settled ? 1 : 0) << ','
+                   << (candidateOutput.settleReleased ? 1 : 0) << ','
+                   << candidateOutput.settleConfirmationSamples << ',' << candidateOutput.feedbackCountsX << ','
                    << candidateOutput.feedbackCountsY << ',' << candidateOutput.trackingFeedforwardCountsX << ','
                    << candidateOutput.trackingFeedforwardCountsY << ',' << candidateOutput.leadCountsX << ','
                    << candidateOutput.leadCountsY << ',' << candidateOutput.integralCountsX << ','
@@ -567,7 +581,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,Passed,Reason\n";
+    output << "Scenario,Variant,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,SettledPercent,SettleReleases,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -585,6 +599,7 @@ void WriteSummary(const std::filesystem::path& path,
                << item.candidate.meanFeedforwardConfidence << ',' << item.candidate.requestedCounts << ','
                << item.candidate.shapedCounts << ',' << item.candidate.sentCounts << ','
                << item.candidate.feedforwardCounts << ','
+               << item.candidate.settledPercent << ',' << item.candidate.settleReleases << ','
                << (item.passed ? 1 : 0) << ',' << item.reason << '\n';
     }
 }

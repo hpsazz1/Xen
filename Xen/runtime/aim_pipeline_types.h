@@ -149,6 +149,9 @@ struct AimControlBreakdown
     bool valid = false;
     bool speedLimited = false;
     bool integralFrozen = false;
+    bool settled = false;
+    bool settleReleased = false;
+    int settleConfirmationSamples = 0;
     double feedbackX = 0.0;
     double feedbackY = 0.0;
     double trackingFeedforwardX = 0.0;

@@ -42,6 +42,7 @@
 | [P0-4A角度控制器拆分](073P0-4A角度控制器拆分20260715.md) | 了解新链路如何分离角反馈、速度前馈、角度积分与经验提前参考。 |
 | [P0-4B确定性轨迹执行层](074P0-4B确定性轨迹执行层20260715.md) | 了解pass-through、固定周期调度、二维运动约束和整数余量语义。 |
 | [P0-5跨域回放首轮阻断](075P0-5跨域回放首轮阻断20260715.md) | 运行同帧r30/候选跨域矩阵并根据硬门槛判断是否保持shadow。 |
+| [P0-5静止角度回差复验](076P0-5静止角度回差复验20260715.md) | 了解角误差与相对LOS速率回差的选型、阈值扫描和剩余阻断。 |
 | [稳健常速度预测与实机振荡排查](034稳健常速度预测与实机振荡排查20260714.md) | 了解首轮实机预测振荡根因、场景边界和r8稳健速度模型。 |
 | [预测连续性保持与单帧门控修复](035预测连续性保持与单帧门控修复20260714.md) | 分析r8提前量频繁中断原因，以及r9窗口级停止和反向确认。 |
 | [透视坐标修正与jump视野逃逸优化](036透视坐标修正与jump视野逃逸优化20260714.md) | 分析r9静止误补偿和jump飞出320裁剪的共同坐标根因。 |
@@ -57,7 +58,7 @@
 DML构建可使用同一批视频并行评价r30与新角度链。命令返回0表示全部门槛通过；返回3（部分Windows调用环境显示为非零）表示结果已完整生成但必须保持shadow：
 
 ```powershell
-build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video --video-model build\dml\Release\models\yolo12n_cs2.onnx --video-output C:\Users\16143\Desktop\Xen\Video\analysis_p0_5 --crop-x 1120 --crop-y 560 --crop-width 320 --crop-height 320 --inference-fps 94 --fov-x 106 --fov-y 74 --sensitivity 1.4 --yaw 0.022 --pitch 0.022 --response-ms 80 --max-cps 1440
+build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video --video-model build\dml\Release\models\yolo12n_cs2.onnx --video-output C:\Users\16143\Desktop\Xen\Video\analysis_p0_5 --crop-x 1120 --crop-y 560 --crop-width 320 --crop-height 320 --inference-fps 94 --fov-x 106 --fov-y 74 --sensitivity 1.4 --yaw 0.022 --pitch 0.022 --response-ms 80 --max-cps 1440 --settle-error-deg 0.08 --settle-rate-dps 1.2
 ```
 
 先查看`cross_domain_decision.txt`，再按`cross_domain_summary.csv`的`Scenario/Variant/Passed/Reason`定位单一失败模块；不要只挑通过变体调参。`cross_domain_frames.csv`只包含基准域逐帧诊断，全矩阵指标均在summary中。

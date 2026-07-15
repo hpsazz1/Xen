@@ -276,6 +276,39 @@ int main()
     expectNear(pOnlyOutput.leadReferenceDegreesX, 0.0, 0.0,
                "zero lead horizon does not create artificial lead");
 
+    LosAimController settleController;
+    LosAimController::Settings settleSettings;
+    settleSettings.responseSeconds = 0.100;
+    settleSettings.maxCountsPerSecond = 10000.0;
+    settleSettings.settleErrorDegrees = 0.080;
+    settleSettings.settleRateDegreesPerSecond = 0.800;
+    LosAimController::Input quietInput = losInput;
+    quietInput.errorDegreesX = 0.050;
+    quietInput.errorDegreesY = 0.0;
+    quietInput.relativeLosRateDegreesPerSecondX = 0.40;
+    quietInput.relativeLosRateDegreesPerSecondY = 0.0;
+    const auto firstQuiet = settleController.update(quietInput, settleSettings);
+    const auto confirmedQuiet = settleController.update(quietInput, settleSettings);
+    expectTrue(!firstQuiet.settled && firstQuiet.settleConfirmationSamples == 1 &&
+               confirmedQuiet.settled && confirmedQuiet.settleConfirmationSamples == 2,
+               "angle settle requires two consecutive quiet observations");
+    expectNear(confirmedQuiet.limitedCountsX, 0.0, 0.0,
+               "settled angle controller suppresses sub-count static pulses");
+    quietInput.errorDegreesX = 0.10;
+    quietInput.relativeLosRateDegreesPerSecondX = 1.0;
+    const auto insideHysteresis = settleController.update(quietInput, settleSettings);
+    expectTrue(insideHysteresis.settled && !insideHysteresis.settleReleased,
+               "angle settle remains latched inside the fixed 1.5x release band");
+    quietInput.relativeLosRateDegreesPerSecondX = 1.21;
+    const auto movingRelease = settleController.update(quietInput, settleSettings);
+    expectTrue(!movingRelease.settled && movingRelease.settleReleased &&
+               movingRelease.limitedCountsX > 0.0,
+               "real LOS motion beyond the release rate resumes feedback in the same frame");
+    settleController.reset();
+    const auto quietAfterReset = settleController.update(quietInput, settleSettings);
+    expectTrue(!quietAfterReset.settled && quietAfterReset.settleConfirmationSamples == 0,
+               "controller reset clears the settle latch and confirmation history");
+
     losSettings.feedforwardGain = 1.0;
     losSettings.leadHorizonSeconds = 0.050;
     losSettings.leadStrength = 1.0;
@@ -843,7 +876,7 @@ int main()
         traceHeader.find("AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence") != std::string::npos,
         "basic pipeline records relative LOS Kalman diagnostics");
     expectTrue(traceHeader.find(
-        "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen") != std::string::npos &&
+        "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples") != std::string::npos &&
         traceHeader.find("AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY") != std::string::npos &&
         traceHeader.find("AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY") != std::string::npos &&
         traceHeader.find("AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit") != std::string::npos,

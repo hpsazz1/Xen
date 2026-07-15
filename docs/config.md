@@ -119,6 +119,8 @@ capture_fps = 60
 | `aim_shadow_response_ms` | `80` | P0-4A角误差P反馈响应时间，范围10~500 ms；按真实控制周期使用指数离散响应。 |
 | `aim_shadow_max_speed_cps` | `1440` | P0-4A全部控制分量合成后的二维速度上限，范围30~4000 counts/s。 |
 | `aim_shadow_feedforward_gain` | `0` | 相对视线角速度前馈增益，范围0~2；默认关闭，且始终受检测置信度与NIS形成的前馈可信度缩放。 |
+| `aim_shadow_settle_error_deg` | `0.08` | P0-5静止回差的二维角误差进入阈值，范围0~1°；0关闭。与角速率连续两个观测同时满足才锁存，退出阈值固定为1.5倍。 |
+| `aim_shadow_settle_rate_dps` | `1.2` | P0-5静止回差的相对LOS速率进入阈值，范围0~20°/s；0关闭。真实运动超过1.5倍阈值时当帧恢复控制。 |
 | `aim_shadow_integral_time_ms` | `0` | 角度PI积分时间，范围0~2000 ms；0为关闭，非零最小50 ms。 |
 | `aim_shadow_integral_zone_deg` | `1` | I-zone绝对角误差范围，范围0~10°；区间外清空积分，饱和时冻结候选。 |
 | `aim_shadow_lead_horizon_ms` | `0` | 独立经验提前时域，范围0~250 ms；默认关闭，不与速度前馈混用。 |

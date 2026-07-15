@@ -34,6 +34,54 @@ LosAimController::Output LosAimController::update(
         clampFinite(input.feedforwardConfidence, 0.0, 1.0, 0.0);
     const double responseFraction = 1.0 - std::exp(-dt / response);
 
+    // 静止锁存同时要求二维角误差和相对LOS速率安静，避免把正在穿越准星的
+    // 真实目标仅因瞬时误差很小而停住。退出阈值固定为进入阈值的1.5倍，
+    // 形成Schmitt回差；连续两个观测才进入，但越过退出阈值时当帧恢复。
+    const double settleError = clampFinite(
+        settings.settleErrorDegrees, 0.0, 1.0, 0.0);
+    const double settleRate = clampFinite(
+        settings.settleRateDegreesPerSecond, 0.0, 20.0, 0.0);
+    const bool settleEnabled = settleError > 0.0 && settleRate > 0.0;
+    const double errorMagnitude = std::hypot(input.errorDegreesX, input.errorDegreesY);
+    const double rateMagnitude = std::hypot(
+        input.relativeLosRateDegreesPerSecondX,
+        input.relativeLosRateDegreesPerSecondY);
+    if (!settleEnabled)
+    {
+        settled_ = false;
+        quietSamples_ = 0;
+    }
+    else if (settled_)
+    {
+        if (errorMagnitude > settleError * 1.5 || rateMagnitude > settleRate * 1.5)
+        {
+            settled_ = false;
+            quietSamples_ = 0;
+            output.settleReleased = true;
+        }
+    }
+    else if (errorMagnitude <= settleError && rateMagnitude <= settleRate)
+    {
+        quietSamples_ = std::min(quietSamples_ + 1, 2);
+        settled_ = quietSamples_ >= 2;
+    }
+    else
+    {
+        quietSamples_ = 0;
+    }
+    output.settled = settled_;
+    output.settleConfirmationSamples = quietSamples_;
+    if (settled_)
+    {
+        // 静止期间所有控制分量和积分历史都归零；以后启用前馈或积分时也不能
+        // 通过隐藏分量继续形成亚count反向脉冲。
+        integralErrorDegreeSecondsX_ = 0.0;
+        integralErrorDegreeSecondsY_ = 0.0;
+        output.valid = true;
+        output.frameCountLimit = maxCountsPerSecond * dt;
+        return output;
+    }
+
     // 基础 P 只纠正控制时刻的角误差；相对视线角速度不允许混入误差 D 项。
     output.feedbackCountsX =
         input.errorDegreesX * responseFraction / input.degreesPerCountX;
@@ -70,7 +118,9 @@ LosAimController::Output LosAimController::update(
     double candidateIntegralY = integralErrorDegreeSecondsY_;
     if (integralTime <= 0.0 || integralZone <= 0.0)
     {
-        reset();
+        // 积分关闭只清积分历史，不能连带清除独立的静止回差状态。
+        integralErrorDegreeSecondsX_ = 0.0;
+        integralErrorDegreeSecondsY_ = 0.0;
     }
     else
     {
@@ -138,6 +188,8 @@ LosAimController::Output LosAimController::update(
 
 void LosAimController::reset()
 {
+    settled_ = false;
+    quietSamples_ = 0;
     integralErrorDegreeSecondsX_ = 0.0;
     integralErrorDegreeSecondsY_ = 0.0;
 }

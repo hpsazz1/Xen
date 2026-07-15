@@ -16,6 +16,8 @@ public:
         double integralOutputRatio = 0.25;
         double leadHorizonSeconds = 0.0;
         double leadStrength = 0.0;
+        double settleErrorDegrees = 0.080;
+        double settleRateDegreesPerSecond = 1.200;
     };
 
     struct Input
@@ -36,6 +38,9 @@ public:
         bool valid = false;
         bool speedLimited = false;
         bool integralFrozen = false;
+        bool settled = false;
+        bool settleReleased = false;
+        int settleConfirmationSamples = 0;
         double feedbackCountsX = 0.0;
         double feedbackCountsY = 0.0;
         double trackingFeedforwardCountsX = 0.0;
@@ -57,6 +62,8 @@ public:
     void reset();
 
 private:
+    bool settled_ = false;
+    int quietSamples_ = 0;
     double integralErrorDegreeSecondsX_ = 0.0;
     double integralErrorDegreeSecondsY_ = 0.0;
 };

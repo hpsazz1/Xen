@@ -28,6 +28,8 @@ foreach ($control in @(
     '##shadow_response_ms',
     '##shadow_max_cps',
     '##shadow_ff_gain',
+    '##shadow_settle_error',
+    '##shadow_settle_rate',
     '##shadow_integral_ms',
     '##shadow_integral_zone',
     '##shadow_lead_horizon',

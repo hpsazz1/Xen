@@ -57,6 +57,8 @@ namespace
         double fovX = 106.0;
         double fovY = 74.0;
         bool crossDomain = false;
+        double settleErrorDegrees = 0.080;
+        double settleRateDegreesPerSecond = 1.200;
     };
 
     struct ScenarioTrajectory
@@ -204,6 +206,10 @@ namespace
         options.pitch = optionDouble(argc, argv, "--pitch", options.pitch);
         options.fovX = optionDouble(argc, argv, "--fov-x", options.fovX);
         options.fovY = optionDouble(argc, argv, "--fov-y", options.fovY);
+        options.settleErrorDegrees = optionDouble(
+            argc, argv, "--settle-error-deg", options.settleErrorDegrees);
+        options.settleRateDegreesPerSecond = optionDouble(
+            argc, argv, "--settle-rate-dps", options.settleRateDegreesPerSecond);
         if (const auto ages = optionValue(argc, argv, "--observation-ages-ms"))
         {
             const auto parsed = parseDoubleList(*ages);
@@ -688,6 +694,8 @@ int Run(int argc, char** argv)
             settings.legacyPredictionStrength = 1.0;
             settings.degreesPerCountX = options.sensitivity * options.yaw;
             settings.degreesPerCountY = options.sensitivity * options.pitch;
+            settings.settleErrorDegrees = options.settleErrorDegrees;
+            settings.settleRateDegreesPerSecond = options.settleRateDegreesPerSecond;
             const auto framePath = options.outputRoot / "cross_domain_frames.csv";
             std::error_code removeError;
             std::filesystem::remove(framePath, removeError);

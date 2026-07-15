@@ -50,6 +50,8 @@ struct ControllerSettings
     double feedforwardGain = 0.0;
     double integralTimeSeconds = 0.0;
     double integralZoneDegrees = 1.0;
+    double settleErrorDegrees = 0.080;
+    double settleRateDegreesPerSecond = 1.200;
 };
 
 struct Metrics
@@ -74,6 +76,8 @@ struct Metrics
     double shapedCounts = 0.0;
     double sentCounts = 0.0;
     double feedforwardCounts = 0.0;
+    double settledPercent = 0.0;
+    size_t settleReleases = 0;
 };
 
 struct Comparison

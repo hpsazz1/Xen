@@ -161,6 +161,9 @@ void AimPipelineRuntime::setViewMotionDiagnostics(
     frame_.control.valid = control.valid;
     frame_.control.speedLimited = control.speedLimited;
     frame_.control.integralFrozen = control.integralFrozen;
+    frame_.control.settled = control.settled;
+    frame_.control.settleReleased = control.settleReleased;
+    frame_.control.settleConfirmationSamples = control.settleConfirmationSamples;
     frame_.control.feedbackX = control.feedbackCountsX;
     frame_.control.feedbackY = control.feedbackCountsY;
     frame_.control.trackingFeedforwardX = control.trackingFeedforwardCountsX;

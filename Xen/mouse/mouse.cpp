@@ -87,6 +87,8 @@ MouseThread::MouseThread(
         shadowControllerSettings.responseSeconds = config.aim_shadow_response_ms / 1000.0;
         shadowControllerSettings.maxCountsPerSecond = config.aim_shadow_max_speed_cps;
         shadowControllerSettings.feedforwardGain = config.aim_shadow_feedforward_gain;
+        shadowControllerSettings.settleErrorDegrees = config.aim_shadow_settle_error_deg;
+        shadowControllerSettings.settleRateDegreesPerSecond = config.aim_shadow_settle_rate_dps;
         shadowControllerSettings.integralTimeSeconds = config.aim_shadow_integral_time_ms / 1000.0;
         shadowControllerSettings.integralZoneDegrees = config.aim_shadow_integral_zone_deg;
         shadowControllerSettings.leadHorizonSeconds = config.aim_shadow_lead_horizon_ms / 1000.0;
@@ -152,6 +154,8 @@ void MouseThread::updateConfig(
     shadowControllerSettings.responseSeconds = config.aim_shadow_response_ms / 1000.0;
     shadowControllerSettings.maxCountsPerSecond = config.aim_shadow_max_speed_cps;
     shadowControllerSettings.feedforwardGain = config.aim_shadow_feedforward_gain;
+    shadowControllerSettings.settleErrorDegrees = config.aim_shadow_settle_error_deg;
+    shadowControllerSettings.settleRateDegreesPerSecond = config.aim_shadow_settle_rate_dps;
     shadowControllerSettings.integralTimeSeconds = config.aim_shadow_integral_time_ms / 1000.0;
     shadowControllerSettings.integralZoneDegrees = config.aim_shadow_integral_zone_deg;
     shadowControllerSettings.leadHorizonSeconds = config.aim_shadow_lead_horizon_ms / 1000.0;
