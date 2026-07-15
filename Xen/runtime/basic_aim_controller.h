@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 37;
+inline constexpr int kBasicAimControllerRevision = 38;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -179,15 +179,38 @@ public:
         out.countsY = proportionalCountsY + out.integralCountsY;
         // 中心附近的 ±1/±2 counts 反向脉冲属于量化抖动，不应让设备在
         // 两侧来回扫动；大于该阈值的真实 reverse/jump 修正保持原样。
-        constexpr double kSmallReverseCounts = 2.0;
-        if (std::abs(errorX) <= releaseRadius &&
-            out.countsX * previousOutputX_ < 0.0 &&
-            std::abs(out.countsX) <= kSmallReverseCounts)
-            out.countsX = 0.0;
-        if (std::abs(errorY) <= releaseRadius &&
-            out.countsY * previousOutputY_ < 0.0 &&
-            std::abs(out.countsY) <= kSmallReverseCounts)
-            out.countsY = 0.0;
+        constexpr double kSmallReverseCounts = 4.0;
+        constexpr int kReverseConfirmationFrames = 2;
+        const auto suppressUnconfirmedReverse = [releaseRadius, kSmallReverseCounts,
+                                                  kReverseConfirmationFrames]
+            (double& output, double error, double previousOutput,
+             double& candidate, int& candidateFrames)
+        {
+            if (std::abs(error) > releaseRadius || previousOutput == 0.0 ||
+                output * previousOutput >= 0.0 ||
+                std::abs(output) > kSmallReverseCounts)
+            {
+                candidate = 0.0;
+                candidateFrames = 0;
+                return;
+            }
+            if (candidate * output < 0.0 || candidate == 0.0)
+                candidateFrames = 1;
+            else
+                ++candidateFrames;
+            candidate = output;
+            if (candidateFrames < kReverseConfirmationFrames)
+                output = 0.0;
+            else
+            {
+                candidate = 0.0;
+                candidateFrames = 0;
+            }
+        };
+        suppressUnconfirmedReverse(
+            out.countsX, errorX, previousOutputX_, pendingReverseX_, pendingReverseFramesX_);
+        suppressUnconfirmedReverse(
+            out.countsY, errorY, previousOutputY_, pendingReverseY_, pendingReverseFramesY_);
         out.requestedPixelX = std::abs(countsPerPixelX) > 1e-12
             ? out.countsX / countsPerPixelX : 0.0;
         out.requestedPixelY = std::abs(countsPerPixelY) > 1e-12
@@ -212,8 +235,10 @@ public:
             integralCountErrorY_ = candidateIntegralY;
         }
         rememberError(errorX, errorY);
-        previousOutputX_ = out.countsX;
-        previousOutputY_ = out.countsY;
+        if (out.countsX != 0.0)
+            previousOutputX_ = out.countsX;
+        if (out.countsY != 0.0)
+            previousOutputY_ = out.countsY;
         return out;
     }
 
@@ -226,6 +251,10 @@ public:
         hasPreviousError_ = false;
         previousOutputX_ = 0.0;
         previousOutputY_ = 0.0;
+        pendingReverseX_ = 0.0;
+        pendingReverseY_ = 0.0;
+        pendingReverseFramesX_ = 0;
+        pendingReverseFramesY_ = 0;
     }
     bool settled() const { return settled_; }
 
@@ -251,4 +280,8 @@ private:
     bool hasPreviousError_ = false;
     double previousOutputX_ = 0.0;
     double previousOutputY_ = 0.0;
+    double pendingReverseX_ = 0.0;
+    double pendingReverseY_ = 0.0;
+    int pendingReverseFramesX_ = 0;
+    int pendingReverseFramesY_ = 0;
 };
