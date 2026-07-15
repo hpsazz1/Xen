@@ -46,6 +46,7 @@
 | [P0-5低速反向确认复验](077P0-5低速反向确认复验20260715.md) | 了解静止回差区内80 ms二维反向确认、参数反证和跨域矩阵结果。 |
 | [P0-5高速横移垂直追赶复验](078P0-5高速横移垂直追赶复验20260715.md) | 了解二维预算下的垂直饥饿、角度域追赶门控和跨域矩阵结果。 |
 | [P0-5固定240Hz梯形轨迹对照](079P0-5固定240Hz梯形轨迹对照20260715.md) | 了解固定tick回放、默认/放宽运动学约束对照和保持off的依据。 |
+| [P0-5相对视线速度前馈复验](080P0-5相对视线速度前馈复验20260715.md) | 了解主场景物理域矩阵、前馈单变量扫描和0.15候选依据。 |
 | [稳健常速度预测与实机振荡排查](034稳健常速度预测与实机振荡排查20260714.md) | 了解首轮实机预测振荡根因、场景边界和r8稳健速度模型。 |
 | [预测连续性保持与单帧门控修复](035预测连续性保持与单帧门控修复20260714.md) | 分析r8提前量频繁中断原因，以及r9窗口级停止和反向确认。 |
 | [透视坐标修正与jump视野逃逸优化](036透视坐标修正与jump视野逃逸优化20260714.md) | 分析r9静止误补偿和jump飞出320裁剪的共同坐标根因。 |
@@ -67,3 +68,5 @@ build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video
 先查看`cross_domain_decision.txt`，再按`cross_domain_summary.csv`的`Scenario/Variant/Passed/Reason`定位单一失败模块；不要只挑通过变体调参。`cross_domain_frames.csv`只包含基准域逐帧诊断，全矩阵指标均在summary中。
 
 固定240 Hz梯形对照在同一命令后追加`--trajectory-mode trapezoid --trajectory-output-hz 240 --trajectory-max-accel-cps2 60000 --trajectory-max-jerk-cps3 4000000`，并使用独立输出目录。该模式当前仅用于反事实回放，正式默认仍为`off`。
+
+当前主场景前馈候选在同一命令后追加`--feedforward-gain 0.15`。该参数仅改变离线候选，运行时`aim_shadow_feedforward_gain`默认仍为0；不要使用0.20以上增益换取reverse/jump收益，因为left/right物理域已经出现回退。

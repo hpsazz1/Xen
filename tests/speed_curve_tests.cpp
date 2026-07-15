@@ -1505,11 +1505,11 @@ int main()
                "video replay splits target teleport into an independent trial");
 
     const auto crossDomainVariants = CrossDomainReplay::BuildRequiredVariants();
-    expectTrue(crossDomainVariants.size() == 169,
-               "cross-domain matrix covers 162 physical variants and seven role-relative variants");
-    expectTrue(std::any_of(crossDomainVariants.begin(), crossDomainVariants.end(), [](const auto& variant) {
-        return variant.name == "role_same_self_faster" && variant.relativeMotionScale < 0.0;
-    }), "role-faster transform reverses relative LOS naturally instead of using WASD direction");
+    expectTrue(crossDomainVariants.size() == 162 &&
+               std::none_of(crossDomainVariants.begin(), crossDomainVariants.end(), [](const auto& variant) {
+                   return variant.name.rfind("role_", 0) == 0;
+               }),
+               "required cross-domain matrix covers only target-motion physical variants");
 
     CrossDomainReplay::Metrics gateBaseline;
     gateBaseline.samples = 100;
@@ -1566,6 +1566,13 @@ int main()
                syntheticComparison.candidate.shapedCounts > 0.0 &&
                syntheticComparison.candidate.sentCounts > 0.0,
                "cross-domain replay records estimator, requested, shaped and sent diagnostics");
+    CrossDomainReplay::ControllerSettings feedforwardReplaySettings = syntheticSettings;
+    feedforwardReplaySettings.feedforwardGain = 0.5;
+    const auto feedforwardComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, feedforwardReplaySettings);
+    expectTrue(feedforwardComparison.feedforwardGain == 0.5 &&
+               feedforwardComparison.candidate.feedforwardCounts > 0.0,
+               "cross-domain replay applies and records relative LOS feedforward gain");
     CrossDomainReplay::ControllerSettings trapezoidReplaySettings = syntheticSettings;
     trapezoidReplaySettings.trajectoryMode = TrajectoryShaperMode::Trapezoid;
     trapezoidReplaySettings.trajectoryOutputHz = 240.0;

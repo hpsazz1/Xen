@@ -97,6 +97,7 @@ struct Comparison
 {
     std::string scenario;
     Variant variant{};
+    double feedforwardGain = 0.0;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
     double trajectoryOutputHz = 0.0;
     Metrics legacy{};

@@ -62,6 +62,7 @@ namespace
         double settleErrorDegrees = 0.080;
         double settleRateDegreesPerSecond = 1.200;
         double reverseConfirmationSeconds = 0.080;
+        double feedforwardGain = 0.0;
         TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
         double trajectoryOutputHz = 240.0;
         double trajectoryMaxAccelerationCountsPerSecond2 = 60000.0;
@@ -223,6 +224,8 @@ namespace
         options.reverseConfirmationSeconds = optionDouble(
             argc, argv, "--reverse-confirm-ms",
             options.reverseConfirmationSeconds * 1000.0) / 1000.0;
+        options.feedforwardGain = optionDouble(
+            argc, argv, "--feedforward-gain", options.feedforwardGain);
         if (const auto mode = optionValue(argc, argv, "--trajectory-mode"))
             options.trajectoryMode = parseTrajectoryShaperMode(*mode);
         options.trajectoryOutputHz = optionDouble(
@@ -722,6 +725,7 @@ int Run(int argc, char** argv)
             settings.settleErrorDegrees = options.settleErrorDegrees;
             settings.settleRateDegreesPerSecond = options.settleRateDegreesPerSecond;
             settings.reverseConfirmationSeconds = options.reverseConfirmationSeconds;
+            settings.feedforwardGain = options.feedforwardGain;
             settings.trajectoryMode = options.trajectoryMode;
             settings.trajectoryOutputHz = options.trajectoryOutputHz;
             settings.trajectoryMaxAccelerationCountsPerSecond2 =
@@ -761,7 +765,11 @@ int Run(int argc, char** argv)
             CrossDomainReplay::WriteSummary(
                 options.outputRoot / "cross_domain_summary.csv", comparisons);
             std::ofstream decision(options.outputRoot / "cross_domain_decision.txt");
-            decision << "TrajectoryMode="
+            decision << "FeedforwardGain="
+                     << (std::isfinite(options.feedforwardGain)
+                             ? std::clamp(options.feedforwardGain, 0.0, 2.0)
+                             : 0.0) << '\n'
+                     << "TrajectoryMode="
                      << trajectoryShaperModeName(options.trajectoryMode) << '\n'
                      << "TrajectoryOutputHz=" << options.trajectoryOutputHz << '\n'
                      << "TrajectoryMaxAccelerationCountsPerSecond2="

@@ -300,17 +300,6 @@ std::vector<Variant> BuildRequiredVariants()
         variant.speedScale = speed;
         result.push_back(variant);
     }
-    for (const auto& role : {
-        std::pair<const char*, double>{"role_same_target_faster", 0.5},
-        {"role_same_equal", 0.05}, {"role_same_self_faster", -0.5},
-        {"role_opposite", 1.5}, {"role_forward_left", 0.75},
-        {"role_forward_center", 0.10}, {"role_forward_right", 0.75} })
-    {
-        Variant variant;
-        variant.name = role.first;
-        variant.relativeMotionScale = role.second;
-        result.push_back(variant);
-    }
     return result;
 }
 
@@ -321,6 +310,9 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     Comparison comparison;
     comparison.scenario = canonicalScenario(source.scenario);
     comparison.variant = variant;
+    comparison.feedforwardGain = std::isfinite(settings.feedforwardGain)
+        ? std::clamp(settings.feedforwardGain, 0.0, 2.0)
+        : 0.0;
     comparison.trajectoryMode = settings.trajectoryMode;
     // 回放参数可能来自命令行；非有限值回退到生产默认频率，有限值再限制到可验证范围。
     comparison.trajectoryOutputHz = std::isfinite(settings.trajectoryOutputHz)
@@ -354,7 +346,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     candidateSettings.verticalCatchUpErrorDegrees =
         settings.verticalCatchUpErrorDegrees;
     candidateSettings.maxCountsPerSecond = settings.maxCountsPerSecond;
-    candidateSettings.feedforwardGain = settings.feedforwardGain;
+    candidateSettings.feedforwardGain = comparison.feedforwardGain;
     candidateSettings.integralTimeSeconds = settings.integralTimeSeconds;
     candidateSettings.integralZoneDegrees = settings.integralZoneDegrees;
     candidateSettings.settleErrorDegrees = settings.settleErrorDegrees;
@@ -705,11 +697,12 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,FeedforwardGain,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
         output << item.scenario << ',' << item.variant.name << ','
+               << item.feedforwardGain << ','
                << trajectoryShaperModeName(item.trajectoryMode) << ','
                << item.trajectoryOutputHz << ',' << item.candidate.samples << ','
                << item.legacy.errorP50Degrees << ',' << item.legacy.errorP95Degrees << ','
