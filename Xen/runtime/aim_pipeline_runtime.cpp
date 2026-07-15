@@ -165,7 +165,9 @@ void AimPipelineRuntime::setViewMotionDiagnostics(
     frame_.control.settleReleased = control.settleReleased;
     frame_.control.settleConfirmationSamples = control.settleConfirmationSamples;
     frame_.control.lowSpeedReverseSuppressed = control.lowSpeedReverseSuppressed;
+    frame_.control.verticalCatchUpActive = control.verticalCatchUpActive;
     frame_.control.reverseConfirmationSeconds = control.reverseConfirmationSeconds;
+    frame_.control.effectiveResponseSecondsY = control.effectiveResponseSecondsY;
     frame_.control.feedbackX = control.feedbackCountsX;
     frame_.control.feedbackY = control.feedbackCountsY;
     frame_.control.trackingFeedforwardX = control.trackingFeedforwardCountsX;

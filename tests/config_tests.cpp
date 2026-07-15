@@ -114,6 +114,8 @@ int main()
                    "shadow settle uses the replay-derived relative LOS rate threshold");
         expectNear(defaults.aim_shadow_reverse_confirm_ms, 80.0, 0.0,
                    "shadow low-speed reverse uses the established time-domain confirmation");
+        expectNear(defaults.aim_shadow_vertical_catch_up_deg, 0.8, 1e-6,
+                   "shadow vertical catch-up uses the cross-domain angle threshold");
         expectNear(defaults.aim_shadow_integral_time_ms, 0.0, 0.0,
                    "shadow angle integral remains disabled by default");
         expectNear(defaults.aim_shadow_lead_horizon_ms, 0.0, 0.0,
@@ -192,6 +194,7 @@ int main()
                    migratedText.find("aim_shadow_settle_error_deg = 0.08") != std::string::npos &&
                    migratedText.find("aim_shadow_settle_rate_dps = 1.2") != std::string::npos &&
                    migratedText.find("aim_shadow_reverse_confirm_ms = 80") != std::string::npos &&
+                   migratedText.find("aim_shadow_vertical_catch_up_deg = 0.8") != std::string::npos &&
                    migratedText.find("aim_shadow_integral_time_ms = 0") != std::string::npos &&
                    migratedText.find("aim_shadow_lead_horizon_ms = 0") != std::string::npos,
                    "saved config persists independently disabled P0-4A controller terms");
@@ -263,6 +266,7 @@ int main()
             << "aim_shadow_settle_error_deg = 9\n"
             << "aim_shadow_settle_rate_dps = 99\n"
             << "aim_shadow_reverse_confirm_ms = 999\n"
+            << "aim_shadow_vertical_catch_up_deg = 99\n"
             << "aim_shadow_integral_time_ms = 1\n"
             << "aim_shadow_integral_zone_deg = 99\n"
             << "aim_shadow_lead_horizon_ms = 999\n"
@@ -283,6 +287,8 @@ int main()
                "shadow settle rate remains bounded");
     expectNear(clampedShadowController.aim_shadow_reverse_confirm_ms, 250.0, 0.0,
                "shadow low-speed reverse confirmation remains bounded");
+    expectNear(clampedShadowController.aim_shadow_vertical_catch_up_deg, 20.0, 0.0,
+               "shadow vertical catch-up threshold remains bounded");
     expectNear(clampedShadowController.aim_shadow_integral_time_ms, 50.0, 0.0,
                "nonzero shadow integral time uses a stable minimum");
     expectNear(clampedShadowController.aim_shadow_integral_zone_deg, 10.0, 0.0,

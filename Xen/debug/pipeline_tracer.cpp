@@ -179,7 +179,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "AimPipelineAngleX,AimPipelineAngleY,AimPipelineRateX,AimPipelineRateY,AimPipelineCovarianceX,AimPipelineCovarianceY,"
          << "AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY,"
          << "AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence,"
-         << "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples,AimPipelineLowSpeedReverseSuppressed,AimPipelineReverseConfirmationSeconds,"
+         << "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples,AimPipelineLowSpeedReverseSuppressed,AimPipelineVerticalCatchUpActive,AimPipelineReverseConfirmationSeconds,AimPipelineEffectiveResponseSecondsY,"
          << "AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadReferenceX,AimPipelineLeadReferenceY,"
          << "AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY,"
          << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit,"
@@ -262,7 +262,9 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << (ap.control.settleReleased ? '1' : '0') << ','
              << ap.control.settleConfirmationSamples << ','
              << (ap.control.lowSpeedReverseSuppressed ? '1' : '0') << ','
+             << (ap.control.verticalCatchUpActive ? '1' : '0') << ','
              << ap.control.reverseConfirmationSeconds << ','
+             << ap.control.effectiveResponseSecondsY << ','
              << ap.control.feedbackX << ',' << ap.control.feedbackY << ','
              << ap.control.trackingFeedforwardX << ',' << ap.control.trackingFeedforwardY << ','
              << ap.control.leadReferenceX << ',' << ap.control.leadReferenceY << ','

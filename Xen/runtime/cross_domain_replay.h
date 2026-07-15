@@ -41,6 +41,7 @@ struct Variant
 struct ControllerSettings
 {
     double responseSeconds = 0.080;
+    double verticalCatchUpErrorDegrees = 0.8;
     double maxCountsPerSecond = 1440.0;
     double legacyPredictionLeadSeconds = 0.050;
     double legacyPredictionWindowSeconds = 0.050;
@@ -80,6 +81,7 @@ struct Metrics
     double settledPercent = 0.0;
     size_t settleReleases = 0;
     double reverseSuppressedPercent = 0.0;
+    double verticalCatchUpPercent = 0.0;
 };
 
 struct Comparison

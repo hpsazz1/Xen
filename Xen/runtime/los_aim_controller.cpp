@@ -6,6 +6,8 @@
 namespace
 {
 constexpr double kMinimumDegreesPerCount = 1e-9;
+constexpr double kVerticalCatchUpMinimumErrorRatio = 0.15;
+constexpr double kVerticalCatchUpMinimumHorizontalRateDps = 5.0;
 
 double clampFinite(double value, double minimum, double maximum, double fallback)
 {
@@ -33,6 +35,28 @@ LosAimController::Output LosAimController::update(
     const double confidence =
         clampFinite(input.feedforwardConfidence, 0.0, 1.0, 0.0);
     const double responseFraction = 1.0 - std::exp(-dt / response);
+    const double verticalCatchUpError = clampFinite(
+        settings.verticalCatchUpErrorDegrees, 0.0, 20.0, 0.0);
+    double effectiveResponseY = response;
+    if (verticalCatchUpError > 0.0 &&
+        std::abs(input.errorDegreesY) >= verticalCatchUpError &&
+        std::abs(input.errorDegreesY) >=
+            std::abs(input.errorDegreesX) * kVerticalCatchUpMinimumErrorRatio &&
+        std::abs(input.relativeLosRateDegreesPerSecondX) >=
+            kVerticalCatchUpMinimumHorizontalRateDps)
+    {
+        output.verticalCatchUpActive = true;
+        // 角度域大误差追赶沿用r30已经验证过的连续响应曲线：从阈值处的0.5倍
+        // 平滑缩短到两倍阈值处的0.375倍，避免硬切增益，同时让二维限速下的Y轴
+        // 获得与其角误差相称的预算。阈值为0时完全保持原控制语义。
+        const double progress = std::clamp(
+            (std::abs(input.errorDegreesY) - verticalCatchUpError) /
+                verticalCatchUpError,
+            0.0, 1.0);
+        effectiveResponseY = response * (0.5 - progress * 0.125);
+    }
+    const double responseFractionY = 1.0 - std::exp(-dt / effectiveResponseY);
+    output.effectiveResponseSecondsY = effectiveResponseY;
 
     // 静止锁存同时要求二维角误差和相对LOS速率安静，避免把正在穿越准星的
     // 真实目标仅因瞬时误差很小而停住。退出阈值固定为进入阈值的1.5倍，
@@ -89,7 +113,7 @@ LosAimController::Output LosAimController::update(
     output.feedbackCountsX =
         input.errorDegreesX * responseFraction / input.degreesPerCountX;
     output.feedbackCountsY =
-        input.errorDegreesY * responseFraction / input.degreesPerCountY;
+        input.errorDegreesY * responseFractionY / input.degreesPerCountY;
 
     // 前馈表示本周期为维持目标角速度所需的相机位移。NIS/检测置信度生成的
     // confidence 只缩放前馈和提前参考，低可信时 P 反馈仍可把准星拉回目标。
@@ -112,7 +136,7 @@ LosAimController::Output LosAimController::update(
     output.leadCountsX =
         output.leadReferenceDegreesX * responseFraction / input.degreesPerCountX;
     output.leadCountsY =
-        output.leadReferenceDegreesY * responseFraction / input.degreesPerCountY;
+        output.leadReferenceDegreesY * responseFractionY / input.degreesPerCountY;
 
     const double integralTime = settings.integralTimeSeconds > 0.0
         ? clampFinite(settings.integralTimeSeconds, 0.050, 2.0, 0.0) : 0.0;

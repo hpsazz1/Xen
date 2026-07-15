@@ -82,6 +82,7 @@ public:
     float aim_shadow_settle_error_deg = 0.08f;          // 静止锁存二维角误差进入阈值
     float aim_shadow_settle_rate_dps = 1.2f;            // 静止锁存相对LOS速率进入阈值
     float aim_shadow_reverse_confirm_ms = 80.0f;        // 低速二维反向请求持续确认时间
+    float aim_shadow_vertical_catch_up_deg = 0.8f;      // 高速横移时垂直大误差追赶阈值
     float aim_shadow_integral_time_ms = 0.0f;            // 角度积分时间；0表示关闭
     float aim_shadow_integral_zone_deg = 1.0f;           // 仅在该角误差范围内积分
     float aim_shadow_lead_horizon_ms = 0.0f;             // 独立经验提前时域；默认关闭

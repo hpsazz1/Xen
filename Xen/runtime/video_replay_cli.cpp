@@ -49,6 +49,7 @@ namespace
         double inferenceFps = 94.0;
         std::vector<double> observationAgesMs{ 10.0, 15.0, 20.0 };
         double responseMs = 80.0;
+        double verticalCatchUpErrorDegrees = 0.8;
         double maxCountsPerSecond = 1440.0;
         double integralMs = 320.0;
         double sensitivity = 1.4;
@@ -200,6 +201,9 @@ namespace
         options.cropHeight = static_cast<int>(optionDouble(argc, argv, "--crop-height", options.cropHeight));
         options.inferenceFps = optionDouble(argc, argv, "--inference-fps", options.inferenceFps);
         options.responseMs = optionDouble(argc, argv, "--response-ms", options.responseMs);
+        options.verticalCatchUpErrorDegrees = optionDouble(
+            argc, argv, "--vertical-catch-up-deg",
+            options.verticalCatchUpErrorDegrees);
         options.maxCountsPerSecond = optionDouble(argc, argv, "--max-cps", options.maxCountsPerSecond);
         options.integralMs = optionDouble(argc, argv, "--integral-ms", options.integralMs);
         options.sensitivity = optionDouble(argc, argv, "--sensitivity", options.sensitivity);
@@ -692,6 +696,8 @@ int Run(int argc, char** argv)
             const auto variants = CrossDomainReplay::BuildRequiredVariants();
             CrossDomainReplay::ControllerSettings settings;
             settings.responseSeconds = options.responseMs / 1000.0;
+            settings.verticalCatchUpErrorDegrees =
+                options.verticalCatchUpErrorDegrees;
             settings.maxCountsPerSecond = options.maxCountsPerSecond;
             settings.legacyPredictionLeadSeconds = 0.050;
             settings.legacyPredictionWindowSeconds = 0.050;

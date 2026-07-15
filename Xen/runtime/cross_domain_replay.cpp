@@ -142,6 +142,7 @@ struct MetricCollector
     size_t diagnosticSamples = 0;
     size_t settledSamples = 0;
     size_t reverseSuppressedSamples = 0;
+    size_t verticalCatchUpSamples = 0;
     Metrics result;
 
     void addError(double errorX, double errorY, double halfBoxX, double halfBoxY, bool late)
@@ -210,6 +211,11 @@ struct MetricCollector
         reverseSuppressedSamples += suppressed ? 1U : 0U;
     }
 
+    void addVerticalCatchUp(bool active)
+    {
+        verticalCatchUpSamples += active ? 1U : 0U;
+    }
+
     Metrics finish()
     {
         result.samples = errors.size();
@@ -229,6 +235,8 @@ struct MetricCollector
             result.settledPercent = 100.0 * settledSamples / diagnosticSamples;
             result.reverseSuppressedPercent =
                 100.0 * reverseSuppressedSamples / diagnosticSamples;
+            result.verticalCatchUpPercent =
+                100.0 * verticalCatchUpSamples / diagnosticSamples;
         }
         return result;
     }
@@ -318,6 +326,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     LosAimController candidateController;
     LosAimController::Settings candidateSettings;
     candidateSettings.responseSeconds = settings.responseSeconds;
+    candidateSettings.verticalCatchUpErrorDegrees =
+        settings.verticalCatchUpErrorDegrees;
     candidateSettings.maxCountsPerSecond = settings.maxCountsPerSecond;
     candidateSettings.feedforwardGain = settings.feedforwardGain;
     candidateSettings.integralTimeSeconds = settings.integralTimeSeconds;
@@ -341,7 +351,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         std::filesystem::create_directories(frameCsv.parent_path());
         frames.open(frameCsv, std::ios::app);
         if (frames.tellp() == 0)
-            frames << "Scenario,Variant,TimeSeconds,Detected,TruthYaw,TruthPitch,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,LowSpeedReverseSuppressed,ReverseConfirmationSeconds,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
+            frames << "Scenario,Variant,TimeSeconds,Detected,TruthYaw,TruthPitch,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
     }
 
     const double dt = 1.0 / std::clamp(variant.replayFps, 10.0, 1000.0);
@@ -496,6 +506,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             candidateOutput.settled, candidateOutput.settleReleased);
         candidateMetrics.addReverseSuppression(
             candidateOutput.lowSpeedReverseSuppressed);
+        candidateMetrics.addVerticalCatchUp(candidateOutput.verticalCatchUpActive);
         candidateMetrics.result.requestedCounts += std::hypot(
             candidateOutput.limitedCountsX, candidateOutput.limitedCountsY);
         candidateMetrics.result.feedforwardCounts += std::hypot(
@@ -519,7 +530,9 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                    << (candidateOutput.settleReleased ? 1 : 0) << ','
                    << candidateOutput.settleConfirmationSamples << ','
                    << (candidateOutput.lowSpeedReverseSuppressed ? 1 : 0) << ','
+                   << (candidateOutput.verticalCatchUpActive ? 1 : 0) << ','
                    << candidateOutput.reverseConfirmationSeconds << ','
+                   << candidateOutput.effectiveResponseSecondsY << ','
                    << candidateOutput.feedbackCountsX << ','
                    << candidateOutput.feedbackCountsY << ',' << candidateOutput.trackingFeedforwardCountsX << ','
                    << candidateOutput.trackingFeedforwardCountsY << ',' << candidateOutput.leadCountsX << ','
@@ -595,7 +608,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,SettledPercent,SettleReleases,ReverseSuppressedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -615,6 +628,7 @@ void WriteSummary(const std::filesystem::path& path,
                << item.candidate.feedforwardCounts << ','
                << item.candidate.settledPercent << ',' << item.candidate.settleReleases << ','
                << item.candidate.reverseSuppressedPercent << ','
+               << item.candidate.verticalCatchUpPercent << ','
                << (item.passed ? 1 : 0) << ',' << item.reason << '\n';
     }
 }

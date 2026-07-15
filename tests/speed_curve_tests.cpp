@@ -352,6 +352,35 @@ int main()
     expectTrue(!fastReverse.lowSpeedReverseSuppressed && fastReverse.limitedCountsX > 0.0,
                "reliable fast LOS reversal bypasses low-speed confirmation immediately");
 
+    LosAimController angularVerticalCatchUpController;
+    LosAimController::Settings angularVerticalCatchUpSettings = settleSettings;
+    angularVerticalCatchUpSettings.verticalCatchUpErrorDegrees = 0.8;
+    LosAimController::Input angularVerticalCatchUpInput = losInput;
+    angularVerticalCatchUpInput.errorDegreesX = 4.0;
+    angularVerticalCatchUpInput.errorDegreesY = 1.0;
+    angularVerticalCatchUpInput.relativeLosRateDegreesPerSecondX = 6.0;
+    const auto angularVerticalCatchUp = angularVerticalCatchUpController.update(
+        angularVerticalCatchUpInput, angularVerticalCatchUpSettings);
+    expectTrue(angularVerticalCatchUp.verticalCatchUpActive &&
+               angularVerticalCatchUp.effectiveResponseSecondsY <
+                   angularVerticalCatchUpSettings.responseSeconds,
+               "sustained cross-axis error receives continuous vertical catch-up");
+    angularVerticalCatchUpController.reset();
+    angularVerticalCatchUpInput.relativeLosRateDegreesPerSecondX = 4.0;
+    const auto lowHorizontalRate = angularVerticalCatchUpController.update(
+        angularVerticalCatchUpInput, angularVerticalCatchUpSettings);
+    expectTrue(!lowHorizontalRate.verticalCatchUpActive &&
+               lowHorizontalRate.effectiveResponseSecondsY ==
+                   angularVerticalCatchUpSettings.responseSeconds,
+               "low horizontal LOS rate cannot activate vertical catch-up");
+    angularVerticalCatchUpController.reset();
+    angularVerticalCatchUpInput.relativeLosRateDegreesPerSecondX = 6.0;
+    angularVerticalCatchUpInput.errorDegreesX = 10.0;
+    const auto insignificantVerticalError = angularVerticalCatchUpController.update(
+        angularVerticalCatchUpInput, angularVerticalCatchUpSettings);
+    expectTrue(!insignificantVerticalError.verticalCatchUpActive,
+               "minor vertical residual cannot steal budget from unidirectional tracking");
+
     losSettings.feedforwardGain = 1.0;
     losSettings.leadHorizonSeconds = 0.050;
     losSettings.leadStrength = 1.0;
@@ -919,7 +948,7 @@ int main()
         traceHeader.find("AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence") != std::string::npos,
         "basic pipeline records relative LOS Kalman diagnostics");
     expectTrue(traceHeader.find(
-        "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples,AimPipelineLowSpeedReverseSuppressed,AimPipelineReverseConfirmationSeconds") != std::string::npos &&
+        "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples,AimPipelineLowSpeedReverseSuppressed,AimPipelineVerticalCatchUpActive,AimPipelineReverseConfirmationSeconds,AimPipelineEffectiveResponseSecondsY") != std::string::npos &&
         traceHeader.find("AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY") != std::string::npos &&
         traceHeader.find("AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY") != std::string::npos &&
         traceHeader.find("AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit") != std::string::npos,

@@ -9,6 +9,7 @@ public:
     struct Settings
     {
         double responseSeconds = 0.080;
+        double verticalCatchUpErrorDegrees = 0.0;
         double maxCountsPerSecond = 1440.0;
         double feedforwardGain = 0.0;
         double integralTimeSeconds = 0.0;
@@ -43,9 +44,11 @@ public:
         bool settleReleased = false;
         int settleConfirmationSamples = 0;
         bool lowSpeedReverseSuppressed = false;
+        bool verticalCatchUpActive = false;
         double reverseConfirmationSeconds = 0.0;
         double feedbackCountsX = 0.0;
         double feedbackCountsY = 0.0;
+        double effectiveResponseSecondsY = 0.0;
         double trackingFeedforwardCountsX = 0.0;
         double trackingFeedforwardCountsY = 0.0;
         double leadReferenceDegreesX = 0.0;

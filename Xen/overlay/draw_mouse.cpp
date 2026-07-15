@@ -36,6 +36,7 @@ float prev_aim_shadow_feedforward_gain = config.aim_shadow_feedforward_gain;
 float prev_aim_shadow_settle_error_deg = config.aim_shadow_settle_error_deg;
 float prev_aim_shadow_settle_rate_dps = config.aim_shadow_settle_rate_dps;
 float prev_aim_shadow_reverse_confirm_ms = config.aim_shadow_reverse_confirm_ms;
+float prev_aim_shadow_vertical_catch_up_deg = config.aim_shadow_vertical_catch_up_deg;
 float prev_aim_shadow_integral_time_ms = config.aim_shadow_integral_time_ms;
 float prev_aim_shadow_integral_zone_deg = config.aim_shadow_integral_zone_deg;
 float prev_aim_shadow_lead_horizon_ms = config.aim_shadow_lead_horizon_ms;
@@ -179,6 +180,10 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayUI::SliderFloatRow("低速反向确认(ms)", &config.aim_shadow_reverse_confirm_ms,
             0.0f, 250.0f, "%.0f", "##shadow_reverse_confirm",
             "仅静止回差区内的低速二维反向请求需持续该时长；误差或速率越界时立即放行。");
+        OverlayUI::SliderFloatRow("高速横移垂直追赶(度)",
+            &config.aim_shadow_vertical_catch_up_deg,
+            0.0f, 20.0f, "%.2f", "##shadow_vertical_catch_up",
+            "0为关闭；仅水平LOS速率至少5度/秒且垂直误差达到水平误差15%时启用连续追赶。");
         OverlayUI::SliderFloatRow("角积分时间(ms)", &config.aim_shadow_integral_time_ms,
             0.0f, 2000.0f, "%.0f", "##shadow_integral_ms",
             "0为关闭，非零最小50ms；饱和时冻结，反向时解卷绕。");
@@ -925,6 +930,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_aim_shadow_settle_error_deg != config.aim_shadow_settle_error_deg ||
         prev_aim_shadow_settle_rate_dps != config.aim_shadow_settle_rate_dps ||
         prev_aim_shadow_reverse_confirm_ms != config.aim_shadow_reverse_confirm_ms ||
+        prev_aim_shadow_vertical_catch_up_deg != config.aim_shadow_vertical_catch_up_deg ||
         prev_aim_shadow_integral_time_ms != config.aim_shadow_integral_time_ms ||
         prev_aim_shadow_integral_zone_deg != config.aim_shadow_integral_zone_deg ||
         prev_aim_shadow_lead_horizon_ms != config.aim_shadow_lead_horizon_ms ||
@@ -961,6 +967,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_aim_shadow_settle_error_deg = config.aim_shadow_settle_error_deg;
         prev_aim_shadow_settle_rate_dps = config.aim_shadow_settle_rate_dps;
         prev_aim_shadow_reverse_confirm_ms = config.aim_shadow_reverse_confirm_ms;
+        prev_aim_shadow_vertical_catch_up_deg = config.aim_shadow_vertical_catch_up_deg;
         prev_aim_shadow_integral_time_ms = config.aim_shadow_integral_time_ms;
         prev_aim_shadow_integral_zone_deg = config.aim_shadow_integral_zone_deg;
         prev_aim_shadow_lead_horizon_ms = config.aim_shadow_lead_horizon_ms;
