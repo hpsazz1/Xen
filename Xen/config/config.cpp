@@ -141,6 +141,7 @@ bool Config::loadConfig(const std::string& filename)
         aim_shadow_feedforward_gain = 0.0f;
         aim_shadow_settle_error_deg = 0.08f;
         aim_shadow_settle_rate_dps = 1.2f;
+        aim_shadow_reverse_confirm_ms = 80.0f;
         aim_shadow_integral_time_ms = 0.0f;
         aim_shadow_integral_zone_deg = 1.0f;
         aim_shadow_lead_horizon_ms = 0.0f;
@@ -563,6 +564,7 @@ bool Config::loadConfig(const std::string& filename)
     aim_shadow_feedforward_gain = (float)get_double("aim_shadow_feedforward_gain", 0.0);
     aim_shadow_settle_error_deg = (float)get_double("aim_shadow_settle_error_deg", 0.08);
     aim_shadow_settle_rate_dps = (float)get_double("aim_shadow_settle_rate_dps", 1.2);
+    aim_shadow_reverse_confirm_ms = (float)get_double("aim_shadow_reverse_confirm_ms", 80.0);
     aim_shadow_integral_time_ms = (float)get_double("aim_shadow_integral_time_ms", 0.0);
     aim_shadow_integral_zone_deg = (float)get_double("aim_shadow_integral_zone_deg", 1.0);
     aim_shadow_lead_horizon_ms = (float)get_double("aim_shadow_lead_horizon_ms", 0.0);
@@ -783,6 +785,7 @@ bool Config::loadConfig(const std::string& filename)
     aim_shadow_feedforward_gain = std::clamp(aim_shadow_feedforward_gain, 0.0f, 2.0f);
     aim_shadow_settle_error_deg = std::clamp(aim_shadow_settle_error_deg, 0.0f, 1.0f);
     aim_shadow_settle_rate_dps = std::clamp(aim_shadow_settle_rate_dps, 0.0f, 20.0f);
+    aim_shadow_reverse_confirm_ms = std::clamp(aim_shadow_reverse_confirm_ms, 0.0f, 250.0f);
     aim_shadow_integral_time_ms = std::clamp(aim_shadow_integral_time_ms, 0.0f, 2000.0f);
     if (aim_shadow_integral_time_ms > 0.0f && aim_shadow_integral_time_ms < 50.0f)
         aim_shadow_integral_time_ms = 50.0f;
@@ -925,6 +928,7 @@ bool Config::saveConfig(const std::string& filename)
         << "aim_shadow_feedforward_gain = " << aim_shadow_feedforward_gain << "\n"
         << "aim_shadow_settle_error_deg = " << aim_shadow_settle_error_deg << "\n"
         << "aim_shadow_settle_rate_dps = " << aim_shadow_settle_rate_dps << "\n"
+        << "aim_shadow_reverse_confirm_ms = " << aim_shadow_reverse_confirm_ms << "\n"
         << "aim_shadow_integral_time_ms = " << aim_shadow_integral_time_ms << "\n"
         << "aim_shadow_integral_zone_deg = " << aim_shadow_integral_zone_deg << "\n"
         << "aim_shadow_lead_horizon_ms = " << aim_shadow_lead_horizon_ms << "\n"

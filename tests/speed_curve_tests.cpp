@@ -309,6 +309,49 @@ int main()
     expectTrue(!quietAfterReset.settled && quietAfterReset.settleConfirmationSamples == 0,
                "controller reset clears the settle latch and confirmation history");
 
+    LosAimController reverseConfirmController;
+    LosAimController::Settings reverseConfirmSettings = settleSettings;
+    reverseConfirmSettings.reverseConfirmationSeconds = 0.080;
+    LosAimController::Input reverseConfirmInput = losInput;
+    reverseConfirmInput.errorDegreesX = 0.10;
+    reverseConfirmInput.errorDegreesY = 0.0;
+    reverseConfirmInput.relativeLosRateDegreesPerSecondX = 0.0;
+    reverseConfirmInput.relativeLosRateDegreesPerSecondY = 0.0;
+    reverseConfirmController.update(reverseConfirmInput, reverseConfirmSettings);
+    reverseConfirmInput.errorDegreesX = -0.10;
+    for (int sample = 0; sample < 7; ++sample)
+    {
+        const auto suppressedReverse = reverseConfirmController.update(
+            reverseConfirmInput, reverseConfirmSettings);
+        expectTrue(suppressedReverse.lowSpeedReverseSuppressed &&
+                   suppressedReverse.limitedCountsX == 0.0,
+                   "low-speed opposite request remains suppressed before eighty milliseconds");
+    }
+    const auto confirmedReverse = reverseConfirmController.update(
+        reverseConfirmInput, reverseConfirmSettings);
+    expectTrue(!confirmedReverse.lowSpeedReverseSuppressed &&
+               confirmedReverse.limitedCountsX < 0.0,
+               "persistent low-speed reverse is released after eighty milliseconds");
+
+    LosAimController outsideSettleBandController;
+    reverseConfirmInput.errorDegreesX = 0.20;
+    outsideSettleBandController.update(reverseConfirmInput, reverseConfirmSettings);
+    reverseConfirmInput.errorDegreesX = -0.20;
+    const auto outsideSettleBandReverse = outsideSettleBandController.update(
+        reverseConfirmInput, reverseConfirmSettings);
+    expectTrue(!outsideSettleBandReverse.lowSpeedReverseSuppressed &&
+               outsideSettleBandReverse.limitedCountsX < 0.0,
+               "reverse outside the settle hysteresis band bypasses confirmation immediately");
+
+    LosAimController fastReverseController;
+    fastReverseController.update(reverseConfirmInput, reverseConfirmSettings);
+    reverseConfirmInput.errorDegreesX = 0.20;
+    reverseConfirmInput.relativeLosRateDegreesPerSecondX = 3.0;
+    const auto fastReverse = fastReverseController.update(
+        reverseConfirmInput, reverseConfirmSettings);
+    expectTrue(!fastReverse.lowSpeedReverseSuppressed && fastReverse.limitedCountsX > 0.0,
+               "reliable fast LOS reversal bypasses low-speed confirmation immediately");
+
     losSettings.feedforwardGain = 1.0;
     losSettings.leadHorizonSeconds = 0.050;
     losSettings.leadStrength = 1.0;
@@ -876,7 +919,7 @@ int main()
         traceHeader.find("AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence") != std::string::npos,
         "basic pipeline records relative LOS Kalman diagnostics");
     expectTrue(traceHeader.find(
-        "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples") != std::string::npos &&
+        "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples,AimPipelineLowSpeedReverseSuppressed,AimPipelineReverseConfirmationSeconds") != std::string::npos &&
         traceHeader.find("AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY") != std::string::npos &&
         traceHeader.find("AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY") != std::string::npos &&
         traceHeader.find("AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit") != std::string::npos,

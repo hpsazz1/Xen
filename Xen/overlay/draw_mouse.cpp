@@ -35,6 +35,7 @@ float prev_aim_shadow_max_speed_cps = config.aim_shadow_max_speed_cps;
 float prev_aim_shadow_feedforward_gain = config.aim_shadow_feedforward_gain;
 float prev_aim_shadow_settle_error_deg = config.aim_shadow_settle_error_deg;
 float prev_aim_shadow_settle_rate_dps = config.aim_shadow_settle_rate_dps;
+float prev_aim_shadow_reverse_confirm_ms = config.aim_shadow_reverse_confirm_ms;
 float prev_aim_shadow_integral_time_ms = config.aim_shadow_integral_time_ms;
 float prev_aim_shadow_integral_zone_deg = config.aim_shadow_integral_zone_deg;
 float prev_aim_shadow_lead_horizon_ms = config.aim_shadow_lead_horizon_ms;
@@ -175,6 +176,9 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayUI::SliderFloatRow("静止角速率(度/秒)", &config.aim_shadow_settle_rate_dps,
             0.0f, 20.0f, "%.2f", "##shadow_settle_rate",
             "退出阈值固定为显示值的1.5倍，真实运动越界时当帧恢复。");
+        OverlayUI::SliderFloatRow("低速反向确认(ms)", &config.aim_shadow_reverse_confirm_ms,
+            0.0f, 250.0f, "%.0f", "##shadow_reverse_confirm",
+            "仅静止回差区内的低速二维反向请求需持续该时长；误差或速率越界时立即放行。");
         OverlayUI::SliderFloatRow("角积分时间(ms)", &config.aim_shadow_integral_time_ms,
             0.0f, 2000.0f, "%.0f", "##shadow_integral_ms",
             "0为关闭，非零最小50ms；饱和时冻结，反向时解卷绕。");
@@ -920,6 +924,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_aim_shadow_feedforward_gain != config.aim_shadow_feedforward_gain ||
         prev_aim_shadow_settle_error_deg != config.aim_shadow_settle_error_deg ||
         prev_aim_shadow_settle_rate_dps != config.aim_shadow_settle_rate_dps ||
+        prev_aim_shadow_reverse_confirm_ms != config.aim_shadow_reverse_confirm_ms ||
         prev_aim_shadow_integral_time_ms != config.aim_shadow_integral_time_ms ||
         prev_aim_shadow_integral_zone_deg != config.aim_shadow_integral_zone_deg ||
         prev_aim_shadow_lead_horizon_ms != config.aim_shadow_lead_horizon_ms ||
@@ -955,6 +960,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_aim_shadow_feedforward_gain = config.aim_shadow_feedforward_gain;
         prev_aim_shadow_settle_error_deg = config.aim_shadow_settle_error_deg;
         prev_aim_shadow_settle_rate_dps = config.aim_shadow_settle_rate_dps;
+        prev_aim_shadow_reverse_confirm_ms = config.aim_shadow_reverse_confirm_ms;
         prev_aim_shadow_integral_time_ms = config.aim_shadow_integral_time_ms;
         prev_aim_shadow_integral_zone_deg = config.aim_shadow_integral_zone_deg;
         prev_aim_shadow_lead_horizon_ms = config.aim_shadow_lead_horizon_ms;

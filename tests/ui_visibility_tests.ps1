@@ -30,6 +30,7 @@ foreach ($control in @(
     '##shadow_ff_gain',
     '##shadow_settle_error',
     '##shadow_settle_rate',
+    '##shadow_reverse_confirm',
     '##shadow_integral_ms',
     '##shadow_integral_zone',
     '##shadow_lead_horizon',

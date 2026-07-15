@@ -121,6 +121,7 @@ capture_fps = 60
 | `aim_shadow_feedforward_gain` | `0` | 相对视线角速度前馈增益，范围0~2；默认关闭，且始终受检测置信度与NIS形成的前馈可信度缩放。 |
 | `aim_shadow_settle_error_deg` | `0.08` | P0-5静止回差的二维角误差进入阈值，范围0~1°；0关闭。与角速率连续两个观测同时满足才锁存，退出阈值固定为1.5倍。 |
 | `aim_shadow_settle_rate_dps` | `1.2` | P0-5静止回差的相对LOS速率进入阈值，范围0~20°/s；0关闭。真实运动超过1.5倍阈值时当帧恢复控制。 |
+| `aim_shadow_reverse_confirm_ms` | `80` | P0-5静止回差区内的低速二维反向确认时长，范围0~250 ms；0关闭。只有误差不超过静止退出边界且相对LOS速率低于进入阈值时才抑制，误差或速率越界当帧放行。 |
 | `aim_shadow_integral_time_ms` | `0` | 角度PI积分时间，范围0~2000 ms；0为关闭，非零最小50 ms。 |
 | `aim_shadow_integral_zone_deg` | `1` | I-zone绝对角误差范围，范围0~10°；区间外清空积分，饱和时冻结候选。 |
 | `aim_shadow_lead_horizon_ms` | `0` | 独立经验提前时域，范围0~250 ms；默认关闭，不与速度前馈混用。 |

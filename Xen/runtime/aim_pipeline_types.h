@@ -152,6 +152,8 @@ struct AimControlBreakdown
     bool settled = false;
     bool settleReleased = false;
     int settleConfirmationSamples = 0;
+    bool lowSpeedReverseSuppressed = false;
+    double reverseConfirmationSeconds = 0.0;
     double feedbackX = 0.0;
     double feedbackY = 0.0;
     double trackingFeedforwardX = 0.0;

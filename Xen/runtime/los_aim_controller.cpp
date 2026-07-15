@@ -77,6 +77,9 @@ LosAimController::Output LosAimController::update(
         // 通过隐藏分量继续形成亚count反向脉冲。
         integralErrorDegreeSecondsX_ = 0.0;
         integralErrorDegreeSecondsY_ = 0.0;
+        pendingReverseX_ = 0.0;
+        pendingReverseY_ = 0.0;
+        pendingReverseSeconds_ = 0.0;
         output.valid = true;
         output.frameCountLimit = maxCountsPerSecond * dt;
         return output;
@@ -182,6 +185,56 @@ LosAimController::Output LosAimController::update(
         integralErrorDegreeSecondsY_ = candidateIntegralY;
     }
 
+    // 静止释放后的低速反向脉冲必须在同一二维方向持续一段真实时间，防止
+    // 检测噪声或量化余量让两个孤立修正被设备执行成正反抖动。真实相对LOS
+    // 速率一旦达到静止判定阈值就立即放行，避免给真实reverse/jump增加固定等待；
+    // 确认窗只处理静止误差回差区与速率阈值以内、最容易由观测噪声触发的低速反向请求；
+    // 已接受方向也只在该区域更新，区外的大幅运动不能覆盖下一次近中心判断的参照方向。
+    const double reverseConfirmation = clampFinite(
+        settings.reverseConfirmationSeconds, 0.0, 0.250, 0.0);
+    const double limitedMagnitude = std::hypot(
+        output.limitedCountsX, output.limitedCountsY);
+    if (reverseConfirmation > 0.0 && settleError > 0.0 && settleRate > 0.0 &&
+        errorMagnitude <= settleError * 1.5 && limitedMagnitude > 1e-12)
+    {
+        const double directionDot =
+            output.limitedCountsX * acceptedSettleBandDirectionX_ +
+            output.limitedCountsY * acceptedSettleBandDirectionY_;
+        const bool lowSpeedReverse = hasAcceptedSettleBandDirection_ &&
+            directionDot < 0.0 && rateMagnitude < settleRate;
+        if (lowSpeedReverse)
+        {
+            const bool samePendingDirection = pendingReverseSeconds_ > 0.0 &&
+                output.limitedCountsX * pendingReverseX_ +
+                    output.limitedCountsY * pendingReverseY_ > 0.0;
+            if (!samePendingDirection)
+                pendingReverseSeconds_ = 0.0;
+            pendingReverseX_ = output.limitedCountsX;
+            pendingReverseY_ = output.limitedCountsY;
+            pendingReverseSeconds_ += dt;
+            output.reverseConfirmationSeconds = pendingReverseSeconds_;
+            if (pendingReverseSeconds_ + 1e-12 < reverseConfirmation)
+            {
+                output.lowSpeedReverseSuppressed = true;
+                output.limitedCountsX = 0.0;
+                output.limitedCountsY = 0.0;
+            }
+        }
+        else
+        {
+            pendingReverseSeconds_ = 0.0;
+        }
+        if (!output.lowSpeedReverseSuppressed)
+        {
+            hasAcceptedSettleBandDirection_ = true;
+            acceptedSettleBandDirectionX_ = output.limitedCountsX;
+            acceptedSettleBandDirectionY_ = output.limitedCountsY;
+            pendingReverseX_ = 0.0;
+            pendingReverseY_ = 0.0;
+            pendingReverseSeconds_ = 0.0;
+        }
+    }
+
     output.valid = true;
     return output;
 }
@@ -190,6 +243,12 @@ void LosAimController::reset()
 {
     settled_ = false;
     quietSamples_ = 0;
+    hasAcceptedSettleBandDirection_ = false;
+    acceptedSettleBandDirectionX_ = 0.0;
+    acceptedSettleBandDirectionY_ = 0.0;
+    pendingReverseX_ = 0.0;
+    pendingReverseY_ = 0.0;
+    pendingReverseSeconds_ = 0.0;
     integralErrorDegreeSecondsX_ = 0.0;
     integralErrorDegreeSecondsY_ = 0.0;
 }

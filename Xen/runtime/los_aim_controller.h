@@ -18,6 +18,7 @@ public:
         double leadStrength = 0.0;
         double settleErrorDegrees = 0.080;
         double settleRateDegreesPerSecond = 1.200;
+        double reverseConfirmationSeconds = 0.080;
     };
 
     struct Input
@@ -41,6 +42,8 @@ public:
         bool settled = false;
         bool settleReleased = false;
         int settleConfirmationSamples = 0;
+        bool lowSpeedReverseSuppressed = false;
+        double reverseConfirmationSeconds = 0.0;
         double feedbackCountsX = 0.0;
         double feedbackCountsY = 0.0;
         double trackingFeedforwardCountsX = 0.0;
@@ -64,6 +67,12 @@ public:
 private:
     bool settled_ = false;
     int quietSamples_ = 0;
+    bool hasAcceptedSettleBandDirection_ = false;
+    double acceptedSettleBandDirectionX_ = 0.0;
+    double acceptedSettleBandDirectionY_ = 0.0;
+    double pendingReverseX_ = 0.0;
+    double pendingReverseY_ = 0.0;
+    double pendingReverseSeconds_ = 0.0;
     double integralErrorDegreeSecondsX_ = 0.0;
     double integralErrorDegreeSecondsY_ = 0.0;
 };

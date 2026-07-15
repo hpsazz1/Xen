@@ -52,6 +52,7 @@ struct ControllerSettings
     double integralZoneDegrees = 1.0;
     double settleErrorDegrees = 0.080;
     double settleRateDegreesPerSecond = 1.200;
+    double reverseConfirmationSeconds = 0.080;
 };
 
 struct Metrics
@@ -78,6 +79,7 @@ struct Metrics
     double feedforwardCounts = 0.0;
     double settledPercent = 0.0;
     size_t settleReleases = 0;
+    double reverseSuppressedPercent = 0.0;
 };
 
 struct Comparison
