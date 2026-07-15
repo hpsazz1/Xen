@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 30;
+inline constexpr int kBasicAimControllerRevision = 31;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -15,8 +15,8 @@ public:
     struct Settings
     {
         double responseSeconds = 0.080;
-        double maxCountsPerSecond = 1440.0; // 四链路九宫格复测值；仅放宽远距限速，单帧预算仍按真实 dt 换算
-        double integralTimeSeconds = 0.0;   // 0 表示关闭；现场移动目标复测通过后再推广默认值
+        double maxCountsPerSecond = 1440.0; // 独立控制器单元测试的保守默认值；现场配置按场景注入
+        double integralTimeSeconds = 0.0;   // 独立控制器默认关闭积分；现场移动配置显式启用
         double settleRadiusPixels = 5.0;
         double releaseRadiusPixels = 8.0;
         bool preserveMovingIntegral = false; // 预测已确认持续移动时，越心误差不代表目标反向

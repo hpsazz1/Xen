@@ -96,10 +96,10 @@ int main()
         expectNear(defaults.ndi_source_width, 2560.0, 0.0, "default ndi full fov width");
         expectNear(defaults.ndi_source_height, 1440.0, 0.0, "default ndi full fov height");
         expectNear(defaults.detection_resolution, 320.0, 0.0, "default detection resolution");
-        expectNear(defaults.move_max_speed_cps, 1440.0, 0.0,
-                   "default maximum speed uses four-chain nine-grid result");
-        expectNear(defaults.move_integral_time_ms, 0.0, 0.0,
-                   "moving integral remains disabled before field validation");
+        expectNear(defaults.move_max_speed_cps, 3200.0, 0.0,
+                   "default maximum speed follows moving-target standard");
+        expectNear(defaults.move_integral_time_ms, 320.0, 0.0,
+                   "moving integral removes steady tracking bias");
         expectString(defaults.aim_pipeline_mode, "legacy",
                      "new pipeline defaults to legacy mode");
         expectNear(defaults.aim_shadow_command_to_frame_delay_ms, 60.0, 0.0,

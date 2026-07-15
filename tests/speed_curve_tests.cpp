@@ -1064,7 +1064,7 @@ int main()
                "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r30") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r31") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -1735,7 +1735,7 @@ int main()
     productionSettings.settleRadiusPixels = 0.0;
     productionSettings.releaseRadiusPixels = 0.0;
     expectNear(productionSettings.maxCountsPerSecond, 1440.0, 0.0,
-               "production max speed uses four-chain nine-grid result");
+               "controller unit-test default remains conservative");
     for (const double actualFps : { 127.0, 143.0, 240.0 })
     {
         BasicAimController actualFpsController;
