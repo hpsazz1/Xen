@@ -403,6 +403,10 @@ if(BUILD_TESTING)
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/dml_performance_analysis_tests.ps1"
     )
     add_test(
+        NAME xen.analysis.shadow_pipeline
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/shadow_pipeline_analysis_tests.ps1"
+    )
+    add_test(
         NAME xen.ui.prediction_visibility
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/ui_visibility_tests.ps1"
     )
