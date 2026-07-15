@@ -1407,12 +1407,21 @@ void MouseThread::moveMousePivot(
     const auto output = aimController.update(
         errorX, errorY, dt, countsPerPixelX, countsPerPixelY, settings);
 
-    int mx = static_cast<int>(std::round(output.countsX));
-    int my = static_cast<int>(std::round(output.countsY));
+    // 先累计分数 counts 再整数化。直接逐帧 round 会在 10/20 ms 交替的
+    // NDI 时间基下产生 1、6、1、6 这类脉冲，视觉上就是左右晃动；余量
+    // 只改变发送时刻，不改变长期平均位移。
+    const double quantizedX = output.countsX + legacyCountRemainderX;
+    const double quantizedY = output.countsY + legacyCountRemainderY;
+    int mx = static_cast<int>(std::round(quantizedX));
+    int my = static_cast<int>(std::round(quantizedY));
+    legacyCountRemainderX = quantizedX - static_cast<double>(mx);
+    legacyCountRemainderY = quantizedY - static_cast<double>(my);
     if (output.settled)
     {
         mx = 0;
         my = 0;
+        legacyCountRemainderX = 0.0;
+        legacyCountRemainderY = 0.0;
         clearQueuedMoves();
     }
 
@@ -1992,6 +2001,8 @@ void MouseThread::resetTracking()
     lastFilterResult = {};
     lastPredictionResult = {};
     lastControlObservationTime = {};
+    legacyCountRemainderX = 0.0;
+    legacyCountRemainderY = 0.0;
     predictionObservationHistory.clear();
     target_detected.store(false);
     // 目标切换时重置确认帧计数，避免新目标跳过确认延迟

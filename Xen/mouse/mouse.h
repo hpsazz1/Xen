@@ -86,6 +86,10 @@ private:
     TargetPredictor::Settings predictionSettings{};                ///< 运行时预测配置缓存
     PassiveProfileCalibrator profileCalibrator;                    ///< 真实发送counts与raw pivot的被动Profile标定器
     std::chrono::steady_clock::time_point lastControlObservationTime{}; ///< 上一有效观测时间，用于网络抖动下逐帧计算 dt
+    // legacy 输出的分数 counts 余量；跨帧累计后再整数化，避免网络帧间隔
+    // 抖动把连续速度变成零步/大步交替。目标切换或停发时清零。
+    double legacyCountRemainderX = 0.0;
+    double legacyCountRemainderY = 0.0;
     struct PredictionObservationContext
     {
         double screenX = 0.0;
