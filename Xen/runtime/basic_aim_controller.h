@@ -20,6 +20,7 @@ public:
         double settleRadiusPixels = 5.0;
         double releaseRadiusPixels = 8.0;
         bool preserveMovingIntegral = false; // 预测已确认持续移动时，越心误差不代表目标反向
+        bool allowMovingInsideSettle = true; // 生产链路仅在确认移动目标时阻止静态锁存
     };
 
     struct Output
@@ -79,7 +80,8 @@ public:
         // 变化达到稳定半径的四分之一（320 检测区域默认 1.25 px），说明目标仍在移动；
         // 即使尚未越过 8 px 释放半径也要立即恢复控制，避免高频换向时连续停发。
         const double settleMotionThreshold = std::max(1.0, settleRadius * 0.25);
-        const bool movingInsideSettle = integralTime > 0.0 && hasPreviousError_ &&
+        const bool movingInsideSettle = settings.allowMovingInsideSettle &&
+            integralTime > 0.0 && hasPreviousError_ &&
             errorMotion >= settleMotionThreshold;
         out.errorMotion = errorMotion;
         out.settleMotionThreshold = settleMotionThreshold;

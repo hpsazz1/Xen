@@ -90,6 +90,7 @@ private:
     // 抖动把连续速度变成零步/大步交替。目标切换或停发时清零。
     double legacyCountRemainderX = 0.0;
     double legacyCountRemainderY = 0.0;
+    bool previousSelfMotionArtifact = false;
     struct PredictionObservationContext
     {
         double screenX = 0.0;

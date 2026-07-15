@@ -1327,13 +1327,21 @@ void MouseThread::moveMousePivot(
             observedScreenAtObservationY - historyStart.screenY;
         const double viewDeltaX = viewAtObservation.first - historyStart.viewX;
         const double viewDeltaY = viewAtObservation.second - historyStart.viewY;
-        selfMotionArtifactDetected = TargetPredictor::isSelfMotionArtifact(
+        const bool rawSelfMotionArtifact = TargetPredictor::isSelfMotionArtifact(
             observedScreenAtObservationX - center_x,
             observedScreenAtObservationY - center_y,
             screenDeltaX, screenDeltaY,
             viewDeltaX, viewDeltaY,
             lastPredictionResult.velocityX,
             lastPredictionResult.velocityY);
+        // 单帧伪迹也可能是真实 jump/反转的高速观测。连续两帧才确认，
+        // 避免一次误判撤销前瞻并让高速目标脱离控制。
+        selfMotionArtifactDetected = rawSelfMotionArtifact && previousSelfMotionArtifact;
+        previousSelfMotionArtifact = rawSelfMotionArtifact;
+    }
+    else
+    {
+        previousSelfMotionArtifact = false;
     }
     targetPredictor.applySelfMotionSuppression(
         lastPredictionResult, selfMotionArtifactDetected);
@@ -1381,15 +1389,21 @@ void MouseThread::moveMousePivot(
     settings.responseSeconds = move_response_seconds;
     settings.maxCountsPerSecond = move_max_speed_cps;
     settings.integralTimeSeconds = move_integral_time_seconds;
-    settings.settleRadiusPixels = std::max(2.0, screen_width / 64.0);
+    settings.settleRadiusPixels = std::max(6.0, screen_width / 64.0);
     settings.releaseRadiusPixels = settings.settleRadiusPixels * 1.6;
     // 持续预测已提供目标运动方向；此时预测点的小幅越心是正常闭环修正，
     // 保留积分可维持目标速度。停止或反向时预测偏移先归零，下一帧恢复原清零规则。
     // 持续预测已提供目标运动方向；此时预测点的小幅越心是正常闭环修正，
     // 保留积分可维持目标速度。停止或反向时预测偏移先归零，下一帧恢复原清零规则。
-    settings.preserveMovingIntegral =
+    const bool predictionLeadActive =
         std::abs(lastPredictionResult.offsetX) +
         std::abs(lastPredictionResult.offsetY) > 1e-6;
+    const bool reliableMovingTarget =
+        lastPredictionResult.directionLocked &&
+        std::hypot(lastPredictionResult.velocityX, lastPredictionResult.velocityY) >= 80.0 &&
+        !lastPredictionResult.selfMotionSuppressed;
+    settings.preserveMovingIntegral = predictionLeadActive || reliableMovingTarget;
+    settings.allowMovingInsideSettle = settings.preserveMovingIntegral;
     // 网络捕获的到帧间隔可能抖动，优先使用相邻有效观测的真实时间差。
     // 捕获窗 FPS 只作为首帧或无时间戳时的回退，避免一秒平均值掩盖 UDP/NDI 抖动。
     double dt = frameIntervalSec(captureFps.load());
@@ -2003,6 +2017,7 @@ void MouseThread::resetTracking()
     lastControlObservationTime = {};
     legacyCountRemainderX = 0.0;
     legacyCountRemainderY = 0.0;
+    previousSelfMotionArtifact = false;
     predictionObservationHistory.clear();
     target_detected.store(false);
     // 目标切换时重置确认帧计数，避免新目标跳过确认延迟
