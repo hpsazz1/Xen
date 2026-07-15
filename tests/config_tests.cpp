@@ -114,6 +114,12 @@ int main()
                    "shadow experience lead horizon remains disabled by default");
         expectNear(defaults.aim_shadow_lead_strength, 0.0, 0.0,
                    "shadow experience lead strength remains disabled by default");
+        expectString(defaults.trajectory_shaper_mode, "off",
+                     "trajectory shaper defaults to exact pass-through mode");
+        expectNear(defaults.trajectory_output_hz, 240.0, 0.0,
+                   "trajectory scheduler uses the documented fixed rate");
+        expectNear(defaults.trajectory_max_velocity_cps, 1440.0, 0.0,
+                   "trajectory speed defaults to the controller device budget");
         expectNear(defaults.prediction_lead_ms, 50.0, 0.0,
                    "default prediction uses kinematic replay lead");
         expectNear(defaults.prediction_velocity_tau_ms, 50.0, 0.0,
@@ -180,6 +186,9 @@ int main()
                    migratedText.find("aim_shadow_integral_time_ms = 0") != std::string::npos &&
                    migratedText.find("aim_shadow_lead_horizon_ms = 0") != std::string::npos,
                    "saved config persists independently disabled P0-4A controller terms");
+        expectTrue(migratedText.find("trajectory_shaper_mode = off") != std::string::npos &&
+                   migratedText.find("trajectory_output_hz = 240") != std::string::npos,
+                   "saved config persists the P0-4B pass-through baseline");
         expectTrue(migratedText.find("predictionInterval") == std::string::npos,
                    "saved config removes legacy prediction interval key");
     }
@@ -265,6 +274,32 @@ int main()
     expectNear(clampedShadowController.aim_shadow_lead_strength, 4.0, 0.0,
                "shadow experience lead strength remains bounded");
     std::filesystem::remove(unsafeShadowControllerPath, removeError);
+
+    const std::filesystem::path unsafeTrajectoryPath =
+        "xen_config_trajectory_shaper_test.ini";
+    {
+        std::ofstream unsafeTrajectoryFile(unsafeTrajectoryPath);
+        unsafeTrajectoryFile
+            << "trajectory_shaper_mode = ruckig\n"
+            << "trajectory_output_hz = 9999\n"
+            << "trajectory_max_velocity_cps = 9999\n"
+            << "trajectory_max_acceleration_cps2 = 1\n"
+            << "trajectory_max_jerk_cps3 = 1\n";
+    }
+    Config clampedTrajectory{};
+    expectTrue(clampedTrajectory.loadConfig(unsafeTrajectoryPath.string()),
+               "trajectory shaper config loads successfully");
+    expectString(clampedTrajectory.trajectory_shaper_mode, "off",
+                 "unavailable Ruckig mode fails safely to pass-through");
+    expectNear(clampedTrajectory.trajectory_output_hz, 1000.0, 0.0,
+               "trajectory output rate remains bounded");
+    expectNear(clampedTrajectory.trajectory_max_velocity_cps, 4000.0, 0.0,
+               "trajectory speed remains bounded by the device safety maximum");
+    expectNear(clampedTrajectory.trajectory_max_acceleration_cps2, 1000.0, 0.0,
+               "trajectory acceleration uses a nonzero engineering minimum");
+    expectNear(clampedTrajectory.trajectory_max_jerk_cps3, 10000.0, 0.0,
+               "trajectory jerk uses a nonzero engineering minimum");
+    std::filesystem::remove(unsafeTrajectoryPath, removeError);
 
     const std::filesystem::path speedLimitPath = "xen_config_speed_limit_test.ini";
     {

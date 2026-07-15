@@ -37,6 +37,11 @@ float prev_aim_shadow_integral_time_ms = config.aim_shadow_integral_time_ms;
 float prev_aim_shadow_integral_zone_deg = config.aim_shadow_integral_zone_deg;
 float prev_aim_shadow_lead_horizon_ms = config.aim_shadow_lead_horizon_ms;
 float prev_aim_shadow_lead_strength = config.aim_shadow_lead_strength;
+std::string prev_trajectory_shaper_mode = config.trajectory_shaper_mode;
+float prev_trajectory_output_hz = config.trajectory_output_hz;
+float prev_trajectory_max_velocity_cps = config.trajectory_max_velocity_cps;
+float prev_trajectory_max_acceleration_cps2 = config.trajectory_max_acceleration_cps2;
+float prev_trajectory_max_jerk_cps3 = config.trajectory_max_jerk_cps3;
 	// 预测
 	bool  prev_prediction_enabled = config.prediction_enabled;
 	float prev_prediction_lead_ms = config.prediction_lead_ms;
@@ -118,6 +123,33 @@ static void draw_mouse_page(MouseSettingsPage page)
     {
         OverlayUI::SliderIntRow("水平视野(FOV X)", &config.fovX, 10, 120);
         OverlayUI::SliderIntRow("垂直视野(FOV Y)", &config.fovY, 10, 120);
+        OverlayUI::EndSection();
+    }
+
+    if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
+        OverlayUI::BeginSection("确定性轨迹影子参数", "mouse_section_shadow_trajectory"))
+    {
+        const char* trajectoryModes[] = { "透传(off)", "梯形/jerk约束(trapezoid)" };
+        int trajectoryModeIndex = config.trajectory_shaper_mode == "trapezoid" ? 1 : 0;
+        if (OverlayUI::ComboRow("整形模式", &trajectoryModeIndex,
+            trajectoryModes, IM_ARRAYSIZE(trajectoryModes), "##trajectory_shaper_mode"))
+        {
+            config.trajectory_shaper_mode = trajectoryModeIndex == 1 ? "trapezoid" : "off";
+            OverlayConfig_MarkDirty();
+        }
+        OverlayUI::SliderFloatRow("固定输出频率", &config.trajectory_output_hz,
+            30.0f, 1000.0f, "%.0f Hz", "##trajectory_output_hz",
+            "调度器每周期最多生成一个二维命令；迟到时跳过旧周期，不批量补发。");
+        OverlayUI::SliderFloatRow("最大轨迹速度", &config.trajectory_max_velocity_cps,
+            30.0f, 4000.0f, "%.0f counts/s", "##trajectory_max_velocity",
+            "限制目标与实际二维速度向量。");
+        OverlayUI::SliderFloatRow("最大轨迹加速度", &config.trajectory_max_acceleration_cps2,
+            1000.0f, 1000000.0f, "%.0f counts/s²", "##trajectory_max_acceleration",
+            "限制二维速度变化率；目标切换和丢失使用紧急清零，不沿旧方向滑行。");
+        OverlayUI::SliderFloatRow("最大轨迹jerk", &config.trajectory_max_jerk_cps3,
+            10000.0f, 100000000.0f, "%.0f counts/s³", "##trajectory_max_jerk",
+            "限制二维加速度变化率，保证回放确定性。");
+        ImGui::TextDisabled("P0-4B仍为shadow；整数输出只记录，不访问设备队列");
         OverlayUI::EndSection();
     }
 
@@ -882,6 +914,11 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_aim_shadow_integral_zone_deg != config.aim_shadow_integral_zone_deg ||
         prev_aim_shadow_lead_horizon_ms != config.aim_shadow_lead_horizon_ms ||
         prev_aim_shadow_lead_strength != config.aim_shadow_lead_strength ||
+        prev_trajectory_shaper_mode != config.trajectory_shaper_mode ||
+        prev_trajectory_output_hz != config.trajectory_output_hz ||
+        prev_trajectory_max_velocity_cps != config.trajectory_max_velocity_cps ||
+        prev_trajectory_max_acceleration_cps2 != config.trajectory_max_acceleration_cps2 ||
+        prev_trajectory_max_jerk_cps3 != config.trajectory_max_jerk_cps3 ||
         prev_minSpeedMultiplier != config.minSpeedMultiplier ||
         prev_maxSpeedMultiplier != config.maxSpeedMultiplier ||
         prev_prediction_enabled != config.prediction_enabled ||
@@ -910,6 +947,11 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_aim_shadow_integral_zone_deg = config.aim_shadow_integral_zone_deg;
         prev_aim_shadow_lead_horizon_ms = config.aim_shadow_lead_horizon_ms;
         prev_aim_shadow_lead_strength = config.aim_shadow_lead_strength;
+        prev_trajectory_shaper_mode = config.trajectory_shaper_mode;
+        prev_trajectory_output_hz = config.trajectory_output_hz;
+        prev_trajectory_max_velocity_cps = config.trajectory_max_velocity_cps;
+        prev_trajectory_max_acceleration_cps2 = config.trajectory_max_acceleration_cps2;
+        prev_trajectory_max_jerk_cps3 = config.trajectory_max_jerk_cps3;
         // 同步速度倍率
         prev_minSpeedMultiplier = config.minSpeedMultiplier;
         prev_maxSpeedMultiplier = config.maxSpeedMultiplier;

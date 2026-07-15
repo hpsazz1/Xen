@@ -92,6 +92,14 @@ MouseThread::MouseThread(
         shadowControllerSettings.leadHorizonSeconds = config.aim_shadow_lead_horizon_ms / 1000.0;
         shadowControllerSettings.leadStrength = config.aim_shadow_lead_strength;
         aimPipelineRuntime.configureController(shadowControllerSettings);
+        CommandTrajectoryShaper::Settings trajectorySettings;
+        trajectorySettings.mode = parseTrajectoryShaperMode(config.trajectory_shaper_mode);
+        trajectorySettings.maxVelocityCountsPerSecond = config.trajectory_max_velocity_cps;
+        trajectorySettings.maxAccelerationCountsPerSecond2 = config.trajectory_max_acceleration_cps2;
+        trajectorySettings.maxJerkCountsPerSecond3 = config.trajectory_max_jerk_cps3;
+        OutputScheduler::Settings schedulerSettings;
+        schedulerSettings.outputHz = config.trajectory_output_hz;
+        aimPipelineRuntime.configureTrajectory(trajectorySettings, schedulerSettings);
         appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
         profileCalibrator.setEnabled(config.profile_calibration_enabled);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
@@ -149,6 +157,14 @@ void MouseThread::updateConfig(
     shadowControllerSettings.leadHorizonSeconds = config.aim_shadow_lead_horizon_ms / 1000.0;
     shadowControllerSettings.leadStrength = config.aim_shadow_lead_strength;
     aimPipelineRuntime.configureController(shadowControllerSettings);
+    CommandTrajectoryShaper::Settings trajectorySettings;
+    trajectorySettings.mode = parseTrajectoryShaperMode(config.trajectory_shaper_mode);
+    trajectorySettings.maxVelocityCountsPerSecond = config.trajectory_max_velocity_cps;
+    trajectorySettings.maxAccelerationCountsPerSecond2 = config.trajectory_max_acceleration_cps2;
+    trajectorySettings.maxJerkCountsPerSecond3 = config.trajectory_max_jerk_cps3;
+    OutputScheduler::Settings schedulerSettings;
+    schedulerSettings.outputHz = config.trajectory_output_hz;
+    aimPipelineRuntime.configureTrajectory(trajectorySettings, schedulerSettings);
     appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
     profileCalibrator.setEnabled(config.profile_calibration_enabled);
     if (config.profile_calibration_enabled)

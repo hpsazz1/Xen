@@ -182,7 +182,12 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,"
          << "AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadReferenceX,AimPipelineLeadReferenceY,"
          << "AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY,"
-         << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit,AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
+         << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit,"
+         << "TrajectoryRequestValid,TrajectoryRequestSequence,TrajectoryRequestTimeNs,TrajectoryRequestDurationMs,TrajectoryShaperMode,TrajectoryOutputProduced,TrajectoryOutputRequestSequence,TrajectoryScheduledTickNs,TrajectoryOutputTickNs,"
+         << "TrajectoryVelocityLimited,TrajectoryAccelerationLimited,TrajectoryJerkLimited,TrajectoryEmergencyReset,"
+         << "TrajectoryPositionX,TrajectoryPositionY,TrajectoryTargetVelocityX,TrajectoryTargetVelocityY,TrajectoryVelocityX,TrajectoryVelocityY,TrajectoryAccelerationX,TrajectoryAccelerationY,TrajectoryJerkX,TrajectoryJerkY,"
+         << "TrajectoryShapedCountsX,TrajectoryShapedCountsY,TrajectoryQuantizationRemainderX,TrajectoryQuantizationRemainderY,TrajectoryShapingDelayMs,TrajectorySchedulerLatenessMs,TrajectorySchedulerSkippedTicks,"
+         << "AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
          << "ViewMotionShadowValid,CommandToFrameDelayMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
          << "AppliedCameraYawAtObservationDegrees,AppliedCameraPitchAtObservationDegrees,AppliedCameraYawAtControlDegrees,AppliedCameraPitchAtControlDegrees,"
          << "StabilizedLosYawDegrees,StabilizedLosPitchDownDegrees,RelativeErrorYawDegrees,RelativeErrorPitchDownDegrees,"
@@ -261,6 +266,36 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << ap.control.unlimitedCountsX << ',' << ap.control.unlimitedCountsY << ','
              << ap.control.requestedCountsX << ',' << ap.control.requestedCountsY << ','
              << ap.control.frameCountLimit << ','
+             << (ap.trajectoryRequest.valid ? '1' : '0') << ','
+             << ap.trajectoryRequest.sequence << ','
+             << steadyTimeNs(ap.trajectoryRequest.requestTime) << ','
+             << ap.trajectoryRequest.requestDurationSeconds * 1000.0 << ','
+             << trajectoryShaperModeName(ap.trajectoryOutput.mode) << ','
+             << (ap.trajectoryOutput.outputProduced ? '1' : '0') << ','
+             << ap.trajectoryOutput.requestSequence << ','
+             << steadyTimeNs(ap.trajectoryOutput.scheduledTickTime) << ','
+             << steadyTimeNs(ap.trajectoryOutput.outputTickTime) << ','
+             << (ap.trajectoryOutput.velocityLimited ? '1' : '0') << ','
+             << (ap.trajectoryOutput.accelerationLimited ? '1' : '0') << ','
+             << (ap.trajectoryOutput.jerkLimited ? '1' : '0') << ','
+             << (ap.trajectoryOutput.emergencyReset ? '1' : '0') << ','
+             << ap.trajectoryState.positionCountsX << ','
+             << ap.trajectoryState.positionCountsY << ','
+             << ap.trajectoryState.targetVelocityCountsPerSecX << ','
+             << ap.trajectoryState.targetVelocityCountsPerSecY << ','
+             << ap.trajectoryState.velocityCountsPerSecX << ','
+             << ap.trajectoryState.velocityCountsPerSecY << ','
+             << ap.trajectoryState.accelerationCountsPerSec2X << ','
+             << ap.trajectoryState.accelerationCountsPerSec2Y << ','
+             << ap.trajectoryState.jerkCountsPerSec3X << ','
+             << ap.trajectoryState.jerkCountsPerSec3Y << ','
+             << ap.trajectoryOutput.shapedCountsX << ','
+             << ap.trajectoryOutput.shapedCountsY << ','
+             << ap.trajectoryOutput.quantizationRemainderX << ','
+             << ap.trajectoryOutput.quantizationRemainderY << ','
+             << ap.trajectoryOutput.shapingDelayMs << ','
+             << ap.trajectoryOutput.schedulerLatenessMs << ','
+             << ap.trajectoryOutput.schedulerSkippedTicks << ','
              << ap.trajectoryOutput.outputCountsX << ',' << ap.trajectoryOutput.outputCountsY << ','
              << (ap.trajectoryOutput.commandSuppressed ? '1' : '0') << ','
              << (ap.viewMotion.valid ? '1' : '0') << ','

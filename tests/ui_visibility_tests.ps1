@@ -36,6 +36,16 @@ foreach ($control in @(
         throw "P0-4A shadow controller UI is missing: $control"
     }
 }
+foreach ($control in @(
+    '##trajectory_shaper_mode',
+    '##trajectory_output_hz',
+    '##trajectory_max_velocity',
+    '##trajectory_max_acceleration',
+    '##trajectory_max_jerk')) {
+    if ($mouseUi -notmatch $control) {
+        throw "P0-4B trajectory shaper UI is missing: $control"
+    }
+}
 if ($overlayUi -notmatch '\{[^\r\n]*draw_mouse_prediction[^\r\n]*SidebarIconKind::Curve\s*\}') {
     throw 'Prediction settings page is not registered in the sidebar.'
 }

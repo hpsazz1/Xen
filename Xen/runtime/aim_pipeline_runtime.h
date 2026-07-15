@@ -5,6 +5,8 @@
 
 #include "aim_pipeline_types.h"
 #include "los_aim_controller.h"
+#include "command_trajectory_shaper.h"
+#include "output_scheduler.h"
 #include "relative_los_kalman.h"
 
 // P0-0 影子运行时：只接收同帧观测并生成诊断快照，绝不直接访问设备队列。
@@ -15,6 +17,8 @@ public:
 
     void configure(const std::string& requestedMode);
     void configureController(const LosAimController::Settings& settings);
+    void configureTrajectory(const CommandTrajectoryShaper::Settings& shaperSettings,
+                             const OutputScheduler::Settings& schedulerSettings);
     void reset();
     AimPipelineFrameState observe(const AimObservation& observation);
     void setViewMotionDiagnostics(const ViewMotionShadowDiagnostics& diagnostics);
@@ -34,6 +38,8 @@ private:
     LosAimController losAimController_{};
     LosAimController::Settings controllerSettings_{};
     FrameTiming::Clock::time_point lastControllerUpdateTime_{};
+    CommandTrajectoryShaper trajectoryShaper_{};
+    OutputScheduler outputScheduler_{};
 };
 
 AimPipelineMode parseAimPipelineMode(const std::string& value);

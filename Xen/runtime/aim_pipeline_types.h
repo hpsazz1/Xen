@@ -13,6 +13,17 @@ enum class AimPipelineMode
     Active
 };
 
+enum class TrajectoryShaperMode
+{
+    Off,
+    Trapezoid
+};
+
+inline const char* trajectoryShaperModeName(TrajectoryShaperMode mode)
+{
+    return mode == TrajectoryShaperMode::Trapezoid ? "trapezoid" : "off";
+}
+
 inline const char* aimPipelineModeName(AimPipelineMode mode)
 {
     switch (mode)
@@ -157,8 +168,11 @@ struct AimControlBreakdown
 
 struct TrajectoryRequest
 {
+    bool valid = false;
+    uint64_t sequence = 0;
     double requestedCountsX = 0.0;
     double requestedCountsY = 0.0;
+    double requestDurationSeconds = 0.0;
     FrameTiming::Clock::time_point requestTime{};
 };
 
@@ -166,17 +180,36 @@ struct TrajectoryState
 {
     double positionCountsX = 0.0;
     double positionCountsY = 0.0;
+    double targetVelocityCountsPerSecX = 0.0;
+    double targetVelocityCountsPerSecY = 0.0;
     double velocityCountsPerSecX = 0.0;
     double velocityCountsPerSecY = 0.0;
     double accelerationCountsPerSec2X = 0.0;
     double accelerationCountsPerSec2Y = 0.0;
+    double jerkCountsPerSec3X = 0.0;
+    double jerkCountsPerSec3Y = 0.0;
 };
 
 struct TrajectoryOutput
 {
+    TrajectoryShaperMode mode = TrajectoryShaperMode::Off;
+    bool outputProduced = false;
+    bool velocityLimited = false;
+    bool accelerationLimited = false;
+    bool jerkLimited = false;
+    bool emergencyReset = false;
+    uint64_t requestSequence = 0;
+    double shapedCountsX = 0.0;
+    double shapedCountsY = 0.0;
+    double quantizationRemainderX = 0.0;
+    double quantizationRemainderY = 0.0;
+    double shapingDelayMs = 0.0;
+    double schedulerLatenessMs = 0.0;
+    uint64_t schedulerSkippedTicks = 0;
     int outputCountsX = 0;
     int outputCountsY = 0;
     bool commandSuppressed = true;
+    FrameTiming::Clock::time_point scheduledTickTime{};
     FrameTiming::Clock::time_point outputTickTime{};
 };
 

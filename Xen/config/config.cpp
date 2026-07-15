@@ -143,6 +143,11 @@ bool Config::loadConfig(const std::string& filename)
         aim_shadow_integral_zone_deg = 1.0f;
         aim_shadow_lead_horizon_ms = 0.0f;
         aim_shadow_lead_strength = 0.0f;
+        trajectory_shaper_mode = "off";                 // P0-4B默认先验证完全等价透传
+        trajectory_output_hz = 240.0f;
+        trajectory_max_velocity_cps = 1440.0f;
+        trajectory_max_acceleration_cps2 = 60000.0f;
+        trajectory_max_jerk_cps3 = 4000000.0f;
 
         prediction_enabled = true;                       // 连续真实观测预测总开关
         prediction_lead_ms = 50.0f;                      // 观测年龄之外的基础前瞻（毫秒）
@@ -558,6 +563,12 @@ bool Config::loadConfig(const std::string& filename)
     aim_shadow_integral_zone_deg = (float)get_double("aim_shadow_integral_zone_deg", 1.0);
     aim_shadow_lead_horizon_ms = (float)get_double("aim_shadow_lead_horizon_ms", 0.0);
     aim_shadow_lead_strength = (float)get_double("aim_shadow_lead_strength", 0.0);
+    trajectory_shaper_mode = get_string("trajectory_shaper_mode", "off");
+    trajectory_output_hz = (float)get_double("trajectory_output_hz", 240.0);
+    trajectory_max_velocity_cps = (float)get_double("trajectory_max_velocity_cps", 1440.0);
+    trajectory_max_acceleration_cps2 = (float)get_double(
+        "trajectory_max_acceleration_cps2", 60000.0);
+    trajectory_max_jerk_cps3 = (float)get_double("trajectory_max_jerk_cps3", 4000000.0);
 
     prediction_enabled = get_bool("prediction_enabled", true);
     const bool hasPredictionLeadMs = ini.GetValue("", "prediction_lead_ms", nullptr) != nullptr;
@@ -772,6 +783,15 @@ bool Config::loadConfig(const std::string& filename)
     aim_shadow_integral_zone_deg = std::clamp(aim_shadow_integral_zone_deg, 0.0f, 10.0f);
     aim_shadow_lead_horizon_ms = std::clamp(aim_shadow_lead_horizon_ms, 0.0f, 250.0f);
     aim_shadow_lead_strength = std::clamp(aim_shadow_lead_strength, 0.0f, 4.0f);
+    if (trajectory_shaper_mode != "trapezoid")
+        trajectory_shaper_mode = "off";
+    trajectory_output_hz = std::clamp(trajectory_output_hz, 30.0f, 1000.0f);
+    trajectory_max_velocity_cps = std::clamp(
+        trajectory_max_velocity_cps, 30.0f, 4000.0f);
+    trajectory_max_acceleration_cps2 = std::clamp(
+        trajectory_max_acceleration_cps2, 1000.0f, 1000000.0f);
+    trajectory_max_jerk_cps3 = std::clamp(
+        trajectory_max_jerk_cps3, 10000.0f, 100000000.0f);
 
     // === 覆盖层尺寸范围校验 ===
     if (overlay_width < 560) overlay_width = 560;
@@ -901,6 +921,11 @@ bool Config::saveConfig(const std::string& filename)
         << "aim_shadow_integral_zone_deg = " << aim_shadow_integral_zone_deg << "\n"
         << "aim_shadow_lead_horizon_ms = " << aim_shadow_lead_horizon_ms << "\n"
         << "aim_shadow_lead_strength = " << aim_shadow_lead_strength << "\n"
+        << "trajectory_shaper_mode = " << trajectory_shaper_mode << "\n"
+        << "trajectory_output_hz = " << trajectory_output_hz << "\n"
+        << "trajectory_max_velocity_cps = " << trajectory_max_velocity_cps << "\n"
+        << "trajectory_max_acceleration_cps2 = " << trajectory_max_acceleration_cps2 << "\n"
+        << "trajectory_max_jerk_cps3 = " << trajectory_max_jerk_cps3 << "\n"
         << "prediction_enabled = " << (prediction_enabled ? "true" : "false") << "\n"
         << "prediction_lead_ms = " << prediction_lead_ms << "\n"
         << "prediction_velocity_tau_ms = " << prediction_velocity_tau_ms << "\n"

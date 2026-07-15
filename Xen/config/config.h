@@ -83,6 +83,11 @@ public:
     float aim_shadow_integral_zone_deg = 1.0f;           // 仅在该角误差范围内积分
     float aim_shadow_lead_horizon_ms = 0.0f;             // 独立经验提前时域；默认关闭
     float aim_shadow_lead_strength = 0.0f;               // 独立经验提前强度；默认关闭
+    std::string trajectory_shaper_mode = "off";          // off透传，trapezoid确定性约束
+    float trajectory_output_hz = 240.0f;                 // 固定整形输出周期
+    float trajectory_max_velocity_cps = 1440.0f;
+    float trajectory_max_acceleration_cps2 = 60000.0f;
+    float trajectory_max_jerk_cps3 = 4000000.0f;
 
     // ========== 目标预测 ==========
     bool  prediction_enabled = true;              // 连续真实观测预测总开关

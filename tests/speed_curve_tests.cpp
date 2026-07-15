@@ -3,6 +3,8 @@
 #include "runtime/applied_view_motion_model.h"
 #include "runtime/relative_los_kalman.h"
 #include "runtime/los_aim_controller.h"
+#include "runtime/command_trajectory_shaper.h"
+#include "runtime/output_scheduler.h"
 #include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_target_filter.h"
 #include "runtime/target_predictor.h"
@@ -19,6 +21,7 @@
 #include "runtime/build_identity.h"
 
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -185,6 +188,12 @@ int main()
                kalmanFrame.trajectoryRequest.requestedCountsX > 0.0 &&
                kalmanFrame.commandSuppressed,
                "P0-4A produces an auditable P-only request without enabling device output");
+    expectTrue(kalmanFrame.trajectoryOutput.outputProduced &&
+               kalmanFrame.trajectoryOutput.commandSuppressed,
+               "P0-4B pass-through produces diagnostics without enabling device output");
+    expectNear(kalmanFrame.trajectoryOutput.shapedCountsX,
+               kalmanFrame.trajectoryRequest.requestedCountsX, 1e-12,
+               "P0-4B off mode is exactly equal to the controller request");
     expectTrue(shadowFrame.observation.trackId == 7 &&
                shadowFrame.observationSequence == 1,
                "shadow pipeline preserves target identity and observation sequence");
@@ -343,6 +352,163 @@ int main()
         integralInput, saturatedIntegralSettings);
     expectTrue(saturatedIntegral.speedLimited && saturatedIntegral.integralFrozen,
                "saturation freezes the angle integral candidate");
+
+    expectTrue(parseTrajectoryShaperMode("trapezoid") == TrajectoryShaperMode::Trapezoid &&
+               parseTrajectoryShaperMode("ruckig") == TrajectoryShaperMode::Off,
+               "unsupported trajectory modes fail safely to pass-through off mode");
+
+    CommandTrajectoryShaper passThroughShaper;
+    CommandTrajectoryShaper::Settings passThroughSettings;
+    passThroughSettings.mode = TrajectoryShaperMode::Off;
+    passThroughShaper.configure(passThroughSettings);
+    TrajectoryRequest fractionalRequest;
+    fractionalRequest.valid = true;
+    fractionalRequest.sequence = 1;
+    fractionalRequest.requestedCountsX = 0.25;
+    fractionalRequest.requestedCountsY = -0.25;
+    fractionalRequest.requestDurationSeconds = 0.010;
+    fractionalRequest.requestTime = timingBase;
+    int quantizedTotalX = 0;
+    int quantizedTotalY = 0;
+    CommandTrajectoryShaper::Result fractionalResult;
+    for (int tick = 0; tick < 4; ++tick)
+    {
+        fractionalRequest.sequence = static_cast<uint64_t>(tick + 1);
+        fractionalResult = passThroughShaper.update(
+            fractionalRequest, 0.010,
+            timingBase + std::chrono::milliseconds(tick * 10));
+        expectNear(fractionalResult.output.shapedCountsX, 0.25, 0.0,
+                   "pass-through preserves every floating-point request");
+        quantizedTotalX += fractionalResult.output.outputCountsX;
+        quantizedTotalY += fractionalResult.output.outputCountsY;
+    }
+    expectNear(quantizedTotalX, 1.0, 0.0,
+               "positive integer quantization remainder is conserved long term");
+    expectNear(quantizedTotalY, -1.0, 0.0,
+               "negative integer quantization remainder is conserved long term");
+    expectNear(fractionalResult.output.quantizationRemainderX, 0.0, 1e-12,
+               "pass-through returns to zero remainder after an exact count");
+
+    CommandTrajectoryShaper constrainedShaper;
+    CommandTrajectoryShaper::Settings constrainedSettings;
+    constrainedSettings.mode = TrajectoryShaperMode::Trapezoid;
+    constrainedSettings.maxVelocityCountsPerSecond = 100.0;
+    constrainedSettings.maxAccelerationCountsPerSecond2 = 200.0;
+    constrainedSettings.maxJerkCountsPerSecond3 = 1000.0;
+    constrainedShaper.configure(constrainedSettings);
+    TrajectoryRequest positiveVelocityRequest;
+    positiveVelocityRequest.valid = true;
+    positiveVelocityRequest.sequence = 10;
+    positiveVelocityRequest.requestedCountsX = 10.0;
+    positiveVelocityRequest.requestDurationSeconds = 0.010;
+    positiveVelocityRequest.requestTime = timingBase;
+    CommandTrajectoryShaper::Result constrainedResult;
+    double previousConstrainedVelocityX = 0.0;
+    double previousConstrainedAccelerationX = 0.0;
+    for (int tick = 0; tick < 200; ++tick)
+    {
+        constrainedResult = constrainedShaper.update(
+            positiveVelocityRequest, 0.010,
+            timingBase + std::chrono::milliseconds(tick * 10));
+        expectTrue(std::hypot(constrainedResult.state.velocityCountsPerSecX,
+                              constrainedResult.state.velocityCountsPerSecY) <= 100.0 + 1e-9,
+                   "trapezoid speed stays inside the two-axis vector limit");
+        expectTrue(std::hypot(constrainedResult.state.accelerationCountsPerSec2X,
+                              constrainedResult.state.accelerationCountsPerSec2Y) <= 200.0 + 1e-9,
+                   "trapezoid acceleration stays inside the two-axis vector limit");
+        expectTrue(std::hypot(constrainedResult.state.jerkCountsPerSec3X,
+                              constrainedResult.state.jerkCountsPerSec3Y) <= 1000.0 + 1e-9,
+                   "trapezoid jerk stays inside the two-axis vector limit");
+        expectNear(constrainedResult.state.accelerationCountsPerSec2X,
+                   (constrainedResult.state.velocityCountsPerSecX -
+                    previousConstrainedVelocityX) / 0.010,
+                   1e-9,
+                   "stored acceleration matches the actual shaped velocity derivative");
+        expectNear(constrainedResult.state.jerkCountsPerSec3X,
+                   (constrainedResult.state.accelerationCountsPerSec2X -
+                    previousConstrainedAccelerationX) / 0.010,
+                   1e-9,
+                   "stored jerk matches the actual shaped acceleration derivative");
+        previousConstrainedVelocityX = constrainedResult.state.velocityCountsPerSecX;
+        previousConstrainedAccelerationX =
+            constrainedResult.state.accelerationCountsPerSec2X;
+    }
+    expectTrue(constrainedResult.output.velocityLimited &&
+               constrainedResult.output.requestSequence == 10,
+               "trapezoid exposes target speed limiting and source request identity");
+    TrajectoryRequest reverseVelocityRequest = positiveVelocityRequest;
+    reverseVelocityRequest.sequence = 11;
+    reverseVelocityRequest.requestedCountsX = -1.0;
+    for (int tick = 200; tick < 500; ++tick)
+    {
+        constrainedResult = constrainedShaper.update(
+            reverseVelocityRequest, 0.010,
+            timingBase + std::chrono::milliseconds(tick * 10));
+    }
+    expectTrue(constrainedResult.state.velocityCountsPerSecX < 0.0,
+               "online replanning reaches a reversed target without replaying an old path");
+    const auto emergencyTrajectory = constrainedShaper.emergencyReset(
+        timingBase + std::chrono::seconds(6));
+    expectTrue(emergencyTrajectory.output.emergencyReset &&
+               emergencyTrajectory.output.outputCountsX == 0 &&
+               emergencyTrajectory.state.velocityCountsPerSecX == 0.0 &&
+               emergencyTrajectory.state.accelerationCountsPerSec2X == 0.0,
+               "target loss emergency reset clears velocity and acceleration in one cycle");
+
+    CommandTrajectoryShaper scheduledShaper;
+    scheduledShaper.configure(constrainedSettings);
+    OutputScheduler scheduler;
+    OutputScheduler::Settings schedulerSettings;
+    schedulerSettings.outputHz = 100.0;
+    scheduler.configure(schedulerSettings);
+    TrajectoryRequest scheduledRequest = positiveVelocityRequest;
+    scheduledRequest.sequence = 20;
+    scheduledRequest.requestTime = timingBase;
+    scheduler.submit(scheduledRequest);
+    const auto firstScheduled = scheduler.service(timingBase, scheduledShaper);
+    expectTrue(firstScheduled.has_value() &&
+               firstScheduled->output.requestSequence == 20,
+               "fixed scheduler emits the first latest request at its initial lattice point");
+    expectTrue(!scheduler.service(
+                   timingBase + std::chrono::milliseconds(5), scheduledShaper).has_value(),
+               "fixed scheduler emits at most one command per output period");
+    TrajectoryRequest newerScheduledRequest = scheduledRequest;
+    newerScheduledRequest.sequence = 21;
+    newerScheduledRequest.requestedCountsX = -1.0;
+    newerScheduledRequest.requestTime = timingBase + std::chrono::milliseconds(6);
+    scheduler.submit(newerScheduledRequest);
+    const auto lateScheduled = scheduler.service(
+        timingBase + std::chrono::milliseconds(25), scheduledShaper);
+    expectTrue(lateScheduled.has_value() &&
+               lateScheduled->output.requestSequence == 21 &&
+               lateScheduled->output.schedulerSkippedTicks == 1,
+               "late scheduler service skips stale ticks and uses only the latest request");
+    expectNear(lateScheduled->output.schedulerLatenessMs, 5.0, 1e-6,
+               "scheduler reports actual service lateness from the selected lattice tick");
+    expectNear(lateScheduled->output.shapingDelayMs, 19.0, 1e-6,
+               "shaping delay includes scheduler lateness instead of using planned tick time");
+    OutputScheduler arrivalOrderedScheduler;
+    arrivalOrderedScheduler.configure(schedulerSettings);
+    CommandTrajectoryShaper arrivalOrderedShaper;
+    arrivalOrderedShaper.configure(constrainedSettings);
+    arrivalOrderedScheduler.submit(scheduledRequest);
+    expectTrue(arrivalOrderedScheduler.service(
+                   timingBase, arrivalOrderedShaper).has_value(),
+               "arrival-ordered scheduler establishes its initial lattice");
+    TrajectoryRequest afterTickRequest = newerScheduledRequest;
+    afterTickRequest.sequence = 22;
+    afterTickRequest.requestTime = timingBase + std::chrono::milliseconds(16);
+    arrivalOrderedScheduler.submit(afterTickRequest);
+    expectTrue(!arrivalOrderedScheduler.service(
+                   timingBase + std::chrono::milliseconds(17),
+                   arrivalOrderedShaper).has_value(),
+               "a new request is never backfilled into a tick before its arrival");
+    const auto firstTickAfterArrival = arrivalOrderedScheduler.service(
+        timingBase + std::chrono::milliseconds(20), arrivalOrderedShaper);
+    expectTrue(firstTickAfterArrival.has_value() &&
+               firstTickAfterArrival->output.requestSequence == 22 &&
+               firstTickAfterArrival->output.schedulerSkippedTicks == 1,
+               "new request starts at the first fixed lattice point after arrival");
 
     FrameRateCounter rateCounter;
     const auto rateStart = FrameRateCounter::TimePoint(std::chrono::milliseconds(1000));
@@ -682,6 +848,11 @@ int main()
         traceHeader.find("AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit") != std::string::npos,
         "basic pipeline records the complete P0-4A controller decomposition");
     expectTrue(traceHeader.find(
+        "TrajectoryRequestValid,TrajectoryRequestSequence,TrajectoryRequestTimeNs,TrajectoryRequestDurationMs,TrajectoryShaperMode,TrajectoryOutputProduced,TrajectoryOutputRequestSequence,TrajectoryScheduledTickNs,TrajectoryOutputTickNs") != std::string::npos &&
+        traceHeader.find("TrajectoryPositionX,TrajectoryPositionY,TrajectoryTargetVelocityX,TrajectoryTargetVelocityY,TrajectoryVelocityX,TrajectoryVelocityY,TrajectoryAccelerationX,TrajectoryAccelerationY,TrajectoryJerkX,TrajectoryJerkY") != std::string::npos &&
+        traceHeader.find("TrajectoryShapedCountsX,TrajectoryShapedCountsY,TrajectoryQuantizationRemainderX,TrajectoryQuantizationRemainderY,TrajectoryShapingDelayMs,TrajectorySchedulerLatenessMs,TrajectorySchedulerSkippedTicks") != std::string::npos,
+        "basic pipeline records the complete P0-4B trajectory timeline");
+    expectTrue(traceHeader.find(
         "CaptureFrameSequence,BackendReceiveNs,CaptureSubmitNs,InferenceStartNs,InferencePublishNs,ControlTimeNs") != std::string::npos &&
         traceHeader.find("BackendQueueMs,SubmitToInferenceMs,InferenceToPublishMs,PublishToControlMs,LocalObservationAgeMs") != std::string::npos,
         "basic pipeline records complete local timing stages and signed segment ages");
@@ -693,6 +864,9 @@ int main()
         "basic pipeline reports settle motion release diagnostics");
     std::string traceRow;
     std::getline(traceFile, traceRow);
+    expectTrue(std::count(traceHeader.begin(), traceHeader.end(), ',') ==
+                   std::count(traceRow.begin(), traceRow.end(), ','),
+               "basic pipeline csv header and data row keep the same column count");
     expectTrue(traceRow.find(",DML,") != std::string::npos ||
                traceRow.find(",CUDA,") != std::string::npos,
                "basic pipeline writes the configured build backend");

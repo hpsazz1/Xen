@@ -51,6 +51,16 @@ void AimPipelineRuntime::reset()
     relativeLosKalman_.reset();
     losAimController_.reset();
     lastControllerUpdateTime_ = {};
+    trajectoryShaper_.reset();
+    outputScheduler_.reset();
+}
+
+void AimPipelineRuntime::configureTrajectory(
+    const CommandTrajectoryShaper::Settings& shaperSettings,
+    const OutputScheduler::Settings& schedulerSettings)
+{
+    trajectoryShaper_.configure(shaperSettings);
+    outputScheduler_.configure(schedulerSettings);
 }
 
 void AimPipelineRuntime::configureController(const LosAimController::Settings& settings)
@@ -80,6 +90,8 @@ AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observat
         relativeLosKalman_.reset();
         losAimController_.reset();
         lastControllerUpdateTime_ = {};
+        trajectoryShaper_.reset();
+        outputScheduler_.reset();
         frame_.resetGeneration = resetGeneration_;
     }
 
@@ -166,5 +178,35 @@ void AimPipelineRuntime::setViewMotionDiagnostics(
     frame_.control.frameCountLimit = control.frameCountLimit;
     frame_.trajectoryRequest.requestedCountsX = control.limitedCountsX;
     frame_.trajectoryRequest.requestedCountsY = control.limitedCountsY;
+    frame_.trajectoryRequest.valid = control.valid;
+    frame_.trajectoryRequest.sequence = frame_.observationSequence;
+    frame_.trajectoryRequest.requestDurationSeconds = std::clamp(
+        controllerInput.dtSeconds, 1.0 / 500.0, 0.050);
     frame_.trajectoryRequest.requestTime = frame_.observation.timing.controlTime;
+
+    auto applyTrajectoryResult = [this](const CommandTrajectoryShaper::Result& result)
+    {
+        frame_.trajectoryState = result.state;
+        frame_.trajectoryOutput = result.output;
+        // P0-4B仍处于shadow，整形器只能生成可审计候选，不得解除设备命令抑制。
+        frame_.trajectoryOutput.commandSuppressed = true;
+    };
+    if (trajectoryShaper_.settings().mode == TrajectoryShaperMode::Off)
+    {
+        applyTrajectoryResult(trajectoryShaper_.update(
+            frame_.trajectoryRequest,
+            frame_.trajectoryRequest.requestDurationSeconds,
+            frame_.trajectoryRequest.requestTime));
+    }
+    else
+    {
+        outputScheduler_.submit(frame_.trajectoryRequest);
+        const auto scheduled = outputScheduler_.service(
+            frame_.observation.timing.controlTime, trajectoryShaper_);
+        frame_.trajectoryState = trajectoryShaper_.state();
+        frame_.trajectoryOutput.mode = trajectoryShaper_.settings().mode;
+        frame_.trajectoryOutput.commandSuppressed = true;
+        if (scheduled.has_value())
+            applyTrajectoryResult(*scheduled);
+    }
 }
