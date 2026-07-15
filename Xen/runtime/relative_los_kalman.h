@@ -28,9 +28,21 @@ class RelativeLosKalman
 public:
     using TimePoint = std::chrono::steady_clock::time_point;
 
+    struct Settings
+    {
+        // 静止或低速目标使用较低过程噪声抑制检测抖动；速度升高后平滑过渡到运动过程噪声，
+        // 兼顾“目标静止/角色静止”和“目标运动/角色静止”两类主场景。
+        double accelerationStdDegreesPerSecond2 = 90.0;
+        double movingAccelerationStdDegreesPerSecond2 = 360.0;
+        double movingRateThresholdDegreesPerSecond = 8.0;
+    };
+
     void reset();
     void update(double angleX, double angleY, float confidence,
         TimePoint observationTime, TimePoint controlTime);
+    void update(double angleX, double angleY, float confidence,
+        TimePoint observationTime, TimePoint controlTime,
+        const Settings& settings);
     const RelativeLosKalmanEstimate& estimate() const { return estimate_; }
 
 private:
@@ -48,7 +60,10 @@ private:
 
     static double boundedDtSeconds(TimePoint start, TimePoint end);
     static double measurementVariance(float confidence);
-    static void predict(AxisState& state, double dt);
+    static double accelerationStd(const AxisState& state,
+        const Settings& settings);
+    static void predict(AxisState& state, double dt,
+        double accelerationStdDegreesPerSecond2);
     static void correct(AxisState& state, double measurement, double variance);
     static RelativeLosKalmanAxisEstimate toEstimate(const AxisState& state);
 

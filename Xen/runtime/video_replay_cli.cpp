@@ -50,6 +50,9 @@ namespace
         double inferenceFps = 94.0;
         std::vector<double> observationAgesMs{ 10.0, 15.0, 20.0 };
         double responseMs = 80.0;
+        double kalmanAccelerationStdDegreesPerSecond2 = 90.0;
+        double kalmanMovingAccelerationStdDegreesPerSecond2 = 360.0;
+        double kalmanMovingRateThresholdDegreesPerSecond = 8.0;
         double verticalCatchUpErrorDegrees = 0.8;
         double maxCountsPerSecond = 1440.0;
         double integralMs = 320.0;
@@ -63,6 +66,8 @@ namespace
         double settleRateDegreesPerSecond = 1.200;
         double reverseConfirmationSeconds = 0.080;
         double feedforwardGain = 0.0;
+        double leadHorizonSeconds = 0.0;
+        double leadStrength = 0.0;
         double reversalFeedforwardBoost = 0.0;
         double reversalFeedforwardSeconds = 0.0;
         TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
@@ -209,6 +214,15 @@ namespace
         options.cropHeight = static_cast<int>(optionDouble(argc, argv, "--crop-height", options.cropHeight));
         options.inferenceFps = optionDouble(argc, argv, "--inference-fps", options.inferenceFps);
         options.responseMs = optionDouble(argc, argv, "--response-ms", options.responseMs);
+        options.kalmanAccelerationStdDegreesPerSecond2 = optionDouble(
+            argc, argv, "--kalman-accel-std-dps2",
+            options.kalmanAccelerationStdDegreesPerSecond2);
+        options.kalmanMovingAccelerationStdDegreesPerSecond2 = optionDouble(
+            argc, argv, "--kalman-moving-accel-std-dps2",
+            options.kalmanMovingAccelerationStdDegreesPerSecond2);
+        options.kalmanMovingRateThresholdDegreesPerSecond = optionDouble(
+            argc, argv, "--kalman-moving-rate-threshold-dps",
+            options.kalmanMovingRateThresholdDegreesPerSecond);
         options.verticalCatchUpErrorDegrees = optionDouble(
             argc, argv, "--vertical-catch-up-deg",
             options.verticalCatchUpErrorDegrees);
@@ -228,6 +242,11 @@ namespace
             options.reverseConfirmationSeconds * 1000.0) / 1000.0;
         options.feedforwardGain = optionDouble(
             argc, argv, "--feedforward-gain", options.feedforwardGain);
+        options.leadHorizonSeconds = optionDouble(
+            argc, argv, "--lead-horizon-ms",
+            options.leadHorizonSeconds * 1000.0) / 1000.0;
+        options.leadStrength = optionDouble(
+            argc, argv, "--lead-strength", options.leadStrength);
         options.reversalFeedforwardBoost = optionDouble(
             argc, argv, "--reversal-ff-boost", options.reversalFeedforwardBoost);
         options.reversalFeedforwardSeconds = optionDouble(
@@ -720,6 +739,12 @@ int Run(int argc, char** argv)
             std::vector<CrossDomainReplay::Comparison> comparisons;
             const auto variants = CrossDomainReplay::BuildRequiredVariants();
             CrossDomainReplay::ControllerSettings settings;
+            settings.kalmanAccelerationStdDegreesPerSecond2 =
+                options.kalmanAccelerationStdDegreesPerSecond2;
+            settings.kalmanMovingAccelerationStdDegreesPerSecond2 =
+                options.kalmanMovingAccelerationStdDegreesPerSecond2;
+            settings.kalmanMovingRateThresholdDegreesPerSecond =
+                options.kalmanMovingRateThresholdDegreesPerSecond;
             settings.responseSeconds = options.responseMs / 1000.0;
             settings.verticalCatchUpErrorDegrees =
                 options.verticalCatchUpErrorDegrees;
@@ -733,6 +758,8 @@ int Run(int argc, char** argv)
             settings.settleRateDegreesPerSecond = options.settleRateDegreesPerSecond;
             settings.reverseConfirmationSeconds = options.reverseConfirmationSeconds;
             settings.feedforwardGain = options.feedforwardGain;
+            settings.leadHorizonSeconds = options.leadHorizonSeconds;
+            settings.leadStrength = options.leadStrength;
             settings.reversalFeedforwardBoost = options.reversalFeedforwardBoost;
             settings.reversalFeedforwardSeconds = options.reversalFeedforwardSeconds;
             settings.trajectoryMode = options.trajectoryMode;
@@ -774,9 +801,35 @@ int Run(int argc, char** argv)
             CrossDomainReplay::WriteSummary(
                 options.outputRoot / "cross_domain_summary.csv", comparisons);
             std::ofstream decision(options.outputRoot / "cross_domain_decision.txt");
-            decision << "FeedforwardGain="
+            decision << "KalmanAccelerationStdDps2="
+                     << (std::isfinite(options.kalmanAccelerationStdDegreesPerSecond2)
+                             ? std::clamp(
+                                 options.kalmanAccelerationStdDegreesPerSecond2,
+                                 1.0, 2000.0)
+                             : 90.0) << '\n'
+                     << "KalmanMovingAccelerationStdDps2="
+                     << (std::isfinite(options.kalmanMovingAccelerationStdDegreesPerSecond2)
+                             ? std::clamp(
+                                 options.kalmanMovingAccelerationStdDegreesPerSecond2,
+                                 1.0, 2000.0)
+                             : 360.0) << '\n'
+                     << "KalmanMovingRateThresholdDps="
+                     << (std::isfinite(options.kalmanMovingRateThresholdDegreesPerSecond)
+                             ? std::clamp(
+                                 options.kalmanMovingRateThresholdDegreesPerSecond,
+                                 0.1, 1000.0)
+                             : 8.0) << '\n'
+                     << "FeedforwardGain="
                      << (std::isfinite(options.feedforwardGain)
                              ? std::clamp(options.feedforwardGain, 0.0, 2.0)
+                             : 0.0) << '\n'
+                     << "LeadHorizonMs="
+                     << (std::isfinite(options.leadHorizonSeconds)
+                             ? std::clamp(options.leadHorizonSeconds, 0.0, 0.250) * 1000.0
+                             : 0.0) << '\n'
+                     << "LeadStrength="
+                     << (std::isfinite(options.leadStrength)
+                             ? std::clamp(options.leadStrength, 0.0, 4.0)
                              : 0.0) << '\n'
                      << "ReversalFeedforwardBoost="
                      << (std::isfinite(options.reversalFeedforwardBoost)

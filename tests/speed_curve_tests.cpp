@@ -237,6 +237,42 @@ int main()
                constantVelocityEstimate.x.innovationVariance > 0.0,
                "relative LOS Kalman exposes positive covariance diagnostics");
 
+    RelativeLosKalman delayedConstantVelocityKalman;
+    for (int sample = 0; sample <= 30; ++sample)
+    {
+        const auto observationTime = kalmanStart + std::chrono::milliseconds(sample * 10);
+        const auto delayedControlTime = observationTime + std::chrono::milliseconds(40);
+        delayedConstantVelocityKalman.update(
+            sample * 0.05, sample * -0.02, 1.0f,
+            observationTime, delayedControlTime);
+    }
+    const RelativeLosKalmanEstimate delayedConstantVelocityEstimate =
+        delayedConstantVelocityKalman.estimate();
+    expectNear(delayedConstantVelocityEstimate.x.rateDegreesPerSecond, 5.0, 0.35,
+               "control projection does not feed delay back into persistent Kalman rate state");
+    expectNear(delayedConstantVelocityEstimate.x.angleDegrees, 1.70, 0.04,
+               "forty-millisecond control projection advances only the published angle");
+    expectNear(delayedConstantVelocityEstimate.y.angleDegrees, -0.68, 0.04,
+               "delayed vertical projection preserves the observation-time posterior");
+
+    RelativeLosKalman stationaryNoiseKalman;
+    RelativeLosKalman movingNoiseKalman;
+    RelativeLosKalman::Settings adaptiveKalmanSettings;
+    for (int sample = 0; sample <= 30; ++sample)
+    {
+        const auto sampleTime = kalmanStart + std::chrono::milliseconds(sample * 10);
+        stationaryNoiseKalman.update(
+            0.0, 0.0, 1.0f, sampleTime, sampleTime, adaptiveKalmanSettings);
+        movingNoiseKalman.update(
+            sample * 0.10, 0.0, 1.0f,
+            sampleTime, sampleTime, adaptiveKalmanSettings);
+    }
+    expectTrue(movingNoiseKalman.estimate().x.angleVariance >
+                   stationaryNoiseKalman.estimate().x.angleVariance,
+               "adaptive Kalman process noise preserves more uncertainty for moving targets");
+    expectNear(movingNoiseKalman.estimate().x.rateDegreesPerSecond, 10.0, 0.45,
+               "adaptive Kalman process noise tracks moving-target angular rate");
+
     RelativeLosKalman highConfidenceKalman;
     RelativeLosKalman lowConfidenceKalman;
     highConfidenceKalman.update(0.0, 0.0, 1.0f, kalmanStart, kalmanStart);

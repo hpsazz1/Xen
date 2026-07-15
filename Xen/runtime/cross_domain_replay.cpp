@@ -318,9 +318,25 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     Comparison comparison;
     comparison.scenario = canonicalScenario(source.scenario);
     comparison.variant = variant;
+    comparison.kalmanAccelerationStdDegreesPerSecond2 =
+        std::isfinite(settings.kalmanAccelerationStdDegreesPerSecond2)
+            ? std::clamp(settings.kalmanAccelerationStdDegreesPerSecond2,
+                1.0, 2000.0) : 90.0;
+    comparison.kalmanMovingAccelerationStdDegreesPerSecond2 =
+        std::isfinite(settings.kalmanMovingAccelerationStdDegreesPerSecond2)
+            ? std::clamp(settings.kalmanMovingAccelerationStdDegreesPerSecond2,
+                1.0, 2000.0) : 360.0;
+    comparison.kalmanMovingRateThresholdDegreesPerSecond =
+        std::isfinite(settings.kalmanMovingRateThresholdDegreesPerSecond)
+            ? std::clamp(settings.kalmanMovingRateThresholdDegreesPerSecond,
+                0.1, 1000.0) : 8.0;
     comparison.feedforwardGain = std::isfinite(settings.feedforwardGain)
         ? std::clamp(settings.feedforwardGain, 0.0, 2.0)
         : 0.0;
+    comparison.leadHorizonSeconds = std::isfinite(settings.leadHorizonSeconds)
+        ? std::clamp(settings.leadHorizonSeconds, 0.0, 0.250) : 0.0;
+    comparison.leadStrength = std::isfinite(settings.leadStrength)
+        ? std::clamp(settings.leadStrength, 0.0, 4.0) : 0.0;
     comparison.reversalFeedforwardBoost =
         std::isfinite(settings.reversalFeedforwardBoost)
             ? std::clamp(settings.reversalFeedforwardBoost, 0.0, 2.0) : 0.0;
@@ -354,6 +370,13 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     legacySettings.releaseRadiusPixels = 0.0;
 
     RelativeLosKalman kalman;
+    RelativeLosKalman::Settings kalmanSettings;
+    kalmanSettings.accelerationStdDegreesPerSecond2 =
+        comparison.kalmanAccelerationStdDegreesPerSecond2;
+    kalmanSettings.movingAccelerationStdDegreesPerSecond2 =
+        comparison.kalmanMovingAccelerationStdDegreesPerSecond2;
+    kalmanSettings.movingRateThresholdDegreesPerSecond =
+        comparison.kalmanMovingRateThresholdDegreesPerSecond;
     LosAimController candidateController;
     LosAimController::Settings candidateSettings;
     candidateSettings.responseSeconds = settings.responseSeconds;
@@ -361,6 +384,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         settings.verticalCatchUpErrorDegrees;
     candidateSettings.maxCountsPerSecond = settings.maxCountsPerSecond;
     candidateSettings.feedforwardGain = comparison.feedforwardGain;
+    candidateSettings.leadHorizonSeconds = comparison.leadHorizonSeconds;
+    candidateSettings.leadStrength = comparison.leadStrength;
     candidateSettings.reversalFeedforwardBoost =
         comparison.reversalFeedforwardBoost;
     candidateSettings.reversalFeedforwardSeconds =
@@ -535,7 +560,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         legacyCamera.submit(controlTime, commandDelay, legacyX, legacyY, settings);
 
         kalman.update(truthAtObservation.yawDegrees, truthAtObservation.pitchDownDegrees,
-            point.confidence, observationPoint, controlPoint);
+            point.confidence, observationPoint, controlPoint, kalmanSettings);
         const auto& estimate = kalman.estimate();
         LosAimController::Input input;
         input.valid = estimate.x.valid && estimate.y.valid;
@@ -720,12 +745,17 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,FeedforwardGain,ReversalFeedforwardBoost,ReversalFeedforwardMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
         output << item.scenario << ',' << item.variant.name << ','
+               << item.kalmanAccelerationStdDegreesPerSecond2 << ','
+               << item.kalmanMovingAccelerationStdDegreesPerSecond2 << ','
+               << item.kalmanMovingRateThresholdDegreesPerSecond << ','
                << item.feedforwardGain << ','
+               << item.leadHorizonSeconds * 1000.0 << ','
+               << item.leadStrength << ','
                << item.reversalFeedforwardBoost << ','
                << item.reversalFeedforwardSeconds * 1000.0 << ','
                << trajectoryShaperModeName(item.trajectoryMode) << ','

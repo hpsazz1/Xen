@@ -41,6 +41,9 @@ struct Variant
 
 struct ControllerSettings
 {
+    double kalmanAccelerationStdDegreesPerSecond2 = 90.0;
+    double kalmanMovingAccelerationStdDegreesPerSecond2 = 360.0;
+    double kalmanMovingRateThresholdDegreesPerSecond = 8.0;
     double responseSeconds = 0.080;
     double verticalCatchUpErrorDegrees = 0.8;
     double maxCountsPerSecond = 1440.0;
@@ -50,6 +53,8 @@ struct ControllerSettings
     double degreesPerCountX = 0.0308;
     double degreesPerCountY = 0.0308;
     double feedforwardGain = 0.0;
+    double leadHorizonSeconds = 0.0;
+    double leadStrength = 0.0;
     double reversalFeedforwardBoost = 0.0;
     double reversalFeedforwardSeconds = 0.0;
     double integralTimeSeconds = 0.0;
@@ -100,7 +105,12 @@ struct Comparison
 {
     std::string scenario;
     Variant variant{};
+    double kalmanAccelerationStdDegreesPerSecond2 = 90.0;
+    double kalmanMovingAccelerationStdDegreesPerSecond2 = 360.0;
+    double kalmanMovingRateThresholdDegreesPerSecond = 8.0;
     double feedforwardGain = 0.0;
+    double leadHorizonSeconds = 0.0;
+    double leadStrength = 0.0;
     double reversalFeedforwardBoost = 0.0;
     double reversalFeedforwardSeconds = 0.0;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
