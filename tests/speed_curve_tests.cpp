@@ -9,6 +9,7 @@
 #include "runtime/basic_target_filter.h"
 #include "runtime/target_predictor.h"
 #include "runtime/video_replay_math.h"
+#include "runtime/cross_domain_replay.h"
 #include "runtime/view_motion_history.h"
 #include "debug/pipeline_tracer.h"
 #include "detector/detection_buffer.h"
@@ -1397,6 +1398,69 @@ int main()
     const VideoReplay::TrajectoryPoint replayReset{ 0.020, 1500.0, 720.0, true };
     expectTrue(VideoReplay::IsNewTrajectorySegment(replayPoints[1], replayReset),
                "video replay splits target teleport into an independent trial");
+
+    const auto crossDomainVariants = CrossDomainReplay::BuildRequiredVariants();
+    expectTrue(crossDomainVariants.size() == 169,
+               "cross-domain matrix covers 162 physical variants and seven role-relative variants");
+    expectTrue(std::any_of(crossDomainVariants.begin(), crossDomainVariants.end(), [](const auto& variant) {
+        return variant.name == "role_same_self_faster" && variant.relativeMotionScale < 0.0;
+    }), "role-faster transform reverses relative LOS naturally instead of using WASD direction");
+
+    CrossDomainReplay::Metrics gateBaseline;
+    gateBaseline.samples = 100;
+    gateBaseline.errorP95Degrees = 1.0;
+    gateBaseline.verticalP95Degrees = 1.0;
+    gateBaseline.insideBoxPercent = 70.0;
+    gateBaseline.lateHalfErrorP95Degrees = 1.0;
+    CrossDomainReplay::Metrics gateCandidate = gateBaseline;
+    std::string gateReason;
+    CrossDomainReplay::Variant gateVariant;
+    gateVariant.name = "unit";
+    gateCandidate.errorP95Degrees = 0.89;
+    gateCandidate.insideBoxPercent = 75.0;
+    gateCandidate.lateHalfErrorP95Degrees = 0.95;
+    expectTrue(CrossDomainReplay::EvaluateGate(
+        "reverse", gateVariant, gateBaseline, gateCandidate, gateReason),
+        "reverse gate accepts a measured ten-percent angular improvement");
+    gateCandidate = gateBaseline;
+    gateCandidate.verticalP95Degrees = 0.95;
+    expectTrue(!CrossDomainReplay::EvaluateGate(
+        "jump", gateVariant, gateBaseline, gateCandidate, gateReason) &&
+        gateReason.find("10%") != std::string::npos,
+        "jump gate rejects vertical improvement below ten percent");
+
+    CrossDomainReplay::SourceTrajectory syntheticReplay;
+    syntheticReplay.scenario = "horizontal_left";
+    syntheticReplay.sourceWidth = 2560;
+    syntheticReplay.sourceHeight = 1440;
+    syntheticReplay.centerX = 1280.0;
+    syntheticReplay.centerY = 720.0;
+    for (int sample = 0; sample < 40; ++sample)
+    {
+        VideoReplay::TrajectoryPoint point;
+        point.timeSeconds = sample * 0.01;
+        point.globalX = 1280.0 - sample * 1.5;
+        point.globalY = 720.0;
+        point.detected = true;
+        point.boxWidth = 32.0;
+        point.boxHeight = 64.0;
+        point.confidence = 0.9f;
+        syntheticReplay.points.push_back(point);
+    }
+    CrossDomainReplay::Variant syntheticVariant;
+    syntheticVariant.name = "unit_94fps";
+    syntheticVariant.replayFps = 94.0;
+    CrossDomainReplay::ControllerSettings syntheticSettings;
+    const auto syntheticComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, syntheticSettings);
+    expectTrue(syntheticComparison.legacy.samples > 20 &&
+               syntheticComparison.candidate.samples == syntheticComparison.legacy.samples,
+               "same-frame replay gives legacy and candidate identical valid sample coverage");
+    expectTrue(std::isfinite(syntheticComparison.candidate.meanNis) &&
+               syntheticComparison.candidate.requestedCounts > 0.0 &&
+               syntheticComparison.candidate.shapedCounts > 0.0 &&
+               syntheticComparison.candidate.sentCounts > 0.0,
+               "cross-domain replay records estimator, requested, shaped and sent diagnostics");
 
     BasicAimController controller;
     BasicAimController::Settings controllerSettings;

@@ -343,6 +343,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/runtime/relative_los_kalman.cpp"
     "${SRC_DIR}/runtime/los_aim_controller.cpp"
     "${SRC_DIR}/runtime/command_trajectory_shaper.cpp"
+    "${SRC_DIR}/runtime/cross_domain_replay.cpp"
     "${SRC_DIR}/runtime/output_scheduler.cpp"
     "${SRC_DIR}/runtime/build_identity.cpp"
     "${SRC_DIR}/runtime/application_shutdown.cpp"
@@ -415,6 +416,7 @@ if(BUILD_TESTING)
         "${SRC_DIR}/runtime/relative_los_kalman.cpp"
         "${SRC_DIR}/runtime/los_aim_controller.cpp"
         "${SRC_DIR}/runtime/command_trajectory_shaper.cpp"
+        "${SRC_DIR}/runtime/cross_domain_replay.cpp"
         "${SRC_DIR}/runtime/output_scheduler.cpp"
         "${SRC_DIR}/runtime/build_identity.cpp"
     )

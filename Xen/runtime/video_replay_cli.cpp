@@ -25,6 +25,7 @@
 #include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_aim_controller.h"
 #include "runtime/basic_target_filter.h"
+#include "runtime/cross_domain_replay.h"
 #include "runtime/target_predictor.h"
 #include "runtime/video_replay_math.h"
 
@@ -55,6 +56,7 @@ namespace
         double pitch = 0.022;
         double fovX = 106.0;
         double fovY = 74.0;
+        bool crossDomain = false;
     };
 
     struct ScenarioTrajectory
@@ -173,7 +175,12 @@ namespace
     Options parseOptions(int argc, char** argv)
     {
         Options options;
-        if (const auto root = optionValue(argc, argv, "--video-replay"))
+        if (const auto root = optionValue(argc, argv, "--cross-domain-replay"))
+        {
+            options.videoRoot = *root;
+            options.crossDomain = true;
+        }
+        else if (const auto root = optionValue(argc, argv, "--video-replay"))
             options.videoRoot = *root;
         if (const auto model = optionValue(argc, argv, "--video-model"))
             options.modelPath = *model;
@@ -300,8 +307,10 @@ namespace
             const cv::Mat crop = frame(cropRect);
             const auto selected = selectTarget(detector.detect(crop), options.cropWidth, options.cropHeight);
             std::optional<std::pair<double, double>> selectedGlobal;
+            std::optional<AimbotTarget> selectedMetadata;
             if (selected)
             {
+                selectedMetadata = *selected;
                 selectedGlobal = std::make_pair(
                     cropRect.x + selected->pivotX,
                     cropRect.y + selected->pivotY);
@@ -331,6 +340,7 @@ namespace
                         if (distance < bestDistance)
                         {
                             bestDistance = distance;
+                            selectedMetadata = *reacquired;
                             selectedGlobal = std::make_pair(globalX, globalY);
                         }
                     }
@@ -346,6 +356,14 @@ namespace
                 point.detected = true;
                 point.globalX = selectedGlobal->first;
                 point.globalY = selectedGlobal->second;
+                // 框尺寸和置信度是P0-5框内比例、边缘余量与Kalman测量噪声的输入，
+                // 必须与支点来自同一次目标选择，不能在回放时用固定框伪造。
+                if (selectedMetadata)
+                {
+                    point.boxWidth = selectedMetadata->w;
+                    point.boxHeight = selectedMetadata->h;
+                    point.confidence = selectedMetadata->confidence;
+                }
                 const double dt = timeSeconds - previousDetectedTime;
                 if (detectedCount > 0 && dt > 0.0 && dt <= 0.15)
                 {
@@ -603,7 +621,8 @@ namespace
 
 bool IsRequested(int argc, char** argv)
 {
-    return optionValue(argc, argv, "--video-replay").has_value();
+    return optionValue(argc, argv, "--video-replay").has_value() ||
+        optionValue(argc, argv, "--cross-domain-replay").has_value();
 }
 
 int Run(int argc, char** argv)
@@ -644,15 +663,72 @@ int Run(int argc, char** argv)
             trajectories.push_back(extractTrajectory(detector, video, options));
 
         std::ofstream observations(options.outputRoot / "video_observations.csv");
-        observations << "Scenario,TimeSeconds,Detected,GlobalX,GlobalY\n";
+        observations << "Scenario,TimeSeconds,Detected,GlobalX,GlobalY,BoxWidth,BoxHeight,Confidence\n";
         for (const auto& trajectory : trajectories)
         {
             for (const auto& point : trajectory.points)
             {
                 observations << trajectory.name << ',' << std::fixed << std::setprecision(6)
                              << point.timeSeconds << ',' << (point.detected ? 1 : 0) << ','
-                             << point.globalX << ',' << point.globalY << '\n';
+                             << point.globalX << ',' << point.globalY << ','
+                             << point.boxWidth << ',' << point.boxHeight << ','
+                             << point.confidence << '\n';
             }
+        }
+
+        if (options.crossDomain)
+        {
+            std::vector<CrossDomainReplay::Comparison> comparisons;
+            const auto variants = CrossDomainReplay::BuildRequiredVariants();
+            CrossDomainReplay::ControllerSettings settings;
+            settings.responseSeconds = options.responseMs / 1000.0;
+            settings.maxCountsPerSecond = options.maxCountsPerSecond;
+            settings.legacyPredictionLeadSeconds = 0.050;
+            settings.legacyPredictionWindowSeconds = 0.050;
+            settings.legacyPredictionStrength = 1.0;
+            settings.degreesPerCountX = options.sensitivity * options.yaw;
+            settings.degreesPerCountY = options.sensitivity * options.pitch;
+            const auto framePath = options.outputRoot / "cross_domain_frames.csv";
+            std::error_code removeError;
+            std::filesystem::remove(framePath, removeError);
+            size_t passed = 0;
+            for (const auto& trajectory : trajectories)
+            {
+                CrossDomainReplay::SourceTrajectory source;
+                source.scenario = trajectory.name;
+                source.sourceWidth = trajectory.sourceWidth;
+                source.sourceHeight = trajectory.sourceHeight;
+                source.sourceFovXDegrees = options.fovX;
+                source.sourceFovYDegrees = options.fovY;
+                source.centerX = options.cropX + options.cropWidth * 0.5;
+                source.centerY = options.cropY + options.cropHeight * 0.5;
+                source.detectionWidth = options.cropWidth;
+                source.detectionHeight = options.cropHeight;
+                source.points = trajectory.points;
+                for (const auto& variant : variants)
+                {
+                    // 全矩阵保留汇总指标；逐帧诊断只记录当前106°/2560×1440/94 FPS/
+                    // 20 ms/1x基准，避免把同一观测机械复制成数GB文件。
+                    const bool detailedVariant =
+                        variant.name == "domain_fov106_2560x1440_94fps_20ms_1x";
+                    auto comparison = CrossDomainReplay::RunComparison(
+                        source, variant, settings,
+                        detailedVariant ? framePath : std::filesystem::path{});
+                    passed += comparison.passed ? 1U : 0U;
+                    comparisons.push_back(std::move(comparison));
+                }
+            }
+            CrossDomainReplay::WriteSummary(
+                options.outputRoot / "cross_domain_summary.csv", comparisons);
+            std::ofstream decision(options.outputRoot / "cross_domain_decision.txt");
+            decision << "Comparisons=" << comparisons.size() << '\n'
+                     << "Passed=" << passed << '\n'
+                     << "Failed=" << comparisons.size() - passed << '\n'
+                     << "Promotion=" << (passed == comparisons.size() ? "PASS" : "HOLD_SHADOW") << '\n';
+            std::cout << "[CrossDomainReplay] " << passed << '/' << comparisons.size()
+                      << " gates passed; promotion="
+                      << (passed == comparisons.size() ? "PASS" : "HOLD_SHADOW") << std::endl;
+            return passed == comparisons.size() ? 0 : 3;
         }
 
         std::ofstream grid(options.outputRoot / "prediction_grid.csv");

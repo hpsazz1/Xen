@@ -12,6 +12,9 @@ namespace VideoReplay
         double globalX = 0.0;
         double globalY = 0.0;
         bool detected = false;
+        double boxWidth = 0.0;
+        double boxHeight = 0.0;
+        float confidence = 1.0f;
     };
 
     inline double ObservedCoordinate(
