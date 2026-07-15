@@ -106,6 +106,7 @@ public:
         result.offsetX = 0.0;
         result.offsetY = 0.0;
         result.selfMotionSuppressed = true;
+        resetPredictionDistanceSmoothing();
 
         if (!artifactDetected)
         {
@@ -210,6 +211,9 @@ public:
         if (!directionLocked_ || !predictionEstablished_ ||
             suppressPrediction_ || oscillationSuppressed || highSpeedSuppressed)
         {
+            // 停止、反向和安全门控必须立即撤销提前量；不能让平滑状态在重新放行时
+            // 带回上一段运动的距离，否则视觉上会形成一次方向正确但幅值陈旧的脉冲。
+            resetPredictionDistanceSmoothing();
             Result result{
                 x, y, velocityX_, velocityY_, accelerationX_, accelerationY_,
                 leadSeconds, 0.0, 0.0, directionLocked_, true
@@ -232,9 +236,36 @@ public:
         // r21将jump上限降至64 px后仍明显远离目标框；反事实回放显示24 px兼顾
         // 追赶收益与框内稳定。限制为检测跨度7.5%，普通left/right约20 px提前基本不受影响。
         const double maxPredictionDistance = std::max(12.0, span * 0.075);
-        const double predictionDistance = std::clamp(
+        const double desiredPredictionDistance = std::clamp(
             speedAlongDirection * leadSeconds * strength * leadReleaseScale,
             0.0, maxPredictionDistance);
+        if (desiredPredictionDistance <= 1e-9)
+            resetPredictionDistanceSmoothing();
+
+        // r41水平实测中预测方向没有翻转，但回归速度抖动使提前距离单帧变化P95达到
+        // 3.8~6.5 px，约两成帧在24 px上限附近伸缩。只对已通过全部门控的距离做
+        // 30 ms一阶低通：约三个100 FPS观测即可跟上真实速度变化，同时不平滑方向，
+        // 也不延迟上方停止、反向、自运动、高速和高频往返的立即撤销。
+        constexpr double kPredictionDistanceSmoothingSeconds = 0.030;
+        double predictionDistance = 0.0;
+        if (desiredPredictionDistance > 1e-9)
+        {
+            if (!predictionDistanceSmoothingInitialized_)
+            {
+                smoothedPredictionDistance_ = desiredPredictionDistance;
+                predictionDistanceSmoothingInitialized_ = true;
+            }
+            else
+            {
+                const double alpha = 1.0 - std::exp(
+                    -dt / kPredictionDistanceSmoothingSeconds);
+                smoothedPredictionDistance_ +=
+                    alpha * (desiredPredictionDistance - smoothedPredictionDistance_);
+            }
+            smoothedPredictionDistance_ = std::clamp(
+                smoothedPredictionDistance_, 0.0, maxPredictionDistance);
+            predictionDistance = smoothedPredictionDistance_;
+        }
         const double offsetX = directionX_ * predictionDistance;
         const double offsetY = directionY_ * predictionDistance;
         return {
@@ -264,6 +295,7 @@ public:
         selfMotionRearmPending_ = false;
         continuousPredictionFrames_ = 0;
         highSpeedTransientSamples_ = 0;
+        resetPredictionDistanceSmoothing();
         directionReversalTimes_.clear();
         oscillationSuppressedUntil_ = {};
         hasCommittedDirection_ = false;
@@ -314,6 +346,7 @@ private:
         selfMotionRearmPending_ = true;
         continuousPredictionFrames_ = 0;
         highSpeedTransientSamples_ = 0;
+        resetPredictionDistanceSmoothing();
         observations_.clear();
         if (initialized_)
             observations_.push_back({ previousX_, previousY_, previousObservationTime_ });
@@ -613,6 +646,12 @@ private:
         y /= length;
     }
 
+    void resetPredictionDistanceSmoothing()
+    {
+        smoothedPredictionDistance_ = 0.0;
+        predictionDistanceSmoothingInitialized_ = false;
+    }
+
     bool initialized_ = false;
     bool hasVelocity_ = false;
     bool directionLocked_ = false;
@@ -642,6 +681,8 @@ private:
     double committedDirectionX_ = 0.0;
     double committedDirectionY_ = 0.0;
     int highSpeedTransientSamples_ = 0; // 不确定高速瞬态仍需三帧确认，可信同向加速可首帧门控
+    double smoothedPredictionDistance_ = 0.0; // 已放行预测提前距离的一阶平滑状态，px
+    bool predictionDistanceSmoothingInitialized_ = false;
     std::deque<Observation> observations_;
     TimePoint previousObservationTime_{};
 };

@@ -40,3 +40,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_moving_target.
 r41起CSV包含`ErrorMotionX/Y`、`MovingInsideSettleX/Y`和`SettledX/Y`。分析Y轴震荡时必须使用
 `-Axis Y`并同时查看`AxisSettledPct`：水平移动期间Y轴应长期独立锁存，可靠垂直或斜向运动时
 `AxisMovingInsideSettlePct`应出现释放证据。只有二维`Settled`不能证明静止轴已停止输出。
+
+r42起分析移动不平滑时同时查看`P95PredictionLeadDeltaPx`、`P95PredictionLeadJerkPx`、
+`PredictionLeadCappedPct`和`PredictionInterruptionCount`。前两项只度量连续激活段内的幅值连续性；
+中断代表停止、反向或门控撤销，不能通过保留陈旧提前量来换取更低的表面跳变量。

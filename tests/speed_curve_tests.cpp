@@ -1066,7 +1066,7 @@ int main()
                "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r41") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r42") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -1234,6 +1234,40 @@ int main()
     expectNear(horizontalPrediction.offsetY, 0.0, 0.0,
                "horizontal movement never creates vertical prediction lead");
 
+    TargetPredictor smoothLeadPredictor;
+    TargetPredictor::Settings smoothLeadSettings = predictionSettings;
+    smoothLeadSettings.additionalLeadSeconds = 0.020;
+    smoothLeadSettings.predictionStrength = 1.0;
+    double previousSmoothLead = 0.0;
+    double maximumMatureLeadDelta = 0.0;
+    double matureLeadTotal = 0.0;
+    int matureLeadSamples = 0;
+    for (int sample = 0; sample < 50; ++sample)
+    {
+        const auto observationTime = t0 + std::chrono::milliseconds(sample * 10);
+        const auto controlTime = observationTime +
+            std::chrono::milliseconds(sample % 2 == 0 ? 0 : 20);
+        const auto smoothLead = smoothLeadPredictor.update(
+            100.0 + sample * 4.0, 100.0,
+            observationTime, controlTime, 320.0, smoothLeadSettings);
+        if (sample >= 20)
+        {
+            if (matureLeadSamples > 0)
+            {
+                maximumMatureLeadDelta = std::max(
+                    maximumMatureLeadDelta,
+                    std::abs(smoothLead.offsetX - previousSmoothLead));
+            }
+            previousSmoothLead = smoothLead.offsetX;
+            matureLeadTotal += smoothLead.offsetX;
+            ++matureLeadSamples;
+        }
+    }
+    expectTrue(maximumMatureLeadDelta < 3.0,
+               "alternating observation age cannot make mature prediction lead pulse per frame");
+    expectTrue(matureLeadSamples > 0 && matureLeadTotal / matureLeadSamples > 8.0,
+               "lead smoothing preserves useful latency compensation instead of suppressing prediction");
+
     expectTrue(TargetPredictor::isSelfMotionArtifact(
                    50.0, 0.0, -8.0, 0.0, 10.0, 0.0, 200.0, 0.0),
                "self-driven screen convergence suppresses outward prediction residual");
@@ -1391,14 +1425,14 @@ int main()
 
     TargetPredictor jumpPredictor;
     TargetPredictor::Result boundedJump{};
-    for (int sample = 0; sample < 18; ++sample)
+    for (int sample = 0; sample < 60; ++sample)
     {
         const auto time = t0 + std::chrono::milliseconds(sample * 8);
         boundedJump = jumpPredictor.update(
             10.0 + sample * 16.0, 10.0, time, time,
             320.0, predictionSettings);
     }
-    expectNear(std::hypot(boundedJump.offsetX, boundedJump.offsetY), 24.0, 1e-9,
+    expectNear(std::hypot(boundedJump.offsetX, boundedJump.offsetY), 24.0, 0.05,
                "mature abnormal high-speed prediction is capped at seven point five percent span");
 
     TargetPredictor oscillatingPredictor;
@@ -1550,7 +1584,7 @@ int main()
     TargetPredictor matureLeadPredictor;
     TargetPredictor::Result matureLeadPrediction{};
     TargetPredictor::Result firstReleasedLead{};
-    for (int sample = 0; sample < 18; ++sample)
+    for (int sample = 0; sample < 50; ++sample)
     {
         const auto time = t0 + std::chrono::milliseconds(sample * 8);
         matureLeadPrediction = matureLeadPredictor.update(
@@ -1565,7 +1599,7 @@ int main()
     expectNear(matureLeadPrediction.offsetX,
                matureLeadPrediction.velocityX * matureLeadPrediction.leadSeconds *
                    predictionSettings.predictionStrength,
-               1e-9, "seven stable prediction frames restore the full constant-velocity lead");
+               0.01, "mature stable motion converges to the full constant-velocity lead");
 
     TargetPredictor disabledPredictor;
     TargetPredictor::Settings disabledPredictionSettings = predictionSettings;

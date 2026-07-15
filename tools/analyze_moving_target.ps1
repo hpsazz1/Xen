@@ -339,12 +339,41 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             Get-PercentileValue -Values $predictionLeadDistances -Percentile 0.95
         }
         else { 0.0 }
+        $predictionSpan = if (
+            $rows[0].PSObject.Properties.Name -contains 'CaptureRoiWidth' -and
+            [double]$samples[0].CaptureRoiWidth -gt 0.0) {
+            [double]$samples[0].CaptureRoiWidth
+        }
+        elseif (
+            $rows[0].PSObject.Properties.Name -contains 'DmlInputWidth' -and
+            [double]$samples[0].DmlInputWidth -gt 0.0) {
+            [double]$samples[0].DmlInputWidth
+        }
+        else { 0.0 }
+        $predictionDistanceCap = if ($predictionSpan -gt 0.0) {
+            [math]::Max(12.0, $predictionSpan * 0.075)
+        }
+        else { 0.0 }
+        $predictionCappedRows = if ($predictionDistanceCap -gt 0.0) {
+            @($predictionRows | Where-Object {
+                $offset = if ($Axis -eq 'X') {
+                    [math]::Abs([double]$_.PredictionOffsetX)
+                }
+                else { [math]::Abs([double]$_.PredictionOffsetY) }
+                $offset -ge $predictionDistanceCap - 0.01
+            }).Count
+        }
+        else { 0 }
         $predictionSideFlipCount = 0
         $predictionInterruptionCount = 0
         $predictionActiveRunFrames = [System.Collections.Generic.List[double]]::new()
+        $predictionLeadDeltas = [System.Collections.Generic.List[double]]::new()
+        $predictionLeadJerks = [System.Collections.Generic.List[double]]::new()
         $activeRunFrames = 0
         $wasPredictionActive = $false
         $lastPredictionSide = 0
+        $previousActiveLead = $null
+        $previousActiveDelta = $null
         if ($hasKinematicPrediction) {
             foreach ($sample in $samples) {
                 $offset = if ($Axis -eq 'X') {
@@ -358,11 +387,29 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
                     [math]::Abs($offset) -gt 0.001
                 if ($isPredictionActive) {
                     ++$activeRunFrames
+                    $lead = [math]::Abs($offset)
+                    if ($null -ne $previousActiveLead) {
+                        $delta = $lead - [double]$previousActiveLead
+                        $predictionLeadDeltas.Add([math]::Abs($delta))
+                        if ($null -ne $previousActiveDelta) {
+                            $predictionLeadJerks.Add(
+                                [math]::Abs($delta - [double]$previousActiveDelta))
+                        }
+                        $previousActiveDelta = $delta
+                    }
+                    else {
+                        $previousActiveDelta = $null
+                    }
+                    $previousActiveLead = $lead
                 }
                 elseif ($wasPredictionActive) {
                     ++$predictionInterruptionCount
                     $predictionActiveRunFrames.Add($activeRunFrames)
                     $activeRunFrames = 0
+                }
+                if (-not $isPredictionActive) {
+                    $previousActiveLead = $null
+                    $previousActiveDelta = $null
                 }
                 $wasPredictionActive = $isPredictionActive
                 if (-not $isPredictionActive) {
@@ -382,6 +429,14 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         }
         $predictionActiveRunP50Frames = if ($predictionActiveRunFrames.Count -gt 0) {
             Get-PercentileValue -Values @($predictionActiveRunFrames) -Percentile 0.50
+        }
+        else { 0.0 }
+        $predictionLeadDeltaP95 = if ($predictionLeadDeltas.Count -gt 0) {
+            Get-PercentileValue -Values @($predictionLeadDeltas) -Percentile 0.95
+        }
+        else { 0.0 }
+        $predictionLeadJerkP95 = if ($predictionLeadJerks.Count -gt 0) {
+            Get-PercentileValue -Values @($predictionLeadJerks) -Percentile 0.95
         }
         else { 0.0 }
         $movingInsideSettleRows = if ($rows[0].PSObject.Properties.Name -contains 'MovingInsideSettle') {
@@ -542,6 +597,11 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
                 100.0 * $highSpeedSuppressedRows / [math]::Max(1, $samples.Count), 1)
             P50PredictionLeadPx = [math]::Round($predictionLeadP50, 2)
             P95PredictionLeadPx = [math]::Round($predictionLeadP95, 2)
+            PredictionActiveSamples = $predictionRows.Count
+            P95PredictionLeadDeltaPx = [math]::Round($predictionLeadDeltaP95, 2)
+            P95PredictionLeadJerkPx = [math]::Round($predictionLeadJerkP95, 2)
+            PredictionLeadCappedPct = [math]::Round(
+                100.0 * $predictionCappedRows / [math]::Max(1, $predictionRows.Count), 1)
             PredictionSideFlipCount = $predictionSideFlipCount
             PredictionInterruptionCount = $predictionInterruptionCount
             P50PredictionActiveRunFrames = [math]::Round($predictionActiveRunP50Frames, 1)
@@ -578,6 +638,7 @@ if ($trialMetrics.Count -eq 0) {
 $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Object {
     $group = @($_.Group)
     $sampleCount = [int]($group | Measure-Object Samples -Sum).Sum
+    $predictionSampleCount = [int]($group | Measure-Object PredictionActiveSamples -Sum).Sum
     $recoveredCount = [int]($group | Measure-Object RecoveredReversals -Sum).Sum
     $weightedRecoveryTotal = [double](($group | Where-Object {
         $_.RecoveredReversals -gt 0 -and $null -ne $_.RecoveryMeanMs
@@ -648,6 +709,17 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
             [double]($group | Measure-Object P50PredictionLeadPx -Average).Average, 2)
         MeanP95PredictionLeadPx = [math]::Round(
             [double]($group | Measure-Object P95PredictionLeadPx -Average).Average, 2)
+        MeanP95PredictionLeadDeltaPx = [math]::Round(
+            [double]($group | Measure-Object P95PredictionLeadDeltaPx -Average).Average, 2)
+        WorstP95PredictionLeadDeltaPx = [math]::Round(
+            [double]($group | Measure-Object P95PredictionLeadDeltaPx -Maximum).Maximum, 2)
+        MeanP95PredictionLeadJerkPx = [math]::Round(
+            [double]($group | Measure-Object P95PredictionLeadJerkPx -Average).Average, 2)
+        WorstP95PredictionLeadJerkPx = [math]::Round(
+            [double]($group | Measure-Object P95PredictionLeadJerkPx -Maximum).Maximum, 2)
+        PredictionLeadCappedPct = [math]::Round([double](($group | ForEach-Object {
+            $_.PredictionLeadCappedPct * $_.PredictionActiveSamples
+        } | Measure-Object -Sum).Sum) / [math]::Max(1, $predictionSampleCount), 1)
         PredictionSideFlipCount = [int]($group | Measure-Object PredictionSideFlipCount -Sum).Sum
         PredictionInterruptionCount = [int]($group | Measure-Object PredictionInterruptionCount -Sum).Sum
         MeanP50PredictionActiveRunFrames = [math]::Round(
@@ -712,6 +784,10 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'SpeedLimitedPct', 'PredictionActivePct', 'PredictionSelfMotionSuppressedPct',
         'PredictionOscillationSuppressedPct', 'PredictionHighSpeedSuppressedPct',
         'P50PredictionLeadPx', 'P95PredictionLeadPx', 'MeanP50PredictionLeadPx', 'MeanP95PredictionLeadPx',
+        'PredictionActiveSamples', 'P95PredictionLeadDeltaPx', 'P95PredictionLeadJerkPx',
+        'PredictionLeadCappedPct', 'MeanP95PredictionLeadDeltaPx',
+        'WorstP95PredictionLeadDeltaPx', 'MeanP95PredictionLeadJerkPx',
+        'WorstP95PredictionLeadJerkPx',
         'PredictionSideFlipCount', 'PredictionInterruptionCount',
         'P50PredictionActiveRunFrames', 'MeanP50PredictionActiveRunFrames',
         'MovingInsideSettlePct', 'AxisMovingInsideSettlePct', 'AxisSettledPct',
@@ -730,6 +806,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, OutputSideFlipMeanAbsCounts, OutputSideFlipMaxAbsCounts, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, OutputSideFlipMeanAbsCounts, OutputSideFlipMaxAbsCounts, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, P95PredictionLeadDeltaPx, P95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, MeanObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, OutputSideFlipRateHz, OutputSideFlipMeanAbsCounts, OutputSideFlipMaxAbsCounts, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, MeanObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, OutputSideFlipRateHz, OutputSideFlipMeanAbsCounts, OutputSideFlipMaxAbsCounts, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, MeanP95PredictionLeadDeltaPx, MeanP95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize

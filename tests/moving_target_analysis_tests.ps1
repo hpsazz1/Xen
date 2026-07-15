@@ -41,14 +41,17 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     foreach ($row in $augmentedRows) {
         $timestamp = [double]$row.Timestamp
         $predictionActive = $timestamp -in @(1000, 1010, 1020, 1050, 1060)
-        $offset = if ($timestamp -in @(1000, 1010, 1020)) { 30.0 }
-            elseif ($timestamp -in @(1050, 1060)) { -20.0 }
+        $offset = if ($timestamp -in @(1000, 1020)) { 30.0 }
+            elseif ($timestamp -eq 1010) { 20.0 }
+            elseif ($timestamp -eq 1050) { -20.0 }
+            elseif ($timestamp -eq 1060) { -10.0 }
             else { 0.0 }
         # Predicted minus Error is the crosshair center; lead offset is not observed error.
         $predictionLocked = if ($predictionActive) { 1 } else { 0 }
         $row | Add-Member -NotePropertyName PredictionDirectionLocked -NotePropertyValue $predictionLocked
         $row | Add-Member -NotePropertyName PredictionOffsetX -NotePropertyValue $offset
         $row | Add-Member -NotePropertyName PredictionOffsetY -NotePropertyValue 0.0
+        $row | Add-Member -NotePropertyName CaptureRoiWidth -NotePropertyValue 320.0
         $row | Add-Member -NotePropertyName PredictedX -NotePropertyValue $(100.0 + [double]$row.ErrorX)
         $row | Add-Member -NotePropertyName PredictedY -NotePropertyValue $(100.0 + [double]$row.ErrorY)
         $row | Add-Member -NotePropertyName RawPivotX -NotePropertyValue 105.0
@@ -94,7 +97,10 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 0 $reverseTrials[0].PredictionSelfMotionSuppressedPct 'Legacy CSV without self-motion gate diagnostics must remain compatible.'
     Assert-Equal 0 $reverseTrials[0].PredictionOscillationSuppressedPct 'Legacy CSV without oscillation gate diagnostics must remain compatible.'
     Assert-Equal 0 $reverseTrials[0].PredictionHighSpeedSuppressedPct 'Legacy CSV without high-speed gate diagnostics must remain compatible.'
-    Assert-Equal 30 $reverseTrials[0].P50PredictionLeadPx 'Kinematic median lead must use active prediction offsets.'
+    Assert-Equal 20 $reverseTrials[0].P50PredictionLeadPx 'Kinematic median lead must use active prediction offsets.'
+    Assert-Equal 10 $reverseTrials[0].P95PredictionLeadDeltaPx 'Prediction smoothness must use active-to-active lead magnitude deltas.'
+    Assert-Equal 20 $reverseTrials[0].P95PredictionLeadJerkPx 'Prediction smoothness must expose alternating lead-magnitude deltas.'
+    Assert-Equal 40 $reverseTrials[0].PredictionLeadCappedPct 'Prediction cap occupancy must use active prediction samples only.'
     Assert-Equal 1 $reverseTrials[0].PredictionInterruptionCount 'Prediction active-to-inactive interruptions must be counted.'
     Assert-Equal 2 $reverseTrials[0].P50PredictionActiveRunFrames 'Prediction active run length must expose one-frame gating churn.'
     Assert-Equal 1 $reverseTrials[0].PredictionSideFlipCount 'Prediction side changes must remain independently auditable.'
@@ -119,6 +125,9 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 5 $scenario[0].MeanObservedSteadyP95AbsAxisErrorPx 'Scenario summary must retain observed steady target error.'
     Assert-Equal 1 $scenario[0].OutputSideFlipCount 'Scenario summary must sum device output side changes across trials.'
     Assert-Equal 1 $scenario[0].OutputSideFlipMeanAbsCounts 'Scenario summary must weight output flip magnitude by flip count.'
+    Assert-Equal 5 $scenario[0].MeanP95PredictionLeadDeltaPx 'Scenario summary must preserve prediction lead smoothness.'
+    Assert-Equal 10 $scenario[0].MeanP95PredictionLeadJerkPx 'Scenario summary must preserve prediction lead jerk.'
+    Assert-Equal 40 $scenario[0].PredictionLeadCappedPct 'Scenario summary must weight cap occupancy by active samples.'
     $exportedRows = @(Import-Csv -LiteralPath $outputCsv)
     Assert-Equal 6 $exportedRows.Count 'CSV export must include trials and scenario summaries.'
     Assert-Equal 2 $exportedRows[-1].Trials 'CSV export must retain scenario-only summary columns.'
