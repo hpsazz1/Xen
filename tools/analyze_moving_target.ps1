@@ -165,6 +165,8 @@ if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
 }
 $velocityColumn = if ($Axis -eq 'X') { 'ObservedVelocityX' } else { 'ObservedVelocityY' }
 $errorColumn = if ($Axis -eq 'X') { 'ErrorX' } else { 'ErrorY' }
+$rawPivotColumn = if ($Axis -eq 'X') { 'RawPivotX' } else { 'RawPivotY' }
+$predictedColumn = if ($Axis -eq 'X') { 'PredictedX' } else { 'PredictedY' }
 $finalMoveColumn = if ($Axis -eq 'X') { 'FinalMx' } else { 'FinalMy' }
 $requestedPixelColumn = if ($Axis -eq 'X') { 'RequestedPixelX' } else { 'RequestedPixelY' }
 $requestedCountsColumn = if ($Axis -eq 'X') { 'RequestedCountsX' } else { 'RequestedCountsY' }
@@ -239,6 +241,52 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         }
 
         $axisAbsErrors = @($samples | ForEach-Object { [math]::Abs([double]$_.$errorColumn) })
+        # ErrorX/ErrorY 是“预测后控制目标 - 准星中心”，包含有意加入的常速度前瞻，
+        # 不能直接代表准星相对真实检测目标的屏幕误差。新CSV用
+        # Predicted-Error 反推出每帧准星中心，再与原始pivot比较；旧CSV继续可分析，
+        # 但通过 ObservedTrackingAvailable=0 明确标记缺少真实跟踪口径。
+        $hasObservedTracking =
+            $rows[0].PSObject.Properties.Name -contains $rawPivotColumn -and
+            $rows[0].PSObject.Properties.Name -contains $predictedColumn
+        $observedAxisErrors = if ($hasObservedTracking) {
+            @($samples | ForEach-Object {
+                $aimCenter = [double]$_.$predictedColumn - [double]$_.$errorColumn
+                [double]$_.$rawPivotColumn - $aimCenter
+            })
+        }
+        else { @() }
+        $observedAxisAbsErrors = @($observedAxisErrors | ForEach-Object { [math]::Abs($_) })
+        $hasObservedBoxTracking = $hasObservedTracking -and
+            $rows[0].PSObject.Properties.Name -contains 'RawPivotX' -and
+            $rows[0].PSObject.Properties.Name -contains 'RawPivotY' -and
+            $rows[0].PSObject.Properties.Name -contains 'PredictedX' -and
+            $rows[0].PSObject.Properties.Name -contains 'PredictedY' -and
+            $rows[0].PSObject.Properties.Name -contains 'TargetBoxX' -and
+            $rows[0].PSObject.Properties.Name -contains 'TargetBoxY' -and
+            $rows[0].PSObject.Properties.Name -contains 'TargetBoxWidth' -and
+            $rows[0].PSObject.Properties.Name -contains 'TargetBoxHeight'
+        $observedDistances = if ($hasObservedBoxTracking) {
+            @($samples | ForEach-Object {
+                $aimCenterX = [double]$_.PredictedX - [double]$_.ErrorX
+                $aimCenterY = [double]$_.PredictedY - [double]$_.ErrorY
+                $observedErrorX = [double]$_.RawPivotX - $aimCenterX
+                $observedErrorY = [double]$_.RawPivotY - $aimCenterY
+                [math]::Sqrt($observedErrorX * $observedErrorX +
+                    $observedErrorY * $observedErrorY)
+            })
+        }
+        else { @() }
+        $insideTargetRows = if ($hasObservedBoxTracking) {
+            @($samples | Where-Object {
+                $aimCenterX = [double]$_.PredictedX - [double]$_.ErrorX
+                $aimCenterY = [double]$_.PredictedY - [double]$_.ErrorY
+                $aimCenterX -ge [double]$_.TargetBoxX -and
+                $aimCenterX -le [double]$_.TargetBoxX + [double]$_.TargetBoxWidth -and
+                $aimCenterY -ge [double]$_.TargetBoxY -and
+                $aimCenterY -le [double]$_.TargetBoxY + [double]$_.TargetBoxHeight
+            }).Count
+        }
+        else { 0 }
         $steadyWindowStart = [double]$samples[-1].Timestamp - $SteadyWindowMs
         $steadySamples = @($samples | Where-Object { [double]$_.Timestamp -ge $steadyWindowStart })
         $steadyAxisAbsErrors = @($steadySamples | ForEach-Object { [math]::Abs([double]$_.$errorColumn) })
@@ -347,6 +395,19 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         $absoluteOutputCounts = [double](($samples | ForEach-Object {
             [math]::Abs([double]$_.$finalMoveColumn)
         } | Measure-Object -Sum).Sum)
+        $outputSideFlipCount = 0
+        $lastOutputSide = 0
+        foreach ($sample in $samples) {
+            $move = [double]$sample.$finalMoveColumn
+            $side = if ($move -gt 0.0) { 1 } elseif ($move -lt 0.0) { -1 } else { 0 }
+            if ($side -eq 0) {
+                continue
+            }
+            if ($lastOutputSide -ne 0 -and $side -ne $lastOutputSide) {
+                ++$outputSideFlipCount
+            }
+            $lastOutputSide = $side
+        }
         $countsPerPixelSamples = @($samples | Where-Object {
             [math]::Abs([double]$_.$requestedPixelColumn) -gt 0.000001
         } | ForEach-Object {
@@ -364,6 +425,11 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         # 可得到闭环滞后的近似时间；该值用于辨别响应时间而非速度上限瓶颈。
         $approxClosedLoopLagMs = 1000.0 * [double]($axisAbsErrors | Measure-Object -Average).Average *
             $estimatedCountsPerPixel / [math]::Max(1.0, $absoluteOutputCps)
+        $observedApproxClosedLoopLagMs = if ($hasObservedTracking) {
+            1000.0 * [double]($observedAxisAbsErrors | Measure-Object -Average).Average *
+                $estimatedCountsPerPixel / [math]::Max(1.0, $absoluteOutputCps)
+        }
+        else { 0.0 }
         # 单向文件的起停、目标切换或短暂过冲不属于测试脚本反转。只有文件名明确标记
         # reverse/reversal 的往返场景才计算恢复指标，避免把单向质量数据误报为反转。
         $isReversalScenario = $csvFile.BaseName -match '(?i)reverse|reversal'
@@ -393,6 +459,25 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             P50AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $axisAbsErrors -Percentile 0.50), 2)
             P95AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $axisAbsErrors -Percentile 0.95), 2)
             P99AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $axisAbsErrors -Percentile 0.99), 2)
+            ObservedTrackingAvailable = if ($hasObservedTracking) { 1 } else { 0 }
+            ObservedMeanAxisErrorPx = if ($hasObservedTracking) {
+                [math]::Round([double]($observedAxisErrors | Measure-Object -Average).Average, 2)
+            } else { 0.0 }
+            ObservedMeanAbsAxisErrorPx = if ($hasObservedTracking) {
+                [math]::Round([double]($observedAxisAbsErrors | Measure-Object -Average).Average, 2)
+            } else { 0.0 }
+            ObservedP95AbsAxisErrorPx = if ($hasObservedTracking) {
+                [math]::Round((Get-PercentileValue -Values $observedAxisAbsErrors -Percentile 0.95), 2)
+            } else { 0.0 }
+            ObservedP99AbsAxisErrorPx = if ($hasObservedTracking) {
+                [math]::Round((Get-PercentileValue -Values $observedAxisAbsErrors -Percentile 0.99), 2)
+            } else { 0.0 }
+            ObservedP95DistancePx = if ($hasObservedBoxTracking) {
+                [math]::Round((Get-PercentileValue -Values $observedDistances -Percentile 0.95), 2)
+            } else { 0.0 }
+            ObservedInsideTargetPct = if ($hasObservedBoxTracking) {
+                [math]::Round(100.0 * $insideTargetRows / [math]::Max(1, $samples.Count), 1)
+            } else { 0.0 }
             SteadySamples = $steadySamples.Count
             SteadyMeanAbsAxisErrorPx = [math]::Round([double]($steadyAxisAbsErrors | Measure-Object -Average).Average, 2)
             SteadyP95AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $steadyAxisAbsErrors -Percentile 0.95), 2)
@@ -405,6 +490,10 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             MeanAbsOutputCountsPerSecond = [math]::Round($absoluteOutputCps, 1)
             EstimatedCountsPerPixel = [math]::Round($estimatedCountsPerPixel, 4)
             ApproxClosedLoopLagMs = [math]::Round($approxClosedLoopLagMs, 1)
+            ObservedApproxClosedLoopLagMs = [math]::Round($observedApproxClosedLoopLagMs, 1)
+            OutputSideFlipCount = $outputSideFlipCount
+            OutputSideFlipRateHz = [math]::Round(
+                $outputSideFlipCount / [math]::Max(0.001, $sampleDurationSeconds), 2)
             SpeedLimitedPct = [math]::Round(100.0 * $limitedRows / [math]::Max(1, $samples.Count), 1)
             PredictionActivePct = [math]::Round(
                 100.0 * $predictionRows.Count / [math]::Max(1, $samples.Count), 1)
@@ -465,11 +554,29 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         MaxStartAbsAxisErrorPx = [math]::Round([double]($group | Measure-Object StartAbsAxisErrorPx -Maximum).Maximum, 2)
         MeanP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object P95AbsAxisErrorPx -Average).Average, 2)
         WorstP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object P95AbsAxisErrorPx -Maximum).Maximum, 2)
+        ObservedTrackingAvailable = [int]($group | Measure-Object ObservedTrackingAvailable -Minimum).Minimum
+        MeanObservedP95AbsAxisErrorPx = [math]::Round(
+            [double]($group | Measure-Object ObservedP95AbsAxisErrorPx -Average).Average, 2)
+        WorstObservedP95AbsAxisErrorPx = [math]::Round(
+            [double]($group | Measure-Object ObservedP95AbsAxisErrorPx -Maximum).Maximum, 2)
+        MeanObservedP99AbsAxisErrorPx = [math]::Round(
+            [double]($group | Measure-Object ObservedP99AbsAxisErrorPx -Average).Average, 2)
+        MeanObservedP95DistancePx = [math]::Round(
+            [double]($group | Measure-Object ObservedP95DistancePx -Average).Average, 2)
+        ObservedInsideTargetPct = [math]::Round([double](($group | ForEach-Object {
+            $_.ObservedInsideTargetPct * $_.Samples
+        } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         MeanSteadyMeanAbsAxisErrorPx = [math]::Round([double]($group | Measure-Object SteadyMeanAbsAxisErrorPx -Average).Average, 2)
         MeanSteadyP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object SteadyP95AbsAxisErrorPx -Average).Average, 2)
         MeanP95ErrorDistancePx = [math]::Round([double]($group | Measure-Object P95ErrorDistancePx -Average).Average, 2)
         MeanAbsOutputCountsPerSecond = [math]::Round([double]($group | Measure-Object MeanAbsOutputCountsPerSecond -Average).Average, 1)
         MeanApproxClosedLoopLagMs = [math]::Round([double]($group | Measure-Object ApproxClosedLoopLagMs -Average).Average, 1)
+        MeanObservedApproxClosedLoopLagMs = [math]::Round(
+            [double]($group | Measure-Object ObservedApproxClosedLoopLagMs -Average).Average, 1)
+        OutputSideFlipCount = [int]($group | Measure-Object OutputSideFlipCount -Sum).Sum
+        OutputSideFlipRateHz = [math]::Round(
+            [double]($group | Measure-Object OutputSideFlipCount -Sum).Sum /
+            [math]::Max(0.001, [double]($group | Measure-Object DurationMs -Sum).Sum / 1000.0), 2)
         SpeedLimitedPct = [math]::Round([double](($group | ForEach-Object { $_.SpeedLimitedPct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         PredictionActivePct = [math]::Round([double](($group | ForEach-Object {
             $_.PredictionActivePct * $_.Samples
@@ -527,13 +634,19 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'Level', 'Chain', 'Scenario', 'Trial', 'Trials', 'Rows', 'Samples', 'DurationMs',
         'StartAbsAxisErrorPx', 'MeanStartAbsAxisErrorPx', 'MinStartAbsAxisErrorPx', 'MaxStartAbsAxisErrorPx',
         'MeanAxisErrorPx', 'MeanAbsAxisErrorPx', 'P50AbsAxisErrorPx', 'P95AbsAxisErrorPx', 'P99AbsAxisErrorPx',
+        'ObservedTrackingAvailable', 'ObservedMeanAxisErrorPx', 'ObservedMeanAbsAxisErrorPx',
+        'ObservedP95AbsAxisErrorPx', 'ObservedP99AbsAxisErrorPx', 'ObservedP95DistancePx',
+        'ObservedInsideTargetPct', 'MeanObservedP95AbsAxisErrorPx', 'WorstObservedP95AbsAxisErrorPx',
+        'MeanObservedP99AbsAxisErrorPx', 'MeanObservedP95DistancePx',
         'SteadySamples', 'SteadyMeanAbsAxisErrorPx', 'SteadyP95AbsAxisErrorPx',
         'MeanP95AbsAxisErrorPx', 'WorstP95AbsAxisErrorPx', 'P95ErrorDistancePx',
         'MeanSteadyMeanAbsAxisErrorPx', 'MeanSteadyP95AbsAxisErrorPx',
         'MeanP95ErrorDistancePx', 'MaxErrorDistancePx', 'P50ObservedAxisSpeed',
         'P95ObservedAxisSpeed', 'P95FilterResidualPx', 'SignedOutputCountsPerSecond',
         'MeanAbsOutputCountsPerSecond', 'EstimatedCountsPerPixel', 'ApproxClosedLoopLagMs',
-        'MeanApproxClosedLoopLagMs', 'SpeedLimitedPct', 'PredictionActivePct', 'PredictionSelfMotionSuppressedPct',
+        'ObservedApproxClosedLoopLagMs', 'MeanApproxClosedLoopLagMs',
+        'MeanObservedApproxClosedLoopLagMs', 'OutputSideFlipCount', 'OutputSideFlipRateHz',
+        'SpeedLimitedPct', 'PredictionActivePct', 'PredictionSelfMotionSuppressedPct',
         'PredictionOscillationSuppressedPct', 'PredictionHighSpeedSuppressedPct',
         'P50PredictionLeadPx', 'P95PredictionLeadPx', 'MeanP50PredictionLeadPx', 'MeanP95PredictionLeadPx',
         'PredictionSideFlipCount', 'PredictionInterruptionCount',
@@ -553,6 +666,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, P95AbsAxisErrorPx, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanP95AbsAxisErrorPx, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, OutputSideFlipRateHz, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize

@@ -44,14 +44,19 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
         $offset = if ($timestamp -in @(1000, 1010, 1020)) { 30.0 }
             elseif ($timestamp -in @(1050, 1060)) { -20.0 }
             else { 0.0 }
-        $predictedX = 100.0 + $offset
-        foreach ($property in @{
-            PredictionDirectionLocked = $(if ($predictionActive) { 1 } else { 0 })
-            PredictionOffsetX = $offset; PredictionOffsetY = 0.0
-            PredictedX = $predictedX; PredictedY = 100.0
-        }.GetEnumerator()) {
-            $row | Add-Member -NotePropertyName $property.Key -NotePropertyValue $property.Value
-        }
+        # Predicted minus Error is the crosshair center; lead offset is not observed error.
+        $predictionLocked = if ($predictionActive) { 1 } else { 0 }
+        $row | Add-Member -NotePropertyName PredictionDirectionLocked -NotePropertyValue $predictionLocked
+        $row | Add-Member -NotePropertyName PredictionOffsetX -NotePropertyValue $offset
+        $row | Add-Member -NotePropertyName PredictionOffsetY -NotePropertyValue 0.0
+        $row | Add-Member -NotePropertyName PredictedX -NotePropertyValue $(100.0 + [double]$row.ErrorX)
+        $row | Add-Member -NotePropertyName PredictedY -NotePropertyValue $(100.0 + [double]$row.ErrorY)
+        $row | Add-Member -NotePropertyName RawPivotX -NotePropertyValue 105.0
+        $row | Add-Member -NotePropertyName RawPivotY -NotePropertyValue 103.0
+        $row | Add-Member -NotePropertyName TargetBoxX -NotePropertyValue 90.0
+        $row | Add-Member -NotePropertyName TargetBoxY -NotePropertyValue 90.0
+        $row | Add-Member -NotePropertyName TargetBoxWidth -NotePropertyValue 20.0
+        $row | Add-Member -NotePropertyName TargetBoxHeight -NotePropertyValue 20.0
     }
     $augmentedRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
 
@@ -87,6 +92,11 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 1 $reverseTrials[0].PredictionInterruptionCount 'Prediction active-to-inactive interruptions must be counted.'
     Assert-Equal 2 $reverseTrials[0].P50PredictionActiveRunFrames 'Prediction active run length must expose one-frame gating churn.'
     Assert-Equal 1 $reverseTrials[0].PredictionSideFlipCount 'Prediction side changes must remain independently auditable.'
+    Assert-Equal 1 $reverseTrials[0].ObservedTrackingAvailable 'Raw pivot diagnostics must enable observed tracking metrics.'
+    Assert-Equal 5 $reverseTrials[0].ObservedP95AbsAxisErrorPx 'Observed error must use raw pivot relative to the inferred aim center.'
+    Assert-Equal 5.83 $reverseTrials[0].ObservedP95DistancePx 'Observed distance must preserve the two-axis screen error.'
+    Assert-Equal 100 $reverseTrials[0].ObservedInsideTargetPct 'Aim center inside the detected box must be reported.'
+    Assert-Equal 1 $reverseTrials[0].OutputSideFlipCount 'Final device output side changes must be counted independently.'
     Assert-Equal $reverseTrials[0].P95AbsAxisErrorPx $reverseTrials[0].SteadyP95AbsAxisErrorPx 'Short synthetic trials must use all samples as the steady window.'
     Assert-Equal 2 $scenario.Count 'Each scenario file must create one summary.'
     Assert-Equal 2 $scenario[0].Trials 'Scenario summary must report both trials.'
@@ -96,6 +106,8 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 12.5 $scenario[0].ReversalRateHz 'Scenario reversal rate must use total valid duration.'
     Assert-Equal 1 $scenario[0].MaxQueuedMoves 'Scenario summary must preserve maximum queue depth.'
     Assert-Equal 30 $scenario[0].RecoveryP95Ms 'Scenario summary must preserve the worst trial recovery P95.'
+    Assert-Equal 5 $scenario[0].MeanObservedP95AbsAxisErrorPx 'Scenario summary must retain observed target error.'
+    Assert-Equal 1 $scenario[0].OutputSideFlipCount 'Scenario summary must sum device output side changes across trials.'
     $exportedRows = @(Import-Csv -LiteralPath $outputCsv)
     Assert-Equal 6 $exportedRows.Count 'CSV export must include trials and scenario summaries.'
     Assert-Equal 2 $exportedRows[-1].Trials 'CSV export must retain scenario-only summary columns.'
@@ -125,6 +137,20 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     $zeroMotionTrial = @($zeroMotionMetrics | Where-Object { $_.Level -eq 'Trial' })[0]
     Assert-Equal 0 $zeroMotionTrial.EstimatedCountsPerPixel 'A valid zero-motion axis must report unavailable counts-per-pixel as zero.'
     Assert-Equal 0 $zeroMotionTrial.ApproxClosedLoopLagMs 'A valid zero-motion axis must not fabricate closed-loop lag.'
+
+    $legacyRows = @(Import-Csv -LiteralPath $csvPath)
+    foreach ($row in $legacyRows) {
+        foreach ($propertyName in @('RawPivotX', 'RawPivotY', 'TargetBoxX', 'TargetBoxY',
+                                    'TargetBoxWidth', 'TargetBoxHeight', 'PredictedX', 'PredictedY')) {
+            $row.PSObject.Properties.Remove($propertyName)
+        }
+    }
+    $legacyPath = Join-Path $zeroMotionDirectory 'legacy.csv'
+    $legacyRows | Export-Csv -LiteralPath $legacyPath -NoTypeInformation -Encoding UTF8
+    $legacyMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_moving_target.ps1') -DataRoot $zeroMotionRoot -WarmupMs 0 -MinTrialDurationMs 0 -MinTrialSamples 1 -PassThru)
+    $legacyTrial = @($legacyMetrics | Where-Object { $_.Level -eq 'Trial' -and $_.Scenario -eq 'legacy' })[0]
+    Assert-Equal 0 $legacyTrial.ObservedTrackingAvailable 'Legacy CSV must remain analyzable without raw target diagnostics.'
+    Assert-Equal 0 $legacyTrial.ObservedP95AbsAxisErrorPx 'Unavailable observed metrics must use zero plus an explicit availability flag.'
 }
 finally {
     if (Test-Path -LiteralPath $temporaryRoot) {
