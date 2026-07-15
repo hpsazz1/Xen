@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 34;
+inline constexpr int kBasicAimControllerRevision = 35;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -138,6 +138,17 @@ public:
         double candidateIntegralY = integralCountErrorY_;
         if (integralTime > 0.0)
         {
+            // 越心时渐进泄放旧侧积分，避免硬清零的稳态偏差和原量换侧的反向脉冲。
+            constexpr double kMovingIntegralCrossingBleed = 0.50;
+            if (settings.preserveMovingIntegral)
+            {
+                if (errorX * candidateIntegralX < 0.0 &&
+                    std::abs(errorX) >= settleRadius)
+                    candidateIntegralX *= kMovingIntegralCrossingBleed;
+                if (errorY * candidateIntegralY < 0.0 &&
+                    std::abs(errorY) >= settleRadius)
+                    candidateIntegralY *= kMovingIntegralCrossingBleed;
+            }
             // 匀速目标对纯比例控制形成固定滞后。积分项累计 counts 误差并提供持续速度，
             // 使系统能够消除斜坡输入的稳态误差；误差换向时清零，避免反转后旧积分拖拽。
             candidateIntegralX += errorX * countsPerPixelX * dt;
