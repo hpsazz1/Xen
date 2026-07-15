@@ -89,7 +89,7 @@ public:
     void applySelfMotionSuppression(Result& result, bool artifactDetected)
     {
         constexpr int kHoldFrames = 4;
-        constexpr int kSustainedMotionFrames = 5;
+        constexpr int kSustainedMotionFrames = 3;
         // static实测的伪预测只持续1~2帧；真实left/right一旦连续预测满5帧，
         // 屏幕收敛与自身视角同向是正常闭环跟随，不再允许自运动门控反复打断。
         if (artifactDetected && continuousPredictionFrames_ >= kSustainedMotionFrames)

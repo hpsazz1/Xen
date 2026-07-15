@@ -1064,7 +1064,7 @@ int main()
                "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r33") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r34") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -1318,7 +1318,7 @@ int main()
     TargetPredictor sustainedMotionPredictor;
     TargetPredictor::Result sustainedPrediction{};
     int activePredictionFrames = 0;
-    for (int sample = 0; sample < 16 && activePredictionFrames < 5; ++sample)
+    for (int sample = 0; sample < 16 && activePredictionFrames < 3; ++sample)
     {
         const auto time = t0 + std::chrono::milliseconds(sample * 8);
         sustainedPrediction = sustainedMotionPredictor.update(
@@ -1326,8 +1326,8 @@ int main()
         if (sustainedPrediction.offsetX > 0.0)
             ++activePredictionFrames;
     }
-    expectTrue(activePredictionFrames == 5 && sustainedPrediction.offsetX > 0.0,
-               "five continuous prediction frames establish sustained target motion");
+    expectTrue(activePredictionFrames == 3 && sustainedPrediction.offsetX > 0.0,
+               "three continuous prediction frames establish sustained target motion");
     sustainedMotionPredictor.applySelfMotionSuppression(sustainedPrediction, true);
     expectTrue(!sustainedPrediction.selfMotionSuppressed && sustainedPrediction.offsetX > 0.0,
                "sustained target motion is exempt from self-motion artifact suppression");
