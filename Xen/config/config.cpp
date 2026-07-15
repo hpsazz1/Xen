@@ -133,7 +133,7 @@ bool Config::loadConfig(const std::string& filename)
         maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
         move_response_ms = 80.0f;                        // 基础控制响应时间（毫秒）
         move_max_speed_cps = 3200.0f;                    // 五类NDI移动目标标准，解除jump远距帧限速
-        move_integral_time_ms = 320.0f;                  // 五类NDI移动目标标准，消除匀速稳态偏差
+        move_integral_time_ms = 500.0f;                  // 五类NDI移动目标抗晃动标准，降低积分累积斜率
         aim_pipeline_mode = "legacy";                   // P0-0 默认保持 r30 正式输出
         aim_shadow_command_to_frame_delay_ms = 60.0f;    // 显式shadow候选，不自动采用被动标定结果
         aim_shadow_response_ms = 80.0f;                  // 第一子阶段仅启用P反馈
@@ -556,7 +556,7 @@ bool Config::loadConfig(const std::string& filename)
     maxSpeedMultiplier = (float)get_double("maxSpeedMultiplier", 0.1);
     move_response_ms = (float)get_double("move_response_ms", 80.0);
     move_max_speed_cps = (float)get_double("move_max_speed_cps", 3200.0);
-    move_integral_time_ms = (float)get_double("move_integral_time_ms", 320.0);
+    move_integral_time_ms = (float)get_double("move_integral_time_ms", 500.0);
     aim_pipeline_mode = get_string("aim_pipeline_mode", "legacy");
     aim_shadow_command_to_frame_delay_ms = (float)get_double(
         "aim_shadow_command_to_frame_delay_ms", 60.0);

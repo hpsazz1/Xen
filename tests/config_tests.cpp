@@ -98,8 +98,8 @@ int main()
         expectNear(defaults.detection_resolution, 320.0, 0.0, "default detection resolution");
         expectNear(defaults.move_max_speed_cps, 3200.0, 0.0,
                    "default maximum speed follows moving-target standard");
-        expectNear(defaults.move_integral_time_ms, 320.0, 0.0,
-                   "moving integral removes steady tracking bias");
+        expectNear(defaults.move_integral_time_ms, 500.0, 0.0,
+                   "moving integral uses the anti-oscillation accumulation window");
         expectString(defaults.aim_pipeline_mode, "legacy",
                      "new pipeline defaults to legacy mode");
         expectNear(defaults.aim_shadow_command_to_frame_delay_ms, 60.0, 0.0,
