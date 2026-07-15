@@ -57,6 +57,10 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
         $row | Add-Member -NotePropertyName TargetBoxY -NotePropertyValue 90.0
         $row | Add-Member -NotePropertyName TargetBoxWidth -NotePropertyValue 20.0
         $row | Add-Member -NotePropertyName TargetBoxHeight -NotePropertyValue 20.0
+        $row | Add-Member -NotePropertyName MovingInsideSettleX -NotePropertyValue $row.MovingInsideSettle
+        $row | Add-Member -NotePropertyName MovingInsideSettleY -NotePropertyValue 0
+        $row | Add-Member -NotePropertyName SettledX -NotePropertyValue 0
+        $row | Add-Member -NotePropertyName SettledY -NotePropertyValue 1
     }
     $augmentedRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
 
@@ -82,6 +86,8 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal test-revision $reverseTrials[0].BuildRevision 'Build revision must be preserved in trial metrics.'
     Assert-Equal 4 $reverseTrials[0].ControllerRevision 'Controller revision must be preserved in trial metrics.'
     Assert-Equal 28.6 $reverseTrials[0].MovingInsideSettlePct 'Settle motion diagnostics must be summarized per trial.'
+    Assert-Equal 28.6 $reverseTrials[0].AxisMovingInsideSettlePct 'Per-axis settle release diagnostics must use the selected axis.'
+    Assert-Equal 0 $reverseTrials[0].AxisSettledPct 'Per-axis settle occupancy must use the selected axis.'
     Assert-Equal 0 $reverseTrials[0].VerticalCatchUpPct 'Legacy CSV without vertical catch-up diagnostics must remain compatible.'
     Assert-Equal 0 $reverseTrials[0].HorizontalCatchUpPct 'Legacy CSV without horizontal catch-up diagnostics must remain compatible.'
     Assert-Equal 71.4 $reverseTrials[0].PredictionActivePct 'Kinematic prediction activation must be summarized.'

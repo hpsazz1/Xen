@@ -1011,9 +1011,11 @@ int main()
         "basic pipeline contains dml stage timing diagnostics");
     expectTrue(traceHeader.find("NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
                "basic pipeline keeps ndi compatibility diagnostics");
-    expectTrue(traceHeader.find("FrameCountLimit,ErrorMotion") != std::string::npos &&
-               traceHeader.find("MovingInsideSettle,HorizontalCatchUp,VerticalCatchUp,SpeedLimited,Settled") != std::string::npos,
-               "basic pipeline reports controller speed limiting");
+    expectTrue(traceHeader.find(
+                   "FrameCountLimit,ErrorMotion,ErrorMotionX,ErrorMotionY") != std::string::npos &&
+               traceHeader.find(
+                   "MovingInsideSettle,MovingInsideSettleX,MovingInsideSettleY,HorizontalCatchUp,VerticalCatchUp,SpeedLimited,Settled,SettledX,SettledY") != std::string::npos,
+               "basic pipeline reports per-axis settle and speed limiting diagnostics");
     expectTrue(traceHeader.find(
         "ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY") != std::string::npos,
         "basic pipeline reports effective per-axis catch-up response");
@@ -1050,7 +1052,7 @@ int main()
         "CommandSequence,CommandEnqueueSucceeded,CommandEnqueueNs,CommandSendAttempted,CommandSendSucceeded,CommandDeviceSendNs,CommandDroppedBeforeSend") != std::string::npos,
         "basic pipeline records command enqueue and device acknowledgement lifecycle");
     expectTrue(traceHeader.find(
-        "ErrorMotion,SettleMotionThreshold,MovingInsideSettle") != std::string::npos,
+        "ErrorMotion,ErrorMotionX,ErrorMotionY,SettleMotionThreshold,MovingInsideSettle") != std::string::npos,
         "basic pipeline reports settle motion release diagnostics");
     std::string traceRow;
     std::getline(traceFile, traceRow);
@@ -1064,7 +1066,7 @@ int main()
                "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r40") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r41") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -1860,12 +1862,12 @@ int main()
     for (int frame = 0; frame < 20; ++frame)
         predictedMotionController.update(
             20.0, 0.0, dmlDt, 1.344, 1.344, predictedMotionSettings);
-    predictedMotionSettings.preserveMovingIntegral = true;
+    predictedMotionSettings.preserveMovingIntegralX = true;
     const auto predictedPointCrossing = predictedMotionController.update(
         -6.0, 0.0, dmlDt, 1.344, 1.344, predictedMotionSettings);
     expectTrue(predictedPointCrossing.integralCountsX > 0.5,
                "active prediction preserves moving integral across aim-point crossing");
-    predictedMotionSettings.preserveMovingIntegral = false;
+    predictedMotionSettings.preserveMovingIntegralX = false;
     const auto predictionWithdrawn = predictedMotionController.update(
         -6.0, 0.0, dmlDt, 1.344, 1.344, predictedMotionSettings);
     expectTrue(predictionWithdrawn.integralCountsX <= 0.0,
@@ -1899,6 +1901,42 @@ int main()
         1.5, 0.0, dmlDt, 1.344, 1.344, centerHoldSettings);
     expectTrue(detectorJitter.settled,
                "subpixel detector jitter keeps pi controller settled");
+
+    // 水平持续运动时，Y轴没有可靠运动证据。旧二维锁存会因X误差始终较大而
+    // 让Y比例输出追逐检测噪声；按轴锁存后X继续输出，Y必须独立保持为零。
+    BasicAimController perAxisSettleController;
+    BasicAimController::Settings perAxisSettleSettings = dmlRateSettings;
+    perAxisSettleSettings.preserveMovingIntegralX = true;
+    perAxisSettleSettings.allowMovingInsideSettleX = true;
+    perAxisSettleSettings.preserveMovingIntegralY = false;
+    perAxisSettleSettings.allowMovingInsideSettleY = false;
+    bool horizontalOutputObserved = false;
+    bool verticalNoiseOutputObserved = false;
+    for (int frame = 0; frame < 120; ++frame)
+    {
+        const double verticalNoise = frame % 2 == 0 ? 2.0 : -2.0;
+        const auto output = perAxisSettleController.update(
+            12.0, verticalNoise, dmlDt,
+            dmlCountsPerPixel, dmlCountsPerPixel, perAxisSettleSettings);
+        horizontalOutputObserved = horizontalOutputObserved || output.countsX > 0.0;
+        verticalNoiseOutputObserved = verticalNoiseOutputObserved || output.countsY != 0.0;
+        expectTrue(output.settledY && !output.settledX,
+                   "stationary vertical axis settles independently during horizontal tracking");
+    }
+    expectTrue(horizontalOutputObserved && !verticalNoiseOutputObserved,
+               "per-axis settle keeps horizontal tracking and rejects vertical detector noise");
+
+    // 可靠垂直或斜向运动必须按该轴误差变化立即释放，不能因上一段水平运动
+    // 留下的Y锁存而等待完整二维误差离开回差区。
+    perAxisSettleSettings.preserveMovingIntegralY = true;
+    perAxisSettleSettings.allowMovingInsideSettleY = true;
+    const auto verticalMotionRelease = perAxisSettleController.update(
+        12.0, 8.0, dmlDt,
+        dmlCountsPerPixel, dmlCountsPerPixel, perAxisSettleSettings);
+    expectTrue(!verticalMotionRelease.settledY &&
+               verticalMotionRelease.movingInsideSettleY &&
+               verticalMotionRelease.countsY > 0.0,
+               "reliable vertical motion releases only the vertical settle latch");
 
     // 积分候选必须保持静止闭环安全：大误差阶段受设备限速时禁止 wind-up，
     // 接近中心后进入既有 5 px 稳定半径并清空积分，不得跨越目标持续反向输出。

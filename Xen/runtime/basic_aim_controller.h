@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 40;
+inline constexpr int kBasicAimControllerRevision = 41;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -19,8 +19,10 @@ public:
         double integralTimeSeconds = 0.0;   // 独立控制器默认关闭积分；现场移动配置显式启用
         double settleRadiusPixels = 5.0;
         double releaseRadiusPixels = 8.0;
-        bool preserveMovingIntegral = false; // 预测已确认持续移动时，越心误差不代表目标反向
-        bool allowMovingInsideSettle = true; // 生产链路仅在确认移动目标时阻止静态锁存
+        bool preserveMovingIntegralX = false; // X轴确认持续移动时保留越心积分
+        bool preserveMovingIntegralY = false; // Y轴确认持续移动时保留越心积分
+        bool allowMovingInsideSettleX = true; // X轴误差快速变化时允许独立释放稳定锁存
+        bool allowMovingInsideSettleY = true; // Y轴误差快速变化时允许独立释放稳定锁存
     };
 
     struct Output
@@ -34,12 +36,18 @@ public:
         double errorDistance = 0.0;
         double frameCountLimit = 0.0;
         double errorMotion = 0.0;
+        double errorMotionX = 0.0;
+        double errorMotionY = 0.0;
         double settleMotionThreshold = 0.0;
         double effectiveResponseSecondsX = 0.0;
         double effectiveResponseSecondsY = 0.0;
         bool settled = false;
+        bool settledX = false;
+        bool settledY = false;
         bool speedLimited = false; // 本次输出是否被最大设备速率截断
         bool movingInsideSettle = false;
+        bool movingInsideSettleX = false;
+        bool movingInsideSettleY = false;
         bool horizontalCatchUp = false; // 水平大误差是否使用短时快速比例响应
         bool verticalCatchUp = false; // 垂直大误差是否使用短时快速比例响应
     };
@@ -74,28 +82,38 @@ public:
             ? catchUpResponse(errorX) : response;
         out.effectiveResponseSecondsY = out.verticalCatchUp
             ? catchUpResponse(errorY) : response;
-        const double errorMotion = hasPreviousError_
-            ? std::hypot(errorX - previousErrorX_, errorY - previousErrorY_) : 0.0;
+        const double errorMotionX = hasPreviousError_
+            ? std::abs(errorX - previousErrorX_) : 0.0;
+        const double errorMotionY = hasPreviousError_
+            ? std::abs(errorY - previousErrorY_) : 0.0;
+        const double errorMotion = std::hypot(errorMotionX, errorMotionY);
         // PI 静止锁存只应用于误差基本不变的目标。启用积分后，如果相邻有效观测的误差
         // 变化达到稳定半径的四分之一（320 检测区域默认 1.25 px），说明目标仍在移动；
         // 即使尚未越过 8 px 释放半径也要立即恢复控制，避免高频换向时连续停发。
         const double settleMotionThreshold = std::max(1.0, settleRadius * 0.25);
-        const bool movingInsideSettle = settings.allowMovingInsideSettle &&
+        const bool movingInsideSettleX = settings.allowMovingInsideSettleX &&
             integralTime > 0.0 && hasPreviousError_ &&
-            errorMotion >= settleMotionThreshold;
+            errorMotionX >= settleMotionThreshold;
+        const bool movingInsideSettleY = settings.allowMovingInsideSettleY &&
+            integralTime > 0.0 && hasPreviousError_ &&
+            errorMotionY >= settleMotionThreshold;
         out.errorMotion = errorMotion;
+        out.errorMotionX = errorMotionX;
+        out.errorMotionY = errorMotionY;
         out.settleMotionThreshold = settleMotionThreshold;
-        out.movingInsideSettle = movingInsideSettle;
+        out.movingInsideSettleX = movingInsideSettleX;
+        out.movingInsideSettleY = movingInsideSettleY;
+        out.movingInsideSettle = movingInsideSettleX || movingInsideSettleY;
 
         // 匀速跟踪时 PI 可能在中心附近产生亚像素级越心，这只是积分自然回调，不能等同于
         // 目标反转。只有误差已位于旧积分反方向且扩大到稳定半径，才撤销该轴旧积分；
         // 这样小幅越心仍保留维持速度，静止过冲或真实反转又能在 5 px 边界内完成解卷绕。
         if (integralTime > 0.0)
         {
-            if (!settings.preserveMovingIntegral &&
+            if (!settings.preserveMovingIntegralX &&
                 errorX * integralCountErrorX_ < 0.0 && std::abs(errorX) >= settleRadius)
                 integralCountErrorX_ = 0.0;
-            if (!settings.preserveMovingIntegral &&
+            if (!settings.preserveMovingIntegralY &&
                 errorY * integralCountErrorY_ < 0.0 && std::abs(errorY) >= settleRadius)
                 integralCountErrorY_ = 0.0;
         }
@@ -106,35 +124,64 @@ public:
             ? integralCountErrorY_ * dt / (response * integralTime) : 0.0;
         // 设备最终发送整数 counts；至少半个 count 的保留积分代表当前帧仍有可执行的
         // 持续运动需求。此时不能把“进入中心”误判成静止并清空 PI 前馈能力。
-        const bool hasActionableIntegral =
-            std::hypot(retainedIntegralCountsX, retainedIntegralCountsY) >= 0.5;
+        const bool hasActionableIntegralX = settings.preserveMovingIntegralX &&
+            std::abs(retainedIntegralCountsX) >= 0.5;
+        const bool hasActionableIntegralY = settings.preserveMovingIntegralY &&
+            std::abs(retainedIntegralCountsY) >= 0.5;
 
-        if (settled_)
+        // 二维共用稳定状态会让水平移动目标的Y轴持续追逐约1~2 px检测噪声。
+        // 每轴沿用原分量半径独立停发，避免改变既有单轴静止精度；可靠垂直或
+        // 斜向运动通过对应轴运动标志立即释放。两轴同时锁存时稳定区是矩形，
+        // 这是分轴控制的明确语义，不再用另一轴误差阻止当前轴停发。
+        const auto updateAxisSettle = [settleRadius, releaseRadius]
+            (double error, bool actionableIntegral, bool movingInsideSettle,
+             bool& settled, double& integralState, double& previousOutput,
+             double& pendingReverse, int& pendingReverseFrames)
         {
-            if (out.errorDistance <= releaseRadius && !hasActionableIntegral && !movingInsideSettle)
+            const auto clearAxisState = [&]()
             {
-                clearIntegralState();
-                rememberError(errorX, errorY);
-                out.settled = true;
-                return out;
+                integralState = 0.0;
+                previousOutput = 0.0;
+                pendingReverse = 0.0;
+                pendingReverseFrames = 0;
+            };
+            if (settled)
+            {
+                if (std::abs(error) <= releaseRadius &&
+                    !actionableIntegral && !movingInsideSettle)
+                {
+                    clearAxisState();
+                    return true;
+                }
+                settled = false;
             }
-            settled_ = false;
-        }
-        if (out.errorDistance <= settleRadius && !hasActionableIntegral && !movingInsideSettle)
-        {
-            settled_ = true;
-            clearIntegralState();
-            rememberError(errorX, errorY);
-            out.settled = true;
-            return out;
-        }
+            if (std::abs(error) <= settleRadius &&
+                !actionableIntegral && !movingInsideSettle)
+            {
+                settled = true;
+                clearAxisState();
+                return true;
+            }
+            return false;
+        };
+        out.settledX = updateAxisSettle(
+            errorX, hasActionableIntegralX, movingInsideSettleX,
+            settledX_, integralCountErrorX_, previousOutputX_,
+            pendingReverseX_, pendingReverseFramesX_);
+        out.settledY = updateAxisSettle(
+            errorY, hasActionableIntegralY, movingInsideSettleY,
+            settledY_, integralCountErrorY_, previousOutputY_,
+            pendingReverseY_, pendingReverseFramesY_);
+        out.settled = out.settledX && out.settledY;
 
         const double responseFractionX =
             1.0 - std::exp(-dt / out.effectiveResponseSecondsX);
         const double responseFractionY =
             1.0 - std::exp(-dt / out.effectiveResponseSecondsY);
-        const double proportionalCountsX = errorX * responseFractionX * countsPerPixelX;
-        const double proportionalCountsY = errorY * responseFractionY * countsPerPixelY;
+        const double proportionalCountsX = out.settledX
+            ? 0.0 : errorX * responseFractionX * countsPerPixelX;
+        const double proportionalCountsY = out.settledY
+            ? 0.0 : errorY * responseFractionY * countsPerPixelY;
 
         double candidateIntegralX = integralCountErrorX_;
         double candidateIntegralY = integralCountErrorY_;
@@ -142,19 +189,28 @@ public:
         {
             // 越心时渐进泄放旧侧积分，避免硬清零的稳态偏差和原量换侧的反向脉冲。
             constexpr double kMovingIntegralCrossingBleed = 0.50;
-            if (settings.preserveMovingIntegral)
+            if (settings.preserveMovingIntegralX)
             {
                 if (errorX * candidateIntegralX < 0.0 &&
                     std::abs(errorX) >= settleRadius)
                     candidateIntegralX *= kMovingIntegralCrossingBleed;
+            }
+            if (settings.preserveMovingIntegralY)
+            {
                 if (errorY * candidateIntegralY < 0.0 &&
                     std::abs(errorY) >= settleRadius)
                     candidateIntegralY *= kMovingIntegralCrossingBleed;
             }
             // 匀速目标对纯比例控制形成固定滞后。积分项累计 counts 误差并提供持续速度，
             // 使系统能够消除斜坡输入的稳态误差；误差换向时清零，避免反转后旧积分拖拽。
-            candidateIntegralX += errorX * countsPerPixelX * dt;
-            candidateIntegralY += errorY * countsPerPixelY * dt;
+            if (out.settledX)
+                candidateIntegralX = 0.0;
+            else
+                candidateIntegralX += errorX * countsPerPixelX * dt;
+            if (out.settledY)
+                candidateIntegralY = 0.0;
+            else
+                candidateIntegralY += errorY * countsPerPixelY * dt;
 
             // 积分速度最多占设备总预算的一半；远距离比例项限速时不提交新积分，
             // 防止静止大步进和设备饱和期间产生 wind-up。
@@ -167,8 +223,10 @@ public:
                 candidateIntegralX *= scale;
                 candidateIntegralY *= scale;
             }
-            out.integralCountsX = candidateIntegralX * dt / (response * integralTime);
-            out.integralCountsY = candidateIntegralY * dt / (response * integralTime);
+            out.integralCountsX = out.settledX
+                ? 0.0 : candidateIntegralX * dt / (response * integralTime);
+            out.integralCountsY = out.settledY
+                ? 0.0 : candidateIntegralY * dt / (response * integralTime);
         }
         else
         {
@@ -244,7 +302,8 @@ public:
 
     void reset()
     {
-        settled_ = false;
+        settledX_ = false;
+        settledY_ = false;
         clearIntegralState();
         previousErrorX_ = 0.0;
         previousErrorY_ = 0.0;
@@ -256,7 +315,7 @@ public:
         pendingReverseFramesX_ = 0;
         pendingReverseFramesY_ = 0;
     }
-    bool settled() const { return settled_; }
+    bool settled() const { return settledX_ && settledY_; }
 
 private:
     void clearIntegralState()
@@ -272,7 +331,8 @@ private:
         hasPreviousError_ = true;
     }
 
-    bool settled_ = false;
+    bool settledX_ = false;
+    bool settledY_ = false;
     double integralCountErrorX_ = 0.0;
     double integralCountErrorY_ = 0.0;
     double previousErrorX_ = 0.0;

@@ -1400,19 +1400,30 @@ void MouseThread::moveMousePivot(
     settings.integralTimeSeconds = move_integral_time_seconds;
     settings.settleRadiusPixels = std::max(6.0, screen_width / 64.0);
     settings.releaseRadiusPixels = settings.settleRadiusPixels * 1.6;
-    // 持续预测已提供目标运动方向；此时预测点的小幅越心是正常闭环修正，
-    // 保留积分可维持目标速度。停止或反向时预测偏移先归零，下一帧恢复原清零规则。
-    // 持续预测已提供目标运动方向；此时预测点的小幅越心是正常闭环修正，
-    // 保留积分可维持目标速度。停止或反向时预测偏移先归零，下一帧恢复原清零规则。
-    const bool predictionLeadActive =
-        std::abs(lastPredictionResult.offsetX) +
-        std::abs(lastPredictionResult.offsetY) > 1e-6;
+    // 移动积分和稳定锁存必须按轴判断。水平目标的可靠X运动不能阻止Y轴
+    // 独立停发，否则Y会持续把约1~2 px检测噪声量化为±1 count。
+    // 水平A/B中Y提前量P95仅0.061 px，不能让这种数值残差重新打开Y轴。
+    // 小于稳定半径10%的提前由可靠速度分量兜底，单独不构成轴向运动证据。
+    const double meaningfulPredictionLead = std::max(0.5, settings.settleRadiusPixels * 0.10);
+    const bool predictionLeadActiveX =
+        std::abs(lastPredictionResult.offsetX) >= meaningfulPredictionLead;
+    const bool predictionLeadActiveY =
+        std::abs(lastPredictionResult.offsetY) >= meaningfulPredictionLead;
+    const double predictionSpeed = std::hypot(
+        lastPredictionResult.velocityX, lastPredictionResult.velocityY);
     const bool reliableMovingTarget =
         lastPredictionResult.directionLocked &&
-        std::hypot(lastPredictionResult.velocityX, lastPredictionResult.velocityY) >= 80.0 &&
+        predictionSpeed >= 80.0 &&
         !lastPredictionResult.selfMotionSuppressed;
-    settings.preserveMovingIntegral = predictionLeadActive || reliableMovingTarget;
-    settings.allowMovingInsideSettle = settings.preserveMovingIntegral;
+    const double reliableAxisSpeed = predictionSpeed * 0.35;
+    const bool reliableMovingTargetX = reliableMovingTarget &&
+        std::abs(lastPredictionResult.velocityX) >= reliableAxisSpeed;
+    const bool reliableMovingTargetY = reliableMovingTarget &&
+        std::abs(lastPredictionResult.velocityY) >= reliableAxisSpeed;
+    settings.preserveMovingIntegralX = predictionLeadActiveX || reliableMovingTargetX;
+    settings.preserveMovingIntegralY = predictionLeadActiveY || reliableMovingTargetY;
+    settings.allowMovingInsideSettleX = settings.preserveMovingIntegralX;
+    settings.allowMovingInsideSettleY = settings.preserveMovingIntegralY;
     // 网络捕获的到帧间隔可能抖动，优先使用相邻有效观测的真实时间差。
     // 捕获窗 FPS 只作为首帧或无时间戳时的回退，避免一秒平均值掩盖 UDP/NDI 抖动。
     double dt = frameIntervalSec(captureFps.load());
@@ -1433,6 +1444,10 @@ void MouseThread::moveMousePivot(
     // 先累计分数 counts 再整数化。直接逐帧 round 会在 10/20 ms 交替的
     // NDI 时间基下产生 1、6、1、6 这类脉冲，视觉上就是左右晃动；余量
     // 只改变发送时刻，不改变长期平均位移。
+    if (output.settledX)
+        legacyCountRemainderX = 0.0;
+    if (output.settledY)
+        legacyCountRemainderY = 0.0;
     const double quantizedX = output.countsX + legacyCountRemainderX;
     const double quantizedY = output.countsY + legacyCountRemainderY;
     int mx = static_cast<int>(std::round(quantizedX));
@@ -1520,12 +1535,18 @@ void MouseThread::moveMousePivot(
         pf->maxCountsPerSecond = settings.maxCountsPerSecond;
         pf->frameCountLimit = output.frameCountLimit;
         pf->errorMotion = output.errorMotion;
+        pf->errorMotionX = output.errorMotionX;
+        pf->errorMotionY = output.errorMotionY;
         pf->settleMotionThreshold = output.settleMotionThreshold;
         pf->movingInsideSettle = output.movingInsideSettle;
+        pf->movingInsideSettleX = output.movingInsideSettleX;
+        pf->movingInsideSettleY = output.movingInsideSettleY;
         pf->horizontalCatchUp = output.horizontalCatchUp;
         pf->verticalCatchUp = output.verticalCatchUp;
         pf->speedLimited = output.speedLimited;
         pf->settled = output.settled;
+        pf->settledX = output.settledX;
+        pf->settledY = output.settledY;
     }
 
     ViewCommandSample commandSample;

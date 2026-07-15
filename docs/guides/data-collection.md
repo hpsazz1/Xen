@@ -36,3 +36,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_moving_target.
 不同轮次起点不一致时，使用`ObservedSteadyP95AbsAxisErrorPx`比较末尾稳态，不要用全段P95
 直接归因控制器。输出换向还需同时查看`OutputSideFlipMeanAbsCounts`和
 `OutputSideFlipMaxAbsCounts`；只有换向率、幅度和发生阶段跨至少三轮一致，才允许修改中心门控。
+
+r41起CSV包含`ErrorMotionX/Y`、`MovingInsideSettleX/Y`和`SettledX/Y`。分析Y轴震荡时必须使用
+`-Axis Y`并同时查看`AxisSettledPct`：水平移动期间Y轴应长期独立锁存，可靠垂直或斜向运动时
+`AxisMovingInsideSettlePct`应出现释放证据。只有二维`Settled`不能证明静止轴已停止输出。

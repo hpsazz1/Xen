@@ -118,10 +118,16 @@ struct PipelineFrame
     double maxCountsPerSecond = 0.0;
     double frameCountLimit = 0.0;
     double errorMotion = 0.0;          ///< 相邻有效控制观测的二维误差变化，px/observation
+    double errorMotionX = 0.0;         ///< X轴相邻有效控制误差变化绝对值，px/observation
+    double errorMotionY = 0.0;         ///< Y轴相邻有效控制误差变化绝对值，px/observation
     double settleMotionThreshold = 0.0;///< PI 稳定锁存快速释放阈值，px/observation
     bool   speedLimited = false;      ///< 本帧控制请求是否触发最大设备速率限制
     bool   settled = false;
+    bool   settledX = false;          ///< X轴是否独立进入稳定停发
+    bool   settledY = false;          ///< Y轴是否独立进入稳定停发
     bool   movingInsideSettle = false;///< 回差内误差变化是否阻止或释放稳定锁存
+    bool   movingInsideSettleX = false;///< X轴回差内运动是否释放稳定锁存
+    bool   movingInsideSettleY = false;///< Y轴回差内运动是否释放稳定锁存
     bool   horizontalCatchUp = false; ///< 水平大误差是否启用快速追赶响应
     bool   verticalCatchUp = false;   ///< 垂直大误差是否启用快速追赶响应
     size_t queuedMoveCount = 0;     ///< 请求入队后的待发送命令数
