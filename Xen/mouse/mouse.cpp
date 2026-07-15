@@ -83,6 +83,15 @@ MouseThread::MouseThread(
         predictionSettings.predictionStrength =
             static_cast<double>(config.prediction_strength);
         aimPipelineRuntime.configure(config.aim_pipeline_mode);
+        LosAimController::Settings shadowControllerSettings;
+        shadowControllerSettings.responseSeconds = config.aim_shadow_response_ms / 1000.0;
+        shadowControllerSettings.maxCountsPerSecond = config.aim_shadow_max_speed_cps;
+        shadowControllerSettings.feedforwardGain = config.aim_shadow_feedforward_gain;
+        shadowControllerSettings.integralTimeSeconds = config.aim_shadow_integral_time_ms / 1000.0;
+        shadowControllerSettings.integralZoneDegrees = config.aim_shadow_integral_zone_deg;
+        shadowControllerSettings.leadHorizonSeconds = config.aim_shadow_lead_horizon_ms / 1000.0;
+        shadowControllerSettings.leadStrength = config.aim_shadow_lead_strength;
+        aimPipelineRuntime.configureController(shadowControllerSettings);
         appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
         profileCalibrator.setEnabled(config.profile_calibration_enabled);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
@@ -131,6 +140,15 @@ void MouseThread::updateConfig(
     predictionSettings.predictionStrength = std::clamp(
         static_cast<double>(config.prediction_strength), 0.0, 4.0);
     aimPipelineRuntime.configure(config.aim_pipeline_mode);
+    LosAimController::Settings shadowControllerSettings;
+    shadowControllerSettings.responseSeconds = config.aim_shadow_response_ms / 1000.0;
+    shadowControllerSettings.maxCountsPerSecond = config.aim_shadow_max_speed_cps;
+    shadowControllerSettings.feedforwardGain = config.aim_shadow_feedforward_gain;
+    shadowControllerSettings.integralTimeSeconds = config.aim_shadow_integral_time_ms / 1000.0;
+    shadowControllerSettings.integralZoneDegrees = config.aim_shadow_integral_zone_deg;
+    shadowControllerSettings.leadHorizonSeconds = config.aim_shadow_lead_horizon_ms / 1000.0;
+    shadowControllerSettings.leadStrength = config.aim_shadow_lead_strength;
+    aimPipelineRuntime.configureController(shadowControllerSettings);
     appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
     profileCalibrator.setEnabled(config.profile_calibration_enabled);
     if (config.profile_calibration_enabled)

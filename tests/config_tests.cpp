@@ -104,6 +104,16 @@ int main()
                      "new pipeline defaults to legacy mode");
         expectNear(defaults.aim_shadow_command_to_frame_delay_ms, 60.0, 0.0,
                    "shadow applied-view model uses explicit fixed delay");
+        expectNear(defaults.aim_shadow_response_ms, 80.0, 0.0,
+                   "shadow angle controller defaults to the P-only response baseline");
+        expectNear(defaults.aim_shadow_feedforward_gain, 0.0, 0.0,
+                   "shadow velocity feedforward remains disabled by default");
+        expectNear(defaults.aim_shadow_integral_time_ms, 0.0, 0.0,
+                   "shadow angle integral remains disabled by default");
+        expectNear(defaults.aim_shadow_lead_horizon_ms, 0.0, 0.0,
+                   "shadow experience lead horizon remains disabled by default");
+        expectNear(defaults.aim_shadow_lead_strength, 0.0, 0.0,
+                   "shadow experience lead strength remains disabled by default");
         expectNear(defaults.prediction_lead_ms, 50.0, 0.0,
                    "default prediction uses kinematic replay lead");
         expectNear(defaults.prediction_velocity_tau_ms, 50.0, 0.0,
@@ -166,6 +176,10 @@ int main()
                    "saved config persists the safe new pipeline mode");
         expectTrue(migratedText.find("aim_shadow_command_to_frame_delay_ms = 60") != std::string::npos,
                    "saved config persists the explicit shadow delay");
+        expectTrue(migratedText.find("aim_shadow_feedforward_gain = 0") != std::string::npos &&
+                   migratedText.find("aim_shadow_integral_time_ms = 0") != std::string::npos &&
+                   migratedText.find("aim_shadow_lead_horizon_ms = 0") != std::string::npos,
+                   "saved config persists independently disabled P0-4A controller terms");
         expectTrue(migratedText.find("predictionInterval") == std::string::npos,
                    "saved config removes legacy prediction interval key");
     }
@@ -219,6 +233,38 @@ int main()
     expectNear(clampedDelay.aim_shadow_command_to_frame_delay_ms, 250.0, 0.0,
                "shadow delay remains bounded by the documented safety maximum");
     std::filesystem::remove(unsafeDelayPath, removeError);
+
+    const std::filesystem::path unsafeShadowControllerPath =
+        "xen_config_shadow_controller_test.ini";
+    {
+        std::ofstream unsafeShadowControllerFile(unsafeShadowControllerPath);
+        unsafeShadowControllerFile
+            << "aim_shadow_response_ms = 1\n"
+            << "aim_shadow_max_speed_cps = 9999\n"
+            << "aim_shadow_feedforward_gain = 9\n"
+            << "aim_shadow_integral_time_ms = 1\n"
+            << "aim_shadow_integral_zone_deg = 99\n"
+            << "aim_shadow_lead_horizon_ms = 999\n"
+            << "aim_shadow_lead_strength = 9\n";
+    }
+    Config clampedShadowController{};
+    expectTrue(clampedShadowController.loadConfig(unsafeShadowControllerPath.string()),
+               "shadow angle controller config loads successfully");
+    expectNear(clampedShadowController.aim_shadow_response_ms, 10.0, 0.0,
+               "shadow response uses its documented lower bound");
+    expectNear(clampedShadowController.aim_shadow_max_speed_cps, 4000.0, 0.0,
+               "shadow speed uses the device safety bound");
+    expectNear(clampedShadowController.aim_shadow_feedforward_gain, 2.0, 0.0,
+               "shadow feedforward gain remains bounded");
+    expectNear(clampedShadowController.aim_shadow_integral_time_ms, 50.0, 0.0,
+               "nonzero shadow integral time uses a stable minimum");
+    expectNear(clampedShadowController.aim_shadow_integral_zone_deg, 10.0, 0.0,
+               "shadow integral zone remains bounded");
+    expectNear(clampedShadowController.aim_shadow_lead_horizon_ms, 250.0, 0.0,
+               "shadow experience lead horizon remains bounded");
+    expectNear(clampedShadowController.aim_shadow_lead_strength, 4.0, 0.0,
+               "shadow experience lead strength remains bounded");
+    std::filesystem::remove(unsafeShadowControllerPath, removeError);
 
     const std::filesystem::path speedLimitPath = "xen_config_speed_limit_test.ini";
     {

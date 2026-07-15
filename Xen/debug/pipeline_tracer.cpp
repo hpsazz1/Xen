@@ -179,8 +179,10 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "AimPipelineAngleX,AimPipelineAngleY,AimPipelineRateX,AimPipelineRateY,AimPipelineCovarianceX,AimPipelineCovarianceY,"
          << "AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY,"
          << "AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence,"
+         << "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,"
          << "AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadReferenceX,AimPipelineLeadReferenceY,"
-         << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
+         << "AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY,"
+         << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit,AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
          << "ViewMotionShadowValid,CommandToFrameDelayMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
          << "AppliedCameraYawAtObservationDegrees,AppliedCameraPitchAtObservationDegrees,AppliedCameraYawAtControlDegrees,AppliedCameraPitchAtControlDegrees,"
          << "StabilizedLosYawDegrees,StabilizedLosPitchDownDegrees,RelativeErrorYawDegrees,RelativeErrorPitchDownDegrees,"
@@ -248,10 +250,17 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << ap.estimate.nisX << ',' << ap.estimate.nisY << ','
              << ap.estimate.measurementConfidence << ','
              << ap.estimate.feedforwardConfidence << ','
+             << (ap.control.valid ? '1' : '0') << ','
+             << (ap.control.speedLimited ? '1' : '0') << ','
+             << (ap.control.integralFrozen ? '1' : '0') << ','
              << ap.control.feedbackX << ',' << ap.control.feedbackY << ','
              << ap.control.trackingFeedforwardX << ',' << ap.control.trackingFeedforwardY << ','
              << ap.control.leadReferenceX << ',' << ap.control.leadReferenceY << ','
+             << ap.control.leadCountsX << ',' << ap.control.leadCountsY << ','
+             << ap.control.integralCountsX << ',' << ap.control.integralCountsY << ','
+             << ap.control.unlimitedCountsX << ',' << ap.control.unlimitedCountsY << ','
              << ap.control.requestedCountsX << ',' << ap.control.requestedCountsY << ','
+             << ap.control.frameCountLimit << ','
              << ap.trajectoryOutput.outputCountsX << ',' << ap.trajectoryOutput.outputCountsY << ','
              << (ap.trajectoryOutput.commandSuppressed ? '1' : '0') << ','
              << (ap.viewMotion.valid ? '1' : '0') << ','

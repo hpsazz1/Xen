@@ -4,6 +4,7 @@
 #include <string>
 
 #include "aim_pipeline_types.h"
+#include "los_aim_controller.h"
 #include "relative_los_kalman.h"
 
 // P0-0 影子运行时：只接收同帧观测并生成诊断快照，绝不直接访问设备队列。
@@ -13,6 +14,7 @@ public:
     AimPipelineRuntime();
 
     void configure(const std::string& requestedMode);
+    void configureController(const LosAimController::Settings& settings);
     void reset();
     AimPipelineFrameState observe(const AimObservation& observation);
     void setViewMotionDiagnostics(const ViewMotionShadowDiagnostics& diagnostics);
@@ -29,6 +31,9 @@ private:
     uint64_t observationSequence_ = 0;
     AimPipelineFrameState frame_{};
     RelativeLosKalman relativeLosKalman_{};
+    LosAimController losAimController_{};
+    LosAimController::Settings controllerSettings_{};
+    FrameTiming::Clock::time_point lastControllerUpdateTime_{};
 };
 
 AimPipelineMode parseAimPipelineMode(const std::string& value);

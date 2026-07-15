@@ -24,6 +24,18 @@ foreach ($control in @('profile_calibration_enabled', 'profile_calibration_resul
         throw "Passive profile calibration UI is missing: $control"
     }
 }
+foreach ($control in @(
+    '##shadow_response_ms',
+    '##shadow_max_cps',
+    '##shadow_ff_gain',
+    '##shadow_integral_ms',
+    '##shadow_integral_zone',
+    '##shadow_lead_horizon',
+    '##shadow_lead_strength')) {
+    if ($mouseUi -notmatch $control) {
+        throw "P0-4A shadow controller UI is missing: $control"
+    }
+}
 if ($overlayUi -notmatch '\{[^\r\n]*draw_mouse_prediction[^\r\n]*SidebarIconKind::Curve\s*\}') {
     throw 'Prediction settings page is not registered in the sidebar.'
 }

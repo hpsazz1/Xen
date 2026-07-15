@@ -2,6 +2,7 @@
 #include "runtime/aim_pipeline_runtime.h"
 #include "runtime/applied_view_motion_model.h"
 #include "runtime/relative_los_kalman.h"
+#include "runtime/los_aim_controller.h"
 #include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_target_filter.h"
 #include "runtime/target_predictor.h"
@@ -167,6 +168,8 @@ int main()
     shadowDiagnostics.valid = true;
     shadowDiagnostics.stabilizedLosYawDegrees = 2.0;
     shadowDiagnostics.stabilizedLosPitchDownDegrees = -1.0;
+    shadowDiagnostics.degreesPerCountX = 0.02;
+    shadowDiagnostics.degreesPerCountY = 0.02;
     newPipeline.setViewMotionDiagnostics(shadowDiagnostics);
     const AimPipelineFrameState kalmanFrame = newPipeline.snapshot();
     expectTrue(kalmanFrame.estimate.valid &&
@@ -177,6 +180,11 @@ int main()
                "first relative LOS Kalman observation anchors the yaw angle");
     expectNear(kalmanFrame.estimate.angleY, -1.0, 1e-9,
                "first relative LOS Kalman observation anchors the pitch angle");
+    expectTrue(kalmanFrame.control.valid &&
+               kalmanFrame.control.feedbackX > 0.0 &&
+               kalmanFrame.trajectoryRequest.requestedCountsX > 0.0 &&
+               kalmanFrame.commandSuppressed,
+               "P0-4A produces an auditable P-only request without enabling device output");
     expectTrue(shadowFrame.observation.trackId == 7 &&
                shadowFrame.observationSequence == 1,
                "shadow pipeline preserves target identity and observation sequence");
@@ -234,6 +242,107 @@ int main()
     expectTrue(lowConfidenceKalman.estimate().feedforwardConfidence <
                    highConfidenceKalman.estimate().feedforwardConfidence,
                "lower detection confidence reduces feedforward confidence");
+
+    LosAimController losController;
+    LosAimController::Input losInput;
+    losInput.valid = true;
+    losInput.errorDegreesX = 2.0;
+    losInput.errorDegreesY = -1.0;
+    losInput.relativeLosRateDegreesPerSecondX = 2.0;
+    losInput.relativeLosRateDegreesPerSecondY = -1.0;
+    losInput.feedforwardConfidence = 1.0;
+    losInput.degreesPerCountX = 0.02;
+    losInput.degreesPerCountY = 0.02;
+    losInput.dtSeconds = 0.010;
+    LosAimController::Settings losSettings;
+    losSettings.responseSeconds = 0.100;
+    losSettings.maxCountsPerSecond = 10000.0;
+    const auto pOnlyOutput = losController.update(losInput, losSettings);
+    expectNear(pOnlyOutput.feedbackCountsX,
+               100.0 * (1.0 - std::exp(-0.1)), 1e-12,
+               "angle controller P feedback uses frame-rate-independent response");
+    expectNear(pOnlyOutput.trackingFeedforwardCountsX, 0.0, 0.0,
+               "P-only baseline does not hide velocity feedforward");
+    expectNear(pOnlyOutput.leadReferenceDegreesX, 0.0, 0.0,
+               "zero lead horizon does not create artificial lead");
+
+    losSettings.feedforwardGain = 1.0;
+    losSettings.leadHorizonSeconds = 0.050;
+    losSettings.leadStrength = 1.0;
+    const auto separatedOutput = losController.update(losInput, losSettings);
+    expectNear(separatedOutput.trackingFeedforwardCountsX, 1.0, 1e-12,
+               "constant angular velocity feedforward requests one-period camera motion");
+    expectNear(separatedOutput.leadReferenceDegreesX, 0.1, 1e-12,
+               "experience lead remains an independent angular reference");
+    LosAimController::Input lowTrustInput = losInput;
+    lowTrustInput.feedforwardConfidence = 0.0;
+    const auto lowTrustOutput = losController.update(lowTrustInput, losSettings);
+    expectNear(lowTrustOutput.feedbackCountsX, separatedOutput.feedbackCountsX, 1e-12,
+               "low trust preserves corrective feedback");
+    expectNear(lowTrustOutput.trackingFeedforwardCountsX, 0.0, 0.0,
+               "low trust withdraws velocity feedforward immediately");
+    expectNear(lowTrustOutput.leadReferenceDegreesX, 0.0, 0.0,
+               "low trust withdraws experience lead immediately");
+
+    LosAimController limitedLosController;
+    LosAimController::Settings limitedLosSettings = losSettings;
+    limitedLosSettings.feedforwardGain = 0.0;
+    limitedLosSettings.leadHorizonSeconds = 0.0;
+    limitedLosSettings.leadStrength = 0.0;
+    limitedLosSettings.maxCountsPerSecond = 100.0;
+    LosAimController::Input diagonalInput = losInput;
+    diagonalInput.errorDegreesX = 0.6;
+    diagonalInput.errorDegreesY = 0.8;
+    const auto diagonalLimited = limitedLosController.update(
+        diagonalInput, limitedLosSettings);
+    expectTrue(diagonalLimited.speedLimited,
+               "angle controller reports two-axis saturation");
+    expectNear(std::hypot(diagonalLimited.limitedCountsX,
+                          diagonalLimited.limitedCountsY),
+               1.0, 1e-12,
+               "two-axis limiter preserves direction within the period budget");
+
+    LosAimController integralLosController;
+    LosAimController::Settings integralLosSettings;
+    integralLosSettings.responseSeconds = 0.100;
+    integralLosSettings.maxCountsPerSecond = 10000.0;
+    integralLosSettings.integralTimeSeconds = 0.200;
+    integralLosSettings.integralZoneDegrees = 1.0;
+    LosAimController::Input integralInput = losInput;
+    integralInput.errorDegreesX = 0.1;
+    integralInput.errorDegreesY = 0.0;
+    integralInput.relativeLosRateDegreesPerSecondX = 0.0;
+    integralInput.relativeLosRateDegreesPerSecondY = 0.0;
+    integralInput.degreesPerCountX = 0.01;
+    integralInput.degreesPerCountY = 0.01;
+    double previousIntegralCounts = 0.0;
+    for (int sample = 0; sample < 10; ++sample)
+    {
+        const auto integralOutput = integralLosController.update(
+            integralInput, integralLosSettings);
+        expectTrue(integralOutput.integralCountsX >= previousIntegralCounts,
+                   "in-zone angle integral grows monotonically on a constant error");
+        previousIntegralCounts = integralOutput.integralCountsX;
+    }
+    integralInput.errorDegreesX = -0.1;
+    const auto reversedIntegral = integralLosController.update(
+        integralInput, integralLosSettings);
+    expectNear(reversedIntegral.integralCountsX, 0.0, 1e-12,
+               "opposite error unwinds the previous integral in one period");
+    integralInput.errorDegreesX = 2.0;
+    const auto outsideZoneIntegral = integralLosController.update(
+        integralInput, integralLosSettings);
+    expectNear(outsideZoneIntegral.integralCountsX, 0.0, 1e-12,
+               "I-zone excludes large step errors from integration");
+
+    LosAimController saturatedIntegralController;
+    LosAimController::Settings saturatedIntegralSettings = integralLosSettings;
+    saturatedIntegralSettings.maxCountsPerSecond = 1.0;
+    integralInput.errorDegreesX = 0.1;
+    const auto saturatedIntegral = saturatedIntegralController.update(
+        integralInput, saturatedIntegralSettings);
+    expectTrue(saturatedIntegral.speedLimited && saturatedIntegral.integralFrozen,
+               "saturation freezes the angle integral candidate");
 
     FrameRateCounter rateCounter;
     const auto rateStart = FrameRateCounter::TimePoint(std::chrono::milliseconds(1000));
@@ -566,6 +675,12 @@ int main()
         traceHeader.find("AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY") != std::string::npos &&
         traceHeader.find("AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence") != std::string::npos,
         "basic pipeline records relative LOS Kalman diagnostics");
+    expectTrue(traceHeader.find(
+        "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen") != std::string::npos &&
+        traceHeader.find("AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY") != std::string::npos &&
+        traceHeader.find("AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY") != std::string::npos &&
+        traceHeader.find("AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit") != std::string::npos,
+        "basic pipeline records the complete P0-4A controller decomposition");
     expectTrue(traceHeader.find(
         "CaptureFrameSequence,BackendReceiveNs,CaptureSubmitNs,InferenceStartNs,InferencePublishNs,ControlTimeNs") != std::string::npos &&
         traceHeader.find("BackendQueueMs,SubmitToInferenceMs,InferenceToPublishMs,PublishToControlMs,LocalObservationAgeMs") != std::string::npos,

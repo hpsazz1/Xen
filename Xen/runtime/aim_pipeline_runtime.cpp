@@ -49,6 +49,15 @@ void AimPipelineRuntime::reset()
     frame_.commandSuppressed = true;
     frame_.resetGeneration = resetGeneration_;
     relativeLosKalman_.reset();
+    losAimController_.reset();
+    lastControllerUpdateTime_ = {};
+}
+
+void AimPipelineRuntime::configureController(const LosAimController::Settings& settings)
+{
+    controllerSettings_ = settings;
+    losAimController_.reset();
+    lastControllerUpdateTime_ = {};
 }
 
 AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observation)
@@ -69,6 +78,8 @@ AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observat
         ++resetGeneration_;
         observationSequence_ = 0;
         relativeLosKalman_.reset();
+        losAimController_.reset();
+        lastControllerUpdateTime_ = {};
         frame_.resetGeneration = resetGeneration_;
     }
 
@@ -116,4 +127,44 @@ void AimPipelineRuntime::setViewMotionDiagnostics(
     frame_.estimate.nisY = estimate.y.nis;
     frame_.estimate.measurementConfidence = estimate.measurementConfidence;
     frame_.estimate.feedforwardConfidence = estimate.feedforwardConfidence;
+
+    LosAimController::Input controllerInput;
+    controllerInput.valid = frame_.estimate.valid;
+    controllerInput.errorDegreesX = frame_.estimate.angleX -
+        diagnostics.appliedCameraYawAtControlDegrees;
+    controllerInput.errorDegreesY = frame_.estimate.angleY -
+        diagnostics.appliedCameraPitchAtControlDegrees;
+    controllerInput.relativeLosRateDegreesPerSecondX = frame_.estimate.rateX;
+    controllerInput.relativeLosRateDegreesPerSecondY = frame_.estimate.rateY;
+    controllerInput.feedforwardConfidence = frame_.estimate.feedforwardConfidence;
+    controllerInput.degreesPerCountX = diagnostics.degreesPerCountX;
+    controllerInput.degreesPerCountY = diagnostics.degreesPerCountY;
+    controllerInput.dtSeconds = lastControllerUpdateTime_.time_since_epoch().count() == 0
+        ? 1.0 / 120.0
+        : std::chrono::duration<double>(
+            frame_.observation.timing.controlTime - lastControllerUpdateTime_).count();
+    const LosAimController::Output control =
+        losAimController_.update(controllerInput, controllerSettings_);
+    lastControllerUpdateTime_ = frame_.observation.timing.controlTime;
+    frame_.control.valid = control.valid;
+    frame_.control.speedLimited = control.speedLimited;
+    frame_.control.integralFrozen = control.integralFrozen;
+    frame_.control.feedbackX = control.feedbackCountsX;
+    frame_.control.feedbackY = control.feedbackCountsY;
+    frame_.control.trackingFeedforwardX = control.trackingFeedforwardCountsX;
+    frame_.control.trackingFeedforwardY = control.trackingFeedforwardCountsY;
+    frame_.control.leadReferenceX = control.leadReferenceDegreesX;
+    frame_.control.leadReferenceY = control.leadReferenceDegreesY;
+    frame_.control.leadCountsX = control.leadCountsX;
+    frame_.control.leadCountsY = control.leadCountsY;
+    frame_.control.integralCountsX = control.integralCountsX;
+    frame_.control.integralCountsY = control.integralCountsY;
+    frame_.control.unlimitedCountsX = control.unlimitedCountsX;
+    frame_.control.unlimitedCountsY = control.unlimitedCountsY;
+    frame_.control.requestedCountsX = control.limitedCountsX;
+    frame_.control.requestedCountsY = control.limitedCountsY;
+    frame_.control.frameCountLimit = control.frameCountLimit;
+    frame_.trajectoryRequest.requestedCountsX = control.limitedCountsX;
+    frame_.trajectoryRequest.requestedCountsY = control.limitedCountsY;
+    frame_.trajectoryRequest.requestTime = frame_.observation.timing.controlTime;
 }

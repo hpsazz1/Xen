@@ -30,6 +30,13 @@ float prev_maxSpeedMultiplier = config.maxSpeedMultiplier;
 float prev_move_response_ms = config.move_response_ms;
 float prev_move_max_speed_cps = config.move_max_speed_cps;
 float prev_move_integral_time_ms = config.move_integral_time_ms;
+float prev_aim_shadow_response_ms = config.aim_shadow_response_ms;
+float prev_aim_shadow_max_speed_cps = config.aim_shadow_max_speed_cps;
+float prev_aim_shadow_feedforward_gain = config.aim_shadow_feedforward_gain;
+float prev_aim_shadow_integral_time_ms = config.aim_shadow_integral_time_ms;
+float prev_aim_shadow_integral_zone_deg = config.aim_shadow_integral_zone_deg;
+float prev_aim_shadow_lead_horizon_ms = config.aim_shadow_lead_horizon_ms;
+float prev_aim_shadow_lead_strength = config.aim_shadow_lead_strength;
 	// 预测
 	bool  prev_prediction_enabled = config.prediction_enabled;
 	float prev_prediction_lead_ms = config.prediction_lead_ms;
@@ -111,6 +118,35 @@ static void draw_mouse_page(MouseSettingsPage page)
     {
         OverlayUI::SliderIntRow("水平视野(FOV X)", &config.fovX, 10, 120);
         OverlayUI::SliderIntRow("垂直视野(FOV Y)", &config.fovY, 10, 120);
+        OverlayUI::EndSection();
+    }
+
+    // P0-4A 参数当前只驱动 shadow 诊断，不会改变 r30 正式设备输出。
+    if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
+        OverlayUI::BeginSection("新控制器影子参数", "mouse_section_shadow_los_controller"))
+    {
+        ImGui::TextDisabled("仅 aim_pipeline_mode=shadow/active 时计算；P0 阶段不发送设备命令");
+        OverlayUI::SliderFloatRow("角反馈响应(ms)", &config.aim_shadow_response_ms,
+            10.0f, 500.0f, "%.0f", "##shadow_response_ms",
+            "按真实控制周期计算角误差P反馈；默认80ms。");
+        OverlayUI::SliderFloatRow("影子最大速度", &config.aim_shadow_max_speed_cps,
+            30.0f, 4000.0f, "%.0f counts/s", "##shadow_max_cps",
+            "对P、前馈、提前参考和积分之和执行二维限速。");
+        OverlayUI::SliderFloatRow("速度前馈增益", &config.aim_shadow_feedforward_gain,
+            0.0f, 2.0f, "%.2f", "##shadow_ff_gain",
+            "0为关闭；只使用Kalman相对视线角速度，并受NIS可信度缩放。");
+        OverlayUI::SliderFloatRow("角积分时间(ms)", &config.aim_shadow_integral_time_ms,
+            0.0f, 2000.0f, "%.0f", "##shadow_integral_ms",
+            "0为关闭，非零最小50ms；饱和时冻结，反向时解卷绕。");
+        OverlayUI::SliderFloatRow("积分区间(度)", &config.aim_shadow_integral_zone_deg,
+            0.0f, 10.0f, "%.2f", "##shadow_integral_zone",
+            "只在绝对角误差不超过该范围时积分，区间外清空历史积分。");
+        OverlayUI::SliderFloatRow("经验提前时域(ms)", &config.aim_shadow_lead_horizon_ms,
+            0.0f, 250.0f, "%.0f", "##shadow_lead_horizon",
+            "0为关闭；与维持目标速度的前馈严格分离。");
+        OverlayUI::SliderFloatRow("经验提前强度", &config.aim_shadow_lead_strength,
+            0.0f, 4.0f, "%.2f", "##shadow_lead_strength",
+            "默认0；必须在P反馈和速度前馈分别通过回放后再启用。");
         OverlayUI::EndSection();
     }
 
@@ -839,6 +875,13 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_move_response_ms != config.move_response_ms ||
         prev_move_max_speed_cps != config.move_max_speed_cps ||
         prev_move_integral_time_ms != config.move_integral_time_ms ||
+        prev_aim_shadow_response_ms != config.aim_shadow_response_ms ||
+        prev_aim_shadow_max_speed_cps != config.aim_shadow_max_speed_cps ||
+        prev_aim_shadow_feedforward_gain != config.aim_shadow_feedforward_gain ||
+        prev_aim_shadow_integral_time_ms != config.aim_shadow_integral_time_ms ||
+        prev_aim_shadow_integral_zone_deg != config.aim_shadow_integral_zone_deg ||
+        prev_aim_shadow_lead_horizon_ms != config.aim_shadow_lead_horizon_ms ||
+        prev_aim_shadow_lead_strength != config.aim_shadow_lead_strength ||
         prev_minSpeedMultiplier != config.minSpeedMultiplier ||
         prev_maxSpeedMultiplier != config.maxSpeedMultiplier ||
         prev_prediction_enabled != config.prediction_enabled ||
@@ -860,6 +903,13 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_move_response_ms = config.move_response_ms;
         prev_move_max_speed_cps = config.move_max_speed_cps;
         prev_move_integral_time_ms = config.move_integral_time_ms;
+        prev_aim_shadow_response_ms = config.aim_shadow_response_ms;
+        prev_aim_shadow_max_speed_cps = config.aim_shadow_max_speed_cps;
+        prev_aim_shadow_feedforward_gain = config.aim_shadow_feedforward_gain;
+        prev_aim_shadow_integral_time_ms = config.aim_shadow_integral_time_ms;
+        prev_aim_shadow_integral_zone_deg = config.aim_shadow_integral_zone_deg;
+        prev_aim_shadow_lead_horizon_ms = config.aim_shadow_lead_horizon_ms;
+        prev_aim_shadow_lead_strength = config.aim_shadow_lead_strength;
         // 同步速度倍率
         prev_minSpeedMultiplier = config.minSpeedMultiplier;
         prev_maxSpeedMultiplier = config.maxSpeedMultiplier;

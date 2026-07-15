@@ -76,6 +76,13 @@ public:
     // 新旧链路迁移模式：legacy 正式旧链路，shadow 同帧诊断但不接管设备，active 在 P0 阶段安全降级为 shadow。
     std::string aim_pipeline_mode = "legacy";
     float aim_shadow_command_to_frame_delay_ms = 60.0f; // 新链路固定相机响应延迟；只用于shadow模型
+    float aim_shadow_response_ms = 80.0f;               // P0-4A角度P反馈响应时间
+    float aim_shadow_max_speed_cps = 1440.0f;           // P0-4A二维counts速度上限
+    float aim_shadow_feedforward_gain = 0.0f;           // 相对视线角速度前馈；0表示关闭
+    float aim_shadow_integral_time_ms = 0.0f;            // 角度积分时间；0表示关闭
+    float aim_shadow_integral_zone_deg = 1.0f;           // 仅在该角误差范围内积分
+    float aim_shadow_lead_horizon_ms = 0.0f;             // 独立经验提前时域；默认关闭
+    float aim_shadow_lead_strength = 0.0f;               // 独立经验提前强度；默认关闭
 
     // ========== 目标预测 ==========
     bool  prediction_enabled = true;              // 连续真实观测预测总开关

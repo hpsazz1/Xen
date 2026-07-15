@@ -135,14 +135,24 @@ struct LosEstimate
 // 新控制器的可审计分解；P0-0 默认全部为零且不参与旧控制器输出。
 struct AimControlBreakdown
 {
+    bool valid = false;
+    bool speedLimited = false;
+    bool integralFrozen = false;
     double feedbackX = 0.0;
     double feedbackY = 0.0;
     double trackingFeedforwardX = 0.0;
     double trackingFeedforwardY = 0.0;
     double leadReferenceX = 0.0;
     double leadReferenceY = 0.0;
+    double leadCountsX = 0.0;
+    double leadCountsY = 0.0;
+    double integralCountsX = 0.0;
+    double integralCountsY = 0.0;
+    double unlimitedCountsX = 0.0;
+    double unlimitedCountsY = 0.0;
     double requestedCountsX = 0.0;
     double requestedCountsY = 0.0;
+    double frameCountLimit = 0.0;
 };
 
 struct TrajectoryRequest
