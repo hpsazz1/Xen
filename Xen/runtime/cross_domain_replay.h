@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "runtime/video_replay_math.h"
+#include "runtime/aim_pipeline_types.h"
 
 namespace CrossDomainReplay
 {
@@ -54,6 +55,10 @@ struct ControllerSettings
     double settleErrorDegrees = 0.080;
     double settleRateDegreesPerSecond = 1.200;
     double reverseConfirmationSeconds = 0.080;
+    TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
+    double trajectoryOutputHz = 240.0;
+    double trajectoryMaxAccelerationCountsPerSecond2 = 60000.0;
+    double trajectoryMaxJerkCountsPerSecond3 = 4000000.0;
 };
 
 struct Metrics
@@ -82,12 +87,18 @@ struct Metrics
     size_t settleReleases = 0;
     double reverseSuppressedPercent = 0.0;
     double verticalCatchUpPercent = 0.0;
+    size_t trajectoryOutputs = 0;
+    double trajectoryVelocityLimitedPercent = 0.0;
+    double trajectoryAccelerationLimitedPercent = 0.0;
+    double trajectoryJerkLimitedPercent = 0.0;
 };
 
 struct Comparison
 {
     std::string scenario;
     Variant variant{};
+    TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
+    double trajectoryOutputHz = 0.0;
     Metrics legacy{};
     Metrics candidate{};
     bool passed = false;

@@ -25,6 +25,7 @@
 #include "runtime/aim_coordinate_space.h"
 #include "runtime/basic_aim_controller.h"
 #include "runtime/basic_target_filter.h"
+#include "runtime/command_trajectory_shaper.h"
 #include "runtime/cross_domain_replay.h"
 #include "runtime/target_predictor.h"
 #include "runtime/video_replay_math.h"
@@ -61,6 +62,10 @@ namespace
         double settleErrorDegrees = 0.080;
         double settleRateDegreesPerSecond = 1.200;
         double reverseConfirmationSeconds = 0.080;
+        TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
+        double trajectoryOutputHz = 240.0;
+        double trajectoryMaxAccelerationCountsPerSecond2 = 60000.0;
+        double trajectoryMaxJerkCountsPerSecond3 = 4000000.0;
     };
 
     struct ScenarioTrajectory
@@ -218,6 +223,16 @@ namespace
         options.reverseConfirmationSeconds = optionDouble(
             argc, argv, "--reverse-confirm-ms",
             options.reverseConfirmationSeconds * 1000.0) / 1000.0;
+        if (const auto mode = optionValue(argc, argv, "--trajectory-mode"))
+            options.trajectoryMode = parseTrajectoryShaperMode(*mode);
+        options.trajectoryOutputHz = optionDouble(
+            argc, argv, "--trajectory-output-hz", options.trajectoryOutputHz);
+        options.trajectoryMaxAccelerationCountsPerSecond2 = optionDouble(
+            argc, argv, "--trajectory-max-accel-cps2",
+            options.trajectoryMaxAccelerationCountsPerSecond2);
+        options.trajectoryMaxJerkCountsPerSecond3 = optionDouble(
+            argc, argv, "--trajectory-max-jerk-cps3",
+            options.trajectoryMaxJerkCountsPerSecond3);
         if (const auto ages = optionValue(argc, argv, "--observation-ages-ms"))
         {
             const auto parsed = parseDoubleList(*ages);
@@ -707,6 +722,12 @@ int Run(int argc, char** argv)
             settings.settleErrorDegrees = options.settleErrorDegrees;
             settings.settleRateDegreesPerSecond = options.settleRateDegreesPerSecond;
             settings.reverseConfirmationSeconds = options.reverseConfirmationSeconds;
+            settings.trajectoryMode = options.trajectoryMode;
+            settings.trajectoryOutputHz = options.trajectoryOutputHz;
+            settings.trajectoryMaxAccelerationCountsPerSecond2 =
+                options.trajectoryMaxAccelerationCountsPerSecond2;
+            settings.trajectoryMaxJerkCountsPerSecond3 =
+                options.trajectoryMaxJerkCountsPerSecond3;
             const auto framePath = options.outputRoot / "cross_domain_frames.csv";
             std::error_code removeError;
             std::filesystem::remove(framePath, removeError);
@@ -740,7 +761,14 @@ int Run(int argc, char** argv)
             CrossDomainReplay::WriteSummary(
                 options.outputRoot / "cross_domain_summary.csv", comparisons);
             std::ofstream decision(options.outputRoot / "cross_domain_decision.txt");
-            decision << "Comparisons=" << comparisons.size() << '\n'
+            decision << "TrajectoryMode="
+                     << trajectoryShaperModeName(options.trajectoryMode) << '\n'
+                     << "TrajectoryOutputHz=" << options.trajectoryOutputHz << '\n'
+                     << "TrajectoryMaxAccelerationCountsPerSecond2="
+                     << options.trajectoryMaxAccelerationCountsPerSecond2 << '\n'
+                     << "TrajectoryMaxJerkCountsPerSecond3="
+                     << options.trajectoryMaxJerkCountsPerSecond3 << '\n'
+                     << "Comparisons=" << comparisons.size() << '\n'
                      << "Passed=" << passed << '\n'
                      << "Failed=" << comparisons.size() - passed << '\n'
                      << "Promotion=" << (passed == comparisons.size() ? "PASS" : "HOLD_SHADOW") << '\n';

@@ -1566,6 +1566,21 @@ int main()
                syntheticComparison.candidate.shapedCounts > 0.0 &&
                syntheticComparison.candidate.sentCounts > 0.0,
                "cross-domain replay records estimator, requested, shaped and sent diagnostics");
+    CrossDomainReplay::ControllerSettings trapezoidReplaySettings = syntheticSettings;
+    trapezoidReplaySettings.trajectoryMode = TrajectoryShaperMode::Trapezoid;
+    trapezoidReplaySettings.trajectoryOutputHz = 240.0;
+    trapezoidReplaySettings.trajectoryMaxAccelerationCountsPerSecond2 = 1000.0;
+    trapezoidReplaySettings.trajectoryMaxJerkCountsPerSecond3 = 10000.0;
+    const auto trapezoidComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, trapezoidReplaySettings);
+    expectTrue(trapezoidComparison.trajectoryMode == TrajectoryShaperMode::Trapezoid &&
+               trapezoidComparison.trajectoryOutputHz == 240.0 &&
+               trapezoidComparison.candidate.trajectoryOutputs >
+                   trapezoidComparison.candidate.samples * 2,
+               "trapezoid replay services every fixed 240 Hz tick between 94 Hz observations");
+    expectTrue(trapezoidComparison.candidate.trajectoryAccelerationLimitedPercent > 0.0 &&
+               trapezoidComparison.candidate.shapedCounts > 0.0,
+               "trapezoid replay records constrained fixed-tick output diagnostics");
 
     BasicAimController controller;
     BasicAimController::Settings controllerSettings;

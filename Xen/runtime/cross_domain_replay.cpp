@@ -143,6 +143,9 @@ struct MetricCollector
     size_t settledSamples = 0;
     size_t reverseSuppressedSamples = 0;
     size_t verticalCatchUpSamples = 0;
+    size_t trajectoryVelocityLimitedSamples = 0;
+    size_t trajectoryAccelerationLimitedSamples = 0;
+    size_t trajectoryJerkLimitedSamples = 0;
     Metrics result;
 
     void addError(double errorX, double errorY, double halfBoxX, double halfBoxY, bool late)
@@ -216,6 +219,14 @@ struct MetricCollector
         verticalCatchUpSamples += active ? 1U : 0U;
     }
 
+    void addTrajectoryOutput(const TrajectoryOutput& output)
+    {
+        ++result.trajectoryOutputs;
+        trajectoryVelocityLimitedSamples += output.velocityLimited ? 1U : 0U;
+        trajectoryAccelerationLimitedSamples += output.accelerationLimited ? 1U : 0U;
+        trajectoryJerkLimitedSamples += output.jerkLimited ? 1U : 0U;
+    }
+
     Metrics finish()
     {
         result.samples = errors.size();
@@ -237,6 +248,15 @@ struct MetricCollector
                 100.0 * reverseSuppressedSamples / diagnosticSamples;
             result.verticalCatchUpPercent =
                 100.0 * verticalCatchUpSamples / diagnosticSamples;
+        }
+        if (result.trajectoryOutputs > 0)
+        {
+            result.trajectoryVelocityLimitedPercent =
+                100.0 * trajectoryVelocityLimitedSamples / result.trajectoryOutputs;
+            result.trajectoryAccelerationLimitedPercent =
+                100.0 * trajectoryAccelerationLimitedSamples / result.trajectoryOutputs;
+            result.trajectoryJerkLimitedPercent =
+                100.0 * trajectoryJerkLimitedSamples / result.trajectoryOutputs;
         }
         return result;
     }
@@ -301,6 +321,11 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     Comparison comparison;
     comparison.scenario = canonicalScenario(source.scenario);
     comparison.variant = variant;
+    comparison.trajectoryMode = settings.trajectoryMode;
+    // 回放参数可能来自命令行；非有限值回退到生产默认频率，有限值再限制到可验证范围。
+    comparison.trajectoryOutputHz = std::isfinite(settings.trajectoryOutputHz)
+        ? std::clamp(settings.trajectoryOutputHz, 30.0, 1000.0)
+        : 240.0;
     if (source.points.empty())
     {
         comparison.reason = "empty trajectory";
@@ -337,8 +362,12 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     candidateSettings.reverseConfirmationSeconds = settings.reverseConfirmationSeconds;
     CommandTrajectoryShaper shaper;
     CommandTrajectoryShaper::Settings shaperSettings;
-    shaperSettings.mode = TrajectoryShaperMode::Off;
+    shaperSettings.mode = settings.trajectoryMode;
     shaperSettings.maxVelocityCountsPerSecond = settings.maxCountsPerSecond;
+    shaperSettings.maxAccelerationCountsPerSecond2 =
+        settings.trajectoryMaxAccelerationCountsPerSecond2;
+    shaperSettings.maxJerkCountsPerSecond3 =
+        settings.trajectoryMaxJerkCountsPerSecond3;
     shaper.configure(shaperSettings);
 
     Camera legacyCamera;
@@ -363,7 +392,46 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     AimCoordinateSpace::LosAngles previousTruth{};
     bool hasPreviousTruth = false;
     bool previousDetected = false;
+    bool previousTruthMoving = false;
     uint64_t requestSequence = 0;
+    const double trajectoryPeriod = 1.0 / comparison.trajectoryOutputHz;
+    bool hasLatestTrajectoryRequest = false;
+    double nextTrajectoryTickSeconds = 0.0;
+    TrajectoryRequest latestTrajectoryRequest;
+
+    // 离线对照显式遍历每个固定输出格点，而不是按观测帧调用一次后让调度器跳过中间tick。
+    // 新请求只会从其到达后的首个格点生效；格点之间始终保持latest-only目标速度。
+    auto serviceTrajectoryBefore = [&](double endTimeSeconds, bool includeEnd)
+    {
+        CommandTrajectoryShaper::Result lastResult;
+        bool produced = false;
+        if (settings.trajectoryMode != TrajectoryShaperMode::Trapezoid ||
+            !hasLatestTrajectoryRequest)
+            return std::pair{ produced, lastResult };
+        const double epsilon = 1e-9;
+        while (nextTrajectoryTickSeconds < endTimeSeconds - epsilon ||
+               (includeEnd && nextTrajectoryTickSeconds <= endTimeSeconds + epsilon))
+        {
+            const auto tickPoint = epoch + std::chrono::duration_cast<Clock::duration>(
+                std::chrono::duration<double>(nextTrajectoryTickSeconds));
+            lastResult = shaper.update(
+                latestTrajectoryRequest, trajectoryPeriod, tickPoint);
+            candidateCamera.submit(nextTrajectoryTickSeconds, commandDelay,
+                lastResult.output.outputCountsX,
+                lastResult.output.outputCountsY, settings);
+            candidateMetrics.addOutput(
+                lastResult.output.outputCountsX,
+                lastResult.output.outputCountsY,
+                previousTruthMoving);
+            candidateMetrics.addTrajectoryOutput(lastResult.output);
+            candidateMetrics.result.shapedCounts += std::hypot(
+                lastResult.output.shapedCountsX,
+                lastResult.output.shapedCountsY);
+            produced = true;
+            nextTrajectoryTickSeconds += trajectoryPeriod;
+        }
+        return std::pair{ produced, lastResult };
+    };
 
     for (double observationTime = 0.0; observationTime <= duration + 1e-9; observationTime += dt)
     {
@@ -409,6 +477,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                 candidateController.reset();
                 shaper.emergencyReset(epoch + std::chrono::duration_cast<Clock::duration>(
                     std::chrono::duration<double>(controlTime)));
+                hasLatestTrajectoryRequest = false;
+                nextTrajectoryTickSeconds = 0.0;
                 // 新执行层的紧急停止语义包含清除尚未生效的旧命令，避免丢失后继续转动。
                 candidateCamera.clearPending();
             }
@@ -418,6 +488,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             continue;
         }
         previousDetected = true;
+        serviceTrajectoryBefore(controlTime, false);
         legacyCamera.apply(controlTime);
         candidateCamera.apply(controlTime);
 
@@ -474,9 +545,31 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         request.requestedCountsX = candidateOutput.limitedCountsX;
         request.requestedCountsY = candidateOutput.limitedCountsY;
         request.requestTime = controlPoint;
-        const auto shaped = shaper.update(request, dt, controlPoint);
-        candidateCamera.submit(controlTime, commandDelay,
-            shaped.output.outputCountsX, shaped.output.outputCountsY, settings);
+        CommandTrajectoryShaper::Result shaped;
+        if (settings.trajectoryMode == TrajectoryShaperMode::Off)
+        {
+            shaped = shaper.update(request, dt, controlPoint);
+            candidateCamera.submit(controlTime, commandDelay,
+                shaped.output.outputCountsX, shaped.output.outputCountsY, settings);
+            candidateMetrics.addTrajectoryOutput(shaped.output);
+        }
+        else
+        {
+            latestTrajectoryRequest = request;
+            if (!hasLatestTrajectoryRequest)
+            {
+                hasLatestTrajectoryRequest = true;
+                nextTrajectoryTickSeconds = controlTime;
+            }
+            const auto scheduled = serviceTrajectoryBefore(controlTime, true);
+            if (scheduled.first)
+                shaped = scheduled.second;
+            else
+            {
+                shaped.state = shaper.state();
+                shaped.output.mode = settings.trajectoryMode;
+            }
+        }
 
         const double legacyErrorX = truthAtControl.yawDegrees - legacyCamera.yaw;
         const double legacyErrorY = truthAtControl.pitchDownDegrees - legacyCamera.pitch;
@@ -497,7 +590,10 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             (truthAtObservation.pitchDownDegrees - previousTruth.pitchDownDegrees) / dt : 0.0;
         const bool moving = std::hypot(truthRateX, truthRateY) > 0.5;
         legacyMetrics.addOutput(legacyX, legacyY, moving);
-        candidateMetrics.addOutput(shaped.output.outputCountsX, shaped.output.outputCountsY, moving);
+        if (settings.trajectoryMode == TrajectoryShaperMode::Off)
+            candidateMetrics.addOutput(
+                shaped.output.outputCountsX, shaped.output.outputCountsY, moving);
+        previousTruthMoving = moving;
         candidateMetrics.addEstimate(estimate.x.rateDegreesPerSecond, estimate.y.rateDegreesPerSecond,
             truthRateX, truthRateY, std::max(estimate.x.nis, estimate.y.nis),
             std::max(estimate.x.angleVariance, estimate.y.angleVariance),
@@ -512,8 +608,9 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         candidateMetrics.result.feedforwardCounts += std::hypot(
             candidateOutput.trackingFeedforwardCountsX,
             candidateOutput.trackingFeedforwardCountsY);
-        candidateMetrics.result.shapedCounts += std::hypot(
-            shaped.output.shapedCountsX, shaped.output.shapedCountsY);
+        if (settings.trajectoryMode == TrajectoryShaperMode::Off)
+            candidateMetrics.result.shapedCounts += std::hypot(
+                shaped.output.shapedCountsX, shaped.output.shapedCountsY);
         legacyMetrics.result.requestedCounts += std::hypot(legacyOutput.countsX, legacyOutput.countsY);
         legacyMetrics.result.shapedCounts = legacyMetrics.result.requestedCounts;
 
@@ -608,11 +705,13 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,Passed,Reason\n";
+    output << "Scenario,Variant,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
-        output << item.scenario << ',' << item.variant.name << ',' << item.candidate.samples << ','
+        output << item.scenario << ',' << item.variant.name << ','
+               << trajectoryShaperModeName(item.trajectoryMode) << ','
+               << item.trajectoryOutputHz << ',' << item.candidate.samples << ','
                << item.legacy.errorP50Degrees << ',' << item.legacy.errorP95Degrees << ','
                << item.legacy.errorP99Degrees << ',' << item.candidate.errorP50Degrees << ','
                << item.candidate.errorP95Degrees << ',' << item.candidate.errorP99Degrees << ','
@@ -629,6 +728,10 @@ void WriteSummary(const std::filesystem::path& path,
                << item.candidate.settledPercent << ',' << item.candidate.settleReleases << ','
                << item.candidate.reverseSuppressedPercent << ','
                << item.candidate.verticalCatchUpPercent << ','
+               << item.candidate.trajectoryOutputs << ','
+               << item.candidate.trajectoryVelocityLimitedPercent << ','
+               << item.candidate.trajectoryAccelerationLimitedPercent << ','
+               << item.candidate.trajectoryJerkLimitedPercent << ','
                << (item.passed ? 1 : 0) << ',' << item.reason << '\n';
     }
 }
