@@ -32,3 +32,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_moving_target.
 只用于解释控制器请求。`OutputSideFlipCount` 统计最终整数设备命令换向，
 `PredictionSideFlipCount` 统计预测侧换向，两者不能互相替代。旧CSV缺少原始支点或预测坐标时，
 `ObservedTrackingAvailable=0`，只能使用旧控制诊断，不能据此宣称实际跟踪误差。
+
+不同轮次起点不一致时，使用`ObservedSteadyP95AbsAxisErrorPx`比较末尾稳态，不要用全段P95
+直接归因控制器。输出换向还需同时查看`OutputSideFlipMeanAbsCounts`和
+`OutputSideFlipMaxAbsCounts`；只有换向率、幅度和发生阶段跨至少三轮一致，才允许修改中心门控。

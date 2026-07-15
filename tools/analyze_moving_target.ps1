@@ -290,6 +290,13 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         $steadyWindowStart = [double]$samples[-1].Timestamp - $SteadyWindowMs
         $steadySamples = @($samples | Where-Object { [double]$_.Timestamp -ge $steadyWindowStart })
         $steadyAxisAbsErrors = @($steadySamples | ForEach-Object { [math]::Abs([double]$_.$errorColumn) })
+        $observedSteadyAxisAbsErrors = if ($hasObservedTracking) {
+            @($steadySamples | ForEach-Object {
+                $aimCenter = [double]$_.$predictedColumn - [double]$_.$errorColumn
+                [math]::Abs([double]$_.$rawPivotColumn - $aimCenter)
+            })
+        }
+        else { @() }
         $distanceErrors = @($samples | ForEach-Object { [double]$_.ErrorDistance })
         $axisSpeeds = @($samples | ForEach-Object { [math]::Abs([double]$_.$velocityColumn) })
         $residuals = @($samples | ForEach-Object { [double]$_.FilterResidual })
@@ -396,6 +403,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             [math]::Abs([double]$_.$finalMoveColumn)
         } | Measure-Object -Sum).Sum)
         $outputSideFlipCount = 0
+        $outputSideFlipAbsCounts = [System.Collections.Generic.List[double]]::new()
         $lastOutputSide = 0
         foreach ($sample in $samples) {
             $move = [double]$sample.$finalMoveColumn
@@ -405,6 +413,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             }
             if ($lastOutputSide -ne 0 -and $side -ne $lastOutputSide) {
                 ++$outputSideFlipCount
+                $outputSideFlipAbsCounts.Add([math]::Abs($move))
             }
             $lastOutputSide = $side
         }
@@ -481,6 +490,12 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             SteadySamples = $steadySamples.Count
             SteadyMeanAbsAxisErrorPx = [math]::Round([double]($steadyAxisAbsErrors | Measure-Object -Average).Average, 2)
             SteadyP95AbsAxisErrorPx = [math]::Round((Get-PercentileValue -Values $steadyAxisAbsErrors -Percentile 0.95), 2)
+            ObservedSteadyMeanAbsAxisErrorPx = if ($hasObservedTracking) {
+                [math]::Round([double]($observedSteadyAxisAbsErrors | Measure-Object -Average).Average, 2)
+            } else { 0.0 }
+            ObservedSteadyP95AbsAxisErrorPx = if ($hasObservedTracking) {
+                [math]::Round((Get-PercentileValue -Values $observedSteadyAxisAbsErrors -Percentile 0.95), 2)
+            } else { 0.0 }
             P95ErrorDistancePx = [math]::Round((Get-PercentileValue -Values $distanceErrors -Percentile 0.95), 2)
             MaxErrorDistancePx = [math]::Round([double]($distanceErrors | Measure-Object -Maximum).Maximum, 2)
             P50ObservedAxisSpeed = [math]::Round((Get-PercentileValue -Values $axisSpeeds -Percentile 0.50), 1)
@@ -494,6 +509,12 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             OutputSideFlipCount = $outputSideFlipCount
             OutputSideFlipRateHz = [math]::Round(
                 $outputSideFlipCount / [math]::Max(0.001, $sampleDurationSeconds), 2)
+            OutputSideFlipMeanAbsCounts = if ($outputSideFlipAbsCounts.Count -gt 0) {
+                [math]::Round([double]($outputSideFlipAbsCounts | Measure-Object -Average).Average, 2)
+            } else { 0.0 }
+            OutputSideFlipMaxAbsCounts = if ($outputSideFlipAbsCounts.Count -gt 0) {
+                [math]::Round([double]($outputSideFlipAbsCounts | Measure-Object -Maximum).Maximum, 2)
+            } else { 0.0 }
             SpeedLimitedPct = [math]::Round(100.0 * $limitedRows / [math]::Max(1, $samples.Count), 1)
             PredictionActivePct = [math]::Round(
                 100.0 * $predictionRows.Count / [math]::Max(1, $samples.Count), 1)
@@ -568,6 +589,10 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         MeanSteadyMeanAbsAxisErrorPx = [math]::Round([double]($group | Measure-Object SteadyMeanAbsAxisErrorPx -Average).Average, 2)
         MeanSteadyP95AbsAxisErrorPx = [math]::Round([double]($group | Measure-Object SteadyP95AbsAxisErrorPx -Average).Average, 2)
+        MeanObservedSteadyMeanAbsAxisErrorPx = [math]::Round(
+            [double]($group | Measure-Object ObservedSteadyMeanAbsAxisErrorPx -Average).Average, 2)
+        MeanObservedSteadyP95AbsAxisErrorPx = [math]::Round(
+            [double]($group | Measure-Object ObservedSteadyP95AbsAxisErrorPx -Average).Average, 2)
         MeanP95ErrorDistancePx = [math]::Round([double]($group | Measure-Object P95ErrorDistancePx -Average).Average, 2)
         MeanAbsOutputCountsPerSecond = [math]::Round([double]($group | Measure-Object MeanAbsOutputCountsPerSecond -Average).Average, 1)
         MeanApproxClosedLoopLagMs = [math]::Round([double]($group | Measure-Object ApproxClosedLoopLagMs -Average).Average, 1)
@@ -577,6 +602,15 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         OutputSideFlipRateHz = [math]::Round(
             [double]($group | Measure-Object OutputSideFlipCount -Sum).Sum /
             [math]::Max(0.001, [double]($group | Measure-Object DurationMs -Sum).Sum / 1000.0), 2)
+        OutputSideFlipMeanAbsCounts = if (
+            [int]($group | Measure-Object OutputSideFlipCount -Sum).Sum -gt 0) {
+            [math]::Round([double](($group | ForEach-Object {
+                $_.OutputSideFlipMeanAbsCounts * $_.OutputSideFlipCount
+            } | Measure-Object -Sum).Sum) /
+                [int]($group | Measure-Object OutputSideFlipCount -Sum).Sum, 2)
+        } else { 0.0 }
+        OutputSideFlipMaxAbsCounts = [math]::Round(
+            [double]($group | Measure-Object OutputSideFlipMaxAbsCounts -Maximum).Maximum, 2)
         SpeedLimitedPct = [math]::Round([double](($group | ForEach-Object { $_.SpeedLimitedPct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         PredictionActivePct = [math]::Round([double](($group | ForEach-Object {
             $_.PredictionActivePct * $_.Samples
@@ -639,13 +673,16 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'ObservedInsideTargetPct', 'MeanObservedP95AbsAxisErrorPx', 'WorstObservedP95AbsAxisErrorPx',
         'MeanObservedP99AbsAxisErrorPx', 'MeanObservedP95DistancePx',
         'SteadySamples', 'SteadyMeanAbsAxisErrorPx', 'SteadyP95AbsAxisErrorPx',
+        'ObservedSteadyMeanAbsAxisErrorPx', 'ObservedSteadyP95AbsAxisErrorPx',
         'MeanP95AbsAxisErrorPx', 'WorstP95AbsAxisErrorPx', 'P95ErrorDistancePx',
         'MeanSteadyMeanAbsAxisErrorPx', 'MeanSteadyP95AbsAxisErrorPx',
+        'MeanObservedSteadyMeanAbsAxisErrorPx', 'MeanObservedSteadyP95AbsAxisErrorPx',
         'MeanP95ErrorDistancePx', 'MaxErrorDistancePx', 'P50ObservedAxisSpeed',
         'P95ObservedAxisSpeed', 'P95FilterResidualPx', 'SignedOutputCountsPerSecond',
         'MeanAbsOutputCountsPerSecond', 'EstimatedCountsPerPixel', 'ApproxClosedLoopLagMs',
         'ObservedApproxClosedLoopLagMs', 'MeanApproxClosedLoopLagMs',
         'MeanObservedApproxClosedLoopLagMs', 'OutputSideFlipCount', 'OutputSideFlipRateHz',
+        'OutputSideFlipMeanAbsCounts', 'OutputSideFlipMaxAbsCounts',
         'SpeedLimitedPct', 'PredictionActivePct', 'PredictionSelfMotionSuppressedPct',
         'PredictionOscillationSuppressedPct', 'PredictionHighSpeedSuppressedPct',
         'P50PredictionLeadPx', 'P95PredictionLeadPx', 'MeanP50PredictionLeadPx', 'MeanP95PredictionLeadPx',
@@ -666,6 +703,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, OutputSideFlipMeanAbsCounts, OutputSideFlipMaxAbsCounts, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, OutputSideFlipRateHz, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, MeanObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, OutputSideFlipRateHz, OutputSideFlipMeanAbsCounts, OutputSideFlipMaxAbsCounts, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
