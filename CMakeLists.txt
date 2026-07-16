@@ -76,11 +76,14 @@ set(AIMBOT_RZCTL_DLL "${CMAKE_SOURCE_DIR}/Xen/rzctl.dll" CACHE FILEPATH "Path to
 set(AIMBOT_CPPWINRT_INCLUDE_DIR "" CACHE PATH "Path to Windows SDK cppwinrt include directory")
 set(AIMBOT_NDI_ROOT "$ENV{ProgramW6432}/NDI/NDI 6 SDK" CACHE PATH "Path to NDI SDK root directory")
 
-# Add NDI SDK include and lib paths if available
+# Add NDI SDK include and lib paths if available. 编译宏与CMake条件必须分别记录，
+# 否则`if(AIMBOT_HAS_NDI)`不会读取由add_compile_definitions创建的宏。
+set(AIMBOT_NDI_AVAILABLE OFF)
 if(EXISTS "${AIMBOT_NDI_ROOT}/Include/Processing.NDI.Lib.h")
     list(APPEND AIMBOT_EXTRA_INCLUDE_DIRS "${AIMBOT_NDI_ROOT}/Include")
     list(APPEND AIMBOT_EXTRA_LINK_DIRS "${AIMBOT_NDI_ROOT}/Lib/x64")
     add_compile_definitions(AIMBOT_HAS_NDI)
+    set(AIMBOT_NDI_AVAILABLE ON)
 endif()
 
 function(aimbot_pick_latest_dir out_var glob_pattern)
@@ -557,7 +560,7 @@ if(AIMBOT_EXTRA_LINK_DIRS)
         target_link_directories(ai PRIVATE "${_ndi_lib_dir}")
     endforeach()
 endif()
-if(AIMBOT_HAS_NDI)
+if(AIMBOT_NDI_AVAILABLE)
     target_link_libraries(ai PRIVATE "Processing.NDI.Lib.x64.lib")
 endif()
 
@@ -646,6 +649,11 @@ if(AIMBOT_COPY_RUNTIME_DLLS)
     aimbot_copy_if_exists(ai "${AIMBOT_OPENCV_DLL}")
     aimbot_copy_if_exists(ai "${AIMBOT_GHUB_MOUSE_DLL}")
     aimbot_copy_if_exists(ai "${AIMBOT_RZCTL_DLL}")
+    if(AIMBOT_NDI_AVAILABLE)
+        aimbot_copy_required_runtime(ai
+            "${AIMBOT_NDI_ROOT}/Bin/x64/Processing.NDI.Lib.x64.dll"
+            "NDI runtime")
+    endif()
 
     if(NOT AIMBOT_USE_CUDA)
         aimbot_copy_if_exists(ai "${AIMBOT_ONNXRUNTIME_DIR}/runtimes/win-x64/native/onnxruntime.dll")

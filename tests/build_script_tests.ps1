@@ -43,9 +43,16 @@ Assert-Equal 'C:\Visual Studio\VC\Tools\MSVC\14.51\bin\Hostx64\x64;C:\Windows\Sy
 $expectedLegacyDml = Join-Path (Get-RepoRoot) 'x64\DML\Xen.exe'
 Assert-Equal $expectedLegacyDml (Get-LegacyExecutablePath -Backend DML) 'Legacy DML executable detection must use the historical x64 path.'
 
+Assert-Equal $true (Test-NuGetPackagesReady) 'Offline DML builds must verify every pinned package before skipping restore.'
+
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('xen-cuda-arch-test-' + [guid]::NewGuid().ToString('N'))
 try {
     New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+    $resolutionPath = Write-DependencyResolution -OutputDirectory $temporaryRoot -Resolution ([pscustomobject]@{
+        backend = 'test'
+    })
+    Assert-Equal (Join-Path $temporaryRoot 'dependency-resolution.json') $resolutionPath 'Dependency resolution must be isolated inside the selected backend build directory.'
+    Assert-Equal 'test' ((Get-Content -LiteralPath $resolutionPath -Raw | ConvertFrom-Json).backend) 'Dependency resolution must preserve backend identity.'
     Assert-Equal $false (Test-OpenCvCudaArchitectureCompatible -Root $temporaryRoot -ExpectedOpenCvArchitectures $all.OpenCv) 'Legacy OpenCV without a manifest must not be reused.'
 
     [pscustomobject]@{ cudaArchBin = '12.0' } |

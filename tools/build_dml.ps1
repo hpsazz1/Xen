@@ -8,6 +8,7 @@ param(
     [object]$OpenCvAlreadyBuilt = $null,
     [object]$DownloadOrUpdateNeeded = $null,
     [switch]$UseLatestPackages,
+    [switch]$SkipNuGetRestore,
     [switch]$NonInteractive,
     [switch]$DryRun,
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -33,7 +34,18 @@ try {
 
     Import-VisualStudioEnvironment
     $ninja = Ensure-Ninja -AllowDownload:$allowDownloads -DryRun:$DryRun
-    Restore-NuGetPackages -UseLatest:$UseLatestPackages -AllowDownload:$allowDownloads -DryRun:$DryRun
+    if ($SkipNuGetRestore) {
+        if ($UseLatestPackages) {
+            throw '-SkipNuGetRestore cannot be combined with -UseLatestPackages.'
+        }
+        if (-not (Test-NuGetPackagesReady)) {
+            throw 'NuGet restore was skipped, but one or more packages from Xen\packages.config are missing.'
+        }
+        Write-BuildStep 'Using the complete repository package cache without NuGet restore.' 'dml'
+    }
+    else {
+        Restore-NuGetPackages -UseLatest:$UseLatestPackages -AllowDownload:$allowDownloads -DryRun:$DryRun
+    }
     Ensure-CoreSourceModules -AllowDownload:$allowDownloads -DryRun:$DryRun
 
     $opencvDmlRoot = Resolve-RepoPath "Xen\modules\opencv\build\dml"
@@ -69,7 +81,7 @@ try {
     }
 
     $buildPath = Resolve-RepoPath $BuildDir
-    $resolutionPath = Write-DependencyResolution -Resolution ([pscustomobject]@{
+    $resolutionPath = Write-DependencyResolution -OutputDirectory $buildPath -Resolution ([pscustomobject]@{
         backend = "dml"
         generator = $Generator
         configuration = $Configuration

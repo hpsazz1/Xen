@@ -1,4 +1,5 @@
 #include "runtime/basic_aim_controller.h"
+#include "runtime/control_interval_tracker.h"
 #include "runtime/aim_pipeline_runtime.h"
 #include "runtime/applied_view_motion_model.h"
 #include "runtime/relative_los_kalman.h"
@@ -1012,7 +1013,7 @@ int main()
     expectTrue(traceHeader.find("NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames") != std::string::npos,
                "basic pipeline keeps ndi compatibility diagnostics");
     expectTrue(traceHeader.find(
-                   "FrameCountLimit,ErrorMotion,ErrorMotionX,ErrorMotionY") != std::string::npos &&
+                   "FrameCountLimit,ControllerUpdateIntervalMs,ErrorMotion,ErrorMotionX,ErrorMotionY") != std::string::npos &&
                traceHeader.find(
                    "MovingInsideSettle,MovingInsideSettleX,MovingInsideSettleY,HorizontalCatchUp,VerticalCatchUp,SpeedLimited,Settled,SettledX,SettledY") != std::string::npos,
                "basic pipeline reports per-axis settle and speed limiting diagnostics");
@@ -1066,10 +1067,10 @@ int main()
                "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r46") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r47") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
-               traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
+               traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds,MaxCountsPerSecond,FrameCountLimit,ControllerUpdateIntervalMs") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
     expectTrue(traceHeader.find(
         "ProfileCalibrationEnabled,ProfileCalibrationValidX,ProfileCalibrationValidY") != std::string::npos &&
@@ -1087,6 +1088,20 @@ int main()
 
     BasicTargetFilter filter;
     const auto t0 = std::chrono::steady_clock::time_point(std::chrono::milliseconds(1000));
+
+    ControlIntervalTracker controlIntervalTracker;
+    expectNear(controlIntervalTracker.update(t0, 0.010), 0.010, 0.0,
+               "control interval tracker uses the first-frame fallback");
+    expectNear(controlIntervalTracker.update(t0 + std::chrono::milliseconds(12), 0.020),
+               0.012, 1e-12,
+               "control interval tracker follows control execution time instead of fallback cadence");
+    expectNear(controlIntervalTracker.update(t0 + std::chrono::milliseconds(13), 0.010),
+               0.002, 0.0,
+               "control interval tracker clamps an implausibly short execution interval");
+    controlIntervalTracker.reset();
+    expectNear(controlIntervalTracker.update(t0 + std::chrono::seconds(1), 0.015),
+               0.015, 0.0,
+               "control interval reset restores first-frame fallback semantics");
 
     ViewMotionHistory viewHistory;
     viewHistory.add(4.0, -2.0, t0 + std::chrono::milliseconds(10));

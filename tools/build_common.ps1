@@ -485,6 +485,19 @@ function Restore-NuGetPackages {
     ) -DryRun:$DryRun
 }
 
+function Test-NuGetPackagesReady {
+    $packagesConfig = Resolve-RepoPath 'Xen\packages.config'
+    $packagesDir = Resolve-RepoPath 'packages'
+    [xml]$manifest = Get-Content -LiteralPath $packagesConfig -Raw
+    foreach ($package in @($manifest.packages.package)) {
+        $packageDirectory = Join-Path $packagesDir ("{0}.{1}" -f $package.id, $package.version)
+        if (-not (Test-Path -LiteralPath $packageDirectory -PathType Container)) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Test-CoreSourceModules {
     $serialRoot = Resolve-RepoPath 'Xen\modules\serial'
     $simpleIni = Resolve-RepoPath 'Xen\modules\SimpleIni.h'
@@ -880,12 +893,12 @@ function Invoke-GuidedDependencyDownloads {
 
 function Write-DependencyResolution {
     param(
-        [Parameter(Mandatory)][object]$Resolution
+        [Parameter(Mandatory)][object]$Resolution,
+        [Parameter(Mandatory)][string]$OutputDirectory
     )
 
-    $buildDir = Resolve-RepoPath 'build'
-    New-DirectoryIfMissing $buildDir
-    $path = Join-Path $buildDir 'dependency-resolution.json'
+    New-DirectoryIfMissing $OutputDirectory
+    $path = Join-Path $OutputDirectory 'dependency-resolution.json'
     $Resolution | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding UTF8
     return $path
 }

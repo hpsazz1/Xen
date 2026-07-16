@@ -4,6 +4,16 @@
 
 使用项目提供的批处理包装脚本进行构建。这些脚本会自动配置 PowerShell 环境、Visual Studio 编译环境、Ninja、后端特定依赖、CMake 生成器和构建配置。
 
+已完整准备`packages/`时，DML脚本可使用`-SkipNuGetRestore`执行离线正式构建。
+脚本会按`Xen/packages.config`逐项核对固定版本目录，缺少任何依赖都会立即失败；该选项不得与
+`-UseLatestPackages`组合，也不能用于掩盖依赖未准备完成的问题。
+
+依赖解析身份分别写入`build/dml/dependency-resolution.json`和
+`build/cuda/dependency-resolution.json`，两后端不会共享或覆盖同一生成文件。
+
+检测到NDI SDK并启用NDI编译时，Release构建会从SDK的`Bin/x64`强制复制
+`Processing.NDI.Lib.x64.dll`。缺少该运行库必须在构建阶段失败，不能依赖旧构建目录残留文件通过发布测试。
+
 ## 1. 选择后端
 
 | 后端 | 适用场景 | 模型格式 |

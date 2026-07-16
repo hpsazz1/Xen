@@ -171,7 +171,7 @@ try {
     }
 
     $buildPath = Resolve-RepoPath $BuildDir
-    $resolutionPath = Write-DependencyResolution -Resolution ([pscustomobject]@{
+    $resolutionPath = Write-DependencyResolution -OutputDirectory $buildPath -Resolution ([pscustomobject]@{
         backend = "cuda"
         compatibilityProfile = $resolution.CompatibilityProfile
         desiredCudaVersion = $resolution.DesiredCudaVersion

@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 46;
+inline constexpr int kBasicAimControllerRevision = 47;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -35,6 +35,7 @@ public:
         double integralCountsY = 0.0;
         double errorDistance = 0.0;
         double frameCountLimit = 0.0;
+        double controllerUpdateIntervalSeconds = 0.0; // 本次输出覆盖的真实控制执行周期
         double errorMotion = 0.0;
         double errorMotionX = 0.0;
         double errorMotionY = 0.0;
@@ -59,6 +60,7 @@ public:
         Output out;
         out.errorDistance = std::hypot(errorX, errorY);
         dt = std::clamp(dt, 1.0 / 500.0, 0.05);
+        out.controllerUpdateIntervalSeconds = dt;
 
         const double response = std::clamp(settings.responseSeconds, 0.010, 0.500);
         const double integralTime = settings.integralTimeSeconds > 0.0

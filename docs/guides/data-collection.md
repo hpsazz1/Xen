@@ -63,3 +63,9 @@ r45起`aim_motion_compensation_delay_ms`表示正式补偿响应中心，
 r46正式响应宽度回退0。预测提前量为0时同时检查`PredictionMotionEvidenceSuppressed`：该字段表示初次建向、
 短时回归退化或反向确认，不属于停止、自运动、高速或往返门控。单向成熟段允许偶发证据退化，但不得随后出现
 `PredictionSelfMotionSuppressed=1`并触发整段重建。
+
+r47起CSV增加`ControllerUpdateIntervalMs`，表示相邻控制消费时刻之间、实际用于PI输出换算的周期。
+状态估计仍使用`BackendReceiveNs`代表的观测时间，设备输出不得复用可能成批到达的观测间隔。
+分析轻微同方向震荡时同时比较`RequestedOutputStepP95Counts`、`IntegralOutputStepP95Counts`、
+`ControllerUpdateIntervalP05/P95Ms`和`ObservationIntervalP05/P95Ms`：若观测周期短长交替而控制周期稳定，
+请求与积分步进不应再随观测周期出现同幅交替。

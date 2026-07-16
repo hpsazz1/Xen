@@ -121,6 +121,7 @@ struct PipelineFrame
     double integralTimeSeconds = 0.0;
     double maxCountsPerSecond = 0.0;
     double frameCountLimit = 0.0;
+    double controllerUpdateIntervalMs = 0.0; ///< 相邻控制消费时刻间隔，不是观测采集间隔
     double errorMotion = 0.0;          ///< 相邻有效控制观测的二维误差变化，px/observation
     double errorMotionX = 0.0;         ///< X轴相邻有效控制误差变化绝对值，px/observation
     double errorMotionY = 0.0;         ///< Y轴相邻有效控制误差变化绝对值，px/observation

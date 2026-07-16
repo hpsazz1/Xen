@@ -1433,20 +1433,10 @@ void MouseThread::moveMousePivot(
     settings.preserveMovingIntegralY = predictionLeadActiveY || reliableMovingTargetY;
     settings.allowMovingInsideSettleX = settings.preserveMovingIntegralX;
     settings.allowMovingInsideSettleY = settings.preserveMovingIntegralY;
-    // 网络捕获的到帧间隔可能抖动，优先使用相邻有效观测的真实时间差。
-    // 捕获窗 FPS 只作为首帧或无时间戳时的回退，避免一秒平均值掩盖 UDP/NDI 抖动。
-    double dt = frameIntervalSec(captureFps.load());
-    if (observationTime.time_since_epoch().count() != 0)
-    {
-        if (lastControlObservationTime.time_since_epoch().count() != 0 &&
-            observationTime > lastControlObservationTime)
-        {
-            dt = std::clamp(
-                std::chrono::duration<double>(observationTime - lastControlObservationTime).count(),
-                1.0 / 1000.0, 0.050);
-        }
-        lastControlObservationTime = observationTime;
-    }
+    // 观测时间用于滤波和预测；设备命令按控制消费节奏发送，因此 PI 输出 counts
+    // 必须覆盖相邻 controlTime，而不能复用 NDI 成批到达的观测时间差。
+    const double dt = controlIntervalTracker.update(
+        controlTime, frameIntervalSec(captureFps.load()));
     const auto output = aimController.update(
         errorX, errorY, dt, countsPerPixelX, countsPerPixelY, settings);
 
@@ -1554,6 +1544,8 @@ void MouseThread::moveMousePivot(
         pf->integralTimeSeconds = settings.integralTimeSeconds;
         pf->maxCountsPerSecond = settings.maxCountsPerSecond;
         pf->frameCountLimit = output.frameCountLimit;
+        pf->controllerUpdateIntervalMs =
+            output.controllerUpdateIntervalSeconds * 1000.0;
         pf->errorMotion = output.errorMotion;
         pf->errorMotionX = output.errorMotionX;
         pf->errorMotionY = output.errorMotionY;
@@ -2064,7 +2056,7 @@ void MouseThread::resetTracking()
     aimPipelineRuntime.reset();
     lastFilterResult = {};
     lastPredictionResult = {};
-    lastControlObservationTime = {};
+    controlIntervalTracker.reset();
     legacyCountRemainderX = 0.0;
     legacyCountRemainderY = 0.0;
     previousSelfMotionArtifact = false;

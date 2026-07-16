@@ -170,6 +170,7 @@ $predictedColumn = if ($Axis -eq 'X') { 'PredictedX' } else { 'PredictedY' }
 $finalMoveColumn = if ($Axis -eq 'X') { 'FinalMx' } else { 'FinalMy' }
 $requestedPixelColumn = if ($Axis -eq 'X') { 'RequestedPixelX' } else { 'RequestedPixelY' }
 $requestedCountsColumn = if ($Axis -eq 'X') { 'RequestedCountsX' } else { 'RequestedCountsY' }
+$integralCountsColumn = if ($Axis -eq 'X') { 'IntegralCountsX' } else { 'IntegralCountsY' }
 $requiredColumns = @(
     'Timestamp', 'SourceWidth', 'SourceHeight', 'InferenceFPS', 'SourceReceiveFPS',
     'ObservationAgeSec', 'ErrorX', 'ErrorY', 'ErrorDistance', 'FilterResidual',
@@ -528,6 +529,50 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
                 ++$sameSideOutputPulseCount
             }
         }
+        $requestedOutputSteps = [System.Collections.Generic.List[double]]::new()
+        $integralOutputSteps = [System.Collections.Generic.List[double]]::new()
+        $controllerUpdateIntervalsMs = [System.Collections.Generic.List[double]]::new()
+        $observationIntervalsMs = [System.Collections.Generic.List[double]]::new()
+        $hasIntegralCounts = $rows[0].PSObject.Properties.Name -contains $integralCountsColumn
+        $hasControllerInterval = $rows[0].PSObject.Properties.Name -contains 'ControllerUpdateIntervalMs'
+        $hasControlTime = $rows[0].PSObject.Properties.Name -contains 'ControlTimeNs'
+        $hasBackendReceiveTime = $rows[0].PSObject.Properties.Name -contains 'BackendReceiveNs'
+        for ($index = 1; $index -lt $samples.Count; ++$index) {
+            $currentRequestedCounts = [double](
+                $samples[$index].PSObject.Properties[$requestedCountsColumn].Value)
+            $previousRequestedCounts = [double](
+                $samples[$index - 1].PSObject.Properties[$requestedCountsColumn].Value)
+            $requestedOutputSteps.Add([math]::Abs(
+                $currentRequestedCounts - $previousRequestedCounts))
+            if ($hasIntegralCounts) {
+                $currentIntegralCounts = [double](
+                    $samples[$index].PSObject.Properties[$integralCountsColumn].Value)
+                $previousIntegralCounts = [double](
+                    $samples[$index - 1].PSObject.Properties[$integralCountsColumn].Value)
+                $integralOutputSteps.Add([math]::Abs(
+                    $currentIntegralCounts - $previousIntegralCounts))
+            }
+            if ($hasControllerInterval) {
+                $intervalMs = [double]$samples[$index].ControllerUpdateIntervalMs
+                if ($intervalMs -gt 0.0) {
+                    $controllerUpdateIntervalsMs.Add($intervalMs)
+                }
+            }
+            elseif ($hasControlTime) {
+                $intervalMs = ([double]$samples[$index].ControlTimeNs -
+                    [double]$samples[$index - 1].ControlTimeNs) / 1000000.0
+                if ($intervalMs -gt 0.0) {
+                    $controllerUpdateIntervalsMs.Add($intervalMs)
+                }
+            }
+            if ($hasBackendReceiveTime) {
+                $intervalMs = ([double]$samples[$index].BackendReceiveNs -
+                    [double]$samples[$index - 1].BackendReceiveNs) / 1000000.0
+                if ($intervalMs -gt 0.0) {
+                    $observationIntervalsMs.Add($intervalMs)
+                }
+            }
+        }
         $countsPerPixelSamples = @($samples | Where-Object {
             [math]::Abs([double]$_.$requestedPixelColumn) -gt 0.000001
         } | ForEach-Object {
@@ -628,6 +673,24 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             } else { 0.0 }
             OutputSameSideStepP95Counts = if ($sameSideOutputSteps.Count -gt 0) {
                 [math]::Round((Get-PercentileValue -Values @($sameSideOutputSteps) -Percentile 0.95), 2)
+            } else { 0.0 }
+            RequestedOutputStepP95Counts = if ($requestedOutputSteps.Count -gt 0) {
+                [math]::Round((Get-PercentileValue -Values @($requestedOutputSteps) -Percentile 0.95), 2)
+            } else { 0.0 }
+            IntegralOutputStepP95Counts = if ($integralOutputSteps.Count -gt 0) {
+                [math]::Round((Get-PercentileValue -Values @($integralOutputSteps) -Percentile 0.95), 2)
+            } else { 0.0 }
+            ControllerUpdateIntervalP05Ms = if ($controllerUpdateIntervalsMs.Count -gt 0) {
+                [math]::Round((Get-PercentileValue -Values @($controllerUpdateIntervalsMs) -Percentile 0.05), 2)
+            } else { 0.0 }
+            ControllerUpdateIntervalP95Ms = if ($controllerUpdateIntervalsMs.Count -gt 0) {
+                [math]::Round((Get-PercentileValue -Values @($controllerUpdateIntervalsMs) -Percentile 0.95), 2)
+            } else { 0.0 }
+            ObservationIntervalP05Ms = if ($observationIntervalsMs.Count -gt 0) {
+                [math]::Round((Get-PercentileValue -Values @($observationIntervalsMs) -Percentile 0.05), 2)
+            } else { 0.0 }
+            ObservationIntervalP95Ms = if ($observationIntervalsMs.Count -gt 0) {
+                [math]::Round((Get-PercentileValue -Values @($observationIntervalsMs) -Percentile 0.95), 2)
             } else { 0.0 }
             OutputSameSidePulseCount = $sameSideOutputPulseCount
             OutputSameSidePulseRateHz = [math]::Round(
@@ -744,6 +807,18 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
             [double]($group | Measure-Object OutputSideFlipMaxAbsCounts -Maximum).Maximum, 2)
         MeanOutputSameSideStepP95Counts = [math]::Round(
             [double]($group | Measure-Object OutputSameSideStepP95Counts -Average).Average, 2)
+        MeanRequestedOutputStepP95Counts = [math]::Round(
+            [double]($group | Measure-Object RequestedOutputStepP95Counts -Average).Average, 2)
+        MeanIntegralOutputStepP95Counts = [math]::Round(
+            [double]($group | Measure-Object IntegralOutputStepP95Counts -Average).Average, 2)
+        MeanControllerUpdateIntervalP05Ms = [math]::Round(
+            [double]($group | Measure-Object ControllerUpdateIntervalP05Ms -Average).Average, 2)
+        MeanControllerUpdateIntervalP95Ms = [math]::Round(
+            [double]($group | Measure-Object ControllerUpdateIntervalP95Ms -Average).Average, 2)
+        MeanObservationIntervalP05Ms = [math]::Round(
+            [double]($group | Measure-Object ObservationIntervalP05Ms -Average).Average, 2)
+        MeanObservationIntervalP95Ms = [math]::Round(
+            [double]($group | Measure-Object ObservationIntervalP95Ms -Average).Average, 2)
         OutputSameSidePulseCount = [int](
             $group | Measure-Object OutputSameSidePulseCount -Sum).Sum
         OutputSameSidePulseRateHz = [math]::Round(
@@ -845,6 +920,12 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'MeanObservedApproxClosedLoopLagMs', 'OutputSideFlipCount', 'OutputSideFlipRateHz',
         'OutputSideFlipMeanAbsCounts', 'OutputSideFlipMaxAbsCounts',
         'OutputSameSideStepP95Counts', 'MeanOutputSameSideStepP95Counts',
+        'RequestedOutputStepP95Counts', 'MeanRequestedOutputStepP95Counts',
+        'IntegralOutputStepP95Counts', 'MeanIntegralOutputStepP95Counts',
+        'ControllerUpdateIntervalP05Ms', 'ControllerUpdateIntervalP95Ms',
+        'MeanControllerUpdateIntervalP05Ms', 'MeanControllerUpdateIntervalP95Ms',
+        'ObservationIntervalP05Ms', 'ObservationIntervalP95Ms',
+        'MeanObservationIntervalP05Ms', 'MeanObservationIntervalP95Ms',
         'OutputSameSidePulseCount', 'OutputSameSidePulseRateHz',
         'SpeedLimitedPct', 'PredictionActivePct', 'PredictionSelfMotionSuppressedPct',
         'PredictionOscillationSuppressedPct', 'PredictionHighSpeedSuppressedPct',
@@ -872,6 +953,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, OutputSameSideStepP95Counts, OutputSameSidePulseCount, OutputSameSidePulseRateHz, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionMotionEvidenceSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, P95PredictionLeadDeltaPx, P95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, OutputSameSideStepP95Counts, RequestedOutputStepP95Counts, IntegralOutputStepP95Counts, ControllerUpdateIntervalP05Ms, ControllerUpdateIntervalP95Ms, ObservationIntervalP05Ms, ObservationIntervalP95Ms, OutputSameSidePulseCount, OutputSameSidePulseRateHz, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionMotionEvidenceSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, P95PredictionLeadDeltaPx, P95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, MeanObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, MeanOutputSameSideStepP95Counts, OutputSameSidePulseCount, OutputSameSidePulseRateHz, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionMotionEvidenceSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, MeanP95PredictionLeadDeltaPx, MeanP95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, MeanObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, MeanOutputSameSideStepP95Counts, MeanRequestedOutputStepP95Counts, MeanIntegralOutputStepP95Counts, MeanControllerUpdateIntervalP05Ms, MeanControllerUpdateIntervalP95Ms, MeanObservationIntervalP05Ms, MeanObservationIntervalP95Ms, OutputSameSidePulseCount, OutputSameSidePulseRateHz, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionMotionEvidenceSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, MeanP95PredictionLeadDeltaPx, MeanP95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize

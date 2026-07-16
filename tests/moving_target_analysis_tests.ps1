@@ -64,16 +64,20 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
         $row | Add-Member -NotePropertyName MovingInsideSettleY -NotePropertyValue 0
         $row | Add-Member -NotePropertyName SettledX -NotePropertyValue 0
         $row | Add-Member -NotePropertyName SettledY -NotePropertyValue 1
+        $row | Add-Member -NotePropertyName ControllerUpdateIntervalMs -NotePropertyValue 10.0
         $row | Add-Member -NotePropertyName PredictionStationarySuppressed `
             -NotePropertyValue $(if ($timestamp -eq 1030) { 1 } else { 0 })
         $row | Add-Member -NotePropertyName PredictionMotionEvidenceSuppressed `
             -NotePropertyValue $(if ($timestamp -eq 1040) { 1 } else { 0 })
         if ($timestamp -in @(1000, 1020, 1040)) {
             $row.FinalMx = 1
+            $row.RequestedCountsX = 1.344
         }
         elseif ($timestamp -in @(1010, 1030)) {
             $row.FinalMx = 8
+            $row.RequestedCountsX = 10.752
         }
+        $row | Add-Member -NotePropertyName IntegralCountsX -NotePropertyValue ([double]$row.RequestedCountsX * 0.5)
     }
     $augmentedRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
 
@@ -125,6 +129,11 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 1 $reverseTrials[0].OutputSideFlipMeanAbsCounts 'Output flip mean magnitude must use the new-side command.'
     Assert-Equal 1 $reverseTrials[0].OutputSideFlipMaxAbsCounts 'Output flip maximum magnitude must remain auditable.'
     Assert-Equal 7 $reverseTrials[0].OutputSameSideStepP95Counts 'Same-side output step P95 must expose command magnitude modulation.'
+    Assert-Equal 9.41 $reverseTrials[0].RequestedOutputStepP95Counts 'Requested output step P95 must expose pre-integer controller modulation.'
+    Assert-Equal 4.7 $reverseTrials[0].IntegralOutputStepP95Counts 'Integral output step P95 must isolate PI modulation.'
+    Assert-Equal 10 $reverseTrials[0].ControllerUpdateIntervalP05Ms 'Controller interval diagnostics must use the exported execution interval.'
+    Assert-Equal 10 $reverseTrials[0].ControllerUpdateIntervalP95Ms 'A fixed controller interval must have matching P05 and P95.'
+    Assert-Equal 0 $reverseTrials[0].ObservationIntervalP05Ms 'Missing legacy observation timestamps must remain compatible.'
     Assert-Equal 3 $reverseTrials[0].OutputSameSidePulseCount 'Alternating same-side command extrema must be counted as pulses.'
     Assert-Equal $reverseTrials[0].P95AbsAxisErrorPx $reverseTrials[0].SteadyP95AbsAxisErrorPx 'Short synthetic trials must use all samples as the steady window.'
     Assert-Equal 2 $scenario.Count 'Each scenario file must create one summary.'
@@ -140,6 +149,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 1 $scenario[0].OutputSideFlipCount 'Scenario summary must sum device output side changes across trials.'
     Assert-Equal 1 $scenario[0].OutputSideFlipMeanAbsCounts 'Scenario summary must weight output flip magnitude by flip count.'
     Assert-Equal 3 $scenario[0].OutputSameSidePulseCount 'Scenario summary must sum same-side command pulses.'
+    Assert-Equal 10 $scenario[0].MeanControllerUpdateIntervalP05Ms 'Scenario summary must preserve controller execution cadence.'
     Assert-Equal 5 $scenario[0].MeanP95PredictionLeadDeltaPx 'Scenario summary must preserve prediction lead smoothness.'
     Assert-Equal 10 $scenario[0].MeanP95PredictionLeadJerkPx 'Scenario summary must preserve prediction lead jerk.'
     Assert-Equal 40 $scenario[0].PredictionLeadCappedPct 'Scenario summary must weight cap occupancy by active samples.'
