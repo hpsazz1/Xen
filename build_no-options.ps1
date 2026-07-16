@@ -67,12 +67,10 @@ if (-not (Test-Path -LiteralPath $buildPath)) {
 
 Write-Host "[build_no-options] Running $Backend main-program build..."
 
-$buildArgs = @(
-    "--build", $buildPath,
-    "--config", $Configuration,
-    "--target", "ai",
-    "--parallel"
-)
+$buildArgs = New-CMakeApplicationBuildArguments `
+    -BuildPath $buildPath `
+    -Configuration $Configuration `
+    -Target 'ai'
 
 if ($DryRun) {
     Write-Host ">> cmake $($buildArgs -join ' ')"

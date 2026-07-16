@@ -109,11 +109,9 @@ try {
     Invoke-External "cmake" $cmakeArgs -DryRun:$DryRun
 
     Write-BuildStep "Building $Configuration" "dml"
-    Invoke-External "cmake" @(
-        "--build", (ConvertTo-CMakePath $buildPath),
-        "--config", $Configuration,
-        "--parallel"
-    ) -DryRun:$DryRun
+    Invoke-External "cmake" (New-CMakeApplicationBuildArguments `
+        -BuildPath (ConvertTo-CMakePath $buildPath) `
+        -Configuration $Configuration) -DryRun:$DryRun
 
     $canonicalExecutable = Join-Path $buildPath "$Configuration\Xen.exe"
     if (-not $DryRun -and -not (Test-Path -LiteralPath $canonicalExecutable -PathType Leaf)) {

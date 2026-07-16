@@ -40,6 +40,12 @@ $selectedPath = Select-VisualStudioEnvironmentPath -Candidates @(
 )
 Assert-Equal 'C:\Visual Studio\VC\Tools\MSVC\14.51\bin\Hostx64\x64;C:\Windows\System32' $selectedPath 'VsDevCmd PATH must win over a duplicate stale Path variable.'
 
+$applicationBuildArguments = New-CMakeApplicationBuildArguments `
+    -BuildPath 'build\dml' -Configuration Release -Target ai
+Assert-Equal '--build|build\dml|--config|Release|--target|ai|--parallel|--clean-first' `
+    ($applicationBuildArguments -join '|') `
+    'Application builds must clean stale objects before compiling header consumers.'
+
 $expectedLegacyDml = Join-Path (Get-RepoRoot) 'x64\DML\Xen.exe'
 Assert-Equal $expectedLegacyDml (Get-LegacyExecutablePath -Backend DML) 'Legacy DML executable detection must use the historical x64 path.'
 

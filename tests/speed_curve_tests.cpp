@@ -1065,6 +1065,13 @@ int main()
                "basic pipeline writes the configured build backend");
     expectTrue(traceRow.find(",unknown,") == std::string::npos,
                "basic pipeline writes concrete build revision and timestamp");
+    std::istringstream traceRowStream(traceRow);
+    std::vector<std::string> identityColumns;
+    for (std::string column; identityColumns.size() < 5 && std::getline(traceRowStream, column, ',');) {
+        identityColumns.push_back(column);
+    }
+    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "48",
+               "pipeline row carries the compiled controller revision");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
     expectTrue(BuildIdentity::displayLabel().find(" r48") != std::string::npos,

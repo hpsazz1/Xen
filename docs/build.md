@@ -140,10 +140,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\build_script_tests.p
 此命令仅运行现有的 CMake 构建树：
 
 ```text
-cmake --build build\<backend> --config Release --target ai --parallel
+cmake --build build\<backend> --config Release --target ai --parallel --clean-first
 ```
 
-它不会还原包、下载依赖、重新构建 OpenCV 或刷新 CMake 缓存路径。如果依赖路径发生变化或构建树已过期，请重新运行 `BUILDER.bat`、`build_dml.bat` 或 `build_cuda.bat`。
+它会先清理并重编译当前应用目标，避免本地化MSVC的`/showIncludes`前缀识别异常造成头文件消费者沿用陈旧对象；不会还原包、下载依赖、重新构建外部OpenCV或刷新CMake缓存路径。如果依赖路径发生变化或构建树已过期，请重新运行 `BUILDER.bat`、`build_dml.bat` 或 `build_cuda.bat`。完整DML/CUDA包装脚本同样对应用构建使用`--clean-first`。
 
 ## 5. 包装脚本的准备工作
 

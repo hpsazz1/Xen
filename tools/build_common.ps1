@@ -296,6 +296,24 @@ function Select-VisualStudioEnvironmentPath {
     return ($Candidates | Sort-Object Length -Descending | Select-Object -First 1)
 }
 
+function New-CMakeApplicationBuildArguments {
+    param(
+        [Parameter(Mandatory)][string]$BuildPath,
+        [Parameter(Mandatory)][string]$Configuration,
+        [string]$Target = ''
+    )
+
+    $arguments = @('--build', $BuildPath, '--config', $Configuration)
+    if (-not [string]::IsNullOrWhiteSpace($Target)) {
+        $arguments += @('--target', $Target)
+    }
+    # 中文MSVC的/showIncludes前缀可能被CMake错误编码，Ninja因而漏记头文件依赖。
+    # 应用对象体量远小于OpenCV；每次包装器构建前清理应用输出，保证头文件消费者和
+    # BuildIdentity来自同一次编译，同时不触碰外部OpenCV安装目录或下载缓存。
+    $arguments += @('--parallel', '--clean-first')
+    return $arguments
+}
+
 function Import-VisualStudioEnvironment {
     param(
         [string]$Architecture = 'x64',
