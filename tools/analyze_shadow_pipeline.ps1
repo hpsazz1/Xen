@@ -5,9 +5,14 @@ param(
     [ValidateRange(0, 1000000)][int]$MinPausedObservations = 1,
     [string]$ExpectedBuildRevision = '',
     [ValidateRange(0, 1000000)][int]$ExpectedControllerRevision = 0,
+    [ValidateRange(1, 1000)][int]$MinShortPauseEventsPerDirection = 6,
+    [ValidateRange(1, 1000)][int]$MinLongPauseEventsPerDirection = 6,
+    [ValidateRange(1.0, 10000.0)][double]$ShortPauseMaxMs = 350.0,
+    [ValidateRange(1.0, 60000.0)][double]$LongPauseMaxMs = 2000.0,
     [string]$OutputCsv = '',
     [switch]$RequireStandardScenarios,
     [switch]$RequirePausedObservations,
+    [switch]$RequirePauseScenarioCoverage,
     [switch]$PassThru
 )
 
@@ -57,6 +62,10 @@ $requiredColumns = @(
     'CommandRequestedCountsX', 'CommandRequestedCountsY',
     'CommandAppliedCountsX', 'CommandAppliedCountsY', 'QueuedMoveCount'
 )
+if ($RequirePauseScenarioCoverage) { $requiredColumns += 'ControlTimeNs' }
+if ($LongPauseMaxMs -le $ShortPauseMaxMs) {
+    throw 'LongPauseMaxMs must be greater than ShortPauseMaxMs.'
+}
 
 $summaries = [Collections.Generic.List[object]]::new()
 $skipped = 0
@@ -118,6 +127,10 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
         -not (Test-NearZero $_.QueuedMoveCount)
     }).Count
     $pauseContinuityViolations = 0
+    $shortPauseEvents = 0
+    $longPauseEvents = 0
+    $pauseDurationViolations = 0
+    $hasControlTime = $rows[0].PSObject.Properties.Name -contains 'ControlTimeNs'
     for ($index = 1; $index -lt $rows.Count; ++$index) {
         $previous = $rows[$index - 1]
         $current = $rows[$index]
@@ -130,6 +143,36 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
             ([uint64]$current.AimPipelineObservationSequence -ne
              [uint64]$previous.AimPipelineObservationSequence + 1)) {
             ++$pauseContinuityViolations
+        }
+        if ($hasControlTime -and $previous.AimPipelineOutputPaused -eq '1' -and
+            $current.AimPipelineOutputPaused -eq '0' -and $sameGeneration -and $sameTarget) {
+            $pauseStartIndex = $index - 1
+            while ($pauseStartIndex -gt 0) {
+                $candidate = $rows[$pauseStartIndex - 1]
+                if ($candidate.AimPipelineOutputPaused -ne '1' -or
+                    $candidate.AimPipelineResetGeneration -ne $current.AimPipelineResetGeneration -or
+                    $candidate.AimPipelineTargetId -ne $current.AimPipelineTargetId) { break }
+                --$pauseStartIndex
+            }
+            $pauseStart = $rows[$pauseStartIndex]
+            if (-not (Test-FiniteNumber $pauseStart.ControlTimeNs -NonNegative) -or
+                -not (Test-FiniteNumber $current.ControlTimeNs -NonNegative)) {
+                ++$pauseDurationViolations
+                continue
+            }
+            $pauseDurationMs = (
+                [Convert]::ToDouble($current.ControlTimeNs, [Globalization.CultureInfo]::InvariantCulture) -
+                [Convert]::ToDouble($pauseStart.ControlTimeNs, [Globalization.CultureInfo]::InvariantCulture)
+            ) / 1000000.0
+            if ($pauseDurationMs -lt 0.0) {
+                ++$pauseDurationViolations
+            }
+            elseif ($pauseDurationMs -lt $ShortPauseMaxMs) {
+                ++$shortPauseEvents
+            }
+            elseif ($pauseDurationMs -le $LongPauseMaxMs) {
+                ++$longPauseEvents
+            }
         }
     }
     $identityCount = @($rows | ForEach-Object {
@@ -146,6 +189,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
     if ($stageOneViolations -gt 0) { $reasons.Add('later-stage controller component enabled') }
     if ($pausedCommandViolations -gt 0) { $reasons.Add('paused device command contract violated') }
     if ($pauseContinuityViolations -gt 0) { $reasons.Add('paused observation sequence interrupted') }
+    if ($pauseDurationViolations -gt 0) { $reasons.Add('paused duration timestamp invalid') }
     $status = if ($reasons.Count -eq 0) { 'PASS' } else { 'FAIL' }
     $summaries.Add([pscustomobject]@{
         Level = 'File'
@@ -161,6 +205,9 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
         PausedObservations = $pausedRows.Count
         PausedCommandViolations = $pausedCommandViolations
         PauseContinuityViolations = $pauseContinuityViolations
+        ShortPauseEvents = $shortPauseEvents
+        LongPauseEvents = $longPauseEvents
+        PauseDurationViolations = $pauseDurationViolations
         Status = $status
         Reason = ($reasons -join '; ')
     })
@@ -181,14 +228,32 @@ $buildRevisionCount = @($summaries.BuildRevision | Select-Object -Unique).Count
 $pausedObservationCount = [int](($summaries | Measure-Object PausedObservations -Sum).Sum)
 $pausedObservationMissing = $RequirePausedObservations -and
     $pausedObservationCount -lt $MinPausedObservations
+$leftSummaries = @($summaries | Where-Object { $_.Source.ToLowerInvariant() -match 'left' })
+$rightSummaries = @($summaries | Where-Object { $_.Source.ToLowerInvariant() -match 'right' })
+$leftShortPauseEvents = [int](($leftSummaries | Measure-Object ShortPauseEvents -Sum).Sum)
+$leftLongPauseEvents = [int](($leftSummaries | Measure-Object LongPauseEvents -Sum).Sum)
+$rightShortPauseEvents = [int](($rightSummaries | Measure-Object ShortPauseEvents -Sum).Sum)
+$rightLongPauseEvents = [int](($rightSummaries | Measure-Object LongPauseEvents -Sum).Sum)
+$pauseCoverageMissing = $RequirePauseScenarioCoverage -and (
+    $leftShortPauseEvents -lt $MinShortPauseEventsPerDirection -or
+    $leftLongPauseEvents -lt $MinLongPauseEventsPerDirection -or
+    $rightShortPauseEvents -lt $MinShortPauseEventsPerDirection -or
+    $rightLongPauseEvents -lt $MinLongPauseEventsPerDirection)
 $overallFailed = $failed.Count -gt 0 -or $missingScenarios.Count -gt 0 -or
-    $buildRevisionCount -ne 1 -or $pausedObservationMissing
+    $buildRevisionCount -ne 1 -or $pausedObservationMissing -or $pauseCoverageMissing
 $overallReasons = [Collections.Generic.List[string]]::new()
 if ($failed.Count -gt 0) { $overallReasons.Add("$($failed.Count) file(s) failed") }
 if ($missingScenarios.Count -gt 0) { $overallReasons.Add("missing scenarios: $($missingScenarios -join ',')") }
 if ($buildRevisionCount -ne 1) { $overallReasons.Add('multiple build revisions') }
 if ($pausedObservationMissing) {
     $overallReasons.Add("paused observations below minimum: $pausedObservationCount/$MinPausedObservations")
+}
+if ($pauseCoverageMissing) {
+    $overallReasons.Add(
+        "directional pause coverage below minimum: " +
+        "left(short=$leftShortPauseEvents,long=$leftLongPauseEvents), " +
+        "right(short=$rightShortPauseEvents,long=$rightLongPauseEvents), " +
+        "required(short=$MinShortPauseEventsPerDirection,long=$MinLongPauseEventsPerDirection)")
 }
 $overall = [pscustomobject]@{
     Level = 'Overall'
@@ -204,6 +269,9 @@ $overall = [pscustomobject]@{
     PausedObservations = $pausedObservationCount
     PausedCommandViolations = [int](($summaries | Measure-Object PausedCommandViolations -Sum).Sum)
     PauseContinuityViolations = [int](($summaries | Measure-Object PauseContinuityViolations -Sum).Sum)
+    ShortPauseEvents = [int](($summaries | Measure-Object ShortPauseEvents -Sum).Sum)
+    LongPauseEvents = [int](($summaries | Measure-Object LongPauseEvents -Sum).Sum)
+    PauseDurationViolations = [int](($summaries | Measure-Object PauseDurationViolations -Sum).Sum)
     Status = if ($overallFailed) { 'FAIL' } else { 'PASS' }
     Reason = ($overallReasons -join '; ')
 }
