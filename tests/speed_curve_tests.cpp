@@ -2053,6 +2053,21 @@ int main()
                syntheticComparison.candidate.shapedCounts > 0.0 &&
                syntheticComparison.candidate.sentCounts > 0.0,
                "cross-domain replay records estimator, requested, shaped and sent diagnostics");
+    CrossDomainReplay::ControllerSettings responseReplaySettings = syntheticSettings;
+    responseReplaySettings.responseSeconds = 0.080;
+    responseReplaySettings.candidateResponseSeconds = 0.060;
+    const auto responseComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, responseReplaySettings);
+    expectNear(responseComparison.legacyResponseSeconds, 0.080, 0.0,
+               "cross-domain replay records the frozen legacy response");
+    expectNear(responseComparison.candidateResponseSeconds, 0.060, 0.0,
+               "cross-domain replay records the independent candidate response");
+    expectNear(responseComparison.legacy.errorP95Degrees,
+               syntheticComparison.legacy.errorP95Degrees, 0.0,
+               "candidate response experiments cannot mutate the legacy comparator");
+    expectTrue(std::abs(responseComparison.candidate.requestedCounts -
+                   syntheticComparison.candidate.requestedCounts) > 1e-6,
+               "independent candidate response changes only the candidate control path");
     CrossDomainReplay::ControllerSettings feedforwardReplaySettings = syntheticSettings;
     feedforwardReplaySettings.feedforwardGain = 0.5;
     const auto feedforwardComparison = CrossDomainReplay::RunComparison(

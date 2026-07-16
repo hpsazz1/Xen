@@ -50,6 +50,7 @@ namespace
         double inferenceFps = 94.0;
         std::vector<double> observationAgesMs{ 10.0, 15.0, 20.0 };
         double responseMs = 80.0;
+        double candidateResponseMs = 0.0;
         double kalmanAccelerationStdDegreesPerSecond2 = 90.0;
         double kalmanMovingAccelerationStdDegreesPerSecond2 = 360.0;
         double kalmanMovingRateThresholdDegreesPerSecond = 8.0;
@@ -214,6 +215,8 @@ namespace
         options.cropHeight = static_cast<int>(optionDouble(argc, argv, "--crop-height", options.cropHeight));
         options.inferenceFps = optionDouble(argc, argv, "--inference-fps", options.inferenceFps);
         options.responseMs = optionDouble(argc, argv, "--response-ms", options.responseMs);
+        options.candidateResponseMs = optionDouble(
+            argc, argv, "--candidate-response-ms", options.candidateResponseMs);
         options.kalmanAccelerationStdDegreesPerSecond2 = optionDouble(
             argc, argv, "--kalman-accel-std-dps2",
             options.kalmanAccelerationStdDegreesPerSecond2);
@@ -746,6 +749,8 @@ int Run(int argc, char** argv)
             settings.kalmanMovingRateThresholdDegreesPerSecond =
                 options.kalmanMovingRateThresholdDegreesPerSecond;
             settings.responseSeconds = options.responseMs / 1000.0;
+            settings.candidateResponseSeconds = options.candidateResponseMs > 0.0
+                ? options.candidateResponseMs / 1000.0 : 0.0;
             settings.verticalCatchUpErrorDegrees =
                 options.verticalCatchUpErrorDegrees;
             settings.maxCountsPerSecond = options.maxCountsPerSecond;
@@ -819,6 +824,17 @@ int Run(int argc, char** argv)
                                  options.kalmanMovingRateThresholdDegreesPerSecond,
                                  0.1, 1000.0)
                              : 8.0) << '\n'
+                     << "LegacyResponseMs="
+                     << (std::isfinite(options.responseMs)
+                             ? std::clamp(options.responseMs, 10.0, 500.0)
+                             : 80.0) << '\n'
+                     << "CandidateResponseMs="
+                     << (std::isfinite(options.candidateResponseMs) &&
+                             options.candidateResponseMs > 0.0
+                             ? std::clamp(options.candidateResponseMs, 10.0, 500.0)
+                             : (std::isfinite(options.responseMs)
+                                 ? std::clamp(options.responseMs, 10.0, 500.0)
+                                 : 80.0)) << '\n'
                      << "FeedforwardGain="
                      << (std::isfinite(options.feedforwardGain)
                              ? std::clamp(options.feedforwardGain, 0.0, 2.0)

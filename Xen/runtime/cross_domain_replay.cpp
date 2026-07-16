@@ -330,6 +330,13 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         std::isfinite(settings.kalmanMovingRateThresholdDegreesPerSecond)
             ? std::clamp(settings.kalmanMovingRateThresholdDegreesPerSecond,
                 0.1, 1000.0) : 8.0;
+    comparison.legacyResponseSeconds = std::isfinite(settings.responseSeconds)
+        ? std::clamp(settings.responseSeconds, 0.010, 0.500) : 0.080;
+    comparison.candidateResponseSeconds =
+        std::isfinite(settings.candidateResponseSeconds) &&
+            settings.candidateResponseSeconds > 0.0
+        ? std::clamp(settings.candidateResponseSeconds, 0.010, 0.500)
+        : comparison.legacyResponseSeconds;
     comparison.feedforwardGain = std::isfinite(settings.feedforwardGain)
         ? std::clamp(settings.feedforwardGain, 0.0, 2.0)
         : 0.0;
@@ -363,7 +370,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     predictorSettings.velocityTimeConstantSeconds = settings.legacyPredictionWindowSeconds;
     predictorSettings.predictionStrength = settings.legacyPredictionStrength;
     BasicAimController::Settings legacySettings;
-    legacySettings.responseSeconds = settings.responseSeconds;
+    legacySettings.responseSeconds = comparison.legacyResponseSeconds;
     legacySettings.maxCountsPerSecond = settings.maxCountsPerSecond;
     legacySettings.integralTimeSeconds = 0.0;
     legacySettings.settleRadiusPixels = 0.0;
@@ -379,7 +386,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         comparison.kalmanMovingRateThresholdDegreesPerSecond;
     LosAimController candidateController;
     LosAimController::Settings candidateSettings;
-    candidateSettings.responseSeconds = settings.responseSeconds;
+    candidateSettings.responseSeconds = comparison.candidateResponseSeconds;
     candidateSettings.verticalCatchUpErrorDegrees =
         settings.verticalCatchUpErrorDegrees;
     candidateSettings.maxCountsPerSecond = settings.maxCountsPerSecond;
@@ -745,7 +752,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -753,6 +760,8 @@ void WriteSummary(const std::filesystem::path& path,
                << item.kalmanAccelerationStdDegreesPerSecond2 << ','
                << item.kalmanMovingAccelerationStdDegreesPerSecond2 << ','
                << item.kalmanMovingRateThresholdDegreesPerSecond << ','
+               << item.legacyResponseSeconds * 1000.0 << ','
+               << item.candidateResponseSeconds * 1000.0 << ','
                << item.feedforwardGain << ','
                << item.leadHorizonSeconds * 1000.0 << ','
                << item.leadStrength << ','

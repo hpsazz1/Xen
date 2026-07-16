@@ -44,7 +44,9 @@ struct ControllerSettings
     double kalmanAccelerationStdDegreesPerSecond2 = 90.0;
     double kalmanMovingAccelerationStdDegreesPerSecond2 = 360.0;
     double kalmanMovingRateThresholdDegreesPerSecond = 8.0;
+    // legacy响应保持冻结基线；候选响应为0时沿用基线，非0时只作用于新控制器。
     double responseSeconds = 0.080;
+    double candidateResponseSeconds = 0.0;
     double verticalCatchUpErrorDegrees = 0.8;
     double maxCountsPerSecond = 1440.0;
     double legacyPredictionLeadSeconds = 0.050;
@@ -108,6 +110,8 @@ struct Comparison
     double kalmanAccelerationStdDegreesPerSecond2 = 90.0;
     double kalmanMovingAccelerationStdDegreesPerSecond2 = 360.0;
     double kalmanMovingRateThresholdDegreesPerSecond = 8.0;
+    double legacyResponseSeconds = 0.080;
+    double candidateResponseSeconds = 0.080;
     double feedforwardGain = 0.0;
     double leadHorizonSeconds = 0.0;
     double leadStrength = 0.0;
