@@ -1411,14 +1411,19 @@ int main()
                "sustained target motion is exempt from self-motion artifact suppression");
     const double sustainedBaseX = sustainedPrediction.x - sustainedPrediction.offsetX;
     TargetPredictor::Result transientRegression{};
-    for (int sample = 1; sample <= 3; ++sample)
+    const double regressionJitterX[] = { 20.0, -20.0, -20.0, 20.0 };
+    const double regressionJitterY[] = { 20.0, 20.0, -20.0, -20.0 };
+    for (int sample = 1; sample <= 4; ++sample)
     {
         const auto time = t0 + std::chrono::milliseconds(
             (lastSustainedSample + sample) * 8);
         transientRegression = sustainedMotionPredictor.update(
-            sustainedBaseX + (sample % 2 == 0 ? -1.0 : 1.0),
-            100.0, time, time, 320.0, predictionSettings);
+            sustainedBaseX + regressionJitterX[sample - 1],
+            100.0 + regressionJitterY[sample - 1],
+            time, time, 320.0, predictionSettings);
     }
+    expectTrue(transientRegression.offsetX == 0.0,
+               "four unreliable regression frames withdraw the current prediction lead");
     sustainedMotionPredictor.applySelfMotionSuppression(transientRegression, true);
     expectTrue(!transientRegression.selfMotionSuppressed,
                "brief regression degradation cannot reopen self-motion gating after sustained motion");
