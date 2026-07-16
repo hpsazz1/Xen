@@ -94,16 +94,28 @@ public:
         // static实测的伪预测只持续1~2帧；真实left/right一旦连续预测满5帧，
         // 屏幕收敛与自身视角同向是正常闭环跟随，不再允许自运动门控反复打断。
         // 持续运动豁免只能阻止“新保持”启动。若早期伪迹已经启动保持，内部回归仍可能
-        // 在保持期间累计出持续运动锁存；此时提前返回会让保持中途穿透，并把未消费计数
-        // 遗留到成熟预测阶段再次触发。已有保持必须连续执行到尾迹计数归零。
+        // 在保持期间累计出持续运动锁存；已有保持必须连续执行到尾迹计数归零，不能中途
+        // 穿透。但锁存成熟后也不能再被每个新伪迹刷新，否则真实单向运动会无限延长保持。
         const bool holdAlreadyActive = selfMotionSuppressionFramesRemaining_ > 0;
         if (!holdAlreadyActive && artifactDetected && sustainedMotionConfirmed_)
             return;
 
-        if (artifactDetected)
+        const bool sustainedMotionMaturedDuringHold =
+            holdAlreadyActive && sustainedMotionConfirmed_;
+        if (artifactDetected && !sustainedMotionMaturedDuringHold)
+        {
+            if (!holdAlreadyActive)
+                selfMotionHoldMaturedUnderContinuedArtifact_ = false;
             selfMotionSuppressionFramesRemaining_ = kHoldFrames;
+        }
+        else if (artifactDetected && sustainedMotionMaturedDuringHold)
+        {
+            // 门控条件持续存在时内部运动仍能成熟，说明当前是闭环跟随被误判，
+            // 而不是伪迹结束后的检测框回弹。仅此情形允许尾迹结束后保留速度。
+            selfMotionHoldMaturedUnderContinuedArtifact_ = true;
+        }
 
-        if (!artifactDetected && selfMotionSuppressionFramesRemaining_ <= 0)
+        if (selfMotionSuppressionFramesRemaining_ <= 0)
             return;
 
         result.x -= result.offsetX;
@@ -113,13 +125,24 @@ public:
         result.selfMotionSuppressed = true;
         resetPredictionDistanceSmoothing();
 
-        if (!artifactDetected)
+        // 普通保持在伪迹结束后消费四帧尾迹；若保持期间已经连续三帧确认真实运动，
+        // 即使原始伪迹条件仍成立，也开始消费剩余尾迹。最后一帧仍保持抑制，下一帧
+        // 才恢复输出，因此不会重现r47的保持中途穿透。
+        if (!artifactDetected || sustainedMotionMaturedDuringHold)
         {
             --selfMotionSuppressionFramesRemaining_;
-            // 保持期内的坐标变化主要来自控制器过冲和检测框回弹，不能作为真实反向运动证据。
-            // 尾帧结束时只丢弃运动学证据，保留当前观测基点，让后续新观测重新确认方向。
+            // 未成熟保持期内的坐标变化主要来自控制器过冲和检测框回弹，尾帧只保留
+            // 当前观测基点并重新建向。若运动已经成熟，则保留可信速度，避免再走一轮
+            // 自运动保持并把冷启动提前量推迟数百毫秒。
             if (selfMotionSuppressionFramesRemaining_ == 0)
-                discardMotionEvidence();
+            {
+                const bool preserveMatureMotion =
+                    selfMotionHoldMaturedUnderContinuedArtifact_ &&
+                    sustainedMotionConfirmed_;
+                selfMotionHoldMaturedUnderContinuedArtifact_ = false;
+                if (!preserveMatureMotion)
+                    discardMotionEvidence();
+            }
         }
     }
 
@@ -310,6 +333,7 @@ public:
         unreliableSamples_ = 0;
         reliableDirectionSamples_ = 0;
         selfMotionSuppressionFramesRemaining_ = 0;
+        selfMotionHoldMaturedUnderContinuedArtifact_ = false;
         selfMotionRearmPending_ = false;
         continuousPredictionFrames_ = 0;
         sustainedMotionConfirmed_ = false;
@@ -369,6 +393,7 @@ private:
         sustainedMotionConfirmed_ = false;
         highSpeedTransientSamples_ = 0;
         sparseResumeFramesRemaining_ = 0;
+        selfMotionHoldMaturedUnderContinuedArtifact_ = false;
         resetPredictionDistanceSmoothing();
         observations_.clear();
         if (initialized_)
@@ -784,6 +809,7 @@ private:
     int unreliableSamples_ = 0;
     int reliableDirectionSamples_ = 0;
     int selfMotionSuppressionFramesRemaining_ = 0; // 自运动伪迹命中后的剩余抑制观测帧数
+    bool selfMotionHoldMaturedUnderContinuedArtifact_ = false; // 保持期间持续伪迹下已确认真实运动
     bool selfMotionRearmPending_ = false; // 保持结束后是否仍需更强净位移证据
     int continuousPredictionFrames_ = 0; // 当前方向连续有效预测帧数，用于识别真实持续运动
     bool sustainedMotionConfirmed_ = false; // 持续运动锁存；短暂回归退化不得重新开放自运动门控
