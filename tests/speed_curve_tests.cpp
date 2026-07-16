@@ -1071,11 +1071,13 @@ int main()
     for (std::string column; identityColumns.size() < 5 && std::getline(traceRowStream, column, ',');) {
         identityColumns.push_back(column);
     }
-    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "55",
+    expectTrue(identityColumns.size() == 5 &&
+                   identityColumns[4] == std::to_string(kBasicAimControllerRevision),
                "pipeline row carries the compiled controller revision");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r55") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(
+                   " r" + std::to_string(kBasicAimControllerRevision)) != std::string::npos,
                "ui build label includes controller revision");
 
     CommandCancellationEpoch cancellationEpoch;
@@ -2048,12 +2050,24 @@ int main()
         48.0, 0.0, 0.010, 1.0, 1.0, boostedResumeSettings);
     expectTrue(!normalResumeOutput.speedLimited && !boostedResumeOutput.speedLimited,
                "medium quick-resume backlog remains below the device speed limit");
-    expectNear(normalResumeOutput.effectiveResponseSecondsX, 0.0525, 1e-12,
-               "normal 120 ms response keeps the existing large-error catch-up curve");
-    expectNear(boostedResumeOutput.effectiveResponseSecondsX, 0.04375, 1e-12,
-               "quick-resume 100 ms response shortens only the bounded backlog phase");
+    expectNear(normalResumeOutput.effectiveResponseSecondsX, 0.045, 1e-12,
+               "normal 120 ms response converges continuously toward the validated floor");
+    expectNear(boostedResumeOutput.effectiveResponseSecondsX, 0.040, 1e-12,
+               "quick-resume 100 ms response still shortens the bounded backlog phase");
     expectTrue(boostedResumeOutput.countsX > normalResumeOutput.countsX,
                "bounded quick-resume response consumes available medium-error headroom");
+    normalResumeController.reset();
+    const auto extremeNormalResumeOutput = normalResumeController.update(
+        80.0, 0.0, 0.010, 1.0, 1.0, normalResumeSettings);
+    expectNear(extremeNormalResumeOutput.effectiveResponseSecondsX, 0.030, 1e-12,
+               "120 ms center response cannot stretch extreme jump catch-up beyond 30 ms");
+    BasicAimController alreadyFastController;
+    BasicAimController::Settings alreadyFastSettings = normalResumeSettings;
+    alreadyFastSettings.responseSeconds = 0.040;
+    const auto alreadyFastOutput = alreadyFastController.update(
+        80.0, 0.0, 0.010, 1.0, 1.0, alreadyFastSettings);
+    expectNear(alreadyFastOutput.effectiveResponseSecondsX, 0.020, 1e-12,
+               "large-error floor never slows an explicitly faster controller response");
 
     // 生产速率必须使用捕获窗统计出的实际 FPS 换算单帧预算，而不是绑定某个设备或固定帧率。
     // 选取本轮 CSV 的约 127/143 FPS 和未来可能出现的 240 FPS，验证每秒总预算始终一致。

@@ -5,7 +5,7 @@
 
 // 写入流水线 CSV 的控制器行为修订号。改变稳定、积分或限速语义时必须递增，
 // 使现场数据能够确认实际运行的控制器，而不是只依据文件目录或口头版本判断。
-inline constexpr int kBasicAimControllerRevision = 55;
+inline constexpr int kBasicAimControllerRevision = 56;
 
 // 帧率无关的一阶基础控制器。
 // 输入是检测空间像素误差，输出是当前帧应发送的设备 counts。
@@ -69,8 +69,8 @@ public:
         const double settleRadius = std::max(0.0, settings.settleRadiusPixels);
         const double releaseRadius = std::max(settleRadius, settings.releaseRadiusPixels);
         // r26在32 px处直接从40 ms切到20 ms，实测该档68.3%的观测撞到速度上限，
-        // 既没有形成可控的额外追赶，还会在阈值附近产生增益跳变。16~32 px改为从半响应
-        // 连续缩短到八分之三响应，32 px以上保持该下限；积分、二维速度预算和稳定区不变。
+        // 既没有形成可控的额外追赶，还会在阈值附近产生增益跳变。入口仍为基础响应的一半，
+        // 16~32 px连续缩短到30 ms并保持；积分、二维速度预算和中心稳定区不变。
         const double catchUpThreshold = std::max(16.0, releaseRadius * 2.0);
         out.horizontalCatchUp = std::abs(errorX) >= catchUpThreshold;
         out.verticalCatchUp = std::abs(errorY) >= catchUpThreshold;
@@ -78,7 +78,14 @@ public:
         {
             const double catchUpProgress = std::clamp(
                 (std::abs(error) - catchUpThreshold) / catchUpThreshold, 0.0, 1.0);
-            return response * (0.5 - catchUpProgress * 0.125);
+            // 120 ms的中心抗晃动响应不能同比拖慢jump的大误差追赶。
+            // 保留半响应入口，并连续收敛到已经过实测验证的30 ms下限。
+            constexpr double kValidatedLargeErrorResponseSeconds = 0.030;
+            const double catchUpEntryResponse = response * 0.5;
+            const double largeErrorResponse = std::min(
+                catchUpEntryResponse, kValidatedLargeErrorResponseSeconds);
+            return catchUpEntryResponse - catchUpProgress *
+                (catchUpEntryResponse - largeErrorResponse);
         };
         out.effectiveResponseSecondsX = out.horizontalCatchUp
             ? catchUpResponse(errorX) : response;
