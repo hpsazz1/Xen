@@ -19,6 +19,12 @@
 
 namespace CrossDomainReplay
 {
+const char* candidateEstimatorModeName(CandidateEstimatorMode mode)
+{
+    return mode == CandidateEstimatorMode::OracleControlTime
+        ? "oracle_control_time" : "kalman";
+}
+
 namespace
 {
 using Clock = std::chrono::steady_clock;
@@ -313,7 +319,9 @@ std::vector<Variant> BuildRequiredVariants()
 
 Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                          const ControllerSettings& settings,
-                         const std::filesystem::path& frameCsv)
+                         const std::filesystem::path& frameCsv,
+                         const std::vector<unsigned char>* frozenDetectionTimeline,
+                         std::vector<unsigned char>* recordedDetectionTimeline)
 {
     Comparison comparison;
     comparison.scenario = canonicalScenario(source.scenario);
@@ -337,6 +345,15 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             settings.candidateResponseSeconds > 0.0
         ? std::clamp(settings.candidateResponseSeconds, 0.010, 0.500)
         : comparison.legacyResponseSeconds;
+    comparison.candidateEstimatorMode = settings.candidateEstimatorMode;
+    const double baselineMaxCountsPerSecond =
+        std::isfinite(settings.maxCountsPerSecond)
+        ? std::clamp(settings.maxCountsPerSecond, 1.0, 100000.0) : 1440.0;
+    comparison.candidateMaxCountsPerSecond =
+        std::isfinite(settings.candidateMaxCountsPerSecond) &&
+            settings.candidateMaxCountsPerSecond > 0.0
+        ? std::clamp(settings.candidateMaxCountsPerSecond, 1.0, 100000.0)
+        : baselineMaxCountsPerSecond;
     comparison.feedforwardGain = std::isfinite(settings.feedforwardGain)
         ? std::clamp(settings.feedforwardGain, 0.0, 2.0)
         : 0.0;
@@ -389,7 +406,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     candidateSettings.responseSeconds = comparison.candidateResponseSeconds;
     candidateSettings.verticalCatchUpErrorDegrees =
         settings.verticalCatchUpErrorDegrees;
-    candidateSettings.maxCountsPerSecond = settings.maxCountsPerSecond;
+    candidateSettings.maxCountsPerSecond = comparison.candidateMaxCountsPerSecond;
     candidateSettings.feedforwardGain = comparison.feedforwardGain;
     candidateSettings.leadHorizonSeconds = comparison.leadHorizonSeconds;
     candidateSettings.leadStrength = comparison.leadStrength;
@@ -405,7 +422,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     CommandTrajectoryShaper shaper;
     CommandTrajectoryShaper::Settings shaperSettings;
     shaperSettings.mode = settings.trajectoryMode;
-    shaperSettings.maxVelocityCountsPerSecond = settings.maxCountsPerSecond;
+    shaperSettings.maxVelocityCountsPerSecond = comparison.candidateMaxCountsPerSecond;
     shaperSettings.maxAccelerationCountsPerSecond2 =
         settings.trajectoryMaxAccelerationCountsPerSecond2;
     shaperSettings.maxJerkCountsPerSecond3 =
@@ -440,6 +457,9 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     bool hasLatestTrajectoryRequest = false;
     double nextTrajectoryTickSeconds = 0.0;
     TrajectoryRequest latestTrajectoryRequest;
+    size_t replayFrameIndex = 0;
+    if (recordedDetectionTimeline)
+        recordedDetectionTimeline->clear();
 
     // 离线对照显式遍历每个固定输出格点，而不是按观测帧调用一次后让调度器跳过中间tick。
     // 新请求只会从其到达后的首个格点生效；格点之间始终保持latest-only目标速度。
@@ -506,8 +526,17 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             std::abs(legacyRelativePixels.y) < cropHeight * 0.5 &&
             std::abs(candidateRelativePixels.x) < cropWidth * 0.5 &&
             std::abs(candidateRelativePixels.y) < cropHeight * 0.5;
-        const bool detected = point.detected && bothInsideDetectionCrop &&
+        const bool naturalDetection = point.detected && bothInsideDetectionCrop &&
             std::abs(point.timeSeconds - sourceTime) <= std::max(0.05, dt * variant.speedScale * 1.5);
+        // 反事实必须复用基线的有效帧与重置边界；否则更强/更弱的候选会因离开
+        // 裁剪区而改变后续样本，归因结果混入不同评估队列，无法区分算法收益。
+        const bool detected = frozenDetectionTimeline
+            ? (replayFrameIndex < frozenDetectionTimeline->size() &&
+                (*frozenDetectionTimeline)[replayFrameIndex] != 0)
+            : naturalDetection;
+        if (recordedDetectionTimeline)
+            recordedDetectionTimeline->push_back(detected ? 1U : 0U);
+        ++replayFrameIndex;
         if (!detected)
         {
             if (previousDetected)
@@ -569,13 +598,31 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         kalman.update(truthAtObservation.yawDegrees, truthAtObservation.pitchDownDegrees,
             point.confidence, observationPoint, controlPoint, kalmanSettings);
         const auto& estimate = kalman.estimate();
+        const double previousControlTime = std::max(0.0, controlTime - dt);
+        const double previousControlSourceTime = std::min(
+            source.points.back().timeSeconds,
+            previousControlTime * variant.speedScale);
+        const auto truthBeforeControl = targetAngles(
+            source, variant, previousControlSourceTime);
+        const double oracleRateX = controlTime > 0.0
+            ? (truthAtControl.yawDegrees - truthBeforeControl.yawDegrees) / dt
+            : 0.0;
+        const double oracleRateY = controlTime > 0.0
+            ? (truthAtControl.pitchDownDegrees - truthBeforeControl.pitchDownDegrees) / dt
+            : 0.0;
+        const bool useOracle = comparison.candidateEstimatorMode ==
+            CandidateEstimatorMode::OracleControlTime;
         LosAimController::Input input;
-        input.valid = estimate.x.valid && estimate.y.valid;
-        input.errorDegreesX = estimate.x.angleDegrees - candidateCamera.yaw;
-        input.errorDegreesY = estimate.y.angleDegrees - candidateCamera.pitch;
-        input.relativeLosRateDegreesPerSecondX = estimate.x.rateDegreesPerSecond;
-        input.relativeLosRateDegreesPerSecondY = estimate.y.rateDegreesPerSecond;
-        input.feedforwardConfidence = estimate.feedforwardConfidence;
+        input.valid = useOracle || (estimate.x.valid && estimate.y.valid);
+        input.errorDegreesX = (useOracle ? truthAtControl.yawDegrees :
+            estimate.x.angleDegrees) - candidateCamera.yaw;
+        input.errorDegreesY = (useOracle ? truthAtControl.pitchDownDegrees :
+            estimate.y.angleDegrees) - candidateCamera.pitch;
+        input.relativeLosRateDegreesPerSecondX = useOracle
+            ? oracleRateX : estimate.x.rateDegreesPerSecond;
+        input.relativeLosRateDegreesPerSecondY = useOracle
+            ? oracleRateY : estimate.y.rateDegreesPerSecond;
+        input.feedforwardConfidence = useOracle ? 1.0 : estimate.feedforwardConfidence;
         input.degreesPerCountX = settings.degreesPerCountX;
         input.degreesPerCountY = settings.degreesPerCountY;
         input.dtSeconds = dt;
@@ -636,10 +683,14 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             candidateMetrics.addOutput(
                 shaped.output.outputCountsX, shaped.output.outputCountsY, moving);
         previousTruthMoving = moving;
-        candidateMetrics.addEstimate(estimate.x.rateDegreesPerSecond, estimate.y.rateDegreesPerSecond,
-            truthRateX, truthRateY, std::max(estimate.x.nis, estimate.y.nis),
-            std::max(estimate.x.angleVariance, estimate.y.angleVariance),
-            estimate.feedforwardConfidence);
+        candidateMetrics.addEstimate(
+            useOracle ? oracleRateX : estimate.x.rateDegreesPerSecond,
+            useOracle ? oracleRateY : estimate.y.rateDegreesPerSecond,
+            truthRateX, truthRateY,
+            useOracle ? 0.0 : std::max(estimate.x.nis, estimate.y.nis),
+            useOracle ? 0.0 : std::max(
+                estimate.x.angleVariance, estimate.y.angleVariance),
+            useOracle ? 1.0 : estimate.feedforwardConfidence);
         candidateMetrics.addSettle(
             candidateOutput.settled, candidateOutput.settleReleased);
         candidateMetrics.addReverseSuppression(
@@ -752,7 +803,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -762,6 +813,8 @@ void WriteSummary(const std::filesystem::path& path,
                << item.kalmanMovingRateThresholdDegreesPerSecond << ','
                << item.legacyResponseSeconds * 1000.0 << ','
                << item.candidateResponseSeconds * 1000.0 << ','
+               << candidateEstimatorModeName(item.candidateEstimatorMode) << ','
+               << item.candidateMaxCountsPerSecond << ','
                << item.feedforwardGain << ','
                << item.leadHorizonSeconds * 1000.0 << ','
                << item.leadStrength << ','
@@ -791,6 +844,117 @@ void WriteSummary(const std::filesystem::path& path,
                << item.candidate.trajectoryAccelerationLimitedPercent << ','
                << item.candidate.trajectoryJerkLimitedPercent << ','
                << (item.passed ? 1 : 0) << ',' << item.reason << '\n';
+    }
+}
+
+namespace
+{
+bool sameLegacyCohort(const Comparison& first, const Comparison& second)
+{
+    const auto& a = first.legacy;
+    const auto& b = second.legacy;
+    return a.samples == b.samples &&
+        a.errorP50Degrees == b.errorP50Degrees &&
+        a.errorP95Degrees == b.errorP95Degrees &&
+        a.errorP99Degrees == b.errorP99Degrees &&
+        a.verticalP95Degrees == b.verticalP95Degrees &&
+        a.insideBoxPercent == b.insideBoxPercent &&
+        a.edgeMarginP05Degrees == b.edgeMarginP05Degrees &&
+        a.interruptionPercent == b.interruptionPercent &&
+        a.outputDirectionFlips == b.outputDirectionFlips &&
+        a.lateHalfErrorP95Degrees == b.lateHalfErrorP95Degrees &&
+        a.requestedCounts == b.requestedCounts &&
+        a.sentCounts == b.sentCounts;
+}
+}
+
+std::string ClassifyAttribution(const Comparison& baseline,
+                                const Comparison& oracleEstimator,
+                                const Comparison& unlimitedActuator,
+                                bool& cohortStable)
+{
+    cohortStable = sameLegacyCohort(baseline, oracleEstimator) &&
+        sameLegacyCohort(baseline, unlimitedActuator) &&
+        baseline.candidate.samples == oracleEstimator.candidate.samples &&
+        baseline.candidate.samples == unlimitedActuator.candidate.samples;
+    if (baseline.passed)
+        return cohortStable ? "BASELINE_PASS" : "COHORT_CHANGED";
+    if (!cohortStable)
+        return "COHORT_CHANGED";
+    if (oracleEstimator.passed && !unlimitedActuator.passed)
+        return "ESTIMATOR_LIMITED";
+    if (!oracleEstimator.passed && unlimitedActuator.passed)
+        return "ACTUATOR_LIMITED";
+    if (oracleEstimator.passed && unlimitedActuator.passed)
+        return "EITHER_INTERVENTION_RESCUES";
+    return "COUPLED_OR_GATE_LIMITED";
+}
+
+Attribution RunAttribution(const SourceTrajectory& source, const Variant& variant,
+                           const ControllerSettings& settings,
+                           const std::filesystem::path& frameCsv)
+{
+    Attribution result;
+    std::vector<unsigned char> detectionTimeline;
+    result.baseline = RunComparison(
+        source, variant, settings, frameCsv, nullptr, &detectionTimeline);
+
+    ControllerSettings oracleSettings = settings;
+    oracleSettings.candidateEstimatorMode = CandidateEstimatorMode::OracleControlTime;
+    result.oracleEstimator = RunComparison(
+        source, variant, oracleSettings, {}, &detectionTimeline);
+
+    ControllerSettings unlimitedSettings = settings;
+    unlimitedSettings.candidateMaxCountsPerSecond = 100000.0;
+    result.unlimitedActuator = RunComparison(
+        source, variant, unlimitedSettings, {}, &detectionTimeline);
+
+    result.classification = ClassifyAttribution(
+        result.baseline, result.oracleEstimator, result.unlimitedActuator,
+        result.cohortStable);
+    return result;
+}
+
+void WriteAttributionSummary(const std::filesystem::path& path,
+                             const std::vector<Attribution>& attributions)
+{
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream output(path);
+    output << "Scenario,Variant,CohortStable,Classification,BaselinePassed,OraclePassed,UnlimitedPassed,BaselineReason,OracleReason,UnlimitedReason,BaselineSamples,OracleSamples,UnlimitedSamples,LegacyP95Deg,BaselineP95Deg,OracleP95Deg,UnlimitedP95Deg,LegacyVerticalP95Deg,BaselineVerticalP95Deg,OracleVerticalP95Deg,UnlimitedVerticalP95Deg,LegacyInsideBoxPercent,BaselineInsideBoxPercent,OracleInsideBoxPercent,UnlimitedInsideBoxPercent,LegacyOutputFlips,BaselineOutputFlips,OracleOutputFlips,UnlimitedOutputFlips,BaselineRequestedCounts,OracleRequestedCounts,UnlimitedRequestedCounts,BaselineSentCounts,OracleSentCounts,UnlimitedSentCounts\n";
+    output << std::fixed << std::setprecision(6);
+    for (const auto& item : attributions)
+    {
+        const auto& baseline = item.baseline;
+        const auto& oracle = item.oracleEstimator;
+        const auto& unlimited = item.unlimitedActuator;
+        output << baseline.scenario << ',' << baseline.variant.name << ','
+               << (item.cohortStable ? 1 : 0) << ',' << item.classification << ','
+               << (baseline.passed ? 1 : 0) << ',' << (oracle.passed ? 1 : 0) << ','
+               << (unlimited.passed ? 1 : 0) << ',' << baseline.reason << ','
+               << oracle.reason << ',' << unlimited.reason << ','
+               << baseline.candidate.samples << ',' << oracle.candidate.samples << ','
+               << unlimited.candidate.samples << ',' << baseline.legacy.errorP95Degrees << ','
+               << baseline.candidate.errorP95Degrees << ','
+               << oracle.candidate.errorP95Degrees << ','
+               << unlimited.candidate.errorP95Degrees << ','
+               << baseline.legacy.verticalP95Degrees << ','
+               << baseline.candidate.verticalP95Degrees << ','
+               << oracle.candidate.verticalP95Degrees << ','
+               << unlimited.candidate.verticalP95Degrees << ','
+               << baseline.legacy.insideBoxPercent << ','
+               << baseline.candidate.insideBoxPercent << ','
+               << oracle.candidate.insideBoxPercent << ','
+               << unlimited.candidate.insideBoxPercent << ','
+               << baseline.legacy.outputDirectionFlips << ','
+               << baseline.candidate.outputDirectionFlips << ','
+               << oracle.candidate.outputDirectionFlips << ','
+               << unlimited.candidate.outputDirectionFlips << ','
+               << baseline.candidate.requestedCounts << ','
+               << oracle.candidate.requestedCounts << ','
+               << unlimited.candidate.requestedCounts << ','
+               << baseline.candidate.sentCounts << ','
+               << oracle.candidate.sentCounts << ','
+               << unlimited.candidate.sentCounts << '\n';
     }
 }
 }

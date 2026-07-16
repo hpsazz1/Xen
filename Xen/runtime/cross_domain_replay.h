@@ -10,6 +10,14 @@
 
 namespace CrossDomainReplay
 {
+enum class CandidateEstimatorMode
+{
+    Kalman,
+    OracleControlTime
+};
+
+const char* candidateEstimatorModeName(CandidateEstimatorMode mode);
+
 struct SourceTrajectory
 {
     std::string scenario;
@@ -47,6 +55,9 @@ struct ControllerSettings
     // legacy响应保持冻结基线；候选响应为0时沿用基线，非0时只作用于新控制器。
     double responseSeconds = 0.080;
     double candidateResponseSeconds = 0.0;
+    // 仅供离线归因：oracle直接使用控制时刻真实LOS状态；0表示候选沿用正式限速。
+    CandidateEstimatorMode candidateEstimatorMode = CandidateEstimatorMode::Kalman;
+    double candidateMaxCountsPerSecond = 0.0;
     double verticalCatchUpErrorDegrees = 0.8;
     double maxCountsPerSecond = 1440.0;
     double legacyPredictionLeadSeconds = 0.050;
@@ -112,6 +123,8 @@ struct Comparison
     double kalmanMovingRateThresholdDegreesPerSecond = 8.0;
     double legacyResponseSeconds = 0.080;
     double candidateResponseSeconds = 0.080;
+    CandidateEstimatorMode candidateEstimatorMode = CandidateEstimatorMode::Kalman;
+    double candidateMaxCountsPerSecond = 1440.0;
     double feedforwardGain = 0.0;
     double leadHorizonSeconds = 0.0;
     double leadStrength = 0.0;
@@ -125,15 +138,35 @@ struct Comparison
     std::string reason;
 };
 
+struct Attribution
+{
+    Comparison baseline{};
+    Comparison oracleEstimator{};
+    Comparison unlimitedActuator{};
+    bool cohortStable = false;
+    std::string classification;
+};
+
 std::vector<Variant> BuildRequiredVariants();
 Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                          const ControllerSettings& settings,
-                         const std::filesystem::path& frameCsv = {});
+                         const std::filesystem::path& frameCsv = {},
+                         const std::vector<unsigned char>* frozenDetectionTimeline = nullptr,
+                         std::vector<unsigned char>* recordedDetectionTimeline = nullptr);
 bool EvaluateGate(const std::string& scenario, const Variant& variant,
                   const Metrics& legacy, const Metrics& candidate,
                   std::string& reason);
 void WriteSummary(const std::filesystem::path& path,
                   const std::vector<Comparison>& comparisons);
+Attribution RunAttribution(const SourceTrajectory& source, const Variant& variant,
+                           const ControllerSettings& settings,
+                           const std::filesystem::path& frameCsv = {});
+std::string ClassifyAttribution(const Comparison& baseline,
+                                const Comparison& oracleEstimator,
+                                const Comparison& unlimitedActuator,
+                                bool& cohortStable);
+void WriteAttributionSummary(const std::filesystem::path& path,
+                             const std::vector<Attribution>& attributions);
 }
 
 #endif

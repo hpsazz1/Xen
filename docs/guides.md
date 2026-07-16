@@ -49,6 +49,7 @@
 | [P0-5相对视线速度前馈复验](080P0-5相对视线速度前馈复验20260715.md) | 了解主场景物理域矩阵、前馈单变量扫描和0.15候选依据。 |
 | [P0-5前馈安全上限细化](081P0-5前馈安全上限细化20260715.md) | 了解0.15~0.20细扫、帕累托门槛和0.16安全上限。 |
 | [P0-5候选响应隔离复验](131P0-5候选响应隔离复验20260716.md) | 了解冻结legacy比较器、独立扫描候选响应时间及否决60/100 ms的依据。 |
+| [P0-5失败归因反事实回放](132P0-5失败归因反事实回放20260717.md) | 使用冻结检测时间线区分估计受限、执行受限与结构性失败。 |
 | [稳健常速度预测与实机振荡排查](034稳健常速度预测与实机振荡排查20260714.md) | 了解首轮实机预测振荡根因、场景边界和r8稳健速度模型。 |
 | [预测连续性保持与单帧门控修复](035预测连续性保持与单帧门控修复20260714.md) | 分析r8提前量频繁中断原因，以及r9窗口级停止和反向确认。 |
 | [透视坐标修正与jump视野逃逸优化](036透视坐标修正与jump视野逃逸优化20260714.md) | 分析r9静止误补偿和jump飞出320裁剪的共同坐标根因。 |
@@ -70,6 +71,8 @@ build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video
 先查看`cross_domain_decision.txt`，再按`cross_domain_summary.csv`的`Scenario/Variant/Passed/Reason`定位单一失败模块；不要只挑通过变体调参。`cross_domain_frames.csv`只包含基准域逐帧诊断，全矩阵指标均在summary中。
 
 `--response-ms`只定义冻结的legacy比较器，`--candidate-response-ms`只定义新控制器候选；不传后者时默认与legacy相同。每次候选响应实验必须核对decision和summary中的`LegacyResponseMs/CandidateResponseMs`，禁止移动比较器后把结果当作候选收益。
+
+需要分析失败归因时追加`--cross-domain-attribution 1`。工具会生成`cross_domain_attribution.csv`，分别运行控制时刻真实LOS状态和100000 counts/s上限两个离线反事实；两者严格复用基线逐帧检测/重置时间线。只有`CohortStable=1`时分类才有效，出现任何`COHORT_CHANGED`必须先修评估工具，不能据此选算法。oracle与解除限速是定位上界，不是可直接发布的候选，总通过数下降时也不得选择性只统计被救回的失败项。
 
 固定240 Hz梯形对照在同一命令后追加`--trajectory-mode trapezoid --trajectory-output-hz 240 --trajectory-max-accel-cps2 60000 --trajectory-max-jerk-cps3 4000000`，并使用独立输出目录。该模式当前仅用于反事实回放，正式默认仍为`off`。
 

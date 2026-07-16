@@ -63,6 +63,7 @@ namespace
         double fovX = 106.0;
         double fovY = 74.0;
         bool crossDomain = false;
+        bool crossDomainAttribution = false;
         double settleErrorDegrees = 0.080;
         double settleRateDegreesPerSecond = 1.200;
         double reverseConfirmationSeconds = 0.080;
@@ -200,6 +201,13 @@ namespace
         }
         else if (const auto root = optionValue(argc, argv, "--video-replay"))
             options.videoRoot = *root;
+        if (const auto attribution = optionValue(
+                argc, argv, "--cross-domain-attribution"))
+        {
+            const std::string normalized = lower(*attribution);
+            options.crossDomainAttribution = normalized != "0" &&
+                normalized != "false" && normalized != "off";
+        }
         if (const auto model = optionValue(argc, argv, "--video-model"))
             options.modelPath = *model;
         else
@@ -740,6 +748,7 @@ int Run(int argc, char** argv)
         if (options.crossDomain)
         {
             std::vector<CrossDomainReplay::Comparison> comparisons;
+            std::vector<CrossDomainReplay::Attribution> attributions;
             const auto variants = CrossDomainReplay::BuildRequiredVariants();
             CrossDomainReplay::ControllerSettings settings;
             settings.kalmanAccelerationStdDegreesPerSecond2 =
@@ -796,15 +805,44 @@ int Run(int argc, char** argv)
                     // 20 ms/1x基准，避免把同一观测机械复制成数GB文件。
                     const bool detailedVariant =
                         variant.name == "domain_fov106_2560x1440_94fps_20ms_1x";
-                    auto comparison = CrossDomainReplay::RunComparison(
-                        source, variant, settings,
-                        detailedVariant ? framePath : std::filesystem::path{});
+                    CrossDomainReplay::Comparison comparison;
+                    if (options.crossDomainAttribution)
+                    {
+                        auto attribution = CrossDomainReplay::RunAttribution(
+                            source, variant, settings,
+                            detailedVariant ? framePath : std::filesystem::path{});
+                        comparison = attribution.baseline;
+                        attributions.push_back(std::move(attribution));
+                    }
+                    else
+                    {
+                        comparison = CrossDomainReplay::RunComparison(
+                            source, variant, settings,
+                            detailedVariant ? framePath : std::filesystem::path{});
+                    }
                     passed += comparison.passed ? 1U : 0U;
                     comparisons.push_back(std::move(comparison));
                 }
             }
             CrossDomainReplay::WriteSummary(
                 options.outputRoot / "cross_domain_summary.csv", comparisons);
+            if (options.crossDomainAttribution)
+            {
+                CrossDomainReplay::WriteAttributionSummary(
+                    options.outputRoot / "cross_domain_attribution.csv",
+                    attributions);
+            }
+            std::map<std::string, size_t> attributionCounts;
+            size_t oraclePassed = 0;
+            size_t unlimitedPassed = 0;
+            size_t changedCohorts = 0;
+            for (const auto& attribution : attributions)
+            {
+                ++attributionCounts[attribution.classification];
+                oraclePassed += attribution.oracleEstimator.passed ? 1U : 0U;
+                unlimitedPassed += attribution.unlimitedActuator.passed ? 1U : 0U;
+                changedCohorts += attribution.cohortStable ? 0U : 1U;
+            }
             std::ofstream decision(options.outputRoot / "cross_domain_decision.txt");
             decision << "KalmanAccelerationStdDps2="
                      << (std::isfinite(options.kalmanAccelerationStdDegreesPerSecond2)
@@ -862,6 +900,14 @@ int Run(int argc, char** argv)
                      << options.trajectoryMaxAccelerationCountsPerSecond2 << '\n'
                      << "TrajectoryMaxJerkCountsPerSecond3="
                      << options.trajectoryMaxJerkCountsPerSecond3 << '\n'
+                     << "AttributionEnabled="
+                     << (options.crossDomainAttribution ? 1 : 0) << '\n'
+                     << "AttributionOraclePassed=" << oraclePassed << '\n'
+                     << "AttributionUnlimitedPassed=" << unlimitedPassed << '\n'
+                     << "AttributionChangedCohorts=" << changedCohorts << '\n';
+            for (const auto& [classification, count] : attributionCounts)
+                decision << "Attribution_" << classification << '=' << count << '\n';
+            decision
                      << "Comparisons=" << comparisons.size() << '\n'
                      << "Passed=" << passed << '\n'
                      << "Failed=" << comparisons.size() - passed << '\n'

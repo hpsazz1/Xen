@@ -2068,6 +2068,38 @@ int main()
     expectTrue(std::abs(responseComparison.candidate.requestedCounts -
                    syntheticComparison.candidate.requestedCounts) > 1e-6,
                "independent candidate response changes only the candidate control path");
+    const auto attribution = CrossDomainReplay::RunAttribution(
+        syntheticReplay, syntheticVariant, syntheticSettings);
+    expectTrue(attribution.oracleEstimator.candidateEstimatorMode ==
+                   CrossDomainReplay::CandidateEstimatorMode::OracleControlTime &&
+               attribution.unlimitedActuator.candidateMaxCountsPerSecond == 100000.0 &&
+               attribution.cohortStable,
+               "cross-domain attribution isolates oracle state and actuator-limit counterfactuals");
+    expectNear(attribution.oracleEstimator.legacy.errorP95Degrees,
+               attribution.baseline.legacy.errorP95Degrees, 0.0,
+               "oracle attribution cannot mutate the frozen legacy comparator");
+    expectNear(attribution.unlimitedActuator.legacy.errorP95Degrees,
+               attribution.baseline.legacy.errorP95Degrees, 0.0,
+               "actuator attribution cannot mutate the frozen legacy comparator");
+
+    CrossDomainReplay::Comparison failedAttribution = syntheticComparison;
+    failedAttribution.passed = false;
+    CrossDomainReplay::Comparison oraclePassAttribution = failedAttribution;
+    oraclePassAttribution.passed = true;
+    CrossDomainReplay::Comparison unlimitedFailAttribution = failedAttribution;
+    bool attributionCohortStable = false;
+    expectTrue(CrossDomainReplay::ClassifyAttribution(
+                   failedAttribution, oraclePassAttribution,
+                   unlimitedFailAttribution, attributionCohortStable) ==
+                   "ESTIMATOR_LIMITED" && attributionCohortStable,
+               "attribution labels an oracle-only rescue as estimator limited");
+    CrossDomainReplay::Comparison changedCohortAttribution = oraclePassAttribution;
+    changedCohortAttribution.legacy.errorP95Degrees += 0.001;
+    expectTrue(CrossDomainReplay::ClassifyAttribution(
+                   failedAttribution, changedCohortAttribution,
+                   unlimitedFailAttribution, attributionCohortStable) ==
+                   "COHORT_CHANGED" && !attributionCohortStable,
+               "attribution refuses conclusions when the frozen cohort changes");
     CrossDomainReplay::ControllerSettings feedforwardReplaySettings = syntheticSettings;
     feedforwardReplaySettings.feedforwardGain = 0.5;
     const auto feedforwardComparison = CrossDomainReplay::RunComparison(
