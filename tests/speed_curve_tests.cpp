@@ -1071,11 +1071,11 @@ int main()
     for (std::string column; identityColumns.size() < 5 && std::getline(traceRowStream, column, ',');) {
         identityColumns.push_back(column);
     }
-    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "50",
+    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "51",
                "pipeline row carries the compiled controller revision");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r50") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r51") != std::string::npos,
                "ui build label includes controller revision");
 
     CommandCancellationEpoch cancellationEpoch;
@@ -1790,6 +1790,34 @@ int main()
     expectTrue(quickResumePrediction.directionLocked &&
                    quickResumePrediction.offsetX > 0.0,
                "short same-target aiming pause preserves mature forward prediction");
+    const auto quantizedQuickResumePrediction = matureLeadPredictor.update(
+        396.0, 100.0, t0 + std::chrono::milliseconds(600),
+        t0 + std::chrono::milliseconds(610), 320.0, predictionSettings);
+    expectTrue(quantizedQuickResumePrediction.directionLocked &&
+                   quantizedQuickResumePrediction.offsetX > 0.0 &&
+                   quantizedQuickResumePrediction.velocityX > 0.0,
+               "quick resume latch preserves lead through a quantized second frame");
+    const auto regressionQuickResumePrediction = matureLeadPredictor.update(
+        400.0, 100.0, t0 + std::chrono::milliseconds(608),
+        t0 + std::chrono::milliseconds(618), 320.0, predictionSettings);
+    expectTrue(regressionQuickResumePrediction.directionLocked &&
+                   regressionQuickResumePrediction.offsetX > 0.0,
+               "four-sample regression takes over without a quick-resume prediction hole");
+
+    TargetPredictor reversedResumePredictor;
+    for (int sample = 0; sample < 50; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        reversedResumePredictor.update(
+            100.0 + sample * 4.0, 100.0, time, time,
+            320.0, predictionSettings);
+    }
+    const auto reversedResumePrediction = reversedResumePredictor.update(
+        240.0, 100.0, t0 + std::chrono::milliseconds(592),
+        t0 + std::chrono::milliseconds(602), 320.0, predictionSettings, 0.35);
+    expectTrue(reversedResumePrediction.offsetX == 0.0 &&
+                   reversedResumePrediction.velocityX == 0.0,
+               "opposite quick-resume motion cannot reuse the previous prediction direction");
 
     TargetPredictor expiredResumePredictor;
     for (int sample = 0; sample < 50; ++sample)

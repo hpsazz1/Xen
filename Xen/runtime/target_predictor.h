@@ -311,6 +311,7 @@ public:
         continuousPredictionFrames_ = 0;
         sustainedMotionConfirmed_ = false;
         highSpeedTransientSamples_ = 0;
+        sparseResumeFramesRemaining_ = 0;
         resetPredictionDistanceSmoothing();
         directionReversalTimes_.clear();
         oscillationSuppressedUntil_ = {};
@@ -364,6 +365,7 @@ private:
         continuousPredictionFrames_ = 0;
         sustainedMotionConfirmed_ = false;
         highSpeedTransientSamples_ = 0;
+        sparseResumeFramesRemaining_ = 0;
         resetPredictionDistanceSmoothing();
         observations_.clear();
         if (initialized_)
@@ -403,12 +405,27 @@ private:
                     resumeSpeed
                 : -1.0;
             const double activationSpeed = std::max(50.0, span * 0.20);
-            if (allowSparseResume && directionLocked_ && predictionEstablished_ &&
-                hasVelocity_ && resumeSpeed >= activationSpeed * 0.50 &&
-                resumeAlignment >= 0.50)
+            const bool startsSparseResume = allowSparseResume &&
+                directionLocked_ && predictionEstablished_ && hasVelocity_ &&
+                resumeSpeed >= activationSpeed * 0.50 && resumeAlignment >= 0.50;
+            if (startsSparseResume)
             {
+                // 跨暂停恢复后的回归窗口需要三次新观测才能重新达到四样本。调用方只会在
+                // 首帧放宽最大间隔，因此由预测器内部锁存后续一帧，避免首帧恢复、次帧
+                // 清零、第三帧再恢复的固定脉冲。锁存仅容忍量化静止或非反向退化；明确
+                // 反向仍立即走冷启动，不能沿用松开前的旧方向。
+                sparseResumeFramesRemaining_ = 2;
+            }
+            const bool clearlyReversed = resumeSpeed >= activationSpeed * 0.50 &&
+                resumeAlignment < 0.0;
+            if (sparseResumeFramesRemaining_ > 0 &&
+                directionLocked_ && predictionEstablished_ && hasVelocity_ &&
+                !clearlyReversed)
+            {
+                --sparseResumeFramesRemaining_;
                 return false;
             }
+            sparseResumeFramesRemaining_ = 0;
             velocityX_ = velocityY_ = 0.0;
             accelerationX_ = accelerationY_ = 0.0;
             hasVelocity_ = false;
@@ -416,6 +433,8 @@ private:
         }
 
         // 对窗口内全部坐标做最小二乘直线拟合，避免单帧差分把框抖动放大成数百px/s。
+        // 四样本回归已经接管速度估计，跨暂停锁存不再参与后续普通观测。
+        sparseResumeFramesRemaining_ = 0;
         double meanTime = 0.0;
         double meanX = 0.0;
         double meanY = 0.0;
@@ -737,6 +756,7 @@ private:
     double committedDirectionY_ = 0.0;
     int highSpeedTransientSamples_ = 0; // 不确定高速瞬态仍需三帧确认，可信同向加速可首帧门控
     double smoothedPredictionDistance_ = 0.0; // 已放行预测提前距离的一阶平滑状态，px
+    int sparseResumeFramesRemaining_ = 0; // 短暂停恢复后等待四样本回归接管的剩余退化帧数
     bool predictionDistanceSmoothingInitialized_ = false;
     std::deque<Observation> observations_;
     TimePoint previousObservationTime_{};
