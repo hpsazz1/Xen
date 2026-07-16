@@ -267,7 +267,7 @@ ViewCommandSample MouseThread::queueMove(int dx, int dy)
     sample.sequence = moveSequence.fetch_add(1, std::memory_order_relaxed) + 1;
     sample.enqueueTime = FrameTiming::Clock::now();
     sample.enqueueSucceeded = true;
-    moveQueue.push({ dx, dy, sample });
+    moveQueue.push({ dx, dy, moveCancellationEpoch.capture(), sample });
     queueCv.notify_one();
     return sample;
 }
@@ -901,6 +901,15 @@ std::pair<double, double> MouseThread::filter_target_position(
  */
 void MouseThread::sendMovementToDriver(Move move)
 {
+    // clearQueuedMoves()不仅清空尚在队列内的命令，还会切换取消代次。
+    // Worker可能已经把旧命令弹出并释放queueMtx；设备调用前必须再次核对，
+    // 否则松开瞄准后仍可能多发送最后1~3 counts，形成每轮末尾的轻微拖尾。
+    if (!moveCancellationEpoch.isCurrent(move.cancellationToken))
+    {
+        g_pipelineTracer.recordCommandDropped(move.timing.sequence);
+        return;
+    }
+
     move.timing.sendAttempted = true;
     if (move.dx == 0 && move.dy == 0)
     {
@@ -913,6 +922,15 @@ void MouseThread::sendMovementToDriver(Move move)
 
         if (!mouseInput)
         {
+            g_pipelineTracer.recordCommandResult(move.timing);
+            return;
+        }
+
+        // 等待设备锁期间也可能发生目标重置；在不可撤销的驱动调用前做最终核对。
+        if (!moveCancellationEpoch.isCurrent(move.cancellationToken))
+        {
+            move.timing.sendAttempted = false;
+            move.timing.droppedBeforeSend = true;
             g_pipelineTracer.recordCommandResult(move.timing);
             return;
         }
@@ -1850,14 +1868,24 @@ void MouseThread::moveMousePivot(
  */
 void MouseThread::clearQueuedMoves()
 {
-    std::lock_guard<std::mutex> lock(queueMtx);
-    while (!moveQueue.empty())
+    // 先切换代次，再处理队列；这样已经被Worker弹出的命令也会在设备调用前失效。
+    moveCancellationEpoch.cancel();
     {
-        g_pipelineTracer.recordCommandDropped(moveQueue.front().timing.sequence);
-        moveQueue.pop();
+        std::lock_guard<std::mutex> lock(queueMtx);
+        while (!moveQueue.empty())
+        {
+            g_pipelineTracer.recordCommandDropped(moveQueue.front().timing.sequence);
+            moveQueue.pop();
+        }
+        std::queue<Move> empty;
+        moveQueue.swap(empty);
     }
-    std::queue<Move> empty;
-    moveQueue.swap(empty);
+
+    // 与可能已经进入设备调用的旧命令建立完成屏障。返回后，不会再有取消前的
+    // 命令晚到设备；等待锁期间的新旧命令仍由上方代次核对决定是否可发送。
+    {
+        std::lock_guard<std::mutex> inputLock(inputDevicesMutex);
+    }
 }
 
 size_t MouseThread::pendingMoveCount()

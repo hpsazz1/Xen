@@ -1,5 +1,6 @@
 #include "runtime/basic_aim_controller.h"
 #include "runtime/control_interval_tracker.h"
+#include "runtime/command_cancellation_epoch.h"
 #include "runtime/aim_pipeline_runtime.h"
 #include "runtime/applied_view_motion_model.h"
 #include "runtime/relative_los_kalman.h"
@@ -1070,12 +1071,21 @@ int main()
     for (std::string column; identityColumns.size() < 5 && std::getline(traceRowStream, column, ',');) {
         identityColumns.push_back(column);
     }
-    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "48",
+    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "49",
                "pipeline row carries the compiled controller revision");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r48") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r49") != std::string::npos,
                "ui build label includes controller revision");
+
+    CommandCancellationEpoch cancellationEpoch;
+    const auto firstCommandToken = cancellationEpoch.capture();
+    expectTrue(cancellationEpoch.isCurrent(firstCommandToken),
+               "newly captured device command token is current");
+    const auto secondEpoch = cancellationEpoch.cancel();
+    expectTrue(!cancellationEpoch.isCurrent(firstCommandToken) &&
+                   cancellationEpoch.isCurrent(secondEpoch),
+               "cancelling device commands invalidates popped old-generation work");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds,MaxCountsPerSecond,FrameCountLimit,ControllerUpdateIntervalMs") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");

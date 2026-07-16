@@ -24,6 +24,7 @@
 #include "MouseInput.h"
 #include "runtime/basic_aim_controller.h"
 #include "runtime/control_interval_tracker.h"
+#include "runtime/command_cancellation_epoch.h"
 #include "runtime/basic_target_filter.h"
 #include "runtime/aim_pipeline_runtime.h"
 #include "runtime/applied_view_motion_model.h"
@@ -111,6 +112,7 @@ private:
     {
         int dx = 0;
         int dy = 0;
+        CommandCancellationEpoch::Token cancellationToken = 0; ///< 入队时的取消代次
         ViewCommandSample timing{};
     };
 
@@ -127,6 +129,7 @@ private:
     std::atomic<bool>             workerStop{ false };  ///< 工作线程停止标志
     std::atomic<bool>             workerRunning{ true }; ///< 工作线程健康标志（异常退出时置false）
     std::atomic<uint64_t>         moveSequence{ 0 };    ///< 所有设备移动请求共享的单调序号
+    CommandCancellationEpoch      moveCancellationEpoch; ///< 目标失效后拦截已出队的旧移动
 
     // ==================== 配置缓存 ====================
     // 缓存活跃游戏配置的静态值，避免每次鼠标移动都加锁查询 map
