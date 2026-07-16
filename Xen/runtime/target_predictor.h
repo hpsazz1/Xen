@@ -93,7 +93,11 @@ public:
         constexpr int kHoldFrames = 4;
         // static实测的伪预测只持续1~2帧；真实left/right一旦连续预测满5帧，
         // 屏幕收敛与自身视角同向是正常闭环跟随，不再允许自运动门控反复打断。
-        if (artifactDetected && sustainedMotionConfirmed_)
+        // 持续运动豁免只能阻止“新保持”启动。若早期伪迹已经启动保持，内部回归仍可能
+        // 在保持期间累计出持续运动锁存；此时提前返回会让保持中途穿透，并把未消费计数
+        // 遗留到成熟预测阶段再次触发。已有保持必须连续执行到尾迹计数归零。
+        const bool holdAlreadyActive = selfMotionSuppressionFramesRemaining_ > 0;
+        if (!holdAlreadyActive && artifactDetected && sustainedMotionConfirmed_)
             return;
 
         if (artifactDetected)

@@ -1067,7 +1067,7 @@ int main()
                "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r47") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r48") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds,MaxCountsPerSecond,FrameCountLimit,ControllerUpdateIntervalMs") != std::string::npos,
@@ -1356,6 +1356,64 @@ int main()
     selfMotionHoldPredictor.applySelfMotionSuppression(recoveredResult, false);
     expectTrue(!recoveredResult.selfMotionSuppressed && recoveredResult.offsetX == 10.0,
                "prediction resumes after the bounded self-motion hold");
+
+    // 实机r47中，早期自运动保持尚未结束时，内部连续预测计数先达到持续运动门槛。
+    // 旧逻辑会因此跳过已有保持并留下未消费计数，数十帧后在成熟预测中突然归零。
+    TargetPredictor uninterruptedHoldPredictor;
+    TargetPredictor::Result uninterruptedHoldResult{};
+    int uninterruptedActiveFrames = 0;
+    int uninterruptedLastSample = 0;
+    for (int sample = 0; sample < 16 && uninterruptedActiveFrames < 1; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        uninterruptedHoldResult = uninterruptedHoldPredictor.update(
+            100.0 + sample * 6.0, 100.0, time, time, 320.0, predictionSettings);
+        uninterruptedLastSample = sample;
+        if (uninterruptedHoldResult.offsetX > 0.0)
+            ++uninterruptedActiveFrames;
+    }
+    expectTrue(uninterruptedActiveFrames == 1,
+               "pending-hold regression starts before sustained motion is confirmed");
+    uninterruptedHoldPredictor.applySelfMotionSuppression(
+        uninterruptedHoldResult, true);
+    expectTrue(uninterruptedHoldResult.selfMotionSuppressed,
+               "an early artifact starts a self-motion hold");
+    for (int sample = 1; sample <= 3; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(
+            (uninterruptedLastSample + sample) * 8);
+        uninterruptedHoldResult = uninterruptedHoldPredictor.update(
+            100.0 + (uninterruptedLastSample + sample) * 6.0,
+            100.0, time, time, 320.0, predictionSettings);
+        uninterruptedHoldPredictor.applySelfMotionSuppression(
+            uninterruptedHoldResult, true);
+        expectTrue(uninterruptedHoldResult.selfMotionSuppressed &&
+                       uninterruptedHoldResult.offsetX == 0.0,
+                   "an active hold cannot be pierced by an internal sustained-motion latch");
+    }
+    for (int frame = 0; frame < 4; ++frame)
+    {
+        const auto time = t0 + std::chrono::milliseconds(
+            (uninterruptedLastSample + 4 + frame) * 8);
+        uninterruptedHoldResult = uninterruptedHoldPredictor.update(
+            100.0 + (uninterruptedLastSample + 4 + frame) * 6.0,
+            100.0, time, time, 320.0, predictionSettings);
+        uninterruptedHoldPredictor.applySelfMotionSuppression(
+            uninterruptedHoldResult, false);
+        expectTrue(uninterruptedHoldResult.selfMotionSuppressed,
+                   "the active hold consumes every response-tail frame without gaps");
+    }
+    const auto uninterruptedRecoveredTime = t0 + std::chrono::milliseconds(
+        (uninterruptedLastSample + 8) * 8);
+    uninterruptedHoldResult = uninterruptedHoldPredictor.update(
+        100.0 + (uninterruptedLastSample + 8) * 6.0,
+        100.0, uninterruptedRecoveredTime, uninterruptedRecoveredTime,
+        320.0, predictionSettings);
+    uninterruptedHoldPredictor.applySelfMotionSuppression(
+        uninterruptedHoldResult, false);
+    expectTrue(!uninterruptedHoldResult.selfMotionSuppressed,
+               "a completed hold leaves no stale counter for mature prediction");
+
     selfMotionHoldPredictor.applySelfMotionSuppression(recoveredResult, true);
     selfMotionHoldPredictor.reset();
     TargetPredictor::Result resetResult{
