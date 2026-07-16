@@ -128,7 +128,8 @@ public:
                   std::chrono::steady_clock::time_point controlTime,
                   double detectionSpan,
                   const Settings& settings,
-                  double maxObservationGapSeconds = 0.10)
+                  double maxObservationGapSeconds = 0.10,
+                  bool preserveMatureDirectionDuringCatchUp = false)
     {
         if (!settings.enabled || !std::isfinite(x) || !std::isfinite(y))
         {
@@ -165,9 +166,10 @@ public:
 
         const bool reliableMotion = updateMotion(
             x, y, observationTime, dt, span, settings,
-            maximumGap > 0.10);
+            maximumGap > 0.10, preserveMatureDirectionDuringCatchUp);
         updateDirection(
-            sampleVelocityX, sampleVelocityY, reliableMotion, span, observationTime);
+            sampleVelocityX, sampleVelocityY, reliableMotion, span, observationTime,
+            preserveMatureDirectionDuringCatchUp);
         const bool oscillationSuppressed =
             observationTime < oscillationSuppressedUntil_;
         // 稳定高速直线仍符合常速度模型，不能仅因速度快而误杀；速度与加速度同时越界
@@ -182,7 +184,8 @@ public:
         // r28单向复测中，left/right在约462~474 px/s稳定速度下因回归加速度抖动
         // 反复命中旧400 px/s门槛；jump速度P95为1908~2103 px/s。速度门槛提高到
         // 检测跨度2倍/秒，隔离普通单向跟随，同时仍覆盖真正的快速横跳。
-        const bool highSpeedTransient = directionLocked_ &&
+        const bool highSpeedTransient = !preserveMatureDirectionDuringCatchUp &&
+            directionLocked_ &&
             fittedSpeed > span * 2.0 &&
             std::hypot(accelerationX_, accelerationY_) > span * 5.0;
         if (highSpeedTransient)
@@ -374,7 +377,8 @@ private:
 
     bool updateMotion(double x, double y, TimePoint observationTime,
                       double dt, double span, const Settings& settings,
-                      bool allowSparseResume)
+                      bool allowSparseResume,
+                      bool preserveMatureDirectionDuringCatchUp)
     {
         observations_.push_back({ x, y, observationTime });
 
@@ -498,6 +502,21 @@ private:
             std::hypot(fittedVelocityX, fittedVelocityY) >= activationSpeed &&
             linearity >= 0.65;
 
+        // 有界追赶保护期内，补偿回归若突然与成熟方向相反，不得用它覆盖最后可信
+        // 速度。调用方已经确认这是同目标、同方向短恢复；保护期外仍按普通反向处理。
+        const double fittedSpeedForAlignment =
+            std::hypot(fittedVelocityX, fittedVelocityY);
+        const double fittedDirectionAlignment = fittedSpeedForAlignment > 1e-9
+            ? (fittedVelocityX * directionX_ + fittedVelocityY * directionY_) /
+                fittedSpeedForAlignment
+            : 1.0;
+        if (reliableMotion && preserveMatureDirectionDuringCatchUp &&
+            sustainedMotionConfirmed_ && directionLocked_ && predictionEstablished_ &&
+            fittedDirectionAlignment < 0.0)
+        {
+            return false;
+        }
+
         // 不可靠窗口只更新噪声诊断，不覆盖最后一次可靠控制速度，避免提前量单帧归零或翻向。
         if (hasVelocity_)
         {
@@ -519,7 +538,8 @@ private:
     }
 
     void updateDirection(double sampleVelocityX, double sampleVelocityY,
-                         bool reliableMotion, double span, TimePoint observationTime)
+                         bool reliableMotion, double span, TimePoint observationTime,
+                         bool preserveMatureDirectionDuringCatchUp)
     {
         const double sampleSpeed = std::hypot(sampleVelocityX, sampleVelocityY);
         const double activationSpeed = std::max(50.0, span * 0.20);
@@ -556,6 +576,14 @@ private:
 
         if (!reliableMotion)
         {
+            if (preserveMatureDirectionDuringCatchUp &&
+                sustainedMotionConfirmed_ && directionLocked_ && predictionEstablished_)
+            {
+                unreliableSamples_ = 0;
+                pendingDirectionSamples_ = 0;
+                suppressPrediction_ = false;
+                return;
+            }
             ++unreliableSamples_;
             pendingDirectionSamples_ = 0;
             // 已锁定后容忍最多两帧窗口退化，使用最后可靠速度维持连续提前。
@@ -592,6 +620,17 @@ private:
             sampleDirectionX * directionX_ + sampleDirectionY * directionY_;
         if (alignment < -0.25)
         {
+            // 同方向短恢复的快速追赶会在相机响应尾迹中制造单帧数千px/s的补偿反向，
+            // 而成熟回归速度仍保持原方向。仅在调用方给出的有界保护期内保留已经
+            // 持续确认的方向；静止分支仍在上方生效，保护期结束后真实反向照常首帧
+            // 撤销并走三次可靠回归确认。
+            if (preserveMatureDirectionDuringCatchUp &&
+                sustainedMotionConfirmed_ && predictionEstablished_)
+            {
+                pendingDirectionSamples_ = 0;
+                suppressPrediction_ = false;
+                return;
+            }
             // 反向必须由稳健回归窗口确认；单帧坐标差分不再直接关闭预测。
             suppressPrediction_ = true;
             predictionEstablished_ = false;

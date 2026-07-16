@@ -1368,10 +1368,16 @@ void MouseThread::moveMousePivot(
     const auto filtered = filter_target_position(
         stabilizedPivotX, stabilizedPivotY, effectiveObservationTime, useMotionTrend,
         maximumObservationGapSeconds);
+    // 100 ms快速追赶结束后，相机命令还需约一个命令到画面延迟才能完全反映在
+    // 检测坐标中。额外覆盖50 ms尾迹，避免把已知控制响应误判为目标高速或反向。
+    constexpr auto kQuickResumePredictionTail = std::chrono::milliseconds(50);
+    const bool preserveMatureDirectionDuringCatchUp = quickResumeCandidate ||
+        (quickResumeCatchUpUntil.time_since_epoch().count() != 0 &&
+         controlTime < quickResumeCatchUpUntil + kQuickResumePredictionTail);
     lastPredictionResult = targetPredictor.update(
         filtered.first, filtered.second, effectiveObservationTime,
         controlTime, screen_width, predictionSettings,
-        maximumObservationGapSeconds);
+        maximumObservationGapSeconds, preserveMatureDirectionDuringCatchUp);
     const double observedScreenAtObservationX = filtered.first - viewAtObservation.first;
     const double observedScreenAtObservationY = filtered.second - viewAtObservation.second;
     bool selfMotionArtifactDetected = false;

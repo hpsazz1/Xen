@@ -1071,11 +1071,11 @@ int main()
     for (std::string column; identityColumns.size() < 5 && std::getline(traceRowStream, column, ',');) {
         identityColumns.push_back(column);
     }
-    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "52",
+    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "53",
                "pipeline row carries the compiled controller revision");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r52") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r53") != std::string::npos,
                "ui build label includes controller revision");
 
     CommandCancellationEpoch cancellationEpoch;
@@ -1640,7 +1640,9 @@ int main()
                "oscillation horizontal corridor follows the central fifth of the box");
 
     TargetPredictor highSpeedPredictor;
+    TargetPredictor protectedHighSpeedPredictor;
     TargetPredictor::Result highSpeedPrediction{};
+    TargetPredictor::Result protectedHighSpeedPrediction{};
     bool observedModerateSpeedAcceleration = false;
     bool observedHighSpeedTransient = false;
     double highSpeedX = 100.0;
@@ -1649,6 +1651,9 @@ int main()
         const auto time = t0 + std::chrono::milliseconds(sample * 8);
         highSpeedX += 4.0;
         highSpeedPrediction = highSpeedPredictor.update(
+            highSpeedX, 100.0, time, time,
+            320.0, predictionSettings);
+        protectedHighSpeedPrediction = protectedHighSpeedPredictor.update(
             highSpeedX, 100.0, time, time,
             320.0, predictionSettings);
     }
@@ -1662,6 +1667,12 @@ int main()
         highSpeedPrediction = highSpeedPredictor.update(
             highSpeedX, 100.0, time, time,
             320.0, predictionSettings);
+        protectedHighSpeedPrediction = protectedHighSpeedPredictor.update(
+            highSpeedX, 100.0, time, time,
+            320.0, predictionSettings, 0.10, true);
+        expectTrue(!protectedHighSpeedPrediction.highSpeedSuppressed &&
+                       protectedHighSpeedPrediction.offsetX > 0.0,
+                   "bounded catch-up tail preserves mature lead through aligned acceleration");
         const double fittedSpeed = std::hypot(
             highSpeedPrediction.velocityX, highSpeedPrediction.velocityY);
         const double fittedAcceleration = std::hypot(
@@ -1689,6 +1700,37 @@ int main()
     }
     expectTrue(observedModerateSpeedAcceleration && observedHighSpeedTransient,
                "high-speed acceleration sequence enters the guarded transient envelope");
+
+    TargetPredictor unprotectedCatchUpArtifactPredictor;
+    TargetPredictor protectedCatchUpArtifactPredictor;
+    for (int sample = 0; sample < 40; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        const double x = 100.0 + sample * 4.0;
+        unprotectedCatchUpArtifactPredictor.update(
+            x, 100.0, time, time, 320.0, predictionSettings);
+        protectedCatchUpArtifactPredictor.update(
+            x, 100.0, time, time, 320.0, predictionSettings);
+    }
+    TargetPredictor::Result unprotectedCatchUpArtifact{};
+    TargetPredictor::Result protectedCatchUpArtifact{};
+    for (int sample = 0; sample < 3; ++sample)
+    {
+        const auto artifactTime =
+            t0 + std::chrono::milliseconds(320 + sample * 8);
+        const double artifactX = 220.0 - sample * 20.0;
+        unprotectedCatchUpArtifact = unprotectedCatchUpArtifactPredictor.update(
+            artifactX, 100.0, artifactTime, artifactTime,
+            320.0, predictionSettings);
+        protectedCatchUpArtifact = protectedCatchUpArtifactPredictor.update(
+            artifactX, 100.0, artifactTime, artifactTime,
+            320.0, predictionSettings, 0.10, true);
+    }
+    expectTrue(unprotectedCatchUpArtifact.offsetX == 0.0,
+               "unprotected contradictory regression withdraws the mature direction");
+    expectTrue(protectedCatchUpArtifact.offsetX > 0.0 &&
+                   protectedCatchUpArtifact.velocityX > 0.0,
+               "bounded catch-up tail rejects contradictory view-motion regression");
 
     TargetPredictor reversalPredictor;
     for (int sample = 0; sample < 10; ++sample)
