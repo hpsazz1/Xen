@@ -197,11 +197,14 @@ void mouseThreadFunction(MouseThread& mouseThread)
 
         }
 
-        // ---- 检测开镜状态变化，切换瞄准状态时重置目标 ----
+        // ---- 检测瞄准状态变化 ----
         const bool aimingNow = aiming.load();
         if (aimingNow != wasAiming)
         {
-            resetActiveTarget();
+            // 松开只暂停输出并保留短时同目标运动状态；重新按住时直接复用。
+            // 未瞄准期间跟踪器仍更新身份，目标丢失/切换会走完整resetTracking。
+            if (!aimingNow)
+                mouseThread.suspendAimingOutput();
             wasAiming = aimingNow;
         }
 

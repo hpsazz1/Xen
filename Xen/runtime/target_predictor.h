@@ -127,7 +127,8 @@ public:
                   std::chrono::steady_clock::time_point observationTime,
                   std::chrono::steady_clock::time_point controlTime,
                   double detectionSpan,
-                  const Settings& settings)
+                  const Settings& settings,
+                  double maxObservationGapSeconds = 0.10)
     {
         if (!settings.enabled || !std::isfinite(x) || !std::isfinite(y))
         {
@@ -148,7 +149,9 @@ public:
 
         const double dt = std::chrono::duration<double>(
             observationTime - previousObservationTime_).count();
-        if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.10)
+        const double maximumGap = std::clamp(
+            maxObservationGapSeconds, 0.10, 0.35);
+        if (!std::isfinite(dt) || dt <= 0.0 || dt > maximumGap)
         {
             reset();
             initialize(x, y, observationTime);
@@ -161,7 +164,8 @@ public:
         clampVector(sampleVelocityX, sampleVelocityY, span * 6.0);
 
         const bool reliableMotion = updateMotion(
-            x, y, observationTime, dt, span, settings);
+            x, y, observationTime, dt, span, settings,
+            maximumGap > 0.10);
         updateDirection(
             sampleVelocityX, sampleVelocityY, reliableMotion, span, observationTime);
         const bool oscillationSuppressed =
@@ -367,7 +371,8 @@ private:
     }
 
     bool updateMotion(double x, double y, TimePoint observationTime,
-                      double dt, double span, const Settings& settings)
+                      double dt, double span, const Settings& settings,
+                      bool allowSparseResume)
     {
         observations_.push_back({ x, y, observationTime });
 
@@ -387,6 +392,23 @@ private:
             observations_.back().time - observations_.front().time).count();
         if (observations_.size() < 4 || duration < 0.025)
         {
+            // 短暂松开后窗口内暂时只有“松开前末帧+恢复首帧”。若端点速度仍与
+            // 已成熟方向一致，保留最后可靠速度最多两个退化帧；后续四帧窗口会
+            // 很快接管。方向不一致、停止或普通稀疏输入仍走原有冷启动清零。
+            const double resumeVelocityX = (x - previousX_) / dt;
+            const double resumeVelocityY = (y - previousY_) / dt;
+            const double resumeSpeed = std::hypot(resumeVelocityX, resumeVelocityY);
+            const double resumeAlignment = resumeSpeed > 1e-9
+                ? (resumeVelocityX * directionX_ + resumeVelocityY * directionY_) /
+                    resumeSpeed
+                : -1.0;
+            const double activationSpeed = std::max(50.0, span * 0.20);
+            if (allowSparseResume && directionLocked_ && predictionEstablished_ &&
+                hasVelocity_ && resumeSpeed >= activationSpeed * 0.50 &&
+                resumeAlignment >= 0.50)
+            {
+                return false;
+            }
             velocityX_ = velocityY_ = 0.0;
             accelerationX_ = accelerationY_ = 0.0;
             hasVelocity_ = false;

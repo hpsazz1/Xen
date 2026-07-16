@@ -1071,11 +1071,11 @@ int main()
     for (std::string column; identityColumns.size() < 5 && std::getline(traceRowStream, column, ',');) {
         identityColumns.push_back(column);
     }
-    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "49",
+    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "50",
                "pipeline row carries the compiled controller revision");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r49") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r50") != std::string::npos,
                "ui build label includes controller revision");
 
     CommandCancellationEpoch cancellationEpoch;
@@ -1783,6 +1783,28 @@ int main()
                matureLeadPrediction.velocityX * matureLeadPrediction.leadSeconds *
                    predictionSettings.predictionStrength,
                0.01, "mature stable motion converges to the full constant-velocity lead");
+
+    const auto quickResumePrediction = matureLeadPredictor.update(
+        396.0, 100.0, t0 + std::chrono::milliseconds(592),
+        t0 + std::chrono::milliseconds(602), 320.0, predictionSettings, 0.35);
+    expectTrue(quickResumePrediction.directionLocked &&
+                   quickResumePrediction.offsetX > 0.0,
+               "short same-target aiming pause preserves mature forward prediction");
+
+    TargetPredictor expiredResumePredictor;
+    for (int sample = 0; sample < 50; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        expiredResumePredictor.update(
+            100.0 + sample * 4.0, 100.0, time, time,
+            320.0, predictionSettings);
+    }
+    const auto expiredResumePrediction = expiredResumePredictor.update(
+        500.0, 100.0, t0 + std::chrono::milliseconds(1200),
+        t0 + std::chrono::milliseconds(1210), 320.0, predictionSettings, 0.35);
+    expectTrue(!expiredResumePrediction.directionLocked &&
+                   expiredResumePrediction.offsetX == 0.0,
+               "long aiming pause expires old prediction state");
 
     TargetPredictor disabledPredictor;
     TargetPredictor::Settings disabledPredictionSettings = predictionSettings;

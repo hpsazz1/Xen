@@ -93,6 +93,8 @@ private:
     double legacyCountRemainderX = 0.0;
     double legacyCountRemainderY = 0.0;
     bool previousSelfMotionArtifact = false;
+    bool predictionResumePending = false;                         ///< 短暂松开后等待同目标快速恢复
+    std::chrono::steady_clock::time_point aimingOutputSuspendedAt{}; ///< 输出暂停起点，用于限制状态复用窗口
     struct PredictionObservationContext
     {
         double screenX = 0.0;
@@ -289,7 +291,8 @@ public:
         double target_x,
         double target_y,
         std::chrono::steady_clock::time_point observationTime = {},
-        bool useMotionTrend = false);
+        bool useMotionTrend = false,
+        double maxObservationGapSeconds = 0.10);
     /** @brief 执行鼠标移动（对目标） */
     void moveMouse(const AimbotTarget& target);
     /** @brief 按下鼠标（射击） */
@@ -298,6 +301,8 @@ public:
     void releaseMouse();
     /** @brief 重置基础跟踪与控制状态 */
     void resetTracking();
+    /** @brief 暂停瞄准输出但短时保留同一目标的滤波与预测状态 */
+    void suspendAimingOutput();
     /** @brief 检查目标是否在准星范围内 */
     bool check_target_in_scope(double target_x, double target_y,
         double target_w, double target_h, double reduction_factor);

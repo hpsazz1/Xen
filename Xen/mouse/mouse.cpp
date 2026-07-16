@@ -877,11 +877,13 @@ std::pair<double, double> MouseThread::getMotionCompensationAt(
 std::pair<double, double> MouseThread::filter_target_position(
     double target_x, double target_y,
     std::chrono::steady_clock::time_point observationTime,
-    bool useMotionTrend)
+    bool useMotionTrend,
+    double maxObservationGapSeconds)
 {
     lastFilterResult = targetFilter.update(
         target_x, target_y, observationTime,
-        frameIntervalSec(captureFps.load()), screen_width, useMotionTrend);
+        frameIntervalSec(captureFps.load()), screen_width, useMotionTrend,
+        maxObservationGapSeconds);
     return { lastFilterResult.x, lastFilterResult.y };
 }
 
@@ -1254,6 +1256,29 @@ void MouseThread::moveMousePivot(
     };
 
     const auto controlTime = std::chrono::steady_clock::now();
+    // 短暂松开期间跟踪器仍持续确认同一目标，但控制输出已暂停。若在350 ms内
+    // 重新按住，允许滤波和预测用跨暂停区间的真实观测继续估速；更长暂停仍按
+    // 冷启动处理，避免复用已经过时或可能被玩家手动转向污染的运动状态。
+    constexpr double kQuickResumeMaximumGapSeconds = 0.35;
+    double maximumObservationGapSeconds = 0.10;
+    if (predictionResumePending)
+    {
+        const double suspendedSeconds = std::chrono::duration<double>(
+            controlTime - aimingOutputSuspendedAt).count();
+        if (std::isfinite(suspendedSeconds) && suspendedSeconds >= 0.0 &&
+            suspendedSeconds <= kQuickResumeMaximumGapSeconds)
+        {
+            maximumObservationGapSeconds = kQuickResumeMaximumGapSeconds;
+        }
+        else
+        {
+            targetFilter.reset();
+            targetPredictor.reset();
+            lastFilterResult = {};
+            lastPredictionResult = {};
+        }
+        predictionResumePending = false;
+    }
     const auto effectiveObservationTime = observationTime.time_since_epoch().count() == 0
         ? controlTime : observationTime;
     frameTiming.observationTime = effectiveObservationTime;
@@ -1338,10 +1363,12 @@ void MouseThread::moveMousePivot(
         std::abs(lastPredictionResult.offsetX) +
         std::abs(lastPredictionResult.offsetY) > 1e-6;
     const auto filtered = filter_target_position(
-        stabilizedPivotX, stabilizedPivotY, effectiveObservationTime, useMotionTrend);
+        stabilizedPivotX, stabilizedPivotY, effectiveObservationTime, useMotionTrend,
+        maximumObservationGapSeconds);
     lastPredictionResult = targetPredictor.update(
         filtered.first, filtered.second, effectiveObservationTime,
-        controlTime, screen_width, predictionSettings);
+        controlTime, screen_width, predictionSettings,
+        maximumObservationGapSeconds);
     const double observedScreenAtObservationX = filtered.first - viewAtObservation.first;
     const double observedScreenAtObservationY = filtered.second - viewAtObservation.second;
     bool selfMotionArtifactDetected = false;
@@ -2088,9 +2115,35 @@ void MouseThread::resetTracking()
     legacyCountRemainderX = 0.0;
     legacyCountRemainderY = 0.0;
     previousSelfMotionArtifact = false;
+    predictionResumePending = false;
+    aimingOutputSuspendedAt = {};
     predictionObservationHistory.clear();
     target_detected.store(false);
     // 目标切换时重置确认帧计数，避免新目标跳过确认延迟
+    stableFrameCount = 0;
+    fireScheduled = false;
+    holdScheduled = false;
+}
+
+/**
+ * suspendAimingOutput
+ *
+ * 松开瞄准时立即撤销设备输出和控制器余量，但保留同一跟踪ID的滤波、预测方向
+ * 与成熟提前量。检测线程在未瞄准期间仍会维护目标身份；若目标切换、丢失或暂停
+ * 超过350 ms，完整resetTracking路径或恢复超时会清除此状态。
+ */
+void MouseThread::suspendAimingOutput()
+{
+    clearQueuedMoves();
+    aimController.reset();
+    aimPipelineRuntime.reset();
+    controlIntervalTracker.reset();
+    legacyCountRemainderX = 0.0;
+    legacyCountRemainderY = 0.0;
+    previousSelfMotionArtifact = false;
+    predictionObservationHistory.clear();
+    predictionResumePending = true;
+    aimingOutputSuspendedAt = std::chrono::steady_clock::now();
     stableFrameCount = 0;
     fireScheduled = false;
     holdScheduled = false;

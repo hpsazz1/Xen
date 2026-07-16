@@ -26,7 +26,8 @@ public:
                   std::chrono::steady_clock::time_point observationTime,
                   double fallbackFrameSeconds,
                   double screenWidth,
-                  bool useMotionTrend = false)
+                  bool useMotionTrend = false,
+                  double maxObservationGapSeconds = 0.10)
     {
         if (!std::isfinite(x) || !std::isfinite(y))
             return { filteredX_, filteredY_, 0.0, 0.0, 0.0,
@@ -45,7 +46,9 @@ public:
         double dt = std::chrono::duration<double>(observationTime - previousTime_).count();
         if (!std::isfinite(dt) || dt <= 0.0)
             dt = fallbackFrameSeconds;
-        dt = std::clamp(dt, 1.0 / 500.0, 0.10);
+        dt = std::clamp(
+            dt, 1.0 / 500.0,
+            std::clamp(maxObservationGapSeconds, 0.10, 0.35));
 
         const double rawDx = x - previousRawX_;
         const double rawDy = y - previousRawY_;
