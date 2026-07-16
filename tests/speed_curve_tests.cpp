@@ -1066,7 +1066,7 @@ int main()
                "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r42") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r43") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -1076,7 +1076,7 @@ int main()
         traceHeader.find("ProfileCalibrationOverallConfidence") != std::string::npos,
         "basic pipeline reports passive profile calibration diagnostics");
     expectTrue(traceHeader.find(
-        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictedX,PredictedY") != std::string::npos,
+        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictionStationarySuppressed,PredictedX,PredictedY") != std::string::npos,
         "basic pipeline reports prediction diagnostics");
     traceFile.close();
     std::remove(tracePath);
@@ -1367,7 +1367,7 @@ int main()
     sustainedMotionPredictor.applySelfMotionSuppression(sustainedPrediction, true);
     expectTrue(!sustainedPrediction.selfMotionSuppressed && sustainedPrediction.offsetX > 0.0,
                "sustained target motion is exempt from self-motion artifact suppression");
-    for (int sample = 16; sample < 20; ++sample)
+    for (int sample = 16; sample < 24; ++sample)
     {
         const auto time = t0 + std::chrono::milliseconds(sample * 8);
         sustainedPrediction = sustainedMotionPredictor.update(
@@ -1575,11 +1575,44 @@ int main()
         320.0, predictionSettings);
     expectTrue(firstStationaryPrediction.offsetX < 0.0,
                "single stationary observation does not interrupt an established lead");
-    const auto confirmedStopPrediction = reversalPredictor.update(
+    const auto shortStationaryPrediction = reversalPredictor.update(
         68.0, 100.0, t0 + std::chrono::milliseconds(192), t0 + std::chrono::milliseconds(192),
         320.0, predictionSettings);
-    expectTrue(confirmedStopPrediction.x == 68.0,
-               "two stationary observations withdraw the prediction lead");
+    expectTrue(shortStationaryPrediction.offsetX < 0.0 &&
+               !shortStationaryPrediction.stationarySuppressed,
+               "sub-thirty-millisecond detection plateaus preserve an established lead");
+    const auto confirmedStopPrediction = reversalPredictor.update(
+        68.0, 100.0, t0 + std::chrono::milliseconds(216), t0 + std::chrono::milliseconds(216),
+        320.0, predictionSettings);
+    expectTrue(confirmedStopPrediction.x == 68.0 &&
+               confirmedStopPrediction.stationarySuppressed,
+               "thirty milliseconds of continuous low speed withdraws prediction lead");
+
+    TargetPredictor quantizedPlateauPredictor;
+    TargetPredictor::Result plateauPrediction{};
+    for (int sample = 0; sample < 20; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(sample * 8);
+        plateauPrediction = quantizedPlateauPredictor.update(
+            100.0 + sample * 4.0, 100.0, time, time,
+            320.0, predictionSettings);
+    }
+    const double plateauX = 100.0 + 19.0 * 4.0;
+    for (int sample = 1; sample <= 3; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds((19 + sample) * 8);
+        plateauPrediction = quantizedPlateauPredictor.update(
+            plateauX, 100.0, time, time, 320.0, predictionSettings);
+        expectTrue(plateauPrediction.offsetX > 0.0 &&
+                   !plateauPrediction.stationarySuppressed,
+                   "short quantized plateaus cannot pulse a mature prediction lead");
+    }
+    plateauPrediction = quantizedPlateauPredictor.update(
+        plateauX + 4.0, 100.0, t0 + std::chrono::milliseconds(184),
+        t0 + std::chrono::milliseconds(184), 320.0, predictionSettings);
+    expectTrue(plateauPrediction.offsetX > 0.0 &&
+               !plateauPrediction.stationarySuppressed,
+               "motion resumption clears partial stationary evidence without rearming lead");
 
     TargetPredictor matureLeadPredictor;
     TargetPredictor::Result matureLeadPrediction{};

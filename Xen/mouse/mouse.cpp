@@ -1493,6 +1493,8 @@ void MouseThread::moveMousePivot(
             lastPredictionResult.oscillationSuppressed;
         pf->predictionHighSpeedSuppressed =
             lastPredictionResult.highSpeedSuppressed;
+        pf->predictionStationarySuppressed =
+            lastPredictionResult.stationarySuppressed;
         pf->predictedX = lastPredictionResult.x;
         pf->predictedY = lastPredictionResult.y;
         pf->errorX = errorX;

@@ -34,6 +34,7 @@ public:
         bool selfMotionSuppressed = false;
         bool oscillationSuppressed = false; // 高频往返模式仅关闭提前量，基础跟踪保持生效
         bool highSpeedSuppressed = false; // 超出已验证常速度范围时撤销不可信外推
+        bool stationarySuppressed = false; // 连续低速达到停止确认时间后撤销提前量
     };
 
     // 静止目标被程序拉向中心时，补偿残差可能表现为“预测速度继续向误差外侧”。
@@ -220,6 +221,7 @@ public:
             };
             result.oscillationSuppressed = oscillationSuppressed;
             result.highSpeedSuppressed = highSpeedSuppressed;
+            result.stationarySuppressed = stationarySuppressed_;
             return result;
         }
 
@@ -288,7 +290,8 @@ public:
         directionX_ = directionY_ = 0.0;
         pendingDirectionX_ = pendingDirectionY_ = 0.0;
         pendingDirectionSamples_ = 0;
-        stationarySamples_ = 0;
+        stationarySince_ = {};
+        stationarySuppressed_ = false;
         unreliableSamples_ = 0;
         reliableDirectionSamples_ = 0;
         selfMotionSuppressionFramesRemaining_ = 0;
@@ -340,7 +343,8 @@ private:
         directionX_ = directionY_ = 0.0;
         pendingDirectionX_ = pendingDirectionY_ = 0.0;
         pendingDirectionSamples_ = 0;
-        stationarySamples_ = 0;
+        stationarySince_ = {};
+        stationarySuppressed_ = false;
         unreliableSamples_ = 0;
         reliableDirectionSamples_ = 0;
         selfMotionRearmPending_ = true;
@@ -471,13 +475,23 @@ private:
 
         if (sampleSpeed < activationSpeed * 0.50)
         {
-            ++stationarySamples_;
             unreliableSamples_ = 0;
             pendingDirectionSamples_ = 0;
-            // 一帧低速常由检测框量化造成；连续两帧才撤销，第三帧才释放方向锁定。
-            if (!predictionEstablished_ || stationarySamples_ >= 2)
+            if (stationarySince_.time_since_epoch().count() == 0)
+                stationarySince_ = observationTime;
+            const double stationarySeconds = std::chrono::duration<double>(
+                observationTime - stationarySince_).count();
+            // r42实机持续左移时，检测量化与视角补偿会产生约20 ms的平台；稳健回归仍有
+            // 170~275 px/s同向速度，旧两帧门控却硬撤销提前量并触发重新释放。成熟运动改用
+            // 真实时间确认：短平台保持连续，连续低速30 ms仍立即撤销，50 ms后释放方向锁。
+            constexpr double kStationarySuppressionSeconds = 0.030;
+            constexpr double kStationaryUnlockSeconds = 0.050;
+            if (stationarySeconds >= kStationarySuppressionSeconds)
+            {
                 suppressPrediction_ = true;
-            if (stationarySamples_ >= 3)
+                stationarySuppressed_ = true;
+            }
+            if (stationarySeconds >= kStationaryUnlockSeconds)
             {
                 directionLocked_ = false;
                 predictionEstablished_ = false;
@@ -485,7 +499,8 @@ private:
             }
             return;
         }
-        stationarySamples_ = 0;
+        stationarySince_ = {};
+        stationarySuppressed_ = false;
 
         if (!reliableMotion)
         {
@@ -668,7 +683,8 @@ private:
     double pendingDirectionX_ = 0.0;
     double pendingDirectionY_ = 0.0;
     int pendingDirectionSamples_ = 0;
-    int stationarySamples_ = 0;
+    TimePoint stationarySince_{}; // 当前连续低速证据起点；使用真实时间避免帧率改变停止语义
+    bool stationarySuppressed_ = false; // 是否已达到30 ms停止确认并撤销提前量
     int unreliableSamples_ = 0;
     int reliableDirectionSamples_ = 0;
     int selfMotionSuppressionFramesRemaining_ = 0; // 自运动伪迹命中后的剩余抑制观测帧数
