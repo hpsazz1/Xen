@@ -112,7 +112,8 @@ capture_fps = 60
 | `minSpeedMultiplier` | `0.1` | 最小移动倍率。 |
 | `maxSpeedMultiplier` | `0.1` | 最大移动倍率。 |
 | `move_response_ms` | `120` | 五类NDI移动目标抗晃动基础响应时间，单位毫秒；较长响应降低误差穿越后的闭环反复修正。 |
-| `move_max_speed_cps` | `3200` | 五类NDI移动目标标准设备最大移动速度，单位 counts/s，范围30~4000；程序按相邻有效观测的真实间隔换算单帧预算，解除jump远距帧的1440 cps瓶颈。 |
+| `move_max_speed_cps` | `3200` | 五类NDI移动目标标准设备最大移动速度，单位 counts/s，范围30~4000；程序按相邻控制执行周期换算单帧预算。 |
+| `move_catch_up_max_speed_cps` | `4000` | jump高速严重落后的条件追赶绝对上限，范围为基础上限至4000 counts/s；仅在可靠高速瞬态、大水平误差且速度继续沿误差方向远离准星的最长120 ms窗口启用，设置为`move_max_speed_cps`即可关闭。 |
 | `move_integral_time_ms` | `500` | 五类NDI移动目标抗晃动PI积分时间，单位毫秒；0为关闭，非零最小50 ms。较长窗口降低积分累积斜率，保留匀速稳态误差消除能力；反向误差达到稳定半径后清除对应轴旧积分。 |
 | `aim_pipeline_mode` | `legacy` | 新旧链路迁移模式。`legacy`只运行r37；`shadow`在同一帧记录新链路独立状态但不向设备队列写命令；P0-0至P0-5请求`active`会保留请求值并安全降级为`shadow`。 |
 | `aim_motion_compensation_delay_ms` | `12` | 正式自运动补偿的命令到画面响应中心，单位毫秒，范围0~250。 |
@@ -134,7 +135,7 @@ capture_fps = 60
 | `trajectory_max_velocity_cps` | `1440` | 二维轨迹速度向量上限，范围30~4000 counts/s。 |
 | `trajectory_max_acceleration_cps2` | `60000` | 二维轨迹加速度向量上限，范围1000~1000000 counts/s²。 |
 | `trajectory_max_jerk_cps3` | `4000000` | 二维轨迹jerk向量上限，范围10000~100000000 counts/s³。 |
-| `auto_derive_tracker_params` | `true` | 按检测分辨率和实际捕获 FPS 自动推导目标跟踪参数；不会覆盖 `move_response_ms` 或 `move_max_speed_cps`。 |
+| `auto_derive_tracker_params` | `true` | 按检测分辨率和实际捕获 FPS 自动推导目标跟踪参数；不会覆盖 `move_response_ms`、`move_max_speed_cps`或`move_catch_up_max_speed_cps`。 |
 | `prediction_enabled` | `true` | 启用连续真实观测预测。关闭时预测器完全旁路，基础滤波位置直接进入控制器。 |
 | `prediction_lead_ms` | `50` | 在自动补偿观测年龄之外增加的常速度前瞻时间，范围0~100 ms。 |
 | `prediction_velocity_tau_ms` | `50` | 兼容旧配置键名，实际表示稳健速度回归窗口，范围40~120 ms；更小值提高变向响应，更大值增强抗检测抖动。 |

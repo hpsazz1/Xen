@@ -29,6 +29,7 @@ float prev_minSpeedMultiplier = config.minSpeedMultiplier;
 float prev_maxSpeedMultiplier = config.maxSpeedMultiplier;
 float prev_move_response_ms = config.move_response_ms;
 float prev_move_max_speed_cps = config.move_max_speed_cps;
+float prev_move_catch_up_max_speed_cps = config.move_catch_up_max_speed_cps;
 float prev_move_integral_time_ms = config.move_integral_time_ms;
 float prev_aim_shadow_response_ms = config.aim_shadow_response_ms;
 float prev_aim_shadow_max_speed_cps = config.aim_shadow_max_speed_cps;
@@ -240,10 +241,24 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayUI::SliderFloatRow("响应时间(ms)", &config.move_response_ms,
             20.0f, 300.0f, "%.0f", "##move_response",
             "越小越快，越大越柔和。该参数不随 FPS 改变含义，也不会被自动跟踪优化覆盖。");
-        OverlayUI::SliderFloatRow("最大设备速度", &config.move_max_speed_cps,
+        if (OverlayUI::SliderFloatRow("最大设备速度", &config.move_max_speed_cps,
             30.0f, 4000.0f, "%.0f counts/s", "##move_max_cps",
             "限制每秒发送的鼠标计数；按实际观测间隔换算单帧预算，不会被自动跟踪优化覆盖。\n"
-            "320裁剪的jump下一轮建议3200 counts/s，需同时复测普通移动与静止稳定。\n");
+            "320裁剪的jump基础标准为3200 counts/s，需同时复测普通移动与静止稳定。\n"))
+        {
+            config.move_catch_up_max_speed_cps = std::clamp(
+                config.move_catch_up_max_speed_cps, config.move_max_speed_cps, 4000.0f);
+            OverlayConfig_MarkDirty();
+        }
+        if (OverlayUI::SliderFloatRow("条件追赶速度", &config.move_catch_up_max_speed_cps,
+            config.move_max_speed_cps, 4000.0f, "%.0f counts/s", "##move_catch_up_max_cps",
+            "仅在水平误差大、可靠速度同向且预测器识别到高速瞬态时短时启用；\n"
+            "等于基础最大设备速度即可关闭，不影响普通移动和静止场景。"))
+        {
+            config.move_catch_up_max_speed_cps = std::clamp(
+                config.move_catch_up_max_speed_cps, config.move_max_speed_cps, 4000.0f);
+            OverlayConfig_MarkDirty();
+        }
         if (OverlayUI::SliderFloatRow("移动积分时间(ms)", &config.move_integral_time_ms,
             0.0f, 1000.0f, "%.0f", "##move_integral_time",
             "0为关闭，非零最小50 ms。用于消除匀速移动目标的固定滞后；时间越小积分越强，需同时验证静止稳定和方向反转。"))
@@ -952,6 +967,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_fovY != config.fovY ||
         prev_move_response_ms != config.move_response_ms ||
         prev_move_max_speed_cps != config.move_max_speed_cps ||
+        prev_move_catch_up_max_speed_cps != config.move_catch_up_max_speed_cps ||
         prev_move_integral_time_ms != config.move_integral_time_ms ||
         prev_aim_shadow_response_ms != config.aim_shadow_response_ms ||
         prev_aim_shadow_max_speed_cps != config.aim_shadow_max_speed_cps ||
@@ -989,6 +1005,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_fovY = config.fovY;
         prev_move_response_ms = config.move_response_ms;
         prev_move_max_speed_cps = config.move_max_speed_cps;
+        prev_move_catch_up_max_speed_cps = config.move_catch_up_max_speed_cps;
         prev_move_integral_time_ms = config.move_integral_time_ms;
         prev_aim_shadow_response_ms = config.aim_shadow_response_ms;
         prev_aim_shadow_max_speed_cps = config.aim_shadow_max_speed_cps;

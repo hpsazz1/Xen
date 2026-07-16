@@ -120,6 +120,7 @@ struct PipelineFrame
     double effectiveResponseSecondsY = 0.0; ///< 当前帧Y轴实际比例响应时间
     double integralTimeSeconds = 0.0;
     double maxCountsPerSecond = 0.0;
+    bool conditionalSpeedBudgetActive = false; ///< 是否正在使用高速大误差条件追赶预算
     double frameCountLimit = 0.0;
     double controllerUpdateIntervalMs = 0.0; ///< 相邻控制消费时刻间隔，不是观测采集间隔
     double errorMotion = 0.0;          ///< 相邻有效控制观测的二维误差变化，px/observation

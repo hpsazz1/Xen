@@ -1,4 +1,5 @@
 #include "runtime/basic_aim_controller.h"
+#include "runtime/conditional_speed_budget.h"
 #include "runtime/control_interval_tracker.h"
 #include "runtime/command_cancellation_epoch.h"
 #include "runtime/aim_pipeline_runtime.h"
@@ -75,6 +76,67 @@ void expectTrue(bool condition, const char* name)
 
 int main()
 {
+    // r57 条件预算只服务于 jump 的高速严重落后尾部：普通移动、反向、
+    // 自运动伪影或尚未锁定方向时都必须维持基础 3200 counts/s。
+    ConditionalSpeedBudget speedBudget;
+    ConditionalSpeedBudget::Settings speedBudgetSettings;
+    const auto speedBudgetBase = ConditionalSpeedBudget::TimePoint(
+        std::chrono::seconds(1));
+    auto budgetOutput = speedBudget.update(
+        59.0, 2000.0, true, true, false,
+        speedBudgetBase, speedBudgetSettings);
+    expectTrue(!budgetOutput.active && budgetOutput.maxCountsPerSecond == 3200.0,
+               "conditional speed budget rejects error below entry threshold");
+    budgetOutput = speedBudget.update(
+        70.0, -2000.0, true, true, false,
+        speedBudgetBase + std::chrono::milliseconds(1), speedBudgetSettings);
+    expectTrue(!budgetOutput.active,
+               "conditional speed budget rejects velocity moving toward the aim point");
+    budgetOutput = speedBudget.update(
+        70.0, 2000.0, true, true, true,
+        speedBudgetBase + std::chrono::milliseconds(2), speedBudgetSettings);
+    expectTrue(!budgetOutput.active,
+               "conditional speed budget rejects safety-suppressed prediction");
+    budgetOutput = speedBudget.update(
+        70.0, 2000.0, true, true, false,
+        speedBudgetBase + std::chrono::milliseconds(3), speedBudgetSettings);
+    expectTrue(budgetOutput.active && budgetOutput.entered &&
+               budgetOutput.maxCountsPerSecond == 4000.0,
+               "conditional speed budget enters on reliable high-speed severe lag");
+    budgetOutput = speedBudget.update(
+        40.0, 900.0, false, true, false,
+        speedBudgetBase + std::chrono::milliseconds(60), speedBudgetSettings);
+    expectTrue(budgetOutput.active && !budgetOutput.entered,
+               "conditional speed budget uses exit hysteresis after transient evidence clears");
+    budgetOutput = speedBudget.update(
+        32.0, 900.0, false, true, false,
+        speedBudgetBase + std::chrono::milliseconds(70), speedBudgetSettings);
+    expectTrue(!budgetOutput.active && budgetOutput.exited &&
+               budgetOutput.maxCountsPerSecond == 3200.0,
+               "conditional speed budget exits when lag reaches the recovery boundary");
+    budgetOutput = speedBudget.update(
+        80.0, 2200.0, true, true, false,
+        speedBudgetBase + std::chrono::milliseconds(100), speedBudgetSettings);
+    expectTrue(!budgetOutput.active,
+               "conditional speed budget blocks immediate re-entry during cooldown");
+    budgetOutput = speedBudget.update(
+        80.0, 2200.0, true, true, false,
+        speedBudgetBase + std::chrono::milliseconds(271), speedBudgetSettings);
+    expectTrue(budgetOutput.active,
+               "conditional speed budget can re-enter after cooldown");
+    budgetOutput = speedBudget.update(
+        80.0, 2200.0, false, true, false,
+        speedBudgetBase + std::chrono::milliseconds(391), speedBudgetSettings);
+    expectTrue(!budgetOutput.active && budgetOutput.exited,
+               "conditional speed budget enforces the maximum active window");
+    speedBudget.reset();
+    speedBudgetSettings.catchUpMaxCountsPerSecond = 3200.0;
+    budgetOutput = speedBudget.update(
+        90.0, 2500.0, true, true, false,
+        speedBudgetBase + std::chrono::seconds(1), speedBudgetSettings);
+    expectTrue(!budgetOutput.active && budgetOutput.maxCountsPerSecond == 3200.0,
+               "conditional speed budget is disabled when catch-up cap equals base cap");
+
     const auto timingBase = FrameTiming::Clock::time_point(std::chrono::seconds(10));
     TimedFakeCapture fakeCapture(timingBase);
     CapturedFrame captured = fakeCapture.GetNextFrameTimed();
@@ -1089,7 +1151,7 @@ int main()
                    cancellationEpoch.isCurrent(secondEpoch),
                "cancelling device commands invalidates popped old-generation work");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
-               traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds,MaxCountsPerSecond,FrameCountLimit,ControllerUpdateIntervalMs") != std::string::npos,
+               traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds,MaxCountsPerSecond,ConditionalSpeedBudgetActive,FrameCountLimit,ControllerUpdateIntervalMs") != std::string::npos,
                "basic pipeline reports moving-target integral diagnostics");
     expectTrue(traceHeader.find(
         "ProfileCalibrationEnabled,ProfileCalibrationValidX,ProfileCalibrationValidY") != std::string::npos &&

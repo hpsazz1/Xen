@@ -218,7 +218,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "ProfileCalibrationRmseX,ProfileCalibrationRmseY,ProfileCalibrationCorrelationX,ProfileCalibrationCorrelationY,"
          << "ProfileCalibrationConfidenceX,ProfileCalibrationConfidenceY,ProfileCalibrationSamplesX,ProfileCalibrationSamplesY,"
          << "ProfileCalibrationActiveSamplesX,ProfileCalibrationActiveSamplesY,ProfileCalibrationOverallConfidence,"
-         << "ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds,MaxCountsPerSecond,FrameCountLimit,ControllerUpdateIntervalMs,"
+         << "ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds,MaxCountsPerSecond,ConditionalSpeedBudgetActive,FrameCountLimit,ControllerUpdateIntervalMs,"
          << "ErrorMotion,ErrorMotionX,ErrorMotionY,SettleMotionThreshold,MovingInsideSettle,MovingInsideSettleX,MovingInsideSettleY,HorizontalCatchUp,VerticalCatchUp,SpeedLimited,Settled,SettledX,SettledY,QueuedMoveCount\n";
 
     for (const auto& f : frames)
@@ -411,6 +411,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.effectiveResponseSecondsY << ','
              << f.integralTimeSeconds << ','
              << f.maxCountsPerSecond << ','
+             << (f.conditionalSpeedBudgetActive ? '1' : '0') << ','
              << f.frameCountLimit << ','
              << f.controllerUpdateIntervalMs << ','
              << f.errorMotion << ',' << f.errorMotionX << ',' << f.errorMotionY << ','

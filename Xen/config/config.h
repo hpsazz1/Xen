@@ -72,6 +72,7 @@ public:
     // 基础移动控制（当前主链路）。旧速度倍率仅用于配置迁移，不再参与运行。
     float move_response_ms;            // 误差响应时间，毫秒
     float move_max_speed_cps;          // 设备最大速度，counts/sec
+    float move_catch_up_max_speed_cps; // jump 严重落后时的条件追赶速度上限；等于基础上限时关闭
     float move_integral_time_ms;        // 移动目标积分时间，毫秒；0 表示关闭
     float aim_motion_compensation_delay_ms = 12.0f; // 正式自运动补偿的命令到画面延迟
     float aim_motion_compensation_response_ms = 0.0f; // 0为固定延迟；连续响应仅保留实验配置

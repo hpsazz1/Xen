@@ -49,6 +49,7 @@ int main()
     config.auto_derive_tracker_params = true;
     config.move_response_ms = 73.0f;
     config.move_max_speed_cps = 1337.0f;
+    config.move_catch_up_max_speed_cps = 3555.0f;
     config.move_integral_time_ms = 333.0f;
 
     config.applyAutoDerivedTrackerParams(320, 240);
@@ -56,6 +57,8 @@ int main()
                "auto derive preserves configured response time");
     expectNear(config.move_max_speed_cps, 1337.0, 0.0,
                "auto derive preserves configured maximum speed");
+    expectNear(config.move_catch_up_max_speed_cps, 3555.0, 0.0,
+               "auto derive preserves configured conditional catch-up speed");
     expectNear(config.move_integral_time_ms, 333.0, 0.0,
                "auto derive preserves configured moving integral time");
     expectNear(config.ml_termination_frames, 30.0, 0.0,
@@ -69,6 +72,8 @@ int main()
                "runtime re-derive preserves configured response time");
     expectNear(config.move_max_speed_cps, 1337.0, 0.0,
                "runtime re-derive preserves configured maximum speed");
+    expectNear(config.move_catch_up_max_speed_cps, 3555.0, 0.0,
+               "runtime re-derive preserves configured conditional catch-up speed");
     expectNear(config.move_integral_time_ms, 333.0, 0.0,
                "runtime re-derive preserves configured moving integral time");
     expectNear(config.ml_termination_frames, 62.0, 0.0,
@@ -98,6 +103,8 @@ int main()
         expectNear(defaults.detection_resolution, 320.0, 0.0, "default detection resolution");
         expectNear(defaults.move_max_speed_cps, 3200.0, 0.0,
                    "default maximum speed follows moving-target standard");
+        expectNear(defaults.move_catch_up_max_speed_cps, 4000.0, 0.0,
+                   "default conditional catch-up speed uses the measured device ceiling");
         expectNear(defaults.move_integral_time_ms, 500.0, 0.0,
                    "moving integral uses the anti-oscillation accumulation window");
         expectNear(defaults.aim_motion_compensation_delay_ms, 12.0, 0.0,
@@ -386,6 +393,30 @@ int main()
     expectNear(clampedSpeed.move_max_speed_cps, 4000.0, 0.0,
                "movement speed remains bounded by the documented safety maximum");
     std::filesystem::remove(speedLimitPath, removeError);
+
+    const std::filesystem::path catchUpLimitPath =
+        "xen_config_catch_up_speed_limit_test.ini";
+    {
+        std::ofstream catchUpLimitFile(catchUpLimitPath);
+        catchUpLimitFile << "move_max_speed_cps = 3600\n"
+                         << "move_catch_up_max_speed_cps = 2000\n";
+    }
+    Config clampedCatchUpLow{};
+    expectTrue(clampedCatchUpLow.loadConfig(catchUpLimitPath.string()),
+               "conditional catch-up speed config loads successfully");
+    expectNear(clampedCatchUpLow.move_catch_up_max_speed_cps, 3600.0, 0.0,
+               "conditional catch-up speed cannot fall below the base limit");
+    {
+        std::ofstream catchUpLimitFile(catchUpLimitPath);
+        catchUpLimitFile << "move_max_speed_cps = 3200\n"
+                         << "move_catch_up_max_speed_cps = 5000\n";
+    }
+    Config clampedCatchUpHigh{};
+    expectTrue(clampedCatchUpHigh.loadConfig(catchUpLimitPath.string()),
+               "oversized conditional catch-up speed config loads successfully");
+    expectNear(clampedCatchUpHigh.move_catch_up_max_speed_cps, 4000.0, 0.0,
+               "conditional catch-up speed remains bounded by the device safety maximum");
+    std::filesystem::remove(catchUpLimitPath, removeError);
 
     if (failures != 0)
     {

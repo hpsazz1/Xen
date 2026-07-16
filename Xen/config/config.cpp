@@ -133,6 +133,7 @@ bool Config::loadConfig(const std::string& filename)
         maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
         move_response_ms = 120.0f;                       // 五类NDI抗晃动响应时间（毫秒）
         move_max_speed_cps = 3200.0f;                    // 五类NDI移动目标标准，解除jump远距帧限速
+        move_catch_up_max_speed_cps = 4000.0f;           // 仅高速大误差短窗口启用，普通场景仍保持3200
         move_integral_time_ms = 500.0f;                  // 五类NDI移动目标抗晃动标准，降低积分累积斜率
         aim_motion_compensation_delay_ms = 12.0f;        // 六轮NDI实测命令到画面生效延迟
         aim_motion_compensation_response_ms = 0.0f;      // r45实测无收益，正式回退固定延迟
@@ -558,6 +559,8 @@ bool Config::loadConfig(const std::string& filename)
     maxSpeedMultiplier = (float)get_double("maxSpeedMultiplier", 0.1);
     move_response_ms = (float)get_double("move_response_ms", 120.0);
     move_max_speed_cps = (float)get_double("move_max_speed_cps", 3200.0);
+    move_catch_up_max_speed_cps = (float)get_double(
+        "move_catch_up_max_speed_cps", 4000.0);
     move_integral_time_ms = (float)get_double("move_integral_time_ms", 500.0);
     aim_motion_compensation_delay_ms = (float)get_double(
         "aim_motion_compensation_delay_ms", 12.0);
@@ -778,6 +781,8 @@ bool Config::loadConfig(const std::string& filename)
     // === 基础移动参数范围校验 ===
     move_response_ms = std::clamp(move_response_ms, 20.0f, 300.0f);
     move_max_speed_cps = std::clamp(move_max_speed_cps, 30.0f, 4000.0f);
+    move_catch_up_max_speed_cps = std::clamp(
+        move_catch_up_max_speed_cps, move_max_speed_cps, 4000.0f);
     move_integral_time_ms = std::clamp(move_integral_time_ms, 0.0f, 1000.0f);
     if (move_integral_time_ms > 0.0f && move_integral_time_ms < 50.0f)
         move_integral_time_ms = 50.0f;
@@ -939,6 +944,7 @@ bool Config::saveConfig(const std::string& filename)
         << "fovY = " << fovY << "\n"
         << "move_response_ms = " << move_response_ms << "\n"
         << "move_max_speed_cps = " << move_max_speed_cps << "\n"
+        << "move_catch_up_max_speed_cps = " << move_catch_up_max_speed_cps << "\n"
         << "move_integral_time_ms = " << move_integral_time_ms << "\n"
         << "aim_motion_compensation_delay_ms = " << aim_motion_compensation_delay_ms << "\n"
         << "aim_motion_compensation_response_ms = " << aim_motion_compensation_response_ms << "\n"

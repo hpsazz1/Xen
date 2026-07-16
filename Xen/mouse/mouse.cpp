@@ -75,6 +75,9 @@ MouseThread::MouseThread(
         std::lock_guard<std::mutex> lock(configMutex);
         move_response_seconds = static_cast<double>(config.move_response_ms) / 1000.0;
         move_max_speed_cps = static_cast<double>(config.move_max_speed_cps);
+        move_catch_up_max_speed_cps = std::clamp(
+            static_cast<double>(config.move_catch_up_max_speed_cps),
+            move_max_speed_cps, 4000.0);
         predictionSettings.enabled = config.prediction_enabled;
         predictionSettings.additionalLeadSeconds =
             static_cast<double>(config.prediction_lead_ms) / 1000.0;
@@ -147,6 +150,9 @@ void MouseThread::updateConfig(
         static_cast<double>(config.move_response_ms) / 1000.0, 0.020, 0.300);
     move_max_speed_cps = std::clamp(
         static_cast<double>(config.move_max_speed_cps), 30.0, 4000.0);
+    move_catch_up_max_speed_cps = std::clamp(
+        static_cast<double>(config.move_catch_up_max_speed_cps),
+        move_max_speed_cps, 4000.0);
     move_integral_time_seconds = std::clamp(
         static_cast<double>(config.move_integral_time_ms) / 1000.0, 0.0, 1.0);
     predictionSettings.enabled = config.prediction_enabled;
@@ -758,6 +764,9 @@ void MouseThread::refreshGameProfileCache()
         static_cast<double>(config.move_response_ms) / 1000.0, 0.020, 0.300);
     move_max_speed_cps = std::clamp(
         static_cast<double>(config.move_max_speed_cps), 30.0, 4000.0);
+    move_catch_up_max_speed_cps = std::clamp(
+        static_cast<double>(config.move_catch_up_max_speed_cps),
+        move_max_speed_cps, 4000.0);
     move_integral_time_seconds = std::clamp(
         static_cast<double>(config.move_integral_time_ms) / 1000.0, 0.0, 1.0);
 }
@@ -1475,10 +1484,35 @@ void MouseThread::moveMousePivot(
     {
         settings.responseSeconds = std::min(settings.responseSeconds, 0.080);
     }
-    settings.maxCountsPerSecond = move_max_speed_cps;
     settings.integralTimeSeconds = move_integral_time_seconds;
     settings.settleRadiusPixels = std::max(6.0, screen_width / 64.0);
     settings.releaseRadiusPixels = settings.settleRadiusPixels * 1.6;
+
+    // r56 的 3200/4000 全局 A/B 只在 3000~5000 px/s 区间达到 15.7% 收益，
+    // 同时放大了普通区间的输出步进。额外预算因此只允许由预测器已经判定的
+    // 高速高加速度瞬态触发，并要求目标继续沿当前水平误差方向远离准星。
+    // 阈值按 320 裁剪标定并随检测分辨率等比例缩放；退出阈值减半形成滞回，
+    // 120 ms 最长窗口与 200 ms 冷却避免检测尖峰反复开关高预算。
+    ConditionalSpeedBudget::Settings speedBudgetSettings;
+    speedBudgetSettings.baseMaxCountsPerSecond = move_max_speed_cps;
+    speedBudgetSettings.catchUpMaxCountsPerSecond = move_catch_up_max_speed_cps;
+    speedBudgetSettings.entryErrorPixels = std::max(60.0, screen_width * 0.1875);
+    speedBudgetSettings.exitErrorPixels = std::max(32.0, screen_width * 0.1000);
+    speedBudgetSettings.entryVelocityPixelsPerSecond =
+        std::max(1280.0, screen_width * 4.0);
+    speedBudgetSettings.exitVelocityPixelsPerSecond =
+        std::max(640.0, screen_width * 2.0);
+    const bool speedBudgetSafetySuppressed =
+        lastPredictionResult.selfMotionSuppressed ||
+        lastPredictionResult.oscillationSuppressed ||
+        lastPredictionResult.stationarySuppressed;
+    const auto speedBudgetOutput = conditionalSpeedBudget.update(
+        errorX, lastPredictionResult.velocityX,
+        lastPredictionResult.highSpeedSuppressed,
+        lastPredictionResult.directionLocked,
+        speedBudgetSafetySuppressed,
+        controlTime, speedBudgetSettings);
+    settings.maxCountsPerSecond = speedBudgetOutput.maxCountsPerSecond;
     // r51短恢复数据中，19~60 px原始积累误差没有触发设备限速，追到16 px内仍需
     // 62~95 ms；79~89 px样本已限速，继续全局提速只会增加饱和。仅在同向短恢复
     // 的100 ms窗口且预测误差仍大于两倍释放半径时，把基础响应从120 ms收紧到
@@ -1625,6 +1659,7 @@ void MouseThread::moveMousePivot(
         pf->effectiveResponseSecondsY = output.effectiveResponseSecondsY;
         pf->integralTimeSeconds = settings.integralTimeSeconds;
         pf->maxCountsPerSecond = settings.maxCountsPerSecond;
+        pf->conditionalSpeedBudgetActive = speedBudgetOutput.active;
         pf->frameCountLimit = output.frameCountLimit;
         pf->controllerUpdateIntervalMs =
             output.controllerUpdateIntervalSeconds * 1000.0;
@@ -2145,6 +2180,7 @@ void MouseThread::resetTracking()
     targetFilter.reset();
     targetPredictor.reset();
     aimController.reset();
+    conditionalSpeedBudget.reset();
     aimPipelineRuntime.reset();
     lastFilterResult = {};
     lastPredictionResult = {};
@@ -2174,6 +2210,7 @@ void MouseThread::suspendAimingOutput()
 {
     clearQueuedMoves();
     aimController.reset();
+    conditionalSpeedBudget.reset();
     aimPipelineRuntime.reset();
     controlIntervalTracker.reset();
     legacyCountRemainderX = 0.0;

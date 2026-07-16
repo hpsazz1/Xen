@@ -23,6 +23,7 @@
 #include "AimbotTarget.h"
 #include "MouseInput.h"
 #include "runtime/basic_aim_controller.h"
+#include "runtime/conditional_speed_budget.h"
 #include "runtime/control_interval_tracker.h"
 #include "runtime/command_cancellation_epoch.h"
 #include "runtime/basic_target_filter.h"
@@ -49,6 +50,7 @@ private:
     double max_distance;             ///< 最大瞄准距离（像素）
     double move_response_seconds = 0.080; ///< 基础控制响应时间
     double move_max_speed_cps = 1440.0;   ///< 设备最大速度（counts/sec）；四链路九宫格复测后按真实观测 dt 动态换算单帧预算
+    double move_catch_up_max_speed_cps = 4000.0; ///< jump 高速大误差时的短时条件上限
     double move_integral_time_seconds = 0.0; ///< 匀速移动目标积分时间；0 表示关闭实验性 PI 补偿
     double center_x;                 ///< 屏幕中心 X
     double center_y;                 ///< 屏幕中心 Y
@@ -81,6 +83,7 @@ private:
     BasicTargetFilter targetFilter;                                ///< 基础观测滤波（不做未来预测）
     TargetPredictor targetPredictor;                               ///< 仅连续真实观测生效的前瞻预测器
     BasicAimController aimController;                              ///< 帧率无关的基础误差控制器
+    ConditionalSpeedBudget conditionalSpeedBudget;                 ///< jump 严重落后时的短时速度预算状态机
     AimPipelineRuntime aimPipelineRuntime;                         ///< P0并行影子链；不持有或访问设备队列
     AppliedViewMotionModel appliedViewMotionModel;                 ///< 成功counts按固定延迟生效的角度影子模型
     BasicTargetFilter::Result lastFilterResult{};                  ///< 流水线诊断快照
