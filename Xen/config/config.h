@@ -90,6 +90,10 @@ public:
     float aim_shadow_integral_zone_deg = 1.0f;           // 仅在该角误差范围内积分
     float aim_shadow_lead_horizon_ms = 0.0f;             // 独立经验提前时域；默认关闭
     float aim_shadow_lead_strength = 0.0f;               // 独立经验提前强度；默认关闭
+    std::string aim_shadow_estimator_mode = "kalman";   // kalman或DML影子机动常加速度候选
+    float aim_shadow_ca_jerk_std_dps3 = 8000.0f;         // 常加速度模型白jerk标准差
+    float aim_shadow_maneuver_rate_threshold_dps = 12.0f;// 二维LOS速率进入阈值
+    float aim_shadow_maneuver_hold_ms = 120.0f;          // 低于阈值后的模型保持时间
     std::string trajectory_shaper_mode = "off";          // off透传，trapezoid确定性约束
     float trajectory_output_hz = 240.0f;                 // 固定整形输出周期
     float trajectory_max_velocity_cps = 1440.0f;

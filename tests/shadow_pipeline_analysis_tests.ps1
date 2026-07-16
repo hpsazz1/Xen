@@ -44,6 +44,41 @@ try {
     Assert-Equal 0 $metrics[-1].PausedCommandViolations 'Paused rows must not reach device commands.'
     Assert-Equal 0 $metrics[-1].PauseContinuityViolations 'Pause boundaries must keep observation sequence continuous.'
 
+    $candidateRoot = Join-Path $temporaryRoot 'maneuver-candidate'
+    New-Item -ItemType Directory -Path $candidateRoot | Out-Null
+    $candidateHeader = $header + ',AimPipelineEstimatorMode,AimPipelineManeuverModelActive,AimPipelineEstimatorSelectionChanged,AimPipelineEstimatorSelectionCount,AimPipelineCaJerkStdDps3,AimPipelineManeuverRateThresholdDps,AimPipelineManeuverHoldMs,AimPipelineManeuverHoldRemainingMs,AimPipelineModelAngleDeltaDeg,AimPipelineModelRateDeltaDps,AimPipelineBaselineCovarianceX,AimPipelineBaselineCovarianceY,AimPipelineCaCovarianceX,AimPipelineCaCovarianceY'
+    $inactiveSuffix = ',maneuver_gated_ca,0,0,0,8000,12,120,0,0.1,1,0.02,0.03,0.02,0.03'
+    $activationSuffix = ',maneuver_gated_ca,1,1,1,8000,12,120,120,0.1,1,0.02,0.03,0.02,0.03'
+    $activeSuffix = ',maneuver_gated_ca,1,0,1,8000,12,120,120,0.1,1,0.02,0.03,0.02,0.03'
+    foreach ($scenario in @('static', 'horizontal_left', 'horizontal_right', 'horizontal_reverse', 'horizontal_jump')) {
+        $moving = $scenario -match 'reverse|jump'
+        @(
+            $candidateHeader,
+            ($activeRow + $inactiveSuffix),
+            ($pausedRow + $(if ($moving) { $activationSuffix } else { $inactiveSuffix })),
+            ($resumedRow + $(if ($moving) { $activeSuffix } else { $inactiveSuffix }))
+        ) | Set-Content -LiteralPath (Join-Path $candidateRoot "$scenario.csv") -Encoding UTF8
+    }
+    $candidateMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `
+        -DataRoot $candidateRoot -MinEstimateSamples 3 -ExpectedBuildRevision test-revision `
+        -ExpectedControllerRevision 59 -RequireStandardScenarios -RequireManeuverCandidate -PassThru)
+    Assert-Equal PASS $candidateMetrics[-1].Status 'Valid maneuver shadow data must pass.'
+    Assert-Equal 4 $candidateMetrics[-1].ManeuverActiveSamples `
+        'Jump and reverse maneuver activation samples must be counted.'
+
+    $unsafeStaticRow = $pausedRow + $activationSuffix
+    @($candidateHeader, ($activeRow + $inactiveSuffix), $unsafeStaticRow,
+        ($resumedRow + $activeSuffix)) |
+        Set-Content -LiteralPath (Join-Path $candidateRoot 'static.csv') -Encoding UTF8
+    $staticActivationFailed = $false
+    try {
+        & (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `
+            -DataRoot $candidateRoot -MinEstimateSamples 3 -ExpectedBuildRevision test-revision `
+            -ExpectedControllerRevision 59 -RequireStandardScenarios -RequireManeuverCandidate | Out-Null
+    }
+    catch { $staticActivationFailed = $true }
+    Assert-Equal True $staticActivationFailed 'Static maneuver-model residency must fail validation.'
+
     $coverageFailed = $false
     try {
         & (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `

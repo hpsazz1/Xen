@@ -255,6 +255,9 @@ int main()
                "first relative LOS Kalman observation anchors the yaw angle");
     expectNear(kalmanFrame.estimate.angleY, -1.0, 1e-9,
                "first relative LOS Kalman observation anchors the pitch angle");
+    expectNear(kalmanFrame.estimate.angleX,
+               kalmanFrame.baselineEstimate.angleX, 0.0,
+               "default shadow estimator remains exactly equal to the frozen Kalman");
     expectTrue(kalmanFrame.control.valid &&
                kalmanFrame.control.feedbackX > 0.0 &&
                kalmanFrame.trajectoryRequest.requestedCountsX > 0.0 &&
@@ -318,6 +321,72 @@ int main()
     newPipeline.configure("invalid-mode");
     expectTrue(newPipeline.effectiveMode() == AimPipelineMode::Legacy,
                "invalid new pipeline mode falls back to legacy");
+
+    AimPipelineRuntime maneuverPipeline;
+    maneuverPipeline.configure("shadow");
+    ManeuverLosEstimator::Settings maneuverSettings;
+    maneuverSettings.mode =
+        ManeuverLosEstimatorMode::ManeuverGatedConstantAcceleration;
+    maneuverSettings.jerkStdDegreesPerSecond3 = 8000.0;
+    maneuverSettings.maneuverRateThresholdDegreesPerSecond = 1.0;
+    maneuverSettings.maneuverHoldSeconds = 0.120;
+    maneuverPipeline.configureEstimator(maneuverSettings);
+    AimObservation maneuverObservation = shadowObservation;
+    ViewMotionShadowDiagnostics maneuverDiagnostics = shadowDiagnostics;
+    for (int sample = 0; sample <= 20; ++sample)
+    {
+        maneuverObservation.timing.observationTime =
+            timingBase + std::chrono::seconds(1) +
+            std::chrono::milliseconds(sample * 10);
+        maneuverObservation.timing.controlTime =
+            maneuverObservation.timing.observationTime +
+            std::chrono::milliseconds(10);
+        maneuverDiagnostics.stabilizedLosYawDegrees = sample * 0.05;
+        maneuverDiagnostics.stabilizedLosPitchDownDegrees = 0.0;
+        maneuverPipeline.observe(maneuverObservation);
+        maneuverPipeline.setViewMotionDiagnostics(maneuverDiagnostics);
+    }
+    const auto activeManeuverFrame = maneuverPipeline.snapshot();
+    expectTrue(activeManeuverFrame.maneuverEstimator.maneuverModelActive &&
+                   activeManeuverFrame.maneuverEstimator.selectionCount == 1 &&
+                   activeManeuverFrame.baselineEstimate.valid &&
+                   activeManeuverFrame.constantAccelerationEstimate.valid &&
+                   activeManeuverFrame.commandSuppressed &&
+                   activeManeuverFrame.trajectoryOutput.commandSuppressed,
+               "DML maneuver candidate selects an auditable model without enabling output");
+    maneuverPipeline.suspendOutput();
+    maneuverObservation.outputPaused = true;
+    maneuverObservation.timing.observationTime += std::chrono::milliseconds(10);
+    maneuverObservation.timing.controlTime += std::chrono::milliseconds(10);
+    maneuverDiagnostics.stabilizedLosYawDegrees += 0.05;
+    maneuverPipeline.observe(maneuverObservation);
+    maneuverPipeline.setViewMotionDiagnostics(maneuverDiagnostics);
+    const auto pausedManeuverFrame = maneuverPipeline.snapshot();
+    expectTrue(pausedManeuverFrame.observation.outputPaused &&
+                   pausedManeuverFrame.maneuverEstimator.maneuverModelActive &&
+                   pausedManeuverFrame.maneuverEstimator.selectionCount == 1,
+               "output pause preserves maneuver estimator state and model selection");
+
+    AimPipelineRuntime staticManeuverPipeline;
+    staticManeuverPipeline.configure("shadow");
+    maneuverSettings.maneuverRateThresholdDegreesPerSecond = 12.0;
+    staticManeuverPipeline.configureEstimator(maneuverSettings);
+    for (int sample = 0; sample <= 20; ++sample)
+    {
+        maneuverObservation.outputPaused = false;
+        maneuverObservation.timing.observationTime =
+            timingBase + std::chrono::seconds(2) +
+            std::chrono::milliseconds(sample * 10);
+        maneuverObservation.timing.controlTime =
+            maneuverObservation.timing.observationTime +
+            std::chrono::milliseconds(10);
+        maneuverDiagnostics.stabilizedLosYawDegrees = 0.25;
+        staticManeuverPipeline.observe(maneuverObservation);
+        staticManeuverPipeline.setViewMotionDiagnostics(maneuverDiagnostics);
+    }
+    expectTrue(!staticManeuverPipeline.snapshot().maneuverEstimator.maneuverModelActive &&
+                   staticManeuverPipeline.snapshot().maneuverEstimator.selectionCount == 0,
+               "static shadow observations never enter the maneuver model");
 
     RelativeLosKalman constantVelocityKalman;
     const auto kalmanStart = timingBase + std::chrono::seconds(2);
@@ -1133,6 +1202,11 @@ int main()
         traceHeader.find("AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY") != std::string::npos &&
         traceHeader.find("AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence") != std::string::npos,
         "basic pipeline records relative LOS Kalman diagnostics");
+    expectTrue(traceHeader.find(
+        "AimPipelineEstimatorMode,AimPipelineManeuverModelActive,AimPipelineEstimatorSelectionChanged,AimPipelineEstimatorSelectionCount") != std::string::npos &&
+        traceHeader.find("AimPipelineBaselineAngleX,AimPipelineBaselineAngleY,AimPipelineBaselineRateX,AimPipelineBaselineRateY") != std::string::npos &&
+        traceHeader.find("AimPipelineCaAngleX,AimPipelineCaAngleY,AimPipelineCaRateX,AimPipelineCaRateY") != std::string::npos,
+        "basic pipeline records same-frame baseline, acceleration and model-selection diagnostics");
     expectTrue(traceHeader.find(
         "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples,AimPipelineLowSpeedReverseSuppressed,AimPipelineVerticalCatchUpActive,AimPipelineReverseConfirmationSeconds,AimPipelineEffectiveResponseSecondsY") != std::string::npos &&
         traceHeader.find("AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY") != std::string::npos &&

@@ -13,6 +13,7 @@ param(
     [switch]$RequireStandardScenarios,
     [switch]$RequirePausedObservations,
     [switch]$RequirePauseScenarioCoverage,
+    [switch]$RequireManeuverCandidate,
     [switch]$PassThru
 )
 
@@ -35,6 +36,13 @@ function Test-NearZero {
     param([object]$Value)
     if (-not (Test-FiniteNumber $Value)) { return $false }
     return [math]::Abs([Convert]::ToDouble($Value, [Globalization.CultureInfo]::InvariantCulture)) -le 1e-9
+}
+
+function Test-NearValue {
+    param([object]$Value, [double]$Expected, [double]$Tolerance = 1e-6)
+    if (-not (Test-FiniteNumber $Value)) { return $false }
+    $number = [Convert]::ToDouble($Value, [Globalization.CultureInfo]::InvariantCulture)
+    return [math]::Abs($number - $Expected) -le $Tolerance
 }
 
 $resolvedRoot = [IO.Path]::GetFullPath($DataRoot)
@@ -63,6 +71,17 @@ $requiredColumns = @(
     'CommandAppliedCountsX', 'CommandAppliedCountsY', 'QueuedMoveCount'
 )
 if ($RequirePauseScenarioCoverage) { $requiredColumns += 'ControlTimeNs' }
+if ($RequireManeuverCandidate) {
+    $requiredColumns += @(
+        'AimPipelineEstimatorMode', 'AimPipelineManeuverModelActive',
+        'AimPipelineEstimatorSelectionChanged', 'AimPipelineEstimatorSelectionCount',
+        'AimPipelineCaJerkStdDps3', 'AimPipelineManeuverRateThresholdDps',
+        'AimPipelineManeuverHoldMs', 'AimPipelineManeuverHoldRemainingMs',
+        'AimPipelineModelAngleDeltaDeg', 'AimPipelineModelRateDeltaDps',
+        'AimPipelineBaselineCovarianceX', 'AimPipelineBaselineCovarianceY',
+        'AimPipelineCaCovarianceX', 'AimPipelineCaCovarianceY'
+    )
+}
 if ($LongPauseMaxMs -le $ShortPauseMaxMs) {
     throw 'LongPauseMaxMs must be greater than ShortPauseMaxMs.'
 }
@@ -115,6 +134,45 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
         -not (Test-NearZero $_.AimPipelineIntegralCountsX) -or
         -not (Test-NearZero $_.AimPipelineIntegralCountsY)
     }).Count
+    $maneuverActiveRows = @()
+    $maneuverContractViolations = 0
+    $maneuverSelectionViolations = 0
+    if ($RequireManeuverCandidate) {
+        $maneuverActiveRows = @($estimateRows | Where-Object AimPipelineManeuverModelActive -eq '1')
+        $maneuverContractViolations = @($estimateRows | Where-Object {
+            $_.AimPipelineEstimatorMode -ne 'maneuver_gated_ca' -or
+            -not (Test-NearValue $_.AimPipelineCaJerkStdDps3 8000.0 0.01) -or
+            -not (Test-NearValue $_.AimPipelineManeuverRateThresholdDps 12.0 0.001) -or
+            -not (Test-NearValue $_.AimPipelineManeuverHoldMs 120.0 0.001) -or
+            -not (Test-FiniteNumber $_.AimPipelineManeuverHoldRemainingMs -NonNegative) -or
+            -not (Test-FiniteNumber $_.AimPipelineModelAngleDeltaDeg -NonNegative) -or
+            -not (Test-FiniteNumber $_.AimPipelineModelRateDeltaDps -NonNegative) -or
+            -not (Test-FiniteNumber $_.AimPipelineBaselineCovarianceX -Positive) -or
+            -not (Test-FiniteNumber $_.AimPipelineBaselineCovarianceY -Positive) -or
+            -not (Test-FiniteNumber $_.AimPipelineCaCovarianceX -Positive) -or
+            -not (Test-FiniteNumber $_.AimPipelineCaCovarianceY -Positive)
+        }).Count
+        if ($csvFile.BaseName.ToLowerInvariant() -match 'static' -and
+            $maneuverActiveRows.Count -gt 0) {
+            $maneuverContractViolations += $maneuverActiveRows.Count
+        }
+        for ($candidateIndex = 1; $candidateIndex -lt $estimateRows.Count; ++$candidateIndex) {
+            $previousCandidate = $estimateRows[$candidateIndex - 1]
+            $currentCandidate = $estimateRows[$candidateIndex]
+            $sameCandidateGeneration = $previousCandidate.AimPipelineResetGeneration -eq
+                $currentCandidate.AimPipelineResetGeneration
+            $sameCandidateTarget = $previousCandidate.AimPipelineTargetId -eq
+                $currentCandidate.AimPipelineTargetId
+            if (-not $sameCandidateGeneration -or -not $sameCandidateTarget) { continue }
+            $countDelta = [uint64]$currentCandidate.AimPipelineEstimatorSelectionCount -
+                [uint64]$previousCandidate.AimPipelineEstimatorSelectionCount
+            $reportedChange = $currentCandidate.AimPipelineEstimatorSelectionChanged -eq '1'
+            if (($reportedChange -and $countDelta -ne 1) -or
+                (-not $reportedChange -and $countDelta -ne 0)) {
+                ++$maneuverSelectionViolations
+            }
+        }
+    }
     $pausedRows = @($rows | Where-Object AimPipelineOutputPaused -eq '1')
     $pausedCommandViolations = @($pausedRows | Where-Object {
         -not (Test-NearZero $_.FinalMx) -or -not (Test-NearZero $_.FinalMy) -or
@@ -190,6 +248,8 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
     if ($pausedCommandViolations -gt 0) { $reasons.Add('paused device command contract violated') }
     if ($pauseContinuityViolations -gt 0) { $reasons.Add('paused observation sequence interrupted') }
     if ($pauseDurationViolations -gt 0) { $reasons.Add('paused duration timestamp invalid') }
+    if ($maneuverContractViolations -gt 0) { $reasons.Add('maneuver estimator contract violated') }
+    if ($maneuverSelectionViolations -gt 0) { $reasons.Add('maneuver model selection sequence violated') }
     $status = if ($reasons.Count -eq 0) { 'PASS' } else { 'FAIL' }
     $summaries.Add([pscustomobject]@{
         Level = 'File'
@@ -208,6 +268,9 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
         ShortPauseEvents = $shortPauseEvents
         LongPauseEvents = $longPauseEvents
         PauseDurationViolations = $pauseDurationViolations
+        ManeuverActiveSamples = $maneuverActiveRows.Count
+        ManeuverContractViolations = $maneuverContractViolations
+        ManeuverSelectionViolations = $maneuverSelectionViolations
         Status = $status
         Reason = ($reasons -join '; ')
     })
@@ -239,8 +302,21 @@ $pauseCoverageMissing = $RequirePauseScenarioCoverage -and (
     $leftLongPauseEvents -lt $MinLongPauseEventsPerDirection -or
     $rightShortPauseEvents -lt $MinShortPauseEventsPerDirection -or
     $rightLongPauseEvents -lt $MinLongPauseEventsPerDirection)
+$staticManeuverSamples = [int](($summaries | Where-Object {
+    $_.Source.ToLowerInvariant() -match 'static'
+} | Measure-Object ManeuverActiveSamples -Sum).Sum)
+$jumpManeuverSamples = [int](($summaries | Where-Object {
+    $_.Source.ToLowerInvariant() -match 'jump'
+} | Measure-Object ManeuverActiveSamples -Sum).Sum)
+$reverseManeuverSamples = [int](($summaries | Where-Object {
+    $_.Source.ToLowerInvariant() -match 'reverse'
+} | Measure-Object ManeuverActiveSamples -Sum).Sum)
+$maneuverCoverageMissing = $RequireManeuverCandidate -and (
+    $staticManeuverSamples -ne 0 -or $jumpManeuverSamples -eq 0 -or
+    $reverseManeuverSamples -eq 0)
 $overallFailed = $failed.Count -gt 0 -or $missingScenarios.Count -gt 0 -or
-    $buildRevisionCount -ne 1 -or $pausedObservationMissing -or $pauseCoverageMissing
+    $buildRevisionCount -ne 1 -or $pausedObservationMissing -or $pauseCoverageMissing -or
+    $maneuverCoverageMissing
 $overallReasons = [Collections.Generic.List[string]]::new()
 if ($failed.Count -gt 0) { $overallReasons.Add("$($failed.Count) file(s) failed") }
 if ($missingScenarios.Count -gt 0) { $overallReasons.Add("missing scenarios: $($missingScenarios -join ',')") }
@@ -254,6 +330,11 @@ if ($pauseCoverageMissing) {
         "left(short=$leftShortPauseEvents,long=$leftLongPauseEvents), " +
         "right(short=$rightShortPauseEvents,long=$rightLongPauseEvents), " +
         "required(short=$MinShortPauseEventsPerDirection,long=$MinLongPauseEventsPerDirection)")
+}
+if ($maneuverCoverageMissing) {
+    $overallReasons.Add(
+        "maneuver coverage violated: static=$staticManeuverSamples, " +
+        "jump=$jumpManeuverSamples, reverse=$reverseManeuverSamples")
 }
 $overall = [pscustomobject]@{
     Level = 'Overall'
@@ -272,6 +353,9 @@ $overall = [pscustomobject]@{
     ShortPauseEvents = [int](($summaries | Measure-Object ShortPauseEvents -Sum).Sum)
     LongPauseEvents = [int](($summaries | Measure-Object LongPauseEvents -Sum).Sum)
     PauseDurationViolations = [int](($summaries | Measure-Object PauseDurationViolations -Sum).Sum)
+    ManeuverActiveSamples = [int](($summaries | Measure-Object ManeuverActiveSamples -Sum).Sum)
+    ManeuverContractViolations = [int](($summaries | Measure-Object ManeuverContractViolations -Sum).Sum)
+    ManeuverSelectionViolations = [int](($summaries | Measure-Object ManeuverSelectionViolations -Sum).Sum)
     Status = if ($overallFailed) { 'FAIL' } else { 'PASS' }
     Reason = ($overallReasons -join '; ')
 }

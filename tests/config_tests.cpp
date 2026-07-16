@@ -133,6 +133,14 @@ int main()
                    "shadow experience lead horizon remains disabled by default");
         expectNear(defaults.aim_shadow_lead_strength, 0.0, 0.0,
                    "shadow experience lead strength remains disabled by default");
+        expectString(defaults.aim_shadow_estimator_mode, "kalman",
+                     "shadow maneuver estimator remains opt-in by default");
+        expectNear(defaults.aim_shadow_ca_jerk_std_dps3, 8000.0, 0.0,
+                   "shadow acceleration estimator uses the frozen offline jerk noise");
+        expectNear(defaults.aim_shadow_maneuver_rate_threshold_dps, 12.0, 0.0,
+                   "shadow maneuver gate uses the zero-regression offline threshold");
+        expectNear(defaults.aim_shadow_maneuver_hold_ms, 120.0, 0.0,
+                   "shadow maneuver gate uses the frozen hold window");
         expectString(defaults.trajectory_shaper_mode, "off",
                      "trajectory shaper defaults to exact pass-through mode");
         expectNear(defaults.trajectory_output_hz, 240.0, 0.0,
@@ -211,7 +219,11 @@ int main()
                    migratedText.find("aim_shadow_reverse_confirm_ms = 80") != std::string::npos &&
                    migratedText.find("aim_shadow_vertical_catch_up_deg = 0.8") != std::string::npos &&
                    migratedText.find("aim_shadow_integral_time_ms = 0") != std::string::npos &&
-                   migratedText.find("aim_shadow_lead_horizon_ms = 0") != std::string::npos,
+                   migratedText.find("aim_shadow_lead_horizon_ms = 0") != std::string::npos &&
+                   migratedText.find("aim_shadow_estimator_mode = kalman") != std::string::npos &&
+                   migratedText.find("aim_shadow_ca_jerk_std_dps3 = 8000") != std::string::npos &&
+                   migratedText.find("aim_shadow_maneuver_rate_threshold_dps = 12") != std::string::npos &&
+                   migratedText.find("aim_shadow_maneuver_hold_ms = 120") != std::string::npos,
                    "saved config persists independently disabled P0-4A controller terms");
         expectTrue(migratedText.find("trajectory_shaper_mode = off") != std::string::npos &&
                    migratedText.find("trajectory_output_hz = 240") != std::string::npos,
@@ -327,7 +339,11 @@ int main()
             << "aim_shadow_integral_time_ms = 1\n"
             << "aim_shadow_integral_zone_deg = 99\n"
             << "aim_shadow_lead_horizon_ms = 999\n"
-            << "aim_shadow_lead_strength = 9\n";
+            << "aim_shadow_lead_strength = 9\n"
+            << "aim_shadow_estimator_mode = typo\n"
+            << "aim_shadow_ca_jerk_std_dps3 = 999999\n"
+            << "aim_shadow_maneuver_rate_threshold_dps = 0\n"
+            << "aim_shadow_maneuver_hold_ms = 9999\n";
     }
     Config clampedShadowController{};
     expectTrue(clampedShadowController.loadConfig(unsafeShadowControllerPath.string()),
@@ -354,6 +370,14 @@ int main()
                "shadow experience lead horizon remains bounded");
     expectNear(clampedShadowController.aim_shadow_lead_strength, 4.0, 0.0,
                "shadow experience lead strength remains bounded");
+    expectString(clampedShadowController.aim_shadow_estimator_mode, "kalman",
+                 "unknown shadow estimator safely falls back to frozen Kalman");
+    expectNear(clampedShadowController.aim_shadow_ca_jerk_std_dps3, 100000.0, 0.0,
+               "shadow acceleration jerk noise remains bounded");
+    expectNear(clampedShadowController.aim_shadow_maneuver_rate_threshold_dps, 0.1, 1e-6,
+               "shadow maneuver threshold remains positive");
+    expectNear(clampedShadowController.aim_shadow_maneuver_hold_ms, 1000.0, 0.0,
+               "shadow maneuver hold remains bounded");
     std::filesystem::remove(unsafeShadowControllerPath, removeError);
 
     const std::filesystem::path unsafeTrajectoryPath =

@@ -179,6 +179,10 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "AimPipelineAngleX,AimPipelineAngleY,AimPipelineRateX,AimPipelineRateY,AimPipelineCovarianceX,AimPipelineCovarianceY,"
          << "AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY,"
          << "AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence,"
+         << "AimPipelineEstimatorMode,AimPipelineManeuverModelActive,AimPipelineEstimatorSelectionChanged,AimPipelineEstimatorSelectionCount,"
+         << "AimPipelineCaJerkStdDps3,AimPipelineManeuverRateThresholdDps,AimPipelineManeuverHoldMs,AimPipelineManeuverHoldRemainingMs,AimPipelineModelAngleDeltaDeg,AimPipelineModelRateDeltaDps,"
+         << "AimPipelineBaselineAngleX,AimPipelineBaselineAngleY,AimPipelineBaselineRateX,AimPipelineBaselineRateY,AimPipelineBaselineCovarianceX,AimPipelineBaselineCovarianceY,AimPipelineBaselineNisX,AimPipelineBaselineNisY,"
+         << "AimPipelineCaAngleX,AimPipelineCaAngleY,AimPipelineCaRateX,AimPipelineCaRateY,AimPipelineCaCovarianceX,AimPipelineCaCovarianceY,AimPipelineCaNisX,AimPipelineCaNisY,"
          << "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples,AimPipelineLowSpeedReverseSuppressed,AimPipelineVerticalCatchUpActive,AimPipelineReverseConfirmationSeconds,AimPipelineEffectiveResponseSecondsY,"
          << "AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadReferenceX,AimPipelineLeadReferenceY,"
          << "AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY,"
@@ -256,6 +260,28 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << ap.estimate.nisX << ',' << ap.estimate.nisY << ','
              << ap.estimate.measurementConfidence << ','
              << ap.estimate.feedforwardConfidence << ','
+             << maneuverLosEstimatorModeName(ap.maneuverEstimator.mode) << ','
+             << (ap.maneuverEstimator.maneuverModelActive ? '1' : '0') << ','
+             << (ap.maneuverEstimator.selectionChanged ? '1' : '0') << ','
+             << ap.maneuverEstimator.selectionCount << ','
+             << ap.maneuverEstimator.jerkStdDegreesPerSecond3 << ','
+             << ap.maneuverEstimator.maneuverRateThresholdDegreesPerSecond << ','
+             << ap.maneuverEstimator.maneuverHoldSeconds * 1000.0 << ','
+             << ap.maneuverEstimator.maneuverHoldRemainingSeconds * 1000.0 << ','
+             << ap.maneuverEstimator.modelAngleDeltaDegrees << ','
+             << ap.maneuverEstimator.modelRateDeltaDegreesPerSecond << ','
+             << ap.baselineEstimate.angleX << ',' << ap.baselineEstimate.angleY << ','
+             << ap.baselineEstimate.rateX << ',' << ap.baselineEstimate.rateY << ','
+             << ap.baselineEstimate.covarianceX << ',' << ap.baselineEstimate.covarianceY << ','
+             << ap.baselineEstimate.nisX << ',' << ap.baselineEstimate.nisY << ','
+             << ap.constantAccelerationEstimate.angleX << ','
+             << ap.constantAccelerationEstimate.angleY << ','
+             << ap.constantAccelerationEstimate.rateX << ','
+             << ap.constantAccelerationEstimate.rateY << ','
+             << ap.constantAccelerationEstimate.covarianceX << ','
+             << ap.constantAccelerationEstimate.covarianceY << ','
+             << ap.constantAccelerationEstimate.nisX << ','
+             << ap.constantAccelerationEstimate.nisY << ','
              << (ap.control.valid ? '1' : '0') << ','
              << (ap.control.speedLimited ? '1' : '0') << ','
              << (ap.control.integralFrozen ? '1' : '0') << ','

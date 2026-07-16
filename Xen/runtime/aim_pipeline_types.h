@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <optional>
 
+#include "maneuver_los_estimator.h"
+
 // P0-0 的运行模式只描述新链路的生命周期，不改变现有 r30 输出。
 enum class AimPipelineMode
 {
@@ -146,6 +148,22 @@ struct LosEstimate
     double feedforwardConfidence = 0.0;
 };
 
+// 机动模型只在shadow内部选择估计结果；baseline与常加速度状态始终同帧保留，
+// 便于检查切换收益、静止误驻留和暂停恢复连续性。
+struct ManeuverEstimatorState
+{
+    ManeuverLosEstimatorMode mode = ManeuverLosEstimatorMode::ConstantVelocity;
+    bool maneuverModelActive = false;
+    bool selectionChanged = false;
+    uint64_t selectionCount = 0;
+    double jerkStdDegreesPerSecond3 = 0.0;
+    double maneuverRateThresholdDegreesPerSecond = 0.0;
+    double maneuverHoldSeconds = 0.0;
+    double maneuverHoldRemainingSeconds = 0.0;
+    double modelAngleDeltaDegrees = 0.0;
+    double modelRateDeltaDegreesPerSecond = 0.0;
+};
+
 // 新控制器的可审计分解；P0-0 默认全部为零且不参与旧控制器输出。
 struct AimControlBreakdown
 {
@@ -253,6 +271,9 @@ struct AimPipelineFrameState
     uint64_t observationSequence = 0;
     AimObservation observation{};
     LosEstimate estimate{};
+    LosEstimate baselineEstimate{};
+    LosEstimate constantAccelerationEstimate{};
+    ManeuverEstimatorState maneuverEstimator{};
     AimControlBreakdown control{};
     TrajectoryRequest trajectoryRequest{};
     TrajectoryState trajectoryState{};

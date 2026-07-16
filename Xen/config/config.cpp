@@ -150,6 +150,10 @@ bool Config::loadConfig(const std::string& filename)
         aim_shadow_integral_zone_deg = 1.0f;
         aim_shadow_lead_horizon_ms = 0.0f;
         aim_shadow_lead_strength = 0.0f;
+        aim_shadow_estimator_mode = "kalman";           // 正式默认保持原常速度Kalman
+        aim_shadow_ca_jerk_std_dps3 = 8000.0f;
+        aim_shadow_maneuver_rate_threshold_dps = 12.0f;
+        aim_shadow_maneuver_hold_ms = 120.0f;
         trajectory_shaper_mode = "off";                 // P0-4B默认先验证完全等价透传
         trajectory_output_hz = 240.0f;
         trajectory_max_velocity_cps = 1440.0f;
@@ -580,6 +584,13 @@ bool Config::loadConfig(const std::string& filename)
     aim_shadow_integral_zone_deg = (float)get_double("aim_shadow_integral_zone_deg", 1.0);
     aim_shadow_lead_horizon_ms = (float)get_double("aim_shadow_lead_horizon_ms", 0.0);
     aim_shadow_lead_strength = (float)get_double("aim_shadow_lead_strength", 0.0);
+    aim_shadow_estimator_mode = get_string("aim_shadow_estimator_mode", "kalman");
+    aim_shadow_ca_jerk_std_dps3 = (float)get_double(
+        "aim_shadow_ca_jerk_std_dps3", 8000.0);
+    aim_shadow_maneuver_rate_threshold_dps = (float)get_double(
+        "aim_shadow_maneuver_rate_threshold_dps", 12.0);
+    aim_shadow_maneuver_hold_ms = (float)get_double(
+        "aim_shadow_maneuver_hold_ms", 120.0);
     trajectory_shaper_mode = get_string("trajectory_shaper_mode", "off");
     trajectory_output_hz = (float)get_double("trajectory_output_hz", 240.0);
     trajectory_max_velocity_cps = (float)get_double("trajectory_max_velocity_cps", 1440.0);
@@ -811,6 +822,14 @@ bool Config::loadConfig(const std::string& filename)
     aim_shadow_integral_zone_deg = std::clamp(aim_shadow_integral_zone_deg, 0.0f, 10.0f);
     aim_shadow_lead_horizon_ms = std::clamp(aim_shadow_lead_horizon_ms, 0.0f, 250.0f);
     aim_shadow_lead_strength = std::clamp(aim_shadow_lead_strength, 0.0f, 4.0f);
+    if (aim_shadow_estimator_mode != "maneuver_gated_ca")
+        aim_shadow_estimator_mode = "kalman";
+    aim_shadow_ca_jerk_std_dps3 = std::clamp(
+        aim_shadow_ca_jerk_std_dps3, 1.0f, 100000.0f);
+    aim_shadow_maneuver_rate_threshold_dps = std::clamp(
+        aim_shadow_maneuver_rate_threshold_dps, 0.1f, 1000.0f);
+    aim_shadow_maneuver_hold_ms = std::clamp(
+        aim_shadow_maneuver_hold_ms, 0.0f, 1000.0f);
     // 灰度模式只接受三个可审计值。未知值必须回退正式旧链路，不能把配置拼写错误
     // 静默解释成影子或未来的 active 行为。
     if (aim_pipeline_mode != "legacy" && aim_pipeline_mode != "shadow" &&
@@ -961,6 +980,11 @@ bool Config::saveConfig(const std::string& filename)
         << "aim_shadow_integral_zone_deg = " << aim_shadow_integral_zone_deg << "\n"
         << "aim_shadow_lead_horizon_ms = " << aim_shadow_lead_horizon_ms << "\n"
         << "aim_shadow_lead_strength = " << aim_shadow_lead_strength << "\n"
+        << "aim_shadow_estimator_mode = " << aim_shadow_estimator_mode << "\n"
+        << "aim_shadow_ca_jerk_std_dps3 = " << aim_shadow_ca_jerk_std_dps3 << "\n"
+        << "aim_shadow_maneuver_rate_threshold_dps = "
+        << aim_shadow_maneuver_rate_threshold_dps << "\n"
+        << "aim_shadow_maneuver_hold_ms = " << aim_shadow_maneuver_hold_ms << "\n"
         << "trajectory_shaper_mode = " << trajectory_shaper_mode << "\n"
         << "trajectory_output_hz = " << trajectory_output_hz << "\n"
         << "trajectory_max_velocity_cps = " << trajectory_max_velocity_cps << "\n"

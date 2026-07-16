@@ -11,6 +11,27 @@ std::string lowerAscii(std::string value)
         [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return value;
 }
+
+LosEstimate toLosEstimate(const RelativeLosKalmanEstimate& estimate)
+{
+    LosEstimate result;
+    result.valid = estimate.x.valid && estimate.y.valid;
+    result.angleX = estimate.x.angleDegrees;
+    result.angleY = estimate.y.angleDegrees;
+    result.rateX = estimate.x.rateDegreesPerSecond;
+    result.rateY = estimate.y.rateDegreesPerSecond;
+    result.covarianceX = estimate.x.angleVariance;
+    result.covarianceY = estimate.y.angleVariance;
+    result.innovationVarianceX = estimate.x.innovationVariance;
+    result.innovationVarianceY = estimate.y.innovationVariance;
+    result.innovationX = estimate.x.innovationDegrees;
+    result.innovationY = estimate.y.innovationDegrees;
+    result.nisX = estimate.x.nis;
+    result.nisY = estimate.y.nis;
+    result.measurementConfidence = estimate.measurementConfidence;
+    result.feedforwardConfidence = estimate.feedforwardConfidence;
+    return result;
+}
 }
 
 AimPipelineRuntime::AimPipelineRuntime()
@@ -48,7 +69,7 @@ void AimPipelineRuntime::reset()
     frame_.activeAvailable = false;
     frame_.commandSuppressed = true;
     frame_.resetGeneration = resetGeneration_;
-    relativeLosKalman_.reset();
+    estimator_.reset();
     losAimController_.reset();
     lastControllerUpdateTime_ = {};
     trajectoryShaper_.reset();
@@ -78,6 +99,15 @@ void AimPipelineRuntime::configureController(const LosAimController::Settings& s
     lastControllerUpdateTime_ = {};
 }
 
+void AimPipelineRuntime::configureEstimator(
+    const ManeuverLosEstimator::Settings& settings)
+{
+    estimatorSettings_ = settings;
+    estimator_.reset();
+    losAimController_.reset();
+    lastControllerUpdateTime_ = {};
+}
+
 AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observation)
 {
     frame_.requestedMode = requestedMode_;
@@ -95,7 +125,7 @@ AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observat
     {
         ++resetGeneration_;
         observationSequence_ = 0;
-        relativeLosKalman_.reset();
+        estimator_.reset();
         losAimController_.reset();
         lastControllerUpdateTime_ = {};
         trajectoryShaper_.reset();
@@ -109,6 +139,9 @@ AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observat
     if (frame_.observation.timing.controlTime.time_since_epoch().count() == 0)
         frame_.observation.timing.controlTime = FrameTiming::Clock::now();
     frame_.estimate = {};
+    frame_.baselineEstimate = {};
+    frame_.constantAccelerationEstimate = {};
+    frame_.maneuverEstimator = {};
     frame_.control = {};
     frame_.trajectoryRequest = {};
     frame_.trajectoryState = {};
@@ -125,28 +158,38 @@ void AimPipelineRuntime::setViewMotionDiagnostics(
     if (!diagnostics.valid || effectiveMode_ == AimPipelineMode::Legacy)
         return;
 
-    relativeLosKalman_.update(
+    estimator_.update(
         diagnostics.stabilizedLosYawDegrees,
         diagnostics.stabilizedLosPitchDownDegrees,
         frame_.observation.confidence,
         frame_.observation.timing.observationTime,
-        frame_.observation.timing.controlTime);
-    const RelativeLosKalmanEstimate& estimate = relativeLosKalman_.estimate();
-    frame_.estimate.valid = estimate.x.valid && estimate.y.valid;
-    frame_.estimate.angleX = estimate.x.angleDegrees;
-    frame_.estimate.angleY = estimate.y.angleDegrees;
-    frame_.estimate.rateX = estimate.x.rateDegreesPerSecond;
-    frame_.estimate.rateY = estimate.y.rateDegreesPerSecond;
-    frame_.estimate.covarianceX = estimate.x.angleVariance;
-    frame_.estimate.covarianceY = estimate.y.angleVariance;
-    frame_.estimate.innovationVarianceX = estimate.x.innovationVariance;
-    frame_.estimate.innovationVarianceY = estimate.y.innovationVariance;
-    frame_.estimate.innovationX = estimate.x.innovationDegrees;
-    frame_.estimate.innovationY = estimate.y.innovationDegrees;
-    frame_.estimate.nisX = estimate.x.nis;
-    frame_.estimate.nisY = estimate.y.nis;
-    frame_.estimate.measurementConfidence = estimate.measurementConfidence;
-    frame_.estimate.feedforwardConfidence = estimate.feedforwardConfidence;
+        frame_.observation.timing.controlTime,
+        estimatorSettings_);
+    frame_.estimate = toLosEstimate(estimator_.selectedEstimate());
+    frame_.baselineEstimate = toLosEstimate(
+        estimator_.constantVelocityEstimate());
+    frame_.constantAccelerationEstimate = toLosEstimate(
+        estimator_.constantAccelerationEstimate());
+    const auto& estimatorDiagnostics = estimator_.diagnostics();
+    frame_.maneuverEstimator.mode = estimatorSettings_.mode;
+    frame_.maneuverEstimator.maneuverModelActive =
+        estimatorDiagnostics.maneuverModelActive;
+    frame_.maneuverEstimator.selectionChanged =
+        estimatorDiagnostics.selectionChanged;
+    frame_.maneuverEstimator.selectionCount =
+        estimatorDiagnostics.selectionCount;
+    frame_.maneuverEstimator.jerkStdDegreesPerSecond3 =
+        estimatorSettings_.jerkStdDegreesPerSecond3;
+    frame_.maneuverEstimator.maneuverRateThresholdDegreesPerSecond =
+        estimatorSettings_.maneuverRateThresholdDegreesPerSecond;
+    frame_.maneuverEstimator.maneuverHoldSeconds =
+        estimatorSettings_.maneuverHoldSeconds;
+    frame_.maneuverEstimator.maneuverHoldRemainingSeconds =
+        estimatorDiagnostics.maneuverHoldRemainingSeconds;
+    frame_.maneuverEstimator.modelAngleDeltaDegrees =
+        estimatorDiagnostics.modelAngleDeltaDegrees;
+    frame_.maneuverEstimator.modelRateDeltaDegreesPerSecond =
+        estimatorDiagnostics.modelRateDeltaDegreesPerSecond;
 
     LosAimController::Input controllerInput;
     controllerInput.valid = frame_.estimate.valid;

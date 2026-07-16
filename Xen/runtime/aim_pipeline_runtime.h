@@ -7,7 +7,7 @@
 #include "los_aim_controller.h"
 #include "command_trajectory_shaper.h"
 #include "output_scheduler.h"
-#include "relative_los_kalman.h"
+#include "maneuver_los_estimator.h"
 
 // P0-0 影子运行时：只接收同帧观测并生成诊断快照，绝不直接访问设备队列。
 class AimPipelineRuntime
@@ -17,6 +17,7 @@ public:
 
     void configure(const std::string& requestedMode);
     void configureController(const LosAimController::Settings& settings);
+    void configureEstimator(const ManeuverLosEstimator::Settings& settings);
     void configureTrajectory(const CommandTrajectoryShaper::Settings& shaperSettings,
                              const OutputScheduler::Settings& schedulerSettings);
     void reset();
@@ -36,7 +37,8 @@ private:
     uint64_t resetGeneration_ = 0;
     uint64_t observationSequence_ = 0;
     AimPipelineFrameState frame_{};
-    RelativeLosKalman relativeLosKalman_{};
+    ManeuverLosEstimator estimator_{};
+    ManeuverLosEstimator::Settings estimatorSettings_{};
     LosAimController losAimController_{};
     LosAimController::Settings controllerSettings_{};
     FrameTiming::Clock::time_point lastControllerUpdateTime_{};

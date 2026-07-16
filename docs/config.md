@@ -130,6 +130,10 @@ capture_fps = 60
 | `aim_shadow_integral_zone_deg` | `1` | I-zone绝对角误差范围，范围0~10°；区间外清空积分，饱和时冻结候选。 |
 | `aim_shadow_lead_horizon_ms` | `0` | 独立经验提前时域，范围0~250 ms；默认关闭，不与速度前馈混用。 |
 | `aim_shadow_lead_strength` | `0` | 独立经验提前强度，范围0~4；默认关闭。 |
+| `aim_shadow_estimator_mode` | `kalman` | Shadow状态估计器。`kalman`保持冻结常速度模型；`maneuver_gated_ca`仅允许DML影子复测使用，CUDA安全回退`kalman`，不会开放active。 |
+| `aim_shadow_ca_jerk_std_dps3` | `8000` | 门控常加速度模型的白jerk标准差，范围1~100000°/s³；只在上述DML影子候选中生效。 |
+| `aim_shadow_maneuver_rate_threshold_dps` | `12` | 常速度比较器二维LOS速率达到该值时选择常加速度模型，范围0.1~1000°/s。 |
+| `aim_shadow_maneuver_hold_ms` | `120` | LOS速率低于阈值后保持机动模型的最长时间，范围0~1000 ms；目标重置时立即清零。 |
 | `trajectory_shaper_mode` | `off` | P0-4B整形模式。`off`逐请求完全透传双精度counts；`trapezoid`启用固定周期二维速度/加速度/jerk约束。未知值和未集成的`ruckig`安全降级为`off`。 |
 | `trajectory_output_hz` | `240` | `trapezoid`固定输出格点频率，范围30~1000 Hz；迟到时跳过旧tick，不批量补发。 |
 | `trajectory_max_velocity_cps` | `1440` | 二维轨迹速度向量上限，范围30~4000 counts/s。 |

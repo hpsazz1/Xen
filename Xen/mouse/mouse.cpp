@@ -101,6 +101,19 @@ MouseThread::MouseThread(
         shadowControllerSettings.leadHorizonSeconds = config.aim_shadow_lead_horizon_ms / 1000.0;
         shadowControllerSettings.leadStrength = config.aim_shadow_lead_strength;
         aimPipelineRuntime.configureController(shadowControllerSettings);
+        ManeuverLosEstimator::Settings estimatorSettings;
+#ifndef USE_CUDA
+        if (config.aim_shadow_estimator_mode == "maneuver_gated_ca")
+            estimatorSettings.mode =
+                ManeuverLosEstimatorMode::ManeuverGatedConstantAcceleration;
+#endif
+        estimatorSettings.jerkStdDegreesPerSecond3 =
+            config.aim_shadow_ca_jerk_std_dps3;
+        estimatorSettings.maneuverRateThresholdDegreesPerSecond =
+            config.aim_shadow_maneuver_rate_threshold_dps;
+        estimatorSettings.maneuverHoldSeconds =
+            config.aim_shadow_maneuver_hold_ms / 1000.0;
+        aimPipelineRuntime.configureEstimator(estimatorSettings);
         CommandTrajectoryShaper::Settings trajectorySettings;
         trajectorySettings.mode = parseTrajectoryShaperMode(config.trajectory_shaper_mode);
         trajectorySettings.maxVelocityCountsPerSecond = config.trajectory_max_velocity_cps;
@@ -178,6 +191,19 @@ void MouseThread::updateConfig(
     shadowControllerSettings.leadHorizonSeconds = config.aim_shadow_lead_horizon_ms / 1000.0;
     shadowControllerSettings.leadStrength = config.aim_shadow_lead_strength;
     aimPipelineRuntime.configureController(shadowControllerSettings);
+    ManeuverLosEstimator::Settings estimatorSettings;
+#ifndef USE_CUDA
+    if (config.aim_shadow_estimator_mode == "maneuver_gated_ca")
+        estimatorSettings.mode =
+            ManeuverLosEstimatorMode::ManeuverGatedConstantAcceleration;
+#endif
+    estimatorSettings.jerkStdDegreesPerSecond3 =
+        config.aim_shadow_ca_jerk_std_dps3;
+    estimatorSettings.maneuverRateThresholdDegreesPerSecond =
+        config.aim_shadow_maneuver_rate_threshold_dps;
+    estimatorSettings.maneuverHoldSeconds =
+        config.aim_shadow_maneuver_hold_ms / 1000.0;
+    aimPipelineRuntime.configureEstimator(estimatorSettings);
     CommandTrajectoryShaper::Settings trajectorySettings;
     trajectorySettings.mode = parseTrajectoryShaperMode(config.trajectory_shaper_mode);
     trajectorySettings.maxVelocityCountsPerSecond = config.trajectory_max_velocity_cps;

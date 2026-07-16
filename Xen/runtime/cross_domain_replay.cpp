@@ -1,7 +1,6 @@
 #include "runtime/cross_domain_replay.h"
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -15,6 +14,7 @@
 #include "runtime/basic_target_filter.h"
 #include "runtime/command_trajectory_shaper.h"
 #include "runtime/los_aim_controller.h"
+#include "runtime/maneuver_los_estimator.h"
 #include "runtime/relative_los_kalman.h"
 #include "runtime/target_predictor.h"
 
@@ -34,166 +34,6 @@ const char* candidateEstimatorModeName(CandidateEstimatorMode mode)
 namespace
 {
 using Clock = std::chrono::steady_clock;
-
-// 仅用于离线反证的三状态常加速度Kalman。每轴状态为[角度,角速度,角加速度]，
-// 过程噪声使用离散白jerk模型GqG'；运行时RelativeLosKalman和r59链路不引用本类。
-class ConstantAccelerationEstimator
-{
-public:
-    void reset()
-    {
-        horizontal_ = {};
-        vertical_ = {};
-        estimate_ = {};
-    }
-
-    void update(double angleX, double angleY, float confidence,
-                Clock::time_point observationTime, Clock::time_point controlTime,
-                double jerkStdDegreesPerSecond3)
-    {
-        const float boundedConfidence = std::isfinite(confidence)
-            ? std::clamp(confidence, 0.0f, 1.0f) : 0.0f;
-        const double confidenceScale = std::clamp(
-            static_cast<double>(boundedConfidence), 0.05, 1.0);
-        const double measurementStd = 0.15 / confidenceScale;
-        const double measurementVariance = measurementStd * measurementStd;
-        const double jerkStd = std::isfinite(jerkStdDegreesPerSecond3)
-            ? std::clamp(jerkStdDegreesPerSecond3, 1.0, 100000.0) : 8000.0;
-        Axis* axes[] = { &horizontal_, &vertical_ };
-        const double measurements[] = { angleX, angleY };
-        for (int index = 0; index < 2; ++index)
-        {
-            Axis& axis = *axes[index];
-            if (!axis.initialized)
-            {
-                axis.initialized = true;
-                axis.time = observationTime;
-                axis.state = { measurements[index], 0.0, 0.0 };
-                axis.covariance = {{
-                    {{ 4.0, 0.0, 0.0 }},
-                    {{ 0.0, 400.0, 0.0 }},
-                    {{ 0.0, 0.0, 40000.0 }}
-                }};
-            }
-            else
-            {
-                predict(axis, boundedDt(axis.time, observationTime), jerkStd);
-                axis.time = observationTime;
-            }
-            correct(axis, measurements[index], measurementVariance);
-        }
-
-        Axis projectedHorizontal = horizontal_;
-        Axis projectedVertical = vertical_;
-        predict(projectedHorizontal,
-            boundedDt(projectedHorizontal.time, controlTime), jerkStd);
-        predict(projectedVertical,
-            boundedDt(projectedVertical.time, controlTime), jerkStd);
-        estimate_.x = toEstimate(projectedHorizontal);
-        estimate_.y = toEstimate(projectedVertical);
-        estimate_.measurementConfidence = boundedConfidence;
-        const double normalizedNis = std::max(
-            horizontal_.diagnostic.nis, vertical_.diagnostic.nis);
-        estimate_.feedforwardConfidence = boundedConfidence * boundedConfidence *
-            std::exp(-0.5 * std::min(normalizedNis, 20.0));
-    }
-
-    const RelativeLosKalmanEstimate& estimate() const { return estimate_; }
-
-private:
-    struct Axis
-    {
-        bool initialized = false;
-        Clock::time_point time{};
-        std::array<double, 3> state{};
-        std::array<std::array<double, 3>, 3> covariance{};
-        RelativeLosKalmanAxisEstimate diagnostic{};
-    };
-
-    static double boundedDt(Clock::time_point start, Clock::time_point end)
-    {
-        const double seconds = std::chrono::duration<double>(end - start).count();
-        if (!std::isfinite(seconds) || seconds <= 0.0)
-            return 0.0;
-        return std::clamp(seconds, 1e-4, 0.5);
-    }
-
-    static void predict(Axis& axis, double dt, double jerkStd)
-    {
-        if (!axis.initialized || dt <= 0.0)
-            return;
-        const double dt2 = dt * dt;
-        const double transition[3][3]{
-            { 1.0, dt, 0.5 * dt2 },
-            { 0.0, 1.0, dt },
-            { 0.0, 0.0, 1.0 }
-        };
-        const double noiseGain[3]{ dt2 * dt / 6.0, dt2 * 0.5, dt };
-        std::array<double, 3> predictedState{};
-        std::array<std::array<double, 3>, 3> intermediate{};
-        std::array<std::array<double, 3>, 3> predictedCovariance{};
-        for (int row = 0; row < 3; ++row)
-        {
-            for (int column = 0; column < 3; ++column)
-            {
-                predictedState[row] += transition[row][column] * axis.state[column];
-                for (int inner = 0; inner < 3; ++inner)
-                    intermediate[row][column] +=
-                        transition[row][inner] * axis.covariance[inner][column];
-            }
-        }
-        const double variance = jerkStd * jerkStd;
-        for (int row = 0; row < 3; ++row)
-        for (int column = 0; column < 3; ++column)
-        {
-            for (int inner = 0; inner < 3; ++inner)
-                predictedCovariance[row][column] +=
-                    intermediate[row][inner] * transition[column][inner];
-            predictedCovariance[row][column] +=
-                variance * noiseGain[row] * noiseGain[column];
-        }
-        axis.state = predictedState;
-        axis.covariance = predictedCovariance;
-    }
-
-    static void correct(Axis& axis, double measurement, double measurementVariance)
-    {
-        const double innovation = measurement - axis.state[0];
-        const double innovationVariance = std::max(
-            axis.covariance[0][0] + measurementVariance, 1e-9);
-        std::array<double, 3> gain{};
-        const auto oldCovariance = axis.covariance;
-        for (int index = 0; index < 3; ++index)
-        {
-            gain[index] = oldCovariance[index][0] / innovationVariance;
-            axis.state[index] += gain[index] * innovation;
-        }
-        for (int row = 0; row < 3; ++row)
-        for (int column = 0; column < 3; ++column)
-            axis.covariance[row][column] =
-                oldCovariance[row][column] - gain[row] * oldCovariance[0][column];
-        for (int index = 0; index < 3; ++index)
-            axis.covariance[index][index] = std::max(
-                axis.covariance[index][index], 1e-12);
-        axis.diagnostic.innovationDegrees = innovation;
-        axis.diagnostic.innovationVariance = innovationVariance;
-        axis.diagnostic.nis = innovation * innovation / innovationVariance;
-    }
-
-    static RelativeLosKalmanAxisEstimate toEstimate(const Axis& axis)
-    {
-        RelativeLosKalmanAxisEstimate result = axis.diagnostic;
-        result.valid = axis.initialized;
-        result.angleDegrees = axis.state[0];
-        result.rateDegreesPerSecond = axis.state[1];
-        result.angleVariance = std::max(axis.covariance[0][0], 0.0);
-        return result;
-    }
-
-    Axis horizontal_{};
-    Axis vertical_{};
-    RelativeLosKalmanEstimate estimate_{};
-};
 
 double percentile(std::vector<double> values, double ratio)
 {
@@ -578,15 +418,26 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     legacySettings.settleRadiusPixels = 0.0;
     legacySettings.releaseRadiusPixels = 0.0;
 
-    RelativeLosKalman kalman;
-    ConstantAccelerationEstimator constantAccelerationEstimator;
-    RelativeLosKalman::Settings kalmanSettings;
-    kalmanSettings.accelerationStdDegreesPerSecond2 =
+    ManeuverLosEstimator estimator;
+    ManeuverLosEstimator::Settings estimatorSettings;
+    estimatorSettings.constantVelocitySettings.accelerationStdDegreesPerSecond2 =
         comparison.kalmanAccelerationStdDegreesPerSecond2;
-    kalmanSettings.movingAccelerationStdDegreesPerSecond2 =
+    estimatorSettings.constantVelocitySettings.movingAccelerationStdDegreesPerSecond2 =
         comparison.kalmanMovingAccelerationStdDegreesPerSecond2;
-    kalmanSettings.movingRateThresholdDegreesPerSecond =
+    estimatorSettings.constantVelocitySettings.movingRateThresholdDegreesPerSecond =
         comparison.kalmanMovingRateThresholdDegreesPerSecond;
+    estimatorSettings.jerkStdDegreesPerSecond3 =
+        comparison.candidateJerkStdDegreesPerSecond3;
+    estimatorSettings.maneuverRateThresholdDegreesPerSecond =
+        comparison.candidateManeuverRateThresholdDegreesPerSecond;
+    estimatorSettings.maneuverHoldSeconds =
+        comparison.candidateManeuverHoldSeconds;
+    if (comparison.candidateEstimatorMode == CandidateEstimatorMode::ConstantAcceleration)
+        estimatorSettings.mode = ManeuverLosEstimatorMode::ConstantAcceleration;
+    else if (comparison.candidateEstimatorMode ==
+        CandidateEstimatorMode::ManeuverGatedConstantAcceleration)
+        estimatorSettings.mode =
+            ManeuverLosEstimatorMode::ManeuverGatedConstantAcceleration;
     LosAimController candidateController;
     LosAimController::Settings candidateSettings;
     candidateSettings.responseSeconds = comparison.candidateResponseSeconds;
@@ -643,7 +494,6 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     bool hasLatestTrajectoryRequest = false;
     double nextTrajectoryTickSeconds = 0.0;
     TrajectoryRequest latestTrajectoryRequest;
-    double maneuverModelRemainingSeconds = 0.0;
     size_t replayFrameIndex = 0;
     if (recordedDetectionTimeline)
         recordedDetectionTimeline->clear();
@@ -731,9 +581,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                 legacyFilter.reset();
                 legacyPredictor.reset();
                 legacyController.reset();
-                kalman.reset();
-                constantAccelerationEstimator.reset();
-                maneuverModelRemainingSeconds = 0.0;
+                estimator.reset();
                 candidateController.reset();
                 shaper.emergencyReset(epoch + std::chrono::duration_cast<Clock::duration>(
                     std::chrono::duration<double>(controlTime)));
@@ -784,45 +632,12 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         const int legacyY = static_cast<int>(std::round(legacyOutput.countsY));
         legacyCamera.submit(controlTime, commandDelay, legacyX, legacyY, settings);
 
-        kalman.update(truthAtObservation.yawDegrees, truthAtObservation.pitchDownDegrees,
-            point.confidence, observationPoint, controlPoint, kalmanSettings);
-        const bool hasConstantAccelerationModel =
-            comparison.candidateEstimatorMode ==
-                CandidateEstimatorMode::ConstantAcceleration ||
-            comparison.candidateEstimatorMode ==
-                CandidateEstimatorMode::ManeuverGatedConstantAcceleration;
-        if (hasConstantAccelerationModel)
-        {
-            constantAccelerationEstimator.update(
-                truthAtObservation.yawDegrees, truthAtObservation.pitchDownDegrees,
-                point.confidence, observationPoint, controlPoint,
-                comparison.candidateJerkStdDegreesPerSecond3);
-        }
-        const auto& constantAccelerationEstimate =
-            constantAccelerationEstimator.estimate();
-        bool useManeuverModel = comparison.candidateEstimatorMode ==
-            CandidateEstimatorMode::ConstantAcceleration;
-        if (comparison.candidateEstimatorMode ==
-            CandidateEstimatorMode::ManeuverGatedConstantAcceleration)
-        {
-            const double kalmanRateMagnitude = std::hypot(
-                kalman.estimate().x.rateDegreesPerSecond,
-                kalman.estimate().y.rateDegreesPerSecond);
-            if (kalmanRateMagnitude >=
-                comparison.candidateManeuverRateThresholdDegreesPerSecond)
-            {
-                maneuverModelRemainingSeconds =
-                    comparison.candidateManeuverHoldSeconds;
-            }
-            else
-            {
-                maneuverModelRemainingSeconds = std::max(
-                    0.0, maneuverModelRemainingSeconds - dt);
-            }
-            useManeuverModel = maneuverModelRemainingSeconds > 0.0;
-        }
-        const RelativeLosKalmanEstimate estimate = useManeuverModel
-            ? constantAccelerationEstimate : kalman.estimate();
+        estimator.update(
+            truthAtObservation.yawDegrees, truthAtObservation.pitchDownDegrees,
+            point.confidence, observationPoint, controlPoint, estimatorSettings);
+        const RelativeLosKalmanEstimate estimate = estimator.selectedEstimate();
+        const bool useManeuverModel =
+            estimator.diagnostics().maneuverModelActive;
         const double previousControlTime = std::max(0.0, controlTime - dt);
         const double previousControlSourceTime = std::min(
             source.points.back().timeSeconds,
