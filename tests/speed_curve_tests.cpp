@@ -1066,7 +1066,7 @@ int main()
                "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r44") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r45") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -1076,7 +1076,7 @@ int main()
         traceHeader.find("ProfileCalibrationOverallConfidence") != std::string::npos,
         "basic pipeline reports passive profile calibration diagnostics");
     expectTrue(traceHeader.find(
-        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictionStationarySuppressed,PredictedX,PredictedY") != std::string::npos,
+        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,ViewMotionCompensationDelayMs,ViewMotionCompensationResponseMs,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictionStationarySuppressed,PredictedX,PredictedY") != std::string::npos,
         "basic pipeline reports prediction diagnostics");
     traceFile.close();
     std::remove(tracePath);
@@ -1104,7 +1104,7 @@ int main()
     expectNear(viewAfterPrune.first, 15.0, 0.0,
                "view history pruning never resets the stable coordinate system");
     ViewMotionHistory delayedViewHistory;
-    delayedViewHistory.configure(12.0);
+    delayedViewHistory.configure(12.0, 0.0);
     delayedViewHistory.add(8.0, -4.0, t0 + std::chrono::milliseconds(10));
     const auto delayedBefore = delayedViewHistory.at(t0 + std::chrono::milliseconds(21));
     const auto delayedAtEffective = delayedViewHistory.at(t0 + std::chrono::milliseconds(22));
@@ -1120,11 +1120,29 @@ int main()
     delayedViewHistory.add(2.0, 0.0, t0 + std::chrono::seconds(3));
     expectNear(delayedViewHistory.at(t0 + std::chrono::seconds(4)).first, 10.0, 0.0,
                "delayed view history pruning preserves the cumulative coordinate system");
-    delayedViewHistory.configure(20.0);
+    delayedViewHistory.configure(20.0, 0.0);
     expectNear(delayedViewHistory.at(t0 + std::chrono::seconds(5)).first, 0.0, 0.0,
                "changing compensation delay clears the incompatible cumulative timeline");
     expectNear(delayedViewHistory.commandToFrameDelayMs(), 20.0, 0.0,
                "view history reports the configured command-to-frame delay");
+    ViewMotionHistory rampedViewHistory;
+    rampedViewHistory.configure(12.0, 24.0);
+    rampedViewHistory.add(24.0, -12.0, t0 + std::chrono::milliseconds(10));
+    expectNear(rampedViewHistory.at(t0 + std::chrono::milliseconds(9)).first,
+               0.0, 0.0, "ramped view history never responds before command send time");
+    expectNear(rampedViewHistory.at(t0 + std::chrono::milliseconds(22)).first,
+               12.0, 1e-9, "ramped view history applies half the command at response center");
+    expectNear(rampedViewHistory.at(t0 + std::chrono::milliseconds(34)).first,
+               24.0, 1e-9, "ramped view history reaches the complete command after response width");
+    expectNear(rampedViewHistory.between(
+                   t0 + std::chrono::milliseconds(10),
+                   t0 + std::chrono::milliseconds(22)).first,
+               12.0, 1e-9, "ramped interval reports only the response fraction inside the window");
+    rampedViewHistory.add(2.0, 0.0, t0 + std::chrono::seconds(3));
+    expectNear(rampedViewHistory.at(t0 + std::chrono::seconds(4)).first,
+               26.0, 1e-9, "ramped view pruning folds completed commands into the baseline");
+    expectNear(rampedViewHistory.commandResponseMs(), 24.0, 0.0,
+               "view history reports the configured response width");
     filter.update(160.0, 160.0, t0, 1.0 / 120.0, 320.0);
     const auto filteredNoise = filter.update(
         160.3, 159.8, t0 + std::chrono::milliseconds(8), 1.0 / 120.0, 320.0);

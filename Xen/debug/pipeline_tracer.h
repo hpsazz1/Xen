@@ -62,6 +62,8 @@ struct PipelineFrame
     double predictionOffsetY = 0.0;
     double viewMotionX = 0.0;
     double viewMotionY = 0.0;
+    double viewMotionCompensationDelayMs = 0.0;
+    double viewMotionCompensationResponseMs = 0.0;
     bool predictionDirectionLocked = false;
     bool predictionSelfMotionSuppressed = false;
     bool predictionOscillationSuppressed = false; ///< 高频可靠换向门控是否撤销框外提前量

@@ -106,7 +106,9 @@ MouseThread::MouseThread(
         OutputScheduler::Settings schedulerSettings;
         schedulerSettings.outputHz = config.trajectory_output_hz;
         aimPipelineRuntime.configureTrajectory(trajectorySettings, schedulerSettings);
-        motionCompensationHistory.configure(config.aim_motion_compensation_delay_ms);
+        motionCompensationHistory.configure(
+            config.aim_motion_compensation_delay_ms,
+            config.aim_motion_compensation_response_ms);
         appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
         profileCalibrator.setEnabled(config.profile_calibration_enabled);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
@@ -180,7 +182,9 @@ void MouseThread::updateConfig(
     aimPipelineRuntime.configureTrajectory(trajectorySettings, schedulerSettings);
     {
         std::lock_guard<std::mutex> lock(motionCompensationMutex);
-        motionCompensationHistory.configure(config.aim_motion_compensation_delay_ms);
+        motionCompensationHistory.configure(
+            config.aim_motion_compensation_delay_ms,
+            config.aim_motion_compensation_response_ms);
     }
     appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
     profileCalibrator.setEnabled(config.profile_calibration_enabled);
@@ -1492,6 +1496,13 @@ void MouseThread::moveMousePivot(
         pf->predictionOffsetY = lastPredictionResult.offsetY;
         pf->viewMotionX = viewAtControl.first - viewAtObservation.first;
         pf->viewMotionY = viewAtControl.second - viewAtObservation.second;
+        {
+            std::lock_guard<std::mutex> lock(motionCompensationMutex);
+            pf->viewMotionCompensationDelayMs =
+                motionCompensationHistory.commandToFrameDelayMs();
+            pf->viewMotionCompensationResponseMs =
+                motionCompensationHistory.commandResponseMs();
+        }
         pf->predictionDirectionLocked = lastPredictionResult.directionLocked;
         pf->predictionSelfMotionSuppressed = lastPredictionResult.selfMotionSuppressed;
         pf->predictionOscillationSuppressed =

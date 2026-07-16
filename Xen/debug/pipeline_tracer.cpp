@@ -205,7 +205,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,"
          << "PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,"
          << "PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,"
-         << "ViewMotionX,ViewMotionY,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictionStationarySuppressed,PredictedX,PredictedY,"
+         << "ViewMotionX,ViewMotionY,ViewMotionCompensationDelayMs,ViewMotionCompensationResponseMs,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictionStationarySuppressed,PredictedX,PredictedY,"
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
          << "FinalMx,FinalMy,"
@@ -370,6 +370,8 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.predictionAccelerationX << ',' << f.predictionAccelerationY << ','
              << f.predictionLeadMs << ',' << f.predictionOffsetX << ',' << f.predictionOffsetY << ','
              << f.viewMotionX << ',' << f.viewMotionY << ','
+             << f.viewMotionCompensationDelayMs << ','
+             << f.viewMotionCompensationResponseMs << ','
              << (f.predictionDirectionLocked ? '1' : '0') << ','
              << (f.predictionSelfMotionSuppressed ? '1' : '0') << ','
              << (f.predictionOscillationSuppressed ? '1' : '0') << ','

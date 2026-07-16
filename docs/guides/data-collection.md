@@ -55,3 +55,7 @@ r43起CSV增加`PredictionStationarySuppressed`，分析器汇总为
 
 r44起正式自运动补偿使用`aim_motion_compensation_delay_ms`。DML/NDI六轮单向数据拟合为10~12 ms，
 默认12 ms；该值与只用于shadow链的`aim_shadow_command_to_frame_delay_ms`相互独立。
+
+r45起`aim_motion_compensation_delay_ms`表示正式补偿响应中心，
+`aim_motion_compensation_response_ms`表示线性响应宽度；CSV分别记录为
+`ViewMotionCompensationDelayMs/ResponseMs`。复测前必须先确认两列为12/24 ms，不能只依赖外部配置文件。
