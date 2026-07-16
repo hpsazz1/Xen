@@ -105,7 +105,10 @@ public:
         if (artifactDetected && !sustainedMotionMaturedDuringHold)
         {
             if (!holdAlreadyActive)
+            {
                 selfMotionHoldMaturedUnderContinuedArtifact_ = false;
+                selfMotionSuppressionFramesElapsed_ = 0;
+            }
             selfMotionSuppressionFramesRemaining_ = kHoldFrames;
         }
         else if (artifactDetected && sustainedMotionMaturedDuringHold)
@@ -125,12 +128,27 @@ public:
         result.selfMotionSuppressed = true;
         resetPredictionDistanceSmoothing();
 
+        // 首次命中本身不计入“四个后续观测”；保持已经活动时，每次实际抑制均计入
+        // 总尾迹进度。连续伪迹可以在运动尚未成熟时刷新剩余计数，但不能抹掉已经
+        // 完成的安全等待，否则成熟后会重复再等待四帧。
+        if (holdAlreadyActive)
+            ++selfMotionSuppressionFramesElapsed_;
+
         // 普通保持在伪迹结束后消费四帧尾迹；若保持期间已经连续三帧确认真实运动，
         // 即使原始伪迹条件仍成立，也开始消费剩余尾迹。最后一帧仍保持抑制，下一帧
         // 才恢复输出，因此不会重现r47的保持中途穿透。
-        if (!artifactDetected || sustainedMotionMaturedDuringHold)
+        if (sustainedMotionMaturedDuringHold)
+        {
+            selfMotionSuppressionFramesRemaining_ = std::max(
+                0, kHoldFrames - selfMotionSuppressionFramesElapsed_);
+        }
+        else if (!artifactDetected)
         {
             --selfMotionSuppressionFramesRemaining_;
+        }
+
+        if (!artifactDetected || sustainedMotionMaturedDuringHold)
+        {
             // 未成熟保持期内的坐标变化主要来自控制器过冲和检测框回弹，尾帧只保留
             // 当前观测基点并重新建向。若运动已经成熟，则保留可信速度，避免再走一轮
             // 自运动保持并把冷启动提前量推迟数百毫秒。
@@ -140,6 +158,7 @@ public:
                     selfMotionHoldMaturedUnderContinuedArtifact_ &&
                     sustainedMotionConfirmed_;
                 selfMotionHoldMaturedUnderContinuedArtifact_ = false;
+                selfMotionSuppressionFramesElapsed_ = 0;
                 if (!preserveMatureMotion)
                     discardMotionEvidence();
             }
@@ -333,6 +352,7 @@ public:
         unreliableSamples_ = 0;
         reliableDirectionSamples_ = 0;
         selfMotionSuppressionFramesRemaining_ = 0;
+        selfMotionSuppressionFramesElapsed_ = 0;
         selfMotionHoldMaturedUnderContinuedArtifact_ = false;
         selfMotionRearmPending_ = false;
         continuousPredictionFrames_ = 0;
@@ -394,6 +414,7 @@ private:
         highSpeedTransientSamples_ = 0;
         sparseResumeFramesRemaining_ = 0;
         selfMotionHoldMaturedUnderContinuedArtifact_ = false;
+        selfMotionSuppressionFramesElapsed_ = 0;
         resetPredictionDistanceSmoothing();
         observations_.clear();
         if (initialized_)
@@ -809,6 +830,7 @@ private:
     int unreliableSamples_ = 0;
     int reliableDirectionSamples_ = 0;
     int selfMotionSuppressionFramesRemaining_ = 0; // 自运动伪迹命中后的剩余抑制观测帧数
+    int selfMotionSuppressionFramesElapsed_ = 0; // 当前保持开始后已实际抑制的后续观测数
     bool selfMotionHoldMaturedUnderContinuedArtifact_ = false; // 保持期间持续伪迹下已确认真实运动
     bool selfMotionRearmPending_ = false; // 保持结束后是否仍需更强净位移证据
     int continuousPredictionFrames_ = 0; // 当前方向连续有效预测帧数，用于识别真实持续运动

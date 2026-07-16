@@ -1071,11 +1071,11 @@ int main()
     for (std::string column; identityColumns.size() < 5 && std::getline(traceRowStream, column, ',');) {
         identityColumns.push_back(column);
     }
-    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "54",
+    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "55",
                "pipeline row carries the compiled controller revision");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r54") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r55") != std::string::npos,
                "ui build label includes controller revision");
 
     CommandCancellationEpoch cancellationEpoch;
@@ -1419,9 +1419,9 @@ int main()
     }
     expectTrue(sustainedHoldSuppressedFrames >= 4 &&
                    sustainedHoldReleaseSample > 0 &&
-                   sustainedHoldReleaseSample <= 8 &&
+                   sustainedHoldReleaseSample <= 5 &&
                    uninterruptedHoldResult.offsetX > 0.0,
-               "mature motion consumes a bounded hold and resumes without discarding its direction");
+               "mature motion counts already-suppressed tail frames and resumes without discarding its direction");
 
     selfMotionHoldPredictor.applySelfMotionSuppression(recoveredResult, true);
     selfMotionHoldPredictor.reset();
