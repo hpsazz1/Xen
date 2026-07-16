@@ -33,6 +33,8 @@
 #include "runtime/target_predictor.h"
 #include "runtime/view_motion_history.h"
 
+struct PipelineFrame;
+
 /**
  * @brief 鼠标控制主线程类
  *
@@ -230,6 +232,17 @@ private:
     std::pair<double, double> getMotionCompensationAt(
         std::chrono::steady_clock::time_point time) const;        ///< 查询指定时刻累计自身视角位移
     std::pair<double, double> currentDegreesPerCount() const;      ///< 当前游戏Profile的X/Y轴角度比例
+    /** @brief 填充正式与暂停影子帧共用的目标、性能和来源诊断。 */
+    void populatePipelineTraceObservation(
+        PipelineFrame& frame, const AimbotTarget& target) const;
+    /** @brief 将单个真实检测送入独立影子链；不访问legacy状态或设备队列。 */
+    AimPipelineFrameState processAimPipelineObservation(
+        const AimbotTarget& target,
+        FrameTiming frameTiming,
+        int targetTrackId,
+        std::chrono::steady_clock::time_point observationTime,
+        std::chrono::steady_clock::time_point controlTime,
+        bool outputPaused);
 
     /** @brief 计算从当前位置到目标位置的移动量（像素→counts，含速度曲线+FPS修正） */
     std::pair<double, double> calc_movement(double target_x, double target_y);
@@ -282,6 +295,11 @@ public:
      * @param observationTime 观测时间戳
      */
     void moveMousePivot(
+        const AimbotTarget& target,
+        FrameTiming frameTiming = {},
+        int targetTrackId = -1);
+    /** @brief 输出暂停时仅推进shadow观测和CSV，绝不运行legacy控制或设备发送。 */
+    void observeAimPipelineOnly(
         const AimbotTarget& target,
         FrameTiming frameTiming = {},
         int targetTrackId = -1);

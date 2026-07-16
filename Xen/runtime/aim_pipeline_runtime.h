@@ -20,6 +20,8 @@ public:
     void configureTrajectory(const CommandTrajectoryShaper::Settings& shaperSettings,
                              const OutputScheduler::Settings& schedulerSettings);
     void reset();
+    /** @brief 正式输出暂停；shadow保留估计状态，legacy维持原空状态重置语义。 */
+    void suspendOutput();
     AimPipelineFrameState observe(const AimObservation& observation);
     void setViewMotionDiagnostics(const ViewMotionShadowDiagnostics& diagnostics);
 

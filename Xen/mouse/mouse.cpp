@@ -1174,6 +1174,118 @@ void MouseThread::moveMouse(const AimbotTarget& target)
     moveMousePivot(target);
 }
 
+void MouseThread::populatePipelineTraceObservation(
+    PipelineFrame& frame, const AimbotTarget& target) const
+{
+    frame.rawPivotX = target.pivotX;
+    frame.rawPivotY = target.pivotY;
+    frame.targetBoxX = target.x;
+    frame.targetBoxY = target.y;
+    frame.targetBoxWidth = target.w;
+    frame.targetBoxHeight = target.h;
+    frame.targetClassId = target.classId;
+    frame.targetDetected = true;
+    frame.fpsValue = static_cast<double>(captureFps.load());
+    frame.inferenceFps = detectionBuffer.getPublishFps();
+    frame.trackerStaleTimeoutMs = trackerStaleTimeoutMs(frame.inferenceFps);
+#ifndef USE_CUDA
+    if (dml_detector)
+    {
+        const DirectMLDetector::TimingSnapshot timing = dml_detector->getTimingSnapshot();
+        frame.dmlPreprocessMs = timing.preprocessMs;
+        frame.dmlTensorSetupMs = timing.tensorSetupMs;
+        frame.dmlInferenceMs = timing.inferenceMs;
+        frame.dmlCopyMs = timing.copyMs;
+        frame.dmlPostprocessMs = timing.postprocessMs;
+        frame.dmlNmsMs = timing.nmsMs;
+        frame.dmlTotalMs = timing.totalMs;
+        frame.dmlModel = timing.modelPath;
+        frame.dmlInputWidth = timing.inputWidth;
+        frame.dmlInputHeight = timing.inputHeight;
+    }
+#endif
+    const CaptureSourceDiagnostics sourceDiagnostics = GetCaptureSourceDiagnostics();
+    frame.sourceDeclaredFps = sourceDiagnostics.declaredFps;
+    frame.sourceReceiveFps = sourceDiagnostics.receiveFps;
+    frame.sourceReceivedFrames = sourceDiagnostics.receivedFrames;
+    frame.sourceDroppedFrames = sourceDiagnostics.droppedFrames;
+    const NdiCaptureDiagnostics ndiDiagnostics = NDICapture::GetDiagnostics();
+    frame.ndiDeclaredFps = ndiDiagnostics.declaredFps;
+    frame.ndiReceiveFps = ndiDiagnostics.receiveFps;
+    frame.ndiReceivedFrames = ndiDiagnostics.receivedFrames;
+    frame.ndiDroppedFrames = ndiDiagnostics.droppedFrames;
+    frame.sourceWidth = ::screenWidth.load(std::memory_order_relaxed);
+    frame.sourceHeight = ::screenHeight.load(std::memory_order_relaxed);
+}
+
+AimPipelineFrameState MouseThread::processAimPipelineObservation(
+    const AimbotTarget& target,
+    FrameTiming frameTiming,
+    int targetTrackId,
+    std::chrono::steady_clock::time_point observationTime,
+    std::chrono::steady_clock::time_point controlTime,
+    bool outputPaused)
+{
+    AimObservation observation;
+    observation.timing = frameTiming;
+    if (observation.timing.sourceWidth <= 0)
+        observation.timing.sourceWidth = ::screenWidth.load(std::memory_order_relaxed);
+    if (observation.timing.sourceHeight <= 0)
+        observation.timing.sourceHeight = ::screenHeight.load(std::memory_order_relaxed);
+    observation.trackId = targetTrackId;
+    observation.classId = target.classId;
+    observation.confidence = target.confidence;
+    observation.pivotX = target.pivotX;
+    observation.pivotY = target.pivotY;
+    observation.boxX = target.x;
+    observation.boxY = target.y;
+    observation.boxWidth = target.w;
+    observation.boxHeight = target.h;
+    observation.outputPaused = outputPaused;
+    observation.valid = true;
+    aimPipelineRuntime.observe(observation);
+
+    if (aimPipelineRuntime.effectiveMode() == AimPipelineMode::Shadow)
+    {
+        const double sourceWidth = AimCoordinateSpace::resolveFovPixelSpan(
+            observation.timing.sourceWidth, screen_width);
+        const double sourceHeight = AimCoordinateSpace::resolveFovPixelSpan(
+            observation.timing.sourceHeight, screen_height);
+        const auto measuredLos = AimCoordinateSpace::pixelOffsetToLosAngles(
+            target.pivotX - center_x,
+            target.pivotY - center_y,
+            fov_x,
+            fov_y,
+            sourceWidth,
+            sourceHeight);
+        const auto cameraAtObservation = appliedViewMotionModel.at(observationTime);
+        const auto cameraAtControl = appliedViewMotionModel.at(controlTime);
+        const auto degreesPerCount = currentDegreesPerCount();
+
+        ViewMotionShadowDiagnostics diagnostics;
+        diagnostics.valid = true;
+        diagnostics.commandToFrameDelayMs = appliedViewMotionModel.commandToFrameDelayMs();
+        diagnostics.degreesPerCountX = degreesPerCount.first;
+        diagnostics.degreesPerCountY = degreesPerCount.second;
+        diagnostics.measuredLosYawDegrees = measuredLos.yawDegrees;
+        diagnostics.measuredLosPitchDownDegrees = measuredLos.pitchDownDegrees;
+        diagnostics.appliedCameraYawAtObservationDegrees = cameraAtObservation.first;
+        diagnostics.appliedCameraPitchAtObservationDegrees = cameraAtObservation.second;
+        diagnostics.appliedCameraYawAtControlDegrees = cameraAtControl.first;
+        diagnostics.appliedCameraPitchAtControlDegrees = cameraAtControl.second;
+        diagnostics.stabilizedLosYawDegrees =
+            measuredLos.yawDegrees + cameraAtObservation.first;
+        diagnostics.stabilizedLosPitchDownDegrees =
+            measuredLos.pitchDownDegrees + cameraAtObservation.second;
+        diagnostics.relativeErrorYawDegrees =
+            diagnostics.stabilizedLosYawDegrees - cameraAtControl.first;
+        diagnostics.relativeErrorPitchDownDegrees =
+            diagnostics.stabilizedLosPitchDownDegrees - cameraAtControl.second;
+        aimPipelineRuntime.setViewMotionDiagnostics(diagnostics);
+    }
+    return aimPipelineRuntime.snapshot();
+}
+
 /**
  * moveMousePivot
  *
@@ -1210,45 +1322,7 @@ void MouseThread::moveMousePivot(
     {
         traceFrame = g_pipelineTracer.beginFrame(static_cast<int>(screen_width));
         pf = &traceFrame;
-        pf->rawPivotX = pivotX;
-        pf->rawPivotY = pivotY;
-        pf->targetBoxX = target.x;
-        pf->targetBoxY = target.y;
-        pf->targetBoxWidth = target.w;
-        pf->targetBoxHeight = target.h;
-        pf->targetClassId = target.classId;
-        pf->targetDetected = true;
-        pf->fpsValue = static_cast<double>(captureFps.load());
-        pf->inferenceFps = detectionBuffer.getPublishFps();
-        pf->trackerStaleTimeoutMs = trackerStaleTimeoutMs(pf->inferenceFps);
-#ifndef USE_CUDA
-        if (dml_detector)
-        {
-            const DirectMLDetector::TimingSnapshot timing = dml_detector->getTimingSnapshot();
-            pf->dmlPreprocessMs = timing.preprocessMs;
-            pf->dmlTensorSetupMs = timing.tensorSetupMs;
-            pf->dmlInferenceMs = timing.inferenceMs;
-            pf->dmlCopyMs = timing.copyMs;
-            pf->dmlPostprocessMs = timing.postprocessMs;
-            pf->dmlNmsMs = timing.nmsMs;
-            pf->dmlTotalMs = timing.totalMs;
-            pf->dmlModel = timing.modelPath;
-            pf->dmlInputWidth = timing.inputWidth;
-            pf->dmlInputHeight = timing.inputHeight;
-        }
-#endif
-        const CaptureSourceDiagnostics sourceDiagnostics = GetCaptureSourceDiagnostics();
-        pf->sourceDeclaredFps = sourceDiagnostics.declaredFps;
-        pf->sourceReceiveFps = sourceDiagnostics.receiveFps;
-        pf->sourceReceivedFrames = sourceDiagnostics.receivedFrames;
-        pf->sourceDroppedFrames = sourceDiagnostics.droppedFrames;
-        const NdiCaptureDiagnostics ndiDiagnostics = NDICapture::GetDiagnostics();
-        pf->ndiDeclaredFps = ndiDiagnostics.declaredFps;
-        pf->ndiReceiveFps = ndiDiagnostics.receiveFps;
-        pf->ndiReceivedFrames = ndiDiagnostics.receivedFrames;
-        pf->ndiDroppedFrames = ndiDiagnostics.droppedFrames;
-        pf->sourceWidth = ::screenWidth.load(std::memory_order_relaxed);
-        pf->sourceHeight = ::screenHeight.load(std::memory_order_relaxed);
+        populatePipelineTraceObservation(*pf, target);
         if (observationTime.time_since_epoch().count() != 0)
         {
             const double age = std::chrono::duration<double>(
@@ -1303,60 +1377,9 @@ void MouseThread::moveMousePivot(
             pf->observationAgeSec = std::chrono::duration<double>(
                 controlTime - frameTiming.backendReceiveTime).count();
     }
-    AimObservation shadowObservation;
-    shadowObservation.timing = frameTiming;
-    if (shadowObservation.timing.sourceWidth <= 0)
-        shadowObservation.timing.sourceWidth = ::screenWidth.load(std::memory_order_relaxed);
-    if (shadowObservation.timing.sourceHeight <= 0)
-        shadowObservation.timing.sourceHeight = ::screenHeight.load(std::memory_order_relaxed);
-    shadowObservation.trackId = targetTrackId;
-    shadowObservation.classId = target.classId;
-    shadowObservation.confidence = target.confidence;
-    shadowObservation.pivotX = pivotX;
-    shadowObservation.pivotY = pivotY;
-    shadowObservation.boxX = target.x;
-    shadowObservation.boxY = target.y;
-    shadowObservation.boxWidth = target.w;
-    shadowObservation.boxHeight = target.h;
-    shadowObservation.valid = true;
-    aimPipelineRuntime.observe(shadowObservation);
-    if (aimPipelineRuntime.effectiveMode() == AimPipelineMode::Shadow)
-    {
-        const double sourceWidth = AimCoordinateSpace::resolveFovPixelSpan(
-            shadowObservation.timing.sourceWidth, screen_width);
-        const double sourceHeight = AimCoordinateSpace::resolveFovPixelSpan(
-            shadowObservation.timing.sourceHeight, screen_height);
-        const auto measuredLos = AimCoordinateSpace::pixelOffsetToLosAngles(
-            pivotX - center_x,
-            pivotY - center_y,
-            fov_x,
-            fov_y,
-            sourceWidth,
-            sourceHeight);
-        const auto cameraAtObservation = appliedViewMotionModel.at(effectiveObservationTime);
-        const auto cameraAtControl = appliedViewMotionModel.at(controlTime);
-        const auto degreesPerCount = currentDegreesPerCount();
-
-        ViewMotionShadowDiagnostics diagnostics;
-        diagnostics.valid = true;
-        diagnostics.commandToFrameDelayMs = appliedViewMotionModel.commandToFrameDelayMs();
-        diagnostics.degreesPerCountX = degreesPerCount.first;
-        diagnostics.degreesPerCountY = degreesPerCount.second;
-        diagnostics.measuredLosYawDegrees = measuredLos.yawDegrees;
-        diagnostics.measuredLosPitchDownDegrees = measuredLos.pitchDownDegrees;
-        diagnostics.appliedCameraYawAtObservationDegrees = cameraAtObservation.first;
-        diagnostics.appliedCameraPitchAtObservationDegrees = cameraAtObservation.second;
-        diagnostics.appliedCameraYawAtControlDegrees = cameraAtControl.first;
-        diagnostics.appliedCameraPitchAtControlDegrees = cameraAtControl.second;
-        diagnostics.stabilizedLosYawDegrees = measuredLos.yawDegrees + cameraAtObservation.first;
-        diagnostics.stabilizedLosPitchDownDegrees = measuredLos.pitchDownDegrees + cameraAtObservation.second;
-        diagnostics.relativeErrorYawDegrees =
-            diagnostics.stabilizedLosYawDegrees - cameraAtControl.first;
-        diagnostics.relativeErrorPitchDownDegrees =
-            diagnostics.stabilizedLosPitchDownDegrees - cameraAtControl.second;
-        aimPipelineRuntime.setViewMotionDiagnostics(diagnostics);
-    }
-    const AimPipelineFrameState shadowFrame = aimPipelineRuntime.snapshot();
+    const AimPipelineFrameState shadowFrame = processAimPipelineObservation(
+        target, frameTiming, targetTrackId,
+        effectiveObservationTime, controlTime, false);
     if (pf)
         pf->aimPipeline = shadowFrame;
     const double calibrationSourceWidth = AimCoordinateSpace::resolveFovPixelSpan(
@@ -1960,6 +1983,42 @@ void MouseThread::moveMousePivot(
 #endif
 }
 
+void MouseThread::observeAimPipelineOnly(
+    const AimbotTarget& target,
+    FrameTiming frameTiming,
+    int targetTrackId)
+{
+    std::lock_guard lg(input_method_mutex);
+    // legacy模式没有独立影子状态；尽早返回保证松开期间不触碰旧滤波、控制器、
+    // 标定器或设备队列。active请求当前也会在运行时安全降级为Shadow。
+    if (aimPipelineRuntime.effectiveMode() == AimPipelineMode::Legacy)
+        return;
+
+    const auto controlTime = std::chrono::steady_clock::now();
+    const auto observationTime = frameTiming.backendReceiveTime.time_since_epoch().count() == 0
+        ? controlTime : frameTiming.backendReceiveTime;
+    frameTiming.observationTime = observationTime;
+    frameTiming.controlTime = controlTime;
+    const AimPipelineFrameState shadowFrame = processAimPipelineObservation(
+        target, frameTiming, targetTrackId,
+        observationTime, controlTime, true);
+
+    if (!g_pipelineTracer.isEnabled())
+        return;
+
+    PipelineFrame traceFrame = g_pipelineTracer.beginFrame(
+        static_cast<int>(screen_width));
+    populatePipelineTraceObservation(traceFrame, target);
+    traceFrame.frameTiming = frameTiming;
+    traceFrame.aimPipeline = shadowFrame;
+    traceFrame.observationAgeSec = std::chrono::duration<double>(
+        controlTime - observationTime).count();
+    // shadow-only入口没有任何排队动作；记录实际队列长度用于现场证明松开边界
+    // 已由clearQueuedMoves清空，而不是仅依赖候选命令的逻辑抑制位。
+    traceFrame.queuedMoveCount = pendingMoveCount();
+    g_pipelineTracer.commitFrame(std::move(traceFrame));
+}
+
 /**
  * clearQueuedMoves
  *
@@ -2172,7 +2231,7 @@ void MouseThread::releaseMouse()
 /**
  * resetTracking
  *
- * 目标丢失、身份切换或瞄准状态变化时统一清空队列、滤波、预测和控制器状态。
+ * 目标丢失、身份切换或配置变化时统一清空队列、滤波、预测和控制器状态。
  * 预测器不保留滑行状态，因此重置后必须重新收到两个连续真实观测才会产生前瞻。
  */
 void MouseThread::resetTracking()
@@ -2212,7 +2271,8 @@ void MouseThread::suspendAimingOutput()
     clearQueuedMoves();
     aimController.reset();
     conditionalSpeedBudget.reset();
-    aimPipelineRuntime.reset();
+    // 输出暂停不是目标丢失；运行时会保留shadow代次与估计，legacy仍维持原重置语义。
+    aimPipelineRuntime.suspendOutput();
     controlIntervalTracker.reset();
     legacyCountRemainderX = 0.0;
     legacyCountRemainderY = 0.0;

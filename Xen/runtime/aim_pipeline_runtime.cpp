@@ -55,6 +55,14 @@ void AimPipelineRuntime::reset()
     outputScheduler_.reset();
 }
 
+void AimPipelineRuntime::suspendOutput()
+{
+    // 输出暂停不是目标丢失。Shadow必须跨松开区间连续消费观测；Legacy没有
+    // 独立估计状态，继续重置空快照可保持旧模式行为和诊断代次语义。
+    if (effectiveMode_ == AimPipelineMode::Legacy)
+        reset();
+}
+
 void AimPipelineRuntime::configureTrajectory(
     const CommandTrajectoryShaper::Settings& shaperSettings,
     const OutputScheduler::Settings& schedulerSettings)

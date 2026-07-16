@@ -352,6 +352,15 @@ void mouseThreadFunction(MouseThread& mouseThread)
             }
         }
 
+        // P0-6C：松开只暂停正式输出。只要同一跟踪目标仍有真实检测，独立影子链
+        // 就继续消费观测和原始时间戳；该入口不运行legacy滤波/控制，也不访问
+        // 设备发送路径。目标丢失或ID切换仍通过resetTracking完整重置两条链。
+        if (!aimingNow && activeTarget && hasAimObservation)
+        {
+            mouseThread.observeAimPipelineOnly(
+                *activeTarget, detectionTiming, activeTrackId);
+        }
+
         // ========== 鼠标移动和自动射击逻辑 ==========
         if (aimingNow)
         {

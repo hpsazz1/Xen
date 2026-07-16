@@ -12,34 +12,70 @@ function Assert-Equal {
 }
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('xen-shadow-analysis-' + [guid]::NewGuid().ToString('N'))
-$header = 'BuildBackend,BuildRevision,ControllerRevision,AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed,AimPipelineEstimateValid,AimPipelineCovarianceX,AimPipelineCovarianceY,AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineNisX,AimPipelineNisY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,TrajectoryShaperMode,AimPipelineTrajectoryCommandSuppressed,TimingComplete,TimingOrderValid'
-$validRow = 'DML,test-revision,30,shadow,shadow,0,1,1,1,0.02,0.03,0.04,0.05,0.2,0.3,0,0,0,0,0,0,off,1,1,1'
+$header = 'BuildBackend,BuildRevision,ControllerRevision,AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed,AimPipelineOutputPaused,AimPipelineResetGeneration,AimPipelineObservationSequence,AimPipelineTargetId,AimPipelineEstimateValid,AimPipelineCovarianceX,AimPipelineCovarianceY,AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineNisX,AimPipelineNisY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,TrajectoryShaperMode,AimPipelineTrajectoryCommandSuppressed,TimingComplete,TimingOrderValid,FinalMx,FinalMy,CommandEnqueueSucceeded,CommandSendAttempted,CommandSendSucceeded,CommandRequestedCountsX,CommandRequestedCountsY,CommandAppliedCountsX,CommandAppliedCountsY,QueuedMoveCount'
+$activeRow = 'DML,test-revision,59,shadow,shadow,0,1,1,0,4,1,7,1,0.02,0.03,0.04,0.05,0.2,0.3,0,0,0,0,0,0,off,1,1,1,0,0,0,0,0,0,0,0,0,0'
+$pausedRow = 'DML,test-revision,59,shadow,shadow,0,1,1,1,4,2,7,1,0.02,0.03,0.04,0.05,0.2,0.3,0,0,0,0,0,0,off,1,1,1,0,0,0,0,0,0,0,0,0,0'
+$resumedRow = 'DML,test-revision,59,shadow,shadow,0,1,1,0,4,3,7,1,0.02,0.03,0.04,0.05,0.2,0.3,0,0,0,0,0,0,off,1,1,1,0,0,0,0,0,0,0,0,0,0'
 try {
     $validRoot = Join-Path $temporaryRoot 'valid'
     New-Item -ItemType Directory -Path $validRoot | Out-Null
     foreach ($scenario in @('static', 'horizontal_left', 'horizontal_right', 'horizontal_reverse', 'horizontal_jump')) {
-        @($header, $validRow, $validRow) | Set-Content `
+        @($header, $activeRow, $pausedRow, $resumedRow) | Set-Content `
             -LiteralPath (Join-Path $validRoot "$scenario.csv") -Encoding UTF8
     }
     $outputCsv = Join-Path $validRoot 'shadow_pipeline_summary.csv'
     $metrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `
-        -DataRoot $validRoot -MinEstimateSamples 2 -ExpectedBuildRevision test-revision `
+        -DataRoot $validRoot -MinEstimateSamples 3 -ExpectedBuildRevision test-revision `
+        -ExpectedControllerRevision 59 -RequirePausedObservations -MinPausedObservations 5 `
         -OutputCsv $outputCsv -RequireStandardScenarios -PassThru)
     Assert-Equal 6 $metrics.Count 'Five scenarios and one overall shadow summary must be emitted.'
     Assert-Equal PASS $metrics[-1].Status 'Valid shadow data must pass.'
-    Assert-Equal 10 $metrics[-1].EstimateSamples 'Estimate samples must be counted.'
+    Assert-Equal 15 $metrics[-1].EstimateSamples 'Estimate samples must be counted.'
+    Assert-Equal 5 $metrics[-1].PausedObservations 'Paused observations must be counted.'
+    Assert-Equal 0 $metrics[-1].PausedCommandViolations 'Paused rows must not reach device commands.'
+    Assert-Equal 0 $metrics[-1].PauseContinuityViolations 'Pause boundaries must keep observation sequence continuous.'
 
     $invalidRoot = Join-Path $temporaryRoot 'invalid'
     New-Item -ItemType Directory -Path $invalidRoot | Out-Null
-    $invalidRow = $validRow -replace ',shadow,shadow,0,1,1,', ',active,shadow,0,1,0,'
+    $invalidRow = $pausedRow -replace ',shadow,shadow,0,1,1,1,', ',active,shadow,0,1,0,1,'
+    $invalidRow = $invalidRow -replace ',0,0,0,0,0,0,0,0,0,0$', ',1,0,1,1,0,5,0,0,0,1'
     @($header, $invalidRow) | Set-Content -LiteralPath (Join-Path $invalidRoot 'unsafe.csv') -Encoding UTF8
     $failed = $false
     try {
         & (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `
-            -DataRoot $invalidRoot -MinEstimateSamples 1 -ExpectedBuildRevision test-revision | Out-Null
+            -DataRoot $invalidRoot -MinEstimateSamples 1 -ExpectedBuildRevision test-revision `
+            -ExpectedControllerRevision 59 -RequirePausedObservations | Out-Null
     }
     catch { $failed = $true }
     Assert-Equal True $failed 'Unsafe shadow mode contract must fail validation.'
+
+    $unsafePauseRoot = Join-Path $temporaryRoot 'unsafe-pause'
+    New-Item -ItemType Directory -Path $unsafePauseRoot | Out-Null
+    $unsafePausedRow = $pausedRow -replace ',0,0,0,0,0,0,0,0,0,0$', ',1,0,1,1,0,5,0,0,0,1'
+    @($header, $activeRow, $unsafePausedRow, $resumedRow) | Set-Content `
+        -LiteralPath (Join-Path $unsafePauseRoot 'left.csv') -Encoding UTF8
+    $unsafePauseFailed = $false
+    try {
+        & (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `
+            -DataRoot $unsafePauseRoot -MinEstimateSamples 3 `
+            -ExpectedBuildRevision test-revision -ExpectedControllerRevision 59 `
+            -RequirePausedObservations | Out-Null
+    }
+    catch { $unsafePauseFailed = $true }
+    Assert-Equal True $unsafePauseFailed 'Paused rows that reach command lifecycle fields must fail.'
+
+    $missingPauseRoot = Join-Path $temporaryRoot 'missing-pause'
+    New-Item -ItemType Directory -Path $missingPauseRoot | Out-Null
+    @($header, $activeRow) | Set-Content -LiteralPath (Join-Path $missingPauseRoot 'left.csv') -Encoding UTF8
+    $missingPauseFailed = $false
+    try {
+        & (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `
+            -DataRoot $missingPauseRoot -MinEstimateSamples 1 `
+            -ExpectedBuildRevision test-revision -ExpectedControllerRevision 59 `
+            -RequirePausedObservations | Out-Null
+    }
+    catch { $missingPauseFailed = $true }
+    Assert-Equal True $missingPauseFailed 'Required paused observations cannot be omitted.'
 }
 finally {
     if (Test-Path -LiteralPath $temporaryRoot) {

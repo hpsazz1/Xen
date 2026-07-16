@@ -104,6 +104,9 @@ struct AimObservation
     double boxY = 0.0;
     double boxWidth = 0.0;
     double boxHeight = 0.0;
+    // true表示本帧只供影子链连续估计，正式瞄准输出处于暂停状态。
+    // 该标志只用于诊断和安全验收，不得解除任何命令抑制。
+    bool outputPaused = false;
     bool valid = false;
 };
 

@@ -174,7 +174,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
 
     // CSV 表头
     file << "FrameID,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision,"
-         << "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed,AimPipelineResetGeneration,AimPipelineObservationSequence,"
+         << "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed,AimPipelineOutputPaused,AimPipelineResetGeneration,AimPipelineObservationSequence,"
          << "AimPipelineTargetId,AimPipelineClassId,AimPipelineConfidence,AimPipelineRawPivotX,AimPipelineRawPivotY,AimPipelineEstimateValid,"
          << "AimPipelineAngleX,AimPipelineAngleY,AimPipelineRateX,AimPipelineRateY,AimPipelineCovarianceX,AimPipelineCovarianceY,"
          << "AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY,"
@@ -242,6 +242,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << (ap.activeAvailable ? '1' : '0') << ','
              << (ap.shadowProcessed ? '1' : '0') << ','
              << (ap.commandSuppressed ? '1' : '0') << ','
+             << (ap.observation.outputPaused ? '1' : '0') << ','
              << ap.resetGeneration << ',' << ap.observationSequence << ','
              << ap.observation.trackId << ',' << ap.observation.classId << ','
              << ap.observation.confidence << ','

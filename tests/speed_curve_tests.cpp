@@ -270,6 +270,35 @@ int main()
                shadowFrame.observationSequence == 1,
                "shadow pipeline preserves target identity and observation sequence");
 
+    AimObservation pausedShadowObservation = shadowObservation;
+    pausedShadowObservation.outputPaused = true;
+    pausedShadowObservation.timing.observationTime += std::chrono::milliseconds(10);
+    pausedShadowObservation.timing.controlTime += std::chrono::milliseconds(10);
+    const uint64_t generationBeforePause = newPipeline.resetGeneration();
+    newPipeline.suspendOutput();
+    expectTrue(newPipeline.snapshot().resetGeneration == generationBeforePause &&
+                   newPipeline.snapshot().observationSequence == 1,
+               "suspending formal output preserves the independent shadow generation");
+    const AimPipelineFrameState pausedShadowFrame =
+        newPipeline.observe(pausedShadowObservation);
+    expectTrue(pausedShadowFrame.shadowProcessed &&
+                   pausedShadowFrame.observation.outputPaused &&
+                   pausedShadowFrame.observationSequence == 2 &&
+                   pausedShadowFrame.resetGeneration == generationBeforePause &&
+                   pausedShadowFrame.commandSuppressed &&
+                   pausedShadowFrame.trajectoryOutput.commandSuppressed,
+               "paused output keeps shadow observations continuous and doubly suppressed");
+    AimObservation resumedShadowObservation = pausedShadowObservation;
+    resumedShadowObservation.outputPaused = false;
+    resumedShadowObservation.timing.observationTime += std::chrono::milliseconds(10);
+    resumedShadowObservation.timing.controlTime += std::chrono::milliseconds(10);
+    const AimPipelineFrameState resumedShadowFrame =
+        newPipeline.observe(resumedShadowObservation);
+    expectTrue(!resumedShadowFrame.observation.outputPaused &&
+                   resumedShadowFrame.observationSequence == 3 &&
+                   resumedShadowFrame.resetGeneration == generationBeforePause,
+               "resuming output continues the same shadow target generation");
+
     const uint64_t generationBeforeSwitch = newPipeline.resetGeneration();
     newPipeline.reset();
     const AimPipelineFrameState resetFrame = newPipeline.snapshot();
@@ -1094,8 +1123,8 @@ int main()
         "FrameID,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision") != std::string::npos,
         "basic pipeline identifies the executable and controller revision");
     expectTrue(traceHeader.find(
-        "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed") != std::string::npos,
-        "basic pipeline records same-frame new pipeline mode diagnostics");
+        "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed,AimPipelineOutputPaused") != std::string::npos,
+        "basic pipeline records same-frame mode and output-pause diagnostics");
     expectTrue(traceHeader.find(
         "ViewMotionShadowValid,CommandToFrameDelayMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees") != std::string::npos,
         "basic pipeline records delayed applied-view angle diagnostics");
@@ -1143,7 +1172,7 @@ int main()
     expectTrue(identityColumns.size() == 5 &&
                    identityColumns[4] == std::to_string(kBasicAimControllerRevision),
                "pipeline row carries the compiled controller revision");
-    expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
+    expectTrue(traceRow.find(",shadow,shadow,0,1,1,0,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
     expectTrue(BuildIdentity::displayLabel().find(
                    " r" + std::to_string(kBasicAimControllerRevision)) != std::string::npos,
