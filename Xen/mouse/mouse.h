@@ -95,6 +95,7 @@ private:
     bool previousSelfMotionArtifact = false;
     bool predictionResumePending = false;                         ///< 短暂松开后等待同目标快速恢复
     std::chrono::steady_clock::time_point aimingOutputSuspendedAt{}; ///< 输出暂停起点，用于限制状态复用窗口
+    std::chrono::steady_clock::time_point quickResumeCatchUpUntil{}; ///< 同向短恢复的大误差短时追赶截止点
     struct PredictionObservationContext
     {
         double screenX = 0.0;

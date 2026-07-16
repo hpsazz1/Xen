@@ -1261,6 +1261,7 @@ void MouseThread::moveMousePivot(
     // 冷启动处理，避免复用已经过时或可能被玩家手动转向污染的运动状态。
     constexpr double kQuickResumeMaximumGapSeconds = 0.35;
     double maximumObservationGapSeconds = 0.10;
+    bool quickResumeCandidate = false;
     if (predictionResumePending)
     {
         const double suspendedSeconds = std::chrono::duration<double>(
@@ -1269,6 +1270,7 @@ void MouseThread::moveMousePivot(
             suspendedSeconds <= kQuickResumeMaximumGapSeconds)
         {
             maximumObservationGapSeconds = kQuickResumeMaximumGapSeconds;
+            quickResumeCandidate = true;
         }
         else
         {
@@ -1276,6 +1278,7 @@ void MouseThread::moveMousePivot(
             targetPredictor.reset();
             lastFilterResult = {};
             lastPredictionResult = {};
+            quickResumeCatchUpUntil = {};
         }
         predictionResumePending = false;
     }
@@ -1399,6 +1402,22 @@ void MouseThread::moveMousePivot(
     }
     targetPredictor.applySelfMotionSuppression(
         lastPredictionResult, selfMotionArtifactDetected);
+    // 只有预测器已经确认沿用松开前的成熟方向，才允许进入短恢复追赶。窗口只覆盖
+    // 暂停积累误差的首个100 ms；目标停止、反向或安全门控撤销提前量时不会启动。
+    if (quickResumeCandidate)
+    {
+        constexpr auto kQuickResumeCatchUpDuration = std::chrono::milliseconds(100);
+        if (lastPredictionResult.directionLocked &&
+            !lastPredictionResult.selfMotionSuppressed &&
+            std::abs(lastPredictionResult.offsetX) > 1e-6)
+        {
+            quickResumeCatchUpUntil = controlTime + kQuickResumeCatchUpDuration;
+        }
+        else
+        {
+            quickResumeCatchUpUntil = {};
+        }
+    }
     predictionObservationHistory.push_back({
         observedScreenAtObservationX, observedScreenAtObservationY,
         viewAtObservation.first, viewAtObservation.second
@@ -1454,6 +1473,18 @@ void MouseThread::moveMousePivot(
     settings.integralTimeSeconds = move_integral_time_seconds;
     settings.settleRadiusPixels = std::max(6.0, screen_width / 64.0);
     settings.releaseRadiusPixels = settings.settleRadiusPixels * 1.6;
+    // r51短恢复数据中，19~60 px原始积累误差没有触发设备限速，追到16 px内仍需
+    // 62~95 ms；79~89 px样本已限速，继续全局提速只会增加饱和。仅在同向短恢复
+    // 的100 ms窗口且预测误差仍大于两倍释放半径时，把基础响应从120 ms收紧到
+    // 100 ms。低于大误差阈值立即恢复原参数，设备限速继续作为最终硬边界。
+    const double quickResumeCatchUpThreshold =
+        std::max(32.0, settings.releaseRadiusPixels * 2.0);
+    const bool quickResumeCatchUpActive =
+        controlTime < quickResumeCatchUpUntil &&
+        std::abs(errorX) >= quickResumeCatchUpThreshold &&
+        lastPredictionResult.offsetX * errorX > 0.0;
+    if (quickResumeCatchUpActive)
+        settings.responseSeconds = std::min(settings.responseSeconds, 0.100);
     // 移动积分和稳定锁存必须按轴判断。水平目标的可靠X运动不能阻止Y轴
     // 独立停发，否则Y会持续把约1~2 px检测噪声量化为±1 count。
     // 水平A/B中Y提前量P95仅0.061 px，不能让这种数值残差重新打开Y轴。
@@ -2117,6 +2148,7 @@ void MouseThread::resetTracking()
     previousSelfMotionArtifact = false;
     predictionResumePending = false;
     aimingOutputSuspendedAt = {};
+    quickResumeCatchUpUntil = {};
     predictionObservationHistory.clear();
     target_detected.store(false);
     // 目标切换时重置确认帧计数，避免新目标跳过确认延迟
@@ -2144,6 +2176,7 @@ void MouseThread::suspendAimingOutput()
     predictionObservationHistory.clear();
     predictionResumePending = true;
     aimingOutputSuspendedAt = std::chrono::steady_clock::now();
+    quickResumeCatchUpUntil = {};
     stableFrameCount = 0;
     fireScheduled = false;
     holdScheduled = false;

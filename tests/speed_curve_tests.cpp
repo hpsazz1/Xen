@@ -1071,11 +1071,11 @@ int main()
     for (std::string column; identityColumns.size() < 5 && std::getline(traceRowStream, column, ',');) {
         identityColumns.push_back(column);
     }
-    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "51",
+    expectTrue(identityColumns.size() == 5 && identityColumns[4] == "52",
                "pipeline row carries the compiled controller revision");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r51") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r52") != std::string::npos,
                "ui build label includes controller revision");
 
     CommandCancellationEpoch cancellationEpoch;
@@ -1997,6 +1997,29 @@ int main()
     expectTrue(largeHorizontalOutput.countsX / 40.0 >
                    catchUpHorizontalOutput.countsX / 20.0,
                "continuous catch-up still increases per-pixel response for extreme jumps");
+
+    BasicAimController normalResumeController;
+    BasicAimController boostedResumeController;
+    BasicAimController::Settings normalResumeSettings;
+    normalResumeSettings.responseSeconds = 0.120;
+    normalResumeSettings.maxCountsPerSecond = 3200.0;
+    normalResumeSettings.integralTimeSeconds = 0.0;
+    normalResumeSettings.settleRadiusPixels = 10.0;
+    normalResumeSettings.releaseRadiusPixels = 16.0;
+    BasicAimController::Settings boostedResumeSettings = normalResumeSettings;
+    boostedResumeSettings.responseSeconds = 0.100;
+    const auto normalResumeOutput = normalResumeController.update(
+        48.0, 0.0, 0.010, 1.0, 1.0, normalResumeSettings);
+    const auto boostedResumeOutput = boostedResumeController.update(
+        48.0, 0.0, 0.010, 1.0, 1.0, boostedResumeSettings);
+    expectTrue(!normalResumeOutput.speedLimited && !boostedResumeOutput.speedLimited,
+               "medium quick-resume backlog remains below the device speed limit");
+    expectNear(normalResumeOutput.effectiveResponseSecondsX, 0.0525, 1e-12,
+               "normal 120 ms response keeps the existing large-error catch-up curve");
+    expectNear(boostedResumeOutput.effectiveResponseSecondsX, 0.04375, 1e-12,
+               "quick-resume 100 ms response shortens only the bounded backlog phase");
+    expectTrue(boostedResumeOutput.countsX > normalResumeOutput.countsX,
+               "bounded quick-resume response consumes available medium-error headroom");
 
     // 生产速率必须使用捕获窗统计出的实际 FPS 换算单帧预算，而不是绑定某个设备或固定帧率。
     // 选取本轮 CSV 的约 127/143 FPS 和未来可能出现的 240 FPS，验证每秒总预算始终一致。
