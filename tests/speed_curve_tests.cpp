@@ -1066,7 +1066,7 @@ int main()
                "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r43") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r44") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -1103,6 +1103,28 @@ int main()
     const auto viewAfterPrune = viewHistory.at(t0 + std::chrono::seconds(4));
     expectNear(viewAfterPrune.first, 15.0, 0.0,
                "view history pruning never resets the stable coordinate system");
+    ViewMotionHistory delayedViewHistory;
+    delayedViewHistory.configure(12.0);
+    delayedViewHistory.add(8.0, -4.0, t0 + std::chrono::milliseconds(10));
+    const auto delayedBefore = delayedViewHistory.at(t0 + std::chrono::milliseconds(21));
+    const auto delayedAtEffective = delayedViewHistory.at(t0 + std::chrono::milliseconds(22));
+    expectNear(delayedBefore.first, 0.0, 0.0,
+               "delayed view history excludes commands before frame-effective time");
+    expectNear(delayedAtEffective.first, 8.0, 0.0,
+               "delayed view history applies the complete command at frame-effective time");
+    expectNear(delayedViewHistory.between(
+                   t0 + std::chrono::milliseconds(10),
+                   t0 + std::chrono::milliseconds(21)).first,
+               0.0, 0.0,
+               "delayed view interval excludes commands still in the future");
+    delayedViewHistory.add(2.0, 0.0, t0 + std::chrono::seconds(3));
+    expectNear(delayedViewHistory.at(t0 + std::chrono::seconds(4)).first, 10.0, 0.0,
+               "delayed view history pruning preserves the cumulative coordinate system");
+    delayedViewHistory.configure(20.0);
+    expectNear(delayedViewHistory.at(t0 + std::chrono::seconds(5)).first, 0.0, 0.0,
+               "changing compensation delay clears the incompatible cumulative timeline");
+    expectNear(delayedViewHistory.commandToFrameDelayMs(), 20.0, 0.0,
+               "view history reports the configured command-to-frame delay");
     filter.update(160.0, 160.0, t0, 1.0 / 120.0, 320.0);
     const auto filteredNoise = filter.update(
         160.3, 159.8, t0 + std::chrono::milliseconds(8), 1.0 / 120.0, 320.0);

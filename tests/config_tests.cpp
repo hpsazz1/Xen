@@ -100,6 +100,8 @@ int main()
                    "default maximum speed follows moving-target standard");
         expectNear(defaults.move_integral_time_ms, 500.0, 0.0,
                    "moving integral uses the anti-oscillation accumulation window");
+        expectNear(defaults.aim_motion_compensation_delay_ms, 12.0, 0.0,
+                   "production motion compensation uses the measured NDI response delay");
         expectString(defaults.aim_pipeline_mode, "legacy",
                      "new pipeline defaults to legacy mode");
         expectNear(defaults.aim_shadow_command_to_frame_delay_ms, 60.0, 0.0,
@@ -188,6 +190,8 @@ int main()
                    "saved config persists passive profile calibration state");
         expectTrue(migratedText.find("aim_pipeline_mode = legacy") != std::string::npos,
                    "saved config persists the safe new pipeline mode");
+        expectTrue(migratedText.find("aim_motion_compensation_delay_ms = 12") != std::string::npos,
+                   "saved config persists the production motion compensation delay");
         expectTrue(migratedText.find("aim_shadow_command_to_frame_delay_ms = 60") != std::string::npos,
                    "saved config persists the explicit shadow delay");
         expectTrue(migratedText.find("aim_shadow_feedforward_gain = 0") != std::string::npos &&
@@ -267,6 +271,20 @@ int main()
     expectNear(clampedDelay.aim_shadow_command_to_frame_delay_ms, 250.0, 0.0,
                "shadow delay remains bounded by the documented safety maximum");
     std::filesystem::remove(unsafeDelayPath, removeError);
+
+    const std::filesystem::path unsafeMotionCompensationDelayPath =
+        "xen_config_motion_compensation_delay_test.ini";
+    {
+        std::ofstream unsafeDelayFile(unsafeMotionCompensationDelayPath);
+        unsafeDelayFile << "aim_motion_compensation_delay_ms = 999\n";
+    }
+    Config clampedMotionCompensationDelay{};
+    expectTrue(clampedMotionCompensationDelay.loadConfig(
+                   unsafeMotionCompensationDelayPath.string()),
+               "production motion compensation delay config loads successfully");
+    expectNear(clampedMotionCompensationDelay.aim_motion_compensation_delay_ms, 250.0, 0.0,
+               "production motion compensation delay remains within the safety bound");
+    std::filesystem::remove(unsafeMotionCompensationDelayPath, removeError);
 
     const std::filesystem::path unsafeShadowControllerPath =
         "xen_config_shadow_controller_test.ini";

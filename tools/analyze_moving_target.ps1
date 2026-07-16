@@ -480,7 +480,11 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
         } | Measure-Object -Sum).Sum)
         $outputSideFlipCount = 0
         $outputSideFlipAbsCounts = [System.Collections.Generic.List[double]]::new()
+        $sameSideOutputSteps = [System.Collections.Generic.List[double]]::new()
+        $sameSideOutputMagnitudes = [System.Collections.Generic.List[double]]::new()
+        $sameSideOutputSides = [System.Collections.Generic.List[int]]::new()
         $lastOutputSide = 0
+        $lastOutputMagnitude = 0.0
         foreach ($sample in $samples) {
             $move = [double]$sample.$finalMoveColumn
             $side = if ($move -gt 0.0) { 1 } elseif ($move -lt 0.0) { -1 } else { 0 }
@@ -491,7 +495,33 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
                 ++$outputSideFlipCount
                 $outputSideFlipAbsCounts.Add([math]::Abs($move))
             }
+            elseif ($side -eq $lastOutputSide) {
+                $sameSideOutputSteps.Add([math]::Abs([math]::Abs($move) - $lastOutputMagnitude))
+            }
+            $sameSideOutputMagnitudes.Add([math]::Abs($move))
+            $sameSideOutputSides.Add($side)
             $lastOutputSide = $side
+            $lastOutputMagnitude = [math]::Abs($move)
+        }
+        $sameSideOutputPulseCount = 0
+        for ($index = 1; $index + 1 -lt $sameSideOutputMagnitudes.Count; ++$index) {
+            if ($sameSideOutputSides[$index - 1] -ne $sameSideOutputSides[$index] -or
+                $sameSideOutputSides[$index] -ne $sameSideOutputSides[$index + 1]) {
+                continue
+            }
+            $leftStep = [math]::Abs(
+                $sameSideOutputMagnitudes[$index] - $sameSideOutputMagnitudes[$index - 1])
+            $rightStep = [math]::Abs(
+                $sameSideOutputMagnitudes[$index + 1] - $sameSideOutputMagnitudes[$index])
+            $isLocalExtreme =
+                ($sameSideOutputMagnitudes[$index] -gt $sameSideOutputMagnitudes[$index - 1] -and
+                 $sameSideOutputMagnitudes[$index] -gt $sameSideOutputMagnitudes[$index + 1]) -or
+                ($sameSideOutputMagnitudes[$index] -lt $sameSideOutputMagnitudes[$index - 1] -and
+                 $sameSideOutputMagnitudes[$index] -lt $sameSideOutputMagnitudes[$index + 1])
+            # 3 counts 高于常见的整数余数抖动，可识别 -1/-8/-1 一类同方向强弱脉冲。
+            if ($isLocalExtreme -and $leftStep -ge 3.0 -and $rightStep -ge 3.0) {
+                ++$sameSideOutputPulseCount
+            }
         }
         $countsPerPixelSamples = @($samples | Where-Object {
             [math]::Abs([double]$_.$requestedPixelColumn) -gt 0.000001
@@ -591,6 +621,12 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             OutputSideFlipMaxAbsCounts = if ($outputSideFlipAbsCounts.Count -gt 0) {
                 [math]::Round([double]($outputSideFlipAbsCounts | Measure-Object -Maximum).Maximum, 2)
             } else { 0.0 }
+            OutputSameSideStepP95Counts = if ($sameSideOutputSteps.Count -gt 0) {
+                [math]::Round((Get-PercentileValue -Values @($sameSideOutputSteps) -Percentile 0.95), 2)
+            } else { 0.0 }
+            OutputSameSidePulseCount = $sameSideOutputPulseCount
+            OutputSameSidePulseRateHz = [math]::Round(
+                $sameSideOutputPulseCount / [math]::Max(0.001, $sampleDurationSeconds), 2)
             SpeedLimitedPct = [math]::Round(100.0 * $limitedRows / [math]::Max(1, $samples.Count), 1)
             PredictionActivePct = [math]::Round(
                 100.0 * $predictionRows.Count / [math]::Max(1, $samples.Count), 1)
@@ -699,6 +735,13 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         } else { 0.0 }
         OutputSideFlipMaxAbsCounts = [math]::Round(
             [double]($group | Measure-Object OutputSideFlipMaxAbsCounts -Maximum).Maximum, 2)
+        MeanOutputSameSideStepP95Counts = [math]::Round(
+            [double]($group | Measure-Object OutputSameSideStepP95Counts -Average).Average, 2)
+        OutputSameSidePulseCount = [int](
+            $group | Measure-Object OutputSameSidePulseCount -Sum).Sum
+        OutputSameSidePulseRateHz = [math]::Round(
+            [double]($group | Measure-Object OutputSameSidePulseCount -Sum).Sum /
+            [math]::Max(0.001, [double]($group | Measure-Object DurationMs -Sum).Sum / 1000.0), 2)
         SpeedLimitedPct = [math]::Round([double](($group | ForEach-Object { $_.SpeedLimitedPct * $_.Samples } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         PredictionActivePct = [math]::Round([double](($group | ForEach-Object {
             $_.PredictionActivePct * $_.Samples
@@ -791,6 +834,8 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'ObservedApproxClosedLoopLagMs', 'MeanApproxClosedLoopLagMs',
         'MeanObservedApproxClosedLoopLagMs', 'OutputSideFlipCount', 'OutputSideFlipRateHz',
         'OutputSideFlipMeanAbsCounts', 'OutputSideFlipMaxAbsCounts',
+        'OutputSameSideStepP95Counts', 'MeanOutputSameSideStepP95Counts',
+        'OutputSameSidePulseCount', 'OutputSameSidePulseRateHz',
         'SpeedLimitedPct', 'PredictionActivePct', 'PredictionSelfMotionSuppressedPct',
         'PredictionOscillationSuppressedPct', 'PredictionHighSpeedSuppressedPct',
         'PredictionStationarySuppressedPct',
@@ -817,6 +862,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, OutputSideFlipMeanAbsCounts, OutputSideFlipMaxAbsCounts, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, P95PredictionLeadDeltaPx, P95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, OutputSameSideStepP95Counts, OutputSameSidePulseCount, OutputSameSidePulseRateHz, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, P95PredictionLeadDeltaPx, P95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, MeanObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, OutputSideFlipRateHz, OutputSideFlipMeanAbsCounts, OutputSideFlipMaxAbsCounts, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, MeanP95PredictionLeadDeltaPx, MeanP95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, MeanObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, MeanOutputSameSideStepP95Counts, OutputSameSidePulseCount, OutputSameSidePulseRateHz, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, MeanP95PredictionLeadDeltaPx, MeanP95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize

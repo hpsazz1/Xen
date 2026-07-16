@@ -66,6 +66,12 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
         $row | Add-Member -NotePropertyName SettledY -NotePropertyValue 1
         $row | Add-Member -NotePropertyName PredictionStationarySuppressed `
             -NotePropertyValue $(if ($timestamp -eq 1030) { 1 } else { 0 })
+        if ($timestamp -in @(1000, 1020, 1040)) {
+            $row.FinalMx = 1
+        }
+        elseif ($timestamp -in @(1010, 1030)) {
+            $row.FinalMx = 8
+        }
     }
     $augmentedRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
 
@@ -115,6 +121,8 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 1 $reverseTrials[0].OutputSideFlipCount 'Final device output side changes must be counted independently.'
     Assert-Equal 1 $reverseTrials[0].OutputSideFlipMeanAbsCounts 'Output flip mean magnitude must use the new-side command.'
     Assert-Equal 1 $reverseTrials[0].OutputSideFlipMaxAbsCounts 'Output flip maximum magnitude must remain auditable.'
+    Assert-Equal 7 $reverseTrials[0].OutputSameSideStepP95Counts 'Same-side output step P95 must expose command magnitude modulation.'
+    Assert-Equal 3 $reverseTrials[0].OutputSameSidePulseCount 'Alternating same-side command extrema must be counted as pulses.'
     Assert-Equal $reverseTrials[0].P95AbsAxisErrorPx $reverseTrials[0].SteadyP95AbsAxisErrorPx 'Short synthetic trials must use all samples as the steady window.'
     Assert-Equal 2 $scenario.Count 'Each scenario file must create one summary.'
     Assert-Equal 2 $scenario[0].Trials 'Scenario summary must report both trials.'
@@ -128,6 +136,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 5 $scenario[0].MeanObservedSteadyP95AbsAxisErrorPx 'Scenario summary must retain observed steady target error.'
     Assert-Equal 1 $scenario[0].OutputSideFlipCount 'Scenario summary must sum device output side changes across trials.'
     Assert-Equal 1 $scenario[0].OutputSideFlipMeanAbsCounts 'Scenario summary must weight output flip magnitude by flip count.'
+    Assert-Equal 3 $scenario[0].OutputSameSidePulseCount 'Scenario summary must sum same-side command pulses.'
     Assert-Equal 5 $scenario[0].MeanP95PredictionLeadDeltaPx 'Scenario summary must preserve prediction lead smoothness.'
     Assert-Equal 10 $scenario[0].MeanP95PredictionLeadJerkPx 'Scenario summary must preserve prediction lead jerk.'
     Assert-Equal 40 $scenario[0].PredictionLeadCappedPct 'Scenario summary must weight cap occupancy by active samples.'

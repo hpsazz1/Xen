@@ -106,6 +106,7 @@ MouseThread::MouseThread(
         OutputScheduler::Settings schedulerSettings;
         schedulerSettings.outputHz = config.trajectory_output_hz;
         aimPipelineRuntime.configureTrajectory(trajectorySettings, schedulerSettings);
+        motionCompensationHistory.configure(config.aim_motion_compensation_delay_ms);
         appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
         profileCalibrator.setEnabled(config.profile_calibration_enabled);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
@@ -177,6 +178,10 @@ void MouseThread::updateConfig(
     OutputScheduler::Settings schedulerSettings;
     schedulerSettings.outputHz = config.trajectory_output_hz;
     aimPipelineRuntime.configureTrajectory(trajectorySettings, schedulerSettings);
+    {
+        std::lock_guard<std::mutex> lock(motionCompensationMutex);
+        motionCompensationHistory.configure(config.aim_motion_compensation_delay_ms);
+    }
     appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
     profileCalibrator.setEnabled(config.profile_calibration_enabled);
     if (config.profile_calibration_enabled)

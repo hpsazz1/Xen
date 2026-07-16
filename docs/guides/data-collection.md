@@ -36,6 +36,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/analyze_moving_target.
 不同轮次起点不一致时，使用`ObservedSteadyP95AbsAxisErrorPx`比较末尾稳态，不要用全段P95
 直接归因控制器。输出换向还需同时查看`OutputSideFlipMeanAbsCounts`和
 `OutputSideFlipMaxAbsCounts`；只有换向率、幅度和发生阶段跨至少三轮一致，才允许修改中心门控。
+方向不翻转但仍有视觉震荡时，检查`OutputSameSideStepP95Counts`、
+`OutputSameSidePulseCount`和`OutputSameSidePulseRateHz`。同方向脉冲按连续三个非零同号命令的局部强弱极值统计，
+可识别`-1/-8/-1`一类补偿时序锯齿；它与`OutputSideFlipCount`分别代表幅值调制和真正换向。
 
 r41起CSV包含`ErrorMotionX/Y`、`MovingInsideSettleX/Y`和`SettledX/Y`。分析Y轴震荡时必须使用
 `-Axis Y`并同时查看`AxisSettledPct`：水平移动期间Y轴应长期独立锁存，可靠垂直或斜向运动时
@@ -49,3 +52,6 @@ r43起CSV增加`PredictionStationarySuppressed`，分析器汇总为
 `PredictionStationarySuppressedPct`。单向持续运动中该值应接近0；明确停止段达到确认时间后应为1且
 提前量归零。中断发生而自运动、高频往返、高速和停止抑制字段均为0时，才继续检查方向反转或
 回归窗口失效，不得把所有`PredictionOffset=0`笼统归因于停止。
+
+r44起正式自运动补偿使用`aim_motion_compensation_delay_ms`。DML/NDI六轮单向数据拟合为10~12 ms，
+默认12 ms；该值与只用于shadow链的`aim_shadow_command_to_frame_delay_ms`相互独立。

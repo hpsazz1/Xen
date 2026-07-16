@@ -134,6 +134,7 @@ bool Config::loadConfig(const std::string& filename)
         move_response_ms = 120.0f;                       // 五类NDI抗晃动响应时间（毫秒）
         move_max_speed_cps = 3200.0f;                    // 五类NDI移动目标标准，解除jump远距帧限速
         move_integral_time_ms = 500.0f;                  // 五类NDI移动目标抗晃动标准，降低积分累积斜率
+        aim_motion_compensation_delay_ms = 12.0f;        // 六轮NDI实测命令到画面生效延迟
         aim_pipeline_mode = "legacy";                   // P0-0 默认保持 r30 正式输出
         aim_shadow_command_to_frame_delay_ms = 60.0f;    // 显式shadow候选，不自动采用被动标定结果
         aim_shadow_response_ms = 80.0f;                  // 第一子阶段仅启用P反馈
@@ -557,6 +558,8 @@ bool Config::loadConfig(const std::string& filename)
     move_response_ms = (float)get_double("move_response_ms", 120.0);
     move_max_speed_cps = (float)get_double("move_max_speed_cps", 3200.0);
     move_integral_time_ms = (float)get_double("move_integral_time_ms", 500.0);
+    aim_motion_compensation_delay_ms = (float)get_double(
+        "aim_motion_compensation_delay_ms", 12.0);
     aim_pipeline_mode = get_string("aim_pipeline_mode", "legacy");
     aim_shadow_command_to_frame_delay_ms = (float)get_double(
         "aim_shadow_command_to_frame_delay_ms", 60.0);
@@ -775,6 +778,8 @@ bool Config::loadConfig(const std::string& filename)
     move_integral_time_ms = std::clamp(move_integral_time_ms, 0.0f, 1000.0f);
     if (move_integral_time_ms > 0.0f && move_integral_time_ms < 50.0f)
         move_integral_time_ms = 50.0f;
+    aim_motion_compensation_delay_ms = std::clamp(
+        aim_motion_compensation_delay_ms, 0.0f, 250.0f);
 
     // === 连续观测预测参数范围校验 ===
     prediction_lead_ms = std::clamp(prediction_lead_ms, 0.0f, 100.0f);
@@ -930,6 +935,7 @@ bool Config::saveConfig(const std::string& filename)
         << "move_response_ms = " << move_response_ms << "\n"
         << "move_max_speed_cps = " << move_max_speed_cps << "\n"
         << "move_integral_time_ms = " << move_integral_time_ms << "\n"
+        << "aim_motion_compensation_delay_ms = " << aim_motion_compensation_delay_ms << "\n"
         << "aim_pipeline_mode = " << aim_pipeline_mode << "\n"
         << "aim_shadow_command_to_frame_delay_ms = " << aim_shadow_command_to_frame_delay_ms << "\n"
         << "aim_shadow_response_ms = " << aim_shadow_response_ms << "\n"
