@@ -2100,6 +2100,42 @@ int main()
                    unlimitedFailAttribution, attributionCohortStable) ==
                    "COHORT_CHANGED" && !attributionCohortStable,
                "attribution refuses conclusions when the frozen cohort changes");
+    CrossDomainReplay::ControllerSettings accelerationReplaySettings = syntheticSettings;
+    accelerationReplaySettings.candidateEstimatorMode =
+        CrossDomainReplay::CandidateEstimatorMode::ConstantAcceleration;
+    accelerationReplaySettings.candidateJerkStdDegreesPerSecond3 = 2000.0;
+    const auto accelerationComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, accelerationReplaySettings);
+    expectTrue(accelerationComparison.candidateEstimatorMode ==
+                   CrossDomainReplay::CandidateEstimatorMode::ConstantAcceleration &&
+               accelerationComparison.candidateJerkStdDegreesPerSecond3 == 2000.0 &&
+               accelerationComparison.candidate.samples ==
+                   syntheticComparison.candidate.samples &&
+               std::isfinite(accelerationComparison.candidate.meanCovariance),
+               "constant-acceleration replay records a finite same-cohort offline estimate");
+    expectNear(accelerationComparison.legacy.errorP95Degrees,
+               syntheticComparison.legacy.errorP95Degrees, 0.0,
+               "constant-acceleration replay cannot mutate the frozen legacy comparator");
+    CrossDomainReplay::ControllerSettings gatedAccelerationSettings = syntheticSettings;
+    gatedAccelerationSettings.candidateEstimatorMode = CrossDomainReplay::
+        CandidateEstimatorMode::ManeuverGatedConstantAcceleration;
+    gatedAccelerationSettings.candidateJerkStdDegreesPerSecond3 = 8000.0;
+    gatedAccelerationSettings.candidateManeuverRateThresholdDegreesPerSecond = 1.0;
+    gatedAccelerationSettings.candidateManeuverHoldSeconds = 0.120;
+    const auto gatedAccelerationComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, gatedAccelerationSettings);
+    expectTrue(gatedAccelerationComparison.candidate.maneuverModelPercent > 0.0 &&
+               gatedAccelerationComparison.candidate.maneuverModelPercent <= 100.0,
+               "maneuver-gated acceleration model activates on reliable fast motion");
+    gatedAccelerationSettings.candidateManeuverRateThresholdDegreesPerSecond = 1000.0;
+    const auto inactiveAccelerationComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, gatedAccelerationSettings);
+    expectNear(inactiveAccelerationComparison.candidate.maneuverModelPercent,
+               0.0, 0.0,
+               "maneuver-gated acceleration model stays off below its physical rate threshold");
+    expectNear(inactiveAccelerationComparison.candidate.errorP95Degrees,
+               syntheticComparison.candidate.errorP95Degrees, 0.0,
+               "inactive maneuver model is exactly equivalent to the frozen Kalman candidate");
     CrossDomainReplay::ControllerSettings feedforwardReplaySettings = syntheticSettings;
     feedforwardReplaySettings.feedforwardGain = 0.5;
     const auto feedforwardComparison = CrossDomainReplay::RunComparison(

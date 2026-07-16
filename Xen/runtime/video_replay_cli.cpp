@@ -51,6 +51,11 @@ namespace
         std::vector<double> observationAgesMs{ 10.0, 15.0, 20.0 };
         double responseMs = 80.0;
         double candidateResponseMs = 0.0;
+        CrossDomainReplay::CandidateEstimatorMode candidateEstimatorMode =
+            CrossDomainReplay::CandidateEstimatorMode::Kalman;
+        double candidateJerkStdDegreesPerSecond3 = 8000.0;
+        double candidateManeuverRateThresholdDegreesPerSecond = 12.0;
+        double candidateManeuverHoldSeconds = 0.120;
         double kalmanAccelerationStdDegreesPerSecond2 = 90.0;
         double kalmanMovingAccelerationStdDegreesPerSecond2 = 360.0;
         double kalmanMovingRateThresholdDegreesPerSecond = 8.0;
@@ -225,6 +230,30 @@ namespace
         options.responseMs = optionDouble(argc, argv, "--response-ms", options.responseMs);
         options.candidateResponseMs = optionDouble(
             argc, argv, "--candidate-response-ms", options.candidateResponseMs);
+        if (const auto estimator = optionValue(argc, argv, "--candidate-estimator"))
+        {
+            const std::string normalized = lower(*estimator);
+            if (normalized == "ca" || normalized == "constant_acceleration")
+            {
+                options.candidateEstimatorMode =
+                    CrossDomainReplay::CandidateEstimatorMode::ConstantAcceleration;
+            }
+            else if (normalized == "gated_ca" ||
+                     normalized == "maneuver_gated_ca")
+            {
+                options.candidateEstimatorMode = CrossDomainReplay::
+                    CandidateEstimatorMode::ManeuverGatedConstantAcceleration;
+            }
+        }
+        options.candidateJerkStdDegreesPerSecond3 = optionDouble(
+            argc, argv, "--candidate-jerk-std-dps3",
+            options.candidateJerkStdDegreesPerSecond3);
+        options.candidateManeuverRateThresholdDegreesPerSecond = optionDouble(
+            argc, argv, "--candidate-maneuver-rate-threshold-dps",
+            options.candidateManeuverRateThresholdDegreesPerSecond);
+        options.candidateManeuverHoldSeconds = optionDouble(
+            argc, argv, "--candidate-maneuver-hold-ms",
+            options.candidateManeuverHoldSeconds * 1000.0) / 1000.0;
         options.kalmanAccelerationStdDegreesPerSecond2 = optionDouble(
             argc, argv, "--kalman-accel-std-dps2",
             options.kalmanAccelerationStdDegreesPerSecond2);
@@ -760,6 +789,13 @@ int Run(int argc, char** argv)
             settings.responseSeconds = options.responseMs / 1000.0;
             settings.candidateResponseSeconds = options.candidateResponseMs > 0.0
                 ? options.candidateResponseMs / 1000.0 : 0.0;
+            settings.candidateEstimatorMode = options.candidateEstimatorMode;
+            settings.candidateJerkStdDegreesPerSecond3 =
+                options.candidateJerkStdDegreesPerSecond3;
+            settings.candidateManeuverRateThresholdDegreesPerSecond =
+                options.candidateManeuverRateThresholdDegreesPerSecond;
+            settings.candidateManeuverHoldSeconds =
+                options.candidateManeuverHoldSeconds;
             settings.verticalCatchUpErrorDegrees =
                 options.verticalCatchUpErrorDegrees;
             settings.maxCountsPerSecond = options.maxCountsPerSecond;
@@ -873,6 +909,26 @@ int Run(int argc, char** argv)
                              : (std::isfinite(options.responseMs)
                                  ? std::clamp(options.responseMs, 10.0, 500.0)
                                  : 80.0)) << '\n'
+                     << "CandidateEstimatorMode="
+                     << CrossDomainReplay::candidateEstimatorModeName(
+                         options.candidateEstimatorMode) << '\n'
+                     << "CandidateJerkStdDps3="
+                     << (std::isfinite(options.candidateJerkStdDegreesPerSecond3)
+                             ? std::clamp(options.candidateJerkStdDegreesPerSecond3,
+                                 1.0, 100000.0)
+                             : 8000.0) << '\n'
+                     << "CandidateManeuverRateThresholdDps="
+                     << (std::isfinite(
+                             options.candidateManeuverRateThresholdDegreesPerSecond)
+                             ? std::clamp(
+                                 options.candidateManeuverRateThresholdDegreesPerSecond,
+                                 0.1, 1000.0)
+                             : 12.0) << '\n'
+                     << "CandidateManeuverHoldMs="
+                     << (std::isfinite(options.candidateManeuverHoldSeconds)
+                             ? std::clamp(options.candidateManeuverHoldSeconds,
+                                 0.0, 1.0) * 1000.0
+                             : 120.0) << '\n'
                      << "FeedforwardGain="
                      << (std::isfinite(options.feedforwardGain)
                              ? std::clamp(options.feedforwardGain, 0.0, 2.0)

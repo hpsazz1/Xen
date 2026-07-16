@@ -1,6 +1,7 @@
 #include "runtime/cross_domain_replay.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -21,13 +22,178 @@ namespace CrossDomainReplay
 {
 const char* candidateEstimatorModeName(CandidateEstimatorMode mode)
 {
-    return mode == CandidateEstimatorMode::OracleControlTime
-        ? "oracle_control_time" : "kalman";
+    if (mode == CandidateEstimatorMode::ConstantAcceleration)
+        return "constant_acceleration";
+    if (mode == CandidateEstimatorMode::ManeuverGatedConstantAcceleration)
+        return "maneuver_gated_ca";
+    if (mode == CandidateEstimatorMode::OracleControlTime)
+        return "oracle_control_time";
+    return "kalman";
 }
 
 namespace
 {
 using Clock = std::chrono::steady_clock;
+
+// 仅用于离线反证的三状态常加速度Kalman。每轴状态为[角度,角速度,角加速度]，
+// 过程噪声使用离散白jerk模型GqG'；运行时RelativeLosKalman和r59链路不引用本类。
+class ConstantAccelerationEstimator
+{
+public:
+    void reset()
+    {
+        horizontal_ = {};
+        vertical_ = {};
+        estimate_ = {};
+    }
+
+    void update(double angleX, double angleY, float confidence,
+                Clock::time_point observationTime, Clock::time_point controlTime,
+                double jerkStdDegreesPerSecond3)
+    {
+        const float boundedConfidence = std::isfinite(confidence)
+            ? std::clamp(confidence, 0.0f, 1.0f) : 0.0f;
+        const double confidenceScale = std::clamp(
+            static_cast<double>(boundedConfidence), 0.05, 1.0);
+        const double measurementStd = 0.15 / confidenceScale;
+        const double measurementVariance = measurementStd * measurementStd;
+        const double jerkStd = std::isfinite(jerkStdDegreesPerSecond3)
+            ? std::clamp(jerkStdDegreesPerSecond3, 1.0, 100000.0) : 8000.0;
+        Axis* axes[] = { &horizontal_, &vertical_ };
+        const double measurements[] = { angleX, angleY };
+        for (int index = 0; index < 2; ++index)
+        {
+            Axis& axis = *axes[index];
+            if (!axis.initialized)
+            {
+                axis.initialized = true;
+                axis.time = observationTime;
+                axis.state = { measurements[index], 0.0, 0.0 };
+                axis.covariance = {{
+                    {{ 4.0, 0.0, 0.0 }},
+                    {{ 0.0, 400.0, 0.0 }},
+                    {{ 0.0, 0.0, 40000.0 }}
+                }};
+            }
+            else
+            {
+                predict(axis, boundedDt(axis.time, observationTime), jerkStd);
+                axis.time = observationTime;
+            }
+            correct(axis, measurements[index], measurementVariance);
+        }
+
+        Axis projectedHorizontal = horizontal_;
+        Axis projectedVertical = vertical_;
+        predict(projectedHorizontal,
+            boundedDt(projectedHorizontal.time, controlTime), jerkStd);
+        predict(projectedVertical,
+            boundedDt(projectedVertical.time, controlTime), jerkStd);
+        estimate_.x = toEstimate(projectedHorizontal);
+        estimate_.y = toEstimate(projectedVertical);
+        estimate_.measurementConfidence = boundedConfidence;
+        const double normalizedNis = std::max(
+            horizontal_.diagnostic.nis, vertical_.diagnostic.nis);
+        estimate_.feedforwardConfidence = boundedConfidence * boundedConfidence *
+            std::exp(-0.5 * std::min(normalizedNis, 20.0));
+    }
+
+    const RelativeLosKalmanEstimate& estimate() const { return estimate_; }
+
+private:
+    struct Axis
+    {
+        bool initialized = false;
+        Clock::time_point time{};
+        std::array<double, 3> state{};
+        std::array<std::array<double, 3>, 3> covariance{};
+        RelativeLosKalmanAxisEstimate diagnostic{};
+    };
+
+    static double boundedDt(Clock::time_point start, Clock::time_point end)
+    {
+        const double seconds = std::chrono::duration<double>(end - start).count();
+        if (!std::isfinite(seconds) || seconds <= 0.0)
+            return 0.0;
+        return std::clamp(seconds, 1e-4, 0.5);
+    }
+
+    static void predict(Axis& axis, double dt, double jerkStd)
+    {
+        if (!axis.initialized || dt <= 0.0)
+            return;
+        const double dt2 = dt * dt;
+        const double transition[3][3]{
+            { 1.0, dt, 0.5 * dt2 },
+            { 0.0, 1.0, dt },
+            { 0.0, 0.0, 1.0 }
+        };
+        const double noiseGain[3]{ dt2 * dt / 6.0, dt2 * 0.5, dt };
+        std::array<double, 3> predictedState{};
+        std::array<std::array<double, 3>, 3> intermediate{};
+        std::array<std::array<double, 3>, 3> predictedCovariance{};
+        for (int row = 0; row < 3; ++row)
+        {
+            for (int column = 0; column < 3; ++column)
+            {
+                predictedState[row] += transition[row][column] * axis.state[column];
+                for (int inner = 0; inner < 3; ++inner)
+                    intermediate[row][column] +=
+                        transition[row][inner] * axis.covariance[inner][column];
+            }
+        }
+        const double variance = jerkStd * jerkStd;
+        for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+        {
+            for (int inner = 0; inner < 3; ++inner)
+                predictedCovariance[row][column] +=
+                    intermediate[row][inner] * transition[column][inner];
+            predictedCovariance[row][column] +=
+                variance * noiseGain[row] * noiseGain[column];
+        }
+        axis.state = predictedState;
+        axis.covariance = predictedCovariance;
+    }
+
+    static void correct(Axis& axis, double measurement, double measurementVariance)
+    {
+        const double innovation = measurement - axis.state[0];
+        const double innovationVariance = std::max(
+            axis.covariance[0][0] + measurementVariance, 1e-9);
+        std::array<double, 3> gain{};
+        const auto oldCovariance = axis.covariance;
+        for (int index = 0; index < 3; ++index)
+        {
+            gain[index] = oldCovariance[index][0] / innovationVariance;
+            axis.state[index] += gain[index] * innovation;
+        }
+        for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+            axis.covariance[row][column] =
+                oldCovariance[row][column] - gain[row] * oldCovariance[0][column];
+        for (int index = 0; index < 3; ++index)
+            axis.covariance[index][index] = std::max(
+                axis.covariance[index][index], 1e-12);
+        axis.diagnostic.innovationDegrees = innovation;
+        axis.diagnostic.innovationVariance = innovationVariance;
+        axis.diagnostic.nis = innovation * innovation / innovationVariance;
+    }
+
+    static RelativeLosKalmanAxisEstimate toEstimate(const Axis& axis)
+    {
+        RelativeLosKalmanAxisEstimate result = axis.diagnostic;
+        result.valid = axis.initialized;
+        result.angleDegrees = axis.state[0];
+        result.rateDegreesPerSecond = axis.state[1];
+        result.angleVariance = std::max(axis.covariance[0][0], 0.0);
+        return result;
+    }
+
+    Axis horizontal_{};
+    Axis vertical_{};
+    RelativeLosKalmanEstimate estimate_{};
+};
 
 double percentile(std::vector<double> values, double ratio)
 {
@@ -150,6 +316,7 @@ struct MetricCollector
     size_t reverseSuppressedSamples = 0;
     size_t reversalFeedforwardSamples = 0;
     size_t verticalCatchUpSamples = 0;
+    size_t maneuverModelSamples = 0;
     size_t trajectoryVelocityLimitedSamples = 0;
     size_t trajectoryAccelerationLimitedSamples = 0;
     size_t trajectoryJerkLimitedSamples = 0;
@@ -231,6 +398,11 @@ struct MetricCollector
         verticalCatchUpSamples += active ? 1U : 0U;
     }
 
+    void addManeuverModel(bool active)
+    {
+        maneuverModelSamples += active ? 1U : 0U;
+    }
+
     void addTrajectoryOutput(const TrajectoryOutput& output)
     {
         ++result.trajectoryOutputs;
@@ -262,6 +434,8 @@ struct MetricCollector
                 100.0 * reversalFeedforwardSamples / diagnosticSamples;
             result.verticalCatchUpPercent =
                 100.0 * verticalCatchUpSamples / diagnosticSamples;
+            result.maneuverModelPercent =
+                100.0 * maneuverModelSamples / diagnosticSamples;
         }
         if (result.trajectoryOutputs > 0)
         {
@@ -346,6 +520,17 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         ? std::clamp(settings.candidateResponseSeconds, 0.010, 0.500)
         : comparison.legacyResponseSeconds;
     comparison.candidateEstimatorMode = settings.candidateEstimatorMode;
+    comparison.candidateJerkStdDegreesPerSecond3 =
+        std::isfinite(settings.candidateJerkStdDegreesPerSecond3)
+        ? std::clamp(settings.candidateJerkStdDegreesPerSecond3, 1.0, 100000.0)
+        : 8000.0;
+    comparison.candidateManeuverRateThresholdDegreesPerSecond =
+        std::isfinite(settings.candidateManeuverRateThresholdDegreesPerSecond)
+        ? std::clamp(settings.candidateManeuverRateThresholdDegreesPerSecond,
+            0.1, 1000.0) : 12.0;
+    comparison.candidateManeuverHoldSeconds =
+        std::isfinite(settings.candidateManeuverHoldSeconds)
+        ? std::clamp(settings.candidateManeuverHoldSeconds, 0.0, 1.0) : 0.120;
     const double baselineMaxCountsPerSecond =
         std::isfinite(settings.maxCountsPerSecond)
         ? std::clamp(settings.maxCountsPerSecond, 1.0, 100000.0) : 1440.0;
@@ -394,6 +579,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     legacySettings.releaseRadiusPixels = 0.0;
 
     RelativeLosKalman kalman;
+    ConstantAccelerationEstimator constantAccelerationEstimator;
     RelativeLosKalman::Settings kalmanSettings;
     kalmanSettings.accelerationStdDegreesPerSecond2 =
         comparison.kalmanAccelerationStdDegreesPerSecond2;
@@ -457,6 +643,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     bool hasLatestTrajectoryRequest = false;
     double nextTrajectoryTickSeconds = 0.0;
     TrajectoryRequest latestTrajectoryRequest;
+    double maneuverModelRemainingSeconds = 0.0;
     size_t replayFrameIndex = 0;
     if (recordedDetectionTimeline)
         recordedDetectionTimeline->clear();
@@ -545,6 +732,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                 legacyPredictor.reset();
                 legacyController.reset();
                 kalman.reset();
+                constantAccelerationEstimator.reset();
+                maneuverModelRemainingSeconds = 0.0;
                 candidateController.reset();
                 shaper.emergencyReset(epoch + std::chrono::duration_cast<Clock::duration>(
                     std::chrono::duration<double>(controlTime)));
@@ -597,7 +786,43 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
 
         kalman.update(truthAtObservation.yawDegrees, truthAtObservation.pitchDownDegrees,
             point.confidence, observationPoint, controlPoint, kalmanSettings);
-        const auto& estimate = kalman.estimate();
+        const bool hasConstantAccelerationModel =
+            comparison.candidateEstimatorMode ==
+                CandidateEstimatorMode::ConstantAcceleration ||
+            comparison.candidateEstimatorMode ==
+                CandidateEstimatorMode::ManeuverGatedConstantAcceleration;
+        if (hasConstantAccelerationModel)
+        {
+            constantAccelerationEstimator.update(
+                truthAtObservation.yawDegrees, truthAtObservation.pitchDownDegrees,
+                point.confidence, observationPoint, controlPoint,
+                comparison.candidateJerkStdDegreesPerSecond3);
+        }
+        const auto& constantAccelerationEstimate =
+            constantAccelerationEstimator.estimate();
+        bool useManeuverModel = comparison.candidateEstimatorMode ==
+            CandidateEstimatorMode::ConstantAcceleration;
+        if (comparison.candidateEstimatorMode ==
+            CandidateEstimatorMode::ManeuverGatedConstantAcceleration)
+        {
+            const double kalmanRateMagnitude = std::hypot(
+                kalman.estimate().x.rateDegreesPerSecond,
+                kalman.estimate().y.rateDegreesPerSecond);
+            if (kalmanRateMagnitude >=
+                comparison.candidateManeuverRateThresholdDegreesPerSecond)
+            {
+                maneuverModelRemainingSeconds =
+                    comparison.candidateManeuverHoldSeconds;
+            }
+            else
+            {
+                maneuverModelRemainingSeconds = std::max(
+                    0.0, maneuverModelRemainingSeconds - dt);
+            }
+            useManeuverModel = maneuverModelRemainingSeconds > 0.0;
+        }
+        const RelativeLosKalmanEstimate estimate = useManeuverModel
+            ? constantAccelerationEstimate : kalman.estimate();
         const double previousControlTime = std::max(0.0, controlTime - dt);
         const double previousControlSourceTime = std::min(
             source.points.back().timeSeconds,
@@ -698,6 +923,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         candidateMetrics.addReversalFeedforward(
             candidateOutput.reversalFeedforwardActive);
         candidateMetrics.addVerticalCatchUp(candidateOutput.verticalCatchUpActive);
+        candidateMetrics.addManeuverModel(useManeuverModel);
         candidateMetrics.result.requestedCounts += std::hypot(
             candidateOutput.limitedCountsX, candidateOutput.limitedCountsY);
         candidateMetrics.result.feedforwardCounts += std::hypot(
@@ -803,7 +1029,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -814,6 +1040,9 @@ void WriteSummary(const std::filesystem::path& path,
                << item.legacyResponseSeconds * 1000.0 << ','
                << item.candidateResponseSeconds * 1000.0 << ','
                << candidateEstimatorModeName(item.candidateEstimatorMode) << ','
+               << item.candidateJerkStdDegreesPerSecond3 << ','
+               << item.candidateManeuverRateThresholdDegreesPerSecond << ','
+               << item.candidateManeuverHoldSeconds * 1000.0 << ','
                << item.candidateMaxCountsPerSecond << ','
                << item.feedforwardGain << ','
                << item.leadHorizonSeconds * 1000.0 << ','
@@ -839,6 +1068,7 @@ void WriteSummary(const std::filesystem::path& path,
                << item.candidate.settledPercent << ',' << item.candidate.settleReleases << ','
                << item.candidate.reverseSuppressedPercent << ','
                << item.candidate.verticalCatchUpPercent << ','
+               << item.candidate.maneuverModelPercent << ','
                << item.candidate.trajectoryOutputs << ','
                << item.candidate.trajectoryVelocityLimitedPercent << ','
                << item.candidate.trajectoryAccelerationLimitedPercent << ','

@@ -13,6 +13,8 @@ namespace CrossDomainReplay
 enum class CandidateEstimatorMode
 {
     Kalman,
+    ConstantAcceleration,
+    ManeuverGatedConstantAcceleration,
     OracleControlTime
 };
 
@@ -57,6 +59,9 @@ struct ControllerSettings
     double candidateResponseSeconds = 0.0;
     // 仅供离线归因：oracle直接使用控制时刻真实LOS状态；0表示候选沿用正式限速。
     CandidateEstimatorMode candidateEstimatorMode = CandidateEstimatorMode::Kalman;
+    double candidateJerkStdDegreesPerSecond3 = 8000.0;
+    double candidateManeuverRateThresholdDegreesPerSecond = 12.0;
+    double candidateManeuverHoldSeconds = 0.120;
     double candidateMaxCountsPerSecond = 0.0;
     double verticalCatchUpErrorDegrees = 0.8;
     double maxCountsPerSecond = 1440.0;
@@ -108,6 +113,7 @@ struct Metrics
     size_t settleReleases = 0;
     double reverseSuppressedPercent = 0.0;
     double verticalCatchUpPercent = 0.0;
+    double maneuverModelPercent = 0.0;
     size_t trajectoryOutputs = 0;
     double trajectoryVelocityLimitedPercent = 0.0;
     double trajectoryAccelerationLimitedPercent = 0.0;
@@ -124,6 +130,9 @@ struct Comparison
     double legacyResponseSeconds = 0.080;
     double candidateResponseSeconds = 0.080;
     CandidateEstimatorMode candidateEstimatorMode = CandidateEstimatorMode::Kalman;
+    double candidateJerkStdDegreesPerSecond3 = 8000.0;
+    double candidateManeuverRateThresholdDegreesPerSecond = 12.0;
+    double candidateManeuverHoldSeconds = 0.120;
     double candidateMaxCountsPerSecond = 1440.0;
     double feedforwardGain = 0.0;
     double leadHorizonSeconds = 0.0;
