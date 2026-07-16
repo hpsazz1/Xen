@@ -195,7 +195,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "SourceTimestampAvailable,SourceTimestamp,SourceTimecodeAvailable,SourceTimecode,SourceTimestampMapped,"
          << "CaptureRoiX,CaptureRoiY,CaptureRoiWidth,CaptureRoiHeight,TimingComplete,TimingOrderValid,TimingAnomaly,"
          << "BackendQueueMs,SubmitToInferenceMs,InferenceToPublishMs,PublishToControlMs,LocalObservationAgeMs,"
-         << "Timestamp,Resolution,SourceWidth,SourceHeight,FPS,InferenceFPS,"
+         << "Timestamp,Resolution,SourceWidth,SourceHeight,FPS,InferenceFPS,TrackerStaleTimeoutMs,"
          << "DmlModel,DmlInputWidth,DmlInputHeight,DmlPreprocessMs,DmlTensorSetupMs,DmlInferenceMs,DmlCopyMs,DmlPostprocessMs,DmlNmsMs,DmlTotalMs,"
          << "SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames,"
          << "NdiDeclaredFPS,NdiReceiveFPS,NdiReceivedFrames,NdiDroppedFrames,TargetDetected,ObservationAgeSec,"
@@ -344,6 +344,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.sourceWidth << ',' << f.sourceHeight << ','
              << std::fixed << std::setprecision(3) << f.fpsValue << ','
              << f.inferenceFps << ','
+             << f.trackerStaleTimeoutMs << ','
              << f.dmlModel << ',' << f.dmlInputWidth << ',' << f.dmlInputHeight << ','
              << f.dmlPreprocessMs << ',' << f.dmlTensorSetupMs << ',' << f.dmlInferenceMs << ','
              << f.dmlCopyMs << ',' << f.dmlPostprocessMs << ','

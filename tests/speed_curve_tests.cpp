@@ -21,6 +21,7 @@
 #include "capture/network_frame_geometry.h"
 #include "runtime/frame_rate_counter.h"
 #include "runtime/latest_frame_queue.h"
+#include "runtime/tracker_timing.h"
 #include "runtime/passive_profile_calibrator.h"
 #include "runtime/build_identity.h"
 
@@ -76,6 +77,12 @@ void expectTrue(bool condition, const char* name)
 
 int main()
 {
+    expectTrue(trackerStaleTimeoutMs(240) == 100 &&
+               trackerStaleTimeoutMs(68) == 100 &&
+               trackerStaleTimeoutMs(20) == 200 &&
+               trackerStaleTimeoutMs(0) == 100,
+               "tracker stale timeout follows inference publications and preserves prediction gap boundary");
+
     // r57 条件预算只服务于 jump 的高速严重落后尾部：普通移动、反向、
     // 自运动伪影或尚未锁定方向时都必须维持基础 3200 counts/s。
     ConditionalSpeedBudget speedBudget;
@@ -1067,7 +1074,7 @@ int main()
                "basic pipeline contains signed target velocity diagnostics");
     expectTrue(traceHeader.find("SourceWidth,SourceHeight") != std::string::npos,
                "basic pipeline contains capture source dimensions");
-    expectTrue(traceHeader.find("InferenceFPS") != std::string::npos && traceHeader.find(
+    expectTrue(traceHeader.find("InferenceFPS,TrackerStaleTimeoutMs") != std::string::npos && traceHeader.find(
         "SourceDeclaredFPS,SourceReceiveFPS,SourceReceivedFrames,SourceDroppedFrames") != std::string::npos,
         "basic pipeline contains generic source fps diagnostics");
     expectTrue(traceHeader.find(

@@ -135,7 +135,7 @@ capture_fps = 60
 | `trajectory_max_velocity_cps` | `1440` | 二维轨迹速度向量上限，范围30~4000 counts/s。 |
 | `trajectory_max_acceleration_cps2` | `60000` | 二维轨迹加速度向量上限，范围1000~1000000 counts/s²。 |
 | `trajectory_max_jerk_cps3` | `4000000` | 二维轨迹jerk向量上限，范围10000~100000000 counts/s³。 |
-| `auto_derive_tracker_params` | `true` | 按检测分辨率和实际捕获 FPS 自动推导目标跟踪参数；不会覆盖 `move_response_ms`、`move_max_speed_cps`或`move_catch_up_max_speed_cps`。 |
+| `auto_derive_tracker_params` | `true` | 按检测分辨率和实际检测结果发布FPS自动推导目标跟踪参数；启动期发布率未知时才回退捕获FPS。不会覆盖 `move_response_ms`、`move_max_speed_cps`或`move_catch_up_max_speed_cps`。 |
 | `prediction_enabled` | `true` | 启用连续真实观测预测。关闭时预测器完全旁路，基础滤波位置直接进入控制器。 |
 | `prediction_lead_ms` | `50` | 在自动补偿观测年龄之外增加的常速度前瞻时间，范围0~100 ms。 |
 | `prediction_velocity_tau_ms` | `50` | 兼容旧配置键名，实际表示稳健速度回归窗口，范围40~120 ms；更小值提高变向响应，更大值增强抗检测抖动。 |

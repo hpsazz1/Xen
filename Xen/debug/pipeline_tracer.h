@@ -143,6 +143,7 @@ struct PipelineFrame
     double observationAgeSec = 0.0;    ///< 检测延迟（秒）
     double fpsValue = 0.0;            ///< 当前帧率
     int    inferenceFps = 0;           ///< 检测器实际结果发布帧率
+    int    trackerStaleTimeoutMs = 0;  ///< 无检测发布时完整清除跟踪状态的门槛
     double dmlPreprocessMs = 0.0;      ///< DML CPU预处理耗时
     double dmlTensorSetupMs = 0.0;     ///< 输入形状与ORT张量包装耗时
     double dmlInferenceMs = 0.0;       ///< ONNX Runtime DirectML同步推理耗时

@@ -1217,7 +1217,8 @@ std::pair<double, double> Config::degToCounts(double degX, double degY, double f
     return { cx, cy };
 }
 
-void Config::applyAutoDerivedTrackerParams(int detectionResolution, int captureFps)
+void Config::applyAutoDerivedTrackerParams(
+    int detectionResolution, int detectionPublishFps)
 {
     if (!auto_derive_tracker_params)
         return;
@@ -1225,7 +1226,7 @@ void Config::applyAutoDerivedTrackerParams(int detectionResolution, int captureF
     std::lock_guard<std::mutex> cfgLock(configMutex);  // 保护对 config 字段的写入
 
     const double scale = static_cast<double>(detectionResolution) / 640.0;
-    const int clampedFps = std::clamp(captureFps, 15, 500);
+    const int clampedFps = std::clamp(detectionPublishFps, 15, 500);
 
     ml_confirm_threshold   = 2;
     ml_termination_frames  = std::max(5, clampedFps / 8);
@@ -1242,5 +1243,5 @@ void Config::applyAutoDerivedTrackerParams(int detectionResolution, int captureF
     ml_recapture_distance_mult = 2.5f;
     ml_coast_velocity_decay    = 1.0f;
     // 移动响应时间、最大设备速率和运动变化保护均属于用户/实测参数，不能由分辨率或 FPS
-    // 自动覆盖。控制器会把每秒速率按真实观测 dt 换算为单帧预算，无需在此重新推导。
+    // 自动覆盖。控制器会把每秒速率按真实控制周期换算为单帧预算，无需在此重新推导。
 }

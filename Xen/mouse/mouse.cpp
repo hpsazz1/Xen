@@ -1220,6 +1220,7 @@ void MouseThread::moveMousePivot(
         pf->targetDetected = true;
         pf->fpsValue = static_cast<double>(captureFps.load());
         pf->inferenceFps = detectionBuffer.getPublishFps();
+        pf->trackerStaleTimeoutMs = trackerStaleTimeoutMs(pf->inferenceFps);
 #ifndef USE_CUDA
         if (dml_detector)
         {

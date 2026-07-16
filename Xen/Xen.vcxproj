@@ -167,6 +167,7 @@
     </ClInclude>
     <ClInclude Include="runtime\basic_aim_controller.h" />
     <ClInclude Include="runtime\conditional_speed_budget.h" />
+    <ClInclude Include="runtime\tracker_timing.h" />
     <ClInclude Include="runtime\build_identity.h" />
     <ClInclude Include="runtime\basic_target_filter.h" />
     <ClInclude Include="runtime\target_predictor.h" />

@@ -14,22 +14,6 @@
 #include "Xen.h"
 #include "runtime/thread_loops.h"
 
-namespace
-{
-/**
- * 计算目标跟踪的过期间隔（毫秒）
- * 基于帧率和宽容时间综合判断目标何时被视为过期
- * @param captureFpsValue 捕获帧率
- * @return 超时时间（毫秒），限制在 25~180ms 之间
- */
-int trackerStaleTimeoutMs(int captureFpsValue)
-{
-    const int fps = std::max(1, captureFpsValue);
-    const int frameBasedMs = 2000 / fps;
-    return std::clamp(frameBasedMs, 25, 100);
-}
-}
-
 void createInputDevices();
 void assignInputDevices();
 /**
@@ -162,7 +146,12 @@ void mouseThreadFunction(MouseThread& mouseThread)
             static int lastDerivedResolution = -1;
             static int lastDerivedFps = -1;
             static bool lastAutoDerive = false;
-            int fps = captureFps.load();
+            // 跟踪器每次检测结果发布只推进一帧，生命周期参数必须按检测发布率
+            // 换算真实时间。捕获处理率通常高于DML推理率，用它会让同样的帧数
+            // 在运行时对应过长或反复变化的滑行窗口。
+            int fps = detectionBuffer.getPublishFps();
+            if (fps <= 0)
+                fps = captureFps.load();
             if (fps <= 0) fps = 60;
             const int stableFps = std::clamp(((fps + 5) / 10) * 10, 20, 500);
             if (autoDeriveTrackerParams &&
@@ -355,7 +344,8 @@ void mouseThreadFunction(MouseThread& mouseThread)
         // ---- 目标过期间隔检查：超过阈值则重置目标 ----
         if (activeTarget)
         {
-            const int staleMs = trackerStaleTimeoutMs(captureFps.load());
+            const int staleMs = trackerStaleTimeoutMs(
+                detectionBuffer.getPublishFps());
             if (std::chrono::steady_clock::now() - lastTrackerUpdate > std::chrono::milliseconds(staleMs))
             {
                 resetActiveTarget();

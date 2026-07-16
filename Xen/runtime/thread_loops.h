@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "AimbotTarget.h"
+#include "runtime/tracker_timing.h"
 
 class MouseThread;
 class Game_overlay;
