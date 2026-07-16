@@ -332,6 +332,11 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
             @($samples | Where-Object { [int]$_.PredictionStationarySuppressed -eq 1 }).Count
         }
         else { 0 }
+        $motionEvidenceSuppressedRows = if (
+            $rows[0].PSObject.Properties.Name -contains 'PredictionMotionEvidenceSuppressed') {
+            @($samples | Where-Object { [int]$_.PredictionMotionEvidenceSuppressed -eq 1 }).Count
+        }
+        else { 0 }
         $predictionLeadDistances = @($predictionRows | ForEach-Object {
             if ($Axis -eq 'X') { [math]::Abs([double]$_.PredictionOffsetX) }
             else { [math]::Abs([double]$_.PredictionOffsetY) }
@@ -638,6 +643,8 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter
                 100.0 * $highSpeedSuppressedRows / [math]::Max(1, $samples.Count), 1)
             PredictionStationarySuppressedPct = [math]::Round(
                 100.0 * $stationarySuppressedRows / [math]::Max(1, $samples.Count), 1)
+            PredictionMotionEvidenceSuppressedPct = [math]::Round(
+                100.0 * $motionEvidenceSuppressedRows / [math]::Max(1, $samples.Count), 1)
             P50PredictionLeadPx = [math]::Round($predictionLeadP50, 2)
             P95PredictionLeadPx = [math]::Round($predictionLeadP95, 2)
             PredictionActiveSamples = $predictionRows.Count
@@ -758,6 +765,9 @@ $scenarioMetrics = @($trialMetrics | Group-Object Chain, Scenario | ForEach-Obje
         PredictionStationarySuppressedPct = [math]::Round([double](($group | ForEach-Object {
             $_.PredictionStationarySuppressedPct * $_.Samples
         } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
+        PredictionMotionEvidenceSuppressedPct = [math]::Round([double](($group | ForEach-Object {
+            $_.PredictionMotionEvidenceSuppressedPct * $_.Samples
+        } | Measure-Object -Sum).Sum) / [math]::Max(1, $sampleCount), 1)
         MeanP50PredictionLeadPx = [math]::Round(
             [double]($group | Measure-Object P50PredictionLeadPx -Average).Average, 2)
         MeanP95PredictionLeadPx = [math]::Round(
@@ -838,7 +848,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputCsv)) {
         'OutputSameSidePulseCount', 'OutputSameSidePulseRateHz',
         'SpeedLimitedPct', 'PredictionActivePct', 'PredictionSelfMotionSuppressedPct',
         'PredictionOscillationSuppressedPct', 'PredictionHighSpeedSuppressedPct',
-        'PredictionStationarySuppressedPct',
+        'PredictionStationarySuppressedPct', 'PredictionMotionEvidenceSuppressedPct',
         'P50PredictionLeadPx', 'P95PredictionLeadPx', 'MeanP50PredictionLeadPx', 'MeanP95PredictionLeadPx',
         'PredictionActiveSamples', 'P95PredictionLeadDeltaPx', 'P95PredictionLeadJerkPx',
         'PredictionLeadCappedPct', 'MeanP95PredictionLeadDeltaPx',
@@ -862,6 +872,6 @@ if ($PassThru) {
 }
 
 Write-Host '[moving-target] Trial metrics' -ForegroundColor Cyan
-$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, OutputSameSideStepP95Counts, OutputSameSidePulseCount, OutputSameSidePulseRateHz, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, P95PredictionLeadDeltaPx, P95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$trialMetrics | Format-Table Chain, Scenario, Trial, DurationMs, ObservedP95AbsAxisErrorPx, ObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, P95AbsAxisErrorPx, OutputSideFlipCount, OutputSameSideStepP95Counts, OutputSameSidePulseCount, OutputSameSidePulseRateHz, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionMotionEvidenceSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, P50PredictionLeadPx, P95PredictionLeadPx, P95PredictionLeadDeltaPx, P95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, P50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
 Write-Host '[moving-target] Scenario summary' -ForegroundColor Cyan
-$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, MeanObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, MeanOutputSameSideStepP95Counts, OutputSameSidePulseCount, OutputSameSidePulseRateHz, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, MeanP95PredictionLeadDeltaPx, MeanP95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize
+$scenarioMetrics | Format-Table Chain, Scenario, Trials, MeanObservedP95AbsAxisErrorPx, MeanObservedSteadyP95AbsAxisErrorPx, ObservedInsideTargetPct, MeanP95AbsAxisErrorPx, OutputSideFlipCount, MeanOutputSameSideStepP95Counts, OutputSameSidePulseCount, OutputSameSidePulseRateHz, AxisSettledPct, AxisMovingInsideSettlePct, PredictionActivePct, PredictionSelfMotionSuppressedPct, PredictionMotionEvidenceSuppressedPct, PredictionOscillationSuppressedPct, PredictionHighSpeedSuppressedPct, PredictionStationarySuppressedPct, HorizontalCatchUpPct, VerticalCatchUpPct, MeanP50PredictionLeadPx, MeanP95PredictionLeadPx, MeanP95PredictionLeadDeltaPx, MeanP95PredictionLeadJerkPx, PredictionLeadCappedPct, PredictionInterruptionCount, MeanP50PredictionActiveRunFrames, PredictionSideFlipCount, ReversalCount, SpeedLimitedPct -AutoSize

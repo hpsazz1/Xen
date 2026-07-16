@@ -59,3 +59,7 @@ r44起正式自运动补偿使用`aim_motion_compensation_delay_ms`。DML/NDI六
 r45起`aim_motion_compensation_delay_ms`表示正式补偿响应中心，
 `aim_motion_compensation_response_ms`表示线性响应宽度；CSV分别记录为
 `ViewMotionCompensationDelayMs/ResponseMs`。复测前必须先确认两列为12/24 ms，不能只依赖外部配置文件。
+
+r46正式响应宽度回退0。预测提前量为0时同时检查`PredictionMotionEvidenceSuppressed`：该字段表示初次建向、
+短时回归退化或反向确认，不属于停止、自运动、高速或往返门控。单向成熟段允许偶发证据退化，但不得随后出现
+`PredictionSelfMotionSuppressed=1`并触发整段重建。

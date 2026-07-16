@@ -1066,7 +1066,7 @@ int main()
                "basic pipeline writes concrete build revision and timestamp");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
-    expectTrue(BuildIdentity::displayLabel().find(" r45") != std::string::npos,
+    expectTrue(BuildIdentity::displayLabel().find(" r46") != std::string::npos,
                "ui build label includes controller revision");
     expectTrue(traceHeader.find("IntegralCountsX,IntegralCountsY") != std::string::npos &&
                traceHeader.find("ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds") != std::string::npos,
@@ -1076,7 +1076,7 @@ int main()
         traceHeader.find("ProfileCalibrationOverallConfidence") != std::string::npos,
         "basic pipeline reports passive profile calibration diagnostics");
     expectTrue(traceHeader.find(
-        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,ViewMotionCompensationDelayMs,ViewMotionCompensationResponseMs,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictionStationarySuppressed,PredictedX,PredictedY") != std::string::npos,
+        "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,ViewMotionCompensationDelayMs,ViewMotionCompensationResponseMs,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictionStationarySuppressed,PredictionMotionEvidenceSuppressed,PredictedX,PredictedY") != std::string::npos,
         "basic pipeline reports prediction diagnostics");
     traceFile.close();
     std::remove(tracePath);
@@ -1394,11 +1394,13 @@ int main()
     TargetPredictor sustainedMotionPredictor;
     TargetPredictor::Result sustainedPrediction{};
     int activePredictionFrames = 0;
+    int lastSustainedSample = 0;
     for (int sample = 0; sample < 16 && activePredictionFrames < 3; ++sample)
     {
         const auto time = t0 + std::chrono::milliseconds(sample * 8);
         sustainedPrediction = sustainedMotionPredictor.update(
             100.0 + sample * 6.0, 100.0, time, time, 320.0, predictionSettings);
+        lastSustainedSample = sample;
         if (sustainedPrediction.offsetX > 0.0)
             ++activePredictionFrames;
     }
@@ -1407,6 +1409,19 @@ int main()
     sustainedMotionPredictor.applySelfMotionSuppression(sustainedPrediction, true);
     expectTrue(!sustainedPrediction.selfMotionSuppressed && sustainedPrediction.offsetX > 0.0,
                "sustained target motion is exempt from self-motion artifact suppression");
+    const double sustainedBaseX = sustainedPrediction.x - sustainedPrediction.offsetX;
+    TargetPredictor::Result transientRegression{};
+    for (int sample = 1; sample <= 3; ++sample)
+    {
+        const auto time = t0 + std::chrono::milliseconds(
+            (lastSustainedSample + sample) * 8);
+        transientRegression = sustainedMotionPredictor.update(
+            sustainedBaseX + (sample % 2 == 0 ? -1.0 : 1.0),
+            100.0, time, time, 320.0, predictionSettings);
+    }
+    sustainedMotionPredictor.applySelfMotionSuppression(transientRegression, true);
+    expectTrue(!transientRegression.selfMotionSuppressed,
+               "brief regression degradation cannot reopen self-motion gating after sustained motion");
     for (int sample = 16; sample < 24; ++sample)
     {
         const auto time = t0 + std::chrono::milliseconds(sample * 8);

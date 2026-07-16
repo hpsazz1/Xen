@@ -102,8 +102,8 @@ int main()
                    "moving integral uses the anti-oscillation accumulation window");
         expectNear(defaults.aim_motion_compensation_delay_ms, 12.0, 0.0,
                    "production motion compensation uses the measured NDI response delay");
-        expectNear(defaults.aim_motion_compensation_response_ms, 24.0, 0.0,
-                   "production motion compensation uses the measured NDI response width");
+        expectNear(defaults.aim_motion_compensation_response_ms, 0.0, 0.0,
+                   "production motion compensation keeps the validated fixed-delay response");
         expectString(defaults.aim_pipeline_mode, "legacy",
                      "new pipeline defaults to legacy mode");
         expectNear(defaults.aim_shadow_command_to_frame_delay_ms, 60.0, 0.0,
@@ -194,8 +194,8 @@ int main()
                    "saved config persists the safe new pipeline mode");
         expectTrue(migratedText.find("aim_motion_compensation_delay_ms = 12") != std::string::npos,
                    "saved config persists the production motion compensation delay");
-        expectTrue(migratedText.find("aim_motion_compensation_response_ms = 24") != std::string::npos,
-                   "saved config persists the production motion compensation response width");
+        expectTrue(migratedText.find("aim_motion_compensation_response_ms = 0") != std::string::npos,
+                   "saved config persists the production fixed-delay response");
         expectTrue(migratedText.find("aim_shadow_command_to_frame_delay_ms = 60") != std::string::npos,
                    "saved config persists the explicit shadow delay");
         expectTrue(migratedText.find("aim_shadow_feedforward_gain = 0") != std::string::npos &&

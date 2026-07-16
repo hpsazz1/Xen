@@ -116,7 +116,7 @@ capture_fps = 60
 | `move_integral_time_ms` | `500` | 五类NDI移动目标抗晃动PI积分时间，单位毫秒；0为关闭，非零最小50 ms。较长窗口降低积分累积斜率，保留匀速稳态误差消除能力；反向误差达到稳定半径后清除对应轴旧积分。 |
 | `aim_pipeline_mode` | `legacy` | 新旧链路迁移模式。`legacy`只运行r37；`shadow`在同一帧记录新链路独立状态但不向设备队列写命令；P0-0至P0-5请求`active`会保留请求值并安全降级为`shadow`。 |
 | `aim_motion_compensation_delay_ms` | `12` | 正式自运动补偿的命令到画面响应中心，单位毫秒，范围0~250。 |
-| `aim_motion_compensation_response_ms` | `24` | 完整命令在画面中线性出现的响应宽度，单位毫秒，范围0~100；设为0时退化为固定延迟阶跃。 |
+| `aim_motion_compensation_response_ms` | `0` | 完整命令在画面中线性出现的实验响应宽度，单位毫秒，范围0~100；r45实测无收益，正式默认固定为0。 |
 | `aim_shadow_command_to_frame_delay_ms` | `60` | 新链路固定相机响应延迟，单位毫秒，范围0~250；只用于shadow角度模型，不自动采用被动Profile标定结果。 |
 | `aim_shadow_response_ms` | `80` | P0-4A角误差P反馈响应时间，范围10~500 ms；按真实控制周期使用指数离散响应。 |
 | `aim_shadow_max_speed_cps` | `1440` | P0-4A全部控制分量合成后的二维速度上限，范围30~4000 counts/s。 |

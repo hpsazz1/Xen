@@ -35,6 +35,7 @@ public:
         bool oscillationSuppressed = false; // 高频往返模式仅关闭提前量，基础跟踪保持生效
         bool highSpeedSuppressed = false; // 超出已验证常速度范围时撤销不可信外推
         bool stationarySuppressed = false; // 连续低速达到停止确认时间后撤销提前量
+        bool motionEvidenceSuppressed = false; // 建向、回归退化或反向确认期间是否撤销提前量
     };
 
     // 静止目标被程序拉向中心时，补偿残差可能表现为“预测速度继续向误差外侧”。
@@ -90,10 +91,9 @@ public:
     void applySelfMotionSuppression(Result& result, bool artifactDetected)
     {
         constexpr int kHoldFrames = 4;
-        constexpr int kSustainedMotionFrames = 3;
         // static实测的伪预测只持续1~2帧；真实left/right一旦连续预测满5帧，
         // 屏幕收敛与自身视角同向是正常闭环跟随，不再允许自运动门控反复打断。
-        if (artifactDetected && continuousPredictionFrames_ >= kSustainedMotionFrames)
+        if (artifactDetected && sustainedMotionConfirmed_)
             return;
 
         if (artifactDetected)
@@ -194,6 +194,8 @@ public:
             ++continuousPredictionFrames_;
         else
             continuousPredictionFrames_ = 0;
+        if (continuousPredictionFrames_ >= 3)
+            sustainedMotionConfirmed_ = true;
 
         previousX_ = x;
         previousY_ = y;
@@ -222,6 +224,8 @@ public:
             result.oscillationSuppressed = oscillationSuppressed;
             result.highSpeedSuppressed = highSpeedSuppressed;
             result.stationarySuppressed = stationarySuppressed_;
+            result.motionEvidenceSuppressed =
+                !directionLocked_ || !predictionEstablished_ || suppressPrediction_;
             return result;
         }
 
@@ -297,6 +301,7 @@ public:
         selfMotionSuppressionFramesRemaining_ = 0;
         selfMotionRearmPending_ = false;
         continuousPredictionFrames_ = 0;
+        sustainedMotionConfirmed_ = false;
         highSpeedTransientSamples_ = 0;
         resetPredictionDistanceSmoothing();
         directionReversalTimes_.clear();
@@ -349,6 +354,7 @@ private:
         reliableDirectionSamples_ = 0;
         selfMotionRearmPending_ = true;
         continuousPredictionFrames_ = 0;
+        sustainedMotionConfirmed_ = false;
         highSpeedTransientSamples_ = 0;
         resetPredictionDistanceSmoothing();
         observations_.clear();
@@ -490,6 +496,7 @@ private:
             {
                 suppressPrediction_ = true;
                 stationarySuppressed_ = true;
+                sustainedMotionConfirmed_ = false;
             }
             if (stationarySeconds >= kStationaryUnlockSeconds)
             {
@@ -514,6 +521,7 @@ private:
                 directionLocked_ = false;
                 predictionEstablished_ = false;
                 reliableDirectionSamples_ = 0;
+                sustainedMotionConfirmed_ = false;
             }
             return;
         }
@@ -604,7 +612,11 @@ private:
             recordDirectionReversal(observationTime);
         }
         if (!hasCommittedDirection_ || committedAlignment < 0.50)
+        {
             committedDirectionSince_ = observationTime;
+            if (hasCommittedDirection_)
+                sustainedMotionConfirmed_ = false;
+        }
         directionX_ = pendingDirectionX_;
         directionY_ = pendingDirectionY_;
         normalize(directionX_, directionY_);
@@ -690,6 +702,7 @@ private:
     int selfMotionSuppressionFramesRemaining_ = 0; // 自运动伪迹命中后的剩余抑制观测帧数
     bool selfMotionRearmPending_ = false; // 保持结束后是否仍需更强净位移证据
     int continuousPredictionFrames_ = 0; // 当前方向连续有效预测帧数，用于识别真实持续运动
+    bool sustainedMotionConfirmed_ = false; // 持续运动锁存；短暂回归退化不得重新开放自运动门控
     std::deque<TimePoint> directionReversalTimes_; // 最近可靠换向时间，用于识别高频小幅往返
     TimePoint oscillationSuppressedUntil_{}; // 高频往返停止后的自动恢复时刻
     bool hasCommittedDirection_ = false; // 是否存在跨解锁保留的最后可靠方向

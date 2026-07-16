@@ -1511,6 +1511,8 @@ void MouseThread::moveMousePivot(
             lastPredictionResult.highSpeedSuppressed;
         pf->predictionStationarySuppressed =
             lastPredictionResult.stationarySuppressed;
+        pf->predictionMotionEvidenceSuppressed =
+            lastPredictionResult.motionEvidenceSuppressed;
         pf->predictedX = lastPredictionResult.x;
         pf->predictedY = lastPredictionResult.y;
         pf->errorX = errorX;

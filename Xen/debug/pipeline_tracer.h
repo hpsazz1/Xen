@@ -69,6 +69,7 @@ struct PipelineFrame
     bool predictionOscillationSuppressed = false; ///< 高频可靠换向门控是否撤销框外提前量
     bool predictionHighSpeedSuppressed = false; ///< 高速高加速度是否超出常速度可信范围
     bool predictionStationarySuppressed = false; ///< 连续低速达到停止确认时间后是否撤销提前量
+    bool predictionMotionEvidenceSuppressed = false; ///< 建向、回归退化或换向确认是否撤销提前量
     double predictedX = 0.0;
     double predictedY = 0.0;
 

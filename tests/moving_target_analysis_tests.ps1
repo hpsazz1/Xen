@@ -66,6 +66,8 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
         $row | Add-Member -NotePropertyName SettledY -NotePropertyValue 1
         $row | Add-Member -NotePropertyName PredictionStationarySuppressed `
             -NotePropertyValue $(if ($timestamp -eq 1030) { 1 } else { 0 })
+        $row | Add-Member -NotePropertyName PredictionMotionEvidenceSuppressed `
+            -NotePropertyValue $(if ($timestamp -eq 1040) { 1 } else { 0 })
         if ($timestamp -in @(1000, 1020, 1040)) {
             $row.FinalMx = 1
         }
@@ -106,6 +108,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 0 $reverseTrials[0].PredictionOscillationSuppressedPct 'Legacy CSV without oscillation gate diagnostics must remain compatible.'
     Assert-Equal 0 $reverseTrials[0].PredictionHighSpeedSuppressedPct 'Legacy CSV without high-speed gate diagnostics must remain compatible.'
     Assert-Equal 14.3 $reverseTrials[0].PredictionStationarySuppressedPct 'Confirmed stationary prediction suppression must be summarized.'
+    Assert-Equal 14.3 $reverseTrials[0].PredictionMotionEvidenceSuppressedPct 'Motion-evidence prediction suppression must be summarized independently.'
     Assert-Equal 20 $reverseTrials[0].P50PredictionLeadPx 'Kinematic median lead must use active prediction offsets.'
     Assert-Equal 10 $reverseTrials[0].P95PredictionLeadDeltaPx 'Prediction smoothness must use active-to-active lead magnitude deltas.'
     Assert-Equal 20 $reverseTrials[0].P95PredictionLeadJerkPx 'Prediction smoothness must expose alternating lead-magnitude deltas.'
@@ -141,6 +144,7 @@ Timestamp,SourceWidth,SourceHeight,InferenceFPS,SourceReceiveFPS,ObservationAgeS
     Assert-Equal 10 $scenario[0].MeanP95PredictionLeadJerkPx 'Scenario summary must preserve prediction lead jerk.'
     Assert-Equal 40 $scenario[0].PredictionLeadCappedPct 'Scenario summary must weight cap occupancy by active samples.'
     Assert-Equal 10 $scenario[0].PredictionStationarySuppressedPct 'Scenario summary must weight stationary suppression by samples.'
+    Assert-Equal 10 $scenario[0].PredictionMotionEvidenceSuppressedPct 'Scenario summary must weight motion-evidence suppression by samples.'
     $exportedRows = @(Import-Csv -LiteralPath $outputCsv)
     Assert-Equal 6 $exportedRows.Count 'CSV export must include trials and scenario summaries.'
     Assert-Equal 2 $exportedRows[-1].Trials 'CSV export must retain scenario-only summary columns.'
