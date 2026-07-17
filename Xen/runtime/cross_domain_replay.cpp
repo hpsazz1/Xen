@@ -127,11 +127,30 @@ struct AppliedCommand
 struct Camera
 {
     std::deque<AppliedCommand> pending;
+    AppliedViewMotionModel responseModel;
+    Clock::time_point epoch = Clock::time_point(std::chrono::seconds(1));
+    bool finiteResponse = false;
     double yaw = 0.0;
     double pitch = 0.0;
 
+    void configure(double centerMs, double responseMs)
+    {
+        finiteResponse = responseMs > 1e-9;
+        if (finiteResponse)
+            responseModel.configure(centerMs, responseMs);
+    }
+
     void apply(double time)
     {
+        if (finiteResponse)
+        {
+            const auto point = epoch + std::chrono::duration_cast<Clock::duration>(
+                std::chrono::duration<double>(time));
+            const auto view = responseModel.at(point);
+            yaw = view.first;
+            pitch = view.second;
+            return;
+        }
         while (!pending.empty() && pending.front().effectiveTime <= time + 1e-12)
         {
             yaw += pending.front().yaw;
@@ -143,6 +162,14 @@ struct Camera
     void submit(double time, double delaySeconds, int x, int y,
                 const ControllerSettings& settings)
     {
+        if (finiteResponse)
+        {
+            const auto point = epoch + std::chrono::duration_cast<Clock::duration>(
+                std::chrono::duration<double>(time));
+            responseModel.addCommand(
+                x, y, settings.degreesPerCountX, settings.degreesPerCountY, point);
+            return;
+        }
         pending.push_back({ time + delaySeconds,
             x * settings.degreesPerCountX,
             y * settings.degreesPerCountY });
@@ -150,6 +177,8 @@ struct Camera
 
     void clearPending()
     {
+        if (finiteResponse)
+            return;
         pending.clear();
     }
 };
@@ -535,8 +564,11 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
 
     Camera legacyCamera;
     Camera candidateCamera;
+    legacyCamera.configure(variant.commandToFrameDelayMs, variant.commandResponseMs);
+    candidateCamera.configure(variant.commandToFrameDelayMs, variant.commandResponseMs);
     AppliedViewMotionModel candidateViewMotionModel;
-    candidateViewMotionModel.configure(variant.commandToFrameDelayMs, 0.0);
+    candidateViewMotionModel.configure(
+        variant.commandToFrameDelayMs, variant.commandResponseMs);
     MetricCollector legacyMetrics;
     MetricCollector candidateMetrics;
     std::ofstream frames;
@@ -1025,11 +1057,13 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommandCommitHorizonMs,CandidateSettleEntryCommandGuard,CandidateSettleEntryCommandHold,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,CommandCenterMs,CommandResponseMs,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommandCommitHorizonMs,CandidateSettleEntryCommandGuard,CandidateSettleEntryCommandHold,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
         output << item.scenario << ',' << item.variant.name << ','
+               << item.variant.commandToFrameDelayMs << ','
+               << item.variant.commandResponseMs << ','
                << item.kalmanAccelerationStdDegreesPerSecond2 << ','
                << item.kalmanMovingAccelerationStdDegreesPerSecond2 << ','
                << item.kalmanMovingRateThresholdDegreesPerSecond << ','

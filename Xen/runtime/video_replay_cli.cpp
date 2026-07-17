@@ -80,6 +80,8 @@ namespace
         bool staticFixedTruth = false;
         bool candidateViewMotionCompensation = false;
         double candidateCommandCommitHorizonMs = 0.0;
+        double physicalCommandCenterMs = 60.0;
+        double physicalCommandResponseMs = 0.0;
         bool candidateSettleEntryCommandGuard = false;
         bool candidateSettleEntryCommandHold = false;
         double feedforwardGain = 0.0;
@@ -338,6 +340,10 @@ namespace
         options.candidateCommandCommitHorizonMs = optionDouble(
             argc, argv, "--candidate-command-commit-horizon-ms",
             options.candidateCommandCommitHorizonMs);
+        options.physicalCommandCenterMs = optionDouble(
+            argc, argv, "--physical-command-center-ms", options.physicalCommandCenterMs);
+        options.physicalCommandResponseMs = optionDouble(
+            argc, argv, "--physical-command-response-ms", options.physicalCommandResponseMs);
         if (const auto guard = optionValue(
                 argc, argv, "--candidate-settle-entry-command-guard"))
         {
@@ -806,6 +812,16 @@ int Run(int argc, char** argv)
     try
     {
         const Options options = parseOptions(argc, argv);
+        // 物理相机响应仅用于离线契约敏感性分析。这里先统一归一化，确保实际执行、
+        // summary与decision记录的是同一组有限值，避免异常输入污染回放身份。
+        const double physicalCommandCenterMs =
+            std::isfinite(options.physicalCommandCenterMs)
+            ? std::clamp(options.physicalCommandCenterMs, 0.0, 250.0)
+            : 60.0;
+        const double physicalCommandResponseMs =
+            std::isfinite(options.physicalCommandResponseMs)
+            ? std::clamp(options.physicalCommandResponseMs, 0.0, 100.0)
+            : 0.0;
         if (!std::filesystem::is_directory(options.videoRoot))
             throw std::runtime_error("Video root does not exist: " + options.videoRoot.string());
         if (!std::filesystem::is_regular_file(options.modelPath))
@@ -814,6 +830,11 @@ int Run(int argc, char** argv)
         if (options.crossDomain)
         {
             crossDomainVariants = CrossDomainReplay::BuildRequiredVariants();
+            for (auto& variant : crossDomainVariants)
+            {
+                variant.commandToFrameDelayMs = physicalCommandCenterMs;
+                variant.commandResponseMs = physicalCommandResponseMs;
+            }
             for (const std::string& detailVariant : options.crossDomainDetailVariants)
             {
                 const bool detailVariantExists = std::any_of(
@@ -1065,6 +1086,10 @@ int Run(int argc, char** argv)
                      << (options.candidateViewMotionCompensation ? 1 : 0) << '\n'
                      << "CandidateCommandCommitHorizonMs="
                      << options.candidateCommandCommitHorizonMs << '\n'
+                     << "PhysicalCommandCenterMs="
+                     << physicalCommandCenterMs << '\n'
+                     << "PhysicalCommandResponseMs="
+                     << physicalCommandResponseMs << '\n'
                      << "CandidateSettleEntryCommandGuard="
                      << (options.candidateSettleEntryCommandGuard ? 1 : 0) << '\n'
                      << "CandidateSettleEntryCommandHold="

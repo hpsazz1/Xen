@@ -2380,6 +2380,21 @@ int main()
                syntheticComparison.candidate.shapedCounts > 0.0 &&
                syntheticComparison.candidate.sentCounts > 0.0,
                "cross-domain replay records estimator, requested, shaped and sent diagnostics");
+    CrossDomainReplay::Variant finiteResponseVariant = syntheticVariant;
+    finiteResponseVariant.commandToFrameDelayMs = 20.0;
+    finiteResponseVariant.commandResponseMs = 20.0;
+    const auto finiteResponseComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, finiteResponseVariant, syntheticSettings);
+    expectNear(finiteResponseComparison.variant.commandToFrameDelayMs, 20.0, 0.0,
+               "cross-domain replay records the shared physical response center");
+    expectNear(finiteResponseComparison.variant.commandResponseMs, 20.0, 0.0,
+               "cross-domain replay records the shared physical response width");
+    expectTrue(std::abs(finiteResponseComparison.legacy.errorP95Degrees -
+                   syntheticComparison.legacy.errorP95Degrees) > 1e-6,
+               "finite physical camera response changes the closed-loop legacy trajectory");
+    expectTrue(std::abs(finiteResponseComparison.candidate.errorP95Degrees -
+                   syntheticComparison.candidate.errorP95Degrees) > 1e-6,
+               "finite physical camera response changes the closed-loop candidate trajectory");
     CrossDomainReplay::ControllerSettings widenedBandReplaySettings = syntheticSettings;
     widenedBandReplaySettings.reverseConfirmationErrorMultiplier = 1.75;
     widenedBandReplaySettings.confirmLowSpeedReverseSettleRelease = true;

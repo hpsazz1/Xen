@@ -55,6 +55,7 @@
 | [P0-5在途命令静止进入保护](152P0-5在途命令静止进入保护20260717.md) | 复现60 ms冻结目标guard、过渡hold和5个剩余损失域。 |
 | [P0-5静止进入双误差守卫修正](153P0-5静止进入双误差守卫修正20260717.md) | 修正承诺终点替换当前误差的提前settle漏洞，并复现正确728/810结果。 |
 | [P0-5双误差守卫剩余损失归因](154P0-5双误差守卫剩余损失归因20260717.md) | 定位两个剩余损失域的翻转链，并以722/810否决正确双条件hold。 |
+| [P0-5跨域物理响应契约审计](155P0-5跨域物理响应契约审计20260717.md) | 用20/20共享物理相机反证实机自运动参数不能直接替换跨域60/0基准。 |
 | [r60 DML机动估计影子接入](134r60DML机动估计影子接入20260717.md) | 使用共享估计器采集DML/NDI模型选择、静止驻留和暂停恢复诊断。 |
 | [r60静止延迟30毫秒反证](138r60静止延迟30毫秒反证20260717.md) | 对照10/20/30/60 ms并结束固定延迟扫描，确定有限响应候选边界。 |
 | [r61有限相机响应影子实现](139r61有限相机响应影子实现20260717.md) | 使用20 ms响应中心和20 ms宽度复测DML九点static。 |
@@ -84,6 +85,8 @@ build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video
 先查看`cross_domain_decision.txt`，再按`cross_domain_summary.csv`的`Scenario/Variant/Passed/Reason`定位单一失败模块；不要只挑通过变体调参。`cross_domain_frames.csv`只包含基准域逐帧诊断，全矩阵指标均在summary中。
 
 `--response-ms`只定义冻结的legacy比较器，`--candidate-response-ms`只定义新控制器候选；不传后者时默认与legacy相同。每次候选响应实验必须核对decision和summary中的`LegacyResponseMs/CandidateResponseMs`，禁止移动比较器后把结果当作候选收益。
+
+跨域物理相机默认保持命令中心60 ms、响应宽度0 ms的整步模型。只有审计物理契约时才追加`--physical-command-center-ms`与`--physical-command-response-ms`；两者同时作用于legacy和candidate，并记录到decision及summary的`CommandCenterMs/CommandResponseMs`。实机shadow的20/20参数用于解释已发生的画面自运动，不能直接当作跨域闭环物理对象或替换正式60/0基准；有限响应改变检测队列后也不能作为固定样本反事实。
 
 需要分析失败归因时追加`--cross-domain-attribution 1`。工具会生成`cross_domain_attribution.csv`，分别运行控制时刻真实LOS状态和100000 counts/s上限两个离线反事实；两者严格复用基线逐帧检测/重置时间线。只有`CohortStable=1`时分类才有效，出现任何`COHORT_CHANGED`必须先修评估工具，不能据此选算法。oracle与解除限速是定位上界，不是可直接发布的候选，总通过数下降时也不得选择性只统计被救回的失败项。
 

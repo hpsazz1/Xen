@@ -44,6 +44,7 @@ struct Variant
     double replayFps = 94.0;
     double observationDelayMs = 15.0;
     double commandToFrameDelayMs = 60.0;
+    double commandResponseMs = 0.0;
     double speedScale = 1.0;
     // 相对运动缩放直接作用于视线轨迹：同向等速接近0，角色更快时允许自然反号。
     double relativeMotionScale = 1.0;
