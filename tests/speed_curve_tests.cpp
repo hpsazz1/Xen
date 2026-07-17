@@ -2358,15 +2358,66 @@ int main()
         syntheticReplay, syntheticVariant, syntheticSettings, detailTracePath);
     std::ifstream detailTrace(detailTracePath);
     size_t detailTraceHeaders = 0;
+    bool detailTraceHasEstimatorBias = false;
     for (std::string line; std::getline(detailTrace, line);)
     {
         if (line.rfind("Scenario,Variant,", 0) == 0)
+        {
             ++detailTraceHeaders;
+            detailTraceHasEstimatorBias =
+                line.find("MeasurementYaw,MeasurementPitch,MeasuredRelativeYaw,") !=
+                    std::string::npos &&
+                line.find("MeasuredRelativePitch,ViewAtObservationYaw,") !=
+                    std::string::npos &&
+                line.find("ViewAtObservationPitch,ViewAtControlYaw,ViewAtControlPitch,") !=
+                    std::string::npos &&
+                line.find("ObservationTruthYaw,") != std::string::npos &&
+                line.find("ObservationTruthPitch,TruthYaw,TruthPitch,") !=
+                    std::string::npos &&
+                line.find("EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,") !=
+                    std::string::npos &&
+                line.find("EstimateTruthBiasX,EstimateTruthBiasY,") != std::string::npos;
+        }
     }
     expectTrue(detailTraceHeaders == 1,
                "cross-domain detail trace writes one header across appended scenarios");
+    expectTrue(detailTraceHasEstimatorBias,
+               "cross-domain detail trace exposes estimator truth bias during settle");
     detailTrace.close();
     std::filesystem::remove(detailTracePath, detailTraceError);
+    CrossDomainReplay::SourceTrajectory staticTruthReplay = syntheticReplay;
+    staticTruthReplay.scenario = "static";
+    CrossDomainReplay::ControllerSettings staticTruthSettings = syntheticSettings;
+    staticTruthSettings.staticFixedTruth = true;
+    const auto fixedTruthComparison = CrossDomainReplay::RunComparison(
+        staticTruthReplay, syntheticVariant, staticTruthSettings);
+    expectTrue(fixedTruthComparison.staticFixedTruth &&
+               fixedTruthComparison.legacy.errorP95Degrees !=
+                   syntheticComparison.legacy.errorP95Degrees,
+               "static replay can separate fixed physical truth from noisy measurements");
+    CrossDomainReplay::ControllerSettings viewMotionSettings = syntheticSettings;
+    viewMotionSettings.candidateViewMotionCompensation = true;
+    const auto viewMotionComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, viewMotionSettings);
+    expectTrue(viewMotionComparison.candidateViewMotionCompensation,
+               "cross-domain replay identifies the formal view-motion timeline candidate");
+    expectTrue(std::isfinite(viewMotionComparison.candidate.errorP95Degrees) &&
+                   std::isfinite(viewMotionComparison.candidate.meanNis) &&
+                   viewMotionComparison.candidate.sentCounts > 0.0,
+               "formal view-motion timeline candidate keeps finite delayed-command diagnostics");
+    expectTrue(std::abs(viewMotionComparison.candidate.errorP95Degrees -
+                   syntheticComparison.candidate.errorP95Degrees) < 0.1,
+               "formal view-motion timeline candidate stays within the continuous-detection error band");
+    CrossDomainReplay::ControllerSettings commitHorizonSettings = viewMotionSettings;
+    commitHorizonSettings.candidateCommandCommitHorizonSeconds = 0.060;
+    const auto commitHorizonComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, commitHorizonSettings);
+    expectNear(commitHorizonComparison.candidateCommandCommitHorizonSeconds,
+               0.060, 0.0,
+               "cross-domain replay records the bounded command commit horizon");
+    expectTrue(std::abs(commitHorizonComparison.candidate.requestedCounts -
+                   viewMotionComparison.candidate.requestedCounts) > 1e-6,
+               "command commit horizon changes the candidate control request");
     CrossDomainReplay::ControllerSettings responseReplaySettings = syntheticSettings;
     responseReplaySettings.responseSeconds = 0.080;
     responseReplaySettings.candidateResponseSeconds = 0.060;

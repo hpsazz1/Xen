@@ -84,6 +84,12 @@ struct ControllerSettings
     double reverseConfirmationErrorMultiplier = 1.5;
     // 离线结构候选，默认关闭且不接入正式配置或active路径。
     bool confirmLowSpeedReverseSettleRelease = false;
+    // 离线评估候选：物理静止场景以整段检测中心中位数作为固定真值，逐帧中心仍作为测量。
+    bool staticFixedTruth = false;
+    // 离线时轴诊断：按正式shadow链路区分画面中的相对LOS与成功命令形成的累计视角。
+    bool candidateViewMotionCompensation = false;
+    // 离线Smith型归因：在已发送命令兑现时刻比较目标与累计视角；0保持当前控制时刻语义。
+    double candidateCommandCommitHorizonSeconds = 0.0;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
     double trajectoryOutputHz = 240.0;
     double trajectoryMaxAccelerationCountsPerSecond2 = 60000.0;
@@ -145,6 +151,9 @@ struct Comparison
     double reversalFeedforwardSeconds = 0.0;
     double reverseConfirmationErrorMultiplier = 1.5;
     bool confirmLowSpeedReverseSettleRelease = false;
+    bool staticFixedTruth = false;
+    bool candidateViewMotionCompensation = false;
+    double candidateCommandCommitHorizonSeconds = 0.0;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
     double trajectoryOutputHz = 0.0;
     Metrics legacy{};

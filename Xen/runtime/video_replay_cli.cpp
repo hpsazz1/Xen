@@ -76,6 +76,9 @@ namespace
         double reverseConfirmationSeconds = 0.080;
         double reverseConfirmationErrorMultiplier = 1.5;
         bool confirmLowSpeedReverseSettleRelease = false;
+        bool staticFixedTruth = false;
+        bool candidateViewMotionCompensation = false;
+        double candidateCommandCommitHorizonMs = 0.0;
         double feedforwardGain = 0.0;
         double leadHorizonSeconds = 0.0;
         double leadStrength = 0.0;
@@ -299,6 +302,22 @@ namespace
             options.confirmLowSpeedReverseSettleRelease = normalized != "0" &&
                 normalized != "false" && normalized != "off";
         }
+        if (const auto fixedTruth = optionValue(argc, argv, "--static-fixed-truth"))
+        {
+            const std::string normalized = lower(*fixedTruth);
+            options.staticFixedTruth = normalized != "0" &&
+                normalized != "false" && normalized != "off";
+        }
+        if (const auto compensation = optionValue(
+                argc, argv, "--candidate-view-motion-compensation"))
+        {
+            const std::string normalized = lower(*compensation);
+            options.candidateViewMotionCompensation = normalized != "0" &&
+                normalized != "false" && normalized != "off";
+        }
+        options.candidateCommandCommitHorizonMs = optionDouble(
+            argc, argv, "--candidate-command-commit-horizon-ms",
+            options.candidateCommandCommitHorizonMs);
         options.feedforwardGain = optionDouble(
             argc, argv, "--feedforward-gain", options.feedforwardGain);
         options.leadHorizonSeconds = optionDouble(
@@ -846,6 +865,11 @@ int Run(int argc, char** argv)
                 options.reverseConfirmationErrorMultiplier;
             settings.confirmLowSpeedReverseSettleRelease =
                 options.confirmLowSpeedReverseSettleRelease;
+            settings.staticFixedTruth = options.staticFixedTruth;
+            settings.candidateViewMotionCompensation =
+                options.candidateViewMotionCompensation;
+            settings.candidateCommandCommitHorizonSeconds =
+                options.candidateCommandCommitHorizonMs / 1000.0;
             settings.feedforwardGain = options.feedforwardGain;
             settings.leadHorizonSeconds = options.leadHorizonSeconds;
             settings.leadStrength = options.leadStrength;
@@ -994,6 +1018,11 @@ int Run(int argc, char** argv)
                              : 1.5) << '\n'
                      << "ConfirmLowSpeedReverseSettleRelease="
                      << (options.confirmLowSpeedReverseSettleRelease ? 1 : 0) << '\n'
+                     << "StaticFixedTruth=" << (options.staticFixedTruth ? 1 : 0) << '\n'
+                     << "CandidateViewMotionCompensation="
+                     << (options.candidateViewMotionCompensation ? 1 : 0) << '\n'
+                     << "CandidateCommandCommitHorizonMs="
+                     << options.candidateCommandCommitHorizonMs << '\n'
                      << "TrajectoryMode="
                      << trajectoryShaperModeName(options.trajectoryMode) << '\n'
                      << "TrajectoryOutputHz=" << options.trajectoryOutputHz << '\n'

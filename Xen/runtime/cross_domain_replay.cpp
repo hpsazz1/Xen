@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "runtime/aim_coordinate_space.h"
+#include "runtime/applied_view_motion_model.h"
 #include "runtime/basic_aim_controller.h"
 #include "runtime/basic_target_filter.h"
 #include "runtime/command_trajectory_shaper.h"
@@ -87,6 +88,24 @@ AimCoordinateSpace::LosAngles targetAngles(
     const double normalizedX = (interpolate(source, sourceTime, true) - source.centerX) /
         std::max(1.0, static_cast<double>(source.sourceWidth));
     const double normalizedY = (interpolate(source, sourceTime, false) - source.centerY) /
+        std::max(1.0, static_cast<double>(source.sourceHeight));
+    auto angles = AimCoordinateSpace::pixelOffsetToLosAngles(
+        normalizedX * variant.sourceWidth,
+        normalizedY * variant.sourceHeight,
+        variant.fovXDegrees, variant.fovYDegrees,
+        variant.sourceWidth, variant.sourceHeight);
+    angles.yawDegrees *= variant.relativeMotionScale;
+    angles.pitchDownDegrees *= variant.relativeMotionScale;
+    return angles;
+}
+
+AimCoordinateSpace::LosAngles targetAnglesAtSourcePosition(
+    const SourceTrajectory& source, const Variant& variant,
+    double globalX, double globalY)
+{
+    const double normalizedX = (globalX - source.centerX) /
+        std::max(1.0, static_cast<double>(source.sourceWidth));
+    const double normalizedY = (globalY - source.centerY) /
         std::max(1.0, static_cast<double>(source.sourceHeight));
     auto angles = AimCoordinateSpace::pixelOffsetToLosAngles(
         normalizedX * variant.sourceWidth,
@@ -397,6 +416,13 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             ? std::clamp(settings.reverseConfirmationErrorMultiplier, 1.5, 2.0) : 1.5;
     comparison.confirmLowSpeedReverseSettleRelease =
         settings.confirmLowSpeedReverseSettleRelease;
+    comparison.staticFixedTruth = settings.staticFixedTruth;
+    comparison.candidateViewMotionCompensation =
+        settings.candidateViewMotionCompensation;
+    comparison.candidateCommandCommitHorizonSeconds =
+        std::isfinite(settings.candidateCommandCommitHorizonSeconds)
+        ? std::clamp(settings.candidateCommandCommitHorizonSeconds, 0.0, 0.250)
+        : 0.0;
     comparison.trajectoryMode = settings.trajectoryMode;
     // 回放参数可能来自命令行；非有限值回退到生产默认频率，有限值再限制到可验证范围。
     comparison.trajectoryOutputHz = std::isfinite(settings.trajectoryOutputHz)
@@ -406,6 +432,32 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     {
         comparison.reason = "empty trajectory";
         return comparison;
+    }
+
+    const bool useStaticFixedTruth = comparison.staticFixedTruth &&
+        canonicalScenario(source.scenario) == "static";
+    AimCoordinateSpace::LosAngles staticTruthAngles{};
+    if (useStaticFixedTruth)
+    {
+        std::vector<double> detectedX;
+        std::vector<double> detectedY;
+        for (const auto& point : source.points)
+        {
+            if (!point.detected)
+                continue;
+            detectedX.push_back(point.globalX);
+            detectedY.push_back(point.globalY);
+        }
+        if (detectedX.empty())
+        {
+            for (const auto& point : source.points)
+            {
+                detectedX.push_back(point.globalX);
+                detectedY.push_back(point.globalY);
+            }
+        }
+        staticTruthAngles = targetAnglesAtSourcePosition(
+            source, variant, percentile(detectedX, 0.5), percentile(detectedY, 0.5));
     }
 
     BasicTargetFilter legacyFilter;
@@ -477,6 +529,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
 
     Camera legacyCamera;
     Camera candidateCamera;
+    AppliedViewMotionModel candidateViewMotionModel;
+    candidateViewMotionModel.configure(variant.commandToFrameDelayMs, 0.0);
     MetricCollector legacyMetrics;
     MetricCollector candidateMetrics;
     std::ofstream frames;
@@ -488,7 +542,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             std::filesystem::file_size(frameCsv, sizeError) == 0;
         frames.open(frameCsv, std::ios::app);
         if (writeHeader)
-            frames << "Scenario,Variant,TimeSeconds,Detected,TruthYaw,TruthPitch,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
+            frames << "Scenario,Variant,TimeSeconds,Detected,MeasurementYaw,MeasurementPitch,MeasuredRelativeYaw,MeasuredRelativePitch,ViewAtObservationYaw,ViewAtObservationPitch,ViewAtControlYaw,ViewAtControlPitch,ObservationTruthYaw,ObservationTruthPitch,TruthYaw,TruthPitch,EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,EstimateTruthBiasX,EstimateTruthBiasY,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
     }
 
     const double dt = 1.0 / std::clamp(variant.replayFps, 10.0, 1000.0);
@@ -510,6 +564,21 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     if (recordedDetectionTimeline)
         recordedDetectionTimeline->clear();
 
+    auto submitCandidate = [&](double timeSeconds, Clock::time_point sendTime,
+                               int countsX, int countsY)
+    {
+        candidateCamera.submit(
+            timeSeconds, commandDelay, countsX, countsY, settings);
+        if (comparison.candidateViewMotionCompensation ||
+            comparison.candidateCommandCommitHorizonSeconds > 0.0)
+        {
+            candidateViewMotionModel.addCommand(
+                countsX, countsY,
+                settings.degreesPerCountX, settings.degreesPerCountY,
+                sendTime);
+        }
+    };
+
     // 离线对照显式遍历每个固定输出格点，而不是按观测帧调用一次后让调度器跳过中间tick。
     // 新请求只会从其到达后的首个格点生效；格点之间始终保持latest-only目标速度。
     auto serviceTrajectoryBefore = [&](double endTimeSeconds, bool includeEnd)
@@ -527,9 +596,9 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                 std::chrono::duration<double>(nextTrajectoryTickSeconds));
             lastResult = shaper.update(
                 latestTrajectoryRequest, trajectoryPeriod, tickPoint);
-            candidateCamera.submit(nextTrajectoryTickSeconds, commandDelay,
+            submitCandidate(nextTrajectoryTickSeconds, tickPoint,
                 lastResult.output.outputCountsX,
-                lastResult.output.outputCountsY, settings);
+                lastResult.output.outputCountsY);
             candidateMetrics.addOutput(
                 lastResult.output.outputCountsX,
                 lastResult.output.outputCountsY,
@@ -549,12 +618,28 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         const double controlTime = observationTime + observationDelay;
         legacyCamera.apply(observationTime);
         candidateCamera.apply(observationTime);
+        const auto observationPoint = epoch + std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(observationTime));
+        const auto controlPoint = epoch + std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(controlTime));
+        // controlTime可能晚于下一帧observationTime，可变Camera一旦前推便不能回退。
+        // 正式时轴候选必须按时间点查询历史，否则会把上一帧的未来相机状态扣到当前观测。
+        const auto modeledViewAtObservation =
+            candidateViewMotionModel.at(observationPoint);
+        const auto modeledViewAtControl = candidateViewMotionModel.at(controlPoint);
+        const auto commitPoint = controlPoint + std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(
+                comparison.candidateCommandCommitHorizonSeconds));
+        const auto modeledViewAtCommit = candidateViewMotionModel.at(commitPoint);
         const double sourceTime = std::min(source.points.back().timeSeconds,
             observationTime * variant.speedScale);
         const double controlSourceTime = std::min(source.points.back().timeSeconds,
             controlTime * variant.speedScale);
-        const auto truthAtObservation = targetAngles(source, variant, sourceTime);
-        const auto truthAtControl = targetAngles(source, variant, controlSourceTime);
+        const auto measurementAtObservation = targetAngles(source, variant, sourceTime);
+        const auto truthAtObservation = useStaticFixedTruth
+            ? staticTruthAngles : measurementAtObservation;
+        const auto truthAtControl = useStaticFixedTruth
+            ? staticTruthAngles : targetAngles(source, variant, controlSourceTime);
         const auto& point = nearestPoint(source, sourceTime);
         const double cropWidth = source.detectionWidth * variant.sourceWidth /
             std::max(1, source.sourceWidth);
@@ -565,9 +650,15 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             truthAtObservation.pitchDownDegrees - legacyCamera.pitch,
             variant.fovXDegrees, variant.fovYDegrees,
             variant.sourceWidth, variant.sourceHeight);
+        const double candidatePhysicalYawAtObservation =
+            comparison.candidateViewMotionCompensation
+            ? modeledViewAtObservation.first : candidateCamera.yaw;
+        const double candidatePhysicalPitchAtObservation =
+            comparison.candidateViewMotionCompensation
+            ? modeledViewAtObservation.second : candidateCamera.pitch;
         const auto candidateRelativePixels = AimCoordinateSpace::losAnglesToPixelOffset(
-            truthAtObservation.yawDegrees - candidateCamera.yaw,
-            truthAtObservation.pitchDownDegrees - candidateCamera.pitch,
+            truthAtObservation.yawDegrees - candidatePhysicalYawAtObservation,
+            truthAtObservation.pitchDownDegrees - candidatePhysicalPitchAtObservation,
             variant.fovXDegrees, variant.fovYDegrees,
             variant.sourceWidth, variant.sourceHeight);
         const bool bothInsideDetectionCrop =
@@ -599,8 +690,10 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                     std::chrono::duration<double>(controlTime)));
                 hasLatestTrajectoryRequest = false;
                 nextTrajectoryTickSeconds = 0.0;
-                // 新执行层的紧急停止语义包含清除尚未生效的旧命令，避免丢失后继续转动。
-                candidateCamera.clearPending();
+                // 已成功提交给物理相机的命令无法撤销；正式视角时轴候选必须保留其迟到响应。
+                // 历史基线继续保留原有清队列语义，确保默认关闭时逐位复现既有矩阵。
+                if (!comparison.candidateViewMotionCompensation)
+                    candidateCamera.clearPending();
             }
             legacyMetrics.addOutput(0, 0, false);
             candidateMetrics.addOutput(0, 0, false);
@@ -613,13 +706,21 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         candidateCamera.apply(controlTime);
 
         const double sourcePixelX = AimCoordinateSpace::sourcePixelDeltaForAngleDegrees(
-            truthAtObservation.yawDegrees, variant.fovXDegrees, variant.sourceWidth);
+            measurementAtObservation.yawDegrees, variant.fovXDegrees, variant.sourceWidth);
         const double sourcePixelY = AimCoordinateSpace::sourcePixelDeltaForAngleDegrees(
-            truthAtObservation.pitchDownDegrees, variant.fovYDegrees, variant.sourceHeight);
-        const auto observationPoint = epoch + std::chrono::duration_cast<Clock::duration>(
-            std::chrono::duration<double>(observationTime));
-        const auto controlPoint = epoch + std::chrono::duration_cast<Clock::duration>(
-            std::chrono::duration<double>(controlTime));
+            measurementAtObservation.pitchDownDegrees, variant.fovYDegrees, variant.sourceHeight);
+        const double measuredRelativeYaw = measurementAtObservation.yawDegrees -
+            candidatePhysicalYawAtObservation;
+        const double measuredRelativePitch =
+            measurementAtObservation.pitchDownDegrees - candidatePhysicalPitchAtObservation;
+        const double stabilizedMeasurementYaw =
+            comparison.candidateViewMotionCompensation
+            ? measuredRelativeYaw + modeledViewAtObservation.first
+            : measurementAtObservation.yawDegrees;
+        const double stabilizedMeasurementPitch =
+            comparison.candidateViewMotionCompensation
+            ? measuredRelativePitch + modeledViewAtObservation.second
+            : measurementAtObservation.pitchDownDegrees;
         const auto filtered = legacyFilter.update(sourcePixelX, sourcePixelY, observationPoint, dt,
             static_cast<double>(variant.sourceWidth));
         const auto predicted = legacyPredictor.update(filtered.x, filtered.y, observationPoint,
@@ -645,7 +746,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         legacyCamera.submit(controlTime, commandDelay, legacyX, legacyY, settings);
 
         estimator.update(
-            truthAtObservation.yawDegrees, truthAtObservation.pitchDownDegrees,
+            stabilizedMeasurementYaw, stabilizedMeasurementPitch,
             point.confidence, observationPoint, controlPoint, estimatorSettings);
         const RelativeLosKalmanEstimate estimate = estimator.selectedEstimate();
         const bool useManeuverModel =
@@ -666,10 +767,24 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             CandidateEstimatorMode::OracleControlTime;
         LosAimController::Input input;
         input.valid = useOracle || (estimate.x.valid && estimate.y.valid);
-        input.errorDegreesX = (useOracle ? truthAtControl.yawDegrees :
-            estimate.x.angleDegrees) - candidateCamera.yaw;
-        input.errorDegreesY = (useOracle ? truthAtControl.pitchDownDegrees :
-            estimate.y.angleDegrees) - candidateCamera.pitch;
+        const double commitHorizon =
+            comparison.candidateCommandCommitHorizonSeconds;
+        const double candidateViewAtEvaluationYaw = commitHorizon > 0.0
+            ? modeledViewAtCommit.first
+            : (comparison.candidateViewMotionCompensation
+                ? modeledViewAtControl.first : candidateCamera.yaw);
+        const double candidateViewAtEvaluationPitch = commitHorizon > 0.0
+            ? modeledViewAtCommit.second
+            : (comparison.candidateViewMotionCompensation
+                ? modeledViewAtControl.second : candidateCamera.pitch);
+        const double targetAtEvaluationYaw = useOracle
+            ? truthAtControl.yawDegrees + oracleRateX * commitHorizon
+            : estimate.x.angleDegrees + estimate.x.rateDegreesPerSecond * commitHorizon;
+        const double targetAtEvaluationPitch = useOracle
+            ? truthAtControl.pitchDownDegrees + oracleRateY * commitHorizon
+            : estimate.y.angleDegrees + estimate.y.rateDegreesPerSecond * commitHorizon;
+        input.errorDegreesX = targetAtEvaluationYaw - candidateViewAtEvaluationYaw;
+        input.errorDegreesY = targetAtEvaluationPitch - candidateViewAtEvaluationPitch;
         input.relativeLosRateDegreesPerSecondX = useOracle
             ? oracleRateX : estimate.x.rateDegreesPerSecond;
         input.relativeLosRateDegreesPerSecondY = useOracle
@@ -690,8 +805,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         if (settings.trajectoryMode == TrajectoryShaperMode::Off)
         {
             shaped = shaper.update(request, dt, controlPoint);
-            candidateCamera.submit(controlTime, commandDelay,
-                shaped.output.outputCountsX, shaped.output.outputCountsY, settings);
+            submitCandidate(controlTime, controlPoint,
+                shaped.output.outputCountsX, shaped.output.outputCountsY);
             candidateMetrics.addTrajectoryOutput(shaped.output);
         }
         else
@@ -765,8 +880,21 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         if (frames)
         {
             frames << comparison.scenario << ',' << variant.name << ',' << std::fixed
-                   << std::setprecision(6) << controlTime << ",1," << truthAtControl.yawDegrees << ','
-                   << truthAtControl.pitchDownDegrees << ',' << legacyErrorX << ',' << legacyErrorY << ','
+                   << std::setprecision(6) << controlTime << ",1,"
+                   << measurementAtObservation.yawDegrees << ','
+                   << measurementAtObservation.pitchDownDegrees << ','
+                   << measuredRelativeYaw << ',' << measuredRelativePitch << ','
+                   << modeledViewAtObservation.first << ','
+                   << modeledViewAtObservation.second << ','
+                   << modeledViewAtControl.first << ',' << modeledViewAtControl.second << ','
+                   << truthAtObservation.yawDegrees << ','
+                   << truthAtObservation.pitchDownDegrees << ','
+                   << truthAtControl.yawDegrees << ',' << truthAtControl.pitchDownDegrees << ','
+                   << estimate.x.angleDegrees << ',' << estimate.y.angleDegrees << ','
+                   << input.errorDegreesX << ',' << input.errorDegreesY << ','
+                   << estimate.x.angleDegrees - truthAtControl.yawDegrees << ','
+                   << estimate.y.angleDegrees - truthAtControl.pitchDownDegrees << ','
+                   << legacyErrorX << ',' << legacyErrorY << ','
                    << candidateErrorX << ',' << candidateErrorY << ',' << estimate.x.rateDegreesPerSecond << ','
                    << estimate.y.rateDegreesPerSecond << ',' << estimate.x.innovationDegrees << ','
                    << estimate.y.innovationDegrees << ',' << estimate.x.nis << ',' << estimate.y.nis << ','
@@ -856,7 +984,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommandCommitHorizonMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -878,6 +1006,9 @@ void WriteSummary(const std::filesystem::path& path,
                << item.reversalFeedforwardSeconds * 1000.0 << ','
                << item.reverseConfirmationErrorMultiplier << ','
                << (item.confirmLowSpeedReverseSettleRelease ? 1 : 0) << ','
+               << (item.staticFixedTruth ? 1 : 0) << ','
+               << (item.candidateViewMotionCompensation ? 1 : 0) << ','
+               << item.candidateCommandCommitHorizonSeconds * 1000.0 << ','
                << trajectoryShaperModeName(item.trajectoryMode) << ','
                << item.trajectoryOutputHz << ',' << item.candidate.samples << ','
                << item.legacy.errorP50Degrees << ',' << item.legacy.errorP95Degrees << ','
