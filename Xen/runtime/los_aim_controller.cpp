@@ -133,7 +133,9 @@ LosAimController::Output LosAimController::update(
             pendingSettleReleaseSeconds_ = 0.0;
         }
     }
-    else if (settleEntryErrorMagnitude <= settleError && rateMagnitude <= settleRate)
+    else if (errorMagnitude <= settleError &&
+             settleEntryErrorMagnitude <= settleError &&
+             rateMagnitude <= settleRate)
     {
         quietSamples_ = std::min(quietSamples_ + 1, 2);
         settled_ = quietSamples_ >= 2;

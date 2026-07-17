@@ -609,6 +609,18 @@ int main()
         guardedSettleInput, settleSettings);
     expectTrue(guardedConfirmed.settled,
                "settle entry guard admits two quiet committed endpoints");
+    LosAimController currentErrorGuardController;
+    guardedSettleInput.errorDegreesX = 0.20;
+    guardedSettleInput.settleEntryErrorDegreesX = 0.05;
+    const auto currentErrorGuardFirst = currentErrorGuardController.update(
+        guardedSettleInput, settleSettings);
+    const auto currentErrorGuardSecond = currentErrorGuardController.update(
+        guardedSettleInput, settleSettings);
+    expectTrue(!currentErrorGuardFirst.settled &&
+                   !currentErrorGuardSecond.settled &&
+                   currentErrorGuardSecond.settleConfirmationSamples == 0,
+               "quiet committed endpoint cannot replace an out-of-band current error");
+    guardedSettleInput.errorDegreesX = quietInput.errorDegreesX;
     LosAimController heldSettleController;
     guardedSettleInput.settleEntryErrorDegreesX = 0.20;
     guardedSettleInput.holdOutputWhileSettleEntryBlocked = true;

@@ -69,8 +69,9 @@ namespace
         double fovY = 74.0;
         bool crossDomain = false;
         bool crossDomainAttribution = false;
-        std::string crossDomainDetailVariant =
-            "domain_fov106_2560x1440_94fps_20ms_1x";
+        std::vector<std::string> crossDomainDetailVariants{
+            "domain_fov106_2560x1440_94fps_20ms_1x"
+        };
         double settleErrorDegrees = 0.080;
         double settleRateDegreesPerSecond = 1.200;
         double reverseConfirmationSeconds = 0.080;
@@ -190,6 +191,21 @@ namespace
         return result;
     }
 
+    std::vector<std::string> parseStringList(const std::string& value)
+    {
+        std::vector<std::string> result;
+        std::stringstream stream(value);
+        for (std::string token; std::getline(stream, token, ',');)
+        {
+            token.erase(std::remove_if(token.begin(), token.end(), [](unsigned char ch) {
+                return std::isspace(ch) != 0;
+            }), token.end());
+            if (!token.empty() && std::find(result.begin(), result.end(), token) == result.end())
+                result.push_back(std::move(token));
+        }
+        return result;
+    }
+
     std::filesystem::path resolveDefaultModel()
     {
         const std::vector<std::filesystem::path> candidates{
@@ -225,7 +241,9 @@ namespace
         if (const auto detailVariant = optionValue(
                 argc, argv, "--cross-domain-detail-variant"))
         {
-            options.crossDomainDetailVariant = *detailVariant;
+            options.crossDomainDetailVariants = parseStringList(*detailVariant);
+            if (options.crossDomainDetailVariants.empty())
+                throw std::runtime_error("--cross-domain-detail-variant requires a name.");
         }
         if (const auto model = optionValue(argc, argv, "--video-model"))
             options.modelPath = *model;
@@ -796,16 +814,18 @@ int Run(int argc, char** argv)
         if (options.crossDomain)
         {
             crossDomainVariants = CrossDomainReplay::BuildRequiredVariants();
-            const bool detailVariantExists = std::any_of(
-                crossDomainVariants.begin(), crossDomainVariants.end(),
-                [&](const auto& variant) {
-                    return variant.name == options.crossDomainDetailVariant;
-                });
-            if (!detailVariantExists)
+            for (const std::string& detailVariant : options.crossDomainDetailVariants)
             {
-                throw std::runtime_error(
-                    "Unknown --cross-domain-detail-variant: " +
-                    options.crossDomainDetailVariant);
+                const bool detailVariantExists = std::any_of(
+                    crossDomainVariants.begin(), crossDomainVariants.end(),
+                    [&](const auto& variant) {
+                        return variant.name == detailVariant;
+                    });
+                if (!detailVariantExists)
+                {
+                    throw std::runtime_error(
+                        "Unknown --cross-domain-detail-variant: " + detailVariant);
+                }
             }
         }
         std::filesystem::create_directories(options.outputRoot);
@@ -921,9 +941,11 @@ int Run(int argc, char** argv)
                 for (const auto& variant : variants)
                 {
                     // 全矩阵保留汇总指标；逐帧诊断默认只记录实机近似基准域，也允许
-                    // 用精确名称选择一个失败物理域，避免机械复制整套矩阵形成数GB文件。
-                    const bool detailedVariant =
-                        variant.name == options.crossDomainDetailVariant;
+                    // 用一个或多个精确名称选择失败物理域；Variant列保持每行来源可审计。
+                    const bool detailedVariant = std::find(
+                        options.crossDomainDetailVariants.begin(),
+                        options.crossDomainDetailVariants.end(),
+                        variant.name) != options.crossDomainDetailVariants.end();
                     CrossDomainReplay::Comparison comparison;
                     if (options.crossDomainAttribution)
                     {
@@ -1054,8 +1076,14 @@ int Run(int argc, char** argv)
                      << options.trajectoryMaxAccelerationCountsPerSecond2 << '\n'
                      << "TrajectoryMaxJerkCountsPerSecond3="
                      << options.trajectoryMaxJerkCountsPerSecond3 << '\n'
-                     << "DetailedVariant="
-                     << options.crossDomainDetailVariant << '\n'
+                     << "DetailedVariant=";
+            for (size_t index = 0; index < options.crossDomainDetailVariants.size(); ++index)
+            {
+                if (index > 0)
+                    decision << ',';
+                decision << options.crossDomainDetailVariants[index];
+            }
+            decision << '\n'
                      << "AttributionEnabled="
                      << (options.crossDomainAttribution ? 1 : 0) << '\n'
                      << "AttributionOraclePassed=" << oraclePassed << '\n'
