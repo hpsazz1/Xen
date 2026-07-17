@@ -1300,6 +1300,9 @@ AimPipelineFrameState MouseThread::processAimPipelineObservation(
         const auto cameraAtControl = appliedViewMotionModel.at(controlTime);
         const auto cameraRateAtObservation =
             appliedViewMotionModel.rateAt(observationTime);
+        const auto uncertaintyRateAtObservation =
+            appliedViewMotionModel.uncertaintyRateAt(
+                observationTime, kManeuverResponseRateUncertaintyTailMs);
         const auto degreesPerCount = currentDegreesPerCount();
 
         ViewMotionShadowDiagnostics diagnostics;
@@ -1309,16 +1312,22 @@ AimPipelineFrameState MouseThread::processAimPipelineObservation(
 #ifndef USE_CUDA
         diagnostics.maneuverRateUncertaintyGain =
             kManeuverResponseRateUncertaintyGain;
+        diagnostics.maneuverRateUncertaintyTailMs =
+            kManeuverResponseRateUncertaintyTailMs;
 #endif
         diagnostics.appliedCameraRateYawDegreesPerSecond =
             cameraRateAtObservation.first;
         diagnostics.appliedCameraRatePitchDegreesPerSecond =
             cameraRateAtObservation.second;
+        diagnostics.maneuverUncertaintyRateYawDegreesPerSecond =
+            uncertaintyRateAtObservation.first;
+        diagnostics.maneuverUncertaintyRatePitchDegreesPerSecond =
+            uncertaintyRateAtObservation.second;
         diagnostics.maneuverRateUncertaintyXDegreesPerSecond =
-            std::abs(cameraRateAtObservation.first) *
+            std::abs(uncertaintyRateAtObservation.first) *
             diagnostics.maneuverRateUncertaintyGain;
         diagnostics.maneuverRateUncertaintyYDegreesPerSecond =
-            std::abs(cameraRateAtObservation.second) *
+            std::abs(uncertaintyRateAtObservation.second) *
             diagnostics.maneuverRateUncertaintyGain;
         diagnostics.degreesPerCountX = degreesPerCount.first;
         diagnostics.degreesPerCountY = degreesPerCount.second;

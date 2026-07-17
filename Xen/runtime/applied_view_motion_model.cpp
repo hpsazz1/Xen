@@ -88,9 +88,19 @@ std::pair<double, double> AppliedViewMotionModel::at(TimePoint queryTime) const
 
 std::pair<double, double> AppliedViewMotionModel::rateAt(TimePoint queryTime) const
 {
+    return uncertaintyRateAt(queryTime, 0.0);
+}
+
+std::pair<double, double> AppliedViewMotionModel::uncertaintyRateAt(
+    TimePoint queryTime, double tailMs) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     if (commandResponseMs_ <= 1e-9)
         return {};
+    const double boundedTailMs = std::isfinite(tailMs)
+        ? std::clamp(tailMs, 0.0, 100.0) : 0.0;
+    const auto tail = std::chrono::duration_cast<TimePoint::duration>(
+        std::chrono::duration<double, std::milli>(boundedTailMs));
 
     double yawRate = 0.0;
     double pitchRate = 0.0;
@@ -98,7 +108,7 @@ std::pair<double, double> AppliedViewMotionModel::rateAt(TimePoint queryTime) co
     {
         if (queryTime < sample.startTime)
             break;
-        if (queryTime < sample.endTime)
+        if (queryTime < sample.endTime + tail)
         {
             const double durationSeconds = std::chrono::duration<double>(
                 sample.endTime - sample.startTime).count();

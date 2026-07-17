@@ -192,7 +192,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "TrajectoryPositionX,TrajectoryPositionY,TrajectoryTargetVelocityX,TrajectoryTargetVelocityY,TrajectoryVelocityX,TrajectoryVelocityY,TrajectoryAccelerationX,TrajectoryAccelerationY,TrajectoryJerkX,TrajectoryJerkY,"
          << "TrajectoryShapedCountsX,TrajectoryShapedCountsY,TrajectoryQuantizationRemainderX,TrajectoryQuantizationRemainderY,TrajectoryShapingDelayMs,TrajectorySchedulerLatenessMs,TrajectorySchedulerSkippedTicks,"
          << "AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
-         << "ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,ManeuverRateUncertaintyGain,AppliedCameraRateYawDps,AppliedCameraRatePitchDps,ViewMotionManeuverRateUncertaintyX,ViewMotionManeuverRateUncertaintyY,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
+         << "ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,ManeuverRateUncertaintyGain,ManeuverRateUncertaintyTailMs,AppliedCameraRateYawDps,AppliedCameraRatePitchDps,ManeuverUncertaintyRateYawDps,ManeuverUncertaintyRatePitchDps,ViewMotionManeuverRateUncertaintyX,ViewMotionManeuverRateUncertaintyY,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
          << "AppliedCameraYawAtObservationDegrees,AppliedCameraPitchAtObservationDegrees,AppliedCameraYawAtControlDegrees,AppliedCameraPitchAtControlDegrees,"
          << "StabilizedLosYawDegrees,StabilizedLosPitchDownDegrees,RelativeErrorYawDegrees,RelativeErrorPitchDownDegrees,"
          << "CaptureFrameSequence,BackendReceiveNs,CaptureSubmitNs,InferenceStartNs,InferencePublishNs,ControlTimeNs,"
@@ -339,8 +339,11 @@ bool PipelineTracer::exportCSV(const std::string& path) const
               << ap.viewMotion.commandToFrameDelayMs << ','
               << ap.viewMotion.commandResponseMs << ','
               << ap.viewMotion.maneuverRateUncertaintyGain << ','
+              << ap.viewMotion.maneuverRateUncertaintyTailMs << ','
               << ap.viewMotion.appliedCameraRateYawDegreesPerSecond << ','
               << ap.viewMotion.appliedCameraRatePitchDegreesPerSecond << ','
+              << ap.viewMotion.maneuverUncertaintyRateYawDegreesPerSecond << ','
+              << ap.viewMotion.maneuverUncertaintyRatePitchDegreesPerSecond << ','
               << ap.viewMotion.maneuverRateUncertaintyXDegreesPerSecond << ','
               << ap.viewMotion.maneuverRateUncertaintyYDegreesPerSecond << ','
               << ap.viewMotion.degreesPerCountX << ',' << ap.viewMotion.degreesPerCountY << ','

@@ -24,6 +24,10 @@ public:
 
     std::pair<double, double> at(TimePoint queryTime) const;
     std::pair<double, double> rateAt(TimePoint queryTime) const;
+    // 仅为机动门控提供响应结束后的速率不确定度尾部（毫秒）；尾部不参与 at() 的
+    // 相机角度累计，避免把观测不确定性误当成已经发生的画面运动。
+    std::pair<double, double> uncertaintyRateAt(
+        TimePoint queryTime, double tailMs) const;
     double commandToFrameDelayMs() const;
     double commandResponseMs() const;
     size_t sampleCount() const;

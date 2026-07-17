@@ -21,6 +21,7 @@ struct Candidate
     AxisResponse horizontal{};
     AxisResponse vertical{};
     double maneuverUncertaintyGain = 0.0;
+    double maneuverUncertaintyTailMs = 0.0;
 };
 
 struct Command

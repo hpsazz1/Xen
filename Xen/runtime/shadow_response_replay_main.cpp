@@ -80,6 +80,7 @@ void writeMetric(std::ostream& output,
         << metric.candidate.vertical.centerMs << ','
         << metric.candidate.vertical.widthMs << ','
         << metric.candidate.maneuverUncertaintyGain << ','
+        << metric.candidate.maneuverUncertaintyTailMs << ','
         << metric.rows << ',' << metric.runningSamples << ','
         << metric.pausedSamples << ',' << metric.runningActiveSamples << ','
         << metric.pausedActiveSamples << ',' << metric.runningActiveSegments << ','
@@ -104,6 +105,7 @@ void writeTrace(std::ostream& output, const std::string& source,
             << candidate.vertical.centerMs << ','
             << candidate.vertical.widthMs << ','
             << candidate.maneuverUncertaintyGain << ','
+            << candidate.maneuverUncertaintyTailMs << ','
             << row.row << ',' << row.trial << ',' << row.observationTimeNs << ','
             << (row.outputPaused ? 1 : 0) << ',' << (row.settled ? 1 : 0) << ','
             << (row.active ? 1 : 0) << ',' << row.cameraRateX << ','
@@ -126,6 +128,7 @@ int main(int argc, char** argv)
             "[--x-centers-ms ... --x-widths-ms ... "
             "--y-centers-ms ... --y-widths-ms ...] "
             "[--uncertainty-gains 0,0.25,0.5] "
+            "[--uncertainty-tail-ms 0,10,20] "
             "[--trace-output <csv>] "
             "[--dpc-x 0.0308 --dpc-y 0.0308]" << std::endl;
         return 2;
@@ -145,6 +148,8 @@ int main(int argc, char** argv)
         argc, argv, "--y-widths-ms", widths);
     const std::vector<double> uncertaintyGains = optionList(
         argc, argv, "--uncertainty-gains", { 0.0 });
+    const std::vector<double> uncertaintyTailsMs = optionList(
+        argc, argv, "--uncertainty-tail-ms", { 0.0 });
     const double dpcX = optionDouble(argc, argv, "--dpc-x", 0.0);
     const double dpcY = optionDouble(argc, argv, "--dpc-y", 0.0);
     const std::filesystem::path outputPath = optionValue(
@@ -191,14 +196,18 @@ int main(int argc, char** argv)
         for (double yCenter : yCenters)
         for (double yWidth : yWidths)
         for (double uncertaintyGain : uncertaintyGains)
+        for (double uncertaintyTailMs : uncertaintyTailsMs)
             candidates.push_back({
-                { xCenter, xWidth }, { yCenter, yWidth }, uncertaintyGain });
+                { xCenter, xWidth }, { yCenter, yWidth }, uncertaintyGain,
+                uncertaintyTailMs });
     }
     else
     {
         for (const auto& response : sharedResponses)
         for (double uncertaintyGain : uncertaintyGains)
-            candidates.push_back({ response, response, uncertaintyGain });
+        for (double uncertaintyTailMs : uncertaintyTailsMs)
+            candidates.push_back({ response, response, uncertaintyGain,
+                uncertaintyTailMs });
     }
 
     ManeuverLosEstimator::Settings settings;
@@ -217,7 +226,7 @@ int main(int argc, char** argv)
         return 4;
     }
     output << std::fixed << std::setprecision(3);
-    output << "Source,XCenterMs,XWidthMs,YCenterMs,YWidthMs,UncertaintyGain,"
+    output << "Source,XCenterMs,XWidthMs,YCenterMs,YWidthMs,UncertaintyGain,UncertaintyTailMs,"
         "Rows,RunningSamples,"
         "PausedSamples,RunningActiveSamples,PausedActiveSamples,RunningActiveSegments,"
         "SettledActiveSamples,SelectionChanges,RecordedSelectionCompared,"
@@ -235,7 +244,7 @@ int main(int argc, char** argv)
             return 4;
         }
         traceOutput << std::fixed << std::setprecision(6);
-        traceOutput << "Source,XCenterMs,XWidthMs,YCenterMs,YWidthMs,UncertaintyGain,"
+        traceOutput << "Source,XCenterMs,XWidthMs,YCenterMs,YWidthMs,UncertaintyGain,UncertaintyTailMs,"
             "Row,Trial,ObservationTimeNs,OutputPaused,Settled,Active,CameraRateX,"
             "CameraRateY,UncertaintyX,UncertaintyY,EstimatedRateX,EstimatedRateY,"
             "ManeuverEvidence,HoldRemainingSeconds\n";
@@ -294,7 +303,7 @@ int main(int argc, char** argv)
     });
 
     const std::size_t top = std::min<std::size_t>(20, overall.size());
-    std::cout << "XCenter XWidth YCenter YWidth Gain Active Settled Segments Mismatch" << std::endl;
+    std::cout << "XCenter XWidth YCenter YWidth Gain Tail Active Settled Segments Mismatch" << std::endl;
     for (std::size_t index = 0; index < top; ++index)
     {
         const auto& metric = overall[index];
@@ -303,6 +312,7 @@ int main(int argc, char** argv)
             << metric.candidate.vertical.centerMs << ' '
             << metric.candidate.vertical.widthMs << ' '
             << metric.candidate.maneuverUncertaintyGain << ' '
+            << metric.candidate.maneuverUncertaintyTailMs << ' '
             << metric.runningActiveSamples << ' '
             << metric.settledActiveSamples << ' '
             << metric.runningActiveSegments << ' '

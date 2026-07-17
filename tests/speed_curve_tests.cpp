@@ -1099,6 +1099,14 @@ int main()
                    commandStart + std::chrono::milliseconds(30)).first,
                0.0, 1e-12,
                "finite view model ends response rate at the upper boundary");
+    expectNear(rampedAppliedViewModel.uncertaintyRateAt(
+                   commandStart + std::chrono::milliseconds(40), 20.0).first,
+               15.0, 1e-12,
+               "response uncertainty keeps the modeled rate through the bounded tail");
+    expectNear(rampedAppliedViewModel.uncertaintyRateAt(
+                   commandStart + std::chrono::milliseconds(50), 20.0).first,
+               0.0, 1e-12,
+               "response uncertainty ends at the exclusive tail boundary");
     rampedAppliedViewModel.configure(20.0, 0.0);
     expectNear(rampedAppliedViewModel.at(
                    commandStart + std::chrono::milliseconds(100)).first,
@@ -1344,7 +1352,7 @@ int main()
         "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed,AimPipelineOutputPaused") != std::string::npos,
         "basic pipeline records same-frame mode and output-pause diagnostics");
     expectTrue(traceHeader.find(
-        "ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,ManeuverRateUncertaintyGain,AppliedCameraRateYawDps") != std::string::npos,
+        "ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,ManeuverRateUncertaintyGain,ManeuverRateUncertaintyTailMs,AppliedCameraRateYawDps") != std::string::npos,
         "basic pipeline records finite applied-view response diagnostics");
     expectTrue(traceHeader.find(
         "AimPipelineAngleX,AimPipelineAngleY,AimPipelineRateX,AimPipelineRateY,AimPipelineCovarianceX,AimPipelineCovarianceY") != std::string::npos &&

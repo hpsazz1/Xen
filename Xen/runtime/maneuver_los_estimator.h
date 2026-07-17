@@ -15,6 +15,7 @@ enum class ManeuverLosEstimatorMode
 // r62 离线正负样本共同通过的命令响应速率裕量。只用于 DML shadow 的机动证据门控，
 // 不修改 LOS 测量、Kalman 状态、12 度/秒物理门槛或正式设备输出。
 inline constexpr double kManeuverResponseRateUncertaintyGain = 1.25;
+inline constexpr double kManeuverResponseRateUncertaintyTailMs = 20.0;
 
 inline const char* maneuverLosEstimatorModeName(ManeuverLosEstimatorMode mode)
 {

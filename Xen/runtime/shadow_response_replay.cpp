@@ -183,8 +183,14 @@ std::pair<double, double> cameraRateAt(const Timeline& timeline,
             const double startNs = static_cast<double>(command.sendTimeNs) +
                 std::max(0.0, centerMs - widthMs * 0.5) * 1'000'000.0;
             const double endNs = startNs + widthMs * 1'000'000.0;
+            const double uncertaintyTailMs = std::isfinite(
+                candidate.maneuverUncertaintyTailMs)
+                ? std::clamp(candidate.maneuverUncertaintyTailMs, 0.0, 100.0)
+                : 0.0;
+            const double uncertaintyEndNs = endNs +
+                uncertaintyTailMs * 1'000'000.0;
             const double queryNs = static_cast<double>(queryTimeNs);
-            if (queryNs >= startNs && queryNs < endNs)
+            if (queryNs >= startNs && queryNs < uncertaintyEndNs)
             {
                 *rates[axis] += static_cast<double>(counts[axis]) *
                     configuredDegreesPerCount[axis] / (widthMs / 1000.0);

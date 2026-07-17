@@ -250,8 +250,11 @@ struct ViewMotionShadowDiagnostics
     double commandToFrameDelayMs = 0.0;
     double commandResponseMs = 0.0;
     double maneuverRateUncertaintyGain = 0.0;
+    double maneuverRateUncertaintyTailMs = 0.0;
     double appliedCameraRateYawDegreesPerSecond = 0.0;
     double appliedCameraRatePitchDegreesPerSecond = 0.0;
+    double maneuverUncertaintyRateYawDegreesPerSecond = 0.0;
+    double maneuverUncertaintyRatePitchDegreesPerSecond = 0.0;
     double maneuverRateUncertaintyXDegreesPerSecond = 0.0;
     double maneuverRateUncertaintyYDegreesPerSecond = 0.0;
     double degreesPerCountX = 0.0;
