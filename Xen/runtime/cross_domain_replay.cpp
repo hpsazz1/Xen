@@ -474,8 +474,11 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     if (!frameCsv.empty())
     {
         std::filesystem::create_directories(frameCsv.parent_path());
+        std::error_code sizeError;
+        const bool writeHeader = !std::filesystem::exists(frameCsv, sizeError) ||
+            std::filesystem::file_size(frameCsv, sizeError) == 0;
         frames.open(frameCsv, std::ios::app);
-        if (frames.tellp() == 0)
+        if (writeHeader)
             frames << "Scenario,Variant,TimeSeconds,Detected,TruthYaw,TruthPitch,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
     }
 

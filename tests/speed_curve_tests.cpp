@@ -2284,6 +2284,25 @@ int main()
                syntheticComparison.candidate.shapedCounts > 0.0 &&
                syntheticComparison.candidate.sentCounts > 0.0,
                "cross-domain replay records estimator, requested, shaped and sent diagnostics");
+    const auto detailTracePath = std::filesystem::temp_directory_path() /
+        "xen_cross_domain_detail_trace.csv";
+    std::error_code detailTraceError;
+    std::filesystem::remove(detailTracePath, detailTraceError);
+    CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, syntheticSettings, detailTracePath);
+    CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, syntheticSettings, detailTracePath);
+    std::ifstream detailTrace(detailTracePath);
+    size_t detailTraceHeaders = 0;
+    for (std::string line; std::getline(detailTrace, line);)
+    {
+        if (line.rfind("Scenario,Variant,", 0) == 0)
+            ++detailTraceHeaders;
+    }
+    expectTrue(detailTraceHeaders == 1,
+               "cross-domain detail trace writes one header across appended scenarios");
+    detailTrace.close();
+    std::filesystem::remove(detailTracePath, detailTraceError);
     CrossDomainReplay::ControllerSettings responseReplaySettings = syntheticSettings;
     responseReplaySettings.responseSeconds = 0.080;
     responseReplaySettings.candidateResponseSeconds = 0.060;

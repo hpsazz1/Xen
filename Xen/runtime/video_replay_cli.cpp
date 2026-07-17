@@ -69,6 +69,8 @@ namespace
         double fovY = 74.0;
         bool crossDomain = false;
         bool crossDomainAttribution = false;
+        std::string crossDomainDetailVariant =
+            "domain_fov106_2560x1440_94fps_20ms_1x";
         double settleErrorDegrees = 0.080;
         double settleRateDegreesPerSecond = 1.200;
         double reverseConfirmationSeconds = 0.080;
@@ -212,6 +214,11 @@ namespace
             const std::string normalized = lower(*attribution);
             options.crossDomainAttribution = normalized != "0" &&
                 normalized != "false" && normalized != "off";
+        }
+        if (const auto detailVariant = optionValue(
+                argc, argv, "--cross-domain-detail-variant"))
+        {
+            options.crossDomainDetailVariant = *detailVariant;
         }
         if (const auto model = optionValue(argc, argv, "--video-model"))
             options.modelPath = *model;
@@ -738,6 +745,22 @@ int Run(int argc, char** argv)
             throw std::runtime_error("Video root does not exist: " + options.videoRoot.string());
         if (!std::filesystem::is_regular_file(options.modelPath))
             throw std::runtime_error("DML model does not exist. Use --video-model with an absolute path.");
+        std::vector<CrossDomainReplay::Variant> crossDomainVariants;
+        if (options.crossDomain)
+        {
+            crossDomainVariants = CrossDomainReplay::BuildRequiredVariants();
+            const bool detailVariantExists = std::any_of(
+                crossDomainVariants.begin(), crossDomainVariants.end(),
+                [&](const auto& variant) {
+                    return variant.name == options.crossDomainDetailVariant;
+                });
+            if (!detailVariantExists)
+            {
+                throw std::runtime_error(
+                    "Unknown --cross-domain-detail-variant: " +
+                    options.crossDomainDetailVariant);
+            }
+        }
         std::filesystem::create_directories(options.outputRoot);
 
         config.detection_resolution = options.cropWidth;
@@ -778,7 +801,7 @@ int Run(int argc, char** argv)
         {
             std::vector<CrossDomainReplay::Comparison> comparisons;
             std::vector<CrossDomainReplay::Attribution> attributions;
-            const auto variants = CrossDomainReplay::BuildRequiredVariants();
+            const auto& variants = crossDomainVariants;
             CrossDomainReplay::ControllerSettings settings;
             settings.kalmanAccelerationStdDegreesPerSecond2 =
                 options.kalmanAccelerationStdDegreesPerSecond2;
@@ -837,10 +860,10 @@ int Run(int argc, char** argv)
                 source.points = trajectory.points;
                 for (const auto& variant : variants)
                 {
-                    // 全矩阵保留汇总指标；逐帧诊断只记录当前106°/2560×1440/94 FPS/
-                    // 20 ms/1x基准，避免把同一观测机械复制成数GB文件。
+                    // 全矩阵保留汇总指标；逐帧诊断默认只记录实机近似基准域，也允许
+                    // 用精确名称选择一个失败物理域，避免机械复制整套矩阵形成数GB文件。
                     const bool detailedVariant =
-                        variant.name == "domain_fov106_2560x1440_94fps_20ms_1x";
+                        variant.name == options.crossDomainDetailVariant;
                     CrossDomainReplay::Comparison comparison;
                     if (options.crossDomainAttribution)
                     {
@@ -956,6 +979,8 @@ int Run(int argc, char** argv)
                      << options.trajectoryMaxAccelerationCountsPerSecond2 << '\n'
                      << "TrajectoryMaxJerkCountsPerSecond3="
                      << options.trajectoryMaxJerkCountsPerSecond3 << '\n'
+                     << "DetailedVariant="
+                     << options.crossDomainDetailVariant << '\n'
                      << "AttributionEnabled="
                      << (options.crossDomainAttribution ? 1 : 0) << '\n'
                      << "AttributionOraclePassed=" << oraclePassed << '\n'
