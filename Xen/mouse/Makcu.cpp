@@ -21,7 +21,11 @@
 #include <iostream>
 
 #include "Makcu.h"
-#include "Xen.h"
+
+// 顶层程序和独立诊断工具分别拥有这三个输入状态；设备层只发布状态，不依赖检测器头文件。
+extern std::atomic<bool> aiming;
+extern std::atomic<bool> shooting;
+extern std::atomic<bool> zooming;
 
 //=====================================================================
 // 构造函数

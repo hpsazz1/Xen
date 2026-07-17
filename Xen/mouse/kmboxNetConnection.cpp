@@ -4,7 +4,6 @@
 
 #include "kmbox_net/kmboxNet.h"
 #include "KmboxNetConnection.h"
-#include <Xen.h>
 
 /**
  * @brief KmboxNetConnection 构造函数

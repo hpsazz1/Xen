@@ -429,6 +429,7 @@ if(BUILD_TESTING)
         "${SRC_DIR}/runtime/output_scheduler.cpp"
         "${SRC_DIR}/runtime/shadow_response_replay.cpp"
         "${SRC_DIR}/runtime/build_identity.cpp"
+        "${SRC_DIR}/runtime/physical_response_probe.cpp"
     )
     set_target_properties(xen_algorithm_tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
@@ -470,6 +471,47 @@ if(BUILD_TESTING)
     target_compile_features(xen_physical_response_fit PRIVATE cxx_std_17)
     if(MSVC)
         target_compile_options(xen_physical_response_fit PRIVATE /utf-8 /W4 /permissive- /EHsc)
+    endif()
+
+    if(AIMBOT_NDI_AVAILABLE)
+        add_executable(xen_physical_response_probe
+            "${SRC_DIR}/runtime/physical_response_probe_main.cpp"
+            "${SRC_DIR}/runtime/physical_response_probe.cpp"
+            "${SRC_DIR}/runtime/build_identity.cpp"
+            "${SRC_DIR}/capture/ndi_capture.cpp"
+            "${SRC_DIR}/capture/ndi_frame_geometry.cpp"
+            "${SRC_DIR}/config/config.cpp"
+            "${SRC_DIR}/modules/makcu/src/makcu.cpp"
+            "${SRC_DIR}/modules/makcu/src/serialport.cpp"
+            "${SRC_DIR}/mouse/ghub.cpp"
+            "${SRC_DIR}/mouse/hid.c"
+            "${SRC_DIR}/mouse/KmboxAConnection.cpp"
+            "${SRC_DIR}/mouse/kmboxA.cpp"
+            "${SRC_DIR}/mouse/kmboxNetConnection.cpp"
+            "${SRC_DIR}/mouse/kmbox_net/kmboxNet.cpp"
+            "${SRC_DIR}/mouse/Makcu.cpp"
+            "${SRC_DIR}/mouse/MouseInput.cpp"
+            "${SRC_DIR}/mouse/rzctl.cpp")
+        set_target_properties(xen_physical_response_probe PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools/$<CONFIG>")
+        target_include_directories(xen_physical_response_probe PRIVATE
+            "${SRC_DIR}" "${SRC_DIR}/capture" "${SRC_DIR}/config" "${SRC_DIR}/detector"
+            "${SRC_DIR}/keyboard" "${SRC_DIR}/mouse" "${SRC_DIR}/overlay" "${SRC_DIR}/scr"
+            "${SRC_DIR}/modules/makcu/include" "${AIMBOT_OPENCV_INCLUDE_DIR}"
+            ${AIMBOT_EXTRA_INCLUDE_DIRS})
+        target_link_directories(xen_physical_response_probe PRIVATE ${AIMBOT_EXTRA_LINK_DIRS})
+        target_link_libraries(xen_physical_response_probe PRIVATE
+            "${AIMBOT_OPENCV_LIBRARY}" "Processing.NDI.Lib.x64.lib" setupapi ws2_32)
+        target_compile_features(xen_physical_response_probe PRIVATE cxx_std_17)
+        target_compile_definitions(xen_physical_response_probe PRIVATE UNICODE _UNICODE NOMINMAX)
+        if(MSVC)
+            target_compile_options(xen_physical_response_probe PRIVATE /utf-8 /W4 /permissive- /EHsc)
+        endif()
+        aimbot_copy_if_exists(xen_physical_response_probe "${AIMBOT_OPENCV_DLL}")
+        aimbot_copy_if_exists(xen_physical_response_probe "${AIMBOT_GHUB_MOUSE_DLL}")
+        aimbot_copy_if_exists(xen_physical_response_probe "${AIMBOT_RZCTL_DLL}")
+        aimbot_copy_required_runtime(xen_physical_response_probe
+            "${AIMBOT_NDI_ROOT}/Bin/x64/Processing.NDI.Lib.x64.dll" "NDI runtime")
     endif()
     add_test(NAME xen.algorithm.basic_tracking COMMAND xen_algorithm_tests)
 

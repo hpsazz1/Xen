@@ -25,6 +25,7 @@
 #include "runtime/passive_profile_calibrator.h"
 #include "runtime/build_identity.h"
 #include "runtime/shadow_response_replay.h"
+#include "runtime/physical_response_probe.h"
 
 #include <cmath>
 #include <algorithm>
@@ -1140,6 +1141,55 @@ int main()
                "latest frame queue drains defensive backlog");
     expectNear(latestValue, 5.0, 0.0, "latest frame queue selects newest backlog value");
     expectTrue(skippedFrames == 2, "latest frame queue reports defensive backlog");
+
+    std::queue<int> preservedFrames;
+    expectTrue(AppendBoundedFrame(preservedFrames, 1, 3) == 0 &&
+               AppendBoundedFrame(preservedFrames, 2, 3) == 0 &&
+               AppendBoundedFrame(preservedFrames, 3, 3) == 0 &&
+               AppendBoundedFrame(preservedFrames, 4, 3) == 1,
+               "bounded diagnostic queue reports capacity loss");
+    int oldestValue = 0;
+    expectTrue(TakeOldestFrame(preservedFrames, oldestValue) && oldestValue == 2,
+               "bounded diagnostic queue preserves receive order");
+
+    std::vector<PhysicalResponseSample> physicalSamples;
+    constexpr int64_t commandNs = 1'000'000'000LL;
+    for (int frame = -72; frame <= 120; ++frame)
+    {
+        const double timeMs = frame * (1000.0 / 240.0);
+        const double normalized = timeMs <= 20.0 ? 0.0
+            : std::clamp((timeMs - 20.0) / 40.0, 0.0, 1.0);
+        PhysicalResponseSample sample;
+        sample.receiveNs = commandNs + static_cast<int64_t>(timeMs * 1e6);
+        sample.displacementX = normalized * 8.0;
+        sample.valid = true;
+        sample.trackingQuality = 1.0;
+        physicalSamples.push_back(sample);
+    }
+    const auto physicalSummary = AnalyzePhysicalResponse(
+        physicalSamples, commandNs, true, 300, 500);
+    expectTrue(physicalSummary.valid, "physical response quantiles accept complete 240hz pulse");
+    expectNear(physicalSummary.t10Ms, 24.0, 1.0, "physical response t10 interpolation");
+    expectNear(physicalSummary.t50Ms, 40.0, 1.0, "physical response t50 interpolation");
+    expectNear(physicalSummary.t90Ms, 56.0, 1.0, "physical response t90 interpolation");
+    expectNear(physicalSummary.t99Ms, 61.5, 1.0, "physical response t99 interpolation");
+
+    cv::Mat trackerFrame = cv::Mat::zeros(160, 160, CV_8UC3);
+    cv::RNG trackerRandom(63);
+    trackerRandom.fill(trackerFrame(cv::Rect(35, 35, 85, 85)), cv::RNG::UNIFORM, 0, 256);
+    PhysicalResponseTracker physicalTracker;
+    std::string trackerReason;
+    expectTrue(physicalTracker.initialize(trackerFrame, cv::Rect(35, 35, 85, 85), trackerReason),
+               "physical response tracker initializes high contrast roi");
+    cv::Mat shiftedTrackerFrame;
+    const cv::Mat trackerTransform =
+        (cv::Mat_<double>(2, 3) << 1.0, 0.0, 4.0, 0.0, 1.0, -3.0);
+    cv::warpAffine(trackerFrame, shiftedTrackerFrame, trackerTransform, trackerFrame.size());
+    const auto trackedShift = physicalTracker.update(shiftedTrackerFrame, commandNs);
+    expectTrue(trackedShift.valid && trackedShift.trackingQuality >= 0.5,
+               "physical response tracker keeps normalized template correlation");
+    expectNear(trackedShift.displacementX, 4.0, 0.25, "physical response tracker x displacement");
+    expectNear(trackedShift.displacementY, -3.0, 0.25, "physical response tracker y displacement");
 
     const auto ndiMetadataGeometry = ResolveNdiFrameGeometry(
         320, 320, "<xen source_width=\"2560\" source_height=\"1440\" roi_x=\"1120\" roi_y=\"560\"/>",

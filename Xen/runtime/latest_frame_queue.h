@@ -1,8 +1,41 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
+#include <cstddef>
 #include <queue>
 #include <utility>
+
+/**
+ * @brief 向有界逐帧队列追加一帧，返回因容量不足而丢弃的最旧帧数
+ *
+ * 该模式仅供需要保留时间序列的诊断工具使用。实时推理仍应使用
+ * ReplaceWithLatestFrame，避免处理过期画面。
+ */
+template<typename T>
+uint64_t AppendBoundedFrame(std::queue<T>& queue, T frame, size_t capacity)
+{
+    const size_t safeCapacity = std::max<size_t>(1, capacity);
+    uint64_t dropped = 0;
+    while (queue.size() >= safeCapacity)
+    {
+        queue.pop();
+        ++dropped;
+    }
+    queue.push(std::move(frame));
+    return dropped;
+}
+
+/** @brief 从逐帧诊断队列取出最旧帧，保持接收顺序。 */
+template<typename T>
+bool TakeOldestFrame(std::queue<T>& queue, T& oldest)
+{
+    if (queue.empty())
+        return false;
+    oldest = std::move(queue.front());
+    queue.pop();
+    return true;
+}
 
 /**
  * @brief 用最新帧替换队列中所有尚未消费的旧帧

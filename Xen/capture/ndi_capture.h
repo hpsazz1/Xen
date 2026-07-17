@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstddef>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -32,11 +33,19 @@ struct NdiCaptureDiagnostics
     int encodedHeight = 0;
 };
 
+enum class NdiFrameDeliveryMode
+{
+    LatestOnly,
+    PreserveAllBounded
+};
+
 class NDICapture : public IScreenCapture
 {
 public:
     NDICapture(int width, int height, const std::string& sourceName = "", int frameRate = 60,
-               int sourceWidth = 0, int sourceHeight = 0);
+               int sourceWidth = 0, int sourceHeight = 0,
+               NdiFrameDeliveryMode deliveryMode = NdiFrameDeliveryMode::LatestOnly,
+               size_t queueCapacity = 1);
     ~NDICapture();
 
     cv::Mat GetNextFrameCpu() override;
@@ -74,6 +83,8 @@ private:
     int frame_rate_;
     int configured_source_width_;  ///< OBS 预裁剪 ROI 未携带元数据时的完整游戏 FOV 宽度
     int configured_source_height_; ///< OBS 预裁剪 ROI 未携带元数据时的完整游戏 FOV 高度
+    NdiFrameDeliveryMode delivery_mode_; ///< 普通运行只取最新帧；诊断采集器显式保留逐帧序列
+    size_t queue_capacity_; ///< 逐帧模式的内存上限，满时硬计数并由上层判整轮失败
     std::string source_name_;
     std::string connected_source_name_;
 

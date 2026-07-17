@@ -28,12 +28,15 @@ std::atomic<int> NDICapture::global_encoded_height_{ 0 };
 
 // 构造函数：保存参数，初始化 NDI SDK 并启动接收线程
 NDICapture::NDICapture(int width, int height, const std::string& sourceName, int frameRate,
-                       int sourceWidth, int sourceHeight)
+                       int sourceWidth, int sourceHeight,
+                       NdiFrameDeliveryMode deliveryMode, size_t queueCapacity)
     : width_(width)
     , height_(height)
-    , frame_rate_(std::max(1, std::min(120, frameRate)))
+    , frame_rate_(std::max(1, std::min(1000, frameRate)))
     , configured_source_width_(sourceWidth)
     , configured_source_height_(sourceHeight)
+    , delivery_mode_(deliveryMode)
+    , queue_capacity_(std::max<size_t>(1, queueCapacity))
     , source_name_(sourceName)
     , ndi_find_(nullptr)
     , ndi_recv_(nullptr)
@@ -195,7 +198,10 @@ CapturedFrame NDICapture::GetNextFrameTimed()
     std::lock_guard<std::mutex> lock(frame_mutex_);
     NetworkFrame latest;
     uint64_t skipped = 0;
-    if (!TakeLatestFrame(frame_queue_, latest, skipped))
+    const bool found = delivery_mode_ == NdiFrameDeliveryMode::PreserveAllBounded
+        ? TakeOldestFrame(frame_queue_, latest)
+        : TakeLatestFrame(frame_queue_, latest, skipped);
+    if (!found)
         return {};
     if (skipped > 0)
     {
@@ -341,9 +347,12 @@ void NDICapture::ReceiveThread()
                         std::lock_guard<std::mutex> lock(frame_mutex_);
                         // 网络接收速度可能高于推理消费速度。这里只保留最新帧，避免排队增加观测延迟；
                         // 被替换的旧帧必须计入丢弃数，不能再显示为“0 丢帧”。
-                        const uint64_t superseded = ReplaceWithLatestFrame(
-                            frame_queue_, NetworkFrame{
-                                std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight, timing });
+                        NetworkFrame queuedFrame{
+                            std::move(detectionFrame), geometry.sourceWidth, geometry.sourceHeight, timing };
+                        const uint64_t superseded =
+                            delivery_mode_ == NdiFrameDeliveryMode::PreserveAllBounded
+                            ? AppendBoundedFrame(frame_queue_, std::move(queuedFrame), queue_capacity_)
+                            : ReplaceWithLatestFrame(frame_queue_, std::move(queuedFrame));
                         if (superseded > 0)
                         {
                             dropped_frames_.fetch_add(static_cast<int>(superseded), std::memory_order_relaxed);
