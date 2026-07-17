@@ -160,6 +160,9 @@ struct ManeuverEstimatorState
     double maneuverRateThresholdDegreesPerSecond = 0.0;
     double maneuverHoldSeconds = 0.0;
     double maneuverHoldRemainingSeconds = 0.0;
+    double maneuverRateUncertaintyXDegreesPerSecond = 0.0;
+    double maneuverRateUncertaintyYDegreesPerSecond = 0.0;
+    double maneuverRateEvidenceDegreesPerSecond = 0.0;
     double modelAngleDeltaDegrees = 0.0;
     double modelRateDeltaDegreesPerSecond = 0.0;
 };
@@ -246,6 +249,11 @@ struct ViewMotionShadowDiagnostics
     bool valid = false;
     double commandToFrameDelayMs = 0.0;
     double commandResponseMs = 0.0;
+    double maneuverRateUncertaintyGain = 0.0;
+    double appliedCameraRateYawDegreesPerSecond = 0.0;
+    double appliedCameraRatePitchDegreesPerSecond = 0.0;
+    double maneuverRateUncertaintyXDegreesPerSecond = 0.0;
+    double maneuverRateUncertaintyYDegreesPerSecond = 0.0;
     double degreesPerCountX = 0.0;
     double degreesPerCountY = 0.0;
     double measuredLosYawDegrees = 0.0;

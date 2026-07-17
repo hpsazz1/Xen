@@ -20,6 +20,7 @@ struct Candidate
 {
     AxisResponse horizontal{};
     AxisResponse vertical{};
+    double maneuverUncertaintyGain = 0.0;
 };
 
 struct Command
@@ -71,7 +72,27 @@ struct Metrics
     std::size_t recordedSelectionMismatches = 0;
     double maxAbsRateX = 0.0;
     double maxAbsRateY = 0.0;
+    double maxManeuverUncertainty = 0.0;
+    double maxManeuverEvidence = 0.0;
     std::vector<std::size_t> failedTrials;
+};
+
+struct TraceRow
+{
+    std::size_t row = 0;
+    std::size_t trial = 0;
+    std::int64_t observationTimeNs = 0;
+    bool outputPaused = false;
+    bool settled = false;
+    bool active = false;
+    double cameraRateX = 0.0;
+    double cameraRateY = 0.0;
+    double uncertaintyX = 0.0;
+    double uncertaintyY = 0.0;
+    double estimatedRateX = 0.0;
+    double estimatedRateY = 0.0;
+    double maneuverEvidence = 0.0;
+    double holdRemainingSeconds = 0.0;
 };
 
 // 读取流水线CSV中的真实观测和已确认设备命令。解析器按CSV引号规则处理字段，
@@ -85,7 +106,8 @@ Metrics Evaluate(const Timeline& timeline, const Candidate& candidate,
     const ManeuverLosEstimator::Settings& settings,
     double degreesPerCountXOverride = 0.0,
     double degreesPerCountYOverride = 0.0,
-    bool compareRecordedSelection = false);
+    bool compareRecordedSelection = false,
+    std::vector<TraceRow>* trace = nullptr);
 }
 
 #endif

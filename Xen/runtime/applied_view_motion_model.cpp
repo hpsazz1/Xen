@@ -86,6 +86,32 @@ std::pair<double, double> AppliedViewMotionModel::at(TimePoint queryTime) const
     return { yaw, pitch };
 }
 
+std::pair<double, double> AppliedViewMotionModel::rateAt(TimePoint queryTime) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (commandResponseMs_ <= 1e-9)
+        return {};
+
+    double yawRate = 0.0;
+    double pitchRate = 0.0;
+    for (const Sample& sample : samples_)
+    {
+        if (queryTime < sample.startTime)
+            break;
+        if (queryTime < sample.endTime)
+        {
+            const double durationSeconds = std::chrono::duration<double>(
+                sample.endTime - sample.startTime).count();
+            if (durationSeconds > 0.0)
+            {
+                yawRate += sample.deltaYawDegrees / durationSeconds;
+                pitchRate += sample.deltaPitchDegrees / durationSeconds;
+            }
+        }
+    }
+    return { yawRate, pitchRate };
+}
+
 double AppliedViewMotionModel::commandToFrameDelayMs() const
 {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -158,13 +158,18 @@ void AimPipelineRuntime::setViewMotionDiagnostics(
     if (!diagnostics.valid || effectiveMode_ == AimPipelineMode::Legacy)
         return;
 
+    ManeuverLosEstimator::Settings sampleSettings = estimatorSettings_;
+    sampleSettings.maneuverRateUncertaintyXDegreesPerSecond =
+        diagnostics.maneuverRateUncertaintyXDegreesPerSecond;
+    sampleSettings.maneuverRateUncertaintyYDegreesPerSecond =
+        diagnostics.maneuverRateUncertaintyYDegreesPerSecond;
     estimator_.update(
         diagnostics.stabilizedLosYawDegrees,
         diagnostics.stabilizedLosPitchDownDegrees,
         frame_.observation.confidence,
         frame_.observation.timing.observationTime,
         frame_.observation.timing.controlTime,
-        estimatorSettings_);
+        sampleSettings);
     frame_.estimate = toLosEstimate(estimator_.selectedEstimate());
     frame_.baselineEstimate = toLosEstimate(
         estimator_.constantVelocityEstimate());
@@ -186,6 +191,12 @@ void AimPipelineRuntime::setViewMotionDiagnostics(
         estimatorSettings_.maneuverHoldSeconds;
     frame_.maneuverEstimator.maneuverHoldRemainingSeconds =
         estimatorDiagnostics.maneuverHoldRemainingSeconds;
+    frame_.maneuverEstimator.maneuverRateUncertaintyXDegreesPerSecond =
+        sampleSettings.maneuverRateUncertaintyXDegreesPerSecond;
+    frame_.maneuverEstimator.maneuverRateUncertaintyYDegreesPerSecond =
+        sampleSettings.maneuverRateUncertaintyYDegreesPerSecond;
+    frame_.maneuverEstimator.maneuverRateEvidenceDegreesPerSecond =
+        estimatorDiagnostics.maneuverRateEvidenceDegreesPerSecond;
     frame_.maneuverEstimator.modelAngleDeltaDegrees =
         estimatorDiagnostics.modelAngleDeltaDegrees;
     frame_.maneuverEstimator.modelRateDeltaDegreesPerSecond =

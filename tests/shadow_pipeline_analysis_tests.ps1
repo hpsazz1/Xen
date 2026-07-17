@@ -46,11 +46,11 @@ try {
 
     $candidateRoot = Join-Path $temporaryRoot 'maneuver-candidate'
     New-Item -ItemType Directory -Path $candidateRoot | Out-Null
-    $candidateHeader = $header + ',AimPipelineEstimatorMode,AimPipelineManeuverModelActive,AimPipelineEstimatorSelectionChanged,AimPipelineEstimatorSelectionCount,AimPipelineCaJerkStdDps3,AimPipelineManeuverRateThresholdDps,AimPipelineManeuverHoldMs,AimPipelineManeuverHoldRemainingMs,AimPipelineModelAngleDeltaDeg,AimPipelineModelRateDeltaDps,AimPipelineBaselineCovarianceX,AimPipelineBaselineCovarianceY,AimPipelineCaCovarianceX,AimPipelineCaCovarianceY,ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs'
-    $inactiveSuffix = ',maneuver_gated_ca,0,0,0,8000,12,120,0,0.1,1,0.02,0.03,0.02,0.03,1,20,20'
-    $activationSuffix = ',maneuver_gated_ca,1,1,1,8000,12,120,120,0.1,1,0.02,0.03,0.02,0.03,1,20,20'
-    $activeSuffix = ',maneuver_gated_ca,1,0,1,8000,12,120,120,0.1,1,0.02,0.03,0.02,0.03,1,20,20'
-    $deactivationSuffix = ',maneuver_gated_ca,0,1,2,8000,12,120,0,0.1,1,0.02,0.03,0.02,0.03,1,20,20'
+    $candidateHeader = $header + ',AimPipelineEstimatorMode,AimPipelineManeuverModelActive,AimPipelineEstimatorSelectionChanged,AimPipelineEstimatorSelectionCount,AimPipelineCaJerkStdDps3,AimPipelineManeuverRateThresholdDps,AimPipelineManeuverHoldMs,AimPipelineManeuverHoldRemainingMs,AimPipelineManeuverRateUncertaintyX,AimPipelineManeuverRateUncertaintyY,AimPipelineManeuverRateEvidenceDps,AimPipelineModelAngleDeltaDeg,AimPipelineModelRateDeltaDps,AimPipelineBaselineCovarianceX,AimPipelineBaselineCovarianceY,AimPipelineCaCovarianceX,AimPipelineCaCovarianceY,ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,ManeuverRateUncertaintyGain,AppliedCameraRateYawDps,AppliedCameraRatePitchDps,ViewMotionManeuverRateUncertaintyX,ViewMotionManeuverRateUncertaintyY'
+    $inactiveSuffix = ',maneuver_gated_ca,0,0,0,8000,12,120,0,0,0,0,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,0,0,0,0'
+    $activationSuffix = ',maneuver_gated_ca,1,1,1,8000,12,120,120,2.5,0,12.3,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,2,0,2.5,0'
+    $activeSuffix = ',maneuver_gated_ca,1,0,1,8000,12,120,120,2.5,0,12.3,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,2,0,2.5,0'
+    $deactivationSuffix = ',maneuver_gated_ca,0,1,2,8000,12,120,0,0,0,2,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,0,0,0,0'
     foreach ($scenario in @('static', 'horizontal_left', 'horizontal_right', 'horizontal_reverse', 'horizontal_jump')) {
         $moving = $scenario -match 'reverse|jump'
         @(
@@ -104,9 +104,9 @@ try {
     $invalidResponseRoot = Join-Path $temporaryRoot 'invalid-response'
     New-Item -ItemType Directory -Path $invalidResponseRoot | Out-Null
     @($candidateHeader,
-        (($activeRow + $inactiveSuffix) -replace ',1,20,20$', ',1,20,0'),
-        (($pausedRow + $inactiveSuffix) -replace ',1,20,20$', ',1,20,0'),
-        (($resumedRow + $inactiveSuffix) -replace ',1,20,20$', ',1,20,0')) |
+        (($activeRow + $inactiveSuffix) -replace ',1,20,20,1.25,0,0,0,0$', ',1,20,0,1.25,0,0,0,0'),
+        (($pausedRow + $inactiveSuffix) -replace ',1,20,20,1.25,0,0,0,0$', ',1,20,0,1.25,0,0,0,0'),
+        (($resumedRow + $inactiveSuffix) -replace ',1,20,20,1.25,0,0,0,0$', ',1,20,0,1.25,0,0,0,0')) |
         Set-Content -LiteralPath (Join-Path $invalidResponseRoot 'profile.csv') -Encoding UTF8
     $invalidResponseFailed = $false
     try {

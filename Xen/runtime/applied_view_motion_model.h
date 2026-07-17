@@ -23,6 +23,7 @@ public:
         TimePoint sendTime);
 
     std::pair<double, double> at(TimePoint queryTime) const;
+    std::pair<double, double> rateAt(TimePoint queryTime) const;
     double commandToFrameDelayMs() const;
     double commandResponseMs() const;
     size_t sampleCount() const;

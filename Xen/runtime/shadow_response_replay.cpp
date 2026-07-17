@@ -153,6 +153,47 @@ std::pair<double, double> cameraAt(const Timeline& timeline,
     return { yaw, pitch };
 }
 
+std::pair<double, double> cameraRateAt(const Timeline& timeline,
+    std::int64_t queryTimeNs, const Candidate& candidate,
+    double degreesPerCountXOverride, double degreesPerCountYOverride)
+{
+    double yawRate = 0.0;
+    double pitchRate = 0.0;
+    for (const Command& command : timeline.commands)
+    {
+        if (command.sendTimeNs > queryTimeNs)
+            break;
+        const AxisResponse responses[]{ candidate.horizontal, candidate.vertical };
+        const int counts[]{ command.countsX, command.countsY };
+        const double configuredDegreesPerCount[]{
+            degreesPerCountXOverride > 0.0
+                ? degreesPerCountXOverride : command.degreesPerCountX,
+            degreesPerCountYOverride > 0.0
+                ? degreesPerCountYOverride : command.degreesPerCountY
+        };
+        double* rates[]{ &yawRate, &pitchRate };
+        for (int axis = 0; axis < 2; ++axis)
+        {
+            const double centerMs = std::clamp(
+                responses[axis].centerMs, 0.0, 250.0);
+            const double widthMs = std::clamp(
+                responses[axis].widthMs, 0.0, 100.0);
+            if (widthMs <= 1e-9)
+                continue;
+            const double startNs = static_cast<double>(command.sendTimeNs) +
+                std::max(0.0, centerMs - widthMs * 0.5) * 1'000'000.0;
+            const double endNs = startNs + widthMs * 1'000'000.0;
+            const double queryNs = static_cast<double>(queryTimeNs);
+            if (queryNs >= startNs && queryNs < endNs)
+            {
+                *rates[axis] += static_cast<double>(counts[axis]) *
+                    configuredDegreesPerCount[axis] / (widthMs / 1000.0);
+            }
+        }
+    }
+    return { yawRate, pitchRate };
+}
+
 std::string joinMissing(const std::vector<std::string>& missing)
 {
     std::ostringstream stream;
@@ -321,7 +362,7 @@ bool LoadTimelineCsv(const std::filesystem::path& path,
 Metrics Evaluate(const Timeline& timeline, const Candidate& candidate,
     const ManeuverLosEstimator::Settings& settings,
     double degreesPerCountXOverride, double degreesPerCountYOverride,
-    bool compareRecordedSelection)
+    bool compareRecordedSelection, std::vector<TraceRow>* trace)
 {
     Metrics metrics;
     metrics.source = timeline.source;
@@ -337,8 +378,10 @@ Metrics Evaluate(const Timeline& timeline, const Candidate& candidate,
     std::size_t trial = 0;
     bool trialFailed = false;
 
+    std::size_t row = 0;
     for (const Sample& sample : timeline.samples)
     {
+        ++row;
         if (!haveIdentity || sample.resetGeneration != previousGeneration ||
             sample.targetId != previousTargetId)
         {
@@ -355,13 +398,44 @@ Metrics Evaluate(const Timeline& timeline, const Candidate& candidate,
             std::chrono::nanoseconds(sample.observationTimeNs) };
         const ManeuverLosEstimator::TimePoint controlTime{
             std::chrono::nanoseconds(sample.controlTimeNs) };
+        const auto cameraRate = cameraRateAt(timeline,
+            sample.observationTimeNs, candidate,
+            degreesPerCountXOverride, degreesPerCountYOverride);
+        ManeuverLosEstimator::Settings sampleSettings = settings;
+        const double uncertaintyGain = std::isfinite(
+            candidate.maneuverUncertaintyGain)
+            ? std::clamp(candidate.maneuverUncertaintyGain, 0.0, 10.0) : 0.0;
+        sampleSettings.maneuverRateUncertaintyXDegreesPerSecond =
+            std::abs(cameraRate.first) * uncertaintyGain;
+        sampleSettings.maneuverRateUncertaintyYDegreesPerSecond =
+            std::abs(cameraRate.second) * uncertaintyGain;
         estimator.update(
             sample.measuredYawDegrees + observationCamera.first,
             sample.measuredPitchDownDegrees + observationCamera.second,
-            sample.confidence, observationTime, controlTime, settings);
+            sample.confidence, observationTime, controlTime, sampleSettings);
         const auto& diagnostics = estimator.diagnostics();
         const auto& estimate = estimator.selectedEstimate();
         const bool active = diagnostics.maneuverModelActive;
+        if (trace)
+        {
+            trace->push_back({
+                row, trial + (sample.outputPaused ? 0U : 1U),
+                sample.observationTimeNs, sample.outputPaused, sample.settled, active,
+                cameraRate.first, cameraRate.second,
+                sampleSettings.maneuverRateUncertaintyXDegreesPerSecond,
+                sampleSettings.maneuverRateUncertaintyYDegreesPerSecond,
+                estimate.x.rateDegreesPerSecond, estimate.y.rateDegreesPerSecond,
+                diagnostics.maneuverRateEvidenceDegreesPerSecond,
+                diagnostics.maneuverHoldRemainingSeconds
+            });
+        }
+        metrics.maxManeuverUncertainty = std::max(
+            metrics.maxManeuverUncertainty,
+            std::hypot(
+                sampleSettings.maneuverRateUncertaintyXDegreesPerSecond,
+                sampleSettings.maneuverRateUncertaintyYDegreesPerSecond));
+        metrics.maxManeuverEvidence = std::max(metrics.maxManeuverEvidence,
+            diagnostics.maneuverRateEvidenceDegreesPerSecond);
         metrics.recordedSelectionCompared = compareRecordedSelection;
         if (compareRecordedSelection && active != sample.recordedManeuverActive)
             ++metrics.recordedSelectionMismatches;

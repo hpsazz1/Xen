@@ -12,6 +12,10 @@ enum class ManeuverLosEstimatorMode
     ManeuverGatedConstantAcceleration
 };
 
+// r62 离线正负样本共同通过的命令响应速率裕量。只用于 DML shadow 的机动证据门控，
+// 不修改 LOS 测量、Kalman 状态、12 度/秒物理门槛或正式设备输出。
+inline constexpr double kManeuverResponseRateUncertaintyGain = 1.25;
+
 inline const char* maneuverLosEstimatorModeName(ManeuverLosEstimatorMode mode)
 {
     if (mode == ManeuverLosEstimatorMode::ConstantAcceleration)
@@ -34,6 +38,10 @@ public:
         double jerkStdDegreesPerSecond3 = 8000.0;
         double maneuverRateThresholdDegreesPerSecond = 12.0;
         double maneuverHoldSeconds = 0.120;
+        // 每帧由外部命令响应模型给出的逐轴速率不确定度上界。0保持历史行为；
+        // 门控只扣除可解释部分，不修改LOS测量、Kalman状态或12°/s物理门槛。
+        double maneuverRateUncertaintyXDegreesPerSecond = 0.0;
+        double maneuverRateUncertaintyYDegreesPerSecond = 0.0;
         RelativeLosKalman::Settings constantVelocitySettings{};
     };
 
@@ -43,6 +51,7 @@ public:
         bool selectionChanged = false;
         size_t selectionCount = 0;
         double maneuverHoldRemainingSeconds = 0.0;
+        double maneuverRateEvidenceDegreesPerSecond = 0.0;
         double modelAngleDeltaDegrees = 0.0;
         double modelRateDeltaDegreesPerSecond = 0.0;
     };

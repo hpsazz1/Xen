@@ -1298,12 +1298,28 @@ AimPipelineFrameState MouseThread::processAimPipelineObservation(
             sourceHeight);
         const auto cameraAtObservation = appliedViewMotionModel.at(observationTime);
         const auto cameraAtControl = appliedViewMotionModel.at(controlTime);
+        const auto cameraRateAtObservation =
+            appliedViewMotionModel.rateAt(observationTime);
         const auto degreesPerCount = currentDegreesPerCount();
 
         ViewMotionShadowDiagnostics diagnostics;
         diagnostics.valid = true;
         diagnostics.commandToFrameDelayMs = appliedViewMotionModel.commandToFrameDelayMs();
         diagnostics.commandResponseMs = appliedViewMotionModel.commandResponseMs();
+#ifndef USE_CUDA
+        diagnostics.maneuverRateUncertaintyGain =
+            kManeuverResponseRateUncertaintyGain;
+#endif
+        diagnostics.appliedCameraRateYawDegreesPerSecond =
+            cameraRateAtObservation.first;
+        diagnostics.appliedCameraRatePitchDegreesPerSecond =
+            cameraRateAtObservation.second;
+        diagnostics.maneuverRateUncertaintyXDegreesPerSecond =
+            std::abs(cameraRateAtObservation.first) *
+            diagnostics.maneuverRateUncertaintyGain;
+        diagnostics.maneuverRateUncertaintyYDegreesPerSecond =
+            std::abs(cameraRateAtObservation.second) *
+            diagnostics.maneuverRateUncertaintyGain;
         diagnostics.degreesPerCountX = degreesPerCount.first;
         diagnostics.degreesPerCountY = degreesPerCount.second;
         diagnostics.measuredLosYawDegrees = measuredLos.yawDegrees;

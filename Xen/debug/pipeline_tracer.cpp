@@ -180,7 +180,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY,"
          << "AimPipelineMeasurementConfidence,AimPipelineFeedforwardConfidence,"
          << "AimPipelineEstimatorMode,AimPipelineManeuverModelActive,AimPipelineEstimatorSelectionChanged,AimPipelineEstimatorSelectionCount,"
-         << "AimPipelineCaJerkStdDps3,AimPipelineManeuverRateThresholdDps,AimPipelineManeuverHoldMs,AimPipelineManeuverHoldRemainingMs,AimPipelineModelAngleDeltaDeg,AimPipelineModelRateDeltaDps,"
+         << "AimPipelineCaJerkStdDps3,AimPipelineManeuverRateThresholdDps,AimPipelineManeuverHoldMs,AimPipelineManeuverHoldRemainingMs,AimPipelineManeuverRateUncertaintyX,AimPipelineManeuverRateUncertaintyY,AimPipelineManeuverRateEvidenceDps,AimPipelineModelAngleDeltaDeg,AimPipelineModelRateDeltaDps,"
          << "AimPipelineBaselineAngleX,AimPipelineBaselineAngleY,AimPipelineBaselineRateX,AimPipelineBaselineRateY,AimPipelineBaselineCovarianceX,AimPipelineBaselineCovarianceY,AimPipelineBaselineNisX,AimPipelineBaselineNisY,"
          << "AimPipelineCaAngleX,AimPipelineCaAngleY,AimPipelineCaRateX,AimPipelineCaRateY,AimPipelineCaCovarianceX,AimPipelineCaCovarianceY,AimPipelineCaNisX,AimPipelineCaNisY,"
          << "AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineIntegralFrozen,AimPipelineSettled,AimPipelineSettleReleased,AimPipelineSettleConfirmationSamples,AimPipelineLowSpeedReverseSuppressed,AimPipelineVerticalCatchUpActive,AimPipelineReverseConfirmationSeconds,AimPipelineEffectiveResponseSecondsY,"
@@ -192,7 +192,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "TrajectoryPositionX,TrajectoryPositionY,TrajectoryTargetVelocityX,TrajectoryTargetVelocityY,TrajectoryVelocityX,TrajectoryVelocityY,TrajectoryAccelerationX,TrajectoryAccelerationY,TrajectoryJerkX,TrajectoryJerkY,"
          << "TrajectoryShapedCountsX,TrajectoryShapedCountsY,TrajectoryQuantizationRemainderX,TrajectoryQuantizationRemainderY,TrajectoryShapingDelayMs,TrajectorySchedulerLatenessMs,TrajectorySchedulerSkippedTicks,"
          << "AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
-         << "ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
+         << "ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,ManeuverRateUncertaintyGain,AppliedCameraRateYawDps,AppliedCameraRatePitchDps,ViewMotionManeuverRateUncertaintyX,ViewMotionManeuverRateUncertaintyY,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
          << "AppliedCameraYawAtObservationDegrees,AppliedCameraPitchAtObservationDegrees,AppliedCameraYawAtControlDegrees,AppliedCameraPitchAtControlDegrees,"
          << "StabilizedLosYawDegrees,StabilizedLosPitchDownDegrees,RelativeErrorYawDegrees,RelativeErrorPitchDownDegrees,"
          << "CaptureFrameSequence,BackendReceiveNs,CaptureSubmitNs,InferenceStartNs,InferencePublishNs,ControlTimeNs,"
@@ -268,6 +268,9 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << ap.maneuverEstimator.maneuverRateThresholdDegreesPerSecond << ','
              << ap.maneuverEstimator.maneuverHoldSeconds * 1000.0 << ','
              << ap.maneuverEstimator.maneuverHoldRemainingSeconds * 1000.0 << ','
+             << ap.maneuverEstimator.maneuverRateUncertaintyXDegreesPerSecond << ','
+             << ap.maneuverEstimator.maneuverRateUncertaintyYDegreesPerSecond << ','
+             << ap.maneuverEstimator.maneuverRateEvidenceDegreesPerSecond << ','
              << ap.maneuverEstimator.modelAngleDeltaDegrees << ','
              << ap.maneuverEstimator.modelRateDeltaDegreesPerSecond << ','
              << ap.baselineEstimate.angleX << ',' << ap.baselineEstimate.angleY << ','
@@ -335,6 +338,11 @@ bool PipelineTracer::exportCSV(const std::string& path) const
               << (ap.viewMotion.valid ? '1' : '0') << ','
               << ap.viewMotion.commandToFrameDelayMs << ','
               << ap.viewMotion.commandResponseMs << ','
+              << ap.viewMotion.maneuverRateUncertaintyGain << ','
+              << ap.viewMotion.appliedCameraRateYawDegreesPerSecond << ','
+              << ap.viewMotion.appliedCameraRatePitchDegreesPerSecond << ','
+              << ap.viewMotion.maneuverRateUncertaintyXDegreesPerSecond << ','
+              << ap.viewMotion.maneuverRateUncertaintyYDegreesPerSecond << ','
               << ap.viewMotion.degreesPerCountX << ',' << ap.viewMotion.degreesPerCountY << ','
              << ap.viewMotion.measuredLosYawDegrees << ','
              << ap.viewMotion.measuredLosPitchDownDegrees << ','

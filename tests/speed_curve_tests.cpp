@@ -434,6 +434,30 @@ int main()
                    wrongResponseMetrics.runningActiveSegments > 0,
                "shadow response replay exposes a phase-mismatched static response");
 
+    ManeuverLosEstimator unguardedEvidenceEstimator;
+    ManeuverLosEstimator guardedEvidenceEstimator;
+    ManeuverLosEstimator::Settings unguardedEvidenceSettings = replaySettings;
+    ManeuverLosEstimator::Settings guardedEvidenceSettings = replaySettings;
+    guardedEvidenceSettings.maneuverRateUncertaintyXDegreesPerSecond = 60.0;
+    for (int sampleIndex = 0; sampleIndex < 20; ++sampleIndex)
+    {
+        const auto observationTime = ManeuverLosEstimator::TimePoint(
+            std::chrono::seconds(5) + std::chrono::milliseconds(sampleIndex * 10));
+        const auto controlTime = observationTime + std::chrono::milliseconds(1);
+        const double angle = sampleIndex * 0.5;
+        unguardedEvidenceEstimator.update(
+            angle, 0.0, 1.0f, observationTime, controlTime,
+            unguardedEvidenceSettings);
+        guardedEvidenceEstimator.update(
+            angle, 0.0, 1.0f, observationTime, controlTime,
+            guardedEvidenceSettings);
+    }
+    expectTrue(unguardedEvidenceEstimator.diagnostics().maneuverModelActive &&
+                   !guardedEvidenceEstimator.diagnostics().maneuverModelActive &&
+                   guardedEvidenceEstimator.diagnostics().
+                       maneuverRateEvidenceDegreesPerSecond < 12.0,
+               "command-response uncertainty discounts explainable rate without changing the physical threshold");
+
     const char* responseCsvPath = "xen_shadow_response_replay_test.csv";
     {
         std::ofstream responseCsv(responseCsvPath);
@@ -1067,6 +1091,14 @@ int main()
                "finite view response completes at the measured upper boundary");
     expectNear(rampedAppliedViewModel.commandResponseMs(), 20.0, 0.0,
                "finite view model reports its configured response width");
+    expectNear(rampedAppliedViewModel.rateAt(
+                   commandStart + std::chrono::milliseconds(20)).first,
+               15.0, 1e-12,
+               "finite view model exposes horizontal response rate inside the ramp");
+    expectNear(rampedAppliedViewModel.rateAt(
+                   commandStart + std::chrono::milliseconds(30)).first,
+               0.0, 1e-12,
+               "finite view model ends response rate at the upper boundary");
     rampedAppliedViewModel.configure(20.0, 0.0);
     expectNear(rampedAppliedViewModel.at(
                    commandStart + std::chrono::milliseconds(100)).first,
@@ -1312,7 +1344,7 @@ int main()
         "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed,AimPipelineOutputPaused") != std::string::npos,
         "basic pipeline records same-frame mode and output-pause diagnostics");
     expectTrue(traceHeader.find(
-        "ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees") != std::string::npos,
+        "ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,ManeuverRateUncertaintyGain,AppliedCameraRateYawDps") != std::string::npos,
         "basic pipeline records finite applied-view response diagnostics");
     expectTrue(traceHeader.find(
         "AimPipelineAngleX,AimPipelineAngleY,AimPipelineRateX,AimPipelineRateY,AimPipelineCovarianceX,AimPipelineCovarianceY") != std::string::npos &&

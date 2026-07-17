@@ -53,10 +53,22 @@ void ManeuverLosEstimator::update(double angleX, double angleY, float confidence
             : 12.0;
         const double hold = std::isfinite(settings.maneuverHoldSeconds)
             ? std::clamp(settings.maneuverHoldSeconds, 0.0, 1.0) : 0.120;
-        const double rateMagnitude = std::hypot(
-            velocity.x.rateDegreesPerSecond,
-            velocity.y.rateDegreesPerSecond);
-        if (velocity.x.valid && velocity.y.valid && rateMagnitude >= threshold)
+        const double uncertaintyX = std::isfinite(
+            settings.maneuverRateUncertaintyXDegreesPerSecond)
+            ? std::clamp(settings.maneuverRateUncertaintyXDegreesPerSecond,
+                0.0, 1000.0) : 0.0;
+        const double uncertaintyY = std::isfinite(
+            settings.maneuverRateUncertaintyYDegreesPerSecond)
+            ? std::clamp(settings.maneuverRateUncertaintyYDegreesPerSecond,
+                0.0, 1000.0) : 0.0;
+        const double evidenceX = std::max(
+            0.0, std::abs(velocity.x.rateDegreesPerSecond) - uncertaintyX);
+        const double evidenceY = std::max(
+            0.0, std::abs(velocity.y.rateDegreesPerSecond) - uncertaintyY);
+        diagnostics_.maneuverRateEvidenceDegreesPerSecond =
+            std::hypot(evidenceX, evidenceY);
+        if (velocity.x.valid && velocity.y.valid &&
+            diagnostics_.maneuverRateEvidenceDegreesPerSecond >= threshold)
             diagnostics_.maneuverHoldRemainingSeconds = hold;
         else
             diagnostics_.maneuverHoldRemainingSeconds = std::max(
@@ -65,6 +77,9 @@ void ManeuverLosEstimator::update(double angleX, double angleY, float confidence
     }
     else
     {
+        diagnostics_.maneuverRateEvidenceDegreesPerSecond = std::hypot(
+            velocity.x.rateDegreesPerSecond,
+            velocity.y.rateDegreesPerSecond);
         diagnostics_.maneuverHoldRemainingSeconds = active
             ? std::clamp(settings.maneuverHoldSeconds, 0.0, 1.0) : 0.0;
     }

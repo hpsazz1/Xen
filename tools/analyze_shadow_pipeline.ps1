@@ -86,6 +86,13 @@ if ($RequireManeuverCandidate) {
         'AimPipelineEstimatorSelectionChanged', 'AimPipelineEstimatorSelectionCount',
         'AimPipelineCaJerkStdDps3', 'AimPipelineManeuverRateThresholdDps',
         'AimPipelineManeuverHoldMs', 'AimPipelineManeuverHoldRemainingMs',
+        'AimPipelineManeuverRateUncertaintyX',
+        'AimPipelineManeuverRateUncertaintyY',
+        'AimPipelineManeuverRateEvidenceDps',
+        'ManeuverRateUncertaintyGain',
+        'AppliedCameraRateYawDps', 'AppliedCameraRatePitchDps',
+        'ViewMotionManeuverRateUncertaintyX',
+        'ViewMotionManeuverRateUncertaintyY',
         'AimPipelineModelAngleDeltaDeg', 'AimPipelineModelRateDeltaDps',
         'AimPipelineBaselineCovarianceX', 'AimPipelineBaselineCovarianceY',
         'AimPipelineCaCovarianceX', 'AimPipelineCaCovarianceY'
@@ -160,7 +167,23 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
             -not (Test-NearValue $_.AimPipelineCaJerkStdDps3 8000.0 0.01) -or
             -not (Test-NearValue $_.AimPipelineManeuverRateThresholdDps 12.0 0.001) -or
             -not (Test-NearValue $_.AimPipelineManeuverHoldMs 120.0 0.001) -or
+            -not (Test-NearValue $_.ManeuverRateUncertaintyGain 1.25 0.001) -or
             -not (Test-FiniteNumber $_.AimPipelineManeuverHoldRemainingMs -NonNegative) -or
+            -not (Test-FiniteNumber $_.AimPipelineManeuverRateUncertaintyX -NonNegative) -or
+            -not (Test-FiniteNumber $_.AimPipelineManeuverRateUncertaintyY -NonNegative) -or
+            -not (Test-FiniteNumber $_.AimPipelineManeuverRateEvidenceDps -NonNegative) -or
+            -not (Test-FiniteNumber $_.AppliedCameraRateYawDps) -or
+            -not (Test-FiniteNumber $_.AppliedCameraRatePitchDps) -or
+            -not (Test-FiniteNumber $_.ViewMotionManeuverRateUncertaintyX -NonNegative) -or
+            -not (Test-FiniteNumber $_.ViewMotionManeuverRateUncertaintyY -NonNegative) -or
+            -not (Test-NearValue $_.ViewMotionManeuverRateUncertaintyX `
+                ([math]::Abs([double]$_.AppliedCameraRateYawDps) * 1.25) 0.002) -or
+            -not (Test-NearValue $_.ViewMotionManeuverRateUncertaintyY `
+                ([math]::Abs([double]$_.AppliedCameraRatePitchDps) * 1.25) 0.002) -or
+            -not (Test-NearValue $_.AimPipelineManeuverRateUncertaintyX `
+                ([double]$_.ViewMotionManeuverRateUncertaintyX) 0.002) -or
+            -not (Test-NearValue $_.AimPipelineManeuverRateUncertaintyY `
+                ([double]$_.ViewMotionManeuverRateUncertaintyY) 0.002) -or
             -not (Test-FiniteNumber $_.AimPipelineModelAngleDeltaDeg -NonNegative) -or
             -not (Test-FiniteNumber $_.AimPipelineModelRateDeltaDps -NonNegative) -or
             -not (Test-FiniteNumber $_.AimPipelineBaselineCovarianceX -Positive) -or

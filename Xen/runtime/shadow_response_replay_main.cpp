@@ -79,6 +79,7 @@ void writeMetric(std::ostream& output,
         << metric.candidate.horizontal.widthMs << ','
         << metric.candidate.vertical.centerMs << ','
         << metric.candidate.vertical.widthMs << ','
+        << metric.candidate.maneuverUncertaintyGain << ','
         << metric.rows << ',' << metric.runningSamples << ','
         << metric.pausedSamples << ',' << metric.runningActiveSamples << ','
         << metric.pausedActiveSamples << ',' << metric.runningActiveSegments << ','
@@ -86,7 +87,31 @@ void writeMetric(std::ostream& output,
         << (metric.recordedSelectionCompared ? 1 : 0) << ','
         << metric.recordedSelectionMismatches << ','
         << metric.maxAbsRateX << ',' << metric.maxAbsRateY << ','
+        << metric.maxManeuverUncertainty << ','
+        << metric.maxManeuverEvidence << ','
         << failedTrials(metric.failedTrials) << '\n';
+}
+
+void writeTrace(std::ostream& output, const std::string& source,
+    const ShadowResponseReplay::Candidate& candidate,
+    const std::vector<ShadowResponseReplay::TraceRow>& rows)
+{
+    for (const auto& row : rows)
+    {
+        output << source << ','
+            << candidate.horizontal.centerMs << ','
+            << candidate.horizontal.widthMs << ','
+            << candidate.vertical.centerMs << ','
+            << candidate.vertical.widthMs << ','
+            << candidate.maneuverUncertaintyGain << ','
+            << row.row << ',' << row.trial << ',' << row.observationTimeNs << ','
+            << (row.outputPaused ? 1 : 0) << ',' << (row.settled ? 1 : 0) << ','
+            << (row.active ? 1 : 0) << ',' << row.cameraRateX << ','
+            << row.cameraRateY << ',' << row.uncertaintyX << ','
+            << row.uncertaintyY << ',' << row.estimatedRateX << ','
+            << row.estimatedRateY << ',' << row.maneuverEvidence << ','
+            << row.holdRemainingSeconds << '\n';
+    }
 }
 }
 
@@ -100,6 +125,8 @@ int main(int argc, char** argv)
             "[--centers-ms 10,15,20] [--widths-ms 0,10,20] "
             "[--x-centers-ms ... --x-widths-ms ... "
             "--y-centers-ms ... --y-widths-ms ...] "
+            "[--uncertainty-gains 0,0.25,0.5] "
+            "[--trace-output <csv>] "
             "[--dpc-x 0.0308 --dpc-y 0.0308]" << std::endl;
         return 2;
     }
@@ -116,11 +143,15 @@ int main(int argc, char** argv)
         argc, argv, "--y-centers-ms", centers);
     const std::vector<double> yWidths = optionList(
         argc, argv, "--y-widths-ms", widths);
+    const std::vector<double> uncertaintyGains = optionList(
+        argc, argv, "--uncertainty-gains", { 0.0 });
     const double dpcX = optionDouble(argc, argv, "--dpc-x", 0.0);
     const double dpcY = optionDouble(argc, argv, "--dpc-y", 0.0);
     const std::filesystem::path outputPath = optionValue(
         argc, argv, "--output",
         (dataRoot / "shadow_response_replay_summary.csv").string());
+    const std::filesystem::path traceOutputPath = optionValue(
+        argc, argv, "--trace-output");
 
     std::vector<ShadowResponseReplay::Timeline> timelines;
     for (const auto& entry : std::filesystem::directory_iterator(dataRoot))
@@ -159,13 +190,15 @@ int main(int argc, char** argv)
         for (double xWidth : xWidths)
         for (double yCenter : yCenters)
         for (double yWidth : yWidths)
+        for (double uncertaintyGain : uncertaintyGains)
             candidates.push_back({
-                { xCenter, xWidth }, { yCenter, yWidth } });
+                { xCenter, xWidth }, { yCenter, yWidth }, uncertaintyGain });
     }
     else
     {
         for (const auto& response : sharedResponses)
-            candidates.push_back({ response, response });
+        for (double uncertaintyGain : uncertaintyGains)
+            candidates.push_back({ response, response, uncertaintyGain });
     }
 
     ManeuverLosEstimator::Settings settings;
@@ -184,11 +217,29 @@ int main(int argc, char** argv)
         return 4;
     }
     output << std::fixed << std::setprecision(3);
-    output << "Source,XCenterMs,XWidthMs,YCenterMs,YWidthMs,Rows,RunningSamples,"
+    output << "Source,XCenterMs,XWidthMs,YCenterMs,YWidthMs,UncertaintyGain,"
+        "Rows,RunningSamples,"
         "PausedSamples,RunningActiveSamples,PausedActiveSamples,RunningActiveSegments,"
         "SettledActiveSamples,SelectionChanges,RecordedSelectionCompared,"
         "RecordedSelectionMismatches,"
-        "MaxAbsRateX,MaxAbsRateY,FailedTrials\n";
+        "MaxAbsRateX,MaxAbsRateY,MaxManeuverUncertainty,"
+        "MaxManeuverEvidence,FailedTrials\n";
+
+    std::ofstream traceOutput;
+    if (!traceOutputPath.empty())
+    {
+        traceOutput.open(traceOutputPath);
+        if (!traceOutput)
+        {
+            std::cerr << "[ShadowReplay] Cannot write " << traceOutputPath << std::endl;
+            return 4;
+        }
+        traceOutput << std::fixed << std::setprecision(6);
+        traceOutput << "Source,XCenterMs,XWidthMs,YCenterMs,YWidthMs,UncertaintyGain,"
+            "Row,Trial,ObservationTimeNs,OutputPaused,Settled,Active,CameraRateX,"
+            "CameraRateY,UncertaintyX,UncertaintyY,EstimatedRateX,EstimatedRateY,"
+            "ManeuverEvidence,HoldRemainingSeconds\n";
+    }
 
     std::vector<ShadowResponseReplay::Metrics> overall;
     overall.reserve(candidates.size());
@@ -204,10 +255,15 @@ int main(int argc, char** argv)
                 std::abs(candidate.horizontal.centerMs - timeline.recordedCenterMs) <= 1e-6 &&
                 std::abs(candidate.horizontal.widthMs - timeline.recordedWidthMs) <= 1e-6 &&
                 std::abs(candidate.vertical.centerMs - timeline.recordedCenterMs) <= 1e-6 &&
-                std::abs(candidate.vertical.widthMs - timeline.recordedWidthMs) <= 1e-6;
+                std::abs(candidate.vertical.widthMs - timeline.recordedWidthMs) <= 1e-6 &&
+                std::abs(candidate.maneuverUncertaintyGain) <= 1e-9;
+            std::vector<ShadowResponseReplay::TraceRow> trace;
             const auto metric = ShadowResponseReplay::Evaluate(
-                timeline, candidate, settings, dpcX, dpcY, compareRecorded);
+                timeline, candidate, settings, dpcX, dpcY, compareRecorded,
+                traceOutput ? &trace : nullptr);
             writeMetric(output, metric);
+            if (traceOutput)
+                writeTrace(traceOutput, timeline.source, candidate, trace);
             aggregate.rows += metric.rows;
             aggregate.runningSamples += metric.runningSamples;
             aggregate.pausedSamples += metric.pausedSamples;
@@ -221,6 +277,10 @@ int main(int argc, char** argv)
             aggregate.recordedSelectionMismatches += metric.recordedSelectionMismatches;
             aggregate.maxAbsRateX = std::max(aggregate.maxAbsRateX, metric.maxAbsRateX);
             aggregate.maxAbsRateY = std::max(aggregate.maxAbsRateY, metric.maxAbsRateY);
+            aggregate.maxManeuverUncertainty = std::max(
+                aggregate.maxManeuverUncertainty, metric.maxManeuverUncertainty);
+            aggregate.maxManeuverEvidence = std::max(
+                aggregate.maxManeuverEvidence, metric.maxManeuverEvidence);
         }
         writeMetric(output, aggregate);
         overall.push_back(aggregate);
@@ -234,7 +294,7 @@ int main(int argc, char** argv)
     });
 
     const std::size_t top = std::min<std::size_t>(20, overall.size());
-    std::cout << "XCenter XWidth YCenter YWidth Active Settled Segments Mismatch" << std::endl;
+    std::cout << "XCenter XWidth YCenter YWidth Gain Active Settled Segments Mismatch" << std::endl;
     for (std::size_t index = 0; index < top; ++index)
     {
         const auto& metric = overall[index];
@@ -242,6 +302,7 @@ int main(int argc, char** argv)
             << metric.candidate.horizontal.widthMs << ' '
             << metric.candidate.vertical.centerMs << ' '
             << metric.candidate.vertical.widthMs << ' '
+            << metric.candidate.maneuverUncertaintyGain << ' '
             << metric.runningActiveSamples << ' '
             << metric.settledActiveSamples << ' '
             << metric.runningActiveSegments << ' '
