@@ -1,0 +1,252 @@
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "shadow_response_replay.h"
+
+namespace
+{
+std::string optionValue(int argc, char** argv,
+    const std::string& name, const std::string& fallback = {})
+{
+    for (int index = 1; index + 1 < argc; ++index)
+    {
+        if (argv[index] && name == argv[index])
+            return argv[index + 1];
+    }
+    return fallback;
+}
+
+double optionDouble(int argc, char** argv,
+    const std::string& name, double fallback)
+{
+    try
+    {
+        return std::stod(optionValue(argc, argv, name, std::to_string(fallback)));
+    }
+    catch (...)
+    {
+        return fallback;
+    }
+}
+
+std::vector<double> optionList(int argc, char** argv,
+    const std::string& name, const std::vector<double>& fallback)
+{
+    const std::string text = optionValue(argc, argv, name);
+    if (text.empty())
+        return fallback;
+    std::vector<double> values;
+    std::stringstream stream(text);
+    std::string token;
+    while (std::getline(stream, token, ','))
+    {
+        try
+        {
+            const double value = std::stod(token);
+            if (std::isfinite(value))
+                values.push_back(value);
+        }
+        catch (...)
+        {
+        }
+    }
+    return values.empty() ? fallback : values;
+}
+
+std::string failedTrials(const std::vector<std::size_t>& trials)
+{
+    std::ostringstream stream;
+    for (std::size_t index = 0; index < trials.size(); ++index)
+    {
+        if (index != 0)
+            stream << ';';
+        stream << trials[index];
+    }
+    return stream.str();
+}
+
+void writeMetric(std::ostream& output,
+    const ShadowResponseReplay::Metrics& metric)
+{
+    output << metric.source << ','
+        << metric.candidate.horizontal.centerMs << ','
+        << metric.candidate.horizontal.widthMs << ','
+        << metric.candidate.vertical.centerMs << ','
+        << metric.candidate.vertical.widthMs << ','
+        << metric.rows << ',' << metric.runningSamples << ','
+        << metric.pausedSamples << ',' << metric.runningActiveSamples << ','
+        << metric.pausedActiveSamples << ',' << metric.runningActiveSegments << ','
+        << metric.settledActiveSamples << ',' << metric.selectionChanges << ','
+        << (metric.recordedSelectionCompared ? 1 : 0) << ','
+        << metric.recordedSelectionMismatches << ','
+        << metric.maxAbsRateX << ',' << metric.maxAbsRateY << ','
+        << failedTrials(metric.failedTrials) << '\n';
+}
+}
+
+int main(int argc, char** argv)
+{
+    const std::filesystem::path dataRoot = optionValue(argc, argv, "--data-root");
+    if (dataRoot.empty() || !std::filesystem::is_directory(dataRoot))
+    {
+        std::cerr << "Usage: xen_shadow_response_replay --data-root <directory> "
+            "[--output <csv>] [--axis-mode shared|split] "
+            "[--centers-ms 10,15,20] [--widths-ms 0,10,20] "
+            "[--x-centers-ms ... --x-widths-ms ... "
+            "--y-centers-ms ... --y-widths-ms ...] "
+            "[--dpc-x 0.0308 --dpc-y 0.0308]" << std::endl;
+        return 2;
+    }
+    const std::string axisMode = optionValue(argc, argv, "--axis-mode", "shared");
+    const std::vector<double> centers = optionList(
+        argc, argv, "--centers-ms", { 20.0 });
+    const std::vector<double> widths = optionList(
+        argc, argv, "--widths-ms", { 20.0 });
+    const std::vector<double> xCenters = optionList(
+        argc, argv, "--x-centers-ms", centers);
+    const std::vector<double> xWidths = optionList(
+        argc, argv, "--x-widths-ms", widths);
+    const std::vector<double> yCenters = optionList(
+        argc, argv, "--y-centers-ms", centers);
+    const std::vector<double> yWidths = optionList(
+        argc, argv, "--y-widths-ms", widths);
+    const double dpcX = optionDouble(argc, argv, "--dpc-x", 0.0);
+    const double dpcY = optionDouble(argc, argv, "--dpc-y", 0.0);
+    const std::filesystem::path outputPath = optionValue(
+        argc, argv, "--output",
+        (dataRoot / "shadow_response_replay_summary.csv").string());
+
+    std::vector<ShadowResponseReplay::Timeline> timelines;
+    for (const auto& entry : std::filesystem::directory_iterator(dataRoot))
+    {
+        if (!entry.is_regular_file() || entry.path().extension() != ".csv" ||
+            entry.path().filename() == outputPath.filename() ||
+            entry.path().filename() == "shadow_pipeline_summary.csv")
+        {
+            continue;
+        }
+        ShadowResponseReplay::Timeline timeline;
+        std::string error;
+        if (!ShadowResponseReplay::LoadTimelineCsv(entry.path(), timeline, error))
+        {
+            std::cerr << "[ShadowReplay] " << error << std::endl;
+            return 3;
+        }
+        timelines.push_back(std::move(timeline));
+    }
+    std::sort(timelines.begin(), timelines.end(),
+        [](const auto& left, const auto& right) { return left.source < right.source; });
+    if (timelines.empty())
+    {
+        std::cerr << "[ShadowReplay] No pipeline CSV files found." << std::endl;
+        return 3;
+    }
+
+    std::vector<ShadowResponseReplay::AxisResponse> sharedResponses;
+    for (double center : centers)
+    for (double width : widths)
+        sharedResponses.push_back({ center, width });
+    std::vector<ShadowResponseReplay::Candidate> candidates;
+    if (axisMode == "split")
+    {
+        for (double xCenter : xCenters)
+        for (double xWidth : xWidths)
+        for (double yCenter : yCenters)
+        for (double yWidth : yWidths)
+            candidates.push_back({
+                { xCenter, xWidth }, { yCenter, yWidth } });
+    }
+    else
+    {
+        for (const auto& response : sharedResponses)
+            candidates.push_back({ response, response });
+    }
+
+    ManeuverLosEstimator::Settings settings;
+    settings.mode = ManeuverLosEstimatorMode::ManeuverGatedConstantAcceleration;
+    settings.jerkStdDegreesPerSecond3 = optionDouble(
+        argc, argv, "--jerk-std-dps3", 8000.0);
+    settings.maneuverRateThresholdDegreesPerSecond = optionDouble(
+        argc, argv, "--maneuver-rate-threshold-dps", 12.0);
+    settings.maneuverHoldSeconds = optionDouble(
+        argc, argv, "--maneuver-hold-ms", 120.0) / 1000.0;
+
+    std::ofstream output(outputPath);
+    if (!output)
+    {
+        std::cerr << "[ShadowReplay] Cannot write " << outputPath << std::endl;
+        return 4;
+    }
+    output << std::fixed << std::setprecision(3);
+    output << "Source,XCenterMs,XWidthMs,YCenterMs,YWidthMs,Rows,RunningSamples,"
+        "PausedSamples,RunningActiveSamples,PausedActiveSamples,RunningActiveSegments,"
+        "SettledActiveSamples,SelectionChanges,RecordedSelectionCompared,"
+        "RecordedSelectionMismatches,"
+        "MaxAbsRateX,MaxAbsRateY,FailedTrials\n";
+
+    std::vector<ShadowResponseReplay::Metrics> overall;
+    overall.reserve(candidates.size());
+    for (const auto& candidate : candidates)
+    {
+        ShadowResponseReplay::Metrics aggregate;
+        aggregate.source = "all";
+        aggregate.candidate = candidate;
+        aggregate.recordedSelectionCompared = true;
+        for (const auto& timeline : timelines)
+        {
+            const bool compareRecorded =
+                std::abs(candidate.horizontal.centerMs - timeline.recordedCenterMs) <= 1e-6 &&
+                std::abs(candidate.horizontal.widthMs - timeline.recordedWidthMs) <= 1e-6 &&
+                std::abs(candidate.vertical.centerMs - timeline.recordedCenterMs) <= 1e-6 &&
+                std::abs(candidate.vertical.widthMs - timeline.recordedWidthMs) <= 1e-6;
+            const auto metric = ShadowResponseReplay::Evaluate(
+                timeline, candidate, settings, dpcX, dpcY, compareRecorded);
+            writeMetric(output, metric);
+            aggregate.rows += metric.rows;
+            aggregate.runningSamples += metric.runningSamples;
+            aggregate.pausedSamples += metric.pausedSamples;
+            aggregate.runningActiveSamples += metric.runningActiveSamples;
+            aggregate.pausedActiveSamples += metric.pausedActiveSamples;
+            aggregate.runningActiveSegments += metric.runningActiveSegments;
+            aggregate.settledActiveSamples += metric.settledActiveSamples;
+            aggregate.selectionChanges += metric.selectionChanges;
+            aggregate.recordedSelectionCompared =
+                aggregate.recordedSelectionCompared && metric.recordedSelectionCompared;
+            aggregate.recordedSelectionMismatches += metric.recordedSelectionMismatches;
+            aggregate.maxAbsRateX = std::max(aggregate.maxAbsRateX, metric.maxAbsRateX);
+            aggregate.maxAbsRateY = std::max(aggregate.maxAbsRateY, metric.maxAbsRateY);
+        }
+        writeMetric(output, aggregate);
+        overall.push_back(aggregate);
+    }
+    std::sort(overall.begin(), overall.end(), [](const auto& left, const auto& right) {
+        if (left.runningActiveSamples != right.runningActiveSamples)
+            return left.runningActiveSamples < right.runningActiveSamples;
+        if (left.settledActiveSamples != right.settledActiveSamples)
+            return left.settledActiveSamples < right.settledActiveSamples;
+        return left.runningActiveSegments < right.runningActiveSegments;
+    });
+
+    const std::size_t top = std::min<std::size_t>(20, overall.size());
+    std::cout << "XCenter XWidth YCenter YWidth Active Settled Segments Mismatch" << std::endl;
+    for (std::size_t index = 0; index < top; ++index)
+    {
+        const auto& metric = overall[index];
+        std::cout << metric.candidate.horizontal.centerMs << ' '
+            << metric.candidate.horizontal.widthMs << ' '
+            << metric.candidate.vertical.centerMs << ' '
+            << metric.candidate.vertical.widthMs << ' '
+            << metric.runningActiveSamples << ' '
+            << metric.settledActiveSamples << ' '
+            << metric.runningActiveSegments << ' '
+            << metric.recordedSelectionMismatches << std::endl;
+    }
+    std::cout << "[ShadowReplay] Wrote " << outputPath << std::endl;
+    return 0;
+}

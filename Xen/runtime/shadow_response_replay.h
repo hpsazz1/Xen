@@ -1,0 +1,91 @@
+#ifndef SHADOW_RESPONSE_REPLAY_H
+#define SHADOW_RESPONSE_REPLAY_H
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#include "maneuver_los_estimator.h"
+
+namespace ShadowResponseReplay
+{
+struct AxisResponse
+{
+    double centerMs = 20.0;
+    double widthMs = 20.0;
+};
+
+struct Candidate
+{
+    AxisResponse horizontal{};
+    AxisResponse vertical{};
+};
+
+struct Command
+{
+    std::int64_t sequence = 0;
+    std::int64_t sendTimeNs = 0;
+    int countsX = 0;
+    int countsY = 0;
+    double degreesPerCountX = 0.0;
+    double degreesPerCountY = 0.0;
+};
+
+struct Sample
+{
+    std::int64_t observationTimeNs = 0;
+    std::int64_t controlTimeNs = 0;
+    std::uint64_t resetGeneration = 0;
+    int targetId = 0;
+    double measuredYawDegrees = 0.0;
+    double measuredPitchDownDegrees = 0.0;
+    float confidence = 0.0f;
+    bool outputPaused = false;
+    bool settled = false;
+    bool recordedManeuverActive = false;
+};
+
+struct Timeline
+{
+    std::string source;
+    std::vector<Sample> samples;
+    std::vector<Command> commands;
+    double recordedCenterMs = 0.0;
+    double recordedWidthMs = 0.0;
+};
+
+struct Metrics
+{
+    std::string source;
+    Candidate candidate{};
+    std::size_t rows = 0;
+    std::size_t runningSamples = 0;
+    std::size_t pausedSamples = 0;
+    std::size_t runningActiveSamples = 0;
+    std::size_t pausedActiveSamples = 0;
+    std::size_t runningActiveSegments = 0;
+    std::size_t settledActiveSamples = 0;
+    std::size_t selectionChanges = 0;
+    bool recordedSelectionCompared = false;
+    std::size_t recordedSelectionMismatches = 0;
+    double maxAbsRateX = 0.0;
+    double maxAbsRateY = 0.0;
+    std::vector<std::size_t> failedTrials;
+};
+
+// 读取流水线CSV中的真实观测和已确认设备命令。解析器按CSV引号规则处理字段，
+// 不依赖固定列位置；缺少时间、LOS、置信度或命令诊断时直接拒绝，禁止静默降级。
+bool LoadTimelineCsv(const std::filesystem::path& path,
+    Timeline& timeline, std::string& error);
+
+// 在完全相同的观测时间线上重放响应核和现有门控CA估计器。degrees-per-count覆盖值
+// 大于0时优先使用精确Profile值，避免CSV三位小数显示精度累积成角度漂移。
+Metrics Evaluate(const Timeline& timeline, const Candidate& candidate,
+    const ManeuverLosEstimator::Settings& settings,
+    double degreesPerCountXOverride = 0.0,
+    double degreesPerCountYOverride = 0.0,
+    bool compareRecordedSelection = false);
+}
+
+#endif

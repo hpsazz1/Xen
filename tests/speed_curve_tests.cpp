@@ -24,6 +24,7 @@
 #include "runtime/tracker_timing.h"
 #include "runtime/passive_profile_calibrator.h"
 #include "runtime/build_identity.h"
+#include "runtime/shadow_response_replay.h"
 
 #include <cmath>
 #include <algorithm>
@@ -389,6 +390,70 @@ int main()
     expectTrue(!staticManeuverPipeline.snapshot().maneuverEstimator.maneuverModelActive &&
                    staticManeuverPipeline.snapshot().maneuverEstimator.selectionCount == 0,
                "static shadow observations never enter the maneuver model");
+
+    // 同一观测时间线必须能够区分“响应核正确”和“模型相位错误”，并允许X/Y使用
+    // 不同响应而不复制估计器实现。静止世界角固定为0，屏幕LOS等于真实相机角的反号。
+    ShadowResponseReplay::Timeline responseTimeline;
+    responseTimeline.source = "synthetic_static.csv";
+    responseTimeline.recordedCenterMs = 20.0;
+    responseTimeline.recordedWidthMs = 0.0;
+    responseTimeline.commands.push_back({
+        1, 1'000'000'000, 100, 100, 0.03, 0.02 });
+    for (int sampleIndex = 0; sampleIndex < 30; ++sampleIndex)
+    {
+        const std::int64_t observationNs =
+            1'000'000'000 + sampleIndex * 10'000'000LL;
+        ShadowResponseReplay::Sample sample;
+        sample.observationTimeNs = observationNs;
+        sample.controlTimeNs = observationNs + 1'000'000;
+        sample.resetGeneration = 1;
+        sample.targetId = 7;
+        sample.confidence = 1.0f;
+        sample.measuredYawDegrees = sampleIndex >= 2 ? -3.0 : 0.0;
+        sample.measuredPitchDownDegrees = sampleIndex >= 3 ? -2.0 : 0.0;
+        responseTimeline.samples.push_back(sample);
+    }
+    ManeuverLosEstimator::Settings replaySettings;
+    replaySettings.mode =
+        ManeuverLosEstimatorMode::ManeuverGatedConstantAcceleration;
+    replaySettings.jerkStdDegreesPerSecond3 = 8000.0;
+    replaySettings.maneuverRateThresholdDegreesPerSecond = 12.0;
+    replaySettings.maneuverHoldSeconds = 0.120;
+    const ShadowResponseReplay::Candidate matchedSplitResponse{
+        { 20.0, 0.0 }, { 30.0, 0.0 } };
+    const auto matchedResponseMetrics = ShadowResponseReplay::Evaluate(
+        responseTimeline, matchedSplitResponse, replaySettings, 0.03, 0.02, true);
+    expectTrue(matchedResponseMetrics.runningActiveSamples == 0 &&
+                   matchedResponseMetrics.recordedSelectionMismatches == 0,
+               "shadow response replay preserves stationary LOS for the matching split-axis kernel");
+    const ShadowResponseReplay::Candidate wrongSharedResponse{
+        { 60.0, 0.0 }, { 60.0, 0.0 } };
+    const auto wrongResponseMetrics = ShadowResponseReplay::Evaluate(
+        responseTimeline, wrongSharedResponse, replaySettings, 0.03, 0.02, false);
+    expectTrue(wrongResponseMetrics.runningActiveSamples > 0 &&
+                   wrongResponseMetrics.runningActiveSegments > 0,
+               "shadow response replay exposes a phase-mismatched static response");
+
+    const char* responseCsvPath = "xen_shadow_response_replay_test.csv";
+    {
+        std::ofstream responseCsv(responseCsvPath);
+        responseCsv << "BackendReceiveNs,ControlTimeNs,AimPipelineResetGeneration,"
+            "AimPipelineTargetId,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
+            "AimPipelineConfidence,AimPipelineOutputPaused,Settled,"
+            "AimPipelineManeuverModelActive,CommandToFrameDelayMs,CommandResponseMs,"
+            "CommandSendSucceeded,CommandSequence,CommandDeviceSendNs,"
+            "CommandAppliedCountsX,CommandAppliedCountsY,DegreesPerCountX,DegreesPerCountY\n"
+            "1000000000,1001000000,1,7,0,0,1,0,0,0,20,0,1,1,1000000000,"
+            "100,100,0.03,0.02\n";
+    }
+    ShadowResponseReplay::Timeline parsedResponseTimeline;
+    std::string responseCsvError;
+    expectTrue(ShadowResponseReplay::LoadTimelineCsv(
+                   responseCsvPath, parsedResponseTimeline, responseCsvError) &&
+                   parsedResponseTimeline.samples.size() == 1 &&
+                   parsedResponseTimeline.commands.size() == 1,
+               "shadow response replay parses the named CSV timing and command contract");
+    std::remove(responseCsvPath);
 
     RelativeLosKalman constantVelocityKalman;
     const auto kalmanStart = timingBase + std::chrono::seconds(2);

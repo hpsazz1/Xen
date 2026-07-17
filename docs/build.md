@@ -187,6 +187,20 @@ build\cuda\Release\Xen.exe
 
 这两个 `build` 路径是唯一规范的测试与发布产物。历史 `x64\DML\Xen.exe`、`x64\CUDA\Xen.exe` 不会由当前构建脚本更新，不得用于复测。构建脚本发现历史副本时会输出警告；流水线CSV中的 `BuildBackend/BuildRevision/BuildTimestampUtc/ControllerRevision` 用于确认实际运行版本。
 
+启用`BUILD_TESTING`时还会在`build\<backend>\tools\Release`生成`xen_shadow_response_replay.exe`。它只离线读取流水线CSV并复用正式门控估计器，不属于运行时发布文件。示例：
+
+```powershell
+build\dml\tools\Release\xen_shadow_response_replay.exe `
+  --data-root C:\path\to\pipeline_csv `
+  --output build\dml\shadow_response_replay_summary.csv `
+  --axis-mode split `
+  --x-centers-ms 15,20 --x-widths-ms 0,20 `
+  --y-centers-ms 20 --y-widths-ms 20 `
+  --dpc-x 0.0308 --dpc-y 0.0308
+```
+
+现场数据必须先用其原始响应参数完成`RecordedSelectionCompared=1`且`RecordedSelectionMismatches=0`的基线自校验；未复现原模型选择时，禁止使用该文件的候选排名。
+
 P0-1 之后的流水线 CSV 还包含捕获后端取得时间、检测提交/开始/发布、控制消费时间、分段年龄、时间顺序异常标记，以及命令入队、设备尝试、成功确认和队列淘汰字段。所有本机年龄均由同一 `steady_clock` 域相减；NDI/DDA/WinRT 的协议或系统原始时间只保留为独立字段，不直接与本机年龄相加。
 
 主界面侧边栏标题同步显示相同身份，格式为 `Xen  <DML|CUDA> <7位提交> r<控制器修订号>`；未提交构建会在提交号后显示 `*`。现场复测可同时核对界面标题与CSV首行。

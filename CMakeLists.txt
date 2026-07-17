@@ -427,6 +427,7 @@ if(BUILD_TESTING)
         "${SRC_DIR}/runtime/command_trajectory_shaper.cpp"
         "${SRC_DIR}/runtime/cross_domain_replay.cpp"
         "${SRC_DIR}/runtime/output_scheduler.cpp"
+        "${SRC_DIR}/runtime/shadow_response_replay.cpp"
         "${SRC_DIR}/runtime/build_identity.cpp"
     )
     set_target_properties(xen_algorithm_tests PROPERTIES
@@ -443,6 +444,19 @@ if(BUILD_TESTING)
     target_compile_features(xen_algorithm_tests PRIVATE cxx_std_17)
     if(MSVC)
         target_compile_options(xen_algorithm_tests PRIVATE /utf-8 /W4 /permissive- /EHsc)
+    endif()
+
+    add_executable(xen_shadow_response_replay
+        "${SRC_DIR}/runtime/shadow_response_replay_main.cpp"
+        "${SRC_DIR}/runtime/shadow_response_replay.cpp"
+        "${SRC_DIR}/runtime/maneuver_los_estimator.cpp"
+        "${SRC_DIR}/runtime/relative_los_kalman.cpp")
+    set_target_properties(xen_shadow_response_replay PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools/$<CONFIG>")
+    target_include_directories(xen_shadow_response_replay PRIVATE "${SRC_DIR}")
+    target_compile_features(xen_shadow_response_replay PRIVATE cxx_std_17)
+    if(MSVC)
+        target_compile_options(xen_shadow_response_replay PRIVATE /utf-8 /W4 /permissive- /EHsc)
     endif()
     add_test(NAME xen.algorithm.basic_tracking COMMAND xen_algorithm_tests)
 
