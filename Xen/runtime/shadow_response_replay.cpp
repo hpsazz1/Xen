@@ -211,6 +211,19 @@ std::string joinMissing(const std::vector<std::string>& missing)
     }
     return stream.str();
 }
+
+double percentile(std::vector<double> values, double quantile)
+{
+    if (values.empty())
+        return 0.0;
+    std::sort(values.begin(), values.end());
+    const double position = std::clamp(quantile, 0.0, 1.0) *
+        static_cast<double>(values.size() - 1);
+    const std::size_t lower = static_cast<std::size_t>(std::floor(position));
+    const std::size_t upper = std::min(values.size() - 1, lower + 1);
+    const double fraction = position - static_cast<double>(lower);
+    return values[lower] + (values[upper] - values[lower]) * fraction;
+}
 }
 
 bool LoadTimelineCsv(const std::filesystem::path& path,
@@ -486,5 +499,193 @@ Metrics Evaluate(const Timeline& timeline, const Candidate& candidate,
     if (wasRunning && trialFailed)
         metrics.failedTrials.push_back(trial);
     return metrics;
+}
+
+static PhysicalFitMetrics fitPhysicalResponse(
+    const std::vector<const Timeline*>& timelines,
+    const Candidate& candidate,
+    double degreesPerCountXOverride,
+    double degreesPerCountYOverride,
+    double quietWindowMs,
+    double responseWindowMs)
+{
+    PhysicalFitMetrics metrics;
+    metrics.source = timelines.size() == 1 ? timelines.front()->source : "all";
+    metrics.candidate = candidate;
+    const std::int64_t quietWindowNs = static_cast<std::int64_t>(
+        std::clamp(quietWindowMs, 1.0, 1000.0) * 1'000'000.0);
+    const std::int64_t responseWindowNs = static_cast<std::int64_t>(
+        std::clamp(responseWindowMs, 1.0, 1000.0) * 1'000'000.0);
+
+    std::vector<double> absoluteResidualsX;
+    std::vector<double> absoluteResidualsY;
+    double squaredResidualsX = 0.0;
+    double squaredResidualsY = 0.0;
+
+    struct SegmentSample
+    {
+        double worldYaw = 0.0;
+        double worldPitch = 0.0;
+        std::int64_t commandAgeNs = std::numeric_limits<std::int64_t>::max();
+        bool outputPaused = false;
+    };
+
+    for (const Timeline* timelinePointer : timelines)
+    {
+        const Timeline& timeline = *timelinePointer;
+        std::vector<SegmentSample> segment;
+        std::uint64_t generation = 0;
+        int targetId = 0;
+        bool haveIdentity = false;
+        bool segmentHasRunningSamples = false;
+        bool previousOutputPaused = false;
+        std::size_t commandIndex = 0;
+        std::int64_t latestCommandTimeNs = std::numeric_limits<std::int64_t>::min();
+
+        const auto finishSegment = [&]() {
+            std::vector<double> anchorX;
+            std::vector<double> anchorY;
+            for (const SegmentSample& sample : segment)
+            {
+                if (!sample.outputPaused && sample.commandAgeNs > quietWindowNs)
+                {
+                    anchorX.push_back(sample.worldYaw);
+                    anchorY.push_back(sample.worldPitch);
+                }
+            }
+            if (anchorX.size() < 3 || anchorY.size() < 3)
+            {
+                segment.clear();
+                return;
+            }
+            const double referenceX = percentile(anchorX, 0.5);
+            const double referenceY = percentile(anchorY, 0.5);
+            std::vector<double> segmentResidualsX;
+            std::vector<double> segmentResidualsY;
+            for (const SegmentSample& sample : segment)
+            {
+                if (sample.outputPaused || sample.commandAgeNs < 0 ||
+                    sample.commandAgeNs > responseWindowNs)
+                {
+                    continue;
+                }
+                const double residualX = sample.worldYaw - referenceX;
+                const double residualY = sample.worldPitch - referenceY;
+                segmentResidualsX.push_back(residualX);
+                segmentResidualsY.push_back(residualY);
+            }
+            if (segmentResidualsX.size() >= 3)
+            {
+                ++metrics.anchoredSegments;
+                metrics.responseSamples += segmentResidualsX.size();
+                for (double residual : segmentResidualsX)
+                {
+                    absoluteResidualsX.push_back(std::abs(residual));
+                    squaredResidualsX += residual * residual;
+                }
+                for (double residual : segmentResidualsY)
+                {
+                    absoluteResidualsY.push_back(std::abs(residual));
+                    squaredResidualsY += residual * residual;
+                }
+            }
+            segment.clear();
+        };
+
+        for (const Sample& sample : timeline.samples)
+        {
+            const bool identityChanged = haveIdentity &&
+                (sample.resetGeneration != generation || sample.targetId != targetId);
+            if (identityChanged)
+            {
+                finishSegment();
+                segmentHasRunningSamples = false;
+            }
+            // 九点测试可在同一目标身份内连续完成多轮。暂停后的下一次运行是新点位，
+            // 前一段暂停尾部只为前一点提供安静锚点，不能与下一点的世界角混合。
+            if (!identityChanged && !sample.outputPaused && previousOutputPaused &&
+                segmentHasRunningSamples)
+            {
+                finishSegment();
+                segmentHasRunningSamples = false;
+            }
+            if (!haveIdentity || sample.resetGeneration != generation ||
+                sample.targetId != targetId)
+            {
+                generation = sample.resetGeneration;
+                targetId = sample.targetId;
+                haveIdentity = true;
+            }
+            while (commandIndex < timeline.commands.size() &&
+                   timeline.commands[commandIndex].sendTimeNs <= sample.observationTimeNs)
+            {
+                latestCommandTimeNs = timeline.commands[commandIndex].sendTimeNs;
+                ++commandIndex;
+            }
+            const auto camera = cameraAt(timeline, sample.observationTimeNs,
+                candidate, degreesPerCountXOverride, degreesPerCountYOverride);
+            const std::int64_t commandAgeNs =
+                latestCommandTimeNs == std::numeric_limits<std::int64_t>::min()
+                ? std::numeric_limits<std::int64_t>::max()
+                : sample.observationTimeNs - latestCommandTimeNs;
+            segment.push_back({
+                sample.measuredYawDegrees + camera.first,
+                sample.measuredPitchDownDegrees + camera.second,
+                commandAgeNs,
+                sample.outputPaused });
+            if (!sample.outputPaused)
+                segmentHasRunningSamples = true;
+            previousOutputPaused = sample.outputPaused;
+        }
+        if (haveIdentity && segmentHasRunningSamples)
+            finishSegment();
+    }
+
+    if (metrics.responseSamples == 0)
+    {
+        metrics.scoreDegrees = std::numeric_limits<double>::infinity();
+        return metrics;
+    }
+    metrics.residualP50XDegrees = percentile(absoluteResidualsX, 0.5);
+    metrics.residualP50YDegrees = percentile(absoluteResidualsY, 0.5);
+    metrics.residualP95XDegrees = percentile(absoluteResidualsX, 0.95);
+    metrics.residualP95YDegrees = percentile(absoluteResidualsY, 0.95);
+    metrics.residualRmseXDegrees = std::sqrt(
+        squaredResidualsX / static_cast<double>(metrics.responseSamples));
+    metrics.residualRmseYDegrees = std::sqrt(
+        squaredResidualsY / static_cast<double>(metrics.responseSamples));
+    metrics.scoreDegrees = std::hypot(
+        metrics.residualP95XDegrees, metrics.residualP95YDegrees);
+    return metrics;
+}
+
+PhysicalFitMetrics FitPhysicalResponse(
+    const Timeline& timeline,
+    const Candidate& candidate,
+    double degreesPerCountXOverride,
+    double degreesPerCountYOverride,
+    double quietWindowMs,
+    double responseWindowMs)
+{
+    return fitPhysicalResponse({ &timeline }, candidate,
+        degreesPerCountXOverride, degreesPerCountYOverride,
+        quietWindowMs, responseWindowMs);
+}
+
+PhysicalFitMetrics FitPhysicalResponse(
+    const std::vector<Timeline>& timelines,
+    const Candidate& candidate,
+    double degreesPerCountXOverride,
+    double degreesPerCountYOverride,
+    double quietWindowMs,
+    double responseWindowMs)
+{
+    std::vector<const Timeline*> timelinePointers;
+    timelinePointers.reserve(timelines.size());
+    for (const Timeline& timeline : timelines)
+        timelinePointers.push_back(&timeline);
+    return fitPhysicalResponse(timelinePointers, candidate,
+        degreesPerCountXOverride, degreesPerCountYOverride,
+        quietWindowMs, responseWindowMs);
 }
 }

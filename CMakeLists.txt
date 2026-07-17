@@ -458,6 +458,19 @@ if(BUILD_TESTING)
     if(MSVC)
         target_compile_options(xen_shadow_response_replay PRIVATE /utf-8 /W4 /permissive- /EHsc)
     endif()
+
+    add_executable(xen_physical_response_fit
+        "${SRC_DIR}/runtime/physical_response_fit_main.cpp"
+        "${SRC_DIR}/runtime/shadow_response_replay.cpp"
+        "${SRC_DIR}/runtime/maneuver_los_estimator.cpp"
+        "${SRC_DIR}/runtime/relative_los_kalman.cpp")
+    set_target_properties(xen_physical_response_fit PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools/$<CONFIG>")
+    target_include_directories(xen_physical_response_fit PRIVATE "${SRC_DIR}")
+    target_compile_features(xen_physical_response_fit PRIVATE cxx_std_17)
+    if(MSVC)
+        target_compile_options(xen_physical_response_fit PRIVATE /utf-8 /W4 /permissive- /EHsc)
+    endif()
     add_test(NAME xen.algorithm.basic_tracking COMMAND xen_algorithm_tests)
 
     add_executable(xen_config_tests

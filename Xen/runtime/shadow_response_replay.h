@@ -96,6 +96,21 @@ struct TraceRow
     double holdRemainingSeconds = 0.0;
 };
 
+struct PhysicalFitMetrics
+{
+    std::string source;
+    Candidate candidate{};
+    std::size_t anchoredSegments = 0;
+    std::size_t responseSamples = 0;
+    double residualP50XDegrees = 0.0;
+    double residualP50YDegrees = 0.0;
+    double residualP95XDegrees = 0.0;
+    double residualP95YDegrees = 0.0;
+    double residualRmseXDegrees = 0.0;
+    double residualRmseYDegrees = 0.0;
+    double scoreDegrees = 0.0;
+};
+
 // 读取流水线CSV中的真实观测和已确认设备命令。解析器按CSV引号规则处理字段，
 // 不依赖固定列位置；缺少时间、LOS、置信度或命令诊断时直接拒绝，禁止静默降级。
 bool LoadTimelineCsv(const std::filesystem::path& path,
@@ -109,6 +124,24 @@ Metrics Evaluate(const Timeline& timeline, const Candidate& candidate,
     double degreesPerCountYOverride = 0.0,
     bool compareRecordedSelection = false,
     std::vector<TraceRow>* trace = nullptr);
+
+// 固定目标物理拟合以每个运行轮次中“最近命令已超过quietWindow”的观测作为
+// 世界角锚点，只评价命令后responseWindow内的稳定化残差。这样拟合目标是实际
+// 画面响应，而不是机动模型是否触发；缺少安静锚点的片段不会静默参与评分。
+PhysicalFitMetrics FitPhysicalResponse(
+    const Timeline& timeline,
+    const Candidate& candidate,
+    double degreesPerCountXOverride = 0.0,
+    double degreesPerCountYOverride = 0.0,
+    double quietWindowMs = 150.0,
+    double responseWindowMs = 150.0);
+PhysicalFitMetrics FitPhysicalResponse(
+    const std::vector<Timeline>& timelines,
+    const Candidate& candidate,
+    double degreesPerCountXOverride = 0.0,
+    double degreesPerCountYOverride = 0.0,
+    double quietWindowMs = 150.0,
+    double responseWindowMs = 150.0);
 }
 
 #endif

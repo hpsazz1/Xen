@@ -433,6 +433,60 @@ int main()
     expectTrue(wrongResponseMetrics.runningActiveSamples > 0 &&
                    wrongResponseMetrics.runningActiveSegments > 0,
                "shadow response replay exposes a phase-mismatched static response");
+    const auto matchedPhysicalFit = ShadowResponseReplay::FitPhysicalResponse(
+        responseTimeline, matchedSplitResponse, 0.03, 0.02, 150.0, 150.0);
+    const auto wrongPhysicalFit = ShadowResponseReplay::FitPhysicalResponse(
+        responseTimeline, wrongSharedResponse, 0.03, 0.02, 150.0, 150.0);
+    expectTrue(matchedPhysicalFit.anchoredSegments == 1 &&
+                   matchedPhysicalFit.responseSamples >= 10,
+               "physical response fit requires a quiet anchor and resolved response samples");
+    expectNear(matchedPhysicalFit.scoreDegrees, 0.0, 1e-9,
+               "matching split-axis physical response stabilizes a fixed world target");
+    expectTrue(wrongPhysicalFit.scoreDegrees > 1.0 &&
+                   wrongPhysicalFit.scoreDegrees > matchedPhysicalFit.scoreDegrees,
+               "physical response fit rejects a phase-mismatched shared step response");
+    ShadowResponseReplay::Timeline segmentedPhysicalTimeline = responseTimeline;
+    for (int sampleIndex = 30; sampleIndex < 50; ++sampleIndex)
+    {
+        const std::int64_t observationNs =
+            1'000'000'000 + sampleIndex * 10'000'000LL;
+        ShadowResponseReplay::Sample sample;
+        sample.observationTimeNs = observationNs;
+        sample.controlTimeNs = observationNs + 1'000'000;
+        sample.resetGeneration = 1;
+        sample.targetId = 7;
+        sample.confidence = 1.0f;
+        sample.outputPaused = true;
+        // 暂停时的人工换点不是设备命令响应，必须完全排除。
+        sample.measuredYawDegrees = 20.0 + sampleIndex;
+        sample.measuredPitchDownDegrees = -20.0 - sampleIndex;
+        segmentedPhysicalTimeline.samples.push_back(sample);
+    }
+    segmentedPhysicalTimeline.commands.push_back({
+        2, 1'500'000'000, -100, -100, 0.03, 0.02 });
+    for (int sampleIndex = 50; sampleIndex < 80; ++sampleIndex)
+    {
+        const std::int64_t observationNs =
+            1'000'000'000 + sampleIndex * 10'000'000LL;
+        ShadowResponseReplay::Sample sample;
+        sample.observationTimeNs = observationNs;
+        sample.controlTimeNs = observationNs + 1'000'000;
+        sample.resetGeneration = 1;
+        sample.targetId = 7;
+        sample.confidence = 1.0f;
+        const bool xApplied = sampleIndex >= 52;
+        const bool yApplied = sampleIndex >= 53;
+        sample.measuredYawDegrees = 5.0 - (xApplied ? 0.0 : 3.0);
+        sample.measuredPitchDownDegrees = -4.0 - (yApplied ? 0.0 : 2.0);
+        segmentedPhysicalTimeline.samples.push_back(sample);
+    }
+    const auto segmentedPhysicalFit = ShadowResponseReplay::FitPhysicalResponse(
+        segmentedPhysicalTimeline, matchedSplitResponse, 0.03, 0.02, 150.0, 150.0);
+    expectTrue(segmentedPhysicalFit.anchoredSegments == 2 &&
+                   segmentedPhysicalFit.responseSamples >= 20,
+               "physical response fit splits repeated running trials within one target identity");
+    expectNear(segmentedPhysicalFit.scoreDegrees, 0.0, 1e-9,
+               "physical response fit excludes paused manual reposition observations");
 
     ManeuverLosEstimator unguardedEvidenceEstimator;
     ManeuverLosEstimator guardedEvidenceEstimator;

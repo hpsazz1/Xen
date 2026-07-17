@@ -201,6 +201,22 @@ build\dml\tools\Release\xen_shadow_response_replay.exe `
 
 现场数据必须先用其原始响应参数完成`RecordedSelectionCompared=1`且`RecordedSelectionMismatches=0`的基线自校验；未复现原模型选择时，禁止使用该文件的候选排名。
 
+同一目录还会生成`xen_physical_response_fit.exe`，用于审计固定目标流水线数据能否辨识物理相机响应。它只使用运行态安静尾部建立锚点，暂停观测不参与拟合；`--files`必须精确列出同一采集身份的CSV，避免混入其他修订：
+
+```powershell
+build\dml\tools\Release\xen_physical_response_fit.exe `
+  --data-root C:\path\to\pipeline_csv `
+  --files static.csv,static_repeat2.csv,static_repeat3.csv `
+  --axis-mode split `
+  --x-centers-ms 8,10,12 --x-widths-ms 5,10,15 `
+  --y-centers-ms 20,22,24 --y-widths-ms 25,30,35 `
+  --quiet-window-ms 150 --response-window-ms 150 `
+  --dpc-x 0.0308 --dpc-y 0.0308 `
+  --output build\dml\physical_response_fit_summary.csv
+```
+
+连续闭环数据的最优值会受命令密度、控制器轨迹和评价窗口影响，只能用于辨识能力审计和拒绝明显错误的响应核，不能直接写回运行时配置。正式物理标定必须使用孤立脉冲与原始高帧率画面。
+
 P0-1 之后的流水线 CSV 还包含捕获后端取得时间、检测提交/开始/发布、控制消费时间、分段年龄、时间顺序异常标记，以及命令入队、设备尝试、成功确认和队列淘汰字段。所有本机年龄均由同一 `steady_clock` 域相减；NDI/DDA/WinRT 的协议或系统原始时间只保留为独立字段，不直接与本机年龄相加。
 
 主界面侧边栏标题同步显示相同身份，格式为 `Xen  <DML|CUDA> <7位提交> r<控制器修订号>`；未提交构建会在提交号后显示 `*`。现场复测可同时核对界面标题与CSV首行。
