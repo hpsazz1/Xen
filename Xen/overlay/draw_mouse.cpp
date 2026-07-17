@@ -192,6 +192,14 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayUI::BeginSection("新控制器影子参数", "mouse_section_shadow_los_controller"))
     {
         ImGui::TextDisabled("仅 aim_pipeline_mode=shadow/active 时计算；P0 阶段不发送设备命令");
+        OverlayUI::SliderFloatRow("相机响应中心(ms)",
+            &config.aim_shadow_command_to_frame_delay_ms,
+            0.0f, 250.0f, "%.0f", "##shadow_camera_delay_ms",
+            "成功发送的counts在画面中响应的时间中心；只影响shadow角度模型。");
+        OverlayUI::SliderFloatRow("相机响应宽度(ms)",
+            &config.aim_shadow_command_response_ms,
+            0.0f, 100.0f, "%.0f", "##shadow_camera_response_ms",
+            "0为固定延迟阶跃；非零时在中心两侧按线性响应逐步生效。CUDA强制为0。");
         OverlayUI::SliderFloatRow("角反馈响应(ms)", &config.aim_shadow_response_ms,
             10.0f, 500.0f, "%.0f", "##shadow_response_ms",
             "按真实控制周期计算角误差P反馈；默认80ms。");

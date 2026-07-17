@@ -46,10 +46,11 @@ try {
 
     $candidateRoot = Join-Path $temporaryRoot 'maneuver-candidate'
     New-Item -ItemType Directory -Path $candidateRoot | Out-Null
-    $candidateHeader = $header + ',AimPipelineEstimatorMode,AimPipelineManeuverModelActive,AimPipelineEstimatorSelectionChanged,AimPipelineEstimatorSelectionCount,AimPipelineCaJerkStdDps3,AimPipelineManeuverRateThresholdDps,AimPipelineManeuverHoldMs,AimPipelineManeuverHoldRemainingMs,AimPipelineModelAngleDeltaDeg,AimPipelineModelRateDeltaDps,AimPipelineBaselineCovarianceX,AimPipelineBaselineCovarianceY,AimPipelineCaCovarianceX,AimPipelineCaCovarianceY'
-    $inactiveSuffix = ',maneuver_gated_ca,0,0,0,8000,12,120,0,0.1,1,0.02,0.03,0.02,0.03'
-    $activationSuffix = ',maneuver_gated_ca,1,1,1,8000,12,120,120,0.1,1,0.02,0.03,0.02,0.03'
-    $activeSuffix = ',maneuver_gated_ca,1,0,1,8000,12,120,120,0.1,1,0.02,0.03,0.02,0.03'
+    $candidateHeader = $header + ',AimPipelineEstimatorMode,AimPipelineManeuverModelActive,AimPipelineEstimatorSelectionChanged,AimPipelineEstimatorSelectionCount,AimPipelineCaJerkStdDps3,AimPipelineManeuverRateThresholdDps,AimPipelineManeuverHoldMs,AimPipelineManeuverHoldRemainingMs,AimPipelineModelAngleDeltaDeg,AimPipelineModelRateDeltaDps,AimPipelineBaselineCovarianceX,AimPipelineBaselineCovarianceY,AimPipelineCaCovarianceX,AimPipelineCaCovarianceY,ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs'
+    $inactiveSuffix = ',maneuver_gated_ca,0,0,0,8000,12,120,0,0.1,1,0.02,0.03,0.02,0.03,1,20,20'
+    $activationSuffix = ',maneuver_gated_ca,1,1,1,8000,12,120,120,0.1,1,0.02,0.03,0.02,0.03,1,20,20'
+    $activeSuffix = ',maneuver_gated_ca,1,0,1,8000,12,120,120,0.1,1,0.02,0.03,0.02,0.03,1,20,20'
+    $deactivationSuffix = ',maneuver_gated_ca,0,1,2,8000,12,120,0,0.1,1,0.02,0.03,0.02,0.03,1,20,20'
     foreach ($scenario in @('static', 'horizontal_left', 'horizontal_right', 'horizontal_reverse', 'horizontal_jump')) {
         $moving = $scenario -match 'reverse|jump'
         @(
@@ -61,10 +62,31 @@ try {
     }
     $candidateMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `
         -DataRoot $candidateRoot -MinEstimateSamples 3 -ExpectedBuildRevision test-revision `
-        -ExpectedControllerRevision 59 -RequireStandardScenarios -RequireManeuverCandidate -PassThru)
+        -ExpectedControllerRevision 59 -RequireStandardScenarios -RequireManeuverCandidate `
+        -RequireFiniteViewResponse -PassThru)
     Assert-Equal PASS $candidateMetrics[-1].Status 'Valid maneuver shadow data must pass.'
     Assert-Equal 4 $candidateMetrics[-1].ManeuverActiveSamples `
         'Jump and reverse maneuver activation samples must be counted.'
+    Assert-Equal 2 $candidateMetrics[-1].ManeuverPausedActiveSamples `
+        'Paused maneuver activation must be reported separately.'
+    Assert-Equal 2 $candidateMetrics[-1].ManeuverRunningActiveSamples `
+        'Running maneuver activation must be reported separately.'
+    Assert-Equal 0 $candidateMetrics[-1].ViewResponseContractViolations `
+        'The frozen 20/20 finite response must pass validation.'
+
+    @($candidateHeader, ($activeRow + $inactiveSuffix),
+        ($pausedRow + $activationSuffix), ($resumedRow + $deactivationSuffix)) |
+        Set-Content -LiteralPath (Join-Path $candidateRoot 'static.csv') -Encoding UTF8
+    $pausedStaticMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `
+        -DataRoot $candidateRoot -MinEstimateSamples 3 -ExpectedBuildRevision test-revision `
+        -ExpectedControllerRevision 59 -RequireStandardScenarios -RequireManeuverCandidate -PassThru)
+    $staticMetric = @($pausedStaticMetrics | Where-Object Source -eq 'static.csv')[0]
+    Assert-Equal PASS $pausedStaticMetrics[-1].Status `
+        'Paused static repositioning must not fail the running candidate gate.'
+    Assert-Equal 1 $staticMetric.ManeuverPausedActiveSamples `
+        'Paused static activation must remain visible in diagnostics.'
+    Assert-Equal 0 $staticMetric.ManeuverRunningActiveSamples `
+        'Paused static activation must not be misreported as running residency.'
 
     $unsafeStaticRow = $pausedRow + $activationSuffix
     @($candidateHeader, ($activeRow + $inactiveSuffix), $unsafeStaticRow,
@@ -77,7 +99,36 @@ try {
             -ExpectedControllerRevision 59 -RequireStandardScenarios -RequireManeuverCandidate | Out-Null
     }
     catch { $staticActivationFailed = $true }
-    Assert-Equal True $staticActivationFailed 'Static maneuver-model residency must fail validation.'
+    Assert-Equal True $staticActivationFailed 'Running static maneuver-model residency must fail validation.'
+
+    $invalidResponseRoot = Join-Path $temporaryRoot 'invalid-response'
+    New-Item -ItemType Directory -Path $invalidResponseRoot | Out-Null
+    @($candidateHeader,
+        (($activeRow + $inactiveSuffix) -replace ',1,20,20$', ',1,20,0'),
+        (($pausedRow + $inactiveSuffix) -replace ',1,20,20$', ',1,20,0'),
+        (($resumedRow + $inactiveSuffix) -replace ',1,20,20$', ',1,20,0')) |
+        Set-Content -LiteralPath (Join-Path $invalidResponseRoot 'profile.csv') -Encoding UTF8
+    $invalidResponseFailed = $false
+    try {
+        & (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `
+            -DataRoot $invalidResponseRoot -MinEstimateSamples 3 `
+            -ExpectedBuildRevision test-revision -ExpectedControllerRevision 59 `
+            -RequireFiniteViewResponse | Out-Null
+    }
+    catch { $invalidResponseFailed = $true }
+    Assert-Equal True $invalidResponseFailed `
+        'A step response must fail the frozen finite-response contract.'
+
+    $nonstandardRoot = Join-Path $temporaryRoot 'nonstandard-name'
+    New-Item -ItemType Directory -Path $nonstandardRoot | Out-Null
+    @($header, $activeRow, $pausedRow, $resumedRow) |
+        Set-Content -LiteralPath (Join-Path $nonstandardRoot 'profile_calibration.csv') -Encoding UTF8
+    $nonstandardMetrics = @(& (Join-Path $PSScriptRoot '..\tools\analyze_shadow_pipeline.ps1') `
+        -DataRoot $nonstandardRoot -MinEstimateSamples 3 `
+        -ExpectedBuildRevision test-revision -ExpectedControllerRevision 59 `
+        -RequirePausedObservations -PassThru)
+    Assert-Equal PASS $nonstandardMetrics[-1].Status `
+        'A nonstandard profile filename must not trigger empty scenario aggregation errors.'
 
     $coverageFailed = $false
     try {
@@ -105,7 +156,9 @@ try {
 
     $unsafePauseRoot = Join-Path $temporaryRoot 'unsafe-pause'
     New-Item -ItemType Directory -Path $unsafePauseRoot | Out-Null
-    $unsafePausedRow = $pausedRow -replace ',0,0,0,0,0,0,0,0,0,0$', ',1,0,1,1,0,5,0,0,0,1'
+    $unsafePausedRow = $pausedRow -replace `
+        ',0,0,0,0,0,0,0,0,0,0,100000000$', `
+        ',1,0,1,1,0,5,0,0,0,1,100000000'
     @($header, $activeRow, $unsafePausedRow, $resumedRow) | Set-Content `
         -LiteralPath (Join-Path $unsafePauseRoot 'left.csv') -Encoding UTF8
     $unsafePauseFailed = $false

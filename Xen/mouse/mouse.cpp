@@ -125,7 +125,13 @@ MouseThread::MouseThread(
         motionCompensationHistory.configure(
             config.aim_motion_compensation_delay_ms,
             config.aim_motion_compensation_response_ms);
-        appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
+        double shadowCommandResponseMs = 0.0;
+#ifndef USE_CUDA
+        shadowCommandResponseMs = config.aim_shadow_command_response_ms;
+#endif
+        appliedViewMotionModel.configure(
+            config.aim_shadow_command_to_frame_delay_ms,
+            shadowCommandResponseMs);
         profileCalibrator.setEnabled(config.profile_calibration_enabled);
         refreshGameProfileCache();  // 必须在锁内调用（读取 config.game_profiles）
     }
@@ -218,7 +224,13 @@ void MouseThread::updateConfig(
             config.aim_motion_compensation_delay_ms,
             config.aim_motion_compensation_response_ms);
     }
-    appliedViewMotionModel.configure(config.aim_shadow_command_to_frame_delay_ms);
+    double shadowCommandResponseMs = 0.0;
+#ifndef USE_CUDA
+    shadowCommandResponseMs = config.aim_shadow_command_response_ms;
+#endif
+    appliedViewMotionModel.configure(
+        config.aim_shadow_command_to_frame_delay_ms,
+        shadowCommandResponseMs);
     profileCalibrator.setEnabled(config.profile_calibration_enabled);
     if (config.profile_calibration_enabled)
         profileCalibrator.reset();
@@ -1291,6 +1303,7 @@ AimPipelineFrameState MouseThread::processAimPipelineObservation(
         ViewMotionShadowDiagnostics diagnostics;
         diagnostics.valid = true;
         diagnostics.commandToFrameDelayMs = appliedViewMotionModel.commandToFrameDelayMs();
+        diagnostics.commandResponseMs = appliedViewMotionModel.commandResponseMs();
         diagnostics.degreesPerCountX = degreesPerCount.first;
         diagnostics.degreesPerCountY = degreesPerCount.second;
         diagnostics.measuredLosYawDegrees = measuredLos.yawDegrees;

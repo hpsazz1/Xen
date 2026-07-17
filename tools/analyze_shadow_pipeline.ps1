@@ -14,6 +14,7 @@ param(
     [switch]$RequirePausedObservations,
     [switch]$RequirePauseScenarioCoverage,
     [switch]$RequireManeuverCandidate,
+    [switch]$RequireFiniteViewResponse,
     [switch]$PassThru
 )
 
@@ -43,6 +44,14 @@ function Test-NearValue {
     if (-not (Test-FiniteNumber $Value)) { return $false }
     $number = [Convert]::ToDouble($Value, [Globalization.CultureInfo]::InvariantCulture)
     return [math]::Abs($number - $Expected) -le $Tolerance
+}
+
+function Get-PropertySum {
+    param([object[]]$Items, [Parameter(Mandatory)][string]$Property)
+    if ($null -eq $Items -or $Items.Count -eq 0) { return 0.0 }
+    $measurement = $Items | Measure-Object -Property $Property -Sum
+    if ($null -eq $measurement -or $null -eq $measurement.Sum) { return 0.0 }
+    return [double]$measurement.Sum
 }
 
 $resolvedRoot = [IO.Path]::GetFullPath($DataRoot)
@@ -81,6 +90,9 @@ if ($RequireManeuverCandidate) {
         'AimPipelineBaselineCovarianceX', 'AimPipelineBaselineCovarianceY',
         'AimPipelineCaCovarianceX', 'AimPipelineCaCovarianceY'
     )
+}
+if ($RequireFiniteViewResponse) {
+    $requiredColumns += @('ViewMotionShadowValid', 'CommandToFrameDelayMs', 'CommandResponseMs')
 }
 if ($LongPauseMaxMs -le $ShortPauseMaxMs) {
     throw 'LongPauseMaxMs must be greater than ShortPauseMaxMs.'
@@ -135,10 +147,14 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
         -not (Test-NearZero $_.AimPipelineIntegralCountsY)
     }).Count
     $maneuverActiveRows = @()
+    $maneuverPausedActiveRows = @()
+    $maneuverRunningActiveRows = @()
     $maneuverContractViolations = 0
     $maneuverSelectionViolations = 0
     if ($RequireManeuverCandidate) {
         $maneuverActiveRows = @($estimateRows | Where-Object AimPipelineManeuverModelActive -eq '1')
+        $maneuverPausedActiveRows = @($maneuverActiveRows | Where-Object AimPipelineOutputPaused -eq '1')
+        $maneuverRunningActiveRows = @($maneuverActiveRows | Where-Object AimPipelineOutputPaused -ne '1')
         $maneuverContractViolations = @($estimateRows | Where-Object {
             $_.AimPipelineEstimatorMode -ne 'maneuver_gated_ca' -or
             -not (Test-NearValue $_.AimPipelineCaJerkStdDps3 8000.0 0.01) -or
@@ -153,8 +169,8 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
             -not (Test-FiniteNumber $_.AimPipelineCaCovarianceY -Positive)
         }).Count
         if ($csvFile.BaseName.ToLowerInvariant() -match 'static' -and
-            $maneuverActiveRows.Count -gt 0) {
-            $maneuverContractViolations += $maneuverActiveRows.Count
+            $maneuverRunningActiveRows.Count -gt 0) {
+            $maneuverContractViolations += $maneuverRunningActiveRows.Count
         }
         for ($candidateIndex = 1; $candidateIndex -lt $estimateRows.Count; ++$candidateIndex) {
             $previousCandidate = $estimateRows[$candidateIndex - 1]
@@ -172,6 +188,14 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
                 ++$maneuverSelectionViolations
             }
         }
+    }
+    $viewResponseContractViolations = 0
+    if ($RequireFiniteViewResponse) {
+        $viewResponseContractViolations = @($rows | Where-Object {
+            $_.ViewMotionShadowValid -ne '1' -or
+            -not (Test-NearValue $_.CommandToFrameDelayMs 20.0 0.001) -or
+            -not (Test-NearValue $_.CommandResponseMs 20.0 0.001)
+        }).Count
     }
     $pausedRows = @($rows | Where-Object AimPipelineOutputPaused -eq '1')
     $pausedCommandViolations = @($pausedRows | Where-Object {
@@ -250,6 +274,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
     if ($pauseDurationViolations -gt 0) { $reasons.Add('paused duration timestamp invalid') }
     if ($maneuverContractViolations -gt 0) { $reasons.Add('maneuver estimator contract violated') }
     if ($maneuverSelectionViolations -gt 0) { $reasons.Add('maneuver model selection sequence violated') }
+    if ($viewResponseContractViolations -gt 0) { $reasons.Add('finite view response contract violated') }
     $status = if ($reasons.Count -eq 0) { 'PASS' } else { 'FAIL' }
     $summaries.Add([pscustomobject]@{
         Level = 'File'
@@ -269,8 +294,11 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
         LongPauseEvents = $longPauseEvents
         PauseDurationViolations = $pauseDurationViolations
         ManeuverActiveSamples = $maneuverActiveRows.Count
+        ManeuverPausedActiveSamples = $maneuverPausedActiveRows.Count
+        ManeuverRunningActiveSamples = $maneuverRunningActiveRows.Count
         ManeuverContractViolations = $maneuverContractViolations
         ManeuverSelectionViolations = $maneuverSelectionViolations
+        ViewResponseContractViolations = $viewResponseContractViolations
         Status = $status
         Reason = ($reasons -join '; ')
     })
@@ -288,32 +316,30 @@ if ($RequireStandardScenarios) {
     }
 }
 $buildRevisionCount = @($summaries.BuildRevision | Select-Object -Unique).Count
-$pausedObservationCount = [int](($summaries | Measure-Object PausedObservations -Sum).Sum)
+$pausedObservationCount = [int](Get-PropertySum @($summaries) 'PausedObservations')
 $pausedObservationMissing = $RequirePausedObservations -and
     $pausedObservationCount -lt $MinPausedObservations
 $leftSummaries = @($summaries | Where-Object { $_.Source.ToLowerInvariant() -match 'left' })
 $rightSummaries = @($summaries | Where-Object { $_.Source.ToLowerInvariant() -match 'right' })
-$leftShortPauseEvents = [int](($leftSummaries | Measure-Object ShortPauseEvents -Sum).Sum)
-$leftLongPauseEvents = [int](($leftSummaries | Measure-Object LongPauseEvents -Sum).Sum)
-$rightShortPauseEvents = [int](($rightSummaries | Measure-Object ShortPauseEvents -Sum).Sum)
-$rightLongPauseEvents = [int](($rightSummaries | Measure-Object LongPauseEvents -Sum).Sum)
+$leftShortPauseEvents = [int](Get-PropertySum $leftSummaries 'ShortPauseEvents')
+$leftLongPauseEvents = [int](Get-PropertySum $leftSummaries 'LongPauseEvents')
+$rightShortPauseEvents = [int](Get-PropertySum $rightSummaries 'ShortPauseEvents')
+$rightLongPauseEvents = [int](Get-PropertySum $rightSummaries 'LongPauseEvents')
 $pauseCoverageMissing = $RequirePauseScenarioCoverage -and (
     $leftShortPauseEvents -lt $MinShortPauseEventsPerDirection -or
     $leftLongPauseEvents -lt $MinLongPauseEventsPerDirection -or
     $rightShortPauseEvents -lt $MinShortPauseEventsPerDirection -or
     $rightLongPauseEvents -lt $MinLongPauseEventsPerDirection)
-$staticManeuverSamples = [int](($summaries | Where-Object {
-    $_.Source.ToLowerInvariant() -match 'static'
-} | Measure-Object ManeuverActiveSamples -Sum).Sum)
-$jumpManeuverSamples = [int](($summaries | Where-Object {
-    $_.Source.ToLowerInvariant() -match 'jump'
-} | Measure-Object ManeuverActiveSamples -Sum).Sum)
-$reverseManeuverSamples = [int](($summaries | Where-Object {
-    $_.Source.ToLowerInvariant() -match 'reverse'
-} | Measure-Object ManeuverActiveSamples -Sum).Sum)
+$staticSummaries = @($summaries | Where-Object { $_.Source.ToLowerInvariant() -match 'static' })
+$jumpSummaries = @($summaries | Where-Object { $_.Source.ToLowerInvariant() -match 'jump' })
+$reverseSummaries = @($summaries | Where-Object { $_.Source.ToLowerInvariant() -match 'reverse' })
+$staticManeuverPausedSamples = [int](Get-PropertySum $staticSummaries 'ManeuverPausedActiveSamples')
+$staticManeuverRunningSamples = [int](Get-PropertySum $staticSummaries 'ManeuverRunningActiveSamples')
+$jumpManeuverRunningSamples = [int](Get-PropertySum $jumpSummaries 'ManeuverRunningActiveSamples')
+$reverseManeuverRunningSamples = [int](Get-PropertySum $reverseSummaries 'ManeuverRunningActiveSamples')
 $maneuverCoverageMissing = $RequireManeuverCandidate -and (
-    $staticManeuverSamples -ne 0 -or $jumpManeuverSamples -eq 0 -or
-    $reverseManeuverSamples -eq 0)
+    $staticManeuverRunningSamples -ne 0 -or $jumpManeuverRunningSamples -eq 0 -or
+    $reverseManeuverRunningSamples -eq 0)
 $overallFailed = $failed.Count -gt 0 -or $missingScenarios.Count -gt 0 -or
     $buildRevisionCount -ne 1 -or $pausedObservationMissing -or $pauseCoverageMissing -or
     $maneuverCoverageMissing
@@ -333,29 +359,32 @@ if ($pauseCoverageMissing) {
 }
 if ($maneuverCoverageMissing) {
     $overallReasons.Add(
-        "maneuver coverage violated: static=$staticManeuverSamples, " +
-        "jump=$jumpManeuverSamples, reverse=$reverseManeuverSamples")
+        "maneuver running coverage violated: static=$staticManeuverRunningSamples, " +
+        "jump=$jumpManeuverRunningSamples, reverse=$reverseManeuverRunningSamples")
 }
 $overall = [pscustomobject]@{
     Level = 'Overall'
     Source = 'all'
-    Rows = [int](($summaries | Measure-Object Rows -Sum).Sum)
-    EstimateSamples = [int](($summaries | Measure-Object EstimateSamples -Sum).Sum)
+    Rows = [int](Get-PropertySum @($summaries) 'Rows')
+    EstimateSamples = [int](Get-PropertySum @($summaries) 'EstimateSamples')
     BuildRevision = (@($summaries.BuildRevision | Select-Object -Unique) -join ';')
-    ModeViolations = [int](($summaries | Measure-Object ModeViolations -Sum).Sum)
-    IdentityViolations = [int](($summaries | Measure-Object IdentityViolations -Sum).Sum)
-    TimingViolations = [int](($summaries | Measure-Object TimingViolations -Sum).Sum)
-    DiagnosticViolations = [int](($summaries | Measure-Object DiagnosticViolations -Sum).Sum)
-    StageOneViolations = [int](($summaries | Measure-Object StageOneViolations -Sum).Sum)
+    ModeViolations = [int](Get-PropertySum @($summaries) 'ModeViolations')
+    IdentityViolations = [int](Get-PropertySum @($summaries) 'IdentityViolations')
+    TimingViolations = [int](Get-PropertySum @($summaries) 'TimingViolations')
+    DiagnosticViolations = [int](Get-PropertySum @($summaries) 'DiagnosticViolations')
+    StageOneViolations = [int](Get-PropertySum @($summaries) 'StageOneViolations')
     PausedObservations = $pausedObservationCount
-    PausedCommandViolations = [int](($summaries | Measure-Object PausedCommandViolations -Sum).Sum)
-    PauseContinuityViolations = [int](($summaries | Measure-Object PauseContinuityViolations -Sum).Sum)
-    ShortPauseEvents = [int](($summaries | Measure-Object ShortPauseEvents -Sum).Sum)
-    LongPauseEvents = [int](($summaries | Measure-Object LongPauseEvents -Sum).Sum)
-    PauseDurationViolations = [int](($summaries | Measure-Object PauseDurationViolations -Sum).Sum)
-    ManeuverActiveSamples = [int](($summaries | Measure-Object ManeuverActiveSamples -Sum).Sum)
-    ManeuverContractViolations = [int](($summaries | Measure-Object ManeuverContractViolations -Sum).Sum)
-    ManeuverSelectionViolations = [int](($summaries | Measure-Object ManeuverSelectionViolations -Sum).Sum)
+    PausedCommandViolations = [int](Get-PropertySum @($summaries) 'PausedCommandViolations')
+    PauseContinuityViolations = [int](Get-PropertySum @($summaries) 'PauseContinuityViolations')
+    ShortPauseEvents = [int](Get-PropertySum @($summaries) 'ShortPauseEvents')
+    LongPauseEvents = [int](Get-PropertySum @($summaries) 'LongPauseEvents')
+    PauseDurationViolations = [int](Get-PropertySum @($summaries) 'PauseDurationViolations')
+    ManeuverActiveSamples = [int](Get-PropertySum @($summaries) 'ManeuverActiveSamples')
+    ManeuverPausedActiveSamples = [int](Get-PropertySum @($summaries) 'ManeuverPausedActiveSamples')
+    ManeuverRunningActiveSamples = [int](Get-PropertySum @($summaries) 'ManeuverRunningActiveSamples')
+    ManeuverContractViolations = [int](Get-PropertySum @($summaries) 'ManeuverContractViolations')
+    ManeuverSelectionViolations = [int](Get-PropertySum @($summaries) 'ManeuverSelectionViolations')
+    ViewResponseContractViolations = [int](Get-PropertySum @($summaries) 'ViewResponseContractViolations')
     Status = if ($overallFailed) { 'FAIL' } else { 'PASS' }
     Reason = ($overallReasons -join '; ')
 }

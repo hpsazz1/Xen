@@ -192,7 +192,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "TrajectoryPositionX,TrajectoryPositionY,TrajectoryTargetVelocityX,TrajectoryTargetVelocityY,TrajectoryVelocityX,TrajectoryVelocityY,TrajectoryAccelerationX,TrajectoryAccelerationY,TrajectoryJerkX,TrajectoryJerkY,"
          << "TrajectoryShapedCountsX,TrajectoryShapedCountsY,TrajectoryQuantizationRemainderX,TrajectoryQuantizationRemainderY,TrajectoryShapingDelayMs,TrajectorySchedulerLatenessMs,TrajectorySchedulerSkippedTicks,"
          << "AimPipelineOutputCountsX,AimPipelineOutputCountsY,AimPipelineTrajectoryCommandSuppressed,"
-         << "ViewMotionShadowValid,CommandToFrameDelayMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
+         << "ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees,MeasuredLosPitchDownDegrees,"
          << "AppliedCameraYawAtObservationDegrees,AppliedCameraPitchAtObservationDegrees,AppliedCameraYawAtControlDegrees,AppliedCameraPitchAtControlDegrees,"
          << "StabilizedLosYawDegrees,StabilizedLosPitchDownDegrees,RelativeErrorYawDegrees,RelativeErrorPitchDownDegrees,"
          << "CaptureFrameSequence,BackendReceiveNs,CaptureSubmitNs,InferenceStartNs,InferencePublishNs,ControlTimeNs,"
@@ -332,9 +332,10 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << ap.trajectoryOutput.schedulerSkippedTicks << ','
              << ap.trajectoryOutput.outputCountsX << ',' << ap.trajectoryOutput.outputCountsY << ','
              << (ap.trajectoryOutput.commandSuppressed ? '1' : '0') << ','
-             << (ap.viewMotion.valid ? '1' : '0') << ','
-             << ap.viewMotion.commandToFrameDelayMs << ','
-             << ap.viewMotion.degreesPerCountX << ',' << ap.viewMotion.degreesPerCountY << ','
+              << (ap.viewMotion.valid ? '1' : '0') << ','
+              << ap.viewMotion.commandToFrameDelayMs << ','
+              << ap.viewMotion.commandResponseMs << ','
+              << ap.viewMotion.degreesPerCountX << ',' << ap.viewMotion.degreesPerCountY << ','
              << ap.viewMotion.measuredLosYawDegrees << ','
              << ap.viewMotion.measuredLosPitchDownDegrees << ','
              << ap.viewMotion.appliedCameraYawAtObservationDegrees << ','

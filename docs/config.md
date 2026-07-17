@@ -118,7 +118,8 @@ capture_fps = 60
 | `aim_pipeline_mode` | `legacy` | 新旧链路迁移模式。`legacy`只运行r37；`shadow`在同一帧记录新链路独立状态但不向设备队列写命令；P0-0至P0-5请求`active`会保留请求值并安全降级为`shadow`。 |
 | `aim_motion_compensation_delay_ms` | `12` | 正式自运动补偿的命令到画面响应中心，单位毫秒，范围0~250。 |
 | `aim_motion_compensation_response_ms` | `0` | 完整命令在画面中线性出现的实验响应宽度，单位毫秒，范围0~100；r45实测无收益，正式默认固定为0。 |
-| `aim_shadow_command_to_frame_delay_ms` | `60` | 新链路固定相机响应延迟，单位毫秒，范围0~250；只用于shadow角度模型，不自动采用被动Profile标定结果。 |
+| `aim_shadow_command_to_frame_delay_ms` | `60` | 新链路相机响应中心，单位毫秒，范围0~250；只用于shadow角度模型，不自动采用被动Profile标定结果。 |
+| `aim_shadow_command_response_ms` | `0` | 新链路完整相机响应宽度，单位毫秒，范围0~100；0保持历史固定延迟阶跃。DML r61有限响应候选显式使用20，CUDA强制为0。 |
 | `aim_shadow_response_ms` | `80` | P0-4A角误差P反馈响应时间，范围10~500 ms；按真实控制周期使用指数离散响应。 |
 | `aim_shadow_max_speed_cps` | `1440` | P0-4A全部控制分量合成后的二维速度上限，范围30~4000 counts/s。 |
 | `aim_shadow_feedforward_gain` | `0` | 相对视线角速度前馈增益，范围0~2；默认关闭，且始终受检测置信度与NIS形成的前馈可信度缩放。 |

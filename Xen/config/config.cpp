@@ -139,6 +139,7 @@ bool Config::loadConfig(const std::string& filename)
         aim_motion_compensation_response_ms = 0.0f;      // r45实测无收益，正式回退固定延迟
         aim_pipeline_mode = "legacy";                   // P0-0 默认保持 r30 正式输出
         aim_shadow_command_to_frame_delay_ms = 60.0f;    // 显式shadow候选，不自动采用被动标定结果
+        aim_shadow_command_response_ms = 0.0f;           // 0保持历史固定延迟阶跃
         aim_shadow_response_ms = 80.0f;                  // 第一子阶段仅启用P反馈
         aim_shadow_max_speed_cps = 1440.0f;
         aim_shadow_feedforward_gain = 0.0f;
@@ -573,6 +574,8 @@ bool Config::loadConfig(const std::string& filename)
     aim_pipeline_mode = get_string("aim_pipeline_mode", "legacy");
     aim_shadow_command_to_frame_delay_ms = (float)get_double(
         "aim_shadow_command_to_frame_delay_ms", 60.0);
+    aim_shadow_command_response_ms = (float)get_double(
+        "aim_shadow_command_response_ms", 0.0);
     aim_shadow_response_ms = (float)get_double("aim_shadow_response_ms", 80.0);
     aim_shadow_max_speed_cps = (float)get_double("aim_shadow_max_speed_cps", 1440.0);
     aim_shadow_feedforward_gain = (float)get_double("aim_shadow_feedforward_gain", 0.0);
@@ -808,6 +811,8 @@ bool Config::loadConfig(const std::string& filename)
     prediction_strength = std::clamp(prediction_strength, 0.0f, 4.0f);
     aim_shadow_command_to_frame_delay_ms = std::clamp(
         aim_shadow_command_to_frame_delay_ms, 0.0f, 250.0f);
+    aim_shadow_command_response_ms = std::clamp(
+        aim_shadow_command_response_ms, 0.0f, 100.0f);
     aim_shadow_response_ms = std::clamp(aim_shadow_response_ms, 10.0f, 500.0f);
     aim_shadow_max_speed_cps = std::clamp(aim_shadow_max_speed_cps, 30.0f, 4000.0f);
     aim_shadow_feedforward_gain = std::clamp(aim_shadow_feedforward_gain, 0.0f, 2.0f);
@@ -969,6 +974,7 @@ bool Config::saveConfig(const std::string& filename)
         << "aim_motion_compensation_response_ms = " << aim_motion_compensation_response_ms << "\n"
         << "aim_pipeline_mode = " << aim_pipeline_mode << "\n"
         << "aim_shadow_command_to_frame_delay_ms = " << aim_shadow_command_to_frame_delay_ms << "\n"
+        << "aim_shadow_command_response_ms = " << aim_shadow_command_response_ms << "\n"
         << "aim_shadow_response_ms = " << aim_shadow_response_ms << "\n"
         << "aim_shadow_max_speed_cps = " << aim_shadow_max_speed_cps << "\n"
         << "aim_shadow_feedforward_gain = " << aim_shadow_feedforward_gain << "\n"

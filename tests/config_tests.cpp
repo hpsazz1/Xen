@@ -114,7 +114,9 @@ int main()
         expectString(defaults.aim_pipeline_mode, "legacy",
                      "new pipeline defaults to legacy mode");
         expectNear(defaults.aim_shadow_command_to_frame_delay_ms, 60.0, 0.0,
-                   "shadow applied-view model uses explicit fixed delay");
+                    "shadow applied-view model keeps the compatible response center");
+        expectNear(defaults.aim_shadow_command_response_ms, 0.0, 0.0,
+                    "shadow applied-view model defaults to the compatible step response");
         expectNear(defaults.aim_shadow_response_ms, 80.0, 0.0,
                    "shadow angle controller defaults to the P-only response baseline");
         expectNear(defaults.aim_shadow_feedforward_gain, 0.0, 0.0,
@@ -212,7 +214,9 @@ int main()
         expectTrue(migratedText.find("aim_motion_compensation_response_ms = 0") != std::string::npos,
                    "saved config persists the production fixed-delay response");
         expectTrue(migratedText.find("aim_shadow_command_to_frame_delay_ms = 60") != std::string::npos,
-                   "saved config persists the explicit shadow delay");
+                    "saved config persists the explicit shadow delay");
+        expectTrue(migratedText.find("aim_shadow_command_response_ms = 0") != std::string::npos,
+                    "saved config persists the compatible shadow response width");
         expectTrue(migratedText.find("aim_shadow_feedforward_gain = 0") != std::string::npos &&
                    migratedText.find("aim_shadow_settle_error_deg = 0.08") != std::string::npos &&
                    migratedText.find("aim_shadow_settle_rate_dps = 1.2") != std::string::npos &&
@@ -294,6 +298,18 @@ int main()
     expectNear(clampedDelay.aim_shadow_command_to_frame_delay_ms, 250.0, 0.0,
                "shadow delay remains bounded by the documented safety maximum");
     std::filesystem::remove(unsafeDelayPath, removeError);
+
+    const std::filesystem::path unsafeResponsePath = "xen_config_shadow_response_width_test.ini";
+    {
+        std::ofstream unsafeResponseFile(unsafeResponsePath);
+        unsafeResponseFile << "aim_shadow_command_response_ms = 999\n";
+    }
+    Config clampedResponse{};
+    expectTrue(clampedResponse.loadConfig(unsafeResponsePath.string()),
+               "shadow response width config loads successfully");
+    expectNear(clampedResponse.aim_shadow_command_response_ms, 100.0, 0.0,
+               "shadow response width remains bounded by the documented safety maximum");
+    std::filesystem::remove(unsafeResponsePath, removeError);
 
     const std::filesystem::path unsafeMotionCompensationDelayPath =
         "xen_config_motion_compensation_delay_test.ini";

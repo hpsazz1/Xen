@@ -7,13 +7,13 @@
 #include <mutex>
 #include <utility>
 
-// 记录设备实际成功发送的相机旋转，并在固定响应延迟后将完整角度步进视为已出现在画面。
+// 记录设备实际成功发送的相机旋转，并按响应中心和宽度查询画面中的累计角度。
 class AppliedViewMotionModel
 {
 public:
     using TimePoint = std::chrono::steady_clock::time_point;
 
-    void configure(double commandToFrameDelayMs);
+    void configure(double commandToFrameDelayMs, double commandResponseMs = 0.0);
     void reset();
     void addCommand(
         int countsX,
@@ -24,6 +24,7 @@ public:
 
     std::pair<double, double> at(TimePoint queryTime) const;
     double commandToFrameDelayMs() const;
+    double commandResponseMs() const;
     size_t sampleCount() const;
 
 private:
@@ -31,19 +32,18 @@ private:
     {
         double deltaYawDegrees = 0.0;
         double deltaPitchDegrees = 0.0;
-        double cumulativeYawDegrees = 0.0;
-        double cumulativePitchDegrees = 0.0;
-        TimePoint effectiveTime{};
+        TimePoint startTime{};
+        TimePoint endTime{};
     };
 
-    std::pair<double, double> baselineBeforeFirstLocked() const;
-    void pruneLocked(TimePoint newestEffectiveTime);
+    void pruneLocked(TimePoint newestEndTime);
 
     mutable std::mutex mutex_;
     std::deque<Sample> samples_;
-    double totalYawDegrees_ = 0.0;
-    double totalPitchDegrees_ = 0.0;
+    double baselineYawDegrees_ = 0.0;
+    double baselinePitchDegrees_ = 0.0;
     double commandToFrameDelayMs_ = 60.0;
+    double commandResponseMs_ = 0.0;
 };
 
 #endif

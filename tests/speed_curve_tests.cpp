@@ -27,11 +27,13 @@
 
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <queue>
 #include <string>
+#include <thread>
 
 namespace
 {
@@ -983,6 +985,56 @@ int main()
                5.44, 1e-9,
                "view model pruning preserves the cumulative angle baseline");
 
+    AppliedViewMotionModel rampedAppliedViewModel;
+    rampedAppliedViewModel.configure(20.0, 20.0);
+    rampedAppliedViewModel.addCommand(10, -4, 0.03, 0.02, commandStart);
+    expectNear(rampedAppliedViewModel.at(
+                   commandStart + std::chrono::milliseconds(9)).first,
+               0.0, 1e-12,
+               "finite view response does not start before the measured lower boundary");
+    expectNear(rampedAppliedViewModel.at(
+                   commandStart + std::chrono::milliseconds(20)).first,
+               0.15, 1e-12,
+               "finite view response applies half the command at the response center");
+    expectNear(rampedAppliedViewModel.at(
+                   commandStart + std::chrono::milliseconds(30)).first,
+               0.30, 1e-12,
+               "finite view response completes at the measured upper boundary");
+    expectNear(rampedAppliedViewModel.commandResponseMs(), 20.0, 0.0,
+               "finite view model reports its configured response width");
+    rampedAppliedViewModel.configure(20.0, 0.0);
+    expectNear(rampedAppliedViewModel.at(
+                   commandStart + std::chrono::milliseconds(100)).first,
+               0.0, 0.0,
+               "changing finite response settings clears the incompatible timeline");
+
+    AppliedViewMotionModel concurrentAppliedViewModel;
+    concurrentAppliedViewModel.configure(20.0, 20.0);
+    std::atomic<bool> concurrentViewQueriesFinite{ true };
+    std::thread viewWriter([&]() {
+        for (int index = 0; index < 600; ++index)
+        {
+            concurrentAppliedViewModel.addCommand(
+                index % 3 - 1, index % 5 - 2, 0.03, 0.02,
+                commandStart + std::chrono::milliseconds(index));
+        }
+    });
+    std::thread viewReader([&]() {
+        for (int index = 0; index < 600; ++index)
+        {
+            const auto value = concurrentAppliedViewModel.at(
+                commandStart + std::chrono::milliseconds(index));
+            if (!std::isfinite(value.first) || !std::isfinite(value.second))
+                concurrentViewQueriesFinite.store(false);
+        }
+    });
+    viewWriter.join();
+    viewReader.join();
+    expectTrue(concurrentViewQueriesFinite.load(),
+               "finite applied-view model keeps concurrent queries finite");
+    expectTrue(concurrentAppliedViewModel.sampleCount() <= 512,
+               "finite applied-view model keeps concurrent history bounded");
+
     AppliedViewMotionModel trueCameraModel;
     AppliedViewMotionModel alignedCameraModel;
     AppliedViewMotionModel wrongDelayCameraModel;
@@ -1195,8 +1247,8 @@ int main()
         "AimPipelineRequestedMode,AimPipelineEffectiveMode,AimPipelineActiveAvailable,AimPipelineShadowProcessed,AimPipelineCommandSuppressed,AimPipelineOutputPaused") != std::string::npos,
         "basic pipeline records same-frame mode and output-pause diagnostics");
     expectTrue(traceHeader.find(
-        "ViewMotionShadowValid,CommandToFrameDelayMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees") != std::string::npos,
-        "basic pipeline records delayed applied-view angle diagnostics");
+        "ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,DegreesPerCountX,DegreesPerCountY,MeasuredLosYawDegrees") != std::string::npos,
+        "basic pipeline records finite applied-view response diagnostics");
     expectTrue(traceHeader.find(
         "AimPipelineAngleX,AimPipelineAngleY,AimPipelineRateX,AimPipelineRateY,AimPipelineCovarianceX,AimPipelineCovarianceY") != std::string::npos &&
         traceHeader.find("AimPipelineInnovationVarianceX,AimPipelineInnovationVarianceY,AimPipelineInnovationX,AimPipelineInnovationY,AimPipelineNisX,AimPipelineNisY") != std::string::npos &&

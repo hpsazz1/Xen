@@ -52,6 +52,8 @@
 | [P0-5失败归因反事实回放](132P0-5失败归因反事实回放20260717.md) | 使用冻结检测时间线区分估计受限、执行受限与结构性失败。 |
 | [P0-5机动常加速度候选复验](133P0-5机动常加速度候选复验20260717.md) | 评估全时与速率门控常加速度模型，并冻结零回退的离线影子配方。 |
 | [r60 DML机动估计影子接入](134r60DML机动估计影子接入20260717.md) | 使用共享估计器采集DML/NDI模型选择、静止驻留和暂停恢复诊断。 |
+| [r60静止延迟30毫秒反证](138r60静止延迟30毫秒反证20260717.md) | 对照10/20/30/60 ms并结束固定延迟扫描，确定有限响应候选边界。 |
+| [r61有限相机响应影子实现](139r61有限相机响应影子实现20260717.md) | 使用20 ms响应中心和20 ms宽度复测DML九点static。 |
 | [稳健常速度预测与实机振荡排查](034稳健常速度预测与实机振荡排查20260714.md) | 了解首轮实机预测振荡根因、场景边界和r8稳健速度模型。 |
 | [预测连续性保持与单帧门控修复](035预测连续性保持与单帧门控修复20260714.md) | 分析r8提前量频繁中断原因，以及r9窗口级停止和反向确认。 |
 | [透视坐标修正与jump视野逃逸优化](036透视坐标修正与jump视野逃逸优化20260714.md) | 分析r9静止误补偿和jump飞出320裁剪的共同坐标根因。 |
@@ -78,7 +80,7 @@ build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video
 
 机动常加速度离线候选在冻结基线命令后追加`--candidate-estimator gated_ca --candidate-jerk-std-dps3 8000 --candidate-maneuver-rate-threshold-dps 12 --candidate-maneuver-hold-ms 120`。该配方只供跨域回放与下一阶段DML shadow验证；`constant_acceleration`全时模型会严重回退static，8/16°/s门槛会损失原通过项，均不得使用。summary中的`ManeuverModelPercent`必须用于检查static误驻留。
 
-DML实机影子配置使用`aim_shadow_estimator_mode=maneuver_gated_ca`及冻结的8000/12/120参数。五场景CSV上传后运行`tools/analyze_shadow_pipeline.ps1 -DataRoot <目录> -ExpectedControllerRevision 60 -RequireStandardScenarios -RequireManeuverCandidate`；还包含松开操作时，继续追加`-RequirePausedObservations`及相应覆盖门槛。该配置在CUDA中强制退化为`kalman`，不得用于CUDA候选结论。
+DML r61实机影子先配置`aim_shadow_command_to_frame_delay_ms=20`、`aim_shadow_command_response_ms=20`、`aim_shadow_estimator_mode=maneuver_gated_ca`及冻结的8000/12/120参数。首轮只采集九点static，并运行`tools/analyze_shadow_pipeline.ps1 -DataRoot <目录> -ExpectedControllerRevision 61 -RequireManeuverCandidate -RequireFiniteViewResponse -RequirePausedObservations`；脚本分别报告暂停态和运行态机动样本，只有运行态static为0才允许继续采集jump/reverse。CUDA强制退化为`kalman`和0 ms响应宽度，不得用于候选结论。
 
 固定240 Hz梯形对照在同一命令后追加`--trajectory-mode trapezoid --trajectory-output-hz 240 --trajectory-max-accel-cps2 60000 --trajectory-max-jerk-cps3 4000000`，并使用独立输出目录。该模式当前仅用于反事实回放，正式默认仍为`off`。
 

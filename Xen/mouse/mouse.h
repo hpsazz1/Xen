@@ -87,7 +87,7 @@ private:
     BasicAimController aimController;                              ///< 帧率无关的基础误差控制器
     ConditionalSpeedBudget conditionalSpeedBudget;                 ///< jump 严重落后时的短时速度预算状态机
     AimPipelineRuntime aimPipelineRuntime;                         ///< P0并行影子链；不持有或访问设备队列
-    AppliedViewMotionModel appliedViewMotionModel;                 ///< 成功counts按固定延迟生效的角度影子模型
+    AppliedViewMotionModel appliedViewMotionModel;                 ///< 成功counts按有限响应核生效的角度影子模型
     BasicTargetFilter::Result lastFilterResult{};                  ///< 流水线诊断快照
     TargetPredictor::Result lastPredictionResult{};                ///< 流水线预测诊断快照
     TargetPredictor::Settings predictionSettings{};                ///< 运行时预测配置缓存

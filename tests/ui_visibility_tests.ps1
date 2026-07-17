@@ -26,6 +26,8 @@ foreach ($control in @('profile_calibration_enabled', 'profile_calibration_resul
 }
 foreach ($control in @(
     '##aim_pipeline_mode',
+    '##shadow_camera_delay_ms',
+    '##shadow_camera_response_ms',
     '##shadow_response_ms',
     '##shadow_max_cps',
     '##shadow_ff_gain',

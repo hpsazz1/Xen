@@ -78,7 +78,8 @@ public:
     float aim_motion_compensation_response_ms = 0.0f; // 0为固定延迟；连续响应仅保留实验配置
     // 新旧链路迁移模式：legacy 正式旧链路，shadow 同帧诊断但不接管设备，active 在 P0 阶段安全降级为 shadow。
     std::string aim_pipeline_mode = "legacy";
-    float aim_shadow_command_to_frame_delay_ms = 60.0f; // 新链路固定相机响应延迟；只用于shadow模型
+    float aim_shadow_command_to_frame_delay_ms = 60.0f; // shadow相机响应中心；不自动采用被动标定结果
+    float aim_shadow_command_response_ms = 0.0f;        // shadow相机完整响应宽度；0保持固定延迟阶跃
     float aim_shadow_response_ms = 80.0f;               // P0-4A角度P反馈响应时间
     float aim_shadow_max_speed_cps = 1440.0f;           // P0-4A二维counts速度上限
     float aim_shadow_feedforward_gain = 0.0f;           // 相对视线角速度前馈；0表示关闭

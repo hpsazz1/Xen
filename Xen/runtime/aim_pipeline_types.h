@@ -245,6 +245,7 @@ struct ViewMotionShadowDiagnostics
 {
     bool valid = false;
     double commandToFrameDelayMs = 0.0;
+    double commandResponseMs = 0.0;
     double degreesPerCountX = 0.0;
     double degreesPerCountY = 0.0;
     double measuredLosYawDegrees = 0.0;
