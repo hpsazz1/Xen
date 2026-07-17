@@ -82,6 +82,8 @@ struct ControllerSettings
     double reverseConfirmationSeconds = 0.080;
     // 离线候选参数；运行时Settings默认1.5，正式配置与active路径均不开放此入口。
     double reverseConfirmationErrorMultiplier = 1.5;
+    // 离线结构候选，默认关闭且不接入正式配置或active路径。
+    bool confirmLowSpeedReverseSettleRelease = false;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
     double trajectoryOutputHz = 240.0;
     double trajectoryMaxAccelerationCountsPerSecond2 = 60000.0;
@@ -142,6 +144,7 @@ struct Comparison
     double reversalFeedforwardBoost = 0.0;
     double reversalFeedforwardSeconds = 0.0;
     double reverseConfirmationErrorMultiplier = 1.5;
+    bool confirmLowSpeedReverseSettleRelease = false;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
     double trajectoryOutputHz = 0.0;
     Metrics legacy{};

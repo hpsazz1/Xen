@@ -24,6 +24,8 @@ public:
         double reverseConfirmationSeconds = 0.080;
         // 仅扩大低速反向确认的误差带，不改变固定为1.5倍的静止锁存退出边界。
         double reverseConfirmationErrorMultiplier = 1.5;
+        // 仅供离线候选验证：低速反向误差越过退出边界时，先确认持续性再解除静止锁存。
+        bool confirmLowSpeedReverseSettleRelease = false;
     };
 
     struct Input
@@ -83,6 +85,9 @@ private:
     double pendingReverseX_ = 0.0;
     double pendingReverseY_ = 0.0;
     double pendingReverseSeconds_ = 0.0;
+    double pendingSettleReleaseX_ = 0.0;
+    double pendingSettleReleaseY_ = 0.0;
+    double pendingSettleReleaseSeconds_ = 0.0;
     int acceptedMovingRateSignX_ = 0;
     double reversalFeedforwardRemainingSeconds_ = 0.0;
     double integralErrorDegreeSecondsX_ = 0.0;

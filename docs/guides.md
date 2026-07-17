@@ -85,6 +85,8 @@ build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video
 
 定位 static 在固定 1.5 倍 settle 退出边界外产生的低速反向脉冲时，可追加 `--reverse-confirm-error-multiplier 1.75` 或 `2.0`。该入口只改变离线候选的低速反向确认误差带，默认 `1.5`；不会改变 settle 退出边界，也未开放到配置、UI 或 active。每轮必须核对 decision 的 `ReverseConfirmationErrorMultiplier` 和 summary 同名列，并与默认 1.5 的完整 810 项结果比较，禁止只统计被救回的 static 变体。
 
+`--confirm-low-speed-reverse-settle-release 1` 仅用于复现“先确认低速反向误差、再解除 settled”的离线反证。该候选把总通过从 721 降至 717，损失 19 个原通过 static 域且只救回 15 个，已正式否决；默认必须保持 `0`，不得加入配置、UI、shadow 运行参数或 active。
+
 机动常加速度离线候选在冻结基线命令后追加`--candidate-estimator gated_ca --candidate-jerk-std-dps3 8000 --candidate-maneuver-rate-threshold-dps 12 --candidate-maneuver-hold-ms 120`。该配方只供跨域回放与下一阶段DML shadow验证；`constant_acceleration`全时模型会严重回退static，8/16°/s门槛会损失原通过项，均不得使用。summary中的`ManeuverModelPercent`必须用于检查static误驻留。
 
 DML r61实机影子先配置`aim_shadow_command_to_frame_delay_ms=20`、`aim_shadow_command_response_ms=20`、`aim_shadow_estimator_mode=maneuver_gated_ca`及冻结的8000/12/120参数。首轮只采集九点static，并运行`tools/analyze_shadow_pipeline.ps1 -DataRoot <目录> -ExpectedControllerRevision 61 -RequireManeuverCandidate -RequireFiniteViewResponse -RequirePausedObservations`；脚本分别报告暂停态和运行态机动样本，只有运行态static为0才允许继续采集jump/reverse。CUDA强制退化为`kalman`和0 ms响应宽度，不得用于候选结论。

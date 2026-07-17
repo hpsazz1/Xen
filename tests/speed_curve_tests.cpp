@@ -665,6 +665,35 @@ int main()
                independentSettleRelease.limitedCountsX > 0.0,
                "wider reverse confirmation band does not delay fixed 1.5x settle release");
 
+    LosAimController confirmedSettleReleaseController;
+    LosAimController::Settings confirmedSettleReleaseSettings = reverseConfirmSettings;
+    confirmedSettleReleaseSettings.confirmLowSpeedReverseSettleRelease = true;
+    reverseConfirmInput.errorDegreesX = 0.10;
+    reverseConfirmInput.relativeLosRateDegreesPerSecondX = 0.0;
+    confirmedSettleReleaseController.update(
+        reverseConfirmInput, confirmedSettleReleaseSettings);
+    reverseConfirmInput.errorDegreesX = 0.05;
+    confirmedSettleReleaseController.update(
+        reverseConfirmInput, confirmedSettleReleaseSettings);
+    confirmedSettleReleaseController.update(
+        reverseConfirmInput, confirmedSettleReleaseSettings);
+    reverseConfirmInput.errorDegreesX = -0.13;
+    for (int sample = 0; sample < 7; ++sample)
+    {
+        const auto heldRelease = confirmedSettleReleaseController.update(
+            reverseConfirmInput, confirmedSettleReleaseSettings);
+        expectTrue(heldRelease.settled && !heldRelease.settleReleased &&
+                   heldRelease.lowSpeedReverseSuppressed &&
+                   heldRelease.limitedCountsX == 0.0,
+                   "low-speed reverse settle release waits for persistent error");
+    }
+    const auto confirmedSettleRelease = confirmedSettleReleaseController.update(
+        reverseConfirmInput, confirmedSettleReleaseSettings);
+    expectTrue(!confirmedSettleRelease.settled &&
+               confirmedSettleRelease.settleReleased &&
+               confirmedSettleRelease.limitedCountsX < 0.0,
+               "persistent low-speed reverse error releases settle after confirmation");
+
     LosAimController fastReverseController;
     fastReverseController.update(reverseConfirmInput, reverseConfirmSettings);
     reverseConfirmInput.errorDegreesX = 0.20;
@@ -2312,10 +2341,13 @@ int main()
                "cross-domain replay records estimator, requested, shaped and sent diagnostics");
     CrossDomainReplay::ControllerSettings widenedBandReplaySettings = syntheticSettings;
     widenedBandReplaySettings.reverseConfirmationErrorMultiplier = 1.75;
+    widenedBandReplaySettings.confirmLowSpeedReverseSettleRelease = true;
     const auto widenedBandComparison = CrossDomainReplay::RunComparison(
         syntheticReplay, syntheticVariant, widenedBandReplaySettings);
     expectNear(widenedBandComparison.reverseConfirmationErrorMultiplier, 1.75, 0.0,
                "cross-domain replay records the independent reverse confirmation error band");
+    expectTrue(widenedBandComparison.confirmLowSpeedReverseSettleRelease,
+               "cross-domain replay records low-speed reverse settle release confirmation");
     const auto detailTracePath = std::filesystem::temp_directory_path() /
         "xen_cross_domain_detail_trace.csv";
     std::error_code detailTraceError;

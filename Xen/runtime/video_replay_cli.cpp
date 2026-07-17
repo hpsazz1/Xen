@@ -75,6 +75,7 @@ namespace
         double settleRateDegreesPerSecond = 1.200;
         double reverseConfirmationSeconds = 0.080;
         double reverseConfirmationErrorMultiplier = 1.5;
+        bool confirmLowSpeedReverseSettleRelease = false;
         double feedforwardGain = 0.0;
         double leadHorizonSeconds = 0.0;
         double leadStrength = 0.0;
@@ -291,6 +292,13 @@ namespace
         options.reverseConfirmationErrorMultiplier = optionDouble(
             argc, argv, "--reverse-confirm-error-multiplier",
             options.reverseConfirmationErrorMultiplier);
+        if (const auto confirmRelease = optionValue(
+                argc, argv, "--confirm-low-speed-reverse-settle-release"))
+        {
+            const std::string normalized = lower(*confirmRelease);
+            options.confirmLowSpeedReverseSettleRelease = normalized != "0" &&
+                normalized != "false" && normalized != "off";
+        }
         options.feedforwardGain = optionDouble(
             argc, argv, "--feedforward-gain", options.feedforwardGain);
         options.leadHorizonSeconds = optionDouble(
@@ -836,6 +844,8 @@ int Run(int argc, char** argv)
             settings.reverseConfirmationSeconds = options.reverseConfirmationSeconds;
             settings.reverseConfirmationErrorMultiplier =
                 options.reverseConfirmationErrorMultiplier;
+            settings.confirmLowSpeedReverseSettleRelease =
+                options.confirmLowSpeedReverseSettleRelease;
             settings.feedforwardGain = options.feedforwardGain;
             settings.leadHorizonSeconds = options.leadHorizonSeconds;
             settings.leadStrength = options.leadStrength;
@@ -982,6 +992,8 @@ int Run(int argc, char** argv)
                      << (std::isfinite(options.reverseConfirmationErrorMultiplier)
                              ? std::clamp(options.reverseConfirmationErrorMultiplier, 1.5, 2.0)
                              : 1.5) << '\n'
+                     << "ConfirmLowSpeedReverseSettleRelease="
+                     << (options.confirmLowSpeedReverseSettleRelease ? 1 : 0) << '\n'
                      << "TrajectoryMode="
                      << trajectoryShaperModeName(options.trajectoryMode) << '\n'
                      << "TrajectoryOutputHz=" << options.trajectoryOutputHz << '\n'

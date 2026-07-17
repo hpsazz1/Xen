@@ -395,6 +395,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     comparison.reverseConfirmationErrorMultiplier =
         std::isfinite(settings.reverseConfirmationErrorMultiplier)
             ? std::clamp(settings.reverseConfirmationErrorMultiplier, 1.5, 2.0) : 1.5;
+    comparison.confirmLowSpeedReverseSettleRelease =
+        settings.confirmLowSpeedReverseSettleRelease;
     comparison.trajectoryMode = settings.trajectoryMode;
     // 回放参数可能来自命令行；非有限值回退到生产默认频率，有限值再限制到可验证范围。
     comparison.trajectoryOutputHz = std::isfinite(settings.trajectoryOutputHz)
@@ -461,6 +463,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     candidateSettings.reverseConfirmationSeconds = settings.reverseConfirmationSeconds;
     candidateSettings.reverseConfirmationErrorMultiplier =
         comparison.reverseConfirmationErrorMultiplier;
+    candidateSettings.confirmLowSpeedReverseSettleRelease =
+        comparison.confirmLowSpeedReverseSettleRelease;
     CommandTrajectoryShaper shaper;
     CommandTrajectoryShaper::Settings shaperSettings;
     shaperSettings.mode = settings.trajectoryMode;
@@ -852,7 +856,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -873,6 +877,7 @@ void WriteSummary(const std::filesystem::path& path,
                << item.reversalFeedforwardBoost << ','
                << item.reversalFeedforwardSeconds * 1000.0 << ','
                << item.reverseConfirmationErrorMultiplier << ','
+               << (item.confirmLowSpeedReverseSettleRelease ? 1 : 0) << ','
                << trajectoryShaperModeName(item.trajectoryMode) << ','
                << item.trajectoryOutputHz << ',' << item.candidate.samples << ','
                << item.legacy.errorP50Degrees << ',' << item.legacy.errorP95Degrees << ','

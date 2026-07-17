@@ -65,6 +65,10 @@ LosAimController::Output LosAimController::update(
         settings.settleErrorDegrees, 0.0, 1.0, 0.0);
     const double settleRate = clampFinite(
         settings.settleRateDegreesPerSecond, 0.0, 20.0, 0.0);
+    const double reverseConfirmation = clampFinite(
+        settings.reverseConfirmationSeconds, 0.0, 0.250, 0.0);
+    const double reverseConfirmationErrorMultiplier = clampFinite(
+        settings.reverseConfirmationErrorMultiplier, 1.5, 2.0, 1.5);
     const bool settleEnabled = settleError > 0.0 && settleRate > 0.0;
     const double errorMagnitude = std::hypot(input.errorDegreesX, input.errorDegreesY);
     const double rateMagnitude = std::hypot(
@@ -77,11 +81,50 @@ LosAimController::Output LosAimController::update(
     }
     else if (settled_)
     {
-        if (errorMagnitude > settleError * 1.5 || rateMagnitude > settleRate * 1.5)
+        const bool errorRelease = errorMagnitude > settleError * 1.5;
+        const bool rateRelease = rateMagnitude > settleRate * 1.5;
+        bool releaseSuppressed = false;
+        if (settings.confirmLowSpeedReverseSettleRelease && errorRelease &&
+            !rateRelease && reverseConfirmation > 0.0 &&
+            rateMagnitude < settleRate && hasAcceptedSettleBandDirection_)
+        {
+            // 使用按灵敏度换算的误差方向判断“回到上次修正方向的反侧”。这里只决定是否延迟
+            // settle 释放，不提前计算或提交控制量；确认通过后仍走原有完整控制链。
+            const double releaseDirectionX = input.errorDegreesX / input.degreesPerCountX;
+            const double releaseDirectionY = input.errorDegreesY / input.degreesPerCountY;
+            const bool lowSpeedReverse =
+                releaseDirectionX * acceptedSettleBandDirectionX_ +
+                    releaseDirectionY * acceptedSettleBandDirectionY_ < 0.0;
+            if (lowSpeedReverse)
+            {
+                const bool samePendingDirection = pendingSettleReleaseSeconds_ > 0.0 &&
+                    releaseDirectionX * pendingSettleReleaseX_ +
+                        releaseDirectionY * pendingSettleReleaseY_ > 0.0;
+                if (!samePendingDirection)
+                    pendingSettleReleaseSeconds_ = 0.0;
+                pendingSettleReleaseX_ = releaseDirectionX;
+                pendingSettleReleaseY_ = releaseDirectionY;
+                pendingSettleReleaseSeconds_ += dt;
+                output.reverseConfirmationSeconds = pendingSettleReleaseSeconds_;
+                releaseSuppressed =
+                    pendingSettleReleaseSeconds_ + 1e-12 < reverseConfirmation;
+                output.lowSpeedReverseSuppressed = releaseSuppressed;
+            }
+        }
+        if (!releaseSuppressed && (errorRelease || rateRelease))
         {
             settled_ = false;
             quietSamples_ = 0;
             output.settleReleased = true;
+            pendingSettleReleaseX_ = 0.0;
+            pendingSettleReleaseY_ = 0.0;
+            pendingSettleReleaseSeconds_ = 0.0;
+        }
+        else if (!releaseSuppressed)
+        {
+            pendingSettleReleaseX_ = 0.0;
+            pendingSettleReleaseY_ = 0.0;
+            pendingSettleReleaseSeconds_ = 0.0;
         }
     }
     else if (errorMagnitude <= settleError && rateMagnitude <= settleRate)
@@ -255,12 +298,8 @@ LosAimController::Output LosAimController::update(
     // 速率一旦达到静止判定阈值就立即放行，避免给真实reverse/jump增加固定等待；
     // 确认窗只处理静止误差回差区与速率阈值以内、最容易由观测噪声触发的低速反向请求；
     // 已接受方向也只在该区域更新，区外的大幅运动不能覆盖下一次近中心判断的参照方向。
-    const double reverseConfirmation = clampFinite(
-        settings.reverseConfirmationSeconds, 0.0, 0.250, 0.0);
     // 候选只允许在静止退出后的0.12~0.16度窄带内增加确认，不能延迟真实运动释放，
     // 也不能通过无界命令行参数把低速动态目标长期抑制。
-    const double reverseConfirmationErrorMultiplier = clampFinite(
-        settings.reverseConfirmationErrorMultiplier, 1.5, 2.0, 1.5);
     const double limitedMagnitude = std::hypot(
         output.limitedCountsX, output.limitedCountsY);
     if (reverseConfirmation > 0.0 && settleError > 0.0 && settleRate > 0.0 &&
@@ -319,6 +358,9 @@ void LosAimController::reset()
     pendingReverseX_ = 0.0;
     pendingReverseY_ = 0.0;
     pendingReverseSeconds_ = 0.0;
+    pendingSettleReleaseX_ = 0.0;
+    pendingSettleReleaseY_ = 0.0;
+    pendingSettleReleaseSeconds_ = 0.0;
     acceptedMovingRateSignX_ = 0;
     reversalFeedforwardRemainingSeconds_ = 0.0;
     integralErrorDegreeSecondsX_ = 0.0;
