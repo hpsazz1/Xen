@@ -74,6 +74,7 @@ namespace
         double settleErrorDegrees = 0.080;
         double settleRateDegreesPerSecond = 1.200;
         double reverseConfirmationSeconds = 0.080;
+        double reverseConfirmationErrorMultiplier = 1.5;
         double feedforwardGain = 0.0;
         double leadHorizonSeconds = 0.0;
         double leadStrength = 0.0;
@@ -287,6 +288,9 @@ namespace
         options.reverseConfirmationSeconds = optionDouble(
             argc, argv, "--reverse-confirm-ms",
             options.reverseConfirmationSeconds * 1000.0) / 1000.0;
+        options.reverseConfirmationErrorMultiplier = optionDouble(
+            argc, argv, "--reverse-confirm-error-multiplier",
+            options.reverseConfirmationErrorMultiplier);
         options.feedforwardGain = optionDouble(
             argc, argv, "--feedforward-gain", options.feedforwardGain);
         options.leadHorizonSeconds = optionDouble(
@@ -830,6 +834,8 @@ int Run(int argc, char** argv)
             settings.settleErrorDegrees = options.settleErrorDegrees;
             settings.settleRateDegreesPerSecond = options.settleRateDegreesPerSecond;
             settings.reverseConfirmationSeconds = options.reverseConfirmationSeconds;
+            settings.reverseConfirmationErrorMultiplier =
+                options.reverseConfirmationErrorMultiplier;
             settings.feedforwardGain = options.feedforwardGain;
             settings.leadHorizonSeconds = options.leadHorizonSeconds;
             settings.leadStrength = options.leadStrength;
@@ -972,6 +978,10 @@ int Run(int argc, char** argv)
                      << (std::isfinite(options.reversalFeedforwardSeconds)
                              ? std::clamp(options.reversalFeedforwardSeconds, 0.0, 0.500) * 1000.0
                              : 0.0) << '\n'
+                     << "ReverseConfirmationErrorMultiplier="
+                     << (std::isfinite(options.reverseConfirmationErrorMultiplier)
+                             ? std::clamp(options.reverseConfirmationErrorMultiplier, 1.5, 2.0)
+                             : 1.5) << '\n'
                      << "TrajectoryMode="
                      << trajectoryShaperModeName(options.trajectoryMode) << '\n'
                      << "TrajectoryOutputHz=" << options.trajectoryOutputHz << '\n'

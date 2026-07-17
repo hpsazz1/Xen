@@ -22,6 +22,8 @@ public:
         double settleErrorDegrees = 0.080;
         double settleRateDegreesPerSecond = 1.200;
         double reverseConfirmationSeconds = 0.080;
+        // 仅扩大低速反向确认的误差带，不改变固定为1.5倍的静止锁存退出边界。
+        double reverseConfirmationErrorMultiplier = 1.5;
     };
 
     struct Input

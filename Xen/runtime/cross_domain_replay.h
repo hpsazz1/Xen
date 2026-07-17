@@ -80,6 +80,8 @@ struct ControllerSettings
     double settleErrorDegrees = 0.080;
     double settleRateDegreesPerSecond = 1.200;
     double reverseConfirmationSeconds = 0.080;
+    // 离线候选参数；运行时Settings默认1.5，正式配置与active路径均不开放此入口。
+    double reverseConfirmationErrorMultiplier = 1.5;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
     double trajectoryOutputHz = 240.0;
     double trajectoryMaxAccelerationCountsPerSecond2 = 60000.0;
@@ -139,6 +141,7 @@ struct Comparison
     double leadStrength = 0.0;
     double reversalFeedforwardBoost = 0.0;
     double reversalFeedforwardSeconds = 0.0;
+    double reverseConfirmationErrorMultiplier = 1.5;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
     double trajectoryOutputHz = 0.0;
     Metrics legacy{};

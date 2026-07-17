@@ -639,6 +639,32 @@ int main()
                outsideSettleBandReverse.limitedCountsX < 0.0,
                "reverse outside the settle hysteresis band bypasses confirmation immediately");
 
+    LosAimController widenedReverseBandController;
+    LosAimController::Settings widenedReverseBandSettings = reverseConfirmSettings;
+    widenedReverseBandSettings.reverseConfirmationErrorMultiplier = 1.75;
+    reverseConfirmInput.errorDegreesX = 0.10;
+    widenedReverseBandController.update(reverseConfirmInput, widenedReverseBandSettings);
+    reverseConfirmInput.errorDegreesX = -0.13;
+    const auto widenedBandReverse = widenedReverseBandController.update(
+        reverseConfirmInput, widenedReverseBandSettings);
+    expectTrue(widenedBandReverse.lowSpeedReverseSuppressed &&
+               widenedBandReverse.limitedCountsX == 0.0,
+               "independent 1.75x error band confirms low-speed reverse beyond settle release");
+
+    LosAimController independentSettleReleaseController;
+    reverseConfirmInput.errorDegreesX = 0.05;
+    independentSettleReleaseController.update(
+        reverseConfirmInput, widenedReverseBandSettings);
+    independentSettleReleaseController.update(
+        reverseConfirmInput, widenedReverseBandSettings);
+    reverseConfirmInput.errorDegreesX = 0.13;
+    const auto independentSettleRelease = independentSettleReleaseController.update(
+        reverseConfirmInput, widenedReverseBandSettings);
+    expectTrue(independentSettleRelease.settleReleased &&
+               !independentSettleRelease.settled &&
+               independentSettleRelease.limitedCountsX > 0.0,
+               "wider reverse confirmation band does not delay fixed 1.5x settle release");
+
     LosAimController fastReverseController;
     fastReverseController.update(reverseConfirmInput, reverseConfirmSettings);
     reverseConfirmInput.errorDegreesX = 0.20;
@@ -2284,6 +2310,12 @@ int main()
                syntheticComparison.candidate.shapedCounts > 0.0 &&
                syntheticComparison.candidate.sentCounts > 0.0,
                "cross-domain replay records estimator, requested, shaped and sent diagnostics");
+    CrossDomainReplay::ControllerSettings widenedBandReplaySettings = syntheticSettings;
+    widenedBandReplaySettings.reverseConfirmationErrorMultiplier = 1.75;
+    const auto widenedBandComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, widenedBandReplaySettings);
+    expectNear(widenedBandComparison.reverseConfirmationErrorMultiplier, 1.75, 0.0,
+               "cross-domain replay records the independent reverse confirmation error band");
     const auto detailTracePath = std::filesystem::temp_directory_path() /
         "xen_cross_domain_detail_trace.csv";
     std::error_code detailTraceError;

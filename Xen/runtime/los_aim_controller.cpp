@@ -257,10 +257,15 @@ LosAimController::Output LosAimController::update(
     // 已接受方向也只在该区域更新，区外的大幅运动不能覆盖下一次近中心判断的参照方向。
     const double reverseConfirmation = clampFinite(
         settings.reverseConfirmationSeconds, 0.0, 0.250, 0.0);
+    // 候选只允许在静止退出后的0.12~0.16度窄带内增加确认，不能延迟真实运动释放，
+    // 也不能通过无界命令行参数把低速动态目标长期抑制。
+    const double reverseConfirmationErrorMultiplier = clampFinite(
+        settings.reverseConfirmationErrorMultiplier, 1.5, 2.0, 1.5);
     const double limitedMagnitude = std::hypot(
         output.limitedCountsX, output.limitedCountsY);
     if (reverseConfirmation > 0.0 && settleError > 0.0 && settleRate > 0.0 &&
-        errorMagnitude <= settleError * 1.5 && limitedMagnitude > 1e-12)
+        errorMagnitude <= settleError * reverseConfirmationErrorMultiplier &&
+        limitedMagnitude > 1e-12)
     {
         const double directionDot =
             output.limitedCountsX * acceptedSettleBandDirectionX_ +
