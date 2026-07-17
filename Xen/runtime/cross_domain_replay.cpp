@@ -423,6 +423,12 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         std::isfinite(settings.candidateCommandCommitHorizonSeconds)
         ? std::clamp(settings.candidateCommandCommitHorizonSeconds, 0.0, 0.250)
         : 0.0;
+    comparison.candidateSettleEntryCommandGuard =
+        settings.candidateSettleEntryCommandGuard &&
+        comparison.candidateCommandCommitHorizonSeconds > 0.0;
+    comparison.candidateSettleEntryCommandHold =
+        comparison.candidateSettleEntryCommandGuard &&
+        settings.candidateSettleEntryCommandHold;
     comparison.trajectoryMode = settings.trajectoryMode;
     // 回放参数可能来自命令行；非有限值回退到生产默认频率，有限值再限制到可验证范围。
     comparison.trajectoryOutputHz = std::isfinite(settings.trajectoryOutputHz)
@@ -542,7 +548,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             std::filesystem::file_size(frameCsv, sizeError) == 0;
         frames.open(frameCsv, std::ios::app);
         if (writeHeader)
-            frames << "Scenario,Variant,TimeSeconds,Detected,MeasurementYaw,MeasurementPitch,MeasuredRelativeYaw,MeasuredRelativePitch,ViewAtObservationYaw,ViewAtObservationPitch,ViewAtControlYaw,ViewAtControlPitch,ObservationTruthYaw,ObservationTruthPitch,TruthYaw,TruthPitch,EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,EstimateTruthBiasX,EstimateTruthBiasY,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
+            frames << "Scenario,Variant,TimeSeconds,Detected,MeasurementYaw,MeasurementPitch,MeasuredRelativeYaw,MeasuredRelativePitch,ViewAtObservationYaw,ViewAtObservationPitch,ViewAtControlYaw,ViewAtControlPitch,ObservationTruthYaw,ObservationTruthPitch,TruthYaw,TruthPitch,EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,SettleEntryErrorX,SettleEntryErrorY,EstimateTruthBiasX,EstimateTruthBiasY,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,SettleEntryCommandHeld,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
     }
 
     const double dt = 1.0 / std::clamp(variant.replayFps, 10.0, 1000.0);
@@ -783,8 +789,38 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         const double targetAtEvaluationPitch = useOracle
             ? truthAtControl.pitchDownDegrees + oracleRateY * commitHorizon
             : estimate.y.angleDegrees + estimate.y.rateDegreesPerSecond * commitHorizon;
-        input.errorDegreesX = targetAtEvaluationYaw - candidateViewAtEvaluationYaw;
-        input.errorDegreesY = targetAtEvaluationPitch - candidateViewAtEvaluationPitch;
+        const double committedErrorX =
+            targetAtEvaluationYaw - candidateViewAtEvaluationYaw;
+        const double committedErrorY =
+            targetAtEvaluationPitch - candidateViewAtEvaluationPitch;
+        if (comparison.candidateSettleEntryCommandGuard)
+        {
+            // 已承诺终点只阻止过早进入settled；反馈和全部运动态分量仍使用当前时刻误差。
+            const double currentViewYaw = comparison.candidateViewMotionCompensation
+                ? modeledViewAtControl.first : candidateCamera.yaw;
+            const double currentViewPitch = comparison.candidateViewMotionCompensation
+                ? modeledViewAtControl.second : candidateCamera.pitch;
+            input.errorDegreesX = (useOracle ? truthAtControl.yawDegrees :
+                estimate.x.angleDegrees) - currentViewYaw;
+            input.errorDegreesY = (useOracle ? truthAtControl.pitchDownDegrees :
+                estimate.y.angleDegrees) - currentViewPitch;
+            // settle候选已经满足低速边界，此处冻结当前目标角，只投影已发送相机命令。
+            // 若继续把阈值内估计速率外推60 ms，会人为加入最多0.072°噪声，接近整个静止带。
+            input.settleEntryErrorDegreesX =
+                (useOracle ? truthAtControl.yawDegrees : estimate.x.angleDegrees) -
+                modeledViewAtCommit.first;
+            input.settleEntryErrorDegreesY =
+                (useOracle ? truthAtControl.pitchDownDegrees : estimate.y.angleDegrees) -
+                modeledViewAtCommit.second;
+            input.settleEntryErrorValid = true;
+            input.holdOutputWhileSettleEntryBlocked =
+                comparison.candidateSettleEntryCommandHold;
+        }
+        else
+        {
+            input.errorDegreesX = committedErrorX;
+            input.errorDegreesY = committedErrorY;
+        }
         input.relativeLosRateDegreesPerSecondX = useOracle
             ? oracleRateX : estimate.x.rateDegreesPerSecond;
         input.relativeLosRateDegreesPerSecondY = useOracle
@@ -892,6 +928,10 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                    << truthAtControl.yawDegrees << ',' << truthAtControl.pitchDownDegrees << ','
                    << estimate.x.angleDegrees << ',' << estimate.y.angleDegrees << ','
                    << input.errorDegreesX << ',' << input.errorDegreesY << ','
+                   << (input.settleEntryErrorValid
+                        ? input.settleEntryErrorDegreesX : input.errorDegreesX) << ','
+                   << (input.settleEntryErrorValid
+                        ? input.settleEntryErrorDegreesY : input.errorDegreesY) << ','
                    << estimate.x.angleDegrees - truthAtControl.yawDegrees << ','
                    << estimate.y.angleDegrees - truthAtControl.pitchDownDegrees << ','
                    << legacyErrorX << ',' << legacyErrorY << ','
@@ -902,6 +942,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                    << estimate.feedforwardConfidence << ',' << (candidateOutput.settled ? 1 : 0) << ','
                    << (candidateOutput.settleReleased ? 1 : 0) << ','
                    << candidateOutput.settleConfirmationSamples << ','
+                   << (candidateOutput.settleEntryCommandHeld ? 1 : 0) << ','
                    << (candidateOutput.lowSpeedReverseSuppressed ? 1 : 0) << ','
                    << (candidateOutput.verticalCatchUpActive ? 1 : 0) << ','
                    << (candidateOutput.reversalDetected ? 1 : 0) << ','
@@ -984,7 +1025,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommandCommitHorizonMs,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommandCommitHorizonMs,CandidateSettleEntryCommandGuard,CandidateSettleEntryCommandHold,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -1009,6 +1050,8 @@ void WriteSummary(const std::filesystem::path& path,
                << (item.staticFixedTruth ? 1 : 0) << ','
                << (item.candidateViewMotionCompensation ? 1 : 0) << ','
                << item.candidateCommandCommitHorizonSeconds * 1000.0 << ','
+               << (item.candidateSettleEntryCommandGuard ? 1 : 0) << ','
+               << (item.candidateSettleEntryCommandHold ? 1 : 0) << ','
                << trajectoryShaperModeName(item.trajectoryMode) << ','
                << item.trajectoryOutputHz << ',' << item.candidate.samples << ','
                << item.legacy.errorP50Degrees << ',' << item.legacy.errorP95Degrees << ','

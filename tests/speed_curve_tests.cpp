@@ -590,6 +590,35 @@ int main()
                "angle settle requires two consecutive quiet observations");
     expectNear(confirmedQuiet.limitedCountsX, 0.0, 0.0,
                "settled angle controller suppresses sub-count static pulses");
+    LosAimController guardedSettleController;
+    LosAimController::Input guardedSettleInput = quietInput;
+    guardedSettleInput.settleEntryErrorValid = true;
+    guardedSettleInput.settleEntryErrorDegreesX = 0.20;
+    guardedSettleInput.settleEntryErrorDegreesY = 0.0;
+    const auto guardedFirst = guardedSettleController.update(
+        guardedSettleInput, settleSettings);
+    const auto guardedSecond = guardedSettleController.update(
+        guardedSettleInput, settleSettings);
+    expectTrue(!guardedFirst.settled && !guardedSecond.settled &&
+                   guardedSecond.settleConfirmationSamples == 0 &&
+                   guardedSecond.limitedCountsX != 0.0,
+               "committed command endpoint blocks settle entry without replacing feedback error");
+    guardedSettleInput.settleEntryErrorDegreesX = quietInput.errorDegreesX;
+    guardedSettleController.update(guardedSettleInput, settleSettings);
+    const auto guardedConfirmed = guardedSettleController.update(
+        guardedSettleInput, settleSettings);
+    expectTrue(guardedConfirmed.settled,
+               "settle entry guard admits two quiet committed endpoints");
+    LosAimController heldSettleController;
+    guardedSettleInput.settleEntryErrorDegreesX = 0.20;
+    guardedSettleInput.holdOutputWhileSettleEntryBlocked = true;
+    const auto heldSettleEntry = heldSettleController.update(
+        guardedSettleInput, settleSettings);
+    expectTrue(heldSettleEntry.settleEntryCommandHeld &&
+                   !heldSettleEntry.settled &&
+                   heldSettleEntry.settleConfirmationSamples == 0 &&
+                   heldSettleEntry.limitedCountsX == 0.0,
+               "settle entry command hold waits for committed motion without latching settle");
     quietInput.errorDegreesX = 0.10;
     quietInput.relativeLosRateDegreesPerSecondX = 1.0;
     const auto insideHysteresis = settleController.update(quietInput, settleSettings);
@@ -2376,7 +2405,10 @@ int main()
                     std::string::npos &&
                 line.find("EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,") !=
                     std::string::npos &&
-                line.find("EstimateTruthBiasX,EstimateTruthBiasY,") != std::string::npos;
+                line.find("SettleEntryErrorX,SettleEntryErrorY,") != std::string::npos &&
+                line.find("EstimateTruthBiasX,EstimateTruthBiasY,") != std::string::npos &&
+                line.find("SettleConfirmationSamples,SettleEntryCommandHeld,") !=
+                    std::string::npos;
         }
     }
     expectTrue(detailTraceHeaders == 1,
@@ -2418,6 +2450,18 @@ int main()
     expectTrue(std::abs(commitHorizonComparison.candidate.requestedCounts -
                    viewMotionComparison.candidate.requestedCounts) > 1e-6,
                "command commit horizon changes the candidate control request");
+    CrossDomainReplay::ControllerSettings settleGuardSettings = syntheticSettings;
+    settleGuardSettings.candidateCommandCommitHorizonSeconds = 0.060;
+    settleGuardSettings.candidateSettleEntryCommandGuard = true;
+    const auto settleGuardComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, settleGuardSettings);
+    expectTrue(settleGuardComparison.candidateSettleEntryCommandGuard,
+               "cross-domain replay records the settle-only committed command guard");
+    settleGuardSettings.candidateSettleEntryCommandHold = true;
+    const auto settleHoldComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, settleGuardSettings);
+    expectTrue(settleHoldComparison.candidateSettleEntryCommandHold,
+               "cross-domain replay records the settle-entry committed command hold");
     CrossDomainReplay::ControllerSettings responseReplaySettings = syntheticSettings;
     responseReplaySettings.responseSeconds = 0.080;
     responseReplaySettings.candidateResponseSeconds = 0.060;

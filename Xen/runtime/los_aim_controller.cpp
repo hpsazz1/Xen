@@ -71,6 +71,12 @@ LosAimController::Output LosAimController::update(
         settings.reverseConfirmationErrorMultiplier, 1.5, 2.0, 1.5);
     const bool settleEnabled = settleError > 0.0 && settleRate > 0.0;
     const double errorMagnitude = std::hypot(input.errorDegreesX, input.errorDegreesY);
+    const bool settleEntryErrorValid = input.settleEntryErrorValid &&
+        std::isfinite(input.settleEntryErrorDegreesX) &&
+        std::isfinite(input.settleEntryErrorDegreesY);
+    const double settleEntryErrorMagnitude = settleEntryErrorValid
+        ? std::hypot(input.settleEntryErrorDegreesX, input.settleEntryErrorDegreesY)
+        : errorMagnitude;
     const double rateMagnitude = std::hypot(
         input.relativeLosRateDegreesPerSecondX,
         input.relativeLosRateDegreesPerSecondY);
@@ -127,7 +133,7 @@ LosAimController::Output LosAimController::update(
             pendingSettleReleaseSeconds_ = 0.0;
         }
     }
-    else if (errorMagnitude <= settleError && rateMagnitude <= settleRate)
+    else if (settleEntryErrorMagnitude <= settleError && rateMagnitude <= settleRate)
     {
         quietSamples_ = std::min(quietSamples_ + 1, 2);
         settled_ = quietSamples_ >= 2;
@@ -138,6 +144,10 @@ LosAimController::Output LosAimController::update(
     }
     output.settled = settled_;
     output.settleConfirmationSamples = quietSamples_;
+    output.settleEntryCommandHeld = input.holdOutputWhileSettleEntryBlocked &&
+        settleEnabled && !settled_ &&
+        errorMagnitude <= settleError && rateMagnitude <= settleRate &&
+        settleEntryErrorMagnitude > settleError;
     if (settled_)
     {
         // 静止期间所有控制分量和积分历史都归零；以后启用前馈或积分时也不能
@@ -149,6 +159,19 @@ LosAimController::Output LosAimController::update(
         pendingReverseSeconds_ = 0.0;
         acceptedMovingRateSignX_ = 0;
         reversalFeedforwardRemainingSeconds_ = 0.0;
+        output.valid = true;
+        output.frameCountLimit = maxCountsPerSecond * dt;
+        return output;
+    }
+    if (output.settleEntryCommandHeld)
+    {
+        // 当前误差已经安静但在途命令终点仍越界时，继续叠加P输出只会扩大迟到过冲。
+        // 这里只暂停新请求；当前误差或速率离开静止带后立即恢复完整控制链。
+        integralErrorDegreeSecondsX_ = 0.0;
+        integralErrorDegreeSecondsY_ = 0.0;
+        pendingReverseX_ = 0.0;
+        pendingReverseY_ = 0.0;
+        pendingReverseSeconds_ = 0.0;
         output.valid = true;
         output.frameCountLimit = maxCountsPerSecond * dt;
         return output;

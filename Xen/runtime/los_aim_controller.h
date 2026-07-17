@@ -38,6 +38,12 @@ public:
         double degreesPerCountX = 0.0;
         double degreesPerCountY = 0.0;
         double dtSeconds = 0.0;
+        // 可选的静止进入判定误差。只影响未锁存时的连续安静样本，不参与P/I/前馈或释放。
+        double settleEntryErrorDegreesX = 0.0;
+        double settleEntryErrorDegreesY = 0.0;
+        bool settleEntryErrorValid = false;
+        // guard阻止安静计数时，可选暂停新输出，等待已发送命令兑现；正常运动态不受影响。
+        bool holdOutputWhileSettleEntryBlocked = false;
         bool valid = false;
     };
 
@@ -49,6 +55,7 @@ public:
         bool settled = false;
         bool settleReleased = false;
         int settleConfirmationSamples = 0;
+        bool settleEntryCommandHeld = false;
         bool lowSpeedReverseSuppressed = false;
         bool verticalCatchUpActive = false;
         bool reversalFeedforwardActive = false;

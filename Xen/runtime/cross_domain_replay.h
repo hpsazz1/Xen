@@ -90,6 +90,9 @@ struct ControllerSettings
     bool candidateViewMotionCompensation = false;
     // 离线Smith型归因：在已发送命令兑现时刻比较目标与累计视角；0保持当前控制时刻语义。
     double candidateCommandCommitHorizonSeconds = 0.0;
+    // 只用已承诺终点保护settle进入；运动态控制误差仍保持当前时刻语义。
+    bool candidateSettleEntryCommandGuard = false;
+    bool candidateSettleEntryCommandHold = false;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
     double trajectoryOutputHz = 240.0;
     double trajectoryMaxAccelerationCountsPerSecond2 = 60000.0;
@@ -154,6 +157,8 @@ struct Comparison
     bool staticFixedTruth = false;
     bool candidateViewMotionCompensation = false;
     double candidateCommandCommitHorizonSeconds = 0.0;
+    bool candidateSettleEntryCommandGuard = false;
+    bool candidateSettleEntryCommandHold = false;
     TrajectoryShaperMode trajectoryMode = TrajectoryShaperMode::Off;
     double trajectoryOutputHz = 0.0;
     Metrics legacy{};

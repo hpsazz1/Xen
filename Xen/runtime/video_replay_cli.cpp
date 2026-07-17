@@ -79,6 +79,8 @@ namespace
         bool staticFixedTruth = false;
         bool candidateViewMotionCompensation = false;
         double candidateCommandCommitHorizonMs = 0.0;
+        bool candidateSettleEntryCommandGuard = false;
+        bool candidateSettleEntryCommandHold = false;
         double feedforwardGain = 0.0;
         double leadHorizonSeconds = 0.0;
         double leadStrength = 0.0;
@@ -318,6 +320,20 @@ namespace
         options.candidateCommandCommitHorizonMs = optionDouble(
             argc, argv, "--candidate-command-commit-horizon-ms",
             options.candidateCommandCommitHorizonMs);
+        if (const auto guard = optionValue(
+                argc, argv, "--candidate-settle-entry-command-guard"))
+        {
+            const std::string normalized = lower(*guard);
+            options.candidateSettleEntryCommandGuard = normalized != "0" &&
+                normalized != "false" && normalized != "off";
+        }
+        if (const auto hold = optionValue(
+                argc, argv, "--candidate-settle-entry-command-hold"))
+        {
+            const std::string normalized = lower(*hold);
+            options.candidateSettleEntryCommandHold = normalized != "0" &&
+                normalized != "false" && normalized != "off";
+        }
         options.feedforwardGain = optionDouble(
             argc, argv, "--feedforward-gain", options.feedforwardGain);
         options.leadHorizonSeconds = optionDouble(
@@ -870,6 +886,10 @@ int Run(int argc, char** argv)
                 options.candidateViewMotionCompensation;
             settings.candidateCommandCommitHorizonSeconds =
                 options.candidateCommandCommitHorizonMs / 1000.0;
+            settings.candidateSettleEntryCommandGuard =
+                options.candidateSettleEntryCommandGuard;
+            settings.candidateSettleEntryCommandHold =
+                options.candidateSettleEntryCommandHold;
             settings.feedforwardGain = options.feedforwardGain;
             settings.leadHorizonSeconds = options.leadHorizonSeconds;
             settings.leadStrength = options.leadStrength;
@@ -1023,6 +1043,10 @@ int Run(int argc, char** argv)
                      << (options.candidateViewMotionCompensation ? 1 : 0) << '\n'
                      << "CandidateCommandCommitHorizonMs="
                      << options.candidateCommandCommitHorizonMs << '\n'
+                     << "CandidateSettleEntryCommandGuard="
+                     << (options.candidateSettleEntryCommandGuard ? 1 : 0) << '\n'
+                     << "CandidateSettleEntryCommandHold="
+                     << (options.candidateSettleEntryCommandHold ? 1 : 0) << '\n'
                      << "TrajectoryMode="
                      << trajectoryShaperModeName(options.trajectoryMode) << '\n'
                      << "TrajectoryOutputHz=" << options.trajectoryOutputHz << '\n'
