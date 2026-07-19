@@ -100,6 +100,8 @@ build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video
 
 候选角积分离线反证可追加`--candidate-integral-ms <50..2000> --candidate-integral-zone-deg <0..10>`；默认时间为0，即完全关闭。decision和summary分别记录`CandidateIntegralTimeMs/CandidateIntegralZoneDeg`。500 ms/10°在15/0实测物理端点仅得348/810，left/right均为0/162且static翻转显著增加，已否决；该入口只用于复现反证，不得写入正式配置、UI默认值或active路径。
 
+响应相位诊断使用`tools/analyze_phase_separation.ps1 -BaselineFrames <80ms/cross_domain_frames.csv> -ComparisonFrames <100ms/cross_domain_frames.csv> -OutputCsv <summary.csv>`。脚本只按`Scenario+Variant+TimeSeconds`比较共同检测帧，并报告双方覆盖率、CV/CA模型差值、真实/相机速率、限速前请求比例和实际裁剪比例。不同运行的原始总通过数不得直接比较：候选相机位置会参与检测裁剪，若共同帧不足100%，场景summary连legacy队列也可能变化。
+
 DML r61实机影子先配置`aim_shadow_command_to_frame_delay_ms=20`、`aim_shadow_command_response_ms=20`、`aim_shadow_estimator_mode=maneuver_gated_ca`及冻结的8000/12/120参数。首轮只采集九点static，并运行`tools/analyze_shadow_pipeline.ps1 -DataRoot <目录> -ExpectedControllerRevision 61 -RequireManeuverCandidate -RequireFiniteViewResponse -RequirePausedObservations`；脚本分别报告暂停态和运行态机动样本，只有运行态static为0才允许继续采集jump/reverse。CUDA强制退化为`kalman`和0 ms响应宽度，不得用于候选结论。
 
 固定240 Hz梯形对照在同一命令后追加`--trajectory-mode trapezoid --trajectory-output-hz 240 --trajectory-max-accel-cps2 60000 --trajectory-max-jerk-cps3 4000000`，并使用独立输出目录。该模式当前仅用于反事实回放，正式默认仍为`off`。

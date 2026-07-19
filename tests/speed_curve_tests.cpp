@@ -2484,6 +2484,34 @@ int main()
                syntheticComparison.candidate.shapedCounts > 0.0 &&
                syntheticComparison.candidate.sentCounts > 0.0,
                "cross-domain replay records estimator, requested, shaped and sent diagnostics");
+    const auto phaseFramePath = std::filesystem::temp_directory_path() /
+        "xen_cross_domain_phase_frames.csv";
+    std::error_code phaseFrameError;
+    std::filesystem::remove(phaseFramePath, phaseFrameError);
+    CrossDomainReplay::ControllerSettings phaseFrameSettings = syntheticSettings;
+    phaseFrameSettings.candidateEstimatorMode =
+        CrossDomainReplay::CandidateEstimatorMode::ManeuverGatedConstantAcceleration;
+    CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, phaseFrameSettings, phaseFramePath);
+    std::ifstream phaseFrameFile(phaseFramePath);
+    std::string phaseFrameHeader;
+    std::string phaseFrameRow;
+    std::getline(phaseFrameFile, phaseFrameHeader);
+    std::getline(phaseFrameFile, phaseFrameRow);
+    expectTrue(phaseFrameHeader.find(
+                   "TruthRateX,TruthRateY,PhysicalCameraRateX,PhysicalCameraRateY") !=
+                   std::string::npos &&
+               phaseFrameHeader.find(
+                   "BaselineAngleX,BaselineAngleY,BaselineRateX,BaselineRateY,CaAngleX,CaAngleY,CaRateX,CaRateY,ModelAngleDeltaDeg,ModelRateDeltaDps,ManeuverRateEvidenceDps,ManeuverModelActive") !=
+                   std::string::npos &&
+               phaseFrameHeader.find(
+                   "UnlimitedX,UnlimitedY,FrameCountLimit,UnlimitedToFrameLimitRatio,LimitedToUnlimitedRatio") !=
+                   std::string::npos,
+               "cross-domain frame csv exposes phase-separation evidence");
+    expectTrue(std::count(phaseFrameHeader.begin(), phaseFrameHeader.end(), ',') ==
+                   std::count(phaseFrameRow.begin(), phaseFrameRow.end(), ','),
+               "cross-domain phase frame header and row keep the same column count");
+    std::filesystem::remove(phaseFramePath, phaseFrameError);
     CrossDomainReplay::ControllerSettings integralReplaySettings = syntheticSettings;
     integralReplaySettings.integralTimeSeconds = 0.500;
     integralReplaySettings.integralZoneDegrees = 10.0;

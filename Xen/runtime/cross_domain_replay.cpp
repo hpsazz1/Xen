@@ -589,7 +589,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             std::filesystem::file_size(frameCsv, sizeError) == 0;
         frames.open(frameCsv, std::ios::app);
         if (writeHeader)
-            frames << "Scenario,Variant,TimeSeconds,Detected,MeasurementYaw,MeasurementPitch,MeasuredRelativeYaw,MeasuredRelativePitch,ViewAtObservationYaw,ViewAtObservationPitch,ViewAtControlYaw,ViewAtControlPitch,ObservationTruthYaw,ObservationTruthPitch,TruthYaw,TruthPitch,EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,SettleEntryErrorX,SettleEntryErrorY,EstimateTruthBiasX,EstimateTruthBiasY,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,SettleEntryCommandHeld,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
+            frames << "Scenario,Variant,TimeSeconds,Detected,MeasurementYaw,MeasurementPitch,MeasuredRelativeYaw,MeasuredRelativePitch,ViewAtObservationYaw,ViewAtObservationPitch,ViewAtControlYaw,ViewAtControlPitch,ObservationTruthYaw,ObservationTruthPitch,TruthYaw,TruthPitch,TruthRateX,TruthRateY,PhysicalCameraRateX,PhysicalCameraRateY,BaselineAngleX,BaselineAngleY,BaselineRateX,BaselineRateY,CaAngleX,CaAngleY,CaRateX,CaRateY,ModelAngleDeltaDeg,ModelRateDeltaDps,ManeuverRateEvidenceDps,ManeuverModelActive,EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,SettleEntryErrorX,SettleEntryErrorY,EstimateTruthBiasX,EstimateTruthBiasY,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,SettleEntryCommandHeld,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,UnlimitedX,UnlimitedY,FrameCountLimit,UnlimitedToFrameLimitRatio,LimitedToUnlimitedRatio,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
     }
 
     const double dt = 1.0 / std::clamp(variant.replayFps, 10.0, 1000.0);
@@ -602,6 +602,10 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     bool hasPreviousTruth = false;
     bool previousDetected = false;
     bool previousTruthMoving = false;
+    bool hasPreviousPhysicalView = false;
+    double previousPhysicalViewYaw = 0.0;
+    double previousPhysicalViewPitch = 0.0;
+    double previousPhysicalControlTime = 0.0;
     uint64_t requestSequence = 0;
     const double trajectoryPeriod = 1.0 / comparison.trajectoryOutputHz;
     bool hasLatestTrajectoryRequest = false;
@@ -745,6 +749,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             legacyMetrics.addOutput(0, 0, false);
             candidateMetrics.addOutput(0, 0, false);
             previousDetected = false;
+            hasPreviousPhysicalView = false;
             continue;
         }
         previousDetected = true;
@@ -796,8 +801,11 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             stabilizedMeasurementYaw, stabilizedMeasurementPitch,
             point.confidence, observationPoint, controlPoint, estimatorSettings);
         const RelativeLosKalmanEstimate estimate = estimator.selectedEstimate();
+        const auto& baselineEstimate = estimator.constantVelocityEstimate();
+        const auto& caEstimate = estimator.constantAccelerationEstimate();
+        const auto& estimatorDiagnostics = estimator.diagnostics();
         const bool useManeuverModel =
-            estimator.diagnostics().maneuverModelActive;
+            estimatorDiagnostics.maneuverModelActive;
         const double previousControlTime = std::max(0.0, controlTime - dt);
         const double previousControlSourceTime = std::min(
             source.points.back().timeSeconds,
@@ -810,6 +818,11 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         const double oracleRateY = controlTime > 0.0
             ? (truthAtControl.pitchDownDegrees - truthBeforeControl.pitchDownDegrees) / dt
             : 0.0;
+        const double physicalRateDt = controlTime - previousPhysicalControlTime;
+        const double physicalCameraRateX = hasPreviousPhysicalView && physicalRateDt > 1e-9
+            ? (candidateCamera.yaw - previousPhysicalViewYaw) / physicalRateDt : 0.0;
+        const double physicalCameraRateY = hasPreviousPhysicalView && physicalRateDt > 1e-9
+            ? (candidateCamera.pitch - previousPhysicalViewPitch) / physicalRateDt : 0.0;
         const bool useOracle = comparison.candidateEstimatorMode ==
             CandidateEstimatorMode::OracleControlTime;
         LosAimController::Input input;
@@ -871,6 +884,14 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         input.degreesPerCountY = settings.degreesPerCountY;
         input.dtSeconds = dt;
         const auto candidateOutput = candidateController.update(input, candidateSettings);
+        const double unlimitedMagnitude = std::hypot(
+            candidateOutput.unlimitedCountsX, candidateOutput.unlimitedCountsY);
+        const double limitedMagnitude = std::hypot(
+            candidateOutput.limitedCountsX, candidateOutput.limitedCountsY);
+        const double unlimitedToFrameLimitRatio = candidateOutput.frameCountLimit > 1e-9
+            ? unlimitedMagnitude / candidateOutput.frameCountLimit : 0.0;
+        const double limitedToUnlimitedRatio = unlimitedMagnitude > 1e-9
+            ? limitedMagnitude / unlimitedMagnitude : 1.0;
         TrajectoryRequest request;
         request.valid = candidateOutput.valid;
         request.sequence = ++requestSequence;
@@ -967,6 +988,19 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                    << truthAtObservation.yawDegrees << ','
                    << truthAtObservation.pitchDownDegrees << ','
                    << truthAtControl.yawDegrees << ',' << truthAtControl.pitchDownDegrees << ','
+                   << oracleRateX << ',' << oracleRateY << ','
+                   << physicalCameraRateX << ',' << physicalCameraRateY << ','
+                   << baselineEstimate.x.angleDegrees << ','
+                   << baselineEstimate.y.angleDegrees << ','
+                   << baselineEstimate.x.rateDegreesPerSecond << ','
+                   << baselineEstimate.y.rateDegreesPerSecond << ','
+                   << caEstimate.x.angleDegrees << ',' << caEstimate.y.angleDegrees << ','
+                   << caEstimate.x.rateDegreesPerSecond << ','
+                   << caEstimate.y.rateDegreesPerSecond << ','
+                   << estimatorDiagnostics.modelAngleDeltaDegrees << ','
+                   << estimatorDiagnostics.modelRateDeltaDegreesPerSecond << ','
+                   << estimatorDiagnostics.maneuverRateEvidenceDegreesPerSecond << ','
+                   << (useManeuverModel ? 1 : 0) << ','
                    << estimate.x.angleDegrees << ',' << estimate.y.angleDegrees << ','
                    << input.errorDegreesX << ',' << input.errorDegreesY << ','
                    << (input.settleEntryErrorValid
@@ -995,11 +1029,20 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                    << candidateOutput.feedbackCountsY << ',' << candidateOutput.trackingFeedforwardCountsX << ','
                    << candidateOutput.trackingFeedforwardCountsY << ',' << candidateOutput.leadCountsX << ','
                    << candidateOutput.leadCountsY << ',' << candidateOutput.integralCountsX << ','
-                   << candidateOutput.integralCountsY << ',' << candidateOutput.limitedCountsX << ','
+                   << candidateOutput.integralCountsY << ','
+                   << candidateOutput.unlimitedCountsX << ','
+                   << candidateOutput.unlimitedCountsY << ','
+                   << candidateOutput.frameCountLimit << ','
+                   << unlimitedToFrameLimitRatio << ','
+                   << limitedToUnlimitedRatio << ',' << candidateOutput.limitedCountsX << ','
                    << candidateOutput.limitedCountsY << ',' << shaped.output.shapedCountsX << ','
                    << shaped.output.shapedCountsY << ',' << shaped.output.outputCountsX << ','
                    << shaped.output.outputCountsY << '\n';
         }
+        previousPhysicalViewYaw = candidateCamera.yaw;
+        previousPhysicalViewPitch = candidateCamera.pitch;
+        previousPhysicalControlTime = controlTime;
+        hasPreviousPhysicalView = true;
         previousTruth = truthAtObservation;
         hasPreviousTruth = true;
     }
