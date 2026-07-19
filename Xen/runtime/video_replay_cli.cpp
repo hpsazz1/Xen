@@ -82,6 +82,7 @@ namespace
         bool confirmLowSpeedReverseSettleRelease = false;
         bool staticFixedTruth = false;
         bool candidateViewMotionCompensation = false;
+        bool candidateCommittedEndpointGuard = false;
         double candidateCommandCommitHorizonMs = 0.0;
         double physicalCommandCenterMs = 60.0;
         double physicalCommandResponseMs = 0.0;
@@ -346,6 +347,13 @@ namespace
         {
             const std::string normalized = lower(*compensation);
             options.candidateViewMotionCompensation = normalized != "0" &&
+                normalized != "false" && normalized != "off";
+        }
+        if (const auto guard = optionValue(
+                argc, argv, "--candidate-committed-endpoint-guard"))
+        {
+            const std::string normalized = lower(*guard);
+            options.candidateCommittedEndpointGuard = normalized != "0" &&
                 normalized != "false" && normalized != "off";
         }
         options.candidateCommandCommitHorizonMs = optionDouble(
@@ -951,6 +959,8 @@ int Run(int argc, char** argv)
             settings.staticFixedTruth = options.staticFixedTruth;
             settings.candidateViewMotionCompensation =
                 options.candidateViewMotionCompensation;
+            settings.candidateCommittedEndpointGuard =
+                options.candidateCommittedEndpointGuard;
             settings.candidateCommandCommitHorizonSeconds =
                 options.candidateCommandCommitHorizonMs / 1000.0;
             settings.candidateSettleEntryCommandGuard =
@@ -1162,6 +1172,8 @@ int Run(int argc, char** argv)
                      << "StaticFixedTruth=" << (options.staticFixedTruth ? 1 : 0) << '\n'
                      << "CandidateViewMotionCompensation="
                      << (options.candidateViewMotionCompensation ? 1 : 0) << '\n'
+                     << "CandidateCommittedEndpointGuard="
+                     << (options.candidateCommittedEndpointGuard ? 1 : 0) << '\n'
                      << "CandidateCommandCommitHorizonMs="
                      << options.candidateCommandCommitHorizonMs << '\n'
                      << "PhysicalCommandCenterMs="

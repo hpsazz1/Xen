@@ -89,6 +89,8 @@ struct ControllerSettings
     bool staticFixedTruth = false;
     // 离线时轴诊断：按正式shadow链路区分画面中的相对LOS与成功命令形成的累计视角。
     bool candidateViewMotionCompensation = false;
+    // 离线候选：按已提交命令的物理响应终点裁剪同向新请求，保留半个 count 的取整余量。
+    bool candidateCommittedEndpointGuard = false;
     // 离线Smith型归因：在已发送命令兑现时刻比较目标与累计视角；0保持当前控制时刻语义。
     double candidateCommandCommitHorizonSeconds = 0.0;
     // 只用已承诺终点保护settle进入；运动态控制误差仍保持当前时刻语义。
@@ -160,6 +162,7 @@ struct Comparison
     bool confirmLowSpeedReverseSettleRelease = false;
     bool staticFixedTruth = false;
     bool candidateViewMotionCompensation = false;
+    bool candidateCommittedEndpointGuard = false;
     double candidateCommandCommitHorizonSeconds = 0.0;
     bool candidateSettleEntryCommandGuard = false;
     bool candidateSettleEntryCommandHold = false;

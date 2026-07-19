@@ -451,6 +451,9 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     comparison.staticFixedTruth = settings.staticFixedTruth;
     comparison.candidateViewMotionCompensation =
         settings.candidateViewMotionCompensation;
+    comparison.candidateCommittedEndpointGuard =
+        settings.candidateCommittedEndpointGuard &&
+        settings.trajectoryMode == TrajectoryShaperMode::Off;
     comparison.candidateCommandCommitHorizonSeconds =
         std::isfinite(settings.candidateCommandCommitHorizonSeconds)
         ? std::clamp(settings.candidateCommandCommitHorizonSeconds, 0.0, 0.250)
@@ -583,7 +586,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             std::filesystem::file_size(frameCsv, sizeError) == 0;
         frames.open(frameCsv, std::ios::app);
         if (writeHeader)
-            frames << "Scenario,Variant,TimeSeconds,Detected,MeasurementYaw,MeasurementPitch,MeasuredRelativeYaw,MeasuredRelativePitch,ViewAtObservationYaw,ViewAtObservationPitch,ViewAtControlYaw,ViewAtControlPitch,ObservationTruthYaw,ObservationTruthPitch,TruthYaw,TruthPitch,TruthRateX,TruthRateY,PhysicalCameraRateX,PhysicalCameraRateY,BaselineAngleX,BaselineAngleY,BaselineRateX,BaselineRateY,CaAngleX,CaAngleY,CaRateX,CaRateY,ModelAngleDeltaDeg,ModelRateDeltaDps,ManeuverRateEvidenceDps,ManeuverModelActive,EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,SettleEntryErrorX,SettleEntryErrorY,EstimateTruthBiasX,EstimateTruthBiasY,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,SettleEntryCommandHeld,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,UnlimitedX,UnlimitedY,FrameCountLimit,UnlimitedToFrameLimitRatio,LimitedToUnlimitedRatio,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
+            frames << "Scenario,Variant,TimeSeconds,Detected,MeasurementYaw,MeasurementPitch,MeasuredRelativeYaw,MeasuredRelativePitch,ViewAtObservationYaw,ViewAtObservationPitch,ViewAtControlYaw,ViewAtControlPitch,ObservationTruthYaw,ObservationTruthPitch,TruthYaw,TruthPitch,TruthRateX,TruthRateY,PhysicalCameraRateX,PhysicalCameraRateY,BaselineAngleX,BaselineAngleY,BaselineRateX,BaselineRateY,CaAngleX,CaAngleY,CaRateX,CaRateY,ModelAngleDeltaDeg,ModelRateDeltaDps,ManeuverRateEvidenceDps,ManeuverModelActive,EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,SettleEntryErrorX,SettleEntryErrorY,EstimateTruthBiasX,EstimateTruthBiasY,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,SettleEntryCommandHeld,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,UnlimitedX,UnlimitedY,FrameCountLimit,UnlimitedToFrameLimitRatio,LimitedToUnlimitedRatio,PreGuardRequestedX,PreGuardRequestedY,CommittedEndpointResidualX,CommittedEndpointResidualY,CommittedEndpointGuardActive,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
     }
 
     const double dt = 1.0 / std::clamp(variant.replayFps, 10.0, 1000.0);
@@ -615,6 +618,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         candidateCamera.submit(
             timeSeconds, commandDelay, countsX, countsY, settings);
         if (comparison.candidateViewMotionCompensation ||
+            comparison.candidateCommittedEndpointGuard ||
             comparison.candidateCommandCommitHorizonSeconds > 0.0)
         {
             candidateViewMotionModel.addCommand(
@@ -672,6 +676,14 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         const auto modeledViewAtObservation =
             candidateViewMotionModel.at(observationPoint);
         const auto modeledViewAtControl = candidateViewMotionModel.at(controlPoint);
+        const double committedEndpointHorizonSeconds =
+            (std::max(0.0, variant.commandToFrameDelayMs) +
+             std::max(0.0, variant.commandResponseMs) * 0.5) / 1000.0;
+        const auto committedEndpointPoint = controlPoint +
+            std::chrono::duration_cast<Clock::duration>(
+                std::chrono::duration<double>(committedEndpointHorizonSeconds));
+        const auto modeledViewAtCommittedEndpoint =
+            candidateViewMotionModel.at(committedEndpointPoint);
         const auto commitPoint = controlPoint + std::chrono::duration_cast<Clock::duration>(
             std::chrono::duration<double>(
                 comparison.candidateCommandCommitHorizonSeconds));
@@ -890,8 +902,40 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         request.valid = candidateOutput.valid;
         request.sequence = ++requestSequence;
         request.requestDurationSeconds = dt;
-        request.requestedCountsX = candidateOutput.limitedCountsX;
-        request.requestedCountsY = candidateOutput.limitedCountsY;
+        const double preGuardRequestedX = candidateOutput.limitedCountsX;
+        const double preGuardRequestedY = candidateOutput.limitedCountsY;
+        const double targetAtControlYaw = useOracle
+            ? truthAtControl.yawDegrees : estimate.x.angleDegrees;
+        const double targetAtControlPitch = useOracle
+            ? truthAtControl.pitchDownDegrees : estimate.y.angleDegrees;
+        // 只叠加尚未兑现的视角增量，不能把模型的累计绝对值再次加到物理相机位置上。
+        const double committedEndpointYaw = candidateCamera.yaw +
+            (modeledViewAtCommittedEndpoint.first - modeledViewAtControl.first);
+        const double committedEndpointPitch = candidateCamera.pitch +
+            (modeledViewAtCommittedEndpoint.second - modeledViewAtControl.second);
+        const double committedEndpointResidualX = settings.degreesPerCountX != 0.0
+            ? (targetAtControlYaw - committedEndpointYaw) / settings.degreesPerCountX
+            : 0.0;
+        const double committedEndpointResidualY = settings.degreesPerCountY != 0.0
+            ? (targetAtControlPitch - committedEndpointPitch) / settings.degreesPerCountY
+            : 0.0;
+        const auto guardAxis = [](double requested, double residual)
+        {
+            if (requested * residual <= 0.0)
+                return 0.0;
+            const double allowed = std::max(0.0, std::abs(residual) - 0.5);
+            return std::copysign(std::min(std::abs(requested), allowed), requested);
+        };
+        request.requestedCountsX = comparison.candidateCommittedEndpointGuard
+            ? guardAxis(preGuardRequestedX, committedEndpointResidualX)
+            : preGuardRequestedX;
+        request.requestedCountsY = comparison.candidateCommittedEndpointGuard
+            ? guardAxis(preGuardRequestedY, committedEndpointResidualY)
+            : preGuardRequestedY;
+        const bool committedEndpointGuardActive =
+            comparison.candidateCommittedEndpointGuard &&
+            (std::abs(request.requestedCountsX - preGuardRequestedX) > 1e-9 ||
+             std::abs(request.requestedCountsY - preGuardRequestedY) > 1e-9);
         request.requestTime = controlPoint;
         CommandTrajectoryShaper::Result shaped;
         if (settings.trajectoryMode == TrajectoryShaperMode::Off)
@@ -959,7 +1003,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         candidateMetrics.addVerticalCatchUp(candidateOutput.verticalCatchUpActive);
         candidateMetrics.addManeuverModel(useManeuverModel);
         candidateMetrics.result.requestedCounts += std::hypot(
-            candidateOutput.limitedCountsX, candidateOutput.limitedCountsY);
+            request.requestedCountsX, request.requestedCountsY);
         candidateMetrics.result.feedforwardCounts += std::hypot(
             candidateOutput.trackingFeedforwardCountsX,
             candidateOutput.trackingFeedforwardCountsY);
@@ -1028,8 +1072,12 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                    << candidateOutput.unlimitedCountsY << ','
                    << candidateOutput.frameCountLimit << ','
                    << unlimitedToFrameLimitRatio << ','
-                   << limitedToUnlimitedRatio << ',' << candidateOutput.limitedCountsX << ','
-                   << candidateOutput.limitedCountsY << ',' << shaped.output.shapedCountsX << ','
+                   << limitedToUnlimitedRatio << ',' << preGuardRequestedX << ','
+                   << preGuardRequestedY << ',' << committedEndpointResidualX << ','
+                   << committedEndpointResidualY << ','
+                   << (committedEndpointGuardActive ? 1 : 0) << ','
+                   << request.requestedCountsX << ',' << request.requestedCountsY << ','
+                   << shaped.output.shapedCountsX << ','
                    << shaped.output.shapedCountsY << ',' << shaped.output.outputCountsX << ','
                    << shaped.output.outputCountsY << '\n';
         }
@@ -1103,7 +1151,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,CommandCenterMs,CommandResponseMs,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,CandidateIntegralTimeMs,CandidateIntegralZoneDeg,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommandCommitHorizonMs,CandidateSettleEntryCommandGuard,CandidateSettleEntryCommandHold,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,CommandCenterMs,CommandResponseMs,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,CandidateIntegralTimeMs,CandidateIntegralZoneDeg,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommittedEndpointGuard,CandidateCommandCommitHorizonMs,CandidateSettleEntryCommandGuard,CandidateSettleEntryCommandHold,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -1131,6 +1179,7 @@ void WriteSummary(const std::filesystem::path& path,
                << (item.confirmLowSpeedReverseSettleRelease ? 1 : 0) << ','
                << (item.staticFixedTruth ? 1 : 0) << ','
                << (item.candidateViewMotionCompensation ? 1 : 0) << ','
+               << (item.candidateCommittedEndpointGuard ? 1 : 0) << ','
                << item.candidateCommandCommitHorizonSeconds * 1000.0 << ','
                << (item.candidateSettleEntryCommandGuard ? 1 : 0) << ','
                << (item.candidateSettleEntryCommandHold ? 1 : 0) << ','

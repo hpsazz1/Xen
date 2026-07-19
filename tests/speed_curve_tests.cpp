@@ -2561,6 +2561,9 @@ int main()
                    std::string::npos &&
                phaseFrameHeader.find(
                    "UnlimitedX,UnlimitedY,FrameCountLimit,UnlimitedToFrameLimitRatio,LimitedToUnlimitedRatio") !=
+                   std::string::npos &&
+               phaseFrameHeader.find(
+                   "PreGuardRequestedX,PreGuardRequestedY,CommittedEndpointResidualX,CommittedEndpointResidualY,CommittedEndpointGuardActive,RequestedX,RequestedY") !=
                    std::string::npos,
                "cross-domain frame csv exposes phase-separation evidence");
     expectTrue(std::count(phaseFrameHeader.begin(), phaseFrameHeader.end(), ',') ==
@@ -2722,6 +2725,21 @@ int main()
                    pendingLossComparison.candidate.requestedCounts < 250.0 &&
                    pendingLossComparison.candidate.sentCounts < 250.0,
                "cross-domain replay preserves committed candidate commands across detection loss");
+    CrossDomainReplay::Variant endpointGuardVariant = pendingLossVariant;
+    endpointGuardVariant.commandResponseMs = 20.0;
+    const auto endpointGuardBaseline = CrossDomainReplay::RunComparison(
+        pendingLossReplay, endpointGuardVariant, syntheticSettings);
+    CrossDomainReplay::ControllerSettings endpointGuardSettings = syntheticSettings;
+    endpointGuardSettings.candidateCommittedEndpointGuard = true;
+    const auto endpointGuardComparison = CrossDomainReplay::RunComparison(
+        pendingLossReplay, endpointGuardVariant, endpointGuardSettings);
+    expectTrue(endpointGuardComparison.candidateCommittedEndpointGuard &&
+                   endpointGuardComparison.candidate.requestedCounts <
+                       endpointGuardBaseline.candidate.requestedCounts,
+               "committed endpoint guard removes requests already covered by delayed commands");
+    expectNear(endpointGuardComparison.legacy.errorP95Degrees,
+               endpointGuardBaseline.legacy.errorP95Degrees, 0.0,
+               "committed endpoint guard cannot mutate the frozen legacy comparator");
     CrossDomainReplay::ControllerSettings settleGuardSettings = syntheticSettings;
     settleGuardSettings.candidateCommandCommitHorizonSeconds = 0.060;
     settleGuardSettings.candidateSettleEntryCommandGuard = true;
