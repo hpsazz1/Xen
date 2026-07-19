@@ -28,11 +28,13 @@ $configPath = [System.IO.Path]::GetFullPath($Config)
 $outputPath = [System.IO.Path]::GetFullPath($OutputRoot)
 if (-not (Test-Path -LiteralPath $probePath -PathType Leaf)) { throw "Probe executable not found: $probePath" }
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "Config file not found: $configPath" }
-if ($Counts.Count -eq 0 -or ($Counts | Where-Object { $_ -le 0 }).Count -gt 0) { throw 'Counts must contain positive integers.' }
+$countList = @($Counts)
+$invalidCounts = @($countList | Where-Object { $_ -le 0 })
+if ($countList.Count -eq 0 -or $invalidCounts.Count -gt 0) { throw 'Counts must contain positive integers.' }
 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
 $results = [System.Collections.Generic.List[object]]::new()
-foreach ($count in $Counts) {
+foreach ($count in $countList) {
     $trialOutput = Join-Path $outputPath ("counts_{0}" -f $count)
     if (Test-Path -LiteralPath $trialOutput) {
         throw "Output directory already exists; choose a new OutputRoot: $trialOutput"
