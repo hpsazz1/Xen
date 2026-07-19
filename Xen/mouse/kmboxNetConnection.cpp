@@ -69,9 +69,12 @@ void KmboxNetConnection::monitorThread()
         int ret = kmNet_monitor(10000); // 启动监听，超时时间 10 秒
         if (ret != 0)
         {
+            monitor_ready_.store(false);
             std::cerr << "[KmboxNet] 监听启动失败，返回值 ret=" << ret << std::endl;
             return;
         }
+
+        monitor_ready_.store(true);
 
         while (monitor_running_)
             std::this_thread::sleep_for(std::chrono::milliseconds(1)); // 每秒轮询 1000 次，保持线程响应
@@ -100,6 +103,7 @@ void KmboxNetConnection::monitorThread()
  */
 KmboxNetConnection::~KmboxNetConnection()
 {
+    monitor_ready_.store(false);
     monitor_running_ = false;             // 通知监听线程退出
     if (monitor_thread_.joinable())
         monitor_thread_.join();           // 等待监听线程结束

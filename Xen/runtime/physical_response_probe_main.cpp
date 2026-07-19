@@ -220,7 +220,7 @@ int main(int argc, char** argv)
     // KMBOX_NET 的连接在后台线程中完成；给网络设备留出握手时间，避免把异步初始化误判为失败。
     const auto deviceDeadline = Clock::now() + std::chrono::seconds(10);
     bool reportedDeviceWait = false;
-    while (!mouse->isOpen() &&
+    while (!mouse->isReadyForMotion() &&
            !stopRequested.load(std::memory_order_relaxed) &&
            Clock::now() < deviceDeadline)
     {
@@ -231,7 +231,7 @@ int main(int argc, char** argv)
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    if (!mouse->isOpen())
+    if (!mouse->isReadyForMotion())
     {
         std::cerr << (stopRequested.load(std::memory_order_relaxed)
                           ? "已取消鼠标设备连接等待\n"

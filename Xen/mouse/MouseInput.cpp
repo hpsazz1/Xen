@@ -316,6 +316,11 @@ public:
         std::lock_guard<std::mutex> lock(state_->mutex);
         return state_->device && state_->device->isOpen();
     }
+    bool isReadyForMotion() const override
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        return state_->device && state_->device->isReadyForMotion();
+    }
     bool move(int dx, int dy) override
     {
         std::lock_guard<std::mutex> lock(state_->mutex);

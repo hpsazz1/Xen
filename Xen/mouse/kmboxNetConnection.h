@@ -29,6 +29,7 @@ public:
     void monitorThread();
     /** @brief 设备是否已打开 */
     bool isOpen() const { return is_open_; }
+    bool isReadyForMotion() const { return is_open_ && monitor_ready_.load(); }
 
     /** @brief 鼠标相对移动 (x, y)，返回 KMBOX SDK 的发送结果 */
     bool move(int x, int y);
@@ -119,5 +120,6 @@ private:
     bool monitor_ = false;              ///< 监控是否已启用
     std::thread monitor_thread_;        ///< 监控线程
     std::atomic<bool> monitor_running_{ false };  ///< 监控线程运行标志
+    std::atomic<bool> monitor_ready_{ false };
     std::string ip_, port_, uuid_;      ///< 连接参数
 };
