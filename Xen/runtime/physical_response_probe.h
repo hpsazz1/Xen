@@ -22,6 +22,7 @@ struct PhysicalResponseSummary
     size_t baselineSamples = 0;
     size_t tailSamples = 0;
     double finalDisplacement = 0.0;
+    double orthogonalFinalDisplacement = 0.0;
     double t10Ms = 0.0;
     double t50Ms = 0.0;
     double t90Ms = 0.0;

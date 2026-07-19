@@ -100,32 +100,50 @@ PhysicalResponseSummary AnalyzePhysicalResponse(
     bool xAxis, int baselineMs, int tailMs)
 {
     PhysicalResponseSummary result;
-    std::vector<double> baseline;
-    std::vector<std::pair<double, double>> post;
+    std::vector<double> baselinePrimary;
+    std::vector<double> baselineOrthogonal;
+    std::vector<std::pair<double, double>> postPrimary;
+    std::vector<double> postOrthogonal;
     for (const auto& sample : samples)
     {
         if (!sample.valid)
             continue;
         const double relativeMs = static_cast<double>(sample.receiveNs - commandConfirmedNs) / 1e6;
-        const double value = xAxis ? sample.displacementX : sample.displacementY;
+        const double primary = xAxis ? sample.displacementX : sample.displacementY;
+        const double orthogonal = xAxis ? sample.displacementY : sample.displacementX;
         if (relativeMs >= -baselineMs && relativeMs < 0.0)
-            baseline.push_back(value);
+        {
+            baselinePrimary.push_back(primary);
+            baselineOrthogonal.push_back(orthogonal);
+        }
         if (relativeMs >= 0.0 && relativeMs <= tailMs)
-            post.emplace_back(relativeMs, value);
+        {
+            postPrimary.emplace_back(relativeMs, primary);
+            postOrthogonal.push_back(orthogonal);
+        }
     }
-    result.baselineSamples = baseline.size();
-    result.tailSamples = post.size();
-    if (baseline.size() < 10 || post.size() < 20)
+    result.baselineSamples = baselinePrimary.size();
+    result.tailSamples = postPrimary.size();
+    if (baselinePrimary.size() < 10 || postPrimary.size() < 20)
     {
         result.reason = "有效基线或尾部帧不足";
         return result;
     }
-    const double origin = median(baseline);
-    const size_t tailCount = std::max<size_t>(5, post.size() / 5);
+    const double primaryOrigin = median(baselinePrimary);
+    const double orthogonalOrigin = median(baselineOrthogonal);
+    const size_t tailCount = std::max<size_t>(5, postPrimary.size() / 5);
     std::vector<double> finalValues;
-    for (size_t index = post.size() - tailCount; index < post.size(); ++index)
-        finalValues.push_back(post[index].second - origin);
+    std::vector<double> orthogonalFinalValues;
+    for (size_t index = postPrimary.size() - tailCount;
+         index < postPrimary.size(); ++index)
+    {
+        finalValues.push_back(postPrimary[index].second - primaryOrigin);
+        orthogonalFinalValues.push_back(
+            postOrthogonal[index] - orthogonalOrigin);
+    }
     result.finalDisplacement = median(std::move(finalValues));
+    result.orthogonalFinalDisplacement =
+        median(std::move(orthogonalFinalValues));
     if (std::abs(result.finalDisplacement) < 1.0)
     {
         result.reason = "最终位移小于1像素";
@@ -133,9 +151,11 @@ PhysicalResponseSummary AnalyzePhysicalResponse(
     }
     std::vector<std::pair<double, double>> normalized;
     double monotonic = 0.0;
-    for (const auto& point : post)
+    for (const auto& point : postPrimary)
     {
-        const double ratio = std::clamp((point.second - origin) / result.finalDisplacement, 0.0, 1.5);
+        const double ratio = std::clamp(
+            (point.second - primaryOrigin) / result.finalDisplacement,
+            0.0, 1.5);
         monotonic = std::max(monotonic, ratio);
         normalized.emplace_back(point.first, monotonic);
     }

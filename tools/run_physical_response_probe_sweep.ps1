@@ -19,6 +19,8 @@ param(
     [int]$BaselineMs = 300,
     [int]$TailMs = 500,
     [int]$IntervalMs = 500,
+    [string]$AnalysisOutput = '',
+    [switch]$SkipAnalysis,
     [switch]$ContinueOnFailure,
     [switch]$StopOnFailure,
     [switch]$SmokeTest
@@ -76,3 +78,11 @@ for ($run = 1; $run -le $Runs; $run++) {
 }
 
 $results | Format-Table -AutoSize
+
+if (-not $SkipAnalysis) {
+    $analyzer = Join-Path $PSScriptRoot 'analyze_active_profile_protocol.ps1'
+    if (-not $AnalysisOutput) {
+        $AnalysisOutput = Join-Path $outputPath 'active_profile_protocol_summary.csv'
+    }
+    & $analyzer -DataRoot $outputPath -OutputCsv $AnalysisOutput
+}

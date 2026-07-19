@@ -161,7 +161,8 @@ void writeOutputs(const Options& options, const std::vector<Trial>& trials)
     frames << "BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision,Trial,Axis,SignedCounts,"
               "FrameReceiveNs,CommandAttemptNs,CommandConfirmedNs,CommandSucceeded,RelativePixelX,RelativePixelY,TrackingQuality,Valid\n";
     summary << "BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision,Trial,Axis,SignedCounts,"
-               "BaselineSamples,TailSamples,FinalDisplacementPx,T10Ms,T50Ms,T90Ms,T99Ms,Valid,Reason\n";
+               "BaselineSamples,TailSamples,FinalDisplacementPx,OrthogonalDisplacementPx,PixelsPerCount,"
+               "CrossAxisLeakagePercent,T10Ms,T50Ms,T90Ms,T99Ms,Valid,Reason\n";
     frames << std::fixed << std::setprecision(6);
     summary << std::fixed << std::setprecision(6);
     for (const auto& trial : trials)
@@ -173,10 +174,19 @@ void writeOutputs(const Options& options, const std::vector<Trial>& trials)
                    << sample.displacementX << ',' << sample.displacementY << ',' << sample.trackingQuality << ',' << sample.valid << '\n';
         const auto result = AnalyzePhysicalResponse(trial.samples, trial.confirmedNs,
                                                      trial.axis == 'x', options.baselineMs, options.tailMs);
+        const double pixelsPerCount = trial.counts != 0
+            ? std::abs(result.finalDisplacement / static_cast<double>(trial.counts))
+            : 0.0;
+        const double crossAxisLeakagePercent = std::abs(result.finalDisplacement) > 1e-9
+            ? 100.0 * std::abs(result.orthogonalFinalDisplacement) /
+                std::abs(result.finalDisplacement)
+            : 0.0;
         summary << BuildIdentity::backend() << ',' << BuildIdentity::revision() << ',' << BuildIdentity::timestampUtc() << ','
                 << kBasicAimControllerRevision << ',' << trial.number << ',' << trial.axis << ',' << trial.counts << ','
                 << result.baselineSamples << ',' << result.tailSamples << ',' << result.finalDisplacement << ','
-                << result.t10Ms << ',' << result.t50Ms << ',' << result.t90Ms << ',' << result.t99Ms << ','
+                << result.orthogonalFinalDisplacement << ',' << pixelsPerCount << ','
+                << crossAxisLeakagePercent << ',' << result.t10Ms << ',' << result.t50Ms << ','
+                << result.t90Ms << ',' << result.t99Ms << ','
                 << result.valid << ',' << result.reason << '\n';
     }
 }

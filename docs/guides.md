@@ -58,6 +58,7 @@
 | [P0-5跨域物理响应契约审计](155P0-5跨域物理响应契约审计20260717.md) | 用20/20共享物理相机反证实机自运动参数不能直接替换跨域60/0基准。 |
 | [P0-5物理集合与绝对门禁契约](167P0-5物理集合与绝对门禁契约20260719.md) | 用14/0、14/2、15/0、15/2四端点拆分逐域绝对安全包络与集合级场景质量门禁。 |
 | [实机物理响应辨识审计](156实机物理响应辨识审计20260717.md) | 直接拟合固定目标世界角残差，证明连续闭环数据不可用于物理标定并定义孤立脉冲协议。 |
+| [分轴主动Profile标定协议](171分轴主动Profile标定协议20260720.md) | 使用三轮分轴正负孤立脉冲、正交泄漏和跨轮硬门禁形成只读Profile候选。 |
 | [r60 DML机动估计影子接入](134r60DML机动估计影子接入20260717.md) | 使用共享估计器采集DML/NDI模型选择、静止驻留和暂停恢复诊断。 |
 | [r60静止延迟30毫秒反证](138r60静止延迟30毫秒反证20260717.md) | 对照10/20/30/60 ms并结束固定延迟扫描，确定有限响应候选边界。 |
 | [r61有限相机响应影子实现](139r61有限相机响应影子实现20260717.md) | 使用20 ms响应中心和20 ms宽度复测DML九点static。 |
@@ -97,6 +98,16 @@ build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video
 定位 static 在固定 1.5 倍 settle 退出边界外产生的低速反向脉冲时，可追加 `--reverse-confirm-error-multiplier 1.75` 或 `2.0`。该入口只改变离线候选的低速反向确认误差带，默认 `1.5`；不会改变 settle 退出边界，也未开放到配置、UI 或 active。每轮必须核对 decision 的 `ReverseConfirmationErrorMultiplier` 和 summary 同名列，并与默认 1.5 的完整 810 项结果比较，禁止只统计被救回的 static 变体。
 
 `--confirm-low-speed-reverse-settle-release 1` 仅用于复现“先确认低速反向误差、再解除 settled”的离线反证。该候选把总通过从 721 降至 717，损失 19 个原通过 static 域且只救回 15 个，已正式否决；默认必须保持 `0`，不得加入配置、UI、shadow 运行参数或 active。
+
+## 分轴主动Profile标定
+
+主动标定前必须让目标和角色静止，确认实时NDI为240 Hz、ROI内有固定高对比纹理，并允许探针产生可见视角移动。推荐一次性运行完整协议：
+
+```powershell
+tools\run_physical_response_probe_sweep.ps1 -ProbeExe E:\Dev\Xen\build\dml\tools\Release\xen_physical_response_probe.exe -Config C:\Users\16143\Desktop\Xen\DML\ndi\config.ini -NdiSource "HPSAZZ (main)" -OutputRoot C:\Users\16143\Desktop\Xen\DML\active_profile_r64 -Counts 16,32,64 -Runs 3 -RoiX 120 -RoiY 100 -RoiWidth 80 -RoiHeight 80 -Repeats 10
+```
+
+ROI坐标必须按现场预览确认，示例值不能盲用。脚本按每轮、每幅值执行X+/X-/Y+/Y-孤立脉冲，并自动调用`analyze_active_profile_protocol.ps1`。正式门禁要求构建身份唯一、至少三轮、每轴每方向至少5个有效trial、画面位移极性与counts相反、t50≤t90≤100 ms、比例位于0.25～0.75 px/count、正负方向不对称不超过15%、同轮幅值线性跨度不超过15%、跨轮比例跨度不超过15%、t50/t90跨度不超过5 ms、正交泄漏P95不超过10%。通过只输出`MANUAL_REVIEW_ONLY`且固定`ProfileAutoWrite=0`；不得自动修改`[Games]`、灵敏度、yaw/pitch、响应参数或控制器配置。
 
 机动常加速度离线候选在冻结基线命令后追加`--candidate-estimator gated_ca --candidate-jerk-std-dps3 8000 --candidate-maneuver-rate-threshold-dps 12 --candidate-maneuver-hold-ms 120`。该配方只供跨域回放与下一阶段DML shadow验证；`constant_acceleration`全时模型会严重回退static，8/16°/s门槛会损失原通过项，均不得使用。summary中的`ManeuverModelPercent`必须用于检查static误驻留。
 

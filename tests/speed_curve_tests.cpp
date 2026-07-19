@@ -1162,6 +1162,7 @@ int main()
         PhysicalResponseSample sample;
         sample.receiveNs = commandNs + static_cast<int64_t>(timeMs * 1e6);
         sample.displacementX = normalized * 8.0;
+        sample.displacementY = normalized * 0.4;
         sample.valid = true;
         sample.trackingQuality = 1.0;
         physicalSamples.push_back(sample);
@@ -1173,6 +1174,8 @@ int main()
     expectNear(physicalSummary.t50Ms, 40.0, 1.0, "physical response t50 interpolation");
     expectNear(physicalSummary.t90Ms, 56.0, 1.0, "physical response t90 interpolation");
     expectNear(physicalSummary.t99Ms, 61.5, 1.0, "physical response t99 interpolation");
+    expectNear(physicalSummary.orthogonalFinalDisplacement, 0.4, 1e-9,
+               "physical response preserves orthogonal-axis leakage diagnostics");
 
     cv::Mat trackerFrame = cv::Mat::zeros(160, 160, CV_8UC3);
     cv::RNG trackerRandom(63);

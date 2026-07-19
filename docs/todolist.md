@@ -14,7 +14,8 @@
 - [x] **[P0-5 响应反事实共同队列契约]**：新增同进程80→100 ms专用入口，810域共2,602,512个时间格、1,651,960个检测帧全部复用，样本数与legacy指标逐域完全一致，`COHORT_CHANGED=0`。80 ms精确复现524/810，100 ms共同队列为579/810而非独立运行581；left/right救回109域，但reverse损失22域、static净损失32域且翻转18→46，详细域持续单向P95仅改善2.08%、机动回退16.03%。100 ms及简单模型角差调度正式否决，继续`HOLD_SHADOW`且不修改`EvaluateGate`、active、r64或1440上限，详见`docs/170P0-5响应共同队列反事实20260720.md`。
 - [x] **[P0-6F r64 static实机门禁]**：`DML / 6218a875ae46 / r64`九点static共2421帧、9个完整运行段；运行态机动启用、legacy settled侵入、暂停命令及全部身份/时序/响应契约违例均为0，文件级正式分析PASS。35 ms尾部修复通过负样本实机门禁，详见`docs/164r64九点static实机通过20260719.md`。
 - [x] **[P0-6F r64三场景实机门禁]**：同一`DML / 6218a875ae46 / r64`身份的static、jump、reverse共6496帧，三文件及overall均PASS，全部身份、安全、时序、35 ms尾部、选择序列和逐轴计算契约违例为0。static 9/9运行段启用0；jump单个23.18秒长段包含6个独立启用区间、75帧；reverse单个18.92秒长段包含44个独立启用区间、948帧，结合既有35 ms复放的jump 7/7、reverse 6/6覆盖，r64门禁关闭且不再追加采集或调参，详见`docs/165r64三场景实机门禁完成20260719.md`。
-- [ ] **[P1] 分轴主动Profile标定协议**：孤立脉冲已确认约`0.5 px/count`、`t50≈14 ms`、`t90≈15 ms`；被动Profile多轮X轴比例和双轴有效窗口仍不稳定，继续保持`profile_calibration_enabled=false`、`HOLD_SHADOW`，不把单轮结果写入Profile。待r64 static门禁闭环后，再设计分轴主动标定协议并要求跨轮重复性，详见`docs/162物理响应与Profile标定阶段结论20260719.md`。
+- [x] **[P1] 分轴主动Profile标定协议与分析器**：孤立脉冲summary补齐正交轴位移、px/count和泄漏率；正式协议固定16/32/64 counts、X/Y正负各10次、3个独立轮次，并对身份、有效trial、比例范围、方向对称、幅值线性、跨轮比例/时序和正交泄漏执行硬门禁。分析结果只允许`MANUAL_REVIEW_ONLY`，始终记录`ProfileAutoWrite=0`，继续保持`profile_calibration_enabled=false`和`HOLD_SHADOW`，详见`docs/171分轴主动Profile标定协议20260720.md`。
+- [ ] **[P1] 分轴主动Profile三轮实测**：现有上传目录只有r64 static/jump/reverse流水线CSV与配置，不含`probe_summary.csv`，且主动探针必须在实时NDI、固定高对比目标和已确认ROI下移动设备，不能离线补跑。下一步由用户准备静止场景后执行16/32/64 counts三轮采集；只有所有硬门禁通过才进入人工Profile候选复核，任何单轴、单方向、单幅值或单轮失败均保持诊断状态，不追加被动样本补票。
 
 ### DML性能阶段（已结束）
 
