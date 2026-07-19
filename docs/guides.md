@@ -128,6 +128,8 @@ build\dml\tools\Release\xen_machine_profile_candidate.exe --config C:\Users\1614
 
 命令提交horizon不得设为实测物理响应中心：15 ms完整Smith投影会损失5个jump和96个static原通过域。也不得在输出端按“已提交终点不越过当前目标”夹紧；该候选只有在错误撤销已发送命令时呈现零损失，按真实设备保留迟到响应后14/0降至485/810并分别损失23个left/right域。相关临时入口已撤回，后续只允许先做检测短失边界的冻结共同队列归因。
 
+跨域回放在检测短失时必须重置控制状态，但不得撤销已经提交给物理相机的命令；legacy、candidate、整步响应和有限响应必须遵守同一生命周期。纠正后的14/0、14/2、15/0、15/2基线为479/480/479/479，共同交集477/810。历史524/480/524/479只用于复现缺陷，不得再作为P0-5晋级基线。
+
 响应相位诊断使用`tools/analyze_phase_separation.ps1 -BaselineFrames <80ms/cross_domain_frames.csv> -ComparisonFrames <100ms/cross_domain_frames.csv> -OutputCsv <summary.csv>`。脚本只按`Scenario+Variant+TimeSeconds`比较共同检测帧，并报告双方覆盖率、CV/CA模型差值、真实/相机速率、限速前请求比例和实际裁剪比例。不同运行的原始总通过数不得直接比较：候选相机位置会参与检测裁剪，若共同帧不足100%，场景summary连legacy队列也可能变化。
 
 DML r61实机影子先配置`aim_shadow_command_to_frame_delay_ms=20`、`aim_shadow_command_response_ms=20`、`aim_shadow_estimator_mode=maneuver_gated_ca`及冻结的8000/12/120参数。首轮只采集九点static，并运行`tools/analyze_shadow_pipeline.ps1 -DataRoot <目录> -ExpectedControllerRevision 61 -RequireManeuverCandidate -RequireFiniteViewResponse -RequirePausedObservations`；脚本分别报告暂停态和运行态机动样本，只有运行态static为0才允许继续采集jump/reverse。CUDA强制退化为`kalman`和0 ms响应宽度，不得用于候选结论。

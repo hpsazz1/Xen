@@ -175,12 +175,6 @@ struct Camera
             y * settings.degreesPerCountY });
     }
 
-    void clearPending()
-    {
-        if (finiteResponse)
-            return;
-        pending.clear();
-    }
 };
 
 struct MetricCollector
@@ -743,8 +737,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                 nextTrajectoryTickSeconds = 0.0;
                 // 已成功提交给物理相机的命令无法撤销；正式视角时轴候选必须保留其迟到响应。
                 // 历史基线继续保留原有清队列语义，确保默认关闭时逐位复现既有矩阵。
-                if (!comparison.candidateViewMotionCompensation)
-                    candidateCamera.clearPending();
+                // 成功提交到物理相机的命令不能因后续检测短失被撤销；candidate与legacy
+                // 必须使用相同的迟到响应契约，否则恢复窗口比较会人为偏向candidate。
             }
             legacyMetrics.addOutput(0, 0, false);
             candidateMetrics.addOutput(0, 0, false);

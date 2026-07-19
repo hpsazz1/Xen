@@ -2696,6 +2696,32 @@ int main()
     expectTrue(std::abs(commitHorizonComparison.candidate.requestedCounts -
                    viewMotionComparison.candidate.requestedCounts) > 1e-6,
                "command commit horizon changes the candidate control request");
+    // 60 ms后才兑现的命令在10帧检测空洞期间仍属于已发送物理输入；恢复时若错误清队列，
+    // 控制器会重复请求同一段位移，使累计请求从约204 counts虚增到约280 counts。
+    CrossDomainReplay::SourceTrajectory pendingLossReplay = syntheticReplay;
+    pendingLossReplay.scenario = "horizontal_left";
+    pendingLossReplay.points.clear();
+    for (int sample = 0; sample < 80; ++sample)
+    {
+        VideoReplay::TrajectoryPoint point;
+        point.timeSeconds = sample * 0.01;
+        point.globalX = 1380.0;
+        point.globalY = 720.0;
+        point.detected = sample < 15 || sample > 24;
+        point.boxWidth = 32.0;
+        point.boxHeight = 64.0;
+        point.confidence = 0.9f;
+        pendingLossReplay.points.push_back(point);
+    }
+    CrossDomainReplay::Variant pendingLossVariant = syntheticVariant;
+    pendingLossVariant.replayFps = 100.0;
+    pendingLossVariant.commandToFrameDelayMs = 60.0;
+    const auto pendingLossComparison = CrossDomainReplay::RunComparison(
+        pendingLossReplay, pendingLossVariant, syntheticSettings);
+    expectTrue(pendingLossComparison.candidate.samples == 70 &&
+                   pendingLossComparison.candidate.requestedCounts < 250.0 &&
+                   pendingLossComparison.candidate.sentCounts < 250.0,
+               "cross-domain replay preserves committed candidate commands across detection loss");
     CrossDomainReplay::ControllerSettings settleGuardSettings = syntheticSettings;
     settleGuardSettings.candidateCommandCommitHorizonSeconds = 0.060;
     settleGuardSettings.candidateSettleEntryCommandGuard = true;
