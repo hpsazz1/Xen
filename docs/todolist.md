@@ -19,7 +19,7 @@
 - [x] **[P1] 独立机器标定缓存与失效降级决策**：新增schema v1只读缓存，严格键覆盖游戏/瞄准模式、捕获源、完整源与ROI、后端、输入设备、灵敏度/FOV和控制器修订；证据校验覆盖比例、t50/t90、可信度、trial、协议、身份和摘要。默认关闭、路径为空、拒绝相对路径和覆盖已有文件；Level 3精确命中、Level 2保守用户角度、Level 1归一化诊断、Level 0安全诊断均进入UI/CSV，Level 0/1停止shadow角度链，active与legacy不变。DML增量CTest 12/12通过，详见`docs/173独立机器Profile缓存与四级降级20260720.md`。
 - [x] **[P1] 人工机器缓存候选生成与离线失效审计**：不可覆盖生成器严格验证协议门禁、BOM/带引号summary、NDI配置、后端与r64身份，并用本轮360脉冲结果生成独立候选但不启用；同一C++加载器反向精确命中Level 3，21个键字段逐项变化均立即降到Level 2。用户config、`[Games]`、legacy和active均未修改，详见`docs/174人工机器Profile候选生成与失效审计20260720.md`。
 - [x] **[P1] 人工启用后的机器Profile命中与失效验收**：实机CSV证明Level 3精确命中、`aimMode`变化立即降至Level 2，三场景三轮中两级均保持身份、时序和双重命令抑制零违例。进一步A/B发现L3的14.096/0 ms响应覆盖使static运行态机动误启用121/2520，而L2的20/20 ms为0/2489；正式门禁否决响应覆盖，详见`docs/175机器Profile响应覆盖阻断与解耦20260720.md`。
-- [ ] **[P1] 解耦响应后的Level 3 static复验**：使用修复后构建和原r64候选采集三轮static，要求精确命中、`MachineProfileCalibratedResponseEnabled=0`、实际响应20/20 ms、运行态机动启用为0；通过后再采集jump/reverse，active继续冻结。
+- [x] **[P1] 解耦响应后的Level 3三场景最终验收**：`DML|d39edc9f2aaa|r64`九文件共12712帧、9229个运行态缓存上下文帧全部精确命中Level 3、响应应用资格为0且保持20/20 ms；static三轮运行态机动启用0/2321，jump为305/3837，reverse为1780/3071，九文件及Overall正式门禁全部PASS。P1闭环完成，不再追加采集；active仍受P0-5跨域质量门禁阻断，详见`docs/176机器Profile最终验收与Active就绪审计20260720.md`。
 
 ### DML性能阶段（已结束）
 
