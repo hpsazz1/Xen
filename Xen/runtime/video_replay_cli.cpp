@@ -62,6 +62,8 @@ namespace
         double verticalCatchUpErrorDegrees = 0.8;
         double maxCountsPerSecond = 1440.0;
         double integralMs = 320.0;
+        double candidateIntegralMs = 0.0;
+        double candidateIntegralZoneDegrees = 1.0;
         double sensitivity = 1.4;
         double yaw = 0.022;
         double pitch = 0.022;
@@ -302,6 +304,11 @@ namespace
             options.verticalCatchUpErrorDegrees);
         options.maxCountsPerSecond = optionDouble(argc, argv, "--max-cps", options.maxCountsPerSecond);
         options.integralMs = optionDouble(argc, argv, "--integral-ms", options.integralMs);
+        options.candidateIntegralMs = optionDouble(
+            argc, argv, "--candidate-integral-ms", options.candidateIntegralMs);
+        options.candidateIntegralZoneDegrees = optionDouble(
+            argc, argv, "--candidate-integral-zone-deg",
+            options.candidateIntegralZoneDegrees);
         options.sensitivity = optionDouble(argc, argv, "--sensitivity", options.sensitivity);
         options.yaw = optionDouble(argc, argv, "--yaw", options.yaw);
         options.pitch = optionDouble(argc, argv, "--pitch", options.pitch);
@@ -910,6 +917,9 @@ int Run(int argc, char** argv)
             settings.verticalCatchUpErrorDegrees =
                 options.verticalCatchUpErrorDegrees;
             settings.maxCountsPerSecond = options.maxCountsPerSecond;
+            settings.integralTimeSeconds = options.candidateIntegralMs > 0.0
+                ? options.candidateIntegralMs / 1000.0 : 0.0;
+            settings.integralZoneDegrees = options.candidateIntegralZoneDegrees;
             settings.legacyPredictionLeadSeconds = 0.050;
             settings.legacyPredictionWindowSeconds = 0.050;
             settings.legacyPredictionStrength = 1.0;
@@ -1055,6 +1065,15 @@ int Run(int argc, char** argv)
                              ? std::clamp(options.candidateManeuverHoldSeconds,
                                  0.0, 1.0) * 1000.0
                              : 120.0) << '\n'
+                     << "CandidateIntegralTimeMs="
+                     << (std::isfinite(options.candidateIntegralMs) &&
+                             options.candidateIntegralMs > 0.0
+                             ? std::clamp(options.candidateIntegralMs, 50.0, 2000.0)
+                             : 0.0) << '\n'
+                     << "CandidateIntegralZoneDeg="
+                     << (std::isfinite(options.candidateIntegralZoneDegrees)
+                             ? std::clamp(options.candidateIntegralZoneDegrees, 0.0, 10.0)
+                             : 1.0) << '\n'
                      << "FeedforwardGain="
                      << (std::isfinite(options.feedforwardGain)
                              ? std::clamp(options.feedforwardGain, 0.0, 2.0)

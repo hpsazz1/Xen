@@ -2484,6 +2484,38 @@ int main()
                syntheticComparison.candidate.shapedCounts > 0.0 &&
                syntheticComparison.candidate.sentCounts > 0.0,
                "cross-domain replay records estimator, requested, shaped and sent diagnostics");
+    CrossDomainReplay::ControllerSettings integralReplaySettings = syntheticSettings;
+    integralReplaySettings.integralTimeSeconds = 0.500;
+    integralReplaySettings.integralZoneDegrees = 10.0;
+    const auto integralReplayComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, integralReplaySettings);
+    expectNear(integralReplayComparison.candidateIntegralTimeSeconds, 0.500, 0.0,
+               "cross-domain replay records candidate integral time");
+    expectNear(integralReplayComparison.candidateIntegralZoneDegrees, 10.0, 0.0,
+               "cross-domain replay records candidate integral zone");
+    expectNear(integralReplayComparison.legacy.errorP95Degrees,
+               syntheticComparison.legacy.errorP95Degrees, 0.0,
+               "candidate integral leaves the frozen legacy comparator unchanged");
+    expectTrue(std::abs(integralReplayComparison.candidate.requestedCounts -
+                   syntheticComparison.candidate.requestedCounts) > 1e-6,
+               "candidate integral changes only the candidate control request");
+    const auto integralSummaryPath = std::filesystem::temp_directory_path() /
+        "xen_cross_domain_integral_summary.csv";
+    CrossDomainReplay::WriteSummary(
+        integralSummaryPath, { integralReplayComparison });
+    std::ifstream integralSummary(integralSummaryPath);
+    std::string integralSummaryHeader;
+    std::string integralSummaryRow;
+    std::getline(integralSummary, integralSummaryHeader);
+    std::getline(integralSummary, integralSummaryRow);
+    expectTrue(integralSummaryHeader.find(
+                   "CandidateIntegralTimeMs,CandidateIntegralZoneDeg") !=
+                   std::string::npos &&
+               integralSummaryRow.find(",500.000000,10.000000,") !=
+                   std::string::npos,
+               "cross-domain summary audits candidate integral parameters");
+    std::error_code integralSummaryError;
+    std::filesystem::remove(integralSummaryPath, integralSummaryError);
     CrossDomainReplay::Variant finiteResponseVariant = syntheticVariant;
     finiteResponseVariant.commandToFrameDelayMs = 20.0;
     finiteResponseVariant.commandResponseMs = 20.0;

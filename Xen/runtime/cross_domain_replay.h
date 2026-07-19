@@ -148,6 +148,9 @@ struct Comparison
     double candidateManeuverRateThresholdDegreesPerSecond = 12.0;
     double candidateManeuverHoldSeconds = 0.120;
     double candidateMaxCountsPerSecond = 1440.0;
+    // 仅供跨域离线候选审计；默认关闭，运行时配置与active能力不由此入口修改。
+    double candidateIntegralTimeSeconds = 0.0;
+    double candidateIntegralZoneDegrees = 1.0;
     double feedforwardGain = 0.0;
     double leadHorizonSeconds = 0.0;
     double leadStrength = 0.0;

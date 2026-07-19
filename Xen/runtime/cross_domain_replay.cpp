@@ -427,6 +427,15 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             settings.candidateMaxCountsPerSecond > 0.0
         ? std::clamp(settings.candidateMaxCountsPerSecond, 1.0, 100000.0)
         : baselineMaxCountsPerSecond;
+    comparison.candidateIntegralTimeSeconds =
+        std::isfinite(settings.integralTimeSeconds) &&
+            settings.integralTimeSeconds > 0.0
+        ? std::clamp(settings.integralTimeSeconds, 0.050, 2.0)
+        : 0.0;
+    comparison.candidateIntegralZoneDegrees =
+        std::isfinite(settings.integralZoneDegrees)
+        ? std::clamp(settings.integralZoneDegrees, 0.0, 10.0)
+        : 1.0;
     comparison.feedforwardGain = std::isfinite(settings.feedforwardGain)
         ? std::clamp(settings.feedforwardGain, 0.0, 2.0)
         : 0.0;
@@ -543,8 +552,8 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         comparison.reversalFeedforwardBoost;
     candidateSettings.reversalFeedforwardSeconds =
         comparison.reversalFeedforwardSeconds;
-    candidateSettings.integralTimeSeconds = settings.integralTimeSeconds;
-    candidateSettings.integralZoneDegrees = settings.integralZoneDegrees;
+    candidateSettings.integralTimeSeconds = comparison.candidateIntegralTimeSeconds;
+    candidateSettings.integralZoneDegrees = comparison.candidateIntegralZoneDegrees;
     candidateSettings.settleErrorDegrees = settings.settleErrorDegrees;
     candidateSettings.settleRateDegreesPerSecond = settings.settleRateDegreesPerSecond;
     candidateSettings.reverseConfirmationSeconds = settings.reverseConfirmationSeconds;
@@ -1057,7 +1066,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,CommandCenterMs,CommandResponseMs,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommandCommitHorizonMs,CandidateSettleEntryCommandGuard,CandidateSettleEntryCommandHold,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,CommandCenterMs,CommandResponseMs,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,CandidateIntegralTimeMs,CandidateIntegralZoneDeg,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommandCommitHorizonMs,CandidateSettleEntryCommandGuard,CandidateSettleEntryCommandHold,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -1074,6 +1083,8 @@ void WriteSummary(const std::filesystem::path& path,
                << item.candidateManeuverRateThresholdDegreesPerSecond << ','
                << item.candidateManeuverHoldSeconds * 1000.0 << ','
                << item.candidateMaxCountsPerSecond << ','
+               << item.candidateIntegralTimeSeconds * 1000.0 << ','
+               << item.candidateIntegralZoneDegrees << ','
                << item.feedforwardGain << ','
                << item.leadHorizonSeconds * 1000.0 << ','
                << item.leadStrength << ','
