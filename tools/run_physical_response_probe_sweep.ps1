@@ -20,7 +20,8 @@ param(
     [int]$TailMs = 500,
     [int]$IntervalMs = 500,
     [switch]$ContinueOnFailure,
-    [switch]$StopOnFailure
+    [switch]$StopOnFailure,
+    [switch]$SmokeTest
 )
 
 Set-StrictMode -Version Latest
@@ -34,6 +35,10 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "Config fi
 $countList = @($Counts)
 $invalidCounts = @($countList | Where-Object { $_ -le 0 })
 if ($countList.Count -eq 0 -or $invalidCounts.Count -gt 0) { throw 'Counts must contain positive integers.' }
+if ($SmokeTest) {
+    $countList = @(32)
+    $Runs = 1
+}
 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
 $results = [System.Collections.Generic.List[object]]::new()
