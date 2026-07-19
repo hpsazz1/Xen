@@ -12,10 +12,11 @@ enum class ManeuverLosEstimatorMode
     ManeuverGatedConstantAcceleration
 };
 
-// r62 离线正负样本共同通过的命令响应速率裕量。只用于 DML shadow 的机动证据门控，
+// r64 静止目标重复实测与 jump/reverse 联合复放选出的命令响应速率裕量。
+// 35 ms 是消除新静止误触的首个候选；它只用于 DML shadow 的机动证据门控，
 // 不修改 LOS 测量、Kalman 状态、12 度/秒物理门槛或正式设备输出。
 inline constexpr double kManeuverResponseRateUncertaintyGain = 1.25;
-inline constexpr double kManeuverResponseRateUncertaintyTailMs = 20.0;
+inline constexpr double kManeuverResponseRateUncertaintyTailMs = 35.0;
 
 inline const char* maneuverLosEstimatorModeName(ManeuverLosEstimatorMode mode)
 {

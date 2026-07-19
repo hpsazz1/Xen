@@ -170,7 +170,7 @@ foreach ($csvFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -
             -not (Test-NearValue $_.AimPipelineManeuverRateThresholdDps 12.0 0.001) -or
             -not (Test-NearValue $_.AimPipelineManeuverHoldMs 120.0 0.001) -or
             -not (Test-NearValue $_.ManeuverRateUncertaintyGain 1.25 0.001) -or
-            -not (Test-NearValue $_.ManeuverRateUncertaintyTailMs 20.0 0.001) -or
+            -not (Test-NearValue $_.ManeuverRateUncertaintyTailMs 35.0 0.001) -or
             -not (Test-FiniteNumber $_.AimPipelineManeuverHoldRemainingMs -NonNegative) -or
             -not (Test-FiniteNumber $_.AimPipelineManeuverRateUncertaintyX -NonNegative) -or
             -not (Test-FiniteNumber $_.AimPipelineManeuverRateUncertaintyY -NonNegative) -or

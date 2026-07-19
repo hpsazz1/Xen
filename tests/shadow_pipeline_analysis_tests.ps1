@@ -47,10 +47,10 @@ try {
     $candidateRoot = Join-Path $temporaryRoot 'maneuver-candidate'
     New-Item -ItemType Directory -Path $candidateRoot | Out-Null
     $candidateHeader = $header + ',AimPipelineEstimatorMode,AimPipelineManeuverModelActive,AimPipelineEstimatorSelectionChanged,AimPipelineEstimatorSelectionCount,AimPipelineCaJerkStdDps3,AimPipelineManeuverRateThresholdDps,AimPipelineManeuverHoldMs,AimPipelineManeuverHoldRemainingMs,AimPipelineManeuverRateUncertaintyX,AimPipelineManeuverRateUncertaintyY,AimPipelineManeuverRateEvidenceDps,AimPipelineModelAngleDeltaDeg,AimPipelineModelRateDeltaDps,AimPipelineBaselineCovarianceX,AimPipelineBaselineCovarianceY,AimPipelineCaCovarianceX,AimPipelineCaCovarianceY,ViewMotionShadowValid,CommandToFrameDelayMs,CommandResponseMs,ManeuverRateUncertaintyGain,ManeuverRateUncertaintyTailMs,AppliedCameraRateYawDps,AppliedCameraRatePitchDps,ManeuverUncertaintyRateYawDps,ManeuverUncertaintyRatePitchDps,ViewMotionManeuverRateUncertaintyX,ViewMotionManeuverRateUncertaintyY'
-    $inactiveSuffix = ',maneuver_gated_ca,0,0,0,8000,12,120,0,0,0,0,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,20,0,0,0,0,0,0'
-    $activationSuffix = ',maneuver_gated_ca,1,1,1,8000,12,120,120,2.5,0,12.3,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,20,2,0,2,0,2.5,0'
-    $activeSuffix = ',maneuver_gated_ca,1,0,1,8000,12,120,120,2.5,0,12.3,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,20,2,0,2,0,2.5,0'
-    $deactivationSuffix = ',maneuver_gated_ca,0,1,2,8000,12,120,0,0,0,2,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,20,0,0,0,0,0,0'
+    $inactiveSuffix = ',maneuver_gated_ca,0,0,0,8000,12,120,0,0,0,0,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,35,0,0,0,0,0,0'
+    $activationSuffix = ',maneuver_gated_ca,1,1,1,8000,12,120,120,2.5,0,12.3,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,35,2,0,2,0,2.5,0'
+    $activeSuffix = ',maneuver_gated_ca,1,0,1,8000,12,120,120,2.5,0,12.3,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,35,2,0,2,0,2.5,0'
+    $deactivationSuffix = ',maneuver_gated_ca,0,1,2,8000,12,120,0,0,0,2,0.1,1,0.02,0.03,0.02,0.03,1,20,20,1.25,35,0,0,0,0,0,0'
     foreach ($scenario in @('static', 'horizontal_left', 'horizontal_right', 'horizontal_reverse', 'horizontal_jump')) {
         $moving = $scenario -match 'reverse|jump'
         @(
@@ -72,7 +72,7 @@ try {
     Assert-Equal 2 $candidateMetrics[-1].ManeuverRunningActiveSamples `
         'Running maneuver activation must be reported separately.'
     Assert-Equal 0 $candidateMetrics[-1].ViewResponseContractViolations `
-        'The frozen 20/20 finite response must pass validation.'
+        'The frozen 20/20 finite response and 35 ms uncertainty tail must pass validation.'
 
     @($candidateHeader, ($activeRow + $inactiveSuffix),
         ($pausedRow + $activationSuffix), ($resumedRow + $deactivationSuffix)) |
@@ -104,9 +104,9 @@ try {
     $invalidResponseRoot = Join-Path $temporaryRoot 'invalid-response'
     New-Item -ItemType Directory -Path $invalidResponseRoot | Out-Null
     @($candidateHeader,
-        (($activeRow + $inactiveSuffix) -replace ',1,20,20,1.25,20,0,0,0,0,0,0$', ',1,20,0,1.25,20,0,0,0,0,0,0'),
-        (($pausedRow + $inactiveSuffix) -replace ',1,20,20,1.25,20,0,0,0,0,0,0$', ',1,20,0,1.25,20,0,0,0,0,0,0'),
-        (($resumedRow + $inactiveSuffix) -replace ',1,20,20,1.25,20,0,0,0,0,0,0$', ',1,20,0,1.25,20,0,0,0,0,0,0')) |
+        (($activeRow + $inactiveSuffix) -replace ',1,20,20,1.25,35,0,0,0,0,0,0$', ',1,20,0,1.25,35,0,0,0,0,0,0'),
+        (($pausedRow + $inactiveSuffix) -replace ',1,20,20,1.25,35,0,0,0,0,0,0$', ',1,20,0,1.25,35,0,0,0,0,0,0'),
+        (($resumedRow + $inactiveSuffix) -replace ',1,20,20,1.25,35,0,0,0,0,0,0$', ',1,20,0,1.25,35,0,0,0,0,0,0')) |
         Set-Content -LiteralPath (Join-Path $invalidResponseRoot 'profile.csv') -Encoding UTF8
     $invalidResponseFailed = $false
     try {

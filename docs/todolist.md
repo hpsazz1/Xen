@@ -8,7 +8,8 @@
 
 ## 当前待办
 
-- [ ] **[P1] 物理响应与Profile标定阶段结论**：孤立脉冲已确认约`0.5 px/count`、`t50≈14 ms`、`t90≈15 ms`；被动Profile多轮X轴比例和双轴有效窗口仍不稳定，保持`profile_calibration_enabled=false`、`HOLD_SHADOW`和r63，不把单轮标定结果写入Profile。后续仅在重新设计分轴主动标定协议并通过跨轮重复性门槛后再评估，详见`docs/162物理响应与Profile标定阶段结论20260719.md`。
+- [ ] **[P0-6F r64 static实机门禁]**：最新3轮静止目标Profile采集合计6099帧，r63第2轮首段恢复后约145 ms出现14帧运行态机动误启用；联合既有jump/reverse正样本复放确认35 ms是首次消除新static失败且保留全部正样本运行段覆盖的尾部候选。r64只扩大DML shadow不确定度尾部，不改变相机补偿、Kalman、门槛、保持或设备输出；下一步仅采一轮九点static，要求运行态启用和settled侵入均为0，详见`docs/163r63静止回退与r64尾部候选20260719.md`。
+- [ ] **[P1] 分轴主动Profile标定协议**：孤立脉冲已确认约`0.5 px/count`、`t50≈14 ms`、`t90≈15 ms`；被动Profile多轮X轴比例和双轴有效窗口仍不稳定，继续保持`profile_calibration_enabled=false`、`HOLD_SHADOW`，不把单轮结果写入Profile。待r64 static门禁闭环后，再设计分轴主动标定协议并要求跨轮重复性，详见`docs/162物理响应与Profile标定阶段结论20260719.md`。
 
 ### DML性能阶段（已结束）
 
