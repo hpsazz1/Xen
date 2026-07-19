@@ -17,7 +17,8 @@ param(
     [int]$BaselineMs = 300,
     [int]$TailMs = 500,
     [int]$IntervalMs = 500,
-    [switch]$ContinueOnFailure
+    [switch]$ContinueOnFailure,
+    [switch]$StopOnFailure
 )
 
 Set-StrictMode -Version Latest
@@ -60,7 +61,7 @@ foreach ($count in $countList) {
     & $probePath @arguments
     $exitCode = $LASTEXITCODE
     $results.Add([pscustomobject]@{ Counts = $count; Output = $trialOutput; ExitCode = $exitCode })
-    if ($exitCode -ne 0 -and -not $ContinueOnFailure) {
+    if ($exitCode -ne 0 -and $StopOnFailure -and -not $ContinueOnFailure) {
         throw "Probe failed for counts=$count with exit code $exitCode. Output was preserved at $trialOutput"
     }
 }
