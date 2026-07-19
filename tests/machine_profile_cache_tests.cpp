@@ -51,6 +51,10 @@ MachineProfileRecord stableRecord()
     record.key.fovScaled = false;
     record.key.baseFovDegrees = 0.0;
     record.key.controllerRevision = 64;
+    record.evidence.probeRoiX = 120;
+    record.evidence.probeRoiY = 100;
+    record.evidence.probeRoiWidth = 80;
+    record.evidence.probeRoiHeight = 80;
     record.evidence.pixelsPerCountX = 0.515625;
     record.evidence.pixelsPerCountY = 0.5;
     record.evidence.degreesPerCountX = 0.021354;

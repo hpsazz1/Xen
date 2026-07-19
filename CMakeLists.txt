@@ -482,6 +482,29 @@ if(BUILD_TESTING)
         target_compile_options(xen_physical_response_fit PRIVATE /utf-8 /W4 /permissive- /EHsc)
     endif()
 
+    add_executable(xen_machine_profile_candidate
+        "${SRC_DIR}/runtime/machine_profile_candidate_main.cpp"
+        "${SRC_DIR}/runtime/machine_profile_cache.cpp"
+        "${SRC_DIR}/runtime/build_identity.cpp"
+        "${SRC_DIR}/config/config.cpp")
+    set_target_properties(xen_machine_profile_candidate PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools/$<CONFIG>")
+    target_include_directories(xen_machine_profile_candidate PRIVATE "${SRC_DIR}")
+    target_link_libraries(xen_machine_profile_candidate PRIVATE bcrypt)
+    target_compile_features(xen_machine_profile_candidate PRIVATE cxx_std_17)
+    if(AIMBOT_USE_CUDA)
+        target_compile_definitions(xen_machine_profile_candidate PRIVATE USE_CUDA)
+    endif()
+    if(MSVC)
+        target_compile_options(xen_machine_profile_candidate PRIVATE /utf-8 /W4 /permissive- /EHsc)
+    endif()
+    add_test(
+        NAME xen.runtime.machine_profile_candidate
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File
+            "${CMAKE_SOURCE_DIR}/tests/machine_profile_candidate_tests.ps1"
+            -CandidateExe "$<TARGET_FILE:xen_machine_profile_candidate>"
+            -Backend "${AIMBOT_BUILD_BACKEND}")
+
     if(AIMBOT_NDI_AVAILABLE)
         add_executable(xen_physical_response_probe
             "${SRC_DIR}/runtime/physical_response_probe_main.cpp"

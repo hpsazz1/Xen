@@ -61,6 +61,7 @@
 | [分轴主动Profile标定协议](171分轴主动Profile标定协议20260720.md) | 使用三轮分轴正负孤立脉冲、正交泄漏和跨轮硬门禁形成只读Profile候选。 |
 | [分轴主动Profile三轮实测](172分轴主动Profile三轮实测20260720.md) | 查看r64三轮360脉冲的比例、时序、离群复核和人工候选结论。 |
 | [独立机器Profile缓存与四级降级](173独立机器Profile缓存与四级降级20260720.md) | 了解严格失效键、只读schema、Level 0～3决策及shadow安全边界。 |
+| [人工机器Profile候选生成与失效审计](174人工机器Profile候选生成与失效审计20260720.md) | 从人工审核通过的主动协议生成不可覆盖候选，并核对精确命中和21字段失效。 |
 | [r60 DML机动估计影子接入](134r60DML机动估计影子接入20260717.md) | 使用共享估计器采集DML/NDI模型选择、静止驻留和暂停恢复诊断。 |
 | [r60静止延迟30毫秒反证](138r60静止延迟30毫秒反证20260717.md) | 对照10/20/30/60 ms并结束固定延迟扫描，确定有限响应候选边界。 |
 | [r61有限相机响应影子实现](139r61有限相机响应影子实现20260717.md) | 使用20 ms响应中心和20 ms宽度复测DML九点static。 |
@@ -110,6 +111,14 @@ tools\run_physical_response_probe_sweep.ps1 -ProbeExe E:\Dev\Xen\build\dml\tools
 ```
 
 ROI坐标必须按现场预览确认，示例值不能盲用。脚本按每轮、每幅值执行X+/X-/Y+/Y-孤立脉冲，并自动调用`analyze_active_profile_protocol.ps1`。正式门禁要求构建身份唯一、至少三轮、每轴每方向至少5个有效trial、画面位移极性与counts相反、t50≤t90≤100 ms、比例位于0.25～0.75 px/count、正负方向不对称不超过15%、同轮幅值线性跨度不超过15%、跨轮比例跨度不超过15%、t50/t90跨度不超过5 ms、正交泄漏P95不超过10%。通过只输出`MANUAL_REVIEW_ONLY`且固定`ProfileAutoWrite=0`；不得自动修改`[Games]`、灵敏度、yaw/pitch、响应参数或控制器配置。
+
+人工审核通过后，可显式生成独立候选；输出路径必须不存在，探针ROI必须使用采集时的真实值：
+
+```powershell
+build\dml\tools\Release\xen_machine_profile_candidate.exe --config C:\Users\16143\Desktop\Xen\DML\ndi\config.ini --data-root C:\Users\16143\Desktop\Xen\DML\ndi\active_profile_r64_rounds --output C:\Users\16143\Desktop\Xen\DML\ndi\active_profile_r64_rounds\machine_profile_candidate_r64.profile --aim-mode hipfire --probe-roi-x 120 --probe-roi-y 100 --probe-roi-width 80 --probe-roi-height 80 --confirm-manual-review YES
+```
+
+成功必须同时显示`CandidateEnabled=0`、`ReverseLoadLevel=3`、`InvalidationAuditFields=21`和`InvalidationAuditPassed=1`。工具只支持同源NDI协议，拒绝覆盖文件，并用哈希确认没有修改config；生成候选不代表允许运行时或active自动启用。
 
 机动常加速度离线候选在冻结基线命令后追加`--candidate-estimator gated_ca --candidate-jerk-std-dps3 8000 --candidate-maneuver-rate-threshold-dps 12 --candidate-maneuver-hold-ms 120`。该配方只供跨域回放与下一阶段DML shadow验证；`constant_acceleration`全时模型会严重回退static，8/16°/s门槛会损失原通过项，均不得使用。summary中的`ManeuverModelPercent`必须用于检查static误驻留。
 

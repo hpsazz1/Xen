@@ -177,7 +177,9 @@ std::string firstMismatch(const MachineProfileKey& expected,
 
 bool validEvidence(const MachineProfileEvidence& evidence)
 {
-    return finitePositive(evidence.pixelsPerCountX) &&
+    return evidence.probeRoiX >= 0 && evidence.probeRoiY >= 0 &&
+        evidence.probeRoiWidth > 0 && evidence.probeRoiHeight > 0 &&
+        finitePositive(evidence.pixelsPerCountX) &&
         finitePositive(evidence.pixelsPerCountY) &&
         finitePositive(evidence.degreesPerCountX) &&
         finitePositive(evidence.degreesPerCountY) &&
@@ -312,6 +314,10 @@ bool MachineProfileCache::load(const std::string& path)
         !parseBool(values, "FovScaled", parsed.key.fovScaled, error_) ||
         !real("BaseFovDegrees", parsed.key.baseFovDegrees) ||
         !integer("ControllerRevision", parsed.key.controllerRevision) ||
+        !integer("ProbeRoiX", parsed.evidence.probeRoiX) ||
+        !integer("ProbeRoiY", parsed.evidence.probeRoiY) ||
+        !integer("ProbeRoiWidth", parsed.evidence.probeRoiWidth) ||
+        !integer("ProbeRoiHeight", parsed.evidence.probeRoiHeight) ||
         !real("PixelsPerCountX", parsed.evidence.pixelsPerCountX) ||
         !real("PixelsPerCountY", parsed.evidence.pixelsPerCountY) ||
         !real("DegreesPerCountX", parsed.evidence.degreesPerCountX) ||
@@ -403,6 +409,10 @@ bool MachineProfileCache::saveNew(const std::string& path,
     output << "FovScaled=" << (record.key.fovScaled ? 1 : 0) << '\n';
     writeDouble(output, "BaseFovDegrees", record.key.baseFovDegrees);
     output << "ControllerRevision=" << record.key.controllerRevision << '\n';
+    output << "ProbeRoiX=" << record.evidence.probeRoiX << '\n'
+           << "ProbeRoiY=" << record.evidence.probeRoiY << '\n'
+           << "ProbeRoiWidth=" << record.evidence.probeRoiWidth << '\n'
+           << "ProbeRoiHeight=" << record.evidence.probeRoiHeight << '\n';
     writeDouble(output, "PixelsPerCountX", record.evidence.pixelsPerCountX);
     writeDouble(output, "PixelsPerCountY", record.evidence.pixelsPerCountY);
     writeDouble(output, "DegreesPerCountX", record.evidence.degreesPerCountX);

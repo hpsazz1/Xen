@@ -38,6 +38,10 @@ struct MachineProfileKey
 /** @brief 主动协议产生的只读证据；不包含任何自动应用或配置覆盖开关。 */
 struct MachineProfileEvidence
 {
+    int probeRoiX = 0;
+    int probeRoiY = 0;
+    int probeRoiWidth = 0;
+    int probeRoiHeight = 0;
     double pixelsPerCountX = 0.0;
     double pixelsPerCountY = 0.0;
     double degreesPerCountX = 0.0;
