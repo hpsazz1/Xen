@@ -321,8 +321,7 @@ public:
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (!state_->device || !state_->device->isOpen())
             return false;
-        state_->device->move(dx, dy);
-        return true;
+        return state_->device->move(dx, dy);
     }
     bool leftDown() override
     {

@@ -30,8 +30,8 @@ public:
     /** @brief 设备是否已打开 */
     bool isOpen() const { return is_open_; }
 
-    /** @brief 鼠标相对移动 (x, y) */
-    void move(int x, int y);
+    /** @brief 鼠标相对移动 (x, y)，返回 KMBOX SDK 的发送结果 */
+    bool move(int x, int y);
     /** @brief 模拟人工鼠标移动（指定时间） */
     void moveAuto(int x, int y, int ms);
     /** @brief 贝塞尔曲线鼠标移动 */

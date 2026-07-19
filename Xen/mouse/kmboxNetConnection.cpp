@@ -121,10 +121,10 @@ KmboxNetConnection::~KmboxNetConnection()
  *
  * 内部调用 kmNet_mouse_move()，将 int 参数强制转换为 short 后传递给底层 SDK。
  */
-void KmboxNetConnection::move(int x, int y)
+bool KmboxNetConnection::move(int x, int y)
 {
-    if (!is_open_) return;
-    kmNet_mouse_move((short)x, (short)y);
+    if (!is_open_) return false;
+    return kmNet_mouse_move((short)x, (short)y) == 0;
 }
 
 /**
