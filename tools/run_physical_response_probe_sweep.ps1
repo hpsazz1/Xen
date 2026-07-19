@@ -8,7 +8,9 @@ param(
     [string]$NdiSource,
     [Parameter(Mandatory = $true)]
     [string]$OutputRoot,
-    [int[]]$Counts = @(8, 16, 32, 64),
+    [int[]]$Counts = @(16, 32, 64),
+    [ValidateRange(1, 100)]
+    [int]$Runs = 3,
     [int]$RoiX = 120,
     [int]$RoiY = 100,
     [int]$RoiWidth = 80,
@@ -35,11 +37,12 @@ if ($countList.Count -eq 0 -or $invalidCounts.Count -gt 0) { throw 'Counts must 
 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
 $results = [System.Collections.Generic.List[object]]::new()
-foreach ($count in $countList) {
-    $trialOutput = Join-Path $outputPath ("counts_{0}" -f $count)
-    if (Test-Path -LiteralPath $trialOutput) {
-        throw "Output directory already exists; choose a new OutputRoot: $trialOutput"
-    }
+for ($run = 1; $run -le $Runs; $run++) {
+    foreach ($count in $countList) {
+        $trialOutput = Join-Path $outputPath ("counts{0}_run{1}" -f $count, $run)
+        if (Test-Path -LiteralPath $trialOutput) {
+            throw "Output directory already exists; choose a new OutputRoot: $trialOutput"
+        }
 
     $arguments = @(
         '--config', $configPath,
@@ -57,12 +60,13 @@ foreach ($count in $countList) {
         '--interval-ms', $IntervalMs,
         '--confirm-device-motion', 'YES'
     )
-    Write-Host "[probe] counts=$count output=$trialOutput" -ForegroundColor Cyan
-    & $probePath @arguments
-    $exitCode = $LASTEXITCODE
-    $results.Add([pscustomobject]@{ Counts = $count; Output = $trialOutput; ExitCode = $exitCode })
-    if ($exitCode -ne 0 -and $StopOnFailure -and -not $ContinueOnFailure) {
-        throw "Probe failed for counts=$count with exit code $exitCode. Output was preserved at $trialOutput"
+        Write-Host "[probe] run=$run counts=$count output=$trialOutput" -ForegroundColor Cyan
+        & $probePath @arguments
+        $exitCode = $LASTEXITCODE
+        $results.Add([pscustomobject]@{ Run = $run; Counts = $count; Output = $trialOutput; ExitCode = $exitCode })
+        if ($exitCode -ne 0 -and $StopOnFailure -and -not $ContinueOnFailure) {
+            throw "Probe failed for run=$run counts=$count with exit code $exitCode. Output was preserved at $trialOutput"
+        }
     }
 }
 
