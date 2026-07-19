@@ -82,6 +82,7 @@ Issues=
         $result -notmatch 'CandidateCreated=1' -or
         $result -notmatch 'CandidateEnabled=0' -or
         $result -notmatch 'ReverseLoadLevel=3' -or
+        $result -notmatch 'CalibratedResponseEnabled=0' -or
         $result -notmatch 'InvalidationAuditFields=21' -or
         $result -notmatch 'InvalidationAuditPassed=1' -or
         $result -notmatch 'RuntimeKeyRoi=1120,560,320,320' -or

@@ -673,6 +673,8 @@ int main(int argc, char** argv)
               << "CandidateEnabled=0\n"
               << "ProfileAutoWrite=0\n"
               << "ReverseLoadLevel=3\n"
+              << "CalibratedResponseEnabled="
+              << (exact.calibratedViewResponseEnabled ? 1 : 0) << '\n'
               << "InvalidationAuditFields=" << auditedFields << '\n'
               << "InvalidationAuditPassed=1\n"
               << "BuildIdentity=" << record.evidence.buildIdentity << '\n'

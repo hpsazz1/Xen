@@ -95,6 +95,19 @@ struct MachineProfileDecision
     std::string reason;
 };
 
+/** @brief 在已审核响应证据与显式配置之间作唯一选择，避免调用方按Level猜测应用资格。 */
+struct MachineProfileViewResponse
+{
+    double commandToFrameDelayMs = 0.0;
+    double commandResponseMs = 0.0;
+    bool calibratedEvidenceApplied = false;
+};
+
+MachineProfileViewResponse selectMachineProfileViewResponse(
+    const MachineProfileDecision& decision,
+    double configuredDelayMs,
+    double configuredResponseMs);
+
 class MachineProfileCache
 {
 public:

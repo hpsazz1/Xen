@@ -18,7 +18,8 @@
 - [x] **[P1] 分轴主动Profile三轮实测**：`DML|13f67257f5c2|r64`完成3轮、9文件、360个孤立脉冲，360/360有效且全部硬门禁通过；X/Y候选分别为0.515625/0.500000 px/count，t90约14.51/14.50 ms，最坏方向不对称6.061%、线性跨度6.061%、跨轮比例跨度6.25%、时序跨度0.981 ms、串轴泄漏P95为0。12个`t90>20 ms`离群分散且最坏61.03 ms，仍低于100 ms硬门槛，不形成轴向偏差。结果仅为`MANUAL_REVIEW_ONLY`且`ProfileAutoWrite=0`，详见`docs/172分轴主动Profile三轮实测20260720.md`。
 - [x] **[P1] 独立机器标定缓存与失效降级决策**：新增schema v1只读缓存，严格键覆盖游戏/瞄准模式、捕获源、完整源与ROI、后端、输入设备、灵敏度/FOV和控制器修订；证据校验覆盖比例、t50/t90、可信度、trial、协议、身份和摘要。默认关闭、路径为空、拒绝相对路径和覆盖已有文件；Level 3精确命中、Level 2保守用户角度、Level 1归一化诊断、Level 0安全诊断均进入UI/CSV，Level 0/1停止shadow角度链，active与legacy不变。DML增量CTest 12/12通过，详见`docs/173独立机器Profile缓存与四级降级20260720.md`。
 - [x] **[P1] 人工机器缓存候选生成与离线失效审计**：不可覆盖生成器严格验证协议门禁、BOM/带引号summary、NDI配置、后端与r64身份，并用本轮360脉冲结果生成独立候选但不启用；同一C++加载器反向精确命中Level 3，21个键字段逐项变化均立即降到Level 2。用户config、`[Games]`、legacy和active均未修改，详见`docs/174人工机器Profile候选生成与失效审计20260720.md`。
-- [ ] **[P1] 人工启用后的机器Profile shadow实机验收**：仅在人工明确配置独立候选路径后采集shadow CSV，核对UI/CSV精确命中Level 3，并现场改变NDI源等安全字段确认Level 2降级；验收前不得启用active或修改legacy。
+- [x] **[P1] 人工启用后的机器Profile命中与失效验收**：实机CSV证明Level 3精确命中、`aimMode`变化立即降至Level 2，三场景三轮中两级均保持身份、时序和双重命令抑制零违例。进一步A/B发现L3的14.096/0 ms响应覆盖使static运行态机动误启用121/2520，而L2的20/20 ms为0/2489；正式门禁否决响应覆盖，详见`docs/175机器Profile响应覆盖阻断与解耦20260720.md`。
+- [ ] **[P1] 解耦响应后的Level 3 static复验**：使用修复后构建和原r64候选采集三轮static，要求精确命中、`MachineProfileCalibratedResponseEnabled=0`、实际响应20/20 ms、运行态机动启用为0；通过后再采集jump/reverse，active继续冻结。
 
 ### DML性能阶段（已结束）
 

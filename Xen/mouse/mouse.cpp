@@ -873,12 +873,19 @@ void MouseThread::refreshMachineProfileDecision()
         std::lock_guard<std::mutex> lock(machineProfileDecisionMutex);
         machineProfileDecision = decision;
     }
-    if (decision.level == MachineProfileLevel::CalibratedAngle)
-    {
-        appliedViewMotionModel.configure(
-            decision.commandToFrameDelayMs,
-            decision.commandResponseMs);
-    }
+    double configuredResponseMs = 0.0;
+#ifndef USE_CUDA
+    configuredResponseMs = config.aim_shadow_command_response_ms;
+#endif
+    // 精确命中只表示比例证据可用。响应模型必须另有显式资格；否则每次刷新都恢复
+    // 配置响应，防止先前L3状态残留14/0 ms并绕过static门禁。
+    const MachineProfileViewResponse response = selectMachineProfileViewResponse(
+        decision,
+        config.aim_shadow_command_to_frame_delay_ms,
+        configuredResponseMs);
+    appliedViewMotionModel.configure(
+        response.commandToFrameDelayMs,
+        response.commandResponseMs);
 }
 
 /**
@@ -1845,6 +1852,8 @@ void MouseThread::moveMousePivot(
         pf->machineProfileCacheRequested = profileDecision.cacheRequested;
         pf->machineProfileCacheLoaded = profileDecision.cacheLoaded;
         pf->machineProfileCacheMatched = profileDecision.cacheMatched;
+        pf->machineProfileCalibratedResponseEnabled =
+            profileDecision.calibratedViewResponseEnabled;
         pf->machineProfilePredictionEnabled = profileDecision.predictionEnabled;
         pf->machineProfileIntegralEnabled = profileDecision.integralEnabled;
         pf->machineProfileFeedforwardScale =

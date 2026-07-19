@@ -230,6 +230,20 @@ const char* machineProfileLevelName(MachineProfileLevel level)
     }
 }
 
+MachineProfileViewResponse selectMachineProfileViewResponse(
+    const MachineProfileDecision& decision,
+    double configuredDelayMs,
+    double configuredResponseMs)
+{
+    MachineProfileViewResponse response;
+    response.calibratedEvidenceApplied = decision.calibratedViewResponseEnabled;
+    response.commandToFrameDelayMs = response.calibratedEvidenceApplied
+        ? decision.commandToFrameDelayMs : configuredDelayMs;
+    response.commandResponseMs = response.calibratedEvidenceApplied
+        ? decision.commandResponseMs : configuredResponseMs;
+    return response;
+}
+
 void MachineProfileCache::clear()
 {
     loaded_ = false;
@@ -499,7 +513,9 @@ MachineProfileDecision MachineProfileCache::evaluate(
 
     decision.level = MachineProfileLevel::CalibratedAngle;
     decision.cacheMatched = true;
-    decision.calibratedViewResponseEnabled = true;
+    // 主动脉冲只证明单次阶跃的比例和时序，尚未证明把t50直接作为零宽度
+    // 相机响应能通过static门禁。证据值继续保留用于审计，但不得自动接管运行时响应。
+    decision.calibratedViewResponseEnabled = false;
     decision.integralEnabled = true;
     decision.feedforwardConfidenceScale = 1.0;
     decision.degreesPerCountX = record_.evidence.degreesPerCountX;

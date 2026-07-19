@@ -92,13 +92,28 @@ int main()
     const MachineProfileDecision exact = cache.evaluate(record.key, true, true);
     expectLevel(exact, MachineProfileLevel::CalibratedAngle,
                 "exact key selects calibrated angle");
-    expectTrue(exact.cacheMatched && exact.calibratedViewResponseEnabled &&
+    expectTrue(exact.cacheMatched && !exact.calibratedViewResponseEnabled &&
                exact.feedforwardConfidenceScale == 1.0 &&
                exact.predictionEnabled && exact.integralEnabled &&
                exact.commandToFrameDelayMs > 14.0 &&
                exact.commandToFrameDelayMs < 14.2 &&
                exact.commandResponseMs == 0.0,
-               "calibrated level exposes bounded feature policy");
+               "calibrated level keeps response evidence without applying it");
+    const MachineProfileViewResponse configuredResponse =
+        selectMachineProfileViewResponse(exact, 20.0, 20.0);
+    expectTrue(!configuredResponse.calibratedEvidenceApplied &&
+               configuredResponse.commandToFrameDelayMs == 20.0 &&
+               configuredResponse.commandResponseMs == 20.0,
+               "unqualified active evidence preserves configured response");
+    MachineProfileDecision separatelyQualified = exact;
+    separatelyQualified.calibratedViewResponseEnabled = true;
+    const MachineProfileViewResponse calibratedResponse =
+        selectMachineProfileViewResponse(separatelyQualified, 20.0, 20.0);
+    expectTrue(calibratedResponse.calibratedEvidenceApplied &&
+               calibratedResponse.commandToFrameDelayMs > 14.0 &&
+               calibratedResponse.commandToFrameDelayMs < 14.2 &&
+               calibratedResponse.commandResponseMs == 0.0,
+               "separately qualified evidence can explicitly select calibrated response");
 
     MachineProfileKey changedSource = record.key;
     changedSource.captureSource = "different NDI source";

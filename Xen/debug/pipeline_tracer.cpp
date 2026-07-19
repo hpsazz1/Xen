@@ -222,7 +222,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "ProfileCalibrationRmseX,ProfileCalibrationRmseY,ProfileCalibrationCorrelationX,ProfileCalibrationCorrelationY,"
          << "ProfileCalibrationConfidenceX,ProfileCalibrationConfidenceY,ProfileCalibrationSamplesX,ProfileCalibrationSamplesY,"
          << "ProfileCalibrationActiveSamplesX,ProfileCalibrationActiveSamplesY,ProfileCalibrationOverallConfidence,"
-         << "MachineProfileLevel,MachineProfileCacheRequested,MachineProfileCacheLoaded,MachineProfileCacheMatched,MachineProfilePredictionEnabled,MachineProfileIntegralEnabled,MachineProfileFeedforwardScale,MachineProfileDegreesPerCountX,MachineProfileDegreesPerCountY,MachineProfileReason,"
+         << "MachineProfileLevel,MachineProfileCacheRequested,MachineProfileCacheLoaded,MachineProfileCacheMatched,MachineProfileCalibratedResponseEnabled,MachineProfilePredictionEnabled,MachineProfileIntegralEnabled,MachineProfileFeedforwardScale,MachineProfileDegreesPerCountX,MachineProfileDegreesPerCountY,MachineProfileReason,"
          << "ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY,IntegralTimeSeconds,MaxCountsPerSecond,ConditionalSpeedBudgetActive,FrameCountLimit,ControllerUpdateIntervalMs,"
          << "ErrorMotion,ErrorMotionX,ErrorMotionY,SettleMotionThreshold,MovingInsideSettle,MovingInsideSettleX,MovingInsideSettleY,HorizontalCatchUp,VerticalCatchUp,SpeedLimited,Settled,SettledX,SettledY,QueuedMoveCount\n";
 
@@ -452,6 +452,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << (f.machineProfileCacheRequested ? '1' : '0') << ','
              << (f.machineProfileCacheLoaded ? '1' : '0') << ','
              << (f.machineProfileCacheMatched ? '1' : '0') << ','
+             << (f.machineProfileCalibratedResponseEnabled ? '1' : '0') << ','
              << (f.machineProfilePredictionEnabled ? '1' : '0') << ','
              << (f.machineProfileIntegralEnabled ? '1' : '0') << ','
              << f.machineProfileFeedforwardScale << ','

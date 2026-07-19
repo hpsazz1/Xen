@@ -117,6 +117,7 @@ struct PipelineFrame
     bool machineProfileCacheRequested = false; ///< 用户是否显式请求读取独立缓存
     bool machineProfileCacheLoaded = false; ///< 缓存文件是否完整加载并通过schema/证据校验
     bool machineProfileCacheMatched = false; ///< 当前全部失效键是否精确匹配
+    bool machineProfileCalibratedResponseEnabled = false; ///< 主动证据是否获准覆盖配置响应
     bool machineProfilePredictionEnabled = false; ///< 当前等级是否允许状态预测
     bool machineProfileIntegralEnabled = false; ///< 当前等级是否允许角度积分
     double machineProfileFeedforwardScale = 0.0; ///< 当前等级约束后的前馈可信度倍率

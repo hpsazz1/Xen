@@ -1593,6 +1593,9 @@ int main()
         "ResponseSeconds,EffectiveResponseSecondsX,EffectiveResponseSecondsY") != std::string::npos,
         "basic pipeline reports effective per-axis catch-up response");
     expectTrue(traceHeader.find(
+        "MachineProfileCacheMatched,MachineProfileCalibratedResponseEnabled,MachineProfilePredictionEnabled") != std::string::npos,
+        "basic pipeline distinguishes response evidence from application eligibility");
+    expectTrue(traceHeader.find(
         "FrameID,BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision") != std::string::npos,
         "basic pipeline identifies the executable and controller revision");
     expectTrue(traceHeader.find(

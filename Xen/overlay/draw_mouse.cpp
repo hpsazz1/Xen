@@ -527,6 +527,10 @@ static void draw_mouse_page(MouseSettingsPage page)
         ImGui::Text("有效角度比例：X %.6f / Y %.6f deg/count",
             decision.degreesPerCountX, decision.degreesPerCountY);
         ImGui::Text("前馈可信度倍率：%.2f", decision.feedforwardConfidenceScale);
+        ImGui::Text("主动标定响应应用：%s（证据 %.3f / %.3f ms）",
+            decision.calibratedViewResponseEnabled ? "是" : "否",
+            decision.commandToFrameDelayMs,
+            decision.commandResponseMs);
         ImGui::Text("预测 / 积分：%s / %s",
             decision.predictionEnabled ? "允许" : "关闭",
             decision.integralEnabled ? "允许" : "关闭");
