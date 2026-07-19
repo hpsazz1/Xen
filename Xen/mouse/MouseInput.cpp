@@ -326,7 +326,11 @@ public:
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (!state_->device || !state_->device->isReadyForMotion())
             return false;
-        return state_->device->move(0, 0);
+        // 部分 KMBOX 固件会忽略冷启动后的零位移命令；使用最小正负配对脉冲唤醒 HID 通道。
+        const bool positive = state_->device->move(1, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const bool negative = state_->device->move(-1, 0);
+        return positive && negative;
     }
     bool move(int dx, int dy) override
     {
