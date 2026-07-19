@@ -321,6 +321,13 @@ public:
         std::lock_guard<std::mutex> lock(state_->mutex);
         return state_->device && state_->device->isReadyForMotion();
     }
+    bool prepareForMotion() override
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (!state_->device || !state_->device->isReadyForMotion())
+            return false;
+        return state_->device->move(0, 0);
+    }
     bool move(int dx, int dy) override
     {
         std::lock_guard<std::mutex> lock(state_->mutex);

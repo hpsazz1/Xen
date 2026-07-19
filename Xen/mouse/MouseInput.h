@@ -49,6 +49,7 @@ public:
     /** @brief 设备是否已打开 */
     virtual bool isOpen() const = 0;
     virtual bool isReadyForMotion() const { return isOpen(); }
+    virtual bool prepareForMotion() { return isReadyForMotion(); }
     /** @brief 相对移动鼠标 (dx, dy) */
     virtual bool move(int dx, int dy) = 0;
     /** @brief 按下左键 */

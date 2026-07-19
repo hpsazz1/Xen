@@ -238,6 +238,13 @@ int main(int argc, char** argv)
                           : "鼠标设备10秒内未打开\n");
         return 6;
     }
+    // KMBOX 冷启动时首条已确认命令可能仅唤醒 HID 动作通道；零位移预热不会移动或回正鼠标。
+    if (!mouse->prepareForMotion())
+    {
+        std::cerr << "鼠标设备动作通道预热失败\n";
+        return 6;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     NDICapture capture(config.detection_resolution, config.detection_resolution, options.source, 240,
                        config.ndi_source_width, config.ndi_source_height,
