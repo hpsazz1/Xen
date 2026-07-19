@@ -212,9 +212,30 @@ int main(int argc, char** argv)
         return 5;
     }
     auto mouse = CreateMouseInputDevice(config);
-    if (!mouse || !mouse->isOpen())
+    if (!mouse)
     {
-        std::cerr << "鼠标设备未打开\n";
+        std::cerr << "鼠标设备创建失败\n";
+        return 6;
+    }
+    // KMBOX_NET 的连接在后台线程中完成；给网络设备留出握手时间，避免把异步初始化误判为失败。
+    const auto deviceDeadline = Clock::now() + std::chrono::seconds(10);
+    bool reportedDeviceWait = false;
+    while (!mouse->isOpen() &&
+           !stopRequested.load(std::memory_order_relaxed) &&
+           Clock::now() < deviceDeadline)
+    {
+        if (!reportedDeviceWait)
+        {
+            std::cout << "等待鼠标设备连接...\n";
+            reportedDeviceWait = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!mouse->isOpen())
+    {
+        std::cerr << (stopRequested.load(std::memory_order_relaxed)
+                          ? "已取消鼠标设备连接等待\n"
+                          : "鼠标设备10秒内未打开\n");
         return 6;
     }
 
