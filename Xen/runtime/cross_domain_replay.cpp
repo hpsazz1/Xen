@@ -1189,6 +1189,81 @@ bool sameLegacyCohort(const Comparison& first, const Comparison& second)
 }
 }
 
+ResponseCounterfactual RunResponseCounterfactual(
+    const SourceTrajectory& source, const Variant& variant,
+    const ControllerSettings& baselineSettings,
+    double counterfactualResponseSeconds,
+    const std::filesystem::path& baselineFrameCsv,
+    const std::filesystem::path& counterfactualFrameCsv)
+{
+    ResponseCounterfactual result;
+    std::vector<unsigned char> detectionTimeline;
+    result.baseline = RunComparison(
+        source, variant, baselineSettings, baselineFrameCsv,
+        nullptr, &detectionTimeline);
+
+    ControllerSettings counterfactualSettings = baselineSettings;
+    counterfactualSettings.candidateResponseSeconds =
+        counterfactualResponseSeconds;
+    result.counterfactual = RunComparison(
+        source, variant, counterfactualSettings, counterfactualFrameCsv,
+        &detectionTimeline);
+
+    result.timelineFrames = detectionTimeline.size();
+    result.detectedFrames = static_cast<size_t>(std::count(
+        detectionTimeline.begin(), detectionTimeline.end(),
+        static_cast<unsigned char>(1)));
+    // 队列相同还不够：legacy 指标必须逐值一致，双方候选样本数也必须相同。
+    // 任一条件失败都表示实现或评估边界漂移，结果不得用于参数选择。
+    result.cohortStable = result.timelineFrames > 0 &&
+        sameLegacyCohort(result.baseline, result.counterfactual) &&
+        result.detectedFrames == result.baseline.candidate.samples &&
+        result.baseline.legacy.samples == result.baseline.candidate.samples &&
+        result.baseline.candidate.samples ==
+            result.counterfactual.candidate.samples;
+    return result;
+}
+
+void WriteResponseCounterfactualSummary(
+    const std::filesystem::path& path,
+    const std::vector<ResponseCounterfactual>& counterfactuals)
+{
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream output(path);
+    output << "Scenario,Variant,CohortStable,TimelineFrames,DetectedFrames,"
+              "BaselineResponseMs,CounterfactualResponseMs,BaselineSamples,"
+              "CounterfactualSamples,BaselineLegacyP95Deg,CounterfactualLegacyP95Deg,"
+              "BaselineCandidateP95Deg,CounterfactualCandidateP95Deg,"
+              "CandidateP95DeltaPercent,BaselineOutputFlips,CounterfactualOutputFlips,"
+              "BaselinePassed,CounterfactualPassed,BaselineReason,CounterfactualReason\n";
+    output << std::fixed << std::setprecision(6);
+    for (const auto& item : counterfactuals)
+    {
+        const double baselineP95 = item.baseline.candidate.errorP95Degrees;
+        const double deltaPercent = baselineP95 > 1e-9
+            ? 100.0 * (item.counterfactual.candidate.errorP95Degrees - baselineP95) /
+                baselineP95
+            : 0.0;
+        output << item.baseline.scenario << ',' << item.baseline.variant.name << ','
+               << (item.cohortStable ? 1 : 0) << ',' << item.timelineFrames << ','
+               << item.detectedFrames << ','
+               << item.baseline.candidateResponseSeconds * 1000.0 << ','
+               << item.counterfactual.candidateResponseSeconds * 1000.0 << ','
+               << item.baseline.candidate.samples << ','
+               << item.counterfactual.candidate.samples << ','
+               << item.baseline.legacy.errorP95Degrees << ','
+               << item.counterfactual.legacy.errorP95Degrees << ','
+               << baselineP95 << ','
+               << item.counterfactual.candidate.errorP95Degrees << ','
+               << deltaPercent << ','
+               << item.baseline.candidate.outputDirectionFlips << ','
+               << item.counterfactual.candidate.outputDirectionFlips << ','
+               << (item.baseline.passed ? 1 : 0) << ','
+               << (item.counterfactual.passed ? 1 : 0) << ','
+               << item.baseline.reason << ',' << item.counterfactual.reason << '\n';
+    }
+}
+
 std::string ClassifyAttribution(const Comparison& baseline,
                                 const Comparison& oracleEstimator,
                                 const Comparison& unlimitedActuator,

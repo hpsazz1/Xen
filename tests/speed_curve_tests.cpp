@@ -2665,6 +2665,51 @@ int main()
     expectNear(responseComparison.legacy.errorP95Degrees,
                syntheticComparison.legacy.errorP95Degrees, 0.0,
                "candidate response experiments cannot mutate the legacy comparator");
+    CrossDomainReplay::ControllerSettings responseCounterfactualSettings =
+        syntheticSettings;
+    responseCounterfactualSettings.responseSeconds = 0.080;
+    responseCounterfactualSettings.candidateResponseSeconds = 0.080;
+    const auto responseCounterfactual =
+        CrossDomainReplay::RunResponseCounterfactual(
+            syntheticReplay, finiteResponseVariant,
+            responseCounterfactualSettings, 0.100);
+    expectTrue(responseCounterfactual.cohortStable &&
+                   responseCounterfactual.timelineFrames > 0 &&
+                   responseCounterfactual.detectedFrames > 0 &&
+                   responseCounterfactual.detectedFrames ==
+                       responseCounterfactual.baseline.candidate.samples,
+               "response counterfactual records and reuses one detection timeline");
+    expectNear(responseCounterfactual.baseline.candidateResponseSeconds,
+               0.080, 0.0,
+               "response counterfactual preserves the 80 ms baseline");
+    expectNear(responseCounterfactual.counterfactual.candidateResponseSeconds,
+               0.100, 0.0,
+               "response counterfactual applies the independent 100 ms response");
+    expectTrue(responseCounterfactual.baseline.candidate.samples ==
+                   responseCounterfactual.counterfactual.candidate.samples &&
+                   responseCounterfactual.baseline.legacy.errorP95Degrees ==
+                   responseCounterfactual.counterfactual.legacy.errorP95Degrees,
+               "response counterfactual keeps candidate samples and legacy metrics exact");
+    const auto responseCounterfactualSummaryPath =
+        std::filesystem::temp_directory_path() /
+        "xen_response_counterfactual_summary.csv";
+    CrossDomainReplay::WriteResponseCounterfactualSummary(
+        responseCounterfactualSummaryPath, { responseCounterfactual });
+    std::ifstream responseCounterfactualSummary(
+        responseCounterfactualSummaryPath);
+    std::string responseCounterfactualHeader;
+    std::string responseCounterfactualRow;
+    std::getline(responseCounterfactualSummary, responseCounterfactualHeader);
+    std::getline(responseCounterfactualSummary, responseCounterfactualRow);
+    expectTrue(responseCounterfactualHeader.find(
+                   "CohortStable,TimelineFrames,DetectedFrames") !=
+                   std::string::npos &&
+                   responseCounterfactualRow.find(",1,") != std::string::npos,
+               "response counterfactual summary exposes the queue contract");
+    responseCounterfactualSummary.close();
+    std::error_code responseCounterfactualSummaryError;
+    std::filesystem::remove(responseCounterfactualSummaryPath,
+        responseCounterfactualSummaryError);
     expectTrue(std::abs(responseComparison.candidate.requestedCounts -
                    syntheticComparison.candidate.requestedCounts) > 1e-6,
                "independent candidate response changes only the candidate control path");

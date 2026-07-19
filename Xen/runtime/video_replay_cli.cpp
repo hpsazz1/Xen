@@ -51,6 +51,7 @@ namespace
         std::vector<double> observationAgesMs{ 10.0, 15.0, 20.0 };
         double responseMs = 80.0;
         double candidateResponseMs = 0.0;
+        double candidateResponseCounterfactualMs = 0.0;
         CrossDomainReplay::CandidateEstimatorMode candidateEstimatorMode =
             CrossDomainReplay::CandidateEstimatorMode::Kalman;
         double candidateJerkStdDegreesPerSecond3 = 8000.0;
@@ -266,6 +267,9 @@ namespace
         options.responseMs = optionDouble(argc, argv, "--response-ms", options.responseMs);
         options.candidateResponseMs = optionDouble(
             argc, argv, "--candidate-response-ms", options.candidateResponseMs);
+        options.candidateResponseCounterfactualMs = optionDouble(
+            argc, argv, "--candidate-response-counterfactual-ms",
+            options.candidateResponseCounterfactualMs);
         if (const auto estimator = optionValue(argc, argv, "--candidate-estimator"))
         {
             const std::string normalized = lower(*estimator);
@@ -896,6 +900,18 @@ int Run(int argc, char** argv)
         {
             std::vector<CrossDomainReplay::Comparison> comparisons;
             std::vector<CrossDomainReplay::Attribution> attributions;
+            std::vector<CrossDomainReplay::ResponseCounterfactual>
+                responseCounterfactuals;
+            std::vector<CrossDomainReplay::Comparison>
+                responseCounterfactualComparisons;
+            const bool responseCounterfactualEnabled =
+                std::isfinite(options.candidateResponseCounterfactualMs) &&
+                options.candidateResponseCounterfactualMs > 0.0;
+            if (responseCounterfactualEnabled && options.crossDomainAttribution)
+            {
+                throw std::runtime_error(
+                    "Response counterfactual and attribution modes are mutually exclusive.");
+            }
             const auto& variants = crossDomainVariants;
             CrossDomainReplay::ControllerSettings settings;
             settings.kalmanAccelerationStdDegreesPerSecond2 =
@@ -953,9 +969,14 @@ int Run(int argc, char** argv)
             settings.trajectoryMaxJerkCountsPerSecond3 =
                 options.trajectoryMaxJerkCountsPerSecond3;
             const auto framePath = options.outputRoot / "cross_domain_frames.csv";
+            const auto counterfactualFramePath = options.outputRoot /
+                "cross_domain_response_counterfactual_frames.csv";
             std::error_code removeError;
             std::filesystem::remove(framePath, removeError);
+            std::filesystem::remove(counterfactualFramePath, removeError);
             size_t passed = 0;
+            size_t counterfactualPassed = 0;
+            size_t responseChangedCohorts = 0;
             for (const auto& trajectory : trajectories)
             {
                 CrossDomainReplay::SourceTrajectory source;
@@ -978,7 +999,26 @@ int Run(int argc, char** argv)
                         options.crossDomainDetailVariants.end(),
                         variant.name) != options.crossDomainDetailVariants.end();
                     CrossDomainReplay::Comparison comparison;
-                    if (options.crossDomainAttribution)
+                    if (responseCounterfactualEnabled)
+                    {
+                        auto responseCounterfactual =
+                            CrossDomainReplay::RunResponseCounterfactual(
+                                source, variant, settings,
+                                options.candidateResponseCounterfactualMs / 1000.0,
+                                detailedVariant ? framePath : std::filesystem::path{},
+                                detailedVariant ? counterfactualFramePath :
+                                    std::filesystem::path{});
+                        comparison = responseCounterfactual.baseline;
+                        counterfactualPassed +=
+                            responseCounterfactual.counterfactual.passed ? 1U : 0U;
+                        responseChangedCohorts +=
+                            responseCounterfactual.cohortStable ? 0U : 1U;
+                        responseCounterfactualComparisons.push_back(
+                            responseCounterfactual.counterfactual);
+                        responseCounterfactuals.push_back(
+                            std::move(responseCounterfactual));
+                    }
+                    else if (options.crossDomainAttribution)
                     {
                         auto attribution = CrossDomainReplay::RunAttribution(
                             source, variant, settings,
@@ -998,6 +1038,17 @@ int Run(int argc, char** argv)
             }
             CrossDomainReplay::WriteSummary(
                 options.outputRoot / "cross_domain_summary.csv", comparisons);
+            if (responseCounterfactualEnabled)
+            {
+                CrossDomainReplay::WriteSummary(
+                    options.outputRoot /
+                        "cross_domain_response_counterfactual_matrix.csv",
+                    responseCounterfactualComparisons);
+                CrossDomainReplay::WriteResponseCounterfactualSummary(
+                    options.outputRoot /
+                        "cross_domain_response_counterfactual.csv",
+                    responseCounterfactuals);
+            }
             if (options.crossDomainAttribution)
             {
                 CrossDomainReplay::WriteAttributionSummary(
@@ -1045,6 +1096,14 @@ int Run(int argc, char** argv)
                              : (std::isfinite(options.responseMs)
                                  ? std::clamp(options.responseMs, 10.0, 500.0)
                                  : 80.0)) << '\n'
+                     << "CandidateResponseCounterfactualEnabled="
+                     << (responseCounterfactualEnabled ? 1 : 0) << '\n'
+                     << "CandidateResponseCounterfactualMs="
+                     << (responseCounterfactualEnabled
+                             ? std::clamp(
+                                 options.candidateResponseCounterfactualMs,
+                                 10.0, 500.0)
+                             : 0.0) << '\n'
                      << "CandidateEstimatorMode="
                      << CrossDomainReplay::candidateEstimatorModeName(
                          options.candidateEstimatorMode) << '\n'
@@ -1136,6 +1195,10 @@ int Run(int argc, char** argv)
             for (const auto& [classification, count] : attributionCounts)
                 decision << "Attribution_" << classification << '=' << count << '\n';
             decision
+                     << "ResponseCounterfactualPassed="
+                     << counterfactualPassed << '\n'
+                     << "ResponseCounterfactualChangedCohorts="
+                     << responseChangedCohorts << '\n'
                      << "Comparisons=" << comparisons.size() << '\n'
                      << "Passed=" << passed << '\n'
                      << "Failed=" << comparisons.size() - passed << '\n'
@@ -1143,6 +1206,15 @@ int Run(int argc, char** argv)
             std::cout << "[CrossDomainReplay] " << passed << '/' << comparisons.size()
                       << " gates passed; promotion="
                       << (passed == comparisons.size() ? "PASS" : "HOLD_SHADOW") << std::endl;
+            if (responseCounterfactualEnabled)
+            {
+                std::cout << "[ResponseCounterfactual] "
+                          << counterfactualPassed << '/' << comparisons.size()
+                          << " gates passed; changed_cohorts="
+                          << responseChangedCohorts << std::endl;
+                if (responseChangedCohorts != 0)
+                    return 4;
+            }
             return passed == comparisons.size() ? 0 : 3;
         }
 

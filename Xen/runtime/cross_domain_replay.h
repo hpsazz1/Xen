@@ -180,6 +180,17 @@ struct Attribution
     std::string classification;
 };
 
+// 响应反事实必须在同一进程先记录基线检测/重置队列，再让候选响应复用该队列。
+// 该结构只服务离线审计，不能作为运行时响应调度或 active 控制入口。
+struct ResponseCounterfactual
+{
+    Comparison baseline{};
+    Comparison counterfactual{};
+    size_t timelineFrames = 0;
+    size_t detectedFrames = 0;
+    bool cohortStable = false;
+};
+
 std::vector<Variant> BuildRequiredVariants();
 Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                          const ControllerSettings& settings,
@@ -200,6 +211,15 @@ std::string ClassifyAttribution(const Comparison& baseline,
                                 bool& cohortStable);
 void WriteAttributionSummary(const std::filesystem::path& path,
                              const std::vector<Attribution>& attributions);
+ResponseCounterfactual RunResponseCounterfactual(
+    const SourceTrajectory& source, const Variant& variant,
+    const ControllerSettings& baselineSettings,
+    double counterfactualResponseSeconds,
+    const std::filesystem::path& baselineFrameCsv = {},
+    const std::filesystem::path& counterfactualFrameCsv = {});
+void WriteResponseCounterfactualSummary(
+    const std::filesystem::path& path,
+    const std::vector<ResponseCounterfactual>& counterfactuals);
 }
 
 #endif
