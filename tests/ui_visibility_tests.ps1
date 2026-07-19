@@ -24,6 +24,11 @@ foreach ($control in @('profile_calibration_enabled', 'profile_calibration_resul
         throw "Passive profile calibration UI is missing: $control"
     }
 }
+foreach ($control in @('machine_profile_cache_enabled', 'machine_profile_cache_path', 'machine_profile_aim_mode')) {
+    if ($mouseUi -notmatch $control) {
+        throw "Machine profile cache UI is missing: $control"
+    }
+}
 foreach ($control in @(
     '##aim_pipeline_mode',
     '##shadow_camera_delay_ms',

@@ -157,6 +157,12 @@ int main()
                    "default prediction uses bounded constant-velocity strength");
         expectTrue(!defaults.profile_calibration_enabled,
                    "passive profile calibration defaults to disabled");
+        expectTrue(!defaults.machine_profile_cache_enabled,
+                   "machine profile cache defaults to disabled");
+        expectString(defaults.machine_profile_cache_path, "",
+                     "machine profile cache has no implicit path");
+        expectString(defaults.machine_profile_aim_mode, "hipfire",
+                     "machine profile cache defaults to hipfire key");
         expectString(defaults.kmbox_net_ip, "192.168.2.188", "default kmbox net ip");
         expectString(defaults.kmbox_net_port, "13384", "default kmbox net port");
         expectString(defaults.kmbox_net_uuid, "7679E04E", "default kmbox net uuid");
@@ -207,6 +213,10 @@ int main()
                    "legacy config receives bounded constant-velocity prediction strength");
         expectTrue(migratedText.find("profile_calibration_enabled = false") != std::string::npos,
                    "saved config persists passive profile calibration state");
+        expectTrue(migratedText.find("machine_profile_cache_enabled = false") != std::string::npos &&
+                   migratedText.find("machine_profile_cache_path = ") != std::string::npos &&
+                   migratedText.find("machine_profile_aim_mode = hipfire") != std::string::npos,
+                   "saved config persists explicit machine cache controls");
         expectTrue(migratedText.find("aim_pipeline_mode = legacy") != std::string::npos,
                    "saved config persists the safe new pipeline mode");
         expectTrue(migratedText.find("aim_motion_compensation_delay_ms = 12") != std::string::npos,
@@ -261,6 +271,23 @@ int main()
     expectTrue(enabledCalibration.profile_calibration_enabled,
                "passive profile calibration enabled state is restored");
     std::filesystem::remove(calibrationConfigPath, removeError);
+
+    const std::filesystem::path machineCacheConfigPath =
+        "xen_config_machine_profile_cache_test.ini";
+    {
+        std::ofstream machineCacheConfigFile(machineCacheConfigPath);
+        machineCacheConfigFile << "machine_profile_cache_enabled = true\n"
+                               << "machine_profile_cache_path = C:\\\\calibration\\\\machine.ini\n"
+                               << "machine_profile_aim_mode = scope1\n";
+    }
+    Config machineCacheConfig{};
+    expectTrue(machineCacheConfig.loadConfig(machineCacheConfigPath.string()),
+               "machine profile cache config loads successfully");
+    expectTrue(machineCacheConfig.machine_profile_cache_enabled,
+               "machine profile cache enabled state is restored");
+    expectString(machineCacheConfig.machine_profile_aim_mode, "scope1",
+                 "machine profile aim mode is restored");
+    std::filesystem::remove(machineCacheConfigPath, removeError);
 
     const std::filesystem::path shadowModePath = "xen_config_shadow_mode_test.ini";
     {

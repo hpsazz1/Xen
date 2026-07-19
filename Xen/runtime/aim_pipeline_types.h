@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 #include "maneuver_los_estimator.h"
 
@@ -259,6 +260,11 @@ struct ViewMotionShadowDiagnostics
     double maneuverRateUncertaintyYDegreesPerSecond = 0.0;
     double degreesPerCountX = 0.0;
     double degreesPerCountY = 0.0;
+    int machineProfileLevel = 0; ///< 0安全直追、1归一化图像、2保守角度、3标定角度
+    bool machineProfileCacheMatched = false; ///< 全部严格失效键是否逐项匹配
+    double machineProfileFeedforwardScale = 0.0; ///< 当前等级允许的前馈可信度倍率
+    bool machineProfileIntegralEnabled = false; ///< 当前等级是否允许角度积分项
+    std::string machineProfileReason; ///< 降级或精确命中的机器可读原因
     double measuredLosYawDegrees = 0.0;
     double measuredLosPitchDownDegrees = 0.0;
     double appliedCameraYawAtObservationDegrees = 0.0;

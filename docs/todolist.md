@@ -16,7 +16,8 @@
 - [x] **[P0-6F r64三场景实机门禁]**：同一`DML / 6218a875ae46 / r64`身份的static、jump、reverse共6496帧，三文件及overall均PASS，全部身份、安全、时序、35 ms尾部、选择序列和逐轴计算契约违例为0。static 9/9运行段启用0；jump单个23.18秒长段包含6个独立启用区间、75帧；reverse单个18.92秒长段包含44个独立启用区间、948帧，结合既有35 ms复放的jump 7/7、reverse 6/6覆盖，r64门禁关闭且不再追加采集或调参，详见`docs/165r64三场景实机门禁完成20260719.md`。
 - [x] **[P1] 分轴主动Profile标定协议与分析器**：孤立脉冲summary补齐正交轴位移、px/count和泄漏率；正式协议固定16/32/64 counts、X/Y正负各10次、3个独立轮次，并对身份、有效trial、比例范围、方向对称、幅值线性、跨轮比例/时序和正交泄漏执行硬门禁。分析结果只允许`MANUAL_REVIEW_ONLY`，始终记录`ProfileAutoWrite=0`，继续保持`profile_calibration_enabled=false`和`HOLD_SHADOW`，详见`docs/171分轴主动Profile标定协议20260720.md`。
 - [x] **[P1] 分轴主动Profile三轮实测**：`DML|13f67257f5c2|r64`完成3轮、9文件、360个孤立脉冲，360/360有效且全部硬门禁通过；X/Y候选分别为0.515625/0.500000 px/count，t90约14.51/14.50 ms，最坏方向不对称6.061%、线性跨度6.061%、跨轮比例跨度6.25%、时序跨度0.981 ms、串轴泄漏P95为0。12个`t90>20 ms`离群分散且最坏61.03 ms，仍低于100 ms硬门槛，不形成轴向偏差。结果仅为`MANUAL_REVIEW_ONLY`且`ProfileAutoWrite=0`，详见`docs/172分轴主动Profile三轮实测20260720.md`。
-- [ ] **[P1] 独立机器标定缓存与失效降级**：以本轮主动候选作为只读证据，设计设备、后端、分辨率、裁剪、NDI源和控制器修订等严格失效键，保存可信度与证据摘要，并接入完整角度控制、保守角度控制、归一化图像控制、安全直追四级降级；实现和验证完成前继续保持`profile_calibration_enabled=false`、`ProfileAutoWrite=0`和`HOLD_SHADOW`，禁止写入`[Games]`或修改active参数。
+- [x] **[P1] 独立机器标定缓存与失效降级决策**：新增schema v1只读缓存，严格键覆盖游戏/瞄准模式、捕获源、完整源与ROI、后端、输入设备、灵敏度/FOV和控制器修订；证据校验覆盖比例、t50/t90、可信度、trial、协议、身份和摘要。默认关闭、路径为空、拒绝相对路径和覆盖已有文件；Level 3精确命中、Level 2保守用户角度、Level 1归一化诊断、Level 0安全诊断均进入UI/CSV，Level 0/1停止shadow角度链，active与legacy不变。DML增量CTest 12/12通过，详见`docs/173独立机器Profile缓存与四级降级20260720.md`。
+- [ ] **[P1] 人工机器缓存候选生成与shadow失效审计**：实现只接受`ProtocolPassed=1`、`MANUAL_REVIEW_ONLY`、`ProfileAutoWrite=0`结果的不可覆盖候选生成器，由同一C++加载器反向校验；使用本轮360脉冲结果生成但不启用缓存，随后验证精确键命中以及NDI源、ROI、后端、设备、灵敏度/FOV、控制器任一变化均立即降到Level 2。审计完成前不得修改用户config、`[Games]`、legacy或active。
 
 ### DML性能阶段（已结束）
 

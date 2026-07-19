@@ -107,6 +107,9 @@ public:
     float prediction_velocity_tau_ms = 50.0f;     // 兼容旧键名，实际为稳健速度回归窗口，毫秒
     float prediction_strength = 1.0f;             // 常速度提前总强度
     bool profile_calibration_enabled = false;     // 被动Profile标定；只估算并展示，不自动覆盖配置
+    bool machine_profile_cache_enabled = false;   // 独立机器缓存显式启用；默认关闭且绝不自动写入
+    std::string machine_profile_cache_path;       // 人工审核后的只读缓存绝对路径；空值表示没有缓存
+    std::string machine_profile_aim_mode = "hipfire"; // 缓存键中的瞄准模式，切换ADS/倍镜必须使用新键
 
     float snapRadius;
     float nearRadius;

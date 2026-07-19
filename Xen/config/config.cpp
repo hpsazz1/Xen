@@ -166,6 +166,9 @@ bool Config::loadConfig(const std::string& filename)
         prediction_velocity_tau_ms = 50.0f;              // 稳健速度回归窗口（毫秒）
         prediction_strength = 1.0f;                      // 常速度提前总强度
         profile_calibration_enabled = false;             // 默认关闭，避免普通追踪数据污染标定
+        machine_profile_cache_enabled = false;           // 默认不读取机器缓存，必须人工审核后显式启用
+        machine_profile_cache_path.clear();              // 缓存独立于config，不提供会静默命中的默认文件
+        machine_profile_aim_mode = "hipfire";            // 开镜/倍镜模式必须形成不同失效键
 
         snapRadius = 1.5f;                               // 瞄准吸附半径
         nearRadius = 25.0f;                              // "近距离"半径阈值
@@ -613,6 +616,11 @@ bool Config::loadConfig(const std::string& filename)
         : (float)(get_double("prediction_tau", 0.035) * 1000.0);
     prediction_strength = (float)get_double("prediction_strength", 1.0);
     profile_calibration_enabled = get_bool("profile_calibration_enabled", false);
+    machine_profile_cache_enabled = get_bool("machine_profile_cache_enabled", false);
+    machine_profile_cache_path = get_string("machine_profile_cache_path", "");
+    machine_profile_aim_mode = get_string("machine_profile_aim_mode", "hipfire");
+    if (machine_profile_aim_mode.empty())
+        machine_profile_aim_mode = "hipfire";
 
     snapRadius = (float)get_double("snapRadius", 1.5);
     nearRadius = (float)get_double("nearRadius", 25.0);
@@ -1001,6 +1009,9 @@ bool Config::saveConfig(const std::string& filename)
         << "prediction_velocity_tau_ms = " << prediction_velocity_tau_ms << "\n"
         << "prediction_strength = " << prediction_strength << "\n"
         << "profile_calibration_enabled = " << (profile_calibration_enabled ? "true" : "false") << "\n"
+        << "machine_profile_cache_enabled = " << (machine_profile_cache_enabled ? "true" : "false") << "\n"
+        << "machine_profile_cache_path = " << machine_profile_cache_path << "\n"
+        << "machine_profile_aim_mode = " << machine_profile_aim_mode << "\n"
         << "easynorecoil = " << (easynorecoil ? "true" : "false") << "\n"
         << std::fixed << std::setprecision(1)
         << "easynorecoilstrength = " << easynorecoilstrength << "\n"

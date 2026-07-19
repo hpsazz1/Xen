@@ -30,6 +30,7 @@
 #include "Xen.h"
 #include "debug/pipeline_tracer.h"
 #include "runtime/aim_coordinate_space.h"
+#include "runtime/build_identity.h"
 #include "runtime/thread_loops.h"
 
 /**
@@ -807,6 +808,77 @@ void MouseThread::refreshGameProfileCache()
         move_max_speed_cps, 4000.0);
     move_integral_time_seconds = std::clamp(
         static_cast<double>(config.move_integral_time_ms) / 1000.0, 0.0, 1.0);
+    refreshMachineProfileDecision();
+}
+
+void MouseThread::refreshMachineProfileDecision()
+{
+    MachineProfileKey key;
+    key.gameProfile = config.active_game;
+    key.aimMode = config.machine_profile_aim_mode;
+    key.captureMethod = config.capture_method;
+    if (config.capture_method == "ndi")
+        key.captureSource = config.ndi_source_name;
+    else if (config.capture_method == "udp_capture")
+        key.captureSource = config.udp_ip + ":" + std::to_string(config.udp_port);
+    else if (config.capture_target == "window")
+        key.captureSource = config.capture_window_title;
+    else
+        key.captureSource = "monitor:" + std::to_string(config.monitor_idx);
+
+    const int observedSourceWidth = ::screenWidth.load(std::memory_order_relaxed);
+    const int observedSourceHeight = ::screenHeight.load(std::memory_order_relaxed);
+    key.sourceWidth = config.capture_method == "ndi" && config.ndi_source_width > 0
+        ? config.ndi_source_width : observedSourceWidth;
+    key.sourceHeight = config.capture_method == "ndi" && config.ndi_source_height > 0
+        ? config.ndi_source_height : observedSourceHeight;
+    if (config.capture_method == "udp_capture" && config.udp_source_width > 0)
+    {
+        key.sourceWidth = config.udp_source_width;
+        key.sourceHeight = config.udp_source_height;
+    }
+    key.roiWidth = config.detection_resolution;
+    key.roiHeight = config.detection_resolution;
+    key.roiX = std::max(0, (key.sourceWidth - key.roiWidth) / 2);
+    key.roiY = std::max(0, (key.sourceHeight - key.roiHeight) / 2);
+    key.inferenceBackend = BuildIdentity::backend();
+    key.inputMethod = config.input_method;
+    if (config.input_method == "KMBOX_NET")
+        key.inputDeviceIdentity = config.kmbox_net_uuid;
+    else if (config.input_method == "KMBOX_A")
+        key.inputDeviceIdentity = config.kmbox_a_pidvid;
+    else if (config.input_method == "MAKCU")
+        key.inputDeviceIdentity = config.makcu_port;
+    else
+        key.inputDeviceIdentity = config.input_method;
+    key.sensitivity = cachedGameSens;
+    key.yaw = cachedGameYaw;
+    key.pitch = cachedGamePitch;
+    key.fovXDegrees = fov_x;
+    key.fovYDegrees = fov_y;
+    key.fovScaled = cachedGameFovScaled;
+    key.baseFovDegrees = cachedGameBaseFOV;
+    key.controllerRevision = kBasicAimControllerRevision;
+
+    machineProfileCache.clear();
+    if (config.machine_profile_cache_enabled)
+        machineProfileCache.load(config.machine_profile_cache_path);
+    const bool userProfileValid = std::isfinite(cachedGameSens) && cachedGameSens > 0.0 &&
+        std::isfinite(cachedGameYaw) && cachedGameYaw > 0.0 &&
+        std::isfinite(cachedGamePitch) && cachedGamePitch > 0.0 &&
+        std::isfinite(fov_x) && fov_x > 0.0 && std::isfinite(fov_y) && fov_y > 0.0;
+    const MachineProfileDecision decision = machineProfileCache.evaluate(
+        key, config.machine_profile_cache_enabled, userProfileValid);
+    {
+        std::lock_guard<std::mutex> lock(machineProfileDecisionMutex);
+        machineProfileDecision = decision;
+    }
+    if (decision.level == MachineProfileLevel::CalibratedAngle)
+    {
+        appliedViewMotionModel.configure(
+            decision.commandToFrameDelayMs,
+            decision.commandResponseMs);
+    }
 }
 
 /**
@@ -998,7 +1070,13 @@ void MouseThread::sendMovementToDriver(Move move)
     move.timing.sendSucceeded = true;
     profileCalibrator.recordCommand(move.dx, move.dy, sendTime);
     recordMotionCompensationStep(move.dx, move.dy, sendTime);
-    const auto degreesPerCount = currentDegreesPerCount();
+    const auto configuredDegreesPerCount = currentDegreesPerCount();
+    const MachineProfileDecision profileDecision = getMachineProfileDecision();
+    const auto degreesPerCount = profileDecision.cacheMatched
+        ? std::pair<double, double>{
+            profileDecision.degreesPerCountX,
+            profileDecision.degreesPerCountY }
+        : configuredDegreesPerCount;
     appliedViewMotionModel.addCommand(
         move.dx, move.dy,
         degreesPerCount.first, degreesPerCount.second,
@@ -1009,6 +1087,12 @@ void MouseThread::sendMovementToDriver(Move move)
 PassiveProfileCalibrator::Snapshot MouseThread::getProfileCalibrationSnapshot() const
 {
     return profileCalibrator.snapshot();
+}
+
+MachineProfileDecision MouseThread::getMachineProfileDecision() const
+{
+    std::lock_guard<std::mutex> lock(machineProfileDecisionMutex);
+    return machineProfileDecision;
 }
 
 void MouseThread::resetProfileCalibration()
@@ -1303,10 +1387,18 @@ AimPipelineFrameState MouseThread::processAimPipelineObservation(
         const auto uncertaintyRateAtObservation =
             appliedViewMotionModel.uncertaintyRateAt(
                 observationTime, kManeuverResponseRateUncertaintyTailMs);
-        const auto degreesPerCount = currentDegreesPerCount();
+        const MachineProfileDecision profileDecision = getMachineProfileDecision();
+        const auto configuredDegreesPerCount = currentDegreesPerCount();
+        const auto degreesPerCount = profileDecision.angleSpaceEnabled
+            ? std::pair<double, double>{
+                profileDecision.degreesPerCountX,
+                profileDecision.degreesPerCountY }
+            : configuredDegreesPerCount;
 
         ViewMotionShadowDiagnostics diagnostics;
-        diagnostics.valid = true;
+        // Level 0/1没有可信角度比例，禁止继续运行角度Kalman或控制器并伪装为
+        // 完整角度链。当前active仍被抑制；归一化/安全模式只记录决策，legacy不变。
+        diagnostics.valid = profileDecision.angleSpaceEnabled;
         diagnostics.commandToFrameDelayMs = appliedViewMotionModel.commandToFrameDelayMs();
         diagnostics.commandResponseMs = appliedViewMotionModel.commandResponseMs();
 #ifndef USE_CUDA
@@ -1331,6 +1423,12 @@ AimPipelineFrameState MouseThread::processAimPipelineObservation(
             diagnostics.maneuverRateUncertaintyGain;
         diagnostics.degreesPerCountX = degreesPerCount.first;
         diagnostics.degreesPerCountY = degreesPerCount.second;
+        diagnostics.machineProfileLevel = static_cast<int>(profileDecision.level);
+        diagnostics.machineProfileCacheMatched = profileDecision.cacheMatched;
+        diagnostics.machineProfileFeedforwardScale =
+            profileDecision.feedforwardConfidenceScale;
+        diagnostics.machineProfileIntegralEnabled = profileDecision.integralEnabled;
+        diagnostics.machineProfileReason = profileDecision.reason;
         diagnostics.measuredLosYawDegrees = measuredLos.yawDegrees;
         diagnostics.measuredLosPitchDownDegrees = measuredLos.pitchDownDegrees;
         diagnostics.appliedCameraYawAtObservationDegrees = cameraAtObservation.first;
@@ -1742,6 +1840,18 @@ void MouseThread::moveMousePivot(
         pf->profileCalibrationActiveSamplesX = calibration.x.activeSampleCount;
         pf->profileCalibrationActiveSamplesY = calibration.y.activeSampleCount;
         pf->profileCalibrationOverallConfidence = calibration.overallConfidence;
+        const MachineProfileDecision profileDecision = getMachineProfileDecision();
+        pf->machineProfileLevel = static_cast<int>(profileDecision.level);
+        pf->machineProfileCacheRequested = profileDecision.cacheRequested;
+        pf->machineProfileCacheLoaded = profileDecision.cacheLoaded;
+        pf->machineProfileCacheMatched = profileDecision.cacheMatched;
+        pf->machineProfilePredictionEnabled = profileDecision.predictionEnabled;
+        pf->machineProfileIntegralEnabled = profileDecision.integralEnabled;
+        pf->machineProfileFeedforwardScale =
+            profileDecision.feedforwardConfidenceScale;
+        pf->machineProfileDegreesPerCountX = profileDecision.degreesPerCountX;
+        pf->machineProfileDegreesPerCountY = profileDecision.degreesPerCountY;
+        pf->machineProfileReason = profileDecision.reason;
         pf->responseSeconds = settings.responseSeconds;
         pf->effectiveResponseSecondsX = output.effectiveResponseSecondsX;
         pf->effectiveResponseSecondsY = output.effectiveResponseSecondsY;

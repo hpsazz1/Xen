@@ -30,6 +30,7 @@
 #include "runtime/aim_pipeline_runtime.h"
 #include "runtime/applied_view_motion_model.h"
 #include "runtime/passive_profile_calibrator.h"
+#include "runtime/machine_profile_cache.h"
 #include "runtime/target_predictor.h"
 #include "runtime/view_motion_history.h"
 
@@ -92,6 +93,9 @@ private:
     TargetPredictor::Result lastPredictionResult{};                ///< 流水线预测诊断快照
     TargetPredictor::Settings predictionSettings{};                ///< 运行时预测配置缓存
     PassiveProfileCalibrator profileCalibrator;                    ///< 真实发送counts与raw pivot的被动Profile标定器
+    MachineProfileCache machineProfileCache;                       ///< 人工审核文件的只读缓存；运行时从不写入
+    mutable std::mutex machineProfileDecisionMutex;                ///< 保护含字符串的决策快照，避免UI与控制线程并发读写
+    MachineProfileDecision machineProfileDecision{};               ///< 当前上下文的四级降级决策快照
     ControlIntervalTracker controlIntervalTracker;                     ///< 按控制执行时刻计算设备输出周期
     // legacy 输出的分数 counts 余量；跨帧累计后再整数化，避免网络帧间隔
     // 抖动把连续速度变成零步/大步交替。目标切换或停发时清零。
@@ -232,6 +236,8 @@ private:
     std::pair<double, double> getMotionCompensationAt(
         std::chrono::steady_clock::time_point time) const;        ///< 查询指定时刻累计自身视角位移
     std::pair<double, double> currentDegreesPerCount() const;      ///< 当前游戏Profile的X/Y轴角度比例
+    /** @brief 重载独立机器缓存并按当前配置生成严格失效决策；调用者持有configMutex。 */
+    void refreshMachineProfileDecision();
     /** @brief 填充正式与暂停影子帧共用的目标、性能和来源诊断。 */
     void populatePipelineTraceObservation(
         PipelineFrame& frame, const AimbotTarget& target) const;
@@ -286,6 +292,8 @@ public:
     );
     /** @brief 获取被动Profile标定的只读结果快照。 */
     PassiveProfileCalibrator::Snapshot getProfileCalibrationSnapshot() const;
+    /** @brief 获取独立机器缓存与四级降级的只读决策。 */
+    MachineProfileDecision getMachineProfileDecision() const;
     /** @brief 清空当前标定样本，保持标定开关不变。 */
     void resetProfileCalibration();
 

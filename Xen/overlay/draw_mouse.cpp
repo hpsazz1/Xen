@@ -491,6 +491,51 @@ static void draw_mouse_page(MouseSettingsPage page)
         OverlayUI::EndSection();
     }
 
+    if (shouldDrawMousePage(page, MouseSettingsPage::Profiles) &&
+        OverlayUI::BeginSection("机器标定缓存", "mouse_section_machine_profile_cache"))
+    {
+        const bool changed = OverlayUI::CheckboxRow(
+            "启用只读缓存##machine_profile_cache_enabled",
+            &config.machine_profile_cache_enabled);
+        if (changed)
+        {
+            OverlayConfig_MarkDirty();
+            if (globalMouseThread)
+            {
+                globalMouseThread->updateConfig(
+                    config.detection_resolution,
+                    config.fovX,
+                    config.fovY,
+                    config.auto_shoot,
+                    config.bScope_multiplier);
+            }
+        }
+
+        const MachineProfileDecision decision = globalMouseThread
+            ? globalMouseThread->getMachineProfileDecision()
+            : MachineProfileDecision{};
+        ImGui::TextWrapped("缓存路径：%s",
+            config.machine_profile_cache_path.empty()
+                ? "（未配置）" : config.machine_profile_cache_path.c_str());
+        ImGui::Text("瞄准模式键：%s", config.machine_profile_aim_mode.c_str());
+        ImGui::Text("降级等级：L%d / %s",
+            static_cast<int>(decision.level), machineProfileLevelName(decision.level));
+        ImGui::Text("请求 / 加载 / 匹配：%s / %s / %s",
+            decision.cacheRequested ? "是" : "否",
+            decision.cacheLoaded ? "是" : "否",
+            decision.cacheMatched ? "是" : "否");
+        ImGui::Text("有效角度比例：X %.6f / Y %.6f deg/count",
+            decision.degreesPerCountX, decision.degreesPerCountY);
+        ImGui::Text("前馈可信度倍率：%.2f", decision.feedforwardConfidenceScale);
+        ImGui::Text("预测 / 积分：%s / %s",
+            decision.predictionEnabled ? "允许" : "关闭",
+            decision.integralEnabled ? "允许" : "关闭");
+        ImGui::TextWrapped("原因：%s", decision.reason.c_str());
+        ImGui::TextWrapped(
+            "缓存只从config.ini中的显式绝对路径读取；程序不会创建、覆盖[Games]或自动启用缓存。键不匹配时立即降级，active仍保持命令抑制。");
+        OverlayUI::EndSection();
+    }
+
     // ========== Manage Profiles（管理配置文件） ==========
     // 支持添加新配置文件、删除已有配置
     if (shouldDrawMousePage(page, MouseSettingsPage::Profiles) &&

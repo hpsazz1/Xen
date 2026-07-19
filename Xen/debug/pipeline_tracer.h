@@ -113,6 +113,16 @@ struct PipelineFrame
     size_t profileCalibrationActiveSamplesX = 0; ///< X轴区间counts绝对值至少0.5的有效激励数
     size_t profileCalibrationActiveSamplesY = 0; ///< Y轴区间counts绝对值至少0.5的有效激励数
     double profileCalibrationOverallConfidence = 0.0; ///< 有效轴可信度的综合结果，范围0~1
+    int machineProfileLevel = 0; ///< 独立机器缓存四级降级，0安全直追至3完整标定角度
+    bool machineProfileCacheRequested = false; ///< 用户是否显式请求读取独立缓存
+    bool machineProfileCacheLoaded = false; ///< 缓存文件是否完整加载并通过schema/证据校验
+    bool machineProfileCacheMatched = false; ///< 当前全部失效键是否精确匹配
+    bool machineProfilePredictionEnabled = false; ///< 当前等级是否允许状态预测
+    bool machineProfileIntegralEnabled = false; ///< 当前等级是否允许角度积分
+    double machineProfileFeedforwardScale = 0.0; ///< 当前等级约束后的前馈可信度倍率
+    double machineProfileDegreesPerCountX = 0.0; ///< 当前shadow决策使用的X轴角度比例
+    double machineProfileDegreesPerCountY = 0.0; ///< 当前shadow决策使用的Y轴角度比例
+    std::string machineProfileReason; ///< 精确命中、失效字段或降级原因
 
     // ========== 控制器诊断 ==========
     double responseSeconds = 0.0;

@@ -245,6 +245,13 @@ int main()
                "shadow pipeline never produces a queued device command");
     ViewMotionShadowDiagnostics shadowDiagnostics;
     shadowDiagnostics.valid = true;
+    // 该组测试验证估计器与控制器本身；显式使用L3倍率，避免机器Profile降级策略
+    // 把前馈关闭后掩盖原有控制器契约。
+    shadowDiagnostics.machineProfileLevel = 3;
+    shadowDiagnostics.machineProfileCacheMatched = true;
+    shadowDiagnostics.machineProfileFeedforwardScale = 1.0;
+    shadowDiagnostics.machineProfileIntegralEnabled = true;
+    shadowDiagnostics.machineProfileReason = "unit_test_exact_match";
     shadowDiagnostics.stabilizedLosYawDegrees = 2.0;
     shadowDiagnostics.stabilizedLosPitchDownDegrees = -1.0;
     shadowDiagnostics.degreesPerCountX = 0.02;
@@ -267,6 +274,43 @@ int main()
                kalmanFrame.trajectoryRequest.requestedCountsX > 0.0 &&
                kalmanFrame.commandSuppressed,
                "P0-4A produces an auditable P-only request without enabling device output");
+
+    AimPipelineRuntime degradedPolicyPipeline;
+    degradedPolicyPipeline.configure("shadow");
+    LosAimController::Settings degradedControllerSettings;
+    degradedControllerSettings.responseSeconds = 0.100;
+    degradedControllerSettings.maxCountsPerSecond = 100000.0;
+    degradedControllerSettings.feedforwardGain = 1.0;
+    degradedControllerSettings.integralTimeSeconds = 0.200;
+    degradedControllerSettings.integralZoneDegrees = 5.0;
+    degradedPolicyPipeline.configureController(degradedControllerSettings);
+    AimObservation degradedObservation = shadowObservation;
+    ViewMotionShadowDiagnostics degradedDiagnostics = shadowDiagnostics;
+    degradedDiagnostics.machineProfileLevel = 2;
+    degradedDiagnostics.machineProfileCacheMatched = false;
+    degradedDiagnostics.machineProfileFeedforwardScale = 0.25;
+    degradedDiagnostics.machineProfileIntegralEnabled = false;
+    degradedDiagnostics.machineProfileReason = "unit_test_cache_miss";
+    degradedDiagnostics.stabilizedLosYawDegrees = 0.10;
+    degradedObservation.timing.observationTime = timingBase + std::chrono::milliseconds(40);
+    degradedObservation.timing.controlTime = timingBase + std::chrono::milliseconds(50);
+    degradedPolicyPipeline.observe(degradedObservation);
+    degradedPolicyPipeline.setViewMotionDiagnostics(degradedDiagnostics);
+    degradedDiagnostics.stabilizedLosYawDegrees = 0.20;
+    degradedObservation.timing.observationTime += std::chrono::milliseconds(10);
+    degradedObservation.timing.controlTime += std::chrono::milliseconds(10);
+    degradedPolicyPipeline.observe(degradedObservation);
+    degradedPolicyPipeline.setViewMotionDiagnostics(degradedDiagnostics);
+    const AimPipelineFrameState degradedPolicyFrame = degradedPolicyPipeline.snapshot();
+    const double expectedDegradedFeedforward =
+        degradedPolicyFrame.estimate.rateX * 0.010 *
+        degradedPolicyFrame.estimate.feedforwardConfidence * 0.25 /
+        degradedDiagnostics.degreesPerCountX;
+    expectNear(degradedPolicyFrame.control.trackingFeedforwardX,
+               expectedDegradedFeedforward, 1e-9,
+               "Level 2 applies the machine-profile feedforward confidence ceiling");
+    expectNear(degradedPolicyFrame.control.integralCountsX, 0.0, 1e-12,
+               "Level 2 disables controller integral even when configured globally");
     expectTrue(kalmanFrame.trajectoryOutput.outputProduced &&
                kalmanFrame.trajectoryOutput.commandSuppressed,
                "P0-4B pass-through produces diagnostics without enabling device output");
@@ -1627,6 +1671,11 @@ int main()
         "ProfileCalibrationEnabled,ProfileCalibrationValidX,ProfileCalibrationValidY") != std::string::npos &&
         traceHeader.find("ProfileCalibrationOverallConfidence") != std::string::npos,
         "basic pipeline reports passive profile calibration diagnostics");
+    expectTrue(traceHeader.find(
+        "MachineProfileLevel,MachineProfileCacheRequested,MachineProfileCacheLoaded,MachineProfileCacheMatched") != std::string::npos &&
+        traceHeader.find("MachineProfilePredictionEnabled,MachineProfileIntegralEnabled") != std::string::npos &&
+        traceHeader.find("MachineProfileReason") != std::string::npos,
+        "basic pipeline reports machine profile cache and degradation diagnostics");
     expectTrue(traceHeader.find(
         "PredictionApplied,PredictionEnabled,PredictionAdditionalLeadMs,PredictionVelocityTauMs,PredictionStrength,PredictionVelocityX,PredictionVelocityY,PredictionAccelerationX,PredictionAccelerationY,PredictionLeadMs,PredictionOffsetX,PredictionOffsetY,ViewMotionX,ViewMotionY,ViewMotionCompensationDelayMs,ViewMotionCompensationResponseMs,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictionStationarySuppressed,PredictionMotionEvidenceSuppressed,PredictedX,PredictedY") != std::string::npos,
         "basic pipeline reports prediction diagnostics");

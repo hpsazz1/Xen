@@ -210,15 +210,19 @@ void AimPipelineRuntime::setViewMotionDiagnostics(
         diagnostics.appliedCameraPitchAtControlDegrees;
     controllerInput.relativeLosRateDegreesPerSecondX = frame_.estimate.rateX;
     controllerInput.relativeLosRateDegreesPerSecondY = frame_.estimate.rateY;
-    controllerInput.feedforwardConfidence = frame_.estimate.feedforwardConfidence;
+    controllerInput.feedforwardConfidence = frame_.estimate.feedforwardConfidence *
+        std::clamp(diagnostics.machineProfileFeedforwardScale, 0.0, 1.0);
     controllerInput.degreesPerCountX = diagnostics.degreesPerCountX;
     controllerInput.degreesPerCountY = diagnostics.degreesPerCountY;
     controllerInput.dtSeconds = lastControllerUpdateTime_.time_since_epoch().count() == 0
         ? 1.0 / 120.0
         : std::chrono::duration<double>(
             frame_.observation.timing.controlTime - lastControllerUpdateTime_).count();
+    LosAimController::Settings effectiveControllerSettings = controllerSettings_;
+    if (!diagnostics.machineProfileIntegralEnabled)
+        effectiveControllerSettings.integralTimeSeconds = 0.0;
     const LosAimController::Output control =
-        losAimController_.update(controllerInput, controllerSettings_);
+        losAimController_.update(controllerInput, effectiveControllerSettings);
     lastControllerUpdateTime_ = frame_.observation.timing.controlTime;
     frame_.control.valid = control.valid;
     frame_.control.speedLimited = control.speedLimited;

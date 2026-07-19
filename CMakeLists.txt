@@ -349,6 +349,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/runtime/command_trajectory_shaper.cpp"
     "${SRC_DIR}/runtime/cross_domain_replay.cpp"
     "${SRC_DIR}/runtime/output_scheduler.cpp"
+    "${SRC_DIR}/runtime/machine_profile_cache.cpp"
     "${SRC_DIR}/runtime/build_identity.cpp"
     "${SRC_DIR}/runtime/application_shutdown.cpp"
     "${SRC_DIR}/runtime/application_threads.cpp"
@@ -522,6 +523,18 @@ if(BUILD_TESTING)
             "${AIMBOT_NDI_ROOT}/Bin/x64/Processing.NDI.Lib.x64.dll" "NDI runtime")
     endif()
     add_test(NAME xen.algorithm.basic_tracking COMMAND xen_algorithm_tests)
+
+    add_executable(xen_machine_profile_cache_tests
+        "${CMAKE_SOURCE_DIR}/tests/machine_profile_cache_tests.cpp"
+        "${SRC_DIR}/runtime/machine_profile_cache.cpp")
+    set_target_properties(xen_machine_profile_cache_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
+    target_include_directories(xen_machine_profile_cache_tests PRIVATE "${SRC_DIR}")
+    target_compile_features(xen_machine_profile_cache_tests PRIVATE cxx_std_17)
+    if(MSVC)
+        target_compile_options(xen_machine_profile_cache_tests PRIVATE /utf-8 /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME xen.runtime.machine_profile_cache COMMAND xen_machine_profile_cache_tests)
 
     add_executable(xen_config_tests
         "${CMAKE_SOURCE_DIR}/tests/config_tests.cpp"
