@@ -120,6 +120,10 @@ foreach ($consoleThemeToken in @(
         throw "Console theme token is missing: $consoleThemeToken"
     }
 }
+if ($startupHelpers -notmatch 'ENABLE_VIRTUAL_TERMINAL_PROCESSING' -or
+    $startupHelpers -notmatch '\\x1b\]4;0;rgb:') {
+    throw 'ANSI console theme sequence is missing.'
+}
 if ($mainSource -notmatch 'SetConsoleOutputCP\(CP_UTF8\);\s*//[^\r\n]*\s*ApplyConsoleTheme\(\);') {
     throw 'Console theme is not applied after UTF-8 console initialization.'
 }

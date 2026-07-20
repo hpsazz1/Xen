@@ -11,12 +11,30 @@
 #include <iostream>
 #include <vector>
 
+namespace
+{
+constexpr const char* kConsoleThemeSequence =
+    "\x1b]4;0;rgb:ffff/ffff/ffff\x07"
+    "\x1b]4;7;rgb:1a1c/1c1c/1f1f\x07"
+    "\x1b]4;8;rgb:6065/6565/6d6d\x07"
+    "\x1b]4;9;rgb:3333/9c9c/ffff\x07"
+    "\x1b]4;10;rgb:0000/a2a2/4040\x07"
+    "\x1b]4;12;rgb:baba/2626/2323\x07"
+    "\x1b[38;5;7;48;5;0m";
+}
+
 void ApplyConsoleTheme()
 {
     HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD consoleMode = 0;
     if (output == nullptr || output == INVALID_HANDLE_VALUE || !GetConsoleMode(output, &consoleMode))
         return;
+
+    // Windows Terminal 等伪控制台不一定支持修改 Win32 调色板，优先使用 ANSI
+    // 主题序列；传统 conhost 会忽略该序列，后面的 Win32 调色板路径继续生效。
+    DWORD ansiMode = consoleMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    if (SetConsoleMode(output, ansiMode))
+        std::cout << kConsoleThemeSequence << std::flush;
 
     CONSOLE_SCREEN_BUFFER_INFOEX info{};
     info.cbSize = sizeof(info);
@@ -37,11 +55,8 @@ void ApplyConsoleTheme()
     info.wAttributes = kThemeAttributes;
     info.wPopupAttributes = kThemeAttributes;
 
-    // SetConsoleScreenBufferInfoEx 会把窗口右、下边界当成排他边界，回写前需补一。
-    ++info.srWindow.Right;
-    ++info.srWindow.Bottom;
     if (!SetConsoleScreenBufferInfoEx(output, &info))
-        return;
+        return; // ANSI 路径已经覆盖支持虚拟终端的控制台。
 
     SetConsoleTextAttribute(output, kThemeAttributes);
 
