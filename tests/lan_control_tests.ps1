@@ -19,6 +19,8 @@ foreach ($required in @(
     'option value=\"terrorist\"',
     'option value=\"custom\"',
     'applyClassState',
+    'applyModelClasses',
+    'class_names',
     'id=\"class_player\"',
     'id=\"class_head\"',
     'std::isfinite')) {

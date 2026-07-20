@@ -133,28 +133,53 @@ void draw_ai()
     // 四类 CS2 模型按阵营成对映射：警方 0/1，匪方 2/3；其他模型可使用自定义 ID。
     if (OverlayUI::BeginSection("目标模型类别", "ai_section_classes"))
     {
-        static const char* classPresets[] = {
-            "警方 · 0 警身 / 1 警头",
-            "匪方 · 2 匪身 / 3 匪头",
-            "自定义类别 ID",
+        std::vector<std::string> modelClassNames;
+        int modelClassCount = 4;
+#ifndef USE_CUDA
+        if (dml_detector && dml_detector->isReady())
+        {
+            modelClassCount = std::max(0, dml_detector->getNumberOfClasses());
+            modelClassNames = dml_detector->getClassNames();
+        }
+#endif
+        const auto displayClassName = [&modelClassNames](int classId) {
+            if (classId < 0 || classId >= static_cast<int>(modelClassNames.size()))
+                return std::string("类别 ") + std::to_string(classId);
+            const std::string& raw = modelClassNames[classId];
+            if (raw == "c") return std::string("警身");
+            if (raw == "ch") return std::string("警头");
+            if (raw == "t") return std::string("匪身");
+            if (raw == "th") return std::string("匪头");
+            return raw.empty() ? std::string("类别 ") + std::to_string(classId) : raw;
         };
+        const bool hasFactionPresets = modelClassCount >= 4;
+        std::vector<std::string> classPresetStorage;
+        if (hasFactionPresets)
+        {
+            classPresetStorage.push_back("警方 · 0 " + displayClassName(0) + " / 1 " + displayClassName(1));
+            classPresetStorage.push_back("匪方 · 2 " + displayClassName(2) + " / 3 " + displayClassName(3));
+        }
+        classPresetStorage.push_back("自定义类别 ID");
+        std::vector<const char*> classPresets;
+        for (const auto& item : classPresetStorage)
+            classPresets.push_back(item.c_str());
 
-        int preset = 2;
-        if (config.class_player == 0 && config.class_head == 1)
+        int preset = static_cast<int>(classPresetStorage.size()) - 1;
+        if (hasFactionPresets && config.class_player == 0 && config.class_head == 1)
             preset = 0;
-        else if (config.class_player == 2 && config.class_head == 3)
+        else if (hasFactionPresets && config.class_player == 2 && config.class_head == 3)
             preset = 1;
 
         {
             const auto row = OverlayUI::BeginSettingRow("目标阵营");
-            if (ImGui::Combo("##class_preset", &preset, classPresets, IM_ARRAYSIZE(classPresets)))
+            if (ImGui::Combo("##class_preset", &preset, classPresets.data(), static_cast<int>(classPresets.size())))
             {
-                if (preset == 0)
+                if (hasFactionPresets && preset == 0)
                 {
                     config.class_player = 0;
                     config.class_head = 1;
                 }
-                else if (preset == 1)
+                else if (hasFactionPresets && preset == 1)
                 {
                     config.class_player = 2;
                     config.class_head = 3;
@@ -164,7 +189,7 @@ void draw_ai()
             OverlayUI::EndSettingRow(row);
         }
 
-        if (preset == 2)
+        if (preset == static_cast<int>(classPresetStorage.size()) - 1)
         {
             {
                 const auto row = OverlayUI::BeginSettingRow("身体类别 ID");
@@ -186,6 +211,16 @@ void draw_ai()
             }
             if (config.class_player == config.class_head)
                 OverlayUI::TextRow("身体类别和头部类别不能相同", IM_COL32(186, 38, 35, 255));
+        }
+        if (!modelClassNames.empty())
+        {
+            std::string metadataText = "模型类别：";
+            for (size_t i = 0; i < modelClassNames.size(); ++i)
+            {
+                if (i != 0) metadataText += "、";
+                metadataText += std::to_string(i) + "=" + displayClassName(static_cast<int>(i));
+            }
+            OverlayUI::TextRow(metadataText.c_str(), IM_COL32(96, 101, 109, 255));
         }
         OverlayUI::EndSection();
     }

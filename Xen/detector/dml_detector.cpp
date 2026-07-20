@@ -18,6 +18,7 @@
 #include <limits>
 #include <algorithm>
 #include <cmath>
+#include <regex>
 #include <dxgi.h>
 #include <utility>
 
@@ -40,6 +41,22 @@ extern std::atomic<bool> detectionPaused;
 
 namespace
 {
+    std::vector<std::string> parseModelClassNames(const std::string& value)
+    {
+        std::vector<std::pair<int, std::string>> indexed;
+        const std::regex entry(R"((\d+)\s*:\s*['\"]([^'\"]+)['\"])");
+        for (std::sregex_iterator it(value.begin(), value.end(), entry), end; it != end; ++it)
+            indexed.emplace_back(std::stoi((*it)[1].str()), (*it)[2].str());
+
+        std::sort(indexed.begin(), indexed.end(), [](const auto& left, const auto& right) {
+            return left.first < right.first;
+        });
+        std::vector<std::string> names;
+        for (const auto& item : indexed)
+            names.push_back(item.second);
+        return names;
+    }
+
     /**
      * utf8ToWide - 将 UTF-8 字符串正确转换为 UTF-16 宽字符串。
      * 不能使用逐字节扩展（wstring(begin, end)），那样会损坏非 ASCII 路径。
@@ -470,6 +487,18 @@ bool DirectMLDetector::tryInitializeModel(
         Ort::SessionOptions options = createSessionOptions(useDirectML, graphOptimizationLevel);
         std::wstring model_path_wide = utf8ToWide(model_path);
         Ort::Session newSession(env, model_path_wide.c_str(), options);
+        std::vector<std::string> newClassNames;
+        try
+        {
+            auto metadata = newSession.GetModelMetadata();
+            auto namesValue = metadata.LookupCustomMetadataMapAllocated("names", allocator);
+            if (namesValue)
+                newClassNames = parseModelClassNames(namesValue.get());
+        }
+        catch (const Ort::Exception&)
+        {
+            // 元数据缺失不影响推理，UI 将回退为类别 ID。
+        }
 
         // 读取输入张量名称和形状
         std::string newInputName = newSession.GetInputNameAllocated(0, allocator).get();
@@ -517,6 +546,10 @@ bool DirectMLDetector::tryInitializeModel(
 
         // 将会话和元数据保存到成员变量
         session = std::move(newSession);
+        {
+            std::lock_guard<std::mutex> metadataLock(modelMetadataMutex);
+            modelClassNames = std::move(newClassNames);
+        }
         input_name = std::move(newInputName);
         output_names = std::move(newOutputNames);
         output_name = output_names.empty() ? std::string() : output_names.front();
@@ -999,6 +1032,12 @@ int DirectMLDetector::getNumberOfClasses()
         std::cerr << "[DirectMLDetector] Unexpected output tensor shape." << std::endl;
         return -1;
     }
+}
+
+std::vector<std::string> DirectMLDetector::getClassNames() const
+{
+    std::lock_guard<std::mutex> lock(modelMetadataMutex);
+    return modelClassNames;
 }
 
 /**

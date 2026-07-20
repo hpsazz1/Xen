@@ -137,5 +137,12 @@ foreach ($classUiToken in @('ai_section_classes', 'class_preset', 'class_player'
         throw "Desktop class selector is missing: $classUiToken"
     }
 }
+$dmlUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\detector\dml_detector.cpp') -Raw -Encoding UTF8
+$dmlHeader = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\detector\dml_detector.h') -Raw -Encoding UTF8
+foreach ($metadataToken in @('LookupCustomMetadataMapAllocated', 'parseModelClassNames', 'getClassNames', '"names"')) {
+    if (($dmlUi + $dmlHeader) -notmatch [regex]::Escape($metadataToken)) {
+        throw "Model metadata class-name support is missing: $metadataToken"
+    }
+}
 
 Write-Output 'prediction ui visibility tests passed'

@@ -47,10 +47,12 @@ function toast(t){$('toast').textContent=t;$('toast').style.display='block';setT
 if(session){showApp();refresh()}setInterval(()=>{if(session)refresh()},1200);
 </script></body></html>)HTML";
 
-constexpr const char* kClassPanelHtml = R"HTML(<div class="panel"><h2>目标模型类别</h2><form class="form" onsubmit="saveClasses(event)"><div class="field full"><label>目标阵营</label><select id="target_faction" name="target_faction" onchange="syncClassPreset()"><option value="police">警方 · 0 警身 / 1 警头</option><option value="terrorist">匪方 · 2 匪身 / 3 匪头</option><option value="custom">自定义类别 ID</option></select></div><div id="custom_body_field" class="field hidden"><label>身体类别 ID</label><input id="class_player" name="class_player" type="number" min="0" max="255" step="1"></div><div id="custom_head_field" class="field hidden"><label>头部类别 ID</label><input id="class_head" name="class_head" type="number" min="0" max="255" step="1"></div><div class="field full"><button type="submit">保存目标类别</button></div></form></div>)HTML";
+constexpr const char* kClassPanelHtml = R"HTML(<div class="panel"><h2>目标模型类别</h2><form class="form" onsubmit="saveClasses(event)"><div class="field full"><label>目标阵营</label><select id="target_faction" name="target_faction" onchange="syncClassPreset()"><option value="police">警方 · 0 警身 / 1 警头</option><option value="terrorist">匪方 · 2 匪身 / 3 匪头</option><option value="custom">自定义类别 ID</option></select></div><div id="custom_body_field" class="field hidden"><label>身体类别 ID</label><input id="class_player" name="class_player" type="number" min="0" max="255" step="1"></div><div id="custom_head_field" class="field hidden"><label>头部类别 ID</label><input id="class_head" name="class_head" type="number" min="0" max="255" step="1"></div><div class="field full"><button type="submit">保存目标类别</button></div></form><p id="model_class_names" class="foot"></p></div>)HTML";
 
 constexpr const char* kClassPanelScript = R"JS(<script>
 function syncClassPreset(){const mode=$('target_faction').value;const custom=mode==='custom';$('custom_body_field').classList.toggle('hidden',!custom);$('custom_head_field').classList.toggle('hidden',!custom);if(mode==='police'){$('class_player').value=0;$('class_head').value=1}else if(mode==='terrorist'){$('class_player').value=2;$('class_head').value=3}}
+function modelClassLabel(raw,id){return({c:'警身',ch:'警头',t:'匪身',th:'匪头'})[raw]||raw||('类别 '+id)}
+function applyModelClasses(names){if(names&&names.length){$('model_class_names').textContent='模型类别：'+names.map((n,i)=>i+'='+modelClassLabel(n,i)).join('、');if(names.length>=4){$('target_faction').options[0].text='警方 · 0 '+modelClassLabel(names[0],0)+' / 1 '+modelClassLabel(names[1],1);$('target_faction').options[1].text='匪方 · 2 '+modelClassLabel(names[2],2)+' / 3 '+modelClassLabel(names[3],3)}}else $('model_class_names').textContent='模型未提供类别名称，使用类别 ID。'}
 function applyClassState(body,head){if(body===0&&head===1)$('target_faction').value='police';else if(body===2&&head===3)$('target_faction').value='terrorist';else $('target_faction').value='custom';$('class_player').value=body;$('class_head').value=head;syncClassPreset()}
 async function saveClasses(e){e.preventDefault();try{syncClassPreset();const f=e.target;await req('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({class_player:f.elements.class_player.value,class_head:f.elements.class_head.value})});toast('目标类别已保存');refresh()}catch(e){toast(e.message)}}
 </script>)JS";
@@ -65,7 +67,7 @@ std::string RenderConsoleHtml()
     const std::string refreshMarker = "$('aiming').textContent=d.aiming?'是':'否';";
     const auto refreshPosition = page.find(refreshMarker);
     if (refreshPosition != std::string::npos)
-        page.insert(refreshPosition + refreshMarker.size(), "applyClassState(d.class_player,d.class_head);");
+        page.insert(refreshPosition + refreshMarker.size(), "applyModelClasses(d.class_names);applyClassState(d.class_player,d.class_head);");
     return page;
 }
 
@@ -163,6 +165,11 @@ bool LanControlServer::Start(const std::string& bindAddress, int port)
     };
     impl_->server.Get("/api/status", [authenticated](const httplib::Request& request, httplib::Response& response) {
         if (!authenticated(request)) { response.status = 401; return; }
+        std::vector<std::string> classNames;
+#ifndef USE_CUDA
+        if (dml_detector && dml_detector->isReady())
+            classNames = dml_detector->getClassNames();
+#endif
         std::lock_guard<std::mutex> lock(configMutex);
         std::ostringstream json;
         json << std::boolalpha
@@ -179,6 +186,13 @@ bool LanControlServer::Start(const std::string& bindAddress, int port)
             << ",\"prediction_lead_ms\":" << config.prediction_lead_ms
             << ",\"class_player\":" << config.class_player
             << ",\"class_head\":" << config.class_head
+            << ",\"class_names\":[";
+        for (size_t i = 0; i < classNames.size(); ++i)
+        {
+            if (i != 0) json << ',';
+            json << '"' << JsonEscape(classNames[i]) << '"';
+        }
+        json << ']'
             << ",\"auto_aim\":" << config.auto_aim
             << ",\"prediction_enabled\":" << config.prediction_enabled
             << ",\"input_method\":\"" << JsonEscape(config.input_method)

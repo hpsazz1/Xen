@@ -52,6 +52,8 @@ public:
         FrameTiming frameTiming = {});
 
     int getNumberOfClasses();
+    // 读取模型 names 元数据；没有元数据时返回空列表。
+    std::vector<std::string> getClassNames() const;
     bool isReady() const;
     // 跨推理线程和UI/控制线程读取同一完整发布快照，避免混合不同推理帧。
     TimingSnapshot getTimingSnapshot() const;
@@ -88,6 +90,8 @@ private:
     cv::Mat preprocessGrayFloatBuffer;
 
     std::mutex inferenceMutex;
+    mutable std::mutex modelMetadataMutex;
+    std::vector<std::string> modelClassNames;
     mutable std::mutex timingMutex; // 保护一次推理对应的完整阶段快照
     TimingSnapshot timingSnapshot;  // 最近一次成功完成后处理的推理耗时
     std::string activeModelPath;     // 最近一次成功初始化的会话模型路径
