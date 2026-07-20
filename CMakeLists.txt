@@ -420,6 +420,10 @@ if(BUILD_TESTING)
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/detection_resume_phase_analysis_tests.ps1"
     )
     add_test(
+        NAME xen.analysis.real_reacquisition_envelope
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/real_reacquisition_envelope_tests.ps1"
+    )
+    add_test(
         NAME xen.analysis.active_profile_protocol
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/active_profile_protocol_tests.ps1" -RepoRoot "${CMAKE_SOURCE_DIR}"
     )
