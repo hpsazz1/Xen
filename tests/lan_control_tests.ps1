@@ -12,6 +12,10 @@ foreach ($required in @(
     'pairingCode',
     'remoteReloadRequested.store\(true\)',
     'config.saveConfig\(\)',
+    'class_player',
+    'class_head',
+    'id=\"class_player\"',
+    'id=\"class_head\"',
     'std::isfinite')) {
     if ($server -notmatch $required) { throw "LAN control contract missing: $required" }
 }

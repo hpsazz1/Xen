@@ -47,6 +47,26 @@ function toast(t){$('toast').textContent=t;$('toast').style.display='block';setT
 if(session){showApp();refresh()}setInterval(()=>{if(session)refresh()},1200);
 </script></body></html>)HTML";
 
+constexpr const char* kClassPanelHtml = R"HTML(<div class="panel"><h2>模型类别映射</h2><form class="form" onsubmit="saveClasses(event)"><div class="field"><label>身体类别 ID</label><select id="class_player" name="class_player"><option value="0">0 · 警身</option><option value="1">1 · 警头</option><option value="2">2 · 匪身</option><option value="3">3 · 匪头</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option></select></div><div class="field"><label>头部类别 ID</label><select id="class_head" name="class_head"><option value="0">0 · 警身</option><option value="1">1 · 警头</option><option value="2">2 · 匪身</option><option value="3">3 · 匪头</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option></select></div><div class="field full"><button type="submit">保存类别映射</button></div></form><p class="foot">当前配置用于身体/头部目标类别识别。</p></div>)HTML";
+
+constexpr const char* kClassPanelScript = R"JS(<script>
+async function saveClasses(e){e.preventDefault();try{const f=e.target;await req('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({class_player:f.elements.class_player.value,class_head:f.elements.class_head.value})});toast('类别映射已保存');refresh()}catch(e){toast(e.message)}}
+</script>)JS";
+
+std::string RenderConsoleHtml()
+{
+    std::string page(kConsoleHtml);
+    const std::string panelMarker = "<div id=\"toast\" class=\"toast\"></div>";
+    const auto panelPosition = page.find(panelMarker);
+    if (panelPosition != std::string::npos)
+        page.insert(panelPosition, std::string(kClassPanelHtml) + kClassPanelScript);
+    const std::string refreshMarker = "$('aiming').textContent=d.aiming?'是':'否';";
+    const auto refreshPosition = page.find(refreshMarker);
+    if (refreshPosition != std::string::npos)
+        page.insert(refreshPosition + refreshMarker.size(), "$('class_player').value=d.class_player;$('class_head').value=d.class_head;");
+    return page;
+}
+
 std::string JsonEscape(const std::string& value)
 {
     std::string result;
@@ -124,7 +144,7 @@ bool LanControlServer::Start(const std::string& bindAddress, int port)
     impl_->port = port;
 
     impl_->server.Get("/", [](const httplib::Request&, httplib::Response& response) {
-        response.set_content(kConsoleHtml, "text/html; charset=UTF-8");
+        response.set_content(RenderConsoleHtml(), "text/html; charset=UTF-8");
     });
     impl_->server.Post("/api/auth", [this](const httplib::Request& request, httplib::Response& response) {
         if (!request.has_param("pairing") || request.get_param_value("pairing") != impl_->pairingCode)
@@ -155,6 +175,8 @@ bool LanControlServer::Start(const std::string& bindAddress, int port)
             << ",\"move_response_ms\":" << config.move_response_ms
             << ",\"move_max_speed_cps\":" << config.move_max_speed_cps
             << ",\"prediction_lead_ms\":" << config.prediction_lead_ms
+            << ",\"class_player\":" << config.class_player
+            << ",\"class_head\":" << config.class_head
             << ",\"auto_aim\":" << config.auto_aim
             << ",\"prediction_enabled\":" << config.prediction_enabled
             << ",\"input_method\":\"" << JsonEscape(config.input_method)
@@ -179,6 +201,7 @@ bool LanControlServer::Start(const std::string& bindAddress, int port)
         std::lock_guard<std::mutex> lock(configMutex);
         float confidence = config.confidence_threshold, nms = config.nms_threshold;
         float responseMs = config.move_response_ms, maxSpeed = config.move_max_speed_cps, leadMs = config.prediction_lead_ms;
+        int classPlayer = config.class_player, classHead = config.class_head;
         bool autoAim = config.auto_aim, prediction = config.prediction_enabled;
         int captureLimit = config.capture_fps;
         if (!ParseFloat(request, "confidence_threshold", 0.01f, 1.0f, confidence, error) ||
@@ -189,6 +212,13 @@ bool LanControlServer::Start(const std::string& bindAddress, int port)
             !ParseBool(request, "auto_aim", autoAim, error) ||
             !ParseBool(request, "prediction_enabled", prediction, error))
         { response.status = 400; response.set_content("{\"error\":\"" + JsonEscape(error) + "\"}", "application/json; charset=UTF-8"); return; }
+        try
+        {
+            if (request.has_param("class_player")) classPlayer = std::clamp(std::stoi(request.get_param_value("class_player")), 0, 255);
+            if (request.has_param("class_head")) classHead = std::clamp(std::stoi(request.get_param_value("class_head")), 0, 255);
+        }
+        catch (...) { response.status = 400; response.set_content("{\"error\":\"类别 ID 无效\"}", "application/json; charset=UTF-8"); return; }
+        if (classPlayer == classHead) { response.status = 400; response.set_content("{\"error\":\"身体类别和头部类别不能相同\"}", "application/json; charset=UTF-8"); return; }
         if (request.has_param("capture_fps"))
         {
             try { captureLimit = std::clamp(std::stoi(request.get_param_value("capture_fps")), 0, 500); }
@@ -199,6 +229,7 @@ bool LanControlServer::Start(const std::string& bindAddress, int port)
         config.move_response_ms = responseMs; config.move_max_speed_cps = maxSpeed;
         config.prediction_lead_ms = leadMs; config.auto_aim = autoAim;
         config.prediction_enabled = prediction; config.capture_fps = captureLimit;
+        config.class_player = classPlayer; config.class_head = classHead;
         if (fpsChanged) capture_fps_changed.store(true);
         if (!config.saveConfig()) { response.status = 500; response.set_content("{\"error\":\"配置保存失败\"}", "application/json; charset=UTF-8"); return; }
         response.set_content("{\"ok\":true}", "application/json; charset=UTF-8");
