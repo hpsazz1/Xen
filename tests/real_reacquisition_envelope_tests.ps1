@@ -62,27 +62,74 @@ try {
 
     $adviceRoot = Join-Path $temporaryRoot 'advice'
     New-Item -ItemType Directory -Path $adviceRoot | Out-Null
-    $adviceHeader = 'BuildBackend,BuildRevision,ControllerRevision,AimPipelineEffectiveMode,AimPipelineShadowProcessed,AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY,AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit,RecoverySpeedAdviceEligible,RecoverySpeedAdviceActive,RecoverySpeedAdviceExited,RecoverySpeedAdviceLimited,RecoverySpeedBaselineMaxCps,RecoverySpeedAdvisoryMaxCps,RecoverySpeedAdvisoryFrameCountLimit,RecoverySpeedAdvisoryRequestedCountsX,RecoverySpeedAdvisoryRequestedCountsY,RecoverySpeedBaselineStaticBudgetFrames,RecoverySpeedAdvisoryStaticBudgetFrames,RecoverySpeedStaticBudgetFramesSaved'
+    $adviceHeader = 'BuildBackend,BuildRevision,ControllerRevision,AimPipelineResetGeneration,AimPipelineObservationSequence,AimPipelineEffectiveMode,AimPipelineShadowProcessed,AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY,AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit,RecoverySpeedAdviceEligible,RecoverySpeedAdviceActive,RecoverySpeedAdviceExited,RecoverySpeedAdviceLimited,RecoverySpeedBaselineMaxCps,RecoverySpeedAdvisoryMaxCps,RecoverySpeedAdvisoryFrameCountLimit,RecoverySpeedAdvisoryRequestedCountsX,RecoverySpeedAdvisoryRequestedCountsY,RecoverySpeedBaselineStaticBudgetFrames,RecoverySpeedAdvisoryStaticBudgetFrames,RecoverySpeedStaticBudgetFramesSaved'
     foreach ($scenario in @('left', 'right')) {
         $sign = if ($scenario -eq 'left') { -1 } else { 1 }
         @(
             $adviceHeader
-            "DML,abc1234,64,shadow,1,1,1,$($sign * 30),0,$($sign * 14.4),0,14.4,1,1,0,1,1440,1800,18,$($sign * 18),0,3,2,1"
-            "DML,abc1234,64,shadow,1,1,1,$($sign * 16),0,$($sign * 14.4),0,14.4,1,1,0,0,1440,1800,18,$($sign * 16),0,2,1,1"
-            "DML,abc1234,64,shadow,1,1,0,$($sign * 10),0,$($sign * 10),0,14.4,1,0,1,0,1440,1800,0,0,0,0,0,0"
+            "DML,abc1234,64,2,1,shadow,1,1,1,$($sign * 30),0,$($sign * 14.4),0,14.4,1,1,0,1,1440,1800,18,$($sign * 18),0,3,2,1"
+            "DML,abc1234,64,2,2,shadow,1,1,1,$($sign * 16),0,$($sign * 14.4),0,14.4,1,1,0,0,1440,1800,18,$($sign * 16),0,2,1,1"
+            "DML,abc1234,64,2,3,shadow,1,1,0,$($sign * 10),0,$($sign * 10),0,14.4,1,0,1,0,1440,1800,0,0,0,0,0,0"
         ) | Set-Content -LiteralPath (Join-Path $adviceRoot "horizontal_$($scenario)1.csv") -Encoding UTF8
     }
     $adviceSummary = @(& (Join-Path $PSScriptRoot '..\tools\analyze_recovery_speed_advice.ps1') `
-        -DataRoot $adviceRoot -ExpectedBuildRevision 'abc1234')
-    Assert-Near 4.0 $adviceSummary.ActiveFrames 0.001 `
+        -DataRoot $adviceRoot -ExpectedBuildRevision 'abc1234' -MinimumPostExitFrames 0 `
+        -MinimumActiveExitedEventsPerDirection 1)
+    $adviceOverall = $adviceSummary | Where-Object Direction -eq 'overall'
+    Assert-Near 4.0 $adviceOverall.ActiveFrames 0.001 `
         'Recovery advice analyzer must count active diagnostic frames.'
-    Assert-Near 2.0 $adviceSummary.ExitFrames 0.001 `
+    Assert-Near 2.0 $adviceOverall.ExitedWindows 0.001 `
         'Recovery advice analyzer must count formal exit frames.'
-    Assert-Near 0.0 $adviceSummary.ViolationCount 0.001 `
+    Assert-Near 0.0 $adviceOverall.ViolationCount 0.001 `
         'Valid advisory-only rows must preserve all safety invariants.'
-    if ($adviceSummary.Conclusion -ne 'DIAGNOSTIC_ONLY_HOLD_SHADOW') {
-        throw "Unexpected recovery advice conclusion: $($adviceSummary.Conclusion)"
+    if ($adviceOverall.Conclusion -ne 'DIAGNOSTIC_ONLY_HOLD_SHADOW') {
+        throw "Unexpected recovery advice conclusion: $($adviceOverall.Conclusion)"
     }
+    $shortTailRejected = $false
+    try {
+        & (Join-Path $PSScriptRoot '..\tools\analyze_recovery_speed_advice.ps1') `
+            -DataRoot $adviceRoot -ExpectedBuildRevision 'abc1234' `
+            -MinimumActiveExitedEventsPerDirection 1 | Out-Null
+    }
+    catch { $shortTailRejected = $true }
+    if (-not $shortTailRejected) {
+        throw 'Default recovery advice analysis must require five post-exit frames.'
+    }
+
+    $rightAdvicePath = Join-Path $adviceRoot 'horizontal_right1.csv'
+    $rightAdviceRows = @(Import-Csv -LiteralPath $rightAdvicePath)
+    $interrupted = $rightAdviceRows[0].PSObject.Copy()
+    $interrupted.AimPipelineResetGeneration = '3'
+    $interrupted.AimPipelineObservationSequence = '1'
+    $interrupted.RecoverySpeedAdviceExited = '0'
+    $open = $rightAdviceRows[0].PSObject.Copy()
+    $open.AimPipelineResetGeneration = '4'
+    $open.AimPipelineObservationSequence = '1'
+    $open.RecoverySpeedAdviceExited = '0'
+    @($rightAdviceRows) + @($interrupted, $open) |
+        Export-Csv -LiteralPath $rightAdvicePath -NoTypeInformation -Encoding UTF8
+    $incompleteSummary = @(& (Join-Path $PSScriptRoot '..\tools\analyze_recovery_speed_advice.ps1') `
+        -DataRoot $adviceRoot -ExpectedBuildRevision 'abc1234' -MinimumPostExitFrames 0 `
+        -MinimumActiveExitedEventsPerDirection 1)
+    $incompleteRight = $incompleteSummary | Where-Object Direction -eq 'right'
+    $incompleteOverall = $incompleteSummary | Where-Object Direction -eq 'overall'
+    Assert-Near 1.0 $incompleteRight.InterruptedWindows 0.001 `
+        'A later reset must classify a non-exited advisory window as interrupted.'
+    Assert-Near 1.0 $incompleteRight.OpenWindows 0.001 `
+        'The final non-exited advisory generation must remain open.'
+    Assert-Near 0.0 $incompleteOverall.CoverageReady 0.001 `
+        'An open direction must block overall real-data coverage.'
+    if ($incompleteOverall.Conclusion -ne 'MORE_REAL_DATA_REQUIRED_HOLD_SHADOW') {
+        throw "Unexpected incomplete recovery advice conclusion: $($incompleteOverall.Conclusion)"
+    }
+    Copy-Item -LiteralPath (Join-Path $adviceRoot 'horizontal_left1.csv') `
+        -Destination (Join-Path $adviceRoot 'horizontal_left_old.csv')
+    $selectedSummary = @(& (Join-Path $PSScriptRoot '..\tools\analyze_recovery_speed_advice.ps1') `
+        -DataRoot $adviceRoot -ExpectedBuildRevision 'abc1234' -MinimumPostExitFrames 0 `
+        -MinimumActiveExitedEventsPerDirection 1 `
+        -LeftFileName 'horizontal_left1.csv' -RightFileName 'horizontal_right1.csv')
+    Assert-Near 1.0 ($selectedSummary | Where-Object Direction -eq 'left').RecoveryEvents 0.001 `
+        'Explicit file selection must exclude historical same-direction CSV files.'
     Remove-Item -LiteralPath $adviceRoot -Recurse -Force
 
     $mixedPath = Join-Path $temporaryRoot 'horizontal_left_mixed.csv'
