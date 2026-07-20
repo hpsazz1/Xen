@@ -1349,8 +1349,8 @@ int main()
     expectTrue(recoverySpeedResult.visualResponseLatencyMs >= 0.0 &&
                    recoverySpeedResult.visualResponseLatencyMs < 10.0,
                "recovery speed protocol aligns stop anchor to visible response latency");
-    expectTrue(recoverySpeedResult.stopDistancePx > 0.0 && recoverySpeedResult.stopDistancePx < 12.0,
-               "recovery speed protocol preserves finite stop distance");
+    expectNear(recoverySpeedResult.stopDistancePx, 0.0, 1e-9,
+               "recovery speed protocol does not count committed visual response as overshoot");
 
     std::vector<PhysicalResponseSample> phaseShiftedRecoverySamples;
     for (int frame = 0; frame <= 616; ++frame)

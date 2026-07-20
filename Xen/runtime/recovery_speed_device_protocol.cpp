@@ -415,7 +415,7 @@ RecoverySpeedTrialResult AnalyzeRecoverySpeedTrial(
             result.stopAnchorDisplacementPx = primary;
             haveStopAnchor = true;
         }
-        if (sample.receiveNs >= stopAnchorNs && relativeMs < 1533.333)
+        if (sample.receiveNs >= responseOnsetNs && relativeMs < 1533.333)
         {
             peak = std::max(peak, primary);
             crossPeak = std::max(crossPeak, cross);
@@ -430,7 +430,9 @@ RecoverySpeedTrialResult AnalyzeRecoverySpeedTrial(
     }
     result.forwardDisplacementPx = median(std::move(forwardTail));
     result.peakDisplacementPx = peak;
-    result.stopDistancePx = std::max(0.0, peak - result.stopAnchorDisplacementPx);
+    // 鼠标增量停止后，命令到画面的固定延迟仍会继续显示已提交位移；该部分不是物理过冲。
+    // 以长稳态尾段作为期望终点，峰值超过稳态终点的部分才计入停止距离。
+    result.stopDistancePx = std::max(0.0, peak - result.forwardDisplacementPx);
     result.finalResidualPx = std::abs(median(std::move(finalX)));
     result.pixelsPerCount = result.forwardDisplacementPx / expectedExcursionCounts;
     result.crossAxisLeakagePercent = peak > 1e-9 ? 100.0 * crossPeak / peak : 1000.0;
