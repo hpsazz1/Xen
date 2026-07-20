@@ -4,6 +4,7 @@ param(
     [ValidateRange(1, 100)][int]$RecoveryFrames = 20,
     [ValidateRange(1, 10000)][int]$MinimumResetGapMs = 100,
     [ValidateRange(1, 10000)][int]$MinimumEventsPerDirection = 6,
+    [ValidateRange(30.0, 4000.0)][double]$ExpectedShadowMaxCountsPerSecond = 1440.0,
     [double]$ReferenceLeftResidualCounts = 303.442641,
     [double]$ReferenceRightResidualCounts = 304.589065,
     [double]$ReferenceTolerancePercent = 20.0,
@@ -51,6 +52,21 @@ if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
     throw "Real reacquisition data root does not exist: $resolvedRoot"
 }
 
+$configFiles = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -Filter 'config.ini')
+if ($configFiles.Count -ne 1) {
+    throw "Data root must contain exactly one config.ini snapshot: $resolvedRoot"
+}
+$shadowSpeedLines = @(Get-Content -LiteralPath $configFiles[0].FullName |
+    Where-Object { $_ -match '^\s*aim_shadow_max_speed_cps\s*=' })
+if ($shadowSpeedLines.Count -ne 1) {
+    throw "config.ini must contain exactly one aim_shadow_max_speed_cps setting: $($configFiles[0].FullName)"
+}
+$shadowSpeedText = ($shadowSpeedLines[0] -split '=', 2)[1].Trim()
+$configuredShadowSpeed = Get-FiniteDouble $shadowSpeedText 'aim_shadow_max_speed_cps'
+if ([math]::Abs($configuredShadowSpeed - $ExpectedShadowMaxCountsPerSecond) -gt 1e-6) {
+    throw "config.ini does not use the frozen $ExpectedShadowMaxCountsPerSecond counts/s shadow limit: $($configFiles[0].FullName)"
+}
+
 $requiredColumns = @(
     'FrameID', 'BuildBackend', 'BuildRevision', 'BuildTimestampUtc', 'ControllerRevision',
     'AimPipelineEffectiveMode', 'AimPipelineShadowProcessed',
@@ -61,13 +77,13 @@ $requiredColumns = @(
     'RelativeErrorYawDegrees', 'DegreesPerCountX', 'ViewMotionShadowValid',
     'CommandToFrameDelayMs', 'CommandResponseMs', 'ControlTimeNs',
     'TargetDetected', 'CommandSendAttempted', 'CommandSendSucceeded',
-    'AimPipelineRateX', 'MaxCountsPerSecond'
+    'AimPipelineRateX'
 )
 $eventRows = [Collections.Generic.List[object]]::new()
 $eventSummaries = [Collections.Generic.List[object]]::new()
 $identityRows = [Collections.Generic.List[object]]::new()
 $inputFiles = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -Filter '*.csv' |
-    Where-Object { $_.BaseName -match '(?i)(^|[_-])(left|right)([_-]|$)' } |
+    Where-Object { $_.BaseName -match '(?i)(left|right)' } |
     Sort-Object FullName)
 if ($inputFiles.Count -eq 0) {
     throw "No left/right pipeline CSV was found below: $resolvedRoot"
@@ -115,15 +131,33 @@ foreach ($csvFile in $inputFiles) {
             $row.ViewMotionShadowValid -ne '1') {
             throw "CSV contains a non-shadow or unprocessed row: $($csvFile.FullName)"
         }
-        if ([math]::Abs((Get-FiniteDouble $row.MaxCountsPerSecond 'MaxCountsPerSecond') - 1440.0) -gt 1e-6) {
-            throw "CSV does not use the frozen 1440 counts/s limit: $($csvFile.FullName)"
-        }
     }
 
-    $scenario = if ($csvFile.BaseName -match '(?i)(^|[_-])left([_-]|$)') {
-        'left'
-    } else { 'right' }
+    $hasLeft = $csvFile.BaseName -match '(?i)left'
+    $hasRight = $csvFile.BaseName -match '(?i)right'
+    if ($hasLeft -eq $hasRight) {
+        throw "CSV filename must identify exactly one direction (left or right): $($csvFile.FullName)"
+    }
+    $scenario = if ($hasLeft) { 'left' } else { 'right' }
     $ordered = @($rows | Sort-Object { Get-FiniteDouble $_.ControlTimeNs 'ControlTimeNs' })
+    $observedSpeedCaps = [Collections.Generic.List[double]]::new()
+    for ($index = 1; $index -lt $ordered.Count; ++$index) {
+        $intervalSeconds = ((Get-FiniteDouble $ordered[$index].ControlTimeNs 'ControlTimeNs') -
+            (Get-FiniteDouble $ordered[$index - 1].ControlTimeNs 'ControlTimeNs')) / 1000000000.0
+        $frameLimit = Get-FiniteDouble $ordered[$index].AimPipelineFrameCountLimit 'AimPipelineFrameCountLimit'
+        if ($intervalSeconds -gt 0.0 -and $intervalSeconds -le 0.05 -and $frameLimit -gt 0.0) {
+            $observedSpeedCaps.Add($frameLimit / $intervalSeconds)
+        }
+    }
+    if ($observedSpeedCaps.Count -eq 0) {
+        throw "CSV has no normal control intervals for shadow speed-limit validation: $($csvFile.FullName)"
+    }
+    $observedSpeedP05 = Get-Percentile -Values ([double[]]$observedSpeedCaps.ToArray()) -Ratio 0.05
+    $observedSpeedP95 = Get-Percentile -Values ([double[]]$observedSpeedCaps.ToArray()) -Ratio 0.95
+    if ([math]::Abs($observedSpeedP05 - $ExpectedShadowMaxCountsPerSecond) -gt 1.0 -or
+        [math]::Abs($observedSpeedP95 - $ExpectedShadowMaxCountsPerSecond) -gt 1.0) {
+        throw "CSV frame limits do not implement the frozen $ExpectedShadowMaxCountsPerSecond counts/s shadow limit: $($csvFile.FullName)"
+    }
     for ($index = 1; $index -lt $ordered.Count; ++$index) {
         $previous = $ordered[$index - 1]
         $first = $ordered[$index]
@@ -149,7 +183,7 @@ foreach ($csvFile in $inputFiles) {
             if ($offset -gt 0 -and $rowGeneration -ne $generation) { break }
             $window.Add($row)
         }
-        if ($window.Count -eq 0) { continue }
+        if ($window.Count -lt $RecoveryFrames) { continue }
 
         $firstResidualDegrees = Get-FiniteDouble $first.RelativeErrorYawDegrees 'RelativeErrorYawDegrees'
         $firstDegreesPerCount = Get-FiniteDouble $first.DegreesPerCountX 'DegreesPerCountX'
@@ -266,7 +300,8 @@ foreach ($group in ($eventSummaries | Group-Object Scenario)) {
 $identitySummary = $identityRows | Select-Object -First 1
 $overallReady = @($summaryRows | Where-Object {
     $_.CoverageReady -eq 1 -and $_.CrossDomainRepresentative -eq 1 -and
-    $_.FirstFrameDirectionAlignedPercent -eq 100 -and $_.CommandFailureEvents -eq 0
+    $_.FirstFrameDirectionAlignedPercent -eq 100 -and $_.CommandFailureEvents -eq 0 -and
+    $_.SaturationExitObservedPercent -eq 100
 }).Count -eq 2
 $summaryRows.Add([pscustomobject]@{
     Scenario = 'overall'
