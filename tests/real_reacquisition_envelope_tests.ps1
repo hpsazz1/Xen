@@ -30,8 +30,9 @@ try {
         $lines.Add("3,DML,abc1234,20260720T010000Z,64,shadow,1,1,3,1,0,5,0,$($sign * 5),14.4,$($sign * 8),0.0308,1,60,20,1020000000,1,1,1,$($sign * 10),1440")
         $lines.Add("4,DML,abc1234,20260720T010000Z,64,shadow,1,2,1,1,1,20,0,$($sign * 15),14.4,$recoveryDegrees,0.0308,1,60,20,1220000000,1,1,1,0,1440")
         $lines.Add("5,DML,abc1234,20260720T010000Z,64,shadow,1,2,2,1,1,18,0,$($sign * 14),14.4,$($sign * 8.7),0.0308,1,60,20,1230000000,1,1,1,$($sign * 5),1440")
-        $lines.Add("6,DML,abc1234,20260720T010000Z,64,shadow,1,2,3,1,0,5,0,$($sign * 5),14.4,$($sign * 8),0.0308,1,60,20,1240000000,1,1,1,$($sign * 10),1440")
-        $lines.Add("7,DML,abc1234,20260720T010000Z,64,shadow,1,3,1,1,1,20,0,$($sign * 15),14.4,$recoveryDegrees,0.0308,1,60,20,1440000000,1,1,1,0,1440")
+        $lines.Add("6,DML,abc1234,20260720T010000Z,64,shadow,1,2,3,1,1,5,0,$($sign * 5),14.4,$($sign * 8),0.0308,1,60,20,1240000000,1,1,1,$($sign * 10),1440")
+        $lines.Add("7,DML,abc1234,20260720T010000Z,64,shadow,1,2,4,1,0,5,0,$($sign * 5),14.4,$($sign * 7.5),0.0308,1,60,20,1250000000,1,1,1,$($sign * 10),1440")
+        $lines.Add("8,DML,abc1234,20260720T010000Z,64,shadow,1,3,1,1,1,20,0,$($sign * 15),14.4,$recoveryDegrees,0.0308,1,60,20,1450000000,1,1,1,0,1440")
         $lines | Set-Content -LiteralPath $path -Encoding UTF8
     }
     $summaryCsv = Join-Path $temporaryRoot 'summary.csv'
@@ -50,18 +51,38 @@ try {
     Assert-Near 100.0 $right.FirstFrameDirectionAlignedPercent 0.001 'Right request must align with residual.'
     Assert-Near 298.7 $left.FirstResidualAbsP50Counts 0.001 'Left residual must convert from degrees to counts.'
     Assert-Near 301.9 $right.FirstResidualAbsP50Counts 0.001 'Right residual must convert from degrees to counts.'
-    Assert-Near 2.0 $left.SaturationFramesP50 0.001 'Two recovery frames must be speed limited.'
-    Assert-Near 20.0 $left.SaturationDurationP50Ms 0.001 'Saturation duration must use the 10 ms frame interval.'
+    Assert-Near 3.0 $left.SaturationFramesP50 0.001 'Actual saturation must extend beyond the minimum window.'
+    Assert-Near 4.0 $left.SaturationExitFrameMax 0.001 'Actual exit frame must be reported.'
+    Assert-Near 30.0 $left.SaturationDurationP50Ms 0.001 'Saturation duration must use the 10 ms frame interval.'
     Assert-Near 1.0 $overall.CoverageReady 0.001 'Synthetic dual-direction coverage must be ready.'
     if (-not (Test-Path -LiteralPath $eventsCsv -PathType Leaf) -or
         -not (Test-Path -LiteralPath $summaryCsv -PathType Leaf)) {
         throw 'Machine-readable real reacquisition outputs were not written.'
     }
 
+    $mixedPath = Join-Path $temporaryRoot 'horizontal_left_mixed.csv'
+    $mixedRows = @(Import-Csv -LiteralPath (Join-Path $temporaryRoot 'horizontal_left1.csv'))
+    $mixedRows | ForEach-Object { $_.BuildRevision = 'other-build' }
+    $mixedRows | Export-Csv -LiteralPath $mixedPath -NoTypeInformation -Encoding UTF8
+    $mixedRejected = $false
+    try {
+        & (Join-Path $PSScriptRoot '..\tools\analyze_real_reacquisition_envelope.ps1') `
+            -DataRoot $temporaryRoot -RecoveryFrames 3 -MinimumEventsPerDirection 1 | Out-Null
+    }
+    catch { $mixedRejected = $true }
+    if (-not $mixedRejected) { throw 'Mixed identities must be rejected without an explicit selector.' }
+    $selectedSummary = @(& (Join-Path $PSScriptRoot '..\tools\analyze_real_reacquisition_envelope.ps1') `
+        -DataRoot $temporaryRoot -RecoveryFrames 3 -MinimumEventsPerDirection 1 `
+        -ExpectedBuildRevision 'abc1234' `
+        -ReferenceLeftResidualCounts 298.7 -ReferenceRightResidualCounts 301.9)
+    Assert-Near 1.0 ($selectedSummary | Where-Object Scenario -eq 'overall').CoverageReady 0.001 `
+        'Explicit revision selection must preserve a single-identity batch.'
+    Remove-Item -LiteralPath $mixedPath -Force
+
     $rightPath = Join-Path $temporaryRoot 'horizontal_right1.csv'
     $rightRows = @(Import-Csv -LiteralPath $rightPath)
     $rightRows | Where-Object {
-        $_.AimPipelineResetGeneration -eq '2' -and $_.AimPipelineObservationSequence -eq '3'
+        $_.AimPipelineResetGeneration -eq '2' -and $_.AimPipelineObservationSequence -eq '4'
     } | ForEach-Object { $_.AimPipelineControlSpeedLimited = '1' }
     $rightRows | Export-Csv -LiteralPath $rightPath -NoTypeInformation -Encoding UTF8
     $blockedSummary = @(& (Join-Path $PSScriptRoot '..\tools\analyze_real_reacquisition_envelope.ps1') `

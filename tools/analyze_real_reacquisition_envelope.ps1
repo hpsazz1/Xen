@@ -5,6 +5,7 @@ param(
     [ValidateRange(1, 10000)][int]$MinimumResetGapMs = 100,
     [ValidateRange(1, 10000)][int]$MinimumEventsPerDirection = 6,
     [ValidateRange(30.0, 4000.0)][double]$ExpectedShadowMaxCountsPerSecond = 1440.0,
+    [string]$ExpectedBuildRevision = '',
     [double]$ReferenceLeftResidualCounts = 303.442641,
     [double]$ReferenceRightResidualCounts = 304.589065,
     [double]$ReferenceTolerancePercent = 20.0,
@@ -105,6 +106,9 @@ foreach ($csvFile in $inputFiles) {
         TimestampUtc = [string]$rows[0].BuildTimestampUtc
         ControllerRevision = [int](Get-FiniteDouble $rows[0].ControllerRevision 'ControllerRevision')
     }
+    if ($ExpectedBuildRevision -and $identity.Revision -ne $ExpectedBuildRevision) {
+        continue
+    }
     if ($identity.Revision -match '-dirty' -or $identity.ControllerRevision -ne 64) {
         throw "CSV identity is not a clean r64 build: $($csvFile.FullName)"
     }
@@ -175,15 +179,29 @@ foreach ($csvFile in $inputFiles) {
             $gapMs -ge [math]::Max($MinimumResetGapMs, $responseHorizonMs)
         if (-not $isRecovery) { continue }
 
-        $window = [Collections.Generic.List[object]]::new()
-        for ($offset = 0; $offset -lt $RecoveryFrames -and
-            $index + $offset -lt $ordered.Count; ++$offset) {
+        $generationRows = [Collections.Generic.List[object]]::new()
+        for ($offset = 0; $index + $offset -lt $ordered.Count; ++$offset) {
             $row = $ordered[$index + $offset]
             $rowGeneration = [int64](Get-FiniteDouble $row.AimPipelineResetGeneration 'AimPipelineResetGeneration')
             if ($offset -gt 0 -and $rowGeneration -ne $generation) { break }
-            $window.Add($row)
+            $generationRows.Add($row)
         }
-        if ($window.Count -lt $RecoveryFrames) { continue }
+        if ($generationRows.Count -lt $RecoveryFrames) { continue }
+
+        $saturationFrames = 0
+        foreach ($row in $generationRows) {
+            if ($row.AimPipelineControlSpeedLimited -ne '1') { break }
+            ++$saturationFrames
+        }
+        $saturationExitObserved = $saturationFrames -lt $generationRows.Count
+        $actualExitFrame = if ($saturationExitObserved) { $saturationFrames + 1 } else { 0 }
+        $windowFrames = if ($saturationExitObserved) {
+            [math]::Max($RecoveryFrames, $actualExitFrame)
+        } else { $RecoveryFrames }
+        $window = [Collections.Generic.List[object]]::new()
+        for ($offset = 0; $offset -lt $windowFrames; ++$offset) {
+            $window.Add($generationRows[$offset])
+        }
 
         $firstResidualDegrees = Get-FiniteDouble $first.RelativeErrorYawDegrees 'RelativeErrorYawDegrees'
         $firstDegreesPerCount = Get-FiniteDouble $first.DegreesPerCountX 'DegreesPerCountX'
@@ -197,12 +215,7 @@ foreach ($csvFile in $inputFiles) {
         $firstUnlimitedY = Get-FiniteDouble $first.AimPipelineUnlimitedCountsY 'AimPipelineUnlimitedCountsY'
         $firstUnlimited = [math]::Sqrt(
             $firstUnlimitedX * $firstUnlimitedX + $firstUnlimitedY * $firstUnlimitedY)
-        $saturationFrames = 0
         $commandFailures = 0
-        foreach ($row in $window) {
-            if ($row.AimPipelineControlSpeedLimited -ne '1') { break }
-            ++$saturationFrames
-        }
         foreach ($row in $window) {
             if ($row.CommandSendAttempted -eq '1' -and $row.CommandSendSucceeded -ne '1') {
                 ++$commandFailures
@@ -260,7 +273,8 @@ foreach ($csvFile in $inputFiles) {
             FirstUnlimitedToLimitRatio = if ($firstLimit -gt 1e-9) { $firstUnlimited / $firstLimit } else { 0.0 }
             FirstRequestDirectionAligned = [int]$aligned
             SaturationFrames = $saturationFrames
-            SaturationExitObserved = [int]($saturationFrames -lt $window.Count)
+            SaturationExitFrame = $actualExitFrame
+            SaturationExitObserved = [int]$saturationExitObserved
             SaturationDurationMs = $saturationFrames * $nominalFrameMs
             CommandFailureCount = $commandFailures
         })
@@ -291,6 +305,9 @@ foreach ($group in ($eventSummaries | Group-Object Scenario)) {
         FirstFrameDirectionAlignedPercent = 100.0 * @($events | Where-Object FirstRequestDirectionAligned -eq 1).Count / $events.Count
         FirstFrameSaturatedPercent = 100.0 * @($events | Where-Object { $_.FirstUnlimitedToLimitRatio -gt 1.0 + 1e-9 }).Count / $events.Count
         SaturationFramesP50 = Get-Percentile -Values @($events.SaturationFrames) -Ratio 0.50
+        SaturationExitFrameP50 = Get-Percentile -Values @($events.SaturationExitFrame) -Ratio 0.50
+        SaturationExitFrameP95 = Get-Percentile -Values @($events.SaturationExitFrame) -Ratio 0.95
+        SaturationExitFrameMax = ($events.SaturationExitFrame | Measure-Object -Maximum).Maximum
         SaturationDurationP50Ms = Get-Percentile -Values @($events.SaturationDurationMs) -Ratio 0.50
         SaturationExitObservedPercent = 100.0 * @($events | Where-Object SaturationExitObserved -eq 1).Count / $events.Count
         CommandFailureEvents = @($events | Where-Object CommandFailureCount -gt 0).Count
@@ -318,6 +335,9 @@ $summaryRows.Add([pscustomobject]@{
     FirstFrameDirectionAlignedPercent = 0.0
     FirstFrameSaturatedPercent = 0.0
     SaturationFramesP50 = 0.0
+    SaturationExitFrameP50 = 0.0
+    SaturationExitFrameP95 = 0.0
+    SaturationExitFrameMax = 0.0
     SaturationDurationP50Ms = 0.0
     SaturationExitObservedPercent = 0.0
     CommandFailureEvents = @($eventSummaries | Where-Object CommandFailureCount -gt 0).Count
