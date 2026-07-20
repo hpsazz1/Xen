@@ -52,6 +52,7 @@ namespace
         double responseMs = 80.0;
         double candidateResponseMs = 0.0;
         double candidateResponseCounterfactualMs = 0.0;
+        double candidateRecoveryMaxCountsPerSecond = 0.0;
         CrossDomainReplay::CandidateEstimatorMode candidateEstimatorMode =
             CrossDomainReplay::CandidateEstimatorMode::Kalman;
         double candidateJerkStdDegreesPerSecond3 = 8000.0;
@@ -271,6 +272,9 @@ namespace
         options.candidateResponseCounterfactualMs = optionDouble(
             argc, argv, "--candidate-response-counterfactual-ms",
             options.candidateResponseCounterfactualMs);
+        options.candidateRecoveryMaxCountsPerSecond = optionDouble(
+            argc, argv, "--candidate-recovery-max-cps",
+            options.candidateRecoveryMaxCountsPerSecond);
         if (const auto estimator = optionValue(argc, argv, "--candidate-estimator"))
         {
             const std::string normalized = lower(*estimator);
@@ -912,13 +916,27 @@ int Run(int argc, char** argv)
                 responseCounterfactuals;
             std::vector<CrossDomainReplay::Comparison>
                 responseCounterfactualComparisons;
+            std::vector<CrossDomainReplay::RecoverySpeedCounterfactual>
+                recoverySpeedCounterfactuals;
+            std::vector<CrossDomainReplay::Comparison>
+                recoverySpeedCounterfactualComparisons;
             const bool responseCounterfactualEnabled =
                 std::isfinite(options.candidateResponseCounterfactualMs) &&
                 options.candidateResponseCounterfactualMs > 0.0;
+            const bool recoverySpeedCounterfactualEnabled =
+                std::isfinite(options.candidateRecoveryMaxCountsPerSecond) &&
+                options.candidateRecoveryMaxCountsPerSecond >
+                    options.maxCountsPerSecond;
             if (responseCounterfactualEnabled && options.crossDomainAttribution)
             {
                 throw std::runtime_error(
                     "Response counterfactual and attribution modes are mutually exclusive.");
+            }
+            if (recoverySpeedCounterfactualEnabled &&
+                (responseCounterfactualEnabled || options.crossDomainAttribution))
+            {
+                throw std::runtime_error(
+                    "Recovery-speed counterfactual, response counterfactual, and attribution modes are mutually exclusive.");
             }
             const auto& variants = crossDomainVariants;
             CrossDomainReplay::ControllerSettings settings;
@@ -981,12 +999,17 @@ int Run(int argc, char** argv)
             const auto framePath = options.outputRoot / "cross_domain_frames.csv";
             const auto counterfactualFramePath = options.outputRoot /
                 "cross_domain_response_counterfactual_frames.csv";
+            const auto recoverySpeedFramePath = options.outputRoot /
+                "cross_domain_recovery_speed_counterfactual_frames.csv";
             std::error_code removeError;
             std::filesystem::remove(framePath, removeError);
             std::filesystem::remove(counterfactualFramePath, removeError);
+            std::filesystem::remove(recoverySpeedFramePath, removeError);
             size_t passed = 0;
             size_t counterfactualPassed = 0;
             size_t responseChangedCohorts = 0;
+            size_t recoverySpeedPassed = 0;
+            size_t recoverySpeedChangedCohorts = 0;
             for (const auto& trajectory : trajectories)
             {
                 CrossDomainReplay::SourceTrajectory source;
@@ -1009,7 +1032,26 @@ int Run(int argc, char** argv)
                         options.crossDomainDetailVariants.end(),
                         variant.name) != options.crossDomainDetailVariants.end();
                     CrossDomainReplay::Comparison comparison;
-                    if (responseCounterfactualEnabled)
+                    if (recoverySpeedCounterfactualEnabled)
+                    {
+                        auto recoverySpeedCounterfactual =
+                            CrossDomainReplay::RunRecoverySpeedCounterfactual(
+                                source, variant, settings,
+                                options.candidateRecoveryMaxCountsPerSecond,
+                                detailedVariant ? framePath : std::filesystem::path{},
+                                detailedVariant ? recoverySpeedFramePath :
+                                    std::filesystem::path{});
+                        comparison = recoverySpeedCounterfactual.baseline;
+                        recoverySpeedPassed +=
+                            recoverySpeedCounterfactual.counterfactual.passed ? 1U : 0U;
+                        recoverySpeedChangedCohorts +=
+                            recoverySpeedCounterfactual.cohortStable ? 0U : 1U;
+                        recoverySpeedCounterfactualComparisons.push_back(
+                            recoverySpeedCounterfactual.counterfactual);
+                        recoverySpeedCounterfactuals.push_back(
+                            std::move(recoverySpeedCounterfactual));
+                    }
+                    else if (responseCounterfactualEnabled)
                     {
                         auto responseCounterfactual =
                             CrossDomainReplay::RunResponseCounterfactual(
@@ -1058,6 +1100,17 @@ int Run(int argc, char** argv)
                     options.outputRoot /
                         "cross_domain_response_counterfactual.csv",
                     responseCounterfactuals);
+            }
+            if (recoverySpeedCounterfactualEnabled)
+            {
+                CrossDomainReplay::WriteSummary(
+                    options.outputRoot /
+                        "cross_domain_recovery_speed_counterfactual_matrix.csv",
+                    recoverySpeedCounterfactualComparisons);
+                CrossDomainReplay::WriteRecoverySpeedCounterfactualSummary(
+                    options.outputRoot /
+                        "cross_domain_recovery_speed_counterfactual.csv",
+                    recoverySpeedCounterfactuals);
             }
             if (options.crossDomainAttribution)
             {
@@ -1114,6 +1167,13 @@ int Run(int argc, char** argv)
                                  options.candidateResponseCounterfactualMs,
                                  10.0, 500.0)
                              : 0.0) << '\n'
+                     << "CandidateRecoverySpeedCounterfactualEnabled="
+                     << (recoverySpeedCounterfactualEnabled ? 1 : 0) << '\n'
+                     << "CandidateRecoveryMaxCountsPerSecond="
+                     << (recoverySpeedCounterfactualEnabled
+                             ? std::clamp(options.candidateRecoveryMaxCountsPerSecond,
+                                 options.maxCountsPerSecond, 100000.0)
+                             : options.maxCountsPerSecond) << '\n'
                      << "CandidateEstimatorMode="
                      << CrossDomainReplay::candidateEstimatorModeName(
                          options.candidateEstimatorMode) << '\n'
@@ -1211,6 +1271,13 @@ int Run(int argc, char** argv)
                      << counterfactualPassed << '\n'
                      << "ResponseCounterfactualChangedCohorts="
                      << responseChangedCohorts << '\n'
+                     << "RecoverySpeedCounterfactualPassed="
+                     << recoverySpeedPassed << '\n'
+                     << "RecoverySpeedCounterfactualChangedCohorts="
+                     << recoverySpeedChangedCohorts << '\n'
+                     << "RecoverySpeedCounterfactualPromotion="
+                     << (recoverySpeedPassed == comparisons.size()
+                             ? "PASS" : "HOLD_SHADOW") << '\n'
                      << "Comparisons=" << comparisons.size() << '\n'
                      << "Passed=" << passed << '\n'
                      << "Failed=" << comparisons.size() - passed << '\n'
@@ -1226,6 +1293,13 @@ int Run(int argc, char** argv)
                           << responseChangedCohorts << std::endl;
                 if (responseChangedCohorts != 0)
                     return 4;
+            }
+            if (recoverySpeedCounterfactualEnabled)
+            {
+                std::cout << "[RecoverySpeedCounterfactual] "
+                          << recoverySpeedPassed << '/' << comparisons.size()
+                          << " gates passed; changed_cohorts="
+                          << recoverySpeedChangedCohorts << std::endl;
             }
             return passed == comparisons.size() ? 0 : 3;
         }

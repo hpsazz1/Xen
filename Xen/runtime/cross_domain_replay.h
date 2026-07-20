@@ -64,6 +64,8 @@ struct ControllerSettings
     double candidateManeuverRateThresholdDegreesPerSecond = 12.0;
     double candidateManeuverHoldSeconds = 0.120;
     double candidateMaxCountsPerSecond = 0.0;
+    // 仅供离线恢复反事实：检测恢复后允许的临时上限；0表示关闭并保持正式上限。
+    double candidateRecoveryMaxCountsPerSecond = 0.0;
     double verticalCatchUpErrorDegrees = 0.8;
     double maxCountsPerSecond = 1440.0;
     double legacyPredictionLeadSeconds = 0.050;
@@ -150,6 +152,11 @@ struct Comparison
     double candidateManeuverRateThresholdDegreesPerSecond = 12.0;
     double candidateManeuverHoldSeconds = 0.120;
     double candidateMaxCountsPerSecond = 1440.0;
+    double candidateRecoveryMaxCountsPerSecond = 1440.0;
+    size_t candidateRecoverySpeedActiveFrames = 0;
+    size_t candidateRecoverySpeedExitedWindows = 0;
+    size_t candidateRecoverySpeedInterruptedWindows = 0;
+    size_t candidateRecoverySpeedOpenWindows = 0;
     // 仅供跨域离线候选审计；默认关闭，运行时配置与active能力不由此入口修改。
     double candidateIntegralTimeSeconds = 0.0;
     double candidateIntegralZoneDegrees = 1.0;
@@ -194,6 +201,17 @@ struct ResponseCounterfactual
     bool cohortStable = false;
 };
 
+// 恢复速度反事实先冻结端点守卫基线的检测队列，再仅改变候选恢复窗口的速度上限。
+// 该结构只服务离线审计，不能作为运行时调度或配置入口。
+struct RecoverySpeedCounterfactual
+{
+    Comparison baseline{};
+    Comparison counterfactual{};
+    size_t timelineFrames = 0;
+    size_t detectedFrames = 0;
+    bool cohortStable = false;
+};
+
 std::vector<Variant> BuildRequiredVariants();
 Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                          const ControllerSettings& settings,
@@ -223,6 +241,15 @@ ResponseCounterfactual RunResponseCounterfactual(
 void WriteResponseCounterfactualSummary(
     const std::filesystem::path& path,
     const std::vector<ResponseCounterfactual>& counterfactuals);
+RecoverySpeedCounterfactual RunRecoverySpeedCounterfactual(
+    const SourceTrajectory& source, const Variant& variant,
+    const ControllerSettings& baselineSettings,
+    double recoveryMaxCountsPerSecond,
+    const std::filesystem::path& baselineFrameCsv = {},
+    const std::filesystem::path& counterfactualFrameCsv = {});
+void WriteRecoverySpeedCounterfactualSummary(
+    const std::filesystem::path& path,
+    const std::vector<RecoverySpeedCounterfactual>& counterfactuals);
 }
 
 #endif

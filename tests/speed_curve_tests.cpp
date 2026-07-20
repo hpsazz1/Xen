@@ -2740,6 +2740,85 @@ int main()
     expectNear(endpointGuardComparison.legacy.errorP95Degrees,
                endpointGuardBaseline.legacy.errorP95Degrees, 0.0,
                "committed endpoint guard cannot mutate the frozen legacy comparator");
+    CrossDomainReplay::SourceTrajectory recoverySpeedReplay = pendingLossReplay;
+    for (size_t index = 25; index < recoverySpeedReplay.points.size(); ++index)
+        recoverySpeedReplay.points[index].globalX = 1500.0;
+    const auto recoverySpeedCounterfactual =
+        CrossDomainReplay::RunRecoverySpeedCounterfactual(
+            recoverySpeedReplay, endpointGuardVariant,
+            endpointGuardSettings, 2160.0);
+    expectTrue(recoverySpeedCounterfactual.cohortStable,
+               "recovery speed counterfactual preserves the frozen detection timeline");
+    expectTrue(recoverySpeedCounterfactual.counterfactual.
+                   candidateRecoveryMaxCountsPerSecond == 2160.0,
+               "recovery speed counterfactual records its bounded candidate limit");
+    expectTrue(recoverySpeedCounterfactual.counterfactual.
+                   candidateRecoverySpeedActiveFrames > 0,
+               "recovery speed counterfactual activates after the detected generation resets");
+    expectTrue(recoverySpeedCounterfactual.counterfactual.
+                   candidateRecoverySpeedExitedWindows == 1,
+               "recovery speed counterfactual locks back to baseline at natural speed-limit exit");
+    expectTrue(recoverySpeedCounterfactual.counterfactual.
+                   candidateRecoverySpeedInterruptedWindows == 0,
+               "completed recovery speed window is not reported as interrupted");
+    CrossDomainReplay::SourceTrajectory interruptedRecoveryReplay =
+        recoverySpeedReplay;
+    for (size_t index = 28; index < 35; ++index)
+        interruptedRecoveryReplay.points[index].detected = false;
+    const auto interruptedRecoverySpeedCounterfactual =
+        CrossDomainReplay::RunRecoverySpeedCounterfactual(
+            interruptedRecoveryReplay, endpointGuardVariant,
+            endpointGuardSettings, 2160.0);
+    expectTrue(interruptedRecoverySpeedCounterfactual.cohortStable &&
+                   interruptedRecoverySpeedCounterfactual.counterfactual.
+                       candidateRecoverySpeedInterruptedWindows > 0,
+               "a repeated loss clears and records the active recovery speed generation");
+    expectNear(recoverySpeedCounterfactual.baseline.legacy.errorP95Degrees,
+               recoverySpeedCounterfactual.counterfactual.legacy.errorP95Degrees,
+               0.0,
+               "recovery speed counterfactual preserves the frozen legacy cohort");
+    CrossDomainReplay::ControllerSettings inactiveRecoverySpeedSettings =
+        syntheticSettings;
+    inactiveRecoverySpeedSettings.candidateRecoveryMaxCountsPerSecond = 2160.0;
+    const auto inactiveRecoverySpeedComparison = CrossDomainReplay::RunComparison(
+        syntheticReplay, syntheticVariant, inactiveRecoverySpeedSettings);
+    expectNear(inactiveRecoverySpeedComparison.candidate.requestedCounts,
+               syntheticComparison.candidate.requestedCounts, 0.0,
+               "recovery speed candidate leaves the initial continuous-detection generation exact");
+    expectTrue(inactiveRecoverySpeedComparison.candidateRecoverySpeedActiveFrames == 0 &&
+                   inactiveRecoverySpeedComparison.candidateRecoverySpeedExitedWindows == 0 &&
+                   inactiveRecoverySpeedComparison.candidateRecoverySpeedInterruptedWindows == 0,
+               "recovery speed candidate cannot activate without a completed loss boundary");
+    CrossDomainReplay::SourceTrajectory staticRecoveryReplay = recoverySpeedReplay;
+    staticRecoveryReplay.scenario = "static";
+    const auto staticRecoverySpeedCounterfactual =
+        CrossDomainReplay::RunRecoverySpeedCounterfactual(
+            staticRecoveryReplay, endpointGuardVariant,
+            endpointGuardSettings, 2160.0);
+    expectNear(staticRecoverySpeedCounterfactual.baseline.candidate.requestedCounts,
+               staticRecoverySpeedCounterfactual.counterfactual.candidate.requestedCounts,
+               0.0,
+               "recovery speed counterfactual leaves static requests exact across loss boundaries");
+    expectTrue(staticRecoverySpeedCounterfactual.counterfactual.
+                   candidateRecoverySpeedActiveFrames == 0,
+               "recovery speed counterfactual is structurally disabled outside left and right");
+    const auto recoverySpeedSummaryPath = std::filesystem::temp_directory_path() /
+        "xen_recovery_speed_counterfactual_summary.csv";
+    CrossDomainReplay::WriteRecoverySpeedCounterfactualSummary(
+        recoverySpeedSummaryPath, { recoverySpeedCounterfactual });
+    std::ifstream recoverySpeedSummary(recoverySpeedSummaryPath);
+    std::string recoverySpeedHeader;
+    std::string recoverySpeedRow;
+    std::getline(recoverySpeedSummary, recoverySpeedHeader);
+    std::getline(recoverySpeedSummary, recoverySpeedRow);
+    expectTrue(recoverySpeedHeader.find(
+                   "RecoveryMaxCountsPerSecond,ActiveFrames,ExitedWindows,InterruptedWindows,OpenWindows") !=
+                   std::string::npos && !recoverySpeedRow.empty(),
+               "recovery speed counterfactual summary exposes scope and exit diagnostics");
+    recoverySpeedSummary.close();
+    std::error_code recoverySpeedSummaryError;
+    std::filesystem::remove(recoverySpeedSummaryPath,
+        recoverySpeedSummaryError);
     CrossDomainReplay::ControllerSettings settleGuardSettings = syntheticSettings;
     settleGuardSettings.candidateCommandCommitHorizonSeconds = 0.060;
     settleGuardSettings.candidateSettleEntryCommandGuard = true;

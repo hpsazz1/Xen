@@ -421,6 +421,13 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             settings.candidateMaxCountsPerSecond > 0.0
         ? std::clamp(settings.candidateMaxCountsPerSecond, 1.0, 100000.0)
         : baselineMaxCountsPerSecond;
+    comparison.candidateRecoveryMaxCountsPerSecond =
+        std::isfinite(settings.candidateRecoveryMaxCountsPerSecond) &&
+            settings.candidateRecoveryMaxCountsPerSecond >
+                comparison.candidateMaxCountsPerSecond
+        ? std::clamp(settings.candidateRecoveryMaxCountsPerSecond,
+            comparison.candidateMaxCountsPerSecond, 100000.0)
+        : comparison.candidateMaxCountsPerSecond;
     comparison.candidateIntegralTimeSeconds =
         std::isfinite(settings.integralTimeSeconds) &&
             settings.integralTimeSeconds > 0.0
@@ -586,7 +593,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             std::filesystem::file_size(frameCsv, sizeError) == 0;
         frames.open(frameCsv, std::ios::app);
         if (writeHeader)
-            frames << "Scenario,Variant,TimeSeconds,Detected,MeasurementYaw,MeasurementPitch,MeasuredRelativeYaw,MeasuredRelativePitch,ViewAtObservationYaw,ViewAtObservationPitch,ViewAtControlYaw,ViewAtControlPitch,ObservationTruthYaw,ObservationTruthPitch,TruthYaw,TruthPitch,TruthRateX,TruthRateY,PhysicalCameraRateX,PhysicalCameraRateY,BaselineAngleX,BaselineAngleY,BaselineRateX,BaselineRateY,CaAngleX,CaAngleY,CaRateX,CaRateY,ModelAngleDeltaDeg,ModelRateDeltaDps,ManeuverRateEvidenceDps,ManeuverModelActive,EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,SettleEntryErrorX,SettleEntryErrorY,EstimateTruthBiasX,EstimateTruthBiasY,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,SettleEntryCommandHeld,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,UnlimitedX,UnlimitedY,FrameCountLimit,UnlimitedToFrameLimitRatio,LimitedToUnlimitedRatio,PreGuardRequestedX,PreGuardRequestedY,CommittedEndpointResidualX,CommittedEndpointResidualY,CommittedEndpointGuardActive,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
+            frames << "Scenario,Variant,TimeSeconds,Detected,MeasurementYaw,MeasurementPitch,MeasuredRelativeYaw,MeasuredRelativePitch,ViewAtObservationYaw,ViewAtObservationPitch,ViewAtControlYaw,ViewAtControlPitch,ObservationTruthYaw,ObservationTruthPitch,TruthYaw,TruthPitch,TruthRateX,TruthRateY,PhysicalCameraRateX,PhysicalCameraRateY,BaselineAngleX,BaselineAngleY,BaselineRateX,BaselineRateY,CaAngleX,CaAngleY,CaRateX,CaRateY,ModelAngleDeltaDeg,ModelRateDeltaDps,ManeuverRateEvidenceDps,ManeuverModelActive,EstimateAngleX,EstimateAngleY,InputErrorX,InputErrorY,SettleEntryErrorX,SettleEntryErrorY,EstimateTruthBiasX,EstimateTruthBiasY,LegacyErrorX,LegacyErrorY,CandidateErrorX,CandidateErrorY,EstimateRateX,EstimateRateY,InnovationX,InnovationY,NisX,NisY,CovarianceX,CovarianceY,FeedforwardConfidence,Settled,SettleReleased,SettleConfirmationSamples,SettleEntryCommandHeld,LowSpeedReverseSuppressed,VerticalCatchUpActive,ReversalDetected,ReversalFeedforwardActive,EffectiveFeedforwardGainX,ReverseConfirmationSeconds,EffectiveResponseSecondsY,FeedbackX,FeedbackY,FeedforwardX,FeedforwardY,LeadX,LeadY,IntegralX,IntegralY,UnlimitedX,UnlimitedY,FrameCountLimit,UnlimitedToFrameLimitRatio,LimitedToUnlimitedRatio,RecoveryGeneration,RecoverySpeedWindow,RecoverySpeedActive,EffectiveMaxCountsPerSecond,PreGuardRequestedX,PreGuardRequestedY,CommittedEndpointResidualX,CommittedEndpointResidualY,CommittedEndpointGuardActive,RequestedX,RequestedY,ShapedX,ShapedY,SentX,SentY\n";
     }
 
     const double dt = 1.0 / std::clamp(variant.replayFps, 10.0, 1000.0);
@@ -609,6 +616,15 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
     double nextTrajectoryTickSeconds = 0.0;
     TrajectoryRequest latestTrajectoryRequest;
     size_t replayFrameIndex = 0;
+    const bool recoveryScenario = comparison.scenario == "left" ||
+        comparison.scenario == "right";
+    const bool recoverySpeedEnabled = recoveryScenario &&
+        comparison.candidateRecoveryMaxCountsPerSecond >
+            comparison.candidateMaxCountsPerSecond + 1e-9 &&
+        settings.trajectoryMode == TrajectoryShaperMode::Off;
+    bool recoveryPending = false;
+    bool recoverySpeedWindow = false;
+    size_t recoveryGeneration = 0;
     if (recordedDetectionTimeline)
         recordedDetectionTimeline->clear();
 
@@ -738,6 +754,10 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         {
             if (previousDetected)
             {
+                if (recoverySpeedWindow)
+                    ++comparison.candidateRecoverySpeedInterruptedWindows;
+                recoverySpeedWindow = false;
+                recoveryPending = recoverySpeedEnabled;
                 legacyFilter.reset();
                 legacyPredictor.reset();
                 legacyController.reset();
@@ -757,6 +777,12 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
             previousDetected = false;
             hasPreviousPhysicalView = false;
             continue;
+        }
+        if (!previousDetected && recoveryPending)
+        {
+            recoveryPending = false;
+            recoverySpeedWindow = true;
+            ++recoveryGeneration;
         }
         previousDetected = true;
         serviceTrajectoryBefore(controlTime, false);
@@ -889,9 +915,27 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
         input.degreesPerCountX = settings.degreesPerCountX;
         input.degreesPerCountY = settings.degreesPerCountY;
         input.dtSeconds = dt;
-        const auto candidateOutput = candidateController.update(input, candidateSettings);
+        candidateSettings.maxCountsPerSecond = recoverySpeedWindow
+            ? comparison.candidateRecoveryMaxCountsPerSecond
+            : comparison.candidateMaxCountsPerSecond;
+        auto candidateOutput = candidateController.update(input, candidateSettings);
         const double unlimitedMagnitude = std::hypot(
             candidateOutput.unlimitedCountsX, candidateOutput.unlimitedCountsY);
+        const double baselineFrameCountLimit =
+            comparison.candidateMaxCountsPerSecond * dt;
+        const bool recoverySpeedActive = recoverySpeedWindow &&
+            unlimitedMagnitude > baselineFrameCountLimit + 1e-9;
+        if (recoverySpeedActive)
+            ++comparison.candidateRecoverySpeedActiveFrames;
+        else if (recoverySpeedWindow)
+        {
+            recoverySpeedWindow = false;
+            ++comparison.candidateRecoverySpeedExitedWindows;
+            // 退出帧本身已不受正式上限约束，输出数值无需重算；审计身份立即回到正式上限。
+            candidateSettings.maxCountsPerSecond =
+                comparison.candidateMaxCountsPerSecond;
+            candidateOutput.frameCountLimit = baselineFrameCountLimit;
+        }
         const double limitedMagnitude = std::hypot(
             candidateOutput.limitedCountsX, candidateOutput.limitedCountsY);
         const double unlimitedToFrameLimitRatio = candidateOutput.frameCountLimit > 1e-9
@@ -1072,7 +1116,10 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
                    << candidateOutput.unlimitedCountsY << ','
                    << candidateOutput.frameCountLimit << ','
                    << unlimitedToFrameLimitRatio << ','
-                   << limitedToUnlimitedRatio << ',' << preGuardRequestedX << ','
+                   << limitedToUnlimitedRatio << ',' << recoveryGeneration << ','
+                   << (recoverySpeedWindow || recoverySpeedActive ? 1 : 0) << ','
+                   << (recoverySpeedActive ? 1 : 0) << ','
+                   << candidateSettings.maxCountsPerSecond << ',' << preGuardRequestedX << ','
                    << preGuardRequestedY << ',' << committedEndpointResidualX << ','
                    << committedEndpointResidualY << ','
                    << (committedEndpointGuardActive ? 1 : 0) << ','
@@ -1091,6 +1138,7 @@ Comparison RunComparison(const SourceTrajectory& source, const Variant& variant,
 
     comparison.legacy = legacyMetrics.finish();
     comparison.candidate = candidateMetrics.finish();
+    comparison.candidateRecoverySpeedOpenWindows = recoverySpeedWindow ? 1U : 0U;
     comparison.passed = EvaluateGate(comparison.scenario, variant,
         comparison.legacy, comparison.candidate, comparison.reason);
     return comparison;
@@ -1151,7 +1199,7 @@ void WriteSummary(const std::filesystem::path& path,
 {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream output(path);
-    output << "Scenario,Variant,CommandCenterMs,CommandResponseMs,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,CandidateIntegralTimeMs,CandidateIntegralZoneDeg,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommittedEndpointGuard,CandidateCommandCommitHorizonMs,CandidateSettleEntryCommandGuard,CandidateSettleEntryCommandHold,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
+    output << "Scenario,Variant,CommandCenterMs,CommandResponseMs,KalmanAccelerationStdDps2,KalmanMovingAccelerationStdDps2,KalmanMovingRateThresholdDps,LegacyResponseMs,CandidateResponseMs,CandidateEstimatorMode,CandidateJerkStdDps3,CandidateManeuverRateThresholdDps,CandidateManeuverHoldMs,CandidateMaxCountsPerSecond,CandidateRecoveryMaxCountsPerSecond,CandidateRecoverySpeedActiveFrames,CandidateRecoverySpeedExitedWindows,CandidateRecoverySpeedInterruptedWindows,CandidateRecoverySpeedOpenWindows,CandidateIntegralTimeMs,CandidateIntegralZoneDeg,FeedforwardGain,LeadHorizonMs,LeadStrength,ReversalFeedforwardBoost,ReversalFeedforwardMs,ReverseConfirmationErrorMultiplier,ConfirmLowSpeedReverseSettleRelease,StaticFixedTruth,CandidateViewMotionCompensation,CandidateCommittedEndpointGuard,CandidateCommandCommitHorizonMs,CandidateSettleEntryCommandGuard,CandidateSettleEntryCommandHold,TrajectoryMode,TrajectoryOutputHz,Samples,LegacyP50Deg,LegacyP95Deg,LegacyP99Deg,CandidateP50Deg,CandidateP95Deg,CandidateP99Deg,LegacyVerticalP95Deg,CandidateVerticalP95Deg,LegacyInsideBoxPercent,CandidateInsideBoxPercent,LegacyEdgeMarginP05Deg,CandidateEdgeMarginP05Deg,LegacyInterruptionPercent,CandidateInterruptionPercent,LegacyOutputFlips,CandidateOutputFlips,EstimateDirectionErrors,EstimateRateSignFlips,MeanNis,MeanCovariance,MeanFeedforwardConfidence,RequestedCounts,ShapedCounts,SentCounts,FeedforwardCounts,ReversalFeedforwardPercent,SettledPercent,SettleReleases,ReverseSuppressedPercent,VerticalCatchUpPercent,ManeuverModelPercent,TrajectoryOutputs,TrajectoryVelocityLimitedPercent,TrajectoryAccelerationLimitedPercent,TrajectoryJerkLimitedPercent,Passed,Reason\n";
     output << std::fixed << std::setprecision(6);
     for (const auto& item : comparisons)
     {
@@ -1168,6 +1216,11 @@ void WriteSummary(const std::filesystem::path& path,
                << item.candidateManeuverRateThresholdDegreesPerSecond << ','
                << item.candidateManeuverHoldSeconds * 1000.0 << ','
                << item.candidateMaxCountsPerSecond << ','
+               << item.candidateRecoveryMaxCountsPerSecond << ','
+               << item.candidateRecoverySpeedActiveFrames << ','
+               << item.candidateRecoverySpeedExitedWindows << ','
+               << item.candidateRecoverySpeedInterruptedWindows << ','
+               << item.candidateRecoverySpeedOpenWindows << ','
                << item.candidateIntegralTimeSeconds * 1000.0 << ','
                << item.candidateIntegralZoneDegrees << ','
                << item.feedforwardGain << ','
@@ -1302,6 +1355,80 @@ void WriteResponseCounterfactualSummary(
                << item.baseline.candidate.outputDirectionFlips << ','
                << item.counterfactual.candidate.outputDirectionFlips << ','
                << (item.baseline.passed ? 1 : 0) << ','
+               << (item.counterfactual.passed ? 1 : 0) << ','
+               << item.baseline.reason << ',' << item.counterfactual.reason << '\n';
+    }
+}
+
+RecoverySpeedCounterfactual RunRecoverySpeedCounterfactual(
+    const SourceTrajectory& source, const Variant& variant,
+    const ControllerSettings& baselineSettings,
+    double recoveryMaxCountsPerSecond,
+    const std::filesystem::path& baselineFrameCsv,
+    const std::filesystem::path& counterfactualFrameCsv)
+{
+    RecoverySpeedCounterfactual result;
+    std::vector<unsigned char> detectionTimeline;
+    result.baseline = RunComparison(
+        source, variant, baselineSettings, baselineFrameCsv,
+        nullptr, &detectionTimeline);
+
+    ControllerSettings counterfactualSettings = baselineSettings;
+    counterfactualSettings.candidateRecoveryMaxCountsPerSecond =
+        recoveryMaxCountsPerSecond;
+    result.counterfactual = RunComparison(
+        source, variant, counterfactualSettings, counterfactualFrameCsv,
+        &detectionTimeline);
+
+    result.timelineFrames = detectionTimeline.size();
+    result.detectedFrames = static_cast<size_t>(std::count(
+        detectionTimeline.begin(), detectionTimeline.end(),
+        static_cast<unsigned char>(1)));
+    result.cohortStable = result.timelineFrames > 0 &&
+        sameLegacyCohort(result.baseline, result.counterfactual) &&
+        result.detectedFrames == result.baseline.candidate.samples &&
+        result.baseline.legacy.samples == result.baseline.candidate.samples &&
+        result.baseline.candidate.samples ==
+            result.counterfactual.candidate.samples;
+    return result;
+}
+
+void WriteRecoverySpeedCounterfactualSummary(
+    const std::filesystem::path& path,
+    const std::vector<RecoverySpeedCounterfactual>& counterfactuals)
+{
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream output(path);
+    output << "Scenario,Variant,CohortStable,TimelineFrames,DetectedFrames,"
+              "BaselineMaxCountsPerSecond,RecoveryMaxCountsPerSecond,ActiveFrames,"
+              "ExitedWindows,InterruptedWindows,OpenWindows,BaselineSamples,CounterfactualSamples,"
+              "BaselineLegacyP95Deg,CounterfactualLegacyP95Deg,BaselineCandidateP95Deg,"
+              "CounterfactualCandidateP95Deg,CandidateP95DeltaPercent,BaselinePassed,"
+              "CounterfactualPassed,BaselineReason,CounterfactualReason\n";
+    output << std::fixed << std::setprecision(6);
+    for (const auto& item : counterfactuals)
+    {
+        const double baselineP95 = item.baseline.candidate.errorP95Degrees;
+        const double deltaPercent = baselineP95 > 1e-9
+            ? 100.0 * (item.counterfactual.candidate.errorP95Degrees - baselineP95) /
+                baselineP95
+            : 0.0;
+        output << item.baseline.scenario << ',' << item.baseline.variant.name << ','
+               << (item.cohortStable ? 1 : 0) << ',' << item.timelineFrames << ','
+               << item.detectedFrames << ','
+               << item.baseline.candidateMaxCountsPerSecond << ','
+               << item.counterfactual.candidateRecoveryMaxCountsPerSecond << ','
+               << item.counterfactual.candidateRecoverySpeedActiveFrames << ','
+               << item.counterfactual.candidateRecoverySpeedExitedWindows << ','
+               << item.counterfactual.candidateRecoverySpeedInterruptedWindows << ','
+               << item.counterfactual.candidateRecoverySpeedOpenWindows << ','
+               << item.baseline.candidate.samples << ','
+               << item.counterfactual.candidate.samples << ','
+               << item.baseline.legacy.errorP95Degrees << ','
+               << item.counterfactual.legacy.errorP95Degrees << ','
+               << baselineP95 << ','
+               << item.counterfactual.candidate.errorP95Degrees << ','
+               << deltaPercent << ',' << (item.baseline.passed ? 1 : 0) << ','
                << (item.counterfactual.passed ? 1 : 0) << ','
                << item.baseline.reason << ',' << item.counterfactual.reason << '\n';
     }

@@ -101,6 +101,8 @@ build\dml\Release\Xen.exe --cross-domain-replay C:\Users\16143\Desktop\Xen\Video
 
 比较两个候选响应时，必须在一次跨域回放中追加`--candidate-response-counterfactual-ms <毫秒>`，不能再运行两份独立矩阵后按时间戳拼接。程序先按`--candidate-response-ms`记录逐场景逐域检测/重置时间线，再让反事实响应复用同一队列；输出`cross_domain_response_counterfactual.csv`、完整反事实矩阵和独立逐帧文件。只有`ResponseCounterfactualChangedCohorts=0`，且CSV中全部`CohortStable=1`时结果才有效；任一队列、样本数或legacy指标变化都会以退出码4拒绝实验。该入口只属于离线审计，不能接入配置、UI、shadow或active。
 
+评估检测恢复限域速度时追加`--candidate-recovery-max-cps <有限上限>`。程序先运行当前端点守卫基线并冻结检测/重置时间线，再只对left/right中发生过检测丢失的恢复代次应用候选上限；无限制请求首次低于正式1440帧限额时，退出帧本身立即锁回1440。输出`cross_domain_recovery_speed_counterfactual.csv`、完整反事实矩阵和独立逐帧文件；必须同时核对`RecoverySpeedCounterfactualChangedCohorts=0`、全部`CohortStable=1`、原通过项损失为0以及`ExitedWindows/InterruptedWindows/OpenWindows`。该模式与响应反事实、归因模式互斥，只属于离线审计，不得接入配置、UI、shadow或active。
+
 跨域物理相机默认保持命令中心60 ms、响应宽度0 ms的整步模型。只有审计物理契约时才追加`--physical-command-center-ms`与`--physical-command-response-ms`；两者同时作用于legacy和candidate，并记录到decision及summary的`CommandCenterMs/CommandResponseMs`。实机shadow的20/20参数用于解释已发生的画面自运动，不能直接当作跨域闭环物理对象或替换正式60/0基准；有限响应改变检测队列后也不能作为固定样本反事实。
 
 需要分析失败归因时追加`--cross-domain-attribution 1`。工具会生成`cross_domain_attribution.csv`，分别运行控制时刻真实LOS状态和100000 counts/s上限两个离线反事实；两者严格复用基线逐帧检测/重置时间线。只有`CohortStable=1`时分类才有效，出现任何`COHORT_CHANGED`必须先修评估工具，不能据此选算法。oracle与解除限速是定位上界，不是可直接发布的候选，总通过数下降时也不得选择性只统计被救回的失败项。
