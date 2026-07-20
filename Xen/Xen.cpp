@@ -149,6 +149,8 @@ int main(int argc, char** argv)
 {
     // 设置控制台输出编码为 UTF-8，支持中文显示
     SetConsoleOutputCP(CP_UTF8);
+    // 应用与叠加层一致的 Codex Light 控制台调色板
+    ApplyConsoleTheme();
     // 设置随机控制台标题，防止被简单检测
     SetRandomConsoleTitle();
     if (!InstallConsoleShutdownHandler())

@@ -10,6 +10,8 @@ $overlayUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\overlay.
 $targetUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_target.cpp') -Raw -Encoding UTF8
 $debugUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_debug.cpp') -Raw -Encoding UTF8
 $exportUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\export_progress_panel.h') -Raw -Encoding UTF8
+$startupHelpers = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\runtime\startup_helpers.cpp') -Raw -Encoding UTF8
+$mainSource = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\Xen.cpp') -Raw -Encoding UTF8
 $startupSources = @(
     (Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\runtime\input_device_manager.cpp') -Raw -Encoding UTF8),
     (Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\detector\dml_detector.cpp') -Raw -Encoding UTF8),
@@ -107,6 +109,19 @@ foreach ($startupSource in $startupSources) {
             throw "English startup log remains: $englishLog"
         }
     }
+}
+foreach ($consoleThemeToken in @(
+    'RGB(255, 255, 255)',
+    'RGB(26, 28, 31)',
+    'RGB(51, 156, 255)',
+    'RGB(0, 162, 64)',
+    'RGB(186, 38, 35)')) {
+    if ($startupHelpers -notmatch [regex]::Escape($consoleThemeToken)) {
+        throw "Console theme token is missing: $consoleThemeToken"
+    }
+}
+if ($mainSource -notmatch 'SetConsoleOutputCP\(CP_UTF8\);\s*//[^\r\n]*\s*ApplyConsoleTheme\(\);') {
+    throw 'Console theme is not applied after UTF-8 console initialization.'
 }
 
 Write-Output 'prediction ui visibility tests passed'
