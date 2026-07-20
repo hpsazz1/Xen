@@ -10,6 +10,12 @@ $overlayUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\overlay.
 $targetUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_target.cpp') -Raw -Encoding UTF8
 $debugUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_debug.cpp') -Raw -Encoding UTF8
 $exportUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\export_progress_panel.h') -Raw -Encoding UTF8
+$startupSources = @(
+    (Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\runtime\input_device_manager.cpp') -Raw -Encoding UTF8),
+    (Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\detector\dml_detector.cpp') -Raw -Encoding UTF8),
+    (Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\Xen.cpp') -Raw -Encoding UTF8),
+    (Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\scr\other_tools.cpp') -Raw -Encoding UTF8)
+)
 
 if ($mouseUi -match 'false\s*&&\s*shouldDrawMousePage\(page,\s*MouseSettingsPage::Prediction\)') {
     throw 'Prediction settings page is compile-time hidden.'
@@ -94,6 +100,13 @@ foreach ($fontSource in @($mouseUi, $targetUi, $debugUi, $exportUi)) {
 $assistTabButtons = [regex]::Matches($mouseUi, 'ImGui::Button\("[^"\r\n]+",\s*tabSize\)')
 if ($assistTabButtons.Count -ne 2 -or $mouseUi -match 'ImGui::SmallButton') {
     throw 'Assist sub-tabs are not using the shared Codex light segmented control.'
+}
+foreach ($startupSource in $startupSources) {
+    foreach ($englishLog in @('[Mouse] Using', 'Model initialized with', 'DML detector created', 'Aimbot is started!', 'Pause Aiming', 'Reload Config', 'Overlay (OPTIONS)')) {
+        if ($startupSource -match [regex]::Escape($englishLog)) {
+            throw "English startup log remains: $englishLog"
+        }
+    }
 }
 
 Write-Output 'prediction ui visibility tests passed'

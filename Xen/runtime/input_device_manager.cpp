@@ -23,10 +23,10 @@ void createInputDevices()
     KmboxAConnection* newKmboxA = newInput ? newInput->kmboxA() : nullptr;
     MakcuConnection* newMakcu = newInput ? newInput->makcu() : nullptr;
 
-    std::string message = std::string("[Mouse] Using ")
-        + (newInput ? newInput->name() : "unknown") + " input.";
+    std::string message = std::string("[鼠标] 使用 ")
+        + (newInput ? newInput->name() : "未知") + " 输入。";
     if (!newInput || !newInput->isOpen())
-        message += " Device not connected; input disabled until the method becomes available.";
+        message += " 设备未连接；该输入方式可用前将保持禁用。";
 
     std::unique_ptr<IMouseInput> oldOwner;
     {
@@ -48,4 +48,3 @@ void assignInputDevices()
     if (globalMouseThread)
         globalMouseThread->setMouseInput(activeMouseInputOwner.get());
 }
-

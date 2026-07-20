@@ -1000,11 +1000,11 @@ bool checkwin1903()
 void welcome_message()
 {
     std::cout <<
-    "\n\nAimbot is started!\n" <<
-    config.joinStrings(config.button_targeting) << " -> Targeting\n" <<
-    config.joinStrings(config.button_exit) << " -> Exit\n" <<
-    config.joinStrings(config.button_pause) << " -> Pause Aiming\n" <<
-    config.joinStrings(config.button_reload_config) << " -> Reload Config\n" <<
-    config.joinStrings(config.button_open_overlay) << " -> Overlay (OPTIONS)" <<
+    "\n\n辅助瞄准已启动！\n" <<
+    config.joinStrings(config.button_targeting) << " -> 瞄准\n" <<
+    config.joinStrings(config.button_exit) << " -> 退出\n" <<
+    config.joinStrings(config.button_pause) << " -> 暂停瞄准\n" <<
+    config.joinStrings(config.button_reload_config) << " -> 重载配置\n" <<
+    config.joinStrings(config.button_open_overlay) << " -> 打开叠加层（选项）" <<
     std::endl;
 }

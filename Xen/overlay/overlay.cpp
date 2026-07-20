@@ -1462,9 +1462,9 @@ void SetupImGui()
 
     // 输出字体加载状态到控制台（用于调试）
     if (font)
-        std::cout << "[Overlay] Font loaded successfully." << std::endl;
+        std::cout << "[叠加层] 字体加载成功。" << std::endl;
     else
-        std::cout << "[Overlay] WARNING: No system font loaded, using default font." << std::endl;
+        std::cout << "[叠加层] 警告：未加载系统字体，将使用默认字体。" << std::endl;
 
     // 禁用 ImGui 的 .ini 文件读写
     io.IniFilename = nullptr;
