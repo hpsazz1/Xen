@@ -1,389 +1,159 @@
-<div align="center">
-
 # Xen
 
-基于 C++ 原生实现的 Windows 视觉辅助工具，支持 DirectML 和 CUDA + TensorRT 双运行后端。
+Xen 是一个基于 C++17 的 Windows 实时视觉辅助工具，提供目标检测、目标跟踪、鼠标控制、桌面设置界面和可选的局域网 Web 控制台。项目支持 DirectML 与 CUDA + TensorRT 两条编译后端，适用于需要在不同 GPU 环境中部署的场景。
 
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)](https://github.com/hpsazz1/Xen)
-[![CUDA 13.2](https://img.shields.io/badge/CUDA-13.2-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-downloads)
-[![TensorRT 10](https://img.shields.io/badge/TensorRT-10.16-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://docs.nvidia.com/deeplearning/tensorrt/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
+> 请确认使用场景、软件和输入设备符合所在平台的服务条款及当地法律。默认配置不会启用自动射击或局域网控制台。
 
-<p>
-  <a href="docs/build.md">构建指南</a>
-  &nbsp;|&nbsp;
-  <a href="docs/config.md">配置说明</a>
-  &nbsp;|&nbsp;
-  <a href="docs/guides.md">使用指南</a>
-  &nbsp;|&nbsp;
-  <a href="docs/002项目开发铁律20260713.md">开发规范</a>
-</p>
+![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)
+![DirectML](https://img.shields.io/badge/DirectML-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)
+![CUDA 13.2](https://img.shields.io/badge/CUDA-13.2-76B900?style=for-the-badge&logo=nvidia&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
 
-</div>
+相关入口：[构建指南](docs/build.md) · [配置说明](docs/config.md) · [使用指南](docs/guides.md) · [开发规范](docs/002项目开发铁律20260713.md)
 
----
+## 当前能力
 
-## 概述
+- **双推理后端**：DirectML 使用 ONNX Runtime，CUDA 使用 TensorRT engine；后端在构建时选择。
+- **实时检测与跟踪**：检测缓冲、目标关联、头部/身体枢轴、连续观测预测、速度与轨迹控制。
+- **多种画面采集**：DXGI Desktop Duplication、WinRT、虚拟摄像头、UDP MJPEG、NDI。
+- **多种鼠标输出**：Win32、G HUB、Razer、Kmbox Net、Kmbox A、Makcu。
+- **桌面设置界面**：ImGui 设置页可调整模型、采集、目标、预测、输入、覆盖层、深度和数据采集参数。
+- **模型类别选择**：可在 UI 或 Web 控制台选择目标身体/头部类别。DML 会读取 ONNX 的 `names` 元数据；没有元数据时显示类别 ID。
+- **游戏覆盖层与深度**：可选检测框、FOV、轨迹、图标、延迟补偿和 Depth Anything v2 深度遮罩（CUDA 路径）。
+- **数据采集**：运行时截图和 YOLO 格式自动标注，可按类别、置信度和帧间隔筛选。
+- **局域网 Web 控制台**：手机或同一局域网浏览器可查看状态、暂停/恢复、重载配置和修改白名单参数。
 
-Xen 是一个实时视觉辅助系统，当前优先验证可观测、可测试的基础目标跟踪与鼠标控制。核心特性：
+## 选择后端
 
-- **双后端推理** — DirectML（通用 GPU）和 CUDA + TensorRT（NVIDIA 加速），编译时分离
-- **基础目标跟踪** — 当前帧目标关联 + 头身枢轴保留，不使用丢失滑行或未来位置外推
-- **基础鼠标控制** — 自适应观测滤波 + 帧率无关 counts/s 限速；预测与轨迹整形待基础测试通过后再独立接入
-- **射击人性化** — 对数正态延迟/保持分布、稳定帧确认、过冲模拟
-- **6 种画面采集** — DXGI Desktop Duplication、WinRT、虚拟摄像头、UDP 网络流、NDI 专业视频源
-- **7 种输入设备** — Win32、G HUB、Razer、Kmbox Net、Kmbox A、Makcu
-- **游戏内覆盖层** — DirectX 延迟补偿检测框、深度可视化、未来轨迹、图标叠加
-- **深度感知** — Depth Anything v2 深度估计，支持检测抑制遮罩
-- **数据采集** — 运行时自动截图与 YOLO 格式自动标注
+| 后端 | 模型格式 | 适用场景 | 主要要求 |
+| --- | --- | --- | --- |
+| DirectML（DML） | `.onnx` | NVIDIA、AMD、Intel、集成显卡和笔记本 | Windows 10/11 x64、支持 DirectML 的驱动 |
+| CUDA + TensorRT | `.engine` | 支持的 NVIDIA 显卡，追求更高推理性能 | NVIDIA 驱动、CUDA 13.1+；源码构建需 TensorRT 10 |
 
-| 运行时 | 适用场景 | 配置说明 |
-| --- | --- | --- |
-| **DirectML（DML）** | NVIDIA、AMD、Intel、集成显卡、笔记本和旧系统 | 通用 Windows 10/11 x64 构建，无需 CUDA |
-| **CUDA + TensorRT** | 追求最佳性能的 NVIDIA 显卡 | 需要最新 NVIDIA 驱动和 CUDA 13.2 |
-
-## 运行时支持
-
-### DirectML
-
-在兼容性优先于 NVIDIA 专属加速时，选择 DML 构建。
-
-| 要求 | 说明 |
-| --- | --- |
-| 系统 | Windows 10/11 x64 |
-| 显卡 | 主流 NVIDIA、AMD Radeon、Intel Iris/Xe 或集成显卡 |
-| 额外运行时 | 无 |
-| 推荐用于 | GTX 10xx/9xx/7xx、AMD 显卡、Intel 显卡、笔记本和办公电脑 |
-
-### CUDA + TensorRT
-
-选择 CUDA 构建以获得最快的 NVIDIA 加速路径。
-
-| 要求 | 说明 |
-| --- | --- |
-| 系统 | Windows 10/11 x64 |
-| 显卡 | GTX 1660 或 RTX 2000/3000/4000/5000 |
-| 驱动 | 最新 NVIDIA 显卡驱动 |
-| CUDA | CUDA 13.2（最低 13.1） |
-| 不支持 | GTX 10xx/Pascal 及更旧（因 TensorRT 限制） |
-| 源码构建额外 | TensorRT 10.16.1.11（仅源码构建时需要单独准备） |
-
-预编译的 CUDA 版本已包含所需 CUDA + TensorRT 运行时文件。在排查 CUDA DLL 缺失或启动闪退问题前，请先更新 NVIDIA 驱动并安装 [CUDA 13.2](https://developer.nvidia.com/cuda-downloads)。
+CUDA 构建默认使用 CUDA 13.2 + TensorRT 10.16 依赖解析。Pascal/GTX 10xx 等旧显卡如果无法运行当前 TensorRT 路径，可改用 DML 后端。后端依赖和版本以 [构建指南](docs/build.md) 为准。
 
 ## 快速开始
 
-1. 将 `.onnx` 模型放入 `models` 文件夹。
-2. 运行 `Xen.exe`。
-3. 等待首次模型导出。首次启动最长需 5 分钟。
-4. 按 `Home` 键，在界面上选择模型并调整设置。
+1. 将 `.onnx` 模型放入 `Xen.exe` 同级的 `models` 文件夹。DML 直接加载 ONNX；CUDA 可在首次选择 ONNX 时自动生成并切换到匹配的 `.engine`。
+2. 运行与后端匹配的 `Xen.exe`。标准产物位于 `build\dml\Release` 或 `build\cuda\Release`。
+3. 首次启动时等待模型加载或 TensorRT engine 导出完成，耗时取决于模型、磁盘和 GPU。
+4. 按 `Home` 打开设置界面，在“AI/目标”页面选择模型和目标类别，在“采集/输入”页面选择来源与鼠标输出。
+5. 确认画面、目标类别和输入设备均正常后，再启用需要的控制功能。
+
+### 模型类别
+
+目标类别通过 `class_player`（身体）和 `class_head`（头部）保存。常见四类别模型可以使用：
+
+| 类别 ID | 语义 |
+| ---: | --- |
+| 0 | 警身 |
+| 1 | 警头 |
+| 2 | 匪身 |
+| 3 | 匪头 |
+
+DML 会优先读取 ONNX 元数据中的类别名称，并在 UI/局域网控制台展示；名称缺失时不会猜测，仍以 ID 为准。CUDA engine 当前没有可用类别名称时同样回退为 ID。若模型类别顺序不同，请在设置页选择“自定义类别 ID”。
 
 ## 快捷键
 
 | 按键 | 功能 |
 | --- | --- |
-| 鼠标右键 | 瞄准检测到的目标 |
-| F2 | 退出程序 |
-| F3 | 暂停瞄准 |
-| F4 | 重新加载配置 |
-| Home | 打开或关闭设置界面 |
-| ↑ / ↓（Shift+↑/↓） | 运行时调整目标偏移（需启用 `enable_arrows_settings`） |
+| 鼠标右键 | 目标检测/瞄准 |
+| `F2` | 退出程序 |
+| `F3` | 暂停或恢复瞄准 |
+| `F4` | 重新加载 `config.ini` |
+| `Home` | 打开或关闭 ImGui 设置界面 |
+| 方向键 | 运行时调整目标偏移（需启用 `enable_arrows_settings`） |
+
+## 局域网 Web 控制台
+
+控制台默认关闭。需要在 `config.ini` 中显式启用：
+
+```ini
+lan_console_enabled = true
+lan_console_bind_address = 0.0.0.0
+lan_console_port = 17888
+```
+
+启动后，程序控制台会打印访问地址和六位配对码。手机连接同一局域网后访问 `http://主机局域网IP:17888`，输入配对码即可。控制台支持：
+
+- 查看运行/暂停状态、采集和检测 FPS、后端、模型及输入方式；
+- 远程暂停/恢复瞄准；
+- 远程重载配置；
+- 修改白名单参数，包括采集帧率、置信度、目标偏移、预测开关、自动射击开关和输入方式；
+- 选择警方、匪方或自定义目标类别，并显示模型类别名称。
+
+配对码和会话令牌只在当前进程有效。不要把端口暴露到公网；建议仅在可信局域网使用，必要时将监听地址改为 `127.0.0.1` 并通过本机端口转发访问。完整接口和安全说明见 [局域网 Web 控制台](docs/198局域网Web控制台20260720.md)。
 
 ## 输入设备
 
-支持 7 种鼠标输出方式，通过 `config.ini` 的 `input_method` 切换：
+通过 `config.ini` 的 `input_method` 选择输出方式：
 
-| 方式 | 说明 | 接口 |
-| --- | --- | --- |
-| `WIN32` | 标准 Windows 鼠标事件 | 系统 API |
-| `GHUB` | 罗技 G HUB 驱动注入 | `ghub_mouse.dll` |
-| `RAZER` | 雷蛇 rzctl 驱动注入 | `rzctl.dll` |
-| `KMBOX_NET` | Kmbox Net UDP 协议 | 网络 |
-| `KMBOX_A` | Kmbox A HID 协议 | HID |
-| `MAKCU` | Makcu 串口桥接（CH343） | UART |
+| 值 | 说明 |
+| --- | --- |
+| `WIN32` | Windows 标准鼠标事件 |
+| `GHUB` | Logitech G HUB DLL |
+| `RAZER` | Razer `rzctl.dll` |
+| `KMBOX_NET` | Kmbox Net UDP |
+| `KMBOX_A` | Kmbox A HID |
+| `MAKCU` | Makcu 串口桥接 |
+
+硬件设备还需要填写对应的 IP、端口、UUID、PID/VID 或串口参数。详细字段和故障排查见 [输入方式指南](docs/guides/input-methods.md)。
 
 ## 从源码构建
 
-| 资源 | 链接 |
-| --- | --- |
-| 构建流程 | [docs/build.md](docs/build.md) |
-| CUDA Toolkit | [developer.nvidia.com/cuda-downloads](https://developer.nvidia.com/cuda-downloads) |
-| TensorRT 文档 | [docs.nvidia.com/deeplearning/tensorrt](https://docs.nvidia.com/deeplearning/tensorrt/) |
+推荐使用项目包装脚本，它会配置 Visual Studio、CMake/Ninja、后端依赖并生成 Release 产物：
 
-## 文档
+```powershell
+.\BUILDER.bat
+```
 
-| 主题 | 链接 |
-| --- | --- |
-| 配置说明 | [docs/config.md](docs/config.md) |
-| 安装、常见问题与排错 | [docs/guides.md](docs/guides.md) |
-| 后端说明 | [docs/guides/backends.md](docs/guides/backends.md) |
-| 输入方式 | [docs/guides/input-methods.md](docs/guides/input-methods.md) |
-| NDI 采集 | [docs/guides/ndi-capture.md](docs/guides/ndi-capture.md) |
-| UDP 局域网采集 | [docs/guides/udp-capture.md](docs/guides/udp-capture.md) |
-| 数据收集 | [docs/guides/data-collection.md](docs/guides/data-collection.md) |
-| 游戏覆盖层 | [docs/guides/overlay.md](docs/guides/overlay.md) |
-| 采集诊断 | [docs/guides/capture-diagnostics.md](docs/guides/capture-diagnostics.md) |
-| 构建工作流 | [docs/guides/build-workflow.md](docs/guides/build-workflow.md) |
-| 首次启动 | [docs/guides/first-launch.md](docs/guides/first-launch.md) |
-| 配方示例 | [docs/guides/recipes.md](docs/guides/recipes.md) |
-| 排错 | [docs/guides/troubleshooting.md](docs/guides/troubleshooting.md) |
-| 源码配置文件 | [Xen/config/config.cpp](Xen/config/config.cpp)、[Xen/config/config.h](Xen/config/config.h) |
+也可以直接选择后端：
+
+```powershell
+.\build_dml.bat
+.\build_cuda.bat
+```
+
+完成首次配置后，使用增量入口重新构建：
+
+```powershell
+.\build_no-options.bat -Backend DML
+.\build_no-options.bat -Backend CUDA
+```
+
+构建、依赖布局、测试和发布身份核对请按 [docs/build.md](docs/build.md) 执行。不要使用历史 `x64\DML` 或 `x64\CUDA` 目录中的旧可执行文件进行验证。
+
+## 配置与文档
+
+常用配置入口：
+
+- [完整配置说明](docs/config.md)：默认值、范围、后端差异和运行时行为。
+- [使用指南总览](docs/guides.md)：首次启动、采集、覆盖层、输入设备和排错入口。
+- [后端说明](docs/guides/backends.md)
+- [NDI 采集](docs/guides/ndi-capture.md)、[UDP 采集](docs/guides/udp-capture.md)、[采集诊断](docs/guides/capture-diagnostics.md)
+- [数据采集](docs/guides/data-collection.md)、[覆盖层](docs/guides/overlay.md)
+- [构建工作流](docs/guides/build-workflow.md)、[首次启动](docs/guides/first-launch.md)
+- [常见问题与排错](docs/guides/troubleshooting.md)
+- [近期功能记录](docs/198局域网Web控制台20260720.md)、[界面导航重构](docs/197界面导航重构20260720.md)
 
 ## 项目结构
 
-### 文件树
-
-```
-├── Xen.sln                         # VS 解决方案
-├── CMakeLists.txt                  # CMake 构建配置
-├── BUILDER.bat / BUILDER.ps1       # 一键构建脚本（交互式选择 DML/CUDA）
-├── build_dml.bat / build_cuda.bat  # DML / CUDA 后端构建入口
-├── build_no-options.bat / .ps1     # 快速增量编译（跳过依赖检查）
-├── LICENSE                         # MIT 许可证
-├── docs\                           # 文档
-├── tools\                          # 构建工具脚本
-├── packages\                       # NuGet 包（构建时自动还原）
-│
-├── Xen\                            # 源代码
-│   ├── Xen.cpp / Xen.h             # 主入口 ── 全局变量、线程启动、设备初始化
-│   │
-│   ├── capture\                    # 画面采集 ── 6 种采集源
-│   │   ├── capture.*               #   ├─ 采集调度：后端选择、帧率控制、帧分发
-│   │   ├── duplication_api_*       #   ├─ DXGI Desktop Duplication API
-│   │   ├── winrt_capture.*         #   ├─ WinRT 窗口/显示器采集
-│   │   ├── virtual_camera.*        #   ├─ 虚拟摄像头输入
-│   │   ├── udp_capture.*           #   ├─ UDP 网络流采集（MJPEG）
-│   │   ├── ndi_capture.*           #   ├─ NDI 网络视频源采集
-│   │   └── circle_fov.h            #   └─ 圆形 FOV 裁剪
-│   │
-│   ├── detector\                   # AI 目标检测 ── 推理 + 后处理
-│   │   ├── detection_buffer.*      #   ├─ 跨线程检测帧缓冲
-│   │   ├── dml_detector.*          #   ├─ DirectML 推理（ONNX Runtime）
-│   │   ├── trt_detector.*          #   ├─ TensorRT 推理（CUDA）
-│   │   ├── postProcess.*           #   ├─ YOLO 解码、NMS、阈值过滤
-│   │   └── cuda_preprocess.*       #   └─ CUDA 核函数预处理
-│   │
-│   ├── depth\                      # 深度估计 ── Depth Anything v2（仅 CUDA）
-│   │   ├── depth_anything_trt.*    #   ├─ TensorRT 引擎加载与推理
-│   │   ├── depth_mask.*            #   ├─ 深度遮罩生成（直方图阈值 + 膨胀）
-│   │   └── depth_utils.*           #   └─ 深度图工具函数
-│   │
-│   ├── tensorrt\                   # TensorRT 封装 ── 引擎构建、序列化、日志
-│   │   ├── nvinf.*                 #   ├─ Inference 封装
-│   │   └── trt_monitor.h           #   └─ 导出进度监控 UI
-│   │
-│   ├── mouse\                      # 鼠标控制 ── 算法 + 10 种设备驱动
-│   │   ├── mouse.*                 #   ├─ 核心：预测、速度曲线、轨迹模拟、
-│   │   │                            #      Pure Pursuit 控制器、射击人性化
-│   │   ├── MouseInput.*            #   ├─ 设备抽象层（IMouseInput 工厂，10 种实现）
-│   │   ├── AimbotTarget.*          #   ├─ 多目标追踪（MOT 匈牙利 + SOT 状态机）
-│   │   ├── ghub.* / rzctl.*        #   ├─ 罗技 G HUB / 雷蛇 rzctl 驱动注入
-│   │   ├── kmbox_net\              #   ├─ Kmbox Net（UDP 协议）
-│   │   ├── kmboxA.* / KmboxA*      #   ├─ Kmbox A（HID 协议）
-│   │   ├── Makcu.*                 #   └─ Makcu 串口桥接（CH343）
-│   │
-│   ├── keyboard\                   # 键盘监听 ── 快捷键、状态检测
-│   │   ├── keyboard_listener.*     #   └─ 键盘线程：瞄准/射击/缩放/热键
-│   │   └── keycodes.*              #      虚拟键码映射表
-│   │
-│   ├── overlay\                    # 设置界面 ── ImGui + D3D11 渲染
-│   │   ├── overlay.*               #   ├─ 窗口创建、D3D11/DComp、主题、字体
-│   │   ├── Game_overlay.*          #   ├─ 游戏叠加层配置管理
-│   │   ├── export_progress_panel.h #   ├─ TensorRT 导出进度面板
-│   │   ├── config_dirty.*          #   ├─ 配置变更追踪
-│   │   ├── draw_settings.h          #   ├─ 绘制设置接口声明
-│   │   ├── ui_sections.h           #   ├─ UI 辅助组件（行标签、动画过渡）
-│   │   ├── draw_ai.*               #   ├─ AI 模型/检测参数设置
-│   │   ├── draw_mouse.*            #   ├─ 鼠标设置（FOV/预测/轨迹/设备/射击）
-│   │   ├── draw_capture.*          #   ├─ 捕获设置（来源/分辨率/FPS）
-│   │   ├── draw_target.*           #   ├─ 目标偏移 + 追踪器设置
-│   │   ├── draw_buttons.*          #   ├─ 热键绑定
-│   │   ├── draw_depth.*            #   ├─ 深度估计设置
-│   │   ├── draw_game_overlay.*     #   ├─ 游戏覆盖层样式设置
-│   │   ├── draw_overlay.*          #   ├─ 叠加层外观设置
-│   │   ├── draw_stats.*            #   ├─ 性能统计图表（推理耗时/采集帧率/诊断）
-│   │   └── draw_debug.*            #   └─ 截图/数据收集/调试工具
-│   │
-│   ├── runtime\                    # 运行时线程 ── 主循环调度
-│   │   ├── mouse_thread_loop.*     #   ├─ 鼠标线程：检测→追踪→预测→控制→移动→射击
-│   │   ├── game_overlay_loop.*     #   ├─ 游戏覆盖层 DirectX 渲染线程
-│   │   ├── thread_loops_shared.*   #   ├─ 线程间共享状态
-│   │   ├── thread_loops.h          #   ├─ 线程循环声明
-│   │   └── speed_curve.h           #   └─ 统一三区间速度曲线函数
-│   │
-│   ├── config\                     # 配置管理 ── INI 文件读写
-│   │   ├── config.*               #   └─ 全部配置项默认值、读写逻辑、结构体定义
-│   │
-│   ├── scr\                        # 杂项工具
-│   │   ├── other_tools.*           #   ├─ 系统信息、窗口枚举、模型管理、图像加载
-│   │   └── data_collector.*        #   └─ 数据收集/自动标注
-│   │
-│   ├── mem\                        # 资源管理
-│   │   ├── cpu_affinity_manager.*  #   ├─ CPU 核心预留 / 系统内存预留
-│   │   └── gpu_resource_manager.*  #   └─ GPU 显存预留 + 独占模式（CUDA）
-│   │
-│   ├── benchmarks\                 # 性能基准测试
-│   │   └── provider_benchmark.*    #   └─ DML/CUDA 后端推理速度对比
-│   │
-│   ├── third_party\                # 第三方库（自有）
-│   │   └── motion_control\         #   └─ Header-only 运动控制库
-│   │       ├── estimation.h         #     ├─ 7 状态卡尔曼、匈牙利匹配、SOT 状态机
-│   │       ├── execution.h          #     ├─ Pure Pursuit 执行控制器
-│   │       ├── filters.h            #     ├─ EMA/DEMA/滑动中值/运动突变检测
-│   │       └── prediction.h         #     └─ 延迟补偿预测
-│   │
-│   ├── include\                    # 内部共享头文件
-│   │   ├── other_tools.h           #   ├─ 工具函数、窗口枚举、模型管理
-│   │   └── memory_images.h         #   └─ Base64 编码内存图像
-│   │
-│   │
-│   └── modules\                    # 第三方模块
-│       ├── opencv\build\           #   ├─ DML / CUDA 双 OpenCV 构建
-│       ├── TensorRT-*\             #   ├─ TensorRT SDK
-│       ├── makcu\                  #   ├─ Makcu 串口通信库（CH343）
-│       ├── serial\                 #   ├─ 跨平台串口库
-│       ├── imgui-1.92.8\           #   ├─ Dear ImGui 界面库
-│       ├── stb\                    #   ├─ stb_image 图像加载
-│       └── SimpleIni.h             #   └─ INI 文件解析库
-│
-└── .gitignore
+```text
+Xen/
+├── capture/       画面采集与帧分发
+├── detector/      DML/CUDA 推理、YOLO 后处理
+├── depth/         深度估计与遮罩
+├── debug/         流水线诊断与运行数据记录
+├── mouse/         目标跟踪、控制器和输入设备
+├── overlay/       ImGui 设置界面与游戏覆盖层
+├── runtime/       鼠标、覆盖层、Web 控制台等运行时线程
+├── config/        INI 配置读写和默认值
+├── modules/       OpenCV、ImGui、TensorRT 等第三方依赖
+└── third_party/   运动控制等内部共享库
 ```
 
-## 模块关系图
+根目录中的 `BUILDER.bat`、`build_dml.bat`、`build_cuda.bat` 和 `build_no-options.bat` 是标准构建入口；`docs/` 保存配置、构建、排错和阶段记录。
 
-```
-                          ┌──────────────────────────┐
-                          │          main()           │
-                          │        Xen.cpp            │
-                          │ 线程创建 / 设备初始化 / 主循环│
-                          └──────┬──────────┬─────────┘
-                                 │          │
-                    ┌────────────┘          └────────────┐
-                    ▼                                    ▼
-        ┌─────────────────────┐              ┌─────────────────────┐
-        │     capture\        │              │     keyboard\        │
-        │   6 种画面采集源      │              │  键盘监听 + 状态检测   │
-        └────────┬────────────┘              └────────┬────────────┘
-                 │ cv::Mat                            │ aiming / shooting
-                 ▼                                    ▼
-        ┌─────────────────────┐              ┌─────────────────────┐
-        │     detector\       │──DetectBuf──▶│     AimbotTarget\    │
-        │   AI 目标检测        │              │    多目标追踪          │
-        │  dml / trt / nms    │              │  MOT 匈牙利 + 7态卡尔曼 │
-        └────────┬────────────┘              │  SOT 锁定→惯性→丢失    │
-                 │                           └────────┬────────────┘
-                 │ 深度推理 + 遮罩                      │ 目标坐标 + 速度
-                 ▼                                    ▼
-        ┌─────────────────────┐              ┌─────────────────────┐
-        │     depth\          │              │      mouse\          │
-        │  Depth Anything v2   │              │    鼠标控制核心        │
-        │  深度估计 + 检测抑制   │              │                     │
-        └────────┬────────────┘              │ ┌──────────────────┐ │
-                 │                            │ │  motion_control\ │ │
-                 ▼                            │ │  运动控制算法库    │ │
-        ┌─────────────────────┐              │ │ Pure Pursuit 执行 │ │
-        │     tensorrt\       │              │ │ Wind/Bezier 轨迹  │ │
-        │  引擎构建/加载/推理   │              │ │ EMA/突变检测 过滤  │ │
-        └─────────────────────┘              │ │ 延迟补偿预测       │ │
-                                              │ └──────────────────┘ │
-                                              │                     │
-                                              │  ┌──────────────┐   │
-                                              │  │ MouseInput\  │   │
-                                              │  │ 10 种设备驱动  │   │
-                                              │  └──────┬───────┘   │
-                                              └─────────┼───────────┘
-                                                        │ 物理鼠标移动
-                                                        ▼
-                                                   ┌───────────┐
-                                                   │   游戏     │
-                                                   └───────────┘
+## 许可证
 
-  ┌───────────────────────┐      读写       ┌───────────────────────┐
-  │    overlay\            │◀──────────────▶│       config\           │
-  │  设置界面 (ImGui)       │               │     config.ini          │
-  └───────────────────────┘               └───────────┬───────────────┘
-                                                    │ 配置广播
-  ┌───────────────────────┐               ┌─────────┴───────────────┐
-  │  game_overlay_loop\    │◀──配置/数据──▶│       runtime\           │
-  │  游戏覆盖层 (DirectX)   │               │  mouse_thread_loop      │
-  │  延迟补偿框 / 深度 /    │               │  game_overlay_loop     │
-  │  未来轨迹 / 图标叠加     │               │  thread_loops_shared   │
-  └───────────────────────┘               └─────────────────────────┘
-
-  数据流: capture → detector → AimbotTarget → mouse → MouseInput → 游戏
-  追踪流: detector → AimbotTarget(MOT/SOT) → mouse(速度注入 + Pure Pursuit)
-  控制流: keyboard / overlay ↔ config ──广播──▶ 各模块
-```
-
-## 技术架构
-
-### 目标追踪与预测
-
-```
-检测帧 ──▶ MOT 多目标追踪 ──▶ SOT 单目标锁定
-              │                    │
-              │  匈牙利匹配          │  状态机：锁定→惯性→丢失
-              │  7状态卡尔曼          │
-              │  [cls,cx,cy,w,h,    │  外部速度注入
-              │   vx,vy]            │
-              └────────┬─────────────┘
-                       ▼
-              mouse.cpp 预测管线
-              ├─ SOT 卡尔曼速度（优先）
-              ├─ 帧差速度估计（备选）
-              ├─ 时间校正 EMA 平滑
-              ├─ 恒速外推 + 自适应钳位
-              └─ 自身运动补偿（环形缓冲区）
-                       │
-                       ▼
-              Pure Pursuit 控制器
-              ├─ 像素空间 2D 追踪
-              ├─ 近距减速 + 死区
-              ├─ IIR 输出平滑
-              ├─ 速度前馈 + 运动突变保护
-              └─ 子像素累积
-                       │
-                       ▼
-              轨迹模拟（可选）
-              ├─ WindMouse（黄金比例双正弦振荡）
-              ├─ 贝塞尔曲线（Perlin 噪声扰动）
-              └─ 直通（无轨迹模拟）
-```
-
-### 速度曲线（三区间）
-
-```
-速度
-  ▲
-  │  maxSpeed ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
-  │
-  │              ╱  近区间（指数插值）
-  │            ╱
-  │  snap ─ ─╱  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
-  │
-  │         ╱│
-  │       ╱  │  远区间（线性映射）
-  │     ╱    │
-  │───╱──────│──────────────────────────▶ 距离
-  │  snapR   nearR
-  │  吸附区   │
-  │  min × boost
-```
-
-## 许可说明
-
-本项目采用 [MIT License](LICENSE)。
-
-| 依赖项 | 许可证 |
-| --- | --- |
-| OpenCV | [Apache License 2.0](https://opencv.org/license.html) |
-| ImGui | [MIT License](https://github.com/ocornut/imgui/blob/master/LICENSE) |
-| TensorRT | [NVIDIA Software License](https://docs.nvidia.com/deeplearning/tensorrt/sla/) |
-| ONNX Runtime | [MIT License](https://github.com/microsoft/onnxruntime/blob/main/LICENSE) |
-
-## 外部链接
-
-- [TensorRT 文档](https://docs.nvidia.com/deeplearning/tensorrt/)
-- [OpenCV 文档](https://docs.opencv.org/4.x/d1/dfb/intro.html)
-- [ImGui](https://github.com/ocornut/imgui)
-- [ONNX Runtime](https://onnxruntime.ai/)
-- [NDI SDK](https://ndi.video/)
+本项目以 [MIT License](LICENSE) 发布。第三方依赖遵循各自许可证。
