@@ -5,6 +5,8 @@
 
 #include "imgui/imgui.h"
 
+#include <algorithm>
+
 #include "Xen.h"
 #include "include/other_tools.h"
 #include "overlay.h"
@@ -123,6 +125,67 @@ void draw_ai()
             // 显示当前模型是否使用固定输入尺寸
             OverlayUI::TextRow(config.fixed_input_size ? "固定模型尺寸：已启用" : "固定模型尺寸：已禁用",
                 IM_COL32(188, 188, 188, 255));
+        }
+        OverlayUI::EndSection();
+    }
+
+    // ========== 模型类别选择区域 ==========
+    // 四类 CS2 模型按阵营成对映射：警方 0/1，匪方 2/3；其他模型可使用自定义 ID。
+    if (OverlayUI::BeginSection("目标模型类别", "ai_section_classes"))
+    {
+        static const char* classPresets[] = {
+            "警方 · 0 警身 / 1 警头",
+            "匪方 · 2 匪身 / 3 匪头",
+            "自定义类别 ID",
+        };
+
+        int preset = 2;
+        if (config.class_player == 0 && config.class_head == 1)
+            preset = 0;
+        else if (config.class_player == 2 && config.class_head == 3)
+            preset = 1;
+
+        {
+            const auto row = OverlayUI::BeginSettingRow("目标阵营");
+            if (ImGui::Combo("##class_preset", &preset, classPresets, IM_ARRAYSIZE(classPresets)))
+            {
+                if (preset == 0)
+                {
+                    config.class_player = 0;
+                    config.class_head = 1;
+                }
+                else if (preset == 1)
+                {
+                    config.class_player = 2;
+                    config.class_head = 3;
+                }
+                OverlayConfig_MarkDirty();
+            }
+            OverlayUI::EndSettingRow(row);
+        }
+
+        if (preset == 2)
+        {
+            {
+                const auto row = OverlayUI::BeginSettingRow("身体类别 ID");
+                if (ImGui::InputInt("##class_player", &config.class_player))
+                {
+                    config.class_player = std::clamp(config.class_player, 0, 255);
+                    OverlayConfig_MarkDirty();
+                }
+                OverlayUI::EndSettingRow(row);
+            }
+            {
+                const auto row = OverlayUI::BeginSettingRow("头部类别 ID");
+                if (ImGui::InputInt("##class_head", &config.class_head))
+                {
+                    config.class_head = std::clamp(config.class_head, 0, 255);
+                    OverlayConfig_MarkDirty();
+                }
+                OverlayUI::EndSettingRow(row);
+            }
+            if (config.class_player == config.class_head)
+                OverlayUI::TextRow("身体类别和头部类别不能相同", IM_COL32(186, 38, 35, 255));
         }
         OverlayUI::EndSection();
     }

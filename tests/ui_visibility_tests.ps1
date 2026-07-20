@@ -131,5 +131,11 @@ if ($startupHelpers -notmatch 'ConsoleToneAttributes' -or
 if ($mainSource -notmatch 'SetConsoleOutputCP\(CP_UTF8\);\s*//[^\r\n]*\s*ApplyConsoleTheme\(\);') {
     throw 'Console theme is not applied after UTF-8 console initialization.'
 }
+$aiUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_ai.cpp') -Raw -Encoding UTF8
+foreach ($classUiToken in @('ai_section_classes', 'class_preset', 'class_player', 'class_head', 'classPresets')) {
+    if ($aiUi -notmatch [regex]::Escape($classUiToken)) {
+        throw "Desktop class selector is missing: $classUiToken"
+    }
+}
 
 Write-Output 'prediction ui visibility tests passed'
