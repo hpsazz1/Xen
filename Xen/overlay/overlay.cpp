@@ -267,8 +267,8 @@ static inline ImVec4 RGBA(int r, int g, int b, int a = 255)
     return ImVec4(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
 }
 
-// 应用 Windows 11 深色主题
-// 覆盖 ImGui 默认样式的所有颜色和尺寸参数，打造深色半透明 UI 风格。
+// 应用 Codex Theme v1 浅色主题
+// 覆盖 ImGui 默认样式的颜色和尺寸参数，同时保留透明窗口合成。
 // 包含完整的配色方案：
 //   底色（surfaceBase / surfaceRaised）→ 深灰色半透明
 //   控件（control / controlHover / controlActive）→ 不同层次的灰色
@@ -276,9 +276,9 @@ static inline ImVec4 RGBA(int r, int g, int b, int a = 255)
 //   文字（text / textDim）→ 近乎纯白 / 浅灰
 //   边框（stroke / strokeHi）→ 半透明灰色
 // 同时配置圆角半径、内边距、间距等布局参数。
-// === Xen 控制台主题 ===
-// 采用低饱和深灰底色和青绿色强调色，突出参数可读性，避免装饰性光晕干扰调参。
-static void ApplyTheme_NeonVoid()
+// === Codex Theme v1 / Light ===
+// 精确使用客户端主题令牌：surface #ffffff、ink #1a1c1f、accent #339cff。
+static void ApplyTheme_CodexLight()
 {
     ImGuiStyle& style = ImGui::GetStyle();
     style.Alpha = 1.0f;
@@ -318,26 +318,26 @@ static void ApplyTheme_NeonVoid()
 
     ImVec4* c = style.Colors;
 
-    const ImVec4 voidBg      = RGBA(23, 23, 23, 255);
-    const ImVec4 surface     = RGBA(32, 33, 35, 250);
-    const ImVec4 surfaceAlt  = RGBA(42, 43, 45, 248);
-    const ImVec4 ctrlBg      = RGBA(48, 49, 51, 255);
-    const ImVec4 ctrlHov     = RGBA(58, 59, 61, 255);
-    const ImVec4 ctrlAct     = RGBA(68, 69, 71, 255);
-    const ImVec4 cyan        = RGBA(16, 163, 127, 245);
-    const ImVec4 purple      = RGBA(128, 130, 132, 245);
-    const ImVec4 green       = RGBA(16, 163, 127, 245);
-    const ImVec4 amber       = RGBA(232, 169, 71, 245);
-    const ImVec4 txtMain     = RGBA(245, 245, 245, 255);
-    const ImVec4 txtSub      = RGBA(166, 166, 166, 255);
-    const ImVec4 borderDim   = RGBA(74, 74, 74, 155);
-    const ImVec4 borderGlow  = RGBA(16, 163, 127, 68);
+    const ImVec4 voidBg      = RGBA(255, 255, 255, 246);
+    const ImVec4 surface     = RGBA(255, 255, 255, 246);
+    const ImVec4 surfaceAlt  = RGBA(247, 247, 248, 250);
+    const ImVec4 ctrlBg      = RGBA(243, 244, 245, 255);
+    const ImVec4 ctrlHov     = RGBA(233, 235, 237, 255);
+    const ImVec4 ctrlAct     = RGBA(222, 225, 228, 255);
+    const ImVec4 accent      = RGBA(51, 156, 255, 245);
+    const ImVec4 skill       = RGBA(146, 79, 247, 245);
+    const ImVec4 diffAdded   = RGBA(0, 162, 64, 245);
+    const ImVec4 diffRemoved = RGBA(186, 38, 35, 245);
+    const ImVec4 txtMain     = RGBA(26, 28, 31, 255);
+    const ImVec4 txtSub      = RGBA(105, 109, 115, 255);
+    const ImVec4 borderDim   = RGBA(205, 208, 212, 210);
+    const ImVec4 borderFocus = RGBA(51, 156, 255, 90);
 
     c[ImGuiCol_Text] = txtMain;
     c[ImGuiCol_TextDisabled] = txtSub;
     c[ImGuiCol_WindowBg] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_ChildBg] = RGBA(0, 0, 0, 0);
-    c[ImGuiCol_PopupBg] = RGBA(32, 33, 35, 252);
+    c[ImGuiCol_PopupBg] = RGBA(255, 255, 255, 252);
     c[ImGuiCol_Border] = borderDim;
     c[ImGuiCol_BorderShadow] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_FrameBg] = ctrlBg;
@@ -348,52 +348,52 @@ static void ApplyTheme_NeonVoid()
     c[ImGuiCol_TitleBgCollapsed] = voidBg;
     c[ImGuiCol_MenuBarBg] = surface;
     c[ImGuiCol_ScrollbarBg] = RGBA(0, 0, 0, 0);
-    c[ImGuiCol_ScrollbarGrab] = RGBA(100, 100, 100, 120);
-    c[ImGuiCol_ScrollbarGrabHovered] = RGBA(16, 163, 127, 90);
-    c[ImGuiCol_ScrollbarGrabActive] = cyan;
-    c[ImGuiCol_CheckMark] = cyan;
-    c[ImGuiCol_CheckboxSelectedBg] = RGBA(16, 135, 106, 255);
-    c[ImGuiCol_SliderGrab] = cyan;
-    c[ImGuiCol_SliderGrabActive] = RGBA(35, 190, 150, 255);
+    c[ImGuiCol_ScrollbarGrab] = RGBA(176, 180, 184, 150);
+    c[ImGuiCol_ScrollbarGrabHovered] = RGBA(51, 156, 255, 120);
+    c[ImGuiCol_ScrollbarGrabActive] = accent;
+    c[ImGuiCol_CheckMark] = accent;
+    c[ImGuiCol_CheckboxSelectedBg] = RGBA(51, 156, 255, 255);
+    c[ImGuiCol_SliderGrab] = accent;
+    c[ImGuiCol_SliderGrabActive] = RGBA(31, 132, 230, 255);
     c[ImGuiCol_Button] = ctrlBg;
     c[ImGuiCol_ButtonHovered] = ctrlHov;
     c[ImGuiCol_ButtonActive] = ctrlAct;
     c[ImGuiCol_Header] = surface;
     c[ImGuiCol_HeaderHovered] = surfaceAlt;
-    c[ImGuiCol_HeaderActive] = RGBA(16, 163, 127, 60);
+    c[ImGuiCol_HeaderActive] = RGBA(51, 156, 255, 45);
     c[ImGuiCol_Separator] = borderDim;
-    c[ImGuiCol_SeparatorHovered] = borderGlow;
-    c[ImGuiCol_SeparatorActive] = cyan;
-    c[ImGuiCol_Tab] = RGBA(32, 33, 35, 245);
-    c[ImGuiCol_TabHovered] = RGBA(58, 59, 61, 255);
-    c[ImGuiCol_TabSelected] = RGBA(68, 69, 71, 255);
-    c[ImGuiCol_TabSelectedOverline] = cyan;
-    c[ImGuiCol_TabDimmed] = RGBA(25, 25, 25, 235);
-    c[ImGuiCol_TabDimmedSelected] = RGBA(45, 46, 48, 245);
-    c[ImGuiCol_TabDimmedSelectedOverline] = RGBA(16, 163, 127, 120);
+    c[ImGuiCol_SeparatorHovered] = borderFocus;
+    c[ImGuiCol_SeparatorActive] = accent;
+    c[ImGuiCol_Tab] = RGBA(247, 247, 248, 245);
+    c[ImGuiCol_TabHovered] = RGBA(233, 235, 237, 255);
+    c[ImGuiCol_TabSelected] = RGBA(222, 225, 228, 255);
+    c[ImGuiCol_TabSelectedOverline] = accent;
+    c[ImGuiCol_TabDimmed] = RGBA(250, 250, 250, 235);
+    c[ImGuiCol_TabDimmedSelected] = RGBA(238, 239, 241, 245);
+    c[ImGuiCol_TabDimmedSelectedOverline] = RGBA(51, 156, 255, 120);
     c[ImGuiCol_ResizeGrip] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_ResizeGripHovered] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_ResizeGripActive] = RGBA(0, 0, 0, 0);
-    c[ImGuiCol_InputTextCursor] = cyan;
-    c[ImGuiCol_PlotLines] = cyan;
-    c[ImGuiCol_PlotLinesHovered] = RGBA(35, 190, 150, 255);
-    c[ImGuiCol_PlotHistogram] = purple;
-    c[ImGuiCol_PlotHistogramHovered] = RGBA(170, 170, 170, 255);
+    c[ImGuiCol_InputTextCursor] = accent;
+    c[ImGuiCol_PlotLines] = diffAdded;
+    c[ImGuiCol_PlotLinesHovered] = RGBA(0, 132, 52, 255);
+    c[ImGuiCol_PlotHistogram] = skill;
+    c[ImGuiCol_PlotHistogramHovered] = RGBA(124, 57, 224, 255);
     c[ImGuiCol_TableHeaderBg] = surfaceAlt;
     c[ImGuiCol_TableBorderStrong] = borderDim;
-    c[ImGuiCol_TableBorderLight] = RGBA(90, 90, 90, 90);
+    c[ImGuiCol_TableBorderLight] = RGBA(205, 208, 212, 120);
     c[ImGuiCol_TableRowBg] = RGBA(0, 0, 0, 0);
-    c[ImGuiCol_TableRowBgAlt] = RGBA(16, 163, 127, 8);
-    c[ImGuiCol_NavCursor] = cyan;
-    c[ImGuiCol_NavWindowingHighlight] = RGBA(16, 163, 127, 60);
+    c[ImGuiCol_TableRowBgAlt] = RGBA(51, 156, 255, 8);
+    c[ImGuiCol_NavCursor] = accent;
+    c[ImGuiCol_NavWindowingHighlight] = RGBA(51, 156, 255, 60);
     c[ImGuiCol_NavWindowingDimBg] = RGBA(0, 0, 0, 120);
-    c[ImGuiCol_TextLink] = cyan;
-    c[ImGuiCol_TextSelectedBg] = RGBA(16, 163, 127, 90);
-    c[ImGuiCol_TreeLines] = RGBA(90, 90, 90, 90);
-    c[ImGuiCol_DragDropTarget] = cyan;
-    c[ImGuiCol_DragDropTargetBg] = RGBA(16, 163, 127, 50);
-    c[ImGuiCol_UnsavedMarker] = amber;
-    c[ImGuiCol_ModalWindowDimBg] = RGBA(0, 0, 0, 160);
+    c[ImGuiCol_TextLink] = accent;
+    c[ImGuiCol_TextSelectedBg] = RGBA(51, 156, 255, 75);
+    c[ImGuiCol_TreeLines] = RGBA(160, 164, 168, 100);
+    c[ImGuiCol_DragDropTarget] = accent;
+    c[ImGuiCol_DragDropTargetBg] = RGBA(51, 156, 255, 45);
+    c[ImGuiCol_UnsavedMarker] = diffRemoved;
+    c[ImGuiCol_ModalWindowDimBg] = RGBA(26, 28, 31, 90);
 }
 
 // 侧边栏图标种类枚举
@@ -454,51 +454,14 @@ static const OverlayTabItem kOverlayTabs[] = {
     { "开发工具",      "系统",  "配置截图、数据收集和 YOLO 自动标注。",                 draw_debug,            SidebarIconKind::Debug },
 };
 
-// 绘制主面板背景 — 深空底色 + 发光边框 + HUD 角标
+// 绘制主面板背景 — 透明窗口上的白色 Codex surface 与细边框
 static void DrawMainPanelBackground(const ImVec2& pos, const ImVec2& size)
 {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImVec2 max(pos.x + size.x, pos.y + size.y);
-    const float r = 8.0f;
-
-    // 底层深空填充
-    draw->AddRectFilled(pos, max, IM_COL32(23, 23, 23, 252), r);
-
-    // 渐变叠加：面板表面微妙的色温变化
-    draw->AddRectFilledMultiColor(
-        ImVec2(pos.x + 1.0f, pos.y + 1.0f),
-        ImVec2(max.x - 1.0f, max.y - 1.0f),
-        IM_COL32(42, 43, 45, 60),
-        IM_COL32(32, 33, 35, 30),
-        IM_COL32(23, 23, 23, 50),
-        IM_COL32(36, 37, 39, 45));
-
-    // 主边框 — 暗色基础边框
-    draw->AddRect(pos, max, IM_COL32(74, 74, 74, 180), r, 0, 1.2f);
-
-    // 外圈青色辉光 — 多层叠加实现发光效果
-    draw->AddRect(ImVec2(pos.x - 1.0f, pos.y - 1.0f), ImVec2(max.x + 1.0f, max.y + 1.0f),
-        IM_COL32(16, 163, 127, 22), r + 1.0f, 0, 2.0f);
-    draw->AddRect(ImVec2(pos.x - 2.0f, pos.y - 2.0f), ImVec2(max.x + 2.0f, max.y + 2.0f),
-        IM_COL32(16, 163, 127, 10), r + 2.0f, 0, 2.5f);
-
-    // 四角 HUD 角度装饰线 (8 条短斜线)
-    const float cl = 18.0f;  // 角线长度
-    const float co = 6.0f;   // 角线距边偏移
-    const ImU32 cornerCol = IM_COL32(16, 163, 127, 90);
-    const float cs = 1.5f;   // 线宽
-    // 左上角
-    draw->AddLine(ImVec2(pos.x + co, pos.y + r), ImVec2(pos.x + co, pos.y + co + cl), cornerCol, cs);
-    draw->AddLine(ImVec2(pos.x + r, pos.y + co), ImVec2(pos.x + co + cl, pos.y + co), cornerCol, cs);
-    // 右上角
-    draw->AddLine(ImVec2(max.x - co, pos.y + r), ImVec2(max.x - co, pos.y + co + cl), cornerCol, cs);
-    draw->AddLine(ImVec2(max.x - r, pos.y + co), ImVec2(max.x - co - cl, pos.y + co), cornerCol, cs);
-    // 左下角
-    draw->AddLine(ImVec2(pos.x + co, max.y - r), ImVec2(pos.x + co, max.y - co - cl), cornerCol, cs);
-    draw->AddLine(ImVec2(pos.x + r, max.y - co), ImVec2(pos.x + co + cl, max.y - co), cornerCol, cs);
-    // 右下角
-    draw->AddLine(ImVec2(max.x - co, max.y - r), ImVec2(max.x - co, max.y - co - cl), cornerCol, cs);
-    draw->AddLine(ImVec2(max.x - r, max.y - co), ImVec2(max.x - co - cl, max.y - co), cornerCol, cs);
+    const float r = 6.0f;
+    draw->AddRectFilled(pos, max, IM_COL32(255, 255, 255, 246), r);
+    draw->AddRect(pos, max, IM_COL32(205, 208, 212, 220), r, 0, 1.0f);
 }
 
 // 绘制侧边栏标题区域 — Xen 项目名称 + 版本号
@@ -508,7 +471,7 @@ static void DrawSidebarTitle()
     const ImVec2 cursor = ImGui::GetCursorScreenPos();
     const float availX = ImGui::GetContentRegionAvail().x;
 
-    // Xen 主标题 — 霓虹青大字
+    // Xen 主标题 — Codex accent 蓝色
     const char* title = "Xen";
     const float titleSize = 24.0f;
     // 用较大的字体大小绘制 (手动缩放文字)
@@ -516,28 +479,28 @@ static void DrawSidebarTitle()
     const float titleX = cursor.x + 8.0f;
     const float titleY = cursor.y + 4.0f;
 
-    // 标题发光背景 (微弱的青色光晕)
+    // 标题背景使用低对比度 accent 色块，不使用发光效果。
     draw->AddRectFilled(
         ImVec2(titleX - 4.0f, titleY - 2.0f),
         ImVec2(titleX + titleDim.x + 4.0f, titleY + titleDim.y + 2.0f),
-        IM_COL32(16, 163, 127, 15), 3.0f);
+        IM_COL32(51, 156, 255, 18), 3.0f);
 
     // 标题文字
-    draw->AddText(ImVec2(titleX, titleY), IM_COL32(16, 163, 127, 255), title);
+    draw->AddText(ImVec2(titleX, titleY), IM_COL32(51, 156, 255, 255), title);
 
     // 版本副标题
     const std::string version = BuildIdentity::displayLabel();
     const ImVec2 verDim = ImGui::CalcTextSize(version.c_str());
     draw->AddText(
         ImVec2(titleX + titleDim.x + 6.0f, titleY + titleDim.y - verDim.y),
-        IM_COL32(100, 110, 128, 200), version.c_str());
+        IM_COL32(105, 109, 115, 220), version.c_str());
 
-    // 标题下方分隔线 — 青色渐变
+    // 标题下方分隔线 — accent 蓝色
     const float sepY = titleY + titleDim.y + 8.0f;
     draw->AddLine(
         ImVec2(cursor.x + 6.0f, sepY),
         ImVec2(cursor.x + availX - 6.0f, sepY),
-        IM_COL32(16, 163, 127, 50), 1.0f);
+        IM_COL32(51, 156, 255, 70), 1.0f);
 
     // 占位空间
     ImGui::Dummy(ImVec2(availX, titleDim.y + 18.0f));
@@ -553,12 +516,12 @@ static void DrawSidebarTitle()
 // selected: 是否处于选中状态
 static void DrawSidebarIcon(ImDrawList* draw, SidebarIconKind icon, const char* group, const ImVec2& pos, bool selected)
 {
-    // 颜色选择：选中时使用高亮青，否则按分组分配颜色
-    const ImU32 color = selected ? IM_COL32(79, 209, 177, 255) :
-        (std::strcmp(group, "感知") == 0 ? IM_COL32(103, 180, 210, 230) :
-         std::strcmp(group, "瞄准") == 0 ? IM_COL32(238, 184, 92, 230) :
-         std::strcmp(group, "控制") == 0 ? IM_COL32(79, 209, 177, 230) :
-         IM_COL32(180, 190, 196, 230));
+    // 颜色选择：选中时使用 Codex accent，否则按语义分组分配颜色。
+    const ImU32 color = selected ? IM_COL32(51, 156, 255, 255) :
+        (std::strcmp(group, "感知") == 0 ? IM_COL32(51, 156, 255, 230) :
+         std::strcmp(group, "瞄准") == 0 ? IM_COL32(146, 79, 247, 230) :
+         std::strcmp(group, "控制") == 0 ? IM_COL32(0, 162, 64, 230) :
+         IM_COL32(105, 109, 115, 230));
 
     const float x = pos.x;
     const float y = pos.y;
@@ -670,9 +633,8 @@ static void DrawSidebarIcon(ImDrawList* draw, SidebarIconKind icon, const char* 
     }
 }
 
-// 绘制侧边栏选项卡按钮 — 科幻风格
-// 选中态：左侧青色发光指示条 + 半透明青色背景
-// 悬停态：淡紫色覆盖
+// 绘制侧边栏选项卡按钮 — Codex 浅色风格
+// 选中态使用 accent 蓝色细指示条，悬停态仅提升灰阶对比度。
 static bool DrawSidebarTabButton(const OverlayTabItem& tab, bool selected)
 {
     const ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -699,9 +661,9 @@ static bool DrawSidebarTabButton(const OverlayTabItem& tab, bool selected)
     // 背景
     ImU32 rowBg = IM_COL32(0, 0, 0, 0);
     if (selected)
-        rowBg = IM_COL32(16, 163, 127, 28);   // 主题绿色半透明
+        rowBg = IM_COL32(51, 156, 255, 28);   // accent 半透明
     else if (hovered)
-        rowBg = IM_COL32(128, 130, 132, 22);  // 灰色半透明
+        rowBg = IM_COL32(26, 28, 31, 12);  // ink 低对比度半透明
 
     if (selected || hovered)
         draw->AddRectFilled(pos, max, rowBg, 4.0f);
@@ -709,22 +671,22 @@ static bool DrawSidebarTabButton(const OverlayTabItem& tab, bool selected)
     // 选中态装饰
     if (selected)
     {
-        // 左侧青色发光指示条 (多层叠加实现辉光)
+        // 左侧 accent 指示条
         const float mx0 = pos.x + 3.0f, mx1 = pos.x + 5.0f;
         const float my0 = pos.y + 6.0f, my1 = max.y - 6.0f;
         draw->AddRectFilled(ImVec2(mx0 - 1.0f, my0), ImVec2(mx1 + 1.0f, my1),
-            IM_COL32(16, 163, 127, 50), 2.0f);
+            IM_COL32(51, 156, 255, 45), 2.0f);
         draw->AddRectFilled(ImVec2(mx0, my0), ImVec2(mx1, my1),
-            IM_COL32(16, 163, 127, 220), 2.0f);
+            IM_COL32(51, 156, 255, 220), 2.0f);
         // 弱边框
-        draw->AddRect(pos, max, IM_COL32(16, 163, 127, 15), 4.0f, 0, 1.0f);
+        draw->AddRect(pos, max, IM_COL32(51, 156, 255, 25), 4.0f, 0, 1.0f);
     }
 
     // 文字
     const float textY = pos.y + (size.y - ImGui::GetTextLineHeight()) * 0.5f;
     const ImU32 textCol = selected
-        ? IM_COL32(16, 163, 127, 255)
-        : (hovered ? IM_COL32(220, 225, 235, 255) : IM_COL32(160, 170, 185, 230));
+        ? IM_COL32(51, 156, 255, 255)
+        : (hovered ? IM_COL32(26, 28, 31, 255) : IM_COL32(105, 109, 115, 230));
 
     // 图标
     DrawSidebarIcon(draw, tab.icon, tab.group,
@@ -1466,7 +1428,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 // 1. 创建 ImGui 上下文
 // 2. 加载字体（首选 Segoe UI Semibold，回退到 Segoe UI 或默认字体）
 // 3. 初始化 Win32 和 D3D11 后端
-// 4. 应用深色主题并捕获基础样式快照，供运行时缩放使用
+// 4. 应用 Codex 浅色主题并捕获基础样式快照，供运行时缩放使用
 // 5. 加载人体轮廓预览纹理
 // 6. 处理在 ImGui 初始化前设置的挂起几何脏标记
 void SetupImGui()
@@ -1512,8 +1474,8 @@ void SetupImGui()
     ImGui_ImplWin32_Init(g_hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
-    // 应用 Codex 风格中性深色主题，保存基础样式用于缩放
-    ApplyTheme_NeonVoid();
+    // 应用用户提供的 Codex Theme v1 浅色主题，保存基础样式用于缩放。
+    ApplyTheme_CodexLight();
     g_baseStyle = ImGui::GetStyle();
     g_baseStyleReady = true;
     g_runtimeUiScale = -1.0f;
@@ -1718,7 +1680,7 @@ static HRESULT RenderOverlayFrame(bool allowAutoResize, bool allowConfigSave)
                 // 新分组开始 → 绘制分组标题
                 if (lastGroup)
                     ImGui::Dummy(ImVec2(0.0f, 5.0f));
-                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(166, 166, 166, 230));
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(105, 109, 115, 230));
                 ImGui::TextUnformatted(group);
                 ImGui::PopStyleColor();
             }

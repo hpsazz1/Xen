@@ -78,9 +78,10 @@ if ($overlayUi -notmatch 'hovered\s*&&\s*tab\.description' -or
     $overlayUi -notmatch 'ImGui::TextUnformatted\(tab\.description\)') {
     throw 'Sidebar descriptions are not wired to unified hover tooltips.'
 }
-if ($overlayUi -notmatch 'RGBA\(16, 163, 127, 245\)' -or
-    $overlayUi -match 'RGBA\(79, 209, 177, 245\)') {
-    throw 'Codex palette accent is missing or the previous accent is still active.'
+if ($overlayUi -notmatch 'RGBA\(51, 156, 255, 245\)' -or
+    $overlayUi -match 'RGBA\(16, 163, 127, 245\)' -or
+    $overlayUi -match 'IM_COL32\(0, 229, 255') {
+    throw 'Codex light palette accent is missing or the previous accent is still active.'
 }
 
 Write-Output 'prediction ui visibility tests passed'
