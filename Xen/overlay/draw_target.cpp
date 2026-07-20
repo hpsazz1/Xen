@@ -70,8 +70,8 @@ void draw_target()
     // 提示文本说明：方向键单独调整身体偏移，Shift+方向键调整头部偏移。
     if (OverlayUI::BeginSection("瞄准偏移", "target_section_offsets"))
     {
-        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "方向键：调节身体偏移");
-        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Shift+方向键：调节头部偏移");
+        ImGui::TextColored(ImVec4(0.10f, 0.35f, 0.70f, 1.0f), "方向键：调节身体偏移");
+        ImGui::TextColored(ImVec4(0.10f, 0.35f, 0.70f, 1.0f), "Shift+方向键：调节头部偏移");
 
         OverlayUI::SliderFloatRow("身体Y偏移(近似)", &config.body_y_offset, 0.0f, 1.0f, "%.2f");
         OverlayUI::SliderFloatRow("头部Y偏移(近似)", &config.head_y_offset, 0.0f, 1.0f, "%.2f");

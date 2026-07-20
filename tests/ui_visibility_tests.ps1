@@ -7,6 +7,9 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $mouseUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_mouse.cpp') -Raw -Encoding UTF8
 $overlayUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\overlay.cpp') -Raw -Encoding UTF8
+$targetUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_target.cpp') -Raw -Encoding UTF8
+$debugUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_debug.cpp') -Raw -Encoding UTF8
+$exportUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\export_progress_panel.h') -Raw -Encoding UTF8
 
 if ($mouseUi -match 'false\s*&&\s*shouldDrawMousePage\(page,\s*MouseSettingsPage::Prediction\)') {
     throw 'Prediction settings page is compile-time hidden.'
@@ -82,6 +85,11 @@ if ($overlayUi -notmatch 'RGBA\(51, 156, 255, 245\)' -or
     $overlayUi -match 'RGBA\(16, 163, 127, 245\)' -or
     $overlayUi -match 'IM_COL32\(0, 229, 255') {
     throw 'Codex light palette accent is missing or the previous accent is still active.'
+}
+foreach ($fontSource in @($mouseUi, $targetUi, $debugUi, $exportUi)) {
+    if ($fontSource -match '1\.0f,\s*1\.0f,\s*0\.0f|255,\s*255,\s*0|252,\s*225,\s*115') {
+        throw 'Low-contrast yellow text remains in a visible UI source file.'
+    }
 }
 
 Write-Output 'prediction ui visibility tests passed'

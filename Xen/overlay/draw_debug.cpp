@@ -454,7 +454,7 @@ void draw_debug_frame()
             if (i < detectionBuffer.classes.size())
             {
                 std::string label = std::to_string(detectionBuffer.classes[i]);
-                draw_list->AddText(ImVec2(p1.x, p1.y - 16), IM_COL32(255, 255, 0, 255), label.c_str());
+                draw_list->AddText(ImVec2(p1.x, p1.y - 16), IM_COL32(51, 156, 255, 255), label.c_str());
             }
         }
     }

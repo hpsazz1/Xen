@@ -215,7 +215,7 @@ inline void DrawProgressBar(ImDrawList* draw, const ImVec2& pos, const ImVec2& s
 inline void DrawPhaseRows(ImDrawList* draw, const ProgressSnapshot& snapshot,
     const ImVec2& origin, float width, int maxRows, float& y)
 {
-    const ImU32 phaseAccent = snapshot.stale ? IM_COL32(252, 225, 115, 255) : IM_COL32(96, 205, 255, 255);
+    const ImU32 phaseAccent = snapshot.stale ? IM_COL32(186, 38, 35, 255) : IM_COL32(51, 156, 255, 255);
     const int count = static_cast<int>(std::min<size_t>(snapshot.phases.size(), static_cast<size_t>(maxRows)));
     for (int i = 0; i < count; ++i)
     {
@@ -287,7 +287,7 @@ inline void DrawTensorRtExportPanel(const char* id, const char* title,
         IM_COL32(35, 37, 42, 0), IM_COL32(35, 37, 42, 0));
     draw->AddRect(cardMin, cardMax, IM_COL32(255, 255, 255, 36), 8.0f, 0, 1.0f);
 
-    const ImU32 accent = snapshot.stale ? IM_COL32(252, 225, 115, 255) : IM_COL32(96, 205, 255, 255);
+    const ImU32 accent = snapshot.stale ? IM_COL32(186, 38, 35, 255) : IM_COL32(51, 156, 255, 255);
     DrawActivityDots(draw, ImVec2(cardMin.x + pad + 15.0f, cardMin.y + 30.0f), static_cast<float>(ImGui::GetTime()));
 
     const float textX = cardMin.x + pad + 42.0f;
@@ -342,7 +342,7 @@ inline void DrawTensorRtExportPanel(const char* id, const char* title,
         const char* warning = "TensorRT may spend a long time selecting tactics without reporting new steps.";
         const std::string fittedWarning = FitTextToWidth(warning, innerW - 20.0f);
         draw->AddRectFilled(ImVec2(innerX, y), ImVec2(innerX + innerW, y + 23.0f), IM_COL32(70, 60, 36, 210), 5.0f);
-        draw->AddText(ImVec2(innerX + 10.0f, y + 4.0f), IM_COL32(252, 225, 115, 255),
+        draw->AddText(ImVec2(innerX + 10.0f, y + 4.0f), IM_COL32(186, 38, 35, 255),
             fittedWarning.c_str());
         y += 31.0f;
     }
@@ -383,7 +383,7 @@ inline void DrawTensorRtExportPanel(const char* id, const char* title,
     std::snprintf(updated, sizeof(updated), "Last update %.1f s ago", snapshot.secondsSinceUpdate);
     const float updatedW = ImGui::CalcTextSize(updated).x;
     draw->AddText(ImVec2(cardMax.x - pad - updatedW, cardMax.y - pad - ImGui::GetTextLineHeight() - 4.0f),
-        snapshot.stale ? IM_COL32(252, 225, 115, 255) : IM_COL32(156, 162, 172, 230), updated);
+        snapshot.stale ? IM_COL32(186, 38, 35, 255) : IM_COL32(105, 109, 115, 230), updated);
 
     ImGui::SetCursorScreenPos(ImVec2(cardMin.x, cardMax.y + style.ItemSpacing.y));
     ImGui::Dummy(ImVec2(width, 1.0f));

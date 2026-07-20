@@ -668,9 +668,9 @@ static void draw_mouse_page(MouseSettingsPage page)
             if (OverlayUI::CheckboxRow("简易压枪", &config.easynorecoil)) OverlayConfig_MarkDirty();
             if (!config.easynorecoil) ImGui::BeginDisabled();
             if (OverlayUI::SliderFloatRow("压枪强度", &config.easynorecoilstrength, 0.1f, 500.0f, "%.1f")) OverlayConfig_MarkDirty();
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "左右方向键：以10为单位调节压枪强度");
+            ImGui::TextColored(ImVec4(0.10f, 0.35f, 0.70f, 1.0f), "左右方向键：以10为单位调节压枪强度");
             if (config.easynorecoilstrength >= 100.0f)
-                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "警告：高强度压枪可能被检测。");
+                ImGui::TextColored(ImVec4(0.72f, 0.15f, 0.14f, 1.0f), "警告：高强度压枪可能被检测。");
             if (!config.easynorecoil) { ImGui::EndDisabled(); ImGui::TextDisabled("启用简易压枪后才能编辑设置。"); }
             OverlayUI::EndSection();
         }

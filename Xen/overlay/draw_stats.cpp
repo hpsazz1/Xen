@@ -454,7 +454,7 @@ void draw_stats()
             if (directCaptureActive)
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 1.0f, 0.45f, 1.0f));
             else
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.28f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.10f, 0.35f, 0.70f, 1.0f));
             ImGui::TextWrapped("直接捕获状态：%s", directCaptureStatus.c_str());
             ImGui::PopStyleColor();
 
