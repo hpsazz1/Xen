@@ -318,26 +318,26 @@ static void ApplyTheme_NeonVoid()
 
     ImVec4* c = style.Colors;
 
-    const ImVec4 voidBg      = RGBA(18, 22, 27, 255);
-    const ImVec4 surface     = RGBA(26, 31, 37, 250);
-    const ImVec4 surfaceAlt  = RGBA(34, 41, 48, 248);
-    const ImVec4 ctrlBg      = RGBA(31, 38, 45, 255);
-    const ImVec4 ctrlHov     = RGBA(42, 52, 60, 255);
-    const ImVec4 ctrlAct     = RGBA(51, 66, 73, 255);
-    const ImVec4 cyan        = RGBA(79, 209, 177, 245);
-    const ImVec4 purple      = RGBA(111, 145, 145, 245);
-    const ImVec4 green       = RGBA(79, 209, 177, 245);
-    const ImVec4 amber       = RGBA(255, 171, 0,   245);
-    const ImVec4 txtMain     = RGBA(232, 236, 238, 255);
-    const ImVec4 txtSub      = RGBA(157, 169, 174, 255);
-    const ImVec4 borderDim   = RGBA(72,  84,  90,  155);
-    const ImVec4 borderGlow  = RGBA(79, 209, 177, 68);
+    const ImVec4 voidBg      = RGBA(23, 23, 23, 255);
+    const ImVec4 surface     = RGBA(32, 33, 35, 250);
+    const ImVec4 surfaceAlt  = RGBA(42, 43, 45, 248);
+    const ImVec4 ctrlBg      = RGBA(48, 49, 51, 255);
+    const ImVec4 ctrlHov     = RGBA(58, 59, 61, 255);
+    const ImVec4 ctrlAct     = RGBA(68, 69, 71, 255);
+    const ImVec4 cyan        = RGBA(16, 163, 127, 245);
+    const ImVec4 purple      = RGBA(128, 130, 132, 245);
+    const ImVec4 green       = RGBA(16, 163, 127, 245);
+    const ImVec4 amber       = RGBA(232, 169, 71, 245);
+    const ImVec4 txtMain     = RGBA(245, 245, 245, 255);
+    const ImVec4 txtSub      = RGBA(166, 166, 166, 255);
+    const ImVec4 borderDim   = RGBA(74, 74, 74, 155);
+    const ImVec4 borderGlow  = RGBA(16, 163, 127, 68);
 
     c[ImGuiCol_Text] = txtMain;
     c[ImGuiCol_TextDisabled] = txtSub;
     c[ImGuiCol_WindowBg] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_ChildBg] = RGBA(0, 0, 0, 0);
-    c[ImGuiCol_PopupBg] = RGBA(14, 18, 28, 252);
+    c[ImGuiCol_PopupBg] = RGBA(32, 33, 35, 252);
     c[ImGuiCol_Border] = borderDim;
     c[ImGuiCol_BorderShadow] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_FrameBg] = ctrlBg;
@@ -348,50 +348,50 @@ static void ApplyTheme_NeonVoid()
     c[ImGuiCol_TitleBgCollapsed] = voidBg;
     c[ImGuiCol_MenuBarBg] = surface;
     c[ImGuiCol_ScrollbarBg] = RGBA(0, 0, 0, 0);
-    c[ImGuiCol_ScrollbarGrab] = RGBA(60, 70, 90, 120);
-    c[ImGuiCol_ScrollbarGrabHovered] = RGBA(0, 229, 255, 90);
+    c[ImGuiCol_ScrollbarGrab] = RGBA(100, 100, 100, 120);
+    c[ImGuiCol_ScrollbarGrabHovered] = RGBA(16, 163, 127, 90);
     c[ImGuiCol_ScrollbarGrabActive] = cyan;
     c[ImGuiCol_CheckMark] = cyan;
-    c[ImGuiCol_CheckboxSelectedBg] = RGBA(0, 180, 210, 255);
+    c[ImGuiCol_CheckboxSelectedBg] = RGBA(16, 135, 106, 255);
     c[ImGuiCol_SliderGrab] = cyan;
-    c[ImGuiCol_SliderGrabActive] = RGBA(50, 240, 255, 255);
+    c[ImGuiCol_SliderGrabActive] = RGBA(35, 190, 150, 255);
     c[ImGuiCol_Button] = ctrlBg;
     c[ImGuiCol_ButtonHovered] = ctrlHov;
     c[ImGuiCol_ButtonActive] = ctrlAct;
     c[ImGuiCol_Header] = surface;
     c[ImGuiCol_HeaderHovered] = surfaceAlt;
-    c[ImGuiCol_HeaderActive] = RGBA(0, 229, 255, 60);
+    c[ImGuiCol_HeaderActive] = RGBA(16, 163, 127, 60);
     c[ImGuiCol_Separator] = borderDim;
     c[ImGuiCol_SeparatorHovered] = borderGlow;
     c[ImGuiCol_SeparatorActive] = cyan;
-    c[ImGuiCol_Tab] = RGBA(20, 26, 38, 245);
-    c[ImGuiCol_TabHovered] = RGBA(28, 35, 53, 255);
-    c[ImGuiCol_TabSelected] = RGBA(32, 42, 62, 255);
+    c[ImGuiCol_Tab] = RGBA(32, 33, 35, 245);
+    c[ImGuiCol_TabHovered] = RGBA(58, 59, 61, 255);
+    c[ImGuiCol_TabSelected] = RGBA(68, 69, 71, 255);
     c[ImGuiCol_TabSelectedOverline] = cyan;
-    c[ImGuiCol_TabDimmed] = RGBA(14, 18, 28, 235);
-    c[ImGuiCol_TabDimmedSelected] = RGBA(22, 30, 44, 245);
-    c[ImGuiCol_TabDimmedSelectedOverline] = RGBA(0, 229, 255, 120);
+    c[ImGuiCol_TabDimmed] = RGBA(25, 25, 25, 235);
+    c[ImGuiCol_TabDimmedSelected] = RGBA(45, 46, 48, 245);
+    c[ImGuiCol_TabDimmedSelectedOverline] = RGBA(16, 163, 127, 120);
     c[ImGuiCol_ResizeGrip] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_ResizeGripHovered] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_ResizeGripActive] = RGBA(0, 0, 0, 0);
     c[ImGuiCol_InputTextCursor] = cyan;
     c[ImGuiCol_PlotLines] = cyan;
-    c[ImGuiCol_PlotLinesHovered] = RGBA(80, 245, 255, 255);
+    c[ImGuiCol_PlotLinesHovered] = RGBA(35, 190, 150, 255);
     c[ImGuiCol_PlotHistogram] = purple;
-    c[ImGuiCol_PlotHistogramHovered] = RGBA(150, 110, 255, 255);
+    c[ImGuiCol_PlotHistogramHovered] = RGBA(170, 170, 170, 255);
     c[ImGuiCol_TableHeaderBg] = surfaceAlt;
     c[ImGuiCol_TableBorderStrong] = borderDim;
-    c[ImGuiCol_TableBorderLight] = RGBA(40, 50, 70, 90);
+    c[ImGuiCol_TableBorderLight] = RGBA(90, 90, 90, 90);
     c[ImGuiCol_TableRowBg] = RGBA(0, 0, 0, 0);
-    c[ImGuiCol_TableRowBgAlt] = RGBA(0, 229, 255, 8);
+    c[ImGuiCol_TableRowBgAlt] = RGBA(16, 163, 127, 8);
     c[ImGuiCol_NavCursor] = cyan;
-    c[ImGuiCol_NavWindowingHighlight] = RGBA(0, 229, 255, 60);
+    c[ImGuiCol_NavWindowingHighlight] = RGBA(16, 163, 127, 60);
     c[ImGuiCol_NavWindowingDimBg] = RGBA(0, 0, 0, 120);
     c[ImGuiCol_TextLink] = cyan;
-    c[ImGuiCol_TextSelectedBg] = RGBA(0, 229, 255, 90);
-    c[ImGuiCol_TreeLines] = RGBA(60, 70, 90, 90);
+    c[ImGuiCol_TextSelectedBg] = RGBA(16, 163, 127, 90);
+    c[ImGuiCol_TreeLines] = RGBA(90, 90, 90, 90);
     c[ImGuiCol_DragDropTarget] = cyan;
-    c[ImGuiCol_DragDropTargetBg] = RGBA(0, 229, 255, 50);
+    c[ImGuiCol_DragDropTargetBg] = RGBA(16, 163, 127, 50);
     c[ImGuiCol_UnsavedMarker] = amber;
     c[ImGuiCol_ModalWindowDimBg] = RGBA(0, 0, 0, 160);
 }
@@ -462,30 +462,30 @@ static void DrawMainPanelBackground(const ImVec2& pos, const ImVec2& size)
     const float r = 8.0f;
 
     // 底层深空填充
-    draw->AddRectFilled(pos, max, IM_COL32(8, 12, 20, 252), r);
+    draw->AddRectFilled(pos, max, IM_COL32(23, 23, 23, 252), r);
 
     // 渐变叠加：面板表面微妙的色温变化
     draw->AddRectFilledMultiColor(
         ImVec2(pos.x + 1.0f, pos.y + 1.0f),
         ImVec2(max.x - 1.0f, max.y - 1.0f),
-        IM_COL32(18, 24, 36, 60),
-        IM_COL32(12, 16, 26, 30),
-        IM_COL32(8, 10, 16, 50),
-        IM_COL32(14, 20, 32, 45));
+        IM_COL32(42, 43, 45, 60),
+        IM_COL32(32, 33, 35, 30),
+        IM_COL32(23, 23, 23, 50),
+        IM_COL32(36, 37, 39, 45));
 
     // 主边框 — 暗色基础边框
-    draw->AddRect(pos, max, IM_COL32(30, 38, 54, 180), r, 0, 1.2f);
+    draw->AddRect(pos, max, IM_COL32(74, 74, 74, 180), r, 0, 1.2f);
 
     // 外圈青色辉光 — 多层叠加实现发光效果
     draw->AddRect(ImVec2(pos.x - 1.0f, pos.y - 1.0f), ImVec2(max.x + 1.0f, max.y + 1.0f),
-        IM_COL32(0, 229, 255, 22), r + 1.0f, 0, 2.0f);
+        IM_COL32(16, 163, 127, 22), r + 1.0f, 0, 2.0f);
     draw->AddRect(ImVec2(pos.x - 2.0f, pos.y - 2.0f), ImVec2(max.x + 2.0f, max.y + 2.0f),
-        IM_COL32(0, 229, 255, 10), r + 2.0f, 0, 2.5f);
+        IM_COL32(16, 163, 127, 10), r + 2.0f, 0, 2.5f);
 
     // 四角 HUD 角度装饰线 (8 条短斜线)
     const float cl = 18.0f;  // 角线长度
     const float co = 6.0f;   // 角线距边偏移
-    const ImU32 cornerCol = IM_COL32(0, 229, 255, 90);
+    const ImU32 cornerCol = IM_COL32(16, 163, 127, 90);
     const float cs = 1.5f;   // 线宽
     // 左上角
     draw->AddLine(ImVec2(pos.x + co, pos.y + r), ImVec2(pos.x + co, pos.y + co + cl), cornerCol, cs);
@@ -520,10 +520,10 @@ static void DrawSidebarTitle()
     draw->AddRectFilled(
         ImVec2(titleX - 4.0f, titleY - 2.0f),
         ImVec2(titleX + titleDim.x + 4.0f, titleY + titleDim.y + 2.0f),
-        IM_COL32(0, 229, 255, 15), 3.0f);
+        IM_COL32(16, 163, 127, 15), 3.0f);
 
     // 标题文字
-    draw->AddText(ImVec2(titleX, titleY), IM_COL32(0, 229, 255, 255), title);
+    draw->AddText(ImVec2(titleX, titleY), IM_COL32(16, 163, 127, 255), title);
 
     // 版本副标题
     const std::string version = BuildIdentity::displayLabel();
@@ -537,7 +537,7 @@ static void DrawSidebarTitle()
     draw->AddLine(
         ImVec2(cursor.x + 6.0f, sepY),
         ImVec2(cursor.x + availX - 6.0f, sepY),
-        IM_COL32(0, 229, 255, 50), 1.0f);
+        IM_COL32(16, 163, 127, 50), 1.0f);
 
     // 占位空间
     ImGui::Dummy(ImVec2(availX, titleDim.y + 18.0f));
@@ -699,9 +699,9 @@ static bool DrawSidebarTabButton(const OverlayTabItem& tab, bool selected)
     // 背景
     ImU32 rowBg = IM_COL32(0, 0, 0, 0);
     if (selected)
-        rowBg = IM_COL32(0, 229, 255, 28);   // 青色半透明
+        rowBg = IM_COL32(16, 163, 127, 28);   // 主题绿色半透明
     else if (hovered)
-        rowBg = IM_COL32(124, 77, 255, 22);  // 紫色半透明
+        rowBg = IM_COL32(128, 130, 132, 22);  // 灰色半透明
 
     if (selected || hovered)
         draw->AddRectFilled(pos, max, rowBg, 4.0f);
@@ -713,17 +713,17 @@ static bool DrawSidebarTabButton(const OverlayTabItem& tab, bool selected)
         const float mx0 = pos.x + 3.0f, mx1 = pos.x + 5.0f;
         const float my0 = pos.y + 6.0f, my1 = max.y - 6.0f;
         draw->AddRectFilled(ImVec2(mx0 - 1.0f, my0), ImVec2(mx1 + 1.0f, my1),
-            IM_COL32(0, 229, 255, 50), 2.0f);
+            IM_COL32(16, 163, 127, 50), 2.0f);
         draw->AddRectFilled(ImVec2(mx0, my0), ImVec2(mx1, my1),
-            IM_COL32(0, 229, 255, 220), 2.0f);
+            IM_COL32(16, 163, 127, 220), 2.0f);
         // 弱边框
-        draw->AddRect(pos, max, IM_COL32(0, 229, 255, 15), 4.0f, 0, 1.0f);
+        draw->AddRect(pos, max, IM_COL32(16, 163, 127, 15), 4.0f, 0, 1.0f);
     }
 
     // 文字
     const float textY = pos.y + (size.y - ImGui::GetTextLineHeight()) * 0.5f;
     const ImU32 textCol = selected
-        ? IM_COL32(0, 229, 255, 255)
+        ? IM_COL32(16, 163, 127, 255)
         : (hovered ? IM_COL32(220, 225, 235, 255) : IM_COL32(160, 170, 185, 230));
 
     // 图标
@@ -1512,7 +1512,7 @@ void SetupImGui()
     ImGui_ImplWin32_Init(g_hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
-    // 应用 Neon Void 科幻主题，保存基础样式用于缩放
+    // 应用 Codex 风格中性深色主题，保存基础样式用于缩放
     ApplyTheme_NeonVoid();
     g_baseStyle = ImGui::GetStyle();
     g_baseStyleReady = true;
@@ -1718,7 +1718,7 @@ static HRESULT RenderOverlayFrame(bool allowAutoResize, bool allowConfigSave)
                 // 新分组开始 → 绘制分组标题
                 if (lastGroup)
                     ImGui::Dummy(ImVec2(0.0f, 5.0f));
-                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(160, 140, 200, 230));
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(166, 166, 166, 230));
                 ImGui::TextUnformatted(group);
                 ImGui::PopStyleColor();
             }
