@@ -555,7 +555,7 @@ bool DirectMLDetector::tryInitializeModel(
         }
 
         WriteConsoleLine(ConsoleTone::Success,
-            "[DML] 已使用 " + providerLabel + " 提供程序初始化模型：" + model_path);
+            std::string("[DML] 已使用 ") + providerLabel + " 提供程序初始化模型：" + model_path);
 
         if (useDirectML && config.verbose)
             std::cout << "[DirectML] Using adapter: " << GetDMLDeviceName(config.dml_device_id) << std::endl;
