@@ -82,6 +82,10 @@ try {
         'Recovery advice analyzer must count formal exit frames.'
     Assert-Near 0.0 $adviceOverall.ViolationCount 0.001 `
         'Valid advisory-only rows must preserve all safety invariants.'
+    Assert-Near 100.0 $adviceOverall.AdvisoryObservedPathExitPercent 0.001 `
+        'Synthetic active events must expose an observed-path advisory exit.'
+    Assert-Near 1.0 $adviceOverall.ObservedPathFramesEarlierP50 0.001 `
+        'Observed-path advisory exit must precede the formal exit by one frame.'
     if ($adviceOverall.Conclusion -ne 'DIAGNOSTIC_ONLY_HOLD_SHADOW') {
         throw "Unexpected recovery advice conclusion: $($adviceOverall.Conclusion)"
     }

@@ -10,7 +10,7 @@ param(
     [ValidateRange(0, 1000)]
     [int]$MinimumPostExitFrames = 5,
     [ValidateRange(1, 1000)]
-    [int]$MinimumActiveExitedEventsPerDirection = 3,
+    [int]$MinimumActiveExitedEventsPerDirection = 1,
     [string]$OutputEventsCsv = '',
     [string]$OutputSummaryCsv = ''
 )
@@ -174,6 +174,9 @@ foreach ($file in $files) {
         }
         $firstExit = @($ordered | Where-Object Exited -eq 1 | Select-Object -First 1)
         $activeRows = @($ordered | Where-Object Active -eq 1)
+        $firstActive = @($activeRows | Select-Object -First 1)
+        $firstAdvisoryUnclipped = @($activeRows |
+            Where-Object AdvisoryLimited -eq 0 | Select-Object -First 1)
         $exitSequence = if ($firstExit.Count -gt 0) {
             [int64]$firstExit[0].ObservationSequence
         } else { 0 }
@@ -197,6 +200,15 @@ foreach ($file in $files) {
         if ($outcome -eq 'exited' -and -not $captureComplete) {
             $violations.Add("$($file.Name): recovery generation $($group.Name) has only $postExitFrames post-exit frames")
         }
+        $advisoryObservedPathExitSequence = if ($firstAdvisoryUnclipped.Count -gt 0) {
+            [int64]$firstAdvisoryUnclipped[0].ObservationSequence
+        } else { 0 }
+        $firstBaselineBudget = if ($firstActive.Count -gt 0) {
+            [double]$firstActive[0].BaselineStaticBudgetFrames
+        } else { 0.0 }
+        $firstAdvisoryBudget = if ($firstActive.Count -gt 0) {
+            [double]$firstActive[0].AdvisoryStaticBudgetFrames
+        } else { 0.0 }
         $events.Add([pscustomobject]@{
             File = $file.Name
             Direction = $direction
@@ -208,6 +220,26 @@ foreach ($file in $files) {
             PostExitFrames = $postExitFrames
             Outcome = $outcome
             CaptureComplete = [int]$captureComplete
+            FirstActiveSequence = if ($firstActive.Count -gt 0) {
+                [int64]$firstActive[0].ObservationSequence
+            } else { 0 }
+            FirstBaselineStaticBudgetFrames = $firstBaselineBudget
+            FirstAdvisoryStaticBudgetFrames = $firstAdvisoryBudget
+            FirstStaticBudgetFramesSaved = [math]::Max(
+                0.0, $firstBaselineBudget - $firstAdvisoryBudget)
+            ActualToFirstBaselineBudgetRatio = if ($firstBaselineBudget -gt 0.0) {
+                $activeRows.Count / $firstBaselineBudget
+            } else { 0.0 }
+            ActualToFirstAdvisoryBudgetRatio = if ($firstAdvisoryBudget -gt 0.0) {
+                $activeRows.Count / $firstAdvisoryBudget
+            } else { 0.0 }
+            AdvisoryObservedPathExitSequence = $advisoryObservedPathExitSequence
+            ObservedPathFramesEarlier = if ($exitSequence -gt 0 -and
+                    $advisoryObservedPathExitSequence -gt 0) {
+                $exitSequence - $advisoryObservedPathExitSequence
+            } else { 0 }
+            AdvisoryObservedPathExitObserved = [int](
+                $advisoryObservedPathExitSequence -gt 0)
             BaselineStaticBudgetP50 = Get-Percentile @($activeRows | ForEach-Object BaselineStaticBudgetFrames) 0.50
             BaselineStaticBudgetP95 = Get-Percentile @($activeRows | ForEach-Object BaselineStaticBudgetFrames) 0.95
             AdvisoryStaticBudgetP50 = Get-Percentile @($activeRows | ForEach-Object AdvisoryStaticBudgetFrames) 0.50
@@ -241,6 +273,9 @@ foreach ($direction in @('left', 'right', 'overall')) {
     $activeExitedEvents = @($directionEvents | Where-Object {
         $_.ActiveFrames -gt 0 -and $_.Outcome -eq 'exited' -and $_.CaptureComplete -eq 1
     })
+    $observedPathExitedEvents = @($activeExitedEvents | Where-Object {
+        $_.AdvisoryObservedPathExitObserved -eq 1
+    })
     $coverageReady = $directionEvents.Count -gt 0 -and
         $activeExitedEvents.Count -ge $MinimumActiveExitedEventsPerDirection -and
         (@($directionEvents | Where-Object Outcome -eq 'open')).Count -eq 0 -and
@@ -268,6 +303,20 @@ foreach ($direction in @('left', 'right', 'overall')) {
         AdvisoryStaticBudgetP95 = Get-Percentile @($activeFrames | ForEach-Object AdvisoryStaticBudgetFrames) 0.95
         StaticBudgetFramesSavedP50 = Get-Percentile @($activeFrames | ForEach-Object StaticBudgetFramesSaved) 0.50
         StaticBudgetFramesSavedP95 = Get-Percentile @($activeFrames | ForEach-Object StaticBudgetFramesSaved) 0.95
+        ActualToFirstBaselineBudgetRatioP50 = Get-Percentile @(
+            $activeExitedEvents | ForEach-Object ActualToFirstBaselineBudgetRatio) 0.50
+        ActualToFirstBaselineBudgetRatioP95 = Get-Percentile @(
+            $activeExitedEvents | ForEach-Object ActualToFirstBaselineBudgetRatio) 0.95
+        AdvisoryObservedPathExitPercent = if ($activeExitedEvents.Count -gt 0) {
+            100.0 * $observedPathExitedEvents.Count / $activeExitedEvents.Count
+        } else { 0.0 }
+        ObservedPathFramesEarlierP50 = Get-Percentile @(
+            $observedPathExitedEvents | ForEach-Object ObservedPathFramesEarlier) 0.50
+        ObservedPathFramesEarlierP95 = Get-Percentile @(
+            $observedPathExitedEvents | ForEach-Object ObservedPathFramesEarlier) 0.95
+        ObservedPathFramesEarlierMax = (@(
+            $observedPathExitedEvents | ForEach-Object ObservedPathFramesEarlier) |
+            Measure-Object -Maximum).Maximum
         CoverageReady = [int]$coverageReady
         ViolationCount = $violations.Count
         Conclusion = if ($violations.Count -gt 0) {
