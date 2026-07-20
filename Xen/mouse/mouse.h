@@ -330,7 +330,7 @@ public:
     /** @brief 释放鼠标 */
     void releaseMouse();
     /** @brief 重置基础跟踪与控制状态 */
-    void resetTracking();
+    void resetTracking(bool targetLost = false);
     /** @brief 暂停瞄准输出但短时保留同一目标的滤波与预测状态 */
     void suspendAimingOutput();
     /** @brief 检查目标是否在准星范围内 */

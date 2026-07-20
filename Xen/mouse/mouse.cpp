@@ -2417,14 +2417,14 @@ void MouseThread::releaseMouse()
  * 目标丢失、身份切换或配置变化时统一清空队列、滤波、预测和控制器状态。
  * 预测器不保留滑行状态，因此重置后必须重新收到两个连续真实观测才会产生前瞻。
  */
-void MouseThread::resetTracking()
+void MouseThread::resetTracking(bool targetLost)
 {
     clearQueuedMoves();
     targetFilter.reset();
     targetPredictor.reset();
     aimController.reset();
     conditionalSpeedBudget.reset();
-    aimPipelineRuntime.reset();
+    aimPipelineRuntime.reset(targetLost);
     lastFilterResult = {};
     lastPredictionResult = {};
     controlIntervalTracker.reset();

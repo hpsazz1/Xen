@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 namespace
 {
@@ -56,11 +57,18 @@ void AimPipelineRuntime::configure(const std::string& requestedMode)
     effectiveMode_ = requestedMode_ == AimPipelineMode::Legacy
         ? AimPipelineMode::Legacy
         : AimPipelineMode::Shadow;
-    reset();
+    hasObservedTarget_ = false;
+    recoveryAdviceArmed_ = false;
+    reset(false);
 }
 
-void AimPipelineRuntime::reset()
+void AimPipelineRuntime::reset(bool targetLost)
 {
+    // 只有已经消费过真实观测后的目标丢失，才允许下一代进入恢复建议窗口。
+    // 连续空检测、启动和配置重载均不能伪造恢复事件。
+    recoveryAdviceArmed_ = targetLost && hasObservedTarget_;
+    recoveryAdviceGeneration_ = false;
+    recoveryAdviceExited_ = false;
     ++resetGeneration_;
     observationSequence_ = 0;
     frame_ = {};
@@ -130,6 +138,9 @@ AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observat
         lastControllerUpdateTime_ = {};
         trajectoryShaper_.reset();
         outputScheduler_.reset();
+        recoveryAdviceArmed_ = false;
+        recoveryAdviceGeneration_ = false;
+        recoveryAdviceExited_ = false;
         frame_.resetGeneration = resetGeneration_;
     }
 
@@ -148,6 +159,14 @@ AimPipelineFrameState AimPipelineRuntime::observe(const AimObservation& observat
     frame_.trajectoryOutput = {};
     frame_.trajectoryOutput.commandSuppressed = true;
     frame_.viewMotion = {};
+    frame_.recoverySpeedAdvice = {};
+    if (observationSequence_ == 1)
+    {
+        recoveryAdviceGeneration_ = recoveryAdviceArmed_;
+        recoveryAdviceArmed_ = false;
+    }
+    if (observation.valid)
+        hasObservedTarget_ = true;
     return frame_;
 }
 
@@ -249,6 +268,49 @@ void AimPipelineRuntime::setViewMotionDiagnostics(
     frame_.control.requestedCountsX = control.limitedCountsX;
     frame_.control.requestedCountsY = control.limitedCountsY;
     frame_.control.frameCountLimit = control.frameCountLimit;
+    auto& advice = frame_.recoverySpeedAdvice;
+    advice.eligible = recoveryAdviceGeneration_;
+    advice.exited = recoveryAdviceExited_;
+    advice.baselineMaxCountsPerSecond = controllerSettings_.maxCountsPerSecond;
+    if (advice.eligible && !recoveryAdviceExited_ && control.valid)
+    {
+        if (!control.speedLimited)
+        {
+            // 正式1440请求首次不再限速时立即退出，本帧及后续帧不得重新启用。
+            recoveryAdviceExited_ = true;
+            advice.exited = true;
+        }
+        else
+        {
+            constexpr double kAdvisoryMaxCountsPerSecond = 1800.0;
+            const double dt = std::clamp(controllerInput.dtSeconds, 1.0 / 500.0, 0.050);
+            const double unlimitedMagnitude = std::hypot(
+                control.unlimitedCountsX, control.unlimitedCountsY);
+            advice.active = true;
+            advice.advisoryMaxCountsPerSecond = kAdvisoryMaxCountsPerSecond;
+            advice.advisoryFrameCountLimit = kAdvisoryMaxCountsPerSecond * dt;
+            advice.advisoryRequestedCountsX = control.unlimitedCountsX;
+            advice.advisoryRequestedCountsY = control.unlimitedCountsY;
+            if (unlimitedMagnitude > advice.advisoryFrameCountLimit &&
+                unlimitedMagnitude > 0.0)
+            {
+                advice.advisorySpeedLimited = true;
+                const double scale = advice.advisoryFrameCountLimit / unlimitedMagnitude;
+                advice.advisoryRequestedCountsX *= scale;
+                advice.advisoryRequestedCountsY *= scale;
+            }
+            if (control.frameCountLimit > 0.0 && advice.advisoryFrameCountLimit > 0.0)
+            {
+                advice.baselineStaticBudgetFrames = std::ceil(
+                    unlimitedMagnitude / control.frameCountLimit);
+                advice.advisoryStaticBudgetFrames = std::ceil(
+                    unlimitedMagnitude / advice.advisoryFrameCountLimit);
+                advice.staticBudgetFramesSaved = std::max(
+                    0.0, advice.baselineStaticBudgetFrames -
+                        advice.advisoryStaticBudgetFrames);
+            }
+        }
+    }
     frame_.trajectoryRequest.requestedCountsX = control.limitedCountsX;
     frame_.trajectoryRequest.requestedCountsY = control.limitedCountsY;
     frame_.trajectoryRequest.valid = control.valid;

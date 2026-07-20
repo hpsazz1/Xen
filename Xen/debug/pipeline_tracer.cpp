@@ -187,6 +187,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "AimPipelineFeedbackX,AimPipelineFeedbackY,AimPipelineTrackingFeedforwardX,AimPipelineTrackingFeedforwardY,AimPipelineLeadReferenceX,AimPipelineLeadReferenceY,"
          << "AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY,"
          << "AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit,"
+         << "RecoverySpeedAdviceEligible,RecoverySpeedAdviceActive,RecoverySpeedAdviceExited,RecoverySpeedAdviceLimited,RecoverySpeedBaselineMaxCps,RecoverySpeedAdvisoryMaxCps,RecoverySpeedAdvisoryFrameCountLimit,RecoverySpeedAdvisoryRequestedCountsX,RecoverySpeedAdvisoryRequestedCountsY,RecoverySpeedBaselineStaticBudgetFrames,RecoverySpeedAdvisoryStaticBudgetFrames,RecoverySpeedStaticBudgetFramesSaved,"
          << "TrajectoryRequestValid,TrajectoryRequestSequence,TrajectoryRequestTimeNs,TrajectoryRequestDurationMs,TrajectoryShaperMode,TrajectoryOutputProduced,TrajectoryOutputRequestSequence,TrajectoryScheduledTickNs,TrajectoryOutputTickNs,"
          << "TrajectoryVelocityLimited,TrajectoryAccelerationLimited,TrajectoryJerkLimited,TrajectoryEmergencyReset,"
          << "TrajectoryPositionX,TrajectoryPositionY,TrajectoryTargetVelocityX,TrajectoryTargetVelocityY,TrajectoryVelocityX,TrajectoryVelocityY,TrajectoryAccelerationX,TrajectoryAccelerationY,TrajectoryJerkX,TrajectoryJerkY,"
@@ -304,6 +305,18 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << ap.control.unlimitedCountsX << ',' << ap.control.unlimitedCountsY << ','
              << ap.control.requestedCountsX << ',' << ap.control.requestedCountsY << ','
              << ap.control.frameCountLimit << ','
+             << (ap.recoverySpeedAdvice.eligible ? '1' : '0') << ','
+             << (ap.recoverySpeedAdvice.active ? '1' : '0') << ','
+             << (ap.recoverySpeedAdvice.exited ? '1' : '0') << ','
+             << (ap.recoverySpeedAdvice.advisorySpeedLimited ? '1' : '0') << ','
+             << ap.recoverySpeedAdvice.baselineMaxCountsPerSecond << ','
+             << ap.recoverySpeedAdvice.advisoryMaxCountsPerSecond << ','
+             << ap.recoverySpeedAdvice.advisoryFrameCountLimit << ','
+             << ap.recoverySpeedAdvice.advisoryRequestedCountsX << ','
+             << ap.recoverySpeedAdvice.advisoryRequestedCountsY << ','
+             << ap.recoverySpeedAdvice.baselineStaticBudgetFrames << ','
+             << ap.recoverySpeedAdvice.advisoryStaticBudgetFrames << ','
+             << ap.recoverySpeedAdvice.staticBudgetFramesSaved << ','
              << (ap.trajectoryRequest.valid ? '1' : '0') << ','
              << ap.trajectoryRequest.sequence << ','
              << steadyTimeNs(ap.trajectoryRequest.requestTime) << ','

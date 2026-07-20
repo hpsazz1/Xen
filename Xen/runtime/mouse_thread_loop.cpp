@@ -111,11 +111,11 @@ void mouseThreadFunction(MouseThread& mouseThread)
      * 重置激活目标——清除当前瞄准目标、跟踪ID和观测状态，
      * 同时重置基础目标滤波和控制状态
      */
-    auto resetActiveTarget = [&]() {
+    auto resetActiveTarget = [&](bool targetLost = true) {
         activeTarget.reset();
         activeTrackId = -1;
         activeTargetObserved = false;
-        mouseThread.resetTracking();
+        mouseThread.resetTracking(targetLost);
     };
 
     // ========== 主循环：持续处理检测结果和执行瞄准 ==========
@@ -241,7 +241,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 g_trackerDebugTracks.clear();
                 g_trackerLockedId = -1;
             }
-            resetActiveTarget();
+            resetActiveTarget(false);
         }
 
         // ---- 跟踪器启用状态变化处理：重置跟踪器和调试信息 ----
@@ -254,7 +254,7 @@ void mouseThreadFunction(MouseThread& mouseThread)
                 g_trackerDebugTracks.clear();
                 g_trackerLockedId = -1;
             }
-            resetActiveTarget();
+            resetActiveTarget(false);
         }
 
         // ========== 新检测帧处理 ==========

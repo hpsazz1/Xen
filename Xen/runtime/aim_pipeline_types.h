@@ -198,6 +198,24 @@ struct AimControlBreakdown
     double frameCountLimit = 0.0;
 };
 
+// 恢复速度建议只描述“若离线采用1800 counts/s”的同帧反事实。
+// 它不参与正式控制请求、轨迹整形或设备输出，静态预算也不等价于闭环退出预测。
+struct RecoverySpeedAdviceDiagnostics
+{
+    bool eligible = false;
+    bool active = false;
+    bool exited = false;
+    bool advisorySpeedLimited = false;
+    double baselineMaxCountsPerSecond = 0.0;
+    double advisoryMaxCountsPerSecond = 1800.0;
+    double advisoryFrameCountLimit = 0.0;
+    double advisoryRequestedCountsX = 0.0;
+    double advisoryRequestedCountsY = 0.0;
+    double baselineStaticBudgetFrames = 0.0;
+    double advisoryStaticBudgetFrames = 0.0;
+    double staticBudgetFramesSaved = 0.0;
+};
+
 struct TrajectoryRequest
 {
     bool valid = false;
@@ -293,6 +311,7 @@ struct AimPipelineFrameState
     LosEstimate constantAccelerationEstimate{};
     ManeuverEstimatorState maneuverEstimator{};
     AimControlBreakdown control{};
+    RecoverySpeedAdviceDiagnostics recoverySpeedAdvice{};
     TrajectoryRequest trajectoryRequest{};
     TrajectoryState trajectoryState{};
     TrajectoryOutput trajectoryOutput{};

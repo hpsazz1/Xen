@@ -60,6 +60,31 @@ try {
         throw 'Machine-readable real reacquisition outputs were not written.'
     }
 
+    $adviceRoot = Join-Path $temporaryRoot 'advice'
+    New-Item -ItemType Directory -Path $adviceRoot | Out-Null
+    $adviceHeader = 'BuildBackend,BuildRevision,ControllerRevision,AimPipelineEffectiveMode,AimPipelineShadowProcessed,AimPipelineControlValid,AimPipelineControlSpeedLimited,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY,AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit,RecoverySpeedAdviceEligible,RecoverySpeedAdviceActive,RecoverySpeedAdviceExited,RecoverySpeedAdviceLimited,RecoverySpeedBaselineMaxCps,RecoverySpeedAdvisoryMaxCps,RecoverySpeedAdvisoryFrameCountLimit,RecoverySpeedAdvisoryRequestedCountsX,RecoverySpeedAdvisoryRequestedCountsY,RecoverySpeedBaselineStaticBudgetFrames,RecoverySpeedAdvisoryStaticBudgetFrames,RecoverySpeedStaticBudgetFramesSaved'
+    foreach ($scenario in @('left', 'right')) {
+        $sign = if ($scenario -eq 'left') { -1 } else { 1 }
+        @(
+            $adviceHeader
+            "DML,abc1234,64,shadow,1,1,1,$($sign * 30),0,$($sign * 14.4),0,14.4,1,1,0,1,1440,1800,18,$($sign * 18),0,3,2,1"
+            "DML,abc1234,64,shadow,1,1,1,$($sign * 16),0,$($sign * 14.4),0,14.4,1,1,0,0,1440,1800,18,$($sign * 16),0,2,1,1"
+            "DML,abc1234,64,shadow,1,1,0,$($sign * 10),0,$($sign * 10),0,14.4,1,0,1,0,1440,1800,0,0,0,0,0,0"
+        ) | Set-Content -LiteralPath (Join-Path $adviceRoot "horizontal_$($scenario)1.csv") -Encoding UTF8
+    }
+    $adviceSummary = @(& (Join-Path $PSScriptRoot '..\tools\analyze_recovery_speed_advice.ps1') `
+        -DataRoot $adviceRoot -ExpectedBuildRevision 'abc1234')
+    Assert-Near 4.0 $adviceSummary.ActiveFrames 0.001 `
+        'Recovery advice analyzer must count active diagnostic frames.'
+    Assert-Near 2.0 $adviceSummary.ExitFrames 0.001 `
+        'Recovery advice analyzer must count formal exit frames.'
+    Assert-Near 0.0 $adviceSummary.ViolationCount 0.001 `
+        'Valid advisory-only rows must preserve all safety invariants.'
+    if ($adviceSummary.Conclusion -ne 'DIAGNOSTIC_ONLY_HOLD_SHADOW') {
+        throw "Unexpected recovery advice conclusion: $($adviceSummary.Conclusion)"
+    }
+    Remove-Item -LiteralPath $adviceRoot -Recurse -Force
+
     $mixedPath = Join-Path $temporaryRoot 'horizontal_left_mixed.csv'
     $mixedRows = @(Import-Csv -LiteralPath (Join-Path $temporaryRoot 'horizontal_left1.csv'))
     $mixedRows | ForEach-Object { $_.BuildRevision = 'other-build' }

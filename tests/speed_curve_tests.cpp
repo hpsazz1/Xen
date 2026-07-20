@@ -360,6 +360,88 @@ int main()
     expectTrue(switchedTargetFrame.observationSequence == 1,
                "target id switch restarts the shadow observation sequence");
 
+    AimPipelineRuntime recoveryAdvicePipeline;
+    recoveryAdvicePipeline.configure("shadow");
+    LosAimController::Settings recoveryAdviceSettings;
+    recoveryAdviceSettings.responseSeconds = 0.100;
+    recoveryAdviceSettings.maxCountsPerSecond = 1440.0;
+    recoveryAdvicePipeline.configureController(recoveryAdviceSettings);
+    AimObservation recoveryObservation = shadowObservation;
+    recoveryObservation.timing.observationTime = timingBase + std::chrono::milliseconds(100);
+    recoveryObservation.timing.controlTime = timingBase + std::chrono::milliseconds(110);
+    ViewMotionShadowDiagnostics recoveryDiagnostics = shadowDiagnostics;
+    recoveryDiagnostics.stabilizedLosYawDegrees = 20.0;
+    recoveryDiagnostics.stabilizedLosPitchDownDegrees = 0.0;
+    recoveryAdvicePipeline.observe(recoveryObservation);
+    recoveryAdvicePipeline.setViewMotionDiagnostics(recoveryDiagnostics);
+    expectTrue(!recoveryAdvicePipeline.snapshot().recoverySpeedAdvice.eligible,
+               "initial continuous tracking never enables recovery speed advice");
+
+    recoveryAdvicePipeline.reset(true);
+    recoveryObservation.timing.observationTime += std::chrono::milliseconds(200);
+    recoveryObservation.timing.controlTime += std::chrono::milliseconds(200);
+    recoveryAdvicePipeline.observe(recoveryObservation);
+    recoveryAdvicePipeline.setViewMotionDiagnostics(recoveryDiagnostics);
+    const AimPipelineFrameState recoveryAdviceFrame = recoveryAdvicePipeline.snapshot();
+    const double baselineRequestMagnitude = std::hypot(
+        recoveryAdviceFrame.control.requestedCountsX,
+        recoveryAdviceFrame.control.requestedCountsY);
+    const double advisoryRequestMagnitude = std::hypot(
+        recoveryAdviceFrame.recoverySpeedAdvice.advisoryRequestedCountsX,
+        recoveryAdviceFrame.recoverySpeedAdvice.advisoryRequestedCountsY);
+    expectTrue(recoveryAdviceFrame.recoverySpeedAdvice.eligible &&
+                   recoveryAdviceFrame.recoverySpeedAdvice.active &&
+                   !recoveryAdviceFrame.recoverySpeedAdvice.exited,
+               "target-loss recovery enables the advisory only while baseline is limited");
+    expectNear(recoveryAdviceFrame.recoverySpeedAdvice.baselineMaxCountsPerSecond,
+               1440.0, 0.0,
+               "recovery advice records the frozen formal speed identity");
+    expectNear(recoveryAdviceFrame.recoverySpeedAdvice.advisoryMaxCountsPerSecond,
+               1800.0, 0.0,
+               "recovery advice uses the fixed diagnostic-only candidate speed");
+    expectNear(baselineRequestMagnitude,
+               recoveryAdviceFrame.control.frameCountLimit, 1e-9,
+               "formal recovery request remains clipped by the 1440 limit");
+    expectNear(advisoryRequestMagnitude,
+               recoveryAdviceFrame.recoverySpeedAdvice.advisoryFrameCountLimit, 1e-9,
+               "advisory vector is independently clipped by the 1800 limit");
+    expectNear(recoveryAdviceFrame.trajectoryRequest.requestedCountsX,
+               recoveryAdviceFrame.control.requestedCountsX, 0.0,
+               "trajectory input remains exactly equal to the formal request");
+    expectTrue(recoveryAdviceFrame.commandSuppressed &&
+                   recoveryAdviceFrame.trajectoryOutput.commandSuppressed,
+               "recovery advice cannot release either shadow command suppression layer");
+
+    bool recoveryAdviceExited = false;
+    recoveryDiagnostics.stabilizedLosYawDegrees = 0.0;
+    for (int sample = 0; sample < 80 && !recoveryAdviceExited; ++sample)
+    {
+        recoveryObservation.timing.observationTime += std::chrono::milliseconds(10);
+        recoveryObservation.timing.controlTime += std::chrono::milliseconds(10);
+        recoveryAdvicePipeline.observe(recoveryObservation);
+        recoveryAdvicePipeline.setViewMotionDiagnostics(recoveryDiagnostics);
+        recoveryAdviceExited = recoveryAdvicePipeline.snapshot().recoverySpeedAdvice.exited;
+    }
+    expectTrue(recoveryAdviceExited &&
+                   !recoveryAdvicePipeline.snapshot().recoverySpeedAdvice.active,
+               "first formal non-limited frame exits and locks the advisory generation");
+    recoveryObservation.timing.observationTime += std::chrono::milliseconds(10);
+    recoveryObservation.timing.controlTime += std::chrono::milliseconds(10);
+    recoveryDiagnostics.stabilizedLosYawDegrees = 20.0;
+    recoveryAdvicePipeline.observe(recoveryObservation);
+    recoveryAdvicePipeline.setViewMotionDiagnostics(recoveryDiagnostics);
+    expectTrue(recoveryAdvicePipeline.snapshot().recoverySpeedAdvice.exited &&
+                   !recoveryAdvicePipeline.snapshot().recoverySpeedAdvice.active,
+               "an exited recovery generation cannot reactivate on later saturation");
+
+    recoveryAdvicePipeline.reset(false);
+    recoveryObservation.timing.observationTime += std::chrono::milliseconds(200);
+    recoveryObservation.timing.controlTime += std::chrono::milliseconds(200);
+    recoveryAdvicePipeline.observe(recoveryObservation);
+    recoveryAdvicePipeline.setViewMotionDiagnostics(recoveryDiagnostics);
+    expectTrue(!recoveryAdvicePipeline.snapshot().recoverySpeedAdvice.eligible,
+               "configuration or identity reset cannot masquerade as target-loss recovery");
+
     newPipeline.configure("active");
     const AimPipelineFrameState deferredActiveFrame = newPipeline.observe(shadowObservation);
     expectTrue(deferredActiveFrame.requestedMode == AimPipelineMode::Active &&
@@ -1620,6 +1702,9 @@ int main()
         traceHeader.find("AimPipelineLeadCountsX,AimPipelineLeadCountsY,AimPipelineIntegralCountsX,AimPipelineIntegralCountsY,AimPipelineUnlimitedCountsX,AimPipelineUnlimitedCountsY") != std::string::npos &&
         traceHeader.find("AimPipelineRequestedCountsX,AimPipelineRequestedCountsY,AimPipelineFrameCountLimit") != std::string::npos,
         "basic pipeline records the complete P0-4A controller decomposition");
+    expectTrue(traceHeader.find(
+        "RecoverySpeedAdviceEligible,RecoverySpeedAdviceActive,RecoverySpeedAdviceExited,RecoverySpeedAdviceLimited,RecoverySpeedBaselineMaxCps,RecoverySpeedAdvisoryMaxCps,RecoverySpeedAdvisoryFrameCountLimit,RecoverySpeedAdvisoryRequestedCountsX,RecoverySpeedAdvisoryRequestedCountsY,RecoverySpeedBaselineStaticBudgetFrames,RecoverySpeedAdvisoryStaticBudgetFrames,RecoverySpeedStaticBudgetFramesSaved") != std::string::npos,
+        "pipeline records recovery speed advice as an independent diagnostic block");
     expectTrue(traceHeader.find(
         "TrajectoryRequestValid,TrajectoryRequestSequence,TrajectoryRequestTimeNs,TrajectoryRequestDurationMs,TrajectoryShaperMode,TrajectoryOutputProduced,TrajectoryOutputRequestSequence,TrajectoryScheduledTickNs,TrajectoryOutputTickNs") != std::string::npos &&
         traceHeader.find("TrajectoryPositionX,TrajectoryPositionY,TrajectoryTargetVelocityX,TrajectoryTargetVelocityY,TrajectoryVelocityX,TrajectoryVelocityY,TrajectoryAccelerationX,TrajectoryAccelerationY,TrajectoryJerkX,TrajectoryJerkY") != std::string::npos &&

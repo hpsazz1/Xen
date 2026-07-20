@@ -20,7 +20,8 @@ public:
     void configureEstimator(const ManeuverLosEstimator::Settings& settings);
     void configureTrajectory(const CommandTrajectoryShaper::Settings& shaperSettings,
                              const OutputScheduler::Settings& schedulerSettings);
-    void reset();
+    /** @brief 清空影子状态；仅真实目标丢失可武装下一代恢复速度建议。 */
+    void reset(bool targetLost = false);
     /** @brief 正式输出暂停；shadow保留估计状态，legacy维持原空状态重置语义。 */
     void suspendOutput();
     AimPipelineFrameState observe(const AimObservation& observation);
@@ -44,6 +45,10 @@ private:
     FrameTiming::Clock::time_point lastControllerUpdateTime_{};
     CommandTrajectoryShaper trajectoryShaper_{};
     OutputScheduler outputScheduler_{};
+    bool hasObservedTarget_ = false;
+    bool recoveryAdviceArmed_ = false;
+    bool recoveryAdviceGeneration_ = false;
+    bool recoveryAdviceExited_ = false;
 };
 
 AimPipelineMode parseAimPipelineMode(const std::string& value);
