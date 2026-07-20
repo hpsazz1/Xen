@@ -89,4 +89,3 @@ RecoverySpeedTrialResult AnalyzeRecoverySpeedTrial(
     int64_t trialStartNs,
     const std::vector<PhysicalResponseSample>& samples,
     const std::vector<RecoverySpeedCommandRecord>& commands);
-

@@ -45,4 +45,3 @@ if (Test-Path -LiteralPath $summaryPath -PathType Leaf) {
 if ($executorExitCode -ne 0) {
     throw "Recovery speed device executor stopped with exit code $executorExitCode; preserved output: $output"
 }
-

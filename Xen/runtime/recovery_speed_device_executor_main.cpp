@@ -58,7 +58,6 @@ int64_t ns(Clock::time_point value)
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(value.time_since_epoch()).count();
 }
-
 void signalHandler(int)
 {
     stopRequested.store(true, std::memory_order_relaxed);
@@ -355,4 +354,3 @@ int main(int argc, char** argv)
     std::cout << "结果已保存:" << options.outputDirectory << '\n';
     return protocolPassed ? 0 : 11;
 }
-
