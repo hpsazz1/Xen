@@ -20,19 +20,21 @@ std::mutex g_consoleOutputMutex;
 
 constexpr const char* kConsoleThemeSequence =
     "\x1b[38;2;26;28;31m\x1b[48;2;255;255;255m\x1b[2J\x1b[H";
+constexpr const char* kConsoleThemeBase =
+    "\x1b[38;2;26;28;31m\x1b[48;2;255;255;255m";
 
 const char* ConsoleToneSequence(ConsoleTone tone)
 {
     switch (tone)
     {
-    case ConsoleTone::Accent: return "\x1b[38;2;51;156;255m";
-    case ConsoleTone::Success: return "\x1b[38;2;0;162;64m";
-    case ConsoleTone::Warning: return "\x1b[38;2;170;104;0m";
-    case ConsoleTone::Error: return "\x1b[38;2;186;38;35m";
-    case ConsoleTone::Muted: return "\x1b[38;2;96;101;109m";
-    case ConsoleTone::Normal: return "\x1b[38;2;26;28;31m";
+    case ConsoleTone::Accent: return "\x1b[38;2;51;156;255m\x1b[48;2;255;255;255m";
+    case ConsoleTone::Success: return "\x1b[38;2;0;162;64m\x1b[48;2;255;255;255m";
+    case ConsoleTone::Warning: return "\x1b[38;2;170;104;0m\x1b[48;2;255;255;255m";
+    case ConsoleTone::Error: return "\x1b[38;2;186;38;35m\x1b[48;2;255;255;255m";
+    case ConsoleTone::Muted: return "\x1b[38;2;96;101;109m\x1b[48;2;255;255;255m";
+    case ConsoleTone::Normal: return "\x1b[38;2;26;28;31m\x1b[48;2;255;255;255m";
     }
-    return "\x1b[38;2;26;28;31m";
+    return kConsoleThemeBase;
 }
 
 WORD ConsoleToneAttributes(ConsoleTone tone)
@@ -101,7 +103,7 @@ void WriteConsoleLine(ConsoleTone tone, const std::string& message)
 {
     std::lock_guard<std::mutex> lock(g_consoleOutputMutex);
     if (g_consoleVirtualTerminal)
-        std::cout << ConsoleToneSequence(tone) << message << "\x1b[0m" << std::endl;
+        std::cout << ConsoleToneSequence(tone) << message << kConsoleThemeBase << std::endl;
     else
     {
         HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
