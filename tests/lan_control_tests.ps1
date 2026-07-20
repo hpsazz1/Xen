@@ -14,6 +14,11 @@ foreach ($required in @(
     'config.saveConfig\(\)',
     'class_player',
     'class_head',
+    'id=\"target_faction\"',
+    'option value=\"police\"',
+    'option value=\"terrorist\"',
+    'option value=\"custom\"',
+    'applyClassState',
     'id=\"class_player\"',
     'id=\"class_head\"',
     'std::isfinite')) {
