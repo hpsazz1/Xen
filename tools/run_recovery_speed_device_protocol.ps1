@@ -19,7 +19,12 @@ if (-not (Test-Path -LiteralPath $planRoot -PathType Container)) { throw "Plan d
 $auditor = Join-Path $PSScriptRoot 'test_recovery_speed_device_plan.ps1'
 & $auditor -PlanDirectory $planRoot -RequirePass | Out-Null
 $manifestPath = Join-Path $planRoot 'recovery_speed_device_manifest.txt'
-$manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-StringData
+$manifest = @{}
+foreach ($line in Get-Content -LiteralPath $manifestPath -Encoding UTF8) {
+    $parts = $line -split '=', 2
+    if ($parts.Count -ne 2) { throw "Invalid manifest line: $line" }
+    $manifest[$parts[0]] = $parts[1]
+}
 if ($ValidateOnly) {
     & $executor --plan-dir $planRoot --validate-only
     if ($LASTEXITCODE -ne 0) { throw "Executor plan validation failed with exit code $LASTEXITCODE" }
