@@ -276,23 +276,22 @@ static inline ImVec4 RGBA(int r, int g, int b, int a = 255)
 //   文字（text / textDim）→ 近乎纯白 / 浅灰
 //   边框（stroke / strokeHi）→ 半透明灰色
 // 同时配置圆角半径、内边距、间距等布局参数。
-// === Neon Void 科幻主题 ===
-// 深空黑基底 + 霓虹青(#00e5ff)强调 + 电光紫(#7c4dff)辅色
-// 更锐利的圆角、更宽松的间距、高对比度文字
+// === Xen 控制台主题 ===
+// 采用低饱和深灰底色和青绿色强调色，突出参数可读性，避免装饰性光晕干扰调参。
 static void ApplyTheme_NeonVoid()
 {
     ImGuiStyle& style = ImGui::GetStyle();
     style.Alpha = 1.0f;
     style.DisabledAlpha = 0.40f;
 
-    style.WindowRounding = 6.0f;
-    style.ChildRounding = 6.0f;
-    style.PopupRounding = 4.0f;
-    style.FrameRounding = 4.0f;
-    style.TabRounding = 4.0f;
-    style.ScrollbarRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.ImageRounding = 4.0f;
+    style.WindowRounding = 3.0f;
+    style.ChildRounding = 3.0f;
+    style.PopupRounding = 3.0f;
+    style.FrameRounding = 3.0f;
+    style.TabRounding = 3.0f;
+    style.ScrollbarRounding = 3.0f;
+    style.GrabRounding = 3.0f;
+    style.ImageRounding = 3.0f;
 
     style.WindowBorderSize = 1.0f;
     style.ChildBorderSize = 1.0f;
@@ -300,9 +299,9 @@ static void ApplyTheme_NeonVoid()
     style.PopupBorderSize = 1.0f;
     style.TabBorderSize = 1.0f;
 
-    style.WindowPadding = ImVec2(18.0f, 14.0f);
-    style.FramePadding = ImVec2(10.0f, 7.0f);
-    style.ItemSpacing = ImVec2(10.0f, 10.0f);
+    style.WindowPadding = ImVec2(14.0f, 12.0f);
+    style.FramePadding = ImVec2(9.0f, 6.0f);
+    style.ItemSpacing = ImVec2(8.0f, 8.0f);
     style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
     style.CellPadding = ImVec2(8.0f, 6.0f);
     style.ScrollbarSize = 7.0f;
@@ -319,20 +318,20 @@ static void ApplyTheme_NeonVoid()
 
     ImVec4* c = style.Colors;
 
-    const ImVec4 voidBg      = RGBA(8,  12, 20, 255);
-    const ImVec4 surface     = RGBA(16, 20, 30, 250);
-    const ImVec4 surfaceAlt  = RGBA(20, 26, 38, 248);
-    const ImVec4 ctrlBg      = RGBA(22, 27, 40, 255);
-    const ImVec4 ctrlHov     = RGBA(28, 35, 53, 255);
-    const ImVec4 ctrlAct     = RGBA(36, 48, 74, 255);
-    const ImVec4 cyan        = RGBA(0,  229, 255, 245);
-    const ImVec4 purple      = RGBA(124, 77,  255, 245);
-    const ImVec4 green       = RGBA(0,  230, 118, 245);
+    const ImVec4 voidBg      = RGBA(18, 22, 27, 255);
+    const ImVec4 surface     = RGBA(26, 31, 37, 250);
+    const ImVec4 surfaceAlt  = RGBA(34, 41, 48, 248);
+    const ImVec4 ctrlBg      = RGBA(31, 38, 45, 255);
+    const ImVec4 ctrlHov     = RGBA(42, 52, 60, 255);
+    const ImVec4 ctrlAct     = RGBA(51, 66, 73, 255);
+    const ImVec4 cyan        = RGBA(79, 209, 177, 245);
+    const ImVec4 purple      = RGBA(111, 145, 145, 245);
+    const ImVec4 green       = RGBA(79, 209, 177, 245);
     const ImVec4 amber       = RGBA(255, 171, 0,   245);
-    const ImVec4 txtMain     = RGBA(228, 231, 236, 255);
-    const ImVec4 txtSub      = RGBA(136, 146, 164, 255);
-    const ImVec4 borderDim   = RGBA(30,  38,  54,  155);
-    const ImVec4 borderGlow  = RGBA(0,   229, 255, 68);
+    const ImVec4 txtMain     = RGBA(232, 236, 238, 255);
+    const ImVec4 txtSub      = RGBA(157, 169, 174, 255);
+    const ImVec4 borderDim   = RGBA(72,  84,  90,  155);
+    const ImVec4 borderGlow  = RGBA(79, 209, 177, 68);
 
     c[ImGuiCol_Text] = txtMain;
     c[ImGuiCol_TextDisabled] = txtSub;
@@ -437,28 +436,22 @@ struct OverlayTabItem
 // 叠加层选项卡定义表
 // 按功能分组排列：感知 → 瞄准 → 控制 → 显示 → 系统
 static const OverlayTabItem kOverlayTabs[] = {
-    { "采集源",        "Perception",  "DXGI/WinRT/UDP/NDI/虚拟摄像头等画面采集源。",  draw_capture_settings,        SidebarIconKind::Camera },
-    { "检测参数",      "Perception",  "置信度/NMS 阈值、最大检测数。",                  draw_ai,                      SidebarIconKind::Chip },
-    { "深度感知",      "Perception",  "深度推理、遮罩过滤、深度叠加层调试。",            draw_depth,                   SidebarIconKind::Layers },
+    { "画面采集",      "感知",  "选择 DXGI、WinRT、UDP、NDI 或虚拟摄像头输入。",       draw_capture_settings, SidebarIconKind::Camera },
+    { "目标检测",      "感知",  "调整置信度、NMS 阈值和每帧最大目标数。",               draw_ai,               SidebarIconKind::Chip },
+    { "深度过滤",      "感知",  "配置深度推理、遮罩过滤和调试预览。",                   draw_depth,            SidebarIconKind::Layers },
 
-    { "目标偏移",      "Aim",         "身体/头部 Y 偏移量、自动瞄准开关。",             draw_target,                  SidebarIconKind::Crosshair },
-    { "追踪状态",      "Aim",         "活跃追踪列表、ID/类别/丢失帧统计。",             draw_tracker,                 SidebarIconKind::Crosshair },
-    { "移动参数",      "Aim",         "基础滤波、响应时间、设备最大计数速度。",          draw_mouse_movement,          SidebarIconKind::Move },
-    { "预测参数",      "Aim",         "连续观测预测开关、额外前瞻和稳健速度窗口。",      draw_mouse_prediction,        SidebarIconKind::Curve },
-    { "射击辅助",      "Aim",         "自动射击、压枪、急停、解锁Y轴。",                draw_mouse_assist,            SidebarIconKind::Spark },
-    { "灵敏度配置",    "Aim",         "游戏灵敏度、偏航/俯仰、FOV缩放预设。",           draw_mouse_profiles,          SidebarIconKind::User },
+    { "瞄准偏移",      "瞄准",  "调整身体/头部偏移并启用自动瞄准。",                    draw_target,           SidebarIconKind::Crosshair },
+    { "追踪器",        "瞄准",  "查看追踪状态，并配置目标列表显示。",                    draw_tracker,          SidebarIconKind::Crosshair },
+    { "移动响应",      "瞄准",  "配置响应时间、滤波和设备移动速度上限。",                draw_mouse_movement,   SidebarIconKind::Move },
+    { "目标预测",      "瞄准",  "配置连续观测预测、前瞻时间和速度窗口。",                draw_mouse_prediction, SidebarIconKind::Curve },
+    { "射击辅助",      "瞄准",  "配置自动射击、压枪、急停和 Y 轴解锁。",                draw_mouse_assist,     SidebarIconKind::Spark },
+    { "灵敏度",        "瞄准",  "配置游戏灵敏度、偏航/俯仰和 FOV 预设。",              draw_mouse_profiles,   SidebarIconKind::User },
 
-    { "设备连接",      "Control",     "鼠标后端选择及连接参数。",                       draw_mouse_input,             SidebarIconKind::Mouse },
-    { "按键绑定",      "Control",     "瞄准/射击/缩放等操作的按键映射。",              draw_buttons,                 SidebarIconKind::Keyboard },
-    { "面板外观",      "Control",     "透明度、UI缩放、录屏隐藏。",                     draw_overlay,                 SidebarIconKind::Sliders },
+    { "输入设备",      "控制",  "选择鼠标后端并填写连接参数。",                         draw_mouse_input,      SidebarIconKind::Mouse },
+    { "快捷键",        "控制",  "绑定瞄准、射击、缩放和配置操作。",                     draw_buttons,          SidebarIconKind::Keyboard },
 
-    { "游戏叠加",      "Display",     "游戏内覆盖层开关与绘制项。",                     draw_game_overlay_general,    SidebarIconKind::Monitor },
-    { "绘制样式",      "Display",     "方框与捕获框的颜色、透明度和粗细。",             draw_game_overlay_visuals,    SidebarIconKind::Palette },
-    { "目标标记",      "Display",     "图标路径/尺寸/锚点/类别筛选。",                 draw_game_overlay_icon,       SidebarIconKind::Image },
-
-    { "性能统计",      "System",      "预处理/推理/NMS 耗时图表与采集详情。",          draw_stats,                   SidebarIconKind::Bars },
-    { "流水线追踪",    "System",      "各处理阶段坐标记录与对比分析。",                  draw_pipeline_tracer,         SidebarIconKind::Bars },
-    { "开发工具",      "System",      "截图、数据收集、YOLO 自动标注。",               draw_debug,                   SidebarIconKind::Debug },
+    { "流水线追踪",    "系统",  "记录各处理阶段坐标，用于问题定位。",                   draw_pipeline_tracer,  SidebarIconKind::Bars },
+    { "开发工具",      "系统",  "配置截图、数据收集和 YOLO 自动标注。",                 draw_debug,            SidebarIconKind::Debug },
 };
 
 // 绘制主面板背景 — 深空底色 + 发光边框 + HUD 角标
@@ -552,9 +545,7 @@ static void DrawSidebarTitle()
 
 // 绘制侧边栏图标（使用 ImDrawList 矢量绘制）
 // 每个图标是 18×18 像素大小，用线条和形状组成简笔画风格
-// 不同类型的图标使用不同的颜色（按分组区分）：
-//   Vision → 蓝色, Aim → 橙色, Control → 青色, Visuals → 紫色, Monitor → 灰色
-// 选中状态下的图标使用高亮蓝色
+// 不同类型的图标使用不同颜色辅助扫描，选中状态统一使用主题强调色。
 // draw: ImDrawList 指针
 // icon: 图标种类
 // group: 所属分组（用于确定默认颜色）
@@ -563,12 +554,11 @@ static void DrawSidebarTitle()
 static void DrawSidebarIcon(ImDrawList* draw, SidebarIconKind icon, const char* group, const ImVec2& pos, bool selected)
 {
     // 颜色选择：选中时使用高亮青，否则按分组分配颜色
-    const ImU32 color = selected ? IM_COL32(0, 229, 255, 255) :
-        (std::strcmp(group, "Perception") == 0 ? IM_COL32(0, 210, 240, 230) :
-         std::strcmp(group, "Aim") == 0 ? IM_COL32(255, 180, 60, 230) :
-         std::strcmp(group, "Control") == 0 ? IM_COL32(0, 220, 180, 230) :
-         std::strcmp(group, "Display") == 0 ? IM_COL32(170, 130, 255, 230) :
-         IM_COL32(180, 190, 210, 230));
+    const ImU32 color = selected ? IM_COL32(79, 209, 177, 255) :
+        (std::strcmp(group, "感知") == 0 ? IM_COL32(103, 180, 210, 230) :
+         std::strcmp(group, "瞄准") == 0 ? IM_COL32(238, 184, 92, 230) :
+         std::strcmp(group, "控制") == 0 ? IM_COL32(79, 209, 177, 230) :
+         IM_COL32(180, 190, 196, 230));
 
     const float x = pos.x;
     const float y = pos.y;
@@ -694,6 +684,14 @@ static bool DrawSidebarTabButton(const OverlayTabItem& tab, bool selected)
     const std::string id = std::string("##nav_") + tab.label;
     const bool pressed = ImGui::InvisibleButton(id.c_str(), size);
     const bool hovered = ImGui::IsItemHovered();
+
+    // 所有导航项统一显示用途说明，避免菜单提示不一致；延迟短于默认值以便快速浏览。
+    if (hovered && tab.description && *tab.description)
+    {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(tab.description);
+        ImGui::EndTooltip();
+    }
 
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImVec2 max(pos.x + size.x, pos.y + size.y);
@@ -1721,14 +1719,7 @@ static HRESULT RenderOverlayFrame(bool allowAutoResize, bool allowConfigSave)
                 if (lastGroup)
                     ImGui::Dummy(ImVec2(0.0f, 5.0f));
                 ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(160, 140, 200, 230));
-                // 将英文组名映射为中文显示
-                const char* groupLabel = group;
-                if (std::strcmp(group, "Perception") == 0) groupLabel = "感知";
-                else if (std::strcmp(group, "Aim") == 0) groupLabel = "瞄准";
-                else if (std::strcmp(group, "Control") == 0) groupLabel = "控制";
-                else if (std::strcmp(group, "Display") == 0) groupLabel = "显示";
-                else if (std::strcmp(group, "System") == 0) groupLabel = "系统";
-                ImGui::TextUnformatted(groupLabel);
+                ImGui::TextUnformatted(group);
                 ImGui::PopStyleColor();
             }
             // 绘制选项卡按钮，点击时切换 g_activeOverlayTab

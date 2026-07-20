@@ -62,4 +62,21 @@ if ($overlayUi -notmatch '\{[^\r\n]*draw_mouse_prediction[^\r\n]*SidebarIconKind
     throw 'Prediction settings page is not registered in the sidebar.'
 }
 
+# The reduced navigation keeps compatibility code but must not register optional pages.
+foreach ($removedDrawFunction in @('draw_overlay', 'draw_game_overlay_general', 'draw_game_overlay_visuals', 'draw_game_overlay_icon', 'draw_stats')) {
+    if ($overlayUi -match ('\{[^\r\n]*' + [regex]::Escape($removedDrawFunction) + '[^\r\n]*SidebarIconKind::')) {
+        throw "Removed sidebar page is registered again: $removedDrawFunction"
+    }
+}
+foreach ($requiredDrawFunction in @('draw_capture_settings', 'draw_ai', 'draw_target', 'draw_mouse_movement', 'draw_mouse_prediction', 'draw_mouse_input', 'draw_buttons')) {
+    if ($overlayUi -notmatch ('\{[^\r\n]*' + [regex]::Escape($requiredDrawFunction) + '[^\r\n]*SidebarIconKind::')) {
+        throw "Core sidebar page is missing: $requiredDrawFunction"
+    }
+}
+if ($overlayUi -notmatch 'hovered\s*&&\s*tab\.description' -or
+    $overlayUi -notmatch 'ImGui::BeginTooltip\(\)' -or
+    $overlayUi -notmatch 'ImGui::TextUnformatted\(tab\.description\)') {
+    throw 'Sidebar descriptions are not wired to unified hover tooltips.'
+}
+
 Write-Output 'prediction ui visibility tests passed'
