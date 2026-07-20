@@ -610,29 +610,40 @@ static void draw_mouse_page(MouseSettingsPage page)
         static AssistSubPage assistTab = AssistSubPage::Shooting;
 
         ImGui::Spacing();
-        ImGui::Indent(4.0f);
-        // 子页签按钮行 —— 类似浏览器 tab
+        // 使用与 Codex Theme v1 一致的浅色分段控件：等宽、固定高度、蓝色选中态。
         {
-            bool isShooting = (assistTab == AssistSubPage::Shooting);
-            bool isTactical = (assistTab == AssistSubPage::Tactical);
+            const bool isShooting = assistTab == AssistSubPage::Shooting;
+            const float gap = ImGui::GetStyle().ItemInnerSpacing.x;
+            const float tabWidth = std::max(88.0f, (ImGui::GetContentRegionAvail().x - gap) * 0.5f);
+            const ImVec2 tabSize(tabWidth, 34.0f);
+            const ImVec4 accent(51.0f / 255.0f, 156.0f / 255.0f, 255.0f / 255.0f, 1.0f);
+            const ImVec4 accentHover(31.0f / 255.0f, 132.0f / 255.0f, 230.0f / 255.0f, 1.0f);
+            const ImVec4 control(243.0f / 255.0f, 244.0f / 255.0f, 245.0f / 255.0f, 1.0f);
+            const ImVec4 controlHover(233.0f / 255.0f, 235.0f / 255.0f, 237.0f / 255.0f, 1.0f);
+            const ImVec4 ink(26.0f / 255.0f, 28.0f / 255.0f, 31.0f / 255.0f, 1.0f);
 
-            ImGui::PushStyleColor(ImGuiCol_Button,        isShooting ? ImVec4(0.22f, 0.30f, 0.22f, 1.0f) : ImVec4(0.15f, 0.15f, 0.15f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.28f, 0.36f, 0.28f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.18f, 0.24f, 0.18f, 1.0f));
-            if (ImGui::SmallButton("射击"))
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 7.0f));
+
+            ImGui::PushStyleColor(ImGuiCol_Button, isShooting ? accent : control);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, isShooting ? accentHover : controlHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, isShooting ? accentHover : control);
+            ImGui::PushStyleColor(ImGuiCol_Text, isShooting ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f) : ink);
+            if (ImGui::Button("射击", tabSize))
                 assistTab = AssistSubPage::Shooting;
-            ImGui::PopStyleColor(3);
+            ImGui::PopStyleColor(4);
 
-            ImGui::SameLine(0.0f, 2.0f);
+            ImGui::SameLine(0.0f, gap);
 
-            ImGui::PushStyleColor(ImGuiCol_Button,        isTactical ? ImVec4(0.22f, 0.30f, 0.22f, 1.0f) : ImVec4(0.15f, 0.15f, 0.15f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.28f, 0.36f, 0.28f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.18f, 0.24f, 0.18f, 1.0f));
-            if (ImGui::SmallButton("战术"))
+            ImGui::PushStyleColor(ImGuiCol_Button, !isShooting ? accent : control);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, !isShooting ? accentHover : controlHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, !isShooting ? accentHover : control);
+            ImGui::PushStyleColor(ImGuiCol_Text, !isShooting ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f) : ink);
+            if (ImGui::Button("战术", tabSize))
                 assistTab = AssistSubPage::Tactical;
-            ImGui::PopStyleColor(3);
+            ImGui::PopStyleColor(4);
+            ImGui::PopStyleVar(2);
         }
-        ImGui::Unindent(4.0f);
         ImGui::Spacing();
 
         // ── 射击子页：Auto Shoot + 开火拟人化 ──

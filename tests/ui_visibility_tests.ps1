@@ -91,5 +91,9 @@ foreach ($fontSource in @($mouseUi, $targetUi, $debugUi, $exportUi)) {
         throw 'Low-contrast yellow text remains in a visible UI source file.'
     }
 }
+$assistTabButtons = [regex]::Matches($mouseUi, 'ImGui::Button\("[^"\r\n]+",\s*tabSize\)')
+if ($assistTabButtons.Count -ne 2 -or $mouseUi -match 'ImGui::SmallButton') {
+    throw 'Assist sub-tabs are not using the shared Codex light segmented control.'
+}
 
 Write-Output 'prediction ui visibility tests passed'
