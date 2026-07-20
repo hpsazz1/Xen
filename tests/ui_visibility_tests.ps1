@@ -124,6 +124,10 @@ if ($startupHelpers -notmatch 'ENABLE_VIRTUAL_TERMINAL_PROCESSING' -or
     $startupHelpers -notmatch '\\x1b\[38;2;26;28;31m') {
     throw 'Truecolor ANSI console theme sequence is missing.'
 }
+if ($startupHelpers -notmatch 'ConsoleToneAttributes' -or
+    $startupHelpers -notmatch 'SetConsoleTextAttribute\(output, ConsoleToneAttributes\(tone\)\)') {
+    throw 'Win32 console tone fallback is missing.'
+}
 if ($mainSource -notmatch 'SetConsoleOutputCP\(CP_UTF8\);\s*//[^\r\n]*\s*ApplyConsoleTheme\(\);') {
     throw 'Console theme is not applied after UTF-8 console initialization.'
 }

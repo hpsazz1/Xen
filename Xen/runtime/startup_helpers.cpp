@@ -34,6 +34,20 @@ const char* ConsoleToneSequence(ConsoleTone tone)
     }
     return "\x1b[38;2;26;28;31m";
 }
+
+WORD ConsoleToneAttributes(ConsoleTone tone)
+{
+    switch (tone)
+    {
+    case ConsoleTone::Accent: return FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+    case ConsoleTone::Success: return FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+    case ConsoleTone::Warning: return FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+    case ConsoleTone::Error: return FOREGROUND_RED | FOREGROUND_INTENSITY;
+    case ConsoleTone::Muted: return FOREGROUND_INTENSITY;
+    case ConsoleTone::Normal: return FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+    }
+    return FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+}
 }
 
 void ApplyConsoleTheme()
@@ -89,7 +103,17 @@ void WriteConsoleLine(ConsoleTone tone, const std::string& message)
     if (g_consoleVirtualTerminal)
         std::cout << ConsoleToneSequence(tone) << message << "\x1b[0m" << std::endl;
     else
+    {
+        HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        const bool hasConsole = output != nullptr && output != INVALID_HANDLE_VALUE &&
+            GetConsoleScreenBufferInfo(output, &info);
+        if (hasConsole)
+            SetConsoleTextAttribute(output, ConsoleToneAttributes(tone));
         std::cout << message << std::endl;
+        if (hasConsole)
+            SetConsoleTextAttribute(output, info.wAttributes);
+    }
 }
 
 int FatalExit(const std::string& message)
