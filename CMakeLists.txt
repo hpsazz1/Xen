@@ -432,6 +432,10 @@ if(BUILD_TESTING)
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/recovery_speed_device_plan_tests.ps1" -RepoRoot "${CMAKE_SOURCE_DIR}"
     )
     add_test(
+        NAME xen.analysis.recovery_speed_device_protocol
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/recovery_speed_device_protocol_analysis_tests.ps1" -RepoRoot "${CMAKE_SOURCE_DIR}"
+    )
+    add_test(
         NAME xen.ui.prediction_visibility
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/ui_visibility_tests.ps1"
     )
@@ -451,13 +455,14 @@ if(BUILD_TESTING)
         "${SRC_DIR}/runtime/shadow_response_replay.cpp"
         "${SRC_DIR}/runtime/build_identity.cpp"
         "${SRC_DIR}/runtime/physical_response_probe.cpp"
+        "${SRC_DIR}/runtime/recovery_speed_device_protocol.cpp"
     )
     set_target_properties(xen_algorithm_tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
     target_include_directories(xen_algorithm_tests PRIVATE
         "${SRC_DIR}"
         "${AIMBOT_OPENCV_INCLUDE_DIR}")
-    target_link_libraries(xen_algorithm_tests PRIVATE "${AIMBOT_OPENCV_LIBRARY}")
+    target_link_libraries(xen_algorithm_tests PRIVATE "${AIMBOT_OPENCV_LIBRARY}" bcrypt)
     add_custom_command(TARGET xen_algorithm_tests POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${AIMBOT_OPENCV_DLL}"
@@ -555,6 +560,46 @@ if(BUILD_TESTING)
         aimbot_copy_if_exists(xen_physical_response_probe "${AIMBOT_GHUB_MOUSE_DLL}")
         aimbot_copy_if_exists(xen_physical_response_probe "${AIMBOT_RZCTL_DLL}")
         aimbot_copy_required_runtime(xen_physical_response_probe
+            "${AIMBOT_NDI_ROOT}/Bin/x64/Processing.NDI.Lib.x64.dll" "NDI runtime")
+
+        add_executable(xen_recovery_speed_device_executor
+            "${SRC_DIR}/runtime/recovery_speed_device_executor_main.cpp"
+            "${SRC_DIR}/runtime/recovery_speed_device_protocol.cpp"
+            "${SRC_DIR}/runtime/physical_response_probe.cpp"
+            "${SRC_DIR}/runtime/build_identity.cpp"
+            "${SRC_DIR}/capture/ndi_capture.cpp"
+            "${SRC_DIR}/capture/ndi_frame_geometry.cpp"
+            "${SRC_DIR}/config/config.cpp"
+            "${SRC_DIR}/modules/makcu/src/makcu.cpp"
+            "${SRC_DIR}/modules/makcu/src/serialport.cpp"
+            "${SRC_DIR}/mouse/ghub.cpp"
+            "${SRC_DIR}/mouse/hid.c"
+            "${SRC_DIR}/mouse/KmboxAConnection.cpp"
+            "${SRC_DIR}/mouse/kmboxA.cpp"
+            "${SRC_DIR}/mouse/kmboxNetConnection.cpp"
+            "${SRC_DIR}/mouse/kmbox_net/kmboxNet.cpp"
+            "${SRC_DIR}/mouse/Makcu.cpp"
+            "${SRC_DIR}/mouse/MouseInput.cpp"
+            "${SRC_DIR}/mouse/rzctl.cpp")
+        set_target_properties(xen_recovery_speed_device_executor PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools/$<CONFIG>")
+        target_include_directories(xen_recovery_speed_device_executor PRIVATE
+            "${SRC_DIR}" "${SRC_DIR}/capture" "${SRC_DIR}/config" "${SRC_DIR}/detector"
+            "${SRC_DIR}/keyboard" "${SRC_DIR}/mouse" "${SRC_DIR}/overlay" "${SRC_DIR}/scr"
+            "${SRC_DIR}/modules/makcu/include" "${AIMBOT_OPENCV_INCLUDE_DIR}"
+            ${AIMBOT_EXTRA_INCLUDE_DIRS})
+        target_link_directories(xen_recovery_speed_device_executor PRIVATE ${AIMBOT_EXTRA_LINK_DIRS})
+        target_link_libraries(xen_recovery_speed_device_executor PRIVATE
+            "${AIMBOT_OPENCV_LIBRARY}" "Processing.NDI.Lib.x64.lib" setupapi ws2_32 bcrypt)
+        target_compile_features(xen_recovery_speed_device_executor PRIVATE cxx_std_17)
+        target_compile_definitions(xen_recovery_speed_device_executor PRIVATE UNICODE _UNICODE NOMINMAX)
+        if(MSVC)
+            target_compile_options(xen_recovery_speed_device_executor PRIVATE /utf-8 /W4 /permissive- /EHsc)
+        endif()
+        aimbot_copy_if_exists(xen_recovery_speed_device_executor "${AIMBOT_OPENCV_DLL}")
+        aimbot_copy_if_exists(xen_recovery_speed_device_executor "${AIMBOT_GHUB_MOUSE_DLL}")
+        aimbot_copy_if_exists(xen_recovery_speed_device_executor "${AIMBOT_RZCTL_DLL}")
+        aimbot_copy_required_runtime(xen_recovery_speed_device_executor
             "${AIMBOT_NDI_ROOT}/Bin/x64/Processing.NDI.Lib.x64.dll" "NDI runtime")
     endif()
     add_test(NAME xen.algorithm.basic_tracking COMMAND xen_algorithm_tests)

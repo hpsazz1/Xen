@@ -143,6 +143,14 @@ tools\new_recovery_speed_device_plan.ps1 -Config C:\Users\16143\Desktop\Xen\DML\
 
 生成器会自动调用`test_recovery_speed_device_plan.ps1`。成功必须同时显示`PlanValidationPassed=True`、`Recommendation=MANUAL_REVIEW_ONLY`、`ExecutionEnabled=0`和`PhysicalExecutionAuthorized=0`；该工具没有设备发送接口。示例ROI来自历史主动Profile，实际生成前仍需按现场画面复核，不能盲用。禁止编辑manifest开启执行，也禁止把计划传给现有孤立脉冲探针模拟速率测试；完整安全边界见`docs/188P0-5设备速率与过冲安全协议20260720.md`。
 
+物理执行只能使用独立执行器和新输出目录。启动脚本会先审计计划，1440正负对照通过后暂停等待人工输入`ENTER-1800:<PlanId>`，不会自动代填：
+
+```powershell
+tools\run_recovery_speed_device_protocol.ps1 -ExecutorExe E:\Dev\Xen\build\dml\tools\Release\xen_recovery_speed_device_executor.exe -PlanDirectory C:\Users\16143\Desktop\Xen\DML\ndi\7\recovery_speed_device_plan_<新提交> -OutputDirectory C:\Users\16143\Desktop\Xen\DML\ndi\7\recovery_speed_device_result_<新提交> -ConfirmDeviceMotion YES -ConfirmZeroTargetRisk YES -ConfirmEmergencyStopReady YES
+```
+
+执行器默认只支持KMBOX_NET和精确NDI源，任何跟踪、丢帧、偏移、设备或Ctrl+C异常都会停止并保留CSV。完整门禁见`docs/189P0-5设备速率协议执行器20260720.md`。
+
 机动常加速度离线候选在冻结基线命令后追加`--candidate-estimator gated_ca --candidate-jerk-std-dps3 8000 --candidate-maneuver-rate-threshold-dps 12 --candidate-maneuver-hold-ms 120`。该配方只供跨域回放与下一阶段DML shadow验证；`constant_acceleration`全时模型会严重回退static，8/16°/s门槛会损失原通过项，均不得使用。summary中的`ManeuverModelPercent`必须用于检查static误驻留。
 
 候选角积分离线反证可追加`--candidate-integral-ms <50..2000> --candidate-integral-zone-deg <0..10>`；默认时间为0，即完全关闭。decision和summary分别记录`CandidateIntegralTimeMs/CandidateIntegralZoneDeg`。500 ms/10°在15/0实测物理端点仅得348/810，left/right均为0/162且static翻转显著增加，已否决；该入口只用于复现反证，不得写入正式配置、UI默认值或active路径。

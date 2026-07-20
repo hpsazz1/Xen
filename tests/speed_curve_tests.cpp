@@ -26,6 +26,7 @@
 #include "runtime/build_identity.h"
 #include "runtime/shadow_response_replay.h"
 #include "runtime/physical_response_probe.h"
+#include "runtime/recovery_speed_device_protocol.h"
 
 #include <cmath>
 #include <algorithm>
@@ -1302,6 +1303,60 @@ int main()
     expectNear(physicalSummary.t99Ms, 61.5, 1.0, "physical response t99 interpolation");
     expectNear(physicalSummary.orthogonalFinalDisplacement, 0.4, 1e-9,
                "physical response preserves orthogonal-axis leakage diagnostics");
+
+    std::vector<PhysicalResponseSample> recoverySpeedSamples;
+    constexpr int64_t recoveryTrialStartNs = 2'000'000'000LL;
+    for (int frame = 0; frame <= 616; ++frame)
+    {
+        const double timeMs = frame * (1000.0 / 240.0);
+        double displacement = 0.0;
+        if (timeMs >= 500.0 && timeMs < 550.0)
+            displacement = -24.0 * (timeMs - 500.0) / 50.0;
+        else if (timeMs >= 550.0 && timeMs < 1533.333)
+            displacement = -24.0;
+        else if (timeMs >= 1533.333 && timeMs < 1583.333)
+            displacement = -24.0 * (1.0 - (timeMs - 1533.333) / 50.0);
+        PhysicalResponseSample sample;
+        sample.receiveNs = recoveryTrialStartNs + static_cast<int64_t>(timeMs * 1e6);
+        sample.displacementX = displacement;
+        sample.displacementY = displacement == 0.0 ? 0.0 : 0.5;
+        sample.trackingQuality = 0.98;
+        sample.valid = true;
+        recoverySpeedSamples.push_back(sample);
+    }
+    std::vector<RecoverySpeedCommandRecord> recoverySpeedCommands;
+    for (int command = 0; command < 16; ++command)
+    {
+        const bool returning = command >= 8;
+        const int frame = command % 8;
+        const int64_t relativeUs = (returning ? 1533333LL : 500000LL) +
+            static_cast<int64_t>(std::llround(frame * 1000000.0 / 240.0));
+        RecoverySpeedCommandRecord record;
+        record.trial = 1;
+        record.command = command + 1;
+        record.deltaX = returning ? -6 : 6;
+        record.scheduledNs = recoveryTrialStartNs + relativeUs * 1000;
+        record.attemptNs = record.scheduledNs + 500'000;
+        record.confirmedNs = record.attemptNs + 100'000;
+        record.succeeded = true;
+        recoverySpeedCommands.push_back(record);
+    }
+    const auto recoverySpeedResult = AnalyzeRecoverySpeedTrial(
+        1, 1440, 1, 48, recoveryTrialStartNs, recoverySpeedSamples, recoverySpeedCommands);
+    expectTrue(recoverySpeedResult.passed, "recovery speed protocol accepts bounded zero-net trial");
+    expectNear(recoverySpeedResult.pixelsPerCount, 0.5, 0.01,
+               "recovery speed protocol measures forward scale");
+    expectTrue(recoverySpeedResult.stopDistancePx > 0.0 && recoverySpeedResult.stopDistancePx < 12.0,
+               "recovery speed protocol preserves finite stop distance");
+    for (auto& sample : recoverySpeedSamples)
+    {
+        if (static_cast<double>(sample.receiveNs - recoveryTrialStartNs) / 1e6 >= 2350.0)
+            sample.displacementX = 4.0;
+    }
+    const auto recoveryResidualFailure = AnalyzeRecoverySpeedTrial(
+        1, 1440, 1, 48, recoveryTrialStartNs, recoverySpeedSamples, recoverySpeedCommands);
+    expectTrue(!recoveryResidualFailure.passed && recoveryResidualFailure.reason == "final_residual",
+               "recovery speed protocol rejects excessive final residual");
 
     cv::Mat trackerFrame = cv::Mat::zeros(160, 160, CV_8UC3);
     cv::RNG trackerRandom(63);
