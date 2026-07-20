@@ -33,6 +33,7 @@
 #include "other_tools.h"
 #include "config.h"
 #include "Xen.h"
+#include "runtime/startup_helpers.h"
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "windowscodecs.lib")
@@ -999,12 +1000,10 @@ bool checkwin1903()
 // 显示自瞄启动提示及按键绑定信息
 void welcome_message()
 {
-    std::cout <<
-    "\n\n辅助瞄准已启动！\n" <<
-    config.joinStrings(config.button_targeting) << " -> 瞄准\n" <<
-    config.joinStrings(config.button_exit) << " -> 退出\n" <<
-    config.joinStrings(config.button_pause) << " -> 暂停瞄准\n" <<
-    config.joinStrings(config.button_reload_config) << " -> 重载配置\n" <<
-    config.joinStrings(config.button_open_overlay) << " -> 打开叠加层（选项）" <<
-    std::endl;
+    WriteConsoleLine(ConsoleTone::Accent, "\n\n辅助瞄准已启动！");
+    WriteConsoleLine(ConsoleTone::Normal, config.joinStrings(config.button_targeting) + " -> 瞄准");
+    WriteConsoleLine(ConsoleTone::Normal, config.joinStrings(config.button_exit) + " -> 退出");
+    WriteConsoleLine(ConsoleTone::Normal, config.joinStrings(config.button_pause) + " -> 暂停瞄准");
+    WriteConsoleLine(ConsoleTone::Normal, config.joinStrings(config.button_reload_config) + " -> 重载配置");
+    WriteConsoleLine(ConsoleTone::Normal, config.joinStrings(config.button_open_overlay) + " -> 打开叠加层（选项）");
 }

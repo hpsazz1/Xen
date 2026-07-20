@@ -3,6 +3,8 @@
 #include <iostream>
 #include <utility>
 
+#include "runtime/startup_helpers.h"
+
 void createInputDevices()
 {
     if (globalMouseThread)
@@ -40,7 +42,7 @@ void createInputDevices()
         makcuSerial = newMakcu;
     }
 
-    std::cout << message << std::endl;
+    WriteConsoleLine(newInput && newInput->isOpen() ? ConsoleTone::Success : ConsoleTone::Warning, message);
 }
 
 void assignInputDevices()

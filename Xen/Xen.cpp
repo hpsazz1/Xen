@@ -329,8 +329,9 @@ int main(int argc, char** argv)
         try
         {
             dml_detector = std::make_unique<DirectMLDetector>("models/" + config.ai_model);
-            std::cout << "[主程序] DML 检测器已创建"
-                      << (dml_detector->isReady() ? "。" : "，但当前没有可用模型。") << std::endl;
+            WriteConsoleLine(dml_detector->isReady() ? ConsoleTone::Success : ConsoleTone::Warning,
+                std::string("[主程序] DML 检测器已创建")
+                + (dml_detector->isReady() ? "。" : "，但当前没有可用模型。"));
             threads.detector = StartThreadGuarded("DmlDetector", [] {
                 dml_detector->dmlInferenceThread();
                 });

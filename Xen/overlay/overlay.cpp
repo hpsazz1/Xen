@@ -33,6 +33,7 @@
 #include "config.h"
 #include "keycodes.h"
 #include "keyboard_listener.h"
+#include "runtime/startup_helpers.h"
 #include "runtime/application_shutdown.h"
 #include "runtime/build_identity.h"
 
@@ -1462,9 +1463,9 @@ void SetupImGui()
 
     // 输出字体加载状态到控制台（用于调试）
     if (font)
-        std::cout << "[叠加层] 字体加载成功。" << std::endl;
+        WriteConsoleLine(ConsoleTone::Success, "[叠加层] 字体加载成功。");
     else
-        std::cout << "[叠加层] 警告：未加载系统字体，将使用默认字体。" << std::endl;
+        WriteConsoleLine(ConsoleTone::Warning, "[叠加层] 警告：未加载系统字体，将使用默认字体。");
 
     // 禁用 ImGui 的 .ini 文件读写
     io.IniFilename = nullptr;

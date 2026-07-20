@@ -9,18 +9,31 @@
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
+#include <sstream>
 #include <vector>
 
 namespace
 {
+bool g_consoleVirtualTerminal = false;
+std::mutex g_consoleOutputMutex;
+
 constexpr const char* kConsoleThemeSequence =
-    "\x1b]4;0;rgb:ffff/ffff/ffff\x07"
-    "\x1b]4;7;rgb:1a1c/1c1c/1f1f\x07"
-    "\x1b]4;8;rgb:6065/6565/6d6d\x07"
-    "\x1b]4;9;rgb:3333/9c9c/ffff\x07"
-    "\x1b]4;10;rgb:0000/a2a2/4040\x07"
-    "\x1b]4;12;rgb:baba/2626/2323\x07"
-    "\x1b[38;5;7;48;5;0m";
+    "\x1b[38;2;26;28;31m\x1b[48;2;255;255;255m\x1b[2J\x1b[H";
+
+const char* ConsoleToneSequence(ConsoleTone tone)
+{
+    switch (tone)
+    {
+    case ConsoleTone::Accent: return "\x1b[38;2;51;156;255m";
+    case ConsoleTone::Success: return "\x1b[38;2;0;162;64m";
+    case ConsoleTone::Warning: return "\x1b[38;2;170;104;0m";
+    case ConsoleTone::Error: return "\x1b[38;2;186;38;35m";
+    case ConsoleTone::Muted: return "\x1b[38;2;96;101;109m";
+    case ConsoleTone::Normal: return "\x1b[38;2;26;28;31m";
+    }
+    return "\x1b[38;2;26;28;31m";
+}
 }
 
 void ApplyConsoleTheme()
@@ -30,11 +43,15 @@ void ApplyConsoleTheme()
     if (output == nullptr || output == INVALID_HANDLE_VALUE || !GetConsoleMode(output, &consoleMode))
         return;
 
-    // Windows Terminal 等伪控制台不一定支持修改 Win32 调色板，优先使用 ANSI
-    // 主题序列；传统 conhost 会忽略该序列，后面的 Win32 调色板路径继续生效。
+    // Windows Terminal 等伪控制台不一定支持修改 Win32 调色板，优先使用真彩色
+    // ANSI 主题序列；传统 conhost 会在启用 VT 后同样处理该序列。
     DWORD ansiMode = consoleMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     if (SetConsoleMode(output, ansiMode))
+    {
+        g_consoleVirtualTerminal = true;
         std::cout << kConsoleThemeSequence << std::flush;
+        return;
+    }
 
     CONSOLE_SCREEN_BUFFER_INFOEX info{};
     info.cbSize = sizeof(info);
@@ -64,6 +81,15 @@ void ApplyConsoleTheme()
     const DWORD cellCount = static_cast<DWORD>(info.dwSize.X) * static_cast<DWORD>(info.dwSize.Y);
     DWORD cellsUpdated = 0;
     FillConsoleOutputAttribute(output, kThemeAttributes, cellCount, COORD{ 0, 0 }, &cellsUpdated);
+}
+
+void WriteConsoleLine(ConsoleTone tone, const std::string& message)
+{
+    std::lock_guard<std::mutex> lock(g_consoleOutputMutex);
+    if (g_consoleVirtualTerminal)
+        std::cout << ConsoleToneSequence(tone) << message << "\x1b[0m" << std::endl;
+    else
+        std::cout << message << std::endl;
 }
 
 int FatalExit(const std::string& message)

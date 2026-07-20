@@ -32,6 +32,7 @@
 #include "depth/depth_mask.h"
 #endif
 #include "detection_filters.h"
+#include "runtime/startup_helpers.h"
 
 extern std::atomic<bool> detector_model_changed;
 extern std::atomic<bool> detection_resolution_changed;
@@ -553,8 +554,8 @@ bool DirectMLDetector::tryInitializeModel(
                       << (isStatic ? "true" : "false") << std::endl;
         }
 
-        std::cout << "[DML] 已使用 " << providerLabel << " 提供程序初始化模型："
-                  << model_path << std::endl;
+        WriteConsoleLine(ConsoleTone::Success,
+            "[DML] 已使用 " + providerLabel + " 提供程序初始化模型：" + model_path);
 
         if (useDirectML && config.verbose)
             std::cout << "[DirectML] Using adapter: " << GetDMLDeviceName(config.dml_device_id) << std::endl;
