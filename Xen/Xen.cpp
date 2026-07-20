@@ -35,6 +35,7 @@
 #include "runtime/application_shutdown.h"
 #include "runtime/application_threads.h"
 #include "runtime/startup_helpers.h"
+#include "runtime/lan_control_server.h"
 #include "runtime/video_replay_cli.h"
 #include "benchmarks/provider_benchmark.h"
 #include "debug/pipeline_tracer.h"
@@ -109,6 +110,8 @@ std::atomic<bool> input_method_changed(false);
 
 // 标志：当前是否正在缩放（狙击/高倍镜模式）
 std::atomic<bool> zooming(false);
+// 局域网控制台通过该标志把重载请求交给键盘线程的既有配置通知链路
+std::atomic<bool> remoteReloadRequested(false);
 // 标志：是否正在自动射击
 std::atomic<bool> shooting(false);
 
@@ -320,6 +323,9 @@ int main(int argc, char** argv)
         assignInputDevices();
 
         ApplicationThreads threads;
+        LanControlServer lanControlServer;
+        if (config.lan_console_enabled)
+            lanControlServer.Start(config.lan_console_bind_address, config.lan_console_port);
 
 #ifdef USE_CUDA
         // 初始化 TensorRT 检测器并加载模型
@@ -397,6 +403,7 @@ int main(int argc, char** argv)
 #endif
 
         RequestApplicationShutdown();
+        lanControlServer.Stop();
         threads.joinAll();
 
         // 清理鼠标设备

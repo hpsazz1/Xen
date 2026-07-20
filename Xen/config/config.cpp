@@ -268,6 +268,11 @@ bool Config::loadConfig(const std::string& filename)
         cpuCoreReserveCount = 4;                         // 预留 CPU 核心数
         systemMemoryReserveMB = 2048;                    // 系统预留内存（MB）
 
+        // === 局域网 Web 控制台 ===
+        lan_console_enabled = false;                     // 默认关闭，避免无意暴露控制面
+        lan_console_bind_address = "0.0.0.0";            // 启用后允许同一局域网访问
+        lan_console_port = 17888;                        // HTTP 监听端口
+
         // === 热键绑定 ===
         button_targeting = splitString("RightMouseButton"); // 瞄准键
         button_shoot = splitString("LeftMouseButton");      // 射击键
@@ -714,6 +719,11 @@ bool Config::loadConfig(const std::string& filename)
     cpuCoreReserveCount = get_long("cpuCoreReserveCount", 4);
     systemMemoryReserveMB = get_long("systemMemoryReserveMB", 2048);
 
+    // === 局域网 Web 控制台 ===
+    lan_console_enabled = get_bool("lan_console_enabled", false);
+    lan_console_bind_address = get_string("lan_console_bind_address", "0.0.0.0");
+    lan_console_port = std::clamp(get_long("lan_console_port", 17888), 1024, 65535);
+
     // === 热键绑定配置 ===
     button_targeting = splitString(get_string("button_targeting", "RightMouseButton"));
     button_shoot = splitString(get_string("button_shoot", "LeftMouseButton"));
@@ -1097,6 +1107,12 @@ bool Config::saveConfig(const std::string& filename)
     file << "# System\n"
         << "cpuCoreReserveCount = " << cpuCoreReserveCount << "\n"
         << "systemMemoryReserveMB = " << systemMemoryReserveMB << "\n\n";
+
+    // === 局域网 Web 控制台 ===
+    file << "# LAN console\n"
+        << "lan_console_enabled = " << (lan_console_enabled ? "true" : "false") << "\n"
+        << "lan_console_bind_address = " << lan_console_bind_address << "\n"
+        << "lan_console_port = " << lan_console_port << "\n\n";
 
     // === 热键绑定 ===
     file << "# Buttons\n"

@@ -64,6 +64,7 @@
     <ClCompile Include="runtime\application_shutdown.cpp" />
     <ClCompile Include="runtime\application_threads.cpp" />
     <ClCompile Include="runtime\startup_helpers.cpp" />
+    <ClCompile Include="runtime\lan_control_server.cpp" />
     <ClCompile Include="runtime\video_replay_cli.cpp" />
     <ClCompile Include="runtime\input_device_manager.cpp" />
     <ClCompile Include="runtime\mouse_thread_loop.cpp" />
@@ -120,6 +121,7 @@
     <ClInclude Include="runtime\application_shutdown.h" />
     <ClInclude Include="runtime\application_threads.h" />
     <ClInclude Include="runtime\startup_helpers.h" />
+    <ClInclude Include="runtime\lan_control_server.h" />
     <ClInclude Include="detector\dml_detector.h" />
     <ClInclude Include="tensorrt\trt_monitor.h" />
     <ClInclude Include="detector\detection_buffer.h" />

@@ -264,6 +264,9 @@ P0-4B控件位于UI“瞄准 → 移动参数 → 确定性轨迹影子参数”
 |---|---:|---|
 | `cpuCoreReserveCount` | `4` | 避免大量使用的 CPU 核心数。 |
 | `systemMemoryReserveMB` | `2048` | 系统内存预留量。 |
+| `lan_console_enabled` | `false` | 是否启用局域网 Web 控制台。启用后需使用启动时显示的配对码登录。 |
+| `lan_console_bind_address` | `0.0.0.0` | Web 控制台监听地址。局域网使用 `0.0.0.0`，仅本机使用可改为 `127.0.0.1`。 |
+| `lan_console_port` | `17888` | Web 控制台 HTTP 端口，范围 `1024..65535`。 |
 
 ## 按钮
 

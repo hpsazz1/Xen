@@ -354,6 +354,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/runtime/application_shutdown.cpp"
     "${SRC_DIR}/runtime/application_threads.cpp"
     "${SRC_DIR}/runtime/startup_helpers.cpp"
+    "${SRC_DIR}/runtime/lan_control_server.cpp"
     "${SRC_DIR}/runtime/video_replay_cli.cpp"
     "${SRC_DIR}/runtime/input_device_manager.cpp"
     "${SRC_DIR}/runtime/mouse_thread_loop.cpp"
@@ -438,6 +439,10 @@ if(BUILD_TESTING)
     add_test(
         NAME xen.ui.prediction_visibility
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/ui_visibility_tests.ps1"
+    )
+    add_test(
+        NAME xen.ui.lan_control
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/lan_control_tests.ps1" -RepoRoot "${CMAKE_SOURCE_DIR}"
     )
 
     add_executable(xen_algorithm_tests
@@ -750,6 +755,7 @@ target_link_libraries(ai PRIVATE
     dwmapi
     d2d1
     setupapi
+    ws2_32
     WindowsApp
 )
 

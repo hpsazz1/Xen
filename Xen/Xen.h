@@ -46,6 +46,9 @@ extern std::atomic<bool> aiming;
 extern std::atomic<bool> shooting;
 // 缩放状态
 extern std::atomic<bool> zooming;
+extern std::atomic<bool> detectionPaused;
+// Web 控制台请求键盘线程执行同一套配置重载流程
+extern std::atomic<bool> remoteReloadRequested;
 // 配置访问互斥锁
 extern std::mutex configMutex;
 // 输入设备列表互斥锁

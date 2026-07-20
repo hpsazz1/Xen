@@ -30,6 +30,7 @@ extern std::atomic<bool> shooting;
 extern std::atomic<bool> zooming;
 extern std::atomic<bool> detectionPaused;
 extern std::atomic<bool> detector_model_changed;
+extern std::atomic<bool> remoteReloadRequested;
 
 extern MouseThread* globalMouseThread;
 
@@ -261,7 +262,8 @@ void keyboardListener()
 
         // === 重载配置（仅 Win32，边缘触发） ===
         static bool reloadPressed = false;
-        if (isAnyKeyPressedWin32Only(cfg.buttonReloadConfig))
+        const bool remoteReload = remoteReloadRequested.exchange(false);
+        if (remoteReload || isAnyKeyPressedWin32Only(cfg.buttonReloadConfig))
         {
 	            if (!reloadPressed)
 	            {

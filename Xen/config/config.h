@@ -197,6 +197,11 @@ public:
     int cpuCoreReserveCount;
     int systemMemoryReserveMB;
 
+    // ========== 局域网 Web 控制台 ==========
+    bool lan_console_enabled;              // 默认关闭，显式启用后才监听局域网
+    std::string lan_console_bind_address;  // 监听地址，0.0.0.0 表示所有本机 IPv4 网卡
+    int lan_console_port;                  // HTTP 监听端口
+
     // ========== 按键绑定 ==========
     std::vector<std::string> button_targeting;
     std::vector<std::string> button_shoot;
