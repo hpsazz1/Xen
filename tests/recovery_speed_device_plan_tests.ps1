@@ -75,6 +75,17 @@ try {
     } catch { $duplicateRejected = $true }
     if (-not $duplicateRejected) { throw 'Generator overwrote an existing plan directory.' }
 
+    $executorSource = Get-Content -LiteralPath (Join-Path $root 'Xen\runtime\recovery_speed_device_executor_main.cpp') -Raw
+    $captureStop = $executorSource.IndexOf('capture.reset();', [StringComparison]::Ordinal)
+    $confirmationRead = $executorSource.IndexOf('std::getline(std::cin, confirmation)', [StringComparison]::Ordinal)
+    $captureRestart = $executorSource.IndexOf(
+        'capture = startStableCapture(config, plan, current, error);',
+        [Math]::Max(0, $confirmationRead), [StringComparison]::Ordinal)
+    if ($captureStop -lt 0 -or $confirmationRead -le $captureStop -or $captureRestart -le $confirmationRead -or
+        $executorSource -notmatch 'diagnostics\.droppedFrames != 0') {
+        throw 'Second-stage confirmation no longer isolates and revalidates the NDI capture session.'
+    }
+
     Write-Host 'Recovery speed device plan tests passed.'
 } finally {
     Remove-Item -LiteralPath $temporaryRoot -Recurse -Force

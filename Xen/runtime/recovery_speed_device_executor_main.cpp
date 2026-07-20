@@ -19,6 +19,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -99,6 +100,39 @@ bool takeFrame(NDICapture& capture, CapturedFrame& frame, int timeoutMs)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return false;
+}
+
+std::unique_ptr<NDICapture> startStableCapture(const Config& config,
+                                               const RecoverySpeedDevicePlan& plan,
+                                               CapturedFrame& current,
+                                               std::string& error)
+{
+    auto capture = std::make_unique<NDICapture>(
+        config.detection_resolution, config.detection_resolution, plan.ndiSource, 240,
+        config.ndi_source_width, config.ndi_source_height,
+        NdiFrameDeliveryMode::PreserveAllBounded, 2048);
+    if (!takeFrame(*capture, current, 10000))
+    {
+        error = "ndi_first_frame_timeout";
+        return {};
+    }
+    const auto stabilityDeadline = Clock::now() + std::chrono::seconds(2);
+    while (Clock::now() < stabilityDeadline)
+    {
+        if (!takeFrame(*capture, current, 100))
+        {
+            error = "ndi_stability_timeout";
+            return {};
+        }
+    }
+    const auto diagnostics = NDICapture::GetDiagnostics();
+    if (diagnostics.declaredFps < 200.0 || diagnostics.receiveFps < 200 ||
+        diagnostics.droppedFrames != 0)
+    {
+        error = "ndi_requires_native_240hz_zero_drop";
+        return {};
+    }
+    return capture;
 }
 
 void writeOutputs(const std::filesystem::path& outputDirectory,
@@ -222,24 +256,11 @@ int main(int argc, char** argv)
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    NDICapture capture(config.detection_resolution, config.detection_resolution, plan.ndiSource, 240,
-                       config.ndi_source_width, config.ndi_source_height,
-                       NdiFrameDeliveryMode::PreserveAllBounded, 2048);
     CapturedFrame current;
-    if (!takeFrame(capture, current, 10000))
+    auto capture = startStableCapture(config, plan, current, error);
+    if (!capture)
     {
-        std::cerr << "10秒内未收到计划NDI源\n";
-        return 8;
-    }
-    const auto stabilityDeadline = Clock::now() + std::chrono::seconds(2);
-    while (Clock::now() < stabilityDeadline)
-    {
-        if (!takeFrame(capture, current, 100)) { std::cerr << "NDI稳定性检查断流\n"; return 8; }
-    }
-    const auto diagnostics = NDICapture::GetDiagnostics();
-    if (diagnostics.declaredFps < 200.0 || diagnostics.receiveFps < 200 || diagnostics.droppedFrames != 0)
-    {
-        std::cerr << "NDI必须为原始240 Hz且零丢帧\n";
+        std::cerr << "NDI启动失败:" << error << '\n';
         return 8;
     }
 
@@ -256,12 +277,21 @@ int main(int argc, char** argv)
                 issues = "1440_control_gate_failed";
                 break;
             }
+            // 人工确认时间无上限。确认前关闭逐帧会话，防止后台接收在无人消费时填满
+            // 有界队列；确认后用新会话清零统计并重新验证原生240 Hz和零丢帧。
+            capture.reset();
             std::cout << "1440对照通过。确认现场仍无目标风险且紧急停止可用后，输入 ENTER-1800:"
                       << plan.planId << " 继续：" << std::flush;
             std::string confirmation;
             if (!std::getline(std::cin, confirmation) || confirmation != "ENTER-1800:" + plan.planId)
             {
                 issues = "second_stage_confirmation_missing";
+                break;
+            }
+            capture = startStableCapture(config, plan, current, error);
+            if (!capture)
+            {
+                issues = "ndi_restart:" + error;
                 break;
             }
         }
@@ -312,7 +342,7 @@ int main(int argc, char** argv)
         const auto deadline = start + std::chrono::microseconds(2566667);
         while (!stopRequested.load() && !trialAbort.load() && Clock::now() < deadline)
         {
-            if (!takeFrame(capture, current, 100)) { trialAbort.store(true); issues = "ndi_frame_timeout"; break; }
+            if (!takeFrame(*capture, current, 100)) { trialAbort.store(true); issues = "ndi_frame_timeout"; break; }
             auto sample = tracker.update(current.image, ns(current.timing.backendReceiveTime));
             trial.samples.push_back(sample);
             if (!sample.valid || std::abs(sample.displacementX) > 48.0 || std::abs(sample.displacementY) > 12.0)
