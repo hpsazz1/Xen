@@ -79,6 +79,11 @@ foreach ($trial in 1..4) {
         (Get-FiniteDouble $value.PixelsPerCount 'PixelsPerCount') -lt 0.25 -or
         (Get-FiniteDouble $value.PixelsPerCount 'PixelsPerCount') -gt 0.75 -or
         (Get-FiniteDouble $value.PeakDisplacementPx 'PeakDisplacementPx') -gt 48.0 -or
+        (Get-FiniteDouble $value.VisualResponseLatencyMs 'VisualResponseLatencyMs') -lt 0.0 -or
+        (Get-FiniteDouble $value.VisualResponseLatencyMs 'VisualResponseLatencyMs') -gt 100.0 -or
+        (Get-FiniteDouble $value.StopAnchorDisplacementPx 'StopAnchorDisplacementPx') -lt 0.0 -or
+        (Get-FiniteDouble $value.StopAnchorDisplacementPx 'StopAnchorDisplacementPx') -gt
+            (Get-FiniteDouble $value.PeakDisplacementPx 'PeakDisplacementPx') -or
         (Get-FiniteDouble $value.StopDistancePx 'StopDistancePx') -gt 12.0 -or
         (Get-FiniteDouble $value.FinalResidualPx 'FinalResidualPx') -gt 3.0 -or
         (Get-FiniteDouble $value.CrossAxisLeakagePercent 'CrossAxisLeakagePercent') -gt 10.0) {

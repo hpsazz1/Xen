@@ -1346,8 +1346,52 @@ int main()
     expectTrue(recoverySpeedResult.passed, "recovery speed protocol accepts bounded zero-net trial");
     expectNear(recoverySpeedResult.pixelsPerCount, 0.5, 0.01,
                "recovery speed protocol measures forward scale");
+    expectTrue(recoverySpeedResult.visualResponseLatencyMs >= 0.0 &&
+                   recoverySpeedResult.visualResponseLatencyMs < 10.0,
+               "recovery speed protocol aligns stop anchor to visible response latency");
     expectTrue(recoverySpeedResult.stopDistancePx > 0.0 && recoverySpeedResult.stopDistancePx < 12.0,
                "recovery speed protocol preserves finite stop distance");
+
+    std::vector<PhysicalResponseSample> phaseShiftedRecoverySamples;
+    for (int frame = 0; frame <= 616; ++frame)
+    {
+        const double timeMs = frame * (1000.0 / 240.0);
+        double displacement = 0.0;
+        if (timeMs >= 520.0 && timeMs < 550.0)
+            displacement = -24.0 * (timeMs - 520.0) / 30.0;
+        else if (timeMs >= 550.0 && timeMs < 1553.333)
+            displacement = -24.0;
+        else if (timeMs >= 1553.333 && timeMs < 1583.333)
+            displacement = -24.0 * (1.0 - (timeMs - 1553.333) / 30.0);
+        PhysicalResponseSample sample;
+        sample.receiveNs = recoveryTrialStartNs + static_cast<int64_t>(timeMs * 1e6);
+        sample.displacementX = displacement;
+        sample.trackingQuality = 0.98;
+        sample.valid = true;
+        phaseShiftedRecoverySamples.push_back(sample);
+    }
+    const auto phaseShiftedRecoveryResult = AnalyzeRecoverySpeedTrial(
+        1, 1440, 1, 48, recoveryTrialStartNs, phaseShiftedRecoverySamples, recoverySpeedCommands);
+    expectTrue(phaseShiftedRecoveryResult.passed && phaseShiftedRecoveryResult.stopDistancePx < 1.0,
+               "recovery speed protocol does not count visual latency as stop distance");
+    expectTrue(phaseShiftedRecoveryResult.visualResponseLatencyMs >= 15.0 &&
+                   phaseShiftedRecoveryResult.visualResponseLatencyMs <= 30.0,
+               "recovery speed protocol records phase-shifted visual latency");
+
+    auto excessiveStopSamples = phaseShiftedRecoverySamples;
+    for (auto& sample : excessiveStopSamples)
+    {
+        const double timeMs = static_cast<double>(sample.receiveNs - recoveryTrialStartNs) / 1e6;
+        if (timeMs >= 550.0 && timeMs < 800.0)
+            sample.displacementX = -24.0 - 16.0 * (timeMs - 550.0) / 250.0;
+        else if (timeMs >= 800.0 && timeMs < 1100.0)
+            sample.displacementX = -40.0 + 16.0 * (timeMs - 800.0) / 300.0;
+    }
+    const auto excessiveStopResult = AnalyzeRecoverySpeedTrial(
+        1, 1440, 1, 48, recoveryTrialStartNs, excessiveStopSamples, recoverySpeedCommands);
+    expectTrue(!excessiveStopResult.passed && excessiveStopResult.reason == "stop_distance" &&
+                   excessiveStopResult.stopDistancePx > 12.0,
+               "recovery speed protocol preserves the fixed stop-distance safety gate");
     for (auto& sample : recoverySpeedSamples)
     {
         if (static_cast<double>(sample.receiveNs - recoveryTrialStartNs) / 1e6 >= 2350.0)

@@ -370,10 +370,39 @@ RecoverySpeedTrialResult AnalyzeRecoverySpeedTrial(
     const double originX = median(std::move(baselineX));
     const double originY = median(std::move(baselineY));
     const double responseSign = static_cast<double>(-leadingDirection);
+    const int64_t firstCommandConfirmedNs = commands.front().confirmedNs;
+    const int64_t lastForwardCommandConfirmedNs = commands[7].confirmedNs;
+    int64_t responseOnsetNs = 0;
+    for (const auto& sample : samples)
+    {
+        if (sample.receiveNs < firstCommandConfirmedNs)
+            continue;
+        const double primary = (sample.displacementX - originX) * responseSign;
+        if (primary >= 1.0)
+        {
+            responseOnsetNs = sample.receiveNs;
+            break;
+        }
+    }
+    if (responseOnsetNs == 0)
+    {
+        result.reason = "response_onset_missing";
+        return result;
+    }
+    result.visualResponseLatencyMs =
+        static_cast<double>(responseOnsetNs - firstCommandConfirmedNs) / 1e6;
+    if (result.visualResponseLatencyMs < 0.0 || result.visualResponseLatencyMs > 100.0)
+    {
+        result.reason = "visual_response_latency";
+        return result;
+    }
+    // 命令确认时间与NDI画面属于不同时间基准。用同一trial的首次可见响应延迟对齐
+    // 最后一条正向命令，避免把尚未显示完的命令响应误计为停止后的额外位移。
+    const int64_t stopAnchorNs = lastForwardCommandConfirmedNs +
+        (responseOnsetNs - firstCommandConfirmedNs);
     std::vector<double> forwardTail;
     std::vector<double> finalX;
-    double atPulseEnd = 0.0;
-    bool havePulseEnd = false;
+    bool haveStopAnchor = false;
     double peak = 0.0;
     double crossPeak = 0.0;
     for (const auto& sample : samples)
@@ -381,12 +410,12 @@ RecoverySpeedTrialResult AnalyzeRecoverySpeedTrial(
         const double relativeMs = static_cast<double>(sample.receiveNs - trialStartNs) / 1e6;
         const double primary = (sample.displacementX - originX) * responseSign;
         const double cross = std::abs(sample.displacementY - originY);
-        if (!havePulseEnd && relativeMs >= 533.333)
+        if (!haveStopAnchor && sample.receiveNs >= stopAnchorNs)
         {
-            atPulseEnd = primary;
-            havePulseEnd = true;
+            result.stopAnchorDisplacementPx = primary;
+            haveStopAnchor = true;
         }
-        if (relativeMs >= 533.333 && relativeMs < 1533.333)
+        if (sample.receiveNs >= stopAnchorNs && relativeMs < 1533.333)
         {
             peak = std::max(peak, primary);
             crossPeak = std::max(crossPeak, cross);
@@ -394,14 +423,14 @@ RecoverySpeedTrialResult AnalyzeRecoverySpeedTrial(
         }
         if (relativeMs >= 2350.0) finalX.push_back(sample.displacementX - originX);
     }
-    if (!havePulseEnd || forwardTail.size() < 20 || finalX.size() < 20)
+    if (!haveStopAnchor || forwardTail.size() < 20 || finalX.size() < 20)
     {
         result.reason = "observation_tail_incomplete";
         return result;
     }
     result.forwardDisplacementPx = median(std::move(forwardTail));
     result.peakDisplacementPx = peak;
-    result.stopDistancePx = std::max(0.0, peak - atPulseEnd);
+    result.stopDistancePx = std::max(0.0, peak - result.stopAnchorDisplacementPx);
     result.finalResidualPx = std::abs(median(std::move(finalX)));
     result.pixelsPerCount = result.forwardDisplacementPx / expectedExcursionCounts;
     result.crossAxisLeakagePercent = peak > 1e-9 ? 100.0 * crossPeak / peak : 1000.0;

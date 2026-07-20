@@ -117,7 +117,8 @@ void writeOutputs(const std::filesystem::path& outputDirectory,
                 "ScheduledNs,AttemptNs,ConfirmedNs,AttemptJitterMs,ConfirmLatencyMs,Succeeded\n";
     summary << "BuildBackend,BuildRevision,BuildTimestampUtc,ControllerRevision,PlanId,Trial,RateCountsPerSecond,"
                "LeadingDirection,ExpectedExcursionCounts,Samples,Commands,MinimumTrackingQuality,ForwardDisplacementPx,"
-               "PeakDisplacementPx,StopDistancePx,FinalResidualPx,PixelsPerCount,CrossAxisLeakagePercent,"
+               "PeakDisplacementPx,VisualResponseLatencyMs,StopAnchorDisplacementPx,StopDistancePx,FinalResidualPx,"
+               "PixelsPerCount,CrossAxisLeakagePercent,"
                "MaximumCommandJitterMs,Passed,Reason\n";
     frames << std::fixed << std::setprecision(6);
     commands << std::fixed << std::setprecision(6);
@@ -142,7 +143,9 @@ void writeOutputs(const std::filesystem::path& outputDirectory,
                 << kBasicAimControllerRevision << ',' << plan.planId << ',' << result.trial << ','
                 << result.rateCountsPerSecond << ',' << result.leadingDirection << ',' << result.expectedExcursionCounts << ','
                 << result.samples << ',' << result.commands << ',' << result.minimumTrackingQuality << ','
-                << result.forwardDisplacementPx << ',' << result.peakDisplacementPx << ',' << result.stopDistancePx << ','
+                << result.forwardDisplacementPx << ',' << result.peakDisplacementPx << ','
+                << result.visualResponseLatencyMs << ',' << result.stopAnchorDisplacementPx << ','
+                << result.stopDistancePx << ','
                 << result.finalResidualPx << ',' << result.pixelsPerCount << ',' << result.crossAxisLeakagePercent << ','
                 << result.maximumCommandJitterMs << ',' << result.passed << ',' << result.reason << '\n';
     }

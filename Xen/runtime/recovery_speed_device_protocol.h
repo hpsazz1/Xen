@@ -64,6 +64,8 @@ struct RecoverySpeedTrialResult
     double minimumTrackingQuality = 0.0;
     double forwardDisplacementPx = 0.0;
     double peakDisplacementPx = 0.0;
+    double visualResponseLatencyMs = 0.0;
+    double stopAnchorDisplacementPx = 0.0;
     double stopDistancePx = 0.0;
     double finalResidualPx = 0.0;
     double pixelsPerCount = 0.0;

@@ -18,7 +18,8 @@ try {
             Trial=$trial; RateCountsPerSecond=$rate; LeadingDirection=$direction
             ExpectedExcursionCounts=$excursion; Samples=600; Commands=16
             MinimumTrackingQuality=0.98; ForwardDisplacementPx=$forward
-            PeakDisplacementPx=$peak; StopDistancePx=$stop
+            PeakDisplacementPx=$peak; VisualResponseLatencyMs=20; StopAnchorDisplacementPx=$peak-$stop
+            StopDistancePx=$stop
             FinalResidualPx=1; PixelsPerCount=0.5; CrossAxisLeakagePercent=2; MaximumCommandJitterMs=0.5
             Passed=1; Reason='passed'
         }
