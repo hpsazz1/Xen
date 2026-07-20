@@ -133,6 +133,16 @@ build\dml\tools\Release\xen_machine_profile_candidate.exe --config C:\Users\1614
 
 成功必须同时显示`CandidateEnabled=0`、`ReverseLoadLevel=3`、`CalibratedResponseEnabled=0`、`InvalidationAuditFields=21`和`InvalidationAuditPassed=1`。工具只支持同源NDI协议，拒绝覆盖文件，并用哈希确认没有修改config；生成候选不代表允许运行时或active自动启用。主动协议的t50/t90当前只作为证据保存，不能自动覆盖`aim_shadow_command_to_frame_delay_ms/aim_shadow_command_response_ms`。
 
+## 恢复速度设备协议计划
+
+1800设备协议当前只允许生成不可执行计划。设备标识、精确NDI源、现场ROI和干净构建身份必须显式提供，输出目录必须不存在：
+
+```powershell
+tools\new_recovery_speed_device_plan.ps1 -Config C:\Users\16143\Desktop\Xen\DML\ndi\7\config.ini -DeviceId "KMBOX_NET:7679E04E" -NdiSource "HPSAZZ (main)" -OutputDirectory C:\Users\16143\Desktop\Xen\DML\ndi\7\recovery_speed_device_plan_r65 -BuildBackend DML -BuildRevision <40位干净提交> -ControllerRevision 65 -RoiX 120 -RoiY 100 -RoiWidth 80 -RoiHeight 80
+```
+
+生成器会自动调用`test_recovery_speed_device_plan.ps1`。成功必须同时显示`PlanValidationPassed=True`、`Recommendation=MANUAL_REVIEW_ONLY`、`ExecutionEnabled=0`和`PhysicalExecutionAuthorized=0`；该工具没有设备发送接口。示例ROI来自历史主动Profile，实际生成前仍需按现场画面复核，不能盲用。禁止编辑manifest开启执行，也禁止把计划传给现有孤立脉冲探针模拟速率测试；完整安全边界见`docs/188P0-5设备速率与过冲安全协议20260720.md`。
+
 机动常加速度离线候选在冻结基线命令后追加`--candidate-estimator gated_ca --candidate-jerk-std-dps3 8000 --candidate-maneuver-rate-threshold-dps 12 --candidate-maneuver-hold-ms 120`。该配方只供跨域回放与下一阶段DML shadow验证；`constant_acceleration`全时模型会严重回退static，8/16°/s门槛会损失原通过项，均不得使用。summary中的`ManeuverModelPercent`必须用于检查static误驻留。
 
 候选角积分离线反证可追加`--candidate-integral-ms <50..2000> --candidate-integral-zone-deg <0..10>`；默认时间为0，即完全关闭。decision和summary分别记录`CandidateIntegralTimeMs/CandidateIntegralZoneDeg`。500 ms/10°在15/0实测物理端点仅得348/810，left/right均为0/162且static翻转显著增加，已否决；该入口只用于复现反证，不得写入正式配置、UI默认值或active路径。

@@ -428,6 +428,10 @@ if(BUILD_TESTING)
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/active_profile_protocol_tests.ps1" -RepoRoot "${CMAKE_SOURCE_DIR}"
     )
     add_test(
+        NAME xen.protocol.recovery_speed_device_plan
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/recovery_speed_device_plan_tests.ps1" -RepoRoot "${CMAKE_SOURCE_DIR}"
+    )
+    add_test(
         NAME xen.ui.prediction_visibility
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/ui_visibility_tests.ps1"
     )
