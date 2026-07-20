@@ -10,7 +10,7 @@
 
 ### 2026-07-20计划重评
 
-- [ ] **[P0 稳定版收口]**：源码默认`aim_pipeline_mode=legacy`，legacy的`move_max_speed_cps`默认3200 counts/s，shadow候选的`aim_shadow_max_speed_cps`为1440 counts/s；程序提交`8609041`的DML/CUDA clean-first Release与双后端CTest各17/17已有记录。但当前`build/dml/Release/config.ini`是被忽略的7月17日shadow实机测试快照，CUDA发布目录没有对应配置，不能直接作为正式包；下一步只需生成/确认legacy正式配置并核对UI/CSV/EXE身份，不重开P0-5，详见`docs/196正式版本收口核对20260720.md`。
+- [x] **[P0 稳定版收口]**：已确认`build/dml/Release/config.ini`为正式legacy配置：`aim_pipeline_mode=legacy`、legacy最大速度3200 counts/s、shadow候选上限1440 counts/s、前馈/积分/经验提前关闭、shadow估计器为kalman；对应`Xen.exe`内嵌`DML|860904143508|20260720T102158Z|r65`身份，配置与EXE SHA-256已记录。程序提交`8609041`的DML/CUDA clean-first Release与双后端CTest各17/17已有记录，不重开P0-5，详见`docs/196正式版本收口核对20260720.md`。
 - [x] **[P1 真实使用问题回收规则]**：当前没有待处理的真实使用问题；本项改为长期触发规则，不作为开放任务。只有出现可复现输入、核心功能影响和明确验收标准时，才新建独立待办；普通优化和研究想法不进入主线。
 - [x] **[阶段决策 P0-5跳过晋级]**：P0-5已有充分证据证明当前候选不能同时满足跨域质量与static/reverse安全门槛；本阶段按`HOLD_SHADOW`关闭，不进入active，也不再扫描速度、响应、前馈、积分、Smith或局部门控。只有真实使用暴露核心缺陷，或出现可提前解释40 ms+1.5x持续单向水平相位且能证明不影响static/reverse的新结构时，才新建独立任务，旧P0-5不得原样恢复。详见`docs/195待办去重与阶段计划重评20260720.md`。
 
