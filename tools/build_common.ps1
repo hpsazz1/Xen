@@ -322,6 +322,9 @@ function Import-VisualStudioEnvironment {
 
     $requiredTools = @('cl.exe', 'link.exe', 'rc.exe', 'mt.exe')
 
+    # 固定MSVC诊断输出为英文，避免CMake/Ninja把中文/showIncludes前缀错误解码后漏记头文件依赖。
+    [Environment]::SetEnvironmentVariable('VSLANG', '1033', 'Process')
+
     # Check if the correct x64 compiler is already in PATH.
     # cl.exe from Hostx64/x64 or Hostx86/x64 means x64 target is active.
     # cl.exe from Hostx86/x86 means x86 target — not acceptable.
@@ -366,6 +369,9 @@ function Import-VisualStudioEnvironment {
         $developerPath = Select-VisualStudioEnvironmentPath -Candidates @($pathCandidates)
         [Environment]::SetEnvironmentVariable('Path', $developerPath, 'Process')
     }
+
+    # VsDevCmd可能按系统区域重新写入VSLANG；导入完成后必须再次覆盖。
+    [Environment]::SetEnvironmentVariable('VSLANG', '1033', 'Process')
 
     $missingTools = @($requiredTools | Where-Object { -not (Get-CommandPath $_) })
     if ($missingTools.Count -gt 0) {

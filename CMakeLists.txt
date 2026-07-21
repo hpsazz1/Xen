@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.24)
 
 project(Xen LANGUAGES C CXX)
 
+# CMake 4.4在中文Windows上可能把MSVC /showIncludes前缀错误解码并缓存为乱码，
+# 导致Ninja完全漏记头文件依赖。构建入口同时固定VSLANG=1033，此处覆盖已有构建树的旧缓存。
+if(MSVC)
+    set(CMAKE_CL_SHOWINCLUDES_PREFIX "Note: including file: ")
+endif()
+
 if(NOT WIN32)
     message(FATAL_ERROR "Xen currently supports Windows builds only.")
 endif()

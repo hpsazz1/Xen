@@ -46,6 +46,19 @@ Assert-Equal '--build|build\dml|--config|Release|--target|ai|--parallel|--clean-
     ($applicationBuildArguments -join '|') `
     'Application builds must clean stale objects before compiling header consumers.'
 
+$buildCommonText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\tools\build_common.ps1') -Raw
+$vslangAssignments = [regex]::Matches(
+    $buildCommonText,
+    "SetEnvironmentVariable\('VSLANG',\s*'1033',\s*'Process'\)")
+if ($vslangAssignments.Count -lt 2) {
+    throw 'Visual Studio environment import must force English diagnostics before and after VsDevCmd.'
+}
+
+$cmakeText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\CMakeLists.txt') -Raw
+if ($cmakeText -notmatch 'set\(CMAKE_CL_SHOWINCLUDES_PREFIX\s+"Note: including file: "\)') {
+    throw 'CMake must replace a cached localized MSVC /showIncludes prefix.'
+}
+
 $expectedLegacyDml = Join-Path (Get-RepoRoot) 'x64\DML\Xen.exe'
 Assert-Equal $expectedLegacyDml (Get-LegacyExecutablePath -Backend DML) 'Legacy DML executable detection must use the historical x64 path.'
 
