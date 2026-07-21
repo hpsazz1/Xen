@@ -15,6 +15,7 @@
 #include <algorithm>
 
 #include "config.h"
+#include "runtime/fov_scaling.h"
 #include "modules/SimpleIni.h"
 
 extern std::mutex configMutex;
@@ -376,6 +377,7 @@ bool Config::loadConfig(const std::string& filename)
         uni.pitch = uni.yaw;                              // 垂直 pitch 值
         uni.fovScaled = false;                            // 是否按 FOV 缩放
         uni.baseFOV = 0.0;                                // 基准 FOV
+        uni.scopeFOV = 0.0;                               // 开镜水平 FOV
         game_profiles[uni.name] = uni;
         GameProfile cs;
         cs.name = "CS";
@@ -384,6 +386,7 @@ bool Config::loadConfig(const std::string& filename)
         cs.pitch = 0.022;
         cs.fovScaled = false;
         cs.baseFOV = 0.0;
+        cs.scopeFOV = 0.0;
         game_profiles[cs.name] = cs;
         active_game = cs.name;
 
@@ -433,7 +436,7 @@ bool Config::loadConfig(const std::string& filename)
     ini.GetAllKeys("Games", keys);
 
     // 遍历 [Games] 段的所有键，解析每条游戏配置
-    // 格式: GameName = sens, yaw, pitch(可选), fovScaled(可选), baseFOV(可选)
+    // 格式: GameName = sens, yaw, pitch, fovScaled, baseFOV, scopeFOV
     for (const auto& k : keys)
     {
         std::string name = k.pItem;
@@ -452,6 +455,8 @@ bool Config::loadConfig(const std::string& filename)
             gp.pitch = parts.size() > 2 ? std::stod(parts[2]) : gp.yaw;
             gp.fovScaled = parts.size() > 3 && (parts[3] == "true" || parts[3] == "1");
             gp.baseFOV = parts.size() > 4 ? std::stod(parts[4]) : 0.0;
+            // 旧五字段配置没有开镜FOV时回退到基准FOV，保持升级前不缩放的行为。
+            gp.scopeFOV = parts.size() > 5 ? std::stod(parts[5]) : gp.baseFOV;
 
             game_profiles[name] = gp;
         }
@@ -472,6 +477,7 @@ bool Config::loadConfig(const std::string& filename)
         uni.pitch = uni.yaw;
         uni.fovScaled = false;
         uni.baseFOV = 0.0;
+        uni.scopeFOV = 0.0;
         game_profiles[uni.name] = uni;
     }
 
@@ -485,6 +491,7 @@ bool Config::loadConfig(const std::string& filename)
         cs.pitch = 0.022;
         cs.fovScaled = false;
         cs.baseFOV = 0.0;
+        cs.scopeFOV = 0.0;
         game_profiles[cs.name] = cs;
     }
 
@@ -1251,7 +1258,7 @@ bool Config::saveConfig(const std::string& filename)
              << gp.sens << "," << gp.yaw;
         file << "," << gp.pitch;
         if (gp.fovScaled)
-            file << ",true," << gp.baseFOV;
+            file << ",true," << gp.baseFOV << "," << gp.scopeFOV;
         file << "\n";
     }
 
@@ -1288,7 +1295,7 @@ std::pair<double, double> Config::degToCounts(double degX, double degY, double f
 {
     const auto& gp = currentProfile();
     // 如果启用了 FOV 缩放且有基准 FOV，计算缩放比例
-    double scale = (gp.fovScaled && gp.baseFOV > 1.0) ? (fovNow / gp.baseFOV) : 1.0;
+    double scale = gp.fovScaled ? projectionFovScale(fovNow, gp.baseFOV) : 1.0;
 
     if (gp.sens == 0.0 || gp.yaw == 0.0 || gp.pitch == 0.0)
         return { 0.0, 0.0 };

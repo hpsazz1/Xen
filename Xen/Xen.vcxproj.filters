@@ -124,6 +124,7 @@
     <ClInclude Include="runtime\startup_helpers.h" />
     <ClInclude Include="runtime\lan_control_server.h" />
     <ClInclude Include="runtime\manual_control_arbiter.h" />
+    <ClInclude Include="runtime\fov_scaling.h" />
     <ClInclude Include="runtime\raw_mouse_input.h" />
     <ClInclude Include="detector\dml_detector.h" />
     <ClInclude Include="tensorrt\trt_monitor.h" />

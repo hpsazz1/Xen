@@ -29,6 +29,7 @@
 #include "runtime/recovery_speed_device_protocol.h"
 #include "runtime/manual_control_arbiter.h"
 #include "runtime/raw_mouse_input.h"
+#include "runtime/fov_scaling.h"
 
 #include <cmath>
 #include <algorithm>
@@ -1823,6 +1824,9 @@ int main()
         traceHeader.find("ManualVelocityXDps,ManualVelocityYDps,ManualSpeedDps,ManualAutoAlignment,ManualAutoWeight,ManualControlState,ManualControlEntered,ManualControlExited,ManualWeightedCountsX,ManualWeightedCountsY") != std::string::npos,
         "basic pipeline records manual authority and raw input attribution diagnostics");
     expectTrue(traceHeader.find(
+        "FovScalingEnabled,Zoomed,BaseFovDegrees,ScopeFovDegrees,EffectiveFovXDegrees,EffectiveFovYDegrees,FovSensitivityScale") != std::string::npos,
+        "basic pipeline records effective hipfire and scoped FOV diagnostics");
+    expectTrue(traceHeader.find(
         "ErrorMotion,ErrorMotionX,ErrorMotionY,SettleMotionThreshold,MovingInsideSettle") != std::string::npos,
         "basic pipeline reports settle motion release diagnostics");
     std::string traceRow;
@@ -3520,6 +3524,34 @@ int main()
     expectTrue(recovering.state == ManualControlState::Recover &&
                recovering.autoWeight > 0.0 && recovering.autoWeight < 1.0,
                "manual release uses a bounded recovery ramp");
+
+    const auto hipfireFov = resolveEffectiveFov(106.0, 74.0, true, 106.0, 40.0, false);
+    const auto scopedFov = resolveEffectiveFov(106.0, 74.0, true, 106.0, 40.0, true);
+    expectNear(hipfireFov.horizontalDegrees, 106.0, 1e-9,
+               "FOV scaling keeps configured hipfire horizontal FOV");
+    expectNear(scopedFov.horizontalDegrees, 40.0, 1e-9,
+               "FOV scaling applies configured scoped horizontal FOV");
+    const double expectedScopedVertical = AimCoordinateSpace::radiansToDegrees(
+        2.0 * std::atan(
+            std::tan(AimCoordinateSpace::degreesToRadians(40.0) * 0.5) *
+            std::tan(AimCoordinateSpace::degreesToRadians(74.0) * 0.5) /
+            std::tan(AimCoordinateSpace::degreesToRadians(106.0) * 0.5)));
+    expectNear(scopedFov.verticalDegrees, expectedScopedVertical, 1e-9,
+               "FOV scaling preserves projection aspect ratio");
+    expectNear(scopedFov.sensitivityScale, projectionFovScale(40.0, 106.0), 1e-12,
+               "FOV scaling derives projection ratio from current/base FOV");
+    const double hipfireCountsPerPixel = AimCoordinateSpace::countsPerSourcePixel(
+        hipfireFov.horizontalDegrees, 2560.0,
+        1.4 * 0.022 * hipfireFov.sensitivityScale);
+    const double scopedCountsPerPixel = AimCoordinateSpace::countsPerSourcePixel(
+        scopedFov.horizontalDegrees, 2560.0,
+        1.4 * 0.022 * scopedFov.sensitivityScale);
+    expectNear(scopedCountsPerPixel, hipfireCountsPerPixel, 1e-6,
+               "FOV scaling keeps visual tracking counts per pixel consistent when scoped");
+    const auto invalidScopeFov = resolveEffectiveFov(106.0, 74.0, true, 106.0, 0.0, true);
+    expectTrue(!invalidScopeFov.scalingEnabled && !invalidScopeFov.zoomed &&
+               invalidScopeFov.sensitivityScale == 1.0,
+               "FOV scaling safely disables when scoped FOV is not configured");
 
     // Raw Input 自身回注过滤：相同向量在发送窗口内归为自动包，真实包仍保留。
     RawMouseInput rawInput;

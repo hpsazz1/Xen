@@ -318,8 +318,9 @@ public:
         double sens;        // 鼠标灵敏度
         double yaw;         // 水平方向每计数对应的角度
         double pitch;       // 垂直方向每计数对应的角度
-        bool fovScaled;     // 是否根据 FOV 缩放
-        double baseFOV;     // 基础 FOV 值
+        bool fovScaled = false; // 是否根据开镜状态动态缩放FOV
+        double baseFOV = 0.0;   // 灵敏度标定时的水平FOV，单位度
+        double scopeFOV = 0.0;  // 按下button_zoom后的实际水平FOV，单位度
     };
 
     std::unordered_map<std::string, GameProfile> game_profiles;

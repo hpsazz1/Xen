@@ -87,6 +87,15 @@ struct PipelineFrame
     double integralCountsX = 0.0; ///< 本帧积分补偿计数；限速时按相同比例缩放
     double integralCountsY = 0.0;
 
+    // ========== 开镜FOV缩放 ==========
+    bool fovScalingEnabled = false;
+    bool zoomed = false;
+    double baseFovDegrees = 0.0;
+    double scopeFovDegrees = 0.0;
+    double effectiveFovXDegrees = 0.0;
+    double effectiveFovYDegrees = 0.0;
+    double fovSensitivityScale = 1.0;
+
     // ========== 人手控制权仲裁 ==========
     bool manualControlEnabled = false;
     int manualRawCountsX = 0; ///< Raw Input 原始合计，包含可识别的自身回注

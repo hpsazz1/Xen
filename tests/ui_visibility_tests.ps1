@@ -41,6 +41,9 @@ foreach ($control in @('machine_profile_cache_enabled', 'machine_profile_cache_p
     }
 }
 foreach ($control in @(
+    '##profile_fov_scaled',
+    '##profile_base_fov',
+    '##profile_scope_fov',
     '##manual_control_enabled',
     '##manual_control_enter_dps',
     '##manual_control_full_dps',

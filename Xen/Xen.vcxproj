@@ -163,6 +163,7 @@
     <ClInclude Include="runtime\startup_helpers.h" />
     <ClInclude Include="runtime\lan_control_server.h" />
     <ClInclude Include="runtime\manual_control_arbiter.h" />
+    <ClInclude Include="runtime\fov_scaling.h" />
     <ClInclude Include="runtime\raw_mouse_input.h" />
     <ClInclude Include="tensorrt\nvinf.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DML|x64'">true</ExcludedFromBuild>

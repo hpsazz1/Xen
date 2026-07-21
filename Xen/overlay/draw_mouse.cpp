@@ -435,6 +435,8 @@ static void draw_mouse_page(MouseSettingsPage page)
         ImGui::Text("偏航：%.4f", gp.yaw);
         ImGui::Text("俯仰：%.4f", gp.pitch);
         ImGui::Text("FOV缩放：%s", gp.fovScaled ? "true" : "false");
+        if (gp.fovScaled)
+            ImGui::Text("腰射 / 开镜FOV：%.1f / %.1f", gp.baseFOV, gp.scopeFOV);
 
         // "UNIFIED" 为内置通用配置，不可编辑
         if (gp.name != "UNIFIED")
@@ -446,6 +448,7 @@ static void draw_mouse_page(MouseSettingsPage page)
             float yaw_f = static_cast<float>(modifiable.yaw);
             float pitch_f = static_cast<float>(modifiable.pitch);
             float baseFOV_f = static_cast<float>(modifiable.baseFOV);
+            float scopeFOV_f = static_cast<float>(modifiable.scopeFOV);
 
             // 灵敏度、Yaw、Pitch 编辑滑块
             changed |= OverlayUI::SliderFloatRow("灵敏度", &sens_f, 0.001f, 10.0f, "%.4f");
@@ -453,11 +456,20 @@ static void draw_mouse_page(MouseSettingsPage page)
             changed |= OverlayUI::SliderFloatRow("俯仰", &pitch_f, 0.001f, 0.1f, "%.4f");
 
             // FOV 缩放：开启后根据当前 FOV 自动调整灵敏度
-            changed |= OverlayUI::CheckboxRow("FOV缩放", &modifiable.fovScaled);
+            const bool fovScalingWasEnabled = modifiable.fovScaled;
+            changed |= OverlayUI::CheckboxRow("开镜FOV缩放##profile_fov_scaled", &modifiable.fovScaled);
+            if (!fovScalingWasEnabled && modifiable.fovScaled)
+            {
+                baseFOV_f = static_cast<float>(config.fovX);
+                scopeFOV_f = baseFOV_f;
+            }
             if (modifiable.fovScaled)
             {
-                // 基准 FOV（用于缩放计算）
-                changed |= OverlayUI::SliderFloatRow("基准FOV", &baseFOV_f, 10.0f, 180.0f, "%.1f");
+                changed |= OverlayUI::SliderFloatRow(
+                    "腰射基准FOV##profile_base_fov", &baseFOV_f, 10.0f, 179.0f, "%.1f");
+                scopeFOV_f = std::min(scopeFOV_f, baseFOV_f);
+                changed |= OverlayUI::SliderFloatRow(
+                    "开镜水平FOV##profile_scope_fov", &scopeFOV_f, 10.0f, baseFOV_f, "%.1f");
             }
 
             // 有改动时写回配置结构体并标记脏
@@ -469,8 +481,16 @@ static void draw_mouse_page(MouseSettingsPage page)
                 modifiable.pitch = static_cast<double>(pitch_f);
 
                 modifiable.baseFOV = static_cast<double>(baseFOV_f);
+                modifiable.scopeFOV = static_cast<double>(scopeFOV_f);
 
                 OverlayConfig_MarkDirty();
+                if (globalMouseThread)
+                    globalMouseThread->updateConfig(
+                        config.detection_resolution,
+                        config.fovX,
+                        config.fovY,
+                        config.auto_shoot,
+                        config.bScope_multiplier);
             }
         }
 
@@ -615,6 +635,7 @@ static void draw_mouse_page(MouseSettingsPage page)
                 gp.pitch = 0.022;
                 gp.fovScaled = false;
                 gp.baseFOV = 90.0;
+                gp.scopeFOV = 90.0;
                 config.game_profiles[name] = gp;
                 config.active_game = name;
                 OverlayConfig_MarkDirty();

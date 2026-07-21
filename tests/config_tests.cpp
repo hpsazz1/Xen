@@ -183,12 +183,48 @@ int main()
                    "default cs yaw");
         expectNear(defaults.game_profiles.at("CS").pitch, 0.022, 1e-9,
                    "default cs pitch");
+        expectTrue(!defaults.game_profiles.at("CS").fovScaled &&
+                   defaults.game_profiles.at("CS").scopeFOV == 0.0,
+                   "default cs FOV scaling remains opt-in");
         expectNear(defaults.game_profiles.at("UNIFIED").sens, 1.0, 1e-9,
                    "default unified sensitivity");
         expectNear(defaults.pipeline_tracer_max_frames, 1000.0, 0.0,
                    "default pipeline trace capacity");
     }
     std::filesystem::remove(defaultsPath, removeError);
+
+    const std::filesystem::path fovPath = "xen_config_fov_scaling_test.ini";
+    {
+        std::ofstream fovFile(fovPath);
+        fovFile << "active_game = SCOPE\n\n[Games]\n"
+                << "SCOPE = 1.4,0.022,0.022,true,106,40\n";
+    }
+    Config fovConfig{};
+    if (!fovConfig.loadConfig(fovPath.string()))
+    {
+        std::cerr << "FOV scaling config load failed\n";
+        ++failures;
+    }
+    else
+    {
+        const auto& scope = fovConfig.game_profiles.at("SCOPE");
+        expectTrue(scope.fovScaled && scope.baseFOV == 106.0 && scope.scopeFOV == 40.0,
+                   "game profile loads scoped FOV scaling parameters");
+        const auto hipfireCounts = fovConfig.degToCounts(1.0, 0.0, 106.0).first;
+        const auto scopedCounts = fovConfig.degToCounts(1.0, 0.0, 40.0).first;
+        const double expectedRatio = std::tan(106.0 * 3.14159265358979323846 / 360.0) /
+            std::tan(40.0 * 3.14159265358979323846 / 360.0);
+        expectNear(scopedCounts / hipfireCounts, expectedRatio, 1e-9,
+                   "deg-to-counts uses projection-correct FOV scaling");
+        expectTrue(fovConfig.saveConfig(fovPath.string()),
+                   "scoped FOV profile saves successfully");
+        std::ifstream fovSaved(fovPath);
+        const std::string fovText((std::istreambuf_iterator<char>(fovSaved)),
+                                  std::istreambuf_iterator<char>());
+        expectTrue(fovText.find("SCOPE = 1.4,0.022,0.022,true,106,40") != std::string::npos,
+                   "saved profile preserves scoped FOV field");
+    }
+    std::filesystem::remove(fovPath, removeError);
 
     const std::filesystem::path legacyPath = "xen_config_legacy_prediction_test.ini";
     {

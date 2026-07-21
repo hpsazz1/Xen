@@ -396,7 +396,7 @@ UNIFIED = 1,0.022,0.022
 格式：
 
 ```text
-name = sensitivity,yaw,pitch[,fovScaled,baseFOV]
+name = sensitivity,yaw,pitch[,fovScaled,baseFOV,scopeFOV]
 ```
 
 示例：
@@ -407,5 +407,13 @@ CS = 1.4,0.022,0.022
 UNIFIED = 1,0.022,0.022
 MY_GAME = 2.5,0.02,0.02,true,90
 ```
+
+启用开镜FOV缩放时，Profile可写为：
+
+```ini
+CS = 1.4,0.022,0.022,true,106,40
+```
+
+`baseFOV`是灵敏度标定时的腰射水平FOV，`scopeFOV`是按住`button_zoom`后的实际水平FOV。程序按针孔投影的半视场正切比例缩放灵敏度，同步推导垂直视场，并在切镜边沿清空旧坐标系下的队列、滤波、积分和量化余量。旧五字段配置仍可读取，但缺少`scopeFOV`时按`baseFOV`处理，因此不会自动改变既有速度。
 
 如果 `active_game` 缺失或无效，应用优先回退到内置 `CS`，再回退到 `UNIFIED`。

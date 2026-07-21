@@ -197,6 +197,16 @@ void mouseThreadFunction(MouseThread& mouseThread)
             wasAiming = aimingNow;
         }
 
+        // FOV变化会改变像素、角度和counts三者的比例。切镜边沿清空旧状态，禁止把
+        // 腰射滤波、积分、量化余量或排队命令带入开镜坐标系。
+        static bool wasZooming = zooming.load(std::memory_order_relaxed);
+        const bool zoomingNow = zooming.load(std::memory_order_relaxed);
+        if (zoomingNow != wasZooming)
+        {
+            mouseThread.resetTracking(false);
+            wasZooming = zoomingNow;
+        }
+
         // ---- 从检测缓冲区轮询新帧（带 1ms 等待避免忙等） ----
         {
             std::unique_lock<std::mutex> lock(detectionBuffer.mutex);

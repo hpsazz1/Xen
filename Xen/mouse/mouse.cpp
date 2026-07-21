@@ -808,6 +808,7 @@ void MouseThread::refreshGameProfileCache()
         cachedGamePitch = gpPtr->pitch;
         cachedGameFovScaled = gpPtr->fovScaled;
         cachedGameBaseFOV = gpPtr->baseFOV;
+        cachedGameScopeFOV = gpPtr->scopeFOV;
     }
 
     move_response_seconds = std::clamp(
@@ -830,6 +831,16 @@ void MouseThread::refreshGameProfileCache()
     manualControlSettings.crossDirectionWeight = config.manual_control_cross_weight;
     manualControlSettings.recoverySeconds = config.manual_control_recovery_ms / 1000.0;
     refreshMachineProfileDecision();
+}
+
+EffectiveFovState MouseThread::effectiveFovState() const
+{
+    return resolveEffectiveFov(
+        fov_x, fov_y,
+        cachedGameFovScaled,
+        cachedGameBaseFOV,
+        cachedGameScopeFOV,
+        zooming.load(std::memory_order_relaxed));
 }
 
 void MouseThread::refreshMachineProfileDecision()
@@ -936,8 +947,8 @@ std::pair<double, double> MouseThread::mouseCountsToScreenPixels(int dx, int dy)
 
     if (cachedGameSens != 0.0 && cachedGameYaw != 0.0 && cachedGamePitch != 0.0)
     {
-        const double fovNow = std::max(1.0, fov_x);
-        const double fovScale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0) ? (fovNow / cachedGameBaseFOV) : 1.0;
+        const EffectiveFovState fov = effectiveFovState();
+        const double fovScale = fov.sensitivityScale;
         const double degX = static_cast<double>(dx) * cachedGameSens * cachedGameYaw * fovScale;
         const double degY = static_cast<double>(dy) * cachedGameSens * cachedGamePitch * fovScale;
 
@@ -948,9 +959,9 @@ std::pair<double, double> MouseThread::mouseCountsToScreenPixels(int dx, int dy)
         const double sourcePixelHeight = AimCoordinateSpace::resolveFovPixelSpan(
             ::screenHeight.load(std::memory_order_relaxed), screen_height);
         deltaPxX = AimCoordinateSpace::sourcePixelDeltaForAngleDegrees(
-            degX, fov_x, sourcePixelWidth);
+            degX, fov.horizontalDegrees, sourcePixelWidth);
         deltaPxY = AimCoordinateSpace::sourcePixelDeltaForAngleDegrees(
-            degY, fov_y, sourcePixelHeight);
+            degY, fov.verticalDegrees, sourcePixelHeight);
     }
 
     return { deltaPxX, deltaPxY };
@@ -987,8 +998,7 @@ void MouseThread::recordMotionCompensationStep(
 
 std::pair<double, double> MouseThread::currentDegreesPerCount() const
 {
-    const double fovScale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0)
-        ? (fov_x / cachedGameBaseFOV) : 1.0;
+    const double fovScale = effectiveFovState().sensitivityScale;
     return {
         cachedGameSens * cachedGameYaw * fovScale,
         cachedGameSens * cachedGamePitch * fovScale
@@ -1101,7 +1111,9 @@ void MouseThread::sendMovementToDriver(Move move)
     recordMotionCompensationStep(move.dx, move.dy, sendTime);
     const auto configuredDegreesPerCount = currentDegreesPerCount();
     const MachineProfileDecision profileDecision = getMachineProfileDecision();
-    const auto degreesPerCount = profileDecision.cacheMatched
+    // 机器缓存当前没有scopeFOV身份字段；开镜时禁止复用腰射标定角度比例。
+    const auto degreesPerCount = profileDecision.cacheMatched &&
+        !effectiveFovState().zoomed
         ? std::pair<double, double>{
             profileDecision.degreesPerCountX,
             profileDecision.degreesPerCountY }
@@ -1402,11 +1414,12 @@ AimPipelineFrameState MouseThread::processAimPipelineObservation(
             observation.timing.sourceWidth, screen_width);
         const double sourceHeight = AimCoordinateSpace::resolveFovPixelSpan(
             observation.timing.sourceHeight, screen_height);
+        const EffectiveFovState fov = effectiveFovState();
         const auto measuredLos = AimCoordinateSpace::pixelOffsetToLosAngles(
             target.pivotX - center_x,
             target.pivotY - center_y,
-            fov_x,
-            fov_y,
+            fov.horizontalDegrees,
+            fov.verticalDegrees,
             sourceWidth,
             sourceHeight);
         const auto cameraAtObservation = appliedViewMotionModel.at(observationTime);
@@ -1418,7 +1431,8 @@ AimPipelineFrameState MouseThread::processAimPipelineObservation(
                 observationTime, kManeuverResponseRateUncertaintyTailMs);
         const MachineProfileDecision profileDecision = getMachineProfileDecision();
         const auto configuredDegreesPerCount = currentDegreesPerCount();
-        const auto degreesPerCount = profileDecision.angleSpaceEnabled
+        // 开镜FOV尚未进入机器缓存身份，开镜期间使用当前Profile的动态比例。
+        const auto degreesPerCount = profileDecision.angleSpaceEnabled && !fov.zoomed
             ? std::pair<double, double>{
                 profileDecision.degreesPerCountX,
                 profileDecision.degreesPerCountY }
@@ -1588,9 +1602,11 @@ void MouseThread::moveMousePivot(
         ::screenWidth.load(std::memory_order_relaxed), screen_width);
     const double calibrationSourceHeight = AimCoordinateSpace::resolveFovPixelSpan(
         ::screenHeight.load(std::memory_order_relaxed), screen_height);
+    const EffectiveFovState activeFov = effectiveFovState();
     profileCalibrator.addObservation(
         pivotX, pivotY, effectiveObservationTime,
-        calibrationSourceWidth, calibrationSourceHeight, fov_x, fov_y);
+        calibrationSourceWidth, calibrationSourceHeight,
+        activeFov.horizontalDegrees, activeFov.verticalDegrees);
     const PassiveProfileCalibrator::Snapshot calibration =
         profileCalibrator.snapshot();
     const auto viewAtObservation = getMotionCompensationAt(effectiveObservationTime);
@@ -1684,8 +1700,7 @@ void MouseThread::moveMousePivot(
     const double errorX = lastPredictionResult.x - center_x;
     const double errorY = lastPredictionResult.y - center_y;
 
-    const double fovScale = (cachedGameFovScaled && cachedGameBaseFOV > 1.0)
-        ? (fov_x / cachedGameBaseFOV) : 1.0;
+    const double fovScale = activeFov.sensitivityScale;
     // FOV 属于捕获源完整画面；检测坐标只是该画面的中心裁剪且保持 1:1 像素映射。
     // 使用捕获后端动态发布的源尺寸，可避免把 2560 等实际源宽误按 320 宽检测区域换算。
     const double sourcePixelWidth = AimCoordinateSpace::resolveFovPixelSpan(
@@ -1695,9 +1710,9 @@ void MouseThread::moveMousePivot(
     const double horizontalDenominator = cachedGameSens * cachedGameYaw * fovScale;
     const double verticalDenominator = cachedGameSens * cachedGamePitch * fovScale;
     const double countsPerPixelX = AimCoordinateSpace::countsPerSourcePixel(
-        fov_x, sourcePixelWidth, horizontalDenominator);
+        activeFov.horizontalDegrees, sourcePixelWidth, horizontalDenominator);
     const double countsPerPixelY = AimCoordinateSpace::countsPerSourcePixel(
-        fov_y, sourcePixelHeight, verticalDenominator);
+        activeFov.verticalDegrees, sourcePixelHeight, verticalDenominator);
 
     BasicAimController::Settings settings;
     settings.responseSeconds = move_response_seconds;
@@ -1880,6 +1895,13 @@ void MouseThread::moveMousePivot(
         pf->requestedCountsY = output.countsY;
         pf->integralCountsX = output.integralCountsX;
         pf->integralCountsY = output.integralCountsY;
+        pf->fovScalingEnabled = activeFov.scalingEnabled;
+        pf->zoomed = activeFov.zoomed;
+        pf->baseFovDegrees = cachedGameBaseFOV;
+        pf->scopeFovDegrees = cachedGameScopeFOV;
+        pf->effectiveFovXDegrees = activeFov.horizontalDegrees;
+        pf->effectiveFovYDegrees = activeFov.verticalDegrees;
+        pf->fovSensitivityScale = activeFov.sensitivityScale;
         pf->manualControlEnabled = manual_control_enabled;
         pf->manualRawCountsX = manualSample.rawDx;
         pf->manualRawCountsY = manualSample.rawDy;

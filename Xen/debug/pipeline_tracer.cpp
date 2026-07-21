@@ -213,6 +213,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "ViewMotionX,ViewMotionY,ViewMotionCompensationDelayMs,ViewMotionCompensationResponseMs,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictionStationarySuppressed,PredictionMotionEvidenceSuppressed,PredictedX,PredictedY,"
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
+         << "FovScalingEnabled,Zoomed,BaseFovDegrees,ScopeFovDegrees,EffectiveFovXDegrees,EffectiveFovYDegrees,FovSensitivityScale,"
          << "ManualControlEnabled,ManualRawCountsX,ManualRawCountsY,ManualInputCountsX,ManualInputCountsY,ManualSelfSuppressedCountsX,ManualSelfSuppressedCountsY,ManualRawPacketCount,ManualSelfSuppressedPacketCount,"
          << "ManualVelocityXDps,ManualVelocityYDps,ManualSpeedDps,ManualAutoAlignment,ManualAutoWeight,ManualControlState,ManualControlEntered,ManualControlExited,ManualWeightedCountsX,ManualWeightedCountsY,"
          << "FinalMx,FinalMy,"
@@ -439,6 +440,11 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.requestedPixelX << ',' << f.requestedPixelY << ','
              << f.requestedCountsX << ',' << f.requestedCountsY << ','
              << f.integralCountsX << ',' << f.integralCountsY << ','
+             << (f.fovScalingEnabled ? '1' : '0') << ','
+             << (f.zoomed ? '1' : '0') << ','
+             << f.baseFovDegrees << ',' << f.scopeFovDegrees << ','
+             << f.effectiveFovXDegrees << ',' << f.effectiveFovYDegrees << ','
+             << f.fovSensitivityScale << ','
              << (f.manualControlEnabled ? '1' : '0') << ','
              << f.manualRawCountsX << ',' << f.manualRawCountsY << ','
              << f.manualInputCountsX << ',' << f.manualInputCountsY << ','

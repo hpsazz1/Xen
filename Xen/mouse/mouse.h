@@ -34,6 +34,7 @@
 #include "runtime/target_predictor.h"
 #include "runtime/view_motion_history.h"
 #include "runtime/manual_control_arbiter.h"
+#include "runtime/fov_scaling.h"
 
 struct PipelineFrame;
 
@@ -154,6 +155,7 @@ private:
     double                        cachedGamePitch = 0.022;
     bool                          cachedGameFovScaled = false;
     double                        cachedGameBaseFOV = 0.0;
+    double                        cachedGameScopeFOV = 0.0;
     // 缓存速度曲线参数（避免 calculate_speed_multiplier 每帧加锁）
     float                         cachedSnapRadius = 1.5f;
     float                         cachedNearRadius = 25.0f;
@@ -263,6 +265,8 @@ private:
 
     /** @brief 刷新缓存的游戏配置值（在 updateConfig 和构造函数中调用） */
     void refreshGameProfileCache();
+    /** @brief 解析当前腰射/开镜状态统一使用的FOV与灵敏度缩放。 */
+    EffectiveFovState effectiveFovState() const;
 
 public:
     /**
