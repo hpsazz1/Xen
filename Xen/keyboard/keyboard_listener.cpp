@@ -23,6 +23,7 @@
 #include "capture.h"
 #include "runtime/thread_loops.h"
 #include "runtime/application_shutdown.h"
+#include "runtime/zoom_toggle.h"
 
 extern std::atomic<bool> shouldExit;
 extern std::atomic<bool> aiming;
@@ -63,6 +64,7 @@ namespace
     {
         bool autoAim = false;
         bool enableArrowsSettings = false;
+        bool zoomToggleMode = false;
         std::vector<std::string> buttonTargeting;
         std::vector<std::string> buttonShoot;
         std::vector<std::string> buttonZoom;
@@ -83,6 +85,8 @@ namespace
         KeyboardConfigSnapshot snapshot;
         snapshot.autoAim = config.auto_aim;
         snapshot.enableArrowsSettings = config.enable_arrows_settings;
+        const auto& profile = config.currentProfile();
+        snapshot.zoomToggleMode = profile.name == "CS" && profile.fovScaled;
         snapshot.buttonTargeting = config.button_targeting;
         snapshot.buttonShoot = config.button_shoot;
         snapshot.buttonZoom = config.button_zoom;
@@ -214,6 +218,7 @@ bool isAnyKeyPressedWin32Only(const std::vector<std::string>& keys)
  */
 void keyboardListener()
 {
+    ZoomToggleState zoomToggleState;
     while (!shouldExit)
     {
         KeyboardConfigSnapshot cfg = SnapshotKeyboardConfig();
@@ -236,8 +241,10 @@ void keyboardListener()
             isShootingActiveFromDevices();
 
         // === 缩放（开镜）状态检测 ===
-        zooming = isAnyKeyPressedInternal(cfg.buttonZoom) ||
+        // CS单倍镜按右键上升沿切换，第二次点击退出；其他Profile保留按住语义。
+        const bool zoomPressed = isAnyKeyPressedInternal(cfg.buttonZoom) ||
             isZoomingActiveFromDevices();
+        zooming = zoomToggleState.update(zoomPressed, cfg.zoomToggleMode);
 
         // === 退出程序（仅 Win32） ===
         if (isAnyKeyPressedWin32Only(cfg.buttonExit))

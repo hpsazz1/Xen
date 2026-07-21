@@ -128,8 +128,8 @@ bool Config::loadConfig(const std::string& filename)
         motion_change_protection = false;
 
         // === 鼠标移动设置 ===
-        fovX = 106;                                      // 水平视野（度）
-        fovY = 74;                                       // 垂直视野（度）
+        fovX = 106.2602;                                 // CS2 16:9 腰射水平视野（度）
+        fovY = 73.7398;                                  // CS2 16:9 腰射垂直视野（度）
         minSpeedMultiplier = 0.1f;                       // 鼠标最小速度倍率
         maxSpeedMultiplier = 0.1f;                       // 鼠标最大速度倍率
         move_response_ms = 120.0f;                       // 五类NDI抗晃动响应时间（毫秒）
@@ -384,9 +384,9 @@ bool Config::loadConfig(const std::string& filename)
         cs.sens = 1.4;
         cs.yaw = 0.022;
         cs.pitch = 0.022;
-        cs.fovScaled = false;
-        cs.baseFOV = 0.0;
-        cs.scopeFOV = 0.0;
+        cs.fovScaled = true;
+        cs.baseFOV = Cs2FovReference::kHipfireHorizontalDegrees;
+        cs.scopeFOV = Cs2FovReference::kScope1HorizontalDegrees;
         game_profiles[cs.name] = cs;
         active_game = cs.name;
 
@@ -431,6 +431,7 @@ bool Config::loadConfig(const std::string& filename)
 
     // === 游戏配置项读入 ===
     game_profiles.clear();
+    bool migratedLegacyCsFov = false;
 
     CSimpleIniA::TNamesDepend keys;
     ini.GetAllKeys("Games", keys);
@@ -457,6 +458,16 @@ bool Config::loadConfig(const std::string& filename)
             gp.baseFOV = parts.size() > 4 ? std::stod(parts[4]) : 0.0;
             // 旧五字段配置没有开镜FOV时回退到基准FOV，保持升级前不缩放的行为。
             gp.scopeFOV = parts.size() > 5 ? std::stod(parts[5]) : gp.baseFOV;
+
+            // 历史CS配置只有sens/yaw/pitch三字段；升级时启用已验证的16:9单倍镜预设。
+            // 四字段及以上视为用户已明确选择，继续尊重显式开关和自定义FOV。
+            if (name == "CS" && parts.size() <= 3)
+            {
+                gp.fovScaled = true;
+                gp.baseFOV = Cs2FovReference::kHipfireHorizontalDegrees;
+                gp.scopeFOV = Cs2FovReference::kScope1HorizontalDegrees;
+                migratedLegacyCsFov = true;
+            }
 
             game_profiles[name] = gp;
         }
@@ -489,9 +500,9 @@ bool Config::loadConfig(const std::string& filename)
         cs.sens = 1.4;
         cs.yaw = 0.022;
         cs.pitch = 0.022;
-        cs.fovScaled = false;
-        cs.baseFOV = 0.0;
-        cs.scopeFOV = 0.0;
+        cs.fovScaled = true;
+        cs.baseFOV = Cs2FovReference::kHipfireHorizontalDegrees;
+        cs.scopeFOV = Cs2FovReference::kScope1HorizontalDegrees;
         game_profiles[cs.name] = cs;
     }
 
@@ -579,8 +590,15 @@ bool Config::loadConfig(const std::string& filename)
     motion_change_protection = get_bool("motion_change_protection", false);
 
     // === 鼠标控制配置 ===
-    fovX = get_long("fovX", 106);
-    fovY = get_long("fovY", 74);
+    fovX = get_double("fovX", 106.2602);
+    fovY = get_double("fovY", 73.7398);
+    if (migratedLegacyCsFov && std::abs(fovX - 106.0) <= 0.001 &&
+        std::abs(fovY - 74.0) <= 0.001)
+    {
+        // 只迁移历史默认整数，不覆盖用户明确保存的自定义视场角。
+        fovX = Cs2FovReference::kHipfireHorizontalDegrees;
+        fovY = Cs2FovReference::kHipfireVerticalDegrees;
+    }
     minSpeedMultiplier = (float)get_double("minSpeedMultiplier", 0.1);
     maxSpeedMultiplier = (float)get_double("maxSpeedMultiplier", 0.1);
     move_response_ms = (float)get_double("move_response_ms", 120.0);
@@ -1007,8 +1025,10 @@ bool Config::saveConfig(const std::string& filename)
     // === 鼠标移动设置 ===
     file << "# Mouse move\n"
         << "# WIN32, GHUB, RAZER, KMBOX_NET, KMBOX_A, MAKCU\n"
+        << std::fixed << std::setprecision(4)
         << "fovX = " << fovX << "\n"
         << "fovY = " << fovY << "\n"
+        << std::defaultfloat << std::setprecision(6)
         << "move_response_ms = " << move_response_ms << "\n"
         << "move_max_speed_cps = " << move_max_speed_cps << "\n"
         << "move_catch_up_max_speed_cps = " << move_catch_up_max_speed_cps << "\n"
@@ -1249,7 +1269,8 @@ bool Config::saveConfig(const std::string& filename)
     // === 当前激活的游戏配置 ===
     file << "# Active game profile\n";
     file << "active_game = " << active_game << "\n\n";
-    file << std::defaultfloat << std::setprecision(6);
+    // CS2参考值包含四位小数；10位有效数字同时覆盖灵敏度和FOV往返精度。
+    file << std::defaultfloat << std::setprecision(10);
     file << "[Games]\n";
     for (auto& kv : game_profiles)
     {

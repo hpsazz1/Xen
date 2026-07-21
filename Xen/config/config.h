@@ -65,8 +65,8 @@ public:
     bool   motion_change_protection;     // 是否启用运动突变保护 (默认 false)
 
     // ========== FOV 与速度设置 ==========
-    int fovX;
-    int fovY;
+    double fovX;                       // 水平完整视场角（度），保留小数以匹配游戏投影参数
+    double fovY;                       // 垂直完整视场角（度），保留小数以匹配游戏投影参数
     float minSpeedMultiplier;
     float maxSpeedMultiplier;
     // 基础移动控制（当前主链路）。旧速度倍率仅用于配置迁移，不再参与运行。

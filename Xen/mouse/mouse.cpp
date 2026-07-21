@@ -55,8 +55,8 @@
  */
 MouseThread::MouseThread(
     int resolution,
-    int fovX,
-    int fovY,
+    double fovX,
+    double fovY,
     bool auto_shoot,
     float bScope_multiplier,
     IMouseInput* mouseInputDevice)
@@ -156,8 +156,8 @@ MouseThread::MouseThread(
  */
 void MouseThread::updateConfig(
     int resolution,
-    int fovX,
-    int fovY,
+    double fovX,
+    double fovY,
     bool auto_shoot,
     float bScope_multiplier
 )

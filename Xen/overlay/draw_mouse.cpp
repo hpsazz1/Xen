@@ -5,6 +5,7 @@
 
 #include <shellapi.h>
 #include <algorithm>
+#include <cmath>
 
 #include "imgui/imgui.h"
 #include <imgui_internal.h>
@@ -14,6 +15,7 @@
 #include "overlay/ui_sections.h"
 #include "include/other_tools.h"
 #include "kmbox_net/picture.h"
+#include "runtime/fov_scaling.h"
 
 // 获取当前安装的 GHUB 版本号（用于输入法兼容性检测）
 std::string ghub_version = get_ghub_version();
@@ -22,8 +24,8 @@ std::string ghub_version = get_ghub_version();
 // 以下 prev_* 变量用于在每帧检测配置是否发生变化，
 // 一旦检测到差异则同步更新到 mouseThread 并标记配置为已修改。
 // 视野（FOV）相关
-int prev_fovX = config.fovX;
-int prev_fovY = config.fovY;
+double prev_fovX = config.fovX;
+double prev_fovY = config.fovY;
 // 速度倍率
 float prev_minSpeedMultiplier = config.minSpeedMultiplier;
 float prev_maxSpeedMultiplier = config.maxSpeedMultiplier;
@@ -132,8 +134,12 @@ static void draw_mouse_page(MouseSettingsPage page)
     if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
         OverlayUI::BeginSection("视野范围", "mouse_section_fov"))
     {
-        OverlayUI::SliderIntRow("水平视野(FOV X)", &config.fovX, 10, 120);
-        OverlayUI::SliderIntRow("垂直视野(FOV Y)", &config.fovY, 10, 120);
+        float fovX = static_cast<float>(config.fovX);
+        float fovY = static_cast<float>(config.fovY);
+        if (OverlayUI::SliderFloatRow("水平视野(FOV X)", &fovX, 10.0f, 120.0f, "%.4f", "##fov_x"))
+            config.fovX = static_cast<double>(fovX);
+        if (OverlayUI::SliderFloatRow("垂直视野(FOV Y)", &fovY, 10.0f, 120.0f, "%.4f", "##fov_y"))
+            config.fovY = static_cast<double>(fovY);
         OverlayUI::EndSection();
     }
 
@@ -436,7 +442,7 @@ static void draw_mouse_page(MouseSettingsPage page)
         ImGui::Text("俯仰：%.4f", gp.pitch);
         ImGui::Text("FOV缩放：%s", gp.fovScaled ? "true" : "false");
         if (gp.fovScaled)
-            ImGui::Text("腰射 / 开镜FOV：%.1f / %.1f", gp.baseFOV, gp.scopeFOV);
+            ImGui::Text("腰射 / 开镜FOV：%.4f / %.4f", gp.baseFOV, gp.scopeFOV);
 
         // "UNIFIED" 为内置通用配置，不可编辑
         if (gp.name != "UNIFIED")
@@ -463,13 +469,37 @@ static void draw_mouse_page(MouseSettingsPage page)
                 baseFOV_f = static_cast<float>(config.fovX);
                 scopeFOV_f = baseFOV_f;
             }
+            const auto nearFov = [](double lhs, double rhs) {
+                return std::abs(lhs - rhs) <= 0.001;
+            };
+            int cs2Preset = 0;
+            if (modifiable.fovScaled &&
+                nearFov(config.fovX, Cs2FovReference::kHipfireHorizontalDegrees) &&
+                nearFov(config.fovY, Cs2FovReference::kHipfireVerticalDegrees) &&
+                nearFov(baseFOV_f, Cs2FovReference::kHipfireHorizontalDegrees))
+            {
+                if (nearFov(scopeFOV_f, Cs2FovReference::kScope1HorizontalDegrees))
+                    cs2Preset = 1;
+            }
+            const char* cs2PresetItems[] = { "自定义", "CS2 右键单倍镜" };
+            if (OverlayUI::ComboRow("开镜FOV预设", &cs2Preset, cs2PresetItems,
+                IM_ARRAYSIZE(cs2PresetItems), "##profile_fov_preset") && cs2Preset != 0)
+            {
+                // 预设是一个原子配置动作：同步腰射投影、镜倍率和缩放开关，避免混搭参数。
+                config.fovX = Cs2FovReference::kHipfireHorizontalDegrees;
+                config.fovY = Cs2FovReference::kHipfireVerticalDegrees;
+                modifiable.fovScaled = true;
+                baseFOV_f = static_cast<float>(Cs2FovReference::kHipfireHorizontalDegrees);
+                scopeFOV_f = static_cast<float>(Cs2FovReference::kScope1HorizontalDegrees);
+                changed = true;
+            }
             if (modifiable.fovScaled)
             {
                 changed |= OverlayUI::SliderFloatRow(
-                    "腰射基准FOV##profile_base_fov", &baseFOV_f, 10.0f, 179.0f, "%.1f");
+                    "腰射基准FOV##profile_base_fov", &baseFOV_f, 10.0f, 179.0f, "%.4f");
                 scopeFOV_f = std::min(scopeFOV_f, baseFOV_f);
                 changed |= OverlayUI::SliderFloatRow(
-                    "开镜水平FOV##profile_scope_fov", &scopeFOV_f, 10.0f, baseFOV_f, "%.1f");
+                    "开镜水平FOV##profile_scope_fov", &scopeFOV_f, 5.0f, baseFOV_f, "%.4f");
             }
 
             // 有改动时写回配置结构体并标记脏

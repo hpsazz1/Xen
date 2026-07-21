@@ -177,15 +177,22 @@ int main()
         expectString(defaults.kmbox_net_port, "13384", "default kmbox net port");
         expectString(defaults.kmbox_net_uuid, "7679E04E", "default kmbox net uuid");
         expectString(defaults.active_game, "CS", "default active game profile");
+        expectNear(defaults.fovX, 106.2602, 1e-9,
+                   "default horizontal FOV matches CS2 16:9 reference");
+        expectNear(defaults.fovY, 73.7398, 1e-9,
+                   "default vertical FOV matches CS2 16:9 reference");
         expectNear(defaults.game_profiles.at("CS").sens, 1.4, 1e-9,
                    "default cs sensitivity");
         expectNear(defaults.game_profiles.at("CS").yaw, 0.022, 1e-9,
                    "default cs yaw");
         expectNear(defaults.game_profiles.at("CS").pitch, 0.022, 1e-9,
                    "default cs pitch");
-        expectTrue(!defaults.game_profiles.at("CS").fovScaled &&
-                   defaults.game_profiles.at("CS").scopeFOV == 0.0,
-                   "default cs FOV scaling remains opt-in");
+        expectTrue(defaults.game_profiles.at("CS").fovScaled,
+                   "default cs profile enables right-click single zoom scaling");
+        expectNear(defaults.game_profiles.at("CS").baseFOV, 106.2602, 1e-9,
+                   "default cs profile uses reference hipfire FOV");
+        expectNear(defaults.game_profiles.at("CS").scopeFOV, 51.7740, 1e-9,
+                   "default cs profile uses reference single zoom FOV");
         expectNear(defaults.game_profiles.at("UNIFIED").sens, 1.0, 1e-9,
                    "default unified sensitivity");
         expectNear(defaults.pipeline_tracer_max_frames, 1000.0, 0.0,
@@ -196,7 +203,8 @@ int main()
     const std::filesystem::path fovPath = "xen_config_fov_scaling_test.ini";
     {
         std::ofstream fovFile(fovPath);
-        fovFile << "active_game = SCOPE\n\n[Games]\n"
+        fovFile << "fovX = 106.2602\nfovY = 73.7398\n"
+                << "active_game = SCOPE\n\n[Games]\n"
                 << "SCOPE = 1.4,0.022,0.022,true,106,40\n";
     }
     Config fovConfig{};
@@ -208,6 +216,10 @@ int main()
     else
     {
         const auto& scope = fovConfig.game_profiles.at("SCOPE");
+        expectNear(fovConfig.fovX, 106.2602, 1e-9,
+                   "horizontal FOV loads without integer truncation");
+        expectNear(fovConfig.fovY, 73.7398, 1e-9,
+                   "vertical FOV loads without integer truncation");
         expectTrue(scope.fovScaled && scope.baseFOV == 106.0 && scope.scopeFOV == 40.0,
                    "game profile loads scoped FOV scaling parameters");
         const auto hipfireCounts = fovConfig.degToCounts(1.0, 0.0, 106.0).first;
@@ -223,8 +235,30 @@ int main()
                                   std::istreambuf_iterator<char>());
         expectTrue(fovText.find("SCOPE = 1.4,0.022,0.022,true,106,40") != std::string::npos,
                    "saved profile preserves scoped FOV field");
+        expectTrue(fovText.find("fovX = 106.2602") != std::string::npos &&
+                   fovText.find("fovY = 73.7398") != std::string::npos,
+                   "saved global FOV preserves four decimal places");
     }
     std::filesystem::remove(fovPath, removeError);
+
+    const std::filesystem::path legacyCsPath = "xen_config_legacy_cs_fov_test.ini";
+    {
+        std::ofstream legacyCsFile(legacyCsPath);
+        legacyCsFile << "fovX = 106\nfovY = 74\nactive_game = CS\n\n[Games]\n"
+                     << "CS = 1.4,0.022,0.022\n";
+    }
+    Config legacyCsConfig{};
+    expectTrue(legacyCsConfig.loadConfig(legacyCsPath.string()),
+               "legacy three-field CS profile loads successfully");
+    expectTrue(legacyCsConfig.game_profiles.at("CS").fovScaled,
+               "legacy three-field CS profile migrates to single zoom scaling");
+    expectNear(legacyCsConfig.game_profiles.at("CS").scopeFOV, 51.7740, 1e-9,
+               "legacy CS profile migrates to reference single zoom FOV");
+    expectNear(legacyCsConfig.fovX, 106.2602, 1e-9,
+               "legacy default horizontal FOV migrates without truncation");
+    expectNear(legacyCsConfig.fovY, 73.7398, 1e-9,
+               "legacy default vertical FOV migrates without truncation");
+    std::filesystem::remove(legacyCsPath, removeError);
 
     const std::filesystem::path legacyPath = "xen_config_legacy_prediction_test.ini";
     {

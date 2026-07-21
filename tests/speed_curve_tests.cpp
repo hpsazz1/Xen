@@ -30,6 +30,7 @@
 #include "runtime/manual_control_arbiter.h"
 #include "runtime/raw_mouse_input.h"
 #include "runtime/fov_scaling.h"
+#include "runtime/zoom_toggle.h"
 
 #include <cmath>
 #include <algorithm>
@@ -3552,6 +3553,31 @@ int main()
     expectTrue(!invalidScopeFov.scalingEnabled && !invalidScopeFov.zoomed &&
                invalidScopeFov.sensitivityScale == 1.0,
                "FOV scaling safely disables when scoped FOV is not configured");
+
+    // CS2参考表使用四位小数，允许末位测量舍入误差；水平和垂直投影必须互相吻合。
+    const auto cs2Scope1 = resolveEffectiveFov(
+        Cs2FovReference::kHipfireHorizontalDegrees,
+        Cs2FovReference::kHipfireVerticalDegrees,
+        true,
+        Cs2FovReference::kHipfireHorizontalDegrees,
+        Cs2FovReference::kScope1HorizontalDegrees,
+        true);
+    expectNear(cs2Scope1.verticalDegrees, Cs2FovReference::kScope1VerticalDegrees, 0.0011,
+               "CS2 single zoom preset reproduces reference vertical FOV");
+    expectNear(cs2Scope1.sensitivityScale,
+               projectionFovScale(51.7740, 106.2602), 1e-12,
+               "CS2 single zoom uses projection-correct sensitivity scale");
+
+    ZoomToggleState cs2ZoomToggle;
+    expectTrue(!cs2ZoomToggle.update(false, true),
+               "CS2 single zoom starts in hipfire");
+    expectTrue(cs2ZoomToggle.update(true, true) && cs2ZoomToggle.update(true, true),
+               "holding right mouse keeps single zoom latched without repeat toggles");
+    expectTrue(cs2ZoomToggle.update(false, true) && !cs2ZoomToggle.update(true, true),
+               "second right mouse click exits single zoom");
+    expectTrue(!cs2ZoomToggle.update(false, false) && cs2ZoomToggle.update(true, false) &&
+               !cs2ZoomToggle.update(false, false),
+               "non-CS profiles retain hold-to-zoom behavior");
 
     // Raw Input 自身回注过滤：相同向量在发送窗口内归为自动包，真实包仍保留。
     RawMouseInput rawInput;

@@ -4,6 +4,18 @@
 #include <cmath>
 
 /**
+ * CS2在16:9、fov_cs_debug 90下的实测投影视场角。
+ * Profile只需要保存水平FOV；垂直值用于初始化全局像素角度模型并校验投影一致性。
+ */
+namespace Cs2FovReference
+{
+inline constexpr double kHipfireHorizontalDegrees = 106.2602;
+inline constexpr double kHipfireVerticalDegrees = 73.7398;
+inline constexpr double kScope1HorizontalDegrees = 51.7740;
+inline constexpr double kScope1VerticalDegrees = 30.5369;
+}
+
+/**
  * @brief 当前瞄准状态使用的视场角与游戏灵敏度缩放。
  *
  * baseFovDegrees是游戏灵敏度标定时的水平FOV，scopeFovDegrees是按下开镜键后的
