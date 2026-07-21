@@ -284,6 +284,7 @@ bool Config::loadConfig(const std::string& filename)
         button_targeting = splitString("RightMouseButton"); // 瞄准键
         button_shoot = splitString("LeftMouseButton");      // 射击键
         button_zoom = splitString("RightMouseButton");      // 缩放键
+        button_fov_reset = splitString("Key1,Key2,Key3,Q");  // 切枪后强制恢复腰射FOV
         button_exit = splitString("F2");                    // 退出键
         button_pause = splitString("F3");                   // 暂停键
         button_reload_config = splitString("F4");           // 重载配置键
@@ -765,6 +766,7 @@ bool Config::loadConfig(const std::string& filename)
     button_targeting = splitString(get_string("button_targeting", "RightMouseButton"));
     button_shoot = splitString(get_string("button_shoot", "LeftMouseButton"));
     button_zoom = splitString(get_string("button_zoom", "RightMouseButton"));
+    button_fov_reset = splitString(get_string("button_fov_reset", "Key1,Key2,Key3,Q"));
     button_exit = splitString(get_string("button_exit", "F2"));
     button_pause = splitString(get_string("button_pause", "F3"));
     button_reload_config = splitString(get_string("button_reload_config", "F4"));
@@ -1170,6 +1172,7 @@ bool Config::saveConfig(const std::string& filename)
         << "button_targeting = " << joinStrings(button_targeting) << "\n"
         << "button_shoot = " << joinStrings(button_shoot) << "\n"
         << "button_zoom = " << joinStrings(button_zoom) << "\n"
+        << "button_fov_reset = " << joinStrings(button_fov_reset) << "\n"
         << "button_exit = " << joinStrings(button_exit) << "\n"
         << "button_pause = " << joinStrings(button_pause) << "\n"
         << "button_reload_config = " << joinStrings(button_reload_config) << "\n"

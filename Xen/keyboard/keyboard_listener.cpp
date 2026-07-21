@@ -68,6 +68,7 @@ namespace
         std::vector<std::string> buttonTargeting;
         std::vector<std::string> buttonShoot;
         std::vector<std::string> buttonZoom;
+        std::vector<std::string> buttonFovReset;
         std::vector<std::string> buttonExit;
         std::vector<std::string> buttonPause;
         std::vector<std::string> buttonReloadConfig;
@@ -90,6 +91,7 @@ namespace
         snapshot.buttonTargeting = config.button_targeting;
         snapshot.buttonShoot = config.button_shoot;
         snapshot.buttonZoom = config.button_zoom;
+        snapshot.buttonFovReset = config.button_fov_reset;
         snapshot.buttonExit = config.button_exit;
         snapshot.buttonPause = config.button_pause;
         snapshot.buttonReloadConfig = config.button_reload_config;
@@ -219,6 +221,7 @@ bool isAnyKeyPressedWin32Only(const std::vector<std::string>& keys)
 void keyboardListener()
 {
     ZoomToggleState zoomToggleState;
+    bool previousFovResetPressed = false;
     while (!shouldExit)
     {
         KeyboardConfigSnapshot cfg = SnapshotKeyboardConfig();
@@ -244,7 +247,15 @@ void keyboardListener()
         // CS单倍镜按右键上升沿切换，第二次点击退出；其他Profile保留按住语义。
         const bool zoomPressed = isAnyKeyPressedInternal(cfg.buttonZoom) ||
             isZoomingActiveFromDevices();
-        zooming = zoomToggleState.update(zoomPressed, cfg.zoomToggleMode);
+        bool zoomed = zoomToggleState.update(zoomPressed, cfg.zoomToggleMode);
+        const bool fovResetPressed = isAnyKeyPressedInternal(cfg.buttonFovReset);
+        if (cfg.zoomToggleMode && fovResetPressed && !previousFovResetPressed)
+        {
+            zoomToggleState.forceHipfire();
+            zoomed = false;
+        }
+        previousFovResetPressed = fovResetPressed;
+        zooming = zoomed;
 
         // === 退出程序（仅 Win32） ===
         if (isAnyKeyPressedWin32Only(cfg.buttonExit))

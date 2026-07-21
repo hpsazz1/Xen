@@ -3575,6 +3575,14 @@ int main()
                "holding right mouse keeps single zoom latched without repeat toggles");
     expectTrue(cs2ZoomToggle.update(false, true) && !cs2ZoomToggle.update(true, true),
                "second right mouse click exits single zoom");
+    cs2ZoomToggle.update(false, true);
+    expectTrue(cs2ZoomToggle.update(true, true),
+               "right mouse can enter single zoom before weapon switch reset");
+    cs2ZoomToggle.forceHipfire();
+    expectTrue(!cs2ZoomToggle.update(true, true),
+               "weapon switch reset returns to hipfire without retriggering a held right mouse");
+    expectTrue(!cs2ZoomToggle.update(false, true) && cs2ZoomToggle.update(true, true),
+               "right mouse can enter single zoom again after release following reset");
     expectTrue(!cs2ZoomToggle.update(false, false) && cs2ZoomToggle.update(true, false) &&
                !cs2ZoomToggle.update(false, false),
                "non-CS profiles retain hold-to-zoom behavior");

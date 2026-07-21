@@ -33,6 +33,12 @@ public:
         return zoomed_;
     }
 
+    /** @brief 武器切换或快速切枪时强制回到腰射，同时保留当前按键边沿记忆。 */
+    void forceHipfire() noexcept
+    {
+        zoomed_ = false;
+    }
+
 private:
     bool toggleMode_ = false;
     bool previousPressed_ = false;

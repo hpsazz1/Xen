@@ -281,6 +281,7 @@ P0-4B控件位于UI“瞄准 → 移动参数 → 确定性轨迹影子参数”
 | `button_targeting` | `RightMouseButton` | 瞄准/目标锁定按钮列表。 |
 | `button_shoot` | `LeftMouseButton` | 射击按钮列表。 |
 | `button_zoom` | `RightMouseButton` | 缩放/瞄准镜按钮列表。 |
+| `button_fov_reset` | `Key1,Key2,Key3,Q` | CS单倍镜状态复位按钮列表；可在快捷键页面自行增删。 |
 | `button_exit` | `F2` | 退出快捷键。 |
 | `button_pause` | `F3` | 暂停快捷键。 |
 | `button_reload_config` | `F4` | 重新加载配置快捷键。 |
@@ -416,6 +417,6 @@ CS = 1.4,0.022,0.022,true,106,40
 
 `baseFOV`是灵敏度标定时的腰射水平FOV，`scopeFOV`是按住`button_zoom`后的实际水平FOV。程序按针孔投影的半视场正切比例缩放灵敏度，同步推导垂直视场，并在切镜边沿清空旧坐标系下的队列、滤波、积分和量化余量。旧五字段配置仍可读取，但缺少`scopeFOV`时按`baseFOV`处理，因此不会自动改变既有速度。
 
-Profile UI提供CS2 16:9精确单倍镜预设，写入`106.2602 -> 51.7740`，并同步全局腰射VFOV `73.7398`。CS Profile中，默认`RightMouseButton`按上升沿切换开镜状态：第一次点击进入单倍镜，第二次点击退出；按住期间不会重复切换。旧三字段CS Profile和旧默认整数FOV `106/74`会迁移到该预设，显式保存过FOV缩放开关或自定义视场角的配置不覆盖。双倍镜暂不处理。
+Profile UI提供CS2 16:9精确单倍镜预设，写入`106.2602 -> 51.7740`，并同步全局腰射VFOV `73.7398`。CS Profile中，默认`RightMouseButton`按上升沿切换开镜状态：第一次点击进入单倍镜，第二次点击退出；按住期间不会重复切换。`button_fov_reset`中的任意按键会强制恢复腰射FOV，默认包含主键盘`1`、`2`、`3`和`Q`，可在快捷键页面自行增删。按住复位键不会重复产生状态边沿；复位时即使右键仍按住，也必须松开后再次点击才能进入单倍镜。旧三字段CS Profile和旧默认整数FOV `106/74`会迁移到该预设，显式保存过FOV缩放开关或自定义视场角的配置不覆盖。双倍镜暂不处理。
 
 如果 `active_game` 缺失或无效，应用优先回退到内置 `CS`，再回退到 `UNIFIED`。

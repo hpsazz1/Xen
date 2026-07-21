@@ -185,6 +185,7 @@ void draw_buttons()
         drawBindingRowsAndMarkDirty("瞄准", config.button_targeting);
         drawBindingRowsAndMarkDirty("射击", config.button_shoot);
         drawBindingRowsAndMarkDirty("缩放", config.button_zoom);
+        drawBindingRowsAndMarkDirty("FOV复位", config.button_fov_reset);
         drawBindingRowsAndMarkDirty("退出", config.button_exit);
         drawBindingRowsAndMarkDirty("暂停", config.button_pause);
         drawBindingRowsAndMarkDirty("重载配置", config.button_reload_config);

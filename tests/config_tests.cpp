@@ -177,6 +177,9 @@ int main()
         expectString(defaults.kmbox_net_port, "13384", "default kmbox net port");
         expectString(defaults.kmbox_net_uuid, "7679E04E", "default kmbox net uuid");
         expectString(defaults.active_game, "CS", "default active game profile");
+        expectTrue(defaults.button_fov_reset ==
+                   std::vector<std::string>({ "Key1", "Key2", "Key3", "Q" }),
+                   "default FOV reset bindings cover weapon switch and quick switch keys");
         expectNear(defaults.fovX, 106.2602, 1e-9,
                    "default horizontal FOV matches CS2 16:9 reference");
         expectNear(defaults.fovY, 73.7398, 1e-9,

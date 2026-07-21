@@ -8,6 +8,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $mouseUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_mouse.cpp') -Raw -Encoding UTF8
 $overlayUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\overlay.cpp') -Raw -Encoding UTF8
 $targetUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_target.cpp') -Raw -Encoding UTF8
+$buttonsUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_buttons.cpp') -Raw -Encoding UTF8
 $debugUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\draw_debug.cpp') -Raw -Encoding UTF8
 $exportUi = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\overlay\export_progress_panel.h') -Raw -Encoding UTF8
 $startupHelpers = Get-Content -LiteralPath (Join-Path $repoRoot 'Xen\runtime\startup_helpers.cpp') -Raw -Encoding UTF8
@@ -34,6 +35,9 @@ foreach ($control in @('profile_calibration_enabled', 'profile_calibration_resul
     if ($mouseUi -notmatch $control) {
         throw "Passive profile calibration UI is missing: $control"
     }
+}
+if ($buttonsUi -notmatch [regex]::Escape('button_fov_reset')) {
+    throw 'Configurable FOV reset bindings are missing from the hotkey page.'
 }
 foreach ($control in @('machine_profile_cache_enabled', 'machine_profile_cache_path', 'machine_profile_aim_mode')) {
     if ($mouseUi -notmatch $control) {
