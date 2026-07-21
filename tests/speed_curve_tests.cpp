@@ -27,6 +27,8 @@
 #include "runtime/shadow_response_replay.h"
 #include "runtime/physical_response_probe.h"
 #include "runtime/recovery_speed_device_protocol.h"
+#include "runtime/manual_control_arbiter.h"
+#include "runtime/raw_mouse_input.h"
 
 #include <cmath>
 #include <algorithm>
@@ -1817,6 +1819,10 @@ int main()
         "CommandSequence,CommandEnqueueSucceeded,CommandEnqueueNs,CommandSendAttempted,CommandSendSucceeded,CommandDeviceSendNs,CommandDroppedBeforeSend") != std::string::npos,
         "basic pipeline records command enqueue and device acknowledgement lifecycle");
     expectTrue(traceHeader.find(
+        "ManualControlEnabled,ManualRawCountsX,ManualRawCountsY,ManualInputCountsX,ManualInputCountsY,ManualSelfSuppressedCountsX,ManualSelfSuppressedCountsY,ManualRawPacketCount,ManualSelfSuppressedPacketCount") != std::string::npos &&
+        traceHeader.find("ManualVelocityXDps,ManualVelocityYDps,ManualSpeedDps,ManualAutoAlignment,ManualAutoWeight,ManualControlState,ManualControlEntered,ManualControlExited,ManualWeightedCountsX,ManualWeightedCountsY") != std::string::npos,
+        "basic pipeline records manual authority and raw input attribution diagnostics");
+    expectTrue(traceHeader.find(
         "ErrorMotion,ErrorMotionX,ErrorMotionY,SettleMotionThreshold,MovingInsideSettle") != std::string::npos,
         "basic pipeline reports settle motion release diagnostics");
     std::string traceRow;
@@ -1835,12 +1841,12 @@ int main()
         identityColumns.push_back(column);
     }
     expectTrue(identityColumns.size() == 5 &&
-                   identityColumns[4] == std::to_string(kBasicAimControllerRevision),
+                   identityColumns[4] == std::to_string(BuildIdentity::controllerRevision()),
                "pipeline row carries the compiled controller revision");
     expectTrue(traceRow.find(",shadow,shadow,0,1,1,0,") != std::string::npos,
                "basic pipeline writes command-suppressed shadow state in the legacy frame");
     expectTrue(BuildIdentity::displayLabel().find(
-                   " r" + std::to_string(kBasicAimControllerRevision)) != std::string::npos,
+                   " r" + std::to_string(BuildIdentity::controllerRevision())) != std::string::npos,
                "ui build label includes controller revision");
 
     CommandCancellationEpoch cancellationEpoch;
@@ -3484,6 +3490,50 @@ int main()
     expectTrue(staticSettled, "pi controller settles a static step");
     expectTrue(std::abs(140.0 - staticCameraPixels) <= 5.0,
                "pi controller keeps static step inside settle radius");
+
+    // 人手控制权仲裁：同向只保留部分自动输出，反向立即交还人手，松手后
+    // 经过迟滞和恢复曲线才回到全自动，避免帧间权重跳变造成二次抖动。
+    ManualControlArbiter::Settings manualSettings;
+    manualSettings.enterSpeedDegreesPerSecond = 0.6;
+    manualSettings.fullSpeedDegreesPerSecond = 3.0;
+    manualSettings.overrideSpeedDegreesPerSecond = 3.0;
+    ManualControlArbiter manualArbiter;
+    ManualControlArbiter::Output sameDirection;
+    for (int i = 0; i < 8; ++i)
+        sameDirection = manualArbiter.update(0.02, 0.0, 0.01, 0.02, 0.0, manualSettings);
+    expectTrue(sameDirection.state == ManualControlState::Blend &&
+               sameDirection.autoWeight > 0.0 && sameDirection.autoWeight < 1.0,
+               "manual same-direction input enters blend with reduced auto authority");
+    ManualControlArbiter conflictArbiter;
+    ManualControlArbiter::Output conflict;
+    for (int i = 0; i < 8; ++i)
+        conflict = conflictArbiter.update(-0.04, 0.0, 0.01, 0.02, 0.0, manualSettings);
+    expectTrue(conflict.state == ManualControlState::ManualOverride &&
+               conflict.autoWeight == 0.0 && conflict.alignment < -0.25,
+               "manual opposite-direction input disables automatic authority");
+    ManualControlArbiter recoveryArbiter;
+    for (int i = 0; i < 8; ++i)
+        recoveryArbiter.update(0.04, 0.0, 0.01, 0.02, 0.0, manualSettings);
+    ManualControlArbiter::Output recovering;
+    for (int i = 0; i < 16; ++i)
+        recovering = recoveryArbiter.update(0.0, 0.0, 0.01, 0.02, 0.0, manualSettings);
+    expectTrue(recovering.state == ManualControlState::Recover &&
+               recovering.autoWeight > 0.0 && recovering.autoWeight < 1.0,
+               "manual release uses a bounded recovery ramp");
+
+    // Raw Input 自身回注过滤：相同向量在发送窗口内归为自动包，真实包仍保留。
+    RawMouseInput rawInput;
+    const auto rawStart = std::chrono::steady_clock::time_point{} +
+        std::chrono::milliseconds(1000);
+    rawInput.ingestRelativeMotion(reinterpret_cast<HANDLE>(1), 3, 4, rawStart);
+    rawInput.recordAutomatedMove(3, 4, rawStart + std::chrono::milliseconds(5));
+    rawInput.ingestRelativeMotion(reinterpret_cast<HANDLE>(1), 1, 0,
+        rawStart + std::chrono::milliseconds(8));
+    const auto rawResult = rawInput.consume(rawStart + std::chrono::milliseconds(20));
+    expectTrue(rawResult.rawDx == 4 && rawResult.rawDy == 4 &&
+               rawResult.manualDx == 1 && rawResult.manualDy == 0 &&
+               rawResult.selfSuppressedDx == 3 && rawResult.selfSuppressedDy == 4,
+               "raw input separates automated and physical motion packets");
 
     if (failures != 0)
     {

@@ -36,6 +36,7 @@
 #include "runtime/startup_helpers.h"
 #include "runtime/application_shutdown.h"
 #include "runtime/build_identity.h"
+#include "runtime/raw_mouse_input.h"
 
 #ifdef USE_CUDA
 #include "trt_detector.h"
@@ -1288,6 +1289,13 @@ static void UpdateManualOverlayWindowDrag(HWND hwnd)
 //   WM_DESTROY — 设置退出标志并投递退出消息
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    if (msg == WM_INPUT)
+    {
+        globalRawMouseInput().handleMessage(lParam);
+        // 前台 RIM_INPUT 需要继续交给 DefWindowProc 完成系统清理。
+        return ::DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
     switch (msg)
     {
         // ---- 自定义非客户区命中测试 ----
@@ -1560,6 +1568,9 @@ bool CreateOverlayWindow()
     if (g_hwnd == NULL)
         return false;
 
+    if (!globalRawMouseInput().registerWindow(g_hwnd))
+        std::cerr << "[ManualControl] Raw Input registration failed; manual arbitration remains inactive." << std::endl;
+
     // 确保窗口在工作区内
     EnsureOverlayInsideWorkArea(g_hwnd, true);
 
@@ -1581,6 +1592,7 @@ bool CreateOverlayWindow()
     // 初始化 D3D11 设备和 DirectComposition
     if (!CreateDeviceD3D(g_hwnd))
     {
+        globalRawMouseInput().unregisterWindow(g_hwnd);
         CleanupDeviceD3D();
         ::UnregisterClass(wc.lpszClassName, wc.hInstance);
         return false;
@@ -1860,6 +1872,7 @@ void OverlayThread()
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
 
+    globalRawMouseInput().unregisterWindow(g_hwnd);
     CleanupDeviceD3D();
     ::DestroyWindow(g_hwnd);
     ::UnregisterClass(_T("Chrome"), GetModuleHandle(NULL));

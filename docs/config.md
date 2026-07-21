@@ -115,6 +115,12 @@ capture_fps = 60
 | `move_max_speed_cps` | `3200` | 五类NDI移动目标标准设备最大移动速度，单位 counts/s，范围30~4000；程序按相邻控制执行周期换算单帧预算。 |
 | `move_catch_up_max_speed_cps` | `4000` | jump高速严重落后的条件追赶绝对上限，范围为基础上限至4000 counts/s；仅在可靠高速瞬态、大水平误差且速度继续沿误差方向远离准星的最长120 ms窗口启用，设置为`move_max_speed_cps`即可关闭。 |
 | `move_integral_time_ms` | `500` | 五类NDI移动目标抗晃动PI积分时间，单位毫秒；0为关闭，非零最小50 ms。较长窗口降低积分累积斜率，保留匀速稳态误差消除能力；反向误差达到稳定半径后清除对应轴旧积分。 |
+| `manual_control_enabled` | `false` | 人手优先控制权仲裁开关。启用后读取 Raw Input，自动输出按人手角速度和方向动态缩放；默认关闭，需先确认 CSV 中自身回注已被过滤。 |
+| `manual_control_enter_dps` | `0.60` | 手动融合进入角速度阈值，单位度/秒；需持续约15 ms，范围0.05~30。退出阈值固定为该值的一半。 |
+| `manual_control_full_dps` | `3.00` | 融合权重稳定角速度，单位度/秒；达到该值时同向/侧向降到配置权重，达到其两倍或与自动方向明显冲突时自动权重为0，范围为进入阈值~60。 |
+| `manual_control_same_weight` | `0.50` | 人手与自动方向夹角小于60度时，在完全接管速度下保留的自动权重，范围0~1。 |
+| `manual_control_cross_weight` | `0.20` | 侧向微调时，在完全接管速度下保留的自动权重，范围0~1；反向冲突不使用该值。 |
+| `manual_control_recovery_ms` | `150` | 人手速度低于退出阈值并保持80 ms后，自动权重从0平滑恢复到1的时间，范围50~500 ms。 |
 | `aim_pipeline_mode` | `legacy` | 新旧链路迁移模式。`legacy`只运行r37；`shadow`在同一帧记录新链路独立状态但不向设备队列写命令；P0-0至P0-5请求`active`会保留请求值并安全降级为`shadow`。 |
 | `aim_motion_compensation_delay_ms` | `12` | 正式自运动补偿的命令到画面响应中心，单位毫秒，范围0~250。 |
 | `aim_motion_compensation_response_ms` | `0` | 完整命令在画面中线性出现的实验响应宽度，单位毫秒，范围0~100；r45实测无收益，正式默认固定为0。 |

@@ -107,6 +107,16 @@ int main()
                    "default conditional catch-up speed uses the measured device ceiling");
         expectNear(defaults.move_integral_time_ms, 500.0, 0.0,
                    "moving integral uses the anti-oscillation accumulation window");
+        expectTrue(!defaults.manual_control_enabled,
+                   "manual control arbitration defaults to opt-in");
+        expectNear(defaults.manual_control_enter_dps, 0.60, 1e-6,
+                   "manual arbitration uses the documented entry angular speed");
+        expectNear(defaults.manual_control_full_dps, 3.00, 1e-6,
+                   "manual arbitration uses the documented full takeover angular speed");
+        expectNear(defaults.manual_control_same_weight, 0.50, 1e-6,
+                   "manual same-direction weight uses the conservative baseline");
+        expectNear(defaults.manual_control_cross_weight, 0.20, 1e-6,
+                   "manual cross-direction weight uses the conservative baseline");
         expectNear(defaults.aim_motion_compensation_delay_ms, 12.0, 0.0,
                    "production motion compensation uses the measured NDI response delay");
         expectNear(defaults.aim_motion_compensation_response_ms, 0.0, 0.0,
@@ -242,6 +252,9 @@ int main()
         expectTrue(migratedText.find("trajectory_shaper_mode = off") != std::string::npos &&
                    migratedText.find("trajectory_output_hz = 240") != std::string::npos,
                    "saved config persists the P0-4B pass-through baseline");
+        expectTrue(migratedText.find("manual_control_enabled = false") != std::string::npos &&
+                   migratedText.find("manual_control_enter_dps = 0.6") != std::string::npos,
+                   "saved config persists manual arbitration opt-in settings");
         expectTrue(migratedText.find("predictionInterval") == std::string::npos,
                    "saved config removes legacy prediction interval key");
     }

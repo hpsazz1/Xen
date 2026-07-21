@@ -41,6 +41,17 @@ foreach ($control in @('machine_profile_cache_enabled', 'machine_profile_cache_p
     }
 }
 foreach ($control in @(
+    '##manual_control_enabled',
+    '##manual_control_enter_dps',
+    '##manual_control_full_dps',
+    '##manual_control_same_weight',
+    '##manual_control_cross_weight',
+    '##manual_control_recovery_ms')) {
+    if ($mouseUi -notmatch $control) {
+        throw "Manual control arbitration UI is missing: $control"
+    }
+}
+foreach ($control in @(
     '##aim_pipeline_mode',
     '##shadow_camera_delay_ms',
     '##shadow_camera_response_ms',

@@ -31,6 +31,12 @@ float prev_move_response_ms = config.move_response_ms;
 float prev_move_max_speed_cps = config.move_max_speed_cps;
 float prev_move_catch_up_max_speed_cps = config.move_catch_up_max_speed_cps;
 float prev_move_integral_time_ms = config.move_integral_time_ms;
+bool prev_manual_control_enabled = config.manual_control_enabled;
+float prev_manual_control_enter_dps = config.manual_control_enter_dps;
+float prev_manual_control_full_dps = config.manual_control_full_dps;
+float prev_manual_control_same_weight = config.manual_control_same_weight;
+float prev_manual_control_cross_weight = config.manual_control_cross_weight;
+float prev_manual_control_recovery_ms = config.manual_control_recovery_ms;
 float prev_aim_shadow_response_ms = config.aim_shadow_response_ms;
 float prev_aim_shadow_max_speed_cps = config.aim_shadow_max_speed_cps;
 float prev_aim_shadow_feedforward_gain = config.aim_shadow_feedforward_gain;
@@ -128,6 +134,44 @@ static void draw_mouse_page(MouseSettingsPage page)
     {
         OverlayUI::SliderIntRow("水平视野(FOV X)", &config.fovX, 10, 120);
         OverlayUI::SliderIntRow("垂直视野(FOV Y)", &config.fovY, 10, 120);
+        OverlayUI::EndSection();
+    }
+
+    if (shouldDrawMousePage(page, MouseSettingsPage::Movement) &&
+        OverlayUI::BeginSection("人手控制权仲裁", "mouse_section_manual_control"))
+    {
+        if (OverlayUI::CheckboxRow("启用人手优先融合", &config.manual_control_enabled,
+            "##manual_control_enabled",
+            "按住自动锁定并移动物理鼠标时，按速度与方向削减自动输出。默认关闭；启用前先用流水线CSV确认自身回注已被排除。"))
+            OverlayConfig_MarkDirty();
+
+        if (!config.manual_control_enabled)
+            ImGui::BeginDisabled();
+        OverlayUI::SliderFloatRow("接管进入角速度", &config.manual_control_enter_dps,
+            0.05f, 30.0f, "%.2f 度/秒", "##manual_control_enter_dps",
+            "物理鼠标角速度持续达到该值15 ms后进入融合；退出阈值固定为其一半。 ");
+        if (OverlayUI::SliderFloatRow("融合权重稳定角速度", &config.manual_control_full_dps,
+            config.manual_control_enter_dps, 60.0f, "%.2f 度/秒", "##manual_control_full_dps",
+            "达到该速度时同向/侧向权重降至下方配置值；达到其两倍或反向冲突时自动权重归零。"))
+        {
+            config.manual_control_full_dps = std::max(
+                config.manual_control_full_dps, config.manual_control_enter_dps);
+            OverlayConfig_MarkDirty();
+        }
+        OverlayUI::SliderFloatRow("同向自动权重", &config.manual_control_same_weight,
+            0.0f, 1.0f, "%.2f", "##manual_control_same_weight",
+            "人手与自动方向夹角小于60度且达到完全接管速度时保留的自动比例。 ");
+        OverlayUI::SliderFloatRow("侧向自动权重", &config.manual_control_cross_weight,
+            0.0f, 1.0f, "%.2f", "##manual_control_cross_weight",
+            "非同向且非反向冲突时保留的自动比例；反向冲突始终为0。 ");
+        OverlayUI::SliderFloatRow("松手恢复时间", &config.manual_control_recovery_ms,
+            50.0f, 500.0f, "%.0f ms", "##manual_control_recovery_ms",
+            "手动速度低于退出阈值80 ms后，自动权重按平滑曲线恢复。 ");
+        if (!config.manual_control_enabled)
+        {
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("默认关闭；先确认 ManualSelfSuppressed* 与设备回注一致");
+        }
         OverlayUI::EndSection();
     }
 
@@ -1037,6 +1081,12 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_move_max_speed_cps != config.move_max_speed_cps ||
         prev_move_catch_up_max_speed_cps != config.move_catch_up_max_speed_cps ||
         prev_move_integral_time_ms != config.move_integral_time_ms ||
+        prev_manual_control_enabled != config.manual_control_enabled ||
+        prev_manual_control_enter_dps != config.manual_control_enter_dps ||
+        prev_manual_control_full_dps != config.manual_control_full_dps ||
+        prev_manual_control_same_weight != config.manual_control_same_weight ||
+        prev_manual_control_cross_weight != config.manual_control_cross_weight ||
+        prev_manual_control_recovery_ms != config.manual_control_recovery_ms ||
         prev_aim_shadow_response_ms != config.aim_shadow_response_ms ||
         prev_aim_shadow_max_speed_cps != config.aim_shadow_max_speed_cps ||
         prev_aim_shadow_feedforward_gain != config.aim_shadow_feedforward_gain ||
@@ -1075,6 +1125,12 @@ static void draw_mouse_page(MouseSettingsPage page)
         prev_move_max_speed_cps = config.move_max_speed_cps;
         prev_move_catch_up_max_speed_cps = config.move_catch_up_max_speed_cps;
         prev_move_integral_time_ms = config.move_integral_time_ms;
+        prev_manual_control_enabled = config.manual_control_enabled;
+        prev_manual_control_enter_dps = config.manual_control_enter_dps;
+        prev_manual_control_full_dps = config.manual_control_full_dps;
+        prev_manual_control_same_weight = config.manual_control_same_weight;
+        prev_manual_control_cross_weight = config.manual_control_cross_weight;
+        prev_manual_control_recovery_ms = config.manual_control_recovery_ms;
         prev_aim_shadow_response_ms = config.aim_shadow_response_ms;
         prev_aim_shadow_max_speed_cps = config.aim_shadow_max_speed_cps;
         prev_aim_shadow_feedforward_gain = config.aim_shadow_feedforward_gain;

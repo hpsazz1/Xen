@@ -33,6 +33,7 @@
 #include "runtime/machine_profile_cache.h"
 #include "runtime/target_predictor.h"
 #include "runtime/view_motion_history.h"
+#include "runtime/manual_control_arbiter.h"
 
 struct PipelineFrame;
 
@@ -55,6 +56,8 @@ private:
     double move_max_speed_cps = 1440.0;   ///< 设备最大速度（counts/sec）；四链路九宫格复测后按真实观测 dt 动态换算单帧预算
     double move_catch_up_max_speed_cps = 4000.0; ///< jump 高速大误差时的短时条件上限
     double move_integral_time_seconds = 0.0; ///< 匀速移动目标积分时间；0 表示关闭实验性 PI 补偿
+    bool manual_control_enabled = false;
+    ManualControlArbiter::Settings manualControlSettings{};
     double center_x;                 ///< 屏幕中心 X
     double center_y;                 ///< 屏幕中心 Y
     bool   auto_shoot;               ///< 是否启用自动射击
@@ -86,6 +89,7 @@ private:
     BasicTargetFilter targetFilter;                                ///< 基础观测滤波（不做未来预测）
     TargetPredictor targetPredictor;                               ///< 仅连续真实观测生效的前瞻预测器
     BasicAimController aimController;                              ///< 帧率无关的基础误差控制器
+    ManualControlArbiter manualControlArbiter;                     ///< 人手与自动输出的动态控制权仲裁
     ConditionalSpeedBudget conditionalSpeedBudget;                 ///< jump 严重落后时的短时速度预算状态机
     AimPipelineRuntime aimPipelineRuntime;                         ///< P0并行影子链；不持有或访问设备队列
     AppliedViewMotionModel appliedViewMotionModel;                 ///< 成功counts按有限响应核生效的角度影子模型

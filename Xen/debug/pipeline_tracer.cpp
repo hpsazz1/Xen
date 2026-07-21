@@ -213,6 +213,8 @@ bool PipelineTracer::exportCSV(const std::string& path) const
          << "ViewMotionX,ViewMotionY,ViewMotionCompensationDelayMs,ViewMotionCompensationResponseMs,PredictionDirectionLocked,PredictionSelfMotionSuppressed,PredictionOscillationSuppressed,PredictionHighSpeedSuppressed,PredictionStationarySuppressed,PredictionMotionEvidenceSuppressed,PredictedX,PredictedY,"
          << "ErrorX,ErrorY,ErrorDistance,"
          << "RequestedPixelX,RequestedPixelY,RequestedCountsX,RequestedCountsY,IntegralCountsX,IntegralCountsY,"
+         << "ManualControlEnabled,ManualRawCountsX,ManualRawCountsY,ManualInputCountsX,ManualInputCountsY,ManualSelfSuppressedCountsX,ManualSelfSuppressedCountsY,ManualRawPacketCount,ManualSelfSuppressedPacketCount,"
+         << "ManualVelocityXDps,ManualVelocityYDps,ManualSpeedDps,ManualAutoAlignment,ManualAutoWeight,ManualControlState,ManualControlEntered,ManualControlExited,ManualWeightedCountsX,ManualWeightedCountsY,"
          << "FinalMx,FinalMy,"
          << "CommandSequence,CommandEnqueueSucceeded,CommandEnqueueNs,CommandSendAttempted,CommandSendSucceeded,CommandDeviceSendNs,CommandDroppedBeforeSend,"
          << "CommandRequestedCountsX,CommandRequestedCountsY,CommandAppliedCountsX,CommandAppliedCountsY,CommandQueueAgeMs,"
@@ -242,7 +244,7 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << BuildIdentity::backend() << ','
              << BuildIdentity::revision() << ','
              << BuildIdentity::timestampUtc() << ','
-             << kBasicAimControllerRevision << ','
+             << BuildIdentity::controllerRevision() << ','
              << aimPipelineModeName(ap.requestedMode) << ','
              << aimPipelineModeName(ap.effectiveMode) << ','
              << (ap.activeAvailable ? '1' : '0') << ','
@@ -437,6 +439,21 @@ bool PipelineTracer::exportCSV(const std::string& path) const
              << f.requestedPixelX << ',' << f.requestedPixelY << ','
              << f.requestedCountsX << ',' << f.requestedCountsY << ','
              << f.integralCountsX << ',' << f.integralCountsY << ','
+             << (f.manualControlEnabled ? '1' : '0') << ','
+             << f.manualRawCountsX << ',' << f.manualRawCountsY << ','
+             << f.manualInputCountsX << ',' << f.manualInputCountsY << ','
+             << f.manualSelfSuppressedCountsX << ','
+             << f.manualSelfSuppressedCountsY << ','
+             << f.manualRawPacketCount << ','
+             << f.manualSelfSuppressedPacketCount << ','
+             << f.manualVelocityXDegreesPerSecond << ','
+             << f.manualVelocityYDegreesPerSecond << ','
+             << f.manualSpeedDegreesPerSecond << ','
+             << f.manualAutoAlignment << ',' << f.manualAutoWeight << ','
+             << manualControlStateName(f.manualControlState) << ','
+             << (f.manualControlEntered ? '1' : '0') << ','
+             << (f.manualControlExited ? '1' : '0') << ','
+             << f.manualWeightedCountsX << ',' << f.manualWeightedCountsY << ','
              << f.finalMx << ',' << f.finalMy << ','
              << command.sequence << ','
              << (command.enqueueSucceeded ? '1' : '0') << ','

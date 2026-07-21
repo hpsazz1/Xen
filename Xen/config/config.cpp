@@ -135,6 +135,12 @@ bool Config::loadConfig(const std::string& filename)
         move_max_speed_cps = 3200.0f;                    // 五类NDI移动目标标准，解除jump远距帧限速
         move_catch_up_max_speed_cps = 4000.0f;           // 仅高速大误差短窗口启用，普通场景仍保持3200
         move_integral_time_ms = 500.0f;                  // 五类NDI移动目标抗晃动标准，降低积分累积斜率
+        manual_control_enabled = false;
+        manual_control_enter_dps = 0.60f;
+        manual_control_full_dps = 3.00f;
+        manual_control_same_weight = 0.50f;
+        manual_control_cross_weight = 0.20f;
+        manual_control_recovery_ms = 150.0f;
         aim_motion_compensation_delay_ms = 12.0f;        // 六轮NDI实测命令到画面生效延迟
         aim_motion_compensation_response_ms = 0.0f;      // r45实测无收益，正式回退固定延迟
         aim_pipeline_mode = "legacy";                   // P0-0 默认保持 r30 正式输出
@@ -575,6 +581,12 @@ bool Config::loadConfig(const std::string& filename)
     move_catch_up_max_speed_cps = (float)get_double(
         "move_catch_up_max_speed_cps", 4000.0);
     move_integral_time_ms = (float)get_double("move_integral_time_ms", 500.0);
+    manual_control_enabled = get_bool("manual_control_enabled", false);
+    manual_control_enter_dps = (float)get_double("manual_control_enter_dps", 0.60);
+    manual_control_full_dps = (float)get_double("manual_control_full_dps", 3.00);
+    manual_control_same_weight = (float)get_double("manual_control_same_weight", 0.50);
+    manual_control_cross_weight = (float)get_double("manual_control_cross_weight", 0.20);
+    manual_control_recovery_ms = (float)get_double("manual_control_recovery_ms", 150.0);
     aim_motion_compensation_delay_ms = (float)get_double(
         "aim_motion_compensation_delay_ms", 12.0);
     aim_motion_compensation_response_ms = (float)get_double(
@@ -816,6 +828,12 @@ bool Config::loadConfig(const std::string& filename)
     move_catch_up_max_speed_cps = std::clamp(
         move_catch_up_max_speed_cps, move_max_speed_cps, 4000.0f);
     move_integral_time_ms = std::clamp(move_integral_time_ms, 0.0f, 1000.0f);
+    manual_control_enter_dps = std::clamp(manual_control_enter_dps, 0.05f, 30.0f);
+    manual_control_full_dps = std::clamp(manual_control_full_dps,
+        manual_control_enter_dps, 60.0f);
+    manual_control_same_weight = std::clamp(manual_control_same_weight, 0.0f, 1.0f);
+    manual_control_cross_weight = std::clamp(manual_control_cross_weight, 0.0f, 1.0f);
+    manual_control_recovery_ms = std::clamp(manual_control_recovery_ms, 50.0f, 500.0f);
     if (move_integral_time_ms > 0.0f && move_integral_time_ms < 50.0f)
         move_integral_time_ms = 50.0f;
     aim_motion_compensation_delay_ms = std::clamp(
@@ -988,6 +1006,12 @@ bool Config::saveConfig(const std::string& filename)
         << "move_max_speed_cps = " << move_max_speed_cps << "\n"
         << "move_catch_up_max_speed_cps = " << move_catch_up_max_speed_cps << "\n"
         << "move_integral_time_ms = " << move_integral_time_ms << "\n"
+        << "manual_control_enabled = " << (manual_control_enabled ? "true" : "false") << "\n"
+        << "manual_control_enter_dps = " << manual_control_enter_dps << "\n"
+        << "manual_control_full_dps = " << manual_control_full_dps << "\n"
+        << "manual_control_same_weight = " << manual_control_same_weight << "\n"
+        << "manual_control_cross_weight = " << manual_control_cross_weight << "\n"
+        << "manual_control_recovery_ms = " << manual_control_recovery_ms << "\n"
         << "aim_motion_compensation_delay_ms = " << aim_motion_compensation_delay_ms << "\n"
         << "aim_motion_compensation_response_ms = " << aim_motion_compensation_response_ms << "\n"
         << "aim_pipeline_mode = " << aim_pipeline_mode << "\n"

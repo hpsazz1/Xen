@@ -30,6 +30,11 @@ const char* BuildIdentity::timestampUtc()
     return AIMBOT_BUILD_TIMESTAMP_UTC;
 }
 
+int BuildIdentity::controllerRevision()
+{
+    return kBasicAimControllerRevision;
+}
+
 std::string BuildIdentity::displayLabel()
 {
     const std::string fullRevision = revision();
@@ -38,5 +43,5 @@ std::string BuildIdentity::displayLabel()
     if (dirty)
         shortRevision += '*';
     return std::string(backend()) + " " + shortRevision + " r" +
-        std::to_string(kBasicAimControllerRevision);
+        std::to_string(controllerRevision());
 }

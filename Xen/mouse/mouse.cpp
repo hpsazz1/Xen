@@ -25,6 +25,7 @@
 #include <random>
 
 #include "mouse.h"
+#include "runtime/raw_mouse_input.h"
 #include "capture.h"
 #include "capture/ndi_capture.h"
 #include "Xen.h"
@@ -175,6 +176,16 @@ void MouseThread::updateConfig(
         move_max_speed_cps, 4000.0);
     move_integral_time_seconds = std::clamp(
         static_cast<double>(config.move_integral_time_ms) / 1000.0, 0.0, 1.0);
+    manual_control_enabled = config.manual_control_enabled;
+    manualControlSettings.enterSpeedDegreesPerSecond = config.manual_control_enter_dps;
+    manualControlSettings.fullSpeedDegreesPerSecond = config.manual_control_full_dps;
+    manualControlSettings.exitSpeedDegreesPerSecond = config.manual_control_enter_dps * 0.5;
+    manualControlSettings.overrideSpeedDegreesPerSecond = std::max(
+        config.manual_control_full_dps * 2.0f,
+        config.manual_control_full_dps + 1.0f);
+    manualControlSettings.sameDirectionWeight = config.manual_control_same_weight;
+    manualControlSettings.crossDirectionWeight = config.manual_control_cross_weight;
+    manualControlSettings.recoverySeconds = config.manual_control_recovery_ms / 1000.0;
     predictionSettings.enabled = config.prediction_enabled;
     predictionSettings.additionalLeadSeconds = std::clamp(
         static_cast<double>(config.prediction_lead_ms) / 1000.0, 0.0, 0.100);
@@ -808,6 +819,16 @@ void MouseThread::refreshGameProfileCache()
         move_max_speed_cps, 4000.0);
     move_integral_time_seconds = std::clamp(
         static_cast<double>(config.move_integral_time_ms) / 1000.0, 0.0, 1.0);
+    manual_control_enabled = config.manual_control_enabled;
+    manualControlSettings.enterSpeedDegreesPerSecond = config.manual_control_enter_dps;
+    manualControlSettings.fullSpeedDegreesPerSecond = config.manual_control_full_dps;
+    manualControlSettings.exitSpeedDegreesPerSecond = config.manual_control_enter_dps * 0.5;
+    manualControlSettings.overrideSpeedDegreesPerSecond = std::max(
+        config.manual_control_full_dps * 2.0f,
+        config.manual_control_full_dps + 1.0f);
+    manualControlSettings.sameDirectionWeight = config.manual_control_same_weight;
+    manualControlSettings.crossDirectionWeight = config.manual_control_cross_weight;
+    manualControlSettings.recoverySeconds = config.manual_control_recovery_ms / 1000.0;
     refreshMachineProfileDecision();
 }
 
@@ -1075,6 +1096,7 @@ void MouseThread::sendMovementToDriver(Move move)
     move.timing.appliedCountsX = move.dx;
     move.timing.appliedCountsY = move.dy;
     move.timing.sendSucceeded = true;
+    globalRawMouseInput().recordAutomatedMove(move.dx, move.dy, sendTime);
     profileCalibrator.recordCommand(move.dx, move.dy, sendTime);
     recordMotionCompensationStep(move.dx, move.dy, sendTime);
     const auto configuredDegreesPerCount = currentDegreesPerCount();
@@ -1509,6 +1531,17 @@ void MouseThread::moveMousePivot(
     };
 
     const auto controlTime = std::chrono::steady_clock::now();
+    const RawMouseMotionSample manualSample = globalRawMouseInput().consume(controlTime);
+    if (manual_control_enabled &&
+        (manualSample.manualDx != 0 || manualSample.manualDy != 0))
+    {
+        // 人手移动和自动命令会经过同一游戏相机响应；将真实输入写入同一像素
+        // 时间线，避免延迟画面把已经完成的手动修正再次解释为目标运动。
+        recordMotionCompensationStep(
+            manualSample.manualDx, manualSample.manualDy, controlTime);
+    }
+    if (!manual_control_enabled)
+        manualControlArbiter.reset();
     // 短暂松开期间跟踪器仍持续确认同一目标，但控制输出已暂停。若在350 ms内
     // 重新按住，允许滤波和预测用跨暂停区间的真实观测继续估速；更长暂停仍按
     // 冷启动处理，避免复用已经过时或可能被玩家手动转向污染的运动状态。
@@ -1677,7 +1710,10 @@ void MouseThread::moveMousePivot(
     {
         settings.responseSeconds = std::min(settings.responseSeconds, 0.080);
     }
-    settings.integralTimeSeconds = move_integral_time_seconds;
+    // 上一控制周期已经进入人手融合时，本周期禁止继续积累积分。首次接管帧
+    // 会在仲裁结果返回后立即重置控制器，因此不会把旧积分带入恢复阶段。
+    settings.integralTimeSeconds = manualControlArbiter.manualActive()
+        ? 0.0 : move_integral_time_seconds;
     settings.settleRadiusPixels = std::max(6.0, screen_width / 64.0);
     settings.releaseRadiusPixels = settings.settleRadiusPixels * 1.6;
 
@@ -1748,6 +1784,27 @@ void MouseThread::moveMousePivot(
         controlTime, frameIntervalSec(captureFps.load()));
     const auto output = aimController.update(
         errorX, errorY, dt, countsPerPixelX, countsPerPixelY, settings);
+    const auto degreesPerCount = currentDegreesPerCount();
+    const auto manualDecision = manual_control_enabled
+        ? manualControlArbiter.update(
+            manualSample.manualDx * degreesPerCount.first,
+            manualSample.manualDy * degreesPerCount.second,
+            manualSample.durationSeconds,
+            output.countsX * degreesPerCount.first,
+            output.countsY * degreesPerCount.second,
+            manualControlSettings)
+        : ManualControlArbiter::Output{};
+    const double weightedCountsX = output.countsX * manualDecision.autoWeight;
+    const double weightedCountsY = output.countsY * manualDecision.autoWeight;
+    if (manualDecision.enteredManual)
+    {
+        // 进入融合时撤销尚未发送的旧自动命令，并清除积分、反向确认和量化余量。
+        // 人手输入本身已经直接进入游戏，此处只削减后续自动辅助输出。
+        clearQueuedMoves();
+        aimController.reset();
+        legacyCountRemainderX = 0.0;
+        legacyCountRemainderY = 0.0;
+    }
 
     // 先累计分数 counts 再整数化。直接逐帧 round 会在 10/20 ms 交替的
     // NDI 时间基下产生 1、6、1、6 这类脉冲，视觉上就是左右晃动；余量
@@ -1756,8 +1813,8 @@ void MouseThread::moveMousePivot(
         legacyCountRemainderX = 0.0;
     if (output.settledY)
         legacyCountRemainderY = 0.0;
-    const double quantizedX = output.countsX + legacyCountRemainderX;
-    const double quantizedY = output.countsY + legacyCountRemainderY;
+    const double quantizedX = weightedCountsX + legacyCountRemainderX;
+    const double quantizedY = weightedCountsY + legacyCountRemainderY;
     int mx = static_cast<int>(std::round(quantizedX));
     int my = static_cast<int>(std::round(quantizedY));
     legacyCountRemainderX = quantizedX - static_cast<double>(mx);
@@ -1823,6 +1880,28 @@ void MouseThread::moveMousePivot(
         pf->requestedCountsY = output.countsY;
         pf->integralCountsX = output.integralCountsX;
         pf->integralCountsY = output.integralCountsY;
+        pf->manualControlEnabled = manual_control_enabled;
+        pf->manualRawCountsX = manualSample.rawDx;
+        pf->manualRawCountsY = manualSample.rawDy;
+        pf->manualInputCountsX = manualSample.manualDx;
+        pf->manualInputCountsY = manualSample.manualDy;
+        pf->manualSelfSuppressedCountsX = manualSample.selfSuppressedDx;
+        pf->manualSelfSuppressedCountsY = manualSample.selfSuppressedDy;
+        pf->manualRawPacketCount = manualSample.rawPacketCount;
+        pf->manualSelfSuppressedPacketCount = manualSample.selfSuppressedPacketCount;
+        pf->manualVelocityXDegreesPerSecond =
+            manualDecision.manualVelocityXDegreesPerSecond;
+        pf->manualVelocityYDegreesPerSecond =
+            manualDecision.manualVelocityYDegreesPerSecond;
+        pf->manualSpeedDegreesPerSecond =
+            manualDecision.manualSpeedDegreesPerSecond;
+        pf->manualAutoAlignment = manualDecision.alignment;
+        pf->manualAutoWeight = manualDecision.autoWeight;
+        pf->manualControlState = manualDecision.state;
+        pf->manualControlEntered = manualDecision.enteredManual;
+        pf->manualControlExited = manualDecision.exitedManual;
+        pf->manualWeightedCountsX = weightedCountsX;
+        pf->manualWeightedCountsY = weightedCountsY;
         pf->finalMx = mx;
         pf->finalMy = my;
         pf->profileCalibrationEnabled = calibration.enabled;
@@ -2424,6 +2503,8 @@ void MouseThread::resetTracking(bool targetLost)
     targetPredictor.reset();
     aimController.reset();
     conditionalSpeedBudget.reset();
+    manualControlArbiter.reset();
+    globalRawMouseInput().reset();
     aimPipelineRuntime.reset(targetLost);
     lastFilterResult = {};
     lastPredictionResult = {};
@@ -2454,6 +2535,8 @@ void MouseThread::suspendAimingOutput()
     clearQueuedMoves();
     aimController.reset();
     conditionalSpeedBudget.reset();
+    manualControlArbiter.reset();
+    globalRawMouseInput().reset();
     // 输出暂停不是目标丢失；运行时会保留shadow代次与估计，legacy仍维持原重置语义。
     aimPipelineRuntime.suspendOutput();
     controlIntervalTracker.reset();

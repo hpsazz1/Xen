@@ -74,6 +74,12 @@ public:
     float move_max_speed_cps;          // 设备最大速度，counts/sec
     float move_catch_up_max_speed_cps; // jump 严重落后时的条件追赶速度上限；等于基础上限时关闭
     float move_integral_time_ms;        // 移动目标积分时间，毫秒；0 表示关闭
+    bool manual_control_enabled = false; // 按住锁定时启用人手与自动控制权仲裁；默认关闭等待实机校准
+    float manual_control_enter_dps = 0.60f; // 手动接管进入阈值，度/秒
+    float manual_control_full_dps = 3.00f; // 手动权重达到上限的速度，度/秒
+    float manual_control_same_weight = 0.50f; // 同向手动输入下保留的自动权重
+    float manual_control_cross_weight = 0.20f; // 侧向微调下保留的自动权重
+    float manual_control_recovery_ms = 150.0f; // 松手后自动权重恢复时间，毫秒
     float aim_motion_compensation_delay_ms = 12.0f; // 正式自运动补偿的命令到画面延迟
     float aim_motion_compensation_response_ms = 0.0f; // 0为固定延迟；连续响应仅保留实验配置
     // 新旧链路迁移模式：legacy 正式旧链路，shadow 同帧诊断但不接管设备，active 在 P0 阶段安全降级为 shadow。

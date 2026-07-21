@@ -355,6 +355,7 @@ set(AIMBOT_SOURCES
     "${SRC_DIR}/runtime/application_threads.cpp"
     "${SRC_DIR}/runtime/startup_helpers.cpp"
     "${SRC_DIR}/runtime/lan_control_server.cpp"
+    "${SRC_DIR}/runtime/raw_mouse_input.cpp"
     "${SRC_DIR}/runtime/video_replay_cli.cpp"
     "${SRC_DIR}/runtime/input_device_manager.cpp"
     "${SRC_DIR}/runtime/mouse_thread_loop.cpp"
@@ -461,6 +462,7 @@ if(BUILD_TESTING)
         "${SRC_DIR}/runtime/build_identity.cpp"
         "${SRC_DIR}/runtime/physical_response_probe.cpp"
         "${SRC_DIR}/runtime/recovery_speed_device_protocol.cpp"
+        "${SRC_DIR}/runtime/raw_mouse_input.cpp"
     )
     set_target_properties(xen_algorithm_tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")

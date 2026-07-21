@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "runtime/aim_pipeline_types.h"
+#include "runtime/manual_control_arbiter.h"
 
 /**
  * @brief 单帧流水线追踪记录
@@ -85,6 +86,27 @@ struct PipelineFrame
     double requestedCountsY = 0.0;
     double integralCountsX = 0.0; ///< 本帧积分补偿计数；限速时按相同比例缩放
     double integralCountsY = 0.0;
+
+    // ========== 人手控制权仲裁 ==========
+    bool manualControlEnabled = false;
+    int manualRawCountsX = 0; ///< Raw Input 原始合计，包含可识别的自身回注
+    int manualRawCountsY = 0;
+    int manualInputCountsX = 0; ///< 排除自身回注后用于仲裁的物理输入
+    int manualInputCountsY = 0;
+    int manualSelfSuppressedCountsX = 0;
+    int manualSelfSuppressedCountsY = 0;
+    std::uint32_t manualRawPacketCount = 0;
+    std::uint32_t manualSelfSuppressedPacketCount = 0;
+    double manualVelocityXDegreesPerSecond = 0.0;
+    double manualVelocityYDegreesPerSecond = 0.0;
+    double manualSpeedDegreesPerSecond = 0.0;
+    double manualAutoAlignment = 0.0;
+    double manualAutoWeight = 1.0;
+    ManualControlState manualControlState = ManualControlState::Auto;
+    bool manualControlEntered = false;
+    bool manualControlExited = false;
+    double manualWeightedCountsX = 0.0;
+    double manualWeightedCountsY = 0.0;
 
     // ========== Stage 6: 请求输出（尚不代表驱动已实际发送） ==========
     int    finalMx = 0;        ///< 请求的水平移动量（counts）
