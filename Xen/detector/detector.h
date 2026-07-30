@@ -20,6 +20,18 @@ enum class BackendType {
 const char* BackendName(BackendType bt) noexcept;
 
 // ============================================================
+// 模型输出契约
+// ============================================================
+// 不按 YOLO 版本号分支，而按 ONNX 实际输出布局解码。只要后续模型继续使用
+// 其中一种稳定契约，就无需修改 Detector 主流程。
+enum class OutputFormat {
+    AUTO,                         ///< 根据 metadata 与张量形状严格识别
+    CHANNEL_FIRST,                ///< [B, 4+C, A]，cxcywh + 类别概率
+    ANCHOR_FIRST_OBJECTNESS,      ///< [B, A, 5+C]，cxcywh + obj + 类别概率
+    END_TO_END,                   ///< [B, N, 6]，xyxy + score + class，无需 NMS
+};
+
+// ============================================================
 // 检测结果
 // ============================================================
 struct Detection {
@@ -45,6 +57,11 @@ struct DetectorConfig {
     float        conf_threshold  = 0.25f;
     float        nms_threshold   = 0.45f;
     int          top_k           = 300;
+
+    // ── 输出契约 ──
+    // AUTO 适用于带标准输出或 Ultralytics metadata 的模型；第三方导出结果
+    // 存在歧义时必须显式指定，Detector 不会猜测未知布局。
+    OutputFormat output_format = OutputFormat::AUTO;
 
     // ── 优化选项 ──
     bool         enable_graph_opt = true;

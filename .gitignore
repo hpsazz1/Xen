@@ -3,3 +3,7 @@ AGENTS.md
 
 # 设计文档和待办清单仅保留在本地。
 docs/
+
+# CMake 本地构建产物。
+build/
+cmake-build-*/

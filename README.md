@@ -21,15 +21,43 @@ Xen/                           # 仓库根目录
 
 ## 构建状态
 
-源码迁移到 `Xen/` 后，顶层 `CMakeLists.txt` 仍引用迁移前的 `detector/` 与 `log/` 路径，因此当前不能按原命令完成配置和构建。修改构建文件前需按项目规范单独确认。
-
-路径同步完成后的标准命令为：
+源码路径已同步到 `Xen/`，并提供 Detector 纯算法测试。Windows 推荐使用 VS 2026 的多配置生成器：
 
 ```bat
-set ONNXRUNTIME_ROOT=C:\path\to\onnxruntime-win-x64-gpu-1.27.1
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+set ONNXRUNTIME_ROOT=C:\path\to\onnxruntime-win-x64-gpu_cuda13-1.27.1
+cmake -S . -B build -G "Visual Studio 18 2026" -A x64 ^
+  -DOpenCV_DIR=C:\path\to\opencv\build\x64\vc16\lib ^
+  -DBUILD_TESTING=ON
 cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --output-on-failure
 ```
+
+运行测试时，OpenCV 的 `bin` 目录需要位于 `PATH`。本项目已用 ONNX Runtime 1.27.1、OpenCV 4.14.0、spdlog 1.17.0 和 VS 2026 Release 配置完成构建，Detector 测试通过。
+
+也可以使用仓库内的可复用脚本完成配置、构建和测试：
+
+```powershell
+.\scripts\build.ps1 `
+  -OnnxRuntimeRoot "C:\path\to\onnxruntime-win-x64-gpu_cuda13-1.27.1" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib" `
+  -ModelPath "C:\path\to\model.onnx"
+```
+
+`ModelPath` 可省略；提供后会额外执行真实模型加载与单帧推理测试，模型不会复制进构建目录或纳入 Git。
+
+## Detector 模型兼容性
+
+Detector 不按“YOLOv5/v8/v10/11/26”等版本号硬编码分支，而按 ONNX 输出契约解码：
+
+| 输出契约 | 典型形状 | 用途 |
+|---|---|---|
+| `CHANNEL_FIRST` | `[B, 4+C, A]` | 现代 Ultralytics raw detect 输出 |
+| `ANCHOR_FIRST_OBJECTNESS` | `[B, A, 5+C]` | YOLOv5 类 raw 输出 |
+| `END_TO_END` | `[B, N, 6]` | 已含 NMS 的 `xyxy, score, class` 输出 |
+
+因此，后续 YOLO 版本只要继续使用上述任一契约即可直接支持；若导出布局变化，只需新增一个契约解码器，不必改动推理主流程。默认 `AUTO` 会结合 metadata 和形状识别。单类别 raw 输出与端到端输出都可能是 `[B,N,6]`，第三方导出模型遇到歧义时应显式设置 `DetectorConfig::output_format`。
+
+当前仅支持单输入、单输出、NCHW、float32 的 detect 模型。分割、姿态、OBB、多输出 head 和真正的 batch inference 不在当前范围内。
 
 ## 本地开发资料
 

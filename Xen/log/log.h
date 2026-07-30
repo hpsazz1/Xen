@@ -4,6 +4,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <utility>
 #include <spdlog/spdlog.h>
 
 // ── 配置 ──
@@ -51,7 +52,7 @@ public:
     template<typename... Args>
     static void writef(const std::string& module,
                        LogLevel level,
-                       const std::string& fmt_str,
+                       spdlog::format_string_t<Args...> fmt_str,
                        Args&&... args) {
         if (!impl_) return;
         auto formatted = spdlog::fmt_lib::format(
