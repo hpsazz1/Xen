@@ -1,25 +1,35 @@
 #include "detector/preprocess.h"
 #include <opencv2/imgproc.hpp>
-#include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace detector::detail {
+namespace {
 
-bool letterbox(const cv::Mat& src, cv::Mat& dst,
-               int target_w, int target_h,
-               LetterBoxInfo& info) noexcept {
-    dst.release();
+bool letterbox_impl(const cv::Mat& src, cv::Mat& dst,
+                    cv::Mat& resize_buffer,
+                    int target_w, int target_h,
+                    LetterBoxInfo& info) noexcept {
     info = {};
 
     // 明确限制输入契约，避免空图、灰度图或浮点图在 OpenCV 内部触发异常，
     // 并防止除零或构造负尺寸画布。
     if (src.empty() || src.type() != CV_8UC3 ||
         target_w <= 0 || target_h <= 0) {
+        dst.release();
         return false;
     }
 
     try {
+        const size_t pixel_count = static_cast<size_t>(target_w) *
+            static_cast<size_t>(target_h);
+        if (pixel_count >
+            static_cast<size_t>(std::numeric_limits<int>::max()) / 3U) {
+            dst.release();
+            return false;
+        }
+
         const int sw = src.cols;
         const int sh = src.rows;
         const float scale = std::min(
@@ -44,28 +54,38 @@ bool letterbox(const cv::Mat& src, cv::Mat& dst,
         info.target_w = target_w;
         info.target_h = target_h;
 
-        cv::Mat resized;
-        cv::resize(src, resized, cv::Size(nw, nh), 0, 0, cv::INTER_LINEAR);
+        const cv::Mat* resized = &src;
+        if (nw != sw || nh != sh) {
+            resize_buffer.create(nh, nw, CV_8UC3);
+            cv::resize(src, resize_buffer, cv::Size(nw, nh),
+                       0, 0, cv::INTER_LINEAR);
+            resized = &resize_buffer;
+        }
 
-        cv::Mat canvas(target_h, target_w, CV_8UC3, cv::Scalar(114, 114, 114));
-        resized.copyTo(canvas(cv::Rect(left, top, nw, nh)));
+        // 一次循环完成填充、BGR→RGB、uint8→float32、归一化和 HWC→CHW。
+        // 相比 canvas/convertTo/cvtColor/split/memcpy 链路，避免四个整图临时
+        // 缓冲区和多次内存遍历。dst.create() 在尺寸不变时保留原有分配。
+        const size_t element_count = pixel_count * 3U;
+        dst.create(1, static_cast<int>(element_count), CV_32F);
+        float* output = dst.ptr<float>();
+        constexpr float kScale = 1.0f / 255.0f;
+        constexpr float kPadding = 114.0f / 255.0f;
+        std::fill_n(output, element_count, kPadding);
 
-        // ONNX 检测模型通常接收 RGB、NCHW、float32、[0,1]。先转 float
-        // 再拆通道，保证最终缓冲区按 R 平面、G 平面、B 平面连续排列。
-        cv::Mat rgb_float;
-        canvas.convertTo(rgb_float, CV_32FC3, 1.0f / 255.0f);
-        cv::cvtColor(rgb_float, rgb_float, cv::COLOR_BGR2RGB);
-
-        std::vector<cv::Mat> channels(3);
-        cv::split(rgb_float, channels);
-
-        dst = cv::Mat(1, 3 * target_h * target_w, CV_32F);
-        float* ptr = dst.ptr<float>();
-        const size_t plane_bytes =
-            static_cast<size_t>(target_h) * target_w * sizeof(float);
-        for (int c = 0; c < 3; ++c) {
-            std::memcpy(ptr + static_cast<size_t>(c) * target_h * target_w,
-                        channels[c].ptr<float>(), plane_bytes);
+        float* red = output;
+        float* green = output + pixel_count;
+        float* blue = output + pixel_count * 2U;
+        for (int y = 0; y < nh; ++y) {
+            const cv::Vec3b* source_row = resized->ptr<cv::Vec3b>(y);
+            const size_t destination_row =
+                static_cast<size_t>(top + y) * target_w + left;
+            for (int x = 0; x < nw; ++x) {
+                const size_t destination = destination_row + x;
+                const cv::Vec3b& pixel = source_row[x];
+                red[destination] = static_cast<float>(pixel[2]) * kScale;
+                green[destination] = static_cast<float>(pixel[1]) * kScale;
+                blue[destination] = static_cast<float>(pixel[0]) * kScale;
+            }
         }
         return true;
     } catch (...) {
@@ -73,6 +93,24 @@ bool letterbox(const cv::Mat& src, cv::Mat& dst,
         info = {};
         return false;
     }
+}
+
+} // namespace
+
+bool letterbox(const cv::Mat& src, cv::Mat& dst,
+               int target_w, int target_h,
+               LetterBoxInfo& info) noexcept {
+    cv::Mat resize_buffer;
+    return letterbox_impl(
+        src, dst, resize_buffer, target_w, target_h, info);
+}
+
+bool letterbox_reuse(const cv::Mat& src, cv::Mat& dst,
+                     cv::Mat& resize_buffer,
+                     int target_w, int target_h,
+                     LetterBoxInfo& info) noexcept {
+    return letterbox_impl(
+        src, dst, resize_buffer, target_w, target_h, info);
 }
 
 } // namespace detector::detail

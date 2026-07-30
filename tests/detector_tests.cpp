@@ -173,6 +173,39 @@ void test_preprocess_contract() {
     cv::Mat invalid;
     expect(!detector::detail::letterbox(invalid, blob, 640, 640, info),
            "空图必须安全失败");
+
+    // 两个像素验证一次循环同时完成 RGB、归一化和 CHW，不能只验证单像素
+    // 而漏掉通道平面步长错误。
+    cv::Mat two_pixels(1, 2, CV_8UC3);
+    two_pixels.at<cv::Vec3b>(0, 0) = cv::Vec3b(10, 20, 30);
+    two_pixels.at<cv::Vec3b>(0, 1) = cv::Vec3b(40, 50, 60);
+    expect(detector::detail::letterbox(two_pixels, blob, 2, 1, info),
+           "两像素前处理应成功");
+    if (blob.total() == 6) {
+        const float* values = blob.ptr<float>();
+        expect(near(values[0], 30.0f / 255.0f) &&
+               near(values[1], 60.0f / 255.0f) &&
+               near(values[2], 20.0f / 255.0f) &&
+               near(values[3], 50.0f / 255.0f) &&
+               near(values[4], 10.0f / 255.0f) &&
+               near(values[5], 40.0f / 255.0f),
+               "融合前处理的 RGB/CHW 平面布局错误");
+    }
+
+    cv::Mat resize_buffer;
+    cv::Mat reusable_blob;
+    cv::Mat larger(2, 4, CV_8UC3, cv::Scalar(1, 2, 3));
+    expect(detector::detail::letterbox_reuse(
+               larger, reusable_blob, resize_buffer, 2, 2, info),
+           "可复用前处理首次调用应成功");
+    const unsigned char* first_blob_address = reusable_blob.data;
+    const unsigned char* first_resize_address = resize_buffer.data;
+    expect(detector::detail::letterbox_reuse(
+               larger, reusable_blob, resize_buffer, 2, 2, info),
+           "可复用前处理第二次调用应成功");
+    expect(reusable_blob.data == first_blob_address &&
+           resize_buffer.data == first_resize_address,
+           "固定输入尺寸不应重复分配前处理缓冲区");
 }
 
 void test_tensorrt_cache_defaults() {

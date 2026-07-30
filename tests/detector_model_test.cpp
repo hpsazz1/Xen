@@ -308,7 +308,7 @@ bool benchmark_videos(Detector& detector,
 int main(int argc, char* argv[]) {
     if (argc < 2 || argc > 7 || !argv[1] || argv[1][0] == '\0') {
         std::cerr << "用法：detector_model_test <模型路径> "
-                     "[cpu|tensorrt] [TensorRT缓存目录] "
+                     "[cpu|cuda|tensorrt|directml] [TensorRT缓存目录] "
                      "[视频目录] [CSV报告路径] [center|full]\n";
         return 2;
     }
@@ -320,10 +320,14 @@ int main(int argc, char* argv[]) {
     const std::string requested_backend = argc >= 3 ? argv[2] : "cpu";
     if (requested_backend == "cpu") {
         config.backend = BackendType::CPU;
+    } else if (requested_backend == "cuda") {
+        config.backend = BackendType::CUDA;
     } else if (requested_backend == "tensorrt") {
         config.backend = BackendType::TENSORRT;
         config.enable_fp16 = true;
         if (argc >= 4) config.trt_cache_path = argv[3];
+    } else if (requested_backend == "directml") {
+        config.backend = BackendType::DIRECTML;
     } else {
         std::cerr << "未知后端：" << requested_backend << '\n';
         return 2;
@@ -341,9 +345,14 @@ int main(int argc, char* argv[]) {
         std::cerr << "模型输入尺寸无效\n";
         return 1;
     }
-    const std::string expected_provider = requested_backend == "tensorrt"
-        ? "TensorrtExecutionProvider"
-        : "CPUExecutionProvider";
+    std::string expected_provider = "CPUExecutionProvider";
+    if (requested_backend == "cuda") {
+        expected_provider = "CUDAExecutionProvider";
+    } else if (requested_backend == "tensorrt") {
+        expected_provider = "TensorrtExecutionProvider";
+    } else if (requested_backend == "directml") {
+        expected_provider = "DmlExecutionProvider";
+    }
     if (detector.backend_name() != expected_provider) {
         std::cerr << "集成测试实际后端不符合请求："
                   << detector.backend_name() << '\n';

@@ -6,6 +6,7 @@
 #include "log/log.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -74,6 +75,10 @@ struct Detector::Impl {
     std::string active_provider = "CPUExecutionProvider";
     std::optional<bool> metadata_end_to_end;
     std::optional<OutputFormat> resolved_output_format;
+    std::array<int64_t, 4> input_shape{1, 3, 0, 0};
+    size_t input_element_count = 0;
+    cv::Mat input_blob;
+    cv::Mat resize_buffer;
 
     bool load(const DetectorConfig& config) {
         if (!valid_config(config)) {
@@ -112,6 +117,10 @@ struct Detector::Impl {
             LOG_ERROR("detector", "模型高宽为动态维度时必须显式设置 input_width/input_height");
             return false;
         }
+
+        input_shape = {1, channels, height, width};
+        input_element_count = static_cast<size_t>(channels) *
+            static_cast<size_t>(height) * static_cast<size_t>(width);
 
         // 静态模型不允许配置值与模型形状冲突，避免调用方误以为 Detector
         // 会在不改变 ONNX 图的情况下强行覆盖固定输入尺寸。
@@ -153,25 +162,20 @@ struct Detector::Impl {
         using milliseconds = std::chrono::duration<double, std::milli>;
 
         const auto start = clock::now();
-        cv::Mat blob;
         detector::detail::LetterBoxInfo letterbox_info;
-        if (!detector::detail::letterbox(
-                bgr_image, blob,
+        if (!detector::detail::letterbox_reuse(
+                bgr_image, input_blob, resize_buffer,
                 static_cast<int>(width), static_cast<int>(height),
                 letterbox_info)) {
             return {};
         }
         const auto preprocessed = clock::now();
 
-        const std::vector<int64_t> input_shape = {
-            1, channels, height, width};
-        const size_t element_count = static_cast<size_t>(channels) *
-            static_cast<size_t>(height) * static_cast<size_t>(width);
         Ort::MemoryInfo* memory = session.memory_info();
         if (!memory) return {};
 
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-            *memory, blob.ptr<float>(), element_count,
+            *memory, input_blob.ptr<float>(), input_element_count,
             input_shape.data(), input_shape.size());
         auto outputs = session.run(input_tensor);
         const auto inferred = clock::now();

@@ -71,6 +71,18 @@ Builder Resource，使同一构建可在不同 NVIDIA GPU 上首次生成对应 
   -CudaRoot "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
 ```
 
+DirectML 使用官方独立 ORT 包，不能与 CUDA/TensorRT 版 `onnxruntime.dll`
+混放。以下脚本固定使用 `build-dml/`，并严格校验实际 Provider；DML 不可用时
+测试失败，不会静默回退 CPU：
+
+```powershell
+.\scripts\test_directml.ps1 `
+  -ModelPath "C:\path\to\model.onnx" `
+  -OnnxRuntimeRoot "C:\path\to\Microsoft.ML.OnnxRuntime.DirectML" `
+  -DirectMlRoot "C:\path\to\Microsoft.AI.DirectML" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib"
+```
+
 使用真实场景视频评估 Detector 时，可逐帧统计前处理、推理、后处理和总耗时，
 以及有检测结果的帧比例和最长连续空检测帧数：
 

@@ -5,6 +5,7 @@
     [string]$TensorRtRoot = $env:TENSORRT_ROOT,
     [string]$CudnnRoot = $env:CUDNN_ROOT,
     [string]$CudaRoot = $env:CUDA_PATH,
+    [string]$DirectMlRoot = $env:DIRECTML_ROOT,
     [string]$ModelPath = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release"
@@ -12,8 +13,17 @@
 
 $ErrorActionPreference = "Stop"
 
-if ([string]::IsNullOrWhiteSpace($OnnxRuntimeRoot) -or
-    -not (Test-Path -LiteralPath (Join-Path $OnnxRuntimeRoot "include\onnxruntime_cxx_api.h"))) {
+$ortHeaderFound = $false
+if (-not [string]::IsNullOrWhiteSpace($OnnxRuntimeRoot)) {
+    $ortHeaderCandidates = @(
+        (Join-Path $OnnxRuntimeRoot "include\onnxruntime_cxx_api.h"),
+        (Join-Path $OnnxRuntimeRoot "build\native\include\onnxruntime_cxx_api.h")
+    )
+    $ortHeaderFound = [bool]($ortHeaderCandidates | Where-Object {
+        Test-Path -LiteralPath $_ -PathType Leaf
+    })
+}
+if ([string]::IsNullOrWhiteSpace($OnnxRuntimeRoot) -or -not $ortHeaderFound) {
     throw "ONNX Runtime SDK 无效：请通过 -OnnxRuntimeRoot 或 ONNXRUNTIME_ROOT 指定解压根目录。"
 }
 
@@ -48,6 +58,13 @@ if (-not [string]::IsNullOrWhiteSpace($CudaRoot)) {
         throw "CUDA Toolkit 目录不存在：$CudaRoot"
     }
     $configureArguments += "-DXEN_CUDA_ROOT=$CudaRoot"
+}
+if (-not [string]::IsNullOrWhiteSpace($DirectMlRoot)) {
+    $directMlDll = Join-Path $DirectMlRoot "bin\x64-win\DirectML.dll"
+    if (-not (Test-Path -LiteralPath $directMlDll -PathType Leaf)) {
+        throw "DirectML 可再发行目录无效：$DirectMlRoot"
+    }
+    $configureArguments += "-DXEN_DIRECTML_ROOT=$DirectMlRoot"
 }
 if (-not [string]::IsNullOrWhiteSpace($ModelPath)) {
     if (-not (Test-Path -LiteralPath $ModelPath -PathType Leaf)) {

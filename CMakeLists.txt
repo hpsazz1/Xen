@@ -19,14 +19,15 @@ if(NOT ONNXRUNTIME_ROOT)
 endif()
 find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
     HINTS ${ONNXRUNTIME_ROOT}
-    PATH_SUFFIXES include)
+    PATH_SUFFIXES include build/native/include)
 find_library(ONNXRUNTIME_LIB onnxruntime
     HINTS ${ONNXRUNTIME_ROOT}
-    PATH_SUFFIXES lib)
+    PATH_SUFFIXES lib runtimes/win-x64/native)
 if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIB)
     message(FATAL_ERROR
         "ONNX Runtime SDK not found. Set ONNXRUNTIME_ROOT to the extracted SDK root.")
 endif()
+get_filename_component(ONNXRUNTIME_RUNTIME_DIR "${ONNXRUNTIME_LIB}" DIRECTORY)
 message(STATUS "ONNX Runtime: ${ONNXRUNTIME_LIB}")
 
 # OpenCV
@@ -43,6 +44,8 @@ set(XEN_CUDNN_ROOT "$ENV{CUDNN_ROOT}" CACHE PATH
     "cuDNN SDK root used to deploy runtime DLLs")
 set(XEN_CUDA_ROOT "$ENV{CUDA_PATH}" CACHE PATH
     "CUDA Toolkit root used to deploy runtime DLLs")
+set(XEN_DIRECTML_ROOT "$ENV{DIRECTML_ROOT}" CACHE PATH
+    "DirectML redistributable root used to deploy DirectML.dll")
 
 # 使用 copy_if_different 避免增量构建反复重写数百 MB 的 GPU 运行库。
 function(xen_copy_runtime_files target)
@@ -54,10 +57,10 @@ function(xen_copy_runtime_files target)
     endforeach()
 endfunction()
 
-# 可执行目标按实际能力选择 OPENCV / ORT_GPU。Windows 系统 DLL、显卡驱动 DLL
+# 可执行目标按实际能力选择 OPENCV / ORT。Windows 系统 DLL、显卡驱动 DLL
 # 和系统提供的 MSVC 运行库不复制。
 function(xen_deploy_runtime_dlls target)
-    set(options OPENCV ORT_GPU)
+    set(options OPENCV ORT)
     cmake_parse_arguments(DEPLOY "${options}" "" "" ${ARGN})
 
     if(DEPLOY_OPENCV)
@@ -85,21 +88,31 @@ function(xen_deploy_runtime_dlls target)
         xen_copy_runtime_files(${target} ${OPENCV_VIDEO_RUNTIME_DLLS})
     endif()
 
-    if(DEPLOY_ORT_GPU)
+    if(DEPLOY_ORT)
         set(ORT_RUNTIME_DLLS)
         foreach(runtime_name
                 onnxruntime.dll
                 onnxruntime_providers_shared.dll
                 onnxruntime_providers_cuda.dll
                 onnxruntime_providers_tensorrt.dll)
-            set(runtime_file "${ONNXRUNTIME_ROOT}/lib/${runtime_name}")
+            set(runtime_file "${ONNXRUNTIME_RUNTIME_DIR}/${runtime_name}")
             if(EXISTS "${runtime_file}")
                 list(APPEND ORT_RUNTIME_DLLS "${runtime_file}")
             endif()
         endforeach()
         xen_copy_runtime_files(${target} ${ORT_RUNTIME_DLLS})
 
-        if(XEN_TENSORRT_ROOT AND IS_DIRECTORY "${XEN_TENSORRT_ROOT}")
+        # 只有当前 ORT 包确实包含 CUDA/TensorRT Provider 时才部署 NVIDIA 依赖。
+        # DirectML 独立构建不会因为机器上设置了 CUDA 环境变量而夹带无关 DLL。
+        if(EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_cuda.dll" OR
+           EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_tensorrt.dll")
+            set(XEN_ORT_USES_NVIDIA TRUE)
+        else()
+            set(XEN_ORT_USES_NVIDIA FALSE)
+        endif()
+
+        if(XEN_ORT_USES_NVIDIA AND
+           XEN_TENSORRT_ROOT AND IS_DIRECTORY "${XEN_TENSORRT_ROOT}")
             set(TENSORRT_RUNTIME_DLLS)
             foreach(runtime_name
                     nvinfer_10.dll
@@ -115,19 +128,21 @@ function(xen_deploy_runtime_dlls target)
                 "${XEN_TENSORRT_ROOT}/bin/nvinfer_builder_resource_*.dll")
             list(APPEND TENSORRT_RUNTIME_DLLS ${TENSORRT_BUILDER_RUNTIME_DLLS})
             xen_copy_runtime_files(${target} ${TENSORRT_RUNTIME_DLLS})
-        else()
+        elseif(XEN_ORT_USES_NVIDIA)
             message(STATUS "TensorRT runtime deployment skipped: XEN_TENSORRT_ROOT is empty")
         endif()
 
-        if(XEN_CUDNN_ROOT AND IS_DIRECTORY "${XEN_CUDNN_ROOT}")
+        if(XEN_ORT_USES_NVIDIA AND
+           XEN_CUDNN_ROOT AND IS_DIRECTORY "${XEN_CUDNN_ROOT}")
             file(GLOB_RECURSE CUDNN_RUNTIME_DLLS CONFIGURE_DEPENDS
                 "${XEN_CUDNN_ROOT}/*.dll")
             xen_copy_runtime_files(${target} ${CUDNN_RUNTIME_DLLS})
-        else()
+        elseif(XEN_ORT_USES_NVIDIA)
             message(STATUS "cuDNN runtime deployment skipped: XEN_CUDNN_ROOT is empty")
         endif()
 
-        if(XEN_CUDA_ROOT AND IS_DIRECTORY "${XEN_CUDA_ROOT}")
+        if(XEN_ORT_USES_NVIDIA AND
+           XEN_CUDA_ROOT AND IS_DIRECTORY "${XEN_CUDA_ROOT}")
             set(CUDA_RUNTIME_DLLS)
             foreach(runtime_name
                     cublas64_13.dll
@@ -139,8 +154,19 @@ function(xen_deploy_runtime_dlls target)
                 endif()
             endforeach()
             xen_copy_runtime_files(${target} ${CUDA_RUNTIME_DLLS})
-        else()
+        elseif(XEN_ORT_USES_NVIDIA)
             message(STATUS "CUDA runtime deployment skipped: XEN_CUDA_ROOT is empty")
+        endif()
+
+        # DML EP 编译进 onnxruntime.dll，但 DirectML 可再发行 DLL 必须位于进程
+        # 搜索路径。只在当前 ORT 头文件含 DML 工厂时部署 x64 正式版。
+        if(EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/dml_provider_factory.h")
+            set(DIRECTML_RUNTIME_DLL "${XEN_DIRECTML_ROOT}/bin/x64-win/DirectML.dll")
+            if(NOT EXISTS "${DIRECTML_RUNTIME_DLL}")
+                message(FATAL_ERROR
+                    "DirectML.dll not found. Set DIRECTML_ROOT to Microsoft.AI.DirectML root.")
+            endif()
+            xen_copy_runtime_files(${target} "${DIRECTML_RUNTIME_DLL}")
         endif()
     endif()
 endfunction()
@@ -220,7 +246,7 @@ if(BUILD_TESTING)
             tests/detector_model_test.cpp)
         target_link_libraries(detector_model_test PRIVATE detector)
         if(WIN32)
-            xen_deploy_runtime_dlls(detector_model_test OPENCV ORT_GPU)
+            xen_deploy_runtime_dlls(detector_model_test OPENCV ORT)
         endif()
         add_test(NAME detector_model_test
             COMMAND detector_model_test "${XEN_TEST_MODEL}")

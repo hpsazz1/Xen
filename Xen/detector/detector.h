@@ -108,7 +108,7 @@ public:
     /// 释放模型资源
     void reset();
 
-    /// 在单张 BGR 图像上运行检测
+    /// 在单张 BGR 图像上运行检测；同一实例不可并发调用，多线程请使用 clone()
     std::vector<Detection> detect(const cv::Mat& bgr_image);
 
     /// 批量检测

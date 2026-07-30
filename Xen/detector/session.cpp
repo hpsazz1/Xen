@@ -9,6 +9,11 @@
 
 #if defined(_WIN32) && __has_include(<dml_provider_factory.h>)
 #include <dml_provider_factory.h>
+// DirectML 间接包含的 Windows 头会定义 ERROR 宏，导致后续日志宏中的
+// LogLevel::ERROR 被预处理器改写。Provider 头读取完毕后立即清除此污染。
+#ifdef ERROR
+#undef ERROR
+#endif
 #define XEN_HAS_DIRECTML_FACTORY 1
 #else
 #define XEN_HAS_DIRECTML_FACTORY 0
@@ -200,13 +205,13 @@ bool Session::setup_options(const DetectorConfig& cfg) {
                     options, cfg.device_id));
                 impl_->active_provider = "DmlExecutionProvider";
             } else {
-                impl_->active_provider = "CPUExecutionProvider";
-                LOG_WARN("detector", "DirectML EP 不可用，降级到 CPU EP");
+                LOG_ERROR("detector", "DirectML EP 不可用，拒绝静默降级到 CPU EP");
+                return false;
             }
 #else
             (void)has_directml;
-            impl_->active_provider = "CPUExecutionProvider";
-            LOG_WARN("detector", "当前 ORT SDK 不含 DirectML 工厂，降级到 CPU EP");
+            LOG_ERROR("detector", "当前 ORT SDK 不含 DirectML 工厂，无法执行 DML 推理");
+            return false;
 #endif
             return true;
         }

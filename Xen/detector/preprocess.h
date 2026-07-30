@@ -23,6 +23,13 @@ bool letterbox(const cv::Mat& src, cv::Mat& dst,
                int target_w, int target_h,
                LetterBoxInfo& info) noexcept;
 
+/// 与 letterbox() 契约相同，但复用调用方持有的 resize 缓冲区和输出张量。
+/// Detector 热路径使用此入口，避免每帧重复分配大块内存。
+bool letterbox_reuse(const cv::Mat& src, cv::Mat& dst,
+                     cv::Mat& resize_buffer,
+                     int target_w, int target_h,
+                     LetterBoxInfo& info) noexcept;
+
 } // namespace detector::detail
 
 #endif // DETECTOR_PREPROCESS_H
