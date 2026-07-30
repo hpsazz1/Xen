@@ -1,0 +1,40 @@
+#ifndef DETECTOR_SESSION_H
+#define DETECTOR_SESSION_H
+
+#include <string>
+#include <vector>
+#include <memory>
+#include <onnxruntime_cxx_api.h>
+#include "detector/detector.h"
+
+namespace detector::detail {
+
+/// ONNX Runtime 会话的轻量封装
+class Session {
+public:
+    Session();
+    ~Session();
+
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
+    Session(Session&&);
+    Session& operator=(Session&&);
+
+    bool init_env(const DetectorConfig& cfg);
+    void setup_options(const DetectorConfig& cfg);
+    bool load(const std::string& path);
+    std::vector<Ort::Value> run(Ort::Value& input);
+
+    std::vector<int64_t>          input_shape() const;
+    size_t                        num_outputs() const;
+    const std::vector<const char*>& output_names() const;
+    Ort::MemoryInfo*              memory_info();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+} // namespace detector::detail
+
+#endif // DETECTOR_SESSION_H
