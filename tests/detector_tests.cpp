@@ -175,6 +175,16 @@ void test_preprocess_contract() {
            "空图必须安全失败");
 }
 
+void test_tensorrt_cache_defaults() {
+    const DetectorConfig config;
+    expect(config.enable_trt_engine_cache,
+           "TensorRT Engine Cache 默认应启用");
+    expect(config.enable_trt_timing_cache,
+           "TensorRT Timing Cache 默认应启用");
+    expect(!config.trt_cache_path.empty(),
+           "启用 TensorRT 缓存时默认目录不能为空");
+}
+
 } // namespace
 
 int main() {
@@ -184,6 +194,7 @@ int main() {
     test_end_to_end_decode();
     test_scale_and_nms();
     test_preprocess_contract();
+    test_tensorrt_cache_defaults();
 
     if (failures != 0) {
         std::cerr << "Detector 测试失败数: " << failures << '\n';

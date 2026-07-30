@@ -59,6 +59,20 @@ Detector 不按“YOLOv5/v8/v10/11/26”等版本号硬编码分支，而按 ONN
 
 当前仅支持单输入、单输出、NCHW、float32 的 detect 模型。分割、姿态、OBB、多输出 head 和真正的 batch inference 不在当前范围内。
 
+### TensorRT 缓存
+
+选择 `BackendType::TENSORRT` 时默认启用 Engine Cache 与 Timing Cache。首次加载仍需从 ONNX 构建 TensorRT Engine，缓存写入 `cache/tensorrt/`；后续创建 Session 会直接复用缓存，无需再次完整构建：
+
+```cpp
+DetectorConfig config;
+config.model_path = "models/yolo.onnx";
+config.backend = BackendType::TENSORRT;
+config.enable_fp16 = true;
+config.trt_cache_path = "cache/tensorrt";
+```
+
+缓存与模型、GPU、精度配置、ONNX Runtime 和 TensorRT 版本相关。上述任一项变化后，应删除对应缓存并重新生成。缓存目录已由 `.gitignore` 排除。
+
 ## 本地开发资料
 
 `AGENTS.md` 与 `docs/` 仅用于本地开发和设计记录，已通过 `.gitignore` 排除，不随源码仓库发布。

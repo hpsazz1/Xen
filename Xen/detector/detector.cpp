@@ -19,8 +19,14 @@ namespace {
 bool valid_config(const DetectorConfig& config) noexcept {
     const bool dimensions_are_pair =
         (config.input_width == 0) == (config.input_height == 0);
+    const bool trt_cache_path_valid =
+        config.backend != BackendType::TENSORRT ||
+        (!config.enable_trt_engine_cache &&
+         !config.enable_trt_timing_cache) ||
+        !config.trt_cache_path.empty();
     return !config.model_path.empty() && config.device_id >= 0 &&
-           dimensions_are_pair && config.input_width >= 0 &&
+           dimensions_are_pair && trt_cache_path_valid &&
+           config.input_width >= 0 &&
            config.input_height >= 0 && config.intra_threads >= 0 &&
            config.inter_threads >= 0 &&
            std::isfinite(config.conf_threshold) &&

@@ -116,14 +116,51 @@ bool Session::setup_options(const DetectorConfig& cfg) {
                 std::unique_ptr<OrtTensorRTProviderOptionsV2, decltype(release)>
                     tensorrt_options(raw_options, release);
 
+                std::string cache_path;
+                if (cfg.enable_trt_engine_cache ||
+                    cfg.enable_trt_timing_cache) {
+                    const auto requested_path =
+                        std::filesystem::u8path(cfg.trt_cache_path);
+                    std::error_code error;
+                    std::filesystem::create_directories(
+                        requested_path, error);
+                    if (error ||
+                        !std::filesystem::is_directory(requested_path)) {
+                        LOG_ERROR("detector", "TensorRT 缓存目录创建失败: {}",
+                                  cfg.trt_cache_path);
+                        return false;
+                    }
+                    // Provider V2 接口接收窄字符串。absolute() 同时固定相对路径
+                    // 的解析位置，避免运行期间工作目录变化后读写不同缓存目录。
+                    cache_path = std::filesystem::absolute(
+                        requested_path).string();
+                }
+
                 const std::string device_id = std::to_string(cfg.device_id);
-                const char* keys[] = {"device_id", "trt_fp16_enable"};
+                const char* keys[] = {
+                    "device_id",
+                    "trt_fp16_enable",
+                    "trt_engine_cache_enable",
+                    "trt_engine_cache_path",
+                    "trt_timing_cache_enable",
+                    "trt_timing_cache_path",
+                };
                 const char* values[] = {
-                    device_id.c_str(), cfg.enable_fp16 ? "1" : "0"};
+                    device_id.c_str(),
+                    cfg.enable_fp16 ? "1" : "0",
+                    cfg.enable_trt_engine_cache ? "1" : "0",
+                    cache_path.c_str(),
+                    cfg.enable_trt_timing_cache ? "1" : "0",
+                    cache_path.c_str(),
+                };
                 Ort::ThrowOnError(Ort::GetApi().UpdateTensorRTProviderOptions(
-                    tensorrt_options.get(), keys, values, 2));
+                    tensorrt_options.get(), keys, values,
+                    sizeof(keys) / sizeof(keys[0])));
                 options.AppendExecutionProvider_TensorRT_V2(*tensorrt_options);
                 impl_->active_provider = "TensorrtExecutionProvider";
+                if (!cache_path.empty()) {
+                    LOG_INFO("detector", "TensorRT 缓存目录: {}", cache_path);
+                }
             }
 
             // TensorRT 官方建议继续注册 CUDA，让 TRT 不支持的节点落到 CUDA，

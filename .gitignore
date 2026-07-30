@@ -7,3 +7,6 @@ docs/
 # CMake 本地构建产物。
 build/
 cmake-build-*/
+
+# TensorRT EP 首次构建生成的 engine/profile/timing 缓存。
+cache/
