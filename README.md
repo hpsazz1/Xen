@@ -64,6 +64,31 @@ ctest --test-dir build -C Release --output-on-failure
   -CudaRoot "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
 ```
 
+使用真实场景视频评估 Detector 时，可逐帧统计前处理、推理、后处理和总耗时，
+以及有检测结果的帧比例和最长连续空检测帧数：
+
+```powershell
+.\scripts\benchmark_detector_videos.ps1 `
+  -ModelPath "C:\path\to\model.onnx" `
+  -VideoDirectory "C:\path\to\videos" `
+  -OnnxRuntimeRoot "C:\path\to\onnxruntime" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib" `
+  -TensorRtRoot "C:\path\to\TensorRT" `
+  -CudnnRoot "C:\path\to\cudnn" `
+  -CudaRoot "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
+```
+
+脚本在 `cache/benchmarks/` 生成 CSV。每段视频先重复第一帧预热 50 次，
+正式统计覆盖全部视频帧，输出各阶段 mean/P50/P95/P99。视频没有人工标注时，
+`detection_frame_rate` 只表示“存在检测结果的帧比例”，不能直接解释为 Recall；
+目标在全屏范围移动而采集范围固定为中心 ROI 时，ROI 外的空检测是正确结果。
+该指标同时受到目标进入 ROI 的时间占比与 ROI 内检测成功率影响；只有补充目标可见性
+标注后，才能单独计算模型在 ROI 内的 Recall。
+
+脚本默认使用 `-InputMode center`，从全屏录像中央裁取与模型输入相同大小的 ROI，
+模拟实时游戏中只采集准星附近 FOV 的链路。只有需要测量“整幅录像缩放到模型输入”时
+才使用 `-InputMode full`；两种模式的准确率结果不能直接混合比较。
+
 ## Detector 模型兼容性
 
 Detector 不按“YOLOv5/v8/v10/11/26”等版本号硬编码分支，而按 ONNX 输出契约解码：
