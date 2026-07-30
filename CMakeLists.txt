@@ -110,11 +110,20 @@ if(BUILD_TESTING)
         target_link_libraries(detector_model_test PRIVATE detector)
         if(WIN32)
             # Windows 会优先从 System32 加载 DLL，不能只依赖 PATH；将与编译
-            # 头文件/导入库同版本的 ORT 核心 DLL 放到测试程序旁，避免误载旧版。
-            add_custom_command(TARGET detector_model_test POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${ONNXRUNTIME_ROOT}/lib/onnxruntime.dll"
-                    "$<TARGET_FILE_DIR:detector_model_test>")
+            # 头文件/导入库同版本的 ORT 核心与 Provider DLL 放到测试程序旁。
+            # ProviderBridge 会按核心 DLL 所在目录查找，只有 PATH 不足以加载。
+            foreach(ORT_RUNTIME_DLL
+                    onnxruntime.dll
+                    onnxruntime_providers_shared.dll
+                    onnxruntime_providers_cuda.dll
+                    onnxruntime_providers_tensorrt.dll)
+                if(EXISTS "${ONNXRUNTIME_ROOT}/lib/${ORT_RUNTIME_DLL}")
+                    add_custom_command(TARGET detector_model_test POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${ONNXRUNTIME_ROOT}/lib/${ORT_RUNTIME_DLL}"
+                            "$<TARGET_FILE_DIR:detector_model_test>")
+                endif()
+            endforeach()
         endif()
         add_test(NAME detector_model_test
             COMMAND detector_model_test "${XEN_TEST_MODEL}")

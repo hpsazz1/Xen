@@ -45,6 +45,25 @@ ctest --test-dir build -C Release --output-on-failure
 
 `ModelPath` 可省略；提供后会额外执行真实模型加载与单帧推理测试，模型不会复制进构建目录或纳入 Git。
 
+需要单独验证 TensorRT EP 与缓存时，可在依赖 DLL 目录均已加入 `PATH` 后执行：
+
+```powershell
+.\build\Release\detector_model_test.exe `
+  "C:\path\to\model.onnx" tensorrt "cache\tensorrt"
+```
+
+推荐使用脚本自动设置隔离的运行库路径并连续加载两次：
+
+```powershell
+.\scripts\test_tensorrt.ps1 `
+  -ModelPath "C:\path\to\model.onnx" `
+  -OnnxRuntimeRoot "C:\path\to\onnxruntime" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib" `
+  -TensorRtRoot "C:\path\to\TensorRT-10.16.1.11" `
+  -CudnnRoot "C:\path\to\cudnn-9.21.0.82-cuda13" `
+  -CudaRoot "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
+```
+
 ## Detector 模型兼容性
 
 Detector 不按“YOLOv5/v8/v10/11/26”等版本号硬编码分支，而按 ONNX 输出契约解码：

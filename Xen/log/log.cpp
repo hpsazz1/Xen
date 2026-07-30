@@ -139,6 +139,9 @@ void Log::init(const LogConfig& cfg) {
     //    queue_size: 4096 条 ≈ 够约 1 秒的爆发日志量（按每帧 5 条 × 200fps）
     //    thread_count: 1，I/O 瓶颈在磁盘不在线程数
     spdlog::init_thread_pool(4096, 1);
+    // async_logger 构造函数需要持有同一个线程池。只初始化 spdlog 全局池但
+    // 不保存指针，会把空 shared_ptr 传入 logger，首次写日志即失败。
+    impl_->thread_pool = spdlog::thread_pool();
 
     // 2. 创建各 sink
     impl_->init_sinks(cfg);
