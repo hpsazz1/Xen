@@ -83,6 +83,10 @@ DirectML 使用官方独立 ORT 包，不能与 CUDA/TensorRT 版 `onnxruntime.d
   -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib"
 ```
 
+固定 shape 的 TensorRT 模型默认启用 CUDA Graph。Detector 会复用 CUDA 输入输出
+缓冲区，在图捕获之外执行每帧 H2D/D2H 复制，避免把首次输入错误地重复重放。
+动态 shape 模型或诊断图捕获问题时设置 `enable_trt_cuda_graph = false`。
+
 使用真实场景视频评估 Detector 时，可逐帧统计前处理、推理、后处理和总耗时，
 以及有检测结果的帧比例和最长连续空检测帧数：
 

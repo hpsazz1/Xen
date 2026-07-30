@@ -23,7 +23,8 @@ public:
     bool init_env(const DetectorConfig& cfg);
     bool setup_options(const DetectorConfig& cfg);
     bool load(const std::string& path);
-    std::vector<Ort::Value> run(Ort::Value& input);
+    // 返回值由 Session 持有，仅在下一次 run()/load() 或析构前有效。
+    const std::vector<Ort::Value>* run(Ort::Value& input);
 
     size_t                        num_inputs() const;
     std::vector<int64_t>          input_shape() const;

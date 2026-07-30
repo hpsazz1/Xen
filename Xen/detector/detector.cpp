@@ -177,11 +177,13 @@ struct Detector::Impl {
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
             *memory, input_blob.ptr<float>(), input_element_count,
             input_shape.data(), input_shape.size());
-        auto outputs = session.run(input_tensor);
+        const auto* outputs = session.run(input_tensor);
         const auto inferred = clock::now();
-        if (outputs.size() != 1 || !outputs[0].IsTensor()) return {};
+        if (!outputs || outputs->size() != 1 || !(*outputs)[0].IsTensor()) {
+            return {};
+        }
 
-        const auto output_info = outputs[0].GetTensorTypeAndShapeInfo();
+        const auto output_info = (*outputs)[0].GetTensorTypeAndShapeInfo();
         if (output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
             return {};
         }
@@ -211,7 +213,7 @@ struct Detector::Impl {
 
         std::vector<Detection> detections;
         if (!detector::detail::decode_output(
-                outputs[0].GetTensorData<float>(), output_shape, resolved,
+                (*outputs)[0].GetTensorData<float>(), output_shape, resolved,
                 config.conf_threshold, detections)) {
             return {};
         }

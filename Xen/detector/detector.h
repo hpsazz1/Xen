@@ -68,6 +68,9 @@ struct DetectorConfig {
     bool         enable_fp16      = false;
     bool         enable_trt_engine_cache = true;
     bool         enable_trt_timing_cache = true;
+    // 固定 shape 实时推理默认使用 CUDA Graph 降低 kernel launch 开销。
+    // 动态 shape 或需要排查图捕获问题时可显式关闭。
+    bool         enable_trt_cuda_graph = true;
     // TensorRT 首次构建后在此保存 engine/profile/timing 文件。模型、ORT、
     // TensorRT 版本或精度配置变化时必须清理旧缓存。
     std::string  trt_cache_path = "cache/tensorrt";

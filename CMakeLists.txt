@@ -47,6 +47,20 @@ set(XEN_CUDA_ROOT "$ENV{CUDA_PATH}" CACHE PATH
 set(XEN_DIRECTML_ROOT "$ENV{DIRECTML_ROOT}" CACHE PATH
     "DirectML redistributable root used to deploy DirectML.dll")
 
+# TensorRT CUDA Graph 需要把每帧输入显式复制到固定设备地址，并在图重放后
+# 把结果复制回固定 CPU 缓冲区。仅 CUDA/TensorRT ORT 构建链接 CUDA Runtime；
+# DirectML 独立构建不查找也不部署任何 CUDA 文件。
+if(EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_cuda.dll" OR
+   EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_tensorrt.dll")
+    set(XEN_ONNXRUNTIME_HAS_CUDA TRUE)
+    if(XEN_CUDA_ROOT)
+        set(CUDAToolkit_ROOT "${XEN_CUDA_ROOT}")
+    endif()
+    find_package(CUDAToolkit REQUIRED)
+else()
+    set(XEN_ONNXRUNTIME_HAS_CUDA FALSE)
+endif()
+
 # 使用 copy_if_different 避免增量构建反复重写数百 MB 的 GPU 运行库。
 function(xen_copy_runtime_files target)
     foreach(runtime_file IN LISTS ARGN)
@@ -154,6 +168,11 @@ function(xen_deploy_runtime_dlls target)
                 endif()
             endforeach()
             xen_copy_runtime_files(${target} ${CUDA_RUNTIME_DLLS})
+            # Detector 直接链接的 cudart 从 CMake 导入目标解析实际版本，避免
+            # 把 CUDA 主版本硬编码进复制规则。
+            if(TARGET CUDA::cudart)
+                xen_copy_runtime_files(${target} "$<TARGET_FILE:CUDA::cudart>")
+            endif()
         elseif(XEN_ORT_USES_NVIDIA)
             message(STATUS "CUDA runtime deployment skipped: XEN_CUDA_ROOT is empty")
         endif()
@@ -217,6 +236,12 @@ target_include_directories(detector
 target_link_libraries(detector
     PUBLIC  ${ONNXRUNTIME_LIB} ${OpenCV_LIBS} ${CMAKE_DL_LIBS} log
     PRIVATE Threads::Threads)
+if(XEN_ONNXRUNTIME_HAS_CUDA)
+    target_link_libraries(detector PRIVATE CUDA::cudart)
+    target_compile_definitions(detector PRIVATE XEN_HAS_CUDA_RUNTIME=1)
+else()
+    target_compile_definitions(detector PRIVATE XEN_HAS_CUDA_RUNTIME=0)
+endif()
 
 # ─── 测试 ───────────────────────────────────────────────
 

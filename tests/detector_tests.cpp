@@ -214,6 +214,8 @@ void test_tensorrt_cache_defaults() {
            "TensorRT Engine Cache 默认应启用");
     expect(config.enable_trt_timing_cache,
            "TensorRT Timing Cache 默认应启用");
+    expect(config.enable_trt_cuda_graph,
+           "固定 shape 实时推理默认应启用 TensorRT CUDA Graph");
     expect(!config.trt_cache_path.empty(),
            "启用 TensorRT 缓存时默认目录不能为空");
 }

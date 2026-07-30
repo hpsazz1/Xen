@@ -11,3 +11,6 @@ cmake-build-*/
 
 # TensorRT EP 首次构建生成的 engine/profile/timing 缓存。
 cache/
+
+# 本地运行日志。
+logs/
