@@ -40,10 +40,17 @@ ctest --test-dir build -C Release --output-on-failure
 .\scripts\build.ps1 `
   -OnnxRuntimeRoot "C:\path\to\onnxruntime-win-x64-gpu_cuda13-1.27.1" `
   -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib" `
+  -TensorRtRoot "C:\path\to\TensorRT" `
+  -CudnnRoot "C:\path\to\cudnn" `
+  -CudaRoot "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2" `
   -ModelPath "C:\path\to\model.onnx"
 ```
 
 `ModelPath` 可省略；提供后会额外执行真实模型加载与单帧推理测试，模型不会复制进构建目录或纳入 Git。
+构建测试可执行文件时，CMake 会把其实际使用的 OpenCV、ONNX Runtime、TensorRT、
+cuDNN 和 CUDA DLL 复制到对应的 `build/<Configuration>/`，测试程序可直接启动，
+无需手工修改系统 `PATH`。TensorRT 只复制核心、ONNX 解析器和 SDK 提供的各架构
+Builder Resource，使同一构建可在不同 NVIDIA GPU 上首次生成对应 Engine；不复制完整 SDK。
 
 需要单独验证 TensorRT EP 与缓存时，可在依赖 DLL 目录均已加入 `PATH` 后执行：
 

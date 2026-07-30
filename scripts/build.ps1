@@ -2,6 +2,9 @@
     [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build"),
     [string]$OnnxRuntimeRoot = $env:ONNXRUNTIME_ROOT,
     [string]$OpenCvDir = $env:OpenCV_DIR,
+    [string]$TensorRtRoot = $env:TENSORRT_ROOT,
+    [string]$CudnnRoot = $env:CUDNN_ROOT,
+    [string]$CudaRoot = $env:CUDA_PATH,
     [string]$ModelPath = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release"
@@ -28,6 +31,24 @@ $configureArguments = @(
     "-DOpenCV_DIR=$OpenCvDir",
     "-DBUILD_TESTING=ON"
 )
+if (-not [string]::IsNullOrWhiteSpace($TensorRtRoot)) {
+    if (-not (Test-Path -LiteralPath $TensorRtRoot -PathType Container)) {
+        throw "TensorRT SDK 目录不存在：$TensorRtRoot"
+    }
+    $configureArguments += "-DXEN_TENSORRT_ROOT=$TensorRtRoot"
+}
+if (-not [string]::IsNullOrWhiteSpace($CudnnRoot)) {
+    if (-not (Test-Path -LiteralPath $CudnnRoot -PathType Container)) {
+        throw "cuDNN SDK 目录不存在：$CudnnRoot"
+    }
+    $configureArguments += "-DXEN_CUDNN_ROOT=$CudnnRoot"
+}
+if (-not [string]::IsNullOrWhiteSpace($CudaRoot)) {
+    if (-not (Test-Path -LiteralPath $CudaRoot -PathType Container)) {
+        throw "CUDA Toolkit 目录不存在：$CudaRoot"
+    }
+    $configureArguments += "-DXEN_CUDA_ROOT=$CudaRoot"
+}
 if (-not [string]::IsNullOrWhiteSpace($ModelPath)) {
     if (-not (Test-Path -LiteralPath $ModelPath -PathType Leaf)) {
         throw "测试模型不存在：$ModelPath"
@@ -41,20 +62,7 @@ if ($LASTEXITCODE -ne 0) { throw "CMake 配置失败，退出码：$LASTEXITCODE
 & cmake --build $BuildDirectory --config $Configuration --parallel
 if ($LASTEXITCODE -ne 0) { throw "构建失败，退出码：$LASTEXITCODE" }
 
-# OpenCV_DIR 通常指向 build/x64/vcXX/lib，测试程序运行时需要同级 bin 中的 DLL。
-$openCvPlatformDirectory = Split-Path -Parent $OpenCvDir
-$openCvBinDirectory = Join-Path $openCvPlatformDirectory "bin"
-$onnxRuntimeBinDirectory = Join-Path $OnnxRuntimeRoot "lib"
-$originalPath = $env:PATH
-try {
-    if (Test-Path -LiteralPath $onnxRuntimeBinDirectory) {
-        $env:PATH = "$onnxRuntimeBinDirectory;$env:PATH"
-    }
-    if (Test-Path -LiteralPath $openCvBinDirectory) {
-        $env:PATH = "$openCvBinDirectory;$env:PATH"
-    }
-    & ctest --test-dir $BuildDirectory -C $Configuration --output-on-failure
-    if ($LASTEXITCODE -ne 0) { throw "测试失败，退出码：$LASTEXITCODE" }
-} finally {
-    $env:PATH = $originalPath
-}
+# CMake 的 POST_BUILD 规则必须已把目标所需 DLL 部署到可执行文件旁。
+# 此处故意不添加 SDK bin/lib 到 PATH，防止缺失的复制规则被开发环境掩盖。
+& ctest --test-dir $BuildDirectory -C $Configuration --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw "测试失败，退出码：$LASTEXITCODE" }
