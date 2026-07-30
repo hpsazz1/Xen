@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstddef>
 #include <exception>
+#include <limits>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -64,6 +66,48 @@ const char* output_format_name(OutputFormat format) noexcept {
     return "UNKNOWN";
 }
 
+OutputFormat requested_output_format(
+        const DetectorConfig& config,
+        const std::optional<bool>& metadata_end_to_end,
+        const std::vector<int64_t>& output_shape) noexcept {
+    if (config.output_format != OutputFormat::AUTO) {
+        return config.output_format;
+    }
+    if (!metadata_end_to_end.has_value()) return OutputFormat::AUTO;
+    if (*metadata_end_to_end) return OutputFormat::END_TO_END;
+
+    // 单类别 raw head 与端到端输出均为六列。metadata 明确为 false 时
+    // 必须尊重模型声明，不能再根据候选数量猜测。
+    if (output_shape.size() == 3 && output_shape[2] == 6) {
+        return OutputFormat::ANCHOR_FIRST_OBJECTNESS;
+    }
+    return OutputFormat::AUTO;
+}
+
+bool valid_declared_output_shape(
+        const std::vector<int64_t>& shape) noexcept {
+    if (shape.size() != 3 || (shape[0] != 1 && shape[0] != -1)) {
+        return false;
+    }
+    return std::all_of(shape.begin() + 1, shape.end(),
+        [](int64_t dimension) {
+            return dimension == -1 || dimension > 0;
+        });
+}
+
+std::uint64_t fnv1a_64(const void* data, size_t byte_count) noexcept {
+    constexpr std::uint64_t kOffsetBasis = 14695981039346656037ULL;
+    constexpr std::uint64_t kPrime = 1099511628211ULL;
+
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    std::uint64_t hash = kOffsetBasis;
+    for (size_t index = 0; index < byte_count; ++index) {
+        hash ^= static_cast<std::uint64_t>(bytes[index]);
+        hash *= kPrime;
+    }
+    return hash;
+}
+
 } // namespace
 
 struct Detector::Impl {
@@ -79,6 +123,28 @@ struct Detector::Impl {
     size_t input_element_count = 0;
     cv::Mat input_blob;
     cv::Mat resize_buffer;
+    std::vector<Detection> candidate_detections;
+    std::vector<unsigned char> nms_suppressed;
+    mutable std::mutex profile_mutex;
+    InferenceProfile last_profile;
+
+    void set_profile(const InferenceProfile& profile) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(profile_mutex);
+            last_profile = profile;
+        } catch (...) {
+            // profile 是观测信息；锁异常不得终止推理进程。
+        }
+    }
+
+    InferenceProfile profile() const noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(profile_mutex);
+            return last_profile;
+        } catch (...) {
+            return {};
+        }
+    }
 
     bool load(const DetectorConfig& config) {
         if (!valid_config(config)) {
@@ -118,6 +184,14 @@ struct Detector::Impl {
             return false;
         }
 
+        const auto max_int = static_cast<int64_t>(
+            std::numeric_limits<int>::max());
+        if (height > max_int || width > max_int ||
+            height > max_int / width || height * width > max_int / 3) {
+            LOG_ERROR("detector", "模型输入尺寸过大: {}x{}", width, height);
+            return false;
+        }
+
         input_shape = {1, channels, height, width};
         input_element_count = static_cast<size_t>(channels) *
             static_cast<size_t>(height) * static_cast<size_t>(width);
@@ -148,6 +222,33 @@ struct Detector::Impl {
             return false;
         }
 
+        if (session.output_type(0) != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            LOG_ERROR("detector", "仅支持 float32 输出张量，实际类型={}",
+                      static_cast<int>(session.output_type(0)));
+            return false;
+        }
+        const auto declared_output_shape = session.output_shape(0);
+        if (!valid_declared_output_shape(declared_output_shape)) {
+            LOG_ERROR("detector", "模型输出必须是单 batch 三维张量，rank={}",
+                      declared_output_shape.size());
+            return false;
+        }
+        const bool static_output = std::all_of(
+            declared_output_shape.begin(), declared_output_shape.end(),
+            [](int64_t dimension) { return dimension > 0; });
+        if (static_output) {
+            const OutputFormat requested = requested_output_format(
+                config, metadata_end_to_end, declared_output_shape);
+            OutputFormat resolved = OutputFormat::AUTO;
+            if (!detector::detail::resolve_output_format(
+                    declared_output_shape, requested, resolved)) {
+                LOG_ERROR("detector",
+                          "无法确定模型输出契约，请显式设置 output_format");
+                return false;
+            }
+            resolved_output_format = resolved;
+        }
+
         active_provider = session.active_provider();
         loaded = true;
         LOG_INFO("detector", "模型加载完成: {}x{}, provider={}",
@@ -167,86 +268,103 @@ struct Detector::Impl {
                 bgr_image, input_blob, resize_buffer,
                 static_cast<int>(width), static_cast<int>(height),
                 letterbox_info)) {
+            profile.status = DetectionStatus::PREPROCESS_FAILED;
             return {};
         }
         const auto preprocessed = clock::now();
 
         Ort::MemoryInfo* memory = session.memory_info();
-        if (!memory) return {};
+        if (!memory) {
+            profile.status = DetectionStatus::INFERENCE_FAILED;
+            return {};
+        }
 
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
             *memory, input_blob.ptr<float>(), input_element_count,
             input_shape.data(), input_shape.size());
-        const auto* outputs = session.run(input_tensor);
+        detector::detail::SessionRunProfile session_profile;
+        const auto* outputs = session.run(input_tensor, session_profile);
         const auto inferred = clock::now();
-        if (!outputs || outputs->size() != 1 || !(*outputs)[0].IsTensor()) {
+        profile.preprocess_ms =
+            std::chrono::duration_cast<milliseconds>(preprocessed - start).count();
+        profile.inference_ms =
+            std::chrono::duration_cast<milliseconds>(inferred - preprocessed).count();
+        profile.h2d_ms = session_profile.h2d_ms;
+        profile.execution_ms = session_profile.execution_ms;
+        profile.d2h_ms = session_profile.d2h_ms;
+        profile.explicit_device_copy = session_profile.explicit_device_copy;
+        if (!outputs) {
+            profile.status = DetectionStatus::INFERENCE_FAILED;
+            return {};
+        }
+        if (outputs->size() != 1 || !(*outputs)[0].IsTensor()) {
+            profile.status = DetectionStatus::INVALID_OUTPUT;
             return {};
         }
 
         const auto output_info = (*outputs)[0].GetTensorTypeAndShapeInfo();
         if (output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            profile.status = DetectionStatus::INVALID_OUTPUT;
             return {};
         }
         const auto output_shape = output_info.GetShape();
 
-        OutputFormat requested = config.output_format;
-        if (requested == OutputFormat::AUTO && metadata_end_to_end.has_value()) {
-            if (*metadata_end_to_end) {
-                requested = OutputFormat::END_TO_END;
-            } else if (output_shape.size() == 3 && output_shape[2] == 6 &&
-                       output_shape[1] > 1024) {
-                requested = OutputFormat::ANCHOR_FIRST_OBJECTNESS;
-            }
-        }
+        const OutputFormat requested = requested_output_format(
+            config, metadata_end_to_end, output_shape);
 
         OutputFormat resolved = OutputFormat::AUTO;
         if (!detector::detail::resolve_output_format(
                 output_shape, requested, resolved)) {
+            profile.status = DetectionStatus::INVALID_OUTPUT;
             return {};
         }
         if (resolved_output_format.has_value() &&
             *resolved_output_format != resolved) {
             // 同一会话输出契约发生变化意味着模型或动态输出不符合约定。
+            profile.status = DetectionStatus::INVALID_OUTPUT;
             return {};
         }
         resolved_output_format = resolved;
 
-        std::vector<Detection> detections;
+        const float* output_data = (*outputs)[0].GetTensorData<float>();
+        if (config.enable_output_fingerprint) {
+            // 指纹只用于回归测试。关闭时不读取原始输出，避免给正式热路径
+            // 增加一次完整张量遍历和额外缓存带宽。
+            profile.output_fingerprint = fnv1a_64(
+                output_data, (*outputs)[0].GetTensorSizeInBytes());
+        }
+
+        candidate_detections.clear();
         if (!detector::detail::decode_output(
-                (*outputs)[0].GetTensorData<float>(), output_shape, resolved,
-                config.conf_threshold, detections)) {
+                output_data, output_shape, resolved,
+                config.conf_threshold, candidate_detections)) {
+            profile.status = DetectionStatus::INVALID_OUTPUT;
             return {};
         }
 
-        detector::detail::scale_detections(detections, letterbox_info);
-        if (resolved != OutputFormat::END_TO_END) {
-            detector::detail::nms(
-                detections, config.nms_threshold, config.top_k);
-        } else if (static_cast<int>(detections.size()) > config.top_k) {
-            std::partial_sort(
-                detections.begin(), detections.begin() + config.top_k,
-                detections.end(),
-                [](const Detection& a, const Detection& b) {
-                    return a.confidence > b.confidence;
-                });
-            detections.resize(static_cast<size_t>(config.top_k));
+        std::vector<Detection> detections;
+        if (!detector::detail::finalize_detections(
+                candidate_detections, resolved, config.nms_threshold,
+                config.top_k, letterbox_info, detections,
+                nms_suppressed)) {
+            profile.status = DetectionStatus::POSTPROCESS_FAILED;
+            return {};
         }
         const auto finished = clock::now();
 
-        profile.preprocess_ms =
-            std::chrono::duration_cast<milliseconds>(preprocessed - start).count();
-        profile.inference_ms =
-            std::chrono::duration_cast<milliseconds>(inferred - preprocessed).count();
         profile.postprocess_ms =
             std::chrono::duration_cast<milliseconds>(finished - inferred).count();
         profile.total_ms =
             std::chrono::duration_cast<milliseconds>(finished - start).count();
+        profile.status = DetectionStatus::SUCCESS;
 
         LOG_TRACE("detector",
-                  "format={}, pre={:.2f}ms infer={:.2f}ms post={:.2f}ms total={:.2f}ms det={}",
+                  "format={}, pre={:.2f}ms infer={:.2f}ms h2d={:.2f}ms exec={:.2f}ms d2h={:.2f}ms post={:.2f}ms total={:.2f}ms det={}",
                   output_format_name(resolved), profile.preprocess_ms,
-                  profile.inference_ms, profile.postprocess_ms,
-                  profile.total_ms, detections.size());
+                  profile.inference_ms, profile.h2d_ms,
+                  profile.execution_ms, profile.d2h_ms,
+                  profile.postprocess_ms, profile.total_ms,
+                  detections.size());
         return detections;
     }
 };
@@ -271,7 +389,6 @@ bool Detector::load() {
         auto candidate = std::make_unique<Impl>();
         if (!candidate->load(config_)) return false;
         impl_ = std::move(candidate);
-        profile_ = {};
         return true;
     } catch (const std::exception& e) {
         LOG_ERROR("detector", "Detector::load() 失败: {}", e.what());
@@ -288,25 +405,35 @@ bool Detector::loaded() const noexcept {
 
 void Detector::reset() {
     impl_ = std::make_unique<Impl>();
-    profile_ = {};
 }
 
 std::vector<Detection> Detector::detect(const cv::Mat& bgr_image) {
-    if (!loaded() || bgr_image.empty() || bgr_image.type() != CV_8UC3) {
+    InferenceProfile current_profile;
+    if (!loaded()) {
+        current_profile.status = DetectionStatus::NOT_LOADED;
+        if (impl_) impl_->set_profile(current_profile);
+        return {};
+    }
+    if (bgr_image.empty() || bgr_image.type() != CV_8UC3) {
+        current_profile.status = DetectionStatus::INVALID_INPUT;
+        impl_->set_profile(current_profile);
         return {};
     }
 
     try {
-        InferenceProfile current_profile;
         auto detections = impl_->run(bgr_image, config_, current_profile);
-        profile_ = current_profile;
+        impl_->set_profile(current_profile);
         return detections;
     } catch (const std::exception& e) {
         // detect() 是推理热路径，只允许编译期可移除的 DEBUG/TRACE。
         LOG_DEBUG("detector", "Detector::detect() 失败: {}", e.what());
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
         return {};
     } catch (...) {
         LOG_DEBUG("detector", "Detector::detect() 失败: 未知异常");
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
         return {};
     }
 }
@@ -326,8 +453,8 @@ std::unique_ptr<Detector> Detector::clone() const {
     return clone->load() ? std::move(clone) : nullptr;
 }
 
-const InferenceProfile& Detector::profile() const noexcept {
-    return profile_;
+InferenceProfile Detector::profile() const noexcept {
+    return impl_ ? impl_->profile() : InferenceProfile{};
 }
 
 std::string Detector::backend_name() const {

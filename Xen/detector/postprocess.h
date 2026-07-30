@@ -28,8 +28,19 @@ void nms(std::vector<Detection>& dets,
          float nms_threshold,
          int top_k) noexcept;
 
+/// 完成候选框排序/NMS、top_k 和坐标还原。raw 输出必须先在模型坐标系
+/// 执行 NMS，再裁剪到原图边界，避免越界框被提前裁剪后改变 IoU。
+/// candidates 与 suppressed 由 Detector 长期持有，用于复用大块临时内存。
+bool finalize_detections(std::vector<Detection>& candidates,
+                         OutputFormat format,
+                         float nms_threshold,
+                         int top_k,
+                         const LetterBoxInfo& info,
+                         std::vector<Detection>& output,
+                         std::vector<unsigned char>& suppressed) noexcept;
+
 /// 将模型输入像素坐标还原到原始图像，裁剪越界坐标并删除退化框。
-void scale_detections(std::vector<Detection>& dets,
+bool scale_detections(std::vector<Detection>& dets,
                       const LetterBoxInfo& info) noexcept;
 
 } // namespace detector::detail

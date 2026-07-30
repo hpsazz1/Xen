@@ -1,9 +1,10 @@
 #ifndef DETECTOR_H
 #define DETECTOR_H
 
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
 #include <opencv2/core.hpp>
 
 // ============================================================
@@ -30,6 +31,34 @@ enum class OutputFormat {
     ANCHOR_FIRST_OBJECTNESS,      ///< [B, A, 5+C]，cxcywh + obj + 类别概率
     END_TO_END,                   ///< [B, N, 6]，xyxy + score + class，无需 NMS
 };
+
+// ============================================================
+// 单帧执行状态
+// ============================================================
+enum class DetectionStatus {
+    NOT_RUN,             ///< 尚未执行 detect()
+    SUCCESS,             ///< pipeline 完整执行；检测结果允许为空
+    NOT_LOADED,          ///< 模型尚未加载
+    INVALID_INPUT,       ///< 输入不是非空 CV_8UC3 图像
+    PREPROCESS_FAILED,   ///< LetterBox 或张量填充失败
+    INFERENCE_FAILED,    ///< ORT 执行或设备复制失败
+    INVALID_OUTPUT,      ///< 模型输出类型、shape 或契约不受支持
+    POSTPROCESS_FAILED,  ///< NMS、top_k 或坐标还原失败
+};
+
+inline const char* DetectionStatusName(DetectionStatus status) noexcept {
+    switch (status) {
+        case DetectionStatus::NOT_RUN: return "NOT_RUN";
+        case DetectionStatus::SUCCESS: return "SUCCESS";
+        case DetectionStatus::NOT_LOADED: return "NOT_LOADED";
+        case DetectionStatus::INVALID_INPUT: return "INVALID_INPUT";
+        case DetectionStatus::PREPROCESS_FAILED: return "PREPROCESS_FAILED";
+        case DetectionStatus::INFERENCE_FAILED: return "INFERENCE_FAILED";
+        case DetectionStatus::INVALID_OUTPUT: return "INVALID_OUTPUT";
+        case DetectionStatus::POSTPROCESS_FAILED: return "POSTPROCESS_FAILED";
+    }
+    return "UNKNOWN";
+}
 
 // ============================================================
 // 检测结果
@@ -71,10 +100,14 @@ struct DetectorConfig {
     // 固定 shape 实时推理默认使用 CUDA Graph 降低 kernel launch 开销。
     // 动态 shape 或需要排查图捕获问题时可显式关闭。
     bool         enable_trt_cuda_graph = true;
+    // 仅用于回归诊断：计算原始输出字节指纹会额外遍历整个输出张量，性能
+    // 基准和正式运行必须保持关闭。
+    bool         enable_output_fingerprint = false;
     // TensorRT 首次构建后在此保存 engine/profile/timing 文件。模型、ORT、
     // TensorRT 版本或精度配置变化时必须清理旧缓存。
     std::string  trt_cache_path = "cache/tensorrt";
-    int          intra_threads    = 0; ///< 0 = 默认
+    int          intra_threads    = 0; ///< 0 = ORT 默认；GPU 单实例建议实测 1
+    // 为保持已有配置源码兼容而保留；当前 Session 始终顺序执行，此值被忽略。
     int          inter_threads    = 0;
 };
 
@@ -86,6 +119,14 @@ struct InferenceProfile {
     double inference_ms   = 0;
     double postprocess_ms = 0;
     double total_ms       = 0;
+    // TensorRT CUDA Graph 使用显式设备复制时可进一步拆分；其他后端的
+    // execution_ms 包含 ORT 内部可能发生的隐式复制，h2d/d2h 保持为 0。
+    double h2d_ms         = 0;
+    double execution_ms   = 0;
+    double d2h_ms         = 0;
+    bool   explicit_device_copy = false;
+    std::uint64_t output_fingerprint = 0;
+    DetectionStatus status = DetectionStatus::NOT_RUN;
 };
 
 // ============================================================
@@ -118,13 +159,15 @@ public:
     std::vector<std::vector<Detection>> detect_batch(
         const std::vector<cv::Mat>& bgr_images);
 
-    /// 创建一个独立副本（多线程安全：每个线程持有自己的 clone）
+    /// 创建完全独立的副本。每个 clone 都会新建 ORT Session、线程池、
+    /// TensorRT 执行上下文和设备缓冲；默认实时链路应优先使用单推理线程单实例，
+    /// 仅独立视频流确需并行推理时才为各线程创建 clone。
     std::unique_ptr<Detector> clone() const;
 
-    /// 最近一次推理的耗时统计
-    const InferenceProfile& profile() const noexcept;
+    /// 最近一次推理的线程安全快照；可与 detect() 并发读取
+    InferenceProfile profile() const noexcept;
 
-    /// 返回当前后端名称
+    /// 返回已注册的最高优先级 Provider；CUDA/TensorRT 允许节点级后备
     std::string backend_name() const;
 
     /// 获取模型实际输入尺寸（load() 后有效）
@@ -139,7 +182,6 @@ private:
     std::unique_ptr<Impl> impl_;
 
     DetectorConfig       config_;
-    InferenceProfile     profile_;
 };
 
 #endif // DETECTOR_H

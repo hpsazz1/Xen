@@ -17,17 +17,55 @@ endif()
 if(NOT ONNXRUNTIME_ROOT)
     set(ONNXRUNTIME_ROOT "$ENV{ONNXRUNTIME_ROOT}")
 endif()
+if(NOT ONNXRUNTIME_ROOT OR NOT IS_DIRECTORY "${ONNXRUNTIME_ROOT}")
+    message(FATAL_ERROR
+        "ONNX Runtime SDK root is invalid. Set ONNXRUNTIME_ROOT to the extracted SDK root.")
+endif()
+
+# find_path/find_library 的结果会进入 CMakeCache。复用构建目录切换 ORT SDK 时，
+# 必须先清除旧解析结果，否则新的 ONNXRUNTIME_ROOT 不会触发重新查找。
+get_filename_component(XEN_ONNXRUNTIME_ROOT_REAL "${ONNXRUNTIME_ROOT}" REALPATH)
+file(TO_CMAKE_PATH "${XEN_ONNXRUNTIME_ROOT_REAL}" XEN_ONNXRUNTIME_ROOT_REAL)
+string(TOLOWER "${XEN_ONNXRUNTIME_ROOT_REAL}" XEN_ONNXRUNTIME_ROOT_KEY)
+if(DEFINED XEN_CONFIGURED_ONNXRUNTIME_ROOT AND
+   NOT XEN_CONFIGURED_ONNXRUNTIME_ROOT STREQUAL XEN_ONNXRUNTIME_ROOT_KEY)
+    unset(ONNXRUNTIME_INCLUDE_DIR CACHE)
+    unset(ONNXRUNTIME_LIB CACHE)
+endif()
+set(XEN_CONFIGURED_ONNXRUNTIME_ROOT "${XEN_ONNXRUNTIME_ROOT_KEY}"
+    CACHE INTERNAL "ONNX Runtime root used by the current build tree" FORCE)
+
 find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
-    HINTS ${ONNXRUNTIME_ROOT}
-    PATH_SUFFIXES include build/native/include)
+    HINTS "${XEN_ONNXRUNTIME_ROOT_REAL}"
+    PATH_SUFFIXES include build/native/include
+    NO_DEFAULT_PATH)
 find_library(ONNXRUNTIME_LIB onnxruntime
-    HINTS ${ONNXRUNTIME_ROOT}
-    PATH_SUFFIXES lib runtimes/win-x64/native)
+    HINTS "${XEN_ONNXRUNTIME_ROOT_REAL}"
+    PATH_SUFFIXES lib runtimes/win-x64/native
+    NO_DEFAULT_PATH)
 if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIB)
     message(FATAL_ERROR
         "ONNX Runtime SDK not found. Set ONNXRUNTIME_ROOT to the extracted SDK root.")
 endif()
+get_filename_component(ONNXRUNTIME_INCLUDE_DIR_REAL
+    "${ONNXRUNTIME_INCLUDE_DIR}" REALPATH)
+get_filename_component(ONNXRUNTIME_LIB_REAL "${ONNXRUNTIME_LIB}" REALPATH)
+file(RELATIVE_PATH ONNXRUNTIME_INCLUDE_RELATIVE
+    "${XEN_ONNXRUNTIME_ROOT_REAL}" "${ONNXRUNTIME_INCLUDE_DIR_REAL}")
+file(RELATIVE_PATH ONNXRUNTIME_LIB_RELATIVE
+    "${XEN_ONNXRUNTIME_ROOT_REAL}" "${ONNXRUNTIME_LIB_REAL}")
+if(IS_ABSOLUTE "${ONNXRUNTIME_INCLUDE_RELATIVE}" OR
+   ONNXRUNTIME_INCLUDE_RELATIVE MATCHES "^\\.\\.($|/)" OR
+   IS_ABSOLUTE "${ONNXRUNTIME_LIB_RELATIVE}" OR
+   ONNXRUNTIME_LIB_RELATIVE MATCHES "^\\.\\.($|/)")
+    message(FATAL_ERROR
+        "Resolved ONNX Runtime files are outside ONNXRUNTIME_ROOT. Clear the build cache.")
+endif()
 get_filename_component(ONNXRUNTIME_RUNTIME_DIR "${ONNXRUNTIME_LIB}" DIRECTORY)
+if(WIN32 AND NOT EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime.dll")
+    message(FATAL_ERROR
+        "onnxruntime.dll not found beside the selected import library: ${ONNXRUNTIME_RUNTIME_DIR}")
+endif()
 message(STATUS "ONNX Runtime: ${ONNXRUNTIME_LIB}")
 
 # OpenCV
@@ -40,6 +78,8 @@ find_package(Threads REQUIRED)
 # 直接或动态加载的 DLL 部署到可执行文件旁，确保测试程序无需手工配置 PATH。
 set(XEN_TENSORRT_ROOT "$ENV{TENSORRT_ROOT}" CACHE PATH
     "TensorRT SDK root used to deploy runtime DLLs")
+set(XEN_TENSORRT_MAJOR "" CACHE STRING
+    "TensorRT DLL major version required by the selected ONNX Runtime package")
 set(XEN_CUDNN_ROOT "$ENV{CUDNN_ROOT}" CACHE PATH
     "cuDNN SDK root used to deploy runtime DLLs")
 set(XEN_CUDA_ROOT "$ENV{CUDA_PATH}" CACHE PATH
@@ -50,8 +90,14 @@ set(XEN_DIRECTML_ROOT "$ENV{DIRECTML_ROOT}" CACHE PATH
 # TensorRT CUDA Graph 需要把每帧输入显式复制到固定设备地址，并在图重放后
 # 把结果复制回固定 CPU 缓冲区。仅 CUDA/TensorRT ORT 构建链接 CUDA Runtime；
 # DirectML 独立构建不查找也不部署任何 CUDA 文件。
+if(EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_tensorrt.dll")
+    set(XEN_ONNXRUNTIME_HAS_TENSORRT TRUE)
+else()
+    set(XEN_ONNXRUNTIME_HAS_TENSORRT FALSE)
+endif()
+
 if(EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_cuda.dll" OR
-   EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_tensorrt.dll")
+   XEN_ONNXRUNTIME_HAS_TENSORRT)
     set(XEN_ONNXRUNTIME_HAS_CUDA TRUE)
     if(XEN_CUDA_ROOT)
         set(CUDAToolkit_ROOT "${XEN_CUDA_ROOT}")
@@ -59,6 +105,69 @@ if(EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_cuda.dll" OR
     find_package(CUDAToolkit REQUIRED)
 else()
     set(XEN_ONNXRUNTIME_HAS_CUDA FALSE)
+endif()
+
+# TensorRT SDK 的 DLL major 必须与 ORT TensorRT Provider 的导入依赖一致。
+# 不能根据本机安装版本猜测，否则 Provider 会在 Session 创建时才因 ABI 不匹配失败。
+if(XEN_TENSORRT_ROOT)
+    if(NOT IS_DIRECTORY "${XEN_TENSORRT_ROOT}")
+        message(FATAL_ERROR "TensorRT SDK root does not exist: ${XEN_TENSORRT_ROOT}")
+    endif()
+    if(NOT XEN_TENSORRT_MAJOR MATCHES "^[0-9]+$")
+        message(FATAL_ERROR
+            "Set XEN_TENSORRT_MAJOR to the DLL major in XEN_TENSORRT_ROOT (for example 10 or 11).")
+    endif()
+
+    set(XEN_TENSORRT_CORE_DLL
+        "${XEN_TENSORRT_ROOT}/bin/nvinfer_${XEN_TENSORRT_MAJOR}.dll")
+    set(XEN_TENSORRT_PARSER_DLL
+        "${XEN_TENSORRT_ROOT}/bin/nvonnxparser_${XEN_TENSORRT_MAJOR}.dll")
+    foreach(required_file IN ITEMS
+            "${XEN_TENSORRT_CORE_DLL}"
+            "${XEN_TENSORRT_PARSER_DLL}")
+        if(NOT EXISTS "${required_file}")
+            message(FATAL_ERROR "Required TensorRT runtime DLL not found: ${required_file}")
+        endif()
+    endforeach()
+
+    if(XEN_ONNXRUNTIME_HAS_TENSORRT AND WIN32 AND MSVC)
+        execute_process(
+            COMMAND "${CMAKE_LINKER}" /dump /dependents
+                "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_tensorrt.dll"
+            RESULT_VARIABLE XEN_TENSORRT_DEPENDENCY_RESULT
+            OUTPUT_VARIABLE XEN_TENSORRT_DEPENDENCIES
+            ERROR_VARIABLE XEN_TENSORRT_DEPENDENCY_ERROR)
+        if(NOT XEN_TENSORRT_DEPENDENCY_RESULT EQUAL 0)
+            message(FATAL_ERROR
+                "Failed to inspect ONNX Runtime TensorRT Provider dependencies: "
+                "${XEN_TENSORRT_DEPENDENCY_ERROR}")
+        endif()
+        string(TOLOWER "${XEN_TENSORRT_DEPENDENCIES}"
+            XEN_TENSORRT_DEPENDENCIES_LOWER)
+        string(REGEX MATCH "nvinfer_([0-9]+)\\.dll"
+            XEN_TENSORRT_PROVIDER_CORE "${XEN_TENSORRT_DEPENDENCIES_LOWER}")
+        set(XEN_TENSORRT_PROVIDER_MAJOR "${CMAKE_MATCH_1}")
+        string(REGEX MATCH "nvonnxparser_([0-9]+)\\.dll"
+            XEN_TENSORRT_PROVIDER_PARSER "${XEN_TENSORRT_DEPENDENCIES_LOWER}")
+        set(XEN_TENSORRT_PROVIDER_PARSER_MAJOR "${CMAKE_MATCH_1}")
+        if(NOT XEN_TENSORRT_PROVIDER_CORE OR
+           NOT XEN_TENSORRT_PROVIDER_PARSER)
+            message(FATAL_ERROR
+                "Cannot determine TensorRT DLL major required by the selected ONNX Runtime package.")
+        endif()
+        if(NOT XEN_TENSORRT_PROVIDER_MAJOR STREQUAL XEN_TENSORRT_MAJOR OR
+           NOT XEN_TENSORRT_PROVIDER_PARSER_MAJOR STREQUAL XEN_TENSORRT_MAJOR)
+            message(FATAL_ERROR
+                "TensorRT SDK major ${XEN_TENSORRT_MAJOR} is incompatible with the selected "
+                "ONNX Runtime Provider, which requires nvinfer_${XEN_TENSORRT_PROVIDER_MAJOR}.dll "
+                "and nvonnxparser_${XEN_TENSORRT_PROVIDER_PARSER_MAJOR}.dll.")
+        endif()
+    elseif(NOT XEN_ONNXRUNTIME_HAS_TENSORRT)
+        message(WARNING
+            "XEN_TENSORRT_ROOT is set, but the selected ONNX Runtime package has no TensorRT Provider.")
+    endif()
+elseif(XEN_TENSORRT_MAJOR)
+    message(FATAL_ERROR "XEN_TENSORRT_MAJOR is set but XEN_TENSORRT_ROOT is empty.")
 endif()
 
 # 使用 copy_if_different 避免增量构建反复重写数百 MB 的 GPU 运行库。
@@ -125,21 +234,14 @@ function(xen_deploy_runtime_dlls target)
             set(XEN_ORT_USES_NVIDIA FALSE)
         endif()
 
-        if(XEN_ORT_USES_NVIDIA AND
-           XEN_TENSORRT_ROOT AND IS_DIRECTORY "${XEN_TENSORRT_ROOT}")
-            set(TENSORRT_RUNTIME_DLLS)
-            foreach(runtime_name
-                    nvinfer_10.dll
-                    nvonnxparser_10.dll)
-                set(runtime_file "${XEN_TENSORRT_ROOT}/bin/${runtime_name}")
-                if(EXISTS "${runtime_file}")
-                    list(APPEND TENSORRT_RUNTIME_DLLS "${runtime_file}")
-                endif()
-            endforeach()
+        if(XEN_ORT_USES_NVIDIA AND XEN_TENSORRT_ROOT)
+            set(TENSORRT_RUNTIME_DLLS
+                "${XEN_TENSORRT_CORE_DLL}"
+                "${XEN_TENSORRT_PARSER_DLL}")
             # Engine Cache 不能跨 GPU 架构复用；部署 SDK 提供的全部 Builder Resource，
             # 使同一构建目录可在不同 NVIDIA 架构上首次生成各自的 Engine。
             file(GLOB TENSORRT_BUILDER_RUNTIME_DLLS CONFIGURE_DEPENDS
-                "${XEN_TENSORRT_ROOT}/bin/nvinfer_builder_resource_*.dll")
+                "${XEN_TENSORRT_ROOT}/bin/nvinfer_builder_resource_*_${XEN_TENSORRT_MAJOR}.dll")
             list(APPEND TENSORRT_RUNTIME_DLLS ${TENSORRT_BUILDER_RUNTIME_DLLS})
             xen_copy_runtime_files(${target} ${TENSORRT_RUNTIME_DLLS})
         elseif(XEN_ORT_USES_NVIDIA)
@@ -168,11 +270,24 @@ function(xen_deploy_runtime_dlls target)
                 endif()
             endforeach()
             xen_copy_runtime_files(${target} ${CUDA_RUNTIME_DLLS})
-            # Detector 直接链接的 cudart 从 CMake 导入目标解析实际版本，避免
-            # 把 CUDA 主版本硬编码进复制规则。
-            if(TARGET CUDA::cudart)
-                xen_copy_runtime_files(${target} "$<TARGET_FILE:CUDA::cudart>")
+            # FindCUDAToolkit 在 Windows 上的 CUDA::cudart TARGET_FILE 指向导入库
+            # cudart.lib，不是运行时 DLL。必须从 Toolkit bin 目录解析实际 DLL。
+            file(GLOB CUDA_CUDART_RUNTIME_DLLS CONFIGURE_DEPENDS
+                "${XEN_CUDA_ROOT}/bin/x64/cudart64_*.dll"
+                "${XEN_CUDA_ROOT}/bin/cudart64_*.dll")
+            list(REMOVE_DUPLICATES CUDA_CUDART_RUNTIME_DLLS)
+            list(LENGTH CUDA_CUDART_RUNTIME_DLLS CUDA_CUDART_RUNTIME_COUNT)
+            if(NOT CUDA_CUDART_RUNTIME_COUNT EQUAL 1)
+                message(FATAL_ERROR
+                    "Expected exactly one cudart64_*.dll under XEN_CUDA_ROOT, found "
+                    "${CUDA_CUDART_RUNTIME_COUNT}: ${XEN_CUDA_ROOT}")
             endif()
+            # 清理旧规则曾错误复制到输出目录的导入库，避免增量构建留下伪运行库。
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E rm -f
+                    "$<TARGET_FILE_DIR:${target}>/cudart.lib"
+                VERBATIM)
+            xen_copy_runtime_files(${target} ${CUDA_CUDART_RUNTIME_DLLS})
         elseif(XEN_ORT_USES_NVIDIA)
             message(STATUS "CUDA runtime deployment skipped: XEN_CUDA_ROOT is empty")
         endif()
@@ -247,6 +362,11 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(log_tests
+        tests/log_tests.cpp)
+    target_link_libraries(log_tests PRIVATE log)
+    add_test(NAME log_tests COMMAND log_tests)
+
     # 纯算法测试不链接 ORT Session，避免测试解码和坐标数学时依赖 GPU
     # 运行环境；同时复用生产源码，防止测试复制一套实现。
     add_executable(detector_tests

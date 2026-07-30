@@ -11,7 +11,6 @@ namespace {
 constexpr int64_t kMinChannelFirstFeatures = 5;       // 4 个框坐标 + 至少 1 类
 constexpr int64_t kMinAnchorFirstFeatures = 6;        // 4 个框坐标 + obj + 至少 1 类
 constexpr int64_t kEndToEndFeatures = 6;              // xyxy + score + class
-constexpr int64_t kTypicalEndToEndMaxDetections = 1024;
 
 bool valid_shape(const std::vector<int64_t>& shape) noexcept {
     return shape.size() == 3 && shape[0] == 1 &&
@@ -154,6 +153,37 @@ bool decode_end_to_end(const float* data,
     return true;
 }
 
+void nms_into(std::vector<Detection>& candidates,
+              float nms_threshold,
+              int top_k,
+              std::vector<Detection>& output,
+              std::vector<unsigned char>& suppressed) {
+    output.clear();
+    std::sort(candidates.begin(), candidates.end(),
+        [](const Detection& a, const Detection& b) {
+            return a.confidence > b.confidence;
+        });
+
+    suppressed.resize(candidates.size());
+    std::fill(suppressed.begin(), suppressed.end(), 0U);
+    output.reserve(std::min(
+        candidates.size(), static_cast<size_t>(top_k)));
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (suppressed[i] != 0U) continue;
+        output.push_back(candidates[i]);
+        if (static_cast<int>(output.size()) >= top_k) break;
+
+        for (size_t j = i + 1; j < candidates.size(); ++j) {
+            if (suppressed[j] == 0U &&
+                candidates[j].class_id == candidates[i].class_id &&
+                intersection_over_union(candidates[i], candidates[j]) >
+                    nms_threshold) {
+                suppressed[j] = 1U;
+            }
+        }
+    }
+}
+
 } // namespace
 
 bool resolve_output_format(const std::vector<int64_t>& shape,
@@ -166,9 +196,9 @@ bool resolve_output_format(const std::vector<int64_t>& shape,
     const auto matches = [&](OutputFormat format) {
         switch (format) {
             case OutputFormat::CHANNEL_FIRST:
-                return rows >= kMinChannelFirstFeatures && columns > rows;
+                return rows >= kMinChannelFirstFeatures;
             case OutputFormat::ANCHOR_FIRST_OBJECTNESS:
-                return columns >= kMinAnchorFirstFeatures && rows > columns;
+                return columns >= kMinAnchorFirstFeatures;
             case OutputFormat::END_TO_END:
                 return columns == kEndToEndFeatures;
             case OutputFormat::AUTO:
@@ -183,20 +213,16 @@ bool resolve_output_format(const std::vector<int64_t>& shape,
         return true;
     }
 
-    // [B,N,6] 与单类别 YOLOv5 的 [B,A,6] 形状相同。官方端到端头
-    // 默认最多数百条结果，而 raw head 通常有数千 anchors；超过保守上限时
-    // 识别为 objectness 契约，边界情况要求调用方显式指定。
+    // [B,N,6] 与单类别 raw head 在 shape 上完全相同，候选数量不是可靠
+    // 契约。没有 metadata 或显式配置时必须失败关闭，禁止按 N 猜测。
     if (columns == kEndToEndFeatures) {
-        resolved = rows <= kTypicalEndToEndMaxDetections
-            ? OutputFormat::END_TO_END
-            : OutputFormat::ANCHOR_FIRST_OBJECTNESS;
-        return true;
+        return false;
     }
-    if (matches(OutputFormat::CHANNEL_FIRST)) {
+    if (rows < columns && matches(OutputFormat::CHANNEL_FIRST)) {
         resolved = OutputFormat::CHANNEL_FIRST;
         return true;
     }
-    if (matches(OutputFormat::ANCHOR_FIRST_OBJECTNESS)) {
+    if (rows > columns && matches(OutputFormat::ANCHOR_FIRST_OBJECTNESS)) {
         resolved = OutputFormat::ANCHOR_FIRST_OBJECTNESS;
         return true;
     }
@@ -246,38 +272,58 @@ void nms(std::vector<Detection>& dets,
     }
 
     try {
-        std::sort(dets.begin(), dets.end(),
-            [](const Detection& a, const Detection& b) {
-                return a.confidence > b.confidence;
-            });
-
-        std::vector<bool> suppressed(dets.size(), false);
         std::vector<Detection> output;
-        output.reserve(std::min(dets.size(), static_cast<size_t>(top_k)));
-        for (size_t i = 0; i < dets.size(); ++i) {
-            if (suppressed[i]) continue;
-            output.push_back(dets[i]);
-            if (static_cast<int>(output.size()) >= top_k) break;
-
-            for (size_t j = i + 1; j < dets.size(); ++j) {
-                if (!suppressed[j] && dets[j].class_id == dets[i].class_id &&
-                    intersection_over_union(dets[i], dets[j]) > nms_threshold) {
-                    suppressed[j] = true;
-                }
-            }
-        }
+        std::vector<unsigned char> suppressed;
+        nms_into(dets, nms_threshold, top_k, output, suppressed);
         dets = std::move(output);
     } catch (...) {
         dets.clear();
     }
 }
 
-void scale_detections(std::vector<Detection>& dets,
+bool finalize_detections(std::vector<Detection>& candidates,
+                         OutputFormat format,
+                         float nms_threshold,
+                         int top_k,
+                         const LetterBoxInfo& info,
+                         std::vector<Detection>& output,
+                         std::vector<unsigned char>& suppressed) noexcept {
+    output.clear();
+    if (top_k <= 0 || !std::isfinite(nms_threshold) ||
+        nms_threshold < 0.0f || nms_threshold > 1.0f) {
+        return false;
+    }
+
+    try {
+        if (format == OutputFormat::END_TO_END) {
+            const size_t count = std::min(
+                candidates.size(), static_cast<size_t>(top_k));
+            if (candidates.size() > count) {
+                std::partial_sort(
+                    candidates.begin(), candidates.begin() + count,
+                    candidates.end(),
+                    [](const Detection& a, const Detection& b) {
+                        return a.confidence > b.confidence;
+                    });
+            }
+            output.assign(candidates.begin(), candidates.begin() + count);
+        } else {
+            nms_into(candidates, nms_threshold, top_k, output, suppressed);
+        }
+
+        return scale_detections(output, info);
+    } catch (...) {
+        output.clear();
+        return false;
+    }
+}
+
+bool scale_detections(std::vector<Detection>& dets,
                       const LetterBoxInfo& info) noexcept {
     if (!(info.scale > 0.0f) || !std::isfinite(info.scale) ||
         info.orig_w <= 0 || info.orig_h <= 0) {
         dets.clear();
-        return;
+        return false;
     }
 
     const float max_x = static_cast<float>(info.orig_w);
@@ -301,6 +347,7 @@ void scale_detections(std::vector<Detection>& dets,
                    detection.x2 <= detection.x1 ||
                    detection.y2 <= detection.y1;
         }), dets.end());
+    return true;
 }
 
 } // namespace detector::detail

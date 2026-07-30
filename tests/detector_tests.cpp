@@ -33,10 +33,25 @@ void test_output_format_resolution() {
            resolved == OutputFormat::ANCHOR_FIRST_OBJECTNESS,
            "[B,A,5+C] 应识别为 ANCHOR_FIRST_OBJECTNESS");
 
+    expect(!detector::detail::resolve_output_format(
+               {1, 300, 6}, OutputFormat::AUTO, resolved),
+           "无 metadata 的 [B,N,6] 存在歧义，AUTO 必须失败关闭");
+
     expect(detector::detail::resolve_output_format(
-               {1, 300, 6}, OutputFormat::AUTO, resolved) &&
+               {1, 300, 6}, OutputFormat::END_TO_END, resolved) &&
            resolved == OutputFormat::END_TO_END,
-           "[B,N,6] 应识别为 END_TO_END");
+           "显式 END_TO_END 应接受 [B,N,6]");
+
+    expect(detector::detail::resolve_output_format(
+               {1, 64, 6}, OutputFormat::ANCHOR_FIRST_OBJECTNESS,
+               resolved) &&
+           resolved == OutputFormat::ANCHOR_FIRST_OBJECTNESS,
+           "显式 objectness 不应按候选数量猜测并拒绝小输出");
+
+    expect(detector::detail::resolve_output_format(
+               {1, 84, 32}, OutputFormat::CHANNEL_FIRST, resolved) &&
+           resolved == OutputFormat::CHANNEL_FIRST,
+           "显式 CHANNEL_FIRST 不应要求 anchors 大于 features");
 
     expect(!detector::detail::resolve_output_format(
                {1, 4, 4}, OutputFormat::AUTO, resolved),
@@ -141,19 +156,54 @@ void test_scale_and_nms() {
         {11.0f, 31.0f, 59.0f, 54.0f, 0.8f, 0},
         {11.0f, 31.0f, 59.0f, 54.0f, 0.7f, 1},
     };
-    detector::detail::scale_detections(detections, info);
-    expect(detections.size() == 3, "有效框不应在坐标还原时丢失");
-    if (!detections.empty()) {
-        expect(near(detections[0].x1, 20.0f) &&
-               near(detections[0].y1, 10.0f) &&
-               near(detections[0].x2, 120.0f) &&
-               near(detections[0].y2, 60.0f),
+    std::vector<Detection> output;
+    std::vector<unsigned char> suppressed;
+    expect(detector::detail::finalize_detections(
+               detections, OutputFormat::CHANNEL_FIRST, 0.5f, 10,
+               info, output, suppressed),
+           "合法候选框后处理必须成功");
+    expect(output.size() == 2,
+           "NMS 应抑制同类别重叠框，但保留不同类别框");
+    if (!output.empty()) {
+        expect(near(output[0].x1, 20.0f) &&
+               near(output[0].y1, 10.0f) &&
+               near(output[0].x2, 120.0f) &&
+               near(output[0].y2, 60.0f),
                "LetterBox 坐标还原公式错误");
     }
 
-    detector::detail::nms(detections, 0.5f, 10);
-    expect(detections.size() == 2,
-           "NMS 应抑制同类别重叠框，但保留不同类别框");
+    detector::detail::LetterBoxInfo edge_info;
+    edge_info.scale = 1.0f;
+    edge_info.orig_w = 100;
+    edge_info.orig_h = 100;
+    std::vector<Detection> edge_candidates = {
+        {-100.0f, 0.0f, 10.0f, 10.0f, 0.9f, 0},
+        {0.0f, 0.0f, 10.0f, 10.0f, 0.8f, 0},
+    };
+    expect(detector::detail::finalize_detections(
+               edge_candidates, OutputFormat::CHANNEL_FIRST, 0.5f, 10,
+               edge_info, output, suppressed),
+           "越界候选框后处理必须成功");
+    expect(output.size() == 2,
+           "越界框必须先 NMS 再裁剪，不能因提前裁剪改变 IoU");
+
+    edge_info.scale = 0.0f;
+    expect(!detector::detail::finalize_detections(
+               edge_candidates, OutputFormat::CHANNEL_FIRST, 0.5f, 10,
+               edge_info, output, suppressed),
+           "非法 LetterBox 参数不得伪装成成功空检测");
+}
+
+void test_detection_status_names() {
+    expect(std::string(DetectionStatusName(DetectionStatus::SUCCESS)) ==
+               "SUCCESS",
+           "DetectionStatus 应提供稳定可读名称");
+    expect(std::string(DetectionStatusName(
+               DetectionStatus::POSTPROCESS_FAILED)) ==
+               "POSTPROCESS_FAILED",
+           "后处理失败状态名称错误");
+    expect(InferenceProfile{}.status == DetectionStatus::NOT_RUN,
+           "默认 profile 状态应为 NOT_RUN");
 }
 
 void test_preprocess_contract() {
@@ -216,6 +266,8 @@ void test_tensorrt_cache_defaults() {
            "TensorRT Timing Cache 默认应启用");
     expect(config.enable_trt_cuda_graph,
            "固定 shape 实时推理默认应启用 TensorRT CUDA Graph");
+    expect(!config.enable_output_fingerprint,
+           "原始输出指纹默认必须关闭，避免污染正式推理性能");
     expect(!config.trt_cache_path.empty(),
            "启用 TensorRT 缓存时默认目录不能为空");
 }
@@ -230,6 +282,7 @@ int main() {
     test_scale_and_nms();
     test_preprocess_contract();
     test_tensorrt_cache_defaults();
+    test_detection_status_names();
 
     if (failures != 0) {
         std::cerr << "Detector 测试失败数: " << failures << '\n';

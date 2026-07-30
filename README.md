@@ -32,7 +32,7 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-运行测试时，OpenCV 的 `bin` 目录需要位于 `PATH`。本项目已用 ONNX Runtime 1.27.1、OpenCV 4.14.0、spdlog 1.17.0 和 VS 2026 Release 配置完成构建，Detector 测试通过。
+本项目已用 ONNX Runtime 1.27.1、OpenCV 4.14.0、spdlog 1.17.0 和 VS 2026 Release 配置完成构建。测试所需的非系统运行库由 CMake 部署到可执行文件旁，不依赖开发机额外配置 `PATH`。
 
 也可以使用仓库内的可复用脚本完成配置、构建和测试：
 
@@ -52,14 +52,7 @@ cuDNN 和 CUDA DLL 复制到对应的 `build/<Configuration>/`，测试程序可
 无需手工修改系统 `PATH`。TensorRT 只复制核心、ONNX 解析器和 SDK 提供的各架构
 Builder Resource，使同一构建可在不同 NVIDIA GPU 上首次生成对应 Engine；不复制完整 SDK。
 
-需要单独验证 TensorRT EP 与缓存时，可在依赖 DLL 目录均已加入 `PATH` 后执行：
-
-```powershell
-.\build\Release\detector_model_test.exe `
-  "C:\path\to\model.onnx" tensorrt "cache\tensorrt"
-```
-
-推荐使用脚本自动设置隔离的运行库路径并连续加载两次：
+需要单独验证 TensorRT EP 与缓存时，应使用正式脚本重新配置、构建并检查本地运行库部署：
 
 ```powershell
 .\scripts\test_tensorrt.ps1 `
@@ -101,7 +94,17 @@ DirectML 使用官方独立 ORT 包，不能与 CUDA/TensorRT 版 `onnxruntime.d
   -CudaRoot "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
 ```
 
-脚本在 `cache/benchmarks/` 生成 CSV。每段视频先重复第一帧预热 50 次，
+脚本会在 CSV 旁生成同名前缀的 JSON 环境清单，记录 Git 状态、模型 SHA-256、
+视频逐文件 SHA-256、可执行文件与部署 DLL 哈希、GPU/驱动、SDK 精确版本，以及
+FP16、CUDA Graph、线程和缓存配置。脚本在运行前后复核输入与二进制快照；CSV 先写
+临时文件，全部场景成功后才原子发布。性能报告和环境清单默认位于
+`cache/benchmarks/`，均不提交 Git。
+
+项目不迁入旧仓库的 `Xen/benchmarks/provider_benchmark.cpp`。旧实现会重复 Provider、
+前处理、解码和统计逻辑，并通过编译期开关维护两套不同管线。当前基准始终复用生产
+`Detector`，避免性能测试与真实运行的数据流、复制链和输出语义漂移。
+
+CSV 中每段视频先重复第一帧预热 50 次，
 正式统计覆盖全部视频帧，输出各阶段 mean/P50/P95/P99。视频没有人工标注时，
 `detection_frame_rate` 只表示“存在检测结果的帧比例”，不能直接解释为 Recall；
 目标在全屏范围移动而采集范围固定为中心 ROI 时，ROI 外的空检测是正确结果。

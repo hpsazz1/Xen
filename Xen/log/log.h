@@ -1,10 +1,13 @@
 #ifndef LOG_H
 #define LOG_H
 
-#include <string>
+#include <atomic>
+#include <iterator>
 #include <memory>
-#include <vector>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 #include <spdlog/spdlog.h>
 
 // ── 配置 ──
@@ -34,13 +37,14 @@ enum class LogLevel {
 class Log {
 public:
     // ── 生命周期 ──
+    // 初始化失败时保持未初始化状态，错误仅写入 stderr，不向业务层抛异常。
     static void init(const LogConfig& cfg);
     static void shutdown();
     static bool initialized() noexcept;
 
     // ── 模块注册 ──
-    // 每个模块在 init 时注册自己的 logger
-    // 返回 logger 名称，后续通过 LOG_INFO(logger_name, ...) 使用
+    // 每个模块在启动阶段注册一次；同名重复注册只更新模块等级。
+    // 保留原接口：失败时仍返回输入名称，详细错误写入 stderr。
     static std::string register_module(
         const std::string& module_name,
         LogLevel level = LogLevel::INFO);
@@ -48,16 +52,26 @@ public:
     // ── 日志写入（模块应使用宏，而非直接调用这些） ──
     static void write(const std::string& module,
                       LogLevel level, const std::string& msg);
-    // fmt 格式化版本 — 内联模板，用 spdlog::fmt_lib::format 格式化后走 write()
+    // 宏在求值格式化参数前调用本接口，避免被等级过滤的热路径日志仍执行格式化。
+    static bool should_log(const std::string& module,
+                           LogLevel level) noexcept;
+    // 保留原有模板签名；格式化异常不得越过日志模块边界。
     template<typename... Args>
     static void writef(const std::string& module,
                        LogLevel level,
                        spdlog::format_string_t<Args...> fmt_str,
                        Args&&... args) {
-        if (!impl_) return;
-        auto formatted = spdlog::fmt_lib::format(
-            fmt_str, std::forward<Args>(args)...);
-        write(module, level, formatted);
+        try {
+            spdlog::memory_buf_t formatted;
+            spdlog::fmt_lib::format_to(
+                std::back_inserter(formatted), fmt_str,
+                std::forward<Args>(args)...);
+            write_view(
+                module, level,
+                std::string_view(formatted.data(), formatted.size()));
+        } catch (...) {
+            // 日志不得让格式化或内存分配异常越过模块边界。
+        }
     }
 
     // ── 运行时控制 ──
@@ -87,8 +101,15 @@ public:
 private:
     Log() = delete;  // 静态类
 
+    static void write_view(const std::string& module,
+                           LogLevel level,
+                           std::string_view msg) noexcept;
+
     struct Impl;
-    static std::unique_ptr<Impl> impl_;
+    // impl_owner_ 仅在生命周期锁下修改；调用路径先取得内部访问租约，再读取
+    // impl_ 的观察指针。shutdown() 会等所有租约退出后才销毁实例。
+    static std::unique_ptr<Impl> impl_owner_;
+    static std::atomic<Impl*> impl_;
 };
 
 // ── 宏 ──
@@ -100,19 +121,49 @@ private:
 
 #if defined(LOG_ENABLE_DEBUG) || !defined(NDEBUG)
     #define LOG_TRACE(module, ...) \
-        Log::writef(module, LogLevel::TRACE, __VA_ARGS__)
+        do { \
+            try { \
+                const std::string xen_log_module_{std::string_view((module))}; \
+                if (Log::should_log(xen_log_module_, LogLevel::TRACE)) \
+                    Log::writef(xen_log_module_, LogLevel::TRACE, __VA_ARGS__); \
+            } catch (...) {} \
+        } while (false)
     #define LOG_DEBUG(module, ...) \
-        Log::writef(module, LogLevel::DEBUG, __VA_ARGS__)
+        do { \
+            try { \
+                const std::string xen_log_module_{std::string_view((module))}; \
+                if (Log::should_log(xen_log_module_, LogLevel::DEBUG)) \
+                    Log::writef(xen_log_module_, LogLevel::DEBUG, __VA_ARGS__); \
+            } catch (...) {} \
+        } while (false)
 #else
     #define LOG_TRACE(module, ...) ((void)0)
     #define LOG_DEBUG(module, ...) ((void)0)
 #endif
 
 #define LOG_INFO(module, ...) \
-    Log::writef(module, LogLevel::INFO, __VA_ARGS__)
+    do { \
+        try { \
+            const std::string xen_log_module_{std::string_view((module))}; \
+            if (Log::should_log(xen_log_module_, LogLevel::INFO)) \
+                Log::writef(xen_log_module_, LogLevel::INFO, __VA_ARGS__); \
+        } catch (...) {} \
+    } while (false)
 #define LOG_WARN(module, ...) \
-    Log::writef(module, LogLevel::WARN, __VA_ARGS__)
+    do { \
+        try { \
+            const std::string xen_log_module_{std::string_view((module))}; \
+            if (Log::should_log(xen_log_module_, LogLevel::WARN)) \
+                Log::writef(xen_log_module_, LogLevel::WARN, __VA_ARGS__); \
+        } catch (...) {} \
+    } while (false)
 #define LOG_ERROR(module, ...) \
-    Log::writef(module, LogLevel::ERROR, __VA_ARGS__)
+    do { \
+        try { \
+            const std::string xen_log_module_{std::string_view((module))}; \
+            if (Log::should_log(xen_log_module_, LogLevel::ERROR)) \
+                Log::writef(xen_log_module_, LogLevel::ERROR, __VA_ARGS__); \
+        } catch (...) {} \
+    } while (false)
 
 #endif // LOG_H

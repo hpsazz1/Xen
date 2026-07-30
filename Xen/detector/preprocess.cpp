@@ -70,11 +70,15 @@ bool letterbox_impl(const cv::Mat& src, cv::Mat& dst,
         float* output = dst.ptr<float>();
         constexpr float kScale = 1.0f / 255.0f;
         constexpr float kPadding = 114.0f / 255.0f;
-        std::fill_n(output, element_count, kPadding);
 
         float* red = output;
         float* green = output + pixel_count;
         float* blue = output + pixel_count * 2U;
+        // ROI 已与模型输入同尺寸时不存在填充区域，后续像素循环会覆盖整个
+        // 张量；跳过这次整块写入可避免每帧先写后覆写 3×H×W 个 float。
+        if (nw != target_w || nh != target_h) {
+            std::fill_n(output, element_count, kPadding);
+        }
         for (int y = 0; y < nh; ++y) {
             const cv::Vec3b* source_row = resized->ptr<cv::Vec3b>(y);
             const size_t destination_row =

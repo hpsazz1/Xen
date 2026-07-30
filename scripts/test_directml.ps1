@@ -31,6 +31,7 @@ if ([string]::IsNullOrWhiteSpace($DirectMlRoot)) {
     -ModelPath $ModelPath `
     -Configuration $Configuration `
     -TensorRtRoot "" `
+    -TensorRtMajor 0 `
     -CudnnRoot "" `
     -CudaRoot ""
 if ($LASTEXITCODE -ne 0) {
@@ -43,9 +44,18 @@ if (-not (Test-Path -LiteralPath $testExecutable -PathType Leaf)) {
 }
 
 # 测试程序会严格校验实际 Provider，若回退 CPU 会直接返回失败。
-& $testExecutable $ModelPath "directml"
-if ($LASTEXITCODE -ne 0) {
-    throw "DirectML 真实模型推理失败，退出码：$LASTEXITCODE"
+$originalPath = $env:PATH
+try {
+    $env:PATH = @(
+        (Join-Path $env:SystemRoot "System32"),
+        $env:SystemRoot
+    ) -join ";"
+    & $testExecutable $ModelPath "directml"
+    if ($LASTEXITCODE -ne 0) {
+        throw "DirectML 真实模型推理失败，退出码：$LASTEXITCODE"
+    }
+} finally {
+    $env:PATH = $originalPath
 }
 
 Write-Host "DirectML 真实模型推理验证通过：$testExecutable"
