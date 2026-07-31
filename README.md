@@ -166,6 +166,18 @@ TensorRT 和 CUDA 允许节点级回退，环境清单会通过独立 ORT profil
 TensorRT 允许 `TensorRT -> CUDA -> CPU`，CUDA 允许 `CUDA -> CPU`。profiling Session 与正式
 性能 Session 分离，诊断开销不会混入正式样本。DirectML 会禁用 CPU 节点回退。
 
+2026-08-01 在 RTX 5070 Ti、本机 DXGI、`2560x1440` 中心 `320x320` ROI 上完成 5 分钟正式
+基准；三组均为零失败、零报告/Runtime 丢弃且没有物理 Mouse 命令。`total` 从 Capture 发布完成
+计到 control 结束，`capture + total` 是按同一帧逐样本相加后的完整采集到控制链路：
+
+| Provider | 正式样本 | total P95 | total P99 | capture + total P95 |
+|---|---:|---:|---:|---:|
+| TensorRT | 78,007 | 0.574 ms | 0.631 ms | 4.612 ms |
+| CUDA | 77,975 | 4.691 ms | 5.585 ms | 8.548 ms |
+| DirectML | 78,001 | 1.148 ms | 1.195 ms | 5.164 ms |
+
+结果仅适用于当前提交、模型和本机硬件。UDP/XUDP/NDI 辅机链路仍需分别完成同口径双机验收。
+
 日志设施也由同一个 `config.ini` 静态加载。旧配置没有 `[log]` 节时使用默认值；日志等级支持
 `trace`、`debug`、`info`、`warn`、`error` 和 `off`，未知等级会拒绝加载并在界面提示错误。
 例如：
