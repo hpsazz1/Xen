@@ -235,6 +235,27 @@ void test_macro_extends_temporary_module_lifetime() {
     Log::shutdown();
 }
 
+void test_standard_format_and_inline_overflow() {
+    Log::shutdown();
+    Log::init(ring_only_config(8));
+    expect(Log::initialized(), "标准格式测试初始化失败");
+    Log::register_module("format", LogLevel::INFO);
+
+    LOG_INFO("format", "decimal={:03} hex={:08X} float={:.3f} bool={}",
+             7, 0x2A, 1.25, true);
+    const std::string long_payload(2'048, 'L');
+    LOG_INFO("format", "long={}", long_payload);
+
+    const auto lines = Log::get_ring_buffer();
+    expect(contains_text(
+               lines,
+               "decimal=007 hex=0000002A float=1.250 bool=true"),
+           "C++20 标准格式串必须保持宽度、进制、精度和布尔语义");
+    expect(contains_text(lines, "long=" + long_payload),
+           "超过 512 字节的格式化结果必须完整切换到动态缓冲");
+    Log::shutdown();
+}
+
 void test_sink_threshold_filters_before_formatting() {
     Log::shutdown();
     TempDirectory directory;
@@ -613,6 +634,7 @@ int main() {
         test_invalid_config_can_retry();
         test_unregistered_is_dropped_and_ring_is_immediate();
         test_macro_extends_temporary_module_lifetime();
+        test_standard_format_and_inline_overflow();
         test_sink_threshold_filters_before_formatting();
         test_concurrent_same_name_registration();
         test_write_shutdown_race();

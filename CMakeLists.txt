@@ -424,7 +424,7 @@ target_include_directories(log
     PRIVATE ${PROJECT_SOURCE_DIR}/Xen/log)
 
 target_link_libraries(log
-    PUBLIC  spdlog::spdlog)
+    PRIVATE spdlog::spdlog)
 
 option(LOG_ENABLE_DEBUG "Enable debug/trace logging" OFF)
 if(LOG_ENABLE_DEBUG)
@@ -553,7 +553,8 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(log_tests
         tests/log_tests.cpp)
-    target_link_libraries(log_tests PRIVATE log)
+    # 生产消费者只依赖 log.h；本测试额外验证 Xen 不触碰外部 spdlog registry。
+    target_link_libraries(log_tests PRIVATE log spdlog::spdlog)
     add_test(NAME log_tests COMMAND log_tests)
 
     add_executable(crash_tests

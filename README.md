@@ -130,6 +130,10 @@ capture=warn
 `[log_modules]` 可覆盖单个模块注册时的默认等级；最终阈值取模块等级与 `global_level` 中更严格者。
 运行期间按 `F9` 可打开或关闭最近日志窗口；窗口只读取内存 ring buffer，不会读取日志文件或阻塞 Runtime 管线。
 
+业务模块的 `#include "log/log.h"` 只依赖 C++20 标准库，格式串使用 `std::format` 语法并在
+编译期校验；spdlog 仅作为 `log.cpp` 的私有 sink/队列后端。普通 `{}`、宽度、进制和浮点
+精度格式与现有调用保持一致，不支持把 fmt 专属自定义 formatter 当作 Xen 公有接口。
+
 应用还会在 Log 初始化后安装进程级崩溃处理器。正常受控诊断继续使用完整的 spdlog ring；
 未处理 SEH 异常或 `std::terminate()` 只读取独立的 128 槽固定紧急尾部，并通过 Win32 API
 同步追加到 `<log_dir>/crash_tail.log`。该异常路径不申请堆、不访问 `std::filesystem`、

@@ -1,8 +1,10 @@
 #ifndef LOG_H
 #define LOG_H
 
+#include <array>
 #include <atomic>
 #include <cstddef>
+#include <format>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -10,7 +12,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <spdlog/spdlog.h>
 
 // ── 日志级别（与 spdlog 对应，但解耦） ──
 enum class LogLevel {
@@ -40,6 +41,37 @@ struct LogConfig {
 
 // ── 日志核心类（全局单例） ──
 class Log {
+private:
+    class InlineFormatBuffer {
+    public:
+        using value_type = char;
+
+        void push_back(char value) {
+            if (overflow_.empty() && size_ < inline_.size()) {
+                inline_[size_++] = value;
+                return;
+            }
+            if (overflow_.empty()) {
+                overflow_.reserve(inline_.size() * 2U);
+                overflow_.assign(inline_.data(), size_);
+            }
+            overflow_.push_back(value);
+            ++size_;
+        }
+
+        const char* data() const noexcept {
+            return overflow_.empty() ? inline_.data() : overflow_.data();
+        }
+
+        std::size_t size() const noexcept { return size_; }
+
+    private:
+        // 512 字节覆盖项目常见短日志；超长结果才切换到动态 string。
+        std::array<char, 512> inline_{};
+        std::string overflow_;
+        std::size_t size_ = 0;
+    };
+
 public:
     using EmergencyWriteCallback =
         bool (*)(void* context, const char* data,
@@ -64,15 +96,16 @@ public:
     // 宏在求值格式化参数前调用本接口，避免被等级过滤的热路径日志仍执行格式化。
     static bool should_log(const std::string& module,
                            LogLevel level) noexcept;
-    // 保留原有模板签名；格式化异常不得越过日志模块边界。
+    // 使用 C++20 标准格式串保持编译期校验，不向业务头文件暴露 spdlog/fmt。
+    // 格式化异常不得越过日志模块边界。
     template<typename... Args>
     static void writef(const std::string& module,
                        LogLevel level,
-                       spdlog::format_string_t<Args...> fmt_str,
+                       std::format_string<Args...> fmt_str,
                        Args&&... args) {
         try {
-            spdlog::memory_buf_t formatted;
-            spdlog::fmt_lib::format_to(
+            InlineFormatBuffer formatted;
+            std::format_to(
                 std::back_inserter(formatted), fmt_str,
                 std::forward<Args>(args)...);
             write_view(
