@@ -7,6 +7,7 @@
 
 #include <Windows.h>
 #include <d3d11.h>
+#include <dwmapi.h>
 #include <wrl/client.h>
 
 #ifdef ERROR
@@ -39,12 +40,14 @@ constexpr unsigned int kAccent = 0x339cff;
 constexpr unsigned int kAccentStrong = 0x0d6fc2;
 constexpr unsigned int kAccentSoft = 0xeaf4ff;
 constexpr unsigned int kSurface = 0xffffff;
-constexpr unsigned int kCanvas = 0xffffff;
-constexpr unsigned int kSidebar = 0xe9ebed;
-constexpr unsigned int kGroupSurface = 0xf0f1f2;
-constexpr unsigned int kFieldSurface = 0xe1e4e7;
-constexpr unsigned int kBorder = 0xd5d9dd;
-constexpr unsigned int kBorderStrong = 0xcbd1d8;
+constexpr unsigned int kCanvas = 0xf4f4f5;
+constexpr unsigned int kSidebar = 0xf3f3f4;
+constexpr unsigned int kGroupSurface = 0xf8f8f9;
+constexpr unsigned int kFieldSurface = 0xfdfdfd;
+constexpr unsigned int kBorder = 0xe1e2e4;
+constexpr unsigned int kBorderStrong = 0xd4d6d8;
+constexpr unsigned int kNavSelected = 0xe5e5e7;
+constexpr unsigned int kNavHovered = 0xebebed;
 constexpr unsigned int kSuccess = 0x00a240;
 constexpr unsigned int kSuccessSoft = 0xe7f6ed;
 constexpr unsigned int kWarning = 0x9a5a00;
@@ -55,8 +58,9 @@ constexpr unsigned int kSkill = 0x924ff7;
 constexpr unsigned int kOnAccent = 0xfefefe;
 
 constexpr float kTopBarHeight = 56.0f;
-constexpr float kSidebarWidth = 176.0f;
+constexpr float kSidebarWidth = 168.0f;
 constexpr float kPanelRounding = 8.0f;
+constexpr float kWorkspaceInset = 8.0f;
 // 与 Xen/app/xen.rc 保持一致，用于标题栏和任务栏图标。
 constexpr int kAppIconResourceId = 101;
 
@@ -84,11 +88,14 @@ unsigned int themed_rgb(unsigned int rgb) noexcept {
         case kAccentStrong: return 0x5aadff;
         case kAccentSoft: return 0x203448;
         case kSurface: return 0x181818;
-        case kSidebar: return 0x111111;
-        case kGroupSurface: return 0x232323;
-        case kFieldSurface: return 0x303030;
-        case kBorder: return 0x353535;
-        case kBorderStrong: return 0x484848;
+        case kCanvas: return 0x101010;
+        case kSidebar: return 0x141414;
+        case kGroupSurface: return 0x202020;
+        case kFieldSurface: return 0x292929;
+        case kBorder: return 0x303030;
+        case kBorderStrong: return 0x424242;
+        case kNavSelected: return 0x2b2b2b;
+        case kNavHovered: return 0x242424;
         case kSuccess: return 0x40c977;
         case kSuccessSoft: return 0x183626;
         case kWarning: return 0xf0ad4e;
@@ -150,7 +157,7 @@ void apply_codex_theme(UiTheme theme) {
     style.ScrollbarSize = 11.0f;
     style.WindowBorderSize = 0.0f;
     style.ChildBorderSize = 0.0f;
-    style.FrameBorderSize = 0.0f;
+    style.FrameBorderSize = 1.0f;
     style.TabBorderSize = 0.0f;
 
     auto& colors = style.Colors;
@@ -196,6 +203,15 @@ void apply_codex_theme(UiTheme theme) {
     colors[ImGuiCol_TableRowBg] = rgba(kSurface);
     colors[ImGuiCol_TableRowBgAlt] = rgba(0xf8f9fa);
     colors[ImGuiCol_NavHighlight] = rgba(kAccent);
+}
+
+void apply_window_theme(HWND window, UiTheme theme) noexcept {
+    if (!window) return;
+    // Windows 10 20H1 及以上使用属性 20 控制非客户区深色模式。
+    constexpr DWORD kUseImmersiveDarkMode = 20;
+    const BOOL enabled = theme == UiTheme::DARK ? TRUE : FALSE;
+    DwmSetWindowAttribute(
+        window, kUseImmersiveDarkMode, &enabled, sizeof(enabled));
 }
 
 const char* page_title(WorkspacePage page) noexcept {
@@ -282,45 +298,6 @@ void status_dot_label(const char* text, const ImVec4& color) {
     ImGui::Dummy(ImVec2(11.0f, line_height));
     ImGui::SameLine(0.0f, 4.0f);
     ImGui::TextColored(color, "%s", text);
-}
-
-void draw_brand_mark(const ImVec2& position, float size) {
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    const ImVec2 maximum(position.x + size, position.y + size);
-    draw_list->AddRectFilled(
-        position, maximum,
-        ImGui::GetColorU32(raw_rgba(0x1a1c1f)), size * 0.22f);
-
-    const float outer = size * 0.29f;
-    const float inner = size * 0.435f;
-    const float stroke = std::max(2.0f, size * 0.095f);
-    draw_list->AddLine(
-        ImVec2(position.x + outer, position.y + outer),
-        ImVec2(position.x + inner, position.y + inner),
-        ImGui::GetColorU32(raw_rgba(kOnAccent)), stroke);
-    draw_list->AddLine(
-        ImVec2(maximum.x - outer, position.y + outer),
-        ImVec2(maximum.x - inner, position.y + inner),
-        ImGui::GetColorU32(raw_rgba(kOnAccent)), stroke);
-    draw_list->AddLine(
-        ImVec2(position.x + outer, maximum.y - outer),
-        ImVec2(position.x + inner, maximum.y - inner),
-        ImGui::GetColorU32(raw_rgba(kOnAccent)), stroke);
-    draw_list->AddLine(
-        ImVec2(maximum.x - outer, maximum.y - outer),
-        ImVec2(maximum.x - inner, maximum.y - inner),
-        ImGui::GetColorU32(raw_rgba(kOnAccent)), stroke);
-    draw_list->AddCircle(
-        ImVec2(position.x + size * 0.5f,
-               position.y + size * 0.5f),
-        size * 0.085f,
-        ImGui::GetColorU32(raw_rgba(kAccent)), 0,
-        std::max(1.4f, size * 0.045f));
-    draw_list->AddCircleFilled(
-        ImVec2(position.x + size * 0.5f,
-               position.y + size * 0.5f),
-        std::max(1.3f, size * 0.035f),
-        ImGui::GetColorU32(raw_rgba(kAccent)));
 }
 
 void draw_badge(const char* text,
@@ -631,76 +608,51 @@ struct Overlay::Impl {
 
     bool nav_item(const char* label, WorkspacePage page) {
         const bool selected = active_page == page;
-        ImGui::PushStyleVar(
-            ImGuiStyleVar_SelectableTextAlign, ImVec2(0.10f, 0.5f));
-        ImGui::PushStyleColor(
-            ImGuiCol_Header,
-            selected ? rgba(kSurface, 0.78f) : rgba(kSidebar, 0.0f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, rgba(kSurface, 0.52f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, rgba(kSurface, 0.68f));
-        ImGui::PushStyleColor(
-            ImGuiCol_Text, selected ? rgba(kInk) : rgba(kMutedInk));
-        const bool pressed = ImGui::Selectable(
-            label, selected, ImGuiSelectableFlags_None, ImVec2(0.0f, 40.0f));
-        ImGui::PopStyleColor(4);
-        ImGui::PopStyleVar();
+        const float start_x = ImGui::GetCursorPosX();
+        ImGui::SetCursorPosX(start_x + 4.0f);
+        const ImVec2 position = ImGui::GetCursorScreenPos();
+        const ImVec2 size(
+            std::max(80.0f, ImGui::GetContentRegionAvail().x - 8.0f),
+            38.0f);
+        ImGui::PushID(static_cast<int>(page));
+        const bool pressed = ImGui::InvisibleButton("nav", size);
+        ImGui::PopID();
 
-        if (selected) {
-            const ImVec2 minimum = ImGui::GetItemRectMin();
-            const ImVec2 maximum = ImGui::GetItemRectMax();
+        const bool hovered = ImGui::IsItemHovered();
+        if (selected || hovered) {
             ImGui::GetWindowDrawList()->AddRectFilled(
-                ImVec2(minimum.x, minimum.y + 9.0f),
-                ImVec2(minimum.x + 3.0f, maximum.y - 9.0f),
-                ImGui::GetColorU32(rgba(kAccentStrong)), 2.0f);
+                position,
+                ImVec2(position.x + size.x, position.y + size.y),
+                ImGui::GetColorU32(
+                    rgba(selected ? kNavSelected : kNavHovered)),
+                6.0f);
         }
+        const ImVec2 text_size = ImGui::CalcTextSize(label);
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(position.x + 12.0f,
+                   position.y + (size.y - text_size.y) * 0.5f),
+            ImGui::GetColorU32(
+                rgba(selected ? kInk : kMutedInk)),
+            label);
         if (pressed) active_page = page;
         return pressed;
     }
 
-    void nav_section(const char* label) {
-        ImGui::PushFont(small_font);
-        ImGui::TextColored(rgba(kFaintInk), "%s", label);
-        ImGui::PopFont();
-        ImGui::Dummy(ImVec2(0.0f, 3.0f));
-    }
-
     void render_sidebar(const RuntimeSnapshot& snapshot) {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kSidebar));
-        ImGui::PushStyleColor(ImGuiCol_Border, rgba(kBorder));
         ImGui::PushStyleVar(
-            ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 14.0f));
+            ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 12.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
         ImGui::BeginChild(
             "sidebar", ImVec2(kSidebarWidth, 0.0f),
-            ImGuiChildFlags_Borders,
+            ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar);
 
-        const ImVec2 brand_position = ImGui::GetCursorScreenPos();
-        draw_brand_mark(brand_position, 34.0f);
-        ImGui::Dummy(ImVec2(34.0f, 34.0f));
-        ImGui::SameLine(0.0f, 10.0f);
-        ImGui::BeginGroup();
-        ImGui::PushFont(medium_font);
-        ImGui::TextUnformatted("XEN");
-        ImGui::PopFont();
-        ImGui::PushFont(small_font);
-        ImGui::TextColored(rgba(kFaintInk), "PRECISION RUNTIME");
-        ImGui::PopFont();
-        ImGui::EndGroup();
-        ImGui::Dummy(ImVec2(0.0f, 15.0f));
-
-        nav_section("运行");
         nav_item("概览", WorkspacePage::OVERVIEW);
-
-        ImGui::Dummy(ImVec2(0.0f, 10.0f));
-        nav_section("控制");
-        nav_item("检测与采集", WorkspacePage::DETECTION);
-        nav_item("瞄准控制", WorkspacePage::AIM);
-        nav_item("输入安全", WorkspacePage::INPUT);
-
-        ImGui::Dummy(ImVec2(0.0f, 10.0f));
-        nav_section("系统");
-        nav_item("偏好设置", WorkspacePage::SETTINGS);
+        nav_item("检测", WorkspacePage::DETECTION);
+        nav_item("瞄准", WorkspacePage::AIM);
+        nav_item("输入", WorkspacePage::INPUT);
+        nav_item("设置", WorkspacePage::SETTINGS);
 
         const float footer_y = ImGui::GetWindowHeight() - 76.0f;
         if (ImGui::GetCursorPosY() < footer_y) {
@@ -717,19 +669,18 @@ struct Overlay::Impl {
 
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(2);
+        ImGui::PopStyleColor();
     }
 
     void render_global_bar(const RuntimeSnapshot& snapshot,
                            OverlayActions& actions) {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kSurface));
-        ImGui::PushStyleColor(ImGuiCol_Border, rgba(kBorder));
         ImGui::PushStyleVar(
             ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 10.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
         ImGui::BeginChild(
             "global_bar", ImVec2(0.0f, kTopBarHeight),
-            ImGuiChildFlags_Borders,
+            ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar);
 
         ImGui::SetCursorPosY(16.0f);
@@ -818,7 +769,7 @@ struct Overlay::Impl {
 
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(2);
+        ImGui::PopStyleColor();
     }
 
     void render_page_heading(bool can_edit, OverlayActions& actions) {
@@ -1527,9 +1478,9 @@ struct Overlay::Impl {
                           const std::string& app_message,
                           OverlayActions& actions) {
         const bool can_edit = editable(snapshot);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kCanvas));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kSurface));
         ImGui::PushStyleVar(
-            ImGuiStyleVar_WindowPadding, ImVec2(20.0f, 12.0f));
+            ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 14.0f));
         ImGui::BeginChild(
             "content", ImVec2(0.0f, 0.0f),
             ImGuiChildFlags_None);
@@ -1602,6 +1553,7 @@ bool Overlay::init(const UiConfig& config) noexcept {
                 impl_->window, WM_SETICON, ICON_SMALL,
                 reinterpret_cast<LPARAM>(impl_->small_icon));
         }
+        apply_window_theme(impl_->window, config.theme);
         if (!impl_->create_device()) return false;
 
         IMGUI_CHECKVERSION();
@@ -1675,6 +1627,7 @@ bool Overlay::render(const RuntimeSnapshot& snapshot,
         ImGui_ImplWin32_NewFrame();
         if (impl_->applied_theme != config.ui.theme) {
             apply_codex_theme(config.ui.theme);
+            apply_window_theme(impl_->window, config.ui.theme);
             impl_->applied_theme = config.ui.theme;
         }
         ImGui::NewFrame();
@@ -1693,15 +1646,23 @@ bool Overlay::render(const RuntimeSnapshot& snapshot,
         ImGui::Begin("XenRoot", nullptr, kWindowFlags);
 
         impl_->render_sidebar(snapshot);
-        ImGui::SameLine(0.0f, 0.0f);
+        ImGui::SetCursorPos(ImVec2(
+            kSidebarWidth + kWorkspaceInset, kWorkspaceInset));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kSurface));
+        ImGui::PushStyleColor(ImGuiCol_Border, rgba(kBorder));
+        ImGui::PushStyleVar(
+            ImGuiStyleVar_ChildRounding, kPanelRounding);
         ImGui::BeginChild(
-            "workspace", ImVec2(0.0f, 0.0f),
-            ImGuiChildFlags_None,
+            "workspace",
+            ImVec2(-kWorkspaceInset, -kWorkspaceInset),
+            ImGuiChildFlags_Borders,
             ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoScrollWithMouse);
         impl_->render_global_bar(snapshot, actions);
         impl_->render_workspace(snapshot, config, app_message, actions);
         ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
         ImGui::End();
 
         ImGui::Render();

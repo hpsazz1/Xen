@@ -40,7 +40,7 @@ Xen/                           # 仓库根目录
 - Capture 线程从 Desktop Duplication 获取中心 ROI，并发布到三个可复用槽组成的最新帧队列。
 - Pipeline 线程依次执行 Detector、Aim、安全门控和 Mouse，不增加独立控制线程。
 - 当前兼容链为 `GPU 纹理 → CPU BGR ROI → Detector CPU 前处理 → Provider`；GPU 互操作待实测后再实施。
-- Overlay 采用 176 px 全高品牌导航和右侧独立运行工具栏。概览按关键指标、延迟链路、运行检查和帧/目标摘要组织，配置页保存操作固定在页头；运行期间锁定需重建资源的配置。
+- Overlay 采用 168 px 简洁标签栏和带 8 px 外边距的独立工作区。程序身份只在随主题切换的原生标题栏展示，侧栏仅保留概览、检测、瞄准、输入和设置五个标签；配置页保存操作固定在页头，运行期间锁定需重建资源的配置。
 - Codex 浅色与深色主题可在偏好设置中切换并保存到 `config.ini`。连续数值使用“滑块粗调 + 数值框精确输入”，手填值在 Enter 或失焦时按合法范围校验。
 - `Xen/app/xen.ico` 提供 16–256 px Windows 图标，`Xen/app/xen-brand.svg` 是可编辑品牌母版；标志以 Xen 的 X 和锁定点表达“精确控制”。
 
