@@ -315,6 +315,35 @@ set(SPDLOG_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_SHARED  OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(spdlog)
 
+# SimpleIni 当前可验证的最新稳定 tag 为 4.19。仅使用其单头文件实现，禁止
+# FetchContent 把上游示例或测试加入 Xen 构建图。
+FetchContent_Declare(simpleini
+    GIT_REPOSITORY https://github.com/brofield/simpleini.git
+    GIT_TAG        4.19
+    SOURCE_SUBDIR  _xen_no_cmake)
+FetchContent_MakeAvailable(simpleini)
+
+# Dear ImGui 上游不提供正式 CMake target，由 Xen 明确列出 Win32/D3D11 后端
+# 与 std::string 适配源码，避免隐式编译无关示例和平台后端。
+FetchContent_Declare(imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        v1.92.9)
+FetchContent_MakeAvailable(imgui)
+
+add_library(imgui STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp
+    ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp)
+target_include_directories(imgui PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+    ${imgui_SOURCE_DIR}/misc/cpp)
+target_link_libraries(imgui PRIVATE d3d11 dxgi)
+
 # ─── Log 模块 ───────────────────────────────────────────
 
 add_library(log STATIC
@@ -358,6 +387,66 @@ else()
     target_compile_definitions(detector PRIVATE XEN_HAS_CUDA_RUNTIME=0)
 endif()
 
+# ─── 实时闭环模块 ───────────────────────────────────────
+
+add_library(capture STATIC
+    Xen/capture/capture.cpp
+    Xen/capture/duplication.cpp)
+target_include_directories(capture PUBLIC
+    ${PROJECT_SOURCE_DIR}/Xen
+    ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(capture PUBLIC ${OpenCV_LIBS} log PRIVATE d3d11 dxgi)
+
+add_library(aim STATIC
+    Xen/aim/aim.cpp)
+target_include_directories(aim PUBLIC
+    ${PROJECT_SOURCE_DIR}/Xen
+    ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(aim PUBLIC log)
+
+add_library(mouse STATIC
+    Xen/mouse/mouse.cpp)
+target_include_directories(mouse PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(mouse PUBLIC log PRIVATE user32)
+
+add_library(keyboard STATIC
+    Xen/keyboard/keyboard.cpp)
+target_include_directories(keyboard PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(keyboard PUBLIC log PRIVATE user32)
+
+add_library(config STATIC
+    Xen/config/config.cpp)
+target_include_directories(config
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/Xen
+        ${OpenCV_INCLUDE_DIRS}
+    PRIVATE
+        ${simpleini_SOURCE_DIR})
+
+add_library(runtime STATIC
+    Xen/runtime/runtime.cpp
+    Xen/runtime/runtime_queue.cpp)
+target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(runtime
+    PUBLIC detector capture aim mouse keyboard config log
+    PRIVATE Threads::Threads)
+
+add_library(overlay STATIC
+    Xen/overlay/overlay.cpp)
+target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(overlay
+    PUBLIC runtime config
+    PRIVATE imgui d3d11 dxgi dwmapi)
+
+add_executable(xen_app WIN32
+    Xen/app/main.cpp
+    Xen/app/xen.rc)
+set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
+target_link_libraries(xen_app PRIVATE overlay runtime config log)
+if(WIN32)
+    xen_deploy_runtime_dlls(xen_app OPENCV ORT)
+endif()
+
 # ─── 测试 ───────────────────────────────────────────────
 
 include(CTest)
@@ -379,6 +468,32 @@ if(BUILD_TESTING)
     target_link_libraries(detector_tests PRIVATE ${OpenCV_LIBS})
     xen_deploy_runtime_dlls(detector_tests OPENCV)
     add_test(NAME detector_tests COMMAND detector_tests)
+
+    add_executable(aim_tests
+        tests/aim_tests.cpp)
+    target_link_libraries(aim_tests PRIVATE aim log)
+    add_test(NAME aim_tests COMMAND aim_tests)
+
+    add_executable(runtime_tests
+        tests/runtime_tests.cpp
+        Xen/runtime/runtime_queue.cpp)
+    target_include_directories(runtime_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/Xen
+        ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(runtime_tests PRIVATE ${OpenCV_LIBS} Threads::Threads)
+    xen_deploy_runtime_dlls(runtime_tests OPENCV)
+    add_test(NAME runtime_tests COMMAND runtime_tests)
+
+    add_executable(config_tests
+        tests/config_tests.cpp)
+    target_link_libraries(config_tests PRIVATE config)
+    add_test(NAME config_tests COMMAND config_tests)
+
+    add_executable(io_tests
+        tests/io_tests.cpp)
+    target_link_libraries(io_tests PRIVATE capture mouse keyboard log)
+    xen_deploy_runtime_dlls(io_tests OPENCV)
+    add_test(NAME io_tests COMMAND io_tests)
 
     # 真实模型测试默认关闭，避免仓库绑定私有模型；配置时通过
     # -DXEN_TEST_MODEL=<onnx路径> 启用加载和单帧推理冒烟测试。

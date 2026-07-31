@@ -2,7 +2,14 @@
 
 Xen 是基于 C++20 原生实现的 Windows AI 辅助瞄准工具。核心管线为：截图采集 → YOLO 目标检测推理 → 瞄准控制。
 
-当前仓库已实现 Log 与 Detector；Capture、Aim Control、Mouse、Keyboard 和 Runtime 仍处于设计或待实现阶段。
+当前仓库已形成 P0 单机最小闭环：
+
+```text
+Desktop Duplication → Detector → Aim → Runtime SafetyGate → Win32 SendInput
+```
+
+物理鼠标输出默认禁用。只有配置显式允许、Runtime 已启动、用户完成武装、按住启用键且
+急停未触发时，Pipeline 才会调用 Mouse。Capture、Detector 或 Aim 失败均不会沿用旧结果。
 
 ## 目录结构
 
@@ -12,12 +19,32 @@ Xen/                           # 仓库根目录
 ├── README.md                  # 项目入口
 ├── Xen/                       # C++ 源码根目录
 │   ├── detector/              # Detector 模块（.h + .cpp 平铺）
-│   └── log/                   # Log 模块（.h + .cpp 平铺）
+│   ├── log/                   # Log 模块（.h + .cpp 平铺）
+│   ├── capture/               # DXGI Desktop Duplication + 中心 ROI
+│   ├── aim/                   # 观测归并、追踪、目标选择和移动控制
+│   ├── mouse/                 # 设备无关命令与 Win32 SendInput 后端
+│   ├── keyboard/              # 按住启用与急停键轮询
+│   ├── config/                # SimpleIni 静态配置与校验
+│   ├── runtime/               # 生命周期、三槽最新帧队列和安全门控
+│   ├── overlay/               # Codex 浅色/深色 ImGui 控制台
+│   └── app/                   # Windows 应用入口与 Xen 品牌资源
 ├── AGENTS.md                  # 本地开发规范，不纳入 Git
 └── docs/                      # 本地设计文档，不纳入 Git
 ```
 
 文档和构建文件中的源码路径均以仓库根目录为基准，例如 `Xen/detector/detector.cpp`。源码内部的 `#include "detector/detector.h"` 以 `Xen/` 为包含目录基准。
+
+## P0 运行模型
+
+- 主线程负责 Win32/D3D11/ImGui 消息循环、只读快照渲染和意图提交。
+- Capture 线程从 Desktop Duplication 获取中心 ROI，并发布到三个可复用槽组成的最新帧队列。
+- Pipeline 线程依次执行 Detector、Aim、安全门控和 Mouse，不增加独立控制线程。
+- 当前兼容链为 `GPU 纹理 → CPU BGR ROI → Detector CPU 前处理 → Provider`；GPU 互操作待实测后再实施。
+- Overlay 采用 176 px 全高品牌导航和右侧独立运行工具栏。概览按关键指标、延迟链路、运行检查和帧/目标摘要组织，配置页保存操作固定在页头；运行期间锁定需重建资源的配置。
+- Codex 浅色与深色主题可在偏好设置中切换并保存到 `config.ini`。连续数值使用“滑块粗调 + 数值框精确输入”，手填值在 Enter 或失焦时按合法范围校验。
+- `Xen/app/xen.ico` 提供 16–256 px Windows 图标，`Xen/app/xen-brand.svg` 是可编辑品牌母版；标志以 Xen 的 X 和锁定点表达“精确控制”。
+
+应用目标为 `xen_app`，Release 输出名为 `Xen.exe`。首次运行缺少 `config.ini` 时，界面会显示配置错误；填写模型路径并保存后方可启动 Runtime。
 
 ## 构建状态
 
