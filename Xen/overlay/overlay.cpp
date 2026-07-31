@@ -60,7 +60,6 @@ constexpr unsigned int kOnAccent = 0xfefefe;
 constexpr float kTopBarHeight = 56.0f;
 constexpr float kSidebarWidth = 152.0f;
 constexpr float kPanelRounding = 8.0f;
-constexpr float kWorkspaceInset = 12.0f;
 constexpr float kWindowTitleBarHeight = 36.0f;
 constexpr float kTitleButtonWidth = 44.0f;
 constexpr int kResizeBorder = 6;
@@ -688,17 +687,6 @@ struct Overlay::Impl {
             ImVec2(origin.x + width,
                    origin.y + ImGui::GetWindowHeight()),
             ImGui::GetColorU32(rgba(kSurface)));
-        draw_list->AddLine(
-            ImVec2(origin.x + kSidebarWidth, origin.y),
-            ImVec2(origin.x + kSidebarWidth,
-                   origin.y + kWindowTitleBarHeight),
-            ImGui::GetColorU32(rgba(kBorder)));
-        draw_list->AddLine(
-            ImVec2(origin.x, origin.y + kWindowTitleBarHeight - 1.0f),
-            ImVec2(origin.x + width,
-                   origin.y + kWindowTitleBarHeight - 1.0f),
-            ImGui::GetColorU32(rgba(kBorder)));
-
         const ImVec2 mark(origin.x + 10.0f, origin.y + 9.0f);
         constexpr float kMarkSize = 18.0f;
         draw_list->AddRectFilled(
@@ -844,17 +832,19 @@ struct Overlay::Impl {
         nav_item("输入", WorkspacePage::INPUT);
         nav_item("设置", WorkspacePage::SETTINGS);
 
-        const float footer_y = ImGui::GetWindowHeight() - 76.0f;
+        const float footer_y = ImGui::GetWindowHeight() - 72.0f;
         if (ImGui::GetCursorPosY() < footer_y) {
             ImGui::SetCursorPosY(footer_y);
         }
-        ImGui::Separator();
-        ImGui::Dummy(ImVec2(0.0f, 5.0f));
+        ImGui::SetCursorPosX(16.0f);
+        ImGui::PushFont(medium_font);
         status_dot_label(
             snapshot.output_armed ? "输出已武装" : "输出未武装",
             snapshot.output_armed ? rgba(kSuccess) : rgba(kMutedInk));
+        ImGui::PopFont();
+        ImGui::SetCursorPosX(16.0f);
         ImGui::PushFont(small_font);
-        ImGui::TextColored(rgba(kFaintInk), "P0  /  v0.1");
+        ImGui::TextColored(rgba(kFaintInk), "Runtime P0  /  v0.1");
         ImGui::PopFont();
 
         ImGui::EndChild();
@@ -870,7 +860,7 @@ struct Overlay::Impl {
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
         ImGui::BeginChild(
             "global_bar", ImVec2(0.0f, kTopBarHeight),
-            ImGuiChildFlags_None,
+            ImGuiChildFlags_AlwaysUseWindowPadding,
             ImGuiWindowFlags_NoScrollbar);
 
         ImGui::SetCursorPosY(16.0f);
@@ -948,14 +938,6 @@ struct Overlay::Impl {
                 {RuntimeIntentType::EMERGENCY_STOP, true});
         }
         pop_colored_button();
-
-        const ImVec2 window_position = ImGui::GetWindowPos();
-        ImGui::GetWindowDrawList()->AddLine(
-            ImVec2(window_position.x,
-                   window_position.y + kTopBarHeight - 1.0f),
-            ImVec2(window_position.x + width,
-                   window_position.y + kTopBarHeight - 1.0f),
-            ImGui::GetColorU32(rgba(kBorder)));
 
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
@@ -1673,7 +1655,7 @@ struct Overlay::Impl {
             ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 16.0f));
         ImGui::BeginChild(
             "content", ImVec2(0.0f, 0.0f),
-            ImGuiChildFlags_None);
+            ImGuiChildFlags_AlwaysUseWindowPadding);
 
         render_page_heading(can_edit, actions);
         render_notice(
@@ -1840,24 +1822,21 @@ bool Overlay::render(const RuntimeSnapshot& snapshot,
         ImGui::SetCursorPos(ImVec2(0.0f, kWindowTitleBarHeight));
         impl_->render_sidebar(snapshot);
         ImGui::SetCursorPos(ImVec2(
-            kSidebarWidth + kWorkspaceInset,
-            kWindowTitleBarHeight + kWorkspaceInset));
+            kSidebarWidth, kWindowTitleBarHeight));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kSurface));
-        ImGui::PushStyleColor(ImGuiCol_Border, rgba(kBorder));
         ImGui::PushStyleVar(
-            ImGuiStyleVar_ChildRounding, kPanelRounding);
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+            ImGuiStyleVar_ChildRounding, 0.0f);
         ImGui::BeginChild(
             "workspace",
-            ImVec2(-kWorkspaceInset, -kWorkspaceInset),
-            ImGuiChildFlags_Borders,
+            ImVec2(0.0f, 0.0f),
+            ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoScrollWithMouse);
         impl_->render_global_bar(snapshot, actions);
         impl_->render_workspace(snapshot, config, app_message, actions);
         ImGui::EndChild();
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
         ImGui::End();
 
         ImGui::Render();
