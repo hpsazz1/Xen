@@ -431,6 +431,13 @@ if(LOG_ENABLE_DEBUG)
     target_compile_definitions(log PUBLIC LOG_ENABLE_DEBUG)
 endif()
 
+# ─── Crash 模块 ─────────────────────────────────────────
+
+add_library(crash STATIC
+    Xen/crash/crash.cpp)
+target_include_directories(crash PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(crash PUBLIC log)
+
 # ─── Detector 模块 ──────────────────────────────────────
 
 add_library(detector STATIC
@@ -534,7 +541,8 @@ add_executable(xen_app WIN32
     Xen/app/main.cpp
     Xen/app/xen.rc)
 set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
-target_link_libraries(xen_app PRIVATE overlay runtime xen_debug config log)
+target_link_libraries(xen_app PRIVATE
+    overlay runtime xen_debug config crash log)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_app OPENCV ORT NDI)
 endif()
@@ -547,6 +555,11 @@ if(BUILD_TESTING)
         tests/log_tests.cpp)
     target_link_libraries(log_tests PRIVATE log)
     add_test(NAME log_tests COMMAND log_tests)
+
+    add_executable(crash_tests
+        tests/crash_tests.cpp)
+    target_link_libraries(crash_tests PRIVATE crash log)
+    add_test(NAME crash_tests COMMAND crash_tests)
 
     # 纯算法测试不链接 ORT Session，避免测试解码和坐标数学时依赖 GPU
     # 运行环境；同时复用生产源码，防止测试复制一套实现。

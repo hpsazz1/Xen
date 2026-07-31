@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include "config/config.h"
+#include "crash/crash.h"
 #include "debug/debug.h"
 #include "log/log.h"
 #include "overlay/overlay.h"
@@ -27,6 +28,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     Log::init(config.log);
     Log::register_module("app", LogLevel::INFO);
+    CrashHandler crash_handler;
+    const std::string crash_log_dir =
+        config.log.log_dir.empty() ? "logs" : config.log.log_dir;
+    if (!crash_handler.install(crash_log_dir)) {
+        LOG_ERROR("app", "崩溃诊断安装失败");
+    }
 
     Runtime runtime;
     DebugReport debug_report;
@@ -35,6 +42,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     Overlay overlay;
     if (!overlay.init(config.ui)) {
         LOG_ERROR("app", "Overlay 初始化失败");
+        crash_handler.uninstall();
         Log::shutdown();
         return 1;
     }
@@ -113,6 +121,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     runtime.stop();
     finish_debug_report();
     overlay.shutdown();
+    crash_handler.uninstall();
     Log::shutdown();
     return 0;
 }

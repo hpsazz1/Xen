@@ -2,6 +2,7 @@
 #define LOG_H
 
 #include <atomic>
+#include <cstddef>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -40,6 +41,10 @@ struct LogConfig {
 // ── 日志核心类（全局单例） ──
 class Log {
 public:
+    using EmergencyWriteCallback =
+        bool (*)(void* context, const char* data,
+                 std::size_t size) noexcept;
+
     // ── 生命周期 ──
     // 初始化失败时保持未初始化状态，错误仅写入 stderr，不向业务层抛异常。
     static void init(const LogConfig& cfg);
@@ -87,6 +92,10 @@ public:
         int last_n = 0);                    // 0=全部
     static void dump_ring_buffer(
         const std::string& path = "logs/crash_dump.txt");
+    // 真正崩溃路径只读取固定原子槽，不访问 Impl、spdlog、堆或生命周期锁。
+    // 回调必须完成同步写入，返回 false 会立即停止后续输出。
+    static bool dump_emergency_tail(
+        void* context, EmergencyWriteCallback writer) noexcept;
 
     // ── 工具 ──
     static constexpr const char* level_name(LogLevel lv) {

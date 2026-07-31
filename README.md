@@ -35,6 +35,7 @@ Xen/                           # 仓库根目录
 ├── Xen/                       # C++ 源码根目录
 │   ├── detector/              # Detector 模块（.h + .cpp 平铺）
 │   ├── log/                   # Log 模块（.h + .cpp 平铺）
+│   ├── crash/                 # Windows 未处理异常与紧急日志尾部落盘
 │   ├── capture/               # DXGI + UDP/XUDP + NDI + 主机 FOV 坐标契约
 │   ├── aim/                   # 观测归并、追踪、目标选择和移动控制
 │   ├── mouse/                 # 设备无关命令、Win32 与 KMBOX NET 后端
@@ -128,6 +129,11 @@ capture=warn
 日志配置在进程启动时生效，运行中不会热更新；修改后保存并重新启动 Xen。
 `[log_modules]` 可覆盖单个模块注册时的默认等级；最终阈值取模块等级与 `global_level` 中更严格者。
 运行期间按 `F9` 可打开或关闭最近日志窗口；窗口只读取内存 ring buffer，不会读取日志文件或阻塞 Runtime 管线。
+
+应用还会在 Log 初始化后安装进程级崩溃处理器。正常受控诊断继续使用完整的 spdlog ring；
+未处理 SEH 异常或 `std::terminate()` 只读取独立的 128 槽固定紧急尾部，并通过 Win32 API
+同步追加到 `<log_dir>/crash_tail.log`。该异常路径不申请堆、不访问 `std::filesystem`、
+spdlog ring 锁或 Log 生命周期锁；每条紧急记录最多 512 字节，超长消息按字节截断。
 
 ## 构建状态
 

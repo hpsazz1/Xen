@@ -10,6 +10,7 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstdint>
@@ -38,8 +39,86 @@ constexpr std::size_t kBytesPerMiB = 1024U * 1024U;
 constexpr int kMaxRingBufferCapacity = 65'536;
 constexpr std::size_t kMaxModuleLevelOverrides = 64;
 constexpr std::size_t kMaxModuleNameLength = 64;
+constexpr std::size_t kEmergencySlotCount = 128;
+constexpr std::size_t kEmergencyPayloadBytes = 512;
 constexpr std::uint64_t kAccessPausedBit = std::uint64_t{1} << 63U;
 constexpr std::uint64_t kAccessCountMask = ~kAccessPausedBit;
+
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+              "紧急日志序号必须使用无锁原子操作");
+static_assert(std::atomic<std::uint16_t>::is_always_lock_free,
+              "紧急日志长度必须使用无锁原子操作");
+static_assert(std::atomic<unsigned char>::is_always_lock_free,
+              "紧急日志字节必须使用无锁原子操作");
+
+struct EmergencySlot {
+    // 奇数表示写入中，偶数表示对应序号已完整发布；0 表示从未写入。
+    std::atomic<std::uint64_t> sequence{0};
+    std::atomic<std::uint16_t> length{0};
+    std::array<std::atomic<unsigned char>, kEmergencyPayloadBytes> bytes{};
+};
+
+struct EmergencyBuffer {
+    std::atomic<std::uint64_t> next_ticket{0};
+    std::array<EmergencySlot, kEmergencySlotCount> slots{};
+};
+
+// 缓冲区不属于 Log::Impl。即使 Log 正在关闭或已经销毁，崩溃处理器仍可读取
+// 最后一次成功初始化后的尾部，且不会进入 spdlog 或生命周期同步原语。
+EmergencyBuffer emergency_buffer;
+
+void reset_emergency_buffer() noexcept {
+    emergency_buffer.next_ticket.store(0, std::memory_order_relaxed);
+    for (auto& slot : emergency_buffer.slots) {
+        slot.length.store(0, std::memory_order_relaxed);
+        slot.sequence.store(0, std::memory_order_relaxed);
+    }
+}
+
+void mirror_emergency_log(LogLevel level, std::string_view module,
+                          std::string_view message) noexcept {
+    const auto ticket = emergency_buffer.next_ticket.fetch_add(
+        1U, std::memory_order_relaxed);
+    auto& slot = emergency_buffer.slots[
+        static_cast<std::size_t>(ticket % kEmergencySlotCount)];
+    const auto writing_sequence = ticket * 2U + 1U;
+    const auto published_sequence = ticket * 2U + 2U;
+
+    // 第 129 个并发写者可能绕回仍在写入的槽。只尝试一次 CAS，冲突即丢弃
+    // 本条紧急镜像，绝不等待业务线程，也不允许两名写者拼接同一个槽。
+    auto observed_sequence = slot.sequence.load(std::memory_order_acquire);
+    if ((observed_sequence & 1U) != 0U ||
+        !slot.sequence.compare_exchange_strong(
+            observed_sequence, writing_sequence,
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return;
+    }
+
+    std::size_t position = 0;
+    const auto append = [&slot, &position](std::string_view text) noexcept {
+        const auto available =
+            (kEmergencyPayloadBytes - 2U) - position;
+        const auto count = std::min(available, text.size());
+        for (std::size_t index = 0; index < count; ++index) {
+            slot.bytes[position + index].store(
+                static_cast<unsigned char>(text[index]),
+                std::memory_order_relaxed);
+        }
+        position += count;
+    };
+
+    append("[");
+    append(Log::level_name(level));
+    append("] [");
+    append(module);
+    append("] ");
+    append(message);
+    slot.bytes[position++].store('\r', std::memory_order_relaxed);
+    slot.bytes[position++].store('\n', std::memory_order_relaxed);
+    slot.length.store(
+        static_cast<std::uint16_t>(position), std::memory_order_relaxed);
+    slot.sequence.store(published_sequence, std::memory_order_release);
+}
 
 std::mutex& lifecycle_mutex() noexcept {
     static std::mutex mutex;
@@ -367,6 +446,7 @@ struct Log::Impl {
                LogLevel level, std::string_view message) {
         if (!should_log(module, level)) return;
 
+        mirror_emergency_log(level, module->name, message);
         const auto spdlog_level = to_spdlog_level(level);
         const auto timestamp = spdlog::log_clock::now();
         if (ringbuf_sink && ringbuf_sink->should_log(spdlog_level)) {
@@ -460,6 +540,7 @@ void Log::init(const LogConfig& config) {
         // 完整构造成功后再一次性发布，失败时不会留下半初始化对象。
         auto candidate = std::make_unique<Impl>(config);
         auto* published = candidate.get();
+        reset_emergency_buffer();
         impl_owner_ = std::move(candidate);
         impl_.store(published, std::memory_order_release);
     } catch (const std::exception& exception) {
@@ -634,4 +715,44 @@ void Log::dump_ring_buffer(const std::string& path) {
     } catch (...) {
         report_error("环形缓冲区转储失败: 未知异常");
     }
+}
+
+bool Log::dump_emergency_tail(
+        void* context, EmergencyWriteCallback writer) noexcept {
+    if (!writer) return false;
+
+    const auto end_ticket = emergency_buffer.next_ticket.load(
+        std::memory_order_acquire);
+    const auto count = std::min<std::uint64_t>(
+        end_ticket, static_cast<std::uint64_t>(kEmergencySlotCount));
+    const auto begin_ticket = end_ticket - count;
+    std::array<char, kEmergencyPayloadBytes> snapshot{};
+
+    for (auto ticket = begin_ticket; ticket < end_ticket; ++ticket) {
+        const auto expected_sequence = ticket * 2U + 2U;
+        const auto& slot = emergency_buffer.slots[
+            static_cast<std::size_t>(ticket % kEmergencySlotCount)];
+        if (slot.sequence.load(std::memory_order_acquire) !=
+            expected_sequence) {
+            continue;
+        }
+
+        const auto length = static_cast<std::size_t>(
+            slot.length.load(std::memory_order_relaxed));
+        if (length > snapshot.size()) continue;
+        for (std::size_t index = 0; index < length; ++index) {
+            snapshot[index] = static_cast<char>(
+                slot.bytes[index].load(std::memory_order_relaxed));
+        }
+
+        // 槽在复制期间被绕回覆盖时丢弃本条，绝不输出首尾拼接的损坏记录。
+        if (slot.sequence.load(std::memory_order_acquire) !=
+            expected_sequence) {
+            continue;
+        }
+        if (length > 0U && !writer(context, snapshot.data(), length)) {
+            return false;
+        }
+    }
+    return true;
 }
