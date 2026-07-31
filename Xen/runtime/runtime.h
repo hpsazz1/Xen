@@ -57,6 +57,13 @@ struct RuntimeSnapshot {
     std::uint64_t processed_frames = 0;
     std::uint64_t failed_frames = 0;
     std::uint64_t source_dropped_frames = 0;
+    std::uint64_t transport_dropped_frames = 0;
+    std::uint64_t source_received_frames = 0;
+    double source_fps = 0.0;
+    std::int64_t source_timecode = 0;
+    bool source_timecode_valid = false;
+    std::int64_t source_timestamp = 0;
+    bool source_timestamp_valid = false;
     std::uint64_t overwritten_frames = 0;
     std::uint64_t mouse_commands = 0;
     std::uint64_t last_sequence = 0;

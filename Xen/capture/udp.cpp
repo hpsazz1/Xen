@@ -33,118 +33,6 @@
 
 namespace capture::detail {
 
-UdpLatestFramePool::UdpLatestFramePool() {
-    for (auto& slot : pool_) {
-        slot = std::make_shared<UdpDecodedFrame>();
-    }
-}
-
-std::shared_ptr<UdpDecodedFrame>
-UdpLatestFramePool::acquire_write() noexcept {
-    try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto& slot : pool_) {
-            // pool_ 自身持有一个引用；其他引用来自解码线程或 CapturedFrame。
-            // 最新帧即使尚未被消费也不能覆写，否则 grab() 会读到撕裂内容。
-            if (slot != latest_ && slot.use_count() == 1) return slot;
-        }
-    } catch (...) {
-    }
-    return nullptr;
-}
-
-void UdpLatestFramePool::publish(
-        const std::shared_ptr<UdpDecodedFrame>& frame) noexcept {
-    if (!frame || frame->bgr.empty() || frame->timing.sequence == 0) return;
-    try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (latest_ && latest_->timing.sequence != consumed_sequence_) {
-            ++dropped_frames_;
-        }
-        frame->timing.source_dropped_frames = dropped_frames_;
-        latest_ = frame;
-    } catch (...) {
-    }
-}
-
-bool UdpLatestFramePool::take_latest(
-        std::uint64_t last_sequence,
-        CapturedFrame& frame) noexcept {
-    try {
-        std::shared_ptr<UdpDecodedFrame> latest;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!latest_ || latest_->timing.sequence == last_sequence) {
-                return false;
-            }
-            latest_->timing.source_dropped_frames = dropped_frames_;
-            latest = latest_;
-            consumed_sequence_ = latest_->timing.sequence;
-        }
-
-        // 先释放旧 Mat 视图，再归还其 storage 引用，避免解码线程过早复用旧槽。
-        frame.bgr.release();
-        frame.bgr_storage.reset();
-        frame.bgr_storage = std::shared_ptr<const cv::Mat>(
-            latest, &latest->bgr);
-        frame.bgr = *frame.bgr_storage;
-        frame.timing = latest->timing;
-        frame.roi_x = latest->roi_x;
-        frame.roi_y = latest->roi_y;
-        frame.source_width = latest->source_width;
-        frame.source_height = latest->source_height;
-        frame.encoded_width = latest->encoded_width;
-        frame.encoded_height = latest->encoded_height;
-        frame.source_pixels_per_pixel_x =
-            latest->source_pixels_per_pixel_x;
-        frame.source_pixels_per_pixel_y =
-            latest->source_pixels_per_pixel_y;
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-void UdpLatestFramePool::record_drop() noexcept {
-    try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++dropped_frames_;
-    } catch (...) {
-    }
-}
-
-std::uint64_t UdpLatestFramePool::dropped_frames() const noexcept {
-    try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return dropped_frames_;
-    } catch (...) {
-        return 0;
-    }
-}
-
-void UdpLatestFramePool::reset() noexcept {
-    try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        latest_.reset();
-        consumed_sequence_ = 0;
-        dropped_frames_ = 0;
-        for (const auto& slot : pool_) {
-            if (slot.use_count() != 1) continue;
-            slot->timing = {};
-            slot->roi_x = 0;
-            slot->roi_y = 0;
-            slot->source_width = 0;
-            slot->source_height = 0;
-            slot->encoded_width = 0;
-            slot->encoded_height = 0;
-            slot->source_pixels_per_pixel_x = 1.0;
-            slot->source_pixels_per_pixel_y = 1.0;
-            // 保留 Mat 容量，固定 ROI 下后续会话不重新申请大缓冲。
-        }
-    } catch (...) {
-    }
-}
-
 bool parse_udp_url(const std::string& url,
                    std::string& bind_address,
                    std::uint16_t& port) noexcept {
@@ -199,92 +87,17 @@ bool resolve_udp_frame_geometry(const CaptureConfig& config,
                                 int encoded_width,
                                 int encoded_height,
                                 UdpFrameGeometry& geometry) noexcept {
-    try {
-        if (encoded_width <= 0 || encoded_height <= 0 ||
-            config.roi_width <= 0 || config.roi_height <= 0) {
-            return false;
-        }
-
-        UdpFrameGeometry resolved;
-        resolved.encoded_width = encoded_width;
-        resolved.encoded_height = encoded_height;
-        if (config.center_roi) {
-            resolved.decoded_roi_width =
-                std::min(config.roi_width, encoded_width);
-            resolved.decoded_roi_height =
-                std::min(config.roi_height, encoded_height);
-            resolved.decoded_roi_x =
-                (encoded_width - resolved.decoded_roi_width) / 2;
-            resolved.decoded_roi_y =
-                (encoded_height - resolved.decoded_roi_height) / 2;
-        } else {
-            resolved.decoded_roi_x = config.roi_x;
-            resolved.decoded_roi_y = config.roi_y;
-            resolved.decoded_roi_width = config.roi_width;
-            resolved.decoded_roi_height = config.roi_height;
-        }
-        if (resolved.decoded_roi_x < 0 || resolved.decoded_roi_y < 0 ||
-            resolved.decoded_roi_width <= 0 ||
-            resolved.decoded_roi_height <= 0 ||
-            resolved.decoded_roi_x + resolved.decoded_roi_width >
-                encoded_width ||
-            resolved.decoded_roi_y + resolved.decoded_roi_height >
-                encoded_height) {
-            return false;
-        }
-
-        switch (config.udp_frame_layout) {
-            case UdpFrameLayout::FULL_FRAME_1_TO_1:
-                resolved.source_width = encoded_width;
-                resolved.source_height = encoded_height;
-                resolved.source_roi_x = resolved.decoded_roi_x;
-                resolved.source_roi_y = resolved.decoded_roi_y;
-                break;
-            case UdpFrameLayout::FULL_FRAME_SCALED:
-                if (config.udp_source_width <= 0 ||
-                    config.udp_source_height <= 0) {
-                    return false;
-                }
-                resolved.source_width = config.udp_source_width;
-                resolved.source_height = config.udp_source_height;
-                resolved.source_pixels_per_pixel_x =
-                    static_cast<double>(resolved.source_width) /
-                    static_cast<double>(encoded_width);
-                resolved.source_pixels_per_pixel_y =
-                    static_cast<double>(resolved.source_height) /
-                    static_cast<double>(encoded_height);
-                resolved.source_roi_x =
-                    resolved.decoded_roi_x *
-                    resolved.source_pixels_per_pixel_x;
-                resolved.source_roi_y =
-                    resolved.decoded_roi_y *
-                    resolved.source_pixels_per_pixel_y;
-                break;
-            case UdpFrameLayout::CENTER_CROP_1_TO_1:
-                if (config.udp_source_width < encoded_width ||
-                    config.udp_source_height < encoded_height) {
-                    return false;
-                }
-                resolved.source_width = config.udp_source_width;
-                resolved.source_height = config.udp_source_height;
-                // 与 Desktop Duplication 的中心 ROI 一致，奇数余量留在右/下侧，
-                // 保证 1:1 模式的主机 ROI 原点始终落在整数像素。
-                resolved.source_roi_x =
-                    (resolved.source_width - encoded_width) / 2 +
-                    resolved.decoded_roi_x;
-                resolved.source_roi_y =
-                    (resolved.source_height - encoded_height) / 2 +
-                    resolved.decoded_roi_y;
-                break;
-            default:
-                return false;
-        }
-
-        geometry = resolved;
-        return true;
-    } catch (...) {
-        return false;
-    }
+    NetworkGeometryConfig network_config;
+    network_config.layout = config.udp_frame_layout;
+    network_config.source_width = config.udp_source_width;
+    network_config.source_height = config.udp_source_height;
+    network_config.roi_width = config.roi_width;
+    network_config.roi_height = config.roi_height;
+    network_config.center_roi = config.center_roi;
+    network_config.roi_x = config.roi_x;
+    network_config.roi_y = config.roi_y;
+    return resolve_network_frame_geometry(
+        network_config, encoded_width, encoded_height, geometry);
 }
 
 namespace {

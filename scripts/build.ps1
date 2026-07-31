@@ -8,6 +8,7 @@
     [string]$CudnnRoot = $env:CUDNN_ROOT,
     [string]$CudaRoot = $env:CUDA_PATH,
     [string]$DirectMlRoot = $env:DIRECTML_ROOT,
+    [string]$NdiSdkRoot = $env:NDI_SDK_DIR,
     [string]$ModelPath = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release"
@@ -142,6 +143,9 @@ if (-not [string]::IsNullOrWhiteSpace($CudaRoot)) {
 if (-not [string]::IsNullOrWhiteSpace($DirectMlRoot)) {
     $DirectMlRoot = Resolve-ExistingPath $DirectMlRoot "DirectML 可再发行目录"
 }
+if (-not [string]::IsNullOrWhiteSpace($NdiSdkRoot)) {
+    $NdiSdkRoot = Resolve-ExistingPath $NdiSdkRoot "NDI 6 SDK 目录"
+}
 if (-not [string]::IsNullOrWhiteSpace($ModelPath)) {
     $ModelPath = Resolve-ExistingPath $ModelPath "测试模型" "Leaf"
 }
@@ -165,6 +169,7 @@ $configureArguments = @(
     "-DXEN_CUDNN_ROOT=$CudnnRoot",
     "-DXEN_CUDA_ROOT=$CudaRoot",
     "-DXEN_DIRECTML_ROOT=$DirectMlRoot",
+    "-DXEN_NDI_SDK_ROOT=$NdiSdkRoot",
     "-DXEN_TEST_MODEL=$ModelPath"
 )
 if (-not [string]::IsNullOrWhiteSpace($DirectMlRoot)) {
@@ -190,8 +195,28 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedTensorRtMajor)) {
 }
 Write-Host "ONNX Runtime 解析校验通过：$resolvedLibrary"
 
+if (-not [string]::IsNullOrWhiteSpace($NdiSdkRoot)) {
+    $resolvedNdiInclude = Get-CMakeCacheValue $cachePath "XEN_NDI_INCLUDE_DIR"
+    $resolvedNdiLibrary = Get-CMakeCacheValue $cachePath "XEN_NDI_LIB"
+    Assert-PathWithinRoot $resolvedNdiInclude $NdiSdkRoot "NDI SDK 头文件"
+    Assert-PathWithinRoot $resolvedNdiLibrary $NdiSdkRoot "NDI SDK 导入库"
+    Write-Host "NDI SDK 解析校验通过：$resolvedNdiLibrary"
+}
+
 & $cmakeCommand --build $BuildDirectory --config $Configuration --parallel
 if ($LASTEXITCODE -ne 0) { throw "构建失败，退出码：$LASTEXITCODE" }
+
+if (-not [string]::IsNullOrWhiteSpace($NdiSdkRoot)) {
+    $outputDirectory = Join-Path $BuildDirectory $Configuration
+    foreach ($runtimeName in @(
+            "Processing.NDI.Lib.x64.dll",
+            "Processing.NDI.Lib.Licenses.txt")) {
+        $runtimePath = Join-Path $outputDirectory $runtimeName
+        if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
+            throw "NDI 运行文件未部署到可执行文件目录：$runtimePath"
+        }
+    }
+}
 
 # CMake 的 POST_BUILD 规则必须已把目标所需 DLL 部署到可执行文件旁。
 # 测试阶段只保留系统目录，避免调用方已有的 SDK PATH 掩盖缺失复制规则。

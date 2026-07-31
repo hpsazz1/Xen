@@ -86,6 +86,64 @@ set(XEN_CUDA_ROOT "$ENV{CUDA_PATH}" CACHE PATH
     "CUDA Toolkit root used to deploy runtime DLLs")
 set(XEN_DIRECTML_ROOT "$ENV{DIRECTML_ROOT}" CACHE PATH
     "DirectML redistributable root used to deploy DirectML.dll")
+set(XEN_NDI_SDK_ROOT "$ENV{NDI_SDK_DIR}" CACHE PATH
+    "NDI 6 SDK root used by the optional NDI capture backend")
+
+# NDI 是可选后端。只有 SDK 的头文件、x64 导入库和运行库同时存在时才
+# 编译真实实现；缺少 SDK 时仍保留明确 UNSUPPORTED 的构建边界。
+set(XEN_HAS_NDI FALSE)
+if(XEN_NDI_SDK_ROOT AND IS_DIRECTORY "${XEN_NDI_SDK_ROOT}")
+    get_filename_component(XEN_NDI_SDK_ROOT_REAL
+        "${XEN_NDI_SDK_ROOT}" REALPATH)
+    file(TO_CMAKE_PATH "${XEN_NDI_SDK_ROOT_REAL}" XEN_NDI_SDK_ROOT_REAL)
+    string(TOLOWER "${XEN_NDI_SDK_ROOT_REAL}" XEN_NDI_SDK_ROOT_KEY)
+    if(DEFINED XEN_CONFIGURED_NDI_SDK_ROOT AND
+       NOT XEN_CONFIGURED_NDI_SDK_ROOT STREQUAL XEN_NDI_SDK_ROOT_KEY)
+        unset(XEN_NDI_INCLUDE_DIR CACHE)
+        unset(XEN_NDI_LIB CACHE)
+    endif()
+    set(XEN_CONFIGURED_NDI_SDK_ROOT "${XEN_NDI_SDK_ROOT_KEY}"
+        CACHE INTERNAL "NDI SDK root used by the current build tree" FORCE)
+    find_path(XEN_NDI_INCLUDE_DIR Processing.NDI.Lib.h
+        HINTS "${XEN_NDI_SDK_ROOT_REAL}"
+        PATH_SUFFIXES Include include
+        NO_DEFAULT_PATH)
+    find_library(XEN_NDI_LIB Processing.NDI.Lib.x64
+        HINTS "${XEN_NDI_SDK_ROOT_REAL}"
+        PATH_SUFFIXES Lib/x64 lib/x64
+        NO_DEFAULT_PATH)
+    set(XEN_NDI_RUNTIME_DLL
+        "${XEN_NDI_SDK_ROOT_REAL}/Bin/x64/Processing.NDI.Lib.x64.dll")
+    set(XEN_NDI_LICENSE_FILE
+        "${XEN_NDI_SDK_ROOT_REAL}/Bin/x64/Processing.NDI.Lib.Licenses.txt")
+    if(XEN_NDI_INCLUDE_DIR AND XEN_NDI_LIB)
+        get_filename_component(XEN_NDI_INCLUDE_DIR_REAL
+            "${XEN_NDI_INCLUDE_DIR}" REALPATH)
+        get_filename_component(XEN_NDI_LIB_REAL "${XEN_NDI_LIB}" REALPATH)
+        file(RELATIVE_PATH XEN_NDI_INCLUDE_RELATIVE
+            "${XEN_NDI_SDK_ROOT_REAL}" "${XEN_NDI_INCLUDE_DIR_REAL}")
+        file(RELATIVE_PATH XEN_NDI_LIB_RELATIVE
+            "${XEN_NDI_SDK_ROOT_REAL}" "${XEN_NDI_LIB_REAL}")
+        if(IS_ABSOLUTE "${XEN_NDI_INCLUDE_RELATIVE}" OR
+           XEN_NDI_INCLUDE_RELATIVE MATCHES "^\\.\\.($|/)" OR
+           IS_ABSOLUTE "${XEN_NDI_LIB_RELATIVE}" OR
+           XEN_NDI_LIB_RELATIVE MATCHES "^\\.\\.($|/)")
+            unset(XEN_NDI_INCLUDE_DIR CACHE)
+            unset(XEN_NDI_LIB CACHE)
+        endif()
+    endif()
+    if(XEN_NDI_INCLUDE_DIR AND XEN_NDI_LIB AND
+       EXISTS "${XEN_NDI_RUNTIME_DLL}" AND
+       EXISTS "${XEN_NDI_LICENSE_FILE}")
+        set(XEN_HAS_NDI TRUE)
+        message(STATUS "NDI SDK: ${XEN_NDI_SDK_ROOT}")
+    else()
+        message(WARNING
+            "NDI SDK root is incomplete; NDI backend will be UNSUPPORTED: ${XEN_NDI_SDK_ROOT}")
+    endif()
+else()
+    message(STATUS "NDI SDK not configured; NDI backend will be UNSUPPORTED")
+endif()
 
 # TensorRT CUDA Graph 需要把每帧输入显式复制到固定设备地址，并在图重放后
 # 把结果复制回固定 CPU 缓冲区。仅 CUDA/TensorRT ORT 构建链接 CUDA Runtime；
@@ -183,7 +241,7 @@ endfunction()
 # 可执行目标按实际能力选择 OPENCV / ORT。Windows 系统 DLL、显卡驱动 DLL
 # 和系统提供的 MSVC 运行库不复制。
 function(xen_deploy_runtime_dlls target)
-    set(options OPENCV ORT)
+    set(options OPENCV ORT NDI)
     cmake_parse_arguments(DEPLOY "${options}" "" "" ${ARGN})
 
     if(DEPLOY_OPENCV)
@@ -303,6 +361,18 @@ function(xen_deploy_runtime_dlls target)
             xen_copy_runtime_files(${target} "${DIRECTML_RUNTIME_DLL}")
         endif()
     endif()
+
+    if(DEPLOY_NDI AND XEN_HAS_NDI)
+        xen_copy_runtime_files(${target}
+            "${XEN_NDI_RUNTIME_DLL}"
+            "${XEN_NDI_LICENSE_FILE}")
+    elseif(DEPLOY_NDI)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E rm -f
+                "$<TARGET_FILE_DIR:${target}>/Processing.NDI.Lib.x64.dll"
+                "$<TARGET_FILE_DIR:${target}>/Processing.NDI.Lib.Licenses.txt"
+            VERBATIM)
+    endif()
 endfunction()
 
 # spdlog
@@ -392,12 +462,21 @@ endif()
 add_library(capture STATIC
     Xen/capture/capture.cpp
     Xen/capture/duplication.cpp
+    Xen/capture/network.cpp
+    Xen/capture/ndi.cpp
     Xen/capture/udp.cpp)
 target_include_directories(capture PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(capture PUBLIC ${OpenCV_LIBS} log
     PRIVATE d3d11 dxgi ws2_32)
+if(XEN_HAS_NDI)
+    target_include_directories(capture PUBLIC ${XEN_NDI_INCLUDE_DIR})
+    target_link_libraries(capture PRIVATE ${XEN_NDI_LIB})
+    target_compile_definitions(capture PUBLIC XEN_HAS_NDI=1)
+else()
+    target_compile_definitions(capture PUBLIC XEN_HAS_NDI=0)
+endif()
 
 add_library(aim STATIC
     Xen/aim/aim.cpp)
@@ -446,7 +525,7 @@ add_executable(xen_app WIN32
 set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
 target_link_libraries(xen_app PRIVATE overlay runtime config log)
 if(WIN32)
-    xen_deploy_runtime_dlls(xen_app OPENCV ORT)
+    xen_deploy_runtime_dlls(xen_app OPENCV ORT NDI)
 endif()
 
 # ─── 测试 ───────────────────────────────────────────────
@@ -495,7 +574,7 @@ if(BUILD_TESTING)
         tests/io_tests.cpp)
     target_link_libraries(io_tests PRIVATE
         capture mouse keyboard log ws2_32)
-    xen_deploy_runtime_dlls(io_tests OPENCV)
+    xen_deploy_runtime_dlls(io_tests OPENCV NDI)
     add_test(NAME io_tests COMMAND io_tests)
 
     # 真实模型测试默认关闭，避免仓库绑定私有模型；配置时通过

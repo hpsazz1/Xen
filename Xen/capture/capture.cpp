@@ -1,5 +1,6 @@
 #include "capture/capture.h"
 
+#include "capture/ndi_internal.h"
 #include "capture/udp_internal.h"
 
 #include "log/log.h"
@@ -10,7 +11,6 @@ namespace capture::detail {
 
 std::unique_ptr<ICapture> create_desktop_duplication_capture(
     const CaptureConfig& config) noexcept;
-
 } // namespace capture::detail
 
 const char* CaptureStatusName(CaptureStatus status) noexcept {
@@ -33,17 +33,23 @@ const char* CaptureBackendName(CaptureBackend backend) noexcept {
             return "DESKTOP_DUPLICATION";
         case CaptureBackend::UDP_MJPEG:
             return "UDP_MJPEG";
+        case CaptureBackend::NDI:
+            return "NDI";
     }
     return "UNKNOWN";
 }
 
 const char* UdpFrameLayoutName(UdpFrameLayout layout) noexcept {
+    return NetworkFrameLayoutName(layout);
+}
+
+const char* NetworkFrameLayoutName(NetworkFrameLayout layout) noexcept {
     switch (layout) {
-        case UdpFrameLayout::FULL_FRAME_1_TO_1:
+        case NetworkFrameLayout::FULL_FRAME_1_TO_1:
             return "FULL_FRAME_1_TO_1";
-        case UdpFrameLayout::FULL_FRAME_SCALED:
+        case NetworkFrameLayout::FULL_FRAME_SCALED:
             return "FULL_FRAME_SCALED";
-        case UdpFrameLayout::CENTER_CROP_1_TO_1:
+        case NetworkFrameLayout::CENTER_CROP_1_TO_1:
             return "CENTER_CROP_1_TO_1";
     }
     return "UNKNOWN";
@@ -58,6 +64,8 @@ std::unique_ptr<ICapture> create_capture(
                     config);
             case CaptureBackend::UDP_MJPEG:
                 return capture::detail::create_udp_mjpeg_capture(config);
+            case CaptureBackend::NDI:
+                return capture::detail::create_ndi_capture(config);
         }
     } catch (...) {
         LOG_ERROR("capture", "创建采集后端时发生未知异常");

@@ -75,6 +75,7 @@ CaptureBackend parse_capture_backend(
         return CaptureBackend::DESKTOP_DUPLICATION;
     }
     if (normalized == "udp_mjpeg") return CaptureBackend::UDP_MJPEG;
+    if (normalized == "ndi") return CaptureBackend::NDI;
     return fallback;
 }
 
@@ -84,33 +85,35 @@ const char* capture_backend_name(CaptureBackend backend) noexcept {
             return "desktop_duplication";
         case CaptureBackend::UDP_MJPEG:
             return "udp_mjpeg";
+        case CaptureBackend::NDI:
+            return "ndi";
     }
     return "desktop_duplication";
 }
 
-UdpFrameLayout parse_udp_frame_layout(
-        const char* value, UdpFrameLayout fallback) {
+NetworkFrameLayout parse_network_frame_layout(
+        const char* value, NetworkFrameLayout fallback) {
     if (!value) return fallback;
     const std::string normalized = lowercase_ascii(value);
     if (normalized == "full_frame_1_to_1") {
-        return UdpFrameLayout::FULL_FRAME_1_TO_1;
+        return NetworkFrameLayout::FULL_FRAME_1_TO_1;
     }
     if (normalized == "full_frame_scaled") {
-        return UdpFrameLayout::FULL_FRAME_SCALED;
+        return NetworkFrameLayout::FULL_FRAME_SCALED;
     }
     if (normalized == "center_crop_1_to_1") {
-        return UdpFrameLayout::CENTER_CROP_1_TO_1;
+        return NetworkFrameLayout::CENTER_CROP_1_TO_1;
     }
     return fallback;
 }
 
-const char* udp_frame_layout_name(UdpFrameLayout layout) noexcept {
+const char* network_frame_layout_name(NetworkFrameLayout layout) noexcept {
     switch (layout) {
-        case UdpFrameLayout::FULL_FRAME_1_TO_1:
+        case NetworkFrameLayout::FULL_FRAME_1_TO_1:
             return "full_frame_1_to_1";
-        case UdpFrameLayout::FULL_FRAME_SCALED:
+        case NetworkFrameLayout::FULL_FRAME_SCALED:
             return "full_frame_scaled";
-        case UdpFrameLayout::CENTER_CROP_1_TO_1:
+        case NetworkFrameLayout::CENTER_CROP_1_TO_1:
             return "center_crop_1_to_1";
     }
     return "full_frame_1_to_1";
@@ -187,39 +190,61 @@ bool validate_app_config(const AppConfig& config,
             error = "Detector 配置非法";
             return false;
         }
-        if ((config.capture.backend !=
-                 CaptureBackend::DESKTOP_DUPLICATION &&
-             config.capture.backend != CaptureBackend::UDP_MJPEG) ||
-            config.capture.roi_width <= 0 ||
-            config.capture.roi_height <= 0 ||
+        const auto valid_network_layout =
+            [kMaxCaptureSourceDimension](NetworkFrameLayout layout,
+                                         int source_width,
+                                         int source_height,
+                                         bool allow_missing_source) {
+                if (layout == NetworkFrameLayout::FULL_FRAME_1_TO_1) {
+                    return source_width == 0 && source_height == 0;
+                }
+                return (layout == NetworkFrameLayout::FULL_FRAME_SCALED ||
+                        layout == NetworkFrameLayout::CENTER_CROP_1_TO_1) &&
+                       ((allow_missing_source && source_width == 0 &&
+                         source_height == 0) ||
+                        (source_width > 0 && source_height > 0 &&
+                         source_width <= kMaxCaptureSourceDimension &&
+                         source_height <= kMaxCaptureSourceDimension));
+            };
+        const bool common_capture_invalid =
+            (config.capture.backend != CaptureBackend::DESKTOP_DUPLICATION &&
+             config.capture.backend != CaptureBackend::UDP_MJPEG &&
+             config.capture.backend != CaptureBackend::NDI) ||
+            config.capture.roi_width <= 0 || config.capture.roi_height <= 0 ||
             (!config.capture.center_roi &&
              (config.capture.roi_x < 0 || config.capture.roi_y < 0)) ||
-            config.capture.acquire_timeout_ms < 0 ||
-            (config.capture.backend ==
-                 CaptureBackend::DESKTOP_DUPLICATION &&
-             (config.capture.adapter_index < 0 ||
-              config.capture.output_index < 0)) ||
-            (config.capture.backend == CaptureBackend::UDP_MJPEG &&
-             (config.capture.udp_url.empty() ||
-              config.capture.udp_read_timeout_ms <= 0 ||
-              config.capture.udp_read_timeout_ms > 1000 ||
-              config.capture.udp_disconnect_timeout_ms <
-                  config.capture.udp_read_timeout_ms ||
-              config.capture.udp_disconnect_timeout_ms > 60000 ||
-              (config.capture.udp_frame_layout ==
-                   UdpFrameLayout::FULL_FRAME_1_TO_1
-                   ? (config.capture.udp_source_width != 0 ||
-                      config.capture.udp_source_height != 0)
-                   : ((config.capture.udp_frame_layout !=
-                           UdpFrameLayout::FULL_FRAME_SCALED &&
-                       config.capture.udp_frame_layout !=
-                           UdpFrameLayout::CENTER_CROP_1_TO_1) ||
-                      config.capture.udp_source_width <= 0 ||
-                      config.capture.udp_source_height <= 0 ||
-                      config.capture.udp_source_width >
-                          kMaxCaptureSourceDimension ||
-                      config.capture.udp_source_height >
-                          kMaxCaptureSourceDimension))))) {
+            config.capture.acquire_timeout_ms < 0;
+        const bool desktop_invalid =
+            config.capture.backend == CaptureBackend::DESKTOP_DUPLICATION &&
+            (config.capture.adapter_index < 0 ||
+             config.capture.output_index < 0);
+        const bool udp_invalid =
+            config.capture.backend == CaptureBackend::UDP_MJPEG &&
+            (config.capture.udp_url.empty() ||
+             config.capture.udp_read_timeout_ms <= 0 ||
+             config.capture.udp_read_timeout_ms > 1000 ||
+             config.capture.udp_disconnect_timeout_ms <
+                 config.capture.udp_read_timeout_ms ||
+             config.capture.udp_disconnect_timeout_ms > 60000 ||
+             !valid_network_layout(config.capture.udp_frame_layout,
+                                   config.capture.udp_source_width,
+                                   config.capture.udp_source_height, false));
+        const bool ndi_invalid =
+            config.capture.backend == CaptureBackend::NDI &&
+            (config.capture.ndi_source_name.empty() ||
+             config.capture.ndi_discovery_timeout_ms <= 0 ||
+             config.capture.ndi_discovery_timeout_ms > 60000 ||
+             config.capture.ndi_receive_timeout_ms <= 0 ||
+             config.capture.ndi_receive_timeout_ms > 1000 ||
+             config.capture.ndi_disconnect_timeout_ms <
+                 config.capture.ndi_receive_timeout_ms ||
+             config.capture.ndi_disconnect_timeout_ms > 60000 ||
+             !valid_network_layout(config.capture.ndi_frame_layout,
+                                   config.capture.ndi_source_width,
+                                   config.capture.ndi_source_height,
+                                   config.capture.ndi_require_frame_metadata));
+        if (common_capture_invalid || desktop_invalid || udp_invalid ||
+            ndi_invalid) {
             error = "Capture 配置非法";
             return false;
         }
@@ -308,7 +333,7 @@ bool load_app_config(const std::string& path,
         candidate.capture.udp_disconnect_timeout_ms = static_cast<int>(
             ini.GetLongValue("capture", "udp_disconnect_timeout_ms",
                              candidate.capture.udp_disconnect_timeout_ms));
-        candidate.capture.udp_frame_layout = parse_udp_frame_layout(
+        candidate.capture.udp_frame_layout = parse_network_frame_layout(
             ini.GetValue("capture", "udp_frame_layout"),
             candidate.capture.udp_frame_layout);
         candidate.capture.udp_source_width = static_cast<int>(
@@ -317,6 +342,30 @@ bool load_app_config(const std::string& path,
         candidate.capture.udp_source_height = static_cast<int>(
             ini.GetLongValue("capture", "udp_source_height",
                              candidate.capture.udp_source_height));
+        candidate.capture.ndi_source_name = ini.GetValue(
+            "capture", "ndi_source_name",
+            candidate.capture.ndi_source_name.c_str());
+        candidate.capture.ndi_discovery_timeout_ms = static_cast<int>(
+            ini.GetLongValue("capture", "ndi_discovery_timeout_ms",
+                             candidate.capture.ndi_discovery_timeout_ms));
+        candidate.capture.ndi_receive_timeout_ms = static_cast<int>(
+            ini.GetLongValue("capture", "ndi_receive_timeout_ms",
+                             candidate.capture.ndi_receive_timeout_ms));
+        candidate.capture.ndi_disconnect_timeout_ms = static_cast<int>(
+            ini.GetLongValue("capture", "ndi_disconnect_timeout_ms",
+                             candidate.capture.ndi_disconnect_timeout_ms));
+        candidate.capture.ndi_frame_layout = parse_network_frame_layout(
+            ini.GetValue("capture", "ndi_frame_layout"),
+            candidate.capture.ndi_frame_layout);
+        candidate.capture.ndi_source_width = static_cast<int>(
+            ini.GetLongValue("capture", "ndi_source_width",
+                             candidate.capture.ndi_source_width));
+        candidate.capture.ndi_source_height = static_cast<int>(
+            ini.GetLongValue("capture", "ndi_source_height",
+                             candidate.capture.ndi_source_height));
+        candidate.capture.ndi_require_frame_metadata = ini.GetBoolValue(
+            "capture", "ndi_require_frame_metadata",
+            candidate.capture.ndi_require_frame_metadata);
         candidate.capture.roi_width = static_cast<int>(ini.GetLongValue(
             "capture", "roi_width", candidate.capture.roi_width));
         candidate.capture.roi_height = static_cast<int>(ini.GetLongValue(
@@ -424,11 +473,27 @@ bool save_app_config(const std::string& path,
         ini.SetLongValue("capture", "udp_disconnect_timeout_ms",
                          config.capture.udp_disconnect_timeout_ms);
         ini.SetValue("capture", "udp_frame_layout",
-                     udp_frame_layout_name(config.capture.udp_frame_layout));
+                     network_frame_layout_name(config.capture.udp_frame_layout));
         ini.SetLongValue("capture", "udp_source_width",
                          config.capture.udp_source_width);
         ini.SetLongValue("capture", "udp_source_height",
                          config.capture.udp_source_height);
+        ini.SetValue("capture", "ndi_source_name",
+                     config.capture.ndi_source_name.c_str());
+        ini.SetLongValue("capture", "ndi_discovery_timeout_ms",
+                         config.capture.ndi_discovery_timeout_ms);
+        ini.SetLongValue("capture", "ndi_receive_timeout_ms",
+                         config.capture.ndi_receive_timeout_ms);
+        ini.SetLongValue("capture", "ndi_disconnect_timeout_ms",
+                         config.capture.ndi_disconnect_timeout_ms);
+        ini.SetValue("capture", "ndi_frame_layout",
+                     network_frame_layout_name(config.capture.ndi_frame_layout));
+        ini.SetLongValue("capture", "ndi_source_width",
+                         config.capture.ndi_source_width);
+        ini.SetLongValue("capture", "ndi_source_height",
+                         config.capture.ndi_source_height);
+        ini.SetBoolValue("capture", "ndi_require_frame_metadata",
+                         config.capture.ndi_require_frame_metadata);
         ini.SetLongValue("capture", "roi_width", config.capture.roi_width);
         ini.SetLongValue("capture", "roi_height", config.capture.roi_height);
         ini.SetBoolValue("capture", "center_roi", config.capture.center_roi);

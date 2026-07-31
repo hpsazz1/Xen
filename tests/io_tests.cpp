@@ -10,6 +10,7 @@
 
 #include "capture/capture.h"
 #include "capture/udp_internal.h"
+#include "capture/network_internal.h"
 #include "keyboard/keyboard.h"
 #include "log/log.h"
 #include "mouse/mouse.h"
@@ -27,6 +28,10 @@
 #include <vector>
 
 #include <opencv2/imgcodecs.hpp>
+
+#if XEN_HAS_NDI
+#include <Processing.NDI.Lib.h>
+#endif
 
 namespace {
 
@@ -164,6 +169,33 @@ void test_udp_frame_geometry() {
            "完整 FOV 小于 OBS 预裁剪帧时必须安全失败");
 }
 
+void test_xen_metadata_geometry() {
+    capture::detail::XenFrameMetadata metadata;
+    expect(capture::detail::parse_xen_frame_metadata(
+               "<xen version=\"1\" source_width=\"2560\" "
+               "source_height=\"1440\" roi_x=\"1120\" roi_y=\"560\" "
+               "roi_width=\"320\" roi_height=\"320\"/>", metadata),
+           "NDI Xen metadata 必须能被严格解析");
+    expect(metadata.source_width == 2560 && metadata.source_height == 1440 &&
+               metadata.roi_x == 1120 && metadata.roi_y == 560 &&
+               metadata.roi_width == 320 && metadata.roi_height == 320,
+           "NDI metadata 的主机 FOV 与 ROI 坐标必须保持原值");
+    capture::detail::NetworkGeometryConfig config;
+    config.layout = NetworkFrameLayout::CENTER_CROP_1_TO_1;
+    config.roi_width = 160;
+    config.roi_height = 160;
+    capture::detail::NetworkFrameGeometry geometry;
+    expect(!capture::detail::resolve_network_frame_geometry(
+               config, 320, 320, geometry, &metadata),
+           "metadata ROI 与本地 Detector ROI 尺寸不一致时必须拒绝");
+    expect(!capture::detail::parse_xen_frame_metadata(
+               "<xen version=\"1\" source_width=\"2560\" "
+               "source_height=\"1440\" roi_x=\"1120\" roi_y=\"560\" "
+               "roi_width=\"320\" roi_height=\"320\" extra=\"1\"/>",
+               metadata),
+           "NDI metadata 出现未知属性时必须拒绝而不是猜测");
+}
+
 void test_invalid_udp_capture_config() {
     CaptureConfig config;
     config.backend = CaptureBackend::UDP_MJPEG;
@@ -183,6 +215,132 @@ void test_invalid_udp_capture_config() {
                missing_source->status() == CaptureStatus::INVALID_CONFIG,
            "中心预裁剪模式缺少主机完整 FOV 时必须在监听前失败");
 }
+
+#if XEN_HAS_NDI
+
+bool wait_for_capture_frame(ICapture& capture,
+                            std::uint64_t after_sequence,
+                            CapturedFrame& frame);
+
+void send_ndi_test_frame(NDIlib_send_instance_t sender,
+                         cv::Scalar color,
+                         const std::string& metadata) {
+    cv::Mat frame(320, 320, CV_8UC4,
+                  cv::Scalar(color[0], color[1], color[2], 255.0));
+    NDIlib_video_frame_v2_t video{};
+    video.xres = frame.cols;
+    video.yres = frame.rows;
+    video.FourCC = NDIlib_FourCC_type_BGRX;
+    video.frame_rate_N = 60;
+    video.frame_rate_D = 1;
+    video.frame_format_type = NDIlib_frame_format_type_progressive;
+    video.timecode = NDIlib_send_timecode_synthesize;
+    video.p_data = frame.data;
+    video.line_stride_in_bytes = static_cast<int>(frame.step);
+    video.p_metadata = metadata.c_str();
+    NDIlib_send_send_video_v2(sender, &video);
+}
+
+void test_ndi_loopback() {
+    CaptureConfig config;
+    config.backend = CaptureBackend::NDI;
+    config.ndi_source_name = "Auto";
+    config.ndi_discovery_timeout_ms = 500;
+    config.ndi_receive_timeout_ms = 50;
+    config.ndi_disconnect_timeout_ms = 500;
+    config.ndi_frame_layout = NetworkFrameLayout::CENTER_CROP_1_TO_1;
+    config.ndi_require_frame_metadata = true;
+    config.roi_width = 320;
+    config.roi_height = 320;
+    config.acquire_timeout_ms = 20;
+
+    auto capture = create_capture(config);
+    expect(capture && capture->open(),
+           "NDI Capture 必须能在真实 SDK 下打开");
+    if (!capture || capture->status() == CaptureStatus::UNSUPPORTED) return;
+
+    NDIlib_send_create_t sender_settings{};
+    sender_settings.p_ndi_name = "Xen NDI Loopback Sender";
+    sender_settings.clock_video = false;
+    sender_settings.clock_audio = false;
+    NDIlib_send_instance_t sender = NDIlib_send_create(&sender_settings);
+    expect(sender != nullptr, "NDI 回环测试发送端必须创建成功");
+    if (!sender) {
+        capture->close();
+        return;
+    }
+    const std::string metadata =
+        "<xen version=\"1\" source_width=\"2560\" "
+        "source_height=\"1440\" roi_x=\"1120\" roi_y=\"560\" "
+        "roi_width=\"320\" roi_height=\"320\"/>";
+    for (int index = 0; index < 20; ++index) {
+        send_ndi_test_frame(
+            sender, cv::Scalar(24.0, 96.0, 208.0), metadata);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    CapturedFrame frame;
+    const bool received_first = wait_for_capture_frame(*capture, 0, frame);
+    expect(received_first && frame.bgr.cols == 320 &&
+               frame.bgr.rows == 320 && frame.bgr.type() == CV_8UC3,
+           "NDI BGRX 回环必须输出 320x320 BGR ROI");
+    expect(received_first && frame.source_width == 2560 &&
+               frame.source_height == 1440 && frame.roi_x == 1120.0 &&
+               frame.roi_y == 560.0 &&
+               frame.source_pixels_per_pixel_x == 1.0 &&
+               frame.source_pixels_per_pixel_y == 1.0,
+           "NDI metadata 必须将辅机接收帧映射到主机 (1120,560)");
+    expect(received_first && frame.timing.source_fps == 60.0 &&
+               frame.timing.source_received_frames > 0,
+           "NDI 帧必须携带 SDK 源帧率与接收统计");
+    const cv::Scalar first_mean = received_first
+        ? cv::mean(frame.bgr) : cv::Scalar{};
+
+    for (int index = 0; index < 20; ++index) {
+        send_ndi_test_frame(
+            sender, cv::Scalar(208.0, 48.0, 20.0), metadata);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const bool received_second = wait_for_capture_frame(
+        *capture, frame.timing.sequence, frame);
+    const cv::Scalar second_mean = received_second
+        ? cv::mean(frame.bgr) : cv::Scalar{};
+    expect(received_second &&
+               std::abs(first_mean[0] - second_mean[0]) > 100.0,
+           "NDI 连续变化帧不得重放首次输入");
+
+    NDIlib_send_destroy(sender);
+    bool access_lost = false;
+    const auto disconnect_deadline = std::chrono::steady_clock::now() +
+                                     std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < disconnect_deadline) {
+        const CaptureStatus status = capture->grab(frame);
+        if (status == CaptureStatus::ACCESS_LOST) {
+            access_lost = true;
+            break;
+        }
+        if (status != CaptureStatus::FRAME &&
+            status != CaptureStatus::NO_FRAME) {
+            break;
+        }
+    }
+    expect(access_lost,
+           "NDI 源断开超过阈值后必须进入 ACCESS_LOST");
+    capture->close();
+}
+
+#else
+
+void test_ndi_unsupported_without_sdk() {
+    CaptureConfig config;
+    config.backend = CaptureBackend::NDI;
+    auto capture = create_capture(config);
+    expect(capture && !capture->open() &&
+               capture->status() == CaptureStatus::UNSUPPORTED,
+           "未安装 NDI SDK 时选择 NDI 必须明确返回 UNSUPPORTED");
+}
+
+#endif
 
 class WinsockSession {
 public:
@@ -244,9 +402,9 @@ bool send_fragmented_jpeg(SOCKET socket_handle,
     return true;
 }
 
-bool wait_for_udp_frame(ICapture& capture,
-                        std::uint64_t after_sequence,
-                        CapturedFrame& frame) {
+bool wait_for_capture_frame(ICapture& capture,
+                            std::uint64_t after_sequence,
+                            CapturedFrame& frame) {
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(2);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -313,7 +471,7 @@ void test_udp_mjpeg_loopback() {
     expect(send_fragmented_jpeg(sender, destination, first_jpeg),
            "第一张 JPEG 的 SOI/EOI 跨数据报发送必须成功");
     CapturedFrame frame;
-    const bool received_first = wait_for_udp_frame(*capture, 0, frame);
+    const bool received_first = wait_for_capture_frame(*capture, 0, frame);
     const std::uint64_t first_sequence = frame.timing.sequence;
     const cv::Scalar first_mean = received_first
         ? cv::mean(frame.bgr) : cv::Scalar{};
@@ -331,7 +489,7 @@ void test_udp_mjpeg_loopback() {
 
     expect(send_fragmented_jpeg(sender, destination, second_jpeg),
            "第二张变化 JPEG 的跨数据报发送必须成功");
-    const bool received_second = wait_for_udp_frame(
+    const bool received_second = wait_for_capture_frame(
         *capture, first_sequence, frame);
     const cv::Scalar second_mean = received_second
         ? cv::mean(frame.bgr) : cv::Scalar{};
@@ -373,7 +531,13 @@ int main() {
     test_udp_latest_frame_pool();
     test_udp_pool_is_bounded();
     test_udp_frame_geometry();
+    test_xen_metadata_geometry();
     test_invalid_udp_capture_config();
+#if XEN_HAS_NDI
+    test_ndi_loopback();
+#else
+    test_ndi_unsupported_without_sdk();
+#endif
     test_udp_mjpeg_loopback();
     Log::shutdown();
 

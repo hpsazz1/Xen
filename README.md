@@ -2,11 +2,12 @@
 
 Xen 是基于 C++20 原生实现的 Windows AI 辅助瞄准工具。核心管线为：截图采集 → YOLO 目标检测推理 → 瞄准控制。
 
-当前仓库已形成 P0 单机最小闭环，并完成 P1 UDP MJPEG 接收端源码与自动回环测试：
+当前仓库已形成 P0 单机最小闭环，并完成 UDP MJPEG 与 NDI 接收端源码和自动回环测试：
 
 ```text
 Desktop Duplication ──────┐
-OBS/FFmpeg UDP MJPEG ─────┴→ Detector → Aim → Runtime SafetyGate → Win32 SendInput
+OBS/FFmpeg UDP MJPEG ─────┤
+OBS/NDI Sender ───────────┴→ Detector → Aim → Runtime SafetyGate → Win32 SendInput
 ```
 
 物理鼠标输出默认禁用。只有配置显式允许、Runtime 已启动、用户完成武装、按住启用键且
@@ -21,7 +22,7 @@ Xen/                           # 仓库根目录
 ├── Xen/                       # C++ 源码根目录
 │   ├── detector/              # Detector 模块（.h + .cpp 平铺）
 │   ├── log/                   # Log 模块（.h + .cpp 平铺）
-│   ├── capture/               # DXGI + UDP MJPEG + 主机 FOV 坐标契约
+│   ├── capture/               # DXGI + UDP MJPEG + NDI + 主机 FOV 坐标契约
 │   ├── aim/                   # 观测归并、追踪、目标选择和移动控制
 │   ├── mouse/                 # 设备无关命令与 Win32 SendInput 后端
 │   ├── keyboard/              # 按住启用与急停键轮询
@@ -46,7 +47,7 @@ Xen/                           # 仓库根目录
 - Codex 浅色与深色主题可在偏好设置中切换并保存到 `config.ini`。连续数值使用“滑块粗调 + 数值框精确输入”，手填值在 Enter 或失焦时按合法范围校验。
 - `Xen/app/xen.ico` 提供 16–256 px Windows 图标，`Xen/app/xen-brand.svg` 是可编辑品牌母版；标志以 Xen 的 X 和锁定点表达“精确控制”。
 
-## 双机 UDP 坐标契约
+## 双机网络坐标契约
 
 双机模式下，主机游戏分辨率、UDP 编码尺寸、检测 ROI 和辅机显示器分辨率是四个独立空间。
 辅机显示器只渲染 Overlay，不参与瞄准换算。例如主机为 `2560x1440`，OBS 以 1:1 像素发送
@@ -61,6 +62,19 @@ Xen/                           # 仓库根目录
 当前裸 MJPEG 兼容模式没有源帧号、发送时间戳、分片序号和校验，因此不能测量严格的发送端到
 接收端帧龄，也不能把主动最新帧淘汰解释为网络丢包。真实双机上线前仍需完成有线局域网长时间
 基准；详细方案见本地文档 `docs/009_双机网络采集坐标与方案评估_20260731.md`。
+
+NDI 后端使用 NDI 6 SDK 的 mDNS 发现与 BGRX/BGRA 接收，仍复用同一主机坐标契约。自定义
+发送端可在每帧附加 Xen XML metadata；普通 OBS NDI 插件不能保证注入该 metadata，因此生产
+配置必须保留显式主机 FOV 回退。`Auto` 仅在发现唯一源时连接，多源环境应填写完整 NDI 源名称。
+
+```xml
+<xen version="1" source_width="2560" source_height="1440"
+     roi_x="1120" roi_y="560" roi_width="320" roi_height="320"/>
+```
+
+NDI SDK 可选。设置 `NDI_SDK_DIR` 或 `-DXEN_NDI_SDK_ROOT=...` 后编译真实后端，CMake 会把
+`Processing.NDI.Lib.x64.dll` 和许可证复制到可执行文件旁；未安装 SDK 时项目仍可构建，但选择
+NDI 会明确返回 `UNSUPPORTED`，不会切换 UDP、DXGI 或 CPU 路径。
 
 应用目标为 `xen_app`，Release 输出名为 `Xen.exe`。首次运行缺少 `config.ini` 时，界面会显示配置错误；填写模型路径并保存后方可启动 Runtime。
 
@@ -88,6 +102,7 @@ ctest --test-dir build -C Release --output-on-failure
   -TensorRtRoot "C:\path\to\TensorRT" `
   -CudnnRoot "C:\path\to\cudnn" `
   -CudaRoot "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2" `
+  -NdiSdkRoot "C:\Program Files\NDI\NDI 6 SDK" `
   -ModelPath "C:\path\to\model.onnx"
 ```
 
@@ -96,6 +111,17 @@ ctest --test-dir build -C Release --output-on-failure
 cuDNN 和 CUDA DLL 复制到对应的 `build/<Configuration>/`，测试程序可直接启动，
 无需手工修改系统 `PATH`。TensorRT 只复制核心、ONNX 解析器和 SDK 提供的各架构
 Builder Resource，使同一构建可在不同 NVIDIA GPU 上首次生成对应 Engine；不复制完整 SDK。
+NDI 构建同时部署 SDK 运行 DLL 与许可证文件。
+
+NDI 有 SDK/无 SDK 两条构建边界、真实 Sender/Receiver 回环、metadata 坐标、变化帧和断流可用
+正式脚本重复验证：
+
+```powershell
+.\scripts\test_ndi.ps1 `
+  -OnnxRuntimeRoot "C:\path\to\onnxruntime" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib" `
+  -NdiSdkRoot "C:\Program Files\NDI\NDI 6 SDK"
+```
 
 需要单独验证 TensorRT EP 与缓存时，应使用正式脚本重新配置、构建并检查本地运行库部署：
 

@@ -1116,7 +1116,7 @@ struct Overlay::Impl {
             ImGui::TableSetupColumn(
                 "数值", ImGuiTableColumnFlags_WidthFixed, 88.0f);
 #define XEN_COUNTER_ROW(label, value) \
-            ImGui::TableNextRow(ImGuiTableRowFlags_None, 23.0f); \
+            ImGui::TableNextRow(ImGuiTableRowFlags_None, 20.0f); \
             ImGui::TableSetColumnIndex(0); \
             ImGui::TextColored(rgba(kMutedInk), "%s", label); \
             ImGui::TableSetColumnIndex(1); \
@@ -1124,6 +1124,7 @@ struct Overlay::Impl {
             XEN_COUNTER_ROW("已采集", snapshot.captured_frames);
             XEN_COUNTER_ROW("已处理", snapshot.processed_frames);
             XEN_COUNTER_ROW("采集端淘汰", snapshot.source_dropped_frames);
+            XEN_COUNTER_ROW("NDI 传输丢帧", snapshot.transport_dropped_frames);
             XEN_COUNTER_ROW("覆盖丢帧", snapshot.overwritten_frames);
             XEN_COUNTER_ROW("失败帧", snapshot.failed_frames);
             XEN_COUNTER_ROW("鼠标命令", snapshot.mouse_commands);
@@ -1371,16 +1372,28 @@ struct Overlay::Impl {
     void render_capture_form(AppConfig& app_config) {
         const bool udp =
             app_config.capture.backend == CaptureBackend::UDP_MJPEG;
+        const bool ndi = app_config.capture.backend == CaptureBackend::NDI;
+        const bool network = udp || ndi;
+        const bool network_source_required = network &&
+            (ndi ? app_config.capture.ndi_frame_layout !=
+                       NetworkFrameLayout::FULL_FRAME_1_TO_1
+                 : app_config.capture.udp_frame_layout !=
+                       NetworkFrameLayout::FULL_FRAME_1_TO_1);
+        const bool ndi_metadata_optional_source = ndi &&
+            app_config.capture.ndi_require_frame_metadata;
+        const bool source_fields_visible =
+            network_source_required && !ndi_metadata_optional_source;
         const bool udp_source_required = udp &&
             app_config.capture.udp_frame_layout !=
                 UdpFrameLayout::FULL_FRAME_1_TO_1;
-        float panel_height = udp
+        float panel_height = network
             ? (app_config.capture.center_roi ? 304.0f : 376.0f)
             : (app_config.capture.center_roi ? 268.0f : 340.0f);
         if (udp) panel_height += udp_source_required ? 108.0f : 36.0f;
+        if (ndi) panel_height += source_fields_visible ? 220.0f : 188.0f;
         begin_config_panel("capture_panel", "画面", panel_height);
         if (begin_form("capture_form", 126.0f)) {
-            const char* backends[] = {"本机 DXGI", "UDP MJPEG"};
+            const char* backends[] = {"本机 DXGI", "UDP MJPEG", "NDI"};
             int backend = static_cast<int>(app_config.capture.backend);
             form_row("采集后端");
             if (ImGui::Combo(
@@ -1428,6 +1441,54 @@ struct Overlay::Impl {
                     ImGui::InputInt(
                         "##udp_source_height",
                         &app_config.capture.udp_source_height);
+                }
+            } else if (ndi) {
+                form_row("NDI 源名称");
+                ImGui::InputText(
+                    "##ndi_source_name", &app_config.capture.ndi_source_name);
+                form_row("发现超时 / ms");
+                ImGui::InputInt(
+                    "##ndi_discovery_timeout_ms",
+                    &app_config.capture.ndi_discovery_timeout_ms);
+                form_row("接收超时 / ms");
+                ImGui::InputInt(
+                    "##ndi_receive_timeout_ms",
+                    &app_config.capture.ndi_receive_timeout_ms);
+                form_row("断流判定 / ms");
+                ImGui::InputInt(
+                    "##ndi_disconnect_timeout_ms",
+                    &app_config.capture.ndi_disconnect_timeout_ms);
+                const char* layouts[] = {
+                    "完整画面 1:1",
+                    "完整画面已缩放",
+                    "主机中心 1:1 裁剪"};
+                int layout = static_cast<int>(
+                    app_config.capture.ndi_frame_layout);
+                form_row("网络画面语义");
+                if (ImGui::Combo(
+                        "##ndi_frame_layout", &layout, layouts,
+                        static_cast<int>(std::size(layouts)))) {
+                    app_config.capture.ndi_frame_layout =
+                        static_cast<NetworkFrameLayout>(layout);
+                    if (app_config.capture.ndi_frame_layout ==
+                        NetworkFrameLayout::FULL_FRAME_1_TO_1) {
+                        app_config.capture.ndi_source_width = 0;
+                        app_config.capture.ndi_source_height = 0;
+                    }
+                }
+                form_row("要求 Xen metadata");
+                toggle_switch(
+                    "##ndi_require_frame_metadata",
+                    &app_config.capture.ndi_require_frame_metadata);
+                if (source_fields_visible) {
+                    form_row("主机 FOV 宽度");
+                    ImGui::InputInt(
+                        "##ndi_source_width",
+                        &app_config.capture.ndi_source_width);
+                    form_row("主机 FOV 高度");
+                    ImGui::InputInt(
+                        "##ndi_source_height",
+                        &app_config.capture.ndi_source_height);
                 }
             } else {
                 form_row("适配器");

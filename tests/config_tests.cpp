@@ -28,6 +28,15 @@ void test_round_trip() {
         UdpFrameLayout::CENTER_CROP_1_TO_1;
     source.capture.udp_source_width = 2560;
     source.capture.udp_source_height = 1440;
+    source.capture.ndi_source_name = "HOST (Xen ROI)";
+    source.capture.ndi_discovery_timeout_ms = 4500;
+    source.capture.ndi_receive_timeout_ms = 40;
+    source.capture.ndi_disconnect_timeout_ms = 1800;
+    source.capture.ndi_frame_layout =
+        NetworkFrameLayout::CENTER_CROP_1_TO_1;
+    source.capture.ndi_source_width = 2560;
+    source.capture.ndi_source_height = 1440;
+    source.capture.ndi_require_frame_metadata = false;
     source.aim.person_class_ids = {0, 2};
     source.aim.head_class_ids = {1, 3};
     source.mouse.allow_send_input = true;
@@ -52,6 +61,15 @@ void test_round_trip() {
                UdpFrameLayout::CENTER_CROP_1_TO_1 &&
            loaded.capture.udp_source_width == 2560 &&
            loaded.capture.udp_source_height == 1440 &&
+           loaded.capture.ndi_source_name == source.capture.ndi_source_name &&
+           loaded.capture.ndi_discovery_timeout_ms == 4500 &&
+           loaded.capture.ndi_receive_timeout_ms == 40 &&
+           loaded.capture.ndi_disconnect_timeout_ms == 1800 &&
+           loaded.capture.ndi_frame_layout ==
+               NetworkFrameLayout::CENTER_CROP_1_TO_1 &&
+           loaded.capture.ndi_source_width == 2560 &&
+           loaded.capture.ndi_source_height == 1440 &&
+           !loaded.capture.ndi_require_frame_metadata &&
            loaded.aim.person_class_ids == source.aim.person_class_ids &&
            loaded.mouse.allow_send_input && loaded.ui.width == 1024 &&
            loaded.ui.theme == UiTheme::DARK,
@@ -89,6 +107,22 @@ void test_invalid_config() {
     config.capture.udp_source_height = 1440;
     expect(validate_app_config(config, error),
            "显式声明主机完整 FOV 后中心预裁剪配置应有效");
+
+    config.capture.backend = CaptureBackend::NDI;
+    config.capture.ndi_source_name.clear();
+    expect(!validate_app_config(config, error),
+           "NDI 源名称为空时必须拒绝配置");
+    config.capture.ndi_source_name = "Auto";
+    config.capture.ndi_frame_layout =
+        NetworkFrameLayout::CENTER_CROP_1_TO_1;
+    config.capture.ndi_source_width = 0;
+    config.capture.ndi_source_height = 0;
+    config.capture.ndi_require_frame_metadata = false;
+    expect(!validate_app_config(config, error),
+           "NDI 中心预裁剪缺少 metadata 和主机 FOV 时必须拒绝配置");
+    config.capture.ndi_require_frame_metadata = true;
+    expect(validate_app_config(config, error),
+           "强制 Xen metadata 时允许由每帧声明主机 FOV 与 ROI");
 }
 
 } // namespace
