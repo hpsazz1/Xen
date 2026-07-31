@@ -42,10 +42,10 @@ constexpr unsigned int kAccentSoft = 0xeaf4ff;
 constexpr unsigned int kSurface = 0xffffff;
 constexpr unsigned int kCanvas = 0xf4f4f5;
 constexpr unsigned int kSidebar = 0xf3f3f4;
-constexpr unsigned int kGroupSurface = 0xf8f8f9;
-constexpr unsigned int kFieldSurface = 0xfdfdfd;
-constexpr unsigned int kBorder = 0xe1e2e4;
-constexpr unsigned int kBorderStrong = 0xd4d6d8;
+constexpr unsigned int kGroupSurface = 0xfcfcfc;
+constexpr unsigned int kFieldSurface = 0xf7f7f8;
+constexpr unsigned int kBorder = 0xe6e6e7;
+constexpr unsigned int kBorderStrong = 0xd8d8da;
 constexpr unsigned int kNavSelected = 0xe5e5e7;
 constexpr unsigned int kNavHovered = 0xebebed;
 constexpr unsigned int kSuccess = 0x00a240;
@@ -58,9 +58,12 @@ constexpr unsigned int kSkill = 0x924ff7;
 constexpr unsigned int kOnAccent = 0xfefefe;
 
 constexpr float kTopBarHeight = 56.0f;
-constexpr float kSidebarWidth = 168.0f;
+constexpr float kSidebarWidth = 152.0f;
 constexpr float kPanelRounding = 8.0f;
-constexpr float kWorkspaceInset = 8.0f;
+constexpr float kWorkspaceInset = 12.0f;
+constexpr float kWindowTitleBarHeight = 36.0f;
+constexpr float kTitleButtonWidth = 44.0f;
+constexpr int kResizeBorder = 6;
 // 与 Xen/app/xen.rc 保持一致，用于标题栏和任务栏图标。
 constexpr int kAppIconResourceId = 101;
 
@@ -90,10 +93,10 @@ unsigned int themed_rgb(unsigned int rgb) noexcept {
         case kSurface: return 0x181818;
         case kCanvas: return 0x101010;
         case kSidebar: return 0x141414;
-        case kGroupSurface: return 0x202020;
+        case kGroupSurface: return 0x1f1f1f;
         case kFieldSurface: return 0x292929;
-        case kBorder: return 0x303030;
-        case kBorderStrong: return 0x424242;
+        case kBorder: return 0x2d2d2d;
+        case kBorderStrong: return 0x3a3a3a;
         case kNavSelected: return 0x2b2b2b;
         case kNavHovered: return 0x242424;
         case kSuccess: return 0x40c977;
@@ -207,11 +210,22 @@ void apply_codex_theme(UiTheme theme) {
 
 void apply_window_theme(HWND window, UiTheme theme) noexcept {
     if (!window) return;
-    // Windows 10 20H1 及以上使用属性 20 控制非客户区深色模式。
+    // 自绘标题栏负责双色分区；DWM 仅同步系统阴影和窗口边框语义。
     constexpr DWORD kUseImmersiveDarkMode = 20;
+    constexpr DWORD kBorderColor = 34;
     const BOOL enabled = theme == UiTheme::DARK ? TRUE : FALSE;
     DwmSetWindowAttribute(
         window, kUseImmersiveDarkMode, &enabled, sizeof(enabled));
+
+    const auto color_ref = [](unsigned int rgb) noexcept {
+        return RGB(
+            static_cast<BYTE>((rgb >> 16) & 0xff),
+            static_cast<BYTE>((rgb >> 8) & 0xff),
+            static_cast<BYTE>(rgb & 0xff));
+    };
+    const COLORREF border = color_ref(
+        theme == UiTheme::DARK ? 0x2d2d2d : kBorder);
+    DwmSetWindowAttribute(window, kBorderColor, &border, sizeof(border));
 }
 
 const char* page_title(WorkspacePage page) noexcept {
@@ -337,15 +351,16 @@ void pop_colored_button() {
 
 void begin_surface(const char* id, const ImVec2& size) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kGroupSurface));
-    ImGui::PushStyleColor(ImGuiCol_Border, rgba(kGroupSurface));
+    ImGui::PushStyleColor(ImGuiCol_Border, rgba(kBorder));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, kPanelRounding);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
-    ImGui::BeginChild(id, size, ImGuiChildFlags_None);
+    ImGui::BeginChild(id, size, ImGuiChildFlags_Borders);
 }
 
 void end_surface() {
     ImGui::EndChild();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(2);
 }
 
@@ -532,6 +547,42 @@ struct Overlay::Impl {
                               reinterpret_cast<LONG_PTR>(self));
         }
         switch (message) {
+            case WM_NCCALCSIZE:
+                // 保留可缩放窗口样式，但由客户区完整绘制标题栏与边框内表面。
+                if (wparam == TRUE) return 0;
+                break;
+            case WM_NCHITTEST: {
+                POINT point{
+                    static_cast<short>(LOWORD(lparam)),
+                    static_cast<short>(HIWORD(lparam))};
+                ScreenToClient(hwnd, &point);
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                const int width = client.right - client.left;
+                const int height = client.bottom - client.top;
+                if (!IsZoomed(hwnd)) {
+                    const bool left = point.x < kResizeBorder;
+                    const bool right = point.x >= width - kResizeBorder;
+                    const bool top = point.y < kResizeBorder;
+                    const bool bottom = point.y >= height - kResizeBorder;
+                    if (top && left) return HTTOPLEFT;
+                    if (top && right) return HTTOPRIGHT;
+                    if (bottom && left) return HTBOTTOMLEFT;
+                    if (bottom && right) return HTBOTTOMRIGHT;
+                    if (left) return HTLEFT;
+                    if (right) return HTRIGHT;
+                    if (top) return HTTOP;
+                    if (bottom) return HTBOTTOM;
+                }
+                const int button_region =
+                    static_cast<int>(kTitleButtonWidth * 3.0f);
+                if (point.y >= 0 &&
+                    point.y < static_cast<int>(kWindowTitleBarHeight) &&
+                    point.x < width - button_region) {
+                    return HTCAPTION;
+                }
+                return HTCLIENT;
+            }
             case WM_SIZE:
                 if (self && self->device && wparam != SIZE_MINIMIZED) {
                     self->destroy_render_target();
@@ -547,6 +598,17 @@ struct Overlay::Impl {
                 auto* minmax = reinterpret_cast<MINMAXINFO*>(lparam);
                 minmax->ptMinTrackSize.x = 820;
                 minmax->ptMinTrackSize.y = 600;
+                MONITORINFO monitor_info{sizeof(MONITORINFO)};
+                if (GetMonitorInfoW(
+                        MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+                        &monitor_info)) {
+                    const RECT& work = monitor_info.rcWork;
+                    const RECT& monitor = monitor_info.rcMonitor;
+                    minmax->ptMaxPosition.x = work.left - monitor.left;
+                    minmax->ptMaxPosition.y = work.top - monitor.top;
+                    minmax->ptMaxSize.x = work.right - work.left;
+                    minmax->ptMaxSize.y = work.bottom - work.top;
+                }
                 return 0;
             }
             case WM_SYSCOMMAND:
@@ -606,6 +668,130 @@ struct Overlay::Impl {
                snapshot.state != RuntimeState::STOPPING;
     }
 
+    void render_title_bar() {
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        const ImVec2 origin = ImGui::GetWindowPos();
+        const float width = ImGui::GetWindowWidth();
+        draw_list->AddRectFilled(
+            origin,
+            ImVec2(origin.x + kSidebarWidth,
+                   origin.y + kWindowTitleBarHeight),
+            ImGui::GetColorU32(rgba(kSidebar)));
+        draw_list->AddRectFilled(
+            ImVec2(origin.x + kSidebarWidth, origin.y),
+            ImVec2(origin.x + width,
+                   origin.y + kWindowTitleBarHeight),
+            ImGui::GetColorU32(rgba(kSurface)));
+        draw_list->AddRectFilled(
+            ImVec2(origin.x + kSidebarWidth,
+                   origin.y + kWindowTitleBarHeight),
+            ImVec2(origin.x + width,
+                   origin.y + ImGui::GetWindowHeight()),
+            ImGui::GetColorU32(rgba(kSurface)));
+        draw_list->AddLine(
+            ImVec2(origin.x + kSidebarWidth, origin.y),
+            ImVec2(origin.x + kSidebarWidth,
+                   origin.y + kWindowTitleBarHeight),
+            ImGui::GetColorU32(rgba(kBorder)));
+        draw_list->AddLine(
+            ImVec2(origin.x, origin.y + kWindowTitleBarHeight - 1.0f),
+            ImVec2(origin.x + width,
+                   origin.y + kWindowTitleBarHeight - 1.0f),
+            ImGui::GetColorU32(rgba(kBorder)));
+
+        const ImVec2 mark(origin.x + 10.0f, origin.y + 9.0f);
+        constexpr float kMarkSize = 18.0f;
+        draw_list->AddRectFilled(
+            mark, ImVec2(mark.x + kMarkSize, mark.y + kMarkSize),
+            ImGui::GetColorU32(raw_rgba(
+                g_active_theme == UiTheme::DARK ? 0x2b2b2b : 0x1a1c1f)),
+            4.0f);
+        draw_list->AddLine(
+            ImVec2(mark.x + 5.0f, mark.y + 5.0f),
+            ImVec2(mark.x + 13.0f, mark.y + 13.0f),
+            ImGui::GetColorU32(raw_rgba(kOnAccent)), 2.0f);
+        draw_list->AddLine(
+            ImVec2(mark.x + 13.0f, mark.y + 5.0f),
+            ImVec2(mark.x + 5.0f, mark.y + 13.0f),
+            ImGui::GetColorU32(raw_rgba(kOnAccent)), 2.0f);
+        draw_list->AddCircleFilled(
+            ImVec2(mark.x + 9.0f, mark.y + 9.0f), 1.8f,
+            ImGui::GetColorU32(raw_rgba(kAccent)));
+        draw_list->AddText(
+            medium_font, 14.0f,
+            ImVec2(origin.x + 36.0f, origin.y + 9.0f),
+            ImGui::GetColorU32(rgba(kInk)), "Xen");
+
+        const auto title_button = [&](const char* id,
+                                      int index,
+                                      bool danger) {
+            const float x = width -
+                kTitleButtonWidth * static_cast<float>(3 - index);
+            ImGui::SetCursorPos(ImVec2(x, 0.0f));
+            ImGui::PushID(id);
+            const bool pressed = ImGui::InvisibleButton(
+                "button",
+                ImVec2(kTitleButtonWidth, kWindowTitleBarHeight));
+            ImGui::PopID();
+            const bool hovered = ImGui::IsItemHovered();
+            const ImVec2 minimum = ImGui::GetItemRectMin();
+            const ImVec2 maximum = ImGui::GetItemRectMax();
+            if (hovered) {
+                draw_list->AddRectFilled(
+                    minimum, maximum,
+                    ImGui::GetColorU32(
+                        danger ? rgba(kDanger) : rgba(kNavHovered)));
+            }
+            const ImU32 icon_color = ImGui::GetColorU32(
+                danger && hovered ? raw_rgba(kOnAccent) : rgba(kInk));
+            const ImVec2 center(
+                (minimum.x + maximum.x) * 0.5f,
+                (minimum.y + maximum.y) * 0.5f);
+            if (index == 0) {
+                draw_list->AddLine(
+                    ImVec2(center.x - 5.0f, center.y + 3.0f),
+                    ImVec2(center.x + 5.0f, center.y + 3.0f),
+                    icon_color, 1.2f);
+            } else if (index == 1) {
+                if (IsZoomed(window)) {
+                    draw_list->AddRect(
+                        ImVec2(center.x - 3.0f, center.y - 5.0f),
+                        ImVec2(center.x + 5.0f, center.y + 3.0f),
+                        icon_color, 0.0f, 0, 1.1f);
+                    draw_list->AddRect(
+                        ImVec2(center.x - 5.0f, center.y - 3.0f),
+                        ImVec2(center.x + 3.0f, center.y + 5.0f),
+                        icon_color, 0.0f, 0, 1.1f);
+                } else {
+                    draw_list->AddRect(
+                        ImVec2(center.x - 5.0f, center.y - 5.0f),
+                        ImVec2(center.x + 5.0f, center.y + 5.0f),
+                        icon_color, 0.0f, 0, 1.1f);
+                }
+            } else {
+                draw_list->AddLine(
+                    ImVec2(center.x - 4.5f, center.y - 4.5f),
+                    ImVec2(center.x + 4.5f, center.y + 4.5f),
+                    icon_color, 1.2f);
+                draw_list->AddLine(
+                    ImVec2(center.x + 4.5f, center.y - 4.5f),
+                    ImVec2(center.x - 4.5f, center.y + 4.5f),
+                    icon_color, 1.2f);
+            }
+            return pressed;
+        };
+
+        if (title_button("minimize", 0, false)) {
+            ShowWindow(window, SW_MINIMIZE);
+        }
+        if (title_button("maximize", 1, false)) {
+            ShowWindow(window, IsZoomed(window) ? SW_RESTORE : SW_MAXIMIZE);
+        }
+        if (title_button("close", 2, true)) {
+            close_requested = true;
+        }
+    }
+
     bool nav_item(const char* label, WorkspacePage page) {
         const bool selected = active_page == page;
         const float start_x = ImGui::GetCursorPosX();
@@ -613,7 +799,7 @@ struct Overlay::Impl {
         const ImVec2 position = ImGui::GetCursorScreenPos();
         const ImVec2 size(
             std::max(80.0f, ImGui::GetContentRegionAvail().x - 8.0f),
-            38.0f);
+            42.0f);
         ImGui::PushID(static_cast<int>(page));
         const bool pressed = ImGui::InvisibleButton("nav", size);
         ImGui::PopID();
@@ -627,9 +813,13 @@ struct Overlay::Impl {
                     rgba(selected ? kNavSelected : kNavHovered)),
                 6.0f);
         }
+        constexpr float kNavFontSize = 16.0f;
+        ImGui::PushFont(medium_font);
         const ImVec2 text_size = ImGui::CalcTextSize(label);
+        ImGui::PopFont();
         ImGui::GetWindowDrawList()->AddText(
-            ImVec2(position.x + 12.0f,
+            medium_font, kNavFontSize,
+            ImVec2(position.x + (size.x - text_size.x) * 0.5f,
                    position.y + (size.y - text_size.y) * 0.5f),
             ImGui::GetColorU32(
                 rgba(selected ? kInk : kMutedInk)),
@@ -676,7 +866,7 @@ struct Overlay::Impl {
                            OverlayActions& actions) {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kSurface));
         ImGui::PushStyleVar(
-            ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 10.0f));
+            ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 10.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
         ImGui::BeginChild(
             "global_bar", ImVec2(0.0f, kTopBarHeight),
@@ -1480,7 +1670,7 @@ struct Overlay::Impl {
         const bool can_edit = editable(snapshot);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kSurface));
         ImGui::PushStyleVar(
-            ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 14.0f));
+            ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 16.0f));
         ImGui::BeginChild(
             "content", ImVec2(0.0f, 0.0f),
             ImGuiChildFlags_None);
@@ -1533,7 +1723,8 @@ bool Overlay::init(const UiConfig& config) noexcept {
         impl_->window = CreateWindowExW(
             WS_EX_APPWINDOW,
             window_class.lpszClassName, L"Xen Precision Runtime",
-            WS_OVERLAPPEDWINDOW,
+            WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX |
+                WS_MAXIMIZEBOX | WS_SYSMENU,
             CW_USEDEFAULT, CW_USEDEFAULT, config.width, config.height,
             nullptr, nullptr, instance, impl_.get());
         if (!impl_->window) return false;
@@ -1645,13 +1836,17 @@ bool Overlay::render(const RuntimeSnapshot& snapshot,
             ImGuiWindowFlags_NoScrollWithMouse;
         ImGui::Begin("XenRoot", nullptr, kWindowFlags);
 
+        impl_->render_title_bar();
+        ImGui::SetCursorPos(ImVec2(0.0f, kWindowTitleBarHeight));
         impl_->render_sidebar(snapshot);
         ImGui::SetCursorPos(ImVec2(
-            kSidebarWidth + kWorkspaceInset, kWorkspaceInset));
+            kSidebarWidth + kWorkspaceInset,
+            kWindowTitleBarHeight + kWorkspaceInset));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kSurface));
         ImGui::PushStyleColor(ImGuiCol_Border, rgba(kBorder));
         ImGui::PushStyleVar(
             ImGuiStyleVar_ChildRounding, kPanelRounding);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
         ImGui::BeginChild(
             "workspace",
             ImVec2(-kWorkspaceInset, -kWorkspaceInset),
@@ -1661,7 +1856,7 @@ bool Overlay::render(const RuntimeSnapshot& snapshot,
         impl_->render_global_bar(snapshot, actions);
         impl_->render_workspace(snapshot, config, app_message, actions);
         ImGui::EndChild();
-        ImGui::PopStyleVar();
+        ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(2);
         ImGui::End();
 
