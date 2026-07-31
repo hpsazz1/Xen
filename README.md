@@ -2,10 +2,11 @@
 
 Xen 是基于 C++20 原生实现的 Windows AI 辅助瞄准工具。核心管线为：截图采集 → YOLO 目标检测推理 → 瞄准控制。
 
-当前仓库已形成 P0 单机最小闭环：
+当前仓库已形成 P0 单机最小闭环，并完成 P1 UDP MJPEG 接收端源码与自动回环测试：
 
 ```text
-Desktop Duplication → Detector → Aim → Runtime SafetyGate → Win32 SendInput
+Desktop Duplication ──────┐
+OBS/FFmpeg UDP MJPEG ─────┴→ Detector → Aim → Runtime SafetyGate → Win32 SendInput
 ```
 
 物理鼠标输出默认禁用。只有配置显式允许、Runtime 已启动、用户完成武装、按住启用键且
@@ -20,7 +21,7 @@ Xen/                           # 仓库根目录
 ├── Xen/                       # C++ 源码根目录
 │   ├── detector/              # Detector 模块（.h + .cpp 平铺）
 │   ├── log/                   # Log 模块（.h + .cpp 平铺）
-│   ├── capture/               # DXGI Desktop Duplication + 中心 ROI
+│   ├── capture/               # DXGI + UDP MJPEG + 主机 FOV 坐标契约
 │   ├── aim/                   # 观测归并、追踪、目标选择和移动控制
 │   ├── mouse/                 # 设备无关命令与 Win32 SendInput 后端
 │   ├── keyboard/              # 按住启用与急停键轮询
@@ -37,13 +38,29 @@ Xen/                           # 仓库根目录
 ## P0 运行模型
 
 - 主线程负责 Win32/D3D11/ImGui 消息循环、只读快照渲染和意图提交。
-- Capture 线程从 Desktop Duplication 获取中心 ROI，并发布到三个可复用槽组成的最新帧队列。
+- Capture 线程从 Desktop Duplication 或 UDP MJPEG 获取 ROI，并发布到三个可复用槽组成的最新帧队列。
 - Pipeline 线程依次执行 Detector、Aim、安全门控和 Mouse，不增加独立控制线程。
 - 当前兼容链为 `GPU 纹理 → CPU BGR ROI → Detector CPU 前处理 → Provider`；GPU 互操作待实测后再实施。
 - Overlay 采用 152 px 居中标签栏和无外框独立工作区。自绘标题栏在侧栏交界处仅用底色分区：左段与侧栏同色，右段与工作区同色，并随浅色/深色主题同步切换；标题栏和顶部控制条下方均不绘制分割线。侧栏仅保留概览、检测、瞄准、输入和设置五个标签，底部以无边框两行状态区展示输出门状态和版本。工作区底色从交界处连续铺满，顶部控制条保留 18 px、页面内容保留 28 px 左侧间距，只为状态卡、配置组等内部模块保留细边框；配置页保存操作固定在页头，运行期间锁定需重建资源的配置。
 - 当前 Overlay 已经人工确认并作为后续 UI 扩展基线。新增部件必须复用现有语义色、间距、表单控件和内部模块样式，不得增加工作区外框、嵌套卡片或新的导航分组；改变整体布局或主题体系前必须重新人工复核。
 - Codex 浅色与深色主题可在偏好设置中切换并保存到 `config.ini`。连续数值使用“滑块粗调 + 数值框精确输入”，手填值在 Enter 或失焦时按合法范围校验。
 - `Xen/app/xen.ico` 提供 16–256 px Windows 图标，`Xen/app/xen-brand.svg` 是可编辑品牌母版；标志以 Xen 的 X 和锁定点表达“精确控制”。
+
+## 双机 UDP 坐标契约
+
+双机模式下，主机游戏分辨率、UDP 编码尺寸、检测 ROI 和辅机显示器分辨率是四个独立空间。
+辅机显示器只渲染 Overlay，不参与瞄准换算。例如主机为 `2560x1440`，OBS 以 1:1 像素发送
+中心 `320x320` 时，Capture 必须发布主机 ROI `(1120, 560, 320, 320)`；即使辅机显示器为
+`1920x1080`，该坐标也不改变。
+
+推荐的低带宽 OBS 配置是对 `2560x1440` 源左右各裁 `1120`、上下各裁 `560`，保持
+`320x320` 输出不再缩放；接收端选择 `CENTER_CROP_1_TO_1`，并显式配置
+`udp_source_width=2560`、`udp_source_height=1440`。若 OBS 发送缩放后的完整画面，应改选
+`FULL_FRAME_SCALED`，Capture 会把检测像素误差换算回主机 FOV 像素。
+
+当前裸 MJPEG 兼容模式没有源帧号、发送时间戳、分片序号和校验，因此不能测量严格的发送端到
+接收端帧龄，也不能把主动最新帧淘汰解释为网络丢包。真实双机上线前仍需完成有线局域网长时间
+基准；详细方案见本地文档 `docs/009_双机网络采集坐标与方案评估_20260731.md`。
 
 应用目标为 `xen_app`，Release 输出名为 `Xen.exe`。首次运行缺少 `config.ini` 时，界面会显示配置错误；填写模型路径并保存后方可启动 Runtime。
 

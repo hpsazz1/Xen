@@ -391,11 +391,13 @@ endif()
 
 add_library(capture STATIC
     Xen/capture/capture.cpp
-    Xen/capture/duplication.cpp)
+    Xen/capture/duplication.cpp
+    Xen/capture/udp.cpp)
 target_include_directories(capture PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(capture PUBLIC ${OpenCV_LIBS} log PRIVATE d3d11 dxgi)
+target_link_libraries(capture PUBLIC ${OpenCV_LIBS} log
+    PRIVATE d3d11 dxgi ws2_32)
 
 add_library(aim STATIC
     Xen/aim/aim.cpp)
@@ -491,7 +493,8 @@ if(BUILD_TESTING)
 
     add_executable(io_tests
         tests/io_tests.cpp)
-    target_link_libraries(io_tests PRIVATE capture mouse keyboard log)
+    target_link_libraries(io_tests PRIVATE
+        capture mouse keyboard log ws2_32)
     xen_deploy_runtime_dlls(io_tests OPENCV)
     add_test(NAME io_tests COMMAND io_tests)
 

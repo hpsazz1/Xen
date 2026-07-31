@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string>
 
 #include <opencv2/core.hpp>
@@ -55,6 +56,21 @@ void test_latest_frame_queue() {
            "停止队列后等待者必须立即退出");
 }
 
+void test_network_storage_released_on_reset() {
+    runtime::detail::LatestFrameQueue queue;
+    auto slot = queue.acquire_write();
+    expect(slot != nullptr, "队列应提供网络帧测试槽");
+    if (!slot) return;
+    auto storage = std::make_shared<cv::Mat>(2, 2, CV_8UC3);
+    slot->bgr_storage = storage;
+    slot->bgr = *storage;
+    slot->timing.sequence = 1;
+    queue.publish(slot);
+    queue.reset();
+    expect(!slot->bgr_storage && slot->bgr.empty(),
+           "Runtime 重置时必须归还异步 Capture 缓冲槽");
+}
+
 void test_safety_gate() {
     runtime::detail::SafetyGate gate;
     expect(!gate.can_dispatch(), "安全门默认必须关闭");
@@ -75,6 +91,7 @@ void test_safety_gate() {
 
 int main() {
     test_latest_frame_queue();
+    test_network_storage_released_on_reset();
     test_safety_gate();
     if (failures != 0) {
         std::cerr << "Runtime 核心测试失败数: " << failures << '\n';

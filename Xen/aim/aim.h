@@ -50,6 +50,12 @@ struct AimFrame {
     std::chrono::steady_clock::time_point captured_at{};
     int roi_width = 0;
     int roi_height = 0;
+    // 主机准星中心在当前检测 ROI 内的位置；允许位于 ROI 外。
+    float control_center_x = 0.0f;
+    float control_center_y = 0.0f;
+    // 一个检测 ROI 像素对应的主机完整 FOV 像素数。
+    float source_pixels_per_roi_pixel_x = 1.0f;
+    float source_pixels_per_roi_pixel_y = 1.0f;
     std::vector<Detection> detections;
 };
 

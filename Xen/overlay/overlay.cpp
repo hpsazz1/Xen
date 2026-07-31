@@ -1123,6 +1123,7 @@ struct Overlay::Impl {
             ImGui::Text("%llu", static_cast<unsigned long long>(value))
             XEN_COUNTER_ROW("已采集", snapshot.captured_frames);
             XEN_COUNTER_ROW("已处理", snapshot.processed_frames);
+            XEN_COUNTER_ROW("采集端淘汰", snapshot.source_dropped_frames);
             XEN_COUNTER_ROW("覆盖丢帧", snapshot.overwritten_frames);
             XEN_COUNTER_ROW("失败帧", snapshot.failed_frames);
             XEN_COUNTER_ROW("鼠标命令", snapshot.mouse_commands);
@@ -1212,18 +1213,18 @@ struct Overlay::Impl {
                 "状态", ImGuiTableColumnFlags_WidthStretch, 1.0f);
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            render_latency_panel(snapshot, 356.0f);
+            render_latency_panel(snapshot, 379.0f);
             ImGui::TableSetColumnIndex(1);
             render_module_panel(snapshot, 150.0f);
             ImGui::Dummy(ImVec2(0.0f, 4.0f));
-            render_activity_panel(snapshot, 198.0f);
+            render_activity_panel(snapshot, 221.0f);
             ImGui::EndTable();
         } else {
-            render_latency_panel(snapshot, 356.0f);
+            render_latency_panel(snapshot, 379.0f);
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
             render_module_panel(snapshot, 150.0f);
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
-            render_activity_panel(snapshot, 198.0f);
+            render_activity_panel(snapshot, 221.0f);
         }
     }
 
@@ -1241,7 +1242,44 @@ struct Overlay::Impl {
         end_surface();
     }
 
-    void render_detection_config(AppConfig& app_config, bool can_edit) {
+    void render_capture_geometry_panel(const RuntimeSnapshot& snapshot) {
+        begin_config_panel("capture_geometry_panel", "坐标契约", 136.0f);
+        if (ImGui::BeginTable(
+                "capture_geometry", 2,
+                ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn(
+                "项目", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+            ImGui::TableSetupColumn(
+                "数值", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+#define XEN_GEOMETRY_ROW(label, format, ...) \
+            ImGui::TableNextRow(ImGuiTableRowFlags_None, 24.0f); \
+            ImGui::TableSetColumnIndex(0); \
+            ImGui::TextColored(rgba(kMutedInk), "%s", label); \
+            ImGui::TableSetColumnIndex(1); \
+            ImGui::Text(format, __VA_ARGS__)
+            XEN_GEOMETRY_ROW(
+                "编码画面", "%d x %d",
+                snapshot.encoded_width, snapshot.encoded_height);
+            XEN_GEOMETRY_ROW(
+                "主机 FOV", "%d x %d",
+                snapshot.source_width, snapshot.source_height);
+            XEN_GEOMETRY_ROW(
+                "主机 ROI", "%.1f, %.1f / %d x %d",
+                snapshot.capture_roi_x, snapshot.capture_roi_y,
+                snapshot.capture_roi_width, snapshot.capture_roi_height);
+            XEN_GEOMETRY_ROW(
+                "主机像素比例", "%.3f x %.3f",
+                snapshot.source_pixels_per_pixel_x,
+                snapshot.source_pixels_per_pixel_y);
+#undef XEN_GEOMETRY_ROW
+            ImGui::EndTable();
+        }
+        end_config_panel();
+    }
+
+    void render_detection_config(const RuntimeSnapshot& snapshot,
+                                 AppConfig& app_config,
+                                 bool can_edit) {
         ImGui::BeginDisabled(!can_edit);
         const bool two_columns =
             ImGui::GetContentRegionAvail().x >= 650.0f;
@@ -1262,6 +1300,8 @@ struct Overlay::Impl {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_detector_tuning(app_config);
         ImGui::EndDisabled();
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        render_capture_geometry_panel(snapshot);
     }
 
     void render_detector_form(AppConfig& app_config) {
@@ -1329,16 +1369,74 @@ struct Overlay::Impl {
     }
 
     void render_capture_form(AppConfig& app_config) {
-        const float panel_height =
-            app_config.capture.center_roi ? 232.0f : 304.0f;
+        const bool udp =
+            app_config.capture.backend == CaptureBackend::UDP_MJPEG;
+        const bool udp_source_required = udp &&
+            app_config.capture.udp_frame_layout !=
+                UdpFrameLayout::FULL_FRAME_1_TO_1;
+        float panel_height = udp
+            ? (app_config.capture.center_roi ? 304.0f : 376.0f)
+            : (app_config.capture.center_roi ? 268.0f : 340.0f);
+        if (udp) panel_height += udp_source_required ? 108.0f : 36.0f;
         begin_config_panel("capture_panel", "画面", panel_height);
         if (begin_form("capture_form", 126.0f)) {
-            form_row("适配器");
-            ImGui::InputInt(
-                "##adapter_index", &app_config.capture.adapter_index);
-            form_row("显示输出");
-            ImGui::InputInt(
-                "##output_index", &app_config.capture.output_index);
+            const char* backends[] = {"本机 DXGI", "UDP MJPEG"};
+            int backend = static_cast<int>(app_config.capture.backend);
+            form_row("采集后端");
+            if (ImGui::Combo(
+                    "##capture_backend", &backend, backends,
+                    static_cast<int>(std::size(backends)))) {
+                app_config.capture.backend =
+                    static_cast<CaptureBackend>(backend);
+            }
+            if (udp) {
+                form_row("UDP 地址");
+                ImGui::InputText(
+                    "##udp_url", &app_config.capture.udp_url);
+                form_row("读取超时 / ms");
+                ImGui::InputInt(
+                    "##udp_read_timeout_ms",
+                    &app_config.capture.udp_read_timeout_ms);
+                form_row("断流判定 / ms");
+                ImGui::InputInt(
+                    "##udp_disconnect_timeout_ms",
+                    &app_config.capture.udp_disconnect_timeout_ms);
+                const char* layouts[] = {
+                    "完整画面 1:1",
+                    "完整画面已缩放",
+                    "主机中心 1:1 裁剪"};
+                int layout = static_cast<int>(
+                    app_config.capture.udp_frame_layout);
+                form_row("网络画面语义");
+                if (ImGui::Combo(
+                        "##udp_frame_layout", &layout, layouts,
+                        static_cast<int>(std::size(layouts)))) {
+                    app_config.capture.udp_frame_layout =
+                        static_cast<UdpFrameLayout>(layout);
+                    if (app_config.capture.udp_frame_layout ==
+                        UdpFrameLayout::FULL_FRAME_1_TO_1) {
+                        app_config.capture.udp_source_width = 0;
+                        app_config.capture.udp_source_height = 0;
+                    }
+                }
+                if (udp_source_required) {
+                    form_row("主机 FOV 宽度");
+                    ImGui::InputInt(
+                        "##udp_source_width",
+                        &app_config.capture.udp_source_width);
+                    form_row("主机 FOV 高度");
+                    ImGui::InputInt(
+                        "##udp_source_height",
+                        &app_config.capture.udp_source_height);
+                }
+            } else {
+                form_row("适配器");
+                ImGui::InputInt(
+                    "##adapter_index", &app_config.capture.adapter_index);
+                form_row("显示输出");
+                ImGui::InputInt(
+                    "##output_index", &app_config.capture.output_index);
+            }
             form_row("中心 ROI");
             toggle_switch(
                 "##center_roi", &app_config.capture.center_roi);
@@ -1668,7 +1766,7 @@ struct Overlay::Impl {
                 render_overview(snapshot);
                 break;
             case WorkspacePage::DETECTION:
-                render_detection_config(app_config, can_edit);
+                render_detection_config(snapshot, app_config, can_edit);
                 break;
             case WorkspacePage::AIM:
                 render_aim_config(app_config, can_edit);

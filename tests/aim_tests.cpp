@@ -37,6 +37,8 @@ AimFrame make_frame(std::uint64_t sequence,
     frame.captured_at = time;
     frame.roi_width = 320;
     frame.roi_height = 320;
+    frame.control_center_x = 160.0f;
+    frame.control_center_y = 160.0f;
     return frame;
 }
 
@@ -118,6 +120,32 @@ void test_command_limit_and_reset() {
            "reset 后不得复用旧目标或旧命令状态");
 }
 
+void test_source_pixel_scale_controls_mouse_counts() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 1000.0f;
+    Aim local_aim(config);
+    Aim network_aim(config);
+
+    const auto now = std::chrono::steady_clock::now();
+    AimFrame local_frame = make_frame(1, now);
+    local_frame.detections = {body(180.0f, 160.0f)};
+    const AimResult local_result = local_aim.process(local_frame);
+
+    AimFrame network_frame = make_frame(1, now);
+    network_frame.source_pixels_per_roi_pixel_x = 4.0f;
+    network_frame.source_pixels_per_roi_pixel_y = 4.0f;
+    network_frame.detections = {body(165.0f, 160.0f)};
+    const AimResult network_result = network_aim.process(network_frame);
+    expect(local_result.has_command && network_result.has_command &&
+               local_result.command.dx_counts == 20 &&
+               network_result.command.dx_counts == 20,
+           "本机 20 个主机像素与辅机 5 个四倍缩放像素必须生成相同 counts");
+}
+
 } // namespace
 
 int main() {
@@ -131,6 +159,7 @@ int main() {
     test_head_body_merge_and_confirmation();
     test_short_loss_keeps_track_id();
     test_command_limit_and_reset();
+    test_source_pixel_scale_controls_mouse_counts();
 
     Log::shutdown();
     if (failures != 0) {

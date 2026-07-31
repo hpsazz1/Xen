@@ -1,5 +1,7 @@
 #include "capture/capture.h"
 
+#include "capture/udp_internal.h"
+
 #include "log/log.h"
 
 #include <memory>
@@ -25,11 +27,37 @@ const char* CaptureStatusName(CaptureStatus status) noexcept {
     return "UNKNOWN";
 }
 
+const char* CaptureBackendName(CaptureBackend backend) noexcept {
+    switch (backend) {
+        case CaptureBackend::DESKTOP_DUPLICATION:
+            return "DESKTOP_DUPLICATION";
+        case CaptureBackend::UDP_MJPEG:
+            return "UDP_MJPEG";
+    }
+    return "UNKNOWN";
+}
+
+const char* UdpFrameLayoutName(UdpFrameLayout layout) noexcept {
+    switch (layout) {
+        case UdpFrameLayout::FULL_FRAME_1_TO_1:
+            return "FULL_FRAME_1_TO_1";
+        case UdpFrameLayout::FULL_FRAME_SCALED:
+            return "FULL_FRAME_SCALED";
+        case UdpFrameLayout::CENTER_CROP_1_TO_1:
+            return "CENTER_CROP_1_TO_1";
+    }
+    return "UNKNOWN";
+}
+
 std::unique_ptr<ICapture> create_capture(
         const CaptureConfig& config) noexcept {
     try {
-        if (config.backend == CaptureBackend::DESKTOP_DUPLICATION) {
-            return capture::detail::create_desktop_duplication_capture(config);
+        switch (config.backend) {
+            case CaptureBackend::DESKTOP_DUPLICATION:
+                return capture::detail::create_desktop_duplication_capture(
+                    config);
+            case CaptureBackend::UDP_MJPEG:
+                return capture::detail::create_udp_mjpeg_capture(config);
         }
     } catch (...) {
         LOG_ERROR("capture", "创建采集后端时发生未知异常");

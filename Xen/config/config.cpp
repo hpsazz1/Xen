@@ -67,6 +67,55 @@ const char* backend_name(BackendType backend) noexcept {
     return "cpu";
 }
 
+CaptureBackend parse_capture_backend(
+        const char* value, CaptureBackend fallback) {
+    if (!value) return fallback;
+    const std::string normalized = lowercase_ascii(value);
+    if (normalized == "desktop_duplication") {
+        return CaptureBackend::DESKTOP_DUPLICATION;
+    }
+    if (normalized == "udp_mjpeg") return CaptureBackend::UDP_MJPEG;
+    return fallback;
+}
+
+const char* capture_backend_name(CaptureBackend backend) noexcept {
+    switch (backend) {
+        case CaptureBackend::DESKTOP_DUPLICATION:
+            return "desktop_duplication";
+        case CaptureBackend::UDP_MJPEG:
+            return "udp_mjpeg";
+    }
+    return "desktop_duplication";
+}
+
+UdpFrameLayout parse_udp_frame_layout(
+        const char* value, UdpFrameLayout fallback) {
+    if (!value) return fallback;
+    const std::string normalized = lowercase_ascii(value);
+    if (normalized == "full_frame_1_to_1") {
+        return UdpFrameLayout::FULL_FRAME_1_TO_1;
+    }
+    if (normalized == "full_frame_scaled") {
+        return UdpFrameLayout::FULL_FRAME_SCALED;
+    }
+    if (normalized == "center_crop_1_to_1") {
+        return UdpFrameLayout::CENTER_CROP_1_TO_1;
+    }
+    return fallback;
+}
+
+const char* udp_frame_layout_name(UdpFrameLayout layout) noexcept {
+    switch (layout) {
+        case UdpFrameLayout::FULL_FRAME_1_TO_1:
+            return "full_frame_1_to_1";
+        case UdpFrameLayout::FULL_FRAME_SCALED:
+            return "full_frame_scaled";
+        case UdpFrameLayout::CENTER_CROP_1_TO_1:
+            return "center_crop_1_to_1";
+    }
+    return "full_frame_1_to_1";
+}
+
 OutputFormat parse_output_format(const char* value, OutputFormat fallback) {
     if (!value) return fallback;
     const std::string normalized = lowercase_ascii(value);
@@ -122,6 +171,7 @@ void set_error(std::string& error, const std::string& value) noexcept {
 bool validate_app_config(const AppConfig& config,
                          std::string& error) noexcept {
     try {
+        constexpr int kMaxCaptureSourceDimension = 16384;
         if (config.detector.model_path.empty()) {
             error = "Detector 模型路径不能为空";
             return false;
@@ -137,11 +187,39 @@ bool validate_app_config(const AppConfig& config,
             error = "Detector 配置非法";
             return false;
         }
-        if (config.capture.adapter_index < 0 ||
-            config.capture.output_index < 0 ||
+        if ((config.capture.backend !=
+                 CaptureBackend::DESKTOP_DUPLICATION &&
+             config.capture.backend != CaptureBackend::UDP_MJPEG) ||
             config.capture.roi_width <= 0 ||
             config.capture.roi_height <= 0 ||
-            config.capture.acquire_timeout_ms < 0) {
+            (!config.capture.center_roi &&
+             (config.capture.roi_x < 0 || config.capture.roi_y < 0)) ||
+            config.capture.acquire_timeout_ms < 0 ||
+            (config.capture.backend ==
+                 CaptureBackend::DESKTOP_DUPLICATION &&
+             (config.capture.adapter_index < 0 ||
+              config.capture.output_index < 0)) ||
+            (config.capture.backend == CaptureBackend::UDP_MJPEG &&
+             (config.capture.udp_url.empty() ||
+              config.capture.udp_read_timeout_ms <= 0 ||
+              config.capture.udp_read_timeout_ms > 1000 ||
+              config.capture.udp_disconnect_timeout_ms <
+                  config.capture.udp_read_timeout_ms ||
+              config.capture.udp_disconnect_timeout_ms > 60000 ||
+              (config.capture.udp_frame_layout ==
+                   UdpFrameLayout::FULL_FRAME_1_TO_1
+                   ? (config.capture.udp_source_width != 0 ||
+                      config.capture.udp_source_height != 0)
+                   : ((config.capture.udp_frame_layout !=
+                           UdpFrameLayout::FULL_FRAME_SCALED &&
+                       config.capture.udp_frame_layout !=
+                           UdpFrameLayout::CENTER_CROP_1_TO_1) ||
+                      config.capture.udp_source_width <= 0 ||
+                      config.capture.udp_source_height <= 0 ||
+                      config.capture.udp_source_width >
+                          kMaxCaptureSourceDimension ||
+                      config.capture.udp_source_height >
+                          kMaxCaptureSourceDimension))))) {
             error = "Capture 配置非法";
             return false;
         }
@@ -215,10 +293,30 @@ bool load_app_config(const std::string& path,
             "detector", "trt_cache_path",
             candidate.detector.trt_cache_path.c_str());
 
+        candidate.capture.backend = parse_capture_backend(
+            ini.GetValue("capture", "backend"),
+            candidate.capture.backend);
         candidate.capture.adapter_index = static_cast<int>(ini.GetLongValue(
             "capture", "adapter_index", candidate.capture.adapter_index));
         candidate.capture.output_index = static_cast<int>(ini.GetLongValue(
             "capture", "output_index", candidate.capture.output_index));
+        candidate.capture.udp_url = ini.GetValue(
+            "capture", "udp_url", candidate.capture.udp_url.c_str());
+        candidate.capture.udp_read_timeout_ms = static_cast<int>(
+            ini.GetLongValue("capture", "udp_read_timeout_ms",
+                             candidate.capture.udp_read_timeout_ms));
+        candidate.capture.udp_disconnect_timeout_ms = static_cast<int>(
+            ini.GetLongValue("capture", "udp_disconnect_timeout_ms",
+                             candidate.capture.udp_disconnect_timeout_ms));
+        candidate.capture.udp_frame_layout = parse_udp_frame_layout(
+            ini.GetValue("capture", "udp_frame_layout"),
+            candidate.capture.udp_frame_layout);
+        candidate.capture.udp_source_width = static_cast<int>(
+            ini.GetLongValue("capture", "udp_source_width",
+                             candidate.capture.udp_source_width));
+        candidate.capture.udp_source_height = static_cast<int>(
+            ini.GetLongValue("capture", "udp_source_height",
+                             candidate.capture.udp_source_height));
         candidate.capture.roi_width = static_cast<int>(ini.GetLongValue(
             "capture", "roi_width", candidate.capture.roi_width));
         candidate.capture.roi_height = static_cast<int>(ini.GetLongValue(
@@ -316,8 +414,21 @@ bool save_app_config(const std::string& path,
         ini.SetValue("detector", "trt_cache_path",
                      config.detector.trt_cache_path.c_str());
 
+        ini.SetValue("capture", "backend",
+                     capture_backend_name(config.capture.backend));
         ini.SetLongValue("capture", "adapter_index", config.capture.adapter_index);
         ini.SetLongValue("capture", "output_index", config.capture.output_index);
+        ini.SetValue("capture", "udp_url", config.capture.udp_url.c_str());
+        ini.SetLongValue("capture", "udp_read_timeout_ms",
+                         config.capture.udp_read_timeout_ms);
+        ini.SetLongValue("capture", "udp_disconnect_timeout_ms",
+                         config.capture.udp_disconnect_timeout_ms);
+        ini.SetValue("capture", "udp_frame_layout",
+                     udp_frame_layout_name(config.capture.udp_frame_layout));
+        ini.SetLongValue("capture", "udp_source_width",
+                         config.capture.udp_source_width);
+        ini.SetLongValue("capture", "udp_source_height",
+                         config.capture.udp_source_height);
         ini.SetLongValue("capture", "roi_width", config.capture.roi_width);
         ini.SetLongValue("capture", "roi_height", config.capture.roi_height);
         ini.SetBoolValue("capture", "center_roi", config.capture.center_roi);

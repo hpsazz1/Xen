@@ -20,6 +20,14 @@ void test_round_trip() {
     source.detector.backend = BackendType::TENSORRT;
     source.capture.roi_width = 416;
     source.capture.roi_height = 416;
+    source.capture.backend = CaptureBackend::UDP_MJPEG;
+    source.capture.udp_url = "udp://127.0.0.1:5500";
+    source.capture.udp_read_timeout_ms = 300;
+    source.capture.udp_disconnect_timeout_ms = 2500;
+    source.capture.udp_frame_layout =
+        UdpFrameLayout::CENTER_CROP_1_TO_1;
+    source.capture.udp_source_width = 2560;
+    source.capture.udp_source_height = 1440;
     source.aim.person_class_ids = {0, 2};
     source.aim.head_class_ids = {1, 3};
     source.mouse.allow_send_input = true;
@@ -36,6 +44,14 @@ void test_round_trip() {
            "写入后的配置应成功读取: " + error);
     expect(loaded.detector.backend == BackendType::TENSORRT &&
            loaded.capture.roi_width == 416 &&
+           loaded.capture.backend == CaptureBackend::UDP_MJPEG &&
+           loaded.capture.udp_url == source.capture.udp_url &&
+           loaded.capture.udp_read_timeout_ms == 300 &&
+           loaded.capture.udp_disconnect_timeout_ms == 2500 &&
+           loaded.capture.udp_frame_layout ==
+               UdpFrameLayout::CENTER_CROP_1_TO_1 &&
+           loaded.capture.udp_source_width == 2560 &&
+           loaded.capture.udp_source_height == 1440 &&
            loaded.aim.person_class_ids == source.aim.person_class_ids &&
            loaded.mouse.allow_send_input && loaded.ui.width == 1024 &&
            loaded.ui.theme == UiTheme::DARK,
@@ -58,6 +74,21 @@ void test_invalid_config() {
     config.ui.theme = static_cast<UiTheme>(99);
     expect(!validate_app_config(config, error),
            "未知 UI 主题必须拒绝配置");
+    config.ui.theme = UiTheme::LIGHT;
+    config.capture.backend = CaptureBackend::UDP_MJPEG;
+    config.capture.udp_read_timeout_ms = 500;
+    config.capture.udp_disconnect_timeout_ms = 100;
+    expect(!validate_app_config(config, error),
+           "UDP 断流判定短于单次读取超时时必须拒绝配置");
+    config.capture.udp_disconnect_timeout_ms = 1000;
+    config.capture.udp_frame_layout =
+        UdpFrameLayout::CENTER_CROP_1_TO_1;
+    expect(!validate_app_config(config, error),
+           "UDP 主机中心预裁剪缺少完整 FOV 尺寸时必须拒绝配置");
+    config.capture.udp_source_width = 2560;
+    config.capture.udp_source_height = 1440;
+    expect(validate_app_config(config, error),
+           "显式声明主机完整 FOV 后中心预裁剪配置应有效");
 }
 
 } // namespace

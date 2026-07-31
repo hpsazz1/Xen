@@ -154,6 +154,20 @@ struct Runtime::Impl {
                 ++current_snapshot.captured_frames;
                 current_snapshot.last_profile.capture_ms =
                     write_slot->timing.capture_ms;
+                current_snapshot.source_dropped_frames =
+                    write_slot->timing.source_dropped_frames;
+                current_snapshot.encoded_width = write_slot->encoded_width;
+                current_snapshot.encoded_height = write_slot->encoded_height;
+                current_snapshot.source_width = write_slot->source_width;
+                current_snapshot.source_height = write_slot->source_height;
+                current_snapshot.capture_roi_width = write_slot->bgr.cols;
+                current_snapshot.capture_roi_height = write_slot->bgr.rows;
+                current_snapshot.capture_roi_x = write_slot->roi_x;
+                current_snapshot.capture_roi_y = write_slot->roi_y;
+                current_snapshot.source_pixels_per_pixel_x =
+                    write_slot->source_pixels_per_pixel_x;
+                current_snapshot.source_pixels_per_pixel_y =
+                    write_slot->source_pixels_per_pixel_y;
                 if (elapsed >= 1.0) {
                     current_snapshot.capture_fps =
                         static_cast<double>(fps_frame_count) / elapsed;
@@ -238,6 +252,16 @@ struct Runtime::Impl {
                 aim_frame.captured_at = frame->timing.captured_at;
                 aim_frame.roi_width = frame->bgr.cols;
                 aim_frame.roi_height = frame->bgr.rows;
+                aim_frame.control_center_x = static_cast<float>(
+                    (frame->source_width * 0.5 - frame->roi_x) /
+                    frame->source_pixels_per_pixel_x);
+                aim_frame.control_center_y = static_cast<float>(
+                    (frame->source_height * 0.5 - frame->roi_y) /
+                    frame->source_pixels_per_pixel_y);
+                aim_frame.source_pixels_per_roi_pixel_x =
+                    static_cast<float>(frame->source_pixels_per_pixel_x);
+                aim_frame.source_pixels_per_roi_pixel_y =
+                    static_cast<float>(frame->source_pixels_per_pixel_y);
                 aim_frame.detections = std::move(detections);
                 aim_result = aim->process(aim_frame);
                 profile.aim = aim_result.profile;

@@ -193,6 +193,12 @@ public:
 
             cv::Mat bgra(roi_height_, roi_width_, CV_8UC4,
                          mapped.pData, mapped.RowPitch);
+            // write_slot 可能来自上一次 UDP Runtime；先释放其别名视图和所有权，
+            // 再恢复为 Desktop Duplication 自有的可写 Mat 缓冲。
+            if (frame.bgr_storage) {
+                frame.bgr.release();
+                frame.bgr_storage.reset();
+            }
             frame.bgr.create(roi_height_, roi_width_, CV_8UC3);
             cv::cvtColor(bgra, frame.bgr, cv::COLOR_BGRA2BGR);
 
@@ -201,10 +207,15 @@ public:
             frame.timing.captured_at = finished;
             frame.timing.capture_ms =
                 std::chrono::duration<double, std::milli>(finished - started).count();
+            frame.timing.source_dropped_frames = 0;
             frame.roi_x = roi_x_;
             frame.roi_y = roi_y_;
             frame.source_width = source_width_;
             frame.source_height = source_height_;
+            frame.encoded_width = source_width_;
+            frame.encoded_height = source_height_;
+            frame.source_pixels_per_pixel_x = 1.0;
+            frame.source_pixels_per_pixel_y = 1.0;
             status_.store(CaptureStatus::FRAME, std::memory_order_release);
             return CaptureStatus::FRAME;
         } catch (...) {

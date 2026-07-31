@@ -356,12 +356,21 @@ struct Aim::Impl {
 
     Track* select_target(const AimFrame& frame) noexcept {
         if (switch_cooldown > 0) --switch_cooldown;
-        const float center_x = static_cast<float>(frame.roi_width) * 0.5f;
-        const float center_y = static_cast<float>(frame.roi_height) * 0.5f;
-        const float diagonal = std::max(1.0f, std::hypot(center_x, center_y));
+        const float center_x = frame.control_center_x;
+        const float center_y = frame.control_center_y;
+        const float diagonal = std::max(
+            1.0f,
+            std::hypot(
+                frame.roi_width *
+                    frame.source_pixels_per_roi_pixel_x * 0.5f,
+                frame.roi_height *
+                    frame.source_pixels_per_roi_pixel_y * 0.5f));
         auto score = [&](const Track& track) {
-            float value = center_distance(
-                track.aim_x, track.aim_y, center_x, center_y) / diagonal;
+            float value = std::hypot(
+                (track.aim_x - center_x) *
+                    frame.source_pixels_per_roi_pixel_x,
+                (track.aim_y - center_y) *
+                    frame.source_pixels_per_roi_pixel_y) / diagonal;
             value += (1.0f - track.confidence) * 0.25f;
             if (track.predicted) value += 0.30f;
             if (track.id == selected_track_id) value -= 0.15f;
@@ -428,8 +437,14 @@ struct Aim::Impl {
             reset_controller();
             controller_track_id = track.id;
         }
-        const float error_x = track.aim_x - frame.roi_width * 0.5f;
-        const float error_y = track.aim_y - frame.roi_height * 0.5f;
+        const float error_x =
+            (track.aim_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float error_y =
+            (track.aim_y - frame.control_center_y) *
+            frame.source_pixels_per_roi_pixel_y;
+        // deadzone_pixels 与 counts_per_pixel 始终以主机完整 FOV 像素为单位，
+        // 不随 OBS 编码尺寸或辅机显示器分辨率变化。
         if (std::hypot(error_x, error_y) <= config.deadzone_pixels) {
             filtered_x = 0.0f;
             filtered_y = 0.0f;
@@ -499,7 +514,13 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
     AimResult result;
     if (!impl_ || !impl_->valid_config() || frame.roi_width <= 0 ||
         frame.roi_height <= 0 || frame.sequence == 0 ||
-        frame.captured_at == std::chrono::steady_clock::time_point{}) {
+        frame.captured_at == std::chrono::steady_clock::time_point{} ||
+        !std::isfinite(frame.control_center_x) ||
+        !std::isfinite(frame.control_center_y) ||
+        !std::isfinite(frame.source_pixels_per_roi_pixel_x) ||
+        !std::isfinite(frame.source_pixels_per_roi_pixel_y) ||
+        frame.source_pixels_per_roi_pixel_x <= 0.0f ||
+        frame.source_pixels_per_roi_pixel_y <= 0.0f) {
         result.status = AimStatus::INVALID_INPUT;
         return result;
     }

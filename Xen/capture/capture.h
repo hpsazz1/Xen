@@ -10,6 +10,16 @@
 
 enum class CaptureBackend {
     DESKTOP_DUPLICATION,
+    UDP_MJPEG,
+};
+
+enum class UdpFrameLayout {
+    // 解码帧与主机完整 FOV 逐像素一致。
+    FULL_FRAME_1_TO_1,
+    // 解码帧覆盖完整 FOV，但已由 OBS 等发送端缩放。
+    FULL_FRAME_SCALED,
+    // 解码帧是主机完整 FOV 的 1:1 像素中心裁剪。
+    CENTER_CROP_1_TO_1,
 };
 
 enum class CaptureStatus {
@@ -24,11 +34,23 @@ enum class CaptureStatus {
 };
 
 const char* CaptureStatusName(CaptureStatus status) noexcept;
+const char* CaptureBackendName(CaptureBackend backend) noexcept;
+const char* UdpFrameLayoutName(UdpFrameLayout layout) noexcept;
 
 struct CaptureConfig {
     CaptureBackend backend = CaptureBackend::DESKTOP_DUPLICATION;
     int adapter_index = 0;
     int output_index = 0;
+    // 接收 FFmpeg `-f mjpeg` 输出的裸 JPEG 字节流；当前仅支持 IPv4。
+    std::string udp_url = "udp://0.0.0.0:5000";
+    // recvfrom 单次阻塞上限，同时决定 close() 回收接收线程的最坏等待时间。
+    int udp_read_timeout_ms = 250;
+    int udp_disconnect_timeout_ms = 2000;
+    UdpFrameLayout udp_frame_layout = UdpFrameLayout::FULL_FRAME_1_TO_1;
+    // 主机完整游戏 FOV，不是辅机显示器或 OBS 输出分辨率。
+    // FULL_FRAME_SCALED 与 CENTER_CROP_1_TO_1 必须成对显式配置。
+    int udp_source_width = 0;
+    int udp_source_height = 0;
     int roi_width = 320;
     int roi_height = 320;
     bool center_roi = true;
@@ -41,15 +63,26 @@ struct FrameTiming {
     std::uint64_t sequence = 0;
     std::chrono::steady_clock::time_point captured_at{};
     double capture_ms = 0.0;
+    // Capture 后端内部有界队列累计丢弃的源帧数，不包含 Runtime 队列覆盖。
+    std::uint64_t source_dropped_frames = 0;
 };
 
 struct CapturedFrame {
+    // 网络等异步后端可用别名 shared_ptr 延长复用缓冲区寿命；bgr 始终是消费入口。
+    // 本成员必须声明在 bgr 之前，使析构时先释放 Mat 视图再归还后端缓冲槽。
+    std::shared_ptr<const cv::Mat> bgr_storage;
     cv::Mat bgr;
     FrameTiming timing;
-    int roi_x = 0;
-    int roi_y = 0;
+    // bgr 左上角在主机完整 FOV 中的坐标；缩放完整帧时允许为小数。
+    double roi_x = 0.0;
+    double roi_y = 0.0;
     int source_width = 0;
     int source_height = 0;
+    int encoded_width = 0;
+    int encoded_height = 0;
+    // 一个 bgr 像素对应的主机 FOV 像素数，用于控制量换算。
+    double source_pixels_per_pixel_x = 1.0;
+    double source_pixels_per_pixel_y = 1.0;
 };
 
 class ICapture {

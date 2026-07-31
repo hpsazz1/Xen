@@ -81,11 +81,21 @@ void LatestFrameQueue::reset() noexcept {
         overwritten_frames_ = 0;
         stopped_ = false;
         for (auto& slot : pool_) {
+            if (slot->bgr_storage) {
+                // 停止后的队列不再有消费者；释放 UDP 后端的别名 Mat 和槽所有权，
+                // 避免旧采集会话的大缓冲跨越下一次 Runtime 启动。
+                slot->bgr.release();
+                slot->bgr_storage.reset();
+            }
             slot->timing = {};
             slot->roi_x = 0;
             slot->roi_y = 0;
             slot->source_width = 0;
             slot->source_height = 0;
+            slot->encoded_width = 0;
+            slot->encoded_height = 0;
+            slot->source_pixels_per_pixel_x = 1.0;
+            slot->source_pixels_per_pixel_y = 1.0;
             // bgr 保留已分配内存，下一次同 shape 取帧可直接复用。
         }
     } catch (...) {
