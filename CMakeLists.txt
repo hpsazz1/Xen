@@ -487,6 +487,15 @@ else()
     target_compile_definitions(capture PUBLIC XEN_HAS_NDI=0)
 endif()
 
+add_library(sender STATIC
+    Xen/sender/sender.cpp)
+target_include_directories(sender PUBLIC
+    ${PROJECT_SOURCE_DIR}/Xen
+    ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(sender
+    PUBLIC capture log
+    PRIVATE bcrypt ws2_32)
+
 add_library(aim STATIC
     Xen/aim/aim.cpp)
 target_include_directories(aim PUBLIC
@@ -545,6 +554,14 @@ target_link_libraries(xen_app PRIVATE
     overlay runtime xen_debug config crash log)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_app OPENCV ORT NDI)
+endif()
+
+add_executable(xen_sender
+    Xen/sender/main.cpp)
+set_target_properties(xen_sender PROPERTIES OUTPUT_NAME XenSender)
+target_link_libraries(xen_sender PRIVATE sender capture crash log)
+if(WIN32)
+    xen_deploy_runtime_dlls(xen_sender OPENCV NDI)
 endif()
 
 # ─── 测试 ───────────────────────────────────────────────
@@ -611,6 +628,13 @@ if(BUILD_TESTING)
         capture mouse keyboard log ws2_32)
     xen_deploy_runtime_dlls(io_tests OPENCV NDI)
     add_test(NAME io_tests COMMAND io_tests)
+
+    add_executable(sender_tests
+        tests/sender_tests.cpp)
+    target_link_libraries(sender_tests PRIVATE
+        sender capture log ws2_32)
+    xen_deploy_runtime_dlls(sender_tests OPENCV NDI)
+    add_test(NAME sender_tests COMMAND sender_tests)
 
     # 真实模型测试默认关闭，避免仓库绑定私有模型；配置时通过
     # -DXEN_TEST_MODEL=<onnx路径> 启用加载和单帧推理冒烟测试。

@@ -336,6 +336,115 @@ bool parse_xudp_packet(
     }
 }
 
+struct XudpFramePacketizer::Impl {
+    bool prepare(
+        const XudpFrameDescriptor& requested_descriptor,
+        std::span<const std::uint8_t> payload,
+        std::size_t requested_max_datagram_bytes) noexcept {
+        prepared = false;
+        if (!valid_descriptor(requested_descriptor) || payload.empty() ||
+            payload.size() != requested_descriptor.frame_size ||
+            requested_max_datagram_bytes <= kXudpHeaderBytes ||
+            requested_max_datagram_bytes > 65507U) {
+            return false;
+        }
+
+        const std::size_t requested_max_payload =
+            requested_max_datagram_bytes - kXudpHeaderBytes;
+        const std::size_t requested_fragment_count =
+            (payload.size() + requested_max_payload - 1U) /
+            requested_max_payload;
+        if (requested_fragment_count == 0U ||
+            requested_fragment_count > kXudpMaxFragments ||
+            !hasher.compute(requested_descriptor, payload, frame_sha256)) {
+            return false;
+        }
+
+        descriptor = requested_descriptor;
+        payload_data = payload.data();
+        payload_size = payload.size();
+        max_fragment_payload = requested_max_payload;
+        fragments = static_cast<std::uint16_t>(requested_fragment_count);
+        prepared = true;
+        return true;
+    }
+
+    bool serialize(
+        std::size_t fragment_index,
+        std::span<const std::uint8_t> payload,
+        std::vector<std::uint8_t>& packet) const noexcept {
+        if (!prepared || fragment_index >= fragments ||
+            payload.data() != payload_data || payload.size() != payload_size) {
+            return false;
+        }
+        const std::size_t offset = fragment_index * max_fragment_payload;
+        const std::size_t size = std::min(
+            max_fragment_payload, payload.size() - offset);
+        XudpPacketHeader header;
+        header.frame = descriptor;
+        header.fragment_index =
+            static_cast<std::uint16_t>(fragment_index);
+        header.fragment_count = fragments;
+        header.fragment_offset = static_cast<std::uint32_t>(offset);
+        header.fragment_payload_size = static_cast<std::uint32_t>(size);
+        header.frame_sha256 = frame_sha256;
+        return serialize_xudp_packet(
+            header, payload.subspan(offset, size), packet);
+    }
+
+    void reset() noexcept {
+        prepared = false;
+        payload_data = nullptr;
+        payload_size = 0U;
+        max_fragment_payload = 0U;
+        fragments = 0U;
+        descriptor = {};
+        frame_sha256.fill(0U);
+    }
+
+    Sha256Hasher hasher;
+    XudpFrameDescriptor descriptor;
+    std::array<std::uint8_t, kXudpSha256Bytes> frame_sha256{};
+    const std::uint8_t* payload_data = nullptr;
+    std::size_t payload_size = 0U;
+    std::size_t max_fragment_payload = 0U;
+    std::uint16_t fragments = 0U;
+    bool prepared = false;
+};
+
+XudpFramePacketizer::XudpFramePacketizer() noexcept {
+    try {
+        impl_ = std::make_unique<Impl>();
+    } catch (...) {
+    }
+}
+
+XudpFramePacketizer::~XudpFramePacketizer() = default;
+
+bool XudpFramePacketizer::prepare_frame(
+        const XudpFrameDescriptor& descriptor,
+        std::span<const std::uint8_t> frame_payload,
+        std::size_t max_datagram_bytes) noexcept {
+    return impl_ && impl_->prepare(
+        descriptor, frame_payload, max_datagram_bytes);
+}
+
+std::size_t XudpFramePacketizer::fragment_count() const noexcept {
+    return impl_ ? impl_->fragments : 0U;
+}
+
+bool XudpFramePacketizer::serialize_fragment(
+        std::size_t fragment_index,
+        std::span<const std::uint8_t> frame_payload,
+        std::vector<std::uint8_t>& packet) const noexcept {
+    return impl_ && impl_->serialize(
+        fragment_index, frame_payload, packet);
+}
+
+void XudpFramePacketizer::reset() noexcept {
+    if (impl_) impl_->reset();
+}
+
 struct XudpFrameAssembler::Impl {
     struct FragmentRange {
         std::uint32_t offset = 0;

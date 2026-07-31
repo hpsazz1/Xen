@@ -2,13 +2,13 @@
 
 Xen 是基于 C++20 原生实现的 Windows AI 辅助瞄准工具。核心管线为：截图采集 → YOLO 目标检测推理 → 瞄准控制。
 
-当前仓库已形成 P0 单机最小闭环，并完成 UDP MJPEG、XUDP JPEG、NDI 接收端与
-KMBOX NET 鼠标后端的源码和自动回环测试：
+当前仓库已形成 P0 单机最小闭环，并完成 UDP MJPEG、XUDP JPEG、NDI 接收端、独立
+XUDP 生产发送端与 KMBOX NET 鼠标后端的源码和自动回环测试：
 
 ```text
 Desktop Duplication ──────┐
 OBS/FFmpeg UDP MJPEG ─────┤
-XUDP v1 自定义发送端 ──────┤
+XenSender DXGI/XUDP ────────┤
 OBS/NDI Sender ───────────┴→ Detector → Aim → Runtime SafetyGate ─┬→ Win32 SendInput
                                                                  └→ KMBOX NET UDP
 ```
@@ -37,6 +37,7 @@ Xen/                           # 仓库根目录
 │   ├── log/                   # Log 模块（.h + .cpp 平铺）
 │   ├── crash/                 # Windows 未处理异常与紧急日志尾部落盘
 │   ├── capture/               # DXGI + UDP/XUDP + NDI + 主机 FOV 坐标契约
+│   ├── sender/                # DXGI ROI 到 JPEG/XUDP 的独立主机发送工具
 │   ├── aim/                   # 观测归并、追踪、目标选择和移动控制
 │   ├── mouse/                 # 设备无关命令、Win32 与 KMBOX NET 后端
 │   ├── keyboard/              # 按住启用与急停键轮询
@@ -86,8 +87,8 @@ Xen/                           # 仓库根目录
 并分别统计帧号缺口、协议异常、Capture 淘汰和 Runtime 覆盖。主机 `2560x1440` 的中心
 `320x320` 由协议明确声明为 `(1120,560,320,320)`，辅机 `1920x1080` 从不进入换算。
 SHA-256 只提供传输完整性，不提供发送端身份认证；未同步跨机时钟时，发送时间戳也不能直接
-解释为严格端到端帧龄。当前仓库只有接收端和测试发送器，OBS 不能直接输出 XUDP，真实部署仍
-需要自定义发送端或 OBS 后处理插件。协议详见本地文档
+解释为严格端到端帧龄。主机可直接运行 `XenSender.exe`，由 Desktop Duplication 采集 ROI 并
+发送 XUDP；OBS 不能直接输出 XUDP，仍只用于裸 UDP/NDI 兼容链。协议详见本地文档
 `docs/011_XUDP版本化帧协议设计与验证_20260731.md`。
 
 NDI 后端使用 NDI 6 SDK 的 mDNS 发现与 BGRX/BGRA 接收，仍复用同一主机坐标契约。自定义
@@ -104,6 +105,21 @@ NDI SDK 可选。设置 `NDI_SDK_DIR` 或 `-DXEN_NDI_SDK_ROOT=...` 后编译真�
 NDI 会明确返回 `UNSUPPORTED`，不会切换 UDP、DXGI 或 CPU 路径。
 
 应用目标为 `xen_app`，Release 输出名为 `Xen.exe`。首次运行缺少 `config.ini` 时，界面会显示配置错误；填写模型路径并保存后方可启动 Runtime。
+
+双机 XUDP 的主机发送目标为 `xen_sender`，Release 输出名为 `XenSender.exe`。目的地址必须显式
+提供；默认采集主机中心 `320x320`、JPEG 质量 85、XUDP 数据报上限 1400 字节、发送上限及协议
+声明 240 FPS：
+
+```powershell
+.\build\Release\XenSender.exe `
+  --destination udp://192.168.1.20:5000
+```
+
+在 `2560x1440` 主机上，默认几何应记录为
+`source=2560x1440, roi=(1120,560,320x320), encoded=320x320, scale=(1,1)`。
+辅机 `1920x1080` 不传给发送器，也不进入 XUDP 几何或 Aim counts。可使用 `--adapter`、
+`--output`、`--roi-width/--roi-height`、成对的 `--roi-x/--roi-y`、`--jpeg-quality`、`--fps`、
+`--datagram-bytes` 和 `--max-frames` 调整；完整参数以 `XenSender.exe --help` 为准。
 
 日志设施也由同一个 `config.ini` 静态加载。旧配置没有 `[log]` 节时使用默认值；日志等级支持
 `trace`、`debug`、`info`、`warn`、`error` 和 `off`，未知等级会拒绝加载并在界面提示错误。

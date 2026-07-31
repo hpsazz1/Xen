@@ -300,6 +300,46 @@ capture::detail::XudpConsumeResult consume_xudp_packets(
     return result;
 }
 
+void test_xudp_packetizer_boundaries() {
+    std::vector<std::uint8_t> payload(3000);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::uint8_t>(index % 251U);
+    }
+    const auto descriptor = make_xudp_descriptor(8, payload.size(), 320, 320);
+    capture::detail::XudpFramePacketizer packetizer;
+    expect(packetizer.prepare_frame(descriptor, payload, 1400) &&
+               packetizer.fragment_count() == 3,
+           "XUDP Packetizer 必须按 1400 字节数据报上限计算三个连续分片");
+
+    std::size_t expected_offset = 0;
+    for (std::size_t index = 0; index < packetizer.fragment_count(); ++index) {
+        std::vector<std::uint8_t> packet;
+        capture::detail::XudpPacketHeader header;
+        std::span<const std::uint8_t> fragment;
+        const bool serialized = packetizer.serialize_fragment(
+            index, payload, packet);
+        expect(serialized && packet.size() <= 1400 &&
+                   capture::detail::parse_xudp_packet(
+                       packet, header, fragment) &&
+                   header.fragment_index == index &&
+                   header.fragment_count == packetizer.fragment_count() &&
+                   header.fragment_offset == expected_offset &&
+                   header.fragment_payload_size == fragment.size(),
+               "XUDP Packetizer 分片必须连续、不重叠且不超过数据报上限");
+        expected_offset += fragment.size();
+    }
+    expect(expected_offset == payload.size(),
+           "XUDP Packetizer 全部分片必须恰好覆盖完整帧");
+
+    const std::vector<std::uint8_t> relocated_payload = payload;
+    std::vector<std::uint8_t> packet;
+    expect(!packetizer.serialize_fragment(0, relocated_payload, packet),
+           "XUDP Packetizer 必须拒绝 prepare 后更换 payload 地址");
+    expect(!packetizer.prepare_frame(
+               descriptor, payload, capture::detail::kXudpHeaderBytes),
+           "XUDP Packetizer 必须拒绝无法容纳 payload 的数据报上限");
+}
+
 void test_xudp_serialization_and_reassembly() {
     const std::vector<std::uint8_t> payload{
         0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
@@ -987,6 +1027,7 @@ int main() {
     test_udp_frame_geometry();
     test_xen_metadata_geometry();
     test_invalid_udp_capture_config();
+    test_xudp_packetizer_boundaries();
     test_xudp_serialization_and_reassembly();
     test_xudp_rejects_invalid_fragments();
     test_xudp_sequence_and_geometry();

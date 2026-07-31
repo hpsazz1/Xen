@@ -78,6 +78,32 @@ bool parse_xudp_packet(
     XudpPacketHeader& header,
     std::span<const std::uint8_t>& fragment_payload) noexcept;
 
+// 生产发送端复用同一个 CNG 哈希句柄和单个数据报缓冲。prepare_frame() 只
+// 计算一次帧级 SHA-256，随后按索引顺序序列化互不重叠的连续分片。
+class XudpFramePacketizer {
+public:
+    XudpFramePacketizer() noexcept;
+    ~XudpFramePacketizer();
+
+    XudpFramePacketizer(const XudpFramePacketizer&) = delete;
+    XudpFramePacketizer& operator=(const XudpFramePacketizer&) = delete;
+
+    bool prepare_frame(
+        const XudpFrameDescriptor& descriptor,
+        std::span<const std::uint8_t> frame_payload,
+        std::size_t max_datagram_bytes) noexcept;
+    std::size_t fragment_count() const noexcept;
+    bool serialize_fragment(
+        std::size_t fragment_index,
+        std::span<const std::uint8_t> frame_payload,
+        std::vector<std::uint8_t>& packet) const noexcept;
+    void reset() noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 class XudpFrameAssembler {
 public:
     XudpFrameAssembler();
