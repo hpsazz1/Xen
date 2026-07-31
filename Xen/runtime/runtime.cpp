@@ -33,6 +33,7 @@ double percentile(std::vector<double> values, double quantile) {
 } // namespace
 
 struct Runtime::Impl {
+    static constexpr std::size_t kDebugSampleCapacity = 4096;
     mutable std::mutex lifecycle_mutex;
     mutable std::mutex snapshot_mutex;
     AppConfig config;
@@ -49,6 +50,8 @@ struct Runtime::Impl {
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> aim_reset_requested{false};
     std::deque<double> pipeline_samples;
+    runtime::detail::BoundedSampleRing<
+        RuntimePipelineSample, kDebugSampleCapacity> debug_samples;
     std::chrono::steady_clock::time_point fps_started{};
     std::uint64_t fps_frame_count = 0;
 
@@ -130,6 +133,7 @@ struct Runtime::Impl {
                 config.mouse.allow_send_input;
         }
         pipeline_samples.clear();
+        debug_samples.reset();
         fps_started = std::chrono::steady_clock::now();
         fps_frame_count = 0;
         return true;
@@ -230,6 +234,16 @@ struct Runtime::Impl {
         current_snapshot.aim_hold_active = safety_gate.hold_active();
         current_snapshot.emergency_stopped =
             safety_gate.emergency_stopped();
+
+        RuntimePipelineSample sample;
+        sample.sequence = frame.timing.sequence;
+        sample.profile = profile;
+        sample.detection_status = profile.detector.status;
+        sample.aim_status = aim_result.status;
+        sample.mouse_status = mouse_status;
+        sample.mouse_sent = mouse_sent;
+        debug_samples.push(sample);
+        current_snapshot.debug_samples_dropped = debug_samples.dropped();
 
         pipeline_samples.push_back(profile.total_ms);
         while (pipeline_samples.size() >
@@ -470,4 +484,10 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
     } catch (...) {
         return {};
     }
+}
+
+bool Runtime::drain_pipeline_samples(
+        std::vector<RuntimePipelineSample>& samples) noexcept {
+    if (!impl_) return false;
+    return impl_->debug_samples.drain(samples);
 }

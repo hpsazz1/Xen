@@ -515,6 +515,13 @@ target_link_libraries(runtime
     PUBLIC detector capture aim mouse keyboard config log
     PRIVATE Threads::Threads)
 
+add_library(xen_debug STATIC
+    Xen/debug/debug.cpp)
+target_include_directories(xen_debug PUBLIC
+    ${PROJECT_SOURCE_DIR}/Xen
+    ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(xen_debug PUBLIC log aim mouse)
+
 add_library(overlay STATIC
     Xen/overlay/overlay.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -526,7 +533,7 @@ add_executable(xen_app WIN32
     Xen/app/main.cpp
     Xen/app/xen.rc)
 set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
-target_link_libraries(xen_app PRIVATE overlay runtime config log)
+target_link_libraries(xen_app PRIVATE overlay runtime xen_debug config log)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_app OPENCV ORT NDI)
 endif()
@@ -572,6 +579,11 @@ if(BUILD_TESTING)
     target_link_libraries(runtime_tests PRIVATE ${OpenCV_LIBS} Threads::Threads)
     xen_deploy_runtime_dlls(runtime_tests OPENCV)
     add_test(NAME runtime_tests COMMAND runtime_tests)
+
+    add_executable(debug_tests
+        tests/debug_tests.cpp)
+    target_link_libraries(debug_tests PRIVATE xen_debug log)
+    add_test(NAME debug_tests COMMAND debug_tests)
 
     add_executable(config_tests
         tests/config_tests.cpp)

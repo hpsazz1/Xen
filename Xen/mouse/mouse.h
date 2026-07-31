@@ -9,6 +9,8 @@ enum class MouseBackend {
     KMBOX_NET,
 };
 
+const char* MouseBackendName(MouseBackend backend) noexcept;
+
 enum class MouseStatus {
     CLOSED,
     READY,

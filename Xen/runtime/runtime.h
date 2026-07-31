@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "aim/aim.h"
 #include "capture/capture.h"
@@ -45,6 +46,17 @@ struct PipelineProfile {
     double total_ms = 0.0;
 };
 
+// Runtime 每处理一帧发布一个固定大小的诊断样本。该样本只包含数值和枚举，
+// 不持有图像、模型或设备资源，便于在主线程锁外写入报告。
+struct RuntimePipelineSample {
+    std::uint64_t sequence = 0;
+    PipelineProfile profile;
+    DetectionStatus detection_status = DetectionStatus::NOT_RUN;
+    AimStatus aim_status = AimStatus::NOT_RUN;
+    MouseStatus mouse_status = MouseStatus::CLOSED;
+    bool mouse_sent = false;
+};
+
 struct RuntimeSnapshot {
     RuntimeState state = RuntimeState::STOPPED;
     CaptureStatus capture_status = CaptureStatus::CLOSED;
@@ -69,6 +81,7 @@ struct RuntimeSnapshot {
     bool source_timestamp_valid = false;
     std::uint64_t overwritten_frames = 0;
     std::uint64_t mouse_commands = 0;
+    std::uint64_t debug_samples_dropped = 0;
     std::uint64_t last_sequence = 0;
     int encoded_width = 0;
     int encoded_height = 0;
@@ -104,6 +117,9 @@ public:
     bool post_intent(const RuntimeIntent& intent) noexcept;
     void poll_keyboard() noexcept;
     RuntimeSnapshot snapshot() const noexcept;
+    // 取出自上次调用以来的诊断样本；失败时不影响 Runtime 主链。
+    bool drain_pipeline_samples(
+        std::vector<RuntimePipelineSample>& samples) noexcept;
 
 private:
     struct Impl;

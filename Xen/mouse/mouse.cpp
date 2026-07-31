@@ -111,6 +111,14 @@ const char* MouseStatusName(MouseStatus status) noexcept {
     return "UNKNOWN";
 }
 
+const char* MouseBackendName(MouseBackend backend) noexcept {
+    switch (backend) {
+        case MouseBackend::WIN32_SEND_INPUT: return "win32_send_input";
+        case MouseBackend::KMBOX_NET: return "kmbox_net";
+    }
+    return "unknown";
+}
+
 std::unique_ptr<IMouseController> MouseDeviceFactory::create(
         const MouseConfig& config) noexcept {
     try {

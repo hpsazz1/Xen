@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <opencv2/core.hpp>
 
@@ -87,12 +88,29 @@ void test_safety_gate() {
     expect(!gate.can_dispatch(), "复位急停不能自动重新武装");
 }
 
+void test_bounded_sample_ring() {
+    runtime::detail::BoundedSampleRing<int, 3> ring;
+    expect(ring.push(1) && ring.push(2) && ring.push(3) && ring.push(4),
+           "固定容量诊断环应接受样本并覆盖最旧项");
+    expect(ring.dropped() == 1,
+           "诊断环满载时必须累计覆盖丢弃数");
+    std::vector<int> output;
+    expect(ring.drain(output) && output == std::vector<int>({2, 3, 4}),
+           "诊断环必须按时间顺序取出保留样本");
+    expect(ring.drain(output) && output.empty(),
+           "诊断环取出后必须为空而不重复交付");
+    ring.reset();
+    expect(ring.dropped() == 0 && ring.push(9),
+           "诊断环 reset 必须清零统计并允许复用");
+}
+
 } // namespace
 
 int main() {
     test_latest_frame_queue();
     test_network_storage_released_on_reset();
     test_safety_gate();
+    test_bounded_sample_ring();
     if (failures != 0) {
         std::cerr << "Runtime 核心测试失败数: " << failures << '\n';
         return 1;
