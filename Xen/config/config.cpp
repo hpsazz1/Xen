@@ -94,6 +94,25 @@ const char* capture_backend_name(CaptureBackend backend) noexcept {
     return "desktop_duplication";
 }
 
+MouseBackend parse_mouse_backend(
+        const char* value, MouseBackend fallback) {
+    if (!value) return fallback;
+    const std::string normalized = lowercase_ascii(value);
+    if (normalized == "win32_send_input") {
+        return MouseBackend::WIN32_SEND_INPUT;
+    }
+    if (normalized == "kmbox_net") return MouseBackend::KMBOX_NET;
+    return fallback;
+}
+
+const char* mouse_backend_name(MouseBackend backend) noexcept {
+    switch (backend) {
+        case MouseBackend::WIN32_SEND_INPUT: return "win32_send_input";
+        case MouseBackend::KMBOX_NET: return "kmbox_net";
+    }
+    return "win32_send_input";
+}
+
 NetworkFrameLayout parse_network_frame_layout(
         const char* value, NetworkFrameLayout fallback) {
     if (!value) return fallback;
@@ -163,6 +182,39 @@ const char* ui_theme_name(UiTheme theme) noexcept {
 
 bool finite_unit(float value) noexcept {
     return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
+}
+
+bool valid_kmbox_uuid(const std::string& value) noexcept {
+    if (value.size() != 8) return false;
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isxdigit(ch) != 0;
+    });
+}
+
+bool valid_ipv4_address(const std::string& value) noexcept {
+    if (value.empty() || value.front() == '.' || value.back() == '.') {
+        return false;
+    }
+    int part_count = 0;
+    std::size_t begin = 0;
+    while (begin < value.size()) {
+        const std::size_t end = value.find('.', begin);
+        const std::size_t length =
+            (end == std::string::npos ? value.size() : end) - begin;
+        if (length == 0 || length > 3) return false;
+        int part = 0;
+        for (std::size_t index = begin; index < begin + length; ++index) {
+            const unsigned char ch =
+                static_cast<unsigned char>(value[index]);
+            if (!std::isdigit(ch)) return false;
+            part = part * 10 + static_cast<int>(ch - '0');
+        }
+        if (part > 255) return false;
+        ++part_count;
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return part_count == 4;
 }
 
 void set_error(std::string& error, const std::string& value) noexcept {
@@ -267,6 +319,23 @@ bool validate_app_config(const AppConfig& config,
             config.aim.max_lost_frames < 0 ||
             config.aim.max_counts_per_frame <= 0.0f) {
             error = "Aim 配置非法";
+            return false;
+        }
+        const bool mouse_backend_invalid =
+            config.mouse.backend != MouseBackend::WIN32_SEND_INPUT &&
+            config.mouse.backend != MouseBackend::KMBOX_NET;
+        const bool kmbox_invalid =
+            config.mouse.backend == MouseBackend::KMBOX_NET &&
+            (!valid_ipv4_address(config.mouse.kmbox_ip) ||
+             config.mouse.kmbox_port <= 0 ||
+             config.mouse.kmbox_port > 65535 ||
+             !valid_kmbox_uuid(config.mouse.kmbox_uuid) ||
+             config.mouse.kmbox_connect_timeout_ms <= 0 ||
+             config.mouse.kmbox_connect_timeout_ms > 10000 ||
+             config.mouse.kmbox_command_timeout_ms <= 0 ||
+             config.mouse.kmbox_command_timeout_ms > 1000);
+        if (mouse_backend_invalid || kmbox_invalid) {
+            error = "Mouse 配置非法";
             return false;
         }
         if (config.keyboard.aim_hold_virtual_key <= 0 ||
@@ -423,9 +492,25 @@ bool load_app_config(const std::string& path,
 #undef XEN_READ_AIM_FLOAT
 #undef XEN_READ_AIM_INT
 
+        candidate.mouse.backend = parse_mouse_backend(
+            ini.GetValue("mouse", "backend"), candidate.mouse.backend);
         candidate.mouse.allow_send_input = ini.GetBoolValue(
             "mouse", "allow_send_input",
             candidate.mouse.allow_send_input);
+        candidate.mouse.kmbox_ip = ini.GetValue(
+            "mouse", "kmbox_ip", candidate.mouse.kmbox_ip.c_str());
+        candidate.mouse.kmbox_port = static_cast<int>(ini.GetLongValue(
+            "mouse", "kmbox_port", candidate.mouse.kmbox_port));
+        candidate.mouse.kmbox_uuid = ini.GetValue(
+            "mouse", "kmbox_uuid", candidate.mouse.kmbox_uuid.c_str());
+        candidate.mouse.kmbox_connect_timeout_ms = static_cast<int>(
+            ini.GetLongValue(
+                "mouse", "kmbox_connect_timeout_ms",
+                candidate.mouse.kmbox_connect_timeout_ms));
+        candidate.mouse.kmbox_command_timeout_ms = static_cast<int>(
+            ini.GetLongValue(
+                "mouse", "kmbox_command_timeout_ms",
+                candidate.mouse.kmbox_command_timeout_ms));
         candidate.keyboard.aim_hold_virtual_key = static_cast<int>(
             ini.GetLongValue("keyboard", "aim_hold_virtual_key",
                              candidate.keyboard.aim_hold_virtual_key));
@@ -541,8 +626,18 @@ bool save_app_config(const std::string& path,
 #undef XEN_WRITE_AIM_FLOAT
 #undef XEN_WRITE_AIM_INT
 
+        ini.SetValue("mouse", "backend",
+                     mouse_backend_name(config.mouse.backend));
         ini.SetBoolValue("mouse", "allow_send_input",
                          config.mouse.allow_send_input);
+        ini.SetValue("mouse", "kmbox_ip", config.mouse.kmbox_ip.c_str());
+        ini.SetLongValue("mouse", "kmbox_port", config.mouse.kmbox_port);
+        ini.SetValue("mouse", "kmbox_uuid",
+                     config.mouse.kmbox_uuid.c_str());
+        ini.SetLongValue("mouse", "kmbox_connect_timeout_ms",
+                         config.mouse.kmbox_connect_timeout_ms);
+        ini.SetLongValue("mouse", "kmbox_command_timeout_ms",
+                         config.mouse.kmbox_command_timeout_ms);
         ini.SetLongValue("keyboard", "aim_hold_virtual_key",
                          config.keyboard.aim_hold_virtual_key);
         ini.SetLongValue("keyboard", "emergency_virtual_key",

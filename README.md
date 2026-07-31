@@ -2,17 +2,29 @@
 
 Xen 是基于 C++20 原生实现的 Windows AI 辅助瞄准工具。核心管线为：截图采集 → YOLO 目标检测推理 → 瞄准控制。
 
-当前仓库已形成 P0 单机最小闭环，并完成 UDP MJPEG、XUDP JPEG 与 NDI 接收端源码和自动回环测试：
+当前仓库已形成 P0 单机最小闭环，并完成 UDP MJPEG、XUDP JPEG、NDI 接收端与
+KMBOX NET 鼠标后端的源码和自动回环测试：
 
 ```text
 Desktop Duplication ──────┐
 OBS/FFmpeg UDP MJPEG ─────┤
 XUDP v1 自定义发送端 ──────┤
-OBS/NDI Sender ───────────┴→ Detector → Aim → Runtime SafetyGate → Win32 SendInput
+OBS/NDI Sender ───────────┴→ Detector → Aim → Runtime SafetyGate ─┬→ Win32 SendInput
+                                                                 └→ KMBOX NET UDP
 ```
 
 物理鼠标输出默认禁用。只有配置显式允许、Runtime 已启动、用户完成武装、按住启用键且
 急停未触发时，Pipeline 才会调用 Mouse。Capture、Detector 或 Aim 失败均不会沿用旧结果。
+
+KMBOX NET 只实现 Runtime 当前需要的相对移动，不包含旧项目的 monitor、按键屏蔽、LCD 或
+自动轨迹接口。配置需填写设备 IPv4、端口和屏幕显示的 8 位十六进制 UUID；仓库不提供设备
+凭据默认值。后端使用 16 字节 connect 和 72 字节 move 小端序数据报，并严格校验 ACK 的来源
+地址、命令码和连续序号。任一发送、超时或 ACK 校验失败都会返回 Mouse 失败，Runtime 随即
+急停。未开启物理输出时不会初始化 Winsock 或访问设备。
+
+KMBOX 的 `dx_counts/dy_counts` 是 Aim 在主机 FOV 坐标下计算出的相对鼠标 counts，不是辅机
+桌面坐标。主机 `2560x1440`、辅机 `1920x1080` 时仍以主机准星和 ROI 计算；辅机分辨率仅影响
+Overlay 显示，不得对 KMBOX 命令再做一次 `1920/2560` 或 `1080/1440` 缩放。
 
 ## 目录结构
 
@@ -25,7 +37,7 @@ Xen/                           # 仓库根目录
 │   ├── log/                   # Log 模块（.h + .cpp 平铺）
 │   ├── capture/               # DXGI + UDP/XUDP + NDI + 主机 FOV 坐标契约
 │   ├── aim/                   # 观测归并、追踪、目标选择和移动控制
-│   ├── mouse/                 # 设备无关命令与 Win32 SendInput 后端
+│   ├── mouse/                 # 设备无关命令、Win32 与 KMBOX NET 后端
 │   ├── keyboard/              # 按住启用与急停键轮询
 │   ├── config/                # SimpleIni 静态配置与校验
 │   ├── runtime/               # 生命周期、三槽最新帧队列和安全门控

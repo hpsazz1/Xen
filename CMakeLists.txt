@@ -488,9 +488,10 @@ target_include_directories(aim PUBLIC
 target_link_libraries(aim PUBLIC log)
 
 add_library(mouse STATIC
-    Xen/mouse/mouse.cpp)
+    Xen/mouse/mouse.cpp
+    Xen/mouse/kmbox_net.cpp)
 target_include_directories(mouse PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
-target_link_libraries(mouse PUBLIC log PRIVATE user32)
+target_link_libraries(mouse PUBLIC log PRIVATE user32 ws2_32)
 
 add_library(keyboard STATIC
     Xen/keyboard/keyboard.cpp)
@@ -556,6 +557,11 @@ if(BUILD_TESTING)
         tests/aim_tests.cpp)
     target_link_libraries(aim_tests PRIVATE aim log)
     add_test(NAME aim_tests COMMAND aim_tests)
+
+    add_executable(mouse_tests
+        tests/mouse_tests.cpp)
+    target_link_libraries(mouse_tests PRIVATE mouse log ws2_32)
+    add_test(NAME mouse_tests COMMAND mouse_tests)
 
     add_executable(runtime_tests
         tests/runtime_tests.cpp

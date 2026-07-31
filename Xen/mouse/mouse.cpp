@@ -3,6 +3,8 @@
 
 #include "mouse/mouse.h"
 
+#include "mouse/kmbox_net_internal.h"
+
 #include "log/log.h"
 
 #include <Windows.h>
@@ -99,8 +101,12 @@ const char* MouseStatusName(MouseStatus status) noexcept {
         case MouseStatus::CLOSED: return "CLOSED";
         case MouseStatus::READY: return "READY";
         case MouseStatus::DISABLED: return "DISABLED";
+        case MouseStatus::INVALID_CONFIG: return "INVALID_CONFIG";
         case MouseStatus::INVALID_COMMAND: return "INVALID_COMMAND";
+        case MouseStatus::CONNECTION_FAILED: return "CONNECTION_FAILED";
         case MouseStatus::SEND_FAILED: return "SEND_FAILED";
+        case MouseStatus::RESPONSE_TIMEOUT: return "RESPONSE_TIMEOUT";
+        case MouseStatus::INVALID_RESPONSE: return "INVALID_RESPONSE";
     }
     return "UNKNOWN";
 }
@@ -110,6 +116,9 @@ std::unique_ptr<IMouseController> MouseDeviceFactory::create(
     try {
         if (config.backend == MouseBackend::WIN32_SEND_INPUT) {
             return std::make_unique<Win32MouseController>(config);
+        }
+        if (config.backend == MouseBackend::KMBOX_NET) {
+            return mouse::detail::create_kmbox_net_controller(config);
         }
     } catch (...) {
         LOG_ERROR("mouse", "创建鼠标后端时发生未知异常");

@@ -1730,10 +1730,40 @@ struct Overlay::Impl {
     }
 
     void render_mouse_form(AppConfig& app_config) {
-        begin_config_panel("mouse_panel", "鼠标输出", 88.0f);
+        const bool kmbox =
+            app_config.mouse.backend == MouseBackend::KMBOX_NET;
+        begin_config_panel(
+            "mouse_panel", "鼠标输出", kmbox ? 268.0f : 88.0f);
         if (begin_form("mouse_form", 126.0f)) {
+            const char* backends[] = {"Win32 SendInput", "KMBOX NET"};
+            int backend = static_cast<int>(app_config.mouse.backend);
             form_row("后端");
-            ImGui::TextColored(rgba(kMutedInk), "Win32 SendInput");
+            if (ImGui::Combo(
+                    "##mouse_backend", &backend, backends,
+                    static_cast<int>(std::size(backends)))) {
+                app_config.mouse.backend =
+                    static_cast<MouseBackend>(backend);
+            }
+            if (kmbox) {
+                form_row("设备 IPv4");
+                ImGui::InputText(
+                    "##kmbox_ip", &app_config.mouse.kmbox_ip);
+                form_row("设备端口");
+                ImGui::InputInt(
+                    "##kmbox_port", &app_config.mouse.kmbox_port);
+                form_row("设备 UUID");
+                ImGui::InputText(
+                    "##kmbox_uuid", &app_config.mouse.kmbox_uuid,
+                    ImGuiInputTextFlags_CharsHexadecimal);
+                form_row("连接超时 / ms");
+                ImGui::InputInt(
+                    "##kmbox_connect_timeout_ms",
+                    &app_config.mouse.kmbox_connect_timeout_ms);
+                form_row("命令超时 / ms");
+                ImGui::InputInt(
+                    "##kmbox_command_timeout_ms",
+                    &app_config.mouse.kmbox_command_timeout_ms);
+            }
             form_row("物理输出");
             toggle_switch(
                 "##allow_send_input",

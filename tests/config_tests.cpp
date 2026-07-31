@@ -39,7 +39,13 @@ void test_round_trip() {
     source.capture.ndi_require_frame_metadata = false;
     source.aim.person_class_ids = {0, 2};
     source.aim.head_class_ids = {1, 3};
+    source.mouse.backend = MouseBackend::KMBOX_NET;
     source.mouse.allow_send_input = true;
+    source.mouse.kmbox_ip = "127.0.0.1";
+    source.mouse.kmbox_port = 6234;
+    source.mouse.kmbox_uuid = "A1b2C3d4";
+    source.mouse.kmbox_connect_timeout_ms = 900;
+    source.mouse.kmbox_command_timeout_ms = 250;
     source.ui.width = 1024;
     source.ui.theme = UiTheme::DARK;
 
@@ -71,7 +77,14 @@ void test_round_trip() {
            loaded.capture.ndi_source_height == 1440 &&
            !loaded.capture.ndi_require_frame_metadata &&
            loaded.aim.person_class_ids == source.aim.person_class_ids &&
-           loaded.mouse.allow_send_input && loaded.ui.width == 1024 &&
+           loaded.mouse.backend == MouseBackend::KMBOX_NET &&
+           loaded.mouse.allow_send_input &&
+           loaded.mouse.kmbox_ip == "127.0.0.1" &&
+           loaded.mouse.kmbox_port == 6234 &&
+           loaded.mouse.kmbox_uuid == "A1b2C3d4" &&
+           loaded.mouse.kmbox_connect_timeout_ms == 900 &&
+           loaded.mouse.kmbox_command_timeout_ms == 250 &&
+           loaded.ui.width == 1024 &&
            loaded.ui.theme == UiTheme::DARK,
            "配置往返后关键字段必须保持一致");
     std::error_code ignored;
@@ -135,6 +148,30 @@ void test_invalid_config() {
     config.capture.udp_source_height = 0;
     expect(validate_app_config(config, error),
            "XUDP 必须忽略裸 UDP 布局并由协议头提供主机几何");
+
+    config.capture.backend = CaptureBackend::DESKTOP_DUPLICATION;
+    config.mouse.backend = MouseBackend::KMBOX_NET;
+    expect(!validate_app_config(config, error),
+           "KMBOX NET 缺少地址、端口和 UUID 时必须拒绝配置");
+    config.mouse.kmbox_ip = "127.0.0.1";
+    config.mouse.kmbox_port = 6234;
+    config.mouse.kmbox_uuid = "1234567Z";
+    expect(!validate_app_config(config, error),
+           "KMBOX NET UUID 不是 8 位十六进制时必须拒绝配置");
+    config.mouse.kmbox_uuid = "12345678";
+    config.mouse.kmbox_ip = "127.0.0.256";
+    expect(!validate_app_config(config, error),
+           "KMBOX NET IPv4 段超出范围时必须拒绝配置");
+    config.mouse.kmbox_ip = "127.0.0.1.";
+    expect(!validate_app_config(config, error),
+           "KMBOX NET IPv4 尾随分隔符必须拒绝配置");
+    config.mouse.kmbox_ip = "127.0.0.1";
+    config.mouse.kmbox_command_timeout_ms = 1001;
+    expect(!validate_app_config(config, error),
+           "KMBOX NET 命令超时超过 Pipeline 上限时必须拒绝配置");
+    config.mouse.kmbox_command_timeout_ms = 300;
+    expect(validate_app_config(config, error),
+           "完整 KMBOX NET 配置应通过校验");
 }
 
 void test_xudp_backend_round_trip() {
