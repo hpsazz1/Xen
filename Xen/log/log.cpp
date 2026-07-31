@@ -36,6 +36,8 @@ constexpr std::size_t kBytesPerMiB = 1024U * 1024U;
 // spdlog 会预构造 capacity + 1 个 log_msg_buffer，每项自带 250 字节内联缓冲；
 // 百万级容量仅内联区就超过 238 MiB，因此把显式配置的基线预分配限制在数十 MiB。
 constexpr int kMaxRingBufferCapacity = 65'536;
+constexpr std::size_t kMaxModuleLevelOverrides = 64;
+constexpr std::size_t kMaxModuleNameLength = 64;
 constexpr std::uint64_t kAccessPausedBit = std::uint64_t{1} << 63U;
 constexpr std::uint64_t kAccessCountMask = ~kAccessPausedBit;
 
@@ -116,6 +118,14 @@ bool valid_level(LogLevel level) noexcept {
     return level >= LogLevel::TRACE && level <= LogLevel::OFF;
 }
 
+bool valid_configured_module_name(std::string_view name) noexcept {
+    if (name.empty() || name.size() > kMaxModuleNameLength) return false;
+    return std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+        return (ch >= 'a' && ch <= 'z') ||
+               (ch >= '0' && ch <= '9') || ch == '_' || ch == '-';
+    });
+}
+
 spdlog::level::level_enum to_spdlog_level(LogLevel level) noexcept {
     switch (level) {
         case LogLevel::TRACE: return spdlog::level::trace;
@@ -130,6 +140,12 @@ spdlog::level::level_enum to_spdlog_level(LogLevel level) noexcept {
 
 bool valid_config(const LogConfig& config) noexcept {
     if (!valid_level(config.global_level)) return false;
+    if (config.module_levels.size() > kMaxModuleLevelOverrides) return false;
+    for (const auto& [module, level] : config.module_levels) {
+        if (!valid_configured_module_name(module) || !valid_level(level)) {
+            return false;
+        }
+    }
 
     if (config.enable_ringbuf &&
         (config.ringbuf_capacity <= 0 ||
@@ -186,6 +202,11 @@ struct Log::Impl {
     };
 
     explicit Impl(const LogConfig& requested_config) {
+        configured_module_levels.reserve(
+            requested_config.module_levels.size());
+        for (const auto& [module, level] : requested_config.module_levels) {
+            configured_module_levels.emplace(module, level);
+        }
         init_sinks(requested_config);
         global_level.store(requested_config.global_level,
                            std::memory_order_relaxed);
@@ -280,9 +301,15 @@ struct Log::Impl {
 
         // 查找、创建和插入位于同一个独占临界区，同名并发注册只会创建一次。
         std::unique_lock<std::shared_mutex> lock(modules_mutex);
+        const auto configured = configured_module_levels.find(name);
+        const LogLevel effective_level =
+            configured == configured_module_levels.end()
+                ? level
+                : configured->second;
         const auto existing = modules.find(name);
         if (existing != modules.end()) {
-            existing->second->level.store(level, std::memory_order_release);
+            existing->second->level.store(
+                effective_level, std::memory_order_release);
             return true;
         }
 
@@ -306,7 +333,7 @@ struct Log::Impl {
         modules.emplace(
             owned_name,
             std::make_shared<ModuleState>(
-                owned_name, level, std::move(normal_logger),
+                owned_name, effective_level, std::move(normal_logger),
                 std::move(priority_logger)));
         return true;
     }
@@ -404,6 +431,9 @@ struct Log::Impl {
     std::unordered_map<
         std::string, std::shared_ptr<ModuleState>,
         TransparentStringHash, std::equal_to<>> modules;
+    std::unordered_map<
+        std::string, LogLevel,
+        TransparentStringHash, std::equal_to<>> configured_module_levels;
     // sink 集合初始化后不再变化，用最低接收等级在格式化前排除必然被全部 sink 丢弃的日志。
     LogLevel minimum_sink_level = LogLevel::OFF;
     // Ring 同步写入，不属于异步 sink；低于此等级的消息禁止无效入队。

@@ -11,9 +11,13 @@
 #include <cmath>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
+
+constexpr std::size_t kMaxLogModuleOverrides = 64;
+constexpr std::size_t kMaxLogModuleNameLength = 64;
 
 std::string lowercase_ascii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
@@ -190,6 +194,14 @@ const char* log_level_name(LogLevel level) noexcept {
     return "off";
 }
 
+bool valid_log_module_name(const std::string& name) noexcept {
+    if (name.empty() || name.size() > kMaxLogModuleNameLength) return false;
+    return std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+        return (ch >= 'a' && ch <= 'z') ||
+               (ch >= '0' && ch <= '9') || ch == '_' || ch == '-';
+    });
+}
+
 const char* output_format_name(OutputFormat format) noexcept {
     switch (format) {
         case OutputFormat::AUTO: return "auto";
@@ -290,6 +302,20 @@ bool validate_app_config(const AppConfig& config,
         if (log_invalid) {
             error = "Log 配置非法";
             return false;
+        }
+        if (config.log.module_levels.size() > kMaxLogModuleOverrides) {
+            error = "Log 模块等级数量超过上限";
+            return false;
+        }
+        for (const auto& [module, level] : config.log.module_levels) {
+            if (!valid_log_module_name(module) ||
+                static_cast<int>(level) <
+                    static_cast<int>(LogLevel::TRACE) ||
+                static_cast<int>(level) >
+                    static_cast<int>(LogLevel::OFF)) {
+                error = "Log 模块等级配置非法";
+                return false;
+            }
         }
         if (config.detector.device_id < 0 ||
             config.detector.input_width < 0 ||
@@ -449,6 +475,25 @@ bool load_app_config(const std::string& path,
             "log", "file_max_size_mb", candidate.log.file_max_size_mb));
         candidate.log.file_max_count = static_cast<int>(ini.GetLongValue(
             "log", "file_max_count", candidate.log.file_max_count));
+        CSimpleIniA::TNamesDepend log_module_keys;
+        if (ini.GetAllKeys("log_modules", log_module_keys)) {
+            candidate.log.module_levels.clear();
+            for (const auto& key : log_module_keys) {
+                const std::string module = lowercase_ascii(
+                    key.pItem ? key.pItem : "");
+                LogLevel module_level = LogLevel::INFO;
+                const char* configured_level = key.pItem
+                    ? ini.GetValue("log_modules", key.pItem, nullptr)
+                    : nullptr;
+                if (!valid_log_module_name(module) || !configured_level ||
+                    !parse_log_level(configured_level, module_level) ||
+                    !candidate.log.module_levels.emplace(
+                        module, module_level).second) {
+                    error = "Log 模块等级配置非法: " + module;
+                    return false;
+                }
+            }
+        }
 
         candidate.detector.model_path =
             ini.GetValue("detector", "model_path",
@@ -739,6 +784,18 @@ bool save_app_config(const std::string& path,
                          config.log.file_max_size_mb);
         ini.SetLongValue("log", "file_max_count",
                          config.log.file_max_count);
+        std::vector<std::pair<std::string, LogLevel>> module_levels(
+            config.log.module_levels.begin(),
+            config.log.module_levels.end());
+        std::sort(
+            module_levels.begin(), module_levels.end(),
+            [](const auto& left, const auto& right) {
+                return left.first < right.first;
+            });
+        for (const auto& [module, level] : module_levels) {
+            ini.SetValue(
+                "log_modules", module.c_str(), log_level_name(level));
+        }
         ini.SetLongValue("runtime", "profile_window",
                          config.runtime.profile_window);
         ini.SetLongValue("ui", "width", config.ui.width);

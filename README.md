@@ -110,7 +110,7 @@ NDI 会明确返回 `UNSUPPORTED`，不会切换 UDP、DXGI 或 CPU 路径。
 
 ```ini
 [log]
-global_level=warn
+global_level=trace
 enable_console=true
 enable_file=true
 enable_debug_file=false
@@ -119,9 +119,14 @@ ringbuf_capacity=1024
 log_dir=logs
 file_max_size_mb=10
 file_max_count=3
+
+[log_modules]
+detector=info
+capture=warn
 ```
 
 日志配置在进程启动时生效，运行中不会热更新；修改后保存并重新启动 Xen。
+`[log_modules]` 可覆盖单个模块注册时的默认等级；最终阈值取模块等级与 `global_level` 中更严格者。
 运行期间按 `F9` 可打开或关闭最近日志窗口；窗口只读取内存 ring buffer，不会读取日志文件或阻塞 Runtime 管线。
 
 ## 构建状态

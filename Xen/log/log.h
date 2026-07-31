@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <spdlog/spdlog.h>
@@ -32,6 +33,8 @@ struct LogConfig {
     std::string log_dir          = "logs";
     int         file_max_size_mb = 10;
     int         file_max_count   = 3;
+    // 键为模块注册名；仅覆盖模块注册时传入的默认等级。
+    std::unordered_map<std::string, LogLevel> module_levels;
 };
 
 // ── 日志核心类（全局单例） ──

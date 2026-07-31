@@ -130,6 +130,19 @@ void test_invalid_config_can_retry() {
     expect(!Log::initialized(), "超大 ring 配置必须在预分配前被拒绝");
 
     config = ring_only_config(32);
+    config.module_levels.emplace("bad module", LogLevel::INFO);
+    Log::init(config);
+    expect(!Log::initialized(), "非法模块名必须在初始化前被拒绝");
+
+    config = ring_only_config(32);
+    for (int index = 0; index < 65; ++index) {
+        config.module_levels.emplace(
+            "module-" + std::to_string(index), LogLevel::INFO);
+    }
+    Log::init(config);
+    expect(!Log::initialized(), "模块等级覆盖数量超过上限时必须拒绝");
+
+    config = ring_only_config(32);
     Log::init(config);
     expect(Log::initialized(), "非法配置失败后必须允许合法配置重试");
     Log::shutdown();
@@ -453,6 +466,30 @@ void test_configured_global_level_is_applied() {
     Log::shutdown();
 }
 
+void test_configured_module_levels_are_applied() {
+    Log::shutdown();
+    auto config = ring_only_config();
+    config.module_levels.emplace("configured-module", LogLevel::WARN);
+    Log::init(config);
+    expect(Log::initialized(), "模块等级配置测试初始化失败");
+
+    Log::register_module("configured-module", LogLevel::TRACE);
+    Log::register_module("unconfigured-module", LogLevel::DEBUG);
+    expect(!Log::should_log("configured-module", LogLevel::INFO) &&
+               Log::should_log("configured-module", LogLevel::WARN),
+           "模块配置必须覆盖注册时的默认等级");
+    expect(Log::should_log("unconfigured-module", LogLevel::DEBUG),
+           "未配置模块必须保留注册时的默认等级");
+
+    Log::set_level("configured-module", LogLevel::DEBUG);
+    expect(Log::should_log("configured-module", LogLevel::DEBUG),
+           "运行时 set_level 必须能够临时覆盖模块配置");
+    Log::register_module("configured-module", LogLevel::TRACE);
+    expect(!Log::should_log("configured-module", LogLevel::INFO),
+           "模块重新注册时必须重新应用静态配置等级");
+    Log::shutdown();
+}
+
 void test_spdlog_global_registry_is_untouched() {
     const std::string external_name = "xen_log_tests_external";
     spdlog::drop(external_name);
@@ -583,6 +620,7 @@ int main() {
         test_shutdown_waits_for_inflight_ring_read();
         test_global_level_applies_to_later_modules();
         test_configured_global_level_is_applied();
+        test_configured_module_levels_are_applied();
         test_spdlog_global_registry_is_untouched();
         test_file_flush_and_restart_preservation();
         test_priority_queue_preserves_warn_burst();

@@ -56,6 +56,10 @@ void test_round_trip() {
     source.log.log_dir = "cache/test-logs";
     source.log.file_max_size_mb = 4;
     source.log.file_max_count = 5;
+    source.log.module_levels = {
+        {"detector", LogLevel::DEBUG},
+        {"capture", LogLevel::WARN},
+    };
     source.ui.width = 1024;
     source.ui.theme = UiTheme::DARK;
 
@@ -101,6 +105,7 @@ void test_round_trip() {
            loaded.log.log_dir == "cache/test-logs" &&
            loaded.log.file_max_size_mb == 4 &&
            loaded.log.file_max_count == 5 &&
+           loaded.log.module_levels == source.log.module_levels &&
            loaded.ui.width == 1024 &&
            loaded.ui.theme == UiTheme::DARK,
            "配置往返后关键字段必须保持一致");
@@ -123,7 +128,8 @@ void test_log_defaults_and_invalid_level() {
     expect(defaults.log.global_level == LogLevel::TRACE &&
                defaults.log.enable_console && defaults.log.enable_file &&
                !defaults.log.enable_debug_file && defaults.log.enable_ringbuf &&
-               defaults.log.ringbuf_capacity == 1024,
+               defaults.log.ringbuf_capacity == 1024 &&
+               defaults.log.module_levels.empty(),
            "旧配置加载后的日志默认值不正确");
     std::error_code ignored;
     std::filesystem::remove(defaults_path, ignored);
@@ -141,6 +147,20 @@ void test_log_defaults_and_invalid_level() {
                error.find("global_level") != std::string::npos,
            "未知日志等级必须明确拒绝并返回字段错误");
     std::filesystem::remove(invalid_path, ignored);
+
+    const auto invalid_module_path =
+        std::filesystem::temp_directory_path() /
+        "xen_config_invalid_log_module_level.ini";
+    {
+        std::ofstream output(invalid_module_path, std::ios::binary);
+        output << "[detector]\nmodel_path=model.onnx\n"
+                  "[log_modules]\ndetector=verbose\n";
+    }
+    error.clear();
+    expect(!load_app_config(invalid_module_path.string(), invalid, error) &&
+               error.find("detector") != std::string::npos,
+           "未知模块日志等级必须明确拒绝并返回模块名");
+    std::filesystem::remove(invalid_module_path, ignored);
 }
 
 void test_invalid_config() {
@@ -233,6 +253,10 @@ void test_invalid_config() {
     config.log.global_level = static_cast<LogLevel>(99);
     expect(!validate_app_config(config, error),
            "未知全局日志等级必须拒绝配置");
+    config.log.global_level = LogLevel::TRACE;
+    config.log.module_levels.emplace("bad module", LogLevel::INFO);
+    expect(!validate_app_config(config, error),
+           "含空格的模块日志配置名必须拒绝");
 }
 
 void test_xudp_backend_round_trip() {
