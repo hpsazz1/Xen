@@ -129,6 +129,8 @@ spdlog::level::level_enum to_spdlog_level(LogLevel level) noexcept {
 }
 
 bool valid_config(const LogConfig& config) noexcept {
+    if (!valid_level(config.global_level)) return false;
+
     if (config.enable_ringbuf &&
         (config.ringbuf_capacity <= 0 ||
          config.ringbuf_capacity > kMaxRingBufferCapacity)) {
@@ -185,6 +187,8 @@ struct Log::Impl {
 
     explicit Impl(const LogConfig& requested_config) {
         init_sinks(requested_config);
+        global_level.store(requested_config.global_level,
+                           std::memory_order_relaxed);
         if (!async_sinks.empty()) {
             // 普通日志覆盖最旧记录，保证热路径永不因 I/O 阻塞；WARN/ERROR
             // 使用独立的小型阻塞队列，避免异常日志被低等级洪峰挤掉。

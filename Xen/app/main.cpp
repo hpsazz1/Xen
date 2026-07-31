@@ -25,8 +25,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         app_message = config_error + "；请在配置页填写并保存。";
     }
 
-    LogConfig log_config;
-    Log::init(log_config);
+    Log::init(config.log);
     Log::register_module("app", LogLevel::INFO);
 
     Runtime runtime;

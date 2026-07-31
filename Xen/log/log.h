@@ -10,8 +10,19 @@
 #include <vector>
 #include <spdlog/spdlog.h>
 
+// ── 日志级别（与 spdlog 对应，但解耦） ──
+enum class LogLevel {
+    TRACE = 0,
+    DEBUG = 1,
+    INFO  = 2,
+    WARN  = 3,
+    ERROR = 4,
+    OFF   = 5,
+};
+
 // ── 配置 ──
 struct LogConfig {
+    LogLevel global_level  = LogLevel::TRACE; // 全局最低日志级别
     bool enable_console    = true;   // 控制台输出
     bool enable_file       = true;   // 轮转文件输出（warn/err）
     bool enable_debug_file = false;  // 调试文件（全级别）
@@ -21,16 +32,6 @@ struct LogConfig {
     std::string log_dir          = "logs";
     int         file_max_size_mb = 10;
     int         file_max_count   = 3;
-};
-
-// ── 日志级别（与 spdlog 对应，但解耦） ──
-enum class LogLevel {
-    TRACE = 0,
-    DEBUG = 1,
-    INFO  = 2,
-    WARN  = 3,
-    ERROR = 4,
-    OFF   = 5,
 };
 
 // ── 日志核心类（全局单例） ──

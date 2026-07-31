@@ -2,6 +2,10 @@
 
 #include <SimpleIni.h>
 
+#ifdef ERROR
+#undef ERROR
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -153,6 +157,39 @@ OutputFormat parse_output_format(const char* value, OutputFormat fallback) {
     return fallback;
 }
 
+bool parse_log_level(const char* value, LogLevel& result) {
+    if (!value) return true;
+    const std::string normalized = lowercase_ascii(value);
+    if (normalized == "trace") {
+        result = LogLevel::TRACE;
+    } else if (normalized == "debug") {
+        result = LogLevel::DEBUG;
+    } else if (normalized == "info") {
+        result = LogLevel::INFO;
+    } else if (normalized == "warn" || normalized == "warning") {
+        result = LogLevel::WARN;
+    } else if (normalized == "error") {
+        result = LogLevel::ERROR;
+    } else if (normalized == "off") {
+        result = LogLevel::OFF;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+const char* log_level_name(LogLevel level) noexcept {
+    switch (level) {
+        case LogLevel::TRACE: return "trace";
+        case LogLevel::DEBUG: return "debug";
+        case LogLevel::INFO:  return "info";
+        case LogLevel::WARN:  return "warn";
+        case LogLevel::ERROR: return "error";
+        case LogLevel::OFF:   return "off";
+    }
+    return "off";
+}
+
 const char* output_format_name(OutputFormat format) noexcept {
     switch (format) {
         case OutputFormat::AUTO: return "auto";
@@ -230,8 +267,28 @@ bool validate_app_config(const AppConfig& config,
                          std::string& error) noexcept {
     try {
         constexpr int kMaxCaptureSourceDimension = 16384;
+        constexpr int kMaxLogRingBufferCapacity = 65'536;
+        constexpr int kMaxLogFileCount = 200'000;
         if (config.detector.model_path.empty()) {
             error = "Detector 模型路径不能为空";
+            return false;
+        }
+        const bool log_invalid =
+            static_cast<int>(config.log.global_level) <
+                static_cast<int>(LogLevel::TRACE) ||
+            static_cast<int>(config.log.global_level) >
+                static_cast<int>(LogLevel::OFF) ||
+            (config.log.enable_ringbuf &&
+             (config.log.ringbuf_capacity <= 0 ||
+              config.log.ringbuf_capacity > kMaxLogRingBufferCapacity)) ||
+            (config.log.enable_file &&
+             (config.log.log_dir.empty() ||
+              config.log.file_max_size_mb <= 0 ||
+              config.log.file_max_count <= 0 ||
+              config.log.file_max_count > kMaxLogFileCount)) ||
+            (config.log.enable_debug_file && config.log.log_dir.empty());
+        if (log_invalid) {
+            error = "Log 配置非法";
             return false;
         }
         if (config.detector.device_id < 0 ||
@@ -369,6 +426,30 @@ bool load_app_config(const std::string& path,
         }
 
         AppConfig candidate = config;
+        const char* configured_log_level = ini.GetValue(
+            "log", "global_level", nullptr);
+        if (!parse_log_level(configured_log_level,
+                             candidate.log.global_level)) {
+            error = "Log global_level 配置非法";
+            return false;
+        }
+        candidate.log.enable_console = ini.GetBoolValue(
+            "log", "enable_console", candidate.log.enable_console);
+        candidate.log.enable_file = ini.GetBoolValue(
+            "log", "enable_file", candidate.log.enable_file);
+        candidate.log.enable_debug_file = ini.GetBoolValue(
+            "log", "enable_debug_file", candidate.log.enable_debug_file);
+        candidate.log.enable_ringbuf = ini.GetBoolValue(
+            "log", "enable_ringbuf", candidate.log.enable_ringbuf);
+        candidate.log.ringbuf_capacity = static_cast<int>(ini.GetLongValue(
+            "log", "ringbuf_capacity", candidate.log.ringbuf_capacity));
+        candidate.log.log_dir = ini.GetValue(
+            "log", "log_dir", candidate.log.log_dir.c_str());
+        candidate.log.file_max_size_mb = static_cast<int>(ini.GetLongValue(
+            "log", "file_max_size_mb", candidate.log.file_max_size_mb));
+        candidate.log.file_max_count = static_cast<int>(ini.GetLongValue(
+            "log", "file_max_count", candidate.log.file_max_count));
+
         candidate.detector.model_path =
             ini.GetValue("detector", "model_path",
                          candidate.detector.model_path.c_str());
@@ -642,6 +723,22 @@ bool save_app_config(const std::string& path,
                          config.keyboard.aim_hold_virtual_key);
         ini.SetLongValue("keyboard", "emergency_virtual_key",
                          config.keyboard.emergency_virtual_key);
+        ini.SetValue("log", "global_level",
+                     log_level_name(config.log.global_level));
+        ini.SetBoolValue("log", "enable_console",
+                         config.log.enable_console);
+        ini.SetBoolValue("log", "enable_file", config.log.enable_file);
+        ini.SetBoolValue("log", "enable_debug_file",
+                         config.log.enable_debug_file);
+        ini.SetBoolValue("log", "enable_ringbuf",
+                         config.log.enable_ringbuf);
+        ini.SetLongValue("log", "ringbuf_capacity",
+                         config.log.ringbuf_capacity);
+        ini.SetValue("log", "log_dir", config.log.log_dir.c_str());
+        ini.SetLongValue("log", "file_max_size_mb",
+                         config.log.file_max_size_mb);
+        ini.SetLongValue("log", "file_max_count",
+                         config.log.file_max_count);
         ini.SetLongValue("runtime", "profile_window",
                          config.runtime.profile_window);
         ini.SetLongValue("ui", "width", config.ui.width);

@@ -7,6 +7,7 @@
 #include "capture/capture.h"
 #include "detector/detector.h"
 #include "keyboard/keyboard.h"
+#include "log/log.h"
 #include "mouse/mouse.h"
 
 struct RuntimeConfig {
@@ -31,6 +32,7 @@ struct AppConfig {
     AimConfig aim;
     MouseConfig mouse;
     KeyboardConfig keyboard;
+    LogConfig log;
     RuntimeConfig runtime;
     UiConfig ui;
 };

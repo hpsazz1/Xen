@@ -1,6 +1,7 @@
 #include "config/config.h"
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -46,6 +47,15 @@ void test_round_trip() {
     source.mouse.kmbox_uuid = "A1b2C3d4";
     source.mouse.kmbox_connect_timeout_ms = 900;
     source.mouse.kmbox_command_timeout_ms = 250;
+    source.log.global_level = LogLevel::WARN;
+    source.log.enable_console = false;
+    source.log.enable_file = false;
+    source.log.enable_debug_file = true;
+    source.log.enable_ringbuf = true;
+    source.log.ringbuf_capacity = 2048;
+    source.log.log_dir = "cache/test-logs";
+    source.log.file_max_size_mb = 4;
+    source.log.file_max_count = 5;
     source.ui.width = 1024;
     source.ui.theme = UiTheme::DARK;
 
@@ -84,11 +94,53 @@ void test_round_trip() {
            loaded.mouse.kmbox_uuid == "A1b2C3d4" &&
            loaded.mouse.kmbox_connect_timeout_ms == 900 &&
            loaded.mouse.kmbox_command_timeout_ms == 250 &&
+           loaded.log.global_level == LogLevel::WARN &&
+           !loaded.log.enable_console && !loaded.log.enable_file &&
+           loaded.log.enable_debug_file && loaded.log.enable_ringbuf &&
+           loaded.log.ringbuf_capacity == 2048 &&
+           loaded.log.log_dir == "cache/test-logs" &&
+           loaded.log.file_max_size_mb == 4 &&
+           loaded.log.file_max_count == 5 &&
            loaded.ui.width == 1024 &&
            loaded.ui.theme == UiTheme::DARK,
            "配置往返后关键字段必须保持一致");
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
+}
+
+void test_log_defaults_and_invalid_level() {
+    const auto defaults_path = std::filesystem::temp_directory_path() /
+                               "xen_config_without_log.ini";
+    {
+        std::ofstream output(defaults_path, std::ios::binary);
+        output << "[detector]\nmodel_path=model.onnx\n";
+    }
+
+    AppConfig defaults;
+    std::string error;
+    expect(load_app_config(defaults_path.string(), defaults, error),
+           "缺少 [log] 的旧配置仍应使用日志默认值");
+    expect(defaults.log.global_level == LogLevel::TRACE &&
+               defaults.log.enable_console && defaults.log.enable_file &&
+               !defaults.log.enable_debug_file && defaults.log.enable_ringbuf &&
+               defaults.log.ringbuf_capacity == 1024,
+           "旧配置加载后的日志默认值不正确");
+    std::error_code ignored;
+    std::filesystem::remove(defaults_path, ignored);
+
+    const auto invalid_path = std::filesystem::temp_directory_path() /
+                              "xen_config_invalid_log_level.ini";
+    {
+        std::ofstream output(invalid_path, std::ios::binary);
+        output << "[detector]\nmodel_path=model.onnx\n"
+                  "[log]\nglobal_level=verbose\n";
+    }
+    AppConfig invalid;
+    error.clear();
+    expect(!load_app_config(invalid_path.string(), invalid, error) &&
+               error.find("global_level") != std::string::npos,
+           "未知日志等级必须明确拒绝并返回字段错误");
+    std::filesystem::remove(invalid_path, ignored);
 }
 
 void test_invalid_config() {
@@ -172,6 +224,15 @@ void test_invalid_config() {
     config.mouse.kmbox_command_timeout_ms = 300;
     expect(validate_app_config(config, error),
            "完整 KMBOX NET 配置应通过校验");
+
+    config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
+    config.log.ringbuf_capacity = 0;
+    expect(!validate_app_config(config, error),
+           "启用 ring 时零容量必须拒绝日志配置");
+    config.log.ringbuf_capacity = 1024;
+    config.log.global_level = static_cast<LogLevel>(99);
+    expect(!validate_app_config(config, error),
+           "未知全局日志等级必须拒绝配置");
 }
 
 void test_xudp_backend_round_trip() {
@@ -201,6 +262,7 @@ void test_xudp_backend_round_trip() {
 
 int main() {
     test_round_trip();
+    test_log_defaults_and_invalid_level();
     test_invalid_config();
     test_xudp_backend_round_trip();
     if (failures != 0) {

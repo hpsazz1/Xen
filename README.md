@@ -104,6 +104,25 @@ NDI 会明确返回 `UNSUPPORTED`，不会切换 UDP、DXGI 或 CPU 路径。
 
 应用目标为 `xen_app`，Release 输出名为 `Xen.exe`。首次运行缺少 `config.ini` 时，界面会显示配置错误；填写模型路径并保存后方可启动 Runtime。
 
+日志设施也由同一个 `config.ini` 静态加载。旧配置没有 `[log]` 节时使用默认值；日志等级支持
+`trace`、`debug`、`info`、`warn`、`error` 和 `off`，未知等级会拒绝加载并在界面提示错误。
+例如：
+
+```ini
+[log]
+global_level=warn
+enable_console=true
+enable_file=true
+enable_debug_file=false
+enable_ringbuf=true
+ringbuf_capacity=1024
+log_dir=logs
+file_max_size_mb=10
+file_max_count=3
+```
+
+日志配置在进程启动时生效，运行中不会热更新；修改后保存并重新启动 Xen。
+
 ## 构建状态
 
 源码路径已同步到 `Xen/`，并提供 Detector 纯算法测试。Windows 推荐使用 VS 2026 的多配置生成器：

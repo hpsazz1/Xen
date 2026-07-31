@@ -506,6 +506,7 @@ target_include_directories(config
         ${OpenCV_INCLUDE_DIRS}
     PRIVATE
         ${simpleini_SOURCE_DIR})
+target_link_libraries(config PUBLIC log)
 
 add_library(runtime STATIC
     Xen/runtime/runtime.cpp

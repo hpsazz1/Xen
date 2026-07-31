@@ -440,6 +440,19 @@ void test_global_level_applies_to_later_modules() {
     Log::shutdown();
 }
 
+void test_configured_global_level_is_applied() {
+    Log::shutdown();
+    auto config = ring_only_config();
+    config.global_level = LogLevel::WARN;
+    Log::init(config);
+    expect(Log::initialized(), "配置全局等级测试初始化失败");
+    Log::register_module("configured-level", LogLevel::TRACE);
+    expect(!Log::should_log("configured-level", LogLevel::INFO) &&
+               Log::should_log("configured-level", LogLevel::WARN),
+           "Log 初始化必须采用 LogConfig 中的全局等级");
+    Log::shutdown();
+}
+
 void test_spdlog_global_registry_is_untouched() {
     const std::string external_name = "xen_log_tests_external";
     spdlog::drop(external_name);
@@ -569,6 +582,7 @@ int main() {
         test_concurrent_init_shutdown_serialization();
         test_shutdown_waits_for_inflight_ring_read();
         test_global_level_applies_to_later_modules();
+        test_configured_global_level_is_applied();
         test_spdlog_global_registry_is_untouched();
         test_file_flush_and_restart_preservation();
         test_priority_queue_preserves_warn_burst();
