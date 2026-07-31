@@ -30,6 +30,14 @@ bool letterbox_reuse(const cv::Mat& src, cv::Mat& dst,
                      int target_w, int target_h,
                      LetterBoxInfo& info) noexcept;
 
+/// 只生成模型尺寸的 uint8 BGR LetterBox 图像，不执行通道重排和归一化。
+/// TensorRT CUDA Graph 的 GPU 前处理路径用它保持 OpenCV resize 结果与 CPU 路径一致，
+/// 随后把 uint8 图像上传到固定设备缓冲并由 CUDA kernel 生成 NCHW float 张量。
+bool letterbox_bgr_reuse(const cv::Mat& src, cv::Mat& dst,
+                         cv::Mat& resize_buffer,
+                         int target_w, int target_h,
+                         LetterBoxInfo& info) noexcept;
+
 } // namespace detector::detail
 
 #endif // DETECTOR_PREPROCESS_H

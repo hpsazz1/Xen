@@ -521,6 +521,9 @@ bool load_app_config(const std::string& path,
         candidate.detector.enable_trt_cuda_graph = ini.GetBoolValue(
             "detector", "enable_trt_cuda_graph",
             candidate.detector.enable_trt_cuda_graph);
+        candidate.detector.enable_gpu_preprocess = ini.GetBoolValue(
+            "detector", "enable_gpu_preprocess",
+            candidate.detector.enable_gpu_preprocess);
         candidate.detector.trt_cache_path = ini.GetValue(
             "detector", "trt_cache_path",
             candidate.detector.trt_cache_path.c_str());
@@ -683,6 +686,8 @@ bool save_app_config(const std::string& path,
         ini.SetBoolValue("detector", "enable_fp16", config.detector.enable_fp16);
         ini.SetBoolValue("detector", "enable_trt_cuda_graph",
                          config.detector.enable_trt_cuda_graph);
+        ini.SetBoolValue("detector", "enable_gpu_preprocess",
+                         config.detector.enable_gpu_preprocess);
         ini.SetValue("detector", "trt_cache_path",
                      config.detector.trt_cache_path.c_str());
 

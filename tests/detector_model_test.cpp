@@ -50,6 +50,7 @@ struct CommandLineOptions {
     std::string comparison_image_path;
     OutputFormat output_format = OutputFormat::AUTO;
     bool has_video_directory = false;
+    bool enable_gpu_preprocess = true;
 };
 
 const char* output_format_name(OutputFormat format) noexcept {
@@ -85,6 +86,8 @@ bool parse_command_line(int argc, char* argv[],
     constexpr const char* kOutputFormatPrefix = "--output-format=";
     constexpr const char* kComparisonImageOption = "--comparison-image";
     constexpr const char* kComparisonImagePrefix = "--comparison-image=";
+    constexpr const char* kGpuPreprocessOption = "--gpu-preprocess";
+    constexpr const char* kGpuPreprocessPrefix = "--gpu-preprocess=";
     std::vector<std::string> positional;
     positional.reserve(6);
 
@@ -112,6 +115,28 @@ bool parse_command_line(int argc, char* argv[],
                 std::char_traits<char>::length(kComparisonImagePrefix));
             if (options.comparison_image_path.empty()) {
                 std::cerr << "--comparison-image 缺少参数\n";
+                return false;
+            }
+            continue;
+        } else if (argument == kGpuPreprocessOption ||
+                   argument.starts_with(kGpuPreprocessPrefix)) {
+            std::string value;
+            if (argument == kGpuPreprocessOption) {
+                if (++index >= argc || !argv[index]) {
+                    std::cerr << "--gpu-preprocess 缺少参数\n";
+                    return false;
+                }
+                value = argv[index];
+            } else {
+                value = argument.substr(
+                    std::char_traits<char>::length(kGpuPreprocessPrefix));
+            }
+            if (value == "on" || value == "true" || value == "1") {
+                options.enable_gpu_preprocess = true;
+            } else if (value == "off" || value == "false" || value == "0") {
+                options.enable_gpu_preprocess = false;
+            } else {
+                std::cerr << "--gpu-preprocess 只接受 on 或 off\n";
                 return false;
             }
             continue;
@@ -162,9 +187,12 @@ struct VideoBenchmarkResult {
     double best_confidence_sum = 0.0;
     DetectionStatus status = DetectionStatus::NOT_RUN;
     bool explicit_device_copy = false;
+    bool gpu_preprocess = false;
+    std::uint64_t input_upload_bytes = 0;
     std::vector<double> preprocess_ms;
     std::vector<double> inference_ms;
     std::vector<double> h2d_ms;
+    std::vector<double> gpu_preprocess_ms;
     std::vector<double> execution_ms;
     std::vector<double> d2h_ms;
     std::vector<double> postprocess_ms;
@@ -176,13 +204,13 @@ std::string path_to_utf8(const std::filesystem::path& path) {
     return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
 }
 
-bool has_mp4_extension(const std::filesystem::path& path) {
+bool has_video_extension(const std::filesystem::path& path) {
     std::string extension = path_to_utf8(path.extension());
     std::transform(extension.begin(), extension.end(), extension.begin(),
                    [](unsigned char character) {
                        return static_cast<char>(std::tolower(character));
                    });
-    return extension == ".mp4";
+    return extension == ".mp4" || extension == ".avi";
 }
 
 double average(const std::vector<double>& values) {
@@ -356,12 +384,21 @@ bool benchmark_video(Detector& detector,
         result.preprocess_ms.push_back(profile.preprocess_ms);
         result.inference_ms.push_back(profile.inference_ms);
         result.h2d_ms.push_back(profile.h2d_ms);
+        result.gpu_preprocess_ms.push_back(profile.gpu_preprocess_ms);
         result.execution_ms.push_back(profile.execution_ms);
         result.d2h_ms.push_back(profile.d2h_ms);
         result.postprocess_ms.push_back(profile.postprocess_ms);
         result.total_ms.push_back(profile.total_ms);
         result.explicit_device_copy =
             result.explicit_device_copy || profile.explicit_device_copy;
+        result.gpu_preprocess =
+            result.gpu_preprocess || profile.gpu_preprocess;
+        if (result.input_upload_bytes == 0) {
+            result.input_upload_bytes = profile.input_upload_bytes;
+        } else if (result.input_upload_bytes != profile.input_upload_bytes) {
+            std::cerr << "输入上传字节数在固定 shape 基准期间发生变化\n";
+            return false;
+        }
         result.detection_count_sum += detections.size();
 
         if (detections.empty()) {
@@ -415,6 +452,8 @@ void write_video_result(std::ostream& output,
            << result.failed_frame_count << ','
            << DetectionStatusName(result.status) << ','
            << (result.explicit_device_copy ? 1 : 0) << ','
+           << (result.gpu_preprocess ? 1 : 0) << ','
+           << result.input_upload_bytes << ','
            << result.detected_frame_count
            << ',' << detection_rate << ',' << result.longest_empty_sequence
            << ',' << mean_detection_count << ',' << mean_best_confidence
@@ -430,6 +469,10 @@ void write_video_result(std::ostream& output,
            << ',' << percentile(result.h2d_ms, 0.50)
            << ',' << percentile(result.h2d_ms, 0.95)
            << ',' << percentile(result.h2d_ms, 0.99)
+           << ',' << average(result.gpu_preprocess_ms)
+           << ',' << percentile(result.gpu_preprocess_ms, 0.50)
+           << ',' << percentile(result.gpu_preprocess_ms, 0.95)
+           << ',' << percentile(result.gpu_preprocess_ms, 0.99)
            << ',' << average(result.execution_ms)
            << ',' << percentile(result.execution_ms, 0.50)
            << ',' << percentile(result.execution_ms, 0.95)
@@ -462,12 +505,13 @@ bool benchmark_videos(Detector& detector,
     std::vector<std::filesystem::path> video_paths;
     for (std::filesystem::directory_iterator iterator(video_directory, error), end;
          !error && iterator != end; iterator.increment(error)) {
-        if (iterator->is_regular_file() && has_mp4_extension(iterator->path())) {
+        if (iterator->is_regular_file() &&
+            has_video_extension(iterator->path())) {
             video_paths.push_back(iterator->path());
         }
     }
     if (error || video_paths.empty()) {
-        std::cerr << "视频目录中没有可用 MP4："
+        std::cerr << "视频目录中没有可用 MP4/AVI："
                   << path_to_utf8(video_directory) << '\n';
         return false;
     }
@@ -496,13 +540,15 @@ bool benchmark_videos(Detector& detector,
     report << "scene,source_width,source_height,evaluated_width,"
               "evaluated_height,model_input_width,model_input_height,"
               "source_fps,frames,failed_frames,status,"
-              "explicit_device_copy,"
+              "explicit_device_copy,gpu_preprocess,input_upload_bytes,"
               "detected_frames,detection_frame_rate,longest_empty_sequence,"
               "mean_detection_count,mean_best_confidence,"
               "preprocess_mean_ms,preprocess_p50_ms,preprocess_p95_ms,"
               "preprocess_p99_ms,inference_mean_ms,inference_p50_ms,"
               "inference_p95_ms,inference_p99_ms,"
               "h2d_mean_ms,h2d_p50_ms,h2d_p95_ms,h2d_p99_ms,"
+              "gpu_preprocess_mean_ms,gpu_preprocess_p50_ms,"
+              "gpu_preprocess_p95_ms,gpu_preprocess_p99_ms,"
               "execution_mean_ms,execution_p50_ms,execution_p95_ms,"
               "execution_p99_ms,d2h_mean_ms,d2h_p50_ms,d2h_p95_ms,"
               "d2h_p99_ms,postprocess_mean_ms,"
@@ -572,7 +618,8 @@ int main(int argc, char* argv[]) {
                      "[视频目录] [CSV报告路径] [center|full] "
                      "[--output-format "
                      "auto|channel_first|objectness|end_to_end] "
-                     "[--comparison-image <图像路径>]\n";
+                     "[--comparison-image <图像路径>] "
+                     "[--gpu-preprocess on|off]\n";
         return 2;
     }
 
@@ -599,6 +646,7 @@ int main(int argc, char* argv[]) {
     }
     config.output_format = options.output_format;
     config.enable_output_fingerprint = true;
+    config.enable_gpu_preprocess = options.enable_gpu_preprocess;
 
     const auto load_start = std::chrono::steady_clock::now();
     Detector detector(config);
@@ -666,6 +714,21 @@ int main(int argc, char* argv[]) {
         std::cerr << "TensorRT CUDA Graph 未走固定设备缓冲显式复制路径\n";
         return 1;
     }
+    if (requested_backend == "tensorrt" &&
+        config.enable_trt_cuda_graph && config.enable_gpu_preprocess) {
+        const std::uint64_t expected_upload_bytes =
+            static_cast<std::uint64_t>(detector.input_width()) *
+            static_cast<std::uint64_t>(detector.input_height()) * 3U;
+        if (!black_profile.gpu_preprocess ||
+            !comparison_profile.gpu_preprocess ||
+            black_profile.gpu_preprocess_ms <= 0.0 ||
+            comparison_profile.gpu_preprocess_ms <= 0.0 ||
+            black_profile.input_upload_bytes != expected_upload_bytes ||
+            comparison_profile.input_upload_bytes != expected_upload_bytes) {
+            std::cerr << "TensorRT CUDA Graph 未走固定 uint8 GPU 前处理路径\n";
+            return 1;
+        }
+    }
     if (black_profile.output_fingerprint ==
         comparison_profile.output_fingerprint) {
         std::cerr << "黑图与对照图的原始输出指纹相同，可能重放了首次输入，"
@@ -694,7 +757,9 @@ int main(int argc, char* argv[]) {
         if (no_graph_black_profile.status != DetectionStatus::SUCCESS ||
             no_graph_comparison_profile.status != DetectionStatus::SUCCESS ||
             no_graph_black_profile.explicit_device_copy ||
-            no_graph_comparison_profile.explicit_device_copy) {
+            no_graph_comparison_profile.explicit_device_copy ||
+            no_graph_black_profile.gpu_preprocess ||
+            no_graph_comparison_profile.gpu_preprocess) {
             std::cerr << "TensorRT Graph off 对照执行状态错误\n";
             return 1;
         }
@@ -720,12 +785,15 @@ int main(int argc, char* argv[]) {
     if (invalid_profile.preprocess_ms != 0.0 ||
         invalid_profile.inference_ms != 0.0 ||
         invalid_profile.h2d_ms != 0.0 ||
+        invalid_profile.gpu_preprocess_ms != 0.0 ||
         invalid_profile.execution_ms != 0.0 ||
         invalid_profile.d2h_ms != 0.0 ||
         invalid_profile.postprocess_ms != 0.0 ||
         invalid_profile.total_ms != 0.0 ||
         invalid_profile.output_fingerprint != 0 ||
-        invalid_profile.explicit_device_copy) {
+        invalid_profile.explicit_device_copy ||
+        invalid_profile.gpu_preprocess ||
+        invalid_profile.input_upload_bytes != 0) {
         std::cerr << "非法输入未清空上一帧耗时或诊断数据\n";
         return 1;
     }
@@ -740,6 +808,8 @@ int main(int argc, char* argv[]) {
                      load_finished - load_start).count()
               << ", detections=" << black_detections.size()
               << ", total_ms=" << black_profile.total_ms
+              << ", gpu_preprocess=" << black_profile.gpu_preprocess
+              << ", upload_bytes=" << black_profile.input_upload_bytes
               << ", black_fingerprint=" << black_profile.output_fingerprint
               << ", comparison_fingerprint="
               << comparison_profile.output_fingerprint

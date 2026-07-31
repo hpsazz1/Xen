@@ -7,6 +7,7 @@
 #include <chrono>
 #include <filesystem>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -14,6 +15,7 @@
 #define XEN_HAS_CUDA_RUNTIME 0
 #endif
 #if XEN_HAS_CUDA_RUNTIME
+#include "detector/cuda_preprocess.h"
 #include <cuda_runtime_api.h>
 #endif
 
@@ -67,10 +69,13 @@ struct Session::Impl {
     std::unique_ptr<Ort::IoBinding> io_binding;
     int device_id = 0;
     bool use_cuda_graph = false;
+    bool gpu_preprocess_requested = false;
 #if XEN_HAS_CUDA_RUNTIME
+    std::unique_ptr<CudaPreprocessor> gpu_preprocessor;
     cudaStream_t compute_stream = nullptr;
     cudaEvent_t h2d_started = nullptr;
     cudaEvent_t h2d_finished = nullptr;
+    cudaEvent_t preprocess_finished = nullptr;
     cudaEvent_t execution_finished = nullptr;
     cudaEvent_t d2h_finished = nullptr;
 #endif
@@ -85,6 +90,7 @@ struct Session::Impl {
         cudaSetDevice(device_id);
         if (h2d_started) cudaEventDestroy(h2d_started);
         if (h2d_finished) cudaEventDestroy(h2d_finished);
+        if (preprocess_finished) cudaEventDestroy(preprocess_finished);
         if (execution_finished) cudaEventDestroy(execution_finished);
         if (d2h_finished) cudaEventDestroy(d2h_finished);
         if (compute_stream) {
@@ -102,6 +108,9 @@ struct Session::Impl {
         device_output_values.clear();
         output_shapes.clear();
         output_types.clear();
+#if XEN_HAS_CUDA_RUNTIME
+        gpu_preprocessor.reset();
+#endif
         device_input_value = Ort::Value{nullptr};
         device_allocator.reset();
         device_memory.reset();
@@ -150,6 +159,7 @@ bool Session::setup_options(const DetectorConfig& cfg) {
             providers, "TensorrtExecutionProvider");
         const bool has_directml = provider_available(
             providers, "DmlExecutionProvider");
+        impl_->gpu_preprocess_requested = cfg.enable_gpu_preprocess;
 
         if (cfg.backend == BackendType::TENSORRT && has_tensorrt &&
             cfg.enable_trt_cuda_graph) {
@@ -172,6 +182,7 @@ bool Session::setup_options(const DetectorConfig& cfg) {
             cudaEvent_t* events[] = {
                 &impl_->h2d_started,
                 &impl_->h2d_finished,
+                &impl_->preprocess_finished,
                 &impl_->execution_finished,
                 &impl_->d2h_finished,
             };
@@ -459,6 +470,41 @@ bool Session::load(const std::string& path) {
                 impl_->input_shape.data(), impl_->input_shape.size(),
                 impl_->input_type);
 
+#if XEN_HAS_CUDA_RUNTIME
+            const bool gpu_preprocess_shape_supported =
+                impl_->input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+                impl_->input_shape.size() == 4 &&
+                impl_->input_shape[0] == 1 &&
+                impl_->input_shape[1] == 3 &&
+                impl_->input_shape[2] <=
+                    static_cast<int64_t>(std::numeric_limits<int>::max()) &&
+                impl_->input_shape[3] <=
+                    static_cast<int64_t>(std::numeric_limits<int>::max());
+            if (impl_->gpu_preprocess_requested &&
+                gpu_preprocess_shape_supported) {
+                auto preprocessor = std::make_unique<CudaPreprocessor>();
+                if (!preprocessor->init(
+                        impl_->device_id,
+                        static_cast<int>(impl_->input_shape[3]),
+                        static_cast<int>(impl_->input_shape[2]))) {
+                    LOG_WARN(
+                        "detector",
+                        "CUDA 前处理工作区初始化失败，回退 CPU 前处理: {}",
+                        cudaGetErrorString(preprocessor->last_error()));
+                } else {
+                    impl_->gpu_preprocessor = std::move(preprocessor);
+                    LOG_INFO(
+                        "detector",
+                        "CUDA 前处理已启用: pinned/device staging={} bytes",
+                        impl_->gpu_preprocessor->upload_bytes());
+                }
+            } else if (impl_->gpu_preprocess_requested) {
+                LOG_WARN(
+                    "detector",
+                    "CUDA 前处理仅支持静态 [1,3,H,W] float32 输入，回退 CPU 前处理");
+            }
+#endif
+
             impl_->output_values.reserve(output_count);
             impl_->device_output_values.reserve(output_count);
             for (size_t i = 0; i < output_count; ++i) {
@@ -504,6 +550,184 @@ bool Session::load(const std::string& path) {
     }
 }
 
+const std::vector<Ort::Value>* Session::run_cuda_graph(
+        const void* host_input,
+        size_t host_input_bytes,
+        bool gpu_preprocessed,
+        SessionRunProfile& profile) {
+#if XEN_HAS_CUDA_RUNTIME
+    profile.explicit_device_copy = true;
+    profile.gpu_preprocess = gpu_preprocessed;
+
+    const cudaError_t set_device_result = cudaSetDevice(impl_->device_id);
+    if (set_device_result != cudaSuccess) {
+        LOG_DEBUG("detector", "CUDA 设备选择失败: {}",
+                  cudaGetErrorString(set_device_result));
+        return nullptr;
+    }
+    if (!impl_->compute_stream) {
+        LOG_DEBUG("detector", "TensorRT CUDA Graph 缺少 user compute stream");
+        return nullptr;
+    }
+
+    struct PendingWorkGuard {
+        cudaStream_t stream = nullptr;
+        bool work_queued = false;
+
+        ~PendingWorkGuard() noexcept {
+            // pinned staging 只有在 H2D 完成后才能由下一帧覆写。若 event 记录、
+            // Provider Run 或后续复制中途失败，返回前收敛已经入队的工作。
+            if (work_queued && stream) {
+                (void)cudaStreamSynchronize(stream);
+            }
+        }
+
+        void dismiss() noexcept {
+            work_queued = false;
+        }
+    } pending_work{impl_->compute_stream};
+
+    const cudaError_t h2d_event_result = cudaEventRecord(
+        impl_->h2d_started, impl_->compute_stream);
+    if (h2d_event_result != cudaSuccess) {
+        LOG_DEBUG("detector", "CUDA H2D timing event 记录失败: {}",
+                  cudaGetErrorString(h2d_event_result));
+        return nullptr;
+    }
+
+    if (gpu_preprocessed) {
+        if (!impl_->gpu_preprocessor ||
+            !impl_->gpu_preprocessor->enqueue_upload(impl_->compute_stream)) {
+            const cudaError_t error = impl_->gpu_preprocessor
+                ? impl_->gpu_preprocessor->last_error()
+                : cudaErrorInvalidValue;
+            LOG_DEBUG("detector", "CUDA uint8 输入复制入队失败: {}",
+                      cudaGetErrorString(error));
+            return nullptr;
+        }
+        profile.input_upload_bytes = static_cast<std::uint64_t>(
+            impl_->gpu_preprocessor->upload_bytes());
+        pending_work.work_queued = true;
+    } else {
+        if (!host_input || host_input_bytes == 0) return nullptr;
+        const cudaError_t input_copy_result = cudaMemcpyAsync(
+            impl_->device_input_value.GetTensorMutableRawData(),
+            host_input, host_input_bytes,
+            cudaMemcpyHostToDevice, impl_->compute_stream);
+        if (input_copy_result != cudaSuccess) {
+            LOG_DEBUG("detector", "CUDA float 输入复制入队失败: {}",
+                      cudaGetErrorString(input_copy_result));
+            return nullptr;
+        }
+        profile.input_upload_bytes = static_cast<std::uint64_t>(
+            host_input_bytes);
+        pending_work.work_queued = true;
+    }
+
+    const cudaError_t h2d_finished_result = cudaEventRecord(
+        impl_->h2d_finished, impl_->compute_stream);
+    if (h2d_finished_result != cudaSuccess) {
+        LOG_DEBUG("detector", "CUDA H2D 完成 event 记录失败: {}",
+                  cudaGetErrorString(h2d_finished_result));
+        return nullptr;
+    }
+
+    cudaEvent_t execution_started = impl_->h2d_finished;
+    if (gpu_preprocessed) {
+        if (!impl_->gpu_preprocessor->enqueue_convert(
+                static_cast<float*>(
+                    impl_->device_input_value.GetTensorMutableRawData()),
+                impl_->compute_stream)) {
+            LOG_DEBUG("detector", "CUDA 前处理 kernel 入队失败: {}",
+                      cudaGetErrorString(
+                          impl_->gpu_preprocessor->last_error()));
+            return nullptr;
+        }
+        const cudaError_t preprocess_event_result = cudaEventRecord(
+            impl_->preprocess_finished, impl_->compute_stream);
+        if (preprocess_event_result != cudaSuccess) {
+            LOG_DEBUG("detector", "CUDA 前处理 timing event 记录失败: {}",
+                      cudaGetErrorString(preprocess_event_result));
+            return nullptr;
+        }
+        execution_started = impl_->preprocess_finished;
+    }
+
+    impl_->session->Run(impl_->run_opts, *impl_->io_binding);
+    const cudaError_t execution_event_result = cudaEventRecord(
+        impl_->execution_finished, impl_->compute_stream);
+    if (execution_event_result != cudaSuccess) {
+        LOG_DEBUG("detector", "CUDA Graph timing event 记录失败: {}",
+                  cudaGetErrorString(execution_event_result));
+        return nullptr;
+    }
+
+    for (size_t i = 0; i < impl_->output_values.size(); ++i) {
+        const cudaError_t output_copy_result = cudaMemcpyAsync(
+            impl_->output_values[i].GetTensorMutableRawData(),
+            impl_->device_output_values[i].GetTensorRawData(),
+            impl_->output_values[i].GetTensorSizeInBytes(),
+            cudaMemcpyDeviceToHost, impl_->compute_stream);
+        if (output_copy_result != cudaSuccess) {
+            LOG_DEBUG("detector", "CUDA 输出复制入队失败: {}",
+                      cudaGetErrorString(output_copy_result));
+            return nullptr;
+        }
+    }
+    const cudaError_t d2h_event_result = cudaEventRecord(
+        impl_->d2h_finished, impl_->compute_stream);
+    if (d2h_event_result != cudaSuccess) {
+        LOG_DEBUG("detector", "CUDA D2H timing event 记录失败: {}",
+                  cudaGetErrorString(d2h_event_result));
+        return nullptr;
+    }
+    // H2D、GPU 前处理、Graph 执行和 D2H 位于同一 stream，只在 CPU 即将
+    // 读取输出前同步一次。复用 event 记录真实设备完成时间，不引入阶段间同步。
+    const cudaError_t output_sync_result =
+        cudaEventSynchronize(impl_->d2h_finished);
+    if (output_sync_result != cudaSuccess) {
+        LOG_DEBUG("detector", "CUDA 输出复制失败: {}",
+                  cudaGetErrorString(output_sync_result));
+        return nullptr;
+    }
+    pending_work.dismiss();
+
+    float h2d_ms = 0.0f;
+    float gpu_preprocess_ms = 0.0f;
+    float execution_ms = 0.0f;
+    float d2h_ms = 0.0f;
+    const cudaError_t h2d_timing_result = cudaEventElapsedTime(
+        &h2d_ms, impl_->h2d_started, impl_->h2d_finished);
+    const cudaError_t preprocess_timing_result = gpu_preprocessed
+        ? cudaEventElapsedTime(
+              &gpu_preprocess_ms,
+              impl_->h2d_finished, impl_->preprocess_finished)
+        : cudaSuccess;
+    const cudaError_t execution_timing_result = cudaEventElapsedTime(
+        &execution_ms, execution_started, impl_->execution_finished);
+    const cudaError_t d2h_timing_result = cudaEventElapsedTime(
+        &d2h_ms, impl_->execution_finished, impl_->d2h_finished);
+    if (h2d_timing_result != cudaSuccess ||
+        preprocess_timing_result != cudaSuccess ||
+        execution_timing_result != cudaSuccess ||
+        d2h_timing_result != cudaSuccess) {
+        LOG_DEBUG("detector", "CUDA 分阶段耗时读取失败");
+        return nullptr;
+    }
+    profile.h2d_ms = static_cast<double>(h2d_ms);
+    profile.gpu_preprocess_ms = static_cast<double>(gpu_preprocess_ms);
+    profile.execution_ms = static_cast<double>(execution_ms);
+    profile.d2h_ms = static_cast<double>(d2h_ms);
+    return &impl_->output_values;
+#else
+    (void)host_input;
+    (void)host_input_bytes;
+    (void)gpu_preprocessed;
+    (void)profile;
+    return nullptr;
+#endif
+}
+
 const std::vector<Ort::Value>* Session::run(
         Ort::Value& input, SessionRunProfile& profile) {
     using clock = std::chrono::steady_clock;
@@ -513,115 +737,19 @@ const std::vector<Ort::Value>* Session::run(
     if (!impl_->session) return nullptr;
     try {
         if (impl_->use_cuda_graph) {
-#if XEN_HAS_CUDA_RUNTIME
-            profile.explicit_device_copy = true;
-            const cudaError_t set_device_result =
-                cudaSetDevice(impl_->device_id);
-            if (set_device_result != cudaSuccess) {
-                LOG_DEBUG("detector", "CUDA 设备选择失败: {}",
-                          cudaGetErrorString(set_device_result));
-                return nullptr;
-            }
-            if (!impl_->compute_stream) {
-                LOG_DEBUG("detector", "TensorRT CUDA Graph 缺少 user compute stream");
-                return nullptr;
-            }
-
-            const cudaError_t h2d_event_result = cudaEventRecord(
-                impl_->h2d_started, impl_->compute_stream);
-            if (h2d_event_result != cudaSuccess) {
-                LOG_DEBUG("detector", "CUDA H2D timing event 记录失败: {}",
-                          cudaGetErrorString(h2d_event_result));
-                return nullptr;
-            }
-            const cudaError_t input_copy_result = cudaMemcpyAsync(
-                impl_->device_input_value.GetTensorMutableRawData(),
+            return run_cuda_graph(
                 input.GetTensorRawData(), input.GetTensorSizeInBytes(),
-                cudaMemcpyHostToDevice, impl_->compute_stream);
-            if (input_copy_result != cudaSuccess) {
-                LOG_DEBUG("detector", "CUDA 输入复制入队失败: {}",
-                          cudaGetErrorString(input_copy_result));
-                return nullptr;
-            }
-            const cudaError_t h2d_finished_result = cudaEventRecord(
-                impl_->h2d_finished, impl_->compute_stream);
-            if (h2d_finished_result != cudaSuccess) {
-                LOG_DEBUG("detector", "CUDA H2D 完成 event 记录失败: {}",
-                          cudaGetErrorString(h2d_finished_result));
-                return nullptr;
-            }
-
-            impl_->session->Run(impl_->run_opts, *impl_->io_binding);
-            const cudaError_t execution_event_result = cudaEventRecord(
-                impl_->execution_finished, impl_->compute_stream);
-            if (execution_event_result != cudaSuccess) {
-                LOG_DEBUG("detector", "CUDA Graph timing event 记录失败: {}",
-                          cudaGetErrorString(execution_event_result));
-                return nullptr;
-            }
-
-            for (size_t i = 0; i < impl_->output_values.size(); ++i) {
-                const cudaError_t output_copy_result = cudaMemcpyAsync(
-                    impl_->output_values[i].GetTensorMutableRawData(),
-                    impl_->device_output_values[i].GetTensorRawData(),
-                    impl_->output_values[i].GetTensorSizeInBytes(),
-                    cudaMemcpyDeviceToHost, impl_->compute_stream);
-                if (output_copy_result != cudaSuccess) {
-                    LOG_DEBUG("detector", "CUDA 输出复制入队失败: {}",
-                              cudaGetErrorString(output_copy_result));
-                    return nullptr;
-                }
-            }
-            const cudaError_t d2h_event_result = cudaEventRecord(
-                impl_->d2h_finished, impl_->compute_stream);
-            if (d2h_event_result != cudaSuccess) {
-                LOG_DEBUG("detector", "CUDA D2H timing event 记录失败: {}",
-                          cudaGetErrorString(d2h_event_result));
-                return nullptr;
-            }
-            // H2D、Graph 执行和 D2H 全部位于同一 stream，只在 CPU 即将读取
-            // 输出前同步一次。四个复用 event 提供各阶段真实设备耗时，避免为
-            // 统计引入三次 host/device 同步。
-            const cudaError_t output_sync_result =
-                cudaEventSynchronize(impl_->d2h_finished);
-            if (output_sync_result != cudaSuccess) {
-                LOG_DEBUG("detector", "CUDA 输出复制失败: {}",
-                          cudaGetErrorString(output_sync_result));
-                return nullptr;
-            }
-
-            float h2d_ms = 0.0f;
-            float execution_ms = 0.0f;
-            float d2h_ms = 0.0f;
-            const cudaError_t h2d_timing_result = cudaEventElapsedTime(
-                &h2d_ms, impl_->h2d_started, impl_->h2d_finished);
-            const cudaError_t execution_timing_result = cudaEventElapsedTime(
-                &execution_ms, impl_->h2d_finished,
-                impl_->execution_finished);
-            const cudaError_t d2h_timing_result = cudaEventElapsedTime(
-                &d2h_ms, impl_->execution_finished, impl_->d2h_finished);
-            if (h2d_timing_result != cudaSuccess ||
-                execution_timing_result != cudaSuccess ||
-                d2h_timing_result != cudaSuccess) {
-                LOG_DEBUG("detector", "CUDA 分阶段耗时读取失败");
-                return nullptr;
-            }
-            profile.h2d_ms = static_cast<double>(h2d_ms);
-            profile.execution_ms = static_cast<double>(execution_ms);
-            profile.d2h_ms = static_cast<double>(d2h_ms);
-#else
-            return nullptr;
-#endif
-        } else {
-            const auto execution_started = clock::now();
-            impl_->output_values = impl_->session->Run(
-                impl_->run_opts,
-                impl_->input_names.data(), &input, 1,
-                impl_->output_names.data(), impl_->output_names.size());
-            const auto execution_finished = clock::now();
-            profile.execution_ms = std::chrono::duration_cast<milliseconds>(
-                execution_finished - execution_started).count();
+                false, profile);
         }
+
+        const auto execution_started = clock::now();
+        impl_->output_values = impl_->session->Run(
+            impl_->run_opts,
+            impl_->input_names.data(), &input, 1,
+            impl_->output_names.data(), impl_->output_names.size());
+        const auto execution_finished = clock::now();
+        profile.execution_ms = std::chrono::duration_cast<milliseconds>(
+            execution_finished - execution_started).count();
         return &impl_->output_values;
     } catch (const std::exception& e) {
         // run() 只负责把异常转成空结果；热路径不打印 INFO 及以上日志。
@@ -629,6 +757,40 @@ const std::vector<Ort::Value>* Session::run(
         return nullptr;
     } catch (...) {
         LOG_DEBUG("detector", "ORT 推理失败: 未知异常");
+        return nullptr;
+    }
+}
+
+bool Session::gpu_preprocess_enabled() const noexcept {
+#if XEN_HAS_CUDA_RUNTIME
+    return impl_ && impl_->use_cuda_graph && impl_->gpu_preprocessor &&
+           impl_->gpu_preprocessor->ready();
+#else
+    return false;
+#endif
+}
+
+bool Session::stage_gpu_input(const cv::Mat& bgr_image) noexcept {
+#if XEN_HAS_CUDA_RUNTIME
+    return gpu_preprocess_enabled() &&
+           impl_->gpu_preprocessor->stage(bgr_image);
+#else
+    (void)bgr_image;
+    return false;
+#endif
+}
+
+const std::vector<Ort::Value>* Session::run_gpu_preprocessed(
+        SessionRunProfile& profile) {
+    profile = {};
+    if (!impl_->session || !gpu_preprocess_enabled()) return nullptr;
+    try {
+        return run_cuda_graph(nullptr, 0, true, profile);
+    } catch (const std::exception& e) {
+        LOG_DEBUG("detector", "ORT GPU 前处理推理失败: {}", e.what());
+        return nullptr;
+    } catch (...) {
+        LOG_DEBUG("detector", "ORT GPU 前处理推理失败: 未知异常");
         return nullptr;
     }
 }

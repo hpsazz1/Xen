@@ -40,6 +40,7 @@ struct DebugReportSummary {
     DebugTimingSummary preprocess;
     DebugTimingSummary inference;
     DebugTimingSummary h2d;
+    DebugTimingSummary gpu_preprocess;
     DebugTimingSummary execution;
     DebugTimingSummary d2h;
     DebugTimingSummary postprocess;

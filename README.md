@@ -63,9 +63,12 @@ Xen/                           # 仓库根目录
   `cache/runtime/<进程-运行时钟-generation-segment>.csv/.json`。模型重载前结束当前报告，
   加载窗口不记录样本，完成后按实际活动模型和 Provider 开始新分段，避免新旧模型混合统计。
   报告按成功/失败状态隔离耗时，
-  输出 capture、queue、preprocess、inference、H2D、execution、D2H、postprocess、aim、
+  输出 capture、queue、preprocess、inference、H2D、GPU preprocess、execution、D2H、postprocess、aim、
   mouse、total 的 mean/P50/P95/P99/最大值；报告队列满载只覆盖最旧诊断样本，不反压核心线程。
-- 当前兼容链为 `GPU 纹理 → CPU BGR ROI → Detector CPU 前处理 → Provider`；GPU 互操作待实测后再实施。
+- 当前兼容链仍从 Capture 交付 CPU BGR ROI。TensorRT CUDA Graph 默认用 OpenCV 在 CPU 完成
+  resize/LetterBox，再经固定 pinned `uint8` staging 上传，由 CUDA kernel 完成 BGR→RGB、归一化和
+  HWC→CHW；DirectML、CPU、CUDA 非 Graph 保持 CPU float 前处理。D3D11/CUDA 或 D3D11/DirectML
+  互操作仍待真实链路基准后实施，当前不宣称消除 `GPU → CPU → GPU` 往返。
 - Overlay 采用 152 px 居中标签栏和无外框独立工作区。自绘标题栏在侧栏交界处仅用底色分区：左段与侧栏同色，右段与工作区同色，并随浅色/深色主题同步切换；标题栏和顶部控制条下方均不绘制分割线。侧栏仅保留概览、检测、瞄准、输入和设置五个标签，底部以无边框两行状态区展示输出门状态和版本。工作区底色从交界处连续铺满，顶部控制条保留 18 px、页面内容保留 28 px 左侧间距，只为状态卡、配置组等内部模块保留细边框；配置页保存操作固定在页头。运行期间仅 Detector 配置允许编辑、保存和热重载，Capture、Aim、Input 与 Runtime 配置仍锁定。
 - 当前 Overlay 已经人工确认并作为后续 UI 扩展基线。新增部件必须复用现有语义色、间距、表单控件和内部模块样式，不得增加工作区外框、嵌套卡片或新的导航分组；改变整体布局或主题体系前必须重新人工复核。
 - Codex 浅色与深色主题可在偏好设置中切换并保存到 `config.ini`。连续数值使用“滑块粗调 + 数值框精确输入”，手填值在 Enter 或失焦时按合法范围校验。
@@ -229,9 +232,22 @@ DirectML 使用官方独立 ORT 包，不能与 CUDA/TensorRT 版 `onnxruntime.d
   -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib"
 ```
 
-固定 shape 的 TensorRT 模型默认启用 CUDA Graph。Detector 会复用 CUDA 输入输出
-缓冲区，在图捕获之外执行每帧 H2D/D2H 复制，避免把首次输入错误地重复重放。
-动态 shape 模型或诊断图捕获问题时设置 `enable_trt_cuda_graph = false`。
+固定 shape 的 TensorRT 模型默认启用 CUDA Graph。Detector 会复用 CUDA 输入输出、pinned
+主机 staging 和 `uint8` 设备 staging；每帧显式上传模型尺寸 BGR 数据，由 CUDA kernel 直接写入
+固定 float 输入，再执行 Graph 和 D2H，避免把首次输入错误地重复重放。320×320 输入由此把
+每帧上传量从 1,228,800 字节降为 307,200 字节。动态 shape 或诊断图捕获问题时设置
+`enable_trt_cuda_graph = false`；需要 A/B 时设置 `enable_gpu_preprocess = false`。
+
+GPU 前处理 A/B 使用已构建的真实模型测试程序，在 clean `PATH` 下核对变化输入、Graph on/off、
+失败帧、检测连续性和上传字节数：
+
+```powershell
+.\scripts\benchmark_gpu_preprocess.ps1 `
+  -BuildDirectory ".\build" `
+  -ModelPath "C:\path\to\model.onnx" `
+  -TensorRtCachePath ".\cache\tensorrt\gpu-preprocess" `
+  -VideoDirectory "C:\path\to\videos"
+```
 
 使用真实场景视频评估 Detector 时，可逐帧统计前处理、推理、后处理和总耗时，
 以及有检测结果的帧比例和最长连续空检测帧数：

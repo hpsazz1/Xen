@@ -256,6 +256,27 @@ void test_preprocess_contract() {
     expect(reusable_blob.data == first_blob_address &&
            resize_buffer.data == first_resize_address,
            "固定输入尺寸不应重复分配前处理缓冲区");
+
+    cv::Mat prepared_bgr;
+    expect(detector::detail::letterbox_bgr_reuse(
+               larger, prepared_bgr, resize_buffer, 2, 2, info),
+           "CUDA 路径的 uint8 BGR LetterBox 应成功");
+    expect(prepared_bgr.type() == CV_8UC3 &&
+               prepared_bgr.cols == 2 && prepared_bgr.rows == 2 &&
+               prepared_bgr.at<cv::Vec3b>(0, 0) == cv::Vec3b(1, 2, 3),
+           "CUDA 路径必须保留 OpenCV resize 后的 BGR uint8 像素");
+
+    cv::Mat tall(2, 1, CV_8UC3, cv::Scalar(10, 20, 30));
+    expect(detector::detail::letterbox_bgr_reuse(
+               tall, prepared_bgr, resize_buffer, 4, 4, info),
+           "带填充的 uint8 BGR LetterBox 应成功");
+    expect(info.scale == 2.0f && info.pad_x == 1.0f &&
+               info.pad_y == 0.0f &&
+               prepared_bgr.at<cv::Vec3b>(0, 0) ==
+                   cv::Vec3b(114, 114, 114) &&
+               prepared_bgr.at<cv::Vec3b>(0, 1) ==
+                   cv::Vec3b(10, 20, 30),
+           "uint8 BGR LetterBox 的几何和 114 填充值必须与 CPU 路径一致");
 }
 
 void test_tensorrt_cache_defaults() {
@@ -266,6 +287,8 @@ void test_tensorrt_cache_defaults() {
            "TensorRT Timing Cache 默认应启用");
     expect(config.enable_trt_cuda_graph,
            "固定 shape 实时推理默认应启用 TensorRT CUDA Graph");
+    expect(config.enable_gpu_preprocess,
+           "TensorRT CUDA Graph 默认应启用 CUDA 通道重排与归一化");
     expect(!config.enable_output_fingerprint,
            "原始输出指纹默认必须关闭，避免污染正式推理性能");
     expect(!config.trt_cache_path.empty(),

@@ -8,7 +8,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # 项目源码和注释统一使用 UTF-8。MSVC 默认跟随系统代码页，中文注释可能被
 # 错误解析并进一步破坏相邻的 C++ 词法单元，因此必须显式启用 UTF-8。
 if(MSVC)
-    add_compile_options(/utf-8)
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:CXX>:/utf-8>"
+        "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>")
 endif()
 
 # ─── 依赖 ───────────────────────────────────────────────
@@ -161,6 +163,11 @@ if(EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_cuda.dll" OR
         set(CUDAToolkit_ROOT "${XEN_CUDA_ROOT}")
     endif()
     find_package(CUDAToolkit REQUIRED)
+    # 仅 CUDA/TensorRT ORT 构建启用 CUDA 编译器。DirectML 独立构建不探测
+    # nvcc，也不会把 CUDA kernel 或运行库带入产物。
+    enable_language(CUDA)
+    set(XEN_CUDA_ARCHITECTURES "75;80;86;89;90;100;120" CACHE STRING
+        "CUDA architectures for Xen detector preprocessing kernels")
 else()
     set(XEN_ONNXRUNTIME_HAS_CUDA FALSE)
 endif()
@@ -440,11 +447,17 @@ target_link_libraries(crash PUBLIC log)
 
 # ─── Detector 模块 ──────────────────────────────────────
 
-add_library(detector STATIC
+set(XEN_DETECTOR_SOURCES
     Xen/detector/detector.cpp
     Xen/detector/session.cpp
     Xen/detector/preprocess.cpp
     Xen/detector/postprocess.cpp)
+if(XEN_ONNXRUNTIME_HAS_CUDA)
+    list(APPEND XEN_DETECTOR_SOURCES
+        Xen/detector/cuda_preprocess.cu)
+endif()
+
+add_library(detector STATIC ${XEN_DETECTOR_SOURCES})
 
 target_include_directories(detector
     PUBLIC
@@ -460,6 +473,13 @@ target_link_libraries(detector
 if(XEN_ONNXRUNTIME_HAS_CUDA)
     target_link_libraries(detector PRIVATE CUDA::cudart)
     target_compile_definitions(detector PRIVATE XEN_HAS_CUDA_RUNTIME=1)
+    set_target_properties(detector PROPERTIES
+        CUDA_STANDARD 20
+        CUDA_STANDARD_REQUIRED ON
+        # cuda_preprocess.cu 与 session.cpp 必须共享同一个动态 cudart；自动运行库
+        # 关闭后统一由上面的 CUDA::cudart 导入目标链接和部署。
+        CUDA_RUNTIME_LIBRARY None
+        CUDA_ARCHITECTURES "${XEN_CUDA_ARCHITECTURES}")
 else()
     target_compile_definitions(detector PRIVATE XEN_HAS_CUDA_RUNTIME=0)
 endif()

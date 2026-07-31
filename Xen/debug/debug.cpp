@@ -28,6 +28,7 @@ struct TimingValues {
     std::vector<double> preprocess;
     std::vector<double> inference;
     std::vector<double> h2d;
+    std::vector<double> gpu_preprocess;
     std::vector<double> execution;
     std::vector<double> d2h;
     std::vector<double> postprocess;
@@ -83,6 +84,8 @@ void collect_timing(TimingValues& values,
     values.preprocess.push_back(sample.profile.detector.preprocess_ms);
     values.inference.push_back(sample.profile.detector.inference_ms);
     values.h2d.push_back(sample.profile.detector.h2d_ms);
+    values.gpu_preprocess.push_back(
+        sample.profile.detector.gpu_preprocess_ms);
     values.execution.push_back(sample.profile.detector.execution_ms);
     values.d2h.push_back(sample.profile.detector.d2h_ms);
     values.postprocess.push_back(sample.profile.detector.postprocess_ms);
@@ -113,6 +116,7 @@ DebugReportSummary make_summary(
     result.preprocess = summarize(values.preprocess);
     result.inference = summarize(values.inference);
     result.h2d = summarize(values.h2d);
+    result.gpu_preprocess = summarize(values.gpu_preprocess);
     result.execution = summarize(values.execution);
     result.d2h = summarize(values.d2h);
     result.postprocess = summarize(values.postprocess);
@@ -296,7 +300,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             samples_, report_samples_dropped_,
             final_snapshot.debug_samples_dropped);
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v1\n"
+        csv << "# Xen Runtime Debug Report v2\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -316,6 +320,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_csv_timing(csv, "preprocess", summary_.preprocess);
         append_csv_timing(csv, "inference", summary_.inference);
         append_csv_timing(csv, "h2d", summary_.h2d);
+        append_csv_timing(
+            csv, "gpu_preprocess", summary_.gpu_preprocess);
         append_csv_timing(csv, "execution", summary_.execution);
         append_csv_timing(csv, "d2h", summary_.d2h);
         append_csv_timing(csv, "postprocess", summary_.postprocess);
@@ -323,9 +329,10 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_csv_timing(csv, "mouse", summary_.mouse);
         append_csv_timing(csv, "total", summary_.total);
         csv << "sequence,capture_ms,queue_ms,preprocess_ms,inference_ms,"
-               "h2d_ms,execution_ms,d2h_ms,postprocess_ms,aim_ms,mouse_ms,"
+               "h2d_ms,gpu_preprocess_ms,execution_ms,d2h_ms,"
+               "postprocess_ms,aim_ms,mouse_ms,"
                "total_ms,detection_status,aim_status,mouse_status,mouse_sent,"
-               "success\n";
+               "gpu_preprocess,input_upload_bytes,success\n";
         csv << std::setprecision(9);
         for (const auto& sample : samples_) {
             csv << sample.sequence << ',' << sample.profile.capture_ms << ','
@@ -333,6 +340,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.profile.detector.preprocess_ms << ','
                 << sample.profile.detector.inference_ms << ','
                 << sample.profile.detector.h2d_ms << ','
+                << sample.profile.detector.gpu_preprocess_ms << ','
                 << sample.profile.detector.execution_ms << ','
                 << sample.profile.detector.d2h_ms << ','
                 << sample.profile.detector.postprocess_ms << ','
@@ -343,12 +351,14 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << AimStatusName(sample.aim_status) << ','
                 << MouseStatusName(sample.mouse_status) << ','
                 << bool_name(sample.mouse_sent) << ','
+                << bool_name(sample.profile.detector.gpu_preprocess) << ','
+                << sample.profile.detector.input_upload_bytes << ','
                 << bool_name(sample_succeeded(sample)) << '\n';
         }
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 1,\n"
+             << "{\n  \"schema\": 2,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -371,6 +381,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_json_timing(json, "preprocess", summary_.preprocess, false);
         append_json_timing(json, "inference", summary_.inference, false);
         append_json_timing(json, "h2d", summary_.h2d, false);
+        append_json_timing(
+            json, "gpu_preprocess", summary_.gpu_preprocess, false);
         append_json_timing(json, "execution", summary_.execution, false);
         append_json_timing(json, "d2h", summary_.d2h, false);
         append_json_timing(json, "postprocess", summary_.postprocess, false);
@@ -389,6 +401,10 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << MouseStatusName(sample.mouse_status)
                  << "\", \"mouse_sent\": "
                  << bool_name(sample.mouse_sent)
+                 << ", \"gpu_preprocess\": "
+                 << bool_name(sample.profile.detector.gpu_preprocess)
+                 << ", \"input_upload_bytes\": "
+                 << sample.profile.detector.input_upload_bytes
                  << ", \"success\": "
                  << bool_name(sample_succeeded(sample))
                  << ", \"total_ms\": " << sample.profile.total_ms << "}"

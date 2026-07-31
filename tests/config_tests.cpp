@@ -19,6 +19,7 @@ void test_round_trip() {
     AppConfig source;
     source.detector.model_path = "models/test.onnx";
     source.detector.backend = BackendType::TENSORRT;
+    source.detector.enable_gpu_preprocess = false;
     source.capture.roi_width = 416;
     source.capture.roi_height = 416;
     source.capture.backend = CaptureBackend::UDP_MJPEG;
@@ -72,6 +73,7 @@ void test_round_trip() {
     expect(load_app_config(path.string(), loaded, error),
            "写入后的配置应成功读取: " + error);
     expect(loaded.detector.backend == BackendType::TENSORRT &&
+           !loaded.detector.enable_gpu_preprocess &&
            loaded.capture.roi_width == 416 &&
            loaded.capture.backend == CaptureBackend::UDP_MJPEG &&
            loaded.capture.udp_url == source.capture.udp_url &&

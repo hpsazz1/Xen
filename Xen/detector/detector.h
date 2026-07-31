@@ -100,6 +100,9 @@ struct DetectorConfig {
     // 固定 shape 实时推理默认使用 CUDA Graph 降低 kernel launch 开销。
     // 动态 shape 或需要排查图捕获问题时可显式关闭。
     bool         enable_trt_cuda_graph = true;
+    // 仅在 TensorRT CUDA Graph 固定设备 I/O 路径生效。OpenCV 仍负责 resize 与
+    // LetterBox 几何，CUDA kernel 负责 BGR→RGB、uint8→float 和 HWC→CHW。
+    bool         enable_gpu_preprocess = true;
     // 仅用于回归诊断：计算原始输出字节指纹会额外遍历整个输出张量，性能
     // 基准和正式运行必须保持关闭。
     bool         enable_output_fingerprint = false;
@@ -122,9 +125,12 @@ struct InferenceProfile {
     // TensorRT CUDA Graph 使用显式设备复制时可进一步拆分；其他后端的
     // execution_ms 包含 ORT 内部可能发生的隐式复制，h2d/d2h 保持为 0。
     double h2d_ms         = 0;
+    double gpu_preprocess_ms = 0;
     double execution_ms   = 0;
     double d2h_ms         = 0;
     bool   explicit_device_copy = false;
+    bool   gpu_preprocess = false;
+    std::uint64_t input_upload_bytes = 0;
     std::uint64_t output_fingerprint = 0;
     DetectionStatus status = DetectionStatus::NOT_RUN;
 };

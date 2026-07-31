@@ -117,4 +117,64 @@ bool letterbox_reuse(const cv::Mat& src, cv::Mat& dst,
         src, dst, resize_buffer, target_w, target_h, info);
 }
 
+bool letterbox_bgr_reuse(const cv::Mat& src, cv::Mat& dst,
+                         cv::Mat& resize_buffer,
+                         int target_w, int target_h,
+                         LetterBoxInfo& info) noexcept {
+    info = {};
+    if (src.empty() || src.type() != CV_8UC3 ||
+        target_w <= 0 || target_h <= 0) {
+        dst.release();
+        return false;
+    }
+
+    try {
+        const int sw = src.cols;
+        const int sh = src.rows;
+        const float scale = std::min(
+            static_cast<float>(target_w) / static_cast<float>(sw),
+            static_cast<float>(target_h) / static_cast<float>(sh));
+        if (!(scale > 0.0f) || !std::isfinite(scale)) return false;
+
+        const int nw = std::clamp(
+            static_cast<int>(std::round(sw * scale)), 1, target_w);
+        const int nh = std::clamp(
+            static_cast<int>(std::round(sh * scale)), 1, target_h);
+        const int left = (target_w - nw) / 2;
+        const int top = (target_h - nh) / 2;
+
+        info.scale = scale;
+        info.pad_x = static_cast<float>(left);
+        info.pad_y = static_cast<float>(top);
+        info.orig_w = sw;
+        info.orig_h = sh;
+        info.target_w = target_w;
+        info.target_h = target_h;
+
+        const cv::Mat* resized = &src;
+        if (nw != sw || nh != sh) {
+            resize_buffer.create(nh, nw, CV_8UC3);
+            cv::resize(src, resize_buffer, cv::Size(nw, nh),
+                       0, 0, cv::INTER_LINEAR);
+            resized = &resize_buffer;
+        }
+
+        if (nw == target_w && nh == target_h) {
+            // 这里只创建浅引用，真正的跨帧稳定地址由 CudaPreprocessor 的 pinned
+            // staging 提供；同尺寸 ROI 不需要额外复制一份普通 CPU cv::Mat。
+            dst = *resized;
+            return true;
+        }
+
+        dst.create(target_h, target_w, CV_8UC3);
+        dst.setTo(cv::Scalar(114, 114, 114));
+        resized->copyTo(dst(cv::Rect(left, top, nw, nh)));
+        return true;
+    } catch (...) {
+        dst.release();
+        info = {};
+        return false;
+    }
+}
+
 } // namespace detector::detail

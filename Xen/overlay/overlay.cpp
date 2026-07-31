@@ -1051,11 +1051,12 @@ struct Overlay::Impl {
         ImGui::Dummy(ImVec2(0.0f, 5.0f));
 
         const PipelineProfile& profile = snapshot.last_profile;
-        const std::array<StageTiming, 10> stages{{
+        const std::array<StageTiming, 11> stages{{
             {"Capture", profile.capture_ms},
             {"Queue", profile.queue_ms},
             {"Preprocess", profile.detector.preprocess_ms},
             {"H2D", profile.detector.h2d_ms},
+            {"GPU preprocess", profile.detector.gpu_preprocess_ms},
             {"Execution", profile.detector.execution_ms},
             {"D2H", profile.detector.d2h_ms},
             {"Postprocess", profile.detector.postprocess_ms},
@@ -1444,7 +1445,7 @@ struct Overlay::Impl {
     }
 
     void render_detector_form(AppConfig& app_config) {
-        begin_config_panel("detector_panel", "推理", 232.0f);
+        begin_config_panel("detector_panel", "推理", 264.0f);
         if (begin_form("detector_form", 126.0f)) {
             form_row("模型路径");
             ImGui::InputText("##model_path", &app_config.detector.model_path);
@@ -1482,6 +1483,10 @@ struct Overlay::Impl {
             toggle_switch(
                 "##enable_trt_cuda_graph",
                 &app_config.detector.enable_trt_cuda_graph);
+            form_row("GPU 前处理");
+            toggle_switch(
+                "##enable_gpu_preprocess",
+                &app_config.detector.enable_gpu_preprocess);
             ImGui::EndTable();
         }
         end_config_panel();

@@ -11,9 +11,12 @@ namespace detector::detail {
 
 struct SessionRunProfile {
     double h2d_ms = 0.0;
+    double gpu_preprocess_ms = 0.0;
     double execution_ms = 0.0;
     double d2h_ms = 0.0;
     bool explicit_device_copy = false;
+    bool gpu_preprocess = false;
+    std::uint64_t input_upload_bytes = 0;
 };
 
 /// ONNX Runtime 会话的轻量封装
@@ -33,6 +36,10 @@ public:
     // 返回值由 Session 持有，仅在下一次 run()/load() 或析构前有效。
     const std::vector<Ort::Value>* run(
         Ort::Value& input, SessionRunProfile& profile);
+    bool gpu_preprocess_enabled() const noexcept;
+    bool stage_gpu_input(const cv::Mat& bgr_image) noexcept;
+    const std::vector<Ort::Value>* run_gpu_preprocessed(
+        SessionRunProfile& profile);
 
     size_t                        num_inputs() const;
     std::vector<int64_t>          input_shape() const;
@@ -46,6 +53,12 @@ public:
     const std::string&            active_provider() const noexcept;
 
 private:
+    const std::vector<Ort::Value>* run_cuda_graph(
+        const void* host_input,
+        size_t host_input_bytes,
+        bool gpu_preprocessed,
+        SessionRunProfile& profile);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

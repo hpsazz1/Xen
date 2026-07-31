@@ -122,6 +122,7 @@ struct Detector::Impl {
     std::array<int64_t, 4> input_shape{1, 3, 0, 0};
     size_t input_element_count = 0;
     cv::Mat input_blob;
+    cv::Mat prepared_bgr;
     cv::Mat resize_buffer;
     std::vector<Detection> candidate_detections;
     std::vector<unsigned char> nms_suppressed;
@@ -264,35 +265,52 @@ struct Detector::Impl {
 
         const auto start = clock::now();
         detector::detail::LetterBoxInfo letterbox_info;
-        if (!detector::detail::letterbox_reuse(
-                bgr_image, input_blob, resize_buffer,
-                static_cast<int>(width), static_cast<int>(height),
-                letterbox_info)) {
+        const bool use_gpu_preprocess = session.gpu_preprocess_enabled();
+        if (use_gpu_preprocess) {
+            if (!detector::detail::letterbox_bgr_reuse(
+                    bgr_image, prepared_bgr, resize_buffer,
+                    static_cast<int>(width), static_cast<int>(height),
+                    letterbox_info) ||
+                !session.stage_gpu_input(prepared_bgr)) {
+                profile.status = DetectionStatus::PREPROCESS_FAILED;
+                return {};
+            }
+        } else if (!detector::detail::letterbox_reuse(
+                       bgr_image, input_blob, resize_buffer,
+                       static_cast<int>(width), static_cast<int>(height),
+                       letterbox_info)) {
             profile.status = DetectionStatus::PREPROCESS_FAILED;
             return {};
         }
         const auto preprocessed = clock::now();
 
-        Ort::MemoryInfo* memory = session.memory_info();
-        if (!memory) {
-            profile.status = DetectionStatus::INFERENCE_FAILED;
-            return {};
-        }
-
-        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-            *memory, input_blob.ptr<float>(), input_element_count,
-            input_shape.data(), input_shape.size());
         detector::detail::SessionRunProfile session_profile;
-        const auto* outputs = session.run(input_tensor, session_profile);
+        const std::vector<Ort::Value>* outputs = nullptr;
+        if (use_gpu_preprocess) {
+            outputs = session.run_gpu_preprocessed(session_profile);
+        } else {
+            Ort::MemoryInfo* memory = session.memory_info();
+            if (!memory) {
+                profile.status = DetectionStatus::INFERENCE_FAILED;
+                return {};
+            }
+            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+                *memory, input_blob.ptr<float>(), input_element_count,
+                input_shape.data(), input_shape.size());
+            outputs = session.run(input_tensor, session_profile);
+        }
         const auto inferred = clock::now();
         profile.preprocess_ms =
             std::chrono::duration_cast<milliseconds>(preprocessed - start).count();
         profile.inference_ms =
             std::chrono::duration_cast<milliseconds>(inferred - preprocessed).count();
         profile.h2d_ms = session_profile.h2d_ms;
+        profile.gpu_preprocess_ms = session_profile.gpu_preprocess_ms;
         profile.execution_ms = session_profile.execution_ms;
         profile.d2h_ms = session_profile.d2h_ms;
         profile.explicit_device_copy = session_profile.explicit_device_copy;
+        profile.gpu_preprocess = session_profile.gpu_preprocess;
+        profile.input_upload_bytes = session_profile.input_upload_bytes;
         if (!outputs) {
             profile.status = DetectionStatus::INFERENCE_FAILED;
             return {};
@@ -359,12 +377,13 @@ struct Detector::Impl {
         profile.status = DetectionStatus::SUCCESS;
 
         LOG_TRACE("detector",
-                  "format={}, pre={:.2f}ms infer={:.2f}ms h2d={:.2f}ms exec={:.2f}ms d2h={:.2f}ms post={:.2f}ms total={:.2f}ms det={}",
+                  "format={}, pre={:.2f}ms infer={:.2f}ms h2d={:.2f}ms gpu_pre={:.2f}ms exec={:.2f}ms d2h={:.2f}ms post={:.2f}ms total={:.2f}ms upload={}B det={}",
                   output_format_name(resolved), profile.preprocess_ms,
                   profile.inference_ms, profile.h2d_ms,
-                  profile.execution_ms, profile.d2h_ms,
+                  profile.gpu_preprocess_ms, profile.execution_ms,
+                  profile.d2h_ms,
                   profile.postprocess_ms, profile.total_ms,
-                  detections.size());
+                  profile.input_upload_bytes, detections.size());
         return detections;
     }
 };

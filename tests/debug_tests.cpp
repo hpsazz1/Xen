@@ -29,6 +29,9 @@ RuntimePipelineSample make_sample(
     sample.profile.detector.preprocess_ms = 0.4;
     sample.profile.detector.inference_ms = 0.5;
     sample.profile.detector.h2d_ms = 0.1;
+    sample.profile.detector.gpu_preprocess_ms = 0.05;
+    sample.profile.detector.gpu_preprocess = true;
+    sample.profile.detector.input_upload_bytes = 307200;
     sample.profile.detector.execution_ms = 0.2;
     sample.profile.detector.d2h_ms = 0.1;
     sample.profile.detector.postprocess_ms = 0.3;
@@ -95,12 +98,14 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v1") != std::string::npos &&
+    expect(csv_text.find("Xen Runtime Debug Report v2") != std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
+               csv_text.find("gpu_preprocess_ms") != std::string::npos &&
                csv_text.find("INFERENCE_FAILED") != std::string::npos,
            "CSV 必须包含 schema、列头和失败状态");
-    expect(json_text.find("\"schema\": 1") != std::string::npos &&
+    expect(json_text.find("\"schema\": 2") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
+               json_text.find("\"gpu_preprocess\"") != std::string::npos &&
                json_text.find("\"runtime_samples_dropped\": 7") !=
                    std::string::npos,
            "JSON 必须包含 schema、分段统计和 Runtime 丢弃数");
