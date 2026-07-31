@@ -27,8 +27,11 @@ bool valid_config(const DetectorConfig& config) noexcept {
         (!config.enable_trt_engine_cache &&
          !config.enable_trt_timing_cache) ||
         !config.trt_cache_path.empty();
+    const bool profiling_path_valid =
+        !config.enable_ort_profiling || !config.ort_profile_prefix.empty();
     return !config.model_path.empty() && config.device_id >= 0 &&
            dimensions_are_pair && trt_cache_path_valid &&
+           profiling_path_valid &&
            config.input_width >= 0 &&
            config.input_height >= 0 && config.intra_threads >= 0 &&
            config.inter_threads >= 0 &&
@@ -474,6 +477,11 @@ std::unique_ptr<Detector> Detector::clone() const {
 
 InferenceProfile Detector::profile() const noexcept {
     return impl_ ? impl_->profile() : InferenceProfile{};
+}
+
+bool Detector::end_profiling(std::string& profile_path) noexcept {
+    profile_path.clear();
+    return loaded() && impl_->session.end_profiling(profile_path);
 }
 
 std::string Detector::backend_name() const {

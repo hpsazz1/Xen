@@ -70,6 +70,8 @@ struct Session::Impl {
     int device_id = 0;
     bool use_cuda_graph = false;
     bool gpu_preprocess_requested = false;
+    bool profiling_enabled = false;
+    bool profiling_ended = false;
 #if XEN_HAS_CUDA_RUNTIME
     std::unique_ptr<CudaPreprocessor> gpu_preprocessor;
     cudaStream_t compute_stream = nullptr;
@@ -85,6 +87,19 @@ struct Session::Impl {
         // Provider 持有 user_compute_stream 指针直到 Session 销毁。必须先释放
         // I/O Binding、设备张量和 Session，最后才能销毁 CUDA stream。
         clear_execution_buffers();
+        if (session && profiling_enabled && !profiling_ended) {
+            try {
+                Ort::AllocatorWithDefaultOptions allocator;
+                auto abandoned = session->EndProfilingAllocated(allocator);
+                if (abandoned && abandoned.get()[0] != '\0') {
+                    std::error_code ignored;
+                    std::filesystem::remove(
+                        std::filesystem::u8path(abandoned.get()), ignored);
+                }
+            } catch (...) {
+                // 析构阶段不能传播异常；未完成的诊断 trace 不具备证据效力。
+            }
+        }
         session.reset();
 #if XEN_HAS_CUDA_RUNTIME
         cudaSetDevice(device_id);
@@ -151,6 +166,26 @@ bool Session::setup_options(const DetectorConfig& cfg) {
         // 设置 inter-op 线程池没有调度收益，反而会让线程清单与实际行为不符。
         options.SetGraphOptimizationLevel(
             cfg.enable_graph_opt ? ORT_ENABLE_ALL : ORT_DISABLE_ALL);
+        if (cfg.enable_ort_profiling) {
+            const auto requested_prefix = std::filesystem::absolute(
+                std::filesystem::u8path(cfg.ort_profile_prefix));
+            const auto parent = requested_prefix.parent_path();
+            std::error_code directory_error;
+            if (!parent.empty()) {
+                std::filesystem::create_directories(
+                    parent, directory_error);
+            }
+            if (directory_error ||
+                (!parent.empty() &&
+                 !std::filesystem::is_directory(parent))) {
+                LOG_ERROR("detector", "ORT profiling 目录创建失败: {}",
+                          cfg.ort_profile_prefix);
+                return false;
+            }
+            options.EnableProfiling(requested_prefix.c_str());
+            impl_->profiling_enabled = true;
+            impl_->profiling_ended = false;
+        }
 
         const auto providers = Ort::GetAvailableProviders();
         const bool has_cuda = provider_available(
@@ -849,6 +884,29 @@ std::string Session::metadata_value(const char* key) const {
         return value ? std::string(value.get()) : std::string{};
     } catch (...) {
         return {};
+    }
+}
+
+bool Session::end_profiling(std::string& profile_path) noexcept {
+    profile_path.clear();
+    if (!impl_ || !impl_->session || !impl_->profiling_enabled ||
+        impl_->profiling_ended) {
+        return false;
+    }
+    try {
+        Ort::AllocatorWithDefaultOptions allocator;
+        auto generated = impl_->session->EndProfilingAllocated(allocator);
+        if (!generated || generated.get()[0] == '\0') return false;
+        profile_path = generated.get();
+        impl_->profiling_ended = true;
+        return true;
+    } catch (const std::exception& exception) {
+        LOG_ERROR("detector", "结束 ORT profiling 失败: {}",
+                  exception.what());
+        return false;
+    } catch (...) {
+        LOG_ERROR("detector", "结束 ORT profiling 失败: 未知异常");
+        return false;
     }
 }
 

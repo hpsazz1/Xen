@@ -26,7 +26,8 @@ void test_main_machine_defaults() {
     const std::vector<std::wstring_view> arguments{
         L"--model", L"model.onnx",
         L"--backend", L"tensorrt",
-        L"--report-prefix", L"reports/runtime"};
+        L"--report-prefix", L"reports/runtime",
+        L"--provider-profile", L"reports/runtime.provider-profile.json"};
     BenchmarkOptions options;
     std::string error;
     expect(parse(arguments, options, error) == BenchmarkParseStatus::READY,
@@ -46,8 +47,10 @@ void test_main_machine_defaults() {
                options.minimum_seconds == 300 &&
                options.maximum_seconds == 600 && options.enable_fp16 &&
                options.enable_cuda_graph &&
-               options.enable_gpu_preprocess,
-           "正式门槛和 TensorRT 优化默认值必须稳定");
+               options.enable_gpu_preprocess &&
+               options.provider_profile_path ==
+                   "reports/runtime.provider-profile.json",
+            "正式门槛和 TensorRT 优化默认值必须稳定");
 }
 
 void test_network_encoded_override() {
@@ -95,6 +98,7 @@ void test_invalid_options() {
     expect(parse({L"--model", L"model.onnx",
                   L"--backend", L"cuda",
                   L"--report-prefix", L"report",
+                  L"--provider-profile", L"report.provider.json",
                   L"--minimum-seconds", L"20",
                   L"--maximum-seconds", L"10"}, options, error) ==
                BenchmarkParseStatus::INVALID,
@@ -102,18 +106,21 @@ void test_invalid_options() {
     expect(parse({L"--model", L"model.onnx",
                   L"--backend", L"cuda",
                   L"--report-prefix", L"report",
+                  L"--provider-profile", L"report.provider.json",
                   L"--warmup-samples", L"100001"}, options, error) ==
                BenchmarkParseStatus::INVALID,
            "warmup 超过固定容量上限必须拒绝");
     expect(parse({L"--model", L"model.onnx",
                   L"--backend", L"cuda",
                   L"--report-prefix", L"report",
+                  L"--provider-profile", L"report.provider.json",
                   L"--maximum-seconds", L"86401"}, options, error) ==
                BenchmarkParseStatus::INVALID,
            "最大运行时长超过一天必须拒绝");
     expect(parse({L"--model", L"model.onnx",
                   L"--backend", L"cuda",
                   L"--report-prefix", L"report",
+                  L"--provider-profile", L"report.provider.json",
                   L"--output-format", L"unknown",
                   L"--maximum-seconds", L"10"}, options, error) ==
                BenchmarkParseStatus::INVALID,
@@ -121,9 +128,22 @@ void test_invalid_options() {
     expect(parse({L"--model", L"model.onnx",
                   L"--backend", L"cuda",
                   L"--report-prefix", L"report",
+                  L"--provider-profile", L"report.provider.json",
                   L"--expect-roi", L"2500,1400,320,320"}, options,
                  error) == BenchmarkParseStatus::INVALID,
            "越过主机 FOV 的 ROI 必须拒绝");
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"cuda",
+                  L"--report-prefix", L"report"}, options, error) ==
+               BenchmarkParseStatus::INVALID &&
+               error.find("--provider-profile") != std::string::npos,
+           "TensorRT/CUDA 缺少节点级 Provider profile 必须拒绝");
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"directml",
+                  L"--report-prefix", L"report",
+                  L"--provider-profile", L"unexpected.json"}, options,
+                 error) == BenchmarkParseStatus::INVALID,
+           "严格 DirectML 不应接受多余的 GPU Provider profile 参数");
     expect(parse({L"--help"}, options, error) ==
                BenchmarkParseStatus::HELP,
            "--help 不应要求其他必选参数");

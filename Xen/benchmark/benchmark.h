@@ -26,6 +26,9 @@ struct BenchmarkOptions {
     std::string model_path;
     std::string config_path;
     std::string report_prefix;
+    // TensorRT/CUDA 正式基准必须先由独立诊断 Session 生成该 ORT profile。
+    // DirectML 已禁用 CPU 回退，CPU 后端不需要该证据文件。
+    std::string provider_profile_path;
     BackendType backend = BackendType::TENSORRT;
     OutputFormat output_format = OutputFormat::AUTO;
     std::uint64_t warmup_samples = 100;

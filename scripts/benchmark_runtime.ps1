@@ -253,6 +253,85 @@ function Assert-Near {
     }
 }
 
+function Get-OrtProviderProfileSummary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedBackend,
+        [Parameter(Mandatory = $true)]
+        [string]$PublishedPath
+    )
+
+    # Windows PowerShell 5 会把 ConvertFrom-Json 返回的顶层数组作为单个
+    # pipeline 对象传给 @()。先赋给变量再展开，确保 foreach 收到逐个事件。
+    $document = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    $events = @($document)
+    if ($events.Count -eq 0) {
+        throw "ORT profile 没有任何事件：$Path"
+    }
+
+    $providerCounts = [ordered]@{}
+    $nodeEventCount = 0
+    $providerEventCount = 0
+    foreach ($event in $events) {
+        if ([string]$event.cat -ne "Node") { continue }
+        ++$nodeEventCount
+        if ($null -eq $event.args) { continue }
+        $property = $event.args.PSObject.Properties["provider"]
+        if ($null -eq $property -or
+            [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            continue
+        }
+        $provider = [string]$property.Value
+        if (-not $providerCounts.Contains($provider)) {
+            $providerCounts[$provider] = 0
+        }
+        $providerCounts[$provider] = [long]$providerCounts[$provider] + 1
+        ++$providerEventCount
+    }
+    if ($nodeEventCount -eq 0 -or $providerEventCount -eq 0) {
+        throw "ORT profile 缺少可归属 Provider 的 Node 事件。"
+    }
+
+    $expectedProvider = if ($RequestedBackend -eq "tensorrt") {
+        "TensorrtExecutionProvider"
+    } else {
+        "CUDAExecutionProvider"
+    }
+    $allowedProviders = if ($RequestedBackend -eq "tensorrt") {
+        @("TensorrtExecutionProvider", "CUDAExecutionProvider",
+          "CPUExecutionProvider")
+    } else {
+        @("CUDAExecutionProvider", "CPUExecutionProvider")
+    }
+    if (-not $providerCounts.Contains($expectedProvider) -or
+        [long]$providerCounts[$expectedProvider] -le 0) {
+        throw "ORT profile 没有预期 Provider 节点：$expectedProvider"
+    }
+    $unexpected = @($providerCounts.Keys | Where-Object {
+        $_ -notin $allowedProviders
+    })
+    if ($unexpected.Count -ne 0) {
+        throw "ORT profile 出现请求链之外的 Provider：$($unexpected -join ', ')"
+    }
+
+    $file = Get-FileSnapshot $Path
+    # pending 文件通过校验后会原子移动；环境清单必须引用发布后的稳定路径。
+    $file["path"] = [System.IO.Path]::GetFullPath($PublishedPath)
+    return [ordered]@{
+        verified = $true
+        expected_provider = $expectedProvider
+        event_count = $events.Count
+        node_event_count = $nodeEventCount
+        provider_event_count = $providerEventCount
+        unassigned_node_events = $nodeEventCount - $providerEventCount
+        provider_counts = $providerCounts
+        file = $file
+    }
+}
+
 if ($MaximumSeconds -lt $MinimumSeconds) {
     throw "MaximumSeconds 不能小于 MinimumSeconds。"
 }
@@ -284,7 +363,15 @@ New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
 $finalCsv = "$ReportPrefix.csv"
 $finalJson = "$ReportPrefix.json"
 $finalEnvironment = "$ReportPrefix.environment.json"
-foreach ($target in @($finalCsv, $finalJson, $finalEnvironment)) {
+$requiresProviderProfile = $Backend -eq "tensorrt" -or $Backend -eq "cuda"
+$finalProviderProfile = if ($requiresProviderProfile) {
+    "$ReportPrefix.provider-profile.json"
+} else {
+    ""
+}
+$finalTargets = @($finalCsv, $finalJson, $finalEnvironment)
+if ($requiresProviderProfile) { $finalTargets += $finalProviderProfile }
+foreach ($target in $finalTargets) {
     if (Test-Path -LiteralPath $target) {
         throw "正式报告目标已存在，拒绝覆盖：$target"
     }
@@ -296,6 +383,13 @@ $pendingPrefix = Join-Path $reportDirectory ".pending-$pendingId"
 $pendingCsv = "$pendingPrefix.csv"
 $pendingJson = "$pendingPrefix.json"
 $pendingEnvironment = "$pendingPrefix.environment.json"
+$pendingProviderProfile = if ($requiresProviderProfile) {
+    "$pendingPrefix.provider-profile.json"
+} else {
+    ""
+}
+$pendingArtifacts = @($pendingCsv, $pendingJson, $pendingEnvironment)
+if ($requiresProviderProfile) { $pendingArtifacts += $pendingProviderProfile }
 
 try {
 $modelBefore = Get-FileSnapshot $ModelPath
@@ -333,6 +427,9 @@ $arguments = @(
     "--cuda-graph", $EnableCudaGraph,
     "--gpu-preprocess", $EnableGpuPreprocess
 )
+if ($requiresProviderProfile) {
+    $arguments += @("--provider-profile", $pendingProviderProfile)
+}
 if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
     $arguments += @("--config", $ConfigPath)
 }
@@ -364,6 +461,27 @@ if ($exitCode -ne 0) {
 if (-not (Test-Path -LiteralPath $pendingCsv -PathType Leaf) -or
     -not (Test-Path -LiteralPath $pendingJson -PathType Leaf)) {
     throw "XenBenchmark 成功退出但没有生成完整 pending 报告。"
+}
+$providerProfileSummary = if ($requiresProviderProfile) {
+    if (-not (Test-Path -LiteralPath $pendingProviderProfile -PathType Leaf)) {
+        throw "GPU 基准成功退出但没有生成 Provider profile。"
+    }
+    Get-OrtProviderProfileSummary `
+        $pendingProviderProfile $Backend $finalProviderProfile
+} else {
+    [ordered]@{
+        verified = $true
+        expected_provider = if ($Backend -eq "directml") {
+            "DmlExecutionProvider"
+        } else {
+            "CPUExecutionProvider"
+        }
+        verification = if ($Backend -eq "directml") {
+            "session.disable_cpu_ep_fallback=1"
+        } else {
+            "CPUExecutionProvider"
+        }
+    }
 }
 
 $modelAfter = Get-FileSnapshot $ModelPath
@@ -511,6 +629,7 @@ $environment = [ordered]@{
         backend = $Backend
         provider = $expectedProvider
         provider_execution = [ordered]@{
+            node_assignment_verified = [bool]$providerProfileSummary.verified
             cpu_fallback_disabled = $Backend -eq "directml"
             node_fallback_policy = switch ($Backend) {
                 "tensorrt" { "TensorRT -> CUDA -> CPU" }
@@ -519,11 +638,12 @@ $environment = [ordered]@{
                 "cpu" { "CPU only" }
             }
             verification = switch ($Backend) {
-                "tensorrt" { "provider name only; TensorRT cache or profiling required before formal comparison" }
-                "cuda" { "provider name; profiling required before formal comparison" }
+                "tensorrt" { "independent ORT profiling session" }
+                "cuda" { "independent ORT profiling session" }
                 "directml" { "session.disable_cpu_ep_fallback=1" }
                 "cpu" { "CPUExecutionProvider" }
             }
+            profile = $providerProfileSummary
         }
         output_format = $OutputFormat
         warmup_samples = $WarmupSamples
@@ -572,6 +692,11 @@ try {
     $published.Add($finalCsv)
     [System.IO.File]::Move($pendingJson, $finalJson)
     $published.Add($finalJson)
+    if ($requiresProviderProfile) {
+        [System.IO.File]::Move(
+            $pendingProviderProfile, $finalProviderProfile)
+        $published.Add($finalProviderProfile)
+    }
     # 环境清单最后发布；只有它存在且 complete=true，整组报告才可视为有效。
     [System.IO.File]::Move($pendingEnvironment, $finalEnvironment)
     $published.Add($finalEnvironment)
@@ -581,7 +706,7 @@ try {
     }
     throw
 } finally {
-    foreach ($path in @($pendingCsv, $pendingJson, $pendingEnvironment)) {
+    foreach ($path in $pendingArtifacts) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }
 }
@@ -593,11 +718,14 @@ Write-Host "  total P95=$($report.timing.total.p95_ms) ms"
 Write-Host "  total P99=$($report.timing.total.p99_ms) ms"
 Write-Host "  CSV：$finalCsv"
 Write-Host "  JSON：$finalJson"
+if ($requiresProviderProfile) {
+    Write-Host "  Provider profile：$finalProviderProfile"
+}
 Write-Host "  环境清单：$finalEnvironment"
 } finally {
     # 任一校验或 XenBenchmark 失败都只能留下日志；pending 报告不构成
     # 有效结果，必须在最外层统一清理。
-    foreach ($path in @($pendingCsv, $pendingJson, $pendingEnvironment)) {
+    foreach ($path in $pendingArtifacts) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }
 }

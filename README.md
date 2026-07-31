@@ -152,14 +152,19 @@ DLL 的 SHA-256，逐样本校验 Provider、状态和几何，全部通过后�
   -ReportPrefix ".\cache\runtime-benchmark\dxgi-tensorrt"
 ```
 
+TensorRT/CUDA 正式基准还必须为同一模型和后端提供独立的 ORT 节点级 profile；脚本会自动将
+profile 作为第四个成组产物发布，并把最终路径、SHA-256 和每个 Provider 的 Node 数量写入环境清单。
+直接调用 `XenBenchmark.exe` 时使用 `--provider-profile PATH`；DirectML/CPU 不接受该参数。
+
 模型 AUTO 契约存在歧义时必须通过 `-OutputFormat` 显式指定，脚本不会猜测未知布局。默认门槛为
 100 个 warmup、至少 10000 个正式成功样本、至少 300 秒且最大 600 秒。调试短冒烟
 可显式降低门槛，但不能写成正式性能结论。FP16、CUDA Graph 和 GPU 前处理通过
 `-EnableFp16 on|off`、`-EnableCudaGraph on|off`、`-EnableGpuPreprocess on|off` 控制，默认均为
 `on`。`<prefix>.environment.json` 最后发布，是整组报告完成
 标记；没有该文件或 `complete` 不为 `true` 的 CSV/JSON 不得视为有效报告。
-TensorRT 和 CUDA 允许节点级回退，环境清单会如实记录 Provider 链；正式性能对比前还必须保存
-同模型、同后端的 ORT profiling 或等价 Provider 证据。DirectML 会禁用 CPU 节点回退。
+TensorRT 和 CUDA 允许节点级回退，环境清单会通过独立 ORT profiling 记录实际 Node 归属：
+TensorRT 允许 `TensorRT -> CUDA -> CPU`，CUDA 允许 `CUDA -> CPU`。profiling Session 与正式
+性能 Session 分离，诊断开销不会混入正式样本。DirectML 会禁用 CPU 节点回退。
 
 日志设施也由同一个 `config.ini` 静态加载。旧配置没有 `[log]` 节时使用默认值；日志等级支持
 `trace`、`debug`、`info`、`warn`、`error` 和 `off`，未知等级会拒绝加载并在界面提示错误。

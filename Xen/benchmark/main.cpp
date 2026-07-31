@@ -60,7 +60,11 @@ int wmain(int argc, wchar_t* argv[]) {
         std::cerr << "基准失败: " << error << '\n';
         return 1;
     }
-    std::cout << "基准通过，报告已发布到 " << options.report_prefix
-              << ".csv/.json\n";
+    std::cout << "基准通过，报告前缀=" << options.report_prefix;
+    if (!options.provider_profile_path.empty()) {
+        std::cout << "，Provider profile="
+                  << options.provider_profile_path;
+    }
+    std::cout << '\n';
     return 0;
 }

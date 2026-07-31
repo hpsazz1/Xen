@@ -50,6 +50,8 @@ public:
     const std::vector<const char*>& output_names() const;
     Ort::MemoryInfo*              memory_info();
     std::string                   metadata_value(const char* key) const;
+    bool                          end_profiling(
+        std::string& profile_path) noexcept;
     const std::string&            active_provider() const noexcept;
 
 private:

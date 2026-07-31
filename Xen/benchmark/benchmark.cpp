@@ -246,7 +246,8 @@ bool validate_runtime_snapshot(
 
 void remove_benchmark_outputs(
         const std::string& csv_path,
-        const std::string& json_path) noexcept {
+        const std::string& json_path,
+        const std::string& provider_profile_path) noexcept {
     try {
         std::error_code ignored;
         std::filesystem::remove(csv_path, ignored);
@@ -259,9 +260,116 @@ void remove_benchmark_outputs(
         std::filesystem::remove(csv_path + temporary_suffix, ignored);
         ignored.clear();
         std::filesystem::remove(json_path + temporary_suffix, ignored);
+        if (!provider_profile_path.empty()) {
+            ignored.clear();
+            std::filesystem::remove(provider_profile_path, ignored);
+        }
     } catch (...) {
         // 失败收口不能覆盖原始错误；PowerShell 外层还会清理 pending 文件。
     }
+}
+
+bool generate_provider_profile(
+        const DetectorConfig& runtime_config,
+        const std::string& output_path,
+        const char* expected_provider,
+        std::string& error) noexcept {
+    std::filesystem::path generated_path;
+    try {
+        const auto final_path = std::filesystem::u8path(output_path);
+        if (output_path.empty() || std::filesystem::exists(final_path)) {
+            set_error(error, "Provider profile 目标为空或已存在: " +
+                              output_path);
+            return false;
+        }
+
+        DetectorConfig profile_config = runtime_config;
+        profile_config.enable_ort_profiling = true;
+        profile_config.ort_profile_prefix = output_path + ".ort";
+        profile_config.enable_output_fingerprint = false;
+        Detector detector(profile_config);
+        if (!detector.load()) {
+            set_error(error, "Provider profiling Detector 加载失败");
+            return false;
+        }
+        bool inference_succeeded = true;
+        if (detector.backend_name() != expected_provider) {
+            set_error(error, "Provider profiling 实际后端不符合请求");
+            inference_succeeded = false;
+        }
+
+        // 两张内容不同的输入走同一个诊断 Session。这里不统计耗时，也不把
+        // trace Session 复用于后续正式样本。
+        for (int index = 0; inference_succeeded && index < 2; ++index) {
+            const unsigned char value = index == 0 ? 0U : 255U;
+            cv::Mat input(
+                detector.input_height(), detector.input_width(), CV_8UC3,
+                cv::Scalar(value, value, value));
+            (void)detector.detect(input);
+            const InferenceProfile profile = detector.profile();
+            if (profile.status != DetectionStatus::SUCCESS) {
+                set_error(error,
+                    "Provider profiling 推理失败: status=" +
+                    std::string(DetectionStatusName(profile.status)));
+                inference_succeeded = false;
+            }
+        }
+
+        std::string generated;
+        const bool profiling_ended = detector.end_profiling(generated);
+        detector.reset();
+        if (!generated.empty()) {
+            generated_path = std::filesystem::u8path(generated);
+        }
+        if (!inference_succeeded) {
+            if (!generated_path.empty()) {
+                std::error_code ignored;
+                std::filesystem::remove(generated_path, ignored);
+                generated_path.clear();
+            }
+            return false;
+        }
+        if (!profiling_ended) {
+            set_error(error, "ORT EndProfiling 未返回证据文件");
+            return false;
+        }
+        if (!std::filesystem::is_regular_file(generated_path)) {
+            set_error(error, "ORT profile 文件不存在: " + generated);
+            return false;
+        }
+        if (!MoveFileExW(
+                generated_path.c_str(), final_path.c_str(),
+                MOVEFILE_WRITE_THROUGH)) {
+            set_error(error,
+                "ORT profile 原子发布失败，Win32Error=" +
+                std::to_string(GetLastError()));
+            std::error_code ignored;
+            std::filesystem::remove(generated_path, ignored);
+            generated_path.clear();
+            return false;
+        }
+        generated_path.clear();
+        if (!std::filesystem::is_regular_file(final_path)) {
+            set_error(error, "Provider profile 发布后不存在");
+            std::error_code ignored;
+            std::filesystem::remove(final_path, ignored);
+            return false;
+        }
+        LOG_INFO("benchmark", "Provider profiling 已生成: {}",
+                 output_path);
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        set_error(error, std::string("生成 Provider profile 异常: ") +
+                          exception.what());
+    } catch (...) {
+        set_error(error, "生成 Provider profile 时发生未知异常");
+    }
+    if (!generated_path.empty()) {
+        std::error_code ignored;
+        std::filesystem::remove(generated_path, ignored);
+    }
+    return false;
 }
 
 } // namespace
@@ -310,6 +418,12 @@ BenchmarkParseStatus parse_benchmark_options(
                     return BenchmarkParseStatus::INVALID;
                 }
                 report_set = true;
+            } else if (argument == L"--provider-profile") {
+                if (!wide_to_utf8(value, parsed.provider_profile_path)) {
+                    set_error(error,
+                              "--provider-profile 不是合法 UTF-16 路径");
+                    return BenchmarkParseStatus::INVALID;
+                }
             } else if (argument == L"--output-format") {
                 if (!parse_output_format(value, parsed.output_format)) {
                     set_error(error,
@@ -414,6 +528,18 @@ bool validate_benchmark_options(
             set_error(error, "必须提供 --report-prefix");
             return false;
         }
+        const bool gpu_backend = options.backend == BackendType::TENSORRT ||
+            options.backend == BackendType::CUDA;
+        if (gpu_backend && options.provider_profile_path.empty()) {
+            set_error(error,
+                      "TensorRT/CUDA 必须提供 --provider-profile");
+            return false;
+        }
+        if (!gpu_backend && !options.provider_profile_path.empty()) {
+            set_error(error,
+                      "DirectML/CPU 不接受 --provider-profile");
+            return false;
+        }
         if (options.warmup_samples > kMaximumReportSamples ||
             options.minimum_samples == 0 ||
             options.minimum_samples > kMaximumReportSamples ||
@@ -511,6 +637,8 @@ std::string benchmark_usage() {
         "  --model PATH             ONNX 模型路径\n"
         "  --backend NAME           tensorrt/cuda/directml/cpu\n"
         "  --report-prefix PATH     成功后发布 PATH.csv 和 PATH.json\n\n"
+        "Provider 证据:\n"
+        "  --provider-profile PATH  TensorRT/CUDA 必选，独立 ORT trace JSON\n\n"
         "运行门槛:\n"
         "  --config PATH            可选 AppConfig INI\n"
         "  --output-format NAME     auto/channel_first/objectness/end_to_end\n"
@@ -539,6 +667,7 @@ bool run_runtime_benchmark(
         std::string& error) noexcept {
     std::string csv_path;
     std::string json_path;
+    std::string provider_profile_path;
     bool report_outputs_owned = false;
     try {
         if (!validate_benchmark_options(options, error)) return false;
@@ -549,8 +678,11 @@ bool run_runtime_benchmark(
         }
         csv_path = options.report_prefix + ".csv";
         json_path = options.report_prefix + ".json";
+        provider_profile_path = options.provider_profile_path;
         if (std::filesystem::exists(csv_path) ||
-            std::filesystem::exists(json_path)) {
+            std::filesystem::exists(json_path) ||
+            (!provider_profile_path.empty() &&
+             std::filesystem::exists(provider_profile_path))) {
             set_error(error, "报告目标已存在，拒绝覆盖: " +
                               options.report_prefix);
             return false;
@@ -571,6 +703,8 @@ bool run_runtime_benchmark(
         config.detector.enable_gpu_preprocess =
             options.enable_gpu_preprocess;
         config.detector.enable_output_fingerprint = false;
+        config.detector.enable_ort_profiling = false;
+        config.detector.ort_profile_prefix.clear();
         // 基准从不武装 SafetyGate，并强制使用禁用的 Win32 后端。即使配置文件
         // 原本允许 KMBOX/SendInput，也不会打开设备连接或发送物理输入。
         config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
@@ -591,6 +725,11 @@ bool run_runtime_benchmark(
             if (!crash_handler.install(crash_log_dir)) {
                 set_error(error, "崩溃诊断安装失败");
             } else {
+                const bool profile_ready = provider_profile_path.empty() ||
+                    generate_provider_profile(
+                        config.detector, provider_profile_path,
+                        expected_provider_name(options.backend), error);
+                if (profile_ready) {
                 Runtime runtime;
                 DebugReport report;
                 benchmark_stop_requested.store(false,
@@ -817,21 +956,24 @@ bool run_runtime_benchmark(
                         }
                     }
                 }
+                }
                 crash_handler.uninstall();
             }
         }
         if (!success && report_outputs_owned) {
             // 报告目标在入口已确认不存在，因此这里只清理本轮创建的精确
-            // CSV/JSON。即使 JSON 原子发布或发布后汇总校验失败，也不能留下
-            // 可被误认为有效结果的单个文件。
-            remove_benchmark_outputs(csv_path, json_path);
+            // CSV、JSON 和 Provider profile。即使 JSON 原子发布或发布后汇总
+            // 校验失败，也不能留下可被误认为有效结果的单个文件。
+            remove_benchmark_outputs(
+                csv_path, json_path, provider_profile_path);
         }
         Log::shutdown();
         if (success) error.clear();
         return success;
     } catch (const std::exception& exception) {
         if (report_outputs_owned) {
-            remove_benchmark_outputs(csv_path, json_path);
+            remove_benchmark_outputs(
+                csv_path, json_path, provider_profile_path);
         }
         Log::shutdown();
         set_error(error, std::string("执行 Runtime 基准异常: ") +
@@ -839,7 +981,8 @@ bool run_runtime_benchmark(
         return false;
     } catch (...) {
         if (report_outputs_owned) {
-            remove_benchmark_outputs(csv_path, json_path);
+            remove_benchmark_outputs(
+                csv_path, json_path, provider_profile_path);
         }
         Log::shutdown();
         set_error(error, "执行 Runtime 基准时发生未知异常");

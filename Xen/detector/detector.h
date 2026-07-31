@@ -106,6 +106,10 @@ struct DetectorConfig {
     // 仅用于回归诊断：计算原始输出字节指纹会额外遍历整个输出张量，性能
     // 基准和正式运行必须保持关闭。
     bool         enable_output_fingerprint = false;
+    // 仅用于独立 Provider 诊断 Session。性能 Session 必须保持关闭，前缀不
+    // 写入常规 config.ini，避免生产运行意外产生大体积 ORT trace。
+    bool         enable_ort_profiling = false;
+    std::string  ort_profile_prefix;
     // TensorRT 首次构建后在此保存 engine/profile/timing 文件。模型、ORT、
     // TensorRT 版本或精度配置变化时必须清理旧缓存。
     std::string  trt_cache_path = "cache/tensorrt";
@@ -172,6 +176,10 @@ public:
 
     /// 最近一次推理的线程安全快照；可与 detect() 并发读取
     InferenceProfile profile() const noexcept;
+
+    // 显式结束 ORT profiling 并返回实际生成的 JSON 路径。调用后不得继续
+    // 使用当前 Session 推理；未启用 profiling、未加载或重复调用均返回 false。
+    bool end_profiling(std::string& profile_path) noexcept;
 
     /// 返回已注册的最高优先级 Provider；CUDA/TensorRT 允许节点级后备
     std::string backend_name() const;
