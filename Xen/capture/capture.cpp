@@ -2,6 +2,7 @@
 
 #include "capture/ndi_internal.h"
 #include "capture/udp_internal.h"
+#include "capture/xudp_internal.h"
 
 #include "log/log.h"
 
@@ -33,6 +34,8 @@ const char* CaptureBackendName(CaptureBackend backend) noexcept {
             return "DESKTOP_DUPLICATION";
         case CaptureBackend::UDP_MJPEG:
             return "UDP_MJPEG";
+        case CaptureBackend::XUDP_JPEG:
+            return "XUDP_JPEG";
         case CaptureBackend::NDI:
             return "NDI";
     }
@@ -64,6 +67,8 @@ std::unique_ptr<ICapture> create_capture(
                     config);
             case CaptureBackend::UDP_MJPEG:
                 return capture::detail::create_udp_mjpeg_capture(config);
+            case CaptureBackend::XUDP_JPEG:
+                return capture::detail::create_xudp_capture(config);
             case CaptureBackend::NDI:
                 return capture::detail::create_ndi_capture(config);
         }

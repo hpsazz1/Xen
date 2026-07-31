@@ -464,12 +464,14 @@ add_library(capture STATIC
     Xen/capture/duplication.cpp
     Xen/capture/network.cpp
     Xen/capture/ndi.cpp
-    Xen/capture/udp.cpp)
+    Xen/capture/udp.cpp
+    Xen/capture/xudp.cpp
+    Xen/capture/xudp_protocol.cpp)
 target_include_directories(capture PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(capture PUBLIC ${OpenCV_LIBS} log
-    PRIVATE d3d11 dxgi ws2_32)
+    PRIVATE bcrypt d3d11 dxgi ws2_32)
 if(XEN_HAS_NDI)
     target_include_directories(capture PUBLIC ${XEN_NDI_INCLUDE_DIR})
     target_link_libraries(capture PRIVATE ${XEN_NDI_LIB})

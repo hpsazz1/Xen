@@ -2,11 +2,12 @@
 
 Xen 是基于 C++20 原生实现的 Windows AI 辅助瞄准工具。核心管线为：截图采集 → YOLO 目标检测推理 → 瞄准控制。
 
-当前仓库已形成 P0 单机最小闭环，并完成 UDP MJPEG 与 NDI 接收端源码和自动回环测试：
+当前仓库已形成 P0 单机最小闭环，并完成 UDP MJPEG、XUDP JPEG 与 NDI 接收端源码和自动回环测试：
 
 ```text
 Desktop Duplication ──────┐
 OBS/FFmpeg UDP MJPEG ─────┤
+XUDP v1 自定义发送端 ──────┤
 OBS/NDI Sender ───────────┴→ Detector → Aim → Runtime SafetyGate → Win32 SendInput
 ```
 
@@ -22,7 +23,7 @@ Xen/                           # 仓库根目录
 ├── Xen/                       # C++ 源码根目录
 │   ├── detector/              # Detector 模块（.h + .cpp 平铺）
 │   ├── log/                   # Log 模块（.h + .cpp 平铺）
-│   ├── capture/               # DXGI + UDP MJPEG + NDI + 主机 FOV 坐标契约
+│   ├── capture/               # DXGI + UDP/XUDP + NDI + 主机 FOV 坐标契约
 │   ├── aim/                   # 观测归并、追踪、目标选择和移动控制
 │   ├── mouse/                 # 设备无关命令与 Win32 SendInput 后端
 │   ├── keyboard/              # 按住启用与急停键轮询
@@ -39,7 +40,7 @@ Xen/                           # 仓库根目录
 ## P0 运行模型
 
 - 主线程负责 Win32/D3D11/ImGui 消息循环、只读快照渲染和意图提交。
-- Capture 线程从 Desktop Duplication 或 UDP MJPEG 获取 ROI，并发布到三个可复用槽组成的最新帧队列。
+- Capture 线程从 Desktop Duplication、UDP/XUDP 或 NDI 获取 ROI，并发布到三个可复用槽组成的最新帧队列。
 - Pipeline 线程依次执行 Detector、Aim、安全门控和 Mouse，不增加独立控制线程。
 - 当前兼容链为 `GPU 纹理 → CPU BGR ROI → Detector CPU 前处理 → Provider`；GPU 互操作待实测后再实施。
 - Overlay 采用 152 px 居中标签栏和无外框独立工作区。自绘标题栏在侧栏交界处仅用底色分区：左段与侧栏同色，右段与工作区同色，并随浅色/深色主题同步切换；标题栏和顶部控制条下方均不绘制分割线。侧栏仅保留概览、检测、瞄准、输入和设置五个标签，底部以无边框两行状态区展示输出门状态和版本。工作区底色从交界处连续铺满，顶部控制条保留 18 px、页面内容保留 28 px 左侧间距，只为状态卡、配置组等内部模块保留细边框；配置页保存操作固定在页头，运行期间锁定需重建资源的配置。
@@ -62,6 +63,15 @@ Xen/                           # 仓库根目录
 当前裸 MJPEG 兼容模式没有源帧号、发送时间戳、分片序号和校验，因此不能测量严格的发送端到
 接收端帧龄，也不能把主动最新帧淘汰解释为网络丢包。真实双机上线前仍需完成有线局域网长时间
 基准；详细方案见本地文档 `docs/009_双机网络采集坐标与方案评估_20260731.md`。
+
+`XUDP_JPEG` v1 在每个大端序数据报中携带流/帧号、分片范围、编码尺寸、主机 FOV、主机 ROI、
+源 FPS、发送时间戳和完整 JPEG SHA-256。接收端最多保留三个在途帧，支持乱序与相同重复分片，
+并分别统计帧号缺口、协议异常、Capture 淘汰和 Runtime 覆盖。主机 `2560x1440` 的中心
+`320x320` 由协议明确声明为 `(1120,560,320,320)`，辅机 `1920x1080` 从不进入换算。
+SHA-256 只提供传输完整性，不提供发送端身份认证；未同步跨机时钟时，发送时间戳也不能直接
+解释为严格端到端帧龄。当前仓库只有接收端和测试发送器，OBS 不能直接输出 XUDP，真实部署仍
+需要自定义发送端或 OBS 后处理插件。协议详见本地文档
+`docs/011_XUDP版本化帧协议设计与验证_20260731.md`。
 
 NDI 后端使用 NDI 6 SDK 的 mDNS 发现与 BGRX/BGRA 接收，仍复用同一主机坐标契约。自定义
 发送端可在每帧附加 Xen XML metadata；普通 OBS NDI 插件不能保证注入该 metadata，因此生产

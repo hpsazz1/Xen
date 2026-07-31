@@ -11,6 +11,7 @@
 enum class CaptureBackend {
     DESKTOP_DUPLICATION,
     UDP_MJPEG,
+    XUDP_JPEG,
     NDI,
 };
 
@@ -46,7 +47,7 @@ struct CaptureConfig {
     CaptureBackend backend = CaptureBackend::DESKTOP_DUPLICATION;
     int adapter_index = 0;
     int output_index = 0;
-    // 接收 FFmpeg `-f mjpeg` 输出的裸 JPEG 字节流；当前仅支持 IPv4。
+    // 裸 UDP 与 XUDP 共用 IPv4 监听地址；协议几何始终由 XUDP 帧头声明。
     std::string udp_url = "udp://0.0.0.0:5000";
     // recvfrom 单次阻塞上限，同时决定 close() 回收接收线程的最坏等待时间。
     int udp_read_timeout_ms = 250;
@@ -82,10 +83,14 @@ struct FrameTiming {
     double capture_ms = 0.0;
     // Capture 后端内部有界队列累计丢弃的源帧数，不包含 Runtime 队列覆盖。
     std::uint64_t source_dropped_frames = 0;
-    // NDI SDK transport 层报告的丢帧数；UDP/本机采集保持为 0。
+    // NDI SDK 报告或 XUDP 帧序号推导的传输丢帧数。
     std::uint64_t transport_dropped_frames = 0;
-    // NDI SDK 报告的源端接收帧总数；没有该统计的后端保持为 0。
+    // 协议解析、分片冲突、覆盖不完整或 SHA-256 失败的累计数量。
+    std::uint64_t transport_invalid_packets = 0;
+    // NDI/XUDP 报告的源端接收帧总数；没有该统计的后端保持为 0。
     std::uint64_t source_received_frames = 0;
+    std::uint64_t source_sequence = 0;
+    bool source_sequence_valid = false;
     double source_fps = 0.0;
     std::int64_t source_timecode = 0;
     bool source_timecode_valid = false;

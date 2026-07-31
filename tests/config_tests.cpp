@@ -123,6 +123,41 @@ void test_invalid_config() {
     config.capture.ndi_require_frame_metadata = true;
     expect(validate_app_config(config, error),
            "强制 Xen metadata 时允许由每帧声明主机 FOV 与 ROI");
+
+    config.capture.backend = CaptureBackend::XUDP_JPEG;
+    config.capture.udp_url.clear();
+    expect(!validate_app_config(config, error),
+           "XUDP 监听地址为空时必须拒绝配置");
+    config.capture.udp_url = "udp://127.0.0.1:5600";
+    config.capture.udp_frame_layout =
+        UdpFrameLayout::CENTER_CROP_1_TO_1;
+    config.capture.udp_source_width = 0;
+    config.capture.udp_source_height = 0;
+    expect(validate_app_config(config, error),
+           "XUDP 必须忽略裸 UDP 布局并由协议头提供主机几何");
+}
+
+void test_xudp_backend_round_trip() {
+    AppConfig source;
+    source.detector.model_path = "models/test.onnx";
+    source.capture.backend = CaptureBackend::XUDP_JPEG;
+    source.capture.udp_url = "udp://0.0.0.0:5600";
+    source.capture.udp_read_timeout_ms = 80;
+    source.capture.udp_disconnect_timeout_ms = 1200;
+    const auto path = std::filesystem::temp_directory_path() /
+                      "xen_xudp_config_round_trip.ini";
+    std::string error;
+    expect(save_app_config(path.string(), source, error),
+           "XUDP 配置应成功写入: " + error);
+    AppConfig loaded;
+    expect(load_app_config(path.string(), loaded, error) &&
+               loaded.capture.backend == CaptureBackend::XUDP_JPEG &&
+               loaded.capture.udp_url == source.capture.udp_url &&
+               loaded.capture.udp_read_timeout_ms == 80 &&
+               loaded.capture.udp_disconnect_timeout_ms == 1200,
+           "xudp_jpeg 名称与网络参数必须完整往返");
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
 }
 
 } // namespace
@@ -130,6 +165,7 @@ void test_invalid_config() {
 int main() {
     test_round_trip();
     test_invalid_config();
+    test_xudp_backend_round_trip();
     if (failures != 0) {
         std::cerr << "Config 测试失败数: " << failures << '\n';
         return 1;

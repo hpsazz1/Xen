@@ -158,8 +158,14 @@ struct Runtime::Impl {
                     write_slot->timing.source_dropped_frames;
                 current_snapshot.transport_dropped_frames =
                     write_slot->timing.transport_dropped_frames;
+                current_snapshot.transport_invalid_packets =
+                    write_slot->timing.transport_invalid_packets;
                 current_snapshot.source_received_frames =
                     write_slot->timing.source_received_frames;
+                current_snapshot.source_sequence =
+                    write_slot->timing.source_sequence;
+                current_snapshot.source_sequence_valid =
+                    write_slot->timing.source_sequence_valid;
                 current_snapshot.source_fps = write_slot->timing.source_fps;
                 current_snapshot.source_timecode =
                     write_slot->timing.source_timecode;

@@ -75,6 +75,7 @@ CaptureBackend parse_capture_backend(
         return CaptureBackend::DESKTOP_DUPLICATION;
     }
     if (normalized == "udp_mjpeg") return CaptureBackend::UDP_MJPEG;
+    if (normalized == "xudp_jpeg") return CaptureBackend::XUDP_JPEG;
     if (normalized == "ndi") return CaptureBackend::NDI;
     return fallback;
 }
@@ -85,6 +86,8 @@ const char* capture_backend_name(CaptureBackend backend) noexcept {
             return "desktop_duplication";
         case CaptureBackend::UDP_MJPEG:
             return "udp_mjpeg";
+        case CaptureBackend::XUDP_JPEG:
+            return "xudp_jpeg";
         case CaptureBackend::NDI:
             return "ndi";
     }
@@ -209,6 +212,7 @@ bool validate_app_config(const AppConfig& config,
         const bool common_capture_invalid =
             (config.capture.backend != CaptureBackend::DESKTOP_DUPLICATION &&
              config.capture.backend != CaptureBackend::UDP_MJPEG &&
+             config.capture.backend != CaptureBackend::XUDP_JPEG &&
              config.capture.backend != CaptureBackend::NDI) ||
             config.capture.roi_width <= 0 || config.capture.roi_height <= 0 ||
             (!config.capture.center_roi &&
@@ -228,7 +232,15 @@ bool validate_app_config(const AppConfig& config,
              config.capture.udp_disconnect_timeout_ms > 60000 ||
              !valid_network_layout(config.capture.udp_frame_layout,
                                    config.capture.udp_source_width,
-                                   config.capture.udp_source_height, false));
+                                    config.capture.udp_source_height, false));
+        const bool xudp_invalid =
+            config.capture.backend == CaptureBackend::XUDP_JPEG &&
+            (config.capture.udp_url.empty() ||
+             config.capture.udp_read_timeout_ms <= 0 ||
+             config.capture.udp_read_timeout_ms > 1000 ||
+             config.capture.udp_disconnect_timeout_ms <
+                 config.capture.udp_read_timeout_ms ||
+             config.capture.udp_disconnect_timeout_ms > 60000);
         const bool ndi_invalid =
             config.capture.backend == CaptureBackend::NDI &&
             (config.capture.ndi_source_name.empty() ||
@@ -244,7 +256,7 @@ bool validate_app_config(const AppConfig& config,
                                    config.capture.ndi_source_height,
                                    config.capture.ndi_require_frame_metadata));
         if (common_capture_invalid || desktop_invalid || udp_invalid ||
-            ndi_invalid) {
+            xudp_invalid || ndi_invalid) {
             error = "Capture 配置非法";
             return false;
         }
