@@ -203,6 +203,7 @@ struct XudpSender::Impl {
             const std::size_t fragment_count =
                 packetizer.fragment_count();
             std::uint64_t sent_datagrams = 0;
+            std::uint64_t sent_wire_bytes = 0;
             for (std::size_t index = 0; index < fragment_count; ++index) {
                 if (!packetizer.serialize_fragment(index, payload, packet) ||
                     packet.empty() ||
@@ -235,6 +236,9 @@ struct XudpSender::Impl {
                     return false;
                 }
                 ++sent_datagrams;
+                saturating_add(
+                    sent_wire_bytes,
+                    static_cast<std::uint64_t>(packet.size()));
                 saturating_increment(stats_value.datagrams_sent);
                 saturating_add(
                     stats_value.wire_bytes_sent,
@@ -252,6 +256,7 @@ struct XudpSender::Impl {
             stats_value.last_frame_datagrams = sent_datagrams;
             stats_value.last_frame_jpeg_bytes =
                 static_cast<std::uint64_t>(jpeg.size());
+            stats_value.last_frame_wire_bytes = sent_wire_bytes;
             update_timings(
                 started, encoded_at, packetized_at, finished);
             set_error({});
@@ -453,6 +458,7 @@ struct XudpSender::Impl {
         if (frame_id != 0) stats_value.last_frame_id = frame_id;
         stats_value.last_frame_datagrams = 0;
         stats_value.last_frame_jpeg_bytes = 0;
+        stats_value.last_frame_wire_bytes = 0;
         update_timings(started, encoded, packetized, finished);
     }
 

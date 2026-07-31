@@ -130,7 +130,16 @@ NDI 会明确返回 `UNSUPPORTED`，不会切换 UDP、DXGI 或 CPU 路径。
 `source=2560x1440, roi=(1120,560,320x320), encoded=320x320, scale=(1,1)`。
 辅机 `1920x1080` 不传给发送器，也不进入 XUDP 几何或 Aim counts。可使用 `--adapter`、
 `--output`、`--roi-width/--roi-height`、成对的 `--roi-x/--roi-y`、`--jpeg-quality`、`--fps`、
-`--datagram-bytes` 和 `--max-frames` 调整；完整参数以 `XenSender.exe --help` 为准。
+`--datagram-bytes`、`--max-frames`、`--max-seconds` 和 `--report` 调整；完整参数以
+`XenSender.exe --help` 为准。正式发送使用包装脚本，默认连续 300 秒并生成逐帧发送报告与
+环境清单：
+
+```powershell
+.\scripts\benchmark_xudp_sender.ps1 `
+  -Destination udp://192.168.1.20:5000 `
+  -BuildDirectory ".\build" `
+  -ReportPrefix ".\cache\runtime-benchmark\xudp-host"
+```
 
 无界面正式基准目标为 `xen_benchmark`，Release 输出名为 `XenBenchmark.exe`。它复用生产
 `Runtime`、`Capture`、`Detector`、`Aim` 和 `DebugReport`，不创建 Overlay；运行时强制
@@ -165,6 +174,27 @@ profile 作为第四个成组产物发布，并把最终路径、SHA-256 和每�
 TensorRT 和 CUDA 允许节点级回退，环境清单会通过独立 ORT profiling 记录实际 Node 归属：
 TensorRT 允许 `TensorRT -> CUDA -> CPU`，CUDA 允许 `CUDA -> CPU`。profiling Session 与正式
 性能 Session 分离，诊断开销不会混入正式样本。DirectML 会禁用 CPU 节点回退。
+
+UDP、XUDP 和 NDI 接收正式验收使用统一包装脚本。以下命令在辅机启动 XUDP 接收端；显式
+`ReadyFilePath` 便于外部编排在 Capture 已绑定、Runtime 为 `RUNNING` 且实际 Provider 校验
+通过后再启动主机 Sender。ready JSON 只声明接收端可收帧，其中几何名为
+`expected_geometry`，不能替代首帧和逐帧几何验证；进程退出后该文件必须消失。
+
+```powershell
+.\scripts\benchmark_network_receiver.ps1 `
+  -ModelPath "C:\path\to\model.onnx" `
+  -CaptureBackend xudp_jpeg `
+  -Backend directml `
+  -BuildDirectory ".\build-dml" `
+  -ListenUrl udp://0.0.0.0:5000 `
+  -ReadyFilePath ".\cache\runtime-benchmark\xudp-aux.ready.json" `
+  -ReportPrefix ".\cache\runtime-benchmark\xudp-aux"
+```
+
+未显式提供 `ReadyFilePath` 时，接收脚本会生成本轮随机路径。自动化必须使用唯一的新路径并轮询
+JSON 内容，禁止靠固定延时或重定向日志中的“已监听”文本判断就绪。裸 UDP、XUDP、NDI 三种
+后端均由同一脚本强制核对实际 Capture 后端、主机 FOV/ROI、Provider、失败状态、传输统计和
+Runtime 覆盖；`<prefix>.network.json` 最后发布才表示网络接收报告完整。
 
 2026-08-01 在 RTX 5070 Ti、本机 DXGI、`2560x1440` 中心 `320x320` ROI 上完成 5 分钟正式
 基准；三组均为零失败、零报告/Runtime 丢弃且没有物理 Mouse 命令。`total` 从 Capture 发布完成

@@ -39,6 +39,7 @@ struct XudpSenderStats {
     std::uint64_t largest_datagram_bytes = 0;
     std::uint64_t last_frame_datagrams = 0;
     std::uint64_t last_frame_jpeg_bytes = 0;
+    std::uint64_t last_frame_wire_bytes = 0;
     double last_encode_ms = 0.0;
     double last_packetize_ms = 0.0;
     double last_send_ms = 0.0;

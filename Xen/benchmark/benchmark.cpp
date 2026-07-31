@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -244,6 +245,110 @@ bool validate_runtime_snapshot(
     return true;
 }
 
+class ReadyFileGuard {
+public:
+    explicit ReadyFileGuard(const std::string& path) noexcept : path_(path) {}
+
+    ReadyFileGuard(const ReadyFileGuard&) = delete;
+    ReadyFileGuard& operator=(const ReadyFileGuard&) = delete;
+
+    ~ReadyFileGuard() noexcept {
+        remove();
+    }
+
+    bool publish(const RuntimeSnapshot& snapshot,
+                 const AppConfig& config,
+                 const BenchmarkOptions& options,
+                 std::string& error) noexcept {
+        if (path_.empty()) return true;
+        try {
+            const auto target = std::filesystem::u8path(path_);
+            if (std::filesystem::exists(target)) {
+                set_error(error, "ready-file 目标已存在，拒绝覆盖: " + path_);
+                return false;
+            }
+            auto temporary = target;
+            temporary += ".tmp." + std::to_string(
+                static_cast<unsigned long long>(GetCurrentProcessId()));
+            if (std::filesystem::exists(temporary)) {
+                set_error(error, "ready-file 临时目标已存在，拒绝覆盖");
+                return false;
+            }
+
+            // ready 只声明接收端已经能够收帧；首帧到达前不能把期望几何
+            // 冒充实际帧几何，因此字段明确命名为 expected_geometry。
+            const auto& geometry = options.expected_geometry;
+            std::ofstream output(
+                temporary, std::ios::binary | std::ios::trunc);
+            if (!output) {
+                set_error(error, "无法创建 ready-file 临时文件: " + path_);
+                return false;
+            }
+            output << "{\n"
+                   << "  \"schema\": 1,\n"
+                   << "  \"ready\": true,\n"
+                   << "  \"pid\": " << GetCurrentProcessId() << ",\n"
+                   << "  \"runtime_state\": \""
+                   << RuntimeStateName(snapshot.state) << "\",\n"
+                   << "  \"provider\": \"" << snapshot.provider << "\",\n"
+                   << "  \"capture_backend\": \""
+                   << CaptureBackendName(config.capture.backend) << "\",\n"
+                   << "  \"expected_geometry\": {"
+                   << "\"source_width\": " << geometry.source_width
+                   << ", \"source_height\": " << geometry.source_height
+                   << ", \"encoded_width\": " << geometry.encoded_width
+                   << ", \"encoded_height\": " << geometry.encoded_height
+                   << ", \"roi_x\": " << geometry.roi_x
+                   << ", \"roi_y\": " << geometry.roi_y
+                   << ", \"roi_width\": " << geometry.roi_width
+                   << ", \"roi_height\": " << geometry.roi_height
+                   << "}\n}\n";
+            output.flush();
+            const bool write_succeeded = output.good();
+            output.close();
+            if (!write_succeeded) {
+                std::error_code ignored;
+                std::filesystem::remove(temporary, ignored);
+                set_error(error, "写入 ready-file 临时文件失败: " + path_);
+                return false;
+            }
+            if (!MoveFileExW(
+                    temporary.c_str(), target.c_str(),
+                    MOVEFILE_WRITE_THROUGH)) {
+                const DWORD win32_error = GetLastError();
+                std::error_code ignored;
+                std::filesystem::remove(temporary, ignored);
+                set_error(error, "ready-file 原子发布失败，Win32Error=" +
+                    std::to_string(win32_error));
+                return false;
+            }
+            owned_ = true;
+            return true;
+        } catch (const std::exception& exception) {
+            set_error(error, std::string("发布 ready-file 异常: ") +
+                              exception.what());
+            return false;
+        } catch (...) {
+            set_error(error, "发布 ready-file 时发生未知异常");
+            return false;
+        }
+    }
+
+    void remove() noexcept {
+        if (!owned_ || path_.empty()) return;
+        try {
+            std::error_code ignored;
+            std::filesystem::remove(std::filesystem::u8path(path_), ignored);
+        } catch (...) {
+        }
+        owned_ = false;
+    }
+
+private:
+    const std::string& path_;
+    bool owned_ = false;
+};
+
 void remove_benchmark_outputs(
         const std::string& csv_path,
         const std::string& json_path,
@@ -382,6 +487,7 @@ BenchmarkParseStatus parse_benchmark_options(
         BenchmarkOptions parsed;
         bool model_set = false;
         bool report_set = false;
+        bool ready_file_set = false;
         for (std::size_t index = 0; index < arguments.size(); ++index) {
             const std::wstring_view argument = arguments[index];
             if (argument == L"--help" || argument == L"-h") {
@@ -418,6 +524,15 @@ BenchmarkParseStatus parse_benchmark_options(
                     return BenchmarkParseStatus::INVALID;
                 }
                 report_set = true;
+            } else if (argument == L"--ready-file") {
+                if (ready_file_set ||
+                    !wide_to_utf8(value, parsed.ready_file_path) ||
+                    parsed.ready_file_path.empty()) {
+                    set_error(error,
+                              "--ready-file 必须是唯一的合法非空 UTF-16 路径");
+                    return BenchmarkParseStatus::INVALID;
+                }
+                ready_file_set = true;
             } else if (argument == L"--provider-profile") {
                 if (!wide_to_utf8(value, parsed.provider_profile_path)) {
                     set_error(error,
@@ -637,6 +752,8 @@ std::string benchmark_usage() {
         "  --model PATH             ONNX 模型路径\n"
         "  --backend NAME           tensorrt/cuda/directml/cpu\n"
         "  --report-prefix PATH     成功后发布 PATH.csv 和 PATH.json\n\n"
+        "进程协调:\n"
+        "  --ready-file PATH        Runtime 就绪后原子发布，退出时删除\n\n"
         "Provider 证据:\n"
         "  --provider-profile PATH  TensorRT/CUDA 必选，独立 ORT trace JSON\n\n"
         "运行门槛:\n"
@@ -669,6 +786,7 @@ bool run_runtime_benchmark(
     std::string json_path;
     std::string provider_profile_path;
     bool report_outputs_owned = false;
+    ReadyFileGuard ready_file(options.ready_file_path);
     try {
         if (!validate_benchmark_options(options, error)) return false;
         const std::filesystem::path model_path(options.model_path);
@@ -679,6 +797,27 @@ bool run_runtime_benchmark(
         csv_path = options.report_prefix + ".csv";
         json_path = options.report_prefix + ".json";
         provider_profile_path = options.provider_profile_path;
+        if (!options.ready_file_path.empty()) {
+            const auto ready_path = std::filesystem::absolute(
+                std::filesystem::u8path(options.ready_file_path))
+                    .lexically_normal();
+            const auto same_as_ready = [&](const std::string& path) {
+                return !path.empty() &&
+                    std::filesystem::absolute(std::filesystem::u8path(path))
+                        .lexically_normal() == ready_path;
+            };
+            if (same_as_ready(csv_path) || same_as_ready(json_path) ||
+                same_as_ready(provider_profile_path)) {
+                set_error(error,
+                    "ready-file 不得与正式报告或 Provider profile 共用路径");
+                return false;
+            }
+            if (std::filesystem::exists(ready_path)) {
+                set_error(error, "ready-file 目标已存在，拒绝覆盖: " +
+                                  options.ready_file_path);
+                return false;
+            }
+        }
         if (std::filesystem::exists(csv_path) ||
             std::filesystem::exists(json_path) ||
             (!provider_profile_path.empty() &&
@@ -744,6 +883,9 @@ bool run_runtime_benchmark(
                     RuntimeSnapshot running_snapshot = runtime.snapshot();
                     if (!validate_runtime_snapshot(
                             running_snapshot, options, false, error)) {
+                        runtime.stop();
+                    } else if (!ready_file.publish(
+                                   running_snapshot, config, options, error)) {
                         runtime.stop();
                     } else {
                         DebugReportConfig report_config;

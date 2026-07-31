@@ -58,6 +58,7 @@ void test_network_encoded_override() {
         L"--model", L"model.onnx",
         L"--backend", L"directml",
         L"--report-prefix", L"reports/network",
+        L"--ready-file", L"reports/network.ready.json",
         L"--output-format", L"channel_first",
         L"--expect-source", L"2560x1440",
         L"--expect-encoded", L"320x320",
@@ -82,6 +83,7 @@ void test_network_encoded_override() {
                options.minimum_samples == 1 &&
                options.minimum_seconds == 0 &&
                options.maximum_seconds == 10 &&
+               options.ready_file_path == "reports/network.ready.json" &&
                !options.enable_fp16 && !options.enable_cuda_graph &&
                !options.enable_gpu_preprocess,
            "辅机运行必须只覆盖编码尺寸，不改变主机 FOV/ROI 契约");
@@ -144,6 +146,26 @@ void test_invalid_options() {
                   L"--provider-profile", L"unexpected.json"}, options,
                  error) == BenchmarkParseStatus::INVALID,
            "严格 DirectML 不应接受多余的 GPU Provider profile 参数");
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"cpu",
+                  L"--report-prefix", L"report",
+                  L"--ready-file", L"report.ready.json"}, options,
+                 error) == BenchmarkParseStatus::READY &&
+               options.ready_file_path == "report.ready.json",
+           "CPU 正式基准也应支持独立 ready-file 协调");
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"directml",
+                  L"--report-prefix", L"report",
+                  L"--ready-file", L"first.ready.json",
+                  L"--ready-file", L"second.ready.json"}, options,
+                 error) == BenchmarkParseStatus::INVALID,
+           "重复 ready-file 参数必须拒绝，避免清理目标歧义");
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"directml",
+                  L"--report-prefix", L"report",
+                  L"--ready-file", L""}, options, error) ==
+               BenchmarkParseStatus::INVALID,
+           "显式传入空 ready-file 路径必须拒绝");
     expect(parse({L"--help"}, options, error) ==
                BenchmarkParseStatus::HELP,
            "--help 不应要求其他必选参数");

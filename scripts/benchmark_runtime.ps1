@@ -8,7 +8,9 @@
     [string]$Backend = "tensorrt",
     [ValidateSet("auto", "channel_first", "objectness", "end_to_end")]
     [string]$OutputFormat = "auto",
-    [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build"),
+    [ValidateSet("auto", "desktop_duplication", "udp_mjpeg", "xudp_jpeg", "ndi")]
+    [string]$ExpectedCaptureBackend = "auto",
+    [string]$BuildDirectory = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
     [ValidateRange(0, 100000)]
@@ -44,10 +46,15 @@
     [ValidateSet("on", "off")]
     [string]$EnableCudaGraph = "on",
     [ValidateSet("on", "off")]
-    [string]$EnableGpuPreprocess = "on"
+    [string]$EnableGpuPreprocess = "on",
+    [string]$ReadyFilePath = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
+    $BuildDirectory = Join-Path $PSScriptRoot "..\build"
+}
 
 function Resolve-InputFile {
     param(
@@ -359,6 +366,17 @@ if ([string]::IsNullOrWhiteSpace($reportDirectory)) {
     throw "ReportPrefix 必须解析到有效父目录。"
 }
 New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
+if (-not [string]::IsNullOrWhiteSpace($ReadyFilePath)) {
+    $ReadyFilePath = [System.IO.Path]::GetFullPath($ReadyFilePath)
+    $readyDirectory = Split-Path -Parent $ReadyFilePath
+    if ([string]::IsNullOrWhiteSpace($readyDirectory) -or
+        -not (Test-Path -LiteralPath $readyDirectory -PathType Container)) {
+        throw "ReadyFilePath 的父目录不存在：$readyDirectory"
+    }
+    if (Test-Path -LiteralPath $ReadyFilePath) {
+        throw "ready-file 目标已存在，拒绝覆盖：$ReadyFilePath"
+    }
+}
 
 $finalCsv = "$ReportPrefix.csv"
 $finalJson = "$ReportPrefix.json"
@@ -390,6 +408,9 @@ $pendingProviderProfile = if ($requiresProviderProfile) {
 }
 $pendingArtifacts = @($pendingCsv, $pendingJson, $pendingEnvironment)
 if ($requiresProviderProfile) { $pendingArtifacts += $pendingProviderProfile }
+if (-not [string]::IsNullOrWhiteSpace($ReadyFilePath)) {
+    $pendingArtifacts += $ReadyFilePath
+}
 
 try {
 $modelBefore = Get-FileSnapshot $ModelPath
@@ -433,6 +454,9 @@ if ($requiresProviderProfile) {
 if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
     $arguments += @("--config", $ConfigPath)
 }
+if (-not [string]::IsNullOrWhiteSpace($ReadyFilePath)) {
+    $arguments += @("--ready-file", $ReadyFilePath)
+}
 
 $startedUtc = [DateTime]::UtcNow
 $originalTaskPath = $env:PATH
@@ -457,6 +481,10 @@ try {
 $finishedUtc = [DateTime]::UtcNow
 if ($exitCode -ne 0) {
     throw "XenBenchmark 失败，退出码：$exitCode"
+}
+if (-not [string]::IsNullOrWhiteSpace($ReadyFilePath) -and
+    (Test-Path -LiteralPath $ReadyFilePath)) {
+    throw "XenBenchmark 退出后仍残留 ready-file，生命周期契约被破坏。"
 }
 if (-not (Test-Path -LiteralPath $pendingCsv -PathType Leaf) -or
     -not (Test-Path -LiteralPath $pendingJson -PathType Leaf)) {
@@ -510,8 +538,23 @@ $expectedProviders = @{
     cpu = "CPUExecutionProvider"
 }
 $expectedProvider = $expectedProviders[$Backend]
+$captureBackendNames = @{
+    desktop_duplication = "DESKTOP_DUPLICATION"
+    udp_mjpeg = "UDP_MJPEG"
+    xudp_jpeg = "XUDP_JPEG"
+    ndi = "NDI"
+}
+$expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
+    ""
+} else {
+    $captureBackendNames[$ExpectedCaptureBackend]
+}
 if ($report.schema -ne 3) {
     throw "报告 schema 不是 3：$($report.schema)"
+}
+if (-not [string]::IsNullOrEmpty($expectedCaptureName) -and
+    $report.capture_backend -ne $expectedCaptureName) {
+    throw "实际 Capture 后端不符合请求：expected=$expectedCaptureName, report=$($report.capture_backend)"
 }
 if ($report.provider -ne $expectedProvider -or
     $report.final_snapshot.provider -ne $expectedProvider) {
@@ -628,6 +671,24 @@ $environment = [ordered]@{
     benchmark = [ordered]@{
         backend = $Backend
         provider = $expectedProvider
+        coordination = [ordered]@{
+            ready_file_enabled = -not [string]::IsNullOrWhiteSpace(
+                $ReadyFilePath)
+            ready_file_absent_after_benchmark =
+                [string]::IsNullOrWhiteSpace($ReadyFilePath) -or
+                -not (Test-Path -LiteralPath $ReadyFilePath)
+        }
+        capture = [ordered]@{
+            requested = $ExpectedCaptureBackend
+            actual = [string]$report.capture_backend
+            source_dropped_frames = [long]$snapshot.source_dropped_frames
+            transport_dropped_frames = [long]$snapshot.transport_dropped_frames
+            transport_invalid_packets = [long]$snapshot.transport_invalid_packets
+            source_received_frames = [long]$snapshot.source_received_frames
+            overwritten_frames = [long]$snapshot.overwritten_frames
+            capture_fps = [double]$snapshot.capture_fps
+            source_fps = [double]$snapshot.source_fps
+        }
         provider_execution = [ordered]@{
             node_assignment_verified = [bool]$providerProfileSummary.verified
             cpu_fallback_disabled = $Backend -eq "directml"

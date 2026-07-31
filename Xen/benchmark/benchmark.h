@@ -26,6 +26,9 @@ struct BenchmarkOptions {
     std::string model_path;
     std::string config_path;
     std::string report_prefix;
+    // 可选的一次性进程就绪标记。仅在 Capture 打开、Runtime 进入 RUNNING
+    // 且实际 Provider 校验通过后发布，退出时必须删除。
+    std::string ready_file_path;
     // TensorRT/CUDA 正式基准必须先由独立诊断 Session 生成该 ORT profile。
     // DirectML 已禁用 CPU 回退，CPU 后端不需要该证据文件。
     std::string provider_profile_path;

@@ -10,12 +10,16 @@
 
 #include "capture/capture.h"
 #include "log/log.h"
+#include "sender/report.h"
 #include "sender/sender.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #include <opencv2/core.hpp>
@@ -122,6 +126,111 @@ void test_invalid_sender_config() {
            "XUDP Sender 数据报必须能容纳固定头和至少一个 payload 字节");
 }
 
+sender::detail::SenderRunReport make_valid_report() {
+    sender::detail::SenderRunReport report;
+    report.destination_url = "udp://127.0.0.1:5000";
+    report.stop_reason = "frame_limit";
+    report.jpeg_quality = 85;
+    report.max_datagram_bytes = 1400;
+    report.fps = 240;
+    report.maximum_frames = 2;
+    report.elapsed_seconds = 1.25;
+    report.geometry.source_width = 2560;
+    report.geometry.source_height = 1440;
+    report.geometry.encoded_width = 320;
+    report.geometry.encoded_height = 320;
+    report.geometry.roi_x = 1120;
+    report.geometry.roi_y = 560;
+    report.geometry.roi_width = 320;
+    report.geometry.roi_height = 320;
+    report.stats.stream_id = 42;
+    report.stats.last_frame_id = 2;
+    report.stats.frames_sent = 2;
+    report.stats.datagrams_sent = 4;
+    report.stats.jpeg_bytes_sent = 4000;
+    report.stats.wire_bytes_sent = 4496;
+    report.stats.largest_datagram_bytes = 1400;
+    report.stats.last_frame_datagrams = 2;
+    report.stats.last_frame_jpeg_bytes = 2000;
+    report.stats.last_frame_wire_bytes = 2248;
+    report.samples = {
+        {1, 0.4, 0.2, 0.1, 0.05, 0.35, 2, 2000, 2248},
+        {2, 0.6, 0.4, 0.2, 0.10, 0.70, 2, 2000, 2248},
+    };
+    return report;
+}
+
+void test_sender_report_atomic_publish() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        (L"xen-sender-report-" + std::to_wstring(GetCurrentProcessId()) +
+         L"-" + std::to_wstring(GetTickCount64()));
+    std::error_code ignored;
+    std::filesystem::create_directories(directory, ignored);
+    expect(!ignored, "发送报告测试目录必须创建成功");
+    if (ignored) return;
+
+    const auto report_path = directory / L"sender.json";
+    std::string error;
+    auto report = make_valid_report();
+    expect(sender::detail::write_sender_run_report(
+               report_path.string(), report, error),
+           "合法发送报告必须原子发布: " + error);
+    std::ifstream input(report_path, std::ios::binary);
+    std::ostringstream text;
+    text << input.rdbuf();
+    expect(input.good() || input.eof(), "发送报告必须可完整读取");
+    expect(text.str().find("\"schema\": 1") != std::string::npos &&
+               text.str().find("\"capture_to_send\"") !=
+                   std::string::npos &&
+               text.str().find("\"frame_id\": 2") !=
+                   std::string::npos &&
+               text.str().find("\"roi_x\": 1120") !=
+                   std::string::npos &&
+               text.str().find("\"p50_ms\": 0.3") !=
+                   std::string::npos,
+           "发送报告必须包含 schema、逐帧计时和主机 ROI");
+
+    expect(!sender::detail::write_sender_run_report(
+               report_path.string(), report, error),
+           "发送报告不得覆盖既有目标");
+    std::size_t pending_files = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (entry.path().filename().wstring().find(L".pending-") !=
+            std::wstring::npos) {
+            ++pending_files;
+        }
+    }
+    expect(pending_files == 0, "发送报告成功或拒绝覆盖后不得遗留 pending");
+
+    auto failed_report = make_valid_report();
+    failed_report.stats.frames_failed = 1;
+    const auto failed_path = directory / L"failed.json";
+    expect(!sender::detail::write_sender_run_report(
+               failed_path.string(), failed_report, error) &&
+               !std::filesystem::exists(failed_path),
+           "包含发送失败的运行不得发布 complete 报告");
+    auto dropped_report = make_valid_report();
+    dropped_report.samples.pop_back();
+    dropped_report.samples_dropped = 1;
+    const auto dropped_path = directory / L"dropped.json";
+    expect(!sender::detail::write_sender_run_report(
+               dropped_path.string(), dropped_report, error) &&
+               !std::filesystem::exists(dropped_path),
+           "发送样本丢弃时不得发布 complete 报告");
+    auto inconsistent_report = make_valid_report();
+    ++inconsistent_report.stats.wire_bytes_sent;
+    const auto inconsistent_path = directory / L"inconsistent.json";
+    expect(!sender::detail::write_sender_run_report(
+               inconsistent_path.string(), inconsistent_report, error) &&
+               !std::filesystem::exists(inconsistent_path),
+           "逐帧字节数与累计统计不一致时不得发布 complete 报告");
+
+    input.close();
+    std::filesystem::remove(report_path, ignored);
+    ignored.clear();
+    std::filesystem::remove(directory, ignored);
+}
+
 void test_production_sender_to_capture_loopback() {
     WinsockSession winsock;
     expect(winsock.ready(), "Winsock 必须可用于生产 XUDP Sender 回环测试");
@@ -210,6 +319,8 @@ void test_production_sender_to_capture_loopback() {
     const XudpSenderStats successful_stats = sender.stats();
     expect(successful_stats.datagrams_sent >= 2 &&
                successful_stats.last_frame_datagrams >= 1 &&
+               successful_stats.last_frame_wire_bytes >
+                   successful_stats.last_frame_jpeg_bytes &&
                successful_stats.largest_datagram_bytes <= 1400 &&
                successful_stats.jpeg_bytes_sent > 0 &&
                successful_stats.wire_bytes_sent >
@@ -237,6 +348,7 @@ int main() {
     log_config.enable_ringbuf = false;
     Log::init(log_config);
     test_invalid_sender_config();
+    test_sender_report_atomic_publish();
     test_production_sender_to_capture_loopback();
     Log::shutdown();
 

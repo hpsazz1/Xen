@@ -10,17 +10,20 @@
 #include "capture/capture.h"
 #include "crash/crash.h"
 #include "log/log.h"
+#include "sender/report.h"
 #include "sender/sender.h"
 
 #include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -36,6 +39,8 @@ struct SenderOptions {
     int max_datagram_bytes = 1400;
     std::uint32_t fps = 240;
     std::uint64_t max_frames = 0;
+    std::uint64_t max_seconds = 0;
+    std::string report_path;
     bool explicit_roi = false;
     bool show_help = false;
 };
@@ -162,6 +167,17 @@ bool parse_options(int argc, wchar_t* argv[], SenderOptions& options,
                     error = "--max-frames 必须是非负整数";
                     return false;
                 }
+            } else if (argument == L"--max-seconds") {
+                if (!parse_integer(value, options.max_seconds)) {
+                    error = "--max-seconds 必须是非负整数";
+                    return false;
+                }
+            } else if (argument == L"--report") {
+                if (!wide_to_utf8(value, options.report_path) ||
+                    options.report_path.empty()) {
+                    error = "--report 必须是合法非空路径";
+                    return false;
+                }
             } else {
                 std::string unknown;
                 wide_to_utf8(argument, unknown);
@@ -184,6 +200,7 @@ bool parse_options(int argc, wchar_t* argv[], SenderOptions& options,
             options.roi_width <= 0 || options.roi_height <= 0 ||
             options.jpeg_quality < 1 || options.jpeg_quality > 100 ||
             options.fps == 0 || options.fps > 1'000'000U ||
+            options.max_seconds > 86'400U ||
             options.max_datagram_bytes <= 124 ||
             options.max_datagram_bytes > 65507 ||
             (options.explicit_roi &&
@@ -213,6 +230,8 @@ void print_help() {
         << "  --fps N              发送上限及协议声明 FPS，默认 240\n"
         << "  --datagram-bytes N   XUDP 数据报上限，默认 1400\n"
         << "  --max-frames N       成功发送 N 帧后退出，0 表示持续运行\n"
+        << "  --max-seconds N      运行 N 秒后退出，0 表示不限时，最大 86400\n"
+        << "  --report PATH        成功退出后原子发布逐帧 JSON 报告\n"
         << "  --help                显示帮助\n";
 }
 
@@ -230,6 +249,20 @@ void log_stats(const XudpSenderStats& stats) noexcept {
 }
 
 int run_sender(const SenderOptions& options) noexcept {
+    if (!options.report_path.empty()) {
+        try {
+            if (std::filesystem::exists(
+                    std::filesystem::u8path(options.report_path))) {
+                LOG_ERROR("sender", "发送报告目标已存在，拒绝覆盖: {}",
+                          options.report_path);
+                return 6;
+            }
+        } catch (...) {
+            LOG_ERROR("sender", "检查发送报告目标时发生异常");
+            return 6;
+        }
+    }
+
     CaptureConfig capture_config;
     capture_config.backend = CaptureBackend::DESKTOP_DUPLICATION;
     capture_config.adapter_index = options.adapter_index;
@@ -268,12 +301,29 @@ int run_sender(const SenderOptions& options) noexcept {
     auto next_send_at = std::chrono::steady_clock::time_point::min();
     auto next_stats_at = std::chrono::steady_clock::now() +
                          std::chrono::seconds(5);
+    const auto run_started = std::chrono::steady_clock::now();
     auto next_warning_at = std::chrono::steady_clock::time_point::min();
     bool geometry_logged = false;
+    sender::detail::SenderRunGeometry report_geometry;
+    bool report_geometry_ready = false;
+    constexpr std::size_t kMaximumReportSamples = 200'000U;
+    std::vector<sender::detail::SenderFrameSample> report_samples;
+    std::uint64_t report_samples_dropped = 0;
+    if (!options.report_path.empty()) {
+        report_samples.reserve(kMaximumReportSamples);
+    }
+    std::string stop_reason = "signal";
     int exit_code = 0;
     CapturedFrame frame;
 
     while (!stop_requested.load(std::memory_order_acquire)) {
+        if (options.max_seconds != 0 &&
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - run_started).count() >=
+                static_cast<double>(options.max_seconds)) {
+            stop_reason = "duration";
+            break;
+        }
         const CaptureStatus capture_status = capture->grab(frame);
         if (capture_status == CaptureStatus::NO_FRAME) continue;
         if (capture_status != CaptureStatus::FRAME) {
@@ -297,6 +347,21 @@ int run_sender(const SenderOptions& options) noexcept {
                 frame.bgr.rows, frame.source_pixels_per_pixel_x,
                 frame.source_pixels_per_pixel_y);
             geometry_logged = true;
+            report_geometry.source_width = frame.source_width;
+            report_geometry.source_height = frame.source_height;
+            report_geometry.encoded_width = frame.bgr.cols;
+            report_geometry.encoded_height = frame.bgr.rows;
+            report_geometry.roi_x = static_cast<int>(std::lround(frame.roi_x));
+            report_geometry.roi_y = static_cast<int>(std::lround(frame.roi_y));
+            report_geometry.roi_width = static_cast<int>(std::lround(
+                frame.bgr.cols * frame.source_pixels_per_pixel_x));
+            report_geometry.roi_height = static_cast<int>(std::lround(
+                frame.bgr.rows * frame.source_pixels_per_pixel_y));
+            report_geometry.source_pixels_per_pixel_x =
+                frame.source_pixels_per_pixel_x;
+            report_geometry.source_pixels_per_pixel_y =
+                frame.source_pixels_per_pixel_y;
+            report_geometry_ready = true;
         }
 
         if (!sender.send_frame(frame)) {
@@ -311,8 +376,31 @@ int run_sender(const SenderOptions& options) noexcept {
             }
         } else {
             next_send_at = now + frame_interval;
+            XudpSenderStats current_stats;
+            const bool need_stats = !options.report_path.empty() ||
+                options.max_frames != 0;
+            if (need_stats) current_stats = sender.stats();
+            if (!options.report_path.empty()) {
+                sender::detail::SenderFrameSample sample;
+                sample.frame_id = current_stats.last_frame_id;
+                sample.capture_ms = frame.timing.capture_ms;
+                sample.encode_ms = current_stats.last_encode_ms;
+                sample.packetize_ms = current_stats.last_packetize_ms;
+                sample.send_ms = current_stats.last_send_ms;
+                sample.sender_total_ms = current_stats.last_total_ms;
+                sample.datagrams = current_stats.last_frame_datagrams;
+                sample.jpeg_bytes = current_stats.last_frame_jpeg_bytes;
+                sample.wire_bytes = current_stats.last_frame_wire_bytes;
+                if (report_samples.size() < kMaximumReportSamples) {
+                    report_samples.push_back(sample);
+                } else if (report_samples_dropped !=
+                           std::numeric_limits<std::uint64_t>::max()) {
+                    ++report_samples_dropped;
+                }
+            }
             if (options.max_frames != 0 &&
-                sender.stats().frames_sent >= options.max_frames) {
+                current_stats.frames_sent >= options.max_frames) {
+                stop_reason = "frame_limit";
                 break;
             }
         }
@@ -323,7 +411,35 @@ int run_sender(const SenderOptions& options) noexcept {
         }
     }
 
-    log_stats(sender.stats());
+    const auto run_finished = std::chrono::steady_clock::now();
+    const XudpSenderStats final_stats = sender.stats();
+    log_stats(final_stats);
+    if (exit_code == 0 && !options.report_path.empty()) {
+        sender::detail::SenderRunReport report;
+        report.destination_url = options.destination_url;
+        report.stop_reason = stop_reason;
+        report.adapter_index = options.adapter_index;
+        report.output_index = options.output_index;
+        report.jpeg_quality = options.jpeg_quality;
+        report.max_datagram_bytes = options.max_datagram_bytes;
+        report.fps = options.fps;
+        report.maximum_frames = options.max_frames;
+        report.maximum_seconds = options.max_seconds;
+        report.elapsed_seconds = std::chrono::duration<double>(
+            run_finished - run_started).count();
+        if (report_geometry_ready) report.geometry = report_geometry;
+        report.stats = final_stats;
+        report.samples = std::move(report_samples);
+        report.samples_dropped = report_samples_dropped;
+        std::string report_error;
+        if (!sender::detail::write_sender_run_report(
+                options.report_path, report, report_error)) {
+            LOG_ERROR("sender", "发送报告发布失败: {}", report_error);
+            exit_code = 6;
+        } else {
+            LOG_INFO("sender", "发送报告已发布: {}", options.report_path);
+        }
+    }
     sender.close();
     capture->close();
     return exit_code;

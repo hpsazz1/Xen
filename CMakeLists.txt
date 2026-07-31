@@ -513,7 +513,8 @@ else()
 endif()
 
 add_library(sender STATIC
-    Xen/sender/sender.cpp)
+    Xen/sender/sender.cpp
+    Xen/sender/report.cpp)
 target_include_directories(sender PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
