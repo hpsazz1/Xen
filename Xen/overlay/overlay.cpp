@@ -531,12 +531,11 @@ struct Overlay::Impl {
     WorkspacePage active_page = WorkspacePage::OVERVIEW;
     bool initialized = false;
     bool close_requested = false;
+    bool show_log_panel = false;
+    std::string last_log_tail;
 
     static LRESULT CALLBACK window_proc(
             HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-        if (ImGui_ImplWin32_WndProcHandler(hwnd, message, wparam, lparam)) {
-            return TRUE;
-        }
         auto* self = reinterpret_cast<Impl*>(
             GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (message == WM_NCCREATE) {
@@ -544,6 +543,15 @@ struct Overlay::Impl {
             self = static_cast<Impl*>(create->lpCreateParams);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA,
                               reinterpret_cast<LONG_PTR>(self));
+        }
+        if (message == WM_KEYDOWN && wparam == VK_F9 &&
+            (lparam & (1LL << 30)) == 0 && self) {
+            self->show_log_panel = !self->show_log_panel;
+            if (self->show_log_panel) self->last_log_tail.clear();
+            return 0;
+        }
+        if (ImGui_ImplWin32_WndProcHandler(hwnd, message, wparam, lparam)) {
+            return TRUE;
         }
         switch (message) {
             case WM_NCCALCSIZE:
@@ -946,13 +954,16 @@ struct Overlay::Impl {
 
     void render_page_heading(bool can_edit, OverlayActions& actions) {
         ImGui::PushFont(small_font);
-        ImGui::TextColored(rgba(kFaintInk), "%s", page_context(active_page));
+        ImGui::TextColored(
+            rgba(kFaintInk), "%s",
+            show_log_panel ? "LOG / RING BUFFER" : page_context(active_page));
         ImGui::PopFont();
         ImGui::PushFont(title_font);
-        ImGui::TextUnformatted(page_title(active_page));
+        ImGui::TextUnformatted(
+            show_log_panel ? "最近日志" : page_title(active_page));
         ImGui::PopFont();
 
-        if (active_page != WorkspacePage::OVERVIEW) {
+        if (!show_log_panel && active_page != WorkspacePage::OVERVIEW) {
             const float button_width = 96.0f;
             ImGui::SetCursorPos(ImVec2(
                 ImGui::GetWindowWidth() - button_width - 22.0f, 12.0f));
@@ -1148,6 +1159,51 @@ struct Overlay::Impl {
         } else {
             ImGui::TextColored(rgba(kFaintInk), "当前无目标");
         }
+        end_surface();
+    }
+
+    void render_log_panel() {
+        const auto lines = Log::get_ring_buffer(64);
+        const bool log_changed = lines.empty()
+            ? !last_log_tail.empty()
+            : lines.back() != last_log_tail;
+        if (lines.empty()) {
+            last_log_tail.clear();
+        } else {
+            last_log_tail = lines.back();
+        }
+
+        const float height = std::max(
+            160.0f, ImGui::GetContentRegionAvail().y);
+        begin_surface("recent_log_panel", ImVec2(0.0f, height));
+        ImGui::PushFont(medium_font);
+        ImGui::TextUnformatted("运行日志");
+        ImGui::PopFont();
+        ImGui::SameLine(0.0f, 10.0f);
+        ImGui::PushFont(small_font);
+        ImGui::TextColored(rgba(kFaintInk), "最近 %zu 条", lines.size());
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 40.0f);
+        if (ImGui::Button("×##close_log_panel", ImVec2(24.0f, 22.0f))) {
+            show_log_panel = false;
+        }
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+        ImGui::BeginChild(
+            "log_entries", ImVec2(0.0f, 0.0f),
+            ImGuiChildFlags_None);
+        if (lines.empty()) {
+            ImGui::TextColored(rgba(kFaintInk), "暂无可显示日志");
+        } else {
+            for (const auto& line : lines) {
+                ImGui::TextWrapped("%s", line.c_str());
+            }
+            if (log_changed) {
+                ImGui::SetScrollHereY(1.0f);
+            }
+        }
+        ImGui::EndChild();
         end_surface();
     }
 
@@ -1858,23 +1914,27 @@ struct Overlay::Impl {
         render_notice(
             "runtime_error", snapshot.last_error, kDanger, kDangerSoft);
 
-        switch (active_page) {
-            case WorkspacePage::OVERVIEW:
-                render_overview(snapshot);
-                break;
-            case WorkspacePage::DETECTION:
-                render_detection_config(snapshot, app_config, can_edit);
-                break;
-            case WorkspacePage::AIM:
-                render_aim_config(app_config, can_edit);
-                break;
-            case WorkspacePage::INPUT:
-                render_input_config(
-                    snapshot, app_config, can_edit, actions);
-                break;
-            case WorkspacePage::SETTINGS:
-                render_settings(app_config, can_edit);
-                break;
+        if (show_log_panel) {
+            render_log_panel();
+        } else {
+            switch (active_page) {
+                case WorkspacePage::OVERVIEW:
+                    render_overview(snapshot);
+                    break;
+                case WorkspacePage::DETECTION:
+                    render_detection_config(snapshot, app_config, can_edit);
+                    break;
+                case WorkspacePage::AIM:
+                    render_aim_config(app_config, can_edit);
+                    break;
+                case WorkspacePage::INPUT:
+                    render_input_config(
+                        snapshot, app_config, can_edit, actions);
+                    break;
+                case WorkspacePage::SETTINGS:
+                    render_settings(app_config, can_edit);
+                    break;
+            }
         }
         ImGui::EndChild();
         ImGui::PopStyleVar();
