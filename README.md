@@ -275,6 +275,24 @@ Detector 不按“YOLOv5/v8/v10/11/26”等版本号硬编码分支，而按 ONN
 
 因此，后续 YOLO 版本只要继续使用上述任一契约即可直接支持；若导出布局变化，只需新增一个契约解码器，不必改动推理主流程。默认 `AUTO` 会结合 metadata 和形状识别。单类别 raw 输出与端到端输出都可能是 `[B,N,6]`，第三方导出模型遇到歧义时应显式设置 `DetectorConfig::output_format`。
 
+三类真实 ONNX 可通过独立 CPU/Release 兼容矩阵重复验证。脚本会先运行全量 CTest，再在
+clean `PATH` 下分别显式请求三种输出契约，核对真实 Provider、模型与二进制 SHA-256、
+变化输入输出指纹，并把 JSON 原子发布到 `cache/compatibility/`：
+
+```powershell
+.\scripts\test_detector_compatibility.ps1 `
+  -ModernRawModelPath "C:\path\to\modern-raw.onnx" `
+  -YoloV5ObjectnessModelPath "C:\path\to\yolov5-objectness.onnx" `
+  -EndToEndModelPath "C:\path\to\end-to-end-nms.onnx" `
+  -ComparisonImagePath "C:\path\to\real-scene.jpg" `
+  -OnnxRuntimeRoot "C:\path\to\onnxruntime" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib"
+```
+
+端到端模型的图内 NMS 可能把黑图和白图都归并为同一份空输出，因此该契约必须提供一张
+能形成真实检测结果的对照图，不能用两张都无目标的合成图证明输入变化传播。模型和对照图
+只作为本地验收输入，不复制进构建目录，也不纳入 Git。
+
 当前仅支持单输入、单输出、NCHW、float32 的 detect 模型。分割、姿态、OBB、多输出 head 和真正的 batch inference 不在当前范围内。
 
 ### TensorRT 缓存

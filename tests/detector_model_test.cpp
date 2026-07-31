@@ -10,6 +10,7 @@
 #include <Windows.h>
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/videoio.hpp>
 
 #include <algorithm>
@@ -38,6 +39,111 @@ struct LogScope {
 
     ~LogScope() { Log::shutdown(); }
 };
+
+struct CommandLineOptions {
+    std::string model_path;
+    std::string backend = "cpu";
+    std::string trt_cache_path;
+    std::string video_directory;
+    std::string report_path = "cache/benchmarks/detector-videos.csv";
+    std::string input_mode = "center";
+    std::string comparison_image_path;
+    OutputFormat output_format = OutputFormat::AUTO;
+    bool has_video_directory = false;
+};
+
+const char* output_format_name(OutputFormat format) noexcept {
+    switch (format) {
+        case OutputFormat::AUTO: return "auto";
+        case OutputFormat::CHANNEL_FIRST: return "channel_first";
+        case OutputFormat::ANCHOR_FIRST_OBJECTNESS: return "objectness";
+        case OutputFormat::END_TO_END: return "end_to_end";
+    }
+    return "unknown";
+}
+
+bool parse_output_format(const std::string& value,
+                         OutputFormat& format) noexcept {
+    if (value == "auto") {
+        format = OutputFormat::AUTO;
+    } else if (value == "channel_first") {
+        format = OutputFormat::CHANNEL_FIRST;
+    } else if (value == "objectness" ||
+               value == "anchor_first_objectness") {
+        format = OutputFormat::ANCHOR_FIRST_OBJECTNESS;
+    } else if (value == "end_to_end") {
+        format = OutputFormat::END_TO_END;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool parse_command_line(int argc, char* argv[],
+                        CommandLineOptions& options) {
+    constexpr const char* kOutputFormatOption = "--output-format";
+    constexpr const char* kOutputFormatPrefix = "--output-format=";
+    constexpr const char* kComparisonImageOption = "--comparison-image";
+    constexpr const char* kComparisonImagePrefix = "--comparison-image=";
+    std::vector<std::string> positional;
+    positional.reserve(6);
+
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument = argv[index] ? argv[index] : "";
+        std::string format_value;
+        if (argument == kOutputFormatOption) {
+            if (++index >= argc || !argv[index]) {
+                std::cerr << "--output-format 缺少参数\n";
+                return false;
+            }
+            format_value = argv[index];
+        } else if (argument.starts_with(kOutputFormatPrefix)) {
+            format_value = argument.substr(
+                std::char_traits<char>::length(kOutputFormatPrefix));
+        } else if (argument == kComparisonImageOption) {
+            if (++index >= argc || !argv[index] || argv[index][0] == '\0') {
+                std::cerr << "--comparison-image 缺少参数\n";
+                return false;
+            }
+            options.comparison_image_path = argv[index];
+            continue;
+        } else if (argument.starts_with(kComparisonImagePrefix)) {
+            options.comparison_image_path = argument.substr(
+                std::char_traits<char>::length(kComparisonImagePrefix));
+            if (options.comparison_image_path.empty()) {
+                std::cerr << "--comparison-image 缺少参数\n";
+                return false;
+            }
+            continue;
+        } else if (argument.starts_with("--")) {
+            std::cerr << "未知选项：" << argument << '\n';
+            return false;
+        } else {
+            positional.push_back(argument);
+            continue;
+        }
+
+        if (!parse_output_format(format_value, options.output_format)) {
+            std::cerr << "未知输出契约：" << format_value << '\n';
+            return false;
+        }
+    }
+
+    if (positional.empty() || positional.size() > 6 ||
+        positional[0].empty()) {
+        return false;
+    }
+    options.model_path = positional[0];
+    if (positional.size() >= 2) options.backend = positional[1];
+    if (positional.size() >= 3) options.trt_cache_path = positional[2];
+    if (positional.size() >= 4) {
+        options.video_directory = positional[3];
+        options.has_video_directory = true;
+    }
+    if (positional.size() >= 5) options.report_path = positional[4];
+    if (positional.size() >= 6) options.input_mode = positional[5];
+    return true;
+}
 
 struct VideoBenchmarkResult {
     std::string scene;
@@ -459,18 +565,22 @@ bool benchmark_videos(Detector& detector,
 } // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc < 2 || argc > 7 || !argv[1] || argv[1][0] == '\0') {
+    CommandLineOptions options;
+    if (!parse_command_line(argc, argv, options)) {
         std::cerr << "用法：detector_model_test <模型路径> "
                      "[cpu|cuda|tensorrt|directml] [TensorRT缓存目录] "
-                     "[视频目录] [CSV报告路径] [center|full]\n";
+                     "[视频目录] [CSV报告路径] [center|full] "
+                     "[--output-format "
+                     "auto|channel_first|objectness|end_to_end] "
+                     "[--comparison-image <图像路径>]\n";
         return 2;
     }
 
     LogScope log_scope;
 
     DetectorConfig config;
-    config.model_path = argv[1];
-    const std::string requested_backend = argc >= 3 ? argv[2] : "cpu";
+    config.model_path = options.model_path;
+    const std::string& requested_backend = options.backend;
     if (requested_backend == "cpu") {
         config.backend = BackendType::CPU;
     } else if (requested_backend == "cuda") {
@@ -478,14 +588,16 @@ int main(int argc, char* argv[]) {
     } else if (requested_backend == "tensorrt") {
         config.backend = BackendType::TENSORRT;
         config.enable_fp16 = true;
-        if (argc >= 4) config.trt_cache_path = argv[3];
+        if (!options.trt_cache_path.empty()) {
+            config.trt_cache_path = options.trt_cache_path;
+        }
     } else if (requested_backend == "directml") {
         config.backend = BackendType::DIRECTML;
     } else {
         std::cerr << "未知后端：" << requested_backend << '\n';
         return 2;
     }
-    config.output_format = OutputFormat::AUTO;
+    config.output_format = options.output_format;
     config.enable_output_fingerprint = true;
 
     const auto load_start = std::chrono::steady_clock::now();
@@ -513,8 +625,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 两种输入必须在同一 Session 连续执行。比较原始 float 输出而不是最终框，
-    // 可覆盖 CUDA Graph 只重放首次设备输入、但两帧都恰好零检测的回归。
+    // 两种输入必须在同一 Session 连续执行。raw 模型比较 ONNX 输出张量可覆盖两帧都
+    // 零检测的重放回归；图内 NMS 模型必须提供能改变最终输出的真实对照图。
     cv::Mat black_image(detector.input_height(), detector.input_width(),
                         CV_8UC3, cv::Scalar(0, 0, 0));
     const auto black_detections = detector.detect(black_image);
@@ -525,25 +637,39 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    cv::Mat white_image(detector.input_height(), detector.input_width(),
-                        CV_8UC3, cv::Scalar(255, 255, 255));
-    const auto white_detections = detector.detect(white_image);
-    const InferenceProfile white_profile = detector.profile();
-    if (white_profile.status != DetectionStatus::SUCCESS) {
-        std::cerr << "白图推理失败，status="
-                  << DetectionStatusName(white_profile.status) << '\n';
+    cv::Mat comparison_image;
+    std::string comparison_source = "white";
+    if (options.comparison_image_path.empty()) {
+        comparison_image = cv::Mat(
+            detector.input_height(), detector.input_width(),
+            CV_8UC3, cv::Scalar(255, 255, 255));
+    } else {
+        comparison_image = cv::imread(
+            options.comparison_image_path, cv::IMREAD_COLOR);
+        comparison_source = options.comparison_image_path;
+        if (comparison_image.empty()) {
+            std::cerr << "无法读取对照图像：" << comparison_source << '\n';
+            return 1;
+        }
+    }
+    const auto comparison_detections = detector.detect(comparison_image);
+    const InferenceProfile comparison_profile = detector.profile();
+    if (comparison_profile.status != DetectionStatus::SUCCESS) {
+        std::cerr << "对照图推理失败，status="
+                  << DetectionStatusName(comparison_profile.status) << '\n';
         return 1;
     }
     if (requested_backend == "tensorrt" &&
         config.enable_trt_cuda_graph &&
         (!black_profile.explicit_device_copy ||
-         !white_profile.explicit_device_copy)) {
+         !comparison_profile.explicit_device_copy)) {
         std::cerr << "TensorRT CUDA Graph 未走固定设备缓冲显式复制路径\n";
         return 1;
     }
     if (black_profile.output_fingerprint ==
-        white_profile.output_fingerprint) {
-        std::cerr << "黑白输入的原始输出指纹相同，可能重放了首次输入\n";
+        comparison_profile.output_fingerprint) {
+        std::cerr << "黑图与对照图的原始输出指纹相同，可能重放了首次输入，"
+                     "或模型把两者归并为同一端到端结果\n";
         return 1;
     }
 
@@ -561,22 +687,24 @@ int main(int argc, char* argv[]) {
         const auto no_graph_black = no_graph_detector.detect(black_image);
         const InferenceProfile no_graph_black_profile =
             no_graph_detector.profile();
-        const auto no_graph_white = no_graph_detector.detect(white_image);
-        const InferenceProfile no_graph_white_profile =
+        const auto no_graph_comparison =
+            no_graph_detector.detect(comparison_image);
+        const InferenceProfile no_graph_comparison_profile =
             no_graph_detector.profile();
         if (no_graph_black_profile.status != DetectionStatus::SUCCESS ||
-            no_graph_white_profile.status != DetectionStatus::SUCCESS ||
+            no_graph_comparison_profile.status != DetectionStatus::SUCCESS ||
             no_graph_black_profile.explicit_device_copy ||
-            no_graph_white_profile.explicit_device_copy) {
+            no_graph_comparison_profile.explicit_device_copy) {
             std::cerr << "TensorRT Graph off 对照执行状态错误\n";
             return 1;
         }
         if (black_profile.output_fingerprint !=
                 no_graph_black_profile.output_fingerprint ||
-            white_profile.output_fingerprint !=
-                no_graph_white_profile.output_fingerprint ||
+            comparison_profile.output_fingerprint !=
+                no_graph_comparison_profile.output_fingerprint ||
             !detections_match(black_detections, no_graph_black) ||
-            !detections_match(white_detections, no_graph_white)) {
+            !detections_match(
+                comparison_detections, no_graph_comparison)) {
             std::cerr << "TensorRT Graph on/off 输出不一致\n";
             return 1;
         }
@@ -605,16 +733,20 @@ int main(int argc, char* argv[]) {
     std::cout << "真实模型测试通过：input="
               << detector.input_width() << 'x' << detector.input_height()
               << ", provider=" << detector.backend_name()
+              << ", output_format="
+              << output_format_name(config.output_format)
               << ", load_ms="
               << std::chrono::duration<double, std::milli>(
                      load_finished - load_start).count()
               << ", detections=" << black_detections.size()
               << ", total_ms=" << black_profile.total_ms
               << ", black_fingerprint=" << black_profile.output_fingerprint
-              << ", white_fingerprint=" << white_profile.output_fingerprint
+              << ", comparison_fingerprint="
+              << comparison_profile.output_fingerprint
+              << ", comparison_source=" << comparison_source
               << '\n';
 
-    if (argc >= 5) {
+    if (options.has_video_directory) {
         // 指纹会额外遍历完整输出张量，不能污染性能基准。先释放冒烟 Session，
         // 再用相同配置但关闭指纹创建正式基准实例。
         detector.reset();
@@ -629,11 +761,9 @@ int main(int argc, char* argv[]) {
                       << benchmark_detector.backend_name() << '\n';
             return 1;
         }
-        const std::filesystem::path video_directory = argv[4];
-        const std::filesystem::path report_path = argc >= 6
-            ? std::filesystem::path(argv[5])
-            : std::filesystem::path("cache/benchmarks/detector-videos.csv");
-        const std::string input_mode = argc >= 7 ? argv[6] : "center";
+        const std::filesystem::path video_directory = options.video_directory;
+        const std::filesystem::path report_path = options.report_path;
+        const std::string& input_mode = options.input_mode;
         if (input_mode != "center" && input_mode != "full") {
             std::cerr << "未知视频输入模式：" << input_mode << '\n';
             return 2;
