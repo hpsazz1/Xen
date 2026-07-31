@@ -390,6 +390,24 @@ CSV 中每段视频先重复第一帧预热 50 次，
 `not_visible_detected_frames` 诊断项，不能直接称为 false positive。无标注模式明确输出
 `visibility_annotations=0`、`recall_available=0`，Recall 与可评价率字段留空。
 
+Aim 的真实追踪评价不能复用 Detector 的“任一检测即命中”标注。可从同一份成功的中心 ROI
+视频基准生成逐帧对象真值骨架：
+
+```powershell
+.\scripts\new_aim_ground_truth_annotations.ps1 `
+  -VideoDirectory "C:\path\to\videos" `
+  -BenchmarkReport ".\cache\benchmarks\detector-videos.csv" `
+  -OutputDirectory ".\cache\aim-ground-truth"
+```
+
+模板文件名为 `<完整视频文件名>.aim.json`，默认每帧都是 `ignore` 且没有目标框，不是真值。
+人工标注时，`visible` 帧必须填写位于主机完整 FOV 坐标中的目标框和视频内稳定 `track_id`；
+`not_visible/ignore` 帧不得携带目标。schema 会严格绑定视频 SHA-256、帧数、输入模式和主机
+ROI。Aim 离线评价器可统计 ROI Recall、ID Switch、连续轨迹片段、碎片事件和旧目标仍可见时
+发生的无必要切换，并拒绝错误帧号和错误几何。主机 `2560x1440` 的默认 ROI 仍是
+`(1120,560,320,320)`；辅机 `1920x1080` 不属于标注或评价坐标。当前已完成 schema、模板和
+纯算法测试，真实素材的人工框/身份标注与正式报告接入仍待执行，不能把合成结果写成真实基线。
+
 脚本默认使用 `-InputMode center`，从全屏录像中央裁取与模型输入相同大小的 ROI，
 模拟实时游戏中只采集准星附近 FOV 的链路。只有需要测量“整幅录像缩放到模型输入”时
 才使用 `-InputMode full`；两种模式的准确率结果不能直接混合比较。

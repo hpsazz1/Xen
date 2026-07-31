@@ -523,11 +523,12 @@ target_link_libraries(sender
     PRIVATE bcrypt ws2_32)
 
 add_library(aim STATIC
-    Xen/aim/aim.cpp)
+    Xen/aim/aim.cpp
+    Xen/aim/aim_evaluation.cpp)
 target_include_directories(aim PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(aim PUBLIC log)
+target_link_libraries(aim PUBLIC log ${OpenCV_LIBS})
 
 add_library(mouse STATIC
     Xen/mouse/mouse.cpp
@@ -649,7 +650,15 @@ if(BUILD_TESTING)
     add_executable(aim_tests
         tests/aim_tests.cpp)
     target_link_libraries(aim_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_tests OPENCV)
     add_test(NAME aim_tests COMMAND aim_tests)
+
+    # Aim 真实视频真值解析和追踪指标保持为离线纯算法测试，不加载 ORT Session。
+    add_executable(aim_evaluation_tests
+        tests/aim_evaluation_tests.cpp)
+    target_link_libraries(aim_evaluation_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_evaluation_tests OPENCV)
+    add_test(NAME aim_evaluation_tests COMMAND aim_evaluation_tests)
 
     add_executable(mouse_tests
         tests/mouse_tests.cpp)
