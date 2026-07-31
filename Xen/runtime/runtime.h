@@ -55,10 +55,26 @@ struct PipelineProfile {
     double total_ms = 0.0;
 };
 
+// 每个 Pipeline 样本都固化对应输入帧的几何，避免只看最终快照时漏掉
+// 网络重连、OBS 场景切换或显示模式变化造成的瞬时坐标漂移。
+struct RuntimeFrameGeometry {
+    int encoded_width = 0;
+    int encoded_height = 0;
+    int source_width = 0;
+    int source_height = 0;
+    int roi_width = 0;
+    int roi_height = 0;
+    double roi_x = 0.0;
+    double roi_y = 0.0;
+    double source_pixels_per_pixel_x = 1.0;
+    double source_pixels_per_pixel_y = 1.0;
+};
+
 // Runtime 每处理一帧发布一个固定大小的诊断样本。该样本只包含数值和枚举，
 // 不持有图像、模型或设备资源，便于在主线程锁外写入报告。
 struct RuntimePipelineSample {
     std::uint64_t sequence = 0;
+    RuntimeFrameGeometry geometry;
     PipelineProfile profile;
     DetectionStatus detection_status = DetectionStatus::NOT_RUN;
     AimStatus aim_status = AimStatus::NOT_RUN;

@@ -49,6 +49,11 @@ struct DebugReportSummary {
     DebugTimingSummary total;
 };
 
+// Debug 报告、正式基准入口和测试共用同一成功语义。合法空检测仍是成功；
+// 只有实际尝试发送 Mouse 命令时才要求后端处于 READY。
+bool debug_sample_succeeded(
+    const RuntimePipelineSample& sample) noexcept;
+
 class DebugReport {
 public:
     DebugReport();

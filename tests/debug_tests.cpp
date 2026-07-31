@@ -24,12 +24,23 @@ RuntimePipelineSample make_sample(
         bool success) {
     RuntimePipelineSample sample;
     sample.sequence = sequence;
+    sample.geometry.encoded_width = 320;
+    sample.geometry.encoded_height = 320;
+    sample.geometry.source_width = 2560;
+    sample.geometry.source_height = 1440;
+    sample.geometry.roi_x = 1120.0;
+    sample.geometry.roi_y = 560.0;
+    sample.geometry.roi_width = 320;
+    sample.geometry.roi_height = 320;
+    sample.geometry.source_pixels_per_pixel_x = 1.0;
+    sample.geometry.source_pixels_per_pixel_y = 1.0;
     sample.profile.capture_ms = 0.2;
     sample.profile.queue_ms = 0.3;
     sample.profile.detector.preprocess_ms = 0.4;
     sample.profile.detector.inference_ms = 0.5;
     sample.profile.detector.h2d_ms = 0.1;
     sample.profile.detector.gpu_preprocess_ms = 0.05;
+    sample.profile.detector.explicit_device_copy = true;
     sample.profile.detector.gpu_preprocess = true;
     sample.profile.detector.input_upload_bytes = 307200;
     sample.profile.detector.execution_ms = 0.2;
@@ -74,6 +85,27 @@ void test_report_summary_and_atomic_files() {
     report.ingest(samples);
     RuntimeSnapshot final_snapshot;
     final_snapshot.debug_samples_dropped = 7;
+    final_snapshot.provider = "CPUExecutionProvider";
+    final_snapshot.active_model_path = "models/test.onnx";
+    final_snapshot.detector_generation = 3;
+    final_snapshot.captured_frames = 5;
+    final_snapshot.processed_frames = 4;
+    final_snapshot.failed_frames = 1;
+    final_snapshot.source_dropped_frames = 2;
+    final_snapshot.transport_dropped_frames = 3;
+    final_snapshot.transport_invalid_packets = 4;
+    final_snapshot.overwritten_frames = 1;
+    final_snapshot.mouse_commands = 0;
+    final_snapshot.encoded_width = 320;
+    final_snapshot.encoded_height = 320;
+    final_snapshot.source_width = 2560;
+    final_snapshot.source_height = 1440;
+    final_snapshot.capture_roi_x = 1120.0;
+    final_snapshot.capture_roi_y = 560.0;
+    final_snapshot.capture_roi_width = 320;
+    final_snapshot.capture_roi_height = 320;
+    final_snapshot.source_pixels_per_pixel_x = 1.0;
+    final_snapshot.source_pixels_per_pixel_y = 1.0;
     expect(report.finalize(final_snapshot, error),
            "Debug 报告应原子发布 CSV 和 JSON: " + error);
     const auto& summary = report.summary();
@@ -98,17 +130,27 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v2") != std::string::npos &&
+    expect(csv_text.find("Xen Runtime Debug Report v3") != std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("gpu_preprocess_ms") != std::string::npos &&
-               csv_text.find("INFERENCE_FAILED") != std::string::npos,
-           "CSV 必须包含 schema、列头和失败状态");
-    expect(json_text.find("\"schema\": 2") != std::string::npos &&
+               csv_text.find("INFERENCE_FAILED") != std::string::npos &&
+               csv_text.find("# final_source_width,2560") !=
+                   std::string::npos &&
+               csv_text.find("# final_roi_x,1120") != std::string::npos,
+           "CSV 必须包含 schema、列头、失败状态和最终几何");
+    expect(json_text.find("\"schema\": 3") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
+               json_text.find("\"explicit_device_copy\": true") !=
+                   std::string::npos &&
                json_text.find("\"gpu_preprocess\"") != std::string::npos &&
                json_text.find("\"runtime_samples_dropped\": 7") !=
+                   std::string::npos &&
+               json_text.find("\"final_snapshot\"") != std::string::npos &&
+               json_text.find("\"source_width\": 2560") !=
+                   std::string::npos &&
+               json_text.find("\"failed_frames\": 1") !=
                    std::string::npos,
-           "JSON 必须包含 schema、分段统计和 Runtime 丢弃数");
+           "JSON 必须包含 schema、分段统计、Runtime 丢弃数和最终快照");
     bool has_temp = false;
     if (std::filesystem::exists(root / "nested")) {
         for (const auto& entry : std::filesystem::directory_iterator(
@@ -132,6 +174,20 @@ void test_report_rejects_invalid_capacity() {
            "零容量 Debug 报告必须拒绝启动");
 }
 
+void test_shared_success_semantics() {
+    RuntimePipelineSample disabled_mouse = make_sample(1, 1.0, true);
+    disabled_mouse.mouse_status = MouseStatus::DISABLED;
+    disabled_mouse.mouse_sent = false;
+    expect(debug_sample_succeeded(disabled_mouse),
+           "未发送命令时禁用 Mouse 是合法成功样本");
+    disabled_mouse.mouse_sent = true;
+    expect(!debug_sample_succeeded(disabled_mouse),
+           "实际发送命令时 Mouse 必须处于 READY");
+    RuntimePipelineSample failed = make_sample(2, 1.0, false);
+    expect(!debug_sample_succeeded(failed),
+           "Detector 或 Aim 失败不得进入成功耗时分位数");
+}
+
 } // namespace
 
 int main() {
@@ -142,6 +198,7 @@ int main() {
     Log::init(log_config);
     test_report_summary_and_atomic_files();
     test_report_rejects_invalid_capacity();
+    test_shared_success_semantics();
     Log::shutdown();
     if (failures != 0) {
         std::cerr << "Debug 测试失败数: " << failures << '\n';

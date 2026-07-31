@@ -243,6 +243,18 @@ struct Runtime::Impl {
 
         RuntimePipelineSample sample;
         sample.sequence = frame.timing.sequence;
+        sample.geometry.encoded_width = frame.encoded_width;
+        sample.geometry.encoded_height = frame.encoded_height;
+        sample.geometry.source_width = frame.source_width;
+        sample.geometry.source_height = frame.source_height;
+        sample.geometry.roi_width = frame.bgr.cols;
+        sample.geometry.roi_height = frame.bgr.rows;
+        sample.geometry.roi_x = frame.roi_x;
+        sample.geometry.roi_y = frame.roi_y;
+        sample.geometry.source_pixels_per_pixel_x =
+            frame.source_pixels_per_pixel_x;
+        sample.geometry.source_pixels_per_pixel_y =
+            frame.source_pixels_per_pixel_y;
         sample.profile = profile;
         sample.detection_status = profile.detector.status;
         sample.aim_status = aim_result.status;

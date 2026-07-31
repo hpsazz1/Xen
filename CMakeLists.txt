@@ -236,11 +236,16 @@ elseif(XEN_TENSORRT_MAJOR)
 endif()
 
 # 使用 copy_if_different 避免增量构建反复重写数百 MB 的 GPU 运行库。
+# 多个可执行目标共享同一配置输出目录；并行构建时必须通过构建树级锁
+# 串行复制，否则 Windows 会因目标 DLL 被另一条 POST_BUILD 命令占用而失败。
 function(xen_copy_runtime_files target)
     foreach(runtime_file IN LISTS ARGN)
         add_custom_command(TARGET ${target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${runtime_file}" "$<TARGET_FILE_DIR:${target}>"
+            COMMAND ${CMAKE_COMMAND}
+                "-DXEN_RUNTIME_SOURCE=${runtime_file}"
+                "-DXEN_RUNTIME_OUTPUT=$<TARGET_FILE_DIR:${target}>"
+                "-DXEN_RUNTIME_LOCK=${CMAKE_BINARY_DIR}/xen-runtime-deploy.lock"
+                -P "${PROJECT_SOURCE_DIR}/scripts/deploy_runtime_file.cmake"
             VERBATIM)
     endforeach()
 endfunction()
@@ -559,6 +564,13 @@ target_include_directories(xen_debug PUBLIC
     ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(xen_debug PUBLIC log aim mouse)
 
+add_library(benchmark STATIC
+    Xen/benchmark/benchmark.cpp)
+target_include_directories(benchmark PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(benchmark
+    PUBLIC runtime xen_debug
+    PRIVATE crash log)
+
 add_library(overlay STATIC
     Xen/overlay/overlay.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -582,6 +594,14 @@ set_target_properties(xen_sender PROPERTIES OUTPUT_NAME XenSender)
 target_link_libraries(xen_sender PRIVATE sender capture crash log)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_sender OPENCV NDI)
+endif()
+
+add_executable(xen_benchmark
+    Xen/benchmark/main.cpp)
+set_target_properties(xen_benchmark PROPERTIES OUTPUT_NAME XenBenchmark)
+target_link_libraries(xen_benchmark PRIVATE benchmark)
+if(WIN32)
+    xen_deploy_runtime_dlls(xen_benchmark OPENCV ORT NDI)
 endif()
 
 # ─── 测试 ───────────────────────────────────────────────
@@ -636,6 +656,14 @@ if(BUILD_TESTING)
         tests/debug_tests.cpp)
     target_link_libraries(debug_tests PRIVATE xen_debug log)
     add_test(NAME debug_tests COMMAND debug_tests)
+
+    add_executable(benchmark_tests
+        tests/benchmark_tests.cpp)
+    target_link_libraries(benchmark_tests PRIVATE benchmark)
+    if(WIN32)
+        xen_deploy_runtime_dlls(benchmark_tests OPENCV ORT NDI)
+    endif()
+    add_test(NAME benchmark_tests COMMAND benchmark_tests)
 
     add_executable(config_tests
         tests/config_tests.cpp)

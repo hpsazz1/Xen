@@ -44,14 +44,6 @@ void set_error(std::string& output, const std::string& value) noexcept {
     }
 }
 
-bool sample_succeeded(const RuntimePipelineSample& sample) noexcept {
-    if (sample.detection_status != DetectionStatus::SUCCESS ||
-        sample.aim_status != AimStatus::SUCCESS) {
-        return false;
-    }
-    return !sample.mouse_sent || sample.mouse_status == MouseStatus::READY;
-}
-
 double percentile(std::vector<double> values, double quantile) {
     if (values.empty()) return 0.0;
     std::sort(values.begin(), values.end());
@@ -105,7 +97,7 @@ DebugReportSummary make_summary(
     TimingValues values;
     std::size_t successful_count = 0;
     for (const auto& sample : samples) {
-        if (!sample_succeeded(sample)) continue;
+        if (!debug_sample_succeeded(sample)) continue;
         ++successful_count;
         collect_timing(values, sample);
     }
@@ -159,6 +151,31 @@ const char* bool_name(bool value) noexcept {
     return value ? "true" : "false";
 }
 
+const char* runtime_state_name(RuntimeState state) noexcept {
+    switch (state) {
+        case RuntimeState::STOPPED: return "STOPPED";
+        case RuntimeState::STARTING: return "STARTING";
+        case RuntimeState::RUNNING: return "RUNNING";
+        case RuntimeState::STOPPING: return "STOPPING";
+        case RuntimeState::FAILED: return "FAILED";
+    }
+    return "UNKNOWN";
+}
+
+const char* capture_status_name(CaptureStatus status) noexcept {
+    switch (status) {
+        case CaptureStatus::CLOSED: return "CLOSED";
+        case CaptureStatus::READY: return "READY";
+        case CaptureStatus::FRAME: return "FRAME";
+        case CaptureStatus::NO_FRAME: return "NO_FRAME";
+        case CaptureStatus::ACCESS_LOST: return "ACCESS_LOST";
+        case CaptureStatus::INVALID_CONFIG: return "INVALID_CONFIG";
+        case CaptureStatus::UNSUPPORTED: return "UNSUPPORTED";
+        case CaptureStatus::FAILURE: return "FAILURE";
+    }
+    return "UNKNOWN";
+}
+
 void append_json_timing(std::ostringstream& output,
                         const char* name,
                         const DebugTimingSummary& timing,
@@ -180,6 +197,123 @@ void append_csv_timing(std::ostringstream& output,
            << timing.mean_ms << ',' << timing.p50_ms << ','
            << timing.p95_ms << ',' << timing.p99_ms << ','
            << timing.max_ms << '\n';
+}
+
+void append_csv_snapshot(std::ostringstream& output,
+                         const RuntimeSnapshot& snapshot) {
+    output
+        << "# final_runtime_state," << runtime_state_name(snapshot.state) << '\n'
+        << "# final_capture_status,"
+        << capture_status_name(snapshot.capture_status) << '\n'
+        << "# final_detection_status,"
+        << DetectionStatusName(snapshot.detection_status) << '\n'
+        << "# final_aim_status," << AimStatusName(snapshot.aim_status) << '\n'
+        << "# final_mouse_status,"
+        << MouseStatusName(snapshot.mouse_status) << '\n'
+        << "# final_provider," << csv_escape(snapshot.provider) << '\n'
+        << "# final_active_model_path,"
+        << csv_escape(snapshot.active_model_path) << '\n'
+        << "# final_last_error," << csv_escape(snapshot.last_error) << '\n'
+        << "# final_detector_reload_error,"
+        << csv_escape(snapshot.detector_reload_error) << '\n'
+        << "# final_detector_generation,"
+        << snapshot.detector_generation << '\n'
+        << "# final_captured_frames," << snapshot.captured_frames << '\n'
+        << "# final_processed_frames," << snapshot.processed_frames << '\n'
+        << "# final_failed_frames," << snapshot.failed_frames << '\n'
+        << "# final_source_dropped_frames,"
+        << snapshot.source_dropped_frames << '\n'
+        << "# final_transport_dropped_frames,"
+        << snapshot.transport_dropped_frames << '\n'
+        << "# final_transport_invalid_packets,"
+        << snapshot.transport_invalid_packets << '\n'
+        << "# final_source_received_frames,"
+        << snapshot.source_received_frames << '\n'
+        << "# final_overwritten_frames,"
+        << snapshot.overwritten_frames << '\n'
+        << "# final_mouse_commands," << snapshot.mouse_commands << '\n'
+        << "# final_debug_samples_dropped,"
+        << snapshot.debug_samples_dropped << '\n'
+        << "# final_last_sequence," << snapshot.last_sequence << '\n'
+        << "# final_encoded_width," << snapshot.encoded_width << '\n'
+        << "# final_encoded_height," << snapshot.encoded_height << '\n'
+        << "# final_source_width," << snapshot.source_width << '\n'
+        << "# final_source_height," << snapshot.source_height << '\n'
+        << "# final_roi_x," << snapshot.capture_roi_x << '\n'
+        << "# final_roi_y," << snapshot.capture_roi_y << '\n'
+        << "# final_roi_width," << snapshot.capture_roi_width << '\n'
+        << "# final_roi_height," << snapshot.capture_roi_height << '\n'
+        << "# final_source_pixels_per_pixel_x,"
+        << snapshot.source_pixels_per_pixel_x << '\n'
+        << "# final_source_pixels_per_pixel_y,"
+        << snapshot.source_pixels_per_pixel_y << '\n'
+        << "# final_capture_fps," << snapshot.capture_fps << '\n'
+        << "# final_source_fps," << snapshot.source_fps << '\n'
+        << "# final_output_allowed_by_config,"
+        << bool_name(snapshot.output_allowed_by_config) << '\n'
+        << "# final_output_armed," << bool_name(snapshot.output_armed) << '\n'
+        << "# final_emergency_stopped,"
+        << bool_name(snapshot.emergency_stopped) << '\n';
+}
+
+void append_json_snapshot(std::ostringstream& output,
+                          const RuntimeSnapshot& snapshot) {
+    output
+        << "  \"final_snapshot\": {\n"
+        << "    \"runtime_state\": \"" << runtime_state_name(snapshot.state)
+        << "\",\n    \"capture_status\": \""
+        << capture_status_name(snapshot.capture_status)
+        << "\",\n    \"detection_status\": \""
+        << DetectionStatusName(snapshot.detection_status)
+        << "\",\n    \"aim_status\": \""
+        << AimStatusName(snapshot.aim_status)
+        << "\",\n    \"mouse_status\": \""
+        << MouseStatusName(snapshot.mouse_status)
+        << "\",\n    \"provider\": \"" << json_escape(snapshot.provider)
+        << "\",\n    \"active_model_path\": \""
+        << json_escape(snapshot.active_model_path)
+        << "\",\n    \"last_error\": \""
+        << json_escape(snapshot.last_error)
+        << "\",\n    \"detector_reload_error\": \""
+        << json_escape(snapshot.detector_reload_error) << "\",\n"
+        << "    \"detector_generation\": "
+        << snapshot.detector_generation << ",\n"
+        << "    \"captured_frames\": " << snapshot.captured_frames << ",\n"
+        << "    \"processed_frames\": " << snapshot.processed_frames << ",\n"
+        << "    \"failed_frames\": " << snapshot.failed_frames << ",\n"
+        << "    \"source_dropped_frames\": "
+        << snapshot.source_dropped_frames << ",\n"
+        << "    \"transport_dropped_frames\": "
+        << snapshot.transport_dropped_frames << ",\n"
+        << "    \"transport_invalid_packets\": "
+        << snapshot.transport_invalid_packets << ",\n"
+        << "    \"source_received_frames\": "
+        << snapshot.source_received_frames << ",\n"
+        << "    \"overwritten_frames\": "
+        << snapshot.overwritten_frames << ",\n"
+        << "    \"mouse_commands\": " << snapshot.mouse_commands << ",\n"
+        << "    \"debug_samples_dropped\": "
+        << snapshot.debug_samples_dropped << ",\n"
+        << "    \"last_sequence\": " << snapshot.last_sequence << ",\n"
+        << "    \"encoded_width\": " << snapshot.encoded_width << ",\n"
+        << "    \"encoded_height\": " << snapshot.encoded_height << ",\n"
+        << "    \"source_width\": " << snapshot.source_width << ",\n"
+        << "    \"source_height\": " << snapshot.source_height << ",\n"
+        << "    \"roi_x\": " << snapshot.capture_roi_x << ",\n"
+        << "    \"roi_y\": " << snapshot.capture_roi_y << ",\n"
+        << "    \"roi_width\": " << snapshot.capture_roi_width << ",\n"
+        << "    \"roi_height\": " << snapshot.capture_roi_height << ",\n"
+        << "    \"source_pixels_per_pixel_x\": "
+        << snapshot.source_pixels_per_pixel_x << ",\n"
+        << "    \"source_pixels_per_pixel_y\": "
+        << snapshot.source_pixels_per_pixel_y << ",\n"
+        << "    \"capture_fps\": " << snapshot.capture_fps << ",\n"
+        << "    \"source_fps\": " << snapshot.source_fps << ",\n"
+        << "    \"output_allowed_by_config\": "
+        << bool_name(snapshot.output_allowed_by_config) << ",\n"
+        << "    \"output_armed\": " << bool_name(snapshot.output_armed)
+        << ",\n    \"emergency_stopped\": "
+        << bool_name(snapshot.emergency_stopped) << "\n  },\n";
 }
 
 bool write_atomically(const std::string& path,
@@ -241,6 +375,15 @@ bool write_atomically(const std::string& path,
 
 } // namespace
 
+bool debug_sample_succeeded(
+        const RuntimePipelineSample& sample) noexcept {
+    if (sample.detection_status != DetectionStatus::SUCCESS ||
+        sample.aim_status != AimStatus::SUCCESS) {
+        return false;
+    }
+    return !sample.mouse_sent || sample.mouse_status == MouseStatus::READY;
+}
+
 DebugReport::DebugReport() {
     Log::register_module("debug", LogLevel::INFO);
 }
@@ -300,7 +443,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             samples_, report_samples_dropped_,
             final_snapshot.debug_samples_dropped);
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v2\n"
+        csv << "# Xen Runtime Debug Report v3\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -315,6 +458,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 summary_.report_samples_dropped << '\n'
             << "# runtime_samples_dropped," <<
                 summary_.runtime_samples_dropped << '\n';
+        append_csv_snapshot(csv, final_snapshot);
         append_csv_timing(csv, "capture", summary_.capture);
         append_csv_timing(csv, "queue", summary_.queue);
         append_csv_timing(csv, "preprocess", summary_.preprocess);
@@ -332,7 +476,11 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "h2d_ms,gpu_preprocess_ms,execution_ms,d2h_ms,"
                "postprocess_ms,aim_ms,mouse_ms,"
                "total_ms,detection_status,aim_status,mouse_status,mouse_sent,"
-               "gpu_preprocess,input_upload_bytes,success\n";
+               "explicit_device_copy,gpu_preprocess,input_upload_bytes,"
+               "encoded_width,"
+               "encoded_height,source_width,source_height,roi_x,roi_y,"
+               "roi_width,roi_height,source_pixels_per_pixel_x,"
+               "source_pixels_per_pixel_y,success\n";
         csv << std::setprecision(9);
         for (const auto& sample : samples_) {
             csv << sample.sequence << ',' << sample.profile.capture_ms << ','
@@ -351,14 +499,26 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << AimStatusName(sample.aim_status) << ','
                 << MouseStatusName(sample.mouse_status) << ','
                 << bool_name(sample.mouse_sent) << ','
+                << bool_name(
+                    sample.profile.detector.explicit_device_copy) << ','
                 << bool_name(sample.profile.detector.gpu_preprocess) << ','
                 << sample.profile.detector.input_upload_bytes << ','
-                << bool_name(sample_succeeded(sample)) << '\n';
+                << sample.geometry.encoded_width << ','
+                << sample.geometry.encoded_height << ','
+                << sample.geometry.source_width << ','
+                << sample.geometry.source_height << ','
+                << sample.geometry.roi_x << ','
+                << sample.geometry.roi_y << ','
+                << sample.geometry.roi_width << ','
+                << sample.geometry.roi_height << ','
+                << sample.geometry.source_pixels_per_pixel_x << ','
+                << sample.geometry.source_pixels_per_pixel_y << ','
+                << bool_name(debug_sample_succeeded(sample)) << '\n';
         }
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 2,\n"
+             << "{\n  \"schema\": 3,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -374,8 +534,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
              << "  \"report_samples_dropped\": "
              << summary_.report_samples_dropped << ",\n"
              << "  \"runtime_samples_dropped\": "
-             << summary_.runtime_samples_dropped << ",\n"
-             << "  \"timing\": {\n";
+             << summary_.runtime_samples_dropped << ",\n";
+        append_json_snapshot(json, final_snapshot);
+        json << "  \"timing\": {\n";
         append_json_timing(json, "capture", summary_.capture, false);
         append_json_timing(json, "queue", summary_.queue, false);
         append_json_timing(json, "preprocess", summary_.preprocess, false);
@@ -401,12 +562,31 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << MouseStatusName(sample.mouse_status)
                  << "\", \"mouse_sent\": "
                  << bool_name(sample.mouse_sent)
+                 << ", \"explicit_device_copy\": "
+                 << bool_name(
+                     sample.profile.detector.explicit_device_copy)
                  << ", \"gpu_preprocess\": "
                  << bool_name(sample.profile.detector.gpu_preprocess)
                  << ", \"input_upload_bytes\": "
                  << sample.profile.detector.input_upload_bytes
+                 << ", \"encoded_width\": "
+                 << sample.geometry.encoded_width
+                 << ", \"encoded_height\": "
+                 << sample.geometry.encoded_height
+                 << ", \"source_width\": "
+                 << sample.geometry.source_width
+                 << ", \"source_height\": "
+                 << sample.geometry.source_height
+                 << ", \"roi_x\": " << sample.geometry.roi_x
+                 << ", \"roi_y\": " << sample.geometry.roi_y
+                 << ", \"roi_width\": " << sample.geometry.roi_width
+                 << ", \"roi_height\": " << sample.geometry.roi_height
+                 << ", \"source_pixels_per_pixel_x\": "
+                 << sample.geometry.source_pixels_per_pixel_x
+                 << ", \"source_pixels_per_pixel_y\": "
+                 << sample.geometry.source_pixels_per_pixel_y
                  << ", \"success\": "
-                 << bool_name(sample_succeeded(sample))
+                 << bool_name(debug_sample_succeeded(sample))
                  << ", \"total_ms\": " << sample.profile.total_ms << "}"
                  << (index + 1 == samples_.size() ? '\n' : ',');
         }

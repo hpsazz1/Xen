@@ -43,6 +43,7 @@ Xen/                           # 仓库根目录
 │   ├── keyboard/              # 按住启用与急停键轮询
 │   ├── config/                # SimpleIni 静态配置与校验
 │   ├── runtime/               # 生命周期、三槽最新帧队列和安全门控
+│   ├── benchmark/             # 复用生产 Runtime 的无界面正式基准入口
 │   ├── overlay/               # Codex 浅色/深色 ImGui 控制台
 │   └── app/                   # Windows 应用入口与 Xen 品牌资源
 ├── AGENTS.md                  # 本地开发规范，不纳入 Git
@@ -59,7 +60,9 @@ Xen/                           # 仓库根目录
 - Detector 可在 Runtime 运行期间异步热重载。候选 Session 在独立线程加载，旧模型继续处理帧；
   只有候选完整加载成功后才在两帧之间交换指针。失败保持旧模型和 `RUNNING`，成功后强制解除
   输出武装并重置 Aim 状态；加载窗口拒绝新的武装请求。
-- Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；主线程在会话结束时将其发布为
+- Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；样本同时固化主机 FOV、编码
+  尺寸、ROI 和像素比例，避免网络重连或显示模式变化造成的瞬时坐标漂移被最终快照掩盖。主线程
+  在会话结束时将其发布为 schema 3 的
   `cache/runtime/<进程-运行时钟-generation-segment>.csv/.json`。模型重载前结束当前报告，
   加载窗口不记录样本，完成后按实际活动模型和 Provider 开始新分段，避免新旧模型混合统计。
   报告按成功/失败状态隔离耗时，
@@ -128,6 +131,35 @@ NDI 会明确返回 `UNSUPPORTED`，不会切换 UDP、DXGI 或 CPU 路径。
 辅机 `1920x1080` 不传给发送器，也不进入 XUDP 几何或 Aim counts。可使用 `--adapter`、
 `--output`、`--roi-width/--roi-height`、成对的 `--roi-x/--roi-y`、`--jpeg-quality`、`--fps`、
 `--datagram-bytes` 和 `--max-frames` 调整；完整参数以 `XenSender.exe --help` 为准。
+
+无界面正式基准目标为 `xen_benchmark`，Release 输出名为 `XenBenchmark.exe`。它复用生产
+`Runtime`、`Capture`、`Detector`、`Aim` 和 `DebugReport`，不创建 Overlay；运行时强制
+`allow_send_input=false`、使用禁用的 Win32 Mouse 且从不武装 SafetyGate。默认逐帧验收本机
+`source=2560x1440, encoded=2560x1440, roi=(1120,560,320x320), scale=(1,1)`。在辅机接收
+XUDP/UDP/NDI 时，主机 FOV 和 ROI 不变，只按实际传输内容覆盖 `--expect-encoded`，辅机显示器
+`1920x1080` 仍不进入坐标换算。
+
+正式运行应使用脚本，它会在 clean `PATH` 下执行，运行前后复核模型、配置、可执行文件和部署
+DLL 的 SHA-256，逐样本校验 Provider、状态和几何，全部通过后才发布 CSV、JSON 与环境清单；
+任一步失败都会清理本轮 pending 报告：
+
+```powershell
+.\scripts\benchmark_runtime.ps1 `
+  -ModelPath "C:\path\to\model.onnx" `
+  -Backend tensorrt `
+  -OutputFormat channel_first `
+  -BuildDirectory ".\build" `
+  -ReportPrefix ".\cache\runtime-benchmark\dxgi-tensorrt"
+```
+
+模型 AUTO 契约存在歧义时必须通过 `-OutputFormat` 显式指定，脚本不会猜测未知布局。默认门槛为
+100 个 warmup、至少 10000 个正式成功样本、至少 300 秒且最大 600 秒。调试短冒烟
+可显式降低门槛，但不能写成正式性能结论。FP16、CUDA Graph 和 GPU 前处理通过
+`-EnableFp16 on|off`、`-EnableCudaGraph on|off`、`-EnableGpuPreprocess on|off` 控制，默认均为
+`on`。`<prefix>.environment.json` 最后发布，是整组报告完成
+标记；没有该文件或 `complete` 不为 `true` 的 CSV/JSON 不得视为有效报告。
+TensorRT 和 CUDA 允许节点级回退，环境清单会如实记录 Provider 链；正式性能对比前还必须保存
+同模型、同后端的 ORT profiling 或等价 Provider 证据。DirectML 会禁用 CPU 节点回退。
 
 日志设施也由同一个 `config.ini` 静态加载。旧配置没有 `[log]` 节时使用默认值；日志等级支持
 `trace`、`debug`、`info`、`warn`、`error` 和 `off`，未知等级会拒绝加载并在界面提示错误。
