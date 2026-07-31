@@ -56,12 +56,17 @@ Xen/                           # 仓库根目录
 - 主线程负责 Win32/D3D11/ImGui 消息循环、只读快照渲染和意图提交。
 - Capture 线程从 Desktop Duplication、UDP/XUDP 或 NDI 获取 ROI，并发布到三个可复用槽组成的最新帧队列。
 - Pipeline 线程依次执行 Detector、Aim、安全门控和 Mouse，不增加独立控制线程。
+- Detector 可在 Runtime 运行期间异步热重载。候选 Session 在独立线程加载，旧模型继续处理帧；
+  只有候选完整加载成功后才在两帧之间交换指针。失败保持旧模型和 `RUNNING`，成功后强制解除
+  输出武装并重置 Aim 状态；加载窗口拒绝新的武装请求。
 - Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；主线程在会话结束时将其发布为
-  `cache/runtime/latest.csv` 和 `cache/runtime/latest.json`。报告按成功/失败状态隔离耗时，
+  `cache/runtime/<进程-运行时钟-generation-segment>.csv/.json`。模型重载前结束当前报告，
+  加载窗口不记录样本，完成后按实际活动模型和 Provider 开始新分段，避免新旧模型混合统计。
+  报告按成功/失败状态隔离耗时，
   输出 capture、queue、preprocess、inference、H2D、execution、D2H、postprocess、aim、
   mouse、total 的 mean/P50/P95/P99/最大值；报告队列满载只覆盖最旧诊断样本，不反压核心线程。
 - 当前兼容链为 `GPU 纹理 → CPU BGR ROI → Detector CPU 前处理 → Provider`；GPU 互操作待实测后再实施。
-- Overlay 采用 152 px 居中标签栏和无外框独立工作区。自绘标题栏在侧栏交界处仅用底色分区：左段与侧栏同色，右段与工作区同色，并随浅色/深色主题同步切换；标题栏和顶部控制条下方均不绘制分割线。侧栏仅保留概览、检测、瞄准、输入和设置五个标签，底部以无边框两行状态区展示输出门状态和版本。工作区底色从交界处连续铺满，顶部控制条保留 18 px、页面内容保留 28 px 左侧间距，只为状态卡、配置组等内部模块保留细边框；配置页保存操作固定在页头，运行期间锁定需重建资源的配置。
+- Overlay 采用 152 px 居中标签栏和无外框独立工作区。自绘标题栏在侧栏交界处仅用底色分区：左段与侧栏同色，右段与工作区同色，并随浅色/深色主题同步切换；标题栏和顶部控制条下方均不绘制分割线。侧栏仅保留概览、检测、瞄准、输入和设置五个标签，底部以无边框两行状态区展示输出门状态和版本。工作区底色从交界处连续铺满，顶部控制条保留 18 px、页面内容保留 28 px 左侧间距，只为状态卡、配置组等内部模块保留细边框；配置页保存操作固定在页头。运行期间仅 Detector 配置允许编辑、保存和热重载，Capture、Aim、Input 与 Runtime 配置仍锁定。
 - 当前 Overlay 已经人工确认并作为后续 UI 扩展基线。新增部件必须复用现有语义色、间距、表单控件和内部模块样式，不得增加工作区外框、嵌套卡片或新的导航分组；改变整体布局或主题体系前必须重新人工复核。
 - Codex 浅色与深色主题可在偏好设置中切换并保存到 `config.ini`。连续数值使用“滑块粗调 + 数值框精确输入”，手填值在 Enter 或失焦时按合法范围校验。
 - `Xen/app/xen.ico` 提供 16–256 px Windows 图标，`Xen/app/xen-brand.svg` 是可编辑品牌母版；标志以 Xen 的 X 和锁定点表达“精确控制”。
@@ -294,6 +299,18 @@ clean `PATH` 下分别显式请求三种输出契约，核对真实 Provider、�
 只作为本地验收输入，不复制进构建目录，也不纳入 Git。
 
 当前仅支持单输入、单输出、NCHW、float32 的 detect 模型。分割、姿态、OBB、多输出 head 和真正的 batch inference 不在当前范围内。
+
+### 运行时模型热重载
+
+检测页显示当前活动模型、Provider、重载状态和模型代次。`Runtime::reload_detector()` 只在
+`RUNNING` 接受请求，且同一时刻只允许一个候选加载。加载期间旧 Detector 继续服务；成功切换
+不复制当前帧或张量，只交换 Detector 所有权，旧 Session 在加载线程释放。加载失败写入独立的
+`detector_reload_error`，不会把 Runtime 置为 `FAILED`。
+
+停止期间若 TensorRT 正在首次构建 Engine，Runtime 会先停止 Capture/Pipeline，再等待不可取消的
+ORT/TensorRT Session 创建自然结束并丢弃候选。该等待可能持续十几秒，但不会 detach 后台线程或在
+Runtime 析构后访问资源。主机/辅机分辨率与热重载相互独立：主机 `2560x1440`、辅机
+`1920x1080` 时仍使用主机中心 ROI `(1120,560,320,320)`，不做辅机分辨率缩放。
 
 ### TensorRT 缓存
 

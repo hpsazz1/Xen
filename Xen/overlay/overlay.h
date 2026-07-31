@@ -11,6 +11,7 @@
 struct OverlayActions {
     bool start_requested = false;
     bool stop_requested = false;
+    bool reload_detector_requested = false;
     bool save_config_requested = false;
     std::vector<RuntimeIntent> runtime_intents;
 };

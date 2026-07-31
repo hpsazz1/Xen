@@ -651,5 +651,15 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME detector_model_test
             COMMAND detector_model_test "${XEN_TEST_MODEL}")
+
+        add_executable(runtime_model_reload_test
+            tests/runtime_model_reload_test.cpp)
+        target_link_libraries(runtime_model_reload_test PRIVATE runtime ws2_32)
+        if(WIN32)
+            xen_deploy_runtime_dlls(
+                runtime_model_reload_test OPENCV ORT NDI)
+        endif()
+        add_test(NAME runtime_model_reload_test
+            COMMAND runtime_model_reload_test "${XEN_TEST_MODEL}")
     endif()
 endif()

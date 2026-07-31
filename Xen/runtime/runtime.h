@@ -22,6 +22,15 @@ enum class RuntimeState {
 
 const char* RuntimeStateName(RuntimeState state) noexcept;
 
+enum class DetectorReloadState {
+    IDLE,
+    LOADING,
+    SUCCEEDED,
+    FAILED,
+};
+
+const char* DetectorReloadStateName(DetectorReloadState state) noexcept;
+
 enum class RuntimeIntentType {
     START,
     STOP,
@@ -63,8 +72,14 @@ struct RuntimeSnapshot {
     DetectionStatus detection_status = DetectionStatus::NOT_RUN;
     AimStatus aim_status = AimStatus::NOT_RUN;
     MouseStatus mouse_status = MouseStatus::CLOSED;
+    DetectorReloadState detector_reload_state = DetectorReloadState::IDLE;
     std::string provider;
+    // 当前实际服务 Pipeline 的模型，不是 Overlay 中尚未提交的编辑值。
+    std::string active_model_path;
+    // 模型重载错误独立于 Runtime 致命错误；失败时旧模型继续工作。
+    std::string detector_reload_error;
     std::string last_error;
+    std::uint64_t detector_generation = 0;
     std::uint64_t captured_frames = 0;
     std::uint64_t processed_frames = 0;
     std::uint64_t failed_frames = 0;
@@ -114,6 +129,8 @@ public:
 
     bool start(const AppConfig& config) noexcept;
     void stop() noexcept;
+    // 仅在 RUNNING 状态接受请求。候选模型异步加载，失败不替换旧模型。
+    bool reload_detector(const DetectorConfig& config) noexcept;
     bool post_intent(const RuntimeIntent& intent) noexcept;
     void poll_keyboard() noexcept;
     RuntimeSnapshot snapshot() const noexcept;

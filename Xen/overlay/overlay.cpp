@@ -287,6 +287,26 @@ ImVec4 detector_color(DetectionStatus status) noexcept {
     return rgba(kDanger);
 }
 
+const char* detector_reload_label(DetectorReloadState state) noexcept {
+    switch (state) {
+        case DetectorReloadState::IDLE: return "待命";
+        case DetectorReloadState::LOADING: return "加载中";
+        case DetectorReloadState::SUCCEEDED: return "已切换";
+        case DetectorReloadState::FAILED: return "加载失败";
+    }
+    return "未知";
+}
+
+ImVec4 detector_reload_color(DetectorReloadState state) noexcept {
+    switch (state) {
+        case DetectorReloadState::SUCCEEDED: return rgba(kSuccess);
+        case DetectorReloadState::LOADING: return rgba(kWarning);
+        case DetectorReloadState::FAILED: return rgba(kDanger);
+        case DetectorReloadState::IDLE: return rgba(kMutedInk);
+    }
+    return rgba(kMutedInk);
+}
+
 ImVec4 aim_color(AimStatus status) noexcept {
     if (status == AimStatus::SUCCESS) return rgba(kSuccess);
     if (status == AimStatus::NOT_RUN) return rgba(kMutedInk);
@@ -931,7 +951,9 @@ struct Overlay::Impl {
         } else {
             ImGui::BeginDisabled(
                 !running || snapshot.emergency_stopped ||
-                !snapshot.output_allowed_by_config);
+                !snapshot.output_allowed_by_config ||
+                snapshot.detector_reload_state ==
+                    DetectorReloadState::LOADING);
             if (ImGui::Button("武装", ImVec2(kButtonWidth, 32.0f))) {
                 actions.runtime_intents.push_back(
                     {RuntimeIntentType::ARM_OUTPUT, true});
@@ -952,7 +974,7 @@ struct Overlay::Impl {
         ImGui::PopStyleColor();
     }
 
-    void render_page_heading(bool can_edit, OverlayActions& actions) {
+    void render_page_heading(bool can_save, OverlayActions& actions) {
         ImGui::PushFont(small_font);
         ImGui::TextColored(
             rgba(kFaintInk), "%s",
@@ -967,7 +989,7 @@ struct Overlay::Impl {
             const float button_width = 96.0f;
             ImGui::SetCursorPos(ImVec2(
                 ImGui::GetWindowWidth() - button_width - 22.0f, 12.0f));
-            ImGui::BeginDisabled(!can_edit);
+            ImGui::BeginDisabled(!can_save);
             push_primary_button();
             if (ImGui::Button(
                     "保存配置", ImVec2(button_width, 34.0f))) {
@@ -1337,8 +1359,13 @@ struct Overlay::Impl {
 
     void render_detection_config(const RuntimeSnapshot& snapshot,
                                  AppConfig& app_config,
-                                 bool can_edit) {
-        ImGui::BeginDisabled(!can_edit);
+                                 bool can_edit,
+                                 OverlayActions& actions) {
+        render_detector_reload_panel(snapshot, actions);
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        const bool detector_editable =
+            (can_edit || snapshot.state == RuntimeState::RUNNING) &&
+            snapshot.detector_reload_state != DetectorReloadState::LOADING;
         const bool two_columns =
             ImGui::GetContentRegionAvail().x >= 650.0f;
         if (two_columns && ImGui::BeginTable(
@@ -1346,20 +1373,74 @@ struct Overlay::Impl {
                 ImGuiTableFlags_SizingStretchSame)) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
+            ImGui::BeginDisabled(!detector_editable);
             render_detector_form(app_config);
+            ImGui::EndDisabled();
             ImGui::TableSetColumnIndex(1);
+            ImGui::BeginDisabled(!can_edit);
             render_capture_form(app_config);
+            ImGui::EndDisabled();
             ImGui::EndTable();
         } else {
+            ImGui::BeginDisabled(!detector_editable);
             render_detector_form(app_config);
+            ImGui::EndDisabled();
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            ImGui::BeginDisabled(!can_edit);
             render_capture_form(app_config);
+            ImGui::EndDisabled();
         }
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::BeginDisabled(!detector_editable);
         render_detector_tuning(app_config);
         ImGui::EndDisabled();
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_capture_geometry_panel(snapshot);
+    }
+
+    void render_detector_reload_panel(const RuntimeSnapshot& snapshot,
+                                      OverlayActions& actions) {
+        begin_config_panel("detector_reload_panel", "运行模型", 68.0f);
+        if (ImGui::BeginTable(
+                "detector_reload", 2,
+                ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn(
+                "状态", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn(
+                "操作", ImGuiTableColumnFlags_WidthFixed, 112.0f);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            status_dot_label(
+                detector_reload_label(snapshot.detector_reload_state),
+                detector_reload_color(snapshot.detector_reload_state));
+            ImGui::SameLine(0.0f, 10.0f);
+            ImGui::TextColored(
+                rgba(kFaintInk), "第 %llu 代",
+                static_cast<unsigned long long>(
+                    snapshot.detector_generation));
+            const char* active_model = snapshot.active_model_path.empty()
+                ? "未加载"
+                : snapshot.active_model_path.c_str();
+            ImGui::TextUnformatted(active_model);
+            if (ImGui::IsItemHovered() &&
+                !snapshot.active_model_path.empty()) {
+                ImGui::SetTooltip("%s", snapshot.active_model_path.c_str());
+            }
+            ImGui::TableSetColumnIndex(1);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
+            ImGui::BeginDisabled(
+                snapshot.state != RuntimeState::RUNNING ||
+                snapshot.detector_reload_state ==
+                    DetectorReloadState::LOADING);
+            push_primary_button();
+            if (ImGui::Button("重载模型", ImVec2(104.0f, 34.0f))) {
+                actions.reload_detector_requested = true;
+            }
+            pop_colored_button();
+            ImGui::EndDisabled();
+            ImGui::EndTable();
+        }
+        end_config_panel();
     }
 
     void render_detector_form(AppConfig& app_config) {
@@ -1901,6 +1982,11 @@ struct Overlay::Impl {
                           const std::string& app_message,
                           OverlayActions& actions) {
         const bool can_edit = editable(snapshot);
+        const bool can_save = can_edit ||
+            (active_page == WorkspacePage::DETECTION &&
+             snapshot.state == RuntimeState::RUNNING &&
+             snapshot.detector_reload_state !=
+                 DetectorReloadState::LOADING);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kSurface));
         ImGui::PushStyleVar(
             ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 16.0f));
@@ -1908,11 +1994,14 @@ struct Overlay::Impl {
             "content", ImVec2(0.0f, 0.0f),
             ImGuiChildFlags_AlwaysUseWindowPadding);
 
-        render_page_heading(can_edit, actions);
+        render_page_heading(can_save, actions);
         render_notice(
             "app_notice", app_message, kAccentStrong, kAccentSoft);
         render_notice(
             "runtime_error", snapshot.last_error, kDanger, kDangerSoft);
+        render_notice(
+            "detector_reload_error", snapshot.detector_reload_error,
+            kDanger, kDangerSoft);
 
         if (show_log_panel) {
             render_log_panel();
@@ -1922,7 +2011,8 @@ struct Overlay::Impl {
                     render_overview(snapshot);
                     break;
                 case WorkspacePage::DETECTION:
-                    render_detection_config(snapshot, app_config, can_edit);
+                    render_detection_config(
+                        snapshot, app_config, can_edit, actions);
                     break;
                 case WorkspacePage::AIM:
                     render_aim_config(app_config, can_edit);
