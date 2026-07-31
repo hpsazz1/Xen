@@ -342,10 +342,37 @@ GPU 前处理 A/B 使用已构建的真实模型测试程序，在 clean `PATH` 
   -CudaRoot "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
 ```
 
+需要区分“目标离开中心 FOV”和“目标在 FOV 内但模型漏检”时，先从一次成功的
+`center` 基准生成严格绑定视频 SHA-256、帧数和 ROI 的标注模板：
+
+```powershell
+.\scripts\new_video_visibility_annotations.ps1 `
+  -VideoDirectory "C:\path\to\videos" `
+  -BenchmarkReport ".\cache\benchmarks\detector-videos.csv" `
+  -OutputDirectory ".\cache\visibility"
+```
+
+模板默认把全部帧设为 `ignore`，只是待人工复核的骨架，不是真值。每个文件使用
+`<完整视频文件名>.visibility.json` 命名，`intervals` 必须从第 0 帧到末帧连续、无重叠、
+无缺口，状态只接受 `visible`、`not_visible` 和 `ignore`。策略
+`target_frame_visibility_v1` 规定：目标身体中心位于中心 ROI 内、可见身体高度不少于
+32 个源像素且遮挡不超过约 50% 时标为 `visible`；中心在 ROI 外时标为
+`not_visible`；边界、严重运动模糊、遮挡或无法稳定判断的帧标为 `ignore`。
+人工标注完成后追加参数运行正式基准：
+
+```powershell
+.\scripts\benchmark_detector_videos.ps1 `
+  -ModelPath "C:\path\to\model.onnx" `
+  -VideoDirectory "C:\path\to\videos" `
+  -VisibilityDirectory ".\cache\visibility" `
+  -InputMode center
+```
+
 脚本会在 CSV 旁生成同名前缀的 JSON 环境清单，记录 Git 状态、模型 SHA-256、
 视频逐文件 SHA-256、可执行文件与部署 DLL 哈希、GPU/驱动、SDK 精确版本，以及
-FP16、CUDA Graph、线程和缓存配置。脚本在运行前后复核输入与二进制快照；CSV 先写
-临时文件，全部场景成功后才原子发布。性能报告和环境清单默认位于
+FP16、CUDA Graph、线程和缓存配置。启用标注时还会登记每份标注的 SHA-256，并在
+运行前后复核；视频、标注或二进制变化都会使验收失败。CSV 和 JSON 均先写同目录
+临时文件，完成校验和 flush/close 后原子发布。性能报告和环境清单默认位于
 `cache/benchmarks/`，均不提交 Git。
 
 项目不迁入旧仓库的 `Xen/benchmarks/provider_benchmark.cpp`。旧实现会重复 Provider、
@@ -357,7 +384,11 @@ CSV 中每段视频先重复第一帧预热 50 次，
 `detection_frame_rate` 只表示“存在检测结果的帧比例”，不能直接解释为 Recall；
 目标在全屏范围移动而采集范围固定为中心 ROI 时，ROI 外的空检测是正确结果。
 该指标同时受到目标进入 ROI 的时间占比与 ROI 内检测成功率影响；只有补充目标可见性
-标注后，才能单独计算模型在 ROI 内的 Recall。
+标注后，才能计算 `visible_frame_recall`、可见漏检帧数及最长连续可见漏检。该指标是
+单目标素材的帧级 Recall：可见帧只要存在任一检测就算命中，不具备目标框匹配和类别
+混淆信息，不能替代对象级 Precision/Recall 或 mAP。`not_visible` 帧出现检测只记录为
+`not_visible_detected_frames` 诊断项，不能直接称为 false positive。无标注模式明确输出
+`visibility_annotations=0`、`recall_available=0`，Recall 与可评价率字段留空。
 
 脚本默认使用 `-InputMode center`，从全屏录像中央裁取与模型输入相同大小的 ROI，
 模拟实时游戏中只采集准星附近 FOV 的链路。只有需要测量“整幅录像缩放到模型输入”时

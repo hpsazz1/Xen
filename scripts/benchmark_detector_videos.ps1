@@ -17,11 +17,87 @@
             (Get-Date -Format "yyyyMMdd-HHmmss"))),
     [ValidateSet("center", "full")]
     [string]$InputMode = "center",
+    [string]$VisibilityDirectory = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release"
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($null -eq ("XenDetectorBenchmarkAtomicFile" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class XenDetectorBenchmarkAtomicFile {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool MoveFileExW(
+        string existingName,
+        string newName,
+        uint flags);
+}
+'@
+}
+
+function Publish-JsonAtomically {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Value,
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $temporaryPath = "{0}.{1}.tmp" -f $Path, $PID
+    if (Test-Path -LiteralPath $temporaryPath) {
+        throw "环境清单临时路径已存在：$temporaryPath"
+    }
+    try {
+        $json = $Value | ConvertTo-Json -Depth 8
+        $encoding = New-Object System.Text.UTF8Encoding($true)
+        [System.IO.File]::WriteAllText($temporaryPath, $json, $encoding)
+        $moveFileReplaceExisting = 0x1
+        $moveFileWriteThrough = 0x8
+        if (-not [XenDetectorBenchmarkAtomicFile]::MoveFileExW(
+                $temporaryPath, $Path,
+                $moveFileReplaceExisting -bor $moveFileWriteThrough)) {
+            $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "无法原子发布环境清单，Win32 error=$errorCode"
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force
+        }
+    }
+}
+
+function Publish-ExistingFileAtomically {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        throw "待发布文件不存在：$Source"
+    }
+    $moveFileReplaceExisting = 0x1
+    $moveFileWriteThrough = 0x8
+    if (-not [XenDetectorBenchmarkAtomicFile]::MoveFileExW(
+            $Source, $Destination,
+            $moveFileReplaceExisting -bor $moveFileWriteThrough)) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "无法原子发布文件，Win32 error=$errorCode：$Destination"
+    }
+}
+
+function Get-VideoFiles {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    return @(Get-ChildItem -LiteralPath $Directory -File | Where-Object {
+        $_.Extension -ieq ".mp4" -or $_.Extension -ieq ".avi"
+    } | Sort-Object Name)
+}
 
 function Get-CMakeCacheValue {
     param(
@@ -212,10 +288,66 @@ foreach ($item in $requiredDirectories) {
 if (-not (Test-Path -LiteralPath $ModelPath -PathType Leaf)) {
     throw "模型不存在：$ModelPath"
 }
+$useVisibilityAnnotations = -not [string]::IsNullOrWhiteSpace(
+    $VisibilityDirectory)
+if ($useVisibilityAnnotations) {
+    if ($InputMode -ne "center") {
+        throw "目标可见性标注只支持 InputMode=center。"
+    }
+    if (-not (Test-Path -LiteralPath $VisibilityDirectory `
+            -PathType Container)) {
+        throw "目标可见性标注目录不存在：$VisibilityDirectory"
+    }
+    $VisibilityDirectory = [System.IO.Path]::GetFullPath(
+        $VisibilityDirectory)
+}
 
-$videoFiles = @(Get-ChildItem -LiteralPath $VideoDirectory -File -Filter "*.mp4")
+$videoFiles = @(Get-VideoFiles $VideoDirectory)
 if ($videoFiles.Count -eq 0) {
-    throw "视频目录中没有 MP4：$VideoDirectory"
+    throw "视频目录中没有 MP4/AVI：$VideoDirectory"
+}
+$visibilityFiles = @()
+if ($useVisibilityAnnotations) {
+    $visibilityFiles = @(Get-ChildItem -LiteralPath $VisibilityDirectory `
+        -File | Where-Object { $_.Name -ilike "*.visibility.json" } |
+        Sort-Object Name)
+    $expectedVisibilityNames = @($videoFiles | ForEach-Object {
+        ("{0}.visibility.json" -f $_.Name).ToLowerInvariant()
+    } | Sort-Object)
+    $actualVisibilityNames = @($visibilityFiles | ForEach-Object {
+        $_.Name.ToLowerInvariant()
+    } | Sort-Object)
+    $visibilityDifference = @(Compare-Object `
+        -ReferenceObject $expectedVisibilityNames `
+        -DifferenceObject $actualVisibilityNames)
+    if ($visibilityDifference.Count -ne 0) {
+        throw "视频与可见性标注文件必须一一对应：$($visibilityDifference -join '; ')"
+    }
+}
+
+$finalReportPath = [System.IO.Path]::GetFullPath($ReportPath)
+if ([System.IO.Path]::GetExtension($finalReportPath) -ine ".csv") {
+    throw "Detector 视频基准报告必须使用 .csv 扩展名：$finalReportPath"
+}
+$manifestPath = [System.IO.Path]::ChangeExtension(
+    $finalReportPath, ".json")
+$pendingReportPath = "{0}.{1}.pending" -f $finalReportPath, $PID
+if (Test-Path -LiteralPath $pendingReportPath) {
+    throw "待发布 CSV 路径已存在：$pendingReportPath"
+}
+$protectedInputPaths = @(
+    [System.IO.Path]::GetFullPath($ModelPath)
+) + @($videoFiles | ForEach-Object { $_.FullName }) +
+    @($visibilityFiles | ForEach-Object { $_.FullName })
+foreach ($candidate in @(
+        $finalReportPath, $manifestPath, $pendingReportPath)) {
+    foreach ($inputPath in $protectedInputPaths) {
+        if ($candidate.Equals(
+                [System.IO.Path]::GetFullPath($inputPath),
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "报告路径与只读输入冲突：$candidate"
+        }
+    }
 }
 
 & (Join-Path $PSScriptRoot "build.ps1") `
@@ -247,10 +379,21 @@ $snapshotVideoDirectory = [System.IO.Path]::GetFullPath($VideoDirectory)
 $snapshotOutputDirectory = Split-Path -Parent $testExecutable
 $snapshotModelSha256 = (Get-FileHash -LiteralPath $snapshotModelPath `
     -Algorithm SHA256).Hash
-$snapshotVideoFiles = @(Get-ChildItem -LiteralPath $snapshotVideoDirectory `
-    -File -Filter "*.mp4" | Sort-Object Name)
+$snapshotVideoFiles = @(Get-VideoFiles $snapshotVideoDirectory)
 $snapshotVideoInventory = @(Get-FileInventory $snapshotVideoFiles)
 $snapshotVideoFingerprint = Get-InventoryFingerprint $snapshotVideoInventory
+$snapshotVisibilityInventory = @()
+$snapshotVisibilityFingerprint = $null
+if ($useVisibilityAnnotations) {
+    $snapshotVisibilityFiles = @(Get-ChildItem `
+        -LiteralPath $VisibilityDirectory -File | Where-Object {
+            $_.Name -ilike "*.visibility.json"
+        } | Sort-Object Name)
+    $snapshotVisibilityInventory = @(Get-FileInventory `
+        $snapshotVisibilityFiles)
+    $snapshotVisibilityFingerprint = Get-InventoryFingerprint `
+        $snapshotVisibilityInventory
+}
 $snapshotRuntimeInventory = @(Get-DeployedRuntimeInfo $snapshotOutputDirectory)
 $snapshotRuntimeFingerprint = Get-InventoryFingerprint $snapshotRuntimeInventory
 $snapshotExecutableSha256 = (Get-FileHash -LiteralPath $testExecutable `
@@ -259,32 +402,44 @@ $snapshotCacheBefore = @(Get-TensorRtCacheInfo `
     ([System.IO.Path]::GetFullPath($CacheDirectory)))
 $benchmarkStartedUtc = [DateTime]::UtcNow.ToString("o")
 
-$originalPath = $env:PATH
 try {
+    $originalPath = $env:PATH
+    try {
     # 只允许从可执行文件目录或系统目录加载 DLL，避免开发机 PATH 掩盖部署缺口。
     $env:PATH = @(
         (Join-Path $env:SystemRoot "System32"),
         $env:SystemRoot
     ) -join ";"
-    & $testExecutable $ModelPath "tensorrt" $CacheDirectory `
-        $VideoDirectory $ReportPath $InputMode
+    $benchmarkArguments = @(
+        $ModelPath,
+        "tensorrt",
+        $CacheDirectory,
+        $VideoDirectory,
+        $pendingReportPath,
+        $InputMode
+    )
+    if ($useVisibilityAnnotations) {
+        $benchmarkArguments += @(
+            "--visibility-directory",
+            $VisibilityDirectory
+        )
+    }
+    & $testExecutable @benchmarkArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Detector 视频基准失败，退出码：$LASTEXITCODE"
     }
-} finally {
-    $env:PATH = $originalPath
-}
-$benchmarkFinishedUtc = [DateTime]::UtcNow.ToString("o")
+    } finally {
+        $env:PATH = $originalPath
+    }
+    $benchmarkFinishedUtc = [DateTime]::UtcNow.ToString("o")
 
-Write-Host "Detector 视频基准完成：$ReportPath"
+    Write-Host "Detector 视频基准执行完成，开始校验待发布 CSV。"
 
 $repositoryRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot ".."))
-$ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
 $ModelPath = [System.IO.Path]::GetFullPath($ModelPath)
 $VideoDirectory = [System.IO.Path]::GetFullPath($VideoDirectory)
 $CacheDirectory = [System.IO.Path]::GetFullPath($CacheDirectory)
-$manifestPath = [System.IO.Path]::ChangeExtension($ReportPath, ".json")
 $cmakeCache = Join-Path $BuildDirectory "CMakeCache.txt"
 
 $gitCommit = $null
@@ -303,10 +458,18 @@ if ($null -ne $gitCommand) {
     }
 }
 
-$videoFiles = @(Get-ChildItem -LiteralPath $VideoDirectory `
-    -File -Filter "*.mp4" | Sort-Object Name)
+$videoFiles = @(Get-VideoFiles $VideoDirectory)
 $videoInventory = @(Get-FileInventory $videoFiles)
 $videoFingerprint = Get-InventoryFingerprint $videoInventory
+$visibilityInventory = @()
+$visibilityFingerprint = $null
+if ($useVisibilityAnnotations) {
+    $visibilityFiles = @(Get-ChildItem -LiteralPath $VisibilityDirectory `
+        -File | Where-Object { $_.Name -ilike "*.visibility.json" } |
+        Sort-Object Name)
+    $visibilityInventory = @(Get-FileInventory $visibilityFiles)
+    $visibilityFingerprint = Get-InventoryFingerprint $visibilityInventory
+}
 $modelSha256 = (Get-FileHash -LiteralPath $ModelPath -Algorithm SHA256).Hash
 $deployedRuntimes = @(Get-DeployedRuntimeInfo `
     (Split-Path -Parent $testExecutable))
@@ -315,13 +478,14 @@ $executableSha256 = (Get-FileHash -LiteralPath $testExecutable `
     -Algorithm SHA256).Hash
 if ($modelSha256 -ne $snapshotModelSha256 -or
     $videoFingerprint -ne $snapshotVideoFingerprint -or
+    $visibilityFingerprint -ne $snapshotVisibilityFingerprint -or
     $runtimeFingerprint -ne $snapshotRuntimeFingerprint -or
     $executableSha256 -ne $snapshotExecutableSha256) {
-    throw "基准运行期间模型、视频、可执行文件或部署运行库发生变化，报告已拒绝发布。"
+    throw "基准运行期间模型、视频、标注、可执行文件或部署运行库发生变化，报告已拒绝发布。"
 }
-$reportRows = @(Import-Csv -LiteralPath $ReportPath)
+$reportRows = @(Import-Csv -LiteralPath $pendingReportPath)
 if ($reportRows.Count -eq 0) {
-    throw "Detector 视频基准报告没有数据行：$ReportPath"
+    throw "Detector 视频基准报告没有数据行：$pendingReportPath"
 }
 if ($reportRows.Count -ne $videoFiles.Count) {
     throw "Detector 视频基准场景数与视频清单不一致：报告 $($reportRows.Count)，视频 $($videoFiles.Count)"
@@ -344,6 +508,52 @@ foreach ($row in $reportRows) {
         [int]$row.explicit_device_copy -ne 1) {
         throw "Detector 视频基准包含失败样本：$($row.scene)"
     }
+    $annotationsPresent = [int]$row.visibility_annotations
+    $recallAvailable = [int]$row.recall_available
+    $annotatedFrames = [long]$row.annotated_frames
+    $visibleFrames = [long]$row.visible_frames
+    $visibleDetectedFrames = [long]$row.visible_detected_frames
+    $visibleMissedFrames = [long]$row.visible_missed_frames
+    $notVisibleFrames = [long]$row.not_visible_frames
+    $notVisibleDetectedFrames = [long]$row.not_visible_detected_frames
+    $ignoredFrames = [long]$row.ignored_frames
+    $ignoredDetectedFrames = [long]$row.ignored_detected_frames
+    if ($useVisibilityAnnotations) {
+        if ($annotationsPresent -ne 1 -or
+            $row.visibility_policy -ne "target_frame_visibility_v1" -or
+            $annotatedFrames -ne $frames -or
+            ($visibleFrames + $notVisibleFrames + $ignoredFrames) -ne
+                $frames -or
+            ($visibleDetectedFrames + $visibleMissedFrames) -ne
+                $visibleFrames -or
+            $notVisibleDetectedFrames -gt $notVisibleFrames -or
+            $ignoredDetectedFrames -gt $ignoredFrames -or
+            [long]$row.longest_visible_miss_sequence -gt
+                $visibleMissedFrames) {
+            throw "可见性标注统计契约不一致：$($row.scene)"
+        }
+        if ($visibleFrames -gt 0) {
+            $visibleRecall = [double]$row.visible_frame_recall
+            if ($recallAvailable -ne 1 -or $visibleRecall -lt 0.0 -or
+                $visibleRecall -gt 1.0) {
+                throw "可见帧 Recall 无效：$($row.scene)"
+            }
+        } elseif ($recallAvailable -ne 0 -or
+                  -not [string]::IsNullOrEmpty(
+                      $row.visible_frame_recall)) {
+            throw "没有可见帧时 Recall 必须显式不可用：$($row.scene)"
+        }
+        $evaluableRate = [double]$row.evaluable_frame_rate
+        if ($evaluableRate -lt 0.0 -or $evaluableRate -gt 1.0) {
+            throw "可评价帧覆盖率无效：$($row.scene)"
+        }
+    } elseif ($annotationsPresent -ne 0 -or $recallAvailable -ne 0 -or
+              $annotatedFrames -ne 0 -or $visibleFrames -ne 0 -or
+              $notVisibleFrames -ne 0 -or $ignoredFrames -ne 0 -or
+              -not [string]::IsNullOrEmpty($row.visible_frame_recall) -or
+              -not [string]::IsNullOrEmpty($row.evaluable_frame_rate)) {
+        throw "无标注模式不得生成伪 Recall：$($row.scene)"
+    }
 }
 $modelShapeKeys = @($reportRows | ForEach-Object {
     "{0}x{1}" -f $_.model_input_height, $_.model_input_width
@@ -364,10 +574,10 @@ $evaluatedShapes = @($reportRows | ForEach-Object {
 })
 
 $manifest = [ordered]@{
-    schema_version = 2
+    schema_version = 3
     generated_utc = [DateTime]::UtcNow.ToString("o")
     report = [ordered]@{
-        csv = $ReportPath
+        csv = $finalReportPath
         json = $manifestPath
         started_utc = $benchmarkStartedUtc
         finished_utc = $benchmarkFinishedUtc
@@ -393,6 +603,20 @@ $manifest = [ordered]@{
         evaluated_shapes = $evaluatedShapes
         inventory_sha256 = $videoFingerprint
         files = $videoInventory
+        visibility = [ordered]@{
+            enabled = $useVisibilityAnnotations
+            directory = if ($useVisibilityAnnotations) {
+                $VisibilityDirectory
+            } else { $null }
+            schema_version = if ($useVisibilityAnnotations) { 1 } else {
+                $null
+            }
+            policy = if ($useVisibilityAnnotations) {
+                "target_frame_visibility_v1"
+            } else { $null }
+            inventory_sha256 = $visibilityFingerprint
+            files = $visibilityInventory
+        }
     }
     detector = [ordered]@{
         backend = "TensorrtExecutionProvider"
@@ -443,10 +667,19 @@ $manifest = [ordered]@{
         isolated_runtime_path = $true
         csv_matches_video_inventory = $true
         inputs_unchanged_during_run = $true
+        annotations_unchanged_during_run = $true
+        recall_requires_visibility_annotations = $true
     }
     deployed_runtimes = $deployedRuntimes
 }
 
-$manifest | ConvertTo-Json -Depth 8 |
-    Set-Content -LiteralPath $manifestPath -Encoding UTF8
-Write-Host "Detector 基准环境清单：$manifestPath"
+    Publish-ExistingFileAtomically -Source $pendingReportPath `
+        -Destination $finalReportPath
+    Publish-JsonAtomically -Value $manifest -Path $manifestPath
+    Write-Host "Detector 视频基准完成：$finalReportPath"
+    Write-Host "Detector 基准环境清单：$manifestPath"
+} finally {
+    if (Test-Path -LiteralPath $pendingReportPath) {
+        Remove-Item -LiteralPath $pendingReportPath -Force
+    }
+}

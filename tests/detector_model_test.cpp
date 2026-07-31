@@ -1,4 +1,5 @@
 #include "detector/detector.h"
+#include "detector/video_visibility_internal.h"
 #include "log/log.h"
 
 #ifndef NOMINMAX
@@ -17,10 +18,12 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -48,6 +51,7 @@ struct CommandLineOptions {
     std::string report_path = "cache/benchmarks/detector-videos.csv";
     std::string input_mode = "center";
     std::string comparison_image_path;
+    std::string visibility_directory;
     OutputFormat output_format = OutputFormat::AUTO;
     bool has_video_directory = false;
     bool enable_gpu_preprocess = true;
@@ -88,6 +92,10 @@ bool parse_command_line(int argc, char* argv[],
     constexpr const char* kComparisonImagePrefix = "--comparison-image=";
     constexpr const char* kGpuPreprocessOption = "--gpu-preprocess";
     constexpr const char* kGpuPreprocessPrefix = "--gpu-preprocess=";
+    constexpr const char* kVisibilityDirectoryOption =
+        "--visibility-directory";
+    constexpr const char* kVisibilityDirectoryPrefix =
+        "--visibility-directory=";
     std::vector<std::string> positional;
     positional.reserve(6);
 
@@ -140,6 +148,22 @@ bool parse_command_line(int argc, char* argv[],
                 return false;
             }
             continue;
+        } else if (argument == kVisibilityDirectoryOption) {
+            if (++index >= argc || !argv[index] || argv[index][0] == '\0') {
+                std::cerr << "--visibility-directory 缺少参数\n";
+                return false;
+            }
+            options.visibility_directory = argv[index];
+            continue;
+        } else if (argument.starts_with(kVisibilityDirectoryPrefix)) {
+            options.visibility_directory = argument.substr(
+                std::char_traits<char>::length(
+                    kVisibilityDirectoryPrefix));
+            if (options.visibility_directory.empty()) {
+                std::cerr << "--visibility-directory 缺少参数\n";
+                return false;
+            }
+            continue;
         } else if (argument.starts_with("--")) {
             std::cerr << "未知选项：" << argument << '\n';
             return false;
@@ -167,6 +191,11 @@ bool parse_command_line(int argc, char* argv[],
     }
     if (positional.size() >= 5) options.report_path = positional[4];
     if (positional.size() >= 6) options.input_mode = positional[5];
+    if (!options.visibility_directory.empty() &&
+        !options.has_video_directory) {
+        std::cerr << "可见性标注只能用于视频基准\n";
+        return false;
+    }
     return true;
 }
 
@@ -189,6 +218,8 @@ struct VideoBenchmarkResult {
     bool explicit_device_copy = false;
     bool gpu_preprocess = false;
     std::uint64_t input_upload_bytes = 0;
+    std::string visibility_policy;
+    detector::detail::VideoVisibilityMetrics visibility;
     std::vector<double> preprocess_ms;
     std::vector<double> inference_ms;
     std::vector<double> h2d_ms;
@@ -202,6 +233,58 @@ struct VideoBenchmarkResult {
 std::string path_to_utf8(const std::filesystem::path& path) {
     const auto utf8 = path.u8string();
     return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
+}
+
+std::wstring normalized_absolute_path(
+    const std::filesystem::path& path) {
+    std::error_code error;
+    std::filesystem::path absolute = std::filesystem::absolute(path, error);
+    if (error) return {};
+    std::wstring normalized = absolute.lexically_normal().wstring();
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](wchar_t character) {
+                       return static_cast<wchar_t>(std::towlower(character));
+                   });
+    return normalized;
+}
+
+struct FileIdentity {
+    DWORD volume_serial = 0;
+    DWORD file_index_high = 0;
+    DWORD file_index_low = 0;
+};
+
+bool get_file_identity(const std::filesystem::path& path,
+                       FileIdentity& identity) noexcept {
+    HANDLE handle = CreateFileW(
+        path.c_str(), 0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool succeeded = GetFileInformationByHandle(handle, &information);
+    CloseHandle(handle);
+    if (!succeeded) return false;
+    identity.volume_serial = information.dwVolumeSerialNumber;
+    identity.file_index_high = information.nFileIndexHigh;
+    identity.file_index_low = information.nFileIndexLow;
+    return true;
+}
+
+bool same_windows_path(const std::filesystem::path& left,
+                       const std::filesystem::path& right) {
+    const std::wstring normalized_left = normalized_absolute_path(left);
+    const std::wstring normalized_right = normalized_absolute_path(right);
+    if (!normalized_left.empty() && normalized_left == normalized_right) {
+        return true;
+    }
+    FileIdentity left_identity;
+    FileIdentity right_identity;
+    return get_file_identity(left, left_identity) &&
+           get_file_identity(right, right_identity) &&
+           left_identity.volume_serial == right_identity.volume_serial &&
+           left_identity.file_index_high == right_identity.file_index_high &&
+           left_identity.file_index_low == right_identity.file_index_low;
 }
 
 bool has_video_extension(const std::filesystem::path& path) {
@@ -304,6 +387,8 @@ private:
 bool benchmark_video(Detector& detector,
                      const std::filesystem::path& video_path,
                      bool use_center_crop,
+                     const std::filesystem::path& annotation_path,
+                     bool has_visibility_annotations,
                      VideoBenchmarkResult& result) {
     const std::string open_path = path_to_utf8(video_path);
     cv::VideoCapture capture(open_path, cv::CAP_ANY);
@@ -326,11 +411,55 @@ bool benchmark_video(Detector& detector,
         std::cerr << "视频没有可读取帧：" << open_path << '\n';
         return false;
     }
+    // 首个实际解码帧是源几何真值。容器元数据可能缺失或不精确，不能让无标注
+    // 基准因此失败；后续每帧仍必须与该几何一致。
+    result.source_width = frame.cols;
+    result.source_height = frame.rows;
 
     const cv::Mat warmup_frame = select_video_input(
         frame, detector, use_center_crop);
     result.evaluated_width = warmup_frame.cols;
     result.evaluated_height = warmup_frame.rows;
+
+    detector::detail::VideoVisibilityAnnotation visibility_annotation;
+    if (has_visibility_annotations) {
+        const double declared_frames = capture.get(cv::CAP_PROP_FRAME_COUNT);
+        const double rounded_frames = std::round(declared_frames);
+        if (!std::isfinite(declared_frames) || declared_frames <= 0.0 ||
+            std::fabs(declared_frames - rounded_frames) > 1e-6 ||
+            rounded_frames > static_cast<double>(
+                std::numeric_limits<int>::max())) {
+            std::cerr << "视频容器没有可用于绑定标注的精确帧数："
+                      << open_path << '\n';
+            return false;
+        }
+
+        std::string video_sha256;
+        std::string annotation_error;
+        if (!detector::detail::compute_file_sha256(
+                video_path, video_sha256, annotation_error)) {
+            std::cerr << annotation_error << '\n';
+            return false;
+        }
+        detector::detail::VideoVisibilityExpectation expected;
+        expected.video_file = path_to_utf8(video_path.filename());
+        expected.video_sha256 = video_sha256;
+        expected.source_width = result.source_width;
+        expected.source_height = result.source_height;
+        expected.frame_count = static_cast<std::size_t>(rounded_frames);
+        expected.input_mode = "center";
+        expected.roi_x = (result.source_width - result.evaluated_width) / 2;
+        expected.roi_y = (result.source_height - result.evaluated_height) / 2;
+        expected.roi_width = result.evaluated_width;
+        expected.roi_height = result.evaluated_height;
+        if (!detector::detail::load_video_visibility_annotation(
+                annotation_path, expected, visibility_annotation,
+                annotation_error)) {
+            std::cerr << "视频可见性标注无效：" << annotation_error << '\n';
+            return false;
+        }
+        result.visibility_policy = visibility_annotation.policy;
+    }
 
     // 固定重复第一帧只用于预热 Session、GPU 时钟和缓存，不计入正式样本；
     // 输入裁剪口径必须与正式测量完全一致，否则预热了不同的前处理路径。
@@ -352,7 +481,16 @@ bool benchmark_video(Detector& detector,
 
     std::size_t current_empty_sequence = 0;
     while (capture.read(frame)) {
-        if (frame.empty()) continue;
+        if (frame.empty()) {
+            std::cerr << "视频解码产生空帧：" << open_path << '\n';
+            return false;
+        }
+        if (frame.cols != result.source_width ||
+            frame.rows != result.source_height) {
+            std::cerr << "视频源帧尺寸在基准期间发生变化："
+                      << open_path << '\n';
+            return false;
+        }
 
         // 游戏实时链路通常只采集准星附近 FOV。全屏录像必须在推理前恢复同样的
         // 中心 ROI，否则把 2560x1440 压到 320x320 会把人物缩小约八倍。
@@ -361,6 +499,13 @@ bool benchmark_video(Detector& detector,
         if (evaluated_frame.cols != result.evaluated_width ||
             evaluated_frame.rows != result.evaluated_height) {
             std::cerr << "视频帧尺寸在基准期间发生变化：" << open_path << '\n';
+            return false;
+        }
+
+        const std::size_t frame_index = result.frame_count;
+        if (has_visibility_annotations &&
+            frame_index >= visibility_annotation.frames.size()) {
+            std::cerr << "视频实际帧数超过标注绑定帧数：" << open_path << '\n';
             return false;
         }
 
@@ -400,6 +545,11 @@ bool benchmark_video(Detector& detector,
             return false;
         }
         result.detection_count_sum += detections.size();
+        if (has_visibility_annotations) {
+            detector::detail::record_video_visibility(
+                visibility_annotation.frames[frame_index],
+                !detections.empty(), result.visibility);
+        }
 
         if (detections.empty()) {
             ++current_empty_sequence;
@@ -427,6 +577,13 @@ bool benchmark_video(Detector& detector,
                   << "，failed=" << result.failed_frame_count << '\n';
         return false;
     }
+    if (has_visibility_annotations &&
+        (result.frame_count != visibility_annotation.frames.size() ||
+         result.visibility.annotated_frames != result.frame_count)) {
+        std::cerr << "视频实际解码帧数与可见性标注帧数不一致："
+                  << open_path << '\n';
+        return false;
+    }
     return true;
 }
 
@@ -443,6 +600,9 @@ void write_video_result(std::ostream& output,
         ? result.best_confidence_sum /
               static_cast<double>(result.detected_frame_count)
         : 0.0;
+    const bool recall_available =
+        detector::detail::video_visibility_recall_available(
+            result.visibility);
 
     output << csv_escape(result.scene) << ','
            << result.source_width << ',' << result.source_height << ','
@@ -457,6 +617,27 @@ void write_video_result(std::ostream& output,
            << result.detected_frame_count
            << ',' << detection_rate << ',' << result.longest_empty_sequence
            << ',' << mean_detection_count << ',' << mean_best_confidence
+           << ',' << (result.visibility.annotations_present ? 1 : 0)
+           << ',' << (recall_available ? 1 : 0)
+           << ',' << csv_escape(result.visibility_policy)
+           << ',' << result.visibility.annotated_frames
+           << ',' << result.visibility.visible_frames
+           << ',' << result.visibility.visible_detected_frames
+           << ',' << result.visibility.visible_missed_frames << ',';
+    if (recall_available) {
+        output << detector::detail::video_visibility_recall(
+            result.visibility);
+    }
+    output << ',' << result.visibility.longest_visible_miss_sequence
+           << ',' << result.visibility.not_visible_frames
+           << ',' << result.visibility.not_visible_detected_frames
+           << ',' << result.visibility.ignored_frames
+           << ',' << result.visibility.ignored_detected_frames << ',';
+    if (result.visibility.annotations_present) {
+        output << detector::detail::video_visibility_evaluable_rate(
+            result.visibility);
+    }
+    output
            << ',' << average(result.preprocess_ms)
            << ',' << percentile(result.preprocess_ms, 0.50)
            << ',' << percentile(result.preprocess_ms, 0.95)
@@ -494,7 +675,9 @@ void write_video_result(std::ostream& output,
 bool benchmark_videos(Detector& detector,
                       const std::filesystem::path& video_directory,
                       const std::filesystem::path& report_path,
-                      bool use_center_crop) {
+                      bool use_center_crop,
+                      const std::filesystem::path& visibility_directory,
+                      bool has_visibility_annotations) {
     std::error_code error;
     if (!std::filesystem::is_directory(video_directory, error)) {
         std::cerr << "视频目录不存在："
@@ -517,6 +700,41 @@ bool benchmark_videos(Detector& detector,
     }
     std::sort(video_paths.begin(), video_paths.end());
 
+    if (has_visibility_annotations) {
+        if (!use_center_crop) {
+            std::cerr << "可见性标注只支持 center 输入模式\n";
+            return false;
+        }
+        std::string annotation_error;
+        if (!detector::detail::validate_video_visibility_annotation_set(
+                visibility_directory, video_paths, annotation_error)) {
+            std::cerr << annotation_error << '\n';
+            return false;
+        }
+    }
+
+    std::filesystem::path temporary_report_path = report_path;
+    temporary_report_path += ".tmp";
+    for (const auto& video_path : video_paths) {
+        if (same_windows_path(report_path, video_path) ||
+            same_windows_path(temporary_report_path, video_path)) {
+            std::cerr << "基准报告路径与视频输入冲突："
+                      << path_to_utf8(video_path) << '\n';
+            return false;
+        }
+        if (has_visibility_annotations) {
+            const auto annotation_path =
+                detector::detail::video_visibility_annotation_path(
+                    visibility_directory, video_path);
+            if (same_windows_path(report_path, annotation_path) ||
+                same_windows_path(temporary_report_path, annotation_path)) {
+                std::cerr << "基准报告路径与可见性标注冲突："
+                          << path_to_utf8(annotation_path) << '\n';
+                return false;
+            }
+        }
+    }
+
     if (!report_path.parent_path().empty()) {
         std::filesystem::create_directories(report_path.parent_path(), error);
         if (error) {
@@ -524,8 +742,6 @@ bool benchmark_videos(Detector& detector,
             return false;
         }
     }
-    std::filesystem::path temporary_report_path = report_path;
-    temporary_report_path += ".tmp";
     TemporaryReportGuard temporary_report_guard(temporary_report_path);
     std::ofstream report(
         temporary_report_path, std::ios::binary | std::ios::trunc);
@@ -543,6 +759,12 @@ bool benchmark_videos(Detector& detector,
               "explicit_device_copy,gpu_preprocess,input_upload_bytes,"
               "detected_frames,detection_frame_rate,longest_empty_sequence,"
               "mean_detection_count,mean_best_confidence,"
+              "visibility_annotations,recall_available,visibility_policy,"
+              "annotated_frames,visible_frames,visible_detected_frames,"
+              "visible_missed_frames,visible_frame_recall,"
+              "longest_visible_miss_sequence,not_visible_frames,"
+              "not_visible_detected_frames,ignored_frames,"
+              "ignored_detected_frames,evaluable_frame_rate,"
               "preprocess_mean_ms,preprocess_p50_ms,preprocess_p95_ms,"
               "preprocess_p99_ms,inference_mean_ms,inference_p50_ms,"
               "inference_p95_ms,inference_p99_ms,"
@@ -560,8 +782,14 @@ bool benchmark_videos(Detector& detector,
         VideoBenchmarkResult result;
         std::cout << "开始测试场景：" << path_to_utf8(video_path.filename())
                   << std::endl;
+        const auto annotation_path =
+            detector::detail::video_visibility_annotation_path(
+                visibility_directory, video_path);
         if (!benchmark_video(
-                detector, video_path, use_center_crop, result)) return false;
+                detector, video_path, use_center_crop, annotation_path,
+                has_visibility_annotations, result)) {
+            return false;
+        }
         write_video_result(report, result);
         if (!report) {
             std::cerr << "基准报告写入失败："
@@ -579,7 +807,15 @@ bool benchmark_videos(Detector& detector,
                   << ", status=" << DetectionStatusName(result.status)
                   << ", detected=" << detection_rate << "%"
                   << ", longest_empty=" << result.longest_empty_sequence
-                  << ", total_p50=" << percentile(result.total_ms, 0.50)
+                  << ", visible_recall=";
+        if (detector::detail::video_visibility_recall_available(
+                result.visibility)) {
+            std::cout << 100.0 * detector::detail::video_visibility_recall(
+                result.visibility) << "%";
+        } else {
+            std::cout << "n/a";
+        }
+        std::cout << ", total_p50=" << percentile(result.total_ms, 0.50)
                   << "ms, total_p95=" << percentile(result.total_ms, 0.95)
                   << "ms, total_p99=" << percentile(result.total_ms, 0.99)
                   << "ms" << std::endl;
@@ -619,7 +855,8 @@ int main(int argc, char* argv[]) {
                      "[--output-format "
                      "auto|channel_first|objectness|end_to_end] "
                      "[--comparison-image <图像路径>] "
-                     "[--gpu-preprocess on|off]\n";
+                     "[--gpu-preprocess on|off] "
+                     "[--visibility-directory <标注目录>]\n";
         return 2;
     }
 
@@ -833,13 +1070,17 @@ int main(int argc, char* argv[]) {
         }
         const std::filesystem::path video_directory = options.video_directory;
         const std::filesystem::path report_path = options.report_path;
+        const std::filesystem::path visibility_directory =
+            options.visibility_directory;
         const std::string& input_mode = options.input_mode;
         if (input_mode != "center" && input_mode != "full") {
             std::cerr << "未知视频输入模式：" << input_mode << '\n';
             return 2;
         }
-        if (!benchmark_videos(benchmark_detector, video_directory, report_path,
-                              input_mode == "center")) {
+        if (!benchmark_videos(
+                benchmark_detector, video_directory, report_path,
+                input_mode == "center", visibility_directory,
+                !options.visibility_directory.empty())) {
             return 1;
         }
     }

@@ -633,6 +633,19 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(detector_tests OPENCV)
     add_test(NAME detector_tests COMMAND detector_tests)
 
+    # 视频真值解析和 Recall 统计保持为无 Session 的纯算法测试；文件哈希使用
+    # Windows CNG，JSON 使用已部署的 OpenCV FileStorage，不增加第三方依赖。
+    add_executable(video_visibility_tests
+        tests/video_visibility_tests.cpp
+        Xen/detector/video_visibility.cpp)
+    target_include_directories(video_visibility_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/Xen
+        ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(video_visibility_tests PRIVATE
+        ${OpenCV_LIBS} bcrypt)
+    xen_deploy_runtime_dlls(video_visibility_tests OPENCV)
+    add_test(NAME video_visibility_tests COMMAND video_visibility_tests)
+
     add_executable(aim_tests
         tests/aim_tests.cpp)
     target_link_libraries(aim_tests PRIVATE aim log)
@@ -693,8 +706,9 @@ if(BUILD_TESTING)
             message(FATAL_ERROR "XEN_TEST_MODEL does not exist: ${XEN_TEST_MODEL}")
         endif()
         add_executable(detector_model_test
-            tests/detector_model_test.cpp)
-        target_link_libraries(detector_model_test PRIVATE detector)
+            tests/detector_model_test.cpp
+            Xen/detector/video_visibility.cpp)
+        target_link_libraries(detector_model_test PRIVATE detector bcrypt)
         if(WIN32)
             xen_deploy_runtime_dlls(detector_model_test OPENCV ORT)
         endif()
