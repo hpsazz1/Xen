@@ -14,6 +14,10 @@ OBS/NDI Sender ───────────┴→ Detector → Aim → Runt
                                                                  └→ MAKCU USB COM
 ```
 
+项目当前处于验证与发布收敛阶段。近期主线是消除 Provider SDK 切换后旧运行库残留造成的
+clean `PATH` 假阳性，在同一最新提交上重建独立 Provider/可选 SDK 矩阵，再完成真实双机、
+物理鼠标设备、Intel 目标硬件、人工可见性与 Aim 身份真值验收；暂不继续横向扩展模型或后端。
+
 物理鼠标输出默认禁用。只有配置显式允许、Runtime 已启动、用户完成武装、按住启用键且
 急停未触发时，Pipeline 才会调用 Mouse。Capture、Detector 或 Aim 失败均不会沿用旧结果。
 按住启用键和急停键必须是 `1..255` 内两个不同的 Win32 虚拟键；按住键同时报告按下/释放
@@ -711,6 +715,10 @@ config.trt_cache_path = "cache/tensorrt";
 ## 本地开发资料
 
 `AGENTS.md` 与 `docs/` 仅用于本地开发和设计记录，已通过 `.gitignore` 排除，不随源码仓库发布。
+共享工作区中的后续开发会话必须依次读取 `AGENTS.md`、`docs/000_项目状态与路线图.md` 和
+`docs/todolist.md`，核对 Git 基线后再领取带 ID 的 `READY` 任务；每次任务结束同步更新状态、
+路线图、相关专题证据，并把可复用的重复问题或约束提炼回 `AGENTS.md`。该续接链只保证同一
+本地工作区内一致，跨机器协作仍以仓库中的源码和本 README 为准。
 
 ## 技术栈
 
