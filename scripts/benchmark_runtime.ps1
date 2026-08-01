@@ -49,6 +49,8 @@
     [string]$EnableGpuPreprocess = "on",
     [ValidateSet("on", "off")]
     [string]$EnableD3D11CudaInterop = "off",
+    [ValidateSet("on", "off")]
+    [string]$EnableD3D11DirectMlInterop = "off",
     [string]$ReadyFilePath = ""
 )
 
@@ -353,6 +355,14 @@ if ($EnableD3D11CudaInterop -eq "on" -and
      $EnableGpuPreprocess -ne "on")) {
     throw "D3D11/CUDA 互操作要求 TensorRT、CUDA Graph 和 GPU 前处理全部启用。"
 }
+if ($EnableD3D11DirectMlInterop -eq "on" -and
+    $Backend -ne "directml") {
+    throw "D3D11/DirectML 互操作要求严格 DirectML 后端。"
+}
+if ($EnableD3D11CudaInterop -eq "on" -and
+    $EnableD3D11DirectMlInterop -eq "on") {
+    throw "D3D11/CUDA 与 D3D11/DirectML 互操作不能同时启用。"
+}
 
 $repositoryRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot ".."))
@@ -438,6 +448,8 @@ $enableFp16Value = $EnableFp16 -eq "on"
 $enableCudaGraphValue = $EnableCudaGraph -eq "on"
 $enableGpuPreprocessValue = $EnableGpuPreprocess -eq "on"
 $enableD3D11CudaInteropValue = $EnableD3D11CudaInterop -eq "on"
+$enableD3D11DirectMlInteropValue =
+    $EnableD3D11DirectMlInterop -eq "on"
 
 $arguments = @(
     "--model", $ModelPath,
@@ -455,7 +467,8 @@ $arguments = @(
     "--fp16", $EnableFp16,
     "--cuda-graph", $EnableCudaGraph,
     "--gpu-preprocess", $EnableGpuPreprocess,
-    "--d3d11-cuda-interop", $EnableD3D11CudaInterop
+    "--d3d11-cuda-interop", $EnableD3D11CudaInterop,
+    "--d3d11-directml-interop", $EnableD3D11DirectMlInterop
 )
 if ($requiresProviderProfile) {
     $arguments += @("--provider-profile", $pendingProviderProfile)
@@ -558,8 +571,8 @@ $expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
 } else {
     $captureBackendNames[$ExpectedCaptureBackend]
 }
-if ($report.schema -ne 4) {
-    throw "报告 schema 不是 4：$($report.schema)"
+if ($report.schema -ne 5) {
+    throw "报告 schema 不是 5：$($report.schema)"
 }
 if (-not [string]::IsNullOrEmpty($expectedCaptureName) -and
     $report.capture_backend -ne $expectedCaptureName) {
@@ -590,6 +603,10 @@ if ([bool]$snapshot.d3d11_cuda_interop -ne
     $enableD3D11CudaInteropValue) {
     throw "最终 Runtime 互操作状态不符合请求。"
 }
+if ([bool]$snapshot.d3d11_directml_interop -ne
+    $enableD3D11DirectMlInteropValue) {
+    throw "最终 Runtime DirectML 互操作状态不符合请求。"
+}
 if ($snapshot.source_width -ne $ExpectedSourceWidth -or
     $snapshot.source_height -ne $ExpectedSourceHeight -or
     $snapshot.encoded_width -ne $ExpectedEncodedWidth -or
@@ -608,8 +625,9 @@ Assert-Near $snapshot.source_pixels_per_pixel_y $ExpectedScaleY `
 $sampleIndex = 0
 $expectExplicitDeviceCopy =
     $Backend -eq "tensorrt" -and $enableCudaGraphValue
-$expectGpuPreprocess =
-    $expectExplicitDeviceCopy -and $enableGpuPreprocessValue
+$expectGpuPreprocess = (
+    ($expectExplicitDeviceCopy -and $enableGpuPreprocessValue) -or
+    $enableD3D11DirectMlInteropValue)
 foreach ($sample in @($report.samples)) {
     if (-not $sample.success -or
         $sample.detection_status -ne "SUCCESS" -or
@@ -635,6 +653,10 @@ foreach ($sample in @($report.samples)) {
         $enableD3D11CudaInteropValue) {
         throw "第 $sampleIndex 个样本的 D3D11/CUDA 互操作语义不符合请求。"
     }
+    if ([bool]$sample.d3d11_directml_interop -ne
+        $enableD3D11DirectMlInteropValue) {
+        throw "第 $sampleIndex 个样本的 D3D11/DirectML 互操作语义不符合请求。"
+    }
     if ($enableD3D11CudaInteropValue) {
         $expectedDeviceCopyBytes = [uint64]$ExpectedRoiWidth *
             [uint64]$ExpectedRoiHeight * 4
@@ -642,6 +664,11 @@ foreach ($sample in @($report.samples)) {
             [uint64]$sample.input_device_copy_bytes -ne
                 $expectedDeviceCopyBytes) {
             throw "第 $sampleIndex 个互操作样本违反零 host upload 或设备复制字节契约。"
+        }
+    } elseif ($enableD3D11DirectMlInteropValue) {
+        if ([uint64]$sample.input_upload_bytes -ne 0 -or
+            [uint64]$sample.input_device_copy_bytes -ne 0) {
+            throw "第 $sampleIndex 个 DirectML 互操作样本违反零 host upload/零中间设备复制契约。"
         }
     } elseif ($expectGpuPreprocess -and $sample.input_upload_bytes -le 0) {
         throw "第 $sampleIndex 个 CPU BGR GPU 前处理样本缺少 H2D 上传字节。"
@@ -742,6 +769,7 @@ $environment = [ordered]@{
         cuda_graph = $enableCudaGraphValue
         gpu_preprocess = $enableGpuPreprocessValue
         d3d11_cuda_interop = $enableD3D11CudaInteropValue
+        d3d11_directml_interop = $enableD3D11DirectMlInteropValue
         expected_explicit_device_copy = $expectExplicitDeviceCopy
         detector_intra_threads = 0
         detector_inter_threads = 0

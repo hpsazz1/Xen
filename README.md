@@ -6,7 +6,7 @@ Xen 是基于 C++20 原生实现的 Windows AI 辅助瞄准工具。核心管线
 XUDP 生产发送端、KMBOX NET 鼠标后端与独立鼠标性能基准工具的源码和自动回环测试：
 
 ```text
-Desktop Duplication CPU/D3D11 ─┐
+Desktop Duplication CPU/D3D11/CUDA/DirectML ─┐
 OBS/FFmpeg UDP MJPEG ─────┤
 XenSender DXGI/XUDP ────────┤
 OBS/NDI Sender ───────────┴→ Detector → Aim → Runtime SafetyGate ─┬→ Win32 SendInput
@@ -65,11 +65,11 @@ Xen/                           # 仓库根目录
   输出武装并重置 Aim 状态；加载窗口拒绝新的武装请求。
 - Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；样本同时固化主机 FOV、编码
   尺寸、ROI 和像素比例，避免网络重连或显示模式变化造成的瞬时坐标漂移被最终快照掩盖。主线程
-  在会话结束时将其发布为 schema 4 的
+  在会话结束时将其发布为 schema 5 的
   `cache/runtime/<进程-运行时钟-generation-segment>.csv/.json`。模型重载前结束当前报告，
   加载窗口不记录样本，完成后按实际活动模型和 Provider 开始新分段，避免新旧模型混合统计。
   报告按成功/失败状态隔离耗时，
-  输出 capture、queue、preprocess、inference、H2D、D3D11→CUDA、GPU preprocess、execution、D2H、postprocess、aim、
+  输出 capture、queue、preprocess、inference、H2D、D3D11→CUDA、D3D11→DirectML、GPU preprocess、execution、D2H、postprocess、aim、
   mouse、total 的 mean/P50/P95/P99/最大值；报告队列满载只覆盖最旧诊断样本，不反压核心线程。
 - 默认兼容链仍从 Capture 交付 CPU BGR ROI。TensorRT CUDA Graph 默认用 OpenCV 在 CPU 完成
   resize/LetterBox，再经固定 pinned `uint8` staging 上传，由 CUDA kernel 完成 BGR→RGB、归一化和
@@ -77,7 +77,10 @@ Xen/                           # 仓库根目录
   `capture.enable_d3d11_cuda_interop` 时，Desktop Duplication 改为发布三槽 BGRA8 D3D11 纹理，
   Runtime 启动期预注册 CUDA 资源，并通过 TensorRT CUDA Graph 消除 host upload。该路径要求 ROI
   等于模型静态输入、实际 Provider 为 TensorRT，且会关闭 ROI 预览和运行期模型热重载；默认关闭。
-  D3D11/DirectML 互操作仍待实施。
+  独立的 `capture.enable_d3d11_directml_interop` 路径使用三槽共享 BGRA8 纹理、D3D11 共享 fence
+  和 DML Session 的 D3D12 command queue，由 compute shader 直接写入固定 DML float CHW
+  输入；它同样要求 Desktop Duplication、静态模型尺寸和实际 DirectML Provider，
+  且与 CUDA 互操作互斥。两条实验路径均默认关闭。
 - Overlay 采用 152 px 居中标签栏和无外框独立工作区。自绘标题栏在侧栏交界处仅用底色分区：左段与侧栏同色，右段与工作区同色，并随浅色/深色主题同步切换；标题栏和顶部控制条下方均不绘制分割线。侧栏仅保留概览、检测、瞄准、输入和设置五个标签，底部以无边框两行状态区展示输出门状态和版本。工作区底色从交界处连续铺满，顶部控制条保留 18 px、页面内容保留 28 px 左侧间距，只为状态卡、配置组等内部模块保留细边框；配置页保存操作固定在页头。运行期间仅 Detector 配置允许编辑、保存和热重载，Capture、Aim、Input 与 Runtime 配置仍锁定。
 - 当前 Overlay 已经人工确认并作为后续 UI 扩展基线。新增部件必须复用现有语义色、间距、表单控件和内部模块样式，不得增加工作区外框、嵌套卡片或新的导航分组；改变整体布局或主题体系前必须重新人工复核。
 - Codex 浅色与深色主题可在偏好设置中切换并保存到 `config.ini`。窗口尺寸的配置与实际拖拽下限统一为 `820×600`；连续数值使用“滑块粗调 + 数值框精确输入”，手填值在 Enter 或失焦时按合法范围校验。
@@ -230,6 +233,13 @@ on/off A/B：默认 CPU BGR 为 78,007/78,007 成功，互操作为 78,003/78,00
 8.065/8.440/8.597 ms；互操作虽把 307,200 B/帧 host upload 降为零，但 D3D11→CUDA 隐式同步
 P95 为 3.789 ms，完整链路 P95 反而增加 3.838 ms。因此该路径只保留为实验/诊断开关，继续默认关闭。
 
+D3D11/DirectML 互操作可追加 `-EnableD3D11DirectMlInterop on`。脚本会强制要求
+Desktop Duplication 和 DirectML，逐样本核对 `d3d11_directml_interop=true`、
+`input_upload_bytes=0`、`input_device_copy_bytes=0`。D3D11 copy 后的共享 fence 值是
+D3D12 队列读取纹理的显式边界；DML 输出回传仍由 ORT 处理并归入
+`execution_ms`。短冒烟已验证严格 DML Provider、零失败和零显式输入复制；
+正式五分钟 A/B 结论在干净提交上另行记录。
+
 UDP、XUDP 和 NDI 接收正式验收使用统一包装脚本。以下命令在辅机启动 XUDP 接收端；显式
 `ReadyFilePath` 便于外部编排在 Capture 已绑定、Runtime 为 `RUNNING` 且实际 Provider 校验
 通过后再启动主机 Sender。ready JSON 只声明接收端可收帧，其中几何名为
@@ -320,6 +330,8 @@ ctest --test-dir build -C Release --output-on-failure
 - 可选真实模型集成：设置 `XEN_TEST_MODEL` 后增加 Detector 加载/变化输入和 Runtime 热重载；
 - CUDA 真实模型构建还增加 D3D11/CUDA 纹理预注册、连续变化输入、Graph 输出指纹与 CPU 对照，
   因而当前 GPU 配置共注册 18 个 CTest；
+- DirectML 真实模型构建还增加 D3D11/DirectML 共享纹理与 fence 测试，用饱和
+  红/蓝变化输入核对通道、原始输出指纹、检测结果和零显式输入复制；
 - 正式性能与部署验收：使用 `scripts/benchmark_*.ps1`，不把短单元测试耗时写成性能结论。
 
 测试不得复制一套生产协议或算法，不得因环境缺失静默回退后端，也不得通过删除、跳过或放宽
@@ -391,6 +403,12 @@ Desktop Duplication 的可选 CUDA 互操作还会复用三张固定 BGRA8 D3D11
 CUDA BGRA staging。D3D copy/Flush 与 CUDA map/copy/unmap 使用同一个短提交锁，防止两个业务
 线程把隐式同步调用交错成驱动死锁；高成本 registration 只在 Runtime 启动期执行，停止时先注销
 CUDA 资源再关闭 D3D11 设备。该路径当前以 INI/Benchmark 显式开关启用，默认路径不受影响。
+
+DirectML 互操作复用三张同样的 BGRA8 ROI 纹理，但纹理以
+`D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE` 创建。Capture 在共享
+提交锁内执行 copy、D3D11 fence `Signal` 与 `Flush`；Detector 的 D3D12 队列等待该
+fence，再把 BGRA8 转成固定 DML float CHW UAV。输入 OrtValue 通过 ORT DML API
+包装该 D3D12 资源并使用 I/O Binding，不经过 CPU `cv::Mat` 或中间设备复制。
 
 GPU 前处理 A/B 使用已构建的真实模型测试程序，在 clean `PATH` 下核对变化输入、Graph on/off、
 失败帧、检测连续性和上传字节数：
@@ -554,8 +572,9 @@ clean `PATH` 下分别显式请求三种输出契约，核对真实 Provider、�
 不复制当前帧或张量，只交换 Detector 所有权，旧 Session 在加载线程释放。加载失败写入独立的
 `detector_reload_error`，不会把 Runtime 置为 `FAILED`。
 
-D3D11/CUDA 互操作启用时，三个纹理的 registration 与 Capture 设备同寿命；为避免旧 Session
-注销资源时 Capture 仍向空闲槽提交 copy，该模式拒绝运行期热重载。需要换模型时应先停止
+D3D11/CUDA 或 D3D11/DirectML 互操作启用时，三个纹理与 Detector 设备资源均与
+Capture 设备同寿命；为避免旧 Session 销毁资源时 Capture 仍向空闲槽提交 copy，
+这两种模式均拒绝运行期热重载。需要换模型时应先停止
 Runtime，保存新配置后重新启动。
 
 停止期间若 TensorRT 正在首次构建 Engine，Runtime 会先停止 Capture/Pipeline，再等待不可取消的

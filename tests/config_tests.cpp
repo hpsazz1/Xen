@@ -400,6 +400,46 @@ void test_d3d11_cuda_interop_config() {
            "显式模型输入与 Capture ROI 不一致时必须提前拒绝");
 }
 
+void test_d3d11_directml_interop_config() {
+    AppConfig config;
+    config.detector.model_path = "models/test.onnx";
+    config.detector.backend = BackendType::DIRECTML;
+    config.capture.enable_d3d11_directml_interop = true;
+    std::string error;
+    expect(validate_app_config(config, error),
+           "默认 Desktop/DirectML 组合应接受 D3D11 资源桥接: " + error);
+
+    const auto path = std::filesystem::temp_directory_path() /
+                      "xen_d3d11_directml_interop.ini";
+    expect(save_app_config(path.string(), config, error),
+           "D3D11/DirectML 互操作配置应成功保存: " + error);
+    AppConfig loaded;
+    expect(load_app_config(path.string(), loaded, error) &&
+               loaded.capture.enable_d3d11_directml_interop,
+           "D3D11/DirectML 互操作开关必须完整往返");
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+
+    config.capture.backend = CaptureBackend::UDP_MJPEG;
+    config.capture.udp_url = "udp://127.0.0.1:5000";
+    expect(!validate_app_config(config, error),
+           "网络 Capture 不得启用 D3D11/DirectML 互操作");
+    config.capture.backend = CaptureBackend::DESKTOP_DUPLICATION;
+    config.detector.backend = BackendType::CPU;
+    expect(!validate_app_config(config, error),
+           "CPU 后端不得启用 DirectML 资源桥接");
+    config.detector.backend = BackendType::DIRECTML;
+    config.detector.input_width = 640;
+    config.detector.input_height = 640;
+    expect(!validate_app_config(config, error),
+           "DirectML 显式模型输入与 Capture ROI 不一致时必须拒绝");
+    config.detector.input_width = 0;
+    config.detector.input_height = 0;
+    config.capture.enable_d3d11_cuda_interop = true;
+    expect(!validate_app_config(config, error),
+           "CUDA 与 DirectML 互操作开关不得同时启用");
+}
+
 } // namespace
 
 int main() {
@@ -409,6 +449,7 @@ int main() {
     test_complete_aim_config_validation();
     test_xudp_backend_round_trip();
     test_d3d11_cuda_interop_config();
+    test_d3d11_directml_interop_config();
     if (failures != 0) {
         std::cerr << "Config 测试失败数: " << failures << '\n';
         return 1;

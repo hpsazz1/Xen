@@ -64,6 +64,8 @@ bool NetworkLatestFramePool::take_latest(
         frame.bgr_storage.reset();
         frame.native_storage.reset();
         frame.native_synchronization.reset();
+        frame.native_fence.reset();
+        frame.native_fence_value = 0;
         frame.bgr_storage = std::shared_ptr<const cv::Mat>(latest, &latest->bgr);
         frame.bgr = *frame.bgr_storage;
         frame.storage = CapturedFrameStorage::CPU_BGR;

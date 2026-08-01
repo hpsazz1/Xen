@@ -74,11 +74,14 @@ struct Detection {
 
 // D3D11 纹理输入的无 Windows 头公有描述符。resource.get() 必须指向
 // ID3D11Texture2D，格式为 DXGI_FORMAT_B8G8R8A8_UNORM；共享所有权保证
-// CUDA map/unmap 完成前纹理不会被释放。synchronization 必须非空，且 Capture
-// 的 D3D copy/Flush 与 Detector 的 CUDA map/copy/unmap 必须持有同一把锁。
+// GPU 消费完成前纹理不会被释放。synchronization 必须非空，且 Capture 的
+// D3D copy/Flush 与 Detector 的跨 API 提交必须持有同一把锁。DirectML 路径
+// 还要求 shared_fence.get() 是 HANDLE，fence_value 是该帧 copy 后的 Signal 值。
 struct D3D11TextureFrame {
     std::shared_ptr<void> resource;
     std::shared_ptr<std::mutex> synchronization;
+    std::shared_ptr<void> shared_fence;
+    std::uint64_t fence_value = 0;
     int width = 0;
     int height = 0;
 };
@@ -146,12 +149,16 @@ struct InferenceProfile {
     // D3D11 map、跨 API 同步和 BGRA array→CUDA 线性缓冲的设备内复制。
     // 互操作路径没有 H2D，h2d_ms 与 input_upload_bytes 必须保持为 0。
     double d3d11_to_cuda_ms = 0;
+    // D3D12 queue 等待 D3D11 fence 并直接执行 BGRA8→CHW shader 的 GPU 时间。
+    // 该路径不经过主机上传或中间设备复制。
+    double d3d11_to_directml_ms = 0;
     double gpu_preprocess_ms = 0;
     double execution_ms   = 0;
     double d2h_ms         = 0;
     bool   explicit_device_copy = false;
     bool   gpu_preprocess = false;
     bool   d3d11_cuda_interop = false;
+    bool   d3d11_directml_interop = false;
     std::uint64_t input_upload_bytes = 0;
     std::uint64_t input_device_copy_bytes = 0;
     std::uint64_t output_fingerprint = 0;
@@ -184,12 +191,13 @@ public:
     /// 在单张 BGR 图像上运行检测；同一实例不可并发调用，多线程请使用 clone()
     std::vector<Detection> detect(const cv::Mat& bgr_image);
 
-    /// 从 D3D11 BGRA8 纹理执行推理；仅 TensorRT CUDA Graph 固定 shape 支持。
+    /// 从 D3D11 BGRA8 纹理执行推理；仅 TensorRT CUDA Graph 或严格 DirectML
+    /// 固定 shape 支持。
     /// 该入口不静默回退 CPU，资源、格式、尺寸或设备不符均返回明确失败状态。
     std::vector<Detection> detect_d3d11(
         const D3D11TextureFrame& frame);
 
-    /// 当前已加载 Session 是否具备 D3D11/CUDA 互操作前处理能力。
+    /// 当前已加载 Session 是否具备对应 Provider 的 D3D11 GPU 互操作能力。
     bool d3d11_interop_supported() const noexcept;
 
     /// 在任何 D3D11 copy 前预注册固定纹理；成功后该资源可跨帧复用。

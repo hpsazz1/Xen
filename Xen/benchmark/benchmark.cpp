@@ -219,6 +219,11 @@ bool validate_runtime_snapshot(
         set_error(error, "Runtime D3D11/CUDA 互操作状态不符合请求");
         return false;
     }
+    if (snapshot.d3d11_directml_interop !=
+        options.enable_d3d11_directml_interop) {
+        set_error(error, "Runtime D3D11/DirectML 互操作状态不符合请求");
+        return false;
+    }
     if (snapshot.failed_frames != 0) {
         set_error(error, "Runtime 已记录失败帧: " +
             std::to_string(snapshot.failed_frames));
@@ -617,6 +622,13 @@ BenchmarkParseStatus parse_benchmark_options(
                               "--d3d11-cuda-interop 必须是 on/off");
                     return BenchmarkParseStatus::INVALID;
                 }
+            } else if (argument == L"--d3d11-directml-interop") {
+                if (!parse_switch(
+                        value, parsed.enable_d3d11_directml_interop)) {
+                    set_error(error,
+                              "--d3d11-directml-interop 必须是 on/off");
+                    return BenchmarkParseStatus::INVALID;
+                }
             } else {
                 std::string unknown;
                 wide_to_utf8(argument, unknown);
@@ -673,6 +685,17 @@ bool validate_benchmark_options(
              !options.enable_gpu_preprocess)) {
             set_error(error,
                 "D3D11/CUDA 互操作只支持 TensorRT CUDA Graph GPU 前处理");
+            return false;
+        }
+        if (options.enable_d3d11_directml_interop &&
+            options.backend != BackendType::DIRECTML) {
+            set_error(error,
+                "D3D11/DirectML 互操作只支持严格 DirectML 后端");
+            return false;
+        }
+        if (options.enable_d3d11_cuda_interop &&
+            options.enable_d3d11_directml_interop) {
+            set_error(error, "两种 D3D11 GPU 互操作模式不能同时启用");
             return false;
         }
         if (options.warmup_samples > kMaximumReportSamples ||
@@ -793,6 +816,7 @@ std::string benchmark_usage() {
         "  --cuda-graph on|off      TensorRT CUDA Graph，默认 on\n"
         "  --gpu-preprocess on|off  CUDA 前处理，默认 on\n"
         "  --d3d11-cuda-interop on|off  DXGI GPU-only 输入，默认 off\n"
+        "  --d3d11-directml-interop on|off  DXGI→DML GPU-only 输入，默认 off\n"
         "  --help                   显示帮助\n";
 }
 
@@ -864,6 +888,8 @@ bool run_runtime_benchmark(
             options.enable_gpu_preprocess;
         config.capture.enable_d3d11_cuda_interop =
             options.enable_d3d11_cuda_interop;
+        config.capture.enable_d3d11_directml_interop =
+            options.enable_d3d11_directml_interop;
         config.detector.enable_output_fingerprint = false;
         config.detector.enable_ort_profiling = false;
         config.detector.ort_profile_prefix.clear();
@@ -974,6 +1000,12 @@ bool run_runtime_benchmark(
                                                 "样本 D3D11/CUDA 互操作状态不符合请求");
                                             return false;
                                         }
+                                        if (detector_profile.d3d11_directml_interop !=
+                                                options.enable_d3d11_directml_interop) {
+                                            set_error(error,
+                                                "样本 D3D11/DirectML 互操作状态不符合请求");
+                                            return false;
+                                        }
                                         if (options.enable_d3d11_cuda_interop) {
                                             const std::uint64_t expected_copy =
                                                 static_cast<std::uint64_t>(
@@ -990,6 +1022,16 @@ bool run_runtime_benchmark(
                                                     "互操作样本违反零 host upload 或设备复制台账");
                                                 return false;
                                             }
+                                        }
+                                        if (options.enable_d3d11_directml_interop &&
+                                            (detector_profile.h2d_ms != 0.0 ||
+                                             detector_profile.input_upload_bytes != 0 ||
+                                             detector_profile.input_device_copy_bytes != 0 ||
+                                             !detector_profile.gpu_preprocess ||
+                                             detector_profile.explicit_device_copy)) {
+                                            set_error(error,
+                                                "DirectML 互操作样本违反零 host upload/零中间设备复制台账");
+                                            return false;
                                         }
                                         if (warmup_successful <
                                                 options.warmup_samples) {

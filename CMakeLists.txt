@@ -156,6 +156,14 @@ else()
     set(XEN_ONNXRUNTIME_HAS_TENSORRT FALSE)
 endif()
 
+# DirectML SDK 发行包通过 dml_provider_factory.h 暴露设备张量与自定义 D3D12
+# command queue API。只按当前 ONNXRUNTIME_ROOT 判定，避免 CUDA 构建误用系统头。
+if(WIN32 AND EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/dml_provider_factory.h")
+    set(XEN_ONNXRUNTIME_HAS_DIRECTML TRUE)
+else()
+    set(XEN_ONNXRUNTIME_HAS_DIRECTML FALSE)
+endif()
+
 if(EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_cuda.dll" OR
    XEN_ONNXRUNTIME_HAS_TENSORRT)
     set(XEN_ONNXRUNTIME_HAS_CUDA TRUE)
@@ -461,6 +469,10 @@ if(XEN_ONNXRUNTIME_HAS_CUDA)
     list(APPEND XEN_DETECTOR_SOURCES
         Xen/detector/cuda_preprocess.cu)
 endif()
+if(XEN_ONNXRUNTIME_HAS_DIRECTML)
+    list(APPEND XEN_DETECTOR_SOURCES
+        Xen/detector/dml_preprocess.cpp)
+endif()
 
 add_library(detector STATIC ${XEN_DETECTOR_SOURCES})
 
@@ -488,6 +500,14 @@ if(XEN_ONNXRUNTIME_HAS_CUDA)
         CUDA_ARCHITECTURES "${XEN_CUDA_ARCHITECTURES}")
 else()
     target_compile_definitions(detector PRIVATE XEN_HAS_CUDA_RUNTIME=0)
+endif()
+if(XEN_ONNXRUNTIME_HAS_DIRECTML)
+    # D3D11/D3D12 互操作与运行时 shader 编译只依赖 Windows SDK 导入库，
+    # 不新增需要部署的第三方 DLL；DirectML.dll 仍由 ORT 部署规则复制。
+    target_link_libraries(detector PRIVATE d3d11 d3d12 dxgi d3dcompiler)
+    target_compile_definitions(detector PRIVATE XEN_HAS_DIRECTML_INTEROP=1)
+else()
+    target_compile_definitions(detector PRIVATE XEN_HAS_DIRECTML_INTEROP=0)
 endif()
 
 # ─── 实时闭环模块 ───────────────────────────────────────
@@ -761,6 +781,18 @@ if(BUILD_TESTING)
                 COMMAND d3d11_cuda_interop_tests
                     "${XEN_TEST_MODEL}"
                     "${CMAKE_BINARY_DIR}/cache/tensorrt/d3d11-interop-test")
+        endif()
+
+        if(XEN_ONNXRUNTIME_HAS_DIRECTML)
+            add_executable(d3d11_directml_interop_tests
+                tests/d3d11_directml_interop_tests.cpp)
+            target_link_libraries(d3d11_directml_interop_tests PRIVATE
+                detector d3d11 d3d12 dxgi)
+            xen_deploy_runtime_dlls(
+                d3d11_directml_interop_tests OPENCV ORT)
+            add_test(NAME d3d11_directml_interop_tests
+                COMMAND d3d11_directml_interop_tests
+                    "${XEN_TEST_MODEL}")
         endif()
 
         add_executable(runtime_model_reload_test

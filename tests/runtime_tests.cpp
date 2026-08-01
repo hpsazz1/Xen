@@ -114,6 +114,30 @@ void test_gpu_storage_released_on_reset() {
            "Runtime 重置必须释放旧会话 GPU 资源并清空显式几何");
 }
 
+void test_directml_frame_requires_fence() {
+    runtime::detail::LatestFrameQueue queue;
+    auto slot = queue.acquire_write();
+    expect(slot != nullptr, "队列应提供 DirectML GPU 帧测试槽");
+    if (!slot) return;
+    slot->native_storage = std::make_shared<int>(1);
+    slot->native_synchronization = std::make_shared<std::mutex>();
+    slot->storage = CapturedFrameStorage::D3D11_BGRA8_DIRECTML;
+    slot->width = 320;
+    slot->height = 320;
+    slot->timing.sequence = 1;
+    queue.publish(slot);
+    std::atomic<bool> stop{false};
+    expect(!queue.wait_latest(0, stop),
+           "缺少 shared fence 的 DirectML GPU 帧必须拒绝发布");
+
+    slot->native_fence = std::make_shared<int>(2);
+    slot->native_fence_value = 1;
+    queue.publish(slot);
+    const auto published = queue.wait_latest(0, stop);
+    expect(published && published->timing.sequence == 1,
+           "纹理、提交锁和非零 fence 完整时才允许发布 DirectML 帧");
+}
+
 void test_safety_gate() {
     runtime::detail::SafetyGate gate;
     expect(!gate.can_dispatch(), "安全门默认必须关闭");
@@ -317,6 +341,7 @@ int main() {
     test_latest_frame_queue();
     test_network_storage_released_on_reset();
     test_gpu_storage_released_on_reset();
+    test_directml_frame_requires_fence();
     test_safety_gate();
     test_bounded_sample_ring();
     test_runtime_preview_channel();

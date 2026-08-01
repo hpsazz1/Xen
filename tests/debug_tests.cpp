@@ -40,6 +40,7 @@ RuntimePipelineSample make_sample(
     sample.profile.detector.inference_ms = 0.5;
     sample.profile.detector.h2d_ms = 0.1;
     sample.profile.detector.d3d11_to_cuda_ms = 0.02;
+    sample.profile.detector.d3d11_to_directml_ms = 0.03;
     sample.profile.detector.gpu_preprocess_ms = 0.05;
     sample.profile.detector.explicit_device_copy = true;
     sample.profile.detector.gpu_preprocess = true;
@@ -133,21 +134,24 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v4") != std::string::npos &&
+    expect(csv_text.find("Xen Runtime Debug Report v5") != std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
+               csv_text.find("d3d11_to_directml_ms") != std::string::npos &&
                csv_text.find("gpu_preprocess_ms") != std::string::npos &&
                csv_text.find("INFERENCE_FAILED") != std::string::npos &&
                csv_text.find("# final_source_width,2560") !=
                    std::string::npos &&
                csv_text.find("# final_roi_x,1120") != std::string::npos,
            "CSV 必须包含 schema、列头、失败状态和最终几何");
-    expect(json_text.find("\"schema\": 4") != std::string::npos &&
+    expect(json_text.find("\"schema\": 5") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
                json_text.find("\"gpu_preprocess\"") != std::string::npos &&
                json_text.find("\"d3d11_cuda_interop\": true") !=
+                   std::string::npos &&
+               json_text.find("\"d3d11_directml_interop\": false") !=
                    std::string::npos &&
                json_text.find("\"input_device_copy_bytes\": 409600") !=
                    std::string::npos &&

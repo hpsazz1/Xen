@@ -13,12 +13,14 @@ namespace detector::detail {
 struct SessionRunProfile {
     double h2d_ms = 0.0;
     double d3d11_to_cuda_ms = 0.0;
+    double d3d11_to_directml_ms = 0.0;
     double gpu_preprocess_ms = 0.0;
     double execution_ms = 0.0;
     double d2h_ms = 0.0;
     bool explicit_device_copy = false;
     bool gpu_preprocess = false;
     bool d3d11_cuda_interop = false;
+    bool d3d11_directml_interop = false;
     std::uint64_t input_upload_bytes = 0;
     std::uint64_t input_device_copy_bytes = 0;
 };
@@ -49,12 +51,15 @@ public:
         void* d3d11_texture,
         int width,
         int height,
-        std::mutex& synchronization) noexcept;
+        std::mutex& synchronization,
+        void* shared_fence_handle) noexcept;
     const std::vector<Ort::Value>* run_d3d11_preprocessed(
         void* d3d11_texture,
         int width,
         int height,
         std::mutex& synchronization,
+        void* shared_fence_handle,
+        std::uint64_t fence_value,
         SessionRunProfile& profile);
 
     size_t                        num_inputs() const;

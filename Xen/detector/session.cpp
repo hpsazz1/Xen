@@ -1,3 +1,5 @@
+#define NOMINMAX
+
 #include "detector/session.h"
 
 #include "log/log.h"
@@ -14,21 +16,24 @@
 #ifndef XEN_HAS_CUDA_RUNTIME
 #define XEN_HAS_CUDA_RUNTIME 0
 #endif
+#ifndef XEN_HAS_DIRECTML_INTEROP
+#define XEN_HAS_DIRECTML_INTEROP 0
+#endif
 #if XEN_HAS_CUDA_RUNTIME
 #include "detector/cuda_preprocess.h"
 #include <cuda_runtime_api.h>
 #endif
 
-#if defined(_WIN32) && __has_include(<dml_provider_factory.h>)
+#if XEN_HAS_DIRECTML_INTEROP
+#include "detector/dml_preprocess.h"
 #include <dml_provider_factory.h>
+#include <d3d12.h>
+#include <wrl/client.h>
 // DirectML 间接包含的 Windows 头会定义 ERROR 宏，导致后续日志宏中的
 // LogLevel::ERROR 被预处理器改写。Provider 头读取完毕后立即清除此污染。
 #ifdef ERROR
 #undef ERROR
 #endif
-#define XEN_HAS_DIRECTML_FACTORY 1
-#else
-#define XEN_HAS_DIRECTML_FACTORY 0
 #endif
 
 namespace detector::detail {
@@ -81,6 +86,15 @@ struct Session::Impl {
     cudaEvent_t execution_finished = nullptr;
     cudaEvent_t d2h_finished = nullptr;
 #endif
+#if XEN_HAS_DIRECTML_INTEROP
+    const OrtDmlApi* dml_api = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> dml_command_queue;
+    std::unique_ptr<DmlPreprocessor> dml_preprocessor;
+    std::unique_ptr<Ort::MemoryInfo> dml_memory;
+    Ort::Value dml_input_value{nullptr};
+    std::vector<Ort::Value> dml_output_values;
+    std::unique_ptr<Ort::IoBinding> dml_io_binding;
+#endif
     std::string active_provider = "CPUExecutionProvider";
 
     ~Impl() noexcept {
@@ -121,6 +135,15 @@ struct Session::Impl {
         io_binding.reset();
         output_values.clear();
         device_output_values.clear();
+#if XEN_HAS_DIRECTML_INTEROP
+        // Binding 先释放 OrtValue 引用，随后释放外部 allocation wrapper，最后
+        // 才归还 DML queue；该顺序与 OrtDmlApi 的资源寿命契约一致。
+        dml_io_binding.reset();
+        dml_output_values.clear();
+        dml_input_value = Ort::Value{nullptr};
+        dml_preprocessor.reset();
+        dml_memory.reset();
+#endif
         output_shapes.clear();
         output_types.clear();
 #if XEN_HAS_CUDA_RUNTIME
@@ -369,10 +392,31 @@ bool Session::setup_options(const DetectorConfig& cfg) {
             // 混合执行误报为严格 DirectML 推理。
             options.AddConfigEntry(
                 kOrtSessionOptionsDisableCPUEPFallback, "1");
-#if XEN_HAS_DIRECTML_FACTORY
+#if XEN_HAS_DIRECTML_INTEROP
             if (has_directml) {
-                Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_DML(
-                    options, cfg.device_id));
+                const OrtDmlApi* dml_api = nullptr;
+                Ort::ThrowOnError(Ort::GetApi().GetExecutionProviderApi(
+                    "DML", ORT_API_VERSION,
+                    reinterpret_cast<const void**>(&dml_api)));
+                if (!dml_api) {
+                    LOG_ERROR("detector", "ORT 未返回 DirectML Provider API");
+                    return false;
+                }
+                Ort::ThrowOnError(
+                    dml_api->SessionOptionsAppendExecutionProvider_DML(
+                        options, cfg.device_id));
+                ID3D12CommandQueue* command_queue = nullptr;
+                Ort::ThrowOnError(dml_api->GetDMLCommandQueue(
+                    options, &command_queue));
+                if (!command_queue) {
+                    LOG_ERROR("detector", "ORT 未返回 DirectML command queue");
+                    return false;
+                }
+                // GetDMLCommandQueue 返回借用指针。ComPtr 立即 AddRef，确保预处理
+                // 命令与 SessionOptions/Session 的内部工厂寿命不发生隐式耦合。
+                impl_->dml_api = dml_api;
+                impl_->dml_command_queue = command_queue;
+                impl_->device_id = cfg.device_id;
                 impl_->active_provider = "DmlExecutionProvider";
             } else {
                 LOG_ERROR("detector", "DirectML EP 不可用，拒绝静默降级到 CPU EP");
@@ -463,6 +507,77 @@ bool Session::load(const std::string& path) {
             impl_->output_shapes.push_back(output_info.GetShape());
             impl_->output_types.push_back(output_info.GetElementType());
         }
+
+#if XEN_HAS_DIRECTML_INTEROP
+        if (impl_->active_provider == "DmlExecutionProvider" &&
+            impl_->dml_api && impl_->dml_command_queue) {
+            const bool static_input = impl_->input_type ==
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+                impl_->input_shape.size() == 4 &&
+                impl_->input_shape[0] == 1 &&
+                impl_->input_shape[1] == 3 &&
+                impl_->input_shape[2] > 0 && impl_->input_shape[3] > 0 &&
+                impl_->input_shape[2] <=
+                    static_cast<int64_t>(std::numeric_limits<int>::max()) &&
+                impl_->input_shape[3] <=
+                    static_cast<int64_t>(std::numeric_limits<int>::max());
+            const bool static_outputs = std::all_of(
+                impl_->output_shapes.begin(), impl_->output_shapes.end(),
+                [](const std::vector<int64_t>& shape) {
+                    return !shape.empty() &&
+                        std::all_of(shape.begin(), shape.end(),
+                            [](int64_t dimension) { return dimension > 0; });
+                });
+            if (static_input && static_outputs) {
+                auto preprocessor = std::make_unique<DmlPreprocessor>();
+                if (preprocessor->init(
+                        impl_->dml_api, impl_->dml_command_queue.Get(),
+                        impl_->device_id,
+                        static_cast<int>(impl_->input_shape[3]),
+                        static_cast<int>(impl_->input_shape[2]))) {
+                    impl_->dml_memory = std::make_unique<Ort::MemoryInfo>(
+                        "DML", OrtDeviceAllocator, impl_->device_id,
+                        OrtMemTypeDefault);
+                    impl_->dml_input_value = Ort::Value::CreateTensor(
+                        *impl_->dml_memory, preprocessor->dml_allocation(),
+                        preprocessor->tensor_bytes(),
+                        impl_->input_shape.data(), impl_->input_shape.size(),
+                        impl_->input_type);
+                    impl_->dml_output_values.reserve(output_count);
+                    for (size_t i = 0; i < output_count; ++i) {
+                        impl_->dml_output_values.push_back(
+                            Ort::Value::CreateTensor(
+                                allocator, impl_->output_shapes[i].data(),
+                                impl_->output_shapes[i].size(),
+                                impl_->output_types[i]));
+                    }
+                    impl_->dml_io_binding =
+                        std::make_unique<Ort::IoBinding>(*impl_->session);
+                    impl_->dml_io_binding->BindInput(
+                        impl_->input_names[0], impl_->dml_input_value);
+                    for (size_t i = 0; i < output_count; ++i) {
+                        impl_->dml_io_binding->BindOutput(
+                            impl_->output_names[i],
+                            impl_->dml_output_values[i]);
+                    }
+                    impl_->dml_preprocessor = std::move(preprocessor);
+                    LOG_INFO(
+                        "detector",
+                        "DirectML D3D11 输入工作区已启用: tensor={} bytes",
+                        impl_->dml_preprocessor->tensor_bytes());
+                } else {
+                    LOG_WARN(
+                        "detector",
+                        "DirectML D3D11 输入工作区初始化失败，保留 CPU 输入路径: {}",
+                        preprocessor->last_error());
+                }
+            } else {
+                LOG_WARN(
+                    "detector",
+                    "DirectML D3D11 输入仅支持静态 [1,3,H,W] float32 和静态输出");
+            }
+        }
+#endif
 
         if (impl_->use_cuda_graph) {
             // CUDA Graph 只重放设备侧工作。输入必须在每帧捕获外显式复制到稳定
@@ -873,6 +988,12 @@ const std::vector<Ort::Value>* Session::run_gpu_preprocessed(
 }
 
 bool Session::d3d11_interop_enabled() const noexcept {
+#if XEN_HAS_DIRECTML_INTEROP
+    if (impl_ && impl_->active_provider == "DmlExecutionProvider") {
+        return impl_->session && impl_->dml_preprocessor &&
+               impl_->dml_io_binding && impl_->dml_input_value;
+    }
+#endif
     // D3D11 纹理入口严格复用 TensorRT CUDA Graph 的固定设备 I/O 和
     // GPU 前处理工作区；普通 CUDA EP/CPU 路径不允许隐式回退。
     return gpu_preprocess_enabled() && impl_ &&
@@ -883,8 +1004,22 @@ bool Session::prepare_d3d11_preprocessed(
         void* d3d11_texture,
         int width,
         int height,
-        std::mutex& synchronization) noexcept {
+        std::mutex& synchronization,
+        void* shared_fence_handle) noexcept {
+#if XEN_HAS_DIRECTML_INTEROP
+    if (impl_ && impl_->active_provider == "DmlExecutionProvider") {
+        (void)synchronization;
+        return d3d11_interop_enabled() && d3d11_texture &&
+               shared_fence_handle && width > 0 && height > 0 &&
+               impl_->input_shape.size() == 4 &&
+               width == impl_->input_shape[3] &&
+               height == impl_->input_shape[2] &&
+               impl_->dml_preprocessor->prepare(
+                   d3d11_texture, shared_fence_handle);
+    }
+#endif
 #if XEN_HAS_CUDA_RUNTIME
+    (void)shared_fence_handle;
     return d3d11_interop_enabled() && d3d11_texture &&
            width > 0 && height > 0 &&
            impl_->gpu_preprocessor->register_d3d11_bgra(
@@ -894,6 +1029,7 @@ bool Session::prepare_d3d11_preprocessed(
     (void)width;
     (void)height;
     (void)synchronization;
+    (void)shared_fence_handle;
     return false;
 #endif
 }
@@ -903,6 +1039,8 @@ const std::vector<Ort::Value>* Session::run_d3d11_preprocessed(
         int width,
         int height,
         std::mutex& synchronization,
+        void* shared_fence_handle,
+        std::uint64_t fence_value,
         SessionRunProfile& profile) {
     profile = {};
     if (!impl_->session || !d3d11_interop_enabled() ||
@@ -910,6 +1048,51 @@ const std::vector<Ort::Value>* Session::run_d3d11_preprocessed(
         return nullptr;
     }
     try {
+#if XEN_HAS_DIRECTML_INTEROP
+        if (impl_->active_provider == "DmlExecutionProvider") {
+            if (!shared_fence_handle || fence_value == 0 ||
+                !impl_->dml_preprocessor->enqueue(
+                    d3d11_texture, shared_fence_handle, fence_value,
+                    synchronization)) {
+                LOG_DEBUG(
+                    "detector", "D3D11/DirectML 输入提交失败: {}",
+                    impl_->dml_preprocessor
+                        ? impl_->dml_preprocessor->last_error()
+                        : std::string("预处理器不可用"));
+                return nullptr;
+            }
+            try {
+                const auto execution_started =
+                    std::chrono::steady_clock::now();
+                impl_->session->Run(
+                    impl_->run_opts, *impl_->dml_io_binding);
+                const auto execution_finished =
+                    std::chrono::steady_clock::now();
+                double d3d11_to_directml_ms = 0.0;
+                if (!impl_->dml_preprocessor->complete_timing(
+                        d3d11_to_directml_ms)) {
+                    LOG_DEBUG(
+                        "detector", "D3D11/DirectML GPU 时间读取失败: {}",
+                        impl_->dml_preprocessor->last_error());
+                    return nullptr;
+                }
+                profile.gpu_preprocess = true;
+                profile.d3d11_directml_interop = true;
+                profile.d3d11_to_directml_ms =
+                    d3d11_to_directml_ms;
+                profile.execution_ms =
+                    std::chrono::duration<double, std::milli>(
+                        execution_finished - execution_started).count();
+                return &impl_->dml_output_values;
+            } catch (...) {
+                impl_->dml_preprocessor->abandon_pending();
+                throw;
+            }
+        }
+#else
+        (void)shared_fence_handle;
+        (void)fence_value;
+#endif
         return run_cuda_graph(
             nullptr, 0, CudaGraphInput::D3D11_BGRA8,
             d3d11_texture, width, height, &synchronization, profile);

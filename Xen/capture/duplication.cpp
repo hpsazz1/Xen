@@ -7,6 +7,7 @@
 
 #include <Windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
@@ -19,6 +20,7 @@
 #include <chrono>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -101,8 +103,12 @@ public:
             hr = output1->DuplicateOutput(device_.Get(), &duplication_);
             if (FAILED(hr)) return fail_hresult("创建 Desktop Duplication 失败", hr);
 
-            if (config_.enable_d3d11_cuda_interop) {
+            if (gpu_interop_enabled()) {
                 interop_synchronization_ = std::make_shared<std::mutex>();
+                if (config_.enable_d3d11_directml_interop &&
+                    !create_directml_fence()) {
+                    return false;
+                }
             } else {
                 D3D11_TEXTURE2D_DESC staging_desc{};
                 staging_desc.Width = static_cast<UINT>(roi_width_);
@@ -127,7 +133,9 @@ public:
                      source_width_, source_height_, roi_x_, roi_y_,
                      roi_width_, roi_height_,
                      config_.enable_d3d11_cuda_interop
-                         ? "D3D11_BGRA8" : "CPU_BGR");
+                         ? "D3D11_BGRA8/CUDA"
+                         : (config_.enable_d3d11_directml_interop
+                                ? "D3D11_BGRA8/DirectML" : "CPU_BGR"));
             return true;
         } catch (...) {
             return fail(CaptureStatus::FAILURE,
@@ -136,10 +144,10 @@ public:
     }
 
     bool prepare_frame(CapturedFrame& frame) noexcept override {
-        if (!config_.enable_d3d11_cuda_interop) return true;
+        if (!gpu_interop_enabled()) return true;
         if (!device_) {
             return fail(CaptureStatus::CLOSED,
-                        "D3D11/CUDA 帧槽预创建时 Capture 尚未打开");
+                        "D3D11 GPU 帧槽预创建时 Capture 尚未打开");
         }
         if (!reusable_gpu_texture(frame) && !create_gpu_texture(frame)) {
             return false;
@@ -147,7 +155,10 @@ public:
         frame.bgr.release();
         frame.bgr_storage.reset();
         frame.native_synchronization = interop_synchronization_;
-        frame.storage = CapturedFrameStorage::D3D11_BGRA8;
+        frame.native_fence = config_.enable_d3d11_directml_interop
+            ? interop_fence_handle_ : std::shared_ptr<void>{};
+        frame.native_fence_value = 0;
+        frame.storage = gpu_storage();
         frame.width = roi_width_;
         frame.height = roi_height_;
         return true;
@@ -155,7 +166,7 @@ public:
 
     CaptureStatus grab(CapturedFrame& frame) noexcept override {
         if (!duplication_ || !context_ ||
-            (!config_.enable_d3d11_cuda_interop && !staging_)) {
+            (!gpu_interop_enabled() && !staging_)) {
             return CaptureStatus::CLOSED;
         }
 
@@ -200,19 +211,19 @@ public:
                 static_cast<UINT>(roi_y_ + roi_height_),
                 1,
             };
-            if (config_.enable_d3d11_cuda_interop) {
+            if (gpu_interop_enabled()) {
                 ID3D11Texture2D* slot_texture =
                     reusable_gpu_texture(frame);
                 if (!slot_texture) {
                     fail(CaptureStatus::FAILURE,
-                         "D3D11/CUDA 帧槽未在 Runtime 启动期预创建");
+                         "D3D11 GPU 帧槽未在 Runtime 启动期预创建");
                     return CaptureStatus::FAILURE;
                 }
                 if (!frame.native_synchronization ||
                     frame.native_synchronization !=
                         interop_synchronization_) {
                     fail(CaptureStatus::FAILURE,
-                         "D3D11/CUDA 帧槽缺少当前设备的提交锁");
+                         "D3D11 GPU 帧槽缺少当前设备的提交锁");
                     return CaptureStatus::FAILURE;
                 }
                 {
@@ -221,13 +232,35 @@ public:
                     context_->CopySubresourceRegion(
                         slot_texture, 0, 0, 0, 0,
                         desktop_texture.Get(), 0, &source_box);
+                    if (config_.enable_d3d11_directml_interop) {
+                        if (!context4_ || !interop_fence_ ||
+                            !interop_fence_handle_ ||
+                            interop_fence_value_ ==
+                                std::numeric_limits<std::uint64_t>::max()) {
+                            fail(CaptureStatus::FAILURE,
+                                 "D3D11/DirectML 共享 fence 状态非法");
+                            return CaptureStatus::FAILURE;
+                        }
+                        const HRESULT signal_hr = context4_->Signal(
+                            interop_fence_.Get(), ++interop_fence_value_);
+                        if (FAILED(signal_hr)) {
+                            fail_hresult("D3D11 共享 fence Signal 失败",
+                                         signal_hr);
+                            return CaptureStatus::FAILURE;
+                        }
+                    }
                     // Flush 只提交而不等待。与 CUDA map/unmap 共用提交锁，
                     // 防止另一个线程在 copy 与 Flush 之间插入隐式同步。
                     context_->Flush();
                 }
                 frame.bgr.release();
                 frame.bgr_storage.reset();
-                frame.storage = CapturedFrameStorage::D3D11_BGRA8;
+                frame.native_fence = config_.enable_d3d11_directml_interop
+                    ? interop_fence_handle_ : std::shared_ptr<void>{};
+                frame.native_fence_value =
+                    config_.enable_d3d11_directml_interop
+                        ? interop_fence_value_ : 0;
+                frame.storage = gpu_storage();
                 frame.width = roi_width_;
                 frame.height = roi_height_;
             } else {
@@ -260,6 +293,8 @@ public:
                 }
                 frame.native_storage.reset();
                 frame.native_synchronization.reset();
+                frame.native_fence.reset();
+                frame.native_fence_value = 0;
                 frame.bgr.create(roi_height_, roi_width_, CV_8UC3);
                 cv::cvtColor(bgra, frame.bgr, cv::COLOR_BGRA2BGR);
                 frame.storage = CapturedFrameStorage::CPU_BGR;
@@ -293,7 +328,12 @@ public:
     void close() noexcept override {
         staging_.Reset();
         duplication_.Reset();
+        context4_.Reset();
+        interop_fence_.Reset();
+        interop_fence_handle_.reset();
+        interop_fence_value_ = 0;
         context_.Reset();
+        device5_.Reset();
         device_.Reset();
         interop_synchronization_.reset();
         output_.Reset();
@@ -313,7 +353,7 @@ public:
 private:
     ID3D11Texture2D* reusable_gpu_texture(
             const CapturedFrame& frame) const noexcept {
-        if (frame.storage != CapturedFrameStorage::D3D11_BGRA8 ||
+        if (frame.storage != gpu_storage() ||
             !frame.native_storage ||
             frame.native_synchronization != interop_synchronization_ ||
             !device_) {
@@ -329,9 +369,16 @@ private:
 
         D3D11_TEXTURE2D_DESC description{};
         texture->GetDesc(&description);
+        const bool directml_contract =
+            !config_.enable_d3d11_directml_interop ||
+            ((description.MiscFlags &
+              D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0 &&
+             (description.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0 &&
+             frame.native_fence == interop_fence_handle_);
         return description.Width == static_cast<UINT>(roi_width_) &&
                description.Height == static_cast<UINT>(roi_height_) &&
-               description.Format == DXGI_FORMAT_B8G8R8A8_UNORM
+               description.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+               directml_contract
             ? texture : nullptr;
     }
 
@@ -344,12 +391,20 @@ private:
         description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         description.SampleDesc.Count = 1;
         description.Usage = D3D11_USAGE_DEFAULT;
+        if (config_.enable_d3d11_directml_interop) {
+            description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            // SHARED + SHARED_NTHANDLE 生成可由 D3D12 打开的 NT handle 资源；
+            // 不启用 keyed mutex，跨 D3D11/D3D12 排序统一由显式 shared fence 完成。
+            description.MiscFlags =
+                D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+                D3D11_RESOURCE_MISC_SHARED;
+        }
 
         ComPtr<ID3D11Texture2D> texture;
         const HRESULT hr = device_->CreateTexture2D(
             &description, nullptr, &texture);
         if (FAILED(hr)) {
-            return fail_hresult("创建 D3D11/CUDA ROI 纹理失败", hr);
+            return fail_hresult("创建 D3D11 GPU ROI 纹理失败", hr);
         }
         ID3D11Texture2D* owned = texture.Detach();
         try {
@@ -362,17 +417,67 @@ private:
         } catch (...) {
             owned->Release();
             return fail(CaptureStatus::FAILURE,
-                        "创建 D3D11/CUDA ROI 纹理所有权失败");
+                        "创建 D3D11 GPU ROI 纹理所有权失败");
         }
         frame.native_synchronization = interop_synchronization_;
-        frame.storage = CapturedFrameStorage::D3D11_BGRA8;
+        frame.native_fence = config_.enable_d3d11_directml_interop
+            ? interop_fence_handle_ : std::shared_ptr<void>{};
+        frame.native_fence_value = 0;
+        frame.storage = gpu_storage();
         return true;
+    }
+
+    bool create_directml_fence() noexcept {
+        HRESULT hr = device_.As(&device5_);
+        if (FAILED(hr)) {
+            return fail_hresult("D3D11 设备不支持共享 fence", hr);
+        }
+        hr = context_.As(&context4_);
+        if (FAILED(hr)) {
+            return fail_hresult("D3D11 immediate context 不支持共享 fence", hr);
+        }
+        hr = device5_->CreateFence(
+            0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&interop_fence_));
+        if (FAILED(hr)) {
+            return fail_hresult("创建 D3D11 共享 fence 失败", hr);
+        }
+        HANDLE handle = nullptr;
+        hr = interop_fence_->CreateSharedHandle(
+            nullptr, GENERIC_ALL, nullptr, &handle);
+        if (FAILED(hr) || !handle) {
+            return fail_hresult("创建 D3D11 fence shared handle 失败", hr);
+        }
+        try {
+            interop_fence_handle_ = std::shared_ptr<void>(
+                handle, [](void* value) noexcept {
+                    if (value) CloseHandle(static_cast<HANDLE>(value));
+                });
+        } catch (...) {
+            CloseHandle(handle);
+            return fail(CaptureStatus::FAILURE,
+                        "创建 D3D11 fence handle 所有权失败");
+        }
+        interop_fence_value_ = 0;
+        return true;
+    }
+
+    bool gpu_interop_enabled() const noexcept {
+        return config_.enable_d3d11_cuda_interop ||
+               config_.enable_d3d11_directml_interop;
+    }
+
+    CapturedFrameStorage gpu_storage() const noexcept {
+        return config_.enable_d3d11_directml_interop
+            ? CapturedFrameStorage::D3D11_BGRA8_DIRECTML
+            : CapturedFrameStorage::D3D11_BGRA8;
     }
 
     bool valid_config() const noexcept {
         return config_.adapter_index >= 0 && config_.output_index >= 0 &&
                config_.roi_width > 0 && config_.roi_height > 0 &&
-               config_.acquire_timeout_ms >= 0;
+               config_.acquire_timeout_ms >= 0 &&
+               !(config_.enable_d3d11_cuda_interop &&
+                 config_.enable_d3d11_directml_interop);
     }
 
     bool resolve_roi() noexcept {
@@ -416,13 +521,18 @@ private:
     ComPtr<IDXGIOutput> output_;
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
+    ComPtr<ID3D11Device5> device5_;
+    ComPtr<ID3D11DeviceContext4> context4_;
+    ComPtr<ID3D11Fence> interop_fence_;
     ComPtr<IDXGIOutputDuplication> duplication_;
     ComPtr<ID3D11Texture2D> staging_;
     std::shared_ptr<std::mutex> interop_synchronization_;
+    std::shared_ptr<void> interop_fence_handle_;
     std::atomic<CaptureStatus> status_{CaptureStatus::CLOSED};
     mutable std::mutex error_mutex_;
     std::string last_error_;
     std::uint64_t sequence_ = 0;
+    std::uint64_t interop_fence_value_ = 0;
     int source_width_ = 0;
     int source_height_ = 0;
     int roi_x_ = 0;

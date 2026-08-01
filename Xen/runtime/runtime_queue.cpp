@@ -52,7 +52,10 @@ void LatestFrameQueue::publish(
             return;
         }
     } else if (!frame->native_storage || !frame->native_synchronization ||
-               !frame->bgr.empty()) {
+               !frame->bgr.empty() ||
+               (frame->storage ==
+                    CapturedFrameStorage::D3D11_BGRA8_DIRECTML &&
+                (!frame->native_fence || frame->native_fence_value == 0))) {
         return;
     }
     try {
@@ -117,6 +120,8 @@ void LatestFrameQueue::reset() noexcept {
             // D3D11 互操作纹理由帧槽持有，跨 Runtime 会话不能复用旧设备资源。
             slot->native_storage.reset();
             slot->native_synchronization.reset();
+            slot->native_fence.reset();
+            slot->native_fence_value = 0;
             slot->storage = CapturedFrameStorage::CPU_BGR;
             slot->width = 0;
             slot->height = 0;

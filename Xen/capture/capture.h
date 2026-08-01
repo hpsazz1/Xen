@@ -40,10 +40,11 @@ enum class CaptureStatus {
 };
 
 // Capture 的像素载荷内存域。CPU_BGR 是所有网络后端和默认 DXGI 路径；
-// D3D11_BGRA8 只由显式开启的 Desktop Duplication/CUDA 互操作路径发布。
+// 两种 D3D11_BGRA8 值只由对应的显式 GPU 互操作路径发布。
 enum class CapturedFrameStorage {
     CPU_BGR,
     D3D11_BGRA8,
+    D3D11_BGRA8_DIRECTML,
 };
 
 const char* CaptureStatusName(CaptureStatus status) noexcept;
@@ -58,6 +59,9 @@ struct CaptureConfig {
     // 默认关闭。开启后 Desktop Duplication 只发布三槽 D3D11 BGRA8 纹理，
     // 不执行逐帧 GPU→CPU readback；Runtime 会严格核对 TensorRT CUDA Graph。
     bool enable_d3d11_cuda_interop = false;
+    // 默认关闭。开启后 Capture 发布可由 D3D12 打开的 shared NT handle 纹理，
+    // 并用共享 fence 把 D3D11 copy 完成点交给严格 DirectML Session。
+    bool enable_d3d11_directml_interop = false;
     // 裸 UDP 与 XUDP 共用 IPv4 监听地址；协议几何始终由 XUDP 帧头声明。
     std::string udp_url = "udp://0.0.0.0:5000";
     // recvfrom 单次阻塞上限，同时决定 close() 回收接收线程的最坏等待时间。
@@ -114,12 +118,17 @@ struct CapturedFrame {
     // 本成员必须声明在 bgr 之前，使析构时先释放 Mat 视图再归还后端缓冲槽。
     std::shared_ptr<const cv::Mat> bgr_storage;
     cv::Mat bgr;
-    // 公有契约不暴露 Windows 头。D3D11_BGRA8 时 native_storage.get() 是
-    // ID3D11Texture2D*，shared_ptr 的自定义 deleter 负责 COM Release。
+    // 公有契约不暴露 Windows 头。两种 D3D11_BGRA8 时 native_storage.get()
+    // 是 ID3D11Texture2D*，shared_ptr 的自定义 deleter 负责 COM Release。
     std::shared_ptr<void> native_storage;
     // 同一 D3D11 immediate context 的 copy/Flush 与 CUDA map/unmap 不能
     // 跨线程交错提交；三个 GPU 帧槽共享同一个互操作提交锁。
     std::shared_ptr<std::mutex> native_synchronization;
+    // DirectML 路径中 native_fence.get() 是可由 D3D12 OpenSharedHandle 打开的
+    // fence HANDLE；自定义 deleter 负责 CloseHandle。CUDA 路径保持为空。
+    std::shared_ptr<void> native_fence;
+    // Capture 在同一 immediate context 的 copy 之后 Signal 的单调 fence 值。
+    std::uint64_t native_fence_value = 0;
     CapturedFrameStorage storage = CapturedFrameStorage::CPU_BGR;
     // 像素载荷尺寸不能从 cv::Mat 推导：GPU-only 帧的 bgr 必须为空。
     int width = 0;
@@ -146,7 +155,7 @@ public:
 
     virtual bool open() noexcept = 0;
     // Runtime 启动线程可在业务线程创建前预备固定帧槽。普通 CPU/网络后端
-    // 无需额外资源；D3D11/CUDA 互操作后端借此预创建可注册纹理。
+    // 无需额外资源；D3D11 GPU 互操作后端借此预创建可注册/共享纹理。
     virtual bool prepare_frame(CapturedFrame& frame) noexcept {
         (void)frame;
         return true;

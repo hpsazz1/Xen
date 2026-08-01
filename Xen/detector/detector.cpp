@@ -277,12 +277,16 @@ struct Detector::Impl {
             inferred - preprocessed).count();
         profile.h2d_ms = session_profile.h2d_ms;
         profile.d3d11_to_cuda_ms = session_profile.d3d11_to_cuda_ms;
+        profile.d3d11_to_directml_ms =
+            session_profile.d3d11_to_directml_ms;
         profile.gpu_preprocess_ms = session_profile.gpu_preprocess_ms;
         profile.execution_ms = session_profile.execution_ms;
         profile.d2h_ms = session_profile.d2h_ms;
         profile.explicit_device_copy = session_profile.explicit_device_copy;
         profile.gpu_preprocess = session_profile.gpu_preprocess;
         profile.d3d11_cuda_interop = session_profile.d3d11_cuda_interop;
+        profile.d3d11_directml_interop =
+            session_profile.d3d11_directml_interop;
         profile.input_upload_bytes = session_profile.input_upload_bytes;
         profile.input_device_copy_bytes =
             session_profile.input_device_copy_bytes;
@@ -349,10 +353,12 @@ struct Detector::Impl {
 
         LOG_TRACE(
             "detector",
-            "format={}, pre={:.2f}ms infer={:.2f}ms h2d={:.2f}ms d3d11_cuda={:.2f}ms gpu_pre={:.2f}ms exec={:.2f}ms d2h={:.2f}ms post={:.2f}ms total={:.2f}ms upload={}B device_copy={}B det={}",
+            "format={}, pre={:.2f}ms infer={:.2f}ms h2d={:.2f}ms d3d11_cuda={:.2f}ms d3d11_dml={:.2f}ms gpu_pre={:.2f}ms exec={:.2f}ms d2h={:.2f}ms post={:.2f}ms total={:.2f}ms upload={}B device_copy={}B det={}",
             output_format_name(resolved), profile.preprocess_ms,
             profile.inference_ms, profile.h2d_ms,
-            profile.d3d11_to_cuda_ms, profile.gpu_preprocess_ms,
+            profile.d3d11_to_cuda_ms,
+            profile.d3d11_to_directml_ms,
+            profile.gpu_preprocess_ms,
             profile.execution_ms, profile.d2h_ms,
             profile.postprocess_ms, profile.total_ms,
             profile.input_upload_bytes, profile.input_device_copy_bytes,
@@ -427,6 +433,7 @@ struct Detector::Impl {
         const auto* outputs = session.run_d3d11_preprocessed(
             frame.resource.get(), frame.width, frame.height,
             *frame.synchronization,
+            frame.shared_fence.get(), frame.fence_value,
             session_profile);
         const auto inferred = clock::now();
         return finish_run(
@@ -512,7 +519,11 @@ std::vector<Detection> Detector::detect_d3d11(
         if (impl_) impl_->set_profile(current_profile);
         return {};
     }
+    const bool directml_frame =
+        impl_->active_provider == "DmlExecutionProvider";
     if (!frame.resource || !frame.synchronization ||
+        (directml_frame &&
+         (!frame.shared_fence || frame.fence_value == 0)) ||
         frame.width <= 0 || frame.height <= 0 ||
         frame.width != input_width() || frame.height != input_height()) {
         current_profile.status = DetectionStatus::INVALID_INPUT;
@@ -558,7 +569,7 @@ bool Detector::prepare_d3d11(
     try {
         return impl_->session.prepare_d3d11_preprocessed(
             frame.resource.get(), frame.width, frame.height,
-            *frame.synchronization);
+            *frame.synchronization, frame.shared_fence.get());
     } catch (...) {
         return false;
     }

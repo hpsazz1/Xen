@@ -63,19 +63,30 @@ struct Runtime::Impl {
     bool validate_d3d11_interop_detector(
             const Detector& candidate,
             std::string& error) const noexcept {
-        if (!config.capture.enable_d3d11_cuda_interop) return true;
-        if (candidate.backend_name() != "TensorrtExecutionProvider" ||
-            !candidate.d3d11_interop_supported()) {
-            error = "D3D11/CUDA 互操作要求实际 TensorRT CUDA Graph GPU 前处理";
+        if (!gpu_interop_enabled()) return true;
+        if (config.capture.enable_d3d11_cuda_interop) {
+            if (candidate.backend_name() != "TensorrtExecutionProvider" ||
+                !candidate.d3d11_interop_supported()) {
+                error = "D3D11/CUDA 互操作要求实际 TensorRT CUDA Graph GPU 前处理";
+                return false;
+            }
+        } else if (candidate.backend_name() != "DmlExecutionProvider" ||
+                   !candidate.d3d11_interop_supported()) {
+            error = "D3D11/DirectML 互操作要求实际严格 DirectML 固定输入工作区";
             return false;
         }
         if (candidate.input_width() != config.capture.roi_width ||
             candidate.input_height() != config.capture.roi_height) {
-            error = "D3D11/CUDA 互操作要求 Capture ROI 与模型输入尺寸完全一致";
+            error = "D3D11 GPU 互操作要求 Capture ROI 与模型输入尺寸完全一致";
             return false;
         }
         error.clear();
         return true;
+    }
+
+    bool gpu_interop_enabled() const noexcept {
+        return config.capture.enable_d3d11_cuda_interop ||
+               config.capture.enable_d3d11_directml_interop;
     }
 
     void set_error(const std::string& error) noexcept {
@@ -140,7 +151,7 @@ struct Runtime::Impl {
             set_error(validation_error);
             return false;
         }
-        if (config.capture.enable_d3d11_cuda_interop) {
+        if (gpu_interop_enabled()) {
             // 预览目前只接受 CPU BGR。互操作会话强制关闭诊断支路，避免为
             // UI 恢复逐帧 readback；后续应另做最高 10 FPS 的 GPU readback。
             if (!preview_channel.set_enabled(false)) {
@@ -154,27 +165,29 @@ struct Runtime::Impl {
             set_error(capture ? capture->last_error() : "创建 Capture 失败");
             return false;
         }
-        if (config.capture.enable_d3d11_cuda_interop) {
-            // 三槽纹理必须在 Capture/Pipeline 线程启动前完成创建和 CUDA 注册。
-            // 若先提交 D3D copy 再从另一线程首次注册，驱动同步可能形成互等。
+        if (gpu_interop_enabled()) {
+            // 三槽纹理必须在 Capture/Pipeline 线程启动前完成创建和跨 API 预备。
+            // 若先提交 D3D copy 再从另一线程首次注册/打开，驱动同步可能互等。
             const auto slots = frame_queue.initialization_slots();
             for (const auto& slot : slots) {
                 if (!slot || !capture->prepare_frame(*slot)) {
                     set_error(capture->last_error().empty()
-                        ? "预创建 D3D11/CUDA 帧槽失败"
+                        ? "预创建 D3D11 GPU 帧槽失败"
                         : capture->last_error());
                     return false;
                 }
                 if (!detector->prepare_d3d11({
                         slot->native_storage,
                         slot->native_synchronization,
+                        slot->native_fence,
+                        slot->native_fence_value,
                         slot->width,
                         slot->height})) {
-                    set_error("预注册 D3D11/CUDA 帧槽失败");
+                    set_error("预备 D3D11 GPU 帧槽失败");
                     return false;
                 }
             }
-            LOG_INFO("runtime", "D3D11/CUDA 三槽纹理已预创建并注册");
+            LOG_INFO("runtime", "D3D11 GPU 三槽纹理已预创建并预备");
         }
         mouse = MouseDeviceFactory::create(config.mouse);
         if (!mouse || !mouse->open()) {
@@ -203,6 +216,8 @@ struct Runtime::Impl {
             current_snapshot.preview_enabled = preview_enabled;
             current_snapshot.d3d11_cuda_interop =
                 config.capture.enable_d3d11_cuda_interop;
+            current_snapshot.d3d11_directml_interop =
+                config.capture.enable_d3d11_directml_interop;
         }
         pipeline_samples.clear();
         debug_samples.reset();
@@ -368,11 +383,14 @@ struct Runtime::Impl {
                         false, std::memory_order_acq_rel)) {
                     aim->reset();
                 }
-                if (frame->storage ==
-                    CapturedFrameStorage::D3D11_BGRA8) {
+                if (frame->storage == CapturedFrameStorage::D3D11_BGRA8 ||
+                    frame->storage ==
+                        CapturedFrameStorage::D3D11_BGRA8_DIRECTML) {
                     detections = detector->detect_d3d11({
                         frame->native_storage,
                         frame->native_synchronization,
+                        frame->native_fence,
+                        frame->native_fence_value,
                         frame->width,
                         frame->height});
                 } else {
@@ -596,7 +614,7 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
             }
         }
 
-        if (impl_->config.capture.enable_d3d11_cuda_interop) {
+        if (impl_->gpu_interop_enabled()) {
             // 互操作预处理器会跨帧缓存三槽 D3D11 资源的 CUDA 注册。
             // 热重载销毁旧 Session 时 Capture 线程仍可能向空闲槽提交 GPU copy，
             // 因此首版契约要求先停止 Runtime，再更换模型并重新启动。
@@ -604,7 +622,7 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
             impl_->current_snapshot.detector_reload_state =
                 DetectorReloadState::FAILED;
             impl_->current_snapshot.detector_reload_error =
-                "D3D11/CUDA 互操作启用时不支持 Detector 热重载；"
+                "D3D11 GPU 互操作启用时不支持 Detector 热重载；"
                 "请停止 Runtime 后更换模型";
             return false;
         }
@@ -812,7 +830,7 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
 
 bool Runtime::set_preview_enabled(bool enabled) noexcept {
     if (!impl_) return false;
-    if (enabled && impl_->config.capture.enable_d3d11_cuda_interop) {
+    if (enabled && impl_->gpu_interop_enabled()) {
         return false;
     }
     const bool succeeded = impl_->preview_channel.set_enabled(enabled);
