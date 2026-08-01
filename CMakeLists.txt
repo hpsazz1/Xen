@@ -698,6 +698,34 @@ if(BUILD_TESTING)
                 "${XEN_TEST_SEGMENTATION_IMAGE}")
     endif()
 
+    # Pose 与 detect/segment 使用不同的输出契约和真实权重，独立配置可避免
+    # 默认构建依赖外部模型；模型和真实图像必须成对提供。
+    set(XEN_TEST_POSE_MODEL "" CACHE FILEPATH
+        "用于姿态估计集成测试的 YOLOv8 兼容 ONNX 模型")
+    set(XEN_TEST_POSE_IMAGE "" CACHE FILEPATH
+        "用于姿态估计集成测试且包含人物的真实图像")
+    if(XEN_TEST_POSE_MODEL OR XEN_TEST_POSE_IMAGE)
+        if(NOT XEN_TEST_POSE_MODEL OR
+           NOT EXISTS "${XEN_TEST_POSE_MODEL}")
+            message(FATAL_ERROR
+                "XEN_TEST_POSE_MODEL does not exist: ${XEN_TEST_POSE_MODEL}")
+        endif()
+        if(NOT XEN_TEST_POSE_IMAGE OR
+           NOT EXISTS "${XEN_TEST_POSE_IMAGE}")
+            message(FATAL_ERROR
+                "XEN_TEST_POSE_IMAGE does not exist: ${XEN_TEST_POSE_IMAGE}")
+        endif()
+        add_executable(pose_model_test tests/pose_model_test.cpp)
+        target_link_libraries(pose_model_test PRIVATE detector)
+        if(WIN32)
+            xen_deploy_runtime_dlls(pose_model_test OPENCV ORT)
+        endif()
+        add_test(NAME pose_model_test
+            COMMAND pose_model_test
+                "${XEN_TEST_POSE_MODEL}"
+                "${XEN_TEST_POSE_IMAGE}")
+    endif()
+
     # 视频真值解析和 Recall 统计保持为无 Session 的纯算法测试；文件哈希使用
     # Windows CNG，JSON 使用已部署的 OpenCV FileStorage，不增加第三方依赖。
     add_executable(video_visibility_tests

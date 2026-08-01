@@ -22,6 +22,18 @@ struct SegmentationCandidate {
     int64_t anchor_index = -1; ///< 用于在 NMS 后读取对应掩码系数
 };
 
+struct PoseContract {
+    int64_t class_count = 0;
+    int64_t keypoint_count = 0;
+    int64_t keypoint_dimensions = 0;
+    int64_t anchors = 0;
+};
+
+struct PoseCandidate {
+    Detection detection;       ///< NMS 前保持模型输入坐标
+    int64_t anchor_index = -1; ///< NMS 后读取同一 anchor 的关键点
+};
+
 /// 根据运行时输出形状解析检测输出契约。
 /// AUTO 只接受可明确区分的三维单 batch 张量；无法确定时返回 false。
 bool resolve_output_format(const std::vector<int64_t>& shape,
@@ -52,6 +64,24 @@ bool decode_segmentation_output(
     const SegmentationContract& contract,
     float conf_threshold,
     std::vector<SegmentationCandidate>& candidates) noexcept;
+
+/// 验证 YOLOv8 兼容 pose raw head。关键点数量和维度来自已验证的
+/// kpt_shape metadata，类别数由 features - 4 - K*D 严格推导。
+bool resolve_pose_contract(
+    const std::vector<int64_t>& prediction_shape,
+    OutputFormat requested,
+    int64_t keypoint_count,
+    int64_t keypoint_dimensions,
+    PoseContract& contract) noexcept;
+
+/// 解码 pose raw head 的框、类别和置信度；关键点在 NMS 后按 anchor
+/// 读取，避免为所有阈值候选复制 K*D 个 float。
+bool decode_pose_output(
+    const float* prediction_data,
+    const std::vector<int64_t>& prediction_shape,
+    const PoseContract& contract,
+    float conf_threshold,
+    std::vector<PoseCandidate>& candidates) noexcept;
 
 /// 同类别 NMS。top_k 表示最终最多保留的检测数量。
 void nms(std::vector<Detection>& dets,
@@ -88,6 +118,21 @@ bool finalize_segmentations(
     std::vector<unsigned char>& suppressed,
     std::vector<float>& mask_logits,
     std::vector<std::uint8_t>& mask_input) noexcept;
+
+/// 对 pose 候选执行同类别 NMS、框/关键点坐标还原。generate_keypoints=false
+/// 时仅返回框，不读取关键点平面，供默认 Detector/Aim 热路径使用。
+bool finalize_poses(
+    std::vector<PoseCandidate>& candidates,
+    float nms_threshold,
+    int top_k,
+    const LetterBoxInfo& info,
+    const float* prediction_data,
+    const std::vector<int64_t>& prediction_shape,
+    const PoseContract& contract,
+    bool generate_keypoints,
+    PoseResult& output,
+    std::vector<PoseCandidate>& selected,
+    std::vector<unsigned char>& suppressed) noexcept;
 
 /// 将模型输入像素坐标还原到原始图像，裁剪越界坐标并删除退化框。
 bool scale_detections(std::vector<Detection>& dets,

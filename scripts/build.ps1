@@ -12,6 +12,8 @@
     [string]$ModelPath = "",
     [string]$SegmentationModelPath = "",
     [string]$SegmentationImagePath = "",
+    [string]$PoseModelPath = "",
+    [string]$PoseImagePath = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release"
 )
@@ -159,6 +161,14 @@ if (-not [string]::IsNullOrWhiteSpace($SegmentationImagePath)) {
     $SegmentationImagePath = Resolve-ExistingPath `
         $SegmentationImagePath "实例分割真实测试图像" "Leaf"
 }
+if (-not [string]::IsNullOrWhiteSpace($PoseModelPath)) {
+    $PoseModelPath = Resolve-ExistingPath `
+        $PoseModelPath "姿态测试模型" "Leaf"
+}
+if (-not [string]::IsNullOrWhiteSpace($PoseImagePath)) {
+    $PoseImagePath = Resolve-ExistingPath `
+        $PoseImagePath "姿态真实测试图像" "Leaf"
+}
 $resolvedTensorRtMajor = Resolve-TensorRtMajor $TensorRtRoot $TensorRtMajor
 $cmakeCommand = (Get-Command cmake -ErrorAction Stop).Source
 $ctestCommand = (Get-Command ctest -ErrorAction Stop).Source
@@ -182,7 +192,9 @@ $configureArguments = @(
     "-DXEN_NDI_SDK_ROOT=$NdiSdkRoot",
     "-DXEN_TEST_MODEL=$ModelPath",
     "-DXEN_TEST_SEGMENTATION_MODEL=$SegmentationModelPath",
-    "-DXEN_TEST_SEGMENTATION_IMAGE=$SegmentationImagePath"
+    "-DXEN_TEST_SEGMENTATION_IMAGE=$SegmentationImagePath",
+    "-DXEN_TEST_POSE_MODEL=$PoseModelPath",
+    "-DXEN_TEST_POSE_IMAGE=$PoseImagePath"
 )
 if (-not [string]::IsNullOrWhiteSpace($DirectMlRoot)) {
     $directMlDll = Join-Path $DirectMlRoot "bin\x64-win\DirectML.dll"

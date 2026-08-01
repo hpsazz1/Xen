@@ -71,6 +71,9 @@ Xen/                           # 仓库根目录
   `[1,M,H,W]` prototype。`detect()` 加载分割模型时仍只返回轻量框，不生成主机掩码；显式
   `segment()`/`segment_d3d11()` 才返回框与单帧共享的紧凑 ROI mask buffer，因此 Aim 和
   Runtime 默认热路径不复制掩码像素。
+- Detector 支持 metadata 明确声明 `task=pose`、`kpt_shape=[K,2|3]` 的 YOLOv8 兼容
+  姿态 raw head。`detect()` 加载姿态模型时只做框解码；显式 `pose()`/`pose_d3d11()`
+  才在 NMS 后按保留的 anchor 展开原图坐标关键点，避免 Aim 默认热路径复制关键点数组。
 - Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；样本同时固化主机 FOV、编码
   尺寸、ROI 和像素比例，避免网络重连或显示模式变化造成的瞬时坐标漂移被最终快照掩盖。主线程
   在会话结束时将其发布为 schema 6 的
@@ -555,6 +558,7 @@ Detector 不按“YOLOv5/v8/v10/11/26”等版本号硬编码分支，而按 ONN
 | `ANCHOR_FIRST_OBJECTNESS` | `[B, A, 5+C]` | YOLOv5 类 raw 输出 |
 | `END_TO_END` | `[B, N, 6]` | 已含 NMS 的 `xyxy, score, class` 输出 |
 | YOLOv8 segment 双输出 | `[1,4+C+M,A]` + `[1,M,H,W]` | raw 实例分割，NMS 后按 anchor 读取系数 |
+| YOLOv8 pose | `[1,4+C+K*D,A]` | raw 姿态，`kpt_shape=[K,D]`，NMS 后读取关键点 |
 
 因此，后续 YOLO 版本只要继续使用上述任一契约即可直接支持；若导出布局变化，只需新增一个契约解码器，不必改动推理主流程。默认 `AUTO` 会结合 metadata 和形状识别。单类别 raw 输出与端到端输出都可能是 `[B,N,6]`，第三方导出模型遇到歧义时应显式设置 `DetectorConfig::output_format`。
 
@@ -588,8 +592,21 @@ clean `PATH` 下分别显式请求三种输出契约，核对真实 Provider、�
   -UltralyticsRoot "C:\path\to\ultralytics-source"
 ```
 
-当前支持单输入 NCHW float32 detect，以及 YOLOv8 兼容的非 end-to-end raw segment 双输出。
-姿态、OBB、其他多输出 head、end-to-end segment 和真正的 batch inference 仍不在当前范围内。
+姿态估计使用独立的真实人物图像门禁；提供 Ultralytics 源码时会比较框、检测置信度、所有
+关键点置信度，以及参考置信度不低于 0.5 的关键点原图坐标：
+
+```powershell
+.\scripts\test_pose.ps1 `
+  -ModelPath "C:\path\to\yolov8n-pose.onnx" `
+  -ImagePath "C:\path\to\real-person-image.jpg" `
+  -OnnxRuntimeRoot "C:\path\to\onnxruntime" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib" `
+  -UltralyticsRoot "C:\path\to\ultralytics-source"
+```
+
+当前支持单输入 NCHW float32 detect、YOLOv8 兼容非 end-to-end raw segment 双输出和
+metadata 完整的非 end-to-end raw pose。OBB、其他多输出 head、end-to-end segment/pose
+和真正的 batch inference 仍不在当前范围内。
 
 ### 运行时模型热重载
 

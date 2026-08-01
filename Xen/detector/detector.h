@@ -126,6 +126,53 @@ struct SegmentationResult {
     }
 };
 
+// ============================================================
+// 姿态估计结果
+// ============================================================
+// 关键点坐标使用原图像素坐标；confidence 是模型给出的可见性/置信度。
+// 二维关键点模型没有第三维时统一写为 1.0。关键点按检测实例连续存放，
+// detections[index] 对应 keypoints 中第 index 行。
+struct PoseKeypoint {
+    float x = 0.0f;
+    float y = 0.0f;
+    float confidence = 1.0f;
+};
+
+struct PoseResult {
+    std::vector<Detection> detections;
+    std::vector<PoseKeypoint> keypoints;
+    std::size_t keypoints_per_detection = 0;
+    int keypoint_dimensions = 0; ///< 原模型维度，只允许 2 或 3
+
+    /// 返回指定实例的首个关键点；索引或连续布局契约非法时返回 nullptr。
+    const PoseKeypoint* keypoint_row(
+            std::size_t detection_index) const noexcept {
+        if (keypoints_per_detection == 0 ||
+            detection_index >= detections.size() ||
+            detection_index >
+                std::numeric_limits<std::size_t>::max() /
+                    keypoints_per_detection) {
+            return nullptr;
+        }
+        const std::size_t offset =
+            detection_index * keypoints_per_detection;
+        if (offset > keypoints.size() ||
+            keypoints_per_detection > keypoints.size() - offset) {
+            return nullptr;
+        }
+        return keypoints.data() + offset;
+    }
+
+    /// 返回单个关键点；任一索引越界时返回 nullptr。
+    const PoseKeypoint* keypoint(
+            std::size_t detection_index,
+            std::size_t keypoint_index) const noexcept {
+        if (keypoint_index >= keypoints_per_detection) return nullptr;
+        const PoseKeypoint* row = keypoint_row(detection_index);
+        return row ? row + keypoint_index : nullptr;
+    }
+};
+
 // D3D11 纹理输入的无 Windows 头公有描述符。resource.get() 必须指向
 // ID3D11Texture2D，格式为 DXGI_FORMAT_B8G8R8A8_UNORM；共享所有权保证
 // GPU 消费完成前纹理不会被释放。synchronization 必须非空，且 Capture 的
@@ -263,6 +310,16 @@ public:
 
     /// 当前已加载模型是否满足受支持的实例分割输出契约。
     bool segmentation_supported() const noexcept;
+
+    /// 执行 YOLOv8 兼容姿态估计；仅支持 metadata 明确声明 task=pose、
+    /// kpt_shape=[K,2|3] 的 channel-first raw head。
+    PoseResult pose(const cv::Mat& bgr_image);
+
+    /// 从 D3D11 BGRA8 纹理执行姿态估计；输入约束与 detect_d3d11() 相同。
+    PoseResult pose_d3d11(const D3D11TextureFrame& frame);
+
+    /// 当前已加载模型是否满足受支持的姿态输出契约。
+    bool pose_supported() const noexcept;
 
     /// 当前已加载 Session 是否具备对应 Provider 的 D3D11 GPU 互操作能力。
     bool d3d11_interop_supported() const noexcept;

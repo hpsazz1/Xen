@@ -22,6 +22,13 @@ namespace {
 enum class ModelTask {
     DETECT,
     SEGMENT,
+    POSE,
+};
+
+enum class RequestedOutput {
+    BOXES,
+    SEGMENTATION,
+    POSE,
 };
 
 bool valid_config(const DetectorConfig& config) noexcept {
@@ -54,6 +61,54 @@ std::string lowercase_ascii(std::string value) {
                 ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch);
         });
     return value;
+}
+
+bool parse_positive_int_pair(const std::string& value,
+                             int64_t& first,
+                             int64_t& second) noexcept {
+    first = 0;
+    second = 0;
+    size_t index = 0;
+    const auto skip_spaces = [&]() {
+        while (index < value.size() &&
+               (value[index] == ' ' || value[index] == '\t' ||
+                value[index] == '\r' || value[index] == '\n')) {
+            ++index;
+        }
+    };
+    const auto parse_positive = [&](int64_t& output) {
+        output = 0;
+        bool has_digit = false;
+        while (index < value.size() && value[index] >= '0' &&
+               value[index] <= '9') {
+            const int digit = value[index] - '0';
+            if (output >
+                (std::numeric_limits<int64_t>::max() - digit) / 10) {
+                return false;
+            }
+            output = output * 10 + digit;
+            has_digit = true;
+            ++index;
+        }
+        return has_digit && output > 0;
+    };
+
+    skip_spaces();
+    if (index >= value.size() ||
+        (value[index] != '[' && value[index] != '(')) {
+        return false;
+    }
+    const char closing = value[index++] == '[' ? ']' : ')';
+    skip_spaces();
+    if (!parse_positive(first)) return false;
+    skip_spaces();
+    if (index >= value.size() || value[index++] != ',') return false;
+    skip_spaces();
+    if (!parse_positive(second)) return false;
+    skip_spaces();
+    if (index >= value.size() || value[index++] != closing) return false;
+    skip_spaces();
+    return index == value.size();
 }
 
 std::optional<bool> parse_bool_metadata(const std::string& value) {
@@ -145,6 +200,13 @@ std::uint64_t output_fingerprint(
     return hash;
 }
 
+struct TaskRunResult {
+    // detect 与 segment 共用 segmentation.detections 作为轻量框载体；
+    // pose 独立保存关键点布局，避免公有结果类型彼此耦合。
+    SegmentationResult segmentation;
+    PoseResult pose;
+};
+
 } // namespace
 
 struct Detector::Impl {
@@ -161,6 +223,10 @@ struct Detector::Impl {
     std::optional<OutputFormat> resolved_output_format;
     std::optional<detector::detail::SegmentationContract>
         resolved_segmentation_contract;
+    std::optional<detector::detail::PoseContract>
+        resolved_pose_contract;
+    int64_t pose_keypoint_count = 0;
+    int64_t pose_keypoint_dimensions = 0;
     std::array<int64_t, 4> input_shape{1, 3, 0, 0};
     size_t input_element_count = 0;
     cv::Mat input_blob;
@@ -171,6 +237,8 @@ struct Detector::Impl {
         segmentation_candidates;
     std::vector<detector::detail::SegmentationCandidate>
         selected_segmentations;
+    std::vector<detector::detail::PoseCandidate> pose_candidates;
+    std::vector<detector::detail::PoseCandidate> selected_poses;
     std::vector<float> mask_logits;
     std::vector<std::uint8_t> mask_input;
     std::vector<unsigned char> nms_suppressed;
@@ -256,13 +324,19 @@ struct Detector::Impl {
         }
 
         const std::string task = lowercase_ascii(session.metadata_value("task"));
-        if (!task.empty() && task != "detect" && task != "segment") {
+        if (!task.empty() && task != "detect" && task != "segment" &&
+            task != "pose") {
             LOG_ERROR("detector", "不支持的模型任务: task={}", task);
             return false;
         }
-        model_task = task == "segment" ||
-                (task.empty() && session.num_outputs() == 2)
-            ? ModelTask::SEGMENT : ModelTask::DETECT;
+        if (task == "segment" ||
+            (task.empty() && session.num_outputs() == 2)) {
+            model_task = ModelTask::SEGMENT;
+        } else if (task == "pose") {
+            model_task = ModelTask::POSE;
+        } else {
+            model_task = ModelTask::DETECT;
+        }
         metadata_end_to_end = parse_bool_metadata(
             session.metadata_value("end2end"));
 
@@ -299,7 +373,7 @@ struct Detector::Impl {
                 }
                 resolved_output_format = resolved;
             }
-        } else {
+        } else if (model_task == ModelTask::SEGMENT) {
             if (session.num_outputs() != 2) {
                 LOG_ERROR(
                     "detector",
@@ -366,18 +440,66 @@ struct Detector::Impl {
                 }
                 resolved_segmentation_contract = contract;
             }
+        } else {
+            if (session.num_outputs() != 1) {
+                LOG_ERROR(
+                    "detector",
+                    "Pose 仅支持单输出 raw head，实际 outputs={}",
+                    session.num_outputs());
+                return false;
+            }
+            if (session.output_type(0) !=
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                LOG_ERROR("detector", "Pose 输出必须为 float32");
+                return false;
+            }
+            if (metadata_end_to_end.value_or(false) ||
+                (config.output_format != OutputFormat::AUTO &&
+                 config.output_format != OutputFormat::CHANNEL_FIRST)) {
+                LOG_ERROR(
+                    "detector",
+                    "Pose 当前仅支持非 end-to-end 的 channel-first raw head");
+                return false;
+            }
+            if (!parse_positive_int_pair(
+                    session.metadata_value("kpt_shape"),
+                    pose_keypoint_count, pose_keypoint_dimensions) ||
+                (pose_keypoint_dimensions != 2 &&
+                 pose_keypoint_dimensions != 3)) {
+                LOG_ERROR(
+                    "detector",
+                    "Pose metadata 必须包含 kpt_shape=[K,2|3]");
+                return false;
+            }
+            const auto declared_output_shape = session.output_shape(0);
+            if (!valid_declared_prediction_shape(declared_output_shape)) {
+                LOG_ERROR("detector", "Pose 输出必须是单 batch 三维张量");
+                return false;
+            }
+            if (static_shape(declared_output_shape)) {
+                detector::detail::PoseContract contract;
+                if (!detector::detail::resolve_pose_contract(
+                        declared_output_shape, config.output_format,
+                        pose_keypoint_count, pose_keypoint_dimensions,
+                        contract)) {
+                    LOG_ERROR("detector", "无法确定 Pose 输出契约");
+                    return false;
+                }
+                resolved_pose_contract = contract;
+            }
         }
 
         active_provider = session.active_provider();
         loaded = true;
+        const char* task_name = model_task == ModelTask::SEGMENT
+            ? "segment"
+            : (model_task == ModelTask::POSE ? "pose" : "detect");
         LOG_INFO("detector", "模型加载完成: {}x{}, task={}, provider={}",
-                 width, height,
-                 model_task == ModelTask::SEGMENT ? "segment" : "detect",
-                 active_provider);
+                 width, height, task_name, active_provider);
         return true;
     }
 
-    SegmentationResult finish_run(
+    TaskRunResult finish_run(
             const std::vector<Ort::Value>* outputs,
             const detector::detail::SessionRunProfile& session_profile,
             const detector::detail::LetterBoxInfo& letterbox_info,
@@ -385,11 +507,11 @@ struct Detector::Impl {
             std::chrono::steady_clock::time_point started,
             std::chrono::steady_clock::time_point preprocessed,
             std::chrono::steady_clock::time_point inferred,
-            bool generate_masks,
+            RequestedOutput requested_output,
             InferenceProfile& profile) {
         using milliseconds = std::chrono::duration<double, std::milli>;
 
-        SegmentationResult result;
+        TaskRunResult result;
 
         profile.preprocess_ms = std::chrono::duration_cast<milliseconds>(
             preprocessed - started).count();
@@ -428,7 +550,7 @@ struct Detector::Impl {
 
         OutputFormat resolved = OutputFormat::CHANNEL_FIRST;
         if (model_task == ModelTask::DETECT) {
-            if (generate_masks) {
+            if (requested_output != RequestedOutput::BOXES) {
                 profile.status = DetectionStatus::UNSUPPORTED_TASK;
                 return result;
             }
@@ -462,12 +584,16 @@ struct Detector::Impl {
             if (!detector::detail::finalize_detections(
                     candidate_detections, resolved,
                     config.nms_threshold, config.top_k,
-                    letterbox_info, result.detections,
+                    letterbox_info, result.segmentation.detections,
                     nms_suppressed)) {
                 profile.status = DetectionStatus::POSTPROCESS_FAILED;
                 return {};
             }
-        } else {
+        } else if (model_task == ModelTask::SEGMENT) {
+            if (requested_output == RequestedOutput::POSE) {
+                profile.status = DetectionStatus::UNSUPPORTED_TASK;
+                return result;
+            }
             const Ort::Value& prediction =
                 (*outputs)[prediction_output_index];
             const Ort::Value& prototype =
@@ -522,9 +648,67 @@ struct Detector::Impl {
                     segmentation_candidates, config.nms_threshold,
                     config.top_k, letterbox_info, prediction_data,
                     prediction_shape, prototype_data, prototype_shape,
-                    contract, generate_masks, result,
+                    contract,
+                    requested_output == RequestedOutput::SEGMENTATION,
+                    result.segmentation,
                     selected_segmentations, nms_suppressed,
                     mask_logits, mask_input)) {
+                profile.status = DetectionStatus::POSTPROCESS_FAILED;
+                return {};
+            }
+        } else {
+            if (requested_output == RequestedOutput::SEGMENTATION) {
+                profile.status = DetectionStatus::UNSUPPORTED_TASK;
+                return result;
+            }
+            const Ort::Value& prediction = (*outputs)[0];
+            const auto prediction_info =
+                prediction.GetTensorTypeAndShapeInfo();
+            if (prediction_info.GetElementType() !=
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            const auto prediction_shape = prediction_info.GetShape();
+            detector::detail::PoseContract contract;
+            if (!detector::detail::resolve_pose_contract(
+                    prediction_shape, config.output_format,
+                    pose_keypoint_count, pose_keypoint_dimensions,
+                    contract)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            const auto same_contract = [](
+                    const detector::detail::PoseContract& left,
+                    const detector::detail::PoseContract& right) {
+                return left.class_count == right.class_count &&
+                       left.keypoint_count == right.keypoint_count &&
+                       left.keypoint_dimensions ==
+                           right.keypoint_dimensions &&
+                       left.anchors == right.anchors;
+            };
+            if (resolved_pose_contract.has_value() &&
+                !same_contract(*resolved_pose_contract, contract)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            resolved_pose_contract = contract;
+
+            const float* prediction_data =
+                prediction.GetTensorData<float>();
+            pose_candidates.clear();
+            if (!detector::detail::decode_pose_output(
+                    prediction_data, prediction_shape, contract,
+                    config.conf_threshold, pose_candidates)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            if (!detector::detail::finalize_poses(
+                    pose_candidates, config.nms_threshold, config.top_k,
+                    letterbox_info, prediction_data, prediction_shape,
+                    contract,
+                    requested_output == RequestedOutput::POSE,
+                    result.pose, selected_poses, nms_suppressed)) {
                 profile.status = DetectionStatus::POSTPROCESS_FAILED;
                 return {};
             }
@@ -536,6 +720,9 @@ struct Detector::Impl {
             finished - started).count();
         profile.status = DetectionStatus::SUCCESS;
 
+        const size_t detection_count = model_task == ModelTask::POSE
+            ? result.pose.detections.size()
+            : result.segmentation.detections.size();
         LOG_TRACE(
             "detector",
             "format={}, pre={:.2f}ms infer={:.2f}ms h2d={:.2f}ms d3d11_cuda={:.2f}ms d3d11_dml={:.2f}ms gpu_pre={:.2f}ms exec={:.2f}ms d2h={:.2f}ms post={:.2f}ms total={:.2f}ms upload={}B device_copy={}B det={}",
@@ -547,14 +734,14 @@ struct Detector::Impl {
             profile.execution_ms, profile.d2h_ms,
             profile.postprocess_ms, profile.total_ms,
             profile.input_upload_bytes, profile.input_device_copy_bytes,
-            result.detections.size());
+            detection_count);
         return result;
     }
 
-    SegmentationResult run(const cv::Mat& bgr_image,
-                           const DetectorConfig& config,
-                           bool generate_masks,
-                           InferenceProfile& profile) {
+    TaskRunResult run(const cv::Mat& bgr_image,
+                      const DetectorConfig& config,
+                      RequestedOutput requested_output,
+                      InferenceProfile& profile) {
         using clock = std::chrono::steady_clock;
         using milliseconds = std::chrono::duration<double, std::milli>;
 
@@ -597,13 +784,13 @@ struct Detector::Impl {
         const auto inferred = clock::now();
         return finish_run(
             outputs, session_profile, letterbox_info, config,
-            start, preprocessed, inferred, generate_masks, profile);
+            start, preprocessed, inferred, requested_output, profile);
     }
 
-    SegmentationResult run_d3d11(
+    TaskRunResult run_d3d11(
             const D3D11TextureFrame& frame,
             const DetectorConfig& config,
-            bool generate_masks,
+            RequestedOutput requested_output,
             InferenceProfile& profile) {
         using clock = std::chrono::steady_clock;
 
@@ -625,7 +812,7 @@ struct Detector::Impl {
         const auto inferred = clock::now();
         return finish_run(
             outputs, session_profile, letterbox_info, config,
-            started, preprocessed, inferred, generate_masks, profile);
+            started, preprocessed, inferred, requested_output, profile);
     }
 };
 
@@ -682,9 +869,11 @@ std::vector<Detection> Detector::detect(const cv::Mat& bgr_image) {
 
     try {
         auto result = impl_->run(
-            bgr_image, config_, false, current_profile);
+            bgr_image, config_, RequestedOutput::BOXES, current_profile);
         impl_->set_profile(current_profile);
-        return std::move(result.detections);
+        return impl_->model_task == ModelTask::POSE
+            ? std::move(result.pose.detections)
+            : std::move(result.segmentation.detections);
     } catch (const std::exception& e) {
         // detect() 是推理热路径，只允许编译期可移除的 DEBUG/TRACE。
         LOG_DEBUG("detector", "Detector::detect() 失败: {}", e.what());
@@ -719,9 +908,10 @@ SegmentationResult Detector::segment(const cv::Mat& bgr_image) {
 
     try {
         auto result = impl_->run(
-            bgr_image, config_, true, current_profile);
+            bgr_image, config_, RequestedOutput::SEGMENTATION,
+            current_profile);
         impl_->set_profile(current_profile);
-        return result;
+        return std::move(result.segmentation);
     } catch (const std::exception& e) {
         LOG_DEBUG("detector", "Detector::segment() 失败: {}", e.what());
         current_profile.status = DetectionStatus::INFERENCE_FAILED;
@@ -762,9 +952,11 @@ std::vector<Detection> Detector::detect_d3d11(
 
     try {
         auto result = impl_->run_d3d11(
-            frame, config_, false, current_profile);
+            frame, config_, RequestedOutput::BOXES, current_profile);
         impl_->set_profile(current_profile);
-        return std::move(result.detections);
+        return impl_->model_task == ModelTask::POSE
+            ? std::move(result.pose.detections)
+            : std::move(result.segmentation.detections);
     } catch (const std::exception& e) {
         LOG_DEBUG("detector", "Detector::detect_d3d11() 失败: {}",
                   e.what());
@@ -811,9 +1003,10 @@ SegmentationResult Detector::segment_d3d11(
 
     try {
         auto result = impl_->run_d3d11(
-            frame, config_, true, current_profile);
+            frame, config_, RequestedOutput::SEGMENTATION,
+            current_profile);
         impl_->set_profile(current_profile);
-        return result;
+        return std::move(result.segmentation);
     } catch (const std::exception& e) {
         LOG_DEBUG("detector", "Detector::segment_d3d11() 失败: {}",
                   e.what());
@@ -831,6 +1024,94 @@ SegmentationResult Detector::segment_d3d11(
 
 bool Detector::segmentation_supported() const noexcept {
     return loaded() && impl_->model_task == ModelTask::SEGMENT;
+}
+
+PoseResult Detector::pose(const cv::Mat& bgr_image) {
+    InferenceProfile current_profile;
+    if (!loaded()) {
+        current_profile.status = DetectionStatus::NOT_LOADED;
+        if (impl_) impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!pose_supported()) {
+        current_profile.status = DetectionStatus::UNSUPPORTED_TASK;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+    if (bgr_image.empty() || bgr_image.type() != CV_8UC3) {
+        current_profile.status = DetectionStatus::INVALID_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+
+    try {
+        auto result = impl_->run(
+            bgr_image, config_, RequestedOutput::POSE, current_profile);
+        impl_->set_profile(current_profile);
+        return std::move(result.pose);
+    } catch (const std::exception& e) {
+        LOG_DEBUG("detector", "Detector::pose() 失败: {}", e.what());
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    } catch (...) {
+        LOG_DEBUG("detector", "Detector::pose() 失败: 未知异常");
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+}
+
+PoseResult Detector::pose_d3d11(const D3D11TextureFrame& frame) {
+    InferenceProfile current_profile;
+    if (!loaded()) {
+        current_profile.status = DetectionStatus::NOT_LOADED;
+        if (impl_) impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!pose_supported()) {
+        current_profile.status = DetectionStatus::UNSUPPORTED_TASK;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+    const bool directml_frame =
+        impl_->active_provider == "DmlExecutionProvider";
+    if (!frame.resource || !frame.synchronization ||
+        (directml_frame &&
+         (!frame.shared_fence || frame.fence_value == 0)) ||
+        frame.width <= 0 || frame.height <= 0 ||
+        frame.width != input_width() || frame.height != input_height()) {
+        current_profile.status = DetectionStatus::INVALID_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!d3d11_interop_supported()) {
+        current_profile.status = DetectionStatus::UNSUPPORTED_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+
+    try {
+        auto result = impl_->run_d3d11(
+            frame, config_, RequestedOutput::POSE, current_profile);
+        impl_->set_profile(current_profile);
+        return std::move(result.pose);
+    } catch (const std::exception& e) {
+        LOG_DEBUG("detector", "Detector::pose_d3d11() 失败: {}",
+                  e.what());
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    } catch (...) {
+        LOG_DEBUG("detector", "Detector::pose_d3d11() 失败: 未知异常");
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+}
+
+bool Detector::pose_supported() const noexcept {
+    return loaded() && impl_->model_task == ModelTask::POSE;
 }
 
 bool Detector::d3d11_interop_supported() const noexcept {

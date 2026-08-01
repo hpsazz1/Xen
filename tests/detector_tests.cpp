@@ -257,6 +257,142 @@ void test_segmentation_decode_and_mask() {
            "detect() 兼容路径不得分配主机掩码缓冲");
 }
 
+void test_pose_decode_and_keypoints() {
+    detector::detail::PoseContract contract;
+    expect(detector::detail::resolve_pose_contract(
+               {1, 11, 2}, OutputFormat::AUTO, 2, 3, contract),
+           "YOLOv8-pose 输出契约应解析成功");
+    expect(contract.class_count == 1 &&
+               contract.keypoint_count == 2 &&
+               contract.keypoint_dimensions == 3 &&
+               contract.anchors == 2,
+           "姿态类别、关键点 shape 或 anchor 数推导错误");
+    expect(!detector::detail::resolve_pose_contract(
+               {1, 11, 2}, OutputFormat::END_TO_END, 2, 3,
+               contract),
+           "姿态 raw head 不得接受 end-to-end 布局");
+    expect(!detector::detail::resolve_pose_contract(
+               {1, 11, 2}, OutputFormat::AUTO, 2, 4, contract),
+           "关键点维度不是 2/3 时必须失败关闭");
+
+    expect(detector::detail::resolve_pose_contract(
+               {1, 11, 2}, OutputFormat::AUTO, 2, 3, contract),
+           "恢复合法姿态契约应成功");
+    constexpr int64_t anchors = 2;
+    std::vector<float> prediction(22, 0.0f);
+    // 两个同类重叠框，NMS 应保留 anchor 0；关键点平面刻意不同，验证
+    // NMS 后仍通过 anchor_index 读取正确实例。
+    prediction[0 * anchors + 0] = 2.0f;
+    prediction[1 * anchors + 0] = 2.0f;
+    prediction[2 * anchors + 0] = 2.0f;
+    prediction[3 * anchors + 0] = 2.0f;
+    prediction[4 * anchors + 0] = 0.9f;
+    prediction[5 * anchors + 0] = 1.0f;
+    prediction[6 * anchors + 0] = 1.5f;
+    prediction[7 * anchors + 0] = 0.8f;
+    prediction[8 * anchors + 0] = 3.0f;
+    prediction[9 * anchors + 0] = 2.5f;
+    prediction[10 * anchors + 0] = 0.4f;
+
+    prediction[0 * anchors + 1] = 2.1f;
+    prediction[1 * anchors + 1] = 2.1f;
+    prediction[2 * anchors + 1] = 2.0f;
+    prediction[3 * anchors + 1] = 2.0f;
+    prediction[4 * anchors + 1] = 0.8f;
+    prediction[5 * anchors + 1] = 0.0f;
+    prediction[6 * anchors + 1] = 0.0f;
+    prediction[7 * anchors + 1] = 0.1f;
+    prediction[8 * anchors + 1] = 0.0f;
+    prediction[9 * anchors + 1] = 0.0f;
+    prediction[10 * anchors + 1] = 0.1f;
+
+    std::vector<detector::detail::PoseCandidate> candidates;
+    expect(detector::detail::decode_pose_output(
+               prediction.data(), {1, 11, 2}, contract, 0.25f,
+               candidates),
+           "姿态 raw head 解码应成功");
+    expect(candidates.size() == 2,
+           "姿态解码应保留两个阈值以上候选");
+
+    detector::detail::LetterBoxInfo info;
+    info.scale = 0.5f;
+    info.pad_x = 0.0f;
+    info.pad_y = 1.0f;
+    info.orig_w = 8;
+    info.orig_h = 4;
+    info.target_w = 4;
+    info.target_h = 4;
+    PoseResult result;
+    std::vector<detector::detail::PoseCandidate> selected;
+    std::vector<unsigned char> suppressed;
+    expect(detector::detail::finalize_poses(
+               candidates, 0.5f, 10, info, prediction.data(),
+               {1, 11, 2}, contract, true, result, selected,
+               suppressed),
+           "姿态 NMS 与关键点后处理应成功");
+    expect(result.detections.size() == 1 &&
+               result.keypoints_per_detection == 2 &&
+               result.keypoint_dimensions == 3 &&
+               result.keypoints.size() == 2,
+           "姿态实例与关键点连续布局错误");
+    const PoseKeypoint* first = result.keypoint(0, 0);
+    const PoseKeypoint* second = result.keypoint(0, 1);
+    expect(first && second && near(first->x, 2.0f) &&
+               near(first->y, 1.0f) &&
+               near(first->confidence, 0.8f) &&
+               near(second->x, 6.0f) && near(second->y, 3.0f) &&
+               near(second->confidence, 0.4f),
+           "关键点坐标、置信度或 anchor 对应关系错误");
+    expect(result.keypoint(0, 2) == nullptr &&
+               result.keypoint(1, 0) == nullptr,
+           "关键点访问必须拒绝越界索引");
+
+    candidates.clear();
+    expect(detector::detail::decode_pose_output(
+               prediction.data(), {1, 11, 2}, contract, 0.25f,
+               candidates),
+           "姿态仅框路径重新解码应成功");
+    PoseResult boxes_only;
+    expect(detector::detail::finalize_poses(
+               candidates, 0.5f, 10, info, nullptr, {1, 11, 2},
+               contract, false, boxes_only, selected, suppressed),
+           "姿态模型仅框热路径应无需读取关键点平面");
+    expect(boxes_only.detections.size() == 1 &&
+               boxes_only.keypoints.empty() &&
+               boxes_only.keypoints_per_detection == 0,
+           "detect() 兼容路径不得生成关键点结果");
+
+    detector::detail::PoseContract two_dimensional_contract;
+    expect(detector::detail::resolve_pose_contract(
+               {1, 9, 1}, OutputFormat::AUTO, 2, 2,
+               two_dimensional_contract),
+           "二维关键点契约应受支持");
+    const std::vector<float> two_dimensional_prediction{
+        2.0f, 2.0f, 2.0f, 2.0f, 0.9f,
+        1.0f, 1.5f, 3.0f, 2.5f,
+    };
+    std::vector<detector::detail::PoseCandidate>
+        two_dimensional_candidates;
+    expect(detector::detail::decode_pose_output(
+               two_dimensional_prediction.data(), {1, 9, 1},
+               two_dimensional_contract, 0.25f,
+               two_dimensional_candidates),
+           "二维关键点 raw head 解码应成功");
+    PoseResult two_dimensional_result;
+    expect(detector::detail::finalize_poses(
+               two_dimensional_candidates, 0.5f, 10, info,
+               two_dimensional_prediction.data(), {1, 9, 1},
+               two_dimensional_contract, true,
+               two_dimensional_result, selected, suppressed),
+           "二维关键点后处理应成功");
+    const PoseKeypoint* two_dimensional_keypoint =
+        two_dimensional_result.keypoint(0, 0);
+    expect(two_dimensional_result.keypoint_dimensions == 2 &&
+               two_dimensional_keypoint &&
+               near(two_dimensional_keypoint->confidence, 1.0f),
+           "二维关键点必须补充 confidence=1.0");
+}
+
 void test_scale_and_nms() {
     detector::detail::LetterBoxInfo info;
     info.scale = 0.5f;
@@ -421,6 +557,7 @@ int main() {
     test_anchor_first_objectness_decode();
     test_end_to_end_decode();
     test_segmentation_decode_and_mask();
+    test_pose_decode_and_keypoints();
     test_scale_and_nms();
     test_preprocess_contract();
     test_tensorrt_cache_defaults();

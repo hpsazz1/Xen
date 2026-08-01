@@ -231,6 +231,40 @@ void nms_segmentations_into(
     }
 }
 
+void nms_poses_into(
+        std::vector<PoseCandidate>& candidates,
+        float nms_threshold,
+        int top_k,
+        std::vector<PoseCandidate>& output,
+        std::vector<unsigned char>& suppressed) {
+    output.clear();
+    std::sort(candidates.begin(), candidates.end(),
+        [](const PoseCandidate& a, const PoseCandidate& b) {
+            return a.detection.confidence > b.detection.confidence;
+        });
+
+    suppressed.resize(candidates.size());
+    std::fill(suppressed.begin(), suppressed.end(), 0U);
+    output.reserve(std::min(
+        candidates.size(), static_cast<size_t>(top_k)));
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (suppressed[i] != 0U) continue;
+        output.push_back(candidates[i]);
+        if (static_cast<int>(output.size()) >= top_k) break;
+
+        for (size_t j = i + 1; j < candidates.size(); ++j) {
+            if (suppressed[j] == 0U &&
+                candidates[j].detection.class_id ==
+                    candidates[i].detection.class_id &&
+                intersection_over_union(
+                    candidates[i].detection,
+                    candidates[j].detection) > nms_threshold) {
+                suppressed[j] = 1U;
+            }
+        }
+    }
+}
+
 bool valid_letterbox(const LetterBoxInfo& info) noexcept {
     return info.scale > 0.0f && std::isfinite(info.scale) &&
            info.orig_w > 0 && info.orig_h > 0;
@@ -453,6 +487,101 @@ bool decode_segmentation_output(
             if (best_class < 0 || best_confidence < conf_threshold) continue;
 
             SegmentationCandidate candidate;
+            if (!make_xywh_detection(
+                    prediction_data[anchor],
+                    prediction_data[contract.anchors + anchor],
+                    prediction_data[2 * contract.anchors + anchor],
+                    prediction_data[3 * contract.anchors + anchor],
+                    best_confidence, best_class,
+                    candidate.detection)) {
+                continue;
+            }
+            candidate.anchor_index = anchor;
+            candidates.push_back(candidate);
+        }
+        return true;
+    } catch (...) {
+        candidates.clear();
+        return false;
+    }
+}
+
+bool resolve_pose_contract(
+        const std::vector<int64_t>& prediction_shape,
+        OutputFormat requested,
+        int64_t keypoint_count,
+        int64_t keypoint_dimensions,
+        PoseContract& contract) noexcept {
+    contract = {};
+    if ((requested != OutputFormat::AUTO &&
+         requested != OutputFormat::CHANNEL_FIRST) ||
+        prediction_shape.size() != 3 || prediction_shape[0] != 1 ||
+        prediction_shape[1] <= 0 || prediction_shape[2] <= 0 ||
+        keypoint_count <= 0 ||
+        (keypoint_dimensions != 2 && keypoint_dimensions != 3) ||
+        keypoint_count > std::numeric_limits<int64_t>::max() /
+            keypoint_dimensions) {
+        return false;
+    }
+
+    const int64_t keypoint_features =
+        keypoint_count * keypoint_dimensions;
+    if (keypoint_features > std::numeric_limits<int64_t>::max() - 4 ||
+        prediction_shape[1] <= 4 + keypoint_features) {
+        return false;
+    }
+
+    contract.class_count =
+        prediction_shape[1] - 4 - keypoint_features;
+    contract.keypoint_count = keypoint_count;
+    contract.keypoint_dimensions = keypoint_dimensions;
+    contract.anchors = prediction_shape[2];
+    return contract.class_count > 0;
+}
+
+bool decode_pose_output(
+        const float* prediction_data,
+        const std::vector<int64_t>& prediction_shape,
+        const PoseContract& contract,
+        float conf_threshold,
+        std::vector<PoseCandidate>& candidates) noexcept {
+    if (!prediction_data || prediction_shape.size() != 3 ||
+        prediction_shape[0] != 1 ||
+        contract.keypoint_count <= 0 ||
+        (contract.keypoint_dimensions != 2 &&
+         contract.keypoint_dimensions != 3) ||
+        contract.keypoint_count > std::numeric_limits<int64_t>::max() /
+            contract.keypoint_dimensions ||
+        prediction_shape[1] !=
+            4 + contract.class_count +
+                contract.keypoint_count * contract.keypoint_dimensions ||
+        prediction_shape[2] != contract.anchors ||
+        contract.class_count <= 0 || contract.anchors <= 0 ||
+        !std::isfinite(conf_threshold) || conf_threshold < 0.0f ||
+        conf_threshold > 1.0f) {
+        return false;
+    }
+
+    try {
+        candidates.reserve(
+            candidates.size() + static_cast<size_t>(contract.anchors));
+        for (int64_t anchor = 0; anchor < contract.anchors; ++anchor) {
+            float best_confidence =
+                -std::numeric_limits<float>::infinity();
+            int best_class = -1;
+            for (int64_t class_index = 0;
+                 class_index < contract.class_count; ++class_index) {
+                const float confidence = prediction_data[
+                    (4 + class_index) * contract.anchors + anchor];
+                if (std::isfinite(confidence) &&
+                    confidence > best_confidence) {
+                    best_confidence = confidence;
+                    best_class = static_cast<int>(class_index);
+                }
+            }
+            if (best_class < 0 || best_confidence < conf_threshold) continue;
+
+            PoseCandidate candidate;
             if (!make_xywh_detection(
                     prediction_data[anchor],
                     prediction_data[contract.anchors + anchor],
@@ -779,6 +908,115 @@ bool finalize_segmentations(
             }
         }
         output.mask_pixels = std::move(pixels);
+        return true;
+    } catch (...) {
+        output = {};
+        return false;
+    }
+}
+
+bool finalize_poses(
+        std::vector<PoseCandidate>& candidates,
+        float nms_threshold,
+        int top_k,
+        const LetterBoxInfo& info,
+        const float* prediction_data,
+        const std::vector<int64_t>& prediction_shape,
+        const PoseContract& contract,
+        bool generate_keypoints,
+        PoseResult& output,
+        std::vector<PoseCandidate>& selected,
+        std::vector<unsigned char>& suppressed) noexcept {
+    output = {};
+    if (top_k <= 0 || !std::isfinite(nms_threshold) ||
+        nms_threshold < 0.0f || nms_threshold > 1.0f ||
+        !valid_letterbox(info) || prediction_shape.size() != 3 ||
+        prediction_shape[0] != 1 || contract.class_count <= 0 ||
+        contract.keypoint_count <= 0 ||
+        (contract.keypoint_dimensions != 2 &&
+         contract.keypoint_dimensions != 3) ||
+        contract.keypoint_count > std::numeric_limits<int64_t>::max() /
+            contract.keypoint_dimensions ||
+        prediction_shape[1] !=
+            4 + contract.class_count +
+                contract.keypoint_count * contract.keypoint_dimensions ||
+        prediction_shape[2] != contract.anchors ||
+        contract.anchors <= 0) {
+        return false;
+    }
+    if (generate_keypoints && !prediction_data) return false;
+
+    try {
+        nms_poses_into(
+            candidates, nms_threshold, top_k, selected, suppressed);
+
+        output.detections.reserve(selected.size());
+        size_t valid_count = 0;
+        for (const PoseCandidate& candidate : selected) {
+            Detection scaled;
+            if (!scale_detection(candidate.detection, info, scaled)) continue;
+            output.detections.push_back(scaled);
+            selected[valid_count++] = candidate;
+        }
+        selected.resize(valid_count);
+        if (!generate_keypoints) return true;
+
+        output.keypoints_per_detection =
+            static_cast<size_t>(contract.keypoint_count);
+        output.keypoint_dimensions =
+            static_cast<int>(contract.keypoint_dimensions);
+        if (selected.empty()) return true;
+        if (selected.size() > std::numeric_limits<size_t>::max() /
+                output.keypoints_per_detection) {
+            return false;
+        }
+        output.keypoints.resize(
+            selected.size() * output.keypoints_per_detection);
+
+        const size_t keypoint_feature_offset =
+            static_cast<size_t>(4 + contract.class_count);
+        for (size_t instance = 0; instance < selected.size(); ++instance) {
+            const PoseCandidate& candidate = selected[instance];
+            if (candidate.anchor_index < 0 ||
+                candidate.anchor_index >= contract.anchors) {
+                return false;
+            }
+            for (int64_t keypoint_index = 0;
+                 keypoint_index < contract.keypoint_count;
+                 ++keypoint_index) {
+                const size_t feature = keypoint_feature_offset +
+                    static_cast<size_t>(keypoint_index) *
+                        static_cast<size_t>(contract.keypoint_dimensions);
+                const float raw_x = prediction_data[
+                    feature * static_cast<size_t>(contract.anchors) +
+                    static_cast<size_t>(candidate.anchor_index)];
+                const float raw_y = prediction_data[
+                    (feature + 1) *
+                        static_cast<size_t>(contract.anchors) +
+                    static_cast<size_t>(candidate.anchor_index)];
+                const float confidence = contract.keypoint_dimensions == 3
+                    ? prediction_data[
+                        (feature + 2) *
+                            static_cast<size_t>(contract.anchors) +
+                        static_cast<size_t>(candidate.anchor_index)]
+                    : 1.0f;
+                if (!std::isfinite(raw_x) || !std::isfinite(raw_y) ||
+                    !std::isfinite(confidence)) {
+                    return false;
+                }
+
+                PoseKeypoint& keypoint = output.keypoints[
+                    instance * output.keypoints_per_detection +
+                    static_cast<size_t>(keypoint_index)];
+                keypoint.x = std::clamp(
+                    (raw_x - info.pad_x) / info.scale,
+                    0.0f, static_cast<float>(info.orig_w));
+                keypoint.y = std::clamp(
+                    (raw_y - info.pad_y) / info.scale,
+                    0.0f, static_cast<float>(info.orig_h));
+                keypoint.confidence = confidence;
+            }
+        }
         return true;
     } catch (...) {
         output = {};
