@@ -14,9 +14,10 @@ OBS/NDI Sender ───────────┴→ Detector → Aim → Runt
                                                                  └→ MAKCU USB COM
 ```
 
-项目当前处于验证与发布收敛阶段。近期主线是消除 Provider SDK 切换后旧运行库残留造成的
-clean `PATH` 假阳性，在同一最新提交上重建独立 Provider/可选 SDK 矩阵，再完成真实双机、
-物理鼠标设备、Intel 目标硬件、人工可见性与 Aim 身份真值验收；暂不继续横向扩展模型或后端。
+项目当前处于验证与发布收敛阶段。构建现已按当前配置授权清单收敛共享输出目录，Provider SDK
+切换后会清理旧运行库，并生成来源与 SHA-256 报告。近期主线是在同一最新提交上重建独立
+Provider/可选 SDK 矩阵，再完成真实双机、物理鼠标设备、Intel 目标硬件、人工可见性与 Aim
+身份真值验收；暂不继续横向扩展模型或后端。
 
 物理鼠标输出默认禁用。只有配置显式允许、Runtime 已启动、用户完成武装、按住启用键且
 急停未触发时，Pipeline 才会调用 Mouse。Capture、Detector 或 Aim 失败均不会沿用旧结果。
@@ -364,20 +365,25 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-本项目已用 ONNX Runtime 1.27.1、OpenCV 4.14.0、spdlog 1.17.0 和 VS 2026 Release 配置完成构建。测试所需的非系统运行库由 CMake 部署到可执行文件旁，不依赖开发机额外配置 `PATH`。
+本项目已用 ONNX Runtime 1.27.1、OpenCV 4.14.0、spdlog 1.17.0 和 VS 2026 Release 配置完成
+构建。测试所需的非系统运行库由 CMake 部署到可执行文件旁，不依赖开发机额外配置 `PATH`。
+每次构建都会按配置级授权清单收敛 `build/<Configuration>/`，即使目标未重新链接，也会移除
+上次 Provider/SDK 遗留的已知运行库；当前来源与 SHA-256 记录在同目录的
+`xen-runtime-deployment.json`。
 
-默认 `BUILD_TESTING=ON` 当前注册 15 个 CTest，按风险分为五层：
+默认 `BUILD_TESTING=ON` 当前注册 16 个 CTest，按风险分为五层：
 
 - 纯算法与内部契约：Detector 解码/前处理、Aim、真值解析、Runtime 队列、Overlay 标量环；
 - 生产库回归：Log、Config、Debug、Benchmark 和 Mouse Benchmark 直接链接生产目标；
-- OS/网络可复现替身：Crash 子进程、UDP/XUDP/NDI 回环、假 KMBOX 与 Keyboard 状态机；
+- OS/网络/部署可复现替身：Crash 子进程、运行库授权清单两阶段切换、UDP/XUDP/NDI 回环、
+  假 KMBOX 与 Keyboard 状态机；
 - 可选真实模型集成：设置 `XEN_TEST_MODEL` 后增加 Detector 加载/变化输入和 Runtime 热重载；
 - CUDA 真实模型构建还增加 D3D11/CUDA 纹理预注册、连续变化输入、Graph 输出指纹与 CPU 对照，
-  因而当前 GPU 配置共注册 18 个 CTest；
+  因而当前 GPU 配置共注册 19 个 CTest；
 - DirectML 真实模型构建还增加 D3D11/DirectML 共享纹理与 fence 测试，用饱和
   红/蓝变化输入核对通道、原始输出指纹、检测结果和零显式输入复制；
 - OpenVINO 真实模型构建增加严格 Provider、变化输入、非法输入状态和 ORT 节点 profile
-  测试；指定 `XEN_TEST_OPENVINO_DEVICE=CPU|GPU|NPU` 后当前共注册 18 个 CTest；
+  测试；指定 `XEN_TEST_OPENVINO_DEVICE=CPU|GPU|NPU` 后当前共注册 19 个 CTest；
 - 正式性能与部署验收：使用 `scripts/benchmark_*.ps1`，不把短单元测试耗时写成性能结论。
 
 测试不得复制一套生产协议或算法，不得因环境缺失静默回退后端，也不得通过删除、跳过或放宽
@@ -399,9 +405,11 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 `ModelPath` 可省略；提供后会额外执行真实模型加载与单帧推理测试，模型不会复制进构建目录或纳入 Git。
-构建测试可执行文件时，CMake 会把其实际使用的 OpenCV、ONNX Runtime、TensorRT、
-cuDNN 和 CUDA DLL 复制到对应的 `build/<Configuration>/`，测试程序可直接启动，
-无需手工修改系统 `PATH`。TensorRT 只复制核心、ONNX 解析器和 SDK 提供的各架构
+同一配置的可执行目标共享 `build/<Configuration>/`，CMake 会把当前配置授权的 OpenCV、
+ONNX Runtime、TensorRT、cuDNN 和 CUDA 文件集中部署到该目录。部署前先清理状态文件记录和
+历史已知家族中不再授权的文件，再按 SHA-256 复制；`scripts/build.ps1` 会独立重算 SDK 来源、
+报告和输出三方哈希，并拒绝任何报告外的已知运行库，随后才在 clean `PATH` 下启动 CTest。
+TensorRT 只复制核心、ONNX 解析器和 SDK 提供的各架构
 Builder Resource，使同一构建可在不同 NVIDIA GPU 上首次生成对应 Engine；不复制完整 SDK。
 NDI 构建同时部署 SDK 运行 DLL 与许可证文件。
 

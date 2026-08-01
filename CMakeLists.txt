@@ -260,18 +260,17 @@ elseif(XEN_TENSORRT_MAJOR)
     message(FATAL_ERROR "XEN_TENSORRT_MAJOR is set but XEN_TENSORRT_ROOT is empty.")
 endif()
 
-# 使用 copy_if_different 避免增量构建反复重写数百 MB 的 GPU 运行库。
-# 多个可执行目标共享同一配置输出目录；并行构建时必须通过构建树级锁
-# 串行复制，否则 Windows 会因目标 DLL 被另一条 POST_BUILD 命令占用而失败。
+# Visual Studio 的同一配置共享一个可执行输出目录。这里只登记当前配置授权的
+# 运行文件，全部目标声明完毕后再由单一构建目标加锁完成清理、复制和哈希报告；
+# 这样即使可执行目标没有重新链接，SDK 清空或切换也不会跳过部署收敛。
 function(xen_copy_runtime_files target)
+    if(NOT TARGET ${target})
+        message(FATAL_ERROR
+            "Runtime deployment target does not exist: ${target}")
+    endif()
     foreach(runtime_file IN LISTS ARGN)
-        add_custom_command(TARGET ${target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND}
-                "-DXEN_RUNTIME_SOURCE=${runtime_file}"
-                "-DXEN_RUNTIME_OUTPUT=$<TARGET_FILE_DIR:${target}>"
-                "-DXEN_RUNTIME_LOCK=${CMAKE_BINARY_DIR}/xen-runtime-deploy.lock"
-                -P "${PROJECT_SOURCE_DIR}/scripts/deploy_runtime_file.cmake"
-            VERBATIM)
+        set_property(GLOBAL APPEND PROPERTY
+            XEN_RUNTIME_DEPLOY_FILES "${runtime_file}")
     endforeach()
 endfunction()
 
@@ -280,6 +279,8 @@ endfunction()
 function(xen_deploy_runtime_dlls target)
     set(options OPENCV ORT NDI)
     cmake_parse_arguments(DEPLOY "${options}" "" "" ${ARGN})
+    set_property(GLOBAL APPEND PROPERTY
+        XEN_RUNTIME_DEPLOY_TARGETS "${target}")
 
     if(DEPLOY_OPENCV)
         get_filename_component(OPENCV_PLATFORM_DIRECTORY "${OpenCV_DIR}" DIRECTORY)
@@ -402,11 +403,6 @@ function(xen_deploy_runtime_dlls target)
                     "Expected exactly one cudart64_*.dll under XEN_CUDA_ROOT, found "
                     "${CUDA_CUDART_RUNTIME_COUNT}: ${XEN_CUDA_ROOT}")
             endif()
-            # 清理旧规则曾错误复制到输出目录的导入库，避免增量构建留下伪运行库。
-            add_custom_command(TARGET ${target} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E rm -f
-                    "$<TARGET_FILE_DIR:${target}>/cudart.lib"
-                VERBATIM)
             xen_copy_runtime_files(${target} ${CUDA_CUDART_RUNTIME_DLLS})
         elseif(XEN_ORT_USES_NVIDIA)
             message(STATUS "CUDA runtime deployment skipped: XEN_CUDA_ROOT is empty")
@@ -429,12 +425,48 @@ function(xen_deploy_runtime_dlls target)
             "${XEN_NDI_RUNTIME_DLL}"
             "${XEN_NDI_LICENSE_FILE}")
     elseif(DEPLOY_NDI)
-        add_custom_command(TARGET ${target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E rm -f
-                "$<TARGET_FILE_DIR:${target}>/Processing.NDI.Lib.x64.dll"
-                "$<TARGET_FILE_DIR:${target}>/Processing.NDI.Lib.Licenses.txt"
-            VERBATIM)
+        message(STATUS
+            "NDI runtime deployment skipped: XEN_NDI_SDK_ROOT is unavailable")
     endif()
+endfunction()
+
+function(xen_finalize_runtime_deployment)
+    get_property(runtime_targets GLOBAL PROPERTY XEN_RUNTIME_DEPLOY_TARGETS)
+    get_property(runtime_files GLOBAL PROPERTY XEN_RUNTIME_DEPLOY_FILES)
+    if(NOT runtime_targets)
+        return()
+    endif()
+    if(NOT runtime_files)
+        message(FATAL_ERROR
+            "Runtime deployment targets exist, but no files were authorized.")
+    endif()
+
+    list(REMOVE_DUPLICATES runtime_targets)
+    list(REMOVE_DUPLICATES runtime_files)
+    set(manifest_content "set(XEN_RUNTIME_SOURCES\n")
+    foreach(runtime_file IN LISTS runtime_files)
+        string(APPEND manifest_content "    [==[${runtime_file}]==]\n")
+    endforeach()
+    string(APPEND manifest_content ")\n")
+
+    set(runtime_manifest
+        "${CMAKE_BINARY_DIR}/xen-runtime-authorized-$<CONFIG>.cmake")
+    file(GENERATE OUTPUT "${runtime_manifest}" CONTENT "${manifest_content}")
+
+    # 项目没有重写 RUNTIME_OUTPUT_DIRECTORY；Visual Studio 多配置生成器的
+    # 共享目录固定为 <build>/<config>，与 scripts/build.ps1 的验收路径一致。
+    add_custom_target(xen_runtime_deployment
+        COMMAND ${CMAKE_COMMAND}
+            "-DXEN_RUNTIME_MANIFEST=${runtime_manifest}"
+            "-DXEN_RUNTIME_OUTPUT=${CMAKE_BINARY_DIR}/$<CONFIG>"
+            "-DXEN_RUNTIME_LOCK=${CMAKE_BINARY_DIR}/xen-runtime-deploy.lock"
+            "-DXEN_RUNTIME_CONFIGURATION=$<CONFIG>"
+            -P "${PROJECT_SOURCE_DIR}/scripts/deploy_runtime_file.cmake"
+        COMMENT "收敛当前配置授权的第三方运行文件并生成来源哈希报告"
+        VERBATIM)
+    foreach(runtime_target IN LISTS runtime_targets)
+        add_dependencies(${runtime_target} xen_runtime_deployment)
+    endforeach()
 endfunction()
 
 # spdlog
@@ -702,6 +734,14 @@ if(BUILD_TESTING)
         tests/crash_tests.cpp)
     target_link_libraries(crash_tests PRIVATE crash log)
     add_test(NAME crash_tests COMMAND crash_tests)
+
+    # 部署闭包是 CMake 脚本级契约，不需要真实 SDK。两阶段测试在同一临时
+    # 输出目录切换授权清单，覆盖陈旧 DLL 清理、同名来源替换和 SHA-256 报告。
+    add_test(NAME runtime_deployment_tests
+        COMMAND ${CMAKE_COMMAND}
+            "-DXEN_DEPLOY_SCRIPT=${PROJECT_SOURCE_DIR}/scripts/deploy_runtime_file.cmake"
+            "-DXEN_DEPLOY_TEST_ROOT=${CMAKE_BINARY_DIR}/runtime-deployment-tests"
+            -P "${PROJECT_SOURCE_DIR}/tests/runtime_deployment_tests.cmake")
 
     # 纯算法测试不链接 ORT Session，避免测试解码和坐标数学时依赖 GPU
     # 运行环境；同时复用生产源码，防止测试复制一套实现。
@@ -971,4 +1011,8 @@ if(BUILD_TESTING)
         add_test(NAME runtime_model_reload_test
             COMMAND runtime_model_reload_test "${XEN_TEST_MODEL}")
     endif()
+endif()
+
+if(WIN32)
+    xen_finalize_runtime_deployment()
 endif()

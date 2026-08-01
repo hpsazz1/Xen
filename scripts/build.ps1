@@ -117,6 +117,137 @@ function Assert-PathWithinRoot {
     }
 }
 
+function Test-PathWithinAnyRoot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Candidate,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Roots
+    )
+
+    $candidatePath = [System.IO.Path]::GetFullPath($Candidate)
+    foreach ($root in $Roots) {
+        if ([string]::IsNullOrWhiteSpace($root)) {
+            continue
+        }
+        $rootPath = [System.IO.Path]::GetFullPath($root).TrimEnd('\', '/')
+        $rootPrefix = $rootPath + [System.IO.Path]::DirectorySeparatorChar
+        if ($candidatePath.Equals(
+                $rootPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $candidatePath.StartsWith(
+                $rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Assert-RuntimeDeploymentReport {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+        [Parameter(Mandatory = $true)]
+        [string[]]$AuthorizedSourceRoots
+    )
+
+    $reportPath = Join-Path $OutputDirectory "xen-runtime-deployment.json"
+    if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+        throw "构建输出缺少运行库来源与哈希报告：$reportPath"
+    }
+    try {
+        $report = Get-Content -LiteralPath $reportPath -Raw -Encoding utf8 |
+            ConvertFrom-Json
+    } catch {
+        throw "运行库来源与哈希报告不是有效 JSON：$reportPath`n$($_.Exception.Message)"
+    }
+    if ([int]$report.schema -ne 1) {
+        throw "不支持的运行库部署报告 schema：$($report.schema)"
+    }
+
+    $reportedOutput = [System.IO.Path]::GetFullPath(
+        ([string]$report.output_directory))
+    $expectedOutput = [System.IO.Path]::GetFullPath($OutputDirectory)
+    if (-not $reportedOutput.Equals(
+            $expectedOutput, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "运行库部署报告绑定了其他输出目录：$reportedOutput"
+    }
+
+    $records = @($report.files)
+    if ($records.Count -eq 0) {
+        throw "运行库部署报告没有授权文件：$reportPath"
+    }
+    $reportedNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($record in $records) {
+        $name = [string]$record.name
+        $source = [string]$record.source
+        $reportedSha256 = [string]$record.sha256
+        if ([string]::IsNullOrWhiteSpace($name) -or
+            [System.IO.Path]::GetFileName($name) -ne $name) {
+            throw "运行库部署报告包含非法文件名：$name"
+        }
+        if (-not $reportedNames.Add($name)) {
+            throw "运行库部署报告包含重复文件名：$name"
+        }
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "运行库部署来源不存在：$source"
+        }
+        $resolvedSource = (Resolve-Path -LiteralPath $source).ProviderPath
+        if (-not (Test-PathWithinAnyRoot `
+                $resolvedSource $AuthorizedSourceRoots)) {
+            throw "运行库部署来源不属于本次配置的 SDK：$resolvedSource"
+        }
+
+        $deployedPath = Join-Path $OutputDirectory $name
+        if (-not (Test-Path -LiteralPath $deployedPath -PathType Leaf)) {
+            throw "授权运行库未部署：$deployedPath"
+        }
+        if ($reportedSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+            throw "运行库部署报告包含非法 SHA-256：$name"
+        }
+        $sourceSha256 = (Get-FileHash -LiteralPath $resolvedSource `
+            -Algorithm SHA256).Hash
+        $deployedSha256 = (Get-FileHash -LiteralPath $deployedPath `
+            -Algorithm SHA256).Hash
+        if ($sourceSha256 -ne $reportedSha256 -or
+            $deployedSha256 -ne $reportedSha256) {
+            throw "运行库来源、报告与输出 SHA-256 不一致：$name"
+        }
+    }
+
+    # 报告是当前配置的授权集合。已知由 Xen 管理的运行库家族若出现在输出
+    # 目录却不在报告中，说明旧 Provider/SDK 污染仍未收敛，必须拒绝测试。
+    $managedPatterns = @(
+        "onnxruntime*.dll",
+        "nvinfer*.dll",
+        "nvonnxparser*.dll",
+        "cudnn*.dll",
+        "cublas*.dll",
+        "cufft*.dll",
+        "cudart*.dll",
+        "DirectML.dll",
+        "openvino*.dll",
+        "tbb12.dll",
+        "opencv_world*.dll",
+        "opencv_videoio_ffmpeg*_64.dll",
+        "Processing.NDI.Lib.x64.dll",
+        "Processing.NDI.Lib.Licenses.txt",
+        "cudart.lib"
+    )
+    $managedPaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($pattern in $managedPatterns) {
+        foreach ($file in @(Get-ChildItem -LiteralPath $OutputDirectory `
+                -File -Filter $pattern -ErrorAction Stop)) {
+            if ($managedPaths.Add($file.FullName) -and
+                -not $reportedNames.Contains($file.Name)) {
+                throw "输出目录包含本次配置未授权的运行库：$($file.FullName)"
+            }
+        }
+    }
+    Write-Host "运行库来源与 SHA-256 校验通过：$($records.Count) 个文件"
+}
+
 $ortHeaderFound = $false
 if (-not [string]::IsNullOrWhiteSpace($OnnxRuntimeRoot)) {
     $ortHeaderCandidates = @(
@@ -245,8 +376,20 @@ if (-not [string]::IsNullOrWhiteSpace($NdiSdkRoot)) {
 & $cmakeCommand --build $BuildDirectory --config $Configuration --parallel
 if ($LASTEXITCODE -ne 0) { throw "构建失败，退出码：$LASTEXITCODE" }
 
+$outputDirectory = Join-Path $BuildDirectory $Configuration
+$openCvRuntimeRoot = Split-Path -Parent $OpenCvDir
+$authorizedRuntimeRoots = @(
+    $OnnxRuntimeRoot,
+    $openCvRuntimeRoot,
+    $TensorRtRoot,
+    $CudnnRoot,
+    $CudaRoot,
+    $DirectMlRoot,
+    $NdiSdkRoot
+) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+Assert-RuntimeDeploymentReport $outputDirectory $authorizedRuntimeRoots
+
 if (-not [string]::IsNullOrWhiteSpace($NdiSdkRoot)) {
-    $outputDirectory = Join-Path $BuildDirectory $Configuration
     foreach ($runtimeName in @(
             "Processing.NDI.Lib.x64.dll",
             "Processing.NDI.Lib.Licenses.txt")) {
