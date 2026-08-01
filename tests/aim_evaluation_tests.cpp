@@ -330,7 +330,12 @@ void test_control_continuity_metrics() {
     frames.push_back(command_frame(0, 10, 3, 4));
     frames.push_back(command_frame(1, 10, 6, 8));
     frames.push_back(command_frame(2, 10, -6, -8));
-    frames.push_back(output_frame(3, 10, 60, 40, 100, 120));
+    AimEvaluationFrame quantized_zero =
+        output_frame(3, 10, 60, 40, 100, 120);
+    quantized_zero.command.sequence = 4;
+    quantized_zero.command.captured_at =
+        std::chrono::steady_clock::time_point{std::chrono::milliseconds(4)};
+    frames.push_back(quantized_zero);
     frames.push_back(command_frame(4, 10, 50, 0));
     frames.push_back(command_frame(5, 20, 0, 50));
     frames.push_back(command_frame(6, 20, 0, 40, true));
@@ -403,6 +408,16 @@ void test_control_contract_rejections() {
     expect(!aim::detail::record_aim_control_continuity(
                AimEvaluationConfig{}, stale_command, stale_metrics, error),
            "has_command=false 时残留命令快照必须拒绝");
+
+    AimEvaluationFrame stale_timestamp =
+        output_frame(0, 10, 60, 40, 100, 120);
+    stale_timestamp.command.captured_at =
+        std::chrono::steady_clock::time_point{std::chrono::milliseconds(1)};
+    AimControlContinuityMetrics stale_timestamp_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, stale_timestamp,
+               stale_timestamp_metrics, error),
+           "has_command=false 时仅残留命令时间戳也必须拒绝");
 
     AimEvaluationFrame invalid_target = output_frame(0, 10, 60, 40, 100, 120);
     invalid_target.target.confidence =

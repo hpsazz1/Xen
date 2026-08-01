@@ -748,7 +748,27 @@ bool benchmark_video(Detector& detector,
                     aim_evaluation_config, evaluation_frame,
                     result.aim_evaluation.control, evaluation_error)) {
                 std::cerr << "Aim 控制连续性帧无效："
-                          << evaluation_error << '\n';
+                          << evaluation_error
+                          << "，frame=" << frame_index
+                          << "，status=" << AimStatusName(aim_result.status)
+                          << "，has_target=" << aim_result.has_target
+                          << "，track_id=" << aim_result.target.track_id
+                          << "，state="
+                          << static_cast<int>(aim_result.target.state)
+                          << "，predicted=" << aim_result.target.predicted
+                          << "，confidence=" << aim_result.target.confidence
+                          << "，box=(" << aim_result.target.x1 << ','
+                          << aim_result.target.y1 << ','
+                          << aim_result.target.x2 << ','
+                          << aim_result.target.y2 << ')'
+                          << "，has_command=" << aim_result.has_command
+                          << "，command_sequence="
+                          << aim_result.command.sequence
+                          << "，command_has_timestamp="
+                          << (aim_result.command.captured_at !=
+                              std::chrono::steady_clock::time_point{})
+                          << "，counts=(" << aim_result.command.dx_counts
+                          << ',' << aim_result.command.dy_counts << ")\n";
                 return false;
             }
             if (has_aim_annotations &&

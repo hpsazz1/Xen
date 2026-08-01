@@ -173,6 +173,19 @@ bool command_is_default(const AimCommand& command) noexcept {
            command.dx_counts == 0 && command.dy_counts == 0;
 }
 
+bool inactive_command_is_valid(const AimEvaluationFrame& frame) noexcept {
+    if (frame.command.dx_counts != 0 || frame.command.dy_counts != 0) {
+        return false;
+    }
+    if (command_is_default(frame.command)) return true;
+    // deadzone 在填写命令元数据前返回；浮点残余量化为零时则保留本帧元数据。
+    // 两者都表示 has_command=false，只有“序号和时间戳成对存在”可被接受。
+    return frame.has_target && frame.aim_status == AimStatus::SUCCESS &&
+           frame.command.sequence != 0 &&
+           frame.command.captured_at !=
+               std::chrono::steady_clock::time_point{};
+}
+
 bool valid_box(float x1, float y1, float x2, float y2) noexcept;
 
 bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
@@ -198,7 +211,7 @@ bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
                    std::chrono::steady_clock::time_point{} ||
                (frame.command.dx_counts == 0 &&
                 frame.command.dy_counts == 0))) ||
-             (!frame.has_command && !command_is_default(frame.command)));
+             (!frame.has_command && !inactive_command_is_valid(frame)));
 }
 
 void break_command_continuity(AimControlContinuityMetrics& control) noexcept {
