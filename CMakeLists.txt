@@ -668,6 +668,36 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(detector_tests OPENCV)
     add_test(NAME detector_tests COMMAND detector_tests)
 
+    # 分割真实模型测试独立于私有 detect 模型。只有模型与包含实例的真实图像
+    # 同时显式配置时才加入构建图，避免默认测试下载权重或依赖外部数据。
+    set(XEN_TEST_SEGMENTATION_MODEL "" CACHE FILEPATH
+        "用于实例分割集成测试的 YOLOv8 兼容 ONNX 模型")
+    set(XEN_TEST_SEGMENTATION_IMAGE "" CACHE FILEPATH
+        "用于实例分割集成测试且确实包含目标的真实图像")
+    if(XEN_TEST_SEGMENTATION_MODEL OR XEN_TEST_SEGMENTATION_IMAGE)
+        if(NOT XEN_TEST_SEGMENTATION_MODEL OR
+           NOT EXISTS "${XEN_TEST_SEGMENTATION_MODEL}")
+            message(FATAL_ERROR
+                "XEN_TEST_SEGMENTATION_MODEL does not exist: ${XEN_TEST_SEGMENTATION_MODEL}")
+        endif()
+        if(NOT XEN_TEST_SEGMENTATION_IMAGE OR
+           NOT EXISTS "${XEN_TEST_SEGMENTATION_IMAGE}")
+            message(FATAL_ERROR
+                "XEN_TEST_SEGMENTATION_IMAGE does not exist: ${XEN_TEST_SEGMENTATION_IMAGE}")
+        endif()
+        add_executable(segmentation_model_test
+            tests/segmentation_model_test.cpp)
+        target_link_libraries(segmentation_model_test PRIVATE detector)
+        if(WIN32)
+            xen_deploy_runtime_dlls(
+                segmentation_model_test OPENCV ORT)
+        endif()
+        add_test(NAME segmentation_model_test
+            COMMAND segmentation_model_test
+                "${XEN_TEST_SEGMENTATION_MODEL}"
+                "${XEN_TEST_SEGMENTATION_IMAGE}")
+    endif()
+
     # 视频真值解析和 Recall 统计保持为无 Session 的纯算法测试；文件哈希使用
     # Windows CNG，JSON 使用已部署的 OpenCV FileStorage，不增加第三方依赖。
     add_executable(video_visibility_tests

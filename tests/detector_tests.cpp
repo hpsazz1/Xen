@@ -143,6 +143,120 @@ void test_end_to_end_decode() {
            "END_TO_END 应过滤补零行并保留 class");
 }
 
+void test_segmentation_decode_and_mask() {
+    detector::detail::SegmentationContract contract;
+    expect(detector::detail::resolve_segmentation_contract(
+               {1, 7, 2}, {1, 2, 2, 2}, OutputFormat::AUTO,
+               contract),
+           "YOLOv8-seg 双输出契约应解析成功");
+    expect(contract.class_count == 1 && contract.mask_channels == 2 &&
+               contract.anchors == 2 &&
+               contract.prototype_height == 2 &&
+               contract.prototype_width == 2,
+           "分割类别数、系数维度或原型尺寸推导错误");
+    expect(!detector::detail::resolve_segmentation_contract(
+               {1, 6, 2}, {1, 2, 2, 2},
+               OutputFormat::ANCHOR_FIRST_OBJECTNESS, contract),
+           "分割模型不得接受 objectness 布局");
+    expect(!detector::detail::resolve_segmentation_contract(
+               {1, 6, 2}, {1, 2, 2, 2}, OutputFormat::AUTO,
+               contract),
+           "没有类别平面的分割输出必须失败关闭");
+
+    expect(detector::detail::resolve_segmentation_contract(
+               {1, 7, 2}, {1, 2, 2, 2}, OutputFormat::AUTO,
+               contract),
+           "恢复合法分割契约应成功");
+    constexpr int64_t anchors = 2;
+    std::vector<float> prediction(14, 0.0f);
+    // 两个同类重叠框；anchor 0 置信度更高且系数选择全正原型，NMS 必须
+    // 保留它，同时用 anchor_index 读取正确系数。
+    prediction[0 * anchors + 0] = 2.0f;
+    prediction[1 * anchors + 0] = 2.0f;
+    prediction[2 * anchors + 0] = 2.0f;
+    prediction[3 * anchors + 0] = 2.0f;
+    prediction[4 * anchors + 0] = 0.9f;
+    prediction[5 * anchors + 0] = 1.0f;
+    prediction[6 * anchors + 0] = 0.0f;
+
+    prediction[0 * anchors + 1] = 2.1f;
+    prediction[1 * anchors + 1] = 2.1f;
+    prediction[2 * anchors + 1] = 2.0f;
+    prediction[3 * anchors + 1] = 2.0f;
+    prediction[4 * anchors + 1] = 0.8f;
+    prediction[5 * anchors + 1] = -1.0f;
+    prediction[6 * anchors + 1] = 0.0f;
+
+    const std::vector<float> prototypes{
+        1.0f, 1.0f, 1.0f, 1.0f,
+        0.0f, 0.0f, 0.0f, 0.0f,
+    };
+    std::vector<detector::detail::SegmentationCandidate> candidates;
+    expect(detector::detail::decode_segmentation_output(
+               prediction.data(), {1, 7, 2}, contract, 0.25f,
+               candidates),
+           "分割 raw head 解码应成功");
+    expect(candidates.size() == 2,
+           "分割解码应保留两个阈值以上候选");
+
+    detector::detail::LetterBoxInfo info;
+    info.scale = 1.0f;
+    info.orig_w = 4;
+    info.orig_h = 4;
+    info.target_w = 4;
+    info.target_h = 4;
+    SegmentationResult result;
+    std::vector<detector::detail::SegmentationCandidate> selected;
+    std::vector<unsigned char> suppressed;
+    std::vector<float> mask_logits;
+    std::vector<std::uint8_t> mask_input;
+    expect(detector::detail::finalize_segmentations(
+               candidates, 0.5f, 10, info, prediction.data(),
+               {1, 7, 2}, prototypes.data(), {1, 2, 2, 2},
+               contract, true, result, selected, suppressed,
+               mask_logits, mask_input),
+           "分割 NMS 与掩码后处理应成功");
+    expect(result.detections.size() == 1 && result.masks.size() == 1,
+           "NMS 后检测框与掩码必须一一对齐");
+    if (result.masks.size() == 1) {
+        const InstanceMask& mask = result.masks[0];
+        expect(mask.x == 1 && mask.y == 1 &&
+                   mask.width == 2 && mask.height == 2 &&
+                   mask.row_stride == 2,
+               "实例掩码 ROI 几何错误");
+        const std::uint8_t* first_row = result.mask_row(0, 0);
+        const std::uint8_t* second_row = result.mask_row(0, 1);
+        expect(first_row && second_row &&
+                   first_row[0] == 1 && first_row[1] == 1 &&
+                   second_row[0] == 1 && second_row[1] == 1,
+               "正原型应生成全一 ROI 掩码");
+        expect(result.mask_row(0, 2) == nullptr &&
+                   result.mask_row(1, 0) == nullptr,
+               "掩码行访问必须拒绝越界索引");
+    }
+
+    const SegmentationResult copied = result;
+    expect(copied.mask_pixels && result.mask_pixels &&
+               copied.mask_pixels.get() == result.mask_pixels.get(),
+           "复制分割结果必须共享像素缓冲而非复制整幅掩码");
+
+    candidates.clear();
+    expect(detector::detail::decode_segmentation_output(
+               prediction.data(), {1, 7, 2}, contract, 0.25f,
+               candidates),
+           "仅框路径重新解码应成功");
+    SegmentationResult boxes_only;
+    expect(detector::detail::finalize_segmentations(
+               candidates, 0.5f, 10, info, prediction.data(),
+               {1, 7, 2}, nullptr, {1, 2, 2, 2}, contract,
+               false, boxes_only, selected, suppressed, mask_logits,
+               mask_input),
+           "分割模型的仅框热路径应无需生成掩码");
+    expect(boxes_only.detections.size() == 1 &&
+               boxes_only.masks.empty() && !boxes_only.mask_pixels,
+           "detect() 兼容路径不得分配主机掩码缓冲");
+}
+
 void test_scale_and_nms() {
     detector::detail::LetterBoxInfo info;
     info.scale = 0.5f;
@@ -202,6 +316,10 @@ void test_detection_status_names() {
                DetectionStatus::POSTPROCESS_FAILED)) ==
                "POSTPROCESS_FAILED",
            "后处理失败状态名称错误");
+    expect(std::string(DetectionStatusName(
+               DetectionStatus::UNSUPPORTED_TASK)) ==
+               "UNSUPPORTED_TASK",
+           "不支持任务状态名称错误");
     expect(InferenceProfile{}.status == DetectionStatus::NOT_RUN,
            "默认 profile 状态应为 NOT_RUN");
 }
@@ -302,6 +420,7 @@ int main() {
     test_channel_first_decode();
     test_anchor_first_objectness_decode();
     test_end_to_end_decode();
+    test_segmentation_decode_and_mask();
     test_scale_and_nms();
     test_preprocess_contract();
     test_tensorrt_cache_defaults();

@@ -9,6 +9,19 @@
 
 namespace detector::detail {
 
+struct SegmentationContract {
+    int64_t class_count = 0;
+    int64_t mask_channels = 0;
+    int64_t anchors = 0;
+    int64_t prototype_height = 0;
+    int64_t prototype_width = 0;
+};
+
+struct SegmentationCandidate {
+    Detection detection;       ///< NMS 前保持模型输入坐标
+    int64_t anchor_index = -1; ///< 用于在 NMS 后读取对应掩码系数
+};
+
 /// 根据运行时输出形状解析检测输出契约。
 /// AUTO 只接受可明确区分的三维单 batch 张量；无法确定时返回 false。
 bool resolve_output_format(const std::vector<int64_t>& shape,
@@ -22,6 +35,23 @@ bool decode_output(const float* data,
                    OutputFormat format,
                    float conf_threshold,
                    std::vector<Detection>& dets) noexcept;
+
+/// 验证 YOLOv8 兼容分割双输出契约。当前只接受 channel-first raw head，
+/// 类别数由 prediction features - 4 - prototype channels 严格推导，不猜 metadata。
+bool resolve_segmentation_contract(
+    const std::vector<int64_t>& prediction_shape,
+    const std::vector<int64_t>& prototype_shape,
+    OutputFormat requested,
+    SegmentationContract& contract) noexcept;
+
+/// 解码分割 raw head 的框、类别与置信度；掩码系数留在原输出中，通过
+/// anchor_index 在 NMS 后按需读取，避免为所有候选复制 M 个 float。
+bool decode_segmentation_output(
+    const float* prediction_data,
+    const std::vector<int64_t>& prediction_shape,
+    const SegmentationContract& contract,
+    float conf_threshold,
+    std::vector<SegmentationCandidate>& candidates) noexcept;
 
 /// 同类别 NMS。top_k 表示最终最多保留的检测数量。
 void nms(std::vector<Detection>& dets,
@@ -38,6 +68,26 @@ bool finalize_detections(std::vector<Detection>& candidates,
                          const LetterBoxInfo& info,
                          std::vector<Detection>& output,
                          std::vector<unsigned char>& suppressed) noexcept;
+
+/// 对分割候选执行同类别 NMS、坐标还原，并按需生成原图坐标系中的紧凑 ROI
+/// 二值掩码。selected、mask_logits 与 mask_input 由 Detector 长期持有并跨帧
+/// 复用；最终像素缓冲由返回结果独占一次分配，复制结果时通过 shared_ptr 共享。
+bool finalize_segmentations(
+    std::vector<SegmentationCandidate>& candidates,
+    float nms_threshold,
+    int top_k,
+    const LetterBoxInfo& info,
+    const float* prediction_data,
+    const std::vector<int64_t>& prediction_shape,
+    const float* prototype_data,
+    const std::vector<int64_t>& prototype_shape,
+    const SegmentationContract& contract,
+    bool generate_masks,
+    SegmentationResult& output,
+    std::vector<SegmentationCandidate>& selected,
+    std::vector<unsigned char>& suppressed,
+    std::vector<float>& mask_logits,
+    std::vector<std::uint8_t>& mask_input) noexcept;
 
 /// 将模型输入像素坐标还原到原始图像，裁剪越界坐标并删除退化框。
 bool scale_detections(std::vector<Detection>& dets,

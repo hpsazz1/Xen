@@ -67,6 +67,10 @@ Xen/                           # 仓库根目录
 - Detector 可在 Runtime 运行期间异步热重载。候选 Session 在独立线程加载，旧模型继续处理帧；
   只有候选完整加载成功后才在两帧之间交换指针。失败保持旧模型和 `RUNNING`，成功后强制解除
   输出武装并重置 Aim 状态；加载窗口拒绝新的武装请求。
+- Detector 支持标准 YOLOv8 兼容实例分割双输出：`[1,4+C+M,A]` prediction 与
+  `[1,M,H,W]` prototype。`detect()` 加载分割模型时仍只返回轻量框，不生成主机掩码；显式
+  `segment()`/`segment_d3d11()` 才返回框与单帧共享的紧凑 ROI mask buffer，因此 Aim 和
+  Runtime 默认热路径不复制掩码像素。
 - Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；样本同时固化主机 FOV、编码
   尺寸、ROI 和像素比例，避免网络重连或显示模式变化造成的瞬时坐标漂移被最终快照掩盖。主线程
   在会话结束时将其发布为 schema 6 的
@@ -550,6 +554,7 @@ Detector 不按“YOLOv5/v8/v10/11/26”等版本号硬编码分支，而按 ONN
 | `CHANNEL_FIRST` | `[B, 4+C, A]` | 现代 Ultralytics raw detect 输出 |
 | `ANCHOR_FIRST_OBJECTNESS` | `[B, A, 5+C]` | YOLOv5 类 raw 输出 |
 | `END_TO_END` | `[B, N, 6]` | 已含 NMS 的 `xyxy, score, class` 输出 |
+| YOLOv8 segment 双输出 | `[1,4+C+M,A]` + `[1,M,H,W]` | raw 实例分割，NMS 后按 anchor 读取系数 |
 
 因此，后续 YOLO 版本只要继续使用上述任一契约即可直接支持；若导出布局变化，只需新增一个契约解码器，不必改动推理主流程。默认 `AUTO` 会结合 metadata 和形状识别。单类别 raw 输出与端到端输出都可能是 `[B,N,6]`，第三方导出模型遇到歧义时应显式设置 `DetectorConfig::output_format`。
 
@@ -571,7 +576,20 @@ clean `PATH` 下分别显式请求三种输出契约，核对真实 Provider、�
 能形成真实检测结果的对照图，不能用两张都无目标的合成图证明输入变化传播。模型和对照图
 只作为本地验收输入，不复制进构建目录，也不纳入 Git。
 
-当前仅支持单输入、单输出、NCHW、float32 的 detect 模型。分割、姿态、OBB、多输出 head 和真正的 batch inference 不在当前范围内。
+实例分割可通过独立 CPU/Release/clean `PATH` 脚本验证；提供 Ultralytics 源码时还会比较真实
+框、置信度和原图 mask IoU，默认要求最小 IoU 不低于 0.96：
+
+```powershell
+.\scripts\test_segmentation.ps1 `
+  -ModelPath "C:\path\to\yolov8n-seg.onnx" `
+  -ImagePath "C:\path\to\real-image.jpg" `
+  -OnnxRuntimeRoot "C:\path\to\onnxruntime" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib" `
+  -UltralyticsRoot "C:\path\to\ultralytics-source"
+```
+
+当前支持单输入 NCHW float32 detect，以及 YOLOv8 兼容的非 end-to-end raw segment 双输出。
+姿态、OBB、其他多输出 head、end-to-end segment 和真正的 batch inference 仍不在当前范围内。
 
 ### 运行时模型热重载
 

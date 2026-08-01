@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <limits>
+#include <memory>
 #include <utility>
 
 namespace detector::detail {
@@ -20,6 +22,24 @@ bool valid_shape(const std::vector<int64_t>& shape) noexcept {
 bool finite_box(float x1, float y1, float x2, float y2) noexcept {
     return std::isfinite(x1) && std::isfinite(y1) &&
            std::isfinite(x2) && std::isfinite(y2);
+}
+
+bool make_xywh_detection(float cx, float cy, float width, float height,
+                         float confidence, int class_id,
+                         Detection& detection) noexcept {
+    if (!std::isfinite(confidence) || confidence < 0.0f ||
+        !finite_box(cx, cy, width, height) ||
+        width <= 0.0f || height <= 0.0f) {
+        return false;
+    }
+
+    detection.x1 = cx - width * 0.5f;
+    detection.y1 = cy - height * 0.5f;
+    detection.x2 = cx + width * 0.5f;
+    detection.y2 = cy + height * 0.5f;
+    detection.confidence = confidence;
+    detection.class_id = class_id;
+    return true;
 }
 
 float intersection_over_union(const Detection& a,
@@ -42,19 +62,11 @@ float intersection_over_union(const Detection& a,
 void append_xywh(float cx, float cy, float width, float height,
                  float confidence, int class_id,
                  std::vector<Detection>& dets) {
-    if (!std::isfinite(confidence) || confidence < 0.0f ||
-        !finite_box(cx, cy, width, height) || width <= 0.0f || height <= 0.0f) {
-        return;
-    }
-
     Detection detection;
-    detection.x1 = cx - width * 0.5f;
-    detection.y1 = cy - height * 0.5f;
-    detection.x2 = cx + width * 0.5f;
-    detection.y2 = cy + height * 0.5f;
-    detection.confidence = confidence;
-    detection.class_id = class_id;
-    dets.push_back(detection);
+    if (make_xywh_detection(cx, cy, width, height,
+                            confidence, class_id, detection)) {
+        dets.push_back(detection);
+    }
 }
 
 bool decode_channel_first(const float* data,
@@ -184,6 +196,116 @@ void nms_into(std::vector<Detection>& candidates,
     }
 }
 
+void nms_segmentations_into(
+        std::vector<SegmentationCandidate>& candidates,
+        float nms_threshold,
+        int top_k,
+        std::vector<SegmentationCandidate>& output,
+        std::vector<unsigned char>& suppressed) {
+    output.clear();
+    std::sort(candidates.begin(), candidates.end(),
+        [](const SegmentationCandidate& a,
+           const SegmentationCandidate& b) {
+            return a.detection.confidence > b.detection.confidence;
+        });
+
+    suppressed.resize(candidates.size());
+    std::fill(suppressed.begin(), suppressed.end(), 0U);
+    output.reserve(std::min(
+        candidates.size(), static_cast<size_t>(top_k)));
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (suppressed[i] != 0U) continue;
+        output.push_back(candidates[i]);
+        if (static_cast<int>(output.size()) >= top_k) break;
+
+        for (size_t j = i + 1; j < candidates.size(); ++j) {
+            if (suppressed[j] == 0U &&
+                candidates[j].detection.class_id ==
+                    candidates[i].detection.class_id &&
+                intersection_over_union(
+                    candidates[i].detection,
+                    candidates[j].detection) > nms_threshold) {
+                suppressed[j] = 1U;
+            }
+        }
+    }
+}
+
+bool valid_letterbox(const LetterBoxInfo& info) noexcept {
+    return info.scale > 0.0f && std::isfinite(info.scale) &&
+           info.orig_w > 0 && info.orig_h > 0;
+}
+
+bool scale_detection(const Detection& input,
+                     const LetterBoxInfo& info,
+                     Detection& output) noexcept {
+    if (!valid_letterbox(info)) return false;
+
+    const float max_x = static_cast<float>(info.orig_w);
+    const float max_y = static_cast<float>(info.orig_h);
+    const float inverse_scale = 1.0f / info.scale;
+    output = input;
+    output.x1 = std::clamp(
+        (input.x1 - info.pad_x) * inverse_scale, 0.0f, max_x);
+    output.y1 = std::clamp(
+        (input.y1 - info.pad_y) * inverse_scale, 0.0f, max_y);
+    output.x2 = std::clamp(
+        (input.x2 - info.pad_x) * inverse_scale, 0.0f, max_x);
+    output.y2 = std::clamp(
+        (input.y2 - info.pad_y) * inverse_scale, 0.0f, max_y);
+    return finite_box(output.x1, output.y1, output.x2, output.y2) &&
+           output.x2 > output.x1 && output.y2 > output.y1;
+}
+
+float bilinear_sample(const std::vector<float>& values,
+                      int width, int height,
+                      float x, float y) noexcept {
+    x = std::clamp(x, 0.0f, static_cast<float>(width - 1));
+    y = std::clamp(y, 0.0f, static_cast<float>(height - 1));
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const int x1 = std::min(x0 + 1, width - 1);
+    const int y1 = std::min(y0 + 1, height - 1);
+    const float wx = x - static_cast<float>(x0);
+    const float wy = y - static_cast<float>(y0);
+    const float top = values[static_cast<size_t>(y0) * width + x0] *
+            (1.0f - wx) +
+        values[static_cast<size_t>(y0) * width + x1] * wx;
+    const float bottom = values[static_cast<size_t>(y1) * width + x0] *
+            (1.0f - wx) +
+        values[static_cast<size_t>(y1) * width + x1] * wx;
+    return top * (1.0f - wy) + bottom * wy;
+}
+
+float bilinear_sample_binary_roi(
+        const std::vector<std::uint8_t>& values,
+        int full_width,
+        int left,
+        int top,
+        int width,
+        int height,
+        float x,
+        float y) noexcept {
+    x = std::clamp(x, 0.0f, static_cast<float>(width - 1));
+    y = std::clamp(y, 0.0f, static_cast<float>(height - 1));
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const int x1 = std::min(x0 + 1, width - 1);
+    const int y1 = std::min(y0 + 1, height - 1);
+    const float wx = x - static_cast<float>(x0);
+    const float wy = y - static_cast<float>(y0);
+    const auto value = [&](int sample_x, int sample_y) {
+        return static_cast<float>(
+            values[static_cast<size_t>(top + sample_y) * full_width +
+                   left + sample_x]);
+    };
+    const float top_value = value(x0, y0) * (1.0f - wx) +
+        value(x1, y0) * wx;
+    const float bottom_value = value(x0, y1) * (1.0f - wx) +
+        value(x1, y1) * wx;
+    return top_value * (1.0f - wy) + bottom_value * wy;
+}
+
 } // namespace
 
 bool resolve_output_format(const std::vector<int64_t>& shape,
@@ -261,6 +383,95 @@ bool decode_output(const float* data,
     return false;
 }
 
+bool resolve_segmentation_contract(
+        const std::vector<int64_t>& prediction_shape,
+        const std::vector<int64_t>& prototype_shape,
+        OutputFormat requested,
+        SegmentationContract& contract) noexcept {
+    contract = {};
+    if (requested != OutputFormat::AUTO &&
+        requested != OutputFormat::CHANNEL_FIRST) {
+        return false;
+    }
+    if (prediction_shape.size() != 3 || prediction_shape[0] != 1 ||
+        prediction_shape[1] <= 0 || prediction_shape[2] <= 0 ||
+        prototype_shape.size() != 4 || prototype_shape[0] != 1 ||
+        prototype_shape[1] <= 0 || prototype_shape[2] <= 0 ||
+        prototype_shape[3] <= 0) {
+        return false;
+    }
+
+    const int64_t mask_channels = prototype_shape[1];
+    const int64_t features = prediction_shape[1];
+    if (mask_channels > std::numeric_limits<int64_t>::max() - 4 ||
+        features <= 4 + mask_channels) {
+        return false;
+    }
+
+    contract.class_count = features - 4 - mask_channels;
+    contract.mask_channels = mask_channels;
+    contract.anchors = prediction_shape[2];
+    contract.prototype_height = prototype_shape[2];
+    contract.prototype_width = prototype_shape[3];
+    return contract.class_count > 0;
+}
+
+bool decode_segmentation_output(
+        const float* prediction_data,
+        const std::vector<int64_t>& prediction_shape,
+        const SegmentationContract& contract,
+        float conf_threshold,
+        std::vector<SegmentationCandidate>& candidates) noexcept {
+    if (!prediction_data || prediction_shape.size() != 3 ||
+        prediction_shape[0] != 1 ||
+        prediction_shape[1] !=
+            4 + contract.class_count + contract.mask_channels ||
+        prediction_shape[2] != contract.anchors ||
+        contract.class_count <= 0 || contract.mask_channels <= 0 ||
+        contract.anchors <= 0 || !std::isfinite(conf_threshold) ||
+        conf_threshold < 0.0f || conf_threshold > 1.0f) {
+        return false;
+    }
+
+    try {
+        candidates.reserve(
+            candidates.size() + static_cast<size_t>(contract.anchors));
+        for (int64_t anchor = 0; anchor < contract.anchors; ++anchor) {
+            float best_confidence =
+                -std::numeric_limits<float>::infinity();
+            int best_class = -1;
+            for (int64_t class_index = 0;
+                 class_index < contract.class_count; ++class_index) {
+                const float confidence = prediction_data[
+                    (4 + class_index) * contract.anchors + anchor];
+                if (std::isfinite(confidence) &&
+                    confidence > best_confidence) {
+                    best_confidence = confidence;
+                    best_class = static_cast<int>(class_index);
+                }
+            }
+            if (best_class < 0 || best_confidence < conf_threshold) continue;
+
+            SegmentationCandidate candidate;
+            if (!make_xywh_detection(
+                    prediction_data[anchor],
+                    prediction_data[contract.anchors + anchor],
+                    prediction_data[2 * contract.anchors + anchor],
+                    prediction_data[3 * contract.anchors + anchor],
+                    best_confidence, best_class,
+                    candidate.detection)) {
+                continue;
+            }
+            candidate.anchor_index = anchor;
+            candidates.push_back(candidate);
+        }
+        return true;
+    } catch (...) {
+        candidates.clear();
+        return false;
+    }
+}
+
 void nms(std::vector<Detection>& dets,
          float nms_threshold,
          int top_k) noexcept {
@@ -318,35 +529,278 @@ bool finalize_detections(std::vector<Detection>& candidates,
     }
 }
 
+bool finalize_segmentations(
+        std::vector<SegmentationCandidate>& candidates,
+        float nms_threshold,
+        int top_k,
+        const LetterBoxInfo& info,
+        const float* prediction_data,
+        const std::vector<int64_t>& prediction_shape,
+        const float* prototype_data,
+        const std::vector<int64_t>& prototype_shape,
+        const SegmentationContract& contract,
+        bool generate_masks,
+        SegmentationResult& output,
+        std::vector<SegmentationCandidate>& selected,
+        std::vector<unsigned char>& suppressed,
+        std::vector<float>& mask_logits,
+        std::vector<std::uint8_t>& mask_input) noexcept {
+    output = {};
+    if (top_k <= 0 || !std::isfinite(nms_threshold) ||
+        nms_threshold < 0.0f || nms_threshold > 1.0f ||
+        !valid_letterbox(info) || prediction_shape.size() != 3 ||
+        prediction_shape[0] != 1 ||
+        prediction_shape[1] !=
+            4 + contract.class_count + contract.mask_channels ||
+        prediction_shape[2] != contract.anchors ||
+        prototype_shape.size() != 4 || prototype_shape[0] != 1 ||
+        prototype_shape[1] != contract.mask_channels ||
+        prototype_shape[2] != contract.prototype_height ||
+        prototype_shape[3] != contract.prototype_width ||
+        contract.class_count <= 0 || contract.mask_channels <= 0 ||
+        contract.anchors <= 0 || contract.prototype_height <= 0 ||
+        contract.prototype_width <= 0) {
+        return false;
+    }
+    if (generate_masks && (!prediction_data || !prototype_data ||
+                           info.target_w <= 0 || info.target_h <= 0)) {
+        return false;
+    }
+
+    try {
+        nms_segmentations_into(
+            candidates, nms_threshold, top_k, selected, suppressed);
+
+        output.detections.reserve(selected.size());
+        size_t valid_count = 0;
+        for (const SegmentationCandidate& candidate : selected) {
+            Detection scaled;
+            if (!scale_detection(candidate.detection, info, scaled)) continue;
+            output.detections.push_back(scaled);
+            selected[valid_count++] = candidate;
+        }
+        selected.resize(valid_count);
+        if (!generate_masks || selected.empty()) return true;
+
+        if (contract.prototype_height >
+                static_cast<int64_t>(std::numeric_limits<int>::max()) ||
+            contract.prototype_width >
+                static_cast<int64_t>(std::numeric_limits<int>::max())) {
+            return false;
+        }
+        const int prototype_height =
+            static_cast<int>(contract.prototype_height);
+        const int prototype_width =
+            static_cast<int>(contract.prototype_width);
+        const size_t prototype_area =
+            static_cast<size_t>(prototype_height) *
+            static_cast<size_t>(prototype_width);
+        if (prototype_width <= 0 || prototype_height <= 0 ||
+            prototype_area >
+                std::numeric_limits<size_t>::max() /
+                    static_cast<size_t>(contract.mask_channels)) {
+            return false;
+        }
+        const size_t prototype_elements = prototype_area *
+            static_cast<size_t>(contract.mask_channels);
+        for (size_t index = 0; index < prototype_elements; ++index) {
+            if (!std::isfinite(prototype_data[index])) return false;
+        }
+
+        output.masks.reserve(output.detections.size());
+        size_t total_mask_bytes = 0;
+        for (const Detection& detection : output.detections) {
+            const int left = std::clamp(
+                static_cast<int>(std::floor(detection.x1)),
+                0, info.orig_w);
+            const int top = std::clamp(
+                static_cast<int>(std::floor(detection.y1)),
+                0, info.orig_h);
+            const int right = std::clamp(
+                static_cast<int>(std::ceil(detection.x2)),
+                0, info.orig_w);
+            const int bottom = std::clamp(
+                static_cast<int>(std::ceil(detection.y2)),
+                0, info.orig_h);
+            if (right <= left || bottom <= top) return false;
+
+            const size_t width = static_cast<size_t>(right - left);
+            const size_t height = static_cast<size_t>(bottom - top);
+            if (height > std::numeric_limits<size_t>::max() / width) {
+                return false;
+            }
+            const size_t mask_bytes = width * height;
+            if (mask_bytes >
+                std::numeric_limits<size_t>::max() - total_mask_bytes) {
+                return false;
+            }
+
+            InstanceMask mask;
+            mask.x = left;
+            mask.y = top;
+            mask.width = right - left;
+            mask.height = bottom - top;
+            mask.data_offset = total_mask_bytes;
+            mask.row_stride = width;
+            output.masks.push_back(mask);
+            total_mask_bytes += mask_bytes;
+        }
+
+        auto pixels = std::make_shared<std::vector<std::uint8_t>>(
+            total_mask_bytes, 0U);
+        mask_logits.resize(prototype_area);
+        const size_t input_area = static_cast<size_t>(info.target_w) *
+            static_cast<size_t>(info.target_h);
+        mask_input.resize(input_area);
+        const float prototype_scale_x =
+            static_cast<float>(prototype_width) /
+            static_cast<float>(info.target_w);
+        const float prototype_scale_y =
+            static_cast<float>(prototype_height) /
+            static_cast<float>(info.target_h);
+        const int resized_width = std::clamp(
+            static_cast<int>(std::round(info.orig_w * info.scale)),
+            1, info.target_w);
+        const int resized_height = std::clamp(
+            static_cast<int>(std::round(info.orig_h * info.scale)),
+            1, info.target_h);
+        const int input_left = std::clamp(
+            static_cast<int>(std::round(info.pad_x)),
+            0, info.target_w - resized_width);
+        const int input_top = std::clamp(
+            static_cast<int>(std::round(info.pad_y)),
+            0, info.target_h - resized_height);
+
+        for (size_t instance = 0; instance < selected.size(); ++instance) {
+            const SegmentationCandidate& candidate = selected[instance];
+            if (candidate.anchor_index < 0 ||
+                candidate.anchor_index >= contract.anchors) {
+                return false;
+            }
+            for (int64_t channel = 0;
+                 channel < contract.mask_channels; ++channel) {
+                const float coefficient = prediction_data[
+                    (4 + contract.class_count + channel) *
+                        contract.anchors + candidate.anchor_index];
+                if (!std::isfinite(coefficient)) return false;
+                const float* prototype = prototype_data +
+                    static_cast<size_t>(channel) * prototype_area;
+                if (channel == 0) {
+                    for (size_t pixel = 0; pixel < prototype_area; ++pixel) {
+                        mask_logits[pixel] = coefficient * prototype[pixel];
+                    }
+                } else {
+                    for (size_t pixel = 0; pixel < prototype_area; ++pixel) {
+                        mask_logits[pixel] += coefficient * prototype[pixel];
+                    }
+                }
+            }
+            if (std::any_of(mask_logits.begin(), mask_logits.end(),
+                    [](float value) { return !std::isfinite(value); })) {
+                return false;
+            }
+
+            // Ultralytics process_mask() 先在原型分辨率按模型框裁剪，再双线性
+            // 上采样并按 logit>0 二值化；该阈值与 sigmoid(logit)>0.5 等价。
+            const int crop_left = std::clamp(
+                static_cast<int>(std::round(
+                    candidate.detection.x1 * prototype_scale_x)),
+                0, prototype_width);
+            const int crop_top = std::clamp(
+                static_cast<int>(std::round(
+                    candidate.detection.y1 * prototype_scale_y)),
+                0, prototype_height);
+            const int crop_right = std::clamp(
+                static_cast<int>(std::round(
+                    candidate.detection.x2 * prototype_scale_x)),
+                0, prototype_width);
+            const int crop_bottom = std::clamp(
+                static_cast<int>(std::round(
+                    candidate.detection.y2 * prototype_scale_y)),
+                0, prototype_height);
+            for (int y = 0; y < prototype_height; ++y) {
+                float* row = mask_logits.data() +
+                    static_cast<size_t>(y) * prototype_width;
+                if (y < crop_top || y >= crop_bottom) {
+                    std::fill_n(row, prototype_width, 0.0f);
+                    continue;
+                }
+                std::fill(row, row + crop_left, 0.0f);
+                std::fill(row + crop_right,
+                          row + prototype_width, 0.0f);
+            }
+
+            // 固定输入 scratch 跨实例、跨帧复用。这里显式保留“先上采样再
+            // 二值化”的阶段边界，不能把两次插值合并，否则小目标边缘会与
+            // Ultralytics 参考实现产生可观测偏差。
+            for (int y = 0; y < info.target_h; ++y) {
+                const float prototype_y =
+                    ((static_cast<float>(y) + 0.5f) *
+                         prototype_scale_y) - 0.5f;
+                std::uint8_t* row = mask_input.data() +
+                    static_cast<size_t>(y) * info.target_w;
+                for (int x = 0; x < info.target_w; ++x) {
+                    const float prototype_x =
+                        ((static_cast<float>(x) + 0.5f) *
+                             prototype_scale_x) - 0.5f;
+                    row[x] = bilinear_sample(
+                        mask_logits, prototype_width, prototype_height,
+                        prototype_x, prototype_y) > 0.0f ? 1U : 0U;
+                }
+            }
+
+            // scale_masks() 会先移除 LetterBox，再把二值模型掩码缩放到原图。
+            // 只计算实例 ROI，最终输出不保留每实例的整图缓冲。
+            const InstanceMask& mask = output.masks[instance];
+            for (int row = 0; row < mask.height; ++row) {
+                const int original_y = mask.y + row;
+                const float center_y =
+                    static_cast<float>(original_y) + 0.5f;
+                const float input_y = center_y *
+                        static_cast<float>(resized_height) /
+                        static_cast<float>(info.orig_h) -
+                    0.5f;
+                std::uint8_t* destination = pixels->data() +
+                    mask.data_offset +
+                    static_cast<size_t>(row) * mask.row_stride;
+                for (int column = 0; column < mask.width; ++column) {
+                    const int original_x = mask.x + column;
+                    const float center_x =
+                        static_cast<float>(original_x) + 0.5f;
+                    const float input_x = center_x *
+                            static_cast<float>(resized_width) /
+                            static_cast<float>(info.orig_w) -
+                        0.5f;
+                    destination[column] = bilinear_sample_binary_roi(
+                        mask_input, info.target_w, input_left, input_top,
+                        resized_width, resized_height,
+                        input_x, input_y) > 0.5f ? 1U : 0U;
+                }
+            }
+        }
+        output.mask_pixels = std::move(pixels);
+        return true;
+    } catch (...) {
+        output = {};
+        return false;
+    }
+}
+
 bool scale_detections(std::vector<Detection>& dets,
                       const LetterBoxInfo& info) noexcept {
-    if (!(info.scale > 0.0f) || !std::isfinite(info.scale) ||
-        info.orig_w <= 0 || info.orig_h <= 0) {
+    if (!valid_letterbox(info)) {
         dets.clear();
         return false;
     }
 
-    const float max_x = static_cast<float>(info.orig_w);
-    const float max_y = static_cast<float>(info.orig_h);
-    const float inverse_scale = 1.0f / info.scale;
-    for (auto& detection : dets) {
-        detection.x1 = std::clamp(
-            (detection.x1 - info.pad_x) * inverse_scale, 0.0f, max_x);
-        detection.y1 = std::clamp(
-            (detection.y1 - info.pad_y) * inverse_scale, 0.0f, max_y);
-        detection.x2 = std::clamp(
-            (detection.x2 - info.pad_x) * inverse_scale, 0.0f, max_x);
-        detection.y2 = std::clamp(
-            (detection.y2 - info.pad_y) * inverse_scale, 0.0f, max_y);
+    size_t valid_count = 0;
+    for (const Detection& detection : dets) {
+        Detection scaled;
+        if (scale_detection(detection, info, scaled)) {
+            dets[valid_count++] = scaled;
+        }
     }
-
-    dets.erase(std::remove_if(dets.begin(), dets.end(),
-        [](const Detection& detection) {
-            return !finite_box(detection.x1, detection.y1,
-                               detection.x2, detection.y2) ||
-                   detection.x2 <= detection.x1 ||
-                   detection.y2 <= detection.y1;
-        }), dets.end());
+    dets.resize(valid_count);
     return true;
 }
 

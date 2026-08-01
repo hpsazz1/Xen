@@ -1,7 +1,9 @@
 #ifndef DETECTOR_H
 #define DETECTOR_H
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,6 +44,7 @@ enum class DetectionStatus {
     NOT_LOADED,          ///< 模型尚未加载
     INVALID_INPUT,       ///< 输入不是非空 CV_8UC3 图像
     UNSUPPORTED_INPUT,   ///< 输入本身有效，但当前 Session 不支持其内存域/格式
+    UNSUPPORTED_TASK,    ///< 调用的任务入口与已加载模型任务不一致
     PREPROCESS_FAILED,   ///< LetterBox 或张量填充失败
     INFERENCE_FAILED,    ///< ORT 执行或设备复制失败
     INVALID_OUTPUT,      ///< 模型输出类型、shape 或契约不受支持
@@ -55,6 +58,7 @@ inline const char* DetectionStatusName(DetectionStatus status) noexcept {
         case DetectionStatus::NOT_LOADED: return "NOT_LOADED";
         case DetectionStatus::INVALID_INPUT: return "INVALID_INPUT";
         case DetectionStatus::UNSUPPORTED_INPUT: return "UNSUPPORTED_INPUT";
+        case DetectionStatus::UNSUPPORTED_TASK: return "UNSUPPORTED_TASK";
         case DetectionStatus::PREPROCESS_FAILED: return "PREPROCESS_FAILED";
         case DetectionStatus::INFERENCE_FAILED: return "INFERENCE_FAILED";
         case DetectionStatus::INVALID_OUTPUT: return "INVALID_OUTPUT";
@@ -70,6 +74,56 @@ struct Detection {
     float x1 = 0, y1 = 0, x2 = 0, y2 = 0; ///< 原始图像像素坐标
     float confidence = 0;
     int   class_id   = 0;
+};
+
+// ============================================================
+// 实例分割结果
+// ============================================================
+// 掩码不嵌入 Detection，避免 Aim、Runtime 预览和队列复制检测框时连带复制像素。
+// 同一帧的所有掩码紧凑存放在 SegmentationResult::mask_pixels 中；描述符只保存
+// 原图 ROI 和偏移。复制 SegmentationResult 时像素缓冲通过 shared_ptr 共享，移动
+// 结果则不复制像素。
+struct InstanceMask {
+    int x = 0;                         ///< ROI 左上角，原图像素坐标
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    std::size_t data_offset = 0;       ///< mask_pixels 中首字节偏移
+    std::size_t row_stride = 0;        ///< 每行字节数，当前等于 width
+};
+
+struct SegmentationResult {
+    // detections[index] 与 masks[index] 始终属于同一实例；即使阈值后二值掩码
+    // 全零也保留该索引，确保 detect() 与 segment() 的框结果一致。
+    std::vector<Detection> detections;
+    std::vector<InstanceMask> masks;
+    // 像素值只使用 0/1。无实例或调用 detect() 只取框时允许为空。
+    std::shared_ptr<const std::vector<std::uint8_t>> mask_pixels;
+
+    /// 返回指定掩码行首地址；索引、行号或缓冲契约非法时返回 nullptr。
+    const std::uint8_t* mask_row(std::size_t mask_index,
+                                 int row) const noexcept {
+        if (!mask_pixels || mask_index >= masks.size()) return nullptr;
+        const InstanceMask& mask = masks[mask_index];
+        if (row < 0 || row >= mask.height || mask.width <= 0 ||
+            mask.row_stride < static_cast<std::size_t>(mask.width)) {
+            return nullptr;
+        }
+        const std::size_t row_index = static_cast<std::size_t>(row);
+        if (row_index >
+            (std::numeric_limits<std::size_t>::max() - mask.data_offset) /
+                mask.row_stride) {
+            return nullptr;
+        }
+        const std::size_t offset =
+            mask.data_offset + row_index * mask.row_stride;
+        if (offset > mask_pixels->size() ||
+            static_cast<std::size_t>(mask.width) >
+                mask_pixels->size() - offset) {
+            return nullptr;
+        }
+        return mask_pixels->data() + offset;
+    }
 };
 
 // D3D11 纹理输入的无 Windows 头公有描述符。resource.get() 必须指向
@@ -188,14 +242,27 @@ public:
     /// 释放模型资源
     void reset();
 
-    /// 在单张 BGR 图像上运行检测；同一实例不可并发调用，多线程请使用 clone()
+    /// 在单张 BGR 图像上运行检测；分割模型只解码框，不生成掩码。为避免复制
+    /// 原型张量之外的主机掩码，本入口仍可直接服务 Aim 热路径。
+    /// 同一实例不可并发调用，多线程请使用 clone()。
     std::vector<Detection> detect(const cv::Mat& bgr_image);
+
+    /// 执行 YOLOv8 兼容的实例分割；仅支持标准双输出 raw head：
+    /// [1,4+C+M,A] 检测/系数张量与 [1,M,H,W] 原型张量。
+    SegmentationResult segment(const cv::Mat& bgr_image);
 
     /// 从 D3D11 BGRA8 纹理执行推理；仅 TensorRT CUDA Graph 或严格 DirectML
     /// 固定 shape 支持。
     /// 该入口不静默回退 CPU，资源、格式、尺寸或设备不符均返回明确失败状态。
     std::vector<Detection> detect_d3d11(
         const D3D11TextureFrame& frame);
+
+    /// 从 D3D11 BGRA8 纹理执行实例分割；输入互操作约束与 detect_d3d11() 相同。
+    SegmentationResult segment_d3d11(
+        const D3D11TextureFrame& frame);
+
+    /// 当前已加载模型是否满足受支持的实例分割输出契约。
+    bool segmentation_supported() const noexcept;
 
     /// 当前已加载 Session 是否具备对应 Provider 的 D3D11 GPU 互操作能力。
     bool d3d11_interop_supported() const noexcept;

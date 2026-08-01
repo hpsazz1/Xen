@@ -19,6 +19,11 @@
 
 namespace {
 
+enum class ModelTask {
+    DETECT,
+    SEGMENT,
+};
+
 bool valid_config(const DetectorConfig& config) noexcept {
     const bool dimensions_are_pair =
         (config.input_width == 0) == (config.input_height == 0);
@@ -87,7 +92,7 @@ OutputFormat requested_output_format(
     return OutputFormat::AUTO;
 }
 
-bool valid_declared_output_shape(
+bool valid_declared_prediction_shape(
         const std::vector<int64_t>& shape) noexcept {
     if (shape.size() != 3 || (shape[0] != 1 && shape[0] != -1)) {
         return false;
@@ -98,15 +103,44 @@ bool valid_declared_output_shape(
         });
 }
 
-std::uint64_t fnv1a_64(const void* data, size_t byte_count) noexcept {
-    constexpr std::uint64_t kOffsetBasis = 14695981039346656037ULL;
+bool valid_declared_prototype_shape(
+        const std::vector<int64_t>& shape) noexcept {
+    if (shape.size() != 4 || (shape[0] != 1 && shape[0] != -1)) {
+        return false;
+    }
+    return std::all_of(shape.begin() + 1, shape.end(),
+        [](int64_t dimension) {
+            return dimension == -1 || dimension > 0;
+        });
+}
+
+bool static_shape(const std::vector<int64_t>& shape) noexcept {
+    return !shape.empty() && std::all_of(
+        shape.begin(), shape.end(),
+        [](int64_t dimension) { return dimension > 0; });
+}
+
+std::uint64_t fnv1a_64_update(std::uint64_t hash,
+                              const void* data,
+                              size_t byte_count) noexcept {
     constexpr std::uint64_t kPrime = 1099511628211ULL;
 
     const auto* bytes = static_cast<const unsigned char*>(data);
-    std::uint64_t hash = kOffsetBasis;
     for (size_t index = 0; index < byte_count; ++index) {
         hash ^= static_cast<std::uint64_t>(bytes[index]);
         hash *= kPrime;
+    }
+    return hash;
+}
+
+std::uint64_t output_fingerprint(
+        const std::vector<Ort::Value>& outputs) {
+    constexpr std::uint64_t kOffsetBasis = 14695981039346656037ULL;
+    std::uint64_t hash = kOffsetBasis;
+    for (const Ort::Value& output : outputs) {
+        const size_t bytes = output.GetTensorSizeInBytes();
+        hash = fnv1a_64_update(hash, &bytes, sizeof(bytes));
+        hash = fnv1a_64_update(hash, output.GetTensorRawData(), bytes);
     }
     return hash;
 }
@@ -120,14 +154,25 @@ struct Detector::Impl {
     int64_t height = 0;
     int64_t width = 0;
     std::string active_provider = "CPUExecutionProvider";
+    ModelTask model_task = ModelTask::DETECT;
+    size_t prediction_output_index = 0;
+    size_t prototype_output_index = 0;
     std::optional<bool> metadata_end_to_end;
     std::optional<OutputFormat> resolved_output_format;
+    std::optional<detector::detail::SegmentationContract>
+        resolved_segmentation_contract;
     std::array<int64_t, 4> input_shape{1, 3, 0, 0};
     size_t input_element_count = 0;
     cv::Mat input_blob;
     cv::Mat prepared_bgr;
     cv::Mat resize_buffer;
     std::vector<Detection> candidate_detections;
+    std::vector<detector::detail::SegmentationCandidate>
+        segmentation_candidates;
+    std::vector<detector::detail::SegmentationCandidate>
+        selected_segmentations;
+    std::vector<float> mask_logits;
+    std::vector<std::uint8_t> mask_input;
     std::vector<unsigned char> nms_suppressed;
     mutable std::mutex profile_mutex;
     InferenceProfile last_profile;
@@ -211,56 +256,128 @@ struct Detector::Impl {
         }
 
         const std::string task = lowercase_ascii(session.metadata_value("task"));
-        if (!task.empty() && task != "detect") {
-            LOG_ERROR("detector", "当前模块仅支持 detect 任务，模型 task={}", task);
+        if (!task.empty() && task != "detect" && task != "segment") {
+            LOG_ERROR("detector", "不支持的模型任务: task={}", task);
             return false;
         }
+        model_task = task == "segment" ||
+                (task.empty() && session.num_outputs() == 2)
+            ? ModelTask::SEGMENT : ModelTask::DETECT;
         metadata_end_to_end = parse_bool_metadata(
             session.metadata_value("end2end"));
 
-        // Detect 标准导出应只有一个输出。多输出通常表示分割原型、姿态附加
-        // 张量或未合并 head；宁可拒绝，也不能静默套用错误解码器。
-        if (session.num_outputs() != 1) {
-            LOG_ERROR("detector", "Detect 仅支持单输出模型，实际 outputs={}",
-                      session.num_outputs());
-            return false;
-        }
-
-        if (session.output_type(0) != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-            LOG_ERROR("detector", "仅支持 float32 输出张量，实际类型={}",
-                      static_cast<int>(session.output_type(0)));
-            return false;
-        }
-        const auto declared_output_shape = session.output_shape(0);
-        if (!valid_declared_output_shape(declared_output_shape)) {
-            LOG_ERROR("detector", "模型输出必须是单 batch 三维张量，rank={}",
-                      declared_output_shape.size());
-            return false;
-        }
-        const bool static_output = std::all_of(
-            declared_output_shape.begin(), declared_output_shape.end(),
-            [](int64_t dimension) { return dimension > 0; });
-        if (static_output) {
-            const OutputFormat requested = requested_output_format(
-                config, metadata_end_to_end, declared_output_shape);
-            OutputFormat resolved = OutputFormat::AUTO;
-            if (!detector::detail::resolve_output_format(
-                    declared_output_shape, requested, resolved)) {
-                LOG_ERROR("detector",
-                          "无法确定模型输出契约，请显式设置 output_format");
+        if (model_task == ModelTask::DETECT) {
+            // Detect 标准导出应只有一个输出。姿态、OBB 或未识别的多输出 head
+            // 继续严格拒绝，不能静默套用检测解码器。
+            if (session.num_outputs() != 1) {
+                LOG_ERROR("detector", "Detect 仅支持单输出模型，实际 outputs={}",
+                          session.num_outputs());
                 return false;
             }
-            resolved_output_format = resolved;
+            if (session.output_type(0) !=
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                LOG_ERROR("detector", "仅支持 float32 输出张量，实际类型={}",
+                          static_cast<int>(session.output_type(0)));
+                return false;
+            }
+            const auto declared_output_shape = session.output_shape(0);
+            if (!valid_declared_prediction_shape(declared_output_shape)) {
+                LOG_ERROR("detector", "模型输出必须是单 batch 三维张量，rank={}",
+                          declared_output_shape.size());
+                return false;
+            }
+            if (static_shape(declared_output_shape)) {
+                const OutputFormat requested = requested_output_format(
+                    config, metadata_end_to_end, declared_output_shape);
+                OutputFormat resolved = OutputFormat::AUTO;
+                if (!detector::detail::resolve_output_format(
+                        declared_output_shape, requested, resolved)) {
+                    LOG_ERROR(
+                        "detector",
+                        "无法确定模型输出契约，请显式设置 output_format");
+                    return false;
+                }
+                resolved_output_format = resolved;
+            }
+        } else {
+            if (session.num_outputs() != 2) {
+                LOG_ERROR(
+                    "detector",
+                    "Segment 仅支持检测/系数与原型双输出，实际 outputs={}",
+                    session.num_outputs());
+                return false;
+            }
+            if (metadata_end_to_end.value_or(false) ||
+                (config.output_format != OutputFormat::AUTO &&
+                 config.output_format != OutputFormat::CHANNEL_FIRST)) {
+                LOG_ERROR(
+                    "detector",
+                    "Segment 当前仅支持非 end-to-end 的 channel-first raw head");
+                return false;
+            }
+
+            std::optional<size_t> prediction_index;
+            std::optional<size_t> prototype_index;
+            for (size_t index = 0; index < session.num_outputs(); ++index) {
+                if (session.output_type(index) !=
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                    LOG_ERROR(
+                        "detector", "Segment 输出必须全部为 float32，索引={}",
+                        index);
+                    return false;
+                }
+                const auto shape = session.output_shape(index);
+                if (shape.size() == 3 && !prediction_index.has_value()) {
+                    prediction_index = index;
+                } else if (shape.size() == 4 &&
+                           !prototype_index.has_value()) {
+                    prototype_index = index;
+                } else {
+                    LOG_ERROR(
+                        "detector",
+                        "Segment 输出必须恰好包含一个三维 prediction 和一个四维 prototype");
+                    return false;
+                }
+            }
+            if (!prediction_index.has_value() ||
+                !prototype_index.has_value()) {
+                LOG_ERROR("detector", "Segment 双输出 rank 契约不完整");
+                return false;
+            }
+            prediction_output_index = *prediction_index;
+            prototype_output_index = *prototype_index;
+            const auto prediction_shape =
+                session.output_shape(prediction_output_index);
+            const auto prototype_shape =
+                session.output_shape(prototype_output_index);
+            if (!valid_declared_prediction_shape(prediction_shape) ||
+                !valid_declared_prototype_shape(prototype_shape)) {
+                LOG_ERROR("detector", "Segment 声明输出 shape 非法");
+                return false;
+            }
+            if (static_shape(prediction_shape) &&
+                static_shape(prototype_shape)) {
+                detector::detail::SegmentationContract contract;
+                if (!detector::detail::resolve_segmentation_contract(
+                        prediction_shape, prototype_shape,
+                        config.output_format, contract)) {
+                    LOG_ERROR("detector", "无法确定 Segment 输出契约");
+                    return false;
+                }
+                resolved_segmentation_contract = contract;
+            }
         }
 
         active_provider = session.active_provider();
         loaded = true;
-        LOG_INFO("detector", "模型加载完成: {}x{}, provider={}",
-                 width, height, active_provider);
+        LOG_INFO("detector", "模型加载完成: {}x{}, task={}, provider={}",
+                 width, height,
+                 model_task == ModelTask::SEGMENT ? "segment" : "detect",
+                 active_provider);
         return true;
     }
 
-    std::vector<Detection> finish_run(
+    SegmentationResult finish_run(
             const std::vector<Ort::Value>* outputs,
             const detector::detail::SessionRunProfile& session_profile,
             const detector::detail::LetterBoxInfo& letterbox_info,
@@ -268,8 +385,11 @@ struct Detector::Impl {
             std::chrono::steady_clock::time_point started,
             std::chrono::steady_clock::time_point preprocessed,
             std::chrono::steady_clock::time_point inferred,
+            bool generate_masks,
             InferenceProfile& profile) {
         using milliseconds = std::chrono::duration<double, std::milli>;
+
+        SegmentationResult result;
 
         profile.preprocess_ms = std::chrono::duration_cast<milliseconds>(
             preprocessed - started).count();
@@ -292,57 +412,122 @@ struct Detector::Impl {
             session_profile.input_device_copy_bytes;
         if (!outputs) {
             profile.status = DetectionStatus::INFERENCE_FAILED;
-            return {};
+            return result;
         }
-        if (outputs->size() != 1 || !(*outputs)[0].IsTensor()) {
+        const size_t expected_outputs =
+            model_task == ModelTask::SEGMENT ? 2U : 1U;
+        if (outputs->size() != expected_outputs ||
+            !std::all_of(outputs->begin(), outputs->end(),
+                [](const Ort::Value& value) { return value.IsTensor(); })) {
             profile.status = DetectionStatus::INVALID_OUTPUT;
-            return {};
+            return result;
         }
-
-        const auto output_info = (*outputs)[0].GetTensorTypeAndShapeInfo();
-        if (output_info.GetElementType() !=
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-            profile.status = DetectionStatus::INVALID_OUTPUT;
-            return {};
-        }
-        const auto output_shape = output_info.GetShape();
-        const OutputFormat requested = requested_output_format(
-            config, metadata_end_to_end, output_shape);
-
-        OutputFormat resolved = OutputFormat::AUTO;
-        if (!detector::detail::resolve_output_format(
-                output_shape, requested, resolved)) {
-            profile.status = DetectionStatus::INVALID_OUTPUT;
-            return {};
-        }
-        if (resolved_output_format.has_value() &&
-            *resolved_output_format != resolved) {
-            profile.status = DetectionStatus::INVALID_OUTPUT;
-            return {};
-        }
-        resolved_output_format = resolved;
-
-        const float* output_data = (*outputs)[0].GetTensorData<float>();
         if (config.enable_output_fingerprint) {
-            profile.output_fingerprint = fnv1a_64(
-                output_data, (*outputs)[0].GetTensorSizeInBytes());
+            profile.output_fingerprint = output_fingerprint(*outputs);
         }
 
-        candidate_detections.clear();
-        if (!detector::detail::decode_output(
-                output_data, output_shape, resolved,
-                config.conf_threshold, candidate_detections)) {
-            profile.status = DetectionStatus::INVALID_OUTPUT;
-            return {};
-        }
+        OutputFormat resolved = OutputFormat::CHANNEL_FIRST;
+        if (model_task == ModelTask::DETECT) {
+            if (generate_masks) {
+                profile.status = DetectionStatus::UNSUPPORTED_TASK;
+                return result;
+            }
+            const auto output_info =
+                (*outputs)[0].GetTensorTypeAndShapeInfo();
+            if (output_info.GetElementType() !=
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            const auto output_shape = output_info.GetShape();
+            const OutputFormat requested = requested_output_format(
+                config, metadata_end_to_end, output_shape);
+            if (!detector::detail::resolve_output_format(
+                    output_shape, requested, resolved) ||
+                (resolved_output_format.has_value() &&
+                 *resolved_output_format != resolved)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            resolved_output_format = resolved;
 
-        std::vector<Detection> detections;
-        if (!detector::detail::finalize_detections(
-                candidate_detections, resolved, config.nms_threshold,
-                config.top_k, letterbox_info, detections,
-                nms_suppressed)) {
-            profile.status = DetectionStatus::POSTPROCESS_FAILED;
-            return {};
+            candidate_detections.clear();
+            if (!detector::detail::decode_output(
+                    (*outputs)[0].GetTensorData<float>(), output_shape,
+                    resolved, config.conf_threshold,
+                    candidate_detections)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            if (!detector::detail::finalize_detections(
+                    candidate_detections, resolved,
+                    config.nms_threshold, config.top_k,
+                    letterbox_info, result.detections,
+                    nms_suppressed)) {
+                profile.status = DetectionStatus::POSTPROCESS_FAILED;
+                return {};
+            }
+        } else {
+            const Ort::Value& prediction =
+                (*outputs)[prediction_output_index];
+            const Ort::Value& prototype =
+                (*outputs)[prototype_output_index];
+            const auto prediction_info =
+                prediction.GetTensorTypeAndShapeInfo();
+            const auto prototype_info =
+                prototype.GetTensorTypeAndShapeInfo();
+            if (prediction_info.GetElementType() !=
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+                prototype_info.GetElementType() !=
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            const auto prediction_shape = prediction_info.GetShape();
+            const auto prototype_shape = prototype_info.GetShape();
+            detector::detail::SegmentationContract contract;
+            if (!detector::detail::resolve_segmentation_contract(
+                    prediction_shape, prototype_shape,
+                    config.output_format, contract)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            const auto same_contract = [](
+                    const detector::detail::SegmentationContract& left,
+                    const detector::detail::SegmentationContract& right) {
+                return left.class_count == right.class_count &&
+                       left.mask_channels == right.mask_channels &&
+                       left.anchors == right.anchors &&
+                       left.prototype_height == right.prototype_height &&
+                       left.prototype_width == right.prototype_width;
+            };
+            if (resolved_segmentation_contract.has_value() &&
+                !same_contract(*resolved_segmentation_contract, contract)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            resolved_segmentation_contract = contract;
+
+            const float* prediction_data =
+                prediction.GetTensorData<float>();
+            const float* prototype_data = prototype.GetTensorData<float>();
+            segmentation_candidates.clear();
+            if (!detector::detail::decode_segmentation_output(
+                    prediction_data, prediction_shape, contract,
+                    config.conf_threshold, segmentation_candidates)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            if (!detector::detail::finalize_segmentations(
+                    segmentation_candidates, config.nms_threshold,
+                    config.top_k, letterbox_info, prediction_data,
+                    prediction_shape, prototype_data, prototype_shape,
+                    contract, generate_masks, result,
+                    selected_segmentations, nms_suppressed,
+                    mask_logits, mask_input)) {
+                profile.status = DetectionStatus::POSTPROCESS_FAILED;
+                return {};
+            }
         }
         const auto finished = std::chrono::steady_clock::now();
         profile.postprocess_ms = std::chrono::duration_cast<milliseconds>(
@@ -362,13 +547,14 @@ struct Detector::Impl {
             profile.execution_ms, profile.d2h_ms,
             profile.postprocess_ms, profile.total_ms,
             profile.input_upload_bytes, profile.input_device_copy_bytes,
-            detections.size());
-        return detections;
+            result.detections.size());
+        return result;
     }
 
-    std::vector<Detection> run(const cv::Mat& bgr_image,
-                               const DetectorConfig& config,
-                               InferenceProfile& profile) {
+    SegmentationResult run(const cv::Mat& bgr_image,
+                           const DetectorConfig& config,
+                           bool generate_masks,
+                           InferenceProfile& profile) {
         using clock = std::chrono::steady_clock;
         using milliseconds = std::chrono::duration<double, std::milli>;
 
@@ -411,12 +597,13 @@ struct Detector::Impl {
         const auto inferred = clock::now();
         return finish_run(
             outputs, session_profile, letterbox_info, config,
-            start, preprocessed, inferred, profile);
+            start, preprocessed, inferred, generate_masks, profile);
     }
 
-    std::vector<Detection> run_d3d11(
+    SegmentationResult run_d3d11(
             const D3D11TextureFrame& frame,
             const DetectorConfig& config,
+            bool generate_masks,
             InferenceProfile& profile) {
         using clock = std::chrono::steady_clock;
 
@@ -438,7 +625,7 @@ struct Detector::Impl {
         const auto inferred = clock::now();
         return finish_run(
             outputs, session_profile, letterbox_info, config,
-            started, preprocessed, inferred, profile);
+            started, preprocessed, inferred, generate_masks, profile);
     }
 };
 
@@ -494,9 +681,10 @@ std::vector<Detection> Detector::detect(const cv::Mat& bgr_image) {
     }
 
     try {
-        auto detections = impl_->run(bgr_image, config_, current_profile);
+        auto result = impl_->run(
+            bgr_image, config_, false, current_profile);
         impl_->set_profile(current_profile);
-        return detections;
+        return std::move(result.detections);
     } catch (const std::exception& e) {
         // detect() 是推理热路径，只允许编译期可移除的 DEBUG/TRACE。
         LOG_DEBUG("detector", "Detector::detect() 失败: {}", e.what());
@@ -505,6 +693,42 @@ std::vector<Detection> Detector::detect(const cv::Mat& bgr_image) {
         return {};
     } catch (...) {
         LOG_DEBUG("detector", "Detector::detect() 失败: 未知异常");
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+}
+
+SegmentationResult Detector::segment(const cv::Mat& bgr_image) {
+    InferenceProfile current_profile;
+    if (!loaded()) {
+        current_profile.status = DetectionStatus::NOT_LOADED;
+        if (impl_) impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!segmentation_supported()) {
+        current_profile.status = DetectionStatus::UNSUPPORTED_TASK;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+    if (bgr_image.empty() || bgr_image.type() != CV_8UC3) {
+        current_profile.status = DetectionStatus::INVALID_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+
+    try {
+        auto result = impl_->run(
+            bgr_image, config_, true, current_profile);
+        impl_->set_profile(current_profile);
+        return result;
+    } catch (const std::exception& e) {
+        LOG_DEBUG("detector", "Detector::segment() 失败: {}", e.what());
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    } catch (...) {
+        LOG_DEBUG("detector", "Detector::segment() 失败: 未知异常");
         current_profile.status = DetectionStatus::INFERENCE_FAILED;
         impl_->set_profile(current_profile);
         return {};
@@ -537,10 +761,10 @@ std::vector<Detection> Detector::detect_d3d11(
     }
 
     try {
-        auto detections = impl_->run_d3d11(
-            frame, config_, current_profile);
+        auto result = impl_->run_d3d11(
+            frame, config_, false, current_profile);
         impl_->set_profile(current_profile);
-        return detections;
+        return std::move(result.detections);
     } catch (const std::exception& e) {
         LOG_DEBUG("detector", "Detector::detect_d3d11() 失败: {}",
                   e.what());
@@ -553,6 +777,60 @@ std::vector<Detection> Detector::detect_d3d11(
         impl_->set_profile(current_profile);
         return {};
     }
+}
+
+SegmentationResult Detector::segment_d3d11(
+        const D3D11TextureFrame& frame) {
+    InferenceProfile current_profile;
+    if (!loaded()) {
+        current_profile.status = DetectionStatus::NOT_LOADED;
+        if (impl_) impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!segmentation_supported()) {
+        current_profile.status = DetectionStatus::UNSUPPORTED_TASK;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+    const bool directml_frame =
+        impl_->active_provider == "DmlExecutionProvider";
+    if (!frame.resource || !frame.synchronization ||
+        (directml_frame &&
+         (!frame.shared_fence || frame.fence_value == 0)) ||
+        frame.width <= 0 || frame.height <= 0 ||
+        frame.width != input_width() || frame.height != input_height()) {
+        current_profile.status = DetectionStatus::INVALID_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!d3d11_interop_supported()) {
+        current_profile.status = DetectionStatus::UNSUPPORTED_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+
+    try {
+        auto result = impl_->run_d3d11(
+            frame, config_, true, current_profile);
+        impl_->set_profile(current_profile);
+        return result;
+    } catch (const std::exception& e) {
+        LOG_DEBUG("detector", "Detector::segment_d3d11() 失败: {}",
+                  e.what());
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    } catch (...) {
+        LOG_DEBUG(
+            "detector", "Detector::segment_d3d11() 失败: 未知异常");
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+}
+
+bool Detector::segmentation_supported() const noexcept {
+    return loaded() && impl_->model_task == ModelTask::SEGMENT;
 }
 
 bool Detector::d3d11_interop_supported() const noexcept {

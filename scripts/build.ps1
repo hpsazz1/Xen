@@ -10,6 +10,8 @@
     [string]$DirectMlRoot = $env:DIRECTML_ROOT,
     [string]$NdiSdkRoot = $env:NDI_SDK_DIR,
     [string]$ModelPath = "",
+    [string]$SegmentationModelPath = "",
+    [string]$SegmentationImagePath = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release"
 )
@@ -149,6 +151,14 @@ if (-not [string]::IsNullOrWhiteSpace($NdiSdkRoot)) {
 if (-not [string]::IsNullOrWhiteSpace($ModelPath)) {
     $ModelPath = Resolve-ExistingPath $ModelPath "测试模型" "Leaf"
 }
+if (-not [string]::IsNullOrWhiteSpace($SegmentationModelPath)) {
+    $SegmentationModelPath = Resolve-ExistingPath `
+        $SegmentationModelPath "实例分割测试模型" "Leaf"
+}
+if (-not [string]::IsNullOrWhiteSpace($SegmentationImagePath)) {
+    $SegmentationImagePath = Resolve-ExistingPath `
+        $SegmentationImagePath "实例分割真实测试图像" "Leaf"
+}
 $resolvedTensorRtMajor = Resolve-TensorRtMajor $TensorRtRoot $TensorRtMajor
 $cmakeCommand = (Get-Command cmake -ErrorAction Stop).Source
 $ctestCommand = (Get-Command ctest -ErrorAction Stop).Source
@@ -170,7 +180,9 @@ $configureArguments = @(
     "-DXEN_CUDA_ROOT=$CudaRoot",
     "-DXEN_DIRECTML_ROOT=$DirectMlRoot",
     "-DXEN_NDI_SDK_ROOT=$NdiSdkRoot",
-    "-DXEN_TEST_MODEL=$ModelPath"
+    "-DXEN_TEST_MODEL=$ModelPath",
+    "-DXEN_TEST_SEGMENTATION_MODEL=$SegmentationModelPath",
+    "-DXEN_TEST_SEGMENTATION_IMAGE=$SegmentationImagePath"
 )
 if (-not [string]::IsNullOrWhiteSpace($DirectMlRoot)) {
     $directMlDll = Join-Path $DirectMlRoot "bin\x64-win\DirectML.dll"
