@@ -1888,13 +1888,16 @@ struct Overlay::Impl {
     }
 
     void render_detector_form(AppConfig& app_config) {
-        begin_config_panel("detector_panel", "推理", 264.0f);
+        const bool openvino =
+            app_config.detector.backend == BackendType::OPENVINO;
+        begin_config_panel(
+            "detector_panel", "推理", openvino ? 300.0f : 264.0f);
         if (begin_form("detector_form", 126.0f)) {
             form_row("模型路径");
             ImGui::InputText("##model_path", &app_config.detector.model_path);
 
             const char* backends[] = {
-                "CUDA", "TensorRT", "DirectML", "CPU"};
+                "CUDA", "TensorRT", "DirectML", "OpenVINO", "CPU"};
             int backend = static_cast<int>(app_config.detector.backend);
             form_row("推理后端");
             if (ImGui::Combo(
@@ -1904,9 +1907,30 @@ struct Overlay::Impl {
                     static_cast<BackendType>(backend);
             }
 
+            if (openvino) {
+                const char* devices[] = {"GPU", "CPU", "NPU"};
+                int device = static_cast<int>(
+                    app_config.detector.openvino_device);
+                form_row("OpenVINO 设备");
+                if (ImGui::Combo(
+                        "##openvino_device", &device, devices,
+                        static_cast<int>(std::size(devices)))) {
+                    app_config.detector.openvino_device =
+                        static_cast<OpenVinoDevice>(device);
+                    if (app_config.detector.openvino_device !=
+                        OpenVinoDevice::GPU) {
+                        app_config.detector.device_id = 0;
+                    }
+                }
+            }
+
             form_row("设备索引");
+            ImGui::BeginDisabled(
+                openvino && app_config.detector.openvino_device !=
+                    OpenVinoDevice::GPU);
             ImGui::InputInt(
                 "##device_id", &app_config.detector.device_id);
+            ImGui::EndDisabled();
             const char* formats[] = {
                 "Auto", "Channel first",
                 "Anchor + objectness", "End to end"};

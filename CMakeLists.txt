@@ -164,6 +164,23 @@ else()
     set(XEN_ONNXRUNTIME_HAS_DIRECTML FALSE)
 endif()
 
+# Intel 官方 NuGet 把 OpenVINO EP、OpenVINO Runtime 和设备 plugin 放在
+# onnxruntime.lib 同目录。Provider 存在却缺少工厂头或核心运行库属于残缺 SDK，
+# 必须在配置期失败，不能等到 Session 创建时才由 DLL 搜索暴露问题。
+if(WIN32 AND
+   EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_openvino.dll")
+    if(NOT EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/openvino_provider_factory.h" OR
+       NOT EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/openvino.dll" OR
+       NOT EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/openvino_onnx_frontend.dll" OR
+       NOT EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/tbb12.dll")
+        message(FATAL_ERROR
+            "Selected ONNX Runtime OpenVINO package is incomplete: ${ONNXRUNTIME_ROOT}")
+    endif()
+    set(XEN_ONNXRUNTIME_HAS_OPENVINO TRUE)
+else()
+    set(XEN_ONNXRUNTIME_HAS_OPENVINO FALSE)
+endif()
+
 if(EXISTS "${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_cuda.dll" OR
    XEN_ONNXRUNTIME_HAS_TENSORRT)
     set(XEN_ONNXRUNTIME_HAS_CUDA TRUE)
@@ -295,7 +312,8 @@ function(xen_deploy_runtime_dlls target)
                 onnxruntime.dll
                 onnxruntime_providers_shared.dll
                 onnxruntime_providers_cuda.dll
-                onnxruntime_providers_tensorrt.dll)
+                onnxruntime_providers_tensorrt.dll
+                onnxruntime_providers_openvino.dll)
             set(runtime_file "${ONNXRUNTIME_RUNTIME_DIR}/${runtime_name}")
             if(EXISTS "${runtime_file}")
                 list(APPEND ORT_RUNTIME_DLLS "${runtime_file}")
@@ -310,6 +328,30 @@ function(xen_deploy_runtime_dlls target)
             set(XEN_ORT_USES_NVIDIA TRUE)
         else()
             set(XEN_ORT_USES_NVIDIA FALSE)
+        endif()
+
+        # OpenVINO Provider 会动态加载 ONNX frontend 和 device_type 对应
+        # plugin，它们不一定出现在静态导入表。Xen 配置允许 CPU/GPU/NPU，
+        # 因此 ONNX 前端、三种正式 plugin、核心 Runtime 与 TBB 都必须随
+        # 可执行文件部署；OpenCL.dll 由显卡驱动提供。
+        if(XEN_ONNXRUNTIME_HAS_OPENVINO)
+            set(OPENVINO_RUNTIME_DLLS)
+            foreach(runtime_name
+                    openvino.dll
+                    openvino_onnx_frontend.dll
+                    openvino_intel_cpu_plugin.dll
+                    openvino_intel_gpu_plugin.dll
+                    openvino_intel_npu_plugin.dll
+                    tbb12.dll)
+                set(runtime_file
+                    "${ONNXRUNTIME_RUNTIME_DIR}/${runtime_name}")
+                if(NOT EXISTS "${runtime_file}")
+                    message(FATAL_ERROR
+                        "Required OpenVINO runtime DLL not found: ${runtime_file}")
+                endif()
+                list(APPEND OPENVINO_RUNTIME_DLLS "${runtime_file}")
+            endforeach()
+            xen_copy_runtime_files(${target} ${OPENVINO_RUNTIME_DLLS})
         endif()
 
         if(XEN_ORT_USES_NVIDIA AND XEN_TENSORRT_ROOT)
@@ -508,6 +550,11 @@ if(XEN_ONNXRUNTIME_HAS_DIRECTML)
     target_compile_definitions(detector PRIVATE XEN_HAS_DIRECTML_INTEROP=1)
 else()
     target_compile_definitions(detector PRIVATE XEN_HAS_DIRECTML_INTEROP=0)
+endif()
+if(XEN_ONNXRUNTIME_HAS_OPENVINO)
+    target_compile_definitions(detector PRIVATE XEN_HAS_OPENVINO_PROVIDER=1)
+else()
+    target_compile_definitions(detector PRIVATE XEN_HAS_OPENVINO_PROVIDER=0)
 endif()
 
 # ─── 实时闭环模块 ───────────────────────────────────────
@@ -842,6 +889,24 @@ if(BUILD_TESTING)
     # 真实模型测试默认关闭，避免仓库绑定私有模型；配置时通过
     # -DXEN_TEST_MODEL=<onnx路径> 启用加载和单帧推理冒烟测试。
     set(XEN_TEST_MODEL "" CACHE FILEPATH "用于 Detector 集成测试的 ONNX 模型")
+    set(XEN_TEST_OPENVINO_DEVICE "" CACHE STRING
+        "OpenVINO 真实模型测试设备：CPU/GPU/NPU；空值表示不启用")
+    string(TOUPPER "${XEN_TEST_OPENVINO_DEVICE}"
+        XEN_TEST_OPENVINO_DEVICE_NORMALIZED)
+    if(XEN_TEST_OPENVINO_DEVICE_NORMALIZED)
+        if(NOT XEN_TEST_MODEL)
+            message(FATAL_ERROR
+                "XEN_TEST_OPENVINO_DEVICE requires XEN_TEST_MODEL")
+        endif()
+        if(NOT XEN_ONNXRUNTIME_HAS_OPENVINO)
+            message(FATAL_ERROR
+                "XEN_TEST_OPENVINO_DEVICE requires an OpenVINO ORT package")
+        endif()
+        if(NOT XEN_TEST_OPENVINO_DEVICE_NORMALIZED MATCHES "^(CPU|GPU|NPU)$")
+            message(FATAL_ERROR
+                "XEN_TEST_OPENVINO_DEVICE must be CPU, GPU or NPU")
+        endif()
+    endif()
     if(XEN_TEST_MODEL)
         if(NOT EXISTS "${XEN_TEST_MODEL}")
             message(FATAL_ERROR "XEN_TEST_MODEL does not exist: ${XEN_TEST_MODEL}")
@@ -855,6 +920,20 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME detector_model_test
             COMMAND detector_model_test "${XEN_TEST_MODEL}")
+
+        if(XEN_TEST_OPENVINO_DEVICE_NORMALIZED)
+            add_executable(openvino_model_test
+                tests/openvino_model_test.cpp)
+            target_link_libraries(openvino_model_test PRIVATE detector)
+            if(WIN32)
+                xen_deploy_runtime_dlls(openvino_model_test OPENCV ORT)
+            endif()
+            add_test(NAME openvino_model_test
+                COMMAND openvino_model_test
+                    "${XEN_TEST_MODEL}"
+                    "${XEN_TEST_OPENVINO_DEVICE_NORMALIZED}"
+                    "${CMAKE_BINARY_DIR}/cache/openvino/ctest")
+        endif()
 
         if(XEN_ONNXRUNTIME_HAS_CUDA)
             add_executable(d3d11_cuda_interop_tests

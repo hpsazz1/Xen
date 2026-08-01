@@ -216,9 +216,39 @@ void test_provider_mapping() {
                "CUDAExecutionProvider" &&
                std::string(expected_provider_name(BackendType::DIRECTML)) ==
                "DmlExecutionProvider" &&
+               std::string(expected_provider_name(BackendType::OPENVINO)) ==
+               "OpenVINOExecutionProvider" &&
                std::string(expected_provider_name(BackendType::CPU)) ==
                "CPUExecutionProvider",
            "请求后端必须映射到 ORT 实际 Provider 名称");
+}
+
+void test_openvino_options() {
+    BenchmarkOptions options;
+    std::string error;
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"openvino",
+                  L"--openvino-device", L"cpu",
+                  L"--report-prefix", L"report",
+                  L"--provider-profile", L"report.provider.json"},
+                 options, error) == BenchmarkParseStatus::READY &&
+               options.backend == BackendType::OPENVINO &&
+               options.openvino_device == OpenVinoDevice::CPU &&
+               options.openvino_device_explicit,
+           "OpenVINO 正式基准必须解析显式设备与 Provider profile: " +
+               error);
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"openvino",
+                  L"--report-prefix", L"report",
+                  L"--provider-profile", L"report.provider.json"},
+                 options, error) == BenchmarkParseStatus::INVALID,
+           "OpenVINO 缺少显式设备时必须拒绝");
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"cpu",
+                  L"--openvino-device", L"cpu",
+                  L"--report-prefix", L"report"},
+                 options, error) == BenchmarkParseStatus::INVALID,
+           "非 OpenVINO 后端不得接受 OpenVINO 设备参数");
 }
 
 void test_per_frame_geometry_validation() {
@@ -258,6 +288,7 @@ int main() {
     test_network_encoded_override();
     test_invalid_options();
     test_provider_mapping();
+    test_openvino_options();
     test_per_frame_geometry_validation();
     if (failures != 0) {
         std::cerr << "Benchmark 测试失败数: " << failures << '\n';

@@ -6,7 +6,7 @@ Xen 是基于 C++20 原生实现的 Windows AI 辅助瞄准工具。核心管线
 XUDP 生产发送端、KMBOX NET 鼠标后端与独立鼠标性能基准工具的源码和自动回环测试：
 
 ```text
-Desktop Duplication CPU/D3D11/CUDA/DirectML ─┐
+Desktop Duplication CPU/D3D11/CUDA/DirectML/OpenVINO ─┐
 OBS/FFmpeg UDP MJPEG ─────┤
 XenSender DXGI/XUDP ────────┤
 OBS/NDI Sender ───────────┴→ Detector → Aim → Runtime SafetyGate ─┬→ Win32 SendInput
@@ -225,9 +225,10 @@ DLL 的 SHA-256，逐样本校验 Provider、状态和几何，全部通过后�
   -ReportPrefix ".\cache\runtime-benchmark\dxgi-tensorrt"
 ```
 
-TensorRT/CUDA 正式基准还必须为同一模型和后端提供独立的 ORT 节点级 profile；脚本会自动将
+TensorRT/CUDA/OpenVINO 正式基准还必须为同一模型和后端提供独立的 ORT 节点级 profile；脚本会自动将
 profile 作为第四个成组产物发布，并把最终路径、SHA-256 和每个 Provider 的 Node 数量写入环境清单。
-直接调用 `XenBenchmark.exe` 时使用 `--provider-profile PATH`；DirectML/CPU 不接受该参数。
+直接调用 `XenBenchmark.exe` 时使用 `--provider-profile PATH`；OpenVINO 还必须显式传入
+`--openvino-device gpu|cpu|npu`，DirectML/CPU 不接受 profile 参数。
 
 模型 AUTO 契约存在歧义时必须通过 `-OutputFormat` 显式指定，脚本不会猜测未知布局。默认门槛为
 100 个 warmup、至少 10000 个正式成功样本、至少 300 秒且最大 600 秒。调试短冒烟
@@ -237,7 +238,8 @@ profile 作为第四个成组产物发布，并把最终路径、SHA-256 和每�
 标记；没有该文件或 `complete` 不为 `true` 的 CSV/JSON 不得视为有效报告。
 TensorRT 和 CUDA 允许节点级回退，环境清单会通过独立 ORT profiling 记录实际 Node 归属：
 TensorRT 允许 `TensorRT -> CUDA -> CPU`，CUDA 允许 `CUDA -> CPU`。profiling Session 与正式
-性能 Session 分离，诊断开销不会混入正式样本。DirectML 会禁用 CPU 节点回退。
+性能 Session 分离，诊断开销不会混入正式样本。DirectML 与 OpenVINO 都禁用 ORT CPU
+节点回退；OpenVINO profile 中只允许出现 `OpenVINOExecutionProvider`。
 
 D3D11/CUDA 互操作可追加 `-EnableD3D11CudaInterop on`。脚本会强制要求 Desktop Duplication、
 TensorRT、CUDA Graph 与 GPU 前处理，并逐样本核对 `h2d_ms=0`、`input_upload_bytes=0`、
@@ -350,6 +352,8 @@ ctest --test-dir build -C Release --output-on-failure
   因而当前 GPU 配置共注册 18 个 CTest；
 - DirectML 真实模型构建还增加 D3D11/DirectML 共享纹理与 fence 测试，用饱和
   红/蓝变化输入核对通道、原始输出指纹、检测结果和零显式输入复制；
+- OpenVINO 真实模型构建增加严格 Provider、变化输入、非法输入状态和 ORT 节点 profile
+  测试；指定 `XEN_TEST_OPENVINO_DEVICE=CPU|GPU|NPU` 后当前共注册 18 个 CTest；
 - 正式性能与部署验收：使用 `scripts/benchmark_*.ps1`，不把短单元测试耗时写成性能结论。
 
 测试不得复制一套生产协议或算法，不得因环境缺失静默回退后端，也不得通过删除、跳过或放宽
@@ -410,6 +414,35 @@ DirectML 使用官方独立 ORT 包，不能与 CUDA/TensorRT 版 `onnxruntime.d
   -DirectMlRoot "C:\path\to\Microsoft.AI.DirectML" `
   -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib"
 ```
+
+OpenVINO 同样使用 Intel 官方独立 ORT 包，不能与 CUDA/TensorRT 或 DirectML 产物混放。
+当前适配 ORT 1.24.1 + OpenVINO 2025.4.1 的 V2 Provider 配置；Session 禁用 ORT 图优化和
+CPU EP 回退，设备只接受 `GPU`、`CPU`、`NPU`。CPU/NPU 的 `device_id` 必须为 0，GPU 的
+非零索引映射为 `GPU.<id>`。低延迟配置通过 `load_config` 设置 `LATENCY`，CPU/GPU 固定单
+stream；NPU 不注入未经验证的 stream 属性。
+
+```powershell
+.\scripts\test_openvino.ps1 `
+  -ModelPath "C:\path\to\model.onnx" `
+  -OnnxRuntimeRoot "C:\path\to\Intel.ML.OnnxRuntime.OpenVino" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib" `
+  -Device GPU
+```
+
+脚本固定使用 `build-openvino/`，清空其他 Provider SDK 输入，并在 clean `PATH` 下检查
+`onnxruntime_providers_openvino.dll`、OpenVINO 核心、动态加载的 ONNX frontend、CPU/GPU/NPU
+插件和 TBB。随后连续执行变化输入并解析 ORT profile，任何 ORT CPU 节点或其他 Provider
+都会失败。正式配置示例：
+
+```ini
+[detector]
+backend=openvino
+openvino_device=gpu
+device_id=0
+```
+
+OpenVINO 官方支持边界仍以 Intel CPU/GPU/NPU 为准；非 Intel 开发机上的成功冒烟不能替代
+目标 Intel 硬件的正式正确性与 P95/P99 验收。
 
 固定 shape 的 TensorRT 模型默认启用 CUDA Graph。Detector 会复用 CUDA 输入输出、pinned
 主机 staging 和 `uint8` 设备 staging；每帧显式上传模型尺寸 BGR 数据，由 CUDA kernel 直接写入

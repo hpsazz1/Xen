@@ -17,11 +17,21 @@ enum class BackendType {
     CUDA,       ///< ONNX Runtime CUDA EP
     TENSORRT,   ///< ONNX Runtime TensorRT EP
     DIRECTML,   ///< ONNX Runtime DirectML EP（AMD/Intel/NVIDIA 通用）
+    OPENVINO,   ///< ONNX Runtime OpenVINO EP（Intel CPU/GPU/NPU）
     CPU,        ///< CPU 兜底
 };
 
 /// 后端可读名称
 const char* BackendName(BackendType bt) noexcept;
+
+enum class OpenVinoDevice {
+    GPU,        ///< Intel 集成或独立 GPU；device_id>0 时选择 GPU.<id>
+    CPU,        ///< OpenVINO CPU plugin；device_id 必须为 0
+    NPU,        ///< Intel NPU；device_id 必须为 0
+};
+
+/// OpenVINO device_type 的稳定基础名称。
+const char* OpenVinoDeviceName(OpenVinoDevice device) noexcept;
 
 // ============================================================
 // 模型输出契约
@@ -216,7 +226,8 @@ struct DetectorConfig {
     // ── 模型与后端 ──
     std::string  model_path;           ///< ONNX 模型文件路径
     BackendType  backend = BackendType::CUDA;
-    int          device_id = 0;        ///< GPU 设备索引
+    int          device_id = 0;        ///< GPU 设备索引；OpenVINO CPU/NPU 仅允许 0
+    OpenVinoDevice openvino_device = OpenVinoDevice::GPU;
 
     // ── 输入尺寸（Detector 会根据 ONNX 输入自动读取，通常无需手动设） ──
     int          input_width  = 0;     ///< 0 = 自动从模型读取

@@ -16,6 +16,8 @@
     [string]$PoseImagePath = "",
     [string]$ObbModelPath = "",
     [string]$ObbImagePath = "",
+    [ValidateSet("", "CPU", "GPU", "NPU")]
+    [string]$OpenVinoTestDevice = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release"
 )
@@ -206,7 +208,8 @@ $configureArguments = @(
     "-DXEN_TEST_POSE_MODEL=$PoseModelPath",
     "-DXEN_TEST_POSE_IMAGE=$PoseImagePath",
     "-DXEN_TEST_OBB_MODEL=$ObbModelPath",
-    "-DXEN_TEST_OBB_IMAGE=$ObbImagePath"
+    "-DXEN_TEST_OBB_IMAGE=$ObbImagePath",
+    "-DXEN_TEST_OPENVINO_DEVICE=$OpenVinoTestDevice"
 )
 if (-not [string]::IsNullOrWhiteSpace($DirectMlRoot)) {
     $directMlDll = Join-Path $DirectMlRoot "bin\x64-win\DirectML.dll"

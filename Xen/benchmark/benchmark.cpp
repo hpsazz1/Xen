@@ -160,7 +160,17 @@ bool parse_backend(std::wstring_view input, BackendType& output) noexcept {
     if (input == L"tensorrt") output = BackendType::TENSORRT;
     else if (input == L"cuda") output = BackendType::CUDA;
     else if (input == L"directml") output = BackendType::DIRECTML;
+    else if (input == L"openvino") output = BackendType::OPENVINO;
     else if (input == L"cpu") output = BackendType::CPU;
+    else return false;
+    return true;
+}
+
+bool parse_openvino_device(
+        std::wstring_view input, OpenVinoDevice& output) noexcept {
+    if (input == L"gpu") output = OpenVinoDevice::GPU;
+    else if (input == L"cpu") output = OpenVinoDevice::CPU;
+    else if (input == L"npu") output = OpenVinoDevice::NPU;
     else return false;
     return true;
 }
@@ -524,10 +534,18 @@ BenchmarkParseStatus parse_benchmark_options(
             } else if (argument == L"--backend") {
                 if (!parse_backend(value, parsed.backend)) {
                     set_error(error,
-                              "--backend 必须是 tensorrt/cuda/directml/cpu");
+                              "--backend 必须是 tensorrt/cuda/directml/"
+                              "openvino/cpu");
                     return BenchmarkParseStatus::INVALID;
                 }
                 parsed.backend_explicit = true;
+            } else if (argument == L"--openvino-device") {
+                if (!parse_openvino_device(value, parsed.openvino_device)) {
+                    set_error(error,
+                              "--openvino-device 必须是 gpu/cpu/npu");
+                    return BenchmarkParseStatus::INVALID;
+                }
+                parsed.openvino_device_explicit = true;
             } else if (argument == L"--report-prefix") {
                 if (!wide_to_utf8(value, parsed.report_prefix)) {
                     set_error(error, "--report-prefix 不是合法 UTF-16 路径");
@@ -667,14 +685,27 @@ bool validate_benchmark_options(
             set_error(error, "必须提供 --report-prefix");
             return false;
         }
-        const bool gpu_backend = options.backend == BackendType::TENSORRT ||
-            options.backend == BackendType::CUDA;
-        if (gpu_backend && options.provider_profile_path.empty()) {
-            set_error(error,
-                      "TensorRT/CUDA 必须提供 --provider-profile");
+        if (options.backend == BackendType::OPENVINO &&
+            !options.openvino_device_explicit) {
+            set_error(error, "OpenVINO 必须提供 --openvino-device");
             return false;
         }
-        if (!gpu_backend && !options.provider_profile_path.empty()) {
+        if (options.backend != BackendType::OPENVINO &&
+            options.openvino_device_explicit) {
+            set_error(error,
+                      "只有 OpenVINO 后端接受 --openvino-device");
+            return false;
+        }
+        const bool profile_required =
+            options.backend == BackendType::TENSORRT ||
+            options.backend == BackendType::CUDA ||
+            options.backend == BackendType::OPENVINO;
+        if (profile_required && options.provider_profile_path.empty()) {
+            set_error(error,
+                      "TensorRT/CUDA/OpenVINO 必须提供 --provider-profile");
+            return false;
+        }
+        if (!profile_required && !options.provider_profile_path.empty()) {
             set_error(error,
                       "DirectML/CPU 不接受 --provider-profile");
             return false;
@@ -780,6 +811,7 @@ const char* expected_provider_name(BackendType backend) noexcept {
         case BackendType::TENSORRT: return "TensorrtExecutionProvider";
         case BackendType::CUDA: return "CUDAExecutionProvider";
         case BackendType::DIRECTML: return "DmlExecutionProvider";
+        case BackendType::OPENVINO: return "OpenVINOExecutionProvider";
         case BackendType::CPU: return "CPUExecutionProvider";
     }
     return "UnknownExecutionProvider";
@@ -793,12 +825,12 @@ std::string benchmark_usage() {
         "--report-prefix <path> [选项]\n\n"
         "必选:\n"
         "  --model PATH             ONNX 模型路径\n"
-        "  --backend NAME           tensorrt/cuda/directml/cpu\n"
+        "  --backend NAME           tensorrt/cuda/directml/openvino/cpu\n"
         "  --report-prefix PATH     成功后发布 PATH.csv 和 PATH.json\n\n"
         "进程协调:\n"
         "  --ready-file PATH        Runtime 就绪后原子发布，退出时删除\n\n"
         "Provider 证据:\n"
-        "  --provider-profile PATH  TensorRT/CUDA 必选，独立 ORT trace JSON\n\n"
+        "  --provider-profile PATH  TensorRT/CUDA/OpenVINO 必选，独立 ORT trace JSON\n\n"
         "运行门槛:\n"
         "  --config PATH            可选 AppConfig INI\n"
         "  --output-format NAME     auto/channel_first/objectness/end_to_end\n"
@@ -812,6 +844,7 @@ std::string benchmark_usage() {
         "  --expect-roi X,Y,W,H     主机 ROI，默认 1120,560,320,320\n"
         "  --expect-scale X,Y       ROI 像素到主机像素比例，默认 1,1\n\n"
         "推理开关:\n"
+        "  --openvino-device NAME   OpenVINO 必选，gpu/cpu/npu\n"
         "  --fp16 on|off            TensorRT FP16，默认 on\n"
         "  --cuda-graph on|off      TensorRT CUDA Graph，默认 on\n"
         "  --gpu-preprocess on|off  CUDA 前处理，默认 on\n"
@@ -881,6 +914,7 @@ bool run_runtime_benchmark(
         }
         config.detector.model_path = options.model_path;
         config.detector.backend = options.backend;
+        config.detector.openvino_device = options.openvino_device;
         config.detector.output_format = options.output_format;
         config.detector.enable_fp16 = options.enable_fp16;
         config.detector.enable_trt_cuda_graph = options.enable_cuda_graph;

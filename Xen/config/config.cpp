@@ -63,6 +63,7 @@ BackendType parse_backend(const char* value, BackendType fallback) {
     if (normalized == "cuda") return BackendType::CUDA;
     if (normalized == "tensorrt") return BackendType::TENSORRT;
     if (normalized == "directml") return BackendType::DIRECTML;
+    if (normalized == "openvino") return BackendType::OPENVINO;
     if (normalized == "cpu") return BackendType::CPU;
     return fallback;
 }
@@ -72,9 +73,29 @@ const char* backend_name(BackendType backend) noexcept {
         case BackendType::CUDA: return "cuda";
         case BackendType::TENSORRT: return "tensorrt";
         case BackendType::DIRECTML: return "directml";
+        case BackendType::OPENVINO: return "openvino";
         case BackendType::CPU: return "cpu";
     }
     return "cpu";
+}
+
+OpenVinoDevice parse_openvino_device(
+        const char* value, OpenVinoDevice fallback) {
+    if (!value) return fallback;
+    const std::string normalized = lowercase_ascii(value);
+    if (normalized == "gpu") return OpenVinoDevice::GPU;
+    if (normalized == "cpu") return OpenVinoDevice::CPU;
+    if (normalized == "npu") return OpenVinoDevice::NPU;
+    return fallback;
+}
+
+const char* openvino_device_name(OpenVinoDevice device) noexcept {
+    switch (device) {
+        case OpenVinoDevice::GPU: return "gpu";
+        case OpenVinoDevice::CPU: return "cpu";
+        case OpenVinoDevice::NPU: return "npu";
+    }
+    return "unknown";
 }
 
 CaptureBackend parse_capture_backend(
@@ -319,7 +340,22 @@ bool validate_app_config(const AppConfig& config,
                 return false;
             }
         }
-        if (config.detector.device_id < 0 ||
+        const bool detector_backend_invalid =
+            config.detector.backend != BackendType::CUDA &&
+            config.detector.backend != BackendType::TENSORRT &&
+            config.detector.backend != BackendType::DIRECTML &&
+            config.detector.backend != BackendType::OPENVINO &&
+            config.detector.backend != BackendType::CPU;
+        const bool openvino_device_invalid =
+            config.detector.openvino_device != OpenVinoDevice::GPU &&
+            config.detector.openvino_device != OpenVinoDevice::CPU &&
+            config.detector.openvino_device != OpenVinoDevice::NPU;
+        const bool openvino_device_id_invalid =
+            config.detector.backend == BackendType::OPENVINO &&
+            config.detector.openvino_device != OpenVinoDevice::GPU &&
+            config.detector.device_id != 0;
+        if (detector_backend_invalid || openvino_device_invalid ||
+            openvino_device_id_invalid || config.detector.device_id < 0 ||
             config.detector.input_width < 0 ||
             config.detector.input_height < 0 ||
             ((config.detector.input_width == 0) !=
@@ -523,6 +559,9 @@ bool load_app_config(const std::string& path,
             candidate.detector.backend);
         candidate.detector.device_id = static_cast<int>(ini.GetLongValue(
             "detector", "device_id", candidate.detector.device_id));
+        candidate.detector.openvino_device = parse_openvino_device(
+            ini.GetValue("detector", "openvino_device"),
+            candidate.detector.openvino_device);
         candidate.detector.input_width = static_cast<int>(ini.GetLongValue(
             "detector", "input_width", candidate.detector.input_width));
         candidate.detector.input_height = static_cast<int>(ini.GetLongValue(
@@ -703,6 +742,9 @@ bool save_app_config(const std::string& path,
         ini.SetValue("detector", "model_path", config.detector.model_path.c_str());
         ini.SetValue("detector", "backend", backend_name(config.detector.backend));
         ini.SetLongValue("detector", "device_id", config.detector.device_id);
+        ini.SetValue(
+            "detector", "openvino_device",
+            openvino_device_name(config.detector.openvino_device));
         ini.SetLongValue("detector", "input_width", config.detector.input_width);
         ini.SetLongValue("detector", "input_height", config.detector.input_height);
         ini.SetDoubleValue("detector", "conf_threshold", config.detector.conf_threshold);

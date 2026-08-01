@@ -12,12 +12,16 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 #ifndef XEN_HAS_CUDA_RUNTIME
 #define XEN_HAS_CUDA_RUNTIME 0
 #endif
 #ifndef XEN_HAS_DIRECTML_INTEROP
 #define XEN_HAS_DIRECTML_INTEROP 0
+#endif
+#ifndef XEN_HAS_OPENVINO_PROVIDER
+#define XEN_HAS_OPENVINO_PROVIDER 0
 #endif
 #if XEN_HAS_CUDA_RUNTIME
 #include "detector/cuda_preprocess.h"
@@ -217,6 +221,8 @@ bool Session::setup_options(const DetectorConfig& cfg) {
             providers, "TensorrtExecutionProvider");
         const bool has_directml = provider_available(
             providers, "DmlExecutionProvider");
+        const bool has_openvino = provider_available(
+            providers, "OpenVINOExecutionProvider");
         impl_->gpu_preprocess_requested = cfg.enable_gpu_preprocess;
 
         if (cfg.backend == BackendType::TENSORRT && has_tensorrt &&
@@ -425,6 +431,64 @@ bool Session::setup_options(const DetectorConfig& cfg) {
 #else
             (void)has_directml;
             LOG_ERROR("detector", "当前 ORT SDK 不含 DirectML 工厂，无法执行 DML 推理");
+            return false;
+#endif
+            return true;
+        }
+
+        if (cfg.backend == BackendType::OPENVINO) {
+            // OpenVINO 自身会针对目标硬件完成图优化；官方建议禁用 ORT 高层
+            // 图优化，避免先改写图后限制 OpenVINO 的融合空间。
+            options.SetGraphOptimizationLevel(ORT_DISABLE_ALL);
+            // OpenVINO 的 subgraph partition 不等于全图执行。严格关闭 ORT CPU
+            // EP 后备，任何未被 OpenVINO 接管的节点都让 Session 创建失败。
+            options.AddConfigEntry(
+                kOrtSessionOptionsDisableCPUEPFallback, "1");
+#if XEN_HAS_OPENVINO_PROVIDER
+            if (!has_openvino) {
+                LOG_ERROR(
+                    "detector",
+                    "OpenVINO EP 不可用，拒绝静默降级到 ORT CPU EP");
+                return false;
+            }
+
+            const std::string base_device =
+                OpenVinoDeviceName(cfg.openvino_device);
+            if (base_device == "UNKNOWN") {
+                LOG_ERROR("detector", "OpenVINO 设备类型非法");
+                return false;
+            }
+            std::string device_type = base_device;
+            if (cfg.openvino_device == OpenVinoDevice::GPU &&
+                cfg.device_id > 0) {
+                device_type += "." + std::to_string(cfg.device_id);
+            }
+
+            // 项目是单 Session、单推理消费者的低延迟链路。通过当前 V2
+            // load_config 接口固定 LATENCY，CPU/GPU 再限制为单 stream，避免
+            // 使用已弃用的 precision/num_streams 顶层选项。NPU 插件没有
+            // 稳定的 NUM_STREAMS 契约，因此不向它注入未经验证的设备属性。
+            const std::string load_config =
+                std::string("{\"") + base_device +
+                (cfg.openvino_device == OpenVinoDevice::NPU
+                    ? "\":{\"PERFORMANCE_HINT\":\"LATENCY\"}}"
+                    : "\":{\"PERFORMANCE_HINT\":\"LATENCY\","
+                      "\"NUM_STREAMS\":\"1\"}}");
+            const std::unordered_map<std::string, std::string>
+                openvino_options{
+                    {"device_type", device_type},
+                    {"load_config", load_config},
+                };
+            options.AppendExecutionProvider_OpenVINO_V2(
+                openvino_options);
+            impl_->active_provider = "OpenVINOExecutionProvider";
+            impl_->device_id = cfg.device_id;
+            LOG_INFO("detector", "OpenVINO 目标设备: {}", device_type);
+#else
+            (void)has_openvino;
+            LOG_ERROR(
+                "detector",
+                "当前 ORT SDK 不含 OpenVINO Provider，无法执行 OpenVINO 推理");
             return false;
 #endif
             return true;

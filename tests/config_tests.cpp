@@ -20,6 +20,7 @@ void test_round_trip() {
     AppConfig source;
     source.detector.model_path = "models/test.onnx";
     source.detector.backend = BackendType::TENSORRT;
+    source.detector.openvino_device = OpenVinoDevice::NPU;
     source.detector.enable_gpu_preprocess = false;
     source.capture.roi_width = 416;
     source.capture.roi_height = 416;
@@ -74,6 +75,7 @@ void test_round_trip() {
     expect(load_app_config(path.string(), loaded, error),
            "写入后的配置应成功读取: " + error);
     expect(loaded.detector.backend == BackendType::TENSORRT &&
+           loaded.detector.openvino_device == OpenVinoDevice::NPU &&
            !loaded.detector.enable_gpu_preprocess &&
            loaded.capture.roi_width == 416 &&
            loaded.capture.backend == CaptureBackend::UDP_MJPEG &&
@@ -114,6 +116,27 @@ void test_round_trip() {
            "配置往返后关键字段必须保持一致");
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
+}
+
+void test_openvino_config_validation() {
+    AppConfig config;
+    config.detector.model_path = "models/test.onnx";
+    config.detector.backend = BackendType::OPENVINO;
+    config.detector.openvino_device = OpenVinoDevice::CPU;
+    config.detector.device_id = 0;
+    std::string error;
+    expect(validate_app_config(config, error),
+           "OpenVINO CPU 的设备索引 0 应通过配置校验: " + error);
+
+    config.detector.device_id = 1;
+    expect(!validate_app_config(config, error),
+           "OpenVINO CPU 不得接受非零设备索引");
+    config.detector.openvino_device = OpenVinoDevice::NPU;
+    expect(!validate_app_config(config, error),
+           "OpenVINO NPU 不得接受非零设备索引");
+    config.detector.openvino_device = OpenVinoDevice::GPU;
+    expect(validate_app_config(config, error),
+           "OpenVINO GPU 应接受显式设备索引: " + error);
 }
 
 void test_log_defaults_and_invalid_level() {
@@ -450,6 +473,7 @@ int main() {
     test_xudp_backend_round_trip();
     test_d3d11_cuda_interop_config();
     test_d3d11_directml_interop_config();
+    test_openvino_config_validation();
     if (failures != 0) {
         std::cerr << "Config 测试失败数: " << failures << '\n';
         return 1;

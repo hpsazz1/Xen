@@ -4,8 +4,10 @@
     [Parameter(Mandatory = $true)]
     [string]$ReportPrefix,
     [string]$ConfigPath = "",
-    [ValidateSet("tensorrt", "cuda", "directml", "cpu")]
+    [ValidateSet("tensorrt", "cuda", "directml", "openvino", "cpu")]
     [string]$Backend = "tensorrt",
+    [ValidateSet("gpu", "cpu", "npu")]
+    [string]$OpenVinoDevice = "gpu",
     [ValidateSet("auto", "channel_first", "objectness", "end_to_end")]
     [string]$OutputFormat = "auto",
     [ValidateSet("auto", "desktop_duplication", "udp_mjpeg", "xudp_jpeg", "ndi")]
@@ -213,6 +215,25 @@ function Assert-RuntimeDllOrigins {
             throw "DirectML 输出目录混入 NVIDIA 运行库：$($forbidden -join ', ')"
         }
     }
+    if ($RequestedBackend -eq "openvino") {
+        $forbidden = @($RuntimeFiles.Keys | Where-Object {
+            $_ -match '^(DirectML|cudart|cublas|cudnn|nvinfer|nvonnxparser|onnxruntime_providers_(cuda|tensorrt))'
+        })
+        if ($forbidden.Count -ne 0) {
+            throw "OpenVINO 输出目录混入其他 GPU 后端运行库：$($forbidden -join ', ')"
+        }
+        $required = @(
+            "onnxruntime_providers_openvino.dll", "openvino.dll",
+            "openvino_onnx_frontend.dll",
+            "openvino_intel_cpu_plugin.dll", "openvino_intel_gpu_plugin.dll",
+            "openvino_intel_npu_plugin.dll", "tbb12.dll")
+        $missing = @($required | Where-Object {
+            -not $RuntimeFiles.Contains($_)
+        })
+        if ($missing.Count -ne 0) {
+            throw "OpenVINO 输出目录缺少运行库：$($missing -join ', ')"
+        }
+    }
     return $resolvedRoots
 }
 
@@ -306,16 +327,19 @@ function Get-OrtProviderProfileSummary {
         throw "ORT profile 缺少可归属 Provider 的 Node 事件。"
     }
 
-    $expectedProvider = if ($RequestedBackend -eq "tensorrt") {
-        "TensorrtExecutionProvider"
-    } else {
-        "CUDAExecutionProvider"
+    $expectedProvider = switch ($RequestedBackend) {
+        "tensorrt" { "TensorrtExecutionProvider" }
+        "cuda" { "CUDAExecutionProvider" }
+        "openvino" { "OpenVINOExecutionProvider" }
+        default { throw "不支持 Provider profile 的后端：$RequestedBackend" }
     }
-    $allowedProviders = if ($RequestedBackend -eq "tensorrt") {
-        @("TensorrtExecutionProvider", "CUDAExecutionProvider",
-          "CPUExecutionProvider")
-    } else {
-        @("CUDAExecutionProvider", "CPUExecutionProvider")
+    $allowedProviders = switch ($RequestedBackend) {
+        "tensorrt" {
+            @("TensorrtExecutionProvider", "CUDAExecutionProvider",
+              "CPUExecutionProvider")
+        }
+        "cuda" { @("CUDAExecutionProvider", "CPUExecutionProvider") }
+        "openvino" { @("OpenVINOExecutionProvider") }
     }
     if (-not $providerCounts.Contains($expectedProvider) -or
         [long]$providerCounts[$expectedProvider] -le 0) {
@@ -354,6 +378,10 @@ if ($EnableD3D11CudaInterop -eq "on" -and
     ($Backend -ne "tensorrt" -or $EnableCudaGraph -ne "on" -or
      $EnableGpuPreprocess -ne "on")) {
     throw "D3D11/CUDA 互操作要求 TensorRT、CUDA Graph 和 GPU 前处理全部启用。"
+}
+if ($Backend -ne "openvino" -and $PSBoundParameters.ContainsKey(
+        "OpenVinoDevice")) {
+    throw "只有 OpenVINO 后端接受 OpenVinoDevice。"
 }
 if ($EnableD3D11DirectMlInterop -eq "on" -and
     $Backend -ne "directml") {
@@ -398,7 +426,9 @@ if (-not [string]::IsNullOrWhiteSpace($ReadyFilePath)) {
 $finalCsv = "$ReportPrefix.csv"
 $finalJson = "$ReportPrefix.json"
 $finalEnvironment = "$ReportPrefix.environment.json"
-$requiresProviderProfile = $Backend -eq "tensorrt" -or $Backend -eq "cuda"
+$requiresProviderProfile =
+    $Backend -eq "tensorrt" -or $Backend -eq "cuda" -or
+    $Backend -eq "openvino"
 $finalProviderProfile = if ($requiresProviderProfile) {
     "$ReportPrefix.provider-profile.json"
 } else {
@@ -473,6 +503,9 @@ $arguments = @(
 if ($requiresProviderProfile) {
     $arguments += @("--provider-profile", $pendingProviderProfile)
 }
+if ($Backend -eq "openvino") {
+    $arguments += @("--openvino-device", $OpenVinoDevice)
+}
 if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
     $arguments += @("--config", $ConfigPath)
 }
@@ -514,7 +547,7 @@ if (-not (Test-Path -LiteralPath $pendingCsv -PathType Leaf) -or
 }
 $providerProfileSummary = if ($requiresProviderProfile) {
     if (-not (Test-Path -LiteralPath $pendingProviderProfile -PathType Leaf)) {
-        throw "GPU 基准成功退出但没有生成 Provider profile。"
+        throw "需要节点级验证的基准没有生成 Provider profile。"
     }
     Get-OrtProviderProfileSummary `
         $pendingProviderProfile $Backend $finalProviderProfile
@@ -557,6 +590,7 @@ $expectedProviders = @{
     tensorrt = "TensorrtExecutionProvider"
     cuda = "CUDAExecutionProvider"
     directml = "DmlExecutionProvider"
+    openvino = "OpenVINOExecutionProvider"
     cpu = "CPUExecutionProvider"
 }
 $expectedProvider = $expectedProviders[$Backend]
@@ -724,6 +758,11 @@ $environment = [ordered]@{
     }
     benchmark = [ordered]@{
         backend = $Backend
+        openvino_device = if ($Backend -eq "openvino") {
+            $OpenVinoDevice
+        } else {
+            $null
+        }
         provider = $expectedProvider
         coordination = [ordered]@{
             ready_file_enabled = -not [string]::IsNullOrWhiteSpace(
@@ -746,17 +785,22 @@ $environment = [ordered]@{
         }
         provider_execution = [ordered]@{
             node_assignment_verified = [bool]$providerProfileSummary.verified
-            cpu_fallback_disabled = $Backend -eq "directml"
+            cpu_fallback_disabled =
+                $Backend -eq "directml" -or $Backend -eq "openvino"
             node_fallback_policy = switch ($Backend) {
                 "tensorrt" { "TensorRT -> CUDA -> CPU" }
                 "cuda" { "CUDA -> CPU" }
                 "directml" { "DirectML only" }
+                "openvino" { "OpenVINO only" }
                 "cpu" { "CPU only" }
             }
             verification = switch ($Backend) {
                 "tensorrt" { "independent ORT profiling session" }
                 "cuda" { "independent ORT profiling session" }
                 "directml" { "session.disable_cpu_ep_fallback=1" }
+                "openvino" {
+                    "independent ORT profiling session + session.disable_cpu_ep_fallback=1"
+                }
                 "cpu" { "CPUExecutionProvider" }
             }
             profile = $providerProfileSummary

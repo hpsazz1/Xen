@@ -43,9 +43,18 @@ bool valid_config(const DetectorConfig& config) noexcept {
         !config.trt_cache_path.empty();
     const bool profiling_path_valid =
         !config.enable_ort_profiling || !config.ort_profile_prefix.empty();
+    const bool openvino_device_valid =
+        config.openvino_device == OpenVinoDevice::GPU ||
+        config.openvino_device == OpenVinoDevice::CPU ||
+        config.openvino_device == OpenVinoDevice::NPU;
+    const bool openvino_device_id_valid =
+        config.backend != BackendType::OPENVINO ||
+        config.openvino_device == OpenVinoDevice::GPU ||
+        config.device_id == 0;
     return !config.model_path.empty() && config.device_id >= 0 &&
            dimensions_are_pair && trt_cache_path_valid &&
-           profiling_path_valid &&
+           profiling_path_valid && openvino_device_valid &&
+           openvino_device_id_valid &&
            config.input_width >= 0 &&
            config.input_height >= 0 && config.intra_threads >= 0 &&
            config.inter_threads >= 0 &&
@@ -917,9 +926,19 @@ const char* BackendName(BackendType backend) noexcept {
         case BackendType::CUDA: return "CUDAExecutionProvider";
         case BackendType::TENSORRT: return "TensorrtExecutionProvider";
         case BackendType::DIRECTML: return "DmlExecutionProvider";
+        case BackendType::OPENVINO: return "OpenVINOExecutionProvider";
         case BackendType::CPU: return "CPUExecutionProvider";
     }
     return "CPUExecutionProvider";
+}
+
+const char* OpenVinoDeviceName(OpenVinoDevice device) noexcept {
+    switch (device) {
+        case OpenVinoDevice::GPU: return "GPU";
+        case OpenVinoDevice::CPU: return "CPU";
+        case OpenVinoDevice::NPU: return "NPU";
+    }
+    return "UNKNOWN";
 }
 
 Detector::Detector(const DetectorConfig& config)

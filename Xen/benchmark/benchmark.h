@@ -29,10 +29,11 @@ struct BenchmarkOptions {
     // 可选的一次性进程就绪标记。仅在 Capture 打开、Runtime 进入 RUNNING
     // 且实际 Provider 校验通过后发布，退出时必须删除。
     std::string ready_file_path;
-    // TensorRT/CUDA 正式基准必须先由独立诊断 Session 生成该 ORT profile。
-    // DirectML 已禁用 CPU 回退，CPU 后端不需要该证据文件。
+    // TensorRT/CUDA/OpenVINO 正式基准必须先由独立诊断 Session 生成该 ORT
+    // profile。DirectML 已禁用 CPU 回退，CPU 后端不需要该证据文件。
     std::string provider_profile_path;
     BackendType backend = BackendType::TENSORRT;
+    OpenVinoDevice openvino_device = OpenVinoDevice::GPU;
     OutputFormat output_format = OutputFormat::AUTO;
     std::uint64_t warmup_samples = 100;
     std::uint64_t minimum_samples = 10000;
@@ -44,6 +45,7 @@ struct BenchmarkOptions {
     bool enable_d3d11_cuda_interop = false;
     bool enable_d3d11_directml_interop = false;
     bool backend_explicit = false;
+    bool openvino_device_explicit = false;
     BenchmarkExpectedGeometry expected_geometry;
 };
 
