@@ -242,7 +242,11 @@ Desktop Duplication 和 DirectML，逐样本核对 `d3d11_directml_interop=true`
 `input_upload_bytes=0`、`input_device_copy_bytes=0`。D3D11 copy 后的共享 fence 值是
 D3D12 队列读取纹理的显式边界；DML 输出回传仍由 ORT 处理并归入
 `execution_ms`。短冒烟已验证严格 DML Provider、零失败和零显式输入复制；
-正式五分钟 A/B 结论在干净提交上另行记录。
+干净提交 `d3e055c` 的同机各 5 分钟 A/B 两侧均为 78,002/78,002 成功，零失败、
+丢弃、覆盖、Mouse 命令和 duplication 恢复。逐帧 `capture + total` P50/P95/P99
+从 5.133/5.458/5.582 ms 降至 5.012/5.346/5.474 ms，P95 改善 0.112 ms（约 2.04%）；
+但互操作 max 由 6.898 ms 增至 8.511 ms，且当前只覆盖单机、单模型、固定 shape。
+因此已验证的固定 shape DirectML 环境可显式启用，兼容默认值仍保持关闭。
 
 UDP、XUDP 和 NDI 接收正式验收使用统一包装脚本。以下命令在辅机启动 XUDP 接收端；显式
 `ReadyFilePath` 便于外部编排在 Capture 已绑定、Runtime 为 `RUNNING` 且实际 Provider 校验
