@@ -34,6 +34,15 @@ struct PoseCandidate {
     int64_t anchor_index = -1; ///< NMS 后读取同一 anchor 的关键点
 };
 
+struct ObbContract {
+    int64_t class_count = 0;
+    int64_t anchors = 0;
+};
+
+struct ObbCandidate {
+    OrientedDetection detection; ///< NMS 前保持模型输入坐标
+};
+
 /// 根据运行时输出形状解析检测输出契约。
 /// AUTO 只接受可明确区分的三维单 batch 张量；无法确定时返回 false。
 bool resolve_output_format(const std::vector<int64_t>& shape,
@@ -82,6 +91,25 @@ bool decode_pose_output(
     const PoseContract& contract,
     float conf_threshold,
     std::vector<PoseCandidate>& candidates) noexcept;
+
+/// 验证 YOLOv8 兼容 OBB raw head：[1,4+C+1,A]，最后一个 feature
+/// 是已解码弧度角。仅接受 channel-first、非 end-to-end 布局。
+bool resolve_obb_contract(
+    const std::vector<int64_t>& prediction_shape,
+    OutputFormat requested,
+    ObbContract& contract) noexcept;
+
+/// 解码 OBB 中心、宽高、类别置信度与角度。
+bool decode_obb_output(
+    const float* prediction_data,
+    const std::vector<int64_t>& prediction_shape,
+    const ObbContract& contract,
+    float conf_threshold,
+    std::vector<ObbCandidate>& candidates) noexcept;
+
+/// 与 Ultralytics rotated NMS 一致的 ProbIoU 相似度。
+float probabilistic_iou(const OrientedDetection& left,
+                        const OrientedDetection& right) noexcept;
 
 /// 同类别 NMS。top_k 表示最终最多保留的检测数量。
 void nms(std::vector<Detection>& dets,
@@ -132,6 +160,18 @@ bool finalize_poses(
     bool generate_keypoints,
     PoseResult& output,
     std::vector<PoseCandidate>& selected,
+    std::vector<unsigned char>& suppressed) noexcept;
+
+/// 执行按类别 Fast-NMS/ProbIoU、LetterBox 坐标还原并生成四角轴对齐
+/// 包围盒。generate_oriented=false 时不构造公有旋转框 vector。
+bool finalize_obbs(
+    std::vector<ObbCandidate>& candidates,
+    float nms_threshold,
+    int top_k,
+    const LetterBoxInfo& info,
+    bool generate_oriented,
+    ObbResult& output,
+    std::vector<ObbCandidate>& selected,
     std::vector<unsigned char>& suppressed) noexcept;
 
 /// 将模型输入像素坐标还原到原始图像，裁剪越界坐标并删除退化框。

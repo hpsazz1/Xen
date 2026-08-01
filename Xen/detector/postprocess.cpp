@@ -1,8 +1,10 @@
 #include "detector/postprocess.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -265,6 +267,42 @@ void nms_poses_into(
     }
 }
 
+void nms_obbs_into(
+        std::vector<ObbCandidate>& candidates,
+        float nms_threshold,
+        int top_k,
+        std::vector<ObbCandidate>& output,
+        std::vector<unsigned char>& suppressed) {
+    output.clear();
+    std::sort(candidates.begin(), candidates.end(),
+        [](const ObbCandidate& a, const ObbCandidate& b) {
+            return a.detection.confidence > b.detection.confidence;
+        });
+
+    // Ultralytics OBB 使用 Fast-NMS：只要任一更高分同类框达到阈值即
+    // 抑制当前框，即使那个更高分框自身随后也被抑制。不能改成贪心 NMS。
+    suppressed.resize(candidates.size());
+    std::fill(suppressed.begin(), suppressed.end(), 0U);
+    output.reserve(std::min(
+        candidates.size(), static_cast<size_t>(top_k)));
+    for (size_t current = 0; current < candidates.size(); ++current) {
+        for (size_t higher = 0; higher < current; ++higher) {
+            if (candidates[higher].detection.class_id ==
+                    candidates[current].detection.class_id &&
+                probabilistic_iou(
+                    candidates[higher].detection,
+                    candidates[current].detection) >= nms_threshold) {
+                suppressed[current] = 1U;
+                break;
+            }
+        }
+        if (suppressed[current] == 0U) {
+            output.push_back(candidates[current]);
+            if (static_cast<int>(output.size()) >= top_k) break;
+        }
+    }
+}
+
 bool valid_letterbox(const LetterBoxInfo& info) noexcept {
     return info.scale > 0.0f && std::isfinite(info.scale) &&
            info.orig_w > 0 && info.orig_h > 0;
@@ -289,6 +327,83 @@ bool scale_detection(const Detection& input,
         (input.y2 - info.pad_y) * inverse_scale, 0.0f, max_y);
     return finite_box(output.x1, output.y1, output.x2, output.y2) &&
            output.x2 > output.x1 && output.y2 > output.y1;
+}
+
+bool scale_oriented_detection(
+        const OrientedDetection& input,
+        const LetterBoxInfo& info,
+        OrientedDetection& scaled,
+        Detection& envelope) noexcept {
+    if (!valid_letterbox(info) ||
+        !std::isfinite(input.center_x) ||
+        !std::isfinite(input.center_y) ||
+        !std::isfinite(input.width) ||
+        !std::isfinite(input.height) ||
+        !std::isfinite(input.angle_radians) ||
+        input.width <= 0.0f || input.height <= 0.0f) {
+        return false;
+    }
+
+    scaled = input;
+    scaled.center_x = (input.center_x - info.pad_x) / info.scale;
+    scaled.center_y = (input.center_y - info.pad_y) / info.scale;
+    scaled.width = input.width / info.scale;
+    scaled.height = input.height / info.scale;
+    if (!std::isfinite(scaled.center_x) ||
+        !std::isfinite(scaled.center_y) ||
+        !std::isfinite(scaled.width) ||
+        !std::isfinite(scaled.height) ||
+        scaled.width <= 0.0f || scaled.height <= 0.0f) {
+        return false;
+    }
+
+    const double cosine = std::cos(
+        static_cast<double>(scaled.angle_radians));
+    const double sine = std::sin(
+        static_cast<double>(scaled.angle_radians));
+    const double half_width =
+        static_cast<double>(scaled.width) * 0.5;
+    const double half_height =
+        static_cast<double>(scaled.height) * 0.5;
+    const double vector1_x = half_width * cosine;
+    const double vector1_y = half_width * sine;
+    const double vector2_x = -half_height * sine;
+    const double vector2_y = half_height * cosine;
+    const double center_x = scaled.center_x;
+    const double center_y = scaled.center_y;
+    const double x_values[4] = {
+        center_x + vector1_x + vector2_x,
+        center_x + vector1_x - vector2_x,
+        center_x - vector1_x - vector2_x,
+        center_x - vector1_x + vector2_x,
+    };
+    const double y_values[4] = {
+        center_y + vector1_y + vector2_y,
+        center_y + vector1_y - vector2_y,
+        center_y - vector1_y - vector2_y,
+        center_y - vector1_y + vector2_y,
+    };
+    const auto [min_x, max_x] = std::minmax_element(
+        std::begin(x_values), std::end(x_values));
+    const auto [min_y, max_y] = std::minmax_element(
+        std::begin(y_values), std::end(y_values));
+    envelope.x1 = std::clamp(
+        static_cast<float>(*min_x), 0.0f,
+        static_cast<float>(info.orig_w));
+    envelope.y1 = std::clamp(
+        static_cast<float>(*min_y), 0.0f,
+        static_cast<float>(info.orig_h));
+    envelope.x2 = std::clamp(
+        static_cast<float>(*max_x), 0.0f,
+        static_cast<float>(info.orig_w));
+    envelope.y2 = std::clamp(
+        static_cast<float>(*max_y), 0.0f,
+        static_cast<float>(info.orig_h));
+    envelope.confidence = scaled.confidence;
+    envelope.class_id = scaled.class_id;
+    return finite_box(
+               envelope.x1, envelope.y1, envelope.x2, envelope.y2) &&
+           envelope.x2 > envelope.x1 && envelope.y2 > envelope.y1;
 }
 
 float bilinear_sample(const std::vector<float>& values,
@@ -599,6 +714,163 @@ bool decode_pose_output(
         candidates.clear();
         return false;
     }
+}
+
+bool resolve_obb_contract(
+        const std::vector<int64_t>& prediction_shape,
+        OutputFormat requested,
+        ObbContract& contract) noexcept {
+    contract = {};
+    if ((requested != OutputFormat::AUTO &&
+         requested != OutputFormat::CHANNEL_FIRST) ||
+        prediction_shape.size() != 3 || prediction_shape[0] != 1 ||
+        prediction_shape[1] <= 5 || prediction_shape[2] <= 0) {
+        return false;
+    }
+    contract.class_count = prediction_shape[1] - 5;
+    contract.anchors = prediction_shape[2];
+    return contract.class_count > 0;
+}
+
+bool decode_obb_output(
+        const float* prediction_data,
+        const std::vector<int64_t>& prediction_shape,
+        const ObbContract& contract,
+        float conf_threshold,
+        std::vector<ObbCandidate>& candidates) noexcept {
+    if (!prediction_data || prediction_shape.size() != 3 ||
+        prediction_shape[0] != 1 ||
+        prediction_shape[1] != 5 + contract.class_count ||
+        prediction_shape[2] != contract.anchors ||
+        contract.class_count <= 0 || contract.anchors <= 0 ||
+        !std::isfinite(conf_threshold) || conf_threshold < 0.0f ||
+        conf_threshold > 1.0f) {
+        return false;
+    }
+
+    try {
+        candidates.reserve(
+            candidates.size() + static_cast<size_t>(contract.anchors));
+        const int64_t angle_feature = 4 + contract.class_count;
+        for (int64_t anchor = 0; anchor < contract.anchors; ++anchor) {
+            float best_confidence =
+                -std::numeric_limits<float>::infinity();
+            int best_class = -1;
+            for (int64_t class_index = 0;
+                 class_index < contract.class_count; ++class_index) {
+                const float confidence = prediction_data[
+                    (4 + class_index) * contract.anchors + anchor];
+                if (std::isfinite(confidence) &&
+                    confidence > best_confidence) {
+                    best_confidence = confidence;
+                    best_class = static_cast<int>(class_index);
+                }
+            }
+            if (best_class < 0 || best_confidence < conf_threshold) continue;
+
+            const float center_x = prediction_data[anchor];
+            const float center_y =
+                prediction_data[contract.anchors + anchor];
+            const float width =
+                prediction_data[2 * contract.anchors + anchor];
+            const float height =
+                prediction_data[3 * contract.anchors + anchor];
+            const float angle = prediction_data[
+                angle_feature * contract.anchors + anchor];
+            if (!std::isfinite(center_x) || !std::isfinite(center_y) ||
+                !std::isfinite(width) || !std::isfinite(height) ||
+                !std::isfinite(angle) || width <= 0.0f ||
+                height <= 0.0f) {
+                continue;
+            }
+
+            ObbCandidate candidate;
+            candidate.detection.center_x = center_x;
+            candidate.detection.center_y = center_y;
+            candidate.detection.width = width;
+            candidate.detection.height = height;
+            candidate.detection.angle_radians = angle;
+            candidate.detection.confidence = best_confidence;
+            candidate.detection.class_id = best_class;
+            candidates.push_back(candidate);
+        }
+        return true;
+    } catch (...) {
+        candidates.clear();
+        return false;
+    }
+}
+
+float probabilistic_iou(const OrientedDetection& left,
+                        const OrientedDetection& right) noexcept {
+    constexpr double kEpsilon = 1e-7;
+    const auto valid = [](const OrientedDetection& box) {
+        return std::isfinite(box.center_x) &&
+               std::isfinite(box.center_y) &&
+               std::isfinite(box.width) &&
+               std::isfinite(box.height) &&
+               std::isfinite(box.angle_radians) &&
+               box.width > 0.0f && box.height > 0.0f;
+    };
+    if (!valid(left) || !valid(right)) return 0.0f;
+
+    const auto covariance = [](const OrientedDetection& box) {
+        const double width_variance =
+            static_cast<double>(box.width) * box.width / 12.0;
+        const double height_variance =
+            static_cast<double>(box.height) * box.height / 12.0;
+        const double cosine = std::cos(box.angle_radians);
+        const double sine = std::sin(box.angle_radians);
+        const double cosine_squared = cosine * cosine;
+        const double sine_squared = sine * sine;
+        return std::array<double, 3>{
+            width_variance * cosine_squared +
+                height_variance * sine_squared,
+            width_variance * sine_squared +
+                height_variance * cosine_squared,
+            (width_variance - height_variance) * cosine * sine,
+        };
+    };
+    const auto left_covariance = covariance(left);
+    const auto right_covariance = covariance(right);
+    const double a1 = left_covariance[0];
+    const double b1 = left_covariance[1];
+    const double c1 = left_covariance[2];
+    const double a2 = right_covariance[0];
+    const double b2 = right_covariance[1];
+    const double c2 = right_covariance[2];
+    const double delta_x =
+        static_cast<double>(left.center_x) - right.center_x;
+    const double delta_y =
+        static_cast<double>(left.center_y) - right.center_y;
+    const double covariance_determinant =
+        (a1 + a2) * (b1 + b2) - (c1 + c2) * (c1 + c2);
+    const double denominator = covariance_determinant + kEpsilon;
+    if (!std::isfinite(denominator) || denominator <= 0.0) return 0.0f;
+
+    const double t1 = 0.25 *
+        ((a1 + a2) * delta_y * delta_y +
+         (b1 + b2) * delta_x * delta_x) /
+        denominator;
+    const double t2 = 0.5 *
+        ((c1 + c2) * (-delta_x) * delta_y) / denominator;
+    const double determinant1 = std::max(0.0, a1 * b1 - c1 * c1);
+    const double determinant2 = std::max(0.0, a2 * b2 - c2 * c2);
+    const double logarithm_argument = covariance_determinant /
+            (4.0 * std::sqrt(determinant1 * determinant2) + kEpsilon) +
+        kEpsilon;
+    if (!std::isfinite(logarithm_argument) ||
+        logarithm_argument <= 0.0) {
+        return 0.0f;
+    }
+    const double t3 = 0.5 * std::log(logarithm_argument);
+    const double bhattacharyya_distance = std::clamp(
+        t1 + t2 + t3, kEpsilon, 100.0);
+    const double hellinger_distance = std::sqrt(std::max(
+        0.0, 1.0 - std::exp(-bhattacharyya_distance) + kEpsilon));
+    const double similarity = 1.0 - hellinger_distance;
+    return std::isfinite(similarity)
+        ? static_cast<float>(similarity) : 0.0f;
 }
 
 void nms(std::vector<Detection>& dets,
@@ -1018,6 +1290,50 @@ bool finalize_poses(
             }
         }
         return true;
+    } catch (...) {
+        output = {};
+        return false;
+    }
+}
+
+bool finalize_obbs(
+        std::vector<ObbCandidate>& candidates,
+        float nms_threshold,
+        int top_k,
+        const LetterBoxInfo& info,
+        bool generate_oriented,
+        ObbResult& output,
+        std::vector<ObbCandidate>& selected,
+        std::vector<unsigned char>& suppressed) noexcept {
+    output = {};
+    if (top_k <= 0 || !std::isfinite(nms_threshold) ||
+        nms_threshold < 0.0f || nms_threshold > 1.0f ||
+        !valid_letterbox(info)) {
+        return false;
+    }
+
+    try {
+        nms_obbs_into(
+            candidates, nms_threshold, top_k, selected, suppressed);
+        output.detections.reserve(selected.size());
+        if (generate_oriented) {
+            output.oriented_detections.reserve(selected.size());
+        }
+        for (const ObbCandidate& candidate : selected) {
+            OrientedDetection scaled;
+            Detection envelope;
+            if (!scale_oriented_detection(
+                    candidate.detection, info, scaled, envelope)) {
+                continue;
+            }
+            output.detections.push_back(envelope);
+            if (generate_oriented) {
+                output.oriented_detections.push_back(scaled);
+            }
+        }
+        return !generate_oriented ||
+               output.detections.size() ==
+                   output.oriented_detections.size();
     } catch (...) {
         output = {};
         return false;

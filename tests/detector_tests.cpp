@@ -393,6 +393,146 @@ void test_pose_decode_and_keypoints() {
            "二维关键点必须补充 confidence=1.0");
 }
 
+void test_obb_decode_and_probabilistic_nms() {
+    detector::detail::ObbContract contract;
+    expect(detector::detail::resolve_obb_contract(
+               {1, 7, 3}, OutputFormat::AUTO, contract),
+           "YOLOv8-OBB 输出契约应解析成功");
+    expect(contract.class_count == 2 && contract.anchors == 3,
+           "OBB 类别数或 anchor 数推导错误");
+    expect(!detector::detail::resolve_obb_contract(
+               {1, 7, 3}, OutputFormat::END_TO_END, contract),
+           "OBB raw head 不得接受 end-to-end 布局");
+
+    expect(detector::detail::resolve_obb_contract(
+               {1, 7, 3}, OutputFormat::AUTO, contract),
+           "恢复合法 OBB 契约应成功");
+    constexpr int64_t anchors = 3;
+    std::vector<float> prediction(21, 0.0f);
+    for (int64_t anchor = 0; anchor < anchors; ++anchor) {
+        prediction[0 * anchors + anchor] =
+            anchor == 1 ? 2.1f : 2.0f;
+        prediction[1 * anchors + anchor] = 2.0f;
+        prediction[2 * anchors + anchor] = 2.0f;
+        prediction[3 * anchors + anchor] = 1.0f;
+        prediction[6 * anchors + anchor] = 0.0f;
+    }
+    prediction[4 * anchors + 0] = 0.9f;
+    prediction[5 * anchors + 0] = 0.1f;
+    prediction[4 * anchors + 1] = 0.8f;
+    prediction[5 * anchors + 1] = 0.1f;
+    prediction[4 * anchors + 2] = 0.1f;
+    prediction[5 * anchors + 2] = 0.7f;
+
+    std::vector<detector::detail::ObbCandidate> candidates;
+    expect(detector::detail::decode_obb_output(
+               prediction.data(), {1, 7, 3}, contract, 0.25f,
+               candidates),
+           "OBB raw head 解码应成功");
+    expect(candidates.size() == 3,
+           "OBB 解码应保留三个阈值以上候选");
+
+    const OrientedDetection identical{
+        2.0f, 2.0f, 2.0f, 1.0f, 0.0f, 0.9f, 0};
+    const OrientedDetection distant{
+        20.0f, 20.0f, 2.0f, 1.0f, 0.0f, 0.8f, 0};
+    expect(detector::detail::probabilistic_iou(
+               identical, identical) > 0.999f,
+           "相同旋转框的 ProbIoU 应接近 1");
+    expect(detector::detail::probabilistic_iou(
+               identical, distant) < 0.01f,
+           "远离旋转框的 ProbIoU 应接近 0");
+
+    detector::detail::LetterBoxInfo info;
+    info.scale = 0.5f;
+    info.pad_x = 0.0f;
+    info.pad_y = 1.0f;
+    info.orig_w = 8;
+    info.orig_h = 4;
+    info.target_w = 4;
+    info.target_h = 4;
+    ObbResult result;
+    std::vector<detector::detail::ObbCandidate> selected;
+    std::vector<unsigned char> suppressed;
+    expect(detector::detail::finalize_obbs(
+               candidates, 0.45f, 10, info, true, result,
+               selected, suppressed),
+           "OBB ProbIoU NMS 与坐标还原应成功");
+    expect(result.detections.size() == 2 &&
+               result.oriented_detections.size() == 2,
+           "同类重叠框应抑制，不同类别旋转框应保留");
+    if (!result.oriented_detections.empty()) {
+        const OrientedDetection& oriented =
+            result.oriented_detections[0];
+        const Detection& envelope = result.detections[0];
+        expect(near(oriented.center_x, 4.0f) &&
+                   near(oriented.center_y, 2.0f) &&
+                   near(oriented.width, 4.0f) &&
+                   near(oriented.height, 2.0f) &&
+                   near(envelope.x1, 2.0f) &&
+                   near(envelope.y1, 1.0f) &&
+                   near(envelope.x2, 6.0f) &&
+                   near(envelope.y2, 3.0f),
+               "OBB LetterBox 缩放或轴对齐包围盒错误");
+    }
+
+    // A-B、B-C 达到阈值而 A-C 不达到。Fast-NMS 会因更高分 B
+    // 抑制 C，即使 B 自身已被 A 抑制；贪心 NMS 则会错误保留 C。
+    std::vector<detector::detail::ObbCandidate> fast_nms_candidates(3);
+    for (std::size_t index = 0; index < fast_nms_candidates.size(); ++index) {
+        auto& box = fast_nms_candidates[index].detection;
+        box.center_x = static_cast<float>(index) * 1.5f + 3.0f;
+        box.center_y = 3.0f;
+        box.width = 4.0f;
+        box.height = 2.0f;
+        box.confidence = 0.9f - static_cast<float>(index) * 0.1f;
+        box.class_id = 0;
+    }
+    detector::detail::LetterBoxInfo fast_nms_info;
+    fast_nms_info.scale = 1.0f;
+    fast_nms_info.orig_w = 10;
+    fast_nms_info.orig_h = 10;
+    fast_nms_info.target_w = 10;
+    fast_nms_info.target_h = 10;
+    ObbResult fast_nms_result;
+    expect(detector::detail::finalize_obbs(
+               fast_nms_candidates, 0.5f, 10, fast_nms_info,
+               false, fast_nms_result, selected, suppressed),
+           "OBB Fast-NMS 链式重叠测试应成功");
+    expect(fast_nms_result.detections.size() == 1 &&
+               fast_nms_result.oriented_detections.empty(),
+           "OBB 必须保持 Ultralytics Fast-NMS 语义且仅框路径不生成旋转数组");
+
+    constexpr float kHalfPi = 1.57079632679489661923f;
+    std::vector<detector::detail::ObbCandidate> rotated_candidates(1);
+    rotated_candidates[0].detection = {
+        0.5f, 3.0f, 4.0f, 2.0f, kHalfPi, 0.95f, 1};
+    ObbResult rotated_result;
+    expect(detector::detail::finalize_obbs(
+               rotated_candidates, 0.45f, 10, fast_nms_info,
+               true, rotated_result, selected, suppressed),
+           "旋转框外包框与边界裁剪测试应成功");
+    expect(rotated_result.detections.size() == 1 &&
+               rotated_result.oriented_detections.size() == 1,
+           "有效旋转框应生成一一对应的原始框与外包框");
+    if (!rotated_result.detections.empty() &&
+        !rotated_result.oriented_detections.empty()) {
+        const Detection& envelope = rotated_result.detections[0];
+        const OrientedDetection& oriented =
+            rotated_result.oriented_detections[0];
+        expect(near(envelope.x1, 0.0f) &&
+                   near(envelope.y1, 1.0f) &&
+                   near(envelope.x2, 1.5f) &&
+                   near(envelope.y2, 5.0f),
+               "九十度 OBB 外包框或原图边界裁剪错误");
+        expect(near(oriented.center_x, 0.5f) &&
+                   near(oriented.width, 4.0f) &&
+                   near(oriented.height, 2.0f) &&
+                   near(oriented.angle_radians, kHalfPi),
+               "外包框裁剪不得改写原始 xywhr 旋转几何");
+    }
+}
+
 void test_scale_and_nms() {
     detector::detail::LetterBoxInfo info;
     info.scale = 0.5f;
@@ -558,6 +698,7 @@ int main() {
     test_end_to_end_decode();
     test_segmentation_decode_and_mask();
     test_pose_decode_and_keypoints();
+    test_obb_decode_and_probabilistic_nms();
     test_scale_and_nms();
     test_preprocess_contract();
     test_tensorrt_cache_defaults();

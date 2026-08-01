@@ -23,12 +23,14 @@ enum class ModelTask {
     DETECT,
     SEGMENT,
     POSE,
+    OBB,
 };
 
 enum class RequestedOutput {
     BOXES,
     SEGMENTATION,
     POSE,
+    OBB,
 };
 
 bool valid_config(const DetectorConfig& config) noexcept {
@@ -205,6 +207,7 @@ struct TaskRunResult {
     // pose 独立保存关键点布局，避免公有结果类型彼此耦合。
     SegmentationResult segmentation;
     PoseResult pose;
+    ObbResult obb;
 };
 
 } // namespace
@@ -225,6 +228,8 @@ struct Detector::Impl {
         resolved_segmentation_contract;
     std::optional<detector::detail::PoseContract>
         resolved_pose_contract;
+    std::optional<detector::detail::ObbContract>
+        resolved_obb_contract;
     int64_t pose_keypoint_count = 0;
     int64_t pose_keypoint_dimensions = 0;
     std::array<int64_t, 4> input_shape{1, 3, 0, 0};
@@ -239,6 +244,8 @@ struct Detector::Impl {
         selected_segmentations;
     std::vector<detector::detail::PoseCandidate> pose_candidates;
     std::vector<detector::detail::PoseCandidate> selected_poses;
+    std::vector<detector::detail::ObbCandidate> obb_candidates;
+    std::vector<detector::detail::ObbCandidate> selected_obbs;
     std::vector<float> mask_logits;
     std::vector<std::uint8_t> mask_input;
     std::vector<unsigned char> nms_suppressed;
@@ -325,7 +332,7 @@ struct Detector::Impl {
 
         const std::string task = lowercase_ascii(session.metadata_value("task"));
         if (!task.empty() && task != "detect" && task != "segment" &&
-            task != "pose") {
+            task != "pose" && task != "obb") {
             LOG_ERROR("detector", "不支持的模型任务: task={}", task);
             return false;
         }
@@ -334,6 +341,8 @@ struct Detector::Impl {
             model_task = ModelTask::SEGMENT;
         } else if (task == "pose") {
             model_task = ModelTask::POSE;
+        } else if (task == "obb") {
+            model_task = ModelTask::OBB;
         } else {
             model_task = ModelTask::DETECT;
         }
@@ -440,7 +449,7 @@ struct Detector::Impl {
                 }
                 resolved_segmentation_contract = contract;
             }
-        } else {
+        } else if (model_task == ModelTask::POSE) {
             if (session.num_outputs() != 1) {
                 LOG_ERROR(
                     "detector",
@@ -487,13 +496,51 @@ struct Detector::Impl {
                 }
                 resolved_pose_contract = contract;
             }
+        } else {
+            if (session.num_outputs() != 1) {
+                LOG_ERROR(
+                    "detector",
+                    "OBB 仅支持单输出 raw head，实际 outputs={}",
+                    session.num_outputs());
+                return false;
+            }
+            if (session.output_type(0) !=
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                LOG_ERROR("detector", "OBB 输出必须为 float32");
+                return false;
+            }
+            if (metadata_end_to_end.value_or(false) ||
+                (config.output_format != OutputFormat::AUTO &&
+                 config.output_format != OutputFormat::CHANNEL_FIRST)) {
+                LOG_ERROR(
+                    "detector",
+                    "OBB 当前仅支持非 end-to-end 的 channel-first raw head");
+                return false;
+            }
+            const auto declared_output_shape = session.output_shape(0);
+            if (!valid_declared_prediction_shape(declared_output_shape)) {
+                LOG_ERROR("detector", "OBB 输出必须是单 batch 三维张量");
+                return false;
+            }
+            if (static_shape(declared_output_shape)) {
+                detector::detail::ObbContract contract;
+                if (!detector::detail::resolve_obb_contract(
+                        declared_output_shape, config.output_format,
+                        contract)) {
+                    LOG_ERROR("detector", "无法确定 OBB 输出契约");
+                    return false;
+                }
+                resolved_obb_contract = contract;
+            }
         }
 
         active_provider = session.active_provider();
         loaded = true;
         const char* task_name = model_task == ModelTask::SEGMENT
             ? "segment"
-            : (model_task == ModelTask::POSE ? "pose" : "detect");
+            : (model_task == ModelTask::POSE
+                ? "pose"
+                : (model_task == ModelTask::OBB ? "obb" : "detect"));
         LOG_INFO("detector", "模型加载完成: {}x{}, task={}, provider={}",
                  width, height, task_name, active_provider);
         return true;
@@ -590,7 +637,8 @@ struct Detector::Impl {
                 return {};
             }
         } else if (model_task == ModelTask::SEGMENT) {
-            if (requested_output == RequestedOutput::POSE) {
+            if (requested_output != RequestedOutput::BOXES &&
+                requested_output != RequestedOutput::SEGMENTATION) {
                 profile.status = DetectionStatus::UNSUPPORTED_TASK;
                 return result;
             }
@@ -656,8 +704,9 @@ struct Detector::Impl {
                 profile.status = DetectionStatus::POSTPROCESS_FAILED;
                 return {};
             }
-        } else {
-            if (requested_output == RequestedOutput::SEGMENTATION) {
+        } else if (model_task == ModelTask::POSE) {
+            if (requested_output != RequestedOutput::BOXES &&
+                requested_output != RequestedOutput::POSE) {
                 profile.status = DetectionStatus::UNSUPPORTED_TASK;
                 return result;
             }
@@ -712,6 +761,51 @@ struct Detector::Impl {
                 profile.status = DetectionStatus::POSTPROCESS_FAILED;
                 return {};
             }
+        } else {
+            if (requested_output != RequestedOutput::BOXES &&
+                requested_output != RequestedOutput::OBB) {
+                profile.status = DetectionStatus::UNSUPPORTED_TASK;
+                return result;
+            }
+            const Ort::Value& prediction = (*outputs)[0];
+            const auto prediction_info =
+                prediction.GetTensorTypeAndShapeInfo();
+            if (prediction_info.GetElementType() !=
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            const auto prediction_shape = prediction_info.GetShape();
+            detector::detail::ObbContract contract;
+            if (!detector::detail::resolve_obb_contract(
+                    prediction_shape, config.output_format, contract)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            if (resolved_obb_contract.has_value() &&
+                (resolved_obb_contract->class_count !=
+                     contract.class_count ||
+                 resolved_obb_contract->anchors != contract.anchors)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            resolved_obb_contract = contract;
+
+            obb_candidates.clear();
+            if (!detector::detail::decode_obb_output(
+                    prediction.GetTensorData<float>(), prediction_shape,
+                    contract, config.conf_threshold, obb_candidates)) {
+                profile.status = DetectionStatus::INVALID_OUTPUT;
+                return result;
+            }
+            if (!detector::detail::finalize_obbs(
+                    obb_candidates, config.nms_threshold, config.top_k,
+                    letterbox_info,
+                    requested_output == RequestedOutput::OBB,
+                    result.obb, selected_obbs, nms_suppressed)) {
+                profile.status = DetectionStatus::POSTPROCESS_FAILED;
+                return {};
+            }
         }
         const auto finished = std::chrono::steady_clock::now();
         profile.postprocess_ms = std::chrono::duration_cast<milliseconds>(
@@ -722,7 +816,9 @@ struct Detector::Impl {
 
         const size_t detection_count = model_task == ModelTask::POSE
             ? result.pose.detections.size()
-            : result.segmentation.detections.size();
+            : (model_task == ModelTask::OBB
+                ? result.obb.detections.size()
+                : result.segmentation.detections.size());
         LOG_TRACE(
             "detector",
             "format={}, pre={:.2f}ms infer={:.2f}ms h2d={:.2f}ms d3d11_cuda={:.2f}ms d3d11_dml={:.2f}ms gpu_pre={:.2f}ms exec={:.2f}ms d2h={:.2f}ms post={:.2f}ms total={:.2f}ms upload={}B device_copy={}B det={}",
@@ -871,9 +967,13 @@ std::vector<Detection> Detector::detect(const cv::Mat& bgr_image) {
         auto result = impl_->run(
             bgr_image, config_, RequestedOutput::BOXES, current_profile);
         impl_->set_profile(current_profile);
-        return impl_->model_task == ModelTask::POSE
-            ? std::move(result.pose.detections)
-            : std::move(result.segmentation.detections);
+        if (impl_->model_task == ModelTask::POSE) {
+            return std::move(result.pose.detections);
+        }
+        if (impl_->model_task == ModelTask::OBB) {
+            return std::move(result.obb.detections);
+        }
+        return std::move(result.segmentation.detections);
     } catch (const std::exception& e) {
         // detect() 是推理热路径，只允许编译期可移除的 DEBUG/TRACE。
         LOG_DEBUG("detector", "Detector::detect() 失败: {}", e.what());
@@ -954,9 +1054,13 @@ std::vector<Detection> Detector::detect_d3d11(
         auto result = impl_->run_d3d11(
             frame, config_, RequestedOutput::BOXES, current_profile);
         impl_->set_profile(current_profile);
-        return impl_->model_task == ModelTask::POSE
-            ? std::move(result.pose.detections)
-            : std::move(result.segmentation.detections);
+        if (impl_->model_task == ModelTask::POSE) {
+            return std::move(result.pose.detections);
+        }
+        if (impl_->model_task == ModelTask::OBB) {
+            return std::move(result.obb.detections);
+        }
+        return std::move(result.segmentation.detections);
     } catch (const std::exception& e) {
         LOG_DEBUG("detector", "Detector::detect_d3d11() 失败: {}",
                   e.what());
@@ -1112,6 +1216,94 @@ PoseResult Detector::pose_d3d11(const D3D11TextureFrame& frame) {
 
 bool Detector::pose_supported() const noexcept {
     return loaded() && impl_->model_task == ModelTask::POSE;
+}
+
+ObbResult Detector::obb(const cv::Mat& bgr_image) {
+    InferenceProfile current_profile;
+    if (!loaded()) {
+        current_profile.status = DetectionStatus::NOT_LOADED;
+        if (impl_) impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!obb_supported()) {
+        current_profile.status = DetectionStatus::UNSUPPORTED_TASK;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+    if (bgr_image.empty() || bgr_image.type() != CV_8UC3) {
+        current_profile.status = DetectionStatus::INVALID_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+
+    try {
+        auto result = impl_->run(
+            bgr_image, config_, RequestedOutput::OBB, current_profile);
+        impl_->set_profile(current_profile);
+        return std::move(result.obb);
+    } catch (const std::exception& e) {
+        LOG_DEBUG("detector", "Detector::obb() 失败: {}", e.what());
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    } catch (...) {
+        LOG_DEBUG("detector", "Detector::obb() 失败: 未知异常");
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+}
+
+ObbResult Detector::obb_d3d11(const D3D11TextureFrame& frame) {
+    InferenceProfile current_profile;
+    if (!loaded()) {
+        current_profile.status = DetectionStatus::NOT_LOADED;
+        if (impl_) impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!obb_supported()) {
+        current_profile.status = DetectionStatus::UNSUPPORTED_TASK;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+    const bool directml_frame =
+        impl_->active_provider == "DmlExecutionProvider";
+    if (!frame.resource || !frame.synchronization ||
+        (directml_frame &&
+         (!frame.shared_fence || frame.fence_value == 0)) ||
+        frame.width <= 0 || frame.height <= 0 ||
+        frame.width != input_width() || frame.height != input_height()) {
+        current_profile.status = DetectionStatus::INVALID_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!d3d11_interop_supported()) {
+        current_profile.status = DetectionStatus::UNSUPPORTED_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+
+    try {
+        auto result = impl_->run_d3d11(
+            frame, config_, RequestedOutput::OBB, current_profile);
+        impl_->set_profile(current_profile);
+        return std::move(result.obb);
+    } catch (const std::exception& e) {
+        LOG_DEBUG("detector", "Detector::obb_d3d11() 失败: {}",
+                  e.what());
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    } catch (...) {
+        LOG_DEBUG("detector", "Detector::obb_d3d11() 失败: 未知异常");
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+}
+
+bool Detector::obb_supported() const noexcept {
+    return loaded() && impl_->model_task == ModelTask::OBB;
 }
 
 bool Detector::d3d11_interop_supported() const noexcept {

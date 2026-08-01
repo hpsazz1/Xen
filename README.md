@@ -74,6 +74,9 @@ Xen/                           # 仓库根目录
 - Detector 支持 metadata 明确声明 `task=pose`、`kpt_shape=[K,2|3]` 的 YOLOv8 兼容
   姿态 raw head。`detect()` 加载姿态模型时只做框解码；显式 `pose()`/`pose_d3d11()`
   才在 NMS 后按保留的 anchor 展开原图坐标关键点，避免 Aim 默认热路径复制关键点数组。
+- Detector 支持 metadata 明确声明 `task=obb` 的 YOLOv8 兼容旋转检测 raw head：
+  `[1,4+C+1,A]` 的最后一个平面是弧度角。显式 `obb()`/`obb_d3d11()` 返回原始
+  `xywhr` 与轴对齐外包框；默认 `detect()` 只构造外包框，继续兼容现有 Aim 热路径。
 - Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；样本同时固化主机 FOV、编码
   尺寸、ROI 和像素比例，避免网络重连或显示模式变化造成的瞬时坐标漂移被最终快照掩盖。主线程
   在会话结束时将其发布为 schema 6 的
@@ -559,6 +562,7 @@ Detector 不按“YOLOv5/v8/v10/11/26”等版本号硬编码分支，而按 ONN
 | `END_TO_END` | `[B, N, 6]` | 已含 NMS 的 `xyxy, score, class` 输出 |
 | YOLOv8 segment 双输出 | `[1,4+C+M,A]` + `[1,M,H,W]` | raw 实例分割，NMS 后按 anchor 读取系数 |
 | YOLOv8 pose | `[1,4+C+K*D,A]` | raw 姿态，`kpt_shape=[K,D]`，NMS 后读取关键点 |
+| YOLOv8 OBB | `[1,4+C+1,A]` | raw 旋转检测，最后一个 feature 平面为弧度角，使用 ProbIoU 旋转 NMS |
 
 因此，后续 YOLO 版本只要继续使用上述任一契约即可直接支持；若导出布局变化，只需新增一个契约解码器，不必改动推理主流程。默认 `AUTO` 会结合 metadata 和形状识别。单类别 raw 输出与端到端输出都可能是 `[B,N,6]`，第三方导出模型遇到歧义时应显式设置 `DetectorConfig::output_format`。
 
@@ -604,9 +608,21 @@ clean `PATH` 下分别显式请求三种输出契约，核对真实 Provider、�
   -UltralyticsRoot "C:\path\to\ultralytics-source"
 ```
 
-当前支持单输入 NCHW float32 detect、YOLOv8 兼容非 end-to-end raw segment 双输出和
-metadata 完整的非 end-to-end raw pose。OBB、其他多输出 head、end-to-end segment/pose
-和真正的 batch inference 仍不在当前范围内。
+旋转目标检测使用独立航拍图像门禁；提供 Ultralytics 源码时会按同类旋转几何一一配对，
+比较原图 `xywh`、弧度角和置信度，并单独报告不同 Provider 导致的近似同分目标重排：
+
+```powershell
+.\scripts\test_obb.ps1 `
+  -ModelPath "C:\path\to\yolov8n-obb.onnx" `
+  -ImagePath "C:\path\to\real-aerial-image.jpg" `
+  -OnnxRuntimeRoot "C:\path\to\onnxruntime" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib" `
+  -UltralyticsRoot "C:\path\to\ultralytics-source"
+```
+
+当前支持单输入 NCHW float32 detect、YOLOv8 兼容非 end-to-end raw segment 双输出、
+metadata 完整的非 end-to-end raw pose 和 raw OBB。其他多输出 head、end-to-end
+segment/pose/OBB 和真正的 batch inference 仍不在当前范围内。
 
 ### 运行时模型热重载
 

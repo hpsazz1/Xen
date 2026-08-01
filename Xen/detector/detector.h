@@ -173,6 +173,28 @@ struct PoseResult {
     }
 };
 
+// ============================================================
+// 旋转目标检测结果
+// ============================================================
+// OBB 使用原图坐标系的 xywhr：中心、宽高和弧度角。角度保持模型原始
+// 表示，不强制转换为 [0,pi/2)；宽高也不因角度归一化而互换。
+struct OrientedDetection {
+    float center_x = 0.0f;
+    float center_y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+    float angle_radians = 0.0f;
+    float confidence = 0.0f;
+    int class_id = 0;
+};
+
+struct ObbResult {
+    // detections 是每个旋转框四角的原图轴对齐包围盒，供现有 Aim 等
+    // 轻量消费者复用；与 oriented_detections 始终一一对应。
+    std::vector<Detection> detections;
+    std::vector<OrientedDetection> oriented_detections;
+};
+
 // D3D11 纹理输入的无 Windows 头公有描述符。resource.get() 必须指向
 // ID3D11Texture2D，格式为 DXGI_FORMAT_B8G8R8A8_UNORM；共享所有权保证
 // GPU 消费完成前纹理不会被释放。synchronization 必须非空，且 Capture 的
@@ -289,8 +311,8 @@ public:
     /// 释放模型资源
     void reset();
 
-    /// 在单张 BGR 图像上运行检测；分割模型只解码框，不生成掩码。为避免复制
-    /// 原型张量之外的主机掩码，本入口仍可直接服务 Aim 热路径。
+    /// 在单张 BGR 图像上运行检测；segment/pose/OBB 模型仅返回轴对齐框，
+    /// 不生成掩码、关键点或公有旋转框数组，可直接服务 Aim 热路径。
     /// 同一实例不可并发调用，多线程请使用 clone()。
     std::vector<Detection> detect(const cv::Mat& bgr_image);
 
@@ -320,6 +342,15 @@ public:
 
     /// 当前已加载模型是否满足受支持的姿态输出契约。
     bool pose_supported() const noexcept;
+
+    /// 执行 YOLOv8 兼容旋转目标检测；返回旋转框及其轴对齐包围盒。
+    ObbResult obb(const cv::Mat& bgr_image);
+
+    /// 从 D3D11 BGRA8 纹理执行旋转目标检测。
+    ObbResult obb_d3d11(const D3D11TextureFrame& frame);
+
+    /// 当前已加载模型是否满足受支持的 OBB 输出契约。
+    bool obb_supported() const noexcept;
 
     /// 当前已加载 Session 是否具备对应 Provider 的 D3D11 GPU 互操作能力。
     bool d3d11_interop_supported() const noexcept;

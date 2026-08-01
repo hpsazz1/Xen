@@ -726,6 +726,34 @@ if(BUILD_TESTING)
                 "${XEN_TEST_POSE_IMAGE}")
     endif()
 
+    # OBB 需要真实航拍图像验证旋转 NMS 和角度/宽高缩放，独立于其他
+    # Detector 模型门禁，模型与图像必须成对显式配置。
+    set(XEN_TEST_OBB_MODEL "" CACHE FILEPATH
+        "用于旋转目标检测集成测试的 YOLOv8 兼容 ONNX 模型")
+    set(XEN_TEST_OBB_IMAGE "" CACHE FILEPATH
+        "用于旋转目标检测集成测试且包含旋转目标的真实图像")
+    if(XEN_TEST_OBB_MODEL OR XEN_TEST_OBB_IMAGE)
+        if(NOT XEN_TEST_OBB_MODEL OR
+           NOT EXISTS "${XEN_TEST_OBB_MODEL}")
+            message(FATAL_ERROR
+                "XEN_TEST_OBB_MODEL does not exist: ${XEN_TEST_OBB_MODEL}")
+        endif()
+        if(NOT XEN_TEST_OBB_IMAGE OR
+           NOT EXISTS "${XEN_TEST_OBB_IMAGE}")
+            message(FATAL_ERROR
+                "XEN_TEST_OBB_IMAGE does not exist: ${XEN_TEST_OBB_IMAGE}")
+        endif()
+        add_executable(obb_model_test tests/obb_model_test.cpp)
+        target_link_libraries(obb_model_test PRIVATE detector)
+        if(WIN32)
+            xen_deploy_runtime_dlls(obb_model_test OPENCV ORT)
+        endif()
+        add_test(NAME obb_model_test
+            COMMAND obb_model_test
+                "${XEN_TEST_OBB_MODEL}"
+                "${XEN_TEST_OBB_IMAGE}")
+    endif()
+
     # 视频真值解析和 Recall 统计保持为无 Session 的纯算法测试；文件哈希使用
     # Windows CNG，JSON 使用已部署的 OpenCV FileStorage，不增加第三方依赖。
     add_executable(video_visibility_tests
