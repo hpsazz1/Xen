@@ -400,13 +400,27 @@ Aim 的真实追踪评价不能复用 Detector 的“任一检测即命中”标
   -OutputDirectory ".\cache\aim-ground-truth"
 ```
 
+人工标注完成后，通过同一条 TensorRT 视频基准链路执行 Aim：
+
+```powershell
+.\scripts\benchmark_detector_videos.ps1 `
+  -ModelPath "C:\path\to\model.onnx" `
+  -VideoDirectory "C:\path\to\videos" `
+  -AimAnnotationDirectory ".\cache\aim-ground-truth" `
+  -InputMode center
+```
+
 模板文件名为 `<完整视频文件名>.aim.json`，默认每帧都是 `ignore` 且没有目标框，不是真值。
 人工标注时，`visible` 帧必须填写位于主机完整 FOV 坐标中的目标框和视频内稳定 `track_id`；
 `not_visible/ignore` 帧不得携带目标。schema 会严格绑定视频 SHA-256、帧数、输入模式和主机
 ROI。Aim 离线评价器可统计 ROI Recall、ID Switch、连续轨迹片段、碎片事件和旧目标仍可见时
 发生的无必要切换，并拒绝错误帧号和错误几何。主机 `2560x1440` 的默认 ROI 仍是
-`(1120,560,320,320)`；辅机 `1920x1080` 不属于标注或评价坐标。当前已完成 schema、模板和
-纯算法测试，真实素材的人工框/身份标注与正式报告接入仍待执行，不能把合成结果写成真实基线。
+`(1120,560,320,320)`；辅机 `1920x1080` 不属于标注或评价坐标。正式视频基准通过
+`-AimAnnotationDirectory` 同时执行生产 Detector 和 Aim，CSV 记录 ROI Recall、ID Switch、
+轨迹碎片、无必要切换、逐帧状态守恒、Aim 默认追踪参数、评价阈值和按视频 FPS 合成的单调
+时间基准，JSON 绑定标注与二进制快照。整套标注至少要有一个
+`visible` 真值帧，全 `ignore` 模板会在 CSV 原子发布前被拒绝。当前已完成报告接入和合成回归；
+真实素材的人工框/身份标注仍待执行，不能把合成结果写成真实基线。
 
 脚本默认使用 `-InputMode center`，从全屏录像中央裁取与模型输入相同大小的 ROI，
 模拟实时游戏中只采集准星附近 FOV 的链路。只有需要测量“整幅录像缩放到模型输入”时

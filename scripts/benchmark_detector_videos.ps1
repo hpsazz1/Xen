@@ -18,6 +18,7 @@
     [ValidateSet("center", "full")]
     [string]$InputMode = "center",
     [string]$VisibilityDirectory = "",
+    [string]$AimAnnotationDirectory = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release"
 )
@@ -301,6 +302,19 @@ if ($useVisibilityAnnotations) {
     $VisibilityDirectory = [System.IO.Path]::GetFullPath(
         $VisibilityDirectory)
 }
+$useAimAnnotations = -not [string]::IsNullOrWhiteSpace(
+    $AimAnnotationDirectory)
+if ($useAimAnnotations) {
+    if ($InputMode -ne "center") {
+        throw "Aim 真值标注只支持 InputMode=center。"
+    }
+    if (-not (Test-Path -LiteralPath $AimAnnotationDirectory `
+            -PathType Container)) {
+        throw "Aim 真值标注目录不存在：$AimAnnotationDirectory"
+    }
+    $AimAnnotationDirectory = [System.IO.Path]::GetFullPath(
+        $AimAnnotationDirectory)
+}
 
 $videoFiles = @(Get-VideoFiles $VideoDirectory)
 if ($videoFiles.Count -eq 0) {
@@ -324,6 +338,23 @@ if ($useVisibilityAnnotations) {
         throw "视频与可见性标注文件必须一一对应：$($visibilityDifference -join '; ')"
     }
 }
+$aimAnnotationFiles = @()
+if ($useAimAnnotations) {
+    $aimAnnotationFiles = @(Get-ChildItem -LiteralPath $AimAnnotationDirectory `
+        -File | Where-Object { $_.Name -ilike "*.aim.json" } |
+        Sort-Object Name)
+    $expectedAimNames = @($videoFiles | ForEach-Object {
+        ("{0}.aim.json" -f $_.Name).ToLowerInvariant()
+    } | Sort-Object)
+    $actualAimNames = @($aimAnnotationFiles | ForEach-Object {
+        $_.Name.ToLowerInvariant()
+    } | Sort-Object)
+    $aimDifference = @(Compare-Object `
+        -ReferenceObject $expectedAimNames -DifferenceObject $actualAimNames)
+    if ($aimDifference.Count -ne 0) {
+        throw "视频与 Aim 真值标注文件必须一一对应：$($aimDifference -join '; ')"
+    }
+}
 
 $finalReportPath = [System.IO.Path]::GetFullPath($ReportPath)
 if ([System.IO.Path]::GetExtension($finalReportPath) -ine ".csv") {
@@ -338,7 +369,8 @@ if (Test-Path -LiteralPath $pendingReportPath) {
 $protectedInputPaths = @(
     [System.IO.Path]::GetFullPath($ModelPath)
 ) + @($videoFiles | ForEach-Object { $_.FullName }) +
-    @($visibilityFiles | ForEach-Object { $_.FullName })
+    @($visibilityFiles | ForEach-Object { $_.FullName }) +
+    @($aimAnnotationFiles | ForEach-Object { $_.FullName })
 foreach ($candidate in @(
         $finalReportPath, $manifestPath, $pendingReportPath)) {
     foreach ($inputPath in $protectedInputPaths) {
@@ -394,6 +426,15 @@ if ($useVisibilityAnnotations) {
     $snapshotVisibilityFingerprint = Get-InventoryFingerprint `
         $snapshotVisibilityInventory
 }
+$snapshotAimInventory = @()
+$snapshotAimFingerprint = $null
+if ($useAimAnnotations) {
+    $snapshotAimFiles = @(Get-ChildItem -LiteralPath $AimAnnotationDirectory `
+        -File | Where-Object { $_.Name -ilike "*.aim.json" } |
+        Sort-Object Name)
+    $snapshotAimInventory = @(Get-FileInventory $snapshotAimFiles)
+    $snapshotAimFingerprint = Get-InventoryFingerprint $snapshotAimInventory
+}
 $snapshotRuntimeInventory = @(Get-DeployedRuntimeInfo $snapshotOutputDirectory)
 $snapshotRuntimeFingerprint = Get-InventoryFingerprint $snapshotRuntimeInventory
 $snapshotExecutableSha256 = (Get-FileHash -LiteralPath $testExecutable `
@@ -422,6 +463,12 @@ try {
         $benchmarkArguments += @(
             "--visibility-directory",
             $VisibilityDirectory
+        )
+    }
+    if ($useAimAnnotations) {
+        $benchmarkArguments += @(
+            "--aim-annotation-directory",
+            $AimAnnotationDirectory
         )
     }
     & $testExecutable @benchmarkArguments
@@ -470,6 +517,15 @@ if ($useVisibilityAnnotations) {
     $visibilityInventory = @(Get-FileInventory $visibilityFiles)
     $visibilityFingerprint = Get-InventoryFingerprint $visibilityInventory
 }
+$aimInventory = @()
+$aimFingerprint = $null
+if ($useAimAnnotations) {
+    $aimFiles = @(Get-ChildItem -LiteralPath $AimAnnotationDirectory `
+        -File | Where-Object { $_.Name -ilike "*.aim.json" } |
+        Sort-Object Name)
+    $aimInventory = @(Get-FileInventory $aimFiles)
+    $aimFingerprint = Get-InventoryFingerprint $aimInventory
+}
 $modelSha256 = (Get-FileHash -LiteralPath $ModelPath -Algorithm SHA256).Hash
 $deployedRuntimes = @(Get-DeployedRuntimeInfo `
     (Split-Path -Parent $testExecutable))
@@ -479,6 +535,7 @@ $executableSha256 = (Get-FileHash -LiteralPath $testExecutable `
 if ($modelSha256 -ne $snapshotModelSha256 -or
     $videoFingerprint -ne $snapshotVideoFingerprint -or
     $visibilityFingerprint -ne $snapshotVisibilityFingerprint -or
+    $aimFingerprint -ne $snapshotAimFingerprint -or
     $runtimeFingerprint -ne $snapshotRuntimeFingerprint -or
     $executableSha256 -ne $snapshotExecutableSha256) {
     throw "基准运行期间模型、视频、标注、可执行文件或部署运行库发生变化，报告已拒绝发布。"
@@ -500,6 +557,7 @@ if ($sceneDifference.Count -ne 0) {
     throw "Detector 视频基准场景集合与视频清单不一致：$($sceneDifference -join '; ')"
 }
 $sampleFrames = 0L
+$aimVisibleFramesTotal = 0L
 foreach ($row in $reportRows) {
     $frames = [long]$row.frames
     $sampleFrames += $frames
@@ -518,6 +576,97 @@ foreach ($row in $reportRows) {
     $notVisibleDetectedFrames = [long]$row.not_visible_detected_frames
     $ignoredFrames = [long]$row.ignored_frames
     $ignoredDetectedFrames = [long]$row.ignored_detected_frames
+    $aimAnnotations = [int]$row.aim_annotations
+    $aimComplete = [int]$row.aim_complete
+    $aimAnnotatedFrames = [long]$row.aim_annotated_frames
+    $aimVisibleFrames = [long]$row.aim_visible_frames
+    $aimVisibleFramesTotal += $aimVisibleFrames
+    $aimMatchedVisibleFrames = [long]$row.aim_matched_visible_frames
+    $aimMissedVisibleFrames = [long]$row.aim_missed_visible_frames
+    $aimIdSwitches = [long]$row.aim_id_switches
+    $aimTrackFragments = [long]$row.aim_track_fragments
+    $aimFragmentationEvents = [long]$row.aim_track_fragmentation_events
+    $aimUnnecessarySwitches = [long]$row.aim_unnecessary_switches
+    $aimNotVisibleFrames = [long]$row.aim_not_visible_frames
+    $aimIgnoredFrames = [long]$row.aim_ignored_frames
+    $aimOutputTargetFrames = [long]$row.aim_output_target_frames
+    $aimInvalidFrames = [long]$row.aim_invalid_frames
+    $aimConfigurationValues = @(
+        $row.aim_person_class_ids, $row.aim_head_class_ids,
+        $row.aim_high_confidence, $row.aim_low_confidence,
+        $row.aim_min_confirmed_hits, $row.aim_max_lost_frames,
+        $row.aim_min_iou, $row.aim_max_center_distance,
+        $row.aim_switch_margin, $row.aim_switch_confirm_frames,
+        $row.aim_switch_cooldown_frames, $row.aim_body_aim_height_ratio,
+        $row.aim_evaluation_min_iou,
+        $row.aim_evaluation_max_center_distance,
+        $row.aim_timebase_fps
+    )
+    $missingAimConfigurationValues = @($aimConfigurationValues |
+        Where-Object { [string]::IsNullOrEmpty($_) })
+    if ($useAimAnnotations) {
+        if ($aimAnnotations -ne 1 -or $aimComplete -ne 1 -or
+            $row.aim_policy -ne "aim_ground_truth_v1" -or
+            $aimAnnotatedFrames -ne $frames -or
+            $aimVisibleFrames -lt 0 -or
+            ($aimVisibleFrames + $aimNotVisibleFrames +
+                $aimIgnoredFrames) -ne $frames -or
+            $aimMatchedVisibleFrames -lt 0 -or
+            $aimMissedVisibleFrames -lt 0 -or
+            ($aimMatchedVisibleFrames + $aimMissedVisibleFrames) -ne
+                $aimVisibleFrames -or
+            $aimMatchedVisibleFrames -gt $aimVisibleFrames -or
+            $aimIdSwitches -lt 0 -or $aimTrackFragments -lt 0 -or
+            $aimFragmentationEvents -lt 0 -or
+            $aimUnnecessarySwitches -lt 0 -or
+            $aimOutputTargetFrames -lt 0 -or
+            $aimOutputTargetFrames -gt $frames -or
+            $aimInvalidFrames -ne 0 -or
+            $missingAimConfigurationValues.Count -ne 0 -or
+            [double]$row.aim_high_confidence -lt 0.0 -or
+            [double]$row.aim_low_confidence -lt 0.0 -or
+            [double]$row.aim_low_confidence -gt
+                [double]$row.aim_high_confidence -or
+            [int]$row.aim_min_confirmed_hits -le 0 -or
+            [int]$row.aim_max_lost_frames -lt 0 -or
+            [double]$row.aim_min_iou -lt 0.0 -or
+            [double]$row.aim_min_iou -gt 1.0 -or
+            [double]$row.aim_max_center_distance -le 0.0 -or
+            [double]$row.aim_switch_margin -lt 0.0 -or
+            [int]$row.aim_switch_confirm_frames -le 0 -or
+            [int]$row.aim_switch_cooldown_frames -lt 0 -or
+            [double]$row.aim_body_aim_height_ratio -lt 0.0 -or
+            [double]$row.aim_body_aim_height_ratio -gt 1.0 -or
+            [double]$row.aim_evaluation_min_iou -lt 0.0 -or
+            [double]$row.aim_evaluation_min_iou -gt 1.0 -or
+            [double]$row.aim_evaluation_max_center_distance -le 0.0 -or
+            [double]$row.aim_timebase_fps -le 0.0) {
+            throw "Aim 真值统计契约不一致：$($row.scene)"
+        }
+        if ($aimVisibleFrames -gt 0) {
+            $aimRecall = [double]$row.aim_roi_recall
+            if ($aimRecall -lt 0.0 -or $aimRecall -gt 1.0) {
+                throw "Aim ROI Recall 无效：$($row.scene)"
+            }
+        } elseif (-not [string]::IsNullOrEmpty($row.aim_roi_recall)) {
+            throw "没有 Aim 可见目标时 Recall 必须留空：$($row.scene)"
+        }
+    } elseif ($aimAnnotations -ne 0 -or $aimComplete -ne 0 -or
+              -not [string]::IsNullOrEmpty($row.aim_policy) -or
+              $aimAnnotatedFrames -ne 0 -or
+              $aimVisibleFrames -ne 0 -or
+              $aimMatchedVisibleFrames -ne 0 -or
+              $aimMissedVisibleFrames -ne 0 -or
+              -not [string]::IsNullOrEmpty($row.aim_roi_recall) -or
+              $aimIdSwitches -ne 0 -or $aimTrackFragments -ne 0 -or
+              $aimFragmentationEvents -ne 0 -or
+              $aimUnnecessarySwitches -ne 0 -or
+              $aimNotVisibleFrames -ne 0 -or $aimIgnoredFrames -ne 0 -or
+              $aimOutputTargetFrames -ne 0 -or $aimInvalidFrames -ne 0 -or
+              $missingAimConfigurationValues.Count -ne
+                  $aimConfigurationValues.Count) {
+        throw "无 Aim 真值模式不得生成伪追踪指标：$($row.scene)"
+    }
     if ($useVisibilityAnnotations) {
         if ($annotationsPresent -ne 1 -or
             $row.visibility_policy -ne "target_frame_visibility_v1" -or
@@ -555,6 +704,9 @@ foreach ($row in $reportRows) {
         throw "无标注模式不得生成伪 Recall：$($row.scene)"
     }
 }
+if ($useAimAnnotations -and $aimVisibleFramesTotal -eq 0) {
+    throw "Aim 真值集合没有可见目标，拒绝发布全 ignore 模板报告。"
+}
 $modelShapeKeys = @($reportRows | ForEach-Object {
     "{0}x{1}" -f $_.model_input_height, $_.model_input_width
 } | Sort-Object -Unique)
@@ -572,6 +724,46 @@ $evaluatedShapes = @($reportRows | ForEach-Object {
         width = [int]$_.evaluated_width
     }
 })
+$aimConfiguration = $null
+if ($useAimAnnotations) {
+    $aimConfigurationKeys = @($reportRows | ForEach-Object {
+        @(
+            $_.aim_person_class_ids, $_.aim_head_class_ids,
+            $_.aim_high_confidence, $_.aim_low_confidence,
+            $_.aim_min_confirmed_hits, $_.aim_max_lost_frames,
+            $_.aim_min_iou, $_.aim_max_center_distance,
+            $_.aim_switch_margin, $_.aim_switch_confirm_frames,
+            $_.aim_switch_cooldown_frames, $_.aim_body_aim_height_ratio,
+            $_.aim_evaluation_min_iou,
+            $_.aim_evaluation_max_center_distance,
+            $_.aim_timebase_fps
+        ) -join "|"
+    } | Sort-Object -Unique)
+    if ($aimConfigurationKeys.Count -ne 1) {
+        throw "Detector 视频基准出现多套 Aim 追踪或评价配置。"
+    }
+    $aimRow = $reportRows[0]
+    $aimConfiguration = [ordered]@{
+        person_class_ids = @($aimRow.aim_person_class_ids -split ";" |
+            ForEach-Object { [int]$_ })
+        head_class_ids = @($aimRow.aim_head_class_ids -split ";" |
+            ForEach-Object { [int]$_ })
+        high_confidence = [double]$aimRow.aim_high_confidence
+        low_confidence = [double]$aimRow.aim_low_confidence
+        min_confirmed_hits = [int]$aimRow.aim_min_confirmed_hits
+        max_lost_frames = [int]$aimRow.aim_max_lost_frames
+        min_iou = [double]$aimRow.aim_min_iou
+        max_center_distance = [double]$aimRow.aim_max_center_distance
+        switch_margin = [double]$aimRow.aim_switch_margin
+        switch_confirm_frames = [int]$aimRow.aim_switch_confirm_frames
+        switch_cooldown_frames = [int]$aimRow.aim_switch_cooldown_frames
+        body_aim_height_ratio = [double]$aimRow.aim_body_aim_height_ratio
+        evaluation_min_iou = [double]$aimRow.aim_evaluation_min_iou
+        evaluation_max_center_distance =
+            [double]$aimRow.aim_evaluation_max_center_distance
+        synthetic_timebase_fps = [double]$aimRow.aim_timebase_fps
+    }
+}
 
 $manifest = [ordered]@{
     schema_version = 3
@@ -616,6 +808,21 @@ $manifest = [ordered]@{
             } else { $null }
             inventory_sha256 = $visibilityFingerprint
             files = $visibilityInventory
+        }
+        aim = [ordered]@{
+            enabled = $useAimAnnotations
+            directory = if ($useAimAnnotations) {
+                $AimAnnotationDirectory
+            } else { $null }
+            schema_version = if ($useAimAnnotations) { 1 } else {
+                $null
+            }
+            policy = if ($useAimAnnotations) {
+                "aim_ground_truth_v1"
+            } else { $null }
+            inventory_sha256 = $aimFingerprint
+            files = $aimInventory
+            configuration = $aimConfiguration
         }
     }
     detector = [ordered]@{
@@ -669,6 +876,7 @@ $manifest = [ordered]@{
         inputs_unchanged_during_run = $true
         annotations_unchanged_during_run = $true
         recall_requires_visibility_annotations = $true
+        aim_metrics_require_ground_truth = $true
     }
     deployed_runtimes = $deployedRuntimes
 }
