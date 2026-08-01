@@ -600,7 +600,8 @@ target_link_libraries(aim PUBLIC log ${OpenCV_LIBS})
 
 add_library(mouse STATIC
     Xen/mouse/mouse.cpp
-    Xen/mouse/kmbox_net.cpp)
+    Xen/mouse/kmbox_net.cpp
+    Xen/mouse/makcu.cpp)
 target_include_directories(mouse PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(mouse PUBLIC log PRIVATE user32 ws2_32)
 

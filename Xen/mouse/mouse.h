@@ -7,6 +7,7 @@
 enum class MouseBackend {
     WIN32_SEND_INPUT,
     KMBOX_NET,
+    MAKCU,
 };
 
 const char* MouseBackendName(MouseBackend backend) noexcept;
@@ -36,6 +37,12 @@ struct MouseConfig {
     // 连接允许设备完成握手；热路径命令超时必须保持较短，避免长期阻塞 Pipeline。
     int kmbox_connect_timeout_ms = 1000;
     int kmbox_command_timeout_ms = 300;
+    // MAKCU 只接受显式 COM 口；波特率限制为设备官方稳定档位，避免主机与设备永久配置不一致。
+    std::string makcu_port;
+    int makcu_baud_rate = 115200;
+    // 连接超时覆盖串口打开后的协议握手，命令超时覆盖每条 move 的写入与 ACK。
+    int makcu_connect_timeout_ms = 1000;
+    int makcu_command_timeout_ms = 300;
 };
 
 struct MouseMoveCommand {

@@ -4,6 +4,7 @@
 #include "mouse/mouse.h"
 
 #include "mouse/kmbox_net_internal.h"
+#include "mouse/makcu_internal.h"
 
 #include "log/log.h"
 
@@ -115,6 +116,7 @@ const char* MouseBackendName(MouseBackend backend) noexcept {
     switch (backend) {
         case MouseBackend::WIN32_SEND_INPUT: return "win32_send_input";
         case MouseBackend::KMBOX_NET: return "kmbox_net";
+        case MouseBackend::MAKCU: return "makcu";
     }
     return "unknown";
 }
@@ -127,6 +129,9 @@ std::unique_ptr<IMouseController> MouseDeviceFactory::create(
         }
         if (config.backend == MouseBackend::KMBOX_NET) {
             return mouse::detail::create_kmbox_net_controller(config);
+        }
+        if (config.backend == MouseBackend::MAKCU) {
+            return mouse::detail::create_makcu_controller(config);
         }
     } catch (...) {
         LOG_ERROR("mouse", "创建鼠标后端时发生未知异常");

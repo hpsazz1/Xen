@@ -50,6 +50,10 @@ void test_round_trip() {
     source.mouse.kmbox_uuid = "A1b2C3d4";
     source.mouse.kmbox_connect_timeout_ms = 900;
     source.mouse.kmbox_command_timeout_ms = 250;
+    source.mouse.makcu_port = "COM17";
+    source.mouse.makcu_baud_rate = 4000000;
+    source.mouse.makcu_connect_timeout_ms = 800;
+    source.mouse.makcu_command_timeout_ms = 120;
     source.log.global_level = LogLevel::WARN;
     source.log.enable_console = false;
     source.log.enable_file = false;
@@ -103,6 +107,10 @@ void test_round_trip() {
            loaded.mouse.kmbox_uuid == "A1b2C3d4" &&
            loaded.mouse.kmbox_connect_timeout_ms == 900 &&
            loaded.mouse.kmbox_command_timeout_ms == 250 &&
+           loaded.mouse.makcu_port == "COM17" &&
+           loaded.mouse.makcu_baud_rate == 4000000 &&
+           loaded.mouse.makcu_connect_timeout_ms == 800 &&
+           loaded.mouse.makcu_command_timeout_ms == 120 &&
            loaded.log.global_level == LogLevel::WARN &&
            !loaded.log.enable_console && !loaded.log.enable_file &&
            loaded.log.enable_debug_file && loaded.log.enable_ringbuf &&
@@ -137,6 +145,33 @@ void test_openvino_config_validation() {
     config.detector.openvino_device = OpenVinoDevice::GPU;
     expect(validate_app_config(config, error),
            "OpenVINO GPU 应接受显式设备索引: " + error);
+}
+
+void test_makcu_config_round_trip() {
+    AppConfig source;
+    source.detector.model_path = "models/test.onnx";
+    source.mouse.backend = MouseBackend::MAKCU;
+    source.mouse.allow_send_input = true;
+    source.mouse.makcu_port = "COM8";
+    source.mouse.makcu_baud_rate = 4000000;
+    source.mouse.makcu_connect_timeout_ms = 700;
+    source.mouse.makcu_command_timeout_ms = 80;
+    const auto path = std::filesystem::temp_directory_path() /
+                      "xen_makcu_config_round_trip.ini";
+    std::string error;
+    expect(save_app_config(path.string(), source, error),
+           "MAKCU 配置应成功写入: " + error);
+    AppConfig loaded;
+    expect(load_app_config(path.string(), loaded, error) &&
+               loaded.mouse.backend == MouseBackend::MAKCU &&
+               loaded.mouse.allow_send_input &&
+               loaded.mouse.makcu_port == "COM8" &&
+               loaded.mouse.makcu_baud_rate == 4000000 &&
+               loaded.mouse.makcu_connect_timeout_ms == 700 &&
+               loaded.mouse.makcu_command_timeout_ms == 80,
+           "makcu 后端名称与串口参数必须完整往返: " + error);
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
 }
 
 void test_log_defaults_and_invalid_level() {
@@ -281,6 +316,27 @@ void test_invalid_config() {
     config.mouse.kmbox_command_timeout_ms = 300;
     expect(validate_app_config(config, error),
            "完整 KMBOX NET 配置应通过校验");
+
+    config.mouse.backend = MouseBackend::MAKCU;
+    config.mouse.makcu_port.clear();
+    expect(!validate_app_config(config, error),
+           "MAKCU 缺少显式 COM 口时必须拒绝配置");
+    config.mouse.makcu_port = "COM01";
+    expect(!validate_app_config(config, error),
+           "MAKCU COM 口不得包含前导零");
+    config.mouse.makcu_port = "com256";
+    expect(validate_app_config(config, error),
+           "MAKCU 应接受大小写不敏感的 COM256 上边界");
+    config.mouse.makcu_baud_rate = 921600;
+    expect(!validate_app_config(config, error),
+           "MAKCU 必须拒绝非官方稳定档位波特率");
+    config.mouse.makcu_baud_rate = 4000000;
+    config.mouse.makcu_command_timeout_ms = 1001;
+    expect(!validate_app_config(config, error),
+           "MAKCU 命令超时超过 Pipeline 上限时必须拒绝配置");
+    config.mouse.makcu_command_timeout_ms = 300;
+    expect(validate_app_config(config, error),
+           "完整 MAKCU 配置应通过校验");
 
     config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
     config.keyboard.emergency_virtual_key =
@@ -474,6 +530,7 @@ int main() {
     test_d3d11_cuda_interop_config();
     test_d3d11_directml_interop_config();
     test_openvino_config_validation();
+    test_makcu_config_round_trip();
     if (failures != 0) {
         std::cerr << "Config 测试失败数: " << failures << '\n';
         return 1;

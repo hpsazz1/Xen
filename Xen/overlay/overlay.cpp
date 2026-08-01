@@ -2341,10 +2341,14 @@ struct Overlay::Impl {
     void render_mouse_form(AppConfig& app_config) {
         const bool kmbox =
             app_config.mouse.backend == MouseBackend::KMBOX_NET;
+        const bool makcu =
+            app_config.mouse.backend == MouseBackend::MAKCU;
         begin_config_panel(
-            "mouse_panel", "鼠标输出", kmbox ? 268.0f : 88.0f);
+            "mouse_panel", "鼠标输出",
+            kmbox ? 268.0f : (makcu ? 228.0f : 88.0f));
         if (begin_form("mouse_form", 126.0f)) {
-            const char* backends[] = {"Win32 SendInput", "KMBOX NET"};
+            const char* backends[] = {
+                "Win32 SendInput", "KMBOX NET", "MAKCU"};
             int backend = static_cast<int>(app_config.mouse.backend);
             form_row("后端");
             if (ImGui::Combo(
@@ -2372,6 +2376,28 @@ struct Overlay::Impl {
                 ImGui::InputInt(
                     "##kmbox_command_timeout_ms",
                     &app_config.mouse.kmbox_command_timeout_ms);
+            } else if (makcu) {
+                form_row("串口");
+                ImGui::InputText(
+                    "##makcu_port", &app_config.mouse.makcu_port);
+                const char* baud_rates[] = {"115200", "4000000"};
+                int baud_index =
+                    app_config.mouse.makcu_baud_rate == 4000000 ? 1 : 0;
+                form_row("波特率");
+                if (ImGui::Combo(
+                        "##makcu_baud_rate", &baud_index, baud_rates,
+                        static_cast<int>(std::size(baud_rates)))) {
+                    app_config.mouse.makcu_baud_rate =
+                        baud_index == 1 ? 4000000 : 115200;
+                }
+                form_row("连接超时 / ms");
+                ImGui::InputInt(
+                    "##makcu_connect_timeout_ms",
+                    &app_config.mouse.makcu_connect_timeout_ms);
+                form_row("命令超时 / ms");
+                ImGui::InputInt(
+                    "##makcu_command_timeout_ms",
+                    &app_config.mouse.makcu_command_timeout_ms);
             }
             form_row("物理输出");
             toggle_switch(

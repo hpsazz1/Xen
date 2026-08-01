@@ -232,6 +232,34 @@ void test_parse_and_safety_gate() {
                win32_with_kmbox_timeout, options, error) ==
                MouseBenchmarkParseStatus::INVALID,
            "Win32 后端必须拒绝 KMBOX 专属超时参数");
+
+    const std::vector<std::wstring_view> valid_makcu{
+        L"--backend", L"makcu", L"--report", L"makcu.json",
+        L"--makcu-port", L"COM8",
+        L"--makcu-baud-rate", L"4000000",
+        L"--connect-timeout-ms", L"700",
+        L"--command-timeout-ms", L"80",
+        L"--allow-physical-output",
+        L"--confirm-physical-output",
+        L"XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT"};
+    expect(parse_mouse_benchmark_options(
+               valid_makcu, options, error) ==
+               MouseBenchmarkParseStatus::READY &&
+               options.mouse.backend == MouseBackend::MAKCU &&
+               options.mouse.makcu_port == "COM8" &&
+               options.mouse.makcu_baud_rate == 4000000 &&
+               options.mouse.makcu_connect_timeout_ms == 700 &&
+               options.mouse.makcu_command_timeout_ms == 80,
+           "完整 MAKCU 设备参数应解析到独立 MouseConfig 字段: " + error);
+
+    auto makcu_with_kmbox = valid_makcu;
+    makcu_with_kmbox.insert(
+        makcu_with_kmbox.end() - 3,
+        {L"--kmbox-ip", L"127.0.0.1"});
+    expect(parse_mouse_benchmark_options(
+               makcu_with_kmbox, options, error) ==
+               MouseBenchmarkParseStatus::INVALID,
+           "MAKCU 后端必须拒绝 KMBOX 专属参数");
 }
 
 void test_summary() {
@@ -325,6 +353,54 @@ void test_failed_command_does_not_publish() {
            "首条失败后必须立即停止，不发送补偿、预热或正式命令");
 }
 
+void test_makcu_report_contract_without_physical_output() {
+    MouseBenchmarkOptions options;
+    options.backend_explicit = true;
+    options.mouse.backend = MouseBackend::MAKCU;
+    options.mouse.makcu_port = "COM8";
+    options.mouse.makcu_baud_rate = 4000000;
+    options.mouse.makcu_connect_timeout_ms = 700;
+    options.mouse.makcu_command_timeout_ms = 80;
+    options.warmup_pairs = 0;
+    options.sample_pairs = 1;
+    options.dx_counts = 2;
+    options.dy_counts = -1;
+    options.allow_physical_output = true;
+    options.physical_output_confirmed = true;
+    const auto report_path = unique_report_path(L"makcu-contract");
+    options.report_path = report_path.string();
+    std::error_code ignored;
+    std::filesystem::remove(report_path, ignored);
+
+    MouseBenchmarkResult result;
+    result.complete = true;
+    result.successful_commands = 4;
+    result.formal_successful_commands = 2;
+    result.final_status = MouseStatus::READY;
+    result.command_latency = {0.2, 0.1, 0.3, 0.4, 0.5};
+    result.samples = {
+        {1, 1, 1, 2, -1, 0.1},
+        {2, 1, -1, -2, 1, 0.2},
+    };
+    std::string error;
+    expect(write_mouse_benchmark_report(options, result, error),
+           "MAKCU 合法合成结果应发布 schema 1 报告: " + error);
+    std::ifstream input(report_path, std::ios::binary);
+    const std::string report((std::istreambuf_iterator<char>(input)),
+                             std::istreambuf_iterator<char>());
+    expect(report.find("\"backend\": \"makcu\"") != std::string::npos &&
+               report.find("\"endpoint\": \"COM8\"") !=
+                   std::string::npos &&
+               report.find("\"baud_rate\": 4000000") !=
+                   std::string::npos &&
+               report.find("\"connect_timeout_ms\": 700") !=
+                   std::string::npos &&
+               report.find("\"command_timeout_ms\": 80") !=
+                   std::string::npos,
+           "MAKCU 报告必须固化非敏感端点、波特率和超时配置");
+    std::filesystem::remove(report_path, ignored);
+}
+
 } // namespace
 
 int main() {
@@ -343,6 +419,7 @@ int main() {
     test_summary();
     test_successful_kmbox_run_and_report();
     test_failed_command_does_not_publish();
+    test_makcu_report_contract_without_physical_output();
 
     Log::shutdown();
     WSACleanup();

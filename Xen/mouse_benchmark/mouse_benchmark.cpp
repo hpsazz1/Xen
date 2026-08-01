@@ -90,6 +90,51 @@ bool valid_kmbox_uuid(std::string_view value) noexcept {
     });
 }
 
+bool valid_makcu_port(std::string_view value) noexcept {
+    if (value.size() < 4U || value.size() > 6U ||
+        (value[0] != 'C' && value[0] != 'c') ||
+        (value[1] != 'O' && value[1] != 'o') ||
+        (value[2] != 'M' && value[2] != 'm') ||
+        (value.size() > 4U && value[3] == '0')) {
+        return false;
+    }
+    int port_number = 0;
+    for (std::size_t index = 3U; index < value.size(); ++index) {
+        const char character = value[index];
+        if (character < '0' || character > '9') return false;
+        port_number = port_number * 10 + static_cast<int>(character - '0');
+    }
+    return port_number >= 1 && port_number <= 256;
+}
+
+std::string mouse_endpoint(const MouseConfig& config) {
+    if (config.backend == MouseBackend::KMBOX_NET) {
+        return config.kmbox_ip + ":" + std::to_string(config.kmbox_port);
+    }
+    if (config.backend == MouseBackend::MAKCU) return config.makcu_port;
+    return {};
+}
+
+int mouse_connect_timeout_ms(const MouseConfig& config) noexcept {
+    if (config.backend == MouseBackend::KMBOX_NET) {
+        return config.kmbox_connect_timeout_ms;
+    }
+    if (config.backend == MouseBackend::MAKCU) {
+        return config.makcu_connect_timeout_ms;
+    }
+    return 0;
+}
+
+int mouse_command_timeout_ms(const MouseConfig& config) noexcept {
+    if (config.backend == MouseBackend::KMBOX_NET) {
+        return config.kmbox_command_timeout_ms;
+    }
+    if (config.backend == MouseBackend::MAKCU) {
+        return config.makcu_command_timeout_ms;
+    }
+    return 0;
+}
+
 double percentile(std::vector<double> values, double quantile) {
     if (values.empty()) return 0.0;
     std::sort(values.begin(), values.end());
@@ -186,10 +231,7 @@ bool write_json(const std::filesystem::path& path,
            << "  \"backend\": \""
            << MouseBackendName(options.mouse.backend) << "\",\n"
            << "  \"endpoint\": \""
-           << json_escape(options.mouse.backend == MouseBackend::KMBOX_NET
-                              ? options.mouse.kmbox_ip + ":" +
-                                    std::to_string(options.mouse.kmbox_port)
-                              : std::string{})
+           << json_escape(mouse_endpoint(options.mouse))
            << "\",\n"
            << "  \"authorization\": {\"physical_output\": true, "
               "\"confirmation_token\": true},\n"
@@ -200,9 +242,12 @@ bool write_json(const std::filesystem::path& path,
            << options.warmup_pairs << ", \"sample_pairs\": "
            << options.sample_pairs
            << ", \"connect_timeout_ms\": "
-           << options.mouse.kmbox_connect_timeout_ms
+           << mouse_connect_timeout_ms(options.mouse)
            << ", \"command_timeout_ms\": "
-           << options.mouse.kmbox_command_timeout_ms
+           << mouse_command_timeout_ms(options.mouse)
+           << ", \"baud_rate\": "
+           << (options.mouse.backend == MouseBackend::MAKCU
+                   ? options.mouse.makcu_baud_rate : 0)
            << ", \"kmbox_uuid_recorded\": false},\n"
            << "  \"stats\": {\"successful_commands\": "
            << result.successful_commands
@@ -322,10 +367,37 @@ bool validate_mouse_benchmark_options(
             set_error(error, "KMBOX NET 地址、UUID 或超时参数非法");
             return false;
         }
-    } else if (!options.mouse.kmbox_ip.empty() ||
-               options.mouse.kmbox_port != 0 ||
-               !options.mouse.kmbox_uuid.empty()) {
-        set_error(error, "Win32 后端不得携带 KMBOX 设备参数");
+        if (!options.mouse.makcu_port.empty()) {
+            set_error(error, "KMBOX NET 后端不得携带 MAKCU 设备参数");
+            return false;
+        }
+    } else if (options.mouse.backend == MouseBackend::MAKCU) {
+        if (!valid_makcu_port(options.mouse.makcu_port) ||
+            (options.mouse.makcu_baud_rate != 115200 &&
+             options.mouse.makcu_baud_rate != 4000000) ||
+            options.mouse.makcu_connect_timeout_ms <= 0 ||
+            options.mouse.makcu_connect_timeout_ms > 10000 ||
+            options.mouse.makcu_command_timeout_ms <= 0 ||
+            options.mouse.makcu_command_timeout_ms > 1000) {
+            set_error(error, "MAKCU COM 口、波特率或超时参数非法");
+            return false;
+        }
+        if (!options.mouse.kmbox_ip.empty() ||
+            options.mouse.kmbox_port != 0 ||
+            !options.mouse.kmbox_uuid.empty()) {
+            set_error(error, "MAKCU 后端不得携带 KMBOX 设备参数");
+            return false;
+        }
+    } else if (options.mouse.backend == MouseBackend::WIN32_SEND_INPUT) {
+        if (!options.mouse.kmbox_ip.empty() ||
+            options.mouse.kmbox_port != 0 ||
+            !options.mouse.kmbox_uuid.empty() ||
+            !options.mouse.makcu_port.empty()) {
+            set_error(error, "Win32 后端不得携带物理设备参数");
+            return false;
+        }
+    } else {
+        set_error(error, "鼠标基准后端非法");
         return false;
     }
     error.clear();
@@ -352,6 +424,8 @@ MouseBenchmarkParseStatus parse_mouse_benchmark_options(
         bool seen_uuid = false;
         bool seen_connect_timeout = false;
         bool seen_command_timeout = false;
+        bool seen_makcu_port = false;
+        bool seen_makcu_baud_rate = false;
 
         for (std::size_t index = 0; index < arguments.size(); ++index) {
             const auto argument = arguments[index];
@@ -388,8 +462,11 @@ MouseBenchmarkParseStatus parse_mouse_benchmark_options(
                     options.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
                 } else if (value == L"kmbox_net") {
                     options.mouse.backend = MouseBackend::KMBOX_NET;
+                } else if (value == L"makcu") {
+                    options.mouse.backend = MouseBackend::MAKCU;
                 } else {
-                    set_error(error, "--backend 仅支持 win32 或 kmbox_net");
+                    set_error(error,
+                              "--backend 仅支持 win32、kmbox_net 或 makcu");
                     return MouseBenchmarkParseStatus::INVALID;
                 }
                 options.backend_explicit = true;
@@ -452,6 +529,21 @@ MouseBenchmarkParseStatus parse_mouse_benchmark_options(
                     if (error.empty()) set_error(error, "--kmbox-uuid 非法");
                     return MouseBenchmarkParseStatus::INVALID;
                 }
+            } else if (argument == L"--makcu-port") {
+                if (duplicate(seen_makcu_port, "--makcu-port") ||
+                    !wide_to_utf8(value, options.mouse.makcu_port)) {
+                    if (error.empty()) set_error(error, "--makcu-port 非法");
+                    return MouseBenchmarkParseStatus::INVALID;
+                }
+            } else if (argument == L"--makcu-baud-rate") {
+                if (duplicate(seen_makcu_baud_rate,
+                              "--makcu-baud-rate") ||
+                    !parse_number(value, options.mouse.makcu_baud_rate)) {
+                    if (error.empty()) {
+                        set_error(error, "--makcu-baud-rate 非法");
+                    }
+                    return MouseBenchmarkParseStatus::INVALID;
+                }
             } else if (argument == L"--connect-timeout-ms") {
                 if (duplicate(seen_connect_timeout,
                               "--connect-timeout-ms") ||
@@ -460,6 +552,8 @@ MouseBenchmarkParseStatus parse_mouse_benchmark_options(
                     if (error.empty()) set_error(error, "--connect-timeout-ms 非法");
                     return MouseBenchmarkParseStatus::INVALID;
                 }
+                options.mouse.makcu_connect_timeout_ms =
+                    options.mouse.kmbox_connect_timeout_ms;
             } else if (argument == L"--command-timeout-ms") {
                 if (duplicate(seen_command_timeout,
                               "--command-timeout-ms") ||
@@ -468,6 +562,8 @@ MouseBenchmarkParseStatus parse_mouse_benchmark_options(
                     if (error.empty()) set_error(error, "--command-timeout-ms 非法");
                     return MouseBenchmarkParseStatus::INVALID;
                 }
+                options.mouse.makcu_command_timeout_ms =
+                    options.mouse.kmbox_command_timeout_ms;
             } else {
                 set_error(error, "未知参数");
                 return MouseBenchmarkParseStatus::INVALID;
@@ -478,8 +574,19 @@ MouseBenchmarkParseStatus parse_mouse_benchmark_options(
         }
         if (options.mouse.backend == MouseBackend::WIN32_SEND_INPUT &&
             (seen_ip || seen_port || seen_uuid ||
+             seen_makcu_port || seen_makcu_baud_rate ||
              seen_connect_timeout || seen_command_timeout)) {
-            set_error(error, "Win32 后端不得携带 KMBOX 专属参数");
+            set_error(error, "Win32 后端不得携带物理设备专属参数");
+            return MouseBenchmarkParseStatus::INVALID;
+        }
+        if (options.mouse.backend == MouseBackend::KMBOX_NET &&
+            (seen_makcu_port || seen_makcu_baud_rate)) {
+            set_error(error, "KMBOX NET 后端不得携带 MAKCU 专属参数");
+            return MouseBenchmarkParseStatus::INVALID;
+        }
+        if (options.mouse.backend == MouseBackend::MAKCU &&
+            (seen_ip || seen_port || seen_uuid)) {
+            set_error(error, "MAKCU 后端不得携带 KMBOX 专属参数");
             return MouseBenchmarkParseStatus::INVALID;
         }
         return MouseBenchmarkParseStatus::READY;
@@ -798,14 +905,15 @@ bool run_mouse_benchmark(
 
 std::string mouse_benchmark_usage() {
     return
-        "用法: XenMouseBenchmark --backend <win32|kmbox_net> --report <json>\n"
+        "用法: XenMouseBenchmark --backend <win32|kmbox_net|makcu> --report <json>\n"
         "  --allow-physical-output\n"
         "  --confirm-physical-output XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT\n"
         "  [--warmup-pairs 100] [--sample-pairs 10000]\n"
         "  [--dx-counts 1] [--dy-counts 0]\n"
         "  KMBOX: --kmbox-ip <IPv4> --kmbox-port <1..65535>\n"
         "         --kmbox-uuid <8位十六进制>\n"
-        "         [--connect-timeout-ms 1000] [--command-timeout-ms 300]\n"
+        "  MAKCU: --makcu-port <COM1..COM256> [--makcu-baud-rate 115200|4000000]\n"
+        "  设备:  [--connect-timeout-ms 1000] [--command-timeout-ms 300]\n"
         "说明: 工具会向系统或设备发送真实相对移动，每组均发送等量反向命令。\n";
 }
 

@@ -1,6 +1,6 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Win32", "KmboxNet")]
+    [ValidateSet("Win32", "KmboxNet", "Makcu")]
     [string]$Backend,
     [Parameter(Mandatory = $true)]
     [string]$ReportPrefix,
@@ -24,6 +24,9 @@ param(
     [ValidateRange(0, 65535)]
     [int]$KmboxPort = 0,
     [string]$KmboxUuid = "",
+    [string]$MakcuPort = "",
+    [ValidateSet(115200, 4000000)]
+    [int]$MakcuBaudRate = 115200,
     [ValidateRange(1, 10000)]
     [int]$ConnectTimeoutMs = 1000,
     [ValidateRange(1, 1000)]
@@ -83,10 +86,25 @@ if ($Backend -eq "KmboxNet") {
         $KmboxUuid -notmatch '^[0-9A-Fa-f]{8}$') {
         throw "KmboxNet 必须提供有效 IPv4、端口和 8 位十六进制 UUID。"
     }
+    if (-not [string]::IsNullOrEmpty($MakcuPort) -or
+        $PSBoundParameters.ContainsKey("MakcuBaudRate")) {
+        throw "KmboxNet 基准不得携带 MAKCU 设备参数。"
+    }
+} elseif ($Backend -eq "Makcu") {
+    if ($MakcuPort -notmatch '^(?i:COM)([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-6])$') {
+        throw "Makcu 必须提供 COM1..COM256 串口。"
+    }
+    if (-not [string]::IsNullOrEmpty($KmboxIp) -or
+        $KmboxPort -ne 0 -or
+        -not [string]::IsNullOrEmpty($KmboxUuid)) {
+        throw "Makcu 基准不得携带 KMBOX 设备参数。"
+    }
 } elseif (-not [string]::IsNullOrEmpty($KmboxIp) -or
           $KmboxPort -ne 0 -or
-          -not [string]::IsNullOrEmpty($KmboxUuid)) {
-    throw "Win32 基准不得携带 KMBOX 设备参数。"
+          -not [string]::IsNullOrEmpty($KmboxUuid) -or
+          -not [string]::IsNullOrEmpty($MakcuPort) -or
+          $PSBoundParameters.ContainsKey("MakcuBaudRate")) {
+    throw "Win32 基准不得携带物理设备参数。"
 }
 
 if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
@@ -122,10 +140,10 @@ foreach ($path in @($finalReport, $finalEnvironment,
 $executableBefore = Get-FileEvidence $executable
 $cacheBefore = Get-FileEvidence $cmakeCache
 $dllsBefore = Get-DllEvidence $outputDirectory
-$backendArgument = if ($Backend -eq "Win32") {
-    "win32"
-} else {
-    "kmbox_net"
+$backendArgument = switch ($Backend) {
+    "Win32" { "win32" }
+    "KmboxNet" { "kmbox_net" }
+    "Makcu" { "makcu" }
 }
 $arguments = @(
     "--backend", $backendArgument,
@@ -142,6 +160,13 @@ if ($Backend -eq "KmboxNet") {
         "--kmbox-ip", $KmboxIp,
         "--kmbox-port", [string]$KmboxPort,
         "--kmbox-uuid", $KmboxUuid,
+        "--connect-timeout-ms", [string]$ConnectTimeoutMs,
+        "--command-timeout-ms", [string]$CommandTimeoutMs
+    )
+} elseif ($Backend -eq "Makcu") {
+    $arguments += @(
+        "--makcu-port", $MakcuPort,
+        "--makcu-baud-rate", [string]$MakcuBaudRate,
         "--connect-timeout-ms", [string]$ConnectTimeoutMs,
         "--command-timeout-ms", [string]$CommandTimeoutMs
     )
@@ -196,13 +221,24 @@ try {
     $expectedFormalCommands = [uint64]$SamplePairs * 2L
     $expectedTotalCommands = `
         ([uint64]$WarmupPairs + [uint64]$SamplePairs + 1L) * 2L
-    $expectedBackend = if ($Backend -eq "Win32") {
-        "win32_send_input"
+    $expectedBackend = switch ($Backend) {
+        "Win32" { "win32_send_input" }
+        "KmboxNet" { "kmbox_net" }
+        "Makcu" { "makcu" }
+    }
+    $expectedEndpoint = switch ($Backend) {
+        "Win32" { "" }
+        "KmboxNet" { "${KmboxIp}:$KmboxPort" }
+        "Makcu" { $MakcuPort }
+    }
+    $expectedBaudRate = if ($Backend -eq "Makcu") {
+        $MakcuBaudRate
     } else {
-        "kmbox_net"
+        0
     }
     if ($report.schema -ne 1 -or -not $report.complete -or
         $report.backend -ne $expectedBackend -or
+        $report.endpoint -ne $expectedEndpoint -or
         -not $report.authorization.physical_output -or
         -not $report.authorization.confirmation_token -or
         -not $report.command.paired_reverse -or
@@ -210,6 +246,7 @@ try {
         [int]$report.command.dy_counts -ne $DyCounts -or
         [uint64]$report.configuration.warmup_pairs -ne $WarmupPairs -or
         [uint64]$report.configuration.sample_pairs -ne $SamplePairs -or
+        [int]$report.configuration.baud_rate -ne $expectedBaudRate -or
         [uint64]$report.stats.successful_commands -ne $expectedTotalCommands -or
         [uint64]$report.stats.formal_successful_commands -ne `
             $expectedFormalCommands -or
@@ -283,6 +320,7 @@ try {
             backend = $expectedBackend
             endpoint = $report.endpoint
             kmbox_uuid_recorded = $false
+            baud_rate = [int]$report.configuration.baud_rate
             connect_timeout_ms = [int]$report.configuration.connect_timeout_ms
             command_timeout_ms = [int]$report.configuration.command_timeout_ms
         }

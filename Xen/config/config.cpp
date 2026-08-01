@@ -133,6 +133,7 @@ MouseBackend parse_mouse_backend(
         return MouseBackend::WIN32_SEND_INPUT;
     }
     if (normalized == "kmbox_net") return MouseBackend::KMBOX_NET;
+    if (normalized == "makcu") return MouseBackend::MAKCU;
     return fallback;
 }
 
@@ -140,6 +141,7 @@ const char* mouse_backend_name(MouseBackend backend) noexcept {
     switch (backend) {
         case MouseBackend::WIN32_SEND_INPUT: return "win32_send_input";
         case MouseBackend::KMBOX_NET: return "kmbox_net";
+        case MouseBackend::MAKCU: return "makcu";
     }
     return "win32_send_input";
 }
@@ -261,6 +263,24 @@ bool valid_kmbox_uuid(const std::string& value) noexcept {
     return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
         return std::isxdigit(ch) != 0;
     });
+}
+
+bool valid_makcu_port(const std::string& value) noexcept {
+    if (value.size() < 4U || value.size() > 6U ||
+        std::tolower(static_cast<unsigned char>(value[0])) != 'c' ||
+        std::tolower(static_cast<unsigned char>(value[1])) != 'o' ||
+        std::tolower(static_cast<unsigned char>(value[2])) != 'm' ||
+        (value.size() > 4U && value[3] == '0')) {
+        return false;
+    }
+    int port_number = 0;
+    for (std::size_t index = 3U; index < value.size(); ++index) {
+        const unsigned char character =
+            static_cast<unsigned char>(value[index]);
+        if (!std::isdigit(character)) return false;
+        port_number = port_number * 10 + static_cast<int>(character - '0');
+    }
+    return port_number >= 1 && port_number <= 256;
 }
 
 bool valid_ipv4_address(const std::string& value) noexcept {
@@ -462,7 +482,8 @@ bool validate_app_config(const AppConfig& config,
         }
         const bool mouse_backend_invalid =
             config.mouse.backend != MouseBackend::WIN32_SEND_INPUT &&
-            config.mouse.backend != MouseBackend::KMBOX_NET;
+            config.mouse.backend != MouseBackend::KMBOX_NET &&
+            config.mouse.backend != MouseBackend::MAKCU;
         const bool kmbox_invalid =
             config.mouse.backend == MouseBackend::KMBOX_NET &&
             (!valid_ipv4_address(config.mouse.kmbox_ip) ||
@@ -473,7 +494,16 @@ bool validate_app_config(const AppConfig& config,
              config.mouse.kmbox_connect_timeout_ms > 10000 ||
              config.mouse.kmbox_command_timeout_ms <= 0 ||
              config.mouse.kmbox_command_timeout_ms > 1000);
-        if (mouse_backend_invalid || kmbox_invalid) {
+        const bool makcu_invalid =
+            config.mouse.backend == MouseBackend::MAKCU &&
+            (!valid_makcu_port(config.mouse.makcu_port) ||
+             (config.mouse.makcu_baud_rate != 115200 &&
+              config.mouse.makcu_baud_rate != 4000000) ||
+             config.mouse.makcu_connect_timeout_ms <= 0 ||
+             config.mouse.makcu_connect_timeout_ms > 10000 ||
+             config.mouse.makcu_command_timeout_ms <= 0 ||
+             config.mouse.makcu_command_timeout_ms > 1000);
+        if (mouse_backend_invalid || kmbox_invalid || makcu_invalid) {
             error = "Mouse 配置非法";
             return false;
         }
@@ -706,6 +736,18 @@ bool load_app_config(const std::string& path,
             ini.GetLongValue(
                 "mouse", "kmbox_command_timeout_ms",
                 candidate.mouse.kmbox_command_timeout_ms));
+        candidate.mouse.makcu_port = ini.GetValue(
+            "mouse", "makcu_port", candidate.mouse.makcu_port.c_str());
+        candidate.mouse.makcu_baud_rate = static_cast<int>(ini.GetLongValue(
+            "mouse", "makcu_baud_rate", candidate.mouse.makcu_baud_rate));
+        candidate.mouse.makcu_connect_timeout_ms = static_cast<int>(
+            ini.GetLongValue(
+                "mouse", "makcu_connect_timeout_ms",
+                candidate.mouse.makcu_connect_timeout_ms));
+        candidate.mouse.makcu_command_timeout_ms = static_cast<int>(
+            ini.GetLongValue(
+                "mouse", "makcu_command_timeout_ms",
+                candidate.mouse.makcu_command_timeout_ms));
         candidate.keyboard.aim_hold_virtual_key = static_cast<int>(
             ini.GetLongValue("keyboard", "aim_hold_virtual_key",
                              candidate.keyboard.aim_hold_virtual_key));
@@ -842,6 +884,14 @@ bool save_app_config(const std::string& path,
                          config.mouse.kmbox_connect_timeout_ms);
         ini.SetLongValue("mouse", "kmbox_command_timeout_ms",
                          config.mouse.kmbox_command_timeout_ms);
+        ini.SetValue("mouse", "makcu_port",
+                     config.mouse.makcu_port.c_str());
+        ini.SetLongValue("mouse", "makcu_baud_rate",
+                         config.mouse.makcu_baud_rate);
+        ini.SetLongValue("mouse", "makcu_connect_timeout_ms",
+                         config.mouse.makcu_connect_timeout_ms);
+        ini.SetLongValue("mouse", "makcu_command_timeout_ms",
+                         config.mouse.makcu_command_timeout_ms);
         ini.SetLongValue("keyboard", "aim_hold_virtual_key",
                          config.keyboard.aim_hold_virtual_key);
         ini.SetLongValue("keyboard", "emergency_virtual_key",
