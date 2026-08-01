@@ -378,8 +378,8 @@ ctest --test-dir build -C Release --output-on-failure
 - OS/网络/部署可复现替身：Crash 子进程、运行库授权清单两阶段切换、UDP/XUDP/NDI 回环、
   假 KMBOX 与 Keyboard 状态机；
 - 可选真实模型集成：设置 `XEN_TEST_MODEL` 后增加 Detector 加载/变化输入和 Runtime 热重载；
-- CUDA 真实模型构建还增加 D3D11/CUDA 纹理预注册、连续变化输入、Graph 输出指纹与 CPU 对照，
-  因而当前 GPU 配置共注册 19 个 CTest；
+- 只有实际配置 TensorRT SDK 的真实模型构建才增加 D3D11/CUDA 纹理预注册、连续变化输入、
+  Graph 输出指纹与 CPU 对照；CPU/CUDA-only 为 18 个 CTest，TensorRT 为 19 个；
 - DirectML 真实模型构建还增加 D3D11/DirectML 共享纹理与 fence 测试，用饱和
   红/蓝变化输入核对通道、原始输出指纹、检测结果和零显式输入复制；
 - OpenVINO 真实模型构建增加严格 Provider、变化输入、非法输入状态和 ORT 节点 profile
@@ -412,6 +412,28 @@ ONNX Runtime、TensorRT、cuDNN 和 CUDA 文件集中部署到该目录。部署
 TensorRT 只复制核心、ONNX 解析器和 SDK 提供的各架构
 Builder Resource，使同一构建可在不同 NVIDIA GPU 上首次生成对应 Engine；不复制完整 SDK。
 NDI 构建同时部署 SDK 运行 DLL 与许可证文件。
+
+需要在同一提交、同一模型上复核 CPU、CUDA、TensorRT、DirectML、OpenVINO 与 NDI 有/无 SDK
+完整 Release 矩阵时，使用统一入口。脚本为每项使用独立构建目录，在 clean `PATH` 下运行全部
+适用 CTest 和变化输入，解析 ORT 节点 profile，核对目标 Provider、部署来源/SHA-256 与输入
+前后快照，并在所有门禁通过后原子发布单份 JSON。`BuildRoot` 派生出的七个目录必须均不存在，
+每次正式运行使用新的根名，禁止复用历史构建目录：
+
+```powershell
+.\scripts\test_baseline_matrix.ps1 `
+  -ModelPath "C:\path\to\fixed-shape-model.onnx" `
+  -CpuOnnxRuntimeRoot "C:\path\to\onnxruntime-win-x64-1.27.1" `
+  -GpuOnnxRuntimeRoot "C:\path\to\onnxruntime-win-x64-gpu_cuda13-1.27.1" `
+  -DirectMlOnnxRuntimeRoot "C:\path\to\onnxruntime-directml" `
+  -OpenVinoOnnxRuntimeRoot "C:\path\to\onnxruntime-openvino" `
+  -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib" `
+  -TensorRtRoot "C:\path\to\TensorRT-10.16.1.11" `
+  -CudnnRoot "C:\path\to\cudnn-9.21.0.82-cuda13" `
+  -CudaRoot "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2" `
+  -DirectMlRoot "C:\path\to\Microsoft.AI.DirectML" `
+  -NdiSdkRoot "C:\Program Files\NDI\NDI 6 SDK" `
+  -BuildRoot ".\build-matrix-20260801"
+```
 
 NDI 有 SDK/无 SDK 两条构建边界、真实 Sender/Receiver 回环、metadata 坐标、变化帧和断流可用
 正式脚本重复验证：

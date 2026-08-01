@@ -54,6 +54,7 @@ struct CommandLineOptions {
     std::string report_path = "cache/benchmarks/detector-videos.csv";
     std::string input_mode = "center";
     std::string comparison_image_path;
+    std::string provider_profile_prefix;
     std::string visibility_directory;
     std::string aim_annotation_directory;
     OutputFormat output_format = OutputFormat::AUTO;
@@ -95,6 +96,10 @@ bool parse_command_line(int argc, char* argv[],
     constexpr const char* kOutputFormatPrefix = "--output-format=";
     constexpr const char* kComparisonImageOption = "--comparison-image";
     constexpr const char* kComparisonImagePrefix = "--comparison-image=";
+    constexpr const char* kProviderProfileOption =
+        "--provider-profile-prefix";
+    constexpr const char* kProviderProfilePrefix =
+        "--provider-profile-prefix=";
     constexpr const char* kGpuPreprocessOption = "--gpu-preprocess";
     constexpr const char* kGpuPreprocessPrefix = "--gpu-preprocess=";
     constexpr const char* kVisibilityDirectoryOption =
@@ -133,6 +138,21 @@ bool parse_command_line(int argc, char* argv[],
                 std::char_traits<char>::length(kComparisonImagePrefix));
             if (options.comparison_image_path.empty()) {
                 std::cerr << "--comparison-image 缺少参数\n";
+                return false;
+            }
+            continue;
+        } else if (argument == kProviderProfileOption) {
+            if (++index >= argc || !argv[index] || argv[index][0] == '\0') {
+                std::cerr << "--provider-profile-prefix 缺少参数\n";
+                return false;
+            }
+            options.provider_profile_prefix = argv[index];
+            continue;
+        } else if (argument.starts_with(kProviderProfilePrefix)) {
+            options.provider_profile_prefix = argument.substr(
+                std::char_traits<char>::length(kProviderProfilePrefix));
+            if (options.provider_profile_prefix.empty()) {
+                std::cerr << "--provider-profile-prefix 缺少参数\n";
                 return false;
             }
             continue;
@@ -1293,6 +1313,7 @@ int main(int argc, char* argv[]) {
                      "[--output-format "
                      "auto|channel_first|objectness|end_to_end] "
                      "[--comparison-image <图像路径>] "
+                     "[--provider-profile-prefix <路径前缀>] "
                      "[--gpu-preprocess on|off] "
                      "[--visibility-directory <标注目录>] "
                      "[--aim-annotation-directory <标注目录>] "
@@ -1324,6 +1345,10 @@ int main(int argc, char* argv[]) {
     config.output_format = options.output_format;
     config.enable_output_fingerprint = true;
     config.enable_gpu_preprocess = options.enable_gpu_preprocess;
+    if (!options.provider_profile_prefix.empty()) {
+        config.enable_ort_profiling = true;
+        config.ort_profile_prefix = options.provider_profile_prefix;
+    }
 
     const auto load_start = std::chrono::steady_clock::now();
     Detector detector(config);
@@ -1475,6 +1500,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    std::string provider_profile_path;
+    if (config.enable_ort_profiling &&
+        (!detector.end_profiling(provider_profile_path) ||
+         provider_profile_path.empty() ||
+         !std::filesystem::is_regular_file(provider_profile_path) ||
+         std::filesystem::file_size(provider_profile_path) == 0)) {
+        std::cerr << "ORT Provider profile 未完整生成\n";
+        return 1;
+    }
+
     std::cout << "真实模型测试通过：input="
               << detector.input_width() << 'x' << detector.input_height()
               << ", provider=" << detector.backend_name()
@@ -1492,6 +1527,9 @@ int main(int argc, char* argv[]) {
               << comparison_profile.output_fingerprint
               << ", comparison_source=" << comparison_source
               << '\n';
+    if (!provider_profile_path.empty()) {
+        std::cout << "provider_profile=" << provider_profile_path << '\n';
+    }
 
     if (options.has_video_directory) {
         // 指纹会额外遍历完整输出张量，不能污染性能基准。先释放冒烟 Session，

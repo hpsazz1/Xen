@@ -976,7 +976,12 @@ if(BUILD_TESTING)
                     "${CMAKE_BINARY_DIR}/cache/openvino/ctest")
         endif()
 
-        if(XEN_ONNXRUNTIME_HAS_CUDA)
+        # 该用例固定请求 TensorRT CUDA Graph，并不验证纯 CUDA EP。只有本轮
+        # 明确配置了匹配的 TensorRT SDK 时才注册，避免 CUDA-only 矩阵被
+        # 未部署的 nvinfer 运行库污染。
+        if(XEN_ONNXRUNTIME_HAS_CUDA AND
+           XEN_ONNXRUNTIME_HAS_TENSORRT AND
+           XEN_TENSORRT_ROOT)
             add_executable(d3d11_cuda_interop_tests
                 tests/d3d11_cuda_interop_tests.cpp)
             target_link_libraries(d3d11_cuda_interop_tests PRIVATE
