@@ -180,8 +180,15 @@ public:
             return CaptureStatus::NO_FRAME;
         }
         if (acquire_hr == DXGI_ERROR_ACCESS_LOST) {
+            // ACCESS_LOST 既可能是显示模式/桌面会话变化，也可能是
+            // D3D11 设备被移除的次级表现。同时保留 device reason，
+            // 避免长时基准只留下一个无法区分根因的 DXGI 状态。
+            const HRESULT device_reason = device_
+                ? device_->GetDeviceRemovedReason() : E_POINTER;
             fail(CaptureStatus::ACCESS_LOST,
-                 "Desktop Duplication 访问丢失，需要重建采集会话");
+                 "Desktop Duplication 访问丢失，需要重建采集会话，"
+                 "device_reason=" +
+                 std::to_string(static_cast<long>(device_reason)));
             return CaptureStatus::ACCESS_LOST;
         }
         if (FAILED(acquire_hr)) {
