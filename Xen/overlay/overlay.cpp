@@ -623,8 +623,8 @@ struct Overlay::Impl {
             case WM_GETMINMAXINFO: {
                 // 紧凑布局的最小尺寸，防止关键安全按钮与内容区互相遮挡。
                 auto* minmax = reinterpret_cast<MINMAXINFO*>(lparam);
-                minmax->ptMinTrackSize.x = 820;
-                minmax->ptMinTrackSize.y = 600;
+                minmax->ptMinTrackSize.x = kMinimumUiWidth;
+                minmax->ptMinTrackSize.y = kMinimumUiHeight;
                 MONITORINFO monitor_info{sizeof(MONITORINFO)};
                 if (GetMonitorInfoW(
                         MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),

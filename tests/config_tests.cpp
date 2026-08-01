@@ -180,6 +180,17 @@ void test_invalid_config() {
     expect(!validate_app_config(config, error),
            "未知 UI 主题必须拒绝配置");
     config.ui.theme = UiTheme::LIGHT;
+    config.ui.width = kMinimumUiWidth - 1;
+    config.ui.height = kMinimumUiHeight;
+    expect(!validate_app_config(config, error),
+           "UI 宽度低于五页紧凑布局下限时必须拒绝配置");
+    config.ui.width = kMinimumUiWidth;
+    config.ui.height = kMinimumUiHeight - 1;
+    expect(!validate_app_config(config, error),
+           "UI 高度低于五页紧凑布局下限时必须拒绝配置");
+    config.ui.height = kMinimumUiHeight;
+    expect(validate_app_config(config, error),
+           "UI 尺寸恰好等于五页紧凑布局下限时应通过配置校验");
     config.capture.backend = CaptureBackend::UDP_MJPEG;
     config.capture.udp_read_timeout_ms = 500;
     config.capture.udp_disconnect_timeout_ms = 100;

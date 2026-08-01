@@ -424,7 +424,8 @@ bool validate_app_config(const AppConfig& config,
         if (!valid_keyboard_config(config.keyboard) ||
             config.runtime.profile_window < 64 ||
             config.runtime.profile_window > 4096 ||
-            config.ui.width < 640 || config.ui.height < 480 ||
+            config.ui.width < kMinimumUiWidth ||
+            config.ui.height < kMinimumUiHeight ||
             (config.ui.theme != UiTheme::LIGHT &&
              config.ui.theme != UiTheme::DARK)) {
             error = "Runtime、Keyboard 或 UI 配置非法";
