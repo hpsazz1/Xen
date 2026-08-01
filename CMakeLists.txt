@@ -573,6 +573,13 @@ target_link_libraries(benchmark
     PUBLIC runtime xen_debug
     PRIVATE crash log)
 
+add_library(mouse_benchmark STATIC
+    Xen/mouse_benchmark/mouse_benchmark.cpp)
+target_include_directories(mouse_benchmark PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(mouse_benchmark
+    PUBLIC mouse
+    PRIVATE crash log)
+
 add_library(overlay STATIC
     Xen/overlay/overlay.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -605,6 +612,12 @@ target_link_libraries(xen_benchmark PRIVATE benchmark)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_benchmark OPENCV ORT NDI)
 endif()
+
+add_executable(xen_mouse_benchmark
+    Xen/mouse_benchmark/main.cpp)
+set_target_properties(
+    xen_mouse_benchmark PROPERTIES OUTPUT_NAME XenMouseBenchmark)
+target_link_libraries(xen_mouse_benchmark PRIVATE mouse_benchmark)
 
 # ─── 测试 ───────────────────────────────────────────────
 
@@ -664,6 +677,12 @@ if(BUILD_TESTING)
         tests/mouse_tests.cpp)
     target_link_libraries(mouse_tests PRIVATE mouse log ws2_32)
     add_test(NAME mouse_tests COMMAND mouse_tests)
+
+    add_executable(mouse_benchmark_tests
+        tests/mouse_benchmark_tests.cpp)
+    target_link_libraries(mouse_benchmark_tests PRIVATE
+        mouse_benchmark ws2_32)
+    add_test(NAME mouse_benchmark_tests COMMAND mouse_benchmark_tests)
 
     add_executable(runtime_tests
         tests/runtime_tests.cpp

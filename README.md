@@ -3,7 +3,7 @@
 Xen 是基于 C++20 原生实现的 Windows AI 辅助瞄准工具。核心管线为：截图采集 → YOLO 目标检测推理 → 瞄准控制。
 
 当前仓库已形成 P0 单机最小闭环，并完成 UDP MJPEG、XUDP JPEG、NDI 接收端、独立
-XUDP 生产发送端与 KMBOX NET 鼠标后端的源码和自动回环测试：
+XUDP 生产发送端、KMBOX NET 鼠标后端与独立鼠标性能基准工具的源码和自动回环测试：
 
 ```text
 Desktop Duplication ──────┐
@@ -42,6 +42,7 @@ Xen/                           # 仓库根目录
 │   ├── sender/                # DXGI ROI 到 JPEG/XUDP 的独立主机发送工具
 │   ├── aim/                   # 观测归并、追踪、目标选择和移动控制
 │   ├── mouse/                 # 设备无关命令、Win32 与 KMBOX NET 后端
+│   ├── mouse_benchmark/       # 复用生产 Mouse 后端的独立性能基准入口
 │   ├── keyboard/              # 按住启用与急停键轮询
 │   ├── config/                # SimpleIni 静态配置与校验
 │   ├── runtime/               # 生命周期、三槽最新帧队列和安全门控
@@ -147,6 +148,42 @@ NDI 会明确返回 `UNSUPPORTED`，不会切换 UDP、DXGI 或 CPU 路径。
   -BuildDirectory ".\build" `
   -ReportPrefix ".\cache\runtime-benchmark\xudp-host"
 ```
+
+鼠标性能基准目标为 `xen_mouse_benchmark`，Release 输出名为 `XenMouseBenchmark.exe`。它在
+独立进程中复用生产 `MouseDeviceFactory` 和 Win32/KMBOX NET 后端，分开记录 `open()`、首条
+正向命令、首条反向补偿、预热和正式命令时延。默认执行 100 组预热和 10000 组正式样本；
+每组都是相同 counts 的正反命令，尽量把累计物理位移归零。工具会发送真实输入，因此程序和
+脚本都要求显式物理输出开关与固定确认令牌，缺少任一项都在设备打开前失败。正式 Win32
+调用示例：
+
+```powershell
+.\scripts\benchmark_mouse.ps1 `
+  -Backend Win32 `
+  -BuildDirectory ".\build" `
+  -ReportPrefix ".\cache\mouse-benchmark\win32" `
+  -AllowPhysicalOutput `
+  -PhysicalOutputConfirmation XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT
+```
+
+KMBOX NET 还需显式提供设备 IPv4、端口和 UUID。UUID 仅作为进程参数传给生产后端，不写入
+程序报告或环境清单：
+
+```powershell
+.\scripts\benchmark_mouse.ps1 `
+  -Backend KmboxNet `
+  -KmboxIp 192.168.1.10 `
+  -KmboxPort 12345 `
+  -KmboxUuid A1B2C3D4 `
+  -ReportPrefix ".\cache\mouse-benchmark\kmbox" `
+  -AllowPhysicalOutput `
+  -PhysicalOutputConfirmation XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT
+```
+
+脚本在 clean `PATH` 下执行，复核 Git、CMakeCache、可执行文件和输出目录 DLL 的前后
+SHA-256，只在全部命令成功、最终状态为 `READY` 且每条正式样本严格正反成对时发布
+`<prefix>.mouse.json` 与 `<prefix>.mouse.environment.json`。首个失败命令立即停止，失败样本不进入
+分位数，也不会留下半份正式报告。自动测试只使用本机 UDP 假 KMBOX，不发送真实 Win32 输入；
+真实设备的冷启动、5 分钟稳定性和断网急停仍需现场执行。
 
 无界面正式基准目标为 `xen_benchmark`，Release 输出名为 `XenBenchmark.exe`。它复用生产
 `Runtime`、`Capture`、`Detector`、`Aim` 和 `DebugReport`，不创建 Overlay；运行时强制
