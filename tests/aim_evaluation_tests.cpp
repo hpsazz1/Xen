@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,7 @@ namespace {
 using aim::detail::AimEvaluationConfig;
 using aim::detail::AimEvaluationFrame;
 using aim::detail::AimEvaluationMetrics;
+using aim::detail::AimControlContinuityMetrics;
 using aim::detail::AimGroundTruthAnnotation;
 using aim::detail::AimGroundTruthExpectation;
 using aim::detail::AimGroundTruthState;
@@ -138,12 +140,31 @@ AimEvaluationFrame output_frame(std::size_t index,
     frame.roi_height = 320;
     frame.aim_status = AimStatus::SUCCESS;
     frame.has_target = track_id != 0;
-    frame.target.track_id = track_id;
-    frame.target.state = TrackState::CONFIRMED;
-    frame.target.x1 = x1;
-    frame.target.y1 = y1;
-    frame.target.x2 = x2;
-    frame.target.y2 = y2;
+    if (frame.has_target) {
+        frame.target.track_id = track_id;
+        frame.target.state = TrackState::CONFIRMED;
+        frame.target.x1 = x1;
+        frame.target.y1 = y1;
+        frame.target.x2 = x2;
+        frame.target.y2 = y2;
+    }
+    return frame;
+}
+
+AimEvaluationFrame command_frame(std::size_t index,
+                                 std::uint64_t track_id,
+                                 int dx_counts, int dy_counts,
+                                 bool predicted = false) {
+    AimEvaluationFrame frame = output_frame(
+        index, track_id, 60.0f, 40.0f, 100.0f, 120.0f);
+    frame.target.predicted = predicted;
+    frame.target.state = predicted ? TrackState::LOST : TrackState::CONFIRMED;
+    frame.has_command = true;
+    frame.command.sequence = static_cast<std::uint64_t>(index + 1U);
+    frame.command.captured_at = std::chrono::steady_clock::time_point{
+        std::chrono::milliseconds(index + 1U)};
+    frame.command.dx_counts = dx_counts;
+    frame.command.dy_counts = dy_counts;
     return frame;
 }
 
@@ -302,6 +323,144 @@ void test_source_to_scaled_roi_coordinates() {
            "主机 ROI 原点漂移一像素必须拒绝");
 }
 
+void test_control_continuity_metrics() {
+    std::string error;
+
+    std::vector<AimEvaluationFrame> frames;
+    frames.push_back(command_frame(0, 10, 3, 4));
+    frames.push_back(command_frame(1, 10, 6, 8));
+    frames.push_back(command_frame(2, 10, -6, -8));
+    frames.push_back(output_frame(3, 10, 60, 40, 100, 120));
+    frames.push_back(command_frame(4, 10, 50, 0));
+    frames.push_back(command_frame(5, 20, 0, 50));
+    frames.push_back(command_frame(6, 20, 0, 40, true));
+    frames.push_back(output_frame(7, 0, 0, 0, 0, 0));
+
+    AimControlContinuityMetrics control;
+    for (const auto& frame : frames) {
+        expect(aim::detail::record_aim_control_continuity(
+                   AimEvaluationConfig{}, frame, control, error),
+               "合法控制命令序列必须成功记录：" + error);
+    }
+    expect(aim::detail::finalize_aim_control_continuity(
+               frames.size(), control, error),
+           "控制连续性评价必须可完整收口：" + error);
+
+    expect(control.complete && control.evaluated_frames == 8 &&
+               control.invalid_aim_frames == 0 &&
+               control.command_frames == 6 &&
+               control.observed_command_frames == 5 &&
+               control.predicted_command_frames == 1 &&
+               control.target_without_command_frames == 1 &&
+               control.no_target_frames == 1 &&
+               control.predicted_target_frames == 1,
+           "命令、死区/量化空命令、无目标和预测帧计数错误");
+    expect(control.continuity_segments == 4 &&
+               control.target_switches == 1 &&
+               control.target_state_changes == 1 &&
+               control.prediction_state_changes == 1 &&
+               control.direction_reversals == 1 &&
+               control.limit_boundary_frames == 2,
+           "连续段边界、切换、方向反转或限幅计数错误");
+    expect(control.abs_dx_counts.samples == 6 &&
+               near(control.abs_dx_counts.mean, 65.0 / 6.0) &&
+               near(control.abs_dx_counts.maximum, 50.0) &&
+               control.abs_dy_counts.samples == 6 &&
+               near(control.abs_dy_counts.mean, 110.0 / 6.0) &&
+               near(control.magnitude_counts.mean, 27.5) &&
+               near(control.magnitude_counts.maximum, 50.0),
+           "绝对轴向或向量命令分布错误");
+    expect(control.delta_counts.samples == 2 &&
+               near(control.delta_counts.mean, 12.5) &&
+               near(control.delta_counts.p50, 12.5) &&
+               near(control.delta_counts.p95, 19.25) &&
+               near(control.delta_counts.p99, 19.85) &&
+               near(control.delta_counts.maximum, 20.0) &&
+               control.acceleration_counts.samples == 1 &&
+               near(control.acceleration_counts.mean, 25.0),
+           "一阶/二阶 counts 变化分位数错误，或跨语义边界错误串联");
+}
+
+void test_control_contract_rejections() {
+    std::string error;
+
+    AimControlContinuityMetrics metrics;
+    AimEvaluationFrame command_without_target = command_frame(0, 10, 1, 0);
+    command_without_target.has_target = false;
+    expect(!aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, command_without_target, metrics, error),
+           "无目标帧不得携带控制命令");
+
+    AimEvaluationFrame zero_command = command_frame(0, 10, 0, 0);
+    AimControlContinuityMetrics zero_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, zero_command, zero_metrics, error),
+           "has_command=true 时零向量必须拒绝");
+
+    AimEvaluationFrame stale_command = output_frame(0, 10, 60, 40, 100, 120);
+    stale_command.command.sequence = 1;
+    AimControlContinuityMetrics stale_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, stale_command, stale_metrics, error),
+           "has_command=false 时残留命令快照必须拒绝");
+
+    AimEvaluationFrame invalid_target = output_frame(0, 10, 60, 40, 100, 120);
+    invalid_target.target.confidence =
+        std::numeric_limits<float>::quiet_NaN();
+    AimControlContinuityMetrics invalid_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, invalid_target, invalid_metrics, error),
+           "目标快照中的非有限数必须拒绝");
+
+    AimEvaluationFrame inconsistent_prediction =
+        output_frame(0, 10, 60, 40, 100, 120);
+    inconsistent_prediction.target.predicted = true;
+    AimControlContinuityMetrics prediction_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, inconsistent_prediction,
+               prediction_metrics, error),
+           "预测标志与轨迹状态不一致时必须拒绝");
+
+    AimEvaluationFrame stale_target = output_frame(0, 10, 60, 40, 100, 120);
+    stale_target.has_target = false;
+    AimControlContinuityMetrics stale_target_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, stale_target,
+               stale_target_metrics, error),
+           "has_target=false 时残留目标快照必须拒绝");
+
+    AimEvaluationConfig invalid_config;
+    invalid_config.max_counts_per_frame =
+        std::numeric_limits<float>::quiet_NaN();
+    AimControlContinuityMetrics config_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               invalid_config, output_frame(0, 0, 0, 0, 0, 0),
+               config_metrics, error),
+           "非有限限幅配置必须在评价入口拒绝");
+
+    AimControlContinuityMetrics failed_metrics;
+    AimEvaluationFrame failed = output_frame(0, 0, 0, 0, 0, 0);
+    failed.aim_status = AimStatus::NOT_RUN;
+    expect(aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, failed, failed_metrics, error) &&
+               aim::detail::record_aim_control_continuity(
+                   AimEvaluationConfig{}, output_frame(1, 0, 0, 0, 0, 0),
+                   failed_metrics, error) &&
+               aim::detail::finalize_aim_control_continuity(
+                   2, failed_metrics, error) &&
+               failed_metrics.invalid_aim_frames == 1 &&
+               failed_metrics.no_target_frames == 1,
+           "Aim 失败帧必须单独计数并从成功状态守恒中排除：" + error);
+
+    AimControlContinuityMetrics incomplete_metrics;
+    expect(aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, output_frame(0, 0, 0, 0, 0, 0),
+               incomplete_metrics, error) &&
+               !aim::detail::finalize_aim_control_continuity(
+                   2, incomplete_metrics, error),
+           "未覆盖全部视频帧的控制连续性不得发布");
+}
+
 void test_sequence_and_annotation_set() {
     AimGroundTruthAnnotation annotation;
     std::string error;
@@ -350,6 +509,8 @@ int main() {
     test_annotation_rejections();
     test_tracking_metrics();
     test_source_to_scaled_roi_coordinates();
+    test_control_continuity_metrics();
+    test_control_contract_rejections();
     test_sequence_and_annotation_set();
 
     if (failures != 0) {

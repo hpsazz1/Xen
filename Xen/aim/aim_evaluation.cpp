@@ -8,6 +8,7 @@
 #include <cwctype>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <set>
 #include <unordered_set>
 #include <utility>
@@ -149,7 +150,179 @@ bool valid_config(const AimEvaluationConfig& config) noexcept {
     return std::isfinite(config.min_iou) &&
            config.min_iou >= 0.0f && config.min_iou <= 1.0f &&
            std::isfinite(config.max_center_distance) &&
-           config.max_center_distance > 0.0f;
+           config.max_center_distance > 0.0f &&
+           std::isfinite(config.max_counts_per_frame) &&
+           config.max_counts_per_frame > 0.0f;
+}
+
+bool valid_track_state(TrackState state) noexcept {
+    return state == TrackState::CONFIRMED || state == TrackState::LOST;
+}
+
+bool target_is_default(const AimTargetSnapshot& target) noexcept {
+    return target.track_id == 0 && target.state == TrackState::TENTATIVE &&
+           target.x1 == 0.0f && target.y1 == 0.0f &&
+           target.x2 == 0.0f && target.y2 == 0.0f &&
+           target.aim_x == 0.0f && target.aim_y == 0.0f &&
+           target.confidence == 0.0f && !target.predicted;
+}
+
+bool command_is_default(const AimCommand& command) noexcept {
+    return command.sequence == 0 &&
+           command.captured_at == std::chrono::steady_clock::time_point{} &&
+           command.dx_counts == 0 && command.dy_counts == 0;
+}
+
+bool valid_box(float x1, float y1, float x2, float y2) noexcept;
+
+bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
+    return !((frame.aim_status != AimStatus::SUCCESS &&
+              (frame.has_target || frame.has_command)) ||
+             (frame.has_command && !frame.has_target) ||
+             (frame.has_target &&
+              (frame.target.track_id == 0 ||
+               !valid_track_state(frame.target.state) ||
+               frame.target.predicted !=
+                   (frame.target.state == TrackState::LOST) ||
+               !valid_box(frame.target.x1, frame.target.y1,
+                          frame.target.x2, frame.target.y2) ||
+               !std::isfinite(frame.target.aim_x) ||
+               !std::isfinite(frame.target.aim_y) ||
+               !std::isfinite(frame.target.confidence) ||
+               frame.target.confidence < 0.0f ||
+               frame.target.confidence > 1.0f)) ||
+             (!frame.has_target && !target_is_default(frame.target)) ||
+             (frame.has_command &&
+              (frame.command.sequence == 0 ||
+               frame.command.captured_at ==
+                   std::chrono::steady_clock::time_point{} ||
+               (frame.command.dx_counts == 0 &&
+                frame.command.dy_counts == 0))) ||
+             (!frame.has_command && !command_is_default(frame.command)));
+}
+
+void break_command_continuity(AimControlContinuityMetrics& control) noexcept {
+    control.has_previous_command = false;
+    control.has_previous_delta = false;
+}
+
+void accumulate_control_continuity(const AimEvaluationConfig& config,
+                                   const AimEvaluationFrame& frame,
+                                   AimControlContinuityMetrics& control) {
+    if (frame.aim_status != AimStatus::SUCCESS) {
+        control.has_previous_target = false;
+        break_command_continuity(control);
+        return;
+    }
+
+    if (!frame.has_target) {
+        ++control.no_target_frames;
+        control.has_previous_target = false;
+        break_command_continuity(control);
+        return;
+    }
+
+    if (frame.target.predicted) ++control.predicted_target_frames;
+    if (control.has_previous_target) {
+        if (control.previous_target_track_id != frame.target.track_id) {
+            ++control.target_switches;
+        } else {
+            if (control.previous_target_state != frame.target.state) {
+                ++control.target_state_changes;
+            }
+            if (control.previous_target_predicted != frame.target.predicted) {
+                ++control.prediction_state_changes;
+            }
+        }
+    }
+    control.has_previous_target = true;
+    control.previous_target_track_id = frame.target.track_id;
+    control.previous_target_state = frame.target.state;
+    control.previous_target_predicted = frame.target.predicted;
+
+    if (!frame.has_command) {
+        ++control.target_without_command_frames;
+        break_command_continuity(control);
+        return;
+    }
+
+    ++control.command_frames;
+    if (frame.target.predicted) {
+        ++control.predicted_command_frames;
+    } else {
+        ++control.observed_command_frames;
+    }
+
+    const double dx = static_cast<double>(frame.command.dx_counts);
+    const double dy = static_cast<double>(frame.command.dy_counts);
+    const double abs_dx = std::fabs(dx);
+    const double abs_dy = std::fabs(dy);
+    control.abs_dx_samples.push_back(abs_dx);
+    control.abs_dy_samples.push_back(abs_dy);
+    control.magnitude_samples.push_back(std::hypot(dx, dy));
+    const double limit_boundary = std::ceil(
+        static_cast<double>(config.max_counts_per_frame));
+    if (abs_dx >= limit_boundary || abs_dy >= limit_boundary) {
+        ++control.limit_boundary_frames;
+    }
+
+    const bool continuous =
+        control.has_previous_command &&
+        control.previous_command_frame_index + 1U == frame.frame_index &&
+        control.previous_command_track_id == frame.target.track_id &&
+        control.previous_command_state == frame.target.state &&
+        control.previous_command_predicted == frame.target.predicted;
+    if (!continuous) {
+        ++control.continuity_segments;
+        control.has_previous_delta = false;
+    } else {
+        const double delta_x = dx - control.previous_dx_counts;
+        const double delta_y = dy - control.previous_dy_counts;
+        control.delta_samples.push_back(std::hypot(delta_x, delta_y));
+        if (dx * control.previous_dx_counts +
+                dy * control.previous_dy_counts < 0.0) {
+            ++control.direction_reversals;
+        }
+        if (control.has_previous_delta) {
+            control.acceleration_samples.push_back(std::hypot(
+                delta_x - control.previous_delta_x_counts,
+                delta_y - control.previous_delta_y_counts));
+        }
+        control.previous_delta_x_counts = delta_x;
+        control.previous_delta_y_counts = delta_y;
+        control.has_previous_delta = true;
+    }
+
+    control.has_previous_command = true;
+    control.previous_command_frame_index = frame.frame_index;
+    control.previous_command_track_id = frame.target.track_id;
+    control.previous_command_state = frame.target.state;
+    control.previous_command_predicted = frame.target.predicted;
+    control.previous_dx_counts = dx;
+    control.previous_dy_counts = dy;
+}
+
+double sample_percentile(const std::vector<double>& sorted,
+                         double ratio) noexcept {
+    if (sorted.empty()) return 0.0;
+    const double position = ratio * static_cast<double>(sorted.size() - 1U);
+    const auto lower = static_cast<std::size_t>(position);
+    const auto upper = std::min(lower + 1U, sorted.size() - 1U);
+    const double fraction = position - static_cast<double>(lower);
+    return sorted[lower] * (1.0 - fraction) + sorted[upper] * fraction;
+}
+
+void finalize_distribution(std::vector<double>& samples,
+                           AimDistributionSummary& summary) noexcept {
+    summary.samples = samples.size();
+    if (samples.empty()) return;
+    summary.mean = std::accumulate(samples.begin(), samples.end(), 0.0) /
+                   static_cast<double>(samples.size());
+    std::sort(samples.begin(), samples.end());
+    summary.p50 = sample_percentile(samples, 0.50);
+    summary.p95 = sample_percentile(samples, 0.95);
+    summary.p99 = sample_percentile(samples, 0.99);
+    summary.maximum = samples.back();
 }
 
 bool valid_box(float x1, float y1, float x2, float y2) noexcept {
@@ -503,6 +676,87 @@ bool load_aim_ground_truth_annotation(
     }
 }
 
+bool record_aim_control_continuity(
+    const AimEvaluationConfig& config,
+    const AimEvaluationFrame& frame,
+    AimControlContinuityMetrics& metrics,
+    std::string& error) noexcept {
+    try {
+        error.clear();
+        if (!valid_config(config) || metrics.complete ||
+            (metrics.has_previous_frame &&
+             frame.frame_index != metrics.previous_frame_index + 1U) ||
+            (!metrics.has_previous_frame && frame.frame_index != 0U)) {
+            set_error(error, "Aim 控制连续性评价帧必须从 0 开始并逐帧连续");
+            return false;
+        }
+        if (!valid_aim_output_contract(frame)) {
+            set_error(error, "Aim 控制连续性评价帧的输出契约不一致");
+            return false;
+        }
+
+        ++metrics.evaluated_frames;
+        if (frame.aim_status != AimStatus::SUCCESS) {
+            ++metrics.invalid_aim_frames;
+        }
+        accumulate_control_continuity(config, frame, metrics);
+        metrics.has_previous_frame = true;
+        metrics.previous_frame_index = frame.frame_index;
+        return true;
+    } catch (const std::exception& exception) {
+        set_error(error, std::string("记录 Aim 控制连续性异常：") +
+            exception.what());
+        return false;
+    } catch (...) {
+        set_error(error, "记录 Aim 控制连续性发生未知异常");
+        return false;
+    }
+}
+
+bool finalize_aim_control_continuity(
+    std::size_t expected_frames,
+    AimControlContinuityMetrics& metrics,
+    std::string& error) noexcept {
+    error.clear();
+    const std::size_t successful_frames =
+        metrics.invalid_aim_frames <= metrics.evaluated_frames
+            ? metrics.evaluated_frames - metrics.invalid_aim_frames
+            : 0U;
+    if (metrics.complete || expected_frames == 0 ||
+        expected_frames > kMaximumAnnotatedFrames ||
+        metrics.evaluated_frames != expected_frames ||
+        metrics.invalid_aim_frames > metrics.evaluated_frames ||
+        !metrics.has_previous_frame ||
+        metrics.previous_frame_index + 1U != expected_frames ||
+        metrics.command_frames + metrics.target_without_command_frames +
+                metrics.no_target_frames != successful_frames ||
+        metrics.observed_command_frames + metrics.predicted_command_frames !=
+                metrics.command_frames ||
+        metrics.predicted_command_frames > metrics.predicted_target_frames ||
+        metrics.predicted_target_frames >
+                metrics.command_frames + metrics.target_without_command_frames ||
+        metrics.limit_boundary_frames > metrics.command_frames ||
+        metrics.continuity_segments > metrics.command_frames ||
+        metrics.delta_samples.size() + metrics.continuity_segments !=
+                metrics.command_frames ||
+        metrics.acceleration_samples.size() > metrics.delta_samples.size() ||
+        metrics.direction_reversals > metrics.delta_samples.size() ||
+        metrics.abs_dx_samples.size() != metrics.command_frames ||
+        metrics.abs_dy_samples.size() != metrics.command_frames ||
+        metrics.magnitude_samples.size() != metrics.command_frames) {
+        set_error(error, "Aim 控制连续性评价没有完整覆盖全部帧");
+        return false;
+    }
+    finalize_distribution(metrics.abs_dx_samples, metrics.abs_dx_counts);
+    finalize_distribution(metrics.abs_dy_samples, metrics.abs_dy_counts);
+    finalize_distribution(metrics.magnitude_samples, metrics.magnitude_counts);
+    finalize_distribution(metrics.delta_samples, metrics.delta_counts);
+    finalize_distribution(metrics.acceleration_samples,
+                          metrics.acceleration_counts);
+    metrics.complete = true;
+    return true;
+}
+
 bool record_aim_evaluation(
     const AimGroundTruthAnnotation& annotation,
     const AimEvaluationConfig& config,
@@ -539,11 +793,7 @@ bool record_aim_evaluation(
             return false;
         }
 
-        if (frame.has_target &&
-            (frame.aim_status != AimStatus::SUCCESS ||
-             frame.target.track_id == 0 ||
-             !valid_box(frame.target.x1, frame.target.y1,
-                        frame.target.x2, frame.target.y2))) {
+        if (!valid_aim_output_contract(frame)) {
             set_error(error, "Aim 评价帧的状态与目标快照契约不一致");
             return false;
         }

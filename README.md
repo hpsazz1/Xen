@@ -467,15 +467,28 @@ Aim 的真实追踪评价不能复用 Detector 的“任一检测即命中”标
   -InputMode center
 ```
 
+尚未完成人工框/身份标注时，可先建立不含 Recall 或身份结论的控制命令连续性基线：
+
+```powershell
+.\scripts\benchmark_detector_videos.ps1 `
+  -ModelPath "C:\path\to\model.onnx" `
+  -VideoDirectory "C:\path\to\videos" `
+  -AimContinuity `
+  -InputMode center
+```
+
 模板文件名为 `<完整视频文件名>.aim.json`，默认每帧都是 `ignore` 且没有目标框，不是真值。
 人工标注时，`visible` 帧必须填写位于主机完整 FOV 坐标中的目标框和视频内稳定 `track_id`；
 `not_visible/ignore` 帧不得携带目标。schema 会严格绑定视频 SHA-256、帧数、输入模式和主机
 ROI。Aim 离线评价器可统计 ROI Recall、ID Switch、连续轨迹片段、碎片事件和旧目标仍可见时
-发生的无必要切换，并拒绝错误帧号和错误几何。主机 `2560x1440` 的默认 ROI 仍是
+发生的无必要切换，并拒绝错误帧号和错误几何。独立的控制连续性评价不需要人工真值，统计
+命令/无命令/无目标/预测帧、连续段、方向反转、限幅边界，以及命令绝对值、向量幅值、一阶
+变化和二阶变化的 mean/P50/P95/P99/max；无命令、目标切换、轨迹状态或预测标志变化都会切断
+连续段，不能被误计为控制抖动。主机 `2560x1440` 的默认 ROI 仍是
 `(1120,560,320,320)`；辅机 `1920x1080` 不属于标注或评价坐标。正式视频基准通过
 `-AimAnnotationDirectory` 同时执行生产 Detector 和 Aim，CSV 记录 ROI Recall、ID Switch、
-轨迹碎片、无必要切换、逐帧状态守恒、Aim 默认追踪参数、评价阈值和按视频 FPS 合成的单调
-时间基准，JSON 绑定标注与二进制快照。整套标注至少要有一个
+轨迹碎片、无必要切换、控制连续性、逐帧状态守恒、完整 Aim 配置、评价阈值和按视频 FPS
+合成的单调时间基准，schema 4 JSON 绑定标注与二进制快照。整套标注至少要有一个
 `visible` 真值帧，全 `ignore` 模板会在 CSV 原子发布前被拒绝。当前已完成报告接入和合成回归；
 真实素材的人工框/身份标注仍待执行，不能把合成结果写成真实基线。
 

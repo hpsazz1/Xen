@@ -1,5 +1,7 @@
 #include "config/config.h"
 
+#include "aim/aim_config_internal.h"
+
 #include <SimpleIni.h>
 
 #ifdef ERROR
@@ -395,12 +397,7 @@ bool validate_app_config(const AppConfig& config,
             error = "Capture 配置非法";
             return false;
         }
-        if (!finite_unit(config.aim.high_confidence) ||
-            !finite_unit(config.aim.low_confidence) ||
-            config.aim.high_confidence < config.aim.low_confidence ||
-            config.aim.min_confirmed_hits <= 0 ||
-            config.aim.max_lost_frames < 0 ||
-            config.aim.max_counts_per_frame <= 0.0f) {
+        if (!aim::detail::valid_aim_config(config.aim)) {
             error = "Aim 配置非法";
             return false;
         }

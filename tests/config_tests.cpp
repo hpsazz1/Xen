@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace {
@@ -283,6 +284,55 @@ void test_invalid_config() {
            "含空格的模块日志配置名必须拒绝");
 }
 
+void test_complete_aim_config_validation() {
+    const auto expect_invalid = [](const AimConfig& aim_config,
+                                   const std::string& message) {
+        AppConfig config;
+        config.detector.model_path = "model.onnx";
+        config.aim = aim_config;
+        std::string error;
+        expect(!validate_app_config(config, error), message);
+    };
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    AimConfig config;
+    config.high_confidence = nan;
+    expect_invalid(config, "Aim 高置信度为 NaN 时必须拒绝");
+    config = AimConfig{};
+    config.low_confidence = nan;
+    expect_invalid(config, "Aim 低置信度为 NaN 时必须拒绝");
+    config = AimConfig{};
+    config.min_iou = nan;
+    expect_invalid(config, "Aim IoU 阈值为 NaN 时必须拒绝");
+    config = AimConfig{};
+    config.max_center_distance = 0.0f;
+    expect_invalid(config, "Aim 中心距离阈值非正时必须拒绝");
+    config = AimConfig{};
+    config.switch_margin = 1.0f;
+    expect_invalid(config, "Aim 切换优势达到 1 时必须拒绝");
+    config = AimConfig{};
+    config.body_aim_height_ratio = nan;
+    expect_invalid(config, "Aim 身体瞄点比例为 NaN 时必须拒绝");
+    config = AimConfig{};
+    config.deadzone_pixels = -0.01f;
+    expect_invalid(config, "Aim 死区为负数时必须拒绝");
+    config = AimConfig{};
+    config.smoothing = 1.01f;
+    expect_invalid(config, "Aim 平滑系数越界时必须拒绝");
+    config = AimConfig{};
+    config.counts_per_pixel_x = nan;
+    expect_invalid(config, "Aim 水平 counts 比例为 NaN 时必须拒绝");
+    config = AimConfig{};
+    config.counts_per_pixel_y = 0.0f;
+    expect_invalid(config, "Aim 垂直 counts 比例非正时必须拒绝");
+    config = AimConfig{};
+    config.max_counts_per_frame = nan;
+    expect_invalid(config, "Aim 单帧限幅为 NaN 时必须拒绝");
+    config = AimConfig{};
+    config.predicted_gain = 1.01f;
+    expect_invalid(config, "Aim 预测增益越界时必须拒绝");
+}
+
 void test_xudp_backend_round_trip() {
     AppConfig source;
     source.detector.model_path = "models/test.onnx";
@@ -312,6 +362,7 @@ int main() {
     test_round_trip();
     test_log_defaults_and_invalid_level();
     test_invalid_config();
+    test_complete_aim_config_validation();
     test_xudp_backend_round_trip();
     if (failures != 0) {
         std::cerr << "Config 测试失败数: " << failures << '\n';

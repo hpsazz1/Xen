@@ -59,6 +59,7 @@ struct CommandLineOptions {
     OutputFormat output_format = OutputFormat::AUTO;
     bool has_video_directory = false;
     bool enable_gpu_preprocess = true;
+    bool enable_aim_continuity = false;
 };
 
 const char* output_format_name(OutputFormat format) noexcept {
@@ -104,6 +105,7 @@ bool parse_command_line(int argc, char* argv[],
         "--aim-annotation-directory";
     constexpr const char* kAimAnnotationDirectoryPrefix =
         "--aim-annotation-directory=";
+    constexpr const char* kAimContinuityOption = "--aim-continuity";
     std::vector<std::string> positional;
     positional.reserve(6);
 
@@ -188,6 +190,9 @@ bool parse_command_line(int argc, char* argv[],
                 return false;
             }
             continue;
+        } else if (argument == kAimContinuityOption) {
+            options.enable_aim_continuity = true;
+            continue;
         } else if (argument.starts_with("--")) {
             std::cerr << "未知选项：" << argument << '\n';
             return false;
@@ -225,6 +230,10 @@ bool parse_command_line(int argc, char* argv[],
         std::cerr << "Aim 真值标注只能用于视频基准\n";
         return false;
     }
+    if (options.enable_aim_continuity && !options.has_video_directory) {
+        std::cerr << "Aim 控制连续性评价只能用于视频基准\n";
+        return false;
+    }
     return true;
 }
 
@@ -250,6 +259,7 @@ struct VideoBenchmarkResult {
     std::string visibility_policy;
     detector::detail::VideoVisibilityMetrics visibility;
     bool aim_annotations_present = false;
+    bool aim_continuity_enabled = false;
     std::string aim_policy;
     AimConfig aim_config;
     aim::detail::AimEvaluationConfig aim_evaluation_config;
@@ -435,6 +445,7 @@ bool benchmark_video(Detector& detector,
                      bool has_visibility_annotations,
                      const std::filesystem::path& aim_annotation_path,
                      bool has_aim_annotations,
+                     bool run_aim_continuity,
                      VideoBenchmarkResult& result) {
     const std::string open_path = path_to_utf8(video_path);
     cv::VideoCapture capture(open_path, cv::CAP_ANY);
@@ -509,8 +520,15 @@ bool benchmark_video(Detector& detector,
 
     aim::detail::AimGroundTruthAnnotation aim_annotation;
     const AimConfig aim_config;
-    const aim::detail::AimEvaluationConfig aim_evaluation_config;
+    aim::detail::AimEvaluationConfig aim_evaluation_config;
+    aim_evaluation_config.max_counts_per_frame =
+        aim_config.max_counts_per_frame;
     Aim aim_runner(aim_config);
+    if (run_aim_continuity) {
+        result.aim_continuity_enabled = true;
+        result.aim_config = aim_config;
+        result.aim_evaluation_config = aim_evaluation_config;
+    }
     if (has_aim_annotations) {
         if (!use_center_crop) {
             std::cerr << "Aim 真值标注只支持 center 输入模式\n";
@@ -560,8 +578,6 @@ bool benchmark_video(Detector& detector,
         }
         result.aim_annotations_present = true;
         result.aim_policy = aim_annotation.policy;
-        result.aim_config = aim_config;
-        result.aim_evaluation_config = aim_evaluation_config;
     }
 
     // 固定重复第一帧只用于预热 Session、GPU 时钟和缓存，不计入正式样本；
@@ -586,7 +602,7 @@ bool benchmark_video(Detector& detector,
     const double source_fps = std::isfinite(result.source_fps) &&
             result.source_fps > 1.0
         ? result.source_fps : 60.0;
-    if (has_aim_annotations) result.aim_timebase_fps = source_fps;
+    if (run_aim_continuity) result.aim_timebase_fps = source_fps;
     const auto aim_time_origin = std::chrono::steady_clock::now();
     while (capture.read(frame)) {
         if (frame.empty()) {
@@ -637,19 +653,29 @@ bool benchmark_video(Detector& detector,
                 evaluation_frame.source_pixels_per_roi_pixel_y = 1.0f;
                 evaluation_frame.aim_status = aim_result.status;
                 evaluation_frame.has_target = aim_result.has_target;
+                evaluation_frame.has_command = aim_result.has_command;
                 evaluation_frame.target = aim_result.target;
+                evaluation_frame.command = aim_result.command;
                 return evaluation_frame;
             };
 
         // 空检测是合法结果；pipeline 状态是区分零检测与执行失败的唯一依据。
         if (profile.status != DetectionStatus::SUCCESS) {
-            if (has_aim_annotations) {
+            if (run_aim_continuity) {
                 AimResult failed_aim;
                 failed_aim.status = AimStatus::NOT_RUN;
+                const auto failed_frame = make_aim_evaluation_frame(failed_aim);
                 std::string evaluation_error;
-                if (!aim::detail::record_aim_evaluation(
-                        aim_annotation, aim_evaluation_config,
-                        make_aim_evaluation_frame(failed_aim),
+                if (!aim::detail::record_aim_control_continuity(
+                        aim_evaluation_config, failed_frame,
+                        result.aim_evaluation.control, evaluation_error)) {
+                    std::cerr << "Aim 控制连续性帧无效："
+                              << evaluation_error << '\n';
+                    return false;
+                }
+                if (has_aim_annotations &&
+                    !aim::detail::record_aim_evaluation(
+                        aim_annotation, aim_evaluation_config, failed_frame,
                         result.aim_evaluation, evaluation_error)) {
                     std::cerr << "Aim 评价帧无效：" << evaluation_error << '\n';
                     return false;
@@ -700,7 +726,7 @@ bool benchmark_video(Detector& detector,
                 });
             result.best_confidence_sum += best->confidence;
         }
-        if (has_aim_annotations) {
+        if (run_aim_continuity) {
             AimFrame aim_frame;
             aim_frame.sequence = static_cast<std::uint64_t>(frame_index + 1U);
             aim_frame.captured_at = aim_time_origin +
@@ -715,10 +741,19 @@ bool benchmark_video(Detector& detector,
             aim_frame.source_pixels_per_roi_pixel_y = 1.0f;
             aim_frame.detections = std::move(detections);
             const AimResult aim_result = aim_runner.process(aim_frame);
+            const auto evaluation_frame =
+                make_aim_evaluation_frame(aim_result);
             std::string evaluation_error;
-            if (!aim::detail::record_aim_evaluation(
-                    aim_annotation, aim_evaluation_config,
-                    make_aim_evaluation_frame(aim_result),
+            if (!aim::detail::record_aim_control_continuity(
+                    aim_evaluation_config, evaluation_frame,
+                    result.aim_evaluation.control, evaluation_error)) {
+                std::cerr << "Aim 控制连续性帧无效："
+                          << evaluation_error << '\n';
+                return false;
+            }
+            if (has_aim_annotations &&
+                !aim::detail::record_aim_evaluation(
+                    aim_annotation, aim_evaluation_config, evaluation_frame,
                     result.aim_evaluation, evaluation_error)) {
                 std::cerr << "Aim 评价帧无效：" << evaluation_error << '\n';
                 return false;
@@ -758,6 +793,23 @@ bool benchmark_video(Detector& detector,
         std::cerr << "视频实际解码帧数与可见性标注帧数不一致："
                   << open_path << '\n';
         return false;
+    }
+    if (run_aim_continuity) {
+        std::string evaluation_error;
+        if (!aim::detail::finalize_aim_control_continuity(
+                result.frame_count, result.aim_evaluation.control,
+                evaluation_error)) {
+            std::cerr << "Aim 控制连续性未完整覆盖视频："
+                      << evaluation_error << '\n';
+            return false;
+        }
+        if (result.aim_evaluation.control.invalid_aim_frames != 0) {
+            std::cerr << "Aim 控制连续性存在失败帧：" << open_path
+                      << "，failed="
+                      << result.aim_evaluation.control.invalid_aim_frames
+                      << '\n';
+            return false;
+        }
     }
     if (has_aim_annotations) {
         std::string evaluation_error;
@@ -828,7 +880,12 @@ void write_video_result(std::ostream& output,
         output << detector::detail::video_visibility_evaluable_rate(
             result.visibility);
     }
-    output << ',' << (result.aim_annotations_present ? 1 : 0)
+    const auto& control = result.aim_evaluation.control;
+    output << ',' << (result.aim_continuity_enabled ? 1 : 0)
+           << ',' << (control.complete ? 1 : 0)
+           << ',' << control.evaluated_frames
+           << ',' << control.invalid_aim_frames
+           << ',' << (result.aim_annotations_present ? 1 : 0)
            << ',' << (result.aim_evaluation.complete ? 1 : 0)
            << ',' << csv_escape(result.aim_policy)
            << ',' << result.aim_evaluation.annotated_frames
@@ -846,7 +903,38 @@ void write_video_result(std::ostream& output,
            << ',' << result.aim_evaluation.ignored_frames
            << ',' << result.aim_evaluation.output_target_frames
            << ',' << result.aim_evaluation.invalid_aim_frames;
-    if (result.aim_annotations_present) {
+    const double limit_boundary_rate = control.command_frames > 0
+        ? static_cast<double>(control.limit_boundary_frames) /
+              static_cast<double>(control.command_frames)
+        : 0.0;
+    output << ',' << control.command_frames
+           << ',' << control.observed_command_frames
+           << ',' << control.predicted_command_frames
+           << ',' << control.target_without_command_frames
+           << ',' << control.no_target_frames
+           << ',' << control.predicted_target_frames
+           << ',' << control.continuity_segments
+           << ',' << control.target_switches
+           << ',' << control.target_state_changes
+           << ',' << control.prediction_state_changes
+           << ',' << control.direction_reversals
+           << ',' << control.limit_boundary_frames
+           << ',' << limit_boundary_rate;
+    const auto write_distribution = [&](
+            const aim::detail::AimDistributionSummary& summary) {
+        output << ',' << summary.samples
+               << ',' << summary.mean
+               << ',' << summary.p50
+               << ',' << summary.p95
+               << ',' << summary.p99
+               << ',' << summary.maximum;
+    };
+    write_distribution(control.abs_dx_counts);
+    write_distribution(control.abs_dy_counts);
+    write_distribution(control.magnitude_counts);
+    write_distribution(control.delta_counts);
+    write_distribution(control.acceleration_counts);
+    if (result.aim_continuity_enabled) {
         output << ',' << csv_escape(join_ints(
                                result.aim_config.person_class_ids))
                << ',' << csv_escape(join_ints(result.aim_config.head_class_ids))
@@ -860,12 +948,18 @@ void write_video_result(std::ostream& output,
                << ',' << result.aim_config.switch_confirm_frames
                << ',' << result.aim_config.switch_cooldown_frames
                << ',' << result.aim_config.body_aim_height_ratio
+               << ',' << result.aim_config.deadzone_pixels
+               << ',' << result.aim_config.smoothing
+               << ',' << result.aim_config.counts_per_pixel_x
+               << ',' << result.aim_config.counts_per_pixel_y
+               << ',' << result.aim_config.max_counts_per_frame
+               << ',' << result.aim_config.predicted_gain
                << ',' << result.aim_evaluation_config.min_iou
                << ',' << result.aim_evaluation_config.max_center_distance
                << ',' << result.aim_timebase_fps;
     } else {
-        // 无真值时不运行 Aim，也不伪造一套看似参与了本次基准的追踪配置。
-        constexpr int kAimConfigurationColumns = 15;
+        // 未启用控制连续性时不运行 Aim，也不伪造一套看似参与了本次基准的配置。
+        constexpr int kAimConfigurationColumns = 21;
         for (int index = 0; index < kAimConfigurationColumns; ++index) {
             output << ',';
         }
@@ -912,7 +1006,8 @@ bool benchmark_videos(Detector& detector,
                       const std::filesystem::path& visibility_directory,
                       bool has_visibility_annotations,
                       const std::filesystem::path& aim_annotation_directory,
-                      bool has_aim_annotations) {
+                      bool has_aim_annotations,
+                      bool run_aim_continuity) {
     std::error_code error;
     if (!std::filesystem::is_directory(video_directory, error)) {
         std::cerr << "视频目录不存在："
@@ -1024,6 +1119,8 @@ bool benchmark_videos(Detector& detector,
               "longest_visible_miss_sequence,not_visible_frames,"
               "not_visible_detected_frames,ignored_frames,"
               "ignored_detected_frames,evaluable_frame_rate,"
+              "aim_continuity,aim_control_complete,"
+              "aim_control_evaluated_frames,aim_control_invalid_frames,"
               "aim_annotations,aim_complete,aim_policy,"
               "aim_annotated_frames,aim_visible_frames,"
               "aim_matched_visible_frames,"
@@ -1031,12 +1128,37 @@ bool benchmark_videos(Detector& detector,
               "aim_track_fragments,aim_track_fragmentation_events,"
               "aim_unnecessary_switches,aim_not_visible_frames,"
               "aim_ignored_frames,aim_output_target_frames,"
-              "aim_invalid_frames,aim_person_class_ids,aim_head_class_ids,"
+              "aim_invalid_frames,aim_command_frames,"
+              "aim_observed_command_frames,aim_predicted_command_frames,"
+              "aim_target_without_command_frames,aim_no_target_frames,"
+              "aim_predicted_target_frames,aim_continuity_segments,"
+              "aim_target_switches,aim_target_state_changes,"
+              "aim_prediction_state_changes,aim_direction_reversals,"
+              "aim_limit_boundary_frames,aim_limit_boundary_rate,"
+              "aim_abs_dx_samples,aim_abs_dx_mean_counts,"
+              "aim_abs_dx_p50_counts,aim_abs_dx_p95_counts,"
+              "aim_abs_dx_p99_counts,aim_abs_dx_max_counts,"
+              "aim_abs_dy_samples,aim_abs_dy_mean_counts,"
+              "aim_abs_dy_p50_counts,aim_abs_dy_p95_counts,"
+              "aim_abs_dy_p99_counts,aim_abs_dy_max_counts,"
+              "aim_magnitude_samples,aim_magnitude_mean_counts,"
+              "aim_magnitude_p50_counts,aim_magnitude_p95_counts,"
+              "aim_magnitude_p99_counts,aim_magnitude_max_counts,"
+              "aim_delta_samples,aim_delta_mean_counts,"
+              "aim_delta_p50_counts,aim_delta_p95_counts,"
+              "aim_delta_p99_counts,aim_delta_max_counts,"
+              "aim_acceleration_samples,aim_acceleration_mean_counts,"
+              "aim_acceleration_p50_counts,aim_acceleration_p95_counts,"
+              "aim_acceleration_p99_counts,aim_acceleration_max_counts,"
+              "aim_person_class_ids,aim_head_class_ids,"
               "aim_high_confidence,aim_low_confidence,"
               "aim_min_confirmed_hits,aim_max_lost_frames,aim_min_iou,"
               "aim_max_center_distance,aim_switch_margin,"
               "aim_switch_confirm_frames,aim_switch_cooldown_frames,"
-              "aim_body_aim_height_ratio,aim_evaluation_min_iou,"
+              "aim_body_aim_height_ratio,aim_deadzone_pixels,"
+              "aim_smoothing,aim_counts_per_pixel_x,"
+              "aim_counts_per_pixel_y,aim_max_counts_per_frame,"
+              "aim_predicted_gain,aim_evaluation_min_iou,"
               "aim_evaluation_max_center_distance,aim_timebase_fps,"
               "preprocess_mean_ms,preprocess_p50_ms,preprocess_p95_ms,"
               "preprocess_p99_ms,inference_mean_ms,inference_p50_ms,"
@@ -1065,7 +1187,7 @@ bool benchmark_videos(Detector& detector,
         if (!benchmark_video(
                 detector, video_path, use_center_crop, annotation_path,
                 has_visibility_annotations, aim_annotation_path,
-                has_aim_annotations, result)) {
+                has_aim_annotations, run_aim_continuity, result)) {
             return false;
         }
         aim_visible_frames += result.aim_evaluation.visible_frames;
@@ -1102,7 +1224,9 @@ bool benchmark_videos(Detector& detector,
         } else {
             std::cout << "n/a";
         }
-        std::cout << ", total_p50=" << percentile(result.total_ms, 0.50)
+        std::cout << ", aim_commands="
+                  << result.aim_evaluation.control.command_frames
+                  << ", total_p50=" << percentile(result.total_ms, 0.50)
                   << "ms, total_p95=" << percentile(result.total_ms, 0.95)
                   << "ms, total_p99=" << percentile(result.total_ms, 0.99)
                   << "ms" << std::endl;
@@ -1151,7 +1275,8 @@ int main(int argc, char* argv[]) {
                      "[--comparison-image <图像路径>] "
                      "[--gpu-preprocess on|off] "
                      "[--visibility-directory <标注目录>] "
-                     "[--aim-annotation-directory <标注目录>]\n";
+                     "[--aim-annotation-directory <标注目录>] "
+                     "[--aim-continuity]\n";
         return 2;
     }
 
@@ -1379,7 +1504,9 @@ int main(int argc, char* argv[]) {
                 input_mode == "center", visibility_directory,
                 !options.visibility_directory.empty(),
                 aim_annotation_directory,
-                !options.aim_annotation_directory.empty())) {
+                !options.aim_annotation_directory.empty(),
+                options.enable_aim_continuity ||
+                    !options.aim_annotation_directory.empty())) {
             return 1;
         }
     }

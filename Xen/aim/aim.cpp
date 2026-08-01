@@ -1,5 +1,7 @@
 #include "aim/aim.h"
 
+#include "aim/aim_config_internal.h"
+
 #include "log/log.h"
 
 #include <algorithm>
@@ -98,23 +100,7 @@ struct Aim::Impl {
     bool controller_initialized = false;
 
     bool valid_config() const noexcept {
-        return config.high_confidence >= config.low_confidence &&
-               config.low_confidence >= 0.0f &&
-               config.high_confidence <= 1.0f &&
-               config.min_confirmed_hits > 0 && config.max_lost_frames >= 0 &&
-               config.min_iou >= 0.0f && config.min_iou <= 1.0f &&
-               config.max_center_distance > 0.0f &&
-               config.switch_margin >= 0.0f && config.switch_margin < 1.0f &&
-               config.switch_confirm_frames > 0 &&
-               config.switch_cooldown_frames >= 0 &&
-               config.body_aim_height_ratio >= 0.0f &&
-               config.body_aim_height_ratio <= 1.0f &&
-               config.deadzone_pixels >= 0.0f &&
-               config.smoothing >= 0.0f && config.smoothing <= 1.0f &&
-               config.counts_per_pixel_x > 0.0f &&
-               config.counts_per_pixel_y > 0.0f &&
-               config.max_counts_per_frame > 0.0f &&
-               config.predicted_gain >= 0.0f && config.predicted_gain <= 1.0f;
+        return aim::detail::valid_aim_config(config);
     }
 
     std::vector<Observation> build_observations(
