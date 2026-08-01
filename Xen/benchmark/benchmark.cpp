@@ -214,6 +214,11 @@ bool validate_runtime_snapshot(
             std::string(expected_provider) + ", actual=" + snapshot.provider);
         return false;
     }
+    if (snapshot.d3d11_cuda_interop !=
+        options.enable_d3d11_cuda_interop) {
+        set_error(error, "Runtime D3D11/CUDA 互操作状态不符合请求");
+        return false;
+    }
     if (snapshot.failed_frames != 0) {
         set_error(error, "Runtime 已记录失败帧: " +
             std::to_string(snapshot.failed_frames));
@@ -605,6 +610,13 @@ BenchmarkParseStatus parse_benchmark_options(
                     set_error(error, "--gpu-preprocess 必须是 on/off");
                     return BenchmarkParseStatus::INVALID;
                 }
+            } else if (argument == L"--d3d11-cuda-interop") {
+                if (!parse_switch(
+                        value, parsed.enable_d3d11_cuda_interop)) {
+                    set_error(error,
+                              "--d3d11-cuda-interop 必须是 on/off");
+                    return BenchmarkParseStatus::INVALID;
+                }
             } else {
                 std::string unknown;
                 wide_to_utf8(argument, unknown);
@@ -653,6 +665,14 @@ bool validate_benchmark_options(
         if (!gpu_backend && !options.provider_profile_path.empty()) {
             set_error(error,
                       "DirectML/CPU 不接受 --provider-profile");
+            return false;
+        }
+        if (options.enable_d3d11_cuda_interop &&
+            (options.backend != BackendType::TENSORRT ||
+             !options.enable_cuda_graph ||
+             !options.enable_gpu_preprocess)) {
+            set_error(error,
+                "D3D11/CUDA 互操作只支持 TensorRT CUDA Graph GPU 前处理");
             return false;
         }
         if (options.warmup_samples > kMaximumReportSamples ||
@@ -772,6 +792,7 @@ std::string benchmark_usage() {
         "  --fp16 on|off            TensorRT FP16，默认 on\n"
         "  --cuda-graph on|off      TensorRT CUDA Graph，默认 on\n"
         "  --gpu-preprocess on|off  CUDA 前处理，默认 on\n"
+        "  --d3d11-cuda-interop on|off  DXGI GPU-only 输入，默认 off\n"
         "  --help                   显示帮助\n";
 }
 
@@ -841,6 +862,8 @@ bool run_runtime_benchmark(
         config.detector.enable_trt_cuda_graph = options.enable_cuda_graph;
         config.detector.enable_gpu_preprocess =
             options.enable_gpu_preprocess;
+        config.capture.enable_d3d11_cuda_interop =
+            options.enable_d3d11_cuda_interop;
         config.detector.enable_output_fingerprint = false;
         config.detector.enable_ort_profiling = false;
         config.detector.ort_profile_prefix.clear();
@@ -942,6 +965,31 @@ bool run_runtime_benchmark(
                                             set_error(error,
                                                 "无界面基准出现 Mouse 发送记录");
                                             return false;
+                                        }
+                                        const auto& detector_profile =
+                                            sample.profile.detector;
+                                        if (detector_profile.d3d11_cuda_interop !=
+                                                options.enable_d3d11_cuda_interop) {
+                                            set_error(error,
+                                                "样本 D3D11/CUDA 互操作状态不符合请求");
+                                            return false;
+                                        }
+                                        if (options.enable_d3d11_cuda_interop) {
+                                            const std::uint64_t expected_copy =
+                                                static_cast<std::uint64_t>(
+                                                    sample.geometry.roi_width) *
+                                                static_cast<std::uint64_t>(
+                                                    sample.geometry.roi_height) * 4U;
+                                            if (detector_profile.h2d_ms != 0.0 ||
+                                                detector_profile.input_upload_bytes != 0 ||
+                                                detector_profile.input_device_copy_bytes !=
+                                                    expected_copy ||
+                                                !detector_profile.gpu_preprocess ||
+                                                !detector_profile.explicit_device_copy) {
+                                                set_error(error,
+                                                    "互操作样本违反零 host upload 或设备复制台账");
+                                                return false;
+                                            }
                                         }
                                         if (warmup_successful <
                                                 options.warmup_samples) {

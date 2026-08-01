@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <mutex>
 #include <onnxruntime_cxx_api.h>
 #include "detector/detector.h"
 
@@ -11,12 +12,15 @@ namespace detector::detail {
 
 struct SessionRunProfile {
     double h2d_ms = 0.0;
+    double d3d11_to_cuda_ms = 0.0;
     double gpu_preprocess_ms = 0.0;
     double execution_ms = 0.0;
     double d2h_ms = 0.0;
     bool explicit_device_copy = false;
     bool gpu_preprocess = false;
+    bool d3d11_cuda_interop = false;
     std::uint64_t input_upload_bytes = 0;
+    std::uint64_t input_device_copy_bytes = 0;
 };
 
 /// ONNX Runtime 会话的轻量封装
@@ -40,6 +44,18 @@ public:
     bool stage_gpu_input(const cv::Mat& bgr_image) noexcept;
     const std::vector<Ort::Value>* run_gpu_preprocessed(
         SessionRunProfile& profile);
+    bool d3d11_interop_enabled() const noexcept;
+    bool prepare_d3d11_preprocessed(
+        void* d3d11_texture,
+        int width,
+        int height,
+        std::mutex& synchronization) noexcept;
+    const std::vector<Ort::Value>* run_d3d11_preprocessed(
+        void* d3d11_texture,
+        int width,
+        int height,
+        std::mutex& synchronization,
+        SessionRunProfile& profile);
 
     size_t                        num_inputs() const;
     std::vector<int64_t>          input_shape() const;
@@ -55,10 +71,20 @@ public:
     const std::string&            active_provider() const noexcept;
 
 private:
+    enum class CudaGraphInput {
+        HOST_FLOAT,
+        STAGED_BGR,
+        D3D11_BGRA8,
+    };
+
     const std::vector<Ort::Value>* run_cuda_graph(
         const void* host_input,
         size_t host_input_bytes,
-        bool gpu_preprocessed,
+        CudaGraphInput input_source,
+        void* d3d11_texture,
+        int d3d11_width,
+        int d3d11_height,
+        std::mutex* d3d11_synchronization,
         SessionRunProfile& profile);
 
     struct Impl;

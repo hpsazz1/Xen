@@ -588,11 +588,20 @@ bool Session::load(const std::string& path) {
 const std::vector<Ort::Value>* Session::run_cuda_graph(
         const void* host_input,
         size_t host_input_bytes,
-        bool gpu_preprocessed,
+        CudaGraphInput input_source,
+        void* d3d11_texture,
+        int d3d11_width,
+        int d3d11_height,
+        std::mutex* d3d11_synchronization,
         SessionRunProfile& profile) {
 #if XEN_HAS_CUDA_RUNTIME
+    const bool gpu_preprocessed =
+        input_source != CudaGraphInput::HOST_FLOAT;
+    const bool d3d11_interop =
+        input_source == CudaGraphInput::D3D11_BGRA8;
     profile.explicit_device_copy = true;
     profile.gpu_preprocess = gpu_preprocessed;
+    profile.d3d11_cuda_interop = d3d11_interop;
 
     const cudaError_t set_device_result = cudaSetDevice(impl_->device_id);
     if (set_device_result != cudaSuccess) {
@@ -630,7 +639,7 @@ const std::vector<Ort::Value>* Session::run_cuda_graph(
         return nullptr;
     }
 
-    if (gpu_preprocessed) {
+    if (input_source == CudaGraphInput::STAGED_BGR) {
         if (!impl_->gpu_preprocessor ||
             !impl_->gpu_preprocessor->enqueue_upload(impl_->compute_stream)) {
             const cudaError_t error = impl_->gpu_preprocessor
@@ -642,6 +651,23 @@ const std::vector<Ort::Value>* Session::run_cuda_graph(
         }
         profile.input_upload_bytes = static_cast<std::uint64_t>(
             impl_->gpu_preprocessor->upload_bytes());
+        pending_work.work_queued = true;
+    } else if (input_source == CudaGraphInput::D3D11_BGRA8) {
+        if (!impl_->gpu_preprocessor ||
+            !d3d11_synchronization ||
+            !impl_->gpu_preprocessor->enqueue_d3d11_bgra(
+                d3d11_texture, d3d11_width, d3d11_height,
+                *d3d11_synchronization,
+                impl_->compute_stream)) {
+            const cudaError_t error = impl_->gpu_preprocessor
+                ? impl_->gpu_preprocessor->last_error()
+                : cudaErrorInvalidValue;
+            LOG_DEBUG("detector", "D3D11/CUDA 输入映射失败: {}",
+                      cudaGetErrorString(error));
+            return nullptr;
+        }
+        profile.input_device_copy_bytes = static_cast<std::uint64_t>(
+            impl_->gpu_preprocessor->d3d11_copy_bytes());
         pending_work.work_queued = true;
     } else {
         if (!host_input || host_input_bytes == 0) return nullptr;
@@ -669,10 +695,16 @@ const std::vector<Ort::Value>* Session::run_cuda_graph(
 
     cudaEvent_t execution_started = impl_->h2d_finished;
     if (gpu_preprocessed) {
-        if (!impl_->gpu_preprocessor->enqueue_convert(
-                static_cast<float*>(
-                    impl_->device_input_value.GetTensorMutableRawData()),
-                impl_->compute_stream)) {
+        const bool convert_enqueued = d3d11_interop
+            ? impl_->gpu_preprocessor->enqueue_convert_bgra(
+                  static_cast<float*>(
+                      impl_->device_input_value.GetTensorMutableRawData()),
+                  impl_->compute_stream)
+            : impl_->gpu_preprocessor->enqueue_convert(
+                  static_cast<float*>(
+                      impl_->device_input_value.GetTensorMutableRawData()),
+                  impl_->compute_stream);
+        if (!convert_enqueued) {
             LOG_DEBUG("detector", "CUDA 前处理 kernel 入队失败: {}",
                       cudaGetErrorString(
                           impl_->gpu_preprocessor->last_error()));
@@ -749,7 +781,11 @@ const std::vector<Ort::Value>* Session::run_cuda_graph(
         LOG_DEBUG("detector", "CUDA 分阶段耗时读取失败");
         return nullptr;
     }
-    profile.h2d_ms = static_cast<double>(h2d_ms);
+    if (d3d11_interop) {
+        profile.d3d11_to_cuda_ms = static_cast<double>(h2d_ms);
+    } else {
+        profile.h2d_ms = static_cast<double>(h2d_ms);
+    }
     profile.gpu_preprocess_ms = static_cast<double>(gpu_preprocess_ms);
     profile.execution_ms = static_cast<double>(execution_ms);
     profile.d2h_ms = static_cast<double>(d2h_ms);
@@ -757,7 +793,11 @@ const std::vector<Ort::Value>* Session::run_cuda_graph(
 #else
     (void)host_input;
     (void)host_input_bytes;
-    (void)gpu_preprocessed;
+    (void)input_source;
+    (void)d3d11_texture;
+    (void)d3d11_width;
+    (void)d3d11_height;
+    (void)d3d11_synchronization;
     (void)profile;
     return nullptr;
 #endif
@@ -774,7 +814,7 @@ const std::vector<Ort::Value>* Session::run(
         if (impl_->use_cuda_graph) {
             return run_cuda_graph(
                 input.GetTensorRawData(), input.GetTensorSizeInBytes(),
-                false, profile);
+                CudaGraphInput::HOST_FLOAT, nullptr, 0, 0, nullptr, profile);
         }
 
         const auto execution_started = clock::now();
@@ -820,12 +860,65 @@ const std::vector<Ort::Value>* Session::run_gpu_preprocessed(
     profile = {};
     if (!impl_->session || !gpu_preprocess_enabled()) return nullptr;
     try {
-        return run_cuda_graph(nullptr, 0, true, profile);
+        return run_cuda_graph(
+            nullptr, 0, CudaGraphInput::STAGED_BGR,
+            nullptr, 0, 0, nullptr, profile);
     } catch (const std::exception& e) {
         LOG_DEBUG("detector", "ORT GPU 前处理推理失败: {}", e.what());
         return nullptr;
     } catch (...) {
         LOG_DEBUG("detector", "ORT GPU 前处理推理失败: 未知异常");
+        return nullptr;
+    }
+}
+
+bool Session::d3d11_interop_enabled() const noexcept {
+    // D3D11 纹理入口严格复用 TensorRT CUDA Graph 的固定设备 I/O 和
+    // GPU 前处理工作区；普通 CUDA EP/CPU 路径不允许隐式回退。
+    return gpu_preprocess_enabled() && impl_ &&
+           impl_->active_provider == "TensorrtExecutionProvider";
+}
+
+bool Session::prepare_d3d11_preprocessed(
+        void* d3d11_texture,
+        int width,
+        int height,
+        std::mutex& synchronization) noexcept {
+#if XEN_HAS_CUDA_RUNTIME
+    return d3d11_interop_enabled() && d3d11_texture &&
+           width > 0 && height > 0 &&
+           impl_->gpu_preprocessor->register_d3d11_bgra(
+               d3d11_texture, width, height, synchronization);
+#else
+    (void)d3d11_texture;
+    (void)width;
+    (void)height;
+    (void)synchronization;
+    return false;
+#endif
+}
+
+const std::vector<Ort::Value>* Session::run_d3d11_preprocessed(
+        void* d3d11_texture,
+        int width,
+        int height,
+        std::mutex& synchronization,
+        SessionRunProfile& profile) {
+    profile = {};
+    if (!impl_->session || !d3d11_interop_enabled() ||
+        !d3d11_texture || width <= 0 || height <= 0) {
+        return nullptr;
+    }
+    try {
+        return run_cuda_graph(
+            nullptr, 0, CudaGraphInput::D3D11_BGRA8,
+            d3d11_texture, width, height, &synchronization, profile);
+    } catch (const std::exception& e) {
+        LOG_DEBUG("detector", "ORT D3D11/CUDA 互操作推理失败: {}",
+                  e.what());
+        return nullptr;
+    } catch (...) {
+        LOG_DEBUG("detector", "ORT D3D11/CUDA 互操作推理失败: 未知异常");
         return nullptr;
     }
 }

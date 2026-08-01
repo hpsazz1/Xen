@@ -146,6 +146,7 @@ struct RuntimeSnapshot {
     std::uint64_t mouse_commands = 0;
     std::uint64_t debug_samples_dropped = 0;
     bool preview_enabled = false;
+    bool d3d11_cuda_interop = false;
     std::uint64_t preview_sampled_frames = 0;
     std::uint64_t preview_dropped_frames = 0;
     std::uint64_t last_sequence = 0;

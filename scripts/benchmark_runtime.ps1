@@ -47,6 +47,8 @@
     [string]$EnableCudaGraph = "on",
     [ValidateSet("on", "off")]
     [string]$EnableGpuPreprocess = "on",
+    [ValidateSet("on", "off")]
+    [string]$EnableD3D11CudaInterop = "off",
     [string]$ReadyFilePath = ""
 )
 
@@ -346,6 +348,11 @@ if ($ExpectedRoiX + $ExpectedRoiWidth -gt $ExpectedSourceWidth -or
     $ExpectedRoiY + $ExpectedRoiHeight -gt $ExpectedSourceHeight) {
     throw "期望 ROI 超出主机 FOV。"
 }
+if ($EnableD3D11CudaInterop -eq "on" -and
+    ($Backend -ne "tensorrt" -or $EnableCudaGraph -ne "on" -or
+     $EnableGpuPreprocess -ne "on")) {
+    throw "D3D11/CUDA 互操作要求 TensorRT、CUDA Graph 和 GPU 前处理全部启用。"
+}
 
 $repositoryRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot ".."))
@@ -430,6 +437,7 @@ $sdkRoots = @(Assert-RuntimeDllOrigins `
 $enableFp16Value = $EnableFp16 -eq "on"
 $enableCudaGraphValue = $EnableCudaGraph -eq "on"
 $enableGpuPreprocessValue = $EnableGpuPreprocess -eq "on"
+$enableD3D11CudaInteropValue = $EnableD3D11CudaInterop -eq "on"
 
 $arguments = @(
     "--model", $ModelPath,
@@ -446,7 +454,8 @@ $arguments = @(
     "--expect-scale", "$ExpectedScaleX,$ExpectedScaleY",
     "--fp16", $EnableFp16,
     "--cuda-graph", $EnableCudaGraph,
-    "--gpu-preprocess", $EnableGpuPreprocess
+    "--gpu-preprocess", $EnableGpuPreprocess,
+    "--d3d11-cuda-interop", $EnableD3D11CudaInterop
 )
 if ($requiresProviderProfile) {
     $arguments += @("--provider-profile", $pendingProviderProfile)
@@ -549,8 +558,8 @@ $expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
 } else {
     $captureBackendNames[$ExpectedCaptureBackend]
 }
-if ($report.schema -ne 3) {
-    throw "报告 schema 不是 3：$($report.schema)"
+if ($report.schema -ne 4) {
+    throw "报告 schema 不是 4：$($report.schema)"
 }
 if (-not [string]::IsNullOrEmpty($expectedCaptureName) -and
     $report.capture_backend -ne $expectedCaptureName) {
@@ -576,6 +585,10 @@ if ($snapshot.runtime_state -ne "STOPPED" -or
     $snapshot.output_armed -or
     -not [string]::IsNullOrEmpty([string]$snapshot.last_error)) {
     throw "最终 Runtime 快照不符合零失败、零物理输入契约。"
+}
+if ([bool]$snapshot.d3d11_cuda_interop -ne
+    $enableD3D11CudaInteropValue) {
+    throw "最终 Runtime 互操作状态不符合请求。"
 }
 if ($snapshot.source_width -ne $ExpectedSourceWidth -or
     $snapshot.source_height -ne $ExpectedSourceHeight -or
@@ -615,9 +628,23 @@ foreach ($sample in @($report.samples)) {
     if ([bool]$sample.explicit_device_copy -ne $expectExplicitDeviceCopy) {
         throw "第 $sampleIndex 个样本的显式设备复制语义不符合 CUDA Graph 配置。"
     }
-    if ([bool]$sample.gpu_preprocess -ne $expectGpuPreprocess -or
-        ($expectGpuPreprocess -and $sample.input_upload_bytes -le 0)) {
+    if ([bool]$sample.gpu_preprocess -ne $expectGpuPreprocess) {
         throw "第 $sampleIndex 个样本的 GPU 前处理语义不符合请求。"
+    }
+    if ([bool]$sample.d3d11_cuda_interop -ne
+        $enableD3D11CudaInteropValue) {
+        throw "第 $sampleIndex 个样本的 D3D11/CUDA 互操作语义不符合请求。"
+    }
+    if ($enableD3D11CudaInteropValue) {
+        $expectedDeviceCopyBytes = [uint64]$ExpectedRoiWidth *
+            [uint64]$ExpectedRoiHeight * 4
+        if ([uint64]$sample.input_upload_bytes -ne 0 -or
+            [uint64]$sample.input_device_copy_bytes -ne
+                $expectedDeviceCopyBytes) {
+            throw "第 $sampleIndex 个互操作样本违反零 host upload 或设备复制字节契约。"
+        }
+    } elseif ($expectGpuPreprocess -and $sample.input_upload_bytes -le 0) {
+        throw "第 $sampleIndex 个 CPU BGR GPU 前处理样本缺少 H2D 上传字节。"
     }
     Assert-Near $sample.source_pixels_per_pixel_x $ExpectedScaleX `
         "第 $sampleIndex 个样本 X 比例"
@@ -714,6 +741,7 @@ $environment = [ordered]@{
         fp16 = $enableFp16Value
         cuda_graph = $enableCudaGraphValue
         gpu_preprocess = $enableGpuPreprocessValue
+        d3d11_cuda_interop = $enableD3D11CudaInteropValue
         expected_explicit_device_copy = $expectExplicitDeviceCopy
         detector_intra_threads = 0
         detector_inter_threads = 0

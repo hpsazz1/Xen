@@ -28,6 +28,7 @@ struct TimingValues {
     std::vector<double> preprocess;
     std::vector<double> inference;
     std::vector<double> h2d;
+    std::vector<double> d3d11_to_cuda;
     std::vector<double> gpu_preprocess;
     std::vector<double> execution;
     std::vector<double> d2h;
@@ -76,6 +77,8 @@ void collect_timing(TimingValues& values,
     values.preprocess.push_back(sample.profile.detector.preprocess_ms);
     values.inference.push_back(sample.profile.detector.inference_ms);
     values.h2d.push_back(sample.profile.detector.h2d_ms);
+    values.d3d11_to_cuda.push_back(
+        sample.profile.detector.d3d11_to_cuda_ms);
     values.gpu_preprocess.push_back(
         sample.profile.detector.gpu_preprocess_ms);
     values.execution.push_back(sample.profile.detector.execution_ms);
@@ -108,6 +111,7 @@ DebugReportSummary make_summary(
     result.preprocess = summarize(values.preprocess);
     result.inference = summarize(values.inference);
     result.h2d = summarize(values.h2d);
+    result.d3d11_to_cuda = summarize(values.d3d11_to_cuda);
     result.gpu_preprocess = summarize(values.gpu_preprocess);
     result.execution = summarize(values.execution);
     result.d2h = summarize(values.d2h);
@@ -249,6 +253,8 @@ void append_csv_snapshot(std::ostringstream& output,
         << snapshot.source_pixels_per_pixel_y << '\n'
         << "# final_capture_fps," << snapshot.capture_fps << '\n'
         << "# final_source_fps," << snapshot.source_fps << '\n'
+        << "# final_d3d11_cuda_interop,"
+        << bool_name(snapshot.d3d11_cuda_interop) << '\n'
         << "# final_output_allowed_by_config,"
         << bool_name(snapshot.output_allowed_by_config) << '\n'
         << "# final_output_armed," << bool_name(snapshot.output_armed) << '\n'
@@ -309,6 +315,8 @@ void append_json_snapshot(std::ostringstream& output,
         << snapshot.source_pixels_per_pixel_y << ",\n"
         << "    \"capture_fps\": " << snapshot.capture_fps << ",\n"
         << "    \"source_fps\": " << snapshot.source_fps << ",\n"
+        << "    \"d3d11_cuda_interop\": "
+        << bool_name(snapshot.d3d11_cuda_interop) << ",\n"
         << "    \"output_allowed_by_config\": "
         << bool_name(snapshot.output_allowed_by_config) << ",\n"
         << "    \"output_armed\": " << bool_name(snapshot.output_armed)
@@ -443,7 +451,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             samples_, report_samples_dropped_,
             final_snapshot.debug_samples_dropped);
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v3\n"
+        csv << "# Xen Runtime Debug Report v4\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -465,6 +473,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_csv_timing(csv, "inference", summary_.inference);
         append_csv_timing(csv, "h2d", summary_.h2d);
         append_csv_timing(
+            csv, "d3d11_to_cuda", summary_.d3d11_to_cuda);
+        append_csv_timing(
             csv, "gpu_preprocess", summary_.gpu_preprocess);
         append_csv_timing(csv, "execution", summary_.execution);
         append_csv_timing(csv, "d2h", summary_.d2h);
@@ -473,10 +483,11 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_csv_timing(csv, "mouse", summary_.mouse);
         append_csv_timing(csv, "total", summary_.total);
         csv << "sequence,capture_ms,queue_ms,preprocess_ms,inference_ms,"
-               "h2d_ms,gpu_preprocess_ms,execution_ms,d2h_ms,"
+               "h2d_ms,d3d11_to_cuda_ms,gpu_preprocess_ms,execution_ms,d2h_ms,"
                "postprocess_ms,aim_ms,mouse_ms,"
                "total_ms,detection_status,aim_status,mouse_status,mouse_sent,"
-               "explicit_device_copy,gpu_preprocess,input_upload_bytes,"
+               "explicit_device_copy,gpu_preprocess,d3d11_cuda_interop,"
+               "input_upload_bytes,input_device_copy_bytes,"
                "encoded_width,"
                "encoded_height,source_width,source_height,roi_x,roi_y,"
                "roi_width,roi_height,source_pixels_per_pixel_x,"
@@ -488,6 +499,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.profile.detector.preprocess_ms << ','
                 << sample.profile.detector.inference_ms << ','
                 << sample.profile.detector.h2d_ms << ','
+                << sample.profile.detector.d3d11_to_cuda_ms << ','
                 << sample.profile.detector.gpu_preprocess_ms << ','
                 << sample.profile.detector.execution_ms << ','
                 << sample.profile.detector.d2h_ms << ','
@@ -502,7 +514,10 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << bool_name(
                     sample.profile.detector.explicit_device_copy) << ','
                 << bool_name(sample.profile.detector.gpu_preprocess) << ','
+                << bool_name(
+                    sample.profile.detector.d3d11_cuda_interop) << ','
                 << sample.profile.detector.input_upload_bytes << ','
+                << sample.profile.detector.input_device_copy_bytes << ','
                 << sample.geometry.encoded_width << ','
                 << sample.geometry.encoded_height << ','
                 << sample.geometry.source_width << ','
@@ -518,7 +533,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 3,\n"
+             << "{\n  \"schema\": 4,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -542,6 +557,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_json_timing(json, "preprocess", summary_.preprocess, false);
         append_json_timing(json, "inference", summary_.inference, false);
         append_json_timing(json, "h2d", summary_.h2d, false);
+        append_json_timing(
+            json, "d3d11_to_cuda", summary_.d3d11_to_cuda, false);
         append_json_timing(
             json, "gpu_preprocess", summary_.gpu_preprocess, false);
         append_json_timing(json, "execution", summary_.execution, false);
@@ -567,8 +584,13 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                      sample.profile.detector.explicit_device_copy)
                  << ", \"gpu_preprocess\": "
                  << bool_name(sample.profile.detector.gpu_preprocess)
+                 << ", \"d3d11_cuda_interop\": "
+                 << bool_name(
+                     sample.profile.detector.d3d11_cuda_interop)
                  << ", \"input_upload_bytes\": "
                  << sample.profile.detector.input_upload_bytes
+                 << ", \"input_device_copy_bytes\": "
+                 << sample.profile.detector.input_device_copy_bytes
                  << ", \"encoded_width\": "
                  << sample.geometry.encoded_width
                  << ", \"encoded_height\": "

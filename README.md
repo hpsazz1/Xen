@@ -6,7 +6,7 @@ Xen 是基于 C++20 原生实现的 Windows AI 辅助瞄准工具。核心管线
 XUDP 生产发送端、KMBOX NET 鼠标后端与独立鼠标性能基准工具的源码和自动回环测试：
 
 ```text
-Desktop Duplication ──────┐
+Desktop Duplication CPU/D3D11 ─┐
 OBS/FFmpeg UDP MJPEG ─────┤
 XenSender DXGI/XUDP ────────┤
 OBS/NDI Sender ───────────┴→ Detector → Aim → Runtime SafetyGate ─┬→ Win32 SendInput
@@ -65,16 +65,19 @@ Xen/                           # 仓库根目录
   输出武装并重置 Aim 状态；加载窗口拒绝新的武装请求。
 - Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；样本同时固化主机 FOV、编码
   尺寸、ROI 和像素比例，避免网络重连或显示模式变化造成的瞬时坐标漂移被最终快照掩盖。主线程
-  在会话结束时将其发布为 schema 3 的
+  在会话结束时将其发布为 schema 4 的
   `cache/runtime/<进程-运行时钟-generation-segment>.csv/.json`。模型重载前结束当前报告，
   加载窗口不记录样本，完成后按实际活动模型和 Provider 开始新分段，避免新旧模型混合统计。
   报告按成功/失败状态隔离耗时，
-  输出 capture、queue、preprocess、inference、H2D、GPU preprocess、execution、D2H、postprocess、aim、
+  输出 capture、queue、preprocess、inference、H2D、D3D11→CUDA、GPU preprocess、execution、D2H、postprocess、aim、
   mouse、total 的 mean/P50/P95/P99/最大值；报告队列满载只覆盖最旧诊断样本，不反压核心线程。
-- 当前兼容链仍从 Capture 交付 CPU BGR ROI。TensorRT CUDA Graph 默认用 OpenCV 在 CPU 完成
+- 默认兼容链仍从 Capture 交付 CPU BGR ROI。TensorRT CUDA Graph 默认用 OpenCV 在 CPU 完成
   resize/LetterBox，再经固定 pinned `uint8` staging 上传，由 CUDA kernel 完成 BGR→RGB、归一化和
-  HWC→CHW；DirectML、CPU、CUDA 非 Graph 保持 CPU float 前处理。D3D11/CUDA 或 D3D11/DirectML
-  互操作仍待真实链路基准后实施，当前不宣称消除 `GPU → CPU → GPU` 往返。
+  HWC→CHW；DirectML、CPU、CUDA 非 Graph 保持 CPU float 前处理。显式开启
+  `capture.enable_d3d11_cuda_interop` 时，Desktop Duplication 改为发布三槽 BGRA8 D3D11 纹理，
+  Runtime 启动期预注册 CUDA 资源，并通过 TensorRT CUDA Graph 消除 host upload。该路径要求 ROI
+  等于模型静态输入、实际 Provider 为 TensorRT，且会关闭 ROI 预览和运行期模型热重载；默认关闭。
+  D3D11/DirectML 互操作仍待实施。
 - Overlay 采用 152 px 居中标签栏和无外框独立工作区。自绘标题栏在侧栏交界处仅用底色分区：左段与侧栏同色，右段与工作区同色，并随浅色/深色主题同步切换；标题栏和顶部控制条下方均不绘制分割线。侧栏仅保留概览、检测、瞄准、输入和设置五个标签，底部以无边框两行状态区展示输出门状态和版本。工作区底色从交界处连续铺满，顶部控制条保留 18 px、页面内容保留 28 px 左侧间距，只为状态卡、配置组等内部模块保留细边框；配置页保存操作固定在页头。运行期间仅 Detector 配置允许编辑、保存和热重载，Capture、Aim、Input 与 Runtime 配置仍锁定。
 - 当前 Overlay 已经人工确认并作为后续 UI 扩展基线。新增部件必须复用现有语义色、间距、表单控件和内部模块样式，不得增加工作区外框、嵌套卡片或新的导航分组；改变整体布局或主题体系前必须重新人工复核。
 - Codex 浅色与深色主题可在偏好设置中切换并保存到 `config.ini`。窗口尺寸的配置与实际拖拽下限统一为 `820×600`；连续数值使用“滑块粗调 + 数值框精确输入”，手填值在 Enter 或失焦时按合法范围校验。
@@ -219,6 +222,13 @@ TensorRT 和 CUDA 允许节点级回退，环境清单会通过独立 ORT profil
 TensorRT 允许 `TensorRT -> CUDA -> CPU`，CUDA 允许 `CUDA -> CPU`。profiling Session 与正式
 性能 Session 分离，诊断开销不会混入正式样本。DirectML 会禁用 CPU 节点回退。
 
+D3D11/CUDA 互操作短跑可追加 `-EnableD3D11CudaInterop on`。脚本会强制要求 Desktop
+Duplication、TensorRT、CUDA Graph 与 GPU 前处理，并逐样本核对 `h2d_ms=0`、
+`input_upload_bytes=0`、`input_device_copy_bytes=roi_w*roi_h*4`。2026-08-01 的 265 帧真实
+DXGI 短跑为 265/265 成功，total P50/P95/P99 为 4.240/4.555/4.645 ms，D3D11→CUDA P50
+为 3.486 ms；这只证明链路和报告门禁正确，且显示当前 legacy interop 没有延迟优势，不能替代
+5 分钟 on/off 正式 A/B，也不构成默认开启依据。
+
 UDP、XUDP 和 NDI 接收正式验收使用统一包装脚本。以下命令在辅机启动 XUDP 接收端；显式
 `ReadyFilePath` 便于外部编排在 Capture 已绑定、Runtime 为 `RUNNING` 且实际 Provider 校验
 通过后再启动主机 Sender。ready JSON 只声明接收端可收帧，其中几何名为
@@ -307,6 +317,8 @@ ctest --test-dir build -C Release --output-on-failure
 - 生产库回归：Log、Config、Debug、Benchmark 和 Mouse Benchmark 直接链接生产目标；
 - OS/网络可复现替身：Crash 子进程、UDP/XUDP/NDI 回环、假 KMBOX 与 Keyboard 状态机；
 - 可选真实模型集成：设置 `XEN_TEST_MODEL` 后增加 Detector 加载/变化输入和 Runtime 热重载；
+- CUDA 真实模型构建还增加 D3D11/CUDA 纹理预注册、连续变化输入、Graph 输出指纹与 CPU 对照，
+  因而当前 GPU 配置共注册 18 个 CTest；
 - 正式性能与部署验收：使用 `scripts/benchmark_*.ps1`，不把短单元测试耗时写成性能结论。
 
 测试不得复制一套生产协议或算法，不得因环境缺失静默回退后端，也不得通过删除、跳过或放宽
@@ -373,6 +385,11 @@ DirectML 使用官方独立 ORT 包，不能与 CUDA/TensorRT 版 `onnxruntime.d
 固定 float 输入，再执行 Graph 和 D2H，避免把首次输入错误地重复重放。320×320 输入由此把
 每帧上传量从 1,228,800 字节降为 307,200 字节。动态 shape 或诊断图捕获问题时设置
 `enable_trt_cuda_graph = false`；需要 A/B 时设置 `enable_gpu_preprocess = false`。
+
+Desktop Duplication 的可选 CUDA 互操作还会复用三张固定 BGRA8 D3D11 ROI 纹理和一块固定
+CUDA BGRA staging。D3D copy/Flush 与 CUDA map/copy/unmap 使用同一个短提交锁，防止两个业务
+线程把隐式同步调用交错成驱动死锁；高成本 registration 只在 Runtime 启动期执行，停止时先注销
+CUDA 资源再关闭 D3D11 设备。该路径当前以 INI/Benchmark 显式开关启用，默认路径不受影响。
 
 GPU 前处理 A/B 使用已构建的真实模型测试程序，在 clean `PATH` 下核对变化输入、Graph on/off、
 失败帧、检测连续性和上传字节数：
@@ -535,6 +552,10 @@ clean `PATH` 下分别显式请求三种输出契约，核对真实 Provider、�
 `RUNNING` 接受请求，且同一时刻只允许一个候选加载。加载期间旧 Detector 继续服务；成功切换
 不复制当前帧或张量，只交换 Detector 所有权，旧 Session 在加载线程释放。加载失败写入独立的
 `detector_reload_error`，不会把 Runtime 置为 `FAILED`。
+
+D3D11/CUDA 互操作启用时，三个纹理的 registration 与 Capture 设备同寿命；为避免旧 Session
+注销资源时 Capture 仍向空闲槽提交 copy，该模式拒绝运行期热重载。需要换模型时应先停止
+Runtime，保存新配置后重新启动。
 
 停止期间若 TensorRT 正在首次构建 Engine，Runtime 会先停止 Capture/Pipeline，再等待不可取消的
 ORT/TensorRT Session 创建自然结束并丢弃候选。该等待可能持续十几秒，但不会 detach 后台线程或在

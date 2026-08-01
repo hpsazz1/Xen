@@ -60,6 +60,24 @@ struct Runtime::Impl {
     std::chrono::steady_clock::time_point fps_started{};
     std::uint64_t fps_frame_count = 0;
 
+    bool validate_d3d11_interop_detector(
+            const Detector& candidate,
+            std::string& error) const noexcept {
+        if (!config.capture.enable_d3d11_cuda_interop) return true;
+        if (candidate.backend_name() != "TensorrtExecutionProvider" ||
+            !candidate.d3d11_interop_supported()) {
+            error = "D3D11/CUDA 互操作要求实际 TensorRT CUDA Graph GPU 前处理";
+            return false;
+        }
+        if (candidate.input_width() != config.capture.roi_width ||
+            candidate.input_height() != config.capture.roi_height) {
+            error = "D3D11/CUDA 互操作要求 Capture ROI 与模型输入尺寸完全一致";
+            return false;
+        }
+        error.clear();
+        return true;
+    }
+
     void set_error(const std::string& error) noexcept {
         try {
             std::lock_guard<std::mutex> lock(snapshot_mutex);
@@ -118,11 +136,45 @@ struct Runtime::Impl {
             set_error("Detector 模型加载失败");
             return false;
         }
+        if (!validate_d3d11_interop_detector(*detector, validation_error)) {
+            set_error(validation_error);
+            return false;
+        }
+        if (config.capture.enable_d3d11_cuda_interop) {
+            // 预览目前只接受 CPU BGR。互操作会话强制关闭诊断支路，避免为
+            // UI 恢复逐帧 readback；后续应另做最高 10 FPS 的 GPU readback。
+            if (!preview_channel.set_enabled(false)) {
+                set_error("关闭不兼容的 ROI 预览失败");
+                return false;
+            }
+        }
         aim = std::make_unique<Aim>(config.aim);
         capture = create_capture(config.capture);
         if (!capture || !capture->open()) {
             set_error(capture ? capture->last_error() : "创建 Capture 失败");
             return false;
+        }
+        if (config.capture.enable_d3d11_cuda_interop) {
+            // 三槽纹理必须在 Capture/Pipeline 线程启动前完成创建和 CUDA 注册。
+            // 若先提交 D3D copy 再从另一线程首次注册，驱动同步可能形成互等。
+            const auto slots = frame_queue.initialization_slots();
+            for (const auto& slot : slots) {
+                if (!slot || !capture->prepare_frame(*slot)) {
+                    set_error(capture->last_error().empty()
+                        ? "预创建 D3D11/CUDA 帧槽失败"
+                        : capture->last_error());
+                    return false;
+                }
+                if (!detector->prepare_d3d11({
+                        slot->native_storage,
+                        slot->native_synchronization,
+                        slot->width,
+                        slot->height})) {
+                    set_error("预注册 D3D11/CUDA 帧槽失败");
+                    return false;
+                }
+            }
+            LOG_INFO("runtime", "D3D11/CUDA 三槽纹理已预创建并注册");
         }
         mouse = MouseDeviceFactory::create(config.mouse);
         if (!mouse || !mouse->open()) {
@@ -149,6 +201,8 @@ struct Runtime::Impl {
             current_snapshot.output_allowed_by_config =
                 config.mouse.allow_send_input;
             current_snapshot.preview_enabled = preview_enabled;
+            current_snapshot.d3d11_cuda_interop =
+                config.capture.enable_d3d11_cuda_interop;
         }
         pipeline_samples.clear();
         debug_samples.reset();
@@ -201,8 +255,8 @@ struct Runtime::Impl {
                 current_snapshot.encoded_height = write_slot->encoded_height;
                 current_snapshot.source_width = write_slot->source_width;
                 current_snapshot.source_height = write_slot->source_height;
-                current_snapshot.capture_roi_width = write_slot->bgr.cols;
-                current_snapshot.capture_roi_height = write_slot->bgr.rows;
+                current_snapshot.capture_roi_width = write_slot->width;
+                current_snapshot.capture_roi_height = write_slot->height;
                 current_snapshot.capture_roi_x = write_slot->roi_x;
                 current_snapshot.capture_roi_y = write_slot->roi_y;
                 current_snapshot.source_pixels_per_pixel_x =
@@ -260,8 +314,8 @@ struct Runtime::Impl {
         sample.geometry.encoded_height = frame.encoded_height;
         sample.geometry.source_width = frame.source_width;
         sample.geometry.source_height = frame.source_height;
-        sample.geometry.roi_width = frame.bgr.cols;
-        sample.geometry.roi_height = frame.bgr.rows;
+        sample.geometry.roi_width = frame.width;
+        sample.geometry.roi_height = frame.height;
         sample.geometry.roi_x = frame.roi_x;
         sample.geometry.roi_y = frame.roi_y;
         sample.geometry.source_pixels_per_pixel_x =
@@ -314,7 +368,16 @@ struct Runtime::Impl {
                         false, std::memory_order_acq_rel)) {
                     aim->reset();
                 }
-                detections = detector->detect(frame->bgr);
+                if (frame->storage ==
+                    CapturedFrameStorage::D3D11_BGRA8) {
+                    detections = detector->detect_d3d11({
+                        frame->native_storage,
+                        frame->native_synchronization,
+                        frame->width,
+                        frame->height});
+                } else {
+                    detections = detector->detect(frame->bgr);
+                }
                 profile.detector = detector->profile();
             }
             AimResult aim_result;
@@ -324,8 +387,8 @@ struct Runtime::Impl {
             if (profile.detector.status == DetectionStatus::SUCCESS) {
                 aim_frame.sequence = frame->timing.sequence;
                 aim_frame.captured_at = frame->timing.captured_at;
-                aim_frame.roi_width = frame->bgr.cols;
-                aim_frame.roi_height = frame->bgr.rows;
+                aim_frame.roi_width = frame->width;
+                aim_frame.roi_height = frame->height;
                 aim_frame.control_center_x = static_cast<float>(
                     (frame->source_width * 0.5 - frame->roi_x) /
                     frame->source_pixels_per_pixel_x);
@@ -380,12 +443,14 @@ struct Runtime::Impl {
                     (frame->source_height * 0.5 - frame->roi_y) /
                     frame->source_pixels_per_pixel_y)
                 : 0.0f;
-            preview_channel.publish(
-                frame->bgr, frame->timing.sequence,
-                control_center_x, control_center_y,
-                profile.detector.status, aim_result.status,
-                preview_detections, aim_result,
-                std::chrono::steady_clock::now());
+            if (frame->storage == CapturedFrameStorage::CPU_BGR) {
+                preview_channel.publish(
+                    frame->bgr, frame->timing.sequence,
+                    control_center_x, control_center_y,
+                    profile.detector.status, aim_result.status,
+                    preview_detections, aim_result,
+                    std::chrono::steady_clock::now());
+            }
             update_pipeline_snapshot(*frame, profile, aim_result,
                                      mouse->status(), mouse_sent);
         }
@@ -394,8 +459,10 @@ struct Runtime::Impl {
     void release_modules() noexcept {
         if (keyboard) keyboard->close();
         if (mouse) mouse->close();
-        if (capture) capture->close();
+        // CUDA registration 持有 D3D11 资源引用。先销毁 Detector/registration，
+        // 再关闭 Capture 的 D3D11 设备，保持跨 API 释放顺序可解释。
         if (detector) detector->reset();
+        if (capture) capture->close();
         if (aim) aim->reset();
         keyboard.reset();
         mouse.reset();
@@ -529,6 +596,19 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
             }
         }
 
+        if (impl_->config.capture.enable_d3d11_cuda_interop) {
+            // 互操作预处理器会跨帧缓存三槽 D3D11 资源的 CUDA 注册。
+            // 热重载销毁旧 Session 时 Capture 线程仍可能向空闲槽提交 GPU copy，
+            // 因此首版契约要求先停止 Runtime，再更换模型并重新启动。
+            std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
+            impl_->current_snapshot.detector_reload_state =
+                DetectorReloadState::FAILED;
+            impl_->current_snapshot.detector_reload_error =
+                "D3D11/CUDA 互操作启用时不支持 Detector 热重载；"
+                "请停止 Runtime 后更换模型";
+            return false;
+        }
+
         AppConfig candidate_config = impl_->config;
         candidate_config.detector = config;
         std::string validation_error;
@@ -567,14 +647,21 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
                          config.model_path);
                 auto candidate = std::make_unique<Detector>(config);
                 if (!candidate->load()) candidate.reset();
+                std::string interop_error;
+                if (candidate &&
+                    !state->validate_d3d11_interop_detector(
+                        *candidate, interop_error)) {
+                    candidate.reset();
+                }
 
                 if (state->stop_requested.load(std::memory_order_acquire)) {
                     return;
                 }
 
                 if (!candidate) {
-                    std::string reload_error =
-                        "Detector 模型加载失败: " + config.model_path;
+                    std::string reload_error = interop_error.empty()
+                        ? "Detector 模型加载失败: " + config.model_path
+                        : interop_error;
                     {
                         std::lock_guard<std::mutex> lock(
                             state->snapshot_mutex);
@@ -725,6 +812,9 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
 
 bool Runtime::set_preview_enabled(bool enabled) noexcept {
     if (!impl_) return false;
+    if (enabled && impl_->config.capture.enable_d3d11_cuda_interop) {
+        return false;
+    }
     const bool succeeded = impl_->preview_channel.set_enabled(enabled);
     if (!succeeded) return false;
     try {

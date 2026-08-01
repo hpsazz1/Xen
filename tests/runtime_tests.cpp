@@ -14,6 +14,16 @@ namespace {
 
 int failures = 0;
 
+struct ReleaseProbe {
+    explicit ReleaseProbe(int* counter) : released(counter) {}
+    ReleaseProbe(const ReleaseProbe&) = delete;
+    ReleaseProbe& operator=(const ReleaseProbe&) = delete;
+    int* released = nullptr;
+    ~ReleaseProbe() {
+        if (released) ++*released;
+    }
+};
+
 void expect(bool condition, const std::string& message) {
     if (condition) return;
     ++failures;
@@ -28,6 +38,9 @@ void publish(runtime::detail::LatestFrameQueue& queue,
     if (!slot) return;
     slot->bgr.create(2, 2, CV_8UC3);
     slot->bgr.setTo(cv::Scalar(marker, marker, marker));
+    slot->storage = CapturedFrameStorage::CPU_BGR;
+    slot->width = 2;
+    slot->height = 2;
     slot->timing.sequence = sequence;
     slot->timing.captured_at = std::chrono::steady_clock::now();
     queue.publish(slot);
@@ -35,6 +48,14 @@ void publish(runtime::detail::LatestFrameQueue& queue,
 
 void test_latest_frame_queue() {
     runtime::detail::LatestFrameQueue queue;
+    {
+        const auto initialization_slots = queue.initialization_slots();
+        expect(initialization_slots[0] && initialization_slots[1] &&
+                   initialization_slots[2] &&
+                   initialization_slots[0] != initialization_slots[1] &&
+                   initialization_slots[1] != initialization_slots[2],
+               "Runtime 启动期必须取得三个互不相同的固定帧槽");
+    }
     std::atomic<bool> stop{false};
     publish(queue, 1, 10);
     const auto first = queue.wait_latest(0, stop);
@@ -71,6 +92,26 @@ void test_network_storage_released_on_reset() {
     queue.reset();
     expect(!slot->bgr_storage && slot->bgr.empty(),
            "Runtime 重置时必须归还异步 Capture 缓冲槽");
+}
+
+void test_gpu_storage_released_on_reset() {
+    runtime::detail::LatestFrameQueue queue;
+    auto slot = queue.acquire_write();
+    expect(slot != nullptr, "队列应提供 GPU 帧测试槽");
+    if (!slot) return;
+    int released = 0;
+    slot->native_storage = std::make_shared<ReleaseProbe>(&released);
+    slot->native_synchronization = std::make_shared<std::mutex>();
+    slot->storage = CapturedFrameStorage::D3D11_BGRA8;
+    slot->width = 320;
+    slot->height = 320;
+    slot->timing.sequence = 1;
+    queue.publish(slot);
+    queue.reset();
+    expect(!slot->native_storage && !slot->native_synchronization &&
+               slot->storage == CapturedFrameStorage::CPU_BGR &&
+               slot->width == 0 && slot->height == 0 && released == 1,
+           "Runtime 重置必须释放旧会话 GPU 资源并清空显式几何");
 }
 
 void test_safety_gate() {
@@ -275,6 +316,7 @@ void test_runtime_preview_held_slots_and_reset() {
 int main() {
     test_latest_frame_queue();
     test_network_storage_released_on_reset();
+    test_gpu_storage_released_on_reset();
     test_safety_gate();
     test_bounded_sample_ring();
     test_runtime_preview_channel();

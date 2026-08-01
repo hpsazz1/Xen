@@ -48,6 +48,7 @@ void test_main_machine_defaults() {
                options.maximum_seconds == 600 && options.enable_fp16 &&
                options.enable_cuda_graph &&
                options.enable_gpu_preprocess &&
+               !options.enable_d3d11_cuda_interop &&
                options.provider_profile_path ==
                    "reports/runtime.provider-profile.json",
             "正式门槛和 TensorRT 优化默认值必须稳定");
@@ -166,6 +167,29 @@ void test_invalid_options() {
                   L"--ready-file", L""}, options, error) ==
                BenchmarkParseStatus::INVALID,
            "显式传入空 ready-file 路径必须拒绝");
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"cuda",
+                  L"--report-prefix", L"report",
+                  L"--provider-profile", L"report.provider.json",
+                  L"--d3d11-cuda-interop", L"on"}, options, error) ==
+               BenchmarkParseStatus::INVALID,
+           "D3D11/CUDA 互操作不得用于普通 CUDA EP");
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"tensorrt",
+                  L"--report-prefix", L"report",
+                  L"--provider-profile", L"report.provider.json",
+                  L"--d3d11-cuda-interop", L"on",
+                  L"--cuda-graph", L"off"}, options, error) ==
+               BenchmarkParseStatus::INVALID,
+           "D3D11/CUDA 互操作关闭 CUDA Graph 时必须拒绝");
+    expect(parse({L"--model", L"model.onnx",
+                  L"--backend", L"tensorrt",
+                  L"--report-prefix", L"report",
+                  L"--provider-profile", L"report.provider.json",
+                  L"--d3d11-cuda-interop", L"on"}, options, error) ==
+               BenchmarkParseStatus::READY &&
+               options.enable_d3d11_cuda_interop,
+           "TensorRT CUDA Graph GPU 前处理应接受显式 D3D11 互操作");
     expect(parse({L"--help"}, options, error) ==
                BenchmarkParseStatus::HELP,
            "--help 不应要求其他必选参数");

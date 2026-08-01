@@ -87,6 +87,8 @@ class LatestFrameQueue {
 public:
     LatestFrameQueue();
 
+    std::array<std::shared_ptr<CapturedFrame>, 3>
+        initialization_slots() noexcept;
     std::shared_ptr<CapturedFrame> acquire_write() noexcept;
     void publish(const std::shared_ptr<CapturedFrame>& frame) noexcept;
     std::shared_ptr<const CapturedFrame> wait_latest(

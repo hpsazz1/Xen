@@ -14,6 +14,17 @@ LatestFrameQueue::LatestFrameQueue() {
     }
 }
 
+std::array<std::shared_ptr<CapturedFrame>, 3>
+LatestFrameQueue::initialization_slots() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (latest_ || stopped_) return {};
+        return pool_;
+    } catch (...) {
+        return {};
+    }
+}
+
 std::shared_ptr<CapturedFrame> LatestFrameQueue::acquire_write() noexcept {
     try {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -30,7 +41,20 @@ std::shared_ptr<CapturedFrame> LatestFrameQueue::acquire_write() noexcept {
 
 void LatestFrameQueue::publish(
         const std::shared_ptr<CapturedFrame>& frame) noexcept {
-    if (!frame || frame->timing.sequence == 0) return;
+    if (!frame || frame->timing.sequence == 0 ||
+        frame->width <= 0 || frame->height <= 0) {
+        return;
+    }
+    if (frame->storage == CapturedFrameStorage::CPU_BGR) {
+        if (frame->bgr.empty() || frame->bgr.type() != CV_8UC3 ||
+            frame->bgr.cols != frame->width ||
+            frame->bgr.rows != frame->height) {
+            return;
+        }
+    } else if (!frame->native_storage || !frame->native_synchronization ||
+               !frame->bgr.empty()) {
+        return;
+    }
     try {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -90,6 +114,12 @@ void LatestFrameQueue::reset() noexcept {
                 slot->bgr.release();
                 slot->bgr_storage.reset();
             }
+            // D3D11 互操作纹理由帧槽持有，跨 Runtime 会话不能复用旧设备资源。
+            slot->native_storage.reset();
+            slot->native_synchronization.reset();
+            slot->storage = CapturedFrameStorage::CPU_BGR;
+            slot->width = 0;
+            slot->height = 0;
             slot->timing = {};
             slot->roi_x = 0;
             slot->roi_y = 0;

@@ -260,6 +260,106 @@ struct Detector::Impl {
         return true;
     }
 
+    std::vector<Detection> finish_run(
+            const std::vector<Ort::Value>* outputs,
+            const detector::detail::SessionRunProfile& session_profile,
+            const detector::detail::LetterBoxInfo& letterbox_info,
+            const DetectorConfig& config,
+            std::chrono::steady_clock::time_point started,
+            std::chrono::steady_clock::time_point preprocessed,
+            std::chrono::steady_clock::time_point inferred,
+            InferenceProfile& profile) {
+        using milliseconds = std::chrono::duration<double, std::milli>;
+
+        profile.preprocess_ms = std::chrono::duration_cast<milliseconds>(
+            preprocessed - started).count();
+        profile.inference_ms = std::chrono::duration_cast<milliseconds>(
+            inferred - preprocessed).count();
+        profile.h2d_ms = session_profile.h2d_ms;
+        profile.d3d11_to_cuda_ms = session_profile.d3d11_to_cuda_ms;
+        profile.gpu_preprocess_ms = session_profile.gpu_preprocess_ms;
+        profile.execution_ms = session_profile.execution_ms;
+        profile.d2h_ms = session_profile.d2h_ms;
+        profile.explicit_device_copy = session_profile.explicit_device_copy;
+        profile.gpu_preprocess = session_profile.gpu_preprocess;
+        profile.d3d11_cuda_interop = session_profile.d3d11_cuda_interop;
+        profile.input_upload_bytes = session_profile.input_upload_bytes;
+        profile.input_device_copy_bytes =
+            session_profile.input_device_copy_bytes;
+        if (!outputs) {
+            profile.status = DetectionStatus::INFERENCE_FAILED;
+            return {};
+        }
+        if (outputs->size() != 1 || !(*outputs)[0].IsTensor()) {
+            profile.status = DetectionStatus::INVALID_OUTPUT;
+            return {};
+        }
+
+        const auto output_info = (*outputs)[0].GetTensorTypeAndShapeInfo();
+        if (output_info.GetElementType() !=
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            profile.status = DetectionStatus::INVALID_OUTPUT;
+            return {};
+        }
+        const auto output_shape = output_info.GetShape();
+        const OutputFormat requested = requested_output_format(
+            config, metadata_end_to_end, output_shape);
+
+        OutputFormat resolved = OutputFormat::AUTO;
+        if (!detector::detail::resolve_output_format(
+                output_shape, requested, resolved)) {
+            profile.status = DetectionStatus::INVALID_OUTPUT;
+            return {};
+        }
+        if (resolved_output_format.has_value() &&
+            *resolved_output_format != resolved) {
+            profile.status = DetectionStatus::INVALID_OUTPUT;
+            return {};
+        }
+        resolved_output_format = resolved;
+
+        const float* output_data = (*outputs)[0].GetTensorData<float>();
+        if (config.enable_output_fingerprint) {
+            profile.output_fingerprint = fnv1a_64(
+                output_data, (*outputs)[0].GetTensorSizeInBytes());
+        }
+
+        candidate_detections.clear();
+        if (!detector::detail::decode_output(
+                output_data, output_shape, resolved,
+                config.conf_threshold, candidate_detections)) {
+            profile.status = DetectionStatus::INVALID_OUTPUT;
+            return {};
+        }
+
+        std::vector<Detection> detections;
+        if (!detector::detail::finalize_detections(
+                candidate_detections, resolved, config.nms_threshold,
+                config.top_k, letterbox_info, detections,
+                nms_suppressed)) {
+            profile.status = DetectionStatus::POSTPROCESS_FAILED;
+            return {};
+        }
+        const auto finished = std::chrono::steady_clock::now();
+        profile.postprocess_ms = std::chrono::duration_cast<milliseconds>(
+            finished - inferred).count();
+        profile.total_ms = std::chrono::duration_cast<milliseconds>(
+            finished - started).count();
+        profile.status = DetectionStatus::SUCCESS;
+
+        LOG_TRACE(
+            "detector",
+            "format={}, pre={:.2f}ms infer={:.2f}ms h2d={:.2f}ms d3d11_cuda={:.2f}ms gpu_pre={:.2f}ms exec={:.2f}ms d2h={:.2f}ms post={:.2f}ms total={:.2f}ms upload={}B device_copy={}B det={}",
+            output_format_name(resolved), profile.preprocess_ms,
+            profile.inference_ms, profile.h2d_ms,
+            profile.d3d11_to_cuda_ms, profile.gpu_preprocess_ms,
+            profile.execution_ms, profile.d2h_ms,
+            profile.postprocess_ms, profile.total_ms,
+            profile.input_upload_bytes, profile.input_device_copy_bytes,
+            detections.size());
+        return detections;
+    }
+
     std::vector<Detection> run(const cv::Mat& bgr_image,
                                const DetectorConfig& config,
                                InferenceProfile& profile) {
@@ -303,91 +403,35 @@ struct Detector::Impl {
             outputs = session.run(input_tensor, session_profile);
         }
         const auto inferred = clock::now();
-        profile.preprocess_ms =
-            std::chrono::duration_cast<milliseconds>(preprocessed - start).count();
-        profile.inference_ms =
-            std::chrono::duration_cast<milliseconds>(inferred - preprocessed).count();
-        profile.h2d_ms = session_profile.h2d_ms;
-        profile.gpu_preprocess_ms = session_profile.gpu_preprocess_ms;
-        profile.execution_ms = session_profile.execution_ms;
-        profile.d2h_ms = session_profile.d2h_ms;
-        profile.explicit_device_copy = session_profile.explicit_device_copy;
-        profile.gpu_preprocess = session_profile.gpu_preprocess;
-        profile.input_upload_bytes = session_profile.input_upload_bytes;
-        if (!outputs) {
-            profile.status = DetectionStatus::INFERENCE_FAILED;
-            return {};
-        }
-        if (outputs->size() != 1 || !(*outputs)[0].IsTensor()) {
-            profile.status = DetectionStatus::INVALID_OUTPUT;
-            return {};
-        }
+        return finish_run(
+            outputs, session_profile, letterbox_info, config,
+            start, preprocessed, inferred, profile);
+    }
 
-        const auto output_info = (*outputs)[0].GetTensorTypeAndShapeInfo();
-        if (output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-            profile.status = DetectionStatus::INVALID_OUTPUT;
-            return {};
-        }
-        const auto output_shape = output_info.GetShape();
+    std::vector<Detection> run_d3d11(
+            const D3D11TextureFrame& frame,
+            const DetectorConfig& config,
+            InferenceProfile& profile) {
+        using clock = std::chrono::steady_clock;
 
-        const OutputFormat requested = requested_output_format(
-            config, metadata_end_to_end, output_shape);
+        const auto started = clock::now();
+        detector::detail::LetterBoxInfo letterbox_info;
+        letterbox_info.scale = 1.0f;
+        letterbox_info.orig_w = frame.width;
+        letterbox_info.orig_h = frame.height;
+        letterbox_info.target_w = static_cast<int>(width);
+        letterbox_info.target_h = static_cast<int>(height);
+        const auto preprocessed = clock::now();
 
-        OutputFormat resolved = OutputFormat::AUTO;
-        if (!detector::detail::resolve_output_format(
-                output_shape, requested, resolved)) {
-            profile.status = DetectionStatus::INVALID_OUTPUT;
-            return {};
-        }
-        if (resolved_output_format.has_value() &&
-            *resolved_output_format != resolved) {
-            // 同一会话输出契约发生变化意味着模型或动态输出不符合约定。
-            profile.status = DetectionStatus::INVALID_OUTPUT;
-            return {};
-        }
-        resolved_output_format = resolved;
-
-        const float* output_data = (*outputs)[0].GetTensorData<float>();
-        if (config.enable_output_fingerprint) {
-            // 指纹只用于回归测试。关闭时不读取原始输出，避免给正式热路径
-            // 增加一次完整张量遍历和额外缓存带宽。
-            profile.output_fingerprint = fnv1a_64(
-                output_data, (*outputs)[0].GetTensorSizeInBytes());
-        }
-
-        candidate_detections.clear();
-        if (!detector::detail::decode_output(
-                output_data, output_shape, resolved,
-                config.conf_threshold, candidate_detections)) {
-            profile.status = DetectionStatus::INVALID_OUTPUT;
-            return {};
-        }
-
-        std::vector<Detection> detections;
-        if (!detector::detail::finalize_detections(
-                candidate_detections, resolved, config.nms_threshold,
-                config.top_k, letterbox_info, detections,
-                nms_suppressed)) {
-            profile.status = DetectionStatus::POSTPROCESS_FAILED;
-            return {};
-        }
-        const auto finished = clock::now();
-
-        profile.postprocess_ms =
-            std::chrono::duration_cast<milliseconds>(finished - inferred).count();
-        profile.total_ms =
-            std::chrono::duration_cast<milliseconds>(finished - start).count();
-        profile.status = DetectionStatus::SUCCESS;
-
-        LOG_TRACE("detector",
-                  "format={}, pre={:.2f}ms infer={:.2f}ms h2d={:.2f}ms gpu_pre={:.2f}ms exec={:.2f}ms d2h={:.2f}ms post={:.2f}ms total={:.2f}ms upload={}B det={}",
-                  output_format_name(resolved), profile.preprocess_ms,
-                  profile.inference_ms, profile.h2d_ms,
-                  profile.gpu_preprocess_ms, profile.execution_ms,
-                  profile.d2h_ms,
-                  profile.postprocess_ms, profile.total_ms,
-                  profile.input_upload_bytes, detections.size());
-        return detections;
+        detector::detail::SessionRunProfile session_profile;
+        const auto* outputs = session.run_d3d11_preprocessed(
+            frame.resource.get(), frame.width, frame.height,
+            *frame.synchronization,
+            session_profile);
+        const auto inferred = clock::now();
+        return finish_run(
+            outputs, session_profile, letterbox_info, config,
+            started, preprocessed, inferred, profile);
     }
 };
 
@@ -457,6 +501,66 @@ std::vector<Detection> Detector::detect(const cv::Mat& bgr_image) {
         current_profile.status = DetectionStatus::INFERENCE_FAILED;
         impl_->set_profile(current_profile);
         return {};
+    }
+}
+
+std::vector<Detection> Detector::detect_d3d11(
+        const D3D11TextureFrame& frame) {
+    InferenceProfile current_profile;
+    if (!loaded()) {
+        current_profile.status = DetectionStatus::NOT_LOADED;
+        if (impl_) impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!frame.resource || !frame.synchronization ||
+        frame.width <= 0 || frame.height <= 0 ||
+        frame.width != input_width() || frame.height != input_height()) {
+        current_profile.status = DetectionStatus::INVALID_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+    if (!d3d11_interop_supported()) {
+        current_profile.status = DetectionStatus::UNSUPPORTED_INPUT;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+
+    try {
+        auto detections = impl_->run_d3d11(
+            frame, config_, current_profile);
+        impl_->set_profile(current_profile);
+        return detections;
+    } catch (const std::exception& e) {
+        LOG_DEBUG("detector", "Detector::detect_d3d11() 失败: {}",
+                  e.what());
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    } catch (...) {
+        LOG_DEBUG("detector", "Detector::detect_d3d11() 失败: 未知异常");
+        current_profile.status = DetectionStatus::INFERENCE_FAILED;
+        impl_->set_profile(current_profile);
+        return {};
+    }
+}
+
+bool Detector::d3d11_interop_supported() const noexcept {
+    return loaded() && impl_->session.d3d11_interop_enabled();
+}
+
+bool Detector::prepare_d3d11(
+        const D3D11TextureFrame& frame) noexcept {
+    if (!d3d11_interop_supported() || !frame.resource ||
+        !frame.synchronization ||
+        frame.width != input_width() || frame.height != input_height()) {
+        return false;
+    }
+    try {
+        return impl_->session.prepare_d3d11_preprocessed(
+            frame.resource.get(), frame.width, frame.height,
+            *frame.synchronization);
+    } catch (...) {
+        return false;
     }
 }
 

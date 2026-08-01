@@ -476,7 +476,8 @@ target_link_libraries(detector
     PUBLIC  ${ONNXRUNTIME_LIB} ${OpenCV_LIBS} ${CMAKE_DL_LIBS} log
     PRIVATE Threads::Threads)
 if(XEN_ONNXRUNTIME_HAS_CUDA)
-    target_link_libraries(detector PRIVATE CUDA::cudart)
+    # CUDA D3D11 interop 仅依赖 Windows 系统 d3d11 导入库，不新增可部署 DLL。
+    target_link_libraries(detector PRIVATE CUDA::cudart d3d11)
     target_compile_definitions(detector PRIVATE XEN_HAS_CUDA_RUNTIME=1)
     set_target_properties(detector PROPERTIES
         CUDA_STANDARD 20
@@ -748,6 +749,19 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME detector_model_test
             COMMAND detector_model_test "${XEN_TEST_MODEL}")
+
+        if(XEN_ONNXRUNTIME_HAS_CUDA)
+            add_executable(d3d11_cuda_interop_tests
+                tests/d3d11_cuda_interop_tests.cpp)
+            target_link_libraries(d3d11_cuda_interop_tests PRIVATE
+                detector CUDA::cudart d3d11 dxgi)
+            xen_deploy_runtime_dlls(
+                d3d11_cuda_interop_tests OPENCV ORT)
+            add_test(NAME d3d11_cuda_interop_tests
+                COMMAND d3d11_cuda_interop_tests
+                    "${XEN_TEST_MODEL}"
+                    "${CMAKE_BINARY_DIR}/cache/tensorrt/d3d11-interop-test")
+        endif()
 
         add_executable(runtime_model_reload_test
             tests/runtime_model_reload_test.cpp)

@@ -41,6 +41,7 @@ struct BenchmarkOptions {
     bool enable_fp16 = true;
     bool enable_cuda_graph = true;
     bool enable_gpu_preprocess = true;
+    bool enable_d3d11_cuda_interop = false;
     bool backend_explicit = false;
     BenchmarkExpectedGeometry expected_geometry;
 };

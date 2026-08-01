@@ -356,6 +356,50 @@ void test_xudp_backend_round_trip() {
     std::filesystem::remove(path, ignored);
 }
 
+void test_d3d11_cuda_interop_config() {
+    AppConfig config;
+    config.detector.model_path = "models/test.onnx";
+    config.detector.backend = BackendType::TENSORRT;
+    config.capture.enable_d3d11_cuda_interop = true;
+    std::string error;
+    expect(validate_app_config(config, error),
+           "默认 Desktop/TensorRT Graph 组合应接受 D3D11/CUDA 互操作: " +
+               error);
+
+    const auto path = std::filesystem::temp_directory_path() /
+                      "xen_d3d11_cuda_interop.ini";
+    expect(save_app_config(path.string(), config, error),
+           "D3D11/CUDA 互操作配置应成功保存: " + error);
+    AppConfig loaded;
+    expect(load_app_config(path.string(), loaded, error) &&
+               loaded.capture.enable_d3d11_cuda_interop,
+           "D3D11/CUDA 互操作开关必须完整往返");
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+
+    config.capture.backend = CaptureBackend::UDP_MJPEG;
+    config.capture.udp_url = "udp://127.0.0.1:5000";
+    expect(!validate_app_config(config, error),
+           "网络 Capture 不得启用 D3D11/CUDA 互操作");
+    config.capture.backend = CaptureBackend::DESKTOP_DUPLICATION;
+    config.detector.backend = BackendType::CUDA;
+    expect(!validate_app_config(config, error),
+           "普通 CUDA EP 不得启用只为 TensorRT Graph 实现的互操作");
+    config.detector.backend = BackendType::TENSORRT;
+    config.detector.enable_trt_cuda_graph = false;
+    expect(!validate_app_config(config, error),
+           "关闭 CUDA Graph 时必须拒绝互操作");
+    config.detector.enable_trt_cuda_graph = true;
+    config.detector.enable_gpu_preprocess = false;
+    expect(!validate_app_config(config, error),
+           "关闭 GPU 前处理时必须拒绝互操作");
+    config.detector.enable_gpu_preprocess = true;
+    config.detector.input_width = 640;
+    config.detector.input_height = 640;
+    expect(!validate_app_config(config, error),
+           "显式模型输入与 Capture ROI 不一致时必须提前拒绝");
+}
+
 } // namespace
 
 int main() {
@@ -364,6 +408,7 @@ int main() {
     test_invalid_config();
     test_complete_aim_config_validation();
     test_xudp_backend_round_trip();
+    test_d3d11_cuda_interop_config();
     if (failures != 0) {
         std::cerr << "Config 测试失败数: " << failures << '\n';
         return 1;

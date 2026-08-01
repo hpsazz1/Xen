@@ -392,8 +392,18 @@ bool validate_app_config(const AppConfig& config,
                                    config.capture.ndi_source_width,
                                    config.capture.ndi_source_height,
                                    config.capture.ndi_require_frame_metadata));
+        const bool d3d11_cuda_interop_invalid =
+            config.capture.enable_d3d11_cuda_interop &&
+            (config.capture.backend !=
+                 CaptureBackend::DESKTOP_DUPLICATION ||
+             config.detector.backend != BackendType::TENSORRT ||
+             !config.detector.enable_trt_cuda_graph ||
+             !config.detector.enable_gpu_preprocess ||
+             (config.detector.input_width > 0 &&
+              (config.detector.input_width != config.capture.roi_width ||
+               config.detector.input_height != config.capture.roi_height)));
         if (common_capture_invalid || desktop_invalid || udp_invalid ||
-            xudp_invalid || ndi_invalid) {
+            xudp_invalid || ndi_invalid || d3d11_cuda_interop_invalid) {
             error = "Capture 配置非法";
             return false;
         }
@@ -532,6 +542,9 @@ bool load_app_config(const std::string& path,
             "capture", "adapter_index", candidate.capture.adapter_index));
         candidate.capture.output_index = static_cast<int>(ini.GetLongValue(
             "capture", "output_index", candidate.capture.output_index));
+        candidate.capture.enable_d3d11_cuda_interop = ini.GetBoolValue(
+            "capture", "enable_d3d11_cuda_interop",
+            candidate.capture.enable_d3d11_cuda_interop);
         candidate.capture.udp_url = ini.GetValue(
             "capture", "udp_url", candidate.capture.udp_url.c_str());
         candidate.capture.udp_read_timeout_ms = static_cast<int>(
@@ -692,6 +705,8 @@ bool save_app_config(const std::string& path,
                      capture_backend_name(config.capture.backend));
         ini.SetLongValue("capture", "adapter_index", config.capture.adapter_index);
         ini.SetLongValue("capture", "output_index", config.capture.output_index);
+        ini.SetBoolValue("capture", "enable_d3d11_cuda_interop",
+                         config.capture.enable_d3d11_cuda_interop);
         ini.SetValue("capture", "udp_url", config.capture.udp_url.c_str());
         ini.SetLongValue("capture", "udp_read_timeout_ms",
                          config.capture.udp_read_timeout_ms);

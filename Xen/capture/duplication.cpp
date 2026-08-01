@@ -101,24 +101,33 @@ public:
             hr = output1->DuplicateOutput(device_.Get(), &duplication_);
             if (FAILED(hr)) return fail_hresult("创建 Desktop Duplication 失败", hr);
 
-            D3D11_TEXTURE2D_DESC staging_desc{};
-            staging_desc.Width = static_cast<UINT>(roi_width_);
-            staging_desc.Height = static_cast<UINT>(roi_height_);
-            staging_desc.MipLevels = 1;
-            staging_desc.ArraySize = 1;
-            staging_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            staging_desc.SampleDesc.Count = 1;
-            staging_desc.Usage = D3D11_USAGE_STAGING;
-            staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            hr = device_->CreateTexture2D(&staging_desc, nullptr, &staging_);
-            if (FAILED(hr)) return fail_hresult("创建 ROI staging 纹理失败", hr);
+            if (config_.enable_d3d11_cuda_interop) {
+                interop_synchronization_ = std::make_shared<std::mutex>();
+            } else {
+                D3D11_TEXTURE2D_DESC staging_desc{};
+                staging_desc.Width = static_cast<UINT>(roi_width_);
+                staging_desc.Height = static_cast<UINT>(roi_height_);
+                staging_desc.MipLevels = 1;
+                staging_desc.ArraySize = 1;
+                staging_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                staging_desc.SampleDesc.Count = 1;
+                staging_desc.Usage = D3D11_USAGE_STAGING;
+                staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                hr = device_->CreateTexture2D(
+                    &staging_desc, nullptr, &staging_);
+                if (FAILED(hr)) {
+                    return fail_hresult("创建 ROI staging 纹理失败", hr);
+                }
+            }
 
             sequence_ = 0;
             set_error({});
             status_.store(CaptureStatus::READY, std::memory_order_release);
-            LOG_INFO("capture", "Desktop Duplication 已打开: source={}x{}, roi=({}, {}) {}x{}",
+            LOG_INFO("capture", "Desktop Duplication 已打开: source={}x{}, roi=({}, {}) {}x{}, storage={}",
                      source_width_, source_height_, roi_x_, roi_y_,
-                     roi_width_, roi_height_);
+                     roi_width_, roi_height_,
+                     config_.enable_d3d11_cuda_interop
+                         ? "D3D11_BGRA8" : "CPU_BGR");
             return true;
         } catch (...) {
             return fail(CaptureStatus::FAILURE,
@@ -126,8 +135,27 @@ public:
         }
     }
 
+    bool prepare_frame(CapturedFrame& frame) noexcept override {
+        if (!config_.enable_d3d11_cuda_interop) return true;
+        if (!device_) {
+            return fail(CaptureStatus::CLOSED,
+                        "D3D11/CUDA 帧槽预创建时 Capture 尚未打开");
+        }
+        if (!reusable_gpu_texture(frame) && !create_gpu_texture(frame)) {
+            return false;
+        }
+        frame.bgr.release();
+        frame.bgr_storage.reset();
+        frame.native_synchronization = interop_synchronization_;
+        frame.storage = CapturedFrameStorage::D3D11_BGRA8;
+        frame.width = roi_width_;
+        frame.height = roi_height_;
+        return true;
+    }
+
     CaptureStatus grab(CapturedFrame& frame) noexcept override {
-        if (!duplication_ || !context_ || !staging_) {
+        if (!duplication_ || !context_ ||
+            (!config_.enable_d3d11_cuda_interop && !staging_)) {
             return CaptureStatus::CLOSED;
         }
 
@@ -149,7 +177,6 @@ public:
             fail_hresult("Desktop Duplication 取帧失败", acquire_hr);
             return CaptureStatus::FAILURE;
         }
-
         struct FrameRelease {
             IDXGIOutputDuplication* duplication = nullptr;
             ~FrameRelease() {
@@ -173,34 +200,72 @@ public:
                 static_cast<UINT>(roi_y_ + roi_height_),
                 1,
             };
-            context_->CopySubresourceRegion(
-                staging_.Get(), 0, 0, 0, 0,
-                desktop_texture.Get(), 0, &source_box);
-
-            D3D11_MAPPED_SUBRESOURCE mapped{};
-            hr = context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-            if (FAILED(hr)) {
-                fail_hresult("映射 ROI staging 纹理失败", hr);
-                return CaptureStatus::FAILURE;
-            }
-            struct Unmap {
-                ID3D11DeviceContext* context = nullptr;
-                ID3D11Texture2D* texture = nullptr;
-                ~Unmap() {
-                    if (context && texture) context->Unmap(texture, 0);
+            if (config_.enable_d3d11_cuda_interop) {
+                ID3D11Texture2D* slot_texture =
+                    reusable_gpu_texture(frame);
+                if (!slot_texture) {
+                    fail(CaptureStatus::FAILURE,
+                         "D3D11/CUDA 帧槽未在 Runtime 启动期预创建");
+                    return CaptureStatus::FAILURE;
                 }
-            } unmap{context_.Get(), staging_.Get()};
-
-            cv::Mat bgra(roi_height_, roi_width_, CV_8UC4,
-                         mapped.pData, mapped.RowPitch);
-            // write_slot 可能来自上一次 UDP Runtime；先释放其别名视图和所有权，
-            // 再恢复为 Desktop Duplication 自有的可写 Mat 缓冲。
-            if (frame.bgr_storage) {
+                if (!frame.native_synchronization ||
+                    frame.native_synchronization !=
+                        interop_synchronization_) {
+                    fail(CaptureStatus::FAILURE,
+                         "D3D11/CUDA 帧槽缺少当前设备的提交锁");
+                    return CaptureStatus::FAILURE;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(
+                        *frame.native_synchronization);
+                    context_->CopySubresourceRegion(
+                        slot_texture, 0, 0, 0, 0,
+                        desktop_texture.Get(), 0, &source_box);
+                    // Flush 只提交而不等待。与 CUDA map/unmap 共用提交锁，
+                    // 防止另一个线程在 copy 与 Flush 之间插入隐式同步。
+                    context_->Flush();
+                }
                 frame.bgr.release();
                 frame.bgr_storage.reset();
+                frame.storage = CapturedFrameStorage::D3D11_BGRA8;
+                frame.width = roi_width_;
+                frame.height = roi_height_;
+            } else {
+                context_->CopySubresourceRegion(
+                    staging_.Get(), 0, 0, 0, 0,
+                    desktop_texture.Get(), 0, &source_box);
+
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                hr = context_->Map(
+                    staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+                if (FAILED(hr)) {
+                    fail_hresult("映射 ROI staging 纹理失败", hr);
+                    return CaptureStatus::FAILURE;
+                }
+                struct Unmap {
+                    ID3D11DeviceContext* context = nullptr;
+                    ID3D11Texture2D* texture = nullptr;
+                    ~Unmap() {
+                        if (context && texture) context->Unmap(texture, 0);
+                    }
+                } unmap{context_.Get(), staging_.Get()};
+
+                cv::Mat bgra(roi_height_, roi_width_, CV_8UC4,
+                             mapped.pData, mapped.RowPitch);
+                // write_slot 可能来自上一次 UDP Runtime；先释放其别名视图和
+                // 所有权，再恢复为 Desktop Duplication 自有可写 Mat 缓冲。
+                if (frame.bgr_storage) {
+                    frame.bgr.release();
+                    frame.bgr_storage.reset();
+                }
+                frame.native_storage.reset();
+                frame.native_synchronization.reset();
+                frame.bgr.create(roi_height_, roi_width_, CV_8UC3);
+                cv::cvtColor(bgra, frame.bgr, cv::COLOR_BGRA2BGR);
+                frame.storage = CapturedFrameStorage::CPU_BGR;
+                frame.width = roi_width_;
+                frame.height = roi_height_;
             }
-            frame.bgr.create(roi_height_, roi_width_, CV_8UC3);
-            cv::cvtColor(bgra, frame.bgr, cv::COLOR_BGRA2BGR);
 
             const auto finished = std::chrono::steady_clock::now();
             frame.timing.sequence = ++sequence_;
@@ -230,6 +295,7 @@ public:
         duplication_.Reset();
         context_.Reset();
         device_.Reset();
+        interop_synchronization_.reset();
         output_.Reset();
         adapter_.Reset();
         status_.store(CaptureStatus::CLOSED, std::memory_order_release);
@@ -245,6 +311,64 @@ public:
     }
 
 private:
+    ID3D11Texture2D* reusable_gpu_texture(
+            const CapturedFrame& frame) const noexcept {
+        if (frame.storage != CapturedFrameStorage::D3D11_BGRA8 ||
+            !frame.native_storage ||
+            frame.native_synchronization != interop_synchronization_ ||
+            !device_) {
+            return nullptr;
+        }
+        auto* texture = static_cast<ID3D11Texture2D*>(
+            frame.native_storage.get());
+        ID3D11Device* owner = nullptr;
+        texture->GetDevice(&owner);
+        const bool same_device = owner == device_.Get();
+        if (owner) owner->Release();
+        if (!same_device) return nullptr;
+
+        D3D11_TEXTURE2D_DESC description{};
+        texture->GetDesc(&description);
+        return description.Width == static_cast<UINT>(roi_width_) &&
+               description.Height == static_cast<UINT>(roi_height_) &&
+               description.Format == DXGI_FORMAT_B8G8R8A8_UNORM
+            ? texture : nullptr;
+    }
+
+    bool create_gpu_texture(CapturedFrame& frame) noexcept {
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = static_cast<UINT>(roi_width_);
+        description.Height = static_cast<UINT>(roi_height_);
+        description.MipLevels = 1;
+        description.ArraySize = 1;
+        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+
+        ComPtr<ID3D11Texture2D> texture;
+        const HRESULT hr = device_->CreateTexture2D(
+            &description, nullptr, &texture);
+        if (FAILED(hr)) {
+            return fail_hresult("创建 D3D11/CUDA ROI 纹理失败", hr);
+        }
+        ID3D11Texture2D* owned = texture.Detach();
+        try {
+            frame.native_storage = std::shared_ptr<void>(
+                owned, [](void* value) noexcept {
+                    if (value) {
+                        static_cast<ID3D11Texture2D*>(value)->Release();
+                    }
+                });
+        } catch (...) {
+            owned->Release();
+            return fail(CaptureStatus::FAILURE,
+                        "创建 D3D11/CUDA ROI 纹理所有权失败");
+        }
+        frame.native_synchronization = interop_synchronization_;
+        frame.storage = CapturedFrameStorage::D3D11_BGRA8;
+        return true;
+    }
+
     bool valid_config() const noexcept {
         return config_.adapter_index >= 0 && config_.output_index >= 0 &&
                config_.roi_width > 0 && config_.roi_height > 0 &&
@@ -294,6 +418,7 @@ private:
     ComPtr<ID3D11DeviceContext> context_;
     ComPtr<IDXGIOutputDuplication> duplication_;
     ComPtr<ID3D11Texture2D> staging_;
+    std::shared_ptr<std::mutex> interop_synchronization_;
     std::atomic<CaptureStatus> status_{CaptureStatus::CLOSED};
     mutable std::mutex error_mutex_;
     std::string last_error_;

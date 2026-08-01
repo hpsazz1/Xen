@@ -62,8 +62,13 @@ bool NetworkLatestFramePool::take_latest(
         // 先释放旧视图，再归还旧槽引用，避免生产者覆写仍在使用的 Mat。
         frame.bgr.release();
         frame.bgr_storage.reset();
+        frame.native_storage.reset();
+        frame.native_synchronization.reset();
         frame.bgr_storage = std::shared_ptr<const cv::Mat>(latest, &latest->bgr);
         frame.bgr = *frame.bgr_storage;
+        frame.storage = CapturedFrameStorage::CPU_BGR;
+        frame.width = frame.bgr.cols;
+        frame.height = frame.bgr.rows;
         frame.timing = latest->timing;
         frame.roi_x = latest->roi_x;
         frame.roi_y = latest->roi_y;
