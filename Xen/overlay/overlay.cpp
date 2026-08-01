@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include "overlay/overlay.h"
+#include "overlay/overlay_internal.h"
 
 #include "log/log.h"
 
@@ -16,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -63,8 +65,12 @@ constexpr float kPanelRounding = 8.0f;
 constexpr float kWindowTitleBarHeight = 36.0f;
 constexpr float kTitleButtonWidth = 44.0f;
 constexpr int kResizeBorder = 6;
+constexpr std::size_t kMetricHistoryCapacity = 256;
 // 与 Xen/app/xen.rc 保持一致，用于标题栏和任务栏图标。
 constexpr int kAppIconResourceId = 101;
+
+using MetricHistory =
+    overlay::detail::MetricHistory<kMetricHistoryCapacity>;
 
 enum class WorkspacePage {
     OVERVIEW,
@@ -553,6 +559,11 @@ struct Overlay::Impl {
     bool close_requested = false;
     bool show_log_panel = false;
     std::string last_log_tail;
+    MetricHistory capture_fps_history;
+    MetricHistory total_latency_history;
+    MetricHistory target_confidence_history;
+    std::uint64_t history_sequence = 0;
+    bool history_runtime_active = false;
 
     static LRESULT CALLBACK window_proc(
             HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -693,6 +704,52 @@ struct Overlay::Impl {
         return snapshot.state != RuntimeState::RUNNING &&
                snapshot.state != RuntimeState::STARTING &&
                snapshot.state != RuntimeState::STOPPING;
+    }
+
+    void clear_metric_history() noexcept {
+        capture_fps_history.clear();
+        total_latency_history.clear();
+        target_confidence_history.clear();
+        history_sequence = 0;
+    }
+
+    void update_metric_history(const RuntimeSnapshot& snapshot) noexcept {
+        const bool runtime_active =
+            snapshot.state == RuntimeState::STARTING ||
+            snapshot.state == RuntimeState::RUNNING;
+        if (runtime_active && !history_runtime_active) {
+            clear_metric_history();
+        }
+        history_runtime_active = runtime_active;
+        if (!runtime_active || snapshot.last_sequence == 0 ||
+            snapshot.last_sequence == history_sequence) {
+            return;
+        }
+        if (history_sequence != 0 &&
+            snapshot.last_sequence < history_sequence) {
+            clear_metric_history();
+        }
+        history_sequence = snapshot.last_sequence;
+
+        // 与正式报告保持一致：失败帧不进入成功样本曲线，避免把错误折叠为零耗时。
+        if (snapshot.detection_status != DetectionStatus::SUCCESS ||
+            snapshot.aim_status != AimStatus::SUCCESS) {
+            return;
+        }
+        const auto nonnegative = [](double value) noexcept {
+            return std::isfinite(value) && value > 0.0
+                ? static_cast<float>(value)
+                : 0.0f;
+        };
+        capture_fps_history.push(nonnegative(snapshot.capture_fps));
+        total_latency_history.push(
+            nonnegative(snapshot.last_profile.total_ms));
+        const float confidence = snapshot.last_aim.has_target &&
+                                 std::isfinite(
+                                     snapshot.last_aim.target.confidence)
+            ? std::clamp(snapshot.last_aim.target.confidence, 0.0f, 1.0f)
+            : 0.0f;
+        target_confidence_history.push(confidence);
     }
 
     void render_title_bar() {
@@ -1185,6 +1242,98 @@ struct Overlay::Impl {
         end_surface();
     }
 
+    static float metric_history_value(void* data, int index) noexcept {
+        const auto* history = static_cast<const MetricHistory*>(data);
+        return history->at(static_cast<std::size_t>(index));
+    }
+
+    void render_metric_plot(const char* id,
+                            const char* label,
+                            const char* value_format,
+                            MetricHistory& history,
+                            float scale_floor,
+                            float fixed_scale_max,
+                            unsigned int color) {
+        ImGui::PushID(id);
+        const float column_right =
+            ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+        ImGui::TextColored(rgba(kMutedInk), "%s", label);
+        char value[32]{};
+        std::snprintf(
+            value, std::size(value), value_format, history.latest());
+        const float value_width = ImGui::CalcTextSize(value).x;
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(std::max(
+            ImGui::GetCursorPosX(),
+            column_right - value_width));
+        ImGui::Text("%s", value);
+
+        if (history.empty()) {
+            const ImVec2 origin = ImGui::GetCursorScreenPos();
+            const ImVec2 size(ImGui::GetContentRegionAvail().x, 62.0f);
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+            draw_list->AddRectFilled(
+                origin, ImVec2(origin.x + size.x, origin.y + size.y),
+                ImGui::GetColorU32(rgba(kFieldSurface)), 6.0f);
+            draw_list->AddRect(
+                origin, ImVec2(origin.x + size.x, origin.y + size.y),
+                ImGui::GetColorU32(rgba(kBorder)), 6.0f);
+            const char* empty_text = "等待成功帧";
+            const ImVec2 text_size = ImGui::CalcTextSize(empty_text);
+            draw_list->AddText(
+                ImVec2(origin.x + (size.x - text_size.x) * 0.5f,
+                       origin.y + (size.y - text_size.y) * 0.5f),
+                ImGui::GetColorU32(rgba(kFaintInk)), empty_text);
+            ImGui::Dummy(size);
+        } else {
+            const float scale_max = fixed_scale_max > 0.0f
+                ? fixed_scale_max
+                : history.maximum(scale_floor) * 1.10f;
+            ImGui::PushStyleColor(ImGuiCol_PlotLines, rgba(color));
+            ImGui::PlotLines(
+                "##history", metric_history_value,
+                &history,
+                static_cast<int>(history.size()), 0, nullptr,
+                0.0f, scale_max,
+                ImVec2(ImGui::GetContentRegionAvail().x, 62.0f));
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopID();
+    }
+
+    void render_history_panel() {
+        begin_surface("metric_history_panel", ImVec2(0.0f, 148.0f));
+        ImGui::PushFont(medium_font);
+        ImGui::TextUnformatted("实时历史");
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::PushFont(small_font);
+        ImGui::TextColored(
+            rgba(kFaintInk), "最近 256 个成功帧 / UI 观测");
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(0.0f, 3.0f));
+
+        if (ImGui::BeginTable(
+                "metric_history_columns", 3,
+                ImGuiTableFlags_SizingStretchSame)) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            render_metric_plot(
+                "capture_fps", "采集 FPS", "%.1f",
+                capture_fps_history, 10.0f, 0.0f, kSuccess);
+            ImGui::TableSetColumnIndex(1);
+            render_metric_plot(
+                "total_latency", "端到端延迟", "%.2f ms",
+                total_latency_history, 1.0f, 0.0f, kSkill);
+            ImGui::TableSetColumnIndex(2);
+            render_metric_plot(
+                "target_confidence", "目标置信度", "%.3f",
+                target_confidence_history, 1.0f, 1.0f, kAccentStrong);
+            ImGui::EndTable();
+        }
+        end_surface();
+    }
+
     void render_log_panel() {
         const auto lines = Log::get_ring_buffer(64);
         const bool log_changed = lines.empty()
@@ -1307,6 +1456,8 @@ struct Overlay::Impl {
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
             render_activity_panel(snapshot, 221.0f);
         }
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        render_history_panel();
     }
 
     void begin_config_panel(const char* id,
@@ -2146,6 +2297,7 @@ bool Overlay::render(const RuntimeSnapshot& snapshot,
     if (!impl_ || !impl_->initialized) return false;
     try {
         actions = {};
+        impl_->update_metric_history(snapshot);
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         if (impl_->applied_theme != config.ui.theme) {

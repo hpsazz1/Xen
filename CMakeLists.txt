@@ -675,6 +675,12 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(runtime_tests OPENCV)
     add_test(NAME runtime_tests COMMAND runtime_tests)
 
+    # Overlay 标量历史环是纯算法契约；测试不创建 Win32/D3D11 窗口，也不链接 ImGui。
+    add_executable(overlay_tests
+        tests/overlay_tests.cpp)
+    target_include_directories(overlay_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    add_test(NAME overlay_tests COMMAND overlay_tests)
+
     add_executable(debug_tests
         tests/debug_tests.cpp)
     target_link_libraries(debug_tests PRIVATE xen_debug log)
