@@ -13,6 +13,7 @@
 #include "capture/udp_internal.h"
 #include "capture/xudp_internal.h"
 #include "keyboard/keyboard.h"
+#include "keyboard/keyboard_internal.h"
 #include "log/log.h"
 #include "mouse/mouse.h"
 
@@ -62,6 +63,55 @@ void test_invalid_keyboard_config() {
     KeyboardListener keyboard(config);
     expect(!keyboard.open() && keyboard.status() == KeyboardStatus::FAILURE,
            "非法虚拟键配置必须失败关闭");
+
+    config.aim_hold_virtual_key = 0x02;
+    config.emergency_virtual_key = 0x02;
+    KeyboardListener conflicting_keyboard(config);
+    expect(!conflicting_keyboard.open() &&
+               conflicting_keyboard.status() == KeyboardStatus::FAILURE,
+           "按住启用键与急停键相同时必须失败关闭");
+
+    config.emergency_virtual_key = 0x100;
+    KeyboardListener out_of_range_keyboard(config);
+    expect(!out_of_range_keyboard.open() &&
+               out_of_range_keyboard.status() == KeyboardStatus::FAILURE,
+           "超出 Win32 虚拟键范围的配置必须失败关闭");
+}
+
+void test_keyboard_event_state_machine() {
+    keyboard::detail::KeyboardEventState state;
+    auto polled = keyboard::detail::update_keyboard_events(
+        state, false, false);
+    expect(polled.count == 0, "初始未按键状态不应产生事件");
+
+    polled = keyboard::detail::update_keyboard_events(state, true, false);
+    expect(polled.count == 1 &&
+               polled.events[0].type ==
+                   KeyboardEventType::AIM_HOLD_CHANGED &&
+               polled.events[0].active,
+           "按住启用键按下必须产生 active=true 边沿");
+    polled = keyboard::detail::update_keyboard_events(state, true, false);
+    expect(polled.count == 0, "持续按住不得重复产生启用事件");
+
+    polled = keyboard::detail::update_keyboard_events(state, true, true);
+    expect(polled.count == 1 &&
+               polled.events[0].type == KeyboardEventType::EMERGENCY_STOP,
+           "急停按下必须产生一次上升沿事件");
+    polled = keyboard::detail::update_keyboard_events(state, false, true);
+    expect(polled.count == 1 &&
+               polled.events[0].type ==
+                   KeyboardEventType::AIM_HOLD_CHANGED &&
+               !polled.events[0].active,
+           "释放按住启用键必须产生 active=false 边沿");
+
+    polled = keyboard::detail::update_keyboard_events(state, false, false);
+    expect(polled.count == 0, "释放急停键不应重复提交急停事件");
+    polled = keyboard::detail::update_keyboard_events(state, true, true);
+    expect(polled.count == 2 &&
+               polled.events[0].type ==
+                   KeyboardEventType::AIM_HOLD_CHANGED &&
+               polled.events[1].type == KeyboardEventType::EMERGENCY_STOP,
+           "再次同时按下时必须按启用边沿、急停上升沿顺序各报告一次");
 }
 
 void test_invalid_capture_config() {
@@ -1021,6 +1071,7 @@ int main() {
     Log::init(log_config);
     test_mouse_disabled_by_default();
     test_invalid_keyboard_config();
+    test_keyboard_event_state_machine();
     test_invalid_capture_config();
     test_udp_latest_frame_pool();
     test_udp_pool_is_bounded();

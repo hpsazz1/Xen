@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include "keyboard/keyboard.h"
+#include "keyboard/keyboard_internal.h"
 
 #include "log/log.h"
 
@@ -19,8 +20,7 @@ struct KeyboardListener::Impl {
 
     KeyboardConfig config;
     KeyboardStatus status = KeyboardStatus::CLOSED;
-    bool aim_hold_active = false;
-    bool emergency_active = false;
+    keyboard::detail::KeyboardEventState event_state;
 };
 
 KeyboardListener::KeyboardListener(const KeyboardConfig& config)
@@ -34,14 +34,12 @@ KeyboardListener::KeyboardListener(KeyboardListener&& other) noexcept
 KeyboardListener& KeyboardListener::operator=(KeyboardListener&& other) noexcept = default;
 
 bool KeyboardListener::open() noexcept {
-    if (!impl_ || impl_->config.aim_hold_virtual_key <= 0 ||
-        impl_->config.emergency_virtual_key <= 0) {
+    if (!impl_ || !valid_keyboard_config(impl_->config)) {
         if (impl_) impl_->status = KeyboardStatus::FAILURE;
         return false;
     }
     Log::register_module("keyboard", LogLevel::INFO);
-    impl_->aim_hold_active = false;
-    impl_->emergency_active = false;
+    impl_->event_state = {};
     impl_->status = KeyboardStatus::READY;
     LOG_INFO("keyboard", "全局按键轮询已启用: hold_vk={}, emergency_vk={}",
              impl_->config.aim_hold_virtual_key,
@@ -55,18 +53,14 @@ std::vector<KeyboardEvent> KeyboardListener::poll() noexcept {
     try {
         const bool hold_active =
             (GetAsyncKeyState(impl_->config.aim_hold_virtual_key) & 0x8000) != 0;
-        if (hold_active != impl_->aim_hold_active) {
-            impl_->aim_hold_active = hold_active;
-            events.push_back(
-                {KeyboardEventType::AIM_HOLD_CHANGED, hold_active});
-        }
-
         const bool emergency_active =
             (GetAsyncKeyState(impl_->config.emergency_virtual_key) & 0x8000) != 0;
-        if (emergency_active && !impl_->emergency_active) {
-            events.push_back({KeyboardEventType::EMERGENCY_STOP, true});
+        const auto polled = keyboard::detail::update_keyboard_events(
+            impl_->event_state, hold_active, emergency_active);
+        events.reserve(polled.count);
+        for (std::size_t index = 0; index < polled.count; ++index) {
+            events.push_back(polled.events[index]);
         }
-        impl_->emergency_active = emergency_active;
     } catch (...) {
         impl_->status = KeyboardStatus::FAILURE;
         events.clear();
@@ -76,8 +70,7 @@ std::vector<KeyboardEvent> KeyboardListener::poll() noexcept {
 
 void KeyboardListener::close() noexcept {
     if (!impl_) return;
-    impl_->aim_hold_active = false;
-    impl_->emergency_active = false;
+    impl_->event_state = {};
     impl_->status = KeyboardStatus::CLOSED;
 }
 

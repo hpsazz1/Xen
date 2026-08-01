@@ -421,8 +421,7 @@ bool validate_app_config(const AppConfig& config,
             error = "Mouse 配置非法";
             return false;
         }
-        if (config.keyboard.aim_hold_virtual_key <= 0 ||
-            config.keyboard.emergency_virtual_key <= 0 ||
+        if (!valid_keyboard_config(config.keyboard) ||
             config.runtime.profile_window < 64 ||
             config.runtime.profile_window > 4096 ||
             config.ui.width < 640 || config.ui.height < 480 ||

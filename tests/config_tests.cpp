@@ -248,6 +248,17 @@ void test_invalid_config() {
            "完整 KMBOX NET 配置应通过校验");
 
     config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
+    config.keyboard.emergency_virtual_key =
+        config.keyboard.aim_hold_virtual_key;
+    expect(!validate_app_config(config, error),
+           "按住启用键与急停键冲突时必须拒绝配置");
+    config.keyboard.emergency_virtual_key = 0x100;
+    expect(!validate_app_config(config, error),
+           "超出 Win32 虚拟键范围时必须拒绝配置");
+    config.keyboard.emergency_virtual_key = 0x23;
+    expect(validate_app_config(config, error),
+           "互不冲突且位于 Win32 范围内的虚拟键应通过校验");
+
     config.log.ringbuf_capacity = 0;
     expect(!validate_app_config(config, error),
            "启用 ring 时零容量必须拒绝日志配置");
