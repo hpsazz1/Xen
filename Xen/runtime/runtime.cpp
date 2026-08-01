@@ -41,6 +41,7 @@ struct Runtime::Impl {
     AppConfig config;
     RuntimeSnapshot current_snapshot;
     runtime::detail::LatestFrameQueue frame_queue;
+    runtime::detail::RuntimePreviewChannel preview_channel;
     runtime::detail::SafetyGate safety_gate;
     std::unique_ptr<ICapture> capture;
     std::unique_ptr<Detector> detector;
@@ -76,6 +77,10 @@ struct Runtime::Impl {
     }
 
     void fail_runtime(const std::string& error) noexcept {
+        // 故障后旧图像不再代表实时状态。递增预览代际可同时阻止已经在锁外
+        // 执行颜色转换的旧帧重新发布，但保留用户开关和已分配的大缓冲。
+        preview_channel.set_session_active(false);
+        const auto preview_stats = preview_channel.stats();
         safety_gate.emergency_stop();
         stop_requested.store(true, std::memory_order_release);
         frame_queue.stop();
@@ -85,6 +90,9 @@ struct Runtime::Impl {
             current_snapshot.last_error = error;
             current_snapshot.output_armed = false;
             current_snapshot.emergency_stopped = true;
+            current_snapshot.preview_enabled = preview_stats.enabled;
+            current_snapshot.preview_sampled_frames = 0;
+            current_snapshot.preview_dropped_frames = 0;
         } catch (...) {
         }
         LOG_ERROR("runtime", "{}", error);
@@ -98,6 +106,7 @@ struct Runtime::Impl {
         }
         config = value;
         frame_queue.reset();
+        preview_channel.set_session_active(false);
         stop_requested.store(false, std::memory_order_release);
         aim_reset_requested.store(false, std::memory_order_release);
         safety_gate.emergency_stop();
@@ -125,6 +134,8 @@ struct Runtime::Impl {
             set_error("Keyboard 初始化失败");
             return false;
         }
+        preview_channel.set_session_active(true);
+        const bool preview_enabled = preview_channel.enabled();
 
         {
             std::lock_guard<std::mutex> lock(snapshot_mutex);
@@ -137,6 +148,7 @@ struct Runtime::Impl {
             current_snapshot.detector_generation = 1;
             current_snapshot.output_allowed_by_config =
                 config.mouse.allow_send_input;
+            current_snapshot.preview_enabled = preview_enabled;
         }
         pipeline_samples.clear();
         debug_samples.reset();
@@ -221,6 +233,7 @@ struct Runtime::Impl {
                                   const AimResult& aim_result,
                                   MouseStatus mouse_status,
                                   bool mouse_sent) {
+        const auto preview_stats = preview_channel.stats();
         std::lock_guard<std::mutex> lock(snapshot_mutex);
         current_snapshot.last_sequence = frame.timing.sequence;
         current_snapshot.last_profile = profile;
@@ -262,6 +275,11 @@ struct Runtime::Impl {
         sample.mouse_sent = mouse_sent;
         debug_samples.push(sample);
         current_snapshot.debug_samples_dropped = debug_samples.dropped();
+        current_snapshot.preview_enabled = preview_stats.enabled;
+        current_snapshot.preview_sampled_frames =
+            preview_stats.sampled_frames;
+        current_snapshot.preview_dropped_frames =
+            preview_stats.dropped_frames;
 
         pipeline_samples.push_back(profile.total_ms);
         while (pipeline_samples.size() >
@@ -300,10 +318,10 @@ struct Runtime::Impl {
                 profile.detector = detector->profile();
             }
             AimResult aim_result;
+            AimFrame aim_frame;
             bool mouse_sent = false;
             double mouse_elapsed_ms = 0.0;
             if (profile.detector.status == DetectionStatus::SUCCESS) {
-                AimFrame aim_frame;
                 aim_frame.sequence = frame->timing.sequence;
                 aim_frame.captured_at = frame->timing.captured_at;
                 aim_frame.roi_width = frame->bgr.cols;
@@ -348,6 +366,26 @@ struct Runtime::Impl {
             profile.mouse_ms = mouse_elapsed_ms;
             profile.total_ms = std::chrono::duration<double, std::milli>(
                 finished - frame->timing.captured_at).count();
+            const std::span<const Detection> preview_detections =
+                profile.detector.status == DetectionStatus::SUCCESS
+                    ? std::span<const Detection>(aim_frame.detections)
+                    : std::span<const Detection>(detections);
+            const float control_center_x = frame->source_pixels_per_pixel_x > 0.0
+                ? static_cast<float>(
+                    (frame->source_width * 0.5 - frame->roi_x) /
+                    frame->source_pixels_per_pixel_x)
+                : 0.0f;
+            const float control_center_y = frame->source_pixels_per_pixel_y > 0.0
+                ? static_cast<float>(
+                    (frame->source_height * 0.5 - frame->roi_y) /
+                    frame->source_pixels_per_pixel_y)
+                : 0.0f;
+            preview_channel.publish(
+                frame->bgr, frame->timing.sequence,
+                control_center_x, control_center_y,
+                profile.detector.status, aim_result.status,
+                preview_detections, aim_result,
+                std::chrono::steady_clock::now());
             update_pipeline_snapshot(*frame, profile, aim_result,
                                      mouse->status(), mouse_sent);
         }
@@ -455,6 +493,10 @@ void Runtime::stop() noexcept {
     }
     impl_->detector_reload_running.store(false, std::memory_order_release);
     impl_->release_modules();
+    // Pipeline 已退出后清除旧预览，但保留三槽大缓冲和用户的启用选择。
+    // 下次启动会从新会话首帧重新发布，不把停止前图像误当成实时画面。
+    impl_->preview_channel.set_session_active(false);
+    const auto preview_stats = impl_->preview_channel.stats();
     {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
         impl_->current_snapshot.state = RuntimeState::STOPPED;
@@ -466,6 +508,9 @@ void Runtime::stop() noexcept {
         impl_->current_snapshot.output_armed = false;
         impl_->current_snapshot.aim_hold_active = false;
         impl_->current_snapshot.emergency_stopped = true;
+        impl_->current_snapshot.preview_enabled = preview_stats.enabled;
+        impl_->current_snapshot.preview_sampled_frames = 0;
+        impl_->current_snapshot.preview_dropped_frames = 0;
     }
 }
 
@@ -676,6 +721,28 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
     } catch (...) {
         return {};
     }
+}
+
+bool Runtime::set_preview_enabled(bool enabled) noexcept {
+    if (!impl_) return false;
+    const bool succeeded = impl_->preview_channel.set_enabled(enabled);
+    if (!succeeded) return false;
+    try {
+        const auto stats = impl_->preview_channel.stats();
+        std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
+        impl_->current_snapshot.preview_enabled = stats.enabled;
+        impl_->current_snapshot.preview_sampled_frames = stats.sampled_frames;
+        impl_->current_snapshot.preview_dropped_frames = stats.dropped_frames;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::shared_ptr<const RuntimePreviewFrame>
+Runtime::preview_frame() const noexcept {
+    if (!impl_) return nullptr;
+    return impl_->preview_channel.latest();
 }
 
 bool Runtime::drain_pipeline_samples(

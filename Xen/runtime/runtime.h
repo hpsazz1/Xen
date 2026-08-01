@@ -1,6 +1,8 @@
 #ifndef RUNTIME_H
 #define RUNTIME_H
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -82,6 +84,36 @@ struct RuntimePipelineSample {
     bool mouse_sent = false;
 };
 
+inline constexpr int kRuntimePreviewMaxDimension = 512;
+inline constexpr std::size_t kRuntimePreviewMaxDetections = 128;
+
+// 可选诊断预览使用独立固定容量通道，不进入 RuntimeSnapshot 的高频复制。
+// bgra 在首次启用时按最大尺寸一次分配，实际有效字节由 width/height 决定。
+struct RuntimePreviewFrame {
+    // 与 Pipeline 输入帧一致的单调序号，用于保证图像与下列标注同帧。
+    std::uint64_t sequence = 0;
+    // BGRA 有效区域尺寸，单位为像素；只缩小、不放大，最长边不超过 512。
+    int width = 0;
+    int height = 0;
+    // Capture 交付的原始 BGR ROI 尺寸，Detection 和 Aim 坐标均以此为基准。
+    int roi_width = 0;
+    int roi_height = 0;
+    // 原始 ROI 坐标到 BGRA 预览像素的独立横纵比例。
+    float scale_x = 1.0f;
+    float scale_y = 1.0f;
+    // 主机准星中心在原始 ROI 内的位置，允许落在 ROI 边界之外。
+    float control_center_x = 0.0f;
+    float control_center_y = 0.0f;
+    DetectionStatus detection_status = DetectionStatus::NOT_RUN;
+    AimStatus aim_status = AimStatus::NOT_RUN;
+    std::vector<std::uint8_t> bgra;
+    // 检测框仍使用原始 ROI 像素坐标；超出固定容量时仅截断诊断显示。
+    std::array<Detection, kRuntimePreviewMaxDetections> detections{};
+    std::size_t detection_count = 0;
+    bool has_target = false;
+    AimTargetSnapshot target;
+};
+
 struct RuntimeSnapshot {
     RuntimeState state = RuntimeState::STOPPED;
     CaptureStatus capture_status = CaptureStatus::CLOSED;
@@ -113,6 +145,9 @@ struct RuntimeSnapshot {
     std::uint64_t overwritten_frames = 0;
     std::uint64_t mouse_commands = 0;
     std::uint64_t debug_samples_dropped = 0;
+    bool preview_enabled = false;
+    std::uint64_t preview_sampled_frames = 0;
+    std::uint64_t preview_dropped_frames = 0;
     std::uint64_t last_sequence = 0;
     int encoded_width = 0;
     int encoded_height = 0;
@@ -150,6 +185,9 @@ public:
     bool post_intent(const RuntimeIntent& intent) noexcept;
     void poll_keyboard() noexcept;
     RuntimeSnapshot snapshot() const noexcept;
+    // 诊断预览默认关闭；启用时最多 10 FPS，最长边 512，且只保留最新同帧图像与标注。
+    bool set_preview_enabled(bool enabled) noexcept;
+    std::shared_ptr<const RuntimePreviewFrame> preview_frame() const noexcept;
     // 取出自上次调用以来的诊断样本；失败时不影响 Runtime 主链。
     bool drain_pipeline_samples(
         std::vector<RuntimePipelineSample>& samples) noexcept;

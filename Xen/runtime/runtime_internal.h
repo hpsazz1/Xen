@@ -7,10 +7,11 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <utility>
 #include <vector>
 
-#include "capture/capture.h"
+#include "runtime/runtime.h"
 
 namespace runtime::detail {
 
@@ -103,6 +104,56 @@ private:
     std::uint64_t consumed_sequence_ = 0;
     std::uint64_t overwritten_frames_ = 0;
     bool stopped_ = false;
+};
+
+struct PreviewStats {
+    bool enabled = false;
+    std::uint64_t sampled_frames = 0;
+    std::uint64_t dropped_frames = 0;
+};
+
+class RuntimePreviewChannel {
+public:
+    RuntimePreviewChannel();
+
+    bool set_enabled(bool enabled) noexcept;
+    bool enabled() const noexcept;
+    // 用户启用选择与 Runtime 会话活动状态分离。停止或故障时关闭会话，
+    // 可以保留 UI 开关和预分配缓冲，但任何在途旧帧都不得再次发布。
+    void set_session_active(bool active) noexcept;
+    bool publish(
+        const cv::Mat& bgr,
+        std::uint64_t sequence,
+        float control_center_x,
+        float control_center_y,
+        DetectionStatus detection_status,
+        AimStatus aim_status,
+        std::span<const Detection> detections,
+        const AimResult& aim_result,
+        std::chrono::steady_clock::time_point now) noexcept;
+    std::shared_ptr<const RuntimePreviewFrame> latest() noexcept;
+    PreviewStats stats() const noexcept;
+
+private:
+    struct Slot;
+
+    bool prepare_slots() noexcept;
+
+    mutable std::mutex mutex_;
+    std::array<std::shared_ptr<Slot>, 3> pool_;
+    std::shared_ptr<Slot> latest_;
+    // 成功发布和无空闲槽的失败尝试都推进采样时钟，确保消费者阻塞时
+    // Pipeline 也只会每 100 ms 做一次槽检查，不退化为逐帧争锁。
+    std::chrono::steady_clock::time_point last_sampled_at_{};
+    // 启停或 Runtime 会话重置时递增。颜色转换在锁外执行，代际号用于阻止
+    // 上一代正在加工的图像在快速关闭并重新启用后混入新会话。
+    std::uint64_t generation_ = 0;
+    std::uint64_t consumed_sequence_ = 0;
+    std::uint64_t sampled_frames_ = 0;
+    std::uint64_t dropped_frames_ = 0;
+    bool slots_prepared_ = false;
+    bool session_active_ = false;
+    bool enabled_ = false;
 };
 
 class SafetyGate {

@@ -1,7 +1,10 @@
 #include "runtime/runtime_internal.h"
 
 #include <chrono>
+#include <cmath>
 #include <memory>
+
+#include <opencv2/imgproc.hpp>
 
 namespace runtime::detail {
 
@@ -108,6 +111,201 @@ std::uint64_t LatestFrameQueue::overwritten_frames() const noexcept {
         return overwritten_frames_;
     } catch (...) {
         return 0;
+    }
+}
+
+struct RuntimePreviewChannel::Slot {
+    RuntimePreviewFrame frame;
+    cv::Mat resized_bgr;
+};
+
+RuntimePreviewChannel::RuntimePreviewChannel() {
+    for (auto& slot : pool_) slot = std::make_shared<Slot>();
+}
+
+bool RuntimePreviewChannel::prepare_slots() noexcept {
+    try {
+        if (slots_prepared_) return true;
+        constexpr std::size_t kMaximumBytes =
+            static_cast<std::size_t>(kRuntimePreviewMaxDimension) *
+            static_cast<std::size_t>(kRuntimePreviewMaxDimension) * 4;
+        for (auto& slot : pool_) {
+            if (!slot) slot = std::make_shared<Slot>();
+            slot->frame.bgra.resize(kMaximumBytes);
+            slot->resized_bgr.create(
+                kRuntimePreviewMaxDimension,
+                kRuntimePreviewMaxDimension, CV_8UC3);
+        }
+        slots_prepared_ = true;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool RuntimePreviewChannel::set_enabled(bool enabled) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (enabled_ == enabled) return true;
+        if (enabled && !prepare_slots()) return false;
+        ++generation_;
+        enabled_ = enabled;
+        latest_.reset();
+        last_sampled_at_ = {};
+        consumed_sequence_ = 0;
+        sampled_frames_ = 0;
+        dropped_frames_ = 0;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool RuntimePreviewChannel::enabled() const noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return enabled_;
+    } catch (...) {
+        return false;
+    }
+}
+
+void RuntimePreviewChannel::set_session_active(bool active) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++generation_;
+        session_active_ = active;
+        latest_.reset();
+        last_sampled_at_ = {};
+        consumed_sequence_ = 0;
+        sampled_frames_ = 0;
+        dropped_frames_ = 0;
+    } catch (...) {
+    }
+}
+
+bool RuntimePreviewChannel::publish(
+        const cv::Mat& bgr,
+        std::uint64_t sequence,
+        float control_center_x,
+        float control_center_y,
+        DetectionStatus detection_status,
+        AimStatus aim_status,
+        std::span<const Detection> detections,
+        const AimResult& aim_result,
+        std::chrono::steady_clock::time_point now) noexcept {
+    if (bgr.empty() || bgr.type() != CV_8UC3 || sequence == 0) return false;
+    std::shared_ptr<Slot> slot;
+    std::uint64_t publish_generation = 0;
+    try {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!enabled_ || !session_active_) return false;
+            publish_generation = generation_;
+            constexpr auto kMinimumInterval = std::chrono::milliseconds(100);
+            if (last_sampled_at_.time_since_epoch().count() != 0 &&
+                now - last_sampled_at_ < kMinimumInterval) {
+                return false;
+            }
+            last_sampled_at_ = now;
+            for (const auto& candidate : pool_) {
+                if (candidate && candidate.use_count() == 1 &&
+                    candidate != latest_) {
+                    slot = candidate;
+                    break;
+                }
+            }
+            if (!slot) {
+                ++dropped_frames_;
+                return false;
+            }
+        }
+
+        const float scale = std::min(
+            1.0f,
+            std::min(
+                static_cast<float>(kRuntimePreviewMaxDimension) /
+                    static_cast<float>(bgr.cols),
+                static_cast<float>(kRuntimePreviewMaxDimension) /
+                    static_cast<float>(bgr.rows)));
+        const int width = std::max(
+            1, static_cast<int>(std::floor(bgr.cols * scale)));
+        const int height = std::max(
+            1, static_cast<int>(std::floor(bgr.rows * scale)));
+        cv::Mat source = bgr;
+        if (width != bgr.cols || height != bgr.rows) {
+            cv::Mat resized = slot->resized_bgr(
+                cv::Rect(0, 0, width, height));
+            cv::resize(bgr, resized, cv::Size(width, height),
+                       0.0, 0.0, cv::INTER_LINEAR);
+            source = resized;
+        }
+        cv::Mat bgra(
+            height, width, CV_8UC4, slot->frame.bgra.data(),
+            static_cast<std::size_t>(width) * 4);
+        cv::cvtColor(source, bgra, cv::COLOR_BGR2BGRA);
+
+        RuntimePreviewFrame& frame = slot->frame;
+        frame.sequence = sequence;
+        frame.width = width;
+        frame.height = height;
+        frame.roi_width = bgr.cols;
+        frame.roi_height = bgr.rows;
+        frame.scale_x = static_cast<float>(width) /
+                        static_cast<float>(bgr.cols);
+        frame.scale_y = static_cast<float>(height) /
+                        static_cast<float>(bgr.rows);
+        frame.control_center_x = control_center_x;
+        frame.control_center_y = control_center_y;
+        frame.detection_status = detection_status;
+        frame.aim_status = aim_status;
+        frame.detection_count = std::min(
+            detections.size(), kRuntimePreviewMaxDetections);
+        for (std::size_t index = 0; index < frame.detection_count; ++index) {
+            frame.detections[index] = detections[index];
+        }
+        frame.has_target = aim_result.has_target;
+        frame.target = aim_result.target;
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!enabled_ || !session_active_ ||
+                generation_ != publish_generation) {
+                return false;
+            }
+            if (latest_ && latest_->frame.sequence != consumed_sequence_) {
+                ++dropped_frames_;
+            }
+            latest_ = slot;
+            ++sampled_frames_;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::shared_ptr<const RuntimePreviewFrame>
+RuntimePreviewChannel::latest() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!enabled_ || !session_active_ || !latest_) return nullptr;
+        consumed_sequence_ = latest_->frame.sequence;
+        auto slot = latest_;
+        const RuntimePreviewFrame* frame = &slot->frame;
+        return std::shared_ptr<const RuntimePreviewFrame>(
+            std::move(slot), frame);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+PreviewStats RuntimePreviewChannel::stats() const noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return {enabled_, sampled_frames_, dropped_frames_};
+    } catch (...) {
+        return {};
     }
 }
 

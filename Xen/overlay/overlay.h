@@ -13,6 +13,8 @@ struct OverlayActions {
     bool stop_requested = false;
     bool reload_detector_requested = false;
     bool save_config_requested = false;
+    bool preview_enabled_changed = false;
+    bool preview_enabled = false;
     std::vector<RuntimeIntent> runtime_intents;
 };
 
@@ -27,6 +29,7 @@ public:
     bool init(const UiConfig& config) noexcept;
     bool pump_messages() noexcept;
     bool render(const RuntimeSnapshot& snapshot,
+                const std::shared_ptr<const RuntimePreviewFrame>& preview,
                 AppConfig& config,
                 const std::string& app_message,
                 OverlayActions& actions) noexcept;

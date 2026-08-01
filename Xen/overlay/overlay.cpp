@@ -19,6 +19,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -319,6 +320,15 @@ ImVec4 aim_color(AimStatus status) noexcept {
     return rgba(kDanger);
 }
 
+const char* track_state_label(TrackState state) noexcept {
+    switch (state) {
+        case TrackState::TENTATIVE: return "待确认";
+        case TrackState::CONFIRMED: return "已确认";
+        case TrackState::LOST: return "短时丢失";
+    }
+    return "未知";
+}
+
 ImVec4 mouse_color(MouseStatus status) noexcept {
     switch (status) {
         case MouseStatus::READY: return rgba(kSuccess);
@@ -547,6 +557,8 @@ struct Overlay::Impl {
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain> swap_chain;
     ComPtr<ID3D11RenderTargetView> render_target;
+    ComPtr<ID3D11Texture2D> preview_texture;
+    ComPtr<ID3D11ShaderResourceView> preview_srv;
     HICON large_icon = nullptr;
     HICON small_icon = nullptr;
     ImFont* small_font = nullptr;
@@ -558,6 +570,10 @@ struct Overlay::Impl {
     bool initialized = false;
     bool close_requested = false;
     bool show_log_panel = false;
+    bool preview_requested = false;
+    int preview_texture_width = 0;
+    int preview_texture_height = 0;
+    std::uint64_t preview_uploaded_sequence = 0;
     std::string last_log_tail;
     MetricHistory capture_fps_history;
     MetricHistory total_latency_history;
@@ -698,6 +714,86 @@ struct Overlay::Impl {
 
     void destroy_render_target() noexcept {
         render_target.Reset();
+    }
+
+    void release_preview_texture() noexcept {
+        preview_srv.Reset();
+        preview_texture.Reset();
+        preview_texture_width = 0;
+        preview_texture_height = 0;
+        preview_uploaded_sequence = 0;
+    }
+
+    bool ensure_preview_texture(int width, int height) noexcept {
+        if (width <= 0 || height <= 0 || !device || !context) return false;
+        if (preview_texture && preview_srv &&
+            preview_texture_width == width &&
+            preview_texture_height == height) {
+            return true;
+        }
+
+        release_preview_texture();
+        D3D11_TEXTURE2D_DESC texture_desc{};
+        texture_desc.Width = static_cast<UINT>(width);
+        texture_desc.Height = static_cast<UINT>(height);
+        texture_desc.MipLevels = 1;
+        texture_desc.ArraySize = 1;
+        texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        texture_desc.SampleDesc.Count = 1;
+        texture_desc.Usage = D3D11_USAGE_DYNAMIC;
+        texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        texture_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateTexture2D(
+                &texture_desc, nullptr, &preview_texture)) ||
+            FAILED(device->CreateShaderResourceView(
+                preview_texture.Get(), nullptr, &preview_srv))) {
+            release_preview_texture();
+            return false;
+        }
+        preview_texture_width = width;
+        preview_texture_height = height;
+        return true;
+    }
+
+    bool upload_preview(
+            const std::shared_ptr<const RuntimePreviewFrame>& preview) noexcept {
+        if (!preview || preview->sequence == 0 || preview->width <= 0 ||
+            preview->height <= 0 ||
+            preview->width > kRuntimePreviewMaxDimension ||
+            preview->height > kRuntimePreviewMaxDimension) {
+            return false;
+        }
+        const std::size_t row_bytes =
+            static_cast<std::size_t>(preview->width) * 4;
+        const std::size_t required_bytes =
+            row_bytes * static_cast<std::size_t>(preview->height);
+        if (preview->bgra.size() < required_bytes ||
+            !ensure_preview_texture(preview->width, preview->height)) {
+            return false;
+        }
+        if (preview_uploaded_sequence == preview->sequence) return true;
+
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(context->Map(
+                preview_texture.Get(), 0, D3D11_MAP_WRITE_DISCARD,
+                0, &mapped))) {
+            return false;
+        }
+        if (!mapped.pData || mapped.RowPitch < row_bytes) {
+            context->Unmap(preview_texture.Get(), 0);
+            return false;
+        }
+        const auto* source = preview->bgra.data();
+        auto* destination = static_cast<std::uint8_t*>(mapped.pData);
+        for (int row = 0; row < preview->height; ++row) {
+            std::memcpy(
+                destination + static_cast<std::size_t>(row) * mapped.RowPitch,
+                source + static_cast<std::size_t>(row) * row_bytes,
+                row_bytes);
+        }
+        context->Unmap(preview_texture.Get(), 0);
+        preview_uploaded_sequence = preview->sequence;
+        return true;
     }
 
     bool editable(const RuntimeSnapshot& snapshot) const noexcept {
@@ -1509,10 +1605,205 @@ struct Overlay::Impl {
         end_config_panel();
     }
 
-    void render_detection_config(const RuntimeSnapshot& snapshot,
-                                 AppConfig& app_config,
-                                 bool can_edit,
-                                 OverlayActions& actions) {
+    void render_roi_preview(
+            const RuntimeSnapshot& snapshot,
+            const std::shared_ptr<const RuntimePreviewFrame>& preview) {
+        const float maximum_width =
+            std::max(1.0f, ImGui::GetContentRegionAvail().x - 26.0f);
+        const auto display = preview
+            ? overlay::detail::fit_preview_size(
+                preview->width, preview->height, maximum_width, 320.0f)
+            : overlay::detail::PreviewSize{};
+        const bool has_image = preview_requested && preview &&
+                               display.width > 0.0f &&
+                               display.height > 0.0f;
+        begin_config_panel(
+            "roi_preview_panel", "实时 ROI 诊断",
+            has_image ? display.height + 126.0f : 92.0f);
+
+        if (ImGui::BeginTable(
+                "roi_preview_header", 2,
+                ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn(
+                "状态", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn(
+                "开关", ImGuiTableColumnFlags_WidthFixed, 54.0f);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted("同帧图像、检测框与 Aim 目标");
+            ImGui::TextColored(
+                rgba(kFaintInk), "最长边 512 / 最高 10 FPS / 三槽最新帧");
+            ImGui::TableSetColumnIndex(1);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
+            toggle_switch("##roi_preview_enabled", &preview_requested);
+            ImGui::EndTable();
+        }
+
+        if (!preview_requested) {
+            ImGui::TextColored(
+                rgba(kMutedInk), "预览已关闭，Runtime 不执行颜色转换或图像复制。");
+            end_config_panel();
+            return;
+        }
+        if (!snapshot.preview_enabled) {
+            ImGui::TextColored(rgba(kWarning), "预览通道切换中。");
+            end_config_panel();
+            return;
+        }
+        if (!has_image) {
+            // Runtime 会话可能从序号 1 重新开始；无图像阶段清除上传序号，
+            // 防止新会话首帧与旧序号相同时跳过纹理更新。
+            preview_uploaded_sequence = 0;
+            ImGui::TextColored(
+                rgba(kMutedInk),
+                snapshot.state == RuntimeState::RUNNING
+                    ? "等待下一帧 ROI 预览。"
+                    : "Runtime 未运行，启动后将发布新会话首帧。");
+            end_config_panel();
+            return;
+        }
+        if (!upload_preview(preview)) {
+            ImGui::TextColored(rgba(kDanger), "D3D11 预览纹理上传失败。");
+            end_config_panel();
+            return;
+        }
+
+        const ImTextureID texture_id = static_cast<ImTextureID>(
+            reinterpret_cast<std::uintptr_t>(preview_srv.Get()));
+        ImGui::Image(
+            ImTextureRef(texture_id), ImVec2(display.width, display.height));
+        const ImVec2 image_min = ImGui::GetItemRectMin();
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        const float display_scale_x =
+            display.width / static_cast<float>(preview->width);
+        const float display_scale_y =
+            display.height / static_cast<float>(preview->height);
+        const float coordinate_scale_x =
+            preview->scale_x * display_scale_x;
+        const float coordinate_scale_y =
+            preview->scale_y * display_scale_y;
+
+        const std::size_t detection_count = std::min(
+            preview->detection_count, preview->detections.size());
+        for (std::size_t index = 0; index < detection_count; ++index) {
+            const Detection& detection = preview->detections[index];
+            const auto rectangle = overlay::detail::map_preview_rect(
+                detection.x1, detection.y1, detection.x2, detection.y2,
+                coordinate_scale_x, coordinate_scale_y,
+                display.width, display.height);
+            if (rectangle.x2 - rectangle.x1 < 1.0f ||
+                rectangle.y2 - rectangle.y1 < 1.0f) {
+                continue;
+            }
+            const ImVec2 minimum(
+                image_min.x + rectangle.x1, image_min.y + rectangle.y1);
+            const ImVec2 maximum(
+                image_min.x + rectangle.x2, image_min.y + rectangle.y2);
+            const ImU32 color = ImGui::GetColorU32(rgba(kAccent));
+            draw_list->AddRect(minimum, maximum, color, 0.0f, 0, 1.5f);
+            char label[48]{};
+            std::snprintf(
+                label, sizeof(label), "C%d  %.0f%%", detection.class_id,
+                std::clamp(detection.confidence, 0.0f, 1.0f) * 100.0f);
+            const ImVec2 text_size = ImGui::CalcTextSize(label);
+            const float label_y = std::max(
+                image_min.y, minimum.y - text_size.y - 4.0f);
+            const float label_width = std::min(
+                display.width, text_size.x + 8.0f);
+            const float label_x = std::clamp(
+                minimum.x, image_min.x,
+                image_min.x + display.width - label_width);
+            draw_list->AddRectFilled(
+                ImVec2(label_x, label_y),
+                ImVec2(label_x + label_width,
+                       label_y + text_size.y + 4.0f),
+                ImGui::GetColorU32(raw_rgba(0x101010, 0.78f)), 2.0f);
+            draw_list->AddText(
+                ImVec2(label_x + 4.0f, label_y + 2.0f),
+                ImGui::GetColorU32(raw_rgba(kOnAccent)), label);
+        }
+
+        const auto crosshair = overlay::detail::map_preview_point(
+            preview->control_center_x, preview->control_center_y,
+            coordinate_scale_x, coordinate_scale_y);
+        if (crosshair.x >= 0.0f && crosshair.x <= display.width &&
+            crosshair.y >= 0.0f && crosshair.y <= display.height) {
+            const ImVec2 center(
+                image_min.x + crosshair.x, image_min.y + crosshair.y);
+            const ImU32 color = ImGui::GetColorU32(rgba(kAccent));
+            draw_list->AddLine(
+                ImVec2(center.x - 8.0f, center.y),
+                ImVec2(center.x + 8.0f, center.y), color, 1.5f);
+            draw_list->AddLine(
+                ImVec2(center.x, center.y - 8.0f),
+                ImVec2(center.x, center.y + 8.0f), color, 1.5f);
+        }
+
+        if (preview->has_target) {
+            const AimTargetSnapshot& target = preview->target;
+            const auto rectangle = overlay::detail::map_preview_rect(
+                target.x1, target.y1, target.x2, target.y2,
+                coordinate_scale_x, coordinate_scale_y,
+                display.width, display.height);
+            const ImU32 target_color = ImGui::GetColorU32(
+                target.predicted ? rgba(kWarning) : rgba(kSuccess));
+            draw_list->AddRect(
+                ImVec2(image_min.x + rectangle.x1,
+                       image_min.y + rectangle.y1),
+                ImVec2(image_min.x + rectangle.x2,
+                       image_min.y + rectangle.y2),
+                target_color, 0.0f, 0, 3.0f);
+            const auto aim_point = overlay::detail::map_preview_point(
+                target.aim_x, target.aim_y,
+                coordinate_scale_x, coordinate_scale_y);
+            if (aim_point.x >= 0.0f && aim_point.x <= display.width &&
+                aim_point.y >= 0.0f && aim_point.y <= display.height) {
+                const ImVec2 point(
+                    image_min.x + aim_point.x, image_min.y + aim_point.y);
+                draw_list->AddCircleFilled(point, 4.5f, target_color);
+                draw_list->AddCircle(
+                    point, 8.0f, target_color, 16, 1.5f);
+            }
+        }
+
+        ImGui::PushFont(small_font);
+        ImGui::TextColored(
+            rgba(kFaintInk),
+            "帧 %llu  /  ROI %d x %d -> %d x %d  /  样本 %llu  丢弃 %llu",
+            static_cast<unsigned long long>(preview->sequence),
+            preview->roi_width, preview->roi_height,
+            preview->width, preview->height,
+            static_cast<unsigned long long>(snapshot.preview_sampled_frames),
+            static_cast<unsigned long long>(snapshot.preview_dropped_frames));
+        ImGui::TextColored(
+            rgba(kFaintInk), "Detector %s  /  Aim %s  /  目标 %s",
+            DetectionStatusName(preview->detection_status),
+            AimStatusName(preview->aim_status),
+            preview->has_target
+                ? (preview->target.predicted
+                    ? "预测"
+                    : track_state_label(preview->target.state))
+                : "无");
+        if (preview->has_target) {
+            ImGui::TextColored(
+                rgba(kFaintInk), "轨迹 %llu  /  置信度 %.1f%%  /  瞄点 %.1f, %.1f",
+                static_cast<unsigned long long>(preview->target.track_id),
+                std::clamp(preview->target.confidence, 0.0f, 1.0f) *
+                    100.0f,
+                preview->target.aim_x, preview->target.aim_y);
+        }
+        ImGui::PopFont();
+        end_config_panel();
+    }
+
+    void render_detection_config(
+            const RuntimeSnapshot& snapshot,
+            const std::shared_ptr<const RuntimePreviewFrame>& preview,
+            AppConfig& app_config,
+            bool can_edit,
+            OverlayActions& actions) {
+        render_roi_preview(snapshot, preview);
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_detector_reload_panel(snapshot, actions);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         const bool detector_editable =
@@ -2133,10 +2424,12 @@ struct Overlay::Impl {
         end_config_panel();
     }
 
-    void render_workspace(const RuntimeSnapshot& snapshot,
-                          AppConfig& app_config,
-                          const std::string& app_message,
-                          OverlayActions& actions) {
+    void render_workspace(
+            const RuntimeSnapshot& snapshot,
+            const std::shared_ptr<const RuntimePreviewFrame>& preview,
+            AppConfig& app_config,
+            const std::string& app_message,
+            OverlayActions& actions) {
         const bool can_edit = editable(snapshot);
         const bool can_save = can_edit ||
             (active_page == WorkspacePage::DETECTION &&
@@ -2168,7 +2461,7 @@ struct Overlay::Impl {
                     break;
                 case WorkspacePage::DETECTION:
                     render_detection_config(
-                        snapshot, app_config, can_edit, actions);
+                        snapshot, preview, app_config, can_edit, actions);
                     break;
                 case WorkspacePage::AIM:
                     render_aim_config(app_config, can_edit);
@@ -2290,10 +2583,12 @@ bool Overlay::pump_messages() noexcept {
     return !impl_->close_requested;
 }
 
-bool Overlay::render(const RuntimeSnapshot& snapshot,
-                     AppConfig& config,
-                     const std::string& app_message,
-                     OverlayActions& actions) noexcept {
+bool Overlay::render(
+        const RuntimeSnapshot& snapshot,
+        const std::shared_ptr<const RuntimePreviewFrame>& preview,
+        AppConfig& config,
+        const std::string& app_message,
+        OverlayActions& actions) noexcept {
     if (!impl_ || !impl_->initialized) return false;
     try {
         actions = {};
@@ -2335,7 +2630,15 @@ bool Overlay::render(const RuntimeSnapshot& snapshot,
             ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoScrollWithMouse);
         impl_->render_global_bar(snapshot, actions);
-        impl_->render_workspace(snapshot, config, app_message, actions);
+        impl_->render_workspace(
+            snapshot, preview, config, app_message, actions);
+        const bool preview_enabled =
+            impl_->active_page == WorkspacePage::DETECTION &&
+            impl_->preview_requested;
+        actions.preview_enabled_changed =
+            preview_enabled != snapshot.preview_enabled;
+        actions.preview_enabled = preview_enabled;
+        if (!preview_enabled) impl_->release_preview_texture();
         ImGui::EndChild();
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
@@ -2361,6 +2664,7 @@ bool Overlay::render(const RuntimeSnapshot& snapshot,
 
 void Overlay::shutdown() noexcept {
     if (!impl_) return;
+    impl_->release_preview_texture();
     if (impl_->initialized) {
         ImGui_ImplDX11_Shutdown();
         ImGui_ImplWin32_Shutdown();

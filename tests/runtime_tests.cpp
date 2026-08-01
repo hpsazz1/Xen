@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -104,6 +105,171 @@ void test_bounded_sample_ring() {
            "诊断环 reset 必须清零统计并允许复用");
 }
 
+void test_runtime_preview_channel() {
+    runtime::detail::RuntimePreviewChannel preview;
+    cv::Mat image(320, 640, CV_8UC3, cv::Scalar(10, 20, 30));
+    const std::vector<Detection> detections{
+        {10.0f, 20.0f, 110.0f, 120.0f, 0.9f, 1}};
+    AimResult aim_result;
+    aim_result.status = AimStatus::SUCCESS;
+    aim_result.has_target = true;
+    aim_result.target.track_id = 7;
+    aim_result.target.aim_x = 60.0f;
+    aim_result.target.aim_y = 40.0f;
+    const auto started = std::chrono::steady_clock::now();
+
+    expect(!preview.publish(
+               image, 1, 320.0f, 160.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result, started),
+           "预览默认关闭时不得复制图像");
+    expect(preview.set_enabled(true), "启用预览时应成功预分配固定槽");
+    expect(!preview.publish(
+               image, 1, 320.0f, 160.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result, started),
+           "Runtime 会话未启动时即使用户启用预览也不得发布图像");
+    preview.set_session_active(true);
+    expect(preview.publish(
+               image, 1, 320.0f, 160.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result, started),
+           "启用后首个预览样本应发布成功");
+    const auto first = preview.latest();
+    expect(first && first->sequence == 1 &&
+               first->width == 512 && first->height == 256 &&
+               first->roi_width == 640 && first->roi_height == 320,
+           "预览必须按最长边 512 等比缩放并保留原 ROI 尺寸");
+    expect(first && first->bgra[0] == 10 && first->bgra[1] == 20 &&
+               first->bgra[2] == 30 && first->bgra[3] == 255,
+           "BGR 预览必须转换为可直接上传 D3D11 的 BGRA");
+    expect(first && first->detection_count == 1 &&
+               first->detections[0].class_id == 1 &&
+               first->has_target && first->target.track_id == 7,
+           "图像、检测框和 Aim 目标必须固化为同一序号快照");
+    expect(!preview.publish(
+               image, 2, 320.0f, 160.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result,
+               started + std::chrono::milliseconds(99)),
+           "预览采样间隔不足 100 ms 时必须跳过而不复制");
+    expect(preview.publish(
+               image, 2, 320.0f, 160.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result,
+               started + std::chrono::milliseconds(100)),
+           "预览达到 10 FPS 节流边界时应发布");
+    const auto stats = preview.stats();
+    expect(stats.enabled && stats.sampled_frames == 2 &&
+               stats.dropped_frames == 0,
+           "正常消费下预览统计应记录样本且无丢弃");
+    expect(preview.set_enabled(false) && !preview.latest(),
+           "关闭预览后必须立即停止交付旧帧");
+}
+
+void test_runtime_preview_overwrite_and_truncation() {
+    runtime::detail::RuntimePreviewChannel preview;
+    cv::Mat image(32, 32, CV_8UC3, cv::Scalar(1, 2, 3));
+    std::vector<Detection> detections(kRuntimePreviewMaxDetections + 2);
+    for (std::size_t index = 0; index < detections.size(); ++index) {
+        detections[index].class_id = static_cast<int>(index);
+    }
+    AimResult aim_result;
+    const auto started = std::chrono::steady_clock::now();
+
+    expect(preview.set_enabled(true), "覆盖测试应能启用预览");
+    preview.set_session_active(true);
+    expect(preview.publish(
+               image, 1, 16.0f, 16.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result, started),
+           "覆盖测试首帧应发布成功");
+    expect(preview.publish(
+               image, 2, 16.0f, 16.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result,
+               started + std::chrono::milliseconds(100)),
+           "消费者未读取时仍应以最新帧覆盖而不反压 Pipeline");
+    const auto latest = preview.latest();
+    const auto stats = preview.stats();
+    expect(latest && latest->sequence == 2 &&
+               latest->detection_count == kRuntimePreviewMaxDetections &&
+               latest->detections[kRuntimePreviewMaxDetections - 1].class_id ==
+                   static_cast<int>(kRuntimePreviewMaxDetections - 1),
+           "预览必须只保留最新帧并将检测框截断到固定容量");
+    expect(stats.sampled_frames == 2 && stats.dropped_frames == 1,
+           "覆盖未消费预览时必须累计一次丢弃");
+}
+
+void test_runtime_preview_held_slots_and_reset() {
+    runtime::detail::RuntimePreviewChannel preview;
+    cv::Mat image(16, 16, CV_8UC3, cv::Scalar(4, 5, 6));
+    const std::vector<Detection> detections;
+    AimResult aim_result;
+    const auto started = std::chrono::steady_clock::now();
+
+    expect(preview.set_enabled(true), "持槽测试应能启用预览");
+    preview.set_session_active(true);
+    expect(preview.publish(
+               image, 1, 8.0f, 8.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result, started),
+           "持槽测试第一帧应发布成功");
+    auto first = preview.latest();
+    expect(preview.publish(
+               image, 2, 8.0f, 8.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result,
+               started + std::chrono::milliseconds(100)),
+           "持槽测试第二帧应发布成功");
+    auto second = preview.latest();
+    expect(preview.publish(
+               image, 3, 8.0f, 8.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result,
+               started + std::chrono::milliseconds(200)),
+           "持槽测试第三帧应发布成功");
+    auto third = preview.latest();
+    expect(first && second && third &&
+               first->sequence == 1 && second->sequence == 2 &&
+               third->sequence == 3,
+           "外部持有的三帧内容不得被后续发布原地覆盖");
+    expect(!preview.publish(
+               image, 4, 8.0f, 8.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result,
+               started + std::chrono::milliseconds(300)),
+           "三槽均被消费者持有时必须丢弃新预览且不得阻塞");
+    expect(preview.stats().dropped_frames == 1,
+           "无空闲预览槽时必须累计一次丢弃");
+    expect(!preview.publish(
+               image, 5, 8.0f, 8.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result,
+               started + std::chrono::milliseconds(350)) &&
+               preview.stats().dropped_frames == 1,
+           "无空闲槽后的重试也必须受 100 ms 采样间隔限制");
+
+    const auto* first_storage = first->bgra.data();
+    expect(preview.set_enabled(false) && preview.set_enabled(true),
+           "消费者仍持槽时预览通道应能安全重启");
+    expect(first->sequence == 1 && first->bgra.data() == first_storage,
+           "通道重启不得重新分配或改写消费者仍持有的旧槽");
+    first.reset();
+    second.reset();
+    third.reset();
+    preview.set_session_active(false);
+    const auto reset_stats = preview.stats();
+    expect(reset_stats.enabled && reset_stats.sampled_frames == 0 &&
+               reset_stats.dropped_frames == 0 && !preview.latest(),
+           "会话关闭必须保留开关、清除旧帧并清零预览统计");
+    expect(!preview.publish(
+               image, 5, 8.0f, 8.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result,
+               started + std::chrono::milliseconds(400)),
+           "会话关闭后不得让最后一帧重新进入预览通道");
+    preview.set_session_active(true);
+    expect(preview.publish(
+               image, 5, 8.0f, 8.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result,
+               started + std::chrono::milliseconds(400)),
+           "会话重置后应立即允许发布新预览");
+    const auto after_reset = preview.latest();
+    expect(after_reset && after_reset->bgra.data() == first_storage &&
+               after_reset->bgra.capacity() >=
+                   static_cast<std::size_t>(kRuntimePreviewMaxDimension) *
+                       kRuntimePreviewMaxDimension * 4,
+           "会话重置必须复用已预分配的大缓冲");
+}
+
 } // namespace
 
 int main() {
@@ -111,6 +277,9 @@ int main() {
     test_network_storage_released_on_reset();
     test_safety_gate();
     test_bounded_sample_ring();
+    test_runtime_preview_channel();
+    test_runtime_preview_overwrite_and_truncation();
+    test_runtime_preview_held_slots_and_reset();
     if (failures != 0) {
         std::cerr << "Runtime 核心测试失败数: " << failures << '\n';
         return 1;

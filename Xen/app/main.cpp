@@ -119,9 +119,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             }
         }
         OverlayActions actions;
-        if (!overlay.render(snapshot, config, app_message, actions)) {
+        const auto preview = snapshot.preview_enabled
+            ? runtime.preview_frame()
+            : nullptr;
+        if (!overlay.render(
+                snapshot, preview, config, app_message, actions)) {
             LOG_ERROR("app", "Overlay 渲染失败");
             break;
+        }
+
+        if (actions.preview_enabled_changed &&
+            !runtime.set_preview_enabled(actions.preview_enabled)) {
+            app_message = "ROI 预览通道切换失败。";
         }
 
         if (actions.start_requested) {

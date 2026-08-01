@@ -54,11 +54,39 @@ void test_metric_history_clear_and_floor() {
            "清空后不得暴露上一轮运行的历史值");
 }
 
+void test_preview_geometry_mapping() {
+    const auto fitted = overlay::detail::fit_preview_size(
+        512, 256, 400.0f, 300.0f);
+    expect(nearly_equal(fitted.width, 400.0f) &&
+               nearly_equal(fitted.height, 200.0f),
+           "预览显示区域必须等比缩小且不得超过可用空间");
+    const auto original = overlay::detail::fit_preview_size(
+        320, 320, 500.0f, 500.0f);
+    expect(nearly_equal(original.width, 320.0f) &&
+               nearly_equal(original.height, 320.0f),
+           "预览纹理不得为填满面板而放大低分辨率图像");
+
+    const auto point = overlay::detail::map_preview_point(
+        100.0f, 50.0f, 0.5f, 0.25f);
+    expect(nearly_equal(point.x, 50.0f) &&
+               nearly_equal(point.y, 12.5f),
+           "ROI 点必须按横纵独立比例映射到显示区域");
+    const auto rectangle = overlay::detail::map_preview_rect(
+        120.0f, -20.0f, -10.0f, 200.0f,
+        0.5f, 0.5f, 50.0f, 60.0f);
+    expect(nearly_equal(rectangle.x1, 0.0f) &&
+               nearly_equal(rectangle.y1, 0.0f) &&
+               nearly_equal(rectangle.x2, 50.0f) &&
+               nearly_equal(rectangle.y2, 60.0f),
+           "预览框必须规范化反向坐标并裁剪到图像边界");
+}
+
 } // namespace
 
 int main() {
     test_metric_history_order_and_overwrite();
     test_metric_history_clear_and_floor();
+    test_preview_geometry_mapping();
     if (failures != 0) {
         std::cerr << "Overlay 测试失败数: " << failures << '\n';
         return 1;
