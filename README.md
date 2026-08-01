@@ -222,12 +222,13 @@ TensorRT 和 CUDA 允许节点级回退，环境清单会通过独立 ORT profil
 TensorRT 允许 `TensorRT -> CUDA -> CPU`，CUDA 允许 `CUDA -> CPU`。profiling Session 与正式
 性能 Session 分离，诊断开销不会混入正式样本。DirectML 会禁用 CPU 节点回退。
 
-D3D11/CUDA 互操作短跑可追加 `-EnableD3D11CudaInterop on`。脚本会强制要求 Desktop
-Duplication、TensorRT、CUDA Graph 与 GPU 前处理，并逐样本核对 `h2d_ms=0`、
-`input_upload_bytes=0`、`input_device_copy_bytes=roi_w*roi_h*4`。2026-08-01 的 265 帧真实
-DXGI 短跑为 265/265 成功，total P50/P95/P99 为 4.240/4.555/4.645 ms，D3D11→CUDA P50
-为 3.486 ms；这只证明链路和报告门禁正确，且显示当前 legacy interop 没有延迟优势，不能替代
-5 分钟 on/off 正式 A/B，也不构成默认开启依据。
+D3D11/CUDA 互操作可追加 `-EnableD3D11CudaInterop on`。脚本会强制要求 Desktop Duplication、
+TensorRT、CUDA Graph 与 GPU 前处理，并逐样本核对 `h2d_ms=0`、`input_upload_bytes=0`、
+`input_device_copy_bytes=roi_w*roi_h*4`。2026-08-01 在干净提交 `daecbdc` 上完成同机各 5 分钟
+on/off A/B：默认 CPU BGR 为 78,007/78,007 成功，互操作为 78,003/78,003 成功，两侧失败和
+诊断丢弃均为零。逐帧 `capture + total` P50/P95/P99 分别为 4.318/4.603/4.716 ms 和
+8.065/8.440/8.597 ms；互操作虽把 307,200 B/帧 host upload 降为零，但 D3D11→CUDA 隐式同步
+P95 为 3.789 ms，完整链路 P95 反而增加 3.838 ms。因此该路径只保留为实验/诊断开关，继续默认关闭。
 
 UDP、XUDP 和 NDI 接收正式验收使用统一包装脚本。以下命令在辅机启动 XUDP 接收端；显式
 `ReadyFilePath` 便于外部编排在 Capture 已绑定、Runtime 为 `RUNNING` 且实际 Provider 校验
