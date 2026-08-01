@@ -571,8 +571,8 @@ $expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
 } else {
     $captureBackendNames[$ExpectedCaptureBackend]
 }
-if ($report.schema -ne 5) {
-    throw "报告 schema 不是 5：$($report.schema)"
+if ($report.schema -ne 6) {
+    throw "报告 schema 不是 6：$($report.schema)"
 }
 if (-not [string]::IsNullOrEmpty($expectedCaptureName) -and
     $report.capture_backend -ne $expectedCaptureName) {
@@ -736,6 +736,7 @@ $environment = [ordered]@{
             requested = $ExpectedCaptureBackend
             actual = [string]$report.capture_backend
             source_dropped_frames = [long]$snapshot.source_dropped_frames
+            duplication_recoveries = [long]$snapshot.duplication_recoveries
             transport_dropped_frames = [long]$snapshot.transport_dropped_frames
             transport_invalid_packets = [long]$snapshot.transport_invalid_packets
             source_received_frames = [long]$snapshot.source_received_frames

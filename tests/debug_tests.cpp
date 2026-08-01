@@ -96,6 +96,7 @@ void test_report_summary_and_atomic_files() {
     final_snapshot.processed_frames = 4;
     final_snapshot.failed_frames = 1;
     final_snapshot.source_dropped_frames = 2;
+    final_snapshot.duplication_recoveries = 6;
     final_snapshot.transport_dropped_frames = 3;
     final_snapshot.transport_invalid_packets = 4;
     final_snapshot.overwritten_frames = 1;
@@ -134,7 +135,7 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v5") != std::string::npos &&
+    expect(csv_text.find("Xen Runtime Debug Report v6") != std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
                csv_text.find("d3d11_to_directml_ms") != std::string::npos &&
@@ -142,9 +143,11 @@ void test_report_summary_and_atomic_files() {
                csv_text.find("INFERENCE_FAILED") != std::string::npos &&
                csv_text.find("# final_source_width,2560") !=
                    std::string::npos &&
-               csv_text.find("# final_roi_x,1120") != std::string::npos,
+               csv_text.find("# final_roi_x,1120") != std::string::npos &&
+               csv_text.find("# final_duplication_recoveries,6") !=
+                   std::string::npos,
            "CSV 必须包含 schema、列头、失败状态和最终几何");
-    expect(json_text.find("\"schema\": 5") != std::string::npos &&
+    expect(json_text.find("\"schema\": 6") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -159,6 +162,8 @@ void test_report_summary_and_atomic_files() {
                    std::string::npos &&
                json_text.find("\"final_snapshot\"") != std::string::npos &&
                json_text.find("\"source_width\": 2560") !=
+                   std::string::npos &&
+               json_text.find("\"duplication_recoveries\": 6") !=
                    std::string::npos &&
                json_text.find("\"failed_frames\": 1") !=
                    std::string::npos,

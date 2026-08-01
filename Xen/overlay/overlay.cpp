@@ -1311,6 +1311,7 @@ struct Overlay::Impl {
             XEN_COUNTER_ROW("已采集", snapshot.captured_frames);
             XEN_COUNTER_ROW("已处理", snapshot.processed_frames);
             XEN_COUNTER_ROW("采集端淘汰", snapshot.source_dropped_frames);
+            XEN_COUNTER_ROW("DXGI 重建", snapshot.duplication_recoveries);
             XEN_COUNTER_ROW("传输丢帧", snapshot.transport_dropped_frames);
             XEN_COUNTER_ROW("传输异常", snapshot.transport_invalid_packets);
             XEN_COUNTER_ROW("覆盖丢帧", snapshot.overwritten_frames);

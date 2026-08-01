@@ -59,13 +59,17 @@ Xen/                           # 仓库根目录
 
 - 主线程负责 Win32/D3D11/ImGui 消息循环、只读快照渲染和意图提交。
 - Capture 线程从 Desktop Duplication、UDP/XUDP 或 NDI 获取 ROI，并发布到三个可复用槽组成的最新帧队列。
+- Desktop Duplication 收到 `DXGI_ERROR_ACCESS_LOST` 且 D3D11 设备仍有效时，会在 1 秒
+  有界窗口内重枚举同一输出并原位重建 duplication；旋转或分辨率变化、设备移除、
+  超时均仍进入 FAILED。成功重建返回 `NO_FRAME`，不发布旧帧，次数在 schema 6
+  `duplication_recoveries` 中单独记录，不混入丢帧或失败帧。
 - Pipeline 线程依次执行 Detector、Aim、安全门控和 Mouse，不增加独立控制线程。
 - Detector 可在 Runtime 运行期间异步热重载。候选 Session 在独立线程加载，旧模型继续处理帧；
   只有候选完整加载成功后才在两帧之间交换指针。失败保持旧模型和 `RUNNING`，成功后强制解除
   输出武装并重置 Aim 状态；加载窗口拒绝新的武装请求。
 - Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；样本同时固化主机 FOV、编码
   尺寸、ROI 和像素比例，避免网络重连或显示模式变化造成的瞬时坐标漂移被最终快照掩盖。主线程
-  在会话结束时将其发布为 schema 5 的
+  在会话结束时将其发布为 schema 6 的
   `cache/runtime/<进程-运行时钟-generation-segment>.csv/.json`。模型重载前结束当前报告，
   加载窗口不记录样本，完成后按实际活动模型和 Provider 开始新分段，避免新旧模型混合统计。
   报告按成功/失败状态隔离耗时，

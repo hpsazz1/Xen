@@ -232,6 +232,8 @@ void append_csv_snapshot(std::ostringstream& output,
         << "# final_failed_frames," << snapshot.failed_frames << '\n'
         << "# final_source_dropped_frames,"
         << snapshot.source_dropped_frames << '\n'
+        << "# final_duplication_recoveries,"
+        << snapshot.duplication_recoveries << '\n'
         << "# final_transport_dropped_frames,"
         << snapshot.transport_dropped_frames << '\n'
         << "# final_transport_invalid_packets,"
@@ -296,6 +298,8 @@ void append_json_snapshot(std::ostringstream& output,
         << "    \"failed_frames\": " << snapshot.failed_frames << ",\n"
         << "    \"source_dropped_frames\": "
         << snapshot.source_dropped_frames << ",\n"
+        << "    \"duplication_recoveries\": "
+        << snapshot.duplication_recoveries << ",\n"
         << "    \"transport_dropped_frames\": "
         << snapshot.transport_dropped_frames << ",\n"
         << "    \"transport_invalid_packets\": "
@@ -460,7 +464,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             samples_, report_samples_dropped_,
             final_snapshot.debug_samples_dropped);
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v5\n"
+        csv << "# Xen Runtime Debug Report v6\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -549,7 +553,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 5,\n"
+             << "{\n  \"schema\": 6,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"

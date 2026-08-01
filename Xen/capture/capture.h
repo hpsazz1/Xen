@@ -98,6 +98,9 @@ struct FrameTiming {
     double capture_ms = 0.0;
     // Capture 后端内部有界队列累计丢弃的源帧数，不包含 Runtime 队列覆盖。
     std::uint64_t source_dropped_frames = 0;
+    // Desktop Duplication 在 D3D11 设备仍有效时成功重建的会话数。
+    // 该数值是异常环境证据，不能与丢帧或失败帧混合。
+    std::uint64_t duplication_recoveries = 0;
     // NDI SDK 报告或 XUDP 帧序号推导的传输丢帧数。
     std::uint64_t transport_dropped_frames = 0;
     // 协议解析、分片冲突、覆盖不完整或 SHA-256 失败的累计数量。

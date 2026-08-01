@@ -24,6 +24,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <utility>
 
 #include <opencv2/imgproc.hpp>
 
@@ -127,6 +129,8 @@ public:
             }
 
             sequence_ = 0;
+            duplication_recoveries_ = 0;
+            last_recovery_warning_at_ = {};
             set_error({});
             status_.store(CaptureStatus::READY, std::memory_order_release);
             LOG_INFO("capture", "Desktop Duplication 已打开: source={}x{}, roi=({}, {}) {}x{}, storage={}",
@@ -185,10 +189,18 @@ public:
             // 避免长时基准只留下一个无法区分根因的 DXGI 状态。
             const HRESULT device_reason = device_
                 ? device_->GetDeviceRemovedReason() : E_POINTER;
+            if (device_reason == S_OK && recover_duplication()) {
+                status_.store(CaptureStatus::NO_FRAME,
+                              std::memory_order_release);
+                return CaptureStatus::NO_FRAME;
+            }
+            const std::string recovery_error = device_reason == S_OK
+                ? last_error() : "D3D11 设备已移除";
             fail(CaptureStatus::ACCESS_LOST,
-                 "Desktop Duplication 访问丢失，需要重建采集会话，"
+                 "Desktop Duplication 访问丢失且重建失败，"
                  "device_reason=" +
-                 std::to_string(static_cast<long>(device_reason)));
+                 std::to_string(static_cast<long>(device_reason)) +
+                 "，recovery=" + recovery_error);
             return CaptureStatus::ACCESS_LOST;
         }
         if (FAILED(acquire_hr)) {
@@ -315,6 +327,8 @@ public:
             frame.timing.capture_ms =
                 std::chrono::duration<double, std::milli>(finished - started).count();
             frame.timing.source_dropped_frames = 0;
+            frame.timing.duplication_recoveries =
+                duplication_recoveries_;
             frame.roi_x = roi_x_;
             frame.roi_y = roi_y_;
             frame.source_width = source_width_;
@@ -358,6 +372,82 @@ public:
     }
 
 private:
+    bool recover_duplication() noexcept {
+        duplication_.Reset();
+        HRESULT last_hr = DXGI_ERROR_ACCESS_LOST;
+
+        // 显示模式或桌面会话切换后，Output 可能需要短暂时间
+        // 才能重新 DuplicateOutput。异常路径最多等待 1 秒，既不忙循环，
+        // 也不会让 Capture 线程在外部会话永久不可用时无限阻塞。
+        constexpr int kMaximumAttempts = 20;
+        constexpr auto kRetryInterval = std::chrono::milliseconds(50);
+        for (int attempt = 0; attempt < kMaximumAttempts; ++attempt) {
+            if (!adapter_ || !device_ ||
+                FAILED(device_->GetDeviceRemovedReason())) {
+                break;
+            }
+
+            ComPtr<IDXGIOutput> recovered_output;
+            last_hr = adapter_->EnumOutputs(
+                static_cast<UINT>(config_.output_index), &recovered_output);
+            if (SUCCEEDED(last_hr)) {
+                DXGI_OUTPUT_DESC output_desc{};
+                last_hr = recovered_output->GetDesc(&output_desc);
+                if (SUCCEEDED(last_hr)) {
+                    const int recovered_width =
+                        output_desc.DesktopCoordinates.right -
+                        output_desc.DesktopCoordinates.left;
+                    const int recovered_height =
+                        output_desc.DesktopCoordinates.bottom -
+                        output_desc.DesktopCoordinates.top;
+                    if ((output_desc.Rotation !=
+                             DXGI_MODE_ROTATION_UNSPECIFIED &&
+                         output_desc.Rotation !=
+                             DXGI_MODE_ROTATION_IDENTITY) ||
+                        recovered_width != source_width_ ||
+                        recovered_height != source_height_) {
+                        set_error("Desktop Duplication 重建后的显示几何与启动契约不一致");
+                        return false;
+                    }
+
+                    ComPtr<IDXGIOutput1> output1;
+                    last_hr = recovered_output.As(&output1);
+                    if (SUCCEEDED(last_hr)) {
+                        ComPtr<IDXGIOutputDuplication> recovered;
+                        last_hr = output1->DuplicateOutput(
+                            device_.Get(), &recovered);
+                        if (SUCCEEDED(last_hr)) {
+                            output_ = std::move(recovered_output);
+                            duplication_ = std::move(recovered);
+                            ++duplication_recoveries_;
+                            set_error({});
+                            const auto now =
+                                std::chrono::steady_clock::now();
+                            if (last_recovery_warning_at_ ==
+                                    std::chrono::steady_clock::time_point{} ||
+                                now - last_recovery_warning_at_ >=
+                                    std::chrono::seconds(5)) {
+                                LOG_WARN("capture",
+                                         "Desktop Duplication 会话已原位重建: count={}",
+                                         duplication_recoveries_);
+                                last_recovery_warning_at_ = now;
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            if (attempt + 1 < kMaximumAttempts) {
+                std::this_thread::sleep_for(kRetryInterval);
+            }
+        }
+
+        set_error("Desktop Duplication 原位重建失败，HRESULT=" +
+                  std::to_string(static_cast<long>(last_hr)));
+        return false;
+    }
+
     ID3D11Texture2D* reusable_gpu_texture(
             const CapturedFrame& frame) const noexcept {
         if (frame.storage != gpu_storage() ||
@@ -539,6 +629,8 @@ private:
     mutable std::mutex error_mutex_;
     std::string last_error_;
     std::uint64_t sequence_ = 0;
+    std::uint64_t duplication_recoveries_ = 0;
+    std::chrono::steady_clock::time_point last_recovery_warning_at_{};
     std::uint64_t interop_fence_value_ = 0;
     int source_width_ = 0;
     int source_height_ = 0;

@@ -132,6 +132,7 @@ struct RuntimeSnapshot {
     std::uint64_t processed_frames = 0;
     std::uint64_t failed_frames = 0;
     std::uint64_t source_dropped_frames = 0;
+    std::uint64_t duplication_recoveries = 0;
     std::uint64_t transport_dropped_frames = 0;
     std::uint64_t transport_invalid_packets = 0;
     std::uint64_t source_received_frames = 0;

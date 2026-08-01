@@ -247,6 +247,8 @@ struct Runtime::Impl {
                     write_slot->timing.capture_ms;
                 current_snapshot.source_dropped_frames =
                     write_slot->timing.source_dropped_frames;
+                current_snapshot.duplication_recoveries =
+                    write_slot->timing.duplication_recoveries;
                 current_snapshot.transport_dropped_frames =
                     write_slot->timing.transport_dropped_frames;
                 current_snapshot.transport_invalid_packets =
