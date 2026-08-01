@@ -301,6 +301,19 @@ ctest --test-dir build -C Release --output-on-failure
 
 本项目已用 ONNX Runtime 1.27.1、OpenCV 4.14.0、spdlog 1.17.0 和 VS 2026 Release 配置完成构建。测试所需的非系统运行库由 CMake 部署到可执行文件旁，不依赖开发机额外配置 `PATH`。
 
+默认 `BUILD_TESTING=ON` 当前注册 15 个 CTest，按风险分为五层：
+
+- 纯算法与内部契约：Detector 解码/前处理、Aim、真值解析、Runtime 队列、Overlay 标量环；
+- 生产库回归：Log、Config、Debug、Benchmark 和 Mouse Benchmark 直接链接生产目标；
+- OS/网络可复现替身：Crash 子进程、UDP/XUDP/NDI 回环、假 KMBOX 与 Keyboard 状态机；
+- 可选真实模型集成：设置 `XEN_TEST_MODEL` 后增加 Detector 加载/变化输入和 Runtime 热重载；
+- 正式性能与部署验收：使用 `scripts/benchmark_*.ps1`，不把短单元测试耗时写成性能结论。
+
+测试不得复制一套生产协议或算法，不得因环境缺失静默回退后端，也不得通过删除、跳过或放宽
+断言处理失败。默认 CTest 必须能在无人值守环境重复运行；需要真实模型、GPU Provider、显示器、
+双机或物理设备的场景由显式脚本承担，并在 clean `PATH` 下核对运行库和输入快照。详细规则见
+本地文档 `docs/031_单元测试架构_20260801.md`。
+
 也可以使用仓库内的可复用脚本完成配置、构建和测试：
 
 ```powershell
