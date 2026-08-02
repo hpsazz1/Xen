@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <memory>
+#include <sstream>
 #include <string>
 
 #include <imgui.h>
@@ -85,6 +86,70 @@ enum class WorkspacePage {
     INPUT,
     SETTINGS,
 };
+
+enum class HotkeyBindingTarget {
+    NONE,
+    RUNTIME_TOGGLE,
+    AIM_HOLD,
+    EMERGENCY,
+};
+
+std::array<bool, 256> current_virtual_key_state() noexcept {
+    std::array<bool, 256> result{};
+    for (int virtual_key = 1; virtual_key <= 0xFF; ++virtual_key) {
+        result[static_cast<std::size_t>(virtual_key)] =
+            (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
+    }
+    return result;
+}
+
+std::string virtual_key_name(int virtual_key) {
+    switch (virtual_key) {
+        case VK_LBUTTON: return "鼠标左键";
+        case VK_RBUTTON: return "鼠标右键";
+        case VK_MBUTTON: return "鼠标中键";
+        case VK_XBUTTON1: return "鼠标侧键 1";
+        case VK_XBUTTON2: return "鼠标侧键 2";
+        case VK_ESCAPE: return "Esc";
+        default: break;
+    }
+    UINT scan_code = MapVirtualKeyW(
+        static_cast<UINT>(virtual_key), MAPVK_VK_TO_VSC);
+    if (virtual_key == VK_LEFT || virtual_key == VK_UP ||
+        virtual_key == VK_RIGHT || virtual_key == VK_DOWN ||
+        virtual_key == VK_PRIOR || virtual_key == VK_NEXT ||
+        virtual_key == VK_END || virtual_key == VK_HOME ||
+        virtual_key == VK_INSERT || virtual_key == VK_DELETE ||
+        virtual_key == VK_DIVIDE || virtual_key == VK_NUMLOCK) {
+        scan_code |= 0xE000U;
+    }
+    wchar_t name[64]{};
+    const LONG key_data = static_cast<LONG>(scan_code << 16U);
+    if (GetKeyNameTextW(
+            key_data, name, static_cast<int>(std::size(name))) > 0) {
+        const int utf8_size = WideCharToMultiByte(
+            CP_UTF8, 0, name, -1, nullptr, 0, nullptr, nullptr);
+        if (utf8_size > 1) {
+            std::string utf8(static_cast<std::size_t>(utf8_size), '\0');
+            WideCharToMultiByte(
+                CP_UTF8, 0, name, -1, utf8.data(), utf8_size,
+                nullptr, nullptr);
+            utf8.pop_back();
+            return utf8;
+        }
+    }
+    return "VK " + std::to_string(virtual_key);
+}
+
+std::string format_hotkey_binding(const std::vector<int>& virtual_keys) {
+    if (virtual_keys.empty()) return "未绑定";
+    std::ostringstream stream;
+    for (std::size_t index = 0; index < virtual_keys.size(); ++index) {
+        if (index > 0) stream << " | ";
+        stream << virtual_key_name(virtual_keys[index]);
+    }
+    return stream.str();
+}
 
 struct StageTiming {
     const char* label = "";
@@ -597,6 +662,9 @@ struct Overlay::Impl {
     MetricHistory target_confidence_history;
     std::uint64_t history_sequence = 0;
     bool history_runtime_active = false;
+    HotkeyBindingTarget hotkey_binding_target = HotkeyBindingTarget::NONE;
+    overlay::detail::HotkeyCaptureState hotkey_capture_state;
+    std::string hotkey_capture_message;
 
     static LRESULT CALLBACK window_proc(
             HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -2828,12 +2896,12 @@ struct Overlay::Impl {
             ImGui::TableSetColumnIndex(0);
             render_mouse_form(app_config);
             ImGui::TableSetColumnIndex(1);
-            render_keyboard_form(app_config);
+            render_keyboard_form(app_config, actions);
             ImGui::EndTable();
         } else {
             render_mouse_form(app_config);
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
-            render_keyboard_form(app_config);
+            render_keyboard_form(app_config, actions);
         }
         ImGui::EndDisabled();
     }
@@ -2908,18 +2976,126 @@ struct Overlay::Impl {
         end_config_panel();
     }
 
-    void render_keyboard_form(AppConfig& app_config) {
-        begin_config_panel("keyboard_panel", "全局按键", 88.0f);
+    std::vector<int>* hotkey_binding(AppConfig& app_config) noexcept {
+        switch (hotkey_binding_target) {
+            case HotkeyBindingTarget::RUNTIME_TOGGLE:
+                return &app_config.keyboard.runtime_toggle_virtual_keys;
+            case HotkeyBindingTarget::AIM_HOLD:
+                return &app_config.keyboard.aim_hold_virtual_keys;
+            case HotkeyBindingTarget::EMERGENCY:
+                return &app_config.keyboard.emergency_virtual_keys;
+            case HotkeyBindingTarget::NONE:
+                return nullptr;
+        }
+        return nullptr;
+    }
+
+    bool virtual_key_assigned_elsewhere(
+            const AppConfig& app_config,
+            const std::vector<int>* current_binding,
+            int virtual_key) const noexcept {
+        const std::array<const std::vector<int>*, 3> bindings{{
+            &app_config.keyboard.runtime_toggle_virtual_keys,
+            &app_config.keyboard.aim_hold_virtual_keys,
+            &app_config.keyboard.emergency_virtual_keys}};
+        return std::any_of(
+            bindings.begin(), bindings.end(),
+            [&](const std::vector<int>* binding) {
+                return binding != current_binding &&
+                    std::find(binding->begin(), binding->end(), virtual_key) !=
+                        binding->end();
+            });
+    }
+
+    void begin_hotkey_binding(
+            HotkeyBindingTarget target,
+            const std::array<bool, 256>& key_active) noexcept {
+        hotkey_binding_target = target;
+        hotkey_capture_message.clear();
+        overlay::detail::begin_hotkey_capture(
+            hotkey_capture_state, key_active);
+    }
+
+    void render_hotkey_row(
+            const char* label,
+            const char* id,
+            HotkeyBindingTarget target,
+            const std::vector<int>& binding,
+            const std::array<bool, 256>& key_active) {
+        form_row(label);
+        const bool capturing = hotkey_capture_state.active &&
+            hotkey_binding_target == target;
+        const std::string text = capturing
+            ? "等待按键（Esc 清空）"
+            : format_hotkey_binding(binding);
+        if (ImGui::Button(id, ImVec2(-1.0f, 30.0f))) {
+            begin_hotkey_binding(target, key_active);
+        }
+        const ImVec2 minimum = ImGui::GetItemRectMin();
+        const ImVec2 maximum = ImGui::GetItemRectMax();
+        const ImVec2 text_size = ImGui::CalcTextSize(text.c_str());
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(
+                minimum.x + 10.0f,
+                minimum.y + (maximum.y - minimum.y - text_size.y) * 0.5f),
+            ImGui::GetColorU32(rgba(capturing ? kAccentStrong : kInk)),
+            text.c_str());
+    }
+
+    void render_keyboard_form(
+            AppConfig& app_config,
+            OverlayActions& actions) {
+        const auto key_active = current_virtual_key_state();
+        const bool capture_was_active = hotkey_capture_state.active;
+        const auto capture_result = overlay::detail::update_hotkey_capture(
+            hotkey_capture_state, key_active);
+        if (capture_was_active) actions.hotkey_capture_consumed = true;
+        if (capture_result.type !=
+                overlay::detail::HotkeyCaptureResultType::NONE) {
+            std::vector<int>* binding = hotkey_binding(app_config);
+            if (binding && capture_result.type ==
+                    overlay::detail::HotkeyCaptureResultType::CLEARED) {
+                binding->clear();
+                hotkey_capture_message = "绑定已清空，该功能已禁用";
+            } else if (binding && capture_result.type ==
+                    overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
+                const int virtual_key = capture_result.virtual_key;
+                if (virtual_key_assigned_elsewhere(
+                        app_config, binding, virtual_key)) {
+                    hotkey_capture_message = "该按键已被其他功能占用";
+                } else if (std::find(
+                        binding->begin(), binding->end(), virtual_key) ==
+                        binding->end()) {
+                    binding->push_back(virtual_key);
+                    hotkey_capture_message = "按键已追加";
+                } else {
+                    hotkey_capture_message = "该按键已在当前绑定中";
+                }
+            }
+            hotkey_binding_target = HotkeyBindingTarget::NONE;
+        }
+
+        begin_config_panel("keyboard_panel", "全局按键", 148.0f);
         if (begin_form("keyboard_form", 126.0f)) {
-            form_row("按住启用 / VK");
-            ImGui::InputInt(
-                "##aim_hold_virtual_key",
-                &app_config.keyboard.aim_hold_virtual_key);
-            form_row("急停 / VK");
-            ImGui::InputInt(
-                "##emergency_virtual_key",
-                &app_config.keyboard.emergency_virtual_key);
+            render_hotkey_row(
+                "运行切换", "##runtime_toggle_virtual_keys",
+                HotkeyBindingTarget::RUNTIME_TOGGLE,
+                app_config.keyboard.runtime_toggle_virtual_keys, key_active);
+            render_hotkey_row(
+                "按住启用", "##aim_hold_virtual_keys",
+                HotkeyBindingTarget::AIM_HOLD,
+                app_config.keyboard.aim_hold_virtual_keys, key_active);
+            render_hotkey_row(
+                "急停", "##emergency_virtual_keys",
+                HotkeyBindingTarget::EMERGENCY,
+                app_config.keyboard.emergency_virtual_keys, key_active);
             ImGui::EndTable();
+        }
+        if (!hotkey_capture_message.empty()) {
+            ImGui::TextColored(
+                rgba(hotkey_capture_message.find("占用") != std::string::npos
+                    ? kDanger : kMutedInk),
+                "%s", hotkey_capture_message.c_str());
         }
         end_config_panel();
     }
@@ -2988,6 +3164,13 @@ struct Overlay::Impl {
              snapshot.state == RuntimeState::RUNNING &&
              snapshot.detector_reload_state !=
                  DetectorReloadState::LOADING);
+        if (hotkey_capture_state.active &&
+            (active_page != WorkspacePage::INPUT || !can_edit ||
+             show_log_panel)) {
+            hotkey_capture_state = {};
+            hotkey_binding_target = HotkeyBindingTarget::NONE;
+            hotkey_capture_message.clear();
+        }
         ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kSurface));
         ImGui::PushStyleVar(
             ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 16.0f));

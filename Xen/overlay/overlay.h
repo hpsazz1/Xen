@@ -16,6 +16,7 @@ struct OverlayActions {
     bool save_config_requested = false;
     bool preview_enabled_changed = false;
     bool preview_enabled = false;
+    bool hotkey_capture_consumed = false;
     std::vector<RuntimeIntent> runtime_intents;
 };
 

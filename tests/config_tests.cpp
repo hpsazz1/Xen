@@ -54,6 +54,9 @@ void test_round_trip() {
     source.mouse.makcu_baud_rate = 4000000;
     source.mouse.makcu_connect_timeout_ms = 800;
     source.mouse.makcu_command_timeout_ms = 120;
+    source.keyboard.aim_hold_virtual_keys = {0x02, 0x05};
+    source.keyboard.emergency_virtual_keys = {0x23, 0x06};
+    source.keyboard.runtime_toggle_virtual_keys = {0x77, 0x04};
     source.log.global_level = LogLevel::WARN;
     source.log.enable_console = false;
     source.log.enable_file = false;
@@ -112,6 +115,12 @@ void test_round_trip() {
            loaded.mouse.makcu_baud_rate == 4000000 &&
            loaded.mouse.makcu_connect_timeout_ms == 800 &&
            loaded.mouse.makcu_command_timeout_ms == 120 &&
+           loaded.keyboard.aim_hold_virtual_keys ==
+               source.keyboard.aim_hold_virtual_keys &&
+           loaded.keyboard.emergency_virtual_keys ==
+               source.keyboard.emergency_virtual_keys &&
+           loaded.keyboard.runtime_toggle_virtual_keys ==
+               source.keyboard.runtime_toggle_virtual_keys &&
            loaded.log.global_level == LogLevel::WARN &&
            !loaded.log.enable_console && !loaded.log.enable_file &&
            loaded.log.enable_debug_file && loaded.log.enable_ringbuf &&
@@ -224,6 +233,31 @@ void test_log_defaults_and_invalid_level() {
                error.find("detector") != std::string::npos,
            "未知模块日志等级必须明确拒绝并返回模块名");
     std::filesystem::remove(invalid_module_path, ignored);
+}
+
+void test_legacy_keyboard_config() {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "xen_legacy_keyboard_config.ini";
+    {
+        std::ofstream output(path, std::ios::binary);
+        output << "[detector]\nmodel_path=model.onnx\n"
+                  "[keyboard]\n"
+                  "aim_hold_virtual_key=5\n"
+                  "emergency_virtual_key=6\n"
+                  "runtime_toggle_virtual_key=118\n";
+    }
+    AppConfig loaded;
+    std::string error;
+    expect(load_app_config(path.string(), loaded, error) &&
+               loaded.keyboard.aim_hold_virtual_keys ==
+                   std::vector<int>{5} &&
+               loaded.keyboard.emergency_virtual_keys ==
+                   std::vector<int>{6} &&
+               loaded.keyboard.runtime_toggle_virtual_keys ==
+                   std::vector<int>{118},
+           "旧版单键配置必须迁移为单元素绑定集合");
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
 }
 
 void test_invalid_config() {
@@ -341,16 +375,29 @@ void test_invalid_config() {
            "完整 MAKCU 配置应通过校验");
 
     config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
-    config.keyboard.emergency_virtual_key =
-        config.keyboard.aim_hold_virtual_key;
+    config.keyboard.emergency_virtual_keys =
+        config.keyboard.aim_hold_virtual_keys;
     expect(!validate_app_config(config, error),
            "按住启用键与急停键冲突时必须拒绝配置");
-    config.keyboard.emergency_virtual_key = 0x100;
+    config.keyboard.emergency_virtual_keys = {0x100};
     expect(!validate_app_config(config, error),
            "超出 Win32 虚拟键范围时必须拒绝配置");
-    config.keyboard.emergency_virtual_key = 0x23;
+    config.keyboard.emergency_virtual_keys = {0x23};
     expect(validate_app_config(config, error),
            "互不冲突且位于 Win32 范围内的虚拟键应通过校验");
+    config.keyboard.runtime_toggle_virtual_keys = {0x77, 0x77};
+    expect(!validate_app_config(config, error),
+           "同一功能内重复绑定必须拒绝配置");
+    config.keyboard.runtime_toggle_virtual_keys.clear();
+    expect(validate_app_config(config, error),
+           "运行切换绑定为空时必须允许禁用该功能");
+    config.mouse.allow_send_input = true;
+    config.keyboard.aim_hold_virtual_keys.clear();
+    expect(!validate_app_config(config, error),
+           "物理输出启用时按住启用绑定不得为空");
+    config.mouse.allow_send_input = false;
+    expect(validate_app_config(config, error),
+           "禁用物理输出时允许清空按住启用绑定");
 
     config.log.ringbuf_capacity = 0;
     expect(!validate_app_config(config, error),
@@ -526,6 +573,7 @@ void test_d3d11_directml_interop_config() {
 int main() {
     test_round_trip();
     test_log_defaults_and_invalid_level();
+    test_legacy_keyboard_config();
     test_invalid_config();
     test_complete_aim_config_validation();
     test_xudp_backend_round_trip();

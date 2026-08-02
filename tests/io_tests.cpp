@@ -59,19 +59,19 @@ void test_mouse_disabled_by_default() {
 
 void test_invalid_keyboard_config() {
     KeyboardConfig config;
-    config.aim_hold_virtual_key = 0;
+    config.aim_hold_virtual_keys = {0};
     KeyboardListener keyboard(config);
     expect(!keyboard.open() && keyboard.status() == KeyboardStatus::FAILURE,
            "非法虚拟键配置必须失败关闭");
 
-    config.aim_hold_virtual_key = 0x02;
-    config.emergency_virtual_key = 0x02;
+    config.aim_hold_virtual_keys = {0x02};
+    config.emergency_virtual_keys = {0x02};
     KeyboardListener conflicting_keyboard(config);
     expect(!conflicting_keyboard.open() &&
                conflicting_keyboard.status() == KeyboardStatus::FAILURE,
            "按住启用键与急停键相同时必须失败关闭");
 
-    config.emergency_virtual_key = 0x100;
+    config.emergency_virtual_keys = {0x100};
     KeyboardListener out_of_range_keyboard(config);
     expect(!out_of_range_keyboard.open() &&
                out_of_range_keyboard.status() == KeyboardStatus::FAILURE,
@@ -79,39 +79,64 @@ void test_invalid_keyboard_config() {
 }
 
 void test_keyboard_event_state_machine() {
+    KeyboardConfig config;
+    config.aim_hold_virtual_keys = {0x02, 0x05};
+    config.emergency_virtual_keys = {0x23, 0x06};
+    config.runtime_toggle_virtual_keys = {0x77, 0x04};
     keyboard::detail::KeyboardEventState state;
+    std::array<bool, 256> keys{};
     auto polled = keyboard::detail::update_keyboard_events(
-        state, false, false);
+        state, config, keys);
     expect(polled.count == 0, "初始未按键状态不应产生事件");
 
-    polled = keyboard::detail::update_keyboard_events(state, true, false);
+    keys[0x05] = true;
+    polled = keyboard::detail::update_keyboard_events(state, config, keys);
     expect(polled.count == 1 &&
                polled.events[0].type ==
                    KeyboardEventType::AIM_HOLD_CHANGED &&
                polled.events[0].active,
            "按住启用键按下必须产生 active=true 边沿");
-    polled = keyboard::detail::update_keyboard_events(state, true, false);
+    polled = keyboard::detail::update_keyboard_events(state, config, keys);
     expect(polled.count == 0, "持续按住不得重复产生启用事件");
 
-    polled = keyboard::detail::update_keyboard_events(state, true, true);
+    keys[0x06] = true;
+    polled = keyboard::detail::update_keyboard_events(state, config, keys);
     expect(polled.count == 1 &&
                polled.events[0].type == KeyboardEventType::EMERGENCY_STOP,
            "急停按下必须产生一次上升沿事件");
-    polled = keyboard::detail::update_keyboard_events(state, false, true);
+    keys[0x05] = false;
+    keys[0x02] = true;
+    keys[0x04] = true;
+    polled = keyboard::detail::update_keyboard_events(state, config, keys);
+    expect(polled.count == 1 &&
+               polled.events[0].type == KeyboardEventType::RUNTIME_TOGGLE,
+           "同组另一按住键接替时不得释放，鼠标中键应触发运行切换");
+
+    keys[0x06] = false;
+    keys[0x04] = false;
+    keys[0x02] = false;
+    polled = keyboard::detail::update_keyboard_events(state, config, keys);
     expect(polled.count == 1 &&
                polled.events[0].type ==
                    KeyboardEventType::AIM_HOLD_CHANGED &&
                !polled.events[0].active,
-           "释放按住启用键必须产生 active=false 边沿");
+           "按住组全部释放后必须产生 active=false 边沿");
 
-    polled = keyboard::detail::update_keyboard_events(state, false, false);
-    expect(polled.count == 0, "释放急停键不应重复提交急停事件");
-    polled = keyboard::detail::update_keyboard_events(state, true, true);
+    keys[0x23] = true;
+    keys[0x77] = true;
+    polled = keyboard::detail::update_keyboard_events(state, config, keys);
     expect(polled.count == 2 &&
-               polled.events[0].type ==
-                   KeyboardEventType::AIM_HOLD_CHANGED &&
-               polled.events[1].type == KeyboardEventType::EMERGENCY_STOP,
-           "再次同时按下时必须按启用边沿、急停上升沿顺序各报告一次");
+               polled.events[0].type == KeyboardEventType::EMERGENCY_STOP &&
+               polled.events[1].type == KeyboardEventType::RUNTIME_TOGGLE,
+           "键盘急停和运行切换上升沿必须按安全优先顺序报告");
+    keys[0x23] = false;
+    keys[0x77] = false;
+    keyboard::detail::update_keyboard_events(state, config, keys);
+    keys[0x77] = true;
+    polled = keyboard::detail::update_keyboard_events(state, config, keys);
+    expect(polled.count == 1 &&
+               polled.events[0].type == KeyboardEventType::RUNTIME_TOGGLE,
+           "同一个 F8 释放后再次按下必须产生第二次运行切换上升沿");
 }
 
 void test_invalid_capture_config() {

@@ -199,7 +199,6 @@ public:
     // 仅在 RUNNING 状态接受请求。候选模型异步加载，失败不替换旧模型。
     bool reload_detector(const DetectorConfig& config) noexcept;
     bool post_intent(const RuntimeIntent& intent) noexcept;
-    void poll_keyboard() noexcept;
     RuntimeSnapshot snapshot() const noexcept;
     // 诊断预览默认关闭；启用时最多 10 FPS，最长边 512，且只保留最新同帧图像与标注。
     bool set_preview_enabled(bool enabled) noexcept;

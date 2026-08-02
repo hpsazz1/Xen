@@ -1,6 +1,5 @@
 #include "runtime/runtime.h"
 
-#include "keyboard/keyboard.h"
 #include "log/log.h"
 #include "runtime/runtime_internal.h"
 
@@ -48,7 +47,6 @@ struct Runtime::Impl {
     std::unique_ptr<Detector> detector;
     std::unique_ptr<Aim> aim;
     std::unique_ptr<IMouseController> mouse;
-    std::unique_ptr<KeyboardListener> keyboard;
     std::thread capture_thread;
     std::thread pipeline_thread;
     std::thread detector_reload_thread;
@@ -196,11 +194,6 @@ struct Runtime::Impl {
         mouse = MouseDeviceFactory::create(config.mouse);
         if (!mouse || !mouse->open()) {
             set_error(mouse ? mouse->last_error() : "创建 Mouse 失败");
-            return false;
-        }
-        keyboard = std::make_unique<KeyboardListener>(config.keyboard);
-        if (!keyboard->open()) {
-            set_error("Keyboard 初始化失败");
             return false;
         }
         preview_channel.set_session_active(true);
@@ -487,14 +480,12 @@ struct Runtime::Impl {
     }
 
     void release_modules() noexcept {
-        if (keyboard) keyboard->close();
         if (mouse) mouse->close();
         // CUDA registration 持有 D3D11 资源引用。先销毁 Detector/registration，
         // 再关闭 Capture 的 D3D11 设备，保持跨 API 释放顺序可解释。
         if (detector) detector->reset();
         if (capture) capture->close();
         if (aim) aim->reset();
-        keyboard.reset();
         mouse.reset();
         capture.reset();
         detector.reset();
@@ -820,17 +811,6 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
         return false;
     }
     return true;
-}
-
-void Runtime::poll_keyboard() noexcept {
-    if (!impl_ || !impl_->keyboard) return;
-    for (const auto& event : impl_->keyboard->poll()) {
-        if (event.type == KeyboardEventType::AIM_HOLD_CHANGED) {
-            post_intent({RuntimeIntentType::AIM_HOLD_CHANGED, event.active});
-        } else if (event.type == KeyboardEventType::EMERGENCY_STOP) {
-            post_intent({RuntimeIntentType::EMERGENCY_STOP, true});
-        }
-    }
 }
 
 RuntimeSnapshot Runtime::snapshot() const noexcept {

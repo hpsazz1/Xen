@@ -149,6 +149,32 @@ void test_detection_role_mapping() {
            "身体类别列表为空时，非头部类别必须按身体处理");
 }
 
+void test_hotkey_capture_state_machine() {
+    using overlay::detail::HotkeyCaptureResultType;
+    overlay::detail::HotkeyCaptureState state;
+    std::array<bool, 256> keys{};
+    keys[0x01] = true;
+    overlay::detail::begin_hotkey_capture(state, keys);
+    auto result = overlay::detail::update_hotkey_capture(state, keys);
+    expect(result.type == HotkeyCaptureResultType::NONE && state.active,
+           "进入捕获时不得把点击按钮的鼠标左键误记为绑定");
+
+    keys[0x01] = false;
+    overlay::detail::update_hotkey_capture(state, keys);
+    keys[0x05] = true;
+    result = overlay::detail::update_hotkey_capture(state, keys);
+    expect(result.type == HotkeyCaptureResultType::ASSIGNED &&
+               result.virtual_key == 0x05 && !state.active,
+           "鼠标侧键上升沿必须可作为快捷键绑定");
+
+    keys = {};
+    overlay::detail::begin_hotkey_capture(state, keys);
+    keys[0x1B] = true;
+    result = overlay::detail::update_hotkey_capture(state, keys);
+    expect(result.type == HotkeyCaptureResultType::CLEARED && !state.active,
+           "捕获期间按 Esc 必须清空绑定并退出捕获");
+}
+
 } // namespace
 
 int main() {
@@ -159,6 +185,7 @@ int main() {
     test_preview_subscription_state();
     test_detached_preview_refresh_state();
     test_detection_role_mapping();
+    test_hotkey_capture_state_machine();
     if (failures != 0) {
         std::cerr << "Overlay 测试失败数: " << failures << '\n';
         return 1;

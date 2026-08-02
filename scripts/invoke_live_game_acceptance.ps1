@@ -493,8 +493,9 @@ makcu_connect_timeout_ms=1000
 makcu_command_timeout_ms=300
 
 [keyboard]
-aim_hold_virtual_key=2
-emergency_virtual_key=35
+aim_hold_virtual_keys=2
+emergency_virtual_keys=35
+runtime_toggle_virtual_keys=119
 
 [log]
 global_level=info
@@ -606,10 +607,10 @@ $safety
 
 $($steps -join "`n")
 
-除 Stability 外，Xen 启动后独立置顶检测预览应自动显示；人工点击“启动”开始 Runtime，完成场景
-后点击“停止”，等待 Xen 主界面显示“Runtime 已停止”，再关闭 Xen。外层 PowerShell 只有在
+除 Stability 外，Xen 启动后独立置顶检测预览应自动显示；保持游戏全屏并按 F8 启动 Runtime，
+完成场景后再次按 F8 停止。等待 Xen 主界面显示“Runtime 已停止”，再关闭 Xen。外层 PowerShell 只有在
 Xen 进程退出后才会汇总并输出“自动报告已汇总”；看到该提示后方可关闭 PowerShell。无需人工
-切换“置顶”，测试中不得保存配置、重载模型或修改任何参数。
+切换 Xen 窗口或“置顶”，测试中不得保存配置、重载模型或修改任何参数。
 
 单个目标只能属于一个阵营：CT 目标正常组合为 C0 身体与 C1 头部，T 目标正常组合为 C2 身体与
 C3 头部，不要求同一目标同时出现 CT/T 四类。自动报告会保留身体/头部聚合值和 C0～C3 分项值。
@@ -696,8 +697,9 @@ function Prepare-Task {
             physical_confirmation_recorded =
                 [bool]$definition.physical_output
             confirmation_token_persisted = $false
-            aim_hold_virtual_key = 2
-            emergency_virtual_key = 35
+            aim_hold_virtual_keys = @(2)
+            emergency_virtual_keys = @(35)
+            runtime_toggle_virtual_keys = @(119)
         }
     }
     Write-JsonAtomically -Path (

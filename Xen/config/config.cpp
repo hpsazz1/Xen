@@ -507,7 +507,12 @@ bool validate_app_config(const AppConfig& config,
             error = "Mouse 配置非法";
             return false;
         }
+        const bool physical_keyboard_invalid =
+            config.mouse.allow_send_input &&
+            (config.keyboard.aim_hold_virtual_keys.empty() ||
+             config.keyboard.emergency_virtual_keys.empty());
         if (!valid_keyboard_config(config.keyboard) ||
+            physical_keyboard_invalid ||
             config.runtime.profile_window < 64 ||
             config.runtime.profile_window > 4096 ||
             config.ui.width < kMinimumUiWidth ||
@@ -748,12 +753,32 @@ bool load_app_config(const std::string& path,
             ini.GetLongValue(
                 "mouse", "makcu_command_timeout_ms",
                 candidate.mouse.makcu_command_timeout_ms));
-        candidate.keyboard.aim_hold_virtual_key = static_cast<int>(
-            ini.GetLongValue("keyboard", "aim_hold_virtual_key",
-                             candidate.keyboard.aim_hold_virtual_key));
-        candidate.keyboard.emergency_virtual_key = static_cast<int>(
-            ini.GetLongValue("keyboard", "emergency_virtual_key",
-                             candidate.keyboard.emergency_virtual_key));
+        const auto load_virtual_keys = [&](const char* plural_key,
+                                           const char* legacy_key,
+                                           const std::vector<int>& fallback) {
+            const char* plural_value = ini.GetValue("keyboard", plural_key);
+            if (plural_value) {
+                // 复数字段显式允许空值，以便用户清空后禁用对应功能。
+                if (*plural_value == '\0') return std::vector<int>{};
+                return parse_int_list(plural_value, fallback);
+            }
+            const char* legacy_value = ini.GetValue("keyboard", legacy_key);
+            if (!legacy_value) return fallback;
+            const long legacy = ini.GetLongValue(
+                "keyboard", legacy_key, -1);
+            return legacy >= 1 && legacy <= 0xFF
+                ? std::vector<int>{static_cast<int>(legacy)}
+                : fallback;
+        };
+        candidate.keyboard.aim_hold_virtual_keys = load_virtual_keys(
+            "aim_hold_virtual_keys", "aim_hold_virtual_key",
+            candidate.keyboard.aim_hold_virtual_keys);
+        candidate.keyboard.emergency_virtual_keys = load_virtual_keys(
+            "emergency_virtual_keys", "emergency_virtual_key",
+            candidate.keyboard.emergency_virtual_keys);
+        candidate.keyboard.runtime_toggle_virtual_keys = load_virtual_keys(
+            "runtime_toggle_virtual_keys", "runtime_toggle_virtual_key",
+            candidate.keyboard.runtime_toggle_virtual_keys);
         candidate.runtime.profile_window = static_cast<int>(ini.GetLongValue(
             "runtime", "profile_window", candidate.runtime.profile_window));
         candidate.ui.width = static_cast<int>(ini.GetLongValue(
@@ -895,10 +920,15 @@ bool save_app_config(const std::string& path,
                          config.mouse.makcu_connect_timeout_ms);
         ini.SetLongValue("mouse", "makcu_command_timeout_ms",
                          config.mouse.makcu_command_timeout_ms);
-        ini.SetLongValue("keyboard", "aim_hold_virtual_key",
-                         config.keyboard.aim_hold_virtual_key);
-        ini.SetLongValue("keyboard", "emergency_virtual_key",
-                         config.keyboard.emergency_virtual_key);
+        ini.SetValue(
+            "keyboard", "aim_hold_virtual_keys",
+            format_int_list(config.keyboard.aim_hold_virtual_keys).c_str());
+        ini.SetValue(
+            "keyboard", "emergency_virtual_keys",
+            format_int_list(config.keyboard.emergency_virtual_keys).c_str());
+        ini.SetValue(
+            "keyboard", "runtime_toggle_virtual_keys",
+            format_int_list(config.keyboard.runtime_toggle_virtual_keys).c_str());
         ini.SetValue("log", "global_level",
                      log_level_name(config.log.global_level));
         ini.SetBoolValue("log", "enable_console",

@@ -5,6 +5,7 @@
 #include "config/config.h"
 #include "crash/crash.h"
 #include "debug/debug.h"
+#include "keyboard/keyboard.h"
 #include "log/log.h"
 #include "overlay/overlay.h"
 #include "runtime/runtime.h"
@@ -111,6 +112,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     Runtime runtime;
+    KeyboardListener keyboard(config.keyboard);
+    if (!keyboard.open()) {
+        append_message(app_message, "全局快捷键初始化失败");
+    }
     DebugReport debug_report;
     bool debug_session_active = false;
     bool detector_reload_pending = false;
@@ -167,8 +172,35 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return debug_session_active;
     };
 
+    const auto start_runtime_session = [&]() {
+        AppConfig runtime_config = config;
+        if (!resolve_detector_config(runtime_config.detector)) {
+            app_message = model_error;
+            return;
+        }
+        if (!runtime.start(runtime_config)) {
+            app_message = "Runtime 启动失败。";
+            return;
+        }
+        debug_run_id =
+            std::to_string(GetCurrentProcessId()) + "-" +
+            std::to_string(GetTickCount64());
+        debug_segment = 0;
+        detector_reload_pending = false;
+        debug_session_active = start_debug_report(runtime.snapshot());
+        app_message = debug_session_active
+            ? "Runtime 已启动，Debug 报告已启用。"
+            : "Runtime 已启动，Debug 报告未启用。";
+    };
+    const auto stop_runtime_session = [&]() {
+        runtime.stop();
+        finish_debug_report();
+        detector_reload_pending = false;
+        app_message = "Runtime 已停止。";
+    };
+
     while (overlay.pump_messages()) {
-        runtime.poll_keyboard();
+        const std::vector<KeyboardEvent> keyboard_events = keyboard.poll();
         drain_debug_samples();
         RuntimeSnapshot snapshot = runtime.snapshot();
         if (detector_reload_pending &&
@@ -204,6 +236,24 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             break;
         }
 
+        bool emergency_pressed = false;
+        bool runtime_toggle_pressed = false;
+        if (!actions.hotkey_capture_consumed) {
+            for (const auto& event : keyboard_events) {
+                if (event.type == KeyboardEventType::AIM_HOLD_CHANGED) {
+                    runtime.post_intent({
+                        RuntimeIntentType::AIM_HOLD_CHANGED, event.active});
+                } else if (event.type ==
+                           KeyboardEventType::EMERGENCY_STOP) {
+                    emergency_pressed = true;
+                    runtime.post_intent({
+                        RuntimeIntentType::EMERGENCY_STOP, true});
+                } else if (event.type == KeyboardEventType::RUNTIME_TOGGLE) {
+                    runtime_toggle_pressed = true;
+                }
+            }
+        }
+
         if (actions.preview_enabled_changed &&
             !runtime.set_preview_enabled(actions.preview_enabled)) {
             app_message = "ROI 预览通道切换失败。";
@@ -224,29 +274,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             }
         }
 
-        if (actions.start_requested) {
-            AppConfig runtime_config = config;
-            if (!resolve_detector_config(runtime_config.detector)) {
-                app_message = model_error;
-            } else if (!runtime.start(runtime_config)) {
-                app_message = "Runtime 启动失败。";
-            } else {
-                debug_run_id =
-                    std::to_string(GetCurrentProcessId()) + "-" +
-                    std::to_string(GetTickCount64());
-                debug_segment = 0;
-                detector_reload_pending = false;
-                debug_session_active = start_debug_report(runtime.snapshot());
-                app_message = debug_session_active
-                    ? "Runtime 已启动，Debug 报告已启用。"
-                    : "Runtime 已启动，Debug 报告未启用。";
-            }
-        }
-        if (actions.stop_requested) {
-            runtime.stop();
-            finish_debug_report();
-            detector_reload_pending = false;
-            app_message = "Runtime 已停止。";
+        const bool toggle_requests_stop = runtime_toggle_pressed &&
+            !emergency_pressed &&
+            (snapshot.state == RuntimeState::RUNNING ||
+             snapshot.state == RuntimeState::STARTING);
+        const bool toggle_requests_start = runtime_toggle_pressed &&
+            !emergency_pressed &&
+            (snapshot.state == RuntimeState::STOPPED ||
+             snapshot.state == RuntimeState::FAILED);
+        if (actions.stop_requested ||
+            (!actions.start_requested && toggle_requests_stop)) {
+            stop_runtime_session();
+        } else if (actions.start_requested || toggle_requests_start) {
+            start_runtime_session();
         }
         if (actions.reload_detector_requested &&
             !actions.stop_requested) {
@@ -283,17 +323,25 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             DetectorConfig detector_config = config.detector;
             if (!resolve_detector_config(detector_config)) {
                 app_message = model_error;
+            } else if (save_app_config(
+                           kConfigPath, config, config_error)) {
+                KeyboardListener replacement(config.keyboard);
+                if (replacement.open()) {
+                    keyboard.close();
+                    keyboard = std::move(replacement);
+                    app_message = "配置已保存，快捷键已立即生效。";
+                } else {
+                    app_message = "配置已保存，但快捷键重载失败。";
+                }
             } else {
-                app_message = save_app_config(
-                    kConfigPath, config, config_error)
-                    ? "配置已保存。"
-                    : config_error;
+                app_message = config_error;
             }
         }
     }
 
     runtime.stop();
     finish_debug_report();
+    keyboard.close();
     overlay.shutdown();
     crash_handler.uninstall();
     Log::shutdown();

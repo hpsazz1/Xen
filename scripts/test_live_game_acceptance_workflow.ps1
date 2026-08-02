@@ -48,6 +48,13 @@ try {
             $config -match '(?m)^roi_width=320$' -and
             $config -match '(?m)^roi_height=320$') `
         "固定模型必须使用 320x320 ROI 并纳入 CT/T 身体和头部类别"
+    Expect ($config -match '(?m)^aim_hold_virtual_keys=2$' -and
+            $config -match '(?m)^emergency_virtual_keys=35$' -and
+            $config -match '(?m)^runtime_toggle_virtual_keys=119$' -and
+            $task.safety.aim_hold_virtual_keys[0] -eq 2 -and
+            $task.safety.emergency_virtual_keys[0] -eq 35 -and
+            $task.safety.runtime_toggle_virtual_keys[0] -eq 119) `
+        "任务配置和身份记录必须固定同一组多键快捷键基准"
     $taskMarkdown = Get-Content -LiteralPath (
         Join-Path $observationRun "TASK.md") -Raw -Encoding UTF8
     $expectedLaunchPrefix =
@@ -57,9 +64,11 @@ try {
             $taskMarkdown -match '~~~powershell' -and
             $taskMarkdown -match
                 'Xen 进程退出后才会汇总并输出“自动报告已汇总”' -and
+            $taskMarkdown -match '按 F8 启动 Runtime' -and
+            $taskMarkdown -match '再次按 F8 停止' -and
             $taskMarkdown -match 'C0～C3' -and
             $taskMarkdown -notmatch 'C0～C4') `
-        "任务单必须提供绝对命令、四类别说明并明确停止、退出、汇总顺序"
+        "任务单必须提供绝对命令、四类别说明和 F8 启停、退出、汇总顺序"
     Expect ($task.view_mode -eq "fixed") `
         "静止检测必须固定人物视角"
 

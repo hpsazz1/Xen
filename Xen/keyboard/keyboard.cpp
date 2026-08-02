@@ -41,9 +41,10 @@ bool KeyboardListener::open() noexcept {
     Log::register_module("keyboard", LogLevel::INFO);
     impl_->event_state = {};
     impl_->status = KeyboardStatus::READY;
-    LOG_INFO("keyboard", "全局按键轮询已启用: hold_vk={}, emergency_vk={}",
-             impl_->config.aim_hold_virtual_key,
-             impl_->config.emergency_virtual_key);
+    LOG_INFO("keyboard", "全局按键轮询已启用: hold_keys={}, emergency_keys={}, toggle_keys={}",
+             impl_->config.aim_hold_virtual_keys.size(),
+             impl_->config.emergency_virtual_keys.size(),
+             impl_->config.runtime_toggle_virtual_keys.size());
     return true;
 }
 
@@ -51,12 +52,18 @@ std::vector<KeyboardEvent> KeyboardListener::poll() noexcept {
     std::vector<KeyboardEvent> events;
     if (!impl_ || impl_->status != KeyboardStatus::READY) return events;
     try {
-        const bool hold_active =
-            (GetAsyncKeyState(impl_->config.aim_hold_virtual_key) & 0x8000) != 0;
-        const bool emergency_active =
-            (GetAsyncKeyState(impl_->config.emergency_virtual_key) & 0x8000) != 0;
+        std::array<bool, 256> key_active{};
+        const auto poll_binding = [&](const std::vector<int>& virtual_keys) {
+            for (const int virtual_key : virtual_keys) {
+                key_active[static_cast<std::size_t>(virtual_key)] =
+                    (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
+            }
+        };
+        poll_binding(impl_->config.aim_hold_virtual_keys);
+        poll_binding(impl_->config.emergency_virtual_keys);
+        poll_binding(impl_->config.runtime_toggle_virtual_keys);
         const auto polled = keyboard::detail::update_keyboard_events(
-            impl_->event_state, hold_active, emergency_active);
+            impl_->event_state, impl_->config, key_active);
         events.reserve(polled.count);
         for (std::size_t index = 0; index < polled.count; ++index) {
             events.push_back(polled.events[index]);

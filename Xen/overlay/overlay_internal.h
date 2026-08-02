@@ -10,6 +10,51 @@
 
 namespace overlay::detail {
 
+enum class HotkeyCaptureResultType {
+    NONE,
+    ASSIGNED,
+    CLEARED,
+};
+
+struct HotkeyCaptureResult {
+    HotkeyCaptureResultType type = HotkeyCaptureResultType::NONE;
+    int virtual_key = 0;
+};
+
+struct HotkeyCaptureState {
+    bool active = false;
+    std::array<bool, 256> previous_key_active{};
+};
+
+inline void begin_hotkey_capture(
+        HotkeyCaptureState& state,
+        const std::array<bool, 256>& key_active) noexcept {
+    state.active = true;
+    // 捕获开始时记录按钮点击等现有按下态，只接受后续新的上升沿。
+    state.previous_key_active = key_active;
+}
+
+inline HotkeyCaptureResult update_hotkey_capture(
+        HotkeyCaptureState& state,
+        const std::array<bool, 256>& key_active) noexcept {
+    if (!state.active) return {};
+    const auto pressed = [&](int virtual_key) {
+        const std::size_t index = static_cast<std::size_t>(virtual_key);
+        return key_active[index] && !state.previous_key_active[index];
+    };
+    if (pressed(0x1B)) { // VK_ESCAPE
+        state = {};
+        return {HotkeyCaptureResultType::CLEARED, 0};
+    }
+    for (int virtual_key = 1; virtual_key <= 0xFF; ++virtual_key) {
+        if (virtual_key == 0x1B || !pressed(virtual_key)) continue;
+        state = {};
+        return {HotkeyCaptureResultType::ASSIGNED, virtual_key};
+    }
+    state.previous_key_active = key_active;
+    return {};
+}
+
 enum class DetectionRole {
     OTHER,
     PERSON,
