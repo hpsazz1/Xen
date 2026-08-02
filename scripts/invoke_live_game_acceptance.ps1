@@ -438,6 +438,7 @@ profile_window=256
 width=900
 height=640
 enable_vsync=true
+open_detached_preview_on_start=true
 theme=light
 "@
 }
@@ -499,6 +500,23 @@ function New-TaskMarkdown {
     } else {
         "本环节强制 allow_send_input=false；禁止武装，Mouse 必须显示 DISABLED。"
     }
+    $workflowPath = Join-Path $repositoryRoot `
+        "scripts\invoke_live_game_acceptance.ps1"
+    $launchCommand = if ($Definition.physical_output) {
+        @"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "$workflowPath" -Mode Launch -Stage $Stage `
+  -RunDirectory "$ResolvedRunDirectory" `
+  -AllowPhysicalOutput `
+  -PhysicalOutputConfirmation XEN_LIVE_GAME_ACCEPTANCE_SENDS_REAL_INPUT
+"@
+    } else {
+        @"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "$workflowPath" -Mode Launch -Stage $Stage `
+  -RunDirectory "$ResolvedRunDirectory"
+"@
+    }
     return @"
 # Xen 实机测试任务
 
@@ -519,8 +537,17 @@ $safety
 
 $($steps -join "`n")
 
-除 Stability 外，人工点击“启动”开始 Runtime，完成场景后点击“停止”，确认报告发布后关闭 Xen。
-测试中不得保存配置、重载模型或修改任何参数。
+除 Stability 外，Xen 启动后独立置顶检测预览应自动显示；人工点击“启动”开始 Runtime，完成场景
+后点击“停止”，确认报告发布后关闭 Xen。无需人工切换“置顶”，测试中不得保存配置、重载模型或
+修改任何参数。
+
+## 启动命令
+
+该命令使用绝对脚本路径，可从任意 PowerShell 工作目录执行：
+
+```powershell
+$launchCommand
+```
 
 ## 必须反馈的观测
 
@@ -562,6 +589,7 @@ function Prepare-Task {
         config = Get-FileEvidence $configPath
         expected_provider = $expectedProvider
         expected_capture_backend = "DESKTOP_DUPLICATION"
+        expected_detached_preview_on_start = $true
         expected_geometry = [ordered]@{
             source_width = 2560
             source_height = 1440
@@ -747,6 +775,10 @@ function Collect-Reports {
         if ([bool]$snapshot.output_allowed_by_config -ne
             [bool]$task.physical_output) {
             $failures += "物理输出配置与任务不一致：$path"
+        }
+        if ($Stage -ne "Stability" -and
+            -not [bool]$snapshot.preview_enabled) {
+            $failures += "GUI 实机场景未启用独立置顶检测预览：$path"
         }
         if ([int64]$report.failed_samples -ne 0 -or
             [int64]$snapshot.failed_frames -ne 0 -or

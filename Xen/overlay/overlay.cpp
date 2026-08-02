@@ -2960,6 +2960,8 @@ bool Overlay::init(const UiConfig& config) noexcept {
     try {
         Log::register_module("overlay", LogLevel::INFO);
         impl_->config = config;
+        impl_->detached_preview_requested =
+            config.open_detached_preview_on_start;
         ImGui_ImplWin32_EnableDpiAwareness();
         const HINSTANCE instance = GetModuleHandleW(nullptr);
         WNDCLASSEXW window_class{

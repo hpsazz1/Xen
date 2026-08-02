@@ -762,6 +762,9 @@ bool load_app_config(const std::string& path,
             "ui", "height", candidate.ui.height));
         candidate.ui.enable_vsync = ini.GetBoolValue(
             "ui", "enable_vsync", candidate.ui.enable_vsync);
+        candidate.ui.open_detached_preview_on_start = ini.GetBoolValue(
+            "ui", "open_detached_preview_on_start",
+            candidate.ui.open_detached_preview_on_start);
         candidate.ui.theme = parse_ui_theme(
             ini.GetValue("ui", "theme"), candidate.ui.theme);
 
@@ -929,6 +932,9 @@ bool save_app_config(const std::string& path,
         ini.SetLongValue("ui", "width", config.ui.width);
         ini.SetLongValue("ui", "height", config.ui.height);
         ini.SetBoolValue("ui", "enable_vsync", config.ui.enable_vsync);
+        ini.SetBoolValue(
+            "ui", "open_detached_preview_on_start",
+            config.ui.open_detached_preview_on_start);
         ini.SetValue("ui", "theme", ui_theme_name(config.ui.theme));
 
         if (ini.SaveFile(path.c_str()) < 0) {

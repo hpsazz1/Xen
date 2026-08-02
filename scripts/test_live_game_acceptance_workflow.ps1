@@ -39,8 +39,15 @@ try {
         "静止检测任务必须禁用物理输出"
     Expect ($config -match '(?m)^model_path=cs2_320_v8s\.onnx$' -and
             $config -match '(?m)^backend=cpu$' -and
-            $config -match '(?m)^allow_send_input=false$') `
-        "观察任务必须固定模型、CPU 和禁用物理输出"
+            $config -match '(?m)^allow_send_input=false$' -and
+            $config -match
+                '(?m)^open_detached_preview_on_start=true$') `
+        "观察任务必须固定模型、CPU、置顶预览和禁用物理输出"
+    $taskMarkdown = Get-Content -LiteralPath (
+        Join-Path $observationRun "TASK.md") -Raw -Encoding UTF8
+    Expect ($taskMarkdown -match [regex]::Escape($workflow) -and
+            $taskMarkdown -match '-Mode Launch') `
+        "任务单必须提供不依赖当前工作目录的绝对脚本启动命令"
     Expect ($task.view_mode -eq "fixed") `
         "静止检测必须固定人物视角"
 
@@ -104,6 +111,7 @@ try {
             source_pixels_per_pixel_x = 1.0
             source_pixels_per_pixel_y = 1.0
             output_allowed_by_config = $false
+            preview_enabled = $true
             failed_frames = 0
             last_error = ""
             mouse_commands = 0

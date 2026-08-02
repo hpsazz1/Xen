@@ -25,15 +25,19 @@ Provider/可选 SDK 矩阵，再以固定 CPU 构建和固定模型完成场景�
 `scripts/invoke_live_game_acceptance.ps1` 会为静止、向左、向右、持续左右往复、超级跳、遮挡跟踪、
 多目标切换、真实控制、急停和五分钟稳定性分别生成独立目录、固定 `config.ini`、模型/程序/部署
 哈希、任务单与人工观测模板。前五个检测基准固定人物视角，避免把目标运动和人工转动视角的误差
-混在一起；人工视角跟随延后到 `AIM-ALGO-001` 需要完善和调节追踪模块时再设计。示例：
+混在一起；人工视角跟随延后到 `AIM-ALGO-001` 需要完善和调节追踪模块时再设计。验收配置固定
+`ui.open_detached_preview_on_start=true`，Xen 启动后自动打开不抢焦点的置顶检测预览；任务单使用
+绝对脚本路径，因此不依赖 PowerShell 当前目录。示例：
 
 ```powershell
 # 只生成任务，不启动 Xen
-.\scripts\invoke_live_game_acceptance.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "E:\Xen\scripts\invoke_live_game_acceptance.ps1" `
   -Mode Prepare -Stage DetectionStatic
 
-# 按 TASK.md 准备好实际游戏场景后，从固定工作目录启动并在退出后自动汇总
-.\scripts\invoke_live_game_acceptance.ps1 `
+# 按 TASK.md 准备好实际游戏场景后，从任意工作目录启动并在退出后自动汇总
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "E:\Xen\scripts\invoke_live_game_acceptance.ps1" `
   -Mode Launch -Stage DetectionStatic `
   -RunDirectory <上一步输出的任务目录>
 ```

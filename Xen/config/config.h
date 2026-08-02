@@ -27,6 +27,8 @@ struct UiConfig {
     int width = 900;
     int height = 640;
     bool enable_vsync = true;
+    // 正式验收可在启动时自动打开不抢焦点的独立 TOPMOST 检测预览；普通用户默认关闭。
+    bool open_detached_preview_on_start = false;
     UiTheme theme = UiTheme::LIGHT;
 };
 

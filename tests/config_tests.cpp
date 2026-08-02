@@ -68,6 +68,7 @@ void test_round_trip() {
         {"capture", LogLevel::WARN},
     };
     source.ui.width = 1024;
+    source.ui.open_detached_preview_on_start = true;
     source.ui.theme = UiTheme::DARK;
 
     const auto path = std::filesystem::temp_directory_path() /
@@ -120,6 +121,7 @@ void test_round_trip() {
            loaded.log.file_max_count == 5 &&
            loaded.log.module_levels == source.log.module_levels &&
            loaded.ui.width == 1024 &&
+           loaded.ui.open_detached_preview_on_start &&
            loaded.ui.theme == UiTheme::DARK,
            "配置往返后关键字段必须保持一致");
     std::error_code ignored;
