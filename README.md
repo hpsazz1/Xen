@@ -361,6 +361,16 @@ KMBOX UUID，也不允许物理输出：
   -DestinationRoot "\\192.168.3.20\XenLab$"
 ```
 
+若构建进程与已保存 SMB 凭据的交互式 PowerShell 不在同一 Windows 会话，可先用
+`-SkipPublish` 只生成本地包，再在已映射共享的同一控制台执行纯传输入口；该入口仍会在复制前后
+核对逐文件哈希，并通过 `.incoming-*` 原位发布：
+
+```powershell
+.\scripts\transfer_dual_machine_package.ps1 `
+  -PackagePath ".\cache\dual-machine-packages\<package-id>" `
+  -DestinationRoot "\\192.168.3.20\XenLab$"
+```
+
 辅机从本地 `C:\XenLab\packages\<package-id>` 运行，不从 SMB 映射盘执行。先生成并人工复核接收
 配置，再在场景准备完成后启动正式接收；普通场景固定 60 秒/3,000 样本，`SoakFreeRun` 固定
 300 秒/10,000 样本：
