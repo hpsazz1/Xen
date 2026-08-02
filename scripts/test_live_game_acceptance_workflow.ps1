@@ -56,8 +56,10 @@ try {
     Expect ($taskMarkdown -match [regex]::Escape($expectedLaunchPrefix) -and
             $taskMarkdown -match '~~~powershell' -and
             $taskMarkdown -match
-                'Xen 进程退出后才会汇总并输出“自动报告已汇总”') `
-        "任务单必须提供绝对启动命令并明确停止、退出、汇总顺序"
+                'Xen 进程退出后才会汇总并输出“自动报告已汇总”' -and
+            $taskMarkdown -match 'C0～C3' -and
+            $taskMarkdown -notmatch 'C0～C4') `
+        "任务单必须提供绝对命令、四类别说明并明确停止、退出、汇总顺序"
     Expect ($task.view_mode -eq "fixed") `
         "静止检测必须固定人物视角"
 
