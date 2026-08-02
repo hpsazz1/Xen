@@ -16,8 +16,31 @@ OBS/NDI Sender ───────────┴→ Detector → Aim → Runt
 
 项目当前处于验证与发布收敛阶段。构建现已按当前配置授权清单收敛共享输出目录，Provider SDK
 切换后会清理旧运行库，并生成来源与 SHA-256 报告。近期主线是在同一最新提交上重建独立
-Provider/可选 SDK 矩阵，再完成真实双机、物理鼠标设备、Intel 目标硬件、人工可见性与 Aim
-身份真值验收；暂不继续横向扩展模型或后端。
+Provider/可选 SDK 矩阵，再以固定 CPU 构建和固定模型完成场景化实机人工验收、自动运行报告、
+真实双机、物理鼠标设备和 Intel 目标硬件验收；视频逐帧真值只在实机问题无法归因时触发，暂不
+继续横向扩展模型或后端。
+
+场景化实机验收统一使用
+`build-matrix-final-cpu/Release/models/cs2_320_v8s.onnx`。禁止人工复制旧配置后修改参数；
+`scripts/invoke_live_game_acceptance.ps1` 会为静止、向左、向右、持续左右往复、超级跳、遮挡跟踪、
+多目标切换、真实控制、急停和五分钟稳定性分别生成独立目录、固定 `config.ini`、模型/程序/部署
+哈希、任务单与人工观测模板。前五个检测基准固定人物视角，避免把目标运动和人工转动视角的误差
+混在一起；人工视角跟随延后到 `AIM-ALGO-001` 需要完善和调节追踪模块时再设计。示例：
+
+```powershell
+# 只生成任务，不启动 Xen
+.\scripts\invoke_live_game_acceptance.ps1 `
+  -Mode Prepare -Stage DetectionStatic
+
+# 按 TASK.md 准备好实际游戏场景后，从固定工作目录启动并在退出后自动汇总
+.\scripts\invoke_live_game_acceptance.ps1 `
+  -Mode Launch -Stage DetectionStatic `
+  -RunDirectory <上一步输出的任务目录>
+```
+
+真实控制和急停环节必须在私有或离线训练环境执行，并在 Prepare 与 Launch 时分别提供
+`-AllowPhysicalOutput -PhysicalOutputConfirmation XEN_LIVE_GAME_ACCEPTANCE_SENDS_REAL_INPUT`；
+其他环节携带物理输出授权会被拒绝。脚本不会自动武装，人工仍需在现场确认 End 急停后操作。
 
 物理鼠标输出默认禁用。只有配置显式允许、Runtime 已启动、用户完成武装、按住启用键且
 急停未触发时，Pipeline 才会调用 Mouse。Capture、Detector 或 Aim 失败均不会沿用旧结果。
