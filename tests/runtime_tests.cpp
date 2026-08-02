@@ -292,6 +292,38 @@ void test_runtime_preview_overwrite_and_truncation() {
            "覆盖未消费预览时必须累计一次丢弃");
 }
 
+void test_runtime_preview_finish_session_reports_before_reset() {
+    runtime::detail::RuntimePreviewChannel preview;
+    cv::Mat image(16, 16, CV_8UC3, cv::Scalar(7, 8, 9));
+    const std::vector<Detection> detections;
+    AimResult aim_result;
+    const auto started = std::chrono::steady_clock::now();
+
+    expect(preview.set_enabled(true), "结束统计测试应能启用预览");
+    preview.set_session_active(true);
+    expect(preview.publish(
+               image, 1, 8.0f, 8.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result, started) &&
+               preview.publish(
+                   image, 2, 8.0f, 8.0f, DetectionStatus::SUCCESS,
+                   AimStatus::SUCCESS, detections, aim_result,
+                   started + std::chrono::milliseconds(100)),
+           "结束统计测试必须先形成两个采样和一次未消费覆盖");
+    const auto finished_stats = preview.finish_session();
+    const auto reset_stats = preview.stats();
+    expect(finished_stats.enabled && finished_stats.sampled_frames == 2 &&
+               finished_stats.dropped_frames == 1,
+           "结束会话必须在清零前返回完整预览采样与丢弃统计");
+    expect(reset_stats.enabled && reset_stats.sampled_frames == 0 &&
+               reset_stats.dropped_frames == 0 && !preview.latest(),
+           "结束会话返回统计后必须清除旧画面和内部计数");
+    expect(!preview.publish(
+               image, 3, 8.0f, 8.0f, DetectionStatus::SUCCESS,
+               AimStatus::SUCCESS, detections, aim_result,
+               started + std::chrono::milliseconds(200)),
+           "结束会话后必须拒绝在途旧帧重新发布");
+}
+
 void test_runtime_preview_held_slots_and_reset() {
     runtime::detail::RuntimePreviewChannel preview;
     cv::Mat image(16, 16, CV_8UC3, cv::Scalar(4, 5, 6));
@@ -344,7 +376,7 @@ void test_runtime_preview_held_slots_and_reset() {
     first.reset();
     second.reset();
     third.reset();
-    preview.set_session_active(false);
+    preview.finish_session();
     const auto reset_stats = preview.stats();
     expect(reset_stats.enabled && reset_stats.sampled_frames == 0 &&
                reset_stats.dropped_frames == 0 && !preview.latest(),
@@ -380,6 +412,7 @@ int main() {
     test_bounded_sample_ring();
     test_runtime_preview_channel();
     test_runtime_preview_overwrite_and_truncation();
+    test_runtime_preview_finish_session_reports_before_reset();
     test_runtime_preview_held_slots_and_reset();
     if (failures != 0) {
         std::cerr << "Runtime 核心测试失败数: " << failures << '\n';

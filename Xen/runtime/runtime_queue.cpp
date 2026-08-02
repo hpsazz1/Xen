@@ -219,6 +219,24 @@ void RuntimePreviewChannel::set_session_active(bool active) noexcept {
     }
 }
 
+PreviewStats RuntimePreviewChannel::finish_session() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const PreviewStats result{
+            enabled_, sampled_frames_, dropped_frames_};
+        ++generation_;
+        session_active_ = false;
+        latest_.reset();
+        last_sampled_at_ = {};
+        consumed_sequence_ = 0;
+        sampled_frames_ = 0;
+        dropped_frames_ = 0;
+        return result;
+    } catch (...) {
+        return {};
+    }
+}
+
 bool RuntimePreviewChannel::publish(
         const cv::Mat& bgr,
         std::uint64_t sequence,

@@ -52,8 +52,10 @@ try {
         'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode Launch' -f
         $workflow
     Expect ($taskMarkdown -match [regex]::Escape($expectedLaunchPrefix) -and
-            $taskMarkdown -match '~~~powershell') `
-        "任务单必须提供不依赖当前工作目录的绝对脚本启动命令"
+            $taskMarkdown -match '~~~powershell' -and
+            $taskMarkdown -match
+                'Xen 进程退出后才会汇总并输出“自动报告已汇总”') `
+        "任务单必须提供绝对启动命令并明确停止、退出、汇总顺序"
     Expect ($task.view_mode -eq "fixed") `
         "静止检测必须固定人物视角"
 
@@ -118,6 +120,8 @@ try {
             source_pixels_per_pixel_y = 1.0
             output_allowed_by_config = $false
             preview_enabled = $true
+            preview_sampled_frames = 120
+            preview_dropped_frames = 0
             failed_frames = 0
             last_error = ""
             mouse_commands = 0
@@ -163,6 +167,24 @@ try {
             $summary.detection_observability.classes[2].confidence.detected_frames `
                 -eq 0) `
         "合法 schema 6 报告应完成自动汇总"
+
+    $synthetic.final_snapshot.preview_sampled_frames = 0
+    [System.IO.File]::WriteAllText(
+        $reportPath, (($synthetic | ConvertTo-Json -Depth 8) + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    & $workflow -Mode Collect -Stage DetectionStatic `
+        -RunDirectory $observationRun | Out-Null
+    $noPreviewSummary = Get-Content -LiteralPath (
+        Join-Path $observationRun "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    Expect (-not [bool]$noPreviewSummary.automatic_complete -and
+            ($noPreviewSummary.failures -join "`n") -match
+                '未形成独立置顶检测预览采样') `
+        "GUI 报告预览采样为零时必须拒绝自动通过"
+    $synthetic.final_snapshot.preview_sampled_frames = 120
+    [System.IO.File]::WriteAllText(
+        $reportPath, (($synthetic | ConvertTo-Json -Depth 8) + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
 
     Copy-Item -LiteralPath $reportPath -Destination (
         Join-Path $runtimeDirectory "duplicate.json")

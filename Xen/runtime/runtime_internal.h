@@ -162,6 +162,9 @@ public:
     // 用户启用选择与 Runtime 会话活动状态分离。停止或故障时关闭会话，
     // 可以保留 UI 开关和预分配缓冲，但任何在途旧帧都不得再次发布。
     void set_session_active(bool active) noexcept;
+    // 报告必须拿到清零前的会话统计。该操作在同一把锁内捕获计数并关闭
+    // 会话，避免 stop() 先清零再读取得到矛盾的零值。
+    PreviewStats finish_session() noexcept;
     bool publish(
         const cv::Mat& bgr,
         std::uint64_t sequence,

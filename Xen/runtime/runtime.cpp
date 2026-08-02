@@ -109,8 +109,7 @@ struct Runtime::Impl {
     void fail_runtime(const std::string& error) noexcept {
         // 故障后旧图像不再代表实时状态。递增预览代际可同时阻止已经在锁外
         // 执行颜色转换的旧帧重新发布，但保留用户开关和已分配的大缓冲。
-        preview_channel.set_session_active(false);
-        const auto preview_stats = preview_channel.stats();
+        const auto preview_stats = preview_channel.finish_session();
         safety_gate.emergency_stop();
         stop_requested.store(true, std::memory_order_release);
         frame_queue.stop();
@@ -121,8 +120,12 @@ struct Runtime::Impl {
             current_snapshot.output_armed = false;
             current_snapshot.emergency_stopped = true;
             current_snapshot.preview_enabled = preview_stats.enabled;
-            current_snapshot.preview_sampled_frames = 0;
-            current_snapshot.preview_dropped_frames = 0;
+            current_snapshot.preview_sampled_frames = std::max(
+                current_snapshot.preview_sampled_frames,
+                preview_stats.sampled_frames);
+            current_snapshot.preview_dropped_frames = std::max(
+                current_snapshot.preview_dropped_frames,
+                preview_stats.dropped_frames);
         } catch (...) {
         }
         LOG_ERROR("runtime", "{}", error);
@@ -589,8 +592,7 @@ void Runtime::stop() noexcept {
     impl_->release_modules();
     // Pipeline 已退出后清除旧预览，但保留三槽大缓冲和用户的启用选择。
     // 下次启动会从新会话首帧重新发布，不把停止前图像误当成实时画面。
-    impl_->preview_channel.set_session_active(false);
-    const auto preview_stats = impl_->preview_channel.stats();
+    const auto preview_stats = impl_->preview_channel.finish_session();
     {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
         impl_->current_snapshot.state = RuntimeState::STOPPED;
@@ -603,8 +605,12 @@ void Runtime::stop() noexcept {
         impl_->current_snapshot.aim_hold_active = false;
         impl_->current_snapshot.emergency_stopped = true;
         impl_->current_snapshot.preview_enabled = preview_stats.enabled;
-        impl_->current_snapshot.preview_sampled_frames = 0;
-        impl_->current_snapshot.preview_dropped_frames = 0;
+        impl_->current_snapshot.preview_sampled_frames = std::max(
+            impl_->current_snapshot.preview_sampled_frames,
+            preview_stats.sampled_frames);
+        impl_->current_snapshot.preview_dropped_frames = std::max(
+            impl_->current_snapshot.preview_dropped_frames,
+            preview_stats.dropped_frames);
     }
 }
 

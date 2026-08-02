@@ -608,8 +608,9 @@ $safety
 $($steps -join "`n")
 
 除 Stability 外，Xen 启动后独立置顶检测预览应自动显示；人工点击“启动”开始 Runtime，完成场景
-后点击“停止”，确认报告发布后关闭 Xen。无需人工切换“置顶”，测试中不得保存配置、重载模型或
-修改任何参数。
+后点击“停止”，等待 Xen 主界面显示“Runtime 已停止”，再关闭 Xen。外层 PowerShell 只有在
+Xen 进程退出后才会汇总并输出“自动报告已汇总”；看到该提示后方可关闭 PowerShell。无需人工
+切换“置顶”，测试中不得保存配置、重载模型或修改任何参数。
 
 单个目标只能属于一个阵营：CT 目标正常组合为 C0 身体与 C1 头部，T 目标正常组合为 C2 身体与
 C3 头部，不要求同一目标同时出现 CT/T 四类。自动报告会保留身体/头部聚合值和 C0～C4 分项值。
@@ -874,8 +875,9 @@ function Collect-Reports {
             $failures += "物理输出配置与任务不一致：$path"
         }
         if ($Stage -ne "Stability" -and
-            -not [bool]$snapshot.preview_enabled) {
-            $failures += "GUI 实机场景未启用独立置顶检测预览：$path"
+            (-not [bool]$snapshot.preview_enabled -or
+             [uint64]$snapshot.preview_sampled_frames -eq 0)) {
+            $failures += "GUI 实机场景未形成独立置顶检测预览采样：$path"
         }
         if ([int64]$report.failed_samples -ne 0 -or
             [int64]$snapshot.failed_frames -ne 0 -or
