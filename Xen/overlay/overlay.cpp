@@ -69,6 +69,11 @@ constexpr int kResizeBorder = 6;
 constexpr std::size_t kMetricHistoryCapacity = 256;
 // 与 Xen/app/xen.rc 保持一致，用于标题栏和任务栏图标。
 constexpr int kAppIconResourceId = 101;
+constexpr wchar_t kMainWindowClass[] = L"XenCodexOverlay";
+constexpr wchar_t kDetachedPreviewWindowClass[] =
+    L"XenDetachedDetectionPreview";
+constexpr int kDetachedPreviewMinimumWidth = 320;
+constexpr int kDetachedPreviewMinimumHeight = 280;
 
 using MetricHistory =
     overlay::detail::MetricHistory<kMetricHistoryCapacity>;
@@ -553,6 +558,12 @@ void draw_timing_bar(double value,
 struct Overlay::Impl {
     UiConfig config;
     HWND window = nullptr;
+    HWND detached_preview_window = nullptr;
+    HDC detached_memory_dc = nullptr;
+    HBITMAP detached_memory_bitmap = nullptr;
+    HGDIOBJ detached_memory_previous_bitmap = nullptr;
+    int detached_memory_width = 0;
+    int detached_memory_height = 0;
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain> swap_chain;
@@ -571,6 +582,8 @@ struct Overlay::Impl {
     bool close_requested = false;
     bool show_log_panel = false;
     bool preview_requested = false;
+    bool detached_preview_requested = false;
+    std::shared_ptr<const RuntimePreviewFrame> detached_preview_frame;
     int preview_texture_width = 0;
     int preview_texture_height = 0;
     std::uint64_t preview_uploaded_sequence = 0;
@@ -673,6 +686,49 @@ struct Overlay::Impl {
                 return 0;
             case WM_DESTROY:
                 PostQuitMessage(0);
+                return 0;
+        }
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+
+    static LRESULT CALLBACK detached_preview_window_proc(
+            HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+        auto* self = reinterpret_cast<Impl*>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (message == WM_NCCREATE) {
+            const auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+            self = static_cast<Impl*>(create->lpCreateParams);
+            SetWindowLongPtrW(
+                hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        switch (message) {
+            case WM_PAINT:
+                if (self) {
+                    self->paint_detached_preview(hwnd);
+                    return 0;
+                }
+                break;
+            case WM_ERASEBKGND:
+                // WM_PAINT 会覆盖完整客户区，避免 10 FPS 更新时背景闪烁。
+                return 1;
+            case WM_GETMINMAXINFO: {
+                auto* minmax = reinterpret_cast<MINMAXINFO*>(lparam);
+                minmax->ptMinTrackSize.x = kDetachedPreviewMinimumWidth;
+                minmax->ptMinTrackSize.y = kDetachedPreviewMinimumHeight;
+                return 0;
+            }
+            case WM_CLOSE:
+                if (self) {
+                    self->detached_preview_requested = false;
+                    self->detached_preview_frame.reset();
+                    self->release_detached_paint_buffer();
+                }
+                ShowWindow(hwnd, SW_HIDE);
+                return 0;
+            case WM_DESTROY:
+                if (self && self->detached_preview_window == hwnd) {
+                    self->detached_preview_window = nullptr;
+                }
                 return 0;
         }
         return DefWindowProcW(hwnd, message, wparam, lparam);
@@ -794,6 +850,294 @@ struct Overlay::Impl {
         context->Unmap(preview_texture.Get(), 0);
         preview_uploaded_sequence = preview->sequence;
         return true;
+    }
+
+    bool ensure_detached_preview_window() noexcept {
+        if (detached_preview_window) return true;
+        const HINSTANCE instance = GetModuleHandleW(nullptr);
+        detached_preview_window = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            kDetachedPreviewWindowClass, L"Xen 实时检测",
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+            CW_USEDEFAULT, CW_USEDEFAULT, 560, 620,
+            nullptr, nullptr, instance, this);
+        if (!detached_preview_window) return false;
+        if (large_icon) {
+            SendMessageW(
+                detached_preview_window, WM_SETICON, ICON_BIG,
+                reinterpret_cast<LPARAM>(large_icon));
+        }
+        if (small_icon) {
+            SendMessageW(
+                detached_preview_window, WM_SETICON, ICON_SMALL,
+                reinterpret_cast<LPARAM>(small_icon));
+        }
+        apply_window_theme(detached_preview_window, applied_theme);
+        return true;
+    }
+
+    void sync_detached_preview(
+            const std::shared_ptr<const RuntimePreviewFrame>& preview) noexcept {
+        if (!detached_preview_requested) {
+            detached_preview_frame.reset();
+            if (detached_preview_window) {
+                ShowWindow(detached_preview_window, SW_HIDE);
+            }
+            return;
+        }
+        if (!ensure_detached_preview_window()) {
+            detached_preview_requested = false;
+            detached_preview_frame.reset();
+            LOG_ERROR("overlay", "独立置顶检测窗口创建失败");
+            return;
+        }
+
+        const bool preview_changed =
+            overlay::detail::detached_preview_content_changed(
+                static_cast<bool>(detached_preview_frame),
+                detached_preview_frame
+                    ? detached_preview_frame->sequence
+                    : 0,
+                static_cast<bool>(preview),
+                preview ? preview->sequence : 0);
+        detached_preview_frame = preview;
+        const bool was_visible = IsWindowVisible(detached_preview_window) != FALSE;
+        if (!was_visible) {
+            // WS_EX_TOPMOST 提供持续置顶语义；只在首次显示时调用 SetWindowPos，
+            // 避免主 UI 高频循环反复改变 Z 序和触发非必要窗口工作。
+            SetWindowPos(
+                detached_preview_window, HWND_TOPMOST,
+                0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE |
+                    SWP_SHOWWINDOW);
+        }
+        if (!was_visible || preview_changed) {
+            InvalidateRect(detached_preview_window, nullptr, FALSE);
+        }
+    }
+
+    void release_detached_paint_buffer() noexcept {
+        if (detached_memory_dc && detached_memory_previous_bitmap) {
+            SelectObject(
+                detached_memory_dc, detached_memory_previous_bitmap);
+        }
+        if (detached_memory_bitmap) {
+            DeleteObject(detached_memory_bitmap);
+        }
+        if (detached_memory_dc) DeleteDC(detached_memory_dc);
+        detached_memory_dc = nullptr;
+        detached_memory_bitmap = nullptr;
+        detached_memory_previous_bitmap = nullptr;
+        detached_memory_width = 0;
+        detached_memory_height = 0;
+    }
+
+    bool ensure_detached_paint_buffer(
+            HDC window_dc, int width, int height) noexcept {
+        if (!window_dc || width <= 0 || height <= 0) return false;
+        if (detached_memory_dc && detached_memory_bitmap &&
+            detached_memory_width == width &&
+            detached_memory_height == height) {
+            return true;
+        }
+        release_detached_paint_buffer();
+        detached_memory_dc = CreateCompatibleDC(window_dc);
+        detached_memory_bitmap = detached_memory_dc
+            ? CreateCompatibleBitmap(window_dc, width, height)
+            : nullptr;
+        if (!detached_memory_dc || !detached_memory_bitmap) {
+            release_detached_paint_buffer();
+            return false;
+        }
+        detached_memory_previous_bitmap = SelectObject(
+            detached_memory_dc, detached_memory_bitmap);
+        if (!detached_memory_previous_bitmap) {
+            release_detached_paint_buffer();
+            return false;
+        }
+        detached_memory_width = width;
+        detached_memory_height = height;
+        return true;
+    }
+
+    void paint_detached_preview(HWND hwnd) noexcept {
+        PAINTSTRUCT paint{};
+        HDC window_dc = BeginPaint(hwnd, &paint);
+        if (!window_dc) return;
+
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        const int client_width = std::max(0L, client.right - client.left);
+        const int client_height = std::max(0L, client.bottom - client.top);
+        const bool double_buffered = ensure_detached_paint_buffer(
+            window_dc, client_width, client_height);
+        HDC dc = double_buffered ? detached_memory_dc : window_dc;
+        const auto finish_paint = [&]() noexcept {
+            if (double_buffered) {
+                BitBlt(
+                    window_dc, 0, 0,
+                    client_width, client_height,
+                    detached_memory_dc, 0, 0, SRCCOPY);
+            }
+            EndPaint(hwnd, &paint);
+        };
+        HBRUSH background = CreateSolidBrush(RGB(16, 16, 16));
+        FillRect(dc, &client, background);
+        DeleteObject(background);
+
+        const auto& preview = detached_preview_frame;
+        const std::size_t required_bytes = preview
+            ? static_cast<std::size_t>(std::max(0, preview->width)) *
+                  static_cast<std::size_t>(std::max(0, preview->height)) * 4
+            : 0;
+        const bool has_image = preview && preview->sequence != 0 &&
+            preview->width > 0 && preview->height > 0 &&
+            preview->bgra.size() >= required_bytes;
+        constexpr int kPadding = 10;
+        constexpr int kStatusHeight = 30;
+        if (!has_image) {
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(180, 184, 190));
+            RECT message_rect{
+                kPadding, kPadding,
+                std::max(kPadding, client_width - kPadding),
+                std::max(kPadding, client_height - kPadding)};
+            DrawTextW(
+                dc, L"等待实时检测画面",
+                -1, &message_rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            finish_paint();
+            return;
+        }
+
+        const float maximum_width = static_cast<float>(
+            std::max(1, client_width - kPadding * 2));
+        const float maximum_height = static_cast<float>(
+            std::max(1, client_height - kPadding * 2 - kStatusHeight));
+        const auto display = overlay::detail::fit_detached_preview_size(
+            preview->width, preview->height,
+            maximum_width, maximum_height);
+        const int display_width = std::max(
+            1, static_cast<int>(std::lround(display.width)));
+        const int display_height = std::max(
+            1, static_cast<int>(std::lround(display.height)));
+        const int image_x = (client_width - display_width) / 2;
+        const int image_y = kPadding +
+            (static_cast<int>(maximum_height) - display_height) / 2;
+
+        BITMAPINFO preview_bitmap{};
+        preview_bitmap.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        preview_bitmap.bmiHeader.biWidth = preview->width;
+        preview_bitmap.bmiHeader.biHeight = -preview->height;
+        preview_bitmap.bmiHeader.biPlanes = 1;
+        preview_bitmap.bmiHeader.biBitCount = 32;
+        preview_bitmap.bmiHeader.biCompression = BI_RGB;
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, nullptr);
+        StretchDIBits(
+            dc, image_x, image_y, display_width, display_height,
+            0, 0, preview->width, preview->height,
+            preview->bgra.data(), &preview_bitmap,
+            DIB_RGB_COLORS, SRCCOPY);
+
+        const float coordinate_scale_x = preview->scale_x *
+            display.width / static_cast<float>(preview->width);
+        const float coordinate_scale_y = preview->scale_y *
+            display.height / static_cast<float>(preview->height);
+        HPEN detection_pen = CreatePen(PS_SOLID, 2, RGB(51, 156, 255));
+        HGDIOBJ old_pen = SelectObject(dc, detection_pen);
+        HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        HBRUSH label_brush = CreateSolidBrush(RGB(16, 16, 16));
+        const std::size_t detection_count = std::min(
+            preview->detection_count, preview->detections.size());
+        for (std::size_t index = 0; index < detection_count; ++index) {
+            const Detection& detection = preview->detections[index];
+            const auto rectangle = overlay::detail::map_preview_rect(
+                detection.x1, detection.y1, detection.x2, detection.y2,
+                coordinate_scale_x, coordinate_scale_y,
+                display.width, display.height);
+            if (rectangle.x2 - rectangle.x1 < 1.0f ||
+                rectangle.y2 - rectangle.y1 < 1.0f) {
+                continue;
+            }
+            const int left = image_x +
+                static_cast<int>(std::lround(rectangle.x1));
+            const int top = image_y +
+                static_cast<int>(std::lround(rectangle.y1));
+            const int right = image_x +
+                static_cast<int>(std::lround(rectangle.x2));
+            const int bottom = image_y +
+                static_cast<int>(std::lround(rectangle.y2));
+            Rectangle(dc, left, top, right, bottom);
+
+            wchar_t label[48]{};
+            swprintf_s(
+                label, L"C%d  %.0f%%", detection.class_id,
+                std::clamp(detection.confidence, 0.0f, 1.0f) * 100.0f);
+            SIZE text_size{};
+            GetTextExtentPoint32W(
+                dc, label, static_cast<int>(wcslen(label)), &text_size);
+            const int text_width = static_cast<int>(text_size.cx);
+            const int text_height = static_cast<int>(text_size.cy);
+            const int label_top = std::max(
+                image_y, top - text_height - 4);
+            RECT label_background{
+                left, label_top,
+                std::min(image_x + display_width, left + text_width + 8),
+                label_top + text_height + 4};
+            FillRect(dc, &label_background, label_brush);
+            TextOutW(
+                dc, label_background.left + 4, label_background.top + 2,
+                label, static_cast<int>(wcslen(label)));
+        }
+        DeleteObject(label_brush);
+
+        if (preview->has_target) {
+            const AimTargetSnapshot& target = preview->target;
+            const auto target_rect = overlay::detail::map_preview_rect(
+                target.x1, target.y1, target.x2, target.y2,
+                coordinate_scale_x, coordinate_scale_y,
+                display.width, display.height);
+            HPEN target_pen = CreatePen(
+                PS_SOLID, 3,
+                target.predicted ? RGB(240, 173, 78) : RGB(64, 201, 119));
+            SelectObject(dc, target_pen);
+            Rectangle(
+                dc,
+                image_x + static_cast<int>(std::lround(target_rect.x1)),
+                image_y + static_cast<int>(std::lround(target_rect.y1)),
+                image_x + static_cast<int>(std::lround(target_rect.x2)),
+                image_y + static_cast<int>(std::lround(target_rect.y2)));
+            const auto aim_point = overlay::detail::map_preview_point(
+                target.aim_x, target.aim_y,
+                coordinate_scale_x, coordinate_scale_y);
+            const int aim_x = image_x +
+                static_cast<int>(std::lround(aim_point.x));
+            const int aim_y = image_y +
+                static_cast<int>(std::lround(aim_point.y));
+            MoveToEx(dc, aim_x - 7, aim_y, nullptr);
+            LineTo(dc, aim_x + 8, aim_y);
+            MoveToEx(dc, aim_x, aim_y - 7, nullptr);
+            LineTo(dc, aim_x, aim_y + 8);
+            SelectObject(dc, detection_pen);
+            DeleteObject(target_pen);
+        }
+
+        SelectObject(dc, old_brush);
+        SelectObject(dc, old_pen);
+        DeleteObject(detection_pen);
+        wchar_t status[128]{};
+        swprintf_s(
+            status, L"帧 %llu    检测 %zu    Detector %S",
+            static_cast<unsigned long long>(preview->sequence),
+            detection_count, DetectionStatusName(preview->detection_status));
+        SetTextColor(dc, RGB(190, 194, 200));
+        TextOutW(
+            dc, kPadding, client_height - kStatusHeight + 7,
+            status, static_cast<int>(wcslen(status)));
+        finish_paint();
     }
 
     bool editable(const RuntimeSnapshot& snapshot) const noexcept {
@@ -1622,27 +1966,56 @@ struct Overlay::Impl {
             "roi_preview_panel", "实时 ROI 诊断",
             has_image ? display.height + 126.0f : 92.0f);
 
+        const bool preview_supported =
+            !snapshot.d3d11_cuda_interop &&
+            !snapshot.d3d11_directml_interop;
+        if (!preview_supported) {
+            preview_requested = false;
+            detached_preview_requested = false;
+        }
         if (ImGui::BeginTable(
-                "roi_preview_header", 2,
+                "roi_preview_header", 3,
                 ImGuiTableFlags_SizingStretchProp)) {
             ImGui::TableSetupColumn(
                 "状态", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn(
-                "开关", ImGuiTableColumnFlags_WidthFixed, 54.0f);
+                "页面", ImGuiTableColumnFlags_WidthFixed, 58.0f);
+            ImGui::TableSetupColumn(
+                "置顶", ImGuiTableColumnFlags_WidthFixed, 58.0f);
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             ImGui::TextUnformatted("同帧图像、检测框与 Aim 目标");
             ImGui::TextColored(
                 rgba(kFaintInk), "最长边 512 / 最高 10 FPS / 三槽最新帧");
             ImGui::TableSetColumnIndex(1);
-            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
+            ImGui::TextColored(rgba(kFaintInk), "页面");
+            ImGui::BeginDisabled(!preview_supported);
             toggle_switch("##roi_preview_enabled", &preview_requested);
+            ImGui::EndDisabled();
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextColored(rgba(kFaintInk), "置顶");
+            ImGui::BeginDisabled(!preview_supported);
+            toggle_switch(
+                "##detached_preview_enabled",
+                &detached_preview_requested);
+            ImGui::EndDisabled();
             ImGui::EndTable();
+        }
+
+        if (!preview_supported) {
+            ImGui::TextColored(
+                rgba(kWarning),
+                "GPU 互操作会话不执行 CPU 预览回读，实时画面不可用。");
+            end_config_panel();
+            return;
         }
 
         if (!preview_requested) {
             ImGui::TextColored(
-                rgba(kMutedInk), "预览已关闭，Runtime 不执行颜色转换或图像复制。");
+                rgba(kMutedInk),
+                detached_preview_requested
+                    ? "页面预览已关闭，独立置顶窗口继续显示。"
+                    : "预览已关闭，Runtime 不执行颜色转换或图像复制。");
             end_config_panel();
             return;
         }
@@ -2592,8 +2965,22 @@ bool Overlay::init(const UiConfig& config) noexcept {
         WNDCLASSEXW window_class{
             sizeof(WNDCLASSEXW), CS_CLASSDC, Impl::window_proc, 0L, 0L,
             instance, nullptr, nullptr, nullptr, nullptr,
-            L"XenCodexOverlay", nullptr};
-        RegisterClassExW(&window_class);
+            kMainWindowClass, nullptr};
+        if (!RegisterClassExW(&window_class) &&
+            GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            return false;
+        }
+        WNDCLASSEXW detached_window_class = window_class;
+        detached_window_class.style = CS_HREDRAW | CS_VREDRAW;
+        detached_window_class.lpfnWndProc =
+            Impl::detached_preview_window_proc;
+        detached_window_class.lpszClassName =
+            kDetachedPreviewWindowClass;
+        if (!RegisterClassExW(&detached_window_class) &&
+            GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            UnregisterClassW(kMainWindowClass, instance);
+            return false;
+        }
         impl_->window = CreateWindowExW(
             WS_EX_APPWINDOW,
             window_class.lpszClassName, L"Xen Precision Runtime",
@@ -2697,6 +3084,8 @@ bool Overlay::render(
         if (impl_->applied_theme != config.ui.theme) {
             apply_codex_theme(config.ui.theme);
             apply_window_theme(impl_->window, config.ui.theme);
+            apply_window_theme(
+                impl_->detached_preview_window, config.ui.theme);
             impl_->applied_theme = config.ui.theme;
         }
         ImGui::NewFrame();
@@ -2732,13 +3121,20 @@ bool Overlay::render(
         impl_->render_workspace(
             snapshot, preview, model_catalog,
             config, app_message, actions);
+        const bool detection_page_active =
+            impl_->active_page == WorkspacePage::DETECTION;
         const bool preview_enabled =
-            impl_->active_page == WorkspacePage::DETECTION &&
-            impl_->preview_requested;
+            overlay::detail::preview_subscription_required(
+                detection_page_active,
+                impl_->preview_requested,
+                impl_->detached_preview_requested);
         actions.preview_enabled_changed =
             preview_enabled != snapshot.preview_enabled;
         actions.preview_enabled = preview_enabled;
-        if (!preview_enabled) impl_->release_preview_texture();
+        if (!detection_page_active || !impl_->preview_requested) {
+            impl_->release_preview_texture();
+        }
+        impl_->sync_detached_preview(preview);
         ImGui::EndChild();
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
@@ -2765,6 +3161,12 @@ bool Overlay::render(
 void Overlay::shutdown() noexcept {
     if (!impl_) return;
     impl_->release_preview_texture();
+    impl_->detached_preview_frame.reset();
+    if (impl_->detached_preview_window) {
+        DestroyWindow(impl_->detached_preview_window);
+        impl_->detached_preview_window = nullptr;
+    }
+    impl_->release_detached_paint_buffer();
     if (impl_->initialized) {
         ImGui_ImplDX11_Shutdown();
         ImGui_ImplWin32_Shutdown();
@@ -2787,6 +3189,7 @@ void Overlay::shutdown() noexcept {
         DestroyIcon(impl_->small_icon);
         impl_->small_icon = nullptr;
     }
-    UnregisterClassW(
-        L"XenCodexOverlay", GetModuleHandleW(nullptr));
+    const HINSTANCE instance = GetModuleHandleW(nullptr);
+    UnregisterClassW(kDetachedPreviewWindowClass, instance);
+    UnregisterClassW(kMainWindowClass, instance);
 }

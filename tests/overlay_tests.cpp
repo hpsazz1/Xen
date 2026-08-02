@@ -81,12 +81,62 @@ void test_preview_geometry_mapping() {
            "预览框必须规范化反向坐标并裁剪到图像边界");
 }
 
+void test_detached_preview_geometry() {
+    const auto enlarged = overlay::detail::fit_detached_preview_size(
+        320, 320, 640.0f, 480.0f);
+    expect(nearly_equal(enlarged.width, 480.0f) &&
+               nearly_equal(enlarged.height, 480.0f),
+           "独立预览应保持宽高比并允许放大到客户区");
+
+    const auto fitted = overlay::detail::fit_detached_preview_size(
+        1280, 720, 640.0f, 480.0f);
+    expect(nearly_equal(fitted.width, 640.0f) &&
+               nearly_equal(fitted.height, 360.0f),
+           "独立预览缩小时必须保持宽高比");
+
+    const auto invalid = overlay::detail::fit_detached_preview_size(
+        0, 320, 640.0f, 480.0f);
+    expect(nearly_equal(invalid.width, 0.0f) &&
+               nearly_equal(invalid.height, 0.0f),
+           "独立预览必须拒绝非法图像尺寸");
+}
+
+void test_preview_subscription_state() {
+    using overlay::detail::preview_subscription_required;
+    expect(!preview_subscription_required(false, false, false),
+           "没有可见预览面时不得订阅 Runtime 画面");
+    expect(!preview_subscription_required(false, true, false),
+           "仅请求内嵌预览时，离开检测页必须取消订阅");
+    expect(preview_subscription_required(true, true, false),
+           "检测页内嵌预览开启时必须订阅 Runtime 画面");
+    expect(preview_subscription_required(false, false, true) &&
+               preview_subscription_required(false, true, true),
+           "独立窗口开启后切换标签页必须保持 Runtime 预览订阅");
+}
+
+void test_detached_preview_refresh_state() {
+    using overlay::detail::detached_preview_content_changed;
+    expect(!detached_preview_content_changed(false, 0, false, 0),
+           "持续等待画面时不得按主 UI 帧率重复重绘");
+    expect(detached_preview_content_changed(false, 0, true, 1),
+           "首个预览帧到达时必须刷新独立窗口");
+    expect(!detached_preview_content_changed(true, 7, true, 7),
+           "同一预览序号不得重复重绘");
+    expect(detached_preview_content_changed(true, 7, true, 8),
+           "新预览序号到达时必须刷新独立窗口");
+    expect(detached_preview_content_changed(true, 8, false, 0),
+           "Runtime 停止后必须清除独立窗口中的旧画面");
+}
+
 } // namespace
 
 int main() {
     test_metric_history_order_and_overwrite();
     test_metric_history_clear_and_floor();
     test_preview_geometry_mapping();
+    test_detached_preview_geometry();
+    test_preview_subscription_state();
+    test_detached_preview_refresh_state();
     if (failures != 0) {
         std::cerr << "Overlay 测试失败数: " << failures << '\n';
         return 1;

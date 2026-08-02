@@ -1,10 +1,11 @@
 #ifndef OVERLAY_INTERNAL_H
 #define OVERLAY_INTERNAL_H
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 
 namespace overlay::detail {
 
@@ -85,6 +86,46 @@ inline PreviewSize fit_preview_size(int width,
     return {
         static_cast<float>(width) * scale,
         static_cast<float>(height) * scale};
+}
+
+// 独立窗口应填满可用客户区，因此允许放大；内嵌预览仍使用 fit_preview_size
+// 保持 1:1 上限，避免主控制台被低分辨率 ROI 撑满。
+inline PreviewSize fit_detached_preview_size(
+        int width,
+        int height,
+        float maximum_width,
+        float maximum_height) noexcept {
+    if (width <= 0 || height <= 0 || maximum_width <= 0.0f ||
+        maximum_height <= 0.0f || !std::isfinite(maximum_width) ||
+        !std::isfinite(maximum_height)) {
+        return {};
+    }
+    const float scale = std::min(
+        maximum_width / static_cast<float>(width),
+        maximum_height / static_cast<float>(height));
+    return {
+        static_cast<float>(width) * scale,
+        static_cast<float>(height) * scale};
+}
+
+// 独立窗口是预览通道的第二个消费者。只要任一可见面需要画面就保持订阅，
+// 从而切换主控制台标签页时不会停掉颜色转换和同帧快照发布。
+inline bool preview_subscription_required(
+        bool detection_page_active,
+        bool embedded_preview_requested,
+        bool detached_preview_requested) noexcept {
+    return detached_preview_requested ||
+           (detection_page_active && embedded_preview_requested);
+}
+
+inline bool detached_preview_content_changed(
+        bool current_has_frame,
+        std::uint64_t current_sequence,
+        bool next_has_frame,
+        std::uint64_t next_sequence) noexcept {
+    return current_has_frame != next_has_frame ||
+           (current_has_frame && next_has_frame &&
+            current_sequence != next_sequence);
 }
 
 inline PreviewPoint map_preview_point(float x,
