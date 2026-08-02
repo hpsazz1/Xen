@@ -44,8 +44,10 @@ try {
                 '(?m)^open_detached_preview_on_start=true$') `
         "观察任务必须固定模型、CPU、置顶预览和禁用物理输出"
     Expect ($config -match '(?m)^person_class_ids=0,2$' -and
-            $config -match '(?m)^head_class_ids=1,3$') `
-        "固定模型必须同时纳入 CT/T 的身体和头部类别"
+            $config -match '(?m)^head_class_ids=1,3$' -and
+            $config -match '(?m)^roi_width=640$' -and
+            $config -match '(?m)^roi_height=640$') `
+        "固定模型必须使用 640x640 ROI 并纳入 CT/T 身体和头部类别"
     $taskMarkdown = Get-Content -LiteralPath (
         Join-Path $observationRun "TASK.md") -Raw -Encoding UTF8
     $expectedLaunchPrefix =
@@ -112,10 +114,10 @@ try {
             source_height = 1440
             encoded_width = 2560
             encoded_height = 1440
-            roi_x = 1120
-            roi_y = 560
-            roi_width = 320
-            roi_height = 320
+            roi_x = 960
+            roi_y = 400
+            roi_width = 640
+            roi_height = 640
             source_pixels_per_pixel_x = 1.0
             source_pixels_per_pixel_y = 1.0
             output_allowed_by_config = $false
@@ -142,8 +144,8 @@ try {
                 head_detection_count = 1
                 max_person_confidence = 0.864
                 max_head_confidence = 0.871
-                detection_count_by_class = @(1, 1, 0, 0, 0)
-                max_confidence_by_class = @(0.864, 0.871, 0.0, 0.0, 0.0)
+                detection_count_by_class = @(1, 1, 0, 0)
+                max_confidence_by_class = @(0.864, 0.871, 0.0, 0.0)
             }
         )
     }
