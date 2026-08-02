@@ -1800,6 +1800,7 @@ struct Overlay::Impl {
     void render_detection_config(
             const RuntimeSnapshot& snapshot,
             const std::shared_ptr<const RuntimePreviewFrame>& preview,
+            const OverlayModelCatalog& model_catalog,
             AppConfig& app_config,
             bool can_edit,
             OverlayActions& actions) {
@@ -1818,7 +1819,7 @@ struct Overlay::Impl {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             ImGui::BeginDisabled(!detector_editable);
-            render_detector_form(app_config);
+            render_detector_form(app_config, model_catalog, actions);
             ImGui::EndDisabled();
             ImGui::TableSetColumnIndex(1);
             ImGui::BeginDisabled(!can_edit);
@@ -1827,7 +1828,7 @@ struct Overlay::Impl {
             ImGui::EndTable();
         } else {
             ImGui::BeginDisabled(!detector_editable);
-            render_detector_form(app_config);
+            render_detector_form(app_config, model_catalog, actions);
             ImGui::EndDisabled();
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
             ImGui::BeginDisabled(!can_edit);
@@ -1887,14 +1888,58 @@ struct Overlay::Impl {
         end_config_panel();
     }
 
-    void render_detector_form(AppConfig& app_config) {
+    void render_detector_form(AppConfig& app_config,
+                              const OverlayModelCatalog& model_catalog,
+                              OverlayActions& actions) {
         const bool openvino =
             app_config.detector.backend == BackendType::OPENVINO;
         begin_config_panel(
             "detector_panel", "推理", openvino ? 300.0f : 264.0f);
         if (begin_form("detector_form", 126.0f)) {
-            form_row("模型路径");
-            ImGui::InputText("##model_path", &app_config.detector.model_path);
+            form_row("模型");
+            const auto selected = std::find(
+                model_catalog.model_names.begin(),
+                model_catalog.model_names.end(),
+                app_config.detector.model_path);
+            const bool model_available =
+                selected != model_catalog.model_names.end();
+            std::string preview = app_config.detector.model_path.empty()
+                ? "未选择"
+                : app_config.detector.model_path;
+            if (!app_config.detector.model_path.empty() &&
+                !model_available) {
+                preview += "（不可用）";
+            }
+
+            constexpr float kRefreshWidth = 56.0f;
+            const float model_combo_width = std::max(
+                96.0f,
+                ImGui::GetContentRegionAvail().x - kRefreshWidth - 8.0f);
+            ImGui::SetNextItemWidth(model_combo_width);
+            ImGui::BeginDisabled(model_catalog.model_names.empty());
+            if (ImGui::BeginCombo("##model_name", preview.c_str())) {
+                for (const std::string& model_name :
+                     model_catalog.model_names) {
+                    const bool is_selected =
+                        model_name == app_config.detector.model_path;
+                    if (ImGui::Selectable(
+                            model_name.c_str(), is_selected)) {
+                        app_config.detector.model_path = model_name;
+                    }
+                    if (is_selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered() &&
+                !model_catalog.directory.empty()) {
+                ImGui::SetTooltip("%s", model_catalog.directory.c_str());
+            }
+            ImGui::SameLine(0.0f, 8.0f);
+            if (ImGui::Button(
+                    "刷新", ImVec2(kRefreshWidth, 0.0f))) {
+                actions.refresh_models_requested = true;
+            }
 
             const char* backends[] = {
                 "CUDA", "TensorRT", "DirectML", "OpenVINO", "CPU"};
@@ -2478,6 +2523,7 @@ struct Overlay::Impl {
     void render_workspace(
             const RuntimeSnapshot& snapshot,
             const std::shared_ptr<const RuntimePreviewFrame>& preview,
+            const OverlayModelCatalog& model_catalog,
             AppConfig& app_config,
             const std::string& app_message,
             OverlayActions& actions) {
@@ -2512,7 +2558,8 @@ struct Overlay::Impl {
                     break;
                 case WorkspacePage::DETECTION:
                     render_detection_config(
-                        snapshot, preview, app_config, can_edit, actions);
+                        snapshot, preview, model_catalog,
+                        app_config, can_edit, actions);
                     break;
                 case WorkspacePage::AIM:
                     render_aim_config(app_config, can_edit);
@@ -2637,6 +2684,7 @@ bool Overlay::pump_messages() noexcept {
 bool Overlay::render(
         const RuntimeSnapshot& snapshot,
         const std::shared_ptr<const RuntimePreviewFrame>& preview,
+        const OverlayModelCatalog& model_catalog,
         AppConfig& config,
         const std::string& app_message,
         OverlayActions& actions) noexcept {
@@ -2682,7 +2730,8 @@ bool Overlay::render(
             ImGuiWindowFlags_NoScrollWithMouse);
         impl_->render_global_bar(snapshot, actions);
         impl_->render_workspace(
-            snapshot, preview, config, app_message, actions);
+            snapshot, preview, model_catalog,
+            config, app_message, actions);
         const bool preview_enabled =
             impl_->active_page == WorkspacePage::DETECTION &&
             impl_->preview_requested;

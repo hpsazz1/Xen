@@ -690,6 +690,7 @@ target_link_libraries(overlay
 
 add_executable(xen_app WIN32
     Xen/app/main.cpp
+    Xen/app/model_catalog.cpp
     Xen/app/xen.rc)
 set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
 target_link_libraries(xen_app PRIVATE
@@ -894,6 +895,14 @@ if(BUILD_TESTING)
         tests/overlay_tests.cpp)
     target_include_directories(overlay_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
     add_test(NAME overlay_tests COMMAND overlay_tests)
+
+    # 模型目录测试只验证 App 的路径、枚举和安全边界，不创建 Overlay 或 ORT Session。
+    add_executable(model_catalog_tests
+        tests/model_catalog_tests.cpp
+        Xen/app/model_catalog.cpp)
+    target_include_directories(
+        model_catalog_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    add_test(NAME model_catalog_tests COMMAND model_catalog_tests)
 
     add_executable(debug_tests
         tests/debug_tests.cpp)

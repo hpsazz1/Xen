@@ -79,6 +79,9 @@ Xen/                           # 仓库根目录
 - Detector 可在 Runtime 运行期间异步热重载。候选 Session 在独立线程加载，旧模型继续处理帧；
   只有候选完整加载成功后才在两帧之间交换指针。失败保持旧模型和 `RUNNING`，成功后强制解除
   输出武装并重置 Aim 状态；加载窗口拒绝新的武装请求。
+- `Xen.exe` 启动时会创建程序同目录的 `models` 文件夹。检测页只列出该目录根部的普通
+  `.onnx` 文件，可显式刷新并选择模型；配置保存模型文件名，启动或热重载前再解析为程序目录下的
+  规范绝对路径，因此不依赖当前工作目录，也不会接受目录穿越、外部路径或符号链接。
 - Detector 支持标准 YOLOv8 兼容实例分割双输出：`[1,4+C+M,A]` prediction 与
   `[1,M,H,W]` prototype。`detect()` 加载分割模型时仍只返回轻量框，不生成主机掩码；显式
   `segment()`/`segment_d3d11()` 才返回框与单帧共享的紧凑 ROI mask buffer，因此 Aim 和
@@ -155,7 +158,9 @@ NDI SDK 可选。设置 `NDI_SDK_DIR` 或 `-DXEN_NDI_SDK_ROOT=...` 后编译真�
 `Processing.NDI.Lib.x64.dll` 和许可证复制到可执行文件旁；未安装 SDK 时项目仍可构建，但选择
 NDI 会明确返回 `UNSUPPORTED`，不会切换 UDP、DXGI 或 CPU 路径。
 
-应用目标为 `xen_app`，Release 输出名为 `Xen.exe`。首次运行缺少 `config.ini` 时，界面会显示配置错误；填写模型路径并保存后方可启动 Runtime。
+应用目标为 `xen_app`，Release 输出名为 `Xen.exe`。首次运行会自动创建 `models`；把 ONNX
+模型放入该文件夹后，可在检测页选择并保存。目录中只有一个模型且配置尚未选择时会自动选中；
+没有可用模型时 Runtime 明确拒绝启动。
 
 双机 XUDP 的主机发送目标为 `xen_sender`，Release 输出名为 `XenSender.exe`。目的地址必须显式
 提供；默认采集主机中心 `320x320`、JPEG 质量 85、XUDP 数据报上限 1400 字节、发送上限及协议
@@ -371,19 +376,19 @@ ctest --test-dir build -C Release --output-on-failure
 上次 Provider/SDK 遗留的已知运行库；当前来源与 SHA-256 记录在同目录的
 `xen-runtime-deployment.json`。
 
-默认 `BUILD_TESTING=ON` 当前注册 16 个 CTest，按风险分为五层：
+默认 `BUILD_TESTING=ON` 当前注册 17 个 CTest，按风险分为五层：
 
 - 纯算法与内部契约：Detector 解码/前处理、Aim、真值解析、Runtime 队列、Overlay 标量环；
 - 生产库回归：Log、Config、Debug、Benchmark 和 Mouse Benchmark 直接链接生产目标；
-- OS/网络/部署可复现替身：Crash 子进程、运行库授权清单两阶段切换、UDP/XUDP/NDI 回环、
-  假 KMBOX 与 Keyboard 状态机；
+- OS/网络/部署可复现替身：Crash 子进程、App 模型目录、运行库授权清单两阶段切换、
+  UDP/XUDP/NDI 回环、假 KMBOX 与 Keyboard 状态机；
 - 可选真实模型集成：设置 `XEN_TEST_MODEL` 后增加 Detector 加载/变化输入和 Runtime 热重载；
 - 只有实际配置 TensorRT SDK 的真实模型构建才增加 D3D11/CUDA 纹理预注册、连续变化输入、
-  Graph 输出指纹与 CPU 对照；CPU/CUDA-only 为 18 个 CTest，TensorRT 为 19 个；
+  Graph 输出指纹与 CPU 对照；CPU/CUDA-only 为 19 个 CTest，TensorRT 为 20 个；
 - DirectML 真实模型构建还增加 D3D11/DirectML 共享纹理与 fence 测试，用饱和
-  红/蓝变化输入核对通道、原始输出指纹、检测结果和零显式输入复制；
+  红/蓝变化输入核对通道、原始输出指纹、检测结果和零显式输入复制，当前共 20 个 CTest；
 - OpenVINO 真实模型构建增加严格 Provider、变化输入、非法输入状态和 ORT 节点 profile
-  测试；指定 `XEN_TEST_OPENVINO_DEVICE=CPU|GPU|NPU` 后当前共注册 19 个 CTest；
+  测试；指定 `XEN_TEST_OPENVINO_DEVICE=CPU|GPU|NPU` 后当前共注册 20 个 CTest；
 - 正式性能与部署验收：使用 `scripts/benchmark_*.ps1`，不把短单元测试耗时写成性能结论。
 
 测试不得复制一套生产协议或算法，不得因环境缺失静默回退后端，也不得通过删除、跳过或放宽
@@ -713,7 +718,8 @@ segment/pose/OBB 和真正的 batch inference 仍不在当前范围内。
 
 ### 运行时模型热重载
 
-检测页显示当前活动模型、Provider、重载状态和模型代次。`Runtime::reload_detector()` 只在
+检测页显示程序 `models` 目录的模型选择器、当前活动模型、Provider、重载状态和模型代次。
+选择另一模型后点击“重载模型”即可提交候选；`Runtime::reload_detector()` 只在
 `RUNNING` 接受请求，且同一时刻只允许一个候选加载。加载期间旧 Detector 继续服务；成功切换
 不复制当前帧或张量，只交换 Detector 所有权，旧 Session 在加载线程释放。加载失败写入独立的
 `detector_reload_error`，不会把 Runtime 置为 `FAILED`。
