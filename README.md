@@ -349,6 +349,42 @@ JSON 内容，禁止靠固定延时或重定向日志中的“已监听”文本
 后端均由同一脚本强制核对实际 Capture 后端、主机 FOV/ROI、Provider、失败状态、传输统计和
 Runtime 覆盖；`<prefix>.network.json` 最后发布才表示网络接收报告完整。
 
+辅机没有 Visual Studio、CMake、Git 或 SDK 时，主机使用便携包发布脚本。它先构建 NDI 组合的
+`XenBenchmark`，核对构建期部署来源和 SHA-256，再把 CPU 接收程序、模型、UDP/XUDP/NDI
+运行库与三个接收脚本封装到逐文件哈希清单，并通过 SMB 临时目录校验后原位发布。包不包含
+KMBOX UUID，也不允许物理输出：
+
+```powershell
+.\scripts\publish_dual_machine_package.ps1 `
+  -BuildDirectory ".\build-matrix-final-ndi" `
+  -ModelPath ".\build-matrix-final-cpu\Release\models\14wv11.onnx" `
+  -DestinationRoot "\\192.168.3.20\XenLab$"
+```
+
+辅机从本地 `C:\XenLab\packages\<package-id>` 运行，不从 SMB 映射盘执行。先生成并人工复核接收
+配置，再在场景准备完成后启动正式接收；普通场景固定 60 秒/3,000 样本，`SoakFreeRun` 固定
+300 秒/10,000 样本：
+
+```powershell
+$package = "C:\XenLab\packages\<package-id>"
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "$package\scripts\invoke_dual_machine_receiver.ps1" `
+  -Scenario GeometryStatic -CaptureBackend xudp_jpeg -Mode Prepare `
+  -PackageRoot $package
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "$package\scripts\invoke_dual_machine_receiver.ps1" `
+  -Scenario GeometryStatic -CaptureBackend xudp_jpeg -Mode Run `
+  -PackageRoot $package
+```
+
+便携模式不读取辅机 SDK 目录或 Git，而是在运行前后验证 `package-manifest.json` 中的精确文件
+集合、长度和 SHA-256，并再次核对构建机产生的 `xen-runtime-deployment.json`。环境清单用
+`build.provenance_mode=portable_package_manifest` 明确区分该证据来源。UDP/NDI 只允许
+`GeometryStatic`、`Shuttle`、`SoakFreeRun` 三个对照锚点；报告统一写入
+`C:\XenLab\reports`，ready 文件写入 `C:\XenLab\runs`。
+
 2026-08-01 在 RTX 5070 Ti、本机 DXGI、`2560x1440` 中心 `320x320` ROI 上完成 5 分钟正式
 基准；三组均为零失败、零报告/Runtime 丢弃且没有物理 Mouse 命令。`total` 从 Capture 发布完成
 计到 control 结束，`capture + total` 是按同一帧逐样本相加后的完整采集到控制链路：

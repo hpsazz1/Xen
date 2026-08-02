@@ -10,6 +10,7 @@
     [ValidateSet("auto", "channel_first", "objectness", "end_to_end")]
     [string]$OutputFormat = "auto",
     [string]$BuildDirectory = "",
+    [string]$PackageManifestPath = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
     [string]$ListenUrl = "udp://0.0.0.0:5000",
@@ -57,7 +58,12 @@
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
-    $BuildDirectory = Join-Path $PSScriptRoot "..\build"
+    if ([string]::IsNullOrWhiteSpace($PackageManifestPath)) {
+        $BuildDirectory = Join-Path $PSScriptRoot "..\build"
+    } else {
+        $BuildDirectory = Split-Path -Parent (
+            [System.IO.Path]::GetFullPath($PackageManifestPath))
+    }
 }
 
 function Get-FileEvidence {
@@ -206,6 +212,7 @@ try {
         -OutputFormat $OutputFormat `
         -ExpectedCaptureBackend $CaptureBackend `
         -BuildDirectory $BuildDirectory `
+        -PackageManifestPath $PackageManifestPath `
         -Configuration $Configuration `
         -WarmupSamples $WarmupSamples `
         -MinimumSamples $MinimumSamples `

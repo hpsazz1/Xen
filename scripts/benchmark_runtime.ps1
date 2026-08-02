@@ -13,6 +13,7 @@
     [ValidateSet("auto", "desktop_duplication", "udp_mjpeg", "xudp_jpeg", "ndi")]
     [string]$ExpectedCaptureBackend = "auto",
     [string]$BuildDirectory = "",
+    [string]$PackageManifestPath = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
     [ValidateRange(0, 100000)]
@@ -58,7 +59,8 @@
 
 $ErrorActionPreference = "Stop"
 
-if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
+if ([string]::IsNullOrWhiteSpace($BuildDirectory) -and
+    [string]::IsNullOrWhiteSpace($PackageManifestPath)) {
     $BuildDirectory = Join-Path $PSScriptRoot "..\build"
 }
 
@@ -107,6 +109,199 @@ function Get-RuntimeSnapshot {
         $result[$file.Name] = Get-FileSnapshot $file.FullName
     }
     return $result
+}
+
+function Get-RelativePackagePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$PackageRoot
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetFullPath($PackageRoot).TrimEnd('\', '/')
+    $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $fullPath.StartsWith(
+            $prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "文件不在便携包根目录内：$fullPath"
+    }
+    return $fullPath.Substring($prefix.Length).Replace('\', '/')
+}
+
+function Assert-PortablePackage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ManifestPath,
+        [Parameter(Mandatory = $true)]
+        [string]$PackageRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedConfiguration,
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedBackend
+    )
+
+    try {
+        $document = Get-Content -LiteralPath $ManifestPath -Raw `
+            -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        throw "便携包清单不是有效 JSON：$ManifestPath`n$($_.Exception.Message)"
+    }
+    if ([int]$document.schema -ne 1 -or -not [bool]$document.complete -or
+        [string]$document.package_type -ne "xen-dual-machine-receiver") {
+        throw "便携包清单 schema、完成状态或类型无效：$ManifestPath"
+    }
+    if ([string]$document.configuration -ne $RequestedConfiguration) {
+        throw "便携包配置不符合请求：$($document.configuration)"
+    }
+    $gitCommit = [string]$document.source.git_commit
+    if ($gitCommit -notmatch '^[0-9a-fA-F]{40}$' -or
+        [bool]$document.source.git_dirty) {
+        throw "便携包必须来自明确且干净的 Git 提交。"
+    }
+    $allowedBackends = @($document.allowed_backends | ForEach-Object {
+        [string]$_
+    })
+    if ($allowedBackends -notcontains $RequestedBackend) {
+        throw "便携包不允许请求的 Provider：$RequestedBackend"
+    }
+
+    $packageRoot = [System.IO.Path]::GetFullPath($PackageRoot).TrimEnd(
+        '\', '/')
+    $rootPrefix = $packageRoot + [System.IO.Path]::DirectorySeparatorChar
+    $reportedPaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    $snapshots = [ordered]@{}
+    foreach ($record in @($document.files)) {
+        $relativePath = ([string]$record.relative_path).Replace('\', '/')
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or
+            [System.IO.Path]::IsPathRooted($relativePath) -or
+            $relativePath -match '(^|/)\.\.(/|$)' -or
+            -not $reportedPaths.Add($relativePath)) {
+            throw "便携包清单包含非法或重复相对路径：$relativePath"
+        }
+        $fullPath = [System.IO.Path]::GetFullPath(
+            (Join-Path $packageRoot $relativePath))
+        if (-not $fullPath.StartsWith(
+                $rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "便携包文件缺失或越界：$relativePath"
+        }
+        $snapshot = Get-FileSnapshot $fullPath
+        if ([long]$record.length -ne [long]$snapshot.length -or
+            [string]$record.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+            [string]$record.sha256 -ne [string]$snapshot.sha256) {
+            throw "便携包文件长度或 SHA-256 不一致：$relativePath"
+        }
+        $snapshots[$relativePath] = $snapshot
+    }
+    if ($reportedPaths.Count -eq 0) {
+        throw "便携包清单没有文件记录。"
+    }
+
+    $requiredPaths = @(
+        "$RequestedConfiguration/XenBenchmark.exe",
+        "$RequestedConfiguration/xen-runtime-deployment.json",
+        "scripts/benchmark_runtime.ps1",
+        "scripts/benchmark_network_receiver.ps1",
+        "scripts/invoke_dual_machine_receiver.ps1",
+        [string]$document.model.relative_path
+    )
+    foreach ($relativePath in $requiredPaths) {
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or
+            -not $reportedPaths.Contains($relativePath.Replace('\', '/'))) {
+            throw "便携包缺少正式入口或模型记录：$relativePath"
+        }
+    }
+
+    $actualPaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($directory in @(
+            (Join-Path $packageRoot $RequestedConfiguration),
+            (Join-Path $packageRoot "scripts"))) {
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+            throw "便携包缺少目录：$directory"
+        }
+        foreach ($file in @(Get-ChildItem -LiteralPath $directory `
+                -Recurse -File)) {
+            $relativePath = Get-RelativePackagePath `
+                $file.FullName $packageRoot
+            $actualPaths.Add($relativePath) | Out-Null
+        }
+    }
+    if (($actualPaths.Count -ne $reportedPaths.Count) -or
+        @($actualPaths | Where-Object {
+            -not $reportedPaths.Contains($_)
+        }).Count -ne 0) {
+        throw "便携包实际文件集合与清单不一致。"
+    }
+
+    return [ordered]@{
+        package_id = [string]$document.package_id
+        manifest = Get-FileSnapshot $ManifestPath
+        git_commit = $gitCommit
+        git_dirty = [bool]$document.source.git_dirty
+        allowed_backends = $allowedBackends
+        model_relative_path = [string]$document.model.relative_path
+        file_count = $reportedPaths.Count
+        files = $snapshots
+    }
+}
+
+function Assert-PortableRuntimeDeployment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$RuntimeFiles,
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedConfiguration
+    )
+
+    $reportPath = Join-Path $OutputDirectory "xen-runtime-deployment.json"
+    try {
+        $report = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+    } catch {
+        throw "便携包部署报告不是有效 JSON：$reportPath`n$($_.Exception.Message)"
+    }
+    if ([int]$report.schema -ne 1 -or
+        [string]$report.configuration -ne $RequestedConfiguration) {
+        throw "便携包部署报告 schema 或配置无效。"
+    }
+    $reportedDlls = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($record in @($report.files)) {
+        $name = [string]$record.name
+        if ([System.IO.Path]::GetFileName($name) -ne $name -or
+            [string]$record.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+            throw "便携包部署报告包含非法文件记录：$name"
+        }
+        $deployedPath = Join-Path $OutputDirectory $name
+        if (-not (Test-Path -LiteralPath $deployedPath -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $deployedPath -Algorithm SHA256).Hash `
+                -ne [string]$record.sha256) {
+            throw "便携包运行库与主机构建部署报告不一致：$name"
+        }
+        if ($name.EndsWith(
+                ".dll", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $reportedDlls.Add($name) | Out-Null
+        }
+    }
+    $actualDlls = @($RuntimeFiles.Keys | Sort-Object)
+    if ($actualDlls.Count -ne $reportedDlls.Count -or
+        @($actualDlls | Where-Object {
+            -not $reportedDlls.Contains([string]$_)
+        }).Count -ne 0) {
+        throw "便携包 DLL 集合与主机构建部署报告不一致。"
+    }
+    return [ordered]@{
+        verified = $true
+        verification = "packaged deployment report + local SHA-256"
+        report = Get-FileSnapshot $reportPath
+        declared_output_directory = [string]$report.output_directory
+        file_count = @($report.files).Count
+    }
 }
 
 function Get-CMakeCacheValue {
@@ -392,8 +587,28 @@ if ($EnableD3D11CudaInterop -eq "on" -and
     throw "D3D11/CUDA 与 D3D11/DirectML 互操作不能同时启用。"
 }
 
-$repositoryRoot = [System.IO.Path]::GetFullPath(
-    (Join-Path $PSScriptRoot ".."))
+$portablePackage = -not [string]::IsNullOrWhiteSpace($PackageManifestPath)
+if ($portablePackage) {
+    $PackageManifestPath = Resolve-InputFile `
+        $PackageManifestPath "便携包清单"
+    $packageRoot = Split-Path -Parent $PackageManifestPath
+    if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
+        $BuildDirectory = $packageRoot
+    }
+    $resolvedBuildDirectory = ([System.IO.Path]::GetFullPath(
+        $BuildDirectory)).TrimEnd('\', '/')
+    $resolvedPackageRoot = ([System.IO.Path]::GetFullPath(
+        $packageRoot)).TrimEnd('\', '/')
+    if (-not $resolvedBuildDirectory.Equals(
+            $resolvedPackageRoot,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "便携包模式要求 BuildDirectory 等于清单所在目录。"
+    }
+    $repositoryRoot = $resolvedPackageRoot
+} else {
+    $repositoryRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path $PSScriptRoot ".."))
+}
 $ModelPath = Resolve-InputFile $ModelPath "模型文件"
 if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = Resolve-InputFile $ConfigPath "配置文件"
@@ -403,8 +618,12 @@ $executable = Resolve-InputFile `
     (Join-Path $BuildDirectory "$Configuration\XenBenchmark.exe") `
     "XenBenchmark"
 $outputDirectory = Split-Path -Parent $executable
-$cmakeCachePath = Resolve-InputFile `
-    (Join-Path $BuildDirectory "CMakeCache.txt") "CMake Cache"
+$cmakeCachePath = if ($portablePackage) {
+    ""
+} else {
+    Resolve-InputFile `
+        (Join-Path $BuildDirectory "CMakeCache.txt") "CMake Cache"
+}
 $ReportPrefix = [System.IO.Path]::GetFullPath($ReportPrefix)
 $reportDirectory = Split-Path -Parent $ReportPrefix
 if ([string]::IsNullOrWhiteSpace($reportDirectory)) {
@@ -460,9 +679,19 @@ if (-not [string]::IsNullOrWhiteSpace($ReadyFilePath)) {
 }
 
 try {
+$packageBefore = if ($portablePackage) {
+    Assert-PortablePackage `
+        $PackageManifestPath $repositoryRoot $Configuration $Backend
+} else {
+    $null
+}
 $modelBefore = Get-FileSnapshot $ModelPath
 $executableBefore = Get-FileSnapshot $executable
-$cmakeCacheBefore = Get-FileSnapshot $cmakeCachePath
+$cmakeCacheBefore = if ($portablePackage) {
+    $null
+} else {
+    Get-FileSnapshot $cmakeCachePath
+}
 $configBefore = if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $null
 } else {
@@ -472,8 +701,17 @@ $runtimeBefore = Get-RuntimeSnapshot $outputDirectory
 if ($runtimeBefore.Count -eq 0) {
     throw "XenBenchmark 输出目录没有部署任何第三方 DLL：$outputDirectory"
 }
-$sdkRoots = @(Assert-RuntimeDllOrigins `
-    $runtimeBefore $cmakeCachePath $Backend)
+$deploymentEvidence = if ($portablePackage) {
+    Assert-PortableRuntimeDeployment `
+        $outputDirectory $runtimeBefore $Configuration
+} else {
+    $null
+}
+$sdkRoots = if ($portablePackage) {
+    @()
+} else {
+    @(Assert-RuntimeDllOrigins $runtimeBefore $cmakeCachePath $Backend)
+}
 $enableFp16Value = $EnableFp16 -eq "on"
 $enableCudaGraphValue = $EnableCudaGraph -eq "on"
 $enableGpuPreprocessValue = $EnableGpuPreprocess -eq "on"
@@ -569,7 +807,11 @@ $providerProfileSummary = if ($requiresProviderProfile) {
 
 $modelAfter = Get-FileSnapshot $ModelPath
 $executableAfter = Get-FileSnapshot $executable
-$cmakeCacheAfter = Get-FileSnapshot $cmakeCachePath
+$cmakeCacheAfter = if ($portablePackage) {
+    $null
+} else {
+    Get-FileSnapshot $cmakeCachePath
+}
 $configAfter = if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $null
 } else {
@@ -578,11 +820,24 @@ $configAfter = if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 $runtimeAfter = Get-RuntimeSnapshot $outputDirectory
 Assert-FileSnapshotUnchanged $modelBefore $modelAfter "模型文件"
 Assert-FileSnapshotUnchanged $executableBefore $executableAfter "XenBenchmark"
-Assert-FileSnapshotUnchanged $cmakeCacheBefore $cmakeCacheAfter "CMake Cache"
+if (-not $portablePackage) {
+    Assert-FileSnapshotUnchanged `
+        $cmakeCacheBefore $cmakeCacheAfter "CMake Cache"
+}
 if ($null -ne $configBefore) {
     Assert-FileSnapshotUnchanged $configBefore $configAfter "配置文件"
 }
 Assert-RuntimeSnapshotUnchanged $runtimeBefore $runtimeAfter
+$packageAfter = if ($portablePackage) {
+    Assert-PortablePackage `
+        $PackageManifestPath $repositoryRoot $Configuration $Backend
+} else {
+    $null
+}
+if ($portablePackage) {
+    Assert-FileSnapshotUnchanged `
+        $packageBefore.manifest $packageAfter.manifest "便携包清单"
+}
 
 $report = Get-Content -LiteralPath $pendingJson -Raw -Encoding UTF8 |
     ConvertFrom-Json
@@ -717,10 +972,22 @@ if ($sampleIndex -ne $report.sample_count) {
     throw "JSON 样本数组长度与 sample_count 不一致。"
 }
 
-$gitCommit = (& git -C $repositoryRoot rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0) { throw "读取 Git commit 失败。" }
-$gitStatus = @(& git -C $repositoryRoot status --porcelain)
-if ($LASTEXITCODE -ne 0) { throw "读取 Git 工作树状态失败。" }
+$gitCommit = if ($portablePackage) {
+    $packageAfter.git_commit
+} else {
+    (& git -C $repositoryRoot rev-parse HEAD).Trim()
+}
+if (-not $portablePackage -and $LASTEXITCODE -ne 0) {
+    throw "读取 Git commit 失败。"
+}
+$gitStatus = if ($portablePackage) {
+    @()
+} else {
+    @(& git -C $repositoryRoot status --porcelain)
+}
+if (-not $portablePackage -and $LASTEXITCODE -ne 0) {
+    throw "读取 Git 工作树状态失败。"
+}
 $gpu = @(Get-CimInstance Win32_VideoController | ForEach-Object {
     [ordered]@{
         name = $_.Name
@@ -736,14 +1003,35 @@ $environment = [ordered]@{
     duration_seconds = ($finishedUtc - $startedUtc).TotalSeconds
     git = [ordered]@{
         commit = $gitCommit
-        dirty = $gitStatus.Count -ne 0
+        dirty = if ($portablePackage) {
+            [bool]$packageAfter.git_dirty
+        } else {
+            $gitStatus.Count -ne 0
+        }
         status = $gitStatus
     }
     build = [ordered]@{
         directory = $BuildDirectory
         configuration = $Configuration
+        provenance_mode = if ($portablePackage) {
+            "portable_package_manifest"
+        } else {
+            "local_cmake_sdk_roots"
+        }
         cmake_cache = $cmakeCacheAfter
         sdk_roots = $sdkRoots
+        package = if ($portablePackage) {
+            [ordered]@{
+                package_id = $packageAfter.package_id
+                manifest = $packageAfter.manifest
+                file_count = $packageAfter.file_count
+                allowed_backends = $packageAfter.allowed_backends
+                model_relative_path = $packageAfter.model_relative_path
+            }
+        } else {
+            $null
+        }
+        deployment = $deploymentEvidence
         executable = $executableAfter
         runtime_dlls = $runtimeAfter
     }
