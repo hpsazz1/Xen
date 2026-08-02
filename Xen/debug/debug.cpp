@@ -245,6 +245,12 @@ void append_csv_snapshot(std::ostringstream& output,
         << "# final_mouse_commands," << snapshot.mouse_commands << '\n'
         << "# final_debug_samples_dropped,"
         << snapshot.debug_samples_dropped << '\n'
+        << "# final_preview_enabled,"
+        << bool_name(snapshot.preview_enabled) << '\n'
+        << "# final_preview_sampled_frames,"
+        << snapshot.preview_sampled_frames << '\n'
+        << "# final_preview_dropped_frames,"
+        << snapshot.preview_dropped_frames << '\n'
         << "# final_last_sequence," << snapshot.last_sequence << '\n'
         << "# final_encoded_width," << snapshot.encoded_width << '\n'
         << "# final_encoded_height," << snapshot.encoded_height << '\n'
@@ -311,6 +317,12 @@ void append_json_snapshot(std::ostringstream& output,
         << "    \"mouse_commands\": " << snapshot.mouse_commands << ",\n"
         << "    \"debug_samples_dropped\": "
         << snapshot.debug_samples_dropped << ",\n"
+        << "    \"preview_enabled\": "
+        << bool_name(snapshot.preview_enabled) << ",\n"
+        << "    \"preview_sampled_frames\": "
+        << snapshot.preview_sampled_frames << ",\n"
+        << "    \"preview_dropped_frames\": "
+        << snapshot.preview_dropped_frames << ",\n"
         << "    \"last_sequence\": " << snapshot.last_sequence << ",\n"
         << "    \"encoded_width\": " << snapshot.encoded_width << ",\n"
         << "    \"encoded_height\": " << snapshot.encoded_height << ",\n"
@@ -502,6 +514,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "gpu_preprocess_ms,execution_ms,d2h_ms,"
                "postprocess_ms,aim_ms,mouse_ms,"
                "total_ms,detection_status,aim_status,mouse_status,mouse_sent,"
+               "person_detection_count,head_detection_count,"
+               "max_person_confidence,max_head_confidence,"
+               "detection_count_by_class,max_confidence_by_class,"
                "explicit_device_copy,gpu_preprocess,d3d11_cuda_interop,"
                "d3d11_directml_interop,"
                "input_upload_bytes,input_device_copy_bytes,"
@@ -529,7 +544,22 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << AimStatusName(sample.aim_status) << ','
                 << MouseStatusName(sample.mouse_status) << ','
                 << bool_name(sample.mouse_sent) << ','
-                << bool_name(
+                << sample.person_detection_count << ','
+                << sample.head_detection_count << ','
+                << sample.max_person_confidence << ','
+                << sample.max_head_confidence << ",\"";
+            for (std::size_t index = 0;
+                 index < sample.detection_count_by_class.size(); ++index) {
+                if (index != 0) csv << ';';
+                csv << sample.detection_count_by_class[index];
+            }
+            csv << "\",\"";
+            for (std::size_t index = 0;
+                 index < sample.max_confidence_by_class.size(); ++index) {
+                if (index != 0) csv << ';';
+                csv << sample.max_confidence_by_class[index];
+            }
+            csv << "\"," << bool_name(
                     sample.profile.detector.explicit_device_copy) << ','
                 << bool_name(sample.profile.detector.gpu_preprocess) << ','
                 << bool_name(
@@ -602,6 +632,29 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << MouseStatusName(sample.mouse_status)
                  << "\", \"mouse_sent\": "
                  << bool_name(sample.mouse_sent)
+                 << ", \"person_detection_count\": "
+                 << sample.person_detection_count
+                 << ", \"head_detection_count\": "
+                 << sample.head_detection_count
+                 << ", \"max_person_confidence\": "
+                 << sample.max_person_confidence
+                 << ", \"max_head_confidence\": "
+                 << sample.max_head_confidence
+                 << ", \"detection_count_by_class\": [";
+            for (std::size_t class_index = 0;
+                 class_index < sample.detection_count_by_class.size();
+                 ++class_index) {
+                if (class_index != 0) json << ", ";
+                json << sample.detection_count_by_class[class_index];
+            }
+            json << "], \"max_confidence_by_class\": [";
+            for (std::size_t class_index = 0;
+                 class_index < sample.max_confidence_by_class.size();
+                 ++class_index) {
+                if (class_index != 0) json << ", ";
+                json << sample.max_confidence_by_class[class_index];
+            }
+            json << ']'
                  << ", \"explicit_device_copy\": "
                  << bool_name(
                      sample.profile.detector.explicit_device_copy)

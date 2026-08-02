@@ -128,6 +128,27 @@ void test_detached_preview_refresh_state() {
            "Runtime 停止后必须清除独立窗口中的旧画面");
 }
 
+void test_detection_role_mapping() {
+    using overlay::detail::DetectionRole;
+    const std::array<int, 2> persons{0, 2};
+    const std::array<int, 2> heads{1, 2};
+    expect(overlay::detail::classify_detection_role(0, persons, heads) ==
+               DetectionRole::PERSON,
+           "配置中的身体类别必须映射为 PERSON");
+    expect(overlay::detail::classify_detection_role(1, persons, heads) ==
+               DetectionRole::HEAD &&
+               overlay::detail::classify_detection_role(2, persons, heads) ==
+                   DetectionRole::HEAD,
+           "头部类别必须映射为 HEAD，且与身体列表重叠时头部优先");
+    expect(overlay::detail::classify_detection_role(3, persons, heads) ==
+               DetectionRole::OTHER,
+           "未配置类别必须映射为 OTHER");
+    const std::span<const int> empty_persons;
+    expect(overlay::detail::classify_detection_role(
+               3, empty_persons, heads) == DetectionRole::PERSON,
+           "身体类别列表为空时，非头部类别必须按身体处理");
+}
+
 } // namespace
 
 int main() {
@@ -137,6 +158,7 @@ int main() {
     test_detached_preview_geometry();
     test_preview_subscription_state();
     test_detached_preview_refresh_state();
+    test_detection_role_mapping();
     if (failures != 0) {
         std::cerr << "Overlay 测试失败数: " << failures << '\n';
         return 1;

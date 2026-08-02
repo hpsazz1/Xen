@@ -79,6 +79,39 @@ void test_latest_frame_queue() {
            "停止队列后等待者必须立即退出");
 }
 
+void test_detection_observability_preserves_team_classes() {
+    AimConfig config;
+    config.person_class_ids = {0, 2};
+    config.head_class_ids = {1, 3};
+
+    RuntimePipelineSample ct_sample;
+    const std::array<Detection, 2> ct_detections{{
+        {10.0f, 10.0f, 100.0f, 200.0f, 0.864f, 0},
+        {30.0f, 15.0f, 70.0f, 60.0f, 0.871f, 1}}};
+    runtime::detail::summarize_detections(
+        ct_detections, config, ct_sample);
+    expect(ct_sample.person_detection_count == 1 &&
+               ct_sample.head_detection_count == 1 &&
+               ct_sample.detection_count_by_class[0] == 1 &&
+               ct_sample.detection_count_by_class[1] == 1 &&
+               ct_sample.detection_count_by_class[2] == 0 &&
+               ct_sample.detection_count_by_class[3] == 0,
+           "单个 CT 目标只能形成 C0 身体与 C1 头部，不得伪造 T 类别");
+
+    RuntimePipelineSample t_sample;
+    const std::array<Detection, 2> t_detections{{
+        {10.0f, 10.0f, 100.0f, 200.0f, 0.855f, 2},
+        {30.0f, 15.0f, 70.0f, 60.0f, 0.862f, 3}}};
+    runtime::detail::summarize_detections(t_detections, config, t_sample);
+    expect(t_sample.person_detection_count == 1 &&
+               t_sample.head_detection_count == 1 &&
+               t_sample.detection_count_by_class[0] == 0 &&
+               t_sample.detection_count_by_class[1] == 0 &&
+               t_sample.detection_count_by_class[2] == 1 &&
+               t_sample.detection_count_by_class[3] == 1,
+           "单个 T 目标只能形成 C2 身体与 C3 头部，不得伪造 CT 类别");
+}
+
 void test_network_storage_released_on_reset() {
     runtime::detail::LatestFrameQueue queue;
     auto slot = queue.acquire_write();
@@ -339,6 +372,7 @@ void test_runtime_preview_held_slots_and_reset() {
 
 int main() {
     test_latest_frame_queue();
+    test_detection_observability_preserves_team_classes();
     test_network_storage_released_on_reset();
     test_gpu_storage_released_on_reset();
     test_directml_frame_requires_fence();

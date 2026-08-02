@@ -584,6 +584,10 @@ struct Overlay::Impl {
     bool preview_requested = false;
     bool detached_preview_requested = false;
     std::shared_ptr<const RuntimePreviewFrame> detached_preview_frame;
+    // 独立窗口的 WM_PAINT 不接收 AppConfig，因此缓存每帧 UI 已确认的类别映射。
+    // 仅在配置变化时更新，避免预览热路径反复复制动态数组。
+    std::vector<int> person_class_ids{0};
+    std::vector<int> head_class_ids{1};
     int preview_texture_width = 0;
     int preview_texture_height = 0;
     std::uint64_t preview_uploaded_sequence = 0;
@@ -1044,16 +1048,24 @@ struct Overlay::Impl {
             display.width / static_cast<float>(preview->width);
         const float coordinate_scale_y = preview->scale_y *
             display.height / static_cast<float>(preview->height);
-        HPEN detection_pen = CreatePen(PS_SOLID, 2, RGB(51, 156, 255));
-        HGDIOBJ old_pen = SelectObject(dc, detection_pen);
+        HPEN person_pen = CreatePen(PS_SOLID, 2, RGB(66, 190, 195));
+        HPEN head_pen = CreatePen(PS_SOLID, 2, RGB(245, 185, 66));
+        HPEN other_pen = CreatePen(PS_SOLID, 2, RGB(51, 156, 255));
+        HGDIOBJ old_pen = SelectObject(dc, other_pen);
         HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(255, 255, 255));
-        HBRUSH label_brush = CreateSolidBrush(RGB(16, 16, 16));
         const std::size_t detection_count = std::min(
             preview->detection_count, preview->detections.size());
         for (std::size_t index = 0; index < detection_count; ++index) {
             const Detection& detection = preview->detections[index];
+            const auto role = overlay::detail::classify_detection_role(
+                detection.class_id, person_class_ids, head_class_ids);
+            SelectObject(
+                dc, role == overlay::detail::DetectionRole::HEAD
+                        ? head_pen
+                        : role == overlay::detail::DetectionRole::PERSON
+                            ? person_pen
+                            : other_pen);
             const auto rectangle = overlay::detail::map_preview_rect(
                 detection.x1, detection.y1, detection.x2, detection.y2,
                 coordinate_scale_x, coordinate_scale_y,
@@ -1071,28 +1083,53 @@ struct Overlay::Impl {
             const int bottom = image_y +
                 static_cast<int>(std::lround(rectangle.y2));
             Rectangle(dc, left, top, right, bottom);
-
-            wchar_t label[48]{};
-            swprintf_s(
-                label, L"C%d  %.0f%%", detection.class_id,
-                std::clamp(detection.confidence, 0.0f, 1.0f) * 100.0f);
-            SIZE text_size{};
-            GetTextExtentPoint32W(
-                dc, label, static_cast<int>(wcslen(label)), &text_size);
-            const int text_width = static_cast<int>(text_size.cx);
-            const int text_height = static_cast<int>(text_size.cy);
-            const int label_top = std::max(
-                image_y, top - text_height - 4);
-            RECT label_background{
-                left, label_top,
-                std::min(image_x + display_width, left + text_width + 8),
-                label_top + text_height + 4};
-            FillRect(dc, &label_background, label_brush);
-            TextOutW(
-                dc, label_background.left + 4, label_background.top + 2,
-                label, static_cast<int>(wcslen(label)));
         }
-        DeleteObject(label_brush);
+
+        // 重叠框的顶部标签会相互覆盖。固定信息区最多列出 8 项，保留一位小数，
+        // 让人工验收能够同时读取身体和头部置信度而不改变框的几何位置。
+        constexpr std::size_t kMaximumLabelRows = 8;
+        const std::size_t label_count = std::min(
+            detection_count, kMaximumLabelRows);
+        if (label_count > 0) {
+            constexpr int kLabelRowHeight = 20;
+            constexpr int kLabelWidth = 152;
+            RECT panel{
+                image_x + 6, image_y + 6,
+                std::min(image_x + display_width - 6,
+                         image_x + 6 + kLabelWidth),
+                std::min(image_y + display_height - 6,
+                         image_y + 10 +
+                             static_cast<int>(label_count) * kLabelRowHeight)};
+            HBRUSH panel_brush = CreateSolidBrush(RGB(16, 16, 16));
+            FillRect(dc, &panel, panel_brush);
+            DeleteObject(panel_brush);
+            for (std::size_t index = 0; index < label_count; ++index) {
+                const Detection& detection = preview->detections[index];
+                const auto role = overlay::detail::classify_detection_role(
+                    detection.class_id, person_class_ids, head_class_ids);
+                const wchar_t* role_name =
+                    role == overlay::detail::DetectionRole::HEAD
+                        ? L"头部"
+                        : role == overlay::detail::DetectionRole::PERSON
+                            ? L"身体"
+                            : L"类别";
+                SetTextColor(
+                    dc, role == overlay::detail::DetectionRole::HEAD
+                            ? RGB(245, 185, 66)
+                            : role == overlay::detail::DetectionRole::PERSON
+                                ? RGB(66, 190, 195)
+                                : RGB(51, 156, 255));
+                wchar_t label[48]{};
+                swprintf_s(
+                    label, L"%s C%d  %.1f%%", role_name,
+                    detection.class_id,
+                    std::clamp(detection.confidence, 0.0f, 1.0f) * 100.0f);
+                TextOutW(
+                    dc, panel.left + 6,
+                    panel.top + 2 + static_cast<int>(index) * kLabelRowHeight,
+                    label, static_cast<int>(wcslen(label)));
+            }
+        }
 
         if (preview->has_target) {
             const AimTargetSnapshot& target = preview->target;
@@ -1121,13 +1158,15 @@ struct Overlay::Impl {
             LineTo(dc, aim_x + 8, aim_y);
             MoveToEx(dc, aim_x, aim_y - 7, nullptr);
             LineTo(dc, aim_x, aim_y + 8);
-            SelectObject(dc, detection_pen);
+            SelectObject(dc, other_pen);
             DeleteObject(target_pen);
         }
 
         SelectObject(dc, old_brush);
         SelectObject(dc, old_pen);
-        DeleteObject(detection_pen);
+        DeleteObject(person_pen);
+        DeleteObject(head_pen);
+        DeleteObject(other_pen);
         wchar_t status[128]{};
         swprintf_s(
             status, L"帧 %llu    检测 %zu    Detector %S",
@@ -2061,6 +2100,8 @@ struct Overlay::Impl {
             preview->detection_count, preview->detections.size());
         for (std::size_t index = 0; index < detection_count; ++index) {
             const Detection& detection = preview->detections[index];
+            const auto role = overlay::detail::classify_detection_role(
+                detection.class_id, person_class_ids, head_class_ids);
             const auto rectangle = overlay::detail::map_preview_rect(
                 detection.x1, detection.y1, detection.x2, detection.y2,
                 coordinate_scale_x, coordinate_scale_y,
@@ -2073,28 +2114,69 @@ struct Overlay::Impl {
                 image_min.x + rectangle.x1, image_min.y + rectangle.y1);
             const ImVec2 maximum(
                 image_min.x + rectangle.x2, image_min.y + rectangle.y2);
-            const ImU32 color = ImGui::GetColorU32(rgba(kAccent));
+            const ImU32 color = ImGui::GetColorU32(
+                role == overlay::detail::DetectionRole::HEAD
+                    ? raw_rgba(0xf5b942)
+                    : role == overlay::detail::DetectionRole::PERSON
+                        ? raw_rgba(0x42bebf)
+                        : rgba(kAccent));
             draw_list->AddRect(minimum, maximum, color, 0.0f, 0, 1.5f);
-            char label[48]{};
-            std::snprintf(
-                label, sizeof(label), "C%d  %.0f%%", detection.class_id,
-                std::clamp(detection.confidence, 0.0f, 1.0f) * 100.0f);
-            const ImVec2 text_size = ImGui::CalcTextSize(label);
-            const float label_y = std::max(
-                image_min.y, minimum.y - text_size.y - 4.0f);
-            const float label_width = std::min(
-                display.width, text_size.x + 8.0f);
-            const float label_x = std::clamp(
-                minimum.x, image_min.x,
-                image_min.x + display.width - label_width);
+        }
+
+        constexpr std::size_t kMaximumLabelRows = 8;
+        const std::size_t label_count = std::min(
+            detection_count, kMaximumLabelRows);
+        if (label_count > 0) {
+            float panel_width = 0.0f;
+            std::array<std::array<char, 48>, kMaximumLabelRows> labels{};
+            for (std::size_t index = 0; index < label_count; ++index) {
+                const Detection& detection = preview->detections[index];
+                const auto role = overlay::detail::classify_detection_role(
+                    detection.class_id, person_class_ids, head_class_ids);
+                const char* role_name =
+                    role == overlay::detail::DetectionRole::HEAD
+                        ? "头部"
+                        : role == overlay::detail::DetectionRole::PERSON
+                            ? "身体"
+                            : "类别";
+                std::snprintf(
+                    labels[index].data(), labels[index].size(),
+                    "%s C%d  %.1f%%", role_name, detection.class_id,
+                    std::clamp(detection.confidence, 0.0f, 1.0f) * 100.0f);
+                panel_width = std::max(
+                    panel_width,
+                    ImGui::CalcTextSize(labels[index].data()).x);
+            }
+            const float row_height = ImGui::GetTextLineHeight() + 4.0f;
+            const ImVec2 panel_min(image_min.x + 6.0f, image_min.y + 6.0f);
+            const ImVec2 panel_max(
+                std::min(
+                    image_min.x + display.width - 6.0f,
+                    panel_min.x + panel_width + 12.0f),
+                std::min(
+                    image_min.y + display.height - 6.0f,
+                    panel_min.y + row_height * static_cast<float>(label_count) +
+                        4.0f));
             draw_list->AddRectFilled(
-                ImVec2(label_x, label_y),
-                ImVec2(label_x + label_width,
-                       label_y + text_size.y + 4.0f),
-                ImGui::GetColorU32(raw_rgba(0x101010, 0.78f)), 2.0f);
-            draw_list->AddText(
-                ImVec2(label_x + 4.0f, label_y + 2.0f),
-                ImGui::GetColorU32(raw_rgba(kOnAccent)), label);
+                panel_min, panel_max,
+                ImGui::GetColorU32(raw_rgba(0x101010, 0.82f)), 2.0f);
+            for (std::size_t index = 0; index < label_count; ++index) {
+                const Detection& detection = preview->detections[index];
+                const auto role = overlay::detail::classify_detection_role(
+                    detection.class_id, person_class_ids, head_class_ids);
+                const ImU32 color = ImGui::GetColorU32(
+                    role == overlay::detail::DetectionRole::HEAD
+                        ? raw_rgba(0xf5b942)
+                        : role == overlay::detail::DetectionRole::PERSON
+                            ? raw_rgba(0x42bebf)
+                            : rgba(kAccent));
+                draw_list->AddText(
+                    ImVec2(
+                        panel_min.x + 6.0f,
+                        panel_min.y + 2.0f +
+                            static_cast<float>(index) * row_height),
+                    color, labels[index].data());
+            }
         }
 
         const auto crosshair = overlay::detail::map_preview_point(
@@ -3081,6 +3163,14 @@ bool Overlay::render(
     try {
         actions = {};
         impl_->update_metric_history(snapshot);
+        if (impl_->person_class_ids != config.aim.person_class_ids ||
+            impl_->head_class_ids != config.aim.head_class_ids) {
+            impl_->person_class_ids = config.aim.person_class_ids;
+            impl_->head_class_ids = config.aim.head_class_ids;
+            if (impl_->detached_preview_window) {
+                InvalidateRect(impl_->detached_preview_window, nullptr, FALSE);
+            }
+        }
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         if (impl_->applied_theme != config.ui.theme) {

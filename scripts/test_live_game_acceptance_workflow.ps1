@@ -43,6 +43,9 @@ try {
             $config -match
                 '(?m)^open_detached_preview_on_start=true$') `
         "观察任务必须固定模型、CPU、置顶预览和禁用物理输出"
+    Expect ($config -match '(?m)^person_class_ids=0,2$' -and
+            $config -match '(?m)^head_class_ids=1,3$') `
+        "固定模型必须同时纳入 CT/T 的身体和头部类别"
     $taskMarkdown = Get-Content -LiteralPath (
         Join-Path $observationRun "TASK.md") -Raw -Encoding UTF8
     $expectedLaunchPrefix =
@@ -129,7 +132,16 @@ try {
                 max_ms = 7.0
             }
         }
-        samples = @()
+        samples = @(
+            [ordered]@{
+                person_detection_count = 1
+                head_detection_count = 1
+                max_person_confidence = 0.864
+                max_head_confidence = 0.871
+                detection_count_by_class = @(1, 1, 0, 0, 0)
+                max_confidence_by_class = @(0.864, 0.871, 0.0, 0.0, 0.0)
+            }
+        )
     }
     [System.IO.File]::WriteAllText(
         $reportPath, (($synthetic | ConvertTo-Json -Depth 8) + "`n"),
@@ -144,7 +156,12 @@ try {
         -Raw -Encoding UTF8 | ConvertFrom-Json
     Expect ([bool]$summary.automatic_complete -and
             $summary.sample_count -eq 1200 -and
-            $summary.failed_samples -eq 0) `
+            $summary.failed_samples -eq 0 -and
+            $summary.detection_observability.classes[0].name -eq "ctBODY" -and
+            $summary.detection_observability.classes[0].confidence.p50 -eq
+                0.864 -and
+            $summary.detection_observability.classes[2].confidence.detected_frames `
+                -eq 0) `
         "合法 schema 6 报告应完成自动汇总"
 
     Copy-Item -LiteralPath $reportPath -Destination (

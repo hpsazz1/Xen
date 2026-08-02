@@ -52,6 +52,7 @@ function Get-StageDefinition {
                 )
                 observations = @(
                     "目标可见时是否持续有框",
+                    "置顶信息区是否分别显示身体和头部置信度；CT 目标应为 C0+C1，T 目标应为 C2+C3",
                     "是否出现背景误框或错误类别",
                     "目标和视角均静止时框位置和大小是否明显抖动",
                     "异常发生时的预览帧序号或大致时间"
@@ -260,6 +261,82 @@ function Get-FileEvidence {
     }
 }
 
+function Get-Percentile {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Values,
+        [Parameter(Mandatory = $true)][double]$Quantile
+    )
+    if ($Values.Count -eq 0) { return $null }
+    $sorted = @($Values | ForEach-Object { [double]$_ } | Sort-Object)
+    $position = $Quantile * ($sorted.Count - 1)
+    $lower = [int][Math]::Floor($position)
+    $upper = [int][Math]::Ceiling($position)
+    if ($lower -eq $upper) { return [double]$sorted[$lower] }
+    $fraction = $position - $lower
+    return [double]$sorted[$lower] * (1.0 - $fraction) +
+        [double]$sorted[$upper] * $fraction
+}
+
+function Get-ConfidenceSummary {
+    param([object[]]$Values)
+    $items = @($Values)
+    if ($items.Count -eq 0) {
+        return [ordered]@{
+            detected_frames = 0
+            minimum = $null
+            p50 = $null
+            p95 = $null
+            maximum = $null
+        }
+    }
+    return [ordered]@{
+        detected_frames = $items.Count
+        minimum = [double](($items | Measure-Object -Minimum).Minimum)
+        p50 = Get-Percentile -Values $items -Quantile 0.50
+        p95 = Get-Percentile -Values $items -Quantile 0.95
+        maximum = [double](($items | Measure-Object -Maximum).Maximum)
+    }
+}
+
+function Get-DetectionObservability {
+    param([Parameter(Mandatory = $true)][object[]]$Samples)
+
+    $classDefinitions = @(
+        [ordered]@{ class_id = 0; name = "ctBODY"; role = "person" },
+        [ordered]@{ class_id = 1; name = "ctHEED"; role = "head" },
+        [ordered]@{ class_id = 2; name = "tBODY"; role = "person" },
+        [ordered]@{ class_id = 3; name = "tHEED"; role = "head" },
+        [ordered]@{ class_id = 4; name = "dw"; role = "other" }
+    )
+    $classes = @()
+    foreach ($definition in $classDefinitions) {
+        $values = @($Samples | Where-Object {
+                [uint64]$_.detection_count_by_class[$definition.class_id] -gt 0
+            } | ForEach-Object {
+                [double]$_.max_confidence_by_class[$definition.class_id]
+            })
+        $classes += [ordered]@{
+            class_id = $definition.class_id
+            name = $definition.name
+            role = $definition.role
+            confidence = Get-ConfidenceSummary -Values $values
+        }
+    }
+    $personValues = @($Samples | Where-Object {
+            [uint64]$_.person_detection_count -gt 0
+        } | ForEach-Object { [double]$_.max_person_confidence })
+    $headValues = @($Samples | Where-Object {
+            [uint64]$_.head_detection_count -gt 0
+        } | ForEach-Object { [double]$_.max_head_confidence })
+    return [ordered]@{
+        model_class_map_source = "固定模型 ONNX metadata"
+        single_target_team_rule = "CT(C0+C1) 或 T(C2+C3)，单目标不同时属于两方"
+        person = Get-ConfidenceSummary -Values $personValues
+        head = Get-ConfidenceSummary -Values $headValues
+        classes = @($classes)
+    }
+}
+
 function Write-TextAtomically {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -384,8 +461,8 @@ roi_y=0
 acquire_timeout_ms=16
 
 [aim]
-person_class_ids=0
-head_class_ids=1
+person_class_ids=0,2
+head_class_ids=1,3
 high_confidence=0.250000
 low_confidence=0.100000
 min_confirmed_hits=2
@@ -517,6 +594,7 @@ function New-TaskMarkdown {
 - 环节：$Stage / $($Definition.title)
 - 视角模式：$($Definition.view_mode)
 - 固定模型：$fixedModelPath
+- 固定类别：C0=ctBODY，C1=ctHEED，C2=tBODY，C3=tHEED，C4=dw
 - 固定 Provider：$expectedProvider
 - 建议时长：$($Definition.recommended_seconds) 秒
 - 任务目录：$ResolvedRunDirectory
@@ -532,6 +610,9 @@ $($steps -join "`n")
 除 Stability 外，Xen 启动后独立置顶检测预览应自动显示；人工点击“启动”开始 Runtime，完成场景
 后点击“停止”，确认报告发布后关闭 Xen。无需人工切换“置顶”，测试中不得保存配置、重载模型或
 修改任何参数。
+
+单个目标只能属于一个阵营：CT 目标正常组合为 C0 身体与 C1 头部，T 目标正常组合为 C2 身体与
+C3 头部，不要求同一目标同时出现 CT/T 四类。自动报告会保留身体/头部聚合值和 C0～C4 分项值。
 
 ## 启动命令
 
@@ -727,6 +808,7 @@ function Collect-Reports {
     $reportDropped = [uint64]0
     $runtimeDropped = [uint64]0
     $mouseCommands = [uint64]0
+    $detectionObservability = $null
     foreach ($path in $paths) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             $failures += "报告不存在：$path"
@@ -740,6 +822,29 @@ function Collect-Reports {
             ConvertFrom-Json
         if ($report.schema -ne 6) {
             $failures += "报告 schema 不是 6：$path"
+        }
+        $requiredSampleFields = @(
+            "person_detection_count", "head_detection_count",
+            "max_person_confidence", "max_head_confidence",
+            "detection_count_by_class", "max_confidence_by_class")
+        $sampleFieldsValid = @($report.samples).Count -gt 0
+        if ($sampleFieldsValid) {
+            $availableFields = @($report.samples[0].PSObject.Properties.Name)
+            foreach ($field in $requiredSampleFields) {
+                if ($availableFields -notcontains $field) {
+                    $sampleFieldsValid = $false
+                }
+            }
+            if (@($report.samples[0].detection_count_by_class).Count -lt 5 -or
+                @($report.samples[0].max_confidence_by_class).Count -lt 5) {
+                $sampleFieldsValid = $false
+            }
+        }
+        if (-not $sampleFieldsValid) {
+            $failures += "报告缺少 CT/T 分类别检测可观测字段：$path"
+        } else {
+            $detectionObservability = Get-DetectionObservability `
+                -Samples @($report.samples)
         }
         if ($report.provider -ne $expectedProvider -or
             $report.final_snapshot.provider -ne $expectedProvider) {
@@ -807,6 +912,7 @@ function Collect-Reports {
             failed_samples = [uint64]$report.failed_samples
             final_snapshot = $snapshot
             timing = $report.timing
+            detection_observability = $detectionObservability
         }
     }
     if ($sampleCount -lt [uint64]$task.minimum_samples) {
@@ -841,6 +947,7 @@ function Collect-Reports {
         report_samples_dropped = $reportDropped
         runtime_samples_dropped = $runtimeDropped
         mouse_commands = $mouseCommands
+        detection_observability = $detectionObservability
         failures = @($failures)
         segments = @($segments)
     }

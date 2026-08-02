@@ -58,6 +58,14 @@ RuntimePipelineSample make_sample(
     sample.aim_status = success ? AimStatus::SUCCESS : AimStatus::NOT_RUN;
     sample.mouse_status = success ? MouseStatus::READY : MouseStatus::CLOSED;
     sample.mouse_sent = success;
+    sample.person_detection_count = 1;
+    sample.head_detection_count = 2;
+    sample.max_person_confidence = 0.864f;
+    sample.max_head_confidence = 0.871f;
+    sample.detection_count_by_class[0] = 1;
+    sample.detection_count_by_class[1] = 2;
+    sample.max_confidence_by_class[0] = 0.864f;
+    sample.max_confidence_by_class[1] = 0.871f;
     return sample;
 }
 
@@ -101,6 +109,9 @@ void test_report_summary_and_atomic_files() {
     final_snapshot.transport_invalid_packets = 4;
     final_snapshot.overwritten_frames = 1;
     final_snapshot.mouse_commands = 0;
+    final_snapshot.preview_enabled = true;
+    final_snapshot.preview_sampled_frames = 123;
+    final_snapshot.preview_dropped_frames = 4;
     final_snapshot.encoded_width = 320;
     final_snapshot.encoded_height = 320;
     final_snapshot.source_width = 2560;
@@ -145,8 +156,14 @@ void test_report_summary_and_atomic_files() {
                    std::string::npos &&
                csv_text.find("# final_roi_x,1120") != std::string::npos &&
                csv_text.find("# final_duplication_recoveries,6") !=
-                   std::string::npos,
-           "CSV 必须包含 schema、列头、失败状态和最终几何");
+                   std::string::npos &&
+               csv_text.find("# final_preview_enabled,true") !=
+                   std::string::npos &&
+               csv_text.find("person_detection_count,head_detection_count") !=
+                   std::string::npos &&
+               csv_text.find(",1,2,") != std::string::npos &&
+               csv_text.find("\"1;2;0;0;") != std::string::npos,
+           "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
     expect(json_text.find("\"schema\": 6") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
@@ -166,8 +183,18 @@ void test_report_summary_and_atomic_files() {
                json_text.find("\"duplication_recoveries\": 6") !=
                    std::string::npos &&
                json_text.find("\"failed_frames\": 1") !=
+                   std::string::npos &&
+               json_text.find("\"preview_enabled\": true") !=
+                   std::string::npos &&
+               json_text.find("\"preview_sampled_frames\": 123") !=
+                   std::string::npos &&
+               json_text.find("\"person_detection_count\": 1") !=
+                   std::string::npos &&
+               json_text.find("\"max_head_confidence\":") !=
+                   std::string::npos &&
+               json_text.find("\"detection_count_by_class\": [1, 2, 0") !=
                    std::string::npos,
-           "JSON 必须包含 schema、分段统计、Runtime 丢弃数和最终快照");
+           "JSON 必须包含分类置信度、分段统计、Runtime 丢弃数和最终快照");
     bool has_temp = false;
     if (std::filesystem::exists(root / "nested")) {
         for (const auto& entry : std::filesystem::directory_iterator(

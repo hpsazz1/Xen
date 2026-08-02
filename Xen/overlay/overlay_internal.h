@@ -6,8 +6,31 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace overlay::detail {
+
+enum class DetectionRole {
+    OTHER,
+    PERSON,
+    HEAD,
+};
+
+inline DetectionRole classify_detection_role(
+        int class_id,
+        std::span<const int> person_class_ids,
+        std::span<const int> head_class_ids) noexcept {
+    if (std::find(head_class_ids.begin(), head_class_ids.end(), class_id) !=
+        head_class_ids.end()) {
+        return DetectionRole::HEAD;
+    }
+    if (person_class_ids.empty() ||
+        std::find(person_class_ids.begin(), person_class_ids.end(), class_id) !=
+            person_class_ids.end()) {
+        return DetectionRole::PERSON;
+    }
+    return DetectionRole::OTHER;
+}
 
 // Overlay 只保留固定数量的标量诊断样本。覆盖最旧值时不分配内存，也不反压 Runtime。
 template <std::size_t Capacity>

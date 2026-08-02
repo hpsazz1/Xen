@@ -12,6 +12,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <utility>
@@ -302,6 +303,7 @@ struct Runtime::Impl {
     void update_pipeline_snapshot(const CapturedFrame& frame,
                                   const PipelineProfile& profile,
                                   const AimResult& aim_result,
+                                  std::span<const Detection> detections,
                                   MouseStatus mouse_status,
                                   bool mouse_sent) {
         const auto preview_stats = preview_channel.stats();
@@ -344,6 +346,10 @@ struct Runtime::Impl {
         sample.aim_status = aim_result.status;
         sample.mouse_status = mouse_status;
         sample.mouse_sent = mouse_sent;
+        if (profile.detector.status == DetectionStatus::SUCCESS) {
+            runtime::detail::summarize_detections(
+                detections, config.aim, sample);
+        }
         debug_samples.push(sample);
         current_snapshot.debug_samples_dropped = debug_samples.dropped();
         current_snapshot.preview_enabled = preview_stats.enabled;
@@ -472,6 +478,7 @@ struct Runtime::Impl {
                     std::chrono::steady_clock::now());
             }
             update_pipeline_snapshot(*frame, profile, aim_result,
+                                     preview_detections,
                                      mouse->status(), mouse_sent);
         }
     }

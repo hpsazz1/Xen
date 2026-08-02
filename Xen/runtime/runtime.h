@@ -72,6 +72,8 @@ struct RuntimeFrameGeometry {
     double source_pixels_per_pixel_y = 1.0;
 };
 
+inline constexpr std::size_t kRuntimeReportedClassCount = 16;
+
 // Runtime 每处理一帧发布一个固定大小的诊断样本。该样本只包含数值和枚举，
 // 不持有图像、模型或设备资源，便于在主线程锁外写入报告。
 struct RuntimePipelineSample {
@@ -82,6 +84,17 @@ struct RuntimePipelineSample {
     AimStatus aim_status = AimStatus::NOT_RUN;
     MouseStatus mouse_status = MouseStatus::CLOSED;
     bool mouse_sent = false;
+    // 分类诊断只保留固定标量；count=0 时对应 confidence=0，避免把无检测
+    // 与真实 0 置信度混为一谈，也不把动态检测集合复制进报告环。
+    std::uint32_t person_detection_count = 0;
+    std::uint32_t head_detection_count = 0;
+    float max_person_confidence = 0.0f;
+    float max_head_confidence = 0.0f;
+    // 固定 0..15 类别槽保留模型原始类别维度，避免身体/头部角色聚合再次
+    // 折叠 CT/T 等业务类别；更大 class_id 仍参与角色统计，但不进入此诊断表。
+    std::array<std::uint32_t, kRuntimeReportedClassCount>
+        detection_count_by_class{};
+    std::array<float, kRuntimeReportedClassCount> max_confidence_by_class{};
 };
 
 inline constexpr int kRuntimePreviewMaxDimension = 512;

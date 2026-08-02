@@ -1,6 +1,7 @@
 #ifndef RUNTIME_INTERNAL_H
 #define RUNTIME_INTERNAL_H
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -14,6 +15,44 @@
 #include "runtime/runtime.h"
 
 namespace runtime::detail {
+
+inline bool class_id_configured(
+        std::span<const int> class_ids, int class_id) noexcept {
+    return std::find(class_ids.begin(), class_ids.end(), class_id) !=
+           class_ids.end();
+}
+
+inline void summarize_detections(
+        std::span<const Detection> detections,
+        const AimConfig& aim_config,
+        RuntimePipelineSample& sample) noexcept {
+    for (const Detection& detection : detections) {
+        const float confidence = std::clamp(detection.confidence, 0.0f, 1.0f);
+        if (detection.class_id >= 0 &&
+            static_cast<std::size_t>(detection.class_id) <
+                kRuntimeReportedClassCount) {
+            const std::size_t class_index =
+                static_cast<std::size_t>(detection.class_id);
+            ++sample.detection_count_by_class[class_index];
+            sample.max_confidence_by_class[class_index] = std::max(
+                sample.max_confidence_by_class[class_index], confidence);
+        }
+        // 与 Aim 保持相同的头部优先语义；身体列表为空时，非头部类别
+        // 均可作为身体候选。原始 class_id 同时保留在上方固定类别槽中。
+        if (class_id_configured(
+                aim_config.head_class_ids, detection.class_id)) {
+            ++sample.head_detection_count;
+            sample.max_head_confidence =
+                std::max(sample.max_head_confidence, confidence);
+        } else if (aim_config.person_class_ids.empty() ||
+                   class_id_configured(
+                       aim_config.person_class_ids, detection.class_id)) {
+            ++sample.person_detection_count;
+            sample.max_person_confidence =
+                std::max(sample.max_person_confidence, confidence);
+        }
+    }
+}
 
 template <typename T, std::size_t Capacity>
 class BoundedSampleRing final {
