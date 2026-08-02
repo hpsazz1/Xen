@@ -45,8 +45,11 @@ try {
         "观察任务必须固定模型、CPU、置顶预览和禁用物理输出"
     $taskMarkdown = Get-Content -LiteralPath (
         Join-Path $observationRun "TASK.md") -Raw -Encoding UTF8
-    Expect ($taskMarkdown -match [regex]::Escape($workflow) -and
-            $taskMarkdown -match '-Mode Launch') `
+    $expectedLaunchPrefix =
+        'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode Launch' -f
+        $workflow
+    Expect ($taskMarkdown -match [regex]::Escape($expectedLaunchPrefix) -and
+            $taskMarkdown -match '~~~powershell') `
         "任务单必须提供不依赖当前工作目录的绝对脚本启动命令"
     Expect ($task.view_mode -eq "fixed") `
         "静止检测必须固定人物视角"

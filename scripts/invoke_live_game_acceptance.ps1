@@ -502,20 +502,12 @@ function New-TaskMarkdown {
     }
     $workflowPath = Join-Path $repositoryRoot `
         "scripts\invoke_live_game_acceptance.ps1"
-    $launchCommand = if ($Definition.physical_output) {
-        @"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  "$workflowPath" -Mode Launch -Stage $Stage `
-  -RunDirectory "$ResolvedRunDirectory" `
-  -AllowPhysicalOutput `
-  -PhysicalOutputConfirmation XEN_LIVE_GAME_ACCEPTANCE_SENDS_REAL_INPUT
-"@
-    } else {
-        @"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  "$workflowPath" -Mode Launch -Stage $Stage `
-  -RunDirectory "$ResolvedRunDirectory"
-"@
+    $launchCommand =
+        'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode Launch -Stage {1} -RunDirectory "{2}"' -f
+        $workflowPath, $Stage, $ResolvedRunDirectory
+    if ($Definition.physical_output) {
+        $launchCommand +=
+            ' -AllowPhysicalOutput -PhysicalOutputConfirmation XEN_LIVE_GAME_ACCEPTANCE_SENDS_REAL_INPUT'
     }
     return @"
 # Xen 实机测试任务
@@ -545,9 +537,9 @@ $($steps -join "`n")
 
 该命令使用绝对脚本路径，可从任意 PowerShell 工作目录执行：
 
-```powershell
+~~~powershell
 $launchCommand
-```
+~~~
 
 ## 必须反馈的观测
 
