@@ -21,11 +21,11 @@ $repositoryRoot = [System.IO.Path]::GetFullPath(
 $fixedBuildDirectory = Join-Path $repositoryRoot "build-matrix-final-cpu"
 $fixedOutputDirectory = Join-Path $fixedBuildDirectory "Release"
 $fixedExecutable = Join-Path $fixedOutputDirectory "Xen.exe"
-$fixedModelPath = Join-Path $fixedOutputDirectory "models\cs2_320_v8s.onnx"
+$fixedModelPath = Join-Path $fixedOutputDirectory "models\14wv8.onnx"
 $fixedDeploymentReport = Join-Path `
     $fixedOutputDirectory "xen-runtime-deployment.json"
 $fixedModelSha256 =
-    "6429726D9FE3C9F5E78BB7811A38D572EBA18D63176B117E72EA66A53A935C47"
+    "60C9BA1DE1348700F5F8F0112BAB643AF2CAA596772729F4F2099F37EECEFB90"
 $physicalConfirmation =
     "XEN_LIVE_GAME_ACCEPTANCE_SENDS_REAL_INPUT"
 $expectedProvider = "CPUExecutionProvider"
@@ -302,11 +302,10 @@ function Get-DetectionObservability {
     param([Parameter(Mandatory = $true)][object[]]$Samples)
 
     $classDefinitions = @(
-        [ordered]@{ class_id = 0; name = "ctBODY"; role = "person" },
-        [ordered]@{ class_id = 1; name = "ctHEED"; role = "head" },
-        [ordered]@{ class_id = 2; name = "tBODY"; role = "person" },
-        [ordered]@{ class_id = 3; name = "tHEED"; role = "head" },
-        [ordered]@{ class_id = 4; name = "dw"; role = "other" }
+        [ordered]@{ class_id = 0; name = "ct_body"; role = "person" },
+        [ordered]@{ class_id = 1; name = "ct_head"; role = "head" },
+        [ordered]@{ class_id = 2; name = "t_body"; role = "person" },
+        [ordered]@{ class_id = 3; name = "t_head"; role = "head" }
     )
     $classes = @()
     foreach ($definition in $classDefinitions) {
@@ -418,7 +417,7 @@ function New-FixedConfigText {
     $allow = if ($PhysicalOutput) { "true" } else { "false" }
     return @"
 [detector]
-model_path=cs2_320_v8s.onnx
+model_path=14wv8.onnx
 backend=cpu
 device_id=0
 openvino_device=cpu
@@ -594,7 +593,7 @@ function New-TaskMarkdown {
 - 环节：$Stage / $($Definition.title)
 - 视角模式：$($Definition.view_mode)
 - 固定模型：$fixedModelPath
-- 固定类别：C0=ctBODY，C1=ctHEED，C2=tBODY，C3=tHEED，C4=dw
+- 固定类别：C0=ct_body，C1=ct_head，C2=t_body，C3=t_head
 - 固定 Provider：$expectedProvider
 - 建议时长：$($Definition.recommended_seconds) 秒
 - 任务目录：$ResolvedRunDirectory
@@ -836,8 +835,8 @@ function Collect-Reports {
                     $sampleFieldsValid = $false
                 }
             }
-            if (@($report.samples[0].detection_count_by_class).Count -lt 5 -or
-                @($report.samples[0].max_confidence_by_class).Count -lt 5) {
+            if (@($report.samples[0].detection_count_by_class).Count -lt 4 -or
+                @($report.samples[0].max_confidence_by_class).Count -lt 4) {
                 $sampleFieldsValid = $false
             }
         }

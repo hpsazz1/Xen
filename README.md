@@ -21,14 +21,14 @@ Provider/可选 SDK 矩阵，再以固定 CPU 构建和固定模型完成场景�
 继续横向扩展模型或后端。
 
 场景化实机验收统一使用
-`build-matrix-final-cpu/Release/models/cs2_320_v8s.onnx`。禁止人工复制旧配置后修改参数；
+`build-matrix-final-cpu/Release/models/14wv8.onnx`。禁止人工复制旧配置后修改参数；
 `scripts/invoke_live_game_acceptance.ps1` 会为静止、向左、向右、持续左右往复、超级跳、遮挡跟踪、
 多目标切换、真实控制、急停和五分钟稳定性分别生成独立目录、固定 `config.ini`、模型/程序/部署
 哈希、任务单与人工观测模板。前五个检测基准固定人物视角，避免把目标运动和人工转动视角的误差
 混在一起；人工视角跟随延后到 `AIM-ALGO-001` 需要完善和调节追踪模块时再设计。验收配置固定
 `ui.open_detached_preview_on_start=true`，Xen 启动后自动打开不抢焦点的置顶检测预览；任务单使用
-绝对脚本路径，因此不依赖 PowerShell 当前目录。固定模型元数据为 `C0=ctBODY`、`C1=ctHEED`、
-`C2=tBODY`、`C3=tHEED`、`C4=dw`；配置同时纳入 CT/T 的身体与头部类别。单个目标只属于 CT
+绝对脚本路径，因此不依赖 PowerShell 当前目录。固定模型元数据为 `C0=ct_body`、`C1=ct_head`、
+`C2=t_body`、`C3=t_head`；配置同时纳入 CT/T 的身体与头部类别。单个目标只属于 CT
 或 T，自动报告按原始类别分别导出数量和置信度，不把另一阵营未出现视为失败。示例：
 
 ```powershell

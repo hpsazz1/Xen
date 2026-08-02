@@ -6,7 +6,7 @@ $workflow = Join-Path $PSScriptRoot "invoke_live_game_acceptance.ps1"
 $testRoot = Join-Path $repositoryRoot (
     "cache\live-game-workflow-test-{0}" -f [guid]::NewGuid().ToString("N"))
 $fixedModel = Join-Path $repositoryRoot `
-    "build-matrix-final-cpu\Release\models\cs2_320_v8s.onnx"
+    "build-matrix-final-cpu\Release\models\14wv8.onnx"
 $failures = 0
 
 function Expect {
@@ -37,7 +37,7 @@ try {
     Expect ($task.stage -eq "DetectionStatic" -and
             -not [bool]$task.physical_output) `
         "静止检测任务必须禁用物理输出"
-    Expect ($config -match '(?m)^model_path=cs2_320_v8s\.onnx$' -and
+    Expect ($config -match '(?m)^model_path=14wv8\.onnx$' -and
             $config -match '(?m)^backend=cpu$' -and
             $config -match '(?m)^allow_send_input=false$' -and
             $config -match
@@ -161,7 +161,7 @@ try {
     Expect ([bool]$summary.automatic_complete -and
             $summary.sample_count -eq 1200 -and
             $summary.failed_samples -eq 0 -and
-            $summary.detection_observability.classes[0].name -eq "ctBODY" -and
+            $summary.detection_observability.classes[0].name -eq "ct_body" -and
             $summary.detection_observability.classes[0].confidence.p50 -eq
                 0.864 -and
             $summary.detection_observability.classes[2].confidence.detected_frames `
