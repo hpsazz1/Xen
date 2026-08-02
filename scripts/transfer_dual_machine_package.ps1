@@ -49,6 +49,80 @@ function Assert-PackageFiles {
     }
 }
 
+function Copy-PackageWithProgress {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$TargetRoot,
+        [Parameter(Mandatory = $true)][object]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ManifestPath
+    )
+
+    New-Item -ItemType Directory -Path $TargetRoot -ErrorAction Stop |
+        Out-Null
+    $entries = @($Manifest.files)
+    $manifestFile = Get-Item -LiteralPath $ManifestPath
+    $entries += [pscustomobject]@{
+        relative_path = "package-manifest.json"
+        length = [long]$manifestFile.Length
+    }
+    $totalBytes = [long](@($entries | Measure-Object -Property length -Sum).
+        Sum)
+    $copiedBytes = [long]0
+    $buffer = [byte[]]::new(4MB)
+    try {
+        foreach ($entry in $entries) {
+            $relativePath = [string]$entry.relative_path
+            $sourcePath = Join-Path $SourceRoot $relativePath
+            $targetPath = Join-Path $TargetRoot $relativePath
+            $targetDirectory = Split-Path -Parent $targetPath
+            New-Item -ItemType Directory -Path $targetDirectory -Force |
+                Out-Null
+
+            $source = [System.IO.FileStream]::new(
+                $sourcePath, [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read,
+                4MB, [System.IO.FileOptions]::SequentialScan)
+            try {
+                $target = [System.IO.FileStream]::new(
+                    $targetPath, [System.IO.FileMode]::CreateNew,
+                    [System.IO.FileAccess]::Write,
+                    [System.IO.FileShare]::None, 4MB,
+                    [System.IO.FileOptions]::SequentialScan)
+                try {
+                    while (($read = $source.Read(
+                                $buffer, 0, $buffer.Length)) -gt 0) {
+                        $target.Write($buffer, 0, $read)
+                        $copiedBytes += $read
+                        $percent = if ($totalBytes -eq 0) {
+                            100
+                        } else {
+                            [Math]::Min(100, [int](
+                                $copiedBytes * 100 / $totalBytes))
+                        }
+                        $status = "{0}  {1:N1}/{2:N1} MiB" -f `
+                            $relativePath, ($copiedBytes / 1MB),
+                            ($totalBytes / 1MB)
+                        Write-Progress -Id 1 `
+                            -Activity "传输 Xen 双机测试包" `
+                            -Status $status -PercentComplete $percent
+                    }
+                    $target.Flush()
+                } finally {
+                    $target.Dispose()
+                }
+            } finally {
+                $source.Dispose()
+            }
+            [System.IO.File]::SetLastWriteTimeUtc(
+                $targetPath,
+                (Get-Item -LiteralPath $sourcePath).LastWriteTimeUtc)
+        }
+    } finally {
+        Write-Progress -Id 1 -Activity "传输 Xen 双机测试包" `
+            -Completed
+    }
+}
+
 $PackagePath = Resolve-RequiredDirectory $PackagePath "本地双机包"
 $manifestPath = Join-Path $PackagePath "package-manifest.json"
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
@@ -65,6 +139,7 @@ if ([int]$manifest.schema -ne 1 -or -not [bool]$manifest.complete -or
 if ([System.IO.Path]::GetFileName($PackagePath) -ne $packageId) {
     throw "包目录名与清单 PackageId 不一致。"
 }
+Write-Host "[1/4] 校验本地包文件与 SHA-256..."
 Assert-PackageFiles $PackagePath $manifest
 
 $DestinationRoot = Resolve-RequiredDirectory `
@@ -79,7 +154,10 @@ if ((Test-Path -LiteralPath $publishedPath) -or
 }
 
 try {
-    Copy-Item -LiteralPath $PackagePath -Destination $incomingPath -Recurse
+    Write-Host "[2/4] 复制到辅机临时目录：$incomingPath"
+    Copy-PackageWithProgress `
+        $PackagePath $incomingPath $manifest $manifestPath
+    Write-Host "[3/4] 回读辅机文件并复核 SHA-256..."
     Assert-PackageFiles $incomingPath $manifest
     $remoteManifestPath = Join-Path $incomingPath "package-manifest.json"
     $remoteManifestHash = (Get-FileHash -LiteralPath $remoteManifestPath `
@@ -89,6 +167,7 @@ try {
     if ($remoteManifestHash -ne $localManifestHash) {
         throw "辅机包清单 SHA-256 与本地不一致。"
     }
+    Write-Host "[4/4] 校验通过，原子发布正式目录..."
     Rename-Item -LiteralPath $incomingPath -NewName $packageId
 } catch {
     if (Test-Path -LiteralPath $incomingPath) {

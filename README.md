@@ -364,6 +364,8 @@ KMBOX UUID，也不允许物理输出：
 若构建进程与已保存 SMB 凭据的交互式 PowerShell 不在同一 Windows 会话，可先用
 `-SkipPublish` 只生成本地包，再在已映射共享的同一控制台执行纯传输入口；该入口仍会在复制前后
 核对逐文件哈希，并通过 `.incoming-*` 原位发布：
+传输时按总字节显示进度，并明确输出本地校验、复制、远端回读校验和原子发布四个阶段；只有看到
+“辅机双机包传输完成”才表示正式目录可用。
 
 ```powershell
 .\scripts\transfer_dual_machine_package.ps1 `
