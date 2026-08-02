@@ -21,11 +21,11 @@ $repositoryRoot = [System.IO.Path]::GetFullPath(
 $fixedBuildDirectory = Join-Path $repositoryRoot "build-matrix-final-cpu"
 $fixedOutputDirectory = Join-Path $fixedBuildDirectory "Release"
 $fixedExecutable = Join-Path $fixedOutputDirectory "Xen.exe"
-$fixedModelPath = Join-Path $fixedOutputDirectory "models\14wv8.onnx"
+$fixedModelPath = Join-Path $fixedOutputDirectory "models\14wv11.onnx"
 $fixedDeploymentReport = Join-Path `
     $fixedOutputDirectory "xen-runtime-deployment.json"
 $fixedModelSha256 =
-    "60C9BA1DE1348700F5F8F0112BAB643AF2CAA596772729F4F2099F37EECEFB90"
+    "7F75CE2E22146D732D3D39C5B8D91431E1D48395BB5FAF81039320179597F7E0"
 $physicalConfirmation =
     "XEN_LIVE_GAME_ACCEPTANCE_SENDS_REAL_INPUT"
 $expectedProvider = "CPUExecutionProvider"
@@ -417,7 +417,7 @@ function New-FixedConfigText {
     $allow = if ($PhysicalOutput) { "true" } else { "false" }
     return @"
 [detector]
-model_path=14wv8.onnx
+model_path=14wv11.onnx
 backend=cpu
 device_id=0
 openvino_device=cpu
@@ -452,8 +452,8 @@ ndi_frame_layout=full_frame_1_to_1
 ndi_source_width=0
 ndi_source_height=0
 ndi_require_frame_metadata=false
-roi_width=640
-roi_height=640
+roi_width=320
+roi_height=320
 center_roi=true
 roi_x=0
 roi_y=0
@@ -668,10 +668,10 @@ function Prepare-Task {
             source_height = 1440
             encoded_width = 2560
             encoded_height = 1440
-            roi_x = 960
-            roi_y = 400
-            roi_width = 640
-            roi_height = 640
+            roi_x = 1120
+            roi_y = 560
+            roi_width = 320
+            roi_height = 320
             scale_x = 1.0
             scale_y = 1.0
         }
@@ -862,9 +862,9 @@ function Collect-Reports {
             $snapshot.source_height -ne 1440 -or
             $snapshot.encoded_width -ne 2560 -or
             $snapshot.encoded_height -ne 1440 -or
-            $snapshot.roi_x -ne 960 -or $snapshot.roi_y -ne 400 -or
-            $snapshot.roi_width -ne 640 -or
-            $snapshot.roi_height -ne 640 -or
+            $snapshot.roi_x -ne 1120 -or $snapshot.roi_y -ne 560 -or
+            $snapshot.roi_width -ne 320 -or
+            $snapshot.roi_height -ne 320 -or
             [double]$snapshot.source_pixels_per_pixel_x -ne 1.0 -or
             [double]$snapshot.source_pixels_per_pixel_y -ne 1.0) {
             $failures += "报告几何不符合固定 2560x1440 中心 ROI：$path"
@@ -999,8 +999,8 @@ function Launch-Task {
             -ExpectedSourceHeight 1440 `
             -ExpectedEncodedWidth 2560 `
             -ExpectedEncodedHeight 1440 `
-            -ExpectedRoiX 960 -ExpectedRoiY 400 `
-            -ExpectedRoiWidth 640 -ExpectedRoiHeight 640 `
+            -ExpectedRoiX 1120 -ExpectedRoiY 560 `
+            -ExpectedRoiWidth 320 -ExpectedRoiHeight 320 `
             -ExpectedScaleX 1 -ExpectedScaleY 1 `
             -EnableFp16 off -EnableCudaGraph off `
             -EnableGpuPreprocess off `
