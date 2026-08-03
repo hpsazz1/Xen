@@ -30,6 +30,21 @@ foreach ($path in $scriptPaths) {
         "PowerShell 语法解析失败：$path"
 }
 
+$networkReceiverText = [System.IO.File]::ReadAllText(
+    (Join-Path $RepositoryRoot "scripts/benchmark_network_receiver.ps1"))
+foreach ($field in @(
+    "source_dropped_frames",
+    "transport_dropped_frames",
+    "transport_invalid_packets",
+    "runtime_overwritten_frames")) {
+    Assert-True ($networkReceiverText -match
+        [regex]::Escape("$field={")) `
+        "网络门禁错误必须打印实际值和阈值：$field。"
+}
+Assert-True ($networkReceiverText -match
+    'if \(-not \$runtimeReportPublished\)') `
+    "网络门禁拒绝后必须保留已原子发布的 Runtime 报告。"
+
 . (Join-Path $RepositoryRoot "scripts/runtime_environment.ps1")
 $successQuery = {
     param([string]$ClassName)

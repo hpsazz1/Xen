@@ -142,6 +142,7 @@ $finalOutputs = @(
     $profilePath,
     $networkMarker
 )
+$runtimeReportPublished = $false
 foreach ($path in $finalOutputs) {
     if (Test-Path -LiteralPath $path) {
         throw "网络基准目标已存在，拒绝覆盖：$path"
@@ -238,6 +239,7 @@ try {
     $report = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 |
         ConvertFrom-Json
     $snapshot = $report.final_snapshot
+    $runtimeReportPublished = $true
     if ([uint64]$snapshot.source_dropped_frames -gt
             $MaximumSourceDroppedFrames -or
         [uint64]$snapshot.transport_dropped_frames -gt
@@ -246,7 +248,19 @@ try {
             $MaximumTransportInvalidPackets -or
         [uint64]$snapshot.overwritten_frames -gt
             $MaximumRuntimeOverwrittenFrames) {
-        throw "网络丢弃、协议异常或 Runtime 覆盖超过正式门槛。"
+        throw ("网络门禁未通过：source_dropped_frames={0}/{1}, " +
+            "transport_dropped_frames={2}/{3}, " +
+            "transport_invalid_packets={4}/{5}, " +
+            "runtime_overwritten_frames={6}/{7}。Runtime 报告已保留，" +
+            "网络完成标记不发布。" -f
+            [uint64]$snapshot.source_dropped_frames,
+            $MaximumSourceDroppedFrames,
+            [uint64]$snapshot.transport_dropped_frames,
+            $MaximumTransportDroppedFrames,
+            [uint64]$snapshot.transport_invalid_packets,
+            $MaximumTransportInvalidPackets,
+            [uint64]$snapshot.overwritten_frames,
+            $MaximumRuntimeOverwrittenFrames)
     }
     if (($CaptureBackend -eq "xudp_jpeg" -or
          $CaptureBackend -eq "ndi") -and
@@ -313,7 +327,11 @@ try {
     [System.IO.File]::Move($pendingNetworkMarker, $networkMarker)
     Write-Host "网络接收正式基准通过：$networkMarker"
 } catch {
-    Remove-OwnedOutputs $ownedOutputs
+    # Runtime 报告已按自身契约原子发布后，即使网络门禁拒绝，也必须保留
+    # 完整采样证据供定位具体丢弃来源；缺少 network.json 明确表示未正式通过。
+    if (-not $runtimeReportPublished) {
+        Remove-OwnedOutputs $ownedOutputs
+    }
     throw
 } finally {
     Remove-Item -LiteralPath $pendingNetworkMarker -Force `
