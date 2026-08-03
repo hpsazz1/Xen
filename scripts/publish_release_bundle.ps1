@@ -11,6 +11,7 @@
     [string[]]$LicenseFiles,
     [string]$ConfigPath = "",
     [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$GitExecutable = "git",
     [Parameter(Mandatory = $true)]
     [string]$OutputDirectory
 )
@@ -151,11 +152,11 @@ function Copy-VerifiedFile(
 }
 
 $repository = Resolve-ExistingPath $RepositoryRoot "仓库根目录"
-$status = & git -C $repository status --porcelain --untracked-files=normal
+$status = & $GitExecutable -C $repository status --porcelain --untracked-files=normal
 if ($LASTEXITCODE -ne 0 -or @($status).Count -ne 0) {
     throw "正式组包要求仓库无可跟踪差异和未跟踪文件"
 }
-$commit = (& git -C $repository rev-parse HEAD).Trim()
+$commit = (& $GitExecutable -C $repository rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-fA-F]{40}$') {
     throw "无法读取正式组包 Git commit"
 }

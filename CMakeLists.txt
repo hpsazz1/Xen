@@ -973,10 +973,17 @@ if(BUILD_TESTING)
     target_link_libraries(release_contract_tests PRIVATE app_release)
     add_test(NAME release_contract_tests COMMAND release_contract_tests)
 
+    set(XEN_WINDOWS_POWERSHELL
+        "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe")
+    if(NOT EXISTS "${XEN_WINDOWS_POWERSHELL}")
+        message(FATAL_ERROR
+            "Windows PowerShell 5 executable not found: ${XEN_WINDOWS_POWERSHELL}")
+    endif()
     add_test(NAME release_bundle_tests
-        COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        COMMAND "${XEN_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
             -File "${PROJECT_SOURCE_DIR}/tests/release_bundle_tests.ps1"
             -PublishScript "${PROJECT_SOURCE_DIR}/scripts/publish_release_bundle.ps1"
+            -GitExecutable "${GIT_EXECUTABLE}"
             -TestRoot "${CMAKE_BINARY_DIR}/release-bundle-tests")
 
     add_executable(debug_tests

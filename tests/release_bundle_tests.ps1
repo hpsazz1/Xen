@@ -2,6 +2,8 @@
     [Parameter(Mandatory = $true)]
     [string]$PublishScript,
     [Parameter(Mandatory = $true)]
+    [string]$GitExecutable,
+    [Parameter(Mandatory = $true)]
     [string]$TestRoot
 )
 
@@ -64,13 +66,13 @@ try {
     $repository = Join-Path $root "repo"
     New-Item -ItemType Directory -Path $repository | Out-Null
     Write-Utf8 (Join-Path $repository "tracked.txt") "fixture"
-    & git -C $repository init --quiet
-    & git -C $repository config user.email "xen-release-test@example.invalid"
-    & git -C $repository config user.name "Xen Release Test"
-    & git -C $repository add tracked.txt
-    & git -C $repository commit --quiet -m "初始化发布夹具"
+    & $GitExecutable -C $repository init --quiet
+    & $GitExecutable -C $repository config user.email "xen-release-test@example.invalid"
+    & $GitExecutable -C $repository config user.name "Xen Release Test"
+    & $GitExecutable -C $repository add tracked.txt
+    & $GitExecutable -C $repository commit --quiet -m "初始化发布夹具"
     if ($LASTEXITCODE -ne 0) { throw "无法创建发布夹具 Git 仓库" }
-    $commit = (& git -C $repository rev-parse HEAD).Trim()
+    $commit = (& $GitExecutable -C $repository rev-parse HEAD).Trim()
 
     $model = Join-Path $root "model.onnx"
     $license = Join-Path $root "LICENSE.txt"
@@ -88,13 +90,16 @@ try {
         "onnxruntime.dll", "onnxruntime_providers_openvino.dll", "openvino.dll")
 
     $output = Join-Path $root "Xen-release"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PublishScript `
+    $windowsPowerShell = Join-Path $env:SystemRoot `
+        "System32\WindowsPowerShell\v1.0\powershell.exe"
+    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $PublishScript `
         -NvidiaBuildDirectory $nvidia `
         -DirectMlBuildDirectory $directml `
         -OpenVinoBuildDirectory $openvino `
         -ModelPath $model `
         -LicenseFiles $license `
         -RepositoryRoot $repository `
+        -GitExecutable $GitExecutable `
         -OutputDirectory $output
     if ($LASTEXITCODE -ne 0) { throw "合法夹具未能生成统一发布包" }
 
