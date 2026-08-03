@@ -407,17 +407,24 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 只读注册表或系统版本补足 OS；这只表示辅助硬件清单不完整，不会放宽 Provider、几何、逐帧失败、
 网络丢弃、Runtime 覆盖、包哈希或物理输出门禁。
 
-2026-08-01 在 RTX 5070 Ti、本机 DXGI、`2560x1440` 中心 `320x320` ROI 上完成 5 分钟正式
-基准；三组均为零失败、零报告/Runtime 丢弃且没有物理 Mouse 命令。`total` 从 Capture 发布完成
-计到 control 结束，`capture + total` 是按同一帧逐样本相加后的完整采集到控制链路：
+2026-08-04 在提交 `712c4ba`、RTX 5070 Ti、Ryzen 7 9800X3D、本机 DXGI、
+`2560x1440` 中心 `320x320` ROI 和同一 `14wv11.onnx` 上完成五个 Provider 各 5 分钟正式
+基准。全部样本成功，失败、报告丢弃和 Runtime 丢弃均为零。`inference` 覆盖 Detector
+前处理、Provider 执行、回传和后处理；`total` 从 Capture 发布完成计到 control 结束：
 
-| Provider | 正式样本 | total P95 | total P99 | capture + total P95 |
-|---|---:|---:|---:|---:|
-| TensorRT | 78,007 | 0.574 ms | 0.631 ms | 4.612 ms |
-| CUDA | 77,975 | 4.691 ms | 5.585 ms | 8.548 ms |
-| DirectML | 78,001 | 1.148 ms | 1.195 ms | 5.164 ms |
+| Provider 与本轮最优配置 | 正式样本 | inference P95/P99 | total P95/P99 |
+|---|---:|---:|---:|
+| TensorRT：FP16 + CUDA Graph + GPU 前处理 | 77,997 | 0.573/0.647 ms | 0.642/0.716 ms |
+| DirectML：固定 shape D3D11 互操作 | 78,009 | 1.010/1.175 ms | 1.067/1.238 ms |
+| OpenVINO CPU：LATENCY + 单 stream | 77,986 | 2.257/2.625 ms | 2.395/2.894 ms |
+| ORT CPU：自动 intra-op 线程 | 77,718 | 3.114/3.318 ms | 3.568/4.668 ms |
+| CUDA：D3D11 互操作关闭 | 70,688 | 4.574/4.894 ms | 7.806/8.151 ms |
 
-结果仅适用于当前提交、模型和本机硬件。UDP/XUDP/NDI 辅机链路仍需分别完成同口径双机验收。
+当前硬件和模型首选 TensorRT。非 NVIDIA GPU 的固定 shape DXGI 场景首选 DirectML，并显式
+开启 D3D11 互操作；无可用 GPU 时优先 OpenVINO CPU，纯 ORT CPU 作为最小依赖兼容方案。
+本模型不建议主动选择整图 CUDA EP；TensorRT 内部的 CUDA 节点后备仍保留。以上开关只用于
+基准和使用建议，程序默认配置未改变。结果不能外推到其他模型、Intel GPU/NPU 或双机链路；
+完整证据见 `docs/049_最终运行时推理延迟与使用方案_20260804.md`。
 
 日志设施也由同一个 `config.ini` 静态加载。旧配置没有 `[log]` 节时使用默认值；日志等级支持
 `trace`、`debug`、`info`、`warn`、`error` 和 `off`，未知等级会拒绝加载并在界面提示错误。
