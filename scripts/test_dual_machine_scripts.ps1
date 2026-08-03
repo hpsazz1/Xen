@@ -84,4 +84,37 @@ Assert-True ($exitCode -ne 0 -and
     $outputText -notmatch "Join-Path") `
     "任意工作目录启动必须在脚本体内解析默认 PackageRoot。"
 
+$fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ("xen-dual-provider-{0}" -f [guid]::NewGuid().ToString("N"))
+try {
+    New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+    $fixtureManifest = [ordered]@{
+        schema = 1
+        complete = $true
+        package_type = "xen-dual-machine-receiver"
+        package_id = "provider-fixture"
+        allowed_backends = @("cpu")
+        allowed_capture_backends = @("xudp_jpeg")
+        model = [ordered]@{ relative_path = "Release/models/missing.onnx" }
+    }
+    [System.IO.File]::WriteAllText(
+        (Join-Path $fixtureRoot "package-manifest.json"),
+        ($fixtureManifest | ConvertTo-Json -Depth 5),
+        [System.Text.UTF8Encoding]::new($false))
+    $ErrorActionPreference = "Continue"
+    $providerOutput = @(& powershell.exe -NoProfile `
+        -ExecutionPolicy Bypass -File $invokeScript `
+        -Scenario GeometryStatic -Mode Prepare `
+        -PackageRoot $fixtureRoot -Backend tensorrt 2>&1)
+    $providerExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $previousErrorActionPreference
+    Assert-True ($providerExitCode -ne 0 -and
+        ($providerOutput -join "`n") -match "便携包不允许 Provider：tensorrt") `
+        "远程入口必须在访问模型前拒绝清单未授权的 Provider。"
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+    Remove-Item -LiteralPath $fixtureRoot -Recurse -Force `
+        -ErrorAction SilentlyContinue
+}
+
 Write-Host "双机 PowerShell 脚本回归通过。"

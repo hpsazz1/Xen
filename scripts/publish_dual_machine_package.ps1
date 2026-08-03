@@ -9,6 +9,8 @@
         "..\cache\dual-machine-packages"),
     [string]$DestinationRoot = "\\192.168.3.20\XenLab$",
     [string]$PackageId = "",
+    [ValidateSet("cpu", "cuda", "tensorrt")]
+    [string[]]$AllowedBackends = @("cpu"),
     [switch]$SkipBuild,
     [switch]$SkipPublish
 )
@@ -133,6 +135,31 @@ foreach ($record in @($deployment.files)) {
     }
 }
 
+$deployedNames = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase)
+foreach ($record in @($deployment.files)) {
+    [void]$deployedNames.Add([string]$record.name)
+}
+$availableBackends = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase)
+[void]$availableBackends.Add("cpu")
+if ($deployedNames.Contains("onnxruntime_providers_cuda.dll")) {
+    [void]$availableBackends.Add("cuda")
+}
+if ($deployedNames.Contains("onnxruntime_providers_tensorrt.dll") -and
+    $deployedNames.Contains("onnxruntime_providers_cuda.dll") -and
+    $deployedNames.Contains("nvinfer_10.dll")) {
+    [void]$availableBackends.Add("tensorrt")
+}
+$normalizedBackends = @($AllowedBackends | ForEach-Object {
+    $_.ToLowerInvariant()
+} | Sort-Object -Unique)
+foreach ($backend in $normalizedBackends) {
+    if (-not $availableBackends.Contains($backend)) {
+        throw "部署闭包不支持请求的辅机 Provider：$backend"
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($PackageId)) {
     $PackageId = "{0}-{1}" -f (Get-Date -Format "yyyyMMdd-HHmmss"),
         $gitCommit.Substring(0, 8)
@@ -187,7 +214,7 @@ $manifest = [ordered]@{
     package_id = $PackageId
     created_utc = [DateTime]::UtcNow.ToString("o")
     configuration = $Configuration
-    allowed_backends = @("cpu")
+    allowed_backends = $normalizedBackends
     allowed_capture_backends = @("xudp_jpeg", "udp_mjpeg", "ndi")
     source = [ordered]@{
         git_commit = $gitCommit

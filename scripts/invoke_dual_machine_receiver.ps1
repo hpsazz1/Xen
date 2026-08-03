@@ -5,6 +5,8 @@
     [string]$Scenario,
     [ValidateSet("xudp_jpeg", "udp_mjpeg", "ndi")]
     [string]$CaptureBackend = "xudp_jpeg",
+    [ValidateSet("cpu", "cuda", "tensorrt")]
+    [string]$Backend = "cpu",
     [ValidateSet("Prepare", "Run")]
     [string]$Mode = "Prepare",
     [string]$PackageRoot = "",
@@ -41,6 +43,9 @@ if ([int]$manifest.schema -ne 1 -or -not [bool]$manifest.complete -or
 if (@($manifest.allowed_capture_backends) -notcontains $CaptureBackend) {
     throw "便携包不允许 Capture 后端：$CaptureBackend"
 }
+if (@($manifest.allowed_backends) -notcontains $Backend) {
+    throw "便携包不允许 Provider：$Backend"
+}
 
 $modelPath = Join-Path $PackageRoot ([string]$manifest.model.relative_path)
 $receiverScript = Join-Path $PackageRoot `
@@ -55,7 +60,7 @@ $isSoak = $Scenario -eq "SoakFreeRun"
 $minimumSamples = if ($isSoak) { 10000 } else { 3000 }
 $minimumSeconds = if ($isSoak) { 300 } else { 60 }
 $maximumSeconds = if ($isSoak) { 600 } else { 120 }
-$runId = "{0}-{1}-{2}" -f $CaptureBackend, $Scenario,
+$runId = "{0}-{1}-{2}-{3}" -f $CaptureBackend, $Backend, $Scenario,
     (Get-Date -Format "yyyyMMdd-HHmmss")
 New-Item -ItemType Directory -Path $ReportRoot, $RunRoot -Force |
     Out-Null
@@ -66,7 +71,7 @@ $arguments = @{
     ModelPath = $modelPath
     ReportPrefix = $reportPrefix
     CaptureBackend = $CaptureBackend
-    Backend = "cpu"
+    Backend = $Backend
     BuildDirectory = $PackageRoot
     PackageManifestPath = $manifestPath
     Configuration = "Release"
@@ -86,9 +91,9 @@ $arguments = @{
     MaximumTransportDroppedFrames = 0
     MaximumTransportInvalidPackets = 0
     MaximumRuntimeOverwrittenFrames = 0
-    EnableFp16 = "off"
-    EnableCudaGraph = "off"
-    EnableGpuPreprocess = "off"
+    EnableFp16 = if ($Backend -eq "tensorrt") { "on" } else { "off" }
+    EnableCudaGraph = if ($Backend -eq "tensorrt") { "on" } else { "off" }
+    EnableGpuPreprocess = if ($Backend -eq "tensorrt") { "on" } else { "off" }
     ReadyFilePath = $readyPath
 }
 if ($Mode -eq "Prepare") {
@@ -100,6 +105,7 @@ Write-Host "  package_id=$($manifest.package_id)"
 Write-Host "  run_id=$runId"
 Write-Host "  scenario=$Scenario"
 Write-Host "  capture=$CaptureBackend"
+Write-Host "  provider=$Backend"
 Write-Host "  samples=$minimumSamples, seconds=$minimumSeconds"
 Write-Host "  report_prefix=$reportPrefix"
 Write-Host "  ready_file=$readyPath"

@@ -355,14 +355,16 @@ JSON 内容，禁止靠固定延时或重定向日志中的“已监听”文本
 Runtime 覆盖；`<prefix>.network.json` 最后发布才表示网络接收报告完整。
 
 辅机没有 Visual Studio、CMake、Git 或 SDK 时，主机使用便携包发布脚本。它先构建 NDI 组合的
-`XenBenchmark`，核对构建期部署来源和 SHA-256，再把 CPU 接收程序、模型、UDP/XUDP/NDI
+`XenBenchmark`，核对构建期部署来源和 SHA-256，再把接收程序、模型、UDP/XUDP/NDI
 运行库、三个接收入口和内部环境采集脚本封装到逐文件哈希清单，并通过 SMB 临时目录校验后原位发布。包不包含
-KMBOX UUID，也不允许物理输出：
+KMBOX UUID，也不允许物理输出。CPU-only 包保持默认只授权 CPU；NVIDIA 闭包必须显式声明允许的
+Provider，发布脚本会根据部署报告拒绝缺少 CUDA/TensorRT DLL 的越权清单：
 
 ```powershell
 .\scripts\publish_dual_machine_package.ps1 `
-  -BuildDirectory ".\build-matrix-final-ndi" `
+  -BuildDirectory ".\build-dual-gpu-<commit>" `
   -ModelPath ".\build-matrix-final-cpu\Release\models\14wv11.onnx" `
+  -AllowedBackends cpu,cuda,tensorrt `
   -DestinationRoot "\\192.168.3.20\XenLab$"
 ```
 
@@ -387,12 +389,14 @@ $package = "C:\XenLab\packages\<package-id>"
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
   "$package\scripts\invoke_dual_machine_receiver.ps1" `
-  -Scenario GeometryStatic -CaptureBackend xudp_jpeg -Mode Prepare `
+  -Scenario GeometryStatic -CaptureBackend xudp_jpeg -Backend tensorrt `
+  -Mode Prepare `
   -PackageRoot $package
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
   "$package\scripts\invoke_dual_machine_receiver.ps1" `
-  -Scenario GeometryStatic -CaptureBackend xudp_jpeg -Mode Run `
+  -Scenario GeometryStatic -CaptureBackend xudp_jpeg -Backend tensorrt `
+  -Mode Run `
   -PackageRoot $package
 ```
 
