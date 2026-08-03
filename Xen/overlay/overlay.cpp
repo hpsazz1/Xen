@@ -483,11 +483,30 @@ bool begin_form(const char* id, float label_width = 148.0f) {
     return true;
 }
 
-void form_row(const char* label) {
+void show_help_tooltip(const char* help) {
+    if (!help || *help == '\0' ||
+        !ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        return;
+    }
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+    ImGui::TextUnformatted(help);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+
+void help_marker(const char* help) {
+    ImGui::SameLine(0.0f, 5.0f);
+    ImGui::TextColored(rgba(kFaintInk), "?");
+    show_help_tooltip(help);
+}
+
+void form_row(const char* label, const char* help) {
     ImGui::TableNextRow(ImGuiTableRowFlags_None, 36.0f);
     ImGui::TableSetColumnIndex(0);
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(rgba(kMutedInk), "%s", label);
+    help_marker(help);
     ImGui::TableSetColumnIndex(1);
     ImGui::SetNextItemWidth(-1.0f);
 }
@@ -1344,7 +1363,8 @@ struct Overlay::Impl {
 
         const auto title_button = [&](const char* id,
                                       int index,
-                                      bool danger) {
+                                      bool danger,
+                                      const char* help) {
             const float x = width -
                 kTitleButtonWidth * static_cast<float>(3 - index);
             ImGui::SetCursorPos(ImVec2(x, 0.0f));
@@ -1398,21 +1418,28 @@ struct Overlay::Impl {
                     ImVec2(center.x - 4.5f, center.y + 4.5f),
                     icon_color, 1.2f);
             }
+            show_help_tooltip(help);
             return pressed;
         };
 
-        if (title_button("minimize", 0, false)) {
+        if (title_button("minimize", 0, false, "最小化 Xen 主控制台。")) {
             ShowWindow(window, SW_MINIMIZE);
         }
-        if (title_button("maximize", 1, false)) {
+        if (title_button(
+                "maximize", 1, false,
+                "最大化窗口；已最大化时恢复到先前尺寸。")) {
             ShowWindow(window, IsZoomed(window) ? SW_RESTORE : SW_MAXIMIZE);
         }
-        if (title_button("close", 2, true)) {
+        if (title_button(
+                "close", 2, true,
+                "关闭 Xen；退出前会停止 Runtime、收口报告并解除物理输出。")) {
             close_requested = true;
         }
     }
 
-    bool nav_item(const char* label, WorkspacePage page) {
+    bool nav_item(const char* label,
+                  WorkspacePage page,
+                  const char* help) {
         const bool selected = active_page == page;
         const float start_x = ImGui::GetCursorPosX();
         ImGui::SetCursorPosX(start_x + 4.0f);
@@ -1423,6 +1450,7 @@ struct Overlay::Impl {
         ImGui::PushID(static_cast<int>(page));
         const bool pressed = ImGui::InvisibleButton("nav", size);
         ImGui::PopID();
+        show_help_tooltip(help);
 
         const bool hovered = ImGui::IsItemHovered();
         if (selected || hovered) {
@@ -1458,11 +1486,21 @@ struct Overlay::Impl {
             ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar);
 
-        nav_item("概览", WorkspacePage::OVERVIEW);
-        nav_item("检测", WorkspacePage::DETECTION);
-        nav_item("瞄准", WorkspacePage::AIM);
-        nav_item("输入", WorkspacePage::INPUT);
-        nav_item("设置", WorkspacePage::SETTINGS);
+        nav_item(
+            "概览", WorkspacePage::OVERVIEW,
+            "查看 Runtime 状态、分段延迟、模块健康、帧统计和最近成功样本历史。");
+        nav_item(
+            "检测", WorkspacePage::DETECTION,
+            "配置模型、推理后端、采集来源与检测阈值，并查看同帧 ROI 检测预览。");
+        nav_item(
+            "瞄准", WorkspacePage::AIM,
+            "配置轨迹确认、目标切换、瞄点位置和相对鼠标移动控制参数。");
+        nav_item(
+            "输入", WorkspacePage::INPUT,
+            "配置物理鼠标后端、安全门和全局快捷键，并在急停后执行受控复位。");
+        nav_item(
+            "设置", WorkspacePage::SETTINGS,
+            "配置统计窗口、控制台尺寸、主题和垂直同步；不改变推理热路径。");
 
         const float footer_y = ImGui::GetWindowHeight() - 72.0f;
         if (ImGui::GetCursorPosY() < footer_y) {
@@ -1536,12 +1574,16 @@ struct Overlay::Impl {
             if (ImGui::Button("停止", ImVec2(kButtonWidth, 32.0f))) {
                 actions.stop_requested = true;
             }
+            show_help_tooltip(
+                "停止整个 Runtime 管线并结束当前 Debug 报告；物理输出会立即解除。快捷键默认为 F8。");
         } else {
             ImGui::BeginDisabled(snapshot.state == RuntimeState::STOPPING);
             push_primary_button();
             if (ImGui::Button("启动", ImVec2(kButtonWidth, 32.0f))) {
                 actions.start_requested = true;
             }
+            show_help_tooltip(
+                "使用当前已保存/编辑配置启动 Capture、Detector、Aim 和安全门；不会自动武装物理输出。快捷键默认为 F8。");
             pop_colored_button();
             ImGui::EndDisabled();
         }
@@ -1552,6 +1594,8 @@ struct Overlay::Impl {
                 actions.runtime_intents.push_back(
                     {RuntimeIntentType::DISARM_OUTPUT, false});
             }
+            show_help_tooltip(
+                "解除本次 Runtime 会话的物理输出武装；检测和瞄准计算继续运行，但 Mouse 不再提交移动。");
         } else {
             ImGui::BeginDisabled(
                 !running || snapshot.emergency_stopped ||
@@ -1562,6 +1606,8 @@ struct Overlay::Impl {
                 actions.runtime_intents.push_back(
                     {RuntimeIntentType::ARM_OUTPUT, true});
             }
+            show_help_tooltip(
+                "在配置允许、Runtime 运行且急停正常时武装物理输出；仍需按住瞄准输出键才会发送移动。");
             ImGui::EndDisabled();
         }
 
@@ -1571,6 +1617,8 @@ struct Overlay::Impl {
             actions.runtime_intents.push_back(
                 {RuntimeIntentType::EMERGENCY_STOP, true});
         }
+        show_help_tooltip(
+            "立即锁存物理输出急停并解除武装；不会停止截图和检测，释放急停键后仍需在输入页手动复位。");
         pop_colored_button();
 
         ImGui::EndChild();
@@ -1599,6 +1647,8 @@ struct Overlay::Impl {
                     "保存配置", ImVec2(button_width, 34.0f))) {
                 actions.save_config_requested = true;
             }
+            show_help_tooltip(
+                "严格校验并保存当前配置；快捷键会立即重载，跨隔离运行时切换会先停止 Runtime 再重启目标 Worker。");
             pop_colored_button();
             ImGui::EndDisabled();
         }
@@ -1908,6 +1958,7 @@ struct Overlay::Impl {
         if (ImGui::Button("×##close_log_panel", ImVec2(24.0f, 22.0f))) {
             show_log_panel = false;
         }
+        show_help_tooltip("关闭最近日志面板并返回当前功能页；不会清空日志环形缓冲区。");
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
         ImGui::BeginChild(
@@ -2098,6 +2149,8 @@ struct Overlay::Impl {
             ImGui::TextColored(rgba(kFaintInk), "页面");
             ImGui::BeginDisabled(!preview_supported);
             toggle_switch("##roi_preview_enabled", &preview_requested);
+            show_help_tooltip(
+                "在检测页显示同帧 ROI 图像、检测框和 Aim 目标；关闭后若无独立窗口，Runtime 停止预览颜色转换与复制。");
             ImGui::EndDisabled();
             ImGui::TableSetColumnIndex(2);
             ImGui::TextColored(rgba(kFaintInk), "置顶");
@@ -2105,6 +2158,8 @@ struct Overlay::Impl {
             toggle_switch(
                 "##detached_preview_enabled",
                 &detached_preview_requested);
+            show_help_tooltip(
+                "打开独立置顶检测预览窗口；切换主控制台页面后仍保持订阅，关闭独立窗口不会退出 Xen。");
             ImGui::EndDisabled();
             ImGui::EndTable();
         }
@@ -2407,6 +2462,8 @@ struct Overlay::Impl {
             if (ImGui::Button("重载模型", ImVec2(104.0f, 34.0f))) {
                 actions.reload_detector_requested = true;
             }
+            show_help_tooltip(
+                "Runtime 运行时在后台加载当前所选模型；成功后原子切换 Session，失败时旧模型继续服务。");
             pop_colored_button();
             ImGui::EndDisabled();
             ImGui::EndTable();
@@ -2423,7 +2480,9 @@ struct Overlay::Impl {
         begin_config_panel(
             "detector_panel", "推理", openvino ? 300.0f : 264.0f);
         if (begin_form("detector_form", 126.0f)) {
-            form_row("模型");
+            form_row(
+                "模型",
+                "从发布根 models 目录选择 ONNX 模型；保存配置或运行时重载前会再次校验规范路径和文件存在性。");
             const auto selected = std::find(
                 model_catalog.model_names.begin(),
                 model_catalog.model_names.end(),
@@ -2467,6 +2526,8 @@ struct Overlay::Impl {
                     "刷新", ImVec2(kRefreshWidth, 0.0f))) {
                 actions.refresh_models_requested = true;
             }
+            show_help_tooltip(
+                "重新扫描发布根 models 目录中的常规 ONNX 文件；链接、目录穿越和目录外模型不会进入清单。");
 
             std::vector<const char*> backend_names;
             backend_names.reserve(backend_catalog.backends.size());
@@ -2488,7 +2549,9 @@ struct Overlay::Impl {
                     backend_index = static_cast<int>(index);
                 }
             }
-            form_row("推理后端");
+            form_row(
+                "推理后端",
+                "选择发布清单授权的执行后端；跨 NVIDIA、DirectML 或 OpenVINO 运行时保存配置时会安全停止并重启 Worker。");
             ImGui::BeginDisabled(backend_index < 0 || backend_names.empty());
             if (ImGui::Combo(
                     "##backend", &backend_index, backend_names.data(),
@@ -2503,7 +2566,9 @@ struct Overlay::Impl {
                 const char* devices[] = {"GPU", "CPU", "NPU"};
                 int device = static_cast<int>(
                     app_config.detector.openvino_device);
-                form_row("OpenVINO 设备");
+                form_row(
+                    "OpenVINO 设备",
+                    "选择 OpenVINO Execution Provider 使用的 GPU、CPU 或 NPU 设备类型；严格后端失败时不会静默回退 CPU。");
                 if (ImGui::Combo(
                         "##openvino_device", &device, devices,
                         static_cast<int>(std::size(devices)))) {
@@ -2516,7 +2581,9 @@ struct Overlay::Impl {
                 }
             }
 
-            form_row("设备索引");
+            form_row(
+                "设备索引",
+                "选择 CUDA、TensorRT、DirectML 或 OpenVINO GPU 使用的设备编号；OpenVINO CPU/NPU 固定使用 0。");
             ImGui::BeginDisabled(
                 openvino && app_config.detector.openvino_device !=
                     OpenVinoDevice::GPU);
@@ -2528,21 +2595,29 @@ struct Overlay::Impl {
                 "Anchor + objectness", "End to end"};
             int format =
                 static_cast<int>(app_config.detector.output_format);
-            form_row("输出契约");
+            form_row(
+                "输出契约",
+                "指定模型输出张量的解析方式；Auto 会按张量形状识别，明确选择可在歧义模型上固定契约。");
             if (ImGui::Combo(
                     "##output_format", &format, formats,
                     static_cast<int>(std::size(formats)))) {
                 app_config.detector.output_format =
                     static_cast<OutputFormat>(format);
             }
-            form_row("FP16");
+            form_row(
+                "FP16",
+                "请求后端以半精度执行可支持的算子；实际执行能力仍由所选 Provider、模型和设备决定。");
             toggle_switch(
                 "##enable_fp16", &app_config.detector.enable_fp16);
-            form_row("CUDA Graph");
+            form_row(
+                "CUDA Graph",
+                "TensorRT 固定 shape 会话复用稳定设备地址并重放 CUDA Graph；变化输入正确性仍由正式回归门禁保证。");
             toggle_switch(
                 "##enable_trt_cuda_graph",
                 &app_config.detector.enable_trt_cuda_graph);
-            form_row("GPU 前处理");
+            form_row(
+                "GPU 前处理",
+                "在支持的 CUDA/TensorRT 路径把颜色转换、缩放和归一化放到 GPU；不支持时按显式契约失败或使用既定 CPU 路径。");
             toggle_switch(
                 "##enable_gpu_preprocess",
                 &app_config.detector.enable_gpu_preprocess);
@@ -2554,17 +2629,23 @@ struct Overlay::Impl {
     void render_detector_tuning(AppConfig& app_config) {
         begin_config_panel("tuning_panel", "检测参数", 124.0f);
         if (begin_form("tuning_form", 144.0f)) {
-            form_row("检测阈值");
+            form_row(
+                "检测阈值",
+                "过滤低于该置信度的候选框；提高可减少弱检测，降低会增加候选数量和误检风险。");
             slider_float_control(
                 "conf_threshold",
                 &app_config.detector.conf_threshold,
                 0.01f, 1.0f, "%.2f");
-            form_row("NMS 阈值");
+            form_row(
+                "NMS 阈值",
+                "控制同类候选框非极大值抑制的 IoU 阈值；越低越容易合并重叠框。");
             slider_float_control(
                 "nms_threshold",
                 &app_config.detector.nms_threshold,
                 0.01f, 1.0f, "%.2f");
-            form_row("最大候选数");
+            form_row(
+                "最大候选数",
+                "限制进入 NMS 和后处理的最高置信候选数量，避免异常输出放大延迟和内存占用。");
             ImGui::InputInt("##top_k", &app_config.detector.top_k);
             ImGui::EndTable();
         }
@@ -2600,7 +2681,9 @@ struct Overlay::Impl {
             const char* backends[] = {
                 "本机 DXGI", "UDP MJPEG", "XUDP JPEG", "NDI"};
             int backend = static_cast<int>(app_config.capture.backend);
-            form_row("采集后端");
+            form_row(
+                "采集后端",
+                "选择本机 DXGI 或网络 UDP、XUDP、NDI 画面来源；不同后端使用各自的连接和几何契约。");
             if (ImGui::Combo(
                     "##capture_backend", &backend, backends,
                     static_cast<int>(std::size(backends)))) {
@@ -2608,14 +2691,20 @@ struct Overlay::Impl {
                     static_cast<CaptureBackend>(backend);
             }
             if (udp || xudp) {
-                form_row("UDP 地址");
+                form_row(
+                    "UDP 地址",
+                    "填写 UDP/XUDP 监听地址，例如 udp://0.0.0.0:5000；启动时会严格解析并绑定端口。");
                 ImGui::InputText(
                     "##udp_url", &app_config.capture.udp_url);
-                form_row("读取超时 / ms");
+                form_row(
+                    "读取超时 / ms",
+                    "单次等待网络数据的最长时间；超时用于让采集线程及时检查停止和连接状态。");
                 ImGui::InputInt(
                     "##udp_read_timeout_ms",
                     &app_config.capture.udp_read_timeout_ms);
-                form_row("断流判定 / ms");
+                form_row(
+                    "断流判定 / ms",
+                    "连续未收到完整有效帧达到该时长后判定网络源断开，并向 Runtime 报告明确失败状态。");
                 ImGui::InputInt(
                     "##udp_disconnect_timeout_ms",
                     &app_config.capture.udp_disconnect_timeout_ms);
@@ -2626,7 +2715,9 @@ struct Overlay::Impl {
                         "主机中心 1:1 裁剪"};
                     int layout = static_cast<int>(
                         app_config.capture.udp_frame_layout);
-                    form_row("网络画面语义");
+                    form_row(
+                        "网络画面语义",
+                        "声明接收图像与主机 FOV/中心 ROI 的坐标关系；错误选择会导致检测框到主机坐标映射错误。");
                     if (ImGui::Combo(
                             "##udp_frame_layout", &layout, layouts,
                             static_cast<int>(std::size(layouts)))) {
@@ -2639,29 +2730,41 @@ struct Overlay::Impl {
                         }
                     }
                     if (udp_source_required) {
-                        form_row("主机 FOV 宽度");
+                        form_row(
+                            "主机 FOV 宽度",
+                            "发送端主机完整画面的像素宽度，用于把已缩放或中心裁剪网络帧映射回主机坐标。");
                         ImGui::InputInt(
                             "##udp_source_width",
                             &app_config.capture.udp_source_width);
-                        form_row("主机 FOV 高度");
+                        form_row(
+                            "主机 FOV 高度",
+                            "发送端主机完整画面的像素高度，用于把已缩放或中心裁剪网络帧映射回主机坐标。");
                         ImGui::InputInt(
                             "##udp_source_height",
                             &app_config.capture.udp_source_height);
                     }
                 }
             } else if (ndi) {
-                form_row("NDI 源名称");
+                form_row(
+                    "NDI 源名称",
+                    "指定唯一 NDI 发送源；留空或匹配不唯一时不会猜测连接目标。");
                 ImGui::InputText(
                     "##ndi_source_name", &app_config.capture.ndi_source_name);
-                form_row("发现超时 / ms");
+                form_row(
+                    "发现超时 / ms",
+                    "等待目标 NDI 源出现在发现列表中的最长时间，超时后启动失败并报告原因。");
                 ImGui::InputInt(
                     "##ndi_discovery_timeout_ms",
                     &app_config.capture.ndi_discovery_timeout_ms);
-                form_row("接收超时 / ms");
+                form_row(
+                    "接收超时 / ms",
+                    "单次等待 NDI 视频帧的最长时间；用于保持停止请求和断流检测有界。");
                 ImGui::InputInt(
                     "##ndi_receive_timeout_ms",
                     &app_config.capture.ndi_receive_timeout_ms);
-                form_row("断流判定 / ms");
+                form_row(
+                    "断流判定 / ms",
+                    "连续未收到有效 NDI 视频帧达到该时长后判定断流，并向 Runtime 报告明确失败。");
                 ImGui::InputInt(
                     "##ndi_disconnect_timeout_ms",
                     &app_config.capture.ndi_disconnect_timeout_ms);
@@ -2671,7 +2774,9 @@ struct Overlay::Impl {
                     "主机中心 1:1 裁剪"};
                 int layout = static_cast<int>(
                     app_config.capture.ndi_frame_layout);
-                form_row("网络画面语义");
+                form_row(
+                    "网络画面语义",
+                    "声明 NDI 图像与主机 FOV/中心 ROI 的坐标关系；可由 Xen metadata 提供或使用下方显式尺寸。");
                 if (ImGui::Combo(
                         "##ndi_frame_layout", &layout, layouts,
                         static_cast<int>(std::size(layouts)))) {
@@ -2683,44 +2788,66 @@ struct Overlay::Impl {
                         app_config.capture.ndi_source_height = 0;
                     }
                 }
-                form_row("要求 Xen metadata");
+                form_row(
+                    "要求 Xen metadata",
+                    "开启后每帧必须携带 Xen 几何 metadata，并以其作为主机 FOV 与 ROI 的事实源；缺失或非法时拒绝该帧。");
                 toggle_switch(
                     "##ndi_require_frame_metadata",
                     &app_config.capture.ndi_require_frame_metadata);
                 if (source_fields_visible) {
-                    form_row("主机 FOV 宽度");
+                    form_row(
+                        "主机 FOV 宽度",
+                        "未要求 Xen metadata 时，显式填写发送端主机完整画面的像素宽度以完成坐标映射。");
                     ImGui::InputInt(
                         "##ndi_source_width",
                         &app_config.capture.ndi_source_width);
-                    form_row("主机 FOV 高度");
+                    form_row(
+                        "主机 FOV 高度",
+                        "未要求 Xen metadata 时，显式填写发送端主机完整画面的像素高度以完成坐标映射。");
                     ImGui::InputInt(
                         "##ndi_source_height",
                         &app_config.capture.ndi_source_height);
                 }
             } else {
-                form_row("适配器");
+                form_row(
+                    "适配器",
+                    "选择 DXGI 显卡适配器索引；多 GPU 环境应与目标显示输出所属适配器一致。");
                 ImGui::InputInt(
                     "##adapter_index", &app_config.capture.adapter_index);
-                form_row("显示输出");
+                form_row(
+                    "显示输出",
+                    "选择所用适配器下的 DXGI 显示输出索引，即实际需要截取的桌面显示器。");
                 ImGui::InputInt(
                     "##output_index", &app_config.capture.output_index);
             }
-            form_row("中心 ROI");
+            form_row(
+                "中心 ROI",
+                "开启后按主机 FOV 中心自动计算 ROI 起点；关闭后使用下方 ROI X/Y 显式定位。");
             toggle_switch(
                 "##center_roi", &app_config.capture.center_roi);
-            form_row("ROI 宽度");
+            form_row(
+                "ROI 宽度",
+                "检测输入区域的主机像素宽度；必须与模型和所选 Provider 的 shape 约束兼容。");
             ImGui::InputInt(
                 "##roi_width", &app_config.capture.roi_width);
-            form_row("ROI 高度");
+            form_row(
+                "ROI 高度",
+                "检测输入区域的主机像素高度；必须与模型和所选 Provider 的 shape 约束兼容。");
             ImGui::InputInt(
                 "##roi_height", &app_config.capture.roi_height);
             if (!app_config.capture.center_roi) {
-                form_row("ROI X");
+                form_row(
+                    "ROI X",
+                    "关闭中心 ROI 时，检测区域左上角相对主机 FOV 的水平像素坐标。");
                 ImGui::InputInt("##roi_x", &app_config.capture.roi_x);
-                form_row("ROI Y");
+                form_row(
+                    "ROI Y",
+                    "关闭中心 ROI 时，检测区域左上角相对主机 FOV 的垂直像素坐标。");
                 ImGui::InputInt("##roi_y", &app_config.capture.roi_y);
             }
-            form_row("超时 / ms");
+            form_row(
+                "超时 / ms",
+                "DXGI 获取下一帧的最长等待时间；网络后端也用它约束通用采集轮询等待。");
             ImGui::InputInt(
                 "##acquire_timeout_ms",
                 &app_config.capture.acquire_timeout_ms);
@@ -2755,29 +2882,41 @@ struct Overlay::Impl {
     void render_tracking_form(AppConfig& app_config) {
         begin_config_panel("tracking_panel", "轨迹确认", 232.0f);
         if (begin_form("tracking_form", 126.0f)) {
-            form_row("高置信阈值");
+            form_row(
+                "高置信阈值",
+                "达到该置信度的观测可直接参与轨迹确认；应不低于低置信阈值。");
             slider_float_control(
                 "aim_high_confidence",
                 &app_config.aim.high_confidence,
                 0.01f, 1.0f, "%.2f");
-            form_row("低置信阈值");
+            form_row(
+                "低置信阈值",
+                "保留弱观测用于与已有轨迹关联；低于该值的检测不会进入 Aim 观测集。");
             slider_float_control(
                 "aim_low_confidence",
                 &app_config.aim.low_confidence,
                 0.01f, 1.0f, "%.2f");
-            form_row("确认帧数");
+            form_row(
+                "确认帧数",
+                "新轨迹至少连续命中该帧数后才进入确认状态，减少单帧误检触发。");
             ImGui::InputInt(
                 "##min_confirmed_hits",
                 &app_config.aim.min_confirmed_hits);
-            form_row("最大丢失帧");
+            form_row(
+                "最大丢失帧",
+                "已确认轨迹允许连续缺少观测的帧数；超过后删除轨迹，不再沿用旧目标。");
             ImGui::InputInt(
                 "##max_lost_frames",
                 &app_config.aim.max_lost_frames);
-            form_row("最小 IoU");
+            form_row(
+                "最小 IoU",
+                "观测与预测框关联时要求的最小交并比；与中心距离门槛共同限制错误匹配。");
             slider_float_control(
                 "min_iou", &app_config.aim.min_iou,
                 0.0f, 1.0f, "%.2f");
-            form_row("中心距离");
+            form_row(
+                "中心距离",
+                "观测与预测中心允许的最大归一化距离；越小越保守，快速移动时可能更易断轨。");
             slider_float_control(
                 "max_center_distance",
                 &app_config.aim.max_center_distance,
@@ -2790,24 +2929,34 @@ struct Overlay::Impl {
     void render_selection_form(AppConfig& app_config) {
         begin_config_panel("selection_panel", "目标选择", 196.0f);
         if (begin_form("selection_form", 126.0f)) {
-            form_row("切换优势");
+            form_row(
+                "切换优势",
+                "候选目标评分必须比当前目标至少高出该幅度，才进入切换确认，避免相近目标抖动。");
             slider_float_control(
                 "switch_margin", &app_config.aim.switch_margin,
                 0.0f, 1.0f, "%.2f");
-            form_row("切换确认帧");
+            form_row(
+                "切换确认帧",
+                "新候选连续保持优势达到该帧数后才切换目标。");
             ImGui::InputInt(
                 "##switch_confirm_frames",
                 &app_config.aim.switch_confirm_frames);
-            form_row("切换冷却帧");
+            form_row(
+                "切换冷却帧",
+                "完成一次目标切换后，在该帧数内抑制再次切换，降低多目标来回跳变。");
             ImGui::InputInt(
                 "##switch_cooldown_frames",
                 &app_config.aim.switch_cooldown_frames);
-            form_row("身体瞄准高度");
+            form_row(
+                "身体瞄准高度",
+                "身体框内从顶部向下的瞄点比例；0 为顶部，1 为底部，头部类别使用自身瞄点契约。");
             slider_float_control(
                 "body_aim_height_ratio",
                 &app_config.aim.body_aim_height_ratio,
                 0.0f, 1.0f, "%.2f");
-            form_row("预测增益");
+            form_row(
+                "预测增益",
+                "目标暂时丢失但轨迹仍有效时，对预测控制量施加的比例；0 表示预测帧不移动。");
             slider_float_control(
                 "predicted_gain", &app_config.aim.predicted_gain,
                 0.0f, 1.0f, "%.2f");
@@ -2819,25 +2968,35 @@ struct Overlay::Impl {
     void render_control_form(AppConfig& app_config) {
         begin_config_panel("control_panel", "移动控制", 196.0f);
         if (begin_form("control_form")) {
-            form_row("死区");
+            form_row(
+                "死区",
+                "瞄点误差绝对值落在该像素范围内时不输出对应轴移动，减少准星附近抖动。");
             slider_float_control(
                 "deadzone", &app_config.aim.deadzone_pixels,
                 0.0f, 20.0f, "%.1f px");
-            form_row("平滑系数");
+            form_row(
+                "平滑系数",
+                "当前控制量在指数平滑中的权重；越大响应越快，越小移动越平缓。");
             slider_float_control(
                 "smoothing", &app_config.aim.smoothing,
                 0.0f, 1.0f, "%.2f");
-            form_row("水平 counts / px");
+            form_row(
+                "水平 counts / px",
+                "把主机 FOV 水平像素误差换算为相对鼠标 counts 的比例，不使用辅机桌面分辨率缩放。");
             slider_float_control(
                 "counts_per_pixel_x",
                 &app_config.aim.counts_per_pixel_x,
                 0.01f, 4.0f, "%.2f");
-            form_row("垂直 counts / px");
+            form_row(
+                "垂直 counts / px",
+                "把主机 FOV 垂直像素误差换算为相对鼠标 counts 的比例，不使用辅机桌面分辨率缩放。");
             slider_float_control(
                 "counts_per_pixel_y",
                 &app_config.aim.counts_per_pixel_y,
                 0.01f, 4.0f, "%.2f");
-            form_row("单帧最大 counts");
+            form_row(
+                "单帧最大 counts",
+                "限制每帧每个轴提交的相对移动绝对值，避免异常目标或参数产生突跳。");
             slider_float_control(
                 "max_counts",
                 &app_config.aim.max_counts_per_frame,
@@ -2903,6 +3062,8 @@ struct Overlay::Impl {
                 actions.runtime_intents.push_back(
                     {RuntimeIntentType::RESET_EMERGENCY, false});
             }
+            show_help_tooltip(
+                "仅在所有瞄准输出按键已释放时清除急停锁存；复位后仍保持未武装，必须再次手动武装。");
             ImGui::EndDisabled();
             ImGui::EndChild();
             ImGui::PopStyleVar();
@@ -2942,7 +3103,9 @@ struct Overlay::Impl {
             const char* backends[] = {
                 "Win32 SendInput", "KMBOX NET", "MAKCU"};
             int backend = static_cast<int>(app_config.mouse.backend);
-            form_row("后端");
+            form_row(
+                "后端",
+                "选择物理鼠标命令的提交方式；Win32 使用 SendInput，KMBOX NET 和 MAKCU 使用外部设备并等待协议确认。");
             if (ImGui::Combo(
                     "##mouse_backend", &backend, backends,
                     static_cast<int>(std::size(backends)))) {
@@ -2950,48 +3113,68 @@ struct Overlay::Impl {
                     static_cast<MouseBackend>(backend);
             }
             if (kmbox) {
-                form_row("设备 IPv4");
+                form_row(
+                    "设备 IPv4",
+                    "KMBOX NET 设备的固定 IPv4 地址；命令 ACK 只接受来自该地址和配置端口的响应。");
                 ImGui::InputText(
                     "##kmbox_ip", &app_config.mouse.kmbox_ip);
-                form_row("设备端口");
+                form_row(
+                    "设备端口",
+                    "KMBOX NET 设备监听的 UDP 端口；超出有效端口范围时配置会被拒绝。");
                 ImGui::InputInt(
                     "##kmbox_port", &app_config.mouse.kmbox_port);
-                form_row("设备 UUID");
+                form_row(
+                    "设备 UUID",
+                    "KMBOX 屏幕显示的 8 位十六进制 UUID；仓库不提供或保存设备凭据默认值。");
                 ImGui::InputText(
                     "##kmbox_uuid", &app_config.mouse.kmbox_uuid,
                     ImGuiInputTextFlags_CharsHexadecimal);
-                form_row("连接超时 / ms");
+                form_row(
+                    "连接超时 / ms",
+                    "等待 KMBOX connect 确认的最长时间；失败时设备保持不可用且不发送移动。");
                 ImGui::InputInt(
                     "##kmbox_connect_timeout_ms",
                     &app_config.mouse.kmbox_connect_timeout_ms);
-                form_row("命令超时 / ms");
+                form_row(
+                    "命令超时 / ms",
+                    "等待 KMBOX move ACK 的最长时间；超时或 ACK 校验失败会触发 Runtime 物理输出急停。");
                 ImGui::InputInt(
                     "##kmbox_command_timeout_ms",
                     &app_config.mouse.kmbox_command_timeout_ms);
             } else if (makcu) {
-                form_row("串口");
+                form_row(
+                    "串口",
+                    "MAKCU 设备所在的 Windows 串口名称，例如 COM3；打开失败时不会允许物理输出。");
                 ImGui::InputText(
                     "##makcu_port", &app_config.mouse.makcu_port);
                 const char* baud_rates[] = {"115200", "4000000"};
                 int baud_index =
                     app_config.mouse.makcu_baud_rate == 4000000 ? 1 : 0;
-                form_row("波特率");
+                form_row(
+                    "波特率",
+                    "选择 MAKCU 串口通信速率；必须与设备固件当前配置一致。");
                 if (ImGui::Combo(
                         "##makcu_baud_rate", &baud_index, baud_rates,
                         static_cast<int>(std::size(baud_rates)))) {
                     app_config.mouse.makcu_baud_rate =
                         baud_index == 1 ? 4000000 : 115200;
                 }
-                form_row("连接超时 / ms");
+                form_row(
+                    "连接超时 / ms",
+                    "打开并握手 MAKCU 串口的最长时间；失败时设备保持不可用。");
                 ImGui::InputInt(
                     "##makcu_connect_timeout_ms",
                     &app_config.mouse.makcu_connect_timeout_ms);
-                form_row("命令超时 / ms");
+                form_row(
+                    "命令超时 / ms",
+                    "等待 MAKCU 移动命令确认的最长时间；超时或畸形响应会触发 Runtime 物理输出急停。");
                 ImGui::InputInt(
                     "##makcu_command_timeout_ms",
                     &app_config.mouse.makcu_command_timeout_ms);
             }
-            form_row("物理输出");
+            form_row(
+                "物理输出",
+                "配置级总开关。开启后仍必须启动 Runtime、手动武装、按住瞄准输出键且急停未锁定，Mouse 才会收到命令。");
             toggle_switch(
                 "##allow_send_input",
                 &app_config.mouse.allow_send_input);
@@ -3043,10 +3226,11 @@ struct Overlay::Impl {
     void render_hotkey_row(
             const char* label,
             const char* id,
+            const char* help,
             HotkeyBindingTarget target,
             const std::vector<int>& binding,
             const std::array<bool, 256>& key_active) {
-        form_row(label);
+        form_row(label, help);
         const bool capturing = hotkey_capture_state.active &&
             hotkey_binding_target == target;
         const std::string text = capturing
@@ -3064,6 +3248,7 @@ struct Overlay::Impl {
                 minimum.y + (maximum.y - minimum.y - text_size.y) * 0.5f),
             ImGui::GetColorU32(rgba(capturing ? kAccentStrong : kInk)),
             text.c_str());
+        show_help_tooltip(help);
     }
 
     void render_keyboard_form(
@@ -3102,15 +3287,18 @@ struct Overlay::Impl {
         begin_config_panel("keyboard_panel", "全局按键", 148.0f);
         if (begin_form("keyboard_form", 126.0f)) {
             render_hotkey_row(
-                "运行切换", "##runtime_toggle_virtual_keys",
+                "运行管线启停", "##runtime_toggle_virtual_keys",
+                "按一次启动或停止整个 Runtime 管线；停止会结束截图、检测、瞄准和物理输出。",
                 HotkeyBindingTarget::RUNTIME_TOGGLE,
                 app_config.keyboard.runtime_toggle_virtual_keys, key_active);
             render_hotkey_row(
-                "按住启用", "##aim_hold_virtual_keys",
+                "瞄准输出（按住）", "##aim_hold_virtual_keys",
+                "仅在 Runtime 已运行、物理输出已允许且已武装时生效；按住期间放行瞄准鼠标输出，全部释放后立即关闭。",
                 HotkeyBindingTarget::AIM_HOLD,
                 app_config.keyboard.aim_hold_virtual_keys, key_active);
             render_hotkey_row(
-                "急停", "##emergency_virtual_keys",
+                "物理输出急停", "##emergency_virtual_keys",
+                "按下后立即锁定物理输出，但不会停止截图和检测 Runtime；释放急停键后仍需在界面中手动复位。",
                 HotkeyBindingTarget::EMERGENCY,
                 app_config.keyboard.emergency_virtual_keys, key_active);
             ImGui::EndTable();
@@ -3148,7 +3336,9 @@ struct Overlay::Impl {
     void render_runtime_settings(AppConfig& app_config) {
         begin_config_panel("runtime_panel", "运行统计", 52.0f);
         if (begin_form("runtime_form", 126.0f)) {
-            form_row("分位数窗口");
+            form_row(
+                "分位数窗口",
+                "Runtime 用于计算滚动延迟分位数的最近成功样本数量；失败帧单独计数，不进入 P50/P95。");
             slider_int_control(
                 "profile_window",
                 &app_config.runtime.profile_window,
@@ -3161,13 +3351,21 @@ struct Overlay::Impl {
     void render_ui_settings(AppConfig& app_config) {
         begin_config_panel("ui_panel", "窗口与外观", 160.0f);
         if (begin_form("ui_form", 126.0f)) {
-            form_row("外观主题");
+            form_row(
+                "外观主题",
+                "切换控制台浅色或深色配色；只影响界面显示，不改变 Runtime 或检测参数。");
             theme_selector("ui_theme", &app_config.ui.theme);
-            form_row("宽度");
+            form_row(
+                "宽度",
+                "主控制台启动时的客户区宽度；仍受最小窗口尺寸约束并可在运行时拖动缩放。");
             ImGui::InputInt("##ui_width", &app_config.ui.width);
-            form_row("高度");
+            form_row(
+                "高度",
+                "主控制台启动时的客户区高度；仍受最小窗口尺寸约束并可在运行时拖动缩放。");
             ImGui::InputInt("##ui_height", &app_config.ui.height);
-            form_row("垂直同步");
+            form_row(
+                "垂直同步",
+                "控制 Overlay 交换链 Present 是否等待显示器垂直同步；不改变 Capture、Detector 或控制线程频率。");
             toggle_switch(
                 "##enable_vsync", &app_config.ui.enable_vsync);
             ImGui::EndTable();
