@@ -44,6 +44,9 @@ foreach ($field in @(
 Assert-True ($networkReceiverText -match
     'if \(-not \$runtimeReportPublished\)') `
     "网络门禁拒绝后必须保留已原子发布的 Runtime 报告。"
+Assert-True ($networkReceiverText -match
+    '(?s)throw \(\("网络门禁未通过.*"网络完成标记不发布。"\) -f') `
+    "网络门禁文本必须先拼接完整模板，再应用格式参数。"
 
 . (Join-Path $RepositoryRoot "scripts/runtime_environment.ps1")
 $successQuery = {

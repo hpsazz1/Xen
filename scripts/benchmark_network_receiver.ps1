@@ -248,11 +248,11 @@ try {
             $MaximumTransportInvalidPackets -or
         [uint64]$snapshot.overwritten_frames -gt
             $MaximumRuntimeOverwrittenFrames) {
-        throw ("网络门禁未通过：source_dropped_frames={0}/{1}, " +
+        throw (("网络门禁未通过：source_dropped_frames={0}/{1}, " +
             "transport_dropped_frames={2}/{3}, " +
             "transport_invalid_packets={4}/{5}, " +
             "runtime_overwritten_frames={6}/{7}。Runtime 报告已保留，" +
-            "网络完成标记不发布。" -f
+            "网络完成标记不发布。") -f
             [uint64]$snapshot.source_dropped_frames,
             $MaximumSourceDroppedFrames,
             [uint64]$snapshot.transport_dropped_frames,
