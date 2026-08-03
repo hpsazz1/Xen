@@ -26,6 +26,11 @@ struct OverlayModelCatalog {
     std::vector<std::string> model_names;
 };
 
+// 发布环境只展示清单授权且属于当前 Worker 的后端；开发环境默认包含全部后端。
+struct OverlayBackendCatalog {
+    std::vector<BackendType> backends;
+};
+
 class Overlay {
 public:
     Overlay();
@@ -39,6 +44,7 @@ public:
     bool render(const RuntimeSnapshot& snapshot,
                 const std::shared_ptr<const RuntimePreviewFrame>& preview,
                 const OverlayModelCatalog& model_catalog,
+                const OverlayBackendCatalog& backend_catalog,
                 AppConfig& config,
                 const std::string& app_message,
                 OverlayActions& actions) noexcept;

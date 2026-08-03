@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "source_root": "@XEN_BUILD_SOURCE_ROOT@",
+  "git_commit": "@XEN_BUILD_GIT_COMMIT@",
+  "git_dirty": @XEN_BUILD_GIT_DIRTY@,
+  "runtime": "@XEN_BUILD_RUNTIME_ID@"
+}

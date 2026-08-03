@@ -2324,6 +2324,7 @@ struct Overlay::Impl {
             const RuntimeSnapshot& snapshot,
             const std::shared_ptr<const RuntimePreviewFrame>& preview,
             const OverlayModelCatalog& model_catalog,
+            const OverlayBackendCatalog& backend_catalog,
             AppConfig& app_config,
             bool can_edit,
             OverlayActions& actions) {
@@ -2342,7 +2343,8 @@ struct Overlay::Impl {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             ImGui::BeginDisabled(!detector_editable);
-            render_detector_form(app_config, model_catalog, actions);
+            render_detector_form(
+                app_config, model_catalog, backend_catalog, actions);
             ImGui::EndDisabled();
             ImGui::TableSetColumnIndex(1);
             ImGui::BeginDisabled(!can_edit);
@@ -2351,7 +2353,8 @@ struct Overlay::Impl {
             ImGui::EndTable();
         } else {
             ImGui::BeginDisabled(!detector_editable);
-            render_detector_form(app_config, model_catalog, actions);
+            render_detector_form(
+                app_config, model_catalog, backend_catalog, actions);
             ImGui::EndDisabled();
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
             ImGui::BeginDisabled(!can_edit);
@@ -2413,6 +2416,7 @@ struct Overlay::Impl {
 
     void render_detector_form(AppConfig& app_config,
                               const OverlayModelCatalog& model_catalog,
+                              const OverlayBackendCatalog& backend_catalog,
                               OverlayActions& actions) {
         const bool openvino =
             app_config.detector.backend == BackendType::OPENVINO;
@@ -2464,16 +2468,36 @@ struct Overlay::Impl {
                 actions.refresh_models_requested = true;
             }
 
-            const char* backends[] = {
-                "CUDA", "TensorRT", "DirectML", "OpenVINO", "CPU"};
-            int backend = static_cast<int>(app_config.detector.backend);
-            form_row("推理后端");
-            if (ImGui::Combo(
-                    "##backend", &backend, backends,
-                    static_cast<int>(std::size(backends)))) {
-                app_config.detector.backend =
-                    static_cast<BackendType>(backend);
+            std::vector<const char*> backend_names;
+            backend_names.reserve(backend_catalog.backends.size());
+            int backend_index = -1;
+            for (std::size_t index = 0;
+                 index < backend_catalog.backends.size(); ++index) {
+                const BackendType candidate = backend_catalog.backends[index];
+                switch (candidate) {
+                    case BackendType::CUDA: backend_names.push_back("CUDA"); break;
+                    case BackendType::TENSORRT:
+                        backend_names.push_back("TensorRT"); break;
+                    case BackendType::DIRECTML:
+                        backend_names.push_back("DirectML"); break;
+                    case BackendType::OPENVINO:
+                        backend_names.push_back("OpenVINO"); break;
+                    case BackendType::CPU: backend_names.push_back("CPU"); break;
+                }
+                if (candidate == app_config.detector.backend) {
+                    backend_index = static_cast<int>(index);
+                }
             }
+            form_row("推理后端");
+            ImGui::BeginDisabled(backend_index < 0 || backend_names.empty());
+            if (ImGui::Combo(
+                    "##backend", &backend_index, backend_names.data(),
+                    static_cast<int>(backend_names.size()))) {
+                app_config.detector.backend =
+                    backend_catalog.backends[
+                        static_cast<std::size_t>(backend_index)];
+            }
+            ImGui::EndDisabled();
 
             if (openvino) {
                 const char* devices[] = {"GPU", "CPU", "NPU"};
@@ -3155,6 +3179,7 @@ struct Overlay::Impl {
             const RuntimeSnapshot& snapshot,
             const std::shared_ptr<const RuntimePreviewFrame>& preview,
             const OverlayModelCatalog& model_catalog,
+            const OverlayBackendCatalog& backend_catalog,
             AppConfig& app_config,
             const std::string& app_message,
             OverlayActions& actions) {
@@ -3196,7 +3221,7 @@ struct Overlay::Impl {
                     break;
                 case WorkspacePage::DETECTION:
                     render_detection_config(
-                        snapshot, preview, model_catalog,
+                        snapshot, preview, model_catalog, backend_catalog,
                         app_config, can_edit, actions);
                     break;
                 case WorkspacePage::AIM:
@@ -3339,6 +3364,7 @@ bool Overlay::render(
         const RuntimeSnapshot& snapshot,
         const std::shared_ptr<const RuntimePreviewFrame>& preview,
         const OverlayModelCatalog& model_catalog,
+        const OverlayBackendCatalog& backend_catalog,
         AppConfig& config,
         const std::string& app_message,
         OverlayActions& actions) noexcept {
@@ -3394,7 +3420,7 @@ bool Overlay::render(
             ImGuiWindowFlags_NoScrollWithMouse);
         impl_->render_global_bar(snapshot, actions);
         impl_->render_workspace(
-            snapshot, preview, model_catalog,
+            snapshot, preview, model_catalog, backend_catalog,
             config, app_message, actions);
         const bool detection_page_active =
             impl_->active_page == WorkspacePage::DETECTION;

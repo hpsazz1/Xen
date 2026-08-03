@@ -53,8 +53,25 @@ bool prepare_model_directory(
             return false;
         }
 
-        const std::filesystem::path candidate =
-            executable_path.parent_path() / L"models";
+        return prepare_model_directory_at_root(
+            executable_path.parent_path(), model_directory, error);
+    } catch (...) {
+        model_directory.clear();
+        error = "准备模型目录时发生未知异常";
+        return false;
+    }
+}
+
+bool prepare_model_directory_at_root(
+        const std::filesystem::path& data_root,
+        std::filesystem::path& model_directory,
+        std::string& error) noexcept {
+    try {
+        if (data_root.empty()) {
+            error = "无法确定数据根目录";
+            return false;
+        }
+        const std::filesystem::path candidate = data_root / L"models";
         std::error_code filesystem_error;
         const auto status =
             std::filesystem::symlink_status(candidate, filesystem_error);

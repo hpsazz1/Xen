@@ -15,6 +15,10 @@ bool prepare_model_directory(
     const std::filesystem::path& executable_path,
     std::filesystem::path& model_directory,
     std::string& error) noexcept;
+bool prepare_model_directory_at_root(
+    const std::filesystem::path& data_root,
+    std::filesystem::path& model_directory,
+    std::string& error) noexcept;
 bool prepare_program_model_directory(
     std::filesystem::path& model_directory,
     std::string& error) noexcept;

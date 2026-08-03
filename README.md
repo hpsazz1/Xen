@@ -114,7 +114,8 @@ Xen/                           # 仓库根目录
 - Detector 可在 Runtime 运行期间异步热重载。候选 Session 在独立线程加载，旧模型继续处理帧；
   只有候选完整加载成功后才在两帧之间交换指针。失败保持旧模型和 `RUNNING`，成功后强制解除
   输出武装并重置 Aim 状态；加载窗口拒绝新的武装请求。
-- `Xen.exe` 启动时会创建程序同目录的 `models` 文件夹。检测页只列出该目录根部的普通
+- 开发目录直接启动 `Xen.exe` 时会创建程序同目录的 `models`；正式包从根目录唯一入口
+  `XenLauncher.exe` 启动，三个隔离 Worker 统一使用发布根 `models`。检测页只列出该目录根部的普通
   `.onnx` 文件，可显式刷新并选择模型；配置保存模型文件名，启动或热重载前再解析为程序目录下的
   规范绝对路径，因此不依赖当前工作目录，也不会接受目录穿越、外部路径或符号链接。
 - Detector 支持标准 YOLOv8 兼容实例分割双输出：`[1,4+C+M,A]` prediction 与
@@ -448,6 +449,33 @@ capture=warn
 同步追加到 `<log_dir>/crash_tail.log`。该异常路径不申请堆、不访问 `std::filesystem`、
 spdlog ring 锁或 Log 生命周期锁；每条紧急记录最多 512 字节，超长消息按字节截断。
 
+## 统一发布包
+
+正式发布根只暴露 `XenLauncher.exe`。NVIDIA Worker 承载 CPU、CUDA 和 TensorRT；DirectML 与
+OpenVINO Worker 各自保留独立 `onnxruntime.dll` 闭包。Launcher 启动前校验 schema 1
+`manifest.json` 中全部文件的长度和 SHA-256，并拒绝缺失、篡改、清单外文件、后端越权或同目录
+混放。模型、`config.ini`、日志和缓存固定属于发布根；界面只展示清单授权能力。选择跨运行时后端
+并保存时，当前 Worker 先停止 Runtime、解除武装并关闭报告，再由 Launcher 启动目标 Worker；
+新进程不会继承运行态武装。
+
+统一包必须从同一干净 commit 的三套全新 Release 构建生成。脚本复核构建身份、部署报告、Provider
+闭包、源/目标 SHA-256 和许可证输入，在唯一 incoming 目录完成后原子改名；禁止从旧
+`build-matrix-final-cpu` 手工复制二进制。当前 Worker 继续包含独立置顶检测预览、F8 Runtime
+Toggle 以及多键/鼠标快捷键等已完成 App 功能。示例：
+
+```powershell
+.\scripts\publish_release_bundle.ps1 `
+  -NvidiaBuildDirectory ".\build-release-nvidia" `
+  -DirectMlBuildDirectory ".\build-release-directml" `
+  -OpenVinoBuildDirectory ".\build-release-openvino" `
+  -ModelPath ".\models\14wv11.onnx" `
+  -LicenseFiles @("C:\path\to\ORT-LICENSE", "C:\path\to\OpenCV-LICENSE") `
+  -OutputDirectory ".\artifacts\Xen-release"
+```
+
+`RELEASE-BUNDLE-001` 的本机包验证不能替代无开发 SDK 目标机门禁；同一已验包仍须由
+`DEPLOY-CLEANHOST-001` 在 clean host 验证。
+
 ## 构建状态
 
 源码路径已同步到 `Xen/`，并提供 Detector 纯算法测试。Windows 推荐使用 VS 2026 的多配置生成器：
@@ -467,19 +495,20 @@ ctest --test-dir build -C Release --output-on-failure
 上次 Provider/SDK 遗留的已知运行库；当前来源与 SHA-256 记录在同目录的
 `xen-runtime-deployment.json`。
 
-默认 `BUILD_TESTING=ON` 当前注册 17 个 CTest，按风险分为五层：
+默认 `BUILD_TESTING=ON` 当前注册 19 个 CTest，按风险分为五层：
 
 - 纯算法与内部契约：Detector 解码/前处理、Aim、真值解析、Runtime 队列、Overlay 标量环；
 - 生产库回归：Log、Config、Debug、Benchmark 和 Mouse Benchmark 直接链接生产目标；
-- OS/网络/部署可复现替身：Crash 子进程、App 模型目录、运行库授权清单两阶段切换、
+- OS/网络/部署可复现替身：Crash 子进程、App 模型目录、发布环境/清单、统一包原子组装、
+  运行库授权清单两阶段切换、
   UDP/XUDP/NDI 回环、假 KMBOX 与 Keyboard 状态机；
 - 可选真实模型集成：设置 `XEN_TEST_MODEL` 后增加 Detector 加载/变化输入和 Runtime 热重载；
 - 只有实际配置 TensorRT SDK 的真实模型构建才增加 D3D11/CUDA 纹理预注册、连续变化输入、
-  Graph 输出指纹与 CPU 对照；CPU/CUDA-only 为 19 个 CTest，TensorRT 为 20 个；
+  Graph 输出指纹与 CPU 对照；CPU/CUDA-only 为 21 个 CTest，TensorRT 为 22 个；
 - DirectML 真实模型构建还增加 D3D11/DirectML 共享纹理与 fence 测试，用饱和
-  红/蓝变化输入核对通道、原始输出指纹、检测结果和零显式输入复制，当前共 20 个 CTest；
+  红/蓝变化输入核对通道、原始输出指纹、检测结果和零显式输入复制，当前共 22 个 CTest；
 - OpenVINO 真实模型构建增加严格 Provider、变化输入、非法输入状态和 ORT 节点 profile
-  测试；指定 `XEN_TEST_OPENVINO_DEVICE=CPU|GPU|NPU` 后当前共注册 20 个 CTest；
+  测试；指定 `XEN_TEST_OPENVINO_DEVICE=CPU|GPU|NPU` 后当前共注册 22 个 CTest；
 - 正式性能与部署验收：使用 `scripts/benchmark_*.ps1`，不把短单元测试耗时写成性能结论。
 
 测试不得复制一套生产协议或算法，不得因环境缺失静默回退后端，也不得通过删除、跳过或放宽
@@ -849,4 +878,4 @@ config.trt_cache_path = "cache/tensorrt";
 
 ## 技术栈
 
-C++20 / ONNX Runtime / OpenCV / spdlog / CMake
+C++20 / ONNX Runtime / OpenCV / spdlog / SimpleIni / Dear ImGui / nlohmann/json / CMake

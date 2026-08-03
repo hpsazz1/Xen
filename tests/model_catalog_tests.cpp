@@ -129,12 +129,24 @@ void test_reject_non_directory_models_path() {
            "models 被同名文件占用时必须失败关闭");
 }
 
+void test_release_root_model_directory() {
+    TemporaryDirectory temporary;
+    std::filesystem::path model_directory;
+    std::string error;
+    expect(app::detail::prepare_model_directory_at_root(
+               temporary.path(), model_directory, error) &&
+               model_directory == std::filesystem::weakly_canonical(
+                   temporary.path() / "models"),
+           "隔离 Worker 必须共享发布根 models，而不是自身运行时目录: " + error);
+}
+
 } // namespace
 
 int main() {
     test_prepare_and_list_models();
     test_normalize_and_resolve_selection();
     test_reject_non_directory_models_path();
+    test_release_root_model_directory();
     if (failures != 0) {
         std::cerr << "模型目录测试失败数: " << failures << '\n';
         return 1;

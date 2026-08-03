@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include "app/model_catalog_internal.h"
+#include "app/release_contract_internal.h"
 #include "config/config.h"
 #include "crash/crash.h"
 #include "debug/debug.h"
@@ -31,20 +32,36 @@ void append_message(std::string& message, const std::string& addition) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    constexpr const char* kConfigPath = "config.ini";
+    app::detail::ReleaseEnvironment release_environment;
+    std::string release_error;
+    if (!app::detail::load_release_environment(
+            release_environment, release_error) ||
+        !app::detail::apply_release_working_directory(
+            release_environment, release_error)) {
+        MessageBoxA(
+            nullptr, release_error.c_str(), "Xen",
+            MB_OK | MB_ICONERROR);
+        return 1;
+    }
+    const std::string config_path = release_environment.managed
+        ? app::detail::path_to_utf8(
+              release_environment.root / L"config.ini")
+        : "config.ini";
     AppConfig config;
     std::string app_message;
     std::string config_error;
-    if (!load_app_config(kConfigPath, config, config_error)) {
+    if (!load_app_config(config_path, config, config_error)) {
         app_message = config_error + "；请在配置页填写并保存。";
     }
 
     std::filesystem::path model_directory;
     OverlayModelCatalog model_catalog;
     std::string model_error;
-    const bool model_directory_ready =
-        app::detail::prepare_program_model_directory(
-            model_directory, model_error);
+    const bool model_directory_ready = release_environment.managed
+        ? app::detail::prepare_model_directory_at_root(
+              release_environment.root, model_directory, model_error)
+        : app::detail::prepare_program_model_directory(
+              model_directory, model_error);
     if (model_directory_ready) {
         model_catalog.directory =
             app::detail::path_to_utf8(model_directory);
@@ -78,6 +95,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     };
     if (model_directory_ready && !refresh_models()) {
         append_message(app_message, model_error);
+    }
+
+    OverlayBackendCatalog backend_catalog;
+    backend_catalog.backends = release_environment.available_backends;
+    if (!app::detail::backend_allowed(
+            backend_catalog.backends, config.detector.backend)) {
+        append_message(app_message, "配置请求的推理后端未被发布清单授权");
     }
 
     const auto resolve_detector_config = [&](DetectorConfig& detector) {
@@ -119,6 +143,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     DebugReport debug_report;
     bool debug_session_active = false;
     bool detector_reload_pending = false;
+    bool release_restart_requested = false;
     std::string debug_run_id;
     std::uint64_t debug_segment = 0;
     std::vector<RuntimePipelineSample> pending_debug_samples;
@@ -173,6 +198,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     };
 
     const auto start_runtime_session = [&]() {
+        if (release_environment.managed &&
+            app::detail::runtime_for_backend(config.detector.backend) !=
+                release_environment.runtime_id) {
+            app_message = "该后端属于其他隔离运行时，请先保存配置以安全重启。";
+            return;
+        }
         AppConfig runtime_config = config;
         if (!resolve_detector_config(runtime_config.detector)) {
             app_message = model_error;
@@ -230,7 +261,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             ? runtime.preview_frame()
             : nullptr;
         if (!overlay.render(
-                snapshot, preview, model_catalog,
+                snapshot, preview, model_catalog, backend_catalog,
                 config, app_message, actions)) {
             LOG_ERROR("app", "Overlay 渲染失败");
             break;
@@ -291,10 +322,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         if (actions.reload_detector_requested &&
             !actions.stop_requested) {
             DetectorConfig detector_config = config.detector;
-            const bool detector_config_resolved =
+            const bool wrong_release_runtime =
+                release_environment.managed &&
+                app::detail::runtime_for_backend(detector_config.backend) !=
+                    release_environment.runtime_id;
+            const bool detector_config_resolved = !wrong_release_runtime &&
                 resolve_detector_config(detector_config);
+            if (wrong_release_runtime) {
+                app_message =
+                    "该后端属于其他隔离运行时，请保存配置以安全重启。";
+            }
             if (!detector_config_resolved) {
-                app_message = model_error;
+                if (!wrong_release_runtime) app_message = model_error;
             } else {
                 finish_debug_report();
             }
@@ -324,7 +363,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             if (!resolve_detector_config(detector_config)) {
                 app_message = model_error;
             } else if (save_app_config(
-                           kConfigPath, config, config_error)) {
+                           config_path, config, config_error)) {
+                const bool cross_runtime_restart =
+                    release_environment.managed &&
+                    app::detail::runtime_for_backend(config.detector.backend) !=
+                        release_environment.runtime_id;
+                if (cross_runtime_restart) {
+                    stop_runtime_session();
+                    release_restart_requested = true;
+                    break;
+                }
                 KeyboardListener replacement(config.keyboard);
                 if (replacement.open()) {
                     keyboard.close();
@@ -345,5 +393,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     overlay.shutdown();
     crash_handler.uninstall();
     Log::shutdown();
-    return 0;
+    return release_restart_requested
+        ? static_cast<int>(app::detail::kReleaseRestartExitCode)
+        : 0;
 }

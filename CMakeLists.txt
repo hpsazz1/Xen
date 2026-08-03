@@ -197,6 +197,46 @@ else()
     set(XEN_ONNXRUNTIME_HAS_CUDA FALSE)
 endif()
 
+# 每个独立构建目录记录配置时的源码提交和运行时归属。正式组包只消费
+# dirty=false、提交一致且归属唯一的全新构建，拒绝用旧矩阵二进制拼包。
+if(XEN_ONNXRUNTIME_HAS_DIRECTML)
+    set(XEN_BUILD_RUNTIME_ID "directml")
+elseif(XEN_ONNXRUNTIME_HAS_OPENVINO)
+    set(XEN_BUILD_RUNTIME_ID "openvino")
+else()
+    set(XEN_BUILD_RUNTIME_ID "nvidia")
+endif()
+find_package(Git REQUIRED)
+execute_process(
+    COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    RESULT_VARIABLE XEN_GIT_COMMIT_RESULT
+    OUTPUT_VARIABLE XEN_BUILD_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+    COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=normal
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    RESULT_VARIABLE XEN_GIT_STATUS_RESULT
+    OUTPUT_VARIABLE XEN_BUILD_GIT_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+string(LENGTH "${XEN_BUILD_GIT_COMMIT}" XEN_BUILD_GIT_COMMIT_LENGTH)
+if(NOT XEN_GIT_COMMIT_RESULT EQUAL 0 OR
+   NOT XEN_GIT_STATUS_RESULT EQUAL 0 OR
+   NOT XEN_BUILD_GIT_COMMIT MATCHES "^[0-9a-fA-F]+$" OR
+   NOT XEN_BUILD_GIT_COMMIT_LENGTH EQUAL 40)
+    message(FATAL_ERROR "Cannot record Xen build Git identity")
+endif()
+if(XEN_BUILD_GIT_STATUS STREQUAL "")
+    set(XEN_BUILD_GIT_DIRTY false)
+else()
+    set(XEN_BUILD_GIT_DIRTY true)
+endif()
+file(TO_CMAKE_PATH "${PROJECT_SOURCE_DIR}" XEN_BUILD_SOURCE_ROOT)
+configure_file(
+    "${PROJECT_SOURCE_DIR}/scripts/build_identity.json.in"
+    "${CMAKE_BINARY_DIR}/xen-build-identity.json"
+    @ONLY)
+
 # TensorRT SDK 的 DLL major 必须与 ORT TensorRT Provider 的导入依赖一致。
 # 不能根据本机安装版本猜测，否则 Provider 会在 Session 创建时才因 ABI 不匹配失败。
 if(XEN_TENSORRT_ROOT)
@@ -487,6 +527,14 @@ FetchContent_Declare(simpleini
     SOURCE_SUBDIR  _xen_no_cmake)
 FetchContent_MakeAvailable(simpleini)
 
+# 发布入口使用严格 JSON schema 解析能力、文件长度与 SHA-256，避免用字符串扫描
+# 处理安全边界清单。该依赖仅进入 Launcher/发布契约测试，不进入推理热路径。
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.12.0)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # Dear ImGui 上游不提供正式 CMake target，由 Xen 明确列出 Win32/D3D11 后端
 # 与 std::string 适配源码，避免隐式编译无关示例和平台后端。
 FetchContent_Declare(imgui
@@ -652,6 +700,15 @@ target_include_directories(config
         ${simpleini_SOURCE_DIR})
 target_link_libraries(config PUBLIC log)
 
+add_library(app_release STATIC
+    Xen/app/release_contract.cpp)
+target_include_directories(app_release PUBLIC
+    ${PROJECT_SOURCE_DIR}/Xen
+    ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(app_release
+    PUBLIC nlohmann_json::nlohmann_json
+    PRIVATE bcrypt)
+
 add_library(runtime STATIC
     Xen/runtime/runtime.cpp
     Xen/runtime/runtime_queue.cpp)
@@ -694,10 +751,17 @@ add_executable(xen_app WIN32
     Xen/app/xen.rc)
 set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
 target_link_libraries(xen_app PRIVATE
-    overlay runtime xen_debug config crash log)
+    overlay runtime xen_debug config crash log app_release)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_app OPENCV ORT NDI)
 endif()
+
+add_executable(xen_launcher WIN32
+    Xen/app/launcher.cpp
+    Xen/app/model_catalog.cpp
+    Xen/app/xen.rc)
+set_target_properties(xen_launcher PROPERTIES OUTPUT_NAME XenLauncher)
+target_link_libraries(xen_launcher PRIVATE app_release config)
 
 add_executable(xen_sender
     Xen/sender/main.cpp)
@@ -903,6 +967,17 @@ if(BUILD_TESTING)
     target_include_directories(
         model_catalog_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
     add_test(NAME model_catalog_tests COMMAND model_catalog_tests)
+
+    add_executable(release_contract_tests
+        tests/release_contract_tests.cpp)
+    target_link_libraries(release_contract_tests PRIVATE app_release)
+    add_test(NAME release_contract_tests COMMAND release_contract_tests)
+
+    add_test(NAME release_bundle_tests
+        COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/tests/release_bundle_tests.ps1"
+            -PublishScript "${PROJECT_SOURCE_DIR}/scripts/publish_release_bundle.ps1"
+            -TestRoot "${CMAKE_BINARY_DIR}/release-bundle-tests")
 
     add_executable(debug_tests
         tests/debug_tests.cpp)
