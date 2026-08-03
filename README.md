@@ -351,7 +351,7 @@ Runtime 覆盖；`<prefix>.network.json` 最后发布才表示网络接收报告
 
 辅机没有 Visual Studio、CMake、Git 或 SDK 时，主机使用便携包发布脚本。它先构建 NDI 组合的
 `XenBenchmark`，核对构建期部署来源和 SHA-256，再把 CPU 接收程序、模型、UDP/XUDP/NDI
-运行库与三个接收脚本封装到逐文件哈希清单，并通过 SMB 临时目录校验后原位发布。包不包含
+运行库、三个接收入口和内部环境采集脚本封装到逐文件哈希清单，并通过 SMB 临时目录校验后原位发布。包不包含
 KMBOX UUID，也不允许物理输出：
 
 ```powershell
@@ -396,6 +396,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 `build.provenance_mode=portable_package_manifest` 明确区分该证据来源。UDP/NDI 只允许
 `GeometryStatic`、`Shuttle`、`SoakFreeRun` 三个对照锚点；报告统一写入
 `C:\XenLab\reports`，ready 文件写入 `C:\XenLab\runs`。
+
+辅机可以使用非管理员 `XenDeploy` 账户通过项目专用 SSH 密钥运行正式接收脚本。若精简系统拒绝
+该账户读取 WMI 硬件清单，环境报告会保留 `hardware.inventory_status=partial` 和明确错误，并用
+只读注册表或系统版本补足 OS；这只表示辅助硬件清单不完整，不会放宽 Provider、几何、逐帧失败、
+网络丢弃、Runtime 覆盖、包哈希或物理输出门禁。
 
 2026-08-01 在 RTX 5070 Ti、本机 DXGI、`2560x1440` 中心 `320x320` ROI 上完成 5 分钟正式
 基准；三组均为零失败、零报告/Runtime 丢弃且没有物理 Mouse 命令。`total` 从 Capture 发布完成

@@ -7,7 +7,7 @@
     [string]$CaptureBackend = "xudp_jpeg",
     [ValidateSet("Prepare", "Run")]
     [string]$Mode = "Prepare",
-    [string]$PackageRoot = (Join-Path $PSScriptRoot ".."),
+    [string]$PackageRoot = "",
     [string]$ReportRoot = "C:\XenLab\reports",
     [string]$RunRoot = "C:\XenLab\runs",
     [string]$ListenUrl = "udp://0.0.0.0:5000",
@@ -15,6 +15,12 @@
 )
 
 $ErrorActionPreference = "Stop"
+
+# Windows PowerShell 在参数默认值求值阶段可能尚未设置 $PSScriptRoot。
+# 路径默认值必须在脚本体内解析，保证从 System32 等任意工作目录启动均稳定。
+if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
+    $PackageRoot = Join-Path $PSScriptRoot ".."
+}
 
 if ($CaptureBackend -ne "xudp_jpeg" -and
     $Scenario -notin @("GeometryStatic", "Shuttle", "SoakFreeRun")) {

@@ -59,6 +59,12 @@
 
 $ErrorActionPreference = "Stop"
 
+$environmentScript = Join-Path $PSScriptRoot "runtime_environment.ps1"
+if (-not (Test-Path -LiteralPath $environmentScript -PathType Leaf)) {
+    throw "Runtime 环境采集脚本不存在：$environmentScript"
+}
+. $environmentScript
+
 if ([string]::IsNullOrWhiteSpace($BuildDirectory) -and
     [string]::IsNullOrWhiteSpace($PackageManifestPath)) {
     $BuildDirectory = Join-Path $PSScriptRoot "..\build"
@@ -205,6 +211,7 @@ function Assert-PortablePackage {
         "scripts/benchmark_runtime.ps1",
         "scripts/benchmark_network_receiver.ps1",
         "scripts/invoke_dual_machine_receiver.ps1",
+        "scripts/runtime_environment.ps1",
         [string]$document.model.relative_path
     )
     foreach ($relativePath in $requiredPaths) {
@@ -988,13 +995,7 @@ $gitStatus = if ($portablePackage) {
 if (-not $portablePackage -and $LASTEXITCODE -ne 0) {
     throw "读取 Git 工作树状态失败。"
 }
-$gpu = @(Get-CimInstance Win32_VideoController | ForEach-Object {
-    [ordered]@{
-        name = $_.Name
-        driver_version = $_.DriverVersion
-        adapter_ram = [long]$_.AdapterRAM
-    }
-})
+$hardwareInventory = Get-XenRuntimeHardwareInventory
 $environment = [ordered]@{
     schema = 1
     complete = $true
@@ -1039,11 +1040,7 @@ $environment = [ordered]@{
         model = $modelAfter
         config = $configAfter
     }
-    hardware = [ordered]@{
-        computer_name = $env:COMPUTERNAME
-        os = (Get-CimInstance Win32_OperatingSystem).Caption
-        gpu = $gpu
-    }
+    hardware = $hardwareInventory
     benchmark = [ordered]@{
         backend = $Backend
         openvino_device = if ($Backend -eq "openvino") {
