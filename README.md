@@ -368,6 +368,10 @@ Provider，发布脚本会根据部署报告拒绝缺少 CUDA/TensorRT DLL 的�
   -DestinationRoot "\\192.168.3.20\XenLab$"
 ```
 
+DirectML 使用独立 ORT 发行包和构建目录，禁止加入上述 NVIDIA 包。发布 DML 包时使用对应的
+DirectML 构建目录并传入 `-AllowedBackends cpu,directml`；脚本只有在部署报告包含
+`DirectML.dll` 时才会授权 `directml`。
+
 若构建进程与已保存 SMB 凭据的交互式 PowerShell 不在同一 Windows 会话，可先用
 `-SkipPublish` 只生成本地包，再在已映射共享的同一控制台执行纯传输入口；该入口仍会在复制前后
 核对逐文件哈希，并通过 `.incoming-*` 原位发布：

@@ -5,7 +5,7 @@
     [string]$Scenario,
     [ValidateSet("xudp_jpeg", "udp_mjpeg", "ndi")]
     [string]$CaptureBackend = "xudp_jpeg",
-    [ValidateSet("cpu", "cuda", "tensorrt")]
+    [ValidateSet("cpu", "cuda", "tensorrt", "directml")]
     [string]$Backend = "cpu",
     [ValidateSet("Prepare", "Run")]
     [string]$Mode = "Prepare",

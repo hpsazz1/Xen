@@ -9,7 +9,7 @@
         "..\cache\dual-machine-packages"),
     [string]$DestinationRoot = "\\192.168.3.20\XenLab$",
     [string]$PackageId = "",
-    [ValidateSet("cpu", "cuda", "tensorrt")]
+    [ValidateSet("cpu", "cuda", "tensorrt", "directml")]
     [string[]]$AllowedBackends = @("cpu"),
     [switch]$SkipBuild,
     [switch]$SkipPublish
@@ -145,6 +145,9 @@ $availableBackends = [System.Collections.Generic.HashSet[string]]::new(
 [void]$availableBackends.Add("cpu")
 if ($deployedNames.Contains("onnxruntime_providers_cuda.dll")) {
     [void]$availableBackends.Add("cuda")
+}
+if ($deployedNames.Contains("DirectML.dll")) {
+    [void]$availableBackends.Add("directml")
 }
 if ($deployedNames.Contains("onnxruntime_providers_tensorrt.dll") -and
     $deployedNames.Contains("onnxruntime_providers_cuda.dll") -and

@@ -102,15 +102,18 @@ try {
         ($fixtureManifest | ConvertTo-Json -Depth 5),
         [System.Text.UTF8Encoding]::new($false))
     $ErrorActionPreference = "Continue"
-    $providerOutput = @(& powershell.exe -NoProfile `
-        -ExecutionPolicy Bypass -File $invokeScript `
-        -Scenario GeometryStatic -Mode Prepare `
-        -PackageRoot $fixtureRoot -Backend tensorrt 2>&1)
-    $providerExitCode = $LASTEXITCODE
+    foreach ($backend in @("tensorrt", "directml")) {
+        $providerOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File $invokeScript `
+            -Scenario GeometryStatic -Mode Prepare `
+            -PackageRoot $fixtureRoot -Backend $backend 2>&1)
+        $providerExitCode = $LASTEXITCODE
+        Assert-True ($providerExitCode -ne 0 -and
+            ($providerOutput -join "`n") -match
+                "便携包不允许 Provider：$backend") `
+            "远程入口必须在访问模型前拒绝清单未授权的 Provider：$backend。"
+    }
     $ErrorActionPreference = $previousErrorActionPreference
-    Assert-True ($providerExitCode -ne 0 -and
-        ($providerOutput -join "`n") -match "便携包不允许 Provider：tensorrt") `
-        "远程入口必须在访问模型前拒绝清单未授权的 Provider。"
 } finally {
     $ErrorActionPreference = $previousErrorActionPreference
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force `
