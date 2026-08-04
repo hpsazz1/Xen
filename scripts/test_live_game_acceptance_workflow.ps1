@@ -108,17 +108,59 @@ try {
     $reportPath = Join-Path $runtimeDirectory "synthetic.json"
     $csvPath = Join-Path $runtimeDirectory "synthetic.csv"
     $synthetic = [ordered]@{
-        schema = 6
+        schema = 7
         session_id = "synthetic"
         model_path = $fixedModel
         provider = "CPUExecutionProvider"
         capture_backend = "DESKTOP_DUPLICATION"
         mouse_backend = "win32_send_input"
+        performance_probes_enabled = $false
         sample_count = 1200
         successful_samples = 1200
         failed_samples = 0
         report_samples_dropped = 0
         runtime_samples_dropped = 0
+        coverage = [ordered]@{
+            available = $true
+            warmup_start_overwritten_frames = 0
+            warmup_end_overwritten_frames = 0
+            formal_end_overwritten_frames = 0
+            startup = [ordered]@{
+                sample_count = 1
+                first_sequence = 1
+                last_sequence = 1
+                runtime_overwritten_frames = 0
+                sequence_gaps = 0
+                trailing_runtime_overwritten_frames = 0
+                counter_matches_sequence_gaps = $true
+            }
+            warmup = [ordered]@{
+                sample_count = 100
+                first_sequence = 2
+                last_sequence = 101
+                runtime_overwritten_frames = 0
+                sequence_gaps = 0
+                trailing_runtime_overwritten_frames = 0
+                counter_matches_sequence_gaps = $true
+            }
+            formal = [ordered]@{
+                sample_count = 1200
+                first_sequence = 102
+                last_sequence = 1301
+                runtime_overwritten_frames = 0
+                sequence_gaps = 0
+                trailing_runtime_overwritten_frames = 0
+                counter_matches_sequence_gaps = $true
+            }
+        }
+        ndi_video_queue_depth = [ordered]@{
+            sample_count = 0
+            mean_frames = 0.0
+            p50_frames = 0.0
+            p95_frames = 0.0
+            p99_frames = 0.0
+            max_frames = 0.0
+        }
         final_snapshot = [ordered]@{
             provider = "CPUExecutionProvider"
             source_width = 2560
@@ -179,7 +221,37 @@ try {
                 0.864 -and
             $summary.detection_observability.classes[2].confidence.detected_frames `
                 -eq 0) `
-        "合法 schema 6 报告应完成自动汇总"
+        "合法 schema 7 报告应完成自动汇总"
+
+    $synthetic.schema = 6
+    [System.IO.File]::WriteAllText(
+        $reportPath, (($synthetic | ConvertTo-Json -Depth 8) + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    & $workflow -Mode Collect -Stage DetectionStatic `
+        -RunDirectory $observationRun | Out-Null
+    $oldSchemaSummary = Get-Content -LiteralPath (
+        Join-Path $observationRun "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    Expect (-not [bool]$oldSchemaSummary.automatic_complete -and
+            ($oldSchemaSummary.failures -join "`n") -match
+                '报告 schema 不是 7') `
+        "旧 schema 报告必须拒绝自动通过"
+    $synthetic.schema = 7
+
+    $synthetic.performance_probes_enabled = $true
+    [System.IO.File]::WriteAllText(
+        $reportPath, (($synthetic | ConvertTo-Json -Depth 8) + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    & $workflow -Mode Collect -Stage DetectionStatic `
+        -RunDirectory $observationRun | Out-Null
+    $probeSummary = Get-Content -LiteralPath (
+        Join-Path $observationRun "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    Expect (-not [bool]$probeSummary.automatic_complete -and
+            ($probeSummary.failures -join "`n") -match
+                '必须显式关闭性能探针') `
+        "开启性能探针的报告必须拒绝作为实机验收证据"
+    $synthetic.performance_probes_enabled = $false
 
     $synthetic.final_snapshot.preview_sampled_frames = 0
     [System.IO.File]::WriteAllText(

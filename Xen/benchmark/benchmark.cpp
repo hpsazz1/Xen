@@ -8,6 +8,7 @@
 #endif
 
 #include "benchmark/benchmark.h"
+#include "benchmark/benchmark_internal.h"
 
 #include "capture/capture.h"
 #include "config/config.h"
@@ -211,6 +212,85 @@ RuntimeFrameGeometry snapshot_geometry(
 bool same_double(double first, double second) noexcept {
     return std::isfinite(first) && std::isfinite(second) &&
            std::abs(first - second) <= 1e-6;
+}
+
+bool validate_performance_probe_sample(
+        const RuntimePipelineSample& sample,
+        CaptureBackend capture_backend,
+        bool probes_enabled,
+        std::string& error) noexcept {
+    const auto& capture = sample.capture_stages;
+    const auto& service = sample.service;
+    if (service.valid != probes_enabled ||
+        capture.runtime_handoff_valid != probes_enabled ||
+        (capture_backend == CaptureBackend::NDI &&
+         capture.ndi_valid != probes_enabled)) {
+        set_error(error, "样本性能探针有效位不符合请求");
+        return false;
+    }
+    if (!probes_enabled) return true;
+
+    const auto finite_nonnegative = [](double value) noexcept {
+        return std::isfinite(value) && value >= 0.0;
+    };
+    const double service_values[] = {
+        service.preview_ms,
+        service.snapshot_ms,
+        service.snapshot_lock_wait_ms,
+        service.debug_ring_ms,
+        service.profile_window_ms,
+        service.service_tail_ms,
+        service.pipeline_service_ms,
+        service.pipeline_complete_ms,
+        capture.runtime_capture_grab_ms,
+        capture.runtime_queue_publish_ms,
+    };
+    for (const double value : service_values) {
+        if (!finite_nonnegative(value)) {
+            set_error(error, "样本 Runtime 收尾探针出现非法耗时");
+            return false;
+        }
+    }
+    if (service.snapshot_ms + 1e-6 < service.snapshot_lock_wait_ms ||
+        service.snapshot_ms + 1e-6 < service.debug_ring_ms ||
+        service.snapshot_ms + 1e-6 < service.profile_window_ms ||
+        service.service_tail_ms + 1e-6 < service.preview_ms ||
+        service.service_tail_ms + 1e-6 < service.snapshot_ms ||
+        std::abs(service.pipeline_complete_ms -
+                 (sample.profile.total_ms + service.service_tail_ms)) > 0.01 ||
+        std::abs(service.pipeline_service_ms -
+                 (service.pipeline_complete_ms - sample.profile.queue_ms)) >
+            0.01) {
+        set_error(error, "样本 Runtime 收尾探针边界或包含关系不成立");
+        return false;
+    }
+    if (capture_backend == CaptureBackend::NDI) {
+        const double ndi_values[] = {
+            capture.receive_call_ms,
+            capture.metadata_ms,
+            capture.geometry_ms,
+            capture.pool_acquire_ms,
+            capture.color_convert_ms,
+            capture.pool_publish_ms,
+        };
+        for (const double value : ndi_values) {
+            if (!finite_nonnegative(value)) {
+                set_error(error, "样本 NDI 分段探针出现非法耗时");
+                return false;
+            }
+        }
+        if ((capture.performance_query_sampled &&
+             !finite_nonnegative(capture.performance_query_ms)) ||
+            (capture.queue_depth_sampled &&
+             (!finite_nonnegative(capture.queue_query_ms) ||
+              capture.queued_video_frames < 0 ||
+              capture.queued_audio_frames < 0 ||
+              capture.queued_metadata_frames < 0))) {
+            set_error(error, "样本 NDI 低频查询探针出现非法结果");
+            return false;
+        }
+    }
+    return true;
 }
 
 bool validate_runtime_snapshot(
@@ -633,6 +713,12 @@ BenchmarkParseStatus parse_benchmark_options(
                     set_error(error, "--gpu-preprocess 必须是 on/off");
                     return BenchmarkParseStatus::INVALID;
                 }
+            } else if (argument == L"--performance-probes") {
+                if (!parse_switch(
+                        value, parsed.enable_performance_probes)) {
+                    set_error(error, "--performance-probes 必须是 on/off");
+                    return BenchmarkParseStatus::INVALID;
+                }
             } else if (argument == L"--d3d11-cuda-interop") {
                 if (!parse_switch(
                         value, parsed.enable_d3d11_cuda_interop)) {
@@ -848,6 +934,7 @@ std::string benchmark_usage() {
         "  --fp16 on|off            TensorRT FP16，默认 on\n"
         "  --cuda-graph on|off      TensorRT CUDA Graph，默认 on\n"
         "  --gpu-preprocess on|off  CUDA 前处理，默认 on\n"
+        "  --performance-probes on|off  NDI/Runtime 分段探针，默认 off\n"
         "  --d3d11-cuda-interop on|off  DXGI GPU-only 输入，默认 off\n"
         "  --d3d11-directml-interop on|off  DXGI→DML GPU-only 输入，默认 off\n"
         "  --help                   显示帮助\n";
@@ -927,6 +1014,8 @@ bool run_runtime_benchmark(
         config.detector.enable_output_fingerprint = false;
         config.detector.enable_ort_profiling = false;
         config.detector.ort_profile_prefix.clear();
+        config.runtime.enable_performance_probes =
+            options.enable_performance_probes;
         // 基准从不武装 SafetyGate，并强制使用禁用的 Win32 后端。即使配置文件
         // 原本允许 KMBOX/SendInput，也不会打开设备连接或发送物理输入。
         config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
@@ -984,15 +1073,15 @@ bool run_runtime_benchmark(
                         report_config.mouse_backend =
                             MouseBackendName(config.mouse.backend);
                         report_config.max_samples = kMaximumReportSamples;
+                        report_config.performance_probes_enabled =
+                            options.enable_performance_probes;
                         if (!report.start(report_config, error)) {
                             runtime.stop();
                         } else {
                             std::vector<RuntimePipelineSample> pending;
-                            std::uint64_t warmup_successful = 0;
-                            std::uint64_t formal_successful = 0;
-                            std::uint64_t formal_samples = 0;
-                            bool measurement_started =
-                                options.warmup_samples == 0;
+                            benchmark::detail::SamplePhaseTracker phase_tracker(
+                                options.warmup_samples);
+                            bool measurement_started = false;
                             auto measurement_started_at = runtime_started;
                             bool gates_satisfied = false;
                             bool run_failed = false;
@@ -1024,6 +1113,12 @@ bool run_runtime_benchmark(
                                         if (sample.mouse_sent) {
                                             set_error(error,
                                                 "无界面基准出现 Mouse 发送记录");
+                                            return false;
+                                        }
+                                        if (!validate_performance_probe_sample(
+                                                sample, config.capture.backend,
+                                                options.enable_performance_probes,
+                                                error)) {
                                             return false;
                                         }
                                         const auto& detector_profile =
@@ -1067,25 +1162,28 @@ bool run_runtime_benchmark(
                                                 "DirectML 互操作样本违反零 host upload/零中间设备复制台账");
                                             return false;
                                         }
-                                        if (warmup_successful <
-                                                options.warmup_samples) {
-                                            ++warmup_successful;
-                                            if (warmup_successful ==
-                                                    options.warmup_samples) {
-                                                measurement_started = true;
-                                                measurement_started_at =
-                                                    std::chrono::steady_clock::now();
-                                            }
+                                        benchmark::detail::
+                                            SamplePhaseObservation observation;
+                                        if (!phase_tracker.observe(
+                                                sample, observation, error)) {
+                                            return false;
+                                        }
+                                        if (observation.measurement_begins) {
+                                            measurement_started = true;
+                                            measurement_started_at =
+                                                std::chrono::steady_clock::now();
+                                        }
+                                        if (observation.phase !=
+                                                benchmark::detail::
+                                                    CoveragePhase::FORMAL) {
                                             continue;
                                         }
                                         if (formal_begin == pending.size()) {
                                             formal_begin = index;
                                         }
-                                        ++formal_samples;
-                                        ++formal_successful;
                                     }
                                     if (formal_begin < pending.size()) {
-                                        if (formal_samples >
+                                        if (phase_tracker.formal_successful() >
                                                 kMaximumReportSamples) {
                                             set_error(error,
                                                 "正式样本超过报告固定容量");
@@ -1157,7 +1255,7 @@ bool run_runtime_benchmark(
                                                 now - measurement_started_at)
                                             .count();
                                     gates_satisfied =
-                                        formal_successful >=
+                                        phase_tracker.formal_successful() >=
                                             options.minimum_samples &&
                                         measurement_seconds >=
                                             static_cast<long long>(
@@ -1190,27 +1288,55 @@ bool run_runtime_benchmark(
                                 run_failed = true;
                             }
                             if (!run_failed &&
-                                (formal_successful < options.minimum_samples ||
-                                 formal_samples != formal_successful)) {
+                                phase_tracker.formal_successful() <
+                                    options.minimum_samples) {
                                 set_error(error,
-                                    "正式样本门槛或成功计数不一致");
+                                    "正式成功样本未达到门槛");
+                                run_failed = true;
+                            }
+                            if (!run_failed && !phase_tracker.finish(
+                                    final_snapshot, error)) {
                                 run_failed = true;
                             }
                             if (!run_failed && report.finalize(
-                                    final_snapshot, error)) {
+                                    final_snapshot, error,
+                                    &phase_tracker.coverage())) {
                                 const auto& summary = report.summary();
+                                const std::uint64_t formal_samples =
+                                    phase_tracker.formal_successful();
+                                const bool probe_summary_valid =
+                                    options.enable_performance_probes
+                                    ? summary.pipeline_complete.sample_count ==
+                                          formal_samples &&
+                                      summary.runtime_handoff.sample_count ==
+                                          formal_samples &&
+                                      (config.capture.backend !=
+                                           CaptureBackend::NDI ||
+                                       (summary.ndi_receive_call.sample_count ==
+                                            formal_samples &&
+                                        summary.ndi_video_queue_depth
+                                                .sample_count > 0))
+                                    : summary.pipeline_complete.sample_count == 0 &&
+                                      summary.runtime_handoff.sample_count == 0 &&
+                                      summary.ndi_receive_call.sample_count == 0 &&
+                                      summary.ndi_video_queue_depth.sample_count ==
+                                          0;
                                 if (summary.sample_count == formal_samples &&
                                     summary.successful_samples == formal_samples &&
                                     summary.failed_samples == 0 &&
                                     summary.report_samples_dropped == 0 &&
-                                    summary.runtime_samples_dropped == 0) {
+                                    summary.runtime_samples_dropped == 0 &&
+                                    summary.coverage.available &&
+                                    probe_summary_valid) {
                                     success = true;
                                     LOG_INFO(
                                         "benchmark",
-                                        "正式基准完成: warmup={}, samples={}, "
+                                        "正式基准完成: startup={}, warmup={}, samples={}, "
                                         "total_p50={:.3f}ms, total_p95={:.3f}ms, "
                                         "total_p99={:.3f}ms",
-                                        warmup_successful, formal_samples,
+                                        phase_tracker.startup_successful(),
+                                        phase_tracker.warmup_successful(),
+                                        formal_samples,
                                         summary.total.p50_ms,
                                         summary.total.p95_ms,
                                         summary.total.p99_ms);

@@ -38,6 +38,7 @@ bool terminal_status(CaptureStatus status) noexcept {
 }
 
 constexpr int kMaxSourceDimension = 16384;
+constexpr auto kQueueProbeInterval = std::chrono::milliseconds(1000);
 
 NetworkGeometryConfig geometry_config(const CaptureConfig& config) noexcept {
     NetworkGeometryConfig result;
@@ -131,6 +132,7 @@ public:
             performance_sample_counter_ = 0;
             source_received_frames_ = 0;
             transport_dropped_frames_ = 0;
+            last_queue_probe_at_ = {};
             last_delivered_sequence_ = 0;
             published_sequence_.store(0, std::memory_order_release);
             stop_requested_.store(false, std::memory_order_release);
@@ -321,6 +323,7 @@ private:
         performance_sample_counter_ = 0;
         source_received_frames_ = 0;
         transport_dropped_frames_ = 0;
+        last_queue_probe_at_ = {};
         ever_connected_ = true;
         LOG_INFO("capture", "NDI 已连接源: {}", source_name_);
         return true;
@@ -328,7 +331,8 @@ private:
 
     bool publish_video(const NDIlib_video_frame_v2_t& video,
                        std::chrono::steady_clock::time_point received_at,
-                       const XenFrameMetadata* metadata) noexcept {
+                       const XenFrameMetadata* metadata,
+                       CaptureStageTiming capture_stages) noexcept {
         if (!video.p_data || video.xres <= 0 || video.yres <= 0 ||
             video.xres > kMaxSourceDimension ||
             video.yres > kMaxSourceDimension ||
@@ -345,6 +349,9 @@ private:
         }
 
         try {
+            const auto geometry_started = capture_stages.ndi_valid
+                ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point{};
             NetworkFrameGeometry geometry;
             const NetworkGeometryConfig config = geometry_config(config_);
             const bool metadata_geometry = metadata &&
@@ -363,8 +370,23 @@ private:
                 frames_.record_drop();
                 return false;
             }
+            if (capture_stages.ndi_valid) {
+                capture_stages.geometry_ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() -
+                        geometry_started).count();
+            }
 
+            const auto pool_acquire_started = capture_stages.ndi_valid
+                ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point{};
             auto write_slot = frames_.acquire_write();
+            if (capture_stages.ndi_valid) {
+                capture_stages.pool_acquire_ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() -
+                        pool_acquire_started).count();
+            }
             if (!write_slot) {
                 frames_.record_drop();
                 return true;
@@ -374,8 +396,16 @@ private:
             const cv::Mat bgra_roi = bgra(cv::Rect(
                 geometry.decoded_roi_x, geometry.decoded_roi_y,
                 geometry.decoded_roi_width, geometry.decoded_roi_height));
+            const auto convert_started = capture_stages.ndi_valid
+                ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point{};
             cv::cvtColor(bgra_roi, write_slot->bgr, cv::COLOR_BGRA2BGR);
             const auto finished = std::chrono::steady_clock::now();
+            if (capture_stages.ndi_valid) {
+                capture_stages.color_convert_ms =
+                    std::chrono::duration<double, std::milli>(
+                        finished - convert_started).count();
+            }
             write_slot->timing.sequence = ++sequence_;
             write_slot->timing.captured_at = finished;
             write_slot->timing.capture_ms =
@@ -395,16 +425,48 @@ private:
             if (performance_sample_counter_++ % 30 == 0) {
                 NDIlib_recv_performance_t total{};
                 NDIlib_recv_performance_t dropped{};
+                const auto query_started = capture_stages.ndi_valid
+                    ? std::chrono::steady_clock::now()
+                    : std::chrono::steady_clock::time_point{};
                 NDIlib_recv_get_performance(receiver_, &total, &dropped);
+                if (capture_stages.ndi_valid) {
+                    capture_stages.performance_query_sampled = true;
+                    capture_stages.performance_query_ms =
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            query_started).count();
+                }
                 source_received_frames_ = total.video_frames > 0
                     ? static_cast<std::uint64_t>(total.video_frames) : 0;
                 transport_dropped_frames_ = dropped.video_frames > 0
                     ? static_cast<std::uint64_t>(dropped.video_frames) : 0;
             }
+            if (capture_stages.ndi_valid) {
+                const auto probe_started = std::chrono::steady_clock::now();
+                if (last_queue_probe_at_.time_since_epoch().count() == 0 ||
+                    probe_started - last_queue_probe_at_ >=
+                        kQueueProbeInterval) {
+                    NDIlib_recv_queue_t queued{};
+                    NDIlib_recv_get_queue(receiver_, &queued);
+                    capture_stages.queue_depth_sampled = true;
+                    capture_stages.queue_query_ms =
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            probe_started).count();
+                    capture_stages.queued_video_frames =
+                        std::max(queued.video_frames, 0);
+                    capture_stages.queued_audio_frames =
+                        std::max(queued.audio_frames, 0);
+                    capture_stages.queued_metadata_frames =
+                        std::max(queued.metadata_frames, 0);
+                    last_queue_probe_at_ = probe_started;
+                }
+            }
             write_slot->timing.source_received_frames =
                 source_received_frames_;
             write_slot->timing.transport_dropped_frames =
                 transport_dropped_frames_;
+            write_slot->timing.capture_stages = capture_stages;
             write_slot->roi_x = geometry.source_roi_x;
             write_slot->roi_y = geometry.source_roi_y;
             write_slot->source_width = geometry.source_width;
@@ -474,6 +536,13 @@ private:
             const NDIlib_frame_type_e type = NDIlib_recv_capture_v2(
                 receiver_, &video, nullptr, &metadata_frame,
                 static_cast<std::uint32_t>(config_.ndi_receive_timeout_ms));
+            CaptureStageTiming capture_stages;
+            capture_stages.ndi_valid = config_.enable_performance_probes;
+            if (capture_stages.ndi_valid) {
+                capture_stages.receive_call_ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - received_at).count();
+            }
 
             XenFrameMetadata parsed_metadata;
             bool metadata_valid = false;
@@ -494,6 +563,9 @@ private:
             }
 
             if (type == NDIlib_frame_type_video) {
+                const auto metadata_started = capture_stages.ndi_valid
+                    ? std::chrono::steady_clock::now()
+                    : std::chrono::steady_clock::time_point{};
                 if (video.p_metadata) {
                     metadata_valid = parse_xen_frame_metadata(
                         std::string_view(video.p_metadata), parsed_metadata);
@@ -502,9 +574,16 @@ private:
                     parsed_metadata = *last_metadata_;
                     metadata_valid = true;
                 }
+                if (capture_stages.ndi_valid) {
+                    capture_stages.metadata_ms =
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            metadata_started).count();
+                }
                 const bool published = publish_video(
                     video, received_at,
-                    metadata_valid ? &parsed_metadata : nullptr);
+                    metadata_valid ? &parsed_metadata : nullptr,
+                    capture_stages);
                 NDIlib_recv_free_video_v2(receiver_, &video);
                 if (terminal_status(status_.load(std::memory_order_acquire))) {
                     return;
@@ -554,6 +633,7 @@ private:
     std::uint64_t performance_sample_counter_ = 0;
     std::uint64_t source_received_frames_ = 0;
     std::uint64_t transport_dropped_frames_ = 0;
+    std::chrono::steady_clock::time_point last_queue_probe_at_{};
     std::uint64_t last_delivered_sequence_ = 0;
     bool ever_connected_ = false;
 };

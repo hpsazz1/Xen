@@ -4,11 +4,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <span>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -59,17 +61,51 @@ class BoundedSampleRing final {
     static_assert(Capacity > 0, "诊断环容量必须大于零");
 
 public:
+    struct PendingToken {
+        std::size_t index = 0;
+        std::uint64_t generation = 0;
+
+        explicit operator bool() const noexcept {
+            return generation != 0;
+        }
+    };
+
     bool push(const T& sample) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (size_ == Capacity) {
-                read_index_ = (read_index_ + 1) % Capacity;
-                --size_;
-                ++dropped_;
+            append_locked(sample, true);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // 探针样本先占用固定槽但暂不对消费者可见。Pipeline 完成本帧全部
+    // Snapshot 收尾后再 finalize，同帧 service-tail 才不会使用上一帧数据。
+    PendingToken push_pending(const T& sample) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return append_locked(sample, false);
+        } catch (...) {
+            return {};
+        }
+    }
+
+    template <typename Finalizer>
+    bool finalize(PendingToken token, Finalizer&& finalizer) noexcept {
+        static_assert(
+            std::is_nothrow_invocable_v<Finalizer, T&>,
+            "诊断环 finalizer 必须 noexcept，避免异常留下永久 pending 槽");
+        if (!token) return false;
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (token.index >= Capacity || !occupied_[token.index] ||
+                ready_[token.index] ||
+                generations_[token.index] != token.generation) {
+                return false;
             }
-            storage_[write_index_] = sample;
-            write_index_ = (write_index_ + 1) % Capacity;
-            ++size_;
+            std::forward<Finalizer>(finalizer)(storage_[token.index]);
+            ready_[token.index] = true;
             return true;
         } catch (...) {
             return false;
@@ -80,12 +116,20 @@ public:
         try {
             std::vector<T> drained;
             std::lock_guard<std::mutex> lock(mutex_);
-            drained.reserve(size_);
-            for (std::size_t index = 0; index < size_; ++index) {
-                drained.push_back(storage_[(read_index_ + index) % Capacity]);
+            std::size_t ready_count = 0;
+            while (ready_count < size_ &&
+                   ready_[(read_index_ + ready_count) % Capacity]) {
+                ++ready_count;
             }
-            read_index_ = write_index_;
-            size_ = 0;
+            drained.reserve(ready_count);
+            for (std::size_t index = 0; index < ready_count; ++index) {
+                drained.push_back(storage_[(read_index_ + index) % Capacity]);
+                const std::size_t slot = (read_index_ + index) % Capacity;
+                ready_[slot] = false;
+                occupied_[slot] = false;
+            }
+            read_index_ = (read_index_ + ready_count) % Capacity;
+            size_ -= ready_count;
             output = std::move(drained);
             return true;
         } catch (...) {
@@ -100,6 +144,11 @@ public:
             write_index_ = 0;
             size_ = 0;
             dropped_ = 0;
+            // 代际跨 reset 保持单调；否则旧会话 token 可能与新会话同槽
+            // 的新 token 发生 ABA，误 finalize 尚未完成的新样本。
+            ready_.fill(false);
+            occupied_.fill(false);
+            generations_.fill(0);
         } catch (...) {
         }
     }
@@ -114,12 +163,36 @@ public:
     }
 
 private:
+    PendingToken append_locked(const T& sample, bool ready) {
+        if (size_ == Capacity) {
+            ready_[read_index_] = false;
+            occupied_[read_index_] = false;
+            read_index_ = (read_index_ + 1) % Capacity;
+            --size_;
+            ++dropped_;
+        }
+        storage_[write_index_] = sample;
+        ++next_generation_;
+        if (next_generation_ == 0) ++next_generation_;
+        generations_[write_index_] = next_generation_;
+        ready_[write_index_] = ready;
+        occupied_[write_index_] = true;
+        const PendingToken token{write_index_, next_generation_};
+        write_index_ = (write_index_ + 1) % Capacity;
+        ++size_;
+        return token;
+    }
+
     mutable std::mutex mutex_;
     std::array<T, Capacity> storage_{};
+    std::array<std::uint64_t, Capacity> generations_{};
+    std::array<bool, Capacity> ready_{};
+    std::array<bool, Capacity> occupied_{};
     std::size_t read_index_ = 0;
     std::size_t write_index_ = 0;
     std::size_t size_ = 0;
     std::uint64_t dropped_ = 0;
+    std::uint64_t next_generation_ = 0;
 };
 
 class LatestFrameQueue {
@@ -129,10 +202,13 @@ public:
     std::array<std::shared_ptr<CapturedFrame>, 3>
         initialization_slots() noexcept;
     std::shared_ptr<CapturedFrame> acquire_write() noexcept;
-    void publish(const std::shared_ptr<CapturedFrame>& frame) noexcept;
+    void publish(
+        const std::shared_ptr<CapturedFrame>& frame,
+        std::chrono::steady_clock::time_point probe_started = {}) noexcept;
     std::shared_ptr<const CapturedFrame> wait_latest(
         std::uint64_t last_sequence,
-        const std::atomic<bool>& stop_requested) noexcept;
+        const std::atomic<bool>& stop_requested,
+        std::uint64_t* overwritten_frames_at_consume = nullptr) noexcept;
     void stop() noexcept;
     void reset() noexcept;
     std::uint64_t overwritten_frames() const noexcept;

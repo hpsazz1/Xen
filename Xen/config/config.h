@@ -12,6 +12,9 @@
 
 struct RuntimeConfig {
     int profile_window = 256;
+    // 仅由正式性能入口按轮次临时覆盖，不进入 INI 或 Overlay。正常应用默认
+    // 关闭，避免新增时钟读取和两阶段诊断发布扰动生产热路径。
+    bool enable_performance_probes = false;
 };
 
 enum class UiTheme {

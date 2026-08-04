@@ -57,6 +57,28 @@ struct PipelineProfile {
     double total_ms = 0.0;
 };
 
+// `total_ms` 必须继续在 Aim/Mouse 完成时封口。该结构只描述随后发生的
+// Pipeline 收尾；valid=false 时默认零值不是实测零耗时。snapshot_ms 包含
+// debug_ring_ms 与 profile_window_ms，三者是包含关系，禁止直接相加。
+struct RuntimeServiceProfile {
+    bool valid = false;
+    bool preview_attempted = false;
+    bool preview_published = false;
+    double preview_ms = 0.0;
+    double snapshot_ms = 0.0;
+    double snapshot_lock_wait_ms = 0.0;
+    double debug_ring_ms = 0.0;
+    double profile_window_ms = 0.0;
+    // 从旧 total_ms 的终点到 Snapshot 解锁，包含 Preview 和原有观测收尾；
+    // 刻意排除探针自身的 debug ring finalize，避免自我计时递归。
+    double service_tail_ms = 0.0;
+    // 从 Pipeline 取到帧到收尾结束，不包含 queue_ms。
+    double pipeline_service_ms = 0.0;
+    // 从 captured_at 到原有收尾结束；同样不含探针自身 finalize。探针完整
+    // 扰动只能由 off/on A/B 的旧 total/queue 对照量化。
+    double pipeline_complete_ms = 0.0;
+};
+
 // 每个 Pipeline 样本都固化对应输入帧的几何，避免只看最终快照时漏掉
 // 网络重连、OBS 场景切换或显示模式变化造成的瞬时坐标漂移。
 struct RuntimeFrameGeometry {
@@ -80,6 +102,14 @@ struct RuntimePipelineSample {
     std::uint64_t sequence = 0;
     RuntimeFrameGeometry geometry;
     PipelineProfile profile;
+    CaptureStageTiming capture_stages;
+    RuntimeServiceProfile service;
+    // 固化本帧完成时的累计计数，使 startup/warmup/formal 能以样本边界
+    // 做单调差分，不再把最终快照累计值直接除以正式样本数。
+    std::uint64_t source_dropped_frames = 0;
+    std::uint64_t transport_dropped_frames = 0;
+    std::uint64_t transport_invalid_packets = 0;
+    std::uint64_t runtime_overwritten_frames = 0;
     DetectionStatus detection_status = DetectionStatus::NOT_RUN;
     AimStatus aim_status = AimStatus::NOT_RUN;
     MouseStatus mouse_status = MouseStatus::CLOSED;

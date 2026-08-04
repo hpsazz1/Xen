@@ -37,6 +37,26 @@ struct TimingValues {
     std::vector<double> aim;
     std::vector<double> mouse;
     std::vector<double> total;
+    std::vector<double> ndi_receive_call;
+    std::vector<double> ndi_metadata;
+    std::vector<double> ndi_geometry;
+    std::vector<double> ndi_pool_acquire;
+    std::vector<double> ndi_color_convert;
+    std::vector<double> ndi_performance_query;
+    std::vector<double> ndi_queue_query;
+    std::vector<double> ndi_pool_publish;
+    std::vector<double> runtime_capture_grab;
+    std::vector<double> runtime_queue_publish;
+    std::vector<double> runtime_handoff;
+    std::vector<double> preview;
+    std::vector<double> snapshot;
+    std::vector<double> snapshot_lock_wait;
+    std::vector<double> debug_ring;
+    std::vector<double> profile_window;
+    std::vector<double> service_tail;
+    std::vector<double> pipeline_service;
+    std::vector<double> pipeline_complete;
+    std::vector<double> ndi_video_queue_depth;
 };
 
 void set_error(std::string& output, const std::string& value) noexcept {
@@ -71,6 +91,22 @@ DebugTimingSummary summarize(const std::vector<double>& values) {
     return result;
 }
 
+DebugQueueDepthSummary summarize_queue_depth(
+        const std::vector<double>& values) {
+    DebugQueueDepthSummary result;
+    result.sample_count = values.size();
+    if (values.empty()) return result;
+    result.mean_frames =
+        std::accumulate(values.begin(), values.end(), 0.0) /
+        static_cast<double>(values.size());
+    result.p50_frames = percentile(values, 0.50);
+    result.p95_frames = percentile(values, 0.95);
+    result.p99_frames = percentile(values, 0.99);
+    result.max_frames = static_cast<int>(
+        *std::max_element(values.begin(), values.end()));
+    return result;
+}
+
 void collect_timing(TimingValues& values,
                     const RuntimePipelineSample& sample) {
     values.capture.push_back(sample.profile.capture_ms);
@@ -90,6 +126,46 @@ void collect_timing(TimingValues& values,
     values.aim.push_back(sample.profile.aim.total_ms);
     values.mouse.push_back(sample.profile.mouse_ms);
     values.total.push_back(sample.profile.total_ms);
+    const auto& capture = sample.capture_stages;
+    if (capture.ndi_valid) {
+        values.ndi_receive_call.push_back(capture.receive_call_ms);
+        values.ndi_metadata.push_back(capture.metadata_ms);
+        values.ndi_geometry.push_back(capture.geometry_ms);
+        values.ndi_pool_acquire.push_back(capture.pool_acquire_ms);
+        values.ndi_color_convert.push_back(capture.color_convert_ms);
+        values.ndi_pool_publish.push_back(capture.pool_publish_ms);
+        if (capture.performance_query_sampled) {
+            values.ndi_performance_query.push_back(
+                capture.performance_query_ms);
+        }
+        if (capture.queue_depth_sampled) {
+            values.ndi_queue_query.push_back(capture.queue_query_ms);
+            values.ndi_video_queue_depth.push_back(
+                static_cast<double>(capture.queued_video_frames));
+        }
+    }
+    if (capture.runtime_handoff_valid) {
+        values.runtime_capture_grab.push_back(
+            capture.runtime_capture_grab_ms);
+        values.runtime_queue_publish.push_back(
+            capture.runtime_queue_publish_ms);
+        values.runtime_handoff.push_back(
+            capture.runtime_capture_grab_ms +
+            capture.runtime_queue_publish_ms);
+    }
+    if (sample.service.valid) {
+        values.preview.push_back(sample.service.preview_ms);
+        values.snapshot.push_back(sample.service.snapshot_ms);
+        values.snapshot_lock_wait.push_back(
+            sample.service.snapshot_lock_wait_ms);
+        values.debug_ring.push_back(sample.service.debug_ring_ms);
+        values.profile_window.push_back(sample.service.profile_window_ms);
+        values.service_tail.push_back(sample.service.service_tail_ms);
+        values.pipeline_service.push_back(
+            sample.service.pipeline_service_ms);
+        values.pipeline_complete.push_back(
+            sample.service.pipeline_complete_ms);
+    }
 }
 
 DebugReportSummary make_summary(
@@ -124,6 +200,29 @@ DebugReportSummary make_summary(
     result.aim = summarize(values.aim);
     result.mouse = summarize(values.mouse);
     result.total = summarize(values.total);
+    result.ndi_receive_call = summarize(values.ndi_receive_call);
+    result.ndi_metadata = summarize(values.ndi_metadata);
+    result.ndi_geometry = summarize(values.ndi_geometry);
+    result.ndi_pool_acquire = summarize(values.ndi_pool_acquire);
+    result.ndi_color_convert = summarize(values.ndi_color_convert);
+    result.ndi_performance_query = summarize(
+        values.ndi_performance_query);
+    result.ndi_queue_query = summarize(values.ndi_queue_query);
+    result.ndi_pool_publish = summarize(values.ndi_pool_publish);
+    result.runtime_capture_grab = summarize(values.runtime_capture_grab);
+    result.runtime_queue_publish = summarize(
+        values.runtime_queue_publish);
+    result.runtime_handoff = summarize(values.runtime_handoff);
+    result.preview = summarize(values.preview);
+    result.snapshot = summarize(values.snapshot);
+    result.snapshot_lock_wait = summarize(values.snapshot_lock_wait);
+    result.debug_ring = summarize(values.debug_ring);
+    result.profile_window = summarize(values.profile_window);
+    result.service_tail = summarize(values.service_tail);
+    result.pipeline_service = summarize(values.pipeline_service);
+    result.pipeline_complete = summarize(values.pipeline_complete);
+    result.ndi_video_queue_depth = summarize_queue_depth(
+        values.ndi_video_queue_depth);
     return result;
 }
 
@@ -206,6 +305,89 @@ void append_csv_timing(std::ostringstream& output,
            << timing.mean_ms << ',' << timing.p50_ms << ','
            << timing.p95_ms << ',' << timing.p99_ms << ','
            << timing.max_ms << '\n';
+}
+
+void append_csv_queue_depth(
+        std::ostringstream& output,
+        const DebugQueueDepthSummary& summary) {
+    output << "# ndi_video_queue_depth," << summary.sample_count << ','
+           << summary.mean_frames << ',' << summary.p50_frames << ','
+           << summary.p95_frames << ',' << summary.p99_frames << ','
+           << summary.max_frames << '\n';
+}
+
+void append_csv_coverage_phase(
+        std::ostringstream& output,
+        const char* name,
+        const DebugCoveragePhaseSummary& phase) {
+    output << "# coverage_phase," << name << ',' << phase.sample_count << ','
+           << phase.first_sequence << ',' << phase.last_sequence << ','
+           << phase.runtime_overwritten_frames << ',' << phase.sequence_gaps
+           << ',' << phase.trailing_runtime_overwritten_frames << ','
+           << bool_name(phase.counter_matches_sequence_gaps) << '\n';
+}
+
+void append_csv_coverage(
+        std::ostringstream& output,
+        const DebugCoverageSummary& coverage) {
+    output << "# coverage_available," << bool_name(coverage.available) << '\n'
+           << "# warmup_start_overwritten_frames,"
+           << coverage.warmup_start_overwritten_frames << '\n'
+           << "# warmup_end_overwritten_frames,"
+           << coverage.warmup_end_overwritten_frames << '\n'
+           << "# formal_end_overwritten_frames,"
+           << coverage.formal_end_overwritten_frames << '\n';
+    append_csv_coverage_phase(output, "startup", coverage.startup);
+    append_csv_coverage_phase(output, "warmup", coverage.warmup);
+    append_csv_coverage_phase(output, "formal", coverage.formal);
+}
+
+void append_json_queue_depth(
+        std::ostringstream& output,
+        const DebugQueueDepthSummary& summary) {
+    output << "  \"ndi_video_queue_depth\": {\"sample_count\": "
+           << summary.sample_count
+           << ", \"mean_frames\": " << summary.mean_frames
+           << ", \"p50_frames\": " << summary.p50_frames
+           << ", \"p95_frames\": " << summary.p95_frames
+           << ", \"p99_frames\": " << summary.p99_frames
+           << ", \"max_frames\": " << summary.max_frames << "},\n";
+}
+
+void append_json_coverage_phase(
+        std::ostringstream& output,
+        const char* name,
+        const DebugCoveragePhaseSummary& phase,
+        bool last) {
+    output << "    \"" << name << "\": {\"sample_count\": "
+           << phase.sample_count
+           << ", \"first_sequence\": " << phase.first_sequence
+           << ", \"last_sequence\": " << phase.last_sequence
+           << ", \"runtime_overwritten_frames\": "
+           << phase.runtime_overwritten_frames
+           << ", \"sequence_gaps\": " << phase.sequence_gaps
+           << ", \"trailing_runtime_overwritten_frames\": "
+           << phase.trailing_runtime_overwritten_frames
+           << ", \"counter_matches_sequence_gaps\": "
+           << bool_name(phase.counter_matches_sequence_gaps) << "}"
+           << (last ? '\n' : ',');
+}
+
+void append_json_coverage(
+        std::ostringstream& output,
+        const DebugCoverageSummary& coverage) {
+    output << "  \"coverage\": {\n"
+           << "    \"available\": " << bool_name(coverage.available)
+           << ",\n    \"warmup_start_overwritten_frames\": "
+           << coverage.warmup_start_overwritten_frames
+           << ",\n    \"warmup_end_overwritten_frames\": "
+           << coverage.warmup_end_overwritten_frames
+           << ",\n    \"formal_end_overwritten_frames\": "
+           << coverage.formal_end_overwritten_frames << ",\n";
+    append_json_coverage_phase(output, "startup", coverage.startup, false);
+    append_json_coverage_phase(output, "warmup", coverage.warmup, false);
+    append_json_coverage_phase(output, "formal", coverage.formal, true);
+    output << "  },\n";
 }
 
 void append_csv_snapshot(std::ostringstream& output,
@@ -466,7 +648,8 @@ void DebugReport::ingest(
 }
 
 bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
-                           std::string& error) noexcept {
+                           std::string& error,
+                           const DebugCoverageSummary* coverage) noexcept {
     if (!active_) {
         set_error(error, "Debug 报告尚未开始");
         return false;
@@ -475,8 +658,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         summary_ = make_summary(
             samples_, report_samples_dropped_,
             final_snapshot.debug_samples_dropped);
+        if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v6\n"
+        csv << "# Xen Runtime Debug Report v7\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -484,6 +668,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             << '\n'
             << "# mouse_backend," << csv_escape(config_.mouse_backend)
             << '\n'
+            << "# performance_probes_enabled,"
+            << bool_name(config_.performance_probes_enabled) << '\n'
             << "# sample_count," << summary_.sample_count << '\n'
             << "# successful_samples," << summary_.successful_samples << '\n'
             << "# failed_samples," << summary_.failed_samples << '\n'
@@ -492,6 +678,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             << "# runtime_samples_dropped," <<
                 summary_.runtime_samples_dropped << '\n';
         append_csv_snapshot(csv, final_snapshot);
+        append_csv_coverage(csv, summary_.coverage);
         append_csv_timing(csv, "capture", summary_.capture);
         append_csv_timing(csv, "queue", summary_.queue);
         append_csv_timing(csv, "preprocess", summary_.preprocess);
@@ -509,6 +696,39 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_csv_timing(csv, "aim", summary_.aim);
         append_csv_timing(csv, "mouse", summary_.mouse);
         append_csv_timing(csv, "total", summary_.total);
+        append_csv_timing(
+            csv, "ndi_receive_call", summary_.ndi_receive_call);
+        append_csv_timing(csv, "ndi_metadata", summary_.ndi_metadata);
+        append_csv_timing(csv, "ndi_geometry", summary_.ndi_geometry);
+        append_csv_timing(
+            csv, "ndi_pool_acquire", summary_.ndi_pool_acquire);
+        append_csv_timing(
+            csv, "ndi_color_convert", summary_.ndi_color_convert);
+        append_csv_timing(
+            csv, "ndi_performance_query", summary_.ndi_performance_query);
+        append_csv_timing(
+            csv, "ndi_queue_query", summary_.ndi_queue_query);
+        append_csv_timing(
+            csv, "ndi_pool_publish", summary_.ndi_pool_publish);
+        append_csv_timing(
+            csv, "runtime_capture_grab", summary_.runtime_capture_grab);
+        append_csv_timing(
+            csv, "runtime_queue_publish", summary_.runtime_queue_publish);
+        append_csv_timing(
+            csv, "runtime_handoff", summary_.runtime_handoff);
+        append_csv_timing(csv, "preview", summary_.preview);
+        append_csv_timing(csv, "snapshot", summary_.snapshot);
+        append_csv_timing(
+            csv, "snapshot_lock_wait", summary_.snapshot_lock_wait);
+        append_csv_timing(csv, "debug_ring", summary_.debug_ring);
+        append_csv_timing(
+            csv, "profile_window", summary_.profile_window);
+        append_csv_timing(csv, "service_tail", summary_.service_tail);
+        append_csv_timing(
+            csv, "pipeline_service", summary_.pipeline_service);
+        append_csv_timing(
+            csv, "pipeline_complete", summary_.pipeline_complete);
+        append_csv_queue_depth(csv, summary_.ndi_video_queue_depth);
         csv << "sequence,capture_ms,queue_ms,preprocess_ms,inference_ms,"
                "h2d_ms,d3d11_to_cuda_ms,d3d11_to_directml_ms,"
                "gpu_preprocess_ms,execution_ms,d2h_ms,"
@@ -523,7 +743,21 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "encoded_width,"
                "encoded_height,source_width,source_height,roi_x,roi_y,"
                "roi_width,roi_height,source_pixels_per_pixel_x,"
-               "source_pixels_per_pixel_y,success\n";
+               "source_pixels_per_pixel_y,success,performance_probes,"
+               "ndi_probe_valid,runtime_handoff_valid,"
+               "ndi_receive_call_ms,ndi_metadata_ms,ndi_geometry_ms,"
+               "ndi_pool_acquire_ms,ndi_color_convert_ms,"
+               "ndi_performance_query_sampled,ndi_performance_query_ms,"
+               "ndi_queue_depth_sampled,ndi_queue_query_ms,"
+               "ndi_queued_video_frames,ndi_queued_audio_frames,"
+               "ndi_queued_metadata_frames,ndi_pool_publish_ms,"
+               "runtime_capture_grab_ms,runtime_queue_publish_ms,"
+               "preview_attempted,preview_published,preview_ms,"
+               "snapshot_ms,snapshot_lock_wait_ms,debug_ring_ms,"
+               "profile_window_ms,service_tail_ms,pipeline_service_ms,"
+               "pipeline_complete_ms,source_dropped_frames,"
+               "transport_dropped_frames,transport_invalid_packets,"
+               "runtime_overwritten_frames\n";
         csv << std::setprecision(9);
         for (const auto& sample : samples_) {
             csv << sample.sequence << ',' << sample.profile.capture_ms << ','
@@ -578,12 +812,47 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.geometry.roi_height << ','
                 << sample.geometry.source_pixels_per_pixel_x << ','
                 << sample.geometry.source_pixels_per_pixel_y << ','
-                << bool_name(debug_sample_succeeded(sample)) << '\n';
+                << bool_name(debug_sample_succeeded(sample)) << ','
+                << bool_name(sample.service.valid) << ','
+                << bool_name(sample.capture_stages.ndi_valid) << ','
+                << bool_name(
+                    sample.capture_stages.runtime_handoff_valid) << ','
+                << sample.capture_stages.receive_call_ms << ','
+                << sample.capture_stages.metadata_ms << ','
+                << sample.capture_stages.geometry_ms << ','
+                << sample.capture_stages.pool_acquire_ms << ','
+                << sample.capture_stages.color_convert_ms << ','
+                << bool_name(
+                    sample.capture_stages.performance_query_sampled) << ','
+                << sample.capture_stages.performance_query_ms << ','
+                << bool_name(
+                    sample.capture_stages.queue_depth_sampled) << ','
+                << sample.capture_stages.queue_query_ms << ','
+                << sample.capture_stages.queued_video_frames << ','
+                << sample.capture_stages.queued_audio_frames << ','
+                << sample.capture_stages.queued_metadata_frames << ','
+                << sample.capture_stages.pool_publish_ms << ','
+                << sample.capture_stages.runtime_capture_grab_ms << ','
+                << sample.capture_stages.runtime_queue_publish_ms << ','
+                << bool_name(sample.service.preview_attempted) << ','
+                << bool_name(sample.service.preview_published) << ','
+                << sample.service.preview_ms << ','
+                << sample.service.snapshot_ms << ','
+                << sample.service.snapshot_lock_wait_ms << ','
+                << sample.service.debug_ring_ms << ','
+                << sample.service.profile_window_ms << ','
+                << sample.service.service_tail_ms << ','
+                << sample.service.pipeline_service_ms << ','
+                << sample.service.pipeline_complete_ms << ','
+                << sample.source_dropped_frames << ','
+                << sample.transport_dropped_frames << ','
+                << sample.transport_invalid_packets << ','
+                << sample.runtime_overwritten_frames << '\n';
         }
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 6,\n"
+             << "{\n  \"schema\": 7,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -592,6 +861,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
              << json_escape(config_.capture_backend)
              << "\",\n  \"mouse_backend\": \""
              << json_escape(config_.mouse_backend) << "\",\n"
+             << "  \"performance_probes_enabled\": "
+             << bool_name(config_.performance_probes_enabled) << ",\n"
              << "  \"sample_count\": " << summary_.sample_count << ",\n"
              << "  \"successful_samples\": "
              << summary_.successful_samples << ",\n"
@@ -600,6 +871,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
              << summary_.report_samples_dropped << ",\n"
              << "  \"runtime_samples_dropped\": "
              << summary_.runtime_samples_dropped << ",\n";
+        append_json_coverage(json, summary_.coverage);
+        append_json_queue_depth(json, summary_.ndi_video_queue_depth);
         append_json_snapshot(json, final_snapshot);
         json << "  \"timing\": {\n";
         append_json_timing(json, "capture", summary_.capture, false);
@@ -619,7 +892,46 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_json_timing(json, "postprocess", summary_.postprocess, false);
         append_json_timing(json, "aim", summary_.aim, false);
         append_json_timing(json, "mouse", summary_.mouse, false);
-        append_json_timing(json, "total", summary_.total, true);
+        append_json_timing(json, "total", summary_.total, false);
+        append_json_timing(
+            json, "ndi_receive_call", summary_.ndi_receive_call, false);
+        append_json_timing(
+            json, "ndi_metadata", summary_.ndi_metadata, false);
+        append_json_timing(
+            json, "ndi_geometry", summary_.ndi_geometry, false);
+        append_json_timing(
+            json, "ndi_pool_acquire", summary_.ndi_pool_acquire, false);
+        append_json_timing(
+            json, "ndi_color_convert", summary_.ndi_color_convert, false);
+        append_json_timing(
+            json, "ndi_performance_query",
+            summary_.ndi_performance_query, false);
+        append_json_timing(
+            json, "ndi_queue_query", summary_.ndi_queue_query, false);
+        append_json_timing(
+            json, "ndi_pool_publish", summary_.ndi_pool_publish, false);
+        append_json_timing(
+            json, "runtime_capture_grab",
+            summary_.runtime_capture_grab, false);
+        append_json_timing(
+            json, "runtime_queue_publish",
+            summary_.runtime_queue_publish, false);
+        append_json_timing(
+            json, "runtime_handoff", summary_.runtime_handoff, false);
+        append_json_timing(json, "preview", summary_.preview, false);
+        append_json_timing(json, "snapshot", summary_.snapshot, false);
+        append_json_timing(
+            json, "snapshot_lock_wait", summary_.snapshot_lock_wait, false);
+        append_json_timing(
+            json, "debug_ring", summary_.debug_ring, false);
+        append_json_timing(
+            json, "profile_window", summary_.profile_window, false);
+        append_json_timing(
+            json, "service_tail", summary_.service_tail, false);
+        append_json_timing(
+            json, "pipeline_service", summary_.pipeline_service, false);
+        append_json_timing(
+            json, "pipeline_complete", summary_.pipeline_complete, true);
         json << "  },\n  \"samples\": [\n";
         for (std::size_t index = 0; index < samples_.size(); ++index) {
             const auto& sample = samples_[index];
@@ -688,7 +1000,71 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << sample.geometry.source_pixels_per_pixel_y
                  << ", \"success\": "
                  << bool_name(debug_sample_succeeded(sample))
-                 << ", \"total_ms\": " << sample.profile.total_ms << "}"
+                 << ", \"total_ms\": " << sample.profile.total_ms
+                 << ", \"performance_probes\": "
+                 << bool_name(sample.service.valid)
+                 << ", \"ndi_probe_valid\": "
+                 << bool_name(sample.capture_stages.ndi_valid)
+                 << ", \"runtime_handoff_valid\": "
+                 << bool_name(
+                     sample.capture_stages.runtime_handoff_valid)
+                 << ", \"ndi_receive_call_ms\": "
+                 << sample.capture_stages.receive_call_ms
+                 << ", \"ndi_metadata_ms\": "
+                 << sample.capture_stages.metadata_ms
+                 << ", \"ndi_geometry_ms\": "
+                 << sample.capture_stages.geometry_ms
+                 << ", \"ndi_pool_acquire_ms\": "
+                 << sample.capture_stages.pool_acquire_ms
+                 << ", \"ndi_color_convert_ms\": "
+                 << sample.capture_stages.color_convert_ms
+                 << ", \"ndi_performance_query_sampled\": "
+                 << bool_name(
+                     sample.capture_stages.performance_query_sampled)
+                 << ", \"ndi_performance_query_ms\": "
+                 << sample.capture_stages.performance_query_ms
+                 << ", \"ndi_queue_depth_sampled\": "
+                 << bool_name(sample.capture_stages.queue_depth_sampled)
+                 << ", \"ndi_queue_query_ms\": "
+                 << sample.capture_stages.queue_query_ms
+                 << ", \"ndi_queued_video_frames\": "
+                 << sample.capture_stages.queued_video_frames
+                 << ", \"ndi_queued_audio_frames\": "
+                 << sample.capture_stages.queued_audio_frames
+                 << ", \"ndi_queued_metadata_frames\": "
+                 << sample.capture_stages.queued_metadata_frames
+                 << ", \"ndi_pool_publish_ms\": "
+                 << sample.capture_stages.pool_publish_ms
+                 << ", \"runtime_capture_grab_ms\": "
+                 << sample.capture_stages.runtime_capture_grab_ms
+                 << ", \"runtime_queue_publish_ms\": "
+                 << sample.capture_stages.runtime_queue_publish_ms
+                 << ", \"preview_attempted\": "
+                 << bool_name(sample.service.preview_attempted)
+                 << ", \"preview_published\": "
+                 << bool_name(sample.service.preview_published)
+                 << ", \"preview_ms\": " << sample.service.preview_ms
+                 << ", \"snapshot_ms\": " << sample.service.snapshot_ms
+                 << ", \"snapshot_lock_wait_ms\": "
+                 << sample.service.snapshot_lock_wait_ms
+                 << ", \"debug_ring_ms\": "
+                 << sample.service.debug_ring_ms
+                 << ", \"profile_window_ms\": "
+                 << sample.service.profile_window_ms
+                 << ", \"service_tail_ms\": "
+                 << sample.service.service_tail_ms
+                 << ", \"pipeline_service_ms\": "
+                 << sample.service.pipeline_service_ms
+                 << ", \"pipeline_complete_ms\": "
+                 << sample.service.pipeline_complete_ms
+                 << ", \"source_dropped_frames\": "
+                 << sample.source_dropped_frames
+                 << ", \"transport_dropped_frames\": "
+                 << sample.transport_dropped_frames
+                 << ", \"transport_invalid_packets\": "
+                 << sample.transport_invalid_packets
+                 << ", \"runtime_overwritten_frames\": "
+                 << sample.runtime_overwritten_frames << "}"
                  << (index + 1 == samples_.size() ? '\n' : ',');
         }
         json << "  ]\n}\n";

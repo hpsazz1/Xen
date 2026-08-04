@@ -167,9 +167,11 @@ void test_udp_latest_frame_pool() {
     capture::detail::UdpLatestFramePool pool;
     auto first = pool.acquire_write();
     fill_udp_slot(first, 1, 10);
+    first->timing.capture_stages.ndi_valid = true;
     pool.publish(first);
     auto second = pool.acquire_write();
     fill_udp_slot(second, 2, 20);
+    second->timing.capture_stages.ndi_valid = true;
     pool.publish(second);
 
     CapturedFrame output;
@@ -177,6 +179,11 @@ void test_udp_latest_frame_pool() {
            "UDP 队列必须跳过未消费旧帧并返回最新帧");
     expect(output.timing.source_dropped_frames == 1,
            "覆盖未消费 UDP 帧时必须累计源端丢帧");
+    expect(output.timing.capture_stages.ndi_valid &&
+               std::isfinite(
+                   output.timing.capture_stages.pool_publish_ms) &&
+               output.timing.capture_stages.pool_publish_ms >= 0.0,
+           "网络最新帧池必须在发布锁内固化可读取的 publish 耗时");
     expect(output.bgr_storage &&
            output.bgr.at<cv::Vec3b>(0, 0)[0] == 20,
            "UDP 输出必须通过 storage 所有权保持解码槽有效");
@@ -187,7 +194,11 @@ void test_udp_latest_frame_pool() {
     second.reset();
     auto third = pool.acquire_write();
     fill_udp_slot(third, 3, 30);
+    if (third) third->timing.capture_stages = {};
     pool.publish(third);
+    expect(third && !third->timing.capture_stages.ndi_valid &&
+               third->timing.capture_stages.pool_publish_ms == 0.0,
+           "未启用性能探针时网络池不得制造伪造的分段耗时");
     expect(output.bgr.at<cv::Vec3b>(0, 0)[0] == 20,
            "发布新帧不得覆写消费者仍持有的 UDP 缓冲");
 }
@@ -667,6 +678,7 @@ void test_ndi_loopback() {
     config.ndi_discovery_timeout_ms = 500;
     config.ndi_receive_timeout_ms = 50;
     config.ndi_disconnect_timeout_ms = 500;
+    config.enable_performance_probes = true;
     config.ndi_frame_layout = NetworkFrameLayout::CENTER_CROP_1_TO_1;
     config.ndi_require_frame_metadata = true;
     config.roi_width = 320;
@@ -712,21 +724,73 @@ void test_ndi_loopback() {
     expect(received_first && frame.timing.source_fps == 60.0 &&
                frame.timing.source_received_frames > 0,
            "NDI 帧必须携带 SDK 源帧率与接收统计");
+    const auto valid_timing = [](double value) {
+        return std::isfinite(value) && value >= 0.0;
+    };
+    expect(received_first && frame.timing.capture_stages.ndi_valid &&
+               !frame.timing.capture_stages.runtime_handoff_valid &&
+               valid_timing(frame.timing.capture_stages.receive_call_ms) &&
+               valid_timing(frame.timing.capture_stages.metadata_ms) &&
+               valid_timing(frame.timing.capture_stages.geometry_ms) &&
+               valid_timing(frame.timing.capture_stages.pool_acquire_ms) &&
+               valid_timing(frame.timing.capture_stages.color_convert_ms) &&
+               valid_timing(frame.timing.capture_stages.pool_publish_ms) &&
+               frame.timing.capture_stages.runtime_capture_grab_ms == 0.0 &&
+               frame.timing.capture_stages.runtime_queue_publish_ms == 0.0,
+           "NDI 性能探针必须发布有限非负的 Capture 分段耗时，且不伪造 Runtime 交接耗时");
     const cv::Scalar first_mean = received_first
         ? cv::mean(frame.bgr) : cv::Scalar{};
 
-    for (int index = 0; index < 20; ++index) {
+    bool received_second = false;
+    bool performance_query_observed =
+        received_first &&
+        frame.timing.capture_stages.performance_query_sampled;
+    bool performance_query_valid = !performance_query_observed ||
+        valid_timing(frame.timing.capture_stages.performance_query_ms);
+    bool queue_probe_observed = received_first &&
+        frame.timing.capture_stages.queue_depth_sampled;
+    bool queue_probe_valid = !queue_probe_observed ||
+        (valid_timing(frame.timing.capture_stages.queue_query_ms) &&
+         frame.timing.capture_stages.queued_video_frames >= 0 &&
+         frame.timing.capture_stages.queued_audio_frames >= 0 &&
+         frame.timing.capture_stages.queued_metadata_frames >= 0);
+    std::uint64_t after_sequence = frame.timing.sequence;
+    const auto probe_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::milliseconds(1500);
+    while (std::chrono::steady_clock::now() < probe_deadline &&
+           (!received_second || !performance_query_observed ||
+            !queue_probe_observed)) {
         send_ndi_test_frame(
             sender, cv::Scalar(208.0, 48.0, 20.0), metadata);
+        if (wait_for_capture_frame(*capture, after_sequence, frame)) {
+            received_second = true;
+            after_sequence = frame.timing.sequence;
+            const auto& stages = frame.timing.capture_stages;
+            if (stages.performance_query_sampled) {
+                performance_query_observed = true;
+                performance_query_valid = performance_query_valid &&
+                    valid_timing(stages.performance_query_ms);
+            }
+            if (stages.queue_depth_sampled) {
+                queue_probe_observed = true;
+                queue_probe_valid = queue_probe_valid &&
+                    valid_timing(stages.queue_query_ms) &&
+                    stages.queued_video_frames >= 0 &&
+                    stages.queued_audio_frames >= 0 &&
+                    stages.queued_metadata_frames >= 0;
+            }
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    const bool received_second = wait_for_capture_frame(
-        *capture, frame.timing.sequence, frame);
     const cv::Scalar second_mean = received_second
         ? cv::mean(frame.bgr) : cv::Scalar{};
     expect(received_second &&
                std::abs(first_mean[0] - second_mean[0]) > 100.0,
            "NDI 连续变化帧不得重放首次输入");
+    expect(performance_query_observed && performance_query_valid,
+           "NDI 探针必须观测并计时周期性 SDK performance 查询");
+    expect(queue_probe_observed && queue_probe_valid,
+           "NDI 探针必须在首帧或一秒周期内发布合法 SDK queue 深度");
 
     NDIlib_send_destroy(sender);
     bool access_lost = false;

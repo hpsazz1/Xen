@@ -53,6 +53,34 @@ RuntimePipelineSample make_sample(
     sample.profile.aim.total_ms = 0.6;
     sample.profile.mouse_ms = 0.7;
     sample.profile.total_ms = total_ms;
+    sample.capture_stages.ndi_valid = true;
+    sample.capture_stages.runtime_handoff_valid = true;
+    sample.capture_stages.receive_call_ms = 0.11;
+    sample.capture_stages.metadata_ms = 0.01;
+    sample.capture_stages.geometry_ms = 0.02;
+    sample.capture_stages.pool_acquire_ms = 0.01;
+    sample.capture_stages.color_convert_ms = 0.03;
+    sample.capture_stages.performance_query_sampled = true;
+    sample.capture_stages.performance_query_ms = 0.004;
+    sample.capture_stages.queue_depth_sampled = true;
+    sample.capture_stages.queue_query_ms = 0.005;
+    sample.capture_stages.queued_video_frames = 2;
+    sample.capture_stages.pool_publish_ms = 0.01;
+    sample.capture_stages.runtime_capture_grab_ms = 0.02;
+    sample.capture_stages.runtime_queue_publish_ms = 0.01;
+    sample.service.valid = true;
+    sample.service.preview_attempted = true;
+    sample.service.preview_ms = 0.01;
+    sample.service.snapshot_ms = 0.10;
+    sample.service.snapshot_lock_wait_ms = 0.01;
+    sample.service.debug_ring_ms = 0.02;
+    sample.service.profile_window_ms = 0.03;
+    sample.service.service_tail_ms = 0.20;
+    sample.service.pipeline_complete_ms = total_ms + 0.20;
+    sample.service.pipeline_service_ms =
+        sample.service.pipeline_complete_ms - sample.profile.queue_ms;
+    sample.source_dropped_frames = sequence;
+    sample.runtime_overwritten_frames = sequence - 1;
     sample.detection_status = success
         ? DetectionStatus::SUCCESS : DetectionStatus::INFERENCE_FAILED;
     sample.aim_status = success ? AimStatus::SUCCESS : AimStatus::NOT_RUN;
@@ -85,6 +113,7 @@ void test_report_summary_and_atomic_files() {
     config.capture_backend = "UDP_MJPEG";
     config.mouse_backend = "kmbox_net";
     config.max_samples = 3;
+    config.performance_probes_enabled = true;
     std::string error;
     expect(report.start(config, error), "Debug 报告合法配置应成功启动");
     if (!report.active()) return;
@@ -122,7 +151,15 @@ void test_report_summary_and_atomic_files() {
     final_snapshot.capture_roi_height = 320;
     final_snapshot.source_pixels_per_pixel_x = 1.0;
     final_snapshot.source_pixels_per_pixel_y = 1.0;
-    expect(report.finalize(final_snapshot, error),
+    DebugCoverageSummary coverage;
+    coverage.available = true;
+    coverage.warmup_start_overwritten_frames = 1;
+    coverage.warmup_end_overwritten_frames = 2;
+    coverage.formal_end_overwritten_frames = 4;
+    coverage.startup = {1, 1, 1, 1, 1, 0, true};
+    coverage.warmup = {1, 2, 2, 1, 1, 0, true};
+    coverage.formal = {3, 3, 5, 2, 1, 1, true};
+    expect(report.finalize(final_snapshot, error, &coverage),
            "Debug 报告应原子发布 CSV 和 JSON: " + error);
     const auto& summary = report.summary();
     expect(summary.sample_count == 3 && summary.successful_samples == 2 &&
@@ -137,6 +174,13 @@ void test_report_summary_and_atomic_files() {
                summary.total.p95_ms > 4.8 &&
                summary.total.p95_ms < 5.0,
            "失败样本不得进入成功耗时的均值和分位数");
+    expect(summary.pipeline_complete.sample_count == 2 &&
+               summary.ndi_receive_call.sample_count == 2 &&
+               summary.ndi_video_queue_depth.sample_count == 2 &&
+               summary.ndi_video_queue_depth.mean_frames == 2.0 &&
+               summary.coverage.available &&
+               summary.coverage.formal.sample_count == 3,
+           "探针分段、NDI 队列深度和覆盖阶段必须独立汇总");
 
     std::ifstream csv(root / "nested" / "runtime.csv");
     std::ifstream json(root / "nested" / "runtime.json");
@@ -146,7 +190,7 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v6") != std::string::npos &&
+    expect(csv_text.find("Xen Runtime Debug Report v7") != std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
                csv_text.find("d3d11_to_directml_ms") != std::string::npos &&
@@ -161,10 +205,14 @@ void test_report_summary_and_atomic_files() {
                    std::string::npos &&
                csv_text.find("person_detection_count,head_detection_count") !=
                    std::string::npos &&
+               csv_text.find("ndi_receive_call_ms") != std::string::npos &&
+               csv_text.find("pipeline_complete_ms") != std::string::npos &&
+               csv_text.find("# coverage_phase,formal,3") !=
+                   std::string::npos &&
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 6") != std::string::npos &&
+    expect(json_text.find("\"schema\": 7") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -193,6 +241,16 @@ void test_report_summary_and_atomic_files() {
                json_text.find("\"max_head_confidence\":") !=
                    std::string::npos &&
                json_text.find("\"detection_count_by_class\": [1, 2, 0") !=
+                   std::string::npos &&
+               json_text.find("\"performance_probes_enabled\": true") !=
+                   std::string::npos &&
+               json_text.find("\"ndi_video_queue_depth\"") !=
+                   std::string::npos &&
+               json_text.find("\"coverage\"") != std::string::npos &&
+               json_text.find(
+                   "\"trailing_runtime_overwritten_frames\": 1") !=
+                   std::string::npos &&
+               json_text.find("\"pipeline_complete_ms\"") !=
                    std::string::npos,
            "JSON 必须包含分类置信度、分段统计、Runtime 丢弃数和最终快照");
     bool has_temp = false;
@@ -216,6 +274,52 @@ void test_report_rejects_invalid_capacity() {
     expect(!report.start(config, error) && !error.empty() &&
                !report.active(),
            "零容量 Debug 报告必须拒绝启动");
+}
+
+void test_disabled_probes_are_not_reported_as_zero_cost_samples() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      "xen_debug_report_probe_off_test";
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+
+    DebugReport report;
+    DebugReportConfig config;
+    config.csv_path = (root / "runtime.csv").string();
+    config.json_path = (root / "runtime.json").string();
+    config.session_id = "probe-off";
+    config.max_samples = 1;
+    config.performance_probes_enabled = false;
+    std::string error;
+    expect(report.start(config, error),
+           "关闭性能探针时报告仍应正常启动: " + error);
+    if (!report.active()) return;
+
+    RuntimePipelineSample sample = make_sample(1, 1.0, true);
+    sample.capture_stages = {};
+    sample.service = {};
+    report.ingest(std::span<const RuntimePipelineSample>(&sample, 1));
+    RuntimeSnapshot final_snapshot;
+    expect(report.finalize(final_snapshot, error),
+           "关闭性能探针时报告仍应正常发布: " + error);
+    const auto& summary = report.summary();
+    expect(summary.total.sample_count == 1 &&
+               summary.pipeline_complete.sample_count == 0 &&
+               summary.runtime_handoff.sample_count == 0 &&
+               summary.ndi_receive_call.sample_count == 0 &&
+               summary.ndi_video_queue_depth.sample_count == 0,
+           "关闭探针的默认零值不得进入任何新增分段汇总");
+
+    std::ifstream json(root / "runtime.json");
+    const std::string json_text(
+        (std::istreambuf_iterator<char>(json)),
+        std::istreambuf_iterator<char>());
+    expect(json_text.find("\"performance_probes_enabled\": false") !=
+               std::string::npos &&
+               json_text.find(
+                   "\"pipeline_complete\": {\"sample_count\": 0") !=
+                   std::string::npos,
+           "关闭探针的 JSON 必须显式区分未测量与零耗时");
+    std::filesystem::remove_all(root, ignored);
 }
 
 void test_shared_success_semantics() {
@@ -242,6 +346,7 @@ int main() {
     Log::init(log_config);
     test_report_summary_and_atomic_files();
     test_report_rejects_invalid_capacity();
+    test_disabled_probes_are_not_reported_as_zero_cost_samples();
     test_shared_success_semantics();
     Log::shutdown();
     if (failures != 0) {

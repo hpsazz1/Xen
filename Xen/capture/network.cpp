@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <string>
@@ -34,12 +35,23 @@ void NetworkLatestFramePool::publish(
     const std::shared_ptr<NetworkDecodedFrame>& frame) noexcept {
     if (!frame || frame->bgr.empty() || frame->timing.sequence == 0) return;
     try {
+        const bool measure_publish = frame->timing.capture_stages.ndi_valid;
+        const auto publish_started = measure_publish
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         std::lock_guard<std::mutex> lock(mutex_);
         if (latest_ && latest_->timing.sequence != consumed_sequence_) {
             ++dropped_frames_;
         }
         frame->timing.source_dropped_frames = dropped_frames_;
         latest_ = frame;
+        // latest_ 只有在本锁释放后才会被消费者取得；在锁内固化耗时，
+        // 避免发布返回后回写正在被消费的帧而产生数据竞争。
+        if (measure_publish) {
+            frame->timing.capture_stages.pool_publish_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - publish_started).count();
+        }
     } catch (...) {
     }
 }

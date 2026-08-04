@@ -822,8 +822,13 @@ function Collect-Reports {
         }
         $report = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-Json
-        if ($report.schema -ne 6) {
-            $failures += "报告 schema 不是 6：$path"
+        if ($report.schema -ne 7) {
+            $failures += "报告 schema 不是 7：$path"
+        }
+        if (@($report.PSObject.Properties.Name) -notcontains
+                "performance_probes_enabled" -or
+            [bool]$report.performance_probes_enabled) {
+            $failures += "实机验收报告必须显式关闭性能探针：$path"
         }
         $requiredSampleFields = @(
             "person_detection_count", "head_detection_count",
@@ -1006,6 +1011,7 @@ function Launch-Task {
             -ExpectedScaleX 1 -ExpectedScaleY 1 `
             -EnableFp16 off -EnableCudaGraph off `
             -EnableGpuPreprocess off `
+            -EnablePerformanceProbes off `
             -EnableD3D11CudaInterop off `
             -EnableD3D11DirectMlInterop off
         if ($LASTEXITCODE -ne 0) {

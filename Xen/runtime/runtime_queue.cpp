@@ -40,7 +40,8 @@ std::shared_ptr<CapturedFrame> LatestFrameQueue::acquire_write() noexcept {
 }
 
 void LatestFrameQueue::publish(
-        const std::shared_ptr<CapturedFrame>& frame) noexcept {
+        const std::shared_ptr<CapturedFrame>& frame,
+        std::chrono::steady_clock::time_point probe_started) noexcept {
     if (!frame || frame->timing.sequence == 0 ||
         frame->width <= 0 || frame->height <= 0) {
         return;
@@ -65,6 +66,15 @@ void LatestFrameQueue::publish(
             if (latest_ && latest_->timing.sequence != consumed_sequence_) {
                 ++overwritten_frames_;
             }
+            if (frame->timing.capture_stages.runtime_handoff_valid &&
+                probe_started.time_since_epoch().count() != 0) {
+                // 在 latest_ 可见前固化计时，消费者必须先取得同一把锁，
+                // 因而不会读到发布后回写造成的数据竞争。
+                frame->timing.capture_stages.runtime_queue_publish_ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - probe_started)
+                        .count();
+            }
             latest_ = frame;
         }
         condition_.notify_one();
@@ -74,7 +84,8 @@ void LatestFrameQueue::publish(
 
 std::shared_ptr<const CapturedFrame> LatestFrameQueue::wait_latest(
         std::uint64_t last_sequence,
-        const std::atomic<bool>& stop_requested) noexcept {
+        const std::atomic<bool>& stop_requested,
+        std::uint64_t* overwritten_frames_at_consume) noexcept {
     try {
         std::unique_lock<std::mutex> lock(mutex_);
         condition_.wait_for(lock, std::chrono::milliseconds(50), [&] {
@@ -86,6 +97,11 @@ std::shared_ptr<const CapturedFrame> LatestFrameQueue::wait_latest(
             return nullptr;
         }
         consumed_sequence_ = latest_->timing.sequence;
+        if (overwritten_frames_at_consume) {
+            // sequence 与累计覆盖在同一队列锁边界固化，阶段差值才能和
+            // 相邻已消费样本的 sequence gap 做严格交叉核对。
+            *overwritten_frames_at_consume = overwritten_frames_;
+        }
         return latest_;
     } catch (...) {
         return nullptr;

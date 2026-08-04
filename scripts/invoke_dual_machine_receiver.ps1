@@ -13,7 +13,11 @@
     [string]$ReportRoot = "C:\XenLab\reports",
     [string]$RunRoot = "C:\XenLab\runs",
     [string]$ListenUrl = "udp://0.0.0.0:5000",
-    [string]$NdiSourceName = "Auto"
+    [string]$NdiSourceName = "Auto",
+    [ValidateSet("on", "off")]
+    [string]$EnablePerformanceProbes = "off",
+    [ValidateRange(0, 1000000000)]
+    [uint64]$MaximumRuntimeOverwrittenFrames = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -90,10 +94,11 @@ $arguments = @{
     MaximumSourceDroppedFrames = 0
     MaximumTransportDroppedFrames = 0
     MaximumTransportInvalidPackets = 0
-    MaximumRuntimeOverwrittenFrames = 0
+    MaximumRuntimeOverwrittenFrames = $MaximumRuntimeOverwrittenFrames
     EnableFp16 = if ($Backend -eq "tensorrt") { "on" } else { "off" }
     EnableCudaGraph = if ($Backend -eq "tensorrt") { "on" } else { "off" }
     EnableGpuPreprocess = if ($Backend -eq "tensorrt") { "on" } else { "off" }
+    EnablePerformanceProbes = $EnablePerformanceProbes
     ReadyFilePath = $readyPath
 }
 if ($Mode -eq "Prepare") {
@@ -106,6 +111,8 @@ Write-Host "  run_id=$runId"
 Write-Host "  scenario=$Scenario"
 Write-Host "  capture=$CaptureBackend"
 Write-Host "  provider=$Backend"
+Write-Host "  performance_probes=$EnablePerformanceProbes"
+Write-Host "  maximum_runtime_overwritten_frames=$MaximumRuntimeOverwrittenFrames"
 Write-Host "  samples=$minimumSamples, seconds=$minimumSeconds"
 Write-Host "  report_prefix=$reportPrefix"
 Write-Host "  ready_file=$readyPath"

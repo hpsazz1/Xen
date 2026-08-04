@@ -18,6 +18,7 @@ struct DebugReportConfig {
     std::string capture_backend;
     std::string mouse_backend;
     std::size_t max_samples = 10000;
+    bool performance_probes_enabled = false;
 };
 
 struct DebugTimingSummary {
@@ -27,6 +28,37 @@ struct DebugTimingSummary {
     double p95_ms = 0.0;
     double p99_ms = 0.0;
     double max_ms = 0.0;
+};
+
+struct DebugQueueDepthSummary {
+    std::size_t sample_count = 0;
+    double mean_frames = 0.0;
+    double p50_frames = 0.0;
+    double p95_frames = 0.0;
+    double p99_frames = 0.0;
+    int max_frames = 0;
+};
+
+struct DebugCoveragePhaseSummary {
+    std::uint64_t sample_count = 0;
+    std::uint64_t first_sequence = 0;
+    std::uint64_t last_sequence = 0;
+    std::uint64_t runtime_overwritten_frames = 0;
+    std::uint64_t sequence_gaps = 0;
+    // formal 最后一个样本到 Runtime stop 封口之间没有后继 sequence 可用于
+    // 交叉核对，单独保存这段 Runtime 覆盖尾差；其他阶段保持 0。
+    std::uint64_t trailing_runtime_overwritten_frames = 0;
+    bool counter_matches_sequence_gaps = false;
+};
+
+struct DebugCoverageSummary {
+    bool available = false;
+    std::uint64_t warmup_start_overwritten_frames = 0;
+    std::uint64_t warmup_end_overwritten_frames = 0;
+    std::uint64_t formal_end_overwritten_frames = 0;
+    DebugCoveragePhaseSummary startup;
+    DebugCoveragePhaseSummary warmup;
+    DebugCoveragePhaseSummary formal;
 };
 
 struct DebugReportSummary {
@@ -49,6 +81,27 @@ struct DebugReportSummary {
     DebugTimingSummary aim;
     DebugTimingSummary mouse;
     DebugTimingSummary total;
+    DebugTimingSummary ndi_receive_call;
+    DebugTimingSummary ndi_metadata;
+    DebugTimingSummary ndi_geometry;
+    DebugTimingSummary ndi_pool_acquire;
+    DebugTimingSummary ndi_color_convert;
+    DebugTimingSummary ndi_performance_query;
+    DebugTimingSummary ndi_queue_query;
+    DebugTimingSummary ndi_pool_publish;
+    DebugTimingSummary runtime_capture_grab;
+    DebugTimingSummary runtime_queue_publish;
+    DebugTimingSummary runtime_handoff;
+    DebugTimingSummary preview;
+    DebugTimingSummary snapshot;
+    DebugTimingSummary snapshot_lock_wait;
+    DebugTimingSummary debug_ring;
+    DebugTimingSummary profile_window;
+    DebugTimingSummary service_tail;
+    DebugTimingSummary pipeline_service;
+    DebugTimingSummary pipeline_complete;
+    DebugQueueDepthSummary ndi_video_queue_depth;
+    DebugCoverageSummary coverage;
 };
 
 // Debug 报告、正式基准入口和测试共用同一成功语义。合法空检测仍是成功；
@@ -68,7 +121,8 @@ public:
                std::string& error) noexcept;
     void ingest(std::span<const RuntimePipelineSample> samples) noexcept;
     bool finalize(const RuntimeSnapshot& final_snapshot,
-                  std::string& error) noexcept;
+                  std::string& error,
+                  const DebugCoverageSummary* coverage = nullptr) noexcept;
 
     bool active() const noexcept;
     const DebugReportSummary& summary() const noexcept;

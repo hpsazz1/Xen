@@ -51,6 +51,8 @@
     [string]$EnableCudaGraph = "auto",
     [ValidateSet("auto", "on", "off")]
     [string]$EnableGpuPreprocess = "auto",
+    [ValidateSet("on", "off")]
+    [string]$EnablePerformanceProbes = "off",
     [string]$ReadyFilePath = "",
     [switch]$PrepareOnly
 )
@@ -232,12 +234,26 @@ try {
         -EnableFp16 $resolvedFp16 `
         -EnableCudaGraph $resolvedGraph `
         -EnableGpuPreprocess $resolvedGpuPreprocess `
+        -EnablePerformanceProbes $EnablePerformanceProbes `
         -ReadyFilePath $ReadyFilePath
 
     $reportPath = "$ReportPrefix.json"
     $environmentPath = "$ReportPrefix.environment.json"
     $report = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 |
         ConvertFrom-Json
+    $expectedPerformanceProbes = $EnablePerformanceProbes -eq "on"
+    $reportFields = @($report.PSObject.Properties.Name)
+    if ([int]$report.schema -ne 7) {
+        throw "网络基准 Runtime 报告 schema 不是 7：$($report.schema)"
+    }
+    if ([bool]$report.performance_probes_enabled -ne
+            $expectedPerformanceProbes) {
+        throw "网络基准 Runtime 报告性能探针状态不符合请求。"
+    }
+    if ($reportFields -notcontains "coverage" -or
+        $reportFields -notcontains "ndi_video_queue_depth") {
+        throw "网络基准 Runtime 报告缺少覆盖分段或 NDI 视频队列深度证据。"
+    }
     $snapshot = $report.final_snapshot
     $runtimeReportPublished = $true
     if ([uint64]$snapshot.source_dropped_frames -gt
@@ -310,6 +326,14 @@ try {
             maximum_transport_dropped_frames = $MaximumTransportDroppedFrames
             maximum_transport_invalid_packets = $MaximumTransportInvalidPackets
             maximum_runtime_overwritten_frames = $MaximumRuntimeOverwrittenFrames
+        }
+        measurement = [ordered]@{
+            runtime_report_schema = [int]$report.schema
+            performance = [ordered]@{
+                probes_enabled = [bool]$report.performance_probes_enabled
+                coverage = $report.coverage
+                ndi_video_queue_depth = $report.ndi_video_queue_depth
+            }
         }
         artifacts = [ordered]@{
             receiver_config = Get-FileEvidence $receiverConfig

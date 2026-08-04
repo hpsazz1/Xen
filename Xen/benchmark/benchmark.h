@@ -44,6 +44,8 @@ struct BenchmarkOptions {
     bool enable_gpu_preprocess = true;
     bool enable_d3d11_cuda_interop = false;
     bool enable_d3d11_directml_interop = false;
+    // 默认关闭；正式 A/B 由命令行逐轮显式选择，不能从用户 INI 继承。
+    bool enable_performance_probes = false;
     bool backend_explicit = false;
     bool openvino_device_explicit = false;
     BenchmarkExpectedGeometry expected_geometry;

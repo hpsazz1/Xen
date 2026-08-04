@@ -47,6 +47,29 @@ Assert-True ($networkReceiverText -match
 Assert-True ($networkReceiverText -match
     '(?s)throw \(\("网络门禁未通过.*"网络完成标记不发布。"\) -f') `
     "网络门禁文本必须先拼接完整模板，再应用格式参数。"
+Assert-True ($networkReceiverText -match
+    '\[string\]\$EnablePerformanceProbes\s*=\s*"off"') `
+    "网络接收脚本必须声明默认关闭的性能探针参数。"
+Assert-True ($networkReceiverText -match
+    '-EnablePerformanceProbes\s+\$EnablePerformanceProbes') `
+    "网络接收脚本必须向 Runtime 基准精确透传性能探针状态。"
+Assert-True ($networkReceiverText -match
+    'coverage\s*=\s*\$report\.coverage' -and
+    $networkReceiverText -match
+        'ndi_video_queue_depth\s*=\s*\$report\.ndi_video_queue_depth') `
+    "网络完成标记必须携带覆盖分段和 NDI 队列深度测量证据。"
+
+$dualReceiverText = [System.IO.File]::ReadAllText(
+    (Join-Path $RepositoryRoot "scripts/invoke_dual_machine_receiver.ps1"))
+Assert-True ($dualReceiverText -match
+    '\[string\]\$EnablePerformanceProbes\s*=\s*"off"' -and
+    $dualReceiverText -match
+        'EnablePerformanceProbes\s*=\s*\$EnablePerformanceProbes' -and
+    $dualReceiverText -match
+        '\[uint64\]\$MaximumRuntimeOverwrittenFrames\s*=\s*0' -and
+    $dualReceiverText -match
+        'MaximumRuntimeOverwrittenFrames\s*=\s*\$MaximumRuntimeOverwrittenFrames') `
+    "双机远程入口必须显式透传探针状态和默认为零的 Runtime 覆盖上限。"
 
 . (Join-Path $RepositoryRoot "scripts/runtime_environment.ps1")
 $successQuery = {
@@ -90,7 +113,8 @@ try {
     # 本回归按退出码和完整文本判断，不能让外层 Stop 提前截断证据。
     $ErrorActionPreference = "Continue"
     $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass `
-        -File $invokeScript -Scenario GeometryStatic -Mode Prepare 2>&1)
+        -File $invokeScript -Scenario GeometryStatic -Mode Prepare `
+        -EnablePerformanceProbes on 2>&1)
     $exitCode = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previousErrorActionPreference
@@ -100,7 +124,7 @@ $outputText = $output -join "`n"
 Assert-True ($exitCode -ne 0 -and
     $outputText -match "便携包清单不存在" -and
     $outputText -notmatch "Join-Path") `
-    "任意工作目录启动必须在脚本体内解析默认 PackageRoot。"
+    "任意工作目录启动必须绑定探针参数并在脚本体内解析默认 PackageRoot。"
 
 $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
     ("xen-dual-provider-{0}" -f [guid]::NewGuid().ToString("N"))

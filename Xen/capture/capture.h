@@ -77,6 +77,9 @@ struct CaptureConfig {
     int ndi_discovery_timeout_ms = 5000;
     int ndi_receive_timeout_ms = 50;
     int ndi_disconnect_timeout_ms = 2000;
+    // 仅由正式性能入口临时开启，不持久化到用户配置。开启后记录 NDI
+    // 分段耗时，并低频查询 SDK 队列深度；正常运行保持关闭以避免诊断扰动。
+    bool enable_performance_probes = false;
     NetworkFrameLayout ndi_frame_layout =
         NetworkFrameLayout::FULL_FRAME_1_TO_1;
     // NDI metadata 缺失或不符合 Xen 契约时使用的主机完整 FOV。
@@ -92,10 +95,42 @@ struct CaptureConfig {
     int acquire_timeout_ms = 16;
 };
 
+// Capture 热路径的可选分段诊断。所有耗时单位均为毫秒；ndi_valid=false
+// 表示本帧没有启用 NDI 探针，不能把默认零值解释为真实零耗时。
+struct CaptureStageTiming {
+    bool ndi_valid = false;
+    bool runtime_handoff_valid = false;
+    // NDIlib_recv_capture_v2 整次阻塞调用，包含等帧和 SDK 内部接收/解码，
+    // 不能解释为纯网络或纯解码耗时。
+    double receive_call_ms = 0.0;
+    // metadata 仅统计当前视频帧携带的文本解析或最近有效 metadata 复制；
+    // geometry 只统计坐标契约解析，不包含五槽池申请。
+    double metadata_ms = 0.0;
+    double geometry_ms = 0.0;
+    double pool_acquire_ms = 0.0;
+    // 仅包围 BGRA/BGRX 到 BGR 的 cv::cvtColor。
+    double color_convert_ms = 0.0;
+    // 两类 SDK 查询均以 sampled 区分“本帧未查询”和“真实零耗时”。
+    bool performance_query_sampled = false;
+    double performance_query_ms = 0.0;
+    bool queue_depth_sampled = false;
+    double queue_query_ms = 0.0;
+    // 三项队列深度只在 queue_depth_sampled=true 时有效。
+    int queued_video_frames = 0;
+    int queued_audio_frames = 0;
+    int queued_metadata_frames = 0;
+    // pool_publish_ms 在 NetworkLatestFramePool 发布锁内固化；最后两项由
+    // Runtime 后续交接阶段填写，Capture 不得提前标记为有效。
+    double pool_publish_ms = 0.0;
+    double runtime_capture_grab_ms = 0.0;
+    double runtime_queue_publish_ms = 0.0;
+};
+
 struct FrameTiming {
     std::uint64_t sequence = 0;
     std::chrono::steady_clock::time_point captured_at{};
     double capture_ms = 0.0;
+    CaptureStageTiming capture_stages;
     // Capture 后端内部有界队列累计丢弃的源帧数，不包含 Runtime 队列覆盖。
     std::uint64_t source_dropped_frames = 0;
     // Desktop Duplication 在 D3D11 设备仍有效时成功重建的会话数。

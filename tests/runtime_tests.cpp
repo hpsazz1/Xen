@@ -58,9 +58,12 @@ void test_latest_frame_queue() {
     }
     std::atomic<bool> stop{false};
     publish(queue, 1, 10);
-    const auto first = queue.wait_latest(0, stop);
+    std::uint64_t overwritten_at_consume = 99;
+    const auto first = queue.wait_latest(0, stop, &overwritten_at_consume);
     expect(first && first->timing.sequence == 1,
            "消费者应取得首个发布帧");
+    expect(overwritten_at_consume == 0,
+           "首个样本必须在消费锁边界固化零覆盖端点");
     expect(first && first->bgr.at<cv::Vec3b>(0, 0)[0] == 10,
            "消费者持有的帧内容应正确");
 
@@ -70,9 +73,12 @@ void test_latest_frame_queue() {
            "消费者落后时只统计被覆盖的未消费帧");
     expect(first && first->bgr.at<cv::Vec3b>(0, 0)[0] == 10,
            "生产者覆写新帧时不得破坏消费者持有的槽");
-    const auto latest = queue.wait_latest(1, stop);
+    const auto latest = queue.wait_latest(
+        1, stop, &overwritten_at_consume);
     expect(latest && latest->timing.sequence == 3,
            "队列必须只返回最新帧而不是积压帧");
+    expect(overwritten_at_consume == 1,
+           "消费端点覆盖累计值必须与 sequence 缺口一致");
 
     queue.stop();
     expect(!queue.wait_latest(3, stop),
@@ -201,6 +207,38 @@ void test_bounded_sample_ring() {
     ring.reset();
     expect(ring.dropped() == 0 && ring.push(9),
            "诊断环 reset 必须清零统计并允许复用");
+
+    runtime::detail::BoundedSampleRing<int, 3> two_phase;
+    expect(two_phase.push(1), "两阶段诊断环应先接受普通样本");
+    const auto pending = two_phase.push_pending(2);
+    expect(static_cast<bool>(pending) && two_phase.push(3),
+           "两阶段诊断环应返回可校验 token");
+    expect(two_phase.drain(output) && output == std::vector<int>({1}),
+           "drain 遇到 pending 样本必须停止，不能越过交付后续样本");
+    expect(two_phase.finalize(pending, [](int& value) noexcept {
+               value += 20;
+           }),
+           "合法 token 必须能原位补齐同一槽样本");
+    expect(two_phase.drain(output) && output == std::vector<int>({22, 3}),
+           "finalize 后必须按原发布顺序交付完整样本");
+    expect(!two_phase.finalize(pending, [](int&) noexcept {}),
+           "已交付 token 不得二次 finalize");
+
+    runtime::detail::BoundedSampleRing<int, 2> overwritten_pending;
+    const auto stale = overwritten_pending.push_pending(7);
+    expect(overwritten_pending.push(8) && overwritten_pending.push(9) &&
+               overwritten_pending.dropped() == 1 &&
+               !overwritten_pending.finalize(
+                   stale, [](int&) noexcept {}),
+           "已被容量覆盖的 pending token 必须失效且不得污染新样本");
+    overwritten_pending.reset();
+    const auto fresh = overwritten_pending.push_pending(10);
+    expect(!overwritten_pending.finalize(stale, [](int&) noexcept {}) &&
+               overwritten_pending.finalize(
+                   fresh, [](int& value) noexcept { value += 1; }) &&
+               overwritten_pending.drain(output) &&
+               output == std::vector<int>({11}),
+           "reset 后必须保持代际单调，旧 token 不得命中新占用槽");
 }
 
 void test_runtime_preview_channel() {

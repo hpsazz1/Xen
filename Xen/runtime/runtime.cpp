@@ -34,6 +34,17 @@ double percentile(std::vector<double> values, double quantile) {
 
 struct Runtime::Impl {
     static constexpr std::size_t kDebugSampleCapacity = 4096;
+    using DebugSampleRing = runtime::detail::BoundedSampleRing<
+        RuntimePipelineSample, kDebugSampleCapacity>;
+
+    struct SnapshotUpdateResult {
+        DebugSampleRing::PendingToken pending_token;
+        double snapshot_ms = 0.0;
+        double snapshot_lock_wait_ms = 0.0;
+        double debug_ring_ms = 0.0;
+        double profile_window_ms = 0.0;
+    };
+
     mutable std::mutex lifecycle_mutex;
     mutable std::mutex snapshot_mutex;
     // Detector 不支持 detect() 与资源切换并发；候选加载始终在锁外完成。
@@ -54,8 +65,7 @@ struct Runtime::Impl {
     std::atomic<bool> aim_reset_requested{false};
     std::atomic<bool> detector_reload_running{false};
     std::deque<double> pipeline_samples;
-    runtime::detail::BoundedSampleRing<
-        RuntimePipelineSample, kDebugSampleCapacity> debug_samples;
+    DebugSampleRing debug_samples;
     std::chrono::steady_clock::time_point fps_started{};
     std::uint64_t fps_frame_count = 0;
 
@@ -162,7 +172,10 @@ struct Runtime::Impl {
             }
         }
         aim = std::make_unique<Aim>(config.aim);
-        capture = create_capture(config.capture);
+        CaptureConfig capture_config = config.capture;
+        capture_config.enable_performance_probes =
+            config.runtime.enable_performance_probes;
+        capture = create_capture(capture_config);
         if (!capture || !capture->open()) {
             set_error(capture ? capture->last_error() : "创建 Capture 失败");
             return false;
@@ -224,15 +237,29 @@ struct Runtime::Impl {
     }
 
     void capture_loop() noexcept {
+        const bool probes_enabled = config.runtime.enable_performance_probes;
         while (!stop_requested.load(std::memory_order_acquire)) {
             auto write_slot = frame_queue.acquire_write();
             if (!write_slot) {
                 std::this_thread::yield();
                 continue;
             }
+            const auto grab_started = probes_enabled
+                ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point{};
             const CaptureStatus capture_status = capture->grab(*write_slot);
+            const auto grab_finished = probes_enabled
+                ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point{};
             if (capture_status == CaptureStatus::FRAME) {
-                frame_queue.publish(write_slot);
+                if (probes_enabled) {
+                    write_slot->timing.capture_stages.runtime_handoff_valid =
+                        true;
+                    write_slot->timing.capture_stages.runtime_capture_grab_ms =
+                        std::chrono::duration<double, std::milli>(
+                            grab_finished - grab_started).count();
+                }
+                frame_queue.publish(write_slot, grab_finished);
                 const auto now = std::chrono::steady_clock::now();
                 ++fps_frame_count;
                 const double elapsed =
@@ -296,22 +323,40 @@ struct Runtime::Impl {
         }
     }
 
-    void update_pipeline_snapshot(const CapturedFrame& frame,
+    SnapshotUpdateResult update_pipeline_snapshot(
+                                  const CapturedFrame& frame,
                                   const PipelineProfile& profile,
+                                  const RuntimeServiceProfile& service,
+                                  std::uint64_t sample_overwritten_frames,
                                   const AimResult& aim_result,
                                   std::span<const Detection> detections,
                                   MouseStatus mouse_status,
                                   bool mouse_sent) {
+        SnapshotUpdateResult result;
+        const bool probes_enabled = config.runtime.enable_performance_probes;
+        const auto snapshot_started = probes_enabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         const auto preview_stats = preview_channel.stats();
-        std::lock_guard<std::mutex> lock(snapshot_mutex);
+        const auto snapshot_lock_requested = probes_enabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
+        std::unique_lock<std::mutex> lock(snapshot_mutex);
+        if (probes_enabled) {
+            result.snapshot_lock_wait_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() -
+                    snapshot_lock_requested).count();
+        }
         current_snapshot.last_sequence = frame.timing.sequence;
         current_snapshot.last_profile = profile;
         current_snapshot.detection_status = profile.detector.status;
         current_snapshot.aim_status = aim_result.status;
         current_snapshot.mouse_status = mouse_status;
         current_snapshot.last_aim = aim_result;
-        current_snapshot.overwritten_frames =
+        const std::uint64_t runtime_overwritten_frames =
             frame_queue.overwritten_frames();
+        current_snapshot.overwritten_frames = runtime_overwritten_frames;
         ++current_snapshot.processed_frames;
         if (profile.detector.status != DetectionStatus::SUCCESS ||
             aim_result.status != AimStatus::SUCCESS) {
@@ -323,6 +368,9 @@ struct Runtime::Impl {
         current_snapshot.emergency_stopped =
             safety_gate.emergency_stopped();
 
+        const auto debug_ring_started = probes_enabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         RuntimePipelineSample sample;
         sample.sequence = frame.timing.sequence;
         sample.geometry.encoded_width = frame.encoded_width;
@@ -338,6 +386,14 @@ struct Runtime::Impl {
         sample.geometry.source_pixels_per_pixel_y =
             frame.source_pixels_per_pixel_y;
         sample.profile = profile;
+        sample.capture_stages = frame.timing.capture_stages;
+        sample.service = service;
+        sample.source_dropped_frames = frame.timing.source_dropped_frames;
+        sample.transport_dropped_frames =
+            frame.timing.transport_dropped_frames;
+        sample.transport_invalid_packets =
+            frame.timing.transport_invalid_packets;
+        sample.runtime_overwritten_frames = sample_overwritten_frames;
         sample.detection_status = profile.detector.status;
         sample.aim_status = aim_result.status;
         sample.mouse_status = mouse_status;
@@ -346,14 +402,27 @@ struct Runtime::Impl {
             runtime::detail::summarize_detections(
                 detections, config.aim, sample);
         }
-        debug_samples.push(sample);
+        if (probes_enabled) {
+            result.pending_token = debug_samples.push_pending(sample);
+        } else {
+            debug_samples.push(sample);
+        }
         current_snapshot.debug_samples_dropped = debug_samples.dropped();
+        if (probes_enabled) {
+            result.debug_ring_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() -
+                    debug_ring_started).count();
+        }
         current_snapshot.preview_enabled = preview_stats.enabled;
         current_snapshot.preview_sampled_frames =
             preview_stats.sampled_frames;
         current_snapshot.preview_dropped_frames =
             preview_stats.dropped_frames;
 
+        const auto profile_window_started = probes_enabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         pipeline_samples.push_back(profile.total_ms);
         while (pipeline_samples.size() >
                static_cast<std::size_t>(config.runtime.profile_window)) {
@@ -363,13 +432,30 @@ struct Runtime::Impl {
             pipeline_samples.begin(), pipeline_samples.end());
         current_snapshot.pipeline_p50_ms = percentile(samples, 0.50);
         current_snapshot.pipeline_p95_ms = percentile(samples, 0.95);
+        if (probes_enabled) {
+            result.profile_window_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() -
+                    profile_window_started).count();
+        }
+        lock.unlock();
+        if (probes_enabled) {
+            result.snapshot_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - snapshot_started)
+                    .count();
+        }
+        return result;
     }
 
     void pipeline_loop() noexcept {
         std::uint64_t last_sequence = 0;
+        const bool probes_enabled = config.runtime.enable_performance_probes;
         while (!stop_requested.load(std::memory_order_acquire)) {
+            std::uint64_t overwritten_frames_at_consume = 0;
             const auto frame = frame_queue.wait_latest(
-                last_sequence, stop_requested);
+                last_sequence, stop_requested,
+                &overwritten_frames_at_consume);
             if (!frame) continue;
             last_sequence = frame->timing.sequence;
             const auto pipeline_started = std::chrono::steady_clock::now();
@@ -465,17 +551,56 @@ struct Runtime::Impl {
                     (frame->source_height * 0.5 - frame->roi_y) /
                     frame->source_pixels_per_pixel_y)
                 : 0.0f;
+            RuntimeServiceProfile service;
+            service.preview_attempted =
+                frame->storage == CapturedFrameStorage::CPU_BGR;
             if (frame->storage == CapturedFrameStorage::CPU_BGR) {
-                preview_channel.publish(
+                const auto preview_started = probes_enabled
+                    ? std::chrono::steady_clock::now()
+                    : std::chrono::steady_clock::time_point{};
+                service.preview_published = preview_channel.publish(
                     frame->bgr, frame->timing.sequence,
                     control_center_x, control_center_y,
                     profile.detector.status, aim_result.status,
                     preview_detections, aim_result,
                     std::chrono::steady_clock::now());
+                if (probes_enabled) {
+                    service.preview_ms =
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            preview_started).count();
+                }
             }
-            update_pipeline_snapshot(*frame, profile, aim_result,
-                                     preview_detections,
-                                     mouse->status(), mouse_sent);
+            SnapshotUpdateResult snapshot_result = update_pipeline_snapshot(
+                *frame, profile, service, overwritten_frames_at_consume,
+                aim_result, preview_detections, mouse->status(), mouse_sent);
+            if (probes_enabled) {
+                const auto tail_finished = std::chrono::steady_clock::now();
+                service.valid = true;
+                service.snapshot_ms = snapshot_result.snapshot_ms;
+                service.snapshot_lock_wait_ms =
+                    snapshot_result.snapshot_lock_wait_ms;
+                service.debug_ring_ms = snapshot_result.debug_ring_ms;
+                service.profile_window_ms =
+                    snapshot_result.profile_window_ms;
+                service.service_tail_ms =
+                    std::chrono::duration<double, std::milli>(
+                        tail_finished - finished).count();
+                service.pipeline_service_ms =
+                    std::chrono::duration<double, std::milli>(
+                        tail_finished - pipeline_started).count();
+                service.pipeline_complete_ms =
+                    std::chrono::duration<double, std::milli>(
+                        tail_finished - frame->timing.captured_at).count();
+                if (!debug_samples.finalize(
+                        snapshot_result.pending_token,
+                        [&service](RuntimePipelineSample& sample) noexcept {
+                            sample.service = service;
+                        })) {
+                    fail_runtime("性能探针样本两阶段发布失败");
+                    return;
+                }
+            }
         }
     }
 
@@ -579,6 +704,8 @@ void Runtime::stop() noexcept {
         }
     } catch (...) {
     }
+    const std::uint64_t final_runtime_overwritten_frames =
+        impl_->frame_queue.overwritten_frames();
     impl_->detector_reload_running.store(false, std::memory_order_release);
     impl_->release_modules();
     // Pipeline 已退出后清除旧预览，但保留三槽大缓冲和用户的启用选择。
@@ -602,6 +729,10 @@ void Runtime::stop() noexcept {
         impl_->current_snapshot.preview_dropped_frames = std::max(
             impl_->current_snapshot.preview_dropped_frames,
             preview_stats.dropped_frames);
+        // 最后一个 Pipeline 样本完成后到 stop() 封口之间仍可能发生 latest-only
+        // 覆盖。线程 join 后读取终值，正式覆盖阶段才能包含这段尾差。
+        impl_->current_snapshot.overwritten_frames =
+            final_runtime_overwritten_frames;
     }
 }
 

@@ -51,6 +51,8 @@
     [ValidateSet("on", "off")]
     [string]$EnableGpuPreprocess = "on",
     [ValidateSet("on", "off")]
+    [string]$EnablePerformanceProbes = "off",
+    [ValidateSet("on", "off")]
     [string]$EnableD3D11CudaInterop = "off",
     [ValidateSet("on", "off")]
     [string]$EnableD3D11DirectMlInterop = "off",
@@ -722,6 +724,7 @@ $sdkRoots = if ($portablePackage) {
 $enableFp16Value = $EnableFp16 -eq "on"
 $enableCudaGraphValue = $EnableCudaGraph -eq "on"
 $enableGpuPreprocessValue = $EnableGpuPreprocess -eq "on"
+$enablePerformanceProbesValue = $EnablePerformanceProbes -eq "on"
 $enableD3D11CudaInteropValue = $EnableD3D11CudaInterop -eq "on"
 $enableD3D11DirectMlInteropValue =
     $EnableD3D11DirectMlInterop -eq "on"
@@ -742,6 +745,7 @@ $arguments = @(
     "--fp16", $EnableFp16,
     "--cuda-graph", $EnableCudaGraph,
     "--gpu-preprocess", $EnableGpuPreprocess,
+    "--performance-probes", $EnablePerformanceProbes,
     "--d3d11-cuda-interop", $EnableD3D11CudaInterop,
     "--d3d11-directml-interop", $EnableD3D11DirectMlInterop
 )
@@ -867,8 +871,12 @@ $expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
 } else {
     $captureBackendNames[$ExpectedCaptureBackend]
 }
-if ($report.schema -ne 6) {
-    throw "报告 schema 不是 6：$($report.schema)"
+if ($report.schema -ne 7) {
+    throw "报告 schema 不是 7：$($report.schema)"
+}
+if ([bool]$report.performance_probes_enabled -ne
+        $enablePerformanceProbesValue) {
+    throw "报告性能探针状态不符合请求。"
 }
 if (-not [string]::IsNullOrEmpty($expectedCaptureName) -and
     $report.capture_backend -ne $expectedCaptureName) {
@@ -926,6 +934,8 @@ $expectGpuPreprocess = (
     $enableD3D11DirectMlInteropValue)
 foreach ($sample in @($report.samples)) {
     if (-not $sample.success -or
+        [bool]$sample.performance_probes -ne
+            $enablePerformanceProbesValue -or
         $sample.detection_status -ne "SUCCESS" -or
         $sample.aim_status -ne "SUCCESS" -or
         $sample.mouse_sent -or
@@ -977,6 +987,95 @@ foreach ($sample in @($report.samples)) {
 }
 if ($sampleIndex -ne $report.sample_count) {
     throw "JSON 样本数组长度与 sample_count 不一致。"
+}
+$csvDataLines = @(Get-Content -LiteralPath $pendingCsv -Encoding UTF8 |
+    Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_) -and
+        -not $_.StartsWith("#", [System.StringComparison]::Ordinal)
+    })
+if ($csvDataLines.Count -lt 2) {
+    throw "CSV 缺少表头或正式样本行。"
+}
+try {
+    $csvRows = @($csvDataLines | ConvertFrom-Csv)
+} catch {
+    throw "CSV 结构化解析失败：$($_.Exception.Message)"
+}
+if ($csvRows.Count -ne [int]$report.sample_count) {
+    throw "CSV 正式样本行数与 JSON sample_count 不一致。"
+}
+$csvSequences = [System.Collections.Generic.List[uint64]]::new()
+for ($csvIndex = 0; $csvIndex -lt $csvRows.Count; ++$csvIndex) {
+    [uint64]$csvSequence = 0
+    if (-not [uint64]::TryParse(
+            [string]$csvRows[$csvIndex].sequence,
+            [ref]$csvSequence)) {
+        throw "CSV 第 $csvIndex 行缺少合法 sequence。"
+    }
+    $jsonSequence = [uint64](@($report.samples)[$csvIndex].sequence)
+    if ($csvSequence -ne $jsonSequence) {
+        throw "CSV 与 JSON 第 $csvIndex 个正式样本 sequence 不一致。"
+    }
+    $csvSequences.Add($csvSequence)
+}
+$coverage = $report.coverage
+if (-not [bool]$coverage.available -or
+    [uint64]$coverage.startup.sample_count -ne 1 -or
+    [uint64]$coverage.warmup.sample_count -ne $WarmupSamples -or
+    [uint64]$coverage.formal.sample_count -ne $report.sample_count -or
+    [uint64]$coverage.startup.runtime_overwritten_frames -ne
+        [uint64]$coverage.warmup_start_overwritten_frames -or
+    [uint64]$coverage.warmup.runtime_overwritten_frames -ne
+        ([uint64]$coverage.warmup_end_overwritten_frames -
+         [uint64]$coverage.warmup_start_overwritten_frames) -or
+    [uint64]$coverage.formal.runtime_overwritten_frames -ne
+        ([uint64]$coverage.formal_end_overwritten_frames -
+         [uint64]$coverage.warmup_end_overwritten_frames)) {
+    throw "startup/warmup/formal 覆盖分段或累计边界不闭合。"
+}
+$previousFormalSequence = if ($WarmupSamples -gt 0) {
+    [uint64]$coverage.warmup.last_sequence
+} else {
+    [uint64]$coverage.startup.last_sequence
+}
+[uint64]$formalSequenceGaps = 0
+foreach ($sequence in $csvSequences) {
+    if ($sequence -le $previousFormalSequence) {
+        throw "正式 CSV sequence 不是严格递增。"
+    }
+    $formalSequenceGaps += $sequence - $previousFormalSequence - 1
+    $previousFormalSequence = $sequence
+}
+if ($formalSequenceGaps -ne [uint64]$coverage.formal.sequence_gaps) {
+    throw "正式 CSV sequence 缺口与 coverage 交叉统计不一致。"
+}
+if ([uint64]$snapshot.source_dropped_frames -eq 0) {
+    $formalCounterExpected =
+        [uint64]$coverage.formal.sequence_gaps +
+        [uint64]$coverage.formal.trailing_runtime_overwritten_frames
+    if (-not [bool]$coverage.formal.counter_matches_sequence_gaps -or
+        [uint64]$coverage.formal.runtime_overwritten_frames -ne
+            $formalCounterExpected) {
+        throw "源端零丢帧时，正式 Runtime 覆盖与 CSV sequence 缺口/停止尾差不一致。"
+    }
+}
+$probeSummaryValid = if ($enablePerformanceProbesValue) {
+    [uint64]$report.timing.pipeline_complete.sample_count -eq
+        [uint64]$report.sample_count -and
+    [uint64]$report.timing.runtime_handoff.sample_count -eq
+        [uint64]$report.sample_count -and
+    ($ExpectedCaptureBackend -ne "ndi" -or
+     ([uint64]$report.timing.ndi_receive_call.sample_count -eq
+          [uint64]$report.sample_count -and
+      [uint64]$report.ndi_video_queue_depth.sample_count -gt 0))
+} else {
+    [uint64]$report.timing.pipeline_complete.sample_count -eq 0 -and
+    [uint64]$report.timing.runtime_handoff.sample_count -eq 0 -and
+    [uint64]$report.timing.ndi_receive_call.sample_count -eq 0 -and
+    [uint64]$report.ndi_video_queue_depth.sample_count -eq 0
+}
+if (-not $probeSummaryValid) {
+    throw "性能探针分段样本数或 NDI queue 采样数不符合请求。"
 }
 
 $gitCommit = if ($portablePackage) {
@@ -1098,6 +1197,7 @@ $environment = [ordered]@{
         fp16 = $enableFp16Value
         cuda_graph = $enableCudaGraphValue
         gpu_preprocess = $enableGpuPreprocessValue
+        performance_probes = $enablePerformanceProbesValue
         d3d11_cuda_interop = $enableD3D11CudaInteropValue
         d3d11_directml_interop = $enableD3D11DirectMlInteropValue
         expected_explicit_device_copy = $expectExplicitDeviceCopy
@@ -1126,6 +1226,9 @@ $environment = [ordered]@{
             -Algorithm SHA256).Hash
         sample_count = [long]$report.sample_count
         total = $report.timing.total
+        pipeline_complete = $report.timing.pipeline_complete
+        coverage = $report.coverage
+        ndi_video_queue_depth = $report.ndi_video_queue_depth
     }
 }
 $environmentText = $environment | ConvertTo-Json -Depth 12
