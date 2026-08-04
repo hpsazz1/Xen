@@ -552,8 +552,10 @@ Toggle 以及多键/鼠标快捷键等已完成 App 功能。示例：
   -OutputDirectory ".\artifacts\Xen-release"
 ```
 
-`RELEASE-BUNDLE-001` 的本机包验证不能替代无开发 SDK 目标机门禁；同一已验包仍须由
-`DEPLOY-CLEANHOST-001` 在 clean host 验证。
+当前辅机为无开发 SDK 的独立 Windows 目标机，已使用自包含 NVIDIA/NDI 部署完成多轮双机动态、
+长稳和 Aim 正式验收。用户于 2026-08-05 接受这些长期运行证据作为当前部署边界，取消
+`DEPLOY-CLEANHOST-001` 的独立重复门禁；本结论不表述为在辅机重新执行了统一发布包的三运行时
+切换矩阵。后续若改变目标机、运行时组合或发布拓扑，必须重新登记部署验收任务。
 
 ## 构建状态
 
