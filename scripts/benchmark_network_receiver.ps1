@@ -53,6 +53,12 @@
     [string]$EnableGpuPreprocess = "auto",
     [ValidateSet("on", "off")]
     [string]$EnablePerformanceProbes = "off",
+    [ValidateSet("on", "off")]
+    [string]$AimPrediction = "off",
+    [ValidateRange(1.0, 50.0)]
+    [double]$AimMaxPredictionLeadPercent = 35.0,
+    [ValidateRange(0, 1000000000)]
+    [uint64]$MinimumAimPrecomputedCommandFrames = 0,
     [string]$ReadyFilePath = "",
     [switch]$PrepareOnly
 )
@@ -152,6 +158,9 @@ foreach ($path in $finalOutputs) {
 }
 
 $ndiMetadata = if ($NdiRequireFrameMetadata -eq "on") { "true" } else { "false" }
+$aimPredictionValue = if ($AimPrediction -eq "on") { "true" } else { "false" }
+$aimMaxPredictionLeadText = $AimMaxPredictionLeadPercent.ToString(
+    "F6", [System.Globalization.CultureInfo]::InvariantCulture)
 $configLines = @(
     "[capture]",
     "backend=$CaptureBackend",
@@ -175,6 +184,42 @@ $configLines = @(
     "roi_x=0",
     "roi_y=0",
     "acquire_timeout_ms=16",
+    "",
+    "[aim]",
+    "person_class_ids=0,2",
+    "head_class_ids=1,3",
+    "high_confidence=0.250000",
+    "low_confidence=0.100000",
+    "min_confirmed_hits=2",
+    "max_lost_frames=8",
+    "min_iou=0.100000",
+    "max_center_distance=0.250000",
+    "switch_margin=0.200000",
+    "switch_confirm_frames=3",
+    "switch_cooldown_frames=5",
+    "acquisition_range_percent=90.000000",
+    "body_aim_height_ratio=0.350000",
+    "deadzone_pixels=1.500000",
+    "smoothing=0.350000",
+    "counts_per_pixel_x=0.500000",
+    "counts_per_pixel_y=0.500000",
+    "max_counts_per_frame=50.000000",
+    "enable_prediction=$aimPredictionValue",
+    "max_prediction_lead_percent=$aimMaxPredictionLeadText",
+    "predicted_gain=0.500000",
+    "",
+    "[mouse]",
+    "backend=win32_send_input",
+    "allow_send_input=false",
+    "kmbox_ip=",
+    "kmbox_port=0",
+    "kmbox_uuid=",
+    "kmbox_connect_timeout_ms=1000",
+    "kmbox_command_timeout_ms=300",
+    "makcu_port=",
+    "makcu_baud_rate=115200",
+    "makcu_connect_timeout_ms=1000",
+    "makcu_command_timeout_ms=300",
     ""
 )
 $configText = $configLines -join "`r`n"
@@ -192,6 +237,8 @@ if (Test-Path -LiteralPath $receiverConfig) {
 if ($PrepareOnly) {
     Write-Host "网络接收配置已准备：$receiverConfig"
     Write-Host "主机 FOV=${SourceWidth}x${SourceHeight}, ROI=($roiX,$roiY,${RoiWidth}x${RoiHeight})"
+    Write-Host "Aim prediction=$AimPrediction, max_lead=$AimMaxPredictionLeadPercent%"
+    Write-Host "Mouse allow_send_input=false"
     return
 }
 
@@ -235,16 +282,23 @@ try {
         -EnableCudaGraph $resolvedGraph `
         -EnableGpuPreprocess $resolvedGpuPreprocess `
         -EnablePerformanceProbes $EnablePerformanceProbes `
+        -ExpectedAimPrediction $AimPrediction `
+        -ExpectedAimMaxPredictionLeadPercent `
+            $AimMaxPredictionLeadPercent `
+        -MinimumAimPrecomputedCommandFrames `
+            $MinimumAimPrecomputedCommandFrames `
         -ReadyFilePath $ReadyFilePath
 
     $reportPath = "$ReportPrefix.json"
     $environmentPath = "$ReportPrefix.environment.json"
     $report = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 |
         ConvertFrom-Json
+    $environment = Get-Content -LiteralPath $environmentPath -Raw `
+        -Encoding UTF8 | ConvertFrom-Json
     $expectedPerformanceProbes = $EnablePerformanceProbes -eq "on"
     $reportFields = @($report.PSObject.Properties.Name)
-    if ([int]$report.schema -ne 7) {
-        throw "网络基准 Runtime 报告 schema 不是 7：$($report.schema)"
+    if ([int]$report.schema -ne 8) {
+        throw "网络基准 Runtime 报告 schema 不是 8：$($report.schema)"
     }
     if ([bool]$report.performance_probes_enabled -ne
             $expectedPerformanceProbes) {
@@ -253,6 +307,12 @@ try {
     if ($reportFields -notcontains "coverage" -or
         $reportFields -notcontains "ndi_video_queue_depth") {
         throw "网络基准 Runtime 报告缺少覆盖分段或 NDI 视频队列深度证据。"
+    }
+    if ([int]$environment.schema -ne 1 -or
+        -not [bool]$environment.complete -or
+        $null -eq $environment.report.aim -or
+        -not [bool]$environment.report.aim.contract_valid) {
+        throw "网络基准环境清单缺少完整且通过的 Aim schema 8 门禁。"
     }
     $snapshot = $report.final_snapshot
     $runtimeReportPublished = $true
@@ -326,9 +386,17 @@ try {
             maximum_transport_dropped_frames = $MaximumTransportDroppedFrames
             maximum_transport_invalid_packets = $MaximumTransportInvalidPackets
             maximum_runtime_overwritten_frames = $MaximumRuntimeOverwrittenFrames
+            minimum_aim_precomputed_command_frames =
+                $MinimumAimPrecomputedCommandFrames
         }
         measurement = [ordered]@{
             runtime_report_schema = [int]$report.schema
+            aim = [ordered]@{
+                prediction_enabled = $AimPrediction -eq "on"
+                max_prediction_lead_percent =
+                    $AimMaxPredictionLeadPercent
+                summary = $environment.report.aim
+            }
             performance = [ordered]@{
                 probes_enabled = [bool]$report.performance_probes_enabled
                 coverage = $report.coverage

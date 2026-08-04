@@ -29,6 +29,14 @@ $fixedModelSha256 =
 $physicalConfirmation =
     "XEN_LIVE_GAME_ACCEPTANCE_SENDS_REAL_INPUT"
 $expectedProvider = "CPUExecutionProvider"
+$fixedAimPrediction = "off"
+$fixedAimMaxPredictionLeadPercent = 35.0
+
+$aimReportScript = Join-Path $PSScriptRoot "aim_report.ps1"
+if (-not (Test-Path -LiteralPath $aimReportScript -PathType Leaf)) {
+    throw "Aim 报告校验脚本不存在：$aimReportScript"
+}
+. $aimReportScript
 
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $repositoryRoot "cache\live-game-acceptance"
@@ -471,12 +479,15 @@ max_center_distance=0.250000
 switch_margin=0.200000
 switch_confirm_frames=3
 switch_cooldown_frames=5
+acquisition_range_percent=90.000000
 body_aim_height_ratio=0.350000
 deadzone_pixels=1.500000
 smoothing=0.350000
 counts_per_pixel_x=0.500000
 counts_per_pixel_y=0.500000
 max_counts_per_frame=50.000000
+enable_prediction=false
+max_prediction_lead_percent=35.000000
 predicted_gain=0.500000
 
 [mouse]
@@ -664,6 +675,13 @@ function Prepare-Task {
         expected_provider = $expectedProvider
         expected_capture_backend = "DESKTOP_DUPLICATION"
         expected_detached_preview_on_start = $true
+        aim = [ordered]@{
+            prediction_enabled = $false
+            max_prediction_lead_percent =
+                $fixedAimMaxPredictionLeadPercent
+            basic_points_must_remain_inside_selected_box = $true
+            prediction_points_may_leave_selected_box = $true
+        }
         expected_geometry = [ordered]@{
             source_width = 2560
             source_height = 1440
@@ -811,6 +829,7 @@ function Collect-Reports {
     $runtimeDropped = [uint64]0
     $mouseCommands = [uint64]0
     $detectionObservability = $null
+    $aimObservability = $null
     foreach ($path in $paths) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             $failures += "报告不存在：$path"
@@ -822,8 +841,8 @@ function Collect-Reports {
         }
         $report = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-Json
-        if ($report.schema -ne 7) {
-            $failures += "报告 schema 不是 7：$path"
+        if ($report.schema -ne 8) {
+            $failures += "报告 schema 不是 8：$path"
         }
         if (@($report.PSObject.Properties.Name) -notcontains
                 "performance_probes_enabled" -or
@@ -852,6 +871,26 @@ function Collect-Reports {
         } else {
             $detectionObservability = Get-DetectionObservability `
                 -Samples @($report.samples)
+        }
+        $aimSummary = $null
+        try {
+            $reportSamples = @($report.samples)
+            if ($reportSamples.Count -ne [int]$report.sample_count) {
+                throw "JSON 样本数组长度与 sample_count 不一致"
+            }
+            $aimSummary = Get-XenAimReportSummary `
+                -Samples $reportSamples `
+                -PredictionEnabled $fixedAimPrediction `
+                -MaxPredictionLeadPercent `
+                    $fixedAimMaxPredictionLeadPercent
+            if (-not [bool]$aimSummary.contract_valid) {
+                foreach ($message in @($aimSummary.violation_messages)) {
+                    $failures += "Aim 门禁未通过：$message；$path"
+                }
+            }
+            $aimObservability = $aimSummary
+        } catch {
+            $failures += "Aim schema 8 样本无效：$($_.Exception.Message)；$path"
         }
         if ($report.provider -ne $expectedProvider -or
             $report.final_snapshot.provider -ne $expectedProvider) {
@@ -921,6 +960,7 @@ function Collect-Reports {
             final_snapshot = $snapshot
             timing = $report.timing
             detection_observability = $detectionObservability
+            aim_observability = $aimSummary
         }
     }
     if ($sampleCount -lt [uint64]$task.minimum_samples) {
@@ -956,6 +996,7 @@ function Collect-Reports {
         runtime_samples_dropped = $runtimeDropped
         mouse_commands = $mouseCommands
         detection_observability = $detectionObservability
+        aim_observability = $aimObservability
         failures = @($failures)
         segments = @($segments)
     }
@@ -1013,7 +1054,10 @@ function Launch-Task {
             -EnableGpuPreprocess off `
             -EnablePerformanceProbes off `
             -EnableD3D11CudaInterop off `
-            -EnableD3D11DirectMlInterop off
+            -EnableD3D11DirectMlInterop off `
+            -ExpectedAimPrediction $fixedAimPrediction `
+            -ExpectedAimMaxPredictionLeadPercent `
+                $fixedAimMaxPredictionLeadPercent
         if ($LASTEXITCODE -ne 0) {
             throw "稳定性基准失败，退出码：$LASTEXITCODE"
         }

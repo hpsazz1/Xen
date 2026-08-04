@@ -17,6 +17,7 @@ $scriptPaths = @(
     "scripts/benchmark_runtime.ps1",
     "scripts/benchmark_network_receiver.ps1",
     "scripts/invoke_dual_machine_receiver.ps1",
+    "scripts/aim_report.ps1",
     "scripts/publish_dual_machine_package.ps1",
     "scripts/runtime_environment.ps1"
 ) | ForEach-Object { Join-Path $RepositoryRoot $_ }
@@ -58,6 +59,66 @@ Assert-True ($networkReceiverText -match
     $networkReceiverText -match
         'ndi_video_queue_depth\s*=\s*\$report\.ndi_video_queue_depth') `
     "网络完成标记必须携带覆盖分段和 NDI 队列深度测量证据。"
+Assert-True ($networkReceiverText -match
+    '\[string\]\$AimPrediction\s*=\s*"off"' -and
+    $networkReceiverText -match
+        '\[double\]\$AimMaxPredictionLeadPercent\s*=\s*35\.0' -and
+    $networkReceiverText -match '(?m)^\s*"\[aim\]",\s*$' -and
+    $networkReceiverText -match
+        '"enable_prediction=\$aimPredictionValue"' -and
+    $networkReceiverText -match
+        '"max_prediction_lead_percent=\$aimMaxPredictionLeadText"' -and
+    $networkReceiverText -match '(?m)^\s*"\[mouse\]",\s*$' -and
+    $networkReceiverText -match '"allow_send_input=false"') `
+    "网络接收脚本必须只暴露预测开关/最大提前距离，并显式固定完整 Aim 与禁用 Mouse。"
+Assert-True ($networkReceiverText -match
+    '-ExpectedAimPrediction\s+\$AimPrediction' -and
+    $networkReceiverText -match
+        '-ExpectedAimMaxPredictionLeadPercent' -and
+    $networkReceiverText -match
+        'summary\s*=\s*\$environment\.report\.aim') `
+    "网络接收脚本必须把 Aim 参数和 schema 8 汇总传入正式报告。"
+
+$runtimeBenchmarkText = [System.IO.File]::ReadAllText(
+    (Join-Path $RepositoryRoot "scripts/benchmark_runtime.ps1"))
+Assert-True ($runtimeBenchmarkText -match
+    'if \(\$report\.schema -ne 8\)' -and
+    $runtimeBenchmarkText -match 'Get-XenAimReportSummary' -and
+    $runtimeBenchmarkText -match
+        'prediction_point_outside_box_frames') `
+    "Runtime 正式入口必须消费 schema 8，并把预测出框作为观测而非违规。"
+
+$packageScriptText = [System.IO.File]::ReadAllText(
+    (Join-Path $RepositoryRoot "scripts/publish_dual_machine_package.ps1"))
+Assert-True ($packageScriptText -match '"aim_report\.ps1"') `
+    "双机便携包必须携带 Aim 报告助手。"
+
+$networkPrepareRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ("xen-network-aim-{0}" -f [guid]::NewGuid().ToString("N"))
+try {
+    New-Item -ItemType Directory -Path $networkPrepareRoot -Force |
+        Out-Null
+    $networkPrefix = Join-Path $networkPrepareRoot "receiver"
+    & (Join-Path $RepositoryRoot "scripts/benchmark_network_receiver.ps1") `
+        -ModelPath (Join-Path $networkPrepareRoot "missing.onnx") `
+        -ReportPrefix $networkPrefix -CaptureBackend ndi `
+        -AimPrediction on -AimMaxPredictionLeadPercent 42.5 `
+        -PrepareOnly | Out-Null
+    $preparedConfig = [System.IO.File]::ReadAllText(
+        "$networkPrefix.receiver.ini")
+    Assert-True ($preparedConfig -match '(?m)^\[aim\]\r?$' -and
+        $preparedConfig -match '(?m)^person_class_ids=0,2\r?$' -and
+        $preparedConfig -match '(?m)^head_class_ids=1,3\r?$' -and
+        $preparedConfig -match '(?m)^enable_prediction=true\r?$' -and
+        $preparedConfig -match
+            '(?m)^max_prediction_lead_percent=42\.500000\r?$' -and
+        $preparedConfig -match '(?m)^\[mouse\]\r?$' -and
+        $preparedConfig -match '(?m)^allow_send_input=false\r?$') `
+        "PrepareOnly 必须落盘完整 Aim、预测参数和显式禁用 Mouse。"
+} finally {
+    Remove-Item -LiteralPath $networkPrepareRoot -Recurse -Force `
+        -ErrorAction SilentlyContinue
+}
 
 $dualReceiverText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/invoke_dual_machine_receiver.ps1"))
@@ -70,6 +131,15 @@ Assert-True ($dualReceiverText -match
     $dualReceiverText -match
         'MaximumRuntimeOverwrittenFrames\s*=\s*\$MaximumRuntimeOverwrittenFrames') `
     "双机远程入口必须显式透传探针状态和默认为零的 Runtime 覆盖上限。"
+Assert-True ($dualReceiverText -match
+    '\[string\]\$AimPrediction\s*=\s*"off"' -and
+    $dualReceiverText -match
+        'AimPrediction\s*=\s*\$AimPrediction' -and
+    $dualReceiverText -match
+        'AimMaxPredictionLeadPercent\s*=\s*\$AimMaxPredictionLeadPercent' -and
+    $dualReceiverText -match
+        '\$CaptureBackend -eq "udp_mjpeg"') `
+    "双机入口必须透传少量 Aim 参数，并只限制裸 UDP 场景。"
 
 . (Join-Path $RepositoryRoot "scripts/runtime_environment.ps1")
 $successQuery = {
@@ -136,7 +206,7 @@ try {
         package_type = "xen-dual-machine-receiver"
         package_id = "provider-fixture"
         allowed_backends = @("cpu")
-        allowed_capture_backends = @("xudp_jpeg")
+        allowed_capture_backends = @("xudp_jpeg", "udp_mjpeg", "ndi")
         model = [ordered]@{ relative_path = "Release/models/missing.onnx" }
     }
     [System.IO.File]::WriteAllText(
@@ -155,6 +225,26 @@ try {
                 "便携包不允许 Provider：$backend") `
             "远程入口必须在访问模型前拒绝清单未授权的 Provider：$backend。"
     }
+    $ndiOutput = @(& powershell.exe -NoProfile `
+        -ExecutionPolicy Bypass -File $invokeScript `
+        -Scenario SuperJump -CaptureBackend ndi -Mode Prepare `
+        -PackageRoot $fixtureRoot -Backend cpu 2>&1)
+    $ndiExitCode = $LASTEXITCODE
+    $ndiText = $ndiOutput -join "`n"
+    Assert-True ($ndiExitCode -ne 0 -and
+        $ndiText -match "便携包缺少运行输入" -and
+        $ndiText -notmatch "只运行 GeometryStatic") `
+        "NDI 必须允许 SuperJump 等 Aim 场景，并在后续真实输入门禁处失败。"
+
+    $udpOutput = @(& powershell.exe -NoProfile `
+        -ExecutionPolicy Bypass -File $invokeScript `
+        -Scenario SuperJump -CaptureBackend udp_mjpeg -Mode Prepare `
+        -PackageRoot $fixtureRoot -Backend cpu 2>&1)
+    $udpExitCode = $LASTEXITCODE
+    Assert-True ($udpExitCode -ne 0 -and
+        ($udpOutput -join "`n") -match
+            "裸 UDP 只运行 GeometryStatic") `
+        "裸 UDP 仍应只保留三个兼容对照锚点。"
     $ErrorActionPreference = $previousErrorActionPreference
 } finally {
     $ErrorActionPreference = $previousErrorActionPreference

@@ -112,7 +112,7 @@ Xen/                           # 仓库根目录
 - Capture 线程从 Desktop Duplication、UDP/XUDP 或 NDI 获取 ROI，并发布到三个可复用槽组成的最新帧队列。
 - Desktop Duplication 收到 `DXGI_ERROR_ACCESS_LOST` 且 D3D11 设备仍有效时，会在 1 秒
   有界窗口内重枚举同一输出并原位重建 duplication；旋转或分辨率变化、设备移除、
-  超时均仍进入 FAILED。成功重建返回 `NO_FRAME`，不发布旧帧，次数在 schema 6
+  超时均仍进入 FAILED。成功重建返回 `NO_FRAME`，不发布旧帧，次数在 schema 8
   `duplication_recoveries` 中单独记录，不混入丢帧或失败帧。
 - Pipeline 线程依次执行 Detector、Aim、安全门控和 Mouse，不增加独立控制线程。
 - Aim 对头身观测归并和高/低置信轨迹关联均执行全局一对一分配，轨迹状态按真实帧间隔使用
@@ -147,7 +147,7 @@ Xen/                           # 仓库根目录
   `xywhr` 与轴对齐外包框；默认 `detect()` 只构造外包框，继续兼容现有 Aim 热路径。
 - Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；样本同时固化主机 FOV、编码
   尺寸、ROI 和像素比例，避免网络重连或显示模式变化造成的瞬时坐标漂移被最终快照掩盖。主线程
-  在会话结束时将其发布为 schema 6 的
+  在会话结束时将其发布为 schema 8 的
   `cache/runtime/<进程-运行时钟-generation-segment>.csv/.json`。模型重载前结束当前报告，
   加载窗口不记录样本，完成后按实际活动模型和 Provider 开始新分段，避免新旧模型混合统计。
   报告按成功/失败状态隔离耗时，
@@ -330,8 +330,17 @@ DLL 的 SHA-256，逐样本校验 Provider、状态和几何，全部通过后�
   -Backend tensorrt `
   -OutputFormat channel_first `
   -BuildDirectory ".\build" `
+  -ExpectedAimPrediction off `
+  -ExpectedAimMaxPredictionLeadPercent 35 `
   -ReportPrefix ".\cache\runtime-benchmark\dxgi-tensorrt"
 ```
+
+schema 8 正式入口会逐帧校验 Aim：基础追踪点只要离开当前目标框即失败；预测提前点允许离开
+目标框，`aim_prediction_point_outside_box` 只作为观测计数，不是失败条件。真正的预测门禁是
+`lead_distance <= target_box_diagonal * max_prediction_lead_percent / 100`。环境清单同时汇总目标、
+预计算命令、预测活动、框外预测、动态范围阻断、目标切换，以及提前距离和观测年龄的
+P50/P95/P99/max。物理输出禁用时仍允许 Aim 持续形成预计算命令，但所有样本必须保持
+`mouse_sent=false`；动态场景可通过 `-MinimumAimPrecomputedCommandFrames` 要求至少出现一帧。
 
 TensorRT/CUDA/OpenVINO 正式基准还必须为同一模型和后端提供独立的 ORT 节点级 profile；脚本会自动将
 profile 作为第四个成组产物发布，并把最终路径、SHA-256 和每个 Provider 的 Node 数量写入环境清单。
@@ -378,6 +387,8 @@ UDP、XUDP 和 NDI 接收正式验收使用统一包装脚本。以下命令在�
   -ModelPath "C:\path\to\model.onnx" `
   -CaptureBackend xudp_jpeg `
   -Backend directml `
+  -AimPrediction off `
+  -AimMaxPredictionLeadPercent 35 `
   -BuildDirectory ".\build-dml" `
   -ListenUrl udp://0.0.0.0:5000 `
   -ReadyFilePath ".\cache\runtime-benchmark\xudp-aux.ready.json" `
@@ -387,11 +398,14 @@ UDP、XUDP 和 NDI 接收正式验收使用统一包装脚本。以下命令在�
 未显式提供 `ReadyFilePath` 时，接收脚本会生成本轮随机路径。自动化必须使用唯一的新路径并轮询
 JSON 内容，禁止靠固定延时或重定向日志中的“已监听”文本判断就绪。裸 UDP、XUDP、NDI 三种
 后端均由同一脚本强制核对实际 Capture 后端、主机 FOV/ROI、Provider、失败状态、传输统计和
-Runtime 覆盖；`<prefix>.network.json` 最后发布才表示网络接收报告完整。
+Runtime 覆盖；接收配置还会显式写入完整 `[aim]` 与 `allow_send_input=false`，只对外暴露预测
+开关和最大提前距离两个 Aim 参数。`<prefix>.network.json` 会带 schema 8 Aim 汇总，最后发布
+才表示网络接收报告完整。
 
 辅机没有 Visual Studio、CMake、Git 或 SDK 时，主机使用便携包发布脚本。它先构建 NDI 组合的
 `XenBenchmark`，核对构建期部署来源和 SHA-256，再把接收程序、模型、UDP/XUDP/NDI
-运行库、三个接收入口和内部环境采集脚本封装到逐文件哈希清单，并通过 SMB 临时目录校验后原位发布。包不包含
+运行库、正式接收入口、Aim 报告助手和内部环境采集脚本封装到逐文件哈希清单，并通过 SMB
+临时目录校验后原位发布。包不包含
 KMBOX UUID，也不允许物理输出。CPU-only 包保持默认只授权 CPU；NVIDIA 闭包必须显式声明允许的
 Provider，发布脚本会根据部署报告拒绝缺少 CUDA/TensorRT DLL 的越权清单：
 
@@ -429,21 +443,24 @@ $package = "C:\XenLab\packages\<package-id>"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
   "$package\scripts\invoke_dual_machine_receiver.ps1" `
   -Scenario GeometryStatic -CaptureBackend xudp_jpeg -Backend tensorrt `
+  -AimPrediction off -AimMaxPredictionLeadPercent 35 `
   -Mode Prepare `
   -PackageRoot $package
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
   "$package\scripts\invoke_dual_machine_receiver.ps1" `
   -Scenario GeometryStatic -CaptureBackend xudp_jpeg -Backend tensorrt `
+  -AimPrediction off -AimMaxPredictionLeadPercent 35 `
   -Mode Run `
   -PackageRoot $package
 ```
 
 便携模式不读取辅机 SDK 目录或 Git，而是在运行前后验证 `package-manifest.json` 中的精确文件
 集合、长度和 SHA-256，并再次核对构建机产生的 `xen-runtime-deployment.json`。环境清单用
-`build.provenance_mode=portable_package_manifest` 明确区分该证据来源。UDP/NDI 只允许
-`GeometryStatic`、`Shuttle`、`SoakFreeRun` 三个对照锚点；报告统一写入
-`C:\XenLab\reports`，ready 文件写入 `C:\XenLab\runs`。
+`build.provenance_mode=portable_package_manifest` 明确区分该证据来源。裸 UDP 只允许
+`GeometryStatic`、`Shuttle`、`SoakFreeRun` 三个兼容对照锚点；NDI 与 XUDP 都可执行
+`SuperJump`、`Occlusion`、`MultiTarget` 等 Aim 场景，便于在同一输入上执行预测关/开 A/B。
+报告统一写入 `C:\XenLab\reports`，ready 文件写入 `C:\XenLab\runs`。
 
 辅机可以使用非管理员 `XenDeploy` 账户通过项目专用 SSH 密钥运行正式接收脚本。若精简系统拒绝
 该账户读取 WMI 硬件清单，环境报告会保留 `hardware.inventory_status=partial` 和明确错误，并用

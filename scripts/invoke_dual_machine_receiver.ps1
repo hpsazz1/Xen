@@ -16,6 +16,10 @@
     [string]$NdiSourceName = "Auto",
     [ValidateSet("on", "off")]
     [string]$EnablePerformanceProbes = "off",
+    [ValidateSet("on", "off")]
+    [string]$AimPrediction = "off",
+    [ValidateRange(1.0, 50.0)]
+    [double]$AimMaxPredictionLeadPercent = 35.0,
     [ValidateRange(0, 1000000000)]
     [uint64]$MaximumRuntimeOverwrittenFrames = 0
 )
@@ -28,9 +32,9 @@ if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
     $PackageRoot = Join-Path $PSScriptRoot ".."
 }
 
-if ($CaptureBackend -ne "xudp_jpeg" -and
+if ($CaptureBackend -eq "udp_mjpeg" -and
     $Scenario -notin @("GeometryStatic", "Shuttle", "SoakFreeRun")) {
-    throw "UDP/NDI 只运行 GeometryStatic、Shuttle 和 SoakFreeRun 三个对照锚点。"
+    throw "裸 UDP 只运行 GeometryStatic、Shuttle 和 SoakFreeRun 三个对照锚点。"
 }
 
 $PackageRoot = [System.IO.Path]::GetFullPath($PackageRoot)
@@ -64,6 +68,9 @@ $isSoak = $Scenario -eq "SoakFreeRun"
 $minimumSamples = if ($isSoak) { 10000 } else { 3000 }
 $minimumSeconds = if ($isSoak) { 300 } else { 60 }
 $maximumSeconds = if ($isSoak) { 600 } else { 120 }
+$minimumAimPrecomputedCommandFrames = if ($Scenario -in @(
+        "MoveLeft", "MoveRight", "Shuttle", "SuperJump", "Occlusion",
+        "MultiTarget")) { [uint64]1 } else { [uint64]0 }
 $runId = "{0}-{1}-{2}-{3}" -f $CaptureBackend, $Backend, $Scenario,
     (Get-Date -Format "yyyyMMdd-HHmmss")
 New-Item -ItemType Directory -Path $ReportRoot, $RunRoot -Force |
@@ -99,6 +106,10 @@ $arguments = @{
     EnableCudaGraph = if ($Backend -eq "tensorrt") { "on" } else { "off" }
     EnableGpuPreprocess = if ($Backend -eq "tensorrt") { "on" } else { "off" }
     EnablePerformanceProbes = $EnablePerformanceProbes
+    AimPrediction = $AimPrediction
+    AimMaxPredictionLeadPercent = $AimMaxPredictionLeadPercent
+    MinimumAimPrecomputedCommandFrames =
+        $minimumAimPrecomputedCommandFrames
     ReadyFilePath = $readyPath
 }
 if ($Mode -eq "Prepare") {
@@ -112,6 +123,9 @@ Write-Host "  scenario=$Scenario"
 Write-Host "  capture=$CaptureBackend"
 Write-Host "  provider=$Backend"
 Write-Host "  performance_probes=$EnablePerformanceProbes"
+Write-Host "  aim_prediction=$AimPrediction"
+Write-Host "  aim_max_prediction_lead_percent=$AimMaxPredictionLeadPercent"
+Write-Host "  minimum_aim_precomputed_commands=$minimumAimPrecomputedCommandFrames"
 Write-Host "  maximum_runtime_overwritten_frames=$MaximumRuntimeOverwrittenFrames"
 Write-Host "  samples=$minimumSamples, seconds=$minimumSeconds"
 Write-Host "  report_prefix=$reportPrefix"

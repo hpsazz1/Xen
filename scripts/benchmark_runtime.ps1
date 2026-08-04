@@ -56,6 +56,12 @@
     [string]$EnableD3D11CudaInterop = "off",
     [ValidateSet("on", "off")]
     [string]$EnableD3D11DirectMlInterop = "off",
+    [ValidateSet("on", "off")]
+    [string]$ExpectedAimPrediction = "off",
+    [ValidateRange(1.0, 50.0)]
+    [double]$ExpectedAimMaxPredictionLeadPercent = 35.0,
+    [ValidateRange(0, 1000000000)]
+    [uint64]$MinimumAimPrecomputedCommandFrames = 0,
     [string]$ReadyFilePath = ""
 )
 
@@ -66,6 +72,12 @@ if (-not (Test-Path -LiteralPath $environmentScript -PathType Leaf)) {
     throw "Runtime 环境采集脚本不存在：$environmentScript"
 }
 . $environmentScript
+
+$aimReportScript = Join-Path $PSScriptRoot "aim_report.ps1"
+if (-not (Test-Path -LiteralPath $aimReportScript -PathType Leaf)) {
+    throw "Aim 报告校验脚本不存在：$aimReportScript"
+}
+. $aimReportScript
 
 if ([string]::IsNullOrWhiteSpace($BuildDirectory) -and
     [string]::IsNullOrWhiteSpace($PackageManifestPath)) {
@@ -213,6 +225,7 @@ function Assert-PortablePackage {
         "scripts/benchmark_runtime.ps1",
         "scripts/benchmark_network_receiver.ps1",
         "scripts/invoke_dual_machine_receiver.ps1",
+        "scripts/aim_report.ps1",
         "scripts/runtime_environment.ps1",
         [string]$document.model.relative_path
     )
@@ -728,6 +741,7 @@ $enablePerformanceProbesValue = $EnablePerformanceProbes -eq "on"
 $enableD3D11CudaInteropValue = $EnableD3D11CudaInterop -eq "on"
 $enableD3D11DirectMlInteropValue =
     $EnableD3D11DirectMlInterop -eq "on"
+$expectedAimPredictionValue = $ExpectedAimPrediction -eq "on"
 
 $arguments = @(
     "--model", $ModelPath,
@@ -871,8 +885,8 @@ $expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
 } else {
     $captureBackendNames[$ExpectedCaptureBackend]
 }
-if ($report.schema -ne 7) {
-    throw "报告 schema 不是 7：$($report.schema)"
+if ($report.schema -ne 8) {
+    throw "报告 schema 不是 8：$($report.schema)"
 }
 if ([bool]$report.performance_probes_enabled -ne
         $enablePerformanceProbesValue) {
@@ -892,6 +906,23 @@ if ($report.sample_count -lt $MinimumSamples -or
     $report.report_samples_dropped -ne 0 -or
     $report.runtime_samples_dropped -ne 0) {
     throw "报告样本数、失败数或丢弃数不符合正式基准门槛。"
+}
+$reportSamples = @($report.samples)
+if ($reportSamples.Count -ne [int]$report.sample_count) {
+    throw "JSON 样本数组长度与 sample_count 不一致。"
+}
+$aimSummary = Get-XenAimReportSummary `
+    -Samples $reportSamples `
+    -PredictionEnabled $ExpectedAimPrediction `
+    -MaxPredictionLeadPercent $ExpectedAimMaxPredictionLeadPercent
+if (-not [bool]$aimSummary.contract_valid) {
+    throw "Aim 逐帧门禁未通过：$($aimSummary.violation_messages -join '；')"
+}
+if ([uint64]$aimSummary.precomputed_command_frames -lt
+        $MinimumAimPrecomputedCommandFrames) {
+    throw ("Aim 预计算命令帧不足：required={0}, actual={1}" -f
+        $MinimumAimPrecomputedCommandFrames,
+        [uint64]$aimSummary.precomputed_command_frames)
 }
 $snapshot = $report.final_snapshot
 if ($snapshot.runtime_state -ne "STOPPED" -or
@@ -932,7 +963,7 @@ $expectExplicitDeviceCopy =
 $expectGpuPreprocess = (
     ($expectExplicitDeviceCopy -and $enableGpuPreprocessValue) -or
     $enableD3D11DirectMlInteropValue)
-foreach ($sample in @($report.samples)) {
+foreach ($sample in $reportSamples) {
     if (-not $sample.success -or
         [bool]$sample.performance_probes -ne
             $enablePerformanceProbesValue -or
@@ -985,9 +1016,6 @@ foreach ($sample in @($report.samples)) {
         "第 $sampleIndex 个样本 Y 比例"
     ++$sampleIndex
 }
-if ($sampleIndex -ne $report.sample_count) {
-    throw "JSON 样本数组长度与 sample_count 不一致。"
-}
 $csvDataLines = @(Get-Content -LiteralPath $pendingCsv -Encoding UTF8 |
     Where-Object {
         -not [string]::IsNullOrWhiteSpace($_) -and
@@ -1012,7 +1040,7 @@ for ($csvIndex = 0; $csvIndex -lt $csvRows.Count; ++$csvIndex) {
             [ref]$csvSequence)) {
         throw "CSV 第 $csvIndex 行缺少合法 sequence。"
     }
-    $jsonSequence = [uint64](@($report.samples)[$csvIndex].sequence)
+    $jsonSequence = [uint64]$reportSamples[$csvIndex].sequence
     if ($csvSequence -ne $jsonSequence) {
         throw "CSV 与 JSON 第 $csvIndex 个正式样本 sequence 不一致。"
     }
@@ -1218,6 +1246,14 @@ $environment = [ordered]@{
             source_pixels_per_pixel_x = $ExpectedScaleX
             source_pixels_per_pixel_y = $ExpectedScaleY
         }
+        aim = [ordered]@{
+            prediction_enabled = $expectedAimPredictionValue
+            max_prediction_lead_percent =
+                $ExpectedAimMaxPredictionLeadPercent
+            minimum_precomputed_command_frames =
+                $MinimumAimPrecomputedCommandFrames
+            physical_output_expected = $false
+        }
     }
     report = [ordered]@{
         csv_sha256 = (Get-FileHash -LiteralPath $pendingCsv `
@@ -1229,6 +1265,7 @@ $environment = [ordered]@{
         pipeline_complete = $report.timing.pipeline_complete
         coverage = $report.coverage
         ndi_video_queue_depth = $report.ndi_video_queue_depth
+        aim = $aimSummary
     }
 }
 $environmentText = $environment | ConvertTo-Json -Depth 12
@@ -1266,6 +1303,12 @@ Write-Host "  samples=$($report.sample_count), provider=$expectedProvider"
 Write-Host "  total P50=$($report.timing.total.p50_ms) ms"
 Write-Host "  total P95=$($report.timing.total.p95_ms) ms"
 Write-Host "  total P99=$($report.timing.total.p99_ms) ms"
+Write-Host (("  Aim：targets={0}, commands={1}, lead_active={2}, " +
+    "prediction_outside_box={3}, switches={4}") -f
+    $aimSummary.target_frames, $aimSummary.command_frames,
+    $aimSummary.lead_active_frames,
+    $aimSummary.prediction_point_outside_box_frames,
+    $aimSummary.target_switches)
 Write-Host "  CSV：$finalCsv"
 Write-Host "  JSON：$finalJson"
 if ($requiresProviderProfile) {

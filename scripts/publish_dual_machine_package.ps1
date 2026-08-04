@@ -196,6 +196,7 @@ foreach ($name in @(
         "benchmark_runtime.ps1",
         "benchmark_network_receiver.ps1",
         "invoke_dual_machine_receiver.ps1",
+        "aim_report.ps1",
         "runtime_environment.ps1")) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) `
         -Destination $scriptRoot
