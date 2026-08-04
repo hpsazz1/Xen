@@ -10,6 +10,7 @@
     [Parameter(Mandatory = $true)]
     [string[]]$LicenseFiles,
     [string]$ConfigPath = "",
+    [string[]]$ToolFiles = @(),
     [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
     [string]$GitExecutable = "git",
     [Parameter(Mandatory = $true)]
@@ -165,6 +166,9 @@ $model = Resolve-ExistingPath $ModelPath "发布模型"
 $licenses = @($LicenseFiles | ForEach-Object {
     Resolve-ExistingPath $_ "许可证文件"
 })
+$tools = @($ToolFiles | ForEach-Object {
+    Resolve-ExistingPath $_ "发布工具"
+})
 if ($licenses.Count -eq 0) {
     throw "正式发布必须至少提供一份许可证文件"
 }
@@ -189,7 +193,8 @@ $incoming = Join-Path $outputParent (
 New-Item -ItemType Directory -Path $incoming | Out-Null
 
 try {
-    foreach ($directory in @("models", "logs", "cache", "licenses", "runtimes")) {
+    foreach ($directory in @(
+            "models", "logs", "cache", "licenses", "runtimes", "tools")) {
         New-Item -ItemType Directory -Path (Join-Path $incoming $directory) |
             Out-Null
     }
@@ -216,6 +221,16 @@ try {
     if ($ConfigPath) {
         $config = Resolve-ExistingPath $ConfigPath "发布配置"
         Copy-VerifiedFile $config "config.ini" "" $config $incoming $manifestFiles
+    }
+    $toolNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($tool in $tools) {
+        $toolName = Split-Path -Leaf $tool
+        if (-not $toolNames.Add($toolName)) {
+            throw "发布工具文件名重复：$toolName"
+        }
+        Copy-VerifiedFile $tool "tools/$toolName" "" $tool `
+            $incoming $manifestFiles
     }
     $licenseIndex = 0
     foreach ($license in $licenses) {

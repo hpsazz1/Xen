@@ -549,8 +549,25 @@ Toggle 以及多键/鼠标快捷键等已完成 App 功能。示例：
   -OpenVinoBuildDirectory ".\build-release-openvino" `
   -ModelPath ".\models\14wv11.onnx" `
   -LicenseFiles @("C:\path\to\ORT-LICENSE", "C:\path\to\OpenCV-LICENSE") `
+  -ToolFiles @(".\scripts\invoke_aim_manual_acceptance.ps1", ".\scripts\aim_report.ps1") `
   -OutputDirectory ".\artifacts\Xen-release"
 ```
+
+完整包发送到无开发 SDK 的辅机时使用独立原子传输入口。该脚本按总字节显示进度，执行本地清单
+校验、临时目录复制、辅机回读 SHA-256 和原位改名；正式目录或 `.incoming-*` 已存在时拒绝覆盖：
+
+```powershell
+.\scripts\transfer_release_bundle.ps1 `
+  -PackagePath ".\artifacts\Xen-release" `
+  -DestinationRoot "\\192.168.3.20\XenLab$"
+```
+
+双机 Aim 人工验收从完整包内 `tools\invoke_aim_manual_acceptance.ps1` 一次只生成一个场景和一个
+tracking/prediction 配置。配置固定 NDI 240 + TensorRT、`320x320`、FP16、CUDA Graph、GPU
+前处理和项目 KMBOX NET；`Prepare` 不启动程序，`Launch` 必须携带物理输出双重授权。脚本会在
+激活配置后原子更新 `manifest.json` 中 `config.ini` 的长度和 SHA-256，避免 Launcher 使用陈旧
+清单，并在应用退出后收集本轮新增 Runtime CSV/JSON、日志和 Aim schema 8 汇总。静止、左移、
+右移、往复和超级跳必须按任务单逐项执行，完成 `OBSERVATION.md` 后才进入下一任务。
 
 当前辅机为无开发 SDK 的独立 Windows 目标机，已使用自包含 NVIDIA/NDI 部署完成多轮双机动态、
 长稳和 Aim 正式验收。用户于 2026-08-05 接受这些长期运行证据作为当前部署边界，取消

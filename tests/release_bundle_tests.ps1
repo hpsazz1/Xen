@@ -76,8 +76,10 @@ try {
 
     $model = Join-Path $root "model.onnx"
     $license = Join-Path $root "LICENSE.txt"
+    $tool = Join-Path $root "acceptance.ps1"
     Write-Utf8 $model "model"
     Write-Utf8 $license "license"
+    Write-Utf8 $tool "Write-Host acceptance"
     $nvidia = Join-Path $root "build-nvidia"
     $directml = Join-Path $root "build-directml"
     $openvino = Join-Path $root "build-openvino"
@@ -98,6 +100,7 @@ try {
         -OpenVinoBuildDirectory $openvino `
         -ModelPath $model `
         -LicenseFiles $license `
+        -ToolFiles $tool `
         -RepositoryRoot $repository `
         -GitExecutable $GitExecutable `
         -OutputDirectory $output
@@ -108,7 +111,8 @@ try {
     if ($manifest.schema -ne 1 -or $manifest.git_commit -ne $commit -or
         @($manifest.runtimes).Count -ne 3 -or
         -not (Test-Path -LiteralPath (Join-Path $output "XenLauncher.exe")) -or
-        -not (Test-Path -LiteralPath (Join-Path $output "models/model.onnx"))) {
+        -not (Test-Path -LiteralPath (Join-Path $output "models/model.onnx")) -or
+        -not (Test-Path -LiteralPath (Join-Path $output "tools/acceptance.ps1"))) {
         throw "统一发布包结构或清单内容不正确"
     }
     $incoming = Get-ChildItem -LiteralPath $root -Force |
