@@ -12,6 +12,7 @@
 #include "log/log.h"
 #include "sender/report.h"
 #include "sender/sender.h"
+#include "sender/sender_internal.h"
 
 #include <chrono>
 #include <cmath>
@@ -124,6 +125,43 @@ void test_invalid_sender_config() {
     expect(!sender.open(config) &&
                sender.status() == XudpSenderStatus::INVALID_CONFIG,
            "XUDP Sender 数据报必须能容纳固定头和至少一个 payload 字节");
+}
+
+void test_sender_frame_pacer_uses_absolute_deadline() {
+    using namespace std::chrono_literals;
+    const auto origin = std::chrono::steady_clock::time_point{};
+    sender::detail::SenderFramePacer pacer(10ms);
+
+    expect(pacer.due(origin), "首帧必须立即允许发送");
+    pacer.record_sent(origin);
+    expect(!pacer.due(origin + 9ms) && pacer.due(origin + 10ms),
+           "首帧成功后必须按绝对帧间隔限速");
+
+    // 11 ms 才完成下一次采样时，截止点仍应从 10 ms 推进到 20 ms；
+    // 不能改成 21 ms，否则每帧 1 ms 的处理抖动会永久累积。
+    pacer.record_sent(origin + 11ms);
+    expect(pacer.next_send_at() == origin + 20ms,
+           "处理耗时不得漂移后续绝对截止时间");
+
+    // 落后多个周期时只发送当前最新帧，并把截止点推进到 now 之后；
+    // 禁止连续补发已经过时的历史周期。
+    pacer.record_sent(origin + 45ms);
+    expect(pacer.next_send_at() == origin + 50ms &&
+               !pacer.due(origin + 45ms),
+           "落后时必须跳过历史周期且不得突发补发旧帧");
+}
+
+void test_sender_frame_pacer_does_not_advance_on_failure() {
+    using namespace std::chrono_literals;
+    const auto origin = std::chrono::steady_clock::time_point{};
+    sender::detail::SenderFramePacer pacer(10ms);
+    pacer.record_sent(origin);
+
+    // due() 是只读判断。发送失败时调用方不执行 record_sent()，下一张
+    // 新采集帧仍可立即重试，而不是被一次失败消耗整个发送周期。
+    expect(pacer.due(origin + 12ms) && pacer.due(origin + 13ms) &&
+               pacer.next_send_at() == origin + 10ms,
+           "发送失败不得推进 pacing 截止时间");
 }
 
 sender::detail::SenderRunReport make_valid_report() {
@@ -348,6 +386,8 @@ int main() {
     log_config.enable_ringbuf = false;
     Log::init(log_config);
     test_invalid_sender_config();
+    test_sender_frame_pacer_uses_absolute_deadline();
+    test_sender_frame_pacer_does_not_advance_on_failure();
     test_sender_report_atomic_publish();
     test_production_sender_to_capture_loopback();
     Log::shutdown();

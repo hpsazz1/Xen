@@ -12,6 +12,7 @@
 #include "log/log.h"
 #include "sender/report.h"
 #include "sender/sender.h"
+#include "sender/sender_internal.h"
 
 #include <atomic>
 #include <charconv>
@@ -298,7 +299,7 @@ int run_sender(const SenderOptions& options) noexcept {
     const auto frame_interval = std::chrono::duration_cast<
         std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(1.0 / options.fps));
-    auto next_send_at = std::chrono::steady_clock::time_point::min();
+    sender::detail::SenderFramePacer frame_pacer(frame_interval);
     auto next_stats_at = std::chrono::steady_clock::now() +
                          std::chrono::seconds(5);
     const auto run_started = std::chrono::steady_clock::now();
@@ -336,7 +337,7 @@ int run_sender(const SenderOptions& options) noexcept {
 
         const auto now = std::chrono::steady_clock::now();
         // 超过目标采样率时直接跳过较早的新帧，不通过 sleep 持有并发送旧画面。
-        if (now < next_send_at) continue;
+        if (!frame_pacer.due(now)) continue;
         if (!geometry_logged) {
             LOG_INFO(
                 "sender",
@@ -375,7 +376,7 @@ int run_sender(const SenderOptions& options) noexcept {
                 break;
             }
         } else {
-            next_send_at = now + frame_interval;
+            frame_pacer.record_sent(now);
             XudpSenderStats current_stats;
             const bool need_stats = !options.report_path.empty() ||
                 options.max_frames != 0;
