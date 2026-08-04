@@ -64,8 +64,11 @@ struct AimGroundTruthAnnotation {
 struct AimEvaluationConfig {
     float min_iou = 0.10f;
     float max_center_distance = 0.25f;
-    // 仅用于从整数命令识别达到控制限幅边界的帧，必须与被测 AimConfig 一致。
+    // 仅用于从整数二维命令识别达到向量限幅边界的帧，必须与被测 AimConfig 一致。
     float max_counts_per_frame = 50.0f;
+    float max_prediction_lead_percent = 35.0f;
+    float counts_per_pixel_x = 0.50f;
+    float counts_per_pixel_y = 0.50f;
 };
 
 struct AimEvaluationFrame {
@@ -76,12 +79,18 @@ struct AimEvaluationFrame {
     float source_roi_y = 0.0f;
     int roi_width = 0;
     int roi_height = 0;
+    float control_center_x = 0.0f;
+    float control_center_y = 0.0f;
     // 一枚 ROI 像素对应多少主机 FOV 像素；辅机显示分辨率不在此结构中。
     float source_pixels_per_roi_pixel_x = 1.0f;
     float source_pixels_per_roi_pixel_y = 1.0f;
     AimStatus aim_status = AimStatus::NOT_RUN;
     bool has_target = false;
     bool has_command = false;
+    float acquisition_range_radius = 0.0f;
+    float active_range_radius = 0.0f;
+    bool range_locked = false;
+    bool range_allows_control = false;
     AimTargetSnapshot target;
     AimCommand command;
 };
@@ -111,12 +120,26 @@ struct AimControlContinuityMetrics {
     std::size_t prediction_state_changes = 0;
     std::size_t direction_reversals = 0;
     std::size_t limit_boundary_frames = 0;
+    std::size_t lead_active_frames = 0;
+    std::size_t base_aim_point_outside_box_frames = 0;
+    std::size_t prediction_point_outside_box_frames = 0;
+    std::size_t lead_limit_violation_frames = 0;
+    std::size_t control_direction_violation_frames = 0;
+    std::size_t range_locked_frames = 0;
+    std::size_t range_blocked_target_frames = 0;
 
     AimDistributionSummary abs_dx_counts;
     AimDistributionSummary abs_dy_counts;
     AimDistributionSummary magnitude_counts;
     AimDistributionSummary delta_counts;
     AimDistributionSummary acceleration_counts;
+    AimDistributionSummary track_speed_pixels_per_second;
+    AimDistributionSummary base_error_pixels;
+    AimDistributionSummary final_error_pixels;
+    AimDistributionSummary lead_pixels;
+    AimDistributionSummary observation_age_ms;
+    AimDistributionSummary acquisition_range_pixels;
+    AimDistributionSummary active_range_pixels;
 
     // 下列状态只在离线评价器中逐帧复用。无命令、目标切换和预测状态变化都会
     // 切断连续段，禁止把这些语义边界误计为控制抖动。
@@ -141,6 +164,13 @@ struct AimControlContinuityMetrics {
     std::vector<double> magnitude_samples;
     std::vector<double> delta_samples;
     std::vector<double> acceleration_samples;
+    std::vector<double> track_speed_samples;
+    std::vector<double> base_error_samples;
+    std::vector<double> final_error_samples;
+    std::vector<double> lead_samples;
+    std::vector<double> observation_age_samples;
+    std::vector<double> acquisition_range_samples;
+    std::vector<double> active_range_samples;
 };
 
 struct AimEvaluationMetrics {

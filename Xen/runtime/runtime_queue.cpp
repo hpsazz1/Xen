@@ -326,6 +326,11 @@ bool RuntimePreviewChannel::publish(
                         static_cast<float>(bgr.rows);
         frame.control_center_x = control_center_x;
         frame.control_center_y = control_center_y;
+        frame.aim_acquisition_range_radius =
+            aim_result.acquisition_range_radius;
+        frame.aim_active_range_radius = aim_result.active_range_radius;
+        frame.aim_range_locked = aim_result.range_locked;
+        frame.aim_range_allows_control = aim_result.range_allows_control;
         frame.detection_status = detection_status;
         frame.aim_status = aim_status;
         frame.detection_count = std::min(

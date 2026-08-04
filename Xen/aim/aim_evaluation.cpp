@@ -152,7 +152,14 @@ bool valid_config(const AimEvaluationConfig& config) noexcept {
            std::isfinite(config.max_center_distance) &&
            config.max_center_distance > 0.0f &&
            std::isfinite(config.max_counts_per_frame) &&
-           config.max_counts_per_frame > 0.0f;
+           config.max_counts_per_frame > 0.0f &&
+           std::isfinite(config.max_prediction_lead_percent) &&
+           config.max_prediction_lead_percent >= 1.0f &&
+           config.max_prediction_lead_percent <= 50.0f &&
+           std::isfinite(config.counts_per_pixel_x) &&
+           std::isfinite(config.counts_per_pixel_y) &&
+           config.counts_per_pixel_x > 0.0f &&
+           config.counts_per_pixel_y > 0.0f;
 }
 
 bool valid_track_state(TrackState state) noexcept {
@@ -163,8 +170,13 @@ bool target_is_default(const AimTargetSnapshot& target) noexcept {
     return target.track_id == 0 && target.state == TrackState::TENTATIVE &&
            target.x1 == 0.0f && target.y1 == 0.0f &&
            target.x2 == 0.0f && target.y2 == 0.0f &&
+           target.base_aim_x == 0.0f && target.base_aim_y == 0.0f &&
            target.aim_x == 0.0f && target.aim_y == 0.0f &&
-           target.confidence == 0.0f && !target.predicted;
+           target.velocity_x == 0.0f && target.velocity_y == 0.0f &&
+           target.lead_x == 0.0f && target.lead_y == 0.0f &&
+           target.observation_age_ms == 0.0f &&
+           target.confidence == 0.0f && !target.lead_active &&
+           !target.predicted;
 }
 
 bool command_is_default(const AimCommand& command) noexcept {
@@ -189,7 +201,17 @@ bool inactive_command_is_valid(const AimEvaluationFrame& frame) noexcept {
 bool valid_box(float x1, float y1, float x2, float y2) noexcept;
 
 bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
-    return !((frame.aim_status != AimStatus::SUCCESS &&
+    return !((frame.aim_status == AimStatus::SUCCESS &&
+              (!std::isfinite(frame.acquisition_range_radius) ||
+               !std::isfinite(frame.active_range_radius) ||
+               frame.acquisition_range_radius <= 0.0f ||
+               frame.active_range_radius <= 0.0f ||
+               frame.active_range_radius >
+                   frame.acquisition_range_radius + kGeometryTolerance ||
+               (frame.range_locked && !frame.has_target) ||
+               (frame.range_allows_control && !frame.has_target) ||
+               (frame.has_command && !frame.range_allows_control))) ||
+             (frame.aim_status != AimStatus::SUCCESS &&
               (frame.has_target || frame.has_command)) ||
              (frame.has_command && !frame.has_target) ||
              (frame.has_target &&
@@ -197,11 +219,27 @@ bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
                !valid_track_state(frame.target.state) ||
                frame.target.predicted !=
                    (frame.target.state == TrackState::LOST) ||
-               !valid_box(frame.target.x1, frame.target.y1,
-                          frame.target.x2, frame.target.y2) ||
-               !std::isfinite(frame.target.aim_x) ||
-               !std::isfinite(frame.target.aim_y) ||
-               !std::isfinite(frame.target.confidence) ||
+                !valid_box(frame.target.x1, frame.target.y1,
+                           frame.target.x2, frame.target.y2) ||
+                !std::isfinite(frame.target.base_aim_x) ||
+                !std::isfinite(frame.target.base_aim_y) ||
+                !std::isfinite(frame.target.aim_x) ||
+                !std::isfinite(frame.target.aim_y) ||
+                !std::isfinite(frame.target.velocity_x) ||
+                !std::isfinite(frame.target.velocity_y) ||
+                !std::isfinite(frame.target.lead_x) ||
+                !std::isfinite(frame.target.lead_y) ||
+                !std::isfinite(frame.target.observation_age_ms) ||
+                frame.target.observation_age_ms < 0.0f ||
+                frame.target.observation_age_ms > 100.001f ||
+                std::fabs(frame.target.aim_x - frame.target.base_aim_x -
+                          frame.target.lead_x) > kGeometryTolerance ||
+                std::fabs(frame.target.aim_y - frame.target.base_aim_y -
+                          frame.target.lead_y) > kGeometryTolerance ||
+                (!frame.target.lead_active &&
+                 (std::fabs(frame.target.lead_x) > kGeometryTolerance ||
+                  std::fabs(frame.target.lead_y) > kGeometryTolerance)) ||
+                !std::isfinite(frame.target.confidence) ||
                frame.target.confidence < 0.0f ||
                frame.target.confidence > 1.0f)) ||
              (!frame.has_target && !target_is_default(frame.target)) ||
@@ -236,6 +274,70 @@ void accumulate_control_continuity(const AimEvaluationConfig& config,
     }
 
     if (frame.target.predicted) ++control.predicted_target_frames;
+    if (frame.range_locked) ++control.range_locked_frames;
+    if (!frame.range_allows_control) {
+        ++control.range_blocked_target_frames;
+    }
+    if (frame.target.lead_active) ++control.lead_active_frames;
+    const bool base_point_outside =
+        frame.target.base_aim_x < frame.target.x1 ||
+        frame.target.base_aim_x > frame.target.x2 ||
+        frame.target.base_aim_y < frame.target.y1 ||
+        frame.target.base_aim_y > frame.target.y2;
+    const bool final_point_outside =
+        frame.target.aim_x < frame.target.x1 ||
+        frame.target.aim_x > frame.target.x2 ||
+        frame.target.aim_y < frame.target.y1 ||
+        frame.target.aim_y > frame.target.y2;
+    if (base_point_outside) {
+        ++control.base_aim_point_outside_box_frames;
+    }
+    if (frame.target.lead_active && final_point_outside) {
+        ++control.prediction_point_outside_box_frames;
+    }
+    const double target_diagonal = std::hypot(
+        static_cast<double>(frame.target.x2 - frame.target.x1),
+        static_cast<double>(frame.target.y2 - frame.target.y1));
+    const double lead_magnitude = std::hypot(
+        static_cast<double>(frame.target.lead_x),
+        static_cast<double>(frame.target.lead_y));
+    const double lead_limit = target_diagonal *
+        static_cast<double>(config.max_prediction_lead_percent) / 100.0;
+    if (lead_magnitude > lead_limit + kGeometryTolerance) {
+        ++control.lead_limit_violation_frames;
+    }
+
+    const double scale_x = static_cast<double>(
+        frame.source_pixels_per_roi_pixel_x);
+    const double scale_y = static_cast<double>(
+        frame.source_pixels_per_roi_pixel_y);
+    const double base_error_x =
+        (static_cast<double>(frame.target.base_aim_x) -
+         frame.control_center_x) * scale_x;
+    const double base_error_y =
+        (static_cast<double>(frame.target.base_aim_y) -
+         frame.control_center_y) * scale_y;
+    const double final_error_x =
+        (static_cast<double>(frame.target.aim_x) -
+         frame.control_center_x) * scale_x;
+    const double final_error_y =
+        (static_cast<double>(frame.target.aim_y) -
+         frame.control_center_y) * scale_y;
+    control.track_speed_samples.push_back(std::hypot(
+        static_cast<double>(frame.target.velocity_x) * scale_x,
+        static_cast<double>(frame.target.velocity_y) * scale_y));
+    control.base_error_samples.push_back(
+        std::hypot(base_error_x, base_error_y));
+    control.final_error_samples.push_back(
+        std::hypot(final_error_x, final_error_y));
+    control.lead_samples.push_back(std::hypot(
+        static_cast<double>(frame.target.lead_x) * scale_x,
+        static_cast<double>(frame.target.lead_y) * scale_y));
+    control.observation_age_samples.push_back(
+        frame.target.observation_age_ms);
+    control.acquisition_range_samples.push_back(
+        frame.acquisition_range_radius);
+    control.active_range_samples.push_back(frame.active_range_radius);
     if (control.has_previous_target) {
         if (control.previous_target_track_id != frame.target.track_id) {
             ++control.target_switches;
@@ -270,13 +372,21 @@ void accumulate_control_continuity(const AimEvaluationConfig& config,
     const double dy = static_cast<double>(frame.command.dy_counts);
     const double abs_dx = std::fabs(dx);
     const double abs_dy = std::fabs(dy);
+    const double magnitude = std::hypot(dx, dy);
     control.abs_dx_samples.push_back(abs_dx);
     control.abs_dy_samples.push_back(abs_dy);
-    control.magnitude_samples.push_back(std::hypot(dx, dy));
+    control.magnitude_samples.push_back(magnitude);
     const double limit_boundary = std::ceil(
         static_cast<double>(config.max_counts_per_frame));
-    if (abs_dx >= limit_boundary || abs_dy >= limit_boundary) {
+    if (magnitude >= limit_boundary) {
         ++control.limit_boundary_frames;
+    }
+    const double desired_x = final_error_x * config.counts_per_pixel_x;
+    const double desired_y = final_error_y * config.counts_per_pixel_y;
+    if (dx * desired_x + dy * desired_y <= 0.0 ||
+        std::fabs(dx) > std::ceil(std::fabs(desired_x)) ||
+        std::fabs(dy) > std::ceil(std::fabs(desired_y))) {
+        ++control.control_direction_violation_frames;
     }
 
     const bool continuous =
@@ -699,7 +809,14 @@ bool record_aim_control_continuity(
         if (!valid_config(config) || metrics.complete ||
             (metrics.has_previous_frame &&
              frame.frame_index != metrics.previous_frame_index + 1U) ||
-            (!metrics.has_previous_frame && frame.frame_index != 0U)) {
+            (!metrics.has_previous_frame && frame.frame_index != 0U) ||
+            frame.roi_width <= 0 || frame.roi_height <= 0 ||
+            !std::isfinite(frame.control_center_x) ||
+            !std::isfinite(frame.control_center_y) ||
+            !std::isfinite(frame.source_pixels_per_roi_pixel_x) ||
+            !std::isfinite(frame.source_pixels_per_roi_pixel_y) ||
+            frame.source_pixels_per_roi_pixel_x <= 0.0f ||
+            frame.source_pixels_per_roi_pixel_y <= 0.0f) {
             set_error(error, "Aim 控制连续性评价帧必须从 0 开始并逐帧连续");
             return false;
         }
@@ -749,6 +866,19 @@ bool finalize_aim_control_continuity(
         metrics.predicted_target_frames >
                 metrics.command_frames + metrics.target_without_command_frames ||
         metrics.limit_boundary_frames > metrics.command_frames ||
+        metrics.control_direction_violation_frames > metrics.command_frames ||
+        metrics.lead_active_frames >
+                metrics.command_frames + metrics.target_without_command_frames ||
+        metrics.base_aim_point_outside_box_frames >
+                metrics.command_frames + metrics.target_without_command_frames ||
+        metrics.prediction_point_outside_box_frames >
+                metrics.lead_active_frames ||
+        metrics.lead_limit_violation_frames >
+                metrics.command_frames + metrics.target_without_command_frames ||
+        metrics.range_locked_frames >
+                metrics.command_frames + metrics.target_without_command_frames ||
+        metrics.range_blocked_target_frames >
+                metrics.target_without_command_frames ||
         metrics.continuity_segments > metrics.command_frames ||
         metrics.delta_samples.size() + metrics.continuity_segments !=
                 metrics.command_frames ||
@@ -756,7 +886,18 @@ bool finalize_aim_control_continuity(
         metrics.direction_reversals > metrics.delta_samples.size() ||
         metrics.abs_dx_samples.size() != metrics.command_frames ||
         metrics.abs_dy_samples.size() != metrics.command_frames ||
-        metrics.magnitude_samples.size() != metrics.command_frames) {
+        metrics.magnitude_samples.size() != metrics.command_frames ||
+        metrics.track_speed_samples.size() !=
+                metrics.command_frames + metrics.target_without_command_frames ||
+        metrics.base_error_samples.size() != metrics.track_speed_samples.size() ||
+        metrics.final_error_samples.size() != metrics.track_speed_samples.size() ||
+        metrics.lead_samples.size() != metrics.track_speed_samples.size() ||
+        metrics.observation_age_samples.size() !=
+                metrics.track_speed_samples.size() ||
+        metrics.acquisition_range_samples.size() !=
+                metrics.track_speed_samples.size() ||
+        metrics.active_range_samples.size() !=
+                metrics.track_speed_samples.size()) {
         set_error(error, "Aim 控制连续性评价没有完整覆盖全部帧");
         return false;
     }
@@ -766,6 +907,19 @@ bool finalize_aim_control_continuity(
     finalize_distribution(metrics.delta_samples, metrics.delta_counts);
     finalize_distribution(metrics.acceleration_samples,
                           metrics.acceleration_counts);
+    finalize_distribution(metrics.track_speed_samples,
+                          metrics.track_speed_pixels_per_second);
+    finalize_distribution(metrics.base_error_samples,
+                          metrics.base_error_pixels);
+    finalize_distribution(metrics.final_error_samples,
+                          metrics.final_error_pixels);
+    finalize_distribution(metrics.lead_samples, metrics.lead_pixels);
+    finalize_distribution(metrics.observation_age_samples,
+                          metrics.observation_age_ms);
+    finalize_distribution(metrics.acquisition_range_samples,
+                          metrics.acquisition_range_pixels);
+    finalize_distribution(metrics.active_range_samples,
+                          metrics.active_range_pixels);
     metrics.complete = true;
     return true;
 }

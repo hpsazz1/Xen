@@ -43,6 +43,9 @@ void test_round_trip() {
     source.capture.ndi_require_frame_metadata = false;
     source.aim.person_class_ids = {0, 2};
     source.aim.head_class_ids = {1, 3};
+    source.aim.acquisition_range_percent = 110.0f;
+    source.aim.enable_prediction = true;
+    source.aim.max_prediction_lead_percent = 18.0f;
     source.mouse.backend = MouseBackend::KMBOX_NET;
     source.mouse.allow_send_input = true;
     source.mouse.kmbox_ip = "127.0.0.1";
@@ -104,6 +107,9 @@ void test_round_trip() {
            loaded.capture.ndi_source_height == 1440 &&
            !loaded.capture.ndi_require_frame_metadata &&
            loaded.aim.person_class_ids == source.aim.person_class_ids &&
+           loaded.aim.acquisition_range_percent == 110.0f &&
+           loaded.aim.enable_prediction &&
+           loaded.aim.max_prediction_lead_percent == 18.0f &&
            loaded.mouse.backend == MouseBackend::KMBOX_NET &&
            loaded.mouse.allow_send_input &&
            loaded.mouse.kmbox_ip == "127.0.0.1" &&
@@ -438,6 +444,18 @@ void test_complete_aim_config_validation() {
     config = AimConfig{};
     config.switch_margin = 1.0f;
     expect_invalid(config, "Aim 切换优势达到 1 时必须拒绝");
+    config = AimConfig{};
+    config.acquisition_range_percent = 4.99f;
+    expect_invalid(config, "Aim 搜索范围低于 5% 时必须拒绝");
+    config = AimConfig{};
+    config.acquisition_range_percent = 150.01f;
+    expect_invalid(config, "Aim 搜索范围高于 150% 时必须拒绝");
+    config = AimConfig{};
+    config.max_prediction_lead_percent = 0.99f;
+    expect_invalid(config, "Aim 最大预测提前距离低于 1% 时必须拒绝");
+    config = AimConfig{};
+    config.max_prediction_lead_percent = 50.01f;
+    expect_invalid(config, "Aim 最大预测提前距离高于 50% 时必须拒绝");
     config = AimConfig{};
     config.body_aim_height_ratio = nan;
     expect_invalid(config, "Aim 身体瞄点比例为 NaN 时必须拒绝");

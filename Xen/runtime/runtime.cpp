@@ -330,6 +330,8 @@ struct Runtime::Impl {
                                   std::uint64_t sample_overwritten_frames,
                                   const AimResult& aim_result,
                                   std::span<const Detection> detections,
+                                  float aim_control_center_x,
+                                  float aim_control_center_y,
                                   MouseStatus mouse_status,
                                   bool mouse_sent) {
         SnapshotUpdateResult result;
@@ -398,6 +400,46 @@ struct Runtime::Impl {
         sample.aim_status = aim_result.status;
         sample.mouse_status = mouse_status;
         sample.mouse_sent = mouse_sent;
+        sample.aim_control_center_x = aim_control_center_x;
+        sample.aim_control_center_y = aim_control_center_y;
+        sample.aim_acquisition_range_radius =
+            aim_result.acquisition_range_radius;
+        sample.aim_active_range_radius = aim_result.active_range_radius;
+        sample.aim_has_target = aim_result.has_target;
+        sample.aim_has_command = aim_result.has_command;
+        sample.aim_range_locked = aim_result.range_locked;
+        sample.aim_range_allows_control = aim_result.range_allows_control;
+        sample.aim_target = aim_result.target;
+        sample.aim_command = aim_result.command;
+        if (aim_result.has_target) {
+            sample.aim_base_point_inside_box =
+                aim_result.target.base_aim_x >= aim_result.target.x1 &&
+                aim_result.target.base_aim_x <= aim_result.target.x2 &&
+                aim_result.target.base_aim_y >= aim_result.target.y1 &&
+                aim_result.target.base_aim_y <= aim_result.target.y2;
+            sample.aim_prediction_point_outside_box =
+                aim_result.target.lead_active &&
+                (aim_result.target.aim_x < aim_result.target.x1 ||
+                 aim_result.target.aim_x > aim_result.target.x2 ||
+                 aim_result.target.aim_y < aim_result.target.y1 ||
+                 aim_result.target.aim_y > aim_result.target.y2);
+        }
+        if (aim_result.has_command) {
+            const double desired_x =
+                (aim_result.target.aim_x - aim_control_center_x) *
+                frame.source_pixels_per_pixel_x *
+                config.aim.counts_per_pixel_x;
+            const double desired_y =
+                (aim_result.target.aim_y - aim_control_center_y) *
+                frame.source_pixels_per_pixel_y *
+                config.aim.counts_per_pixel_y;
+            const double command_x = aim_result.command.dx_counts;
+            const double command_y = aim_result.command.dy_counts;
+            sample.aim_command_toward_target =
+                command_x * desired_x + command_y * desired_y > 0.0 &&
+                std::fabs(command_x) <= std::ceil(std::fabs(desired_x)) &&
+                std::fabs(command_y) <= std::ceil(std::fabs(desired_y));
+        }
         if (profile.detector.status == DetectionStatus::SUCCESS) {
             runtime::detail::summarize_detections(
                 detections, config.aim, sample);
@@ -507,6 +549,7 @@ struct Runtime::Impl {
                     static_cast<float>(frame->source_pixels_per_pixel_x);
                 aim_frame.source_pixels_per_roi_pixel_y =
                     static_cast<float>(frame->source_pixels_per_pixel_y);
+                aim_frame.lock_active = safety_gate.can_dispatch();
                 aim_frame.detections = std::move(detections);
                 aim_result = aim->process(aim_frame);
                 profile.aim = aim_result.profile;
@@ -573,7 +616,9 @@ struct Runtime::Impl {
             }
             SnapshotUpdateResult snapshot_result = update_pipeline_snapshot(
                 *frame, profile, service, overwritten_frames_at_consume,
-                aim_result, preview_detections, mouse->status(), mouse_sent);
+                aim_result, preview_detections,
+                aim_frame.control_center_x, aim_frame.control_center_y,
+                mouse->status(), mouse_sent);
             if (probes_enabled) {
                 const auto tail_finished = std::chrono::steady_clock::now();
                 service.valid = true;
@@ -911,14 +956,11 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
             break;
         case RuntimeIntentType::DISARM_OUTPUT:
             impl_->safety_gate.disarm();
-            impl_->aim_reset_requested.store(true, std::memory_order_release);
             break;
         case RuntimeIntentType::AIM_HOLD_CHANGED:
             impl_->safety_gate.set_hold(intent.active);
-            if (!intent.active) {
-                impl_->aim_reset_requested.store(true,
-                                                  std::memory_order_release);
-            }
+            // 按住键只控制物理发送门。Aim 在未按键期间仍按每个观测帧持续
+            // 更新轨迹、预测和最新命令，下一次按下即可直接放行当前结果。
             break;
         case RuntimeIntentType::EMERGENCY_STOP:
             impl_->safety_gate.emergency_stop();

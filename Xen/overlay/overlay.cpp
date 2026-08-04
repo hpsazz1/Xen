@@ -1141,6 +1141,39 @@ struct Overlay::Impl {
         HGDIOBJ old_pen = SelectObject(dc, other_pen);
         HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
         SetBkMode(dc, TRANSPARENT);
+        const auto range_center = overlay::detail::map_preview_point(
+            preview->control_center_x, preview->control_center_y,
+            coordinate_scale_x, coordinate_scale_y);
+        const float range_radius_x = preview->aim_active_range_radius *
+            coordinate_scale_x;
+        const float range_radius_y = preview->aim_active_range_radius *
+            coordinate_scale_y;
+        HPEN range_pen = CreatePen(
+            PS_DASH, 1,
+            preview->aim_range_locked
+                ? (preview->aim_range_allows_control
+                    ? RGB(64, 201, 119) : RGB(240, 173, 78))
+                : RGB(51, 156, 255));
+        SelectObject(dc, range_pen);
+        Ellipse(
+            dc,
+            image_x + static_cast<int>(std::lround(
+                range_center.x - range_radius_x)),
+            image_y + static_cast<int>(std::lround(
+                range_center.y - range_radius_y)),
+            image_x + static_cast<int>(std::lround(
+                range_center.x + range_radius_x)),
+            image_y + static_cast<int>(std::lround(
+                range_center.y + range_radius_y)));
+        const int center_x = image_x +
+            static_cast<int>(std::lround(range_center.x));
+        const int center_y = image_y +
+            static_cast<int>(std::lround(range_center.y));
+        MoveToEx(dc, center_x - 8, center_y, nullptr);
+        LineTo(dc, center_x + 9, center_y);
+        MoveToEx(dc, center_x, center_y - 8, nullptr);
+        LineTo(dc, center_x, center_y + 9);
+        SelectObject(dc, other_pen);
         const std::size_t detection_count = std::min(
             preview->detection_count, preview->detections.size());
         for (std::size_t index = 0; index < detection_count; ++index) {
@@ -1254,6 +1287,7 @@ struct Overlay::Impl {
         DeleteObject(person_pen);
         DeleteObject(head_pen);
         DeleteObject(other_pen);
+        DeleteObject(range_pen);
         wchar_t status[128]{};
         swprintf_s(
             status, L"帧 %llu    检测 %zu    Detector %S",
@@ -2309,7 +2343,17 @@ struct Overlay::Impl {
             crosshair.y >= 0.0f && crosshair.y <= display.height) {
             const ImVec2 center(
                 image_min.x + crosshair.x, image_min.y + crosshair.y);
-            const ImU32 color = ImGui::GetColorU32(rgba(kAccent));
+            const ImU32 color = ImGui::GetColorU32(
+                preview->aim_range_locked
+                    ? (preview->aim_range_allows_control
+                        ? rgba(kSuccess) : rgba(kWarning))
+                    : rgba(kAccent));
+            const float range_radius = preview->aim_active_range_radius *
+                std::min(coordinate_scale_x, coordinate_scale_y);
+            if (range_radius > 0.0f) {
+                draw_list->AddCircle(
+                    center, range_radius, color, 64, 1.5f);
+            }
             draw_list->AddLine(
                 ImVec2(center.x - 8.0f, center.y),
                 ImVec2(center.x + 8.0f, center.y), color, 1.5f);
@@ -2363,6 +2407,11 @@ struct Overlay::Impl {
                     ? "预测"
                     : track_state_label(preview->target.state))
                 : "无");
+        ImGui::TextColored(
+            rgba(kFaintInk), "范围 %.1f px  /  %s  /  控制 %s",
+            preview->aim_active_range_radius,
+            preview->aim_range_locked ? "动态锁定" : "搜索",
+            preview->aim_range_allows_control ? "范围内" : "范围外");
         if (preview->has_target) {
             ImGui::TextColored(
                 rgba(kFaintInk), "轨迹 %llu  /  置信度 %.1f%%  /  瞄点 %.1f, %.1f",
@@ -2858,149 +2907,82 @@ struct Overlay::Impl {
 
     void render_aim_config(AppConfig& app_config, bool can_edit) {
         ImGui::BeginDisabled(!can_edit);
-        const bool two_columns =
-            ImGui::GetContentRegionAvail().x >= 650.0f;
-        if (two_columns && ImGui::BeginTable(
-                "aim_columns", 2,
-                ImGuiTableFlags_SizingStretchSame)) {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            render_tracking_form(app_config);
-            ImGui::TableSetColumnIndex(1);
-            render_selection_form(app_config);
-            ImGui::EndTable();
-        } else {
-            render_tracking_form(app_config);
-            ImGui::Dummy(ImVec2(0.0f, 8.0f));
-            render_selection_form(app_config);
-        }
+        render_basic_aim_form(app_config);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        render_control_form(app_config);
+        render_prediction_form(app_config);
         ImGui::EndDisabled();
     }
 
-    void render_tracking_form(AppConfig& app_config) {
-        begin_config_panel("tracking_panel", "轨迹确认", 232.0f);
-        if (begin_form("tracking_form", 126.0f)) {
+    void render_basic_aim_form(AppConfig& app_config) {
+        begin_config_panel("basic_aim_panel", "基础瞄准", 236.0f);
+        if (begin_form("basic_aim_form", 126.0f)) {
             form_row(
-                "高置信阈值",
-                "达到该置信度的观测可直接参与轨迹确认；应不低于低置信阈值。");
-            slider_float_control(
+                "目标置信度",
+                "Aim 接受新目标的最低置信度；弱观测阈值、确认帧、丢失窗口、关联门槛和多目标切换迟滞由内部自动处理。");
+            if (slider_float_control(
                 "aim_high_confidence",
                 &app_config.aim.high_confidence,
-                0.01f, 1.0f, "%.2f");
+                0.05f, 1.0f, "%.2f")) {
+                app_config.aim.low_confidence = std::clamp(
+                    app_config.aim.high_confidence * 0.4f,
+                    0.05f, app_config.aim.high_confidence);
+            }
             form_row(
-                "低置信阈值",
-                "保留弱观测用于与已有轨迹关联；低于该值的检测不会进入 Aim 观测集。");
+                "搜索范围",
+                "只限制未锁定目标的获取、锁定后的挑战者切换和鼠标移动，不裁剪检测画面或减少轨迹观测。按住瞄准键后会围绕当前目标距离与模型框尺寸自动收缩；当前生效范围显示在检测预览中。");
             slider_float_control(
-                "aim_low_confidence",
-                &app_config.aim.low_confidence,
-                0.01f, 1.0f, "%.2f");
-            form_row(
-                "确认帧数",
-                "新轨迹至少连续命中该帧数后才进入确认状态，减少单帧误检触发。");
-            ImGui::InputInt(
-                "##min_confirmed_hits",
-                &app_config.aim.min_confirmed_hits);
-            form_row(
-                "最大丢失帧",
-                "已确认轨迹允许连续缺少观测的帧数；超过后删除轨迹，不再沿用旧目标。");
-            ImGui::InputInt(
-                "##max_lost_frames",
-                &app_config.aim.max_lost_frames);
-            form_row(
-                "最小 IoU",
-                "观测与预测框关联时要求的最小交并比；与中心距离门槛共同限制错误匹配。");
-            slider_float_control(
-                "min_iou", &app_config.aim.min_iou,
-                0.0f, 1.0f, "%.2f");
-            form_row(
-                "中心距离",
-                "观测与预测中心允许的最大归一化距离；越小越保守，快速移动时可能更易断轨。");
-            slider_float_control(
-                "max_center_distance",
-                &app_config.aim.max_center_distance,
-                0.0f, 1.0f, "%.2f");
-            ImGui::EndTable();
-        }
-        end_config_panel();
-    }
-
-    void render_selection_form(AppConfig& app_config) {
-        begin_config_panel("selection_panel", "目标选择", 196.0f);
-        if (begin_form("selection_form", 126.0f)) {
-            form_row(
-                "切换优势",
-                "候选目标评分必须比当前目标至少高出该幅度，才进入切换确认，避免相近目标抖动。");
-            slider_float_control(
-                "switch_margin", &app_config.aim.switch_margin,
-                0.0f, 1.0f, "%.2f");
-            form_row(
-                "切换确认帧",
-                "新候选连续保持优势达到该帧数后才切换目标。");
-            ImGui::InputInt(
-                "##switch_confirm_frames",
-                &app_config.aim.switch_confirm_frames);
-            form_row(
-                "切换冷却帧",
-                "完成一次目标切换后，在该帧数内抑制再次切换，降低多目标来回跳变。");
-            ImGui::InputInt(
-                "##switch_cooldown_frames",
-                &app_config.aim.switch_cooldown_frames);
+                "aim_acquisition_range_percent",
+                &app_config.aim.acquisition_range_percent,
+                5.0f, 150.0f, "%.0f%%");
             form_row(
                 "身体瞄准高度",
-                "身体框内从顶部向下的瞄点比例；0 为顶部，1 为底部，头部类别使用自身瞄点契约。");
+                "身体框内从顶部向下的基础比例；检测到框内头部时会换算为身体框归一化坐标，头框连续缺失期间也不会上下跳回身体默认点。");
             slider_float_control(
                 "body_aim_height_ratio",
                 &app_config.aim.body_aim_height_ratio,
                 0.0f, 1.0f, "%.2f");
             form_row(
-                "预测增益",
-                "目标暂时丢失但轨迹仍有效时，对预测控制量施加的比例；0 表示预测帧不移动。");
+                "移动强度",
+                "把主机 FOV 像素误差换算为相对鼠标 counts；界面统一水平和垂直比例，内部自动完成平滑、提前和相邻帧变化约束。");
+            float movement_strength = std::sqrt(
+                app_config.aim.counts_per_pixel_x *
+                app_config.aim.counts_per_pixel_y);
+            if (slider_float_control(
+                    "counts_per_pixel",
+                    &movement_strength,
+                    0.01f, 4.0f, "%.2f")) {
+                app_config.aim.counts_per_pixel_x = movement_strength;
+                app_config.aim.counts_per_pixel_y = movement_strength;
+            }
+            form_row(
+                "最大步长",
+                "限制每帧二维相对移动总 counts。基础追踪点始终在当前模型框内；启用预测时可移动到框外提前点，但历史动量不得背离当前控制点或越过它。");
             slider_float_control(
-                "predicted_gain", &app_config.aim.predicted_gain,
-                0.0f, 1.0f, "%.2f");
+                "max_counts",
+                &app_config.aim.max_counts_per_frame,
+                1.0f, 200.0f, "%.0f");
             ImGui::EndTable();
         }
         end_config_panel();
     }
 
-    void render_control_form(AppConfig& app_config) {
-        begin_config_panel("control_panel", "移动控制", 196.0f);
-        if (begin_form("control_form")) {
+    void render_prediction_form(AppConfig& app_config) {
+        begin_config_panel("prediction_panel", "预测提前", 118.0f);
+        if (begin_form("prediction_form", 126.0f)) {
             form_row(
-                "死区",
-                "瞄点误差绝对值落在该像素范围内时不输出对应轴移动，减少准星附近抖动。");
-            slider_float_control(
-                "deadzone", &app_config.aim.deadzone_pixels,
-                0.0f, 20.0f, "%.1f px");
+                "启用预测",
+                "独立控制观测年龄提前和丢失轨迹控制。关闭时只执行基础观测移动；开启后仅在目标相对准星持续向外运动且距离足够时提前，越过准星、反向或回到收敛区会先撤销预测并归位，避免前探与回拉震荡。");
+            toggle_switch(
+                "##enable_prediction", &app_config.aim.enable_prediction);
             form_row(
-                "平滑系数",
-                "当前控制量在指数平滑中的权重；越大响应越快，越小移动越平缓。");
+                "最大提前距离",
+                "预测提前向量相对当前目标框对角线的最大比例；提前点允许位于目标框外，但高速、低速或加速度变化都不能越过该距离门禁。预测关闭时此项不生效。");
+            ImGui::BeginDisabled(!app_config.aim.enable_prediction);
             slider_float_control(
-                "smoothing", &app_config.aim.smoothing,
-                0.0f, 1.0f, "%.2f");
-            form_row(
-                "水平 counts / px",
-                "把主机 FOV 水平像素误差换算为相对鼠标 counts 的比例，不使用辅机桌面分辨率缩放。");
-            slider_float_control(
-                "counts_per_pixel_x",
-                &app_config.aim.counts_per_pixel_x,
-                0.01f, 4.0f, "%.2f");
-            form_row(
-                "垂直 counts / px",
-                "把主机 FOV 垂直像素误差换算为相对鼠标 counts 的比例，不使用辅机桌面分辨率缩放。");
-            slider_float_control(
-                "counts_per_pixel_y",
-                &app_config.aim.counts_per_pixel_y,
-                0.01f, 4.0f, "%.2f");
-            form_row(
-                "单帧最大 counts",
-                "限制每帧每个轴提交的相对移动绝对值，避免异常目标或参数产生突跳。");
-            slider_float_control(
-                "max_counts",
-                &app_config.aim.max_counts_per_frame,
-                1.0f, 200.0f, "%.0f");
+                "max_prediction_lead_percent",
+                &app_config.aim.max_prediction_lead_percent,
+                1.0f, 50.0f, "%.0f%%");
+            ImGui::EndDisabled();
             ImGui::EndTable();
         }
         end_config_panel();

@@ -249,9 +249,17 @@ void test_runtime_preview_channel() {
     AimResult aim_result;
     aim_result.status = AimStatus::SUCCESS;
     aim_result.has_target = true;
+    aim_result.acquisition_range_radius = 144.0f;
+    aim_result.active_range_radius = 72.0f;
+    aim_result.range_locked = true;
+    aim_result.range_allows_control = false;
     aim_result.target.track_id = 7;
+    aim_result.target.base_aim_x = 55.0f;
+    aim_result.target.base_aim_y = 40.0f;
     aim_result.target.aim_x = 60.0f;
     aim_result.target.aim_y = 40.0f;
+    aim_result.target.lead_x = 5.0f;
+    aim_result.target.lead_active = true;
     const auto started = std::chrono::steady_clock::now();
 
     expect(!preview.publish(
@@ -280,6 +288,14 @@ void test_runtime_preview_channel() {
                first->detections[0].class_id == 1 &&
                first->has_target && first->target.track_id == 7,
            "图像、检测框和 Aim 目标必须固化为同一序号快照");
+    expect(first && first->aim_acquisition_range_radius == 144.0f &&
+               first->aim_active_range_radius == 72.0f &&
+               first->aim_range_locked &&
+               !first->aim_range_allows_control &&
+               first->target.base_aim_x == 55.0f &&
+               first->target.lead_x == 5.0f &&
+               first->target.lead_active,
+           "预览必须复制动态范围和预测标量，范围阻断不能删除同帧检测或目标观测");
     expect(!preview.publish(
                image, 2, 320.0f, 160.0f, DetectionStatus::SUCCESS,
                AimStatus::SUCCESS, detections, aim_result,

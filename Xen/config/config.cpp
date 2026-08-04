@@ -712,12 +712,17 @@ bool load_app_config(const std::string& path,
         XEN_READ_AIM_FLOAT(switch_margin);
         XEN_READ_AIM_INT(switch_confirm_frames);
         XEN_READ_AIM_INT(switch_cooldown_frames);
+        XEN_READ_AIM_FLOAT(acquisition_range_percent);
         XEN_READ_AIM_FLOAT(body_aim_height_ratio);
         XEN_READ_AIM_FLOAT(deadzone_pixels);
         XEN_READ_AIM_FLOAT(smoothing);
         XEN_READ_AIM_FLOAT(counts_per_pixel_x);
         XEN_READ_AIM_FLOAT(counts_per_pixel_y);
         XEN_READ_AIM_FLOAT(max_counts_per_frame);
+        candidate.aim.enable_prediction = ini.GetBoolValue(
+            "aim", "enable_prediction",
+            candidate.aim.enable_prediction);
+        XEN_READ_AIM_FLOAT(max_prediction_lead_percent);
         XEN_READ_AIM_FLOAT(predicted_gain);
 #undef XEN_READ_AIM_FLOAT
 #undef XEN_READ_AIM_INT
@@ -890,12 +895,16 @@ bool save_app_config(const std::string& path,
         XEN_WRITE_AIM_FLOAT(switch_margin);
         XEN_WRITE_AIM_INT(switch_confirm_frames);
         XEN_WRITE_AIM_INT(switch_cooldown_frames);
+        XEN_WRITE_AIM_FLOAT(acquisition_range_percent);
         XEN_WRITE_AIM_FLOAT(body_aim_height_ratio);
         XEN_WRITE_AIM_FLOAT(deadzone_pixels);
         XEN_WRITE_AIM_FLOAT(smoothing);
         XEN_WRITE_AIM_FLOAT(counts_per_pixel_x);
         XEN_WRITE_AIM_FLOAT(counts_per_pixel_y);
         XEN_WRITE_AIM_FLOAT(max_counts_per_frame);
+        ini.SetBoolValue("aim", "enable_prediction",
+                         config.aim.enable_prediction);
+        XEN_WRITE_AIM_FLOAT(max_prediction_lead_percent);
         XEN_WRITE_AIM_FLOAT(predicted_gain);
 #undef XEN_WRITE_AIM_FLOAT
 #undef XEN_WRITE_AIM_INT

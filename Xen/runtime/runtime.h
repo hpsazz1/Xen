@@ -114,6 +114,21 @@ struct RuntimePipelineSample {
     AimStatus aim_status = AimStatus::NOT_RUN;
     MouseStatus mouse_status = MouseStatus::CLOSED;
     bool mouse_sent = false;
+    // Aim 诊断只固化固定大小快照，不复制检测容器。control_center 与几何比例
+    // 可把 ROI 点、速度和命令统一换算到主机 FOV 口径做双机 A/B。
+    float aim_control_center_x = 0.0f;
+    float aim_control_center_y = 0.0f;
+    float aim_acquisition_range_radius = 0.0f;
+    float aim_active_range_radius = 0.0f;
+    bool aim_has_target = false;
+    bool aim_has_command = false;
+    bool aim_range_locked = false;
+    bool aim_range_allows_control = false;
+    bool aim_base_point_inside_box = false;
+    bool aim_prediction_point_outside_box = false;
+    bool aim_command_toward_target = false;
+    AimTargetSnapshot aim_target;
+    AimCommand aim_command;
     // 分类诊断只保留固定标量；count=0 时对应 confidence=0，避免把无检测
     // 与真实 0 置信度混为一谈，也不把动态检测集合复制进报告环。
     std::uint32_t person_detection_count = 0;
@@ -147,6 +162,10 @@ struct RuntimePreviewFrame {
     // 主机准星中心在原始 ROI 内的位置，允许落在 ROI 边界之外。
     float control_center_x = 0.0f;
     float control_center_y = 0.0f;
+    float aim_acquisition_range_radius = 0.0f;
+    float aim_active_range_radius = 0.0f;
+    bool aim_range_locked = false;
+    bool aim_range_allows_control = false;
     DetectionStatus detection_status = DetectionStatus::NOT_RUN;
     AimStatus aim_status = AimStatus::NOT_RUN;
     std::vector<std::uint8_t> bgra;

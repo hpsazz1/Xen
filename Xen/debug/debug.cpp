@@ -259,6 +259,15 @@ const char* bool_name(bool value) noexcept {
     return value ? "true" : "false";
 }
 
+const char* track_state_name(TrackState state) noexcept {
+    switch (state) {
+        case TrackState::TENTATIVE: return "TENTATIVE";
+        case TrackState::CONFIRMED: return "CONFIRMED";
+        case TrackState::LOST: return "LOST";
+    }
+    return "UNKNOWN";
+}
+
 const char* runtime_state_name(RuntimeState state) noexcept {
     switch (state) {
         case RuntimeState::STOPPED: return "STOPPED";
@@ -660,7 +669,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v7\n"
+        csv << "# Xen Runtime Debug Report v8\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -734,6 +743,17 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "gpu_preprocess_ms,execution_ms,d2h_ms,"
                "postprocess_ms,aim_ms,mouse_ms,"
                "total_ms,detection_status,aim_status,mouse_status,mouse_sent,"
+               "aim_has_target,aim_has_command,aim_track_id,aim_track_state,"
+               "aim_track_predicted,aim_lead_active,"
+               "aim_base_point_inside_box,aim_prediction_point_outside_box,"
+               "aim_command_toward_target,aim_control_center_x,"
+               "aim_control_center_y,aim_acquisition_range_radius,"
+               "aim_active_range_radius,aim_range_locked,"
+               "aim_range_allows_control,aim_box_x1,aim_box_y1,aim_box_x2,"
+               "aim_box_y2,aim_base_x,aim_base_y,aim_final_x,aim_final_y,"
+               "aim_velocity_x,aim_velocity_y,aim_lead_x,aim_lead_y,"
+               "aim_observation_age_ms,aim_command_dx_counts,"
+               "aim_command_dy_counts,"
                "person_detection_count,head_detection_count,"
                "max_person_confidence,max_head_confidence,"
                "detection_count_by_class,max_confidence_by_class,"
@@ -778,6 +798,36 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << AimStatusName(sample.aim_status) << ','
                 << MouseStatusName(sample.mouse_status) << ','
                 << bool_name(sample.mouse_sent) << ','
+                << bool_name(sample.aim_has_target) << ','
+                << bool_name(sample.aim_has_command) << ','
+                << sample.aim_target.track_id << ','
+                << track_state_name(sample.aim_target.state) << ','
+                << bool_name(sample.aim_target.predicted) << ','
+                << bool_name(sample.aim_target.lead_active) << ','
+                << bool_name(sample.aim_base_point_inside_box) << ','
+                << bool_name(sample.aim_prediction_point_outside_box) << ','
+                << bool_name(sample.aim_command_toward_target) << ','
+                << sample.aim_control_center_x << ','
+                << sample.aim_control_center_y << ','
+                << sample.aim_acquisition_range_radius << ','
+                << sample.aim_active_range_radius << ','
+                << bool_name(sample.aim_range_locked) << ','
+                << bool_name(sample.aim_range_allows_control) << ','
+                << sample.aim_target.x1 << ','
+                << sample.aim_target.y1 << ','
+                << sample.aim_target.x2 << ','
+                << sample.aim_target.y2 << ','
+                << sample.aim_target.base_aim_x << ','
+                << sample.aim_target.base_aim_y << ','
+                << sample.aim_target.aim_x << ','
+                << sample.aim_target.aim_y << ','
+                << sample.aim_target.velocity_x << ','
+                << sample.aim_target.velocity_y << ','
+                << sample.aim_target.lead_x << ','
+                << sample.aim_target.lead_y << ','
+                << sample.aim_target.observation_age_ms << ','
+                << sample.aim_command.dx_counts << ','
+                << sample.aim_command.dy_counts << ','
                 << sample.person_detection_count << ','
                 << sample.head_detection_count << ','
                 << sample.max_person_confidence << ','
@@ -852,7 +902,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 7,\n"
+             << "{\n  \"schema\": 8,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -944,6 +994,54 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << MouseStatusName(sample.mouse_status)
                  << "\", \"mouse_sent\": "
                  << bool_name(sample.mouse_sent)
+                 << ", \"aim_has_target\": "
+                 << bool_name(sample.aim_has_target)
+                 << ", \"aim_has_command\": "
+                 << bool_name(sample.aim_has_command)
+                 << ", \"aim_track_id\": " << sample.aim_target.track_id
+                 << ", \"aim_track_state\": \""
+                 << track_state_name(sample.aim_target.state)
+                 << "\", \"aim_track_predicted\": "
+                 << bool_name(sample.aim_target.predicted)
+                 << ", \"aim_lead_active\": "
+                 << bool_name(sample.aim_target.lead_active)
+                 << ", \"aim_base_point_inside_box\": "
+                 << bool_name(sample.aim_base_point_inside_box)
+                 << ", \"aim_prediction_point_outside_box\": "
+                 << bool_name(sample.aim_prediction_point_outside_box)
+                 << ", \"aim_command_toward_target\": "
+                 << bool_name(sample.aim_command_toward_target)
+                 << ", \"aim_control_center_x\": "
+                 << sample.aim_control_center_x
+                 << ", \"aim_control_center_y\": "
+                 << sample.aim_control_center_y
+                 << ", \"aim_acquisition_range_radius\": "
+                 << sample.aim_acquisition_range_radius
+                 << ", \"aim_active_range_radius\": "
+                 << sample.aim_active_range_radius
+                 << ", \"aim_range_locked\": "
+                 << bool_name(sample.aim_range_locked)
+                 << ", \"aim_range_allows_control\": "
+                 << bool_name(sample.aim_range_allows_control)
+                 << ", \"aim_box\": [" << sample.aim_target.x1 << ", "
+                 << sample.aim_target.y1 << ", " << sample.aim_target.x2
+                 << ", " << sample.aim_target.y2 << ']'
+                 << ", \"aim_base_point\": ["
+                 << sample.aim_target.base_aim_x << ", "
+                 << sample.aim_target.base_aim_y << ']'
+                 << ", \"aim_final_point\": ["
+                 << sample.aim_target.aim_x << ", "
+                 << sample.aim_target.aim_y << ']'
+                 << ", \"aim_velocity\": ["
+                 << sample.aim_target.velocity_x << ", "
+                 << sample.aim_target.velocity_y << ']'
+                 << ", \"aim_lead\": [" << sample.aim_target.lead_x
+                 << ", " << sample.aim_target.lead_y << ']'
+                 << ", \"aim_observation_age_ms\": "
+                 << sample.aim_target.observation_age_ms
+                 << ", \"aim_command\": ["
+                 << sample.aim_command.dx_counts << ", "
+                 << sample.aim_command.dy_counts << ']'
                  << ", \"person_detection_count\": "
                  << sample.person_detection_count
                  << ", \"head_detection_count\": "

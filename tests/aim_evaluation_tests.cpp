@@ -138,8 +138,13 @@ AimEvaluationFrame output_frame(std::size_t index,
     frame.source_roi_y = 560.0f;
     frame.roi_width = 320;
     frame.roi_height = 320;
+    frame.control_center_x = 160.0f;
+    frame.control_center_y = 160.0f;
+    frame.acquisition_range_radius = 144.0f;
+    frame.active_range_radius = 144.0f;
     frame.aim_status = AimStatus::SUCCESS;
     frame.has_target = track_id != 0;
+    frame.range_allows_control = frame.has_target;
     if (frame.has_target) {
         frame.target.track_id = track_id;
         frame.target.state = TrackState::CONFIRMED;
@@ -147,6 +152,10 @@ AimEvaluationFrame output_frame(std::size_t index,
         frame.target.y1 = y1;
         frame.target.x2 = x2;
         frame.target.y2 = y2;
+        frame.target.base_aim_x = (x1 + x2) * 0.5f;
+        frame.target.base_aim_y = (y1 + y2) * 0.5f;
+        frame.target.aim_x = frame.target.base_aim_x;
+        frame.target.aim_y = frame.target.base_aim_y;
     }
     return frame;
 }
@@ -165,6 +174,23 @@ AimEvaluationFrame command_frame(std::size_t index,
         std::chrono::milliseconds(index + 1U)};
     frame.command.dx_counts = dx_counts;
     frame.command.dy_counts = dy_counts;
+    constexpr float kCountsPerPixel = 0.50f;
+    if (dx_counts != 0) {
+        const float direction = dx_counts > 0 ? 1.0f : -1.0f;
+        frame.control_center_x = frame.target.aim_x - direction *
+            (std::fabs(static_cast<float>(dx_counts)) / kCountsPerPixel +
+             10.0f);
+    } else {
+        frame.control_center_x = frame.target.aim_x;
+    }
+    if (dy_counts != 0) {
+        const float direction = dy_counts > 0 ? 1.0f : -1.0f;
+        frame.control_center_y = frame.target.aim_y - direction *
+            (std::fabs(static_cast<float>(dy_counts)) / kCountsPerPixel +
+             10.0f);
+    } else {
+        frame.control_center_y = frame.target.aim_y;
+    }
     return frame;
 }
 
@@ -365,7 +391,12 @@ void test_control_continuity_metrics() {
                control.target_state_changes == 1 &&
                control.prediction_state_changes == 1 &&
                control.direction_reversals == 1 &&
-               control.limit_boundary_frames == 2,
+               control.limit_boundary_frames == 2 &&
+               control.lead_active_frames == 0 &&
+               control.base_aim_point_outside_box_frames == 0 &&
+               control.prediction_point_outside_box_frames == 0 &&
+               control.lead_limit_violation_frames == 0 &&
+               control.control_direction_violation_frames == 0,
            "连续段边界、切换、方向反转或限幅计数错误");
     expect(control.abs_dx_counts.samples == 6 &&
                near(control.abs_dx_counts.mean, 65.0 / 6.0) &&
@@ -384,10 +415,61 @@ void test_control_continuity_metrics() {
                control.acceleration_counts.samples == 1 &&
                near(control.acceleration_counts.mean, 25.0),
            "一阶/二阶 counts 变化分位数错误，或跨语义边界错误串联");
+    expect(control.track_speed_pixels_per_second.samples == 7 &&
+               control.base_error_pixels.samples == 7 &&
+               control.final_error_pixels.samples == 7 &&
+               control.lead_pixels.samples == 7 &&
+               control.observation_age_ms.samples == 7 &&
+               control.acquisition_range_pixels.samples == 7 &&
+               control.active_range_pixels.samples == 7 &&
+               near(control.lead_pixels.maximum, 0.0) &&
+               near(control.observation_age_ms.maximum, 0.0) &&
+               near(control.acquisition_range_pixels.mean, 144.0) &&
+               near(control.active_range_pixels.mean, 144.0),
+           "速度、基础/最终误差、提前量与观测年龄必须覆盖全部目标帧");
 }
 
 void test_control_contract_rejections() {
     std::string error;
+
+    AimEvaluationFrame legal_outside =
+        output_frame(0, 10, 60, 40, 100, 120);
+    legal_outside.target.aim_x = 110.0f;
+    legal_outside.target.lead_x = 30.0f;
+    legal_outside.target.lead_active = true;
+    AimControlContinuityMetrics legal_outside_metrics;
+    expect(aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, legal_outside,
+               legal_outside_metrics, error) &&
+               aim::detail::finalize_aim_control_continuity(
+                   1, legal_outside_metrics, error) &&
+               legal_outside_metrics.base_aim_point_outside_box_frames == 0 &&
+               legal_outside_metrics.prediction_point_outside_box_frames == 1 &&
+               legal_outside_metrics.lead_limit_violation_frames == 0,
+           "合法预测提前点可位于目标框外，但基础点和距离门禁必须通过：" + error);
+
+    AimEvaluationFrame excessive_lead = legal_outside;
+    excessive_lead.target.aim_x = 120.0f;
+    excessive_lead.target.lead_x = 40.0f;
+    AimControlContinuityMetrics excessive_lead_metrics;
+    expect(aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, excessive_lead,
+               excessive_lead_metrics, error) &&
+               aim::detail::finalize_aim_control_continuity(
+                   1, excessive_lead_metrics, error) &&
+               excessive_lead_metrics.lead_limit_violation_frames == 1,
+           "评价器必须单独记录超过最大预测提前距离的帧：" + error);
+
+    AimEvaluationConfig diagonal_limit_config;
+    diagonal_limit_config.max_counts_per_frame = 5.0f;
+    AimControlContinuityMetrics diagonal_limit_metrics;
+    expect(aim::detail::record_aim_control_continuity(
+               diagonal_limit_config, command_frame(0, 10, 3, 4),
+               diagonal_limit_metrics, error) &&
+               aim::detail::finalize_aim_control_continuity(
+                   1, diagonal_limit_metrics, error) &&
+               diagonal_limit_metrics.limit_boundary_frames == 1,
+           "3-4-5 对角线命令必须按二维模长识别为限幅边界：" + error);
 
     AimControlContinuityMetrics metrics;
     AimEvaluationFrame command_without_target = command_frame(0, 10, 1, 0);
@@ -427,6 +509,14 @@ void test_control_contract_rejections() {
                AimEvaluationConfig{}, invalid_target, invalid_metrics, error),
            "目标快照中的非有限数必须拒绝");
 
+    AimEvaluationFrame inconsistent_lead =
+        output_frame(0, 10, 60, 40, 100, 120);
+    inconsistent_lead.target.lead_x = 1.0f;
+    AimControlContinuityMetrics lead_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, inconsistent_lead, lead_metrics, error),
+           "预测未激活时不得残留非零提前向量");
+
     AimEvaluationFrame inconsistent_prediction =
         output_frame(0, 10, 60, 40, 100, 120);
     inconsistent_prediction.target.predicted = true;
@@ -452,6 +542,14 @@ void test_control_contract_rejections() {
                invalid_config, output_frame(0, 0, 0, 0, 0, 0),
                config_metrics, error),
            "非有限限幅配置必须在评价入口拒绝");
+
+    invalid_config = AimEvaluationConfig{};
+    invalid_config.max_prediction_lead_percent = 50.01f;
+    AimControlContinuityMetrics invalid_lead_config_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               invalid_config, output_frame(0, 0, 0, 0, 0, 0),
+               invalid_lead_config_metrics, error),
+           "越界最大预测提前距离配置必须在评价入口拒绝");
 
     AimControlContinuityMetrics failed_metrics;
     AimEvaluationFrame failed = output_frame(0, 0, 0, 0, 0, 0);

@@ -24,6 +24,9 @@ inline bool valid_aim_config(const AimConfig& config) noexcept {
            config.switch_margin >= 0.0f && config.switch_margin < 1.0f &&
            config.switch_confirm_frames > 0 &&
            config.switch_cooldown_frames >= 0 &&
+           std::isfinite(config.acquisition_range_percent) &&
+           config.acquisition_range_percent >= 5.0f &&
+           config.acquisition_range_percent <= 150.0f &&
            std::isfinite(config.body_aim_height_ratio) &&
            config.body_aim_height_ratio >= 0.0f &&
            config.body_aim_height_ratio <= 1.0f &&
@@ -37,6 +40,9 @@ inline bool valid_aim_config(const AimConfig& config) noexcept {
            config.counts_per_pixel_y > 0.0f &&
            std::isfinite(config.max_counts_per_frame) &&
            config.max_counts_per_frame > 0.0f &&
+           std::isfinite(config.max_prediction_lead_percent) &&
+           config.max_prediction_lead_percent >= 1.0f &&
+           config.max_prediction_lead_percent <= 50.0f &&
            std::isfinite(config.predicted_gain) &&
            config.predicted_gain >= 0.0f && config.predicted_gain <= 1.0f;
 }

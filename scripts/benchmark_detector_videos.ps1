@@ -20,6 +20,7 @@
     [string]$VisibilityDirectory = "",
     [string]$AimAnnotationDirectory = "",
     [switch]$AimContinuity,
+    [switch]$AimPrediction,
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release"
 )
@@ -317,6 +318,9 @@ if ($useAimAnnotations) {
         $AimAnnotationDirectory)
 }
 $useAimContinuity = $AimContinuity.IsPresent -or $useAimAnnotations
+if ($AimPrediction.IsPresent -and -not $useAimContinuity) {
+    throw "AimPrediction 必须与 AimContinuity 或 AimAnnotationDirectory 同时使用。"
+}
 
 $videoFiles = @(Get-VideoFiles $VideoDirectory)
 if ($videoFiles.Count -eq 0) {
@@ -476,6 +480,9 @@ try {
     if ($useAimContinuity) {
         $benchmarkArguments += "--aim-continuity"
     }
+    if ($AimPrediction.IsPresent) {
+        $benchmarkArguments += "--aim-prediction"
+    }
     & $testExecutable @benchmarkArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Detector 视频基准失败，退出码：$LASTEXITCODE"
@@ -614,6 +621,18 @@ foreach ($row in $reportRows) {
     $aimDirectionReversals = [long]$row.aim_direction_reversals
     $aimLimitBoundaryFrames = [long]$row.aim_limit_boundary_frames
     $aimLimitBoundaryRate = [double]$row.aim_limit_boundary_rate
+    $aimLeadActiveFrames = [long]$row.aim_lead_active_frames
+    $aimBasePointOutsideBoxFrames =
+        [long]$row.aim_base_point_outside_box_frames
+    $aimPredictionPointOutsideBoxFrames =
+        [long]$row.aim_prediction_point_outside_box_frames
+    $aimLeadLimitViolationFrames =
+        [long]$row.aim_lead_limit_violation_frames
+    $aimControlDirectionViolationFrames =
+        [long]$row.aim_control_direction_violation_frames
+    $aimRangeLockedFrames = [long]$row.aim_range_locked_frames
+    $aimRangeBlockedTargetFrames =
+        [long]$row.aim_range_blocked_target_frames
     $aimDistributionPrefixes = @(
         "abs_dx", "abs_dy", "magnitude", "delta", "acceleration"
     )
@@ -646,16 +665,60 @@ foreach ($row in $reportRows) {
             maximum = $maximum
         }
     }
+    $aimTelemetrySpecs = @(
+        [ordered]@{ prefix = "track_speed"; unit = "pixels_per_second" },
+        [ordered]@{ prefix = "base_error"; unit = "pixels" },
+        [ordered]@{ prefix = "final_error"; unit = "pixels" },
+        [ordered]@{ prefix = "lead"; unit = "pixels" },
+        [ordered]@{ prefix = "observation_age"; unit = "ms" },
+        [ordered]@{ prefix = "acquisition_range"; unit = "pixels" },
+        [ordered]@{ prefix = "active_range"; unit = "pixels" }
+    )
+    $aimTelemetryDistributions = @{}
+    foreach ($spec in $aimTelemetrySpecs) {
+        $prefix = $spec.prefix
+        $unit = $spec.unit
+        $samples = [long]$row.("aim_{0}_samples" -f $prefix)
+        $mean = [double]$row.("aim_{0}_mean_{1}" -f $prefix, $unit)
+        $p50 = [double]$row.("aim_{0}_p50_{1}" -f $prefix, $unit)
+        $p95 = [double]$row.("aim_{0}_p95_{1}" -f $prefix, $unit)
+        $p99 = [double]$row.("aim_{0}_p99_{1}" -f $prefix, $unit)
+        $maximum = [double]$row.("aim_{0}_max_{1}" -f $prefix, $unit)
+        $values = @($mean, $p50, $p95, $p99, $maximum)
+        $invalidValue = @($values | Where-Object {
+            [double]::IsNaN($_) -or [double]::IsInfinity($_) -or $_ -lt 0.0
+        }).Count -ne 0
+        if ($samples -lt 0 -or $invalidValue -or
+            $p50 -gt $p95 -or $p95 -gt $p99 -or $p99 -gt $maximum -or
+            $mean -gt ($maximum + 0.0001) -or
+            ($samples -eq 0 -and @($values | Where-Object {
+                [math]::Abs($_) -gt 0.0001
+            }).Count -ne 0)) {
+            throw "Aim 诊断分布无效：$($row.scene)，$prefix"
+        }
+        $aimTelemetryDistributions[$prefix] = [ordered]@{
+            samples = $samples
+            mean = $mean
+            p50 = $p50
+            p95 = $p95
+            p99 = $p99
+            maximum = $maximum
+        }
+    }
     $aimConfigurationValues = @(
         $row.aim_person_class_ids, $row.aim_head_class_ids,
         $row.aim_high_confidence, $row.aim_low_confidence,
         $row.aim_min_confirmed_hits, $row.aim_max_lost_frames,
         $row.aim_min_iou, $row.aim_max_center_distance,
         $row.aim_switch_margin, $row.aim_switch_confirm_frames,
-        $row.aim_switch_cooldown_frames, $row.aim_body_aim_height_ratio,
+        $row.aim_switch_cooldown_frames,
+        $row.aim_acquisition_range_percent,
+        $row.aim_body_aim_height_ratio,
         $row.aim_deadzone_pixels, $row.aim_smoothing,
         $row.aim_counts_per_pixel_x, $row.aim_counts_per_pixel_y,
-        $row.aim_max_counts_per_frame, $row.aim_predicted_gain,
+        $row.aim_max_counts_per_frame, $row.aim_prediction_enabled,
+        $row.aim_max_prediction_lead_percent,
+        $row.aim_predicted_gain,
         $row.aim_evaluation_min_iou,
         $row.aim_evaluation_max_center_distance,
         $row.aim_timebase_fps
@@ -669,12 +732,14 @@ foreach ($row in $reportRows) {
             [double]$row.aim_min_iou,
             [double]$row.aim_max_center_distance,
             [double]$row.aim_switch_margin,
+            [double]$row.aim_acquisition_range_percent,
             [double]$row.aim_body_aim_height_ratio,
             [double]$row.aim_deadzone_pixels,
             [double]$row.aim_smoothing,
             [double]$row.aim_counts_per_pixel_x,
             [double]$row.aim_counts_per_pixel_y,
             [double]$row.aim_max_counts_per_frame,
+            [double]$row.aim_max_prediction_lead_percent,
             [double]$row.aim_predicted_gain,
             [double]$row.aim_evaluation_min_iou,
             [double]$row.aim_evaluation_max_center_distance,
@@ -709,6 +774,21 @@ foreach ($row in $reportRows) {
             $aimDirectionReversals -lt 0 -or
             $aimLimitBoundaryFrames -lt 0 -or
             $aimLimitBoundaryFrames -gt $aimCommandFrames -or
+            $aimLeadActiveFrames -lt 0 -or
+            $aimLeadActiveFrames -gt
+                ($aimCommandFrames + $aimTargetWithoutCommandFrames) -or
+            $aimBasePointOutsideBoxFrames -ne 0 -or
+            $aimPredictionPointOutsideBoxFrames -lt 0 -or
+            $aimPredictionPointOutsideBoxFrames -gt
+                $aimLeadActiveFrames -or
+            $aimLeadLimitViolationFrames -ne 0 -or
+            $aimControlDirectionViolationFrames -ne 0 -or
+            $aimRangeLockedFrames -lt 0 -or
+            $aimRangeLockedFrames -gt
+                ($aimCommandFrames + $aimTargetWithoutCommandFrames) -or
+            $aimRangeBlockedTargetFrames -lt 0 -or
+            $aimRangeBlockedTargetFrames -gt
+                $aimTargetWithoutCommandFrames -or
             [double]::IsNaN($aimLimitBoundaryRate) -or
             [double]::IsInfinity($aimLimitBoundaryRate) -or
             $aimLimitBoundaryRate -lt 0.0 -or
@@ -728,8 +808,24 @@ foreach ($row in $reportRows) {
                 [long]$aimDistributions.delta.samples -or
             $aimDirectionReversals -gt
                 [long]$aimDistributions.delta.samples -or
+            @($aimTelemetryDistributions.Values | Where-Object {
+                [long]$_.samples -ne
+                    ($aimCommandFrames + $aimTargetWithoutCommandFrames)
+            }).Count -ne 0 -or
+            [double]$aimTelemetryDistributions.observation_age.maximum -gt
+                100.001 -or
+            [double]$aimTelemetryDistributions.active_range.maximum -gt
+                ([double]$aimTelemetryDistributions.acquisition_range.maximum +
+                    0.0001) -or
+            ([int]$row.aim_prediction_enabled -eq 0 -and
+             ($aimLeadActiveFrames -ne 0 -or
+              [math]::Abs(
+                  [double]$aimTelemetryDistributions.lead.maximum) -gt
+                    0.0001)) -or
             $missingAimConfigurationValues.Count -ne 0 -or
             $invalidAimFloatingConfiguration -or
+            [int]$row.aim_prediction_enabled -lt 0 -or
+            [int]$row.aim_prediction_enabled -gt 1 -or
             [double]$row.aim_high_confidence -lt 0.0 -or
             [double]$row.aim_low_confidence -lt 0.0 -or
             [double]$row.aim_low_confidence -gt
@@ -743,6 +839,8 @@ foreach ($row in $reportRows) {
             [double]$row.aim_switch_margin -ge 1.0 -or
             [int]$row.aim_switch_confirm_frames -le 0 -or
             [int]$row.aim_switch_cooldown_frames -lt 0 -or
+            [double]$row.aim_acquisition_range_percent -lt 5.0 -or
+            [double]$row.aim_acquisition_range_percent -gt 150.0 -or
             [double]$row.aim_body_aim_height_ratio -lt 0.0 -or
             [double]$row.aim_body_aim_height_ratio -gt 1.0 -or
             [double]$row.aim_deadzone_pixels -lt 0.0 -or
@@ -751,6 +849,8 @@ foreach ($row in $reportRows) {
             [double]$row.aim_counts_per_pixel_x -le 0.0 -or
             [double]$row.aim_counts_per_pixel_y -le 0.0 -or
             [double]$row.aim_max_counts_per_frame -le 0.0 -or
+            [double]$row.aim_max_prediction_lead_percent -lt 1.0 -or
+            [double]$row.aim_max_prediction_lead_percent -gt 50.0 -or
             [double]$row.aim_predicted_gain -lt 0.0 -or
             [double]$row.aim_predicted_gain -gt 1.0 -or
             [double]$row.aim_evaluation_min_iou -lt 0.0 -or
@@ -774,8 +874,18 @@ foreach ($row in $reportRows) {
               $aimPredictionStateChanges -ne 0 -or
               $aimDirectionReversals -ne 0 -or
               $aimLimitBoundaryFrames -ne 0 -or
+              $aimLeadActiveFrames -ne 0 -or
+              $aimBasePointOutsideBoxFrames -ne 0 -or
+              $aimPredictionPointOutsideBoxFrames -ne 0 -or
+              $aimLeadLimitViolationFrames -ne 0 -or
+              $aimControlDirectionViolationFrames -ne 0 -or
+              $aimRangeLockedFrames -ne 0 -or
+              $aimRangeBlockedTargetFrames -ne 0 -or
               [math]::Abs($aimLimitBoundaryRate) -gt 0.0001 -or
               @($aimDistributions.Values | Where-Object {
+                  [long]$_.samples -ne 0
+              }).Count -ne 0 -or
+              @($aimTelemetryDistributions.Values | Where-Object {
                   [long]$_.samples -ne 0
               }).Count -ne 0 -or
               $missingAimConfigurationValues.Count -ne
@@ -890,10 +1000,14 @@ if ($useAimContinuity) {
             $_.aim_min_confirmed_hits, $_.aim_max_lost_frames,
             $_.aim_min_iou, $_.aim_max_center_distance,
             $_.aim_switch_margin, $_.aim_switch_confirm_frames,
-            $_.aim_switch_cooldown_frames, $_.aim_body_aim_height_ratio,
+            $_.aim_switch_cooldown_frames,
+            $_.aim_acquisition_range_percent,
+            $_.aim_body_aim_height_ratio,
             $_.aim_deadzone_pixels, $_.aim_smoothing,
             $_.aim_counts_per_pixel_x, $_.aim_counts_per_pixel_y,
-            $_.aim_max_counts_per_frame, $_.aim_predicted_gain,
+            $_.aim_max_counts_per_frame, $_.aim_prediction_enabled,
+            $_.aim_max_prediction_lead_percent,
+            $_.aim_predicted_gain,
             $_.aim_evaluation_min_iou,
             $_.aim_evaluation_max_center_distance,
             $_.aim_timebase_fps
@@ -917,12 +1031,17 @@ if ($useAimContinuity) {
         switch_margin = [double]$aimRow.aim_switch_margin
         switch_confirm_frames = [int]$aimRow.aim_switch_confirm_frames
         switch_cooldown_frames = [int]$aimRow.aim_switch_cooldown_frames
+        acquisition_range_percent =
+            [double]$aimRow.aim_acquisition_range_percent
         body_aim_height_ratio = [double]$aimRow.aim_body_aim_height_ratio
         deadzone_pixels = [double]$aimRow.aim_deadzone_pixels
         smoothing = [double]$aimRow.aim_smoothing
         counts_per_pixel_x = [double]$aimRow.aim_counts_per_pixel_x
         counts_per_pixel_y = [double]$aimRow.aim_counts_per_pixel_y
         max_counts_per_frame = [double]$aimRow.aim_max_counts_per_frame
+        prediction_enabled = [int]$aimRow.aim_prediction_enabled -eq 1
+        max_prediction_lead_percent =
+            [double]$aimRow.aim_max_prediction_lead_percent
         predicted_gain = [double]$aimRow.aim_predicted_gain
         evaluation_min_iou = [double]$aimRow.aim_evaluation_min_iou
         evaluation_max_center_distance =
@@ -932,7 +1051,7 @@ if ($useAimContinuity) {
 }
 
 $manifest = [ordered]@{
-    schema_version = 4
+    schema_version = 6
     generated_utc = [DateTime]::UtcNow.ToString("o")
     report = [ordered]@{
         csv = $finalReportPath
@@ -978,7 +1097,7 @@ $manifest = [ordered]@{
         aim = [ordered]@{
             enabled = $useAimContinuity
             continuity_policy = if ($useAimContinuity) {
-                "aim_control_continuity_v1"
+                "aim_control_continuity_v2"
             } else { $null }
             ground_truth_enabled = $useAimAnnotations
             directory = if ($useAimAnnotations) {
@@ -1050,6 +1169,10 @@ $manifest = [ordered]@{
         aim_continuity_supports_unannotated_video = $true
         aim_command_state_conservation = $true
         aim_continuity_resets_at_semantic_boundaries = $true
+        aim_base_points_remain_inside_selected_box = $true
+        aim_prediction_points_may_leave_selected_box = $true
+        aim_commands_do_not_reverse_or_cross_target = $true
+        aim_latency_uses_explicit_measurement_time = $true
     }
     deployed_runtimes = $deployedRuntimes
 }

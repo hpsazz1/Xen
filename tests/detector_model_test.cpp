@@ -61,6 +61,7 @@ struct CommandLineOptions {
     bool has_video_directory = false;
     bool enable_gpu_preprocess = true;
     bool enable_aim_continuity = false;
+    bool enable_aim_prediction = false;
 };
 
 const char* output_format_name(OutputFormat format) noexcept {
@@ -111,6 +112,7 @@ bool parse_command_line(int argc, char* argv[],
     constexpr const char* kAimAnnotationDirectoryPrefix =
         "--aim-annotation-directory=";
     constexpr const char* kAimContinuityOption = "--aim-continuity";
+    constexpr const char* kAimPredictionOption = "--aim-prediction";
     std::vector<std::string> positional;
     positional.reserve(6);
 
@@ -213,6 +215,9 @@ bool parse_command_line(int argc, char* argv[],
         } else if (argument == kAimContinuityOption) {
             options.enable_aim_continuity = true;
             continue;
+        } else if (argument == kAimPredictionOption) {
+            options.enable_aim_prediction = true;
+            continue;
         } else if (argument.starts_with("--")) {
             std::cerr << "未知选项：" << argument << '\n';
             return false;
@@ -252,6 +257,12 @@ bool parse_command_line(int argc, char* argv[],
     }
     if (options.enable_aim_continuity && !options.has_video_directory) {
         std::cerr << "Aim 控制连续性评价只能用于视频基准\n";
+        return false;
+    }
+    if (options.enable_aim_prediction &&
+        !options.enable_aim_continuity &&
+        options.aim_annotation_directory.empty()) {
+        std::cerr << "Aim 预测只能与控制连续性评价同时启用\n";
         return false;
     }
     return true;
@@ -466,6 +477,7 @@ bool benchmark_video(Detector& detector,
                      const std::filesystem::path& aim_annotation_path,
                      bool has_aim_annotations,
                      bool run_aim_continuity,
+                     bool enable_aim_prediction,
                      VideoBenchmarkResult& result) {
     const std::string open_path = path_to_utf8(video_path);
     cv::VideoCapture capture(open_path, cv::CAP_ANY);
@@ -539,10 +551,15 @@ bool benchmark_video(Detector& detector,
     }
 
     aim::detail::AimGroundTruthAnnotation aim_annotation;
-    const AimConfig aim_config;
+    AimConfig aim_config;
+    aim_config.enable_prediction = enable_aim_prediction;
     aim::detail::AimEvaluationConfig aim_evaluation_config;
     aim_evaluation_config.max_counts_per_frame =
         aim_config.max_counts_per_frame;
+    aim_evaluation_config.max_prediction_lead_percent =
+        aim_config.max_prediction_lead_percent;
+    aim_evaluation_config.counts_per_pixel_x = aim_config.counts_per_pixel_x;
+    aim_evaluation_config.counts_per_pixel_y = aim_config.counts_per_pixel_y;
     Aim aim_runner(aim_config);
     if (run_aim_continuity) {
         result.aim_continuity_enabled = true;
@@ -669,11 +686,22 @@ bool benchmark_video(Detector& detector,
                     (result.source_height - result.evaluated_height) / 2);
                 evaluation_frame.roi_width = evaluated_frame.cols;
                 evaluation_frame.roi_height = evaluated_frame.rows;
+                evaluation_frame.control_center_x =
+                    evaluated_frame.cols * 0.5f;
+                evaluation_frame.control_center_y =
+                    evaluated_frame.rows * 0.5f;
                 evaluation_frame.source_pixels_per_roi_pixel_x = 1.0f;
                 evaluation_frame.source_pixels_per_roi_pixel_y = 1.0f;
                 evaluation_frame.aim_status = aim_result.status;
                 evaluation_frame.has_target = aim_result.has_target;
                 evaluation_frame.has_command = aim_result.has_command;
+                evaluation_frame.acquisition_range_radius =
+                    aim_result.acquisition_range_radius;
+                evaluation_frame.active_range_radius =
+                    aim_result.active_range_radius;
+                evaluation_frame.range_locked = aim_result.range_locked;
+                evaluation_frame.range_allows_control =
+                    aim_result.range_allows_control;
                 evaluation_frame.target = aim_result.target;
                 evaluation_frame.command = aim_result.command;
                 return evaluation_frame;
@@ -753,12 +781,19 @@ bool benchmark_video(Detector& detector,
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(
                         static_cast<double>(frame_index) / source_fps));
+            // 轨迹状态按视频时间推进；离线提前量只使用本次真实 Detector
+            // 总耗时，避免回放循环快慢把 wall clock 偶然性混入算法 A/B。
+            aim_frame.control_at = aim_frame.captured_at +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double, std::milli>(
+                        profile.total_ms));
             aim_frame.roi_width = evaluated_frame.cols;
             aim_frame.roi_height = evaluated_frame.rows;
             aim_frame.control_center_x = evaluated_frame.cols * 0.5f;
             aim_frame.control_center_y = evaluated_frame.rows * 0.5f;
             aim_frame.source_pixels_per_roi_pixel_x = 1.0f;
             aim_frame.source_pixels_per_roi_pixel_y = 1.0f;
+            aim_frame.lock_active = true;
             aim_frame.detections = std::move(detections);
             const AimResult aim_result = aim_runner.process(aim_frame);
             const auto evaluation_frame =
@@ -959,7 +994,14 @@ void write_video_result(std::ostream& output,
            << ',' << control.prediction_state_changes
            << ',' << control.direction_reversals
            << ',' << control.limit_boundary_frames
-           << ',' << limit_boundary_rate;
+           << ',' << limit_boundary_rate
+           << ',' << control.lead_active_frames
+           << ',' << control.base_aim_point_outside_box_frames
+           << ',' << control.prediction_point_outside_box_frames
+           << ',' << control.lead_limit_violation_frames
+           << ',' << control.control_direction_violation_frames
+           << ',' << control.range_locked_frames
+           << ',' << control.range_blocked_target_frames;
     const auto write_distribution = [&](
             const aim::detail::AimDistributionSummary& summary) {
         output << ',' << summary.samples
@@ -974,6 +1016,13 @@ void write_video_result(std::ostream& output,
     write_distribution(control.magnitude_counts);
     write_distribution(control.delta_counts);
     write_distribution(control.acceleration_counts);
+    write_distribution(control.track_speed_pixels_per_second);
+    write_distribution(control.base_error_pixels);
+    write_distribution(control.final_error_pixels);
+    write_distribution(control.lead_pixels);
+    write_distribution(control.observation_age_ms);
+    write_distribution(control.acquisition_range_pixels);
+    write_distribution(control.active_range_pixels);
     if (result.aim_continuity_enabled) {
         output << ',' << csv_escape(join_ints(
                                result.aim_config.person_class_ids))
@@ -987,19 +1036,22 @@ void write_video_result(std::ostream& output,
                << ',' << result.aim_config.switch_margin
                << ',' << result.aim_config.switch_confirm_frames
                << ',' << result.aim_config.switch_cooldown_frames
+               << ',' << result.aim_config.acquisition_range_percent
                << ',' << result.aim_config.body_aim_height_ratio
                << ',' << result.aim_config.deadzone_pixels
                << ',' << result.aim_config.smoothing
                << ',' << result.aim_config.counts_per_pixel_x
                << ',' << result.aim_config.counts_per_pixel_y
                << ',' << result.aim_config.max_counts_per_frame
+               << ',' << (result.aim_config.enable_prediction ? 1 : 0)
+               << ',' << result.aim_config.max_prediction_lead_percent
                << ',' << result.aim_config.predicted_gain
                << ',' << result.aim_evaluation_config.min_iou
                << ',' << result.aim_evaluation_config.max_center_distance
                << ',' << result.aim_timebase_fps;
     } else {
         // 未启用控制连续性时不运行 Aim，也不伪造一套看似参与了本次基准的配置。
-        constexpr int kAimConfigurationColumns = 21;
+        constexpr int kAimConfigurationColumns = 24;
         for (int index = 0; index < kAimConfigurationColumns; ++index) {
             output << ',';
         }
@@ -1047,7 +1099,8 @@ bool benchmark_videos(Detector& detector,
                       bool has_visibility_annotations,
                       const std::filesystem::path& aim_annotation_directory,
                       bool has_aim_annotations,
-                      bool run_aim_continuity) {
+                      bool run_aim_continuity,
+                      bool enable_aim_prediction) {
     std::error_code error;
     if (!std::filesystem::is_directory(video_directory, error)) {
         std::cerr << "视频目录不存在："
@@ -1175,6 +1228,11 @@ bool benchmark_videos(Detector& detector,
               "aim_target_switches,aim_target_state_changes,"
               "aim_prediction_state_changes,aim_direction_reversals,"
               "aim_limit_boundary_frames,aim_limit_boundary_rate,"
+              "aim_lead_active_frames,aim_base_point_outside_box_frames,"
+              "aim_prediction_point_outside_box_frames,"
+              "aim_lead_limit_violation_frames,"
+              "aim_control_direction_violation_frames,"
+              "aim_range_locked_frames,aim_range_blocked_target_frames,"
               "aim_abs_dx_samples,aim_abs_dx_mean_counts,"
               "aim_abs_dx_p50_counts,aim_abs_dx_p95_counts,"
               "aim_abs_dx_p99_counts,aim_abs_dx_max_counts,"
@@ -1190,15 +1248,43 @@ bool benchmark_videos(Detector& detector,
               "aim_acceleration_samples,aim_acceleration_mean_counts,"
               "aim_acceleration_p50_counts,aim_acceleration_p95_counts,"
               "aim_acceleration_p99_counts,aim_acceleration_max_counts,"
+              "aim_track_speed_samples,aim_track_speed_mean_pixels_per_second,"
+              "aim_track_speed_p50_pixels_per_second,"
+              "aim_track_speed_p95_pixels_per_second,"
+              "aim_track_speed_p99_pixels_per_second,"
+              "aim_track_speed_max_pixels_per_second,"
+              "aim_base_error_samples,aim_base_error_mean_pixels,"
+              "aim_base_error_p50_pixels,aim_base_error_p95_pixels,"
+              "aim_base_error_p99_pixels,aim_base_error_max_pixels,"
+              "aim_final_error_samples,aim_final_error_mean_pixels,"
+              "aim_final_error_p50_pixels,aim_final_error_p95_pixels,"
+              "aim_final_error_p99_pixels,aim_final_error_max_pixels,"
+              "aim_lead_samples,aim_lead_mean_pixels,aim_lead_p50_pixels,"
+              "aim_lead_p95_pixels,aim_lead_p99_pixels,aim_lead_max_pixels,"
+              "aim_observation_age_samples,aim_observation_age_mean_ms,"
+              "aim_observation_age_p50_ms,aim_observation_age_p95_ms,"
+              "aim_observation_age_p99_ms,aim_observation_age_max_ms,"
+              "aim_acquisition_range_samples,"
+              "aim_acquisition_range_mean_pixels,"
+              "aim_acquisition_range_p50_pixels,"
+              "aim_acquisition_range_p95_pixels,"
+              "aim_acquisition_range_p99_pixels,"
+              "aim_acquisition_range_max_pixels,"
+              "aim_active_range_samples,aim_active_range_mean_pixels,"
+              "aim_active_range_p50_pixels,aim_active_range_p95_pixels,"
+              "aim_active_range_p99_pixels,aim_active_range_max_pixels,"
               "aim_person_class_ids,aim_head_class_ids,"
               "aim_high_confidence,aim_low_confidence,"
               "aim_min_confirmed_hits,aim_max_lost_frames,aim_min_iou,"
               "aim_max_center_distance,aim_switch_margin,"
               "aim_switch_confirm_frames,aim_switch_cooldown_frames,"
+              "aim_acquisition_range_percent,"
               "aim_body_aim_height_ratio,aim_deadzone_pixels,"
               "aim_smoothing,aim_counts_per_pixel_x,"
               "aim_counts_per_pixel_y,aim_max_counts_per_frame,"
-              "aim_predicted_gain,aim_evaluation_min_iou,"
+              "aim_prediction_enabled,aim_max_prediction_lead_percent,"
+              "aim_predicted_gain,"
+              "aim_evaluation_min_iou,"
               "aim_evaluation_max_center_distance,aim_timebase_fps,"
               "preprocess_mean_ms,preprocess_p50_ms,preprocess_p95_ms,"
               "preprocess_p99_ms,inference_mean_ms,inference_p50_ms,"
@@ -1227,7 +1313,8 @@ bool benchmark_videos(Detector& detector,
         if (!benchmark_video(
                 detector, video_path, use_center_crop, annotation_path,
                 has_visibility_annotations, aim_annotation_path,
-                has_aim_annotations, run_aim_continuity, result)) {
+                has_aim_annotations, run_aim_continuity,
+                enable_aim_prediction, result)) {
             return false;
         }
         aim_visible_frames += result.aim_evaluation.visible_frames;
@@ -1564,7 +1651,8 @@ int main(int argc, char* argv[]) {
                 aim_annotation_directory,
                 !options.aim_annotation_directory.empty(),
                 options.enable_aim_continuity ||
-                    !options.aim_annotation_directory.empty())) {
+                    !options.aim_annotation_directory.empty(),
+                options.enable_aim_prediction)) {
             return 1;
         }
     }

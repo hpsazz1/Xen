@@ -86,6 +86,37 @@ RuntimePipelineSample make_sample(
     sample.aim_status = success ? AimStatus::SUCCESS : AimStatus::NOT_RUN;
     sample.mouse_status = success ? MouseStatus::READY : MouseStatus::CLOSED;
     sample.mouse_sent = success;
+    if (success) {
+        sample.aim_control_center_x = 160.0f;
+        sample.aim_control_center_y = 160.0f;
+        sample.aim_acquisition_range_radius = 144.0f;
+        sample.aim_active_range_radius = 72.0f;
+        sample.aim_has_target = true;
+        sample.aim_has_command = true;
+        sample.aim_range_locked = true;
+        sample.aim_range_allows_control = true;
+        sample.aim_base_point_inside_box = true;
+        sample.aim_prediction_point_outside_box = true;
+        sample.aim_command_toward_target = true;
+        sample.aim_target.track_id = 7;
+        sample.aim_target.state = TrackState::CONFIRMED;
+        sample.aim_target.x1 = 150.0f;
+        sample.aim_target.y1 = 100.0f;
+        sample.aim_target.x2 = 230.0f;
+        sample.aim_target.y2 = 220.0f;
+        sample.aim_target.base_aim_x = 200.0f;
+        sample.aim_target.base_aim_y = 140.0f;
+        sample.aim_target.aim_x = 240.0f;
+        sample.aim_target.aim_y = 140.0f;
+        sample.aim_target.velocity_x = 250.0f;
+        sample.aim_target.lead_x = 40.0f;
+        sample.aim_target.observation_age_ms = 20.0f;
+        sample.aim_target.confidence = 0.9f;
+        sample.aim_target.lead_active = true;
+        sample.aim_command.sequence = sequence;
+        sample.aim_command.dx_counts = 20;
+        sample.aim_command.dy_counts = -10;
+    }
     sample.person_detection_count = 1;
     sample.head_detection_count = 2;
     sample.max_person_confidence = 0.864f;
@@ -190,7 +221,7 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v7") != std::string::npos &&
+    expect(csv_text.find("Xen Runtime Debug Report v8") != std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
                csv_text.find("d3d11_to_directml_ms") != std::string::npos &&
@@ -203,8 +234,10 @@ void test_report_summary_and_atomic_files() {
                    std::string::npos &&
                csv_text.find("# final_preview_enabled,true") !=
                    std::string::npos &&
-               csv_text.find("person_detection_count,head_detection_count") !=
-                   std::string::npos &&
+                csv_text.find("person_detection_count,head_detection_count") !=
+                    std::string::npos &&
+                csv_text.find("aim_base_x,aim_base_y,aim_final_x") !=
+                    std::string::npos &&
                csv_text.find("ndi_receive_call_ms") != std::string::npos &&
                csv_text.find("pipeline_complete_ms") != std::string::npos &&
                csv_text.find("# coverage_phase,formal,3") !=
@@ -212,7 +245,7 @@ void test_report_summary_and_atomic_files() {
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 7") != std::string::npos &&
+    expect(json_text.find("\"schema\": 8") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -236,8 +269,22 @@ void test_report_summary_and_atomic_files() {
                    std::string::npos &&
                json_text.find("\"preview_sampled_frames\": 123") !=
                    std::string::npos &&
-               json_text.find("\"person_detection_count\": 1") !=
-                   std::string::npos &&
+                json_text.find("\"person_detection_count\": 1") !=
+                    std::string::npos &&
+                json_text.find("\"aim_track_id\": 7") !=
+                    std::string::npos &&
+                 json_text.find("\"aim_lead_active\": true") !=
+                     std::string::npos &&
+                 json_text.find(
+                     "\"aim_base_point_inside_box\": true") !=
+                     std::string::npos &&
+                 json_text.find(
+                     "\"aim_prediction_point_outside_box\": true") !=
+                     std::string::npos &&
+                json_text.find("\"aim_observation_age_ms\": 20") !=
+                    std::string::npos &&
+                json_text.find("\"aim_active_range_radius\": 72") !=
+                    std::string::npos &&
                json_text.find("\"max_head_confidence\":") !=
                    std::string::npos &&
                json_text.find("\"detection_count_by_class\": [1, 2, 0") !=

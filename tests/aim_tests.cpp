@@ -23,6 +23,14 @@ Detection body(float center_x, float center_y,
             confidence, 0};
 }
 
+Detection body_box(float center_x, float center_y,
+                   float width, float height,
+                   float confidence = 0.9f) {
+    return {center_x - width * 0.5f, center_y - height * 0.5f,
+            center_x + width * 0.5f, center_y + height * 0.5f,
+            confidence, 0};
+}
+
 Detection head(float center_x, float center_y,
                float confidence = 0.95f) {
     return {center_x - 7.0f, center_y - 7.0f,
@@ -49,6 +57,35 @@ void test_invalid_input() {
            "空 AimFrame 必须返回 INVALID_INPUT");
 }
 
+void test_frame_order_contract() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now();
+    AimFrame first = make_frame(1, base);
+    first.detections = {body(180.0f, 160.0f)};
+    expect(aim.process(first).status == AimStatus::SUCCESS,
+           "首个有序帧必须处理成功");
+
+    AimFrame duplicate = make_frame(1, base + std::chrono::milliseconds(1));
+    expect(aim.process(duplicate).status == AimStatus::INVALID_INPUT,
+           "重复帧序号必须拒绝，不能重复更新状态估计");
+    AimFrame older_time = make_frame(2, base - std::chrono::milliseconds(1));
+    expect(aim.process(older_time).status == AimStatus::INVALID_INPUT,
+           "倒退的采集时间必须拒绝，不能用最小 dt 掩盖乱序");
+    AimFrame invalid_control_time = make_frame(
+        2, base + std::chrono::milliseconds(2));
+    invalid_control_time.control_at =
+        invalid_control_time.captured_at - std::chrono::milliseconds(1);
+    expect(aim.process(invalid_control_time).status == AimStatus::INVALID_INPUT,
+           "显式控制时刻早于采集时刻必须拒绝，不能产生负观测年龄");
+
+    AimFrame second = make_frame(2, base + std::chrono::milliseconds(4));
+    second.detections = {body(182.0f, 160.0f)};
+    expect(aim.process(second).status == AimStatus::SUCCESS,
+           "拒绝乱序帧后，后续合法帧仍应继续处理");
+}
+
 void test_head_body_merge_and_confirmation() {
     AimConfig config;
     config.min_confirmed_hits = 2;
@@ -69,9 +106,9 @@ void test_head_body_merge_and_confirmation() {
     const AimResult second_result = aim.process(second);
     expect(second_result.has_target,
            "连续两帧命中后应产生确认目标");
-    expect(std::fabs(second_result.target.aim_x - 222.0f) < 0.1f &&
+    expect(std::fabs(second_result.target.aim_x - 222.0f) < 1.0f &&
            std::fabs(second_result.target.aim_y - 140.0f) < 0.1f,
-           "身体和头部框应归并，并使用头部中心作为瞄准点");
+           "身体和头部框应归并，滤波状态应收敛到头部中心");
     expect(second_result.has_command,
            "目标超出死区时应产生移动命令");
 }
@@ -94,6 +131,8 @@ void test_short_loss_keeps_track_id() {
            "短时丢框应输出降权预测目标");
     expect(predicted.target.track_id == detected.target.track_id,
            "短时丢框不得更换 track_id");
+    expect(!predicted.has_command,
+           "预测关闭时可以保留轨迹身份，但不得输出丢失轨迹控制命令");
 }
 
 void test_command_limit_and_reset() {
@@ -103,15 +142,16 @@ void test_command_limit_and_reset() {
     config.counts_per_pixel_x = 10.0f;
     config.counts_per_pixel_y = 10.0f;
     config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 150.0f;
     Aim aim(config);
     const auto now = std::chrono::steady_clock::now();
     AimFrame frame = make_frame(1, now);
     frame.detections = {body(300.0f, 300.0f)};
     const AimResult result = aim.process(frame);
     expect(result.has_command &&
-           std::abs(result.command.dx_counts) <= 12 &&
-           std::abs(result.command.dy_counts) <= 12,
-           "AimCommand 必须执行单帧 counts 限幅");
+           std::hypot(static_cast<float>(result.command.dx_counts),
+                      static_cast<float>(result.command.dy_counts)) <= 12.0f,
+           "AimCommand 必须执行二维向量单帧 counts 限幅");
 
     aim.reset();
     AimFrame empty = make_frame(2, now + std::chrono::milliseconds(4));
@@ -146,6 +186,396 @@ void test_source_pixel_scale_controls_mouse_counts() {
            "本机 20 个主机像素与辅机 5 个四倍缩放像素必须生成相同 counts");
 }
 
+void test_global_head_body_assignment() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    Aim aim(config);
+    const auto now = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame frame = make_frame(1, now);
+    // 168 头框可属于两个人，125 头框只属于左侧人物。局部分配会先把 168
+    // 给左侧人物并让右侧身体失去头框；全局分配应选择 125->左、168->右。
+    frame.detections = {
+        body_box(150.0f, 160.0f, 60.0f, 80.0f),
+        body_box(180.0f, 160.0f, 40.0f, 80.0f),
+        head(168.0f, 136.0f),
+        head(125.0f, 136.0f)};
+    const AimResult result = aim.process(frame);
+    expect(result.has_target && result.target.x1 > 150.0f &&
+               std::fabs(result.target.aim_x - 168.0f) < 0.1f,
+           "头身归并必须做全局一对一分配，不能受检测输入顺序影响");
+}
+
+void test_head_body_normalized_aim_stays_stable() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame with_head = make_frame(1, base);
+    with_head.detections = {
+        body_box(180.0f, 170.0f, 80.0f, 120.0f),
+        head(184.0f, 128.0f)};
+    const AimResult first = aim.process(with_head);
+
+    AimFrame body_only = make_frame(
+        2, base + std::chrono::milliseconds(10));
+    body_only.detections = {
+        body_box(182.0f, 170.0f, 80.0f, 120.0f)};
+    const AimResult second = aim.process(body_only);
+
+    AimFrame body_only_again = make_frame(
+        3, base + std::chrono::milliseconds(20));
+    body_only_again.detections = {
+        body_box(184.0f, 170.0f, 80.0f, 120.0f)};
+    const AimResult third = aim.process(body_only_again);
+
+    expect(first.has_target && second.has_target && third.has_target &&
+               std::fabs(second.target.aim_y - first.target.aim_y) < 0.5f &&
+               std::fabs(third.target.aim_y - first.target.aim_y) < 0.5f &&
+               second.target.aim_x >= second.target.x1 &&
+               second.target.aim_x <= second.target.x2 &&
+               second.target.aim_y >= second.target.y1 &&
+               second.target.aim_y <= second.target.y2 &&
+               third.target.aim_x >= third.target.x1 &&
+               third.target.aim_x <= third.target.x2 &&
+               third.target.aim_y >= third.target.y1 &&
+               third.target.aim_y <= third.target.y2,
+           "头框连续缺失时必须保留身体框归一化瞄点，不能上下切回身体默认点");
+}
+
+void test_multi_target_crossing_keeps_selected_identity() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.switch_confirm_frames = 3;
+    config.switch_cooldown_frames = 3;
+    config.max_center_distance = 0.35f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    const float right_positions[] = {
+        100.0f, 115.0f, 130.0f, 145.0f, 160.0f, 175.0f, 190.0f};
+    const float left_positions[] = {
+        260.0f, 240.0f, 220.0f, 200.0f, 180.0f, 160.0f, 140.0f};
+
+    std::uint64_t selected_id = 0;
+    AimResult last;
+    for (std::size_t index = 0; index < 7; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::milliseconds(index * 10));
+        if ((index % 2U) == 0U) {
+            frame.detections = {
+                body(right_positions[index], 160.0f),
+                body(left_positions[index], 160.0f)};
+        } else {
+            frame.detections = {
+                body(left_positions[index], 160.0f),
+                body(right_positions[index], 160.0f)};
+        }
+        last = aim.process(frame);
+        expect(last.has_target, "双目标交叉期间每帧都应保留已确认目标");
+        if (index == 0) selected_id = last.target.track_id;
+        expect(last.target.track_id == selected_id,
+               "双目标交叉和检测顺序变化不得造成无确认的锁定切换");
+    }
+    expect(last.target.aim_x > 175.0f,
+           "交叉结束后选中轨迹应继续沿原方向移动，不能交换为反向目标，实际 aim_x=" +
+               std::to_string(last.target.aim_x));
+}
+
+void test_loss_prediction_does_not_compound_time() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.max_lost_frames = 4;
+    config.deadzone_pixels = 0.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame first = make_frame(1, base);
+    first.detections = {body(100.0f, 160.0f)};
+    aim.process(first);
+    AimFrame second = make_frame(2, base + std::chrono::milliseconds(10));
+    second.detections = {body(110.0f, 160.0f)};
+    aim.process(second);
+
+    const AimResult lost_once = aim.process(
+        make_frame(3, base + std::chrono::milliseconds(20)));
+    const AimResult lost_twice = aim.process(
+        make_frame(4, base + std::chrono::milliseconds(30)));
+    const float first_step = lost_once.target.aim_x - 107.2f;
+    const float second_step = lost_twice.target.aim_x -
+                              lost_once.target.aim_x;
+    expect(lost_once.has_target && lost_twice.has_target &&
+               lost_once.target.predicted && lost_twice.target.predicted &&
+               std::fabs(first_step - second_step) < 0.25f,
+           "连续丢帧只能推进新增时间区间，不能重复累计从最后观测开始的总时长");
+}
+
+void test_observation_age_adds_bounded_lead() {
+    AimConfig config;
+    config.enable_prediction = true;
+    config.max_prediction_lead_percent = 5.0f;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.max_counts_per_frame = 1000.0f;
+    Aim aged(config);
+    Aim fresh(config);
+    const auto now = std::chrono::steady_clock::now();
+
+    AimFrame aged_first = make_frame(1, now - std::chrono::milliseconds(60));
+    aged_first.detections = {body(200.0f, 160.0f)};
+    aged.process(aged_first);
+    AimFrame aged_second = make_frame(2, now - std::chrono::milliseconds(50));
+    aged_second.detections = {body(210.0f, 160.0f)};
+    const AimResult aged_result = aged.process(aged_second);
+
+    const auto future = now + std::chrono::seconds(1);
+    AimFrame fresh_first = make_frame(1, future);
+    fresh_first.detections = {body(200.0f, 160.0f)};
+    fresh.process(fresh_first);
+    AimFrame fresh_second = make_frame(2, future +
+        std::chrono::milliseconds(10));
+    fresh_second.detections = {body(210.0f, 160.0f)};
+    const AimResult fresh_result = fresh.process(fresh_second);
+
+    expect(aged_result.has_target && fresh_result.has_target &&
+               aged_result.target.aim_x > fresh_result.target.aim_x + 2.0f,
+           "控制点必须按真实观测年龄沿估计速度提前，不能只追逐过期位置");
+    expect(aged_result.target.aim_x - fresh_result.target.aim_x < 20.0f,
+           "观测年龄提前必须受目标框尺度安全上限约束");
+    expect(aged_result.target.base_aim_x >= aged_result.target.x1 &&
+               aged_result.target.base_aim_x <= aged_result.target.x2 &&
+               aged_result.target.base_aim_y >= aged_result.target.y1 &&
+               aged_result.target.base_aim_y <= aged_result.target.y2,
+           "预测开启时基础追踪点仍必须始终位于选中模型框内");
+    expect(aged_result.target.lead_active &&
+               aged_result.target.lead_x > 0.0f &&
+               std::hypot(aged_result.target.lead_x,
+                          aged_result.target.lead_y) <=
+                   std::hypot(40.0f, 80.0f) * 0.05f + 0.01f &&
+               aged_result.target.observation_age_ms > 0.0f &&
+               std::fabs(aged_result.target.aim_x -
+                         aged_result.target.base_aim_x -
+                         aged_result.target.lead_x) < 0.01f,
+           "提前诊断必须准确记录基础点、实际提前向量和观测年龄，且不能越过用户最大提前距离");
+}
+
+void test_prediction_lead_can_leave_box_with_bounded_distance() {
+    AimConfig config;
+    config.enable_prediction = true;
+    config.max_prediction_lead_percent = 50.0f;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.max_counts_per_frame = 1000.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    for (int index = 0; index < 3; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::milliseconds(index * 10));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(100);
+        frame.control_center_x = 60.0f;
+        frame.detections = {body(100.0f + index * 20.0f, 160.0f)};
+        const AimResult result = aim.process(frame);
+        if (index != 2) continue;
+
+        const float maximum_lead = std::hypot(40.0f, 80.0f) * 0.50f;
+        expect(result.has_target && result.target.lead_active &&
+                   result.target.base_aim_x >= result.target.x1 &&
+                   result.target.base_aim_x <= result.target.x2 &&
+                   result.target.aim_x > result.target.x2 &&
+                   std::hypot(result.target.lead_x,
+                              result.target.lead_y) <= maximum_lead + 0.01f,
+               "预测点应允许越出目标框，同时严格受最大提前距离门禁约束");
+    }
+}
+
+void test_dynamic_control_range_does_not_reduce_observation() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.max_center_distance = 0.50f;
+    config.acquisition_range_percent = 60.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame acquired = make_frame(1, base);
+    acquired.detections = {body(200.0f, 160.0f)};
+    const AimResult first = aim.process(acquired);
+
+    AimFrame locked = make_frame(2, base + std::chrono::milliseconds(10));
+    locked.lock_active = true;
+    locked.detections = {body(210.0f, 160.0f)};
+    const AimResult second = aim.process(locked);
+
+    AimFrame outside = make_frame(3, base + std::chrono::milliseconds(20));
+    outside.lock_active = true;
+    outside.detections = {body(310.0f, 160.0f)};
+    const AimResult third = aim.process(outside);
+
+    AimFrame returned = make_frame(4, base + std::chrono::milliseconds(30));
+    returned.lock_active = true;
+    returned.detections = {body(220.0f, 160.0f)};
+    const AimResult fourth = aim.process(returned);
+
+    expect(first.has_target && second.has_target &&
+               second.target.track_id == first.target.track_id &&
+               second.range_locked &&
+               second.active_range_radius <
+                   second.acquisition_range_radius,
+           "按住控制后应在已预选轨迹上动态收缩范围，范围外挑战者不能立即切换");
+    expect(third.has_target &&
+               third.target.track_id == first.target.track_id &&
+               !third.range_allows_control && !third.has_command,
+           "目标越出控制范围时必须继续更新同一轨迹，只暂停鼠标命令");
+    expect(fourth.has_target &&
+               fourth.target.track_id == first.target.track_id &&
+               fourth.range_allows_control && fourth.has_command,
+           "同一目标回到动态范围后应直接恢复预计算命令，不能重新建轨迹");
+}
+
+void test_prediction_hysteresis_avoids_crosshair_oscillation() {
+    AimConfig predicted_config;
+    predicted_config.enable_prediction = true;
+    predicted_config.min_confirmed_hits = 1;
+    predicted_config.deadzone_pixels = 0.0f;
+    predicted_config.max_counts_per_frame = 1000.0f;
+    AimConfig basic_config = predicted_config;
+    basic_config.enable_prediction = false;
+    Aim predicted(predicted_config);
+    Aim basic(basic_config);
+    const auto base = std::chrono::steady_clock::now() -
+        std::chrono::milliseconds(100);
+
+    const auto process_pair = [&](std::uint64_t sequence, int milliseconds,
+                                  float target_x, float control_x) {
+        AimFrame frame = make_frame(
+            sequence, base + std::chrono::milliseconds(milliseconds));
+        frame.control_center_x = control_x;
+        frame.detections = {body(target_x, 160.0f)};
+        return std::pair<AimResult, AimResult>{
+            predicted.process(frame), basic.process(frame)};
+    };
+
+    process_pair(1, 0, 100.0f, 60.0f);
+    const auto moving_away = process_pair(2, 10, 112.0f, 60.0f);
+    const auto crossed = process_pair(3, 20, 124.0f, 150.0f);
+    const auto settled = process_pair(4, 30, 132.0f, 132.0f);
+    const auto rearmed = process_pair(5, 40, 148.0f, 100.0f);
+
+    expect(moving_away.first.target.aim_x >
+               moving_away.second.target.aim_x + 1.0f,
+           "目标持续远离准星时，开启预测应产生有界提前量");
+    expect(std::fabs(crossed.first.target.aim_x -
+                     crossed.second.target.aim_x) < 0.5f,
+           "目标越过准星后必须撤销提前量，不能继续预测到前方造成反向拉回");
+    expect(std::fabs(settled.first.target.aim_x -
+                     settled.second.target.aim_x) < 0.5f,
+           "归位收敛区内必须保持预测关闭，避免立即重新前探");
+    expect(rearmed.first.target.aim_x >
+               rearmed.second.target.aim_x + 1.0f,
+           "目标重新远离并越过进入阈值后才允许再次预测");
+}
+
+void test_control_trajectory_never_moves_away_from_target() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 0.35f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 50.0f;
+    config.max_center_distance = 0.50f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame right = make_frame(1, base);
+    right.detections = {body(250.0f, 160.0f)};
+    const AimResult right_result = aim.process(right);
+    AimFrame left = make_frame(2, base + std::chrono::milliseconds(10));
+    left.detections = {body(70.0f, 160.0f)};
+    const AimResult left_result = aim.process(left);
+    AimFrame left_again = make_frame(
+        3, base + std::chrono::milliseconds(20));
+    left_again.detections = {body(70.0f, 160.0f)};
+    const AimResult left_again_result = aim.process(left_again);
+
+    expect(right_result.has_command &&
+               right_result.command.dx_counts > 0 &&
+               (!left_result.has_command ||
+                left_result.command.dx_counts <= 0) &&
+               left_again_result.has_command &&
+               left_again_result.command.dx_counts < 0,
+           "目标反向时不得沿历史动量继续远离当前框内瞄点");
+}
+
+void test_quantization_residual_cannot_reverse_after_crossing() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 0.35f;
+    config.counts_per_pixel_x = 0.50f;
+    config.counts_per_pixel_y = 0.50f;
+    config.max_counts_per_frame = 50.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    for (int index = 0; index < 50; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::milliseconds(index * 10));
+        frame.detections = {body(120.0f + index * 2.0f, 160.0f)};
+        const AimResult result = aim.process(frame);
+        if (!result.has_command) continue;
+        const float error_x = result.target.aim_x - frame.control_center_x;
+        const float error_y = result.target.aim_y - frame.control_center_y;
+        const float dot = result.command.dx_counts * error_x +
+                          result.command.dy_counts * error_y;
+        expect(dot > 0.0f,
+               "目标穿越准星后，上一方向的量化残余不得生成反向整数命令");
+    }
+}
+
+void test_control_step_cannot_cross_in_box_aim_point() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 100.0f;
+    Aim aim(config);
+
+    AimFrame frame = make_frame(
+        1, std::chrono::steady_clock::now() + std::chrono::seconds(1));
+    frame.detections = {body_box(160.0f, 160.0f, 100.0f, 100.0f)};
+    const AimResult result = aim.process(frame);
+    const float reached_x = frame.control_center_x +
+        result.command.dx_counts / config.counts_per_pixel_x;
+    const float reached_y = frame.control_center_y +
+        result.command.dy_counts / config.counts_per_pixel_y;
+    expect(result.has_target &&
+               result.target.aim_x >= result.target.x1 &&
+               result.target.aim_x <= result.target.x2 &&
+               result.target.aim_y >= result.target.y1 &&
+               result.target.aim_y <= result.target.y2 &&
+               reached_x >= result.target.x1 && reached_x <= result.target.x2 &&
+               reached_y >= result.target.y1 && reached_y <= result.target.y2,
+           "准星已在模型框内时，单帧控制不得把它推出选中框");
+}
+
 } // namespace
 
 int main() {
@@ -156,10 +586,22 @@ int main() {
     Log::init(log_config);
 
     test_invalid_input();
+    test_frame_order_contract();
     test_head_body_merge_and_confirmation();
     test_short_loss_keeps_track_id();
     test_command_limit_and_reset();
     test_source_pixel_scale_controls_mouse_counts();
+    test_global_head_body_assignment();
+    test_head_body_normalized_aim_stays_stable();
+    test_multi_target_crossing_keeps_selected_identity();
+    test_loss_prediction_does_not_compound_time();
+    test_observation_age_adds_bounded_lead();
+    test_prediction_lead_can_leave_box_with_bounded_distance();
+    test_dynamic_control_range_does_not_reduce_observation();
+    test_prediction_hysteresis_avoids_crosshair_oscillation();
+    test_control_trajectory_never_moves_away_from_target();
+    test_quantization_residual_cannot_reverse_after_crossing();
+    test_control_step_cannot_cross_in_box_aim_point();
 
     Log::shutdown();
     if (failures != 0) {
