@@ -342,6 +342,12 @@ schema 8 正式入口会逐帧校验 Aim：基础追踪点只要离开当前目�
 P50/P95/P99/max。物理输出禁用时仍允许 Aim 持续形成预计算命令，但所有样本必须保持
 `mouse_sent=false`；动态场景可通过 `-MinimumAimPrecomputedCommandFrames` 要求至少出现一帧。
 
+大报告封口时，`benchmark_runtime.ps1` 会先缓存一次 JSON 样本数组，再由
+`runtime_report_sequence.ps1` 线性核对 CSV/JSON sequence；禁止在逐行循环内重复执行
+`@($report.samples)`。该优化只发生在采样结束后，不进入 Capture、Detector、Aim、队列或控制
+线程。可用 `scripts/test_benchmark_report_scale.ps1` 对 72,002 个合成样本执行接受/拒绝、缺口、
+证据哈希和扫描耗时回归；传入固定 CSV 时还会核对输入前后 SHA-256 不变。
+
 TensorRT/CUDA/OpenVINO 正式基准还必须为同一模型和后端提供独立的 ORT 节点级 profile；脚本会自动将
 profile 作为第四个成组产物发布，并把最终路径、SHA-256 和每个 Provider 的 Node 数量写入环境清单。
 直接调用 `XenBenchmark.exe` 时使用 `--provider-profile PATH`；OpenVINO 还必须显式传入
@@ -404,7 +410,7 @@ Runtime 覆盖；接收配置还会显式写入完整 `[aim]` 与 `allow_send_in
 
 辅机没有 Visual Studio、CMake、Git 或 SDK 时，主机使用便携包发布脚本。它先构建 NDI 组合的
 `XenBenchmark`，核对构建期部署来源和 SHA-256，再把接收程序、模型、UDP/XUDP/NDI
-运行库、正式接收入口、Aim 报告助手和内部环境采集脚本封装到逐文件哈希清单，并通过 SMB
+运行库、正式接收入口、Aim/sequence 报告助手和内部环境采集脚本封装到逐文件哈希清单，并通过 SMB
 临时目录校验后原位发布。包不包含
 KMBOX UUID，也不允许物理输出。CPU-only 包保持默认只授权 CPU；NVIDIA 闭包必须显式声明允许的
 Provider，发布脚本会根据部署报告拒绝缺少 CUDA/TensorRT DLL 的越权清单：

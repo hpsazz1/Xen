@@ -79,6 +79,12 @@ if (-not (Test-Path -LiteralPath $aimReportScript -PathType Leaf)) {
 }
 . $aimReportScript
 
+$sequenceScript = Join-Path $PSScriptRoot "runtime_report_sequence.ps1"
+if (-not (Test-Path -LiteralPath $sequenceScript -PathType Leaf)) {
+    throw "Runtime sequence 校验脚本不存在：$sequenceScript"
+}
+. $sequenceScript
+
 if ([string]::IsNullOrWhiteSpace($BuildDirectory) -and
     [string]::IsNullOrWhiteSpace($PackageManifestPath)) {
     $BuildDirectory = Join-Path $PSScriptRoot "..\build"
@@ -226,6 +232,7 @@ function Assert-PortablePackage {
         "scripts/benchmark_network_receiver.ps1",
         "scripts/invoke_dual_machine_receiver.ps1",
         "scripts/aim_report.ps1",
+        "scripts/runtime_report_sequence.ps1",
         "scripts/runtime_environment.ps1",
         [string]$document.model.relative_path
     )
@@ -1032,20 +1039,8 @@ try {
 if ($csvRows.Count -ne [int]$report.sample_count) {
     throw "CSV 正式样本行数与 JSON sample_count 不一致。"
 }
-$csvSequences = [System.Collections.Generic.List[uint64]]::new()
-for ($csvIndex = 0; $csvIndex -lt $csvRows.Count; ++$csvIndex) {
-    [uint64]$csvSequence = 0
-    if (-not [uint64]::TryParse(
-            [string]$csvRows[$csvIndex].sequence,
-            [ref]$csvSequence)) {
-        throw "CSV 第 $csvIndex 行缺少合法 sequence。"
-    }
-    $jsonSequence = [uint64]$reportSamples[$csvIndex].sequence
-    if ($csvSequence -ne $jsonSequence) {
-        throw "CSV 与 JSON 第 $csvIndex 个正式样本 sequence 不一致。"
-    }
-    $csvSequences.Add($csvSequence)
-}
+[uint64[]]$csvSequences = Get-XenRuntimeSequenceValues `
+    -JsonSamples $reportSamples -CsvRows $csvRows
 $coverage = $report.coverage
 if (-not [bool]$coverage.available -or
     [uint64]$coverage.startup.sample_count -ne 1 -or

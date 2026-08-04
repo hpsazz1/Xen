@@ -18,6 +18,8 @@ $scriptPaths = @(
     "scripts/benchmark_network_receiver.ps1",
     "scripts/invoke_dual_machine_receiver.ps1",
     "scripts/aim_report.ps1",
+    "scripts/runtime_report_sequence.ps1",
+    "scripts/test_benchmark_report_scale.ps1",
     "scripts/publish_dual_machine_package.ps1",
     "scripts/runtime_environment.ps1"
 ) | ForEach-Object { Join-Path $RepositoryRoot $_ }
@@ -85,13 +87,20 @@ Assert-True ($runtimeBenchmarkText -match
     'if \(\$report\.schema -ne 8\)' -and
     $runtimeBenchmarkText -match 'Get-XenAimReportSummary' -and
     $runtimeBenchmarkText -match
-        'prediction_point_outside_box_frames') `
+        'prediction_point_outside_box_frames' -and
+    $runtimeBenchmarkText -match 'Get-XenRuntimeSequenceValues' -and
+    $runtimeBenchmarkText -notmatch
+        '@\(\$report\.samples\)\[\$csvIndex\]') `
     "Runtime 正式入口必须消费 schema 8，并把预测出框作为观测而非违规。"
 
 $packageScriptText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/publish_dual_machine_package.ps1"))
-Assert-True ($packageScriptText -match '"aim_report\.ps1"') `
-    "双机便携包必须携带 Aim 报告助手。"
+Assert-True ($packageScriptText -match '"aim_report\.ps1"' -and
+    $packageScriptText -match '"runtime_report_sequence\.ps1"') `
+    "双机便携包必须携带 Aim 与线性 sequence 报告助手。"
+
+& (Join-Path $RepositoryRoot "scripts/test_benchmark_report_scale.ps1") `
+    -SyntheticSampleCount 72002 -LegacyProbeCount 5000 -Quiet
 
 $networkPrepareRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
     ("xen-network-aim-{0}" -f [guid]::NewGuid().ToString("N"))
