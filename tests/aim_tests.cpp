@@ -1,10 +1,12 @@
 #include "aim/aim.h"
 #include "log/log.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -461,6 +463,7 @@ void test_prediction_hysteresis_avoids_crosshair_oscillation() {
                                   float target_x, float control_x) {
         AimFrame frame = make_frame(
             sequence, base + std::chrono::milliseconds(milliseconds));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(20);
         frame.control_center_x = control_x;
         frame.detections = {body(target_x, 160.0f)};
         return std::pair<AimResult, AimResult>{
@@ -468,10 +471,26 @@ void test_prediction_hysteresis_avoids_crosshair_oscillation() {
     };
 
     process_pair(1, 0, 100.0f, 60.0f);
-    const auto moving_away = process_pair(2, 10, 112.0f, 60.0f);
-    const auto crossed = process_pair(3, 20, 124.0f, 150.0f);
-    const auto settled = process_pair(4, 30, 132.0f, 132.0f);
-    const auto rearmed = process_pair(5, 40, 148.0f, 100.0f);
+    process_pair(2, 10, 112.0f, 60.0f);
+    process_pair(3, 20, 124.0f, 60.0f);
+    const auto moving_away = process_pair(4, 30, 136.0f, 60.0f);
+    const auto crossed = process_pair(5, 40, 144.0f, 170.0f);
+    const auto settling = process_pair(6, 50, 148.0f, 148.0f);
+    AimResult settled = settling.first;
+    AimResult settled_basic = settling.second;
+    for (int sequence = 7; sequence <= 17; ++sequence) {
+        const auto pair = process_pair(
+            static_cast<std::uint64_t>(sequence), sequence * 10 - 10,
+            148.0f, 148.0f);
+        settled = pair.first;
+        settled_basic = pair.second;
+    }
+    std::pair<AimResult, AimResult> rearmed;
+    for (int sequence = 18; sequence <= 24; ++sequence) {
+        rearmed = process_pair(
+            static_cast<std::uint64_t>(sequence), sequence * 10 - 10,
+            148.0f + (sequence - 17) * 12.0f, 100.0f);
+    }
 
     expect(moving_away.first.target.aim_x >
                moving_away.second.target.aim_x + 1.0f,
@@ -479,12 +498,188 @@ void test_prediction_hysteresis_avoids_crosshair_oscillation() {
     expect(std::fabs(crossed.first.target.aim_x -
                      crossed.second.target.aim_x) < 0.5f,
            "目标越过准星后必须撤销提前量，不能继续预测到前方造成反向拉回");
-    expect(std::fabs(settled.first.target.aim_x -
-                     settled.second.target.aim_x) < 0.5f,
+    expect(std::fabs(settling.first.target.aim_x -
+                     settling.second.target.aim_x) < 0.5f &&
+               std::fabs(settled.target.aim_x -
+                         settled_basic.target.aim_x) < 0.5f,
            "归位收敛区内必须保持预测关闭，避免立即重新前探");
     expect(rearmed.first.target.aim_x >
                rearmed.second.target.aim_x + 1.0f,
-           "目标重新远离并越过进入阈值后才允许再次预测");
+           "目标重新远离并越过进入阈值后才允许再次预测，基础点=" +
+               std::to_string(rearmed.first.target.base_aim_x) +
+               "，最终点=" + std::to_string(rearmed.first.target.aim_x) +
+               "，基础模式点=" +
+               std::to_string(rearmed.second.target.aim_x) +
+               "，速度=" +
+               std::to_string(rearmed.first.target.velocity_x) +
+               "，lead_active=" +
+               std::to_string(rearmed.first.target.lead_active));
+}
+
+void test_closed_loop_view_feedback_converges_without_limit_cycle() {
+    AimConfig config;
+    config.enable_prediction = true;
+    config.max_prediction_lead_percent = 35.0f;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.75f;
+    config.smoothing = 0.45f;
+    config.counts_per_pixel_x = 0.50f;
+    config.counts_per_pixel_y = 0.50f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    Aim aim(config);
+
+    constexpr int kFrameCount = 240;
+    constexpr int kCommandDelayFrames = 2;
+    constexpr float kFrameSeconds = 0.005f;
+    constexpr float kCameraResponse = 0.85f;
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    float world_target_x = 52.0f;
+    float camera_x = 0.0f;
+    float delayed_commands[kCommandDelayFrames]{};
+    float previous_observed_error = 0.0f;
+    int previous_settle_command_sign = 0;
+    int initial_lead_frames = 0;
+    int settled_lead_frames = 0;
+    int late_settled_lead_frames = 0;
+    int rearmed_lead_frames = 0;
+    int settle_command_frames = 0;
+    int settle_direction_reversals = 0;
+    int first_reverse_command_frame = -1;
+    int base_point_outside_frames = 0;
+    int lead_limit_violation_frames = 0;
+    int command_direction_violation_frames = 0;
+    bool crossed_after_camera_feedback = false;
+    float maximum_settle_error = 0.0f;
+
+    // 世界目标和镜头使用同一角度等效像素坐标。历史鼠标命令经过固定
+    // 两帧延迟改变镜头，下一帧观测位置按 world - camera 反向变化。
+    for (int index = 0; index < kFrameCount; ++index) {
+        const int delay_slot = index % kCommandDelayFrames;
+        camera_x += delayed_commands[delay_slot] /
+            config.counts_per_pixel_x * kCameraResponse;
+        delayed_commands[delay_slot] = 0.0f;
+
+        float world_velocity = 0.0f;
+        if (index < 70) {
+            world_velocity = 280.0f;
+        } else if (index < 115) {
+            world_velocity = -320.0f;
+        } else if (index >= 175) {
+            world_velocity = 260.0f;
+        }
+        world_target_x += world_velocity * kFrameSeconds;
+
+        const float observed_x = 160.0f + world_target_x - camera_x;
+        const float observed_error = observed_x - 160.0f;
+        if (index > 0 && previous_observed_error > 0.0f &&
+            observed_error < 0.0f) {
+            crossed_after_camera_feedback = true;
+        }
+        previous_observed_error = observed_error;
+
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::milliseconds(index * 5));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(18);
+        frame.lock_active = true;
+        frame.detections = {body(observed_x, 160.0f)};
+        const AimResult result = aim.process(frame);
+
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "闭环视角反馈期间每帧都必须保留合法目标");
+        if (!result.has_target) continue;
+
+        const bool base_inside =
+            result.target.base_aim_x >= result.target.x1 &&
+            result.target.base_aim_x <= result.target.x2 &&
+            result.target.base_aim_y >= result.target.y1 &&
+            result.target.base_aim_y <= result.target.y2;
+        if (!base_inside) ++base_point_outside_frames;
+        const float maximum_lead = std::hypot(
+            result.target.x2 - result.target.x1,
+            result.target.y2 - result.target.y1) *
+            config.max_prediction_lead_percent / 100.0f;
+        if (std::hypot(result.target.lead_x, result.target.lead_y) >
+            maximum_lead + 0.01f) {
+            ++lead_limit_violation_frames;
+        }
+
+        if (index >= 1 && index < 70 && result.target.lead_active) {
+            ++initial_lead_frames;
+        }
+        if (index >= 155 && index < 175 && result.target.lead_active) {
+            ++settled_lead_frames;
+        }
+        if (index >= 165 && index < 175 && result.target.lead_active) {
+            ++late_settled_lead_frames;
+        }
+        if (index >= 185 && result.target.lead_active) {
+            ++rearmed_lead_frames;
+        }
+
+        const float final_error_x = result.target.aim_x -
+            frame.control_center_x;
+        const float final_error_y = result.target.aim_y -
+            frame.control_center_y;
+        if (result.has_command) {
+            const float command_dot_error =
+                result.command.dx_counts * final_error_x +
+                result.command.dy_counts * final_error_y;
+            if (command_dot_error <= 0.0f) {
+                ++command_direction_violation_frames;
+            }
+            delayed_commands[delay_slot] =
+                static_cast<float>(result.command.dx_counts);
+            if (index >= 70 && first_reverse_command_frame < 0 &&
+                result.command.dx_counts < 0) {
+                first_reverse_command_frame = index;
+            }
+        }
+
+        if (index >= 155 && index < 175) {
+            maximum_settle_error = std::max(
+                maximum_settle_error, std::fabs(final_error_x));
+            if (result.has_command) {
+                ++settle_command_frames;
+                const int command_sign = result.command.dx_counts < 0 ? -1 : 1;
+                if (previous_settle_command_sign != 0 &&
+                    command_sign != previous_settle_command_sign) {
+                    ++settle_direction_reversals;
+                }
+                previous_settle_command_sign = command_sign;
+            }
+        }
+    }
+
+    expect(crossed_after_camera_feedback,
+           "闭环模型必须实际覆盖鼠标命令改变视角后目标越过准星的反馈");
+    expect(base_point_outside_frames == 0,
+           "闭环预测期间基础追踪点必须始终位于当前目标框内");
+    expect(lead_limit_violation_frames == 0,
+           "预测点允许位于框外，但提前向量不得超过用户最大距离门禁");
+    expect(command_direction_violation_frames == 0,
+           "闭环命令必须始终朝向本帧基础点或预测最终点");
+    expect(initial_lead_frames > 0,
+           "闭环持续运动且形成足够轴向误差时必须进入预测，首次=" +
+               std::to_string(initial_lead_frames) +
+               "，恢复阶段=" + std::to_string(rearmed_lead_frames));
+    expect(first_reverse_command_frame >= 70 &&
+               first_reverse_command_frame <= 85,
+           "世界目标突然反向后，闭环控制必须在有界帧数内反向响应");
+    expect(settled_lead_frames <= 6 && late_settled_lead_frames == 0,
+           "静止归位阶段只允许短暂过渡，后半段必须退出预测，实际预测帧=" +
+               std::to_string(settled_lead_frames) +
+               "，后半段预测帧=" +
+               std::to_string(late_settled_lead_frames));
+    expect(maximum_settle_error <= 4.0f &&
+               settle_direction_reversals <= 2,
+           "静止归位阶段不得形成持续往返的闭环极限环，最大误差=" +
+               std::to_string(maximum_settle_error) +
+               "，命令帧=" + std::to_string(settle_command_frames) +
+               "，方向反转=" + std::to_string(settle_direction_reversals));
 }
 
 void test_control_trajectory_never_moves_away_from_target() {
@@ -599,6 +794,7 @@ int main() {
     test_prediction_lead_can_leave_box_with_bounded_distance();
     test_dynamic_control_range_does_not_reduce_observation();
     test_prediction_hysteresis_avoids_crosshair_oscillation();
+    test_closed_loop_view_feedback_converges_without_limit_cycle();
     test_control_trajectory_never_moves_away_from_target();
     test_quantization_residual_cannot_reverse_after_crossing();
     test_control_step_cannot_cross_in_box_aim_point();

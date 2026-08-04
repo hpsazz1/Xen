@@ -225,6 +225,10 @@ struct Aim::Impl {
     bool shaper_initialized = false;
     std::uint64_t lead_track_id = 0;
     bool lead_active = false;
+    bool lead_ever_activated = false;
+    bool lead_rearm_ready = true;
+    int lead_settle_frames = 0;
+    int lead_candidate_frames = 0;
     float lead_direction_x = 0.0f;
     float lead_direction_y = 0.0f;
     float acquisition_range_radius = 0.0f;
@@ -772,11 +776,19 @@ struct Aim::Impl {
         if (lead_track_id != track.id) {
             lead_track_id = track.id;
             lead_active = false;
+            lead_ever_activated = false;
+            lead_rearm_ready = true;
+            lead_settle_frames = 0;
+            lead_candidate_frames = 0;
             lead_direction_x = 0.0f;
             lead_direction_y = 0.0f;
         }
         if (!config.enable_prediction) {
             lead_active = false;
+            lead_ever_activated = false;
+            lead_rearm_ready = true;
+            lead_settle_frames = 0;
+            lead_candidate_frames = 0;
             return projection;
         }
 
@@ -785,6 +797,8 @@ struct Aim::Impl {
         const float error_magnitude = std::hypot(error_x, error_y);
         const float velocity_magnitude = std::hypot(track.vx, track.vy);
         const float alignment = error_x * track.vx + error_y * track.vy;
+        const float longitudinal_error = velocity_magnitude > 1.0f
+            ? std::fabs(alignment) / velocity_magnitude : 0.0f;
         const float box_diagonal = std::hypot(
             track.x2 - track.x1, track.y2 - track.y1);
         const float enter_distance = std::max(
@@ -794,15 +808,51 @@ struct Aim::Impl {
         const bool moving_away = velocity_magnitude > 1.0f && alignment > 0.0f;
         const bool velocity_reversed = lead_active &&
             lead_direction_x * track.vx + lead_direction_y * track.vy <= 0.0f;
+        const float lead_axis_error =
+            std::fabs(error_x * lead_direction_x +
+                      error_y * lead_direction_y);
 
         if (lead_active) {
             if (!moving_away || velocity_reversed ||
                 error_magnitude <= exit_distance) {
                 lead_active = false;
+                lead_rearm_ready = false;
+                lead_settle_frames = 0;
+                lead_candidate_frames = 0;
             }
-        } else if (!track.predicted && moving_away &&
-                   error_magnitude >= enter_distance) {
-            lead_active = true;
+        } else {
+            // 准星移动会反向改变目标的屏幕速度。预测退出后若立即按该相对
+            // 速度重新前探，会形成“越过目标→反拉→归位→再次前探”的极限环。
+            // 只有基础点沿原预测方向连续回到中心小范围后才重新武装；该
+            // 条件由目标框尺度归一化，作为后台状态机，不增加用户参数。
+            if (!lead_rearm_ready) {
+                // 重新武装只判断上一预测方向上的归位。身体默认瞄点可能在
+                // 垂直方向天然偏离准星，正交误差不能永久阻塞水平预测恢复。
+                if (lead_axis_error <= exit_distance) {
+                    ++lead_settle_frames;
+                    constexpr int kLeadSettleConfirmFrames = 5;
+                    if (lead_settle_frames >= kLeadSettleConfirmFrames) {
+                        lead_rearm_ready = true;
+                    }
+                } else {
+                    lead_settle_frames = 0;
+                }
+            }
+            if (lead_rearm_ready && !track.predicted && moving_away &&
+                longitudinal_error >= enter_distance) {
+                ++lead_candidate_frames;
+                constexpr int kLeadReenterConfirmFrames = 2;
+                const int required_frames = lead_ever_activated
+                    ? kLeadReenterConfirmFrames : 1;
+                if (lead_candidate_frames >= required_frames) {
+                    lead_active = true;
+                    lead_ever_activated = true;
+                    lead_settle_frames = 0;
+                    lead_candidate_frames = 0;
+                }
+            } else {
+                lead_candidate_frames = 0;
+            }
         }
         if (!lead_active) return projection;
 
@@ -952,6 +1002,10 @@ struct Aim::Impl {
         switch_cooldown = 0;
         lead_track_id = 0;
         lead_active = false;
+        lead_ever_activated = false;
+        lead_rearm_ready = true;
+        lead_settle_frames = 0;
+        lead_candidate_frames = 0;
         lead_direction_x = 0.0f;
         lead_direction_y = 0.0f;
         acquisition_range_radius = 0.0f;
