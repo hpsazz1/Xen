@@ -113,6 +113,22 @@ void test_manifest_validation() {
                parsed, BackendType::DIRECTML)->id == "directml",
            "后端必须映射到清单声明的隔离运行时");
 
+    write_file(root / "cache/runtime/report.json", "runtime report");
+    write_file(root / "cache/tensorrt/model.engine", "provider cache");
+    write_file(root / "logs/xen.log", "runtime log");
+    expect(app::detail::validate_release_manifest(root, parsed, error),
+           "cache/logs 中的运行时产物不得阻止发布包再次启动: " + error);
+
+    write_file(root / "cache-shadow/unknown.dll", "not mutable cache");
+    expect(!app::detail::validate_release_manifest(root, parsed, error),
+           "与 cache 同名前缀的目录不得绕过清单校验");
+    std::filesystem::remove(root / "cache-shadow/unknown.dll");
+
+    write_file(root / "models/unknown.onnx", "unlisted model");
+    expect(!app::detail::validate_release_manifest(root, parsed, error),
+           "模型等静态目录中的清单外文件必须失败关闭");
+    std::filesystem::remove(root / "models/unknown.onnx");
+
     write_file(root / "runtimes/directml/Xen.exe", "tampered");
     expect(!app::detail::validate_release_manifest(root, parsed, error),
            "运行时文件被篡改后必须失败关闭");

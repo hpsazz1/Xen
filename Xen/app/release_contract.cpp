@@ -55,6 +55,20 @@ bool is_safe_relative_path(const std::filesystem::path& path) {
     return true;
 }
 
+bool is_mutable_release_file(const std::filesystem::path& path) {
+    if (!is_safe_relative_path(path)) return false;
+    auto component = path.begin();
+    if (component == path.end()) return false;
+    const std::wstring root = component->native();
+    const bool mutable_root =
+        CompareStringOrdinal(root.c_str(), -1, L"cache", -1, TRUE) ==
+            CSTR_EQUAL ||
+        CompareStringOrdinal(root.c_str(), -1, L"logs", -1, TRUE) ==
+            CSTR_EQUAL;
+    if (!mutable_root) return false;
+    return ++component != path.end();
+}
+
 std::string bytes_to_hex(const std::vector<unsigned char>& bytes) {
     constexpr char kDigits[] = "0123456789abcdef";
     std::string result(bytes.size() * 2, '0');
@@ -414,7 +428,10 @@ bool validate_release_manifest(const std::filesystem::path& release_root,
                 return false;
             }
             if (relative == L"manifest.json") continue;
-            if (!file_paths.contains(relative)) {
+            // cache 与 logs 由发布脚本预创建，运行时会写入报告、Provider
+            // 缓存和日志。它们不属于静态供应链清单，但链接仍在上方拒绝。
+            if (!file_paths.contains(relative) &&
+                !is_mutable_release_file(relative)) {
                 error = "发布包包含清单外文件";
                 return false;
             }
