@@ -452,7 +452,7 @@ void test_packet_layout_and_sequence() {
            "连续 KMBOX NET 命令序号必须递增且保留有符号边界");
 }
 
-void test_kmbox_monitor_input_and_stale_release() {
+void test_kmbox_monitor_retains_state_until_explicit_release() {
     FakeKmboxDevice device({AckMode::VALID, AckMode::VALID});
     auto mouse = MouseDeviceFactory::create(make_config(device.port()));
     expect(mouse && mouse->open(), "KMBOX monitor 输入测试必须先连接");
@@ -465,12 +465,13 @@ void test_kmbox_monitor_input_and_stale_release() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     expect(snapshot.status == InputMonitorStatus::READY &&
+               snapshot.state_valid &&
                snapshot.virtual_keys[0x02] &&
                snapshot.virtual_keys[0x23] &&
                snapshot.virtual_keys[0x77],
            "KMBOX monitor 必须映射右键、End 和 F8");
 
-    const std::uint64_t pressed_sequence = snapshot.sequence;
+    std::uint64_t pressed_sequence = snapshot.sequence;
     expect(device.send_monitor(0U), "假 KMBOX 必须能发送全释放报告");
     for (int retry = 0; retry < 50; ++retry) {
         mouse->poll_input(snapshot);
@@ -478,17 +479,40 @@ void test_kmbox_monitor_input_and_stale_release() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     expect(snapshot.status == InputMonitorStatus::READY &&
+               snapshot.state_valid &&
                !snapshot.virtual_keys[0x02] &&
                !snapshot.virtual_keys[0x23] &&
                !snapshot.virtual_keys[0x77],
            "KMBOX monitor 释放报告不得保留旧按键状态");
 
-    expect(device.send_monitor(0x02U), "陈旧测试必须先发送右键按下");
+    const std::uint64_t released_sequence = snapshot.sequence;
+    expect(device.send_monitor(0x02U), "长按测试必须先发送右键按下");
+    for (int retry = 0; retry < 50; ++retry) {
+        mouse->poll_input(snapshot);
+        if (snapshot.sequence > released_sequence) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    pressed_sequence = snapshot.sequence;
     std::this_thread::sleep_for(std::chrono::milliseconds(750));
     mouse->poll_input(snapshot);
-    expect(snapshot.status == InputMonitorStatus::STALE &&
-               !snapshot.virtual_keys[0x02],
-           "KMBOX monitor 断流后必须 fail-closed 释放右键");
+    expect(snapshot.status == InputMonitorStatus::READY &&
+               snapshot.state_valid &&
+               snapshot.virtual_keys[0x02] &&
+               snapshot.sequence == pressed_sequence,
+           "KMBOX monitor 静止长按没有新事件包时必须保留最近按下状态");
+
+    expect(device.send_monitor(0U),
+           "KMBOX monitor 长按后必须能发送明确全释放报告");
+    for (int retry = 0; retry < 50; ++retry) {
+        mouse->poll_input(snapshot);
+        if (snapshot.sequence > pressed_sequence) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    expect(snapshot.status == InputMonitorStatus::READY &&
+               snapshot.state_valid &&
+               !snapshot.virtual_keys[0x02] &&
+               snapshot.sequence > pressed_sequence,
+           "KMBOX monitor 只有收到明确释放报告后才能清除右键状态");
 }
 
 void test_invalid_commands_are_not_sent() {
@@ -809,7 +833,7 @@ int main() {
 
     test_disabled_does_not_access_network();
     test_packet_layout_and_sequence();
-    test_kmbox_monitor_input_and_stale_release();
+    test_kmbox_monitor_retains_state_until_explicit_release();
     test_invalid_commands_are_not_sent();
     test_invalid_config();
     test_open_response_failure(

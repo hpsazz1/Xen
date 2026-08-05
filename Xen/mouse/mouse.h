@@ -36,6 +36,8 @@ enum class InputMonitorStatus {
 
 struct InputSnapshot {
     InputMonitorStatus status = InputMonitorStatus::CLOSED;
+    // 仅当键态来自真实输入报告时为 true；链路状态本身不能推导按键释放。
+    bool state_valid = false;
     std::array<bool, 256> virtual_keys{};
     std::uint64_t sequence = 0;
 };
@@ -75,7 +77,8 @@ public:
 
     virtual bool open() noexcept = 0;
     virtual bool move(const MouseMoveCommand& command) noexcept = 0;
-    // 非阻塞取得与当前鼠标输出后端绑定的物理键鼠状态；失败或陈旧时必须全释放。
+    // 非阻塞取得与当前鼠标输出后端绑定的物理键鼠状态；只有 state_valid
+    // 快照可改变键态，status 只描述链路，不得被调用方猜测为全释放。
     virtual bool poll_input(InputSnapshot& snapshot) noexcept = 0;
     virtual void close() noexcept = 0;
     virtual MouseStatus status() const noexcept = 0;

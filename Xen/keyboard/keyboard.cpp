@@ -64,15 +64,13 @@ std::vector<KeyboardEvent> KeyboardListener::poll() noexcept {
         if (impl_->device) {
             InputSnapshot snapshot;
             if (!impl_->device->poll_input(snapshot)) {
-                // 先让空状态进入事件归并，确保此前按住状态产生 release，再标记失败。
-                snapshot = {};
-                snapshot.status = InputMonitorStatus::FAILURE;
                 impl_->status = KeyboardStatus::FAILURE;
+                return events;
             }
-            // WAITING/STALE/FAILURE 都按全释放处理，避免设备异常保留旧 hold。
-            if (snapshot.status == InputMonitorStatus::READY) {
-                key_active = snapshot.virtual_keys;
-            }
+            // 只有来自真实输入报告的快照才能推进按键状态。status 只描述链路，
+            // 等待、陈旧、故障或关闭都不能被猜测成“所有键已释放”。
+            if (!snapshot.state_valid) return events;
+            key_active = snapshot.virtual_keys;
         } else {
             const auto poll_binding = [&](const std::vector<int>& virtual_keys) {
                 for (const int virtual_key : virtual_keys) {

@@ -79,6 +79,7 @@ public:
                     (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
             }
             snapshot.status = InputMonitorStatus::READY;
+            snapshot.state_valid = true;
             snapshot.sequence = ++input_sequence_;
             return true;
         } catch (...) {

@@ -35,7 +35,6 @@ constexpr std::size_t kMousePacketBytes = kHeaderBytes + kMousePayloadBytes;
 constexpr int kMaxConnectTimeoutMs = 10000;
 constexpr int kMaxCommandTimeoutMs = 1000;
 constexpr std::size_t kMonitorPacketBytes = 20U;
-constexpr auto kInputFreshness = std::chrono::milliseconds(700);
 
 void write_u32_le(std::uint8_t* output, std::uint32_t value) noexcept {
     output[0] = static_cast<std::uint8_t>(value);
@@ -288,20 +287,18 @@ public:
             snapshot.status = InputMonitorStatus::CLOSED;
             return true;
         }
-        if (monitor_failed_) {
-            snapshot.status = InputMonitorStatus::FAILURE;
-            return true;
-        }
         if (!monitor_received_) {
-            snapshot.status = InputMonitorStatus::WAITING;
+            snapshot.status = monitor_failed_
+                ? InputMonitorStatus::FAILURE
+                : InputMonitorStatus::WAITING;
             return true;
         }
-        if (std::chrono::steady_clock::now() - monitor_received_at_ >
-            kInputFreshness) {
-            snapshot.status = InputMonitorStatus::STALE;
-            return true;
-        }
-        snapshot.status = InputMonitorStatus::READY;
+        // KMBOX monitor 只在物理输入变化时报告，不提供周期心跳。收到明确释放包前，
+        // 最近键态始终有效；socket 故障只改变链路状态，不能伪造全释放。
+        snapshot.status = monitor_failed_
+            ? InputMonitorStatus::FAILURE
+            : InputMonitorStatus::READY;
+        snapshot.state_valid = true;
         snapshot.virtual_keys = keyboard_keys_;
         snapshot.virtual_keys[0x01] = (mouse_buttons_ & 0x01U) != 0;
         snapshot.virtual_keys[0x02] = (mouse_buttons_ & 0x02U) != 0;
@@ -522,7 +519,6 @@ private:
             mouse::detail::apply_hid_keyboard_report(
                 packet[9], packet.data() + 10U, 10U, keyboard_keys_);
             monitor_received_ = true;
-            monitor_received_at_ = std::chrono::steady_clock::now();
             ++monitor_sequence_;
         }
     }
@@ -561,7 +557,6 @@ private:
     bool monitor_failed_ = false;
     bool monitor_configured_ = false;
     std::uint64_t monitor_sequence_ = 0;
-    std::chrono::steady_clock::time_point monitor_received_at_{};
     mutable std::mutex io_mutex_;
     std::atomic<MouseStatus> status_{MouseStatus::CLOSED};
     mutable std::mutex error_mutex_;

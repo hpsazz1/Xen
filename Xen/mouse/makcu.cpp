@@ -526,6 +526,7 @@ public:
             return true;
         }
         snapshot.status = InputMonitorStatus::READY;
+        snapshot.state_valid = true;
         snapshot.virtual_keys = keyboard_keys_;
         snapshot.virtual_keys[0x01] = (mouse_buttons_ & 0x01U) != 0;
         snapshot.virtual_keys[0x02] = (mouse_buttons_ & 0x02U) != 0;

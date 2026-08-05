@@ -193,6 +193,7 @@ void test_keyboard_event_state_machine() {
 void test_keyboard_listener_uses_selected_device() {
     auto device = std::make_shared<FakeInputDevice>();
     device->snapshot_.status = InputMonitorStatus::READY;
+    device->snapshot_.state_valid = true;
     KeyboardListener listener(KeyboardConfig{}, device);
     expect(listener.open(), "共享输入设备监听器必须可初始化");
 
@@ -203,15 +204,30 @@ void test_keyboard_listener_uses_selected_device() {
                events[0].active,
            "所选设备右键必须产生瞄准按住事件");
 
-    device->snapshot_.status = InputMonitorStatus::STALE;
+    for (const InputMonitorStatus status : {
+             InputMonitorStatus::WAITING,
+             InputMonitorStatus::STALE,
+             InputMonitorStatus::FAILURE,
+             InputMonitorStatus::CLOSED}) {
+        device->snapshot_.status = status;
+        device->snapshot_.state_valid = false;
+        events = listener.poll();
+        expect(events.empty(),
+               "所选设备非 READY 状态不得被猜测为瞄准释放事件");
+    }
+
+    device->snapshot_ = {};
+    device->snapshot_.status = InputMonitorStatus::FAILURE;
+    device->snapshot_.state_valid = true;
     events = listener.poll();
     expect(events.size() == 1U &&
                events[0].type == KeyboardEventType::AIM_HOLD_CHANGED &&
                !events[0].active,
-           "所选设备断流必须立即产生瞄准释放事件");
+           "明确全释放快照即使伴随链路故障也必须产生瞄准释放事件");
 
     device->snapshot_ = {};
     device->snapshot_.status = InputMonitorStatus::READY;
+    device->snapshot_.state_valid = true;
     device->snapshot_.virtual_keys[0x23] = true;
     device->snapshot_.virtual_keys[0x77] = true;
     events = listener.poll();
