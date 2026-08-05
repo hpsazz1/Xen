@@ -88,6 +88,10 @@ function Read-Manifest() {
     return [pscustomobject]@{ Path = $path; Value = $manifest }
 }
 
+function Test-MutablePackageFile([string]$RelativePath) {
+    return $RelativePath -match '^(cache|logs)\\.+'
+}
+
 function Assert-ManifestFiles(
         [object]$Manifest,
         [switch]$AllowConfigMismatch) {
@@ -119,7 +123,8 @@ function Assert-ManifestFiles(
         $relative = $file.FullName.Substring(
             $PackageRoot.TrimEnd('\').Length + 1)
         if ($relative -ieq "manifest.json") { continue }
-        if (-not $declared.Contains($relative)) {
+        if (-not $declared.Contains($relative) -and
+            -not (Test-MutablePackageFile $relative)) {
             throw "发布包包含清单外文件：$relative"
         }
     }

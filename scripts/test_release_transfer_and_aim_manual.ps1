@@ -120,6 +120,23 @@ try {
         throw "完整发布包传输未原子收口。"
     }
 
+    Write-Utf8 (Join-Path $published "cache\tensorrt\fixture.engine") `
+        "runtime provider cache"
+    Write-Utf8 (Join-Path $published "logs\xen.log") "runtime log"
+
+    $invalidMutablePrefix = Join-Path $published `
+        "cache-shadow\unknown.dll"
+    Write-Utf8 $invalidMutablePrefix "not mutable cache"
+    $invalidRoot = Join-Path $root "invalid-prefix-task"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -Mode Prepare -Scenario Static -Profile tracking `
+        -PackageRoot $published -RunDirectory $invalidRoot
+    if ($LASTEXITCODE -eq 0) {
+        throw "cache 同名前缀目录不应绕过人工验收清单校验。"
+    }
+    Remove-Item -LiteralPath $invalidMutablePrefix -Force
+
     $trackingRoot = Join-Path $root "tracking-task"
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
