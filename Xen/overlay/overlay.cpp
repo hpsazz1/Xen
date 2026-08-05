@@ -3001,7 +3001,7 @@ struct Overlay::Impl {
                              OverlayActions& actions) {
         begin_config_panel("safety_panel", "安全门", 72.0f);
         if (ImGui::BeginTable(
-                "safety_grid", 3,
+                "safety_grid", 4,
                 ImGuiTableFlags_SizingStretchSame |
                 ImGuiTableFlags_BordersInnerV)) {
             ImGui::TableNextRow();
@@ -3023,6 +3023,12 @@ struct Overlay::Impl {
                 snapshot.emergency_stopped ? "已锁定" : "正常",
                 snapshot.emergency_stopped
                     ? rgba(kDanger) : rgba(kSuccess));
+            ImGui::TableSetColumnIndex(3);
+            safety_gate_column(
+                "按住门",
+                snapshot.aim_hold_active ? "已按下" : "已释放",
+                snapshot.aim_hold_active
+                    ? rgba(kSuccess) : rgba(kMutedInk));
             ImGui::EndTable();
         }
         end_config_panel();
