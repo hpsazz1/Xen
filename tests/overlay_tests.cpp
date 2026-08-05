@@ -18,6 +18,16 @@ bool nearly_equal(float lhs, float rhs) {
     return std::abs(lhs - rhs) < 0.0001f;
 }
 
+void test_extended_key_name_lparam() {
+    constexpr std::uint32_t kEndAndNum1ScanCode = 0x4fU;
+    const auto end_data = overlay::detail::make_key_name_lparam(
+        kEndAndNum1ScanCode, true);
+    const auto num1_data = overlay::detail::make_key_name_lparam(
+        kEndAndNum1ScanCode, false);
+    expect(end_data == 0x014f0000U && num1_data == 0x004f0000U,
+           "End 必须通过 bit 24 与相同扫描码的小键盘 Num 1 区分");
+}
+
 void test_metric_history_order_and_overwrite() {
     overlay::detail::MetricHistory<3> history;
     expect(history.empty() && history.size() == 0,
@@ -178,6 +188,7 @@ void test_hotkey_capture_state_machine() {
 } // namespace
 
 int main() {
+    test_extended_key_name_lparam();
     test_metric_history_order_and_overwrite();
     test_metric_history_clear_and_floor();
     test_preview_geometry_mapping();

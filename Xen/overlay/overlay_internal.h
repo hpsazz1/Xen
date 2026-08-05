@@ -26,6 +26,15 @@ struct HotkeyCaptureState {
     std::array<bool, 256> previous_key_active{};
 };
 
+// GetKeyNameText 的 lParam 使用 bit 16..23 保存扫描码，并用 bit 24 区分
+// 导航区扩展键与数字小键盘。E0 是协议前缀，不能直接拼到扫描码后整体左移。
+inline std::uint32_t make_key_name_lparam(
+        std::uint32_t scan_code,
+        bool extended) noexcept {
+    return ((scan_code & 0xffU) << 16U) |
+           (extended ? (1U << 24U) : 0U);
+}
+
 inline void begin_hotkey_capture(
         HotkeyCaptureState& state,
         const std::array<bool, 256>& key_active) noexcept {

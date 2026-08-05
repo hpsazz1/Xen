@@ -115,16 +115,16 @@ std::string virtual_key_name(int virtual_key) {
     }
     UINT scan_code = MapVirtualKeyW(
         static_cast<UINT>(virtual_key), MAPVK_VK_TO_VSC);
-    if (virtual_key == VK_LEFT || virtual_key == VK_UP ||
+    const bool extended =
+        virtual_key == VK_LEFT || virtual_key == VK_UP ||
         virtual_key == VK_RIGHT || virtual_key == VK_DOWN ||
         virtual_key == VK_PRIOR || virtual_key == VK_NEXT ||
         virtual_key == VK_END || virtual_key == VK_HOME ||
         virtual_key == VK_INSERT || virtual_key == VK_DELETE ||
-        virtual_key == VK_DIVIDE || virtual_key == VK_NUMLOCK) {
-        scan_code |= 0xE000U;
-    }
+        virtual_key == VK_DIVIDE || virtual_key == VK_NUMLOCK;
     wchar_t name[64]{};
-    const LONG key_data = static_cast<LONG>(scan_code << 16U);
+    const LONG key_data = static_cast<LONG>(
+        overlay::detail::make_key_name_lparam(scan_code, extended));
     if (GetKeyNameTextW(
             key_data, name, static_cast<int>(std::size(name))) > 0) {
         const int utf8_size = WideCharToMultiByte(
