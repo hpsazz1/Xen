@@ -244,6 +244,8 @@ public:
     Runtime& operator=(const Runtime&) = delete;
 
     bool start(const AppConfig& config) noexcept;
+    bool start(const AppConfig& config,
+               std::shared_ptr<IMouseController> input_device) noexcept;
     void stop() noexcept;
     // 仅在 RUNNING 状态接受请求。候选模型异步加载，失败不替换旧模型。
     bool reload_detector(const DetectorConfig& config) noexcept;

@@ -213,7 +213,7 @@ kmbox_uuid=$kmboxUuid
 kmbox_connect_timeout_ms=1000
 kmbox_command_timeout_ms=300
 makcu_port=
-makcu_baud_rate=115200
+makcu_baud_rate=4000000
 makcu_connect_timeout_ms=1000
 makcu_command_timeout_ms=300
 

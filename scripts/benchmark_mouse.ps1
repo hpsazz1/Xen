@@ -25,8 +25,8 @@
     [int]$KmboxPort = 0,
     [string]$KmboxUuid = "",
     [string]$MakcuPort = "",
-    [ValidateSet(115200, 4000000)]
-    [int]$MakcuBaudRate = 115200,
+    [ValidateSet(4000000)]
+    [int]$MakcuBaudRate = 4000000,
     [ValidateRange(1, 10000)]
     [int]$ConnectTimeoutMs = 1000,
     [ValidateRange(1, 1000)]

@@ -9,6 +9,7 @@
 #endif
 
 #include "mouse/kmbox_net_internal.h"
+#include "mouse/input_internal.h"
 
 #include "log/log.h"
 
@@ -21,16 +22,20 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace {
 
 constexpr std::uint32_t kConnectCommand = 0xaf3c2828U;
 constexpr std::uint32_t kMouseMoveCommand = 0xaede7345U;
+constexpr std::uint32_t kMonitorCommand = 0x27388020U;
 constexpr std::size_t kHeaderBytes = 16;
 constexpr std::size_t kMousePayloadBytes = 56;
 constexpr std::size_t kMousePacketBytes = kHeaderBytes + kMousePayloadBytes;
 constexpr int kMaxConnectTimeoutMs = 10000;
 constexpr int kMaxCommandTimeoutMs = 1000;
+constexpr std::size_t kMonitorPacketBytes = 20U;
+constexpr auto kInputFreshness = std::chrono::milliseconds(700);
 
 void write_u32_le(std::uint8_t* output, std::uint32_t value) noexcept {
     output[0] = static_cast<std::uint8_t>(value);
@@ -80,13 +85,6 @@ public:
         std::lock_guard<std::mutex> io_lock(io_mutex_);
         close_locked();
         set_error({});
-
-        // 禁用状态必须在任何网络初始化之前返回，保证配置门本身就是硬边界。
-        if (!config_.allow_send_input) {
-            status_.store(MouseStatus::DISABLED, std::memory_order_release);
-            LOG_INFO("mouse", "KMBOX NET 后端已禁用，未访问网络设备");
-            return true;
-        }
 
         try {
             if (!validate_config()) {
@@ -160,9 +158,63 @@ public:
                 return false;
             }
 
-            status_.store(MouseStatus::READY, std::memory_order_release);
+            monitor_socket_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            if (monitor_socket_ == INVALID_SOCKET) {
+                set_winsock_error("KMBOX NET monitor socket 创建失败",
+                                   WSAGetLastError());
+                close_locked();
+                return false;
+            }
+            sockaddr_in monitor_address{};
+            monitor_address.sin_family = AF_INET;
+            monitor_address.sin_addr.s_addr = htonl(INADDR_ANY);
+            monitor_address.sin_port = 0;
+            if (bind(monitor_socket_,
+                     reinterpret_cast<const sockaddr*>(&monitor_address),
+                     sizeof(monitor_address)) == SOCKET_ERROR) {
+                set_winsock_error("KMBOX NET monitor 端口绑定失败",
+                                   WSAGetLastError());
+                close_locked();
+                return false;
+            }
+            int monitor_address_size = sizeof(monitor_address);
+            if (getsockname(monitor_socket_,
+                            reinterpret_cast<sockaddr*>(&monitor_address),
+                            &monitor_address_size) == SOCKET_ERROR) {
+                set_winsock_error("KMBOX NET monitor 端口读取失败",
+                                   WSAGetLastError());
+                close_locked();
+                return false;
+            }
+            const int monitor_port = ntohs(monitor_address.sin_port);
+            std::array<std::uint8_t, kHeaderBytes> monitor_packet{};
+            write_header(monitor_packet.data(), kMonitorCommand, ++sequence_);
+            write_u32_le(monitor_packet.data() + 4U,
+                         static_cast<std::uint32_t>(monitor_port) |
+                         (0xaa55U << 16U));
+            if (!send_and_wait_ack(monitor_packet.data(),
+                                   monitor_packet.size(), kMonitorCommand,
+                                   sequence_, config_.kmbox_connect_timeout_ms)) {
+                close_locked();
+                return false;
+            }
+            monitor_configured_ = true;
+            {
+                std::lock_guard<std::mutex> lock(monitor_mutex_);
+                keyboard_keys_.fill(false);
+                mouse_buttons_ = 0;
+                monitor_received_ = false;
+                monitor_failed_ = false;
+                monitor_sequence_ = 0;
+            }
+            monitor_stop_.store(false, std::memory_order_release);
+            monitor_thread_ = std::thread([this] { monitor_loop(); });
+
+            status_.store(config_.allow_send_input
+                              ? MouseStatus::READY : MouseStatus::DISABLED,
+                          std::memory_order_release);
             set_error({});
-            LOG_INFO("mouse", "KMBOX NET 后端已连接: {}:{}",
+            LOG_INFO("mouse", "KMBOX NET 后端已连接并启用物理键鼠监听: {}:{}",
                      config_.kmbox_ip, config_.kmbox_port);
             return true;
         } catch (...) {
@@ -226,6 +278,38 @@ public:
                           std::memory_order_release);
             return false;
         }
+    }
+
+    bool poll_input(InputSnapshot& snapshot) noexcept override {
+        snapshot = {};
+        std::lock_guard<std::mutex> lock(monitor_mutex_);
+        if (monitor_socket_ == INVALID_SOCKET ||
+            monitor_stop_.load(std::memory_order_acquire)) {
+            snapshot.status = InputMonitorStatus::CLOSED;
+            return true;
+        }
+        if (monitor_failed_) {
+            snapshot.status = InputMonitorStatus::FAILURE;
+            return true;
+        }
+        if (!monitor_received_) {
+            snapshot.status = InputMonitorStatus::WAITING;
+            return true;
+        }
+        if (std::chrono::steady_clock::now() - monitor_received_at_ >
+            kInputFreshness) {
+            snapshot.status = InputMonitorStatus::STALE;
+            return true;
+        }
+        snapshot.status = InputMonitorStatus::READY;
+        snapshot.virtual_keys = keyboard_keys_;
+        snapshot.virtual_keys[0x01] = (mouse_buttons_ & 0x01U) != 0;
+        snapshot.virtual_keys[0x02] = (mouse_buttons_ & 0x02U) != 0;
+        snapshot.virtual_keys[0x04] = (mouse_buttons_ & 0x04U) != 0;
+        snapshot.virtual_keys[0x05] = (mouse_buttons_ & 0x08U) != 0;
+        snapshot.virtual_keys[0x06] = (mouse_buttons_ & 0x10U) != 0;
+        snapshot.sequence = monitor_sequence_;
+        return true;
     }
 
     void close() noexcept override {
@@ -387,6 +471,22 @@ private:
     }
 
     void close_locked() noexcept {
+        if (monitor_configured_ && socket_ != INVALID_SOCKET) {
+            std::array<std::uint8_t, kHeaderBytes> disable_packet{};
+            write_header(disable_packet.data(), kMonitorCommand, ++sequence_);
+            write_u32_le(disable_packet.data() + 4U, 0U);
+            sendto(socket_, reinterpret_cast<const char*>(disable_packet.data()),
+                   static_cast<int>(disable_packet.size()), 0,
+                   reinterpret_cast<const sockaddr*>(&destination_),
+                   sizeof(destination_));
+        }
+        monitor_configured_ = false;
+        monitor_stop_.store(true, std::memory_order_release);
+        if (monitor_socket_ != INVALID_SOCKET) {
+            closesocket(monitor_socket_);
+            monitor_socket_ = INVALID_SOCKET;
+        }
+        if (monitor_thread_.joinable()) monitor_thread_.join();
         if (socket_ != INVALID_SOCKET) {
             closesocket(socket_);
             socket_ = INVALID_SOCKET;
@@ -394,6 +494,36 @@ private:
         if (winsock_started_) {
             WSACleanup();
             winsock_started_ = false;
+        }
+    }
+
+    void monitor_loop() noexcept {
+        std::array<std::uint8_t, 1024> packet{};
+        while (!monitor_stop_.load(std::memory_order_acquire)) {
+            sockaddr_in source{};
+            int source_size = sizeof(source);
+            const int received = recvfrom(
+                monitor_socket_, reinterpret_cast<char*>(packet.data()),
+                static_cast<int>(packet.size()), 0,
+                reinterpret_cast<sockaddr*>(&source), &source_size);
+            if (received == SOCKET_ERROR) {
+                if (!monitor_stop_.load(std::memory_order_acquire)) {
+                    std::lock_guard<std::mutex> lock(monitor_mutex_);
+                    monitor_failed_ = true;
+                }
+                break;
+            }
+            if (received < static_cast<int>(kMonitorPacketBytes) ||
+                source.sin_addr.S_un.S_addr != destination_.sin_addr.S_un.S_addr) {
+                continue;
+            }
+            std::lock_guard<std::mutex> lock(monitor_mutex_);
+            mouse_buttons_ = packet[1];
+            mouse::detail::apply_hid_keyboard_report(
+                packet[9], packet.data() + 10U, 10U, keyboard_keys_);
+            monitor_received_ = true;
+            monitor_received_at_ = std::chrono::steady_clock::now();
+            ++monitor_sequence_;
         }
     }
 
@@ -416,11 +546,22 @@ private:
 
     MouseConfig config_;
     SOCKET socket_ = INVALID_SOCKET;
+    SOCKET monitor_socket_ = INVALID_SOCKET;
     bool winsock_started_ = false;
     sockaddr_in destination_{};
     std::uint32_t uuid_ = 0;
     std::uint32_t random_state_ = 0;
     std::uint32_t sequence_ = 0;
+    std::atomic<bool> monitor_stop_{true};
+    std::thread monitor_thread_;
+    mutable std::mutex monitor_mutex_;
+    std::array<bool, 256> keyboard_keys_{};
+    std::uint8_t mouse_buttons_ = 0;
+    bool monitor_received_ = false;
+    bool monitor_failed_ = false;
+    bool monitor_configured_ = false;
+    std::uint64_t monitor_sequence_ = 0;
+    std::chrono::steady_clock::time_point monitor_received_at_{};
     mutable std::mutex io_mutex_;
     std::atomic<MouseStatus> status_{MouseStatus::CLOSED};
     mutable std::mutex error_mutex_;

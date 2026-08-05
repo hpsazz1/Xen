@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -29,6 +31,7 @@ namespace {
 
 constexpr std::uint32_t kConnectCommand = 0xaf3c2828U;
 constexpr std::uint32_t kMouseMoveCommand = 0xaede7345U;
+constexpr std::uint32_t kMonitorCommand = 0x27388020U;
 constexpr std::size_t kHeaderBytes = 16;
 constexpr std::size_t kMovePacketBytes = 72;
 constexpr std::uint8_t kMakcuFrameStart = 0x50U;
@@ -70,6 +73,7 @@ struct FakeMakcuState {
     std::vector<int> write_timeouts_ms;
     std::vector<int> read_timeouts_ms;
     std::size_t read_index = 0;
+    std::size_t response_offset = 0;
 };
 
 class FakeMakcuTransport final : public mouse::detail::IMakcuTransport {
@@ -111,7 +115,7 @@ public:
             std::string& error) noexcept override {
         try {
             state_->read_timeouts_ms.push_back(timeout_ms);
-            const std::size_t index = state_->read_index++;
+            const std::size_t index = state_->read_index;
             const auto result = index < state_->read_results.size()
                 ? state_->read_results[index]
                 : mouse::detail::MakcuIoResult::SUCCESS;
@@ -121,14 +125,26 @@ public:
                 return result;
             }
             if (index >= state_->responses.size()) {
+                if (timeout_ms == 0) {
+                    error = "假串口当前无输入";
+                    return mouse::detail::MakcuIoResult::TIMEOUT;
+                }
                 error = "假串口缺少响应";
                 return mouse::detail::MakcuIoResult::FAILED;
             }
-            std::fill(bytes.begin(), bytes.end(), 0U);
             const auto& response = state_->responses[index];
-            std::copy_n(response.begin(),
-                        (std::min)(response.size(), bytes.size()),
-                        bytes.begin());
+            if (state_->response_offset + bytes.size() > response.size()) {
+                error = "假串口响应长度不足";
+                return mouse::detail::MakcuIoResult::FAILED;
+            }
+            std::copy(response.begin() + state_->response_offset,
+                      response.begin() + state_->response_offset + bytes.size(),
+                      bytes.begin());
+            state_->response_offset += bytes.size();
+            if (state_->response_offset == response.size()) {
+                ++state_->read_index;
+                state_->response_offset = 0;
+            }
             error.clear();
             return mouse::detail::MakcuIoResult::SUCCESS;
         } catch (...) {
@@ -155,6 +171,25 @@ std::vector<std::uint8_t> makcu_baud_response(
 
 std::vector<std::uint8_t> makcu_move_response(std::uint8_t status = 0U) {
     return {kMakcuFrameStart, kMakcuMoveCommand, 1U, 0U, status};
+}
+
+std::vector<std::uint8_t> makcu_stream_response(
+        std::uint8_t command, std::uint8_t status = 0U) {
+    return {kMakcuFrameStart, command, 1U, 0U, status};
+}
+
+std::vector<std::uint8_t> makcu_mouse_stream(std::uint8_t buttons) {
+    return {kMakcuFrameStart, 0x0cU, 8U, 0U, buttons,
+            0U, 0U, 0U, 0U, 0U, 0U, 0U};
+}
+
+std::vector<std::uint8_t> makcu_keyboard_stream(
+        std::initializer_list<std::uint8_t> keys) {
+    std::vector<std::uint8_t> frame{
+        kMakcuFrameStart, 0xa5U, 15U, 0U, 0U};
+    frame.resize(19U, 0U);
+    std::copy(keys.begin(), keys.end(), frame.begin() + 5U);
+    return frame;
 }
 
 MouseConfig make_makcu_config() {
@@ -241,6 +276,27 @@ public:
         return packets_;
     }
 
+    bool send_monitor(std::uint8_t mouse_buttons,
+                      std::initializer_list<std::uint8_t> keys = {}) {
+        sockaddr_in destination{};
+        {
+            std::unique_lock<std::mutex> lock(monitor_mutex_);
+            if (!monitor_ready_cv_.wait_for(
+                    lock, std::chrono::milliseconds(500),
+                    [&] { return monitor_ready_; })) {
+                return false;
+            }
+            destination = monitor_destination_;
+        }
+        std::array<std::uint8_t, 20U> report{};
+        report[1] = mouse_buttons;
+        std::copy(keys.begin(), keys.end(), report.begin() + 10U);
+        return sendto(socket_, reinterpret_cast<const char*>(report.data()),
+                      static_cast<int>(report.size()), 0,
+                      reinterpret_cast<const sockaddr*>(&destination),
+                      sizeof(destination)) == static_cast<int>(report.size());
+    }
+
 private:
     void run() noexcept {
         for (const AckMode mode : responses_) {
@@ -286,6 +342,15 @@ private:
                    reinterpret_cast<const char*>(ack.data()),
                    static_cast<int>(ack.size()), 0,
                    reinterpret_cast<const sockaddr*>(&client), client_size);
+            if (mode == AckMode::VALID &&
+                read_u32_le(buffer.data() + 12U) == kMonitorCommand) {
+                std::lock_guard<std::mutex> lock(monitor_mutex_);
+                monitor_destination_ = client;
+                monitor_destination_.sin_port = htons(static_cast<u_short>(
+                    read_u32_le(buffer.data() + 4U) & 0xffffU));
+                monitor_ready_ = true;
+                monitor_ready_cv_.notify_all();
+            }
             if (wrong_source_socket != INVALID_SOCKET) {
                 closesocket(wrong_source_socket);
             }
@@ -298,6 +363,10 @@ private:
     std::thread worker_;
     mutable std::mutex packets_mutex_;
     std::vector<std::vector<std::uint8_t>> packets_;
+    std::mutex monitor_mutex_;
+    std::condition_variable monitor_ready_cv_;
+    sockaddr_in monitor_destination_{};
+    bool monitor_ready_ = false;
 };
 
 MouseConfig make_config(int port) {
@@ -313,14 +382,15 @@ MouseConfig make_config(int port) {
 }
 
 void test_disabled_does_not_access_network() {
-    FakeKmboxDevice device({AckMode::NONE});
+    FakeKmboxDevice device({AckMode::VALID, AckMode::VALID});
     expect(device.valid(), "未授权测试 UDP 端点必须创建成功");
     if (!device.valid()) return;
     MouseConfig config;
     config.backend = MouseBackend::KMBOX_NET;
     config.allow_send_input = false;
-    config.kmbox_ip = "invalid";
+    config.kmbox_ip = "127.0.0.1";
     config.kmbox_port = device.port();
+    config.kmbox_uuid = "A1B2C3D4";
     auto mouse = MouseDeviceFactory::create(config);
     expect(mouse && mouse->open(),
            "未授权 KMBOX NET 应直接初始化为禁用状态");
@@ -330,13 +400,14 @@ void test_disabled_does_not_access_network() {
            "未授权 KMBOX NET 不得发送移动命令");
     mouse.reset();
     device.finish();
-    expect(device.packets().empty(),
-           "未授权 KMBOX NET 不得创建协议流量");
+    const auto packets = device.packets();
+    expect(packets.size() == 2U,
+           "未授权 KMBOX NET 允许只读握手与 monitor 配置，但不得发送移动");
 }
 
 void test_packet_layout_and_sequence() {
     FakeKmboxDevice device(
-        {AckMode::VALID, AckMode::VALID, AckMode::VALID});
+        {AckMode::VALID, AckMode::VALID, AckMode::VALID, AckMode::VALID});
     expect(device.valid(), "成功路径假设备必须创建成功");
     if (!device.valid()) return;
     auto mouse = MouseDeviceFactory::create(make_config(device.port()));
@@ -351,38 +422,77 @@ void test_packet_layout_and_sequence() {
     device.finish();
 
     const auto packets = device.packets();
-    expect(packets.size() == 3, "假设备应收到握手和两条移动命令");
-    if (packets.size() != 3) return;
+    expect(packets.size() == 4, "假设备应收到握手、monitor 和两条移动命令");
+    if (packets.size() != 4) return;
     expect(packets[0].size() == kHeaderBytes &&
                read_u32_le(packets[0].data()) == 0xA1B2C3D4U &&
                read_u32_le(packets[0].data() + 8) == 0U &&
                read_u32_le(packets[0].data() + 12) == kConnectCommand,
            "connect 必须是 16 字节小端序 UUID/序号/命令头");
-    expect(packets[1].size() == kMovePacketBytes &&
-               read_u32_le(packets[1].data() + 8) == 1U &&
-               read_u32_le(packets[1].data() + 12) == kMouseMoveCommand &&
+    expect(packets[2].size() == kMovePacketBytes &&
+               read_u32_le(packets[2].data() + 8) == 2U &&
+               read_u32_le(packets[2].data() + 12) == kMouseMoveCommand &&
                static_cast<std::int32_t>(
-                   read_u32_le(packets[1].data() + 20)) == 120 &&
+                   read_u32_le(packets[2].data() + 20)) == 120 &&
                static_cast<std::int32_t>(
-                   read_u32_le(packets[1].data() + 24)) == -45,
+                   read_u32_le(packets[2].data() + 24)) == -45,
            "move 必须是 72 字节且 x/y 位于 payload 固定偏移");
     bool zero_fields = true;
-    for (std::size_t index = 16; index < packets[1].size(); ++index) {
+    for (std::size_t index = 16; index < packets[2].size(); ++index) {
         if ((index >= 20 && index < 28)) continue;
-        zero_fields = zero_fields && packets[1][index] == 0;
+        zero_fields = zero_fields && packets[2][index] == 0;
     }
     expect(zero_fields,
            "未使用的 button/wheel/轨迹点必须显式清零");
-    expect(read_u32_le(packets[2].data() + 8) == 2U &&
+    expect(read_u32_le(packets[3].data() + 8) == 3U &&
                static_cast<std::int32_t>(
-                   read_u32_le(packets[2].data() + 20)) == -32768 &&
+                   read_u32_le(packets[3].data() + 20)) == -32768 &&
                static_cast<std::int32_t>(
-                   read_u32_le(packets[2].data() + 24)) == 32767,
+                   read_u32_le(packets[3].data() + 24)) == 32767,
            "连续 KMBOX NET 命令序号必须递增且保留有符号边界");
 }
 
+void test_kmbox_monitor_input_and_stale_release() {
+    FakeKmboxDevice device({AckMode::VALID, AckMode::VALID});
+    auto mouse = MouseDeviceFactory::create(make_config(device.port()));
+    expect(mouse && mouse->open(), "KMBOX monitor 输入测试必须先连接");
+    expect(device.send_monitor(0x02U, {0x4dU, 0x41U}),
+           "假 KMBOX 必须能发送右键、End 与 F8 物理报告");
+    InputSnapshot snapshot;
+    for (int retry = 0; retry < 50; ++retry) {
+        mouse->poll_input(snapshot);
+        if (snapshot.status == InputMonitorStatus::READY) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    expect(snapshot.status == InputMonitorStatus::READY &&
+               snapshot.virtual_keys[0x02] &&
+               snapshot.virtual_keys[0x23] &&
+               snapshot.virtual_keys[0x77],
+           "KMBOX monitor 必须映射右键、End 和 F8");
+
+    const std::uint64_t pressed_sequence = snapshot.sequence;
+    expect(device.send_monitor(0U), "假 KMBOX 必须能发送全释放报告");
+    for (int retry = 0; retry < 50; ++retry) {
+        mouse->poll_input(snapshot);
+        if (snapshot.sequence > pressed_sequence) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    expect(snapshot.status == InputMonitorStatus::READY &&
+               !snapshot.virtual_keys[0x02] &&
+               !snapshot.virtual_keys[0x23] &&
+               !snapshot.virtual_keys[0x77],
+           "KMBOX monitor 释放报告不得保留旧按键状态");
+
+    expect(device.send_monitor(0x02U), "陈旧测试必须先发送右键按下");
+    std::this_thread::sleep_for(std::chrono::milliseconds(750));
+    mouse->poll_input(snapshot);
+    expect(snapshot.status == InputMonitorStatus::STALE &&
+               !snapshot.virtual_keys[0x02],
+           "KMBOX monitor 断流后必须 fail-closed 释放右键");
+}
+
 void test_invalid_commands_are_not_sent() {
-    FakeKmboxDevice device({AckMode::VALID});
+    FakeKmboxDevice device({AckMode::VALID, AckMode::VALID});
     expect(device.valid(), "非法命令测试假设备必须创建成功");
     if (!device.valid()) return;
     auto mouse = MouseDeviceFactory::create(make_config(device.port()));
@@ -397,7 +507,7 @@ void test_invalid_commands_are_not_sent() {
                mouse->status() == MouseStatus::INVALID_COMMAND,
            "超出 int16 负边界的移动必须在发送前拒绝");
     device.finish();
-    expect(device.packets().size() == 1,
+    expect(device.packets().size() == 2,
            "非法移动不得产生握手之外的数据报");
 }
 
@@ -427,7 +537,8 @@ void test_open_response_failure(AckMode mode,
 }
 
 void test_move_response_failure() {
-    FakeKmboxDevice device({AckMode::VALID, AckMode::WRONG_SEQUENCE});
+    FakeKmboxDevice device({AckMode::VALID, AckMode::VALID,
+                             AckMode::WRONG_SEQUENCE});
     expect(device.valid(), "移动 ACK 失败假设备必须创建成功");
     if (!device.valid()) return;
     auto mouse = MouseDeviceFactory::create(make_config(device.port()));
@@ -442,29 +553,34 @@ void test_makcu_disabled_does_not_access_serial() {
     MouseConfig config;
     config.backend = MouseBackend::MAKCU;
     config.allow_send_input = false;
-    config.makcu_port = "not-a-com-port";
+    config.makcu_port = "COM7";
+    config.makcu_baud_rate = 4000000;
     auto state = std::make_shared<FakeMakcuState>();
+    state->responses = {makcu_baud_response(4000000U),
+                        makcu_stream_response(0x0cU),
+                        makcu_stream_response(0xa5U)};
     auto mouse = make_fake_makcu(config, state);
     expect(mouse && mouse->open() &&
                mouse->status() == MouseStatus::DISABLED,
-           "未授权 MAKCU 应在串口参数校验前进入 DISABLED");
+           "未授权 MAKCU 仍应打开同一设备监听并保持 DISABLED 输出状态");
     expect(mouse && !mouse->move({1, 1}) &&
                mouse->status() == MouseStatus::DISABLED,
            "未授权 MAKCU 不得发送移动命令");
-    expect(state->open_calls == 0 && state->writes.empty(),
-           "未授权 MAKCU 不得打开串口或写协议帧");
+    expect(state->open_calls == 1 && state->writes.size() == 3U,
+           "未授权 MAKCU 只允许 baud 与两条监听配置，不得发送移动帧");
 
     auto production_mouse = MouseDeviceFactory::create(config);
     expect(std::string(MouseBackendName(MouseBackend::MAKCU)) == "makcu" &&
-               production_mouse && production_mouse->open() &&
-               production_mouse->status() == MouseStatus::DISABLED,
-           "生产工厂必须创建 MAKCU 且在禁用状态不校验无效 COM 口");
+               production_mouse && !production_mouse->open(),
+           "生产工厂必须创建 MAKCU 且校验监听所需 COM 口");
 }
 
 void test_makcu_binary_protocol_and_boundaries() {
     auto state = std::make_shared<FakeMakcuState>();
     state->responses = {
         makcu_baud_response(4000000U),
+        makcu_stream_response(0x0cU),
+        makcu_stream_response(0xa5U),
         makcu_move_response(),
         makcu_move_response(),
     };
@@ -481,14 +597,20 @@ void test_makcu_binary_protocol_and_boundaries() {
     expect(state->open_calls == 1 && state->port == "COM7" &&
                state->baud_rate == 4000000U,
            "MAKCU 必须使用显式 COM 口与 4M 波特率打开串口");
-    expect(state->writes.size() == 3U,
-           "MAKCU 成功路径应写一次 baud 查询和两次 move");
-    if (state->writes.size() == 3U) {
+    expect(state->writes.size() == 5U,
+           "MAKCU 成功路径应写 baud、鼠标流、键盘流和两次 move");
+    if (state->writes.size() == 5U) {
         expect(state->writes[0] ==
                    std::vector<std::uint8_t>{
                        kMakcuFrameStart, kMakcuBaudCommand, 0U, 0U},
                "MAKCU open 必须使用 V2 baud getter 完成设备握手");
-        const auto& first = state->writes[1];
+        expect(state->writes[1] ==
+                   std::vector<std::uint8_t>{kMakcuFrameStart, 0x0cU, 2U, 0U, 1U, 10U},
+               "MAKCU open 必须启用鼠标物理流");
+        expect(state->writes[2] ==
+                   std::vector<std::uint8_t>{kMakcuFrameStart, 0xa5U, 2U, 0U, 1U, 10U},
+               "MAKCU open 必须启用键盘物理流");
+        const auto& first = state->writes[3];
         expect(first.size() == 11U && first[0] == kMakcuFrameStart &&
                    first[1] == kMakcuMoveCommand && first[2] == 7U &&
                    first[3] == 0U &&
@@ -500,19 +622,18 @@ void test_makcu_binary_protocol_and_boundaries() {
                        (static_cast<std::uint16_t>(first[7]) << 8U)) == -45 &&
                    first[8] == 1U && first[9] == 0U && first[10] == 0U,
                "MAKCU move 必须是 11 字节 V2 小端序直线帧");
-        const auto& boundary = state->writes[2];
+        const auto& boundary = state->writes[4];
         expect(boundary[4] == 0U && boundary[5] == 0x80U &&
                    boundary[6] == 0xffU && boundary[7] == 0x7fU,
                "MAKCU move 必须保留 int16 正负边界位模式");
     }
-    expect(state->write_timeouts_ms == std::vector<int>{90, 40, 40} &&
-               state->read_timeouts_ms.size() == 3U &&
+    expect(state->write_timeouts_ms == std::vector<int>{90, 90, 90, 40, 40} &&
+               state->read_timeouts_ms.size() >= 15U &&
                state->read_timeouts_ms[0] > 0 &&
                state->read_timeouts_ms[0] <= 90 &&
-               state->read_timeouts_ms[1] > 0 &&
-               state->read_timeouts_ms[1] <= 40 &&
-               state->read_timeouts_ms[2] > 0 &&
-               state->read_timeouts_ms[2] <= 40,
+               std::all_of(state->read_timeouts_ms.begin(),
+                           state->read_timeouts_ms.end(),
+                           [](int timeout) { return timeout > 0 && timeout <= 90; }),
            "MAKCU 握手与命令必须共享各自单次端到端超时预算");
 }
 
@@ -537,7 +658,9 @@ void test_makcu_invalid_config_and_commands() {
            "MAKCU 必须拒绝非官方稳定档位波特率");
 
     auto state = std::make_shared<FakeMakcuState>();
-    state->responses = {makcu_baud_response(4000000U)};
+    state->responses = {makcu_baud_response(4000000U),
+                        makcu_stream_response(0x0cU),
+                        makcu_stream_response(0xa5U)};
     auto mouse = make_fake_makcu(make_makcu_config(), state);
     expect(mouse && mouse->open(), "MAKCU 非法命令测试必须先握手成功");
     expect(mouse && !mouse->move({0, 0}) &&
@@ -546,20 +669,22 @@ void test_makcu_invalid_config_and_commands() {
     expect(mouse && !mouse->move({32768, 0}) &&
                mouse->status() == MouseStatus::INVALID_COMMAND,
            "MAKCU 超出 int16 的移动必须在写串口前拒绝");
-    expect(state->writes.size() == 1U,
-           "MAKCU 非法移动不得产生握手之外的协议帧");
+    expect(state->writes.size() == 3U,
+           "MAKCU 非法移动不得产生握手和两条监听配置之外的协议帧");
 
     auto minimum_timeout_state = std::make_shared<FakeMakcuState>();
     minimum_timeout_state->responses = {
-        makcu_baud_response(4000000U), makcu_move_response()};
+        makcu_baud_response(4000000U), makcu_stream_response(0x0cU),
+        makcu_stream_response(0xa5U), makcu_move_response()};
     auto minimum_timeout_config = make_makcu_config();
     minimum_timeout_config.makcu_command_timeout_ms = 1;
     auto minimum_timeout_mouse = make_fake_makcu(
         minimum_timeout_config, minimum_timeout_state);
     expect(minimum_timeout_mouse && minimum_timeout_mouse->open() &&
                minimum_timeout_mouse->move({1, 0}) &&
-               minimum_timeout_state->read_timeouts_ms.size() == 2U &&
-               minimum_timeout_state->read_timeouts_ms[1] == 1,
+               std::find(minimum_timeout_state->read_timeouts_ms.begin(),
+                         minimum_timeout_state->read_timeouts_ms.end(), 1) !=
+                   minimum_timeout_state->read_timeouts_ms.end(),
            "MAKCU 1 ms 合法下边界不得因剩余预算截断为零");
 }
 
@@ -582,9 +707,29 @@ void test_makcu_response_failures() {
                wrong_baud_mouse->status() == MouseStatus::INVALID_RESPONSE,
            "MAKCU 设备波特率响应与配置不一致时必须失败关闭");
 
+    auto rejected_mouse_stream_state = std::make_shared<FakeMakcuState>();
+    rejected_mouse_stream_state->responses = {
+        makcu_baud_response(4000000U), makcu_stream_response(0x0cU, 1U)};
+    auto rejected_mouse_stream = make_fake_makcu(
+        make_makcu_config(), rejected_mouse_stream_state);
+    expect(rejected_mouse_stream && !rejected_mouse_stream->open() &&
+               rejected_mouse_stream->status() == MouseStatus::INVALID_RESPONSE,
+           "MAKCU 鼠标流启用被拒绝时必须失败关闭");
+
+    auto rejected_keyboard_stream_state = std::make_shared<FakeMakcuState>();
+    rejected_keyboard_stream_state->responses = {
+        makcu_baud_response(4000000U), makcu_stream_response(0x0cU),
+        makcu_stream_response(0xa5U, 1U)};
+    auto rejected_keyboard_stream = make_fake_makcu(
+        make_makcu_config(), rejected_keyboard_stream_state);
+    expect(rejected_keyboard_stream && !rejected_keyboard_stream->open() &&
+               rejected_keyboard_stream->status() == MouseStatus::INVALID_RESPONSE,
+           "MAKCU 键盘流启用被拒绝时必须失败关闭");
+
     auto rejected_state = std::make_shared<FakeMakcuState>();
     rejected_state->responses = {
-        makcu_baud_response(4000000U), makcu_move_response(1U)};
+        makcu_baud_response(4000000U), makcu_stream_response(0x0cU),
+        makcu_stream_response(0xa5U), makcu_move_response(1U)};
     auto rejected_mouse = make_fake_makcu(
         make_makcu_config(), rejected_state);
     expect(rejected_mouse && rejected_mouse->open() &&
@@ -594,7 +739,8 @@ void test_makcu_response_failures() {
 
     auto malformed_state = std::make_shared<FakeMakcuState>();
     malformed_state->responses = {
-        makcu_baud_response(4000000U),
+        makcu_baud_response(4000000U), makcu_stream_response(0x0cU),
+        makcu_stream_response(0xa5U),
         {kMakcuFrameStart, 0xffU, 1U, 0U, 0U}};
     auto malformed_mouse = make_fake_makcu(
         make_makcu_config(), malformed_state);
@@ -602,6 +748,49 @@ void test_makcu_response_failures() {
                !malformed_mouse->move({2, -1}) &&
                malformed_mouse->status() == MouseStatus::INVALID_RESPONSE,
            "MAKCU 错误命令码 ACK 必须返回 INVALID_RESPONSE");
+}
+
+void test_makcu_interleaved_input_streams() {
+    auto state = std::make_shared<FakeMakcuState>();
+    state->responses = {
+        makcu_baud_response(4000000U),
+        makcu_stream_response(0x0cU),
+        makcu_stream_response(0xa5U),
+        makcu_mouse_stream(0x02U),
+        makcu_keyboard_stream({0x4dU, 0x41U}),
+        makcu_move_response(),
+    };
+    auto mouse = make_fake_makcu(make_makcu_config(), state);
+    expect(mouse && mouse->open(), "MAKCU 交错流测试必须先完成监听握手");
+    expect(mouse && mouse->move({3, -2}),
+           "MAKCU 输入流先于 move ACK 时仍必须匹配正确 ACK");
+    InputSnapshot snapshot;
+    expect(mouse && mouse->poll_input(snapshot) &&
+               snapshot.status == InputMonitorStatus::READY &&
+               snapshot.virtual_keys[0x02] &&
+               snapshot.virtual_keys[0x23] &&
+               snapshot.virtual_keys[0x77],
+           "MAKCU 同一串口必须发布右键、End 与 F8 物理状态");
+
+    state->responses.push_back(makcu_mouse_stream(0U));
+    state->responses.push_back(makcu_keyboard_stream({}));
+    expect(mouse && mouse->poll_input(snapshot) &&
+               snapshot.status == InputMonitorStatus::READY &&
+               !snapshot.virtual_keys[0x02] &&
+               !snapshot.virtual_keys[0x23] &&
+               !snapshot.virtual_keys[0x77] &&
+               std::find(state->read_timeouts_ms.begin(),
+                         state->read_timeouts_ms.end(), 0) !=
+                   state->read_timeouts_ms.end(),
+           "MAKCU poll 必须用非阻塞首字节探测并发布物理全释放");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(720));
+    expect(mouse && mouse->poll_input(snapshot) &&
+               snapshot.status == InputMonitorStatus::STALE &&
+               !snapshot.virtual_keys[0x02] &&
+               !snapshot.virtual_keys[0x23] &&
+               !snapshot.virtual_keys[0x77],
+           "MAKCU 输入流陈旧后必须失败关闭为全释放");
 }
 
 } // namespace
@@ -620,6 +809,7 @@ int main() {
 
     test_disabled_does_not_access_network();
     test_packet_layout_and_sequence();
+    test_kmbox_monitor_input_and_stale_release();
     test_invalid_commands_are_not_sent();
     test_invalid_config();
     test_open_response_failure(
@@ -639,6 +829,7 @@ int main() {
     test_makcu_binary_protocol_and_boundaries();
     test_makcu_invalid_config_and_commands();
     test_makcu_response_failures();
+    test_makcu_interleaved_input_streams();
 
     Log::shutdown();
     WSACleanup();

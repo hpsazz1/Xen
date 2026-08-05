@@ -63,20 +63,22 @@ OR，物理输出急停和运行管线启停按每个物理键的独立上升沿
 禁用状态下仍可查看其生效条件。物理输出急停只锁存输出安全门，不停止截图和检测，释放急停键
 后还必须在界面中手动复位。
 
-KMBOX NET 只实现 Runtime 当前需要的相对移动，不包含旧项目的 monitor、按键屏蔽、LCD 或
-自动轨迹接口。配置需填写设备 IPv4、端口和屏幕显示的 8 位十六进制 UUID；仓库不提供设备
+KMBOX NET 实现 Runtime 相对移动和只读物理键鼠 monitor，不包含按键屏蔽、LCD 或自动轨迹
+接口。配置需填写设备 IPv4、端口和屏幕显示的 8 位十六进制 UUID；仓库不提供设备
 凭据默认值。后端使用 16 字节 connect 和 72 字节 move 小端序数据报，并严格校验 ACK 的来源
 地址、命令码和连续序号。任一发送、超时或 ACK 校验失败都会返回 Mouse 失败，Runtime 随即
-急停。未开启物理输出时不会初始化 Winsock 或访问设备。
+急停。未开启物理输出时仍会建立只读 monitor 会话，用于同一 KMBOX 上的右键、End、F8 与
+键盘监听；`move()` 仍由配置、武装、按住和急停四重门严格禁止。
 
 KMBOX 的 `dx_counts/dy_counts` 是 Aim 在主机 FOV 坐标下计算出的相对鼠标 counts，不是辅机
 桌面坐标。主机 `2560x1440`、辅机 `1920x1080` 时仍以主机准星和 ROI 计算；辅机分辨率仅影响
 Overlay 显示，不得对 KMBOX 命令再做一次 `1920/2560` 或 `1080/1440` 缩放。
 
-MAKCU 同样只实现 Runtime 所需的相对移动。配置必须显式填写 `COM1..COM256`，波特率仅允许
-官方稳定档位 115200 或 4,000,000 bps；默认 115200。后端使用 KM Host Protocol v3.9 的 V2
-二进制协议：`open()` 通过 `baud` getter 核对设备响应，每条 `move` 写入 11 字节固定帧并严格
-校验 5 字节状态 ACK。未授权时不会打开 COM 口，任一超时、畸形响应或设备拒绝都会使 Runtime
+MAKCU 配置必须显式填写 `COM1..COM256`，并固定使用 4,000,000 bps；官方物理鼠标和键盘
+streaming 要求至少 1 Mbps，因此 115200 不能满足完整后端契约。后端使用 KM Host Protocol v3.9
+的 V2 二进制协议：`open()` 通过 `baud` getter 核对设备响应并启用 raw mouse/keyboard stream，
+每条 `move` 写入 11 字节固定帧；输入流可与 5 字节状态 ACK 交错，读取状态机会按命令和长度分流。
+未授权时仍打开 COM 口做只读监听，但不会发送移动；任一超时、畸形响应或设备拒绝都会使 Runtime
 急停。MAKCU 与 KMBOX 都直接消费 Aim counts，不进行显示分辨率缩放。
 
 ## 目录结构
@@ -282,8 +284,7 @@ XUDP 提供帧号、分片、主机几何和 JPEG SHA-256，严格生产默认�
   -PhysicalOutputConfirmation XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT
 ```
 
-MAKCU 需显式提供 COM 口，波特率必须与设备启动指示灯对应（1 闪为 115200，4 闪为
-4,000,000）：
+MAKCU 需显式提供 COM 口，设备必须处于 4,000,000 bps 档位：
 
 ```powershell
 .\scripts\benchmark_mouse.ps1 `

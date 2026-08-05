@@ -497,8 +497,7 @@ bool validate_app_config(const AppConfig& config,
         const bool makcu_invalid =
             config.mouse.backend == MouseBackend::MAKCU &&
             (!valid_makcu_port(config.mouse.makcu_port) ||
-             (config.mouse.makcu_baud_rate != 115200 &&
-              config.mouse.makcu_baud_rate != 4000000) ||
+             config.mouse.makcu_baud_rate != 4000000 ||
              config.mouse.makcu_connect_timeout_ms <= 0 ||
              config.mouse.makcu_connect_timeout_ms > 10000 ||
              config.mouse.makcu_command_timeout_ms <= 0 ||

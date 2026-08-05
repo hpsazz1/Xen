@@ -67,6 +67,26 @@ public:
         return true;
     }
 
+    bool poll_input(InputSnapshot& snapshot) noexcept override {
+        snapshot = {};
+        if (status_.load(std::memory_order_acquire) == MouseStatus::CLOSED) {
+            snapshot.status = InputMonitorStatus::CLOSED;
+            return true;
+        }
+        try {
+            for (int virtual_key = 1; virtual_key <= 0xff; ++virtual_key) {
+                snapshot.virtual_keys[static_cast<std::size_t>(virtual_key)] =
+                    (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
+            }
+            snapshot.status = InputMonitorStatus::READY;
+            snapshot.sequence = ++input_sequence_;
+            return true;
+        } catch (...) {
+            snapshot.status = InputMonitorStatus::FAILURE;
+            return false;
+        }
+    }
+
     void close() noexcept override {
         status_.store(MouseStatus::CLOSED, std::memory_order_release);
     }
@@ -91,6 +111,7 @@ private:
 
     MouseConfig config_;
     std::atomic<MouseStatus> status_{MouseStatus::CLOSED};
+    std::uint64_t input_sequence_ = 0;
     mutable std::mutex error_mutex_;
     std::string last_error_;
 };

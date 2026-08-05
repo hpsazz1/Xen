@@ -18,6 +18,7 @@
 #endif
 
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,21 @@ void append_message(std::string& message, const std::string& addition) {
     if (addition.empty()) return;
     if (!message.empty()) message += "；";
     message += addition;
+}
+
+bool same_mouse_config(const MouseConfig& first,
+                       const MouseConfig& second) noexcept {
+    return first.backend == second.backend &&
+           first.allow_send_input == second.allow_send_input &&
+           first.kmbox_ip == second.kmbox_ip &&
+           first.kmbox_port == second.kmbox_port &&
+           first.kmbox_uuid == second.kmbox_uuid &&
+           first.kmbox_connect_timeout_ms == second.kmbox_connect_timeout_ms &&
+           first.kmbox_command_timeout_ms == second.kmbox_command_timeout_ms &&
+           first.makcu_port == second.makcu_port &&
+           first.makcu_baud_rate == second.makcu_baud_rate &&
+           first.makcu_connect_timeout_ms == second.makcu_connect_timeout_ms &&
+           first.makcu_command_timeout_ms == second.makcu_command_timeout_ms;
 }
 
 } // namespace
@@ -136,7 +152,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     Runtime runtime;
-    KeyboardListener keyboard(config.keyboard);
+    std::shared_ptr<IMouseController> input_device;
+    if (auto created_mouse = MouseDeviceFactory::create(config.mouse)) {
+        input_device = std::shared_ptr<IMouseController>(
+            std::move(created_mouse));
+    }
+    if (!input_device || !input_device->open()) {
+        append_message(app_message, input_device
+            ? "物理键鼠监听后端初始化失败"
+            : "物理键鼠监听后端创建失败");
+    }
+    MouseConfig active_input_config = config.mouse;
+    KeyboardListener keyboard(config.keyboard, input_device);
     if (!keyboard.open()) {
         append_message(app_message, "全局快捷键初始化失败");
     }
@@ -209,7 +236,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             app_message = model_error;
             return;
         }
-        if (!runtime.start(runtime_config)) {
+        if (!runtime.start(runtime_config, input_device)) {
             app_message = "Runtime 启动失败。";
             return;
         }
@@ -373,11 +400,58 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                     release_restart_requested = true;
                     break;
                 }
-                KeyboardListener replacement(config.keyboard);
+                const bool input_backend_changed =
+                    !same_mouse_config(active_input_config, config.mouse);
+                bool input_reloaded = true;
+                bool input_rollback_persisted = true;
+                if (input_backend_changed) {
+                    stop_runtime_session();
+                    keyboard.close();
+                    if (input_device) input_device->close();
+                    std::shared_ptr<IMouseController> replacement_device;
+                    if (auto created = MouseDeviceFactory::create(config.mouse)) {
+                        replacement_device = std::shared_ptr<IMouseController>(
+                            std::move(created));
+                    }
+                    input_reloaded = replacement_device &&
+                                     replacement_device->open();
+                    if (input_reloaded) {
+                        input_device = std::move(replacement_device);
+                        active_input_config = config.mouse;
+                    } else {
+                        // 新配置失败时恢复旧会话，避免保存操作让急停/F8 一并失效。
+                        config.mouse = active_input_config;
+                        std::string rollback_error;
+                        if (!save_app_config(config_path, config,
+                                             rollback_error)) {
+                            input_rollback_persisted = false;
+                            LOG_ERROR("app", "键鼠后端配置回滚写入失败: {}",
+                                      rollback_error);
+                        }
+                        if (auto rollback = MouseDeviceFactory::create(
+                                active_input_config)) {
+                            input_device = std::shared_ptr<IMouseController>(
+                                std::move(rollback));
+                            if (!input_device->open()) input_device.reset();
+                        } else {
+                            input_device.reset();
+                        }
+                    }
+                }
+                KeyboardListener replacement(config.keyboard, input_device);
                 if (replacement.open()) {
                     keyboard.close();
                     keyboard = std::move(replacement);
-                    app_message = "配置已保存，快捷键已立即生效。";
+                    if (input_reloaded) {
+                        app_message =
+                            "配置已保存，键鼠后端与快捷键已立即生效。";
+                    } else if (input_rollback_persisted) {
+                        app_message =
+                            "新键鼠后端打开失败，配置与监听均已恢复旧会话。";
+                    } else {
+                        app_message = "新键鼠后端打开失败，当前监听已恢复旧会话，"
+                                      "但配置文件回滚失败。";
+                    }
                 } else {
                     app_message = "配置已保存，但快捷键重载失败。";
                 }
@@ -390,6 +464,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     runtime.stop();
     finish_debug_report();
     keyboard.close();
+    if (input_device) input_device->close();
     overlay.shutdown();
     crash_handler.uninstall();
     Log::shutdown();

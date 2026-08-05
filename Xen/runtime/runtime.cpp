@@ -57,7 +57,8 @@ struct Runtime::Impl {
     std::unique_ptr<ICapture> capture;
     std::unique_ptr<Detector> detector;
     std::unique_ptr<Aim> aim;
-    std::unique_ptr<IMouseController> mouse;
+    std::shared_ptr<IMouseController> mouse;
+    bool owns_mouse = false;
     std::thread capture_thread;
     std::thread pipeline_thread;
     std::thread detector_reload_thread;
@@ -139,7 +140,8 @@ struct Runtime::Impl {
         LOG_ERROR("runtime", "{}", error);
     }
 
-    bool initialize(const AppConfig& value) {
+    bool initialize(const AppConfig& value,
+                    std::shared_ptr<IMouseController> input_device = {}) {
         std::string validation_error;
         if (!validate_app_config(value, validation_error)) {
             set_error(validation_error);
@@ -204,8 +206,28 @@ struct Runtime::Impl {
             }
             LOG_INFO("runtime", "D3D11 GPU 三槽纹理已预创建并预备");
         }
-        mouse = MouseDeviceFactory::create(config.mouse);
-        if (!mouse || !mouse->open()) {
+        if (input_device) {
+            mouse = std::move(input_device);
+            owns_mouse = false;
+            if (mouse->status() == MouseStatus::CLOSED && !mouse->open()) {
+                set_error(mouse->last_error().empty()
+                              ? "共享 Mouse 设备打开失败" : mouse->last_error());
+                return false;
+            }
+            if (mouse->status() != MouseStatus::READY &&
+                mouse->status() != MouseStatus::DISABLED) {
+                set_error(mouse->last_error().empty()
+                              ? "共享 Mouse 设备不可用" : mouse->last_error());
+                return false;
+            }
+        } else {
+            auto owned_mouse = MouseDeviceFactory::create(config.mouse);
+            if (owned_mouse) {
+                mouse = std::shared_ptr<IMouseController>(std::move(owned_mouse));
+            }
+            owns_mouse = true;
+        }
+        if (!mouse || (owns_mouse && !mouse->open())) {
             set_error(mouse ? mouse->last_error() : "创建 Mouse 失败");
             return false;
         }
@@ -650,13 +672,14 @@ struct Runtime::Impl {
     }
 
     void release_modules() noexcept {
-        if (mouse) mouse->close();
+        if (mouse && owns_mouse) mouse->close();
         // CUDA registration 持有 D3D11 资源引用。先销毁 Detector/registration，
         // 再关闭 Capture 的 D3D11 设备，保持跨 API 释放顺序可解释。
         if (detector) detector->reset();
         if (capture) capture->close();
         if (aim) aim->reset();
         mouse.reset();
+        owns_mouse = false;
         capture.reset();
         detector.reset();
         aim.reset();
@@ -693,6 +716,11 @@ Runtime::~Runtime() {
 }
 
 bool Runtime::start(const AppConfig& config) noexcept {
+    return start(config, {});
+}
+
+bool Runtime::start(const AppConfig& config,
+                    std::shared_ptr<IMouseController> input_device) noexcept {
     if (!impl_) return false;
     std::lock_guard<std::mutex> lifecycle_lock(impl_->lifecycle_mutex);
     // 上次失败可能留下已退出但仍 joinable 的线程，先完整回收。
@@ -711,7 +739,7 @@ bool Runtime::start(const AppConfig& config) noexcept {
     }
     impl_->set_state(RuntimeState::STARTING);
     try {
-        if (!impl_->initialize(config)) {
+        if (!impl_->initialize(config, std::move(input_device))) {
             impl_->release_modules();
             impl_->set_state(RuntimeState::FAILED);
             return false;

@@ -373,8 +373,7 @@ bool validate_mouse_benchmark_options(
         }
     } else if (options.mouse.backend == MouseBackend::MAKCU) {
         if (!valid_makcu_port(options.mouse.makcu_port) ||
-            (options.mouse.makcu_baud_rate != 115200 &&
-             options.mouse.makcu_baud_rate != 4000000) ||
+            options.mouse.makcu_baud_rate != 4000000 ||
             options.mouse.makcu_connect_timeout_ms <= 0 ||
             options.mouse.makcu_connect_timeout_ms > 10000 ||
             options.mouse.makcu_command_timeout_ms <= 0 ||
@@ -912,7 +911,7 @@ std::string mouse_benchmark_usage() {
         "  [--dx-counts 1] [--dy-counts 0]\n"
         "  KMBOX: --kmbox-ip <IPv4> --kmbox-port <1..65535>\n"
         "         --kmbox-uuid <8位十六进制>\n"
-        "  MAKCU: --makcu-port <COM1..COM256> [--makcu-baud-rate 115200|4000000]\n"
+        "  MAKCU: --makcu-port <COM1..COM256> [--makcu-baud-rate 4000000]\n"
         "  设备:  [--connect-timeout-ms 1000] [--command-timeout-ms 300]\n"
         "说明: 工具会向系统或设备发送真实相对移动，每组均发送等量反向命令。\n";
 }

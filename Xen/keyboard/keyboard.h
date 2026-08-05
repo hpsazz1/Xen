@@ -6,6 +6,8 @@
 #include <memory>
 #include <vector>
 
+#include "mouse/mouse.h"
+
 enum class KeyboardStatus {
     CLOSED,
     READY,
@@ -51,6 +53,8 @@ struct KeyboardEvent {
 class KeyboardListener {
 public:
     explicit KeyboardListener(const KeyboardConfig& config);
+    KeyboardListener(const KeyboardConfig& config,
+                     std::shared_ptr<IMouseController> device);
     ~KeyboardListener();
 
     KeyboardListener(const KeyboardListener&) = delete;

@@ -16,15 +16,23 @@
 #include <utility>
 
 struct KeyboardListener::Impl {
-    explicit Impl(const KeyboardConfig& value) : config(value) {}
+    explicit Impl(const KeyboardConfig& value,
+                  std::shared_ptr<IMouseController> device_value = {})
+        : config(value), device(std::move(device_value)) {}
 
     KeyboardConfig config;
+    std::shared_ptr<IMouseController> device;
     KeyboardStatus status = KeyboardStatus::CLOSED;
     keyboard::detail::KeyboardEventState event_state;
 };
 
 KeyboardListener::KeyboardListener(const KeyboardConfig& config)
     : impl_(std::make_unique<Impl>(config)) {}
+
+KeyboardListener::KeyboardListener(
+        const KeyboardConfig& config,
+        std::shared_ptr<IMouseController> device)
+    : impl_(std::make_unique<Impl>(config, std::move(device))) {}
 
 KeyboardListener::~KeyboardListener() = default;
 
@@ -53,15 +61,29 @@ std::vector<KeyboardEvent> KeyboardListener::poll() noexcept {
     if (!impl_ || impl_->status != KeyboardStatus::READY) return events;
     try {
         std::array<bool, 256> key_active{};
-        const auto poll_binding = [&](const std::vector<int>& virtual_keys) {
-            for (const int virtual_key : virtual_keys) {
-                key_active[static_cast<std::size_t>(virtual_key)] =
-                    (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
+        if (impl_->device) {
+            InputSnapshot snapshot;
+            if (!impl_->device->poll_input(snapshot)) {
+                // 先让空状态进入事件归并，确保此前按住状态产生 release，再标记失败。
+                snapshot = {};
+                snapshot.status = InputMonitorStatus::FAILURE;
+                impl_->status = KeyboardStatus::FAILURE;
             }
-        };
-        poll_binding(impl_->config.aim_hold_virtual_keys);
-        poll_binding(impl_->config.emergency_virtual_keys);
-        poll_binding(impl_->config.runtime_toggle_virtual_keys);
+            // WAITING/STALE/FAILURE 都按全释放处理，避免设备异常保留旧 hold。
+            if (snapshot.status == InputMonitorStatus::READY) {
+                key_active = snapshot.virtual_keys;
+            }
+        } else {
+            const auto poll_binding = [&](const std::vector<int>& virtual_keys) {
+                for (const int virtual_key : virtual_keys) {
+                    key_active[static_cast<std::size_t>(virtual_key)] =
+                        (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
+                }
+            };
+            poll_binding(impl_->config.aim_hold_virtual_keys);
+            poll_binding(impl_->config.emergency_virtual_keys);
+            poll_binding(impl_->config.runtime_toggle_virtual_keys);
+        }
         const auto polled = keyboard::detail::update_keyboard_events(
             impl_->event_state, impl_->config, key_active);
         events.reserve(polled.count);

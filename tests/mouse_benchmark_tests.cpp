@@ -252,6 +252,13 @@ void test_parse_and_safety_gate() {
                options.mouse.makcu_command_timeout_ms == 80,
            "完整 MAKCU 设备参数应解析到独立 MouseConfig 字段: " + error);
 
+    auto slow_makcu = valid_makcu;
+    slow_makcu[7] = L"115200";
+    expect(parse_mouse_benchmark_options(
+               slow_makcu, options, error) ==
+               MouseBenchmarkParseStatus::INVALID,
+           "MAKCU 基准必须拒绝不支持物理 streaming 的 115200");
+
     auto makcu_with_kmbox = valid_makcu;
     makcu_with_kmbox.insert(
         makcu_with_kmbox.end() - 3,
@@ -274,7 +281,7 @@ void test_summary() {
 }
 
 void test_successful_kmbox_run_and_report() {
-    FakeKmboxDevice device(std::vector<AckMode>(9, AckMode::VALID));
+    FakeKmboxDevice device(std::vector<AckMode>(10, AckMode::VALID));
     expect(device.valid(), "成功基准假 KMBOX 必须创建成功");
     if (!device.valid()) return;
     const auto report_path = unique_report_path(L"success");
@@ -296,15 +303,15 @@ void test_successful_kmbox_run_and_report() {
            "成功运行必须原子发布 JSON 报告");
 
     const auto packets = device.packets();
-    expect(packets.size() == 9,
-           "握手、首条补偿、预热和正式样本应产生九个数据报");
-    if (packets.size() == 9) {
+    expect(packets.size() == 10,
+           "握手、monitor、首条补偿、预热和正式样本应产生十个数据报");
+    if (packets.size() == 10) {
         expect(packets.front().size() == kHeaderBytes &&
                    read_u32_le(packets.front().data() + 12) ==
                        kConnectCommand,
                "首包必须是 KMBOX 连接握手");
-        for (std::size_t index = 1; index < packets.size(); ++index) {
-            const int direction = index % 2U == 1U ? 1 : -1;
+        for (std::size_t index = 2; index < packets.size(); ++index) {
+            const int direction = (index - 2U) % 2U == 0U ? 1 : -1;
             expect(packets[index].size() == kMovePacketBytes &&
                        read_u32_le(packets[index].data() + 12) ==
                            kMouseMoveCommand &&
@@ -333,7 +340,7 @@ void test_successful_kmbox_run_and_report() {
 
 void test_failed_command_does_not_publish() {
     FakeKmboxDevice device(
-        {AckMode::VALID, AckMode::WRONG_SEQUENCE});
+        {AckMode::VALID, AckMode::VALID, AckMode::WRONG_SEQUENCE});
     expect(device.valid(), "失败基准假 KMBOX 必须创建成功");
     if (!device.valid()) return;
     const auto report_path = unique_report_path(L"failure");
@@ -349,7 +356,7 @@ void test_failed_command_does_not_publish() {
                result.final_status == MouseStatus::INVALID_RESPONSE &&
                !result.complete && !std::filesystem::exists(report_path),
            "失败样本必须单独计数且不得发布半份报告");
-    expect(device.packets().size() == 2,
+    expect(device.packets().size() == 3,
            "首条失败后必须立即停止，不发送补偿、预热或正式命令");
 }
 

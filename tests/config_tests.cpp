@@ -369,6 +369,9 @@ void test_invalid_config() {
     config.mouse.makcu_port = "com256";
     expect(validate_app_config(config, error),
            "MAKCU 应接受大小写不敏感的 COM256 上边界");
+    config.mouse.makcu_baud_rate = 115200;
+    expect(!validate_app_config(config, error),
+           "MAKCU 115200 不满足物理键鼠 streaming 最低速率，必须拒绝");
     config.mouse.makcu_baud_rate = 921600;
     expect(!validate_app_config(config, error),
            "MAKCU 必须拒绝非官方稳定档位波特率");

@@ -3079,7 +3079,7 @@ struct Overlay::Impl {
         const bool makcu =
             app_config.mouse.backend == MouseBackend::MAKCU;
         begin_config_panel(
-            "mouse_panel", "鼠标输出",
+            "mouse_panel", "键鼠后端",
             kmbox ? 268.0f : (makcu ? 228.0f : 88.0f));
         if (begin_form("mouse_form", 126.0f)) {
             const char* backends[] = {
@@ -3087,7 +3087,7 @@ struct Overlay::Impl {
             int backend = static_cast<int>(app_config.mouse.backend);
             form_row(
                 "后端",
-                "选择物理鼠标命令的提交方式；Win32 使用 SendInput，KMBOX NET 和 MAKCU 使用外部设备并等待协议确认。");
+                "同时选择物理鼠标输出和键鼠监听来源；Win32 读取本机键鼠，KMBOX NET/MAKCU 读取连接在对应设备上的物理键鼠并等待输出协议确认。");
             if (ImGui::Combo(
                     "##mouse_backend", &backend, backends,
                     static_cast<int>(std::size(backends)))) {
@@ -3129,18 +3129,13 @@ struct Overlay::Impl {
                     "MAKCU 设备所在的 Windows 串口名称，例如 COM3；打开失败时不会允许物理输出。");
                 ImGui::InputText(
                     "##makcu_port", &app_config.mouse.makcu_port);
-                const char* baud_rates[] = {"115200", "4000000"};
-                int baud_index =
-                    app_config.mouse.makcu_baud_rate == 4000000 ? 1 : 0;
                 form_row(
                     "波特率",
-                    "选择 MAKCU 串口通信速率；必须与设备固件当前配置一致。");
-                if (ImGui::Combo(
-                        "##makcu_baud_rate", &baud_index, baud_rates,
-                        static_cast<int>(std::size(baud_rates)))) {
-                    app_config.mouse.makcu_baud_rate =
-                        baud_index == 1 ? 4000000 : 115200;
-                }
+                    "MAKCU 物理鼠标和键盘流要求至少 1 Mbps；Xen 固定使用设备稳定档 4,000,000 bps，115,200 只支持输出命令，不能作为完整输入后端。");
+                ImGui::BeginDisabled();
+                ImGui::InputInt(
+                    "##makcu_baud_rate", &app_config.mouse.makcu_baud_rate);
+                ImGui::EndDisabled();
                 form_row(
                     "连接超时 / ms",
                     "打开并握手 MAKCU 串口的最长时间；失败时设备保持不可用。");
@@ -3270,17 +3265,17 @@ struct Overlay::Impl {
         if (begin_form("keyboard_form", 126.0f)) {
             render_hotkey_row(
                 "运行管线启停", "##runtime_toggle_virtual_keys",
-                "按一次启动或停止整个 Runtime 管线；停止会结束截图、检测、瞄准和物理输出。",
+                "由当前键鼠后端监听；按一次启动或停止整个 Runtime 管线，停止会结束截图、检测、瞄准和物理输出。",
                 HotkeyBindingTarget::RUNTIME_TOGGLE,
                 app_config.keyboard.runtime_toggle_virtual_keys, key_active);
             render_hotkey_row(
                 "瞄准输出（按住）", "##aim_hold_virtual_keys",
-                "仅在 Runtime 已运行、物理输出已允许且已武装时生效；按住期间放行瞄准鼠标输出，全部释放后立即关闭。",
+                "由当前键鼠后端监听；仅在 Runtime 已运行、物理输出已允许且已武装时生效，全部释放、监听断流或状态陈旧后立即关闭。",
                 HotkeyBindingTarget::AIM_HOLD,
                 app_config.keyboard.aim_hold_virtual_keys, key_active);
             render_hotkey_row(
                 "物理输出急停", "##emergency_virtual_keys",
-                "按下后立即锁定物理输出，但不会停止截图和检测 Runtime；释放急停键后仍需在界面中手动复位。",
+                "由当前键鼠后端监听；按下后立即锁定物理输出，但不会停止截图和检测 Runtime，释放后仍需在界面中手动复位。",
                 HotkeyBindingTarget::EMERGENCY,
                 app_config.keyboard.emergency_virtual_keys, key_active);
             ImGui::EndTable();

@@ -47,6 +47,21 @@ void expect(bool condition, const std::string& message) {
     std::cerr << "[失败] " << message << '\n';
 }
 
+class FakeInputDevice final : public IMouseController {
+public:
+    bool open() noexcept override { return true; }
+    bool move(const MouseMoveCommand&) noexcept override { return false; }
+    bool poll_input(InputSnapshot& snapshot) noexcept override {
+        snapshot = snapshot_;
+        return true;
+    }
+    void close() noexcept override {}
+    MouseStatus status() const noexcept override { return MouseStatus::DISABLED; }
+    std::string last_error() const override { return {}; }
+
+    InputSnapshot snapshot_;
+};
+
 void test_mouse_disabled_by_default() {
     MouseConfig config;
     auto mouse = MouseDeviceFactory::create(config);
@@ -137,6 +152,37 @@ void test_keyboard_event_state_machine() {
     expect(polled.count == 1 &&
                polled.events[0].type == KeyboardEventType::RUNTIME_TOGGLE,
            "同一个 F8 释放后再次按下必须产生第二次运行切换上升沿");
+}
+
+void test_keyboard_listener_uses_selected_device() {
+    auto device = std::make_shared<FakeInputDevice>();
+    device->snapshot_.status = InputMonitorStatus::READY;
+    KeyboardListener listener(KeyboardConfig{}, device);
+    expect(listener.open(), "共享输入设备监听器必须可初始化");
+
+    device->snapshot_.virtual_keys[0x02] = true;
+    auto events = listener.poll();
+    expect(events.size() == 1U &&
+               events[0].type == KeyboardEventType::AIM_HOLD_CHANGED &&
+               events[0].active,
+           "所选设备右键必须产生瞄准按住事件");
+
+    device->snapshot_.status = InputMonitorStatus::STALE;
+    events = listener.poll();
+    expect(events.size() == 1U &&
+               events[0].type == KeyboardEventType::AIM_HOLD_CHANGED &&
+               !events[0].active,
+           "所选设备断流必须立即产生瞄准释放事件");
+
+    device->snapshot_ = {};
+    device->snapshot_.status = InputMonitorStatus::READY;
+    device->snapshot_.virtual_keys[0x23] = true;
+    device->snapshot_.virtual_keys[0x77] = true;
+    events = listener.poll();
+    expect(events.size() == 2U &&
+               events[0].type == KeyboardEventType::EMERGENCY_STOP &&
+               events[1].type == KeyboardEventType::RUNTIME_TOGGLE,
+           "所选设备 End/F8 必须按急停优先顺序生成事件");
 }
 
 void test_invalid_capture_config() {
@@ -1161,6 +1207,7 @@ int main() {
     test_mouse_disabled_by_default();
     test_invalid_keyboard_config();
     test_keyboard_event_state_machine();
+    test_keyboard_listener_uses_selected_device();
     test_invalid_capture_config();
     test_udp_latest_frame_pool();
     test_udp_pool_is_bounded();

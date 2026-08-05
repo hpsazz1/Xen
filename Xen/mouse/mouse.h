@@ -2,6 +2,8 @@
 #define MOUSE_H
 
 #include <memory>
+#include <array>
+#include <cstdint>
 #include <string>
 
 enum class MouseBackend {
@@ -24,6 +26,20 @@ enum class MouseStatus {
     INVALID_RESPONSE,
 };
 
+enum class InputMonitorStatus {
+    CLOSED,
+    WAITING,
+    READY,
+    STALE,
+    FAILURE,
+};
+
+struct InputSnapshot {
+    InputMonitorStatus status = InputMonitorStatus::CLOSED;
+    std::array<bool, 256> virtual_keys{};
+    std::uint64_t sequence = 0;
+};
+
 const char* MouseStatusName(MouseStatus status) noexcept;
 
 struct MouseConfig {
@@ -37,9 +53,9 @@ struct MouseConfig {
     // 连接允许设备完成握手；热路径命令超时必须保持较短，避免长期阻塞 Pipeline。
     int kmbox_connect_timeout_ms = 1000;
     int kmbox_command_timeout_ms = 300;
-    // MAKCU 只接受显式 COM 口；波特率限制为设备官方稳定档位，避免主机与设备永久配置不一致。
+    // MAKCU 只接受显式 COM 口；完整物理键鼠 streaming 固定使用 4 Mbps。
     std::string makcu_port;
-    int makcu_baud_rate = 115200;
+    int makcu_baud_rate = 4000000;
     // 连接超时覆盖串口打开后的协议握手，命令超时覆盖每条 move 的写入与 ACK。
     int makcu_connect_timeout_ms = 1000;
     int makcu_command_timeout_ms = 300;
@@ -59,6 +75,8 @@ public:
 
     virtual bool open() noexcept = 0;
     virtual bool move(const MouseMoveCommand& command) noexcept = 0;
+    // 非阻塞取得与当前鼠标输出后端绑定的物理键鼠状态；失败或陈旧时必须全释放。
+    virtual bool poll_input(InputSnapshot& snapshot) noexcept = 0;
     virtual void close() noexcept = 0;
     virtual MouseStatus status() const noexcept = 0;
     virtual std::string last_error() const = 0;

@@ -8,6 +8,7 @@
 #endif
 
 #include "mouse/makcu_internal.h"
+#include "mouse/input_internal.h"
 
 #include "log/log.h"
 
@@ -34,6 +35,9 @@ constexpr std::size_t kQueryFrameBytes = 4U;
 constexpr std::size_t kMoveFrameBytes = 11U;
 constexpr std::size_t kBaudResponseBytes = 8U;
 constexpr std::size_t kSetterResponseBytes = 5U;
+constexpr std::size_t kMouseStreamFrameBytes = 12U;
+constexpr std::size_t kKeyboardStreamFrameBytes = 19U;
+constexpr std::size_t kMaximumFrameBytes = 68U;
 constexpr int kMaximumPortNumber = 256;
 constexpr int kMaximumConnectTimeoutMs = 10000;
 constexpr int kMaximumCommandTimeoutMs = 1000;
@@ -66,10 +70,6 @@ bool valid_makcu_port(std::string_view port) noexcept {
         value = value * 10 + static_cast<int>(character - '0');
     }
     return value >= 1 && value <= kMaximumPortNumber;
-}
-
-bool valid_makcu_baud_rate(int baud_rate) noexcept {
-    return baud_rate == 115200 || baud_rate == 4000000;
 }
 
 std::array<std::uint8_t, kQueryFrameBytes> make_baud_query() noexcept {
@@ -230,10 +230,13 @@ private:
 
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::milliseconds(timeout_ms);
+        // 仅输入流首字节允许 0 ms：仍发起一次重叠读并立即探测，避免把
+        // “非阻塞”误实现为完全不访问串口。命令与帧剩余部分继续使用正预算。
+        const bool nonblocking_read = reading && timeout_ms == 0;
         std::size_t completed = 0U;
         while (completed < byte_count) {
             const auto now = std::chrono::steady_clock::now();
-            if (now >= deadline) {
+            if (!nonblocking_read && now >= deadline) {
                 error = reading ? "读取 MAKCU 响应超时" :
                                   "写入 MAKCU 命令超时";
                 return mouse::detail::MakcuIoResult::TIMEOUT;
@@ -261,8 +264,10 @@ private:
                 }
                 const auto remaining = std::chrono::duration_cast<
                     std::chrono::milliseconds>(deadline - now);
-                const DWORD wait_ms = static_cast<DWORD>(
-                    (std::max)(std::int64_t{1}, remaining.count()));
+                const DWORD wait_ms = nonblocking_read
+                    ? 0U
+                    : static_cast<DWORD>((std::max)(
+                          std::int64_t{1}, remaining.count()));
                 const DWORD wait_result = WaitForSingleObject(event, wait_ms);
                 if (wait_result == WAIT_TIMEOUT) {
                     CancelIoEx(handle_, &operation);
@@ -326,13 +331,6 @@ public:
         close_locked();
         set_error({});
 
-        // 配置门必须在 COM 名称校验和 CreateFile 之前返回，确保禁用状态不触碰设备。
-        if (!config_.allow_send_input) {
-            status_.store(MouseStatus::DISABLED, std::memory_order_release);
-            LOG_INFO("mouse", "MAKCU 后端已禁用，未访问串口设备");
-            return true;
-        }
-
         try {
             if (!validate_config()) {
                 status_.store(MouseStatus::INVALID_CONFIG,
@@ -379,9 +377,48 @@ public:
             }
 
             connected_ = true;
-            status_.store(MouseStatus::READY, std::memory_order_release);
+            const std::array<std::uint8_t, 6U> mouse_stream{
+                kFrameStart, 0x0cU, 2U, 0U, 1U, 10U};
+            std::array<std::uint8_t, kSetterResponseBytes> stream_response{};
+            if (!exchange(mouse_stream, stream_response,
+                          config_.makcu_connect_timeout_ms, "鼠标监听")) {
+                close_locked();
+                return false;
+            }
+            if (stream_response !=
+                    std::array<std::uint8_t, kSetterResponseBytes>{
+                        kFrameStart, 0x0cU, 1U, 0U, 0U}) {
+                set_error("MAKCU 鼠标监听 ACK 非法或被设备拒绝");
+                status_.store(MouseStatus::INVALID_RESPONSE,
+                              std::memory_order_release);
+                close_locked();
+                return false;
+            }
+            const std::array<std::uint8_t, 6U> keyboard_stream{
+                kFrameStart, 0xa5U, 2U, 0U, 1U, 10U};
+            if (!exchange(keyboard_stream, stream_response,
+                          config_.makcu_connect_timeout_ms, "键盘监听")) {
+                close_locked();
+                return false;
+            }
+            if (stream_response !=
+                    std::array<std::uint8_t, kSetterResponseBytes>{
+                        kFrameStart, 0xa5U, 1U, 0U, 0U}) {
+                set_error("MAKCU 键盘监听 ACK 非法或被设备拒绝");
+                status_.store(MouseStatus::INVALID_RESPONSE,
+                              std::memory_order_release);
+                close_locked();
+                return false;
+            }
+            keyboard_keys_.fill(false);
+            mouse_buttons_ = 0;
+            input_received_ = false;
+            input_sequence_ = 0;
+            status_.store(config_.allow_send_input
+                              ? MouseStatus::READY : MouseStatus::DISABLED,
+                          std::memory_order_release);
             set_error({});
-            LOG_INFO("mouse", "MAKCU 后端已连接: port={}, baud={}",
+            LOG_INFO("mouse", "MAKCU 后端已连接并启用物理键鼠监听: port={}, baud={}",
                      config_.makcu_port, config_.makcu_baud_rate);
             return true;
         } catch (...) {
@@ -461,6 +498,44 @@ public:
         }
     }
 
+    bool poll_input(InputSnapshot& snapshot) noexcept override {
+        snapshot = {};
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
+        if (!connected_ || !transport_) {
+            snapshot.status = InputMonitorStatus::CLOSED;
+            return true;
+        }
+        MakcuFrame frame;
+        for (int count = 0; count < 16; ++count) {
+            const auto result = read_frame(frame, 0);
+            if (result == FrameReadResult::NO_DATA) break;
+            if (result != FrameReadResult::SUCCESS) {
+                set_error("MAKCU 物理输入流读取失败");
+                snapshot.status = InputMonitorStatus::FAILURE;
+                return true;
+            }
+            handle_stream_frame(frame);
+        }
+        if (!input_received_) {
+            snapshot.status = InputMonitorStatus::WAITING;
+            return true;
+        }
+        if (std::chrono::steady_clock::now() - input_received_at_ >
+            std::chrono::milliseconds(700)) {
+            snapshot.status = InputMonitorStatus::STALE;
+            return true;
+        }
+        snapshot.status = InputMonitorStatus::READY;
+        snapshot.virtual_keys = keyboard_keys_;
+        snapshot.virtual_keys[0x01] = (mouse_buttons_ & 0x01U) != 0;
+        snapshot.virtual_keys[0x02] = (mouse_buttons_ & 0x02U) != 0;
+        snapshot.virtual_keys[0x04] = (mouse_buttons_ & 0x04U) != 0;
+        snapshot.virtual_keys[0x05] = (mouse_buttons_ & 0x08U) != 0;
+        snapshot.virtual_keys[0x06] = (mouse_buttons_ & 0x10U) != 0;
+        snapshot.sequence = input_sequence_;
+        return true;
+    }
+
     void close() noexcept override {
         std::lock_guard<std::mutex> io_lock(io_mutex_);
         close_locked();
@@ -477,13 +552,85 @@ public:
     }
 
 private:
+    enum class FrameReadResult { SUCCESS, NO_DATA, FAILURE };
+
+    struct MakcuFrame {
+        std::array<std::uint8_t, kMaximumFrameBytes> bytes{};
+        std::size_t size = 0U;
+    };
+
+    FrameReadResult read_frame(MakcuFrame& frame,
+                               int timeout_ms) noexcept {
+        frame.size = 0U;
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds((std::max)(0, timeout_ms));
+        const auto remaining_timeout = [&]() noexcept {
+            if (timeout_ms == 0) return 1;
+            const auto remaining = std::chrono::duration_cast<
+                std::chrono::milliseconds>(deadline -
+                                           std::chrono::steady_clock::now()).count();
+            return static_cast<int>((std::max)(std::int64_t{1}, remaining));
+        };
+        std::uint8_t start = 0;
+        std::string error;
+        const auto first = transport_->read_exact(
+            std::span<std::uint8_t>(&start, 1U), timeout_ms, error);
+        if (first == mouse::detail::MakcuIoResult::TIMEOUT) {
+            return FrameReadResult::NO_DATA;
+        }
+        if (first != mouse::detail::MakcuIoResult::SUCCESS ||
+            start != kFrameStart) {
+            return FrameReadResult::FAILURE;
+        }
+        std::array<std::uint8_t, 3U> tail{};
+        if (transport_->read_exact(tail, remaining_timeout(), error) !=
+            mouse::detail::MakcuIoResult::SUCCESS) {
+            return FrameReadResult::FAILURE;
+        }
+        const std::size_t payload_size =
+            static_cast<std::size_t>(tail[1]) |
+            (static_cast<std::size_t>(tail[2]) << 8U);
+        if (payload_size > 64U) return FrameReadResult::FAILURE;
+        frame.size = 4U + payload_size;
+        frame.bytes[0] = start;
+        frame.bytes[1] = tail[0];
+        frame.bytes[2] = tail[1];
+        frame.bytes[3] = tail[2];
+        if (payload_size != 0U &&
+            transport_->read_exact(
+                std::span<std::uint8_t>(frame.bytes.data() + 4U, payload_size),
+                remaining_timeout(), error) !=
+                    mouse::detail::MakcuIoResult::SUCCESS) {
+            frame.size = 0U;
+            return FrameReadResult::FAILURE;
+        }
+        return FrameReadResult::SUCCESS;
+    }
+
+    void handle_stream_frame(const MakcuFrame& frame) noexcept {
+        if (frame.size == kMouseStreamFrameBytes &&
+            frame.bytes[1] == 0x0cU) {
+            mouse_buttons_ = frame.bytes[4];
+        } else if (frame.size == kKeyboardStreamFrameBytes &&
+                   frame.bytes[1] == 0xa5U) {
+            mouse::detail::apply_hid_keyboard_report(
+                frame.bytes[4], frame.bytes.data() + 5U, 14U,
+                keyboard_keys_);
+        } else {
+            return;
+        }
+        input_received_ = true;
+        input_received_at_ = std::chrono::steady_clock::now();
+        ++input_sequence_;
+    }
+
     bool validate_config() noexcept {
         if (!valid_makcu_port(config_.makcu_port)) {
             set_error("MAKCU 串口必须是 COM1..COM256");
             return false;
         }
-        if (!valid_makcu_baud_rate(config_.makcu_baud_rate)) {
-            set_error("MAKCU 波特率必须是 115200 或 4000000");
+        if (config_.makcu_baud_rate != 4000000) {
+            set_error("MAKCU 物理键鼠监听要求波特率为 4000000");
             return false;
         }
         if (config_.makcu_connect_timeout_ms <= 0 ||
@@ -524,27 +671,57 @@ private:
                           std::memory_order_release);
             return false;
         }
-        // 毫秒接口向上保留最后不足 1 ms 的预算，避免允许值 1 ms 在快速写入后被截断为零。
-        const auto remaining = std::chrono::duration_cast<
-            std::chrono::milliseconds>(deadline - now).count();
-        const int read_timeout_ms = static_cast<int>(
-            (std::max)(std::int64_t{1}, remaining));
-        const auto read_result = transport_->read_exact(
-            response, read_timeout_ms, transport_error);
-        if (read_result != mouse::detail::MakcuIoResult::SUCCESS) {
-            set_error(std::string("MAKCU ") + phase + "读取失败: " +
-                      transport_error);
-            status_.store(
-                read_result == mouse::detail::MakcuIoResult::TIMEOUT
-                    ? MouseStatus::RESPONSE_TIMEOUT
-                    : MouseStatus::CONNECTION_FAILED,
-                std::memory_order_release);
-            return false;
+        // ACK 与异步流共用串口；逐帧读取并消费流帧，直到找到本次请求的响应。
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto remaining = std::chrono::duration_cast<
+                std::chrono::milliseconds>(deadline -
+                                           std::chrono::steady_clock::now()).count();
+            const int read_timeout_ms = static_cast<int>(
+                (std::max)(std::int64_t{1}, remaining));
+            MakcuFrame frame;
+            const auto read_result = read_frame(frame, read_timeout_ms);
+            if (read_result == FrameReadResult::NO_DATA) break;
+            if (read_result != FrameReadResult::SUCCESS) {
+                set_error(std::string("MAKCU ") + phase +
+                          "读取到非法或不完整 V2 帧");
+                status_.store(MouseStatus::CONNECTION_FAILED,
+                              std::memory_order_release);
+                return false;
+            }
+            if ((frame.size == kMouseStreamFrameBytes &&
+                 frame.bytes[1] == 0x0cU) ||
+                (frame.size == kKeyboardStreamFrameBytes &&
+                 frame.bytes[1] == 0xa5U)) {
+                handle_stream_frame(frame);
+                continue;
+            }
+            if (frame.size != response.size()) {
+                set_error(std::string("MAKCU ") + phase + "响应长度非法");
+                status_.store(MouseStatus::INVALID_RESPONSE,
+                              std::memory_order_release);
+                return false;
+            }
+            std::copy_n(frame.bytes.begin(), frame.size, response.begin());
+            return true;
         }
-        return true;
+        set_error(std::string("MAKCU ") + phase + "读取响应超时");
+        status_.store(MouseStatus::RESPONSE_TIMEOUT,
+                      std::memory_order_release);
+        return false;
     }
 
     void close_locked() noexcept {
+        if (connected_ && transport_) {
+            const std::array<std::uint8_t, 6U> mouse_stream_off{
+                kFrameStart, 0x0cU, 2U, 0U, 0U, 0U};
+            const std::array<std::uint8_t, 6U> keyboard_stream_off{
+                kFrameStart, 0xa5U, 2U, 0U, 0U, 0U};
+            std::string ignored;
+            transport_->write_exact(mouse_stream_off,
+                                    config_.makcu_command_timeout_ms, ignored);
+            transport_->write_exact(keyboard_stream_off,
+                                    config_.makcu_command_timeout_ms, ignored);
+        }
         connected_ = false;
         if (transport_) transport_->close();
     }
@@ -560,6 +737,11 @@ private:
     MouseConfig config_;
     std::unique_ptr<mouse::detail::IMakcuTransport> transport_;
     bool connected_ = false;
+    std::array<bool, 256> keyboard_keys_{};
+    std::uint8_t mouse_buttons_ = 0;
+    bool input_received_ = false;
+    std::uint64_t input_sequence_ = 0;
+    std::chrono::steady_clock::time_point input_received_at_{};
     mutable std::mutex io_mutex_;
     std::atomic<MouseStatus> status_{MouseStatus::CLOSED};
     mutable std::mutex error_mutex_;
