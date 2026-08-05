@@ -9,6 +9,7 @@
 #endif
 
 #include "capture/capture.h"
+#include "capture/ndi_internal.h"
 #include "capture/network_internal.h"
 #include "capture/udp_internal.h"
 #include "capture/xudp_internal.h"
@@ -70,6 +71,41 @@ void test_mouse_disabled_by_default() {
            "物理输出默认必须为 DISABLED");
     expect(mouse && !mouse->move({1, 1}),
            "未显式允许 SendInput 时不得提交命令");
+}
+
+void test_ndi_silence_watchdog_tracks_first_frame_and_reopen() {
+    using Watchdog = capture::detail::NdiSilenceWatchdog;
+    const auto started = Watchdog::Clock::time_point{};
+    Watchdog watchdog;
+    watchdog.reset(started);
+
+    expect(!watchdog.received_valid_frame() &&
+               watchdog.timeout_ms(10000, 2000) == 10000,
+           "NDI receiver 创建后、首帧前必须使用完整发现预算");
+    expect(!watchdog.expired(started + std::chrono::milliseconds(9999),
+                             10000, 2000) &&
+               watchdog.expired(started + std::chrono::milliseconds(10000),
+                                10000, 2000),
+           "NDI 首帧发现预算必须在精确边界到期");
+
+    const auto first_frame = started + std::chrono::milliseconds(4000);
+    watchdog.record_valid_frame(first_frame);
+    expect(watchdog.received_valid_frame() &&
+               watchdog.timeout_ms(10000, 2000) == 2000,
+           "NDI 收到有效首帧后必须切换为断流预算");
+    expect(!watchdog.expired(first_frame + std::chrono::milliseconds(1999),
+                             10000, 2000) &&
+               watchdog.expired(first_frame + std::chrono::milliseconds(2000),
+                                10000, 2000),
+           "NDI 首帧后的断流预算必须从最后有效帧开始计算");
+
+    const auto reopened = started + std::chrono::seconds(30);
+    watchdog.reset(reopened);
+    expect(!watchdog.received_valid_frame() &&
+               watchdog.timeout_ms(10000, 2000) == 10000 &&
+               !watchdog.expired(reopened + std::chrono::milliseconds(2000),
+                                 10000, 2000),
+           "NDI 同进程重新打开后必须重新进入首帧发现阶段");
 }
 
 void test_invalid_keyboard_config() {
@@ -1205,6 +1241,7 @@ int main() {
     log_config.enable_ringbuf = false;
     Log::init(log_config);
     test_mouse_disabled_by_default();
+    test_ndi_silence_watchdog_tracks_first_frame_and_reopen();
     test_invalid_keyboard_config();
     test_keyboard_event_state_machine();
     test_keyboard_listener_uses_selected_device();

@@ -136,7 +136,7 @@ public:
             last_delivered_sequence_ = 0;
             published_sequence_.store(0, std::memory_order_release);
             stop_requested_.store(false, std::memory_order_release);
-            ever_connected_ = false;
+            silence_watchdog_.reset(std::chrono::steady_clock::now());
             {
                 std::lock_guard<std::mutex> lock(error_mutex_);
                 last_error_.clear();
@@ -324,7 +324,6 @@ private:
         source_received_frames_ = 0;
         transport_dropped_frames_ = 0;
         last_queue_probe_at_ = {};
-        ever_connected_ = true;
         LOG_INFO("capture", "NDI 已连接源: {}", source_name_);
         return true;
     }
@@ -498,8 +497,6 @@ private:
     }
 
     void receive_loop_impl() {
-        const auto discovery_started = std::chrono::steady_clock::now();
-        auto last_valid_frame = discovery_started;
         NDIlib_find_create_t finder_settings{};
         finder_settings.show_local_sources = true;
         finder_ = NDIlib_find_create_v2(&finder_settings);
@@ -509,20 +506,14 @@ private:
         }
         while (!stop_requested_.load(std::memory_order_acquire)) {
             if (!connect_source()) {
-                const auto silent_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - last_valid_frame)
-                        .count();
-                if (!ever_connected_ &&
-                    silent_ms >= config_.ndi_discovery_timeout_ms) {
+                if (silence_watchdog_.expired(
+                        std::chrono::steady_clock::now(),
+                        config_.ndi_discovery_timeout_ms,
+                        config_.ndi_disconnect_timeout_ms)) {
                     fail(CaptureStatus::ACCESS_LOST,
-                         "NDI 发现超时，未找到唯一匹配的源");
-                    return;
-                }
-                if (ever_connected_ &&
-                    silent_ms >= config_.ndi_disconnect_timeout_ms) {
-                    fail(CaptureStatus::ACCESS_LOST,
-                         "NDI 源长时间无可用视频帧，采集会话已失效");
+                         silence_watchdog_.received_valid_frame()
+                             ? "NDI 源长时间无可用视频帧，采集会话已失效"
+                             : "NDI 发现超时，未找到唯一匹配的源");
                     return;
                 }
                 status_.store(CaptureStatus::NO_FRAME,
@@ -588,7 +579,10 @@ private:
                 if (terminal_status(status_.load(std::memory_order_acquire))) {
                     return;
                 }
-                if (published) last_valid_frame = std::chrono::steady_clock::now();
+                if (published) {
+                    silence_watchdog_.record_valid_frame(
+                        std::chrono::steady_clock::now());
+                }
                 continue;
             }
             if (type == NDIlib_frame_type_error) {
@@ -600,14 +594,14 @@ private:
                 status_.store(CaptureStatus::NO_FRAME,
                               std::memory_order_release);
             }
-            const auto silent_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - last_valid_frame)
-                    .count();
-            if (ever_connected_ &&
-                silent_ms >= config_.ndi_disconnect_timeout_ms) {
+            if (silence_watchdog_.expired(
+                    std::chrono::steady_clock::now(),
+                    config_.ndi_discovery_timeout_ms,
+                    config_.ndi_disconnect_timeout_ms)) {
                 fail(CaptureStatus::ACCESS_LOST,
-                     "NDI 源长时间无可用视频帧，采集会话已失效");
+                     silence_watchdog_.received_valid_frame()
+                         ? "NDI 源长时间无可用视频帧，采集会话已失效"
+                         : "NDI 发现超时，源未交付首个有效视频帧");
                 return;
             }
         }
@@ -635,7 +629,7 @@ private:
     std::uint64_t transport_dropped_frames_ = 0;
     std::chrono::steady_clock::time_point last_queue_probe_at_{};
     std::uint64_t last_delivered_sequence_ = 0;
-    bool ever_connected_ = false;
+    NdiSilenceWatchdog silence_watchdog_;
 };
 
 #else
