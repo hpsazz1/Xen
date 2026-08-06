@@ -138,11 +138,21 @@ try {
     Remove-Item -LiteralPath $invalidMutablePrefix -Force
 
     $trackingRoot = Join-Path $root "tracking-task"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+    $trackingOutput = @(& powershell.exe -NoProfile `
+        -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
         -Mode Prepare -Scenario Static -Profile tracking `
-        -PackageRoot $published -RunDirectory $trackingRoot
+        -PackageRoot $published -RunDirectory $trackingRoot 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "tracking 任务准备失败。" }
+    $trackingOutput | ForEach-Object { Write-Host $_ }
+    $trackingOutputText = $trackingOutput -join "`n"
+    if ($trackingOutputText -notmatch
+            ('(?m)^powershell\.exe .* -Mode Launch -Scenario Static ' +
+             '-Profile tracking .* -AllowPhysicalOutput ' +
+             '-PhysicalOutputConfirmation ' +
+             'XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT\r?$')) {
+        throw "Prepare 前台没有输出可直接复制的完整 Launch 命令。"
+    }
     $trackingConfig = Get-Content -LiteralPath `
         (Join-Path $trackingRoot "config.ini") -Raw -Encoding utf8
     if ($trackingConfig -notmatch '(?m)^backend=tensorrt\r?$' -or

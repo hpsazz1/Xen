@@ -367,6 +367,13 @@ function Get-ScenarioDefinition() {
     }
 }
 
+function New-LaunchCommand([string]$ResolvedRunDirectory) {
+    return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode Launch -Scenario {1} -Profile {2} -PackageRoot "{3}" -RunDirectory "{4}" -AllowPhysicalOutput -PhysicalOutputConfirmation {5}' -f
+        (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
+        $Scenario, $Profile, $PackageRoot, $ResolvedRunDirectory,
+        $physicalConfirmation
+}
+
 function New-TaskMarkdown(
         [object]$Definition,
         [string]$ResolvedRunDirectory,
@@ -375,10 +382,7 @@ function New-TaskMarkdown(
         "{0}. {1}" -f ($index + 1), $Definition.actions[$index]
     }
     $checks = $Definition.observations | ForEach-Object { "- [ ] $_" }
-    $launch = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode Launch -Scenario {1} -Profile {2} -PackageRoot "{3}" -RunDirectory "{4}" -AllowPhysicalOutput -PhysicalOutputConfirmation {5}' -f
-        (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
-        $Scenario, $Profile, $PackageRoot, $ResolvedRunDirectory,
-        $physicalConfirmation
+    $launch = New-LaunchCommand $ResolvedRunDirectory
     return @"
 # Xen 双机 Aim 人工测试任务
 
@@ -524,6 +528,8 @@ if ($Mode -eq "Prepare") {
     Write-Host "  profile=$Profile"
     Write-Host "  config_sha256=$($task.config.sha256)"
     Write-Host "本轮尚未启动物理输出；请先人工复核 TASK.md。"
+    Write-Host "以下命令会发送真实 KMBOX 输入，确认现场安全后可直接复制执行："
+    Write-Output (New-LaunchCommand $resolvedRun)
     exit 0
 }
 
