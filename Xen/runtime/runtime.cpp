@@ -461,8 +461,8 @@ struct Runtime::Impl {
             const double command_y = aim_result.command.dy_counts;
             sample.aim_command_toward_target =
                 command_x * desired_x + command_y * desired_y > 0.0 &&
-                std::fabs(command_x) <= std::ceil(std::fabs(desired_x)) &&
-                std::fabs(command_y) <= std::ceil(std::fabs(desired_y));
+                std::hypot(command_x, command_y) <=
+                    config.aim.max_counts_per_frame + 0.001;
         }
         if (profile.detector.status == DetectionStatus::SUCCESS) {
             runtime::detail::summarize_detections(

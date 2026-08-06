@@ -60,6 +60,14 @@ constexpr float kTrackVelocityBetaHigh = 0.10f;
 constexpr float kTrackVelocityBetaLow = 0.04f;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
+// 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
+// 持续偏差：单位为 counts，按真实帧间隔累计，并以泄漏和独立小上限避免把
+// 检测抖动长期记忆成鼠标命令。常量保持内部固定，先用实机门禁验证收益。
+constexpr float kControllerIntegralGainPerSecond = 2.0f;
+constexpr float kControllerIntegralLeakPerSecond = 1.5f;
+constexpr float kControllerIntegralMaximumCounts = 1.25f;
+constexpr float kControllerIntegralMaximumProportionalRatio = 0.50f;
+constexpr float kControllerIntegralMinimumErrorPixels = 2.0f;
 
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
@@ -221,6 +229,11 @@ struct Aim::Impl {
     float shaped_y = 0.0f;
     float residual_x = 0.0f;
     float residual_y = 0.0f;
+    float integral_x = 0.0f;
+    float integral_y = 0.0f;
+    float previous_error_x = 0.0f;
+    float previous_error_y = 0.0f;
+    std::chrono::steady_clock::time_point controller_captured_at{};
     bool controller_initialized = false;
     bool shaper_initialized = false;
     std::uint64_t lead_track_id = 0;
@@ -770,6 +783,11 @@ struct Aim::Impl {
         shaped_y = 0.0f;
         residual_x = 0.0f;
         residual_y = 0.0f;
+        integral_x = 0.0f;
+        integral_y = 0.0f;
+        previous_error_x = 0.0f;
+        previous_error_y = 0.0f;
+        controller_captured_at = {};
         controller_initialized = false;
         shaper_initialized = false;
     }
@@ -927,6 +945,7 @@ struct Aim::Impl {
 
     bool control(const AimFrame& frame, const Track& track,
                  float aim_x, float aim_y,
+                 bool allow_integral,
                  AimCommand& command) noexcept {
         if (controller_track_id != track.id) {
             reset_controller();
@@ -952,12 +971,59 @@ struct Aim::Impl {
             shaped_y = 0.0f;
             residual_x = 0.0f;
             residual_y = 0.0f;
+            integral_x = 0.0f;
+            integral_y = 0.0f;
+            previous_error_x = 0.0f;
+            previous_error_y = 0.0f;
+            controller_captured_at = frame.captured_at;
             return false;
         }
 
         const float gain = track.predicted ? config.predicted_gain : 1.0f;
-        const float desired_x = error_x * config.counts_per_pixel_x * gain;
-        const float desired_y = error_y * config.counts_per_pixel_y * gain;
+        const float proportional_x =
+            error_x * config.counts_per_pixel_x * gain;
+        const float proportional_y =
+            error_y * config.counts_per_pixel_y * gain;
+        const float controller_dt = controller_captured_at ==
+                std::chrono::steady_clock::time_point{}
+            ? track.prediction_dt
+            : clamp_delta_seconds(std::chrono::duration<double>(
+                  frame.captured_at - controller_captured_at).count());
+        controller_captured_at = frame.captured_at;
+
+        // prediction 前探、滑行轨迹或方向反转时不允许积分继续积累。逐轴
+        // 释放可保留另一轴仍然有效的恒定偏差；积分输出始终和当前误差同向，
+        // 且不超过比例项的一半，因此不会复现整体提高 P 增益后的高频摆动。
+        const auto update_integral = [&](float error, float proportional,
+                                         float& previous_error,
+                                         float& integral) {
+            const float activation_error = std::max(
+                kControllerIntegralMinimumErrorPixels,
+                config.deadzone_pixels * 1.5f);
+            if (!allow_integral || track.state != TrackState::CONFIRMED ||
+                track.predicted || std::fabs(error) <= activation_error ||
+                previous_error * error <= 0.0f) {
+                integral = 0.0f;
+            } else {
+                integral *= std::exp(
+                    -kControllerIntegralLeakPerSecond * controller_dt);
+                integral += proportional *
+                    kControllerIntegralGainPerSecond * controller_dt;
+                const float maximum = std::min(
+                    kControllerIntegralMaximumCounts,
+                    std::fabs(proportional) *
+                        kControllerIntegralMaximumProportionalRatio);
+                integral = std::clamp(integral, -maximum, maximum);
+                if (integral * error < 0.0f) integral = 0.0f;
+            }
+            previous_error = error;
+        };
+        update_integral(error_x, proportional_x,
+                        previous_error_x, integral_x);
+        update_integral(error_y, proportional_y,
+                        previous_error_y, integral_y);
+        float desired_x = proportional_x + integral_x;
+        float desired_y = proportional_y + integral_y;
         if (!controller_initialized) {
             filtered_x = desired_x;
             filtered_y = desired_y;
@@ -968,7 +1034,14 @@ struct Aim::Impl {
         }
         // 鼠标后端消费二维相对位移，限幅也必须作用于向量模长；逐轴限幅会让
         // 对角线命令达到配置上限的 sqrt(2) 倍。
+        const float unclamped_magnitude = std::hypot(filtered_x, filtered_y);
         clamp_vector(filtered_x, filtered_y, config.max_counts_per_frame);
+        if (unclamped_magnitude > config.max_counts_per_frame) {
+            // 输出已饱和时继续积分只会在误差减小时延迟释放。饱和帧立即
+            // 清空积分，下一帧退回稳定的比例控制。
+            integral_x = 0.0f;
+            integral_y = 0.0f;
+        }
 
         if (!shaper_initialized) {
             shaped_x = filtered_x;
@@ -1159,6 +1232,7 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
             if (impl_->range_allows_control) {
                 result.has_command = impl_->control(
                     frame, *target, projection.final_x, projection.final_y,
+                    !projection.active,
                     result.command);
             } else {
                 impl_->reset_controller();

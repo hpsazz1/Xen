@@ -763,6 +763,111 @@ void test_control_trajectory_never_moves_away_from_target() {
            "目标反向时不得沿历史动量继续远离当前框内瞄点");
 }
 
+void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.75f;
+    config.smoothing = 0.50f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    Aim aim(config);
+
+    constexpr int kFrameCount = 300;
+    constexpr float kFrameSeconds = 1.0f / 240.0f;
+    constexpr float kTargetVelocity = 180.0f;
+    constexpr float kCameraResponse = 0.85f;
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float world_target_x = 32.0f;
+    float camera_x = 0.0f;
+    float integral_error_sum = 0.0f;
+    int measured_frames = 0;
+
+    for (int index = 0; index < kFrameCount; ++index) {
+        world_target_x += kTargetVelocity * kFrameSeconds;
+        const float observed_error = world_target_x - camera_x;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.lock_active = true;
+        frame.detections = {body(160.0f + observed_error, 160.0f)};
+        const AimResult result = aim.process(frame);
+        if (result.has_command) {
+            camera_x += result.command.dx_counts /
+                config.counts_per_pixel_x * kCameraResponse;
+        }
+
+        if (index >= 180) {
+            integral_error_sum += std::fabs(world_target_x - camera_x);
+            ++measured_frames;
+        }
+    }
+
+    const float integral_mean = integral_error_sum / measured_frames;
+    expect(integral_mean <= 2.0f,
+           "0.40 增益下，泄漏积分必须把恒速目标的动态稳态误差限制在 2 px 内，实际=" +
+               std::to_string(integral_mean));
+}
+
+void test_integral_releases_on_reversal_and_static_settle() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.75f;
+    config.smoothing = 0.50f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.max_center_distance = 1.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float target_error = 18.0f;
+    int first_reverse_command_frame = -1;
+    int previous_settle_sign = 0;
+    int settle_reversals = 0;
+
+    for (int index = 0; index < 180; ++index) {
+        if (index < 80) {
+            target_error += 0.75f;
+        } else if (index < 100) {
+            target_error -= 2.0f;
+        }
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.lock_active = true;
+        frame.detections = {body(160.0f + target_error, 160.0f)};
+        const AimResult result = aim.process(frame);
+        if (!result.has_command) continue;
+        target_error -= result.command.dx_counts /
+            config.counts_per_pixel_x * 0.85f;
+        if (index >= 80 && result.command.dx_counts < 0 &&
+            first_reverse_command_frame < 0) {
+            first_reverse_command_frame = index;
+        }
+        if (index >= 120) {
+            const int sign = result.command.dx_counts < 0 ? -1 : 1;
+            if (previous_settle_sign != 0 && sign != previous_settle_sign) {
+                ++settle_reversals;
+            }
+            previous_settle_sign = sign;
+        }
+    }
+
+    expect(first_reverse_command_frame >= 80 &&
+               first_reverse_command_frame <= 86,
+           "目标反向时积分必须立即释放，不能延迟反向命令");
+    expect(std::fabs(target_error) <= 2.5f && settle_reversals <= 2,
+           "静止归位后积分不得形成持续往返，误差=" +
+               std::to_string(target_error) + "，反转=" +
+               std::to_string(settle_reversals));
+}
+
 void test_quantization_residual_cannot_reverse_after_crossing() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -883,6 +988,8 @@ int main() {
     test_prediction_hysteresis_avoids_crosshair_oscillation();
     test_closed_loop_view_feedback_converges_without_limit_cycle();
     test_control_trajectory_never_moves_away_from_target();
+    test_leaky_integral_tracks_constant_velocity_with_bounded_error();
+    test_integral_releases_on_reversal_and_static_settle();
     test_quantization_residual_cannot_reverse_after_crossing();
     test_control_step_cannot_cross_in_box_aim_point();
     test_delay_compensation_stacks_before_prediction();
