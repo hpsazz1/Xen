@@ -137,6 +137,43 @@ try {
     }
     Remove-Item -LiteralPath $invalidMutablePrefix -Force
 
+    $directMlWorker = Join-Path $published "runtimes\directml\Xen.exe"
+    Write-Utf8 $directMlWorker "dml-not-transferred-this-round"
+    $lightweightRoot = Join-Path $root "lightweight-task"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-LATENCY-COMP-001 `
+        -Mode Prepare -Scenario Static -Profile tracking `
+        -LightweightPackageValidation `
+        -PackageRoot $published -RunDirectory $lightweightRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "轻量校验不应重复哈希未传输的 DirectML Worker。"
+    }
+    $lightweightTask = Get-Content -LiteralPath `
+        (Join-Path $lightweightRoot "task.json") -Raw -Encoding utf8 |
+        ConvertFrom-Json
+    if ([string]$lightweightTask.package_validation -ne "lightweight" -or
+        [string]::IsNullOrWhiteSpace($lightweightTask.worker.sha256) -or
+        [string]::IsNullOrWhiteSpace(
+            $lightweightTask.acceptance_script.sha256)) {
+        throw "轻量任务没有绑定校验模式、Worker 或任务脚本哈希。"
+    }
+    Write-Utf8 $directMlWorker "dml"
+
+    $nvidiaWorker = Join-Path $published "runtimes\nvidia\Xen.exe"
+    Write-Utf8 $nvidiaWorker "nvidia-corrupt"
+    $invalidWorkerRoot = Join-Path $root "invalid-lightweight-worker"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-LATENCY-COMP-001 `
+        -Mode Prepare -Scenario Static -Profile tracking `
+        -LightweightPackageValidation `
+        -PackageRoot $published -RunDirectory $invalidWorkerRoot
+    if ($LASTEXITCODE -eq 0) {
+        throw "轻量校验必须拒绝本轮传输的 NVIDIA Worker 哈希变化。"
+    }
+    Write-Utf8 $nvidiaWorker "nvidia"
+
     $trackingRoot = Join-Path $root "tracking-task"
     $trackingOutput = @(& powershell.exe -NoProfile `
         -ExecutionPolicy Bypass -File `
@@ -147,6 +184,7 @@ try {
         -EnableDelayCompensation -ControlDelayMs 7.5 `
         -MaxDelayCompensationMs 18.0 `
         -MaxDelayCompensationPercent 12.0 `
+        -LightweightPackageValidation `
         -PackageRoot $published -RunDirectory $trackingRoot 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "tracking 任务准备失败。" }
     $trackingOutput | ForEach-Object { Write-Host $_ }
@@ -159,6 +197,7 @@ try {
              '-ControlDelayMs 7\.500000 ' +
              '-MaxDelayCompensationMs 18\.000000 ' +
              '-MaxDelayCompensationPercent 12\.000000 ' +
+             '-LightweightPackageValidation ' +
              '-AllowPhysicalOutput ' +
              '-PhysicalOutputConfirmation ' +
              'XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT\r?$')) {
@@ -191,10 +230,36 @@ try {
         [double]$trackingTask.aim.smoothing -ne 0.50 -or
         [double]$trackingTask.aim.counts_per_pixel -ne 0.55 -or
         [bool]$trackingTask.aim.delay_compensation_enabled -ne $true -or
+        [string]$trackingTask.package_validation -ne "lightweight" -or
         [double]$trackingTask.aim.control_delay_ms -ne 7.5 -or
         [double]$trackingTask.aim.max_delay_compensation_ms -ne 18.0 -or
         [double]$trackingTask.aim.max_delay_compensation_percent -ne 12.0) {
         throw "task.json 没有固化任务 ID、平滑或延迟补偿参数。"
+    }
+
+    $publishedManifest = Join-Path $published "manifest.json"
+    $manifestBytes = [System.IO.File]::ReadAllBytes($publishedManifest)
+    try {
+        [System.IO.File]::AppendAllText(
+            $publishedManifest, "`n", [System.Text.UTF8Encoding]::new($false))
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-LATENCY-COMP-001 `
+            -Mode Launch -Scenario Static -Profile tracking -Smoothing 0.50 `
+            -CountsPerPixel 0.55 `
+            -EnableDelayCompensation -ControlDelayMs 7.5 `
+            -MaxDelayCompensationMs 18.0 `
+            -MaxDelayCompensationPercent 12.0 `
+            -LightweightPackageValidation `
+            -PackageRoot $published -RunDirectory $trackingRoot `
+            -AllowPhysicalOutput `
+            -PhysicalOutputConfirmation `
+                XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT
+        if ($LASTEXITCODE -eq 0) {
+            throw "轻量 Launch 必须拒绝 Prepare 后变化的 manifest。"
+        }
+    } finally {
+        [System.IO.File]::WriteAllBytes($publishedManifest, $manifestBytes)
     }
 
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
@@ -205,6 +270,7 @@ try {
         -EnableDelayCompensation -ControlDelayMs 7.5 `
         -MaxDelayCompensationMs 18.0 `
         -MaxDelayCompensationPercent 12.0 `
+        -LightweightPackageValidation `
         -PackageRoot $published -RunDirectory $trackingRoot `
         -AllowPhysicalOutput `
         -PhysicalOutputConfirmation XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT
