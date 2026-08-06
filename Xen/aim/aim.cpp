@@ -1003,14 +1003,20 @@ struct Aim::Impl {
                     std::fabs(proportional) *
                         kControllerIntegralMaximumProportionalRatio);
                 integral = std::clamp(integral, -maximum, maximum);
-                if (integral * error < 0.0f) integral = 0.0f;
+                if (integral * error < 0.0f &&
+                    std::fabs(error) > config.deadzone_pixels) {
+                    integral = 0.0f;
+                }
             } else {
                 // 死区及其外侧的释放带内停止继续积分，但保留亚整数 counts
                 // 作为恒速前馈。量化残余会把它分摊到后续帧；若误差真正过零
                 // 并离开死区，上面的方向门禁会立即释放该轴。
                 integral *= std::exp(
                     -kControllerIntegralLeakPerSecond * controller_dt);
-                if (integral * error < 0.0f) integral = 0.0f;
+                if (integral * error < 0.0f &&
+                    std::fabs(error) > config.deadzone_pixels) {
+                    integral = 0.0f;
+                }
             }
             previous_error = error;
         };

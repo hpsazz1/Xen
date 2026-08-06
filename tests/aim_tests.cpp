@@ -817,7 +817,7 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
     expect(integral_mean <= 2.0f,
            "0.40 增益下，泄漏积分必须把恒速目标的动态稳态误差限制在 2 px 内，实际=" +
                std::to_string(integral_mean));
-    expect(maximum_no_command <= 3,
+    expect(maximum_no_command <= 1,
            "恒速目标进入死区后不得周期停发并等待再次落后，最长停发=" +
                std::to_string(maximum_no_command));
 }
@@ -901,7 +901,8 @@ void test_quantization_residual_cannot_reverse_after_crossing() {
         const float error_y = result.target.aim_y - frame.control_center_y;
         const float dot = result.command.dx_counts * error_x +
                           result.command.dy_counts * error_y;
-        expect(dot > 0.0f,
+        expect(dot > 0.0f || std::hypot(error_x, error_y) <=
+                                  config.deadzone_pixels,
                "目标穿越准星后，上一方向的量化残余不得生成反向整数命令");
     }
 }
