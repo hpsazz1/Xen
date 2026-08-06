@@ -934,6 +934,55 @@ void test_quantization_residual_cannot_reverse_after_crossing() {
     }
 }
 
+void test_delay_compensation_direction_cannot_reverse_within_hold_band() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.35f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    Aim aim(config);
+
+    // 先建立向左的基础保持量，再以约 100 px/s 向右回穿；最终基础点仍
+    // 略在准星左侧，而延迟补偿点已越过准星。
+    for (int index = 0; index < 40; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::milliseconds(index * 10));
+        frame.detections = {body(140.0f, 160.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "延迟补偿方向回归的建立阶段必须成功");
+    }
+
+    for (int index = 0; index < 19; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 41),
+            base + std::chrono::milliseconds((index + 40) * 10));
+        frame.detections = {body(140.0f + (index + 1), 160.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "延迟补偿方向回归的回穿阶段必须成功");
+    }
+
+    AimFrame crossed = make_frame(60, base + std::chrono::milliseconds(590));
+    crossed.detections = {body(159.8f, 160.0f)};
+    const AimResult result = aim.process(crossed);
+    const float final_error = result.target.delay_compensated_aim_x -
+        crossed.control_center_x;
+    expect(result.status == AimStatus::SUCCESS && result.has_target &&
+               (!result.has_command ||
+                result.command.dx_counts * final_error >= 0.0f),
+           "延迟补偿点越过准星后，命令不得在保持带内反向推动最终瞄准点");
+}
+
 void test_control_step_cannot_cross_in_box_aim_point() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -1158,6 +1207,7 @@ int main() {
     test_leaky_integral_tracks_constant_velocity_with_bounded_error();
     test_integral_releases_on_reversal_and_static_settle();
     test_quantization_residual_cannot_reverse_after_crossing();
+    test_delay_compensation_direction_cannot_reverse_within_hold_band();
     test_control_step_cannot_cross_in_box_aim_point();
     test_delay_compensation_stacks_before_prediction();
     test_short_glide_preserves_base_tracking_hold();

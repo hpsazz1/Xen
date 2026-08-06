@@ -1075,10 +1075,13 @@ struct Aim::Impl {
                         config.counts_per_pixel_y, integral_y);
         float desired_x = proportional_x + integral_x;
         float desired_y = proportional_y + integral_y;
-        if (std::fabs(error_x) > hold_band && desired_x * error_x <= 0.0f) {
+        // 最终控制点已经包含延迟补偿；即使误差落在保持带内，也不能让
+        // 上一轮基础积分把命令发向最终点的反方向。否则基础点刚过准星时，
+        // 延迟补偿点可能已越过准星，旧保持量会制造一次可见反向输入。
+        if (desired_x * error_x <= 0.0f) {
             desired_x = proportional_x;
         }
-        if (std::fabs(error_y) > hold_band && desired_y * error_y <= 0.0f) {
+        if (desired_y * error_y <= 0.0f) {
             desired_y = proportional_y;
         }
         const bool moving_away_x =
