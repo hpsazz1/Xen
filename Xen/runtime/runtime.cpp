@@ -464,8 +464,10 @@ struct Runtime::Impl {
                     frame.source_pixels_per_pixel_x,
                 (aim_result.target.aim_y - aim_control_center_y) *
                     frame.source_pixels_per_pixel_y);
+            const double hold_band = std::max(
+                2.0, static_cast<double>(config.aim.deadzone_pixels) * 1.5);
             sample.aim_command_toward_target =
-                (error_magnitude <= config.aim.deadzone_pixels ||
+                (error_magnitude <= hold_band ||
                  command_x * desired_x + command_y * desired_y > 0.0) &&
                 std::hypot(command_x, command_y) <=
                     config.aim.max_counts_per_frame + 0.001;

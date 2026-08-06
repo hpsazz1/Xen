@@ -972,6 +972,135 @@ void test_delay_compensation_stacks_before_prediction() {
            "延迟补偿必须先于 prediction 叠加，且沿确认速度方向生效");
 }
 
+void test_short_glide_preserves_base_tracking_hold() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.max_lost_frames = 3;
+    config.deadzone_pixels = 0.75f;
+    config.smoothing = 0.50f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    Aim aim(config);
+
+    constexpr float kFrameSeconds = 1.0f / 240.0f;
+    constexpr float kTargetVelocity = 180.0f;
+    constexpr float kCameraResponse = 0.85f;
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float world_target_x = 32.0f;
+    float camera_x = 0.0f;
+    int first_recovery_command = -1;
+
+    for (int index = 0; index < 220; ++index) {
+        world_target_x += kTargetVelocity * kFrameSeconds;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.lock_active = true;
+        if (index < 150 || index > 151) {
+            frame.detections = {
+                body(160.0f + world_target_x - camera_x, 160.0f)};
+        }
+        const AimResult result = aim.process(frame);
+        if (index == 150 || index == 151) {
+            expect(result.has_target && result.target.predicted &&
+                       !result.has_command,
+                   "短时滑行必须保留轨迹但禁止发送物理命令");
+        }
+        if (result.has_command) {
+            camera_x += result.command.dx_counts /
+                config.counts_per_pixel_x * kCameraResponse;
+            if (index >= 152 && first_recovery_command < 0) {
+                first_recovery_command = index;
+            }
+        }
+    }
+
+    expect(first_recovery_command >= 152 && first_recovery_command <= 153,
+           "同一轨迹短时丢框恢复后必须连续接回基础保持量，首次恢复命令帧=" +
+               std::to_string(first_recovery_command));
+    expect(std::fabs(world_target_x - camera_x) <= 3.0f,
+           "短时滑行恢复后不得因重建基础保持量留下持续滞后，误差=" +
+               std::to_string(std::fabs(world_target_x - camera_x)));
+}
+
+void test_prediction_layer_keeps_base_tracking_hold_continuous() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.75f;
+    config.smoothing = 0.50f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+
+    constexpr float kFrameSeconds = 1.0f / 240.0f;
+    constexpr float kTargetVelocity = 180.0f;
+    // 低响应闭环让目标在屏幕坐标中持续远离准星，从而稳定触发 prediction；
+    // 本测试验证状态连续性，不用于模拟已标定的真实镜头响应。
+    constexpr float kCameraResponse = 0.01f;
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    // 初始轴向误差显式超过按目标框对角线归一化的 prediction 进入阈值，
+    // 保证本回归确实覆盖提前量状态，而不是只运行基础 tracking。
+    float world_target_x = 20.0f;
+    float camera_x = 0.0f;
+    int lead_active_frames = 0;
+    int consecutive_no_command = 0;
+    int maximum_no_command = 0;
+    float maximum_velocity = 0.0f;
+    float maximum_error = 0.0f;
+
+    for (int index = 0; index < 140; ++index) {
+        world_target_x += kTargetVelocity * kFrameSeconds;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {
+            body(160.0f + world_target_x - camera_x, 160.0f)};
+        const AimResult result = aim.process(frame);
+        if (result.has_target && result.target.lead_active) {
+            ++lead_active_frames;
+        }
+        if (result.has_target) {
+            maximum_velocity = std::max(
+                maximum_velocity, result.target.velocity_x);
+            maximum_error = std::max(
+                maximum_error,
+                result.target.delay_compensated_aim_x -
+                    frame.control_center_x);
+        }
+        if (result.has_command) {
+            camera_x += result.command.dx_counts /
+                config.counts_per_pixel_x * kCameraResponse;
+            consecutive_no_command = 0;
+        } else if (index >= 40) {
+            ++consecutive_no_command;
+            maximum_no_command = std::max(
+                maximum_no_command, consecutive_no_command);
+        }
+    }
+
+    expect(lead_active_frames > 0,
+           "prediction 连续性回归必须实际覆盖提前量活动帧，最大速度=" +
+               std::to_string(maximum_velocity) + "，最大误差=" +
+               std::to_string(maximum_error));
+    expect(maximum_no_command <= 1,
+           "prediction 活动不得重置基础 tracking 保持量，最长停发=" +
+               std::to_string(maximum_no_command));
+}
+
 } // namespace
 
 int main() {
@@ -1004,6 +1133,8 @@ int main() {
     test_quantization_residual_cannot_reverse_after_crossing();
     test_control_step_cannot_cross_in_box_aim_point();
     test_delay_compensation_stacks_before_prediction();
+    test_short_glide_preserves_base_tracking_hold();
+    test_prediction_layer_keeps_base_tracking_hold_continuous();
 
     Log::shutdown();
     if (failures != 0) {
