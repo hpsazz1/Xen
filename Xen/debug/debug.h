@@ -81,6 +81,9 @@ struct DebugReportSummary {
     DebugTimingSummary aim;
     DebugTimingSummary mouse;
     DebugTimingSummary total;
+    DebugTimingSummary capture_to_control;
+    DebugTimingSummary control_to_mouse_completion;
+    DebugTimingSummary capture_to_mouse_completion;
     DebugTimingSummary ndi_receive_call;
     DebugTimingSummary ndi_metadata;
     DebugTimingSummary ndi_geometry;

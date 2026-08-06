@@ -249,9 +249,15 @@ struct Aim::Impl {
     struct LeadProjection {
         float base_x = 0.0f;
         float base_y = 0.0f;
+        float delay_compensated_x = 0.0f;
+        float delay_compensated_y = 0.0f;
+        float delay_x = 0.0f;
+        float delay_y = 0.0f;
+        float delay_seconds = 0.0f;
         float final_x = 0.0f;
         float final_y = 0.0f;
         float observation_age_seconds = 0.0f;
+        bool delay_active = false;
         bool active = false;
     };
 
@@ -783,11 +789,38 @@ struct Aim::Impl {
         LeadProjection projection;
         projection.base_x = base_x;
         projection.base_y = base_y;
+        projection.delay_compensated_x = base_x;
+        projection.delay_compensated_y = base_y;
         projection.final_x = base_x;
         projection.final_y = base_y;
         projection.observation_age_seconds = static_cast<float>(std::clamp(
             std::chrono::duration<double>(control_at - frame.captured_at).count(),
             0.0, static_cast<double>(kMaxObservationAgeSeconds)));
+        const float box_diagonal = std::hypot(
+            track.x2 - track.x1, track.y2 - track.y1);
+        if (config.enable_delay_compensation &&
+            track.state == TrackState::CONFIRMED && !track.predicted) {
+            const float requested_delay_seconds =
+                projection.observation_age_seconds +
+                config.control_delay_ms / 1000.0f;
+            projection.delay_seconds = std::clamp(
+                requested_delay_seconds, 0.0f,
+                config.max_delay_compensation_ms / 1000.0f);
+            projection.delay_x = track.vx * projection.delay_seconds;
+            projection.delay_y = track.vy * projection.delay_seconds;
+            // 延迟补偿只投影控制点，不修改原始框和关联状态。距离门禁按当前
+            // 目标尺度归一化，速度尖峰不能生成无界物理输入。
+            clamp_vector(
+                projection.delay_x, projection.delay_y,
+                box_diagonal *
+                    config.max_delay_compensation_percent / 100.0f);
+            projection.delay_active = projection.delay_seconds > 0.0f &&
+                std::hypot(projection.delay_x, projection.delay_y) > 0.0f;
+            projection.delay_compensated_x = base_x + projection.delay_x;
+            projection.delay_compensated_y = base_y + projection.delay_y;
+            projection.final_x = projection.delay_compensated_x;
+            projection.final_y = projection.delay_compensated_y;
+        }
         if (lead_track_id != track.id) {
             lead_track_id = track.id;
             lead_active = false;
@@ -807,15 +840,17 @@ struct Aim::Impl {
             return projection;
         }
 
-        const float error_x = base_x - frame.control_center_x;
-        const float error_y = base_y - frame.control_center_y;
+        // prediction 的进入、退出和方向判断必须建立在已经完成延迟补偿的
+        // tracking 点上，最终提前量也叠加在该点之后。
+        const float error_x =
+            projection.delay_compensated_x - frame.control_center_x;
+        const float error_y =
+            projection.delay_compensated_y - frame.control_center_y;
         const float error_magnitude = std::hypot(error_x, error_y);
         const float velocity_magnitude = std::hypot(track.vx, track.vy);
         const float alignment = error_x * track.vx + error_y * track.vy;
         const float longitudinal_error = velocity_magnitude > 1.0f
             ? std::fabs(alignment) / velocity_magnitude : 0.0f;
-        const float box_diagonal = std::hypot(
-            track.x2 - track.x1, track.y2 - track.y1);
         const float enter_distance = std::max(
             config.deadzone_pixels * 2.0f, box_diagonal * 0.12f);
         const float exit_distance = std::max(
@@ -884,8 +919,8 @@ struct Aim::Impl {
             box_diagonal * config.max_prediction_lead_percent / 100.0f);
         // 基础追踪点必须锁在模型框内；预测提前点允许越过框边界，否则高速
         // 目标只能追到当前观测位置，失去提前量的意义。
-        projection.final_x = base_x + lead_x;
-        projection.final_y = base_y + lead_y;
+        projection.final_x = projection.delay_compensated_x + lead_x;
+        projection.final_y = projection.delay_compensated_y + lead_y;
         projection.active = true;
         return projection;
     }
@@ -1098,16 +1133,28 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
             result.target.y2 = target->y2;
             result.target.base_aim_x = projection.base_x;
             result.target.base_aim_y = projection.base_y;
+            result.target.delay_compensated_aim_x =
+                projection.delay_compensated_x;
+            result.target.delay_compensated_aim_y =
+                projection.delay_compensated_y;
             result.target.aim_x = projection.final_x;
             result.target.aim_y = projection.final_y;
             result.target.velocity_x = target->vx;
             result.target.velocity_y = target->vy;
-            result.target.lead_x = projection.final_x - projection.base_x;
-            result.target.lead_y = projection.final_y - projection.base_y;
+            result.target.lead_x = projection.final_x -
+                projection.delay_compensated_x;
+            result.target.lead_y = projection.final_y -
+                projection.delay_compensated_y;
+            result.target.delay_compensation_x = projection.delay_x;
+            result.target.delay_compensation_y = projection.delay_y;
+            result.target.delay_compensation_ms =
+                projection.delay_seconds * 1000.0f;
             result.target.observation_age_ms =
                 projection.observation_age_seconds * 1000.0f;
             result.target.confidence = target->confidence;
             result.target.lead_active = projection.active;
+            result.target.delay_compensation_active =
+                projection.delay_active;
             result.target.predicted = target->predicted;
             if (impl_->range_allows_control) {
                 result.has_command = impl_->control(

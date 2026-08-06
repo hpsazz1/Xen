@@ -1784,6 +1784,20 @@ struct Overlay::Impl {
             }
             ImGui::EndTable();
         }
+        ImGui::Dummy(ImVec2(0.0f, 5.0f));
+        if (snapshot.control_latency_available) {
+            ImGui::TextColored(
+                rgba(kMutedInk),
+                "端到端控制：最近 %.3f ms | P50 %.3f ms | P95 %.3f ms | 样本 %zu",
+                snapshot.control_latency_last_ms,
+                snapshot.control_latency_p50_ms,
+                snapshot.control_latency_p95_ms,
+                snapshot.control_latency_sample_count);
+        } else {
+            ImGui::TextColored(
+                rgba(kFaintInk),
+                "端到端控制：尚无完成鼠标命令样本");
+        }
         end_surface();
     }
 
@@ -2974,11 +2988,37 @@ struct Overlay::Impl {
     }
 
     void render_prediction_form(AppConfig& app_config) {
-        begin_config_panel("prediction_panel", "预测提前", 118.0f);
-        if (begin_form("prediction_form", 126.0f)) {
+        begin_config_panel("prediction_panel", "预测与延迟补偿", 254.0f);
+        if (begin_form("prediction_form", 278.0f)) {
+            form_row(
+                "启用延迟补偿",
+                "只把已测的截图到输入完成延迟乘以当前确认轨迹速度，生成基础 tracking 补偿点；不移动原始检测框。可与 prediction 同时开启，顺序为基础瞄点、延迟补偿、prediction。默认关闭。 ");
+            toggle_switch(
+                "##enable_delay_compensation",
+                &app_config.aim.enable_delay_compensation);
+            form_row(
+                "控制延迟",
+                "Aim 控制时刻之后未包含在观测年龄中的固定延迟，单位 ms；应由 Runtime 端到端控制报告和真实设备测量确定，范围 0～100 ms。 ");
+            slider_float_control(
+                "control_delay_ms", &app_config.aim.control_delay_ms,
+                0.0f, 100.0f, "%.1f ms");
+            form_row(
+                "最大补偿延迟",
+                "观测年龄与固定控制延迟之和的硬上限，单位 ms，用于阻止异常帧龄或设备卡顿产生无界提前。 ");
+            slider_float_control(
+                "max_delay_compensation_ms",
+                &app_config.aim.max_delay_compensation_ms,
+                0.0f, 100.0f, "%.1f ms");
+            form_row(
+                "最大补偿距离",
+                "延迟补偿向量相对目标框对角线的上限；只限制延迟补偿，不改变 prediction 最大提前距离。 ");
+            slider_float_control(
+                "max_delay_compensation_percent",
+                &app_config.aim.max_delay_compensation_percent,
+                1.0f, 50.0f, "%.0f%%");
             form_row(
                 "启用预测",
-                "独立控制观测年龄提前和丢失轨迹控制。关闭时只执行基础观测移动；开启后仅在目标相对准星持续向外运动且距离足够时提前，越过准星、反向或回到收敛区会先撤销预测并归位，避免前探与回拉震荡。");
+                "在延迟补偿后的 tracking 点上叠加运动提前量和丢失轨迹控制。关闭时只执行基础点与延迟补偿；开启后仅在目标相对准星持续向外运动且距离足够时提前，越过准星、反向或回到收敛区会先撤销预测并归位。");
             toggle_switch(
                 "##enable_prediction", &app_config.aim.enable_prediction);
             form_row(

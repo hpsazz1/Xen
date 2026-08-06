@@ -55,6 +55,13 @@ struct PipelineProfile {
     AimProfile aim;
     double mouse_ms = 0.0;
     double total_ms = 0.0;
+    // control_at 是 Aim 消费检测结果并开始控制计算的单调时刻；只有实际
+    // 尝试发送鼠标命令时，mouse completion 三项才有效，未发送帧不是 0 ms。
+    bool control_timing_valid = false;
+    bool mouse_completion_timing_valid = false;
+    double capture_to_control_ms = 0.0;
+    double control_to_mouse_completion_ms = 0.0;
+    double capture_to_mouse_completion_ms = 0.0;
 };
 
 // `total_ms` 必须继续在 Aim/Mouse 完成时封口。该结构只描述随后发生的
@@ -227,6 +234,11 @@ struct RuntimeSnapshot {
     double capture_fps = 0.0;
     double pipeline_p50_ms = 0.0;
     double pipeline_p95_ms = 0.0;
+    bool control_latency_available = false;
+    std::size_t control_latency_sample_count = 0;
+    double control_latency_last_ms = 0.0;
+    double control_latency_p50_ms = 0.0;
+    double control_latency_p95_ms = 0.0;
     PipelineProfile last_profile;
     bool output_allowed_by_config = false;
     bool output_armed = false;

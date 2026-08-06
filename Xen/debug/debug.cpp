@@ -37,6 +37,9 @@ struct TimingValues {
     std::vector<double> aim;
     std::vector<double> mouse;
     std::vector<double> total;
+    std::vector<double> capture_to_control;
+    std::vector<double> control_to_mouse_completion;
+    std::vector<double> capture_to_mouse_completion;
     std::vector<double> ndi_receive_call;
     std::vector<double> ndi_metadata;
     std::vector<double> ndi_geometry;
@@ -126,6 +129,16 @@ void collect_timing(TimingValues& values,
     values.aim.push_back(sample.profile.aim.total_ms);
     values.mouse.push_back(sample.profile.mouse_ms);
     values.total.push_back(sample.profile.total_ms);
+    if (sample.profile.control_timing_valid) {
+        values.capture_to_control.push_back(
+            sample.profile.capture_to_control_ms);
+    }
+    if (sample.profile.mouse_completion_timing_valid) {
+        values.control_to_mouse_completion.push_back(
+            sample.profile.control_to_mouse_completion_ms);
+        values.capture_to_mouse_completion.push_back(
+            sample.profile.capture_to_mouse_completion_ms);
+    }
     const auto& capture = sample.capture_stages;
     if (capture.ndi_valid) {
         values.ndi_receive_call.push_back(capture.receive_call_ms);
@@ -200,6 +213,11 @@ DebugReportSummary make_summary(
     result.aim = summarize(values.aim);
     result.mouse = summarize(values.mouse);
     result.total = summarize(values.total);
+    result.capture_to_control = summarize(values.capture_to_control);
+    result.control_to_mouse_completion = summarize(
+        values.control_to_mouse_completion);
+    result.capture_to_mouse_completion = summarize(
+        values.capture_to_mouse_completion);
     result.ndi_receive_call = summarize(values.ndi_receive_call);
     result.ndi_metadata = summarize(values.ndi_metadata);
     result.ndi_geometry = summarize(values.ndi_geometry);
@@ -457,6 +475,16 @@ void append_csv_snapshot(std::ostringstream& output,
         << snapshot.source_pixels_per_pixel_y << '\n'
         << "# final_capture_fps," << snapshot.capture_fps << '\n'
         << "# final_source_fps," << snapshot.source_fps << '\n'
+        << "# final_control_latency_available,"
+        << bool_name(snapshot.control_latency_available) << '\n'
+        << "# final_control_latency_sample_count,"
+        << snapshot.control_latency_sample_count << '\n'
+        << "# final_control_latency_last_ms,"
+        << snapshot.control_latency_last_ms << '\n'
+        << "# final_control_latency_p50_ms,"
+        << snapshot.control_latency_p50_ms << '\n'
+        << "# final_control_latency_p95_ms,"
+        << snapshot.control_latency_p95_ms << '\n'
         << "# final_d3d11_cuda_interop,"
         << bool_name(snapshot.d3d11_cuda_interop) << '\n'
         << "# final_d3d11_directml_interop,"
@@ -529,6 +557,16 @@ void append_json_snapshot(std::ostringstream& output,
         << snapshot.source_pixels_per_pixel_y << ",\n"
         << "    \"capture_fps\": " << snapshot.capture_fps << ",\n"
         << "    \"source_fps\": " << snapshot.source_fps << ",\n"
+        << "    \"control_latency_available\": "
+        << bool_name(snapshot.control_latency_available) << ",\n"
+        << "    \"control_latency_sample_count\": "
+        << snapshot.control_latency_sample_count << ",\n"
+        << "    \"control_latency_last_ms\": "
+        << snapshot.control_latency_last_ms << ",\n"
+        << "    \"control_latency_p50_ms\": "
+        << snapshot.control_latency_p50_ms << ",\n"
+        << "    \"control_latency_p95_ms\": "
+        << snapshot.control_latency_p95_ms << ",\n"
         << "    \"d3d11_cuda_interop\": "
         << bool_name(snapshot.d3d11_cuda_interop) << ",\n"
         << "    \"d3d11_directml_interop\": "
@@ -706,6 +744,14 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_csv_timing(csv, "mouse", summary_.mouse);
         append_csv_timing(csv, "total", summary_.total);
         append_csv_timing(
+            csv, "capture_to_control", summary_.capture_to_control);
+        append_csv_timing(
+            csv, "control_to_mouse_completion",
+            summary_.control_to_mouse_completion);
+        append_csv_timing(
+            csv, "capture_to_mouse_completion",
+            summary_.capture_to_mouse_completion);
+        append_csv_timing(
             csv, "ndi_receive_call", summary_.ndi_receive_call);
         append_csv_timing(csv, "ndi_metadata", summary_.ndi_metadata);
         append_csv_timing(csv, "ndi_geometry", summary_.ndi_geometry);
@@ -742,17 +788,25 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "h2d_ms,d3d11_to_cuda_ms,d3d11_to_directml_ms,"
                "gpu_preprocess_ms,execution_ms,d2h_ms,"
                "postprocess_ms,aim_ms,mouse_ms,"
-               "total_ms,detection_status,aim_status,mouse_status,mouse_sent,"
+               "total_ms,control_timing_valid,mouse_completion_timing_valid,"
+               "capture_to_control_ms,control_to_mouse_completion_ms,"
+               "capture_to_mouse_completion_ms,detection_status,aim_status,"
+               "mouse_status,mouse_sent,"
                "aim_has_target,aim_has_command,aim_track_id,aim_track_state,"
                "aim_track_predicted,aim_lead_active,"
+               "aim_delay_compensation_active,"
                "aim_base_point_inside_box,aim_prediction_point_outside_box,"
                "aim_command_toward_target,aim_control_center_x,"
                "aim_control_center_y,aim_acquisition_range_radius,"
                "aim_active_range_radius,aim_range_locked,"
                "aim_range_allows_control,aim_box_x1,aim_box_y1,aim_box_x2,"
-               "aim_box_y2,aim_base_x,aim_base_y,aim_final_x,aim_final_y,"
+               "aim_box_y2,aim_base_x,aim_base_y,"
+               "aim_delay_compensated_x,aim_delay_compensated_y,"
+               "aim_final_x,aim_final_y,"
                "aim_velocity_x,aim_velocity_y,aim_lead_x,aim_lead_y,"
-               "aim_observation_age_ms,aim_command_dx_counts,"
+               "aim_delay_compensation_x,aim_delay_compensation_y,"
+               "aim_delay_compensation_ms,aim_observation_age_ms,"
+               "aim_command_dx_counts,"
                "aim_command_dy_counts,"
                "person_detection_count,head_detection_count,"
                "max_person_confidence,max_head_confidence,"
@@ -794,6 +848,12 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.profile.aim.total_ms << ','
                 << sample.profile.mouse_ms << ','
                 << sample.profile.total_ms << ','
+                << bool_name(sample.profile.control_timing_valid) << ','
+                << bool_name(
+                    sample.profile.mouse_completion_timing_valid) << ','
+                << sample.profile.capture_to_control_ms << ','
+                << sample.profile.control_to_mouse_completion_ms << ','
+                << sample.profile.capture_to_mouse_completion_ms << ','
                 << DetectionStatusName(sample.detection_status) << ','
                 << AimStatusName(sample.aim_status) << ','
                 << MouseStatusName(sample.mouse_status) << ','
@@ -804,6 +864,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << track_state_name(sample.aim_target.state) << ','
                 << bool_name(sample.aim_target.predicted) << ','
                 << bool_name(sample.aim_target.lead_active) << ','
+                << bool_name(
+                    sample.aim_target.delay_compensation_active) << ','
                 << bool_name(sample.aim_base_point_inside_box) << ','
                 << bool_name(sample.aim_prediction_point_outside_box) << ','
                 << bool_name(sample.aim_command_toward_target) << ','
@@ -819,12 +881,17 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.aim_target.y2 << ','
                 << sample.aim_target.base_aim_x << ','
                 << sample.aim_target.base_aim_y << ','
+                << sample.aim_target.delay_compensated_aim_x << ','
+                << sample.aim_target.delay_compensated_aim_y << ','
                 << sample.aim_target.aim_x << ','
                 << sample.aim_target.aim_y << ','
                 << sample.aim_target.velocity_x << ','
                 << sample.aim_target.velocity_y << ','
                 << sample.aim_target.lead_x << ','
                 << sample.aim_target.lead_y << ','
+                << sample.aim_target.delay_compensation_x << ','
+                << sample.aim_target.delay_compensation_y << ','
+                << sample.aim_target.delay_compensation_ms << ','
                 << sample.aim_target.observation_age_ms << ','
                 << sample.aim_command.dx_counts << ','
                 << sample.aim_command.dy_counts << ','
@@ -944,6 +1011,15 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_json_timing(json, "mouse", summary_.mouse, false);
         append_json_timing(json, "total", summary_.total, false);
         append_json_timing(
+            json, "capture_to_control", summary_.capture_to_control,
+            false);
+        append_json_timing(
+            json, "control_to_mouse_completion",
+            summary_.control_to_mouse_completion, false);
+        append_json_timing(
+            json, "capture_to_mouse_completion",
+            summary_.capture_to_mouse_completion, false);
+        append_json_timing(
             json, "ndi_receive_call", summary_.ndi_receive_call, false);
         append_json_timing(
             json, "ndi_metadata", summary_.ndi_metadata, false);
@@ -994,6 +1070,17 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << MouseStatusName(sample.mouse_status)
                  << "\", \"mouse_sent\": "
                  << bool_name(sample.mouse_sent)
+                 << ", \"control_timing_valid\": "
+                 << bool_name(sample.profile.control_timing_valid)
+                 << ", \"mouse_completion_timing_valid\": "
+                 << bool_name(
+                     sample.profile.mouse_completion_timing_valid)
+                 << ", \"capture_to_control_ms\": "
+                 << sample.profile.capture_to_control_ms
+                 << ", \"control_to_mouse_completion_ms\": "
+                 << sample.profile.control_to_mouse_completion_ms
+                 << ", \"capture_to_mouse_completion_ms\": "
+                 << sample.profile.capture_to_mouse_completion_ms
                  << ", \"aim_has_target\": "
                  << bool_name(sample.aim_has_target)
                  << ", \"aim_has_command\": "
@@ -1005,6 +1092,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << bool_name(sample.aim_target.predicted)
                  << ", \"aim_lead_active\": "
                  << bool_name(sample.aim_target.lead_active)
+                 << ", \"aim_delay_compensation_active\": "
+                 << bool_name(
+                     sample.aim_target.delay_compensation_active)
                  << ", \"aim_base_point_inside_box\": "
                  << bool_name(sample.aim_base_point_inside_box)
                  << ", \"aim_prediction_point_outside_box\": "
@@ -1029,6 +1119,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << ", \"aim_base_point\": ["
                  << sample.aim_target.base_aim_x << ", "
                  << sample.aim_target.base_aim_y << ']'
+                 << ", \"aim_delay_compensated_point\": ["
+                 << sample.aim_target.delay_compensated_aim_x << ", "
+                 << sample.aim_target.delay_compensated_aim_y << ']'
                  << ", \"aim_final_point\": ["
                  << sample.aim_target.aim_x << ", "
                  << sample.aim_target.aim_y << ']'
@@ -1037,6 +1130,11 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << sample.aim_target.velocity_y << ']'
                  << ", \"aim_lead\": [" << sample.aim_target.lead_x
                  << ", " << sample.aim_target.lead_y << ']'
+                 << ", \"aim_delay_compensation\": ["
+                 << sample.aim_target.delay_compensation_x << ", "
+                 << sample.aim_target.delay_compensation_y << ']'
+                 << ", \"aim_delay_compensation_ms\": "
+                 << sample.aim_target.delay_compensation_ms
                  << ", \"aim_observation_age_ms\": "
                  << sample.aim_target.observation_age_ms
                  << ", \"aim_command\": ["

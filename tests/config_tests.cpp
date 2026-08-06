@@ -46,6 +46,10 @@ void test_round_trip() {
     source.aim.acquisition_range_percent = 110.0f;
     source.aim.body_aim_range_percent = 62.0f;
     source.aim.enable_prediction = true;
+    source.aim.enable_delay_compensation = true;
+    source.aim.control_delay_ms = 7.5f;
+    source.aim.max_delay_compensation_ms = 18.0f;
+    source.aim.max_delay_compensation_percent = 12.0f;
     source.aim.max_prediction_lead_percent = 18.0f;
     source.mouse.backend = MouseBackend::KMBOX_NET;
     source.mouse.allow_send_input = true;
@@ -111,6 +115,10 @@ void test_round_trip() {
            loaded.aim.acquisition_range_percent == 110.0f &&
            loaded.aim.body_aim_range_percent == 62.0f &&
            loaded.aim.enable_prediction &&
+           loaded.aim.enable_delay_compensation &&
+           loaded.aim.control_delay_ms == 7.5f &&
+           loaded.aim.max_delay_compensation_ms == 18.0f &&
+           loaded.aim.max_delay_compensation_percent == 12.0f &&
            loaded.aim.max_prediction_lead_percent == 18.0f &&
            loaded.mouse.backend == MouseBackend::KMBOX_NET &&
            loaded.mouse.allow_send_input &&

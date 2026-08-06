@@ -47,6 +47,15 @@ struct AimConfig {
     float counts_per_pixel_x = 0.50f;
     float counts_per_pixel_y = 0.50f;
     float max_counts_per_frame = 50.0f;
+    // 基础 tracking 的延迟补偿与 prediction 互斥。它只补偿从截图到输入完成的
+    // 已测控制延迟，不改变检测框、轨迹关联或丢失状态。
+    bool enable_delay_compensation = false;
+    // Aim 控制时刻之后仍未包含在 observation age 中的固定控制延迟，单位 ms。
+    float control_delay_ms = 0.0f;
+    // observation age 与固定控制延迟之和的硬上限，单位 ms。
+    float max_delay_compensation_ms = 16.0f;
+    // 延迟补偿向量相对当前目标框对角线的最大百分比。
+    float max_delay_compensation_percent = 15.0f;
     bool enable_prediction = false;
     // 预测提前向量相对当前目标框对角线的最大百分比。该值只限制预测层，
     // 不改变基础移动、观测或轨迹状态更新。
@@ -88,10 +97,12 @@ struct AimTargetSnapshot {
     float y1 = 0.0f;
     float x2 = 0.0f;
     float y2 = 0.0f;
-    // 基础瞄点来自观测/状态估计并始终位于目标框内；aim_* 是应用有界
-    // 提前后的最终点，预测开启时允许位于框外。
+    // 基础瞄点来自观测/状态估计并始终位于目标框内；延迟补偿点只用于
+    // 基础 tracking 的已测控制延迟；aim_* 是再应用 prediction 后的最终点。
     float base_aim_x = 0.0f;
     float base_aim_y = 0.0f;
+    float delay_compensated_aim_x = 0.0f;
+    float delay_compensated_aim_y = 0.0f;
     float aim_x = 0.0f;
     float aim_y = 0.0f;
     // 速度单位为检测 ROI 像素/秒；实际提前向量已经包含帧龄、降权和距离限幅。
@@ -99,9 +110,13 @@ struct AimTargetSnapshot {
     float velocity_y = 0.0f;
     float lead_x = 0.0f;
     float lead_y = 0.0f;
+    float delay_compensation_x = 0.0f;
+    float delay_compensation_y = 0.0f;
+    float delay_compensation_ms = 0.0f;
     float observation_age_ms = 0.0f;
     float confidence = 0.0f;
     bool lead_active = false;
+    bool delay_compensation_active = false;
     bool predicted = false;
 };
 

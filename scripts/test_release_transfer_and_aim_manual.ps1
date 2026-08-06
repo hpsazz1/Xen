@@ -158,6 +158,11 @@ try {
     if ($trackingConfig -notmatch '(?m)^backend=tensorrt\r?$' -or
         $trackingConfig -notmatch '(?m)^backend=ndi\r?$' -or
         $trackingConfig -notmatch '(?m)^enable_prediction=false\r?$' -or
+        $trackingConfig -notmatch '(?m)^smoothing=0\.350000\r?$' -or
+        $trackingConfig -notmatch '(?m)^enable_delay_compensation=false\r?$' -or
+        $trackingConfig -notmatch '(?m)^control_delay_ms=0\.000000\r?$' -or
+        $trackingConfig -notmatch '(?m)^max_delay_compensation_ms=16\.000000\r?$' -or
+        $trackingConfig -notmatch '(?m)^max_delay_compensation_percent=15\.000000\r?$' -or
         $trackingConfig -notmatch '(?m)^counts_per_pixel_x=0\.400000\r?$' -or
         $trackingConfig -notmatch '(?m)^counts_per_pixel_y=0\.400000\r?$' -or
         $trackingConfig -notmatch '(?m)^max_counts_per_frame=12\.000000\r?$' -or

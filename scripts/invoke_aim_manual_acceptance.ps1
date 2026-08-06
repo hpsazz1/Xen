@@ -10,6 +10,15 @@
     [string]$PackageRoot = "",
     [string]$RunDirectory = "",
     [string]$OutputRoot = "C:\XenLab\reports\aim-dual-manual",
+    [ValidateRange(0.0, 1.0)]
+    [double]$Smoothing = 0.35,
+    [switch]$EnableDelayCompensation,
+    [ValidateRange(0.0, 100.0)]
+    [double]$ControlDelayMs = 0.0,
+    [ValidateRange(0.0, 100.0)]
+    [double]$MaxDelayCompensationMs = 16.0,
+    [ValidateRange(1.0, 50.0)]
+    [double]$MaxDelayCompensationPercent = 15.0,
     [switch]$AllowPhysicalOutput,
     [string]$PhysicalOutputConfirmation = ""
 )
@@ -202,12 +211,16 @@ acquisition_range_percent=90.000000
 body_aim_height_ratio=0.350000
 body_aim_range_percent=50.000000
 deadzone_pixels=1.500000
-smoothing=0.350000
+smoothing=$('{0:F6}' -f $Smoothing)
 # tracking 基线针对移动跟随的轻微滞后做单变量增益修正；单帧上限和平滑保持不变，
 # prediction 只改变提前项，不改变基础控制曲线。
 counts_per_pixel_x=0.400000
 counts_per_pixel_y=0.400000
 max_counts_per_frame=12.000000
+enable_delay_compensation=$($EnableDelayCompensation.IsPresent.ToString().ToLowerInvariant())
+control_delay_ms=$('{0:F6}' -f $ControlDelayMs)
+max_delay_compensation_ms=$('{0:F6}' -f $MaxDelayCompensationMs)
+max_delay_compensation_percent=$('{0:F6}' -f $MaxDelayCompensationPercent)
 enable_prediction=$prediction
 max_prediction_lead_percent=35.000000
 predicted_gain=0.500000
@@ -658,6 +671,11 @@ $summary = [ordered]@{
     run_id = [string]$task.run_id
     scenario = $Scenario
     profile = $Profile
+    smoothing = $Smoothing
+    enable_delay_compensation = $EnableDelayCompensation.IsPresent
+    control_delay_ms = $ControlDelayMs
+    max_delay_compensation_ms = $MaxDelayCompensationMs
+    max_delay_compensation_percent = $MaxDelayCompensationPercent
     started_utc = $startedUtc.ToString("o")
     ended_utc = $endedUtc.ToString("o")
     launcher_exit_code = [int]$process.ExitCode

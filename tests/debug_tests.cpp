@@ -53,6 +53,11 @@ RuntimePipelineSample make_sample(
     sample.profile.aim.total_ms = 0.6;
     sample.profile.mouse_ms = 0.7;
     sample.profile.total_ms = total_ms;
+    sample.profile.control_timing_valid = true;
+    sample.profile.mouse_completion_timing_valid = success;
+    sample.profile.capture_to_control_ms = 1.1;
+    sample.profile.control_to_mouse_completion_ms = 0.8;
+    sample.profile.capture_to_mouse_completion_ms = 1.9;
     sample.capture_stages.ndi_valid = true;
     sample.capture_stages.runtime_handoff_valid = true;
     sample.capture_stages.receive_call_ms = 0.11;
@@ -106,10 +111,14 @@ RuntimePipelineSample make_sample(
         sample.aim_target.y2 = 220.0f;
         sample.aim_target.base_aim_x = 200.0f;
         sample.aim_target.base_aim_y = 140.0f;
+        sample.aim_target.delay_compensated_aim_x = 210.0f;
+        sample.aim_target.delay_compensated_aim_y = 140.0f;
         sample.aim_target.aim_x = 240.0f;
         sample.aim_target.aim_y = 140.0f;
         sample.aim_target.velocity_x = 250.0f;
         sample.aim_target.lead_x = 40.0f;
+        sample.aim_target.delay_compensation_x = 10.0f;
+        sample.aim_target.delay_compensation_ms = 8.0f;
         sample.aim_target.observation_age_ms = 20.0f;
         sample.aim_target.confidence = 0.9f;
         sample.aim_target.lead_active = true;
@@ -206,6 +215,9 @@ void test_report_summary_and_atomic_files() {
                summary.total.p95_ms < 5.0,
            "失败样本不得进入成功耗时的均值和分位数");
     expect(summary.pipeline_complete.sample_count == 2 &&
+               summary.capture_to_control.sample_count == 2 &&
+               summary.control_to_mouse_completion.sample_count == 2 &&
+               summary.capture_to_mouse_completion.p50_ms == 1.9 &&
                summary.ndi_receive_call.sample_count == 2 &&
                summary.ndi_video_queue_depth.sample_count == 2 &&
                summary.ndi_video_queue_depth.mean_frames == 2.0 &&
@@ -221,7 +233,7 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v8") != std::string::npos &&
+        expect(csv_text.find("Xen Runtime Debug Report v8") != std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
                csv_text.find("d3d11_to_directml_ms") != std::string::npos &&
@@ -236,10 +248,12 @@ void test_report_summary_and_atomic_files() {
                    std::string::npos &&
                 csv_text.find("person_detection_count,head_detection_count") !=
                     std::string::npos &&
-                csv_text.find("aim_base_x,aim_base_y,aim_final_x") !=
+                csv_text.find("aim_base_x,aim_base_y,aim_delay_compensated_x") !=
                     std::string::npos &&
                csv_text.find("ndi_receive_call_ms") != std::string::npos &&
                csv_text.find("pipeline_complete_ms") != std::string::npos &&
+               csv_text.find("capture_to_mouse_completion_ms") !=
+                   std::string::npos &&
                csv_text.find("# coverage_phase,formal,3") !=
                    std::string::npos &&
                csv_text.find(",1,2,") != std::string::npos &&
@@ -281,7 +295,9 @@ void test_report_summary_and_atomic_files() {
                  json_text.find(
                      "\"aim_prediction_point_outside_box\": true") !=
                      std::string::npos &&
-                json_text.find("\"aim_observation_age_ms\": 20") !=
+               json_text.find("\"aim_observation_age_ms\": 20") !=
+                    std::string::npos &&
+               json_text.find("\"capture_to_mouse_completion_ms\": 1.9") !=
                     std::string::npos &&
                 json_text.find("\"aim_active_range_radius\": 72") !=
                     std::string::npos &&

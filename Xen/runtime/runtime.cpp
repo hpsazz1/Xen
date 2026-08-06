@@ -66,6 +66,7 @@ struct Runtime::Impl {
     std::atomic<bool> aim_reset_requested{false};
     std::atomic<bool> detector_reload_running{false};
     std::deque<double> pipeline_samples;
+    std::deque<double> control_latency_samples;
     DebugSampleRing debug_samples;
     std::chrono::steady_clock::time_point fps_started{};
     std::uint64_t fps_frame_count = 0;
@@ -252,6 +253,7 @@ struct Runtime::Impl {
                 config.capture.enable_d3d11_directml_interop;
         }
         pipeline_samples.clear();
+        control_latency_samples.clear();
         debug_samples.reset();
         fps_started = std::chrono::steady_clock::now();
         fps_frame_count = 0;
@@ -496,6 +498,26 @@ struct Runtime::Impl {
             pipeline_samples.begin(), pipeline_samples.end());
         current_snapshot.pipeline_p50_ms = percentile(samples, 0.50);
         current_snapshot.pipeline_p95_ms = percentile(samples, 0.95);
+        if (profile.mouse_completion_timing_valid) {
+            control_latency_samples.push_back(
+                profile.capture_to_mouse_completion_ms);
+            while (control_latency_samples.size() >
+                   static_cast<std::size_t>(config.runtime.profile_window)) {
+                control_latency_samples.pop_front();
+            }
+            const std::vector<double> control_samples(
+                control_latency_samples.begin(),
+                control_latency_samples.end());
+            current_snapshot.control_latency_available = true;
+            current_snapshot.control_latency_sample_count =
+                control_samples.size();
+            current_snapshot.control_latency_last_ms =
+                profile.capture_to_mouse_completion_ms;
+            current_snapshot.control_latency_p50_ms =
+                percentile(control_samples, 0.50);
+            current_snapshot.control_latency_p95_ms =
+                percentile(control_samples, 0.95);
+        }
         if (probes_enabled) {
             result.profile_window_ms =
                 std::chrono::duration<double, std::milli>(
@@ -559,6 +581,12 @@ struct Runtime::Impl {
             if (profile.detector.status == DetectionStatus::SUCCESS) {
                 aim_frame.sequence = frame->timing.sequence;
                 aim_frame.captured_at = frame->timing.captured_at;
+                aim_frame.control_at = std::chrono::steady_clock::now();
+                profile.control_timing_valid = true;
+                profile.capture_to_control_ms =
+                    std::chrono::duration<double, std::milli>(
+                        aim_frame.control_at -
+                        frame->timing.captured_at).count();
                 aim_frame.roi_width = frame->width;
                 aim_frame.roi_height = frame->height;
                 aim_frame.control_center_x = static_cast<float>(
@@ -583,10 +611,20 @@ struct Runtime::Impl {
                         aim_result.command.dy_counts};
                     const auto mouse_started = std::chrono::steady_clock::now();
                     mouse_sent = mouse->move(command);
+                    const auto mouse_completed =
+                        std::chrono::steady_clock::now();
                     mouse_elapsed_ms =
                         std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() -
+                            mouse_completed -
                             mouse_started).count();
+                    profile.mouse_completion_timing_valid = true;
+                    profile.control_to_mouse_completion_ms =
+                        std::chrono::duration<double, std::milli>(
+                            mouse_completed - aim_frame.control_at).count();
+                    profile.capture_to_mouse_completion_ms =
+                        std::chrono::duration<double, std::milli>(
+                            mouse_completed -
+                            frame->timing.captured_at).count();
                     if (!mouse_sent) {
                         safety_gate.emergency_stop();
                         aim_reset_requested.store(true,

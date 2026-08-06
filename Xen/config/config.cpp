@@ -719,6 +719,12 @@ bool load_app_config(const std::string& path,
         XEN_READ_AIM_FLOAT(counts_per_pixel_x);
         XEN_READ_AIM_FLOAT(counts_per_pixel_y);
         XEN_READ_AIM_FLOAT(max_counts_per_frame);
+        candidate.aim.enable_delay_compensation = ini.GetBoolValue(
+            "aim", "enable_delay_compensation",
+            candidate.aim.enable_delay_compensation);
+        XEN_READ_AIM_FLOAT(control_delay_ms);
+        XEN_READ_AIM_FLOAT(max_delay_compensation_ms);
+        XEN_READ_AIM_FLOAT(max_delay_compensation_percent);
         candidate.aim.enable_prediction = ini.GetBoolValue(
             "aim", "enable_prediction",
             candidate.aim.enable_prediction);
@@ -903,6 +909,11 @@ bool save_app_config(const std::string& path,
         XEN_WRITE_AIM_FLOAT(counts_per_pixel_x);
         XEN_WRITE_AIM_FLOAT(counts_per_pixel_y);
         XEN_WRITE_AIM_FLOAT(max_counts_per_frame);
+        ini.SetBoolValue("aim", "enable_delay_compensation",
+                         config.aim.enable_delay_compensation);
+        XEN_WRITE_AIM_FLOAT(control_delay_ms);
+        XEN_WRITE_AIM_FLOAT(max_delay_compensation_ms);
+        XEN_WRITE_AIM_FLOAT(max_delay_compensation_percent);
         ini.SetBoolValue("aim", "enable_prediction",
                          config.aim.enable_prediction);
         XEN_WRITE_AIM_FLOAT(max_prediction_lead_percent);

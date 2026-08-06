@@ -43,6 +43,16 @@ inline bool valid_aim_config(const AimConfig& config) noexcept {
            config.counts_per_pixel_y > 0.0f &&
            std::isfinite(config.max_counts_per_frame) &&
            config.max_counts_per_frame > 0.0f &&
+           std::isfinite(config.control_delay_ms) &&
+           config.control_delay_ms >= 0.0f &&
+           config.control_delay_ms <= 100.0f &&
+           std::isfinite(config.max_delay_compensation_ms) &&
+           config.max_delay_compensation_ms >= 0.0f &&
+           config.max_delay_compensation_ms <= 100.0f &&
+           config.control_delay_ms <= config.max_delay_compensation_ms &&
+           std::isfinite(config.max_delay_compensation_percent) &&
+           config.max_delay_compensation_percent >= 1.0f &&
+           config.max_delay_compensation_percent <= 50.0f &&
            std::isfinite(config.max_prediction_lead_percent) &&
            config.max_prediction_lead_percent >= 1.0f &&
            config.max_prediction_lead_percent <= 50.0f &&

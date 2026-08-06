@@ -819,6 +819,43 @@ void test_control_step_cannot_cross_in_box_aim_point() {
            "准星已在模型框内时，单帧控制不得把它推出选中框");
 }
 
+void test_delay_compensation_stacks_before_prediction() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 100.0f;
+    config.max_center_distance = 1.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 10.0f;
+    config.max_delay_compensation_ms = 20.0f;
+    config.max_delay_compensation_percent = 50.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame first = make_frame(1, base);
+    first.control_at = base + std::chrono::milliseconds(5);
+    first.detections = {body(180.0f, 160.0f)};
+    aim.process(first);
+
+    AimFrame second = make_frame(
+        2, base + std::chrono::milliseconds(10));
+    second.control_at = second.captured_at +
+        std::chrono::milliseconds(5);
+    second.detections = {body(190.0f, 160.0f)};
+    const AimResult result = aim.process(second);
+    expect(result.has_target && result.target.delay_compensation_active &&
+               result.target.delay_compensation_x > 0.0f &&
+               result.target.delay_compensated_aim_x >
+                   result.target.base_aim_x &&
+               result.target.aim_x >= result.target.delay_compensated_aim_x,
+           "延迟补偿必须先于 prediction 叠加，且沿确认速度方向生效");
+}
+
 } // namespace
 
 int main() {
@@ -848,6 +885,7 @@ int main() {
     test_control_trajectory_never_moves_away_from_target();
     test_quantization_residual_cannot_reverse_after_crossing();
     test_control_step_cannot_cross_in_box_aim_point();
+    test_delay_compensation_stacks_before_prediction();
 
     Log::shutdown();
     if (failures != 0) {
