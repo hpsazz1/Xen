@@ -14,6 +14,8 @@
     [string]$OutputRoot = "C:\XenLab\reports\aim-dual-manual",
     [ValidateRange(0.0, 1.0)]
     [double]$Smoothing = 0.35,
+    [ValidateRange(0.01, 10.0)]
+    [double]$CountsPerPixel = 0.40,
     [switch]$EnableDelayCompensation,
     [ValidateRange(0.0, 100.0)]
     [double]$ControlDelayMs = 0.0,
@@ -216,8 +218,8 @@ deadzone_pixels=1.500000
 smoothing=$('{0:F6}' -f $Smoothing)
 # tracking 基线针对移动跟随的轻微滞后做单变量增益修正；单帧上限和平滑保持不变，
 # prediction 只改变提前项，不改变基础控制曲线。
-counts_per_pixel_x=0.400000
-counts_per_pixel_y=0.400000
+counts_per_pixel_x=$('{0:F6}' -f $CountsPerPixel)
+counts_per_pixel_y=$('{0:F6}' -f $CountsPerPixel)
 max_counts_per_frame=12.000000
 enable_delay_compensation=$($EnableDelayCompensation.IsPresent.ToString().ToLowerInvariant())
 control_delay_ms=$('{0:F6}' -f $ControlDelayMs)
@@ -391,12 +393,13 @@ function New-LaunchCommand([string]$ResolvedRunDirectory) {
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
         '-TaskId {1} -Mode Launch -Scenario {2} -Profile {3} ' +
         '-PackageRoot "{4}" -RunDirectory "{5}" -Smoothing {6:F6}' +
-        '{7} -ControlDelayMs {8:F6} -MaxDelayCompensationMs {9:F6} ' +
-        '-MaxDelayCompensationPercent {10:F6} -AllowPhysicalOutput ' +
-        '-PhysicalOutputConfirmation {11}') -f
+        ' -CountsPerPixel {7:F6}{8} -ControlDelayMs {9:F6} ' +
+        '-MaxDelayCompensationMs {10:F6} ' +
+        '-MaxDelayCompensationPercent {11:F6} -AllowPhysicalOutput ' +
+        '-PhysicalOutputConfirmation {12}') -f
         (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
         $taskId, $Scenario, $Profile, $PackageRoot, $ResolvedRunDirectory,
-        $Smoothing, $delaySwitch, $ControlDelayMs,
+        $Smoothing, $CountsPerPixel, $delaySwitch, $ControlDelayMs,
         $MaxDelayCompensationMs, $MaxDelayCompensationPercent,
         $physicalConfirmation
 }
@@ -418,6 +421,7 @@ function New-TaskMarkdown(
 - 场景：$Scenario / $($Definition.title)
 - 配置：$Profile
 - smoothing：$('{0:F6}' -f $Smoothing)
+- counts-per-pixel：$('{0:F6}' -f $CountsPerPixel)
 - 延迟补偿：$($EnableDelayCompensation.IsPresent)
 - 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
 - Capture：NDI / $ndiSourceName
@@ -522,6 +526,7 @@ if ($Mode -eq "Prepare") {
         }
         aim = [ordered]@{
             smoothing = $Smoothing
+            counts_per_pixel = $CountsPerPixel
             delay_compensation_enabled = $EnableDelayCompensation.IsPresent
             control_delay_ms = $ControlDelayMs
             max_delay_compensation_ms = $MaxDelayCompensationMs
@@ -548,6 +553,7 @@ if ($Mode -eq "Prepare") {
 - 场景：$Scenario
 - 配置：$Profile
 - smoothing：$('{0:F6}' -f $Smoothing)
+- counts-per-pixel：$('{0:F6}' -f $CountsPerPixel)
 - 延迟补偿：$($EnableDelayCompensation.IsPresent)
 - 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
 - 执行人：
@@ -588,6 +594,7 @@ if ([int]$task.schema -ne 1 -or
     [string]$task.profile -ne $Profile -or
     [string]$task.package_root -ne $PackageRoot -or
     [double]$task.aim.smoothing -ne $Smoothing -or
+    [double]$task.aim.counts_per_pixel -ne $CountsPerPixel -or
     [bool]$task.aim.delay_compensation_enabled -ne
         $EnableDelayCompensation.IsPresent -or
     [double]$task.aim.control_delay_ms -ne $ControlDelayMs -or
@@ -705,6 +712,7 @@ $summary = [ordered]@{
     scenario = $Scenario
     profile = $Profile
     smoothing = $Smoothing
+    counts_per_pixel = $CountsPerPixel
     enable_delay_compensation = $EnableDelayCompensation.IsPresent
     control_delay_ms = $ControlDelayMs
     max_delay_compensation_ms = $MaxDelayCompensationMs

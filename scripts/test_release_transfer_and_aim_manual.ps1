@@ -143,6 +143,7 @@ try {
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
         -TaskId AIM-LATENCY-COMP-001 `
         -Mode Prepare -Scenario Static -Profile tracking -Smoothing 0.50 `
+        -CountsPerPixel 0.55 `
         -EnableDelayCompensation -ControlDelayMs 7.5 `
         -MaxDelayCompensationMs 18.0 `
         -MaxDelayCompensationPercent 12.0 `
@@ -153,7 +154,8 @@ try {
     if ($trackingOutputText -notmatch
             ('(?m)^powershell\.exe .* -TaskId AIM-LATENCY-COMP-001 ' +
              '-Mode Launch -Scenario Static -Profile tracking .* ' +
-             '-Smoothing 0\.500000 -EnableDelayCompensation ' +
+             '-Smoothing 0\.500000 -CountsPerPixel 0\.550000 ' +
+             '-EnableDelayCompensation ' +
              '-ControlDelayMs 7\.500000 ' +
              '-MaxDelayCompensationMs 18\.000000 ' +
              '-MaxDelayCompensationPercent 12\.000000 ' +
@@ -172,8 +174,8 @@ try {
         $trackingConfig -notmatch '(?m)^control_delay_ms=7\.500000\r?$' -or
         $trackingConfig -notmatch '(?m)^max_delay_compensation_ms=18\.000000\r?$' -or
         $trackingConfig -notmatch '(?m)^max_delay_compensation_percent=12\.000000\r?$' -or
-        $trackingConfig -notmatch '(?m)^counts_per_pixel_x=0\.400000\r?$' -or
-        $trackingConfig -notmatch '(?m)^counts_per_pixel_y=0\.400000\r?$' -or
+        $trackingConfig -notmatch '(?m)^counts_per_pixel_x=0\.550000\r?$' -or
+        $trackingConfig -notmatch '(?m)^counts_per_pixel_y=0\.550000\r?$' -or
         $trackingConfig -notmatch '(?m)^max_counts_per_frame=12\.000000\r?$' -or
         $trackingConfig -notmatch '(?m)^backend=kmbox_net\r?$' -or
         $trackingConfig -notmatch '(?m)^kmbox_ip=192\.168\.2\.188\r?$' -or
@@ -187,6 +189,7 @@ try {
         ConvertFrom-Json
     if ([string]$trackingTask.task_id -ne "AIM-LATENCY-COMP-001" -or
         [double]$trackingTask.aim.smoothing -ne 0.50 -or
+        [double]$trackingTask.aim.counts_per_pixel -ne 0.55 -or
         [bool]$trackingTask.aim.delay_compensation_enabled -ne $true -or
         [double]$trackingTask.aim.control_delay_ms -ne 7.5 -or
         [double]$trackingTask.aim.max_delay_compensation_ms -ne 18.0 -or
@@ -198,6 +201,7 @@ try {
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
         -TaskId AIM-LATENCY-COMP-001 `
         -Mode Launch -Scenario Static -Profile tracking -Smoothing 0.35 `
+        -CountsPerPixel 0.55 `
         -EnableDelayCompensation -ControlDelayMs 7.5 `
         -MaxDelayCompensationMs 18.0 `
         -MaxDelayCompensationPercent 12.0 `
