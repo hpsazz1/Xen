@@ -2,6 +2,7 @@
     [string]$PackageRoot = (Join-Path $PSScriptRoot "..\cache\releases\Xen-888b04e-aim-dual"),
     [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build-release-096e1a7-nvidia"),
     [string]$DestinationRoot = "\\192.168.3.20\XenLab$\releases\Xen-888b04e-aim-dual",
+    [string]$RemotePackageRoot = "C:\XenLab\releases\Xen-888b04e-aim-dual",
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE ".ssh\xen_foxos_ed25519"),
     [string]$SshUser = "XenDeploy",
     [string]$SshHost = "192.168.3.20",
@@ -96,7 +97,8 @@ $record[0].sha256 = $hash
 $record[0].source = "$worker@$($commit.Substring(0, 7))"
 
 $manifestPending = Join-Path $packageRoot ".manifest.incoming-$([guid]::NewGuid().ToString('N'))"
-$remoteStage = Join-Path $destinationRoot ".aim-worker.incoming-$([guid]::NewGuid().ToString('N'))"
+$remoteStageName = ".aim-worker.incoming-$([guid]::NewGuid().ToString('N'))"
+$remoteStage = Join-Path $destinationRoot $remoteStageName
 $remoteWorker = Join-Path $destinationRoot "runtimes\nvidia\Xen.exe"
 $remoteManifest = Join-Path $destinationRoot "manifest.json"
 try {
@@ -111,8 +113,20 @@ try {
     Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $remoteStage "manifest.json")
     $remoteHash = (Get-FileHash -LiteralPath (Join-Path $remoteStage "runtimes\nvidia\Xen.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($remoteHash -ne $hash) { throw "辅机暂存 Worker SHA-256 校验失败。" }
-    Replace-FileAtomically (Join-Path $remoteStage "runtimes\nvidia\Xen.exe") $remoteWorker
-    Replace-FileAtomically (Join-Path $remoteStage "manifest.json") $remoteManifest
+    if (-not (Test-Path -LiteralPath $SshIdentityFile -PathType Leaf)) {
+        throw "SSH 身份文件不存在：$SshIdentityFile"
+    }
+    $remoteStageLocal = Join-Path $RemotePackageRoot $remoteStageName
+    $applyCommand = 'cmd.exe /d /c move /Y "' +
+        (Join-Path $remoteStageLocal "runtimes\nvidia\Xen.exe") + '" "' +
+        (Join-Path $RemotePackageRoot "runtimes\nvidia\Xen.exe") +
+        '" && move /Y "' + (Join-Path $remoteStageLocal "manifest.json") +
+        '" "' + (Join-Path $RemotePackageRoot "manifest.json") + '"'
+    & ssh -i $SshIdentityFile -o IdentitiesOnly=yes -o BatchMode=yes `
+        "$SshUser@$SshHost" $applyCommand
+    if ($LASTEXITCODE -ne 0) {
+        throw "辅机本地原子替换失败，退出码：$LASTEXITCODE"
+    }
 } finally {
     if (Test-Path -LiteralPath $manifestPending -PathType Leaf) {
         Remove-Item -LiteralPath $manifestPending -Force
