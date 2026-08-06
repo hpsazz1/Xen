@@ -60,6 +60,8 @@ constexpr float kTrackVelocityBetaHigh = 0.10f;
 constexpr float kTrackVelocityBetaLow = 0.04f;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
+constexpr float kBaseAimMotionHorizonSeconds = 0.08f;
+constexpr float kBaseAimMotionDeadbandWidthsPerSecond = 0.25f;
 
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
@@ -345,12 +347,10 @@ struct Aim::Impl {
                     head_assignment[body_index]);
                 const Detection& head = *heads[head_index];
                 head_used[head_index] = true;
-                const float head_x = (head.x1 + head.x2) * 0.5f;
-                const float head_y = (head.y1 + head.y2) * 0.5f;
-                observation.aim_ratio_x = normalized_position(
-                    head_x, body->x1, body->x2);
-                observation.aim_ratio_y = normalized_position(
-                    head_y, body->y1, body->y2);
+                // 头框只参与头身归一化关联，不直接把头中心作为瞄点；基础瞄点的
+                // 高度和横向有效范围统一由 AimConfig 控制，避免不同检测框尺度造成跳变。
+                observation.aim_ratio_x = 0.5f;
+                observation.aim_ratio_y = config.body_aim_height_ratio;
                 observation.confidence =
                     std::max(observation.confidence, head.confidence);
                 observation.aim_from_head = true;
@@ -369,11 +369,21 @@ struct Aim::Impl {
         for (std::size_t index = 0; index < heads.size(); ++index) {
             if (head_used[index]) continue;
             const Detection& head = *heads[index];
-            observations.push_back({
-                head.x1, head.y1, head.x2, head.y2,
-                (head.x1 + head.x2) * 0.5f,
-                (head.y1 + head.y2) * 0.5f,
-                0.5f, 0.5f, head.confidence, true, true});
+            Observation observation;
+            observation.x1 = head.x1;
+            observation.y1 = head.y1;
+            observation.x2 = head.x2;
+            observation.y2 = head.y2;
+            observation.aim_ratio_x = 0.5f;
+            observation.aim_ratio_y = config.body_aim_height_ratio;
+            observation.aim_x = head.x1 + (head.x2 - head.x1) *
+                observation.aim_ratio_x;
+            observation.aim_y = head.y1 + (head.y2 - head.y1) *
+                observation.aim_ratio_y;
+            observation.confidence = head.confidence;
+            observation.head_only = true;
+            observation.aim_from_head = true;
+            observations.push_back(observation);
         }
         return observations;
     }
@@ -763,7 +773,20 @@ struct Aim::Impl {
     LeadProjection projected_aim_point(
             const AimFrame& frame, const Track& track,
             std::chrono::steady_clock::time_point control_at) noexcept {
-        const float base_x = std::clamp(track.aim_x, track.x1, track.x2);
+        const float half_range = config.body_aim_range_percent / 200.0f;
+        const float range_min_x = track.x1 + (track.x2 - track.x1) *
+            (0.5f - half_range);
+        const float range_max_x = track.x1 + (track.x2 - track.x1) *
+            (0.5f + half_range);
+        const float box_width = track.x2 - track.x1;
+        const float motion_x = !config.enable_prediction && !track.predicted &&
+                std::fabs(track.vx) >=
+                box_width * kBaseAimMotionDeadbandWidthsPerSecond
+            ? track.vx * kBaseAimMotionHorizonSeconds : 0.0f;
+        // 基础点只在配置的身体框内窗中随目标方向移动。速度死区让静止目标
+        // 保持原参数位置；内窗硬边界保证该层不会退化成框外预测。
+        const float base_x = std::clamp(
+            track.aim_x + motion_x, range_min_x, range_max_x);
         const float base_y = std::clamp(track.aim_y, track.y1, track.y2);
         LeadProjection projection;
         projection.base_x = base_x;

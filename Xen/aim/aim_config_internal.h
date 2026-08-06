@@ -30,6 +30,9 @@ inline bool valid_aim_config(const AimConfig& config) noexcept {
            std::isfinite(config.body_aim_height_ratio) &&
            config.body_aim_height_ratio >= 0.0f &&
            config.body_aim_height_ratio <= 1.0f &&
+           std::isfinite(config.body_aim_range_percent) &&
+           config.body_aim_range_percent >= 1.0f &&
+           config.body_aim_range_percent <= 100.0f &&
            std::isfinite(config.deadzone_pixels) &&
            config.deadzone_pixels >= 0.0f &&
            std::isfinite(config.smoothing) &&

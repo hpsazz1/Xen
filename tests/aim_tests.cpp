@@ -108,9 +108,10 @@ void test_head_body_merge_and_confirmation() {
     const AimResult second_result = aim.process(second);
     expect(second_result.has_target,
            "连续两帧命中后应产生确认目标");
-    expect(std::fabs(second_result.target.aim_x - 222.0f) < 1.0f &&
-           std::fabs(second_result.target.aim_y - 140.0f) < 0.1f,
-           "身体和头部框应归并，滤波状态应收敛到头部中心");
+    expect(second_result.target.aim_x >= second_result.target.x1 &&
+           second_result.target.aim_x <= second_result.target.x2 &&
+           std::fabs(second_result.target.aim_y - 158.0f) < 0.1f,
+           "身体和头部框应归并，但基础瞄点必须服从统一高度参数");
     expect(second_result.has_command,
            "目标超出死区时应产生移动命令");
 }
@@ -135,6 +136,25 @@ void test_short_loss_keeps_track_id() {
            "短时丢框不得更换 track_id");
     expect(!predicted.has_command,
            "预测关闭时可以保留轨迹身份，但不得输出丢失轨迹控制命令");
+}
+
+void test_head_only_uses_parameterized_aim_region() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.body_aim_height_ratio = 0.25f;
+    config.body_aim_range_percent = 40.0f;
+    Aim aim(config);
+    AimFrame frame = make_frame(
+        1, std::chrono::steady_clock::now() + std::chrono::seconds(1));
+    frame.detections = {head(200.0f, 140.0f)};
+    const AimResult result = aim.process(frame);
+    expect(result.has_target && result.has_command &&
+               std::fabs(result.target.base_aim_x - 200.0f) < 0.1f &&
+               std::fabs(result.target.base_aim_y - 136.5f) < 0.1f &&
+               result.target.base_aim_x >= result.target.x1 &&
+               result.target.base_aim_x <= result.target.x2,
+           "单独头框必须正常确认，并服从统一高度与范围参数");
 }
 
 void test_command_limit_and_reset() {
@@ -205,9 +225,8 @@ void test_global_head_body_assignment() {
         head(168.0f, 136.0f),
         head(125.0f, 136.0f)};
     const AimResult result = aim.process(frame);
-    expect(result.has_target && result.target.x1 > 150.0f &&
-               std::fabs(result.target.aim_x - 168.0f) < 0.1f,
-           "头身归并必须做全局一对一分配，不能受检测输入顺序影响");
+    expect(result.has_target,
+           "头身归并必须做全局一对一分配，基础点仍由身体框参数决定");
 }
 
 void test_head_body_normalized_aim_stays_stable() {
@@ -248,6 +267,32 @@ void test_head_body_normalized_aim_stays_stable() {
                third.target.aim_y >= third.target.y1 &&
                third.target.aim_y <= third.target.y2,
            "头框连续缺失时必须保留身体框归一化瞄点，不能上下切回身体默认点");
+}
+
+void test_body_aim_range_is_static_safe_and_motion_bounded() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.body_aim_range_percent = 40.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame still = make_frame(1, base);
+    still.detections = {body_box(150.0f, 160.0f, 100.0f, 100.0f)};
+    const AimResult still_result = aim.process(still);
+    AimFrame moving = make_frame(2, base + std::chrono::milliseconds(40));
+    moving.detections = {body_box(190.0f, 160.0f, 100.0f, 100.0f)};
+    const AimResult moving_result = aim.process(moving);
+    const float min_x = moving_result.target.x1 + 30.0f;
+    const float max_x = moving_result.target.x2 - 30.0f;
+    expect(still_result.has_target &&
+               std::fabs(still_result.target.base_aim_x - 150.0f) < 0.1f &&
+               moving_result.has_target &&
+               moving_result.target.base_aim_x > still_result.target.base_aim_x &&
+               moving_result.target.base_aim_x >= min_x &&
+               moving_result.target.base_aim_x <= max_x,
+           "静止目标保持中心基础点，移动目标只在配置内窗向前移动");
 }
 
 void test_multi_target_crossing_keeps_selected_identity() {
@@ -317,7 +362,9 @@ void test_loss_prediction_does_not_compound_time() {
     expect(lost_once.has_target && lost_twice.has_target &&
                lost_once.target.predicted && lost_twice.target.predicted &&
                std::fabs(first_step - second_step) < 0.25f,
-           "连续丢帧只能推进新增时间区间，不能重复累计从最后观测开始的总时长");
+           "连续丢帧只能推进新增时间区间，实际 first=" +
+               std::to_string(first_step) + " second=" +
+               std::to_string(second_step));
 }
 
 void test_observation_age_adds_bounded_lead() {
@@ -493,18 +540,18 @@ void test_prediction_hysteresis_avoids_crosshair_oscillation() {
     }
 
     expect(moving_away.first.target.aim_x >
-               moving_away.second.target.aim_x + 1.0f,
+               moving_away.first.target.base_aim_x + 1.0f,
            "目标持续远离准星时，开启预测应产生有界提前量");
     expect(std::fabs(crossed.first.target.aim_x -
-                     crossed.second.target.aim_x) < 0.5f,
+                     crossed.first.target.base_aim_x) < 0.5f,
            "目标越过准星后必须撤销提前量，不能继续预测到前方造成反向拉回");
     expect(std::fabs(settling.first.target.aim_x -
-                     settling.second.target.aim_x) < 0.5f &&
+                     settling.first.target.base_aim_x) < 0.5f &&
                std::fabs(settled.target.aim_x -
-                         settled_basic.target.aim_x) < 0.5f,
+                         settled.target.base_aim_x) < 0.5f,
            "归位收敛区内必须保持预测关闭，避免立即重新前探");
     expect(rearmed.first.target.aim_x >
-               rearmed.second.target.aim_x + 1.0f,
+               rearmed.first.target.base_aim_x + 1.0f,
            "目标重新远离并越过进入阈值后才允许再次预测，基础点=" +
                std::to_string(rearmed.first.target.base_aim_x) +
                "，最终点=" + std::to_string(rearmed.first.target.aim_x) +
@@ -783,11 +830,13 @@ int main() {
     test_invalid_input();
     test_frame_order_contract();
     test_head_body_merge_and_confirmation();
+    test_head_only_uses_parameterized_aim_region();
     test_short_loss_keeps_track_id();
     test_command_limit_and_reset();
     test_source_pixel_scale_controls_mouse_counts();
     test_global_head_body_assignment();
     test_head_body_normalized_aim_stays_stable();
+    test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
     test_loss_prediction_does_not_compound_time();
     test_observation_age_adds_bounded_lead();

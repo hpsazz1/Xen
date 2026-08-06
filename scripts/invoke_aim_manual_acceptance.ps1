@@ -200,6 +200,7 @@ switch_confirm_frames=3
 switch_cooldown_frames=5
 acquisition_range_percent=90.000000
 body_aim_height_ratio=0.350000
+body_aim_range_percent=50.000000
 deadzone_pixels=1.500000
 smoothing=0.350000
 # tracking 基线使用已收敛的比例和单帧上限；prediction 只改变提前项，不改变基础控制曲线。

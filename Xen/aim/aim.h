@@ -40,6 +40,8 @@ struct AimConfig {
     // 挑战者切换和鼠标命令，不裁剪 Detector 输入或停止轨迹状态更新。
     float acquisition_range_percent = 90.0f;
     float body_aim_height_ratio = 0.35f;
+    // 身体框内基础瞄点允许活动的横向有效范围百分比；50 表示身体框中间 50%。
+    float body_aim_range_percent = 50.0f;
     float deadzone_pixels = 1.5f;
     float smoothing = 0.35f;
     float counts_per_pixel_x = 0.50f;

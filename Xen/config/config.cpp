@@ -713,6 +713,7 @@ bool load_app_config(const std::string& path,
         XEN_READ_AIM_INT(switch_cooldown_frames);
         XEN_READ_AIM_FLOAT(acquisition_range_percent);
         XEN_READ_AIM_FLOAT(body_aim_height_ratio);
+        XEN_READ_AIM_FLOAT(body_aim_range_percent);
         XEN_READ_AIM_FLOAT(deadzone_pixels);
         XEN_READ_AIM_FLOAT(smoothing);
         XEN_READ_AIM_FLOAT(counts_per_pixel_x);
@@ -896,6 +897,7 @@ bool save_app_config(const std::string& path,
         XEN_WRITE_AIM_INT(switch_cooldown_frames);
         XEN_WRITE_AIM_FLOAT(acquisition_range_percent);
         XEN_WRITE_AIM_FLOAT(body_aim_height_ratio);
+        XEN_WRITE_AIM_FLOAT(body_aim_range_percent);
         XEN_WRITE_AIM_FLOAT(deadzone_pixels);
         XEN_WRITE_AIM_FLOAT(smoothing);
         XEN_WRITE_AIM_FLOAT(counts_per_pixel_x);

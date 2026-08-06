@@ -2942,6 +2942,13 @@ struct Overlay::Impl {
                 &app_config.aim.body_aim_height_ratio,
                 0.0f, 1.0f, "%.2f");
             form_row(
+                "身体瞄准范围",
+                "基础瞄点在身体框内允许使用的横向有效范围；头框仅用于归一化头身关联，不直接瞄准头中心。静止目标仍使用瞄准高度，移动时基础点不会超出该范围。单位为身体框宽度百分比。");
+            slider_float_control(
+                "body_aim_range_percent",
+                &app_config.aim.body_aim_range_percent,
+                1.0f, 100.0f, "%.0f%%");
+            form_row(
                 "移动强度",
                 "把主机 FOV 像素误差换算为相对鼠标 counts；界面统一水平和垂直比例，内部自动完成平滑、提前和相邻帧变化约束。");
             float movement_strength = std::sqrt(
