@@ -47,8 +47,9 @@ struct AimConfig {
     float counts_per_pixel_x = 0.50f;
     float counts_per_pixel_y = 0.50f;
     float max_counts_per_frame = 50.0f;
-    // 基础 tracking 的延迟补偿与 prediction 互斥。它只补偿从截图到输入完成的
-    // 已测控制延迟，不改变检测框、轨迹关联或丢失状态。
+    // 基础 tracking 的延迟补偿可与 prediction 同时开启；它只补偿从截图到输入完成的
+    // 已测控制延迟，不改变检测框、轨迹关联或丢失状态。处理顺序固定为基础瞄点、
+    // 延迟补偿点、prediction 提前点。
     bool enable_delay_compensation = false;
     // Aim 控制时刻之后仍未包含在 observation age 中的固定控制延迟，单位 ms。
     float control_delay_ms = 0.0f;
