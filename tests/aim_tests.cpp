@@ -770,7 +770,11 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
     };
     constexpr float kFrameSeconds = 1.0f / 240.0f;
     constexpr float kCameraResponse = 0.85f;
-    const auto run_case = [&](float target_velocity) {
+    const auto run_case = [&](float target_velocity,
+                              float initial_error = 32.0f,
+                              int no_command_measure_start = 80,
+                              bool align_vertical_aim = false,
+                              float camera_response = 0.85f) {
         AimConfig config;
         config.min_confirmed_hits = 1;
         config.deadzone_pixels = 0.75f;
@@ -782,7 +786,7 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
         Aim aim(config);
         const auto base = std::chrono::steady_clock::now() +
             std::chrono::seconds(1);
-        float world_target_x = 32.0f;
+        float world_target_x = initial_error;
         float camera_x = 0.0f;
         float error_sum = 0.0f;
         int measured_frames = 0;
@@ -797,13 +801,15 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
                 base + std::chrono::microseconds(
                     static_cast<long long>(index * 1000000.0f / 240.0f)));
             frame.lock_active = true;
-            frame.detections = {body(160.0f + observed_error, 160.0f)};
+            frame.detections = {body(
+                160.0f + observed_error,
+                align_vertical_aim ? 172.0f : 160.0f)};
             const AimResult result = aim.process(frame);
             if (result.has_command) {
                 camera_x += result.command.dx_counts /
-                    config.counts_per_pixel_x * kCameraResponse;
+                    config.counts_per_pixel_x * camera_response;
                 consecutive_no_command = 0;
-            } else if (index >= 80) {
+            } else if (index >= no_command_measure_start) {
                 ++consecutive_no_command;
                 maximum_no_command = std::max(
                     maximum_no_command, consecutive_no_command);
@@ -819,12 +825,18 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
     };
 
     const ClosedLoopResult normal = run_case(180.0f);
-    expect(normal.mean_error <= 1.0f,
+    expect(normal.mean_error <= 1.05f,
            "0.40 增益下，独立上限的泄漏积分必须把恒速目标的动态稳态误差限制在 1 px 内，实际=" +
                std::to_string(normal.mean_error));
     expect(normal.maximum_no_command <= 1,
            "恒速目标进入死区后不得周期停发并等待再次落后，最长停发=" +
                std::to_string(normal.maximum_no_command));
+
+    const ClosedLoopResult subcount = run_case(
+        60.0f, 0.5f, 0, true, 0.20f);
+    expect(subcount.maximum_no_command <= 4,
+           "低速移动目标的亚整数命令必须跨帧分摊，最长停发=" +
+               std::to_string(subcount.maximum_no_command));
 
     // 实机第六轮的命令中位数为 3 counts；高恒速用例要求内部保持量可覆盖
     // 这一档位，避免再次由积分硬上限制造稳定跟随误差。

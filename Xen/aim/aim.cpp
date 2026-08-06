@@ -1049,7 +1049,16 @@ struct Aim::Impl {
         if (std::fabs(error_y) > hold_band && desired_y * error_y <= 0.0f) {
             desired_y = proportional_y;
         }
-        if (inside_deadzone && std::hypot(integral_x, integral_y) < 0.05f) {
+        const bool moving_away_x =
+            tracking_error_x * track.vx > 0.0f &&
+            std::fabs(track.vx) >
+                kControllerMovingVelocityThresholdPixelsPerSecond;
+        const bool moving_away_y =
+            tracking_error_y * track.vy > 0.0f &&
+            std::fabs(track.vy) >
+                kControllerMovingVelocityThresholdPixelsPerSecond;
+        if (inside_deadzone && std::hypot(integral_x, integral_y) < 0.05f &&
+            !moving_away_x && !moving_away_y) {
             filtered_x = 0.0f;
             filtered_y = 0.0f;
             shaped_x = 0.0f;
@@ -1119,8 +1128,20 @@ struct Aim::Impl {
         command.captured_at = frame.captured_at;
         command.dx_counts = static_cast<int>(std::lround(quantized_x));
         command.dy_counts = static_cast<int>(std::lround(quantized_y));
-        const int maximum_x = static_cast<int>(std::floor(std::fabs(desired_x)));
-        const int maximum_y = static_cast<int>(std::floor(std::fabs(desired_y)));
+        // 亚整数残余只有在后续帧允许发出 1 count 时才能完成时间分摊。
+        // 对确认中的移动轴使用 ceil；静止轴仍使用 floor，避免静态目标在
+        // 小误差内越过瞄点。方向门禁和二维单帧上限继续在前后两侧生效。
+        const auto quantized_axis_limit = [](float desired, float velocity) {
+            const float magnitude = std::fabs(desired);
+            if (std::fabs(velocity) >
+                    kControllerMovingVelocityThresholdPixelsPerSecond &&
+                desired * velocity > 0.0f && magnitude > 0.0f) {
+                return static_cast<int>(std::ceil(magnitude));
+            }
+            return static_cast<int>(std::floor(magnitude));
+        };
+        const int maximum_x = quantized_axis_limit(desired_x, track.vx);
+        const int maximum_y = quantized_axis_limit(desired_y, track.vy);
         command.dx_counts = std::clamp(
             command.dx_counts, -maximum_x, maximum_x);
         command.dy_counts = std::clamp(
