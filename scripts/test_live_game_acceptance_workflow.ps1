@@ -55,9 +55,13 @@ function New-SyntheticAimSample {
         aim_range_allows_control = $true
         aim_box = @(150.0, 100.0, 230.0, 220.0)
         aim_base_point = @(200.0, 140.0)
+        aim_delay_compensated_point = @(200.0, 140.0)
         aim_final_point = @($FinalX, 140.0)
         aim_velocity = @(250.0, 0.0)
         aim_lead = @($LeadX, 0.0)
+        aim_delay_compensation_active = $false
+        aim_delay_compensation = @(0.0, 0.0)
+        aim_delay_compensation_ms = 0.0
         aim_observation_age_ms = 20.0
         aim_command = @(20, -10)
         person_detection_count = 1
@@ -85,6 +89,26 @@ $tooFarSummary = Get-XenAimReportSummary -Samples @($outsidePrediction) `
 Expect (-not [bool]$tooFarSummary.contract_valid -and
         $tooFarSummary.violations.lead_limit_frames -eq 1) `
     "预测点出框不是失败，超过最大提前距离才必须失败"
+
+$delayCompensated = New-SyntheticAimSample -LeadActive $false `
+    -LeadX 0.0 -FinalX 206.0 -PredictionOutside $false
+$delayCompensated.aim_delay_compensation_active = $true
+$delayCompensated.aim_delay_compensation = @(6.0, 0.0)
+$delayCompensated.aim_delay_compensation_ms = 6.0
+$delayCompensated.aim_delay_compensated_point = @(206.0, 140.0)
+$delaySummary = Get-XenAimReportSummary -Samples @($delayCompensated) `
+    -PredictionEnabled off -MaxPredictionLeadPercent 35.0
+Expect ([bool]$delaySummary.contract_valid -and
+        $delaySummary.violations.lead_vector_consistency_frames -eq 0 -and
+        $delaySummary.violations.prediction_disabled_lead_frames -eq 0) `
+    "prediction 关闭时合法延迟补偿不得误报为提前量"
+$delayCompensated.aim_delay_compensated_point = @(205.0, 140.0)
+$invalidDelaySummary = Get-XenAimReportSummary `
+    -Samples @($delayCompensated) -PredictionEnabled off `
+    -MaxPredictionLeadPercent 35.0
+Expect (-not [bool]$invalidDelaySummary.contract_valid -and
+        $invalidDelaySummary.violations.lead_vector_consistency_frames -eq 1) `
+    "延迟补偿点与基础点加补偿向量不一致时必须拒绝"
 
 try {
     $observationRun = Join-Path $testRoot "observation"

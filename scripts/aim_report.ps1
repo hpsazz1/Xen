@@ -83,7 +83,9 @@ function Get-XenAimReportSummary {
         "aim_prediction_point_outside_box", "aim_command_toward_target",
         "aim_acquisition_range_radius", "aim_active_range_radius",
         "aim_range_locked", "aim_range_allows_control", "aim_box",
-        "aim_base_point", "aim_final_point", "aim_lead",
+        "aim_base_point", "aim_delay_compensated_point", "aim_final_point",
+        "aim_lead", "aim_delay_compensation",
+        "aim_delay_compensation_active", "aim_delay_compensation_ms",
         "aim_observation_age_ms", "aim_command")
     $availableFields = if ($items[0] -is
             [System.Collections.IDictionary]) {
@@ -187,12 +189,15 @@ function Get-XenAimReportSummary {
 
         $box = @($sample.aim_box)
         $basePoint = @($sample.aim_base_point)
+        $delayCompensatedPoint = @($sample.aim_delay_compensated_point)
         $finalPoint = @($sample.aim_final_point)
         $lead = @($sample.aim_lead)
+        $delayCompensation = @($sample.aim_delay_compensation)
         $command = @($sample.aim_command)
         if ($box.Count -ne 4 -or $basePoint.Count -ne 2 -or
+            $delayCompensatedPoint.Count -ne 2 -or
             $finalPoint.Count -ne 2 -or $lead.Count -ne 2 -or
-            $command.Count -ne 2) {
+            $delayCompensation.Count -ne 2 -or $command.Count -ne 2) {
             throw "第 $index 个 Aim 样本的向量维度无效。"
         }
         $x1 = ConvertTo-XenAimFiniteDouble $box[0] "第 $index 个框 x1"
@@ -241,13 +246,13 @@ function Get-XenAimReportSummary {
 
         $leadDistance = [Math]::Sqrt($leadX * $leadX + $leadY * $leadY)
         $delayX = ConvertTo-XenAimFiniteDouble `
-            $sample.aim_delay_compensation_x "第 $index 个延迟补偿 X"
+            $delayCompensation[0] "第 $index 个延迟补偿 X"
         $delayY = ConvertTo-XenAimFiniteDouble `
-            $sample.aim_delay_compensation_y "第 $index 个延迟补偿 Y"
+            $delayCompensation[1] "第 $index 个延迟补偿 Y"
         $delayCompensatedX = ConvertTo-XenAimFiniteDouble `
-            $sample.aim_delay_compensated_x "第 $index 个延迟补偿点 X"
+            $delayCompensatedPoint[0] "第 $index 个延迟补偿点 X"
         $delayCompensatedY = ConvertTo-XenAimFiniteDouble `
-            $sample.aim_delay_compensated_y "第 $index 个延迟补偿点 Y"
+            $delayCompensatedPoint[1] "第 $index 个延迟补偿点 Y"
         $delayActive = [bool]$sample.aim_delay_compensation_active
         $targetWidth = [Math]::Max(0.0, $x2 - $x1)
         $targetHeight = [Math]::Max(0.0, $y2 - $y1)
@@ -265,6 +270,11 @@ function Get-XenAimReportSummary {
                 $geometryTolerance -or
             [Math]::Abs($finalY - $delayCompensatedY - $leadY) -gt
                 $geometryTolerance -or
+            (-not $delayActive -and
+             ([Math]::Abs($delayX) -gt $geometryTolerance -or
+              [Math]::Abs($delayY) -gt $geometryTolerance -or
+              [Math]::Abs([double]$sample.aim_delay_compensation_ms) -gt
+                  $geometryTolerance)) -or
             (-not $leadActive -and $leadDistance -gt $geometryTolerance)) {
             ++$violations.lead_vector_consistency_frames
         }
