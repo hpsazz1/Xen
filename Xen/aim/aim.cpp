@@ -66,8 +66,9 @@ constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 带前会把已学习的恒速输入压回亚整数，重新形成周期停发。
 constexpr float kControllerIntegralGainPerSecond = 2.0f;
 constexpr float kControllerIntegralLeakPerSecond = 1.5f;
-constexpr float kControllerIntegralMaximumCounts = 1.25f;
+constexpr float kControllerIntegralMaximumCounts = 2.0f;
 constexpr float kControllerIntegralMinimumErrorPixels = 2.0f;
+constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
@@ -1019,12 +1020,15 @@ struct Aim::Impl {
                     -kControllerIntegralMaximumCounts,
                     kControllerIntegralMaximumCounts);
             } else {
-                // 死区及其外侧的释放带内停止继续积分，但保留亚整数 counts
-                // 作为恒速前馈。量化残余会把它分摊到后续帧；符号反转不再
-                // 硬清空保持量，而由释放带外的反向误差连续反积分，避免重新
-                // 回到“停发、落后、再追”的极限环。
-                integral *= std::exp(
-                    -kControllerIntegralLeakPerSecond * controller_dt);
+                // 恒速目标进入保持带后，已建立的积分就是该目标的前馈量，
+                // 必须保持而不能每帧泄漏；否则量化后的命令会逐渐归零，
+                // 再次落后后重建，形成“追上-停发-滞后”循环。静止目标
+                // 仍按泄漏清空，避免把历史移动速度带入静态归位。
+                if (std::hypot(track.vx, track.vy) <=
+                    kControllerMovingVelocityThresholdPixelsPerSecond) {
+                    integral *= std::exp(
+                        -kControllerIntegralLeakPerSecond * controller_dt);
+                }
             }
         };
         // 积分始终基于延迟补偿后的基础 tracking 点；prediction 仅改变最终

@@ -764,62 +764,77 @@ void test_control_trajectory_never_moves_away_from_target() {
 }
 
 void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
-    AimConfig config;
-    config.min_confirmed_hits = 1;
-    config.deadzone_pixels = 0.75f;
-    config.smoothing = 0.50f;
-    config.counts_per_pixel_x = 0.40f;
-    config.counts_per_pixel_y = 0.40f;
-    config.max_counts_per_frame = 12.0f;
-    config.acquisition_range_percent = 100.0f;
-    Aim aim(config);
-
-    constexpr int kFrameCount = 300;
+    struct ClosedLoopResult {
+        float mean_error = 0.0f;
+        int maximum_no_command = 0;
+    };
     constexpr float kFrameSeconds = 1.0f / 240.0f;
-    constexpr float kTargetVelocity = 180.0f;
     constexpr float kCameraResponse = 0.85f;
-    const auto base = std::chrono::steady_clock::now() +
-        std::chrono::seconds(1);
-    float world_target_x = 32.0f;
-    float camera_x = 0.0f;
-    float integral_error_sum = 0.0f;
-    int measured_frames = 0;
-    int consecutive_no_command = 0;
-    int maximum_no_command = 0;
+    const auto run_case = [&](float target_velocity) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.75f;
+        config.smoothing = 0.50f;
+        config.counts_per_pixel_x = 0.40f;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 12.0f;
+        config.acquisition_range_percent = 100.0f;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        float world_target_x = 32.0f;
+        float camera_x = 0.0f;
+        float error_sum = 0.0f;
+        int measured_frames = 0;
+        int consecutive_no_command = 0;
+        int maximum_no_command = 0;
 
-    for (int index = 0; index < kFrameCount; ++index) {
-        world_target_x += kTargetVelocity * kFrameSeconds;
-        const float observed_error = world_target_x - camera_x;
-        AimFrame frame = make_frame(
-            static_cast<std::uint64_t>(index + 1),
-            base + std::chrono::microseconds(
-                static_cast<long long>(index * 1000000.0f / 240.0f)));
-        frame.lock_active = true;
-        frame.detections = {body(160.0f + observed_error, 160.0f)};
-        const AimResult result = aim.process(frame);
-        if (result.has_command) {
-            camera_x += result.command.dx_counts /
-                config.counts_per_pixel_x * kCameraResponse;
-            consecutive_no_command = 0;
-        } else if (index >= 80) {
-            ++consecutive_no_command;
-            maximum_no_command = std::max(
-                maximum_no_command, consecutive_no_command);
+        for (int index = 0; index < 420; ++index) {
+            world_target_x += target_velocity * kFrameSeconds;
+            const float observed_error = world_target_x - camera_x;
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index * 1000000.0f / 240.0f)));
+            frame.lock_active = true;
+            frame.detections = {body(160.0f + observed_error, 160.0f)};
+            const AimResult result = aim.process(frame);
+            if (result.has_command) {
+                camera_x += result.command.dx_counts /
+                    config.counts_per_pixel_x * kCameraResponse;
+                consecutive_no_command = 0;
+            } else if (index >= 80) {
+                ++consecutive_no_command;
+                maximum_no_command = std::max(
+                    maximum_no_command, consecutive_no_command);
+            }
+
+            if (index >= 240) {
+                error_sum += std::fabs(world_target_x - camera_x);
+                ++measured_frames;
+            }
         }
+        return ClosedLoopResult{
+            error_sum / measured_frames, maximum_no_command};
+    };
 
-        if (index >= 180) {
-            integral_error_sum += std::fabs(world_target_x - camera_x);
-            ++measured_frames;
-        }
-    }
-
-    const float integral_mean = integral_error_sum / measured_frames;
-    expect(integral_mean <= 1.0f,
+    const ClosedLoopResult normal = run_case(180.0f);
+    expect(normal.mean_error <= 1.0f,
            "0.40 增益下，独立上限的泄漏积分必须把恒速目标的动态稳态误差限制在 1 px 内，实际=" +
-               std::to_string(integral_mean));
-    expect(maximum_no_command <= 1,
+               std::to_string(normal.mean_error));
+    expect(normal.maximum_no_command <= 1,
            "恒速目标进入死区后不得周期停发并等待再次落后，最长停发=" +
-               std::to_string(maximum_no_command));
+               std::to_string(normal.maximum_no_command));
+
+    // 实机第六轮的命令中位数为 3 counts；高恒速用例要求内部保持量可覆盖
+    // 这一档位，避免再次由积分硬上限制造稳定跟随误差。
+    const ClosedLoopResult fast = run_case(720.0f);
+    expect(fast.mean_error <= 2.0f,
+           "高恒速目标不得受旧 1.25-count 保持上限限制，动态稳态误差=" +
+               std::to_string(fast.mean_error));
+    expect(fast.maximum_no_command <= 1,
+           "高恒速目标不得周期停发，最长停发=" +
+               std::to_string(fast.maximum_no_command));
 }
 
 void test_integral_releases_on_reversal_and_static_settle() {
