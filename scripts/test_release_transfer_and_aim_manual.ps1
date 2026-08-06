@@ -141,14 +141,23 @@ try {
     $trackingOutput = @(& powershell.exe -NoProfile `
         -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
-        -Mode Prepare -Scenario Static -Profile tracking `
+        -TaskId AIM-LATENCY-COMP-001 `
+        -Mode Prepare -Scenario Static -Profile tracking -Smoothing 0.50 `
+        -EnableDelayCompensation -ControlDelayMs 7.5 `
+        -MaxDelayCompensationMs 18.0 `
+        -MaxDelayCompensationPercent 12.0 `
         -PackageRoot $published -RunDirectory $trackingRoot 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "tracking 任务准备失败。" }
     $trackingOutput | ForEach-Object { Write-Host $_ }
     $trackingOutputText = $trackingOutput -join "`n"
     if ($trackingOutputText -notmatch
-            ('(?m)^powershell\.exe .* -Mode Launch -Scenario Static ' +
-             '-Profile tracking .* -AllowPhysicalOutput ' +
+            ('(?m)^powershell\.exe .* -TaskId AIM-LATENCY-COMP-001 ' +
+             '-Mode Launch -Scenario Static -Profile tracking .* ' +
+             '-Smoothing 0\.500000 -EnableDelayCompensation ' +
+             '-ControlDelayMs 7\.500000 ' +
+             '-MaxDelayCompensationMs 18\.000000 ' +
+             '-MaxDelayCompensationPercent 12\.000000 ' +
+             '-AllowPhysicalOutput ' +
              '-PhysicalOutputConfirmation ' +
              'XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT\r?$')) {
         throw "Prepare 前台没有输出可直接复制的完整 Launch 命令。"
@@ -158,11 +167,11 @@ try {
     if ($trackingConfig -notmatch '(?m)^backend=tensorrt\r?$' -or
         $trackingConfig -notmatch '(?m)^backend=ndi\r?$' -or
         $trackingConfig -notmatch '(?m)^enable_prediction=false\r?$' -or
-        $trackingConfig -notmatch '(?m)^smoothing=0\.350000\r?$' -or
-        $trackingConfig -notmatch '(?m)^enable_delay_compensation=false\r?$' -or
-        $trackingConfig -notmatch '(?m)^control_delay_ms=0\.000000\r?$' -or
-        $trackingConfig -notmatch '(?m)^max_delay_compensation_ms=16\.000000\r?$' -or
-        $trackingConfig -notmatch '(?m)^max_delay_compensation_percent=15\.000000\r?$' -or
+        $trackingConfig -notmatch '(?m)^smoothing=0\.500000\r?$' -or
+        $trackingConfig -notmatch '(?m)^enable_delay_compensation=true\r?$' -or
+        $trackingConfig -notmatch '(?m)^control_delay_ms=7\.500000\r?$' -or
+        $trackingConfig -notmatch '(?m)^max_delay_compensation_ms=18\.000000\r?$' -or
+        $trackingConfig -notmatch '(?m)^max_delay_compensation_percent=12\.000000\r?$' -or
         $trackingConfig -notmatch '(?m)^counts_per_pixel_x=0\.400000\r?$' -or
         $trackingConfig -notmatch '(?m)^counts_per_pixel_y=0\.400000\r?$' -or
         $trackingConfig -notmatch '(?m)^max_counts_per_frame=12\.000000\r?$' -or
@@ -172,6 +181,31 @@ try {
         $trackingConfig -notmatch '(?m)^kmbox_uuid=7679E04E\r?$' -or
         $trackingConfig -notmatch '(?m)^allow_send_input=true\r?$') {
         throw "tracking 配置没有固定 NDI、TensorRT 或 KMBOX 契约。"
+    }
+    $trackingTask = Get-Content -LiteralPath `
+        (Join-Path $trackingRoot "task.json") -Raw -Encoding utf8 |
+        ConvertFrom-Json
+    if ([string]$trackingTask.task_id -ne "AIM-LATENCY-COMP-001" -or
+        [double]$trackingTask.aim.smoothing -ne 0.50 -or
+        [bool]$trackingTask.aim.delay_compensation_enabled -ne $true -or
+        [double]$trackingTask.aim.control_delay_ms -ne 7.5 -or
+        [double]$trackingTask.aim.max_delay_compensation_ms -ne 18.0 -or
+        [double]$trackingTask.aim.max_delay_compensation_percent -ne 12.0) {
+        throw "task.json 没有固化任务 ID、平滑或延迟补偿参数。"
+    }
+
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-LATENCY-COMP-001 `
+        -Mode Launch -Scenario Static -Profile tracking -Smoothing 0.35 `
+        -EnableDelayCompensation -ControlDelayMs 7.5 `
+        -MaxDelayCompensationMs 18.0 `
+        -MaxDelayCompensationPercent 12.0 `
+        -PackageRoot $published -RunDirectory $trackingRoot `
+        -AllowPhysicalOutput `
+        -PhysicalOutputConfirmation XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT
+    if ($LASTEXITCODE -eq 0) {
+        throw "Launch 不应接受与 Prepare 快照不一致的 smoothing 参数。"
     }
 
     $predictionRoot = Join-Path $root "prediction-task"

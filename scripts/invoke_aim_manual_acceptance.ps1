@@ -1,4 +1,6 @@
 ﻿param(
+    [ValidateSet("AIM-DUAL-ACCEPT-001", "AIM-LATENCY-COMP-001")]
+    [string]$TaskId = "AIM-DUAL-ACCEPT-001",
     [Parameter(Mandatory = $true)]
     [ValidateSet("Static", "MoveLeft", "MoveRight", "Shuttle", "SuperJump")]
     [string]$Scenario,
@@ -26,7 +28,7 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-$taskId = "AIM-DUAL-ACCEPT-001"
+$taskId = $TaskId
 $physicalConfirmation = "XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT"
 $ndiSourceName = "HPSAZZ (Xen-ROI-320)"
 $kmboxIp = "192.168.2.188"
@@ -381,9 +383,21 @@ function Get-ScenarioDefinition() {
 }
 
 function New-LaunchCommand([string]$ResolvedRunDirectory) {
-    return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode Launch -Scenario {1} -Profile {2} -PackageRoot "{3}" -RunDirectory "{4}" -AllowPhysicalOutput -PhysicalOutputConfirmation {5}' -f
+    $delaySwitch = if ($EnableDelayCompensation.IsPresent) {
+        " -EnableDelayCompensation"
+    } else {
+        ""
+    }
+    return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
+        '-TaskId {1} -Mode Launch -Scenario {2} -Profile {3} ' +
+        '-PackageRoot "{4}" -RunDirectory "{5}" -Smoothing {6:F6}' +
+        '{7} -ControlDelayMs {8:F6} -MaxDelayCompensationMs {9:F6} ' +
+        '-MaxDelayCompensationPercent {10:F6} -AllowPhysicalOutput ' +
+        '-PhysicalOutputConfirmation {11}') -f
         (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
-        $Scenario, $Profile, $PackageRoot, $ResolvedRunDirectory,
+        $taskId, $Scenario, $Profile, $PackageRoot, $ResolvedRunDirectory,
+        $Smoothing, $delaySwitch, $ControlDelayMs,
+        $MaxDelayCompensationMs, $MaxDelayCompensationPercent,
         $physicalConfirmation
 }
 
@@ -403,6 +417,9 @@ function New-TaskMarkdown(
 - 运行 ID：$RunId
 - 场景：$Scenario / $($Definition.title)
 - 配置：$Profile
+- smoothing：$('{0:F6}' -f $Smoothing)
+- 延迟补偿：$($EnableDelayCompensation.IsPresent)
+- 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
 - Capture：NDI / $ndiSourceName
 - Provider：TensorRT，FP16 + CUDA Graph + GPU 前处理
 - Mouse：KMBOX NET $kmboxIp`:$kmboxPort
@@ -504,6 +521,11 @@ if ($Mode -eq "Prepare") {
             gpu_preprocess = $true
         }
         aim = [ordered]@{
+            smoothing = $Smoothing
+            delay_compensation_enabled = $EnableDelayCompensation.IsPresent
+            control_delay_ms = $ControlDelayMs
+            max_delay_compensation_ms = $MaxDelayCompensationMs
+            max_delay_compensation_percent = $MaxDelayCompensationPercent
             prediction_enabled = $Profile -eq "prediction"
             max_prediction_lead_percent = $maxPredictionLeadPercent
             predicted_gain = 0.5
@@ -525,6 +547,9 @@ if ($Mode -eq "Prepare") {
 - 运行 ID：$runId
 - 场景：$Scenario
 - 配置：$Profile
+- smoothing：$('{0:F6}' -f $Smoothing)
+- 延迟补偿：$($EnableDelayCompensation.IsPresent)
+- 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
 - 执行人：
 - 开始/结束时间：
 - 是否完成全部操作：
@@ -561,7 +586,15 @@ if ([int]$task.schema -ne 1 -or
     [string]$task.task_id -ne $taskId -or
     [string]$task.scenario -ne $Scenario -or
     [string]$task.profile -ne $Profile -or
-    [string]$task.package_root -ne $PackageRoot) {
+    [string]$task.package_root -ne $PackageRoot -or
+    [double]$task.aim.smoothing -ne $Smoothing -or
+    [bool]$task.aim.delay_compensation_enabled -ne
+        $EnableDelayCompensation.IsPresent -or
+    [double]$task.aim.control_delay_ms -ne $ControlDelayMs -or
+    [double]$task.aim.max_delay_compensation_ms -ne
+        $MaxDelayCompensationMs -or
+    [double]$task.aim.max_delay_compensation_percent -ne
+        $MaxDelayCompensationPercent) {
     throw "Launch 参数与 Prepare 任务不一致。"
 }
 $activeConfig = Join-Path $PackageRoot "config.ini"
