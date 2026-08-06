@@ -60,8 +60,6 @@ constexpr float kTrackVelocityBetaHigh = 0.10f;
 constexpr float kTrackVelocityBetaLow = 0.04f;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
-constexpr float kBaseAimMotionHorizonSeconds = 0.08f;
-constexpr float kBaseAimMotionDeadbandWidthsPerSecond = 0.25f;
 
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
@@ -778,15 +776,9 @@ struct Aim::Impl {
             (0.5f - half_range);
         const float range_max_x = track.x1 + (track.x2 - track.x1) *
             (0.5f + half_range);
-        const float box_width = track.x2 - track.x1;
-        const float motion_x = !config.enable_prediction && !track.predicted &&
-                std::fabs(track.vx) >=
-                box_width * kBaseAimMotionDeadbandWidthsPerSecond
-            ? track.vx * kBaseAimMotionHorizonSeconds : 0.0f;
-        // 基础点只在配置的身体框内窗中随目标方向移动。速度死区让静止目标
-        // 保持原参数位置；内窗硬边界保证该层不会退化成框外预测。
-        const float base_x = std::clamp(
-            track.aim_x + motion_x, range_min_x, range_max_x);
+        // 基础点直接取状态估计点在配置内窗中的位置，不按速度逐帧补偿；
+        // 这样检测抖动不会把瞄点反复推向内窗两侧。预测层仍独立处理提前量。
+        const float base_x = std::clamp(track.aim_x, range_min_x, range_max_x);
         const float base_y = std::clamp(track.aim_y, track.y1, track.y2);
         LeadProjection projection;
         projection.base_x = base_x;

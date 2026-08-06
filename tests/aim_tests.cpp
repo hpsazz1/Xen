@@ -289,10 +289,11 @@ void test_body_aim_range_is_static_safe_and_motion_bounded() {
     expect(still_result.has_target &&
                std::fabs(still_result.target.base_aim_x - 150.0f) < 0.1f &&
                moving_result.has_target &&
-               moving_result.target.base_aim_x > still_result.target.base_aim_x &&
+               std::fabs(moving_result.target.base_aim_x -
+                         (moving_result.target.x1 + moving_result.target.x2) * 0.5f) < 0.1f &&
                moving_result.target.base_aim_x >= min_x &&
                moving_result.target.base_aim_x <= max_x,
-           "静止目标保持中心基础点，移动目标只在配置内窗向前移动");
+           "静止和移动目标都直接使用配置内窗中的稳定基础点");
 }
 
 void test_multi_target_crossing_keeps_selected_identity() {
