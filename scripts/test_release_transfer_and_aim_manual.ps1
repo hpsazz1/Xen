@@ -148,6 +148,9 @@ try {
     if ($trackingConfig -notmatch '(?m)^backend=tensorrt\r?$' -or
         $trackingConfig -notmatch '(?m)^backend=ndi\r?$' -or
         $trackingConfig -notmatch '(?m)^enable_prediction=false\r?$' -or
+        $trackingConfig -notmatch '(?m)^counts_per_pixel_x=0\.350000\r?$' -or
+        $trackingConfig -notmatch '(?m)^counts_per_pixel_y=0\.350000\r?$' -or
+        $trackingConfig -notmatch '(?m)^max_counts_per_frame=12\.000000\r?$' -or
         $trackingConfig -notmatch '(?m)^backend=kmbox_net\r?$' -or
         $trackingConfig -notmatch '(?m)^kmbox_ip=192\.168\.2\.188\r?$' -or
         $trackingConfig -notmatch '(?m)^kmbox_port=13384\r?$' -or

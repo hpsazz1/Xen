@@ -202,9 +202,10 @@ acquisition_range_percent=90.000000
 body_aim_height_ratio=0.350000
 deadzone_pixels=1.500000
 smoothing=0.350000
-counts_per_pixel_x=0.500000
-counts_per_pixel_y=0.500000
-max_counts_per_frame=50.000000
+# tracking 基线使用已收敛的比例和单帧上限；prediction 只改变提前项，不改变基础控制曲线。
+counts_per_pixel_x=0.350000
+counts_per_pixel_y=0.350000
+max_counts_per_frame=12.000000
 enable_prediction=$prediction
 max_prediction_lead_percent=35.000000
 predicted_gain=0.500000
