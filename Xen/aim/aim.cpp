@@ -63,7 +63,7 @@ constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
 // 持续偏差：单位为 counts，按真实帧间隔累计，并以泄漏和独立小上限避免把
 // 检测抖动长期记忆成鼠标命令。常量保持内部固定，先用实机门禁验证收益。
-constexpr float kControllerIntegralGainPerSecond = 2.0f;
+constexpr float kControllerIntegralGainPerSecond = 8.0f;
 constexpr float kControllerIntegralLeakPerSecond = 1.5f;
 constexpr float kControllerIntegralMaximumCounts = 1.25f;
 constexpr float kControllerIntegralMaximumProportionalRatio = 0.50f;
