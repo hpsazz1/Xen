@@ -784,6 +784,8 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
     float camera_x = 0.0f;
     float integral_error_sum = 0.0f;
     int measured_frames = 0;
+    int consecutive_no_command = 0;
+    int maximum_no_command = 0;
 
     for (int index = 0; index < kFrameCount; ++index) {
         world_target_x += kTargetVelocity * kFrameSeconds;
@@ -798,6 +800,11 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
         if (result.has_command) {
             camera_x += result.command.dx_counts /
                 config.counts_per_pixel_x * kCameraResponse;
+            consecutive_no_command = 0;
+        } else if (index >= 80) {
+            ++consecutive_no_command;
+            maximum_no_command = std::max(
+                maximum_no_command, consecutive_no_command);
         }
 
         if (index >= 180) {
@@ -810,6 +817,9 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
     expect(integral_mean <= 2.0f,
            "0.40 增益下，泄漏积分必须把恒速目标的动态稳态误差限制在 2 px 内，实际=" +
                std::to_string(integral_mean));
+    expect(maximum_no_command <= 3,
+           "恒速目标进入死区后不得周期停发并等待再次落后，最长停发=" +
+               std::to_string(maximum_no_command));
 }
 
 void test_integral_releases_on_reversal_and_static_settle() {

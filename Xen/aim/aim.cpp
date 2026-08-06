@@ -63,7 +63,7 @@ constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
 // 持续偏差：单位为 counts，按真实帧间隔累计，并以泄漏和独立小上限避免把
 // 检测抖动长期记忆成鼠标命令。常量保持内部固定，先用实机门禁验证收益。
-constexpr float kControllerIntegralGainPerSecond = 8.0f;
+constexpr float kControllerIntegralGainPerSecond = 2.0f;
 constexpr float kControllerIntegralLeakPerSecond = 1.5f;
 constexpr float kControllerIntegralMaximumCounts = 1.25f;
 constexpr float kControllerIntegralMaximumProportionalRatio = 0.50f;
@@ -963,22 +963,10 @@ struct Aim::Impl {
             (aim_y - frame.control_center_y) *
             frame.source_pixels_per_roi_pixel_y;
         // deadzone_pixels 与 counts_per_pixel 始终以主机完整 FOV 像素为单位，
-        // 不随 OBS 编码尺寸或辅机显示器分辨率变化。
-        if (std::hypot(error_x, error_y) <= config.deadzone_pixels) {
-            filtered_x = 0.0f;
-            filtered_y = 0.0f;
-            shaped_x = 0.0f;
-            shaped_y = 0.0f;
-            residual_x = 0.0f;
-            residual_y = 0.0f;
-            integral_x = 0.0f;
-            integral_y = 0.0f;
-            previous_error_x = 0.0f;
-            previous_error_y = 0.0f;
-            controller_captured_at = frame.captured_at;
-            return false;
-        }
-
+        // 不随 OBS 编码尺寸或辅机显示器分辨率变化。恒速目标进入死区后不能
+        // 立即清空已学习的积分，否则会形成“追上、停发、落后、再追”的周期。
+        const bool inside_deadzone =
+            std::hypot(error_x, error_y) <= config.deadzone_pixels;
         const float gain = track.predicted ? config.predicted_gain : 1.0f;
         const float proportional_x =
             error_x * config.counts_per_pixel_x * gain;
@@ -1001,10 +989,11 @@ struct Aim::Impl {
                 kControllerIntegralMinimumErrorPixels,
                 config.deadzone_pixels * 1.5f);
             if (!allow_integral || track.state != TrackState::CONFIRMED ||
-                track.predicted || std::fabs(error) <= activation_error ||
-                previous_error * error <= 0.0f) {
+                track.predicted ||
+                (previous_error * error < 0.0f &&
+                 std::fabs(error) > config.deadzone_pixels)) {
                 integral = 0.0f;
-            } else {
+            } else if (std::fabs(error) > activation_error) {
                 integral *= std::exp(
                     -kControllerIntegralLeakPerSecond * controller_dt);
                 integral += proportional *
@@ -1015,6 +1004,13 @@ struct Aim::Impl {
                         kControllerIntegralMaximumProportionalRatio);
                 integral = std::clamp(integral, -maximum, maximum);
                 if (integral * error < 0.0f) integral = 0.0f;
+            } else {
+                // 死区及其外侧的释放带内停止继续积分，但保留亚整数 counts
+                // 作为恒速前馈。量化残余会把它分摊到后续帧；若误差真正过零
+                // 并离开死区，上面的方向门禁会立即释放该轴。
+                integral *= std::exp(
+                    -kControllerIntegralLeakPerSecond * controller_dt);
+                if (integral * error < 0.0f) integral = 0.0f;
             }
             previous_error = error;
         };
@@ -1024,6 +1020,16 @@ struct Aim::Impl {
                         previous_error_y, integral_y);
         float desired_x = proportional_x + integral_x;
         float desired_y = proportional_y + integral_y;
+        if (inside_deadzone && std::hypot(integral_x, integral_y) < 0.05f) {
+            filtered_x = 0.0f;
+            filtered_y = 0.0f;
+            shaped_x = 0.0f;
+            shaped_y = 0.0f;
+            residual_x = 0.0f;
+            residual_y = 0.0f;
+            controller_captured_at = frame.captured_at;
+            return false;
+        }
         if (!controller_initialized) {
             filtered_x = desired_x;
             filtered_y = desired_y;
