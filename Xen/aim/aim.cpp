@@ -61,12 +61,15 @@ constexpr float kTrackVelocityBetaLow = 0.04f;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
-// 持续偏差：单位为 counts，按真实帧间隔累计，并以泄漏和独立小上限避免把
-// 检测抖动长期记忆成鼠标命令。上限不能随瞬时比例误差缩小，否则进入保持
-// 带前会把已学习的恒速输入压回亚整数，重新形成周期停发。
+// 持续偏差：单位为 counts，按真实帧间隔累计；移动误差存在时保持真实积分，
+// 静止确认和短时滑行才泄漏。独立上限不能低于实测维持命令，否则比例项必须
+// 永久保留误差，重新形成周期性追赶。
 constexpr float kControllerIntegralGainPerSecond = 2.0f;
 constexpr float kControllerIntegralLeakPerSecond = 1.5f;
-constexpr float kControllerIntegralMaximumCounts = 2.0f;
+// 第八轮真实 KMBOX 命令 P50/P95 为 3/4 counts；基础保持量低于维持速度
+// 本身时，比例项必须永久保留数像素误差才能补足差额。上限覆盖实测 P95，
+// 方向过零和静止确认仍负责释放历史保持量。
+constexpr float kControllerIntegralMaximumCounts = 4.0f;
 constexpr float kControllerIntegralMinimumErrorPixels = 2.0f;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
@@ -1045,8 +1048,10 @@ struct Aim::Impl {
                 integral = 0.0f;
             } else if (std::fabs(error) > activation_error) {
                 const float proportional = error * counts_per_pixel;
-                integral *= std::exp(
-                    -kControllerIntegralLeakPerSecond * controller_dt);
+                // 移动误差存在时采用真实积分，不能一边学习一边泄漏；泄漏积分
+                // 的稳态必然要求比例项保留固定误差。误差显著反向时先清除旧
+                // 前馈量，避免目标反转后依赖缓慢反积分释放历史速度。
+                if (integral * error < 0.0f) integral = 0.0f;
                 integral += proportional *
                     kControllerIntegralGainPerSecond * controller_dt;
                 integral = std::clamp(

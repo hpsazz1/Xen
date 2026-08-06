@@ -763,7 +763,7 @@ void test_control_trajectory_never_moves_away_from_target() {
            "目标反向时不得沿历史动量继续远离当前框内瞄点");
 }
 
-void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
+void test_integral_tracks_constant_velocity_with_bounded_error() {
     struct ClosedLoopResult {
         float mean_error = 0.0f;
         int maximum_no_command = 0;
@@ -825,8 +825,8 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
     };
 
     const ClosedLoopResult normal = run_case(180.0f);
-    expect(normal.mean_error <= 1.05f,
-           "0.40 增益下，独立上限的泄漏积分必须把恒速目标的动态稳态误差限制在 1 px 内，实际=" +
+    expect(normal.mean_error <= 0.75f,
+           "0.40 增益下，真实积分必须把恒速目标的动态稳态误差限制在 0.75 px 内，实际=" +
                std::to_string(normal.mean_error));
     expect(normal.maximum_no_command <= 1,
            "恒速目标进入死区后不得周期停发并等待再次落后，最长停发=" +
@@ -842,11 +842,17 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
     // 这一档位，避免再次由积分硬上限制造稳定跟随误差。
     const ClosedLoopResult fast = run_case(720.0f);
     expect(fast.mean_error <= 2.0f,
-           "高恒速目标不得受旧 1.25-count 保持上限限制，动态稳态误差=" +
+           "高恒速目标不得破坏原有动态稳态误差门禁，实际=" +
                std::to_string(fast.mean_error));
     expect(fast.maximum_no_command <= 1,
            "高恒速目标不得周期停发，最长停发=" +
                std::to_string(fast.maximum_no_command));
+
+    const ClosedLoopResult real_demand = run_case(
+        480.0f, 32.0f, 80, false, 0.20f);
+    expect(real_demand.mean_error <= 0.50f,
+           "低响应闭环必须覆盖实机约 4-count 维持档，动态稳态误差=" +
+               std::to_string(real_demand.mean_error));
 }
 
 void test_integral_releases_on_reversal_and_static_settle() {
@@ -1204,7 +1210,7 @@ int main() {
     test_prediction_hysteresis_avoids_crosshair_oscillation();
     test_closed_loop_view_feedback_converges_without_limit_cycle();
     test_control_trajectory_never_moves_away_from_target();
-    test_leaky_integral_tracks_constant_velocity_with_bounded_error();
+    test_integral_tracks_constant_velocity_with_bounded_error();
     test_integral_releases_on_reversal_and_static_settle();
     test_quantization_residual_cannot_reverse_after_crossing();
     test_delay_compensation_direction_cannot_reverse_within_hold_band();
