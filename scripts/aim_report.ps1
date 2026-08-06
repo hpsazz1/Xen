@@ -240,6 +240,15 @@ function Get-XenAimReportSummary {
         }
 
         $leadDistance = [Math]::Sqrt($leadX * $leadX + $leadY * $leadY)
+        $delayX = ConvertTo-XenAimFiniteDouble `
+            $sample.aim_delay_compensation_x "第 $index 个延迟补偿 X"
+        $delayY = ConvertTo-XenAimFiniteDouble `
+            $sample.aim_delay_compensation_y "第 $index 个延迟补偿 Y"
+        $delayCompensatedX = ConvertTo-XenAimFiniteDouble `
+            $sample.aim_delay_compensated_x "第 $index 个延迟补偿点 X"
+        $delayCompensatedY = ConvertTo-XenAimFiniteDouble `
+            $sample.aim_delay_compensated_y "第 $index 个延迟补偿点 Y"
+        $delayActive = [bool]$sample.aim_delay_compensation_active
         $targetWidth = [Math]::Max(0.0, $x2 - $x1)
         $targetHeight = [Math]::Max(0.0, $y2 - $y1)
         $targetDiagonal = [Math]::Sqrt(
@@ -248,17 +257,19 @@ function Get-XenAimReportSummary {
         if ($leadDistance -gt $leadLimit + $geometryTolerance) {
             ++$violations.lead_limit_frames
         }
-        if ([Math]::Abs($finalX - $baseX - $leadX) -gt
+        if ([Math]::Abs($delayCompensatedX - $baseX - $delayX) -gt
                 $geometryTolerance -or
-            [Math]::Abs($finalY - $baseY - $leadY) -gt
+            [Math]::Abs($delayCompensatedY - $baseY - $delayY) -gt
+                $geometryTolerance -or
+            [Math]::Abs($finalX - $delayCompensatedX - $leadX) -gt
+                $geometryTolerance -or
+            [Math]::Abs($finalY - $delayCompensatedY - $leadY) -gt
                 $geometryTolerance -or
             (-not $leadActive -and $leadDistance -gt $geometryTolerance)) {
             ++$violations.lead_vector_consistency_frames
         }
         if (-not $predictionEnabledValue -and
             ($leadActive -or $leadDistance -gt $geometryTolerance -or
-             [Math]::Abs($finalX - $baseX) -gt $geometryTolerance -or
-             [Math]::Abs($finalY - $baseY) -gt $geometryTolerance -or
              $reportedPredictionOutside)) {
             ++$violations.prediction_disabled_lead_frames
         }

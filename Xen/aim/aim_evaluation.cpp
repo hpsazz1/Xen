@@ -173,7 +173,12 @@ bool target_is_default(const AimTargetSnapshot& target) noexcept {
            target.base_aim_x == 0.0f && target.base_aim_y == 0.0f &&
            target.aim_x == 0.0f && target.aim_y == 0.0f &&
            target.velocity_x == 0.0f && target.velocity_y == 0.0f &&
+           target.delay_compensated_aim_x == 0.0f &&
+           target.delay_compensated_aim_y == 0.0f &&
            target.lead_x == 0.0f && target.lead_y == 0.0f &&
+           target.delay_compensation_x == 0.0f &&
+           target.delay_compensation_y == 0.0f &&
+           target.delay_compensation_ms == 0.0f &&
            target.observation_age_ms == 0.0f &&
            target.confidence == 0.0f && !target.lead_active &&
            !target.predicted;
@@ -227,15 +232,37 @@ bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
                 !std::isfinite(frame.target.aim_y) ||
                 !std::isfinite(frame.target.velocity_x) ||
                 !std::isfinite(frame.target.velocity_y) ||
+                !std::isfinite(frame.target.delay_compensated_aim_x) ||
+                !std::isfinite(frame.target.delay_compensated_aim_y) ||
                 !std::isfinite(frame.target.lead_x) ||
                 !std::isfinite(frame.target.lead_y) ||
+                !std::isfinite(frame.target.delay_compensation_x) ||
+                !std::isfinite(frame.target.delay_compensation_y) ||
+                !std::isfinite(frame.target.delay_compensation_ms) ||
                 !std::isfinite(frame.target.observation_age_ms) ||
                 frame.target.observation_age_ms < 0.0f ||
                 frame.target.observation_age_ms > 100.001f ||
-                std::fabs(frame.target.aim_x - frame.target.base_aim_x -
+                std::fabs(frame.target.delay_compensated_aim_x -
+                          frame.target.base_aim_x -
+                          frame.target.delay_compensation_x) >
+                    kGeometryTolerance ||
+                std::fabs(frame.target.delay_compensated_aim_y -
+                          frame.target.base_aim_y -
+                          frame.target.delay_compensation_y) >
+                    kGeometryTolerance ||
+                std::fabs(frame.target.aim_x -
+                          frame.target.delay_compensated_aim_x -
                           frame.target.lead_x) > kGeometryTolerance ||
-                std::fabs(frame.target.aim_y - frame.target.base_aim_y -
+                std::fabs(frame.target.aim_y -
+                          frame.target.delay_compensated_aim_y -
                           frame.target.lead_y) > kGeometryTolerance ||
+                (!frame.target.delay_compensation_active &&
+                 (std::fabs(frame.target.delay_compensation_x) >
+                      kGeometryTolerance ||
+                  std::fabs(frame.target.delay_compensation_y) >
+                      kGeometryTolerance ||
+                  std::fabs(frame.target.delay_compensation_ms) >
+                      kGeometryTolerance)) ||
                 (!frame.target.lead_active &&
                  (std::fabs(frame.target.lead_x) > kGeometryTolerance ||
                   std::fabs(frame.target.lead_y) > kGeometryTolerance)) ||

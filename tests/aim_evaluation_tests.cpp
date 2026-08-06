@@ -154,6 +154,8 @@ AimEvaluationFrame output_frame(std::size_t index,
         frame.target.y2 = y2;
         frame.target.base_aim_x = (x1 + x2) * 0.5f;
         frame.target.base_aim_y = (y1 + y2) * 0.5f;
+        frame.target.delay_compensated_aim_x = frame.target.base_aim_x;
+        frame.target.delay_compensated_aim_y = frame.target.base_aim_y;
         frame.target.aim_x = frame.target.base_aim_x;
         frame.target.aim_y = frame.target.base_aim_y;
     }
@@ -431,6 +433,45 @@ void test_control_continuity_metrics() {
 
 void test_control_contract_rejections() {
     std::string error;
+
+    AimEvaluationFrame legal_delay_compensation =
+        output_frame(0, 10, 60, 40, 100, 120);
+    legal_delay_compensation.target.delay_compensation_x = 6.0f;
+    legal_delay_compensation.target.delay_compensation_y = -2.0f;
+    legal_delay_compensation.target.delay_compensation_ms = 3.0f;
+    legal_delay_compensation.target.delay_compensation_active = true;
+    legal_delay_compensation.target.delay_compensated_aim_x = 86.0f;
+    legal_delay_compensation.target.delay_compensated_aim_y = 78.0f;
+    legal_delay_compensation.target.aim_x = 86.0f;
+    legal_delay_compensation.target.aim_y = 78.0f;
+    AimControlContinuityMetrics legal_delay_metrics;
+    expect(aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, legal_delay_compensation,
+               legal_delay_metrics, error) &&
+               aim::detail::finalize_aim_control_continuity(
+                   1, legal_delay_metrics, error) &&
+               legal_delay_metrics.lead_active_frames == 0 &&
+               near(legal_delay_metrics.lead_pixels.maximum, 0.0),
+           "延迟补偿必须先作用于基础点，prediction 关闭时最终点应等于补偿点：" +
+               error);
+
+    AimEvaluationFrame inconsistent_delay = legal_delay_compensation;
+    inconsistent_delay.target.delay_compensated_aim_x = 85.0f;
+    inconsistent_delay.target.aim_x = 85.0f;
+    AimControlContinuityMetrics inconsistent_delay_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, inconsistent_delay,
+               inconsistent_delay_metrics, error),
+           "延迟补偿点与基础点加补偿向量不一致时必须拒绝");
+
+    AimEvaluationFrame inactive_delay =
+        output_frame(0, 10, 60, 40, 100, 120);
+    inactive_delay.target.delay_compensation_ms = 3.0f;
+    AimControlContinuityMetrics inactive_delay_metrics;
+    expect(!aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, inactive_delay,
+               inactive_delay_metrics, error),
+           "延迟补偿未激活时不得残留补偿时长或位移");
 
     AimEvaluationFrame legal_outside =
         output_frame(0, 10, 60, 40, 100, 120);
