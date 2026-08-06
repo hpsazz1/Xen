@@ -997,7 +997,8 @@ struct Aim::Impl {
         // 基础积分只消费延迟补偿后的 tracking 误差，prediction 提前量不会
         // 参与或重置它；短时滑行只泄漏冻结，方向反转则由带符号误差连续
         // 反积分。积分始终受独立的绝对 counts 小上限约束。
-        const auto update_integral = [&](float error, float counts_per_pixel,
+        const auto update_integral = [&](float error, float velocity,
+                                         float counts_per_pixel,
                                          float& integral) {
             const float activation_error = std::max(
                 kControllerIntegralMinimumErrorPixels,
@@ -1024,7 +1025,7 @@ struct Aim::Impl {
                 // 必须保持而不能每帧泄漏；否则量化后的命令会逐渐归零，
                 // 再次落后后重建，形成“追上-停发-滞后”循环。静止目标
                 // 仍按泄漏清空，避免把历史移动速度带入静态归位。
-                if (std::hypot(track.vx, track.vy) <=
+                if (std::fabs(velocity) <=
                     kControllerMovingVelocityThresholdPixelsPerSecond) {
                     integral *= std::exp(
                         -kControllerIntegralLeakPerSecond * controller_dt);
@@ -1033,9 +1034,9 @@ struct Aim::Impl {
         };
         // 积分始终基于延迟补偿后的基础 tracking 点；prediction 仅改变最终
         // 比例纠偏点。两层状态互不重置，顺序固定为 tracking → prediction。
-        update_integral(tracking_error_x,
+        update_integral(tracking_error_x, track.vx,
                         config.counts_per_pixel_x, integral_x);
-        update_integral(tracking_error_y,
+        update_integral(tracking_error_y, track.vy,
                         config.counts_per_pixel_y, integral_y);
         float desired_x = proportional_x + integral_x;
         float desired_y = proportional_y + integral_y;
