@@ -69,6 +69,12 @@ constexpr float kControllerIntegralLeakPerSecond = 1.5f;
 constexpr float kControllerIntegralMaximumCounts = 2.0f;
 constexpr float kControllerIntegralMinimumErrorPixels = 2.0f;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
+// 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
+// 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
+constexpr float kControllerQuantizationMotionThresholdPixelsPerSecond = 10.0f;
+// 相对速度在准星跟随目标时会自然接近零，不能用单帧低速直接判定静止。
+// 连续 60 帧无命令且误差处于保持带内，才允许泄漏历史移动保持量。
+constexpr int kControllerStaticSettleConfirmFrames = 60;
 
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
@@ -232,6 +238,9 @@ struct Aim::Impl {
     float residual_y = 0.0f;
     float integral_x = 0.0f;
     float integral_y = 0.0f;
+    float previous_command_x = 0.0f;
+    float previous_command_y = 0.0f;
+    int static_settle_frames = 0;
     std::chrono::steady_clock::time_point controller_captured_at{};
     bool controller_initialized = false;
     bool shaper_initialized = false;
@@ -784,6 +793,9 @@ struct Aim::Impl {
         residual_y = 0.0f;
         integral_x = 0.0f;
         integral_y = 0.0f;
+        previous_command_x = 0.0f;
+        previous_command_y = 0.0f;
+        static_settle_frames = 0;
         controller_captured_at = {};
         controller_initialized = false;
         shaper_initialized = false;
@@ -962,6 +974,9 @@ struct Aim::Impl {
                 -kControllerIntegralLeakPerSecond * controller_dt);
             integral_x *= leak;
             integral_y *= leak;
+            previous_command_x = 0.0f;
+            previous_command_y = 0.0f;
+            static_settle_frames = 0;
             controller_captured_at = frame.captured_at;
             return false;
         }
@@ -993,6 +1008,24 @@ struct Aim::Impl {
             : clamp_delta_seconds(std::chrono::duration<double>(
                   frame.captured_at - controller_captured_at).count());
         controller_captured_at = frame.captured_at;
+        const float hold_band = std::max(
+            kControllerIntegralMinimumErrorPixels,
+            config.deadzone_pixels * 1.5f);
+        const bool previous_command_zero =
+            previous_command_x == 0.0f && previous_command_y == 0.0f;
+        const bool low_relative_motion =
+            std::hypot(track.vx, track.vy) <=
+                kControllerMovingVelocityThresholdPixelsPerSecond;
+        const bool within_hold_band =
+            std::hypot(tracking_error_x, tracking_error_y) <= hold_band;
+        if (previous_command_zero && low_relative_motion &&
+            within_hold_band) {
+            static_settle_frames = std::min(
+                static_settle_frames + 1,
+                kControllerStaticSettleConfirmFrames);
+        } else {
+            static_settle_frames = 0;
+        }
 
         // 基础积分只消费延迟补偿后的 tracking 误差，prediction 提前量不会
         // 参与或重置它；短时滑行只泄漏冻结，方向反转则由带符号误差连续
@@ -1026,7 +1059,9 @@ struct Aim::Impl {
                 // 再次落后后重建，形成“追上-停发-滞后”循环。静止目标
                 // 仍按泄漏清空，避免把历史移动速度带入静态归位。
                 if (std::fabs(velocity) <=
-                    kControllerMovingVelocityThresholdPixelsPerSecond) {
+                        kControllerMovingVelocityThresholdPixelsPerSecond &&
+                    static_settle_frames >=
+                        kControllerStaticSettleConfirmFrames) {
                     integral *= std::exp(
                         -kControllerIntegralLeakPerSecond * controller_dt);
                 }
@@ -1040,9 +1075,6 @@ struct Aim::Impl {
                         config.counts_per_pixel_y, integral_y);
         float desired_x = proportional_x + integral_x;
         float desired_y = proportional_y + integral_y;
-        const float hold_band = std::max(
-            kControllerIntegralMinimumErrorPixels,
-            config.deadzone_pixels * 1.5f);
         if (std::fabs(error_x) > hold_band && desired_x * error_x <= 0.0f) {
             desired_x = proportional_x;
         }
@@ -1065,6 +1097,8 @@ struct Aim::Impl {
             shaped_y = 0.0f;
             residual_x = 0.0f;
             residual_y = 0.0f;
+            previous_command_x = 0.0f;
+            previous_command_y = 0.0f;
             controller_captured_at = frame.captured_at;
             return false;
         }
@@ -1134,7 +1168,7 @@ struct Aim::Impl {
         const auto quantized_axis_limit = [](float desired, float velocity) {
             const float magnitude = std::fabs(desired);
             if (std::fabs(velocity) >
-                    kControllerMovingVelocityThresholdPixelsPerSecond &&
+                    kControllerQuantizationMotionThresholdPixelsPerSecond &&
                 desired * velocity > 0.0f && magnitude > 0.0f) {
                 return static_cast<int>(std::ceil(magnitude));
             }
@@ -1160,6 +1194,8 @@ struct Aim::Impl {
         }
         residual_x = quantized_x - command.dx_counts;
         residual_y = quantized_y - command.dy_counts;
+        previous_command_x = static_cast<float>(command.dx_counts);
+        previous_command_y = static_cast<float>(command.dy_counts);
         return command.dx_counts != 0 || command.dy_counts != 0;
     }
 
