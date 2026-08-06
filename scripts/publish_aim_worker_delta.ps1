@@ -8,7 +8,11 @@
     [string]$SshHost = "192.168.3.20",
     [switch]$Prepare,
     [string]$Scenario = "MoveLeft",
-    [string]$Profile = "tracking"
+    [string]$Profile = "tracking",
+    [ValidateRange(0.0, 1.0)]
+    [double]$Smoothing = 0.50,
+    [ValidateRange(0.01, 10.0)]
+    [double]$CountsPerPixel = 0.40
 )
 
 $ErrorActionPreference = "Stop"
@@ -159,7 +163,11 @@ if ($Prepare) {
         $remoteScript + '" -TaskId AIM-LATENCY-COMP-001 -Scenario ' +
         $Scenario + ' -Profile ' + $Profile +
         ' -Mode Prepare -PackageRoot "' + $remoteRoot +
-        '" -LightweightPackageValidation -EnableDelayCompensation -ControlDelayMs 15'
+        '" -Smoothing ' + $Smoothing.ToString(
+            'F6', [Globalization.CultureInfo]::InvariantCulture) +
+        ' -CountsPerPixel ' + $CountsPerPixel.ToString(
+            'F6', [Globalization.CultureInfo]::InvariantCulture) +
+        ' -LightweightPackageValidation -EnableDelayCompensation -ControlDelayMs 15'
     & ssh -i $SshIdentityFile -o IdentitiesOnly=yes -o BatchMode=yes `
         "$SshUser@$SshHost" $remoteCommand
     if ($LASTEXITCODE -ne 0) { throw "辅机 Prepare 失败，退出码：$LASTEXITCODE" }
