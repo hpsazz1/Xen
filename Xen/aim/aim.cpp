@@ -62,11 +62,11 @@ constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
 // 持续偏差：单位为 counts，按真实帧间隔累计，并以泄漏和独立小上限避免把
-// 检测抖动长期记忆成鼠标命令。常量保持内部固定，先用实机门禁验证收益。
+// 检测抖动长期记忆成鼠标命令。上限不能随瞬时比例误差缩小，否则进入保持
+// 带前会把已学习的恒速输入压回亚整数，重新形成周期停发。
 constexpr float kControllerIntegralGainPerSecond = 2.0f;
 constexpr float kControllerIntegralLeakPerSecond = 1.5f;
 constexpr float kControllerIntegralMaximumCounts = 1.25f;
-constexpr float kControllerIntegralMaximumProportionalRatio = 0.50f;
 constexpr float kControllerIntegralMinimumErrorPixels = 2.0f;
 
 bool finite_box(const Detection& detection) noexcept {
@@ -995,7 +995,7 @@ struct Aim::Impl {
 
         // 基础积分只消费延迟补偿后的 tracking 误差，prediction 提前量不会
         // 参与或重置它；短时滑行只泄漏冻结，方向反转则由带符号误差连续
-        // 反积分。积分仍受比例项比例和绝对 counts 双重上限约束。
+        // 反积分。积分始终受独立的绝对 counts 小上限约束。
         const auto update_integral = [&](float error, float counts_per_pixel,
                                          float& integral) {
             const float activation_error = std::max(
@@ -1014,11 +1014,10 @@ struct Aim::Impl {
                     -kControllerIntegralLeakPerSecond * controller_dt);
                 integral += proportional *
                     kControllerIntegralGainPerSecond * controller_dt;
-                const float maximum = std::min(
-                    kControllerIntegralMaximumCounts,
-                    std::fabs(proportional) *
-                        kControllerIntegralMaximumProportionalRatio);
-                integral = std::clamp(integral, -maximum, maximum);
+                integral = std::clamp(
+                    integral,
+                    -kControllerIntegralMaximumCounts,
+                    kControllerIntegralMaximumCounts);
             } else {
                 // 死区及其外侧的释放带内停止继续积分，但保留亚整数 counts
                 // 作为恒速前馈。量化残余会把它分摊到后续帧；符号反转不再

@@ -814,8 +814,8 @@ void test_leaky_integral_tracks_constant_velocity_with_bounded_error() {
     }
 
     const float integral_mean = integral_error_sum / measured_frames;
-    expect(integral_mean <= 2.0f,
-           "0.40 增益下，泄漏积分必须把恒速目标的动态稳态误差限制在 2 px 内，实际=" +
+    expect(integral_mean <= 1.0f,
+           "0.40 增益下，独立上限的泄漏积分必须把恒速目标的动态稳态误差限制在 1 px 内，实际=" +
                std::to_string(integral_mean));
     expect(maximum_no_command <= 1,
            "恒速目标进入死区后不得周期停发并等待再次落后，最长停发=" +
