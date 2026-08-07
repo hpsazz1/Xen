@@ -1412,6 +1412,22 @@ struct Aim::Impl {
                 quantized_y = 0.0f;
             }
         }
+        // 二维整形可能在合成向量仍然朝向目标时，让单个轴从旧方向直接跳到
+        // 新方向。真实延迟窗口会放大这个跳变，表现为视觉抖动；每个轴必须
+        // 先经过一个零命令帧，再允许沿新方向输出。被截断的量化残余同步清除，
+        // 避免下一帧把旧方向重新带回来。
+        if (previous_command_x != 0.0f && command.dx_counts != 0 &&
+            std::signbit(previous_command_x) !=
+                std::signbit(static_cast<float>(command.dx_counts))) {
+            command.dx_counts = 0;
+            quantized_x = 0.0f;
+        }
+        if (previous_command_y != 0.0f && command.dy_counts != 0 &&
+            std::signbit(previous_command_y) !=
+                std::signbit(static_cast<float>(command.dy_counts))) {
+            command.dy_counts = 0;
+            quantized_y = 0.0f;
+        }
         residual_x = quantized_x - command.dx_counts;
         residual_y = quantized_y - command.dy_counts;
         previous_command_x = static_cast<float>(command.dx_counts);

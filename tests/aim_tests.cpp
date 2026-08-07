@@ -884,6 +884,7 @@ void test_delayed_closed_loop_holds_moving_base_point() {
     int measured_frames = 0;
     int consecutive_no_command = 0;
     int maximum_no_command = 0;
+    int previous_horizontal_command = 0;
 
     for (int index = 0; index < 960; ++index) {
         // 低响应与周期变速会先建立较大保持积分，再突然降低维持需求，覆盖实机报告中的过零停发。
@@ -902,6 +903,13 @@ void test_delayed_closed_loop_holds_moving_base_point() {
         frame.lock_active = true;
         frame.detections = {body(160.0f + observed_error, 160.0f)};
         const AimResult result = aim.process(frame);
+        const int horizontal_command = result.has_command
+            ? result.command.dx_counts : 0;
+        expect(previous_horizontal_command * horizontal_command >= 0,
+               "延迟闭环的单轴命令换向必须先经过零，前值=" +
+                   std::to_string(previous_horizontal_command) + "，当前=" +
+                   std::to_string(horizontal_command));
+        previous_horizontal_command = horizontal_command;
         if (result.has_command) {
             delayed_commands[index % kActuationDelayFrames] =
                 result.command.dx_counts;
@@ -1052,7 +1060,7 @@ void test_base_crossing_releases_integral_smoothly() {
         const int command = result.has_command
             ? result.command.dx_counts : 0;
         // 同方向增减速受逐 count 斜率约束；真实换向时方向安全门允许一次
-        // 直接归零，但绝不能跨零跳到反方向的多 count 命令。
+        // 直接归零，但任一轴都必须经过零，不能从旧方向直接跳到反方向。
         if (have_previous_command && previous_command * command > 0) {
             expect(std::abs(command - previous_command) <= 1,
                    "基础点回穿的同向物理命令必须逐 count 变化，前值=" +
@@ -1060,8 +1068,10 @@ void test_base_crossing_releases_integral_smoothly() {
                        std::to_string(command));
         }
         if (have_previous_command && previous_command * command < 0) {
-            expect(std::abs(command) <= 1,
-                   "基础点真实换向不得跨零跳到多 count 反向命令");
+            expect(false,
+                   "基础点真实换向的单轴命令必须先经过零，前值=" +
+                       std::to_string(previous_command) + "，当前=" +
+                       std::to_string(command));
         }
         previous_command = command;
         have_previous_command = true;
@@ -1086,6 +1096,58 @@ void test_base_crossing_releases_integral_smoothly() {
            "基础点真实越过后必须平滑并及时反向，越过帧=" +
                std::to_string(base_crossing_offset) + "，反向帧=" +
                std::to_string(reverse_command_offset));
+}
+
+void test_two_axis_command_reversal_passes_through_zero() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.45f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    int previous_x = 0;
+    int previous_y = 0;
+    int tested_frames = 0;
+    for (int index = 0; index < 600; ++index) {
+        const float x = 160.0f + 18.0f * std::sin(index * 0.37f) +
+            6.0f * std::sin(index * 1.13f);
+        const float y = 172.0f + 10.0f * std::sin(index * 0.23f);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body(x, y)};
+        const AimResult result = aim.process(frame);
+        const int current_x = result.has_command
+            ? result.command.dx_counts : 0;
+        const int current_y = result.has_command
+            ? result.command.dy_counts : 0;
+        if (index > 20) {
+            ++tested_frames;
+            expect(previous_x * current_x >= 0,
+                   "二维整形后的水平命令换向必须先经过零，前值=" +
+                       std::to_string(previous_x) + "，当前=" +
+                       std::to_string(current_x));
+            expect(previous_y * current_y >= 0,
+                   "二维整形后的垂直命令换向必须先经过零，前值=" +
+                       std::to_string(previous_y) + "，当前=" +
+                       std::to_string(current_y));
+        }
+        previous_x = current_x;
+        previous_y = current_y;
+    }
+    expect(tested_frames > 0, "二维单轴反转回归必须实际处理稳定轨迹帧");
 }
 
 void test_integral_releases_on_reversal_and_static_settle() {
@@ -1527,6 +1589,7 @@ int main() {
     test_delayed_closed_loop_holds_moving_base_point();
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_base_crossing_releases_integral_smoothly();
+    test_two_axis_command_reversal_passes_through_zero();
     test_integral_releases_on_reversal_and_static_settle();
     test_quantization_residual_cannot_reverse_after_crossing();
     test_delay_projection_crossing_keeps_base_tracking_hold();
