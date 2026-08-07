@@ -1306,13 +1306,24 @@ struct Aim::Impl {
         // 亚整数残余只有在后续帧允许发出 1 count 时才能完成时间分摊。
         // 对确认中的移动轴使用 ceil；静止轴仍使用 floor，避免静态目标在
         // 小误差内越过瞄点。方向门禁和二维单帧上限继续在前后两侧生效。
-        const auto quantized_axis_limit = [](
-                float desired, float velocity, float previous_command) {
+        const auto quantized_axis_limit = [&](float desired,
+                float feedforward, float relative_velocity,
+                float previous_command) {
             const float magnitude = std::fabs(desired);
             int limit = static_cast<int>(std::floor(magnitude));
-            if (std::fabs(velocity) >
+            // 屏幕相对速度会被相机执行旧命令反向，不能再据此判断世界
+            // 目标运动方向。观察器前馈与当前需求同向时，亚整数维持量
+            // 必须允许 ceil 后跨帧分摊，否则会重新形成停发等待窗口。
+            const bool observed_world_motion =
+                std::fabs(feedforward) > 0.01f &&
+                desired * feedforward > 0.0f;
+            const bool direct_relative_motion =
+                !config.enable_delay_compensation &&
+                std::fabs(relative_velocity) >
                     kControllerQuantizationMotionThresholdPixelsPerSecond &&
-                desired * velocity > 0.0f && magnitude > 0.0f) {
+                desired * relative_velocity > 0.0f;
+            if ((observed_world_motion || direct_relative_motion) &&
+                magnitude > 0.0f) {
                 limit = static_cast<int>(std::ceil(magnitude));
             }
             // 轨迹正在向零点收敛时，速度会与剩余纠偏方向相反。只要剩余纠偏仍与上一帧同向，
@@ -1325,9 +1336,9 @@ struct Aim::Impl {
             return limit;
         };
         const int maximum_x = quantized_axis_limit(
-            desired_x, track.vx, previous_command_x);
+            desired_x, feedforward_x, track.vx, previous_command_x);
         const int maximum_y = quantized_axis_limit(
-            desired_y, track.vy, previous_command_y);
+            desired_y, feedforward_y, track.vy, previous_command_y);
         command.dx_counts = std::clamp(
             command.dx_counts, -maximum_x, maximum_x);
         command.dy_counts = std::clamp(

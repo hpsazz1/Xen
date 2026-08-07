@@ -934,6 +934,71 @@ void test_delayed_closed_loop_holds_moving_base_point() {
                std::to_string(maximum_no_command));
 }
 
+void test_delayed_left_motion_quantizes_from_world_feedforward() {
+    constexpr float kFrameSeconds = 1.0f / 240.0f;
+    constexpr int kActuationDelayFrames = 4;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.50f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> delayed_commands{};
+    float world_target_x = -24.0f;
+    float camera_x = 0.0f;
+    int consecutive_no_command = 0;
+    int maximum_no_command = 0;
+    int self_motion_crossing_frames = 0;
+
+    for (int index = 0; index < 960; ++index) {
+        camera_x += delayed_commands[index % kActuationDelayFrames] /
+            config.counts_per_pixel_x * 0.20f;
+        delayed_commands[index % kActuationDelayFrames] = 0;
+        const float target_velocity = (index / 120) % 2 == 0
+            ? -480.0f : -180.0f;
+        world_target_x += target_velocity * kFrameSeconds;
+        const float observed_error = world_target_x - camera_x;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body(160.0f + observed_error, 160.0f)};
+        const AimResult result = aim.process(frame);
+        if (result.has_command) {
+            delayed_commands[index % kActuationDelayFrames] =
+                result.command.dx_counts;
+            consecutive_no_command = 0;
+        } else if (index >= 480) {
+            ++consecutive_no_command;
+            maximum_no_command = std::max(
+                maximum_no_command, consecutive_no_command);
+        }
+        if (index >= 480 && result.has_target &&
+            result.target.base_aim_x < frame.control_center_x &&
+            result.target.delay_compensated_aim_x > frame.control_center_x &&
+            result.target.velocity_x > 20.0f) {
+            ++self_motion_crossing_frames;
+        }
+    }
+
+    expect(self_motion_crossing_frames > 0,
+           "左移延迟闭环必须覆盖相机反馈使相对速度和延迟点反向的窗口");
+    expect(maximum_no_command <= 1,
+           "左移延迟闭环必须按世界运动前馈量化，最长停发=" +
+               std::to_string(maximum_no_command));
+}
+
 void test_base_crossing_releases_integral_smoothly() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -1460,6 +1525,7 @@ int main() {
     test_control_trajectory_never_moves_away_from_target();
     test_integral_tracks_constant_velocity_with_bounded_error();
     test_delayed_closed_loop_holds_moving_base_point();
+    test_delayed_left_motion_quantizes_from_world_feedforward();
     test_base_crossing_releases_integral_smoothly();
     test_integral_releases_on_reversal_and_static_settle();
     test_quantization_residual_cannot_reverse_after_crossing();
