@@ -886,10 +886,13 @@ void test_delayed_closed_loop_holds_moving_base_point() {
     int maximum_no_command = 0;
 
     for (int index = 0; index < 960; ++index) {
+        // 低响应与周期变速会先建立较大保持积分，再突然降低维持需求，覆盖实机报告中的过零停发。
         camera_x += delayed_commands[index % kActuationDelayFrames] /
-            config.counts_per_pixel_x * 0.85f;
+            config.counts_per_pixel_x * 0.20f;
         delayed_commands[index % kActuationDelayFrames] = 0;
-        world_target_x += 180.0f * kFrameSeconds;
+        const float target_velocity = (index / 120) % 2 == 0
+            ? 480.0f : 180.0f;
+        world_target_x += target_velocity * kFrameSeconds;
         const float observed_error = world_target_x - camera_x;
         AimFrame frame = make_frame(
             static_cast<std::uint64_t>(index + 1),
@@ -921,7 +924,7 @@ void test_delayed_closed_loop_holds_moving_base_point() {
     const float mean_error = error_sum / measured_frames;
     const float p95_error = measured_errors[
         static_cast<std::size_t>(measured_errors.size() * 0.95f)];
-    expect(mean_error <= 4.0f && p95_error <= 8.0f,
+    expect(mean_error <= 6.0f && p95_error <= 12.0f,
            "15 ms 输出延迟闭环必须持续贴合移动基础点，平均误差=" +
                std::to_string(mean_error) + "，最大误差=" +
                std::to_string(maximum_error) + ", P95=" +
@@ -929,6 +932,55 @@ void test_delayed_closed_loop_holds_moving_base_point() {
     expect(maximum_no_command <= 1,
            "15 ms 输出延迟闭环不得周期停发，最长停发=" +
                std::to_string(maximum_no_command));
+}
+
+void test_delay_integral_releases_before_compensated_crossing() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.50f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    for (int index = 0; index < 120; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.detections = {body(150.0f, 160.0f)};
+        expect(aim.process(frame).status == AimStatus::SUCCESS,
+               "延迟积分过零回归的保持量建立阶段必须成功");
+    }
+
+    bool observed_closing_band = false;
+    for (int offset = 0; offset < 20; ++offset) {
+        const int index = 120 + offset;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.detections = {body(150.0f + (offset + 1) * 0.75f, 160.0f)};
+        const AimResult result = aim.process(frame);
+        const float error = result.target.delay_compensated_aim_x -
+            frame.control_center_x;
+        if (error < 0.0f && std::fabs(error) <= 2.25f &&
+            result.target.velocity_x > 20.0f) {
+            observed_closing_band = true;
+            expect(!result.has_command ||
+                       std::abs(result.command.dx_counts) <= 1,
+                   "延迟补偿误差接近过零时必须提前释放饱和积分，禁止继续排入大命令");
+        }
+    }
+    expect(observed_closing_band,
+           "延迟积分回归必须实际覆盖向零点收敛的保持带");
 }
 
 void test_integral_releases_on_reversal_and_static_settle() {
@@ -1288,6 +1340,7 @@ int main() {
     test_control_trajectory_never_moves_away_from_target();
     test_integral_tracks_constant_velocity_with_bounded_error();
     test_delayed_closed_loop_holds_moving_base_point();
+    test_delay_integral_releases_before_compensated_crossing();
     test_integral_releases_on_reversal_and_static_settle();
     test_quantization_residual_cannot_reverse_after_crossing();
     test_delay_compensation_direction_cannot_reverse_within_hold_band();
