@@ -1239,7 +1239,7 @@ void test_delay_projection_crossing_keeps_base_tracking_hold() {
         166.0f, 166.0f, 156.7f, 157.0f, 157.0f, 157.0f,
         157.0f, 157.0f, 157.0f, 157.0f, 157.0f, 157.0f};
     bool observed_base_overshoot = false;
-    bool observed_returned_projection_crossing = false;
+    bool observed_returned_base = false;
     float maximum_transient_base_error = -1000.0f;
     float minimum_returned_base_error = 1000.0f;
     float returned_final_error = 0.0f;
@@ -1281,20 +1281,20 @@ void test_delay_projection_crossing_keeps_base_tracking_hold() {
             minimum_returned_base_error = transient_base_error;
             returned_final_error = transient_final_error;
         }
-        if (observed_base_overshoot && transient_base_error < -0.1f &&
-            transient_final_error > 0.0f &&
-            transient_final_error <= hold_band) {
-            observed_returned_projection_crossing = true;
+        if (observed_base_overshoot && transient_base_error < -0.1f) {
+            observed_returned_base = true;
+            expect(transient_final_error <= 0.0f,
+                   "在途命令补偿后，返回原侧的基础点不得保留虚假跨侧投影");
             if (transient.has_command) {
                 expect(transient.command.dx_counts * transient_final_error >= 0.0f,
-                       "基础点过冲后回到原侧时，整数命令不得背离延迟最终点");
+                       "基础点过冲后回到原侧时，整数命令不得背离补偿最终点");
             }
             break;
         }
     }
     expect(observed_base_overshoot &&
-               observed_returned_projection_crossing,
-           "回归必须覆盖基础点短暂越过保持带后回到原侧、投影点仍过零，基础最大=" +
+               observed_returned_base,
+           "回归必须覆盖基础点短暂越过保持带后回到原侧，基础最大=" +
                std::to_string(maximum_transient_base_error) +
                "，返回基础最小=" +
                std::to_string(minimum_returned_base_error) +

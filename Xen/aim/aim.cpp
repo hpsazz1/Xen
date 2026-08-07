@@ -84,6 +84,9 @@ constexpr float kControllerFeedforwardMaximumCounts = 4.0f;
 constexpr float kControllerIntegralMinimumErrorPixels = 2.0f;
 constexpr std::size_t kControllerCommandHistoryCapacity = 64;
 constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
+// 第十四轮真实序列中，15 ms 窗口内约 15% 的命令位移足以解释基础点
+// 随后越过准星的幅度。这里只用于保守预测在途位移，不改变鼠标标定。
+constexpr float kControllerPendingCommandResponse = 0.15f;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
 // 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
@@ -850,6 +853,33 @@ struct Aim::Impl {
         return {best->dx_counts, best->dy_counts};
     }
 
+    std::pair<float, float> pending_issued_command_sum(
+            std::chrono::steady_clock::time_point captured_at) const
+            noexcept {
+        if (!config.enable_delay_compensation ||
+            config.control_delay_ms <= 0.0f) {
+            return {0.0f, 0.0f};
+        }
+        const auto effective_at = captured_at -
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<float>(
+                    config.control_delay_ms / 1000.0f));
+        float pending_x = 0.0f;
+        float pending_y = 0.0f;
+        for (std::size_t offset = 0; offset < issued_command_count; ++offset) {
+            const std::size_t index =
+                (issued_command_next + issued_commands.size() - 1U - offset) %
+                issued_commands.size();
+            const IssuedCommand& candidate = issued_commands[index];
+            if (candidate.captured_at <= effective_at) break;
+            if (candidate.captured_at <= captured_at) {
+                pending_x += candidate.dx_counts;
+                pending_y += candidate.dy_counts;
+            }
+        }
+        return {pending_x, pending_y};
+    }
+
     void reset_controller() noexcept {
         controller_track_id = 0;
         filtered_x = 0.0f;
@@ -905,6 +935,20 @@ struct Aim::Impl {
                 config.max_delay_compensation_ms / 1000.0f);
             projection.delay_x = track.vx * projection.delay_seconds;
             projection.delay_y = track.vy * projection.delay_seconds;
+            if (controller_track_id == track.id) {
+                const auto [pending_x, pending_y] =
+                    pending_issued_command_sum(frame.captured_at);
+                // 当前基础点尚未包含延迟窗内命令的相机位移。提前扣除该
+                // 位移可在批量命令生效前减速，避免越过后只能停发反拉。
+                projection.delay_x -= pending_x *
+                    kControllerPendingCommandResponse /
+                    config.counts_per_pixel_x /
+                    frame.source_pixels_per_roi_pixel_x;
+                projection.delay_y -= pending_y *
+                    kControllerPendingCommandResponse /
+                    config.counts_per_pixel_y /
+                    frame.source_pixels_per_roi_pixel_y;
+            }
             // 延迟补偿只投影控制点，不修改原始框和关联状态。距离门禁按当前
             // 目标尺度归一化，速度尖峰不能生成无界物理输入。
             clamp_vector(
