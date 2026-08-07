@@ -75,6 +75,9 @@ constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
 // 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
 constexpr float kControllerQuantizationMotionThresholdPixelsPerSecond = 10.0f;
+// 延迟窗口内连续比例命令会在真正生效前叠加。0.75 保留足够纠偏速度，同时为整数命令、
+// 85% 实机响应和四帧执行延迟留下相位裕量；恒速需求继续由独立积分项承担。
+constexpr float kDelayedProportionalFrameWeight = 0.75f;
 // 相对速度在准星跟随目标时会自然接近零，不能用单帧低速直接判定静止。
 // 连续 60 帧无命令且误差处于保持带内，才允许泄漏历史移动保持量。
 constexpr int kControllerStaticSettleConfirmFrames = 60;
@@ -1001,16 +1004,31 @@ struct Aim::Impl {
         const bool inside_deadzone =
             std::hypot(error_x, error_y) <= config.deadzone_pixels;
         const float gain = track.predicted ? config.predicted_gain : 1.0f;
-        const float proportional_x =
-            error_x * config.counts_per_pixel_x * gain;
-        const float proportional_y =
-            error_y * config.counts_per_pixel_y * gain;
         const float controller_dt = controller_captured_at ==
                 std::chrono::steady_clock::time_point{}
             ? track.prediction_dt
             : clamp_delta_seconds(std::chrono::duration<double>(
                   frame.captured_at - controller_captured_at).count());
         controller_captured_at = frame.captured_at;
+        // 实际鼠标输出存在排队延迟时，当前误差对应的命令要到未来帧才生效。
+        // 若仍使用无延迟比例增益，量化后的大命令会在延迟窗口内连续叠加，形成过冲-反向修正循环。
+        // 按延迟帧数对比例项降额，积分项继续补偿恒速目标的稳态误差。
+        const float control_delay_seconds = config.enable_delay_compensation
+            ? std::clamp(config.control_delay_ms, 0.0f,
+                         config.max_delay_compensation_ms) / 1000.0f
+            : 0.0f;
+        const float delay_frame_ratio = control_delay_seconds > 0.0f
+            ? control_delay_seconds /
+                std::max(controller_dt, 1.0f / 240.0f)
+            : 0.0f;
+        const float delay_gain = control_delay_seconds > 0.0f
+            ? 1.0f / (1.0f + delay_frame_ratio *
+                               kDelayedProportionalFrameWeight)
+            : 1.0f;
+        const float proportional_x =
+            error_x * config.counts_per_pixel_x * gain * delay_gain;
+        const float proportional_y =
+            error_y * config.counts_per_pixel_y * gain * delay_gain;
         const float hold_band = std::max(
             kControllerIntegralMinimumErrorPixels,
             config.deadzone_pixels * 1.5f);

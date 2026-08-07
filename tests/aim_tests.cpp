@@ -2,6 +2,7 @@
 #include "log/log.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -855,6 +856,81 @@ void test_integral_tracks_constant_velocity_with_bounded_error() {
                std::to_string(real_demand.mean_error));
 }
 
+void test_delayed_closed_loop_holds_moving_base_point() {
+    constexpr float kFrameSeconds = 1.0f / 240.0f;
+    constexpr int kActuationDelayFrames = 4;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.50f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> delayed_commands{};
+    float world_target_x = 24.0f;
+    float camera_x = 0.0f;
+    float error_sum = 0.0f;
+    float maximum_error = 0.0f;
+    std::vector<float> measured_errors;
+    measured_errors.reserve(480);
+    int measured_frames = 0;
+    int consecutive_no_command = 0;
+    int maximum_no_command = 0;
+
+    for (int index = 0; index < 960; ++index) {
+        camera_x += delayed_commands[index % kActuationDelayFrames] /
+            config.counts_per_pixel_x * 0.85f;
+        delayed_commands[index % kActuationDelayFrames] = 0;
+        world_target_x += 180.0f * kFrameSeconds;
+        const float observed_error = world_target_x - camera_x;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body(160.0f + observed_error, 160.0f)};
+        const AimResult result = aim.process(frame);
+        if (result.has_command) {
+            delayed_commands[index % kActuationDelayFrames] =
+                result.command.dx_counts;
+            consecutive_no_command = 0;
+        } else if (index >= 480) {
+            ++consecutive_no_command;
+            maximum_no_command = std::max(
+                maximum_no_command, consecutive_no_command);
+        }
+        if (index >= 480) {
+            const float error = std::fabs(world_target_x - camera_x);
+            error_sum += error;
+            maximum_error = std::max(maximum_error, error);
+            measured_errors.push_back(error);
+            ++measured_frames;
+        }
+    }
+
+    std::sort(measured_errors.begin(), measured_errors.end());
+    const float mean_error = error_sum / measured_frames;
+    const float p95_error = measured_errors[
+        static_cast<std::size_t>(measured_errors.size() * 0.95f)];
+    expect(mean_error <= 4.0f && p95_error <= 8.0f,
+           "15 ms 输出延迟闭环必须持续贴合移动基础点，平均误差=" +
+               std::to_string(mean_error) + "，最大误差=" +
+               std::to_string(maximum_error) + ", P95=" +
+               std::to_string(p95_error));
+    expect(maximum_no_command <= 1,
+           "15 ms 输出延迟闭环不得周期停发，最长停发=" +
+               std::to_string(maximum_no_command));
+}
+
 void test_integral_releases_on_reversal_and_static_settle() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -1211,6 +1287,7 @@ int main() {
     test_closed_loop_view_feedback_converges_without_limit_cycle();
     test_control_trajectory_never_moves_away_from_target();
     test_integral_tracks_constant_velocity_with_bounded_error();
+    test_delayed_closed_loop_holds_moving_base_point();
     test_integral_releases_on_reversal_and_static_settle();
     test_quantization_residual_cannot_reverse_after_crossing();
     test_delay_compensation_direction_cannot_reverse_within_hold_band();
