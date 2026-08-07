@@ -959,6 +959,7 @@ struct Aim::Impl {
     }
 
     bool control(const AimFrame& frame, const Track& track,
+                 float base_x, float base_y,
                  float tracking_x, float tracking_y,
                  float aim_x, float aim_y,
                  AimCommand& command) noexcept {
@@ -998,6 +999,12 @@ struct Aim::Impl {
         const float tracking_error_y =
             (tracking_y - frame.control_center_y) *
             frame.source_pixels_per_roi_pixel_y;
+        const float base_error_x =
+            (base_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float base_error_y =
+            (base_y - frame.control_center_y) *
+            frame.source_pixels_per_roi_pixel_y;
         // deadzone_pixels 与 counts_per_pixel 始终以主机完整 FOV 像素为单位，
         // 不随 OBS 编码尺寸或辅机显示器分辨率变化。恒速目标进入死区后不能
         // 立即清空已学习的积分，否则会形成“追上、停发、落后、再追”的周期。
@@ -1023,7 +1030,7 @@ struct Aim::Impl {
             std::hypot(track.vx, track.vy) <=
                 kControllerMovingVelocityThresholdPixelsPerSecond;
         const bool within_hold_band =
-            std::hypot(tracking_error_x, tracking_error_y) <= hold_band;
+            std::hypot(base_error_x, base_error_y) <= hold_band;
         if (previous_command_zero && low_relative_motion &&
             within_hold_band) {
             static_settle_frames = std::min(
@@ -1033,9 +1040,10 @@ struct Aim::Impl {
             static_settle_frames = 0;
         }
 
-        // 基础积分只消费延迟补偿后的 tracking 误差，prediction 提前量不会
-        // 参与或重置它；短时滑行只泄漏冻结，方向反转则由带符号误差连续
-        // 反积分。积分始终受独立的绝对 counts 小上限约束。
+        // 基础积分只消费框内基础点误差，prediction 和延迟投影均不会参与
+        // 或重置它。基础点明确越过保持带后立即作废旧维持量，物理命令再由
+        // 后续时间斜率平滑过渡；这样既不会被投影点瞬时过零误触发，也不会
+        // 把内部状态切换直接变成可见阶跃。积分受独立 counts 上限约束。
         const auto update_integral = [&](float error, float velocity,
                                          float counts_per_pixel,
                                          float& integral) {
@@ -1049,29 +1057,11 @@ struct Aim::Impl {
                     -kControllerIntegralLeakPerSecond * controller_dt);
             } else if (track.state != TrackState::CONFIRMED) {
                 integral = 0.0f;
-            } else if (config.enable_delay_compensation &&
-                       config.control_delay_ms > 0.0f &&
-                       integral * velocity < 0.0f &&
-                       std::fabs(velocity) >
-                           kControllerMovingVelocityThresholdPixelsPerSecond &&
-                       std::fabs(error) <= activation_error) {
-                // 延迟补偿误差已经进入保持带且正向零点收敛时，历史积分代表的追赶速度已过量。
-                // 按半个固定控制延迟窗口线性卸载一个积分上限，避免继续向队列追加过量命令；
-                // 最终物理命令仍由独立斜率门禁逐 count 减速，避免积分快速回收造成视觉抖动。
-                // 恒速贴合时相对速度接近零，不进入该分支，已学习的维持命令仍会保持。
-                const float delay_seconds = std::max(
-                    controller_dt, config.control_delay_ms / 1000.0f);
-                const float release_counts =
-                    kControllerIntegralMaximumCounts * 2.0f *
-                    controller_dt / delay_seconds;
-                integral = std::copysign(
-                    std::max(0.0f, std::fabs(integral) - release_counts),
-                    integral);
             } else if (std::fabs(error) > activation_error) {
                 const float proportional = error * counts_per_pixel;
                 // 移动误差存在时采用真实积分，不能一边学习一边泄漏；泄漏积分
-                // 的稳态必然要求比例项保留固定误差。误差显著反向时先清除旧
-                // 前馈量，避免目标反转后依赖缓慢反积分释放历史速度。
+                // 的稳态必然要求比例项保留固定误差。基础点明确越过保持带
+                // 时立即作废旧方向状态，再从当前误差学习新的维持速度。
                 if (integral * error < 0.0f) integral = 0.0f;
                 integral += proportional *
                     kControllerIntegralGainPerSecond * controller_dt;
@@ -1093,21 +1083,29 @@ struct Aim::Impl {
                 }
             }
         };
-        // 积分始终基于延迟补偿后的基础 tracking 点；prediction 仅改变最终
-        // 比例纠偏点。两层状态互不重置，顺序固定为 tracking → prediction。
-        update_integral(tracking_error_x, track.vx,
+        // 积分只学习框内基础点的真实偏差。相机执行旧命令时，屏幕相对速度会
+        // 反向并使延迟投影点短暂越过准星；它是闭环反馈而不是目标减速，不能
+        // 据此卸载维持量。延迟投影和 prediction 只改变比例纠偏点。
+        update_integral(base_error_x, track.vx,
                         config.counts_per_pixel_x, integral_x);
-        update_integral(tracking_error_y, track.vy,
+        update_integral(base_error_y, track.vy,
                         config.counts_per_pixel_y, integral_y);
         float desired_x = proportional_x + integral_x;
         float desired_y = proportional_y + integral_y;
-        // 最终控制点已经包含延迟补偿；即使误差落在保持带内，也不能让
-        // 上一轮基础积分把命令发向最终点的反方向。否则基础点刚过准星时，
-        // 延迟补偿点可能已越过准星，旧保持量会制造一次可见反向输入。
-        if (desired_x * error_x <= 0.0f) {
+        // 只允许一种跨最终点符号的保持命令：延迟投影点位于保持带内，且
+        // 命令仍明确朝向尚未过零的基础点。无延迟控制、基础点真实过零或
+        // 投影点离开保持带时均恢复逐轴比例方向，避免积分推动闭环远离目标。
+        const bool allow_delayed_base_hold =
+            config.enable_delay_compensation &&
+            config.control_delay_ms > 0.0f;
+        if (desired_x * error_x <= 0.0f &&
+            (!allow_delayed_base_hold || std::fabs(error_x) > hold_band ||
+             desired_x * base_error_x <= 0.0f)) {
             desired_x = proportional_x;
         }
-        if (desired_y * error_y <= 0.0f) {
+        if (desired_y * error_y <= 0.0f &&
+            (!allow_delayed_base_hold || std::fabs(error_y) > hold_band ||
+             desired_y * base_error_y <= 0.0f)) {
             desired_y = proportional_y;
         }
         const bool moving_away_x =
@@ -1371,6 +1369,8 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
             if (impl_->range_allows_control) {
                 result.has_command = impl_->control(
                     frame, *target,
+                    projection.base_x,
+                    projection.base_y,
                     projection.delay_compensated_x,
                     projection.delay_compensated_y,
                     projection.final_x, projection.final_y,

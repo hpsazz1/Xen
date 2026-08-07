@@ -934,7 +934,7 @@ void test_delayed_closed_loop_holds_moving_base_point() {
                std::to_string(maximum_no_command));
 }
 
-void test_delay_integral_releases_before_compensated_crossing() {
+void test_base_crossing_releases_integral_smoothly() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 1.5f;
@@ -965,9 +965,13 @@ void test_delay_integral_releases_before_compensated_crossing() {
         }
     }
 
-    bool observed_closing_band = false;
-    bool observed_reduced_command = false;
-    int previous_closing_magnitude = -1;
+    bool observed_base_crossing = false;
+    bool observed_reverse_command = false;
+    int base_crossing_offset = -1;
+    int reverse_command_offset = -1;
+    int previous_command = 0;
+    bool have_previous_command = false;
+    const float hold_band = std::max(2.0f, config.deadzone_pixels * 1.5f);
     for (int offset = 0; offset < 20; ++offset) {
         const int index = 120 + offset;
         AimFrame frame = make_frame(
@@ -976,32 +980,45 @@ void test_delay_integral_releases_before_compensated_crossing() {
                 static_cast<long long>(index * 1000000.0f / 240.0f)));
         frame.detections = {body(150.0f + (offset + 1) * 0.75f, 160.0f)};
         const AimResult result = aim.process(frame);
-        const float error = result.target.delay_compensated_aim_x -
+        const float base_error = result.target.base_aim_x -
             frame.control_center_x;
-        if (error < 0.0f && std::fabs(error) <= 2.25f &&
-            result.target.velocity_x > 20.0f) {
-            observed_closing_band = true;
-            const int magnitude = result.has_command
-                ? std::abs(result.command.dx_counts) : 0;
-            expect(magnitude <= 4,
-                   "延迟补偿误差接近过零时不得继续增加满幅保持命令");
-            if (magnitude <= 3) observed_reduced_command = true;
-            if (previous_closing_magnitude >= 0) {
-                expect(magnitude <= previous_closing_magnitude &&
-                           previous_closing_magnitude - magnitude <= 1,
-                       "延迟积分必须逐帧平滑卸载，禁止清零或反向增加造成视觉抖动，前值=" +
-                           std::to_string(previous_closing_magnitude) +
-                           "，当前=" + std::to_string(magnitude));
+        const int command = result.has_command
+            ? result.command.dx_counts : 0;
+        // 同方向增减速受逐 count 斜率约束；真实换向时方向安全门允许一次
+        // 直接归零，但绝不能跨零跳到反方向的多 count 命令。
+        if (have_previous_command && previous_command * command > 0) {
+            expect(std::abs(command - previous_command) <= 1,
+                   "基础点回穿的同向物理命令必须逐 count 变化，前值=" +
+                       std::to_string(previous_command) + "，当前=" +
+                       std::to_string(command));
+        }
+        if (have_previous_command && previous_command * command < 0) {
+            expect(std::abs(command) <= 1,
+                   "基础点真实换向不得跨零跳到多 count 反向命令");
+        }
+        previous_command = command;
+        have_previous_command = true;
+        if (base_error > hold_band) {
+            if (!observed_base_crossing) {
+                observed_base_crossing = true;
+                base_crossing_offset = offset;
             }
-            previous_closing_magnitude = magnitude;
-        } else {
-            previous_closing_magnitude = -1;
+            expect(command >= 0,
+                   "基础点越过保持带后不得继续发送旧方向维持命令");
+            if (command > 0) {
+                observed_reverse_command = true;
+                reverse_command_offset = offset;
+                break;
+            }
         }
     }
-    expect(observed_closing_band,
-           "延迟积分回归必须实际覆盖向零点收敛的保持带");
-    expect(observed_reduced_command,
-           "延迟积分进入收敛保持带后必须实际降低命令幅度");
+    expect(observed_base_crossing,
+           "回归必须实际覆盖基础点越过死区，而不只是延迟投影点过零");
+    expect(observed_reverse_command &&
+               reverse_command_offset - base_crossing_offset <= 6,
+           "基础点真实越过后必须平滑并及时反向，越过帧=" +
+               std::to_string(base_crossing_offset) + "，反向帧=" +
+               std::to_string(reverse_command_offset));
 }
 
 void test_integral_releases_on_reversal_and_static_settle() {
@@ -1089,7 +1106,7 @@ void test_quantization_residual_cannot_reverse_after_crossing() {
     }
 }
 
-void test_delay_compensation_direction_cannot_reverse_within_hold_band() {
+void test_delay_projection_crossing_keeps_base_tracking_hold() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 1.5f;
@@ -1105,8 +1122,9 @@ void test_delay_compensation_direction_cannot_reverse_within_hold_band() {
         std::chrono::seconds(1);
     Aim aim(config);
 
-    // 先建立向左的基础保持量，再以约 100 px/s 向右回穿；最终基础点仍
-    // 略在准星左侧，而延迟补偿点已越过准星。
+    // 先建立向左的基础保持量，再以约 100 px/s 向右回穿。实机第十一轮
+    // 的长停发都发生在基础点仍位于原侧、但相机反馈使延迟投影点短暂过零
+    // 的阶段；这里固定复现该职责冲突。
     for (int index = 0; index < 40; ++index) {
         AimFrame frame = make_frame(
             static_cast<std::uint64_t>(index + 1),
@@ -1130,12 +1148,17 @@ void test_delay_compensation_direction_cannot_reverse_within_hold_band() {
     AimFrame crossed = make_frame(60, base + std::chrono::milliseconds(590));
     crossed.detections = {body(159.8f, 160.0f)};
     const AimResult result = aim.process(crossed);
+    const float base_error = result.target.base_aim_x -
+        crossed.control_center_x;
     const float final_error = result.target.delay_compensated_aim_x -
         crossed.control_center_x;
+    const float hold_band = std::max(2.0f, config.deadzone_pixels * 1.5f);
     expect(result.status == AimStatus::SUCCESS && result.has_target &&
-               (!result.has_command ||
-                result.command.dx_counts * final_error >= 0.0f),
-           "延迟补偿点越过准星后，命令不得在保持带内反向推动最终瞄准点");
+               base_error < 0.0f && final_error > 0.0f &&
+               std::fabs(final_error) <= hold_band,
+           "回归必须覆盖基础点未过零、延迟投影点在保持带内过零");
+    expect(result.has_command && result.command.dx_counts < 0,
+           "延迟投影点瞬时过零不得切断仍朝向基础点的维持命令");
 }
 
 void test_control_step_cannot_cross_in_box_aim_point() {
@@ -1361,10 +1384,10 @@ int main() {
     test_control_trajectory_never_moves_away_from_target();
     test_integral_tracks_constant_velocity_with_bounded_error();
     test_delayed_closed_loop_holds_moving_base_point();
-    test_delay_integral_releases_before_compensated_crossing();
+    test_base_crossing_releases_integral_smoothly();
     test_integral_releases_on_reversal_and_static_settle();
     test_quantization_residual_cannot_reverse_after_crossing();
-    test_delay_compensation_direction_cannot_reverse_within_hold_band();
+    test_delay_projection_crossing_keeps_base_tracking_hold();
     test_control_step_cannot_cross_in_box_aim_point();
     test_delay_compensation_stacks_before_prediction();
     test_short_glide_preserves_base_tracking_hold();
