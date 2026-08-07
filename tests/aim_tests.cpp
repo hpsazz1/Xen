@@ -1159,6 +1159,73 @@ void test_delay_projection_crossing_keeps_base_tracking_hold() {
            "回归必须覆盖基础点未过零、延迟投影点在保持带内过零");
     expect(result.has_command && result.command.dx_counts < 0,
            "延迟投影点瞬时过零不得切断仍朝向基础点的维持命令");
+
+    // 实机第十二轮证明：基础点在一个延迟闭环周期中可能先短暂越过保持带，
+    // 随后回到原侧且投影点仍在另一侧。单次过冲不得清空恒速前馈，否则
+    // 回到保持带后只能等待比例误差再次扩大，形成 5~6 帧停发窗口。
+    const std::array<float, 12> transient_positions{
+        166.0f, 166.0f, 156.7f, 157.0f, 157.0f, 157.0f,
+        157.0f, 157.0f, 157.0f, 157.0f, 157.0f, 157.0f};
+    bool observed_base_overshoot = false;
+    bool observed_returned_projection_crossing = false;
+    float maximum_transient_base_error = -1000.0f;
+    float minimum_returned_base_error = 1000.0f;
+    float returned_final_error = 0.0f;
+    std::string transient_trace;
+    for (std::size_t offset = 0; offset < transient_positions.size();
+         ++offset) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(61 + offset),
+            base + std::chrono::milliseconds(
+                600 + static_cast<int>(offset) * 10));
+        frame.detections = {body(transient_positions[offset], 160.0f)};
+        const AimResult transient = aim.process(frame);
+        const float transient_base_error = transient.target.base_aim_x -
+            frame.control_center_x;
+        const float transient_final_error =
+            transient.target.delay_compensated_aim_x -
+            frame.control_center_x;
+        const float transient_final_error_y =
+            transient.target.delay_compensated_aim_y -
+            frame.control_center_y;
+        if (transient.has_command && std::hypot(
+                transient_final_error, transient_final_error_y) > hold_band) {
+            expect(transient.command.dx_counts * transient_final_error +
+                       transient.command.dy_counts *
+                           transient_final_error_y > 0.0f,
+                   "延迟基础维持的二维合成命令在保持带外必须朝向最终点");
+        }
+        maximum_transient_base_error = std::max(
+            maximum_transient_base_error, transient_base_error);
+        transient_trace += " [" + std::to_string(offset) + ":" +
+            std::to_string(transient_base_error) + "," +
+            std::to_string(transient_final_error) + "]";
+        if (transient_base_error > hold_band) {
+            observed_base_overshoot = true;
+        }
+        if (observed_base_overshoot && transient_base_error <
+                minimum_returned_base_error) {
+            minimum_returned_base_error = transient_base_error;
+            returned_final_error = transient_final_error;
+        }
+        if (observed_base_overshoot && transient_base_error < -0.25f &&
+            transient_final_error > 0.0f &&
+            transient_final_error <= hold_band) {
+            observed_returned_projection_crossing = true;
+            expect(transient.has_command &&
+                       transient.command.dx_counts < 0,
+                   "短暂基础点过冲后回到原侧时必须保留原方向维持量");
+            break;
+        }
+    }
+    expect(observed_base_overshoot &&
+               observed_returned_projection_crossing,
+           "回归必须覆盖基础点短暂越过保持带后回到原侧、投影点仍过零，基础最大=" +
+               std::to_string(maximum_transient_base_error) +
+               "，返回基础最小=" +
+               std::to_string(minimum_returned_base_error) +
+               "，对应投影=" + std::to_string(returned_final_error) +
+               "，轨迹=" + transient_trace);
 }
 
 void test_control_step_cannot_cross_in_box_aim_point() {

@@ -71,6 +71,9 @@ constexpr float kControllerIntegralLeakPerSecond = 1.5f;
 // 方向过零和静止确认仍负责释放历史保持量。
 constexpr float kControllerIntegralMaximumCounts = 4.0f;
 constexpr float kControllerIntegralMinimumErrorPixels = 2.0f;
+// 输出延迟闭环中的基础点过零通常只持续 3~6 帧。显著反向误差至少保持
+// 30 ms 才作废旧前馈；物理方向门禁仍逐帧生效，因此确认窗不会继续推离目标。
+constexpr float kControllerIntegralReversalConfirmSeconds = 0.030f;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
 // 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
@@ -244,6 +247,8 @@ struct Aim::Impl {
     float residual_y = 0.0f;
     float integral_x = 0.0f;
     float integral_y = 0.0f;
+    float integral_reversal_seconds_x = 0.0f;
+    float integral_reversal_seconds_y = 0.0f;
     float previous_command_x = 0.0f;
     float previous_command_y = 0.0f;
     int static_settle_frames = 0;
@@ -799,6 +804,8 @@ struct Aim::Impl {
         residual_y = 0.0f;
         integral_x = 0.0f;
         integral_y = 0.0f;
+        integral_reversal_seconds_x = 0.0f;
+        integral_reversal_seconds_y = 0.0f;
         previous_command_x = 0.0f;
         previous_command_y = 0.0f;
         static_settle_frames = 0;
@@ -981,6 +988,8 @@ struct Aim::Impl {
                 -kControllerIntegralLeakPerSecond * controller_dt);
             integral_x *= leak;
             integral_y *= leak;
+            integral_reversal_seconds_x = 0.0f;
+            integral_reversal_seconds_y = 0.0f;
             previous_command_x = 0.0f;
             previous_command_y = 0.0f;
             static_settle_frames = 0;
@@ -1040,13 +1049,14 @@ struct Aim::Impl {
             static_settle_frames = 0;
         }
 
-        // 基础积分只消费框内基础点误差，prediction 和延迟投影均不会参与
-        // 或重置它。基础点明确越过保持带后立即作废旧维持量，物理命令再由
-        // 后续时间斜率平滑过渡；这样既不会被投影点瞬时过零误触发，也不会
-        // 把内部状态切换直接变成可见阶跃。积分受独立 counts 上限约束。
+        // 基础积分只消费框内基础点误差，prediction 和延迟投影均不会参与。
+        // 显著反向误差先经过时间确认：短暂过冲冻结已学习的恒速维持量，
+        // 持续反向才作废旧状态；真实反转的物理方向由后续门禁立即约束。
+        // 积分受独立 counts 上限约束。
         const auto update_integral = [&](float error, float velocity,
                                          float counts_per_pixel,
-                                         float& integral) {
+                                         float& integral,
+                                         float& reversal_seconds) {
             const float activation_error = std::max(
                 kControllerIntegralMinimumErrorPixels,
                 config.deadzone_pixels * 1.5f);
@@ -1055,21 +1065,39 @@ struct Aim::Impl {
                 // 后继续使用，不能因 prediction/滑行进入退出重新建立速度。
                 integral *= std::exp(
                     -kControllerIntegralLeakPerSecond * controller_dt);
+                reversal_seconds = 0.0f;
             } else if (track.state != TrackState::CONFIRMED) {
                 integral = 0.0f;
+                reversal_seconds = 0.0f;
             } else if (std::fabs(error) > activation_error) {
                 const float proportional = error * counts_per_pixel;
-                // 移动误差存在时采用真实积分，不能一边学习一边泄漏；泄漏积分
-                // 的稳态必然要求比例项保留固定误差。基础点明确越过保持带
-                // 时立即作废旧方向状态，再从当前误差学习新的维持速度。
-                if (integral * error < 0.0f) integral = 0.0f;
-                integral += proportional *
-                    kControllerIntegralGainPerSecond * controller_dt;
+                if (integral * error < 0.0f) {
+                    reversal_seconds += controller_dt;
+                    const float configured_delay_seconds =
+                        config.enable_delay_compensation
+                        ? config.control_delay_ms / 1000.0f : 0.0f;
+                    const float confirmation_seconds =
+                        configured_delay_seconds > 0.0f
+                        ? std::max(
+                              kControllerIntegralReversalConfirmSeconds,
+                              configured_delay_seconds * 2.0f)
+                        : 0.0f;
+                    if (reversal_seconds >= confirmation_seconds) {
+                        integral = proportional *
+                            kControllerIntegralGainPerSecond * controller_dt;
+                        reversal_seconds = 0.0f;
+                    }
+                } else {
+                    reversal_seconds = 0.0f;
+                    integral += proportional *
+                        kControllerIntegralGainPerSecond * controller_dt;
+                }
                 integral = std::clamp(
                     integral,
                     -kControllerIntegralMaximumCounts,
                     kControllerIntegralMaximumCounts);
             } else {
+                reversal_seconds = 0.0f;
                 // 恒速目标进入保持带后，已建立的积分就是该目标的前馈量，
                 // 必须保持而不能每帧泄漏；否则量化后的命令会逐渐归零，
                 // 再次落后后重建，形成“追上-停发-滞后”循环。静止目标
@@ -1087,9 +1115,11 @@ struct Aim::Impl {
         // 反向并使延迟投影点短暂越过准星；它是闭环反馈而不是目标减速，不能
         // 据此卸载维持量。延迟投影和 prediction 只改变比例纠偏点。
         update_integral(base_error_x, track.vx,
-                        config.counts_per_pixel_x, integral_x);
+                        config.counts_per_pixel_x, integral_x,
+                        integral_reversal_seconds_x);
         update_integral(base_error_y, track.vy,
-                        config.counts_per_pixel_y, integral_y);
+                        config.counts_per_pixel_y, integral_y,
+                        integral_reversal_seconds_y);
         float desired_x = proportional_x + integral_x;
         float desired_y = proportional_y + integral_y;
         // 只允许一种跨最终点符号的保持命令：延迟投影点位于保持带内，且
@@ -1106,6 +1136,14 @@ struct Aim::Impl {
         if (desired_y * error_y <= 0.0f &&
             (!allow_delayed_base_hold || std::fabs(error_y) > hold_band ||
              desired_y * base_error_y <= 0.0f)) {
+            desired_y = proportional_y;
+        }
+        // 逐轴允许基础维持后仍需满足二维生产契约。若正交轴误差使合成向量
+        // 在保持带外整体背离最终点，回退纯比例向量；保持带内不触发，避免
+        // 再次切断本轮需要保护的恒速前馈。
+        if (std::hypot(error_x, error_y) > hold_band &&
+            desired_x * error_x + desired_y * error_y <= 0.0f) {
+            desired_x = proportional_x;
             desired_y = proportional_y;
         }
         const bool moving_away_x =
