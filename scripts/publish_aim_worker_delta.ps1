@@ -140,18 +140,10 @@ try {
     }
 }
 
-$localManifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
 $remoteWorkerHash = (Get-FileHash -LiteralPath $remoteWorker -Algorithm SHA256).Hash
-$remoteManifestHash = (Get-FileHash -LiteralPath $remoteManifest -Algorithm SHA256).Hash
 if ($remoteWorkerHash -ne $hash.ToUpperInvariant()) {
     throw "辅机 Worker 回读 SHA-256 不一致。"
 }
-
-Write-Host "Aim NVIDIA Worker 差量发布完成。"
-Write-Host "  commit=$commit"
-Write-Host "  worker_sha256=$($hash.ToUpperInvariant())"
-Write-Host "  manifest_sha256=$remoteManifestHash"
-Write-Host "  package_root=$destinationRoot"
 
 if ($Prepare) {
     if (-not (Test-Path -LiteralPath $SshIdentityFile -PathType Leaf)) {
@@ -171,4 +163,20 @@ if ($Prepare) {
     & ssh -i $SshIdentityFile -o IdentitiesOnly=yes -o BatchMode=yes `
         "$SshUser@$SshHost" $remoteCommand
     if ($LASTEXITCODE -ne 0) { throw "辅机 Prepare 失败，退出码：$LASTEXITCODE" }
+
+    # Prepare 会把本轮 Run ID 写入 manifest 的 config 来源。辅机最终 manifest 才是任务绑定事实，
+    # 必须原子回写主机固定包，避免主辅机仅因来源元数据不同而形成两个发布基线。
+    Copy-Atomic $remoteManifest $manifestPath
 }
+
+$localManifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+$remoteManifestHash = (Get-FileHash -LiteralPath $remoteManifest -Algorithm SHA256).Hash
+if ($localManifestHash -ne $remoteManifestHash) {
+    throw "主辅机最终 manifest SHA-256 不一致。"
+}
+
+Write-Host "Aim NVIDIA Worker 差量发布完成。"
+Write-Host "  commit=$commit"
+Write-Host "  worker_sha256=$($hash.ToUpperInvariant())"
+Write-Host "  manifest_sha256=$remoteManifestHash"
+Write-Host "  package_root=$destinationRoot"
