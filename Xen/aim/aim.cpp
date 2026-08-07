@@ -75,6 +75,9 @@ constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
 // 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
 constexpr float kControllerQuantizationMotionThresholdPixelsPerSecond = 10.0f;
+// 命令整形使用时间速率而不是固定帧步：240 Hz 下每帧最多变化 1 count，
+// 120/60 Hz 下分别为 2/4 counts，保持不同采集刷新率下的加减速时间一致。
+constexpr float kControllerMaximumSlewCountsPerSecond = 240.0f;
 // 相对速度在准星跟随目标时会自然接近零，不能用单帧低速直接判定静止。
 // 连续 60 帧无命令且误差处于保持带内，才允许泄漏历史移动保持量。
 constexpr int kControllerStaticSettleConfirmFrames = 60;
@@ -1053,9 +1056,17 @@ struct Aim::Impl {
                            kControllerMovingVelocityThresholdPixelsPerSecond &&
                        std::fabs(error) <= activation_error) {
                 // 延迟补偿误差已经进入保持带且正向零点收敛时，历史积分代表的追赶速度已过量。
-                // 若继续保留，它会在输出延迟窗口内追加多帧同向大命令，过零后只能停发等待回落。
-                // 清零只发生在明确收敛的小误差区；恒速贴合时相对速度接近零，保持积分不受影响。
-                integral = 0.0f;
+                // 按半个固定控制延迟窗口线性卸载一个积分上限，避免继续向队列追加过量命令；
+                // 最终物理命令仍由独立斜率门禁逐 count 减速，避免积分快速回收造成视觉抖动。
+                // 恒速贴合时相对速度接近零，不进入该分支，已学习的维持命令仍会保持。
+                const float delay_seconds = std::max(
+                    controller_dt, config.control_delay_ms / 1000.0f);
+                const float release_counts =
+                    kControllerIntegralMaximumCounts * 2.0f *
+                    controller_dt / delay_seconds;
+                integral = std::copysign(
+                    std::max(0.0f, std::fabs(integral) - release_counts),
+                    integral);
             } else if (std::fabs(error) > activation_error) {
                 const float proportional = error * counts_per_pixel;
                 // 移动误差存在时采用真实积分，不能一边学习一边泄漏；泄漏积分
@@ -1108,6 +1119,7 @@ struct Aim::Impl {
             std::fabs(track.vy) >
                 kControllerMovingVelocityThresholdPixelsPerSecond;
         if (inside_deadzone && std::hypot(integral_x, integral_y) < 0.05f &&
+            std::hypot(shaped_x, shaped_y) <= 1.0f &&
             !moving_away_x && !moving_away_y) {
             filtered_x = 0.0f;
             filtered_y = 0.0f;
@@ -1132,6 +1144,11 @@ struct Aim::Impl {
         // 对角线命令达到配置上限的 sqrt(2) 倍。
         clamp_vector(filtered_x, filtered_y, config.max_counts_per_frame);
 
+        const bool smooth_delayed_motion =
+            config.enable_delay_compensation &&
+            config.control_delay_ms > 0.0f &&
+            std::hypot(track.vx, track.vy) >
+                kControllerMovingVelocityThresholdPixelsPerSecond;
         if (!shaper_initialized) {
             shaped_x = filtered_x;
             shaped_y = filtered_y;
@@ -1139,17 +1156,22 @@ struct Aim::Impl {
         } else {
             float delta_x = filtered_x - shaped_x;
             float delta_y = filtered_y - shaped_y;
-            const float maximum_delta = std::max(
-                1.0f, config.max_counts_per_frame *
-                    std::max(0.10f, config.smoothing));
+            // 比例滤波负责低频响应，整形器按真实 dt 限制相邻物理命令的可见阶跃。
+            const float maximum_delta = smooth_delayed_motion
+                ? std::max(
+                    0.25f,
+                    kControllerMaximumSlewCountsPerSecond * controller_dt)
+                : std::max(
+                    1.0f, config.max_counts_per_frame *
+                        std::max(0.10f, config.smoothing));
             clamp_vector(delta_x, delta_y, maximum_delta);
             shaped_x += delta_x;
             shaped_y += delta_y;
             clamp_vector(shaped_x, shaped_y, config.max_counts_per_frame);
         }
 
-        // 轨迹整形只平滑步长，不能让历史动量继续把准星推向当前控制点
-        // 的反方向。方向始终对准本帧基础点或预测点，且步长不超过剩余误差。
+        // 轨迹整形不能让历史动量继续把准星推向当前控制点的反方向。方向始终对准本帧
+        // 基础点或预测点；静态模式限制到当前需求，延迟移动模式保留连续减速幅度。
         const float desired_magnitude = std::hypot(desired_x, desired_y);
         const float shaped_magnitude = std::hypot(shaped_x, shaped_y);
         if (desired_magnitude <= 0.0f || shaped_magnitude <= 0.0f ||
@@ -1159,8 +1181,11 @@ struct Aim::Impl {
             residual_x = 0.0f;
             residual_y = 0.0f;
         } else {
-            const float safe_magnitude = std::min(
-                shaped_magnitude, desired_magnitude);
+            // 方向立即对准当前控制点，幅度则保留整形后的连续减速轨迹。后续逐轴量化上限仍按
+            // 当前 desired 限制整数命令，因此不会因平滑状态超过当前需求而增加额外物理步长。
+            const float safe_magnitude = smooth_delayed_motion
+                ? shaped_magnitude
+                : std::min(shaped_magnitude, desired_magnitude);
             shaped_x = desired_x / desired_magnitude * safe_magnitude;
             shaped_y = desired_y / desired_magnitude * safe_magnitude;
         }
@@ -1183,17 +1208,28 @@ struct Aim::Impl {
         // 亚整数残余只有在后续帧允许发出 1 count 时才能完成时间分摊。
         // 对确认中的移动轴使用 ceil；静止轴仍使用 floor，避免静态目标在
         // 小误差内越过瞄点。方向门禁和二维单帧上限继续在前后两侧生效。
-        const auto quantized_axis_limit = [](float desired, float velocity) {
+        const auto quantized_axis_limit = [](
+                float desired, float velocity, float previous_command) {
             const float magnitude = std::fabs(desired);
+            int limit = static_cast<int>(std::floor(magnitude));
             if (std::fabs(velocity) >
                     kControllerQuantizationMotionThresholdPixelsPerSecond &&
                 desired * velocity > 0.0f && magnitude > 0.0f) {
-                return static_cast<int>(std::ceil(magnitude));
+                limit = static_cast<int>(std::ceil(magnitude));
             }
-            return static_cast<int>(std::floor(magnitude));
+            // 轨迹正在向零点收敛时，速度会与剩余纠偏方向相反。只要剩余纠偏仍与上一帧同向，
+            // 整数上限每帧最多下降 1 count，确保减速序列经过 …3、2、1、0 而不是直接停发。
+            if (desired * previous_command > 0.0f &&
+                std::fabs(previous_command) > 1.0f && magnitude > 0.0f) {
+                limit = std::max(
+                    limit, static_cast<int>(std::fabs(previous_command)) - 1);
+            }
+            return limit;
         };
-        const int maximum_x = quantized_axis_limit(desired_x, track.vx);
-        const int maximum_y = quantized_axis_limit(desired_y, track.vy);
+        const int maximum_x = quantized_axis_limit(
+            desired_x, track.vx, previous_command_x);
+        const int maximum_y = quantized_axis_limit(
+            desired_y, track.vy, previous_command_y);
         command.dx_counts = std::clamp(
             command.dx_counts, -maximum_x, maximum_x);
         command.dy_counts = std::clamp(
@@ -1323,8 +1359,8 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
                 projection.delay_compensated_y;
             result.target.delay_compensation_x = projection.delay_x;
             result.target.delay_compensation_y = projection.delay_y;
-            result.target.delay_compensation_ms =
-                projection.delay_seconds * 1000.0f;
+            result.target.delay_compensation_ms = projection.delay_active
+                ? projection.delay_seconds * 1000.0f : 0.0f;
             result.target.observation_age_ms =
                 projection.observation_age_seconds * 1000.0f;
             result.target.confidence = target->confidence;

@@ -956,11 +956,18 @@ void test_delay_integral_releases_before_compensated_crossing() {
             base + std::chrono::microseconds(
                 static_cast<long long>(index * 1000000.0f / 240.0f)));
         frame.detections = {body(150.0f, 160.0f)};
-        expect(aim.process(frame).status == AimStatus::SUCCESS,
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
                "延迟积分过零回归的保持量建立阶段必须成功");
+        if (index >= 20 && !result.target.delay_compensation_active) {
+            expect(result.target.delay_compensation_ms == 0.0f,
+                   "延迟向量未激活时必须报告 0 ms，禁止产生报告契约矛盾");
+        }
     }
 
     bool observed_closing_band = false;
+    bool observed_reduced_command = false;
+    int previous_closing_magnitude = -1;
     for (int offset = 0; offset < 20; ++offset) {
         const int index = 120 + offset;
         AimFrame frame = make_frame(
@@ -974,13 +981,27 @@ void test_delay_integral_releases_before_compensated_crossing() {
         if (error < 0.0f && std::fabs(error) <= 2.25f &&
             result.target.velocity_x > 20.0f) {
             observed_closing_band = true;
-            expect(!result.has_command ||
-                       std::abs(result.command.dx_counts) <= 1,
-                   "延迟补偿误差接近过零时必须提前释放饱和积分，禁止继续排入大命令");
+            const int magnitude = result.has_command
+                ? std::abs(result.command.dx_counts) : 0;
+            expect(magnitude <= 4,
+                   "延迟补偿误差接近过零时不得继续增加满幅保持命令");
+            if (magnitude <= 3) observed_reduced_command = true;
+            if (previous_closing_magnitude >= 0) {
+                expect(magnitude <= previous_closing_magnitude &&
+                           previous_closing_magnitude - magnitude <= 1,
+                       "延迟积分必须逐帧平滑卸载，禁止清零或反向增加造成视觉抖动，前值=" +
+                           std::to_string(previous_closing_magnitude) +
+                           "，当前=" + std::to_string(magnitude));
+            }
+            previous_closing_magnitude = magnitude;
+        } else {
+            previous_closing_magnitude = -1;
         }
     }
     expect(observed_closing_band,
            "延迟积分回归必须实际覆盖向零点收敛的保持带");
+    expect(observed_reduced_command,
+           "延迟积分进入收敛保持带后必须实际降低命令幅度");
 }
 
 void test_integral_releases_on_reversal_and_static_settle() {
