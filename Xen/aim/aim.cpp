@@ -5,6 +5,7 @@
 #include "log/log.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -52,6 +53,12 @@ struct Track {
     std::chrono::steady_clock::time_point state_at{};
 };
 
+struct IssuedCommand {
+    std::chrono::steady_clock::time_point captured_at{};
+    float dx_counts = 0.0f;
+    float dy_counts = 0.0f;
+};
+
 constexpr float kInvalidAssignmentCost = 1000000.0f;
 constexpr float kUnmatchedAssignmentCost = 1.05f;
 constexpr float kTrackPositionAlphaHigh = 0.72f;
@@ -61,19 +68,22 @@ constexpr float kTrackVelocityBetaLow = 0.04f;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
-// 持续偏差：单位为 counts，按真实帧间隔累计；移动误差存在时保持真实积分，
-// 静止确认和短时滑行才泄漏。独立上限不能低于实测维持命令，否则比例项必须
-// 永久保留误差，重新形成周期性追赶。
-constexpr float kControllerIntegralGainPerSecond = 2.0f;
-constexpr float kControllerIntegralLeakPerSecond = 1.5f;
+// 基础前馈观察器：状态单位为 counts/frame。历史命令补回相机自运动后，
+// 屏幕相对速度才代表世界目标运动；低通增益按真实帧间隔计算，避免帧率变化
+// 改变收敛速度。独立上限覆盖实测维持命令，但不允许生成无界物理输入。
+constexpr float kControllerFeedforwardObserverGainPerSecond = 20.0f;
+// 轨迹速度是平滑后的估计值，存在一个采样窗口的幅值损失；有限补偿只作用
+// 于观察器测量，不改变比例项或物理命令上限。
+constexpr float kControllerFeedforwardVelocityScale = 2.00f;
+constexpr float kControllerMovingHoldBiasMaximumCounts = 0.15f;
+constexpr float kControllerFeedforwardLeakPerSecond = 1.5f;
 // 第八轮真实 KMBOX 命令 P50/P95 为 3/4 counts；基础保持量低于维持速度
 // 本身时，比例项必须永久保留数像素误差才能补足差额。上限覆盖实测 P95，
 // 方向过零和静止确认仍负责释放历史保持量。
-constexpr float kControllerIntegralMaximumCounts = 4.0f;
+constexpr float kControllerFeedforwardMaximumCounts = 4.0f;
 constexpr float kControllerIntegralMinimumErrorPixels = 2.0f;
-// 输出延迟闭环中的基础点过零通常只持续 3~6 帧。显著反向误差至少保持
-// 30 ms 才作废旧前馈；物理方向门禁仍逐帧生效，因此确认窗不会继续推离目标。
-constexpr float kControllerIntegralReversalConfirmSeconds = 0.030f;
+constexpr std::size_t kControllerCommandHistoryCapacity = 64;
+constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
 // 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
@@ -245,10 +255,12 @@ struct Aim::Impl {
     float shaped_y = 0.0f;
     float residual_x = 0.0f;
     float residual_y = 0.0f;
-    float integral_x = 0.0f;
-    float integral_y = 0.0f;
-    float integral_reversal_seconds_x = 0.0f;
-    float integral_reversal_seconds_y = 0.0f;
+    float feedforward_x = 0.0f;
+    float feedforward_y = 0.0f;
+    std::array<IssuedCommand, kControllerCommandHistoryCapacity>
+        issued_commands{};
+    std::size_t issued_command_next = 0;
+    std::size_t issued_command_count = 0;
     float previous_command_x = 0.0f;
     float previous_command_y = 0.0f;
     int static_settle_frames = 0;
@@ -794,6 +806,50 @@ struct Aim::Impl {
         return current;
     }
 
+    void record_issued_command(const AimFrame& frame,
+                               float dx_counts,
+                               float dy_counts) noexcept {
+        // lock_active=false 时 Runtime 不会发送物理命令，历史必须记录零而
+        // 不是预计算结果，否则观察器会补偿一段从未发生的相机自运动。
+        IssuedCommand& entry = issued_commands[issued_command_next];
+        entry.captured_at = frame.captured_at;
+        entry.dx_counts = frame.lock_active ? dx_counts : 0.0f;
+        entry.dy_counts = frame.lock_active ? dy_counts : 0.0f;
+        issued_command_next =
+            (issued_command_next + 1U) % issued_commands.size();
+        issued_command_count = std::min(
+            issued_command_count + 1U, issued_commands.size());
+    }
+
+    std::pair<float, float> delayed_issued_command(
+            std::chrono::steady_clock::time_point captured_at) const
+            noexcept {
+        const float delay_seconds = config.enable_delay_compensation
+            ? config.control_delay_ms / 1000.0f : 0.0f;
+        const auto effective_at = captured_at -
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<float>(delay_seconds));
+        const IssuedCommand* best = nullptr;
+        for (std::size_t offset = 0; offset < issued_command_count; ++offset) {
+            const std::size_t index =
+                (issued_command_next + issued_commands.size() - 1U - offset) %
+                issued_commands.size();
+            const IssuedCommand& candidate = issued_commands[index];
+            if (candidate.captured_at <= effective_at) {
+                best = &candidate;
+                break;
+            }
+        }
+        if (!best) return {0.0f, 0.0f};
+        const float age_seconds = static_cast<float>(
+            std::chrono::duration<double>(effective_at - best->captured_at)
+                .count());
+        if (age_seconds > kControllerCommandHistoryMaximumAgeSeconds) {
+            return {0.0f, 0.0f};
+        }
+        return {best->dx_counts, best->dy_counts};
+    }
+
     void reset_controller() noexcept {
         controller_track_id = 0;
         filtered_x = 0.0f;
@@ -802,10 +858,11 @@ struct Aim::Impl {
         shaped_y = 0.0f;
         residual_x = 0.0f;
         residual_y = 0.0f;
-        integral_x = 0.0f;
-        integral_y = 0.0f;
-        integral_reversal_seconds_x = 0.0f;
-        integral_reversal_seconds_y = 0.0f;
+        feedforward_x = 0.0f;
+        feedforward_y = 0.0f;
+        issued_commands = {};
+        issued_command_next = 0;
+        issued_command_count = 0;
         previous_command_x = 0.0f;
         previous_command_y = 0.0f;
         static_settle_frames = 0;
@@ -985,15 +1042,14 @@ struct Aim::Impl {
                 : clamp_delta_seconds(std::chrono::duration<double>(
                       frame.captured_at - controller_captured_at).count());
             const float leak = std::exp(
-                -kControllerIntegralLeakPerSecond * controller_dt);
-            integral_x *= leak;
-            integral_y *= leak;
-            integral_reversal_seconds_x = 0.0f;
-            integral_reversal_seconds_y = 0.0f;
+                -kControllerFeedforwardLeakPerSecond * controller_dt);
+            feedforward_x *= leak;
+            feedforward_y *= leak;
             previous_command_x = 0.0f;
             previous_command_y = 0.0f;
             static_settle_frames = 0;
             controller_captured_at = frame.captured_at;
+            record_issued_command(frame, 0.0f, 0.0f);
             return false;
         }
         const float error_x =
@@ -1049,79 +1105,84 @@ struct Aim::Impl {
             static_settle_frames = 0;
         }
 
-        // 基础积分只消费框内基础点误差，prediction 和延迟投影均不会参与。
-        // 显著反向误差先经过时间确认：短暂过冲冻结已学习的恒速维持量，
-        // 持续反向才作废旧状态；真实反转的物理方向由后续门禁立即约束。
-        // 积分受独立 counts 上限约束。
-        const auto update_integral = [&](float error, float velocity,
-                                         float counts_per_pixel,
-                                         float& integral,
-                                         float& reversal_seconds) {
-            const float activation_error = std::max(
-                kControllerIntegralMinimumErrorPixels,
-                config.deadzone_pixels * 1.5f);
-            if (track.predicted) {
-                // 短时丢框只冻结并泄漏基础 tracking 的保持量；同一轨迹恢复
-                // 后继续使用，不能因 prediction/滑行进入退出重新建立速度。
-                integral *= std::exp(
-                    -kControllerIntegralLeakPerSecond * controller_dt);
-                reversal_seconds = 0.0f;
+        const auto [delayed_command_x, delayed_command_y] =
+            delayed_issued_command(frame.captured_at);
+        // track.v* 是目标相对屏幕的速度，包含历史鼠标命令造成的相机运动。
+        // 将预计当前生效的历史命令补回后，measurement 才是世界目标在本帧
+        // 需要的维持量。该观察器不依赖基础点过零或相对速度符号猜测反转。
+        const auto update_feedforward = [&](float base_error,
+                                            float relative_velocity,
+                                            float source_scale,
+                                            float counts_per_pixel,
+                                            float delayed_command,
+                                            float& feedforward) {
+            if (config.enable_prediction) {
+                // prediction 状态机和基础 tracking 共用相对速度时，提前量
+                // 会让自运动补偿失去可观测性；基础控制只保留比例与整形。
+                feedforward *= std::exp(
+                    -kControllerFeedforwardLeakPerSecond * controller_dt);
+            } else if (track.predicted) {
+                feedforward *= std::exp(
+                    -kControllerFeedforwardLeakPerSecond * controller_dt);
             } else if (track.state != TrackState::CONFIRMED) {
-                integral = 0.0f;
-                reversal_seconds = 0.0f;
-            } else if (std::fabs(error) > activation_error) {
-                const float proportional = error * counts_per_pixel;
-                if (integral * error < 0.0f) {
-                    reversal_seconds += controller_dt;
-                    const float configured_delay_seconds =
-                        config.enable_delay_compensation
-                        ? config.control_delay_ms / 1000.0f : 0.0f;
-                    const float confirmation_seconds =
-                        configured_delay_seconds > 0.0f
-                        ? std::max(
-                              kControllerIntegralReversalConfirmSeconds,
-                              configured_delay_seconds * 2.0f)
-                        : 0.0f;
-                    if (reversal_seconds >= confirmation_seconds) {
-                        integral = proportional *
-                            kControllerIntegralGainPerSecond * controller_dt;
-                        reversal_seconds = 0.0f;
-                    }
-                } else {
-                    reversal_seconds = 0.0f;
-                    integral += proportional *
-                        kControllerIntegralGainPerSecond * controller_dt;
-                }
-                integral = std::clamp(
-                    integral,
-                    -kControllerIntegralMaximumCounts,
-                    kControllerIntegralMaximumCounts);
+                feedforward = 0.0f;
             } else {
-                reversal_seconds = 0.0f;
-                // 恒速目标进入保持带后，已建立的积分就是该目标的前馈量，
-                // 必须保持而不能每帧泄漏；否则量化后的命令会逐渐归零，
-                // 再次落后后重建，形成“追上-停发-滞后”循环。静止目标
-                // 仍按泄漏清空，避免把历史移动速度带入静态归位。
-                if (std::fabs(velocity) <=
-                        kControllerMovingVelocityThresholdPixelsPerSecond &&
-                    static_settle_frames >=
-                        kControllerStaticSettleConfirmFrames) {
-                    integral *= std::exp(
-                        -kControllerIntegralLeakPerSecond * controller_dt);
+                const float measurement = delayed_command +
+                    relative_velocity * source_scale * controller_dt *
+                        counts_per_pixel *
+                        kControllerFeedforwardVelocityScale;
+                const float alpha = 1.0f - std::exp(
+                    -kControllerFeedforwardObserverGainPerSecond *
+                        controller_dt);
+                feedforward += (measurement - feedforward) * alpha;
+                // 只有相对速度已静止时，基础点反向才可视为真正归位。
+                // 动态过冲仍交给前馈观测器判断，避免把相机反馈误当成目标反转。
+                if (std::fabs(base_error) > hold_band &&
+                    base_error * feedforward < 0.0f &&
+                    std::fabs(measurement) < 0.80f) {
+                    feedforward = 0.0f;
                 }
+                // 基础点在保持带内且相对速度朝向准星时，观测主要由相机
+                // 执行旧命令造成。加速释放这部分残余，避免静止目标留下
+                // 亚整数前馈而出现视觉往返；目标继续离开准星时不触发。
+                if (std::fabs(base_error) <= hold_band &&
+                    base_error * relative_velocity < 0.0f) {
+                    feedforward *= std::exp(
+                        -20.0f * controller_dt);
+                }
+                feedforward = std::clamp(
+                    feedforward,
+                    -kControllerFeedforwardMaximumCounts,
+                    kControllerFeedforwardMaximumCounts);
             }
         };
-        // 积分只学习框内基础点的真实偏差。相机执行旧命令时，屏幕相对速度会
-        // 反向并使延迟投影点短暂越过准星；它是闭环反馈而不是目标减速，不能
-        // 据此卸载维持量。延迟投影和 prediction 只改变比例纠偏点。
-        update_integral(base_error_x, track.vx,
-                        config.counts_per_pixel_x, integral_x,
-                        integral_reversal_seconds_x);
-        update_integral(base_error_y, track.vy,
-                        config.counts_per_pixel_y, integral_y,
-                        integral_reversal_seconds_y);
-        float desired_x = proportional_x + integral_x;
-        float desired_y = proportional_y + integral_y;
+        update_feedforward(
+            base_error_x, track.vx, frame.source_pixels_per_roi_pixel_x,
+            config.counts_per_pixel_x, delayed_command_x, feedforward_x);
+        update_feedforward(
+            base_error_y, track.vy, frame.source_pixels_per_roi_pixel_y,
+            config.counts_per_pixel_y, delayed_command_y, feedforward_y);
+        float desired_x = proportional_x + feedforward_x;
+        float desired_y = proportional_y + feedforward_y;
+        // 移动目标在保持带内仍需承担量化后的平均维持量。仅在观察器已
+        // 学到前馈且基础误差与其同向时加入很小的偏置，静止目标和真实
+        // 反转不继承该偏置，避免重新引入周期性抖动。
+        if (std::fabs(feedforward_x) > 0.05f &&
+            base_error_x * feedforward_x > 0.0f &&
+            std::fabs(base_error_x) <= hold_band) {
+            desired_x += std::clamp(
+                base_error_x * config.counts_per_pixel_x * 0.25f,
+                -kControllerMovingHoldBiasMaximumCounts,
+                kControllerMovingHoldBiasMaximumCounts);
+        }
+        if (std::fabs(feedforward_y) > 0.05f &&
+            base_error_y * feedforward_y > 0.0f &&
+            std::fabs(base_error_y) <= hold_band) {
+            desired_y += std::clamp(
+                base_error_y * config.counts_per_pixel_y * 0.25f,
+                -kControllerMovingHoldBiasMaximumCounts,
+                kControllerMovingHoldBiasMaximumCounts);
+        }
         // 只允许一种跨最终点符号的保持命令：延迟投影点位于保持带内，且
         // 命令仍明确朝向尚未过零的基础点。无延迟控制、基础点真实过零或
         // 投影点离开保持带时均恢复逐轴比例方向，避免积分推动闭环远离目标。
@@ -1154,7 +1215,7 @@ struct Aim::Impl {
             tracking_error_y * track.vy > 0.0f &&
             std::fabs(track.vy) >
                 kControllerMovingVelocityThresholdPixelsPerSecond;
-        if (inside_deadzone && std::hypot(integral_x, integral_y) < 0.05f &&
+        if (inside_deadzone && std::hypot(feedforward_x, feedforward_y) < 0.05f &&
             std::hypot(shaped_x, shaped_y) <= 1.0f &&
             !moving_away_x && !moving_away_y) {
             filtered_x = 0.0f;
@@ -1166,6 +1227,7 @@ struct Aim::Impl {
             previous_command_x = 0.0f;
             previous_command_y = 0.0f;
             controller_captured_at = frame.captured_at;
+            record_issued_command(frame, 0.0f, 0.0f);
             return false;
         }
         if (!controller_initialized) {
@@ -1282,10 +1344,25 @@ struct Aim::Impl {
                 break;
             }
         }
+        // 浮点 desired 合法并不保证逐轴整数化后仍满足二维方向契约。
+        // 保持带外剔除每个背离最终点的轴分量，避免正交轴四舍五入后让合成
+        // 命令整体推离目标；被剔除轴的残余也必须作废，不能延后再次发出。
+        if (std::hypot(error_x, error_y) > hold_band) {
+            if (command.dx_counts * error_x <= 0.0f) {
+                command.dx_counts = 0;
+                quantized_x = 0.0f;
+            }
+            if (command.dy_counts * error_y <= 0.0f) {
+                command.dy_counts = 0;
+                quantized_y = 0.0f;
+            }
+        }
         residual_x = quantized_x - command.dx_counts;
         residual_y = quantized_y - command.dy_counts;
         previous_command_x = static_cast<float>(command.dx_counts);
         previous_command_y = static_cast<float>(command.dy_counts);
+        record_issued_command(
+            frame, previous_command_x, previous_command_y);
         return command.dx_counts != 0 || command.dy_counts != 0;
     }
 
