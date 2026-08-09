@@ -52,6 +52,10 @@ struct Track {
     bool aim_from_head = false;
     float prediction_dt = 1.0f / 240.0f;
     std::chrono::steady_clock::time_point state_at{};
+    float previous_center_residual_x = 0.0f;
+    float previous_center_residual_y = 0.0f;
+    int coherent_jitter_x_frames = 0;
+    int coherent_jitter_y_frames = 0;
 };
 
 struct IssuedCommand {
@@ -70,6 +74,14 @@ constexpr float kTrackVelocityBetaLow = 0.04f;
 // 仅低速校正其框内偏移。这样恒速平移仍使用原位置增益，不额外引入滞后。
 constexpr float kTrackAimShapeAlphaHigh = 0.12f;
 constexpr float kTrackAimShapeAlphaLow = 0.06f;
+// 人物姿态可能让检测框两条对边同向高频摆动，单靠“对边反向即形变”
+// 无法识别。小尺度中心残差逐帧反号时，短暂把控制锚点校正降为形变增益；
+// 真实持续平移保持同向，最多三帧后自动恢复，不引入固定低通滞后。
+constexpr float kTrackCoherentJitterMaximumTargetDiagonal = 0.04f;
+constexpr float kTrackCoherentJitterMinimumShapeChangeTargetDiagonal =
+    0.0005f;
+constexpr float kTrackCoherentJitterMinimumShapeChangePixels = 0.05f;
+constexpr int kTrackCoherentJitterHoldFrames = 3;
 constexpr float kTrackIncoherentVelocityBetaScale = 0.40f;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
@@ -562,14 +574,73 @@ struct Aim::Impl {
             const float x2_residual = observation.x2 - track.x2;
             const float y1_residual = observation.y1 - track.y1;
             const float y2_residual = observation.y2 - track.y2;
+            const bool x_edges_coherent =
+                x1_residual * x2_residual > 0.0f;
+            const bool y_edges_coherent =
+                y1_residual * y2_residual > 0.0f;
             stable_motion_residual_x = common_edge_motion(
                 x1_residual, x2_residual);
             stable_motion_residual_y = common_edge_motion(
                 y1_residual, y2_residual);
-            if (x1_residual * x2_residual <= 0.0f) {
+            const float target_diagonal = std::max(
+                1.0f, std::hypot(
+                    (track.x2 - track.x1 +
+                     observation.x2 - observation.x1) * 0.5f,
+                    (track.y2 - track.y1 +
+                     observation.y2 - observation.y1) * 0.5f));
+            const float coherent_jitter_maximum =
+                target_diagonal *
+                kTrackCoherentJitterMaximumTargetDiagonal;
+            const float shape_residual = std::max(
+                std::fabs(x2_residual - x1_residual),
+                std::fabs(y2_residual - y1_residual));
+            const bool shape_changed = shape_residual > std::max(
+                kTrackCoherentJitterMinimumShapeChangePixels,
+                target_diagonal *
+                    kTrackCoherentJitterMinimumShapeChangeTargetDiagonal);
+            const auto update_coherent_jitter = [=](
+                    float residual, bool edges_coherent,
+                    float& previous_residual,
+                    int& hold_frames) {
+                const bool reversed =
+                    shape_changed && edges_coherent &&
+                    residual * previous_residual < 0.0f &&
+                    std::fabs(residual) <= coherent_jitter_maximum &&
+                    std::fabs(previous_residual) <=
+                        coherent_jitter_maximum;
+                if (reversed) {
+                    hold_frames = kTrackCoherentJitterHoldFrames;
+                } else if (hold_frames > 0) {
+                    --hold_frames;
+                }
+                previous_residual = residual;
+            };
+            update_coherent_jitter(
+                center_motion_residual_x,
+                x_edges_coherent,
+                track.previous_center_residual_x,
+                track.coherent_jitter_x_frames);
+            update_coherent_jitter(
+                center_motion_residual_y,
+                y_edges_coherent,
+                track.previous_center_residual_y,
+                track.coherent_jitter_y_frames);
+            if (track.coherent_jitter_x_frames > 0) {
+                stable_motion_residual_x = 0.0f;
+                if (x_edges_coherent) {
+                    velocity_beta_x *= kTrackIncoherentVelocityBetaScale;
+                }
+            }
+            if (track.coherent_jitter_y_frames > 0) {
+                stable_motion_residual_y = 0.0f;
+                if (y_edges_coherent) {
+                    velocity_beta_y *= kTrackIncoherentVelocityBetaScale;
+                }
+            }
+            if (!x_edges_coherent) {
                 velocity_beta_x *= kTrackIncoherentVelocityBetaScale;
             }
-            if (y1_residual * y2_residual <= 0.0f) {
+            if (!y_edges_coherent) {
                 velocity_beta_y *= kTrackIncoherentVelocityBetaScale;
             }
         }
@@ -648,6 +719,10 @@ struct Aim::Impl {
             // 头框和身体框的尺度定义不同，切换时不把几何变化解释为速度。
             track.vx *= 0.5f;
             track.vy *= 0.5f;
+            track.previous_center_residual_x = 0.0f;
+            track.previous_center_residual_y = 0.0f;
+            track.coherent_jitter_x_frames = 0;
+            track.coherent_jitter_y_frames = 0;
         } else {
             // 控制锚点使用对边共同残差抑制瞬时形变；速度观察器仍以低
             // beta 消费中心残差。持续平移会跨帧累积，正负交替的步态
@@ -771,6 +846,12 @@ struct Aim::Impl {
         for (std::size_t index = 0; index < tracks.size(); ++index) {
             if (track_matched[index]) continue;
             Track& track = tracks[index];
+            // 没有相邻观测时不能跨缺帧沿用“逐帧反号”证据；重新匹配后
+            // 必须从新的连续序列建立姿态形变判断。
+            track.previous_center_residual_x = 0.0f;
+            track.previous_center_residual_y = 0.0f;
+            track.coherent_jitter_x_frames = 0;
+            track.coherent_jitter_y_frames = 0;
             ++track.lost_frames;
             if (track.state == TrackState::CONFIRMED ||
                 track.state == TrackState::LOST) {

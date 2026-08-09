@@ -364,6 +364,133 @@ void test_body_box_shape_jitter_preserves_real_translation() {
                std::to_string(mean_velocity_error));
 }
 
+void test_coherent_box_center_jitter_does_not_move_base_anchor() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::vector<float> settled_base_x;
+    int base_outside_frames = 0;
+
+    for (int index = 0; index < 600; ++index) {
+        // 人物真实控制锚点固定在 160；模型姿态却让左右边缘同向摆动。
+        // 这种整框中心高频漂移会绕过“对边反向即形变”的旧判断，正是实机
+        // Run 中基础点与框中心逐帧位移相关约 0.99 的未覆盖反例。
+        const float phase = (index % 2) == 0 ? -1.0f : 1.0f;
+        const float pose_jitter = phase * 1.50f;
+        const float width = 42.0f + phase * 0.50f;
+        const float height = 90.0f + phase * 0.60f;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(index * 4167));
+        frame.detections = {
+            body_box(160.0f + pose_jitter, 175.0f, width, height)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "整框中心形变回归必须持续保留确认目标");
+        if (!result.has_target) continue;
+        if (result.target.base_aim_x < result.target.x1 ||
+            result.target.base_aim_x > result.target.x2 ||
+            result.target.base_aim_y < result.target.y1 ||
+            result.target.base_aim_y > result.target.y2) {
+            ++base_outside_frames;
+        }
+        if (index >= 100) {
+            settled_base_x.push_back(result.target.base_aim_x);
+        }
+    }
+
+    std::vector<float> position_errors;
+    std::vector<float> second_differences;
+    for (std::size_t index = 0; index < settled_base_x.size(); ++index) {
+        position_errors.push_back(std::fabs(settled_base_x[index] - 160.0f));
+        if (index >= 2) {
+            second_differences.push_back(std::fabs(
+                settled_base_x[index] - 2.0f * settled_base_x[index - 1] +
+                settled_base_x[index - 2]));
+        }
+    }
+    std::sort(position_errors.begin(), position_errors.end());
+    std::sort(second_differences.begin(), second_differences.end());
+    const auto percentile = [](const std::vector<float>& values,
+                               float fraction) {
+        if (values.empty()) return 0.0f;
+        const std::size_t index = std::min(
+            values.size() - 1,
+            static_cast<std::size_t>(values.size() * fraction));
+        return values[index];
+    };
+    const float error_p95 = percentile(position_errors, 0.95f);
+    const float second_p95 = percentile(second_differences, 0.95f);
+    expect(error_p95 <= 0.50f && second_p95 <= 0.75f,
+           "姿态导致整框同向漂移时基础锚点必须保持稳定，位置/二阶 P95=" +
+               std::to_string(error_p95) + "/" +
+               std::to_string(second_p95));
+    expect(base_outside_frames == 0,
+           "抑制整框中心形变后基础点仍必须逐帧位于身体框内");
+}
+
+void test_coherent_box_center_jitter_preserves_real_translation() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.acquisition_range_percent = 150.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::vector<float> settled_base_x;
+    float position_error_sum = 0.0f;
+    float velocity_error_sum = 0.0f;
+    int settled_frames = 0;
+
+    for (int index = 0; index < 240; ++index) {
+        const float phase = (index % 2) == 0 ? -1.0f : 1.0f;
+        const float true_aim_x = 100.0f + index * 0.40f;
+        const float pose_jitter = phase * 1.50f;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(index * 4167));
+        frame.detections = {body_box(
+            true_aim_x + pose_jitter, 175.0f,
+            42.0f + phase * 0.50f,
+            90.0f + phase * 0.60f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "移动整框中心形变回归必须持续保留确认目标");
+        if (index < 60 || !result.has_target) continue;
+        settled_base_x.push_back(result.target.base_aim_x);
+        position_error_sum += std::fabs(
+            result.target.base_aim_x - true_aim_x);
+        velocity_error_sum += std::fabs(
+            result.target.velocity_x - 96.0f);
+        ++settled_frames;
+    }
+
+    std::vector<float> second_differences;
+    for (std::size_t index = 2; index < settled_base_x.size(); ++index) {
+        second_differences.push_back(std::fabs(
+            settled_base_x[index] - 2.0f * settled_base_x[index - 1] +
+            settled_base_x[index - 2]));
+    }
+    std::sort(second_differences.begin(), second_differences.end());
+    const std::size_t p95_index = std::min(
+        second_differences.size() - 1,
+        static_cast<std::size_t>(second_differences.size() * 0.95f));
+    const float mean_position_error = position_error_sum /
+        static_cast<float>(settled_frames);
+    const float mean_velocity_error = velocity_error_sum /
+        static_cast<float>(settled_frames);
+    const float second_p95 = second_differences[p95_index];
+    expect(mean_position_error <= 0.75f &&
+               mean_velocity_error <= 20.0f && second_p95 <= 0.75f,
+           "抑制同向框形变时必须保留真实匀速平移，位置/速度均值误差和二阶 P95=" +
+               std::to_string(mean_position_error) + "/" +
+               std::to_string(mean_velocity_error) + "/" +
+               std::to_string(second_p95));
+}
+
 void test_body_aim_range_is_static_safe_and_motion_bounded() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -2588,6 +2715,8 @@ int main() {
     test_head_body_normalized_aim_stays_stable();
     test_body_box_shape_jitter_does_not_move_stable_aim_point();
     test_body_box_shape_jitter_preserves_real_translation();
+    test_coherent_box_center_jitter_does_not_move_base_anchor();
+    test_coherent_box_center_jitter_preserves_real_translation();
     test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
     test_loss_prediction_does_not_compound_time();
