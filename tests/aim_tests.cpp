@@ -491,6 +491,65 @@ void test_coherent_box_center_jitter_preserves_real_translation() {
                std::to_string(second_p95));
 }
 
+void test_multiframe_pose_deformation_does_not_move_base_anchor() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::vector<float> settled_base_x;
+
+    for (int index = 0; index < 720; ++index) {
+        // 实机相邻残差并非每帧正负交替：人物一个步态内会连续 3～10 帧
+        // 向同一方向形变，随后才回摆。使用 20 帧三角波复现这种慢整框
+        // 漂移；真实控制锚点保持在 160，宽高变化提供明确的姿态证据。
+        const int phase_index = index % 20;
+        const float phase = phase_index <= 10
+            ? -1.0f + static_cast<float>(phase_index) * 0.20f
+            : 1.0f - static_cast<float>(phase_index - 10) * 0.20f;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(index * 4167));
+        frame.detections = {body_box(
+            160.0f + phase * 1.50f, 175.0f,
+            42.0f + phase * 0.50f,
+            90.0f + phase * 0.60f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "多帧姿态形变回归必须持续保留确认目标");
+        if (index >= 120 && result.has_target) {
+            settled_base_x.push_back(result.target.base_aim_x);
+        }
+    }
+
+    std::vector<float> position_errors;
+    std::vector<float> second_differences;
+    for (std::size_t index = 0; index < settled_base_x.size(); ++index) {
+        position_errors.push_back(std::fabs(settled_base_x[index] - 160.0f));
+        if (index >= 2) {
+            second_differences.push_back(std::fabs(
+                settled_base_x[index] - 2.0f * settled_base_x[index - 1] +
+                settled_base_x[index - 2]));
+        }
+    }
+    std::sort(position_errors.begin(), position_errors.end());
+    std::sort(second_differences.begin(), second_differences.end());
+    const auto percentile = [](const std::vector<float>& values,
+                               float fraction) {
+        if (values.empty()) return 0.0f;
+        return values[std::min(
+            values.size() - 1,
+            static_cast<std::size_t>(values.size() * fraction))];
+    };
+    const float error_p95 = percentile(position_errors, 0.95f);
+    const float second_p95 = percentile(second_differences, 0.95f);
+    expect(error_p95 <= 0.75f && second_p95 <= 0.35f,
+           "连续多帧同向的姿态形变不得推动基础锚点，位置/二阶 P95=" +
+               std::to_string(error_p95) + "/" +
+               std::to_string(second_p95));
+}
+
 void test_body_aim_range_is_static_safe_and_motion_bounded() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -2717,6 +2776,7 @@ int main() {
     test_body_box_shape_jitter_preserves_real_translation();
     test_coherent_box_center_jitter_does_not_move_base_anchor();
     test_coherent_box_center_jitter_preserves_real_translation();
+    test_multiframe_pose_deformation_does_not_move_base_anchor();
     test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
     test_loss_prediction_does_not_compound_time();
