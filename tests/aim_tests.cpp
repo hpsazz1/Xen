@@ -1219,7 +1219,7 @@ void test_prediction_uses_world_motion_when_delay_vector_points_backward() {
                maximum_lead_distance >= 0.25f &&
                maximum_lead_distance <=
                    std::hypot(40.0f, 80.0f) *
-                       config.max_delay_compensation_percent / 100.0f * 1.50f +
+                       config.max_prediction_lead_percent / 100.0f +
                        0.01f,
            "MoveLeft 全程的 prediction 必须只向左，且反向延迟抵消量与额外前探都受几何上限约束，活动=" +
                std::to_string(lead_active_frames) + "，错向=" +
@@ -1318,13 +1318,13 @@ void test_prediction_motion_axis_requires_confirmed_stop() {
     float motion = 1.0f;
     int low_frames = 0;
 
-    // 同向前馈从 1.0 降到 0.6 是速度变化，不是停止。生产旧逻辑会以
-    // 120/s 直接朝零释放到约 0.135 count，从而当帧关闭 prediction。
+    // 同向前馈从 1.0 降到 0.6 是速度变化，不是停止。它既不能朝零释放，
+    // 也不能用停止增益逐帧复制新值，否则模型框动画会直接变成提前点晃动。
     aim::detail::update_prediction_motion_axis(
         0.60f, 0.60f, kDeltaSeconds, kMinimumCounts, kConfirmFrames,
-        kBuildGain, kReleaseGain, false, motion, low_frames);
-    expect(motion > 0.50f && motion < 0.70f && low_frames == 0,
-           "同向世界运动幅值下降必须快速跟随非零新值，不能误释放到零，实际=" +
+        kBuildGain, kReleaseGain, motion, low_frames);
+    expect(motion > 0.95f && motion < 1.0f && low_frames == 0,
+           "同向世界运动幅值下降必须按持续运动增益平滑，不能复制框动画，实际=" +
                std::to_string(motion));
 
     motion = 1.0f;
@@ -1332,7 +1332,7 @@ void test_prediction_motion_axis_requires_confirmed_stop() {
     for (int index = 0; index < kConfirmFrames - 1; ++index) {
         aim::detail::update_prediction_motion_axis(
             0.0f, 0.0f, kDeltaSeconds, kMinimumCounts, kConfirmFrames,
-            kBuildGain, kReleaseGain, false, motion, low_frames);
+            kBuildGain, kReleaseGain, motion, low_frames);
     }
     expect(motion > kMinimumCounts && low_frames == kConfirmFrames - 1,
            "少于五帧的低测量只能慢速保持 prediction，实际=" +
@@ -1340,11 +1340,247 @@ void test_prediction_motion_axis_requires_confirmed_stop() {
                std::to_string(low_frames));
     aim::detail::update_prediction_motion_axis(
         0.0f, 0.0f, kDeltaSeconds, kMinimumCounts, kConfirmFrames,
-        kBuildGain, kReleaseGain, false, motion, low_frames);
+        kBuildGain, kReleaseGain, motion, low_frames);
     expect(motion < kMinimumCounts && low_frames == kConfirmFrames,
            "连续五帧低测量后必须快速释放 prediction，实际=" +
                std::to_string(motion) + "，计数=" +
                std::to_string(low_frames));
+}
+
+void test_prediction_closed_loop_keeps_visible_left_lead_without_pullback() {
+    constexpr float kFrameSeconds = 1.0f / 240.0f;
+    constexpr int kActuationDelayFrames = 4;
+    constexpr int kMovingFrames = 1100;
+    constexpr int kFrameCount = 1260;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> delayed_commands{};
+    float world_target_x = -12.0f;
+    float camera_x = 0.0f;
+    bool previous_lead_active = false;
+    float previous_forecast_x = 0.0f;
+    bool previous_forecast_valid = false;
+    int moving_lead_frames = 0;
+    int moving_lead_edges = 0;
+    int pullback_command_frames = 0;
+    int moving_direction_switches = 0;
+    int previous_nonzero_command_sign = 0;
+    int stop_tail_command_frames = 0;
+    int stop_tail_lead_frames = 0;
+    std::vector<float> moving_base_offsets;
+    std::vector<float> moving_forecast_distances;
+    std::vector<float> moving_forecast_steps;
+
+    for (int index = 0; index < kFrameCount; ++index) {
+        const int delay_slot = index % kActuationDelayFrames;
+        camera_x += delayed_commands[delay_slot] /
+            config.counts_per_pixel_x * 0.18f;
+        delayed_commands[delay_slot] = 0;
+        if (index < kMovingFrames) {
+            world_target_x -= 0.65f;
+        }
+
+        // 高频中心与宽度扰动近似人物步态和模型框动画；真实平移仍只由
+        // world_target_x 表达。prediction 必须平滑世界运动，不能把框动画
+        // 变成逐帧提前量跳动。
+        const float animation_scale = index < kMovingFrames ? 1.0f : 0.0f;
+        const float animation_x = animation_scale * 0.35f *
+            std::sin(index * 0.73f);
+        const float animation_width = 40.0f +
+            animation_scale * 3.0f * std::sin(index * 0.51f);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body_box(
+            160.0f + world_target_x - camera_x + animation_x,
+            160.0f, animation_width, 80.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "prediction 闭环提前回归必须逐帧保留合法目标");
+        if (!result.has_target) continue;
+
+        const int command_x = result.has_command
+            ? result.command.dx_counts : 0;
+        if (result.has_command) {
+            delayed_commands[delay_slot] = command_x;
+        }
+        if (index >= 500 && index < kMovingFrames) {
+            if (result.target.lead_active != previous_lead_active) {
+                ++moving_lead_edges;
+            }
+            if (result.target.lead_active) {
+                ++moving_lead_frames;
+                const float forecast_x = result.target.aim_x -
+                    result.target.base_aim_x;
+                moving_base_offsets.push_back(
+                    result.target.base_aim_x - frame.control_center_x);
+                moving_forecast_distances.push_back(-forecast_x);
+                if (previous_forecast_valid) {
+                    moving_forecast_steps.push_back(
+                        std::fabs(forecast_x - previous_forecast_x));
+                }
+                previous_forecast_x = forecast_x;
+                previous_forecast_valid = true;
+            } else {
+                previous_forecast_valid = false;
+            }
+            if (command_x > 0) {
+                ++pullback_command_frames;
+            }
+            const int command_sign = command_x < 0 ? -1 :
+                command_x > 0 ? 1 : 0;
+            if (command_sign != 0) {
+                if (previous_nonzero_command_sign != 0 &&
+                    command_sign != previous_nonzero_command_sign) {
+                    ++moving_direction_switches;
+                }
+                previous_nonzero_command_sign = command_sign;
+            }
+        }
+        if (index >= kFrameCount - 40) {
+            if (command_x != 0) ++stop_tail_command_frames;
+            if (std::fabs(result.target.lead_x) > 0.25f) {
+                ++stop_tail_lead_frames;
+            }
+        }
+        previous_lead_active = result.target.lead_active;
+    }
+
+    std::sort(moving_base_offsets.begin(), moving_base_offsets.end());
+    std::sort(
+        moving_forecast_distances.begin(), moving_forecast_distances.end());
+    std::sort(moving_forecast_steps.begin(), moving_forecast_steps.end());
+    const auto percentile = [](const std::vector<float>& values,
+                               float fraction) {
+        if (values.empty()) return 0.0f;
+        const std::size_t index = std::min(
+            values.size() - 1,
+            static_cast<std::size_t>(values.size() * fraction));
+        return values[index];
+    };
+    const float base_offset_p50 = percentile(moving_base_offsets, 0.50f);
+    const float forecast_p50 =
+        percentile(moving_forecast_distances, 0.50f);
+    const float forecast_step_p95 =
+        percentile(moving_forecast_steps, 0.95f);
+
+    expect(moving_lead_frames >= 570 && moving_lead_edges <= 2,
+           "持续 MoveLeft 中 prediction 不得在追上后释放并重新进入，活动帧=" +
+               std::to_string(moving_lead_frames) + "，边沿=" +
+               std::to_string(moving_lead_edges));
+    expect(pullback_command_frames == 0 && moving_direction_switches == 0,
+           "持续 MoveLeft 中不得退回基础点并产生向右拉回，拉回帧=" +
+               std::to_string(pullback_command_frames) + "，换向=" +
+               std::to_string(moving_direction_switches));
+    expect(base_offset_p50 >= 0.75f && forecast_p50 >= 4.0f,
+           "预测最终点必须覆盖控制稳态误差，使准星实际位于 MoveLeft 基础点前方，基础点相对准星 P50=" +
+               std::to_string(base_offset_p50) + "，最终点前探 P50=" +
+               std::to_string(forecast_p50));
+    expect(forecast_step_p95 <= 0.75f,
+           "人物框动画下 prediction 前探不得逐帧晃动，前探阶跃 P95=" +
+               std::to_string(forecast_step_p95));
+    expect(stop_tail_command_frames == 0 && stop_tail_lead_frames == 0,
+           "人物真实停止后水平 prediction 和命令必须在尾部持续归零，命令帧=" +
+               std::to_string(stop_tail_command_frames) + "，预测帧=" +
+               std::to_string(stop_tail_lead_frames));
+}
+
+void test_prediction_pullback_hold_releases_after_real_reversal() {
+    constexpr int kActuationDelayFrames = 4;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> delayed_commands{};
+    float world_target_x = 12.0f;
+    float camera_x = 0.0f;
+    int stop_pullback_commands = 0;
+    int first_real_reverse_command = -1;
+    int reverse_lead_frames = 0;
+
+    for (int index = 0; index < 900; ++index) {
+        const int delay_slot = index % kActuationDelayFrames;
+        camera_x += delayed_commands[delay_slot] /
+            config.counts_per_pixel_x * 0.18f;
+        delayed_commands[delay_slot] = 0;
+        if (index < 500) {
+            world_target_x += 0.65f;
+        } else if (index >= 580) {
+            world_target_x -= 0.65f;
+        }
+
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {
+            body(160.0f + world_target_x - camera_x, 160.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "prediction 真实反向回归必须逐帧保留合法目标");
+        if (!result.has_target) continue;
+
+        const int command_x = result.has_command
+            ? result.command.dx_counts : 0;
+        if (result.has_command) {
+            delayed_commands[delay_slot] = command_x;
+        }
+        if (index >= 520 && index < 580 && command_x < 0) {
+            ++stop_pullback_commands;
+        }
+        if (index >= 580 && command_x < 0 &&
+            first_real_reverse_command < 0) {
+            first_real_reverse_command = index;
+        }
+        if (index >= 650 && result.target.lead_active &&
+            result.target.lead_x < -0.25f) {
+            ++reverse_lead_frames;
+        }
+    }
+
+    expect(stop_pullback_commands == 0,
+           "目标只停止时不得把已形成的右向提前反拉，反向命令帧=" +
+               std::to_string(stop_pullback_commands));
+    expect(first_real_reverse_command >= 580 &&
+               first_real_reverse_command <= 720,
+           "目标真实反向并越过接管距离后必须解除逐轴停发保持，首次反向命令帧=" +
+               std::to_string(first_real_reverse_command));
+    expect(reverse_lead_frames >= 80,
+           "真实反向稳定后 prediction 必须按新世界方向重新建立，反向提前帧=" +
+               std::to_string(reverse_lead_frames));
 }
 
 void test_base_crossing_releases_integral_smoothly() {
@@ -1989,6 +2225,7 @@ void test_prediction_adds_continuous_delay_derived_lead() {
         int late_stationary_command_frames = 0;
         float maximum_stationary_lead = 0.0f;
         float maximum_stationary_error = 0.0f;
+        float maximum_stationary_hold_error = 0.0f;
         int stationary_direction_reversals = 0;
         int direct_command_reversals = 0;
         int zero_mediated_command_reversals = 0;
@@ -2029,6 +2266,9 @@ void test_prediction_adds_continuous_delay_derived_lead() {
         int previous_horizontal_command = 0;
         bool have_previous_command = false;
         Metrics metrics;
+        metrics.maximum_stationary_hold_error =
+            std::hypot(40.0f, 80.0f) *
+            config.max_delay_compensation_percent / 100.0f;
         const auto base = std::chrono::steady_clock::now() +
             std::chrono::seconds(1);
 
@@ -2178,9 +2418,10 @@ void test_prediction_adds_continuous_delay_derived_lead() {
                "，首个经零反转=" + prediction.command_reversal_trace);
     expect(prediction.maximum_stationary_lead <= 0.50f &&
                prediction.late_stationary_command_frames == 0 &&
-               prediction.maximum_stationary_error <= 4.0f &&
+               prediction.maximum_stationary_error <=
+                   prediction.maximum_stationary_hold_error &&
                prediction.stationary_direction_reversals <= 2,
-           "延迟 prediction 在目标停止后必须收敛提前量且不得形成微抖，预测帧=" +
+           "延迟 prediction 在目标停止后必须撤销水平提前并停发，禁止为归位反拉；残余位置只允许保留在有界提前区，预测帧=" +
                std::to_string(prediction.late_stationary_lead_frames) +
                "，最大提前量=" +
                std::to_string(prediction.maximum_stationary_lead) +
@@ -2188,6 +2429,8 @@ void test_prediction_adds_continuous_delay_derived_lead() {
                std::to_string(prediction.late_stationary_command_frames) +
                "，最大误差=" +
                std::to_string(prediction.maximum_stationary_error) +
+               "，保持上限=" +
+               std::to_string(prediction.maximum_stationary_hold_error) +
                "，方向反转=" +
                std::to_string(prediction.stationary_direction_reversals) +
                "；tracking 最大误差=" +
@@ -2231,6 +2474,8 @@ int main() {
     test_prediction_uses_world_motion_when_delay_vector_points_backward();
     test_prediction_survives_short_world_motion_measurement_dips();
     test_prediction_motion_axis_requires_confirmed_stop();
+    test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
+    test_prediction_pullback_hold_releases_after_real_reversal();
     test_base_crossing_releases_integral_smoothly();
     test_two_axis_command_reversal_passes_through_zero();
     test_integral_releases_on_reversal_and_static_settle();
