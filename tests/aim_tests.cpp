@@ -1463,8 +1463,16 @@ void test_prediction_survives_short_world_motion_measurement_dips() {
                 static_cast<long long>(index * kFrameSeconds * 1000000.0f)));
         frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
         frame.lock_active = true;
+        const int pose_phase = index % 40;
+        const float pose_progress = pose_phase <= 20
+            ? static_cast<float>(pose_phase) / 20.0f
+            : static_cast<float>(40 - pose_phase) / 20.0f;
+        const float pose_x = -1.5f + 3.0f * pose_progress;
+        const float pose_width = 40.0f - 2.0f + 4.0f * pose_progress;
         frame.detections = {
-            body(160.0f + world_target_x - camera_x, 160.0f)};
+            body_box(
+                160.0f + world_target_x - camera_x + pose_x,
+                160.0f, pose_width, 80.0f)};
         const AimResult result = aim.process(frame);
         expect(result.status == AimStatus::SUCCESS && result.has_target,
                "短时世界运动低谷回归必须每帧保留合法目标");

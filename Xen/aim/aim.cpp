@@ -1379,20 +1379,58 @@ struct Aim::Impl {
                 lead_direction_x * world_velocity_x +
                     lead_direction_y * world_velocity_y <= 0.0f;
             if (opposite_world_direction) {
-                // 全局世界方向可能因垂直姿态先反号；水平和垂直分别保存旧
-                // 方向，只允许各自越过接管距离后解除对应轴的停发保护。
+                const bool reverse_takeover_x =
+                    std::fabs(lead_direction_x) > 0.001f &&
+                    lead_direction_x * world_velocity_x < 0.0f &&
+                    lead_direction_x * track.vx < 0.0f &&
+                    -(base_x - frame.control_center_x) * lead_direction_x >=
+                        reverse_takeover_distance;
+                const bool reverse_takeover_y =
+                    std::fabs(lead_direction_y) > 0.001f &&
+                    lead_direction_y * world_velocity_y < 0.0f &&
+                    lead_direction_y * track.vy < 0.0f &&
+                    -(base_y - frame.control_center_y) * lead_direction_y >=
+                        reverse_takeover_distance;
+                // 闭环相机反馈会让世界速度观察器短时反号。基础点尚未沿
+                // 旧方向反侧越过接管距离时，这不是人物真实反向：保留上个
+                // 有界预测偏移，并由反拉门禁停发相反命令。否则每次伪反向
+                // 都会把偏移瞬时清零，形成约二十至三十帧的周期性抖动。
+                if (!reverse_takeover_x && !reverse_takeover_y) {
+                    if (std::fabs(lead_direction_x) > 0.001f) {
+                        prediction_pullback_hold_x = true;
+                        prediction_pullback_direction_x =
+                            std::copysign(1.0f, lead_direction_x);
+                    }
+                    if (std::fabs(lead_direction_y) > 0.001f) {
+                        prediction_pullback_hold_y = true;
+                        prediction_pullback_direction_y =
+                            std::copysign(1.0f, lead_direction_y);
+                    }
+                    float held_lead_x =
+                        prediction_offset_x - projection.delay_x;
+                    float held_lead_y =
+                        prediction_offset_y - projection.delay_y;
+                    clamp_vector(
+                        held_lead_x, held_lead_y,
+                        box_diagonal *
+                            config.max_prediction_lead_percent / 100.0f);
+                    prediction_offset_x = projection.delay_x + held_lead_x;
+                    prediction_offset_y = projection.delay_y + held_lead_y;
+                    projection.final_x = base_x + prediction_offset_x;
+                    projection.final_y = base_y + prediction_offset_y;
+                    projection.active = true;
+                    return projection;
+                }
+                // 确认某一轴真实接管后，其他轴仍保留旧方向的反拉保护，
+                // 下一帧再由新世界方向建立新的预测偏移。
                 if (std::fabs(lead_direction_x) > 0.001f &&
-                    !(lead_direction_x * world_velocity_x < 0.0f &&
-                      -(base_x - frame.control_center_x) * lead_direction_x >=
-                          reverse_takeover_distance)) {
+                    !reverse_takeover_x) {
                     prediction_pullback_hold_x = true;
                     prediction_pullback_direction_x =
                         std::copysign(1.0f, lead_direction_x);
                 }
                 if (std::fabs(lead_direction_y) > 0.001f &&
-                    !(lead_direction_y * world_velocity_y < 0.0f &&
-                      -(base_y - frame.control_center_y) * lead_direction_y >=
-                          reverse_takeover_distance)) {
+                    !reverse_takeover_y) {
                     prediction_pullback_hold_y = true;
                     prediction_pullback_direction_y =
                         std::copysign(1.0f, lead_direction_y);
