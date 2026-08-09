@@ -270,6 +270,54 @@ void test_head_body_normalized_aim_stays_stable() {
            "头框连续缺失时必须保留身体框归一化瞄点，不能上下切回身体默认点");
 }
 
+void test_body_box_shape_jitter_does_not_move_stable_aim_point() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float maximum_settled_error = 0.0f;
+    float settled_error_sum = 0.0f;
+    int settled_frames = 0;
+
+    for (int index = 0; index < 120; ++index) {
+        const float phase = (index % 2) == 0 ? -1.0f : 1.0f;
+        const float width = phase < 0.0f ? 34.0f : 46.0f;
+        const float height = phase < 0.0f ? 84.0f : 100.0f;
+        // 人物真实控制锚点固定在 (160,160)，检测框因步态在宽高、中心和
+        // 上下边缘间交替；原始框内比例点会随模型外形抖动 ±2 px。
+        const float observed_aim_x = 160.0f + phase * 2.0f;
+        const float observed_aim_y = 160.0f + phase * 2.0f;
+        const float center_y = observed_aim_y +
+            height * (0.5f - config.body_aim_height_ratio);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::milliseconds(index * 5));
+        frame.detections = {
+            body_box(observed_aim_x, center_y, width, height)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "身体框形变回归必须持续保留确认目标");
+        if (index >= 20 && result.has_target) {
+            const float error = std::hypot(
+                result.target.base_aim_x - 160.0f,
+                result.target.base_aim_y - 160.0f);
+            maximum_settled_error = std::max(maximum_settled_error, error);
+            settled_error_sum += error;
+            ++settled_frames;
+        }
+    }
+
+    const float mean_settled_error = settled_error_sum /
+        static_cast<float>(settled_frames);
+    expect(maximum_settled_error <= 0.80f &&
+               mean_settled_error <= 0.60f,
+           "人物外形导致检测框交替缩放时，稳定基础点不得跟随框形变抖动，均值=" +
+               std::to_string(mean_settled_error) + "，最大=" +
+               std::to_string(maximum_settled_error));
+}
+
 void test_body_aim_range_is_static_safe_and_motion_bounded() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -1576,6 +1624,7 @@ int main() {
     test_source_pixel_scale_controls_mouse_counts();
     test_global_head_body_assignment();
     test_head_body_normalized_aim_stays_stable();
+    test_body_box_shape_jitter_does_not_move_stable_aim_point();
     test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
     test_loss_prediction_does_not_compound_time();

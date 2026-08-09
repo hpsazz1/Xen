@@ -65,6 +65,10 @@ constexpr float kTrackPositionAlphaHigh = 0.72f;
 constexpr float kTrackPositionAlphaLow = 0.45f;
 constexpr float kTrackVelocityBetaHigh = 0.10f;
 constexpr float kTrackVelocityBetaLow = 0.04f;
+// 控制点只立即跟随框两条对边的共同位移；边缘分歧代表宽高/姿态形变，
+// 仅低速校正其框内偏移。这样恒速平移仍使用原位置增益，不额外引入滞后。
+constexpr float kTrackAimShapeAlphaHigh = 0.12f;
+constexpr float kTrackAimShapeAlphaLow = 0.06f;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
@@ -139,6 +143,16 @@ void clamp_vector(float& x, float& y, float maximum) noexcept {
     const float scale = maximum / magnitude;
     x *= scale;
     y *= scale;
+}
+
+float common_edge_motion(float first_residual,
+                         float second_residual) noexcept {
+    // 两条对边同向移动的重叠部分才能确定为人物平移；相反方向或仅单边
+    // 变化属于框尺度/轮廓形变，不能立即写入控制点和轨迹速度。
+    if (first_residual * second_residual <= 0.0f) return 0.0f;
+    return std::copysign(
+        std::min(std::abs(first_residual), std::abs(second_residual)),
+        first_residual);
 }
 
 float normalized_position(float value, float minimum,
@@ -478,6 +492,15 @@ struct Aim::Impl {
         float motion_residual_x = observation_center_x - track_center_x;
         float motion_residual_y = observation_center_y - track_center_y;
 
+        if (!box_semantics_changed) {
+            motion_residual_x = common_edge_motion(
+                observation.x1 - track.x1,
+                observation.x2 - track.x2);
+            motion_residual_y = common_edge_motion(
+                observation.y1 - track.y1,
+                observation.y2 - track.y2);
+        }
+
         // 身体框短时消失、只剩头框时保留既有身体尺度，只用头部观测平移状态。
         // 否则下一帧身体框恢复会制造一次无意义的尺度突变并破坏多目标关联。
         if (observation.head_only && !track.head_only) {
@@ -526,11 +549,27 @@ struct Aim::Impl {
                 (observed_ratio_y - track.aim_ratio_y) * ratio_alpha;
             track.aim_from_head = true;
         }
-        const auto [aim_x, aim_y] = point_from_ratio(
+        const auto [observed_aim_x, observed_aim_y] = point_from_ratio(
             track.x1, track.y1, track.x2, track.y2,
             track.aim_ratio_x, track.aim_ratio_y);
-        track.aim_x = aim_x;
-        track.aim_y = aim_y;
+        if (box_semantics_changed) {
+            // 头框和身体框的坐标语义不同，切换时直接采用已归一化的新点，
+            // 避免把合法尺度切换长期滞留在旧框内。
+            track.aim_x = observed_aim_x;
+            track.aim_y = observed_aim_y;
+        } else {
+            // predict_tracks() 已按速度完成本帧推进。共同边缘位移使用与
+            // 关联框相同的增益立即校正；剩余差值只可能来自框内形变或
+            // 缓慢尺度变化，因此使用独立低增益，不拖慢真实平移响应。
+            track.aim_x += motion_residual_x * alpha;
+            track.aim_y += motion_residual_y * alpha;
+            const float shape_alpha = high
+                ? kTrackAimShapeAlphaHigh : kTrackAimShapeAlphaLow;
+            track.aim_x += (observed_aim_x - track.aim_x) * shape_alpha;
+            track.aim_y += (observed_aim_y - track.aim_y) * shape_alpha;
+        }
+        track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
+        track.aim_y = std::clamp(track.aim_y, track.y1, track.y2);
 
         if (box_semantics_changed) {
             // 头框和身体框的尺度定义不同，切换时不把几何变化解释为速度。
