@@ -1,6 +1,7 @@
 #include "aim/aim.h"
 
 #include "aim/aim_config_internal.h"
+#include "aim/aim_prediction_internal.h"
 
 #include "log/log.h"
 
@@ -298,6 +299,8 @@ struct Aim::Impl {
     float world_motion_measurement_y = 0.0f;
     float prediction_world_motion_x = 0.0f;
     float prediction_world_motion_y = 0.0f;
+    int prediction_low_motion_x_frames = 0;
+    int prediction_low_motion_y_frames = 0;
     std::array<IssuedCommand, kControllerCommandHistoryCapacity>
         issued_commands{};
     std::size_t issued_command_next = 0;
@@ -969,43 +972,31 @@ struct Aim::Impl {
         if (!frame.lock_active || controller_track_id != track.id) {
             prediction_world_motion_x = 0.0f;
             prediction_world_motion_y = 0.0f;
+            prediction_low_motion_x_frames = 0;
+            prediction_low_motion_y_frames = 0;
             return {0.0f, 0.0f};
         }
         const bool static_release = prediction_idle_frames >=
             kPredictionStaticReleaseConfirmFrames;
-        // 目标停止时基础前馈幅值会先下降。下降段必须快速跟随，
-        // 否则慢速方向滤波会把过时提前量保留数百毫秒。只对同向降幅
-        // 加速；反向证据仍用慢增益穿过零点，不把镜头反馈当成立即转向。
-        // 逐轴判断静止非常重要：水平目标已停止时，垂直轴的持续纠偏
-        // 不得阻止水平 prediction 释放。
-        const auto update_axis = [&](float feedforward,
-                                     float measurement,
-                                     float& prediction_motion) {
-            const float feedforward_magnitude = std::fabs(feedforward);
-            const float prediction_magnitude = std::fabs(prediction_motion);
-            const bool same_direction = prediction_motion * feedforward > 0.0f;
-            const bool releasing = static_release ||
-                std::fabs(measurement) <=
-                    kPredictionWorldMotionMinimumCounts ||
-                feedforward_magnitude <=
-                    kPredictionWorldMotionMinimumCounts ||
-                (same_direction && prediction_magnitude >
-                     kPredictionWorldMotionMinimumCounts &&
-                 feedforward_magnitude < prediction_magnitude);
-            const float gain = releasing
-                ? kPredictionWorldMotionReleasePerSecond
-                : kPredictionWorldMotionGainPerSecond;
-            const float alpha = 1.0f - std::exp(
-                -gain * track.prediction_dt);
-            const float target = releasing ? 0.0f : feedforward;
-            prediction_motion += (target - prediction_motion) * alpha;
-        };
-        update_axis(
+        // 真机 856e9df Run 中 prediction 形成 52 个约 21 帧开、43 帧关的
+        // 周期。根因是任意一次前馈降幅或原始测量低谷都用 120/s 增益直接
+        // 朝零释放。幅值下降现在快速跟随新的非零前馈；只有原始测量连续
+        // 五帧低于门槛或全局静止证据成立才朝零释放。逐轴确认保证垂直
+        // 姿态纠偏不阻塞水平停止，同时不把人物框动画当成真实停走。
+        aim::detail::update_prediction_motion_axis(
             feedforward_x, world_motion_measurement_x,
-            prediction_world_motion_x);
-        update_axis(
+            track.prediction_dt, kPredictionWorldMotionMinimumCounts,
+            kPredictionStaticReleaseConfirmFrames,
+            kPredictionWorldMotionGainPerSecond,
+            kPredictionWorldMotionReleasePerSecond, static_release,
+            prediction_world_motion_x, prediction_low_motion_x_frames);
+        aim::detail::update_prediction_motion_axis(
             feedforward_y, world_motion_measurement_y,
-            prediction_world_motion_y);
+            track.prediction_dt, kPredictionWorldMotionMinimumCounts,
+            kPredictionStaticReleaseConfirmFrames,
+            kPredictionWorldMotionGainPerSecond,
+            kPredictionWorldMotionReleasePerSecond, static_release,
+            prediction_world_motion_y, prediction_low_motion_y_frames);
         if (std::hypot(
                 prediction_world_motion_x,
                 prediction_world_motion_y) <=
@@ -1037,6 +1028,8 @@ struct Aim::Impl {
         world_motion_measurement_y = 0.0f;
         prediction_world_motion_x = 0.0f;
         prediction_world_motion_y = 0.0f;
+        prediction_low_motion_x_frames = 0;
+        prediction_low_motion_y_frames = 0;
         issued_commands = {};
         issued_command_next = 0;
         issued_command_count = 0;
@@ -1122,6 +1115,8 @@ struct Aim::Impl {
             delay_lead_scale = 0.0f;
             prediction_world_motion_x = 0.0f;
             prediction_world_motion_y = 0.0f;
+            prediction_low_motion_x_frames = 0;
+            prediction_low_motion_y_frames = 0;
         }
         if (!config.enable_prediction) {
             lead_active = false;
@@ -1132,6 +1127,8 @@ struct Aim::Impl {
             delay_lead_scale = 0.0f;
             prediction_world_motion_x = 0.0f;
             prediction_world_motion_y = 0.0f;
+            prediction_low_motion_x_frames = 0;
+            prediction_low_motion_y_frames = 0;
             return projection;
         }
 
@@ -1768,6 +1765,8 @@ struct Aim::Impl {
         lead_direction_y = 0.0f;
         prediction_world_motion_x = 0.0f;
         prediction_world_motion_y = 0.0f;
+        prediction_low_motion_x_frames = 0;
+        prediction_low_motion_y_frames = 0;
         world_motion_measurement_x = 0.0f;
         world_motion_measurement_y = 0.0f;
         prediction_idle_frames = 0;

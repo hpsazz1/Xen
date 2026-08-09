@@ -1,4 +1,5 @@
 #include "aim/aim.h"
+#include "aim/aim_prediction_internal.h"
 #include "log/log.h"
 
 #include <algorithm>
@@ -1230,6 +1231,122 @@ void test_prediction_uses_world_motion_when_delay_vector_points_backward() {
                std::to_string(shifted_base_frames));
 }
 
+void test_prediction_survives_short_world_motion_measurement_dips() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+
+    constexpr float kFrameSeconds = 1.0f / 60.0f;
+    constexpr float kWorldPixelsPerFrame = -1.5f;
+    constexpr float kCameraResponse = 0.50f;
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float world_target_x = 40.0f;
+    float camera_x = 0.0f;
+    int delayed_command = 0;
+    bool lead_armed = false;
+    int armed_frames = 0;
+    int lead_dropout_frames = 0;
+    int lead_state_edges = 0;
+    bool previous_lead_active = false;
+
+    for (int index = 0; index < 180; ++index) {
+        camera_x += delayed_command / config.counts_per_pixel_x *
+            kCameraResponse;
+        delayed_command = 0;
+        // 人物持续 MoveLeft，但模型动画允许最多连续三帧的中心速度低谷。
+        // 三帧小于生产停止确认的五帧，不得把已经建立的世界运动状态释放。
+        const int phase = index % 36;
+        if (phase < 20 || phase > 22) {
+            world_target_x += kWorldPixelsPerFrame;
+        }
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * kFrameSeconds * 1000000.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {
+            body(160.0f + world_target_x - camera_x, 160.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "短时世界运动低谷回归必须每帧保留合法目标");
+        if (!result.has_target) continue;
+        if (result.target.lead_active) {
+            lead_armed = true;
+        }
+        if (lead_armed) {
+            ++armed_frames;
+            if (!result.target.lead_active) {
+                ++lead_dropout_frames;
+            }
+        }
+        if (index > 0 && result.target.lead_active != previous_lead_active) {
+            ++lead_state_edges;
+        }
+        previous_lead_active = result.target.lead_active;
+        if (result.has_command) {
+            delayed_command = result.command.dx_counts;
+        }
+    }
+
+    expect(lead_armed && armed_frames >= 90,
+           "短时世界运动低谷回归必须先建立足够长的 prediction 观察窗口");
+    expect(lead_dropout_frames == 0 && lead_state_edges <= 1,
+           "少于五帧的世界运动测量低谷不得让 prediction 周期性开关，掉线帧=" +
+               std::to_string(lead_dropout_frames) + "，边沿=" +
+               std::to_string(lead_state_edges));
+}
+
+void test_prediction_motion_axis_requires_confirmed_stop() {
+    constexpr float kDeltaSeconds = 1.0f / 60.0f;
+    constexpr float kMinimumCounts = 0.25f;
+    constexpr int kConfirmFrames = 5;
+    constexpr float kBuildGain = 2.0f;
+    constexpr float kReleaseGain = 120.0f;
+    float motion = 1.0f;
+    int low_frames = 0;
+
+    // 同向前馈从 1.0 降到 0.6 是速度变化，不是停止。生产旧逻辑会以
+    // 120/s 直接朝零释放到约 0.135 count，从而当帧关闭 prediction。
+    aim::detail::update_prediction_motion_axis(
+        0.60f, 0.60f, kDeltaSeconds, kMinimumCounts, kConfirmFrames,
+        kBuildGain, kReleaseGain, false, motion, low_frames);
+    expect(motion > 0.50f && motion < 0.70f && low_frames == 0,
+           "同向世界运动幅值下降必须快速跟随非零新值，不能误释放到零，实际=" +
+               std::to_string(motion));
+
+    motion = 1.0f;
+    low_frames = 0;
+    for (int index = 0; index < kConfirmFrames - 1; ++index) {
+        aim::detail::update_prediction_motion_axis(
+            0.0f, 0.0f, kDeltaSeconds, kMinimumCounts, kConfirmFrames,
+            kBuildGain, kReleaseGain, false, motion, low_frames);
+    }
+    expect(motion > kMinimumCounts && low_frames == kConfirmFrames - 1,
+           "少于五帧的低测量只能慢速保持 prediction，实际=" +
+               std::to_string(motion) + "，计数=" +
+               std::to_string(low_frames));
+    aim::detail::update_prediction_motion_axis(
+        0.0f, 0.0f, kDeltaSeconds, kMinimumCounts, kConfirmFrames,
+        kBuildGain, kReleaseGain, false, motion, low_frames);
+    expect(motion < kMinimumCounts && low_frames == kConfirmFrames,
+           "连续五帧低测量后必须快速释放 prediction，实际=" +
+               std::to_string(motion) + "，计数=" +
+               std::to_string(low_frames));
+}
+
 void test_base_crossing_releases_integral_smoothly() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -2112,6 +2229,8 @@ int main() {
     test_delayed_closed_loop_holds_moving_base_point();
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_prediction_uses_world_motion_when_delay_vector_points_backward();
+    test_prediction_survives_short_world_motion_measurement_dips();
+    test_prediction_motion_axis_requires_confirmed_stop();
     test_base_crossing_releases_integral_smoothly();
     test_two_axis_command_reversal_passes_through_zero();
     test_integral_releases_on_reversal_and_static_settle();
