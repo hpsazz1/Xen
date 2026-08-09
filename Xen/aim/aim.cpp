@@ -93,12 +93,20 @@ constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
 // 随后越过准星的幅度。这里只用于保守预测在途位移，不改变鼠标标定。
 constexpr float kControllerPendingCommandResponse = 0.15f;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
-// 第二轮真实 MoveLeft 的 0.5 倍视距只有 P50/P95 0.447/0.719 count，
-// 会被整数输出量化吞掉。两倍视距提供可见幅值并继续受 35% 尺度门禁；
-// 第三轮证明延迟向量方向会与世界运动相反，因此该常量只缩放长度，绝不
-// 再参与 prediction 方向计算。
-constexpr float kPredictionDelayHorizonScale = 2.00f;
-// 世界运动方向只在基础前馈观察器形成至少四分之一 count 的稳定维持量后
+// prediction 从已经完成基础延迟补偿的点继续向前推约半个
+// 实测控制延迟。位移必须由世界运动速度积分得到，不再使用包含
+// 镜头反馈和在途命令扣减的延迟向量长度，避免 prediction 放大自身输出。
+constexpr float kPredictionAdditionalHorizonScale = 0.50f;
+// 基础前馈服务于每帧跟随，响应不能为 prediction 稳定方向降速。
+// prediction 单独使用慢速世界运动状态：持续运动低通，静止时快速释放。
+// 这个状态只读取基础前馈，绝不回写轨迹、基础控制点或基础控制器。
+constexpr float kPredictionWorldMotionGainPerSecond = 2.0f;
+constexpr float kPredictionWorldMotionReleasePerSecond = 120.0f;
+// 与真机停发门禁一致：基础控制连续五帧无命令、低相对速度且
+// 位于保持带内后，prediction 必须释放额外前探；基础前馈自身仍保留
+// 更长的静止确认，不因 prediction 改变 tracking 状态。
+constexpr int kPredictionStaticReleaseConfirmFrames = 5;
+// 世界运动只在独立慢速状态形成至少四分之一 count 的稳定维持量后
 // 才可用于 prediction；更小残余属于静止收敛和量化噪声，禁止强行前探。
 constexpr float kPredictionWorldMotionMinimumCounts = 0.25f;
 // 正确方向的提前量也不能在观察器刚建立时整段跳入。按真实 dt 在约 33 ms
@@ -286,6 +294,10 @@ struct Aim::Impl {
     float residual_y = 0.0f;
     float feedforward_x = 0.0f;
     float feedforward_y = 0.0f;
+    float world_motion_measurement_x = 0.0f;
+    float world_motion_measurement_y = 0.0f;
+    float prediction_world_motion_x = 0.0f;
+    float prediction_world_motion_y = 0.0f;
     std::array<IssuedCommand, kControllerCommandHistoryCapacity>
         issued_commands{};
     std::size_t issued_command_next = 0;
@@ -293,6 +305,7 @@ struct Aim::Impl {
     float previous_command_x = 0.0f;
     float previous_command_y = 0.0f;
     int static_settle_frames = 0;
+    int prediction_idle_frames = 0;
     std::chrono::steady_clock::time_point controller_captured_at{};
     bool controller_initialized = false;
     bool shaper_initialized = false;
@@ -951,21 +964,61 @@ struct Aim::Impl {
         return {pending_x, pending_y};
     }
 
-    std::pair<float, float> prediction_world_motion(
-            const AimFrame& frame, const Track& track) const noexcept {
-        if (!frame.lock_active || controller_track_id != track.id ||
-            std::hypot(feedforward_x, feedforward_y) <=
-                kPredictionWorldMotionMinimumCounts) {
+    std::pair<float, float> stable_prediction_world_motion(
+            const AimFrame& frame, const Track& track) noexcept {
+        if (!frame.lock_active || controller_track_id != track.id) {
+            prediction_world_motion_x = 0.0f;
+            prediction_world_motion_y = 0.0f;
             return {0.0f, 0.0f};
         }
-        // feedforward 是上一控制帧用“相对速度 + 已生效历史命令”恢复的
-        // 世界维持量，单位为 counts/frame。这里只换算到各轴源像素方向；
-        // prediction 距离仍由当前有界延迟向量给出，不重复放大前馈幅值。
+        const bool static_release = prediction_idle_frames >=
+            kPredictionStaticReleaseConfirmFrames;
+        // 目标停止时基础前馈幅值会先下降。下降段必须快速跟随，
+        // 否则慢速方向滤波会把过时提前量保留数百毫秒。只对同向降幅
+        // 加速；反向证据仍用慢增益穿过零点，不把镜头反馈当成立即转向。
+        // 逐轴判断静止非常重要：水平目标已停止时，垂直轴的持续纠偏
+        // 不得阻止水平 prediction 释放。
+        const auto update_axis = [&](float feedforward,
+                                     float measurement,
+                                     float& prediction_motion) {
+            const float feedforward_magnitude = std::fabs(feedforward);
+            const float prediction_magnitude = std::fabs(prediction_motion);
+            const bool same_direction = prediction_motion * feedforward > 0.0f;
+            const bool releasing = static_release ||
+                std::fabs(measurement) <=
+                    kPredictionWorldMotionMinimumCounts ||
+                feedforward_magnitude <=
+                    kPredictionWorldMotionMinimumCounts ||
+                (same_direction && prediction_magnitude >
+                     kPredictionWorldMotionMinimumCounts &&
+                 feedforward_magnitude < prediction_magnitude);
+            const float gain = releasing
+                ? kPredictionWorldMotionReleasePerSecond
+                : kPredictionWorldMotionGainPerSecond;
+            const float alpha = 1.0f - std::exp(
+                -gain * track.prediction_dt);
+            const float target = releasing ? 0.0f : feedforward;
+            prediction_motion += (target - prediction_motion) * alpha;
+        };
+        update_axis(
+            feedforward_x, world_motion_measurement_x,
+            prediction_world_motion_x);
+        update_axis(
+            feedforward_y, world_motion_measurement_y,
+            prediction_world_motion_y);
+        if (std::hypot(
+                prediction_world_motion_x,
+                prediction_world_motion_y) <=
+            kPredictionWorldMotionMinimumCounts) {
+            return {0.0f, 0.0f};
+        }
+        // 慢速状态的单位仍为 counts/frame，换算后是每个观测帧的源像素
+        // 位移。调用者再按额外预测时域与真实 dt 的比例积分为提前量。
         return {
-            feedforward_x /
+            prediction_world_motion_x /
                 (config.counts_per_pixel_x *
                  frame.source_pixels_per_roi_pixel_x),
-            feedforward_y /
+            prediction_world_motion_y /
                 (config.counts_per_pixel_y *
                  frame.source_pixels_per_roi_pixel_y)};
     }
@@ -980,12 +1033,17 @@ struct Aim::Impl {
         residual_y = 0.0f;
         feedforward_x = 0.0f;
         feedforward_y = 0.0f;
+        world_motion_measurement_x = 0.0f;
+        world_motion_measurement_y = 0.0f;
+        prediction_world_motion_x = 0.0f;
+        prediction_world_motion_y = 0.0f;
         issued_commands = {};
         issued_command_next = 0;
         issued_command_count = 0;
         previous_command_x = 0.0f;
         previous_command_y = 0.0f;
         static_settle_frames = 0;
+        prediction_idle_frames = 0;
         controller_captured_at = {};
         controller_initialized = false;
         shaper_initialized = false;
@@ -1062,6 +1120,8 @@ struct Aim::Impl {
             lead_direction_x = 0.0f;
             lead_direction_y = 0.0f;
             delay_lead_scale = 0.0f;
+            prediction_world_motion_x = 0.0f;
+            prediction_world_motion_y = 0.0f;
         }
         if (!config.enable_prediction) {
             lead_active = false;
@@ -1070,23 +1130,38 @@ struct Aim::Impl {
             lead_settle_frames = 0;
             lead_candidate_frames = 0;
             delay_lead_scale = 0.0f;
+            prediction_world_motion_x = 0.0f;
+            prediction_world_motion_y = 0.0f;
             return projection;
         }
 
         if (projection.delay_active && !track.predicted) {
-            // 延迟向量包含轨迹位移和在途命令扣减，其长度可作为当前有界
-            // 预测视距，但方向可能只是把闭环误差拉回准星，不能代表人物
-            // 世界运动。真实 MoveLeft 反例中 3341 个发送帧的旧 lead 与命令
-            // 方向相反，因此方向必须来自基础世界运动前馈观察器。
-            const float delay_magnitude = std::hypot(
-                projection.delay_x, projection.delay_y);
+            // 真实失败 Run 证明：延迟向量长度会被 prediction 命令造成的镜头
+            // 反馈从 P50 2.878 px 放大到 8.099 px，再乘固定倍率会构成正反馈。
+            // 因此延迟点只是叠加起点；额外位移由独立世界运动速度在半个
+            // 控制延迟时域内积分，不会再反读 prediction 放大后的延迟向量。
             const auto [world_motion_x, world_motion_y] =
-                prediction_world_motion(frame, track);
+                stable_prediction_world_motion(frame, track);
             const float world_motion_magnitude = std::hypot(
                 world_motion_x, world_motion_y);
-            const float activation_distance = std::max(
-                0.25f, config.deadzone_pixels * 0.50f);
-            if (delay_magnitude <= activation_distance ||
+            const float horizon_frames =
+                projection.delay_seconds *
+                kPredictionAdditionalHorizonScale /
+                std::max(track.prediction_dt, 1.0f / 1000.0f);
+            const float activation_distance_x = std::max(
+                {0.25f, config.deadzone_pixels * 0.50f,
+                 0.50f /
+                     (config.counts_per_pixel_x *
+                      frame.source_pixels_per_roi_pixel_x)});
+            const float activation_distance_y = std::max(
+                {0.25f, config.deadzone_pixels * 0.50f,
+                 0.50f /
+                     (config.counts_per_pixel_y *
+                      frame.source_pixels_per_roi_pixel_y)});
+            const float desired_lead_x = world_motion_x * horizon_frames;
+            const float desired_lead_y = world_motion_y * horizon_frames;
+            if ((std::fabs(desired_lead_x) <= activation_distance_x &&
+                 std::fabs(desired_lead_y) <= activation_distance_y) ||
                 world_motion_magnitude <= 0.0f) {
                 lead_active = false;
                 lead_candidate_frames = 0;
@@ -1115,13 +1190,29 @@ struct Aim::Impl {
             delay_lead_scale = std::min(
                 1.0f, delay_lead_scale +
                     kPredictionLeadRampPerSecond * track.prediction_dt);
-            const float lead_distance = delay_magnitude *
-                kPredictionDelayHorizonScale * delay_lead_scale;
-            float lead_x = lead_direction_x * lead_distance;
-            float lead_y = lead_direction_y * lead_distance;
+            float lead_x = world_motion_x * horizon_frames *
+                delay_lead_scale;
+            float lead_y = world_motion_y * horizon_frames *
+                delay_lead_scale;
+            // 额外预测时域只有基础延迟时域的 0.5 倍，几何上限也必须
+            // 按同一比例缩放。这样世界运动观察器的短时过估不能跳过
+            // 延迟补偿已验证的尺度边界，用户的总预测百分比仍是更外层硬上限。
+            const float derived_lead_percent =
+                config.max_delay_compensation_percent *
+                kPredictionAdditionalHorizonScale;
             clamp_vector(
                 lead_x, lead_y,
-                box_diagonal * config.max_prediction_lead_percent / 100.0f);
+                box_diagonal * std::min(
+                    config.max_prediction_lead_percent,
+                    derived_lead_percent) / 100.0f);
+            // 渐入初期的亚量化提前量既不会形成可感知控制效果，又可能在准星
+            // 附近把最终点推过零点。内部渐入状态继续累积，但只有实际向量
+            // 达到同一激活门槛后才公开为最终点，避免停止阶段的微小再次前探。
+            if (std::fabs(lead_x) < activation_distance_x) lead_x = 0.0f;
+            if (std::fabs(lead_y) < activation_distance_y) lead_y = 0.0f;
+            if (lead_x == 0.0f && lead_y == 0.0f) {
+                return projection;
+            }
             projection.final_x = projection.delay_compensated_x + lead_x;
             projection.final_y = projection.delay_compensated_y + lead_y;
             projection.active = true;
@@ -1287,6 +1378,16 @@ struct Aim::Impl {
                 kControllerMovingVelocityThresholdPixelsPerSecond;
         const bool within_hold_band =
             std::hypot(base_error_x, base_error_y) <= hold_band;
+        // prediction 的停止证据只需要基础点连续位于保持带且上一帧未发命令。
+        // 不复用 tracking 更严格的低速度条件：框轮廓在人物静止后仍可产生短时
+        // 速度尾巴，若等它完全归零，额外前探会在无命令阶段滞留并再次起振。
+        if (previous_command_zero && within_hold_band) {
+            prediction_idle_frames = std::min(
+                prediction_idle_frames + 1,
+                kPredictionStaticReleaseConfirmFrames);
+        } else {
+            prediction_idle_frames = 0;
+        }
         if (previous_command_zero && low_relative_motion &&
             within_hold_band) {
             static_settle_frames = std::min(
@@ -1306,7 +1407,9 @@ struct Aim::Impl {
                                             float source_scale,
                                             float counts_per_pixel,
                                             float delayed_command,
-                                            float& feedforward) {
+                                            float& feedforward,
+                                            float& world_motion_measurement) {
+            world_motion_measurement = 0.0f;
             if (config.enable_prediction &&
                 !config.enable_delay_compensation) {
                 // 无延迟向量时 prediction 只能按相对速度生成提前量；若再
@@ -1326,10 +1429,23 @@ struct Aim::Impl {
                     relative_velocity * source_scale * controller_dt *
                         counts_per_pixel *
                         kControllerFeedforwardVelocityScale;
+                world_motion_measurement = measurement;
                 const float alpha = 1.0f - std::exp(
                     -kControllerFeedforwardObserverGainPerSecond *
                         controller_dt);
                 feedforward += (measurement - feedforward) * alpha;
+                // prediction 已经把准星推到人物前方后，目标停止帧不能继续
+                // 保留旧的同向基础维持量，否则它会与返回基础点的比例项争抢
+                // 方向，形成“经零反转”微抖。只在当前轴的世界运动测量已
+                // 低于 prediction 噪声门槛时快速释放，tracking 配置的原路径不变。
+                if (config.enable_prediction &&
+                    config.enable_delay_compensation &&
+                    std::fabs(measurement) <=
+                        kPredictionWorldMotionMinimumCounts) {
+                    feedforward *= std::exp(
+                        -kPredictionWorldMotionReleasePerSecond *
+                            controller_dt);
+                }
                 // 只有相对速度已静止时，基础点反向才可视为真正归位。
                 // 动态过冲仍交给前馈观测器判断，避免把相机反馈误当成目标反转。
                 if (std::fabs(base_error) > hold_band &&
@@ -1353,10 +1469,12 @@ struct Aim::Impl {
         };
         update_feedforward(
             base_error_x, track.vx, frame.source_pixels_per_roi_pixel_x,
-            config.counts_per_pixel_x, delayed_command_x, feedforward_x);
+            config.counts_per_pixel_x, delayed_command_x, feedforward_x,
+            world_motion_measurement_x);
         update_feedforward(
             base_error_y, track.vy, frame.source_pixels_per_roi_pixel_y,
-            config.counts_per_pixel_y, delayed_command_y, feedforward_y);
+            config.counts_per_pixel_y, delayed_command_y, feedforward_y,
+            world_motion_measurement_y);
         float desired_x = proportional_x + feedforward_x;
         float desired_y = proportional_y + feedforward_y;
         // 移动目标在保持带内仍需承担量化后的平均维持量。仅在观察器已
@@ -1605,6 +1723,11 @@ struct Aim::Impl {
         lead_candidate_frames = 0;
         lead_direction_x = 0.0f;
         lead_direction_y = 0.0f;
+        prediction_world_motion_x = 0.0f;
+        prediction_world_motion_y = 0.0f;
+        world_motion_measurement_x = 0.0f;
+        world_motion_measurement_y = 0.0f;
+        prediction_idle_frames = 0;
         acquisition_range_radius = 0.0f;
         active_range_radius = 0.0f;
         range_locked = false;

@@ -1124,7 +1124,10 @@ void test_prediction_uses_world_motion_when_delay_vector_points_backward() {
     float camera_x = 0.0f;
     int backward_delay_frames = 0;
     int wrong_prediction_direction_frames = 0;
+    int all_wrong_prediction_direction_frames = 0;
+    int lead_active_frames = 0;
     int shifted_base_frames = 0;
+    float maximum_lead_distance = 0.0f;
 
     for (int index = 0; index < 960; ++index) {
         camera_x += delayed_commands[index % kActuationDelayFrames] /
@@ -1153,6 +1156,17 @@ void test_prediction_uses_world_motion_when_delay_vector_points_backward() {
             ++shifted_base_frames;
         }
         if (result.target.lead_active &&
+            std::fabs(result.target.lead_x) > 0.0f) {
+            ++lead_active_frames;
+            maximum_lead_distance = std::max(
+                maximum_lead_distance,
+                std::hypot(result.target.lead_x, result.target.lead_y));
+            if (result.target.lead_x >= 0.0f) {
+                ++all_wrong_prediction_direction_frames;
+            }
+        }
+        if (result.target.lead_active &&
+            std::fabs(result.target.lead_x) > 0.0f &&
             result.target.base_aim_x < frame.control_center_x &&
             result.target.delay_compensation_x > 0.5f) {
             ++backward_delay_frames;
@@ -1173,6 +1187,18 @@ void test_prediction_uses_world_motion_when_delay_vector_points_backward() {
     expect(wrong_prediction_direction_frames == 0,
            "延迟向量向右拉回时，MoveLeft prediction 仍必须沿世界运动向左，错误帧=" +
                std::to_string(wrong_prediction_direction_frames));
+    expect(lead_active_frames > 0 &&
+               all_wrong_prediction_direction_frames == 0 &&
+               maximum_lead_distance >= 0.25f &&
+               maximum_lead_distance <=
+                   std::hypot(40.0f, 80.0f) *
+                       config.max_delay_compensation_percent / 100.0f * 0.50f +
+                       0.01f,
+           "MoveLeft 全程的 prediction 必须只向左且不得被闭环放大，活动=" +
+               std::to_string(lead_active_frames) + "，错向=" +
+               std::to_string(all_wrong_prediction_direction_frames) +
+               "，最大提前=" +
+               std::to_string(maximum_lead_distance));
     expect(shifted_base_frames == 0,
            "prediction 只能移动最终点，基础瞄点必须保持模型框中央附近，偏移帧=" +
                std::to_string(shifted_base_frames));
@@ -1592,18 +1618,94 @@ void test_delay_compensation_stacks_before_prediction() {
         frame.detections = {body(180.0f + index * 2.0f, 160.0f)};
         result = aim.process(frame);
     }
-    const float delay_distance = std::hypot(
-        result.target.delay_compensation_x,
-        result.target.delay_compensation_y);
     const float lead_distance = std::hypot(
         result.target.lead_x, result.target.lead_y);
     expect(result.has_target && result.target.delay_compensation_active &&
                result.target.lead_active && result.target.lead_x > 0.0f &&
                std::fabs(result.target.aim_x -
-                         result.target.delay_compensated_aim_x -
-                         result.target.lead_x) < 0.01f &&
-               std::fabs(lead_distance - delay_distance * 2.00f) < 0.01f,
-           "prediction 必须从延迟补偿点沿稳定世界运动方向渐入可见视距");
+                          result.target.delay_compensated_aim_x -
+                          result.target.lead_x) < 0.01f &&
+               lead_distance >= 0.25f && lead_distance <= 5.0f,
+            "prediction 必须从延迟补偿点按稳定世界运动速度生成有界前探");
+}
+
+void test_prediction_never_changes_base_tracking_sequence() {
+    AimConfig tracking_config;
+    tracking_config.min_confirmed_hits = 1;
+    tracking_config.deadzone_pixels = 0.75f;
+    tracking_config.smoothing = 0.475f;
+    tracking_config.counts_per_pixel_x = 0.40f;
+    tracking_config.counts_per_pixel_y = 0.40f;
+    tracking_config.max_counts_per_frame = 12.0f;
+    tracking_config.acquisition_range_percent = 100.0f;
+    tracking_config.enable_delay_compensation = true;
+    tracking_config.control_delay_ms = 15.0f;
+    tracking_config.max_delay_compensation_ms = 16.0f;
+    tracking_config.max_delay_compensation_percent = 15.0f;
+    AimConfig prediction_config = tracking_config;
+    prediction_config.enable_prediction = true;
+    Aim tracking(tracking_config);
+    Aim prediction(prediction_config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    int lead_active_frames = 0;
+    int different_final_frames = 0;
+
+    // 两个实例消费完全相同的平移+框宽高形变序列，但各自保留
+    // 不同的控制器、命令历史和 prediction 状态。这是基础控制点的强不变量：
+    // 即使预测已真正活动，每帧轨迹框、速度与基础点也必须与 tracking 逐位相同。
+    for (int index = 0; index < 240; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 60.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(2);
+        frame.lock_active = true;
+        const float center_x = 220.0f - index * 2.5f;
+        const float width = 40.0f + static_cast<float>((index % 6) - 3) * 1.4f;
+        const float height = 80.0f + static_cast<float>((index % 5) - 2) * 1.6f;
+        frame.detections = {body_box(center_x, 160.0f, width, height)};
+        const AimResult tracking_result = tracking.process(frame);
+        const AimResult prediction_result = prediction.process(frame);
+        expect(tracking_result.status == AimStatus::SUCCESS &&
+                   prediction_result.status == AimStatus::SUCCESS &&
+                   tracking_result.has_target && prediction_result.has_target,
+               "prediction 基础点不变量回归每帧必须保留合法目标");
+        if (!tracking_result.has_target || !prediction_result.has_target) {
+            continue;
+        }
+        expect(tracking_result.target.track_id ==
+                   prediction_result.target.track_id &&
+                   tracking_result.target.state ==
+                   prediction_result.target.state &&
+                   tracking_result.target.x1 == prediction_result.target.x1 &&
+                   tracking_result.target.y1 == prediction_result.target.y1 &&
+                   tracking_result.target.x2 == prediction_result.target.x2 &&
+                   tracking_result.target.y2 == prediction_result.target.y2 &&
+                   tracking_result.target.velocity_x ==
+                   prediction_result.target.velocity_x &&
+                   tracking_result.target.velocity_y ==
+                   prediction_result.target.velocity_y &&
+                   tracking_result.target.base_aim_x ==
+                   prediction_result.target.base_aim_x &&
+                   tracking_result.target.base_aim_y ==
+                   prediction_result.target.base_aim_y,
+               "prediction 开关不得改变任何 tracking 轨迹或基础控制点字段");
+        if (prediction_result.target.lead_active) {
+            ++lead_active_frames;
+        }
+        if (std::fabs(prediction_result.target.aim_x -
+                      tracking_result.target.aim_x) > 0.25f ||
+            std::fabs(prediction_result.target.aim_y -
+                      tracking_result.target.aim_y) > 0.25f) {
+            ++different_final_frames;
+        }
+    }
+
+    expect(lead_active_frames >= 60 && different_final_frames >= 60,
+           "基础点相同的同时 prediction 最终点必须真正产生独立前探，活动=" +
+               std::to_string(lead_active_frames) + "，差异=" +
+               std::to_string(different_final_frames));
 }
 
 void test_short_glide_preserves_base_tracking_hold() {
@@ -1746,6 +1848,7 @@ void test_prediction_adds_continuous_delay_derived_lead() {
         float maximum_stationary_error = 0.0f;
         int stationary_direction_reversals = 0;
         int direct_command_reversals = 0;
+        int zero_mediated_command_reversals = 0;
         int maximum_command_step = 0;
         int maximum_command_step_frame = -1;
         int maximum_command_step_before = 0;
@@ -1778,6 +1881,7 @@ void test_prediction_adds_continuous_delay_derived_lead() {
         float camera_x = 0.0f;
         float delayed_commands[kCommandDelayFrames]{};
         int previous_stationary_command_sign = 0;
+        int previous_nonzero_command_sign = 0;
         int previous_horizontal_command = 0;
         bool have_previous_command = false;
         Metrics metrics;
@@ -1836,6 +1940,12 @@ void test_prediction_adds_continuous_delay_derived_lead() {
             const int horizontal_command = result.has_command
                 ? result.command.dx_counts : 0;
             if (result.has_command) {
+                const int command_sign = horizontal_command < 0 ? -1 : 1;
+                if (previous_nonzero_command_sign != 0 &&
+                    command_sign != previous_nonzero_command_sign) {
+                    ++metrics.zero_mediated_command_reversals;
+                }
+                previous_nonzero_command_sign = command_sign;
                 if (have_previous_command) {
                     const int command_step = std::abs(
                         horizontal_command - previous_horizontal_command);
@@ -1888,9 +1998,14 @@ void test_prediction_adds_continuous_delay_derived_lead() {
                std::to_string(tracking_mean) + "，prediction=" +
                std::to_string(prediction_mean));
     expect(prediction.direct_command_reversals == 0 &&
+               prediction.zero_mediated_command_reversals == 0 &&
                prediction.maximum_command_step <= 4,
            "可见预测提前不得破坏同轴命令连续性，直接反转=" +
                std::to_string(prediction.direct_command_reversals) +
+               "，经零反转=" +
+               std::to_string(prediction.zero_mediated_command_reversals) +
+               "，tracking 经零反转=" +
+               std::to_string(tracking.zero_mediated_command_reversals) +
                "，最大阶跃=" +
                std::to_string(prediction.maximum_command_step) +
                "，帧=" +
@@ -1959,6 +2074,7 @@ int main() {
     test_delay_projection_crossing_keeps_base_tracking_hold();
     test_control_step_cannot_cross_in_box_aim_point();
     test_delay_compensation_stacks_before_prediction();
+    test_prediction_never_changes_base_tracking_sequence();
     test_short_glide_preserves_base_tracking_hold();
     test_prediction_layer_keeps_base_tracking_hold_continuous();
     test_prediction_adds_continuous_delay_derived_lead();
