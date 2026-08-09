@@ -93,11 +93,17 @@ constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
 // 随后越过准星的幅度。这里只用于保守预测在途位移，不改变鼠标标定。
 constexpr float kControllerPendingCommandResponse = 0.15f;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
-// 第二轮真实 MoveLeft 虽有 98.93% prediction 覆盖，但 0.5 倍延迟向量
-// 只有 P50/P95 1.116/1.798 px，即 0.447/0.719 count，尚未经过平滑就
-// 会被整数输出量化吞掉。从延迟补偿点再前探两倍向量后，反事实 P50/P95
-// 为 4.46/6.90 px（1.78/2.76 counts），并继续受 35% 尺度门禁限制。
+// 第二轮真实 MoveLeft 的 0.5 倍视距只有 P50/P95 0.447/0.719 count，
+// 会被整数输出量化吞掉。两倍视距提供可见幅值并继续受 35% 尺度门禁；
+// 第三轮证明延迟向量方向会与世界运动相反，因此该常量只缩放长度，绝不
+// 再参与 prediction 方向计算。
 constexpr float kPredictionDelayHorizonScale = 2.00f;
+// 世界运动方向只在基础前馈观察器形成至少四分之一 count 的稳定维持量后
+// 才可用于 prediction；更小残余属于静止收敛和量化噪声，禁止强行前探。
+constexpr float kPredictionWorldMotionMinimumCounts = 0.25f;
+// 正确方向的提前量也不能在观察器刚建立时整段跳入。按真实 dt 在约 33 ms
+// 内线性渐入，避免 prediction 状态变化绕过物理命令阶跃门禁。
+constexpr float kPredictionLeadRampPerSecond = 30.0f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
 // 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
 constexpr float kControllerQuantizationMotionThresholdPixelsPerSecond = 10.0f;
@@ -298,6 +304,7 @@ struct Aim::Impl {
     int lead_candidate_frames = 0;
     float lead_direction_x = 0.0f;
     float lead_direction_y = 0.0f;
+    float delay_lead_scale = 0.0f;
     float acquisition_range_radius = 0.0f;
     float active_range_radius = 0.0f;
     bool range_locked = false;
@@ -944,6 +951,25 @@ struct Aim::Impl {
         return {pending_x, pending_y};
     }
 
+    std::pair<float, float> prediction_world_motion(
+            const AimFrame& frame, const Track& track) const noexcept {
+        if (!frame.lock_active || controller_track_id != track.id ||
+            std::hypot(feedforward_x, feedforward_y) <=
+                kPredictionWorldMotionMinimumCounts) {
+            return {0.0f, 0.0f};
+        }
+        // feedforward 是上一控制帧用“相对速度 + 已生效历史命令”恢复的
+        // 世界维持量，单位为 counts/frame。这里只换算到各轴源像素方向；
+        // prediction 距离仍由当前有界延迟向量给出，不重复放大前馈幅值。
+        return {
+            feedforward_x /
+                (config.counts_per_pixel_x *
+                 frame.source_pixels_per_roi_pixel_x),
+            feedforward_y /
+                (config.counts_per_pixel_y *
+                 frame.source_pixels_per_roi_pixel_y)};
+    }
+
     void reset_controller() noexcept {
         controller_track_id = 0;
         filtered_x = 0.0f;
@@ -1035,6 +1061,7 @@ struct Aim::Impl {
             lead_candidate_frames = 0;
             lead_direction_x = 0.0f;
             lead_direction_y = 0.0f;
+            delay_lead_scale = 0.0f;
         }
         if (!config.enable_prediction) {
             lead_active = false;
@@ -1042,28 +1069,37 @@ struct Aim::Impl {
             lead_rearm_ready = true;
             lead_settle_frames = 0;
             lead_candidate_frames = 0;
+            delay_lead_scale = 0.0f;
             return projection;
         }
 
         if (projection.delay_active && !track.predicted) {
-            // 延迟向量已经同时包含轨迹位移和在途命令扣减，真实序列中的
-            // 方向远比逐帧原始速度稳定。prediction 直接以补偿后的点为
-            // 原点，沿该有界向量继续前探；不再等待框尺度误差积累后才启动。
+            // 延迟向量包含轨迹位移和在途命令扣减，其长度可作为当前有界
+            // 预测视距，但方向可能只是把闭环误差拉回准星，不能代表人物
+            // 世界运动。真实 MoveLeft 反例中 3341 个发送帧的旧 lead 与命令
+            // 方向相反，因此方向必须来自基础世界运动前馈观察器。
             const float delay_magnitude = std::hypot(
                 projection.delay_x, projection.delay_y);
+            const auto [world_motion_x, world_motion_y] =
+                prediction_world_motion(frame, track);
+            const float world_motion_magnitude = std::hypot(
+                world_motion_x, world_motion_y);
             const float activation_distance = std::max(
                 0.25f, config.deadzone_pixels * 0.50f);
-            if (delay_magnitude <= activation_distance) {
+            if (delay_magnitude <= activation_distance ||
+                world_motion_magnitude <= 0.0f) {
                 lead_active = false;
                 lead_candidate_frames = 0;
+                delay_lead_scale = 0.0f;
                 return projection;
             }
             const bool direction_reversed = lead_active &&
-                lead_direction_x * projection.delay_x +
-                    lead_direction_y * projection.delay_y <= 0.0f;
+                lead_direction_x * world_motion_x +
+                    lead_direction_y * world_motion_y <= 0.0f;
             if (direction_reversed) {
                 lead_active = false;
                 lead_candidate_frames = 0;
+                delay_lead_scale = 0.0f;
                 return projection;
             }
             if (!lead_active) {
@@ -1074,12 +1110,15 @@ struct Aim::Impl {
                 lead_ever_activated = true;
                 lead_candidate_frames = 0;
             }
-            lead_direction_x = projection.delay_x / delay_magnitude;
-            lead_direction_y = projection.delay_y / delay_magnitude;
-            float lead_x = projection.delay_x *
-                kPredictionDelayHorizonScale;
-            float lead_y = projection.delay_y *
-                kPredictionDelayHorizonScale;
+            lead_direction_x = world_motion_x / world_motion_magnitude;
+            lead_direction_y = world_motion_y / world_motion_magnitude;
+            delay_lead_scale = std::min(
+                1.0f, delay_lead_scale +
+                    kPredictionLeadRampPerSecond * track.prediction_dt);
+            const float lead_distance = delay_magnitude *
+                kPredictionDelayHorizonScale * delay_lead_scale;
+            float lead_x = lead_direction_x * lead_distance;
+            float lead_y = lead_direction_y * lead_distance;
             clamp_vector(
                 lead_x, lead_y,
                 box_diagonal * config.max_prediction_lead_percent / 100.0f);
@@ -1091,6 +1130,7 @@ struct Aim::Impl {
 
         // 未启用延迟补偿时保留原有的准星闭环迟滞语义。此分支没有可
         // 复用的延迟向量，只能按相对速度和观测年龄做保守预测。
+        delay_lead_scale = 0.0f;
         const float error_x =
             projection.delay_compensated_x - frame.control_center_x;
         const float error_y =
