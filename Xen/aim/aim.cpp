@@ -69,6 +69,7 @@ constexpr float kTrackVelocityBetaLow = 0.04f;
 // 仅低速校正其框内偏移。这样恒速平移仍使用原位置增益，不额外引入滞后。
 constexpr float kTrackAimShapeAlphaHigh = 0.12f;
 constexpr float kTrackAimShapeAlphaLow = 0.06f;
+constexpr float kTrackIncoherentVelocityBetaScale = 0.50f;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
@@ -489,27 +490,41 @@ struct Aim::Impl {
             (observation.x1 + observation.x2) * 0.5f;
         const float observation_center_y =
             (observation.y1 + observation.y2) * 0.5f;
-        float motion_residual_x = observation_center_x - track_center_x;
-        float motion_residual_y = observation_center_y - track_center_y;
+        const float center_motion_residual_x =
+            observation_center_x - track_center_x;
+        const float center_motion_residual_y =
+            observation_center_y - track_center_y;
+        float stable_motion_residual_x = center_motion_residual_x;
+        float stable_motion_residual_y = center_motion_residual_y;
+        float velocity_beta_x = beta;
+        float velocity_beta_y = beta;
 
         if (!box_semantics_changed) {
-            motion_residual_x = common_edge_motion(
-                observation.x1 - track.x1,
-                observation.x2 - track.x2);
-            motion_residual_y = common_edge_motion(
-                observation.y1 - track.y1,
-                observation.y2 - track.y2);
+            const float x1_residual = observation.x1 - track.x1;
+            const float x2_residual = observation.x2 - track.x2;
+            const float y1_residual = observation.y1 - track.y1;
+            const float y2_residual = observation.y2 - track.y2;
+            stable_motion_residual_x = common_edge_motion(
+                x1_residual, x2_residual);
+            stable_motion_residual_y = common_edge_motion(
+                y1_residual, y2_residual);
+            if (x1_residual * x2_residual <= 0.0f) {
+                velocity_beta_x *= kTrackIncoherentVelocityBetaScale;
+            }
+            if (y1_residual * y2_residual <= 0.0f) {
+                velocity_beta_y *= kTrackIncoherentVelocityBetaScale;
+            }
         }
 
         // 身体框短时消失、只剩头框时保留既有身体尺度，只用头部观测平移状态。
         // 否则下一帧身体框恢复会制造一次无意义的尺度突变并破坏多目标关联。
         if (observation.head_only && !track.head_only) {
-            motion_residual_x = observation.aim_x - track.aim_x;
-            motion_residual_y = observation.aim_y - track.aim_y;
-            track.x1 += motion_residual_x * alpha;
-            track.x2 += motion_residual_x * alpha;
-            track.y1 += motion_residual_y * alpha;
-            track.y2 += motion_residual_y * alpha;
+            stable_motion_residual_x = observation.aim_x - track.aim_x;
+            stable_motion_residual_y = observation.aim_y - track.aim_y;
+            track.x1 += stable_motion_residual_x * alpha;
+            track.x2 += stable_motion_residual_x * alpha;
+            track.y1 += stable_motion_residual_y * alpha;
+            track.y2 += stable_motion_residual_y * alpha;
         } else {
             track.x1 += (observation.x1 - track.x1) * alpha;
             track.y1 += (observation.y1 - track.y1) * alpha;
@@ -561,8 +576,8 @@ struct Aim::Impl {
             // predict_tracks() 已按速度完成本帧推进。共同边缘位移使用与
             // 关联框相同的增益立即校正；剩余差值只可能来自框内形变或
             // 缓慢尺度变化，因此使用独立低增益，不拖慢真实平移响应。
-            track.aim_x += motion_residual_x * alpha;
-            track.aim_y += motion_residual_y * alpha;
+            track.aim_x += stable_motion_residual_x * alpha;
+            track.aim_y += stable_motion_residual_y * alpha;
             const float shape_alpha = high
                 ? kTrackAimShapeAlphaHigh : kTrackAimShapeAlphaLow;
             track.aim_x += (observed_aim_x - track.aim_x) * shape_alpha;
@@ -576,8 +591,13 @@ struct Aim::Impl {
             track.vx *= 0.5f;
             track.vy *= 0.5f;
         } else {
-            track.vx += beta * motion_residual_x / track.prediction_dt;
-            track.vy += beta * motion_residual_y / track.prediction_dt;
+            // 控制锚点使用对边共同残差抑制瞬时形变；速度观察器仍以低
+            // beta 消费中心残差。持续平移会跨帧累积，正负交替的步态
+            // 形变则相互抵消，避免把真实运动连同轮廓噪声一起归零。
+            track.vx += velocity_beta_x * center_motion_residual_x /
+                track.prediction_dt;
+            track.vy += velocity_beta_y * center_motion_residual_y /
+                track.prediction_dt;
         }
         clamp_vector(track.vx, track.vy,
                      diagonal * kMaxTrackSpeedDiagonalsPerSecond);

@@ -318,6 +318,51 @@ void test_body_box_shape_jitter_does_not_move_stable_aim_point() {
                std::to_string(maximum_settled_error));
 }
 
+void test_body_box_shape_jitter_preserves_real_translation() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.acquisition_range_percent = 150.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float settled_position_error_sum = 0.0f;
+    float settled_velocity_error_sum = 0.0f;
+    int settled_frames = 0;
+
+    for (int index = 0; index < 160; ++index) {
+        const float phase = (index % 2) == 0 ? -1.0f : 1.0f;
+        const float true_aim_x = 100.0f + index * 0.6f;
+        const float observed_aim_x = true_aim_x + phase * 2.0f;
+        const float width = phase < 0.0f ? 34.0f : 46.0f;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::milliseconds(index * 5));
+        frame.detections = {
+            body_box(observed_aim_x, 175.0f, width, 100.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "带框形变的匀速目标必须持续保留确认轨迹");
+        if (index >= 40 && result.has_target) {
+            settled_position_error_sum += std::fabs(
+                result.target.base_aim_x - true_aim_x);
+            settled_velocity_error_sum += std::fabs(
+                result.target.velocity_x - 120.0f);
+            ++settled_frames;
+        }
+    }
+
+    const float mean_position_error = settled_position_error_sum /
+        static_cast<float>(settled_frames);
+    const float mean_velocity_error = settled_velocity_error_sum /
+        static_cast<float>(settled_frames);
+    expect(mean_position_error <= 1.50f &&
+               mean_velocity_error <= 30.0f,
+           "去除人物框形变时不得丢失真实匀速平移，位置均值误差=" +
+               std::to_string(mean_position_error) + "，速度均值误差=" +
+               std::to_string(mean_velocity_error));
+}
+
 void test_body_aim_range_is_static_safe_and_motion_bounded() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -1625,6 +1670,7 @@ int main() {
     test_global_head_body_assignment();
     test_head_body_normalized_aim_stays_stable();
     test_body_box_shape_jitter_does_not_move_stable_aim_point();
+    test_body_box_shape_jitter_preserves_real_translation();
     test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
     test_loss_prediction_does_not_compound_time();
