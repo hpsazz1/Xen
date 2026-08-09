@@ -69,7 +69,7 @@ constexpr float kTrackVelocityBetaLow = 0.04f;
 // 仅低速校正其框内偏移。这样恒速平移仍使用原位置增益，不额外引入滞后。
 constexpr float kTrackAimShapeAlphaHigh = 0.12f;
 constexpr float kTrackAimShapeAlphaLow = 0.06f;
-constexpr float kTrackIncoherentVelocityBetaScale = 0.50f;
+constexpr float kTrackIncoherentVelocityBetaScale = 0.40f;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分

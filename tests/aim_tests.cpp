@@ -356,8 +356,8 @@ void test_body_box_shape_jitter_preserves_real_translation() {
         static_cast<float>(settled_frames);
     const float mean_velocity_error = settled_velocity_error_sum /
         static_cast<float>(settled_frames);
-    expect(mean_position_error <= 1.50f &&
-               mean_velocity_error <= 30.0f,
+    expect(mean_position_error <= 0.50f &&
+               mean_velocity_error <= 20.0f,
            "去除人物框形变时不得丢失真实匀速平移，位置均值误差=" +
                std::to_string(mean_position_error) + "，速度均值误差=" +
                std::to_string(mean_velocity_error));
