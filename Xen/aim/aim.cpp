@@ -1190,29 +1190,56 @@ struct Aim::Impl {
             delay_lead_scale = std::min(
                 1.0f, delay_lead_scale +
                     kPredictionLeadRampPerSecond * track.prediction_dt);
-            float lead_x = world_motion_x * horizon_frames *
+            float forecast_x = world_motion_x * horizon_frames *
                 delay_lead_scale;
-            float lead_y = world_motion_y * horizon_frames *
+            float forecast_y = world_motion_y * horizon_frames *
                 delay_lead_scale;
-            // 额外预测时域只有基础延迟时域的 0.5 倍，几何上限也必须
-            // 按同一比例缩放。这样世界运动观察器的短时过估不能跳过
-            // 延迟补偿已验证的尺度边界，用户的总预测百分比仍是更外层硬上限。
+            // 额外预测时域只有基础延迟时域的 0.5 倍，因此先单独限制真正的
+            // 世界运动前探。后续若延迟补偿沿世界运动反方向，只允许 prediction
+            // 抵消该轴向反向分量；不能把这部分抵消误算成额外预测时域。
             const float derived_lead_percent =
                 config.max_delay_compensation_percent *
                 kPredictionAdditionalHorizonScale;
             clamp_vector(
-                lead_x, lead_y,
+                forecast_x, forecast_y,
                 box_diagonal * std::min(
                     config.max_prediction_lead_percent,
                     derived_lead_percent) / 100.0f);
             // 渐入初期的亚量化提前量既不会形成可感知控制效果，又可能在准星
             // 附近把最终点推过零点。内部渐入状态继续累积，但只有实际向量
             // 达到同一激活门槛后才公开为最终点，避免停止阶段的微小再次前探。
-            if (std::fabs(lead_x) < activation_distance_x) lead_x = 0.0f;
-            if (std::fabs(lead_y) < activation_distance_y) lead_y = 0.0f;
-            if (lead_x == 0.0f && lead_y == 0.0f) {
+            if (std::fabs(forecast_x) < activation_distance_x) {
+                forecast_x = 0.0f;
+            }
+            if (std::fabs(forecast_y) < activation_distance_y) {
+                forecast_y = 0.0f;
+            }
+            if (forecast_x == 0.0f && forecast_y == 0.0f) {
                 return projection;
             }
+            // 真机 MoveLeft Run 20260809-225041 中，世界前探 P50 为向左
+            // 3.11 px，但屏幕相对速度生成的延迟补偿 P50 为向右 2.45 px；
+            // 99.32% 的有效帧发生抵消，最终点 P50 只剩 0.37 count，肉眼等同
+            // 没有预测。prediction 仍从延迟点叠加，但必须先吃掉延迟向量在
+            // 世界运动反方向上的投影，再把独立世界运动前探完整留在基础点前方。
+            // 同向和正交延迟分量保持原样，基础点、轨迹与基础控制器均不回写。
+            // 鼠标按轴量化，水平追踪中少量垂直姿态噪声不能把水平抵消量旋转到
+            // 另一轴。只在该轴的延迟分量与世界前探确实反向时逐轴抵消；同向轴
+            // 和没有有效前探的轴完全不动。
+            const float opposing_delay_x =
+                projection.delay_x * forecast_x < 0.0f
+                ? -projection.delay_x : 0.0f;
+            const float opposing_delay_y =
+                projection.delay_y * forecast_y < 0.0f
+                ? -projection.delay_y : 0.0f;
+            float lead_x = forecast_x + opposing_delay_x;
+            float lead_y = forecast_y + opposing_delay_y;
+            // 公有 lead 表示“延迟点到最终点”的完整位移，因此抵消量加入后仍须
+            // 服从用户配置的 prediction 总几何上限。默认 35% 足以容纳最多
+            // 15% 的反向延迟抵消和 7.5% 的额外前探，但异常配置也不能越界。
+            clamp_vector(
+                lead_x, lead_y,
+                box_diagonal * config.max_prediction_lead_percent / 100.0f);
             projection.final_x = projection.delay_compensated_x + lead_x;
             projection.final_y = projection.delay_compensated_y + lead_y;
             projection.active = true;
@@ -1519,6 +1546,22 @@ struct Aim::Impl {
             desired_x * error_x + desired_y * error_y <= 0.0f) {
             desired_x = proportional_x;
             desired_y = proportional_y;
+        }
+        // prediction 活动时，最终点可能已经越过基础点，但仍暂时位于准星另一侧。
+        // 此时沿世界运动反方向纠偏只会把准星拉回旧位置；真实延迟闭环会将
+        // 这种“追上后反拉”放大为经零反转抖动。对确有世界运动分量的轴选择
+        // 停发等待目标进入预测点，不影响 prediction 退出后的基础归位，也不
+        // 改写 tracking 配置的控制路径。
+        if (config.enable_prediction &&
+            config.enable_delay_compensation && lead_active) {
+            if (std::fabs(lead_direction_x) > 0.10f &&
+                desired_x * lead_direction_x < 0.0f) {
+                desired_x = 0.0f;
+            }
+            if (std::fabs(lead_direction_y) > 0.10f &&
+                desired_y * lead_direction_y < 0.0f) {
+                desired_y = 0.0f;
+            }
         }
         const bool moving_away_x =
             tracking_error_x * track.vx > 0.0f &&

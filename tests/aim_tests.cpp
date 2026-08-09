@@ -1124,10 +1124,12 @@ void test_prediction_uses_world_motion_when_delay_vector_points_backward() {
     float camera_x = 0.0f;
     int backward_delay_frames = 0;
     int wrong_prediction_direction_frames = 0;
+    int prediction_not_ahead_of_base_frames = 0;
     int all_wrong_prediction_direction_frames = 0;
     int lead_active_frames = 0;
     int shifted_base_frames = 0;
     float maximum_lead_distance = 0.0f;
+    std::string first_not_ahead_trace;
 
     for (int index = 0; index < 960; ++index) {
         camera_x += delayed_commands[index % kActuationDelayFrames] /
@@ -1175,6 +1177,26 @@ void test_prediction_uses_world_motion_when_delay_vector_points_backward() {
                     result.target.delay_compensated_aim_x) {
                 ++wrong_prediction_direction_frames;
             }
+            // MoveLeft 的延迟点被屏幕相对速度拉到基础点右侧时，prediction
+            // 必须先吃掉这段反向位移，再从基础点继续沿世界运动方向前探。
+            // 只验证最终投影，不允许为了通过回归改写轨迹或基础瞄点。
+            if (result.target.aim_x >= result.target.base_aim_x) {
+                ++prediction_not_ahead_of_base_frames;
+                if (first_not_ahead_trace.empty()) {
+                    first_not_ahead_trace =
+                        "帧=" + std::to_string(index) +
+                        "，base=" +
+                        std::to_string(result.target.base_aim_x) +
+                        "，delay=" +
+                        std::to_string(result.target.delay_compensated_aim_x) +
+                        "，final=" +
+                        std::to_string(result.target.aim_x) +
+                        "，lead=" +
+                        std::to_string(result.target.lead_x) +
+                        "，delay_dx=" +
+                        std::to_string(result.target.delay_compensation_x);
+                }
+            }
         }
         if (result.has_command) {
             delayed_commands[index % kActuationDelayFrames] =
@@ -1187,14 +1209,18 @@ void test_prediction_uses_world_motion_when_delay_vector_points_backward() {
     expect(wrong_prediction_direction_frames == 0,
            "延迟向量向右拉回时，MoveLeft prediction 仍必须沿世界运动向左，错误帧=" +
                std::to_string(wrong_prediction_direction_frames));
+    expect(prediction_not_ahead_of_base_frames == 0,
+           "延迟补偿与 MoveLeft 世界运动反向时，最终预测点必须越过基础点形成可见提前量，未越过帧=" +
+               std::to_string(prediction_not_ahead_of_base_frames) +
+               "，首帧=" + first_not_ahead_trace);
     expect(lead_active_frames > 0 &&
                all_wrong_prediction_direction_frames == 0 &&
                maximum_lead_distance >= 0.25f &&
                maximum_lead_distance <=
                    std::hypot(40.0f, 80.0f) *
-                       config.max_delay_compensation_percent / 100.0f * 0.50f +
+                       config.max_delay_compensation_percent / 100.0f * 1.50f +
                        0.01f,
-           "MoveLeft 全程的 prediction 必须只向左且不得被闭环放大，活动=" +
+           "MoveLeft 全程的 prediction 必须只向左，且反向延迟抵消量与额外前探都受几何上限约束，活动=" +
                std::to_string(lead_active_frames) + "，错向=" +
                std::to_string(all_wrong_prediction_direction_frames) +
                "，最大提前=" +
@@ -1853,6 +1879,7 @@ void test_prediction_adds_continuous_delay_derived_lead() {
         int maximum_command_step_frame = -1;
         int maximum_command_step_before = 0;
         int maximum_command_step_after = 0;
+        std::string command_reversal_trace;
     };
     const auto run = [](bool prediction_enabled) {
         AimConfig config;
@@ -1944,6 +1971,23 @@ void test_prediction_adds_continuous_delay_derived_lead() {
                 if (previous_nonzero_command_sign != 0 &&
                     command_sign != previous_nonzero_command_sign) {
                     ++metrics.zero_mediated_command_reversals;
+                    if (metrics.command_reversal_trace.empty()) {
+                        metrics.command_reversal_trace =
+                            "帧=" + std::to_string(index) +
+                            "，前向=" +
+                            std::to_string(previous_nonzero_command_sign) +
+                            "，当前命令=" +
+                            std::to_string(horizontal_command) +
+                            "，base=" +
+                            std::to_string(result.target.base_aim_x) +
+                            "，delay=" +
+                            std::to_string(
+                                result.target.delay_compensated_aim_x) +
+                            "，final=" +
+                            std::to_string(result.target.aim_x) +
+                            "，lead=" +
+                            std::to_string(result.target.lead_x);
+                    }
                 }
                 previous_nonzero_command_sign = command_sign;
                 if (have_previous_command) {
@@ -2013,7 +2057,8 @@ void test_prediction_adds_continuous_delay_derived_lead() {
                "，命令=" +
                std::to_string(prediction.maximum_command_step_before) +
                "→" +
-               std::to_string(prediction.maximum_command_step_after));
+               std::to_string(prediction.maximum_command_step_after) +
+               "，首个经零反转=" + prediction.command_reversal_trace);
     expect(prediction.maximum_stationary_lead <= 0.50f &&
                prediction.late_stationary_command_frames == 0 &&
                prediction.maximum_stationary_error <= 4.0f &&
