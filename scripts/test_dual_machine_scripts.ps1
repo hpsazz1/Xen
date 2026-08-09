@@ -21,6 +21,8 @@ $scriptPaths = @(
     "scripts/runtime_report_sequence.ps1",
     "scripts/test_benchmark_report_scale.ps1",
     "scripts/publish_dual_machine_package.ps1",
+    "scripts/invoke_aim_manual_acceptance.ps1",
+    "scripts/publish_aim_worker_delta.ps1",
     "scripts/runtime_environment.ps1"
 ) | ForEach-Object { Join-Path $RepositoryRoot $_ }
 
@@ -98,6 +100,20 @@ $packageScriptText = [System.IO.File]::ReadAllText(
 Assert-True ($packageScriptText -match '"aim_report\.ps1"' -and
     $packageScriptText -match '"runtime_report_sequence\.ps1"') `
     "双机便携包必须携带 Aim 与线性 sequence 报告助手。"
+
+$aimDeltaText = [System.IO.File]::ReadAllText(
+    (Join-Path $RepositoryRoot "scripts/publish_aim_worker_delta.ps1"))
+Assert-True ($aimDeltaText -match
+        '\[ValidateSet\("AIM-DUAL-ACCEPT-001", "AIM-LATENCY-COMP-001"\)\]' -and
+    $aimDeltaText -match
+        '\[string\]\$TaskId\s*=\s*"AIM-LATENCY-COMP-001"' -and
+    $aimDeltaText -match
+        '\$remoteScript\s*\+\s*''" -TaskId ''\s*\+\s*\$TaskId' -and
+    $aimDeltaText -match
+        '\[string\]\$task\.task_id\s*-ne\s*\$TaskId' -and
+    $aimDeltaText -match
+        '\[bool\]\$task\.aim\.prediction_enabled\s*-ne\s*\(\$Profile -eq "prediction"\)') `
+    "Aim 差量入口必须透传任务 ID，并按 profile 回读 prediction 快照。"
 
 & (Join-Path $RepositoryRoot "scripts/test_benchmark_report_scale.ps1") `
     -SyntheticSampleCount 72002 -LegacyProbeCount 5000 -Quiet

@@ -8,6 +8,8 @@
     [string]$SshHost = "192.168.3.20",
     [switch]$ConfigOnly,
     [switch]$Prepare,
+    [ValidateSet("AIM-DUAL-ACCEPT-001", "AIM-LATENCY-COMP-001")]
+    [string]$TaskId = "AIM-LATENCY-COMP-001",
     [string]$Scenario = "MoveLeft",
     [string]$Profile = "tracking",
     [ValidateRange(0.0, 1.0)]
@@ -173,7 +175,7 @@ if ($Prepare) {
     $remoteScript = 'C:\XenLab\releases\Xen-888b04e-aim-dual\tools\invoke_aim_manual_acceptance.ps1'
     $remoteRoot = 'C:\XenLab\releases\Xen-888b04e-aim-dual'
     $remoteCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' +
-        $remoteScript + '" -TaskId AIM-LATENCY-COMP-001 -Scenario ' +
+        $remoteScript + '" -TaskId ' + $TaskId + ' -Scenario ' +
         $Scenario + ' -Profile ' + $Profile +
         ' -Mode Prepare -PackageRoot "' + $remoteRoot +
         '" -Smoothing ' + $Smoothing.ToString(
@@ -211,10 +213,11 @@ $expectedSmoothing = $Smoothing.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
 $expectedCounts = $CountsPerPixel.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
+$expectedPrediction = if ($Profile -eq "prediction") { "true" } else { "false" }
 if ($configText -notmatch "(?m)^smoothing=$([regex]::Escape($expectedSmoothing))\r?$" -or
     $configText -notmatch "(?m)^counts_per_pixel_x=$([regex]::Escape($expectedCounts))\r?$" -or
     $configText -notmatch "(?m)^counts_per_pixel_y=$([regex]::Escape($expectedCounts))\r?$" -or
-    $configText -notmatch '(?m)^enable_prediction=false\r?$' -or
+    $configText -notmatch "(?m)^enable_prediction=$expectedPrediction\r?$" -or
     $configText -notmatch '(?m)^enable_delay_compensation=true\r?$' -or
     $configText -notmatch '(?m)^control_delay_ms=15\.000000\r?$') {
     throw "最终 config.ini 没有固化本轮唯一变量和不变参数。"
@@ -259,10 +262,13 @@ if ($Prepare) {
     $task = Read-Json (Join-Path $runRoot "task.json") "Prepare task.json"
     if ($runConfigHash -ne $remoteConfigHash -or
         [string]$task.run_id -ne $runId -or
-        [string]$task.task_id -ne "AIM-LATENCY-COMP-001" -or
+        [string]$task.task_id -ne $TaskId -or
+        [string]$task.scenario -ne $Scenario -or
+        [string]$task.profile -ne $Profile -or
         [double]$task.aim.smoothing -ne $Smoothing -or
         [double]$task.aim.counts_per_pixel -ne $CountsPerPixel -or
         -not [bool]$task.aim.delay_compensation_enabled -or
+        [bool]$task.aim.prediction_enabled -ne ($Profile -eq "prediction") -or
         [double]$task.aim.control_delay_ms -ne 15.0 -or
         [string]$task.config.sha256 -ne $remoteConfigHash -or
         [string]$task.package_manifest.sha256 -ne $remoteManifestHash) {
