@@ -93,6 +93,10 @@ constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
 // 随后越过准星的幅度。这里只用于保守预测在途位移，不改变鼠标标定。
 constexpr float kControllerPendingCommandResponse = 0.15f;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
+// 真实 MoveLeft 序列中，延迟向量方向仅跨越阈值反转 5 次，而原始速度
+// 符号出现 459 个短游程。prediction 因此从延迟补偿点沿同一向量再前探
+// 半个补偿窗口：P50/P95 约 1.42/2.09 px，既可感知又保留过冲余量。
+constexpr float kPredictionDelayHorizonScale = 0.50f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
 // 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
 constexpr float kControllerQuantizationMotionThresholdPixelsPerSecond = 10.0f;
@@ -1040,8 +1044,52 @@ struct Aim::Impl {
             return projection;
         }
 
-        // prediction 的进入、退出和方向判断必须建立在已经完成延迟补偿的
-        // tracking 点上，最终提前量也叠加在该点之后。
+        if (projection.delay_active && !track.predicted) {
+            // 延迟向量已经同时包含轨迹位移和在途命令扣减，真实序列中的
+            // 方向远比逐帧原始速度稳定。prediction 直接以补偿后的点为
+            // 原点，沿该有界向量继续前探；不再等待框尺度误差积累后才启动。
+            const float delay_magnitude = std::hypot(
+                projection.delay_x, projection.delay_y);
+            const float activation_distance = std::max(
+                0.25f, config.deadzone_pixels * 0.50f);
+            if (delay_magnitude <= activation_distance) {
+                lead_active = false;
+                lead_candidate_frames = 0;
+                return projection;
+            }
+            const bool direction_reversed = lead_active &&
+                lead_direction_x * projection.delay_x +
+                    lead_direction_y * projection.delay_y <= 0.0f;
+            if (direction_reversed) {
+                lead_active = false;
+                lead_candidate_frames = 0;
+                return projection;
+            }
+            if (!lead_active) {
+                ++lead_candidate_frames;
+                const int required_frames = lead_ever_activated ? 2 : 1;
+                if (lead_candidate_frames < required_frames) return projection;
+                lead_active = true;
+                lead_ever_activated = true;
+                lead_candidate_frames = 0;
+            }
+            lead_direction_x = projection.delay_x / delay_magnitude;
+            lead_direction_y = projection.delay_y / delay_magnitude;
+            float lead_x = projection.delay_x *
+                kPredictionDelayHorizonScale;
+            float lead_y = projection.delay_y *
+                kPredictionDelayHorizonScale;
+            clamp_vector(
+                lead_x, lead_y,
+                box_diagonal * config.max_prediction_lead_percent / 100.0f);
+            projection.final_x = projection.delay_compensated_x + lead_x;
+            projection.final_y = projection.delay_compensated_y + lead_y;
+            projection.active = true;
+            return projection;
+        }
+
+        // 未启用延迟补偿时保留原有的准星闭环迟滞语义。此分支没有可
+        // 复用的延迟向量，只能按相对速度和观测年龄做保守预测。
         const float error_x =
             projection.delay_compensated_x - frame.control_center_x;
         const float error_y =
@@ -1073,11 +1121,10 @@ struct Aim::Impl {
         } else {
             // 准星移动会反向改变目标的屏幕速度。预测退出后若立即按该相对
             // 速度重新前探，会形成“越过目标→反拉→归位→再次前探”的极限环。
-            // 只有基础点沿原预测方向连续回到中心小范围后才重新武装；该
-            // 条件由目标框尺度归一化，作为后台状态机，不增加用户参数。
+            // 只有基础点沿原预测方向连续回到中心小范围后才重新武装。
             if (!lead_rearm_ready) {
-                // 重新武装只判断上一预测方向上的归位。身体默认瞄点可能在
-                // 垂直方向天然偏离准星，正交误差不能永久阻塞水平预测恢复。
+                // 只判断上一预测方向上的归位；身体默认瞄点在正交方向的
+                // 天然偏移不能永久阻塞水平预测恢复。
                 if (lead_axis_error <= exit_distance) {
                     ++lead_settle_frames;
                     constexpr int kLeadSettleConfirmFrames = 5;
@@ -1219,9 +1266,13 @@ struct Aim::Impl {
                                             float counts_per_pixel,
                                             float delayed_command,
                                             float& feedforward) {
-            if (config.enable_prediction) {
-                // prediction 状态机和基础 tracking 共用相对速度时，提前量
-                // 会让自运动补偿失去可观测性；基础控制只保留比例与整形。
+            if (config.enable_prediction &&
+                !config.enable_delay_compensation) {
+                // 无延迟向量时 prediction 只能按相对速度生成提前量；若再
+                // 叠加基础速度前馈，同一相机运动会被两条路径重复补偿，
+                // 静止归位会形成闭环极限环，因此只保留比例与整形。
+                // 启用延迟补偿时 prediction 仅延伸其既有向量，基础 tracking
+                // 前馈必须继续工作，否则开关 prediction 会直接造成严重滞后。
                 feedforward *= std::exp(
                     -kControllerFeedforwardLeakPerSecond * controller_dt);
             } else if (track.predicted) {
