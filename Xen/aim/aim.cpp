@@ -105,6 +105,11 @@ constexpr float kPredictionAdditionalHorizonScale = 1.50f;
 // 这个状态只读取基础前馈，绝不回写轨迹、基础控制点或基础控制器。
 constexpr float kPredictionWorldMotionGainPerSecond = 2.0f;
 constexpr float kPredictionWorldMotionReleasePerSecond = 120.0f;
+// 世界速度低通仍可能遇到 Provider/NDI 突发交付、几何上限切入或基础前馈
+// 量化边沿。最终预测偏移单独按目标对角线/秒限速，保证基础点不动的同时
+// 阻止预测点一帧从半程跳到几何上限。1.5 diagonals/s 在 240 Hz、约 100 px
+// 人物框下每帧最多约 0.63 px，不改变稳定提前距离。
+constexpr float kPredictionOffsetMaximumSlewDiagonalsPerSecond = 1.5f;
 // 世界运动测量与屏幕相对速度同轴连续五帧都低于门槛后，prediction 才
 // 释放额外前探；基础前馈自身仍保留更长的静止确认，不因 prediction
 // 改变 tracking 状态。
@@ -166,6 +171,22 @@ void clamp_vector(float& x, float& y, float maximum) noexcept {
     const float scale = maximum / magnitude;
     x *= scale;
     y *= scale;
+}
+
+void move_vector_toward(float target_x, float target_y,
+                        float maximum_delta,
+                        float& current_x, float& current_y) noexcept {
+    const float delta_x = target_x - current_x;
+    const float delta_y = target_y - current_y;
+    const float distance = std::hypot(delta_x, delta_y);
+    if (distance <= maximum_delta || distance <= 0.0f) {
+        current_x = target_x;
+        current_y = target_y;
+        return;
+    }
+    const float scale = maximum_delta / distance;
+    current_x += delta_x * scale;
+    current_y += delta_y * scale;
 }
 
 float common_edge_motion(float first_residual,
@@ -299,8 +320,12 @@ struct Aim::Impl {
     float feedforward_y = 0.0f;
     float world_motion_measurement_x = 0.0f;
     float world_motion_measurement_y = 0.0f;
-    float prediction_world_motion_x = 0.0f;
-    float prediction_world_motion_y = 0.0f;
+    // 独立 prediction 状态使用 counts/second；基础控制器前馈仍保持
+    // counts/frame，二者不能混用，否则瞬时帧间隔会改变预测距离。
+    float prediction_world_velocity_x = 0.0f;
+    float prediction_world_velocity_y = 0.0f;
+    float prediction_offset_x = 0.0f;
+    float prediction_offset_y = 0.0f;
     int prediction_low_motion_x_frames = 0;
     int prediction_low_motion_y_frames = 0;
     std::array<IssuedCommand, kControllerCommandHistoryCapacity>
@@ -972,11 +997,13 @@ struct Aim::Impl {
         return {pending_x, pending_y};
     }
 
-    std::pair<float, float> stable_prediction_world_motion(
+    std::pair<float, float> stable_prediction_world_velocity(
             const AimFrame& frame, const Track& track) noexcept {
         if (!frame.lock_active || controller_track_id != track.id) {
-            prediction_world_motion_x = 0.0f;
-            prediction_world_motion_y = 0.0f;
+            prediction_world_velocity_x = 0.0f;
+            prediction_world_velocity_y = 0.0f;
+            prediction_offset_x = 0.0f;
+            prediction_offset_y = 0.0f;
             prediction_low_motion_x_frames = 0;
             prediction_low_motion_y_frames = 0;
             return {0.0f, 0.0f};
@@ -997,7 +1024,7 @@ struct Aim::Impl {
             return std::fabs(relative_counts) > std::fabs(world_measurement)
                 ? relative_counts : world_measurement;
         };
-        aim::detail::update_prediction_motion_axis(
+        aim::detail::update_prediction_velocity_axis(
             feedforward_x,
             stop_measurement(
                 world_motion_measurement_x, track.vx,
@@ -1007,8 +1034,8 @@ struct Aim::Impl {
             kPredictionStaticReleaseConfirmFrames,
             kPredictionWorldMotionGainPerSecond,
             kPredictionWorldMotionReleasePerSecond,
-            prediction_world_motion_x, prediction_low_motion_x_frames);
-        aim::detail::update_prediction_motion_axis(
+            prediction_world_velocity_x, prediction_low_motion_x_frames);
+        aim::detail::update_prediction_velocity_axis(
             feedforward_y,
             stop_measurement(
                 world_motion_measurement_y, track.vy,
@@ -1018,20 +1045,18 @@ struct Aim::Impl {
             kPredictionStaticReleaseConfirmFrames,
             kPredictionWorldMotionGainPerSecond,
             kPredictionWorldMotionReleasePerSecond,
-            prediction_world_motion_y, prediction_low_motion_y_frames);
-        if (std::hypot(
-                prediction_world_motion_x,
-                prediction_world_motion_y) <=
-            kPredictionWorldMotionMinimumCounts) {
+            prediction_world_velocity_y, prediction_low_motion_y_frames);
+        if (prediction_world_velocity_x == 0.0f &&
+            prediction_world_velocity_y == 0.0f) {
             return {0.0f, 0.0f};
         }
-        // 慢速状态的单位仍为 counts/frame，换算后是每个观测帧的源像素
-        // 位移。调用者再按额外预测时域与真实 dt 的比例积分为提前量。
+        // 独立状态已经是 counts/second；这里只换算为检测 ROI 像素/秒，
+        // 调用者直接乘固定预测秒数，不再除以瞬时 prediction_dt。
         return {
-            prediction_world_motion_x /
+            prediction_world_velocity_x /
                 (config.counts_per_pixel_x *
                  frame.source_pixels_per_roi_pixel_x),
-            prediction_world_motion_y /
+            prediction_world_velocity_y /
                 (config.counts_per_pixel_y *
                  frame.source_pixels_per_roi_pixel_y)};
     }
@@ -1048,8 +1073,10 @@ struct Aim::Impl {
         feedforward_y = 0.0f;
         world_motion_measurement_x = 0.0f;
         world_motion_measurement_y = 0.0f;
-        prediction_world_motion_x = 0.0f;
-        prediction_world_motion_y = 0.0f;
+        prediction_world_velocity_x = 0.0f;
+        prediction_world_velocity_y = 0.0f;
+        prediction_offset_x = 0.0f;
+        prediction_offset_y = 0.0f;
         prediction_low_motion_x_frames = 0;
         prediction_low_motion_y_frames = 0;
         issued_commands = {};
@@ -1138,8 +1165,10 @@ struct Aim::Impl {
             lead_direction_x = 0.0f;
             lead_direction_y = 0.0f;
             delay_lead_scale = 0.0f;
-            prediction_world_motion_x = 0.0f;
-            prediction_world_motion_y = 0.0f;
+            prediction_world_velocity_x = 0.0f;
+            prediction_world_velocity_y = 0.0f;
+            prediction_offset_x = 0.0f;
+            prediction_offset_y = 0.0f;
             prediction_low_motion_x_frames = 0;
             prediction_low_motion_y_frames = 0;
         }
@@ -1154,8 +1183,10 @@ struct Aim::Impl {
             lead_settle_frames = 0;
             lead_candidate_frames = 0;
             delay_lead_scale = 0.0f;
-            prediction_world_motion_x = 0.0f;
-            prediction_world_motion_y = 0.0f;
+            prediction_world_velocity_x = 0.0f;
+            prediction_world_velocity_y = 0.0f;
+            prediction_offset_x = 0.0f;
+            prediction_offset_y = 0.0f;
             prediction_low_motion_x_frames = 0;
             prediction_low_motion_y_frames = 0;
             return projection;
@@ -1175,8 +1206,10 @@ struct Aim::Impl {
             lead_direction_x = 0.0f;
             lead_direction_y = 0.0f;
             delay_lead_scale = 0.0f;
-            prediction_world_motion_x = 0.0f;
-            prediction_world_motion_y = 0.0f;
+            prediction_world_velocity_x = 0.0f;
+            prediction_world_velocity_y = 0.0f;
+            prediction_offset_x = 0.0f;
+            prediction_offset_y = 0.0f;
             prediction_low_motion_x_frames = 0;
             prediction_low_motion_y_frames = 0;
             return projection;
@@ -1190,14 +1223,13 @@ struct Aim::Impl {
             // 控制延迟时域内积分，不会再反读 prediction 放大后的延迟向量。
             // 瞬时延迟向量恰好为零时仍属于同一模式，不能因此清空逐轴反拉
             // 保持并退回无延迟状态机。
-            const auto [world_motion_x, world_motion_y] =
-                stable_prediction_world_motion(frame, track);
-            const float world_motion_magnitude = std::hypot(
-                world_motion_x, world_motion_y);
-            const float horizon_frames =
+            const auto [world_velocity_x, world_velocity_y] =
+                stable_prediction_world_velocity(frame, track);
+            const float world_velocity_magnitude = std::hypot(
+                world_velocity_x, world_velocity_y);
+            const float horizon_seconds =
                 projection.delay_seconds *
-                kPredictionAdditionalHorizonScale /
-                std::max(track.prediction_dt, 1.0f / 1000.0f);
+                kPredictionAdditionalHorizonScale;
             const float activation_distance_x = std::max(
                 {0.25f, config.deadzone_pixels * 0.50f,
                  0.50f /
@@ -1208,8 +1240,8 @@ struct Aim::Impl {
                  0.50f /
                      (config.counts_per_pixel_y *
                       frame.source_pixels_per_roi_pixel_y)});
-            const float desired_lead_x = world_motion_x * horizon_frames;
-            const float desired_lead_y = world_motion_y * horizon_frames;
+            const float desired_lead_x = world_velocity_x * horizon_seconds;
+            const float desired_lead_y = world_velocity_y * horizon_seconds;
             const float forecast_limit_percent = std::min(
                 config.max_prediction_lead_percent,
                 config.max_delay_compensation_percent *
@@ -1218,20 +1250,20 @@ struct Aim::Impl {
                 config.deadzone_pixels * 2.0f,
                 box_diagonal * forecast_limit_percent / 100.0f);
             const auto update_pullback_hold = [&](
-                    float world_motion, float base_error,
+                    float world_velocity, float base_error,
                     float hold_direction, bool& hold) {
-                if (hold && hold_direction * world_motion < 0.0f &&
+                if (hold && hold_direction * world_velocity < 0.0f &&
                     -base_error * hold_direction >=
                         reverse_takeover_distance) {
                     hold = false;
                 }
             };
             update_pullback_hold(
-                world_motion_x, base_x - frame.control_center_x,
+                world_velocity_x, base_x - frame.control_center_x,
                 prediction_pullback_direction_x,
                 prediction_pullback_hold_x);
             update_pullback_hold(
-                world_motion_y, base_y - frame.control_center_y,
+                world_velocity_y, base_y - frame.control_center_y,
                 prediction_pullback_direction_y,
                 prediction_pullback_hold_y);
             // 二维 prediction 可能仍因垂直姿态保持 active，但水平世界状态
@@ -1253,7 +1285,7 @@ struct Aim::Impl {
             }
             if ((std::fabs(desired_lead_x) <= activation_distance_x &&
                  std::fabs(desired_lead_y) <= activation_distance_y) ||
-                world_motion_magnitude <= 0.0f) {
+                world_velocity_magnitude <= 0.0f) {
                 // 已经形成提前后，低运动释放不能立刻回到基础点发送反向命令；
                 // 保持停发，等待真实反向或锁定结束，切断“提前—拉回—再预测”。
                 if (lead_active && std::fabs(lead_direction_x) > 0.001f) {
@@ -1269,17 +1301,19 @@ struct Aim::Impl {
                 lead_active = false;
                 lead_candidate_frames = 0;
                 delay_lead_scale = 0.0f;
+                prediction_offset_x = 0.0f;
+                prediction_offset_y = 0.0f;
                 return projection;
             }
             const bool opposite_world_direction =
                 lead_active &&
-                lead_direction_x * world_motion_x +
-                    lead_direction_y * world_motion_y <= 0.0f;
+                lead_direction_x * world_velocity_x +
+                    lead_direction_y * world_velocity_y <= 0.0f;
             if (opposite_world_direction) {
                 // 全局世界方向可能因垂直姿态先反号；水平和垂直分别保存旧
                 // 方向，只允许各自越过接管距离后解除对应轴的停发保护。
                 if (std::fabs(lead_direction_x) > 0.001f &&
-                    !(lead_direction_x * world_motion_x < 0.0f &&
+                    !(lead_direction_x * world_velocity_x < 0.0f &&
                       -(base_x - frame.control_center_x) * lead_direction_x >=
                           reverse_takeover_distance)) {
                     prediction_pullback_hold_x = true;
@@ -1287,7 +1321,7 @@ struct Aim::Impl {
                         std::copysign(1.0f, lead_direction_x);
                 }
                 if (std::fabs(lead_direction_y) > 0.001f &&
-                    !(lead_direction_y * world_motion_y < 0.0f &&
+                    !(lead_direction_y * world_velocity_y < 0.0f &&
                       -(base_y - frame.control_center_y) * lead_direction_y >=
                           reverse_takeover_distance)) {
                     prediction_pullback_hold_y = true;
@@ -1297,6 +1331,8 @@ struct Aim::Impl {
                 lead_active = false;
                 lead_candidate_frames = 0;
                 delay_lead_scale = 0.0f;
+                prediction_offset_x = 0.0f;
+                prediction_offset_y = 0.0f;
                 return projection;
             }
             if (!lead_active) {
@@ -1307,14 +1343,14 @@ struct Aim::Impl {
                 lead_ever_activated = true;
                 lead_candidate_frames = 0;
             }
-            lead_direction_x = world_motion_x / world_motion_magnitude;
-            lead_direction_y = world_motion_y / world_motion_magnitude;
+            lead_direction_x = world_velocity_x / world_velocity_magnitude;
+            lead_direction_y = world_velocity_y / world_velocity_magnitude;
             delay_lead_scale = std::min(
                 1.0f, delay_lead_scale +
                     kPredictionLeadRampPerSecond * track.prediction_dt);
-            float forecast_x = world_motion_x * horizon_frames *
+            float forecast_x = world_velocity_x * horizon_seconds *
                 delay_lead_scale;
-            float forecast_y = world_motion_y * horizon_frames *
+            float forecast_y = world_velocity_y * horizon_seconds *
                 delay_lead_scale;
             // 额外预测时域为基础延迟时域的 1.5 倍，因此先单独限制真正的
             // 世界运动前探。后续若延迟补偿沿世界运动反方向，只允许 prediction
@@ -1357,8 +1393,30 @@ struct Aim::Impl {
             clamp_vector(
                 lead_x, lead_y,
                 box_diagonal * config.max_prediction_lead_percent / 100.0f);
-            projection.final_x = projection.delay_compensated_x + lead_x;
-            projection.final_y = projection.delay_compensated_y + lead_y;
+            // 延迟抵消后才得到真正送入控制器的最终预测点。把它转换为相对
+            // 基础点的独立偏移并按秒限速：基础点仍严格锁在身体框内，预测偏移
+            // 可以越过框边界；NDI 突发交付、延迟向量变化和几何上限切入都不能
+            // 再让最终点一帧跳到另一位置。
+            const float target_offset_x = projection.delay_x + lead_x;
+            const float target_offset_y = projection.delay_y + lead_y;
+            move_vector_toward(
+                target_offset_x, target_offset_y,
+                box_diagonal *
+                    kPredictionOffsetMaximumSlewDiagonalsPerSecond *
+                    track.prediction_dt,
+                prediction_offset_x, prediction_offset_y);
+            // 公有 lead 的硬上限以“延迟点到最终点”为定义。当前延迟向量
+            // 变化后，历史平滑状态可能暂时落在新上限之外，因此在发布前再次
+            // 收敛，并同步保存状态，保证运行时契约始终成立。
+            float smoothed_lead_x = prediction_offset_x - projection.delay_x;
+            float smoothed_lead_y = prediction_offset_y - projection.delay_y;
+            clamp_vector(
+                smoothed_lead_x, smoothed_lead_y,
+                box_diagonal * config.max_prediction_lead_percent / 100.0f);
+            prediction_offset_x = projection.delay_x + smoothed_lead_x;
+            prediction_offset_y = projection.delay_y + smoothed_lead_y;
+            projection.final_x = base_x + prediction_offset_x;
+            projection.final_y = base_y + prediction_offset_y;
             projection.active = true;
             return projection;
         }
@@ -1370,6 +1428,8 @@ struct Aim::Impl {
         prediction_pullback_hold_y = false;
         prediction_pullback_direction_x = 0.0f;
         prediction_pullback_direction_y = 0.0f;
+        prediction_offset_x = 0.0f;
+        prediction_offset_y = 0.0f;
         const float error_x =
             projection.delay_compensated_x - frame.control_center_x;
         const float error_y =
@@ -1892,8 +1952,10 @@ struct Aim::Impl {
         lead_candidate_frames = 0;
         lead_direction_x = 0.0f;
         lead_direction_y = 0.0f;
-        prediction_world_motion_x = 0.0f;
-        prediction_world_motion_y = 0.0f;
+        prediction_world_velocity_x = 0.0f;
+        prediction_world_velocity_y = 0.0f;
+        prediction_offset_x = 0.0f;
+        prediction_offset_y = 0.0f;
         prediction_low_motion_x_frames = 0;
         prediction_low_motion_y_frames = 0;
         world_motion_measurement_x = 0.0f;
