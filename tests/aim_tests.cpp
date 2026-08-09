@@ -1523,8 +1523,8 @@ void test_delay_compensation_stacks_before_prediction() {
                          result.target.delay_compensated_aim_x -
                          result.target.lead_x) < 0.01f &&
                std::fabs(result.target.lead_x -
-                         result.target.delay_compensation_x * 0.50f) < 0.01f,
-           "prediction 必须从延迟补偿点按同一窗口导出的短视距继续外推");
+                         result.target.delay_compensation_x * 2.00f) < 0.01f,
+           "prediction 必须从延迟补偿点按同一窗口导出的可见视距继续外推");
 }
 
 void test_short_glide_preserves_base_tracking_hold() {
@@ -1658,14 +1658,16 @@ void test_prediction_layer_keeps_base_tracking_hold_continuous() {
 
 void test_prediction_adds_continuous_delay_derived_lead() {
     struct Metrics {
-        float delay_error_sum = 0.0f;
-        int delay_error_samples = 0;
+        float control_error_sum = 0.0f;
+        int control_error_samples = 0;
         int lead_active_frames = 0;
         int late_stationary_lead_frames = 0;
         int late_stationary_command_frames = 0;
         float maximum_stationary_lead = 0.0f;
         float maximum_stationary_error = 0.0f;
         int stationary_direction_reversals = 0;
+        int direct_command_reversals = 0;
+        int maximum_command_step = 0;
     };
     const auto run = [](bool prediction_enabled) {
         AimConfig config;
@@ -1694,6 +1696,8 @@ void test_prediction_adds_continuous_delay_derived_lead() {
         float camera_x = 0.0f;
         float delayed_commands[kCommandDelayFrames]{};
         int previous_stationary_command_sign = 0;
+        int previous_horizontal_command = 0;
+        bool have_previous_command = false;
         Metrics metrics;
         const auto base = std::chrono::steady_clock::now() +
             std::chrono::seconds(1);
@@ -1726,10 +1730,14 @@ void test_prediction_adds_continuous_delay_derived_lead() {
                 ++metrics.lead_active_frames;
             }
             if (index >= 100 && index < kMovingFrameCount - 20) {
-                metrics.delay_error_sum += std::fabs(
-                    result.target.delay_compensated_aim_x -
-                    frame.control_center_x);
-                ++metrics.delay_error_samples;
+                // tracking 以延迟点为控制目标；prediction 则必须允许延迟点
+                // 落在准星后方，只要求真正发送控制的最终预测点保持收敛。
+                const float control_point_x = prediction_enabled
+                    ? result.target.aim_x
+                    : result.target.delay_compensated_aim_x;
+                metrics.control_error_sum += std::fabs(
+                    control_point_x - frame.control_center_x);
+                ++metrics.control_error_samples;
             }
             if (index >= 400) {
                 if (result.target.lead_active) {
@@ -1742,6 +1750,24 @@ void test_prediction_adds_continuous_delay_derived_lead() {
                     metrics.maximum_stationary_error,
                     std::fabs(result.target.aim_x -
                               frame.control_center_x));
+            }
+            const int horizontal_command = result.has_command
+                ? result.command.dx_counts : 0;
+            if (result.has_command) {
+                if (have_previous_command) {
+                    metrics.maximum_command_step = std::max(
+                        metrics.maximum_command_step,
+                        std::abs(horizontal_command -
+                                 previous_horizontal_command));
+                    if (horizontal_command * previous_horizontal_command < 0) {
+                        ++metrics.direct_command_reversals;
+                    }
+                }
+                previous_horizontal_command = horizontal_command;
+                have_previous_command = true;
+            } else {
+                previous_horizontal_command = 0;
+                have_previous_command = false;
             }
             if (result.has_command) {
                 delayed_commands[slot] =
@@ -1762,17 +1788,23 @@ void test_prediction_adds_continuous_delay_derived_lead() {
 
     const Metrics tracking = run(false);
     const Metrics prediction = run(true);
-    const float tracking_mean = tracking.delay_error_sum /
-        static_cast<float>(tracking.delay_error_samples);
-    const float prediction_mean = prediction.delay_error_sum /
-        static_cast<float>(prediction.delay_error_samples);
+    const float tracking_mean = tracking.control_error_sum /
+        static_cast<float>(tracking.control_error_samples);
+    const float prediction_mean = prediction.control_error_sum /
+        static_cast<float>(prediction.control_error_samples);
     expect(prediction.lead_active_frames >= 220,
            "匀速闭环开启 prediction 后必须持续从延迟补偿点产生提前量，实际=" +
                std::to_string(prediction.lead_active_frames));
     expect(prediction_mean <= tracking_mean + 1.0f,
-           "prediction 只能叠加在延迟 tracking 之后，不得关闭基础前馈造成严重滞后，tracking=" +
+           "prediction 最终点必须保持与 tracking 延迟点同级收敛，tracking=" +
                std::to_string(tracking_mean) + "，prediction=" +
                std::to_string(prediction_mean));
+    expect(prediction.direct_command_reversals == 0 &&
+               prediction.maximum_command_step <= 4,
+           "可见预测提前不得破坏同轴命令连续性，直接反转=" +
+               std::to_string(prediction.direct_command_reversals) +
+               "，最大阶跃=" +
+               std::to_string(prediction.maximum_command_step));
     expect(prediction.maximum_stationary_lead <= 0.50f &&
                prediction.late_stationary_command_frames == 0 &&
                prediction.maximum_stationary_error <= 4.0f &&

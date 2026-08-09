@@ -93,10 +93,11 @@ constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
 // 随后越过准星的幅度。这里只用于保守预测在途位移，不改变鼠标标定。
 constexpr float kControllerPendingCommandResponse = 0.15f;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
-// 真实 MoveLeft 序列中，延迟向量方向仅跨越阈值反转 5 次，而原始速度
-// 符号出现 459 个短游程。prediction 因此从延迟补偿点沿同一向量再前探
-// 半个补偿窗口：P50/P95 约 1.42/2.09 px，既可感知又保留过冲余量。
-constexpr float kPredictionDelayHorizonScale = 0.50f;
+// 第二轮真实 MoveLeft 虽有 98.93% prediction 覆盖，但 0.5 倍延迟向量
+// 只有 P50/P95 1.116/1.798 px，即 0.447/0.719 count，尚未经过平滑就
+// 会被整数输出量化吞掉。从延迟补偿点再前探两倍向量后，反事实 P50/P95
+// 为 4.46/6.90 px（1.78/2.76 counts），并继续受 35% 尺度门禁限制。
+constexpr float kPredictionDelayHorizonScale = 2.00f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
 // 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
 constexpr float kControllerQuantizationMotionThresholdPixelsPerSecond = 10.0f;
