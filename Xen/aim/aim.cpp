@@ -1444,7 +1444,9 @@ struct Aim::Impl {
             }
             if (!lead_active) {
                 ++lead_candidate_frames;
-                const int required_frames = lead_ever_activated ? 2 : 1;
+                // 退出过 prediction 后要求连续 4 帧运动确认，避免低谷噪声
+                // 让最终点在基础点和 prediction 点之间快速来回切换。
+                const int required_frames = lead_ever_activated ? 4 : 1;
                 if (lead_candidate_frames < required_frames) return projection;
                 lead_active = true;
                 lead_ever_activated = true;
@@ -1585,7 +1587,7 @@ struct Aim::Impl {
             if (lead_rearm_ready && !track.predicted && moving_away &&
                 longitudinal_error >= enter_distance) {
                 ++lead_candidate_frames;
-                constexpr int kLeadReenterConfirmFrames = 2;
+                constexpr int kLeadReenterConfirmFrames = 4;
                 const int required_frames = lead_ever_activated
                     ? kLeadReenterConfirmFrames : 1;
                 if (lead_candidate_frames >= required_frames) {
