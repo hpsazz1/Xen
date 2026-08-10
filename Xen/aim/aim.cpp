@@ -126,6 +126,10 @@ constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // 也只让基础点领先 0.52 px，仍低于可见门槛。1.5 倍只积分独立世界速度，
 // 不反读会被自身输出放大的延迟向量。
 constexpr float kPredictionAdditionalHorizonScale = 1.50f;
+// 控制延迟描述 KMBOX 命令到画面反馈的时域；几何投影只描述当前轨迹在
+// 画面中的短时外推，两者不能被同一个配置值同时放大。真实命令响应需要
+// 约 40 ms，但已经验证的几何/prediction 基准最多使用 16 ms 基础时域。
+constexpr float kGeometricProjectionMaximumSeconds = 0.016f;
 // 基础前馈服务于每帧跟随，响应不能为 prediction 稳定方向降速。
 // prediction 单独使用慢速世界运动状态：持续运动低通，静止时快速释放。
 // 这个状态只读取基础前馈，绝不回写轨迹、基础控制点或基础控制器。
@@ -1396,7 +1400,8 @@ struct Aim::Impl {
                 config.control_delay_ms / 1000.0f;
             projection.delay_seconds = std::clamp(
                 requested_delay_seconds, 0.0f,
-                config.max_delay_compensation_ms / 1000.0f);
+                std::min(config.max_delay_compensation_ms / 1000.0f,
+                         kGeometricProjectionMaximumSeconds));
             projection.delay_x = track.vx * projection.delay_seconds;
             projection.delay_y = track.vy * projection.delay_seconds;
             if (controller_track_id == track.id) {
@@ -1527,7 +1532,8 @@ struct Aim::Impl {
             const float world_velocity_magnitude = std::hypot(
                 world_velocity_x, world_velocity_y);
             const float horizon_seconds =
-                projection.delay_seconds *
+                std::min(projection.delay_seconds,
+                         kGeometricProjectionMaximumSeconds) *
                 kPredictionAdditionalHorizonScale;
             const float activation_distance_x = std::max(
                 {0.25f, config.deadzone_pixels * 0.50f,
