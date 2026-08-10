@@ -42,15 +42,14 @@ inline void update_prediction_velocity_axis(
 }
 
 // 历史 prediction 方向的反拉保护不能无条件覆盖当前最终点。只有命令
-// 确实朝当前最终点、最终点仍位于比例保持带内，且命令补偿后的世界运动
-// 测量超过噪声门槛并支持历史方向时，才允许该轴继续输出。这样既避免
-// 持续移动时形成长停发，也不把停止、相机反馈低谷或真实反向误放行。
+// 确实朝当前最终点，且命令补偿后的世界运动测量超过噪声门槛并支持历史
+// 方向时，才允许该轴继续输出。超额在途命令已经由控制锚提前制动，因此
+// 保持带外也必须服从当前最终点；停止、反馈低谷和真实反向仍不会误放行。
 inline bool prediction_pullback_command_allowed(
         float desired_counts, float final_error_pixels,
-        float hold_band_pixels, float world_measurement_counts,
-        float prediction_direction, float minimum_world_counts) noexcept {
+        float world_measurement_counts, float prediction_direction,
+        float minimum_world_counts) noexcept {
     return desired_counts * final_error_pixels > 0.0f &&
-        std::fabs(final_error_pixels) <= hold_band_pixels &&
         std::fabs(world_measurement_counts) > minimum_world_counts &&
         std::fabs(prediction_direction) > 0.001f &&
         world_measurement_counts * prediction_direction > 0.0f;

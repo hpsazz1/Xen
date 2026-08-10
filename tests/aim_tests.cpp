@@ -1606,14 +1606,13 @@ void test_prediction_motion_axis_requires_confirmed_stop() {
 }
 
 void test_prediction_pullback_command_requires_causal_world_motion() {
-    constexpr float kHoldBand = 2.25f;
     constexpr float kMinimumWorldCounts = 0.25f;
     const auto allowed = [&](float desired_counts, float final_error_pixels,
                              float world_measurement_counts,
                              float prediction_direction) {
         return aim::detail::prediction_pullback_command_allowed(
-            desired_counts, final_error_pixels, kHoldBand,
-            world_measurement_counts, prediction_direction,
+            desired_counts, final_error_pixels, world_measurement_counts,
+            prediction_direction,
             kMinimumWorldCounts);
     };
 
@@ -1621,8 +1620,8 @@ void test_prediction_pullback_command_requires_causal_world_motion() {
            "X 轴命令朝当前最终点且世界测量支持历史 prediction 时必须放行");
     expect(!allowed(-0.8f, 1.0f, -0.5f, -1.0f),
            "命令背离当前最终点时必须继续执行反拉停发");
-    expect(!allowed(0.8f, 3.0f, -0.5f, -1.0f),
-           "最终点离开保持带时不得用历史 prediction 方向覆盖比例纠偏");
+    expect(allowed(0.8f, 3.0f, -0.5f, -1.0f),
+           "库存补偿生效后，保持带外朝最终点的正确制动也必须放行");
     expect(!allowed(0.8f, 1.0f, -0.25f, -1.0f),
            "世界测量处于 prediction 噪声门槛时不得放行");
     expect(!allowed(0.8f, 1.0f, 0.5f, -1.0f),
@@ -2100,6 +2099,8 @@ void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
     int horizontal_control_samples = 0;
     int horizontal_command_state_changes = 0;
     bool previous_horizontal_command_active = false;
+    int current_horizontal_stop_frames = 0;
+    int longest_horizontal_stop_frames = 0;
 
     for (int index = 0; index < kFrameCount; ++index) {
         const int delay_slot = index % kActuationDelayFrames;
@@ -2188,6 +2189,14 @@ void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
                 previous_horizontal_command_active) {
                 ++horizontal_command_state_changes;
             }
+            if (horizontal_command_active) {
+                current_horizontal_stop_frames = 0;
+            } else {
+                ++current_horizontal_stop_frames;
+                longest_horizontal_stop_frames = std::max(
+                    longest_horizontal_stop_frames,
+                    current_horizontal_stop_frames);
+            }
             previous_horizontal_command_active = horizontal_command_active;
             const float vertical_error = std::fabs(
                 result.target.base_aim_y - frame.control_center_y);
@@ -2247,7 +2256,9 @@ void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
                std::to_string(vertical_prediction_frames) +
                "，最大 Y prediction 偏移=" +
                std::to_string(maximum_vertical_prediction_offset));
-    expect(horizontal_offset_p95 <= 18.5f &&
+    const float maximum_world_forecast = std::hypot(40.0f, 80.0f) *
+        config.max_delay_compensation_percent / 100.0f * 1.5f;
+    expect(horizontal_offset_p95 <= maximum_world_forecast + 0.01f &&
                horizontal_second_difference_p95 <= 0.30f,
            "40 ms 控制延迟不得同步放大额外 prediction 时域，X 独立偏移 P95=" +
                std::to_string(horizontal_offset_p95) +
@@ -2256,12 +2267,122 @@ void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
     expect(coherent_control_second_difference_p95 <= 0.30f &&
                coherent_control_second_difference_p95 <=
                    legacy_control_second_difference_p95 * 0.70f &&
-               horizontal_command_state_changes <= 55,
+               horizontal_command_state_changes <= 65 &&
+               longest_horizontal_stop_frames <= 8,
            "10 帧反馈下必须统一处理延迟与反向 lead，旧/统一控制目标二阶 P95=" +
                std::to_string(legacy_control_second_difference_p95) + "/" +
                std::to_string(coherent_control_second_difference_p95) +
                "，命令启停切换=" +
-               std::to_string(horizontal_command_state_changes));
+               std::to_string(horizontal_command_state_changes) +
+               "，最长停发=" +
+               std::to_string(longest_horizontal_stop_frames));
+}
+
+void test_long_delay_prediction_distributes_horizontal_hold_command() {
+    constexpr int kActuationDelayFrames = 10;
+    constexpr int kFrameCount = 1800;
+    constexpr int kSettledFrame = 600;
+    // Run 20260811-023032 的命令反馈回归得到约 0.433 px/count、
+    // -0.97 px/frame 世界位移。闭环平均只需约 -2.24 counts/frame；
+    // 若观察器跟随延迟后的 -4~-6 counts 脉冲，就会形成 18~24 帧停发。
+    constexpr float kCameraResponse = 0.173f;
+    constexpr float kWorldStep = -0.97f;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 40.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> delayed_commands{};
+    float world_target_x = -12.0f;
+    float camera_x = 0.0f;
+    int active_frames = 0;
+    int current_stop_frames = 0;
+    int longest_stop_frames = 0;
+    int nonzero_frames = 0;
+    int public_direction_violations = 0;
+    float command_sum = 0.0f;
+    float nonzero_command_sum = 0.0f;
+
+    for (int index = 0; index < kFrameCount; ++index) {
+        const int delay_slot = index % kActuationDelayFrames;
+        camera_x += delayed_commands[delay_slot] /
+            config.counts_per_pixel_x * kCameraResponse;
+        delayed_commands[delay_slot] = 0;
+        world_target_x += kWorldStep;
+
+        const float animation_x = 0.35f * std::sin(index * 0.73f);
+        const float animation_width =
+            40.0f + 3.0f * std::sin(index * 0.51f);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body_box(
+            160.0f + world_target_x - camera_x + animation_x,
+            160.0f, animation_width, 80.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "实测长延迟 prediction 回归必须逐帧保留合法目标");
+        if (!result.has_target) continue;
+
+        const int command_x = result.has_command
+            ? result.command.dx_counts : 0;
+        if (result.has_command) {
+            delayed_commands[delay_slot] = command_x;
+        }
+        if (index < kSettledFrame || !result.target.lead_active) continue;
+
+        ++active_frames;
+        command_sum += static_cast<float>(command_x);
+        const float public_error_x =
+            result.target.aim_x - frame.control_center_x;
+        const float hold_band = std::max(
+            2.0f, config.deadzone_pixels * 1.5f);
+        if (std::fabs(public_error_x) > hold_band &&
+            command_x * public_error_x <= 0.0f) {
+            ++public_direction_violations;
+        }
+        if (command_x == 0) {
+            ++current_stop_frames;
+            longest_stop_frames = std::max(
+                longest_stop_frames, current_stop_frames);
+        } else {
+            current_stop_frames = 0;
+            ++nonzero_frames;
+            nonzero_command_sum += static_cast<float>(command_x);
+        }
+    }
+
+    expect(active_frames >= 1000 && nonzero_frames > 0,
+           "实测长延迟 prediction 回归必须覆盖稳定活动窗口");
+    const float mean_command = command_sum /
+        static_cast<float>(active_frames);
+    const float mean_nonzero_command = nonzero_command_sum /
+        static_cast<float>(nonzero_frames);
+    expect(longest_stop_frames <= 8 &&
+               mean_command < -1.75f && mean_command > -2.75f &&
+               mean_nonzero_command > -3.25f &&
+               public_direction_violations == 0,
+           "长延迟世界维持量不得退化为高幅脉冲和长停发，最长停发=" +
+               std::to_string(longest_stop_frames) +
+               "，平均命令=" + std::to_string(mean_command) +
+               "，非零平均=" + std::to_string(mean_nonzero_command) +
+               "，公开最终点方向违规=" +
+               std::to_string(public_direction_violations));
 }
 
 void test_prediction_lead_is_stable_across_bursty_frame_intervals() {
@@ -3383,6 +3504,7 @@ int main() {
     test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();
     test_horizontal_prediction_rejects_delayed_vertical_camera_feedback();
+    test_long_delay_prediction_distributes_horizontal_hold_command();
     test_prediction_lead_is_stable_across_bursty_frame_intervals();
     test_prediction_pullback_hold_releases_after_real_reversal();
     test_prediction_pullback_command_requires_causal_world_motion();

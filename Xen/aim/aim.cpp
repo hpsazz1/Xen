@@ -119,6 +119,10 @@ constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
 // 第十四轮真实序列中，15 ms 窗口内约 15% 的命令位移足以解释基础点
 // 随后越过准星的幅度。这里只用于保守预测在途位移，不改变鼠标标定。
 constexpr float kControllerPendingCommandResponse = 0.15f;
+// 40 ms 窗口内的 pending 总和会按命令逐帧阶跃；0.12 只平滑隐藏库存
+// 投影，使实测 8～10 帧命令反馈周期内逐步制动，不改变公开 prediction 点或
+// 用户配置的 0.475 基础控制平滑。
+constexpr float kPredictionPendingProjectionResponse = 0.12f;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // prediction 从已经完成基础延迟补偿的点继续向前推 1.5 个控制延迟。
 // 真机 Run 20260809-234450 证明半个时域的最终点虽比基础点向前 2.75 px，
@@ -374,6 +378,7 @@ struct Aim::Impl {
     float prediction_offset_y = 0.0f;
     float prediction_control_offset_x = 0.0f;
     float prediction_control_offset_y = 0.0f;
+    float prediction_pending_projection_x = 0.0f;
     int prediction_low_motion_x_frames = 0;
     int prediction_low_motion_y_frames = 0;
     std::array<IssuedCommand, kControllerCommandHistoryCapacity>
@@ -1356,6 +1361,7 @@ struct Aim::Impl {
         prediction_offset_y = 0.0f;
         prediction_control_offset_x = 0.0f;
         prediction_control_offset_y = 0.0f;
+        prediction_pending_projection_x = 0.0f;
         prediction_low_motion_x_frames = 0;
         prediction_low_motion_y_frames = 0;
         issued_commands = {};
@@ -1955,20 +1961,50 @@ struct Aim::Impl {
         // prediction 最终点可能通过反向 lead 抵消延迟点中的在途命令投影。
         // 若延迟点即时进入比例项、lead 再单独低通，同一抵消向量会形成快慢
         // 两条控制路径；真实 40 ms 闭环中公开最终点虽稳定，内部控制目标仍会
-        // 往返。该轴有 prediction 时改以基础点为锚，统一处理最终点相对
-        // 基础点的总投影偏移；其他轴和关闭 prediction 时继续控制延迟点。
+        // 往返。该轴有 prediction 时改以基础点为锚，统一处理最终点相对基础点
+        // 的总投影偏移，并把超过稳定世界维持预算的在途库存投影到隐藏控制锚；
+        // 其他轴和关闭 prediction 时继续控制延迟点。
         const bool use_coherent_prediction_projection_x =
             config.enable_prediction && config.enable_delay_compensation &&
             lead_active && lead_axis_active_x;
         const bool use_coherent_prediction_projection_y =
             config.enable_prediction && config.enable_delay_compensation &&
             lead_active && lead_axis_active_y;
+        float pending_control_projection_target_x = 0.0f;
+        if (use_coherent_prediction_projection_x) {
+            const auto [pending_x, pending_y] =
+                pending_issued_command_sum(frame.captured_at);
+            (void)pending_y;
+            // 稳定世界速度本来就需要在反馈窗内保留一份命令库存，不能把
+            // 全部 pending 都当成过冲。只投影超过稳定预算的部分，连续小
+            // 命令不受影响，-4~-6 counts 的脉冲库存则会提前触发制动。
+            const float expected_pending_x = prediction_world_velocity_x *
+                config.control_delay_ms / 1000.0f;
+            const float excess_pending_x = pending_x - expected_pending_x;
+            pending_control_projection_target_x = -excess_pending_x *
+                kControllerPendingCommandResponse /
+                config.counts_per_pixel_x /
+                frame.source_pixels_per_roi_pixel_x;
+            const float maximum_pending_projection = std::hypot(
+                track.x2 - track.x1, track.y2 - track.y1) *
+                config.max_delay_compensation_percent / 100.0f;
+            pending_control_projection_target_x = std::clamp(
+                pending_control_projection_target_x,
+                -maximum_pending_projection, maximum_pending_projection);
+            prediction_pending_projection_x +=
+                (pending_control_projection_target_x -
+                 prediction_pending_projection_x) *
+                kPredictionPendingProjectionResponse;
+        } else {
+            prediction_pending_projection_x = 0.0f;
+        }
         const float control_anchor_x = use_coherent_prediction_projection_x
-            ? base_x : tracking_x;
+            ? base_x + prediction_pending_projection_x : tracking_x;
         const float control_anchor_y = use_coherent_prediction_projection_y
             ? base_y : tracking_y;
         const float prediction_target_x =
-            (aim_x - control_anchor_x) *
+            (aim_x - (use_coherent_prediction_projection_x
+                ? base_x : control_anchor_x)) *
             frame.source_pixels_per_roi_pixel_x;
         const float prediction_target_y =
             (aim_y - control_anchor_y) *
@@ -2187,13 +2223,12 @@ struct Aim::Impl {
             // 只有真实目标仍在沿原方向运动时才切断约束造成的长停发。
             const bool allow_x_lead_release =
                 aim::detail::prediction_pullback_command_allowed(
-                    desired_x, error_x, hold_band,
-                    world_motion_measurement_x, lead_direction_x,
+                    desired_x, error_x, world_motion_measurement_x,
+                    lead_direction_x,
                     kPredictionWorldMotionMinimumCounts);
             const bool allow_x_pullback_release =
                 aim::detail::prediction_pullback_command_allowed(
-                    desired_x, error_x, hold_band,
-                    world_motion_measurement_x,
+                    desired_x, error_x, world_motion_measurement_x,
                     prediction_pullback_direction_x,
                     kPredictionWorldMotionMinimumCounts);
             // 公有命令逐轴量化；只要该轴存在有效世界方向就必须阻止反拉，
@@ -2439,6 +2474,7 @@ struct Aim::Impl {
         prediction_offset_y = 0.0f;
         prediction_control_offset_x = 0.0f;
         prediction_control_offset_y = 0.0f;
+        prediction_pending_projection_x = 0.0f;
         prediction_low_motion_x_frames = 0;
         prediction_low_motion_y_frames = 0;
         world_motion_measurement_x = 0.0f;
