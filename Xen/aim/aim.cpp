@@ -2146,6 +2146,9 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
                 projection.delay_compensated_x;
             result.target.delay_compensated_aim_y =
                 projection.delay_compensated_y;
+            // prediction 点与最终控制点保持同一坐标契约；基础点始终独立保留。
+            result.target.prediction_aim_x = projection.final_x;
+            result.target.prediction_aim_y = projection.final_y;
             result.target.aim_x = projection.final_x;
             result.target.aim_y = projection.final_y;
             result.target.velocity_x = target->vx;

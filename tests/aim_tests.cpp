@@ -2391,7 +2391,11 @@ void test_prediction_never_changes_base_tracking_sequence() {
                    tracking_result.target.base_aim_x ==
                    prediction_result.target.base_aim_x &&
                    tracking_result.target.base_aim_y ==
-                   prediction_result.target.base_aim_y,
+                   prediction_result.target.base_aim_y &&
+                   prediction_result.target.prediction_aim_x ==
+                       prediction_result.target.aim_x &&
+                   prediction_result.target.prediction_aim_y ==
+                       prediction_result.target.aim_y,
                "prediction 开关不得改变任何 tracking 轨迹或基础控制点字段");
         if (prediction_result.target.lead_active) {
             ++lead_active_frames;

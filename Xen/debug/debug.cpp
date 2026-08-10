@@ -802,6 +802,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "aim_range_allows_control,aim_box_x1,aim_box_y1,aim_box_x2,"
                "aim_box_y2,aim_base_x,aim_base_y,"
                "aim_delay_compensated_x,aim_delay_compensated_y,"
+               "aim_prediction_x,aim_prediction_y,"
                "aim_final_x,aim_final_y,"
                "aim_velocity_x,aim_velocity_y,aim_lead_x,aim_lead_y,"
                "aim_delay_compensation_x,aim_delay_compensation_y,"
@@ -883,6 +884,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.aim_target.base_aim_y << ','
                 << sample.aim_target.delay_compensated_aim_x << ','
                 << sample.aim_target.delay_compensated_aim_y << ','
+                << sample.aim_target.prediction_aim_x << ','
+                << sample.aim_target.prediction_aim_y << ','
                 << sample.aim_target.aim_x << ','
                 << sample.aim_target.aim_y << ','
                 << sample.aim_target.velocity_x << ','
@@ -1122,6 +1125,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << ", \"aim_delay_compensated_point\": ["
                  << sample.aim_target.delay_compensated_aim_x << ", "
                  << sample.aim_target.delay_compensated_aim_y << ']'
+                 << ", \"aim_prediction_point\": ["
+                 << sample.aim_target.prediction_aim_x << ", "
+                 << sample.aim_target.prediction_aim_y << ']'
                  << ", \"aim_final_point\": ["
                  << sample.aim_target.aim_x << ", "
                  << sample.aim_target.aim_y << ']'

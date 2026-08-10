@@ -1268,16 +1268,37 @@ struct Overlay::Impl {
                 image_x + static_cast<int>(std::lround(target_rect.x2)),
                 image_y + static_cast<int>(std::lround(target_rect.y2)));
             const auto aim_point = overlay::detail::map_preview_point(
-                target.aim_x, target.aim_y,
+                target.base_aim_x, target.base_aim_y,
                 coordinate_scale_x, coordinate_scale_y);
             const int aim_x = image_x +
                 static_cast<int>(std::lround(aim_point.x));
             const int aim_y = image_y +
                 static_cast<int>(std::lround(aim_point.y));
+            HPEN base_pen = CreatePen(PS_SOLID, 2, RGB(80, 210, 130));
+            SelectObject(dc, base_pen);
             MoveToEx(dc, aim_x - 7, aim_y, nullptr);
             LineTo(dc, aim_x + 8, aim_y);
             MoveToEx(dc, aim_x, aim_y - 7, nullptr);
             LineTo(dc, aim_x, aim_y + 8);
+            SelectObject(dc, other_pen);
+            DeleteObject(base_pen);
+            if (target.lead_active) {
+                const auto prediction_point = overlay::detail::map_preview_point(
+                    target.prediction_aim_x, target.prediction_aim_y,
+                    coordinate_scale_x, coordinate_scale_y);
+                const int prediction_x = image_x +
+                    static_cast<int>(std::lround(prediction_point.x));
+                const int prediction_y = image_y +
+                    static_cast<int>(std::lround(prediction_point.y));
+                HPEN prediction_pen = CreatePen(PS_SOLID, 2, RGB(245, 185, 66));
+                SelectObject(dc, prediction_pen);
+                MoveToEx(dc, prediction_x - 8, prediction_y, nullptr);
+                LineTo(dc, prediction_x + 9, prediction_y);
+                MoveToEx(dc, prediction_x, prediction_y - 8, nullptr);
+                LineTo(dc, prediction_x, prediction_y + 9);
+                SelectObject(dc, other_pen);
+                DeleteObject(prediction_pen);
+            }
             SelectObject(dc, other_pen);
             DeleteObject(target_pen);
         }
@@ -2391,15 +2412,28 @@ struct Overlay::Impl {
                        image_min.y + rectangle.y2),
                 target_color, 0.0f, 0, 3.0f);
             const auto aim_point = overlay::detail::map_preview_point(
-                target.aim_x, target.aim_y,
+                target.base_aim_x, target.base_aim_y,
                 coordinate_scale_x, coordinate_scale_y);
             if (aim_point.x >= 0.0f && aim_point.x <= display.width &&
                 aim_point.y >= 0.0f && aim_point.y <= display.height) {
                 const ImVec2 point(
                     image_min.x + aim_point.x, image_min.y + aim_point.y);
-                draw_list->AddCircleFilled(point, 4.5f, target_color);
-                draw_list->AddCircle(
-                    point, 8.0f, target_color, 16, 1.5f);
+                const ImU32 base_color = ImGui::GetColorU32(rgba(kSuccess));
+                draw_list->AddCircleFilled(point, 3.5f, base_color);
+                draw_list->AddCircle(point, 7.0f, base_color, 16, 1.5f);
+            }
+            if (target.lead_active) {
+                const auto prediction_point = overlay::detail::map_preview_point(
+                    target.prediction_aim_x, target.prediction_aim_y,
+                    coordinate_scale_x, coordinate_scale_y);
+                if (prediction_point.x >= 0.0f && prediction_point.x <= display.width &&
+                    prediction_point.y >= 0.0f && prediction_point.y <= display.height) {
+                    const ImVec2 point(
+                        image_min.x + prediction_point.x,
+                        image_min.y + prediction_point.y);
+                    draw_list->AddCircleFilled(point, 4.5f, target_color);
+                    draw_list->AddCircle(point, 8.0f, target_color, 16, 1.5f);
+                }
             }
         }
 
@@ -2428,11 +2462,12 @@ struct Overlay::Impl {
             preview->aim_range_allows_control ? "范围内" : "范围外");
         if (preview->has_target) {
             ImGui::TextColored(
-                rgba(kFaintInk), "轨迹 %llu  /  置信度 %.1f%%  /  瞄点 %.1f, %.1f",
+                rgba(kFaintInk), "轨迹 %llu  /  置信度 %.1f%%  /  基础 %.1f, %.1f  /  预测 %.1f, %.1f",
                 static_cast<unsigned long long>(preview->target.track_id),
                 std::clamp(preview->target.confidence, 0.0f, 1.0f) *
                     100.0f,
-                preview->target.aim_x, preview->target.aim_y);
+                preview->target.base_aim_x, preview->target.base_aim_y,
+                preview->target.prediction_aim_x, preview->target.prediction_aim_y);
         }
         ImGui::PopFont();
         end_config_panel();

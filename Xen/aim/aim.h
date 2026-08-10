@@ -104,6 +104,9 @@ struct AimTargetSnapshot {
     float base_aim_y = 0.0f;
     float delay_compensated_aim_x = 0.0f;
     float delay_compensated_aim_y = 0.0f;
+    // 独立 prediction 瞄点：只表示 prediction 层生成的点，不回写基础 tracking 瞄点。
+    float prediction_aim_x = 0.0f;
+    float prediction_aim_y = 0.0f;
     float aim_x = 0.0f;
     float aim_y = 0.0f;
     // 速度单位为检测 ROI 像素/秒；实际提前向量已经包含帧龄、降权和距离限幅。
