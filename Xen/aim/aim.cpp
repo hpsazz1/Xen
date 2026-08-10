@@ -131,6 +131,7 @@ constexpr float kPredictionWorldMotionMinimumCounts = 0.25f;
 // 正确方向的提前量也不能在观察器刚建立时整段跳入。按真实 dt 在约 33 ms
 // 内线性渐入，避免 prediction 状态变化绕过物理命令阶跃门禁。
 constexpr float kPredictionLeadRampPerSecond = 30.0f;
+constexpr float kPredictionPointFilterGainPerSecond = 120.0f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
 // 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
 constexpr float kControllerQuantizationMotionThresholdPixelsPerSecond = 10.0f;
@@ -339,6 +340,9 @@ struct Aim::Impl {
     float prediction_offset_y = 0.0f;
     float prediction_control_offset_x = 0.0f;
     float prediction_control_offset_y = 0.0f;
+    float filtered_prediction_point_x = 0.0f;
+    float filtered_prediction_point_y = 0.0f;
+    bool filtered_prediction_point_initialized = false;
     int prediction_low_motion_x_frames = 0;
     int prediction_low_motion_y_frames = 0;
     std::array<IssuedCommand, kControllerCommandHistoryCapacity>
@@ -1075,6 +1079,7 @@ struct Aim::Impl {
             prediction_world_velocity_y = 0.0f;
             prediction_offset_x = 0.0f;
             prediction_offset_y = 0.0f;
+            filtered_prediction_point_initialized = false;
             prediction_low_motion_x_frames = 0;
             prediction_low_motion_y_frames = 0;
             return {0.0f, 0.0f};
@@ -2151,8 +2156,45 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
             const auto control_at = frame.control_at ==
                     std::chrono::steady_clock::time_point{}
                 ? clock::now() : frame.control_at;
-            const auto projection =
+            auto projection =
                 impl_->projected_aim_point(frame, *target, control_at);
+            if (projection.active) {
+                if (!impl_->filtered_prediction_point_initialized) {
+                    impl_->filtered_prediction_point_x = projection.final_x;
+                    impl_->filtered_prediction_point_y = projection.final_y;
+                    impl_->filtered_prediction_point_initialized = true;
+                } else {
+                    const float alpha = 1.0f - std::exp(
+                        -kPredictionPointFilterGainPerSecond *
+                            target->prediction_dt);
+                    impl_->filtered_prediction_point_x +=
+                        (projection.final_x -
+                         impl_->filtered_prediction_point_x) * alpha;
+                    impl_->filtered_prediction_point_y +=
+                        (projection.final_y -
+                         impl_->filtered_prediction_point_y) * alpha;
+                }
+                float filtered_lead_x =
+                    impl_->filtered_prediction_point_x -
+                    projection.delay_compensated_x;
+                float filtered_lead_y =
+                    impl_->filtered_prediction_point_y -
+                    projection.delay_compensated_y;
+                const float box_diagonal = std::hypot(
+                    target->x2 - target->x1, target->y2 - target->y1);
+                clamp_vector(
+                    filtered_lead_x, filtered_lead_y,
+                    box_diagonal *
+                        impl_->config.max_prediction_lead_percent / 100.0f);
+                projection.final_x =
+                    projection.delay_compensated_x + filtered_lead_x;
+                projection.final_y =
+                    projection.delay_compensated_y + filtered_lead_y;
+                impl_->filtered_prediction_point_x = projection.final_x;
+                impl_->filtered_prediction_point_y = projection.final_y;
+            } else {
+                impl_->filtered_prediction_point_initialized = false;
+            }
             result.has_target = true;
             result.target.track_id = target->id;
             result.target.state = target->state;
