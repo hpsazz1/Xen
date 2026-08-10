@@ -80,7 +80,9 @@ constexpr float kTrackCoherentDeformationMaximumTargetDiagonal = 0.04f;
 constexpr float kTrackCoherentDeformationMinimumShapeChangeTargetDiagonal =
     0.0005f;
 constexpr float kTrackCoherentDeformationMinimumShapeChangePixels = 0.05f;
-constexpr int kTrackCoherentDeformationHoldFrames = 3;
+// 实机姿态同向形变可持续 3～10 帧；保护必须覆盖完整形变窗口，真实平移仍由
+// stable_motion_residual 和速度估计独立推进。
+constexpr int kTrackCoherentDeformationHoldFrames = 10;
 constexpr float kTrackIncoherentVelocityBetaScale = 0.40f;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
