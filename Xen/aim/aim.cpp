@@ -121,10 +121,10 @@ constexpr float kPredictionWorldMotionReleasePerSecond = 120.0f;
 // 阻止预测点一帧从半程跳到几何上限。1.5 diagonals/s 在 240 Hz、约 100 px
 // 人物框下每帧最多约 0.63 px，不改变稳定提前距离。
 constexpr float kPredictionOffsetMaximumSlewDiagonalsPerSecond = 1.5f;
-// 世界运动测量与屏幕相对速度同轴连续五帧都低于门槛后，prediction 才
-// 释放额外前探；基础前馈自身仍保留更长的静止确认，不因 prediction
-// 改变 tracking 状态。
-constexpr int kPredictionStaticReleaseConfirmFrames = 5;
+// 实机人物姿态会造成 3～10 帧的同向低运动窗口；五帧确认仍会把窗口
+// 中间误判成停止并清零 prediction。延长到 12 帧只改变停止确认，真实
+// 停止尾窗仍受快速释放增益限制，基础前馈状态不受影响。
+constexpr int kPredictionStaticReleaseConfirmFrames = 12;
 // 世界运动只在独立慢速状态形成至少四分之一 count 的稳定维持量后
 // 才可用于 prediction；更小残余属于静止收敛和量化噪声，禁止强行前探。
 constexpr float kPredictionWorldMotionMinimumCounts = 0.25f;

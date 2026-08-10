@@ -1451,10 +1451,10 @@ void test_prediction_survives_short_world_motion_measurement_dips() {
         camera_x += delayed_command / config.counts_per_pixel_x *
             kCameraResponse;
         delayed_command = 0;
-        // 人物持续 MoveLeft，但模型动画允许最多连续三帧的中心速度低谷。
-        // 三帧小于生产停止确认的五帧，不得把已经建立的世界运动状态释放。
+        // 人物持续 MoveLeft，但模型动画允许连续十帧的中心速度低谷。
+        // 低谷小于新的生产停止确认窗口，不得把已经建立的世界运动状态释放。
         const int phase = index % 36;
-        if (phase < 20 || phase > 22) {
+        if (phase < 20 || phase > 29) {
             world_target_x += kWorldPixelsPerFrame;
         }
         AimFrame frame = make_frame(
