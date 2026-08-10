@@ -1671,7 +1671,9 @@ struct Aim::Impl {
             (aim_x - tracking_x) * frame.source_pixels_per_roi_pixel_x;
         const float prediction_target_y =
             (aim_y - tracking_y) * frame.source_pixels_per_roi_pixel_y;
-        const float prediction_alpha = lead_active ? 0.75f : 0.20f;
+        // 基础 tracking 的 smoothing 为 0.475；prediction 采用更慢的独立响应，
+        // 避免姿态形变导致的瞬时前探变化直接转成鼠标命令。
+        const float prediction_alpha = lead_active ? 0.35f : 0.12f;
         prediction_control_offset_x +=
             (prediction_target_x - prediction_control_offset_x) *
             prediction_alpha;
