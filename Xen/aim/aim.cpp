@@ -2181,10 +2181,26 @@ struct Aim::Impl {
         // 停发等待目标进入预测点，不影响 prediction 退出后的基础归位，也不
         // 改写 tracking 配置的控制路径。
         if (config.enable_prediction && config.enable_delay_compensation) {
+            // X 轴反拉门禁只允许被同一帧的因果世界运动证据放行：命令必须
+            // 朝当前最终点，且命令补偿后的世界测量仍与历史 prediction 方向
+            // 同向并超过噪声门槛。这样相机反馈低谷、停止和真实反向继续停发，
+            // 只有真实目标仍在沿原方向运动时才切断约束造成的长停发。
+            const bool allow_x_lead_release =
+                aim::detail::prediction_pullback_command_allowed(
+                    desired_x, error_x, hold_band,
+                    world_motion_measurement_x, lead_direction_x,
+                    kPredictionWorldMotionMinimumCounts);
+            const bool allow_x_pullback_release =
+                aim::detail::prediction_pullback_command_allowed(
+                    desired_x, error_x, hold_band,
+                    world_motion_measurement_x,
+                    prediction_pullback_direction_x,
+                    kPredictionWorldMotionMinimumCounts);
             // 公有命令逐轴量化；只要该轴存在有效世界方向就必须阻止反拉，
             // 不能因正交轴幅值更大而用归一化 0.1 门槛丢掉水平保护。
             if (lead_active && std::fabs(lead_direction_x) > 0.001f &&
-                desired_x * lead_direction_x < 0.0f) {
+                desired_x * lead_direction_x < 0.0f &&
+                !allow_x_lead_release) {
                 desired_x = 0.0f;
             }
             if (lead_active && lead_axis_active_y &&
@@ -2193,7 +2209,8 @@ struct Aim::Impl {
                 desired_y = 0.0f;
             }
             if (prediction_pullback_hold_x &&
-                desired_x * prediction_pullback_direction_x < 0.0f) {
+                desired_x * prediction_pullback_direction_x < 0.0f &&
+                !allow_x_pullback_release) {
                 desired_x = 0.0f;
             }
             if (prediction_pullback_hold_y &&

@@ -1605,6 +1605,32 @@ void test_prediction_motion_axis_requires_confirmed_stop() {
                std::to_string(low_frames));
 }
 
+void test_prediction_pullback_command_requires_causal_world_motion() {
+    constexpr float kHoldBand = 2.25f;
+    constexpr float kMinimumWorldCounts = 0.25f;
+    const auto allowed = [&](float desired_counts, float final_error_pixels,
+                             float world_measurement_counts,
+                             float prediction_direction) {
+        return aim::detail::prediction_pullback_command_allowed(
+            desired_counts, final_error_pixels, kHoldBand,
+            world_measurement_counts, prediction_direction,
+            kMinimumWorldCounts);
+    };
+
+    expect(allowed(0.8f, 1.0f, -0.5f, -1.0f),
+           "X 轴命令朝当前最终点且世界测量支持历史 prediction 时必须放行");
+    expect(!allowed(-0.8f, 1.0f, -0.5f, -1.0f),
+           "命令背离当前最终点时必须继续执行反拉停发");
+    expect(!allowed(0.8f, 3.0f, -0.5f, -1.0f),
+           "最终点离开保持带时不得用历史 prediction 方向覆盖比例纠偏");
+    expect(!allowed(0.8f, 1.0f, -0.25f, -1.0f),
+           "世界测量处于 prediction 噪声门槛时不得放行");
+    expect(!allowed(0.8f, 1.0f, 0.5f, -1.0f),
+           "世界测量背离历史 prediction 时不得放行");
+    expect(!allowed(0.8f, 1.0f, -0.5f, 0.0f),
+           "没有有效历史 prediction 方向时不得放行");
+}
+
 void test_prediction_closed_loop_keeps_visible_left_lead_without_pullback() {
     constexpr float kFrameSeconds = 1.0f / 240.0f;
     constexpr int kActuationDelayFrames = 4;
@@ -3359,6 +3385,7 @@ int main() {
     test_horizontal_prediction_rejects_delayed_vertical_camera_feedback();
     test_prediction_lead_is_stable_across_bursty_frame_intervals();
     test_prediction_pullback_hold_releases_after_real_reversal();
+    test_prediction_pullback_command_requires_causal_world_motion();
     test_base_crossing_releases_integral_smoothly();
     test_two_axis_command_reversal_passes_through_zero();
     test_integral_releases_on_reversal_and_static_settle();
