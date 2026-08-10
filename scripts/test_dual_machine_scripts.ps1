@@ -112,8 +112,14 @@ Assert-True ($aimDeltaText -match
     $aimDeltaText -match
         '\[string\]\$task\.task_id\s*-ne\s*\$TaskId' -and
     $aimDeltaText -match
-        '\[bool\]\$task\.aim\.prediction_enabled\s*-ne\s*\(\$Profile -eq "prediction"\)') `
-    "Aim 差量入口必须透传任务 ID，并按 profile 回读 prediction 快照。"
+        '\[bool\]\$task\.aim\.prediction_enabled\s*-ne\s*\(\$Profile -eq "prediction"\)' -and
+    $aimDeltaText -match
+        '\[double\]\$task\.aim\.control_delay_ms\s*-ne\s*\$ControlDelayMs' -and
+    $aimDeltaText -match
+        '\[double\]\$task\.aim\.max_delay_compensation_ms\s*-ne' -and
+    $aimDeltaText -match
+        ''' -MaxDelayCompensationPercent ''\s*\+\s*') `
+    "Aim 差量入口必须透传任务 ID、延迟参数，并按 profile 回读 prediction 快照。"
 
 & (Join-Path $RepositoryRoot "scripts/test_benchmark_report_scale.ps1") `
     -SyntheticSampleCount 72002 -LegacyProbeCount 5000 -Quiet

@@ -15,7 +15,13 @@
     [ValidateRange(0.0, 1.0)]
     [double]$Smoothing = 0.50,
     [ValidateRange(0.01, 10.0)]
-    [double]$CountsPerPixel = 0.40
+    [double]$CountsPerPixel = 0.40,
+    [ValidateRange(0.0, 100.0)]
+    [double]$ControlDelayMs = 15.0,
+    [ValidateRange(0.0, 100.0)]
+    [double]$MaxDelayCompensationMs = 16.0,
+    [ValidateRange(1.0, 50.0)]
+    [double]$MaxDelayCompensationPercent = 15.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,6 +78,9 @@ if (-not (Test-Path -LiteralPath $destinationRoot -PathType Container)) {
 }
 if ($ConfigOnly -and -not $Prepare) {
     throw "纯配置差量必须同时指定 -Prepare，由正式任务生成器更新配置和 manifest。"
+}
+if ($ControlDelayMs -gt $MaxDelayCompensationMs) {
+    throw "固定控制延迟不得大于延迟补偿时域上限。"
 }
 
 $commit = (& git -C $repositoryRoot rev-parse HEAD).Trim()
@@ -182,7 +191,14 @@ if ($Prepare) {
             'F6', [Globalization.CultureInfo]::InvariantCulture) +
         ' -CountsPerPixel ' + $CountsPerPixel.ToString(
             'F6', [Globalization.CultureInfo]::InvariantCulture) +
-        ' -LightweightPackageValidation -EnableDelayCompensation -ControlDelayMs 15'
+        ' -LightweightPackageValidation -EnableDelayCompensation' +
+        ' -ControlDelayMs ' + $ControlDelayMs.ToString(
+            'F6', [Globalization.CultureInfo]::InvariantCulture) +
+        ' -MaxDelayCompensationMs ' + $MaxDelayCompensationMs.ToString(
+            'F6', [Globalization.CultureInfo]::InvariantCulture) +
+        ' -MaxDelayCompensationPercent ' +
+            $MaxDelayCompensationPercent.ToString(
+                'F6', [Globalization.CultureInfo]::InvariantCulture)
     $prepareOutput = @(& ssh -i $SshIdentityFile -o IdentitiesOnly=yes `
         -o BatchMode=yes "$SshUser@$SshHost" $remoteCommand 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "辅机 Prepare 失败，退出码：$LASTEXITCODE" }
@@ -213,13 +229,24 @@ $expectedSmoothing = $Smoothing.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
 $expectedCounts = $CountsPerPixel.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
+$expectedControlDelay = $ControlDelayMs.ToString(
+    'F6', [Globalization.CultureInfo]::InvariantCulture)
+$expectedMaximumDelay = $MaxDelayCompensationMs.ToString(
+    'F6', [Globalization.CultureInfo]::InvariantCulture)
+$expectedMaximumDelayPercent = $MaxDelayCompensationPercent.ToString(
+    'F6', [Globalization.CultureInfo]::InvariantCulture)
 $expectedPrediction = if ($Profile -eq "prediction") { "true" } else { "false" }
 if ($configText -notmatch "(?m)^smoothing=$([regex]::Escape($expectedSmoothing))\r?$" -or
     $configText -notmatch "(?m)^counts_per_pixel_x=$([regex]::Escape($expectedCounts))\r?$" -or
     $configText -notmatch "(?m)^counts_per_pixel_y=$([regex]::Escape($expectedCounts))\r?$" -or
     $configText -notmatch "(?m)^enable_prediction=$expectedPrediction\r?$" -or
     $configText -notmatch '(?m)^enable_delay_compensation=true\r?$' -or
-    $configText -notmatch '(?m)^control_delay_ms=15\.000000\r?$') {
+    $configText -notmatch
+        "(?m)^control_delay_ms=$([regex]::Escape($expectedControlDelay))\r?$" -or
+    $configText -notmatch
+        "(?m)^max_delay_compensation_ms=$([regex]::Escape($expectedMaximumDelay))\r?$" -or
+    $configText -notmatch
+        "(?m)^max_delay_compensation_percent=$([regex]::Escape($expectedMaximumDelayPercent))\r?$") {
     throw "最终 config.ini 没有固化本轮唯一变量和不变参数。"
 }
 
@@ -269,7 +296,11 @@ if ($Prepare) {
         [double]$task.aim.counts_per_pixel -ne $CountsPerPixel -or
         -not [bool]$task.aim.delay_compensation_enabled -or
         [bool]$task.aim.prediction_enabled -ne ($Profile -eq "prediction") -or
-        [double]$task.aim.control_delay_ms -ne 15.0 -or
+        [double]$task.aim.control_delay_ms -ne $ControlDelayMs -or
+        [double]$task.aim.max_delay_compensation_ms -ne
+            $MaxDelayCompensationMs -or
+        [double]$task.aim.max_delay_compensation_percent -ne
+            $MaxDelayCompensationPercent -or
         [string]$task.config.sha256 -ne $remoteConfigHash -or
         [string]$task.package_manifest.sha256 -ne $remoteManifestHash) {
         throw "Prepare Run 参数或发布身份回读不一致。"
