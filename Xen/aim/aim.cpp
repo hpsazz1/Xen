@@ -1952,22 +1952,54 @@ struct Aim::Impl {
         const float base_error_y =
             (base_y - frame.control_center_y) *
             frame.source_pixels_per_roi_pixel_y;
+        // prediction 最终点可能通过反向 lead 抵消延迟点中的在途命令投影。
+        // 若延迟点即时进入比例项、lead 再单独低通，同一抵消向量会形成快慢
+        // 两条控制路径；真实 40 ms 闭环中公开最终点虽稳定，内部控制目标仍会
+        // 往返。该轴有 prediction 时改以基础点为锚，统一处理最终点相对
+        // 基础点的总投影偏移；其他轴和关闭 prediction 时继续控制延迟点。
+        const bool use_coherent_prediction_projection_x =
+            config.enable_prediction && config.enable_delay_compensation &&
+            lead_active && lead_axis_active_x;
+        const bool use_coherent_prediction_projection_y =
+            config.enable_prediction && config.enable_delay_compensation &&
+            lead_active && lead_axis_active_y;
+        const float control_anchor_x = use_coherent_prediction_projection_x
+            ? base_x : tracking_x;
+        const float control_anchor_y = use_coherent_prediction_projection_y
+            ? base_y : tracking_y;
         const float prediction_target_x =
-            (aim_x - tracking_x) * frame.source_pixels_per_roi_pixel_x;
+            (aim_x - control_anchor_x) *
+            frame.source_pixels_per_roi_pixel_x;
         const float prediction_target_y =
-            (aim_y - tracking_y) * frame.source_pixels_per_roi_pixel_y;
-        // 基础 tracking 的 smoothing 为 0.475；prediction 采用更慢的独立响应，
-        // 避免姿态形变导致的瞬时前探变化直接转成鼠标命令。
+            (aim_y - control_anchor_y) *
+            frame.source_pixels_per_roi_pixel_y;
+        // 基础 tracking 的 smoothing 为 0.475；总投影偏移采用更慢的独立
+        // 响应，避免姿态形变和在途命令窗口变化直接转成鼠标命令。
         const float prediction_alpha = lead_active ? 0.35f : 0.12f;
-        prediction_control_offset_x +=
-            (prediction_target_x - prediction_control_offset_x) *
-            prediction_alpha;
-        prediction_control_offset_y +=
-            (prediction_target_y - prediction_control_offset_y) *
-            prediction_alpha;
-        // 比例误差以基础 tracking 为锚，prediction 偏移使用独立的迟滞状态渐入/渐退。
-        const float error_x = tracking_error_x + prediction_control_offset_x;
-        const float error_y = tracking_error_y + prediction_control_offset_y;
+        if (!controller_initialized && use_coherent_prediction_projection_x) {
+            prediction_control_offset_x = prediction_target_x;
+        } else {
+            prediction_control_offset_x +=
+                (prediction_target_x - prediction_control_offset_x) *
+                prediction_alpha;
+        }
+        if (!controller_initialized && use_coherent_prediction_projection_y) {
+            prediction_control_offset_y = prediction_target_y;
+        } else {
+            prediction_control_offset_y +=
+                (prediction_target_y - prediction_control_offset_y) *
+                prediction_alpha;
+        }
+        const float control_anchor_error_x =
+            (control_anchor_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float control_anchor_error_y =
+            (control_anchor_y - frame.control_center_y) *
+            frame.source_pixels_per_roi_pixel_y;
+        const float error_x =
+            control_anchor_error_x + prediction_control_offset_x;
+        const float error_y =
+            control_anchor_error_y + prediction_control_offset_y;
         // deadzone_pixels 与 counts_per_pixel 始终以主机完整 FOV 像素为单位，
         // 不随 OBS 编码尺寸或辅机显示器分辨率变化。恒速目标进入死区后不能
         // 立即清空已学习的积分，否则会形成“追上、停发、落后、再追”的周期。
@@ -1980,8 +2012,8 @@ struct Aim::Impl {
             : clamp_delta_seconds(std::chrono::duration<double>(
                   frame.captured_at - controller_captured_at).count());
         controller_captured_at = frame.captured_at;
-        // 比例闭环沿用基础 tracking/延迟点；prediction 只通过独立前馈进入，
-        // 避免 prediction 点开关把比例误差瞬间推到基础点的另一侧。
+        // 比例闭环复用同一总投影偏移状态；prediction 关闭时锚点仍是原延迟点，
+        // 开启时则不会把延迟点与其反向抵消量拆成不同响应速度。
         const float proportional_x =
             error_x * config.counts_per_pixel_x * gain;
         const float proportional_y =

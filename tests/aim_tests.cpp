@@ -2060,9 +2060,20 @@ void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
     std::vector<float> settled_vertical_errors;
     std::vector<float> horizontal_prediction_offsets;
     std::vector<float> horizontal_prediction_second_differences;
+    std::vector<float> legacy_control_second_differences;
+    std::vector<float> coherent_control_second_differences;
     float previous_horizontal_prediction_offset = 0.0f;
     float previous_previous_horizontal_prediction_offset = 0.0f;
+    float legacy_control_offset = 0.0f;
+    float coherent_control_offset = 0.0f;
+    float previous_legacy_control_target = 0.0f;
+    float previous_previous_legacy_control_target = 0.0f;
+    float previous_coherent_control_target = 0.0f;
+    float previous_previous_coherent_control_target = 0.0f;
     int horizontal_prediction_samples = 0;
+    int horizontal_control_samples = 0;
+    int horizontal_command_state_changes = 0;
+    bool previous_horizontal_command_active = false;
 
     for (int index = 0; index < kFrameCount; ++index) {
         const int delay_slot = index % kActuationDelayFrames;
@@ -2097,6 +2108,22 @@ void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
             delayed_commands_x[delay_slot] = command_x;
             delayed_commands_y[delay_slot] = command_y;
         }
+        const float prediction_alpha = result.target.lead_active
+            ? 0.35f : 0.12f;
+        const float legacy_control_target_offset =
+            result.target.aim_x - result.target.delay_compensated_aim_x;
+        legacy_control_offset +=
+            (legacy_control_target_offset - legacy_control_offset) *
+            prediction_alpha;
+        const float legacy_control_target =
+            result.target.delay_compensated_aim_x + legacy_control_offset;
+        const float coherent_control_target_offset =
+            result.target.aim_x - result.target.base_aim_x;
+        coherent_control_offset +=
+            (coherent_control_target_offset - coherent_control_offset) *
+            prediction_alpha;
+        const float coherent_control_target =
+            result.target.base_aim_x + coherent_control_offset;
         if (index >= 500) {
             const float horizontal_prediction_offset =
                 result.target.aim_x - result.target.base_aim_x;
@@ -2113,6 +2140,29 @@ void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
             previous_horizontal_prediction_offset =
                 horizontal_prediction_offset;
             ++horizontal_prediction_samples;
+            if (horizontal_control_samples >= 2) {
+                legacy_control_second_differences.push_back(std::fabs(
+                    legacy_control_target -
+                    2.0f * previous_legacy_control_target +
+                    previous_previous_legacy_control_target));
+                coherent_control_second_differences.push_back(std::fabs(
+                    coherent_control_target -
+                    2.0f * previous_coherent_control_target +
+                    previous_previous_coherent_control_target));
+            }
+            previous_previous_legacy_control_target =
+                previous_legacy_control_target;
+            previous_legacy_control_target = legacy_control_target;
+            previous_previous_coherent_control_target =
+                previous_coherent_control_target;
+            previous_coherent_control_target = coherent_control_target;
+            ++horizontal_control_samples;
+            const bool horizontal_command_active = command_x != 0;
+            if (horizontal_command_active !=
+                previous_horizontal_command_active) {
+                ++horizontal_command_state_changes;
+            }
+            previous_horizontal_command_active = horizontal_command_active;
             const float vertical_error = std::fabs(
                 result.target.base_aim_y - frame.control_center_y);
             const float vertical_prediction_offset =
@@ -2137,6 +2187,10 @@ void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
               horizontal_prediction_offsets.end());
     std::sort(horizontal_prediction_second_differences.begin(),
               horizontal_prediction_second_differences.end());
+    std::sort(legacy_control_second_differences.begin(),
+              legacy_control_second_differences.end());
+    std::sort(coherent_control_second_differences.begin(),
+              coherent_control_second_differences.end());
     const float horizontal_offset_p95 = horizontal_prediction_offsets[
         std::min(
             horizontal_prediction_offsets.size() - 1,
@@ -2149,6 +2203,15 @@ void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
                 static_cast<std::size_t>(
                     horizontal_prediction_second_differences.size() *
                     0.95f))];
+    const auto p95 = [](const std::vector<float>& values) {
+        return values[std::min(
+            values.size() - 1,
+            static_cast<std::size_t>(values.size() * 0.95f))];
+    };
+    const float legacy_control_second_difference_p95 =
+        p95(legacy_control_second_differences);
+    const float coherent_control_second_difference_p95 =
+        p95(coherent_control_second_differences);
     expect(vertical_error_p95 <= 6.0f &&
                vertical_prediction_frames == 0 &&
                maximum_vertical_prediction_offset <= 0.25f,
@@ -2164,6 +2227,15 @@ void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
                std::to_string(horizontal_offset_p95) +
                "，二阶 P95=" +
                std::to_string(horizontal_second_difference_p95));
+    expect(coherent_control_second_difference_p95 <= 0.30f &&
+               coherent_control_second_difference_p95 <=
+                   legacy_control_second_difference_p95 * 0.70f &&
+               horizontal_command_state_changes <= 55,
+           "10 帧反馈下必须统一处理延迟与反向 lead，旧/统一控制目标二阶 P95=" +
+               std::to_string(legacy_control_second_difference_p95) + "/" +
+               std::to_string(coherent_control_second_difference_p95) +
+               "，命令启停切换=" +
+               std::to_string(horizontal_command_state_changes));
 }
 
 void test_prediction_lead_is_stable_across_bursty_frame_intervals() {
