@@ -337,6 +337,8 @@ struct Aim::Impl {
     float prediction_world_velocity_y = 0.0f;
     float prediction_offset_x = 0.0f;
     float prediction_offset_y = 0.0f;
+    float prediction_control_offset_x = 0.0f;
+    float prediction_control_offset_y = 0.0f;
     int prediction_low_motion_x_frames = 0;
     int prediction_low_motion_y_frames = 0;
     std::array<IssuedCommand, kControllerCommandHistoryCapacity>
@@ -1146,6 +1148,8 @@ struct Aim::Impl {
         prediction_world_velocity_y = 0.0f;
         prediction_offset_x = 0.0f;
         prediction_offset_y = 0.0f;
+        prediction_control_offset_x = 0.0f;
+        prediction_control_offset_y = 0.0f;
         prediction_low_motion_x_frames = 0;
         prediction_low_motion_y_frames = 0;
         issued_commands = {};
@@ -1651,12 +1655,6 @@ struct Aim::Impl {
             record_issued_command(frame, 0.0f, 0.0f);
             return false;
         }
-        const float error_x =
-            (aim_x - frame.control_center_x) *
-            frame.source_pixels_per_roi_pixel_x;
-        const float error_y =
-            (aim_y - frame.control_center_y) *
-            frame.source_pixels_per_roi_pixel_y;
         const float tracking_error_x =
             (tracking_x - frame.control_center_x) *
             frame.source_pixels_per_roi_pixel_x;
@@ -1669,6 +1667,20 @@ struct Aim::Impl {
         const float base_error_y =
             (base_y - frame.control_center_y) *
             frame.source_pixels_per_roi_pixel_y;
+        const float prediction_target_x =
+            (aim_x - tracking_x) * frame.source_pixels_per_roi_pixel_x;
+        const float prediction_target_y =
+            (aim_y - tracking_y) * frame.source_pixels_per_roi_pixel_y;
+        const float prediction_alpha = lead_active ? 0.75f : 0.20f;
+        prediction_control_offset_x +=
+            (prediction_target_x - prediction_control_offset_x) *
+            prediction_alpha;
+        prediction_control_offset_y +=
+            (prediction_target_y - prediction_control_offset_y) *
+            prediction_alpha;
+        // 比例误差以基础 tracking 为锚，prediction 偏移使用独立的迟滞状态渐入/渐退。
+        const float error_x = tracking_error_x + prediction_control_offset_x;
+        const float error_y = tracking_error_y + prediction_control_offset_y;
         // deadzone_pixels 与 counts_per_pixel 始终以主机完整 FOV 像素为单位，
         // 不随 OBS 编码尺寸或辅机显示器分辨率变化。恒速目标进入死区后不能
         // 立即清空已学习的积分，否则会形成“追上、停发、落后、再追”的周期。
@@ -1681,6 +1693,8 @@ struct Aim::Impl {
             : clamp_delta_seconds(std::chrono::duration<double>(
                   frame.captured_at - controller_captured_at).count());
         controller_captured_at = frame.captured_at;
+        // 比例闭环沿用基础 tracking/延迟点；prediction 只通过独立前馈进入，
+        // 避免 prediction 点开关把比例误差瞬间推到基础点的另一侧。
         const float proportional_x =
             error_x * config.counts_per_pixel_x * gain;
         const float proportional_y =
@@ -2065,6 +2079,8 @@ struct Aim::Impl {
         prediction_world_velocity_y = 0.0f;
         prediction_offset_x = 0.0f;
         prediction_offset_y = 0.0f;
+        prediction_control_offset_x = 0.0f;
+        prediction_control_offset_y = 0.0f;
         prediction_low_motion_x_frames = 0;
         prediction_low_motion_y_frames = 0;
         world_motion_measurement_x = 0.0f;
