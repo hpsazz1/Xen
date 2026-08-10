@@ -136,6 +136,9 @@ constexpr float kPredictionWorldMotionReleasePerSecond = 120.0f;
 // 阻止预测点一帧从半程跳到几何上限。1.5 diagonals/s 在 240 Hz、约 100 px
 // 人物框下每帧最多约 0.63 px，不改变稳定提前距离。
 constexpr float kPredictionOffsetMaximumSlewDiagonalsPerSecond = 1.5f;
+// prediction 退出后反拉保持只用于跨越短暂的相机反馈低谷；低运动持续超过
+// 300 ms 仍没有真实反向时必须释放，才能让基础点把准星带回配置高度。
+constexpr float kPredictionPullbackHoldTimeoutSeconds = 0.30f;
 // 实机人物姿态会造成 3～10 帧的同向低运动窗口；五帧确认仍会把窗口
 // 中间误判成停止并清零 prediction。延长到 12 帧只改变停止确认，真实
 // 停止尾窗仍受快速释放增益限制，基础前馈状态不受影响。
@@ -381,12 +384,16 @@ struct Aim::Impl {
     bool shaper_initialized = false;
     std::uint64_t lead_track_id = 0;
     bool lead_active = false;
+    bool lead_axis_active_x = false;
+    bool lead_axis_active_y = false;
     bool lead_ever_activated = false;
     bool lead_rearm_ready = true;
     bool prediction_pullback_hold_x = false;
     bool prediction_pullback_hold_y = false;
     float prediction_pullback_direction_x = 0.0f;
     float prediction_pullback_direction_y = 0.0f;
+    float prediction_pullback_hold_time_x = 0.0f;
+    float prediction_pullback_hold_time_y = 0.0f;
     int lead_settle_frames = 0;
     int lead_candidate_frames = 0;
     float lead_direction_x = 0.0f;
@@ -1422,12 +1429,16 @@ struct Aim::Impl {
         if (lead_track_id != track.id) {
             lead_track_id = track.id;
             lead_active = false;
+            lead_axis_active_x = false;
+            lead_axis_active_y = false;
             lead_ever_activated = false;
             lead_rearm_ready = true;
             prediction_pullback_hold_x = false;
             prediction_pullback_hold_y = false;
             prediction_pullback_direction_x = 0.0f;
             prediction_pullback_direction_y = 0.0f;
+            prediction_pullback_hold_time_x = 0.0f;
+            prediction_pullback_hold_time_y = 0.0f;
             lead_settle_frames = 0;
             lead_candidate_frames = 0;
             lead_direction_x = 0.0f;
@@ -1446,12 +1457,16 @@ struct Aim::Impl {
         }
         if (!config.enable_prediction) {
             lead_active = false;
+            lead_axis_active_x = false;
+            lead_axis_active_y = false;
             lead_ever_activated = false;
             lead_rearm_ready = true;
             prediction_pullback_hold_x = false;
             prediction_pullback_hold_y = false;
             prediction_pullback_direction_x = 0.0f;
             prediction_pullback_direction_y = 0.0f;
+            prediction_pullback_hold_time_x = 0.0f;
+            prediction_pullback_hold_time_y = 0.0f;
             lead_settle_frames = 0;
             lead_candidate_frames = 0;
             delay_lead_scale = 0.0f;
@@ -1471,12 +1486,16 @@ struct Aim::Impl {
             // 松开锁定后 Runtime 不发送物理输出；prediction 的逐轴反拉保持
             // 也必须在此清空，避免下一次按住时继承上一次移动方向。
             lead_active = false;
+            lead_axis_active_x = false;
+            lead_axis_active_y = false;
             lead_ever_activated = false;
             lead_rearm_ready = true;
             prediction_pullback_hold_x = false;
             prediction_pullback_hold_y = false;
             prediction_pullback_direction_x = 0.0f;
             prediction_pullback_direction_y = 0.0f;
+            prediction_pullback_hold_time_x = 0.0f;
+            prediction_pullback_hold_time_y = 0.0f;
             lead_settle_frames = 0;
             lead_candidate_frames = 0;
             lead_direction_x = 0.0f;
@@ -1531,37 +1550,66 @@ struct Aim::Impl {
                 box_diagonal * forecast_limit_percent / 100.0f);
             const auto update_pullback_hold = [&](
                     float world_velocity, float base_error,
-                    float hold_direction, bool& hold) {
-                if (hold && hold_direction * world_velocity < 0.0f &&
+                    float hold_direction, bool& hold,
+                    float& hold_time, float release_velocity,
+                    bool allow_timeout) {
+                if (!hold) {
+                    hold_time = 0.0f;
+                    return;
+                }
+                hold_time += track.prediction_dt;
+                if (hold_direction * world_velocity < 0.0f &&
                     -base_error * hold_direction >=
                         reverse_takeover_distance) {
                     hold = false;
+                    hold_time = 0.0f;
+                    return;
+                }
+                // 低运动长期持续表示 prediction 已经失效，而不是一帧相机
+                // 反馈低谷。超时后释放逐轴停发，避免 Y 轴永久停在错误高度。
+                if (allow_timeout &&
+                    hold_time >= kPredictionPullbackHoldTimeoutSeconds &&
+                    std::fabs(world_velocity) <= release_velocity) {
+                    hold = false;
+                    hold_time = 0.0f;
                 }
             };
             update_pullback_hold(
                 world_velocity_x, base_x - frame.control_center_x,
                 prediction_pullback_direction_x,
-                prediction_pullback_hold_x);
+                prediction_pullback_hold_x,
+                prediction_pullback_hold_time_x,
+                kPredictionEstablishedWorldVelocityCountsPerSecond /
+                    (config.counts_per_pixel_x *
+                     frame.source_pixels_per_roi_pixel_x),
+                false);
             update_pullback_hold(
                 world_velocity_y, base_y - frame.control_center_y,
                 prediction_pullback_direction_y,
-                prediction_pullback_hold_y);
+                prediction_pullback_hold_y,
+                prediction_pullback_hold_time_y,
+                kPredictionEstablishedWorldVelocityCountsPerSecond /
+                    (config.counts_per_pixel_y *
+                     frame.source_pixels_per_roi_pixel_y),
+                true);
             // 二维 prediction 可能仍因垂直姿态保持 active，但水平世界状态
             // 已先衰减到门槛以下。每轴必须在自己的前探消失时保存方向，
             // 不能等两个轴同时归零，否则垂直 lead 会掩盖水平拉回。
-            if (lead_active &&
+            if (lead_active && lead_axis_active_x &&
                 std::fabs(desired_lead_x) <= activation_distance_x &&
                 std::fabs(lead_direction_x) > 0.001f) {
                 prediction_pullback_hold_x = true;
                 prediction_pullback_direction_x =
                     std::copysign(1.0f, lead_direction_x);
+                prediction_pullback_hold_time_x = 0.0f;
             }
-            if (lead_active &&
+            if (lead_active && lead_axis_active_y &&
                 std::fabs(desired_lead_y) <= activation_distance_y &&
                 std::fabs(lead_direction_y) > 0.001f) {
                 prediction_pullback_hold_y = true;
                 prediction_pullback_direction_y =
                     std::copysign(1.0f, lead_direction_y);
+                prediction_pullback_hold_time_y = 0.0f;
             }
             if ((std::fabs(desired_lead_x) <= activation_distance_x &&
                  std::fabs(desired_lead_y) <= activation_distance_y) ||
@@ -1572,13 +1620,18 @@ struct Aim::Impl {
                     prediction_pullback_hold_x = true;
                     prediction_pullback_direction_x =
                         std::copysign(1.0f, lead_direction_x);
+                    prediction_pullback_hold_time_x = 0.0f;
                 }
-                if (lead_active && std::fabs(lead_direction_y) > 0.001f) {
+                if (lead_active && lead_axis_active_y &&
+                    std::fabs(lead_direction_y) > 0.001f) {
                     prediction_pullback_hold_y = true;
                     prediction_pullback_direction_y =
                         std::copysign(1.0f, lead_direction_y);
+                    prediction_pullback_hold_time_y = 0.0f;
                 }
                 lead_active = false;
+                lead_axis_active_x = false;
+                lead_axis_active_y = false;
                 lead_candidate_frames = 0;
                 delay_lead_scale = 0.0f;
                 prediction_offset_x = 0.0f;
@@ -1597,6 +1650,7 @@ struct Aim::Impl {
                     -(base_x - frame.control_center_x) * lead_direction_x >=
                         reverse_takeover_distance;
                 const bool reverse_takeover_y =
+                    lead_axis_active_y &&
                     std::fabs(lead_direction_y) > 0.001f &&
                     lead_direction_y * world_velocity_y < 0.0f &&
                     lead_direction_y * track.vy < 0.0f &&
@@ -1611,11 +1665,14 @@ struct Aim::Impl {
                         prediction_pullback_hold_x = true;
                         prediction_pullback_direction_x =
                             std::copysign(1.0f, lead_direction_x);
+                        prediction_pullback_hold_time_x = 0.0f;
                     }
-                    if (std::fabs(lead_direction_y) > 0.001f) {
+                    if (lead_axis_active_y &&
+                        std::fabs(lead_direction_y) > 0.001f) {
                         prediction_pullback_hold_y = true;
                         prediction_pullback_direction_y =
                             std::copysign(1.0f, lead_direction_y);
+                        prediction_pullback_hold_time_y = 0.0f;
                     }
                     float held_lead_x =
                         prediction_offset_x - projection.delay_x;
@@ -1639,14 +1696,19 @@ struct Aim::Impl {
                     prediction_pullback_hold_x = true;
                     prediction_pullback_direction_x =
                         std::copysign(1.0f, lead_direction_x);
+                    prediction_pullback_hold_time_x = 0.0f;
                 }
-                if (std::fabs(lead_direction_y) > 0.001f &&
+                if (lead_axis_active_y &&
+                    std::fabs(lead_direction_y) > 0.001f &&
                     !reverse_takeover_y) {
                     prediction_pullback_hold_y = true;
                     prediction_pullback_direction_y =
                         std::copysign(1.0f, lead_direction_y);
+                    prediction_pullback_hold_time_y = 0.0f;
                 }
                 lead_active = false;
+                lead_axis_active_x = false;
+                lead_axis_active_y = false;
                 lead_candidate_frames = 0;
                 delay_lead_scale = 0.0f;
                 prediction_offset_x = 0.0f;
@@ -1688,8 +1750,12 @@ struct Aim::Impl {
                 forecast_y = 0.0f;
             }
             if (forecast_x == 0.0f && forecast_y == 0.0f) {
+                lead_axis_active_x = false;
+                lead_axis_active_y = false;
                 return projection;
             }
+            lead_axis_active_x = std::fabs(forecast_x) > activation_distance_x;
+            lead_axis_active_y = std::fabs(forecast_y) > activation_distance_y;
             // 真机 MoveLeft Run 20260809-225041 中，世界前探 P50 为向左
             // 3.11 px，但屏幕相对速度生成的延迟补偿 P50 为向右 2.45 px；
             // 99.32% 的有效帧发生抵消，最终点 P50 只剩 0.37 count，肉眼等同
@@ -1746,8 +1812,12 @@ struct Aim::Impl {
         delay_lead_scale = 0.0f;
         prediction_pullback_hold_x = false;
         prediction_pullback_hold_y = false;
+        lead_axis_active_x = false;
+        lead_axis_active_y = false;
         prediction_pullback_direction_x = 0.0f;
         prediction_pullback_direction_y = 0.0f;
+        prediction_pullback_hold_time_x = 0.0f;
+        prediction_pullback_hold_time_y = 0.0f;
         prediction_offset_x = 0.0f;
         prediction_offset_y = 0.0f;
         const float error_x =
@@ -1774,6 +1844,8 @@ struct Aim::Impl {
             if (!moving_away || velocity_reversed ||
                 error_magnitude <= exit_distance) {
                 lead_active = false;
+                lead_axis_active_x = false;
+                lead_axis_active_y = false;
                 lead_rearm_ready = false;
                 lead_settle_frames = 0;
                 lead_candidate_frames = 0;
@@ -2077,7 +2149,8 @@ struct Aim::Impl {
                 desired_x * lead_direction_x < 0.0f) {
                 desired_x = 0.0f;
             }
-            if (lead_active && std::fabs(lead_direction_y) > 0.001f &&
+            if (lead_active && lead_axis_active_y &&
+                std::fabs(lead_direction_y) > 0.001f &&
                 desired_y * lead_direction_y < 0.0f) {
                 desired_y = 0.0f;
             }
@@ -2287,12 +2360,16 @@ struct Aim::Impl {
         switch_cooldown = 0;
         lead_track_id = 0;
         lead_active = false;
+        lead_axis_active_x = false;
+        lead_axis_active_y = false;
         lead_ever_activated = false;
         lead_rearm_ready = true;
         prediction_pullback_hold_x = false;
         prediction_pullback_hold_y = false;
         prediction_pullback_direction_x = 0.0f;
         prediction_pullback_direction_y = 0.0f;
+        prediction_pullback_hold_time_x = 0.0f;
+        prediction_pullback_hold_time_y = 0.0f;
         lead_settle_frames = 0;
         lead_candidate_frames = 0;
         lead_direction_x = 0.0f;

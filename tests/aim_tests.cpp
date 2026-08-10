@@ -1920,6 +1920,115 @@ void test_horizontal_prediction_does_not_block_vertical_height_correction() {
                "，首个中距停发=" + first_medium_stop_trace);
 }
 
+void test_vertical_pullback_hold_releases_while_horizontal_prediction_continues() {
+    constexpr int kActuationDelayFrames = 4;
+    constexpr int kVerticalMovingFrames = 520;
+    constexpr int kFrameCount = 1400;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> delayed_commands_x{};
+    std::array<int, kActuationDelayFrames> delayed_commands_y{};
+    float world_target_x = -12.0f;
+    float world_target_y = 24.0f;
+    float camera_x = 0.0f;
+    float camera_y = 0.0f;
+    int moving_vertical_lead_frames = 0;
+    int late_vertical_stop_frames = 0;
+    int late_vertical_correction_frames = 0;
+    std::vector<float> late_vertical_errors;
+
+    for (int index = 0; index < kFrameCount; ++index) {
+        const int delay_slot = index % kActuationDelayFrames;
+        camera_x += delayed_commands_x[delay_slot] /
+            config.counts_per_pixel_x * 0.18f;
+        camera_y += delayed_commands_y[delay_slot] /
+            config.counts_per_pixel_y * 0.18f;
+        delayed_commands_x[delay_slot] = 0;
+        delayed_commands_y[delay_slot] = 0;
+        world_target_x -= 0.65f;
+        if (index < kVerticalMovingFrames) {
+            world_target_y -= 0.80f;
+        } else if (index == kVerticalMovingFrames) {
+            // 目标停止时叠加一次向旧 prediction 反侧的姿态/观测偏移，
+            // 模拟真机归位阶段把基础 Y 点推离准星的窗口。
+            world_target_y += 20.0f;
+        }
+
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body_box(
+            160.0f + world_target_x - camera_x,
+            172.0f + world_target_y - camera_y,
+            40.0f, 80.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "逐轴反拉释放回归必须逐帧保留合法目标");
+        if (!result.has_target) continue;
+
+        const int command_x = result.has_command
+            ? result.command.dx_counts : 0;
+        const int command_y = result.has_command
+            ? result.command.dy_counts : 0;
+        if (result.has_command) {
+            delayed_commands_x[delay_slot] = command_x;
+            delayed_commands_y[delay_slot] = command_y;
+        }
+        if (index >= 300 && index < kVerticalMovingFrames &&
+            result.target.lead_active && result.target.lead_y < -0.25f) {
+            ++moving_vertical_lead_frames;
+        }
+        if (index >= kVerticalMovingFrames + 72) {
+            const float vertical_error =
+                std::fabs(result.target.base_aim_y - frame.control_center_y);
+            if (vertical_error > 3.0f && command_y > 0) {
+                ++late_vertical_correction_frames;
+            }
+            if (index >= kVerticalMovingFrames + 180) {
+                late_vertical_errors.push_back(vertical_error);
+                if (vertical_error > 3.0f && command_y == 0) {
+                    ++late_vertical_stop_frames;
+                }
+            }
+        }
+    }
+
+    std::sort(late_vertical_errors.begin(), late_vertical_errors.end());
+    const std::size_t p95_index = std::min(
+        late_vertical_errors.size() - 1,
+        static_cast<std::size_t>(late_vertical_errors.size() * 0.95f));
+    const float late_vertical_error_p95 = late_vertical_errors[p95_index];
+    expect(moving_vertical_lead_frames >= 60,
+           "逐轴反拉释放回归必须先建立真实 Y prediction，活动帧=" +
+               std::to_string(moving_vertical_lead_frames));
+    expect(late_vertical_stop_frames == 0 &&
+               late_vertical_correction_frames > 0 &&
+               late_vertical_error_p95 <= 5.0f,
+           "Y 运动停止后不得因 X prediction 继续活动而永久停发，高度误差 P95=" +
+               std::to_string(late_vertical_error_p95) +
+               "，停发帧=" + std::to_string(late_vertical_stop_frames) +
+               "，纠正帧=" +
+               std::to_string(late_vertical_correction_frames));
+}
+
 void test_prediction_lead_is_stable_across_bursty_frame_intervals() {
     constexpr std::array<int, 8> kFrameIntervalsMicroseconds{
         4167, 4167, 1000, 7334, 4167, 1500, 6834, 4167};
@@ -3037,6 +3146,7 @@ int main() {
     test_prediction_motion_axis_requires_confirmed_stop();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
+    test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();
     test_prediction_lead_is_stable_across_bursty_frame_intervals();
     test_prediction_pullback_hold_releases_after_real_reversal();
     test_base_crossing_releases_integral_smoothly();
