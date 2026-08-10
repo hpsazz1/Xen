@@ -143,10 +143,17 @@ constexpr int kPredictionStaticReleaseConfirmFrames = 12;
 // 世界运动只在独立慢速状态形成至少四分之一 count 的稳定维持量后
 // 才可用于 prediction；更小残余属于静止收敛和量化噪声，禁止强行前探。
 constexpr float kPredictionWorldMotionMinimumCounts = 0.25f;
+// 屏幕相对速度包含 KMBOX 命令造成的相机反馈，只能用于维持已经成立的
+// 世界运动，不能从静止状态单独启动 prediction。60 counts/s 等价于
+// 240 Hz 下每帧 0.25 count，与真实 Run 使用的世界运动门槛保持一致。
+constexpr float kPredictionEstablishedWorldVelocityCountsPerSecond = 60.0f;
+// 从零建立 prediction 前，命令补偿后的世界运动必须按同一方向持续至少
+// 250 ms。真机姿态/归位伪运动只持续数十帧，持续移动则远长于该窗口；
+// 已建立后的低谷和停止仍由原有 12 帧释放状态机处理。
+constexpr float kPredictionWorldMotionEstablishmentSeconds = 0.25f;
 // 正确方向的提前量也不能在观察器刚建立时整段跳入。按真实 dt 在约 33 ms
 // 内线性渐入，避免 prediction 状态变化绕过物理命令阶跃门禁。
 constexpr float kPredictionLeadRampPerSecond = 30.0f;
-constexpr float kPredictionPointFilterGainPerSecond = 120.0f;
 // 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
 // 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
 constexpr float kControllerQuantizationMotionThresholdPixelsPerSecond = 10.0f;
@@ -351,13 +358,15 @@ struct Aim::Impl {
     // counts/frame，二者不能混用，否则瞬时帧间隔会改变预测距离。
     float prediction_world_velocity_x = 0.0f;
     float prediction_world_velocity_y = 0.0f;
+    // 符号表示候选世界方向，绝对值表示同向连续测量时长（秒）。
+    float prediction_motion_candidate_x_seconds = 0.0f;
+    float prediction_motion_candidate_y_seconds = 0.0f;
+    bool prediction_external_motion_evidence_x = false;
+    bool prediction_external_motion_evidence_y = false;
     float prediction_offset_x = 0.0f;
     float prediction_offset_y = 0.0f;
     float prediction_control_offset_x = 0.0f;
     float prediction_control_offset_y = 0.0f;
-    float filtered_prediction_point_x = 0.0f;
-    float filtered_prediction_point_y = 0.0f;
-    bool filtered_prediction_point_initialized = false;
     int prediction_low_motion_x_frames = 0;
     int prediction_low_motion_y_frames = 0;
     std::array<IssuedCommand, kControllerCommandHistoryCapacity>
@@ -1200,9 +1209,12 @@ struct Aim::Impl {
         if (!frame.lock_active || controller_track_id != track.id) {
             prediction_world_velocity_x = 0.0f;
             prediction_world_velocity_y = 0.0f;
+            prediction_motion_candidate_x_seconds = 0.0f;
+            prediction_motion_candidate_y_seconds = 0.0f;
+            prediction_external_motion_evidence_x = false;
+            prediction_external_motion_evidence_y = false;
             prediction_offset_x = 0.0f;
             prediction_offset_y = 0.0f;
-            filtered_prediction_point_initialized = false;
             prediction_low_motion_x_frames = 0;
             prediction_low_motion_y_frames = 0;
             return {0.0f, 0.0f};
@@ -1216,35 +1228,86 @@ struct Aim::Impl {
         const auto stop_measurement = [&](float world_measurement,
                                           float relative_velocity,
                                           float source_scale,
-                                          float counts_per_pixel) {
+                                          float counts_per_pixel,
+                                          float prediction_velocity) {
             const float relative_counts = relative_velocity * source_scale *
                 track.prediction_dt * counts_per_pixel *
                 kControllerFeedforwardVelocityScale;
-            return std::fabs(relative_counts) > std::fabs(world_measurement)
+            // 命令补偿后的世界测量负责建立运动；只有该轴 prediction 已有
+            // 足够强且与屏幕相对速度同向的世界速度时，才允许后者跨越低谷。
+            // 否则静止目标的相机归位会在 Y 轴凭空创建 prediction，随后被
+            // 反拉保护误当成真实运动方向并长期清零高度修正命令。
+            const bool relative_motion_confirms_world_motion =
+                std::fabs(prediction_velocity) >=
+                    kPredictionEstablishedWorldVelocityCountsPerSecond &&
+                relative_counts * prediction_velocity > 0.0f;
+            return relative_motion_confirms_world_motion &&
+                    std::fabs(relative_counts) > std::fabs(world_measurement)
                 ? relative_counts : world_measurement;
         };
-        aim::detail::update_prediction_velocity_axis(
-            feedforward_x,
-            stop_measurement(
-                world_motion_measurement_x, track.vx,
-                frame.source_pixels_per_roi_pixel_x,
-                config.counts_per_pixel_x),
-            track.prediction_dt, kPredictionWorldMotionMinimumCounts,
-            kPredictionStaticReleaseConfirmFrames,
-            kPredictionWorldMotionGainPerSecond,
-            kPredictionWorldMotionReleasePerSecond,
-            prediction_world_velocity_x, prediction_low_motion_x_frames);
-        aim::detail::update_prediction_velocity_axis(
-            feedforward_y,
-            stop_measurement(
-                world_motion_measurement_y, track.vy,
-                frame.source_pixels_per_roi_pixel_y,
-                config.counts_per_pixel_y),
-            track.prediction_dt, kPredictionWorldMotionMinimumCounts,
-            kPredictionStaticReleaseConfirmFrames,
-            kPredictionWorldMotionGainPerSecond,
-            kPredictionWorldMotionReleasePerSecond,
-            prediction_world_velocity_y, prediction_low_motion_y_frames);
+        const auto update_prediction_axis = [&](
+                float feedforward, float world_measurement,
+                float relative_velocity, float source_scale,
+                float counts_per_pixel, float& prediction_velocity,
+                int& low_motion_frames, float& candidate_seconds,
+                bool& external_motion_evidence) {
+            if (!external_motion_evidence &&
+                std::fabs(candidate_seconds) <
+                kPredictionWorldMotionEstablishmentSeconds) {
+                if (std::fabs(world_measurement) <=
+                    kPredictionWorldMotionMinimumCounts) {
+                    candidate_seconds = 0.0f;
+                } else {
+                    const float signed_dt = std::copysign(
+                        track.prediction_dt, world_measurement);
+                    if (candidate_seconds * world_measurement <= 0.0f) {
+                        candidate_seconds = signed_dt;
+                    } else {
+                        candidate_seconds += signed_dt;
+                    }
+                    candidate_seconds = std::clamp(
+                        candidate_seconds,
+                        -kPredictionWorldMotionEstablishmentSeconds,
+                        kPredictionWorldMotionEstablishmentSeconds);
+                }
+                if (std::fabs(candidate_seconds) <
+                    kPredictionWorldMotionEstablishmentSeconds) {
+                    prediction_velocity = 0.0f;
+                    low_motion_frames = 0;
+                    return;
+                }
+            }
+            aim::detail::update_prediction_velocity_axis(
+                feedforward,
+                stop_measurement(
+                    world_measurement, relative_velocity, source_scale,
+                    counts_per_pixel, prediction_velocity),
+                track.prediction_dt, kPredictionWorldMotionMinimumCounts,
+                kPredictionStaticReleaseConfirmFrames,
+                kPredictionWorldMotionGainPerSecond,
+                kPredictionWorldMotionReleasePerSecond,
+                prediction_velocity, low_motion_frames);
+            if (low_motion_frames >= kPredictionStaticReleaseConfirmFrames &&
+                std::fabs(prediction_velocity) <
+                    kPredictionEstablishedWorldVelocityCountsPerSecond) {
+                prediction_velocity = 0.0f;
+                low_motion_frames = 0;
+                candidate_seconds = 0.0f;
+                external_motion_evidence = false;
+            }
+        };
+        update_prediction_axis(
+            feedforward_x, world_motion_measurement_x, track.vx,
+            frame.source_pixels_per_roi_pixel_x, config.counts_per_pixel_x,
+            prediction_world_velocity_x, prediction_low_motion_x_frames,
+            prediction_motion_candidate_x_seconds,
+            prediction_external_motion_evidence_x);
+        update_prediction_axis(
+            feedforward_y, world_motion_measurement_y, track.vy,
+            frame.source_pixels_per_roi_pixel_y, config.counts_per_pixel_y,
+            prediction_world_velocity_y, prediction_low_motion_y_frames,
+            prediction_motion_candidate_y_seconds,
+            prediction_external_motion_evidence_y);
         if (prediction_world_velocity_x == 0.0f &&
             prediction_world_velocity_y == 0.0f) {
             return {0.0f, 0.0f};
@@ -1274,6 +1337,10 @@ struct Aim::Impl {
         world_motion_measurement_y = 0.0f;
         prediction_world_velocity_x = 0.0f;
         prediction_world_velocity_y = 0.0f;
+        prediction_motion_candidate_x_seconds = 0.0f;
+        prediction_motion_candidate_y_seconds = 0.0f;
+        prediction_external_motion_evidence_x = false;
+        prediction_external_motion_evidence_y = false;
         prediction_offset_x = 0.0f;
         prediction_offset_y = 0.0f;
         prediction_control_offset_x = 0.0f;
@@ -1368,6 +1435,10 @@ struct Aim::Impl {
             delay_lead_scale = 0.0f;
             prediction_world_velocity_x = 0.0f;
             prediction_world_velocity_y = 0.0f;
+            prediction_motion_candidate_x_seconds = 0.0f;
+            prediction_motion_candidate_y_seconds = 0.0f;
+            prediction_external_motion_evidence_x = false;
+            prediction_external_motion_evidence_y = false;
             prediction_offset_x = 0.0f;
             prediction_offset_y = 0.0f;
             prediction_low_motion_x_frames = 0;
@@ -1386,6 +1457,10 @@ struct Aim::Impl {
             delay_lead_scale = 0.0f;
             prediction_world_velocity_x = 0.0f;
             prediction_world_velocity_y = 0.0f;
+            prediction_motion_candidate_x_seconds = 0.0f;
+            prediction_motion_candidate_y_seconds = 0.0f;
+            prediction_external_motion_evidence_x = false;
+            prediction_external_motion_evidence_y = false;
             prediction_offset_x = 0.0f;
             prediction_offset_y = 0.0f;
             prediction_low_motion_x_frames = 0;
@@ -1409,6 +1484,10 @@ struct Aim::Impl {
             delay_lead_scale = 0.0f;
             prediction_world_velocity_x = 0.0f;
             prediction_world_velocity_y = 0.0f;
+            prediction_motion_candidate_x_seconds = 0.0f;
+            prediction_motion_candidate_y_seconds = 0.0f;
+            prediction_external_motion_evidence_x = false;
+            prediction_external_motion_evidence_y = false;
             prediction_offset_x = 0.0f;
             prediction_offset_y = 0.0f;
             prediction_low_motion_x_frames = 0;
@@ -1861,7 +1940,8 @@ struct Aim::Impl {
                                             float counts_per_pixel,
                                             float delayed_command,
                                             float& feedforward,
-                                            float& world_motion_measurement) {
+                                            float& world_motion_measurement,
+                                            bool& external_motion_evidence) {
             world_motion_measurement = 0.0f;
             if (config.enable_prediction &&
                 !config.enable_delay_compensation) {
@@ -1878,11 +1958,21 @@ struct Aim::Impl {
             } else if (track.state != TrackState::CONFIRMED) {
                 feedforward = 0.0f;
             } else {
-                const float measurement = delayed_command +
+                const float relative_motion_counts =
                     relative_velocity * source_scale * controller_dt *
-                        counts_per_pixel *
-                        kControllerFeedforwardVelocityScale;
+                    counts_per_pixel * kControllerFeedforwardVelocityScale;
+                const float measurement =
+                    delayed_command + relative_motion_counts;
                 world_motion_measurement = measurement;
+                // 自身相机反馈必然与到期命令反向；相对运动仍与命令同向
+                // 说明外部目标运动压过了反馈，可作为快速建立的因果证据。
+                // 零命令后的滤波残余不满足此条件，不能误触发 Y prediction。
+                if (std::fabs(delayed_command) > 0.001f &&
+                    std::fabs(relative_motion_counts) >
+                        kPredictionWorldMotionMinimumCounts &&
+                    delayed_command * relative_motion_counts > 0.0f) {
+                    external_motion_evidence = true;
+                }
                 const float alpha = 1.0f - std::exp(
                     -kControllerFeedforwardObserverGainPerSecond *
                         controller_dt);
@@ -1923,11 +2013,13 @@ struct Aim::Impl {
         update_feedforward(
             base_error_x, track.vx, frame.source_pixels_per_roi_pixel_x,
             config.counts_per_pixel_x, delayed_command_x, feedforward_x,
-            world_motion_measurement_x);
+            world_motion_measurement_x,
+            prediction_external_motion_evidence_x);
         update_feedforward(
             base_error_y, track.vy, frame.source_pixels_per_roi_pixel_y,
             config.counts_per_pixel_y, delayed_command_y, feedforward_y,
-            world_motion_measurement_y);
+            world_motion_measurement_y,
+            prediction_external_motion_evidence_y);
         float desired_x = proportional_x + feedforward_x;
         float desired_y = proportional_y + feedforward_y;
         // 移动目标在保持带内仍需承担量化后的平均维持量。仅在观察器已
@@ -2207,6 +2299,10 @@ struct Aim::Impl {
         lead_direction_y = 0.0f;
         prediction_world_velocity_x = 0.0f;
         prediction_world_velocity_y = 0.0f;
+        prediction_motion_candidate_x_seconds = 0.0f;
+        prediction_motion_candidate_y_seconds = 0.0f;
+        prediction_external_motion_evidence_x = false;
+        prediction_external_motion_evidence_y = false;
         prediction_offset_x = 0.0f;
         prediction_offset_y = 0.0f;
         prediction_control_offset_x = 0.0f;
@@ -2279,45 +2375,8 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
             const auto control_at = frame.control_at ==
                     std::chrono::steady_clock::time_point{}
                 ? clock::now() : frame.control_at;
-            auto projection =
+            const auto projection =
                 impl_->projected_aim_point(frame, *target, control_at);
-            if (projection.active) {
-                if (!impl_->filtered_prediction_point_initialized) {
-                    impl_->filtered_prediction_point_x = projection.final_x;
-                    impl_->filtered_prediction_point_y = projection.final_y;
-                    impl_->filtered_prediction_point_initialized = true;
-                } else {
-                    const float alpha = 1.0f - std::exp(
-                        -kPredictionPointFilterGainPerSecond *
-                            target->prediction_dt);
-                    impl_->filtered_prediction_point_x +=
-                        (projection.final_x -
-                         impl_->filtered_prediction_point_x) * alpha;
-                    impl_->filtered_prediction_point_y +=
-                        (projection.final_y -
-                         impl_->filtered_prediction_point_y) * alpha;
-                }
-                float filtered_lead_x =
-                    impl_->filtered_prediction_point_x -
-                    projection.delay_compensated_x;
-                float filtered_lead_y =
-                    impl_->filtered_prediction_point_y -
-                    projection.delay_compensated_y;
-                const float box_diagonal = std::hypot(
-                    target->x2 - target->x1, target->y2 - target->y1);
-                clamp_vector(
-                    filtered_lead_x, filtered_lead_y,
-                    box_diagonal *
-                        impl_->config.max_prediction_lead_percent / 100.0f);
-                projection.final_x =
-                    projection.delay_compensated_x + filtered_lead_x;
-                projection.final_y =
-                    projection.delay_compensated_y + filtered_lead_y;
-                impl_->filtered_prediction_point_x = projection.final_x;
-                impl_->filtered_prediction_point_y = projection.final_y;
-            } else {
-                impl_->filtered_prediction_point_initialized = false;
-            }
             result.has_target = true;
             result.target.track_id = target->id;
             result.target.state = target->state;

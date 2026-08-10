@@ -1761,6 +1761,165 @@ void test_prediction_closed_loop_keeps_visible_left_lead_without_pullback() {
                std::to_string(stop_tail_lead_frames));
 }
 
+void test_horizontal_prediction_does_not_block_vertical_height_correction() {
+    constexpr int kActuationDelayFrames = 4;
+    constexpr int kFrameCount = 1200;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> delayed_commands_x{};
+    std::array<int, kActuationDelayFrames> delayed_commands_y{};
+    float world_target_x = -12.0f;
+    constexpr float kWorldTargetYOffset = 25.0f;
+    float camera_x = 0.0f;
+    float camera_y = 0.0f;
+    int far_vertical_stop_frames = 0;
+    int medium_vertical_stop_frames = 0;
+    int maximum_far_vertical_stop_run = 0;
+    int current_far_vertical_stop_run = 0;
+    int vertical_prediction_frames = 0;
+    int all_vertical_prediction_frames = 0;
+    float maximum_vertical_prediction_offset = 0.0f;
+    float maximum_all_vertical_prediction_offset = 0.0f;
+    std::string first_vertical_prediction_trace;
+    std::string first_medium_stop_trace;
+    std::vector<float> settled_vertical_errors;
+
+    for (int index = 0; index < kFrameCount; ++index) {
+        const int delay_slot = index % kActuationDelayFrames;
+        camera_x += delayed_commands_x[delay_slot] /
+            config.counts_per_pixel_x * 0.18f;
+        camera_y += delayed_commands_y[delay_slot] /
+            config.counts_per_pixel_y * 0.18f;
+        delayed_commands_x[delay_slot] = 0;
+        delayed_commands_y[delay_slot] = 0;
+        world_target_x -= 0.65f;
+
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        // body_aim_height_ratio=0.35 时，80 px 身体框的瞄点比框中心高
+        // 12 px。这里显式补回该偏移，使真实指定高度只由相机闭环改变。
+        frame.detections = {body_box(
+            160.0f + world_target_x - camera_x,
+            172.0f + kWorldTargetYOffset - camera_y,
+            40.0f, 80.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "二维 prediction 高度闭环必须逐帧保留合法目标");
+        if (!result.has_target) continue;
+
+        const int command_x = result.has_command
+            ? result.command.dx_counts : 0;
+        const int command_y = result.has_command
+            ? result.command.dy_counts : 0;
+        if (result.has_command) {
+            delayed_commands_x[delay_slot] = command_x;
+            delayed_commands_y[delay_slot] = command_y;
+        }
+        const float all_vertical_prediction_offset =
+            std::fabs(result.target.lead_y);
+        maximum_all_vertical_prediction_offset = std::max(
+            maximum_all_vertical_prediction_offset,
+            all_vertical_prediction_offset);
+        if (all_vertical_prediction_offset > 0.25f) {
+            ++all_vertical_prediction_frames;
+            if (first_vertical_prediction_trace.empty()) {
+                first_vertical_prediction_trace =
+                    "帧=" + std::to_string(index) +
+                    "，base_y=" + std::to_string(
+                        result.target.base_aim_y) +
+                    "，prediction_y=" + std::to_string(
+                        result.target.prediction_aim_y) +
+                    "，lead_y=" + std::to_string(result.target.lead_y);
+            }
+        }
+
+        if (index >= 400) {
+            const float vertical_error =
+                std::fabs(result.target.base_aim_y - frame.control_center_y);
+            const float vertical_prediction_offset =
+                std::fabs(result.target.lead_y);
+            settled_vertical_errors.push_back(vertical_error);
+            maximum_vertical_prediction_offset = std::max(
+                maximum_vertical_prediction_offset,
+                vertical_prediction_offset);
+            if (vertical_prediction_offset > 0.25f) {
+                ++vertical_prediction_frames;
+            }
+            if (vertical_error > 3.0f && command_y == 0) {
+                ++medium_vertical_stop_frames;
+                if (first_medium_stop_trace.empty()) {
+                    first_medium_stop_trace =
+                        "帧=" + std::to_string(index) +
+                        "，base_y=" +
+                        std::to_string(result.target.base_aim_y) +
+                        "，delay_y=" + std::to_string(
+                            result.target.delay_compensated_aim_y) +
+                        "，final_y=" +
+                        std::to_string(result.target.aim_y) +
+                        "，lead_y=" +
+                        std::to_string(result.target.lead_y);
+                }
+            }
+            if (vertical_error > 8.0f && command_y == 0) {
+                ++far_vertical_stop_frames;
+                ++current_far_vertical_stop_run;
+                maximum_far_vertical_stop_run = std::max(
+                    maximum_far_vertical_stop_run,
+                    current_far_vertical_stop_run);
+            } else {
+                current_far_vertical_stop_run = 0;
+            }
+        }
+    }
+
+    std::sort(settled_vertical_errors.begin(),
+              settled_vertical_errors.end());
+    const std::size_t p95_index = std::min(
+        settled_vertical_errors.size() - 1,
+        static_cast<std::size_t>(settled_vertical_errors.size() * 0.95f));
+    const float vertical_error_p95 = settled_vertical_errors[p95_index];
+    expect(vertical_error_p95 <= 5.0f && far_vertical_stop_frames == 0 &&
+               medium_vertical_stop_frames == 0 &&
+               maximum_far_vertical_stop_run == 0 &&
+               vertical_prediction_frames == 0 &&
+               maximum_all_vertical_prediction_offset <= 2.0f,
+           "水平 prediction 不得阻断 Y 轴回到配置高度，误差 P95=" +
+               std::to_string(vertical_error_p95) + "，远距停发帧=" +
+               std::to_string(far_vertical_stop_frames) + "，最长连续=" +
+               std::to_string(maximum_far_vertical_stop_run) +
+               "，中距停发帧=" +
+               std::to_string(medium_vertical_stop_frames) +
+               "，Y prediction 帧=" +
+               std::to_string(vertical_prediction_frames) +
+               "，最大 Y prediction 偏移=" +
+               std::to_string(maximum_vertical_prediction_offset) +
+               "，全程 Y prediction 帧=" +
+               std::to_string(all_vertical_prediction_frames) +
+               "，全程最大 Y prediction 偏移=" +
+               std::to_string(maximum_all_vertical_prediction_offset) +
+               "，首个 Y prediction=" + first_vertical_prediction_trace +
+               "，首个中距停发=" + first_medium_stop_trace);
+}
+
 void test_prediction_lead_is_stable_across_bursty_frame_intervals() {
     constexpr std::array<int, 8> kFrameIntervalsMicroseconds{
         4167, 4167, 1000, 7334, 4167, 1500, 6834, 4167};
@@ -2370,14 +2529,16 @@ void test_delay_compensation_stacks_before_prediction() {
         std::chrono::seconds(1);
 
     AimResult result;
-    for (int index = 0; index < 20; ++index) {
+    // 未取得“相对运动与命令同向”的外部运动证据时，prediction 从零
+    // 建立需要覆盖 250 ms 同向确认；该场景共 390 ms。
+    for (int index = 0; index < 40; ++index) {
         AimFrame frame = make_frame(
             static_cast<std::uint64_t>(index + 1),
             base + std::chrono::milliseconds(index * 10));
         frame.control_at = frame.captured_at +
             std::chrono::milliseconds(5);
         frame.lock_active = true;
-        frame.detections = {body(180.0f + index * 2.0f, 160.0f)};
+        frame.detections = {body(180.0f + index * 2.0f, 172.0f)};
         result = aim.process(frame);
     }
     const float lead_distance = std::hypot(
@@ -2388,7 +2549,16 @@ void test_delay_compensation_stacks_before_prediction() {
                           result.target.delay_compensated_aim_x -
                           result.target.lead_x) < 0.01f &&
                lead_distance >= 0.25f && lead_distance <= 5.0f,
-            "prediction 必须从延迟补偿点按稳定世界运动速度生成有界前探");
+            "prediction 必须从延迟补偿点按稳定世界运动速度生成有界前探，目标=" +
+                std::to_string(result.has_target) + "，延迟=" +
+                std::to_string(result.target.delay_compensation_active) +
+                "，prediction=" +
+                std::to_string(result.target.lead_active) + "，lead_x=" +
+                std::to_string(result.target.lead_x) + "，距离=" +
+                std::to_string(lead_distance) + "，基础=" +
+                std::to_string(result.target.base_aim_x) + "，延迟点=" +
+                std::to_string(result.target.delay_compensated_aim_x) +
+                "，最终点=" + std::to_string(result.target.aim_x));
 }
 
 void test_prediction_never_changes_base_tracking_sequence() {
@@ -2866,6 +3036,7 @@ int main() {
     test_prediction_survives_short_world_motion_measurement_dips();
     test_prediction_motion_axis_requires_confirmed_stop();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
+    test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_prediction_lead_is_stable_across_bursty_frame_intervals();
     test_prediction_pullback_hold_releases_after_real_reversal();
     test_base_crossing_releases_integral_smoothly();
