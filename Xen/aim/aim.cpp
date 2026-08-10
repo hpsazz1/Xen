@@ -54,6 +54,12 @@ struct Track {
     std::chrono::steady_clock::time_point state_at{};
     int shape_deformation_x_frames = 0;
     int shape_deformation_y_frames = 0;
+    int pose_deformation_x_frames = 0;
+    int pose_deformation_y_frames = 0;
+    float protected_motion_direction_x = 0.0f;
+    float protected_motion_direction_y = 0.0f;
+    int protected_motion_x_frames = 0;
+    int protected_motion_y_frames = 0;
 };
 
 struct IssuedCommand {
@@ -73,9 +79,9 @@ constexpr float kTrackVelocityBetaLow = 0.04f;
 constexpr float kTrackAimShapeAlphaHigh = 0.12f;
 constexpr float kTrackAimShapeAlphaLow = 0.06f;
 // 人物姿态可能让检测框两条对边连续多帧同向摆动，单靠“对边反向即形变”
-// 或“中心逐帧反号”都无法识别。有明确宽高变化且中心创新仍属于小尺度时，
-// 短暂把控制锚点校正降为形变增益；尺度稳定后最多三帧自动恢复，不引入
-// 固定低通滞后。真实匀速平移仍由轨迹速度预测连续推进。
+// 或“中心逐帧反号”都无法识别。有明确尺度变化且中心创新仍属于小尺度时，
+// 保护基础锚点；尺度证据消失后按固定保持窗口恢复。真实匀速平移仍由轨迹
+// 速度预测连续推进。
 constexpr float kTrackCoherentDeformationMaximumTargetDiagonal = 0.04f;
 constexpr float kTrackCoherentDeformationMinimumShapeChangeTargetDiagonal =
     0.0005f;
@@ -83,7 +89,14 @@ constexpr float kTrackCoherentDeformationMinimumShapeChangePixels = 0.05f;
 // 实机姿态同向形变可持续 3～10 帧；保护必须覆盖完整形变窗口，真实平移仍由
 // stable_motion_residual 和速度估计独立推进。
 constexpr int kTrackCoherentDeformationHoldFrames = 10;
-constexpr float kTrackIncoherentVelocityBetaScale = 0.40f;
+// 姿态段内先用低速度增益并隔离比例点回写；只有同向速度跨过实测最长
+// 17 帧形变段后，才在固定窗口内连续恢复原增益。这样不会冻结真实平移，
+// 也不会在阈值帧把累计位置误差一次性写回基础锚点。
+constexpr float kTrackDeformationVelocityBetaScaleMinimum = 0.08f;
+constexpr float kTrackDeformationVelocityBetaScaleMaximum = 0.40f;
+constexpr float kTrackProtectedMotionMinimumPixelsPerSecond = 8.0f;
+constexpr int kTrackProtectedMotionConfirmFrames = 18;
+constexpr int kTrackProtectedMotionRampFrames = 4;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
@@ -598,18 +611,24 @@ struct Aim::Impl {
             const float coherent_deformation_maximum =
                 target_diagonal *
                 kTrackCoherentDeformationMaximumTargetDiagonal;
-            const float shape_residual = std::max(
-                std::fabs(x2_residual - x1_residual),
-                std::fabs(y2_residual - y1_residual));
-            const bool shape_changed = shape_residual > std::max(
+            const float shape_change_minimum = std::max(
                 kTrackCoherentDeformationMinimumShapeChangePixels,
                 target_diagonal *
                     kTrackCoherentDeformationMinimumShapeChangeTargetDiagonal);
-            const auto update_coherent_deformation = [=](
-                    float residual, bool edges_coherent,
+            const bool width_changed =
+                std::fabs(x2_residual - x1_residual) >
+                    shape_change_minimum;
+            const bool height_changed =
+                std::fabs(y2_residual - y1_residual) >
+                    shape_change_minimum;
+            const bool shape_changed = width_changed || height_changed;
+            const bool pose_changed = width_changed && height_changed;
+            const auto update_deformation = [=](
+                    bool shape_evidence, float residual,
+                    bool edges_coherent,
                     int& hold_frames) {
                 const bool deformation =
-                    shape_changed && edges_coherent &&
+                    shape_evidence && edges_coherent &&
                     std::fabs(residual) <= coherent_deformation_maximum;
                 if (deformation) {
                     hold_frames = kTrackCoherentDeformationHoldFrames;
@@ -617,31 +636,106 @@ struct Aim::Impl {
                     --hold_frames;
                 }
             };
-            update_coherent_deformation(
-                center_motion_residual_x,
+            update_deformation(
+                shape_changed, center_motion_residual_x,
                 x_edges_coherent,
                 track.shape_deformation_x_frames);
-            update_coherent_deformation(
-                center_motion_residual_y,
+            update_deformation(
+                shape_changed, center_motion_residual_y,
                 y_edges_coherent,
                 track.shape_deformation_y_frames);
+            update_deformation(
+                pose_changed, center_motion_residual_x,
+                x_edges_coherent,
+                track.pose_deformation_x_frames);
+            update_deformation(
+                pose_changed, center_motion_residual_y,
+                y_edges_coherent,
+                track.pose_deformation_y_frames);
+            const auto update_protected_motion = [](
+                    bool shape_protected, float velocity,
+                    float& direction, int& frames) {
+                if (!shape_protected) {
+                    direction = 0.0f;
+                    frames = 0;
+                    return;
+                }
+                if (frames >= kTrackProtectedMotionConfirmFrames +
+                    kTrackProtectedMotionRampFrames) {
+                    return;
+                }
+                if (std::fabs(velocity) <
+                    kTrackProtectedMotionMinimumPixelsPerSecond) {
+                    direction = 0.0f;
+                    frames = 0;
+                    return;
+                }
+                const float current_direction =
+                    std::copysign(1.0f, velocity);
+                if (current_direction == direction) {
+                    frames = std::min(
+                        frames + 1,
+                        kTrackProtectedMotionConfirmFrames +
+                            kTrackProtectedMotionRampFrames);
+                } else {
+                    direction = current_direction;
+                    frames = 1;
+                }
+            };
+            update_protected_motion(
+                track.pose_deformation_x_frames > 0, track.vx,
+                track.protected_motion_direction_x,
+                track.protected_motion_x_frames);
+            update_protected_motion(
+                track.pose_deformation_y_frames > 0, track.vy,
+                track.protected_motion_direction_y,
+                track.protected_motion_y_frames);
+            const auto protected_motion_blend = [](int frames) {
+                return std::clamp(
+                    static_cast<float>(
+                        frames - kTrackProtectedMotionConfirmFrames) /
+                        static_cast<float>(kTrackProtectedMotionRampFrames),
+                    0.0f, 1.0f);
+            };
             if (track.shape_deformation_x_frames > 0) {
                 stable_motion_residual_x = 0.0f;
                 if (x_edges_coherent) {
-                    velocity_beta_x *= kTrackIncoherentVelocityBetaScale;
+                    float scale =
+                        kTrackDeformationVelocityBetaScaleMaximum;
+                    if (track.pose_deformation_x_frames > 0) {
+                        const float blend = protected_motion_blend(
+                            track.protected_motion_x_frames);
+                        scale = kTrackDeformationVelocityBetaScaleMinimum +
+                            (kTrackDeformationVelocityBetaScaleMaximum -
+                             kTrackDeformationVelocityBetaScaleMinimum) *
+                                blend;
+                    }
+                    velocity_beta_x *= scale;
                 }
             }
             if (track.shape_deformation_y_frames > 0) {
                 stable_motion_residual_y = 0.0f;
                 if (y_edges_coherent) {
-                    velocity_beta_y *= kTrackIncoherentVelocityBetaScale;
+                    float scale =
+                        kTrackDeformationVelocityBetaScaleMaximum;
+                    if (track.pose_deformation_y_frames > 0) {
+                        const float blend = protected_motion_blend(
+                            track.protected_motion_y_frames);
+                        scale = kTrackDeformationVelocityBetaScaleMinimum +
+                            (kTrackDeformationVelocityBetaScaleMaximum -
+                             kTrackDeformationVelocityBetaScaleMinimum) *
+                                blend;
+                    }
+                    velocity_beta_y *= scale;
                 }
             }
             if (!x_edges_coherent) {
-                velocity_beta_x *= kTrackIncoherentVelocityBetaScale;
+                velocity_beta_x *=
+                    kTrackDeformationVelocityBetaScaleMaximum;
             }
             if (!y_edges_coherent) {
-                velocity_beta_y *= kTrackIncoherentVelocityBetaScale;
+                velocity_beta_y *=
+                    kTrackDeformationVelocityBetaScaleMaximum;
             }
         }
 
@@ -709,8 +803,23 @@ struct Aim::Impl {
             track.aim_y += stable_motion_residual_y * alpha;
             const float shape_alpha = high
                 ? kTrackAimShapeAlphaHigh : kTrackAimShapeAlphaLow;
-            track.aim_x += (observed_aim_x - track.aim_x) * shape_alpha;
-            track.aim_y += (observed_aim_y - track.aim_y) * shape_alpha;
+            const auto protected_shape_alpha = [=](
+                    int deformation_frames, int motion_frames) {
+                if (deformation_frames <= 0) return shape_alpha;
+                return shape_alpha * std::clamp(
+                    static_cast<float>(
+                        motion_frames - kTrackProtectedMotionConfirmFrames) /
+                        static_cast<float>(kTrackProtectedMotionRampFrames),
+                    0.0f, 1.0f);
+            };
+            track.aim_x += (observed_aim_x - track.aim_x) *
+                protected_shape_alpha(
+                    track.pose_deformation_x_frames,
+                    track.protected_motion_x_frames);
+            track.aim_y += (observed_aim_y - track.aim_y) *
+                protected_shape_alpha(
+                    track.pose_deformation_y_frames,
+                    track.protected_motion_y_frames);
         }
         track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
         track.aim_y = std::clamp(track.aim_y, track.y1, track.y2);
@@ -721,6 +830,12 @@ struct Aim::Impl {
             track.vy *= 0.5f;
             track.shape_deformation_x_frames = 0;
             track.shape_deformation_y_frames = 0;
+            track.pose_deformation_x_frames = 0;
+            track.pose_deformation_y_frames = 0;
+            track.protected_motion_direction_x = 0.0f;
+            track.protected_motion_direction_y = 0.0f;
+            track.protected_motion_x_frames = 0;
+            track.protected_motion_y_frames = 0;
         } else {
             // 控制锚点使用对边共同残差抑制瞬时形变；速度观察器仍以低
             // beta 消费中心残差。持续平移会跨帧累积，正负交替的步态
@@ -848,6 +963,12 @@ struct Aim::Impl {
             // 新的连续观测重新建立宽高与中心创新证据。
             track.shape_deformation_x_frames = 0;
             track.shape_deformation_y_frames = 0;
+            track.pose_deformation_x_frames = 0;
+            track.pose_deformation_y_frames = 0;
+            track.protected_motion_direction_x = 0.0f;
+            track.protected_motion_direction_y = 0.0f;
+            track.protected_motion_x_frames = 0;
+            track.protected_motion_y_frames = 0;
             ++track.lost_frames;
             if (track.state == TrackState::CONFIRMED ||
                 track.state == TrackState::LOST) {
