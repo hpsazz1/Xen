@@ -123,15 +123,19 @@ constexpr float kControllerPendingCommandResponse = 0.15f;
 // 投影，使实测 8～10 帧命令反馈周期内逐步制动，不改变公开 prediction 点或
 // 用户配置的 0.475 基础控制平滑。
 constexpr float kPredictionPendingProjectionResponse = 0.12f;
+// 公开延迟点需要保留上面的 0.15 实测几何响应；隐藏控制锚只处理超过稳定
+// 世界速度预算的库存，不能再次使用完整几何响应，否则控制器会在公开
+// prediction 点前永久保留数像素误差。两者拆分后只收窄隐藏超额库存强度。
+constexpr float kPredictionExcessPendingCommandResponse = 0.145f;
 // 高频闭环已有足够多的延迟窗口样本供基础观察器工作；真实 Run 的控制
 // 节奏会在 68～119 Hz 间变化，40 ms 窗口仅剩 3～5 个离散命令。低于
 // 125 Hz 时改用同源世界速度维持量，避免刚好跨过 100 Hz 后再次退回持续
 // 位置误差；240 Hz 高频路径保持原观察器。
 constexpr float kPredictionDirectFeedforwardMinimumDeltaSeconds = 0.008f;
 // 119 Hz 真实 Run 中平均命令仍约等于公开误差的 0.4 倍比例量，
-// 说明离散世界速度维持量仍有小幅损失。1.15 只校正低频同源前馈，
+// 说明离散世界速度维持量仍有小幅损失。1.10 只校正低频同源前馈，
 // 不放大公开 prediction 点、Y 轴或 240 Hz 基础观察器路径。
-constexpr float kPredictionDirectFeedforwardScale = 1.15f;
+constexpr float kPredictionDirectFeedforwardScale = 1.10f;
 // 最新真机 Run 仍把“最多两帧”预算用满，8 帧 +1 count 全部背离
 // 当前公开 prediction 点。超额在途命令已由隐藏控制锚提前制动，公开点
 // 保持带外不再允许额外反向物理命令，只停发等待已在途库存反馈。
@@ -2043,7 +2047,7 @@ struct Aim::Impl {
                 config.control_delay_ms / 1000.0f;
             const float excess_pending_x = pending_x - expected_pending_x;
             pending_control_projection_target_x = -excess_pending_x *
-                kControllerPendingCommandResponse /
+                kPredictionExcessPendingCommandResponse /
                 config.counts_per_pixel_x /
                 frame.source_pixels_per_roi_pixel_x;
             const float maximum_pending_projection = std::hypot(
