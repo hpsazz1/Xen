@@ -146,8 +146,9 @@ constexpr float kPredictionAdditionalHorizonScale = 1.50f;
 // Y 轴快速运动在超级跳实测中会因更长外推产生抖动，因此继续使用已经验证
 // 的 16 ms 几何时域。prediction 也保留同一基准，避免改变既有闭环语义。
 constexpr float kGeometricProjectionMaximumSeconds = 0.016f;
-// prediction 关闭时，X 轴允许覆盖已测得的 40 ms KMBOX 响应窗口。扩展量只
-// 使用二维限幅中扣除既有 Y 向量后的剩余预算，不能改变 Y 轴投影结果。
+// prediction 关闭时，X 轴允许覆盖已测得的 40 ms KMBOX 响应窗口。超过
+// 16 ms 的部分只能消费扣除相机自运动后的基础前馈，禁止继续积分包含镜头
+// 回流的 track.vx；扩展量仍只使用保留既有 Y 后的二维剩余预算。
 constexpr float kHorizontalTrackingProjectionMaximumSeconds = 0.040f;
 // 基础前馈服务于每帧跟随，响应不能为 prediction 稳定方向降速。
 // prediction 单独使用慢速世界运动状态：持续运动低通，静止时快速释放。
@@ -1487,7 +1488,15 @@ struct Aim::Impl {
                 const float remaining_x_limit = std::sqrt(std::max(
                     0.0f, vector_limit * vector_limit -
                         projection.delay_y * projection.delay_y));
-                const float horizontal_extension = track.vx *
+                // feedforward_x 是上一控制帧已经用到期命令扣除相机自运动后
+                // 得到的世界维持量，单位 counts/frame。换算为 ROI px/s 后
+                // 只积分额外 X 时域；一帧滞后换来不会反读当前鼠标回流。
+                const float horizontal_world_velocity = feedforward_x /
+                    config.counts_per_pixel_x /
+                    frame.source_pixels_per_roi_pixel_x /
+                    std::max(track.prediction_dt, 0.0001f);
+                const float horizontal_extension =
+                    horizontal_world_velocity *
                     (projection.delay_seconds_x -
                      projection.delay_seconds_y);
                 projection.delay_x = std::clamp(

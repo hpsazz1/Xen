@@ -3336,7 +3336,7 @@ void test_tracking_delay_projection_uses_longer_horizontal_horizon_only() {
             static_cast<std::uint64_t>(index + 1),
             base + std::chrono::milliseconds(index * 10));
         frame.control_at = frame.captured_at + std::chrono::milliseconds(5);
-        frame.lock_active = true;
+        frame.lock_active = false;
         frame.detections = {body_box(
             140.0f + index * 2.0f, 120.0f + index,
             40.0f, 80.0f)};
@@ -3373,6 +3373,58 @@ void test_tracking_delay_projection_uses_longer_horizontal_horizon_only() {
                std::fabs(prediction_result.target.delay_compensation_x) +
                    0.10f,
            "prediction 关闭时 X 轴 40 ms 投影必须产生可观测的额外水平提前量");
+}
+
+void test_tracking_horizontal_extension_rejects_camera_feedback_direction() {
+    AimConfig short_config;
+    short_config.min_confirmed_hits = 1;
+    short_config.deadzone_pixels = 0.0f;
+    short_config.smoothing = 1.0f;
+    short_config.counts_per_pixel_x = 0.40f;
+    short_config.counts_per_pixel_y = 0.40f;
+    short_config.max_counts_per_frame = 14.0f;
+    short_config.max_center_distance = 1.0f;
+    short_config.enable_delay_compensation = true;
+    short_config.control_delay_ms = 15.0f;
+    short_config.max_delay_compensation_ms = 16.0f;
+    short_config.max_delay_compensation_percent = 50.0f;
+    AimConfig extended_config = short_config;
+    extended_config.control_delay_ms = 40.0f;
+    extended_config.max_delay_compensation_ms = 44.0f;
+    Aim short_projection(short_config);
+    Aim extended_projection(extended_config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    for (int index = 0; index < 20; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::milliseconds(index * 10));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(5);
+        frame.lock_active = false;
+        frame.detections = {body(180.0f + index * 1.5f, 160.0f)};
+        short_projection.process(frame);
+        extended_projection.process(frame);
+    }
+
+    // 人物世界运动已经稳定向右后，模拟一帧由相机追踪造成的屏幕左移。
+    // 额外 24 ms 必须继续使用上一帧的世界维持量，而不是放大负 track.vx。
+    AimFrame feedback_frame = make_frame(
+        21, base + std::chrono::milliseconds(200));
+    feedback_frame.control_at = feedback_frame.captured_at +
+        std::chrono::milliseconds(5);
+    feedback_frame.lock_active = false;
+    feedback_frame.detections = {body(190.0f, 160.0f)};
+    const AimResult short_result = short_projection.process(feedback_frame);
+    const AimResult extended_result =
+        extended_projection.process(feedback_frame);
+
+    expect(short_result.has_target && extended_result.has_target &&
+               extended_result.target.velocity_x < 0.0f,
+           "相机反馈方向回归必须形成与既有世界运动相反的屏幕 X 速度");
+    expect(extended_result.target.delay_compensation_x >
+               short_result.target.delay_compensation_x + 0.10f,
+           "额外 X 时域必须沿自运动扣除后的世界方向，禁止继续积分反向屏幕回流");
 }
 
 void test_delay_compensation_stacks_before_prediction() {
@@ -3993,6 +4045,7 @@ int main() {
     test_delay_projection_crossing_keeps_base_tracking_hold();
     test_control_step_cannot_cross_in_box_aim_point();
     test_tracking_delay_projection_uses_longer_horizontal_horizon_only();
+    test_tracking_horizontal_extension_rejects_camera_feedback_direction();
     test_delay_compensation_stacks_before_prediction();
     test_horizontal_prediction_startup_rejects_static_camera_feedback();
     test_prediction_never_changes_base_tracking_sequence();
