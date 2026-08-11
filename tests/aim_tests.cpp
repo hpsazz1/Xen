@@ -1605,6 +1605,44 @@ void test_prediction_motion_axis_requires_confirmed_stop() {
                std::to_string(low_frames));
 }
 
+void test_prediction_release_offset_is_slew_limited() {
+    constexpr float kBoxDiagonal = 110.0f;
+    constexpr float kMaximumSlew = 1.5f;
+    constexpr float kDeltaSeconds = 1.0f / 240.0f;
+    constexpr float kMaximumLeadPercent = 35.0f;
+    const float maximum_step =
+        kBoxDiagonal * kMaximumSlew * kDeltaSeconds;
+    float offset_x = -22.0f;
+    float offset_y = 0.0f;
+    const float target_offset_x = 13.0f;
+    const float target_offset_y = 0.0f;
+    float maximum_observed_step = 0.0f;
+
+    for (int index = 0; index < 200; ++index) {
+        const float previous_x = offset_x;
+        const float previous_y = offset_y;
+        aim::detail::slew_prediction_offset(
+            target_offset_x, target_offset_y,
+            target_offset_x, target_offset_y,
+            kBoxDiagonal, kMaximumLeadPercent, kMaximumSlew,
+            kDeltaSeconds, offset_x, offset_y);
+        maximum_observed_step = std::max(
+            maximum_observed_step,
+            std::hypot(offset_x - previous_x, offset_y - previous_y));
+    }
+
+    expect(maximum_observed_step <= maximum_step + 0.001f,
+           "prediction 退出回收到延迟点时不得绕过偏移限速，最大步长=" +
+               std::to_string(maximum_observed_step) + "，上限=" +
+               std::to_string(maximum_step));
+    expect(std::hypot(offset_x - target_offset_x,
+                      offset_y - target_offset_y) <= 0.001f,
+           "prediction 退出限速最终必须准确回到延迟补偿点，残差=" +
+               std::to_string(std::hypot(
+                   offset_x - target_offset_x,
+                   offset_y - target_offset_y)));
+}
+
 void test_prediction_pullback_command_requires_causal_world_motion() {
     constexpr float kMinimumWorldCounts = 0.25f;
     const auto allowed = [&](float desired_counts, float final_error_pixels,
@@ -3523,6 +3561,7 @@ int main() {
     test_horizontal_prediction_rejects_delayed_vertical_camera_feedback();
     test_long_delay_prediction_distributes_horizontal_hold_command();
     test_prediction_lead_is_stable_across_bursty_frame_intervals();
+    test_prediction_release_offset_is_slew_limited();
     test_prediction_pullback_hold_releases_after_real_reversal();
     test_prediction_pullback_command_requires_causal_world_motion();
     test_prediction_inventory_brake_is_short_and_minimal();

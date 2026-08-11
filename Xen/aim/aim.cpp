@@ -1405,6 +1405,22 @@ struct Aim::Impl {
             0.0, static_cast<double>(kMaxObservationAgeSeconds)));
         const float box_diagonal = std::hypot(
             track.x2 - track.x1, track.y2 - track.y1);
+        // prediction 的进入、延迟向量变化和退出都复用同一偏移限速器。
+        // 退出时目标不是基础点，而是当前延迟补偿点；这样停止或相机反馈
+        // 低谷不会把已经公开的提前量一帧清零，最终点只会按已验证的最大
+        // 目标对角线/秒回收。该状态只改变最终点，不回写基础轨迹。
+        const auto slew_prediction_offset = [&](float target_offset_x,
+                                                  float target_offset_y) {
+            aim::detail::slew_prediction_offset(
+                target_offset_x, target_offset_y,
+                projection.delay_x, projection.delay_y,
+                box_diagonal, config.max_prediction_lead_percent,
+                kPredictionOffsetMaximumSlewDiagonalsPerSecond,
+                track.prediction_dt,
+                prediction_offset_x, prediction_offset_y);
+            projection.final_x = base_x + prediction_offset_x;
+            projection.final_y = base_y + prediction_offset_y;
+        };
         if (config.enable_delay_compensation &&
             track.state == TrackState::CONFIRMED && !track.predicted) {
             const float requested_delay_seconds =
@@ -1633,7 +1649,9 @@ struct Aim::Impl {
                  std::fabs(desired_lead_y) <= activation_distance_y) ||
                 world_velocity_magnitude <= 0.0f) {
                 // 已经形成提前后，低运动释放不能立刻回到基础点发送反向命令；
-                // 保持停发，等待真实反向或锁定结束，切断“提前—拉回—再预测”。
+                // 先把公开偏移平滑回收到当前延迟点，等待真实反向或锁定结束，
+                // 切断“提前—复位—再预测”的可见跳变。X 轴保持仍由后续反拉
+                // 门禁保护，Y 轴允许原有超时释放高度误差。
                 if (lead_active && std::fabs(lead_direction_x) > 0.001f) {
                     prediction_pullback_hold_x = true;
                     prediction_pullback_direction_x =
@@ -1646,6 +1664,25 @@ struct Aim::Impl {
                     prediction_pullback_direction_y =
                         std::copysign(1.0f, lead_direction_y);
                     prediction_pullback_hold_time_y = 0.0f;
+                }
+                if (lead_active) {
+                    slew_prediction_offset(
+                        projection.delay_x, projection.delay_y);
+                    const float remaining_lead_x =
+                        prediction_offset_x - projection.delay_x;
+                    const float remaining_lead_y =
+                        prediction_offset_y - projection.delay_y;
+                    if (std::hypot(
+                            remaining_lead_x, remaining_lead_y) > 0.001f) {
+                        lead_axis_active_x =
+                            std::fabs(remaining_lead_x) > activation_distance_x;
+                        lead_axis_active_y =
+                            std::fabs(remaining_lead_y) > activation_distance_y;
+                        projection.active = true;
+                        lead_candidate_frames = 0;
+                        delay_lead_scale = 0.0f;
+                        return projection;
+                    }
                 }
                 lead_active = false;
                 lead_axis_active_x = false;
@@ -1803,24 +1840,7 @@ struct Aim::Impl {
             // 再让最终点一帧跳到另一位置。
             const float target_offset_x = projection.delay_x + lead_x;
             const float target_offset_y = projection.delay_y + lead_y;
-            move_vector_toward(
-                target_offset_x, target_offset_y,
-                box_diagonal *
-                    kPredictionOffsetMaximumSlewDiagonalsPerSecond *
-                    track.prediction_dt,
-                prediction_offset_x, prediction_offset_y);
-            // 公有 lead 的硬上限以“延迟点到最终点”为定义。当前延迟向量
-            // 变化后，历史平滑状态可能暂时落在新上限之外，因此在发布前再次
-            // 收敛，并同步保存状态，保证运行时契约始终成立。
-            float smoothed_lead_x = prediction_offset_x - projection.delay_x;
-            float smoothed_lead_y = prediction_offset_y - projection.delay_y;
-            clamp_vector(
-                smoothed_lead_x, smoothed_lead_y,
-                box_diagonal * config.max_prediction_lead_percent / 100.0f);
-            prediction_offset_x = projection.delay_x + smoothed_lead_x;
-            prediction_offset_y = projection.delay_y + smoothed_lead_y;
-            projection.final_x = base_x + prediction_offset_x;
-            projection.final_y = base_y + prediction_offset_y;
+            slew_prediction_offset(target_offset_x, target_offset_y);
             projection.active = true;
             return projection;
         }

@@ -41,6 +41,44 @@ inline void update_prediction_velocity_axis(
          prediction_velocity_counts_per_second) * alpha;
 }
 
+// 最终 prediction 偏移按目标对角线/秒限速，并在发布前重新约束“延迟点到
+// 最终点”的几何上限。进入 prediction 和退出 prediction 必须使用同一函数，
+// 不能在低运动释放时直接把偏移清零。
+inline void slew_prediction_offset(
+        float target_offset_x, float target_offset_y,
+        float delay_offset_x, float delay_offset_y,
+        float box_diagonal, float maximum_lead_percent,
+        float maximum_slew_diagonals_per_second, float delta_seconds,
+        float& offset_x, float& offset_y) noexcept {
+    const float delta_x = target_offset_x - offset_x;
+    const float delta_y = target_offset_y - offset_y;
+    const float distance = std::hypot(delta_x, delta_y);
+    const float maximum_delta = std::max(
+        0.0f, box_diagonal * maximum_slew_diagonals_per_second *
+            std::max(delta_seconds, 0.0f));
+    if (distance <= maximum_delta || distance <= 0.0f) {
+        offset_x = target_offset_x;
+        offset_y = target_offset_y;
+    } else {
+        const float scale = maximum_delta / distance;
+        offset_x += delta_x * scale;
+        offset_y += delta_y * scale;
+    }
+
+    float lead_x = offset_x - delay_offset_x;
+    float lead_y = offset_y - delay_offset_y;
+    const float maximum_lead =
+        std::max(0.0f, box_diagonal * maximum_lead_percent / 100.0f);
+    const float lead_distance = std::hypot(lead_x, lead_y);
+    if (lead_distance > maximum_lead && lead_distance > 0.0f) {
+        const float scale = maximum_lead / lead_distance;
+        lead_x *= scale;
+        lead_y *= scale;
+    }
+    offset_x = delay_offset_x + lead_x;
+    offset_y = delay_offset_y + lead_y;
+}
+
 // 历史 prediction 方向的反拉保护不能无条件覆盖当前最终点。只有命令
 // 确实朝当前最终点，且命令补偿后的世界运动测量超过噪声门槛并支持历史
 // 方向时，才允许该轴继续输出。超额在途命令已经由控制锚提前制动，因此
