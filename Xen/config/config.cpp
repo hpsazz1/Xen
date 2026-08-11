@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <filesystem>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -811,6 +812,26 @@ bool load_app_config(const std::string& path,
         set_error(error, "读取配置时发生未知异常");
         return false;
     }
+}
+
+bool load_or_create_app_config(const std::string& path,
+                               AppConfig& config,
+                               bool& created,
+                               std::string& error) noexcept {
+    created = false;
+    if (load_app_config(path, config, error)) return true;
+
+    std::error_code filesystem_error;
+    const bool exists = std::filesystem::exists(path, filesystem_error);
+    if (filesystem_error || exists) {
+        return false;
+    }
+
+    // 此时 config 仍是调用方传入的代码默认值。只为真正缺失的文件生成完整配置，
+    // 避免把拼写错误或被截断的现有配置静默恢复为默认值。
+    if (!save_app_config(path, config, error)) return false;
+    created = true;
+    return true;
 }
 
 bool save_app_config(const std::string& path,

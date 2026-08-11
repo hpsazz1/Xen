@@ -66,8 +66,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     AppConfig config;
     std::string app_message;
     std::string config_error;
-    if (!load_app_config(config_path, config, config_error)) {
+    bool config_created = false;
+    if (!load_or_create_app_config(
+            config_path, config, config_created, config_error)) {
         app_message = config_error + "；请在配置页填写并保存。";
+    } else if (config_created) {
+        app_message = "未找到 config.ini，已按代码默认值生成；物理输出保持禁用。";
     }
 
     std::filesystem::path model_directory;

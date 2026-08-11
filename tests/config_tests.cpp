@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <string>
 
@@ -14,6 +15,91 @@ void expect(bool condition, const std::string& message) {
     if (condition) return;
     ++failures;
     std::cerr << "[失败] " << message << '\n';
+}
+
+void test_current_code_defaults() {
+    const AppConfig config;
+    expect(config.detector.model_path == "14wv11.onnx" &&
+               config.detector.backend == BackendType::TENSORRT &&
+               config.detector.openvino_device == OpenVinoDevice::CPU &&
+               config.detector.enable_fp16 &&
+               config.detector.enable_trt_cuda_graph &&
+               config.detector.enable_gpu_preprocess,
+           "代码 Detector 默认值应匹配当前 TensorRT 配置");
+    expect(config.capture.backend == CaptureBackend::NDI &&
+               config.capture.ndi_source_name == "HPSAZZ (Xen-ROI-320)" &&
+               config.capture.ndi_discovery_timeout_ms == 10000 &&
+               config.capture.ndi_frame_layout ==
+                   NetworkFrameLayout::CENTER_CROP_1_TO_1 &&
+               config.capture.ndi_source_width == 2560 &&
+               config.capture.ndi_source_height == 1440 &&
+               config.capture.roi_width == 320 &&
+               config.capture.roi_height == 320,
+           "代码 Capture 默认值应匹配当前 NDI 320 配置");
+    expect(config.aim.person_class_ids == std::vector<int>({0, 2}) &&
+               config.aim.head_class_ids == std::vector<int>({1, 3}) &&
+               config.aim.smoothing == 0.475f &&
+               config.aim.counts_per_pixel_x == 0.40f &&
+               config.aim.counts_per_pixel_y == 0.40f &&
+               config.aim.max_counts_per_frame == 12.0f &&
+               config.aim.enable_delay_compensation &&
+               config.aim.control_delay_ms == 40.0f &&
+               config.aim.max_delay_compensation_ms == 44.0f &&
+               config.aim.enable_prediction &&
+               config.aim.max_prediction_lead_percent == 35.0f &&
+               config.aim.predicted_gain == 0.50f,
+           "代码 Aim 默认值应匹配当前 prediction 配置");
+    expect(config.mouse.backend == MouseBackend::KMBOX_NET &&
+               !config.mouse.allow_send_input &&
+               config.mouse.kmbox_ip == "192.168.2.188" &&
+               config.mouse.kmbox_port == 13384 &&
+               config.mouse.kmbox_uuid == "7679E04E",
+           "代码 Mouse 默认值应包含设备参数并保持物理输出禁用");
+    expect(config.log.global_level == LogLevel::INFO &&
+               config.ui.open_detached_preview_on_start,
+           "代码 Log/UI 默认值应匹配当前配置");
+}
+
+void test_load_or_create_default_config() {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "xen_generated_default_config.ini";
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+
+    AppConfig config;
+    bool created = false;
+    std::string error;
+    expect(load_or_create_app_config(path.string(), config, created, error) &&
+               created && std::filesystem::is_regular_file(path),
+           "config.ini 缺失时应写出完整代码默认配置: " + error);
+
+    AppConfig loaded;
+    expect(load_app_config(path.string(), loaded, error) &&
+               loaded.detector.backend == BackendType::TENSORRT &&
+               loaded.capture.backend == CaptureBackend::NDI &&
+               loaded.aim.enable_prediction &&
+               loaded.mouse.backend == MouseBackend::KMBOX_NET &&
+               !loaded.mouse.allow_send_input,
+           "生成的默认配置应可回读且不得开启物理输出: " + error);
+
+    const std::string invalid_text =
+        "[detector]\ninput_width=-1\ninput_height=-1\n";
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << invalid_text;
+    }
+    created = true;
+    expect(!load_or_create_app_config(path.string(), config, created, error) &&
+               !created,
+           "已有但无效的 config.ini 应报错且不得按默认值覆盖");
+    std::ifstream input(path, std::ios::binary);
+    const std::string actual{
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()};
+    expect(actual == invalid_text,
+           "已有但无效的 config.ini 内容必须保持不变");
+    input.close();
+    std::filesystem::remove(path, ignored);
 }
 
 void test_round_trip() {
@@ -213,7 +299,7 @@ void test_log_defaults_and_invalid_level() {
     std::string error;
     expect(load_app_config(defaults_path.string(), defaults, error),
            "缺少 [log] 的旧配置仍应使用日志默认值");
-    expect(defaults.log.global_level == LogLevel::TRACE &&
+    expect(defaults.log.global_level == LogLevel::INFO &&
                defaults.log.enable_console && defaults.log.enable_file &&
                !defaults.log.enable_debug_file && defaults.log.enable_ringbuf &&
                defaults.log.ringbuf_capacity == 1024 &&
@@ -279,6 +365,7 @@ void test_legacy_keyboard_config() {
 void test_invalid_config() {
     AppConfig config;
     std::string error;
+    config.detector.model_path.clear();
     expect(!validate_app_config(config, error) && !error.empty(),
            "缺少模型路径的默认配置必须失败关闭");
     config.detector.model_path = "model.onnx";
@@ -310,6 +397,8 @@ void test_invalid_config() {
     config.capture.udp_disconnect_timeout_ms = 1000;
     config.capture.udp_frame_layout =
         UdpFrameLayout::CENTER_CROP_1_TO_1;
+    config.capture.udp_source_width = 0;
+    config.capture.udp_source_height = 0;
     expect(!validate_app_config(config, error),
            "UDP 主机中心预裁剪缺少完整 FOV 尺寸时必须拒绝配置");
     config.capture.udp_source_width = 2560;
@@ -347,6 +436,9 @@ void test_invalid_config() {
 
     config.capture.backend = CaptureBackend::DESKTOP_DUPLICATION;
     config.mouse.backend = MouseBackend::KMBOX_NET;
+    config.mouse.kmbox_ip.clear();
+    config.mouse.kmbox_port = 0;
+    config.mouse.kmbox_uuid.clear();
     expect(!validate_app_config(config, error),
            "KMBOX NET 缺少地址、端口和 UUID 时必须拒绝配置");
     config.mouse.kmbox_ip = "127.0.0.1";
@@ -525,6 +617,7 @@ void test_d3d11_cuda_interop_config() {
     AppConfig config;
     config.detector.model_path = "models/test.onnx";
     config.detector.backend = BackendType::TENSORRT;
+    config.capture.backend = CaptureBackend::DESKTOP_DUPLICATION;
     config.capture.enable_d3d11_cuda_interop = true;
     std::string error;
     expect(validate_app_config(config, error),
@@ -569,6 +662,7 @@ void test_d3d11_directml_interop_config() {
     AppConfig config;
     config.detector.model_path = "models/test.onnx";
     config.detector.backend = BackendType::DIRECTML;
+    config.capture.backend = CaptureBackend::DESKTOP_DUPLICATION;
     config.capture.enable_d3d11_directml_interop = true;
     std::string error;
     expect(validate_app_config(config, error),
@@ -608,6 +702,8 @@ void test_d3d11_directml_interop_config() {
 } // namespace
 
 int main() {
+    test_current_code_defaults();
+    test_load_or_create_default_config();
     test_round_trip();
     test_log_defaults_and_invalid_level();
     test_legacy_keyboard_config();
