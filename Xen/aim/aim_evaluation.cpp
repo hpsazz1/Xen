@@ -178,6 +178,8 @@ bool target_is_default(const AimTargetSnapshot& target) noexcept {
            target.lead_x == 0.0f && target.lead_y == 0.0f &&
            target.delay_compensation_x == 0.0f &&
            target.delay_compensation_y == 0.0f &&
+           target.delay_compensation_ms_x == 0.0f &&
+           target.delay_compensation_ms_y == 0.0f &&
            target.delay_compensation_ms == 0.0f &&
            target.observation_age_ms == 0.0f &&
            target.confidence == 0.0f && !target.lead_active &&
@@ -238,7 +240,15 @@ bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
                 !std::isfinite(frame.target.lead_y) ||
                 !std::isfinite(frame.target.delay_compensation_x) ||
                 !std::isfinite(frame.target.delay_compensation_y) ||
+                !std::isfinite(frame.target.delay_compensation_ms_x) ||
+                !std::isfinite(frame.target.delay_compensation_ms_y) ||
                 !std::isfinite(frame.target.delay_compensation_ms) ||
+                frame.target.delay_compensation_ms_x < 0.0f ||
+                frame.target.delay_compensation_ms_y < 0.0f ||
+                std::fabs(frame.target.delay_compensation_ms -
+                          std::max(frame.target.delay_compensation_ms_x,
+                                   frame.target.delay_compensation_ms_y)) >
+                    kGeometryTolerance ||
                 !std::isfinite(frame.target.observation_age_ms) ||
                 frame.target.observation_age_ms < 0.0f ||
                 frame.target.observation_age_ms > 100.001f ||
@@ -260,6 +270,10 @@ bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
                  (std::fabs(frame.target.delay_compensation_x) >
                       kGeometryTolerance ||
                   std::fabs(frame.target.delay_compensation_y) >
+                      kGeometryTolerance ||
+                  std::fabs(frame.target.delay_compensation_ms_x) >
+                      kGeometryTolerance ||
+                  std::fabs(frame.target.delay_compensation_ms_y) >
                       kGeometryTolerance ||
                   std::fabs(frame.target.delay_compensation_ms) >
                       kGeometryTolerance)) ||

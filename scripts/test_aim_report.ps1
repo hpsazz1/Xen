@@ -31,6 +31,8 @@ function New-AimSample {
         aim_final_point = @(206.0, 140.0)
         aim_lead = @(0.0, 0.0)
         aim_delay_compensation = @(6.0, 0.0)
+        aim_delay_compensation_ms_x = 6.0
+        aim_delay_compensation_ms_y = 6.0
         aim_delay_compensation_ms = 6.0
         aim_observation_age_ms = 2.0
         aim_command = @(12, 0)
@@ -53,5 +55,12 @@ Assert-Condition (-not [bool]$invalid.contract_valid) `
 Assert-Condition `
     ($invalid.violations.lead_vector_consistency_frames -eq 1) `
     "Inconsistent delay geometry must produce one vector violation."
+
+$sample = New-AimSample
+$sample.aim_delay_compensation_ms = 5.0
+$invalid = Get-XenAimReportSummary -Samples @($sample) `
+    -PredictionEnabled off -MaxPredictionLeadPercent 35.0
+Assert-Condition (-not [bool]$invalid.contract_valid) `
+    "Legacy delay horizon must equal the maximum per-axis horizon."
 
 Write-Host "Aim report delay-compensation contract tests passed."

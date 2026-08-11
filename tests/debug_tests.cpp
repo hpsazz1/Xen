@@ -118,6 +118,8 @@ RuntimePipelineSample make_sample(
         sample.aim_target.velocity_x = 250.0f;
         sample.aim_target.lead_x = 40.0f;
         sample.aim_target.delay_compensation_x = 10.0f;
+        sample.aim_target.delay_compensation_ms_x = 8.0f;
+        sample.aim_target.delay_compensation_ms_y = 8.0f;
         sample.aim_target.delay_compensation_ms = 8.0f;
         sample.aim_target.observation_age_ms = 20.0f;
         sample.aim_target.confidence = 0.9f;
@@ -296,6 +298,10 @@ void test_report_summary_and_atomic_files() {
                      "\"aim_prediction_point_outside_box\": true") !=
                      std::string::npos &&
                json_text.find("\"aim_observation_age_ms\": 20") !=
+                    std::string::npos &&
+               json_text.find("\"aim_delay_compensation_ms_x\": 8") !=
+                    std::string::npos &&
+               json_text.find("\"aim_delay_compensation_ms_y\": 8") !=
                     std::string::npos &&
                json_text.find("\"capture_to_mouse_completion_ms\": 1.9") !=
                     std::string::npos &&

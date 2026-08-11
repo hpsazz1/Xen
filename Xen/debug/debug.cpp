@@ -806,6 +806,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "aim_final_x,aim_final_y,"
                "aim_velocity_x,aim_velocity_y,aim_lead_x,aim_lead_y,"
                "aim_delay_compensation_x,aim_delay_compensation_y,"
+               "aim_delay_compensation_ms_x,aim_delay_compensation_ms_y,"
                "aim_delay_compensation_ms,aim_observation_age_ms,"
                "aim_command_dx_counts,"
                "aim_command_dy_counts,"
@@ -894,6 +895,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.aim_target.lead_y << ','
                 << sample.aim_target.delay_compensation_x << ','
                 << sample.aim_target.delay_compensation_y << ','
+                << sample.aim_target.delay_compensation_ms_x << ','
+                << sample.aim_target.delay_compensation_ms_y << ','
                 << sample.aim_target.delay_compensation_ms << ','
                 << sample.aim_target.observation_age_ms << ','
                 << sample.aim_command.dx_counts << ','
@@ -1139,6 +1142,10 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << ", \"aim_delay_compensation\": ["
                  << sample.aim_target.delay_compensation_x << ", "
                  << sample.aim_target.delay_compensation_y << ']'
+                 << ", \"aim_delay_compensation_ms_x\": "
+                 << sample.aim_target.delay_compensation_ms_x
+                 << ", \"aim_delay_compensation_ms_y\": "
+                 << sample.aim_target.delay_compensation_ms_y
                  << ", \"aim_delay_compensation_ms\": "
                  << sample.aim_target.delay_compensation_ms
                  << ", \"aim_observation_age_ms\": "

@@ -116,6 +116,10 @@ struct AimTargetSnapshot {
     float lead_y = 0.0f;
     float delay_compensation_x = 0.0f;
     float delay_compensation_y = 0.0f;
+    // 分轴记录实际使用的几何投影时域，单位 ms。旧字段保留为两轴最大值，
+    // 供既有报告读取方兼容；新诊断必须优先读取 x/y 字段。
+    float delay_compensation_ms_x = 0.0f;
+    float delay_compensation_ms_y = 0.0f;
     float delay_compensation_ms = 0.0f;
     float observation_age_ms = 0.0f;
     float confidence = 0.0f;

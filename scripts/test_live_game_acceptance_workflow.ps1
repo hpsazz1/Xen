@@ -61,6 +61,8 @@ function New-SyntheticAimSample {
         aim_lead = @($LeadX, 0.0)
         aim_delay_compensation_active = $false
         aim_delay_compensation = @(0.0, 0.0)
+        aim_delay_compensation_ms_x = 0.0
+        aim_delay_compensation_ms_y = 0.0
         aim_delay_compensation_ms = 0.0
         aim_observation_age_ms = 20.0
         aim_command = @(20, -10)
@@ -94,6 +96,8 @@ $delayCompensated = New-SyntheticAimSample -LeadActive $false `
     -LeadX 0.0 -FinalX 206.0 -PredictionOutside $false
 $delayCompensated.aim_delay_compensation_active = $true
 $delayCompensated.aim_delay_compensation = @(6.0, 0.0)
+$delayCompensated.aim_delay_compensation_ms_x = 6.0
+$delayCompensated.aim_delay_compensation_ms_y = 6.0
 $delayCompensated.aim_delay_compensation_ms = 6.0
 $delayCompensated.aim_delay_compensated_point = @(206.0, 140.0)
 $delaySummary = Get-XenAimReportSummary -Samples @($delayCompensated) `

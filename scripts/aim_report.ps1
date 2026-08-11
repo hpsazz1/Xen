@@ -85,7 +85,8 @@ function Get-XenAimReportSummary {
         "aim_range_locked", "aim_range_allows_control", "aim_box",
         "aim_base_point", "aim_delay_compensated_point", "aim_final_point",
         "aim_lead", "aim_delay_compensation",
-        "aim_delay_compensation_active", "aim_delay_compensation_ms",
+        "aim_delay_compensation_active", "aim_delay_compensation_ms_x",
+        "aim_delay_compensation_ms_y", "aim_delay_compensation_ms",
         "aim_observation_age_ms", "aim_command")
     $availableFields = if ($items[0] -is
             [System.Collections.IDictionary]) {
@@ -253,6 +254,12 @@ function Get-XenAimReportSummary {
             $delayCompensatedPoint[0] "第 $index 个延迟补偿点 X"
         $delayCompensatedY = ConvertTo-XenAimFiniteDouble `
             $delayCompensatedPoint[1] "第 $index 个延迟补偿点 Y"
+        $delayMsX = ConvertTo-XenAimFiniteDouble `
+            $sample.aim_delay_compensation_ms_x "第 $index 个 X 延迟补偿时域"
+        $delayMsY = ConvertTo-XenAimFiniteDouble `
+            $sample.aim_delay_compensation_ms_y "第 $index 个 Y 延迟补偿时域"
+        $delayMs = ConvertTo-XenAimFiniteDouble `
+            $sample.aim_delay_compensation_ms "第 $index 个兼容延迟补偿时域"
         $delayActive = [bool]$sample.aim_delay_compensation_active
         $targetWidth = [Math]::Max(0.0, $x2 - $x1)
         $targetHeight = [Math]::Max(0.0, $y2 - $y1)
@@ -270,11 +277,15 @@ function Get-XenAimReportSummary {
                 $geometryTolerance -or
             [Math]::Abs($finalY - $delayCompensatedY - $leadY) -gt
                 $geometryTolerance -or
+            $delayMsX -lt 0.0 -or $delayMsY -lt 0.0 -or
+            [Math]::Abs($delayMs - [Math]::Max($delayMsX, $delayMsY)) -gt
+                $geometryTolerance -or
             (-not $delayActive -and
              ([Math]::Abs($delayX) -gt $geometryTolerance -or
               [Math]::Abs($delayY) -gt $geometryTolerance -or
-              [Math]::Abs([double]$sample.aim_delay_compensation_ms) -gt
-                  $geometryTolerance)) -or
+              [Math]::Abs($delayMsX) -gt $geometryTolerance -or
+              [Math]::Abs($delayMsY) -gt $geometryTolerance -or
+              [Math]::Abs($delayMs) -gt $geometryTolerance)) -or
             (-not $leadActive -and $leadDistance -gt $geometryTolerance)) {
             ++$violations.lead_vector_consistency_frames
         }

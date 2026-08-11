@@ -438,6 +438,8 @@ void test_control_contract_rejections() {
         output_frame(0, 10, 60, 40, 100, 120);
     legal_delay_compensation.target.delay_compensation_x = 6.0f;
     legal_delay_compensation.target.delay_compensation_y = -2.0f;
+    legal_delay_compensation.target.delay_compensation_ms_x = 3.0f;
+    legal_delay_compensation.target.delay_compensation_ms_y = 3.0f;
     legal_delay_compensation.target.delay_compensation_ms = 3.0f;
     legal_delay_compensation.target.delay_compensation_active = true;
     legal_delay_compensation.target.delay_compensated_aim_x = 86.0f;

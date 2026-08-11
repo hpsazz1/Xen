@@ -3309,6 +3309,72 @@ void test_control_step_cannot_cross_in_box_aim_point() {
            "准星已在模型框内时，单帧控制不得把它推出选中框");
 }
 
+void test_tracking_delay_projection_uses_longer_horizontal_horizon_only() {
+    AimConfig tracking_config;
+    tracking_config.min_confirmed_hits = 1;
+    tracking_config.deadzone_pixels = 0.0f;
+    tracking_config.smoothing = 1.0f;
+    tracking_config.counts_per_pixel_x = 1.0f;
+    tracking_config.counts_per_pixel_y = 1.0f;
+    tracking_config.max_counts_per_frame = 100.0f;
+    tracking_config.max_center_distance = 1.0f;
+    tracking_config.enable_delay_compensation = true;
+    tracking_config.control_delay_ms = 40.0f;
+    tracking_config.max_delay_compensation_ms = 44.0f;
+    tracking_config.max_delay_compensation_percent = 50.0f;
+    AimConfig prediction_config = tracking_config;
+    prediction_config.enable_prediction = true;
+    Aim tracking(tracking_config);
+    Aim prediction(prediction_config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimResult tracking_result;
+    AimResult prediction_result;
+    for (int index = 0; index < 12; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::milliseconds(index * 10));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(5);
+        frame.lock_active = true;
+        frame.detections = {body_box(
+            140.0f + index * 2.0f, 120.0f + index,
+            40.0f, 80.0f)};
+        tracking_result = tracking.process(frame);
+        prediction_result = prediction.process(frame);
+    }
+
+    expect(tracking_result.status == AimStatus::SUCCESS &&
+               tracking_result.has_target &&
+               tracking_result.target.delay_compensation_active,
+           "分轴延迟投影回归必须形成有效 tracking 目标和补偿向量");
+    expect(std::fabs(
+               tracking_result.target.delay_compensation_ms_x - 40.0f) <
+               0.01f &&
+               std::fabs(
+                   tracking_result.target.delay_compensation_ms_y - 16.0f) <
+                   0.01f &&
+               std::fabs(
+                   tracking_result.target.delay_compensation_ms - 40.0f) <
+                   0.01f,
+           "prediction 关闭时必须报告 X=40 ms、Y=16 ms，兼容字段取两轴最大值");
+    expect(std::fabs(
+               prediction_result.target.delay_compensation_ms_x - 16.0f) <
+               0.01f &&
+               std::fabs(
+                   prediction_result.target.delay_compensation_ms_y - 16.0f) <
+                   0.01f,
+           "prediction 开启时必须保留已经验证的双轴 16 ms 几何基准");
+    expect(std::fabs(
+               tracking_result.target.delay_compensation_y -
+               prediction_result.target.delay_compensation_y) < 0.01f,
+           "X 轴扩展不得改变同一输入下的 Y 轴延迟补偿量");
+    expect(std::fabs(tracking_result.target.delay_compensation_x) >
+               std::fabs(prediction_result.target.delay_compensation_x) +
+                   0.10f,
+           "prediction 关闭时 X 轴 40 ms 投影必须产生可观测的额外水平提前量");
+}
+
 void test_delay_compensation_stacks_before_prediction() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -3926,6 +3992,7 @@ int main() {
     test_quantization_residual_cannot_reverse_after_crossing();
     test_delay_projection_crossing_keeps_base_tracking_hold();
     test_control_step_cannot_cross_in_box_aim_point();
+    test_tracking_delay_projection_uses_longer_horizontal_horizon_only();
     test_delay_compensation_stacks_before_prediction();
     test_horizontal_prediction_startup_rejects_static_camera_feedback();
     test_prediction_never_changes_base_tracking_sequence();

@@ -143,10 +143,12 @@ constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // 也只让基础点领先 0.52 px，仍低于可见门槛。1.5 倍只积分独立世界速度，
 // 不反读会被自身输出放大的延迟向量。
 constexpr float kPredictionAdditionalHorizonScale = 1.50f;
-// 控制延迟描述 KMBOX 命令到画面反馈的时域；几何投影只描述当前轨迹在
-// 画面中的短时外推，两者不能被同一个配置值同时放大。真实命令响应需要
-// 约 40 ms，但已经验证的几何/prediction 基准最多使用 16 ms 基础时域。
+// Y 轴快速运动在超级跳实测中会因更长外推产生抖动，因此继续使用已经验证
+// 的 16 ms 几何时域。prediction 也保留同一基准，避免改变既有闭环语义。
 constexpr float kGeometricProjectionMaximumSeconds = 0.016f;
+// prediction 关闭时，X 轴允许覆盖已测得的 40 ms KMBOX 响应窗口。扩展量只
+// 使用二维限幅中扣除既有 Y 向量后的剩余预算，不能改变 Y 轴投影结果。
+constexpr float kHorizontalTrackingProjectionMaximumSeconds = 0.040f;
 // 基础前馈服务于每帧跟随，响应不能为 prediction 稳定方向降速。
 // prediction 单独使用慢速世界运动状态：持续运动低通，静止时快速释放。
 // 这个状态只读取基础前馈，绝不回写轨迹、基础控制点或基础控制器。
@@ -454,7 +456,8 @@ struct Aim::Impl {
         float delay_compensated_y = 0.0f;
         float delay_x = 0.0f;
         float delay_y = 0.0f;
-        float delay_seconds = 0.0f;
+        float delay_seconds_x = 0.0f;
+        float delay_seconds_y = 0.0f;
         float final_x = 0.0f;
         float final_y = 0.0f;
         float observation_age_seconds = 0.0f;
@@ -1444,12 +1447,20 @@ struct Aim::Impl {
             const float requested_delay_seconds =
                 projection.observation_age_seconds +
                 config.control_delay_ms / 1000.0f;
-            projection.delay_seconds = std::clamp(
+            projection.delay_seconds_y = std::clamp(
                 requested_delay_seconds, 0.0f,
                 std::min(config.max_delay_compensation_ms / 1000.0f,
                          kGeometricProjectionMaximumSeconds));
-            projection.delay_x = track.vx * projection.delay_seconds;
-            projection.delay_y = track.vy * projection.delay_seconds;
+            const float horizontal_projection_maximum_seconds =
+                config.enable_prediction
+                    ? kGeometricProjectionMaximumSeconds
+                    : kHorizontalTrackingProjectionMaximumSeconds;
+            projection.delay_seconds_x = std::clamp(
+                requested_delay_seconds, 0.0f,
+                std::min(config.max_delay_compensation_ms / 1000.0f,
+                         horizontal_projection_maximum_seconds));
+            projection.delay_x = track.vx * projection.delay_seconds_y;
+            projection.delay_y = track.vy * projection.delay_seconds_y;
             if (controller_track_id == track.id) {
                 const auto [pending_x, pending_y] =
                     pending_issued_command_sum(frame.captured_at);
@@ -1470,7 +1481,22 @@ struct Aim::Impl {
                 projection.delay_x, projection.delay_y,
                 box_diagonal *
                     config.max_delay_compensation_percent / 100.0f);
-            projection.delay_active = projection.delay_seconds > 0.0f &&
+            if (projection.delay_seconds_x > projection.delay_seconds_y) {
+                const float vector_limit = box_diagonal *
+                    config.max_delay_compensation_percent / 100.0f;
+                const float remaining_x_limit = std::sqrt(std::max(
+                    0.0f, vector_limit * vector_limit -
+                        projection.delay_y * projection.delay_y));
+                const float horizontal_extension = track.vx *
+                    (projection.delay_seconds_x -
+                     projection.delay_seconds_y);
+                projection.delay_x = std::clamp(
+                    projection.delay_x + horizontal_extension,
+                    -remaining_x_limit, remaining_x_limit);
+            }
+            projection.delay_active =
+                (projection.delay_seconds_x > 0.0f ||
+                 projection.delay_seconds_y > 0.0f) &&
                 std::hypot(projection.delay_x, projection.delay_y) > 0.0f;
             projection.delay_compensated_x = base_x + projection.delay_x;
             projection.delay_compensated_y = base_y + projection.delay_y;
@@ -1584,7 +1610,7 @@ struct Aim::Impl {
             const float world_velocity_magnitude = std::hypot(
                 world_velocity_x, world_velocity_y);
             const float horizon_seconds =
-                std::min(projection.delay_seconds,
+                std::min(projection.delay_seconds_y,
                          kGeometricProjectionMaximumSeconds) *
                 kPredictionAdditionalHorizonScale;
             const float activation_distance_x = std::max(
@@ -2693,8 +2719,14 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
                 projection.delay_compensated_y;
             result.target.delay_compensation_x = projection.delay_x;
             result.target.delay_compensation_y = projection.delay_y;
+            result.target.delay_compensation_ms_x = projection.delay_active
+                ? projection.delay_seconds_x * 1000.0f : 0.0f;
+            result.target.delay_compensation_ms_y = projection.delay_active
+                ? projection.delay_seconds_y * 1000.0f : 0.0f;
             result.target.delay_compensation_ms = projection.delay_active
-                ? projection.delay_seconds * 1000.0f : 0.0f;
+                ? std::max(projection.delay_seconds_x,
+                           projection.delay_seconds_y) * 1000.0f
+                : 0.0f;
             result.target.observation_age_ms =
                 projection.observation_age_seconds * 1000.0f;
             result.target.confidence = target->confidence;
