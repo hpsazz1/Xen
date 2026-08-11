@@ -155,6 +155,14 @@ constexpr float kHorizontalTrackingProjectionMaximumSeconds = 0.040f;
 // 这个状态只读取基础前馈，绝不回写轨迹、基础控制点或基础控制器。
 constexpr float kPredictionWorldMotionGainPerSecond = 2.0f;
 constexpr float kPredictionWorldMotionReleasePerSecond = 120.0f;
+// tracking 的额外 X 时域需要比 prediction 更快建立，但仍必须先把
+// counts/frame 按真实 dt 归一化并低通，避免 NDI 批量交付把短帧放大。
+constexpr float kTrackingProjectionWorldMotionGainPerSecond = 8.0f;
+constexpr float kTrackingProjectionWorldMotionReleasePerSecond = 40.0f;
+constexpr int kTrackingProjectionStaticReleaseConfirmFrames = 4;
+// 额外 X 位移每秒最多移动 0.75 个目标对角线；约 120 Hz、90 px 目标下
+// 单帧不超过 0.51 px，使新增分量二阶阶跃保持在旧 16 ms 路径量级。
+constexpr float kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond = 0.75f;
 // 世界速度低通仍可能遇到 Provider/NDI 突发交付、几何上限切入或基础前馈
 // 量化边沿。最终预测偏移单独按目标对角线/秒限速，保证基础点不动的同时
 // 阻止预测点一帧从半程跳到几何上限。1.5 diagonals/s 在 240 Hz、约 100 px
@@ -389,6 +397,9 @@ struct Aim::Impl {
     float feedforward_y = 0.0f;
     float world_motion_measurement_x = 0.0f;
     float world_motion_measurement_y = 0.0f;
+    float tracking_projection_world_velocity_x = 0.0f;
+    float tracking_delay_extension_x = 0.0f;
+    int tracking_projection_low_motion_x_frames = 0;
     // 独立 prediction 状态使用 counts/second；基础控制器前馈仍保持
     // counts/frame，二者不能混用，否则瞬时帧间隔会改变预测距离。
     float prediction_world_velocity_x = 0.0f;
@@ -1376,6 +1387,9 @@ struct Aim::Impl {
         feedforward_y = 0.0f;
         world_motion_measurement_x = 0.0f;
         world_motion_measurement_y = 0.0f;
+        tracking_projection_world_velocity_x = 0.0f;
+        tracking_delay_extension_x = 0.0f;
+        tracking_projection_low_motion_x_frames = 0;
         prediction_world_velocity_x = 0.0f;
         prediction_world_velocity_y = 0.0f;
         prediction_motion_candidate_x_seconds = 0.0f;
@@ -1482,26 +1496,33 @@ struct Aim::Impl {
                 projection.delay_x, projection.delay_y,
                 box_diagonal *
                     config.max_delay_compensation_percent / 100.0f);
-            if (projection.delay_seconds_x > projection.delay_seconds_y) {
+            if (projection.delay_seconds_x > projection.delay_seconds_y &&
+                controller_track_id == track.id) {
                 const float vector_limit = box_diagonal *
                     config.max_delay_compensation_percent / 100.0f;
                 const float remaining_x_limit = std::sqrt(std::max(
                     0.0f, vector_limit * vector_limit -
                         projection.delay_y * projection.delay_y));
-                // feedforward_x 是上一控制帧已经用到期命令扣除相机自运动后
-                // 得到的世界维持量，单位 counts/frame。换算为 ROI px/s 后
-                // 只积分额外 X 时域；一帧滞后换来不会反读当前鼠标回流。
-                const float horizontal_world_velocity = feedforward_x /
+                const float horizontal_world_velocity =
+                    tracking_projection_world_velocity_x /
                     config.counts_per_pixel_x /
-                    frame.source_pixels_per_roi_pixel_x /
-                    std::max(track.prediction_dt, 0.0001f);
-                const float horizontal_extension =
+                    frame.source_pixels_per_roi_pixel_x;
+                const float desired_horizontal_extension =
                     horizontal_world_velocity *
                     (projection.delay_seconds_x -
                      projection.delay_seconds_y);
+                const float maximum_extension_step = box_diagonal *
+                    kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond *
+                    track.prediction_dt;
+                tracking_delay_extension_x += std::clamp(
+                    desired_horizontal_extension -
+                        tracking_delay_extension_x,
+                    -maximum_extension_step, maximum_extension_step);
                 projection.delay_x = std::clamp(
-                    projection.delay_x + horizontal_extension,
+                    projection.delay_x + tracking_delay_extension_x,
                     -remaining_x_limit, remaining_x_limit);
+            } else {
+                tracking_delay_extension_x = 0.0f;
             }
             projection.delay_active =
                 (projection.delay_seconds_x > 0.0f ||
@@ -2257,6 +2278,20 @@ struct Aim::Impl {
             config.counts_per_pixel_y, delayed_command_y, feedforward_y,
             world_motion_measurement_y,
             prediction_external_motion_evidence_y);
+        if (!config.enable_prediction && config.enable_delay_compensation &&
+            track.state == TrackState::CONFIRMED) {
+            aim::detail::update_prediction_velocity_axis(
+                feedforward_x, world_motion_measurement_x, controller_dt,
+                kPredictionWorldMotionMinimumCounts,
+                kTrackingProjectionStaticReleaseConfirmFrames,
+                kTrackingProjectionWorldMotionGainPerSecond,
+                kTrackingProjectionWorldMotionReleasePerSecond,
+                tracking_projection_world_velocity_x,
+                tracking_projection_low_motion_x_frames);
+        } else {
+            tracking_projection_world_velocity_x = 0.0f;
+            tracking_projection_low_motion_x_frames = 0;
+        }
         float control_feedforward_x = feedforward_x;
         if (use_coherent_prediction_projection_x &&
             controller_dt >=

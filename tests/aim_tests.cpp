@@ -3427,6 +3427,72 @@ void test_tracking_horizontal_extension_rejects_camera_feedback_direction() {
            "额外 X 时域必须沿自运动扣除后的世界方向，禁止继续积分反向屏幕回流");
 }
 
+void test_tracking_horizontal_extension_is_slew_limited_under_variable_dt() {
+    constexpr float kExpectedMaximumSlewDiagonalsPerSecond = 0.75f;
+    AimConfig short_config;
+    short_config.min_confirmed_hits = 1;
+    short_config.deadzone_pixels = 0.0f;
+    short_config.smoothing = 1.0f;
+    short_config.counts_per_pixel_x = 0.40f;
+    short_config.counts_per_pixel_y = 0.40f;
+    short_config.max_counts_per_frame = 14.0f;
+    short_config.max_center_distance = 1.0f;
+    short_config.enable_delay_compensation = true;
+    short_config.control_delay_ms = 15.0f;
+    short_config.max_delay_compensation_ms = 16.0f;
+    short_config.max_delay_compensation_percent = 50.0f;
+    AimConfig extended_config = short_config;
+    extended_config.control_delay_ms = 40.0f;
+    extended_config.max_delay_compensation_ms = 44.0f;
+    Aim short_projection(short_config);
+    Aim extended_projection(extended_config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::chrono::milliseconds elapsed{};
+    float previous_extension = 0.0f;
+    float maximum_extension = 0.0f;
+    bool have_previous_extension = false;
+
+    for (int index = 0; index < 100; ++index) {
+        const auto frame_dt = std::chrono::milliseconds(
+            index % 2 == 0 ? 4 : 12);
+        if (index != 0) elapsed += frame_dt;
+        const float elapsed_seconds =
+            std::chrono::duration<float>(elapsed).count();
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1), base + elapsed);
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(2);
+        frame.lock_active = false;
+        frame.detections = {body(
+            180.0f + elapsed_seconds * 120.0f, 160.0f)};
+        const AimResult short_result = short_projection.process(frame);
+        const AimResult extended_result = extended_projection.process(frame);
+        expect(short_result.has_target && extended_result.has_target,
+               "变化 dt 的水平扩展回归必须持续保留目标");
+        if (!short_result.has_target || !extended_result.has_target) continue;
+        const float extension =
+            extended_result.target.delay_compensation_x -
+            short_result.target.delay_compensation_x;
+        maximum_extension = std::max(maximum_extension, std::fabs(extension));
+        if (have_previous_extension) {
+            const float target_diagonal = std::hypot(
+                extended_result.target.x2 - extended_result.target.x1,
+                extended_result.target.y2 - extended_result.target.y1);
+            const float maximum_step = target_diagonal *
+                kExpectedMaximumSlewDiagonalsPerSecond *
+                std::chrono::duration<float>(frame_dt).count();
+            expect(std::fabs(extension - previous_extension) <=
+                       maximum_step + 0.02f,
+                   "变化 dt 下额外 X 位移不得超过按目标尺度归一化的单帧渐变上限");
+        }
+        previous_extension = extension;
+        have_previous_extension = true;
+    }
+
+    expect(maximum_extension >= 1.0f,
+           "渐变限制不得把持续水平世界运动的额外提前量永久压为零");
+}
+
 void test_delay_compensation_stacks_before_prediction() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -4046,6 +4112,7 @@ int main() {
     test_control_step_cannot_cross_in_box_aim_point();
     test_tracking_delay_projection_uses_longer_horizontal_horizon_only();
     test_tracking_horizontal_extension_rejects_camera_feedback_direction();
+    test_tracking_horizontal_extension_is_slew_limited_under_variable_dt();
     test_delay_compensation_stacks_before_prediction();
     test_horizontal_prediction_startup_rejects_static_camera_feedback();
     test_prediction_never_changes_base_tracking_sequence();
