@@ -1682,6 +1682,42 @@ void test_tracking_projection_velocity_uses_matching_frame_interval() {
                std::to_string(velocity));
 }
 
+void test_tracking_delay_extension_back_calculates_saturation() {
+    constexpr float kDesiredExtension = 20.0f;
+    constexpr float kMaximumStep = 1.0f;
+    float extension = 0.0f;
+
+    // 水平预算充足时按原渐变速度建立，不允许绕过单帧上限。
+    float output = aim::detail::update_tracking_delay_extension(
+        kDesiredExtension, 2.0f, 20.0f, kMaximumStep, extension);
+    expect(std::fabs(extension - 1.0f) < 0.001f &&
+               std::fabs(output - 3.0f) < 0.001f,
+           "tracking X 扩展建立必须继续服从原单帧渐变上限");
+
+    for (int index = 0; index < 10; ++index) {
+        output = aim::detail::update_tracking_delay_extension(
+            kDesiredExtension, 2.0f, 20.0f, kMaximumStep, extension);
+    }
+    expect(extension > 10.0f,
+           "反饱和回归必须先形成可观察的内部水平扩展库存");
+
+    // Y 跳跃把水平剩余空间压到 4 px 时，公开输出必须保持二维上限，内部
+    // 状态也必须同步回写到 2 px，而不是继续隐藏十余像素库存。
+    output = aim::detail::update_tracking_delay_extension(
+        kDesiredExtension, 2.0f, 4.0f, kMaximumStep, extension);
+    expect(std::fabs(extension - 2.0f) < 0.001f &&
+               std::fabs(output - 4.0f) < 0.001f,
+           "水平预算收缩必须把限幅结果回写到 X 扩展状态");
+
+    // Y 回落、水平空间重新扩大时，只能从已回写状态按 1 px/帧恢复；旧实现
+    // 会保留 11 px 隐藏库存并让公开点从 4 px 直接跳到新边界 10 px。
+    output = aim::detail::update_tracking_delay_extension(
+        kDesiredExtension, 2.0f, 10.0f, kMaximumStep, extension);
+    expect(std::fabs(extension - 3.0f) < 0.001f &&
+               std::fabs(output - 5.0f) < 0.001f,
+           "水平预算扩张后必须按原渐变上限重建，禁止隐藏库存瞬间露出");
+}
+
 void test_prediction_release_offset_is_slew_limited() {
     constexpr float kBoxDiagonal = 110.0f;
     constexpr float kMaximumSlew = 1.5f;
@@ -4129,6 +4165,7 @@ int main() {
     test_prediction_motion_candidate_tolerates_one_low_sample();
     test_prediction_motion_axis_requires_confirmed_stop();
     test_tracking_projection_velocity_uses_matching_frame_interval();
+    test_tracking_delay_extension_back_calculates_saturation();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();

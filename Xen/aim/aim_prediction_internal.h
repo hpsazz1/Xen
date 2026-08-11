@@ -110,6 +110,31 @@ inline void update_tracking_projection_velocity_axis(
          projection_velocity_counts_per_second) * alpha;
 }
 
+// tracking 的额外 X 位移必须把二维几何限幅结果回写到内部状态。Y 快速跳跃
+// 会暂时缩小水平剩余空间；若只限幅公开点而保留超额内部库存，Y 回落时库存会
+// 沿着变化后的边界瞬间重新露出，形成 X 轴震荡。预算收缩时立即反饱和以继续
+// 满足总向量上限；预算扩张时仍服从原单帧渐变上限，不改变稳定提前距离。
+inline float update_tracking_delay_extension(
+        float desired_extension_x, float base_delay_x,
+        float remaining_x_limit, float maximum_extension_step,
+        float& extension_x) noexcept {
+    const float safe_remaining_x_limit =
+        std::max(remaining_x_limit, 0.0f);
+    const float minimum_extension =
+        -safe_remaining_x_limit - base_delay_x;
+    const float maximum_extension =
+        safe_remaining_x_limit - base_delay_x;
+    const float reachable_desired_extension = std::clamp(
+        desired_extension_x, minimum_extension, maximum_extension);
+    const float safe_maximum_step = std::max(maximum_extension_step, 0.0f);
+    extension_x += std::clamp(
+        reachable_desired_extension - extension_x,
+        -safe_maximum_step, safe_maximum_step);
+    extension_x = std::clamp(
+        extension_x, minimum_extension, maximum_extension);
+    return base_delay_x + extension_x;
+}
+
 // 最终 prediction 偏移按目标对角线/秒限速，并在发布前重新约束“延迟点到
 // 最终点”的几何上限。进入 prediction 和退出 prediction 必须使用同一函数，
 // 不能在低运动释放时直接把偏移清零。

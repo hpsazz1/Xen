@@ -1515,13 +1515,11 @@ struct Aim::Impl {
                 const float maximum_extension_step = box_diagonal *
                     kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond *
                     track.prediction_dt;
-                tracking_delay_extension_x += std::clamp(
-                    desired_horizontal_extension -
-                        tracking_delay_extension_x,
-                    -maximum_extension_step, maximum_extension_step);
-                projection.delay_x = std::clamp(
-                    projection.delay_x + tracking_delay_extension_x,
-                    -remaining_x_limit, remaining_x_limit);
+                projection.delay_x =
+                    aim::detail::update_tracking_delay_extension(
+                        desired_horizontal_extension, projection.delay_x,
+                        remaining_x_limit, maximum_extension_step,
+                        tracking_delay_extension_x);
             } else {
                 tracking_delay_extension_x = 0.0f;
             }
