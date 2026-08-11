@@ -124,10 +124,14 @@ constexpr float kControllerPendingCommandResponse = 0.15f;
 // 用户配置的 0.475 基础控制平滑。
 constexpr float kPredictionPendingProjectionResponse = 0.12f;
 // 高频闭环已有足够多的延迟窗口样本供基础观察器工作；真实 Run 的控制
-// 节奏会在 68～107 Hz 间变化，40 ms 窗口仅剩 3～4 个离散命令。低于
+// 节奏会在 68～119 Hz 间变化，40 ms 窗口仅剩 3～5 个离散命令。低于
 // 125 Hz 时改用同源世界速度维持量，避免刚好跨过 100 Hz 后再次退回持续
 // 位置误差；240 Hz 高频路径保持原观察器。
 constexpr float kPredictionDirectFeedforwardMinimumDeltaSeconds = 0.008f;
+// 119 Hz 真实 Run 中平均命令仍约等于公开误差的 0.4 倍比例量，
+// 说明离散世界速度维持量仍有小幅损失。1.10 只校正低频同源前馈，
+// 不放大公开 prediction 点、Y 轴或 240 Hz 基础观察器路径。
+constexpr float kPredictionDirectFeedforwardScale = 1.10f;
 // 公开最终点保持带外的反向库存制动只能短促存在。实机最新 Run 的 6 帧
 // 连续 +1 count 会累积约 2.6 px 反向位移；限制为 2 帧后仍保留制动能力，
 // 但单次可见反向位移不超过约 0.87 px。
@@ -2226,8 +2230,11 @@ struct Aim::Impl {
             // prediction 点与控制器必须消费同一份已确认世界速度。否则公开
             // 点按稳定速度前探，物理控制却在相机反馈低谷释放基础前馈，最终
             // 只能长期保留比例误差来维持移动，表现为准星贴不到预测标记。
+            // 幅度按当前真实 dt 积分，有限校正只补偿离散命令与实际镜头
+            // 反馈之间的小幅损失，不改变高/低频选择或单帧上限。
             control_feedforward_x = std::clamp(
-                prediction_world_velocity_x * controller_dt,
+                prediction_world_velocity_x * controller_dt *
+                    kPredictionDirectFeedforwardScale,
                 -kControllerFeedforwardMaximumCounts,
                 kControllerFeedforwardMaximumCounts);
         }

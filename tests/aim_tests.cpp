@@ -2599,11 +2599,14 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
     constexpr int kActuationDelayFrames = 4;
     constexpr int kFrameCount = 900;
     constexpr int kSettledFrame = 300;
-    // 下一轮真实 Run 在相同配置下升到 107.1 Hz，40 ms 约覆盖 4 帧；
-    // 门槛不能因单次 Runtime 吞吐跨过 100 Hz 就关闭同源世界速度维持量。
-    constexpr int kFrameIntervalMicroseconds = 9330;
+    // 最新真实 Run 约 119 Hz，单帧间隔会跨越 8 ms 门槛。固定世界速度
+    // 下交替 7.2～10.4 ms，验证低频同源前馈的有限幅度校正在边界节奏下
+    // 仍能收敛，且不引入停发或错向命令。均值 8.4 ms 同时覆盖上一轮
+    // 107.1 Hz 边界。
+    constexpr std::array<int, 8> kFrameIntervalsMicroseconds{
+        7200, 10400, 7600, 8400, 7900, 9000, 7500, 9200};
+    constexpr float kWorldVelocityPixelsPerSecond = -96.43f;
     constexpr float kCameraResponse = 0.173f;
-    constexpr float kWorldStep = -0.81f;
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 1.5f;
@@ -2622,6 +2625,7 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
     const auto base = std::chrono::steady_clock::now() +
         std::chrono::seconds(1);
     std::array<int, kActuationDelayFrames> delayed_commands{};
+    std::chrono::microseconds elapsed{};
     float world_target_x = -12.0f;
     float camera_x = 0.0f;
     int active_frames = 0;
@@ -2636,16 +2640,19 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
         camera_x += delayed_commands[delay_slot] /
             config.counts_per_pixel_x * kCameraResponse;
         delayed_commands[delay_slot] = 0;
-        world_target_x += kWorldStep;
+        const int interval_us = kFrameIntervalsMicroseconds[
+            static_cast<std::size_t>(index) %
+            kFrameIntervalsMicroseconds.size()];
+        if (index > 0) elapsed += std::chrono::microseconds(interval_us);
+        world_target_x += kWorldVelocityPixelsPerSecond *
+            static_cast<float>(interval_us) / 1000000.0f;
 
         const float animation_x = 0.35f * std::sin(index * 0.73f);
         const float animation_width =
             40.0f + 3.0f * std::sin(index * 0.51f);
         AimFrame frame = make_frame(
             static_cast<std::uint64_t>(index + 1),
-            base + std::chrono::microseconds(
-                static_cast<long long>(index) *
-                kFrameIntervalMicroseconds));
+            base + elapsed);
         frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
         frame.lock_active = true;
         frame.detections = {body_box(
@@ -2653,7 +2660,7 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
             160.0f, animation_width, 80.0f)};
         const AimResult result = aim.process(frame);
         expect(result.status == AimStatus::SUCCESS && result.has_target,
-               "107 Hz prediction 回归必须逐帧保留合法目标");
+               "119 Hz 变周期 prediction 回归必须逐帧保留合法目标");
         if (!result.has_target) continue;
 
         const int command_x = result.has_command
@@ -2684,16 +2691,16 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
     }
 
     expect(active_frames >= 500,
-           "107 Hz 回归必须覆盖稳定 prediction 活动窗口");
+           "119 Hz 变周期回归必须覆盖稳定 prediction 活动窗口");
     const float mean_public_error = public_error_abs_sum /
         static_cast<float>(active_frames);
     const float mean_command = command_sum /
         static_cast<float>(active_frames);
-    expect(mean_public_error <= 1.20f &&
+    expect(mean_public_error <= 0.60f &&
                mean_command < -1.45f && mean_command > -2.35f &&
                longest_stop_frames <= 8 &&
                direction_violations == 0,
-           "真实 107.1 Hz/40 ms 闭环必须贴合公开 prediction 点，平均误差=" +
+           "真实 119 Hz 变周期/40 ms 闭环必须贴合公开 prediction 点，平均误差=" +
                std::to_string(mean_public_error) +
                "，平均命令=" + std::to_string(mean_command) +
                "，最长停发=" + std::to_string(longest_stop_frames) +
