@@ -180,7 +180,7 @@ try {
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
         -TaskId AIM-SUPERJUMP-ACCEPT-001 `
         -Mode Prepare -Scenario SuperJump -Profile tracking -Smoothing 0.50 `
-        -CountsPerPixel 0.55 `
+        -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
         -EnableDelayCompensation -ControlDelayMs 7.5 `
         -MaxDelayCompensationMs 18.0 `
         -MaxDelayCompensationPercent 12.0 `
@@ -192,7 +192,8 @@ try {
     if ($trackingOutputText -notmatch
             ('(?m)^powershell\.exe .* -TaskId AIM-SUPERJUMP-ACCEPT-001 ' +
              '-Mode Launch -Scenario SuperJump -Profile tracking .* ' +
-             '-Smoothing 0\.500000 -CountsPerPixel 0\.550000 ' +
+             '-Smoothing 0\.500000 -CountsPerPixelX 0\.450000 ' +
+             '-CountsPerPixelY 0\.400000 ' +
              '-EnableDelayCompensation ' +
              '-ControlDelayMs 7\.500000 ' +
              '-MaxDelayCompensationMs 18\.000000 ' +
@@ -213,8 +214,8 @@ try {
         $trackingConfig -notmatch '(?m)^control_delay_ms=7\.500000\r?$' -or
         $trackingConfig -notmatch '(?m)^max_delay_compensation_ms=18\.000000\r?$' -or
         $trackingConfig -notmatch '(?m)^max_delay_compensation_percent=12\.000000\r?$' -or
-        $trackingConfig -notmatch '(?m)^counts_per_pixel_x=0\.550000\r?$' -or
-        $trackingConfig -notmatch '(?m)^counts_per_pixel_y=0\.550000\r?$' -or
+        $trackingConfig -notmatch '(?m)^counts_per_pixel_x=0\.450000\r?$' -or
+        $trackingConfig -notmatch '(?m)^counts_per_pixel_y=0\.400000\r?$' -or
         $trackingConfig -notmatch '(?m)^max_counts_per_frame=12\.000000\r?$' -or
         $trackingConfig -notmatch '(?m)^backend=kmbox_net\r?$' -or
         $trackingConfig -notmatch '(?m)^kmbox_ip=192\.168\.2\.188\r?$' -or
@@ -229,7 +230,8 @@ try {
     if ([string]$trackingTask.task_id -ne "AIM-SUPERJUMP-ACCEPT-001" -or
         [string]$trackingTask.scenario -ne "SuperJump" -or
         [double]$trackingTask.aim.smoothing -ne 0.50 -or
-        [double]$trackingTask.aim.counts_per_pixel -ne 0.55 -or
+        [double]$trackingTask.aim.counts_per_pixel_x -ne 0.45 -or
+        [double]$trackingTask.aim.counts_per_pixel_y -ne 0.40 -or
         [bool]$trackingTask.aim.delay_compensation_enabled -ne $true -or
         [string]$trackingTask.package_validation -ne "lightweight" -or
         [double]$trackingTask.aim.control_delay_ms -ne 7.5 -or

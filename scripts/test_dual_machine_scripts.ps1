@@ -114,6 +114,10 @@ Assert-True ($aimDeltaText -match
     $aimDeltaText -match
         '\[bool\]\$task\.aim\.prediction_enabled\s*-ne\s*\(\$Profile -eq "prediction"\)' -and
     $aimDeltaText -match
+        '\[double\]\$task\.aim\.counts_per_pixel_x\s*-ne\s*\$resolvedCountsPerPixelX' -and
+    $aimDeltaText -match
+        '\[double\]\$task\.aim\.counts_per_pixel_y\s*-ne\s*\$resolvedCountsPerPixelY' -and
+    $aimDeltaText -match
         '\[double\]\$task\.aim\.control_delay_ms\s*-ne\s*\$ControlDelayMs' -and
     $aimDeltaText -match
         '\[double\]\$task\.aim\.max_delay_compensation_ms\s*-ne' -and

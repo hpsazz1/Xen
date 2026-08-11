@@ -17,6 +17,8 @@
     [double]$Smoothing = 0.50,
     [ValidateRange(0.01, 10.0)]
     [double]$CountsPerPixel = 0.40,
+    [Nullable[double]]$CountsPerPixelX = $null,
+    [Nullable[double]]$CountsPerPixelY = $null,
     [ValidateRange(0.0, 100.0)]
     [double]$ControlDelayMs = 15.0,
     [ValidateRange(0.0, 100.0)]
@@ -27,6 +29,19 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+$resolvedCountsPerPixelX = if ($null -eq $CountsPerPixelX) {
+    $CountsPerPixel
+} else { [double]$CountsPerPixelX }
+$resolvedCountsPerPixelY = if ($null -eq $CountsPerPixelY) {
+    $CountsPerPixel
+} else { [double]$CountsPerPixelY }
+if ($resolvedCountsPerPixelX -lt 0.01 -or
+    $resolvedCountsPerPixelX -gt 10.0 -or
+    $resolvedCountsPerPixelY -lt 0.01 -or
+    $resolvedCountsPerPixelY -gt 10.0) {
+    throw "分轴 counts-per-pixel 必须位于 [0.01, 10.0]。"
+}
 
 function Read-Json([string]$Path, [string]$Description) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -263,7 +278,9 @@ if ($Prepare) {
         ' -Mode Prepare -PackageRoot "' + $remoteRoot +
         '" -Smoothing ' + $Smoothing.ToString(
             'F6', [Globalization.CultureInfo]::InvariantCulture) +
-        ' -CountsPerPixel ' + $CountsPerPixel.ToString(
+        ' -CountsPerPixelX ' + $resolvedCountsPerPixelX.ToString(
+            'F6', [Globalization.CultureInfo]::InvariantCulture) +
+        ' -CountsPerPixelY ' + $resolvedCountsPerPixelY.ToString(
             'F6', [Globalization.CultureInfo]::InvariantCulture) +
         ' -LightweightPackageValidation -EnableDelayCompensation' +
         ' -ControlDelayMs ' + $ControlDelayMs.ToString(
@@ -301,7 +318,9 @@ if ($localConfigHash -ne $remoteConfigHash -or
 $configText = Get-Content -LiteralPath $remoteConfig -Raw -Encoding UTF8
 $expectedSmoothing = $Smoothing.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
-$expectedCounts = $CountsPerPixel.ToString(
+$expectedCountsX = $resolvedCountsPerPixelX.ToString(
+    'F6', [Globalization.CultureInfo]::InvariantCulture)
+$expectedCountsY = $resolvedCountsPerPixelY.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
 $expectedControlDelay = $ControlDelayMs.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
@@ -311,8 +330,8 @@ $expectedMaximumDelayPercent = $MaxDelayCompensationPercent.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
 $expectedPrediction = if ($Profile -eq "prediction") { "true" } else { "false" }
 if ($configText -notmatch "(?m)^smoothing=$([regex]::Escape($expectedSmoothing))\r?$" -or
-    $configText -notmatch "(?m)^counts_per_pixel_x=$([regex]::Escape($expectedCounts))\r?$" -or
-    $configText -notmatch "(?m)^counts_per_pixel_y=$([regex]::Escape($expectedCounts))\r?$" -or
+    $configText -notmatch "(?m)^counts_per_pixel_x=$([regex]::Escape($expectedCountsX))\r?$" -or
+    $configText -notmatch "(?m)^counts_per_pixel_y=$([regex]::Escape($expectedCountsY))\r?$" -or
     $configText -notmatch "(?m)^enable_prediction=$expectedPrediction\r?$" -or
     $configText -notmatch '(?m)^enable_delay_compensation=true\r?$' -or
     $configText -notmatch
@@ -367,7 +386,8 @@ if ($Prepare) {
         [string]$task.scenario -ne $Scenario -or
         [string]$task.profile -ne $Profile -or
         [double]$task.aim.smoothing -ne $Smoothing -or
-        [double]$task.aim.counts_per_pixel -ne $CountsPerPixel -or
+        [double]$task.aim.counts_per_pixel_x -ne $resolvedCountsPerPixelX -or
+        [double]$task.aim.counts_per_pixel_y -ne $resolvedCountsPerPixelY -or
         -not [bool]$task.aim.delay_compensation_enabled -or
         [bool]$task.aim.prediction_enabled -ne ($Profile -eq "prediction") -or
         [double]$task.aim.control_delay_ms -ne $ControlDelayMs -or

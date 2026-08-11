@@ -17,6 +17,8 @@
     [double]$Smoothing = 0.35,
     [ValidateRange(0.01, 10.0)]
     [double]$CountsPerPixel = 0.40,
+    [Nullable[double]]$CountsPerPixelX = $null,
+    [Nullable[double]]$CountsPerPixelY = $null,
     [switch]$EnableDelayCompensation,
     [ValidateRange(0.0, 100.0)]
     [double]$ControlDelayMs = 0.0,
@@ -33,6 +35,18 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $taskId = $TaskId
+$resolvedCountsPerPixelX = if ($null -eq $CountsPerPixelX) {
+    $CountsPerPixel
+} else { [double]$CountsPerPixelX }
+$resolvedCountsPerPixelY = if ($null -eq $CountsPerPixelY) {
+    $CountsPerPixel
+} else { [double]$CountsPerPixelY }
+if ($resolvedCountsPerPixelX -lt 0.01 -or
+    $resolvedCountsPerPixelX -gt 10.0 -or
+    $resolvedCountsPerPixelY -lt 0.01 -or
+    $resolvedCountsPerPixelY -gt 10.0) {
+    throw "分轴 counts-per-pixel 必须位于 [0.01, 10.0]。"
+}
 $physicalConfirmation = "XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT"
 $ndiSourceName = "HPSAZZ (Xen-ROI-320)"
 $kmboxIp = "192.168.2.188"
@@ -249,8 +263,8 @@ deadzone_pixels=1.500000
 smoothing=$('{0:F6}' -f $Smoothing)
 # tracking 基线针对移动跟随的轻微滞后做单变量增益修正；单帧上限和平滑保持不变，
 # prediction 只改变提前项，不改变基础控制曲线。
-counts_per_pixel_x=$('{0:F6}' -f $CountsPerPixel)
-counts_per_pixel_y=$('{0:F6}' -f $CountsPerPixel)
+counts_per_pixel_x=$('{0:F6}' -f $resolvedCountsPerPixelX)
+counts_per_pixel_y=$('{0:F6}' -f $resolvedCountsPerPixelY)
 max_counts_per_frame=12.000000
 enable_delay_compensation=$($EnableDelayCompensation.IsPresent.ToString().ToLowerInvariant())
 control_delay_ms=$('{0:F6}' -f $ControlDelayMs)
@@ -434,13 +448,14 @@ function New-LaunchCommand([string]$ResolvedRunDirectory) {
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
         '-TaskId {1} -Mode Launch -Scenario {2} -Profile {3} ' +
         '-PackageRoot "{4}" -RunDirectory "{5}" -Smoothing {6:F6}' +
-        ' -CountsPerPixel {7:F6}{8} -ControlDelayMs {9:F6} ' +
-        '-MaxDelayCompensationMs {10:F6} ' +
-        '-MaxDelayCompensationPercent {11:F6}{12} -AllowPhysicalOutput ' +
-        '-PhysicalOutputConfirmation {13}') -f
+        ' -CountsPerPixelX {7:F6} -CountsPerPixelY {8:F6}{9} ' +
+        '-ControlDelayMs {10:F6} -MaxDelayCompensationMs {11:F6} ' +
+        '-MaxDelayCompensationPercent {12:F6}{13} -AllowPhysicalOutput ' +
+        '-PhysicalOutputConfirmation {14}') -f
         (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
         $taskId, $Scenario, $Profile, $PackageRoot, $ResolvedRunDirectory,
-        $Smoothing, $CountsPerPixel, $delaySwitch, $ControlDelayMs,
+        $Smoothing, $resolvedCountsPerPixelX, $resolvedCountsPerPixelY,
+        $delaySwitch, $ControlDelayMs,
         $MaxDelayCompensationMs, $MaxDelayCompensationPercent,
         $validationSwitch,
         $physicalConfirmation
@@ -463,7 +478,8 @@ function New-TaskMarkdown(
 - 场景：$Scenario / $($Definition.title)
 - 配置：$Profile
 - smoothing：$('{0:F6}' -f $Smoothing)
-- counts-per-pixel：$('{0:F6}' -f $CountsPerPixel)
+- counts-per-pixel X：$('{0:F6}' -f $resolvedCountsPerPixelX)
+- counts-per-pixel Y：$('{0:F6}' -f $resolvedCountsPerPixelY)
 - 延迟补偿：$($EnableDelayCompensation.IsPresent)
 - 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
 - Capture：NDI / $ndiSourceName
@@ -579,7 +595,10 @@ if ($Mode -eq "Prepare") {
         }
         aim = [ordered]@{
             smoothing = $Smoothing
-            counts_per_pixel = $CountsPerPixel
+            counts_per_pixel = if ($resolvedCountsPerPixelX -eq
+                $resolvedCountsPerPixelY) { $resolvedCountsPerPixelX } else { $null }
+            counts_per_pixel_x = $resolvedCountsPerPixelX
+            counts_per_pixel_y = $resolvedCountsPerPixelY
             delay_compensation_enabled = $EnableDelayCompensation.IsPresent
             control_delay_ms = $ControlDelayMs
             max_delay_compensation_ms = $MaxDelayCompensationMs
@@ -606,7 +625,8 @@ if ($Mode -eq "Prepare") {
 - 场景：$Scenario
 - 配置：$Profile
 - smoothing：$('{0:F6}' -f $Smoothing)
-- counts-per-pixel：$('{0:F6}' -f $CountsPerPixel)
+- counts-per-pixel X：$('{0:F6}' -f $resolvedCountsPerPixelX)
+- counts-per-pixel Y：$('{0:F6}' -f $resolvedCountsPerPixelY)
 - 延迟补偿：$($EnableDelayCompensation.IsPresent)
 - 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
 - 执行人：
@@ -641,6 +661,14 @@ if (-not (Test-Path -LiteralPath $taskPath -PathType Leaf)) {
 }
 $task = Get-Content -LiteralPath $taskPath -Raw -Encoding utf8 |
     ConvertFrom-Json
+$taskCountsPerPixelX = if ($task.aim.PSObject.Properties.Name -contains
+    "counts_per_pixel_x") { [double]$task.aim.counts_per_pixel_x } else {
+    [double]$task.aim.counts_per_pixel
+}
+$taskCountsPerPixelY = if ($task.aim.PSObject.Properties.Name -contains
+    "counts_per_pixel_y") { [double]$task.aim.counts_per_pixel_y } else {
+    [double]$task.aim.counts_per_pixel
+}
 if ([int]$task.schema -ne 1 -or
     [string]$task.task_id -ne $taskId -or
     [string]$task.scenario -ne $Scenario -or
@@ -648,7 +676,8 @@ if ([int]$task.schema -ne 1 -or
     [string]$task.package_validation -ne $packageValidationMode -or
     [string]$task.package_root -ne $PackageRoot -or
     [double]$task.aim.smoothing -ne $Smoothing -or
-    [double]$task.aim.counts_per_pixel -ne $CountsPerPixel -or
+    $taskCountsPerPixelX -ne $resolvedCountsPerPixelX -or
+    $taskCountsPerPixelY -ne $resolvedCountsPerPixelY -or
     [bool]$task.aim.delay_compensation_enabled -ne
         $EnableDelayCompensation.IsPresent -or
     [double]$task.aim.control_delay_ms -ne $ControlDelayMs -or
@@ -776,7 +805,10 @@ $summary = [ordered]@{
     scenario = $Scenario
     profile = $Profile
     smoothing = $Smoothing
-    counts_per_pixel = $CountsPerPixel
+    counts_per_pixel = if ($resolvedCountsPerPixelX -eq
+        $resolvedCountsPerPixelY) { $resolvedCountsPerPixelX } else { $null }
+    counts_per_pixel_x = $resolvedCountsPerPixelX
+    counts_per_pixel_y = $resolvedCountsPerPixelY
     enable_delay_compensation = $EnableDelayCompensation.IsPresent
     control_delay_ms = $ControlDelayMs
     max_delay_compensation_ms = $MaxDelayCompensationMs
