@@ -1511,7 +1511,20 @@ struct Aim::Impl {
                 requested_delay_seconds, 0.0f,
                 std::min(config.max_delay_compensation_ms / 1000.0f,
                          horizontal_projection_maximum_seconds));
-            projection.delay_x = track.vx * projection.delay_seconds_y;
+            const float horizontal_world_velocity =
+                tracking_projection_world_velocity_x /
+                config.counts_per_pixel_x /
+                frame.source_pixels_per_roi_pixel_x;
+            const bool tracking_jump_x =
+                !config.enable_prediction &&
+                controller_track_id == track.id &&
+                std::fabs(track.vy) >=
+                    kTrackingBaseJumpVelocityThresholdPixelsPerSecond;
+            const float horizontal_projection_velocity =
+                aim::detail::select_tracking_horizontal_projection_velocity(
+                    track.vx, horizontal_world_velocity, tracking_jump_x);
+            projection.delay_x = horizontal_projection_velocity *
+                projection.delay_seconds_y;
             projection.delay_y = track.vy * projection.delay_seconds_y;
             if (controller_track_id == track.id) {
                 const auto [pending_x, pending_y] =
@@ -1540,10 +1553,6 @@ struct Aim::Impl {
                 const float remaining_x_limit = std::sqrt(std::max(
                     0.0f, vector_limit * vector_limit -
                         projection.delay_y * projection.delay_y));
-                const float horizontal_world_velocity =
-                    tracking_projection_world_velocity_x /
-                    config.counts_per_pixel_x /
-                    frame.source_pixels_per_roi_pixel_x;
                 const float desired_horizontal_extension =
                     horizontal_world_velocity *
                     (projection.delay_seconds_x -

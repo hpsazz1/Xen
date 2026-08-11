@@ -164,6 +164,19 @@ inline float update_tracking_horizontal_half_range(
     return current_half_range;
 }
 
+// 超级跳期间，屏幕水平速度会混入本机鼠标导致的镜头反向位移。延迟补偿若
+// 继续用该相对速度覆盖基础 16 ms，会把自身输出再次投影到控制点，形成
+// “连续打满 -> 越过 -> 反向打满”的闭环震荡。已扣除到期命令的世界速度
+// 才能用于跳跃 X；非跳跃路径继续保留原相对速度，避免扩大改动范围。
+inline float select_tracking_horizontal_projection_velocity(
+        float relative_velocity_pixels_per_second,
+        float world_velocity_pixels_per_second,
+        bool jump_active) noexcept {
+    return jump_active
+        ? world_velocity_pixels_per_second
+        : relative_velocity_pixels_per_second;
+}
+
 // 延迟窗口内的旧方向命令不能无条件阻塞真实反向。只有新方向纠偏需求小于
 // 预计库存影响时才暂停；目标已经沿新方向拉开足够误差后必须恢复输出，避免
 // “等库存全清空 -> 大误差重新打满”的新极限环。门禁只作用于跳跃 X 轴。

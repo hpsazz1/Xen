@@ -1743,6 +1743,23 @@ void test_tracking_jump_base_range_expands_and_releases_smoothly() {
            "落地后水平内窗必须按相同速率回收，禁止单帧复位到配置范围");
 }
 
+void test_tracking_jump_horizontal_projection_rejects_camera_feedback() {
+    constexpr float kRelativeCameraFeedback = -420.0f;
+    constexpr float kConfirmedWorldMotion = 135.0f;
+
+    const float jump_velocity =
+        aim::detail::select_tracking_horizontal_projection_velocity(
+            kRelativeCameraFeedback, kConfirmedWorldMotion, true);
+    expect(std::fabs(jump_velocity - kConfirmedWorldMotion) < 0.001f,
+           "跳跃 X 的完整延迟时域必须使用扣除相机反馈后的世界速度");
+
+    const float normal_velocity =
+        aim::detail::select_tracking_horizontal_projection_velocity(
+            kRelativeCameraFeedback, kConfirmedWorldMotion, false);
+    expect(std::fabs(normal_velocity - kRelativeCameraFeedback) < 0.001f,
+           "非跳跃 tracking 必须保留原屏幕相对速度投影路径");
+}
+
 void test_tracking_jump_reversal_waits_for_pending_inventory() {
     const auto allowed = [](int command_counts, float pending_counts,
                             float control_error_counts, bool jump_active) {
@@ -4216,6 +4233,7 @@ int main() {
     test_tracking_projection_velocity_uses_matching_frame_interval();
     test_tracking_delay_output_back_calculates_saturation();
     test_tracking_jump_base_range_expands_and_releases_smoothly();
+    test_tracking_jump_horizontal_projection_rejects_camera_feedback();
     test_tracking_jump_reversal_waits_for_pending_inventory();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
