@@ -128,11 +128,10 @@ constexpr float kPredictionPendingProjectionResponse = 0.12f;
 // 125 Hz 时改用同源世界速度维持量，避免刚好跨过 100 Hz 后再次退回持续
 // 位置误差；240 Hz 高频路径保持原观察器。
 constexpr float kPredictionDirectFeedforwardMinimumDeltaSeconds = 0.008f;
-constexpr std::size_t kPredictionDirectFeedforwardCadenceIntervals = 8;
 // 119 Hz 真实 Run 中平均命令仍约等于公开误差的 0.4 倍比例量，
-// 说明离散世界速度维持量仍有小幅损失。1.10 只校正低频同源前馈，
+// 说明离散世界速度维持量仍有小幅损失。1.15 只校正低频同源前馈，
 // 不放大公开 prediction 点、Y 轴或 240 Hz 基础观察器路径。
-constexpr float kPredictionDirectFeedforwardScale = 1.10f;
+constexpr float kPredictionDirectFeedforwardScale = 1.15f;
 // 最新真机 Run 仍把“最多两帧”预算用满，8 帧 +1 count 全部背离
 // 当前公开 prediction 点。超额在途命令已由隐藏控制锚提前制动，公开点
 // 保持带外不再允许额外反向物理命令，只停发等待已在途库存反馈。
@@ -180,10 +179,10 @@ constexpr float kPredictionEstablishedWorldVelocityCountsPerSecond = 60.0f;
 // 归位相机反馈伪运动；已建立后的低谷和停止仍由原有 12 帧释放状态机处理。
 constexpr float kPredictionHorizontalMotionEstablishmentSeconds = 0.15f;
 constexpr float kPredictionVerticalMotionEstablishmentSeconds = 0.25f;
-// 119 Hz 真实闭环中命令反馈低谷可连续数帧；首次世界运动证据
-// 不应在每个短低谷后从零重建。四帧只暂停已有候选，第五帧仍清零；
-// 反向有效测量仍立即换向重计，静止目标不会凭空增加候选时长。
-constexpr int kPredictionEstablishmentLowMotionGraceFrames = 4;
+// 首次确认只容忍一个低于 0.25 count 的采样空洞。四帧容错的
+// 真机反事实未缩短首次进入，因此撤回；连续第二个低谷仍清空累计，
+// 不能把断续相机反馈拼成真实运动。
+constexpr int kPredictionEstablishmentLowMotionGraceFrames = 1;
 // 正确方向的提前量也不能在观察器刚建立时整段跳入。按真实 dt 在约 33 ms
 // 内线性渐入，避免 prediction 状态变化绕过物理命令阶跃门禁。
 constexpr float kPredictionLeadRampPerSecond = 30.0f;
@@ -1245,31 +1244,6 @@ struct Aim::Impl {
         return {pending_x, pending_y};
     }
 
-    float recent_controller_interval_seconds(
-            std::chrono::steady_clock::time_point captured_at,
-            float fallback_seconds) const noexcept {
-        if (issued_command_count == 0) return fallback_seconds;
-        std::chrono::steady_clock::time_point oldest = captured_at;
-        std::size_t interval_count = 0;
-        for (std::size_t offset = 0;
-             offset < issued_command_count &&
-             interval_count <
-                 kPredictionDirectFeedforwardCadenceIntervals;
-             ++offset) {
-            const std::size_t index =
-                (issued_command_next + issued_commands.size() - 1U - offset) %
-                issued_commands.size();
-            const IssuedCommand& candidate = issued_commands[index];
-            if (candidate.captured_at >= captured_at) continue;
-            oldest = candidate.captured_at;
-            ++interval_count;
-        }
-        if (interval_count == 0) return fallback_seconds;
-        return clamp_delta_seconds(
-            std::chrono::duration<double>(captured_at - oldest).count() /
-            static_cast<double>(interval_count));
-    }
-
     std::pair<float, float> stable_prediction_world_velocity(
             const AimFrame& frame, const Track& track) noexcept {
         if (!frame.lock_active || controller_track_id != track.id) {
@@ -2249,11 +2223,8 @@ struct Aim::Impl {
             world_motion_measurement_y,
             prediction_external_motion_evidence_y);
         float control_feedforward_x = feedforward_x;
-        const float controller_cadence_interval =
-            recent_controller_interval_seconds(
-                frame.captured_at, controller_dt);
         if (use_coherent_prediction_projection_x &&
-            controller_cadence_interval >=
+            controller_dt >=
                 kPredictionDirectFeedforwardMinimumDeltaSeconds &&
             std::fabs(prediction_world_velocity_x) >=
                 kPredictionEstablishedWorldVelocityCountsPerSecond) {
@@ -2261,8 +2232,7 @@ struct Aim::Impl {
             // 点按稳定速度前探，物理控制却在相机反馈低谷释放基础前馈，最终
             // 只能长期保留比例误差来维持移动，表现为准星贴不到预测标记。
             // 幅度按当前真实 dt 积分，有限校正只补偿离散命令与实际镜头
-            // 反馈之间的小幅损失。高/低频选择使用近八个周期的平均节奏，
-            // 避免 119 Hz 突发交付在 8 ms 两侧逐帧启停；单帧上限仍不变。
+            // 反馈之间的小幅损失，不改变高/低频选择或单帧上限。
             control_feedforward_x = std::clamp(
                 prediction_world_velocity_x * controller_dt *
                     kPredictionDirectFeedforwardScale,
