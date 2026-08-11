@@ -1722,26 +1722,25 @@ void test_tracking_delay_output_back_calculates_saturation() {
            "预算扩张和基础延迟变化必须统一服从总 X 输出渐变上限");
 }
 
-void test_tracking_jump_base_uses_soft_inner_and_hard_outer_bounds() {
-    float output = 100.0f;
+void test_tracking_jump_base_range_expands_and_releases_smoothly() {
+    bool initialized = false;
+    float half_range = 0.0f;
 
-    // 内窗目标随跳跃框中心横摆 10 px 时，基础点只按 3 px 测试步长移动。
-    float published = aim::detail::update_tracking_base_output(
-        110.0f, 90.0f, 130.0f, 3.0f, output);
-    expect(std::fabs(published - 103.0f) < 0.001f,
-           "跳跃基础 X 不得完整复制配置内窗的单帧横摆");
-    published = aim::detail::update_tracking_base_output(
-        116.0f, 90.0f, 130.0f, 3.0f, output);
-    expect(std::fabs(published - 106.0f) < 0.001f,
-           "连续跳跃横摆必须保持相同的基础 X 单帧上限");
+    float published = aim::detail::update_tracking_horizontal_half_range(
+        0.25f, true, 0.010f, 2.0f, initialized, half_range);
+    expect(initialized && std::fabs(published - 0.27f) < 0.001f,
+           "起跳时水平内窗必须从配置范围渐变扩展，不能单帧切到完整框");
+    for (int index = 0; index < 20; ++index) {
+        published = aim::detail::update_tracking_horizontal_half_range(
+            0.25f, true, 0.010f, 2.0f, initialized, half_range);
+    }
+    expect(std::fabs(published - 0.50f) < 0.001f,
+           "持续高速垂直运动必须允许 Track 瞄点使用完整人物框范围");
 
-    // 人物框整体真实移动到状态之外时，完整框是硬边界，必须立即回到框内；
-    // 该安全收缩可以越过软限速，不能发布框外基础点。
-    published = aim::detail::update_tracking_base_output(
-        125.0f, 108.0f, 148.0f, 3.0f, output);
-    expect(std::fabs(published - 111.0f) < 0.001f &&
-               published >= 108.0f && published <= 148.0f,
-           "真实框移动时基础 X 必须先满足完整人物框硬边界再限速");
+    published = aim::detail::update_tracking_horizontal_half_range(
+        0.25f, false, 0.010f, 2.0f, initialized, half_range);
+    expect(std::fabs(published - 0.48f) < 0.001f,
+           "落地后水平内窗必须按相同速率回收，禁止单帧复位到配置范围");
 }
 
 void test_prediction_release_offset_is_slew_limited() {
@@ -4192,7 +4191,7 @@ int main() {
     test_prediction_motion_axis_requires_confirmed_stop();
     test_tracking_projection_velocity_uses_matching_frame_interval();
     test_tracking_delay_output_back_calculates_saturation();
-    test_tracking_jump_base_uses_soft_inner_and_hard_outer_bounds();
+    test_tracking_jump_base_range_expands_and_releases_smoothly();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();

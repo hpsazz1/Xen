@@ -165,11 +165,10 @@ constexpr int kTrackingProjectionStaticReleaseConfirmFrames = 4;
 // 单帧不超过 0.51 px，使新增分量二阶阶跃保持在旧 16 ms 路径量级。
 constexpr float kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond = 0.75f;
 // 超级跳实测中基础 X 有 53% 的跳跃帧贴在 25%/75% 内窗边界，基础点
-// 相邻变化与框中心相关系数 0.819。高速垂直阶段只限制基础 X 的逐帧位移；
-// 完整人物框继续作为硬边界，正常地面 tracking 不改变。
+// 相邻变化与框中心相关系数 0.819。高速垂直阶段把水平内窗渐变扩展到完整框，
+// 直接消费 Track 已滤波的瞄点，避免绝对位置限速产生滞后后再被硬边界拉回。
 constexpr float kTrackingBaseJumpVelocityThresholdPixelsPerSecond = 60.0f;
-constexpr float kTrackingBaseMaximumSlewDiagonalsPerSecond = 3.0f;
-constexpr int kTrackingBaseJumpReleaseConfirmFrames = 12;
+constexpr float kTrackingBaseRangeSlewPerSecond = 2.0f;
 // 世界速度低通仍可能遇到 Provider/NDI 突发交付、几何上限切入或基础前馈
 // 量化边沿。最终预测偏移单独按目标对角线/秒限速，保证基础点不动的同时
 // 阻止预测点一帧从半程跳到几何上限。1.5 diagonals/s 在 240 Hz、约 100 px
@@ -408,10 +407,8 @@ struct Aim::Impl {
     bool tracking_delay_output_initialized_x = false;
     float tracking_delay_output_x = 0.0f;
     int tracking_projection_low_motion_x_frames = 0;
-    bool tracking_base_output_initialized_x = false;
-    bool tracking_base_jump_active_x = false;
-    int tracking_base_jump_release_frames_x = 0;
-    float tracking_base_output_x = 0.0f;
+    bool tracking_base_range_initialized_x = false;
+    float tracking_base_half_range_x = 0.0f;
     // 独立 prediction 状态使用 counts/second；基础控制器前馈仍保持
     // counts/frame，二者不能混用，否则瞬时帧间隔会改变预测距离。
     float prediction_world_velocity_x = 0.0f;
@@ -1403,10 +1400,8 @@ struct Aim::Impl {
         tracking_delay_output_initialized_x = false;
         tracking_delay_output_x = 0.0f;
         tracking_projection_low_motion_x_frames = 0;
-        tracking_base_output_initialized_x = false;
-        tracking_base_jump_active_x = false;
-        tracking_base_jump_release_frames_x = 0;
-        tracking_base_output_x = 0.0f;
+        tracking_base_range_initialized_x = false;
+        tracking_base_half_range_x = 0.0f;
         prediction_world_velocity_x = 0.0f;
         prediction_world_velocity_y = 0.0f;
         prediction_motion_candidate_x_seconds = 0.0f;
@@ -1437,58 +1432,34 @@ struct Aim::Impl {
     LeadProjection projected_aim_point(
             const AimFrame& frame, const Track& track,
             std::chrono::steady_clock::time_point control_at) noexcept {
-        const float half_range = config.body_aim_range_percent / 200.0f;
+        const float configured_half_range =
+            config.body_aim_range_percent / 200.0f;
+        float half_range = configured_half_range;
+        const bool adapt_tracking_base_range_x =
+            frame.lock_active && !config.enable_prediction &&
+            config.enable_delay_compensation &&
+            controller_track_id == track.id &&
+            track.state == TrackState::CONFIRMED && !track.predicted;
+        if (adapt_tracking_base_range_x) {
+            half_range = aim::detail::update_tracking_horizontal_half_range(
+                configured_half_range,
+                std::fabs(track.vy) >=
+                    kTrackingBaseJumpVelocityThresholdPixelsPerSecond,
+                track.prediction_dt, kTrackingBaseRangeSlewPerSecond,
+                tracking_base_range_initialized_x,
+                tracking_base_half_range_x);
+        } else {
+            tracking_base_range_initialized_x = false;
+            tracking_base_half_range_x = configured_half_range;
+        }
         const float range_min_x = track.x1 + (track.x2 - track.x1) *
             (0.5f - half_range);
         const float range_max_x = track.x1 + (track.x2 - track.x1) *
             (0.5f + half_range);
         // 基础点直接取状态估计点在配置内窗中的位置，不按速度逐帧补偿；
         // 这样检测抖动不会把瞄点反复推向内窗两侧。预测层仍独立处理提前量。
-        const float desired_base_x = std::clamp(
+        const float base_x = std::clamp(
             track.aim_x, range_min_x, range_max_x);
-        float base_x = desired_base_x;
-        const bool stabilize_tracking_base_x =
-            frame.lock_active && !config.enable_prediction &&
-            config.enable_delay_compensation &&
-            controller_track_id == track.id &&
-            track.state == TrackState::CONFIRMED && !track.predicted;
-        if (stabilize_tracking_base_x) {
-            if (!tracking_base_output_initialized_x) {
-                tracking_base_output_x = desired_base_x;
-                tracking_base_output_initialized_x = true;
-            }
-            const float maximum_base_step = std::hypot(
-                track.x2 - track.x1, track.y2 - track.y1) *
-                kTrackingBaseMaximumSlewDiagonalsPerSecond *
-                track.prediction_dt;
-            if (std::fabs(track.vy) >=
-                    kTrackingBaseJumpVelocityThresholdPixelsPerSecond) {
-                tracking_base_jump_active_x = true;
-                tracking_base_jump_release_frames_x = 0;
-            } else if (tracking_base_jump_active_x) {
-                tracking_base_jump_release_frames_x = std::min(
-                    tracking_base_jump_release_frames_x + 1,
-                    kTrackingBaseJumpReleaseConfirmFrames);
-                if (tracking_base_jump_release_frames_x >=
-                        kTrackingBaseJumpReleaseConfirmFrames &&
-                    std::fabs(tracking_base_output_x - desired_base_x) <=
-                        maximum_base_step) {
-                    tracking_base_jump_active_x = false;
-                }
-            }
-            if (tracking_base_jump_active_x) {
-                base_x = aim::detail::update_tracking_base_output(
-                    desired_base_x, track.x1, track.x2, maximum_base_step,
-                    tracking_base_output_x);
-            } else {
-                tracking_base_output_x = desired_base_x;
-            }
-        } else {
-            tracking_base_output_initialized_x = false;
-            tracking_base_jump_active_x = false;
-            tracking_base_jump_release_frames_x = 0;
-            tracking_base_output_x = desired_base_x;
-        }
         const float base_y = std::clamp(track.aim_y, track.y1, track.y2);
         LeadProjection projection;
         projection.base_x = base_x;

@@ -139,25 +139,29 @@ inline float update_tracking_delay_output(
     return output_x;
 }
 
-// 跳跃动画会让检测框水平中心在相邻帧横摆。配置内窗仍是期望瞄点，但不能
-// 再作为每帧硬边界，否则基础点贴住 25%/75% 边界时会完整复制框中心抖动。
-// 状态只向内窗目标限速移动，完整人物框仍是不可越过的硬安全边界。
-inline float update_tracking_base_output(
-        float desired_base_x, float box_min_x, float box_max_x,
-        float maximum_step, float& output_x) noexcept {
-    if (box_max_x <= box_min_x) {
-        output_x = desired_base_x;
-        return output_x;
+// 跳跃期间逐步把水平内窗扩展到完整人物框，使已滤波的 Track 瞄点不再被
+// 25%/75% 移动边界夹住。这里只改变 clamp 可达范围，不建立绝对屏幕位置
+// 状态，因此不会滞后真实水平运动；起跳和落地使用同一速率渐变，避免切换跳变。
+inline float update_tracking_horizontal_half_range(
+        float configured_half_range, bool jump_active, float delta_seconds,
+        float slew_per_second, bool& initialized,
+        float& current_half_range) noexcept {
+    const float safe_configured_half_range = std::clamp(
+        configured_half_range, 0.0f, 0.5f);
+    if (!initialized) {
+        current_half_range = safe_configured_half_range;
+        initialized = true;
     }
-    output_x = std::clamp(output_x, box_min_x, box_max_x);
-    const float reachable_desired = std::clamp(
-        desired_base_x, box_min_x, box_max_x);
-    const float safe_maximum_step = std::max(maximum_step, 0.0f);
-    output_x += std::clamp(
-        reachable_desired - output_x,
-        -safe_maximum_step, safe_maximum_step);
-    output_x = std::clamp(output_x, box_min_x, box_max_x);
-    return output_x;
+    const float target_half_range = jump_active
+        ? 0.5f : safe_configured_half_range;
+    const float maximum_step = std::max(
+        0.0f, slew_per_second * std::max(delta_seconds, 0.0f));
+    current_half_range += std::clamp(
+        target_half_range - current_half_range,
+        -maximum_step, maximum_step);
+    current_half_range = std::clamp(
+        current_half_range, safe_configured_half_range, 0.5f);
+    return current_half_range;
 }
 
 // 最终 prediction 偏移按目标对角线/秒限速，并在发布前重新约束“延迟点到
