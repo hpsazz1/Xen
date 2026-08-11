@@ -104,7 +104,7 @@ Assert-True ($packageScriptText -match '"aim_report\.ps1"' -and
 $aimDeltaText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/publish_aim_worker_delta.ps1"))
 Assert-True ($aimDeltaText -match
-        '\[ValidateSet\("AIM-DUAL-ACCEPT-001", "AIM-LATENCY-COMP-001"\)\]' -and
+        '"AIM-SUPERJUMP-ACCEPT-001"\)\]' -and
     $aimDeltaText -match
         '\[string\]\$TaskId\s*=\s*"AIM-LATENCY-COMP-001"' -and
     $aimDeltaText -match
@@ -120,6 +120,14 @@ Assert-True ($aimDeltaText -match
     $aimDeltaText -match
         ''' -MaxDelayCompensationPercent ''\s*\+\s*') `
     "Aim 差量入口必须透传任务 ID、延迟参数，并按 profile 回读 prediction 快照。"
+Assert-True ($aimDeltaText -match
+        '\$repositoryAcceptanceScript\s*=\s*Join-Path' -and
+    $aimDeltaText -match
+        'tools\\invoke_aim_manual_acceptance\.ps1' -and
+    $aimDeltaText -match
+        '\$manifest\.git_commit\s*=\s*\$commit\.ToLowerInvariant\(\)' -and
+    $aimDeltaText -match 'Aim 正式任务脚本原子替换失败') `
+    "Aim 差量入口必须把正式任务脚本、manifest 和发布提交作为同一原子差量同步。"
 
 & (Join-Path $RepositoryRoot "scripts/test_benchmark_report_scale.ps1") `
     -SyntheticSampleCount 72002 -LegacyProbeCount 5000 -Quiet

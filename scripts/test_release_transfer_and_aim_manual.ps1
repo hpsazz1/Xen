@@ -178,8 +178,8 @@ try {
     $trackingOutput = @(& powershell.exe -NoProfile `
         -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
-        -TaskId AIM-LATENCY-COMP-001 `
-        -Mode Prepare -Scenario Static -Profile tracking -Smoothing 0.50 `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Prepare -Scenario SuperJump -Profile tracking -Smoothing 0.50 `
         -CountsPerPixel 0.55 `
         -EnableDelayCompensation -ControlDelayMs 7.5 `
         -MaxDelayCompensationMs 18.0 `
@@ -190,8 +190,8 @@ try {
     $trackingOutput | ForEach-Object { Write-Host $_ }
     $trackingOutputText = $trackingOutput -join "`n"
     if ($trackingOutputText -notmatch
-            ('(?m)^powershell\.exe .* -TaskId AIM-LATENCY-COMP-001 ' +
-             '-Mode Launch -Scenario Static -Profile tracking .* ' +
+            ('(?m)^powershell\.exe .* -TaskId AIM-SUPERJUMP-ACCEPT-001 ' +
+             '-Mode Launch -Scenario SuperJump -Profile tracking .* ' +
              '-Smoothing 0\.500000 -CountsPerPixel 0\.550000 ' +
              '-EnableDelayCompensation ' +
              '-ControlDelayMs 7\.500000 ' +
@@ -226,7 +226,8 @@ try {
     $trackingTask = Get-Content -LiteralPath `
         (Join-Path $trackingRoot "task.json") -Raw -Encoding utf8 |
         ConvertFrom-Json
-    if ([string]$trackingTask.task_id -ne "AIM-LATENCY-COMP-001" -or
+    if ([string]$trackingTask.task_id -ne "AIM-SUPERJUMP-ACCEPT-001" -or
+        [string]$trackingTask.scenario -ne "SuperJump" -or
         [double]$trackingTask.aim.smoothing -ne 0.50 -or
         [double]$trackingTask.aim.counts_per_pixel -ne 0.55 -or
         [bool]$trackingTask.aim.delay_compensation_enabled -ne $true -or

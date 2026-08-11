@@ -1,5 +1,6 @@
 ﻿param(
-    [ValidateSet("AIM-DUAL-ACCEPT-001", "AIM-LATENCY-COMP-001")]
+    [ValidateSet("AIM-DUAL-ACCEPT-001", "AIM-LATENCY-COMP-001",
+        "AIM-SUPERJUMP-ACCEPT-001")]
     [string]$TaskId = "AIM-DUAL-ACCEPT-001",
     [Parameter(Mandatory = $true)]
     [ValidateSet("Static", "MoveLeft", "MoveRight", "Shuttle", "SuperJump")]

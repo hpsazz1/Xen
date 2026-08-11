@@ -8,7 +8,8 @@
     [string]$SshHost = "192.168.3.20",
     [switch]$ConfigOnly,
     [switch]$Prepare,
-    [ValidateSet("AIM-DUAL-ACCEPT-001", "AIM-LATENCY-COMP-001")]
+    [ValidateSet("AIM-DUAL-ACCEPT-001", "AIM-LATENCY-COMP-001",
+        "AIM-SUPERJUMP-ACCEPT-001")]
     [string]$TaskId = "AIM-LATENCY-COMP-001",
     [string]$Scenario = "MoveLeft",
     [string]$Profile = "tracking",
@@ -73,6 +74,12 @@ $packageRoot = (Resolve-Path -LiteralPath $PackageRoot).Path
 $destinationRoot = $DestinationRoot.TrimEnd('\')
 $manifestPath = Join-Path $packageRoot "manifest.json"
 $packageWorker = Join-Path $packageRoot "runtimes\nvidia\Xen.exe"
+$repositoryAcceptanceScript = Join-Path $repositoryRoot `
+    "scripts\invoke_aim_manual_acceptance.ps1"
+$packageAcceptanceScript = Join-Path $packageRoot `
+    "tools\invoke_aim_manual_acceptance.ps1"
+$remoteAcceptanceScript = Join-Path $destinationRoot `
+    "tools\invoke_aim_manual_acceptance.ps1"
 if (-not (Test-Path -LiteralPath $destinationRoot -PathType Container)) {
     throw "辅机固定发布根不可读：$destinationRoot"
 }
@@ -96,6 +103,12 @@ $record = @($manifest.files) | Where-Object {
 }
 if (@($record).Count -ne 1) {
     throw "manifest 中 NVIDIA Worker 记录不是唯一项。"
+}
+$acceptanceRecord = @($manifest.files) | Where-Object {
+    [string]$_.path -eq "tools/invoke_aim_manual_acceptance.ps1"
+}
+if (@($acceptanceRecord).Count -ne 1) {
+    throw "manifest 中 Aim 正式任务脚本记录不是唯一项。"
 }
 $remoteWorker = Join-Path $destinationRoot "runtimes\nvidia\Xen.exe"
 $remoteConfig = Join-Path $destinationRoot "config.ini"
@@ -165,6 +178,67 @@ if (-not $ConfigOnly) {
             "$SshUser@$SshHost" $applyCommand
         if ($LASTEXITCODE -ne 0) {
             throw "辅机本地原子替换失败，退出码：$LASTEXITCODE"
+        }
+    } finally {
+        if (Test-Path -LiteralPath $manifestPending -PathType Leaf) {
+            Remove-Item -LiteralPath $manifestPending -Force
+        }
+        if (Test-Path -LiteralPath $remoteStage) {
+            Remove-Item -LiteralPath $remoteStage -Recurse -Force
+        }
+    }
+}
+
+# 正式任务 ID 或生成契约变化时，只差量同步任务脚本及 manifest。Worker、模型和运行库保持原位，
+# 但发布提交必须更新为当前干净 HEAD，使 Prepare 的任务身份能够精确绑定本轮脚本版本。
+$acceptanceHash = (Get-FileHash -LiteralPath $repositoryAcceptanceScript `
+    -Algorithm SHA256).Hash
+$packageAcceptanceHash = (Get-FileHash -LiteralPath $packageAcceptanceScript `
+    -Algorithm SHA256).Hash
+$remoteAcceptanceHash = (Get-FileHash -LiteralPath $remoteAcceptanceScript `
+    -Algorithm SHA256).Hash
+$declaredAcceptanceHash = ([string]$acceptanceRecord[0].sha256).ToUpperInvariant()
+if ($acceptanceHash -ne $packageAcceptanceHash -or
+    $acceptanceHash -ne $remoteAcceptanceHash -or
+    $acceptanceHash -ne $declaredAcceptanceHash) {
+    $acceptanceRecord[0].size = [long](Get-Item -LiteralPath `
+        $repositoryAcceptanceScript).Length
+    $acceptanceRecord[0].sha256 = $acceptanceHash.ToLowerInvariant()
+    $acceptanceRecord[0].source =
+        "$repositoryAcceptanceScript@$($commit.Substring(0, 7))"
+    $manifest.git_commit = $commit.ToLowerInvariant()
+
+    $manifestPending = Join-Path $packageRoot `
+        ".manifest.incoming-$([guid]::NewGuid().ToString('N'))"
+    $remoteStageName = ".aim-tool.incoming-$([guid]::NewGuid().ToString('N'))"
+    $remoteStage = Join-Path $destinationRoot $remoteStageName
+    try {
+        $manifest | ConvertTo-Json -Depth 12 |
+            Set-Content -LiteralPath $manifestPending -Encoding UTF8
+        Copy-Atomic $repositoryAcceptanceScript $packageAcceptanceScript
+        Replace-FileAtomically $manifestPending $manifestPath
+
+        New-Item -ItemType Directory -Path (Join-Path $remoteStage "tools") `
+            -Force | Out-Null
+        Copy-Item -LiteralPath $repositoryAcceptanceScript -Destination `
+            (Join-Path $remoteStage "tools\invoke_aim_manual_acceptance.ps1")
+        Copy-Item -LiteralPath $manifestPath -Destination `
+            (Join-Path $remoteStage "manifest.json")
+        if (-not (Test-Path -LiteralPath $SshIdentityFile -PathType Leaf)) {
+            throw "SSH 身份文件不存在：$SshIdentityFile"
+        }
+        $remoteStageLocal = Join-Path $RemotePackageRoot $remoteStageName
+        $applyCommand = 'cmd.exe /d /c move /Y "' +
+            (Join-Path $remoteStageLocal `
+                "tools\invoke_aim_manual_acceptance.ps1") + '" "' +
+            (Join-Path $RemotePackageRoot `
+                "tools\invoke_aim_manual_acceptance.ps1") +
+            '" && move /Y "' + (Join-Path $remoteStageLocal "manifest.json") +
+            '" "' + (Join-Path $RemotePackageRoot "manifest.json") + '"'
+        & ssh -i $SshIdentityFile -o IdentitiesOnly=yes -o BatchMode=yes `
+            "$SshUser@$SshHost" $applyCommand
+        if ($LASTEXITCODE -ne 0) {
+            throw "辅机 Aim 正式任务脚本原子替换失败，退出码：$LASTEXITCODE"
         }
     } finally {
         if (Test-Path -LiteralPath $manifestPending -PathType Leaf) {
