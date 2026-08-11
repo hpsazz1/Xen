@@ -1743,6 +1743,23 @@ void test_tracking_jump_base_range_expands_and_releases_smoothly() {
            "落地后水平内窗必须按相同速率回收，禁止单帧复位到配置范围");
 }
 
+void test_tracking_jump_reversal_waits_for_pending_inventory() {
+    const auto allowed = [](int command_counts, float pending_counts,
+                            bool jump_active) {
+        return aim::detail::tracking_jump_reversal_command_allowed(
+            command_counts, pending_counts, jump_active);
+    };
+
+    expect(!allowed(-2, 33.0f, true) && !allowed(1, -27.0f, true),
+           "跳跃 X 反向前必须等待 40 ms 窗口内的旧方向库存反馈");
+    expect(allowed(2, 33.0f, true) && allowed(-1, -27.0f, true),
+           "跳跃 X 同向续发不得被库存门禁误停");
+    expect(allowed(-2, 0.0f, true) && allowed(-2, 33.0f, false),
+           "库存清空后的真实反向和非跳跃场景必须保持原控制路径");
+    expect(allowed(0, 33.0f, true),
+           "零命令必须始终允许，门禁不得自行产生物理输出");
+}
+
 void test_prediction_release_offset_is_slew_limited() {
     constexpr float kBoxDiagonal = 110.0f;
     constexpr float kMaximumSlew = 1.5f;
@@ -4192,6 +4209,7 @@ int main() {
     test_tracking_projection_velocity_uses_matching_frame_interval();
     test_tracking_delay_output_back_calculates_saturation();
     test_tracking_jump_base_range_expands_and_releases_smoothly();
+    test_tracking_jump_reversal_waits_for_pending_inventory();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();

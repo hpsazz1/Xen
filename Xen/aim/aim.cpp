@@ -2630,6 +2630,24 @@ struct Aim::Impl {
             command.dy_counts = 0;
             quantized_y = 0.0f;
         }
+        const bool tracking_jump_x =
+            !config.enable_prediction && config.enable_delay_compensation &&
+            track.state == TrackState::CONFIRMED && !track.predicted &&
+            std::fabs(track.vy) >=
+                kTrackingBaseJumpVelocityThresholdPixelsPerSecond;
+        if (tracking_jump_x && command.dx_counts != 0) {
+            const auto [pending_x, pending_y] =
+                pending_issued_command_sum(frame.captured_at);
+            (void)pending_y;
+            // 40 ms 反馈窗内仍有旧方向库存时，立即反向只会让两批相反
+            // 命令在 KMBOX 侧重叠。暂停 X，等待旧库存反馈；Y 和同向 X
+            // 不受影响，库存清空后沿现有整形轨迹恢复真实反向。
+            if (!aim::detail::tracking_jump_reversal_command_allowed(
+                    command.dx_counts, pending_x, true)) {
+                command.dx_counts = 0;
+                quantized_x = 0.0f;
+            }
+        }
         const float public_error_magnitude =
             std::hypot(public_error_x, public_error_y);
         const bool opposite_public_brake_x =

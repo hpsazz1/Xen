@@ -164,6 +164,18 @@ inline float update_tracking_horizontal_half_range(
     return current_half_range;
 }
 
+// 延迟窗口内尚未反馈的旧方向命令与新反向命令不能同时进入设备。真实超级跳
+// Run 的水平反向几乎全部发生在反方向 pending 仍非零时，这会把一次过零变成
+// 两批相反物理位移的叠加。门禁只作用于跳跃 X 轴；同向续发、库存清空后的
+// 真实反向以及非跳跃场景保持原路径。
+inline bool tracking_jump_reversal_command_allowed(
+        int command_counts, float pending_counts,
+        bool jump_active) noexcept {
+    return !jump_active || command_counts == 0 ||
+        pending_counts == 0.0f ||
+        static_cast<float>(command_counts) * pending_counts >= 0.0f;
+}
+
 // 最终 prediction 偏移按目标对角线/秒限速，并在发布前重新约束“延迟点到
 // 最终点”的几何上限。进入 prediction 和退出 prediction 必须使用同一函数，
 // 不能在低运动释放时直接把偏移清零。
