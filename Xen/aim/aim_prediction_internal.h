@@ -164,17 +164,29 @@ inline float update_tracking_horizontal_half_range(
     return current_half_range;
 }
 
-// 超级跳期间，屏幕水平速度会混入本机鼠标导致的镜头反向位移。延迟补偿若
-// 继续用该相对速度覆盖基础 16 ms，会把自身输出再次投影到控制点，形成
-// “连续打满 -> 越过 -> 反向打满”的闭环震荡。已扣除到期命令的世界速度
-// 才能用于跳跃 X；非跳跃路径继续保留原相对速度，避免扩大改动范围。
+// 超级跳期间逐步把水平投影从屏幕相对速度切换到扣除到期命令后的世界
+// 速度。不能在垂直速度阈值处硬切：真实 Run 中 |vy|=60 两侧反复穿越，
+// 硬切会把两种相位不同的速度源直接变成控制点阶跃。blend 按真实 dt
+// 对称渐入/退出，使短暂阈值穿越保持原路径，持续跳跃才完整隔离镜头回流。
+inline float update_tracking_jump_world_velocity_blend(
+        bool jump_active, float delta_seconds, float slew_per_second,
+        float& blend) noexcept {
+    const float target = jump_active ? 1.0f : 0.0f;
+    const float maximum_step = std::max(
+        0.0f, slew_per_second * std::max(delta_seconds, 0.0f));
+    blend += std::clamp(target - blend, -maximum_step, maximum_step);
+    blend = std::clamp(blend, 0.0f, 1.0f);
+    return blend;
+}
+
 inline float select_tracking_horizontal_projection_velocity(
         float relative_velocity_pixels_per_second,
         float world_velocity_pixels_per_second,
-        bool jump_active) noexcept {
-    return jump_active
-        ? world_velocity_pixels_per_second
-        : relative_velocity_pixels_per_second;
+        float world_velocity_blend) noexcept {
+    const float blend = std::clamp(world_velocity_blend, 0.0f, 1.0f);
+    return relative_velocity_pixels_per_second +
+        (world_velocity_pixels_per_second -
+         relative_velocity_pixels_per_second) * blend;
 }
 
 // 延迟窗口内的旧方向命令不能无条件阻塞真实反向。只有新方向纠偏需求小于

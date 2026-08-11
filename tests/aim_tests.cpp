@@ -1746,18 +1746,41 @@ void test_tracking_jump_base_range_expands_and_releases_smoothly() {
 void test_tracking_jump_horizontal_projection_rejects_camera_feedback() {
     constexpr float kRelativeCameraFeedback = -420.0f;
     constexpr float kConfirmedWorldMotion = 135.0f;
+    constexpr float kDeltaSeconds = 0.010f;
+    constexpr float kBlendSlewPerSecond = 4.0f;
+    float blend = 0.0f;
 
-    const float jump_velocity =
+    aim::detail::update_tracking_jump_world_velocity_blend(
+        true, kDeltaSeconds, kBlendSlewPerSecond, blend);
+    const float first_jump_velocity =
         aim::detail::select_tracking_horizontal_projection_velocity(
-            kRelativeCameraFeedback, kConfirmedWorldMotion, true);
-    expect(std::fabs(jump_velocity - kConfirmedWorldMotion) < 0.001f,
-           "跳跃 X 的完整延迟时域必须使用扣除相机反馈后的世界速度");
+            kRelativeCameraFeedback, kConfirmedWorldMotion, blend);
+    expect(std::fabs(blend - 0.04f) < 0.001f &&
+               first_jump_velocity > kRelativeCameraFeedback &&
+               first_jump_velocity < kConfirmedWorldMotion,
+           "跳跃 X 首帧只能渐入世界速度，禁止在垂直阈值处硬切相位");
 
-    const float normal_velocity =
+    for (int index = 0; index < 24; ++index) {
+        aim::detail::update_tracking_jump_world_velocity_blend(
+            true, kDeltaSeconds, kBlendSlewPerSecond, blend);
+    }
+    const float sustained_jump_velocity =
         aim::detail::select_tracking_horizontal_projection_velocity(
-            kRelativeCameraFeedback, kConfirmedWorldMotion, false);
-    expect(std::fabs(normal_velocity - kRelativeCameraFeedback) < 0.001f,
-           "非跳跃 tracking 必须保留原屏幕相对速度投影路径");
+            kRelativeCameraFeedback, kConfirmedWorldMotion, blend);
+    expect(std::fabs(blend - 1.0f) < 0.001f &&
+               std::fabs(sustained_jump_velocity -
+                         kConfirmedWorldMotion) < 0.001f,
+           "持续跳跃 250 ms 后必须完整隔离水平镜头回流");
+
+    aim::detail::update_tracking_jump_world_velocity_blend(
+        false, kDeltaSeconds, kBlendSlewPerSecond, blend);
+    const float first_release_velocity =
+        aim::detail::select_tracking_horizontal_projection_velocity(
+            kRelativeCameraFeedback, kConfirmedWorldMotion, blend);
+    expect(std::fabs(blend - 0.96f) < 0.001f &&
+               first_release_velocity > kRelativeCameraFeedback &&
+               first_release_velocity < kConfirmedWorldMotion,
+           "落地首帧必须渐退世界速度，禁止立即切回屏幕相对速度");
 }
 
 void test_tracking_jump_reversal_waits_for_pending_inventory() {

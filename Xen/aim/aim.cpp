@@ -169,6 +169,10 @@ constexpr float kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond = 0.75f;
 // 直接消费 Track 已滤波的瞄点，避免绝对位置限速产生滞后后再被硬边界拉回。
 constexpr float kTrackingBaseJumpVelocityThresholdPixelsPerSecond = 60.0f;
 constexpr float kTrackingBaseRangeSlewPerSecond = 2.0f;
+// 最新真机 Run 证明在 |vy|=60 边界硬切水平速度源会把延迟变化 P95 放大
+// 近一倍。4/s 让一次普通 10 ms 帧最多混入 4%，持续约 250 ms 才完全
+// 隔离镜头回流；短跳和落地阈值抖动不会直接切换控制相位。
+constexpr float kTrackingJumpWorldVelocityBlendSlewPerSecond = 4.0f;
 // 最新超级跳 Run 的全库存清空门禁把跳跃 X 零命令帧从 101 放大到 288。
 // 按同一 CSV 回放，10% 库存影响阈值可释放 87 个反向停发帧中的 68 个，
 // 同时保留 19 个“小纠偏、大库存”制动帧；该值只决定是否允许反向，
@@ -412,6 +416,7 @@ struct Aim::Impl {
     bool tracking_delay_output_initialized_x = false;
     float tracking_delay_output_x = 0.0f;
     int tracking_projection_low_motion_x_frames = 0;
+    float tracking_jump_world_velocity_blend_x = 0.0f;
     bool tracking_base_range_initialized_x = false;
     float tracking_base_half_range_x = 0.0f;
     // 独立 prediction 状态使用 counts/second；基础控制器前馈仍保持
@@ -1405,6 +1410,7 @@ struct Aim::Impl {
         tracking_delay_output_initialized_x = false;
         tracking_delay_output_x = 0.0f;
         tracking_projection_low_motion_x_frames = 0;
+        tracking_jump_world_velocity_blend_x = 0.0f;
         tracking_base_range_initialized_x = false;
         tracking_base_half_range_x = 0.0f;
         prediction_world_velocity_x = 0.0f;
@@ -1520,9 +1526,15 @@ struct Aim::Impl {
                 controller_track_id == track.id &&
                 std::fabs(track.vy) >=
                     kTrackingBaseJumpVelocityThresholdPixelsPerSecond;
+            const float world_velocity_blend =
+                aim::detail::update_tracking_jump_world_velocity_blend(
+                    tracking_jump_x, track.prediction_dt,
+                    kTrackingJumpWorldVelocityBlendSlewPerSecond,
+                    tracking_jump_world_velocity_blend_x);
             const float horizontal_projection_velocity =
                 aim::detail::select_tracking_horizontal_projection_velocity(
-                    track.vx, horizontal_world_velocity, tracking_jump_x);
+                    track.vx, horizontal_world_velocity,
+                    world_velocity_blend);
             projection.delay_x = horizontal_projection_velocity *
                 projection.delay_seconds_y;
             projection.delay_y = track.vy * projection.delay_seconds_y;
