@@ -110,29 +110,33 @@ inline void update_tracking_projection_velocity_axis(
          projection_velocity_counts_per_second) * alpha;
 }
 
-// tracking 的额外 X 位移必须把二维几何限幅结果回写到内部状态。Y 快速跳跃
-// 会暂时缩小水平剩余空间；若只限幅公开点而保留超额内部库存，Y 回落时库存会
-// 沿着变化后的边界瞬间重新露出，形成 X 轴震荡。预算收缩时立即反饱和以继续
-// 满足总向量上限；预算扩张时仍服从原单帧渐变上限，不改变稳定提前距离。
-inline float update_tracking_delay_extension(
-        float desired_extension_x, float base_delay_x,
-        float remaining_x_limit, float maximum_extension_step,
-        float& extension_x) noexcept {
+// tracking 的总 X 延迟必须作为一个状态统一限速。只限速额外 24 ms 分量时，
+// 基础 16 ms 分量仍会随 track.vx 和 Y 占用的二维预算直接阶跃，绕过扩展限速。
+// 首次进入从本帧基础延迟开始，保留已有 tracking 响应；预算收缩时立即回写以
+// 满足总向量上限，预算扩张和后续基础速度变化则统一服从单帧渐变上限。
+inline float update_tracking_delay_output(
+        float desired_output_x, float base_delay_x,
+        float remaining_x_limit, float maximum_output_step,
+        bool& initialized, float& output_x) noexcept {
     const float safe_remaining_x_limit =
         std::max(remaining_x_limit, 0.0f);
-    const float minimum_extension =
-        -safe_remaining_x_limit - base_delay_x;
-    const float maximum_extension =
-        safe_remaining_x_limit - base_delay_x;
-    const float reachable_desired_extension = std::clamp(
-        desired_extension_x, minimum_extension, maximum_extension);
-    const float safe_maximum_step = std::max(maximum_extension_step, 0.0f);
-    extension_x += std::clamp(
-        reachable_desired_extension - extension_x,
+    if (!initialized) {
+        output_x = std::clamp(
+            base_delay_x, -safe_remaining_x_limit, safe_remaining_x_limit);
+        initialized = true;
+    } else {
+        output_x = std::clamp(
+            output_x, -safe_remaining_x_limit, safe_remaining_x_limit);
+    }
+    const float reachable_desired_output = std::clamp(
+        desired_output_x, -safe_remaining_x_limit, safe_remaining_x_limit);
+    const float safe_maximum_step = std::max(maximum_output_step, 0.0f);
+    output_x += std::clamp(
+        reachable_desired_output - output_x,
         -safe_maximum_step, safe_maximum_step);
-    extension_x = std::clamp(
-        extension_x, minimum_extension, maximum_extension);
-    return base_delay_x + extension_x;
+    output_x = std::clamp(
+        output_x, -safe_remaining_x_limit, safe_remaining_x_limit);
+    return output_x;
 }
 
 // 最终 prediction 偏移按目标对角线/秒限速，并在发布前重新约束“延迟点到

@@ -399,7 +399,8 @@ struct Aim::Impl {
     float world_motion_measurement_x = 0.0f;
     float world_motion_measurement_y = 0.0f;
     float tracking_projection_world_velocity_x = 0.0f;
-    float tracking_delay_extension_x = 0.0f;
+    bool tracking_delay_output_initialized_x = false;
+    float tracking_delay_output_x = 0.0f;
     int tracking_projection_low_motion_x_frames = 0;
     // 独立 prediction 状态使用 counts/second；基础控制器前馈仍保持
     // counts/frame，二者不能混用，否则瞬时帧间隔会改变预测距离。
@@ -1389,7 +1390,8 @@ struct Aim::Impl {
         world_motion_measurement_x = 0.0f;
         world_motion_measurement_y = 0.0f;
         tracking_projection_world_velocity_x = 0.0f;
-        tracking_delay_extension_x = 0.0f;
+        tracking_delay_output_initialized_x = false;
+        tracking_delay_output_x = 0.0f;
         tracking_projection_low_motion_x_frames = 0;
         prediction_world_velocity_x = 0.0f;
         prediction_world_velocity_y = 0.0f;
@@ -1515,13 +1517,15 @@ struct Aim::Impl {
                 const float maximum_extension_step = box_diagonal *
                     kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond *
                     track.prediction_dt;
-                projection.delay_x =
-                    aim::detail::update_tracking_delay_extension(
-                        desired_horizontal_extension, projection.delay_x,
+                projection.delay_x = aim::detail::update_tracking_delay_output(
+                        projection.delay_x + desired_horizontal_extension,
+                        projection.delay_x,
                         remaining_x_limit, maximum_extension_step,
-                        tracking_delay_extension_x);
+                        tracking_delay_output_initialized_x,
+                        tracking_delay_output_x);
             } else {
-                tracking_delay_extension_x = 0.0f;
+                tracking_delay_output_initialized_x = false;
+                tracking_delay_output_x = 0.0f;
             }
             projection.delay_active =
                 (projection.delay_seconds_x > 0.0f ||
