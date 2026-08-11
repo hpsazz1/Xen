@@ -1604,6 +1604,45 @@ void test_prediction_motion_candidate_tolerates_one_low_sample() {
            "世界测量反向时必须从新方向重新计时，不能继承旧方向资格");
 }
 
+void test_prediction_motion_candidate_tolerates_short_feedback_trough() {
+    constexpr float kMinimumCounts = 0.25f;
+    constexpr float kDeltaSeconds = 1.0f / 120.0f;
+    constexpr float kEstablishmentSeconds = 0.15f;
+    constexpr int kGraceFrames = 4;
+    float candidate_seconds = -0.10f;
+    int low_frames = 0;
+    for (int index = 0; index < kGraceFrames; ++index) {
+        const bool confirmed =
+            aim::detail::update_prediction_motion_candidate(
+                0.0f, kMinimumCounts, kDeltaSeconds,
+                kEstablishmentSeconds, kGraceFrames,
+                candidate_seconds, low_frames);
+        expect(!confirmed && candidate_seconds < -0.099f,
+               "119 Hz 短反馈低谷只能暂停已有水平运动证据");
+    }
+    expect(low_frames == kGraceFrames,
+           "短反馈低谷必须精确记录已消耗容错帧");
+    const bool confirmed_after_resume =
+        aim::detail::update_prediction_motion_candidate(
+            -0.50f, kMinimumCounts, 0.05f,
+            kEstablishmentSeconds, kGraceFrames,
+            candidate_seconds, low_frames);
+    expect(confirmed_after_resume && candidate_seconds < -0.149f &&
+               low_frames == 0,
+           "短反馈低谷后同向运动必须继续原候选而不是慢速重建");
+
+    candidate_seconds = -0.10f;
+    low_frames = 0;
+    for (int index = 0; index <= kGraceFrames; ++index) {
+        aim::detail::update_prediction_motion_candidate(
+            0.0f, kMinimumCounts, kDeltaSeconds,
+            kEstablishmentSeconds, kGraceFrames,
+            candidate_seconds, low_frames);
+    }
+    expect(candidate_seconds == 0.0f && low_frames == kGraceFrames + 1,
+           "连续第五个低测量必须清空候选，禁止拼接长期断续反馈");
+}
+
 void test_prediction_motion_axis_requires_confirmed_stop() {
     constexpr float kDeltaSeconds = 1.0f / 60.0f;
     constexpr float kMinimumCounts = 0.25f;
@@ -1710,15 +1749,12 @@ void test_prediction_pullback_command_requires_causal_world_motion() {
 }
 
 void test_prediction_inventory_brake_is_short_and_minimal() {
-    constexpr int kMaximumFrames = 2;
-    expect(aim::detail::prediction_inventory_brake_allowed(
-               1, 0, kMaximumFrames) &&
-               aim::detail::prediction_inventory_brake_allowed(
-                   -1, 1, kMaximumFrames),
-           "公开点反向库存制动的前两帧必须允许最小整数命令");
+    constexpr int kMaximumFrames = 0;
     expect(!aim::detail::prediction_inventory_brake_allowed(
-               1, 2, kMaximumFrames),
-           "连续反向库存制动达到两帧后必须停发等待反馈");
+               1, 0, kMaximumFrames) &&
+               !aim::detail::prediction_inventory_brake_allowed(
+                   -1, 0, kMaximumFrames),
+           "公开 prediction 点保持带外不得再发送任何反向库存制动");
     expect(!aim::detail::prediction_inventory_brake_allowed(
                2, 0, kMaximumFrames) &&
                !aim::detail::prediction_inventory_brake_allowed(
@@ -3895,6 +3931,7 @@ int main() {
     test_prediction_uses_world_motion_when_delay_vector_points_backward();
     test_prediction_survives_short_world_motion_measurement_dips();
     test_prediction_motion_candidate_tolerates_one_low_sample();
+    test_prediction_motion_candidate_tolerates_short_feedback_trough();
     test_prediction_motion_axis_requires_confirmed_stop();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
