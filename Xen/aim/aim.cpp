@@ -169,6 +169,11 @@ constexpr float kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond = 0.75f;
 // 直接消费 Track 已滤波的瞄点，避免绝对位置限速产生滞后后再被硬边界拉回。
 constexpr float kTrackingBaseJumpVelocityThresholdPixelsPerSecond = 60.0f;
 constexpr float kTrackingBaseRangeSlewPerSecond = 2.0f;
+// 最新超级跳 Run 的全库存清空门禁把跳跃 X 零命令帧从 101 放大到 288。
+// 按同一 CSV 回放，10% 库存影响阈值可释放 87 个反向停发帧中的 68 个，
+// 同时保留 19 个“小纠偏、大库存”制动帧；该值只决定是否允许反向，
+// 不改变既有 15% 延迟点投影或任何物理命令幅度。
+constexpr float kTrackingJumpReversalPendingResponse = 0.10f;
 // 世界速度低通仍可能遇到 Provider/NDI 突发交付、几何上限切入或基础前馈
 // 量化边沿。最终预测偏移单独按目标对角线/秒限速，保证基础点不动的同时
 // 阻止预测点一帧从半程跳到几何上限。1.5 diagonals/s 在 240 Hz、约 100 px
@@ -2640,10 +2645,13 @@ struct Aim::Impl {
                 pending_issued_command_sum(frame.captured_at);
             (void)pending_y;
             // 40 ms 反馈窗内仍有旧方向库存时，立即反向只会让两批相反
-            // 命令在 KMBOX 侧重叠。暂停 X，等待旧库存反馈；Y 和同向 X
-            // 不受影响，库存清空后沿现有整形轨迹恢复真实反向。
+            // 命令在 KMBOX 侧叠加。但真实 Run 也证明等待库存完全清空会
+            // 形成 5～8 帧停发后重新打满。仅当当前纠偏 counts 还不足以
+            // 覆盖保守库存影响时暂停 X；真实反向需求建立后立即恢复。
             if (!aim::detail::tracking_jump_reversal_command_allowed(
-                    command.dx_counts, pending_x, true)) {
+                    command.dx_counts, pending_x,
+                    public_error_x * config.counts_per_pixel_x,
+                    kTrackingJumpReversalPendingResponse, true)) {
                 command.dx_counts = 0;
                 quantized_x = 0.0f;
             }

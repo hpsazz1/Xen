@@ -1745,18 +1745,25 @@ void test_tracking_jump_base_range_expands_and_releases_smoothly() {
 
 void test_tracking_jump_reversal_waits_for_pending_inventory() {
     const auto allowed = [](int command_counts, float pending_counts,
-                            bool jump_active) {
+                            float control_error_counts, bool jump_active) {
         return aim::detail::tracking_jump_reversal_command_allowed(
-            command_counts, pending_counts, jump_active);
+            command_counts, pending_counts, control_error_counts,
+            0.10f, jump_active);
     };
 
-    expect(!allowed(-2, 33.0f, true) && !allowed(1, -27.0f, true),
-           "跳跃 X 反向前必须等待 40 ms 窗口内的旧方向库存反馈");
-    expect(allowed(2, 33.0f, true) && allowed(-1, -27.0f, true),
+    expect(!allowed(-2, 33.0f, -2.0f, true) &&
+               !allowed(1, -27.0f, 1.0f, true),
+           "跳跃 X 的弱反向纠偏必须等待旧方向库存影响下降");
+    expect(allowed(-2, 33.0f, -4.0f, true) &&
+               allowed(1, -27.0f, 3.0f, true),
+           "真实反向需求超过预计库存影响后必须恢复 X，禁止等待全清空");
+    expect(allowed(2, 33.0f, 0.5f, true) &&
+               allowed(-1, -27.0f, -0.5f, true),
            "跳跃 X 同向续发不得被库存门禁误停");
-    expect(allowed(-2, 0.0f, true) && allowed(-2, 33.0f, false),
+    expect(allowed(-2, 0.0f, -0.5f, true) &&
+               allowed(-2, 33.0f, -0.5f, false),
            "库存清空后的真实反向和非跳跃场景必须保持原控制路径");
-    expect(allowed(0, 33.0f, true),
+    expect(allowed(0, 33.0f, 0.0f, true),
            "零命令必须始终允许，门禁不得自行产生物理输出");
 }
 

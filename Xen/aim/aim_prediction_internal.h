@@ -164,16 +164,20 @@ inline float update_tracking_horizontal_half_range(
     return current_half_range;
 }
 
-// 延迟窗口内尚未反馈的旧方向命令与新反向命令不能同时进入设备。真实超级跳
-// Run 的水平反向几乎全部发生在反方向 pending 仍非零时，这会把一次过零变成
-// 两批相反物理位移的叠加。门禁只作用于跳跃 X 轴；同向续发、库存清空后的
-// 真实反向以及非跳跃场景保持原路径。
+// 延迟窗口内的旧方向命令不能无条件阻塞真实反向。只有新方向纠偏需求小于
+// 预计库存影响时才暂停；目标已经沿新方向拉开足够误差后必须恢复输出，避免
+// “等库存全清空 -> 大误差重新打满”的新极限环。门禁只作用于跳跃 X 轴。
 inline bool tracking_jump_reversal_command_allowed(
         int command_counts, float pending_counts,
+        float control_error_counts, float pending_response,
         bool jump_active) noexcept {
+    const bool opposite_inventory =
+        static_cast<float>(command_counts) * pending_counts < 0.0f;
+    const float expected_pending_effect = std::fabs(pending_counts) *
+        std::clamp(pending_response, 0.0f, 1.0f);
     return !jump_active || command_counts == 0 ||
-        pending_counts == 0.0f ||
-        static_cast<float>(command_counts) * pending_counts >= 0.0f;
+        !opposite_inventory ||
+        std::fabs(control_error_counts) >= expected_pending_effect;
 }
 
 // 最终 prediction 偏移按目标对角线/秒限速，并在发布前重新约束“延迟点到
