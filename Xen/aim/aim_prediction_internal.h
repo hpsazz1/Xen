@@ -73,6 +73,43 @@ inline void update_prediction_velocity_axis(
          prediction_velocity_counts_per_second) * alpha;
 }
 
+// tracking 的额外水平时域直接从“本帧世界位移 / 本帧 dt”估计速度。
+// 不能把已经跨帧低通的 counts/frame 基础前馈再除以当前 dt：NDI 以 4/12 ms
+// 交替交付时，历史位移会被错误套用到当前采样周期，形成慢速追赶和回摆。
+// 同向变化仍使用低增益抑制检测噪声；确认的反向测量使用释放增益快速穿零，
+// 避免旧方向在一个完整低通时间常数内继续推动准星。
+inline void update_tracking_projection_velocity_axis(
+        float world_measurement_counts_per_frame, float delta_seconds,
+        float minimum_counts, int release_confirm_frames,
+        float build_gain_per_second, float release_gain_per_second,
+        float reversal_gain_per_second,
+        float& projection_velocity_counts_per_second,
+        int& low_measurement_frames) noexcept {
+    if (std::fabs(world_measurement_counts_per_frame) <= minimum_counts) {
+        low_measurement_frames = std::min(
+            low_measurement_frames + 1, release_confirm_frames);
+    } else {
+        low_measurement_frames = 0;
+    }
+
+    const bool release_confirmed =
+        low_measurement_frames >= release_confirm_frames;
+    const float safe_delta_seconds = std::max(delta_seconds, 0.001f);
+    const float target_velocity_counts_per_second = release_confirmed
+        ? 0.0f
+        : world_measurement_counts_per_frame / safe_delta_seconds;
+    const bool reversing =
+        projection_velocity_counts_per_second *
+            target_velocity_counts_per_second < 0.0f;
+    const float gain = release_confirmed
+        ? release_gain_per_second
+        : (reversing ? reversal_gain_per_second : build_gain_per_second);
+    const float alpha = 1.0f - std::exp(-gain * safe_delta_seconds);
+    projection_velocity_counts_per_second +=
+        (target_velocity_counts_per_second -
+         projection_velocity_counts_per_second) * alpha;
+}
+
 // 最终 prediction 偏移按目标对角线/秒限速，并在发布前重新约束“延迟点到
 // 最终点”的几何上限。进入 prediction 和退出 prediction 必须使用同一函数，
 // 不能在低运动释放时直接把偏移清零。

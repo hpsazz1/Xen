@@ -1646,6 +1646,42 @@ void test_prediction_motion_axis_requires_confirmed_stop() {
                std::to_string(low_frames));
 }
 
+void test_tracking_projection_velocity_uses_matching_frame_interval() {
+    constexpr float kMinimumCounts = 0.25f;
+    constexpr int kConfirmFrames = 4;
+    constexpr float kBuildGain = 8.0f;
+    constexpr float kReleaseGain = 40.0f;
+    constexpr float kReversalGain = 40.0f;
+    constexpr float kWorldVelocity = 120.0f;
+    float velocity = 0.0f;
+    int low_frames = 0;
+
+    // 同一物理速度在 4/12 ms 帧中对应不同 counts/frame；用各自 dt 归一化后，
+    // 观察器目标必须保持 120 counts/s，不能随交付节奏在三倍幅值间摆动。
+    for (int index = 0; index < 80; ++index) {
+        const float dt = index % 2 == 0 ? 0.004f : 0.012f;
+        aim::detail::update_tracking_projection_velocity_axis(
+            kWorldVelocity * dt, dt, kMinimumCounts, kConfirmFrames,
+            kBuildGain, kReleaseGain, kReversalGain, velocity, low_frames);
+    }
+    expect(std::fabs(velocity - kWorldVelocity) < 1.0f && low_frames == 0,
+           "变化 dt 下 tracking 世界速度必须收敛到物理速度，实际=" +
+               std::to_string(velocity));
+
+    // 真实反向不能再沿 8/s 的建立时间常数缓慢穿零；40/s 在三个 12 ms
+    // 采样内应完成换向，同时仍经过连续状态而不是单帧硬清零。
+    for (int index = 0; index < 3; ++index) {
+        constexpr float kDeltaSeconds = 0.012f;
+        aim::detail::update_tracking_projection_velocity_axis(
+            -kWorldVelocity * kDeltaSeconds, kDeltaSeconds,
+            kMinimumCounts, kConfirmFrames, kBuildGain, kReleaseGain,
+            kReversalGain, velocity, low_frames);
+    }
+    expect(velocity < 0.0f,
+           "tracking 世界速度确认反向后三帧内必须穿零，实际=" +
+               std::to_string(velocity));
+}
+
 void test_prediction_release_offset_is_slew_limited() {
     constexpr float kBoxDiagonal = 110.0f;
     constexpr float kMaximumSlew = 1.5f;
@@ -4092,6 +4128,7 @@ int main() {
     test_prediction_survives_short_world_motion_measurement_dips();
     test_prediction_motion_candidate_tolerates_one_low_sample();
     test_prediction_motion_axis_requires_confirmed_stop();
+    test_tracking_projection_velocity_uses_matching_frame_interval();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();

@@ -155,10 +155,11 @@ constexpr float kHorizontalTrackingProjectionMaximumSeconds = 0.040f;
 // 这个状态只读取基础前馈，绝不回写轨迹、基础控制点或基础控制器。
 constexpr float kPredictionWorldMotionGainPerSecond = 2.0f;
 constexpr float kPredictionWorldMotionReleasePerSecond = 120.0f;
-// tracking 的额外 X 时域需要比 prediction 更快建立，但仍必须先把
-// counts/frame 按真实 dt 归一化并低通，避免 NDI 批量交付把短帧放大。
+// tracking 的额外 X 时域直接把同一帧的世界位移按真实 dt 归一化；同向运动
+// 低通抑制检测噪声，确认反向时快速穿零，避免旧方向形成低频闭环回摆。
 constexpr float kTrackingProjectionWorldMotionGainPerSecond = 8.0f;
 constexpr float kTrackingProjectionWorldMotionReleasePerSecond = 40.0f;
+constexpr float kTrackingProjectionWorldMotionReversalGainPerSecond = 40.0f;
 constexpr int kTrackingProjectionStaticReleaseConfirmFrames = 4;
 // 额外 X 位移每秒最多移动 0.75 个目标对角线；约 120 Hz、90 px 目标下
 // 单帧不超过 0.51 px，使新增分量二阶阶跃保持在旧 16 ms 路径量级。
@@ -2280,12 +2281,13 @@ struct Aim::Impl {
             prediction_external_motion_evidence_y);
         if (!config.enable_prediction && config.enable_delay_compensation &&
             track.state == TrackState::CONFIRMED) {
-            aim::detail::update_prediction_velocity_axis(
-                feedforward_x, world_motion_measurement_x, controller_dt,
+            aim::detail::update_tracking_projection_velocity_axis(
+                world_motion_measurement_x, controller_dt,
                 kPredictionWorldMotionMinimumCounts,
                 kTrackingProjectionStaticReleaseConfirmFrames,
                 kTrackingProjectionWorldMotionGainPerSecond,
                 kTrackingProjectionWorldMotionReleasePerSecond,
+                kTrackingProjectionWorldMotionReversalGainPerSecond,
                 tracking_projection_world_velocity_x,
                 tracking_projection_low_motion_x_frames);
         } else {
