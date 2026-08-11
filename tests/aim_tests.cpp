@@ -1722,6 +1722,28 @@ void test_tracking_delay_output_back_calculates_saturation() {
            "预算扩张和基础延迟变化必须统一服从总 X 输出渐变上限");
 }
 
+void test_tracking_jump_base_uses_soft_inner_and_hard_outer_bounds() {
+    float output = 100.0f;
+
+    // 内窗目标随跳跃框中心横摆 10 px 时，基础点只按 3 px 测试步长移动。
+    float published = aim::detail::update_tracking_base_output(
+        110.0f, 90.0f, 130.0f, 3.0f, output);
+    expect(std::fabs(published - 103.0f) < 0.001f,
+           "跳跃基础 X 不得完整复制配置内窗的单帧横摆");
+    published = aim::detail::update_tracking_base_output(
+        116.0f, 90.0f, 130.0f, 3.0f, output);
+    expect(std::fabs(published - 106.0f) < 0.001f,
+           "连续跳跃横摆必须保持相同的基础 X 单帧上限");
+
+    // 人物框整体真实移动到状态之外时，完整框是硬边界，必须立即回到框内；
+    // 该安全收缩可以越过软限速，不能发布框外基础点。
+    published = aim::detail::update_tracking_base_output(
+        125.0f, 108.0f, 148.0f, 3.0f, output);
+    expect(std::fabs(published - 111.0f) < 0.001f &&
+               published >= 108.0f && published <= 148.0f,
+           "真实框移动时基础 X 必须先满足完整人物框硬边界再限速");
+}
+
 void test_prediction_release_offset_is_slew_limited() {
     constexpr float kBoxDiagonal = 110.0f;
     constexpr float kMaximumSlew = 1.5f;
@@ -4170,6 +4192,7 @@ int main() {
     test_prediction_motion_axis_requires_confirmed_stop();
     test_tracking_projection_velocity_uses_matching_frame_interval();
     test_tracking_delay_output_back_calculates_saturation();
+    test_tracking_jump_base_uses_soft_inner_and_hard_outer_bounds();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();
