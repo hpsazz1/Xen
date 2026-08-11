@@ -19,6 +19,8 @@
     [double]$CountsPerPixel = 0.40,
     [Nullable[double]]$CountsPerPixelX = $null,
     [Nullable[double]]$CountsPerPixelY = $null,
+    [ValidateRange(1.0, 200.0)]
+    [double]$MaxCountsPerFrame = 12.0,
     [switch]$EnableDelayCompensation,
     [ValidateRange(0.0, 100.0)]
     [double]$ControlDelayMs = 0.0,
@@ -265,7 +267,7 @@ smoothing=$('{0:F6}' -f $Smoothing)
 # prediction 只改变提前项，不改变基础控制曲线。
 counts_per_pixel_x=$('{0:F6}' -f $resolvedCountsPerPixelX)
 counts_per_pixel_y=$('{0:F6}' -f $resolvedCountsPerPixelY)
-max_counts_per_frame=12.000000
+max_counts_per_frame=$('{0:F6}' -f $MaxCountsPerFrame)
 enable_delay_compensation=$($EnableDelayCompensation.IsPresent.ToString().ToLowerInvariant())
 control_delay_ms=$('{0:F6}' -f $ControlDelayMs)
 max_delay_compensation_ms=$('{0:F6}' -f $MaxDelayCompensationMs)
@@ -448,14 +450,15 @@ function New-LaunchCommand([string]$ResolvedRunDirectory) {
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
         '-TaskId {1} -Mode Launch -Scenario {2} -Profile {3} ' +
         '-PackageRoot "{4}" -RunDirectory "{5}" -Smoothing {6:F6}' +
-        ' -CountsPerPixelX {7:F6} -CountsPerPixelY {8:F6}{9} ' +
-        '-ControlDelayMs {10:F6} -MaxDelayCompensationMs {11:F6} ' +
-        '-MaxDelayCompensationPercent {12:F6}{13} -AllowPhysicalOutput ' +
-        '-PhysicalOutputConfirmation {14}') -f
+        ' -CountsPerPixelX {7:F6} -CountsPerPixelY {8:F6} ' +
+        '-MaxCountsPerFrame {9:F6}{10} -ControlDelayMs {11:F6} ' +
+        '-MaxDelayCompensationMs {12:F6} ' +
+        '-MaxDelayCompensationPercent {13:F6}{14} -AllowPhysicalOutput ' +
+        '-PhysicalOutputConfirmation {15}') -f
         (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
         $taskId, $Scenario, $Profile, $PackageRoot, $ResolvedRunDirectory,
         $Smoothing, $resolvedCountsPerPixelX, $resolvedCountsPerPixelY,
-        $delaySwitch, $ControlDelayMs,
+        $MaxCountsPerFrame, $delaySwitch, $ControlDelayMs,
         $MaxDelayCompensationMs, $MaxDelayCompensationPercent,
         $validationSwitch,
         $physicalConfirmation
@@ -480,6 +483,7 @@ function New-TaskMarkdown(
 - smoothing：$('{0:F6}' -f $Smoothing)
 - counts-per-pixel X：$('{0:F6}' -f $resolvedCountsPerPixelX)
 - counts-per-pixel Y：$('{0:F6}' -f $resolvedCountsPerPixelY)
+- 单帧二维上限：$('{0:F6}' -f $MaxCountsPerFrame) counts
 - 延迟补偿：$($EnableDelayCompensation.IsPresent)
 - 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
 - Capture：NDI / $ndiSourceName
@@ -599,6 +603,7 @@ if ($Mode -eq "Prepare") {
                 $resolvedCountsPerPixelY) { $resolvedCountsPerPixelX } else { $null }
             counts_per_pixel_x = $resolvedCountsPerPixelX
             counts_per_pixel_y = $resolvedCountsPerPixelY
+            max_counts_per_frame = $MaxCountsPerFrame
             delay_compensation_enabled = $EnableDelayCompensation.IsPresent
             control_delay_ms = $ControlDelayMs
             max_delay_compensation_ms = $MaxDelayCompensationMs
@@ -627,6 +632,7 @@ if ($Mode -eq "Prepare") {
 - smoothing：$('{0:F6}' -f $Smoothing)
 - counts-per-pixel X：$('{0:F6}' -f $resolvedCountsPerPixelX)
 - counts-per-pixel Y：$('{0:F6}' -f $resolvedCountsPerPixelY)
+- 单帧二维上限：$('{0:F6}' -f $MaxCountsPerFrame) counts
 - 延迟补偿：$($EnableDelayCompensation.IsPresent)
 - 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
 - 执行人：
@@ -678,6 +684,7 @@ if ([int]$task.schema -ne 1 -or
     [double]$task.aim.smoothing -ne $Smoothing -or
     $taskCountsPerPixelX -ne $resolvedCountsPerPixelX -or
     $taskCountsPerPixelY -ne $resolvedCountsPerPixelY -or
+    [double]$task.aim.max_counts_per_frame -ne $MaxCountsPerFrame -or
     [bool]$task.aim.delay_compensation_enabled -ne
         $EnableDelayCompensation.IsPresent -or
     [double]$task.aim.control_delay_ms -ne $ControlDelayMs -or
@@ -809,6 +816,7 @@ $summary = [ordered]@{
         $resolvedCountsPerPixelY) { $resolvedCountsPerPixelX } else { $null }
     counts_per_pixel_x = $resolvedCountsPerPixelX
     counts_per_pixel_y = $resolvedCountsPerPixelY
+    max_counts_per_frame = $MaxCountsPerFrame
     enable_delay_compensation = $EnableDelayCompensation.IsPresent
     control_delay_ms = $ControlDelayMs
     max_delay_compensation_ms = $MaxDelayCompensationMs

@@ -19,6 +19,8 @@
     [double]$CountsPerPixel = 0.40,
     [Nullable[double]]$CountsPerPixelX = $null,
     [Nullable[double]]$CountsPerPixelY = $null,
+    [ValidateRange(1.0, 200.0)]
+    [double]$MaxCountsPerFrame = 12.0,
     [ValidateRange(0.0, 100.0)]
     [double]$ControlDelayMs = 15.0,
     [ValidateRange(0.0, 100.0)]
@@ -282,6 +284,8 @@ if ($Prepare) {
             'F6', [Globalization.CultureInfo]::InvariantCulture) +
         ' -CountsPerPixelY ' + $resolvedCountsPerPixelY.ToString(
             'F6', [Globalization.CultureInfo]::InvariantCulture) +
+        ' -MaxCountsPerFrame ' + $MaxCountsPerFrame.ToString(
+            'F6', [Globalization.CultureInfo]::InvariantCulture) +
         ' -LightweightPackageValidation -EnableDelayCompensation' +
         ' -ControlDelayMs ' + $ControlDelayMs.ToString(
             'F6', [Globalization.CultureInfo]::InvariantCulture) +
@@ -322,6 +326,8 @@ $expectedCountsX = $resolvedCountsPerPixelX.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
 $expectedCountsY = $resolvedCountsPerPixelY.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
+$expectedMaximumCounts = $MaxCountsPerFrame.ToString(
+    'F6', [Globalization.CultureInfo]::InvariantCulture)
 $expectedControlDelay = $ControlDelayMs.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
 $expectedMaximumDelay = $MaxDelayCompensationMs.ToString(
@@ -332,6 +338,7 @@ $expectedPrediction = if ($Profile -eq "prediction") { "true" } else { "false" }
 if ($configText -notmatch "(?m)^smoothing=$([regex]::Escape($expectedSmoothing))\r?$" -or
     $configText -notmatch "(?m)^counts_per_pixel_x=$([regex]::Escape($expectedCountsX))\r?$" -or
     $configText -notmatch "(?m)^counts_per_pixel_y=$([regex]::Escape($expectedCountsY))\r?$" -or
+    $configText -notmatch "(?m)^max_counts_per_frame=$([regex]::Escape($expectedMaximumCounts))\r?$" -or
     $configText -notmatch "(?m)^enable_prediction=$expectedPrediction\r?$" -or
     $configText -notmatch '(?m)^enable_delay_compensation=true\r?$' -or
     $configText -notmatch
@@ -388,6 +395,7 @@ if ($Prepare) {
         [double]$task.aim.smoothing -ne $Smoothing -or
         [double]$task.aim.counts_per_pixel_x -ne $resolvedCountsPerPixelX -or
         [double]$task.aim.counts_per_pixel_y -ne $resolvedCountsPerPixelY -or
+        [double]$task.aim.max_counts_per_frame -ne $MaxCountsPerFrame -or
         -not [bool]$task.aim.delay_compensation_enabled -or
         [bool]$task.aim.prediction_enabled -ne ($Profile -eq "prediction") -or
         [double]$task.aim.control_delay_ms -ne $ControlDelayMs -or

@@ -181,6 +181,7 @@ try {
         -TaskId AIM-SUPERJUMP-ACCEPT-001 `
         -Mode Prepare -Scenario SuperJump -Profile tracking -Smoothing 0.50 `
         -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+        -MaxCountsPerFrame 14.0 `
         -EnableDelayCompensation -ControlDelayMs 7.5 `
         -MaxDelayCompensationMs 18.0 `
         -MaxDelayCompensationPercent 12.0 `
@@ -194,6 +195,7 @@ try {
              '-Mode Launch -Scenario SuperJump -Profile tracking .* ' +
              '-Smoothing 0\.500000 -CountsPerPixelX 0\.450000 ' +
              '-CountsPerPixelY 0\.400000 ' +
+             '-MaxCountsPerFrame 14\.000000 ' +
              '-EnableDelayCompensation ' +
              '-ControlDelayMs 7\.500000 ' +
              '-MaxDelayCompensationMs 18\.000000 ' +
@@ -216,7 +218,7 @@ try {
         $trackingConfig -notmatch '(?m)^max_delay_compensation_percent=12\.000000\r?$' -or
         $trackingConfig -notmatch '(?m)^counts_per_pixel_x=0\.450000\r?$' -or
         $trackingConfig -notmatch '(?m)^counts_per_pixel_y=0\.400000\r?$' -or
-        $trackingConfig -notmatch '(?m)^max_counts_per_frame=12\.000000\r?$' -or
+        $trackingConfig -notmatch '(?m)^max_counts_per_frame=14\.000000\r?$' -or
         $trackingConfig -notmatch '(?m)^backend=kmbox_net\r?$' -or
         $trackingConfig -notmatch '(?m)^kmbox_ip=192\.168\.2\.188\r?$' -or
         $trackingConfig -notmatch '(?m)^kmbox_port=13384\r?$' -or
@@ -232,6 +234,7 @@ try {
         [double]$trackingTask.aim.smoothing -ne 0.50 -or
         [double]$trackingTask.aim.counts_per_pixel_x -ne 0.45 -or
         [double]$trackingTask.aim.counts_per_pixel_y -ne 0.40 -or
+        [double]$trackingTask.aim.max_counts_per_frame -ne 14.0 -or
         [bool]$trackingTask.aim.delay_compensation_enabled -ne $true -or
         [string]$trackingTask.package_validation -ne "lightweight" -or
         [double]$trackingTask.aim.control_delay_ms -ne 7.5 -or

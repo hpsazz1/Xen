@@ -118,6 +118,8 @@ Assert-True ($aimDeltaText -match
     $aimDeltaText -match
         '\[double\]\$task\.aim\.counts_per_pixel_y\s*-ne\s*\$resolvedCountsPerPixelY' -and
     $aimDeltaText -match
+        '\[double\]\$task\.aim\.max_counts_per_frame\s*-ne\s*\$MaxCountsPerFrame' -and
+    $aimDeltaText -match
         '\[double\]\$task\.aim\.control_delay_ms\s*-ne\s*\$ControlDelayMs' -and
     $aimDeltaText -match
         '\[double\]\$task\.aim\.max_delay_compensation_ms\s*-ne' -and
