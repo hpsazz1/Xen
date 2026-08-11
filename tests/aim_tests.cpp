@@ -3049,8 +3049,9 @@ void test_delay_compensation_stacks_before_prediction() {
         std::chrono::seconds(1);
 
     AimResult result;
-    // 未取得“相对运动与命令同向”的外部运动证据时，prediction 从零
-    // 建立需要覆盖 250 ms 同向确认；该场景共 390 ms。
+    int first_horizontal_prediction_frame = -1;
+    // 未取得“相对运动与命令同向”的外部运动证据时，水平 prediction 从零
+    // 建立仍需连续同向确认，但真实移动不应继续等待旧 250 ms 窗口。
     for (int index = 0; index < 40; ++index) {
         AimFrame frame = make_frame(
             static_cast<std::uint64_t>(index + 1),
@@ -3060,6 +3061,10 @@ void test_delay_compensation_stacks_before_prediction() {
         frame.lock_active = true;
         frame.detections = {body(180.0f + index * 2.0f, 172.0f)};
         result = aim.process(frame);
+        if (first_horizontal_prediction_frame < 0 && result.has_target &&
+            result.target.lead_active && result.target.lead_x > 0.25f) {
+            first_horizontal_prediction_frame = index;
+        }
     }
     const float lead_distance = std::hypot(
         result.target.lead_x, result.target.lead_y);
@@ -3079,6 +3084,74 @@ void test_delay_compensation_stacks_before_prediction() {
                 std::to_string(result.target.base_aim_x) + "，延迟点=" +
                 std::to_string(result.target.delay_compensated_aim_x) +
                 "，最终点=" + std::to_string(result.target.aim_x));
+    expect(first_horizontal_prediction_frame >= 0 &&
+               first_horizontal_prediction_frame <= 20,
+           "持续水平移动必须在 200 ms 内建立可见 prediction，首帧=" +
+               std::to_string(first_horizontal_prediction_frame));
+}
+
+void test_horizontal_prediction_startup_rejects_static_camera_feedback() {
+    constexpr int kActuationDelayFrames = 10;
+    constexpr int kFrameCount = 480;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 40.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> delayed_commands{};
+    constexpr float kStaticWorldTargetX = 36.0f;
+    float camera_x = 0.0f;
+    int horizontal_prediction_frames = 0;
+    float maximum_horizontal_lead = 0.0f;
+
+    for (int index = 0; index < kFrameCount; ++index) {
+        const int delay_slot = index % kActuationDelayFrames;
+        camera_x += delayed_commands[delay_slot] /
+            config.counts_per_pixel_x * 0.15f;
+        delayed_commands[delay_slot] = 0;
+
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index * 1000000.0f / 240.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body_box(
+            160.0f + kStaticWorldTargetX - camera_x,
+            172.0f, 40.0f, 80.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "静止水平相机反馈回归必须逐帧保留合法目标");
+        if (!result.has_target) continue;
+
+        const float horizontal_lead = std::fabs(result.target.lead_x);
+        maximum_horizontal_lead = std::max(
+            maximum_horizontal_lead, horizontal_lead);
+        if (result.target.lead_active && horizontal_lead > 0.25f) {
+            ++horizontal_prediction_frames;
+        }
+        if (result.has_command) {
+            delayed_commands[delay_slot] = result.command.dx_counts;
+        }
+    }
+
+    expect(horizontal_prediction_frames == 0 &&
+               maximum_horizontal_lead <= 0.25f,
+           "缩短首次 X 确认后，静止目标的 10 帧相机归位反馈仍不得误建 prediction，帧=" +
+               std::to_string(horizontal_prediction_frames) + "，最大 lead=" +
+               std::to_string(maximum_horizontal_lead));
 }
 
 void test_prediction_never_changes_base_tracking_sequence() {
@@ -3572,6 +3645,7 @@ int main() {
     test_delay_projection_crossing_keeps_base_tracking_hold();
     test_control_step_cannot_cross_in_box_aim_point();
     test_delay_compensation_stacks_before_prediction();
+    test_horizontal_prediction_startup_rejects_static_camera_feedback();
     test_prediction_never_changes_base_tracking_sequence();
     test_short_glide_preserves_base_tracking_hold();
     test_prediction_layer_keeps_base_tracking_hold_continuous();

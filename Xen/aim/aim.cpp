@@ -162,10 +162,14 @@ constexpr float kPredictionWorldMotionMinimumCounts = 0.25f;
 // 世界运动，不能从静止状态单独启动 prediction。60 counts/s 等价于
 // 240 Hz 下每帧 0.25 count，与真实 Run 使用的世界运动门槛保持一致。
 constexpr float kPredictionEstablishedWorldVelocityCountsPerSecond = 60.0f;
-// 从零建立 prediction 前，命令补偿后的世界运动必须按同一方向持续至少
-// 250 ms。真机姿态/归位伪运动只持续数十帧，持续移动则远长于该窗口；
-// 已建立后的低谷和停止仍由原有 12 帧释放状态机处理。
-constexpr float kPredictionWorldMotionEstablishmentSeconds = 0.25f;
+// 最新 MoveLeft 真机 Run 中，首次水平 prediction 在锁定后通常仍等待完整
+// 250 ms 运动确认，一个测量断续段甚至延长到约 600 ms。120 ms 反事实会
+// 让既有闭环在停止边界新增经零反转，最终 X 轴取最小通过值 150 ms：它仍
+// 覆盖 40/44 ms 命令反馈窗三倍以上和实测 3～10 帧姿态段，但不会把首次
+// 可见提前推迟到目标已接近准星之后。Y 轴保留 250 ms，继续隔离已经复现过的
+// 归位相机反馈伪运动；已建立后的低谷和停止仍由原有 12 帧释放状态机处理。
+constexpr float kPredictionHorizontalMotionEstablishmentSeconds = 0.15f;
+constexpr float kPredictionVerticalMotionEstablishmentSeconds = 0.25f;
 // 正确方向的提前量也不能在观察器刚建立时整段跳入。按真实 dt 在约 33 ms
 // 内线性渐入，避免 prediction 状态变化绕过物理命令阶跃门禁。
 constexpr float kPredictionLeadRampPerSecond = 30.0f;
@@ -1269,12 +1273,12 @@ struct Aim::Impl {
         const auto update_prediction_axis = [&](
                 float feedforward, float world_measurement,
                 float relative_velocity, float source_scale,
-                float counts_per_pixel, float& prediction_velocity,
+                float counts_per_pixel, float establishment_seconds,
+                float& prediction_velocity,
                 int& low_motion_frames, float& candidate_seconds,
                 bool& external_motion_evidence) {
             if (!external_motion_evidence &&
-                std::fabs(candidate_seconds) <
-                kPredictionWorldMotionEstablishmentSeconds) {
+                std::fabs(candidate_seconds) < establishment_seconds) {
                 if (std::fabs(world_measurement) <=
                     kPredictionWorldMotionMinimumCounts) {
                     candidate_seconds = 0.0f;
@@ -1288,11 +1292,10 @@ struct Aim::Impl {
                     }
                     candidate_seconds = std::clamp(
                         candidate_seconds,
-                        -kPredictionWorldMotionEstablishmentSeconds,
-                        kPredictionWorldMotionEstablishmentSeconds);
+                        -establishment_seconds,
+                        establishment_seconds);
                 }
-                if (std::fabs(candidate_seconds) <
-                    kPredictionWorldMotionEstablishmentSeconds) {
+                if (std::fabs(candidate_seconds) < establishment_seconds) {
                     prediction_velocity = 0.0f;
                     low_motion_frames = 0;
                     return;
@@ -1320,12 +1323,14 @@ struct Aim::Impl {
         update_prediction_axis(
             feedforward_x, world_motion_measurement_x, track.vx,
             frame.source_pixels_per_roi_pixel_x, config.counts_per_pixel_x,
+            kPredictionHorizontalMotionEstablishmentSeconds,
             prediction_world_velocity_x, prediction_low_motion_x_frames,
             prediction_motion_candidate_x_seconds,
             prediction_external_motion_evidence_x);
         update_prediction_axis(
             feedforward_y, world_motion_measurement_y, track.vy,
             frame.source_pixels_per_roi_pixel_y, config.counts_per_pixel_y,
+            kPredictionVerticalMotionEstablishmentSeconds,
             prediction_world_velocity_y, prediction_low_motion_y_frames,
             prediction_motion_candidate_y_seconds,
             prediction_external_motion_evidence_y);
