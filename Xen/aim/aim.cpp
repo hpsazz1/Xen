@@ -123,6 +123,10 @@ constexpr float kControllerPendingCommandResponse = 0.15f;
 // 投影，使实测 8～10 帧命令反馈周期内逐步制动，不改变公开 prediction 点或
 // 用户配置的 0.475 基础控制平滑。
 constexpr float kPredictionPendingProjectionResponse = 0.12f;
+// 公开最终点保持带外的反向库存制动只能短促存在。实机最新 Run 的 6 帧
+// 连续 +1 count 会累积约 2.6 px 反向位移；限制为 2 帧后仍保留制动能力，
+// 但单次可见反向位移不超过约 0.87 px。
+constexpr int kPredictionOppositePublicBrakeMaximumFrames = 2;
 constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // prediction 从已经完成基础延迟补偿的点继续向前推 1.5 个控制延迟。
 // 真机 Run 20260809-234450 证明半个时域的最终点虽比基础点向前 2.75 px，
@@ -379,6 +383,7 @@ struct Aim::Impl {
     float prediction_control_offset_x = 0.0f;
     float prediction_control_offset_y = 0.0f;
     float prediction_pending_projection_x = 0.0f;
+    int prediction_opposite_public_brake_x_frames = 0;
     int prediction_low_motion_x_frames = 0;
     int prediction_low_motion_y_frames = 0;
     std::array<IssuedCommand, kControllerCommandHistoryCapacity>
@@ -1362,6 +1367,7 @@ struct Aim::Impl {
         prediction_control_offset_x = 0.0f;
         prediction_control_offset_y = 0.0f;
         prediction_pending_projection_x = 0.0f;
+        prediction_opposite_public_brake_x_frames = 0;
         prediction_low_motion_x_frames = 0;
         prediction_low_motion_y_frames = 0;
         issued_commands = {};
@@ -1958,6 +1964,12 @@ struct Aim::Impl {
         const float base_error_y =
             (base_y - frame.control_center_y) *
             frame.source_pixels_per_roi_pixel_y;
+        const float public_error_x =
+            (aim_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float public_error_y =
+            (aim_y - frame.control_center_y) *
+            frame.source_pixels_per_roi_pixel_y;
         // prediction 最终点可能通过反向 lead 抵消延迟点中的在途命令投影。
         // 若延迟点即时进入比例项、lead 再单独低通，同一抵消向量会形成快慢
         // 两条控制路径；真实 40 ms 闭环中公开最终点虽稳定，内部控制目标仍会
@@ -2430,6 +2442,28 @@ struct Aim::Impl {
             command.dy_counts = 0;
             quantized_y = 0.0f;
         }
+        const float public_error_magnitude =
+            std::hypot(public_error_x, public_error_y);
+        const bool opposite_public_brake_x =
+            use_coherent_prediction_projection_x &&
+            command.dx_counts != 0 &&
+            public_error_magnitude > hold_band &&
+            command.dx_counts * public_error_x <= 0.0f;
+        if (opposite_public_brake_x) {
+            if (aim::detail::prediction_inventory_brake_allowed(
+                    command.dx_counts,
+                    prediction_opposite_public_brake_x_frames,
+                    kPredictionOppositePublicBrakeMaximumFrames)) {
+                ++prediction_opposite_public_brake_x_frames;
+            } else {
+                command.dx_counts = 0;
+                quantized_x = 0.0f;
+                prediction_opposite_public_brake_x_frames =
+                    kPredictionOppositePublicBrakeMaximumFrames;
+            }
+        } else {
+            prediction_opposite_public_brake_x_frames = 0;
+        }
         residual_x = quantized_x - command.dx_counts;
         residual_y = quantized_y - command.dy_counts;
         previous_command_x = static_cast<float>(command.dx_counts);
@@ -2475,6 +2509,7 @@ struct Aim::Impl {
         prediction_control_offset_x = 0.0f;
         prediction_control_offset_y = 0.0f;
         prediction_pending_projection_x = 0.0f;
+        prediction_opposite_public_brake_x_frames = 0;
         prediction_low_motion_x_frames = 0;
         prediction_low_motion_y_frames = 0;
         world_motion_measurement_x = 0.0f;

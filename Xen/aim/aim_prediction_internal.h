@@ -55,6 +55,17 @@ inline bool prediction_pullback_command_allowed(
         world_measurement_counts * prediction_direction > 0.0f;
 }
 
+// 反向库存制动只允许用最小整数命令短促消化超额 pending。更大命令或超过
+// 连续帧预算后必须停发，等待已经在途的命令反馈；调用者只在公开最终点
+// 保持带外且命令确实背离该点时使用本门禁。
+inline bool prediction_inventory_brake_allowed(
+        int command_counts, int previous_brake_frames,
+        int maximum_brake_frames) noexcept {
+    return std::abs(command_counts) == 1 &&
+        previous_brake_frames >= 0 &&
+        previous_brake_frames < maximum_brake_frames;
+}
+
 } // namespace aim::detail
 
 #endif // AIM_PREDICTION_INTERNAL_H

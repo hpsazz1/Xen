@@ -1630,6 +1630,23 @@ void test_prediction_pullback_command_requires_causal_world_motion() {
            "没有有效历史 prediction 方向时不得放行");
 }
 
+void test_prediction_inventory_brake_is_short_and_minimal() {
+    constexpr int kMaximumFrames = 2;
+    expect(aim::detail::prediction_inventory_brake_allowed(
+               1, 0, kMaximumFrames) &&
+               aim::detail::prediction_inventory_brake_allowed(
+                   -1, 1, kMaximumFrames),
+           "公开点反向库存制动的前两帧必须允许最小整数命令");
+    expect(!aim::detail::prediction_inventory_brake_allowed(
+               1, 2, kMaximumFrames),
+           "连续反向库存制动达到两帧后必须停发等待反馈");
+    expect(!aim::detail::prediction_inventory_brake_allowed(
+               2, 0, kMaximumFrames) &&
+               !aim::detail::prediction_inventory_brake_allowed(
+                   -2, 0, kMaximumFrames),
+           "反向库存制动不得发送超过 1 count 的可见脉冲");
+}
+
 void test_prediction_closed_loop_keeps_visible_left_lead_without_pullback() {
     constexpr float kFrameSeconds = 1.0f / 240.0f;
     constexpr int kActuationDelayFrames = 4;
@@ -3508,6 +3525,7 @@ int main() {
     test_prediction_lead_is_stable_across_bursty_frame_intervals();
     test_prediction_pullback_hold_releases_after_real_reversal();
     test_prediction_pullback_command_requires_causal_world_motion();
+    test_prediction_inventory_brake_is_short_and_minimal();
     test_base_crossing_releases_integral_smoothly();
     test_two_axis_command_reversal_passes_through_zero();
     test_integral_releases_on_reversal_and_static_settle();
