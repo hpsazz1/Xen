@@ -6,6 +6,38 @@
 
 namespace aim::detail {
 
+// prediction 首次建立必须累计同向世界运动时长，但真实命令反馈和量化会
+// 偶发一个低于门槛的采样。单帧低谷只暂停累计；连续低谷超过预算时立即
+// 清零，反向有效测量则从新方向重新计时，不能跨方向继承资格。
+inline bool update_prediction_motion_candidate(
+        float world_measurement_counts, float minimum_counts,
+        float delta_seconds, float establishment_seconds,
+        int tolerated_low_measurement_frames, float& candidate_seconds,
+        int& low_measurement_frames) noexcept {
+    const int low_frame_limit = std::max(
+        tolerated_low_measurement_frames, 0);
+    if (std::fabs(world_measurement_counts) <= minimum_counts) {
+        low_measurement_frames = std::min(
+            low_measurement_frames + 1, low_frame_limit + 1);
+        if (low_measurement_frames > low_frame_limit) {
+            candidate_seconds = 0.0f;
+        }
+        return false;
+    }
+
+    low_measurement_frames = 0;
+    const float signed_dt = std::copysign(
+        std::max(delta_seconds, 0.0f), world_measurement_counts);
+    if (candidate_seconds * world_measurement_counts <= 0.0f) {
+        candidate_seconds = signed_dt;
+    } else {
+        candidate_seconds += signed_dt;
+    }
+    candidate_seconds = std::clamp(
+        candidate_seconds, -establishment_seconds, establishment_seconds);
+    return std::fabs(candidate_seconds) >= establishment_seconds;
+}
+
 // prediction 的世界速度状态需要同时满足两个相反要求：持续运动期间抑制
 // 检测框动画造成的速度起伏，真实停止时又能及时归零。基础前馈的单位是
 // counts/frame，必须先按本帧真实 dt 归一化为 counts/second 再低通；否则

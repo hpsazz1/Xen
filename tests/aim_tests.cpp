@@ -1563,6 +1563,47 @@ void test_prediction_survives_short_world_motion_measurement_dips() {
                std::to_string(lead_state_edges));
 }
 
+void test_prediction_motion_candidate_tolerates_one_low_sample() {
+    constexpr float kMinimumCounts = 0.25f;
+    constexpr float kDeltaSeconds = 0.05f;
+    constexpr float kEstablishmentSeconds = 0.15f;
+    constexpr int kGraceFrames = 1;
+    float candidate_seconds = 0.0f;
+    int low_frames = 0;
+    const auto update = [&](float measurement) {
+        return aim::detail::update_prediction_motion_candidate(
+            measurement, kMinimumCounts, kDeltaSeconds,
+            kEstablishmentSeconds, kGraceFrames,
+            candidate_seconds, low_frames);
+    };
+
+    expect(!update(-0.50f) && candidate_seconds < -0.049f &&
+               low_frames == 0,
+           "首次 prediction 候选必须按有效世界测量累计同向时长");
+    expect(!update(0.0f) && candidate_seconds < -0.049f &&
+               low_frames == 1,
+           "单个低世界测量只能暂停首次确认，不能清空已有同向证据");
+    const bool resumed_without_confirmation = update(-0.50f);
+    const bool confirmed_after_resume = update(-0.50f);
+    expect(!resumed_without_confirmation && confirmed_after_resume &&
+               candidate_seconds < -0.149f && low_frames == 0,
+           "单帧低谷后恢复同向测量必须继续累计并按原窗口确认");
+
+    candidate_seconds = -0.10f;
+    low_frames = 0;
+    const bool first_low_confirmed = update(0.0f);
+    const bool second_low_confirmed = update(0.0f);
+    expect(!first_low_confirmed && !second_low_confirmed &&
+               candidate_seconds == 0.0f && low_frames == 2,
+           "连续第二个低世界测量必须清空候选，禁止拼接断续相机反馈");
+
+    candidate_seconds = -0.10f;
+    low_frames = 0;
+    expect(!update(0.50f) && candidate_seconds > 0.049f &&
+               candidate_seconds < 0.051f && low_frames == 0,
+           "世界测量反向时必须从新方向重新计时，不能继承旧方向资格");
+}
+
 void test_prediction_motion_axis_requires_confirmed_stop() {
     constexpr float kDeltaSeconds = 1.0f / 60.0f;
     constexpr float kMinimumCounts = 0.25f;
@@ -3627,6 +3668,7 @@ int main() {
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_prediction_uses_world_motion_when_delay_vector_points_backward();
     test_prediction_survives_short_world_motion_measurement_dips();
+    test_prediction_motion_candidate_tolerates_one_low_sample();
     test_prediction_motion_axis_requires_confirmed_stop();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();

@@ -170,6 +170,9 @@ constexpr float kPredictionEstablishedWorldVelocityCountsPerSecond = 60.0f;
 // 归位相机反馈伪运动；已建立后的低谷和停止仍由原有 12 帧释放状态机处理。
 constexpr float kPredictionHorizontalMotionEstablishmentSeconds = 0.15f;
 constexpr float kPredictionVerticalMotionEstablishmentSeconds = 0.25f;
+// 首次确认只容忍一个低于 0.25 count 的采样空洞。它覆盖单帧 NDI/量化
+// 低谷，但第二个连续低谷仍会清空累计，不能把断续相机反馈拼成真实运动。
+constexpr int kPredictionEstablishmentLowMotionGraceFrames = 1;
 // 正确方向的提前量也不能在观察器刚建立时整段跳入。按真实 dt 在约 33 ms
 // 内线性渐入，避免 prediction 状态变化绕过物理命令阶跃门禁。
 constexpr float kPredictionLeadRampPerSecond = 30.0f;
@@ -377,9 +380,11 @@ struct Aim::Impl {
     // counts/frame，二者不能混用，否则瞬时帧间隔会改变预测距离。
     float prediction_world_velocity_x = 0.0f;
     float prediction_world_velocity_y = 0.0f;
-    // 符号表示候选世界方向，绝对值表示同向连续测量时长（秒）。
+    // 符号表示候选世界方向，绝对值表示同向有效测量累计时长（秒）。
     float prediction_motion_candidate_x_seconds = 0.0f;
     float prediction_motion_candidate_y_seconds = 0.0f;
+    int prediction_candidate_low_motion_x_frames = 0;
+    int prediction_candidate_low_motion_y_frames = 0;
     bool prediction_external_motion_evidence_x = false;
     bool prediction_external_motion_evidence_y = false;
     float prediction_offset_x = 0.0f;
@@ -1236,6 +1241,8 @@ struct Aim::Impl {
             prediction_world_velocity_y = 0.0f;
             prediction_motion_candidate_x_seconds = 0.0f;
             prediction_motion_candidate_y_seconds = 0.0f;
+            prediction_candidate_low_motion_x_frames = 0;
+            prediction_candidate_low_motion_y_frames = 0;
             prediction_external_motion_evidence_x = false;
             prediction_external_motion_evidence_y = false;
             prediction_offset_x = 0.0f;
@@ -1276,31 +1283,22 @@ struct Aim::Impl {
                 float counts_per_pixel, float establishment_seconds,
                 float& prediction_velocity,
                 int& low_motion_frames, float& candidate_seconds,
+                int& candidate_low_motion_frames,
                 bool& external_motion_evidence) {
             if (!external_motion_evidence &&
                 std::fabs(candidate_seconds) < establishment_seconds) {
-                if (std::fabs(world_measurement) <=
-                    kPredictionWorldMotionMinimumCounts) {
-                    candidate_seconds = 0.0f;
-                } else {
-                    const float signed_dt = std::copysign(
-                        track.prediction_dt, world_measurement);
-                    if (candidate_seconds * world_measurement <= 0.0f) {
-                        candidate_seconds = signed_dt;
-                    } else {
-                        candidate_seconds += signed_dt;
-                    }
-                    candidate_seconds = std::clamp(
-                        candidate_seconds,
-                        -establishment_seconds,
-                        establishment_seconds);
-                }
-                if (std::fabs(candidate_seconds) < establishment_seconds) {
+                if (!aim::detail::update_prediction_motion_candidate(
+                        world_measurement,
+                        kPredictionWorldMotionMinimumCounts,
+                        track.prediction_dt, establishment_seconds,
+                        kPredictionEstablishmentLowMotionGraceFrames,
+                        candidate_seconds, candidate_low_motion_frames)) {
                     prediction_velocity = 0.0f;
                     low_motion_frames = 0;
                     return;
                 }
             }
+            candidate_low_motion_frames = 0;
             aim::detail::update_prediction_velocity_axis(
                 feedforward,
                 stop_measurement(
@@ -1317,6 +1315,7 @@ struct Aim::Impl {
                 prediction_velocity = 0.0f;
                 low_motion_frames = 0;
                 candidate_seconds = 0.0f;
+                candidate_low_motion_frames = 0;
                 external_motion_evidence = false;
             }
         };
@@ -1326,6 +1325,7 @@ struct Aim::Impl {
             kPredictionHorizontalMotionEstablishmentSeconds,
             prediction_world_velocity_x, prediction_low_motion_x_frames,
             prediction_motion_candidate_x_seconds,
+            prediction_candidate_low_motion_x_frames,
             prediction_external_motion_evidence_x);
         update_prediction_axis(
             feedforward_y, world_motion_measurement_y, track.vy,
@@ -1333,6 +1333,7 @@ struct Aim::Impl {
             kPredictionVerticalMotionEstablishmentSeconds,
             prediction_world_velocity_y, prediction_low_motion_y_frames,
             prediction_motion_candidate_y_seconds,
+            prediction_candidate_low_motion_y_frames,
             prediction_external_motion_evidence_y);
         if (prediction_world_velocity_x == 0.0f &&
             prediction_world_velocity_y == 0.0f) {
@@ -1365,6 +1366,8 @@ struct Aim::Impl {
         prediction_world_velocity_y = 0.0f;
         prediction_motion_candidate_x_seconds = 0.0f;
         prediction_motion_candidate_y_seconds = 0.0f;
+        prediction_candidate_low_motion_x_frames = 0;
+        prediction_candidate_low_motion_y_frames = 0;
         prediction_external_motion_evidence_x = false;
         prediction_external_motion_evidence_y = false;
         prediction_offset_x = 0.0f;
@@ -1486,6 +1489,8 @@ struct Aim::Impl {
             prediction_world_velocity_y = 0.0f;
             prediction_motion_candidate_x_seconds = 0.0f;
             prediction_motion_candidate_y_seconds = 0.0f;
+            prediction_candidate_low_motion_x_frames = 0;
+            prediction_candidate_low_motion_y_frames = 0;
             prediction_external_motion_evidence_x = false;
             prediction_external_motion_evidence_y = false;
             prediction_offset_x = 0.0f;
@@ -1512,6 +1517,8 @@ struct Aim::Impl {
             prediction_world_velocity_y = 0.0f;
             prediction_motion_candidate_x_seconds = 0.0f;
             prediction_motion_candidate_y_seconds = 0.0f;
+            prediction_candidate_low_motion_x_frames = 0;
+            prediction_candidate_low_motion_y_frames = 0;
             prediction_external_motion_evidence_x = false;
             prediction_external_motion_evidence_y = false;
             prediction_offset_x = 0.0f;
@@ -1543,6 +1550,8 @@ struct Aim::Impl {
             prediction_world_velocity_y = 0.0f;
             prediction_motion_candidate_x_seconds = 0.0f;
             prediction_motion_candidate_y_seconds = 0.0f;
+            prediction_candidate_low_motion_x_frames = 0;
+            prediction_candidate_low_motion_y_frames = 0;
             prediction_external_motion_evidence_x = false;
             prediction_external_motion_evidence_y = false;
             prediction_offset_x = 0.0f;
@@ -2527,6 +2536,8 @@ struct Aim::Impl {
         prediction_world_velocity_y = 0.0f;
         prediction_motion_candidate_x_seconds = 0.0f;
         prediction_motion_candidate_y_seconds = 0.0f;
+        prediction_candidate_low_motion_x_frames = 0;
+        prediction_candidate_low_motion_y_frames = 0;
         prediction_external_motion_evidence_x = false;
         prediction_external_motion_evidence_y = false;
         prediction_offset_x = 0.0f;
