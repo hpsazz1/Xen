@@ -2066,6 +2066,7 @@ void test_vertical_pullback_hold_releases_while_horizontal_prediction_continues(
     float camera_x = 0.0f;
     float camera_y = 0.0f;
     int moving_vertical_lead_frames = 0;
+    int early_vertical_correction_frames = 0;
     int late_vertical_stop_frames = 0;
     int late_vertical_correction_frames = 0;
     std::vector<float> late_vertical_errors;
@@ -2114,6 +2115,17 @@ void test_vertical_pullback_hold_releases_while_horizontal_prediction_continues(
             result.target.lead_active && result.target.lead_y < -0.25f) {
             ++moving_vertical_lead_frames;
         }
+        // 旧 Y 门禁会无条件服从历史向上 prediction，必须等满 300 ms
+        // 超时后才允许向下恢复高度。当前世界测量仍支持历史方向时，向下
+        // 命令实际是在追当前最终点，应与 X 轴一样立即因果放行。
+        if (index > kVerticalMovingFrames &&
+            index <= kVerticalMovingFrames + 60) {
+            const float vertical_error =
+                result.target.base_aim_y - frame.control_center_y;
+            if (vertical_error > 3.0f && command_y > 0) {
+                ++early_vertical_correction_frames;
+            }
+        }
         if (index >= kVerticalMovingFrames + 72) {
             const float vertical_error =
                 std::fabs(result.target.base_aim_y - frame.control_center_y);
@@ -2137,11 +2149,14 @@ void test_vertical_pullback_hold_releases_while_horizontal_prediction_continues(
     expect(moving_vertical_lead_frames >= 60,
            "逐轴反拉释放回归必须先建立真实 Y prediction，活动帧=" +
                std::to_string(moving_vertical_lead_frames));
-    expect(late_vertical_stop_frames == 0 &&
+    expect(early_vertical_correction_frames > 0 &&
+               late_vertical_stop_frames == 0 &&
                late_vertical_correction_frames > 0 &&
                late_vertical_error_p95 <= 5.0f,
            "Y 运动停止后不得因 X prediction 继续活动而永久停发，高度误差 P95=" +
                std::to_string(late_vertical_error_p95) +
+               "，超时前纠正帧=" +
+               std::to_string(early_vertical_correction_frames) +
                "，停发帧=" + std::to_string(late_vertical_stop_frames) +
                "，纠正帧=" +
                std::to_string(late_vertical_correction_frames));

@@ -123,10 +123,6 @@ constexpr float kControllerPendingCommandResponse = 0.15f;
 // 投影，使实测 8～10 帧命令反馈周期内逐步制动，不改变公开 prediction 点或
 // 用户配置的 0.475 基础控制平滑。
 constexpr float kPredictionPendingProjectionResponse = 0.12f;
-// 公开延迟点需要保留上面的 0.15 实测几何响应；隐藏控制锚只处理超过稳定
-// 世界速度预算的库存，不能再次使用完整几何响应，否则控制器会在公开
-// prediction 点前永久保留数像素误差。两者拆分后只收窄隐藏超额库存强度。
-constexpr float kPredictionExcessPendingCommandResponse = 0.145f;
 // 高频闭环已有足够多的延迟窗口样本供基础观察器工作；真实 Run 的控制
 // 节奏会在 68～119 Hz 间变化，40 ms 窗口仅剩 3～5 个离散命令。低于
 // 125 Hz 时改用同源世界速度维持量，避免刚好跨过 100 Hz 后再次退回持续
@@ -2047,7 +2043,7 @@ struct Aim::Impl {
                 config.control_delay_ms / 1000.0f;
             const float excess_pending_x = pending_x - expected_pending_x;
             pending_control_projection_target_x = -excess_pending_x *
-                kPredictionExcessPendingCommandResponse /
+                kControllerPendingCommandResponse /
                 config.counts_per_pixel_x /
                 frame.source_pixels_per_roi_pixel_x;
             const float maximum_pending_projection = std::hypot(
@@ -2308,6 +2304,28 @@ struct Aim::Impl {
                     desired_x, error_x, world_motion_measurement_x,
                     prediction_pullback_direction_x,
                     kPredictionWorldMotionMinimumCounts);
+            // Y 轴必须使用与 X 相同的因果释放条件。人物姿态变化和相机反馈
+            // 可能短暂建立垂直 prediction；若历史方向无条件覆盖当前高度
+            // 纠偏，基础点已经偏离几十像素时仍会长期停发，随后形成大幅
+            // 反向脉冲。只有世界测量仍支持历史方向且命令朝当前最终点时
+            // 放行，停止、反馈低谷和真实反向继续受保护。
+            const bool allow_y_lead_release =
+                aim::detail::prediction_pullback_command_allowed(
+                    desired_y, error_y, world_motion_measurement_y,
+                    lead_direction_y,
+                    kPredictionWorldMotionMinimumCounts);
+            const bool allow_y_pullback_release =
+                aim::detail::prediction_pullback_command_allowed(
+                    desired_y, error_y, world_motion_measurement_y,
+                    prediction_pullback_direction_y,
+                    kPredictionWorldMotionMinimumCounts);
+            // 配置高度已经偏离 8 px 以上时，历史垂直 prediction 不能继续
+            // 享有无限优先级。只放行同时朝当前最终点和基础高度的纠偏；
+            // 方向整形、二维上限和后续整数方向门禁仍会限制物理命令。
+            const bool allow_y_height_recovery =
+                std::fabs(base_error_y) > 8.0f &&
+                desired_y * error_y > 0.0f &&
+                desired_y * base_error_y > 0.0f;
             // 公有命令逐轴量化；只要该轴存在有效世界方向就必须阻止反拉，
             // 不能因正交轴幅值更大而用归一化 0.1 门槛丢掉水平保护。
             if (lead_active && std::fabs(lead_direction_x) > 0.001f &&
@@ -2317,7 +2335,8 @@ struct Aim::Impl {
             }
             if (lead_active && lead_axis_active_y &&
                 std::fabs(lead_direction_y) > 0.001f &&
-                desired_y * lead_direction_y < 0.0f) {
+                desired_y * lead_direction_y < 0.0f &&
+                !allow_y_lead_release && !allow_y_height_recovery) {
                 desired_y = 0.0f;
             }
             if (prediction_pullback_hold_x &&
@@ -2326,7 +2345,8 @@ struct Aim::Impl {
                 desired_x = 0.0f;
             }
             if (prediction_pullback_hold_y &&
-                desired_y * prediction_pullback_direction_y < 0.0f) {
+                desired_y * prediction_pullback_direction_y < 0.0f &&
+                !allow_y_pullback_release && !allow_y_height_recovery) {
                 desired_y = 0.0f;
             }
         }
