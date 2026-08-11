@@ -123,6 +123,10 @@ constexpr float kControllerPendingCommandResponse = 0.15f;
 // 投影，使实测 8～10 帧命令反馈周期内逐步制动，不改变公开 prediction 点或
 // 用户配置的 0.475 基础控制平滑。
 constexpr float kPredictionPendingProjectionResponse = 0.12f;
+// 高频闭环已有足够多的延迟窗口样本供基础观察器工作；当控制采样低于
+// 100 Hz 时，40 ms 窗口只剩约 3 个离散命令，改用同源世界速度维持量，
+// 避免量化后的单帧命令只能靠持续位置误差生成。
+constexpr float kPredictionDirectFeedforwardMinimumDeltaSeconds = 0.010f;
 // 公开最终点保持带外的反向库存制动只能短促存在。实机最新 Run 的 6 帧
 // 连续 +1 count 会累积约 2.6 px 反向位移；限制为 2 帧后仍保留制动能力，
 // 但单次可见反向位移不超过约 0.87 px。
@@ -2016,6 +2020,11 @@ struct Aim::Impl {
         const bool use_coherent_prediction_projection_y =
             config.enable_prediction && config.enable_delay_compensation &&
             lead_active && lead_axis_active_y;
+        const float controller_dt = controller_captured_at ==
+                std::chrono::steady_clock::time_point{}
+            ? track.prediction_dt
+            : clamp_delta_seconds(std::chrono::duration<double>(
+                  frame.captured_at - controller_captured_at).count());
         float pending_control_projection_target_x = 0.0f;
         if (use_coherent_prediction_projection_x) {
             const auto [pending_x, pending_y] =
@@ -2088,11 +2097,6 @@ struct Aim::Impl {
         const bool inside_deadzone =
             std::hypot(error_x, error_y) <= config.deadzone_pixels;
         const float gain = track.predicted ? config.predicted_gain : 1.0f;
-        const float controller_dt = controller_captured_at ==
-                std::chrono::steady_clock::time_point{}
-            ? track.prediction_dt
-            : clamp_delta_seconds(std::chrono::duration<double>(
-                  frame.captured_at - controller_captured_at).count());
         controller_captured_at = frame.captured_at;
         // 比例闭环复用同一总投影偏移状态；prediction 关闭时锚点仍是原延迟点，
         // 开启时则不会把延迟点与其反向抵消量拆成不同响应速度。
@@ -2212,7 +2216,21 @@ struct Aim::Impl {
             config.counts_per_pixel_y, delayed_command_y, feedforward_y,
             world_motion_measurement_y,
             prediction_external_motion_evidence_y);
-        float desired_x = proportional_x + feedforward_x;
+        float control_feedforward_x = feedforward_x;
+        if (use_coherent_prediction_projection_x &&
+            controller_dt >=
+                kPredictionDirectFeedforwardMinimumDeltaSeconds &&
+            std::fabs(prediction_world_velocity_x) >=
+                kPredictionEstablishedWorldVelocityCountsPerSecond) {
+            // prediction 点与控制器必须消费同一份已确认世界速度。否则公开
+            // 点按稳定速度前探，物理控制却在相机反馈低谷释放基础前馈，最终
+            // 只能长期保留比例误差来维持移动，表现为准星贴不到预测标记。
+            control_feedforward_x = std::clamp(
+                prediction_world_velocity_x * controller_dt,
+                -kControllerFeedforwardMaximumCounts,
+                kControllerFeedforwardMaximumCounts);
+        }
+        float desired_x = proportional_x + control_feedforward_x;
         float desired_y = proportional_y + feedforward_y;
         // 移动目标在保持带内仍需承担量化后的平均维持量。仅在观察器已
         // 学到前馈且基础误差与其同向时加入很小的偏置，静止目标和真实
