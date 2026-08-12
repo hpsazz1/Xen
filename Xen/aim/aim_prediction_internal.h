@@ -215,6 +215,32 @@ inline float combine_delayed_command_world_motion(
         relative_motion_counts;
 }
 
+// 跳跃轨迹速度允许保持较高绝对值，但不能在一帧内跨越不可能的加速度。
+// 对候选速度的二维变化按 pixels/s² 和真实 dt 限制；非活动路径保持原值。
+inline void limit_tracking_jump_velocity_acceleration(
+        float candidate_x, float candidate_y, bool jump_active,
+        float maximum_acceleration_pixels_per_second_squared,
+        float delta_seconds, float& velocity_x, float& velocity_y) noexcept {
+    if (!jump_active) {
+        velocity_x = candidate_x;
+        velocity_y = candidate_y;
+        return;
+    }
+    float delta_x = candidate_x - velocity_x;
+    float delta_y = candidate_y - velocity_y;
+    const float maximum_delta = std::max(
+        maximum_acceleration_pixels_per_second_squared, 0.0f) *
+        std::max(delta_seconds, 0.0f);
+    const float magnitude = std::hypot(delta_x, delta_y);
+    if (magnitude > maximum_delta && magnitude > 0.0f) {
+        const float scale = maximum_delta / magnitude;
+        delta_x *= scale;
+        delta_y *= scale;
+    }
+    velocity_x += delta_x;
+    velocity_y += delta_y;
+}
+
 // 延迟窗口内的旧方向命令不能无条件阻塞真实反向。只有新方向纠偏需求小于
 // 预计库存影响时才暂停；目标已经沿新方向拉开足够误差后必须恢复输出，避免
 // “等库存全清空 -> 大误差重新打满”的新极限环。门禁只作用于跳跃 X 轴。

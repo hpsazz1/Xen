@@ -179,6 +179,12 @@ constexpr float kTrackingBaseRangeReleaseSlewPerSecond = 1.0f;
 // 该修正只消除自身相机反馈形成的虚假前馈，不改变比例、Y 或非跳跃路径。
 constexpr float kTrackingJumpDelayedCommandObserverScale =
     kControllerPendingCommandResponse * kControllerFeedforwardVelocityScale;
+// 最新单 Track 真机 Run 中 Y 速度 P95 为 737.56 px/s，并有 25 次相邻帧
+// 直接跨越 +60/-60 px/s；最大 +355.6→-306.5 使延迟点单帧跳 15.59 px。
+// 30 ROI diagonals/s² 的真实序列回放将直接高速反转降为 0，延迟 Y 速度项
+// 单帧变化 P95 约 0.90 px；只限制速度变化，不限制持续同向速度。
+constexpr float kTrackingJumpMaximumAccelerationDiagonalsPerSecondSquared =
+    30.0f;
 // 最新真机 Run 证明在 |vy|=60 边界硬切水平速度源会把延迟变化 P95 放大
 // 近一倍。4/s 让一次普通 10 ms 帧最多混入 4%，持续约 250 ms 才完全
 // 隔离镜头回流；短跳和落地阈值抖动不会直接切换控制相位。
@@ -933,10 +939,23 @@ struct Aim::Impl {
             // 控制锚点使用对边共同残差抑制瞬时形变；速度观察器仍以低
             // beta 消费中心残差。持续平移会跨帧累积，正负交替的步态
             // 形变则相互抵消，避免把真实运动连同轮廓噪声一起归零。
-            track.vx += velocity_beta_x * center_motion_residual_x /
-                track.prediction_dt;
-            track.vy += velocity_beta_y * center_motion_residual_y /
-                track.prediction_dt;
+            const float candidate_vx = track.vx +
+                velocity_beta_x * center_motion_residual_x /
+                    track.prediction_dt;
+            const float candidate_vy = track.vy +
+                velocity_beta_y * center_motion_residual_y /
+                    track.prediction_dt;
+            const bool tracking_jump_velocity =
+                !config.enable_prediction && config.enable_delay_compensation &&
+                (std::fabs(track.vy) >=
+                     kTrackingBaseJumpVelocityThresholdPixelsPerSecond ||
+                 std::fabs(candidate_vy) >=
+                     kTrackingBaseJumpVelocityThresholdPixelsPerSecond);
+            aim::detail::limit_tracking_jump_velocity_acceleration(
+                candidate_vx, candidate_vy, tracking_jump_velocity,
+                diagonal *
+                    kTrackingJumpMaximumAccelerationDiagonalsPerSecondSquared,
+                track.prediction_dt, track.vx, track.vy);
         }
         clamp_vector(track.vx, track.vy,
                      diagonal * kMaxTrackSpeedDiagonalsPerSecond);

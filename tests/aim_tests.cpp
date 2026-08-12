@@ -1875,6 +1875,33 @@ void test_tracking_jump_scales_delayed_command_in_world_observer() {
            "非法负响应必须收敛为零，禁止反转历史命令");
 }
 
+void test_tracking_jump_velocity_has_time_scaled_acceleration_limit() {
+    float velocity_x = 0.0f;
+    float velocity_y = 0.0f;
+    aim::detail::limit_tracking_jump_velocity_acceleration(
+        300.0f, 400.0f, true, 1000.0f, 0.01f,
+        velocity_x, velocity_y);
+    expect(std::fabs(velocity_x - 6.0f) < 0.001f &&
+               std::fabs(velocity_y - 8.0f) < 0.001f,
+           "跳跃二维速度变化必须按真实 dt 和向量模长限制");
+
+    aim::detail::limit_tracking_jump_velocity_acceleration(
+        -300.0f, -400.0f, false, 1000.0f, 0.01f,
+        velocity_x, velocity_y);
+    expect(std::fabs(velocity_x + 300.0f) < 0.001f &&
+               std::fabs(velocity_y + 400.0f) < 0.001f,
+           "非跳跃速度更新必须保持原候选值");
+
+    velocity_x = 2.0f;
+    velocity_y = -3.0f;
+    aim::detail::limit_tracking_jump_velocity_acceleration(
+        100.0f, 100.0f, true, -1.0f, 0.01f,
+        velocity_x, velocity_y);
+    expect(std::fabs(velocity_x - 2.0f) < 0.001f &&
+               std::fabs(velocity_y + 3.0f) < 0.001f,
+           "非法负加速度必须收敛为零变化，禁止反向放大");
+}
+
 void test_prediction_release_offset_is_slew_limited() {
     constexpr float kBoxDiagonal = 110.0f;
     constexpr float kMaximumSlew = 1.5f;
@@ -4328,6 +4355,7 @@ int main() {
     test_tracking_jump_horizontal_projection_rejects_camera_feedback();
     test_tracking_jump_reversal_waits_for_pending_inventory();
     test_tracking_jump_scales_delayed_command_in_world_observer();
+    test_tracking_jump_velocity_has_time_scaled_acceleration_limit();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();
