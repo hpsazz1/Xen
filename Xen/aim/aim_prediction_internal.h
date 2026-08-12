@@ -206,6 +206,17 @@ inline float select_tracking_horizontal_projection_velocity(
          relative_velocity_pixels_per_second) * blend;
 }
 
+// 高速跳跃只限制 X 物理命令，Y 和通用二维模长上限保持原契约。
+// 这里返回可发送的整数命令；调用者在发生截幅时同步丢弃被拒绝的
+// 浮点余量，避免它变成跨帧隐藏积压。
+inline int limit_tracking_jump_horizontal_command(
+        int command_counts, bool jump_active,
+        int maximum_absolute_counts) noexcept {
+    if (!jump_active) return command_counts;
+    const int safe_limit = std::max(maximum_absolute_counts, 0);
+    return std::clamp(command_counts, -safe_limit, safe_limit);
+}
+
 // 延迟窗口内的旧方向命令不能无条件阻塞真实反向。只有新方向纠偏需求小于
 // 预计库存影响时才暂停；目标已经沿新方向拉开足够误差后必须恢复输出，避免
 // “等库存全清空 -> 大误差重新打满”的新极限环。门禁只作用于跳跃 X 轴。

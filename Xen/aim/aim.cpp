@@ -173,6 +173,10 @@ constexpr float kTrackingBaseRangeExpansionStartPixelsPerSecond = 20.0f;
 constexpr float kTrackingBaseRangeMaximumHalfRange = 0.40f;
 constexpr float kTrackingBaseRangeExpansionSlewPerSecond = 4.0f;
 constexpr float kTrackingBaseRangeReleaseSlewPerSecond = 1.0f;
+// 最新超级跳真机 Run 中 X 命令 P95 为 12 counts，13~14 counts 共 272 帧，
+// 且强命令连续段最长 75 帧。10-count 上限只影响 10.32% 的高速跳跃帧、
+// 减少 4.25% 总 X 命令量；既限制相机大幅拉动，又不改变大多数正常跟随帧。
+constexpr int kTrackingJumpMaximumHorizontalCounts = 10;
 // 最新真机 Run 证明在 |vy|=60 边界硬切水平速度源会把延迟变化 P95 放大
 // 近一倍。4/s 让一次普通 10 ms 帧最多混入 4%，持续约 250 ms 才完全
 // 隔离镜头回流；短跳和落地阈值抖动不会直接切换控制相位。
@@ -2635,6 +2639,20 @@ struct Aim::Impl {
                 break;
             }
         }
+        const bool tracking_jump_x =
+            !config.enable_prediction && config.enable_delay_compensation &&
+            track.state == TrackState::CONFIRMED && !track.predicted &&
+            std::fabs(track.vy) >=
+                kTrackingBaseJumpVelocityThresholdPixelsPerSecond;
+        const int unrestricted_dx_counts = command.dx_counts;
+        command.dx_counts = aim::detail::limit_tracking_jump_horizontal_command(
+            command.dx_counts, tracking_jump_x,
+            kTrackingJumpMaximumHorizontalCounts);
+        if (command.dx_counts != unrestricted_dx_counts) {
+            // 限幅部分是已明确拒绝的物理输出，不能作为量化余量
+            // 带入下一帧，否则会在连续跳跃中形成隐藏积压并长期贴上限。
+            quantized_x = static_cast<float>(command.dx_counts);
+        }
         // 浮点 desired 合法并不保证逐轴整数化后仍满足二维方向契约。
         // 保持带外剔除每个背离最终点的轴分量，避免正交轴四舍五入后让合成
         // 命令整体推离目标；被剔除轴的残余也必须作废，不能延后再次发出。
@@ -2664,11 +2682,6 @@ struct Aim::Impl {
             command.dy_counts = 0;
             quantized_y = 0.0f;
         }
-        const bool tracking_jump_x =
-            !config.enable_prediction && config.enable_delay_compensation &&
-            track.state == TrackState::CONFIRMED && !track.predicted &&
-            std::fabs(track.vy) >=
-                kTrackingBaseJumpVelocityThresholdPixelsPerSecond;
         if (tracking_jump_x && command.dx_counts != 0) {
             const auto [pending_x, pending_y] =
                 pending_issued_command_sum(frame.captured_at);
