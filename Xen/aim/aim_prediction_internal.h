@@ -206,14 +206,13 @@ inline float select_tracking_horizontal_projection_velocity(
          relative_velocity_pixels_per_second) * blend;
 }
 
-// 高速跳跃只降低 X 的比例纠偏，世界速度前馈、Y 和非跳跃路径保持原契约。
-// scale 是阻尼系数而不是增益旋钮，必须收敛到 [0, 1]，禁止因错误配置
-// 放大比例项或反转方向。
-inline float scale_tracking_jump_horizontal_proportional(
-        float proportional_counts, bool jump_active,
-        float scale) noexcept {
-    if (!jump_active) return proportional_counts;
-    return proportional_counts * std::clamp(scale, 0.0f, 1.0f);
+// 世界运动测量需要把已经到期的相机命令补回屏幕相对速度。命令补回比例
+// 必须使用同一物理响应标定；非法比例收敛为零，不能反转历史命令。
+inline float combine_delayed_command_world_motion(
+        float delayed_command_counts, float relative_motion_counts,
+        float delayed_command_scale) noexcept {
+    return delayed_command_counts * std::max(delayed_command_scale, 0.0f) +
+        relative_motion_counts;
 }
 
 // 延迟窗口内的旧方向命令不能无条件阻塞真实反向。只有新方向纠偏需求小于

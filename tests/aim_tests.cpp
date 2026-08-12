@@ -1816,25 +1816,22 @@ void test_tracking_jump_reversal_waits_for_pending_inventory() {
            "零命令必须始终允许，门禁不得自行产生物理输出");
 }
 
-void test_tracking_jump_scales_only_horizontal_proportional() {
+void test_tracking_jump_scales_delayed_command_in_world_observer() {
     expect(std::fabs(
-               aim::detail::scale_tracking_jump_horizontal_proportional(
-                   10.0f, true, 0.70f) - 7.0f) < 0.001f &&
+               aim::detail::combine_delayed_command_world_motion(
+                   10.0f, -3.0f, 0.30f)) < 0.001f &&
                std::fabs(
-               aim::detail::scale_tracking_jump_horizontal_proportional(
-                   -10.0f, true, 0.70f) + 7.0f) < 0.001f,
-           "高速跳跃 X 比例项必须按对称阻尼缩放且保持方向");
+               aim::detail::combine_delayed_command_world_motion(
+                   -10.0f, 3.0f, 0.30f)) < 0.001f,
+           "高速跳跃观察器必须按 KMBOX 响应抵消正负相机反馈");
     expect(std::fabs(
-               aim::detail::scale_tracking_jump_horizontal_proportional(
-                   10.0f, false, 0.70f) - 10.0f) < 0.001f,
-           "非跳跃路径必须保持原比例响应");
+               aim::detail::combine_delayed_command_world_motion(
+                   10.0f, -3.0f, 1.0f) - 7.0f) < 0.001f,
+           "原观察器比例必须保持可表达，供非跳跃和 Y 路径复用");
     expect(std::fabs(
-               aim::detail::scale_tracking_jump_horizontal_proportional(
-                   10.0f, true, -1.0f)) < 0.001f &&
-               std::fabs(
-               aim::detail::scale_tracking_jump_horizontal_proportional(
-                   10.0f, true, 1.5f) - 10.0f) < 0.001f,
-           "非法阻尼必须收敛到零至原比例之间，禁止反转或放大");
+               aim::detail::combine_delayed_command_world_motion(
+                   10.0f, -3.0f, -1.0f) + 3.0f) < 0.001f,
+           "非法负响应必须收敛为零，禁止反转历史命令");
 }
 
 void test_prediction_release_offset_is_slew_limited() {
@@ -4288,7 +4285,7 @@ int main() {
     test_tracking_jump_base_range_expands_and_releases_smoothly();
     test_tracking_jump_horizontal_projection_rejects_camera_feedback();
     test_tracking_jump_reversal_waits_for_pending_inventory();
-    test_tracking_jump_scales_only_horizontal_proportional();
+    test_tracking_jump_scales_delayed_command_in_world_observer();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();

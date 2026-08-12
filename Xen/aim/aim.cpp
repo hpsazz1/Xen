@@ -173,11 +173,12 @@ constexpr float kTrackingBaseRangeExpansionStartPixelsPerSecond = 20.0f;
 constexpr float kTrackingBaseRangeMaximumHalfRange = 0.40f;
 constexpr float kTrackingBaseRangeExpansionSlewPerSecond = 4.0f;
 constexpr float kTrackingBaseRangeReleaseSlewPerSecond = 1.0f;
-// 10-count 硬截幅真机复测后出现“削峰但贴顶”：饱和帧 867/3297，强命令段
-// P95/max 增至 37/72 帧，最终 X 误差 P95 增至 42.53 px。撤销幅值截断，
-// 改为只把高速跳跃的 X 比例纠偏降至 70%；世界速度前馈继续承担恒速跟随，
-// 因而降低延迟闭环回摆增益而不削掉稳定横移所需的维持命令。
-constexpr float kTrackingJumpHorizontalProportionalScale = 0.70f;
+// 最新真机 Run 中降低比例增益已把高频二阶 P95 压到 2.75 px，但人工仍见
+// 大幅低频摆动。回放发现世界运动测量按 100% 补回到期命令，而 KMBOX 相机
+// 响应标定只有 15%；相对速度又统一乘 2.0 校正，因此跳跃 X 应按 0.30 补回。
+// 该修正只消除自身相机反馈形成的虚假前馈，不改变比例、Y 或非跳跃路径。
+constexpr float kTrackingJumpDelayedCommandObserverScale =
+    kControllerPendingCommandResponse * kControllerFeedforwardVelocityScale;
 // 最新真机 Run 证明在 |vy|=60 边界硬切水平速度源会把延迟变化 P95 放大
 // 近一倍。4/s 让一次普通 10 ms 帧最多混入 4%，持续约 250 ms 才完全
 // 隔离镜头回流；短跳和落地阈值抖动不会直接切换控制相位。
@@ -2239,10 +2240,7 @@ struct Aim::Impl {
             std::fabs(track.vy) >=
                 kTrackingBaseJumpVelocityThresholdPixelsPerSecond;
         const float proportional_x =
-            aim::detail::scale_tracking_jump_horizontal_proportional(
-                error_x * config.counts_per_pixel_x * gain,
-                tracking_jump_x,
-                kTrackingJumpHorizontalProportionalScale);
+            error_x * config.counts_per_pixel_x * gain;
         const float proportional_y =
             error_y * config.counts_per_pixel_y * gain;
         const float hold_band = std::max(
@@ -2276,6 +2274,7 @@ struct Aim::Impl {
                                             float source_scale,
                                             float counts_per_pixel,
                                             float delayed_command,
+                                            float delayed_command_scale,
                                             float& feedforward,
                                             float& world_motion_measurement,
                                             bool& external_motion_evidence) {
@@ -2299,7 +2298,9 @@ struct Aim::Impl {
                     relative_velocity * source_scale * controller_dt *
                     counts_per_pixel * kControllerFeedforwardVelocityScale;
                 const float measurement =
-                    delayed_command + relative_motion_counts;
+                    aim::detail::combine_delayed_command_world_motion(
+                        delayed_command, relative_motion_counts,
+                        delayed_command_scale);
                 world_motion_measurement = measurement;
                 // 自身相机反馈必然与到期命令反向；相对运动仍与命令同向
                 // 说明外部目标运动压过了反馈，可作为快速建立的因果证据。
@@ -2349,12 +2350,16 @@ struct Aim::Impl {
         };
         update_feedforward(
             base_error_x, track.vx, frame.source_pixels_per_roi_pixel_x,
-            config.counts_per_pixel_x, delayed_command_x, feedforward_x,
+            config.counts_per_pixel_x, delayed_command_x,
+            tracking_jump_x
+                ? kTrackingJumpDelayedCommandObserverScale : 1.0f,
+            feedforward_x,
             world_motion_measurement_x,
             prediction_external_motion_evidence_x);
         update_feedforward(
             base_error_y, track.vy, frame.source_pixels_per_roi_pixel_y,
-            config.counts_per_pixel_y, delayed_command_y, feedforward_y,
+            config.counts_per_pixel_y, delayed_command_y, 1.0f,
+            feedforward_y,
             world_motion_measurement_y,
             prediction_external_motion_evidence_y);
         if (!config.enable_prediction && config.enable_delay_compensation &&
