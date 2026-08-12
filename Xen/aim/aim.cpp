@@ -144,9 +144,16 @@ constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // 不反读会被自身输出放大的延迟向量。
 constexpr float kPredictionAdditionalHorizonScale = 1.50f;
 // 控制延迟描述 KMBOX 命令到画面反馈的时域；几何投影只描述当前轨迹在
-// 画面中的短时外推，两者不能被同一个配置值同时放大。真实命令响应需要
-// 约 40 ms，但已经验证的几何/prediction 基准最多使用 16 ms 基础时域。
+// 画面中的短时外推，两者不能被同一个配置值同时放大。prediction 保持
+// 已验证的双轴 16 ms 基准。
 constexpr float kGeometricProjectionMaximumSeconds = 0.016f;
+// 最新真实 tracking Run 中，X 的 16 ms 延迟把误差 P95 从 28.99 降到
+// 21.37 px，但仍略滞后；放宽到 20 ms 的同序列回放约为 19.85 px。
+// Y 的 16 ms 几乎不改善误差，却把二阶抖动从 0.715 放大到 1.886 px；
+// 4 ms 回放为 0.848 px，且误差 P95 略降。这里只拆分几何时域，不恢复
+// 已被真机否定的世界速度、动态内窗或库存控制状态。
+constexpr float kHorizontalTrackingProjectionMaximumSeconds = 0.020f;
+constexpr float kVerticalTrackingProjectionMaximumSeconds = 0.004f;
 // 基础前馈服务于每帧跟随，响应不能为 prediction 稳定方向降速。
 // prediction 单独使用慢速世界运动状态：持续运动低通，静止时快速释放。
 // 这个状态只读取基础前馈，绝不回写轨迹、基础控制点或基础控制器。
@@ -1457,11 +1464,20 @@ struct Aim::Impl {
             const float requested_delay_seconds =
                 projection.observation_age_seconds +
                 config.control_delay_ms / 1000.0f;
+            const float horizontal_maximum_seconds = config.enable_prediction
+                ? kGeometricProjectionMaximumSeconds
+                : kHorizontalTrackingProjectionMaximumSeconds;
+            const float vertical_maximum_seconds = config.enable_prediction
+                ? kGeometricProjectionMaximumSeconds
+                : kVerticalTrackingProjectionMaximumSeconds;
             projection.delay_seconds_x = std::clamp(
                 requested_delay_seconds, 0.0f,
                 std::min(config.max_delay_compensation_ms / 1000.0f,
-                         kGeometricProjectionMaximumSeconds));
-            projection.delay_seconds_y = projection.delay_seconds_x;
+                         horizontal_maximum_seconds));
+            projection.delay_seconds_y = std::clamp(
+                requested_delay_seconds, 0.0f,
+                std::min(config.max_delay_compensation_ms / 1000.0f,
+                         vertical_maximum_seconds));
             projection.delay_x = track.vx * projection.delay_seconds_x;
             projection.delay_y = track.vy * projection.delay_seconds_y;
             if (controller_track_id == track.id) {

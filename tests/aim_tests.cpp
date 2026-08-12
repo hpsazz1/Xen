@@ -3350,7 +3350,7 @@ void test_control_step_cannot_cross_in_box_aim_point() {
            "准星已在模型框内时，单帧控制不得把它推出选中框");
 }
 
-void test_tracking_delay_projection_uses_shared_bounded_horizon() {
+void test_tracking_delay_projection_uses_data_driven_axis_horizons() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 0.0f;
@@ -3363,11 +3363,15 @@ void test_tracking_delay_projection_uses_shared_bounded_horizon() {
     config.control_delay_ms = 40.0f;
     config.max_delay_compensation_ms = 44.0f;
     config.max_delay_compensation_percent = 50.0f;
+    AimConfig prediction_config = config;
+    prediction_config.enable_prediction = true;
     Aim aim(config);
+    Aim prediction(prediction_config);
     const auto base = std::chrono::steady_clock::now() +
         std::chrono::seconds(1);
 
     AimResult result;
+    AimResult prediction_result;
     for (int index = 0; index < 12; ++index) {
         AimFrame frame = make_frame(
             static_cast<std::uint64_t>(index + 1),
@@ -3378,18 +3382,27 @@ void test_tracking_delay_projection_uses_shared_bounded_horizon() {
             140.0f + index * 2.0f, 120.0f + index,
             40.0f, 80.0f)};
         result = aim.process(frame);
+        prediction_result = prediction.process(frame);
     }
 
     expect(result.status == AimStatus::SUCCESS && result.has_target &&
                result.target.delay_compensation_active,
-           "统一延迟投影回归必须形成有效 tracking 目标和补偿向量");
-    expect(std::fabs(result.target.delay_compensation_ms_x - 16.0f) <
+           "分轴延迟投影回归必须形成有效 tracking 目标和补偿向量");
+    expect(std::fabs(result.target.delay_compensation_ms_x - 20.0f) <
                    0.01f &&
-               std::fabs(result.target.delay_compensation_ms_y - 16.0f) <
+               std::fabs(result.target.delay_compensation_ms_y - 4.0f) <
                    0.01f &&
-               std::fabs(result.target.delay_compensation_ms - 16.0f) <
+               std::fabs(result.target.delay_compensation_ms - 20.0f) <
                    0.01f,
-           "tracking 双轴几何投影必须共享 16 ms 上限，不能把设备响应时域直接变成瞄点前探");
+           "tracking 必须报告 X=20 ms、Y=4 ms，兼容字段取两轴最大值");
+    expect(prediction_result.has_target &&
+               std::fabs(
+                   prediction_result.target.delay_compensation_ms_x -
+                   16.0f) < 0.01f &&
+               std::fabs(
+                   prediction_result.target.delay_compensation_ms_y -
+                   16.0f) < 0.01f,
+           "prediction 必须保留已验证的双轴 16 ms 几何时域");
 }
 
 void test_delay_compensation_stacks_before_prediction() {
@@ -4010,7 +4023,7 @@ int main() {
     test_quantization_residual_cannot_reverse_after_crossing();
     test_delay_projection_crossing_keeps_base_tracking_hold();
     test_control_step_cannot_cross_in_box_aim_point();
-    test_tracking_delay_projection_uses_shared_bounded_horizon();
+    test_tracking_delay_projection_uses_data_driven_axis_horizons();
     test_delay_compensation_stacks_before_prediction();
     test_horizontal_prediction_startup_rejects_static_camera_feedback();
     test_prediction_never_changes_base_tracking_sequence();
