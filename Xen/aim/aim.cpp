@@ -124,6 +124,12 @@ constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
 // 第十四轮真实序列中，15 ms 窗口内约 15% 的命令位移足以解释基础点
 // 随后越过准星的幅度。这里只用于保守预测在途位移，不改变鼠标标定。
 constexpr float kControllerPendingCommandResponse = 0.15f;
+// 超级跳 tracking 的真实 Run 中，水平公开延迟点有近半帧被 15% 在途扣减推到
+// 轨迹速度反向，并比基础点额外产生 41 次过零。prediction 仍依赖既有 15%
+// 几何/库存契约；仅在 prediction 关闭时把 X 响应降至其 75%，保留同向提前量，
+// Y 继续使用原响应，避免本轮重新引入已经收敛的垂直摆动。
+constexpr float kTrackingHorizontalPendingCommandResponse =
+    kControllerPendingCommandResponse * 0.75f;
 // 40 ms 窗口内的 pending 总和会按命令逐帧阶跃；0.12 只平滑隐藏库存
 // 投影，使实测 8～10 帧命令反馈周期内逐步制动，不改变公开 prediction 点或
 // 用户配置的 0.475 基础控制平滑。
@@ -1504,8 +1510,12 @@ struct Aim::Impl {
                     pending_issued_command_sum(frame.captured_at);
                 // 当前基础点尚未包含延迟窗内命令的相机位移。提前扣除该
                 // 位移可在批量命令生效前减速，避免越过后只能停发反拉。
+                const float horizontal_pending_response =
+                    config.enable_prediction
+                    ? kControllerPendingCommandResponse
+                    : kTrackingHorizontalPendingCommandResponse;
                 projection.delay_x -= pending_x *
-                    kControllerPendingCommandResponse /
+                    horizontal_pending_response /
                     config.counts_per_pixel_x /
                     frame.source_pixels_per_roi_pixel_x;
                 projection.delay_y -= pending_y *

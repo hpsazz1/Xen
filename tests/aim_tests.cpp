@@ -1443,6 +1443,89 @@ void test_delayed_left_motion_quantizes_from_world_feedforward() {
                std::to_string(maximum_no_command));
 }
 
+void test_tracking_horizontal_pending_response_is_axis_and_profile_scoped() {
+    const auto run_horizontal = [](bool prediction_enabled) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        config.enable_prediction = prediction_enabled;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+
+        AimFrame first = make_frame(1, base);
+        first.lock_active = true;
+        first.detections = {body(180.0f, 172.0f)};
+        const AimResult issued = aim.process(first);
+        AimFrame second = make_frame(
+            2, base + std::chrono::milliseconds(4));
+        second.lock_active = true;
+        second.detections = {body(180.0f, 172.0f)};
+        const AimResult pending = aim.process(second);
+        return std::pair{issued, pending};
+    };
+
+    const auto [tracking_issued, tracking_pending] =
+        run_horizontal(false);
+    const auto [prediction_issued, prediction_pending] =
+        run_horizontal(true);
+    expect(tracking_issued.has_command && tracking_pending.has_target &&
+               prediction_issued.has_command && prediction_pending.has_target,
+           "分 profile 在途响应回归必须先生成水平命令和有效目标");
+    const float tracking_response =
+        -tracking_pending.target.delay_compensation_x /
+        static_cast<float>(tracking_issued.command.dx_counts);
+    const float prediction_response =
+        -prediction_pending.target.delay_compensation_x /
+        static_cast<float>(prediction_issued.command.dx_counts);
+    expect(std::fabs(tracking_response - 0.1125f) < 0.001f &&
+               std::fabs(prediction_response - 0.15f) < 0.001f,
+           "prediction 关闭时只能降低 X 在途响应，tracking/prediction=" +
+               std::to_string(tracking_response) + "/" +
+               std::to_string(prediction_response));
+
+    AimConfig vertical_config;
+    vertical_config.min_confirmed_hits = 1;
+    vertical_config.deadzone_pixels = 0.0f;
+    vertical_config.smoothing = 1.0f;
+    vertical_config.counts_per_pixel_x = 1.0f;
+    vertical_config.counts_per_pixel_y = 1.0f;
+    vertical_config.max_counts_per_frame = 100.0f;
+    vertical_config.acquisition_range_percent = 150.0f;
+    vertical_config.enable_delay_compensation = true;
+    vertical_config.control_delay_ms = 15.0f;
+    vertical_config.max_delay_compensation_ms = 44.0f;
+    vertical_config.max_delay_compensation_percent = 50.0f;
+    Aim vertical(vertical_config);
+    const auto vertical_base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(2);
+    AimFrame first_vertical = make_frame(1, vertical_base);
+    first_vertical.lock_active = true;
+    first_vertical.detections = {body(160.0f, 182.0f)};
+    const AimResult vertical_issued = vertical.process(first_vertical);
+    AimFrame second_vertical = make_frame(
+        2, vertical_base + std::chrono::milliseconds(4));
+    second_vertical.lock_active = true;
+    second_vertical.detections = {body(160.0f, 182.0f)};
+    const AimResult vertical_pending = vertical.process(second_vertical);
+    const float vertical_response =
+        -vertical_pending.target.delay_compensation_y /
+        static_cast<float>(vertical_issued.command.dy_counts);
+    expect(vertical_issued.has_command && vertical_pending.has_target &&
+               std::fabs(vertical_response - 0.15f) < 0.001f,
+           "tracking Y 在途响应必须保持 15%，实际=" +
+               std::to_string(vertical_response));
+}
+
 void test_prediction_uses_world_motion_when_delay_vector_points_backward() {
     constexpr float kFrameSeconds = 1.0f / 240.0f;
     constexpr int kActuationDelayFrames = 4;
@@ -4057,6 +4140,7 @@ int main() {
     test_integral_tracks_constant_velocity_with_bounded_error();
     test_delayed_closed_loop_holds_moving_base_point();
     test_delayed_left_motion_quantizes_from_world_feedforward();
+    test_tracking_horizontal_pending_response_is_axis_and_profile_scoped();
     test_prediction_uses_world_motion_when_delay_vector_points_backward();
     test_prediction_survives_short_world_motion_measurement_dips();
     test_prediction_motion_candidate_tolerates_one_low_sample();
