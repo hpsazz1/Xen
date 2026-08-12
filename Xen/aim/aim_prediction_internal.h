@@ -206,15 +206,14 @@ inline float select_tracking_horizontal_projection_velocity(
          relative_velocity_pixels_per_second) * blend;
 }
 
-// 高速跳跃只限制 X 物理命令，Y 和通用二维模长上限保持原契约。
-// 这里返回可发送的整数命令；调用者在发生截幅时同步丢弃被拒绝的
-// 浮点余量，避免它变成跨帧隐藏积压。
-inline int limit_tracking_jump_horizontal_command(
-        int command_counts, bool jump_active,
-        int maximum_absolute_counts) noexcept {
-    if (!jump_active) return command_counts;
-    const int safe_limit = std::max(maximum_absolute_counts, 0);
-    return std::clamp(command_counts, -safe_limit, safe_limit);
+// 高速跳跃只降低 X 的比例纠偏，世界速度前馈、Y 和非跳跃路径保持原契约。
+// scale 是阻尼系数而不是增益旋钮，必须收敛到 [0, 1]，禁止因错误配置
+// 放大比例项或反转方向。
+inline float scale_tracking_jump_horizontal_proportional(
+        float proportional_counts, bool jump_active,
+        float scale) noexcept {
+    if (!jump_active) return proportional_counts;
+    return proportional_counts * std::clamp(scale, 0.0f, 1.0f);
 }
 
 // 延迟窗口内的旧方向命令不能无条件阻塞真实反向。只有新方向纠偏需求小于
