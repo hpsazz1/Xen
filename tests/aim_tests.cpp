@@ -678,6 +678,47 @@ void test_multi_target_crossing_keeps_selected_identity() {
                std::to_string(last.target.aim_x));
 }
 
+void test_tentative_duplicate_cannot_steal_confirmed_observation() {
+    AimConfig config;
+    config.min_confirmed_hits = 2;
+    config.deadzone_pixels = 0.0f;
+    config.max_center_distance = 0.25f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame first = make_frame(1, base);
+    first.detections = {body(150.0f, 160.0f)};
+    expect(!aim.process(first).has_target,
+           "首帧暂定轨迹不得提前成为目标");
+
+    AimFrame second = make_frame(
+        2, base + std::chrono::milliseconds(10));
+    second.detections = {body(154.0f, 160.0f)};
+    const AimResult confirmed = aim.process(second);
+    expect(confirmed.has_target && !confirmed.target.predicted,
+           "连续人体观测必须先建立确认轨迹");
+    const std::uint64_t confirmed_id = confirmed.target.track_id;
+
+    // 真机 Run 中第二个人体框只出现一帧：既有轨迹匹配主框，额外框
+    // 创建暂定候选；下一帧单框更靠近候选时，候选也不能抢走观测。
+    AimFrame duplicate = make_frame(
+        3, base + std::chrono::milliseconds(20));
+    duplicate.detections = {
+        body(158.0f, 160.0f), body(170.0f, 160.0f)};
+    const AimResult duplicate_result = aim.process(duplicate);
+    AimFrame single = make_frame(
+        4, base + std::chrono::milliseconds(30));
+    single.detections = {body(168.0f, 160.0f)};
+    const AimResult single_result = aim.process(single);
+
+    expect(duplicate_result.has_target && single_result.has_target &&
+               duplicate_result.target.track_id == confirmed_id &&
+               single_result.target.track_id == confirmed_id &&
+               !single_result.target.predicted,
+           "短暂重复人体框消失后，确认轨迹必须优先消费唯一观测，禁止候选抢占");
+}
+
 void test_loss_prediction_does_not_compound_time() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -4266,6 +4307,7 @@ int main() {
     test_long_pose_deformation_with_sparse_evidence_does_not_leak_into_anchor();
     test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
+    test_tentative_duplicate_cannot_steal_confirmed_observation();
     test_loss_prediction_does_not_compound_time();
     test_observation_age_adds_bounded_lead();
     test_prediction_lead_can_leave_box_with_bounded_distance();

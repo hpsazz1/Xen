@@ -951,13 +951,21 @@ struct Aim::Impl {
     }
 
     void associate_stage(const std::vector<Observation>& observations,
-                         bool high_stage, float diagonal,
+                         bool high_stage, bool tentative_stage,
+                         float diagonal,
                          std::vector<bool>& track_matched,
                          std::vector<bool>& observation_matched) {
         std::vector<std::size_t> track_indices;
         std::vector<std::size_t> observation_indices;
         for (std::size_t ti = 0; ti < tracks.size(); ++ti) {
-            if (!track_matched[ti]) track_indices.push_back(ti);
+            // 确认/丢失轨迹先消费本置信度层的观测，暂定轨迹只能匹配
+            // 剩余观测。短暂重复人体框因此不能在下一帧抢走当前人物，
+            // 多个既有确认目标仍在同一层使用全局最优分配。
+            const bool tentative =
+                tracks[ti].state == TrackState::TENTATIVE;
+            if (!track_matched[ti] && tentative == tentative_stage) {
+                track_indices.push_back(ti);
+            }
         }
         for (std::size_t oi = 0; oi < observations.size(); ++oi) {
             const bool high = observations[oi].confidence >=
@@ -1044,9 +1052,13 @@ struct Aim::Impl {
         predict_tracks(frame.captured_at, diagonal);
         std::vector<bool> track_matched(tracks.size(), false);
         std::vector<bool> observation_matched(observations.size(), false);
-        associate_stage(observations, true, diagonal,
+        associate_stage(observations, true, false, diagonal,
                         track_matched, observation_matched);
-        associate_stage(observations, false, diagonal,
+        associate_stage(observations, true, true, diagonal,
+                        track_matched, observation_matched);
+        associate_stage(observations, false, false, diagonal,
+                        track_matched, observation_matched);
+        associate_stage(observations, false, true, diagonal,
                         track_matched, observation_matched);
 
         for (std::size_t index = 0; index < tracks.size(); ++index) {
