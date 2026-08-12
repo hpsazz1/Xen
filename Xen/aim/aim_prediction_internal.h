@@ -139,12 +139,16 @@ inline float update_tracking_delay_output(
     return output_x;
 }
 
-// 跳跃期间逐步把水平内窗扩展到完整人物框，使已滤波的 Track 瞄点不再被
-// 25%/75% 移动边界夹住。这里只改变 clamp 可达范围，不建立绝对屏幕位置
-// 状态，因此不会滞后真实水平运动；起跳和落地使用同一速率渐变，避免切换跳变。
+// 垂直运动进入高速阈值前就逐步把水平内窗扩展到完整人物框，使已滤波的
+// Track 瞄点不再被 25%/75% 边界夹住。真实 Run 中进入 |vy|>=60 前中位
+// 只有三帧过渡，若到阈值后才扩张，整个短跳都会继续复制框中心横摆。
+// 扩张使用较快速率赶在高速段前释放 clamp；回收使用较慢速率，避免落地
+// 后把尚在框边的瞄点快速推回旧内窗。这里只改变范围，不建立绝对位置状态。
 inline float update_tracking_horizontal_half_range(
-        float configured_half_range, bool jump_active, float delta_seconds,
-        float slew_per_second, bool& initialized,
+        float configured_half_range, float vertical_speed,
+        float expansion_start_speed, float expansion_full_speed,
+        float delta_seconds, float expansion_slew_per_second,
+        float release_slew_per_second, bool& initialized,
         float& current_half_range) noexcept {
     const float safe_configured_half_range = std::clamp(
         configured_half_range, 0.0f, 0.5f);
@@ -152,8 +156,17 @@ inline float update_tracking_horizontal_half_range(
         current_half_range = safe_configured_half_range;
         initialized = true;
     }
-    const float target_half_range = jump_active
-        ? 0.5f : safe_configured_half_range;
+    const float safe_start_speed = std::max(expansion_start_speed, 0.0f);
+    const float safe_full_speed = std::max(
+        expansion_full_speed, safe_start_speed + 0.001f);
+    const float speed_blend = std::clamp(
+        (std::fabs(vertical_speed) - safe_start_speed) /
+            (safe_full_speed - safe_start_speed),
+        0.0f, 1.0f);
+    const float target_half_range = safe_configured_half_range +
+        (0.5f - safe_configured_half_range) * speed_blend;
+    const float slew_per_second = target_half_range > current_half_range
+        ? expansion_slew_per_second : release_slew_per_second;
     const float maximum_step = std::max(
         0.0f, slew_per_second * std::max(delta_seconds, 0.0f));
     current_half_range += std::clamp(

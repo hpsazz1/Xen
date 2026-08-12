@@ -168,7 +168,9 @@ constexpr float kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond = 0.75f;
 // 相邻变化与框中心相关系数 0.819。高速垂直阶段把水平内窗渐变扩展到完整框，
 // 直接消费 Track 已滤波的瞄点，避免绝对位置限速产生滞后后再被硬边界拉回。
 constexpr float kTrackingBaseJumpVelocityThresholdPixelsPerSecond = 60.0f;
-constexpr float kTrackingBaseRangeSlewPerSecond = 2.0f;
+constexpr float kTrackingBaseRangeExpansionStartPixelsPerSecond = 20.0f;
+constexpr float kTrackingBaseRangeExpansionSlewPerSecond = 4.0f;
+constexpr float kTrackingBaseRangeReleaseSlewPerSecond = 1.0f;
 // 最新真机 Run 证明在 |vy|=60 边界硬切水平速度源会把延迟变化 P95 放大
 // 近一倍。4/s 让一次普通 10 ms 帧最多混入 4%，持续约 250 ms 才完全
 // 隔离镜头回流；短跳和落地阈值抖动不会直接切换控制相位。
@@ -1454,9 +1456,12 @@ struct Aim::Impl {
         if (adapt_tracking_base_range_x) {
             half_range = aim::detail::update_tracking_horizontal_half_range(
                 configured_half_range,
-                std::fabs(track.vy) >=
-                    kTrackingBaseJumpVelocityThresholdPixelsPerSecond,
-                track.prediction_dt, kTrackingBaseRangeSlewPerSecond,
+                track.vy,
+                kTrackingBaseRangeExpansionStartPixelsPerSecond,
+                kTrackingBaseJumpVelocityThresholdPixelsPerSecond,
+                track.prediction_dt,
+                kTrackingBaseRangeExpansionSlewPerSecond,
+                kTrackingBaseRangeReleaseSlewPerSecond,
                 tracking_base_range_initialized_x,
                 tracking_base_half_range_x);
         } else {
