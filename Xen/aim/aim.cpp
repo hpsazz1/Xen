@@ -78,6 +78,11 @@ constexpr float kTrackVelocityBetaLow = 0.04f;
 // 仅低速校正其框内偏移。这样恒速平移仍使用原位置增益，不额外引入滞后。
 constexpr float kTrackAimShapeAlphaHigh = 0.12f;
 constexpr float kTrackAimShapeAlphaLow = 0.06f;
+// 姿态保护会暂时冻结绝对控制锚点；超级跳期间人物框却可能连续快速平移。
+// 若完全依赖框边界兜底，旧锚点会先穿过人物框再被压到框顶/框底，形成预览中
+// 可见的基础瞄点跳变。允许锚点在配置高度附近保留 5% 框高的抑振余量，超过后
+// 只校正必要位移；这样不把逐帧轮廓噪声直接写回，也不允许保护状态改变瞄点语义。
+constexpr float kTrackAimVerticalDeviationMaximumTargetHeight = 0.05f;
 // 人物姿态可能让检测框两条对边连续多帧同向摆动，单靠“对边反向即形变”
 // 或“中心逐帧反号”都无法识别。有明确尺度变化且中心创新仍属于小尺度时，
 // 保护基础锚点；尺度证据消失后按固定保持窗口恢复。真实匀速平移仍由轨迹
@@ -879,7 +884,21 @@ struct Aim::Impl {
                     track.protected_motion_y_frames);
         }
         track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
-        track.aim_y = std::clamp(track.aim_y, track.y1, track.y2);
+        const float vertical_ratio_minimum = std::clamp(
+            track.aim_ratio_y -
+                kTrackAimVerticalDeviationMaximumTargetHeight,
+            0.0f, 1.0f);
+        const float vertical_ratio_maximum = std::clamp(
+            track.aim_ratio_y +
+                kTrackAimVerticalDeviationMaximumTargetHeight,
+            0.0f, 1.0f);
+        const float tracked_height = track.y2 - track.y1;
+        const float vertical_minimum_y =
+            track.y1 + tracked_height * vertical_ratio_minimum;
+        const float vertical_maximum_y =
+            track.y1 + tracked_height * vertical_ratio_maximum;
+        track.aim_y = std::clamp(
+            track.aim_y, vertical_minimum_y, vertical_maximum_y);
 
         if (box_semantics_changed) {
             // 头框和身体框的尺度定义不同，切换时不把几何变化解释为速度。

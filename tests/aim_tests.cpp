@@ -610,6 +610,61 @@ void test_long_pose_deformation_with_sparse_evidence_does_not_leak_into_anchor()
                std::to_string(second_p95));
 }
 
+void test_vertical_jump_pose_protection_keeps_configured_aim_height() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.acquisition_range_percent = 150.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float maximum_ratio_error = 0.0f;
+    int boundary_frames = 0;
+
+    for (int index = 0; index < 480; ++index) {
+        // 一次升降各持续 30 帧，叠加逐帧宽高形变，复现实机超级跳中
+        // “1 人框 + 1 头框”始终存在但旧绝对锚点被姿态保护冻结的反例。
+        const int phase_index = index % 60;
+        const float jump_phase = phase_index <= 30
+            ? static_cast<float>(phase_index)
+            : static_cast<float>(60 - phase_index);
+        const float true_aim_y = 220.0f - jump_phase * 3.0f;
+        const float pose_phase = (index % 2) == 0 ? -1.0f : 1.0f;
+        const float height = 86.0f + pose_phase * 5.0f;
+        const float observed_aim_y = true_aim_y + pose_phase * 1.5f;
+        const float center_y = observed_aim_y +
+            height * (0.5f - config.body_aim_height_ratio);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(index * 4167));
+        frame.detections = {
+            body_box(160.0f, center_y, 42.0f, height),
+            head(160.0f, center_y - height * 0.30f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "垂直跳跃形变回归必须持续保留确认目标");
+        if (index < 60 || !result.has_target) continue;
+
+        const float tracked_height =
+            result.target.y2 - result.target.y1;
+        const float ratio = tracked_height > 0.0f
+            ? (result.target.base_aim_y - result.target.y1) /
+                tracked_height
+            : -1.0f;
+        maximum_ratio_error = std::max(
+            maximum_ratio_error,
+            std::fabs(ratio - config.body_aim_height_ratio));
+        if (ratio <= 0.001f || ratio >= 0.999f) {
+            ++boundary_frames;
+        }
+    }
+
+    expect(maximum_ratio_error <= 0.051f && boundary_frames == 0,
+           "超级跳姿态保护不得把基础瞄点推到框顶/框底，最大高度比例偏差/贴边帧=" +
+               std::to_string(maximum_ratio_error) + "/" +
+               std::to_string(boundary_frames));
+}
+
 void test_body_aim_range_is_static_safe_and_motion_bounded() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -3988,6 +4043,7 @@ int main() {
     test_coherent_box_center_jitter_preserves_real_translation();
     test_multiframe_pose_deformation_does_not_move_base_anchor();
     test_long_pose_deformation_with_sparse_evidence_does_not_leak_into_anchor();
+    test_vertical_jump_pose_protection_keeps_configured_aim_height();
     test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
     test_tentative_duplicate_cannot_steal_confirmed_observation();
