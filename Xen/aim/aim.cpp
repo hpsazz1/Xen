@@ -143,57 +143,15 @@ constexpr float kControllerMovingVelocityThresholdPixelsPerSecond = 20.0f;
 // 也只让基础点领先 0.52 px，仍低于可见门槛。1.5 倍只积分独立世界速度，
 // 不反读会被自身输出放大的延迟向量。
 constexpr float kPredictionAdditionalHorizonScale = 1.50f;
-// Y 轴快速运动在超级跳实测中会因更长外推产生抖动，因此继续使用已经验证
-// 的 16 ms 几何时域。prediction 也保留同一基准，避免改变既有闭环语义。
+// 控制延迟描述 KMBOX 命令到画面反馈的时域；几何投影只描述当前轨迹在
+// 画面中的短时外推，两者不能被同一个配置值同时放大。真实命令响应需要
+// 约 40 ms，但已经验证的几何/prediction 基准最多使用 16 ms 基础时域。
 constexpr float kGeometricProjectionMaximumSeconds = 0.016f;
-// prediction 关闭时，X 轴允许覆盖已测得的 40 ms KMBOX 响应窗口。超过
-// 16 ms 的部分只能消费扣除相机自运动后的基础前馈，禁止继续积分包含镜头
-// 回流的 track.vx；扩展量仍只使用保留既有 Y 后的二维剩余预算。
-constexpr float kHorizontalTrackingProjectionMaximumSeconds = 0.040f;
 // 基础前馈服务于每帧跟随，响应不能为 prediction 稳定方向降速。
 // prediction 单独使用慢速世界运动状态：持续运动低通，静止时快速释放。
 // 这个状态只读取基础前馈，绝不回写轨迹、基础控制点或基础控制器。
 constexpr float kPredictionWorldMotionGainPerSecond = 2.0f;
 constexpr float kPredictionWorldMotionReleasePerSecond = 120.0f;
-// tracking 的额外 X 时域直接把同一帧的世界位移按真实 dt 归一化；同向运动
-// 低通抑制检测噪声，确认反向时快速穿零，避免旧方向形成低频闭环回摆。
-constexpr float kTrackingProjectionWorldMotionGainPerSecond = 8.0f;
-constexpr float kTrackingProjectionWorldMotionReleasePerSecond = 40.0f;
-constexpr float kTrackingProjectionWorldMotionReversalGainPerSecond = 40.0f;
-constexpr int kTrackingProjectionStaticReleaseConfirmFrames = 4;
-// 额外 X 位移每秒最多移动 0.75 个目标对角线；约 120 Hz、90 px 目标下
-// 单帧不超过 0.51 px，使新增分量二阶阶跃保持在旧 16 ms 路径量级。
-constexpr float kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond = 0.75f;
-// 超级跳实测中基础 X 有 53% 的跳跃帧贴在 25%/75% 内窗边界，基础点
-// 相邻变化与框中心相关系数 0.819。高速垂直阶段只把水平内窗渐变扩展到
-// 10%~90%；最新真机回放中完整框使过渡段贴边率从 31.0% 升到 58.7%，
-// 而 40% half-range 是 25%~50% 候选中基础二阶 P95 最低点，避免用边缘换平滑。
-constexpr float kTrackingBaseJumpVelocityThresholdPixelsPerSecond = 60.0f;
-constexpr float kTrackingBaseRangeExpansionStartPixelsPerSecond = 20.0f;
-constexpr float kTrackingBaseRangeMaximumHalfRange = 0.40f;
-constexpr float kTrackingBaseRangeExpansionSlewPerSecond = 4.0f;
-constexpr float kTrackingBaseRangeReleaseSlewPerSecond = 1.0f;
-// 最新真机 Run 中降低比例增益已把高频二阶 P95 压到 2.75 px，但人工仍见
-// 大幅低频摆动。回放发现世界运动测量按 100% 补回到期命令，而 KMBOX 相机
-// 响应标定只有 15%；相对速度又统一乘 2.0 校正，因此跳跃 X 应按 0.30 补回。
-// 该修正只消除自身相机反馈形成的虚假前馈，不改变比例、Y 或非跳跃路径。
-constexpr float kTrackingJumpDelayedCommandObserverScale =
-    kControllerPendingCommandResponse * kControllerFeedforwardVelocityScale;
-// 最新单 Track 真机 Run 中 Y 速度 P95 为 737.56 px/s，并有 25 次相邻帧
-// 直接跨越 +60/-60 px/s；最大 +355.6→-306.5 使延迟点单帧跳 15.59 px。
-// 30 ROI diagonals/s² 的真实序列回放将直接高速反转降为 0，延迟 Y 速度项
-// 单帧变化 P95 约 0.90 px；只限制速度变化，不限制持续同向速度。
-constexpr float kTrackingJumpMaximumAccelerationDiagonalsPerSecondSquared =
-    30.0f;
-// 最新真机 Run 证明在 |vy|=60 边界硬切水平速度源会把延迟变化 P95 放大
-// 近一倍。4/s 让一次普通 10 ms 帧最多混入 4%，持续约 250 ms 才完全
-// 隔离镜头回流；短跳和落地阈值抖动不会直接切换控制相位。
-constexpr float kTrackingJumpWorldVelocityBlendSlewPerSecond = 4.0f;
-// 最新超级跳 Run 的全库存清空门禁把跳跃 X 零命令帧从 101 放大到 288。
-// 按同一 CSV 回放，10% 库存影响阈值可释放 87 个反向停发帧中的 68 个，
-// 同时保留 19 个“小纠偏、大库存”制动帧；该值只决定是否允许反向，
-// 不改变既有 15% 延迟点投影或任何物理命令幅度。
-constexpr float kTrackingJumpReversalPendingResponse = 0.10f;
 // 世界速度低通仍可能遇到 Provider/NDI 突发交付、几何上限切入或基础前馈
 // 量化边沿。最终预测偏移单独按目标对角线/秒限速，保证基础点不动的同时
 // 阻止预测点一帧从半程跳到几何上限。1.5 diagonals/s 在 240 Hz、约 100 px
@@ -428,13 +386,6 @@ struct Aim::Impl {
     float feedforward_y = 0.0f;
     float world_motion_measurement_x = 0.0f;
     float world_motion_measurement_y = 0.0f;
-    float tracking_projection_world_velocity_x = 0.0f;
-    bool tracking_delay_output_initialized_x = false;
-    float tracking_delay_output_x = 0.0f;
-    int tracking_projection_low_motion_x_frames = 0;
-    float tracking_jump_world_velocity_blend_x = 0.0f;
-    bool tracking_base_range_initialized_x = false;
-    float tracking_base_half_range_x = 0.0f;
     // 独立 prediction 状态使用 counts/second；基础控制器前馈仍保持
     // counts/frame，二者不能混用，否则瞬时帧间隔会改变预测距离。
     float prediction_world_velocity_x = 0.0f;
@@ -939,23 +890,10 @@ struct Aim::Impl {
             // 控制锚点使用对边共同残差抑制瞬时形变；速度观察器仍以低
             // beta 消费中心残差。持续平移会跨帧累积，正负交替的步态
             // 形变则相互抵消，避免把真实运动连同轮廓噪声一起归零。
-            const float candidate_vx = track.vx +
-                velocity_beta_x * center_motion_residual_x /
-                    track.prediction_dt;
-            const float candidate_vy = track.vy +
-                velocity_beta_y * center_motion_residual_y /
-                    track.prediction_dt;
-            const bool tracking_jump_velocity =
-                !config.enable_prediction && config.enable_delay_compensation &&
-                (std::fabs(track.vy) >=
-                     kTrackingBaseJumpVelocityThresholdPixelsPerSecond ||
-                 std::fabs(candidate_vy) >=
-                     kTrackingBaseJumpVelocityThresholdPixelsPerSecond);
-            aim::detail::limit_tracking_jump_velocity_acceleration(
-                candidate_vx, candidate_vy, tracking_jump_velocity,
-                diagonal *
-                    kTrackingJumpMaximumAccelerationDiagonalsPerSecondSquared,
-                track.prediction_dt, track.vx, track.vy);
+            track.vx += velocity_beta_x * center_motion_residual_x /
+                track.prediction_dt;
+            track.vy += velocity_beta_y * center_motion_residual_y /
+                track.prediction_dt;
         }
         clamp_vector(track.vx, track.vy,
                      diagonal * kMaxTrackSpeedDiagonalsPerSecond);
@@ -1447,13 +1385,6 @@ struct Aim::Impl {
         feedforward_y = 0.0f;
         world_motion_measurement_x = 0.0f;
         world_motion_measurement_y = 0.0f;
-        tracking_projection_world_velocity_x = 0.0f;
-        tracking_delay_output_initialized_x = false;
-        tracking_delay_output_x = 0.0f;
-        tracking_projection_low_motion_x_frames = 0;
-        tracking_jump_world_velocity_blend_x = 0.0f;
-        tracking_base_range_initialized_x = false;
-        tracking_base_half_range_x = 0.0f;
         prediction_world_velocity_x = 0.0f;
         prediction_world_velocity_y = 0.0f;
         prediction_motion_candidate_x_seconds = 0.0f;
@@ -1484,38 +1415,14 @@ struct Aim::Impl {
     LeadProjection projected_aim_point(
             const AimFrame& frame, const Track& track,
             std::chrono::steady_clock::time_point control_at) noexcept {
-        const float configured_half_range =
-            config.body_aim_range_percent / 200.0f;
-        float half_range = configured_half_range;
-        const bool adapt_tracking_base_range_x =
-            frame.lock_active && !config.enable_prediction &&
-            config.enable_delay_compensation &&
-            controller_track_id == track.id &&
-            track.state == TrackState::CONFIRMED && !track.predicted;
-        if (adapt_tracking_base_range_x) {
-            half_range = aim::detail::update_tracking_horizontal_half_range(
-                configured_half_range,
-                track.vy,
-                kTrackingBaseRangeExpansionStartPixelsPerSecond,
-                kTrackingBaseJumpVelocityThresholdPixelsPerSecond,
-                kTrackingBaseRangeMaximumHalfRange,
-                track.prediction_dt,
-                kTrackingBaseRangeExpansionSlewPerSecond,
-                kTrackingBaseRangeReleaseSlewPerSecond,
-                tracking_base_range_initialized_x,
-                tracking_base_half_range_x);
-        } else {
-            tracking_base_range_initialized_x = false;
-            tracking_base_half_range_x = configured_half_range;
-        }
+        const float half_range = config.body_aim_range_percent / 200.0f;
         const float range_min_x = track.x1 + (track.x2 - track.x1) *
             (0.5f - half_range);
         const float range_max_x = track.x1 + (track.x2 - track.x1) *
             (0.5f + half_range);
         // 基础点直接取状态估计点在配置内窗中的位置，不按速度逐帧补偿；
         // 这样检测抖动不会把瞄点反复推向内窗两侧。预测层仍独立处理提前量。
-        const float base_x = std::clamp(
-            track.aim_x, range_min_x, range_max_x);
+        const float base_x = std::clamp(track.aim_x, range_min_x, range_max_x);
         const float base_y = std::clamp(track.aim_y, track.y1, track.y2);
         LeadProjection projection;
         projection.base_x = base_x;
@@ -1550,38 +1457,12 @@ struct Aim::Impl {
             const float requested_delay_seconds =
                 projection.observation_age_seconds +
                 config.control_delay_ms / 1000.0f;
-            projection.delay_seconds_y = std::clamp(
-                requested_delay_seconds, 0.0f,
-                std::min(config.max_delay_compensation_ms / 1000.0f,
-                         kGeometricProjectionMaximumSeconds));
-            const float horizontal_projection_maximum_seconds =
-                config.enable_prediction
-                    ? kGeometricProjectionMaximumSeconds
-                    : kHorizontalTrackingProjectionMaximumSeconds;
             projection.delay_seconds_x = std::clamp(
                 requested_delay_seconds, 0.0f,
                 std::min(config.max_delay_compensation_ms / 1000.0f,
-                         horizontal_projection_maximum_seconds));
-            const float horizontal_world_velocity =
-                tracking_projection_world_velocity_x /
-                config.counts_per_pixel_x /
-                frame.source_pixels_per_roi_pixel_x;
-            const bool tracking_jump_x =
-                !config.enable_prediction &&
-                controller_track_id == track.id &&
-                std::fabs(track.vy) >=
-                    kTrackingBaseJumpVelocityThresholdPixelsPerSecond;
-            const float world_velocity_blend =
-                aim::detail::update_tracking_jump_world_velocity_blend(
-                    tracking_jump_x, track.prediction_dt,
-                    kTrackingJumpWorldVelocityBlendSlewPerSecond,
-                    tracking_jump_world_velocity_blend_x);
-            const float horizontal_projection_velocity =
-                aim::detail::select_tracking_horizontal_projection_velocity(
-                    track.vx, horizontal_world_velocity,
-                    world_velocity_blend);
-            projection.delay_x = horizontal_projection_velocity *
-                projection.delay_seconds_y;
+                         kGeometricProjectionMaximumSeconds));
+            projection.delay_seconds_y = projection.delay_seconds_x;
+            projection.delay_x = track.vx * projection.delay_seconds_x;
             projection.delay_y = track.vy * projection.delay_seconds_y;
             if (controller_track_id == track.id) {
                 const auto [pending_x, pending_y] =
@@ -1603,30 +1484,6 @@ struct Aim::Impl {
                 projection.delay_x, projection.delay_y,
                 box_diagonal *
                     config.max_delay_compensation_percent / 100.0f);
-            if (projection.delay_seconds_x > projection.delay_seconds_y &&
-                controller_track_id == track.id) {
-                const float vector_limit = box_diagonal *
-                    config.max_delay_compensation_percent / 100.0f;
-                const float remaining_x_limit = std::sqrt(std::max(
-                    0.0f, vector_limit * vector_limit -
-                        projection.delay_y * projection.delay_y));
-                const float desired_horizontal_extension =
-                    horizontal_world_velocity *
-                    (projection.delay_seconds_x -
-                     projection.delay_seconds_y);
-                const float maximum_extension_step = box_diagonal *
-                    kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond *
-                    track.prediction_dt;
-                projection.delay_x = aim::detail::update_tracking_delay_output(
-                        projection.delay_x + desired_horizontal_extension,
-                        projection.delay_x,
-                        remaining_x_limit, maximum_extension_step,
-                        tracking_delay_output_initialized_x,
-                        tracking_delay_output_x);
-            } else {
-                tracking_delay_output_initialized_x = false;
-                tracking_delay_output_x = 0.0f;
-            }
             projection.delay_active =
                 (projection.delay_seconds_x > 0.0f ||
                  projection.delay_seconds_y > 0.0f) &&
@@ -2265,11 +2122,6 @@ struct Aim::Impl {
         controller_captured_at = frame.captured_at;
         // 比例闭环复用同一总投影偏移状态；prediction 关闭时锚点仍是原延迟点，
         // 开启时则不会把延迟点与其反向抵消量拆成不同响应速度。
-        const bool tracking_jump_x =
-            !config.enable_prediction && config.enable_delay_compensation &&
-            track.state == TrackState::CONFIRMED && !track.predicted &&
-            std::fabs(track.vy) >=
-                kTrackingBaseJumpVelocityThresholdPixelsPerSecond;
         const float proportional_x =
             error_x * config.counts_per_pixel_x * gain;
         const float proportional_y =
@@ -2305,7 +2157,6 @@ struct Aim::Impl {
                                             float source_scale,
                                             float counts_per_pixel,
                                             float delayed_command,
-                                            float delayed_command_scale,
                                             float& feedforward,
                                             float& world_motion_measurement,
                                             bool& external_motion_evidence) {
@@ -2329,9 +2180,7 @@ struct Aim::Impl {
                     relative_velocity * source_scale * controller_dt *
                     counts_per_pixel * kControllerFeedforwardVelocityScale;
                 const float measurement =
-                    aim::detail::combine_delayed_command_world_motion(
-                        delayed_command, relative_motion_counts,
-                        delayed_command_scale);
+                    delayed_command + relative_motion_counts;
                 world_motion_measurement = measurement;
                 // 自身相机反馈必然与到期命令反向；相对运动仍与命令同向
                 // 说明外部目标运动压过了反馈，可作为快速建立的因果证据。
@@ -2381,33 +2230,14 @@ struct Aim::Impl {
         };
         update_feedforward(
             base_error_x, track.vx, frame.source_pixels_per_roi_pixel_x,
-            config.counts_per_pixel_x, delayed_command_x,
-            tracking_jump_x
-                ? kTrackingJumpDelayedCommandObserverScale : 1.0f,
-            feedforward_x,
+            config.counts_per_pixel_x, delayed_command_x, feedforward_x,
             world_motion_measurement_x,
             prediction_external_motion_evidence_x);
         update_feedforward(
             base_error_y, track.vy, frame.source_pixels_per_roi_pixel_y,
-            config.counts_per_pixel_y, delayed_command_y, 1.0f,
-            feedforward_y,
+            config.counts_per_pixel_y, delayed_command_y, feedforward_y,
             world_motion_measurement_y,
             prediction_external_motion_evidence_y);
-        if (!config.enable_prediction && config.enable_delay_compensation &&
-            track.state == TrackState::CONFIRMED) {
-            aim::detail::update_tracking_projection_velocity_axis(
-                world_motion_measurement_x, controller_dt,
-                kPredictionWorldMotionMinimumCounts,
-                kTrackingProjectionStaticReleaseConfirmFrames,
-                kTrackingProjectionWorldMotionGainPerSecond,
-                kTrackingProjectionWorldMotionReleasePerSecond,
-                kTrackingProjectionWorldMotionReversalGainPerSecond,
-                tracking_projection_world_velocity_x,
-                tracking_projection_low_motion_x_frames);
-        } else {
-            tracking_projection_world_velocity_x = 0.0f;
-            tracking_projection_low_motion_x_frames = 0;
-        }
         float control_feedforward_x = feedforward_x;
         if (use_coherent_prediction_projection_x &&
             controller_dt >=
@@ -2712,22 +2542,6 @@ struct Aim::Impl {
                 std::signbit(static_cast<float>(command.dy_counts))) {
             command.dy_counts = 0;
             quantized_y = 0.0f;
-        }
-        if (tracking_jump_x && command.dx_counts != 0) {
-            const auto [pending_x, pending_y] =
-                pending_issued_command_sum(frame.captured_at);
-            (void)pending_y;
-            // 40 ms 反馈窗内仍有旧方向库存时，立即反向只会让两批相反
-            // 命令在 KMBOX 侧叠加。但真实 Run 也证明等待库存完全清空会
-            // 形成 5～8 帧停发后重新打满。仅当当前纠偏 counts 还不足以
-            // 覆盖保守库存影响时暂停 X；真实反向需求建立后立即恢复。
-            if (!aim::detail::tracking_jump_reversal_command_allowed(
-                    command.dx_counts, pending_x,
-                    public_error_x * config.counts_per_pixel_x,
-                    kTrackingJumpReversalPendingResponse, true)) {
-                command.dx_counts = 0;
-                quantized_x = 0.0f;
-            }
         }
         const float public_error_magnitude =
             std::hypot(public_error_x, public_error_y);

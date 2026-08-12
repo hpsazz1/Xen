@@ -1687,221 +1687,6 @@ void test_prediction_motion_axis_requires_confirmed_stop() {
                std::to_string(low_frames));
 }
 
-void test_tracking_projection_velocity_uses_matching_frame_interval() {
-    constexpr float kMinimumCounts = 0.25f;
-    constexpr int kConfirmFrames = 4;
-    constexpr float kBuildGain = 8.0f;
-    constexpr float kReleaseGain = 40.0f;
-    constexpr float kReversalGain = 40.0f;
-    constexpr float kWorldVelocity = 120.0f;
-    float velocity = 0.0f;
-    int low_frames = 0;
-
-    // 同一物理速度在 4/12 ms 帧中对应不同 counts/frame；用各自 dt 归一化后，
-    // 观察器目标必须保持 120 counts/s，不能随交付节奏在三倍幅值间摆动。
-    for (int index = 0; index < 80; ++index) {
-        const float dt = index % 2 == 0 ? 0.004f : 0.012f;
-        aim::detail::update_tracking_projection_velocity_axis(
-            kWorldVelocity * dt, dt, kMinimumCounts, kConfirmFrames,
-            kBuildGain, kReleaseGain, kReversalGain, velocity, low_frames);
-    }
-    expect(std::fabs(velocity - kWorldVelocity) < 1.0f && low_frames == 0,
-           "变化 dt 下 tracking 世界速度必须收敛到物理速度，实际=" +
-               std::to_string(velocity));
-
-    // 真实反向不能再沿 8/s 的建立时间常数缓慢穿零；40/s 在三个 12 ms
-    // 采样内应完成换向，同时仍经过连续状态而不是单帧硬清零。
-    for (int index = 0; index < 3; ++index) {
-        constexpr float kDeltaSeconds = 0.012f;
-        aim::detail::update_tracking_projection_velocity_axis(
-            -kWorldVelocity * kDeltaSeconds, kDeltaSeconds,
-            kMinimumCounts, kConfirmFrames, kBuildGain, kReleaseGain,
-            kReversalGain, velocity, low_frames);
-    }
-    expect(velocity < 0.0f,
-           "tracking 世界速度确认反向后三帧内必须穿零，实际=" +
-               std::to_string(velocity));
-}
-
-void test_tracking_delay_output_back_calculates_saturation() {
-    constexpr float kDesiredOutput = 22.0f;
-    constexpr float kMaximumStep = 1.0f;
-    bool initialized = false;
-    float output_state = 0.0f;
-
-    // 首次从基础 2 px 延迟开始，再按原渐变速度建立额外提前量。
-    float output = aim::detail::update_tracking_delay_output(
-        kDesiredOutput, 2.0f, 20.0f, kMaximumStep,
-        initialized, output_state);
-    expect(initialized && std::fabs(output_state - 3.0f) < 0.001f &&
-               std::fabs(output - 3.0f) < 0.001f,
-           "tracking 总 X 延迟首次必须从基础值按单帧上限建立");
-
-    for (int index = 0; index < 10; ++index) {
-        output = aim::detail::update_tracking_delay_output(
-            kDesiredOutput, 2.0f, 20.0f, kMaximumStep,
-            initialized, output_state);
-    }
-    expect(output_state > 10.0f,
-           "反饱和回归必须先形成可观察的总 X 延迟状态");
-
-    // Y 跳跃把水平剩余空间压到 4 px 时，总状态和公开输出必须同步回写。
-    output = aim::detail::update_tracking_delay_output(
-        kDesiredOutput, 2.0f, 4.0f, kMaximumStep,
-        initialized, output_state);
-    expect(std::fabs(output_state - 4.0f) < 0.001f &&
-               std::fabs(output - 4.0f) < 0.001f,
-           "水平预算收缩必须把限幅结果回写到总 X 延迟状态");
-
-    // Y 回落后，基础分量即使同时跳到 8 px，总输出也只能从 4 增到 5 px；
-    // 这覆盖上一版未限制基础 16 ms 分量的缺口。
-    output = aim::detail::update_tracking_delay_output(
-        kDesiredOutput, 8.0f, 10.0f, kMaximumStep,
-        initialized, output_state);
-    expect(std::fabs(output_state - 5.0f) < 0.001f &&
-               std::fabs(output - 5.0f) < 0.001f,
-           "预算扩张和基础延迟变化必须统一服从总 X 输出渐变上限");
-}
-
-void test_tracking_jump_base_range_expands_and_releases_smoothly() {
-    bool initialized = false;
-    float half_range = 0.0f;
-
-    float published = aim::detail::update_tracking_horizontal_half_range(
-        0.25f, 40.0f, 20.0f, 60.0f, 0.40f, 0.010f, 4.0f, 1.0f,
-        initialized, half_range);
-    expect(initialized && std::fabs(published - 0.29f) < 0.001f,
-           "垂直速度进入过渡区后必须提前渐扩水平范围");
-
-    published = aim::detail::update_tracking_horizontal_half_range(
-        0.25f, 80.0f, 20.0f, 60.0f, 0.40f, 0.010f, 4.0f, 1.0f,
-        initialized, half_range);
-    expect(std::fabs(published - 0.33f) < 0.001f,
-           "高速首帧仍必须渐扩，不能直接切到完整框");
-    for (int index = 0; index < 5; ++index) {
-        published = aim::detail::update_tracking_horizontal_half_range(
-            0.25f, 80.0f, 20.0f, 60.0f, 0.40f, 0.010f, 4.0f, 1.0f,
-            initialized, half_range);
-    }
-    expect(std::fabs(published - 0.40f) < 0.001f,
-           "持续高速垂直运动必须快速释放到受控水平上界");
-
-    published = aim::detail::update_tracking_horizontal_half_range(
-        0.25f, 0.0f, 20.0f, 60.0f, 0.40f, 0.010f, 4.0f, 1.0f,
-        initialized, half_range);
-    expect(std::fabs(published - 0.39f) < 0.001f,
-           "落地后水平内窗必须慢速回收，禁止快速夹回配置范围");
-}
-
-void test_tracking_jump_horizontal_projection_rejects_camera_feedback() {
-    constexpr float kRelativeCameraFeedback = -420.0f;
-    constexpr float kConfirmedWorldMotion = 135.0f;
-    constexpr float kDeltaSeconds = 0.010f;
-    constexpr float kBlendSlewPerSecond = 4.0f;
-    float blend = 0.0f;
-
-    aim::detail::update_tracking_jump_world_velocity_blend(
-        true, kDeltaSeconds, kBlendSlewPerSecond, blend);
-    const float first_jump_velocity =
-        aim::detail::select_tracking_horizontal_projection_velocity(
-            kRelativeCameraFeedback, kConfirmedWorldMotion, blend);
-    expect(std::fabs(blend - 0.04f) < 0.001f &&
-               first_jump_velocity > kRelativeCameraFeedback &&
-               first_jump_velocity < kConfirmedWorldMotion,
-           "跳跃 X 首帧只能渐入世界速度，禁止在垂直阈值处硬切相位");
-
-    for (int index = 0; index < 24; ++index) {
-        aim::detail::update_tracking_jump_world_velocity_blend(
-            true, kDeltaSeconds, kBlendSlewPerSecond, blend);
-    }
-    const float sustained_jump_velocity =
-        aim::detail::select_tracking_horizontal_projection_velocity(
-            kRelativeCameraFeedback, kConfirmedWorldMotion, blend);
-    expect(std::fabs(blend - 1.0f) < 0.001f &&
-               std::fabs(sustained_jump_velocity -
-                         kConfirmedWorldMotion) < 0.001f,
-           "持续跳跃 250 ms 后必须完整隔离水平镜头回流");
-
-    aim::detail::update_tracking_jump_world_velocity_blend(
-        false, kDeltaSeconds, kBlendSlewPerSecond, blend);
-    const float first_release_velocity =
-        aim::detail::select_tracking_horizontal_projection_velocity(
-            kRelativeCameraFeedback, kConfirmedWorldMotion, blend);
-    expect(std::fabs(blend - 0.96f) < 0.001f &&
-               first_release_velocity > kRelativeCameraFeedback &&
-               first_release_velocity < kConfirmedWorldMotion,
-           "落地首帧必须渐退世界速度，禁止立即切回屏幕相对速度");
-}
-
-void test_tracking_jump_reversal_waits_for_pending_inventory() {
-    const auto allowed = [](int command_counts, float pending_counts,
-                            float control_error_counts, bool jump_active) {
-        return aim::detail::tracking_jump_reversal_command_allowed(
-            command_counts, pending_counts, control_error_counts,
-            0.10f, jump_active);
-    };
-
-    expect(!allowed(-2, 33.0f, -2.0f, true) &&
-               !allowed(1, -27.0f, 1.0f, true),
-           "跳跃 X 的弱反向纠偏必须等待旧方向库存影响下降");
-    expect(allowed(-2, 33.0f, -4.0f, true) &&
-               allowed(1, -27.0f, 3.0f, true),
-           "真实反向需求超过预计库存影响后必须恢复 X，禁止等待全清空");
-    expect(allowed(2, 33.0f, 0.5f, true) &&
-               allowed(-1, -27.0f, -0.5f, true),
-           "跳跃 X 同向续发不得被库存门禁误停");
-    expect(allowed(-2, 0.0f, -0.5f, true) &&
-               allowed(-2, 33.0f, -0.5f, false),
-           "库存清空后的真实反向和非跳跃场景必须保持原控制路径");
-    expect(allowed(0, 33.0f, 0.0f, true),
-           "零命令必须始终允许，门禁不得自行产生物理输出");
-}
-
-void test_tracking_jump_scales_delayed_command_in_world_observer() {
-    expect(std::fabs(
-               aim::detail::combine_delayed_command_world_motion(
-                   10.0f, -3.0f, 0.30f)) < 0.001f &&
-               std::fabs(
-               aim::detail::combine_delayed_command_world_motion(
-                   -10.0f, 3.0f, 0.30f)) < 0.001f,
-           "高速跳跃观察器必须按 KMBOX 响应抵消正负相机反馈");
-    expect(std::fabs(
-               aim::detail::combine_delayed_command_world_motion(
-                   10.0f, -3.0f, 1.0f) - 7.0f) < 0.001f,
-           "原观察器比例必须保持可表达，供非跳跃和 Y 路径复用");
-    expect(std::fabs(
-               aim::detail::combine_delayed_command_world_motion(
-                   10.0f, -3.0f, -1.0f) + 3.0f) < 0.001f,
-           "非法负响应必须收敛为零，禁止反转历史命令");
-}
-
-void test_tracking_jump_velocity_has_time_scaled_acceleration_limit() {
-    float velocity_x = 0.0f;
-    float velocity_y = 0.0f;
-    aim::detail::limit_tracking_jump_velocity_acceleration(
-        300.0f, 400.0f, true, 1000.0f, 0.01f,
-        velocity_x, velocity_y);
-    expect(std::fabs(velocity_x - 6.0f) < 0.001f &&
-               std::fabs(velocity_y - 8.0f) < 0.001f,
-           "跳跃二维速度变化必须按真实 dt 和向量模长限制");
-
-    aim::detail::limit_tracking_jump_velocity_acceleration(
-        -300.0f, -400.0f, false, 1000.0f, 0.01f,
-        velocity_x, velocity_y);
-    expect(std::fabs(velocity_x + 300.0f) < 0.001f &&
-               std::fabs(velocity_y + 400.0f) < 0.001f,
-           "非跳跃速度更新必须保持原候选值");
-
-    velocity_x = 2.0f;
-    velocity_y = -3.0f;
-    aim::detail::limit_tracking_jump_velocity_acceleration(
-        100.0f, 100.0f, true, -1.0f, 0.01f,
-        velocity_x, velocity_y);
-    expect(std::fabs(velocity_x - 2.0f) < 0.001f &&
-               std::fabs(velocity_y + 3.0f) < 0.001f,
-           "非法负加速度必须收敛为零变化，禁止反向放大");
-}
-
 void test_prediction_release_offset_is_slew_limited() {
     constexpr float kBoxDiagonal = 110.0f;
     constexpr float kMaximumSlew = 1.5f;
@@ -3565,28 +3350,24 @@ void test_control_step_cannot_cross_in_box_aim_point() {
            "准星已在模型框内时，单帧控制不得把它推出选中框");
 }
 
-void test_tracking_delay_projection_uses_longer_horizontal_horizon_only() {
-    AimConfig tracking_config;
-    tracking_config.min_confirmed_hits = 1;
-    tracking_config.deadzone_pixels = 0.0f;
-    tracking_config.smoothing = 1.0f;
-    tracking_config.counts_per_pixel_x = 1.0f;
-    tracking_config.counts_per_pixel_y = 1.0f;
-    tracking_config.max_counts_per_frame = 100.0f;
-    tracking_config.max_center_distance = 1.0f;
-    tracking_config.enable_delay_compensation = true;
-    tracking_config.control_delay_ms = 40.0f;
-    tracking_config.max_delay_compensation_ms = 44.0f;
-    tracking_config.max_delay_compensation_percent = 50.0f;
-    AimConfig prediction_config = tracking_config;
-    prediction_config.enable_prediction = true;
-    Aim tracking(tracking_config);
-    Aim prediction(prediction_config);
+void test_tracking_delay_projection_uses_shared_bounded_horizon() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 100.0f;
+    config.max_center_distance = 1.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 40.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 50.0f;
+    Aim aim(config);
     const auto base = std::chrono::steady_clock::now() +
         std::chrono::seconds(1);
 
-    AimResult tracking_result;
-    AimResult prediction_result;
+    AimResult result;
     for (int index = 0; index < 12; ++index) {
         AimFrame frame = make_frame(
             static_cast<std::uint64_t>(index + 1),
@@ -3596,157 +3377,19 @@ void test_tracking_delay_projection_uses_longer_horizontal_horizon_only() {
         frame.detections = {body_box(
             140.0f + index * 2.0f, 120.0f + index,
             40.0f, 80.0f)};
-        tracking_result = tracking.process(frame);
-        prediction_result = prediction.process(frame);
+        result = aim.process(frame);
     }
 
-    expect(tracking_result.status == AimStatus::SUCCESS &&
-               tracking_result.has_target &&
-               tracking_result.target.delay_compensation_active,
-           "分轴延迟投影回归必须形成有效 tracking 目标和补偿向量");
-    expect(std::fabs(
-               tracking_result.target.delay_compensation_ms_x - 40.0f) <
-               0.01f &&
-               std::fabs(
-                   tracking_result.target.delay_compensation_ms_y - 16.0f) <
+    expect(result.status == AimStatus::SUCCESS && result.has_target &&
+               result.target.delay_compensation_active,
+           "统一延迟投影回归必须形成有效 tracking 目标和补偿向量");
+    expect(std::fabs(result.target.delay_compensation_ms_x - 16.0f) <
                    0.01f &&
-               std::fabs(
-                   tracking_result.target.delay_compensation_ms - 40.0f) <
+               std::fabs(result.target.delay_compensation_ms_y - 16.0f) <
+                   0.01f &&
+               std::fabs(result.target.delay_compensation_ms - 16.0f) <
                    0.01f,
-           "prediction 关闭时必须报告 X=40 ms、Y=16 ms，兼容字段取两轴最大值");
-    expect(std::fabs(
-               prediction_result.target.delay_compensation_ms_x - 16.0f) <
-               0.01f &&
-               std::fabs(
-                   prediction_result.target.delay_compensation_ms_y - 16.0f) <
-                   0.01f,
-           "prediction 开启时必须保留已经验证的双轴 16 ms 几何基准");
-    expect(std::fabs(
-               tracking_result.target.delay_compensation_y -
-               prediction_result.target.delay_compensation_y) < 0.01f,
-           "X 轴扩展不得改变同一输入下的 Y 轴延迟补偿量");
-    expect(std::fabs(tracking_result.target.delay_compensation_x) >
-               std::fabs(prediction_result.target.delay_compensation_x) +
-                   0.10f,
-           "prediction 关闭时 X 轴 40 ms 投影必须产生可观测的额外水平提前量");
-}
-
-void test_tracking_horizontal_extension_rejects_camera_feedback_direction() {
-    AimConfig short_config;
-    short_config.min_confirmed_hits = 1;
-    short_config.deadzone_pixels = 0.0f;
-    short_config.smoothing = 1.0f;
-    short_config.counts_per_pixel_x = 0.40f;
-    short_config.counts_per_pixel_y = 0.40f;
-    short_config.max_counts_per_frame = 14.0f;
-    short_config.max_center_distance = 1.0f;
-    short_config.enable_delay_compensation = true;
-    short_config.control_delay_ms = 15.0f;
-    short_config.max_delay_compensation_ms = 16.0f;
-    short_config.max_delay_compensation_percent = 50.0f;
-    AimConfig extended_config = short_config;
-    extended_config.control_delay_ms = 40.0f;
-    extended_config.max_delay_compensation_ms = 44.0f;
-    Aim short_projection(short_config);
-    Aim extended_projection(extended_config);
-    const auto base = std::chrono::steady_clock::now() +
-        std::chrono::seconds(1);
-
-    for (int index = 0; index < 20; ++index) {
-        AimFrame frame = make_frame(
-            static_cast<std::uint64_t>(index + 1),
-            base + std::chrono::milliseconds(index * 10));
-        frame.control_at = frame.captured_at + std::chrono::milliseconds(5);
-        frame.lock_active = false;
-        frame.detections = {body(180.0f + index * 1.5f, 160.0f)};
-        short_projection.process(frame);
-        extended_projection.process(frame);
-    }
-
-    // 人物世界运动已经稳定向右后，模拟一帧由相机追踪造成的屏幕左移。
-    // 额外 24 ms 必须继续使用上一帧的世界维持量，而不是放大负 track.vx。
-    AimFrame feedback_frame = make_frame(
-        21, base + std::chrono::milliseconds(200));
-    feedback_frame.control_at = feedback_frame.captured_at +
-        std::chrono::milliseconds(5);
-    feedback_frame.lock_active = false;
-    feedback_frame.detections = {body(190.0f, 160.0f)};
-    const AimResult short_result = short_projection.process(feedback_frame);
-    const AimResult extended_result =
-        extended_projection.process(feedback_frame);
-
-    expect(short_result.has_target && extended_result.has_target &&
-               extended_result.target.velocity_x < 0.0f,
-           "相机反馈方向回归必须形成与既有世界运动相反的屏幕 X 速度");
-    expect(extended_result.target.delay_compensation_x >
-               short_result.target.delay_compensation_x + 0.10f,
-           "额外 X 时域必须沿自运动扣除后的世界方向，禁止继续积分反向屏幕回流");
-}
-
-void test_tracking_horizontal_extension_is_slew_limited_under_variable_dt() {
-    constexpr float kExpectedMaximumSlewDiagonalsPerSecond = 0.75f;
-    AimConfig short_config;
-    short_config.min_confirmed_hits = 1;
-    short_config.deadzone_pixels = 0.0f;
-    short_config.smoothing = 1.0f;
-    short_config.counts_per_pixel_x = 0.40f;
-    short_config.counts_per_pixel_y = 0.40f;
-    short_config.max_counts_per_frame = 14.0f;
-    short_config.max_center_distance = 1.0f;
-    short_config.enable_delay_compensation = true;
-    short_config.control_delay_ms = 15.0f;
-    short_config.max_delay_compensation_ms = 16.0f;
-    short_config.max_delay_compensation_percent = 50.0f;
-    AimConfig extended_config = short_config;
-    extended_config.control_delay_ms = 40.0f;
-    extended_config.max_delay_compensation_ms = 44.0f;
-    Aim short_projection(short_config);
-    Aim extended_projection(extended_config);
-    const auto base = std::chrono::steady_clock::now() +
-        std::chrono::seconds(1);
-    std::chrono::milliseconds elapsed{};
-    float previous_extension = 0.0f;
-    float maximum_extension = 0.0f;
-    bool have_previous_extension = false;
-
-    for (int index = 0; index < 100; ++index) {
-        const auto frame_dt = std::chrono::milliseconds(
-            index % 2 == 0 ? 4 : 12);
-        if (index != 0) elapsed += frame_dt;
-        const float elapsed_seconds =
-            std::chrono::duration<float>(elapsed).count();
-        AimFrame frame = make_frame(
-            static_cast<std::uint64_t>(index + 1), base + elapsed);
-        frame.control_at = frame.captured_at + std::chrono::milliseconds(2);
-        frame.lock_active = false;
-        frame.detections = {body(
-            180.0f + elapsed_seconds * 120.0f, 160.0f)};
-        const AimResult short_result = short_projection.process(frame);
-        const AimResult extended_result = extended_projection.process(frame);
-        expect(short_result.has_target && extended_result.has_target,
-               "变化 dt 的水平扩展回归必须持续保留目标");
-        if (!short_result.has_target || !extended_result.has_target) continue;
-        const float extension =
-            extended_result.target.delay_compensation_x -
-            short_result.target.delay_compensation_x;
-        maximum_extension = std::max(maximum_extension, std::fabs(extension));
-        if (have_previous_extension) {
-            const float target_diagonal = std::hypot(
-                extended_result.target.x2 - extended_result.target.x1,
-                extended_result.target.y2 - extended_result.target.y1);
-            const float maximum_step = target_diagonal *
-                kExpectedMaximumSlewDiagonalsPerSecond *
-                std::chrono::duration<float>(frame_dt).count();
-            expect(std::fabs(extension - previous_extension) <=
-                       maximum_step + 0.02f,
-                   "变化 dt 下额外 X 位移不得超过按目标尺度归一化的单帧渐变上限");
-        }
-        previous_extension = extension;
-        have_previous_extension = true;
-    }
-
-    expect(maximum_extension >= 1.0f,
-           "渐变限制不得把持续水平世界运动的额外提前量永久压为零");
+           "tracking 双轴几何投影必须共享 16 ms 上限，不能把设备响应时域直接变成瞄点前探");
 }
 
 void test_delay_compensation_stacks_before_prediction() {
@@ -4349,13 +3992,6 @@ int main() {
     test_prediction_survives_short_world_motion_measurement_dips();
     test_prediction_motion_candidate_tolerates_one_low_sample();
     test_prediction_motion_axis_requires_confirmed_stop();
-    test_tracking_projection_velocity_uses_matching_frame_interval();
-    test_tracking_delay_output_back_calculates_saturation();
-    test_tracking_jump_base_range_expands_and_releases_smoothly();
-    test_tracking_jump_horizontal_projection_rejects_camera_feedback();
-    test_tracking_jump_reversal_waits_for_pending_inventory();
-    test_tracking_jump_scales_delayed_command_in_world_observer();
-    test_tracking_jump_velocity_has_time_scaled_acceleration_limit();
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();
@@ -4374,9 +4010,7 @@ int main() {
     test_quantization_residual_cannot_reverse_after_crossing();
     test_delay_projection_crossing_keeps_base_tracking_hold();
     test_control_step_cannot_cross_in_box_aim_point();
-    test_tracking_delay_projection_uses_longer_horizontal_horizon_only();
-    test_tracking_horizontal_extension_rejects_camera_feedback_direction();
-    test_tracking_horizontal_extension_is_slew_limited_under_variable_dt();
+    test_tracking_delay_projection_uses_shared_bounded_horizon();
     test_delay_compensation_stacks_before_prediction();
     test_horizontal_prediction_startup_rejects_static_camera_feedback();
     test_prediction_never_changes_base_tracking_sequence();
