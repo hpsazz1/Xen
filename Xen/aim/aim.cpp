@@ -165,10 +165,12 @@ constexpr int kTrackingProjectionStaticReleaseConfirmFrames = 4;
 // 单帧不超过 0.51 px，使新增分量二阶阶跃保持在旧 16 ms 路径量级。
 constexpr float kTrackingDelayExtensionMaximumSlewDiagonalsPerSecond = 0.75f;
 // 超级跳实测中基础 X 有 53% 的跳跃帧贴在 25%/75% 内窗边界，基础点
-// 相邻变化与框中心相关系数 0.819。高速垂直阶段把水平内窗渐变扩展到完整框，
-// 直接消费 Track 已滤波的瞄点，避免绝对位置限速产生滞后后再被硬边界拉回。
+// 相邻变化与框中心相关系数 0.819。高速垂直阶段只把水平内窗渐变扩展到
+// 10%~90%；最新真机回放中完整框使过渡段贴边率从 31.0% 升到 58.7%，
+// 而 40% half-range 是 25%~50% 候选中基础二阶 P95 最低点，避免用边缘换平滑。
 constexpr float kTrackingBaseJumpVelocityThresholdPixelsPerSecond = 60.0f;
 constexpr float kTrackingBaseRangeExpansionStartPixelsPerSecond = 20.0f;
+constexpr float kTrackingBaseRangeMaximumHalfRange = 0.40f;
 constexpr float kTrackingBaseRangeExpansionSlewPerSecond = 4.0f;
 constexpr float kTrackingBaseRangeReleaseSlewPerSecond = 1.0f;
 // 最新真机 Run 证明在 |vy|=60 边界硬切水平速度源会把延迟变化 P95 放大
@@ -1459,6 +1461,7 @@ struct Aim::Impl {
                 track.vy,
                 kTrackingBaseRangeExpansionStartPixelsPerSecond,
                 kTrackingBaseJumpVelocityThresholdPixelsPerSecond,
+                kTrackingBaseRangeMaximumHalfRange,
                 track.prediction_dt,
                 kTrackingBaseRangeExpansionSlewPerSecond,
                 kTrackingBaseRangeReleaseSlewPerSecond,

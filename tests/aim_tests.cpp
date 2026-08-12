@@ -1727,28 +1727,28 @@ void test_tracking_jump_base_range_expands_and_releases_smoothly() {
     float half_range = 0.0f;
 
     float published = aim::detail::update_tracking_horizontal_half_range(
-        0.25f, 40.0f, 20.0f, 60.0f, 0.010f, 4.0f, 1.0f,
+        0.25f, 40.0f, 20.0f, 60.0f, 0.40f, 0.010f, 4.0f, 1.0f,
         initialized, half_range);
     expect(initialized && std::fabs(published - 0.29f) < 0.001f,
            "垂直速度进入过渡区后必须提前渐扩水平范围");
 
     published = aim::detail::update_tracking_horizontal_half_range(
-        0.25f, 80.0f, 20.0f, 60.0f, 0.010f, 4.0f, 1.0f,
+        0.25f, 80.0f, 20.0f, 60.0f, 0.40f, 0.010f, 4.0f, 1.0f,
         initialized, half_range);
     expect(std::fabs(published - 0.33f) < 0.001f,
            "高速首帧仍必须渐扩，不能直接切到完整框");
     for (int index = 0; index < 5; ++index) {
         published = aim::detail::update_tracking_horizontal_half_range(
-            0.25f, 80.0f, 20.0f, 60.0f, 0.010f, 4.0f, 1.0f,
+            0.25f, 80.0f, 20.0f, 60.0f, 0.40f, 0.010f, 4.0f, 1.0f,
             initialized, half_range);
     }
-    expect(std::fabs(published - 0.50f) < 0.001f,
-           "持续高速垂直运动必须快速释放到完整人物框范围");
+    expect(std::fabs(published - 0.40f) < 0.001f,
+           "持续高速垂直运动必须快速释放到受控水平上界");
 
     published = aim::detail::update_tracking_horizontal_half_range(
-        0.25f, 0.0f, 20.0f, 60.0f, 0.010f, 4.0f, 1.0f,
+        0.25f, 0.0f, 20.0f, 60.0f, 0.40f, 0.010f, 4.0f, 1.0f,
         initialized, half_range);
-    expect(std::fabs(published - 0.49f) < 0.001f,
+    expect(std::fabs(published - 0.39f) < 0.001f,
            "落地后水平内窗必须慢速回收，禁止快速夹回配置范围");
 }
 
