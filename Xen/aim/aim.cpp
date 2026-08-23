@@ -17,6 +17,15 @@
 
 namespace {
 
+// 固定 240 Hz 下 51 个连续观测约覆盖 0.21 秒。窗口长度用于分离短周期
+// 人体轮廓形变与轨迹平移，不代表人物速度档位；拟合仍使用真实采集时间。
+constexpr std::size_t kTrackHorizontalTrendSampleCount = 51;
+constexpr std::size_t kTrackHorizontalTrendMinimumSampleCount = 5;
+// OLS 有效后，当前中心与趋势中心的 ROI 横向比例连续三次相差超过 2%
+// 才切段。门限不读取身体框宽高或人物绝对速度，候选确认前与主趋势隔离。
+constexpr float kTrackHorizontalTrendChangePointMaximumRoiWidthRatio = 0.02f;
+constexpr std::size_t kTrackHorizontalTrendChangePointConfirmSampleCount = 3;
+
 struct Observation {
     float x1 = 0.0f;
     float y1 = 0.0f;
@@ -29,6 +38,25 @@ struct Observation {
     float confidence = 0.0f;
     bool head_only = false;
     bool aim_from_head = false;
+};
+
+struct HorizontalTrendHistory {
+    std::array<std::chrono::steady_clock::time_point,
+               kTrackHorizontalTrendSampleCount> captured_at{};
+    std::array<float, kTrackHorizontalTrendSampleCount> center_x_ratio{};
+    std::size_t next = 0;
+    std::size_t count = 0;
+};
+
+struct HorizontalTrendChangePoint {
+    std::array<std::chrono::steady_clock::time_point,
+               kTrackHorizontalTrendChangePointConfirmSampleCount>
+        captured_at{};
+    std::array<float,
+               kTrackHorizontalTrendChangePointConfirmSampleCount>
+        center_x_ratio{};
+    float side = 0.0f;
+    std::size_t count = 0;
 };
 
 struct Track {
@@ -54,12 +82,17 @@ struct Track {
     std::chrono::steady_clock::time_point state_at{};
     int shape_deformation_x_frames = 0;
     int shape_deformation_y_frames = 0;
-    int pose_deformation_x_frames = 0;
+    int horizontal_center_trend_frames = 0;
+    int partial_visibility_x_frames = 0;
+    float partial_visibility_x_side = 0.0f;
+    float accepted_partial_visibility_x_width = 0.0f;
+    bool horizontal_trend_rebuilding_from_partial = false;
+    bool partial_visibility_x_recovery_pending = false;
     int pose_deformation_y_frames = 0;
-    float protected_motion_direction_x = 0.0f;
     float protected_motion_direction_y = 0.0f;
-    int protected_motion_x_frames = 0;
     int protected_motion_y_frames = 0;
+    HorizontalTrendHistory horizontal_trend{};
+    HorizontalTrendChangePoint horizontal_trend_change{};
 };
 
 struct IssuedCommand {
@@ -75,33 +108,42 @@ constexpr float kTrackPositionAlphaLow = 0.45f;
 constexpr float kTrackVelocityBetaHigh = 0.10f;
 constexpr float kTrackVelocityBetaLow = 0.04f;
 // 控制点只立即跟随框两条对边的共同位移；边缘分歧代表宽高/姿态形变，
-// 仅低速校正其框内偏移。这样恒速平移仍使用原位置增益，不额外引入滞后。
+// 框内偏移使用独立低增益校正。这样真实平移仍使用原位置增益，不额外引入滞后。
 constexpr float kTrackAimShapeAlphaHigh = 0.12f;
 constexpr float kTrackAimShapeAlphaLow = 0.06f;
-// 姿态保护会暂时冻结绝对控制锚点；超级跳期间人物框却可能连续快速平移。
-// 若完全依赖框边界兜底，旧锚点会先穿过人物框再被压到框顶/框底，形成预览中
-// 可见的基础瞄点跳变。允许锚点在配置高度附近保留 5% 框高的抑振余量，超过后
-// 只校正必要位移；这样不把逐帧轮廓噪声直接写回，也不允许保护状态改变瞄点语义。
+// 语义证据不足时姿态保护可能短暂冻结绝对控制锚点。垂直方向允许锚点在
+// 配置高度附近保留 5% 框高的抑振余量，超过后只校正必要位移；这样不把
+// 逐帧轮廓噪声直接写回，也不允许保护状态改变瞄点语义。
 constexpr float kTrackAimVerticalDeviationMaximumTargetHeight = 0.05f;
 // 人物姿态可能让检测框两条对边连续多帧同向摆动，单靠“对边反向即形变”
 // 或“中心逐帧反号”都无法识别。有明确尺度变化且中心创新仍属于小尺度时，
-// 保护基础锚点；尺度证据消失后按固定保持窗口恢复。真实匀速平移仍由轨迹
-// 速度预测连续推进。
+// 保护基础锚点；尺度证据消失后按固定保持窗口恢复。X 在宽高共同形变时
+// 使用原始身体中心的时间趋势，避免依赖 head 是否闪断或人物速度档位。
 constexpr float kTrackCoherentDeformationMaximumTargetDiagonal = 0.04f;
 constexpr float kTrackCoherentDeformationMinimumShapeChangeTargetDiagonal =
     0.0005f;
 constexpr float kTrackCoherentDeformationMinimumShapeChangePixels = 0.05f;
+// 左/右半身裁切通常表现为一条边基本稳定、另一条边明显内缩。只比较两边
+// 残差比例，不使用像素速度；对称缩放不会误入该分支。
+constexpr float kTrackPartialVisibilityStableEdgeMaximumResidualRatio = 0.25f;
+constexpr float kTrackPartialVisibilityMaximumWidthRatio = 0.75f;
+// 单侧截断连续三帧才接受为新的可见框几何。前两帧约 8.3 ms（240 Hz）
+// 保留既有水平框；该计数只看几何连续性，不按人物像素速度分档。
+constexpr int kTrackPartialVisibilityConfirmFrames = 3;
 // 实机姿态同向形变可持续 3～10 帧；保护必须覆盖完整形变窗口，真实平移仍由
 // stable_motion_residual 和速度估计独立推进。
 constexpr int kTrackCoherentDeformationHoldFrames = 10;
-// 姿态段内先用低速度增益并隔离比例点回写；只有同向速度跨过实测最长
-// 17 帧形变段后，才在固定窗口内连续恢复原增益。这样不会冻结真实平移，
-// 也不会在阈值帧把累计位置误差一次性写回基础锚点。
+// X 轴姿态段由固定时间窗几何趋势更新；首四个样本沿用共同边缘位移。
+// Y 不引入长窗，继续沿用本轮前的跳跃保护状态机，避免扩大改动范围。
 constexpr float kTrackDeformationVelocityBetaScaleMinimum = 0.08f;
 constexpr float kTrackDeformationVelocityBetaScaleMaximum = 0.40f;
-constexpr float kTrackProtectedMotionMinimumPixelsPerSecond = 8.0f;
-constexpr int kTrackProtectedMotionConfirmFrames = 18;
-constexpr int kTrackProtectedMotionRampFrames = 4;
+// 趋势斜率按真实 dt 以 25 ms 时间常数连续并入速度状态。该增益控制估计器
+// 收敛时间，不比较或划分人物速度。
+constexpr float kTrackHorizontalTrendVelocityGainPerSecond = 40.0f;
+// Y 保持本轮前已验证的保护状态机；本任务只替换 X 的速度门槛。
+constexpr float kTrackVerticalProtectedMotionMinimumPixelsPerSecond = 8.0f;
+constexpr int kTrackVerticalProtectedMotionConfirmFrames = 18;
+constexpr int kTrackVerticalProtectedMotionRampFrames = 4;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
@@ -281,6 +323,120 @@ float common_edge_motion(float first_residual,
     return std::copysign(
         std::min(std::abs(first_residual), std::abs(second_residual)),
         first_residual);
+}
+
+struct HorizontalTrendEstimate {
+    bool valid = false;
+    float position_ratio = 0.0f;
+    float velocity_ratio = 0.0f;
+};
+
+void clear_horizontal_trend_change_point(Track& track) noexcept {
+    track.horizontal_trend_change.side = 0.0f;
+    track.horizontal_trend_change.count = 0;
+}
+
+void reset_horizontal_trend(Track& track) noexcept {
+    track.horizontal_trend.next = 0;
+    track.horizontal_trend.count = 0;
+    track.horizontal_trend_rebuilding_from_partial = false;
+    clear_horizontal_trend_change_point(track);
+}
+
+void append_horizontal_trend(
+        Track& track, std::chrono::steady_clock::time_point captured_at,
+        float center_x_ratio) noexcept {
+    HorizontalTrendHistory& history = track.horizontal_trend;
+    history.captured_at[history.next] = captured_at;
+    history.center_x_ratio[history.next] = center_x_ratio;
+    history.next = (history.next + 1) % kTrackHorizontalTrendSampleCount;
+    history.count = std::min(
+        history.count + 1, kTrackHorizontalTrendSampleCount);
+}
+
+HorizontalTrendEstimate estimate_horizontal_trend(
+        const Track& track,
+        std::chrono::steady_clock::time_point estimated_at) noexcept {
+    const HorizontalTrendHistory& history = track.horizontal_trend;
+    if (history.count < kTrackHorizontalTrendMinimumSampleCount) return {};
+
+    // 端点局部线性回归相当于因果的一阶 Savitzky-Golay 趋势估计：
+    // 前五帧后使用增长窗口及时跟随，满 51 帧后衰减窗口内的短周期轮廓
+    // 摆动；匀速平移不论快慢都保留原斜率。时间先减去最新采集时刻，
+    // 避免 steady_clock 大数损失精度。
+    const std::size_t oldest =
+        (history.next + kTrackHorizontalTrendSampleCount - history.count) %
+        kTrackHorizontalTrendSampleCount;
+    const std::size_t newest =
+        (history.next + kTrackHorizontalTrendSampleCount - 1) %
+        kTrackHorizontalTrendSampleCount;
+    const auto reference_time = history.captured_at[newest];
+    double mean_time = 0.0;
+    double mean_position = 0.0;
+    for (std::size_t offset = 0;
+         offset < history.count; ++offset) {
+        const std::size_t index =
+            (oldest + offset) % kTrackHorizontalTrendSampleCount;
+        mean_time += std::chrono::duration<double>(
+            history.captured_at[index] - reference_time).count();
+        mean_position += history.center_x_ratio[index];
+    }
+    mean_time /= static_cast<double>(history.count);
+    mean_position /= static_cast<double>(history.count);
+
+    double covariance = 0.0;
+    double time_variance = 0.0;
+    for (std::size_t offset = 0;
+         offset < history.count; ++offset) {
+        const std::size_t index =
+            (oldest + offset) % kTrackHorizontalTrendSampleCount;
+        const double time = std::chrono::duration<double>(
+            history.captured_at[index] - reference_time).count();
+        const double centered_time = time - mean_time;
+        covariance += centered_time *
+            (static_cast<double>(history.center_x_ratio[index]) -
+             mean_position);
+        time_variance += centered_time * centered_time;
+    }
+    if (time_variance <= std::numeric_limits<double>::epsilon()) return {};
+
+    const double velocity = covariance / time_variance;
+    const double latest_position = mean_position - velocity * mean_time;
+    const double projection_seconds = std::chrono::duration<double>(
+        estimated_at - reference_time).count();
+    const double position = latest_position + velocity * projection_seconds;
+    if (!std::isfinite(position) || !std::isfinite(velocity)) return {};
+    return {true, static_cast<float>(position),
+            static_cast<float>(velocity)};
+}
+
+void append_horizontal_trend_change_candidate(
+        Track& track, float side,
+        std::chrono::steady_clock::time_point captured_at,
+        float center_x_ratio) noexcept {
+    HorizontalTrendChangePoint& change = track.horizontal_trend_change;
+    if (side != change.side) {
+        clear_horizontal_trend_change_point(track);
+        change.side = side;
+    }
+    if (change.count >=
+        kTrackHorizontalTrendChangePointConfirmSampleCount) {
+        return;
+    }
+    change.captured_at[change.count] = captured_at;
+    change.center_x_ratio[change.count] = center_x_ratio;
+    ++change.count;
+}
+
+void commit_horizontal_trend_change_point(Track& track) noexcept {
+    const HorizontalTrendChangePoint change =
+        track.horizontal_trend_change;
+    reset_horizontal_trend(track);
+    for (std::size_t index = 0; index < change.count; ++index) {
+        append_horizontal_trend(
+            track, change.captured_at[index],
+            change.center_x_ratio[index]);
+    }
 }
 
 float normalized_position(float value, float minimum,
@@ -634,7 +790,8 @@ struct Aim::Impl {
 
     void update_matched_track(Track& track,
                               const Observation& observation,
-                              float diagonal) noexcept {
+                              float diagonal,
+                              float roi_width) noexcept {
         const bool high = observation.confidence >= config.high_confidence;
         const float alpha = high
             ? kTrackPositionAlphaHigh : kTrackPositionAlphaLow;
@@ -646,6 +803,8 @@ struct Aim::Impl {
         const float track_center_y = (track.y1 + track.y2) * 0.5f;
         const float observation_center_x =
             (observation.x1 + observation.x2) * 0.5f;
+        const float observation_center_x_ratio =
+            observation_center_x / roi_width;
         const float observation_center_y =
             (observation.y1 + observation.y2) * 0.5f;
         const float center_motion_residual_x =
@@ -654,28 +813,48 @@ struct Aim::Impl {
             observation_center_y - track_center_y;
         float stable_motion_residual_x = center_motion_residual_x;
         float stable_motion_residual_y = center_motion_residual_y;
+        float horizontal_box_motion_residual_x = center_motion_residual_x;
         float velocity_beta_x = beta;
         float velocity_beta_y = beta;
+        bool preserve_horizontal_box = false;
+        bool isolate_horizontal_center_observation = false;
+        bool suppress_center_velocity_x =
+            track.horizontal_trend_rebuilding_from_partial;
+        bool horizontal_trend_active = false;
+        HorizontalTrendEstimate horizontal_trend;
+
+        // 趋势窗口只接收连续的身体框中心。原始 head 框是否出现不会改变
+        // 身体坐标系；真正切到 head-only 或轨迹丢帧才重建窗口，避免把两种
+        // 框尺度的切换写成水平运动。
+        if (observation.head_only || box_semantics_changed) {
+            track.partial_visibility_x_recovery_pending = false;
+            track.accepted_partial_visibility_x_width = 0.0f;
+            reset_horizontal_trend(track);
+        }
+        if (!observation.head_only && box_semantics_changed) {
+            append_horizontal_trend(
+                track, track.state_at, observation_center_x_ratio);
+        }
 
         if (!box_semantics_changed) {
             const float x1_residual = observation.x1 - track.x1;
             const float x2_residual = observation.x2 - track.x2;
             const float y1_residual = observation.y1 - track.y1;
             const float y2_residual = observation.y2 - track.y2;
-            const bool x_edges_coherent =
-                x1_residual * x2_residual > 0.0f;
-            const bool y_edges_coherent =
-                y1_residual * y2_residual > 0.0f;
-            stable_motion_residual_x = common_edge_motion(
-                x1_residual, x2_residual);
-            stable_motion_residual_y = common_edge_motion(
-                y1_residual, y2_residual);
+            const bool x_edges_coherent = x1_residual * x2_residual > 0.0f;
+            const bool y_edges_coherent = y1_residual * y2_residual > 0.0f;
+            stable_motion_residual_x =
+                common_edge_motion(x1_residual, x2_residual);
+            horizontal_box_motion_residual_x = stable_motion_residual_x;
+            stable_motion_residual_y =
+                common_edge_motion(y1_residual, y2_residual);
             const float target_diagonal = std::max(
-                1.0f, std::hypot(
-                    (track.x2 - track.x1 +
-                     observation.x2 - observation.x1) * 0.5f,
-                    (track.y2 - track.y1 +
-                     observation.y2 - observation.y1) * 0.5f));
+                1.0f,
+                std::hypot(
+                    (track.x2 - track.x1 + observation.x2 - observation.x1) *
+                        0.5f,
+                    (track.y2 - track.y1 + observation.y2 - observation.y1) *
+                        0.5f));
             const float coherent_deformation_maximum =
                 target_diagonal *
                 kTrackCoherentDeformationMaximumTargetDiagonal;
@@ -684,17 +863,15 @@ struct Aim::Impl {
                 target_diagonal *
                     kTrackCoherentDeformationMinimumShapeChangeTargetDiagonal);
             const bool width_changed =
-                std::fabs(x2_residual - x1_residual) >
-                    shape_change_minimum;
+                std::fabs(x2_residual - x1_residual) > shape_change_minimum;
             const bool height_changed =
-                std::fabs(y2_residual - y1_residual) >
-                    shape_change_minimum;
+                std::fabs(y2_residual - y1_residual) > shape_change_minimum;
             const bool shape_changed = width_changed || height_changed;
             const bool pose_changed = width_changed && height_changed;
-            const auto update_deformation = [=](
-                    bool shape_evidence, float residual,
-                    bool edges_coherent,
-                    int& hold_frames) {
+            const auto update_deformation = [=](bool shape_evidence,
+                                                float residual,
+                                                bool edges_coherent,
+                                                int& hold_frames) {
                 const bool deformation =
                     shape_evidence && edges_coherent &&
                     std::fabs(residual) <= coherent_deformation_maximum;
@@ -704,91 +881,267 @@ struct Aim::Impl {
                     --hold_frames;
                 }
             };
-            update_deformation(
-                shape_changed, center_motion_residual_x,
-                x_edges_coherent,
-                track.shape_deformation_x_frames);
-            update_deformation(
-                shape_changed, center_motion_residual_y,
-                y_edges_coherent,
-                track.shape_deformation_y_frames);
-            update_deformation(
-                pose_changed, center_motion_residual_x,
-                x_edges_coherent,
-                track.pose_deformation_x_frames);
-            update_deformation(
-                pose_changed, center_motion_residual_y,
-                y_edges_coherent,
-                track.pose_deformation_y_frames);
-            const auto update_protected_motion = [](
-                    bool shape_protected, float velocity,
-                    float& direction, int& frames) {
-                if (!shape_protected) {
-                    direction = 0.0f;
-                    frames = 0;
-                    return;
-                }
-                if (frames >= kTrackProtectedMotionConfirmFrames +
-                    kTrackProtectedMotionRampFrames) {
-                    return;
-                }
-                if (std::fabs(velocity) <
-                    kTrackProtectedMotionMinimumPixelsPerSecond) {
-                    direction = 0.0f;
-                    frames = 0;
-                    return;
-                }
-                const float current_direction =
-                    std::copysign(1.0f, velocity);
-                if (current_direction == direction) {
-                    frames = std::min(
-                        frames + 1,
-                        kTrackProtectedMotionConfirmFrames +
-                            kTrackProtectedMotionRampFrames);
+            update_deformation(shape_changed,
+                               center_motion_residual_x,
+                               x_edges_coherent,
+                               track.shape_deformation_x_frames);
+            update_deformation(shape_changed,
+                               center_motion_residual_y,
+                               y_edges_coherent,
+                               track.shape_deformation_y_frames);
+            const float maximum_x_edge_residual =
+                std::max(std::fabs(x1_residual), std::fabs(x2_residual));
+            const float minimum_x_edge_residual =
+                std::min(std::fabs(x1_residual), std::fabs(x2_residual));
+            const float track_width = track.x2 - track.x1;
+            const float observation_width = observation.x2 - observation.x1;
+            const bool partial_visibility_x =
+                !observation.head_only && width_changed &&
+                maximum_x_edge_residual > 0.0f &&
+                observation_width <=
+                    track_width * kTrackPartialVisibilityMaximumWidthRatio &&
+                minimum_x_edge_residual / maximum_x_edge_residual <=
+                    kTrackPartialVisibilityStableEdgeMaximumResidualRatio;
+            const bool pose_center_trend_x =
+                pose_changed && x_edges_coherent &&
+                std::fabs(center_motion_residual_x) <=
+                    coherent_deformation_maximum;
+            // 原宽高共同形变继续使用中心趋势；另补“一边稳定、另一边
+            // 内缩”的半身可见性证据。对称缩放和普通单轴动画保持旧路径。
+            if (pose_center_trend_x || partial_visibility_x) {
+                track.horizontal_center_trend_frames =
+                    kTrackCoherentDeformationHoldFrames;
+            } else if (track.horizontal_center_trend_frames > 0) {
+                --track.horizontal_center_trend_frames;
+            }
+            if (partial_visibility_x) {
+                // 残差较大的边就是疑似被裁掉的一侧。仅同一侧连续出现才
+                // 累计；左右交替更像轮廓抖动，不能提前接受成新框。
+                const float partial_side =
+                    std::fabs(x1_residual) > std::fabs(x2_residual) ? -1.0f
+                                                                    : 1.0f;
+                const bool same_partial_side =
+                    partial_side == track.partial_visibility_x_side;
+                const int previous_partial_frames =
+                    same_partial_side ? track.partial_visibility_x_frames : 0;
+                if (same_partial_side) {
+                    track.partial_visibility_x_frames =
+                        std::min(track.partial_visibility_x_frames + 1,
+                                 kTrackPartialVisibilityConfirmFrames);
                 } else {
-                    direction = current_direction;
-                    frames = 1;
+                    track.partial_visibility_x_side = partial_side;
+                    track.partial_visibility_x_frames = 1;
                 }
-            };
-            update_protected_motion(
-                track.pose_deformation_x_frames > 0, track.vx,
-                track.protected_motion_direction_x,
-                track.protected_motion_x_frames);
-            update_protected_motion(
+                preserve_horizontal_box = track.partial_visibility_x_frames <
+                                          kTrackPartialVisibilityConfirmFrames;
+                const bool confirmed_now =
+                    previous_partial_frames ==
+                        kTrackPartialVisibilityConfirmFrames - 1 &&
+                    track.partial_visibility_x_frames ==
+                        kTrackPartialVisibilityConfirmFrames;
+                if (preserve_horizontal_box || confirmed_now) {
+                    // 小目标单侧裁切的中心偏移可能不足 ROI 的 2%。几何证据
+                    // 已成立时，前两点仍必须无条件与主 OLS 隔离；第三个同侧
+                    // 点才确认新的可见构图，并按原时间戳重建趋势。
+                    if (previous_partial_frames == 0) {
+                        // 不能把此前由普通 ROI 创新留下的候选与单侧裁切
+                        // 拼接；几何序列必须从自己的第一帧独立计数。
+                        clear_horizontal_trend_change_point(track);
+                    }
+                    append_horizontal_trend_change_candidate(
+                        track,
+                        partial_side,
+                        track.state_at,
+                        observation_center_x_ratio);
+                    isolate_horizontal_center_observation = true;
+                    if (confirmed_now) {
+                        commit_horizontal_trend_change_point(track);
+                        track.vx = 0.0f;
+                        track.horizontal_trend_rebuilding_from_partial = true;
+                        track.partial_visibility_x_recovery_pending = true;
+                        track.accepted_partial_visibility_x_width =
+                            observation_width;
+                        suppress_center_velocity_x = true;
+                    }
+                }
+            } else {
+                const bool abandoned_partial_candidate =
+                    track.partial_visibility_x_frames > 0 &&
+                    track.partial_visibility_x_frames <
+                        kTrackPartialVisibilityConfirmFrames;
+                track.partial_visibility_x_frames = 0;
+                track.partial_visibility_x_side = 0.0f;
+                if (abandoned_partial_candidate) {
+                    clear_horizontal_trend_change_point(track);
+                }
+            }
+            const bool full_visibility_recovery_x =
+                !observation.head_only &&
+                track.partial_visibility_x_recovery_pending && width_changed &&
+                track.accepted_partial_visibility_x_width > 0.0f &&
+                maximum_x_edge_residual > 0.0f &&
+                observation_width >=
+                    track.accepted_partial_visibility_x_width /
+                        kTrackPartialVisibilityMaximumWidthRatio &&
+                minimum_x_edge_residual / maximum_x_edge_residual <=
+                    kTrackPartialVisibilityStableEdgeMaximumResidualRatio;
+            if (full_visibility_recovery_x) {
+                // 已接受的单侧半框恢复为完整框时，两种中心语义不能混进
+                // 同一 OLS。以首个完整框重新播种；满五点前既不消费原始
+                // 中心残差，也不把扩边误当成人物速度。
+                reset_horizontal_trend(track);
+                track.partial_visibility_x_recovery_pending = false;
+                track.accepted_partial_visibility_x_width = 0.0f;
+                append_horizontal_trend(
+                    track, track.state_at, observation_center_x_ratio);
+                track.horizontal_trend_rebuilding_from_partial = true;
+                track.horizontal_center_trend_frames =
+                    kTrackCoherentDeformationHoldFrames;
+                isolate_horizontal_center_observation = true;
+                suppress_center_velocity_x = true;
+            }
+            update_deformation(pose_changed,
+                               center_motion_residual_y,
+                               y_edges_coherent,
+                               track.pose_deformation_y_frames);
+            if (!observation.head_only) {
+                if (isolate_horizontal_center_observation) {
+                    // 候选未确认时继续按不含候选的主趋势推进；第三点提交后
+                    // 新窗只有三个样本，会自然走下面的几何预热 fallback。
+                    horizontal_trend =
+                        estimate_horizontal_trend(track, track.state_at);
+                } else if (track.horizontal_center_trend_frames > 0 &&
+                           track.horizontal_trend.count >=
+                               kTrackHorizontalTrendMinimumSampleCount) {
+                    // 先用未包含当前观测的稳定窗口外推到当前采集时刻。
+                    // 越界候选在确认前不进入主窗，避免单/双帧异常在恢复后
+                    // 继续污染回归并形成延迟误重置。
+                    horizontal_trend =
+                        estimate_horizontal_trend(track, track.state_at);
+                    if (horizontal_trend.valid) {
+                        const float innovation =
+                            observation_center_x_ratio -
+                            horizontal_trend.position_ratio;
+                        float outside_side = 0.0f;
+                        if (innovation <
+                            -kTrackHorizontalTrendChangePointMaximumRoiWidthRatio) {
+                            outside_side = -1.0f;
+                        } else if (
+                            innovation >
+                            kTrackHorizontalTrendChangePointMaximumRoiWidthRatio) {
+                            outside_side = 1.0f;
+                        }
+                        if (outside_side != 0.0f) {
+                            append_horizontal_trend_change_candidate(
+                                track,
+                                outside_side,
+                                track.state_at,
+                                observation_center_x_ratio);
+                            if (track.horizontal_trend_change.count >=
+                                kTrackHorizontalTrendChangePointConfirmSampleCount) {
+                                // 连续三次同侧几何创新才确认新运动段。三点按
+                                // 原时间顺序播种新窗，旧方向速度只在此处释放。
+                                commit_horizontal_trend_change_point(track);
+                                horizontal_trend = {};
+                                track.vx = 0.0f;
+                            }
+                        } else {
+                            clear_horizontal_trend_change_point(track);
+                            append_horizontal_trend(track,
+                                                    track.state_at,
+                                                    observation_center_x_ratio);
+                            horizontal_trend = estimate_horizontal_trend(
+                                track, track.state_at);
+                        }
+                    } else {
+                        clear_horizontal_trend_change_point(track);
+                        append_horizontal_trend(
+                            track, track.state_at, observation_center_x_ratio);
+                    }
+                } else {
+                    // OLS 尚未有效时只能继续预热；变点候选不能跨中心趋势
+                    // 保护段或无效拟合累计。
+                    clear_horizontal_trend_change_point(track);
+                    append_horizontal_trend(
+                        track, track.state_at, observation_center_x_ratio);
+                    if (track.horizontal_center_trend_frames > 0) {
+                        horizontal_trend =
+                            estimate_horizontal_trend(track, track.state_at);
+                    }
+                }
+            }
+            if (track.horizontal_center_trend_frames > 0) {
+                if (horizontal_trend.valid) {
+                    // 增长窗口相邻帧只增加一个样本，拟合端点仍经既有
+                    // alpha 合入；不会在第 51 帧形成一步状态切换。
+                    stable_motion_residual_x =
+                        horizontal_trend.position_ratio * roi_width -
+                        track.aim_x;
+                    horizontal_trend_active = true;
+                } else {
+                    // 首四个观测尚不足以拟合斜率，沿用两侧共同位移；
+                    // 该几何 fallback 不判断快慢，且只持续约 17 ms。
+                    velocity_beta_x *=
+                        kTrackDeformationVelocityBetaScaleMaximum;
+                }
+            } else if (track.shape_deformation_x_frames > 0) {
+                stable_motion_residual_x = 0.0f;
+                velocity_beta_x *= kTrackDeformationVelocityBetaScaleMaximum;
+            }
+            if (track.horizontal_trend_rebuilding_from_partial &&
+                track.horizontal_trend.count >=
+                    kTrackHorizontalTrendMinimumSampleCount) {
+                track.horizontal_trend_rebuilding_from_partial = false;
+            }
+            const auto update_vertical_protected_motion =
+                [](bool shape_protected,
+                   float velocity,
+                   float& direction,
+                   int& frames) {
+                    if (!shape_protected) {
+                        direction = 0.0f;
+                        frames = 0;
+                        return;
+                    }
+                    if (frames >= kTrackVerticalProtectedMotionConfirmFrames +
+                                      kTrackVerticalProtectedMotionRampFrames) {
+                        return;
+                    }
+                    if (std::fabs(velocity) <
+                        kTrackVerticalProtectedMotionMinimumPixelsPerSecond) {
+                        direction = 0.0f;
+                        frames = 0;
+                        return;
+                    }
+                    const float current_direction =
+                        std::copysign(1.0f, velocity);
+                    if (current_direction == direction) {
+                        frames = std::min(
+                            frames + 1,
+                            kTrackVerticalProtectedMotionConfirmFrames +
+                                kTrackVerticalProtectedMotionRampFrames);
+                    } else {
+                        direction = current_direction;
+                        frames = 1;
+                    }
+                };
+            update_vertical_protected_motion(
                 track.pose_deformation_y_frames > 0, track.vy,
                 track.protected_motion_direction_y,
                 track.protected_motion_y_frames);
-            const auto protected_motion_blend = [](int frames) {
-                return std::clamp(
-                    static_cast<float>(
-                        frames - kTrackProtectedMotionConfirmFrames) /
-                        static_cast<float>(kTrackProtectedMotionRampFrames),
-                    0.0f, 1.0f);
-            };
-            if (track.shape_deformation_x_frames > 0) {
-                stable_motion_residual_x = 0.0f;
-                if (x_edges_coherent) {
-                    float scale =
-                        kTrackDeformationVelocityBetaScaleMaximum;
-                    if (track.pose_deformation_x_frames > 0) {
-                        const float blend = protected_motion_blend(
-                            track.protected_motion_x_frames);
-                        scale = kTrackDeformationVelocityBetaScaleMinimum +
-                            (kTrackDeformationVelocityBetaScaleMaximum -
-                             kTrackDeformationVelocityBetaScaleMinimum) *
-                                blend;
-                    }
-                    velocity_beta_x *= scale;
-                }
-            }
             if (track.shape_deformation_y_frames > 0) {
                 stable_motion_residual_y = 0.0f;
                 if (y_edges_coherent) {
                     float scale =
                         kTrackDeformationVelocityBetaScaleMaximum;
                     if (track.pose_deformation_y_frames > 0) {
-                        const float blend = protected_motion_blend(
-                            track.protected_motion_y_frames);
+                        const float blend = std::clamp(
+                            static_cast<float>(
+                                track.protected_motion_y_frames -
+                                kTrackVerticalProtectedMotionConfirmFrames) /
+                                static_cast<float>(
+                                    kTrackVerticalProtectedMotionRampFrames),
+                            0.0f, 1.0f);
                         scale = kTrackDeformationVelocityBetaScaleMinimum +
                             (kTrackDeformationVelocityBetaScaleMaximum -
                              kTrackDeformationVelocityBetaScaleMinimum) *
@@ -806,7 +1159,6 @@ struct Aim::Impl {
                     kTrackDeformationVelocityBetaScaleMaximum;
             }
         }
-
         // 身体框短时消失、只剩头框时保留既有身体尺度，只用头部观测平移状态。
         // 否则下一帧身体框恢复会制造一次无意义的尺度突变并破坏多目标关联。
         if (observation.head_only && !track.head_only) {
@@ -817,9 +1169,17 @@ struct Aim::Impl {
             track.y1 += stable_motion_residual_y * alpha;
             track.y2 += stable_motion_residual_y * alpha;
         } else {
-            track.x1 += (observation.x1 - track.x1) * alpha;
+            if (preserve_horizontal_box) {
+                // 单侧截断尚未确认时只消费两边都支持的平移，不把移动的
+                // 可见边界写入身份框。持续第三帧会退出该分支并接受新框。
+                const float dx = horizontal_box_motion_residual_x * alpha;
+                track.x1 += dx;
+                track.x2 += dx;
+            } else {
+                track.x1 += (observation.x1 - track.x1) * alpha;
+                track.x2 += (observation.x2 - track.x2) * alpha;
+            }
             track.y1 += (observation.y1 - track.y1) * alpha;
-            track.x2 += (observation.x2 - track.x2) * alpha;
             track.y2 += (observation.y2 - track.y2) * alpha;
             track.head_only = observation.head_only;
         }
@@ -864,30 +1224,30 @@ struct Aim::Impl {
             track.aim_x = observed_aim_x;
             track.aim_y = observed_aim_y;
         } else {
-            // predict_tracks() 已按速度完成本帧推进。共同边缘位移使用与
-            // 关联框相同的增益立即校正；剩余差值只可能来自框内形变或
-            // 缓慢尺度变化，因此使用独立低增益，不拖慢真实平移响应。
+            // predict_tracks() 已按速度完成本帧推进。常规段的共同边缘位移
+            // 使用与关联框相同的增益；X 宽高共同形变段则使用时间趋势端点。
+            // 其余框内形变或缓慢尺度变化使用独立低增益。
             track.aim_x += stable_motion_residual_x * alpha;
             track.aim_y += stable_motion_residual_y * alpha;
             const float shape_alpha = high
                 ? kTrackAimShapeAlphaHigh : kTrackAimShapeAlphaLow;
-            const auto protected_shape_alpha = [=](
-                    int deformation_frames, int motion_frames) {
-                if (deformation_frames <= 0) return shape_alpha;
-                return shape_alpha * std::clamp(
-                    static_cast<float>(
-                        motion_frames - kTrackProtectedMotionConfirmFrames) /
-                        static_cast<float>(kTrackProtectedMotionRampFrames),
-                    0.0f, 1.0f);
-            };
+            const float horizontal_shape_alpha =
+                track.horizontal_center_trend_frames > 0
+                ? 0.0f : shape_alpha;
             track.aim_x += (observed_aim_x - track.aim_x) *
-                protected_shape_alpha(
-                    track.pose_deformation_x_frames,
-                    track.protected_motion_x_frames);
+                horizontal_shape_alpha;
+            const float vertical_shape_alpha =
+                track.pose_deformation_y_frames <= 0
+                ? shape_alpha
+                : shape_alpha * std::clamp(
+                    static_cast<float>(
+                        track.protected_motion_y_frames -
+                        kTrackVerticalProtectedMotionConfirmFrames) /
+                        static_cast<float>(
+                            kTrackVerticalProtectedMotionRampFrames),
+                    0.0f, 1.0f);
             track.aim_y += (observed_aim_y - track.aim_y) *
-                protected_shape_alpha(
-                    track.pose_deformation_y_frames,
-                    track.protected_motion_y_frames);
+                vertical_shape_alpha;
         }
         track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
         const float vertical_ratio_minimum = std::clamp(
@@ -912,20 +1272,30 @@ struct Aim::Impl {
             track.vy *= 0.5f;
             track.shape_deformation_x_frames = 0;
             track.shape_deformation_y_frames = 0;
-            track.pose_deformation_x_frames = 0;
+            track.horizontal_center_trend_frames = 0;
+            track.partial_visibility_x_frames = 0;
+            track.partial_visibility_x_side = 0.0f;
             track.pose_deformation_y_frames = 0;
-            track.protected_motion_direction_x = 0.0f;
             track.protected_motion_direction_y = 0.0f;
-            track.protected_motion_x_frames = 0;
             track.protected_motion_y_frames = 0;
         } else {
-            // 控制锚点使用对边共同残差抑制瞬时形变；速度观察器仍以低
-            // beta 消费中心残差。持续平移会跨帧累积，正负交替的步态
-            // 形变则相互抵消，避免把真实运动连同轮廓噪声一起归零。
-            track.vx += velocity_beta_x * center_motion_residual_x /
-                track.prediction_dt;
+            // 常规段以低 beta 消费中心残差；X 宽高共同形变段改用同一
+            // 时间趋势的斜率，不能再叠加中心残差。Y 保持短记忆观察器。
+            if (horizontal_trend_active) {
+                const float trend_gain =
+                    std::clamp(track.prediction_dt *
+                                   kTrackHorizontalTrendVelocityGainPerSecond,
+                               0.0f,
+                               1.0f);
+                const float trend_velocity_x =
+                    horizontal_trend.velocity_ratio * roi_width;
+                track.vx += (trend_velocity_x - track.vx) * trend_gain;
+            } else if (!suppress_center_velocity_x) {
+                track.vx += velocity_beta_x * center_motion_residual_x /
+                            track.prediction_dt;
+            }
             track.vy += velocity_beta_y * center_motion_residual_y /
-                track.prediction_dt;
+                        track.prediction_dt;
         }
         clamp_vector(track.vx, track.vy,
                      diagonal * kMaxTrackSpeedDiagonalsPerSecond);
@@ -941,7 +1311,7 @@ struct Aim::Impl {
 
     void associate_stage(const std::vector<Observation>& observations,
                          bool high_stage, bool tentative_stage,
-                         float diagonal,
+                         float diagonal, float roi_width,
                          std::vector<bool>& track_matched,
                          std::vector<bool>& observation_matched) {
         std::vector<std::size_t> track_indices;
@@ -1027,7 +1397,8 @@ struct Aim::Impl {
                 continue;
             }
             update_matched_track(tracks[track_index],
-                                 observations[observation_index], diagonal);
+                                 observations[observation_index], diagonal,
+                                 roi_width);
             track_matched[track_index] = true;
             observation_matched[observation_index] = true;
         }
@@ -1038,17 +1409,29 @@ struct Aim::Impl {
         const float diagonal = std::hypot(
             static_cast<float>(frame.roi_width),
             static_cast<float>(frame.roi_height));
+        const float roi_width = std::max(
+            1.0f, static_cast<float>(frame.roi_width));
         predict_tracks(frame.captured_at, diagonal);
         std::vector<bool> track_matched(tracks.size(), false);
         std::vector<bool> observation_matched(observations.size(), false);
-        associate_stage(observations, true, false, diagonal,
-                        track_matched, observation_matched);
-        associate_stage(observations, true, true, diagonal,
-                        track_matched, observation_matched);
-        associate_stage(observations, false, false, diagonal,
-                        track_matched, observation_matched);
-        associate_stage(observations, false, true, diagonal,
-                        track_matched, observation_matched);
+        associate_stage(observations, true, false, diagonal, roi_width,
+                         track_matched, observation_matched);
+        associate_stage(observations, true, true, diagonal, roi_width,
+                         track_matched, observation_matched);
+        associate_stage(observations,
+                        false,
+                        false,
+                        diagonal,
+                        roi_width,
+                        track_matched,
+                        observation_matched);
+        associate_stage(observations,
+                        false,
+                        true,
+                        diagonal,
+                        roi_width,
+                        track_matched,
+                        observation_matched);
 
         for (std::size_t index = 0; index < tracks.size(); ++index) {
             if (track_matched[index]) continue;
@@ -1057,12 +1440,15 @@ struct Aim::Impl {
             // 新的连续观测重新建立宽高与中心创新证据。
             track.shape_deformation_x_frames = 0;
             track.shape_deformation_y_frames = 0;
-            track.pose_deformation_x_frames = 0;
+            track.horizontal_center_trend_frames = 0;
+            track.partial_visibility_x_frames = 0;
+            track.partial_visibility_x_side = 0.0f;
             track.pose_deformation_y_frames = 0;
-            track.protected_motion_direction_x = 0.0f;
             track.protected_motion_direction_y = 0.0f;
-            track.protected_motion_x_frames = 0;
             track.protected_motion_y_frames = 0;
+            track.partial_visibility_x_recovery_pending = false;
+            track.accepted_partial_visibility_x_width = 0.0f;
+            reset_horizontal_trend(track);
             ++track.lost_frames;
             if (track.state == TrackState::CONFIRMED ||
                 track.state == TrackState::LOST) {
@@ -1090,6 +1476,12 @@ struct Aim::Impl {
                 1, 0, false, observation.head_only,
                 observation.aim_from_head, 1.0f / 240.0f,
                 frame.captured_at});
+            Track& created_track = tracks.back();
+            if (!observation.head_only) {
+                append_horizontal_trend(
+                    created_track, frame.captured_at,
+                    (observation.x1 + observation.x2) * 0.5f / roi_width);
+            }
         }
 
         tracks.erase(std::remove_if(tracks.begin(), tracks.end(),
@@ -1445,8 +1837,11 @@ struct Aim::Impl {
     }
 
     LeadProjection projected_aim_point(
-            const AimFrame& frame, const Track& track,
-            std::chrono::steady_clock::time_point control_at) noexcept {
+        const AimFrame& frame,
+        const Track& track,
+        std::chrono::steady_clock::time_point control_at) noexcept {
+        // 无论趋势或可见性状态如何，基础点都必须遵守用户配置的身体水平
+        // 瞄准范围。估计器负责减少触边，不能靠扩大公开安全范围掩盖误差。
         const float half_range = config.body_aim_range_percent / 200.0f;
         const float range_min_x = track.x1 + (track.x2 - track.x1) *
             (0.5f - half_range);

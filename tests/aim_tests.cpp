@@ -36,11 +36,26 @@ Detection body_box(float center_x, float center_y,
             confidence, 0};
 }
 
-Detection head(float center_x, float center_y,
-               float confidence = 0.95f) {
-    return {center_x - 7.0f, center_y - 7.0f,
-            center_x + 7.0f, center_y + 7.0f,
-            confidence, 1};
+Detection head(float center_x, float center_y, float confidence = 0.95f) {
+    return {center_x - 7.0f,
+            center_y - 7.0f,
+            center_x + 7.0f,
+            center_y + 7.0f,
+            confidence,
+            1};
+}
+
+Detection head_box(float center_x,
+                   float center_y,
+                   float width,
+                   float height,
+                   float confidence = 0.95f) {
+    return {center_x - width * 0.5f,
+            center_y - height * 0.5f,
+            center_x + width * 0.5f,
+            center_y + height * 0.5f,
+            confidence,
+            1};
 }
 
 AimFrame make_frame(std::uint64_t sequence,
@@ -611,7 +626,138 @@ void test_long_pose_deformation_with_sparse_evidence_does_not_leak_into_anchor()
                std::to_string(second_p95));
 }
 
-void test_vertical_jump_pose_protection_keeps_configured_aim_height() {
+void test_horizontal_pose_trend_is_speed_independent() {
+    // 同一个 240 Hz 几何观察器覆盖静止、双向慢移和最新实测约
+    // 412 px/s 的高速档；速度只改变拟合斜率，不参与任何分支选择。
+    constexpr std::array<float, 9> kMotionPerFrame{
+        0.0f, 0.02f, -0.02f, 0.20f, -0.20f,
+        0.80f, -0.80f, 1.70f, -1.70f};
+    constexpr std::array<int, 3> kPosePeriods{20, 34, 40};
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    const auto percentile = [](const std::vector<float>& values,
+                               float fraction) {
+        if (values.empty()) return 0.0f;
+        return values[std::min(
+            values.size() - 1,
+            static_cast<std::size_t>(values.size() * fraction))];
+    };
+
+    for (const int pose_period : kPosePeriods) {
+        for (const float motion_per_frame : kMotionPerFrame) {
+            AimConfig config;
+            config.min_confirmed_hits = 1;
+            config.deadzone_pixels = 0.0f;
+            config.acquisition_range_percent = 150.0f;
+            Aim aim(config);
+            std::vector<float> position_errors;
+            std::vector<float> velocity_errors;
+            std::vector<float> second_differences;
+            std::vector<float> base_points;
+            std::vector<float> all_base_points;
+            int horizontal_boundary_frames = 0;
+            float maximum_warmup_position_error = 0.0f;
+            std::uint64_t track_id = 0;
+            const float start_x = motion_per_frame > 0.0f
+                ? 30.0f : motion_per_frame < 0.0f ? 290.0f : 160.0f;
+
+            for (int index = 0; index < 150; ++index) {
+                const int half_period = pose_period / 2;
+                const int phase_index = index % pose_period;
+                const float pose_phase = phase_index <= half_period
+                    ? -1.0f + static_cast<float>(phase_index) *
+                        (2.0f / static_cast<float>(half_period))
+                    : 1.0f - static_cast<float>(
+                        phase_index - half_period) *
+                        (2.0f / static_cast<float>(half_period));
+                const float true_x = start_x +
+                    static_cast<float>(index) * motion_per_frame;
+                AimFrame frame = make_frame(
+                    static_cast<std::uint64_t>(index + 1),
+                    base + std::chrono::microseconds(
+                        static_cast<long long>(index) * 4167));
+                // 全程只有身体框，确保测试真正覆盖旧 8 px/s fallback，
+                // 而不是由理想头框绕过 body-only 路径。
+                frame.detections = {body_box(
+                    true_x + pose_phase * 3.0f, 175.0f,
+                    42.0f + pose_phase * 1.6f,
+                    90.0f + pose_phase * 1.8f)};
+                const AimResult result = aim.process(frame);
+                expect(result.status == AimStatus::SUCCESS &&
+                           result.has_target,
+                       "X 趋势速度无关回归必须逐帧保留确认目标");
+                if (!result.has_target) continue;
+                if (track_id == 0) track_id = result.target.track_id;
+                expect(result.target.track_id == track_id,
+                       "X 趋势不得因人物移速或方向改变轨迹身份");
+                all_base_points.push_back(result.target.base_aim_x);
+                if (index >= 4 && index < 80) {
+                    maximum_warmup_position_error = std::max(
+                        maximum_warmup_position_error,
+                        std::fabs(result.target.base_aim_x - true_x));
+                }
+                const float width = result.target.x2 - result.target.x1;
+                const float ratio = width > 0.0f
+                    ? (result.target.base_aim_x - result.target.x1) / width
+                    : -1.0f;
+                if (std::fabs(ratio - 0.25f) <= 0.0001f ||
+                    std::fabs(ratio - 0.75f) <= 0.0001f) {
+                    ++horizontal_boundary_frames;
+                }
+                if (index < 80) continue;
+
+                position_errors.push_back(std::fabs(
+                    result.target.base_aim_x - true_x));
+                velocity_errors.push_back(std::fabs(
+                    result.target.velocity_x - motion_per_frame * 240.0f));
+                base_points.push_back(result.target.base_aim_x);
+            }
+
+            for (std::size_t index = 2; index < base_points.size(); ++index) {
+                second_differences.push_back(std::fabs(
+                    base_points[index] - 2.0f * base_points[index - 1] +
+                    base_points[index - 2]));
+            }
+            float activation_second_maximum = 0.0f;
+            for (std::size_t index = 4;
+                 index <= 60 && index < all_base_points.size(); ++index) {
+                activation_second_maximum = std::max(
+                    activation_second_maximum,
+                    std::fabs(all_base_points[index] -
+                        2.0f * all_base_points[index - 1] +
+                        all_base_points[index - 2]));
+            }
+            std::sort(position_errors.begin(), position_errors.end());
+            std::sort(velocity_errors.begin(), velocity_errors.end());
+            std::sort(second_differences.begin(), second_differences.end());
+            const float error_p95 = percentile(position_errors, 0.95f);
+            const float velocity_error_p95 =
+                percentile(velocity_errors, 0.95f);
+            const float second_p95 = percentile(second_differences, 0.95f);
+            expect(error_p95 <= 2.0f && velocity_error_p95 <= 12.0f &&
+                       second_p95 <= 0.25f &&
+                       maximum_warmup_position_error <= 4.0f &&
+                       activation_second_maximum <= 2.0f &&
+                       horizontal_boundary_frames == 0,
+                   "X 趋势必须跨姿态周期、双向人物速度保持准确且不贴边，"
+                   "周期/每帧位移/位置P95/速度P95/二阶P95/"
+                   "预热最大误差/增长窗最大二阶/全程贴边帧=" +
+                       std::to_string(pose_period) + "/" +
+                       std::to_string(motion_per_frame) + "/" +
+                       std::to_string(error_p95) + "/" +
+                       std::to_string(velocity_error_p95) + "/" +
+                       std::to_string(second_p95) + "/" +
+                       std::to_string(maximum_warmup_position_error) + "/" +
+                       std::to_string(activation_second_maximum) + "/" +
+                       std::to_string(horizontal_boundary_frames));
+        }
+    }
+}
+
+void test_horizontal_pose_trend_uses_capture_time_across_head_and_delivery_gaps() {
+    constexpr std::array<int, 8> kIntervalsMicroseconds{
+        4167, 4167, 8334, 4167, 12501, 4167, 4167, 8334};
+    constexpr float kVelocityPixelsPerSecond = 120.0f;
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 0.0f;
@@ -619,6 +765,1091 @@ void test_vertical_jump_pose_protection_keeps_configured_aim_height() {
     Aim aim(config);
     const auto base = std::chrono::steady_clock::now() +
         std::chrono::seconds(1);
+    std::chrono::microseconds elapsed{};
+    std::uint64_t sequence = 1;
+    std::uint64_t track_id = 0;
+    std::vector<float> position_errors;
+    std::vector<float> velocity_errors;
+    std::vector<float> base_points;
+    int horizontal_boundary_frames = 0;
+
+    for (int index = 0; index < 180; ++index) {
+        const int interval = kIntervalsMicroseconds[
+            static_cast<std::size_t>(index) % kIntervalsMicroseconds.size()];
+        if (index > 0) {
+            elapsed += std::chrono::microseconds(interval);
+            sequence += static_cast<std::uint64_t>(
+                std::max(1, static_cast<int>(std::lround(
+                    static_cast<float>(interval) / 4167.0f))));
+        }
+        const float elapsed_seconds =
+            static_cast<float>(elapsed.count()) / 1000000.0f;
+        const float true_x = 40.0f +
+            kVelocityPixelsPerSecond * elapsed_seconds;
+        const int source_phase = static_cast<int>(sequence % 34);
+        const float pose_phase = source_phase <= 17
+            ? -1.0f + static_cast<float>(source_phase) * (2.0f / 17.0f)
+            : 1.0f - static_cast<float>(source_phase - 17) *
+                (2.0f / 17.0f);
+        AimFrame frame = make_frame(sequence, base + elapsed);
+        frame.detections = {body_box(
+            true_x + pose_phase * 3.0f, 175.0f,
+            25.6f + pose_phase * 0.8f,
+            70.0f + pose_phase * 1.8f)};
+        // 交替覆盖单帧、8 帧及 70 帧无头段。头框只是原始语义层，
+        // 其出现/消失不能重置身体中心趋势或制造基础点阶跃。
+        const int head_phase = index % 120;
+        const bool head_missing = head_phase == 23 ||
+            (head_phase >= 50 && head_phase < 58) ||
+            (index >= 90 && index < 160);
+        if (!head_missing) frame.detections.push_back(head(true_x, 145.0f));
+
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "头框/交付缺口回归必须始终由身体实体维持确认目标");
+        if (!result.has_target) continue;
+        if (track_id == 0) track_id = result.target.track_id;
+        expect(result.target.track_id == track_id,
+               "头框与交付缺口不得生成第二轨迹或切换实体");
+        if (index < 80) continue;
+
+        position_errors.push_back(std::fabs(
+            result.target.base_aim_x - true_x));
+        velocity_errors.push_back(std::fabs(
+            result.target.velocity_x - kVelocityPixelsPerSecond));
+        base_points.push_back(result.target.base_aim_x);
+        const float width = result.target.x2 - result.target.x1;
+        const float ratio = width > 0.0f
+            ? (result.target.base_aim_x - result.target.x1) / width : -1.0f;
+        if (std::fabs(ratio - 0.25f) <= 0.0001f ||
+            std::fabs(ratio - 0.75f) <= 0.0001f) {
+            ++horizontal_boundary_frames;
+        }
+    }
+
+    std::vector<float> second_differences;
+    for (std::size_t index = 2; index < base_points.size(); ++index) {
+        second_differences.push_back(std::fabs(
+            base_points[index] - 2.0f * base_points[index - 1] +
+            base_points[index - 2]));
+    }
+    std::sort(position_errors.begin(), position_errors.end());
+    std::sort(velocity_errors.begin(), velocity_errors.end());
+    std::sort(second_differences.begin(), second_differences.end());
+    const auto percentile = [](const std::vector<float>& values,
+                               float fraction) {
+        return values[std::min(
+            values.size() - 1,
+            static_cast<std::size_t>(values.size() * fraction))];
+    };
+    const float error_p95 = percentile(position_errors, 0.95f);
+    const float velocity_error_p95 = percentile(velocity_errors, 0.95f);
+    const float second_p99 = percentile(second_differences, 0.99f);
+    // 非等间隔交付下逐样本二阶包含 8～12 ms 合法时间跨度变化，故只约束
+    // 其有界上限；位置和速度误差才是 timestamp 拟合的主验收量。
+    expect(error_p95 <= 2.0f && velocity_error_p95 <= 15.0f &&
+               second_p99 <= 1.25f && horizontal_boundary_frames == 0,
+           "趋势必须按真实采集时间跨过交付/头框缺口，"
+           "位置P95/速度P95/二阶P99/贴边帧=" +
+               std::to_string(error_p95) + "/" +
+               std::to_string(velocity_error_p95) + "/" +
+               std::to_string(second_p99) + "/" +
+               std::to_string(horizontal_boundary_frames));
+}
+
+void test_horizontal_pose_trend_reversal_is_bounded() {
+    constexpr std::array<float, 3> kMotionPerFrame{0.20f, 0.80f, 1.70f};
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    for (const float speed_per_frame : kMotionPerFrame) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.acquisition_range_percent = 150.0f;
+        Aim aim(config);
+        float true_x = 40.0f;
+        std::vector<float> recovered_errors;
+        std::vector<float> base_points;
+        int direction_changes = 0;
+        int previous_direction = 0;
+        int reversal_boundary_frames = 0;
+        int wrong_direction_frames = 0;
+        float maximum_reversal_error = 0.0f;
+
+        for (int index = 0; index < 205; ++index) {
+            const float motion_per_frame = index < 100
+                ? speed_per_frame : -speed_per_frame;
+            if (index > 0) true_x += motion_per_frame;
+            const int phase_index = index % 34;
+            const float pose_phase = phase_index <= 17
+                ? -1.0f + static_cast<float>(phase_index) * (2.0f / 17.0f)
+                : 1.0f - static_cast<float>(phase_index - 17) *
+                    (2.0f / 17.0f);
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.detections = {body_box(
+                true_x + pose_phase * 3.0f, 175.0f,
+                25.6f + pose_phase * 0.8f,
+                70.0f + pose_phase * 1.8f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "不同运动尺度的 X 趋势换向必须逐帧保留确认目标");
+            if (!result.has_target) continue;
+
+            if (index >= 100 && index < 156) {
+                maximum_reversal_error = std::max(
+                    maximum_reversal_error,
+                    std::fabs(result.target.base_aim_x - true_x));
+                const float width = result.target.x2 - result.target.x1;
+                const float ratio = width > 0.0f
+                    ? (result.target.base_aim_x - result.target.x1) / width
+                    : -1.0f;
+                if (std::fabs(ratio - 0.25f) <= 0.0001f ||
+                    std::fabs(ratio - 0.75f) <= 0.0001f) {
+                    ++reversal_boundary_frames;
+                }
+            }
+            if (index >= 160) {
+                recovered_errors.push_back(std::fabs(
+                    result.target.base_aim_x - true_x));
+            }
+            if (index >= 80) {
+                base_points.push_back(result.target.base_aim_x);
+                if (base_points.size() >= 2) {
+                    const float delta = base_points.back() -
+                        base_points[base_points.size() - 2];
+                    const int direction = delta > 0.10f ? 1 :
+                        delta < -0.10f ? -1 : 0;
+                    if (index >= 100 && index < 156 && direction > 0) {
+                        ++wrong_direction_frames;
+                    }
+                    if (direction != 0) {
+                        if (previous_direction != 0 &&
+                            direction != previous_direction) {
+                            ++direction_changes;
+                        }
+                        previous_direction = direction;
+                    }
+                }
+            }
+        }
+
+        std::sort(recovered_errors.begin(), recovered_errors.end());
+        const float recovered_p95 = recovered_errors[
+            std::min(recovered_errors.size() - 1,
+                     static_cast<std::size_t>(
+                         recovered_errors.size() * 0.95f))];
+        const float wrong_direction_distance =
+            static_cast<float>(wrong_direction_frames) * speed_per_frame;
+        expect(maximum_reversal_error <= 16.0f && recovered_p95 <= 2.0f &&
+                   direction_changes <= 1 &&
+                   reversal_boundary_frames <= 20 &&
+                   wrong_direction_distance <= 12.0f,
+               "固定窗跨运动尺度换向时允许有限几何滞后但不得往返震荡，"
+               "每帧位移/最大换向误差/恢复P95/方向变化/贴边帧/"
+               "错向距离=" +
+                   std::to_string(speed_per_frame) + "/" +
+                   std::to_string(maximum_reversal_error) + "/" +
+                   std::to_string(recovered_p95) + "/" +
+                   std::to_string(direction_changes) + "/" +
+                   std::to_string(reversal_boundary_frames) + "/" +
+                   std::to_string(wrong_direction_distance));
+    }
+}
+
+void test_horizontal_pose_trend_recovers_after_body_semantic_loss() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.max_lost_frames = 3;
+    config.deadzone_pixels = 0.0f;
+    config.acquisition_range_percent = 150.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::uint64_t track_id = 0;
+    float maximum_recovery_error = 0.0f;
+    int recovery_boundary_frames = 0;
+
+    for (int index = 0; index < 180; ++index) {
+        const float true_x = 40.0f + static_cast<float>(index) * 0.80f;
+        const int phase_index = index % 34;
+        const float pose_phase = phase_index <= 17
+            ? -1.0f + static_cast<float>(phase_index) * (2.0f / 17.0f)
+            : 1.0f - static_cast<float>(phase_index - 17) *
+                (2.0f / 17.0f);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index) * 4167));
+        const bool empty_frame = index == 70;
+        const bool head_only_frame = index >= 100 && index < 103;
+        if (head_only_frame) {
+            frame.detections = {head(true_x, 145.0f)};
+        } else if (!empty_frame) {
+            frame.detections = {body_box(
+                true_x + pose_phase * 3.0f, 175.0f,
+                42.0f + pose_phase * 1.6f,
+                90.0f + pose_phase * 1.8f)};
+        }
+
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "身体丢失/语义切换期间必须保留原确认轨迹");
+        if (!result.has_target) continue;
+        if (track_id == 0) track_id = result.target.track_id;
+        expect(result.target.track_id == track_id,
+               "空帧、head-only 与身体恢复不得更换轨迹身份");
+
+        const bool recovery_body_frame =
+            (!empty_frame && !head_only_frame) &&
+            ((index >= 71 && index < 100) || index >= 103);
+        if (!recovery_body_frame) continue;
+        maximum_recovery_error = std::max(
+            maximum_recovery_error,
+            std::fabs(result.target.base_aim_x - true_x));
+        const float width = result.target.x2 - result.target.x1;
+        const float ratio = width > 0.0f
+            ? (result.target.base_aim_x - result.target.x1) / width : -1.0f;
+        if (std::fabs(ratio - 0.25f) <= 0.0001f ||
+            std::fabs(ratio - 0.75f) <= 0.0001f) {
+            ++recovery_boundary_frames;
+        }
+    }
+
+    expect(maximum_recovery_error <= 4.0f && recovery_boundary_frames == 0,
+           "身体趋势重置后必须用增长窗及时重暖机，最大误差/贴边帧=" +
+               std::to_string(maximum_recovery_error) + "/" +
+               std::to_string(recovery_boundary_frames));
+}
+
+void test_horizontal_pose_trend_bounds_sparse_center_outliers() {
+    struct OutlierPattern {
+        std::array<float, 3> offsets;
+        int half_width_frames;
+        float half_height_offset;
+    };
+    constexpr std::array<OutlierPattern, 11> kPatterns{
+        {{{{8.0f, 0.0f, 0.0f}}, 0, 0.0f},
+         {{{8.0f, 8.0f, 0.0f}}, 0, 0.0f},
+         {{{-8.0f, -8.0f, 0.0f}}, 0, 0.0f},
+         {{{8.0f, -8.0f, 0.0f}}, 0, 0.0f},
+         {{{8.0f, 0.0f, 8.0f}}, 0, 0.0f},
+         // 左右单侧裁切各覆盖一帧和两帧；偏移等于丢失半宽的一半。
+         {{{6.4f, 0.0f, 0.0f}}, 1, 0.0f},
+         {{{6.4f, 6.4f, 0.0f}}, 2, 0.0f},
+         {{{-6.4f, 0.0f, 0.0f}}, 1, 0.0f},
+         {{{-6.4f, -6.4f, 0.0f}}, 2, 0.0f},
+         // 上/下半身只改变 Y 几何，不得触发 X 的单侧截断保护。
+         {{{0.0f, 0.0f, 0.0f}}, 0, -17.5f},
+         {{{0.0f, 0.0f, 0.0f}}, 0, 17.5f}}};
+    constexpr std::array<int, 2> kOutlierStartFrames{20, 90};
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    std::vector<float> position_errors;
+    std::vector<float> velocity_errors;
+    std::vector<float> second_differences;
+    int delayed_boundary_frames = 0;
+    int partial_box_edge_frames = 0;
+    float maximum_outlier_position_error = 0.0f;
+    float maximum_outlier_velocity_error = 0.0f;
+    float maximum_warmup_position_delta = 0.0f;
+    float maximum_warmup_velocity_delta = 0.0f;
+    float maximum_event_position_delta = 0.0f;
+    float maximum_event_velocity_delta = 0.0f;
+    float maximum_event_second_difference = 0.0f;
+    float maximum_vertical_position_delta = 0.0f;
+    float maximum_vertical_velocity_delta = 0.0f;
+    float maximum_vertical_second_difference_delta = 0.0f;
+
+    for (int phase_offset = 0; phase_offset < 34; ++phase_offset) {
+        for (const OutlierPattern& pattern : kPatterns) {
+            for (const int outlier_start : kOutlierStartFrames) {
+                AimConfig config;
+                config.min_confirmed_hits = 1;
+                config.deadzone_pixels = 0.0f;
+                config.acquisition_range_percent = 150.0f;
+                Aim aim(config);
+                Aim reference_aim(config);
+                std::vector<float> scenario_base_points;
+                std::vector<float> all_base_points;
+                std::vector<float> all_reference_base_points;
+                std::uint64_t track_id = 0;
+
+                for (int index = 0; index < 150; ++index) {
+                    const float true_x =
+                        70.0f + static_cast<float>(index) * 0.20f;
+                    const int phase_index = (index + phase_offset) % 34;
+                    const float pose_phase =
+                        phase_index <= 17
+                            ? -1.0f + static_cast<float>(phase_index) *
+                                          (2.0f / 17.0f)
+                            : 1.0f - static_cast<float>(phase_index - 17) *
+                                         (2.0f / 17.0f);
+                    const float sparse_outlier =
+                        index >= outlier_start && index <= outlier_start + 2
+                            ? pattern.offsets[static_cast<std::size_t>(
+                                  index - outlier_start)]
+                            : 0.0f;
+                    const bool outlier_window =
+                        index >= outlier_start && index <= outlier_start + 2;
+                    const bool horizontal_partial_frame =
+                        pattern.half_width_frames > 0 &&
+                        index >= outlier_start &&
+                        index < outlier_start + pattern.half_width_frames;
+                    const bool vertical_partial_frame =
+                        outlier_window && pattern.half_height_offset != 0.0f;
+                    const bool vertical_comparison_window =
+                        pattern.half_height_offset != 0.0f &&
+                        index >= outlier_start - 2 &&
+                        index <= outlier_start + 12;
+                    const float normal_width = 25.6f + pose_phase * 0.8f;
+                    const float observed_width =
+                        horizontal_partial_frame ? 12.8f : normal_width;
+                    const float observed_height =
+                        vertical_partial_frame ? 35.0f
+                                               : 70.0f + pose_phase * 1.8f;
+                    const float observed_center_y =
+                        vertical_partial_frame
+                            ? 175.0f + pattern.half_height_offset
+                            : 175.0f;
+                    AimFrame frame = make_frame(
+                        static_cast<std::uint64_t>(index + 1),
+                        base + std::chrono::microseconds(
+                                   static_cast<long long>(index) * 4167));
+                    frame.detections = {
+                        body_box(true_x + pose_phase * 3.0f + sparse_outlier,
+                                 observed_center_y,
+                                 observed_width,
+                                 observed_height)};
+                    AimFrame reference_frame = frame;
+                    reference_frame.detections = {
+                        body_box(true_x + pose_phase * 3.0f,
+                                 175.0f,
+                                 normal_width,
+                                 70.0f + pose_phase * 1.8f)};
+                    const AimResult result = aim.process(frame);
+                    const AimResult reference_result =
+                        reference_aim.process(reference_frame);
+                    expect(result.status == AimStatus::SUCCESS &&
+                               result.has_target &&
+                               reference_result.status == AimStatus::SUCCESS &&
+                               reference_result.has_target,
+                           "各姿态相位的稀疏框中心异常必须保留确认轨迹");
+                    if (!result.has_target || !reference_result.has_target) {
+                        continue;
+                    }
+                    if (track_id == 0) track_id = result.target.track_id;
+                    expect(result.target.track_id == track_id,
+                           "稀疏框中心异常不得切换轨迹身份");
+                    const float position_error =
+                        std::fabs(result.target.base_aim_x - true_x);
+                    const float velocity_error =
+                        std::fabs(result.target.velocity_x - 48.0f);
+                    const float reference_position_delta =
+                        std::fabs(result.target.base_aim_x -
+                                  reference_result.target.base_aim_x);
+                    const float reference_velocity_delta =
+                        std::fabs(result.target.velocity_x -
+                                  reference_result.target.velocity_x);
+                    if (index >= outlier_start - 2 &&
+                        index <= outlier_start + 12) {
+                        maximum_event_position_delta =
+                            std::max(maximum_event_position_delta,
+                                     reference_position_delta);
+                        maximum_event_velocity_delta =
+                            std::max(maximum_event_velocity_delta,
+                                     reference_velocity_delta);
+                    }
+                    if (vertical_comparison_window) {
+                        maximum_vertical_position_delta =
+                            std::max(maximum_vertical_position_delta,
+                                     reference_position_delta);
+                        maximum_vertical_velocity_delta =
+                            std::max(maximum_vertical_velocity_delta,
+                                     reference_velocity_delta);
+                    }
+                    if (index >= outlier_start - 2 &&
+                        index <= outlier_start + 12) {
+                        if (outlier_start < 70) {
+                            maximum_warmup_position_delta =
+                                std::max(maximum_warmup_position_delta,
+                                         reference_position_delta);
+                            maximum_warmup_velocity_delta =
+                                std::max(maximum_warmup_velocity_delta,
+                                         reference_velocity_delta);
+                        } else {
+                            maximum_outlier_position_error = std::max(
+                                maximum_outlier_position_error, position_error);
+                            maximum_outlier_velocity_error = std::max(
+                                maximum_outlier_velocity_error, velocity_error);
+                        }
+                    }
+                    if (index >= outlier_start + 3 &&
+                        index <= outlier_start + 12) {
+                        const float width = result.target.x2 - result.target.x1;
+                        const float ratio = width > 0.0f
+                                                ? (result.target.base_aim_x -
+                                                   result.target.x1) /
+                                                      width
+                                                : -1.0f;
+                        if (ratio <= 0.30f || ratio >= 0.70f) {
+                            ++delayed_boundary_frames;
+                        }
+                    }
+                    if (index >= outlier_start && index <= outlier_start + 2) {
+                        const float width = result.target.x2 - result.target.x1;
+                        const float ratio = width > 0.0f
+                                                ? (result.target.base_aim_x -
+                                                   result.target.x1) /
+                                                      width
+                                                : -1.0f;
+                        if (ratio <= 0.10f || ratio >= 0.90f) {
+                            ++partial_box_edge_frames;
+                        }
+                    }
+                    all_base_points.push_back(result.target.base_aim_x);
+                    all_reference_base_points.push_back(
+                        reference_result.target.base_aim_x);
+                    if (all_base_points.size() >= 3 && index >= outlier_start &&
+                        index <= outlier_start + 12) {
+                        const std::size_t size = all_base_points.size();
+                        const float second_difference =
+                            all_base_points[size - 1] -
+                            2.0f * all_base_points[size - 2] +
+                            all_base_points[size - 3];
+                        const float reference_second_difference =
+                            all_reference_base_points[size - 1] -
+                            2.0f * all_reference_base_points[size - 2] +
+                            all_reference_base_points[size - 3];
+                        maximum_event_second_difference =
+                            std::max(maximum_event_second_difference,
+                                     std::fabs(second_difference));
+                        if (vertical_comparison_window) {
+                            maximum_vertical_second_difference_delta = std::max(
+                                maximum_vertical_second_difference_delta,
+                                std::fabs(second_difference -
+                                          reference_second_difference));
+                        }
+                    }
+                    if (index < 70) continue;
+                    position_errors.push_back(position_error);
+                    velocity_errors.push_back(velocity_error);
+                    scenario_base_points.push_back(result.target.base_aim_x);
+                }
+                for (std::size_t index = 2; index < scenario_base_points.size();
+                     ++index) {
+                    second_differences.push_back(
+                        std::fabs(scenario_base_points[index] -
+                                  2.0f * scenario_base_points[index - 1] +
+                                  scenario_base_points[index - 2]));
+                }
+            }
+        }
+    }
+
+    std::sort(position_errors.begin(), position_errors.end());
+    std::sort(velocity_errors.begin(), velocity_errors.end());
+    std::sort(second_differences.begin(), second_differences.end());
+    const auto percentile = [](const std::vector<float>& values,
+                               float fraction) {
+        return values[std::min(
+            values.size() - 1,
+            static_cast<std::size_t>(values.size() * fraction))];
+    };
+    const float error_p95 = percentile(position_errors, 0.95f);
+    const float velocity_error_p95 = percentile(velocity_errors, 0.95f);
+    const float second_p99 = percentile(second_differences, 0.99f);
+    expect(error_p95 <= 2.0f && velocity_error_p95 <= 12.0f &&
+               second_p99 <= 1.6f && maximum_outlier_position_error <= 5.0f &&
+               maximum_outlier_velocity_error <= 24.0f &&
+               maximum_warmup_position_delta <= 4.1f &&
+               maximum_warmup_velocity_delta <= 24.0f &&
+               maximum_event_position_delta <= 4.1f &&
+               maximum_event_velocity_delta <= 24.0f &&
+               maximum_event_second_difference <= 6.0f &&
+               maximum_vertical_position_delta <= 1.0f &&
+               maximum_vertical_velocity_delta <= 8.0f &&
+               maximum_vertical_second_difference_delta <= 1.0f &&
+               delayed_boundary_frames == 0 && partial_box_edge_frames == 0,
+           "半身框各姿态相位的单/双帧中心异常不得污染中心比例趋势，"
+           "位置P95/速度P95/二阶P99/异常邻域最大位置误差/"
+           "最大速度误差/增长窗最大位置差/最大速度差/"
+           "事件相对对照最大位置差/速度差/最大二阶/"
+           "上下半身相对对照最大位置差/速度差/二阶差/"
+           "恢复段近内窗/异常段近全框边缘=" +
+               std::to_string(error_p95) + "/" +
+               std::to_string(velocity_error_p95) + "/" +
+               std::to_string(second_p99) + "/" +
+               std::to_string(maximum_outlier_position_error) + "/" +
+               std::to_string(maximum_outlier_velocity_error) + "/" +
+               std::to_string(maximum_warmup_position_delta) + "/" +
+               std::to_string(maximum_warmup_velocity_delta) + "/" +
+               std::to_string(maximum_event_position_delta) + "/" +
+               std::to_string(maximum_event_velocity_delta) + "/" +
+               std::to_string(maximum_event_second_difference) + "/" +
+               std::to_string(maximum_vertical_position_delta) + "/" +
+               std::to_string(maximum_vertical_velocity_delta) + "/" +
+               std::to_string(maximum_vertical_second_difference_delta) + "/" +
+               std::to_string(delayed_boundary_frames) + "/" +
+               std::to_string(partial_box_edge_frames));
+}
+
+void test_horizontal_partial_visibility_isolates_small_transients() {
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    for (const float normal_width : {12.0f, 16.0f, 25.6f}) {
+        for (const float side : {-1.0f, 1.0f}) {
+            for (const int partial_frames : {1, 2}) {
+                AimConfig config;
+                config.min_confirmed_hits = 1;
+                config.deadzone_pixels = 0.0f;
+                config.acquisition_range_percent = 150.0f;
+                Aim aim(config);
+                Aim reference_aim(config);
+                std::uint64_t track_id = 0;
+                float minimum_event_width = normal_width;
+                float recovered_width = 0.0f;
+                float maximum_position_delta = 0.0f;
+                float maximum_velocity_delta = 0.0f;
+                float maximum_second_difference_delta = 0.0f;
+                std::vector<float> base_points;
+                std::vector<float> reference_base_points;
+
+                for (int index = 0; index < 100; ++index) {
+                    const float true_x =
+                        70.0f + static_cast<float>(index) * 0.20f;
+                    const bool partial =
+                        index >= 60 && index < 60 + partial_frames;
+                    AimFrame frame = make_frame(
+                        static_cast<std::uint64_t>(index + 1),
+                        base + std::chrono::microseconds(
+                                   static_cast<long long>(index) * 4167));
+                    frame.detections = {body_box(
+                        true_x + (partial ? side * normal_width * 0.25f : 0.0f),
+                        175.0f,
+                        partial ? normal_width * 0.5f : normal_width,
+                        70.0f)};
+                    AimFrame reference_frame = frame;
+                    reference_frame.detections = {
+                        body_box(true_x, 175.0f, normal_width, 70.0f)};
+                    const AimResult result = aim.process(frame);
+                    const AimResult reference_result =
+                        reference_aim.process(reference_frame);
+                    expect(result.status == AimStatus::SUCCESS &&
+                               result.has_target &&
+                               reference_result.status == AimStatus::SUCCESS &&
+                               reference_result.has_target,
+                           "小框短时单侧截断及完整框对照必须逐帧保留目标");
+                    if (!result.has_target || !reference_result.has_target) {
+                        continue;
+                    }
+                    if (track_id == 0) track_id = result.target.track_id;
+                    expect(result.target.track_id == track_id,
+                           "小框单/双帧截断不得切换轨迹身份");
+                    if (index >= 58 && index <= 70) {
+                        maximum_position_delta = std::max(
+                            maximum_position_delta,
+                            std::fabs(result.target.base_aim_x -
+                                      reference_result.target.base_aim_x));
+                        maximum_velocity_delta = std::max(
+                            maximum_velocity_delta,
+                            std::fabs(result.target.velocity_x -
+                                      reference_result.target.velocity_x));
+                    }
+                    if (partial) {
+                        minimum_event_width =
+                            std::min(minimum_event_width,
+                                     result.target.x2 - result.target.x1);
+                    }
+                    if (index == 70) {
+                        recovered_width = result.target.x2 - result.target.x1;
+                    }
+                    base_points.push_back(result.target.base_aim_x);
+                    reference_base_points.push_back(
+                        reference_result.target.base_aim_x);
+                    if (base_points.size() >= 3 && index >= 58 && index <= 70) {
+                        const std::size_t size = base_points.size();
+                        const float second_difference =
+                            base_points[size - 1] -
+                            2.0f * base_points[size - 2] +
+                            base_points[size - 3];
+                        const float reference_second_difference =
+                            reference_base_points[size - 1] -
+                            2.0f * reference_base_points[size - 2] +
+                            reference_base_points[size - 3];
+                        maximum_second_difference_delta =
+                            std::max(maximum_second_difference_delta,
+                                     std::fabs(second_difference -
+                                               reference_second_difference));
+                    }
+                }
+
+                expect(minimum_event_width >= normal_width * 0.90f &&
+                           recovered_width >= normal_width * 0.95f &&
+                           maximum_position_delta <= 0.25f &&
+                           maximum_velocity_delta <= 2.0f &&
+                           maximum_second_difference_delta <= 0.25f,
+                       "小目标单/双帧裁切必须隔离中心样本并保留规范框，"
+                       "原宽/side/帧数/最小宽/恢复宽/最大位置差/速度差/"
+                       "二阶差=" +
+                           std::to_string(normal_width) + "/" +
+                           std::to_string(side) + "/" +
+                           std::to_string(partial_frames) + "/" +
+                           std::to_string(minimum_event_width) + "/" +
+                           std::to_string(recovered_width) + "/" +
+                           std::to_string(maximum_position_delta) + "/" +
+                           std::to_string(maximum_velocity_delta) + "/" +
+                           std::to_string(maximum_second_difference_delta));
+            }
+        }
+    }
+}
+
+void test_horizontal_partial_visibility_exact_three_recovers() {
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    for (const float normal_width : {12.0f, 16.0f, 25.6f}) {
+        for (const float event_confidence : {0.20f, 0.90f}) {
+            for (const float side : {-1.0f, 1.0f}) {
+                AimConfig config;
+                config.min_confirmed_hits = 1;
+                config.deadzone_pixels = 0.0f;
+                config.acquisition_range_percent = 150.0f;
+                Aim aim(config);
+                Aim reference_aim(config);
+                std::uint64_t track_id = 0;
+                float width_after_two = 0.0f;
+                float width_at_confirmation = 0.0f;
+                float width_after_three_full = 0.0f;
+                float ratio_after_three_full = -1.0f;
+                float maximum_first_two_position_delta = 0.0f;
+                float position_delta_after_three_full = 0.0f;
+                float final_position_delta = 0.0f;
+                float maximum_transition_second_difference = 0.0f;
+                std::vector<float> base_points;
+
+                for (int index = 0; index < 100; ++index) {
+                    const float true_x =
+                        70.0f + static_cast<float>(index) * 0.20f;
+                    const bool partial = index >= 60 && index <= 62;
+                    const float confidence =
+                        index >= 60 && index <= 70 ? event_confidence : 0.90f;
+                    AimFrame frame = make_frame(
+                        static_cast<std::uint64_t>(index + 1),
+                        base + std::chrono::microseconds(
+                                   static_cast<long long>(index) * 4167));
+                    frame.detections = {body_box(
+                        true_x + (partial ? side * normal_width * 0.25f : 0.0f),
+                        175.0f,
+                        partial ? normal_width * 0.5f : normal_width,
+                        70.0f,
+                        confidence)};
+                    AimFrame reference_frame = frame;
+                    reference_frame.detections = {body_box(
+                        true_x, 175.0f, normal_width, 70.0f, confidence)};
+                    const AimResult result = aim.process(frame);
+                    const AimResult reference_result =
+                        reference_aim.process(reference_frame);
+                    expect(result.status == AimStatus::SUCCESS &&
+                               result.has_target &&
+                               reference_result.status == AimStatus::SUCCESS &&
+                               reference_result.has_target,
+                           "恰好三帧单侧截断及完整框对照必须逐帧保留目标");
+                    if (!result.has_target || !reference_result.has_target) {
+                        continue;
+                    }
+                    if (track_id == 0) track_id = result.target.track_id;
+                    expect(result.target.track_id == track_id,
+                           "恰好三帧截断及立即恢复不得切换轨迹身份");
+                    const float width = result.target.x2 - result.target.x1;
+                    const float ratio =
+                        width > 0.0f
+                            ? (result.target.base_aim_x - result.target.x1) /
+                                  width
+                            : -1.0f;
+                    const float position_delta =
+                        std::fabs(result.target.base_aim_x -
+                                  reference_result.target.base_aim_x);
+                    if (index >= 60 && index <= 61) {
+                        maximum_first_two_position_delta = std::max(
+                            maximum_first_two_position_delta, position_delta);
+                    }
+                    if (index == 61) width_after_two = width;
+                    if (index == 62) width_at_confirmation = width;
+                    if (index == 65) {
+                        width_after_three_full = width;
+                        ratio_after_three_full = ratio;
+                        position_delta_after_three_full = position_delta;
+                    }
+                    if (index == 70) final_position_delta = position_delta;
+                    base_points.push_back(result.target.base_aim_x);
+                    if (base_points.size() >= 3 && index >= 58 && index <= 70) {
+                        const std::size_t size = base_points.size();
+                        maximum_transition_second_difference =
+                            std::max(maximum_transition_second_difference,
+                                     std::fabs(base_points[size - 1] -
+                                               2.0f * base_points[size - 2] +
+                                               base_points[size - 3]));
+                    }
+                }
+
+                const float confirmation_maximum_width_ratio =
+                    event_confidence >= config.high_confidence ? 0.70f : 0.82f;
+                expect(
+                    width_after_two >= normal_width * 0.90f &&
+                        width_at_confirmation <=
+                            normal_width * confirmation_maximum_width_ratio &&
+                        width_after_three_full >= normal_width * 0.93f &&
+                        ratio_after_three_full >= 0.30f &&
+                        ratio_after_three_full <= 0.70f &&
+                        maximum_first_two_position_delta <=
+                            normal_width * 0.05f &&
+                        position_delta_after_three_full <=
+                            normal_width * 0.20f &&
+                        final_position_delta <= normal_width * 0.05f &&
+                        maximum_transition_second_difference <=
+                            std::max(1.0f, normal_width * 0.15f),
+                    "恰好三帧截断必须确认一次并在三帧完整框后恢复，"
+                    "原宽/置信度/side/第二帧宽/确认宽/恢复宽/恢复ratio/"
+                    "前两帧位置差/恢复位置差/末端位置差/最大二阶=" +
+                        std::to_string(normal_width) + "/" +
+                        std::to_string(event_confidence) + "/" +
+                        std::to_string(side) + "/" +
+                        std::to_string(width_after_two) + "/" +
+                        std::to_string(width_at_confirmation) + "/" +
+                        std::to_string(width_after_three_full) + "/" +
+                        std::to_string(ratio_after_three_full) + "/" +
+                        std::to_string(maximum_first_two_position_delta) + "/" +
+                        std::to_string(position_delta_after_three_full) + "/" +
+                        std::to_string(final_position_delta) + "/" +
+                        std::to_string(maximum_transition_second_difference));
+            }
+        }
+    }
+}
+
+void test_horizontal_partial_rebuild_does_not_inject_velocity() {
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    for (const float normal_width : {12.0f, 25.6f}) {
+        for (const float motion_per_frame : {-0.20f, 0.0f, 0.20f}) {
+            for (const float event_confidence : {0.20f, 0.90f}) {
+                for (const float side : {-1.0f, 1.0f}) {
+                    AimConfig config;
+                    config.min_confirmed_hits = 1;
+                    config.deadzone_pixels = 0.0f;
+                    config.acquisition_range_percent = 150.0f;
+                    Aim aim(config);
+                    std::uint64_t track_id = 0;
+                    float maximum_wrong_direction_velocity = 0.0f;
+                    float maximum_rebuild_velocity = 0.0f;
+                    float settled_partial_velocity_error = 0.0f;
+                    float settled_recovery_velocity_error = 0.0f;
+                    const float expected_velocity = motion_per_frame * 240.0f;
+
+                    for (int index = 0; index < 100; ++index) {
+                        const float true_x =
+                            120.0f +
+                            static_cast<float>(index) * motion_per_frame;
+                        const bool partial = index >= 60 && index < 75;
+                        const float confidence = index >= 60 && index <= 85
+                                                     ? event_confidence
+                                                     : 0.90f;
+                        AimFrame frame = make_frame(
+                            static_cast<std::uint64_t>(index + 1),
+                            base + std::chrono::microseconds(
+                                       static_cast<long long>(index) * 4167));
+                        frame.detections = {body_box(
+                            true_x +
+                                (partial ? side * normal_width * 0.25f : 0.0f),
+                            175.0f,
+                            partial ? normal_width * 0.5f : normal_width,
+                            70.0f,
+                            confidence)};
+                        const AimResult result = aim.process(frame);
+                        expect(result.status == AimStatus::SUCCESS &&
+                                   result.has_target,
+                               "静止及双向运动的半身重建必须逐帧保留目标");
+                        if (!result.has_target) continue;
+                        if (track_id == 0) track_id = result.target.track_id;
+                        expect(result.target.track_id == track_id,
+                               "静止及双向半身重建不得切换轨迹身份");
+                        const bool rebuilding_partial =
+                            index >= 62 && index <= 64;
+                        const bool rebuilding_full = index >= 75 && index <= 78;
+                        if (rebuilding_partial || rebuilding_full) {
+                            maximum_rebuild_velocity =
+                                std::max(maximum_rebuild_velocity,
+                                         std::fabs(result.target.velocity_x));
+                            if (motion_per_frame > 0.0f) {
+                                maximum_wrong_direction_velocity =
+                                    std::max(maximum_wrong_direction_velocity,
+                                             -result.target.velocity_x);
+                            } else if (motion_per_frame < 0.0f) {
+                                maximum_wrong_direction_velocity =
+                                    std::max(maximum_wrong_direction_velocity,
+                                             result.target.velocity_x);
+                            } else {
+                                maximum_wrong_direction_velocity = std::max(
+                                    maximum_wrong_direction_velocity,
+                                    std::fabs(result.target.velocity_x));
+                            }
+                        }
+                        if (index == 70) {
+                            settled_partial_velocity_error = std::fabs(
+                                result.target.velocity_x - expected_velocity);
+                        }
+                        if (index == 85) {
+                            settled_recovery_velocity_error = std::fabs(
+                                result.target.velocity_x - expected_velocity);
+                        }
+                    }
+
+                    expect(
+                        maximum_wrong_direction_velocity <= 2.0f &&
+                            maximum_rebuild_velocity <= 60.0f &&
+                            settled_partial_velocity_error <= 15.0f &&
+                            settled_recovery_velocity_error <= 15.0f,
+                        "半身确认与完整框恢复的五点预热不得注入反向速度，"
+                        "原宽/每帧运动/置信度/side/最大错向速度/重建速度/"
+                        "半框稳定误差/完整框稳定误差=" +
+                            std::to_string(normal_width) + "/" +
+                            std::to_string(motion_per_frame) + "/" +
+                            std::to_string(event_confidence) + "/" +
+                            std::to_string(side) + "/" +
+                            std::to_string(maximum_wrong_direction_velocity) +
+                            "/" + std::to_string(maximum_rebuild_velocity) +
+                            "/" +
+                            std::to_string(settled_partial_velocity_error) +
+                            "/" +
+                            std::to_string(settled_recovery_velocity_error));
+                }
+            }
+        }
+    }
+}
+
+void test_head_only_width_change_skips_body_partial_guard() {
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    for (const float side : {-1.0f, 1.0f}) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.acquisition_range_percent = 150.0f;
+        Aim aim(config);
+        std::uint64_t track_id = 0;
+        float first_partial_width = 0.0f;
+        float third_partial_width = 0.0f;
+        float recovered_width = 0.0f;
+
+        for (int index = 0; index < 80; ++index) {
+            const float true_x = 120.0f + static_cast<float>(index) * 0.20f;
+            const bool partial = index >= 50 && index <= 52;
+            AimFrame frame =
+                make_frame(static_cast<std::uint64_t>(index + 1),
+                           base + std::chrono::microseconds(
+                                      static_cast<long long>(index) * 4167));
+            frame.detections = {
+                head_box(true_x + (partial ? side * 3.5f : 0.0f),
+                         145.0f,
+                         partial ? 7.0f : 14.0f,
+                         14.0f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "head-only 宽度变化必须逐帧保留目标");
+            if (!result.has_target) continue;
+            if (track_id == 0) track_id = result.target.track_id;
+            expect(result.target.track_id == track_id,
+                   "head-only 宽度变化不得切换轨迹身份");
+            const float width = result.target.x2 - result.target.x1;
+            if (index == 50) first_partial_width = width;
+            if (index == 52) third_partial_width = width;
+            if (index == 60) recovered_width = width;
+        }
+
+        expect(first_partial_width <= 10.5f && third_partial_width <= 8.0f &&
+                   recovered_width >= 13.5f,
+               "head-only 必须直接采用自身几何，不能累计 body 半身确认，"
+               "side/首帧半框宽/第三帧半框宽/恢复宽=" +
+                   std::to_string(side) + "/" +
+                   std::to_string(first_partial_width) + "/" +
+                   std::to_string(third_partial_width) + "/" +
+                   std::to_string(recovered_width));
+    }
+}
+
+void test_horizontal_partial_visibility_accepts_persistent_geometry() {
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    for (const float normal_width : {12.0f, 16.0f, 25.6f}) {
+        for (const float side : {-1.0f, 1.0f}) {
+            AimConfig config;
+            config.min_confirmed_hits = 1;
+            config.deadzone_pixels = 0.0f;
+            config.acquisition_range_percent = 150.0f;
+            Aim aim(config);
+            Aim reference_aim(config);
+            std::uint64_t track_id = 0;
+            float width_before_confirmation = 0.0f;
+            float width_at_confirmation = 0.0f;
+            float persistent_width = 0.0f;
+            float recovered_width = 0.0f;
+            float maximum_first_two_position_delta = 0.0f;
+            float maximum_first_two_velocity_delta = 0.0f;
+            float maximum_recovery_position_delta = 0.0f;
+            float final_recovery_position_delta = 0.0f;
+            float maximum_transition_second_difference = 0.0f;
+            int transition_edge_frames = 0;
+            int stable_partial_edge_frames = 0;
+            std::vector<float> stable_visible_center_errors;
+            std::vector<float> stable_velocity_deltas;
+            std::vector<float> base_points;
+
+            for (int index = 0; index < 120; ++index) {
+                const float true_x = 70.0f + static_cast<float>(index) * 0.20f;
+                const bool persistent_partial = index >= 60 && index < 75;
+                AimFrame frame = make_frame(
+                    static_cast<std::uint64_t>(index + 1),
+                    base + std::chrono::microseconds(
+                               static_cast<long long>(index) * 4167));
+                frame.detections = {body_box(
+                    true_x + (persistent_partial ? side * normal_width * 0.25f
+                                                 : 0.0f),
+                    175.0f,
+                    persistent_partial ? normal_width * 0.5f : normal_width,
+                    70.0f)};
+                AimFrame reference_frame = frame;
+                reference_frame.detections = {
+                    body_box(true_x, 175.0f, normal_width, 70.0f)};
+                const AimResult result = aim.process(frame);
+                const AimResult reference_result =
+                    reference_aim.process(reference_frame);
+                expect(result.status == AimStatus::SUCCESS &&
+                           result.has_target &&
+                           reference_result.status == AimStatus::SUCCESS &&
+                           reference_result.has_target,
+                       "持续单侧半身框及完整框对照必须逐帧保留目标");
+                if (!result.has_target || !reference_result.has_target)
+                    continue;
+                if (track_id == 0) track_id = result.target.track_id;
+                expect(result.target.track_id == track_id,
+                       "持续单侧半身框和完整身体恢复不得切换轨迹身份");
+
+                const float tracked_width = result.target.x2 - result.target.x1;
+                const float tracked_ratio =
+                    tracked_width > 0.0f
+                        ? (result.target.base_aim_x - result.target.x1) /
+                              tracked_width
+                        : -1.0f;
+                const float position_delta =
+                    std::fabs(result.target.base_aim_x -
+                              reference_result.target.base_aim_x);
+                const float velocity_delta =
+                    std::fabs(result.target.velocity_x -
+                              reference_result.target.velocity_x);
+                if (index >= 60 && index <= 61) {
+                    maximum_first_two_position_delta = std::max(
+                        maximum_first_two_position_delta, position_delta);
+                    maximum_first_two_velocity_delta = std::max(
+                        maximum_first_two_velocity_delta, velocity_delta);
+                }
+                if (index >= 62 && index <= 65 &&
+                    (tracked_ratio <= 0.05f || tracked_ratio >= 0.95f)) {
+                    ++transition_edge_frames;
+                }
+                if (index >= 70 && index < 75) {
+                    if (tracked_ratio <= 0.25f || tracked_ratio >= 0.75f) {
+                        ++stable_partial_edge_frames;
+                    }
+                    stable_visible_center_errors.push_back(
+                        std::fabs(result.target.base_aim_x -
+                                  (true_x + side * normal_width * 0.25f)));
+                    stable_velocity_deltas.push_back(velocity_delta);
+                }
+                if (index >= 77 && index <= 84) {
+                    maximum_recovery_position_delta = std::max(
+                        maximum_recovery_position_delta, position_delta);
+                }
+                if (index == 84) {
+                    final_recovery_position_delta = position_delta;
+                }
+                if (index == 61) width_before_confirmation = tracked_width;
+                if (index == 62) width_at_confirmation = tracked_width;
+                if (index == 70) persistent_width = tracked_width;
+                if (index == 77) recovered_width = tracked_width;
+
+                base_points.push_back(result.target.base_aim_x);
+                if (base_points.size() >= 3 && index >= 58 && index <= 82) {
+                    const std::size_t size = base_points.size();
+                    maximum_transition_second_difference =
+                        std::max(maximum_transition_second_difference,
+                                 std::fabs(base_points[size - 1] -
+                                           2.0f * base_points[size - 2] +
+                                           base_points[size - 3]));
+                }
+            }
+
+            std::sort(stable_visible_center_errors.begin(),
+                      stable_visible_center_errors.end());
+            std::sort(stable_velocity_deltas.begin(),
+                      stable_velocity_deltas.end());
+            const auto p95 = [](const std::vector<float>& values) {
+                return values[std::min(
+                    values.size() - 1,
+                    static_cast<std::size_t>(values.size() * 0.95f))];
+            };
+            const float stable_center_error_p95 =
+                p95(stable_visible_center_errors);
+            const float stable_velocity_delta_p95 = p95(stable_velocity_deltas);
+            expect(
+                width_before_confirmation >= normal_width * 0.90f &&
+                    width_at_confirmation <= normal_width * 0.70f &&
+                    persistent_width <= normal_width * 0.58f &&
+                    recovered_width >= normal_width * 0.93f &&
+                    maximum_first_two_position_delta <= normal_width * 0.05f &&
+                    maximum_first_two_velocity_delta <= 2.0f &&
+                    transition_edge_frames <= 2 &&
+                    stable_partial_edge_frames == 0 &&
+                    stable_center_error_p95 <= normal_width * 0.15f &&
+                    stable_velocity_delta_p95 <= 24.0f &&
+                    maximum_recovery_position_delta <= normal_width * 0.27f &&
+                    final_recovery_position_delta <= normal_width * 0.05f &&
+                    maximum_transition_second_difference <=
+                        std::max(1.0f, normal_width * 0.19f),
+                "左右持续截断应在第三帧接受、稳定居中并限时恢复，"
+                "原宽/side/确认前宽/第三帧宽/持续宽/恢复宽/"
+                "前两帧位置差/速度差/"
+                "过渡贴边/稳定贴边/稳定中心误差P95/速度差P95/恢复位置差/"
+                "恢复末位置差/最大二阶=" +
+                    std::to_string(normal_width) + "/" + std::to_string(side) +
+                    "/" + std::to_string(width_before_confirmation) + "/" +
+                    std::to_string(width_at_confirmation) + "/" +
+                    std::to_string(persistent_width) + "/" +
+                    std::to_string(recovered_width) + "/" +
+                    std::to_string(maximum_first_two_position_delta) + "/" +
+                    std::to_string(maximum_first_two_velocity_delta) + "/" +
+                    std::to_string(transition_edge_frames) + "/" +
+                    std::to_string(stable_partial_edge_frames) + "/" +
+                    std::to_string(stable_center_error_p95) + "/" +
+                    std::to_string(stable_velocity_delta_p95) + "/" +
+                    std::to_string(maximum_recovery_position_delta) + "/" +
+                    std::to_string(final_recovery_position_delta) + "/" +
+                    std::to_string(maximum_transition_second_difference));
+        }
+    }
+}
+
+void test_vertical_jump_pose_protection_keeps_configured_aim_height() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.acquisition_range_percent = 150.0f;
+    Aim aim(config);
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
     float maximum_ratio_error = 0.0f;
     int boundary_frames = 0;
 
@@ -627,20 +1858,19 @@ void test_vertical_jump_pose_protection_keeps_configured_aim_height() {
         // “1 人框 + 1 头框”始终存在但旧绝对锚点被姿态保护冻结的反例。
         const int phase_index = index % 60;
         const float jump_phase = phase_index <= 30
-            ? static_cast<float>(phase_index)
-            : static_cast<float>(60 - phase_index);
+                                     ? static_cast<float>(phase_index)
+                                     : static_cast<float>(60 - phase_index);
         const float true_aim_y = 220.0f - jump_phase * 3.0f;
         const float pose_phase = (index % 2) == 0 ? -1.0f : 1.0f;
         const float height = 86.0f + pose_phase * 5.0f;
         const float observed_aim_y = true_aim_y + pose_phase * 1.5f;
-        const float center_y = observed_aim_y +
-            height * (0.5f - config.body_aim_height_ratio);
-        AimFrame frame = make_frame(
-            static_cast<std::uint64_t>(index + 1),
-            base + std::chrono::microseconds(index * 4167));
-        frame.detections = {
-            body_box(160.0f, center_y, 42.0f, height),
-            head(160.0f, center_y - height * 0.30f)};
+        const float center_y =
+            observed_aim_y + height * (0.5f - config.body_aim_height_ratio);
+        AimFrame frame =
+            make_frame(static_cast<std::uint64_t>(index + 1),
+                       base + std::chrono::microseconds(index * 4167));
+        frame.detections = {body_box(160.0f, center_y, 42.0f, height),
+                            head(160.0f, center_y - height * 0.30f)};
         const AimResult result = aim.process(frame);
         expect(result.status == AimStatus::SUCCESS && result.has_target,
                "垂直跳跃形变回归必须持续保留确认目标");
@@ -4457,6 +5687,16 @@ int main() {
     test_coherent_box_center_jitter_preserves_real_translation();
     test_multiframe_pose_deformation_does_not_move_base_anchor();
     test_long_pose_deformation_with_sparse_evidence_does_not_leak_into_anchor();
+    test_horizontal_pose_trend_is_speed_independent();
+    test_horizontal_pose_trend_uses_capture_time_across_head_and_delivery_gaps();
+    test_horizontal_pose_trend_reversal_is_bounded();
+    test_horizontal_pose_trend_recovers_after_body_semantic_loss();
+    test_horizontal_pose_trend_bounds_sparse_center_outliers();
+    test_horizontal_partial_visibility_isolates_small_transients();
+    test_horizontal_partial_visibility_exact_three_recovers();
+    test_horizontal_partial_rebuild_does_not_inject_velocity();
+    test_head_only_width_change_skips_body_partial_guard();
+    test_horizontal_partial_visibility_accepts_persistent_geometry();
     test_vertical_jump_pose_protection_keeps_configured_aim_height();
     test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
