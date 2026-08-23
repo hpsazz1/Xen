@@ -67,8 +67,9 @@ struct AimConfig {
 struct AimFrame {
     std::uint64_t sequence = 0;
     std::chrono::steady_clock::time_point captured_at{};
-    // 默认零值表示由 Aim 在处理时读取当前时刻。离线回放可显式给出控制
-    // 时刻，使轨迹 dt 仍按视频时间推进，而提前量只消费声明的测量延迟。
+    // 默认零值表示由 Aim 在处理时读取当前时刻（离线未来帧至少钳到
+    // captured_at）。显式值必须不早于 captured_at，且随帧严格递增；
+    // 轨迹 dt 仍按视频时间推进，控制整形和命令库存只使用该控制时间线。
     std::chrono::steady_clock::time_point control_at{};
     int roi_width = 0;
     int roi_height = 0;

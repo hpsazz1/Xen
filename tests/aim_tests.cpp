@@ -83,6 +83,7 @@ void test_frame_order_contract() {
     Aim aim(config);
     const auto base = std::chrono::steady_clock::now();
     AimFrame first = make_frame(1, base);
+    first.control_at = base + std::chrono::milliseconds(10);
     first.detections = {body(180.0f, 160.0f)};
     expect(aim.process(first).status == AimStatus::SUCCESS,
            "首个有序帧必须处理成功");
@@ -100,7 +101,14 @@ void test_frame_order_contract() {
     expect(aim.process(invalid_control_time).status == AimStatus::INVALID_INPUT,
            "显式控制时刻早于采集时刻必须拒绝，不能产生负观测年龄");
 
+    AimFrame older_control_time = make_frame(
+        2, base + std::chrono::milliseconds(2));
+    older_control_time.control_at = base + std::chrono::milliseconds(8);
+    expect(aim.process(older_control_time).status == AimStatus::INVALID_INPUT,
+           "倒退的控制时刻必须拒绝，不能破坏命令历史单调顺序");
+
     AimFrame second = make_frame(2, base + std::chrono::milliseconds(4));
+    second.control_at = base + std::chrono::milliseconds(12);
     second.detections = {body(182.0f, 160.0f)};
     expect(aim.process(second).status == AimStatus::SUCCESS,
            "拒绝乱序帧后，后续合法帧仍应继续处理");
@@ -959,6 +967,455 @@ void test_horizontal_pose_trend_reversal_is_bounded() {
     }
 }
 
+void test_horizontal_persistent_innovation_keeps_velocity_and_delay_continuous() {
+    struct Trace {
+        std::vector<float> normalized_velocity;
+        std::vector<float> normalized_delay;
+        std::vector<float> normalized_position_error;
+        int velocity_collapses = 0;
+        int wrong_direction_frames = 0;
+        float response_ratio_after_twelve_frames = 0.0f;
+        float maximum_delay_step = 0.0f;
+    };
+    constexpr int kMotionChangeFrame = 70;
+    constexpr float kInitialMotionPerFrame = 0.20f;
+    // 320 ROI 下 7 px/frame 明确高于旧 2% ROI（6.4 px/frame）断点；
+    // 该用例要求同一观察器仍按几何一致性追赶，而不是换游戏后被隐式限速。
+    constexpr float kFastMotionPerFrame = 7.00f;
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_case = [&](float roi_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.425f;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 14.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 15.0f;
+        Aim aim(config);
+        Trace trace;
+        float true_x = 40.0f * roi_scale;
+        float previous_velocity = 0.0f;
+        float previous_delay = 0.0f;
+        bool have_previous = false;
+
+        for (int index = 0; index < 110; ++index) {
+            const float motion_per_frame =
+                index < kMotionChangeFrame
+                ? kInitialMotionPerFrame : kFastMotionPerFrame;
+            if (index > 0) {
+                true_x += motion_per_frame * roi_scale;
+            }
+            const int phase_index = index % 34;
+            const float pose_phase = phase_index <= 17
+                ? -1.0f + static_cast<float>(phase_index) *
+                    (2.0f / 17.0f)
+                : 1.0f - static_cast<float>(phase_index - 17) *
+                    (2.0f / 17.0f);
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.roi_width = static_cast<int>(320.0f * roi_scale);
+            frame.roi_height = static_cast<int>(320.0f * roi_scale);
+            frame.control_center_x = 160.0f * roi_scale;
+            frame.control_center_y = 160.0f * roi_scale;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                true_x + pose_phase * 3.0f * roi_scale,
+                175.0f * roi_scale,
+                (42.0f + pose_phase * 1.6f) * roi_scale,
+                (90.0f + pose_phase * 1.8f) * roi_scale)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "持续归一化创新回归必须逐帧保留确认目标");
+            if (!result.has_target) continue;
+
+            const float normalized_velocity =
+                result.target.velocity_x / frame.roi_width;
+            const float normalized_delay =
+                result.target.delay_compensation_x / frame.roi_width;
+            trace.normalized_velocity.push_back(normalized_velocity);
+            trace.normalized_delay.push_back(normalized_delay);
+            if (index >= kMotionChangeFrame) {
+                trace.normalized_position_error.push_back(
+                    std::fabs(result.target.base_aim_x - true_x) /
+                    frame.roi_width);
+                if (have_previous && previous_velocity > 0.0f &&
+                    result.target.velocity_x >= 0.0f &&
+                    result.target.velocity_x < previous_velocity * 0.25f) {
+                    ++trace.velocity_collapses;
+                }
+                if (result.target.velocity_x < 0.0f) {
+                    ++trace.wrong_direction_frames;
+                }
+            }
+            if (index == kMotionChangeFrame + 12) {
+                const float expected_velocity =
+                    kFastMotionPerFrame * roi_scale * 240.0f;
+                trace.response_ratio_after_twelve_frames =
+                    result.target.velocity_x / expected_velocity;
+            }
+            if (have_previous) {
+                trace.maximum_delay_step = std::max(
+                    trace.maximum_delay_step,
+                    std::fabs(result.target.delay_compensation_x -
+                              previous_delay) / frame.roi_width);
+            }
+            previous_velocity = result.target.velocity_x;
+            previous_delay = result.target.delay_compensation_x;
+            have_previous = true;
+        }
+        return trace;
+    };
+
+    const Trace normal = run_case(1.0f);
+    const Trace doubled = run_case(2.0f);
+    expect(normal.normalized_velocity.size() ==
+               doubled.normalized_velocity.size(),
+           "320/640 ROI 轨迹必须生成等长归一化速度序列");
+    float maximum_scale_velocity_delta = 0.0f;
+    float maximum_scale_delay_delta = 0.0f;
+    const std::size_t sample_count = std::min(
+        normal.normalized_velocity.size(),
+        doubled.normalized_velocity.size());
+    for (std::size_t index = 0; index < sample_count; ++index) {
+        maximum_scale_velocity_delta = std::max(
+            maximum_scale_velocity_delta,
+            std::fabs(normal.normalized_velocity[index] -
+                      doubled.normalized_velocity[index]));
+        maximum_scale_delay_delta = std::max(
+            maximum_scale_delay_delta,
+            std::fabs(normal.normalized_delay[index] -
+                      doubled.normalized_delay[index]));
+    }
+    std::vector<float> sorted_position_errors =
+        normal.normalized_position_error;
+    std::sort(sorted_position_errors.begin(), sorted_position_errors.end());
+    const float position_error_p95 = sorted_position_errors[
+        std::min(sorted_position_errors.size() - 1,
+                 static_cast<std::size_t>(
+                     sorted_position_errors.size() * 0.95f))];
+    expect(normal.velocity_collapses == 0 &&
+               normal.wrong_direction_frames == 0 &&
+               normal.response_ratio_after_twelve_frames >= 0.55f &&
+               normal.maximum_delay_step <= 0.02f &&
+               position_error_p95 <= 0.05f &&
+               maximum_scale_velocity_delta <= 0.0001f &&
+               maximum_scale_delay_delta <= 0.0002f,
+           "持续同向创新不得触发 vx 硬清零，且 320/640 ROI 必须比例同构，"
+           "塌缩/错向/12帧响应/延迟单步/位置P95/速度缩放差/延迟缩放差=" +
+               std::to_string(normal.velocity_collapses) + "/" +
+               std::to_string(normal.wrong_direction_frames) + "/" +
+               std::to_string(normal.response_ratio_after_twelve_frames) +
+               "/" + std::to_string(normal.maximum_delay_step) + "/" +
+               std::to_string(position_error_p95) + "/" +
+               std::to_string(maximum_scale_velocity_delta) + "/" +
+               std::to_string(maximum_scale_delay_delta));
+}
+
+void test_horizontal_maneuver_accepts_coherent_second_reversal() {
+    constexpr int kFirstManeuverFrame = 70;
+    constexpr int kSecondManeuverFrame = 77;
+    constexpr float kFastMotionPerFrame = 7.0f;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    Aim aim(config);
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    float true_x = 200.0f;
+    int first_negative_velocity_frame = -1;
+    int late_wrong_direction_frames = 0;
+    std::vector<float> recovered_position_errors;
+    std::string reversal_trace;
+
+    for (int index = 0; index < 100; ++index) {
+        const float motion_per_frame = index < kFirstManeuverFrame
+            ? 0.20f
+            : index < kSecondManeuverFrame
+                ? kFastMotionPerFrame : -kFastMotionPerFrame;
+        if (index > 0) true_x += motion_per_frame;
+        const int phase_index = index % 34;
+        const float pose_phase = phase_index <= 17
+            ? -1.0f + static_cast<float>(phase_index) * (2.0f / 17.0f)
+            : 1.0f - static_cast<float>(phase_index - 17) *
+                (2.0f / 17.0f);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index) * 4167));
+        frame.detections = {body_box(
+            true_x + pose_phase * 3.0f, 175.0f,
+            42.0f + pose_phase * 1.6f,
+            90.0f + pose_phase * 1.8f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "共同边二次换向回归必须逐帧保留确认目标");
+        if (!result.has_target || index < kSecondManeuverFrame) continue;
+
+        if (index <= kSecondManeuverFrame + 12) {
+            reversal_trace += std::to_string(index) + ":" +
+                std::to_string(result.target.velocity_x) + ",";
+        }
+
+        if (first_negative_velocity_frame < 0 &&
+            result.target.velocity_x < 0.0f) {
+            first_negative_velocity_frame = index;
+        }
+        if (index >= kSecondManeuverFrame + 8 &&
+            result.target.velocity_x > 0.0f) {
+            ++late_wrong_direction_frames;
+        }
+        if (index >= kSecondManeuverFrame + 12) {
+            recovered_position_errors.push_back(std::fabs(
+                result.target.base_aim_x - true_x));
+        }
+    }
+
+    std::sort(recovered_position_errors.begin(),
+              recovered_position_errors.end());
+    const float recovered_error_p95 = recovered_position_errors[
+        std::min(recovered_position_errors.size() - 1,
+                 static_cast<std::size_t>(
+                     recovered_position_errors.size() * 0.95f))];
+    expect(first_negative_velocity_frame >= kSecondManeuverFrame &&
+               first_negative_velocity_frame <= kSecondManeuverFrame + 4 &&
+               late_wrong_direction_frames == 0 &&
+               recovered_error_p95 <= 14.0f,
+           "确认后的十帧快通道必须按共同边一致性接受二次真实换向，"
+           "首次负速度帧/迟到错向帧/恢复位置P95=" +
+               std::to_string(first_negative_velocity_frame) + "/" +
+               std::to_string(late_wrong_direction_frames) + "/" +
+               std::to_string(recovered_error_p95) + "，轨迹=" +
+               reversal_trace);
+}
+
+void test_horizontal_maneuver_rejects_short_coherent_center_outliers() {
+    struct EventCase {
+        int start_frame = 0;
+        int frame_count = 0;
+        const char* boundary = "";
+    };
+    struct Metrics {
+        float maximum_position_delta_ratio = 0.0f;
+        float maximum_velocity_delta_ratio_per_second = 0.0f;
+        float maximum_delay_delta_ratio = 0.0f;
+        float settled_velocity_delta_ratio_per_second = 0.0f;
+        float settled_delay_delta_ratio = 0.0f;
+        int identity_changes = 0;
+        std::string maximum_position_context;
+        std::string maximum_velocity_context;
+    };
+    // 70 帧起由 0.0625% ROI/frame 切为 2.1875% ROI/frame，并叠加与生产
+    // 姿态回归相同的中心/宽高三角波，确保实际进入 horizontal maneuver。
+    // 异常幅度、框几何和运动量都只用 ROI 比例表达。
+    constexpr int kFastMotionStartFrame = 70;
+    constexpr int kManeuverWindowFirstFrame = 75;
+    constexpr int kManeuverWindowLastFrame = 81;
+    constexpr float kSlowMotionRatioPerFrame = 0.000625f;
+    constexpr float kFastMotionRatioPerFrame = 0.021875f;
+    constexpr float kOutlierOffsetRatio = 0.025f;
+    constexpr std::array<EventCase, 4> kEvents{{
+        {kManeuverWindowFirstFrame + 1, 1, "首端单帧"},
+        {kManeuverWindowFirstFrame + 1, 2, "首端双帧"},
+        {kManeuverWindowLastFrame, 1, "末端单帧"},
+        {kManeuverWindowLastFrame - 1, 2, "末端双帧"}}};
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+
+    const auto run_case = [&](float roi_scale,
+                              const EventCase& event,
+                              float outlier_side) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 15.0f;
+        Aim aim(config);
+        Aim reference_aim(config);
+        Metrics metrics;
+        const float roi_width = 320.0f * roi_scale;
+        float true_x = roi_width * 0.125f;
+        std::uint64_t track_id = 0;
+
+        for (int index = 0; index < 96; ++index) {
+            const float motion_ratio = index < kFastMotionStartFrame
+                ? kSlowMotionRatioPerFrame : kFastMotionRatioPerFrame;
+            if (index > 0) true_x += motion_ratio * roi_width;
+            const bool event_active =
+                index >= event.start_frame &&
+                index < event.start_frame + event.frame_count;
+            const int pose_phase_index = index % 34;
+            const float pose_phase = pose_phase_index <= 17
+                ? -1.0f + static_cast<float>(pose_phase_index) *
+                    (2.0f / 17.0f)
+                : 1.0f - static_cast<float>(pose_phase_index - 17) *
+                    (2.0f / 17.0f);
+            const float pose_center_x =
+                pose_phase * 0.009375f * roi_width;
+            const float observed_x = true_x + pose_center_x +
+                (event_active
+                     ? outlier_side * kOutlierOffsetRatio * roi_width
+                     : 0.0f);
+            const float observed_width =
+                (0.13125f + pose_phase * 0.005f) * roi_width;
+            const float observed_height =
+                (0.28125f + pose_phase * 0.005625f) * roi_width;
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_center_x = roi_width * 0.5f;
+            frame.control_center_y = roi_width * 0.5f;
+            frame.detections = {body_box(
+                observed_x, roi_width * 0.55f,
+                observed_width, observed_height)};
+            AimFrame reference_frame = frame;
+            reference_frame.detections = {body_box(
+                true_x + pose_center_x, roi_width * 0.55f,
+                observed_width, observed_height)};
+            const AimResult result = aim.process(frame);
+            const AimResult reference_result =
+                reference_aim.process(reference_frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target &&
+                       reference_result.status == AimStatus::SUCCESS &&
+                       reference_result.has_target,
+                   "maneuver 窗内共同边短异常及固定框对照必须逐帧保留目标");
+            if (!result.has_target || !reference_result.has_target) continue;
+            if (track_id == 0) track_id = result.target.track_id;
+            if (result.target.track_id != track_id) ++metrics.identity_changes;
+
+            if (index < event.start_frame - 1 ||
+                index > event.start_frame + event.frame_count + 8) {
+                continue;
+            }
+            const float position_delta_ratio = std::fabs(
+                result.target.base_aim_x -
+                reference_result.target.base_aim_x) / roi_width;
+            const float velocity_delta_ratio_per_second = std::fabs(
+                result.target.velocity_x -
+                reference_result.target.velocity_x) / roi_width;
+            const float delay_delta_ratio = std::fabs(
+                result.target.delay_compensation_x -
+                reference_result.target.delay_compensation_x) / roi_width;
+            if (position_delta_ratio >
+                metrics.maximum_position_delta_ratio) {
+                metrics.maximum_position_delta_ratio =
+                    position_delta_ratio;
+                metrics.maximum_position_context =
+                    "frame=" + std::to_string(index) +
+                    ",base=" + std::to_string(result.target.base_aim_x) +
+                    ",ref_base=" +
+                    std::to_string(reference_result.target.base_aim_x) +
+                    ",box_center=" + std::to_string(
+                        (result.target.x1 + result.target.x2) * 0.5f) +
+                    ",ref_box_center=" + std::to_string(
+                        (reference_result.target.x1 +
+                         reference_result.target.x2) * 0.5f);
+            }
+            if (velocity_delta_ratio_per_second >
+                metrics.maximum_velocity_delta_ratio_per_second) {
+                metrics.maximum_velocity_delta_ratio_per_second =
+                    velocity_delta_ratio_per_second;
+                metrics.maximum_velocity_context =
+                    "frame=" + std::to_string(index) +
+                    ",event=" + event.boundary +
+                    ",count=" + std::to_string(event.frame_count) +
+                    ",side=" + std::to_string(outlier_side) +
+                    ",vx=" + std::to_string(result.target.velocity_x) +
+                    ",ref_vx=" +
+                    std::to_string(reference_result.target.velocity_x) +
+                    ",delay=" +
+                    std::to_string(result.target.delay_compensation_x) +
+                    ",ref_delay=" + std::to_string(
+                        reference_result.target.delay_compensation_x);
+            }
+            metrics.maximum_delay_delta_ratio = std::max(
+                metrics.maximum_delay_delta_ratio, delay_delta_ratio);
+            if (index == event.start_frame + event.frame_count + 8) {
+                metrics.settled_velocity_delta_ratio_per_second =
+                    velocity_delta_ratio_per_second;
+                metrics.settled_delay_delta_ratio = delay_delta_ratio;
+            }
+        }
+        return metrics;
+    };
+
+    for (const EventCase& event : kEvents) {
+        for (const float outlier_side : {-1.0f, 1.0f}) {
+            const Metrics normal = run_case(1.0f, event, outlier_side);
+            const Metrics doubled = run_case(2.0f, event, outlier_side);
+            const float scale_velocity_delta = std::fabs(
+                normal.maximum_velocity_delta_ratio_per_second -
+                doubled.maximum_velocity_delta_ratio_per_second);
+            const float scale_delay_delta = std::fabs(
+                normal.maximum_delay_delta_ratio -
+                doubled.maximum_delay_delta_ratio);
+            expect(
+                normal.identity_changes == 0 &&
+                    doubled.identity_changes == 0 &&
+                    normal.maximum_position_delta_ratio <= 0.010f &&
+                    normal.maximum_velocity_delta_ratio_per_second <= 0.25f &&
+                    normal.maximum_delay_delta_ratio <= 0.006f &&
+                    normal.settled_velocity_delta_ratio_per_second <= 0.10f &&
+                    normal.settled_delay_delta_ratio <= 0.003f &&
+                    doubled.maximum_position_delta_ratio <= 0.010f &&
+                    doubled.maximum_velocity_delta_ratio_per_second <= 0.25f &&
+                    doubled.maximum_delay_delta_ratio <= 0.006f &&
+                    doubled.settled_velocity_delta_ratio_per_second <= 0.10f &&
+                    doubled.settled_delay_delta_ratio <= 0.003f &&
+                    scale_velocity_delta <= 0.002f &&
+                    scale_delay_delta <= 0.0002f,
+                "已确认 maneuver 的首末边界内，单/双帧两边共同中心异常"
+                "不得重播种 vx 或制造延迟脉冲，且 320/640 ROI 必须比例同构；"
+                "边界/帧数/side/320位置/速度/延迟/收敛速度/收敛延迟/"
+                "640位置/速度/延迟/收敛速度/收敛延迟/缩放差=" +
+                    std::string(event.boundary) + "/" +
+                    std::to_string(event.frame_count) + "/" +
+                    std::to_string(outlier_side) + "/" +
+                    std::to_string(normal.maximum_position_delta_ratio) + "/" +
+                    std::to_string(
+                        normal.maximum_velocity_delta_ratio_per_second) + "/" +
+                    std::to_string(normal.maximum_delay_delta_ratio) + "/" +
+                    std::to_string(
+                        normal.settled_velocity_delta_ratio_per_second) + "/" +
+                    std::to_string(normal.settled_delay_delta_ratio) + "/" +
+                    std::to_string(doubled.maximum_position_delta_ratio) + "/" +
+                    std::to_string(
+                        doubled.maximum_velocity_delta_ratio_per_second) + "/" +
+                    std::to_string(doubled.maximum_delay_delta_ratio) + "/" +
+                    std::to_string(
+                        doubled.settled_velocity_delta_ratio_per_second) + "/" +
+                    std::to_string(doubled.settled_delay_delta_ratio) + "/" +
+                    std::to_string(scale_velocity_delta) + "/" +
+                    std::to_string(scale_delay_delta) +
+                    "，320最坏位置=" + normal.maximum_position_context +
+                    "，320最坏速度=" + normal.maximum_velocity_context +
+                    "，640最坏位置=" + doubled.maximum_position_context +
+                    "，640最坏速度=" + doubled.maximum_velocity_context);
+        }
+    }
+}
+
 void test_horizontal_pose_trend_recovers_after_body_semantic_loss() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -1058,6 +1515,7 @@ void test_horizontal_pose_trend_bounds_sparse_center_outliers() {
     float maximum_warmup_velocity_delta = 0.0f;
     float maximum_event_position_delta = 0.0f;
     float maximum_event_velocity_delta = 0.0f;
+    std::string maximum_event_velocity_context;
     float maximum_event_second_difference = 0.0f;
     float maximum_vertical_position_delta = 0.0f;
     float maximum_vertical_velocity_delta = 0.0f;
@@ -1158,9 +1616,25 @@ void test_horizontal_pose_trend_bounds_sparse_center_outliers() {
                         maximum_event_position_delta =
                             std::max(maximum_event_position_delta,
                                      reference_position_delta);
-                        maximum_event_velocity_delta =
-                            std::max(maximum_event_velocity_delta,
-                                     reference_velocity_delta);
+                        if (reference_velocity_delta >
+                            maximum_event_velocity_delta) {
+                            maximum_event_velocity_delta =
+                                reference_velocity_delta;
+                            maximum_event_velocity_context =
+                                "phase=" + std::to_string(phase_offset) +
+                                ",start=" + std::to_string(outlier_start) +
+                                ",frame=" + std::to_string(index) +
+                                ",offsets=" +
+                                std::to_string(pattern.offsets[0]) + "," +
+                                std::to_string(pattern.offsets[1]) + "," +
+                                std::to_string(pattern.offsets[2]) +
+                                ",half=" +
+                                std::to_string(pattern.half_width_frames) +
+                                ",vx=" +
+                                std::to_string(result.target.velocity_x) +
+                                ",ref_vx=" + std::to_string(
+                                    reference_result.target.velocity_x);
+                        }
                     }
                     if (vertical_comparison_window) {
                         maximum_vertical_position_delta =
@@ -1293,7 +1767,8 @@ void test_horizontal_pose_trend_bounds_sparse_center_outliers() {
                std::to_string(maximum_vertical_velocity_delta) + "/" +
                std::to_string(maximum_vertical_second_difference_delta) + "/" +
                std::to_string(delayed_boundary_frames) + "/" +
-               std::to_string(partial_box_edge_frames));
+               std::to_string(partial_box_edge_frames) +
+               "，最坏速度事件=" + maximum_event_velocity_context);
 }
 
 void test_horizontal_partial_visibility_isolates_small_transients() {
@@ -1534,7 +2009,8 @@ void test_horizontal_partial_rebuild_does_not_inject_velocity() {
     const auto base =
         std::chrono::steady_clock::now() + std::chrono::seconds(1);
     for (const float normal_width : {12.0f, 25.6f}) {
-        for (const float motion_per_frame : {-0.20f, 0.0f, 0.20f}) {
+        for (const float motion_per_frame :
+                 {-1.70f, -0.20f, 0.0f, 0.20f, 1.70f}) {
             for (const float event_confidence : {0.20f, 0.90f}) {
                 for (const float side : {-1.0f, 1.0f}) {
                     AimConfig config;
@@ -1544,10 +2020,13 @@ void test_horizontal_partial_rebuild_does_not_inject_velocity() {
                     Aim aim(config);
                     std::uint64_t track_id = 0;
                     float maximum_wrong_direction_velocity = 0.0f;
-                    float maximum_rebuild_velocity = 0.0f;
+                    float maximum_rebuild_velocity_error = 0.0f;
+                    float maximum_rebuild_absolute_velocity = 0.0f;
                     float settled_partial_velocity_error = 0.0f;
                     float settled_recovery_velocity_error = 0.0f;
                     const float expected_velocity = motion_per_frame * 240.0f;
+                    const bool legacy_low_motion_case =
+                        std::fabs(motion_per_frame) <= 0.20f;
 
                     for (int index = 0; index < 100; ++index) {
                         const float true_x =
@@ -1580,9 +2059,13 @@ void test_horizontal_partial_rebuild_does_not_inject_velocity() {
                             index >= 62 && index <= 64;
                         const bool rebuilding_full = index >= 75 && index <= 78;
                         if (rebuilding_partial || rebuilding_full) {
-                            maximum_rebuild_velocity =
-                                std::max(maximum_rebuild_velocity,
-                                         std::fabs(result.target.velocity_x));
+                            maximum_rebuild_velocity_error = std::max(
+                                maximum_rebuild_velocity_error,
+                                std::fabs(result.target.velocity_x -
+                                          expected_velocity));
+                            maximum_rebuild_absolute_velocity = std::max(
+                                maximum_rebuild_absolute_velocity,
+                                std::fabs(result.target.velocity_x));
                             if (motion_per_frame > 0.0f) {
                                 maximum_wrong_direction_velocity =
                                     std::max(maximum_wrong_direction_velocity,
@@ -1609,18 +2092,23 @@ void test_horizontal_partial_rebuild_does_not_inject_velocity() {
 
                     expect(
                         maximum_wrong_direction_velocity <= 2.0f &&
-                            maximum_rebuild_velocity <= 60.0f &&
+                            maximum_rebuild_velocity_error <= 60.0f &&
+                            (!legacy_low_motion_case ||
+                             maximum_rebuild_absolute_velocity <= 60.0f) &&
                             settled_partial_velocity_error <= 15.0f &&
                             settled_recovery_velocity_error <= 15.0f,
                         "半身确认与完整框恢复的五点预热不得注入反向速度，"
-                        "原宽/每帧运动/置信度/side/最大错向速度/重建速度/"
-                        "半框稳定误差/完整框稳定误差=" +
+                        "原宽/每帧运动/置信度/side/最大错向速度/重建速度误差/"
+                        "重建绝对速度/半框稳定误差/完整框稳定误差=" +
                             std::to_string(normal_width) + "/" +
                             std::to_string(motion_per_frame) + "/" +
                             std::to_string(event_confidence) + "/" +
                             std::to_string(side) + "/" +
                             std::to_string(maximum_wrong_direction_velocity) +
-                            "/" + std::to_string(maximum_rebuild_velocity) +
+                            "/" +
+                            std::to_string(maximum_rebuild_velocity_error) +
+                            "/" +
+                            std::to_string(maximum_rebuild_absolute_velocity) +
                             "/" +
                             std::to_string(settled_partial_velocity_error) +
                             "/" +
@@ -2609,6 +3097,633 @@ void test_delayed_closed_loop_holds_moving_base_point() {
                std::to_string(maximum_no_command));
 }
 
+void test_delayed_pose_closed_loop_keeps_tracking_observer_continuous() {
+    constexpr float kFrameSeconds = 1.0f / 240.0f;
+    constexpr int kActuationDelayFrames = 4;
+    struct Trace {
+        float error_p95 = 0.0f;
+        float input_second_p95 = 0.0f;
+        float base_second_p95 = 0.0f;
+        float final_second_p95 = 0.0f;
+        float delay_second_p95 = 0.0f;
+        float boundary_base_second_p95 = 0.0f;
+        float boundary_final_second_p95 = 0.0f;
+        int command_reversals = 0;
+        int missed_true_reversals = 0;
+        int wrong_direction_commands_after_base_crossing = 0;
+        int maximum_high_speed_reverse_latency_frames = 0;
+        int maximum_low_speed_reverse_latency_frames = 0;
+        int maximum_reverse_zero_frames = 0;
+        std::string first_command_reversal_context;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto percentile = [](const std::vector<float>& values,
+                               float fraction) {
+        return values[std::min(
+            values.size() - 1,
+            static_cast<std::size_t>(values.size() * fraction))];
+    };
+    const auto run_case = [&](bool pose_enabled) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.425f;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 14.0f;
+        config.acquisition_range_percent = 100.0f;
+        // 该回归只测 X；Y 瞄点固定在框中心，避免未建模的 Y 植物响应
+        // 污染二维 deadzone 与向量整形。
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 15.0f;
+        Aim aim(config);
+        std::array<int, kActuationDelayFrames> delayed_commands{};
+        float world_target_x = 24.0f;
+        float camera_x = 0.0f;
+        int previous_command_sign = 0;
+        Trace trace;
+        std::vector<float> true_errors;
+        std::vector<float> observed_centers;
+        std::vector<float> base_points;
+        std::vector<float> final_points;
+        std::vector<float> delay_offsets;
+        std::vector<int> sample_frame_indices;
+        constexpr std::array<float, 6> kTargetVelocities{
+            480.0f, 180.0f, -480.0f, -180.0f, 180.0f, -180.0f};
+        int active_reverse_direction = 0;
+        float active_reverse_speed = 0.0f;
+        int active_reverse_base_crossing_frame = -1;
+        int active_reverse_zero_frames = 0;
+        int expected_true_reversals = 0;
+        int completed_true_reversals = 0;
+
+        for (int index = 0; index < 720; ++index) {
+            camera_x += delayed_commands[index % kActuationDelayFrames] /
+                config.counts_per_pixel_x * 0.20f;
+            delayed_commands[index % kActuationDelayFrames] = 0;
+            const int motion_segment = std::min(
+                static_cast<int>(kTargetVelocities.size()) - 1,
+                index / 120);
+            const float target_velocity =
+                kTargetVelocities[static_cast<std::size_t>(motion_segment)];
+            if (index > 0 && index % 120 == 0) {
+                const float previous_target_velocity =
+                    kTargetVelocities[static_cast<std::size_t>(
+                        motion_segment - 1)];
+                if (target_velocity * previous_target_velocity < 0.0f) {
+                    active_reverse_direction = target_velocity < 0.0f ? -1 : 1;
+                    active_reverse_speed = std::fabs(target_velocity);
+                    active_reverse_base_crossing_frame = -1;
+                    active_reverse_zero_frames = 0;
+                    ++expected_true_reversals;
+                }
+            }
+            world_target_x += target_velocity * kFrameSeconds;
+            const int pose_phase_index = index % 34;
+            const float pose_phase = pose_phase_index <= 17
+                ? -1.0f + static_cast<float>(pose_phase_index) *
+                    (2.0f / 17.0f)
+                : 1.0f - static_cast<float>(pose_phase_index - 17) *
+                    (2.0f / 17.0f);
+            const float applied_pose = pose_enabled ? pose_phase : 0.0f;
+            const float observed_x = 160.0f + world_target_x - camera_x;
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.control_at =
+                frame.captured_at + std::chrono::milliseconds(1);
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                observed_x + applied_pose * 3.0f,
+                160.0f,
+                42.0f + applied_pose * 1.6f,
+                90.0f + applied_pose * 1.8f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "tracking 四帧反馈对照必须逐帧保留确认目标");
+            if (!result.has_target) continue;
+            const int command_x = result.has_command
+                ? result.command.dx_counts : 0;
+            if (result.has_command) {
+                delayed_commands[index % kActuationDelayFrames] = command_x;
+            }
+            if (active_reverse_direction != 0) {
+                const float base_error_x =
+                    result.target.base_aim_x - frame.control_center_x;
+                if (active_reverse_base_crossing_frame < 0 &&
+                    base_error_x * active_reverse_direction > 2.25f) {
+                    active_reverse_base_crossing_frame = index;
+                }
+                if (active_reverse_base_crossing_frame >= 0) {
+                    if (command_x * active_reverse_direction > 0) {
+                        const int latency_frames =
+                            index - active_reverse_base_crossing_frame;
+                        if (active_reverse_speed >= 400.0f) {
+                            trace.maximum_high_speed_reverse_latency_frames =
+                                std::max(
+                                    trace.maximum_high_speed_reverse_latency_frames,
+                                    latency_frames);
+                        } else {
+                            trace.maximum_low_speed_reverse_latency_frames =
+                                std::max(
+                                    trace.maximum_low_speed_reverse_latency_frames,
+                                    latency_frames);
+                        }
+                        trace.maximum_reverse_zero_frames = std::max(
+                            trace.maximum_reverse_zero_frames,
+                            active_reverse_zero_frames);
+                        active_reverse_direction = 0;
+                        ++completed_true_reversals;
+                    } else if (command_x == 0) {
+                        ++active_reverse_zero_frames;
+                    } else {
+                        ++trace.wrong_direction_commands_after_base_crossing;
+                    }
+                }
+            }
+            if (index < 120) continue;
+
+            true_errors.push_back(std::fabs(world_target_x - camera_x));
+            observed_centers.push_back(
+                observed_x + applied_pose * 3.0f);
+            base_points.push_back(result.target.base_aim_x);
+            final_points.push_back(result.target.aim_x);
+            delay_offsets.push_back(result.target.delay_compensation_x);
+            sample_frame_indices.push_back(index);
+            // 不再跳过变速/换向后的 24 帧：真实方向切换本身只应贡献一次
+            // 命令换向，边界窗口内的额外往返就是本任务要拦截的泵振。
+            if (command_x != 0) {
+                const int command_sign = command_x < 0 ? -1 : 1;
+                if (previous_command_sign != 0 &&
+                    command_sign != previous_command_sign) {
+                    ++trace.command_reversals;
+                    if (trace.first_command_reversal_context.empty()) {
+                        trace.first_command_reversal_context =
+                            "frame=" + std::to_string(index) +
+                            ",cmd=" + std::to_string(command_x) +
+                            ",error=" + std::to_string(
+                                world_target_x - camera_x) +
+                            ",vx=" + std::to_string(
+                                result.target.velocity_x) +
+                            ",base=" + std::to_string(
+                                result.target.base_aim_x) +
+                            ",final=" + std::to_string(
+                                result.target.aim_x) +
+                            ",delay=" + std::to_string(
+                                result.target.delay_compensation_x);
+                    }
+                }
+                previous_command_sign = command_sign;
+            }
+        }
+
+        std::vector<float> input_second_differences;
+        std::vector<float> base_second_differences;
+        std::vector<float> final_second_differences;
+        std::vector<float> delay_second_differences;
+        std::vector<float> boundary_base_second_differences;
+        std::vector<float> boundary_final_second_differences;
+        for (std::size_t index = 2; index < final_points.size(); ++index) {
+            input_second_differences.push_back(std::fabs(
+                observed_centers[index] -
+                2.0f * observed_centers[index - 1] +
+                observed_centers[index - 2]));
+            const float base_second = std::fabs(
+                base_points[index] - 2.0f * base_points[index - 1] +
+                base_points[index - 2]);
+            const float final_second = std::fabs(
+                final_points[index] - 2.0f * final_points[index - 1] +
+                final_points[index - 2]);
+            base_second_differences.push_back(base_second);
+            final_second_differences.push_back(final_second);
+            delay_second_differences.push_back(std::fabs(
+                delay_offsets[index] - 2.0f * delay_offsets[index - 1] +
+                delay_offsets[index - 2]));
+            if (sample_frame_indices[index] % 120 < 24) {
+                boundary_base_second_differences.push_back(base_second);
+                boundary_final_second_differences.push_back(final_second);
+            }
+        }
+        std::sort(true_errors.begin(), true_errors.end());
+        std::sort(input_second_differences.begin(),
+                  input_second_differences.end());
+        std::sort(base_second_differences.begin(),
+                  base_second_differences.end());
+        std::sort(final_second_differences.begin(),
+                  final_second_differences.end());
+        std::sort(delay_second_differences.begin(),
+                  delay_second_differences.end());
+        std::sort(boundary_base_second_differences.begin(),
+                  boundary_base_second_differences.end());
+        std::sort(boundary_final_second_differences.begin(),
+                  boundary_final_second_differences.end());
+        trace.error_p95 = percentile(true_errors, 0.95f);
+        trace.input_second_p95 =
+            percentile(input_second_differences, 0.95f);
+        trace.base_second_p95 =
+            percentile(base_second_differences, 0.95f);
+        trace.final_second_p95 =
+            percentile(final_second_differences, 0.95f);
+        trace.delay_second_p95 =
+            percentile(delay_second_differences, 0.95f);
+        trace.boundary_base_second_p95 =
+            percentile(boundary_base_second_differences, 0.95f);
+        trace.boundary_final_second_p95 =
+            percentile(boundary_final_second_differences, 0.95f);
+        trace.missed_true_reversals =
+            expected_true_reversals - completed_true_reversals;
+        return trace;
+    };
+
+    const Trace fixed_box = run_case(false);
+    const Trace pose_box = run_case(true);
+    expect(fixed_box.error_p95 <= 12.0f &&
+               fixed_box.base_second_p95 <= 1.5f &&
+               fixed_box.base_second_p95 -
+                       fixed_box.input_second_p95 <= 1.5f &&
+               fixed_box.final_second_p95 <= 2.0f &&
+               fixed_box.delay_second_p95 <= 0.8f &&
+               fixed_box.boundary_base_second_p95 <= 3.0f &&
+               fixed_box.boundary_final_second_p95 <= 4.0f &&
+               fixed_box.command_reversals <= 4 &&
+               fixed_box.missed_true_reversals == 0 &&
+               fixed_box.wrong_direction_commands_after_base_crossing == 0 &&
+               fixed_box.maximum_high_speed_reverse_latency_frames <= 4 &&
+               fixed_box.maximum_low_speed_reverse_latency_frames <= 8 &&
+               fixed_box.maximum_reverse_zero_frames <= 8,
+           "固定框双向变速闭环必须同时证明高速追赶、基础点连续和真实"
+           "反向及时，误差P95/输入二阶P95/基础点二阶P95/最终点二阶P95/延迟二阶P95/"
+           "边界基础二阶P95/边界最终二阶P95/全部反转/漏反转/过线后错向/"
+           "高速反向延迟/低速反向延迟/反向零命令=" +
+               std::to_string(fixed_box.error_p95) + "/" +
+               std::to_string(fixed_box.input_second_p95) + "/" +
+               std::to_string(fixed_box.base_second_p95) + "/" +
+               std::to_string(fixed_box.final_second_p95) + "/" +
+               std::to_string(fixed_box.delay_second_p95) + "/" +
+               std::to_string(fixed_box.boundary_base_second_p95) + "/" +
+               std::to_string(fixed_box.boundary_final_second_p95) + "/" +
+               std::to_string(fixed_box.command_reversals) + "/" +
+               std::to_string(fixed_box.missed_true_reversals) + "/" +
+               std::to_string(
+                   fixed_box.wrong_direction_commands_after_base_crossing) +
+               "/" + std::to_string(
+                   fixed_box.maximum_high_speed_reverse_latency_frames) +
+               "/" + std::to_string(
+                   fixed_box.maximum_low_speed_reverse_latency_frames) +
+               "/" + std::to_string(fixed_box.maximum_reverse_zero_frames) +
+               "，首个反转=" +
+               fixed_box.first_command_reversal_context);
+    expect(pose_box.error_p95 <= 23.0f &&
+               pose_box.base_second_p95 <= 4.25f &&
+               pose_box.base_second_p95 -
+                       pose_box.input_second_p95 <= 3.75f &&
+               pose_box.final_second_p95 <= 5.0f &&
+               pose_box.final_second_p95 -
+                       pose_box.input_second_p95 <= 4.25f &&
+               pose_box.delay_second_p95 <= 1.5f &&
+               pose_box.boundary_base_second_p95 <= 6.0f &&
+               pose_box.boundary_final_second_p95 <= 7.0f &&
+               pose_box.command_reversals <= 7 &&
+               pose_box.missed_true_reversals == 0 &&
+               pose_box.wrong_direction_commands_after_base_crossing == 0 &&
+               pose_box.maximum_high_speed_reverse_latency_frames <= 4 &&
+               pose_box.maximum_low_speed_reverse_latency_frames <= 8 &&
+               pose_box.maximum_reverse_zero_frames <= 8 &&
+               pose_box.error_p95 - fixed_box.error_p95 <= 12.0f &&
+               pose_box.base_second_p95 -
+                       fixed_box.base_second_p95 <= 3.75f &&
+               pose_box.final_second_p95 -
+                       fixed_box.final_second_p95 <= 4.25f,
+           "同一闭环叠加姿态形变后只能增加有界歧义，不能恢复"
+           "高频泵振或阻塞真实反向，误差P95/输入二阶P95/基础点二阶P95/最终点二阶P95/"
+           "延迟二阶P95/边界基础二阶P95/边界最终二阶P95/全部反转/漏反转/"
+           "过线后错向/高速反向延迟/低速反向延迟/反向零命令/"
+           "相对固定框误差增量/基础二阶增量/最终二阶增量=" +
+               std::to_string(pose_box.error_p95) + "/" +
+               std::to_string(pose_box.input_second_p95) + "/" +
+               std::to_string(pose_box.base_second_p95) + "/" +
+               std::to_string(pose_box.final_second_p95) + "/" +
+               std::to_string(pose_box.delay_second_p95) + "/" +
+               std::to_string(pose_box.boundary_base_second_p95) + "/" +
+               std::to_string(pose_box.boundary_final_second_p95) + "/" +
+               std::to_string(pose_box.command_reversals) + "/" +
+               std::to_string(pose_box.missed_true_reversals) + "/" +
+               std::to_string(
+                   pose_box.wrong_direction_commands_after_base_crossing) +
+               "/" + std::to_string(
+                   pose_box.maximum_high_speed_reverse_latency_frames) +
+               "/" + std::to_string(
+                   pose_box.maximum_low_speed_reverse_latency_frames) +
+               "/" + std::to_string(pose_box.maximum_reverse_zero_frames) +
+               "/" +
+               std::to_string(pose_box.error_p95 - fixed_box.error_p95) +
+               "/" +
+               std::to_string(pose_box.base_second_p95 -
+                              fixed_box.base_second_p95) +
+               "/" +
+               std::to_string(pose_box.final_second_p95 -
+                              fixed_box.final_second_p95) +
+               "，首个反转=" +
+               pose_box.first_command_reversal_context);
+}
+
+void test_delayed_partial_visibility_closed_loop_preserves_real_reversals() {
+    constexpr int kFrameCount = 240;
+    constexpr int kSegmentFrameCount = 80;
+    constexpr int kActuationDelayFrames = 4;
+    constexpr float kFrameSeconds = 1.0f / 240.0f;
+    constexpr float kFullWidthRatio = 0.14f;
+    constexpr float kPartialWidthRatio = 0.70f;
+    constexpr std::array<float, 3> kMotionRatiosPerSecond{
+        0.75f, -0.75f, 0.75f};
+    struct Trace {
+        float error_p95_ratio = 0.0f;
+        float base_second_p95_ratio = 0.0f;
+        int command_reversals = 0;
+        int expected_true_reversals = 0;
+        int completed_true_reversals = 0;
+        int wrong_direction_commands_after_base_crossing = 0;
+        int maximum_reverse_latency_frames = 0;
+        int identity_changes = 0;
+        int left_partial_confirmed_frames = 0;
+        int right_partial_confirmed_frames = 0;
+        int first_full_recovery_frames = 0;
+        int second_full_recovery_frames = 0;
+        std::string first_reversal_context;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto percentile = [](const std::vector<float>& values,
+                               float fraction) {
+        return values[std::min(
+            values.size() - 1,
+            static_cast<std::size_t>(values.size() * fraction))];
+    };
+
+    const auto run_case = [&](float roi_scale, bool partial_enabled) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 1.5f * roi_scale;
+        config.smoothing = 0.475f;
+        // ROI 放大时每 ROI 像素对应 counts 成比例缩小，使闭环镜头响应保持
+        // 归一化同构；运动本身只由 ROI/s 定义，不按 px/s 或游戏速度分档。
+        config.counts_per_pixel_x = 0.425f / roi_scale;
+        config.counts_per_pixel_y = 0.40f / roi_scale;
+        config.max_counts_per_frame = 14.0f;
+        config.acquisition_range_percent = 100.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 15.0f;
+        Aim aim(config);
+        Trace trace;
+        std::array<int, kActuationDelayFrames> delayed_commands{};
+        const float roi_width = 320.0f * roi_scale;
+        const float control_center_x = roi_width * 0.5f;
+        const float full_width = roi_width * kFullWidthRatio;
+        const float partial_width = full_width * kPartialWidthRatio;
+        float world_target_x = roi_width * 0.075f;
+        float camera_x = 0.0f;
+        std::uint64_t track_id = 0;
+        int previous_command_sign = 0;
+        int active_reverse_direction = 0;
+        int active_reverse_base_crossing_frame = -1;
+        std::vector<float> normalized_errors;
+        std::vector<float> normalized_base_points;
+
+        for (int index = 0; index < kFrameCount; ++index) {
+            camera_x += delayed_commands[index % kActuationDelayFrames] /
+                config.counts_per_pixel_x * 0.20f;
+            delayed_commands[index % kActuationDelayFrames] = 0;
+            const int segment = std::min(
+                static_cast<int>(kMotionRatiosPerSecond.size()) - 1,
+                index / kSegmentFrameCount);
+            const float motion_ratio_per_second =
+                kMotionRatiosPerSecond[static_cast<std::size_t>(segment)];
+            if (index > 0 && index % kSegmentFrameCount == 0) {
+                active_reverse_direction =
+                    motion_ratio_per_second < 0.0f ? -1 : 1;
+                active_reverse_base_crossing_frame = -1;
+                ++trace.expected_true_reversals;
+            }
+            world_target_x +=
+                motion_ratio_per_second * roi_width * kFrameSeconds;
+            const float observed_x =
+                control_center_x + world_target_x - camera_x;
+            const bool left_partial =
+                partial_enabled && index >= 44 && index < 60;
+            const bool right_partial =
+                partial_enabled && index >= 124 && index < 140;
+            float observation_center_x = observed_x;
+            float observation_width = full_width;
+            if (left_partial) {
+                // 保持完整框左边界，仅内收右边界。
+                observation_width = partial_width;
+                observation_center_x = observed_x -
+                    (full_width - partial_width) * 0.5f;
+            } else if (right_partial) {
+                // 保持完整框右边界，仅内收左边界。
+                observation_width = partial_width;
+                observation_center_x = observed_x +
+                    (full_width - partial_width) * 0.5f;
+            }
+
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_center_x = control_center_x;
+            frame.control_center_y = roi_width * 0.5f;
+            frame.control_at =
+                frame.captured_at + std::chrono::milliseconds(1);
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                observation_center_x, roi_width * 0.5f,
+                observation_width, roi_width * 0.28f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "左右半身、完整框恢复及真实反转闭环必须逐帧保留目标");
+            if (!result.has_target) continue;
+            if (track_id == 0) track_id = result.target.track_id;
+            if (result.target.track_id != track_id) ++trace.identity_changes;
+            const int command_x = result.has_command
+                ? result.command.dx_counts : 0;
+            if (result.has_command) {
+                delayed_commands[index % kActuationDelayFrames] = command_x;
+            }
+
+            const float tracked_width =
+                result.target.x2 - result.target.x1;
+            if (left_partial && index >= 47 &&
+                tracked_width <= full_width * 0.82f) {
+                ++trace.left_partial_confirmed_frames;
+            }
+            if (right_partial && index >= 127 &&
+                tracked_width <= full_width * 0.82f) {
+                ++trace.right_partial_confirmed_frames;
+            }
+            if (partial_enabled && index >= 64 && index < 80 &&
+                tracked_width >= full_width * 0.90f) {
+                ++trace.first_full_recovery_frames;
+            }
+            if (partial_enabled && index >= 144 && index < 160 &&
+                tracked_width >= full_width * 0.90f) {
+                ++trace.second_full_recovery_frames;
+            }
+
+            if (active_reverse_direction != 0) {
+                const float normalized_base_error =
+                    (result.target.base_aim_x - control_center_x) / roi_width;
+                if (active_reverse_base_crossing_frame < 0 &&
+                    normalized_base_error * active_reverse_direction >
+                        0.007f) {
+                    active_reverse_base_crossing_frame = index;
+                }
+                if (active_reverse_base_crossing_frame >= 0) {
+                    if (command_x * active_reverse_direction > 0) {
+                        const int latency =
+                            index - active_reverse_base_crossing_frame;
+                        trace.maximum_reverse_latency_frames = std::max(
+                            trace.maximum_reverse_latency_frames, latency);
+                        if (trace.first_reversal_context.empty()) {
+                            trace.first_reversal_context =
+                                "frame=" + std::to_string(index) +
+                                ",latency=" + std::to_string(latency) +
+                                ",cmd=" + std::to_string(command_x) +
+                                ",base_ratio=" +
+                                std::to_string(normalized_base_error) +
+                                ",width_ratio=" +
+                                std::to_string(tracked_width / full_width);
+                        }
+                        active_reverse_direction = 0;
+                        ++trace.completed_true_reversals;
+                    } else if (command_x != 0) {
+                        ++trace.wrong_direction_commands_after_base_crossing;
+                    }
+                }
+            }
+            if (index >= 20 && command_x != 0) {
+                const int command_sign = command_x < 0 ? -1 : 1;
+                if (previous_command_sign != 0 &&
+                    command_sign != previous_command_sign) {
+                    ++trace.command_reversals;
+                }
+                previous_command_sign = command_sign;
+            }
+            if (index >= 20) {
+                normalized_errors.push_back(
+                    std::fabs(world_target_x - camera_x) / roi_width);
+                normalized_base_points.push_back(
+                    result.target.base_aim_x / roi_width);
+            }
+        }
+
+        std::vector<float> normalized_base_seconds;
+        for (std::size_t index = 2;
+             index < normalized_base_points.size(); ++index) {
+            normalized_base_seconds.push_back(std::fabs(
+                normalized_base_points[index] -
+                2.0f * normalized_base_points[index - 1] +
+                normalized_base_points[index - 2]));
+        }
+        std::sort(normalized_errors.begin(), normalized_errors.end());
+        std::sort(normalized_base_seconds.begin(),
+                  normalized_base_seconds.end());
+        trace.error_p95_ratio = percentile(normalized_errors, 0.95f);
+        trace.base_second_p95_ratio =
+            percentile(normalized_base_seconds, 0.95f);
+        return trace;
+    };
+
+    const Trace fixed = run_case(1.0f, false);
+    const Trace partial = run_case(1.0f, true);
+    const Trace doubled_partial = run_case(2.0f, true);
+    expect(kPartialWidthRatio <= 0.75f &&
+               fixed.expected_true_reversals == 2 &&
+               fixed.completed_true_reversals == 2 &&
+               fixed.command_reversals == 2 &&
+               fixed.wrong_direction_commands_after_base_crossing == 0,
+           "固定框闭环对照必须先稳定完成两次真实反转且没有额外往返，"
+           "预期/完成/命令反转/过线错向=" +
+               std::to_string(fixed.expected_true_reversals) + "/" +
+               std::to_string(fixed.completed_true_reversals) + "/" +
+               std::to_string(fixed.command_reversals) + "/" +
+               std::to_string(
+                   fixed.wrong_direction_commands_after_base_crossing));
+    const auto partial_contract_holds = [](const Trace& trace) {
+        return trace.expected_true_reversals == 2 &&
+            trace.completed_true_reversals == 2 &&
+            trace.command_reversals == 2 &&
+            trace.wrong_direction_commands_after_base_crossing == 0 &&
+            trace.maximum_reverse_latency_frames <= 10 &&
+            trace.identity_changes == 0 &&
+            trace.left_partial_confirmed_frames >= 8 &&
+            trace.right_partial_confirmed_frames >= 8 &&
+            trace.first_full_recovery_frames >= 12 &&
+            trace.second_full_recovery_frames >= 12 &&
+            trace.error_p95_ratio <= 0.08f &&
+            trace.base_second_p95_ratio <= 0.02f;
+    };
+    expect(
+        partial_contract_holds(partial) &&
+            partial_contract_holds(doubled_partial) &&
+            partial.command_reversals == fixed.command_reversals &&
+            partial.error_p95_ratio - fixed.error_p95_ratio <= 0.04f &&
+            std::fabs(partial.error_p95_ratio -
+                      doubled_partial.error_p95_ratio) <= 0.005f &&
+            std::fabs(partial.base_second_p95_ratio -
+                      doubled_partial.base_second_p95_ratio) <= 0.001f &&
+            std::abs(partial.maximum_reverse_latency_frames -
+                     doubled_partial.maximum_reverse_latency_frames) <= 1,
+        "稳定真实闭环中的左/右半身必须以不超过 75% 的宽度确认，恢复完整"
+        "框后两次真实水平反转不得漏发或产生额外往返，且 320/640 ROI"
+        " 必须比例同构；320预期/完成/反转/错向/延迟/身份/左半/右半/"
+        "恢复1/恢复2/误差P95/基础D2P95，640对应值=" +
+            std::to_string(partial.expected_true_reversals) + "/" +
+            std::to_string(partial.completed_true_reversals) + "/" +
+            std::to_string(partial.command_reversals) + "/" +
+            std::to_string(
+                partial.wrong_direction_commands_after_base_crossing) + "/" +
+            std::to_string(partial.maximum_reverse_latency_frames) + "/" +
+            std::to_string(partial.identity_changes) + "/" +
+            std::to_string(partial.left_partial_confirmed_frames) + "/" +
+            std::to_string(partial.right_partial_confirmed_frames) + "/" +
+            std::to_string(partial.first_full_recovery_frames) + "/" +
+            std::to_string(partial.second_full_recovery_frames) + "/" +
+            std::to_string(partial.error_p95_ratio) + "/" +
+            std::to_string(partial.base_second_p95_ratio) + ";" +
+            std::to_string(doubled_partial.expected_true_reversals) + "/" +
+            std::to_string(doubled_partial.completed_true_reversals) + "/" +
+            std::to_string(doubled_partial.command_reversals) + "/" +
+            std::to_string(
+                doubled_partial.wrong_direction_commands_after_base_crossing) +
+            "/" + std::to_string(
+                doubled_partial.maximum_reverse_latency_frames) + "/" +
+            std::to_string(doubled_partial.identity_changes) + "/" +
+            std::to_string(
+                doubled_partial.left_partial_confirmed_frames) + "/" +
+            std::to_string(
+                doubled_partial.right_partial_confirmed_frames) + "/" +
+            std::to_string(
+                doubled_partial.first_full_recovery_frames) + "/" +
+            std::to_string(
+                doubled_partial.second_full_recovery_frames) + "/" +
+            std::to_string(doubled_partial.error_p95_ratio) + "/" +
+            std::to_string(doubled_partial.base_second_p95_ratio) +
+            "，320首反转=" + partial.first_reversal_context +
+            "，640首反转=" + doubled_partial.first_reversal_context);
+}
+
 void test_delayed_left_motion_quantizes_from_world_feedforward() {
     constexpr float kFrameSeconds = 1.0f / 240.0f;
     constexpr int kActuationDelayFrames = 4;
@@ -2890,6 +4005,737 @@ void test_tracking_horizontal_pending_subtraction_stays_disabled_across_command_
                std::to_string(before.target.delay_compensation_x) + "/" +
                std::to_string(after.target.delay_compensation_x) + "/" +
                std::to_string(expired.target.delay_compensation_x));
+}
+
+void test_pending_command_age_uses_control_execution_time() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 100.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 50.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+
+    AimFrame first = make_frame(1, base);
+    first.control_at = base + std::chrono::milliseconds(10);
+    first.lock_active = true;
+    first.detections = {body(180.0f, 172.0f)};
+    const AimResult issued = aim.process(first);
+
+    // 相对截图已经过去 20 ms，但相对实际控制执行仅过去 10 ms；首条命令
+    // 仍应属于 15 ms 在途窗。若错误使用 captured_at，库存会被提前清除。
+    AimFrame second = make_frame(
+        2, base + std::chrono::milliseconds(14));
+    second.control_at = base + std::chrono::milliseconds(20);
+    second.lock_active = true;
+    second.detections = {body(180.0f, 172.0f)};
+    const AimResult pending = aim.process(second);
+    const float response = issued.command.dx_counts != 0
+        ? -pending.target.delay_compensation_x /
+            static_cast<float>(issued.command.dx_counts)
+        : 0.0f;
+    expect(issued.has_command && issued.command.dx_counts != 0 &&
+               pending.has_target &&
+               std::fabs(response - 0.15f) < 0.001f,
+           "命令库存年龄必须从控制执行时刻计算，不能从截图时刻提前到期，"
+           "响应=" + std::to_string(response));
+}
+
+void test_tracking_pending_direction_does_not_cancel_opposite_inventory() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 100.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 50.0f;
+    Aim aim(config);
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_frame = [&](std::uint64_t sequence,
+                               int elapsed_ms,
+                               float body_center_x,
+                               float control_center_x) {
+        AimFrame frame = make_frame(
+            sequence, base + std::chrono::milliseconds(elapsed_ms));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.control_center_x = control_center_x;
+        frame.lock_active = true;
+        frame.detections = {body(body_center_x, 160.0f)};
+        return aim.process(frame);
+    };
+
+    const AimResult positive = run_frame(1, 0, 181.0f, 180.0f);
+    const AimResult reversal_zero = run_frame(2, 4, 150.0f, 180.0f);
+    const AimResult negative = run_frame(3, 8, 130.0f, 180.0f);
+    // +1 与 -1 同时位于 15 ms 窗内，带符号净和为零；当前只需要
+    // -1 count 时，仍必须识别尚未到期的正向批次并先停发。
+    float hold_control_center_x = negative.target.base_aim_x +
+        negative.target.velocity_x * 0.004f + 0.8f;
+    const AimResult mixed_inventory_hold = run_frame(
+        4, 12, 130.0f, hold_control_center_x);
+    hold_control_center_x = mixed_inventory_hold.target.base_aim_x +
+        mixed_inventory_hold.target.velocity_x * 0.004f + 0.8f;
+    int released_elapsed_ms = -1;
+    int released_command = 0;
+    std::uint64_t sequence = 5;
+    for (int elapsed_ms = 16; elapsed_ms <= 48; elapsed_ms += 4) {
+        const AimResult result = run_frame(
+            sequence++, elapsed_ms, 130.0f, hold_control_center_x);
+        hold_control_center_x = result.target.base_aim_x +
+            result.target.velocity_x * 0.004f + 0.8f;
+        if (result.command.dx_counts < 0) {
+            released_elapsed_ms = elapsed_ms;
+            released_command = result.command.dx_counts;
+            break;
+        }
+    }
+
+    expect(positive.command.dx_counts > 0 &&
+               reversal_zero.command.dx_counts == 0 &&
+               negative.command.dx_counts == -positive.command.dx_counts,
+           "正负库存回归必须先构造等量反向批次，正/过零/负=" +
+               std::to_string(positive.command.dx_counts) + "/" +
+               std::to_string(reversal_zero.command.dx_counts) + "/" +
+               std::to_string(negative.command.dx_counts));
+    expect(mixed_inventory_hold.command.dx_counts == 0 &&
+               released_command < 0 && released_elapsed_ms <= 32,
+           "在途正负净和为零时仍须按实际方向库存停发，且正向库存到期后"
+           "必须有界释放，保持/释放时刻/命令/保持基础点/控制中心=" +
+               std::to_string(mixed_inventory_hold.command.dx_counts) + "/" +
+               std::to_string(released_elapsed_ms) + "/" +
+               std::to_string(released_command) + "/" +
+               std::to_string(mixed_inventory_hold.target.base_aim_x) + "/" +
+               std::to_string(negative.target.base_aim_x +
+                              negative.target.velocity_x * 0.004f + 0.8f));
+}
+
+void test_tracking_reverse_requires_base_and_common_edge_direction() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 100.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 50.0f;
+    Aim aim(config);
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    bool observed_projected_reverse_before_base_crossing = false;
+    int wrong_reverse_commands = 0;
+    std::string first_context;
+
+    for (int index = 0; index < 8; ++index) {
+        const float body_center_x = index == 0
+            ? 220.0f : 220.0f - static_cast<float>(index) * 15.0f;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index) * 4167));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.control_center_x = 160.0f;
+        frame.lock_active = true;
+        frame.detections = {body(body_center_x, 160.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "反向几何一致性回归必须逐帧保留确认目标");
+        if (!result.has_target) continue;
+
+        const float base_error =
+            result.target.base_aim_x - frame.control_center_x;
+        const float delayed_error =
+            result.target.delay_compensated_aim_x - frame.control_center_x;
+        if (base_error > 2.0f && delayed_error < 0.0f) {
+            observed_projected_reverse_before_base_crossing = true;
+            if (result.command.dx_counts < 0) {
+                ++wrong_reverse_commands;
+                if (first_context.empty()) {
+                    first_context = "frame=" + std::to_string(index) +
+                        ",base=" + std::to_string(base_error) +
+                        ",delay=" + std::to_string(delayed_error) +
+                        ",vx=" +
+                        std::to_string(result.target.velocity_x) +
+                        ",cmd=" +
+                        std::to_string(result.command.dx_counts);
+                }
+            }
+        }
+    }
+
+    expect(observed_projected_reverse_before_base_crossing &&
+               wrong_reverse_commands == 0,
+           "延迟投影先翻向而基础中心仍支持旧方向时不得提前发送反向制动，"
+           "已覆盖/错向命令/首例=" +
+               std::to_string(
+                   observed_projected_reverse_before_base_crossing) + "/" +
+               std::to_string(wrong_reverse_commands) + "/" + first_context);
+}
+
+void test_tracking_reverse_releases_during_continuous_head_only_motion() {
+    struct Trace {
+        int first_negative_command_offset = -1;
+        int negative_base_frames = 0;
+        int identity_changes = 0;
+        float final_velocity_ratio_per_second = 0.0f;
+        float final_delay_ratio = 0.0f;
+        std::string first_negative_context;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_case = [&](float roi_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        Trace trace;
+        const float roi_width = 320.0f * roi_scale;
+
+        AimFrame body_frame = make_frame(1, base);
+        body_frame.roi_width = static_cast<int>(roi_width);
+        body_frame.roi_height = static_cast<int>(roi_width);
+        body_frame.control_at = body_frame.captured_at +
+            std::chrono::milliseconds(1);
+        body_frame.control_center_x = roi_width * 0.4375f;
+        body_frame.control_center_y = roi_width * 0.50f;
+        body_frame.lock_active = true;
+        body_frame.detections = {body_box(
+            roi_width * 0.48125f,
+            roi_width * 0.50f,
+            roi_width * 0.125f,
+            roi_width * 0.25f)};
+        const AimResult established = aim.process(body_frame);
+        expect(established.status == AimStatus::SUCCESS &&
+                   established.has_target &&
+                   established.command.dx_counts > 0,
+               "连续 head-only 反向回归必须先建立正向物理输出，ROI/命令=" +
+                   std::to_string(roi_width) + "/" +
+                   std::to_string(established.command.dx_counts));
+
+        const std::uint64_t track_id = established.target.track_id;
+        float final_velocity_sum = 0.0f;
+        float final_delay_sum = 0.0f;
+        int final_sample_count = 0;
+        for (int offset = 0; offset < 20; ++offset) {
+            const float head_center_x =
+                roi_width * (0.4796875f - 0.0015625f * offset);
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(offset + 2),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(offset + 1) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.50f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            frame.detections = {head_box(
+                head_center_x,
+                roi_width * 0.50f,
+                roi_width * 0.04375f,
+                roi_width * 0.04375f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "连续 head-only 真实反向必须逐帧保留目标");
+            if (!result.has_target) continue;
+            if (result.target.track_id != track_id) {
+                ++trace.identity_changes;
+            }
+            if (result.target.base_aim_x < frame.control_center_x) {
+                ++trace.negative_base_frames;
+            }
+            if (trace.first_negative_command_offset < 0 &&
+                result.command.dx_counts < 0) {
+                trace.first_negative_command_offset = offset;
+                trace.first_negative_context =
+                    "offset=" + std::to_string(offset) +
+                    ",base=" + std::to_string(result.target.base_aim_x) +
+                    ",delay=" +
+                    std::to_string(result.target.delay_compensated_aim_x) +
+                    ",vx=" + std::to_string(result.target.velocity_x) +
+                    ",cmd=" + std::to_string(result.command.dx_counts);
+            }
+            if (offset >= 16) {
+                final_velocity_sum += result.target.velocity_x / roi_width;
+                final_delay_sum +=
+                    result.target.delay_compensation_x / roi_width;
+                ++final_sample_count;
+            }
+        }
+        trace.final_velocity_ratio_per_second =
+            final_velocity_sum / static_cast<float>(final_sample_count);
+        trace.final_delay_ratio =
+            final_delay_sum / static_cast<float>(final_sample_count);
+        return trace;
+    };
+
+    const Trace normal = run_case(1.0f);
+    const Trace doubled = run_case(2.0f);
+    constexpr float kExpectedVelocityRatioPerSecond = -0.375f;
+    const auto contract_holds = [](const Trace& trace) {
+        const float velocity_response =
+            trace.final_velocity_ratio_per_second /
+            kExpectedVelocityRatioPerSecond;
+        return trace.identity_changes == 0 &&
+            trace.negative_base_frames >= 12 &&
+            trace.first_negative_command_offset >= 1 &&
+            trace.first_negative_command_offset <= 10 &&
+            velocity_response >= 0.55f && velocity_response <= 1.25f &&
+            trace.final_delay_ratio <= -0.0033f &&
+            trace.final_delay_ratio >= -0.0075f;
+    };
+    expect(contract_holds(normal) && contract_holds(doubled) &&
+               std::fabs(normal.final_velocity_ratio_per_second -
+                         doubled.final_velocity_ratio_per_second) <= 0.01f &&
+               std::fabs(normal.final_delay_ratio -
+                         doubled.final_delay_ratio) <= 0.001f &&
+               std::abs(normal.first_negative_command_offset -
+                        doubled.first_negative_command_offset) <= 1,
+           "旧正向输出建立后，即使身体框始终不恢复，连续 head-only 共同边"
+           "真实反向也必须保持速度与延迟提前量，且 320/640 ROI 比例同构；"
+           "320 身份/反侧帧/首负偏移/vx比例/延迟比例，640对应值=" +
+               std::to_string(normal.identity_changes) + "/" +
+               std::to_string(normal.negative_base_frames) + "/" +
+               std::to_string(normal.first_negative_command_offset) + "/" +
+               std::to_string(normal.final_velocity_ratio_per_second) + "/" +
+               std::to_string(normal.final_delay_ratio) + "/" +
+               std::to_string(doubled.identity_changes) + "/" +
+               std::to_string(doubled.negative_base_frames) + "/" +
+               std::to_string(doubled.first_negative_command_offset) + "/" +
+               std::to_string(doubled.final_velocity_ratio_per_second) + "/" +
+               std::to_string(doubled.final_delay_ratio) +
+               "，首个负命令=" + normal.first_negative_context);
+}
+
+void test_tracking_reverse_cusum_resets_across_body_head_semantics() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 100.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 50.0f;
+    Aim partial_evidence_aim(config);
+    Aim reference_aim(config);
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto make_control_frame = [&](int frame_index,
+                                        float control_center_x) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(frame_index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(frame_index) * 4167));
+        frame.control_at = frame.captured_at +
+            std::chrono::milliseconds(1);
+        frame.control_center_x = control_center_x;
+        frame.lock_active = true;
+        return frame;
+    };
+
+    AimFrame established_frame = make_control_frame(0, 140.0f);
+    established_frame.detections = {
+        body_box(154.0f, 160.0f, 40.0f, 80.0f)};
+    const AimResult partial_established =
+        partial_evidence_aim.process(established_frame);
+    const AimResult reference_established =
+        reference_aim.process(established_frame);
+    expect(partial_established.status == AimStatus::SUCCESS &&
+               partial_established.has_target &&
+               partial_established.command.dx_counts > 0 &&
+               reference_established.status == AimStatus::SUCCESS &&
+               reference_established.has_target &&
+               reference_established.command.dx_counts > 0,
+           "body/head 语义切换回归必须先在两个实例建立正向输出");
+
+    constexpr std::array<float, 4> kPartialReverseCenters{
+        153.5f, 153.0f, 152.5f, 152.0f};
+    int premature_negative_commands = 0;
+    for (std::size_t index = 0;
+         index < kPartialReverseCenters.size(); ++index) {
+        AimFrame partial_frame = make_control_frame(
+            static_cast<int>(index) + 1, 160.0f);
+        partial_frame.detections = {body_box(
+            kPartialReverseCenters[index], 160.0f, 40.0f, 80.0f)};
+        AimFrame reference_frame = partial_frame;
+        reference_frame.control_center_x = 140.0f;
+        const AimResult partial =
+            partial_evidence_aim.process(partial_frame);
+        const AimResult reference = reference_aim.process(reference_frame);
+        expect(partial.status == AimStatus::SUCCESS && partial.has_target &&
+                   reference.status == AimStatus::SUCCESS &&
+                   reference.has_target,
+               "body→head 前的部分 CUSUM 必须保持两个实例的目标");
+        if (partial.command.dx_counts < 0) {
+            ++premature_negative_commands;
+        }
+    }
+
+    int partial_first_negative_offset = -1;
+    int reference_first_negative_offset = -1;
+    int fresh_position_crossing_offset = -1;
+    int identity_changes = 0;
+    float fresh_position_area_ratio_seconds = 0.0f;
+    for (int offset = 0; offset < 20; ++offset) {
+        const int frame_index =
+            1 + static_cast<int>(kPartialReverseCenters.size()) + offset;
+        AimFrame frame = make_control_frame(frame_index, 160.0f);
+        frame.detections = {
+            head_box(148.0f, 160.0f, 14.0f, 14.0f)};
+        const AimResult partial = partial_evidence_aim.process(frame);
+        const AimResult reference = reference_aim.process(frame);
+        expect(partial.status == AimStatus::SUCCESS && partial.has_target &&
+                   reference.status == AimStatus::SUCCESS &&
+                   reference.has_target,
+               "body→head 后静态反侧框必须在两个实例逐帧保留目标");
+        if (!partial.has_target || !reference.has_target) continue;
+        if (partial.target.track_id != partial_established.target.track_id ||
+            reference.target.track_id !=
+                reference_established.target.track_id) {
+            ++identity_changes;
+        }
+        const float normalized_reverse_error = std::max(
+            0.0f,
+            (frame.control_center_x - partial.target.base_aim_x) /
+                static_cast<float>(frame.roi_width));
+        fresh_position_area_ratio_seconds +=
+            normalized_reverse_error * (1.0f / 240.0f);
+        if (fresh_position_crossing_offset < 0 &&
+            fresh_position_area_ratio_seconds >=
+                0.10f * config.control_delay_ms / 1000.0f) {
+            fresh_position_crossing_offset = offset;
+        }
+        if (partial_first_negative_offset < 0 &&
+            partial.command.dx_counts < 0) {
+            partial_first_negative_offset = offset;
+        }
+        if (reference_first_negative_offset < 0 &&
+            reference.command.dx_counts < 0) {
+            reference_first_negative_offset = offset;
+        }
+    }
+
+    expect(premature_negative_commands == 0 && identity_changes == 0 &&
+               fresh_position_crossing_offset >= 0 &&
+               partial_first_negative_offset >=
+                   fresh_position_crossing_offset &&
+               reference_first_negative_offset >=
+                   fresh_position_crossing_offset &&
+               std::abs(partial_first_negative_offset -
+                        reference_first_negative_offset) <= 1,
+           "body/head 原始框语义切换必须清空旧 CUSUM 与位置面积，静态"
+           " head 重获只能从新鲜 10% ROI 位置面积释放；提前负命令/身份变化/"
+           "外部过门/部分实例首负/参考实例首负=" +
+               std::to_string(premature_negative_commands) + "/" +
+               std::to_string(identity_changes) + "/" +
+               std::to_string(fresh_position_crossing_offset) + "/" +
+               std::to_string(partial_first_negative_offset) + "/" +
+               std::to_string(reference_first_negative_offset));
+}
+
+void test_tracking_reverse_cusum_resets_across_locked_loss() {
+    for (const int lost_frame_count : {1, 3}) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim partial_evidence_aim(config);
+        Aim reference_aim(config);
+        const auto base =
+            std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        const auto make_control_frame = [&](int frame_index,
+                                            float control_center_x) {
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(frame_index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(frame_index) * 4167));
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = control_center_x;
+            frame.lock_active = true;
+            return frame;
+        };
+
+        AimFrame established_frame = make_control_frame(0, 140.0f);
+        established_frame.detections = {
+            body_box(154.0f, 160.0f, 40.0f, 80.0f)};
+        const AimResult partial_established =
+            partial_evidence_aim.process(established_frame);
+        const AimResult reference_established =
+            reference_aim.process(established_frame);
+        expect(partial_established.status == AimStatus::SUCCESS &&
+                   partial_established.has_target &&
+                   partial_established.command.dx_counts > 0 &&
+                   reference_established.status == AimStatus::SUCCESS &&
+                   reference_established.has_target &&
+                   reference_established.command.dx_counts > 0,
+               "锁定丢失回归的两个实例都必须先建立正向物理输出");
+        const std::uint64_t partial_track_id =
+            partial_established.target.track_id;
+        const std::uint64_t reference_track_id =
+            reference_established.target.track_id;
+
+        constexpr std::array<float, 4> kPartialReverseCenters{
+            153.5f, 153.0f, 152.5f, 152.0f};
+        int partial_reverse_geometry_frames = 0;
+        int premature_commands_before_loss = 0;
+        for (std::size_t index = 0;
+             index < kPartialReverseCenters.size(); ++index) {
+            AimFrame partial_frame = make_control_frame(
+                static_cast<int>(index) + 1, 160.0f);
+            partial_frame.detections = {body_box(
+                kPartialReverseCenters[index],
+                160.0f, 40.0f, 80.0f)};
+            AimFrame reference_frame = partial_frame;
+            reference_frame.control_center_x = 140.0f;
+            const AimResult partial =
+                partial_evidence_aim.process(partial_frame);
+            const AimResult reference = reference_aim.process(reference_frame);
+            expect(partial.status == AimStatus::SUCCESS &&
+                       partial.has_target &&
+                       partial.target.track_id == partial_track_id &&
+                       reference.status == AimStatus::SUCCESS &&
+                       reference.has_target &&
+                       reference.target.track_id == reference_track_id,
+                   "丢失前四帧共同边反向证据必须保持两个实例的轨迹身份");
+            if (partial.has_target &&
+                partial.target.base_aim_x < partial_frame.control_center_x) {
+                ++partial_reverse_geometry_frames;
+            }
+            if (partial.command.dx_counts < 0) {
+                ++premature_commands_before_loss;
+            }
+        }
+
+        int invalid_lost_frames = 0;
+        for (int index = 0; index < lost_frame_count; ++index) {
+            const int frame_index =
+                1 + static_cast<int>(kPartialReverseCenters.size()) + index;
+            AimFrame frame = make_control_frame(frame_index, 160.0f);
+            const AimResult partial = partial_evidence_aim.process(frame);
+            const AimResult reference = reference_aim.process(frame);
+            if (partial.status != AimStatus::SUCCESS ||
+                !partial.has_target || !partial.target.predicted ||
+                partial.target.track_id != partial_track_id ||
+                partial.has_command ||
+                reference.status != AimStatus::SUCCESS ||
+                !reference.has_target || !reference.target.predicted ||
+                reference.target.track_id != reference_track_id ||
+                reference.has_command) {
+                ++invalid_lost_frames;
+            }
+        }
+
+        int partial_first_negative_offset = -1;
+        int reference_first_negative_offset = -1;
+        int fresh_position_crossing_offset = -1;
+        int identity_changes = 0;
+        float fresh_position_area_ratio_seconds = 0.0f;
+        std::string first_negative_context;
+        for (int offset = 0; offset < 40; ++offset) {
+            const int frame_index =
+                1 + static_cast<int>(kPartialReverseCenters.size()) +
+                lost_frame_count + offset;
+            AimFrame frame = make_control_frame(frame_index, 160.0f);
+            frame.detections = {
+                body_box(148.0f, 160.0f, 40.0f, 80.0f)};
+            const AimResult partial = partial_evidence_aim.process(frame);
+            const AimResult reference = reference_aim.process(frame);
+            expect(partial.status == AimStatus::SUCCESS &&
+                       partial.has_target &&
+                       reference.status == AimStatus::SUCCESS &&
+                       reference.has_target,
+                   "锁定丢失后静态反侧重获必须在两个实例逐帧保留目标");
+            if (!partial.has_target || !reference.has_target) continue;
+            if (partial.target.track_id != partial_track_id ||
+                reference.target.track_id != reference_track_id) {
+                ++identity_changes;
+            }
+            const float normalized_reverse_error = std::max(
+                0.0f,
+                (frame.control_center_x - partial.target.base_aim_x) /
+                    static_cast<float>(frame.roi_width));
+            fresh_position_area_ratio_seconds +=
+                normalized_reverse_error * (1.0f / 240.0f);
+            if (fresh_position_crossing_offset < 0 &&
+                fresh_position_area_ratio_seconds >=
+                    0.10f * config.control_delay_ms / 1000.0f) {
+                fresh_position_crossing_offset = offset;
+            }
+            if (partial_first_negative_offset < 0 &&
+                partial.command.dx_counts < 0) {
+                partial_first_negative_offset = offset;
+                first_negative_context =
+                    "offset=" + std::to_string(offset) +
+                    ",base=" + std::to_string(partial.target.base_aim_x) +
+                    ",delay=" +
+                    std::to_string(
+                        partial.target.delay_compensated_aim_x) +
+                    ",vx=" + std::to_string(partial.target.velocity_x) +
+                    ",cmd=" +
+                    std::to_string(partial.command.dx_counts);
+            }
+            if (reference_first_negative_offset < 0 &&
+                reference.command.dx_counts < 0) {
+                reference_first_negative_offset = offset;
+            }
+        }
+
+        expect(partial_reverse_geometry_frames == 4 &&
+                   premature_commands_before_loss == 0 &&
+                   invalid_lost_frames == 0 && identity_changes == 0 &&
+                   fresh_position_crossing_offset >= 0 &&
+                   partial_first_negative_offset >=
+                       fresh_position_crossing_offset &&
+                   reference_first_negative_offset >=
+                       fresh_position_crossing_offset &&
+                   std::abs(partial_first_negative_offset -
+                            reference_first_negative_offset) <= 1,
+               "lock_active 持续为 true 的单帧/短丢失必须清空丢失前部分"
+               " CUSUM、原始共同边历史与位置面积；静态重获只能从新鲜"
+               " 10% ROI 位置累计有界释放，丢失帧/部分证据帧/丢失前负命令/"
+               "非法丢失/身份变化/新鲜过门/部分实例首负/参考实例首负=" +
+                   std::to_string(lost_frame_count) + "/" +
+                   std::to_string(partial_reverse_geometry_frames) + "/" +
+                   std::to_string(premature_commands_before_loss) + "/" +
+                   std::to_string(invalid_lost_frames) + "/" +
+                   std::to_string(identity_changes) + "/" +
+                   std::to_string(fresh_position_crossing_offset) + "/" +
+                   std::to_string(partial_first_negative_offset) + "/" +
+                   std::to_string(reference_first_negative_offset) +
+                   "，首个负命令=" + first_negative_context);
+    }
+}
+
+void test_tracking_reverse_rejects_common_edge_micro_jitter() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 100.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 50.0f;
+    Aim aim(config);
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+
+    AimFrame established_frame = make_frame(1, base);
+    established_frame.control_at = established_frame.captured_at +
+        std::chrono::milliseconds(1);
+    established_frame.control_center_x = 140.0f;
+    established_frame.lock_active = true;
+    established_frame.detections = {
+        body_box(154.0f, 160.0f, 40.0f, 80.0f)};
+    const AimResult established = aim.process(established_frame);
+    expect(established.status == AimStatus::SUCCESS &&
+               established.has_target && established.command.dx_counts > 0,
+           "共同边微抖回归必须先建立正向物理输出");
+
+    constexpr std::array<float, 3> kMicroJitterOffsets{
+        -0.10f, -0.20f, 0.0f};
+    int reverse_geometry_frames = 0;
+    int negative_commands = 0;
+    int first_negative_command_offset = -1;
+    std::string first_negative_context;
+    for (int offset = 0; offset < 14; ++offset) {
+        const float target_center_x =
+            154.0f + kMicroJitterOffsets[offset % 3];
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(offset + 2),
+            base + std::chrono::microseconds(
+                static_cast<long long>(offset + 1) * 4167));
+        frame.control_at = frame.captured_at +
+            std::chrono::milliseconds(1);
+        frame.control_center_x = 160.0f;
+        frame.lock_active = true;
+        frame.detections = {
+            body_box(target_center_x, 160.0f, 40.0f, 80.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "共同边微抖回归必须逐帧保留目标");
+        if (!result.has_target) continue;
+        if (result.target.base_aim_x < frame.control_center_x - 4.0f) {
+            ++reverse_geometry_frames;
+        }
+        if (result.command.dx_counts < 0) {
+            ++negative_commands;
+            if (first_negative_command_offset < 0) {
+                first_negative_command_offset = offset;
+                first_negative_context =
+                    "offset=" + std::to_string(offset) +
+                    ",center=" + std::to_string(target_center_x) +
+                    ",base=" + std::to_string(result.target.base_aim_x) +
+                    ",vx=" + std::to_string(result.target.velocity_x) +
+                    ",cmd=" + std::to_string(result.command.dx_counts);
+            }
+        }
+    }
+
+    expect(reverse_geometry_frames == 14 && negative_commands == 0,
+           "相邻两边共同作 -0.1/-0.1/+0.2 px 的正负微抖时，Page/CUSUM"
+           " 参考漂移必须阻止反向门在位置兜底前快速放行；反侧几何帧/"
+           "负命令/首个偏移=" +
+               std::to_string(reverse_geometry_frames) + "/" +
+               std::to_string(negative_commands) + "/" +
+               std::to_string(first_negative_command_offset) +
+               "，首个负命令=" + first_negative_context);
 }
 
 void test_tracking_without_pending_keeps_geometric_contract_across_inputs() {
@@ -4691,8 +6537,9 @@ void test_base_crossing_releases_integral_smoothly() {
     int reverse_command_offset = -1;
     int previous_command = 0;
     bool have_previous_command = false;
+    std::string crossing_trace;
     const float hold_band = std::max(2.0f, config.deadzone_pixels * 1.5f);
-    for (int offset = 0; offset < 20; ++offset) {
+    for (int offset = 0; offset < 40; ++offset) {
         const int index = 120 + offset;
         AimFrame frame = make_frame(
             static_cast<std::uint64_t>(index + 1),
@@ -4734,6 +6581,14 @@ void test_base_crossing_releases_integral_smoothly() {
                 break;
             }
         }
+        if (offset >= 12) {
+            crossing_trace +=
+                std::to_string(offset) + ":base=" +
+                std::to_string(base_error) + ",delay=" +
+                std::to_string(result.target.delay_compensation_x) +
+                ",vx=" + std::to_string(result.target.velocity_x) +
+                ",cmd=" + std::to_string(command) + ";";
+        }
     }
     expect(observed_base_crossing,
            "回归必须实际覆盖基础点越过死区，而不只是延迟投影点过零");
@@ -4741,7 +6596,8 @@ void test_base_crossing_releases_integral_smoothly() {
                reverse_command_offset - base_crossing_offset <= 6,
            "基础点真实越过后必须平滑并及时反向，越过帧=" +
                std::to_string(base_crossing_offset) + "，反向帧=" +
-               std::to_string(reverse_command_offset));
+               std::to_string(reverse_command_offset) + "，轨迹=" +
+               crossing_trace);
 }
 
 void test_two_axis_command_reversal_passes_through_zero() {
@@ -5338,7 +7194,9 @@ void test_short_glide_preserves_base_tracking_hold() {
             static_cast<std::uint64_t>(index + 1),
             base + std::chrono::microseconds(
                 static_cast<long long>(index * 1000000.0f / 240.0f)));
-        frame.lock_active = true;
+        // 两帧滑行期间模拟用户已经释放物理安全门。恢复同一 Track 时既要
+        // 接回基础前馈，也不能继承释放前的 X 输出方向/反向证据。
+        frame.lock_active = index < 150 || index > 151;
         if (index < 150 || index > 151) {
             frame.detections = {
                 body(160.0f + world_target_x - camera_x, 160.0f)};
@@ -5690,6 +7548,9 @@ int main() {
     test_horizontal_pose_trend_is_speed_independent();
     test_horizontal_pose_trend_uses_capture_time_across_head_and_delivery_gaps();
     test_horizontal_pose_trend_reversal_is_bounded();
+    test_horizontal_persistent_innovation_keeps_velocity_and_delay_continuous();
+    test_horizontal_maneuver_accepts_coherent_second_reversal();
+    test_horizontal_maneuver_rejects_short_coherent_center_outliers();
     test_horizontal_pose_trend_recovers_after_body_semantic_loss();
     test_horizontal_pose_trend_bounds_sparse_center_outliers();
     test_horizontal_partial_visibility_isolates_small_transients();
@@ -5710,9 +7571,18 @@ int main() {
     test_control_trajectory_never_moves_away_from_target();
     test_integral_tracks_constant_velocity_with_bounded_error();
     test_delayed_closed_loop_holds_moving_base_point();
+    test_delayed_pose_closed_loop_keeps_tracking_observer_continuous();
+    test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_horizontal_pending_subtraction_is_axis_and_profile_scoped();
     test_tracking_horizontal_pending_subtraction_stays_disabled_across_command_age();
+    test_pending_command_age_uses_control_execution_time();
+    test_tracking_pending_direction_does_not_cancel_opposite_inventory();
+    test_tracking_reverse_requires_base_and_common_edge_direction();
+    test_tracking_reverse_releases_during_continuous_head_only_motion();
+    test_tracking_reverse_cusum_resets_across_body_head_semantics();
+    test_tracking_reverse_cusum_resets_across_locked_loss();
+    test_tracking_reverse_rejects_common_edge_micro_jitter();
     test_tracking_without_pending_keeps_geometric_contract_across_inputs();
     test_prediction_uses_world_motion_when_delay_vector_points_backward();
     test_prediction_survives_short_world_motion_measurement_dips();
