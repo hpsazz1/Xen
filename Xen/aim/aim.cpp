@@ -124,12 +124,12 @@ constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
 // 第十四轮真实序列中，15 ms 窗口内约 15% 的命令位移足以解释基础点
 // 随后越过准星的幅度。这里只用于保守预测在途位移，不改变鼠标标定。
 constexpr float kControllerPendingCommandResponse = 0.15f;
-// 超级跳 tracking 的真实 Run 中，水平公开延迟点有近半帧被 15% 在途扣减推到
-// 轨迹速度反向，并比基础点额外产生 41 次过零。prediction 仍依赖既有 15%
-// 几何/库存契约；仅在 prediction 关闭时把 X 响应降至其 75%，保留同向提前量，
-// Y 继续使用原响应，避免本轮重新引入已经收敛的垂直摆动。
-constexpr float kTrackingHorizontalPendingCommandResponse =
-    kControllerPendingCommandResponse * 0.75f;
+// 超级跳两个独立 tracking Run 证明固定 X 在途响应无法稳定表征不同闭环
+// 库存状态：响应从 15% 降到 11.25% 后，未触发二维限幅帧的库存 P50 从
+// 6 增到 9 counts，当前闭环仍形成约 3.2 Hz 的完整追赶—制动循环。
+// tracking X 因此不再用不确定库存模型制造提前制动，只保留连续几何投影；
+// Y 与 prediction 的在途响应系数继续使用已验证的 15%。
+constexpr float kTrackingHorizontalPendingCommandResponse = 0.0f;
 // 40 ms 窗口内的 pending 总和会按命令逐帧阶跃；0.12 只平滑隐藏库存
 // 投影，使实测 8～10 帧命令反馈周期内逐步制动，不改变公开 prediction 点或
 // 用户配置的 0.475 基础控制平滑。

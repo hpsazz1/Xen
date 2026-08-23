@@ -9,6 +9,7 @@
 #include <iostream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -1443,7 +1444,7 @@ void test_delayed_left_motion_quantizes_from_world_feedforward() {
                std::to_string(maximum_no_command));
 }
 
-void test_tracking_horizontal_pending_response_is_axis_and_profile_scoped() {
+void test_tracking_horizontal_pending_subtraction_is_axis_and_profile_scoped() {
     const auto run_horizontal = [](bool prediction_enabled) {
         AimConfig config;
         config.min_confirmed_hits = 1;
@@ -1487,9 +1488,10 @@ void test_tracking_horizontal_pending_response_is_axis_and_profile_scoped() {
     const float prediction_response =
         -prediction_pending.target.delay_compensation_x /
         static_cast<float>(prediction_issued.command.dx_counts);
-    expect(std::fabs(tracking_response - 0.1125f) < 0.001f &&
+    expect(std::fabs(tracking_response) < 0.001f &&
                std::fabs(prediction_response - 0.15f) < 0.001f,
-           "prediction 关闭时只能降低 X 在途响应，tracking/prediction=" +
+           "tracking X 不得扣减不确定在途库存，prediction X 保持原 15% 契约，"
+           "tracking/prediction=" +
                std::to_string(tracking_response) + "/" +
                std::to_string(prediction_response));
 
@@ -1524,6 +1526,324 @@ void test_tracking_horizontal_pending_response_is_axis_and_profile_scoped() {
                std::fabs(vertical_response - 0.15f) < 0.001f,
            "tracking Y 在途响应必须保持 15%，实际=" +
                std::to_string(vertical_response));
+
+    AimConfig prediction_vertical_config = vertical_config;
+    prediction_vertical_config.enable_prediction = true;
+    Aim prediction_vertical(prediction_vertical_config);
+    const auto prediction_vertical_base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    AimFrame first_prediction_vertical = make_frame(
+        1, prediction_vertical_base);
+    first_prediction_vertical.lock_active = true;
+    first_prediction_vertical.detections = {body(160.0f, 182.0f)};
+    const AimResult prediction_vertical_issued =
+        prediction_vertical.process(first_prediction_vertical);
+    AimFrame second_prediction_vertical = make_frame(
+        2, prediction_vertical_base + std::chrono::milliseconds(4));
+    second_prediction_vertical.lock_active = true;
+    second_prediction_vertical.detections = {body(160.0f, 182.0f)};
+    const AimResult prediction_vertical_pending =
+        prediction_vertical.process(second_prediction_vertical);
+    const float prediction_vertical_response =
+        -prediction_vertical_pending.target.delay_compensation_y /
+        static_cast<float>(prediction_vertical_issued.command.dy_counts);
+    expect(prediction_vertical_issued.has_command &&
+               prediction_vertical_pending.has_target &&
+               std::fabs(prediction_vertical_response - 0.15f) < 0.001f,
+           "prediction Y 在途响应必须保持 15%，实际=" +
+               std::to_string(prediction_vertical_response));
+
+    AimConfig coupled_config = vertical_config;
+    coupled_config.max_delay_compensation_percent = 1.0f;
+    Aim coupled(coupled_config);
+    const auto coupled_base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(3);
+    AimFrame first_coupled = make_frame(1, coupled_base);
+    first_coupled.lock_active = true;
+    first_coupled.detections = {body(180.0f, 182.0f)};
+    const AimResult coupled_issued = coupled.process(first_coupled);
+    AimFrame second_coupled = make_frame(
+        2, coupled_base + std::chrono::milliseconds(4));
+    second_coupled.lock_active = true;
+    second_coupled.detections = {body(184.0f, 182.0f)};
+    const AimResult coupled_projected = coupled.process(second_coupled);
+    const float maximum_coupled_delay = std::hypot(
+        coupled_projected.target.x2 - coupled_projected.target.x1,
+        coupled_projected.target.y2 - coupled_projected.target.y1) * 0.01f;
+    const float unclamped_pending_y =
+        -static_cast<float>(coupled_issued.command.dy_counts) * 0.15f /
+        coupled_config.counts_per_pixel_y;
+    const float unclamped_geometric_x =
+        coupled_projected.target.velocity_x *
+        coupled_projected.target.delay_compensation_ms_x / 1000.0f;
+    const float unclamped_coupled_length = std::hypot(
+        unclamped_geometric_x, unclamped_pending_y);
+    const float coupled_delay_length = std::hypot(
+        coupled_projected.target.delay_compensation_x,
+        coupled_projected.target.delay_compensation_y);
+    expect(coupled_issued.has_command &&
+               coupled_issued.command.dx_counts != 0 &&
+               coupled_issued.command.dy_counts != 0 &&
+               coupled_projected.status == AimStatus::SUCCESS &&
+               coupled_projected.has_target &&
+               coupled_projected.target.velocity_x > 0.0f &&
+               unclamped_pending_y != 0.0f &&
+               unclamped_coupled_length > maximum_coupled_delay + 0.001f &&
+               std::fabs(coupled_delay_length - maximum_coupled_delay) <
+                   0.001f &&
+               coupled_projected.target.delay_compensation_y != 0.0f &&
+               coupled_projected.target.delay_compensation_y *
+                       unclamped_pending_y >= 0.0f &&
+               std::fabs(coupled_projected.target.delay_compensation_y) <=
+                   std::fabs(unclamped_pending_y) + 0.001f,
+           "tracking X 去库存后的混合轴投影仍必须遵守二维预算，"
+           "且不得翻转或放大 Y 在途响应");
+}
+
+void test_tracking_horizontal_pending_subtraction_stays_disabled_across_command_age() {
+    const auto project_after = [](int age_microseconds) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        AimFrame first = make_frame(1, base);
+        first.lock_active = true;
+        first.detections = {body(180.0f, 172.0f)};
+        const AimResult issued = aim.process(first);
+        AimFrame second = make_frame(
+            2, base + std::chrono::microseconds(age_microseconds));
+        second.lock_active = true;
+        second.detections = {body(180.0f, 172.0f)};
+        const AimResult projected = aim.process(second);
+        return std::pair{issued, projected};
+    };
+
+    const auto [young_issued, young] = project_after(4000);
+    const auto [before_issued, before] = project_after(14900);
+    const auto [after_issued, after] = project_after(15100);
+    const auto [expired_issued, expired] = project_after(30000);
+    expect(young_issued.has_command &&
+               young_issued.command.dx_counts != 0 && young.has_target &&
+               before_issued.has_command &&
+               before_issued.command.dx_counts != 0 && before.has_target &&
+               after_issued.has_command &&
+               after_issued.command.dx_counts != 0 && after.has_target &&
+               expired_issued.has_command &&
+               expired_issued.command.dx_counts != 0 && expired.has_target,
+           "命令年龄回归必须生成非零首帧命令和有效次帧目标；"
+           "4/14.9 ms 样本才真实含有在途库存");
+    expect(young_issued.command.dx_counts ==
+                   before_issued.command.dx_counts &&
+               before_issued.command.dx_counts ==
+                   after_issued.command.dx_counts &&
+               before_issued.command.dx_counts ==
+                   expired_issued.command.dx_counts,
+           "命令年龄回归必须从相同首帧整数命令开始");
+    expect(std::fabs(young.target.delay_compensation_x) < 0.001f &&
+               std::fabs(before.target.delay_compensation_x) < 0.001f &&
+               std::fabs(after.target.delay_compensation_x) < 0.001f &&
+               std::fabs(expired.target.delay_compensation_x) < 0.001f,
+           "tracking X 在 4/14.9 ms 有效库存及 15.1/30 ms 到期样本中"
+           "均不得扣减，实际=" +
+               std::to_string(young.target.delay_compensation_x) + "/" +
+               std::to_string(before.target.delay_compensation_x) + "/" +
+               std::to_string(after.target.delay_compensation_x) + "/" +
+               std::to_string(expired.target.delay_compensation_x));
+}
+
+void test_tracking_without_pending_keeps_geometric_contract_across_inputs() {
+    struct TimedCommand {
+        double time_seconds = 0.0;
+        int dx_counts = 0;
+    };
+    struct CaseMetrics {
+        int projection_contract_violations = 0;
+        int legacy_inventory_changed_frames = 0;
+    };
+    constexpr std::array<float, 6> kMotionScales{
+        0.10f, 0.25f, 0.50f, 1.0f, 2.0f, 4.0f};
+    constexpr std::array<float, 3> kCameraResponses{
+        0.10f, 0.20f, 0.40f};
+    constexpr std::array<std::array<int, 3>, 5> kCadenceMicroseconds{{
+        {{16667, 16667, 16667}},
+        {{8333, 8333, 8333}},
+        {{4167, 4167, 4167}},
+        {{4000, 12000, 4000}},
+        {{4000, 4000, 12000}}}};
+
+    const auto run_case = [](float motion_scale, float camera_response,
+                             const std::array<int, 3>& cadence) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.425f;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 14.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.max_center_distance = 1.0f;
+        config.enable_delay_compensation = true;
+        // 20 ms 测试窗确保 60 Hz 的上一条命令也位于库存窗口内；产品仍为 15 ms。
+        config.control_delay_ms = 20.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        // 契约矩阵使用宽预算暴露旧库存扣减；1% 混合轴用例单独覆盖二维饱和。
+        // 产品 15% 配置不在本测试中改写。
+        config.max_delay_compensation_percent = 50.0f;
+        config.enable_prediction = false;
+        Aim aim(config);
+
+        constexpr float kAmplitudePixels = 30.0f;
+        constexpr float kBaseMoveSeconds = 0.60f;
+        constexpr float kHoldSeconds = 0.60f;
+        constexpr float kActuationDelaySeconds = 0.015f;
+        const double pending_window_seconds =
+            static_cast<double>(config.control_delay_ms) / 1000.0;
+        const float move_seconds = kBaseMoveSeconds / motion_scale;
+        const float cycle_seconds = move_seconds * 2.0f +
+            kHoldSeconds * 2.0f;
+        const float total_seconds = cycle_seconds * 3.0f;
+        const auto base_time = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        std::vector<TimedCommand> physical_commands;
+        std::vector<TimedCommand> issued_commands;
+        std::size_t physical_next = 0;
+        double time_seconds = 0.0;
+        float camera_x = 0.0f;
+        int frame_index = 0;
+        CaseMetrics metrics;
+
+        while (time_seconds < total_seconds) {
+            const int interval_microseconds = cadence[
+                static_cast<std::size_t>(frame_index) % cadence.size()];
+            time_seconds +=
+                static_cast<double>(interval_microseconds) / 1000000.0;
+            while (physical_next < physical_commands.size() &&
+                   physical_commands[physical_next].time_seconds <=
+                       time_seconds) {
+                camera_x +=
+                    physical_commands[physical_next].dx_counts /
+                    config.counts_per_pixel_x * camera_response;
+                ++physical_next;
+            }
+
+            const float phase = std::fmod(
+                static_cast<float>(time_seconds), cycle_seconds);
+            float world_target_x = -kAmplitudePixels;
+            if (phase < move_seconds) {
+                world_target_x = -kAmplitudePixels +
+                    kAmplitudePixels * 2.0f * phase / move_seconds;
+            } else if (phase < move_seconds + kHoldSeconds) {
+                world_target_x = kAmplitudePixels;
+            } else if (phase < move_seconds * 2.0f + kHoldSeconds) {
+                const float reverse_phase =
+                    phase - move_seconds - kHoldSeconds;
+                world_target_x = kAmplitudePixels -
+                    kAmplitudePixels * 2.0f * reverse_phase / move_seconds;
+            } else {
+                world_target_x = -kAmplitudePixels;
+            }
+
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(frame_index + 1),
+                base_time + std::chrono::microseconds(
+                    static_cast<long long>(
+                        time_seconds * 1000000.0)));
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(2);
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                160.0f + world_target_x - camera_x,
+                172.0f, 40.0f, 80.0f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "多速度/节奏 tracking X 回归必须逐帧保留合法目标");
+            if (!result.has_target) {
+                ++frame_index;
+                continue;
+            }
+
+            const int command_x = result.has_command
+                ? result.command.dx_counts : 0;
+            physical_commands.push_back({
+                time_seconds + kActuationDelaySeconds, command_x});
+
+            float rectangular_pending_counts = 0.0f;
+            for (auto it = issued_commands.rbegin();
+                 it != issued_commands.rend(); ++it) {
+                const double age_seconds =
+                    time_seconds - it->time_seconds;
+                if (age_seconds >= pending_window_seconds) break;
+                rectangular_pending_counts +=
+                    static_cast<float>(it->dx_counts);
+            }
+            const float raw_delay_x = result.target.velocity_x *
+                result.target.delay_compensation_ms_x / 1000.0f;
+            float rectangular_delay_x = raw_delay_x -
+                rectangular_pending_counts * 0.1125f /
+                    config.counts_per_pixel_x;
+            const float maximum_delay = std::hypot(
+                result.target.x2 - result.target.x1,
+                result.target.y2 - result.target.y1) *
+                config.max_delay_compensation_percent / 100.0f;
+            const float expected_tracking_delay_x = std::clamp(
+                raw_delay_x, -maximum_delay, maximum_delay);
+            rectangular_delay_x = std::clamp(
+                rectangular_delay_x, -maximum_delay, maximum_delay);
+            if (std::fabs(result.target.delay_compensation_x -
+                          expected_tracking_delay_x) > 0.001f) {
+                ++metrics.projection_contract_violations;
+            }
+            if (std::fabs(rectangular_delay_x -
+                          expected_tracking_delay_x) > 0.001f) {
+                ++metrics.legacy_inventory_changed_frames;
+            }
+            issued_commands.push_back({time_seconds, command_x});
+            ++frame_index;
+        }
+        return metrics;
+    };
+
+    int case_count = 0;
+    int legacy_inventory_covered_cases = 0;
+    int projection_contract_violations = 0;
+    int legacy_inventory_changed_frames = 0;
+    for (const float motion_scale : kMotionScales) {
+        for (const float camera_response : kCameraResponses) {
+            for (const auto& cadence : kCadenceMicroseconds) {
+                const CaseMetrics metrics = run_case(
+                    motion_scale, camera_response, cadence);
+                ++case_count;
+                projection_contract_violations +=
+                    metrics.projection_contract_violations;
+                if (metrics.legacy_inventory_changed_frames > 0) {
+                    ++legacy_inventory_covered_cases;
+                }
+                legacy_inventory_changed_frames +=
+                    metrics.legacy_inventory_changed_frames;
+            }
+        }
+    }
+    expect(case_count == 90 &&
+               legacy_inventory_covered_cases == case_count &&
+               projection_contract_violations == 0 &&
+               legacy_inventory_changed_frames > 0,
+           "tracking X 跨运动尺度、节奏和相机响应必须始终等于几何投影，"
+           "且每组样本必须实际覆盖旧库存差异，case/covered/contract/legacy=" +
+               std::to_string(case_count) + "/" +
+               std::to_string(legacy_inventory_covered_cases) + "/" +
+               std::to_string(projection_contract_violations) + "/" +
+               std::to_string(legacy_inventory_changed_frames));
 }
 
 void test_prediction_uses_world_motion_when_delay_vector_points_backward() {
@@ -3331,7 +3651,7 @@ void test_quantization_residual_cannot_reverse_after_crossing() {
     }
 }
 
-void test_delay_projection_crossing_keeps_base_tracking_hold() {
+void test_tracking_delay_projection_keeps_geometric_endpoint_contract() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 1.5f;
@@ -3390,9 +3710,9 @@ void test_delay_projection_crossing_keeps_base_tracking_hold() {
                "延迟投影点瞬时过零后的整数命令不得背离最终瞄点");
     }
 
-    // 实机第十二轮证明：基础点在一个延迟闭环周期中可能先短暂越过保持带，
-    // 随后回到原侧且投影点仍在另一侧。单次过冲不得清空恒速前馈，否则
-    // 回到保持带后只能等待比例误差再次扩大，形成 5~6 帧停发窗口。
+    // 基础点在一个延迟闭环周期中可能先短暂越过保持带，随后回到原侧，
+    // 而连续几何投影仍在另一侧。tracking X 不再用不确定命令库存改写这个
+    // 端点；方向安全由最终瞄点和既有整数命令换向门禁负责。
     const std::array<float, 12> transient_positions{
         166.0f, 166.0f, 156.7f, 157.0f, 157.0f, 157.0f,
         157.0f, 157.0f, 157.0f, 157.0f, 157.0f, 157.0f};
@@ -3441,8 +3761,19 @@ void test_delay_projection_crossing_keeps_base_tracking_hold() {
         }
         if (observed_base_overshoot && transient_base_error < -0.1f) {
             observed_returned_base = true;
-            expect(transient_final_error <= 0.0f,
-                   "在途命令补偿后，返回原侧的基础点不得保留虚假跨侧投影");
+            const float maximum_delay = std::hypot(
+                transient.target.x2 - transient.target.x1,
+                transient.target.y2 - transient.target.y1) *
+                config.max_delay_compensation_percent / 100.0f;
+            const float expected_delay_x = std::clamp(
+                transient.target.velocity_x *
+                    transient.target.delay_compensation_ms_x / 1000.0f,
+                -maximum_delay, maximum_delay);
+            expect(std::fabs(
+                       transient_final_error - transient_base_error -
+                       expected_delay_x) < 0.001f,
+                   "tracking X 基础点回到原侧时仍必须保持连续几何端点，"
+                   "禁止重新注入命令库存");
             if (transient.has_command) {
                 expect(transient.command.dx_counts * transient_final_error >= 0.0f,
                        "基础点过冲后回到原侧时，整数命令不得背离补偿最终点");
@@ -4140,7 +4471,9 @@ int main() {
     test_integral_tracks_constant_velocity_with_bounded_error();
     test_delayed_closed_loop_holds_moving_base_point();
     test_delayed_left_motion_quantizes_from_world_feedforward();
-    test_tracking_horizontal_pending_response_is_axis_and_profile_scoped();
+    test_tracking_horizontal_pending_subtraction_is_axis_and_profile_scoped();
+    test_tracking_horizontal_pending_subtraction_stays_disabled_across_command_age();
+    test_tracking_without_pending_keeps_geometric_contract_across_inputs();
     test_prediction_uses_world_motion_when_delay_vector_points_backward();
     test_prediction_survives_short_world_motion_measurement_dips();
     test_prediction_motion_candidate_tolerates_one_low_sample();
@@ -4161,7 +4494,7 @@ int main() {
     test_two_axis_command_reversal_passes_through_zero();
     test_integral_releases_on_reversal_and_static_settle();
     test_quantization_residual_cannot_reverse_after_crossing();
-    test_delay_projection_crossing_keeps_base_tracking_hold();
+    test_tracking_delay_projection_keeps_geometric_endpoint_contract();
     test_control_step_cannot_cross_in_box_aim_point();
     test_tracking_delay_projection_uses_data_driven_axis_horizons();
     test_delay_compensation_stacks_before_prediction();
