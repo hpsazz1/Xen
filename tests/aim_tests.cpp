@@ -4194,6 +4194,793 @@ void test_tracking_reverse_requires_base_and_common_edge_direction() {
                std::to_string(wrong_reverse_commands) + "/" + first_context);
 }
 
+void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
+    struct Trace {
+        int first_negative_command_offset = -1;
+        int first_negative_command_magnitude = 0;
+        int release_y_command = 0;
+        int identity_changes = 0;
+        double first_negative_elapsed_seconds = -1.0;
+        std::string first_negative_context;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_case = [&]
+        (float roi_scale,
+         const std::array<int, 3>& cadence_microseconds) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        Trace trace;
+        const float roi_width = 320.0f * roi_scale;
+
+        AimFrame established_frame = make_frame(1, base);
+        established_frame.roi_width = static_cast<int>(roi_width);
+        established_frame.roi_height = static_cast<int>(roi_width);
+        established_frame.control_at = established_frame.captured_at +
+            std::chrono::milliseconds(1);
+        established_frame.control_center_x = roi_width * 0.4375f;
+        established_frame.control_center_y = roi_width * 0.50f;
+        established_frame.lock_active = true;
+        established_frame.detections = {body_box(
+            roi_width * 0.48125f,
+            roi_width * 0.45f,
+            roi_width * 0.125f,
+            roi_width * 0.25f)};
+        const AimResult established = aim.process(established_frame);
+        expect(established.status == AimStatus::SUCCESS &&
+                   established.has_target &&
+                   established.command.dx_counts > 0,
+               "位置兜底回归必须先建立正向物理输出，ROI/命令=" +
+                   std::to_string(roi_width) + "/" +
+                   std::to_string(established.command.dx_counts));
+        const std::uint64_t track_id = established.target.track_id;
+
+        // 控制中心切到目标右侧后，基础点持续留在候选负侧；原始框却按
+        // ROI 比例缓慢右移，因此相邻两边始终给出高度一致、但与候选方向
+        // 相反的共同平移。前三帧固定宽高，专门证明位置面积不能绕过旧
+        // 库存；库存退出后再持续增大宽高，逐帧刷新形变保护，证明它也
+        // 不能无限饿死位置通道。形变态须等待 15 ms episode，并从新鲜
+        // 的 30% ROI×反馈窗面积有界放行；320/640 构造完全同构，不依赖
+        // 像素速度或当前框宽档位。
+        long long elapsed_microseconds = 0;
+        for (int offset = 0; offset < 32; ++offset) {
+            elapsed_microseconds += cadence_microseconds[
+                static_cast<std::size_t>(offset) %
+                cadence_microseconds.size()];
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(offset + 2),
+                base + std::chrono::microseconds(
+                    elapsed_microseconds));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.6125f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            const int shape_steps = std::max(0, offset - 2);
+            frame.detections = {body_box(
+                roi_width *
+                    (0.48125f + 0.003125f * (offset + 1)),
+                roi_width * 0.45f,
+                roi_width *
+                    (0.125f + 0.000625f * shape_steps),
+                roi_width *
+                    (0.25f + 0.000625f * shape_steps))};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "位置兜底回归必须逐帧保留确认目标");
+            if (!result.has_target) continue;
+            if (result.target.track_id != track_id) {
+                ++trace.identity_changes;
+            }
+            if (trace.first_negative_command_offset < 0 &&
+                result.command.dx_counts < 0) {
+                trace.first_negative_command_offset = offset;
+                trace.first_negative_command_magnitude =
+                    std::abs(result.command.dx_counts);
+                trace.release_y_command = result.command.dy_counts;
+                trace.first_negative_elapsed_seconds =
+                    static_cast<double>(elapsed_microseconds) / 1000000.0;
+                trace.first_negative_context =
+                    "offset=" + std::to_string(offset) +
+                    ",base=" + std::to_string(result.target.base_aim_x) +
+                    ",delay=" +
+                    std::to_string(result.target.delay_compensated_aim_x) +
+                    ",vx=" + std::to_string(result.target.velocity_x) +
+                    ",cmd=" +
+                    std::to_string(result.command.dx_counts);
+            }
+        }
+        return trace;
+    };
+
+    constexpr std::array<int, 3> kSteadyCadence{
+        4167, 4167, 4167};
+    constexpr std::array<int, 3> kJitteredCadence{
+        3000, 5000, 4500};
+    const Trace normal = run_case(1.0f, kSteadyCadence);
+    const Trace doubled = run_case(2.0f, kSteadyCadence);
+    const Trace jittered = run_case(1.0f, kJitteredCadence);
+    const Trace jittered_doubled =
+        run_case(2.0f, kJitteredCadence);
+    const auto bounded_release = [](const Trace& trace) {
+        return trace.identity_changes == 0 &&
+            trace.first_negative_command_offset >= 4 &&
+            trace.first_negative_command_offset < 20 &&
+            trace.first_negative_command_magnitude == 1 &&
+            trace.release_y_command < 0;
+    };
+    expect(bounded_release(normal) && bounded_release(doubled) &&
+               bounded_release(jittered) &&
+               bounded_release(jittered_doubled) &&
+               std::abs(normal.first_negative_command_offset -
+                        doubled.first_negative_command_offset) <= 1 &&
+               std::abs(jittered.first_negative_command_offset -
+                        jittered_doubled.first_negative_command_offset) <= 1 &&
+               std::fabs(normal.first_negative_elapsed_seconds -
+                         jittered.first_negative_elapsed_seconds) <= 0.012,
+           "旧方向库存退出后，持续 ROI 中心反侧误差必须在有界帧数内放行，"
+           "且 320/640 ROI 与 3～5 ms 抖动节奏同构；稳定320/640、"
+           "抖动320/640首负偏移=" +
+               std::to_string(normal.first_negative_command_offset) + "/" +
+               std::to_string(doubled.first_negative_command_offset) +
+               "/" +
+               std::to_string(jittered.first_negative_command_offset) +
+               "/" +
+               std::to_string(
+                   jittered_doubled.first_negative_command_offset) +
+               "，首负幅值=" +
+               std::to_string(normal.first_negative_command_magnitude) + "/" +
+               std::to_string(doubled.first_negative_command_magnitude) +
+               "，首例=" + normal.first_negative_context);
+}
+
+void test_tracking_reverse_fixed_center_pose_episode_is_bounded() {
+    struct Trace {
+        int first_negative_offset = -1;
+        int first_negative_magnitude = 0;
+        int first_negative_y = 0;
+        int identity_changes = 0;
+        int premature_negative_commands = 0;
+        int evidence_dip_negative_commands = 0;
+        double evidence_dip_position_area = -1.0;
+        double first_negative_position_area = -1.0;
+        double first_negative_seconds_since_positive = -1.0;
+        std::string first_negative_context;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_case = [&](float roi_scale, bool deforming) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        Trace trace;
+        const float roi_width = 320.0f * roi_scale;
+        constexpr int kEvidenceDipOffset = 7;
+        constexpr double kFrameSeconds = 0.004167;
+
+        AimFrame established_frame = make_frame(1, base);
+        established_frame.roi_width = static_cast<int>(roi_width);
+        established_frame.roi_height = static_cast<int>(roi_width);
+        established_frame.control_at = established_frame.captured_at +
+            std::chrono::milliseconds(1);
+        established_frame.control_center_x = roi_width * 0.50f;
+        established_frame.control_center_y = roi_width * 0.50f;
+        established_frame.lock_active = true;
+        established_frame.detections = {body_box(
+            roi_width * 0.53f,
+            roi_width * 0.50f,
+            roi_width * 0.375f,
+            roi_width * 0.3125f)};
+        const AimResult established = aim.process(established_frame);
+        expect(established.status == AimStatus::SUCCESS &&
+                   established.has_target &&
+                   established.command.dx_counts > 0,
+               "固定中心姿态回归必须先建立 +X 物理输出");
+        const std::uint64_t track_id = established.target.track_id;
+
+        // ROI 控制中心始终固定在 50%。F1～F5 先以 +0.45/+0.55 边缘
+        // 位移预热宽高形变趋势和 OLS；F6～F8 再用三点候选把同一大框
+        // 移到左侧。首次大负共同边发生时基础点仍在准星右侧，不会给
+        // -X CUSUM 注入捷径。F9 起框中心继续按 ROI 比例缓慢右移，
+        // 形变实例同时小幅增加宽高，所以原始共同边始终指向 +X、与
+        // 候选 -X 相反，只能由位置面积有界释放。第 7 个跟随帧一次性
+        // 增加 0.625% ROI 的宽高基线（320 ROI 为 2 px），使该帧共同
+        // 平移占比跌到 70% 以下；
+        // 已进入的姿态 episode 必须跨过这次证据抖动保持 30% 门。
+        // 全部量均为 ROI 比例与真实 dt，不读取绝对速度或当前框宽档位。
+        double seconds_since_positive = 0.0;
+        double public_position_area = 0.0;
+        const auto observe = [&](const AimResult& result,
+                                 const AimFrame& frame,
+                                 int follow_offset) {
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "固定 ROI 中心形变回归必须逐帧保留确认目标");
+            if (!result.has_target) return;
+            if (result.target.track_id != track_id) {
+                ++trace.identity_changes;
+            }
+            if (result.command.dx_counts > 0) {
+                seconds_since_positive = 0.0;
+                public_position_area = 0.0;
+            } else {
+                seconds_since_positive += kFrameSeconds;
+                if (seconds_since_positive >=
+                    static_cast<double>(config.control_delay_ms) / 1000.0) {
+                    public_position_area += std::max(
+                        0.0,
+                        static_cast<double>(
+                            frame.control_center_x -
+                            result.target.base_aim_x) /
+                            static_cast<double>(roi_width)) *
+                        kFrameSeconds;
+                }
+            }
+            if (result.command.dx_counts < 0 && follow_offset <= 0) {
+                ++trace.premature_negative_commands;
+            }
+            if (deforming && follow_offset == kEvidenceDipOffset) {
+                trace.evidence_dip_position_area = public_position_area;
+                if (result.command.dx_counts < 0) {
+                    ++trace.evidence_dip_negative_commands;
+                }
+            }
+            if (follow_offset > 0 &&
+                trace.first_negative_offset < 0 &&
+                result.command.dx_counts < 0) {
+                trace.first_negative_offset = follow_offset;
+                trace.first_negative_magnitude =
+                    std::abs(result.command.dx_counts);
+                trace.first_negative_y = result.command.dy_counts;
+                trace.first_negative_position_area = public_position_area;
+                trace.first_negative_seconds_since_positive =
+                    seconds_since_positive;
+                trace.first_negative_context =
+                    "offset=" + std::to_string(follow_offset) +
+                    ",base=" +
+                    std::to_string(result.target.base_aim_x) +
+                    ",delay=" +
+                    std::to_string(result.target.delay_compensated_aim_x) +
+                    ",cmd=" +
+                    std::to_string(result.command.dx_counts) +
+                    ",area=" + std::to_string(public_position_area);
+            }
+        };
+
+        for (int index = 1; index <= 5; ++index) {
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.50f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                roi_width *
+                    (0.53f + 0.0015625f * static_cast<float>(index)),
+                roi_width * 0.50f,
+                roi_width *
+                    (0.375f + 0.0003125f * static_cast<float>(index)),
+                roi_width *
+                    (0.3125f + 0.0003125f * static_cast<float>(index)))};
+            const AimResult result = aim.process(frame);
+            observe(result, frame, 0);
+        }
+
+        constexpr float kPreheatedWidthRatio =
+            0.375f + 0.0003125f * 5.0f;
+        constexpr float kPreheatedHeightRatio =
+            0.3125f + 0.0003125f * 5.0f;
+        for (int index = 6; index <= 8; ++index) {
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.50f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                roi_width * 0.33f,
+                roi_width * 0.50f,
+                roi_width * kPreheatedWidthRatio,
+                roi_width * kPreheatedHeightRatio)};
+            const AimResult result = aim.process(frame);
+            observe(result, frame, 0);
+        }
+
+        for (int follow_offset = 1;
+             follow_offset <= 24;
+             ++follow_offset) {
+            const int index = 8 + follow_offset;
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.50f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            const float follow_steps =
+                static_cast<float>(follow_offset);
+            float width_ratio = kPreheatedWidthRatio;
+            float height_ratio = kPreheatedHeightRatio;
+            if (deforming) {
+                width_ratio += 0.0003125f * follow_steps;
+                height_ratio += 0.0003125f * follow_steps;
+                if (follow_offset >= kEvidenceDipOffset) {
+                    width_ratio += 0.00625f;
+                    height_ratio += 0.00625f;
+                }
+            }
+            frame.detections = {body_box(
+                roi_width * (0.33f + 0.0015625f * follow_steps),
+                roi_width * 0.50f,
+                roi_width * width_ratio,
+                roi_width * height_ratio)};
+            const AimResult result = aim.process(frame);
+            observe(result, frame, follow_offset);
+        }
+        return trace;
+    };
+
+    constexpr double kStablePositionThreshold = 0.10 * 0.015;
+    constexpr double kDeformationPositionThreshold = 0.30 * 0.015;
+    const Trace stable = run_case(1.0f, false);
+    const Trace stable_doubled = run_case(2.0f, false);
+    const Trace deforming = run_case(1.0f, true);
+    const Trace deforming_doubled = run_case(2.0f, true);
+    const auto valid_stable = [](const Trace& trace) {
+        return trace.identity_changes == 0 &&
+            trace.premature_negative_commands == 0 &&
+            trace.first_negative_offset >= 1 &&
+            trace.first_negative_offset < 16 &&
+            trace.first_negative_magnitude == 1 &&
+            trace.first_negative_y == 0 &&
+            trace.first_negative_position_area >=
+                kStablePositionThreshold &&
+            trace.first_negative_position_area <
+                kDeformationPositionThreshold;
+    };
+    const auto valid_deforming = [](const Trace& trace) {
+        return trace.identity_changes == 0 &&
+            trace.premature_negative_commands == 0 &&
+            trace.evidence_dip_negative_commands == 0 &&
+            trace.evidence_dip_position_area >=
+                kStablePositionThreshold &&
+            trace.evidence_dip_position_area <
+                kDeformationPositionThreshold &&
+            trace.first_negative_offset >= 8 &&
+            trace.first_negative_offset < 20 &&
+            trace.first_negative_magnitude == 1 &&
+            trace.first_negative_y == 0 &&
+            trace.first_negative_seconds_since_positive >= 0.015 &&
+            trace.first_negative_position_area >=
+                kDeformationPositionThreshold;
+    };
+    expect(valid_stable(stable) && valid_stable(stable_doubled) &&
+               valid_deforming(deforming) &&
+               valid_deforming(deforming_doubled) &&
+               std::abs(stable.first_negative_offset -
+                        stable_doubled.first_negative_offset) <= 1 &&
+               std::abs(deforming.first_negative_offset -
+                        deforming_doubled.first_negative_offset) <= 1 &&
+               deforming.first_negative_offset >=
+                   stable.first_negative_offset + 2 &&
+               deforming_doubled.first_negative_offset >=
+                   stable_doubled.first_negative_offset + 2,
+           "固定 ROI 中心下，稳定框须按 10% 面积及时追赶，持续宽高形变"
+           "须跨单帧证据下降保持 30% 有界门；稳定320/640、形变320/640"
+           "首负=" +
+               std::to_string(stable.first_negative_offset) + "/" +
+               std::to_string(stable_doubled.first_negative_offset) +
+               "/" + std::to_string(deforming.first_negative_offset) +
+               "/" +
+               std::to_string(deforming_doubled.first_negative_offset) +
+               "，形变证据下降面积=" +
+               std::to_string(deforming.evidence_dip_position_area) +
+               "，首例=" + deforming.first_negative_context);
+}
+
+void test_tracking_reverse_partial_semantics_discards_stale_position_area() {
+    struct Trace {
+        int first_negative_offset = -1;
+        int first_negative_magnitude = 0;
+        int premature_negative_commands = 0;
+        int identity_changes = 0;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_case = [&](float roi_scale, float partial_side,
+                              int partial_frames) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        Trace trace;
+        const float roi_width = 320.0f * roi_scale;
+
+        AimFrame established_frame = make_frame(1, base);
+        established_frame.roi_width = static_cast<int>(roi_width);
+        established_frame.roi_height = static_cast<int>(roi_width);
+        established_frame.control_at = established_frame.captured_at +
+            std::chrono::milliseconds(1);
+        established_frame.control_center_x = roi_width * 0.4375f;
+        established_frame.control_center_y = roi_width * 0.50f;
+        established_frame.lock_active = true;
+        established_frame.detections = {body_box(
+            roi_width * 0.48125f,
+            roi_width * 0.50f,
+            roi_width * 0.125f,
+            roi_width * 0.25f)};
+        const AimResult established = aim.process(established_frame);
+        expect(established.status == AimStatus::SUCCESS &&
+                   established.has_target &&
+                   established.command.dx_counts > 0,
+               "半身语义反向回归必须先建立正向物理输出");
+        const std::uint64_t track_id = established.target.track_id;
+
+        constexpr int kPartialStartOffset = 5;
+        for (int offset = 0; offset < 30; ++offset) {
+            const bool partial =
+                offset >= kPartialStartOffset &&
+                offset < kPartialStartOffset + partial_frames;
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(offset + 2),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(offset + 1) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.6125f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                roi_width *
+                    (0.48125f +
+                     (partial ? partial_side * 0.03125f : 0.0f)),
+                roi_width * 0.50f,
+                roi_width * (partial ? 0.0625f : 0.125f),
+                roi_width * 0.25f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "半身候选、确认及完整框恢复必须逐帧保留目标");
+            if (!result.has_target) continue;
+            if (result.target.track_id != track_id) {
+                ++trace.identity_changes;
+            }
+            if (result.command.dx_counts < 0) {
+                if (offset <
+                    kPartialStartOffset + partial_frames) {
+                    ++trace.premature_negative_commands;
+                }
+                if (trace.first_negative_offset < 0) {
+                    trace.first_negative_offset = offset;
+                    trace.first_negative_magnitude =
+                        std::abs(result.command.dx_counts);
+                }
+            }
+        }
+        return trace;
+    };
+
+    for (const float side : {-1.0f, 1.0f}) {
+        for (const int partial_frames : {1, 2, 3}) {
+            const Trace normal = run_case(1.0f, side, partial_frames);
+            const Trace doubled = run_case(2.0f, side, partial_frames);
+            const int first_fresh_offset = 5 + partial_frames;
+            const auto valid = [=](const Trace& trace) {
+                return trace.identity_changes == 0 &&
+                    trace.premature_negative_commands == 0 &&
+                    trace.first_negative_offset >= first_fresh_offset &&
+                    trace.first_negative_offset < 26 &&
+                    trace.first_negative_magnitude == 1;
+            };
+            expect(valid(normal) && valid(doubled) &&
+                       std::abs(normal.first_negative_offset -
+                                doubled.first_negative_offset) <= 1,
+                   "左右 1/2/3 帧半身候选与完整框恢复必须清除旧位置面积，"
+                   "稳定重建后只由新鲜 ROI 面积有界放行；side/帧数/"
+                   "320首负/640首负/提前命令/身份变化=" +
+                       std::to_string(side) + "/" +
+                       std::to_string(partial_frames) + "/" +
+                       std::to_string(normal.first_negative_offset) + "/" +
+                       std::to_string(doubled.first_negative_offset) + "/" +
+                       std::to_string(
+                           normal.premature_negative_commands +
+                           doubled.premature_negative_commands) + "/" +
+                       std::to_string(
+                           normal.identity_changes +
+                           doubled.identity_changes));
+        }
+    }
+}
+
+void test_two_axis_shaper_alignment_cannot_bypass_growth_slew() {
+    const auto run_case = [](float roi_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        const auto base =
+            std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        const float roi_width = 320.0f * roi_scale;
+        const auto make_case_frame = [&](int index, float center_x) {
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.50f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                center_x,
+                roi_width * 0.45f,
+                roi_width * 0.125f,
+                roi_width * 0.25f)};
+            return frame;
+        };
+
+        const AimResult vertical = aim.process(make_case_frame(
+            0, roi_width * 0.50f));
+        const AimResult rotated = aim.process(make_case_frame(
+            1, roi_width * 0.55f));
+        const AimResult growing = aim.process(make_case_frame(
+            2, roi_width * 0.55f));
+        expect(vertical.status == AimStatus::SUCCESS &&
+                   vertical.has_command &&
+                   vertical.command.dx_counts == 0 &&
+                   vertical.command.dy_counts < 0,
+               "二维方向整形回归必须先建立纯 Y 命令");
+        expect(rotated.status == AimStatus::SUCCESS &&
+                   rotated.has_command &&
+                   rotated.command.dx_counts == 1 &&
+                   rotated.command.dy_counts < 0 &&
+                   growing.status == AimStatus::SUCCESS &&
+                   growing.has_command &&
+                   growing.command.dx_counts == 2 &&
+                   growing.command.dy_counts < 0,
+               "240 Hz 下从纯 Y 旋到 X/Y 同向需求时，X 新增幅度必须从"
+               " 0→1 逐帧增长，不能把既有 Y 模长瞬时搬到 X；ROI/命令=" +
+                   std::to_string(roi_width) + "/(" +
+                   std::to_string(vertical.command.dx_counts) + "," +
+                   std::to_string(vertical.command.dy_counts) + ")->(" +
+                   std::to_string(rotated.command.dx_counts) + "," +
+                   std::to_string(rotated.command.dy_counts) + ")->(" +
+                   std::to_string(growing.command.dx_counts) + "," +
+                   std::to_string(growing.command.dy_counts) + ")");
+        return std::pair<int, int>{
+            rotated.command.dx_counts, growing.command.dx_counts};
+    };
+
+    const auto normal = run_case(1.0f);
+    const auto doubled = run_case(2.0f);
+    expect(normal == doubled,
+           "二维方向增长门禁必须保持 320/640 ROI 同构，320/640=" +
+               std::to_string(normal.first) + "," +
+               std::to_string(normal.second) + "/" +
+               std::to_string(doubled.first) + "," +
+               std::to_string(doubled.second));
+}
+
+void test_tracking_x_growth_slew_discards_saturated_residual() {
+    const auto run_case = [](float roi_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        const auto base =
+            std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        const float roi_width = 320.0f * roi_scale;
+        const auto make_case_frame = [&](int index, float error_x) {
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.50f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                frame.control_center_x + error_x,
+                frame.control_center_y - 16.0f,
+                roi_width * 0.125f,
+                roi_width * 0.25f)};
+            return frame;
+        };
+
+        std::array<int, 3> preheated_x{};
+        for (int index = 0; index < 3; ++index) {
+            const AimResult result = aim.process(make_case_frame(index, 1.2f));
+            expect(result.status == AimStatus::SUCCESS &&
+                       result.has_command &&
+                       result.command.dy_counts < 0,
+                   "tracking X 残余回归预热帧必须保留二维控制命令");
+            preheated_x[static_cast<std::size_t>(index)] =
+                result.command.dx_counts;
+        }
+        const AimResult rotated = aim.process(make_case_frame(3, 20.0f));
+        const AimResult growing = aim.process(make_case_frame(4, 20.0f));
+        expect(preheated_x == std::array<int, 3>{1, 1, 1} &&
+                   rotated.status == AimStatus::SUCCESS &&
+                   rotated.has_command &&
+                   rotated.command.dx_counts == 2 &&
+                   rotated.command.dy_counts < 0 &&
+                   growing.status == AimStatus::SUCCESS &&
+                   growing.has_command &&
+                   growing.command.dx_counts == 3 &&
+                   growing.command.dy_counts < 0,
+               "逐轴上限截断后的残余不得绕过 tracking X 增长门；240 Hz "
+               "预热/旋转/增长命令应为 1,1,1→2→3，ROI/实测=" +
+                   std::to_string(roi_width) + "/" +
+                   std::to_string(preheated_x[0]) + "," +
+                   std::to_string(preheated_x[1]) + "," +
+                   std::to_string(preheated_x[2]) + "→" +
+                   std::to_string(rotated.command.dx_counts) + "→" +
+                   std::to_string(growing.command.dx_counts));
+        return std::array<int, 5>{
+            preheated_x[0], preheated_x[1], preheated_x[2],
+            rotated.command.dx_counts, growing.command.dx_counts};
+    };
+
+    const auto normal = run_case(1.0f);
+    const auto doubled = run_case(2.0f);
+    expect(normal == doubled,
+           "tracking X anti-windup 必须保持 320/640 ROI 同构");
+}
+
+void test_tracking_x_growth_discards_residual_without_alignment_clamp() {
+    const auto run_case = [](float roi_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        const auto base =
+            std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        const float roi_width = 320.0f * roi_scale;
+        const auto make_case_frame = [&](int index, float control_center_x) {
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = control_center_x;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                roi_width * 0.50f + 1.2f,
+                roi_width * 0.50f,
+                roi_width * 0.125f,
+                roi_width * 0.25f)};
+            return frame;
+        };
+
+        std::array<int, 3> preheated_x{};
+        for (int index = 0; index < 3; ++index) {
+            const AimResult result = aim.process(make_case_frame(
+                index, roi_width * 0.50f));
+            expect(result.status == AimStatus::SUCCESS &&
+                       result.has_command,
+                   "同轴残余回归预热帧必须产生有效 X 命令");
+            preheated_x[static_cast<std::size_t>(index)] =
+                result.command.dx_counts;
+        }
+        const AimResult growing = aim.process(make_case_frame(
+            3, roi_width * 0.50f - 1.8f));
+        expect(preheated_x == std::array<int, 3>{1, 1, 1} &&
+                   growing.status == AimStatus::SUCCESS &&
+                   growing.has_command &&
+                   growing.command.dx_counts == 2 &&
+                   growing.command.dy_counts == 0,
+               "tracking X 同轴正常增长也不得携带旧饱和残余；240 Hz "
+               "命令应为 1,1,1→2，ROI/实测=" +
+                   std::to_string(roi_width) + "/" +
+                   std::to_string(preheated_x[0]) + "," +
+                   std::to_string(preheated_x[1]) + "," +
+                   std::to_string(preheated_x[2]) + "→" +
+                   std::to_string(growing.command.dx_counts));
+        return std::array<int, 4>{
+            preheated_x[0], preheated_x[1], preheated_x[2],
+            growing.command.dx_counts};
+    };
+
+    const auto normal = run_case(1.0f);
+    const auto doubled = run_case(2.0f);
+    expect(normal == doubled,
+           "tracking X 同轴增长残余门必须保持 320/640 ROI 同构");
+}
+
 void test_tracking_reverse_releases_during_continuous_head_only_motion() {
     struct Trace {
         int first_negative_command_offset = -1;
@@ -4455,16 +5242,25 @@ void test_tracking_reverse_cusum_resets_across_body_head_semantics() {
         }
     }
 
+    constexpr int kInventoryExitMaximumFrames = 4;
     expect(premature_negative_commands == 0 && identity_changes == 0 &&
                fresh_position_crossing_offset >= 0 &&
                partial_first_negative_offset >=
                    fresh_position_crossing_offset &&
                reference_first_negative_offset >=
                    fresh_position_crossing_offset &&
+               partial_first_negative_offset <=
+                   fresh_position_crossing_offset +
+                       kInventoryExitMaximumFrames &&
+               reference_first_negative_offset <=
+                   fresh_position_crossing_offset +
+                       kInventoryExitMaximumFrames &&
                std::abs(partial_first_negative_offset -
-                        reference_first_negative_offset) <= 1,
+                        reference_first_negative_offset) <=
+                   kInventoryExitMaximumFrames,
            "body/head 原始框语义切换必须清空旧 CUSUM 与位置面积，静态"
-           " head 重获只能从新鲜 10% ROI 位置面积释放；提前负命令/身份变化/"
+           " head 重获只能从新鲜 10% ROI 位置面积释放；已经发出的旧方向"
+           "库存仍须保留，并在最多一个反馈窗内退出。提前负命令/身份变化/"
            "外部过门/部分实例首负/参考实例首负=" +
                std::to_string(premature_negative_commands) + "/" +
                std::to_string(identity_changes) + "/" +
@@ -4631,6 +5427,7 @@ void test_tracking_reverse_cusum_resets_across_locked_loss() {
             }
         }
 
+        constexpr int kInventoryExitMaximumFrames = 4;
         expect(partial_reverse_geometry_frames == 4 &&
                    premature_commands_before_loss == 0 &&
                    invalid_lost_frames == 0 && identity_changes == 0 &&
@@ -4639,11 +5436,19 @@ void test_tracking_reverse_cusum_resets_across_locked_loss() {
                        fresh_position_crossing_offset &&
                    reference_first_negative_offset >=
                        fresh_position_crossing_offset &&
+                   partial_first_negative_offset <=
+                       fresh_position_crossing_offset +
+                           kInventoryExitMaximumFrames &&
+                   reference_first_negative_offset <=
+                       fresh_position_crossing_offset +
+                           kInventoryExitMaximumFrames &&
                    std::abs(partial_first_negative_offset -
-                            reference_first_negative_offset) <= 1,
+                            reference_first_negative_offset) <=
+                       kInventoryExitMaximumFrames,
                "lock_active 持续为 true 的单帧/短丢失必须清空丢失前部分"
                " CUSUM、原始共同边历史与位置面积；静态重获只能从新鲜"
-               " 10% ROI 位置累计有界释放，丢失帧/部分证据帧/丢失前负命令/"
+               " 10% ROI 位置累计有界释放，且已发出的旧方向库存最多再保留"
+               "一个反馈窗；丢失帧/部分证据帧/丢失前负命令/"
                "非法丢失/身份变化/新鲜过门/部分实例首负/参考实例首负=" +
                    std::to_string(lost_frame_count) + "/" +
                    std::to_string(partial_reverse_geometry_frames) + "/" +
@@ -7579,6 +8384,12 @@ int main() {
     test_pending_command_age_uses_control_execution_time();
     test_tracking_pending_direction_does_not_cancel_opposite_inventory();
     test_tracking_reverse_requires_base_and_common_edge_direction();
+    test_tracking_reverse_position_fallback_releases_after_old_inventory();
+    test_tracking_reverse_fixed_center_pose_episode_is_bounded();
+    test_tracking_reverse_partial_semantics_discards_stale_position_area();
+    test_two_axis_shaper_alignment_cannot_bypass_growth_slew();
+    test_tracking_x_growth_slew_discards_saturated_residual();
+    test_tracking_x_growth_discards_residual_without_alignment_clamp();
     test_tracking_reverse_releases_during_continuous_head_only_motion();
     test_tracking_reverse_cusum_resets_across_body_head_semantics();
     test_tracking_reverse_cusum_resets_across_locked_loss();

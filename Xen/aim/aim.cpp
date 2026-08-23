@@ -321,6 +321,10 @@ constexpr float kTrackingHorizontalReverseAmbiguousEvidenceAllowance = 0.20f;
 // 允许纯中心位置误差以更严格的 10% ROI×反馈窗有界接管，避免永久停发；
 // 正常一致平移继续走更快的 2.8% CUSUM。
 constexpr float kTrackingHorizontalReverseFallbackRoiRatio = 0.10f;
+// 持续宽高形变时，ROI 中心仍提供最终活性，但可靠性低于稳定语义：
+// 稳定态使用 10% ROI×反馈窗，形变态使用 30% 并等待一个反馈窗。
+// 位置面积只降权而不永久禁用；不按当前框宽值或人物速度分档。
+constexpr float kTrackingHorizontalReverseDeformationFallbackScale = 3.0f;
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
            std::isfinite(detection.x2) && std::isfinite(detection.y2) &&
@@ -693,6 +697,8 @@ struct Aim::Impl {
     float tracking_horizontal_output_direction = 0.0f;
     float tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
     float tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+    float tracking_horizontal_reverse_deformation_seconds = 0.0f;
+    bool tracking_horizontal_reverse_deformation_active = false;
     std::chrono::steady_clock::time_point controller_at{};
     bool controller_initialized = false;
     bool shaper_initialized = false;
@@ -923,6 +929,8 @@ struct Aim::Impl {
             // 保留已经发出的方向库存和控制连续性。
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_deformation_seconds = 0.0f;
+            tracking_horizontal_reverse_deformation_active = false;
         }
         const float track_center_x = (track.x1 + track.x2) * 0.5f;
         const float track_center_y = (track.y1 + track.y2) * 0.5f;
@@ -2358,6 +2366,8 @@ struct Aim::Impl {
         tracking_horizontal_output_direction = 0.0f;
         tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
         tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+        tracking_horizontal_reverse_deformation_seconds = 0.0f;
+        tracking_horizontal_reverse_deformation_active = false;
         controller_at = {};
         controller_initialized = false;
         shaper_initialized = false;
@@ -2982,6 +2992,8 @@ struct Aim::Impl {
             // 恢复帧仍明确知道哪一侧属于真正反向。
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_deformation_seconds = 0.0f;
+            tracking_horizontal_reverse_deformation_active = false;
             if (!frame.lock_active) {
                 // 丢框早退不会经过函数末尾的公共清理。安全门已经释放时，
                 // 还必须丢弃上一次输出方向，避免恢复锁定后继承一条已经
@@ -3276,10 +3288,9 @@ struct Aim::Impl {
                 const float roi_width_source_pixels =
                     frame.roi_width *
                     frame.source_pixels_per_roi_pixel_x;
-                // 反向证据必须同时满足两条几何事实：基础中心已经位于候选
-                // 方向，且两条框边主要表现为共同平移。只因延迟投影或姿态
-                // 形变让 desired 短暂翻向时，既不累计无符号误差，也不发送
-                // 反向制动；等待真实基础中心与共同边证据到来。
+                // 快速反向通道必须同时满足两条几何事实：基础中心已经位于
+                // 候选方向，且两条框边主要表现为共同平移。共同边持续歧义
+                // 时另由更严格、带有限姿态隔离的 ROI 位置面积保证活性。
                 const float aligned_base_error_x = std::max(
                     0.0f, base_error_x * desired_direction_x);
                 const float aligned_translation_evidence =
@@ -3294,6 +3305,8 @@ struct Aim::Impl {
                 if (aligned_base_error_x <= 0.0f) {
                     tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
                     tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+                    tracking_horizontal_reverse_deformation_seconds = 0.0f;
+                    tracking_horizontal_reverse_deformation_active = false;
                     desired_x = 0.0f;
                 } else {
                     // 采用带参考漂移的 Page/CUSUM：候选方向共同边增加
@@ -3327,35 +3340,101 @@ struct Aim::Impl {
                             0.0f,
                             tracking_horizontal_reverse_evidence_ratio_seconds +
                                 evidence_increment);
-                    if (std::fabs(
-                            track.horizontal_translation_evidence_x) >=
-                        kHorizontalTranslationEvidenceConsistencyMinimum) {
-                        // 相邻两边已经给出可信方向时，只由带符号 CUSUM
-                        // 裁决，不能再让无符号位置积分绕过反向几何。位置
-                        // 兜底仅服务于静止重获、语义首帧和单边裁切等确实
-                        // 没有共同边方向的情况。
+                    const bool previous_direction_pending =
+                        (tracking_horizontal_output_direction > 0.0f &&
+                         pending_inventory.has_positive_x) ||
+                        (tracking_horizontal_output_direction < 0.0f &&
+                         pending_inventory.has_negative_x);
+                    const bool partial_semantics_transition =
+                        (track.partial_visibility_x_frames > 0 &&
+                         track.partial_visibility_x_frames <
+                             kTrackPartialVisibilityConfirmFrames) ||
+                        track.horizontal_trend_rebuilding_from_partial;
+                    if (partial_semantics_transition) {
+                        // 单侧半框候选、确认和完整框恢复会改变可见中心语义。
+                        // 两类证据都只能从稳定重建后的新鲜观测重新累计。
+                        tracking_horizontal_reverse_evidence_ratio_seconds =
+                            0.0f;
                         tracking_horizontal_reverse_position_ratio_seconds =
                             0.0f;
+                        tracking_horizontal_reverse_deformation_seconds =
+                            0.0f;
+                        tracking_horizontal_reverse_deformation_active = false;
                     } else {
-                        tracking_horizontal_reverse_position_ratio_seconds +=
-                            normalized_base_error * controller_dt;
+                        // 姿态 episode 是观测几何生命周期，不能在等待同向
+                        // 旧库存过期时或被单帧共同边置信度抹掉。库存期允许
+                        // 年龄与真实 dt 并行增长，但位置面积仍保持为零；这样不会
+                        // 提前反拉，也不会在库存退出后再额外空等一个反馈窗。
+                        // horizontal_center_trend_frames 已由宽高共同形变或
+                        // partial 几何确认产生，归零才代表该 episode 结束。
+                        const bool deformation_episode_continues =
+                            tracking_horizontal_reverse_deformation_active &&
+                            track.horizontal_center_trend_frames > 0;
+                        const bool deformation_episode_starts =
+                            !tracking_horizontal_reverse_deformation_active &&
+                            track.horizontal_center_trend_frames > 0 &&
+                            std::fabs(
+                                track.horizontal_translation_evidence_x) >=
+                                kHorizontalTranslationEvidenceConsistencyMinimum;
+                        if (deformation_episode_continues ||
+                            deformation_episode_starts) {
+                            if (deformation_episode_starts) {
+                                tracking_horizontal_reverse_deformation_seconds =
+                                    0.0f;
+                            }
+                            tracking_horizontal_reverse_deformation_active =
+                                true;
+                            tracking_horizontal_reverse_deformation_seconds +=
+                                controller_dt;
+                        } else {
+                            tracking_horizontal_reverse_deformation_seconds =
+                                0.0f;
+                            tracking_horizontal_reverse_deformation_active =
+                                false;
+                        }
+                        if (previous_direction_pending) {
+                            // 屏幕中心跨侧可能完全由自身相机响应造成；位置
+                            // 面积必须从零等待真实旧方向库存退出。
+                            tracking_horizontal_reverse_position_ratio_seconds =
+                                0.0f;
+                        } else {
+                            // 库存退出后，持续位于候选侧的 ROI 中心误差才是
+                            // 闭环必须处理的可控位置状态。
+                            tracking_horizontal_reverse_position_ratio_seconds +=
+                                normalized_base_error * controller_dt;
+                        }
                     }
                     const float required_evidence =
                         kTrackingHorizontalReverseEvidenceRoiRatio *
                         config.control_delay_ms / 1000.0f;
                     const float required_position_fallback =
                         kTrackingHorizontalReverseFallbackRoiRatio *
+                        config.control_delay_ms / 1000.0f *
+                        (tracking_horizontal_reverse_deformation_active
+                            ? kTrackingHorizontalReverseDeformationFallbackScale
+                            : 1.0f);
+                    const float required_deformation_dwell =
                         config.control_delay_ms / 1000.0f;
-                    if (tracking_horizontal_reverse_evidence_ratio_seconds <
-                            required_evidence &&
-                        tracking_horizontal_reverse_position_ratio_seconds <
-                            required_position_fallback) {
+                    const bool evidence_ready =
+                        tracking_horizontal_reverse_evidence_ratio_seconds >=
+                        required_evidence;
+                    const bool deformation_dwell_ready =
+                        !tracking_horizontal_reverse_deformation_active ||
+                        tracking_horizontal_reverse_deformation_seconds >=
+                            required_deformation_dwell;
+                    const bool position_ready =
+                        tracking_horizontal_reverse_position_ratio_seconds >=
+                            required_position_fallback &&
+                        deformation_dwell_ready;
+                    if (!evidence_ready && !position_ready) {
                         desired_x = 0.0f;
                     }
                 }
             } else {
                 tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
                 tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+                tracking_horizontal_reverse_deformation_seconds = 0.0f;
+                tracking_horizontal_reverse_deformation_active = false;
             }
         }
         if (config.enable_delay_compensation &&
@@ -3462,6 +3541,8 @@ struct Aim::Impl {
             tracking_horizontal_output_direction = 0.0f;
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_deformation_seconds = 0.0f;
+            tracking_horizontal_reverse_deformation_active = false;
             controller_at = current_controller_at;
             record_issued_command(
                 frame, current_controller_at, 0.0f, 0.0f);
@@ -3485,6 +3566,19 @@ struct Aim::Impl {
             (!config.enable_prediction ||
              std::hypot(track.vx, track.vy) >
                  kPredictionDelayedShapingMotionThresholdPixelsPerSecond);
+        const bool delayed_tracking_x_guard =
+            config.enable_delay_compensation &&
+            config.control_delay_ms > 0.0f &&
+            !config.enable_prediction;
+        const bool shaper_was_initialized = shaper_initialized;
+        const float previous_shaped_x = shaped_x;
+        const float maximum_delta = smooth_delayed_motion
+            ? std::max(
+                0.25f,
+                kControllerMaximumSlewCountsPerSecond * controller_dt)
+            : std::max(
+                1.0f, config.max_counts_per_frame *
+                    std::max(0.10f, config.smoothing));
         if (!shaper_initialized) {
             shaped_x = filtered_x;
             shaped_y = filtered_y;
@@ -3493,13 +3587,6 @@ struct Aim::Impl {
             float delta_x = filtered_x - shaped_x;
             float delta_y = filtered_y - shaped_y;
             // 比例滤波负责低频响应，整形器按真实 dt 限制相邻物理命令的可见阶跃。
-            const float maximum_delta = smooth_delayed_motion
-                ? std::max(
-                    0.25f,
-                    kControllerMaximumSlewCountsPerSecond * controller_dt)
-                : std::max(
-                    1.0f, config.max_counts_per_frame *
-                        std::max(0.10f, config.smoothing));
             clamp_vector(delta_x, delta_y, maximum_delta);
             shaped_x += delta_x;
             shaped_y += delta_y;
@@ -3524,6 +3611,34 @@ struct Aim::Impl {
                 : std::min(shaped_magnitude, desired_magnitude);
             shaped_x = desired_x / desired_magnitude * safe_magnitude;
             shaped_y = desired_y / desired_magnitude * safe_magnitude;
+        }
+        if (shaper_was_initialized && delayed_tracking_x_guard) {
+            // 上面的方向对齐会保持向量模长，但若 desired 从近竖直旋到近
+            // 水平，它也可能把既有 Y 模长一帧搬到 X，绕过刚执行的向量
+            // slew。真实 Run 已出现 (0,-6)->(8,-5) 一类阶跃。反向轴仍可
+            // 立即降到零以满足安全方向契约；tracking X 的任何同向新增
+            // 幅度则继续受本帧 maximum_delta 约束，保证零后重新增长不能
+            // 绕过 240 counts/s 门禁。Y 与 prediction 保持既有路径，避免
+            // 用本轮 X 实验改写尚未出现同类证据的轴/profile。
+            if (shaped_x != 0.0f &&
+                previous_shaped_x * shaped_x < 0.0f) {
+                shaped_x = 0.0f;
+                residual_x = 0.0f;
+            } else if (std::fabs(shaped_x) >
+                       std::fabs(previous_shaped_x)) {
+                const float unconstrained_growth_x =
+                    shaped_x - previous_shaped_x;
+                const float growth_x = std::clamp(
+                    unconstrained_growth_x,
+                    -maximum_delta, maximum_delta);
+                shaped_x = previous_shaped_x + growth_x;
+                // 旧残余属于上一轴向模长。即使本帧增长没有触及浮点
+                // maximum_delta，它也不能跨入新的增长阶跃，否则 0.8 的
+                // 旧余量会把允许增加 1 count 的命令量化成增加 2 counts。
+                // 非增长帧仍保留正常误差扩散，低速亚像素响应不会被关闭。
+                residual_x = 0.0f;
+            }
+            clamp_vector(shaped_x, shaped_y, config.max_counts_per_frame);
         }
 
         float quantized_x = shaped_x + residual_x;
@@ -3652,11 +3767,15 @@ struct Aim::Impl {
             tracking_horizontal_output_direction = 0.0f;
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_deformation_seconds = 0.0f;
+            tracking_horizontal_reverse_deformation_active = false;
         } else if (command.dx_counts != 0) {
             tracking_horizontal_output_direction = std::copysign(
                 1.0f, static_cast<float>(command.dx_counts));
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_deformation_seconds = 0.0f;
+            tracking_horizontal_reverse_deformation_active = false;
         }
         record_issued_command(
             frame, current_controller_at,
