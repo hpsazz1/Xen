@@ -59,6 +59,10 @@ try {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "aim_report.ps1") `
         -Destination (Join-Path $package "tools\aim_report.ps1")
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot `
+        "aim_control_diagnostics.ps1") `
+        -Destination (Join-Path $package `
+            "tools\aim_control_diagnostics.ps1")
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot `
         "invoke_aim_manual_acceptance.ps1") `
         -Destination (Join-Path $package `
             "tools\invoke_aim_manual_acceptance.ps1")
@@ -77,6 +81,7 @@ try {
     Add-ManifestFile $files $package `
         "runtimes\openvino\Xen.exe" "openvino"
     Add-ManifestFile $files $package "tools\aim_report.ps1"
+    Add-ManifestFile $files $package "tools\aim_control_diagnostics.ps1"
     Add-ManifestFile $files $package `
         "tools\invoke_aim_manual_acceptance.ps1"
     [ordered]@{
@@ -155,10 +160,38 @@ try {
     if ([string]$lightweightTask.package_validation -ne "lightweight" -or
         [string]::IsNullOrWhiteSpace($lightweightTask.worker.sha256) -or
         [string]::IsNullOrWhiteSpace(
-            $lightweightTask.acceptance_script.sha256)) {
-        throw "轻量任务没有绑定校验模式、Worker 或任务脚本哈希。"
+            $lightweightTask.acceptance_script.sha256) -or
+        [string]::IsNullOrWhiteSpace($lightweightTask.aim_report.sha256) -or
+        [string]::IsNullOrWhiteSpace(
+            $lightweightTask.aim_control_diagnostics.sha256)) {
+        throw "轻量任务没有绑定校验模式、Worker 或完整报告工具哈希。"
     }
     Write-Utf8 $directMlWorker "dml"
+
+    $controlDiagnosticsTool = Join-Path $published `
+        "tools\aim_control_diagnostics.ps1"
+    $controlDiagnosticsBytes = [System.IO.File]::ReadAllBytes(
+        $controlDiagnosticsTool)
+    try {
+        [System.IO.File]::AppendAllText(
+            $controlDiagnosticsTool, "`n# corrupt", `
+            [System.Text.UTF8Encoding]::new($false))
+        $invalidControlDiagnosticsRoot = Join-Path $root `
+            "invalid-lightweight-control-diagnostics"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-LATENCY-COMP-001 `
+            -Mode Prepare -Scenario Static -Profile tracking `
+            -LightweightPackageValidation `
+            -PackageRoot $published `
+            -RunDirectory $invalidControlDiagnosticsRoot
+        if ($LASTEXITCODE -eq 0) {
+            throw "轻量校验必须拒绝控制诊断工具哈希变化。"
+        }
+    } finally {
+        [System.IO.File]::WriteAllBytes(
+            $controlDiagnosticsTool, $controlDiagnosticsBytes)
+    }
 
     $nvidiaWorker = Join-Path $published "runtimes\nvidia\Xen.exe"
     Write-Utf8 $nvidiaWorker "nvidia-corrupt"

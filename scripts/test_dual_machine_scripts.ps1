@@ -18,6 +18,7 @@ $scriptPaths = @(
     "scripts/benchmark_network_receiver.ps1",
     "scripts/invoke_dual_machine_receiver.ps1",
     "scripts/aim_report.ps1",
+    "scripts/aim_control_diagnostics.ps1",
     "scripts/runtime_report_sequence.ps1",
     "scripts/test_benchmark_report_scale.ps1",
     "scripts/publish_dual_machine_package.ps1",
@@ -126,14 +127,27 @@ Assert-True ($aimDeltaText -match
     $aimDeltaText -match
         ''' -MaxDelayCompensationPercent ''\s*\+\s*') `
     "Aim 差量入口必须透传任务 ID、延迟参数，并按 profile 回读 prediction 快照。"
-Assert-True ($aimDeltaText -match
-        '\$repositoryAcceptanceScript\s*=\s*Join-Path' -and
-    $aimDeltaText -match
-        'tools\\invoke_aim_manual_acceptance\.ps1' -and
+Assert-True ($aimDeltaText -match '\$toolSpecs\s*=\s*@\(' -and
+    $aimDeltaText -match 'tools/aim_report\.ps1' -and
+    $aimDeltaText -match 'tools/aim_control_diagnostics\.ps1' -and
+    $aimDeltaText -match '\$changedTools' -and
     $aimDeltaText -match
         '\$manifest\.git_commit\s*=\s*\$commit\.ToLowerInvariant\(\)' -and
-    $aimDeltaText -match 'Aim 正式任务脚本原子替换失败') `
-    "Aim 差量入口必须把正式任务脚本、manifest 和发布提交作为同一原子差量同步。"
+    $aimDeltaText -match 'Copy-Atomic\s+\$manifestPath\s+\$remoteManifest') `
+    "Aim 差量入口必须把完整报告工具闭包、manifest 和发布提交作为同一差量同步。"
+
+$aimManualText = [System.IO.File]::ReadAllText(
+    (Join-Path $RepositoryRoot "scripts/invoke_aim_manual_acceptance.ps1"))
+Assert-True ($aimManualText -match
+        'tools\\aim_control_diagnostics\.ps1' -and
+    $aimManualText -match
+        'Get-XenAimControlDiagnosticsSummary\s+-Samples\s+\$allSamples' -and
+    $aimManualText -match
+        'reverse_translation_detail_diagnostics_available' -and
+    $aimManualText -match
+        'control_diagnostics\s*=\s*\$controlDiagnostics' -and
+    $aimManualText -match '(?m)^\s*schema\s*=\s*2\s*$') `
+    "Aim 人工入口必须把 schema 12 控制诊断直接写入自动汇总。"
 
 & (Join-Path $RepositoryRoot "scripts/test_benchmark_report_scale.ps1") `
     -SyntheticSampleCount 72002 -LegacyProbeCount 5000 -Quiet

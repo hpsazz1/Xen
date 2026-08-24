@@ -58,7 +58,9 @@ $maxPredictionLeadPercent = 35.0
 $lightweightManifestPaths = @(
     "config.ini",
     "runtimes\nvidia\Xen.exe",
-    "tools\invoke_aim_manual_acceptance.ps1"
+    "tools\invoke_aim_manual_acceptance.ps1",
+    "tools\aim_report.ps1",
+    "tools\aim_control_diagnostics.ps1"
 )
 $packageValidationMode = if ($LightweightPackageValidation.IsPresent) {
     "lightweight"
@@ -533,6 +535,11 @@ $aimReportScript = Join-Path $PackageRoot "tools\aim_report.ps1"
 if (-not (Test-Path -LiteralPath $aimReportScript -PathType Leaf)) {
     throw "完整发布包缺少 Aim 报告助手。"
 }
+$aimControlDiagnosticsScript = Join-Path $PackageRoot `
+    "tools\aim_control_diagnostics.ps1"
+if (-not (Test-Path -LiteralPath $aimControlDiagnosticsScript -PathType Leaf)) {
+    throw "完整发布包缺少 Aim 控制诊断助手。"
+}
 
 if ($Mode -eq "Prepare") {
     if ($AllowPhysicalOutput.IsPresent -or
@@ -582,6 +589,9 @@ if ($Mode -eq "Prepare") {
             Join-Path $PackageRoot "runtimes\nvidia\Xen.exe")
         acceptance_script = Get-FileEvidence (
             Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1")
+        aim_report = Get-FileEvidence $aimReportScript
+        aim_control_diagnostics = Get-FileEvidence `
+            $aimControlDiagnosticsScript
         launcher = Get-FileEvidence $launcher
         model = Get-FileEvidence (Join-Path $PackageRoot "models\$modelName")
         config = Get-FileEvidence $configPath
@@ -757,6 +767,7 @@ if (Test-Path -LiteralPath $logRoot) {
 }
 
 . $aimReportScript
+. $aimControlDiagnosticsScript
 $jsonReports = @($newReports | Where-Object { $_.Extension -ieq ".json" })
 $segments = @()
 $allSamples = @()
@@ -769,6 +780,9 @@ foreach ($file in $jsonReports) {
     $report = Get-Content -LiteralPath $file.FullName -Raw -Encoding utf8 |
         ConvertFrom-Json
     if ($null -eq $report.samples) { continue }
+    if ([int]$report.schema -ne 12) {
+        throw "Aim 人工任务 Runtime 报告 schema 不是 12：$($file.FullName)"
+    }
     $samples = @($report.samples)
     $allSamples += $samples
     $sampleCount += [uint64]$report.sample_count
@@ -794,6 +808,7 @@ $predictionState = if ($Profile -eq "prediction") { "on" } else { "off" }
 $aimSummary = Get-XenAimReportSummary -Samples $allSamples `
     -PredictionEnabled $predictionState `
     -MaxPredictionLeadPercent $maxPredictionLeadPercent
+$controlDiagnostics = Get-XenAimControlDiagnosticsSummary -Samples $allSamples
 $providerMismatch = @($segments | Where-Object {
     $_.provider -ne "TensorrtExecutionProvider"
 }).Count
@@ -804,9 +819,11 @@ $mouseCommands = @($allSamples | Where-Object { [bool]$_.mouse_sent }).Count
 $complete = $failed -eq 0 -and $reportDropped -eq 0 -and
     $runtimeDropped -eq 0 -and $providerMismatch -eq 0 -and
     $captureMismatch -eq 0 -and $mouseCommands -gt 0 -and
-    [uint64]$aimSummary.violation_count -eq 0
+    [uint64]$aimSummary.violation_count -eq 0 -and
+    [uint64]$controlDiagnostics.diagnostics_missing_frames -eq 0 -and
+    [bool]$controlDiagnostics.reverse_translation_detail_diagnostics_available
 $summary = [ordered]@{
-    schema = 1
+    schema = 2
     task_id = $taskId
     run_id = [string]$task.run_id
     scenario = $Scenario
@@ -836,6 +853,7 @@ $summary = [ordered]@{
     provider_mismatch_segments = $providerMismatch
     capture_mismatch_segments = $captureMismatch
     aim = $aimSummary
+    control_diagnostics = $controlDiagnostics
     segments = $segments
     collected_files = $reportEvidence
     logs = $logEvidence
@@ -844,5 +862,8 @@ Write-JsonAtomically (Join-Path $resolvedRun "automatic-summary.json") $summary
 Write-Host "Aim 人工任务自动证据已收集：$resolvedRun"
 Write-Host "  samples=$sampleCount, failed=$failed, mouse_commands=$mouseCommands"
 Write-Host "  aim_violations=$($aimSummary.violation_count)"
+Write-Host "  control_diagnostics_schema=$($controlDiagnostics.schema)"
+Write-Host ("  reverse_translation_details=" +
+    $controlDiagnostics.reverse_translation_detail_diagnostics_available)
 Write-Host "  automatic_complete=$complete"
 Write-Host "请填写 OBSERVATION.md，并等待下一场景任务。"

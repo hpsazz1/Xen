@@ -86,17 +86,32 @@ function Copy-Atomic([string]$Source, [string]$Target) {
     }
 }
 
+function ConvertTo-PowerShellEncodedCommand([string]$Command) {
+    return [Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($Command))
+}
+
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $packageRoot = (Resolve-Path -LiteralPath $PackageRoot).Path
 $destinationRoot = $DestinationRoot.TrimEnd('\')
 $manifestPath = Join-Path $packageRoot "manifest.json"
 $packageWorker = Join-Path $packageRoot "runtimes\nvidia\Xen.exe"
-$repositoryAcceptanceScript = Join-Path $repositoryRoot `
-    "scripts\invoke_aim_manual_acceptance.ps1"
-$packageAcceptanceScript = Join-Path $packageRoot `
-    "tools\invoke_aim_manual_acceptance.ps1"
-$remoteAcceptanceScript = Join-Path $destinationRoot `
-    "tools\invoke_aim_manual_acceptance.ps1"
+$toolSpecs = @(
+    [pscustomobject][ordered]@{
+        relative = "tools/invoke_aim_manual_acceptance.ps1"
+        repository = Join-Path $repositoryRoot `
+            "scripts\invoke_aim_manual_acceptance.ps1"
+    },
+    [pscustomobject][ordered]@{
+        relative = "tools/aim_report.ps1"
+        repository = Join-Path $repositoryRoot "scripts\aim_report.ps1"
+    },
+    [pscustomobject][ordered]@{
+        relative = "tools/aim_control_diagnostics.ps1"
+        repository = Join-Path $repositoryRoot `
+            "scripts\aim_control_diagnostics.ps1"
+    }
+)
 if (-not (Test-Path -LiteralPath $destinationRoot -PathType Container)) {
     throw "辅机固定发布根不可读：$destinationRoot"
 }
@@ -120,12 +135,6 @@ $record = @($manifest.files) | Where-Object {
 }
 if (@($record).Count -ne 1) {
     throw "manifest 中 NVIDIA Worker 记录不是唯一项。"
-}
-$acceptanceRecord = @($manifest.files) | Where-Object {
-    [string]$_.path -eq "tools/invoke_aim_manual_acceptance.ps1"
-}
-if (@($acceptanceRecord).Count -ne 1) {
-    throw "manifest 中 Aim 正式任务脚本记录不是唯一项。"
 }
 $remoteWorker = Join-Path $destinationRoot "runtimes\nvidia\Xen.exe"
 $remoteConfig = Join-Path $destinationRoot "config.ini"
@@ -163,7 +172,15 @@ if (-not $ConfigOnly) {
     $manifestPending = Join-Path $packageRoot `
         ".manifest.incoming-$([guid]::NewGuid().ToString('N'))"
     $remoteStageName = ".aim-worker.incoming-$([guid]::NewGuid().ToString('N'))"
-    $remoteStage = Join-Path $destinationRoot $remoteStageName
+    $destinationPrefix =
+        [System.IO.Path]::GetFullPath($destinationRoot).TrimEnd('\') + '\'
+    $remoteStage = [System.IO.Path]::GetFullPath(
+        (Join-Path $destinationRoot $remoteStageName))
+    if (-not $remoteStage.StartsWith(
+            $destinationPrefix,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "辅机 Worker 暂存目录越出固定发布根：$remoteStage"
+    }
     try {
         $manifest | ConvertTo-Json -Depth 12 |
             Set-Content -LiteralPath $manifestPending -Encoding UTF8
@@ -185,14 +202,39 @@ if (-not $ConfigOnly) {
         if (-not (Test-Path -LiteralPath $SshIdentityFile -PathType Leaf)) {
             throw "SSH 身份文件不存在：$SshIdentityFile"
         }
-        $remoteStageLocal = Join-Path $RemotePackageRoot $remoteStageName
-        $applyCommand = 'cmd.exe /d /c move /Y "' +
-            (Join-Path $remoteStageLocal "runtimes\nvidia\Xen.exe") + '" "' +
-            (Join-Path $RemotePackageRoot "runtimes\nvidia\Xen.exe") +
-            '" && move /Y "' + (Join-Path $remoteStageLocal "manifest.json") +
-            '" "' + (Join-Path $RemotePackageRoot "manifest.json") + '"'
+        $remotePackagePrefix =
+            [System.IO.Path]::GetFullPath($RemotePackageRoot).TrimEnd('\') + '\'
+        $remoteWorkerStageLocal = [System.IO.Path]::GetFullPath(
+            (Join-Path $RemotePackageRoot `
+                "$remoteStageName\runtimes\nvidia\Xen.exe"))
+        $remoteWorkerTarget = [System.IO.Path]::GetFullPath(
+            (Join-Path $RemotePackageRoot "runtimes\nvidia\Xen.exe"))
+        $remoteManifestStageLocal = [System.IO.Path]::GetFullPath(
+            (Join-Path $RemotePackageRoot "$remoteStageName\manifest.json"))
+        $remoteManifestTarget = [System.IO.Path]::GetFullPath(
+            (Join-Path $RemotePackageRoot "manifest.json"))
+        foreach ($path in @(
+                $remoteWorkerStageLocal, $remoteWorkerTarget,
+                $remoteManifestStageLocal, $remoteManifestTarget)) {
+            if (-not $path.StartsWith(
+                    $remotePackagePrefix,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "辅机原子替换路径越出固定发布根：$path"
+            }
+        }
+        $escapedWorkerStage = $remoteWorkerStageLocal.Replace("'", "''")
+        $escapedWorkerTarget = $remoteWorkerTarget.Replace("'", "''")
+        $escapedManifestStage = $remoteManifestStageLocal.Replace("'", "''")
+        $escapedManifestTarget = $remoteManifestTarget.Replace("'", "''")
+        $applyScript = '& { $ErrorActionPreference = ''Stop''; ' +
+            "Move-Item -LiteralPath '$escapedWorkerStage' " +
+            "-Destination '$escapedWorkerTarget' -Force; " +
+            "Move-Item -LiteralPath '$escapedManifestStage' " +
+            "-Destination '$escapedManifestTarget' -Force }"
+        $encodedApplyCommand = ConvertTo-PowerShellEncodedCommand $applyScript
         & ssh -i $SshIdentityFile -o IdentitiesOnly=yes -o BatchMode=yes `
-            "$SshUser@$SshHost" $applyCommand
+            "$SshUser@$SshHost" powershell.exe -NoProfile -NonInteractive `
+            -EncodedCommand $encodedApplyCommand
         if ($LASTEXITCODE -ne 0) {
             throw "辅机本地原子替换失败，退出码：$LASTEXITCODE"
         }
@@ -206,63 +248,81 @@ if (-not $ConfigOnly) {
     }
 }
 
-# 正式任务 ID 或生成契约变化时，只差量同步任务脚本及 manifest。Worker、模型和运行库保持原位，
-# 但发布提交必须更新为当前干净 HEAD，使 Prepare 的任务身份能够精确绑定本轮脚本版本。
-$acceptanceHash = (Get-FileHash -LiteralPath $repositoryAcceptanceScript `
-    -Algorithm SHA256).Hash
-$packageAcceptanceHash = (Get-FileHash -LiteralPath $packageAcceptanceScript `
-    -Algorithm SHA256).Hash
-$remoteAcceptanceHash = (Get-FileHash -LiteralPath $remoteAcceptanceScript `
-    -Algorithm SHA256).Hash
-$declaredAcceptanceHash = ([string]$acceptanceRecord[0].sha256).ToUpperInvariant()
-if ($acceptanceHash -ne $packageAcceptanceHash -or
-    $acceptanceHash -ne $remoteAcceptanceHash -or
-    $acceptanceHash -ne $declaredAcceptanceHash) {
-    $acceptanceRecord[0].size = [long](Get-Item -LiteralPath `
-        $repositoryAcceptanceScript).Length
-    $acceptanceRecord[0].sha256 = $acceptanceHash.ToLowerInvariant()
-    $acceptanceRecord[0].source =
-        "$repositoryAcceptanceScript@$($commit.Substring(0, 7))"
+# 人工入口、Aim 契约和控制诊断是同一个正式报告闭包。任一脚本变化时只传输变化文件，
+# 但 manifest 最后发布；中途失败会让旧清单与新文件哈希不一致并 fail-closed，不能误启任务。
+$changedTools = [System.Collections.Generic.List[object]]::new()
+$toolManifestChanged = $false
+foreach ($spec in $toolSpecs) {
+    if (-not (Test-Path -LiteralPath $spec.repository -PathType Leaf)) {
+        throw "仓库 Aim 报告工具不存在：$($spec.repository)"
+    }
+    $relativeWindows = ([string]$spec.relative).Replace('/', '\')
+    $packagePath = Join-Path $packageRoot $relativeWindows
+    $remotePath = Join-Path $destinationRoot $relativeWindows
+    $records = @($manifest.files) | Where-Object {
+        [string]$_.path -eq [string]$spec.relative
+    }
+    if ($records.Count -gt 1) {
+        throw "manifest 中 Aim 报告工具记录重复：$($spec.relative)"
+    }
+    if ($records.Count -eq 0) {
+        $record = [pscustomobject][ordered]@{
+            path = [string]$spec.relative
+            runtime = ""
+            size = [long]0
+            sha256 = ""
+            source = ""
+        }
+        $manifest.files = @($manifest.files) + $record
+        $toolManifestChanged = $true
+    } else {
+        $record = $records[0]
+    }
+    $repositoryItem = Get-Item -LiteralPath $spec.repository
+    $repositoryHash = (Get-FileHash -LiteralPath $spec.repository `
+        -Algorithm SHA256).Hash
+    $source = "$($spec.repository)@$($commit.Substring(0, 7))"
+    if ([long]$record.size -ne [long]$repositoryItem.Length -or
+        ([string]$record.sha256).ToUpperInvariant() -ne $repositoryHash -or
+        [string]$record.source -ne $source) {
+        $toolManifestChanged = $true
+    }
+    $record.size = [long]$repositoryItem.Length
+    $record.sha256 = $repositoryHash.ToLowerInvariant()
+    $record.source = $source
+    $packageHash = if (Test-Path -LiteralPath $packagePath -PathType Leaf) {
+        (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash
+    } else { "" }
+    $remoteHash = if (Test-Path -LiteralPath $remotePath -PathType Leaf) {
+        (Get-FileHash -LiteralPath $remotePath -Algorithm SHA256).Hash
+    } else { "" }
+    if ($packageHash -ne $repositoryHash -or $remoteHash -ne $repositoryHash) {
+        $changedTools.Add([pscustomobject][ordered]@{
+            relative = [string]$spec.relative
+            repository = [string]$spec.repository
+            package = $packagePath
+            remote = $remotePath
+        })
+    }
+}
+if ($changedTools.Count -gt 0 -or $toolManifestChanged) {
     $manifest.git_commit = $commit.ToLowerInvariant()
-
     $manifestPending = Join-Path $packageRoot `
         ".manifest.incoming-$([guid]::NewGuid().ToString('N'))"
-    $remoteStageName = ".aim-tool.incoming-$([guid]::NewGuid().ToString('N'))"
-    $remoteStage = Join-Path $destinationRoot $remoteStageName
     try {
         $manifest | ConvertTo-Json -Depth 12 |
             Set-Content -LiteralPath $manifestPending -Encoding UTF8
-        Copy-Atomic $repositoryAcceptanceScript $packageAcceptanceScript
+        foreach ($tool in $changedTools) {
+            Copy-Atomic $tool.repository $tool.package
+        }
         Replace-FileAtomically $manifestPending $manifestPath
-
-        New-Item -ItemType Directory -Path (Join-Path $remoteStage "tools") `
-            -Force | Out-Null
-        Copy-Item -LiteralPath $repositoryAcceptanceScript -Destination `
-            (Join-Path $remoteStage "tools\invoke_aim_manual_acceptance.ps1")
-        Copy-Item -LiteralPath $manifestPath -Destination `
-            (Join-Path $remoteStage "manifest.json")
-        if (-not (Test-Path -LiteralPath $SshIdentityFile -PathType Leaf)) {
-            throw "SSH 身份文件不存在：$SshIdentityFile"
+        foreach ($tool in $changedTools) {
+            Copy-Atomic $tool.repository $tool.remote
         }
-        $remoteStageLocal = Join-Path $RemotePackageRoot $remoteStageName
-        $applyCommand = 'cmd.exe /d /c move /Y "' +
-            (Join-Path $remoteStageLocal `
-                "tools\invoke_aim_manual_acceptance.ps1") + '" "' +
-            (Join-Path $RemotePackageRoot `
-                "tools\invoke_aim_manual_acceptance.ps1") +
-            '" && move /Y "' + (Join-Path $remoteStageLocal "manifest.json") +
-            '" "' + (Join-Path $RemotePackageRoot "manifest.json") + '"'
-        & ssh -i $SshIdentityFile -o IdentitiesOnly=yes -o BatchMode=yes `
-            "$SshUser@$SshHost" $applyCommand
-        if ($LASTEXITCODE -ne 0) {
-            throw "辅机 Aim 正式任务脚本原子替换失败，退出码：$LASTEXITCODE"
-        }
+        Copy-Atomic $manifestPath $remoteManifest
     } finally {
         if (Test-Path -LiteralPath $manifestPending -PathType Leaf) {
             Remove-Item -LiteralPath $manifestPending -Force
-        }
-        if (Test-Path -LiteralPath $remoteStage) {
-            Remove-Item -LiteralPath $remoteStage -Recurse -Force
         }
     }
 }
@@ -306,6 +366,37 @@ if ($Prepare) {
 }
 
 $finalManifest = Read-Json $manifestPath "最终固定包 manifest"
+$finalToolEvidence = [ordered]@{}
+foreach ($spec in $toolSpecs) {
+    $records = @($finalManifest.files) | Where-Object {
+        [string]$_.path -eq [string]$spec.relative
+    }
+    if ($records.Count -ne 1) {
+        throw "最终 manifest 中 Aim 报告工具记录不是唯一项：$($spec.relative)"
+    }
+    $relativeWindows = ([string]$spec.relative).Replace('/', '\')
+    $packagePath = Join-Path $packageRoot $relativeWindows
+    $remotePath = Join-Path $destinationRoot $relativeWindows
+    $repositoryItem = Get-Item -LiteralPath $spec.repository
+    $packageItem = Get-Item -LiteralPath $packagePath
+    $remoteItem = Get-Item -LiteralPath $remotePath
+    $repositoryHash = (Get-FileHash -LiteralPath $spec.repository `
+        -Algorithm SHA256).Hash
+    $packageHash = (Get-FileHash -LiteralPath $packagePath `
+        -Algorithm SHA256).Hash
+    $remoteHash = (Get-FileHash -LiteralPath $remotePath `
+        -Algorithm SHA256).Hash
+    $declaredHash = ([string]$records[0].sha256).ToUpperInvariant()
+    if ($packageHash -ne $repositoryHash -or
+        $remoteHash -ne $repositoryHash -or
+        $declaredHash -ne $repositoryHash -or
+        [long]$records[0].size -ne [long]$repositoryItem.Length -or
+        [long]$packageItem.Length -ne [long]$repositoryItem.Length -or
+        [long]$remoteItem.Length -ne [long]$repositoryItem.Length) {
+        throw "Aim 报告工具闭包回读不一致：$($spec.relative)"
+    }
+    $finalToolEvidence[[string]$spec.relative] = $repositoryHash
+}
 $finalConfigRecord = @($finalManifest.files) | Where-Object {
     [string]$_.path -eq "config.ini"
 }
@@ -403,6 +494,12 @@ if ($Prepare) {
             $MaxDelayCompensationMs -or
         [double]$task.aim.max_delay_compensation_percent -ne
             $MaxDelayCompensationPercent -or
+        [string]$task.acceptance_script.sha256 -ne
+            $finalToolEvidence["tools/invoke_aim_manual_acceptance.ps1"] -or
+        [string]$task.aim_report.sha256 -ne
+            $finalToolEvidence["tools/aim_report.ps1"] -or
+        [string]$task.aim_control_diagnostics.sha256 -ne
+            $finalToolEvidence["tools/aim_control_diagnostics.ps1"] -or
         [string]$task.config.sha256 -ne $remoteConfigHash -or
         [string]$task.package_manifest.sha256 -ne $remoteManifestHash) {
         throw "Prepare Run 参数或发布身份回读不一致。"
@@ -426,6 +523,9 @@ Write-Host "  commit=$commit"
 Write-Host "  worker_sha256=$remoteWorkerHashAfter"
 Write-Host "  config_sha256=$remoteConfigHash"
 Write-Host "  manifest_sha256=$remoteManifestHash"
+foreach ($entry in $finalToolEvidence.GetEnumerator()) {
+    Write-Host "  $($entry.Key)_sha256=$($entry.Value)"
+}
 Write-Host "  package_root=$destinationRoot"
 if ($Prepare) {
     Write-Host "  run_id=$runId"

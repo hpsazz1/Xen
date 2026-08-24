@@ -3650,10 +3650,20 @@ struct Aim::Impl {
                         !tracking_horizontal_reverse_deformation_active ||
                         tracking_horizontal_reverse_deformation_seconds >=
                             required_deformation_dwell;
+                    // schema 12 真机 Run 中 21 次换向有 7 次来自纯位置
+                    // 兜底，其中 3 次在两条原始框边仍明确沿旧输出方向
+                    // 移动时放行；它们注入 42～69 counts 后，仅 15～19
+                    // 帧就被独立 CUSUM/共同平移事实反向纠正。这个往返
+                    // 同时表现为晃动和有效追赶损失。位置面积仍保留静止
+                    // 最终活性与同向弱证据活性，但当前生产共同平移明确
+                    // 反对候选方向时不能单独授权；快速证据通道不受影响。
+                    const bool position_translation_allows_release =
+                        aligned_translation_evidence >= 0.0f;
                     const bool position_ready =
                         tracking_horizontal_reverse_position_ratio_seconds >=
                             required_position_fallback &&
-                        deformation_dwell_ready;
+                        deformation_dwell_ready &&
+                        position_translation_allows_release;
                     diagnostics.reverse_required_evidence_ratio_seconds_x =
                         required_evidence;
                     diagnostics.reverse_required_position_ratio_seconds_x =

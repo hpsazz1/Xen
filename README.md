@@ -559,7 +559,7 @@ Toggle 以及多键/鼠标快捷键等已完成 App 功能。示例：
   -OpenVinoBuildDirectory ".\build-release-openvino" `
   -ModelPath ".\models\14wv11.onnx" `
   -LicenseFiles @("C:\path\to\ORT-LICENSE", "C:\path\to\OpenCV-LICENSE") `
-  -ToolFiles @(".\scripts\invoke_aim_manual_acceptance.ps1", ".\scripts\aim_report.ps1") `
+  -ToolFiles @(".\scripts\invoke_aim_manual_acceptance.ps1", ".\scripts\aim_report.ps1", ".\scripts\aim_control_diagnostics.ps1") `
   -OutputDirectory ".\artifacts\Xen-release"
 ```
 
@@ -576,7 +576,8 @@ Toggle 以及多键/鼠标快捷键等已完成 App 功能。示例：
 tracking/prediction 配置。配置固定 NDI 240 + TensorRT、`320x320`、FP16、CUDA Graph、GPU
 前处理和项目 KMBOX NET；`Prepare` 不启动程序，`Launch` 必须携带物理输出双重授权。脚本会在
 激活配置后原子更新 `manifest.json` 中 `config.ini` 的长度和 SHA-256，避免 Launcher 使用陈旧
-清单，并在应用退出后收集本轮新增 Runtime CSV/JSON、日志和 Aim schema 12 汇总。静止、左移、
+清单，并在应用退出后收集本轮新增 Runtime CSV/JSON、日志、Aim schema 12 汇总和 schema 5
+控制诊断；控制诊断会直接保留候选方向对齐的原始框边、共同位移、弱证据 gap 与清零原因。静止、左移、
 右移、往复和超级跳必须按任务单逐项执行，完成 `OBSERVATION.md` 后才进入下一任务。
 
 当前辅机为无开发 SDK 的独立 Windows 目标机，已使用自包含 NVIDIA/NDI 部署完成多轮双机动态、
