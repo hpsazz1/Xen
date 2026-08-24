@@ -846,8 +846,8 @@ function Collect-Reports {
         }
         $report = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-Json
-        if ($report.schema -ne 10) {
-            $failures += "报告 schema 不是 10：$path"
+        if ($report.schema -ne 11) {
+            $failures += "报告 schema 不是 11：$path"
         }
         if (@($report.PSObject.Properties.Name) -notcontains
                 "performance_probes_enabled" -or
@@ -895,7 +895,7 @@ function Collect-Reports {
             }
             $aimObservability = $aimSummary
         } catch {
-            $failures += "Aim schema 10 样本无效：$($_.Exception.Message)；$path"
+            $failures += "Aim schema 11 样本无效：$($_.Exception.Message)；$path"
         }
         if ($report.provider -ne $expectedProvider -or
             $report.final_snapshot.provider -ne $expectedProvider) {

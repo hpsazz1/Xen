@@ -702,6 +702,7 @@ struct Aim::Impl {
     float tracking_horizontal_output_direction = 0.0f;
     float tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
     float tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+    float tracking_horizontal_reverse_position_peak_error = 0.0f;
     float tracking_horizontal_reverse_translation_seconds = 0.0f;
     float tracking_horizontal_reverse_deformation_seconds = 0.0f;
     bool tracking_horizontal_reverse_deformation_active = false;
@@ -938,6 +939,7 @@ struct Aim::Impl {
             // 保留已经发出的方向库存和控制连续性。
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_position_peak_error = 0.0f;
             tracking_horizontal_reverse_translation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
@@ -2376,6 +2378,7 @@ struct Aim::Impl {
         tracking_horizontal_output_direction = 0.0f;
         tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
         tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+        tracking_horizontal_reverse_position_peak_error = 0.0f;
         tracking_horizontal_reverse_translation_seconds = 0.0f;
         tracking_horizontal_reverse_deformation_seconds = 0.0f;
         tracking_horizontal_reverse_deformation_active = false;
@@ -3012,6 +3015,7 @@ struct Aim::Impl {
             // 恢复帧仍明确知道哪一侧属于真正反向。
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_position_peak_error = 0.0f;
             tracking_horizontal_reverse_translation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
@@ -3311,6 +3315,7 @@ struct Aim::Impl {
         // 该标志区分首个探测脉冲与延迟反馈后确认的换向。
         bool reverse_release_probe_x = false;
         bool reverse_translation_ready_x = false;
+        bool reverse_position_improvement_reset_x = false;
         if (config.enable_delay_compensation &&
             config.control_delay_ms > 0.0f &&
             !config.enable_prediction) {
@@ -3345,6 +3350,7 @@ struct Aim::Impl {
                         desired_direction_x) {
                     tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
                     tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+                    tracking_horizontal_reverse_position_peak_error = 0.0f;
                     tracking_horizontal_reverse_translation_seconds = 0.0f;
                     tracking_horizontal_reverse_deformation_seconds = 0.0f;
                     tracking_horizontal_reverse_deformation_active = false;
@@ -3410,6 +3416,8 @@ struct Aim::Impl {
                             0.0f;
                         tracking_horizontal_reverse_position_ratio_seconds =
                             0.0f;
+                        tracking_horizontal_reverse_position_peak_error =
+                            0.0f;
                         tracking_horizontal_reverse_translation_seconds =
                             0.0f;
                         tracking_horizontal_reverse_deformation_seconds =
@@ -3468,11 +3476,36 @@ struct Aim::Impl {
                             // 面积必须从零等待真实旧方向库存退出。
                             tracking_horizontal_reverse_position_ratio_seconds =
                                 0.0f;
+                            tracking_horizontal_reverse_position_peak_error =
+                                aligned_base_error_x;
                         } else {
-                            // 库存退出后，持续位于候选侧的 ROI 中心误差才是
-                            // 闭环必须处理的可控位置状态。
-                            tracking_horizontal_reverse_position_ratio_seconds +=
-                                normalized_base_error * controller_dt;
+                            // 位置兜底是最后的活性保证，不是可以在对象已经
+                            // 自行回到准星时继续 windup 的积分器。实际 Run 中
+                            // 42 次位置放行有 40 次在 44 ms 内已向中心改善，
+                            // 旧面积仍越门并与共同边证据交替形成低频继电环。
+                            // 相对本 episode 峰值改善一个现有 hold band 后，
+                            // 清空旧面积并从当前误差重新开始；持续静态偏差或
+                            // 继续离开准星的真实目标仍会有界重新积累。
+                            if (tracking_horizontal_reverse_position_peak_error <=
+                                    0.0f) {
+                                tracking_horizontal_reverse_position_peak_error =
+                                    aligned_base_error_x;
+                            }
+                            if (aligned_base_error_x + hold_band <=
+                                tracking_horizontal_reverse_position_peak_error) {
+                                tracking_horizontal_reverse_position_ratio_seconds =
+                                    0.0f;
+                                tracking_horizontal_reverse_position_peak_error =
+                                    aligned_base_error_x;
+                                reverse_position_improvement_reset_x = true;
+                            } else {
+                                tracking_horizontal_reverse_position_peak_error =
+                                    std::max(
+                                        tracking_horizontal_reverse_position_peak_error,
+                                        aligned_base_error_x);
+                                tracking_horizontal_reverse_position_ratio_seconds +=
+                                    normalized_base_error * controller_dt;
+                            }
                         }
                     }
                     const float required_evidence =
@@ -3546,6 +3579,7 @@ struct Aim::Impl {
             } else {
                 tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
                 tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+                tracking_horizontal_reverse_position_peak_error = 0.0f;
                 tracking_horizontal_reverse_translation_seconds = 0.0f;
                 tracking_horizontal_reverse_deformation_seconds = 0.0f;
                 tracking_horizontal_reverse_deformation_active = false;
@@ -3654,6 +3688,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_evidence_ratio_seconds;
         diagnostics.reverse_position_ratio_seconds_x =
             tracking_horizontal_reverse_position_ratio_seconds;
+        diagnostics.reverse_position_peak_error_x =
+            tracking_horizontal_reverse_position_peak_error;
         diagnostics.reverse_translation_seconds_x =
             tracking_horizontal_reverse_translation_seconds;
         diagnostics.reverse_deformation_seconds_x =
@@ -3667,6 +3703,8 @@ struct Aim::Impl {
         diagnostics.reverse_probe_limited_x = reverse_release_probe_x;
         diagnostics.reverse_translation_ready_x =
             reverse_translation_ready_x;
+        diagnostics.reverse_position_improvement_reset_x =
+            reverse_position_improvement_reset_x;
         if (tracking_horizontal_reverse_probe_started_at !=
             std::chrono::steady_clock::time_point{}) {
             diagnostics.reverse_probe_age_ms_x = static_cast<float>(
@@ -3698,6 +3736,7 @@ struct Aim::Impl {
             tracking_horizontal_output_direction = 0.0f;
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_position_peak_error = 0.0f;
             tracking_horizontal_reverse_translation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
@@ -3952,6 +3991,7 @@ struct Aim::Impl {
             tracking_horizontal_output_direction = 0.0f;
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_position_peak_error = 0.0f;
             tracking_horizontal_reverse_translation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
@@ -3972,6 +4012,7 @@ struct Aim::Impl {
                 1.0f, static_cast<float>(command.dx_counts));
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_position_peak_error = 0.0f;
             tracking_horizontal_reverse_translation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;

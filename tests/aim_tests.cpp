@@ -4433,11 +4433,11 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
                    std::to_string(established.command.dx_counts));
         const std::uint64_t track_id = established.target.track_id;
 
-        // 控制中心切到目标右侧后，基础点持续留在候选负侧；原始框却按
-        // ROI 比例缓慢右移，因此相邻两边始终给出高度一致、但与候选方向
-        // 相反的共同平移。前三帧固定宽高，专门证明位置面积不能绕过旧
-        // 库存；库存退出后再持续增大宽高，逐帧刷新形变保护，证明它也
-        // 不能无限饿死位置通道。形变态须等待 15 ms episode，并从新鲜
+        // 控制中心切到目标右侧后，基础点持续留在候选负侧，框中心
+        // 全程保持不动；旧方向库存退出后，宽高持续增大，逐帧刷新
+        // 形变保护。这个静态剩余误差不会触发
+        // “误差回落”清零，专门证明条件积分仍保留最终活性。形变态须
+        // 等待 15 ms episode，并从新鲜
         // 的 30% ROI×反馈窗面积有界放行；320/640 构造完全同构，不依赖
         // 像素速度或当前框宽档位。
         long long elapsed_microseconds = 0;
@@ -4458,8 +4458,7 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
             frame.lock_active = true;
             const int shape_steps = std::max(0, offset - 2);
             frame.detections = {body_box(
-                roi_width *
-                    (0.48125f + 0.003125f * (offset + 1)),
+                roi_width * 0.48125f,
                 roi_width * 0.45f,
                 roi_width *
                     (0.125f + 0.000625f * shape_steps),
@@ -4572,6 +4571,146 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
                std::to_string(normal.maximum_probe_command_magnitude) + "/" +
                std::to_string(normal.first_committed_negative_offset) +
                "，首例=" + normal.first_negative_context);
+}
+
+void test_tracking_reverse_position_fallback_resets_while_error_improves() {
+    struct Trace {
+        int improvement_reset_offset = -1;
+        int first_negative_offset = -1;
+        int negative_during_improvement = 0;
+        int identity_changes = 0;
+        float position_area_after_reset = -1.0f;
+        float peak_error_after_reset = -1.0f;
+        bool first_negative_position_ready = false;
+        bool first_negative_probe_limited = false;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_case = [&](float roi_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        Trace trace;
+        const float roi_width = 320.0f * roi_scale;
+
+        AimFrame established_frame = make_frame(1, base);
+        established_frame.roi_width = static_cast<int>(roi_width);
+        established_frame.roi_height = static_cast<int>(roi_width);
+        established_frame.control_at = established_frame.captured_at +
+            std::chrono::milliseconds(1);
+        established_frame.control_center_x = roi_width * 0.4375f;
+        established_frame.control_center_y = roi_width * 0.50f;
+        established_frame.lock_active = true;
+        established_frame.detections = {body_box(
+            roi_width * 0.48125f,
+            roi_width * 0.50f,
+            roi_width * 0.125f,
+            roi_width * 0.25f)};
+        const AimResult established = aim.process(established_frame);
+        expect(established.status == AimStatus::SUCCESS &&
+                   established.has_target &&
+                   established.command.dx_counts > 0,
+               "误差回落回归必须先建立 +X 物理输出");
+        const std::uint64_t track_id = established.target.track_id;
+
+        // 控制中心切到右侧后，框中心先连续向准星靠近 12 帧；
+        // 候选方向为 -X，两条边的 +X 共同平移不能放行快速通道。
+        // 每累计改善一个 2 px hold band 必须清空旧位置面积，不得
+        // 在已回落过程中反拉。随后保持剩余误差不变，证明新鲜面积
+        // 仍能在有界时间内重新累积并发出受限探测。
+        constexpr int kImprovingFrames = 12;
+        for (int offset = 0; offset < 32; ++offset) {
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(offset + 2),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(offset + 1) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.6125f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            const int improving_steps =
+                std::min(offset + 1, kImprovingFrames);
+            frame.detections = {body_box(
+                roi_width *
+                    (0.48125f + 0.003125f * improving_steps),
+                roi_width * 0.50f,
+                roi_width * 0.125f,
+                roi_width * 0.25f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "误差回落及剩余静态误差必须逐帧保留目标");
+            if (!result.has_target) continue;
+            if (result.target.track_id != track_id) {
+                ++trace.identity_changes;
+            }
+            if (offset < kImprovingFrames &&
+                result.command.dx_counts < 0) {
+                ++trace.negative_during_improvement;
+            }
+            if (result.control.reverse_position_improvement_reset_x &&
+                trace.improvement_reset_offset < 0) {
+                trace.improvement_reset_offset = offset;
+                trace.position_area_after_reset =
+                    result.control.reverse_position_ratio_seconds_x;
+                trace.peak_error_after_reset =
+                    result.control.reverse_position_peak_error_x;
+            }
+            if (trace.first_negative_offset < 0 &&
+                result.command.dx_counts < 0) {
+                trace.first_negative_offset = offset;
+                trace.first_negative_position_ready =
+                    result.control.reverse_position_ready_x;
+                trace.first_negative_probe_limited =
+                    result.control.reverse_probe_limited_x;
+            }
+        }
+        return trace;
+    };
+
+    const Trace normal = run_case(1.0f);
+    const Trace doubled = run_case(2.0f);
+    const auto valid = [](const Trace& trace) {
+        return trace.identity_changes == 0 &&
+            trace.improvement_reset_offset >= 3 &&
+            trace.improvement_reset_offset < 12 &&
+            trace.position_area_after_reset == 0.0f &&
+            trace.peak_error_after_reset > 0.0f &&
+            trace.negative_during_improvement == 0 &&
+            trace.first_negative_offset >= 12 &&
+            trace.first_negative_offset < 28 &&
+            trace.first_negative_position_ready &&
+            trace.first_negative_probe_limited;
+    };
+    expect(valid(normal) && valid(doubled) &&
+               std::abs(normal.improvement_reset_offset -
+                        doubled.improvement_reset_offset) <= 1 &&
+               std::abs(normal.first_negative_offset -
+                        doubled.first_negative_offset) <= 1,
+           "候选侧误差改善一个 hold band 后必须清空陈旧位置面积，"
+           "回落期间不反拉，但剩余静态误差仍须有界放行；"
+           "320/640 reset/first-negative=" +
+               std::to_string(normal.improvement_reset_offset) + "/" +
+               std::to_string(doubled.improvement_reset_offset) + "/" +
+               std::to_string(normal.first_negative_offset) + "/" +
+               std::to_string(doubled.first_negative_offset) +
+               "，回落期间负命令=" +
+               std::to_string(normal.negative_during_improvement) + "/" +
+               std::to_string(doubled.negative_during_improvement));
 }
 
 void test_tracking_reverse_fixed_center_pose_episode_is_bounded() {
@@ -8615,6 +8754,7 @@ int main() {
     test_tracking_reverse_requires_base_and_common_edge_direction();
     test_tracking_reverse_consecutive_common_translation_releases();
     test_tracking_reverse_position_fallback_releases_after_old_inventory();
+    test_tracking_reverse_position_fallback_resets_while_error_improves();
     test_tracking_reverse_fixed_center_pose_episode_is_bounded();
     test_tracking_reverse_partial_semantics_discards_stale_position_area();
     test_two_axis_shaper_alignment_cannot_bypass_growth_slew();

@@ -74,7 +74,7 @@ function Get-XenAimReportSummary {
 
     $items = @($Samples)
     if ($items.Count -eq 0) {
-        throw "Aim schema 10 报告没有正式样本。"
+        throw "Aim schema 11 报告没有正式样本。"
     }
     $requiredFields = @(
         "aim_status", "mouse_sent", "aim_has_target", "aim_has_command",
@@ -98,7 +98,7 @@ function Get-XenAimReportSummary {
         $availableFields -notcontains $_
     })
     if ($missingFields.Count -ne 0) {
-        throw "Aim schema 10 样本缺少字段：$($missingFields -join ', ')"
+        throw "Aim schema 11 样本缺少字段：$($missingFields -join ', ')"
     }
 
     $leadDistances = [System.Collections.Generic.List[double]]::new()

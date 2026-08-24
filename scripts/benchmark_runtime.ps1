@@ -892,8 +892,8 @@ $expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
 } else {
     $captureBackendNames[$ExpectedCaptureBackend]
 }
-if ($report.schema -ne 10) {
-    throw "报告 schema 不是 10：$($report.schema)"
+if ($report.schema -ne 11) {
+    throw "报告 schema 不是 11：$($report.schema)"
 }
 if ([bool]$report.performance_probes_enabled -ne
         $enablePerformanceProbesValue) {

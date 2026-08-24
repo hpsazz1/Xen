@@ -136,6 +136,7 @@ RuntimePipelineSample make_sample(
         sample.aim_control.reverse_candidate_x = true;
         sample.aim_control.reverse_previous_direction_pending_x = true;
         sample.aim_control.reverse_evidence_ratio_seconds_x = 0.0002f;
+        sample.aim_control.reverse_position_peak_error_x = 18.0f;
         sample.aim_control.reverse_translation_seconds_x = 0.016f;
         sample.aim_control.reverse_required_evidence_ratio_seconds_x =
             0.00042f;
@@ -143,6 +144,7 @@ RuntimePipelineSample make_sample(
         sample.aim_control.reverse_probe_age_ms_x = 8.334f;
         sample.aim_control.reverse_gate_blocked_x = true;
         sample.aim_control.reverse_translation_ready_x = true;
+        sample.aim_control.reverse_position_improvement_reset_x = true;
         sample.aim_control.reverse_probe_active_x = true;
         sample.aim_control.reverse_probe_limited_x = true;
         sample.aim_command.sequence = sequence;
@@ -256,7 +258,8 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-        expect(csv_text.find("Xen Runtime Debug Report v10") != std::string::npos &&
+    expect(csv_text.find("Xen Runtime Debug Report v11") !=
+                   std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
                csv_text.find("d3d11_to_directml_ms") != std::string::npos &&
@@ -281,6 +284,11 @@ void test_report_summary_and_atomic_files() {
                     std::string::npos &&
                 csv_text.find("aim_reverse_translation_ready_x") !=
                     std::string::npos &&
+                csv_text.find("aim_reverse_position_peak_error_x") !=
+                    std::string::npos &&
+                csv_text.find(
+                    "aim_reverse_position_improvement_reset_x") !=
+                    std::string::npos &&
                csv_text.find("ndi_receive_call_ms") != std::string::npos &&
                csv_text.find("pipeline_complete_ms") != std::string::npos &&
                csv_text.find("capture_to_mouse_completion_ms") !=
@@ -290,7 +298,7 @@ void test_report_summary_and_atomic_files() {
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 10") != std::string::npos &&
+    expect(json_text.find("\"schema\": 11") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -315,6 +323,12 @@ void test_report_summary_and_atomic_files() {
                     std::string::npos &&
                 json_text.find(
                     "\"aim_reverse_translation_ready_x\": true") !=
+                    std::string::npos &&
+                json_text.find(
+                    "\"aim_reverse_position_peak_error_x\": 18") !=
+                    std::string::npos &&
+                json_text.find(
+                    "\"aim_reverse_position_improvement_reset_x\": true") !=
                     std::string::npos &&
                json_text.find("\"final_snapshot\"") != std::string::npos &&
                json_text.find("\"source_width\": 2560") !=
