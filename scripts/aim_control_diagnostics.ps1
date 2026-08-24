@@ -64,6 +64,7 @@ function Get-XenAimControlDiagnosticsSummary {
         "aim_shaper_direction_reset_x",
         "aim_post_alignment_sign_change_blocked_x",
         "aim_post_alignment_growth_limited_x",
+        "aim_closing_response_tapered_x",
         "aim_integer_direction_blocked_x",
         "aim_command_sign_change_blocked_x", "aim_quantization_zero_x")
     $availableFields = if ($items[0] -is
@@ -147,6 +148,7 @@ function Get-XenAimControlDiagnosticsSummary {
         reverse_probe_limited = [uint64]0
         pending_inventory_hold_blocked = [uint64]0
         post_alignment_growth_limited = [uint64]0
+        closing_response_tapered = [uint64]0
     }
     $controllerDt = [System.Collections.Generic.List[double]]::new()
     $zeroError = [System.Collections.Generic.List[double]]::new()
@@ -232,7 +234,9 @@ function Get-XenAimControlDiagnosticsSummary {
                 @("pending_inventory_hold_blocked",
                   "aim_pending_inventory_hold_blocked_x"),
                 @("post_alignment_growth_limited",
-                  "aim_post_alignment_growth_limited_x"))
+                  "aim_post_alignment_growth_limited_x"),
+                @("closing_response_tapered",
+                  "aim_closing_response_tapered_x"))
         if ($probeDiagnosticsAvailable) {
             $flagMappings += ,@(
                 "reverse_probe_active", "aim_reverse_probe_active_x")

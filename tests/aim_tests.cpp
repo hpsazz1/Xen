@@ -3124,6 +3124,7 @@ void test_tracking_closing_response_does_not_keep_growing_command() {
     int previous_command_x = 0;
     int closing_response_frames = 0;
     int closing_response_growth_frames = 0;
+    int closing_response_taper_frames = 0;
     int output_translation_bridge_frames = 0;
     int same_direction_stop_go_episodes = 0;
     int active_zero_frames = 0;
@@ -3158,6 +3159,9 @@ void test_tracking_closing_response_does_not_keep_growing_command() {
         if (result.has_command) {
             delayed_commands[index % kActuationDelayFrames] = command_x;
         }
+        if (result.control.closing_response_tapered_x) {
+            ++closing_response_taper_frames;
+        }
 
         if (index >= 240) {
             const float output_direction =
@@ -3190,7 +3194,6 @@ void test_tracking_closing_response_does_not_keep_growing_command() {
                         result.control.reverse_output_direction_x >= 0.70f) {
                 ++output_translation_bridge_frames;
             }
-
             if (command_x == 0) {
                 if (active_zero_frames == 0) {
                     zero_previous_sign = previous_command_x < 0 ? -1 :
@@ -3220,15 +3223,17 @@ void test_tracking_closing_response_does_not_keep_growing_command() {
         static_cast<std::size_t>(measured_errors.size() * 0.95f)];
     expect(closing_response_frames > 0 &&
                closing_response_growth_frames == 0 &&
+               closing_response_taper_frames > 0 &&
                output_translation_bridge_frames > 0 &&
                maximum_same_direction_zero_frames <= 2 &&
                error_p95 < 2.0f,
            "旧方向命令已生效且可信共同边正朝中心闭合时，tracking X "
-           "只能保持或减小当前物理命令；候选反向门停发后，共同边重新"
-           "支持原方向时必须以有界 1 count 桥接且不饿死真实反向；"
-           "闭合帧/增长帧/桥接帧/同向停发恢复/最长停发/误差P95=" +
+           "短于反馈窗时只能保持或减小当前物理命令，连续满 1.5 个反馈窗"
+           "后必须逐级卸载；保持带内最小桥接仍不得饿死真实反向；"
+           "闭合帧/增长帧/卸载帧/桥接帧/同向停发恢复/最长停发/误差P95=" +
                std::to_string(closing_response_frames) + "/" +
                std::to_string(closing_response_growth_frames) + "/" +
+               std::to_string(closing_response_taper_frames) + "/" +
                std::to_string(output_translation_bridge_frames) + "/" +
                std::to_string(same_direction_stop_go_episodes) + "/" +
                std::to_string(maximum_same_direction_zero_frames) + "/" +

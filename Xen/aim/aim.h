@@ -164,6 +164,7 @@ struct AimControlDiagnostics {
     bool shaper_direction_reset_x = false;
     bool post_alignment_sign_change_blocked_x = false;
     bool post_alignment_growth_limited_x = false;
+    bool closing_response_tapered_x = false;
     bool integer_direction_blocked_x = false;
     bool command_sign_change_blocked_x = false;
     bool quantization_zero_x = false;

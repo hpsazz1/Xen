@@ -129,6 +129,7 @@ function New-ControlDiagnosticSample(
     $sample.aim_post_alignment_sign_change_blocked_x =
         $ZeroReason -eq "post_alignment_sign_change"
     $sample.aim_post_alignment_growth_limited_x = $false
+    $sample.aim_closing_response_tapered_x = $Sequence -eq 4
     $sample.aim_integer_direction_blocked_x =
         $ZeroReason -eq "integer_direction"
     $sample.aim_command_sign_change_blocked_x =
@@ -174,6 +175,7 @@ Assert-Condition ($controlSummary.schema -eq 5 -and
             -eq 1 -and
         $controlSummary.x.diagnostic_flags.reverse_position_improvement_reset `
             -eq 1 -and
+        $controlSummary.x.diagnostic_flags.closing_response_tapered -eq 1 -and
         $controlSummary.x.reverse_probe_age_ms.p50 -eq 8.0 -and
         $controlSummary.x.reverse_translation_dwell_ms.p50 -eq 7.5 -and
         $controlSummary.x.reverse_translation_gap_ms.maximum -eq 8.0 -and

@@ -847,6 +847,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 "aim_shaper_direction_reset_x,"
                 "aim_post_alignment_sign_change_blocked_x,"
                 "aim_post_alignment_growth_limited_x,"
+                "aim_closing_response_tapered_x,"
                 "aim_integer_direction_blocked_x,"
                 "aim_command_sign_change_blocked_x,"
                 "aim_quantization_zero_x,"
@@ -1009,6 +1010,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << ','
                 << bool_name(
                     sample.aim_control.post_alignment_growth_limited_x) << ','
+                << bool_name(sample.aim_control.closing_response_tapered_x)
+                << ','
                 << bool_name(sample.aim_control.integer_direction_blocked_x)
                 << ','
                 << bool_name(
@@ -1375,6 +1378,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << ", \"aim_post_alignment_growth_limited_x\": "
                  << bool_name(sample.aim_control
                      .post_alignment_growth_limited_x)
+                 << ", \"aim_closing_response_tapered_x\": "
+                 << bool_name(sample.aim_control.closing_response_tapered_x)
                  << ", \"aim_integer_direction_blocked_x\": "
                  << bool_name(sample.aim_control.integer_direction_blocked_x)
                  << ", \"aim_command_sign_change_blocked_x\": "

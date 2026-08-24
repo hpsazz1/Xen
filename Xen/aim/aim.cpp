@@ -342,6 +342,9 @@ constexpr float kTrackingHorizontalReverseDeformationFallbackScale = 3.0f;
 constexpr float kTrackingHorizontalReverseProbeMaximumCounts = 3.0f;
 constexpr float kTrackingHorizontalReverseFeedbackProbeMaximumCounts = 1.0f;
 constexpr float kTrackingHorizontalReverseProbeCommitWindows = 2.0f;
+// 连续闭合响应必须跨过一个半反馈窗才卸载 1 count；单个反馈窗只冻结
+// 增长，避免在真实方向刚建立或快速反转前过早削弱追赶。
+constexpr float kTrackingHorizontalClosingResponseTaperWindowsPerCount = 1.5f;
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
            std::isfinite(detection.x2) && std::isfinite(detection.y2) &&
@@ -731,6 +734,9 @@ struct Aim::Impl {
     std::chrono::steady_clock::time_point
         tracking_horizontal_reverse_output_bridge_started_at{};
     bool tracking_horizontal_reverse_output_bridge_consumed = false;
+    std::chrono::steady_clock::time_point
+        tracking_horizontal_closing_response_started_at{};
+    float tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
     std::chrono::steady_clock::time_point controller_at{};
     bool controller_initialized = false;
     bool shaper_initialized = false;
@@ -968,6 +974,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_output_bridge_started_at = {};
             tracking_horizontal_reverse_output_bridge_consumed = false;
+            tracking_horizontal_closing_response_started_at = {};
+            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
         }
         const float track_center_x = (track.x1 + track.x2) * 0.5f;
         const float track_center_y = (track.y1 + track.y2) * 0.5f;
@@ -2436,6 +2444,8 @@ struct Aim::Impl {
         tracking_horizontal_reverse_probe_started_at = {};
         tracking_horizontal_reverse_output_bridge_started_at = {};
         tracking_horizontal_reverse_output_bridge_consumed = false;
+        tracking_horizontal_closing_response_started_at = {};
+        tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
         controller_at = {};
         controller_initialized = false;
         shaper_initialized = false;
@@ -3087,6 +3097,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_probe_started_at = {};
             tracking_horizontal_reverse_output_bridge_started_at = {};
             tracking_horizontal_reverse_output_bridge_consumed = false;
+            tracking_horizontal_closing_response_started_at = {};
+            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
             if (!frame.lock_active) {
                 // 丢框早退不会经过函数末尾的公共清理。安全门已经释放时，
                 // 还必须丢弃上一次输出方向，避免恢复锁定后继承一条已经
@@ -3390,6 +3402,36 @@ struct Aim::Impl {
             track.horizontal_control_translation_evidence_x *
                     tracking_horizontal_output_direction <=
                 -kHorizontalTranslationEvidenceConsistencyMinimum;
+        float tracking_horizontal_closing_response_maximum_x =
+            std::fabs(previous_command_x);
+        if (tracking_horizontal_closing_response_growth_guard_x) {
+            if (tracking_horizontal_closing_response_started_at ==
+                std::chrono::steady_clock::time_point{}) {
+                tracking_horizontal_closing_response_started_at =
+                    current_controller_at;
+                tracking_horizontal_closing_response_initial_magnitude_x =
+                    std::fabs(previous_command_x);
+            }
+            const float taper_step_seconds =
+                config.control_delay_ms / 1000.0f *
+                kTrackingHorizontalClosingResponseTaperWindowsPerCount;
+            const float response_age_seconds = static_cast<float>(
+                std::chrono::duration<double>(
+                    current_controller_at -
+                    tracking_horizontal_closing_response_started_at)
+                    .count());
+            const float completed_taper_steps = std::floor(
+                response_age_seconds / taper_step_seconds);
+            const float scheduled_maximum_x = std::max(
+                1.0f,
+                tracking_horizontal_closing_response_initial_magnitude_x -
+                    completed_taper_steps);
+            tracking_horizontal_closing_response_maximum_x = std::min(
+                std::fabs(previous_command_x), scheduled_maximum_x);
+        } else {
+            tracking_horizontal_closing_response_started_at = {};
+            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
+        }
         // 首个换向帧只允许有界命令进入延迟库存，不得把
         // “已确认输出方向”提前改成候选方向。函数末尾使用
         // 该标志区分首个探测脉冲与延迟反馈后确认的换向。
@@ -3889,13 +3931,9 @@ struct Aim::Impl {
         }
         if (diagnostics.reverse_gate_blocked_x &&
             reverse_output_translation_bridge_x) {
-            // 实际 196 次“同向输出—零命令—同向恢复”中有 195 次最终
-            // 恢复原方向，其中 165 次停发主体的共同边事实明确反对候选
-            // 反向、支持既有输出方向。此时继续硬归零会把追踪切成约
-            // 75.5 ms 一段的继电停顿。只在两条框边以既有 0.70 无量纲
-            // 一致性支持原方向时，在上述归一化位置/时间预算内用物理最小
-            // 1 count 桥接；共同边一旦支持真实反向、失去一致性或预算
-            // 到期便立即停发，原反向证据门仍完整保留。
+            // 已确认方向的共同边重新占优时，保留原有一次性最小桥接；
+            // 最终整数方向门仍会剔除任何背离当前控制点的命令，因此该层
+            // 只承担保持带内的最低连续性，不替代本轮上游存量卸载。
             desired_x = std::copysign(
                 kTrackingHorizontalReverseFeedbackProbeMaximumCounts,
                 tracking_horizontal_output_direction);
@@ -4051,6 +4089,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_probe_started_at = {};
             tracking_horizontal_reverse_output_bridge_started_at = {};
             tracking_horizontal_reverse_output_bridge_consumed = false;
+            tracking_horizontal_closing_response_started_at = {};
+            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
             controller_at = current_controller_at;
             diagnostics.deadzone_quiet = true;
             diagnostics.filtered_x_counts = filtered_x;
@@ -4157,16 +4197,20 @@ struct Aim::Impl {
             }
             if (tracking_horizontal_closing_response_growth_guard_x &&
                 previous_command_x * shaped_x > 0.0f &&
-                std::fabs(shaped_x) > std::fabs(previous_command_x)) {
-                // 新真机 Run 的 196 次“同方向输出—停发—原方向恢复”
-                // 中，196 次都在旧方向命令已生效时开始；停发前连续
-                // 输出 P50 约 70.8 ms/74 counts，停发 P50 75.5 ms。
-                // 当两条框边已以既有 0.70 一致性明确朝中心闭合时，
-                // 继续增加同方向命令只会扩大随后越心和硬停发。这里像
-                // 动态 command governor 一样只冻结物理 X 的增长；当前
-                // 幅度可以保持，任何减速立即通过，不估算固定库存响应，
-                // 也不读取人物绝对速度、游戏档位或改变 Y/prediction。
-                shaped_x = previous_command_x;
+                std::fabs(shaped_x) >
+                    tracking_horizontal_closing_response_maximum_x) {
+                // 当旧方向延迟命令已经生效、两条框边又以既有 0.70
+                // 一致性朝中心闭合时，先禁止继续加码；若该事实持续超过
+                // 1.5 个真实 control_delay 反馈窗，则每完成 1.5 窗最多卸载
+                // 1 count，直至物理最小 1 count。这样把减速节拍绑定到
+                // 已配置的反馈延迟而不是帧率/人物速度：短闭合只冻结增长，
+                // 长闭合才逐窗减小旧方向存量，任何更快的自然减速仍通过。
+                diagnostics.closing_response_tapered_x =
+                    tracking_horizontal_closing_response_maximum_x + 0.001f <
+                    std::fabs(previous_command_x);
+                shaped_x = std::copysign(
+                    tracking_horizontal_closing_response_maximum_x,
+                    previous_command_x);
                 residual_x = 0.0f;
             }
             clamp_vector(shaped_x, shaped_y, config.max_counts_per_frame);
@@ -4339,7 +4383,11 @@ struct Aim::Impl {
             tracking_horizontal_reverse_probe_started_at = {};
             tracking_horizontal_reverse_output_bridge_started_at = {};
             tracking_horizontal_reverse_output_bridge_consumed = false;
+            tracking_horizontal_closing_response_started_at = {};
+            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
         } else if (command.dx_counts != 0 && reverse_release_probe_x) {
+            tracking_horizontal_closing_response_started_at = {};
+            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
             const float command_direction = std::copysign(
                 1.0f, static_cast<float>(command.dx_counts));
             if (tracking_horizontal_reverse_probe_direction !=
@@ -4358,8 +4406,14 @@ struct Aim::Impl {
             // 否则公共“非零命令即提交”路径会每帧重置预算并永久饿死
             // 真正反向。
         } else if (command.dx_counts != 0) {
-            tracking_horizontal_output_direction = std::copysign(
+            const float command_direction = std::copysign(
                 1.0f, static_cast<float>(command.dx_counts));
+            if (tracking_horizontal_output_direction != 0.0f &&
+                tracking_horizontal_output_direction != command_direction) {
+                tracking_horizontal_closing_response_started_at = {};
+                tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
+            }
+            tracking_horizontal_output_direction = command_direction;
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_peak_error = 0.0f;
