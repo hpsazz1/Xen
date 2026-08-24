@@ -309,6 +309,17 @@ if ($changedTools.Count -gt 0 -or $toolManifestChanged) {
     $manifest.git_commit = $commit.ToLowerInvariant()
     $manifestPending = Join-Path $packageRoot `
         ".manifest.incoming-$([guid]::NewGuid().ToString('N'))"
+    $remoteToolStageName =
+        ".aim-tools.incoming-$([guid]::NewGuid().ToString('N'))"
+    $toolDestinationPrefix =
+        [System.IO.Path]::GetFullPath($destinationRoot).TrimEnd('\') + '\'
+    $remoteToolStage = [System.IO.Path]::GetFullPath(
+        (Join-Path $destinationRoot $remoteToolStageName))
+    if (-not $remoteToolStage.StartsWith(
+            $toolDestinationPrefix,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "辅机报告工具暂存目录越出固定发布根：$remoteToolStage"
+    }
     try {
         $manifest | ConvertTo-Json -Depth 12 |
             Set-Content -LiteralPath $manifestPending -Encoding UTF8
@@ -316,13 +327,83 @@ if ($changedTools.Count -gt 0 -or $toolManifestChanged) {
             Copy-Atomic $tool.repository $tool.package
         }
         Replace-FileAtomically $manifestPending $manifestPath
+
+        New-Item -ItemType Directory -Path $remoteToolStage -Force |
+            Out-Null
         foreach ($tool in $changedTools) {
-            Copy-Atomic $tool.repository $tool.remote
+            $stagePath = Join-Path $remoteToolStage `
+                ([string]$tool.relative).Replace('/', '\')
+            New-Item -ItemType Directory -Path (Split-Path -Parent $stagePath) `
+                -Force | Out-Null
+            Copy-Item -LiteralPath $tool.repository -Destination $stagePath
+            $stageHash = (Get-FileHash -LiteralPath $stagePath `
+                -Algorithm SHA256).Hash
+            $repositoryHash = (Get-FileHash -LiteralPath $tool.repository `
+                -Algorithm SHA256).Hash
+            if ($stageHash -ne $repositoryHash) {
+                throw "辅机报告工具暂存 SHA-256 校验失败：$($tool.relative)"
+            }
         }
-        Copy-Atomic $manifestPath $remoteManifest
+        Copy-Item -LiteralPath $manifestPath -Destination `
+            (Join-Path $remoteToolStage "manifest.json")
+        if (-not (Test-Path -LiteralPath $SshIdentityFile -PathType Leaf)) {
+            throw "SSH 身份文件不存在：$SshIdentityFile"
+        }
+        $remotePackagePrefix =
+            [System.IO.Path]::GetFullPath($RemotePackageRoot).TrimEnd('\') + '\'
+        $remoteToolStageLocal = [System.IO.Path]::GetFullPath(
+            (Join-Path $RemotePackageRoot $remoteToolStageName))
+        $moveStatements = [System.Collections.Generic.List[string]]::new()
+        foreach ($tool in $changedTools) {
+            $relativeWindows = ([string]$tool.relative).Replace('/', '\')
+            $stageLocal = [System.IO.Path]::GetFullPath(
+                (Join-Path $remoteToolStageLocal $relativeWindows))
+            $targetLocal = [System.IO.Path]::GetFullPath(
+                (Join-Path $RemotePackageRoot $relativeWindows))
+            foreach ($path in @($stageLocal, $targetLocal)) {
+                if (-not $path.StartsWith(
+                        $remotePackagePrefix,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw "辅机报告工具替换路径越出固定发布根：$path"
+                }
+            }
+            $escapedStage = $stageLocal.Replace("'", "''")
+            $escapedTarget = $targetLocal.Replace("'", "''")
+            $moveStatements.Add(
+                "Move-Item -LiteralPath '$escapedStage' " +
+                "-Destination '$escapedTarget' -Force")
+        }
+        $manifestStageLocal = [System.IO.Path]::GetFullPath(
+            (Join-Path $remoteToolStageLocal "manifest.json"))
+        $manifestTargetLocal = [System.IO.Path]::GetFullPath(
+            (Join-Path $RemotePackageRoot "manifest.json"))
+        foreach ($path in @($manifestStageLocal, $manifestTargetLocal)) {
+            if (-not $path.StartsWith(
+                    $remotePackagePrefix,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "辅机报告工具清单替换路径越出固定发布根：$path"
+            }
+        }
+        $escapedManifestStage = $manifestStageLocal.Replace("'", "''")
+        $escapedManifestTarget = $manifestTargetLocal.Replace("'", "''")
+        $moveStatements.Add(
+            "Move-Item -LiteralPath '$escapedManifestStage' " +
+            "-Destination '$escapedManifestTarget' -Force")
+        $applyScript = '& { $ErrorActionPreference = ''Stop''; ' +
+            ($moveStatements -join '; ') + ' }'
+        $encodedApplyCommand = ConvertTo-PowerShellEncodedCommand $applyScript
+        & ssh -i $SshIdentityFile -o IdentitiesOnly=yes -o BatchMode=yes `
+            "$SshUser@$SshHost" powershell.exe -NoProfile -NonInteractive `
+            -EncodedCommand $encodedApplyCommand
+        if ($LASTEXITCODE -ne 0) {
+            throw "辅机报告工具闭包原子替换失败，退出码：$LASTEXITCODE"
+        }
     } finally {
         if (Test-Path -LiteralPath $manifestPending -PathType Leaf) {
             Remove-Item -LiteralPath $manifestPending -Force
+        }
+        if (Test-Path -LiteralPath $remoteToolStage -PathType Container) {
+            Remove-Item -LiteralPath $remoteToolStage -Recurse -Force
         }
     }
 }

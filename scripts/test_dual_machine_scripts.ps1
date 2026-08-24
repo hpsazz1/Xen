@@ -133,8 +133,11 @@ Assert-True ($aimDeltaText -match '\$toolSpecs\s*=\s*@\(' -and
     $aimDeltaText -match '\$changedTools' -and
     $aimDeltaText -match
         '\$manifest\.git_commit\s*=\s*\$commit\.ToLowerInvariant\(\)' -and
-    $aimDeltaText -match 'Copy-Atomic\s+\$manifestPath\s+\$remoteManifest') `
-    "Aim 差量入口必须把完整报告工具闭包、manifest 和发布提交作为同一差量同步。"
+    $aimDeltaText -match '\$remoteToolStageName' -and
+    $aimDeltaText -match '\$moveStatements\.Add\(' -and
+    $aimDeltaText -match 'ConvertTo-PowerShellEncodedCommand\s+\$applyScript' -and
+    $aimDeltaText -match 'escapedManifestStage') `
+    "Aim 差量入口必须暂存完整报告工具闭包，并由辅机本地 PowerShell 最后发布 manifest。"
 Assert-True (([regex]::Matches(
         $aimDeltaText,
         '\$records\s*=\s*@\(@\(\$(?:manifest|finalManifest)\.files\)\s*\|\s*Where-Object')).Count -eq 2) `
