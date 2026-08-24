@@ -712,6 +712,9 @@ struct Aim::Impl {
     float tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
     float tracking_horizontal_reverse_position_peak_error = 0.0f;
     float tracking_horizontal_reverse_translation_seconds = 0.0f;
+    // 连续共同平移只容忍一个“仍同向但一致性暂时不足”的观测空洞。
+    // 空洞不累计驻留；连续第二个弱观测、零位移、反向或库存/语义变化均清零。
+    bool tracking_horizontal_reverse_translation_gap_used = false;
     float tracking_horizontal_reverse_deformation_seconds = 0.0f;
     bool tracking_horizontal_reverse_deformation_active = false;
     float tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -949,6 +952,7 @@ struct Aim::Impl {
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_peak_error = 0.0f;
             tracking_horizontal_reverse_translation_seconds = 0.0f;
+            tracking_horizontal_reverse_translation_gap_used = false;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
         }
@@ -2405,6 +2409,7 @@ struct Aim::Impl {
         tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
         tracking_horizontal_reverse_position_peak_error = 0.0f;
         tracking_horizontal_reverse_translation_seconds = 0.0f;
+        tracking_horizontal_reverse_translation_gap_used = false;
         tracking_horizontal_reverse_deformation_seconds = 0.0f;
         tracking_horizontal_reverse_deformation_active = false;
         tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -3042,6 +3047,7 @@ struct Aim::Impl {
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_peak_error = 0.0f;
             tracking_horizontal_reverse_translation_seconds = 0.0f;
+            tracking_horizontal_reverse_translation_gap_used = false;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -3379,6 +3385,7 @@ struct Aim::Impl {
                     tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
                     tracking_horizontal_reverse_position_peak_error = 0.0f;
                     tracking_horizontal_reverse_translation_seconds = 0.0f;
+                    tracking_horizontal_reverse_translation_gap_used = false;
                     tracking_horizontal_reverse_deformation_seconds = 0.0f;
                     tracking_horizontal_reverse_deformation_active = false;
                     tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -3447,6 +3454,8 @@ struct Aim::Impl {
                             0.0f;
                         tracking_horizontal_reverse_translation_seconds =
                             0.0f;
+                        tracking_horizontal_reverse_translation_gap_used =
+                            false;
                         tracking_horizontal_reverse_deformation_seconds =
                             0.0f;
                         tracking_horizontal_reverse_deformation_active = false;
@@ -3454,18 +3463,41 @@ struct Aim::Impl {
                         tracking_horizontal_reverse_probe_started_at = {};
                     } else {
                         // 实际整体平移不应再乘基础误差幅值后等待几十毫秒。
-                        // 候选方向的两条框边共同移动且连续覆盖一个反馈窗时，
-                        // 方向事实已经独立于人物速度和框宽成立。旧方向仍在途、
-                        // 单帧置信度下降或方向相反都会清零，不能把断续姿态
-                        // 形变拼成真实反向。
+                        // 候选方向的两条框边共同移动且累计覆盖一个反馈窗时，
+                        // 方向事实已经独立于人物速度和框宽成立。最新真机 Run
+                        // 显示已累计 10～17 ms 的驻留会被一个约 3～5 ms、仍与
+                        // 候选同向但一致性暂低的观测清零，下一帧又恢复同向；
+                        // 这会把连续运动切成永远达不到反馈窗的短片段。
+                        // 因此只桥接一个同向弱观测且不累计其 dt；连续第二个弱观测、
+                        // 零位移、反向、旧库存或语义变化仍立即清零，不能把静止、
+                        // 真实反转或断续姿态拼成平移。
+                        const bool translation_evidence_consistent =
+                            aligned_translation_evidence >=
+                            kHorizontalTranslationEvidenceConsistencyMinimum;
+                        const bool translation_evidence_same_direction =
+                            aligned_translation_evidence > 0.0f;
                         if (previous_direction_pending ||
-                            aligned_translation_evidence <
-                                kHorizontalTranslationEvidenceConsistencyMinimum) {
+                            !translation_evidence_same_direction) {
                             tracking_horizontal_reverse_translation_seconds =
                                 0.0f;
-                        } else {
+                            tracking_horizontal_reverse_translation_gap_used =
+                                false;
+                        } else if (translation_evidence_consistent) {
                             tracking_horizontal_reverse_translation_seconds +=
                                 controller_dt;
+                            tracking_horizontal_reverse_translation_gap_used =
+                                false;
+                        } else if (
+                            tracking_horizontal_reverse_translation_seconds >
+                                0.0f &&
+                            !tracking_horizontal_reverse_translation_gap_used) {
+                            tracking_horizontal_reverse_translation_gap_used =
+                                true;
+                        } else {
+                            tracking_horizontal_reverse_translation_seconds =
+                                0.0f;
+                            tracking_horizontal_reverse_translation_gap_used =
+                                false;
                         }
                         // 姿态 episode 是观测几何生命周期，不能在等待同向
                         // 旧库存过期时或被单帧共同边置信度抹掉。库存期允许
@@ -3625,6 +3657,7 @@ struct Aim::Impl {
                 tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
                 tracking_horizontal_reverse_position_peak_error = 0.0f;
                 tracking_horizontal_reverse_translation_seconds = 0.0f;
+                tracking_horizontal_reverse_translation_gap_used = false;
                 tracking_horizontal_reverse_deformation_seconds = 0.0f;
                 tracking_horizontal_reverse_deformation_active = false;
                 // 探测命令未产生反馈前，单帧候选消失可能只是延迟投影或
@@ -3782,6 +3815,7 @@ struct Aim::Impl {
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_peak_error = 0.0f;
             tracking_horizontal_reverse_translation_seconds = 0.0f;
+            tracking_horizontal_reverse_translation_gap_used = false;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -4037,6 +4071,7 @@ struct Aim::Impl {
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_peak_error = 0.0f;
             tracking_horizontal_reverse_translation_seconds = 0.0f;
+            tracking_horizontal_reverse_translation_gap_used = false;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -4058,6 +4093,7 @@ struct Aim::Impl {
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_peak_error = 0.0f;
             tracking_horizontal_reverse_translation_seconds = 0.0f;
+            tracking_horizontal_reverse_translation_gap_used = false;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;

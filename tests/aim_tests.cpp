@@ -4516,6 +4516,171 @@ void test_tracking_reverse_robust_common_translation_survives_edge_noise() {
                std::to_string(normal.position_ready));
 }
 
+void test_tracking_reverse_translation_dwell_bridges_one_weak_observation() {
+    struct Trace {
+        int first_negative_offset = -1;
+        int pending_frames = 0;
+        int identity_changes = 0;
+        float dwell_before_gap_ms = 0.0f;
+        float dwell_during_first_gap_ms = 0.0f;
+        bool first_gap_preserved = false;
+        bool second_gap_reset = false;
+        bool translation_ready = false;
+        bool position_ready = false;
+        bool probe_limited = false;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_case = [&]
+        (float roi_scale,
+         const std::array<int, 3>& cadence_microseconds,
+         int weak_observation_count) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        Trace trace;
+        const float roi_width = 320.0f * roi_scale;
+        float center_x = roi_width * 0.53125f;
+        float box_width = roi_width * 0.125f;
+
+        AimFrame established_frame = make_frame(1, base);
+        established_frame.roi_width = static_cast<int>(roi_width);
+        established_frame.roi_height = static_cast<int>(roi_width);
+        established_frame.control_at = established_frame.captured_at +
+            std::chrono::milliseconds(1);
+        established_frame.control_center_x = roi_width * 0.50f;
+        established_frame.control_center_y = roi_width * 0.50f;
+        established_frame.lock_active = true;
+        established_frame.detections = {body_box(
+            center_x, roi_width * 0.50f, box_width, roi_width * 0.25f)};
+        const AimResult established = aim.process(established_frame);
+        expect(established.status == AimStatus::SUCCESS &&
+                   established.has_target &&
+                   established.command.dx_counts > 0,
+               "同向弱观测桥接回归必须先建立 +X 输出");
+        const std::uint64_t track_id = established.target.track_id;
+
+        long long elapsed_microseconds = 0;
+        int weak_observations_remaining = 0;
+        int weak_observation_index = 0;
+        bool gap_scheduled = false;
+        float previous_dwell_seconds = 0.0f;
+        for (int offset = 0; offset < 28; ++offset) {
+            const int cadence = cadence_microseconds[
+                static_cast<std::size_t>(offset) % cadence_microseconds.size()];
+            elapsed_microseconds += cadence;
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(offset + 2),
+                base + std::chrono::microseconds(elapsed_microseconds));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.534375f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+
+            center_x -= roi_width * 0.003125f;
+            const bool weak_observation = weak_observations_remaining > 0;
+            if (weak_observation) {
+                // 中心继续沿候选方向移动，但宽度同时增加 0.375% ROI：
+                // 两条边仍同向，逐帧和三点中值一致性都低于 0.70。
+                // 这模拟真机中 3～5 ms 的单观测轮廓空洞，不是静止或反转。
+                box_width += roi_width * 0.00375f;
+                --weak_observations_remaining;
+                ++weak_observation_index;
+            }
+            frame.detections = {body_box(
+                center_x, roi_width * 0.50f, box_width,
+                roi_width * 0.25f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "同向弱观测桥接期间必须逐帧保留目标");
+            if (!result.has_target) continue;
+            if (result.target.track_id != track_id) {
+                ++trace.identity_changes;
+            }
+            if (result.control.reverse_previous_direction_pending_x) {
+                ++trace.pending_frames;
+            }
+            if (weak_observation && weak_observation_index == 1) {
+                trace.dwell_before_gap_ms = previous_dwell_seconds * 1000.0f;
+                trace.dwell_during_first_gap_ms =
+                    result.control.reverse_translation_seconds_x * 1000.0f;
+                trace.first_gap_preserved =
+                    previous_dwell_seconds > 0.0f &&
+                    std::fabs(
+                        result.control.reverse_translation_seconds_x -
+                        previous_dwell_seconds) < 0.000001f;
+            }
+            if (weak_observation && weak_observation_index == 2) {
+                trace.second_gap_reset =
+                    result.control.reverse_translation_seconds_x == 0.0f &&
+                    !result.control.reverse_translation_ready_x;
+            }
+            if (!gap_scheduled &&
+                !result.control.reverse_previous_direction_pending_x &&
+                result.control.reverse_translation_seconds_x > 0.0f &&
+                !result.control.reverse_translation_ready_x) {
+                weak_observations_remaining = weak_observation_count;
+                gap_scheduled = true;
+            }
+            previous_dwell_seconds =
+                result.control.reverse_translation_seconds_x;
+            if (trace.first_negative_offset < 0 &&
+                result.command.dx_counts < 0) {
+                trace.first_negative_offset = offset;
+                trace.translation_ready =
+                    result.control.reverse_translation_ready_x;
+                trace.position_ready =
+                    result.control.reverse_position_ready_x;
+                trace.probe_limited =
+                    result.control.reverse_probe_limited_x;
+            }
+        }
+        return trace;
+    };
+
+    const std::array<int, 3> steady{4167, 4167, 4167};
+    const std::array<int, 3> jittered{3000, 5000, 4500};
+    const Trace one_normal = run_case(1.0f, steady, 1);
+    const Trace one_doubled = run_case(2.0f, jittered, 1);
+    const Trace two_normal = run_case(1.0f, steady, 2);
+    const auto one_gap_valid = [](const Trace& trace) {
+        return trace.identity_changes == 0 &&
+            trace.pending_frames > 0 &&
+            trace.first_gap_preserved &&
+            trace.first_negative_offset >= 5 &&
+            trace.first_negative_offset < 20 &&
+            trace.translation_ready &&
+            !trace.position_ready &&
+            trace.probe_limited;
+    };
+    expect(one_gap_valid(one_normal) && one_gap_valid(one_doubled) &&
+               two_normal.first_gap_preserved &&
+               two_normal.second_gap_reset,
+           "连续共同平移必须只桥接一个同向弱观测且不累计空洞 dt；连续"
+           "第二个弱观测必须清零，320/640 ROI 与 3～5 ms 节奏同构；首负/"
+           "空洞前后驻留/双空洞清零=" +
+               std::to_string(one_normal.first_negative_offset) + "/" +
+               std::to_string(one_doubled.first_negative_offset) + "/" +
+               std::to_string(one_normal.dwell_before_gap_ms) + "/" +
+               std::to_string(one_normal.dwell_during_first_gap_ms) + "/" +
+               std::to_string(two_normal.second_gap_reset));
+}
+
 void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
     struct Trace {
         int first_negative_command_offset = -1;
@@ -9037,6 +9202,7 @@ int main() {
     test_tracking_reverse_requires_base_and_common_edge_direction();
     test_tracking_reverse_consecutive_common_translation_releases();
     test_tracking_reverse_robust_common_translation_survives_edge_noise();
+    test_tracking_reverse_translation_dwell_bridges_one_weak_observation();
     test_tracking_reverse_position_fallback_releases_after_old_inventory();
     test_tracking_reverse_position_fallback_resets_while_error_improves();
     test_tracking_reverse_feedback_probe_uses_minimum_count();
