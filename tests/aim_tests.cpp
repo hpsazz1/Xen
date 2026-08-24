@@ -4383,6 +4383,138 @@ void test_tracking_reverse_consecutive_common_translation_releases() {
                first_context);
 }
 
+void test_tracking_reverse_effective_old_command_requires_fresh_confirmation() {
+    struct Trace {
+        int first_probe_offset = -1;
+        int first_probe_magnitude = 0;
+        int unconfirmed_full_negative_commands = 0;
+        int cancellation_count = 0;
+        int identity_changes = 0;
+        bool first_probe_has_effective_old_command = false;
+        bool first_probe_cusum_was_ready = false;
+        bool previous_probe_active = false;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_case = [&](float roi_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        Trace trace;
+        const float roi_width = 320.0f * roi_scale;
+
+        AimFrame established_frame = make_frame(1, base);
+        established_frame.roi_width = static_cast<int>(roi_width);
+        established_frame.roi_height = static_cast<int>(roi_width);
+        established_frame.control_at = established_frame.captured_at +
+            std::chrono::milliseconds(1);
+        established_frame.control_center_x = roi_width * 0.50f;
+        established_frame.control_center_y = roi_width * 0.50f;
+        established_frame.lock_active = true;
+        established_frame.detections = {body_box(
+            roi_width * 0.53f, roi_width * 0.50f,
+            roi_width * 0.125f, roi_width * 0.25f)};
+        const AimResult established = aim.process(established_frame);
+        expect(established.status == AimStatus::SUCCESS &&
+                   established.has_target &&
+                   established.command.dx_counts > 0,
+               "旧方向到期响应回归必须先建立 +X 输出");
+        const std::uint64_t track_id = established.target.track_id;
+
+        float center_ratio = 0.47f;
+        for (int offset = 0; offset < 28; ++offset) {
+            // 前四帧只用 ROI 比例构造候选方向共同平移，使 CUSUM 恰在
+            // t≈16.7 ms、旧 +X 命令成为 delayed_command 的帧达到门限。
+            // 此后框完全静止，禁止用同一批旧相机响应跨反馈窗自动提交。
+            if (offset < 4) {
+                center_ratio -= 0.003125f;
+            }
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(offset + 2),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(offset + 1) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.50f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                roi_width * center_ratio, roi_width * 0.50f,
+                roi_width * 0.125f, roi_width * 0.25f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "旧方向到期响应与后续静止窗必须逐帧保留目标");
+            if (!result.has_target) continue;
+            if (result.target.track_id != track_id) {
+                ++trace.identity_changes;
+            }
+            if (trace.first_probe_offset < 0 &&
+                result.command.dx_counts < 0) {
+                trace.first_probe_offset = offset;
+                trace.first_probe_magnitude =
+                    std::abs(result.command.dx_counts);
+                trace.first_probe_has_effective_old_command =
+                    result.control.delayed_command_x_counts > 0.0f;
+                trace.first_probe_cusum_was_ready =
+                    result.control.reverse_evidence_ready_x;
+            }
+            if (result.command.dx_counts < 0 &&
+                !result.control.reverse_probe_limited_x) {
+                ++trace.unconfirmed_full_negative_commands;
+            }
+            if (!result.control.reverse_probe_active_x &&
+                trace.previous_probe_active &&
+                result.control.reverse_gate_blocked_x) {
+                ++trace.cancellation_count;
+            }
+            trace.previous_probe_active =
+                result.control.reverse_probe_active_x;
+        }
+        return trace;
+    };
+
+    const Trace normal = run_case(1.0f);
+    const Trace doubled = run_case(2.0f);
+    const auto valid = [](const Trace& trace) {
+        return trace.identity_changes == 0 &&
+            trace.first_probe_offset >= 2 &&
+            trace.first_probe_offset <= 5 &&
+            trace.first_probe_magnitude > 0 &&
+            trace.first_probe_magnitude <= 3 &&
+            trace.first_probe_has_effective_old_command &&
+            trace.first_probe_cusum_was_ready &&
+            trace.unconfirmed_full_negative_commands == 0 &&
+            trace.cancellation_count >= 1;
+    };
+    expect(valid(normal) && valid(doubled) &&
+               std::abs(normal.first_probe_offset -
+                        doubled.first_probe_offset) <= 1,
+           "旧方向命令刚成为 delayed_command 时达到门限的 CUSUM 只能"
+           "启动有界探针；后续没有新鲜共同平移时不得自动提交全量换向；"
+           "320/640 首探针/全量负命令/取消=" +
+               std::to_string(normal.first_probe_offset) + "/" +
+               std::to_string(doubled.first_probe_offset) + "/" +
+               std::to_string(normal.unconfirmed_full_negative_commands) +
+               "/" + std::to_string(
+                   doubled.unconfirmed_full_negative_commands) + "/" +
+               std::to_string(normal.cancellation_count) + "/" +
+               std::to_string(doubled.cancellation_count));
+}
+
 void test_tracking_reverse_robust_common_translation_survives_edge_noise() {
     struct Trace {
         int first_negative_offset = -1;
@@ -9613,6 +9745,7 @@ int main() {
     test_tracking_pending_direction_does_not_cancel_opposite_inventory();
     test_tracking_reverse_requires_base_and_common_edge_direction();
     test_tracking_reverse_consecutive_common_translation_releases();
+    test_tracking_reverse_effective_old_command_requires_fresh_confirmation();
     test_tracking_reverse_robust_common_translation_survives_edge_noise();
     test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget();
     test_tracking_reverse_position_probe_retries_without_unconfirmed_commit();
