@@ -728,6 +728,9 @@ struct Aim::Impl {
     bool tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
     std::chrono::steady_clock::time_point
         tracking_horizontal_reverse_probe_started_at{};
+    std::chrono::steady_clock::time_point
+        tracking_horizontal_reverse_output_bridge_started_at{};
+    bool tracking_horizontal_reverse_output_bridge_consumed = false;
     std::chrono::steady_clock::time_point controller_at{};
     bool controller_initialized = false;
     bool shaper_initialized = false;
@@ -963,6 +966,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_translation_gap_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
+            tracking_horizontal_reverse_output_bridge_started_at = {};
+            tracking_horizontal_reverse_output_bridge_consumed = false;
         }
         const float track_center_x = (track.x1 + track.x2) * 0.5f;
         const float track_center_y = (track.y1 + track.y2) * 0.5f;
@@ -2429,6 +2434,8 @@ struct Aim::Impl {
         tracking_horizontal_reverse_probe_direction = 0.0f;
         tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
         tracking_horizontal_reverse_probe_started_at = {};
+        tracking_horizontal_reverse_output_bridge_started_at = {};
+        tracking_horizontal_reverse_output_bridge_consumed = false;
         controller_at = {};
         controller_initialized = false;
         shaper_initialized = false;
@@ -3078,6 +3085,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_probe_direction = 0.0f;
             tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
             tracking_horizontal_reverse_probe_started_at = {};
+            tracking_horizontal_reverse_output_bridge_started_at = {};
+            tracking_horizontal_reverse_output_bridge_consumed = false;
             if (!frame.lock_active) {
                 // 丢框早退不会经过函数末尾的公共清理。安全门已经释放时，
                 // 还必须丢弃上一次输出方向，避免恢复锁定后继承一条已经
@@ -3367,6 +3376,20 @@ struct Aim::Impl {
             desired_y = proportional_y;
         }
         diagnostics.desired_before_reverse_x_counts = desired_x;
+        const bool tracking_horizontal_closing_response_growth_guard_x =
+            config.enable_delay_compensation &&
+            config.control_delay_ms > 0.0f &&
+            !config.enable_prediction &&
+            tracking_horizontal_output_direction != 0.0f &&
+            previous_command_x * tracking_horizontal_output_direction >
+                0.0f &&
+            delayed_command_x * tracking_horizontal_output_direction >
+                0.001f &&
+            base_error_x * tracking_horizontal_output_direction > 0.0f &&
+            desired_x * tracking_horizontal_output_direction > 0.0f &&
+            track.horizontal_control_translation_evidence_x *
+                    tracking_horizontal_output_direction <=
+                -kHorizontalTranslationEvidenceConsistencyMinimum;
         // 首个换向帧只允许有界命令进入延迟库存，不得把
         // “已确认输出方向”提前改成候选方向。函数末尾使用
         // 该标志区分首个探测脉冲与延迟反馈后确认的换向。
@@ -3377,6 +3400,7 @@ struct Aim::Impl {
         bool reverse_translation_ready_x = false;
         bool reverse_translation_fresh_evidence_x = false;
         bool reverse_position_improvement_reset_x = false;
+        bool reverse_output_translation_bridge_x = false;
         AimReverseTranslationResetReason reverse_translation_reset_reason_x =
             AimReverseTranslationResetReason::NONE;
         if (config.enable_delay_compensation &&
@@ -3417,6 +3441,11 @@ struct Aim::Impl {
                     delayed_command_x *
                             tracking_horizontal_output_direction >
                         0.001f;
+                const bool reverse_probe_active_before_update =
+                    tracking_horizontal_reverse_probe_direction != 0.0f;
+                const bool output_translation_supports_confirmed_direction =
+                    aligned_translation_evidence <=
+                        -kHorizontalTranslationEvidenceConsistencyMinimum;
                 // pending_inventory 只覆盖尚未到达配置延迟的命令；
                 // delayed_command_x 则是本帧预计刚开始产生画面反馈的命令。
                 // 新真机 Run 的 37 次快速探针中有 7 次恰在旧方向命令
@@ -3682,6 +3711,56 @@ struct Aim::Impl {
                         required_position_fallback;
                     diagnostics.reverse_evidence_ready_x = evidence_ready;
                     diagnostics.reverse_position_ready_x = position_ready;
+                    const float output_bridge_position_ratio_limit =
+                        tracking_horizontal_reverse_deformation_active
+                        ? kTrackingHorizontalReverseEvidenceRoiRatio
+                        : kTrackingHorizontalReverseFallbackRoiRatio;
+                    const bool output_bridge_can_run =
+                        !reverse_probe_active_before_update &&
+                        !evidence_ready &&
+                        !reverse_translation_ready_x &&
+                        !position_ready &&
+                        !partial_semantics_transition &&
+                        normalized_base_error <=
+                            output_bridge_position_ratio_limit &&
+                        output_translation_supports_confirmed_direction;
+                    if (output_bridge_can_run &&
+                        !tracking_horizontal_reverse_output_bridge_consumed) {
+                        if (tracking_horizontal_reverse_output_bridge_started_at ==
+                            std::chrono::steady_clock::time_point{}) {
+                            tracking_horizontal_reverse_output_bridge_started_at =
+                                current_controller_at;
+                        }
+                        const float bridge_age_seconds = static_cast<float>(
+                            std::chrono::duration<double>(
+                                current_controller_at -
+                                tracking_horizontal_reverse_output_bridge_started_at)
+                                .count());
+                        // 最小桥接不能让真正的反向位置兜底失去活性。预算
+                        // 不超过两个反馈窗，并进一步限制为“当前归一化反侧
+                        // 误差按既有位置门理论所需的累计时间”。偏差越大，
+                        // 桥接越早让位；接近中心的真机假反向可获得更完整的
+                        // 连续性。全程不读取人物速度或游戏类型。
+                        const float output_bridge_budget_seconds = std::min(
+                            config.control_delay_ms / 1000.0f *
+                                kTrackingHorizontalReverseProbeCommitWindows,
+                            required_position_fallback /
+                                std::max(1.0e-6f, normalized_base_error));
+                        if (bridge_age_seconds <
+                            output_bridge_budget_seconds) {
+                            reverse_output_translation_bridge_x = true;
+                        } else {
+                            tracking_horizontal_reverse_output_bridge_started_at =
+                                {};
+                            tracking_horizontal_reverse_output_bridge_consumed =
+                                true;
+                        }
+                    } else if (
+                        tracking_horizontal_reverse_output_bridge_started_at !=
+                        std::chrono::steady_clock::time_point{}) {
+                        tracking_horizontal_reverse_output_bridge_started_at = {};
+                        tracking_horizontal_reverse_output_bridge_consumed = true;
+                    }
                     if (tracking_horizontal_reverse_probe_direction ==
                         desired_direction_x) {
                         const float probe_age_seconds =
@@ -3777,6 +3856,8 @@ struct Aim::Impl {
                     }
                 }
             } else {
+                tracking_horizontal_reverse_output_bridge_started_at = {};
+                tracking_horizontal_reverse_output_bridge_consumed = false;
                 tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
                 tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
                 tracking_horizontal_reverse_position_peak_error = 0.0f;
@@ -3805,6 +3886,19 @@ struct Aim::Impl {
                 reverse_translation_reset_reason_x =
                     AimReverseTranslationResetReason::CANDIDATE_INACTIVE;
             }
+        }
+        if (diagnostics.reverse_gate_blocked_x &&
+            reverse_output_translation_bridge_x) {
+            // 实际 196 次“同向输出—零命令—同向恢复”中有 195 次最终
+            // 恢复原方向，其中 165 次停发主体的共同边事实明确反对候选
+            // 反向、支持既有输出方向。此时继续硬归零会把追踪切成约
+            // 75.5 ms 一段的继电停顿。只在两条框边以既有 0.70 无量纲
+            // 一致性支持原方向时，在上述归一化位置/时间预算内用物理最小
+            // 1 count 桥接；共同边一旦支持真实反向、失去一致性或预算
+            // 到期便立即停发，原反向证据门仍完整保留。
+            desired_x = std::copysign(
+                kTrackingHorizontalReverseFeedbackProbeMaximumCounts,
+                tracking_horizontal_output_direction);
         }
         if (config.enable_delay_compensation &&
             config.control_delay_ms > 0.0f &&
@@ -3955,6 +4049,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_probe_direction = 0.0f;
             tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
             tracking_horizontal_reverse_probe_started_at = {};
+            tracking_horizontal_reverse_output_bridge_started_at = {};
+            tracking_horizontal_reverse_output_bridge_consumed = false;
             controller_at = current_controller_at;
             diagnostics.deadzone_quiet = true;
             diagnostics.filtered_x_counts = filtered_x;
@@ -4059,7 +4155,36 @@ struct Aim::Impl {
                 // 非增长帧仍保留正常误差扩散，低速亚像素响应不会被关闭。
                 residual_x = 0.0f;
             }
+            if (tracking_horizontal_closing_response_growth_guard_x &&
+                previous_command_x * shaped_x > 0.0f &&
+                std::fabs(shaped_x) > std::fabs(previous_command_x)) {
+                // 新真机 Run 的 196 次“同方向输出—停发—原方向恢复”
+                // 中，196 次都在旧方向命令已生效时开始；停发前连续
+                // 输出 P50 约 70.8 ms/74 counts，停发 P50 75.5 ms。
+                // 当两条框边已以既有 0.70 一致性明确朝中心闭合时，
+                // 继续增加同方向命令只会扩大随后越心和硬停发。这里像
+                // 动态 command governor 一样只冻结物理 X 的增长；当前
+                // 幅度可以保持，任何减速立即通过，不估算固定库存响应，
+                // 也不读取人物绝对速度、游戏档位或改变 Y/prediction。
+                shaped_x = previous_command_x;
+                residual_x = 0.0f;
+            }
             clamp_vector(shaped_x, shaped_y, config.max_counts_per_frame);
+        }
+        if (diagnostics.reverse_gate_blocked_x &&
+            reverse_output_translation_bridge_x) {
+            // 桥接只改 X；若 Y 已占满二维上限，按剩余向量预算缩小桥接，
+            // 不压低或重整 Y 的既有输出。
+            const float remaining_x = std::sqrt(std::max(
+                0.0f,
+                config.max_counts_per_frame * config.max_counts_per_frame -
+                    shaped_y * shaped_y));
+            shaped_x = std::copysign(
+                std::min(
+                    kTrackingHorizontalReverseFeedbackProbeMaximumCounts,
+                    remaining_x),
+                tracking_horizontal_output_direction);
+            residual_x = 0.0f;
         }
         if (reverse_release_probe_x) {
             // 探测仍经过比例、平滑、方向和 slew 全链路，这里只对最终
@@ -4212,6 +4337,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_probe_direction = 0.0f;
             tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
             tracking_horizontal_reverse_probe_started_at = {};
+            tracking_horizontal_reverse_output_bridge_started_at = {};
+            tracking_horizontal_reverse_output_bridge_consumed = false;
         } else if (command.dx_counts != 0 && reverse_release_probe_x) {
             const float command_direction = std::copysign(
                 1.0f, static_cast<float>(command.dx_counts));
@@ -4224,6 +4351,12 @@ struct Aim::Impl {
                 tracking_horizontal_reverse_probe_started_at =
                     current_controller_at;
             }
+        } else if (command.dx_counts != 0 &&
+                   reverse_output_translation_bridge_x) {
+            // 这条 1-count 命令只是已确认方向的有界连续层，不是一次
+            // 新方向提交。保留当前反向候选、位置面积和一次性桥接预算，
+            // 否则公共“非零命令即提交”路径会每帧重置预算并永久饿死
+            // 真正反向。
         } else if (command.dx_counts != 0) {
             tracking_horizontal_output_direction = std::copysign(
                 1.0f, static_cast<float>(command.dx_counts));
@@ -4237,6 +4370,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_probe_direction = 0.0f;
             tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
             tracking_horizontal_reverse_probe_started_at = {};
+            tracking_horizontal_reverse_output_bridge_started_at = {};
+            tracking_horizontal_reverse_output_bridge_consumed = false;
         }
         diagnostics.reverse_probe_direction_x =
             tracking_horizontal_reverse_probe_direction;

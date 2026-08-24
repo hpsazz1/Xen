@@ -3097,6 +3097,144 @@ void test_delayed_closed_loop_holds_moving_base_point() {
                std::to_string(maximum_no_command));
 }
 
+void test_tracking_closing_response_does_not_keep_growing_command() {
+    constexpr float kFrameSeconds = 1.0f / 240.0f;
+    constexpr int kActuationDelayFrames = 4;
+    constexpr float kCameraResponse = 0.20f;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 14.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    Aim aim(config);
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> delayed_commands{};
+    float world_target_x = 20.0f;
+    float camera_x = 0.0f;
+    int previous_command_x = 0;
+    int closing_response_frames = 0;
+    int closing_response_growth_frames = 0;
+    int output_translation_bridge_frames = 0;
+    int same_direction_stop_go_episodes = 0;
+    int active_zero_frames = 0;
+    int zero_previous_sign = 0;
+    int maximum_same_direction_zero_frames = 0;
+    std::vector<float> measured_errors;
+
+    for (int index = 0; index < 1200; ++index) {
+        camera_x += delayed_commands[index % kActuationDelayFrames] /
+            config.counts_per_pixel_x * kCameraResponse;
+        delayed_commands[index % kActuationDelayFrames] = 0;
+        // 真机顿挫段的共同边低频世界运动约为每帧 0.6 ROI px；不在
+        // 产品代码中判断该速度，这里只用它和真实 240 Hz/15 ms/
+        // 0.20 响应复现“70 ms 加码—越心停发—原方向恢复”的闭环。
+        world_target_x += 150.0f * kFrameSeconds;
+        const float observed_error = world_target_x - camera_x;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index) * 4167));
+        frame.control_at =
+            frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body_box(
+            160.0f + observed_error, 160.0f, 42.0f, 90.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "闭合响应 governor 回归必须逐帧保留确认目标");
+        if (!result.has_target) continue;
+        const int command_x = result.has_command
+            ? result.command.dx_counts : 0;
+        if (result.has_command) {
+            delayed_commands[index % kActuationDelayFrames] = command_x;
+        }
+
+        if (index >= 240) {
+            const float output_direction =
+                result.control.reverse_output_direction_x;
+            const float base_error_x =
+                result.target.base_aim_x - frame.control_center_x;
+            const bool observed_closing_response =
+                output_direction != 0.0f &&
+                previous_command_x * output_direction > 0.0f &&
+                result.control.delayed_command_x_counts *
+                        output_direction > 0.001f &&
+                base_error_x * output_direction > 0.0f &&
+                result.control.desired_before_reverse_x_counts *
+                        output_direction > 0.0f &&
+                result.control.reverse_translation_control_evidence_x *
+                        output_direction <= -0.70f;
+            if (observed_closing_response) {
+                ++closing_response_frames;
+                if (command_x * previous_command_x > 0 &&
+                    std::abs(command_x) > std::abs(previous_command_x)) {
+                    ++closing_response_growth_frames;
+                }
+            }
+            if (result.control.reverse_gate_blocked_x &&
+                command_x != 0 &&
+                std::abs(command_x) == 1 &&
+                command_x * result.control.reverse_output_direction_x >
+                    0.0f &&
+                result.control.reverse_translation_control_evidence_x *
+                        result.control.reverse_output_direction_x >= 0.70f) {
+                ++output_translation_bridge_frames;
+            }
+
+            if (command_x == 0) {
+                if (active_zero_frames == 0) {
+                    zero_previous_sign = previous_command_x < 0 ? -1 :
+                        (previous_command_x > 0 ? 1 : 0);
+                }
+                ++active_zero_frames;
+            } else if (active_zero_frames > 0) {
+                const int current_sign = command_x < 0 ? -1 : 1;
+                if (zero_previous_sign != 0 &&
+                    current_sign == zero_previous_sign) {
+                    ++same_direction_stop_go_episodes;
+                    maximum_same_direction_zero_frames = std::max(
+                        maximum_same_direction_zero_frames,
+                        active_zero_frames);
+                }
+                active_zero_frames = 0;
+                zero_previous_sign = 0;
+            }
+            measured_errors.push_back(
+                std::fabs(world_target_x - camera_x));
+        }
+        previous_command_x = command_x;
+    }
+
+    std::sort(measured_errors.begin(), measured_errors.end());
+    const float error_p95 = measured_errors[
+        static_cast<std::size_t>(measured_errors.size() * 0.95f)];
+    expect(closing_response_frames > 0 &&
+               closing_response_growth_frames == 0 &&
+               output_translation_bridge_frames > 0 &&
+               maximum_same_direction_zero_frames <= 2 &&
+               error_p95 < 2.0f,
+           "旧方向命令已生效且可信共同边正朝中心闭合时，tracking X "
+           "只能保持或减小当前物理命令；候选反向门停发后，共同边重新"
+           "支持原方向时必须以有界 1 count 桥接且不饿死真实反向；"
+           "闭合帧/增长帧/桥接帧/同向停发恢复/最长停发/误差P95=" +
+               std::to_string(closing_response_frames) + "/" +
+               std::to_string(closing_response_growth_frames) + "/" +
+               std::to_string(output_translation_bridge_frames) + "/" +
+               std::to_string(same_direction_stop_go_episodes) + "/" +
+               std::to_string(maximum_same_direction_zero_frames) + "/" +
+               std::to_string(error_p95));
+}
+
 void test_delayed_pose_closed_loop_keeps_tracking_observer_continuous() {
     constexpr float kFrameSeconds = 1.0f / 240.0f;
     constexpr int kActuationDelayFrames = 4;
@@ -9736,6 +9874,7 @@ int main() {
     test_control_trajectory_never_moves_away_from_target();
     test_integral_tracks_constant_velocity_with_bounded_error();
     test_delayed_closed_loop_holds_moving_base_point();
+    test_tracking_closing_response_does_not_keep_growing_command();
     test_delayed_pose_closed_loop_keeps_tracking_observer_continuous();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
