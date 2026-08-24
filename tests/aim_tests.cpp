@@ -4516,7 +4516,7 @@ void test_tracking_reverse_robust_common_translation_survives_edge_noise() {
                std::to_string(normal.position_ready));
 }
 
-void test_tracking_reverse_translation_dwell_bridges_one_weak_observation() {
+void test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget() {
     struct Trace {
         int first_negative_offset = -1;
         int pending_frames = 0;
@@ -4524,7 +4524,9 @@ void test_tracking_reverse_translation_dwell_bridges_one_weak_observation() {
         float dwell_before_gap_ms = 0.0f;
         float dwell_during_first_gap_ms = 0.0f;
         bool first_gap_preserved = false;
-        bool second_gap_reset = false;
+        int preserved_weak_observations = 0;
+        bool budget_exhausted_reset = false;
+        bool released_during_weak_observation = false;
         bool translation_ready = false;
         bool position_ready = false;
         bool probe_limited = false;
@@ -4534,7 +4536,7 @@ void test_tracking_reverse_translation_dwell_bridges_one_weak_observation() {
     const auto run_case = [&]
         (float roi_scale,
          const std::array<int, 3>& cadence_microseconds,
-         int weak_observation_count) {
+         const std::vector<bool>& weak_pattern) {
         AimConfig config;
         config.min_confirmed_hits = 1;
         config.deadzone_pixels = 0.0f;
@@ -4573,9 +4575,10 @@ void test_tracking_reverse_translation_dwell_bridges_one_weak_observation() {
         const std::uint64_t track_id = established.target.track_id;
 
         long long elapsed_microseconds = 0;
-        int weak_observations_remaining = 0;
+        std::size_t weak_pattern_index = 0;
         int weak_observation_index = 0;
         bool gap_scheduled = false;
+        bool gap_pattern_active = false;
         float previous_dwell_seconds = 0.0f;
         for (int offset = 0; offset < 28; ++offset) {
             const int cadence = cadence_microseconds[
@@ -4593,13 +4596,14 @@ void test_tracking_reverse_translation_dwell_bridges_one_weak_observation() {
             frame.lock_active = true;
 
             center_x -= roi_width * 0.003125f;
-            const bool weak_observation = weak_observations_remaining > 0;
+            const bool gap_pattern_frame = gap_pattern_active;
+            const bool weak_observation =
+                gap_pattern_frame && weak_pattern[weak_pattern_index];
             if (weak_observation) {
                 // 中心继续沿候选方向移动，但宽度同时增加 0.375% ROI：
                 // 两条边仍同向，逐帧和三点中值一致性都低于 0.70。
                 // 这模拟真机中 3～5 ms 的单观测轮廓空洞，不是静止或反转。
                 box_width += roi_width * 0.00375f;
-                --weak_observations_remaining;
                 ++weak_observation_index;
             }
             frame.detections = {body_box(
@@ -4625,17 +4629,34 @@ void test_tracking_reverse_translation_dwell_bridges_one_weak_observation() {
                         result.control.reverse_translation_seconds_x -
                         previous_dwell_seconds) < 0.000001f;
             }
-            if (weak_observation && weak_observation_index == 2) {
-                trace.second_gap_reset =
-                    result.control.reverse_translation_seconds_x == 0.0f &&
-                    !result.control.reverse_translation_ready_x;
+            if (weak_observation && previous_dwell_seconds > 0.0f &&
+                std::fabs(
+                    result.control.reverse_translation_seconds_x -
+                    previous_dwell_seconds) < 0.000001f) {
+                ++trace.preserved_weak_observations;
+            }
+            if (weak_observation && previous_dwell_seconds > 0.0f &&
+                result.control.reverse_translation_seconds_x == 0.0f) {
+                trace.budget_exhausted_reset = true;
+            }
+            if (weak_observation &&
+                (result.control.reverse_translation_ready_x ||
+                 result.command.dx_counts < 0)) {
+                trace.released_during_weak_observation = true;
             }
             if (!gap_scheduled &&
                 !result.control.reverse_previous_direction_pending_x &&
                 result.control.reverse_translation_seconds_x > 0.0f &&
                 !result.control.reverse_translation_ready_x) {
-                weak_observations_remaining = weak_observation_count;
                 gap_scheduled = true;
+                gap_pattern_active = true;
+                weak_pattern_index = 0;
+            }
+            if (gap_pattern_frame) {
+                ++weak_pattern_index;
+                if (weak_pattern_index >= weak_pattern.size()) {
+                    gap_pattern_active = false;
+                }
             }
             previous_dwell_seconds =
                 result.control.reverse_translation_seconds_x;
@@ -4655,30 +4676,45 @@ void test_tracking_reverse_translation_dwell_bridges_one_weak_observation() {
 
     const std::array<int, 3> steady{4167, 4167, 4167};
     const std::array<int, 3> jittered{3000, 5000, 4500};
-    const Trace one_normal = run_case(1.0f, steady, 1);
-    const Trace one_doubled = run_case(2.0f, jittered, 1);
-    const Trace two_normal = run_case(1.0f, steady, 2);
-    const auto one_gap_valid = [](const Trace& trace) {
+    const std::vector<bool> within_budget{true, true, true};
+    const std::vector<bool> exceeds_budget{true, true, true, true};
+    const std::vector<bool> split_exceeds_budget{
+        true, true, false, true, true};
+    const Trace normal = run_case(1.0f, steady, within_budget);
+    const Trace doubled = run_case(2.0f, jittered, within_budget);
+    const Trace exhausted = run_case(1.0f, steady, exceeds_budget);
+    const Trace split_exhausted =
+        run_case(1.0f, steady, split_exceeds_budget);
+    const auto within_budget_valid = [](const Trace& trace) {
         return trace.identity_changes == 0 &&
             trace.pending_frames > 0 &&
             trace.first_gap_preserved &&
+            trace.preserved_weak_observations == 3 &&
+            !trace.budget_exhausted_reset &&
+            !trace.released_during_weak_observation &&
             trace.first_negative_offset >= 5 &&
             trace.first_negative_offset < 20 &&
             trace.translation_ready &&
             !trace.position_ready &&
             trace.probe_limited;
     };
-    expect(one_gap_valid(one_normal) && one_gap_valid(one_doubled) &&
-               two_normal.first_gap_preserved &&
-               two_normal.second_gap_reset,
-           "连续共同平移必须只桥接一个同向弱观测且不累计空洞 dt；连续"
-           "第二个弱观测必须清零，320/640 ROI 与 3～5 ms 节奏同构；首负/"
-           "空洞前后驻留/双空洞清零=" +
-               std::to_string(one_normal.first_negative_offset) + "/" +
-               std::to_string(one_doubled.first_negative_offset) + "/" +
-               std::to_string(one_normal.dwell_before_gap_ms) + "/" +
-               std::to_string(one_normal.dwell_during_first_gap_ms) + "/" +
-               std::to_string(two_normal.second_gap_reset));
+    expect(within_budget_valid(normal) && within_budget_valid(doubled) &&
+               exhausted.first_gap_preserved &&
+               exhausted.budget_exhausted_reset &&
+               !exhausted.released_during_weak_observation &&
+               split_exhausted.first_gap_preserved &&
+               split_exhausted.budget_exhausted_reset &&
+               !split_exhausted.released_during_weak_observation,
+           "连续共同平移必须按反馈窗累计同向弱证据预算且不累计弱帧 dt；"
+           "预算内三帧应保持驻留并只在新强证据帧放行，累计弱时间达到 15 ms"
+           "必须清零，中间强帧不得刷新预算；320/640 ROI 与 3～5 ms 节奏"
+           "同构；首负/空洞前后驻留/连续与分段预算清零=" +
+               std::to_string(normal.first_negative_offset) + "/" +
+               std::to_string(doubled.first_negative_offset) + "/" +
+               std::to_string(normal.dwell_before_gap_ms) + "/" +
+               std::to_string(normal.dwell_during_first_gap_ms) + "/" +
+               std::to_string(exhausted.budget_exhausted_reset) + "/" +
+               std::to_string(split_exhausted.budget_exhausted_reset));
 }
 
 void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
@@ -9202,7 +9238,7 @@ int main() {
     test_tracking_reverse_requires_base_and_common_edge_direction();
     test_tracking_reverse_consecutive_common_translation_releases();
     test_tracking_reverse_robust_common_translation_survives_edge_noise();
-    test_tracking_reverse_translation_dwell_bridges_one_weak_observation();
+    test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget();
     test_tracking_reverse_position_fallback_releases_after_old_inventory();
     test_tracking_reverse_position_fallback_resets_while_error_improves();
     test_tracking_reverse_feedback_probe_uses_minimum_count();
