@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot "aim_report.ps1")
+. (Join-Path $PSScriptRoot "aim_control_diagnostics.ps1")
 
 function Assert-Condition([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -63,4 +64,73 @@ $invalid = Get-XenAimReportSummary -Samples @($sample) `
 Assert-Condition (-not [bool]$invalid.contract_valid) `
     "Legacy delay horizon must equal the maximum per-axis horizon."
 
-Write-Host "Aim report delay-compensation contract tests passed."
+function New-ControlDiagnosticSample(
+        [uint64]$Sequence,
+        [int]$CommandX,
+        [string]$ZeroReason) {
+    $sample = New-AimSample
+    $sample.sequence = $Sequence
+    $sample.aim_control_center_x = 160.0
+    $sample.source_pixels_per_pixel_x = 1.0
+    $sample.aim_final_point = @(172.0, 140.0)
+    $sample.aim_command = @($CommandX, 0)
+    $sample.aim_control_evaluated = $true
+    $sample.aim_controller_dt_ms = 4.167
+    $sample.aim_desired_x_counts = if ($CommandX -eq 0) { -2.0 } else {
+        [double]$CommandX
+    }
+    $sample.aim_pending_absolute_x_counts = 3.0
+    $sample.aim_reverse_candidate_x = $false
+    $sample.aim_reverse_previous_direction_pending_x = $false
+    $sample.aim_reverse_deformation_active_x = $false
+    $sample.aim_reverse_evidence_ratio_seconds_x = 0.0
+    $sample.aim_reverse_position_ratio_seconds_x = 0.0
+    $sample.aim_reverse_required_evidence_ratio_seconds_x = 0.00042
+    $sample.aim_reverse_required_position_ratio_seconds_x = 0.0015
+    $sample.aim_reverse_evidence_ready_x = $false
+    $sample.aim_reverse_position_ready_x = $false
+    $sample.aim_reverse_gate_blocked_x =
+        $ZeroReason -eq "reverse_gate"
+    $sample.aim_pending_inventory_hold_blocked_x =
+        $ZeroReason -eq "pending_inventory_hold"
+    $sample.aim_deadzone_quiet = $ZeroReason -eq "deadzone_quiet"
+    $sample.aim_shaper_direction_reset_x =
+        $ZeroReason -eq "shaper_direction_reset"
+    $sample.aim_post_alignment_sign_change_blocked_x =
+        $ZeroReason -eq "post_alignment_sign_change"
+    $sample.aim_post_alignment_growth_limited_x = $false
+    $sample.aim_integer_direction_blocked_x =
+        $ZeroReason -eq "integer_direction"
+    $sample.aim_command_sign_change_blocked_x =
+        $ZeroReason -eq "command_sign_change"
+    $sample.aim_quantization_zero_x = $ZeroReason -eq "quantization"
+    return $sample
+}
+
+$controlSamples = @(
+    (New-ControlDiagnosticSample 1 2 ""),
+    (New-ControlDiagnosticSample 2 0 "reverse_gate"),
+    (New-ControlDiagnosticSample 3 0 "pending_inventory_hold"),
+    (New-ControlDiagnosticSample 4 -1 ""),
+    (New-ControlDiagnosticSample 5 0 "shaper_direction_reset"),
+    (New-ControlDiagnosticSample 6 0 "quantization"),
+    (New-ControlDiagnosticSample 7 1 ""))
+$controlSummary = Get-XenAimControlDiagnosticsSummary $controlSamples
+Assert-Condition ($controlSummary.controllable_frames -eq 7 -and
+        $controlSummary.x.command_zero_frames -eq 4 -and
+        $controlSummary.x.stopped_final_error_over_hold_band_pixels -eq 4 -and
+        $controlSummary.x.stopped_final_error_over_10_pixels -eq 4) `
+    "Control diagnostics must summarize eligible zero-output frames."
+Assert-Condition ($controlSummary.x.zero_primary_causes.reverse_gate -eq 1 -and
+        $controlSummary.x.zero_primary_causes.pending_inventory_hold -eq 1 -and
+        $controlSummary.x.zero_primary_causes.shaper_direction_reset -eq 1 -and
+        $controlSummary.x.zero_primary_causes.quantization -eq 1) `
+    "Control diagnostics must classify every zero-output frame once."
+Assert-Condition ($controlSummary.x.nonzero_direction_reversals -eq 2 -and
+        $controlSummary.x.reversal_zero_frames.p50 -eq 2 -and
+        $controlSummary.x.reversal_window_dominant_causes.reverse_gate -eq 1 -and
+        $controlSummary.x.reversal_window_dominant_causes.shaper_direction_reset `
+            -eq 1) `
+    "Control diagnostics must summarize reversal zero-window causes."
+
+Write-Host "Aim report and control-diagnostics tests passed."
