@@ -327,9 +327,12 @@ constexpr float kTrackingHorizontalReverseFallbackRoiRatio = 0.10f;
 constexpr float kTrackingHorizontalReverseDeformationFallbackScale = 3.0f;
 // 真机诊断表明，形变反向门放行后若在同一个反馈窗内继续
 // 递增新方向命令，会把硬停后累积的大误差转成未观测响应的追赶
-// 脉冲。换向确认窗内的命令因此上限为 3 counts；只有首帧退出延迟库存且
-// 候选依然成立，才确认新输出方向。
+// 脉冲。快速共同边/CUSUM 通道仍在一个反馈窗后确认；只有最终活性保证的
+// 纯位置兜底连续两个反馈窗都限制到最多 3 counts，等待首窗整批探测库存
+// 进入画面后再确认新输出方向。这里按已有控制时域定义，
+// 不读取人物速度、框宽或游戏类型。
 constexpr float kTrackingHorizontalReverseProbeMaximumCounts = 3.0f;
+constexpr float kTrackingHorizontalReverseProbeCommitWindows = 2.0f;
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
            std::isfinite(detection.x2) && std::isfinite(detection.y2) &&
@@ -3556,6 +3559,20 @@ struct Aim::Impl {
                             // 首个反馈窗内最多允许持续 3 counts，但不递增。
                             // 相比原有 1、2、3、4… 的未反馈追赶，这保留真实
                             // 反向的最低活性，同时把形变假反向脉冲限在平坦边界层。
+                            reverse_release_probe_x = true;
+                        } else if (!evidence_ready &&
+                                   !reverse_translation_ready_x &&
+                                   position_ready &&
+                                   probe_age_seconds <
+                                       feedback_window_seconds *
+                                           kTrackingHorizontalReverseProbeCommitWindows) {
+                            // 第一个窗口末尾只能看到最早探测命令的反馈，后续
+                            // 1/2/3-count 库存仍未完整进入画面。真实 Run 的
+                            // 13 次探测中有 8 次只由位置兜底放行；其中 7 次在
+                            // 原确认点仍没有独立共同边/CUSUM 事实。第二个窗口
+                            // 继续保持同一 3-count 平坦边界层，不再按 4/5/6...
+                            // 递增；任一快速通道后来成立即可立即确认，候选消失、
+                            // partial 重建或方向变化仍沿原状态机取消。
                             reverse_release_probe_x = true;
                         }
                     } else if (!evidence_ready &&

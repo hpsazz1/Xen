@@ -4281,6 +4281,7 @@ void test_tracking_reverse_consecutive_common_translation_releases() {
 
     int pending_frames = 0;
     int first_negative_offset = -1;
+    int first_committed_negative_offset = -1;
     int translation_reset_offset = -1;
     bool first_negative_translation_ready = false;
     bool first_negative_position_ready = false;
@@ -4349,6 +4350,12 @@ void test_tracking_reverse_consecutive_common_translation_releases() {
                 std::to_string(
                     result.control.reverse_position_ratio_seconds_x);
         }
+        if (first_committed_negative_offset < 0 &&
+            result.control.reverse_output_direction_x < 0.0f &&
+            result.command.dx_counts < 0 &&
+            !result.control.reverse_probe_active_x) {
+            first_committed_negative_offset = offset;
+        }
     }
 
     expect(pending_frames > 0 &&
@@ -4360,6 +4367,8 @@ void test_tracking_reverse_consecutive_common_translation_releases() {
                first_negative_translation_ready &&
                !first_negative_position_ready &&
                first_negative_probe_limited &&
+               first_committed_negative_offset > first_negative_offset &&
+               first_committed_negative_offset <= first_negative_offset + 5 &&
                first_negative_translation_ms >= 15.0f,
            "旧方向库存退出后，候选方向共同边连续覆盖一个反馈窗应先于"
            "30% 位置门进入有界确认；库存帧/驻留清零/首负/平移就绪/"
@@ -4370,6 +4379,7 @@ void test_tracking_reverse_consecutive_common_translation_releases() {
                std::to_string(first_negative_translation_ready) + "/" +
                std::to_string(first_negative_position_ready) + "/" +
                std::to_string(first_negative_probe_limited) + "/" +
+               std::to_string(first_committed_negative_offset) + "/" +
                first_context);
 }
 
@@ -4379,6 +4389,8 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
         int first_negative_command_magnitude = 0;
         int maximum_probe_command_magnitude = 0;
         int first_committed_negative_offset = -1;
+        int second_probe_window_frames = 0;
+        int second_probe_window_maximum_command = 0;
         int release_y_command = 0;
         int identity_changes = 0;
         int reverse_gate_blocked_frames = 0;
@@ -4437,9 +4449,10 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
         // 全程保持不动；旧方向库存退出后，宽高持续增大，逐帧刷新
         // 形变保护。这个静态剩余误差不会触发
         // “误差回落”清零，专门证明条件积分仍保留最终活性。形变态须
-        // 等待 15 ms episode，并从新鲜
-        // 的 30% ROI×反馈窗面积有界放行；320/640 构造完全同构，不依赖
-        // 像素速度或当前框宽档位。
+        // 等待 15 ms episode，并从新鲜的 30% ROI×反馈窗面积有界放行。
+        // 该纯位置兜底先经过一窗有界探测，再用第二个反馈窗保持同一
+        // 3-count 上限；若没有独立共同边/CUSUM 事实，不能立刻递增完整命令。
+        // 320/640 构造完全同构，不依赖像素速度或当前框宽档位。
         long long elapsed_microseconds = 0;
         for (int offset = 0; offset < 32; ++offset) {
             elapsed_microseconds += cadence_microseconds[
@@ -4480,6 +4493,15 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
             if (result.control.reverse_probe_limited_x) {
                 trace.maximum_probe_command_magnitude = std::max(
                     trace.maximum_probe_command_magnitude,
+                    std::abs(result.command.dx_counts));
+            }
+            if (result.control.reverse_probe_active_x &&
+                result.control.reverse_probe_limited_x &&
+                result.control.reverse_probe_age_ms_x >=
+                    config.control_delay_ms) {
+                ++trace.second_probe_window_frames;
+                trace.second_probe_window_maximum_command = std::max(
+                    trace.second_probe_window_maximum_command,
                     std::abs(result.command.dx_counts));
             }
             if (trace.first_committed_negative_offset < 0 &&
@@ -4539,7 +4561,12 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
             trace.first_committed_negative_offset >
                 trace.first_negative_command_offset &&
             trace.first_committed_negative_offset <=
-                trace.first_negative_command_offset + 8 &&
+                trace.first_negative_command_offset + 11 &&
+            trace.first_committed_negative_offset >=
+                trace.first_negative_command_offset + 6 &&
+            trace.second_probe_window_frames >= 2 &&
+            trace.second_probe_window_maximum_command > 0 &&
+            trace.second_probe_window_maximum_command <= 3 &&
             trace.release_y_command < 0 &&
             trace.reverse_gate_blocked_frames > 0 &&
             trace.previous_direction_pending_frames > 0 &&
@@ -4570,6 +4597,9 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
                "，探测峰值/确认偏移=" +
                std::to_string(normal.maximum_probe_command_magnitude) + "/" +
                std::to_string(normal.first_committed_negative_offset) +
+               "，第二探测窗帧/峰值=" +
+               std::to_string(normal.second_probe_window_frames) + "/" +
+               std::to_string(normal.second_probe_window_maximum_command) +
                "，首例=" + normal.first_negative_context);
 }
 
