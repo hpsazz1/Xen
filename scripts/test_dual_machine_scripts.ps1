@@ -135,6 +135,10 @@ Assert-True ($aimDeltaText -match '\$toolSpecs\s*=\s*@\(' -and
         '\$manifest\.git_commit\s*=\s*\$commit\.ToLowerInvariant\(\)' -and
     $aimDeltaText -match 'Copy-Atomic\s+\$manifestPath\s+\$remoteManifest') `
     "Aim 差量入口必须把完整报告工具闭包、manifest 和发布提交作为同一差量同步。"
+Assert-True (([regex]::Matches(
+        $aimDeltaText,
+        '\$records\s*=\s*@\(@\(\$(?:manifest|finalManifest)\.files\)\s*\|\s*Where-Object')).Count -eq 2) `
+    "Aim 差量入口的单项 manifest 查询必须保持显式数组，不能在严格模式下退化为标量。"
 
 $aimManualText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/invoke_aim_manual_acceptance.ps1"))

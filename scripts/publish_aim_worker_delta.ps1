@@ -259,9 +259,9 @@ foreach ($spec in $toolSpecs) {
     $relativeWindows = ([string]$spec.relative).Replace('/', '\')
     $packagePath = Join-Path $packageRoot $relativeWindows
     $remotePath = Join-Path $destinationRoot $relativeWindows
-    $records = @($manifest.files) | Where-Object {
+    $records = @(@($manifest.files) | Where-Object {
         [string]$_.path -eq [string]$spec.relative
-    }
+    })
     if ($records.Count -gt 1) {
         throw "manifest 中 Aim 报告工具记录重复：$($spec.relative)"
     }
@@ -368,9 +368,9 @@ if ($Prepare) {
 $finalManifest = Read-Json $manifestPath "最终固定包 manifest"
 $finalToolEvidence = [ordered]@{}
 foreach ($spec in $toolSpecs) {
-    $records = @($finalManifest.files) | Where-Object {
+    $records = @(@($finalManifest.files) | Where-Object {
         [string]$_.path -eq [string]$spec.relative
-    }
+    })
     if ($records.Count -ne 1) {
         throw "最终 manifest 中 Aim 报告工具记录不是唯一项：$($spec.relative)"
     }
