@@ -807,10 +807,36 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "aim_velocity_x,aim_velocity_y,aim_lead_x,aim_lead_y,"
                "aim_delay_compensation_x,aim_delay_compensation_y,"
                "aim_delay_compensation_ms_x,aim_delay_compensation_ms_y,"
-               "aim_delay_compensation_ms,aim_observation_age_ms,"
-               "aim_command_dx_counts,"
-               "aim_command_dy_counts,"
-               "person_detection_count,head_detection_count,"
+                "aim_delay_compensation_ms,aim_observation_age_ms,"
+                "aim_command_dx_counts,"
+                "aim_command_dy_counts,"
+                "aim_control_evaluated,aim_controller_dt_ms,"
+                "aim_proportional_x_counts,aim_feedforward_x_counts,"
+                "aim_desired_before_reverse_x_counts,aim_desired_x_counts,"
+                "aim_filtered_x_counts,aim_shaped_x_counts,"
+                "aim_residual_before_quantization_x_counts,"
+                "aim_delayed_command_x_counts,aim_pending_net_x_counts,"
+                "aim_pending_absolute_x_counts,aim_pending_positive_x,"
+                "aim_pending_negative_x,aim_reverse_output_direction_x,"
+                "aim_reverse_candidate_x,"
+                "aim_reverse_previous_direction_pending_x,"
+                "aim_reverse_partial_semantics_transition_x,"
+                "aim_reverse_deformation_active_x,"
+                "aim_reverse_evidence_ratio_seconds_x,"
+                "aim_reverse_position_ratio_seconds_x,"
+                "aim_reverse_deformation_seconds_x,"
+                "aim_reverse_required_evidence_ratio_seconds_x,"
+                "aim_reverse_required_position_ratio_seconds_x,"
+                "aim_reverse_evidence_ready_x,aim_reverse_position_ready_x,"
+                "aim_reverse_gate_blocked_x,"
+                "aim_pending_inventory_hold_blocked_x,aim_deadzone_quiet,"
+                "aim_shaper_direction_reset_x,"
+                "aim_post_alignment_sign_change_blocked_x,"
+                "aim_post_alignment_growth_limited_x,"
+                "aim_integer_direction_blocked_x,"
+                "aim_command_sign_change_blocked_x,"
+                "aim_quantization_zero_x,"
+                "person_detection_count,head_detection_count,"
                "max_person_confidence,max_head_confidence,"
                "detection_count_by_class,max_confidence_by_class,"
                "explicit_device_copy,gpu_preprocess,d3d11_cuda_interop,"
@@ -901,6 +927,55 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.aim_target.observation_age_ms << ','
                 << sample.aim_command.dx_counts << ','
                 << sample.aim_command.dy_counts << ','
+                << bool_name(sample.aim_control.evaluated) << ','
+                << sample.aim_control.controller_dt_ms << ','
+                << sample.aim_control.proportional_x_counts << ','
+                << sample.aim_control.feedforward_x_counts << ','
+                << sample.aim_control.desired_before_reverse_x_counts << ','
+                << sample.aim_control.desired_x_counts << ','
+                << sample.aim_control.filtered_x_counts << ','
+                << sample.aim_control.shaped_x_counts << ','
+                << sample.aim_control.residual_before_quantization_x_counts
+                << ','
+                << sample.aim_control.delayed_command_x_counts << ','
+                << sample.aim_control.pending_net_x_counts << ','
+                << sample.aim_control.pending_absolute_x_counts << ','
+                << bool_name(sample.aim_control.pending_positive_x) << ','
+                << bool_name(sample.aim_control.pending_negative_x) << ','
+                << sample.aim_control.reverse_output_direction_x << ','
+                << bool_name(sample.aim_control.reverse_candidate_x) << ','
+                << bool_name(
+                    sample.aim_control.reverse_previous_direction_pending_x)
+                << ','
+                << bool_name(
+                    sample.aim_control.reverse_partial_semantics_transition_x)
+                << ','
+                << bool_name(
+                    sample.aim_control.reverse_deformation_active_x) << ','
+                << sample.aim_control.reverse_evidence_ratio_seconds_x << ','
+                << sample.aim_control.reverse_position_ratio_seconds_x << ','
+                << sample.aim_control.reverse_deformation_seconds_x << ','
+                << sample.aim_control
+                    .reverse_required_evidence_ratio_seconds_x << ','
+                << sample.aim_control
+                    .reverse_required_position_ratio_seconds_x << ','
+                << bool_name(sample.aim_control.reverse_evidence_ready_x) << ','
+                << bool_name(sample.aim_control.reverse_position_ready_x) << ','
+                << bool_name(sample.aim_control.reverse_gate_blocked_x) << ','
+                << bool_name(
+                    sample.aim_control.pending_inventory_hold_blocked_x) << ','
+                << bool_name(sample.aim_control.deadzone_quiet) << ','
+                << bool_name(sample.aim_control.shaper_direction_reset_x) << ','
+                << bool_name(
+                    sample.aim_control.post_alignment_sign_change_blocked_x)
+                << ','
+                << bool_name(
+                    sample.aim_control.post_alignment_growth_limited_x) << ','
+                << bool_name(sample.aim_control.integer_direction_blocked_x)
+                << ','
+                << bool_name(
+                    sample.aim_control.command_sign_change_blocked_x) << ','
+                << bool_name(sample.aim_control.quantization_zero_x) << ','
                 << sample.person_detection_count << ','
                 << sample.head_detection_count << ','
                 << sample.max_person_confidence << ','
@@ -1153,6 +1228,84 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << ", \"aim_command\": ["
                  << sample.aim_command.dx_counts << ", "
                  << sample.aim_command.dy_counts << ']'
+                 << ", \"aim_control_evaluated\": "
+                 << bool_name(sample.aim_control.evaluated)
+                 << ", \"aim_controller_dt_ms\": "
+                 << sample.aim_control.controller_dt_ms
+                 << ", \"aim_proportional_x_counts\": "
+                 << sample.aim_control.proportional_x_counts
+                 << ", \"aim_feedforward_x_counts\": "
+                 << sample.aim_control.feedforward_x_counts
+                 << ", \"aim_desired_before_reverse_x_counts\": "
+                 << sample.aim_control.desired_before_reverse_x_counts
+                 << ", \"aim_desired_x_counts\": "
+                 << sample.aim_control.desired_x_counts
+                 << ", \"aim_filtered_x_counts\": "
+                 << sample.aim_control.filtered_x_counts
+                 << ", \"aim_shaped_x_counts\": "
+                 << sample.aim_control.shaped_x_counts
+                 << ", \"aim_residual_before_quantization_x_counts\": "
+                 << sample.aim_control.residual_before_quantization_x_counts
+                 << ", \"aim_delayed_command_x_counts\": "
+                 << sample.aim_control.delayed_command_x_counts
+                 << ", \"aim_pending_net_x_counts\": "
+                 << sample.aim_control.pending_net_x_counts
+                 << ", \"aim_pending_absolute_x_counts\": "
+                 << sample.aim_control.pending_absolute_x_counts
+                 << ", \"aim_pending_positive_x\": "
+                 << bool_name(sample.aim_control.pending_positive_x)
+                 << ", \"aim_pending_negative_x\": "
+                 << bool_name(sample.aim_control.pending_negative_x)
+                 << ", \"aim_reverse_output_direction_x\": "
+                 << sample.aim_control.reverse_output_direction_x
+                 << ", \"aim_reverse_candidate_x\": "
+                 << bool_name(sample.aim_control.reverse_candidate_x)
+                 << ", \"aim_reverse_previous_direction_pending_x\": "
+                 << bool_name(sample.aim_control
+                     .reverse_previous_direction_pending_x)
+                 << ", \"aim_reverse_partial_semantics_transition_x\": "
+                 << bool_name(sample.aim_control
+                     .reverse_partial_semantics_transition_x)
+                 << ", \"aim_reverse_deformation_active_x\": "
+                 << bool_name(sample.aim_control.reverse_deformation_active_x)
+                 << ", \"aim_reverse_evidence_ratio_seconds_x\": "
+                 << sample.aim_control.reverse_evidence_ratio_seconds_x
+                 << ", \"aim_reverse_position_ratio_seconds_x\": "
+                 << sample.aim_control.reverse_position_ratio_seconds_x
+                 << ", \"aim_reverse_deformation_seconds_x\": "
+                 << sample.aim_control.reverse_deformation_seconds_x
+                 << ", \"aim_reverse_required_evidence_ratio_seconds_x\": "
+                 << sample.aim_control
+                     .reverse_required_evidence_ratio_seconds_x
+                 << ", \"aim_reverse_required_position_ratio_seconds_x\": "
+                 << sample.aim_control
+                     .reverse_required_position_ratio_seconds_x
+                 << ", \"aim_reverse_evidence_ready_x\": "
+                 << bool_name(sample.aim_control.reverse_evidence_ready_x)
+                 << ", \"aim_reverse_position_ready_x\": "
+                 << bool_name(sample.aim_control.reverse_position_ready_x)
+                 << ", \"aim_reverse_gate_blocked_x\": "
+                 << bool_name(sample.aim_control.reverse_gate_blocked_x)
+                 << ", \"aim_pending_inventory_hold_blocked_x\": "
+                 << bool_name(sample.aim_control
+                     .pending_inventory_hold_blocked_x)
+                 << ", \"aim_deadzone_quiet\": "
+                 << bool_name(sample.aim_control.deadzone_quiet)
+                 << ", \"aim_shaper_direction_reset_x\": "
+                 << bool_name(sample.aim_control.shaper_direction_reset_x)
+                 << ", \"aim_post_alignment_sign_change_blocked_x\": "
+                 << bool_name(sample.aim_control
+                     .post_alignment_sign_change_blocked_x)
+                 << ", \"aim_post_alignment_growth_limited_x\": "
+                 << bool_name(sample.aim_control
+                     .post_alignment_growth_limited_x)
+                 << ", \"aim_integer_direction_blocked_x\": "
+                 << bool_name(sample.aim_control.integer_direction_blocked_x)
+                 << ", \"aim_command_sign_change_blocked_x\": "
+                 << bool_name(sample.aim_control
+                     .command_sign_change_blocked_x)
+                 << ", \"aim_quantization_zero_x\": "
+                 << bool_name(sample.aim_control.quantization_zero_x)
                  << ", \"person_detection_count\": "
                  << sample.person_detection_count
                  << ", \"head_detection_count\": "

@@ -124,6 +124,21 @@ RuntimePipelineSample make_sample(
         sample.aim_target.observation_age_ms = 20.0f;
         sample.aim_target.confidence = 0.9f;
         sample.aim_target.lead_active = true;
+        sample.aim_control.evaluated = true;
+        sample.aim_control.controller_dt_ms = 4.167f;
+        sample.aim_control.proportional_x_counts = 2.5f;
+        sample.aim_control.feedforward_x_counts = 0.75f;
+        sample.aim_control.desired_before_reverse_x_counts = -3.25f;
+        sample.aim_control.desired_x_counts = 0.0f;
+        sample.aim_control.pending_absolute_x_counts = 6.0f;
+        sample.aim_control.pending_positive_x = true;
+        sample.aim_control.reverse_output_direction_x = 1.0f;
+        sample.aim_control.reverse_candidate_x = true;
+        sample.aim_control.reverse_previous_direction_pending_x = true;
+        sample.aim_control.reverse_evidence_ratio_seconds_x = 0.0002f;
+        sample.aim_control.reverse_required_evidence_ratio_seconds_x =
+            0.00042f;
+        sample.aim_control.reverse_gate_blocked_x = true;
         sample.aim_command.sequence = sequence;
         sample.aim_command.dx_counts = 20;
         sample.aim_command.dy_counts = -10;
@@ -250,7 +265,11 @@ void test_report_summary_and_atomic_files() {
                    std::string::npos &&
                 csv_text.find("person_detection_count,head_detection_count") !=
                     std::string::npos &&
-                csv_text.find("aim_base_x,aim_base_y,aim_delay_compensated_x") !=
+                 csv_text.find("aim_base_x,aim_base_y,aim_delay_compensated_x") !=
+                     std::string::npos &&
+                csv_text.find("aim_control_evaluated,aim_controller_dt_ms") !=
+                    std::string::npos &&
+                csv_text.find("aim_reverse_gate_blocked_x") !=
                     std::string::npos &&
                csv_text.find("ndi_receive_call_ms") != std::string::npos &&
                csv_text.find("pipeline_complete_ms") != std::string::npos &&
@@ -272,8 +291,14 @@ void test_report_summary_and_atomic_files() {
                    std::string::npos &&
                json_text.find("\"input_device_copy_bytes\": 409600") !=
                    std::string::npos &&
-               json_text.find("\"runtime_samples_dropped\": 7") !=
-                   std::string::npos &&
+                json_text.find("\"runtime_samples_dropped\": 7") !=
+                    std::string::npos &&
+                json_text.find("\"aim_controller_dt_ms\": 4.") !=
+                    std::string::npos &&
+                json_text.find("\"aim_reverse_candidate_x\": true") !=
+                    std::string::npos &&
+                json_text.find("\"aim_reverse_gate_blocked_x\": true") !=
+                    std::string::npos &&
                json_text.find("\"final_snapshot\"") != std::string::npos &&
                json_text.find("\"source_width\": 2560") !=
                    std::string::npos &&

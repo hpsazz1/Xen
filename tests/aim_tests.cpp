@@ -4200,6 +4200,9 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
         int first_negative_command_magnitude = 0;
         int release_y_command = 0;
         int identity_changes = 0;
+        int reverse_gate_blocked_frames = 0;
+        int previous_direction_pending_frames = 0;
+        bool release_diagnostic_consistent = false;
         double first_negative_elapsed_seconds = -1.0;
         std::string first_negative_context;
     };
@@ -4287,6 +4290,12 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
             if (result.target.track_id != track_id) {
                 ++trace.identity_changes;
             }
+            if (result.control.reverse_gate_blocked_x) {
+                ++trace.reverse_gate_blocked_frames;
+            }
+            if (result.control.reverse_previous_direction_pending_x) {
+                ++trace.previous_direction_pending_frames;
+            }
             if (trace.first_negative_command_offset < 0 &&
                 result.command.dx_counts < 0) {
                 trace.first_negative_command_offset = offset;
@@ -4295,6 +4304,14 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
                 trace.release_y_command = result.command.dy_counts;
                 trace.first_negative_elapsed_seconds =
                     static_cast<double>(elapsed_microseconds) / 1000000.0;
+                trace.release_diagnostic_consistent =
+                    result.control.evaluated &&
+                    result.control.reverse_candidate_x &&
+                    !result.control.reverse_gate_blocked_x &&
+                    (result.control.reverse_evidence_ready_x ||
+                     result.control.reverse_position_ready_x) &&
+                    result.control.desired_x_counts < 0.0f &&
+                    result.control.shaped_x_counts < 0.0f;
                 trace.first_negative_context =
                     "offset=" + std::to_string(offset) +
                     ",base=" + std::to_string(result.target.base_aim_x) +
@@ -4322,7 +4339,10 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
             trace.first_negative_command_offset >= 4 &&
             trace.first_negative_command_offset < 20 &&
             trace.first_negative_command_magnitude == 1 &&
-            trace.release_y_command < 0;
+            trace.release_y_command < 0 &&
+            trace.reverse_gate_blocked_frames > 0 &&
+            trace.previous_direction_pending_frames > 0 &&
+            trace.release_diagnostic_consistent;
     };
     expect(bounded_release(normal) && bounded_release(doubled) &&
                bounded_release(jittered) &&
@@ -4799,6 +4819,10 @@ void test_two_axis_shaper_alignment_cannot_bypass_growth_slew() {
                    rotated.has_command &&
                    rotated.command.dx_counts == 1 &&
                    rotated.command.dy_counts < 0 &&
+                   rotated.control.evaluated &&
+                   rotated.control.post_alignment_growth_limited_x &&
+                   rotated.control.filtered_x_counts >
+                       rotated.control.shaped_x_counts &&
                    growing.status == AimStatus::SUCCESS &&
                    growing.has_command &&
                    growing.command.dx_counts == 2 &&

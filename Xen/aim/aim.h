@@ -92,6 +92,46 @@ struct AimCommand {
     int dy_counts = 0;
 };
 
+// 控制诊断只包含固定大小标量，用来解释“有目标但某轴停发”的具体阶段。
+// 单位统一为 counts、秒或毫秒；该结构不参与控制决策，也不持有动态资源。
+struct AimControlDiagnostics {
+    bool evaluated = false;
+    float controller_dt_ms = 0.0f;
+    float proportional_x_counts = 0.0f;
+    float feedforward_x_counts = 0.0f;
+    float desired_before_reverse_x_counts = 0.0f;
+    float desired_x_counts = 0.0f;
+    float filtered_x_counts = 0.0f;
+    float shaped_x_counts = 0.0f;
+    float residual_before_quantization_x_counts = 0.0f;
+    float delayed_command_x_counts = 0.0f;
+    float pending_net_x_counts = 0.0f;
+    float pending_absolute_x_counts = 0.0f;
+    float reverse_output_direction_x = 0.0f;
+    float reverse_evidence_ratio_seconds_x = 0.0f;
+    float reverse_position_ratio_seconds_x = 0.0f;
+    float reverse_deformation_seconds_x = 0.0f;
+    float reverse_required_evidence_ratio_seconds_x = 0.0f;
+    float reverse_required_position_ratio_seconds_x = 0.0f;
+    bool pending_positive_x = false;
+    bool pending_negative_x = false;
+    bool reverse_candidate_x = false;
+    bool reverse_previous_direction_pending_x = false;
+    bool reverse_partial_semantics_transition_x = false;
+    bool reverse_deformation_active_x = false;
+    bool reverse_evidence_ready_x = false;
+    bool reverse_position_ready_x = false;
+    bool reverse_gate_blocked_x = false;
+    bool pending_inventory_hold_blocked_x = false;
+    bool deadzone_quiet = false;
+    bool shaper_direction_reset_x = false;
+    bool post_alignment_sign_change_blocked_x = false;
+    bool post_alignment_growth_limited_x = false;
+    bool integer_direction_blocked_x = false;
+    bool command_sign_change_blocked_x = false;
+    bool quantization_zero_x = false;
+};
+
 struct AimTargetSnapshot {
     std::uint64_t track_id = 0;
     TrackState state = TrackState::TENTATIVE;
@@ -146,6 +186,7 @@ struct AimResult {
     bool range_locked = false;
     bool range_allows_control = false;
     AimTargetSnapshot target;
+    AimControlDiagnostics control;
     AimCommand command;
     AimProfile profile;
 };

@@ -2964,11 +2964,16 @@ struct Aim::Impl {
                  float tracking_x, float tracking_y,
                  float aim_x, float aim_y,
                  std::chrono::steady_clock::time_point current_controller_at,
+                 AimControlDiagnostics& diagnostics,
                  AimCommand& command) noexcept {
         if (controller_track_id != track.id) {
             reset_controller();
             controller_track_id = track.id;
         }
+        diagnostics = {};
+        diagnostics.evaluated = true;
+        diagnostics.reverse_output_direction_x =
+            tracking_horizontal_output_direction;
         // 轨迹估计继续严格使用 captured_at；控制滤波、泄漏、slew 与
         // 命令库存统一使用 process() 解析出的同一控制时刻。
         if (track.predicted && !config.enable_prediction) {
@@ -2985,6 +2990,8 @@ struct Aim::Impl {
                 -kControllerFeedforwardLeakPerSecond * controller_dt);
             feedforward_x *= leak;
             feedforward_y *= leak;
+            diagnostics.controller_dt_ms = controller_dt * 1000.0f;
+            diagnostics.feedforward_x_counts = feedforward_x;
             previous_command_x = 0.0f;
             previous_command_y = 0.0f;
             // 原始观测连续性已经中断，任何未完成的反向累计都不能跨缺帧
@@ -3034,6 +3041,7 @@ struct Aim::Impl {
             ? track.prediction_dt
             : clamp_delta_seconds(std::chrono::duration<double>(
                   current_controller_at - controller_at).count());
+        diagnostics.controller_dt_ms = controller_dt * 1000.0f;
         float pending_control_projection_target_x = 0.0f;
         if (use_coherent_prediction_projection_x) {
             const auto pending =
@@ -3123,6 +3131,11 @@ struct Aim::Impl {
             delayed_issued_command(current_controller_at);
         const auto pending_inventory =
             pending_issued_command_inventory(current_controller_at);
+        diagnostics.delayed_command_x_counts = delayed_command_x;
+        diagnostics.pending_net_x_counts = pending_inventory.net_x;
+        diagnostics.pending_absolute_x_counts = pending_inventory.absolute_x;
+        diagnostics.pending_positive_x = pending_inventory.has_positive_x;
+        diagnostics.pending_negative_x = pending_inventory.has_negative_x;
         // track.v* 是目标相对屏幕的速度，包含历史鼠标命令造成的相机运动。
         // 将预计当前生效的历史命令补回后，measurement 才是世界目标在本帧
         // 需要的维持量。该观察器不依赖基础点过零或相对速度符号猜测反转。
@@ -3231,6 +3244,8 @@ struct Aim::Impl {
         }
         float desired_x = proportional_x + control_feedforward_x;
         float desired_y = proportional_y + feedforward_y;
+        diagnostics.proportional_x_counts = proportional_x;
+        diagnostics.feedforward_x_counts = control_feedforward_x;
         // 移动目标在保持带内仍需承担量化后的平均维持量。仅在观察器已
         // 学到前馈且基础误差与其同向时加入很小的偏置，静止目标和真实
         // 反转不继承该偏置，避免重新引入周期性抖动。
@@ -3274,6 +3289,7 @@ struct Aim::Impl {
             desired_x = proportional_x;
             desired_y = proportional_y;
         }
+        diagnostics.desired_before_reverse_x_counts = desired_x;
         if (config.enable_delay_compensation &&
             config.control_delay_ms > 0.0f &&
             !config.enable_prediction) {
@@ -3284,6 +3300,7 @@ struct Aim::Impl {
                 desired_direction_x != 0.0f &&
                 desired_direction_x !=
                     tracking_horizontal_output_direction;
+            diagnostics.reverse_candidate_x = reverse_candidate;
             if (reverse_candidate) {
                 const float roi_width_source_pixels =
                     frame.roi_width *
@@ -3308,6 +3325,7 @@ struct Aim::Impl {
                     tracking_horizontal_reverse_deformation_seconds = 0.0f;
                     tracking_horizontal_reverse_deformation_active = false;
                     desired_x = 0.0f;
+                    diagnostics.reverse_gate_blocked_x = true;
                 } else {
                     // 采用带参考漂移的 Page/CUSUM：候选方向共同边增加
                     // 证据，反方向平移抵消；allowance 只按既有几何语义
@@ -3350,6 +3368,10 @@ struct Aim::Impl {
                          track.partial_visibility_x_frames <
                              kTrackPartialVisibilityConfirmFrames) ||
                         track.horizontal_trend_rebuilding_from_partial;
+                    diagnostics.reverse_previous_direction_pending_x =
+                        previous_direction_pending;
+                    diagnostics.reverse_partial_semantics_transition_x =
+                        partial_semantics_transition;
                     if (partial_semantics_transition) {
                         // 单侧半框候选、确认和完整框恢复会改变可见中心语义。
                         // 两类证据都只能从稳定重建后的新鲜观测重新累计。
@@ -3426,8 +3448,15 @@ struct Aim::Impl {
                         tracking_horizontal_reverse_position_ratio_seconds >=
                             required_position_fallback &&
                         deformation_dwell_ready;
+                    diagnostics.reverse_required_evidence_ratio_seconds_x =
+                        required_evidence;
+                    diagnostics.reverse_required_position_ratio_seconds_x =
+                        required_position_fallback;
+                    diagnostics.reverse_evidence_ready_x = evidence_ready;
+                    diagnostics.reverse_position_ready_x = position_ready;
                     if (!evidence_ready && !position_ready) {
                         desired_x = 0.0f;
+                        diagnostics.reverse_gate_blocked_x = true;
                     }
                 }
             } else {
@@ -3451,6 +3480,7 @@ struct Aim::Impl {
             if (pending_x_opposes_desired &&
                 std::fabs(base_error_x) <= hold_band) {
                 desired_x = 0.0f;
+                diagnostics.pending_inventory_hold_blocked_x = true;
             }
         }
         // prediction 活动时，最终点可能已经越过基础点，但仍暂时位于准星另一侧。
@@ -3519,6 +3549,15 @@ struct Aim::Impl {
                 desired_y = 0.0f;
             }
         }
+        diagnostics.reverse_evidence_ratio_seconds_x =
+            tracking_horizontal_reverse_evidence_ratio_seconds;
+        diagnostics.reverse_position_ratio_seconds_x =
+            tracking_horizontal_reverse_position_ratio_seconds;
+        diagnostics.reverse_deformation_seconds_x =
+            tracking_horizontal_reverse_deformation_seconds;
+        diagnostics.reverse_deformation_active_x =
+            tracking_horizontal_reverse_deformation_active;
+        diagnostics.desired_x_counts = desired_x;
         // 进入死区也不能按某个像素速度阈值硬清状态；只有上一命令、到期
         // 命令和整个在途窗都归零，才可证明执行器库存已经安静。
         const bool control_inventory_quiet =
@@ -3544,6 +3583,9 @@ struct Aim::Impl {
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             controller_at = current_controller_at;
+            diagnostics.deadzone_quiet = true;
+            diagnostics.filtered_x_counts = filtered_x;
+            diagnostics.shaped_x_counts = shaped_x;
             record_issued_command(
                 frame, current_controller_at, 0.0f, 0.0f);
             return false;
@@ -3559,6 +3601,7 @@ struct Aim::Impl {
         // 鼠标后端消费二维相对位移，限幅也必须作用于向量模长；逐轴限幅会让
         // 对角线命令达到配置上限的 sqrt(2) 倍。
         clamp_vector(filtered_x, filtered_y, config.max_counts_per_frame);
+        diagnostics.filtered_x_counts = filtered_x;
 
         const bool smooth_delayed_motion =
             config.enable_delay_compensation &&
@@ -3599,6 +3642,8 @@ struct Aim::Impl {
         const float shaped_magnitude = std::hypot(shaped_x, shaped_y);
         if (desired_magnitude <= 0.0f || shaped_magnitude <= 0.0f ||
             shaped_x * desired_x + shaped_y * desired_y <= 0.0f) {
+            diagnostics.shaper_direction_reset_x =
+                std::fabs(shaped_x) > 0.001f;
             shaped_x = 0.0f;
             shaped_y = 0.0f;
             residual_x = 0.0f;
@@ -3624,6 +3669,7 @@ struct Aim::Impl {
                 previous_shaped_x * shaped_x < 0.0f) {
                 shaped_x = 0.0f;
                 residual_x = 0.0f;
+                diagnostics.post_alignment_sign_change_blocked_x = true;
             } else if (std::fabs(shaped_x) >
                        std::fabs(previous_shaped_x)) {
                 const float unconstrained_growth_x =
@@ -3632,6 +3678,8 @@ struct Aim::Impl {
                     unconstrained_growth_x,
                     -maximum_delta, maximum_delta);
                 shaped_x = previous_shaped_x + growth_x;
+                diagnostics.post_alignment_growth_limited_x =
+                    std::fabs(unconstrained_growth_x - growth_x) > 0.001f;
                 // 旧残余属于上一轴向模长。即使本帧增长没有触及浮点
                 // maximum_delta，它也不能跨入新的增长阶跃，否则 0.8 的
                 // 旧余量会把允许增加 1 count 的命令量化成增加 2 counts。
@@ -3641,6 +3689,8 @@ struct Aim::Impl {
             clamp_vector(shaped_x, shaped_y, config.max_counts_per_frame);
         }
 
+        diagnostics.shaped_x_counts = shaped_x;
+        diagnostics.residual_before_quantization_x_counts = residual_x;
         float quantized_x = shaped_x + residual_x;
         float quantized_y = shaped_y + residual_y;
         // 量化残余属于上一帧误差方向。目标越过准星或转向时，旧残余不能
@@ -3715,6 +3765,7 @@ struct Aim::Impl {
             if (command.dx_counts * error_x <= 0.0f) {
                 command.dx_counts = 0;
                 quantized_x = 0.0f;
+                diagnostics.integer_direction_blocked_x = true;
             }
             if (command.dy_counts * error_y <= 0.0f) {
                 command.dy_counts = 0;
@@ -3730,6 +3781,7 @@ struct Aim::Impl {
                 std::signbit(static_cast<float>(command.dx_counts))) {
             command.dx_counts = 0;
             quantized_x = 0.0f;
+            diagnostics.command_sign_change_blocked_x = true;
         }
         if (previous_command_y != 0.0f && command.dy_counts != 0 &&
             std::signbit(previous_command_y) !=
@@ -3761,6 +3813,8 @@ struct Aim::Impl {
         }
         residual_x = quantized_x - command.dx_counts;
         residual_y = quantized_y - command.dy_counts;
+        diagnostics.quantization_zero_x =
+            command.dx_counts == 0 && std::fabs(desired_x) > 0.001f;
         previous_command_x = static_cast<float>(command.dx_counts);
         previous_command_y = static_cast<float>(command.dy_counts);
         if (!frame.lock_active) {
@@ -3944,6 +3998,7 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
                     projection.delay_compensated_y,
                     projection.final_x, projection.final_y,
                     control_at,
+                    result.control,
                     result.command);
             } else {
                 impl_->reset_controller();

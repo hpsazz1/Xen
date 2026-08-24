@@ -434,6 +434,7 @@ struct Runtime::Impl {
         sample.aim_range_locked = aim_result.range_locked;
         sample.aim_range_allows_control = aim_result.range_allows_control;
         sample.aim_target = aim_result.target;
+        sample.aim_control = aim_result.control;
         sample.aim_command = aim_result.command;
         if (aim_result.has_target) {
             sample.aim_base_point_inside_box =

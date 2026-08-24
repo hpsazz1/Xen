@@ -135,6 +135,7 @@ struct RuntimePipelineSample {
     bool aim_prediction_point_outside_box = false;
     bool aim_command_toward_target = false;
     AimTargetSnapshot aim_target;
+    AimControlDiagnostics aim_control;
     AimCommand aim_command;
     // 分类诊断只保留固定标量；count=0 时对应 confidence=0，避免把无检测
     // 与真实 0 置信度混为一谈，也不把动态检测集合复制进报告环。
