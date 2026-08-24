@@ -4450,8 +4450,9 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
         // 形变保护。这个静态剩余误差不会触发
         // “误差回落”清零，专门证明条件积分仍保留最终活性。形变态须
         // 等待 15 ms episode，并从新鲜的 30% ROI×反馈窗面积有界放行。
-        // 该纯位置兜底先经过一窗有界探测，再用第二个反馈窗保持同一
-        // 3-count 上限；若没有独立共同边/CUSUM 事实，不能立刻递增完整命令。
+        // 该纯位置兜底先经过一窗有界探测；第二个反馈窗没有独立
+        // 共同边/CUSUM 事实时只保留物理最小 1 count，不能重复注入
+        // 同幅库存或立刻递增完整命令。
         // 320/640 构造完全同构，不依赖像素速度或当前框宽档位。
         long long elapsed_microseconds = 0;
         for (int offset = 0; offset < 32; ++offset) {
@@ -4565,8 +4566,7 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
             trace.first_committed_negative_offset >=
                 trace.first_negative_command_offset + 6 &&
             trace.second_probe_window_frames >= 2 &&
-            trace.second_probe_window_maximum_command > 0 &&
-            trace.second_probe_window_maximum_command <= 3 &&
+            trace.second_probe_window_maximum_command == 1 &&
             trace.release_y_command < 0 &&
             trace.reverse_gate_blocked_frames > 0 &&
             trace.previous_direction_pending_frames > 0 &&
@@ -4741,6 +4741,126 @@ void test_tracking_reverse_position_fallback_resets_while_error_improves() {
                "，回落期间负命令=" +
                std::to_string(normal.negative_during_improvement) + "/" +
                std::to_string(doubled.negative_during_improvement));
+}
+
+void test_tracking_reverse_feedback_probe_uses_minimum_count() {
+    struct Trace {
+        int probe_second_window_offset = -1;
+        int second_window_command_magnitude = 0;
+        int identity_changes = 0;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_case = [&](float roi_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        Trace trace;
+        const float roi_width = 320.0f * roi_scale;
+
+        AimFrame established_frame = make_frame(1, base);
+        established_frame.roi_width = static_cast<int>(roi_width);
+        established_frame.roi_height = static_cast<int>(roi_width);
+        established_frame.control_at = established_frame.captured_at +
+            std::chrono::milliseconds(1);
+        established_frame.control_center_x = roi_width * 0.4375f;
+        established_frame.control_center_y = roi_width * 0.50f;
+        established_frame.lock_active = true;
+        established_frame.detections = {body_box(
+            roi_width * 0.48125f,
+            roi_width * 0.45f,
+            roi_width * 0.125f,
+            roi_width * 0.25f)};
+        const AimResult established = aim.process(established_frame);
+        expect(established.status == AimStatus::SUCCESS &&
+                   established.has_target &&
+                   established.command.dx_counts > 0,
+               "探测证据失效回归必须先建立 +X 物理输出");
+        const std::uint64_t track_id = established.target.track_id;
+
+        // 先保持纯位置反侧误差和持续形变，等待第二个探测窗；随后让
+        // 人物框逐帧向准星回落。首窗已经注入足够辨识方向的探测量，
+        // 第二窗没有新快速几何事实时只允许保留物理最小 1 count。
+        bool improve_after_second_window = false;
+        int improvement_steps = 0;
+        for (int offset = 0; offset < 48; ++offset) {
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(offset + 2),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(offset + 1) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.6125f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            if (improve_after_second_window) {
+                ++improvement_steps;
+            }
+            const int shape_steps = std::max(0, offset - 2);
+            frame.detections = {body_box(
+                roi_width *
+                    (0.48125f +
+                     0.003125f *
+                         static_cast<float>(improvement_steps)),
+                roi_width * 0.45f,
+                roi_width *
+                    (0.125f + 0.000625f * shape_steps),
+                roi_width *
+                    (0.25f + 0.000625f * shape_steps))};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "探测证据失效期间必须逐帧保留确认目标");
+            if (!result.has_target) continue;
+            if (result.target.track_id != track_id) {
+                ++trace.identity_changes;
+            }
+            if (!improve_after_second_window &&
+                result.control.reverse_probe_active_x &&
+                result.control.reverse_probe_limited_x &&
+                result.control.reverse_probe_age_ms_x >=
+                    config.control_delay_ms) {
+                improve_after_second_window = true;
+                trace.probe_second_window_offset = offset;
+                trace.second_window_command_magnitude =
+                    std::abs(result.command.dx_counts);
+            }
+        }
+        return trace;
+    };
+
+    const Trace normal = run_case(1.0f);
+    const Trace doubled = run_case(2.0f);
+    const auto valid = [](const Trace& trace) {
+        return trace.identity_changes == 0 &&
+            trace.probe_second_window_offset >= 0 &&
+            trace.second_window_command_magnitude == 1;
+    };
+    expect(valid(normal) && valid(doubled) &&
+               std::abs(normal.probe_second_window_offset -
+                        doubled.probe_second_window_offset) <= 1 &&
+               normal.second_window_command_magnitude ==
+                   doubled.second_window_command_magnitude,
+           "纯位置探测进入第二反馈窗且没有新快速几何事实时，只能保留"
+           "物理最小 1 count，禁止重复注入首窗的 3-count 库存；"
+           "320/640 第二窗/命令=" +
+               std::to_string(normal.probe_second_window_offset) + "/" +
+               std::to_string(doubled.probe_second_window_offset) + "/" +
+               std::to_string(normal.second_window_command_magnitude) + "/" +
+               std::to_string(doubled.second_window_command_magnitude));
 }
 
 void test_tracking_reverse_fixed_center_pose_episode_is_bounded() {
@@ -8785,6 +8905,7 @@ int main() {
     test_tracking_reverse_consecutive_common_translation_releases();
     test_tracking_reverse_position_fallback_releases_after_old_inventory();
     test_tracking_reverse_position_fallback_resets_while_error_improves();
+    test_tracking_reverse_feedback_probe_uses_minimum_count();
     test_tracking_reverse_fixed_center_pose_episode_is_bounded();
     test_tracking_reverse_partial_semantics_discards_stale_position_area();
     test_two_axis_shaper_alignment_cannot_bypass_growth_slew();

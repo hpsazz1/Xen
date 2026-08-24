@@ -332,6 +332,7 @@ constexpr float kTrackingHorizontalReverseDeformationFallbackScale = 3.0f;
 // 进入画面后再确认新输出方向。这里按已有控制时域定义，
 // 不读取人物速度、框宽或游戏类型。
 constexpr float kTrackingHorizontalReverseProbeMaximumCounts = 3.0f;
+constexpr float kTrackingHorizontalReverseFeedbackProbeMaximumCounts = 1.0f;
 constexpr float kTrackingHorizontalReverseProbeCommitWindows = 2.0f;
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
@@ -3317,6 +3318,8 @@ struct Aim::Impl {
         // “已确认输出方向”提前改成候选方向。函数末尾使用
         // 该标志区分首个探测脉冲与延迟反馈后确认的换向。
         bool reverse_release_probe_x = false;
+        float reverse_release_probe_maximum_counts_x =
+            kTrackingHorizontalReverseProbeMaximumCounts;
         bool reverse_translation_ready_x = false;
         bool reverse_position_improvement_reset_x = false;
         if (config.enable_delay_compensation &&
@@ -3570,10 +3573,13 @@ struct Aim::Impl {
                             // 1/2/3-count 库存仍未完整进入画面。真实 Run 的
                             // 13 次探测中有 8 次只由位置兜底放行；其中 7 次在
                             // 原确认点仍没有独立共同边/CUSUM 事实。第二个窗口
-                            // 继续保持同一 3-count 平坦边界层，不再按 4/5/6...
-                            // 递增；任一快速通道后来成立即可立即确认，候选消失、
+                            // 首窗已经提供 3-count 探测，第二窗尚无任何新几何
+                            // 事实时只保留物理最小 1 count，不再重复注入同幅
+                            // 库存。任一快速通道后来成立即可立即确认，候选消失、
                             // partial 重建或方向变化仍沿原状态机取消。
                             reverse_release_probe_x = true;
+                            reverse_release_probe_maximum_counts_x =
+                                kTrackingHorizontalReverseFeedbackProbeMaximumCounts;
                         }
                     } else if (!evidence_ready &&
                                !reverse_translation_ready_x &&
@@ -3871,8 +3877,8 @@ struct Aim::Impl {
             // 240 counts/s 的 slew 一帧跨出多个探测 count。
             shaped_x = std::clamp(
                 shaped_x,
-                -kTrackingHorizontalReverseProbeMaximumCounts,
-                kTrackingHorizontalReverseProbeMaximumCounts);
+                -reverse_release_probe_maximum_counts_x,
+                reverse_release_probe_maximum_counts_x);
             residual_x = 0.0f;
         }
 
