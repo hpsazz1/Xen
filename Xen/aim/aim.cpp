@@ -723,6 +723,9 @@ struct Aim::Impl {
     float tracking_horizontal_reverse_deformation_seconds = 0.0f;
     bool tracking_horizontal_reverse_deformation_active = false;
     float tracking_horizontal_reverse_probe_direction = 0.0f;
+    // 纯位置面积只能启动有界辨识探针，不能仅因等待时间到期就升级为
+    // 全量换向；独立 CUSUM/共同平移启动的快速探针仍保持原确认语义。
+    bool tracking_horizontal_reverse_probe_position_only = false;
     std::chrono::steady_clock::time_point
         tracking_horizontal_reverse_probe_started_at{};
     std::chrono::steady_clock::time_point controller_at{};
@@ -2424,6 +2427,7 @@ struct Aim::Impl {
         tracking_horizontal_reverse_deformation_seconds = 0.0f;
         tracking_horizontal_reverse_deformation_active = false;
         tracking_horizontal_reverse_probe_direction = 0.0f;
+        tracking_horizontal_reverse_probe_position_only = false;
         tracking_horizontal_reverse_probe_started_at = {};
         controller_at = {};
         controller_initialized = false;
@@ -3072,6 +3076,7 @@ struct Aim::Impl {
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
+            tracking_horizontal_reverse_probe_position_only = false;
             tracking_horizontal_reverse_probe_started_at = {};
             if (!frame.lock_active) {
                 // 丢框早退不会经过函数末尾的公共清理。安全门已经释放时，
@@ -3366,6 +3371,7 @@ struct Aim::Impl {
         // “已确认输出方向”提前改成候选方向。函数末尾使用
         // 该标志区分首个探测脉冲与延迟反馈后确认的换向。
         bool reverse_release_probe_x = false;
+        bool reverse_release_probe_position_only_x = false;
         float reverse_release_probe_maximum_counts_x =
             kTrackingHorizontalReverseProbeMaximumCounts;
         bool reverse_translation_ready_x = false;
@@ -3413,6 +3419,7 @@ struct Aim::Impl {
                     tracking_horizontal_reverse_deformation_seconds = 0.0f;
                     tracking_horizontal_reverse_deformation_active = false;
                     tracking_horizontal_reverse_probe_direction = 0.0f;
+                    tracking_horizontal_reverse_probe_position_only = false;
                     tracking_horizontal_reverse_probe_started_at = {};
                     desired_x = 0.0f;
                     diagnostics.reverse_gate_blocked_x = true;
@@ -3486,6 +3493,7 @@ struct Aim::Impl {
                             0.0f;
                         tracking_horizontal_reverse_deformation_active = false;
                         tracking_horizontal_reverse_probe_direction = 0.0f;
+                        tracking_horizontal_reverse_probe_position_only = false;
                         tracking_horizontal_reverse_probe_started_at = {};
                         reverse_translation_reset_reason_x =
                             AimReverseTranslationResetReason::PARTIAL_SEMANTICS;
@@ -3650,20 +3658,10 @@ struct Aim::Impl {
                         !tracking_horizontal_reverse_deformation_active ||
                         tracking_horizontal_reverse_deformation_seconds >=
                             required_deformation_dwell;
-                    // schema 12 真机 Run 中 21 次换向有 7 次来自纯位置
-                    // 兜底，其中 3 次在两条原始框边仍明确沿旧输出方向
-                    // 移动时放行；它们注入 42～69 counts 后，仅 15～19
-                    // 帧就被独立 CUSUM/共同平移事实反向纠正。这个往返
-                    // 同时表现为晃动和有效追赶损失。位置面积仍保留静止
-                    // 最终活性与同向弱证据活性，但当前生产共同平移明确
-                    // 反对候选方向时不能单独授权；快速证据通道不受影响。
-                    const bool position_translation_allows_release =
-                        aligned_translation_evidence >= 0.0f;
                     const bool position_ready =
                         tracking_horizontal_reverse_position_ratio_seconds >=
                             required_position_fallback &&
-                        deformation_dwell_ready &&
-                        position_translation_allows_release;
+                        deformation_dwell_ready;
                     diagnostics.reverse_required_evidence_ratio_seconds_x =
                         required_evidence;
                     diagnostics.reverse_required_position_ratio_seconds_x =
@@ -3688,28 +3686,49 @@ struct Aim::Impl {
                             // 相比原有 1、2、3、4… 的未反馈追赶，这保留真实
                             // 反向的最低活性，同时把形变假反向脉冲限在平坦边界层。
                             reverse_release_probe_x = true;
-                        } else if (!evidence_ready &&
-                                   !reverse_translation_ready_x &&
-                                   position_ready &&
-                                   probe_age_seconds <
-                                       feedback_window_seconds *
-                                           kTrackingHorizontalReverseProbeCommitWindows) {
-                            // 第一个窗口末尾只能看到最早探测命令的反馈，后续
-                            // 1/2/3-count 库存仍未完整进入画面。真实 Run 的
-                            // 13 次探测中有 8 次只由位置兜底放行；其中 7 次在
-                            // 原确认点仍没有独立共同边/CUSUM 事实。第二个窗口
-                            // 首窗已经提供 3-count 探测，第二窗尚无任何新几何
-                            // 事实时只保留物理最小 1 count，不再重复注入同幅
-                            // 库存。任一快速通道后来成立即可立即确认，候选消失、
-                            // partial 重建或方向变化仍沿原状态机取消。
-                            reverse_release_probe_x = true;
-                            reverse_release_probe_maximum_counts_x =
-                                kTrackingHorizontalReverseFeedbackProbeMaximumCounts;
+                        } else if (
+                            tracking_horizontal_reverse_probe_position_only &&
+                            !evidence_ready &&
+                            !reverse_translation_ready_x) {
+                            if (position_ready &&
+                                probe_age_seconds <
+                                    feedback_window_seconds *
+                                        kTrackingHorizontalReverseProbeCommitWindows) {
+                                // 纯位置探针的第二个反馈窗只保留物理最小
+                                // 1 count，等待首窗库存完整进入画面。它只能由
+                                // 当前独立 CUSUM/共同平移事实升级为全量换向。
+                                reverse_release_probe_x = true;
+                                reverse_release_probe_maximum_counts_x =
+                                    kTrackingHorizontalReverseFeedbackProbeMaximumCounts;
+                            } else {
+                                // 最新真机 Run 的两次纯位置探针在证据失效或
+                                // 第二窗到期后直接穿透成全量输出，各注入 67/72
+                                // counts 才反向纠正。没有独立确认时必须取消本轮
+                                // 探针并清空位置面积；持续静态误差可从新鲜面积
+                                // 重新发起下一轮有界探针，但不能靠时间自动提交。
+                                tracking_horizontal_reverse_position_ratio_seconds =
+                                    0.0f;
+                                tracking_horizontal_reverse_position_peak_error =
+                                    aligned_base_error_x;
+                                tracking_horizontal_reverse_probe_direction = 0.0f;
+                                tracking_horizontal_reverse_probe_position_only = false;
+                                tracking_horizontal_reverse_probe_started_at = {};
+                                // 下一轮位置面积必须对应一轮全新的有界探针；
+                                // 仅清候选标志会让平滑/整形残量跨轮继承。
+                                // 只归零 X 动态状态，Y、前馈、预测和真实在途
+                                // 命令历史均保持原样。
+                                filtered_x = 0.0f;
+                                shaped_x = 0.0f;
+                                residual_x = 0.0f;
+                                desired_x = 0.0f;
+                                diagnostics.reverse_gate_blocked_x = true;
+                            }
                         }
                     } else if (!evidence_ready &&
                                !reverse_translation_ready_x &&
                                !position_ready) {
                         tracking_horizontal_reverse_probe_direction = 0.0f;
+                        tracking_horizontal_reverse_probe_position_only = false;
                         tracking_horizontal_reverse_probe_started_at = {};
                         desired_x = 0.0f;
                         diagnostics.reverse_gate_blocked_x = true;
@@ -3721,6 +3740,10 @@ struct Aim::Impl {
                             diagnostics.reverse_gate_blocked_x = true;
                         } else {
                             reverse_release_probe_x = true;
+                            reverse_release_probe_position_only_x =
+                                !evidence_ready &&
+                                !reverse_translation_ready_x &&
+                                position_ready;
                         }
                     }
                 }
@@ -3746,6 +3769,7 @@ struct Aim::Impl {
                         static_cast<double>(config.control_delay_ms) / 1000.0;
                 if (!probe_feedback_pending) {
                     tracking_horizontal_reverse_probe_direction = 0.0f;
+                    tracking_horizontal_reverse_probe_position_only = false;
                     tracking_horizontal_reverse_probe_started_at = {};
                 }
                 reverse_translation_reset_reason_x =
@@ -3899,6 +3923,7 @@ struct Aim::Impl {
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
+            tracking_horizontal_reverse_probe_position_only = false;
             tracking_horizontal_reverse_probe_started_at = {};
             controller_at = current_controller_at;
             diagnostics.deadzone_quiet = true;
@@ -4155,6 +4180,7 @@ struct Aim::Impl {
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
+            tracking_horizontal_reverse_probe_position_only = false;
             tracking_horizontal_reverse_probe_started_at = {};
         } else if (command.dx_counts != 0 && reverse_release_probe_x) {
             const float command_direction = std::copysign(
@@ -4163,6 +4189,8 @@ struct Aim::Impl {
                 command_direction) {
                 tracking_horizontal_reverse_probe_direction =
                     command_direction;
+                tracking_horizontal_reverse_probe_position_only =
+                    reverse_release_probe_position_only_x;
                 tracking_horizontal_reverse_probe_started_at =
                     current_controller_at;
             }
@@ -4177,6 +4205,7 @@ struct Aim::Impl {
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
+            tracking_horizontal_reverse_probe_position_only = false;
             tracking_horizontal_reverse_probe_started_at = {};
         }
         diagnostics.reverse_probe_direction_x =

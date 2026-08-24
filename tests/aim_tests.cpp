@@ -4761,12 +4761,15 @@ void test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget() {
                std::to_string(split_exhausted.budget_exhausted_reset));
 }
 
-void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
+void test_tracking_reverse_position_probe_retries_without_unconfirmed_commit() {
     struct Trace {
         int first_negative_command_offset = -1;
         int first_negative_command_magnitude = 0;
         int maximum_probe_command_magnitude = 0;
         int first_committed_negative_offset = -1;
+        int unconfirmed_cancel_count = 0;
+        int probe_start_count = 0;
+        int unlimited_negative_commands = 0;
         int second_probe_window_frames = 0;
         int second_probe_window_maximum_command = 0;
         int release_y_command = 0;
@@ -4775,6 +4778,7 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
         int previous_direction_pending_frames = 0;
         bool release_diagnostic_consistent = false;
         bool first_negative_was_probe_limited = false;
+        bool previous_probe_active = false;
         double first_negative_elapsed_seconds = -1.0;
         std::string first_negative_context;
     };
@@ -4829,8 +4833,8 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
         // “误差回落”清零，专门证明条件积分仍保留最终活性。形变态须
         // 等待 15 ms episode，并从新鲜的 30% ROI×反馈窗面积有界放行。
         // 该纯位置兜底先经过一窗有界探测；第二个反馈窗没有独立
-        // 共同边/CUSUM 事实时只保留物理最小 1 count，不能重复注入
-        // 同幅库存或立刻递增完整命令。
+        // 共同边/CUSUM 事实时只保留物理最小 1 count。第二窗到期必须
+        // 取消并从新鲜位置面积重试，不能把等待时间当作全量提交证据。
         // 320/640 构造完全同构，不依赖像素速度或当前框宽档位。
         long long elapsed_microseconds = 0;
         for (int offset = 0; offset < 32; ++offset) {
@@ -4874,6 +4878,21 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
                     trace.maximum_probe_command_magnitude,
                     std::abs(result.command.dx_counts));
             }
+            if (result.command.dx_counts < 0 &&
+                !result.control.reverse_probe_limited_x) {
+                ++trace.unlimited_negative_commands;
+            }
+            if (result.control.reverse_probe_active_x &&
+                !trace.previous_probe_active) {
+                ++trace.probe_start_count;
+            }
+            if (!result.control.reverse_probe_active_x &&
+                trace.previous_probe_active &&
+                result.control.reverse_gate_blocked_x) {
+                ++trace.unconfirmed_cancel_count;
+            }
+            trace.previous_probe_active =
+                result.control.reverse_probe_active_x;
             if (result.control.reverse_probe_active_x &&
                 result.control.reverse_probe_limited_x &&
                 result.control.reverse_probe_age_ms_x >=
@@ -4929,7 +4948,7 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
     const Trace jittered = run_case(1.0f, kJitteredCadence);
     const Trace jittered_doubled =
         run_case(2.0f, kJitteredCadence);
-    const auto bounded_release = [](const Trace& trace) {
+    const auto bounded_retry = [](const Trace& trace) {
         return trace.identity_changes == 0 &&
             trace.first_negative_command_offset >= 4 &&
             trace.first_negative_command_offset < 20 &&
@@ -4937,12 +4956,10 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
             trace.first_negative_was_probe_limited &&
             trace.maximum_probe_command_magnitude > 0 &&
             trace.maximum_probe_command_magnitude <= 3 &&
-            trace.first_committed_negative_offset >
-                trace.first_negative_command_offset &&
-            trace.first_committed_negative_offset <=
-                trace.first_negative_command_offset + 11 &&
-            trace.first_committed_negative_offset >=
-                trace.first_negative_command_offset + 6 &&
+            trace.first_committed_negative_offset < 0 &&
+            trace.unlimited_negative_commands == 0 &&
+            trace.unconfirmed_cancel_count >= 1 &&
+            trace.probe_start_count >= 2 &&
             trace.second_probe_window_frames >= 2 &&
             trace.second_probe_window_maximum_command == 1 &&
             trace.release_y_command < 0 &&
@@ -4950,17 +4967,18 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
             trace.previous_direction_pending_frames > 0 &&
             trace.release_diagnostic_consistent;
     };
-    expect(bounded_release(normal) && bounded_release(doubled) &&
-               bounded_release(jittered) &&
-               bounded_release(jittered_doubled) &&
+    expect(bounded_retry(normal) && bounded_retry(doubled) &&
+               bounded_retry(jittered) &&
+               bounded_retry(jittered_doubled) &&
                std::abs(normal.first_negative_command_offset -
                         doubled.first_negative_command_offset) <= 1 &&
                std::abs(jittered.first_negative_command_offset -
                         jittered_doubled.first_negative_command_offset) <= 1 &&
                std::fabs(normal.first_negative_elapsed_seconds -
                          jittered.first_negative_elapsed_seconds) <= 0.012,
-           "旧方向库存退出后，持续 ROI 中心反侧误差必须在有界帧数内放行，"
-           "且 320/640 ROI 与 3～5 ms 抖动节奏同构；稳定320/640、"
+           "旧方向库存退出后，持续 ROI 中心反侧误差必须以有界探针保持活性，"
+           "但没有独立几何确认时第二窗到期只能取消并重试；320/640 ROI 与"
+           "3～5 ms 抖动节奏同构；稳定320/640、"
            "抖动320/640首负偏移=" +
                std::to_string(normal.first_negative_command_offset) + "/" +
                std::to_string(doubled.first_negative_command_offset) +
@@ -4972,30 +4990,200 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
                "，首负幅值=" +
                std::to_string(normal.first_negative_command_magnitude) + "/" +
                std::to_string(doubled.first_negative_command_magnitude) +
-               "，探测峰值/确认偏移=" +
+               "，探测峰值/全量确认偏移=" +
                std::to_string(normal.maximum_probe_command_magnitude) + "/" +
                std::to_string(normal.first_committed_negative_offset) +
+               "，取消/重试=" +
+               std::to_string(normal.unconfirmed_cancel_count) + "/" +
+               std::to_string(normal.probe_start_count) +
                "，第二探测窗帧/峰值=" +
                std::to_string(normal.second_probe_window_frames) + "/" +
                std::to_string(normal.second_probe_window_maximum_command) +
                "，首例=" + normal.first_negative_context);
 }
 
-void test_tracking_reverse_position_fallback_waits_out_opposing_translation() {
+void test_tracking_reverse_position_probe_cancels_after_evidence_resets() {
     struct Trace {
-        int premature_negative_commands = 0;
-        int opposing_veto_frames = 0;
         int first_negative_offset = -1;
         int first_negative_magnitude = 0;
+        int cancel_offset = -1;
+        int maximum_probe_magnitude = 0;
+        int unlimited_negative_commands = 0;
         int identity_changes = 0;
-        bool release_position_ready = false;
-        bool release_after_nonopposing_observation = false;
+        bool improvement_reset_seen = false;
+        bool cancel_gate_blocked = false;
+        bool cancel_preserved_output_direction = false;
+        bool cancel_cleared_position_area = false;
+        bool cancel_cleared_x_dynamics = false;
     };
     const auto base =
         std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    constexpr int kOpposingFrames = 12;
-    constexpr int kTotalFrames = 28;
-    constexpr float kMotionRatioPerFrame = 0.00078125f;
+    const auto run_case = [&](float roi_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.425f;
+        config.counts_per_pixel_y = 0.4f;
+        config.max_counts_per_frame = 14.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        Trace trace;
+        const float roi_width = 320.0f * roi_scale;
+
+        AimFrame established_frame = make_frame(1, base);
+        established_frame.roi_width = static_cast<int>(roi_width);
+        established_frame.roi_height = static_cast<int>(roi_width);
+        established_frame.control_at = established_frame.captured_at +
+            std::chrono::milliseconds(1);
+        established_frame.control_center_x = roi_width * 0.4375f;
+        established_frame.control_center_y = roi_width * 0.50f;
+        established_frame.lock_active = true;
+        established_frame.detections = {body_box(
+            roi_width * 0.48125f,
+            roi_width * 0.50f,
+            roi_width * 0.125f,
+            roi_width * 0.25f)};
+        const AimResult established = aim.process(established_frame);
+        expect(established.status == AimStatus::SUCCESS &&
+                   established.has_target &&
+                   established.command.dx_counts > 0,
+               "反向共同边位置兜底回归必须先建立 +X 输出");
+        const std::uint64_t track_id = established.target.track_id;
+
+        // 先用静态反侧误差启动纯位置探针。首个探针命令发出后，检测框
+        // 每帧按 ROI 比例向准星改善 1.25%，让位置面积在首个反馈窗内
+        // 被既有 hold-band 规则反复清零。旧实现到窗口末尾会从 1/2/3
+        // counts 穿透成全量输出；新契约必须取消探针、保持原 +X 已确认
+        // 方向，且整个过程不读取绝对速度或游戏类型。
+        bool improve_after_probe = false;
+        bool previous_probe_active = false;
+        int improvement_steps = 0;
+        for (int offset = 0; offset < 24; ++offset) {
+            if (improve_after_probe) {
+                ++improvement_steps;
+            }
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(offset + 2),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(offset + 1) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.6125f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                roi_width *
+                    (0.48125f +
+                     0.0125f *
+                         static_cast<float>(improvement_steps)),
+                roi_width * 0.50f,
+                roi_width * 0.125f,
+                roi_width * 0.25f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "位置探针证据失效回归必须逐帧保留目标");
+            if (!result.has_target) continue;
+            if (result.target.track_id != track_id) {
+                ++trace.identity_changes;
+            }
+            if (result.control.reverse_position_improvement_reset_x) {
+                trace.improvement_reset_seen = true;
+            }
+            if (result.control.reverse_probe_limited_x) {
+                trace.maximum_probe_magnitude = std::max(
+                    trace.maximum_probe_magnitude,
+                    std::abs(result.command.dx_counts));
+            }
+            if (result.command.dx_counts < 0 &&
+                !result.control.reverse_probe_limited_x) {
+                ++trace.unlimited_negative_commands;
+            }
+            if (trace.first_negative_offset < 0 &&
+                result.command.dx_counts < 0) {
+                trace.first_negative_offset = offset;
+                trace.first_negative_magnitude =
+                    std::abs(result.command.dx_counts);
+                improve_after_probe = true;
+            }
+            if (trace.cancel_offset < 0 && previous_probe_active &&
+                !result.control.reverse_probe_active_x) {
+                trace.cancel_offset = offset;
+                trace.cancel_gate_blocked =
+                    result.control.reverse_gate_blocked_x;
+                trace.cancel_preserved_output_direction =
+                    result.control.reverse_output_direction_x > 0.0f &&
+                    result.command.dx_counts == 0;
+                trace.cancel_cleared_position_area =
+                    result.control.reverse_position_ratio_seconds_x <
+                    result.control
+                        .reverse_required_position_ratio_seconds_x;
+                trace.cancel_cleared_x_dynamics =
+                    std::fabs(result.control.filtered_x_counts) <= 0.001f &&
+                    std::fabs(result.control.shaped_x_counts) <= 0.001f &&
+                    std::fabs(result.control
+                        .residual_before_quantization_x_counts) <= 0.001f;
+                break;
+            }
+            previous_probe_active =
+                result.control.reverse_probe_active_x;
+        }
+        return trace;
+    };
+
+    const Trace normal = run_case(1.0f);
+    const Trace doubled = run_case(2.0f);
+    const auto valid = [](const Trace& trace) {
+        return trace.identity_changes == 0 &&
+            trace.first_negative_offset >= 0 &&
+            trace.first_negative_magnitude == 1 &&
+            trace.maximum_probe_magnitude > 0 &&
+            trace.maximum_probe_magnitude <= 3 &&
+            trace.improvement_reset_seen &&
+            trace.cancel_offset > trace.first_negative_offset &&
+            trace.cancel_offset - trace.first_negative_offset >= 3 &&
+            trace.cancel_offset - trace.first_negative_offset <= 6 &&
+            trace.unlimited_negative_commands == 0 &&
+            trace.cancel_gate_blocked &&
+            trace.cancel_preserved_output_direction &&
+            trace.cancel_cleared_position_area &&
+            trace.cancel_cleared_x_dynamics;
+    };
+    expect(valid(normal) && valid(doubled) &&
+               std::abs(normal.first_negative_offset -
+                        doubled.first_negative_offset) <= 1 &&
+               std::abs(normal.cancel_offset -
+                        doubled.cancel_offset) <= 1,
+           "纯位置探针在首反馈窗内丢失位置证据且没有独立快速事实时，"
+           "必须取消而不能穿透成全量输出；320/640 首负/取消偏移=" +
+               std::to_string(normal.first_negative_offset) + "/" +
+               std::to_string(doubled.first_negative_offset) + "/" +
+               std::to_string(normal.cancel_offset) + "/" +
+               std::to_string(doubled.cancel_offset) +
+               "，探针峰值/全量负命令=" +
+               std::to_string(normal.maximum_probe_magnitude) + "/" +
+               std::to_string(normal.unlimited_negative_commands));
+}
+
+void test_tracking_reverse_position_probe_commits_after_fast_confirmation() {
+    struct Trace {
+        int first_probe_offset = -1;
+        int first_committed_offset = -1;
+        int maximum_probe_magnitude = 0;
+        int identity_changes = 0;
+        bool committed_with_fast_evidence = false;
+        bool committed_without_probe_limit = false;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
     const auto run_case = [&](float roi_scale) {
         AimConfig config;
         config.min_confirmed_hits = 1;
@@ -5032,15 +5220,20 @@ void test_tracking_reverse_position_fallback_waits_out_opposing_translation() {
         expect(established.status == AimStatus::SUCCESS &&
                    established.has_target &&
                    established.command.dx_counts > 0,
-               "反向共同边位置兜底回归必须先建立 +X 输出");
+               "位置探针快速确认回归必须先建立 +X 输出");
         const std::uint64_t track_id = established.target.track_id;
 
-        // 控制中心切到目标右侧后，候选方向为 -X；前 12 帧原始框
-        // 每帧仍向 +X 小幅共同平移。单帧改善小于既有 hold band，
-        // 位置面积会先达到 10% 门，但当前共同边明确反对候选方向，
-        // 不能像真实 Run 的三个错误 episode 一样仅凭面积反拉。
-        // 随后框停止移动，零共同边继续保留静态最终活性。
-        for (int offset = 0; offset < kTotalFrames; ++offset) {
+        // 先由静态 10% ROI×反馈窗面积启动纯位置探针；探针开始后，
+        // 框每帧沿候选 -X 共同平移 1% ROI。该独立共同边事实累计满
+        // 既有反馈窗后必须立即升级为全量换向，证明取消穿透不会牺牲
+        // 真正移动目标的追赶通道。
+        bool move_after_probe = false;
+        bool previous_probe_active = false;
+        int movement_steps = 0;
+        for (int offset = 0; offset < 28; ++offset) {
+            if (move_after_probe) {
+                ++movement_steps;
+            }
             AimFrame frame = make_frame(
                 static_cast<std::uint64_t>(offset + 2),
                 base + std::chrono::microseconds(
@@ -5052,51 +5245,45 @@ void test_tracking_reverse_position_fallback_waits_out_opposing_translation() {
             frame.control_center_x = roi_width * 0.6125f;
             frame.control_center_y = roi_width * 0.50f;
             frame.lock_active = true;
-            const int motion_steps = std::min(offset + 1, kOpposingFrames);
             frame.detections = {body_box(
                 roi_width *
-                    (0.48125f +
-                     kMotionRatioPerFrame * motion_steps),
+                    (0.48125f -
+                     0.01f * static_cast<float>(movement_steps)),
                 roi_width * 0.50f,
                 roi_width * 0.125f,
                 roi_width * 0.25f)};
             const AimResult result = aim.process(frame);
             expect(result.status == AimStatus::SUCCESS && result.has_target,
-                   "反向共同边位置兜底回归必须逐帧保留目标");
+                   "位置探针快速确认期间必须逐帧保留目标");
             if (!result.has_target) continue;
             if (result.target.track_id != track_id) {
                 ++trace.identity_changes;
             }
-            const bool opposing_translation =
-                result.control.reverse_translation_reset_reason_x ==
-                AimReverseTranslationResetReason::OPPOSING_TRANSLATION;
-            const bool position_threshold_reached =
-                result.control.reverse_required_position_ratio_seconds_x >
-                    0.0f &&
-                result.control.reverse_position_ratio_seconds_x >=
-                    result.control
-                        .reverse_required_position_ratio_seconds_x;
-            if (offset < kOpposingFrames && opposing_translation &&
-                position_threshold_reached &&
-                !result.control.reverse_position_ready_x) {
-                ++trace.opposing_veto_frames;
+            if (result.control.reverse_probe_limited_x) {
+                trace.maximum_probe_magnitude = std::max(
+                    trace.maximum_probe_magnitude,
+                    std::abs(result.command.dx_counts));
             }
-            if (offset < kOpposingFrames &&
-                result.command.dx_counts < 0) {
-                ++trace.premature_negative_commands;
+            if (trace.first_probe_offset < 0 &&
+                result.command.dx_counts < 0 &&
+                result.control.reverse_probe_active_x &&
+                result.control.reverse_probe_limited_x) {
+                trace.first_probe_offset = offset;
+                move_after_probe = true;
             }
-            if (trace.first_negative_offset < 0 &&
-                result.command.dx_counts < 0) {
-                trace.first_negative_offset = offset;
-                trace.first_negative_magnitude =
-                    std::abs(result.command.dx_counts);
-                trace.release_position_ready =
-                    result.control.reverse_position_ready_x;
-                trace.release_after_nonopposing_observation =
-                    result.control.reverse_translation_reset_reason_x !=
-                    AimReverseTranslationResetReason::
-                        OPPOSING_TRANSLATION;
+            if (trace.first_committed_offset < 0 &&
+                previous_probe_active &&
+                result.command.dx_counts < 0 &&
+                !result.control.reverse_probe_active_x) {
+                trace.first_committed_offset = offset;
+                trace.committed_with_fast_evidence =
+                    result.control.reverse_evidence_ready_x ||
+                    result.control.reverse_translation_ready_x;
+                trace.committed_without_probe_limit =
+                    !result.control.reverse_probe_limited_x;
             }
+            previous_probe_active =
+                result.control.reverse_probe_active_x;
         }
         return trace;
     };
@@ -5105,24 +5292,24 @@ void test_tracking_reverse_position_fallback_waits_out_opposing_translation() {
     const Trace doubled = run_case(2.0f);
     const auto valid = [](const Trace& trace) {
         return trace.identity_changes == 0 &&
-            trace.premature_negative_commands == 0 &&
-            trace.opposing_veto_frames > 0 &&
-            trace.first_negative_offset >= kOpposingFrames &&
-            trace.first_negative_offset < kTotalFrames &&
-            trace.first_negative_magnitude > 0 &&
-            trace.first_negative_magnitude <= 3 &&
-            trace.release_position_ready &&
-            trace.release_after_nonopposing_observation;
+            trace.first_probe_offset >= 0 &&
+            trace.maximum_probe_magnitude > 0 &&
+            trace.maximum_probe_magnitude <= 3 &&
+            trace.first_committed_offset > trace.first_probe_offset &&
+            trace.first_committed_offset - trace.first_probe_offset >= 3 &&
+            trace.first_committed_offset - trace.first_probe_offset <= 10 &&
+            trace.committed_with_fast_evidence &&
+            trace.committed_without_probe_limit;
     };
     expect(valid(normal) && valid(doubled) &&
-               std::abs(normal.first_negative_offset -
-                        doubled.first_negative_offset) <= 2,
-           "纯位置兜底必须等待当前原始共同边不再反对候选方向，"
-           "同时保留静止最终活性；320/640 首负/反向否决帧=" +
-               std::to_string(normal.first_negative_offset) + "/" +
-               std::to_string(doubled.first_negative_offset) + "/" +
-               std::to_string(normal.opposing_veto_frames) + "/" +
-               std::to_string(doubled.opposing_veto_frames));
+               std::abs(normal.first_committed_offset -
+                        doubled.first_committed_offset) <= 1,
+           "纯位置探针获得独立共同边/CUSUM 确认后必须及时升级全量换向；"
+           "320/640 探针/确认偏移=" +
+               std::to_string(normal.first_probe_offset) + "/" +
+               std::to_string(doubled.first_probe_offset) + "/" +
+               std::to_string(normal.first_committed_offset) + "/" +
+               std::to_string(doubled.first_committed_offset));
 }
 
 void test_tracking_reverse_position_fallback_resets_while_error_improves() {
@@ -5385,14 +5572,13 @@ void test_tracking_reverse_feedback_probe_uses_minimum_count() {
                std::to_string(doubled.second_window_command_magnitude));
 }
 
-void test_tracking_reverse_fixed_center_opposing_translation_vetoes_position() {
+void test_tracking_reverse_fixed_center_pose_episode_is_bounded() {
     struct Trace {
         int first_negative_offset = -1;
         int first_negative_magnitude = 0;
         int first_negative_y = 0;
         int identity_changes = 0;
         int premature_negative_commands = 0;
-        int opposing_position_veto_frames = 0;
         int evidence_dip_negative_commands = 0;
         double evidence_dip_position_area = -1.0;
         double first_negative_position_area = -1.0;
@@ -5447,10 +5633,8 @@ void test_tracking_reverse_fixed_center_opposing_translation_vetoes_position() {
         // 移到左侧。首次大负共同边发生时基础点仍在准星右侧，不会给
         // -X CUSUM 注入捷径。F9 起框中心继续按 ROI 比例缓慢右移，
         // 形变实例同时小幅增加宽高，所以原始共同边始终指向 +X、与
-        // 候选 -X 相反。schema 12 真机数据已经证明，仅凭位置面积在
-        // 这种观测下放行会产生反拉，随后又被独立几何事实纠正；因此即使
-        // 10%/30% 面积已经越门，也必须等待当前共同平移不再反对。第 7
-        // 个跟随帧一次性
+        // 候选 -X 相反，只能由位置面积启动有界辨识探针。第 7 个跟随帧
+        // 一次性
         // 增加 0.625% ROI 的宽高基线（320 ROI 为 2 px），使该帧共同
         // 平移占比跌到 70% 以下；
         // 已进入的姿态 episode 必须跨过这次证据抖动保持 30% 门。
@@ -5484,17 +5668,6 @@ void test_tracking_reverse_fixed_center_opposing_translation_vetoes_position() {
             }
             if (result.command.dx_counts < 0 && follow_offset <= 0) {
                 ++trace.premature_negative_commands;
-            }
-            if (result.control.reverse_translation_reset_reason_x ==
-                    AimReverseTranslationResetReason::
-                        OPPOSING_TRANSLATION &&
-                result.control.reverse_required_position_ratio_seconds_x >
-                    0.0f &&
-                result.control.reverse_position_ratio_seconds_x >=
-                    result.control
-                        .reverse_required_position_ratio_seconds_x &&
-                !result.control.reverse_position_ready_x) {
-                ++trace.opposing_position_veto_frames;
             }
             if (deforming && follow_offset == kEvidenceDipOffset) {
                 trace.evidence_dip_position_area = public_position_area;
@@ -5620,8 +5793,14 @@ void test_tracking_reverse_fixed_center_opposing_translation_vetoes_position() {
     const auto valid_stable = [](const Trace& trace) {
         return trace.identity_changes == 0 &&
             trace.premature_negative_commands == 0 &&
-            trace.first_negative_offset < 0 &&
-            trace.opposing_position_veto_frames > 0;
+            trace.first_negative_offset >= 1 &&
+            trace.first_negative_offset < 16 &&
+            trace.first_negative_magnitude == 1 &&
+            trace.first_negative_y == 0 &&
+            trace.first_negative_position_area >=
+                kStablePositionThreshold &&
+            trace.first_negative_position_area <
+                kDeformationPositionThreshold;
     };
     const auto valid_deforming = [](const Trace& trace) {
         return trace.identity_changes == 0 &&
@@ -5631,28 +5810,33 @@ void test_tracking_reverse_fixed_center_opposing_translation_vetoes_position() {
                 kStablePositionThreshold &&
             trace.evidence_dip_position_area <
                 kDeformationPositionThreshold &&
-            trace.first_negative_offset < 0 &&
-            trace.opposing_position_veto_frames > 0;
+            trace.first_negative_offset >= 8 &&
+            trace.first_negative_offset < 20 &&
+            trace.first_negative_magnitude == 1 &&
+            trace.first_negative_y == 0 &&
+            trace.first_negative_seconds_since_positive >= 0.015 &&
+            trace.first_negative_position_area >=
+                kDeformationPositionThreshold;
     };
     expect(valid_stable(stable) && valid_stable(stable_doubled) &&
                valid_deforming(deforming) &&
-               valid_deforming(deforming_doubled),
-           "固定 ROI 中心下，只要原始共同边仍明确反对候选方向，稳定框"
-           "和持续宽高形变都不得仅凭 10%/30% 位置面积反拉；"
-           "稳定320/640、形变320/640首负=" +
+               valid_deforming(deforming_doubled) &&
+               std::abs(stable.first_negative_offset -
+                        stable_doubled.first_negative_offset) <= 1 &&
+               std::abs(deforming.first_negative_offset -
+                        deforming_doubled.first_negative_offset) <= 1 &&
+               deforming.first_negative_offset >=
+                   stable.first_negative_offset + 2 &&
+               deforming_doubled.first_negative_offset >=
+                   stable_doubled.first_negative_offset + 2,
+           "固定 ROI 中心下，稳定框须按 10% 面积及时启动有界探针，持续"
+           "宽高形变须跨单帧证据下降保持 30% 有界门；稳定320/640、"
+           "形变320/640首负=" +
                std::to_string(stable.first_negative_offset) + "/" +
                std::to_string(stable_doubled.first_negative_offset) +
                "/" + std::to_string(deforming.first_negative_offset) +
                "/" +
                std::to_string(deforming_doubled.first_negative_offset) +
-               "，反向共同边否决帧=" +
-               std::to_string(stable.opposing_position_veto_frames) + "/" +
-               std::to_string(stable_doubled.opposing_position_veto_frames) +
-               "/" +
-               std::to_string(deforming.opposing_position_veto_frames) +
-               "/" +
-               std::to_string(
-                   deforming_doubled.opposing_position_veto_frames) +
                "，形变证据下降面积=" +
                std::to_string(deforming.evidence_dip_position_area) +
                "，首例=" + deforming.first_negative_context);
@@ -9431,11 +9615,12 @@ int main() {
     test_tracking_reverse_consecutive_common_translation_releases();
     test_tracking_reverse_robust_common_translation_survives_edge_noise();
     test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget();
-    test_tracking_reverse_position_fallback_releases_after_old_inventory();
-    test_tracking_reverse_position_fallback_waits_out_opposing_translation();
+    test_tracking_reverse_position_probe_retries_without_unconfirmed_commit();
+    test_tracking_reverse_position_probe_cancels_after_evidence_resets();
+    test_tracking_reverse_position_probe_commits_after_fast_confirmation();
     test_tracking_reverse_position_fallback_resets_while_error_improves();
     test_tracking_reverse_feedback_probe_uses_minimum_count();
-    test_tracking_reverse_fixed_center_opposing_translation_vetoes_position();
+    test_tracking_reverse_fixed_center_pose_episode_is_bounded();
     test_tracking_reverse_partial_semantics_discards_stale_position_area();
     test_two_axis_shaper_alignment_cannot_bypass_growth_slew();
     test_tracking_x_growth_slew_discards_saturated_residual();
