@@ -113,6 +113,8 @@ struct AimControlDiagnostics {
     float reverse_deformation_seconds_x = 0.0f;
     float reverse_required_evidence_ratio_seconds_x = 0.0f;
     float reverse_required_position_ratio_seconds_x = 0.0f;
+    float reverse_probe_direction_x = 0.0f;
+    float reverse_probe_age_ms_x = 0.0f;
     bool pending_positive_x = false;
     bool pending_negative_x = false;
     bool reverse_candidate_x = false;
@@ -122,6 +124,8 @@ struct AimControlDiagnostics {
     bool reverse_evidence_ready_x = false;
     bool reverse_position_ready_x = false;
     bool reverse_gate_blocked_x = false;
+    bool reverse_probe_active_x = false;
+    bool reverse_probe_limited_x = false;
     bool pending_inventory_hold_blocked_x = false;
     bool deadzone_quiet = false;
     bool shaper_direction_reset_x = false;

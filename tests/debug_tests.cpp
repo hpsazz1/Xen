@@ -138,7 +138,11 @@ RuntimePipelineSample make_sample(
         sample.aim_control.reverse_evidence_ratio_seconds_x = 0.0002f;
         sample.aim_control.reverse_required_evidence_ratio_seconds_x =
             0.00042f;
+        sample.aim_control.reverse_probe_direction_x = -1.0f;
+        sample.aim_control.reverse_probe_age_ms_x = 8.334f;
         sample.aim_control.reverse_gate_blocked_x = true;
+        sample.aim_control.reverse_probe_active_x = true;
+        sample.aim_control.reverse_probe_limited_x = true;
         sample.aim_command.sequence = sequence;
         sample.aim_command.dx_counts = 20;
         sample.aim_command.dy_counts = -10;
@@ -250,7 +254,7 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-        expect(csv_text.find("Xen Runtime Debug Report v8") != std::string::npos &&
+        expect(csv_text.find("Xen Runtime Debug Report v9") != std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
                csv_text.find("d3d11_to_directml_ms") != std::string::npos &&
@@ -271,6 +275,8 @@ void test_report_summary_and_atomic_files() {
                     std::string::npos &&
                 csv_text.find("aim_reverse_gate_blocked_x") !=
                     std::string::npos &&
+                csv_text.find("aim_reverse_probe_age_ms_x") !=
+                    std::string::npos &&
                csv_text.find("ndi_receive_call_ms") != std::string::npos &&
                csv_text.find("pipeline_complete_ms") != std::string::npos &&
                csv_text.find("capture_to_mouse_completion_ms") !=
@@ -280,7 +286,7 @@ void test_report_summary_and_atomic_files() {
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 8") != std::string::npos &&
+    expect(json_text.find("\"schema\": 9") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -298,6 +304,10 @@ void test_report_summary_and_atomic_files() {
                 json_text.find("\"aim_reverse_candidate_x\": true") !=
                     std::string::npos &&
                 json_text.find("\"aim_reverse_gate_blocked_x\": true") !=
+                    std::string::npos &&
+                json_text.find("\"aim_reverse_probe_active_x\": true") !=
+                    std::string::npos &&
+                json_text.find("\"aim_reverse_probe_age_ms_x\": 8.") !=
                     std::string::npos &&
                json_text.find("\"final_snapshot\"") != std::string::npos &&
                json_text.find("\"source_width\": 2560") !=

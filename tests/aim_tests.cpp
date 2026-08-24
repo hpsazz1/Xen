@@ -4094,12 +4094,38 @@ void test_tracking_pending_direction_does_not_cancel_opposite_inventory() {
         mixed_inventory_hold.target.velocity_x * 0.004f + 0.8f;
     int released_elapsed_ms = -1;
     int released_command = 0;
+    std::string release_trace;
     std::uint64_t sequence = 5;
     for (int elapsed_ms = 16; elapsed_ms <= 48; elapsed_ms += 4) {
+        const float applied_control_center_x = hold_control_center_x;
         const AimResult result = run_frame(
-            sequence++, elapsed_ms, 130.0f, hold_control_center_x);
+            sequence++, elapsed_ms, 130.0f, applied_control_center_x);
         hold_control_center_x = result.target.base_aim_x +
             result.target.velocity_x * 0.004f + 0.8f;
+        release_trace += "[t=" + std::to_string(elapsed_ms) +
+            ",id=" + std::to_string(result.target.track_id) +
+            ",base_error=" + std::to_string(
+                result.target.base_aim_x - applied_control_center_x) +
+            ",cmd=" + std::to_string(result.command.dx_counts) +
+            ",candidate=" +
+            std::to_string(result.control.reverse_candidate_x) +
+            ",blocked=" +
+            std::to_string(result.control.reverse_gate_blocked_x) +
+            ",partial=" +
+            std::to_string(
+                result.control.reverse_partial_semantics_transition_x) +
+            ",pending_hold=" +
+            std::to_string(
+                result.control.pending_inventory_hold_blocked_x) +
+            ",evidence=" +
+            std::to_string(result.control.reverse_evidence_ready_x) +
+            ",position=" +
+            std::to_string(result.control.reverse_position_ready_x) +
+            ",probe=" +
+            std::to_string(result.control.reverse_probe_active_x) + "/" +
+            std::to_string(result.control.reverse_probe_limited_x) + "/" +
+            std::to_string(result.control.reverse_probe_age_ms_x) +
+            ",dead=" + std::to_string(result.control.deadzone_quiet) + "]";
         if (result.command.dx_counts < 0) {
             released_elapsed_ms = elapsed_ms;
             released_command = result.command.dx_counts;
@@ -4123,7 +4149,35 @@ void test_tracking_pending_direction_does_not_cancel_opposite_inventory() {
                std::to_string(released_command) + "/" +
                std::to_string(mixed_inventory_hold.target.base_aim_x) + "/" +
                std::to_string(negative.target.base_aim_x +
-                              negative.target.velocity_x * 0.004f + 0.8f));
+                               negative.target.velocity_x * 0.004f + 0.8f) +
+               "，负向诊断=" +
+               std::to_string(negative.target.track_id) + "/" +
+               std::to_string(negative.control.reverse_candidate_x) + "/" +
+               std::to_string(negative.control.reverse_gate_blocked_x) +
+               "/" +
+               std::to_string(negative.control.reverse_evidence_ready_x) +
+               "/" +
+               std::to_string(negative.control.reverse_position_ready_x) +
+               "/" +
+               std::to_string(negative.control.reverse_probe_active_x) +
+               "/" +
+               std::to_string(negative.control.reverse_probe_limited_x) +
+               "，保持诊断=" +
+               std::to_string(mixed_inventory_hold.target.track_id) + "/" +
+               std::to_string(
+                   mixed_inventory_hold.control.reverse_candidate_x) + "/" +
+               std::to_string(
+                   mixed_inventory_hold.control.reverse_gate_blocked_x) +
+               "/" +
+               std::to_string(
+                   mixed_inventory_hold.control.pending_inventory_hold_blocked_x) +
+               "/" +
+               std::to_string(
+                   mixed_inventory_hold.control.reverse_probe_active_x) +
+               "/" +
+               std::to_string(
+                   mixed_inventory_hold.control.reverse_probe_limited_x) +
+               "，轨迹=" + release_trace);
 }
 
 void test_tracking_reverse_requires_base_and_common_edge_direction() {
@@ -4198,11 +4252,14 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
     struct Trace {
         int first_negative_command_offset = -1;
         int first_negative_command_magnitude = 0;
+        int maximum_probe_command_magnitude = 0;
+        int first_committed_negative_offset = -1;
         int release_y_command = 0;
         int identity_changes = 0;
         int reverse_gate_blocked_frames = 0;
         int previous_direction_pending_frames = 0;
         bool release_diagnostic_consistent = false;
+        bool first_negative_was_probe_limited = false;
         double first_negative_elapsed_seconds = -1.0;
         std::string first_negative_context;
     };
@@ -4296,12 +4353,25 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
             if (result.control.reverse_previous_direction_pending_x) {
                 ++trace.previous_direction_pending_frames;
             }
+            if (result.control.reverse_probe_limited_x) {
+                trace.maximum_probe_command_magnitude = std::max(
+                    trace.maximum_probe_command_magnitude,
+                    std::abs(result.command.dx_counts));
+            }
+            if (trace.first_committed_negative_offset < 0 &&
+                result.control.reverse_output_direction_x < 0.0f &&
+                result.command.dx_counts < 0 &&
+                !result.control.reverse_probe_active_x) {
+                trace.first_committed_negative_offset = offset;
+            }
             if (trace.first_negative_command_offset < 0 &&
                 result.command.dx_counts < 0) {
                 trace.first_negative_command_offset = offset;
                 trace.first_negative_command_magnitude =
                     std::abs(result.command.dx_counts);
                 trace.release_y_command = result.command.dy_counts;
+                trace.first_negative_was_probe_limited =
+                    result.control.reverse_probe_limited_x;
                 trace.first_negative_elapsed_seconds =
                     static_cast<double>(elapsed_microseconds) / 1000000.0;
                 trace.release_diagnostic_consistent =
@@ -4339,6 +4409,13 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
             trace.first_negative_command_offset >= 4 &&
             trace.first_negative_command_offset < 20 &&
             trace.first_negative_command_magnitude == 1 &&
+            trace.first_negative_was_probe_limited &&
+            trace.maximum_probe_command_magnitude > 0 &&
+            trace.maximum_probe_command_magnitude <= 3 &&
+            trace.first_committed_negative_offset >
+                trace.first_negative_command_offset &&
+            trace.first_committed_negative_offset <=
+                trace.first_negative_command_offset + 8 &&
             trace.release_y_command < 0 &&
             trace.reverse_gate_blocked_frames > 0 &&
             trace.previous_direction_pending_frames > 0 &&
@@ -4366,6 +4443,9 @@ void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
                "，首负幅值=" +
                std::to_string(normal.first_negative_command_magnitude) + "/" +
                std::to_string(doubled.first_negative_command_magnitude) +
+               "，探测峰值/确认偏移=" +
+               std::to_string(normal.maximum_probe_command_magnitude) + "/" +
+               std::to_string(normal.first_committed_negative_offset) +
                "，首例=" + normal.first_negative_context);
 }
 

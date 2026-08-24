@@ -87,10 +87,18 @@ function New-ControlDiagnosticSample(
     $sample.aim_reverse_position_ratio_seconds_x = 0.0
     $sample.aim_reverse_required_evidence_ratio_seconds_x = 0.00042
     $sample.aim_reverse_required_position_ratio_seconds_x = 0.0015
+    $sample.aim_reverse_probe_direction_x = if ($Sequence -eq 4) {
+        -1.0
+    } else { 0.0 }
+    $sample.aim_reverse_probe_age_ms_x = if ($Sequence -eq 4) {
+        8.0
+    } else { 0.0 }
     $sample.aim_reverse_evidence_ready_x = $false
     $sample.aim_reverse_position_ready_x = $false
     $sample.aim_reverse_gate_blocked_x =
         $ZeroReason -eq "reverse_gate"
+    $sample.aim_reverse_probe_active_x = $Sequence -eq 4
+    $sample.aim_reverse_probe_limited_x = $Sequence -eq 4
     $sample.aim_pending_inventory_hold_blocked_x =
         $ZeroReason -eq "pending_inventory_hold"
     $sample.aim_deadzone_quiet = $ZeroReason -eq "deadzone_quiet"
@@ -132,5 +140,26 @@ Assert-Condition ($controlSummary.x.nonzero_direction_reversals -eq 2 -and
         $controlSummary.x.reversal_window_dominant_causes.shaper_direction_reset `
             -eq 1) `
     "Control diagnostics must summarize reversal zero-window causes."
+Assert-Condition ($controlSummary.schema -eq 2 -and
+        [bool]$controlSummary.reverse_probe_diagnostics_available -and
+        $controlSummary.x.diagnostic_flags.reverse_probe_active -eq 1 -and
+        $controlSummary.x.diagnostic_flags.reverse_probe_limited -eq 1 -and
+        $controlSummary.x.reverse_probe_age_ms.p50 -eq 8.0) `
+    "Control diagnostics must summarize feedback-confirmation probes."
+
+$legacyControlSamples = foreach ($controlSample in $controlSamples) {
+    $legacy = [ordered]@{}
+    foreach ($key in $controlSample.Keys) {
+        if ($key -notlike "aim_reverse_probe_*") {
+            $legacy[$key] = $controlSample[$key]
+        }
+    }
+    $legacy
+}
+$legacyControlSummary = Get-XenAimControlDiagnosticsSummary `
+    $legacyControlSamples
+Assert-Condition (-not [bool]$legacyControlSummary.reverse_probe_diagnostics_available -and
+        $legacyControlSummary.x.nonzero_direction_reversals -eq 2) `
+    "Schema 8 control diagnostics must remain backward-compatible."
 
 Write-Host "Aim report and control-diagnostics tests passed."

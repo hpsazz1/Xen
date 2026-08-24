@@ -10,22 +10,35 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "aim_report.ps1")
 . (Join-Path $PSScriptRoot "aim_control_diagnostics.ps1")
 
+if ($null -eq ("XenAimDiagnosticsAtomicFile" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+
+public static class XenAimDiagnosticsAtomicFile {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool MoveFileExW(
+        string existingName,
+        string newName,
+        uint flags);
+}
+'@
+}
+
 function Replace-FileAtomically([string]$Pending, [string]$Target) {
-    if (Test-Path -LiteralPath $Target -PathType Leaf) {
-        $backup = "$Target.backup-$([guid]::NewGuid().ToString('N'))"
-        try {
-            [System.IO.File]::Replace($Pending, $Target, $backup)
-        } finally {
-            if (Test-Path -LiteralPath $backup -PathType Leaf) {
-                Remove-Item -LiteralPath $backup -Force
-            }
-        }
-    } else {
-        Move-Item -LiteralPath $Pending -Destination $Target
+    $moveFileReplaceExisting = 0x1
+    $moveFileWriteThrough = 0x8
+    if (-not [XenAimDiagnosticsAtomicFile]::MoveFileExW(
+            $Pending, $Target,
+            $moveFileReplaceExisting -bor $moveFileWriteThrough)) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "无法原子发布 Aim 控制诊断，Win32 error=$errorCode：$Target"
     }
 }
 
-$resolvedRun = (Resolve-Path -LiteralPath $RunDirectory -ErrorAction Stop).Path
+$resolvedRunInfo = Resolve-Path -LiteralPath $RunDirectory -ErrorAction Stop
+# UNC 路径的 Path 带 `Microsoft.PowerShell.Core\FileSystem::` provider 前缀，
+# 不能再交给 System.IO.Path。ProviderPath 才是 Win32/IO API 可接受的真实路径。
+$resolvedRun = [string]$resolvedRunInfo.ProviderPath
 $automaticRoot = Join-Path $resolvedRun "automatic"
 if (-not (Test-Path -LiteralPath $automaticRoot -PathType Container)) {
     throw "Run 尚无 automatic 报告目录：$automaticRoot"
@@ -37,7 +50,7 @@ $evidence = @()
 foreach ($file in $reports) {
     $report = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
         ConvertFrom-Json
-    if ([int]$report.schema -ne 8 -or $null -eq $report.samples) {
+    if ([int]$report.schema -lt 8 -or $null -eq $report.samples) {
         continue
     }
     $reportSamples = @($report.samples)
@@ -50,11 +63,12 @@ foreach ($file in $reports) {
         size = [long]$file.Length
         sha256 = (Get-FileHash -LiteralPath $file.FullName `
             -Algorithm SHA256).Hash
+        schema = [int]$report.schema
         sample_count = $reportSamples.Count
     }
 }
 if ($samples.Count -eq 0) {
-    throw "Run 没有可分析的 schema 8 Runtime JSON。"
+    throw "Run 没有可分析的 schema 8+ Runtime JSON。"
 }
 
 $taskPath = Join-Path $resolvedRun "task.json"

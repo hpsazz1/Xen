@@ -78,6 +78,12 @@ function Get-XenAimControlDiagnosticsSummary {
     if ($missingFields.Count -ne 0) {
         throw "Runtime 样本缺少控制诊断字段：$($missingFields -join ', ')"
     }
+    $probeFields = @(
+        "aim_reverse_probe_direction_x", "aim_reverse_probe_age_ms_x",
+        "aim_reverse_probe_active_x", "aim_reverse_probe_limited_x")
+    $probeDiagnosticsAvailable = @($probeFields | Where-Object {
+        $availableFields -notcontains $_
+    }).Count -eq 0
 
     $reasonNames = @(
         "reverse_gate", "pending_inventory_hold", "deadzone_quiet",
@@ -99,6 +105,8 @@ function Get-XenAimControlDiagnosticsSummary {
         reverse_evidence_ready = [uint64]0
         reverse_position_ready = [uint64]0
         reverse_gate_blocked = [uint64]0
+        reverse_probe_active = [uint64]0
+        reverse_probe_limited = [uint64]0
         pending_inventory_hold_blocked = [uint64]0
         post_alignment_growth_limited = [uint64]0
     }
@@ -107,6 +115,7 @@ function Get-XenAimControlDiagnosticsSummary {
     $zeroPending = [System.Collections.Generic.List[double]]::new()
     $evidenceProgress = [System.Collections.Generic.List[double]]::new()
     $positionProgress = [System.Collections.Generic.List[double]]::new()
+    $probeAge = [System.Collections.Generic.List[double]]::new()
     $reversalZeroFrames = [System.Collections.Generic.List[double]]::new()
 
     [uint64]$controlFrames = 0
@@ -159,7 +168,7 @@ function Get-XenAimControlDiagnosticsSummary {
         $previousTrackId = $trackId
         $controllerDt.Add([double]$sample.aim_controller_dt_ms)
 
-        foreach ($entry in @(
+        $flagMappings = @(
                 @("reverse_candidate", "aim_reverse_candidate_x"),
                 @("reverse_previous_direction_pending",
                   "aim_reverse_previous_direction_pending_x"),
@@ -174,7 +183,14 @@ function Get-XenAimControlDiagnosticsSummary {
                 @("pending_inventory_hold_blocked",
                   "aim_pending_inventory_hold_blocked_x"),
                 @("post_alignment_growth_limited",
-                  "aim_post_alignment_growth_limited_x"))) {
+                  "aim_post_alignment_growth_limited_x"))
+        if ($probeDiagnosticsAvailable) {
+            $flagMappings += ,@(
+                "reverse_probe_active", "aim_reverse_probe_active_x")
+            $flagMappings += ,@(
+                "reverse_probe_limited", "aim_reverse_probe_limited_x")
+        }
+        foreach ($entry in $flagMappings) {
             $propertyName = [string]$entry[1]
             if ([bool]$sample.$propertyName) {
                 ++$flags[[string]$entry[0]]
@@ -195,6 +211,10 @@ function Get-XenAimControlDiagnosticsSummary {
             $positionProgress.Add(
                 [double]$sample.aim_reverse_position_ratio_seconds_x /
                     $requiredPosition)
+        }
+        if ($probeDiagnosticsAvailable -and
+            [bool]$sample.aim_reverse_probe_active_x) {
+            $probeAge.Add([double]$sample.aim_reverse_probe_age_ms_x)
         }
 
         $command = @($sample.aim_command)
@@ -254,11 +274,12 @@ function Get-XenAimControlDiagnosticsSummary {
         [double]$zeroFrames / [double]$diagnosedFrames
     }
     return [ordered]@{
-        schema = 1
+        schema = 2
         sample_count = $items.Count
         controllable_frames = $controlFrames
         diagnosed_frames = $diagnosedFrames
         diagnostics_missing_frames = $diagnosticsMissingFrames
+        reverse_probe_diagnostics_available = $probeDiagnosticsAvailable
         x = [ordered]@{
             command_zero_frames = $zeroFrames
             command_nonzero_frames = $diagnosedFrames - $zeroFrames
@@ -282,6 +303,8 @@ function Get-XenAimControlDiagnosticsSummary {
                 Get-XenAimDistributionSummary $evidenceProgress
             reverse_position_progress_ratio =
                 Get-XenAimDistributionSummary $positionProgress
+            reverse_probe_age_ms =
+                Get-XenAimDistributionSummary $probeAge
         }
     }
 }

@@ -325,6 +325,11 @@ constexpr float kTrackingHorizontalReverseFallbackRoiRatio = 0.10f;
 // 稳定态使用 10% ROI×反馈窗，形变态使用 30% 并等待一个反馈窗。
 // 位置面积只降权而不永久禁用；不按当前框宽值或人物速度分档。
 constexpr float kTrackingHorizontalReverseDeformationFallbackScale = 3.0f;
+// 真机诊断表明，形变反向门放行后若在同一个反馈窗内继续
+// 递增新方向命令，会把硬停后累积的大误差转成未观测响应的追赶
+// 脉冲。换向确认窗内的命令因此上限为 3 counts；只有首帧退出延迟库存且
+// 候选依然成立，才确认新输出方向。
+constexpr float kTrackingHorizontalReverseProbeMaximumCounts = 3.0f;
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
            std::isfinite(detection.x2) && std::isfinite(detection.y2) &&
@@ -699,6 +704,9 @@ struct Aim::Impl {
     float tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
     float tracking_horizontal_reverse_deformation_seconds = 0.0f;
     bool tracking_horizontal_reverse_deformation_active = false;
+    float tracking_horizontal_reverse_probe_direction = 0.0f;
+    std::chrono::steady_clock::time_point
+        tracking_horizontal_reverse_probe_started_at{};
     std::chrono::steady_clock::time_point controller_at{};
     bool controller_initialized = false;
     bool shaper_initialized = false;
@@ -2368,6 +2376,8 @@ struct Aim::Impl {
         tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
         tracking_horizontal_reverse_deformation_seconds = 0.0f;
         tracking_horizontal_reverse_deformation_active = false;
+        tracking_horizontal_reverse_probe_direction = 0.0f;
+        tracking_horizontal_reverse_probe_started_at = {};
         controller_at = {};
         controller_initialized = false;
         shaper_initialized = false;
@@ -3001,6 +3011,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
+            tracking_horizontal_reverse_probe_direction = 0.0f;
+            tracking_horizontal_reverse_probe_started_at = {};
             if (!frame.lock_active) {
                 // 丢框早退不会经过函数末尾的公共清理。安全门已经释放时，
                 // 还必须丢弃上一次输出方向，避免恢复锁定后继承一条已经
@@ -3290,6 +3302,10 @@ struct Aim::Impl {
             desired_y = proportional_y;
         }
         diagnostics.desired_before_reverse_x_counts = desired_x;
+        // 首个换向帧只允许有界命令进入延迟库存，不得把
+        // “已确认输出方向”提前改成候选方向。函数末尾使用
+        // 该标志区分首个探测脉冲与延迟反馈后确认的换向。
+        bool reverse_release_probe_x = false;
         if (config.enable_delay_compensation &&
             config.control_delay_ms > 0.0f &&
             !config.enable_prediction) {
@@ -3319,11 +3335,15 @@ struct Aim::Impl {
                 const float translation_consistency_fourth =
                     translation_consistency_squared *
                     translation_consistency_squared;
-                if (aligned_base_error_x <= 0.0f) {
+                if (aligned_base_error_x <= 0.0f &&
+                    tracking_horizontal_reverse_probe_direction !=
+                        desired_direction_x) {
                     tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
                     tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
                     tracking_horizontal_reverse_deformation_seconds = 0.0f;
                     tracking_horizontal_reverse_deformation_active = false;
+                    tracking_horizontal_reverse_probe_direction = 0.0f;
+                    tracking_horizontal_reverse_probe_started_at = {};
                     desired_x = 0.0f;
                     diagnostics.reverse_gate_blocked_x = true;
                 } else {
@@ -3363,6 +3383,11 @@ struct Aim::Impl {
                          pending_inventory.has_positive_x) ||
                         (tracking_horizontal_output_direction < 0.0f &&
                          pending_inventory.has_negative_x);
+                    const bool candidate_direction_pending =
+                        (desired_direction_x > 0.0f &&
+                         pending_inventory.has_positive_x) ||
+                        (desired_direction_x < 0.0f &&
+                         pending_inventory.has_negative_x);
                     const bool partial_semantics_transition =
                         (track.partial_visibility_x_frames > 0 &&
                          track.partial_visibility_x_frames <
@@ -3382,6 +3407,8 @@ struct Aim::Impl {
                         tracking_horizontal_reverse_deformation_seconds =
                             0.0f;
                         tracking_horizontal_reverse_deformation_active = false;
+                        tracking_horizontal_reverse_probe_direction = 0.0f;
+                        tracking_horizontal_reverse_probe_started_at = {};
                     } else {
                         // 姿态 episode 是观测几何生命周期，不能在等待同向
                         // 旧库存过期时或被单帧共同边置信度抹掉。库存期允许
@@ -3454,9 +3481,39 @@ struct Aim::Impl {
                         required_position_fallback;
                     diagnostics.reverse_evidence_ready_x = evidence_ready;
                     diagnostics.reverse_position_ready_x = position_ready;
-                    if (!evidence_ready && !position_ready) {
+                    if (tracking_horizontal_reverse_probe_direction ==
+                        desired_direction_x) {
+                        const float probe_age_seconds =
+                            tracking_horizontal_reverse_probe_started_at ==
+                                    std::chrono::steady_clock::time_point{}
+                                ? 0.0f
+                                : static_cast<float>(
+                                      std::chrono::duration<double>(
+                                          current_controller_at -
+                                          tracking_horizontal_reverse_probe_started_at)
+                                          .count());
+                        const float feedback_window_seconds =
+                            config.control_delay_ms / 1000.0f;
+                        if (probe_age_seconds < feedback_window_seconds) {
+                            // 首个反馈窗内最多允许持续 3 counts，但不递增。
+                            // 相比原有 1、2、3、4… 的未反馈追赶，这保留真实
+                            // 反向的最低活性，同时把形变假反向脉冲限在平坦边界层。
+                            reverse_release_probe_x = true;
+                        }
+                    } else if (!evidence_ready && !position_ready) {
+                        tracking_horizontal_reverse_probe_direction = 0.0f;
+                        tracking_horizontal_reverse_probe_started_at = {};
                         desired_x = 0.0f;
                         diagnostics.reverse_gate_blocked_x = true;
+                    } else {
+                        // 证据门首次通过后只发一个有界探测。若候选方向
+                        // 已有未反馈命令，必须先等它退出库存，禁止同窗叠加。
+                        if (candidate_direction_pending) {
+                            desired_x = 0.0f;
+                            diagnostics.reverse_gate_blocked_x = true;
+                        } else {
+                            reverse_release_probe_x = true;
+                        }
                     }
                 }
             } else {
@@ -3464,6 +3521,22 @@ struct Aim::Impl {
                 tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
                 tracking_horizontal_reverse_deformation_seconds = 0.0f;
                 tracking_horizontal_reverse_deformation_active = false;
+                // 探测命令未产生反馈前，单帧候选消失可能只是延迟投影或
+                // 量化过零。保留探测时间戳到首个反馈窗结束；若旧方向
+                // 真的恢复非零输出，函数末尾仍会立即清理该候选。
+                const bool probe_feedback_pending =
+                    tracking_horizontal_reverse_probe_direction != 0.0f &&
+                    tracking_horizontal_reverse_probe_started_at !=
+                        std::chrono::steady_clock::time_point{} &&
+                    std::chrono::duration<double>(
+                        current_controller_at -
+                        tracking_horizontal_reverse_probe_started_at)
+                            .count() <
+                        static_cast<double>(config.control_delay_ms) / 1000.0;
+                if (!probe_feedback_pending) {
+                    tracking_horizontal_reverse_probe_direction = 0.0f;
+                    tracking_horizontal_reverse_probe_started_at = {};
+                }
             }
         }
         if (config.enable_delay_compensation &&
@@ -3557,6 +3630,19 @@ struct Aim::Impl {
             tracking_horizontal_reverse_deformation_seconds;
         diagnostics.reverse_deformation_active_x =
             tracking_horizontal_reverse_deformation_active;
+        diagnostics.reverse_probe_direction_x =
+            tracking_horizontal_reverse_probe_direction;
+        diagnostics.reverse_probe_active_x =
+            tracking_horizontal_reverse_probe_direction != 0.0f;
+        diagnostics.reverse_probe_limited_x = reverse_release_probe_x;
+        if (tracking_horizontal_reverse_probe_started_at !=
+            std::chrono::steady_clock::time_point{}) {
+            diagnostics.reverse_probe_age_ms_x = static_cast<float>(
+                std::chrono::duration<double, std::milli>(
+                    current_controller_at -
+                    tracking_horizontal_reverse_probe_started_at)
+                    .count());
+        }
         diagnostics.desired_x_counts = desired_x;
         // 进入死区也不能按某个像素速度阈值硬清状态；只有上一命令、到期
         // 命令和整个在途窗都归零，才可证明执行器库存已经安静。
@@ -3582,6 +3668,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
+            tracking_horizontal_reverse_probe_direction = 0.0f;
+            tracking_horizontal_reverse_probe_started_at = {};
             controller_at = current_controller_at;
             diagnostics.deadzone_quiet = true;
             diagnostics.filtered_x_counts = filtered_x;
@@ -3687,6 +3775,16 @@ struct Aim::Impl {
                 residual_x = 0.0f;
             }
             clamp_vector(shaped_x, shaped_y, config.max_counts_per_frame);
+        }
+        if (reverse_release_probe_x) {
+            // 探测仍经过比例、平滑、方向和 slew 全链路，这里只对最终
+            // X 轴幅值做 3 counts 上限。真实 dt 偶发变大时也不能让
+            // 240 counts/s 的 slew 一帧跨出多个探测 count。
+            shaped_x = std::clamp(
+                shaped_x,
+                -kTrackingHorizontalReverseProbeMaximumCounts,
+                kTrackingHorizontalReverseProbeMaximumCounts);
+            residual_x = 0.0f;
         }
 
         diagnostics.shaped_x_counts = shaped_x;
@@ -3823,6 +3921,18 @@ struct Aim::Impl {
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
+            tracking_horizontal_reverse_probe_direction = 0.0f;
+            tracking_horizontal_reverse_probe_started_at = {};
+        } else if (command.dx_counts != 0 && reverse_release_probe_x) {
+            const float command_direction = std::copysign(
+                1.0f, static_cast<float>(command.dx_counts));
+            if (tracking_horizontal_reverse_probe_direction !=
+                command_direction) {
+                tracking_horizontal_reverse_probe_direction =
+                    command_direction;
+                tracking_horizontal_reverse_probe_started_at =
+                    current_controller_at;
+            }
         } else if (command.dx_counts != 0) {
             tracking_horizontal_output_direction = std::copysign(
                 1.0f, static_cast<float>(command.dx_counts));
@@ -3830,7 +3940,22 @@ struct Aim::Impl {
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
+            tracking_horizontal_reverse_probe_direction = 0.0f;
+            tracking_horizontal_reverse_probe_started_at = {};
         }
+        diagnostics.reverse_probe_direction_x =
+            tracking_horizontal_reverse_probe_direction;
+        diagnostics.reverse_probe_active_x =
+            tracking_horizontal_reverse_probe_direction != 0.0f;
+        diagnostics.reverse_probe_age_ms_x =
+            tracking_horizontal_reverse_probe_started_at ==
+                    std::chrono::steady_clock::time_point{}
+                ? 0.0f
+                : static_cast<float>(
+                      std::chrono::duration<double, std::milli>(
+                          current_controller_at -
+                          tracking_horizontal_reverse_probe_started_at)
+                          .count());
         record_issued_command(
             frame, current_controller_at,
             previous_command_x, previous_command_y);
