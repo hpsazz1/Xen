@@ -4383,6 +4383,139 @@ void test_tracking_reverse_consecutive_common_translation_releases() {
                first_context);
 }
 
+void test_tracking_reverse_robust_common_translation_survives_edge_noise() {
+    struct Trace {
+        int first_negative_offset = -1;
+        int pending_frames = 0;
+        int identity_changes = 0;
+        int legacy_maximum_dwell_frames = 0;
+        bool translation_ready = false;
+        bool position_ready = false;
+        bool probe_limited = false;
+    };
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto run_case = [&](float roi_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 100.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_prediction = false;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        Aim aim(config);
+        Trace trace;
+        const float roi_width = 320.0f * roi_scale;
+        float center_x = roi_width * 0.65625f;
+        float box_width = roi_width * 0.125f;
+
+        AimFrame established_frame = make_frame(1, base);
+        established_frame.roi_width = static_cast<int>(roi_width);
+        established_frame.roi_height = static_cast<int>(roi_width);
+        established_frame.control_at = established_frame.captured_at +
+            std::chrono::milliseconds(1);
+        established_frame.control_center_x = roi_width * 0.50f;
+        established_frame.control_center_y = roi_width * 0.50f;
+        established_frame.lock_active = true;
+        established_frame.detections = {body_box(
+            center_x, roi_width * 0.50f, box_width, roi_width * 0.25f)};
+        const AimResult established = aim.process(established_frame);
+        expect(established.status == AimStatus::SUCCESS &&
+                   established.has_target &&
+                   established.command.dx_counts > 0,
+               "鲁棒共同边回归必须先建立 +X 输出");
+        const std::uint64_t track_id = established.target.track_id;
+
+        int legacy_dwell_frames = 0;
+        for (int offset = 0; offset < 24; ++offset) {
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(offset + 2),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(offset + 1) * 4167));
+            frame.roi_width = static_cast<int>(roi_width);
+            frame.roi_height = static_cast<int>(roi_width);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = roi_width * 0.66875f;
+            frame.control_center_y = roi_width * 0.50f;
+            frame.lock_active = true;
+            center_x -= roi_width * 0.003125f;
+            // 平移每帧为 0.3125% ROI；普通帧宽度增加约
+            // 0.0771% ROI，原始共同平移一致性约为 0.78。每四帧
+            // 改为增加约 0.1147% ROI，使原始一致性降到约 0.69。
+            // 三观测中值在该噪声帧仍约为 0.705，可恢复连续驻留。
+            // 旧逐帧驻留因此永远到不了 15 ms，而三观测中值仍由
+            // 当前帧同向共同边授权，可补回单帧幅值噪声。
+            const bool noisy_edge = offset % 4 == 2;
+            if (noisy_edge) {
+                box_width += roi_width * 0.001147f;
+                legacy_dwell_frames = 0;
+            } else {
+                box_width += roi_width * 0.000771f;
+                ++legacy_dwell_frames;
+                trace.legacy_maximum_dwell_frames = std::max(
+                    trace.legacy_maximum_dwell_frames,
+                    legacy_dwell_frames);
+            }
+            frame.detections = {body_box(
+                center_x, roi_width * 0.50f, box_width,
+                roi_width * 0.25f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "边界幅值噪声期间必须逐帧保留目标");
+            if (!result.has_target) continue;
+            if (result.target.track_id != track_id) {
+                ++trace.identity_changes;
+            }
+            if (result.control.reverse_previous_direction_pending_x) {
+                ++trace.pending_frames;
+            }
+            if (trace.first_negative_offset < 0 &&
+                result.command.dx_counts < 0) {
+                trace.first_negative_offset = offset;
+                trace.translation_ready =
+                    result.control.reverse_translation_ready_x;
+                trace.position_ready =
+                    result.control.reverse_position_ready_x;
+                trace.probe_limited =
+                    result.control.reverse_probe_limited_x;
+            }
+        }
+        return trace;
+    };
+
+    const Trace normal = run_case(1.0f);
+    const Trace doubled = run_case(2.0f);
+    const auto valid = [](const Trace& trace) {
+        return trace.identity_changes == 0 &&
+            trace.pending_frames > 0 &&
+            trace.legacy_maximum_dwell_frames <= 3 &&
+            trace.first_negative_offset >= 5 &&
+            trace.first_negative_offset < 16 &&
+            trace.translation_ready &&
+            !trace.position_ready &&
+            trace.probe_limited;
+    };
+    expect(valid(normal) && valid(doubled) &&
+               std::abs(normal.first_negative_offset -
+                        doubled.first_negative_offset) <= 1,
+           "当前帧共同边同向但单帧幅值一致性间歇低于 0.70 时，三观测"
+           "中值必须先于位置兜底完成 15 ms 驻留，且 320/640 ROI 同构；"
+           "首负/旧逐帧最大驻留/来源=" +
+               std::to_string(normal.first_negative_offset) + "/" +
+               std::to_string(doubled.first_negative_offset) + "/" +
+               std::to_string(normal.legacy_maximum_dwell_frames) + "/" +
+               std::to_string(normal.translation_ready) + "/" +
+               std::to_string(normal.position_ready));
+}
+
 void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
     struct Trace {
         int first_negative_command_offset = -1;
@@ -8903,6 +9036,7 @@ int main() {
     test_tracking_pending_direction_does_not_cancel_opposite_inventory();
     test_tracking_reverse_requires_base_and_common_edge_direction();
     test_tracking_reverse_consecutive_common_translation_releases();
+    test_tracking_reverse_robust_common_translation_survives_edge_noise();
     test_tracking_reverse_position_fallback_releases_after_old_inventory();
     test_tracking_reverse_position_fallback_resets_while_error_improves();
     test_tracking_reverse_feedback_probe_uses_minimum_count();

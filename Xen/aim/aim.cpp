@@ -99,9 +99,13 @@ struct Track {
     int horizontal_trend_observation_isolation_frames = 0;
     int horizontal_maneuver_frames = 0;
     float horizontal_maneuver_direction = 0.0f;
-    // 带符号的两边共同平移一致性，范围 [-1, 1]。控制反向证据只消费
-    // 这份无量纲几何方向/置信度，不读取人物像素速度或当前框宽。
+    // 当前相邻观测的带符号两边共同平移一致性，范围 [-1, 1]。轨迹变点
+    // 继续消费这份新鲜原始几何，不读取人物像素速度或当前框宽。
     float horizontal_translation_evidence_x = 0.0f;
+    // 反向门专用的三观测鲁棒共同边一致性。当前帧原始共同边必须与
+    // 三点中值同向，因此静止、符号反转和语义切换仍会立即归零；中值只
+    // 修复单帧边界幅值噪声，不能凭历史方向跨帧伪造平移。
+    float horizontal_control_translation_evidence_x = 0.0f;
     float last_observation_x1 = 0.0f;
     float last_observation_x2 = 0.0f;
     std::chrono::steady_clock::time_point last_observation_at{};
@@ -996,6 +1000,7 @@ struct Aim::Impl {
         bool horizontal_trend_active = false;
         HorizontalTrendEstimate horizontal_trend;
         track.horizontal_translation_evidence_x = 0.0f;
+        track.horizontal_control_translation_evidence_x = 0.0f;
 
         // 趋势窗口只接收连续的身体框中心。原始 head 框是否出现不会改变
         // 身体坐标系；真正切到 head-only 或轨迹丢帧才重建窗口，避免把两种
@@ -1008,6 +1013,7 @@ struct Aim::Impl {
             track.horizontal_maneuver_frames = 0;
             track.horizontal_maneuver_direction = 0.0f;
             track.horizontal_translation_evidence_x = 0.0f;
+            track.horizontal_control_translation_evidence_x = 0.0f;
             reset_horizontal_trend(track);
         }
         if (!observation.head_only && box_semantics_changed) {
@@ -1040,6 +1046,8 @@ struct Aim::Impl {
             track.horizontal_translation_evidence_x =
                 raw_common_motion == 0.0f ? 0.0f : std::copysign(
                     raw_translation_consistency, raw_common_motion);
+            track.horizontal_control_translation_evidence_x =
+                track.horizontal_translation_evidence_x;
             const double raw_delta_seconds =
                 std::chrono::duration<double>(
                     track.state_at - track.last_observation_at).count();
@@ -1064,6 +1072,18 @@ struct Aim::Impl {
                             ? std::fabs(robust_common_motion) /
                                   robust_translation_evidence
                             : 0.0f;
+                    if (raw_common_motion * robust_horizontal_velocity_x >
+                        0.0f) {
+                        // 当前原始共同边提供新鲜方向，三观测中值只补回因
+                        // 单帧轮廓幅值噪声损失的一致性。两者不同向、当前
+                        // 静止或语义重建均不借用历史，连续驻留语义不变。
+                        track.horizontal_control_translation_evidence_x =
+                            std::copysign(
+                                std::max(
+                                    raw_translation_consistency,
+                                    robust_horizontal_translation_consistency),
+                                raw_common_motion);
+                    }
                     const float previous_raw_center_x =
                         (track.last_observation_x1 +
                          track.last_observation_x2) * 0.5f;
@@ -1983,6 +2003,7 @@ struct Aim::Impl {
             track.horizontal_maneuver_frames = 0;
             track.horizontal_maneuver_direction = 0.0f;
             track.horizontal_translation_evidence_x = 0.0f;
+            track.horizontal_control_translation_evidence_x = 0.0f;
             track.horizontal_observation_initialized = false;
             track.last_observation_at = {};
             reset_horizontal_raw_motion(track);
@@ -3343,7 +3364,7 @@ struct Aim::Impl {
                 const float aligned_base_error_x = std::max(
                     0.0f, base_error_x * desired_direction_x);
                 const float aligned_translation_evidence =
-                    track.horizontal_translation_evidence_x *
+                    track.horizontal_control_translation_evidence_x *
                     desired_direction_x;
                 const float translation_consistency_squared =
                     aligned_translation_evidence *
