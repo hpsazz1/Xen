@@ -80,11 +80,14 @@ function New-ControlDiagnosticSample(
         [double]$CommandX
     }
     $sample.aim_pending_absolute_x_counts = 3.0
-    $sample.aim_reverse_candidate_x = $false
+    $sample.aim_reverse_candidate_x = $Sequence -eq 4
     $sample.aim_reverse_previous_direction_pending_x = $false
     $sample.aim_reverse_deformation_active_x = $false
     $sample.aim_reverse_evidence_ratio_seconds_x = 0.0
     $sample.aim_reverse_position_ratio_seconds_x = 0.0
+    $sample.aim_reverse_translation_seconds_x = if ($Sequence -eq 4) {
+        0.015
+    } else { 0.0 }
     $sample.aim_reverse_required_evidence_ratio_seconds_x = 0.00042
     $sample.aim_reverse_required_position_ratio_seconds_x = 0.0015
     $sample.aim_reverse_probe_direction_x = if ($Sequence -eq 4) {
@@ -94,6 +97,7 @@ function New-ControlDiagnosticSample(
         8.0
     } else { 0.0 }
     $sample.aim_reverse_evidence_ready_x = $false
+    $sample.aim_reverse_translation_ready_x = $Sequence -eq 4
     $sample.aim_reverse_position_ready_x = $false
     $sample.aim_reverse_gate_blocked_x =
         $ZeroReason -eq "reverse_gate"
@@ -140,17 +144,21 @@ Assert-Condition ($controlSummary.x.nonzero_direction_reversals -eq 2 -and
         $controlSummary.x.reversal_window_dominant_causes.shaper_direction_reset `
             -eq 1) `
     "Control diagnostics must summarize reversal zero-window causes."
-Assert-Condition ($controlSummary.schema -eq 2 -and
+Assert-Condition ($controlSummary.schema -eq 3 -and
         [bool]$controlSummary.reverse_probe_diagnostics_available -and
+        [bool]$controlSummary.reverse_translation_diagnostics_available -and
         $controlSummary.x.diagnostic_flags.reverse_probe_active -eq 1 -and
         $controlSummary.x.diagnostic_flags.reverse_probe_limited -eq 1 -and
-        $controlSummary.x.reverse_probe_age_ms.p50 -eq 8.0) `
-    "Control diagnostics must summarize feedback-confirmation probes."
+        $controlSummary.x.diagnostic_flags.reverse_translation_ready -eq 1 -and
+        $controlSummary.x.reverse_probe_age_ms.p50 -eq 8.0 -and
+        $controlSummary.x.reverse_translation_dwell_ms.p50 -eq 15.0) `
+    "Control diagnostics must summarize translation-confirmed probes."
 
 $legacyControlSamples = foreach ($controlSample in $controlSamples) {
     $legacy = [ordered]@{}
     foreach ($key in $controlSample.Keys) {
-        if ($key -notlike "aim_reverse_probe_*") {
+        if ($key -notlike "aim_reverse_probe_*" -and
+            $key -notlike "aim_reverse_translation_*") {
             $legacy[$key] = $controlSample[$key]
         }
     }
@@ -159,7 +167,8 @@ $legacyControlSamples = foreach ($controlSample in $controlSamples) {
 $legacyControlSummary = Get-XenAimControlDiagnosticsSummary `
     $legacyControlSamples
 Assert-Condition (-not [bool]$legacyControlSummary.reverse_probe_diagnostics_available -and
+        -not [bool]$legacyControlSummary.reverse_translation_diagnostics_available -and
         $legacyControlSummary.x.nonzero_direction_reversals -eq 2) `
-    "Schema 8 control diagnostics must remain backward-compatible."
+    "Schema 8/9 control diagnostics must remain backward-compatible."
 
 Write-Host "Aim report and control-diagnostics tests passed."

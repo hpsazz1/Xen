@@ -110,6 +110,7 @@ struct AimControlDiagnostics {
     float reverse_output_direction_x = 0.0f;
     float reverse_evidence_ratio_seconds_x = 0.0f;
     float reverse_position_ratio_seconds_x = 0.0f;
+    float reverse_translation_seconds_x = 0.0f;
     float reverse_deformation_seconds_x = 0.0f;
     float reverse_required_evidence_ratio_seconds_x = 0.0f;
     float reverse_required_position_ratio_seconds_x = 0.0f;
@@ -122,6 +123,7 @@ struct AimControlDiagnostics {
     bool reverse_partial_semantics_transition_x = false;
     bool reverse_deformation_active_x = false;
     bool reverse_evidence_ready_x = false;
+    bool reverse_translation_ready_x = false;
     bool reverse_position_ready_x = false;
     bool reverse_gate_blocked_x = false;
     bool reverse_probe_active_x = false;

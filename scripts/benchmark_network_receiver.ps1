@@ -302,8 +302,8 @@ try {
         -Encoding UTF8 | ConvertFrom-Json
     $expectedPerformanceProbes = $EnablePerformanceProbes -eq "on"
     $reportFields = @($report.PSObject.Properties.Name)
-    if ([int]$report.schema -ne 9) {
-        throw "网络基准 Runtime 报告 schema 不是 9：$($report.schema)"
+    if ([int]$report.schema -ne 10) {
+        throw "网络基准 Runtime 报告 schema 不是 10：$($report.schema)"
     }
     if ([bool]$report.performance_probes_enabled -ne
             $expectedPerformanceProbes) {
@@ -317,7 +317,7 @@ try {
         -not [bool]$environment.complete -or
         $null -eq $environment.report.aim -or
         -not [bool]$environment.report.aim.contract_valid) {
-        throw "网络基准环境清单缺少完整且通过的 Aim schema 9 门禁。"
+        throw "网络基准环境清单缺少完整且通过的 Aim schema 10 门禁。"
     }
     $snapshot = $report.final_snapshot
     $runtimeReportPublished = $true

@@ -707,7 +707,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v9\n"
+        csv << "# Xen Runtime Debug Report v10\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -824,11 +824,14 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 "aim_reverse_deformation_active_x,"
                 "aim_reverse_evidence_ratio_seconds_x,"
                 "aim_reverse_position_ratio_seconds_x,"
+                "aim_reverse_translation_seconds_x,"
                 "aim_reverse_deformation_seconds_x,"
                 "aim_reverse_required_evidence_ratio_seconds_x,"
                 "aim_reverse_required_position_ratio_seconds_x,"
                 "aim_reverse_probe_direction_x,aim_reverse_probe_age_ms_x,"
-                "aim_reverse_evidence_ready_x,aim_reverse_position_ready_x,"
+                "aim_reverse_evidence_ready_x,"
+                "aim_reverse_translation_ready_x,"
+                "aim_reverse_position_ready_x,"
                 "aim_reverse_gate_blocked_x,"
                 "aim_reverse_probe_active_x,aim_reverse_probe_limited_x,"
                 "aim_pending_inventory_hold_blocked_x,aim_deadzone_quiet,"
@@ -956,6 +959,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                     sample.aim_control.reverse_deformation_active_x) << ','
                 << sample.aim_control.reverse_evidence_ratio_seconds_x << ','
                 << sample.aim_control.reverse_position_ratio_seconds_x << ','
+                << sample.aim_control.reverse_translation_seconds_x << ','
                 << sample.aim_control.reverse_deformation_seconds_x << ','
                 << sample.aim_control
                     .reverse_required_evidence_ratio_seconds_x << ','
@@ -964,6 +968,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.aim_control.reverse_probe_direction_x << ','
                 << sample.aim_control.reverse_probe_age_ms_x << ','
                 << bool_name(sample.aim_control.reverse_evidence_ready_x) << ','
+                << bool_name(sample.aim_control.reverse_translation_ready_x)
+                << ','
                 << bool_name(sample.aim_control.reverse_position_ready_x) << ','
                 << bool_name(sample.aim_control.reverse_gate_blocked_x) << ','
                 << bool_name(sample.aim_control.reverse_probe_active_x) << ','
@@ -1056,7 +1062,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 9,\n"
+             << "{\n  \"schema\": 10,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -1278,6 +1284,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << sample.aim_control.reverse_evidence_ratio_seconds_x
                  << ", \"aim_reverse_position_ratio_seconds_x\": "
                  << sample.aim_control.reverse_position_ratio_seconds_x
+                 << ", \"aim_reverse_translation_seconds_x\": "
+                 << sample.aim_control.reverse_translation_seconds_x
                  << ", \"aim_reverse_deformation_seconds_x\": "
                  << sample.aim_control.reverse_deformation_seconds_x
                  << ", \"aim_reverse_required_evidence_ratio_seconds_x\": "
@@ -1292,6 +1300,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << sample.aim_control.reverse_probe_age_ms_x
                  << ", \"aim_reverse_evidence_ready_x\": "
                  << bool_name(sample.aim_control.reverse_evidence_ready_x)
+                 << ", \"aim_reverse_translation_ready_x\": "
+                 << bool_name(sample.aim_control.reverse_translation_ready_x)
                  << ", \"aim_reverse_position_ready_x\": "
                  << bool_name(sample.aim_control.reverse_position_ready_x)
                  << ", \"aim_reverse_gate_blocked_x\": "

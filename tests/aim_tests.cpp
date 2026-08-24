@@ -4248,6 +4248,131 @@ void test_tracking_reverse_requires_base_and_common_edge_direction() {
                std::to_string(wrong_reverse_commands) + "/" + first_context);
 }
 
+void test_tracking_reverse_consecutive_common_translation_releases() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 100.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 50.0f;
+    Aim aim(config);
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+
+    AimFrame established_frame = make_frame(1, base);
+    established_frame.control_at = established_frame.captured_at +
+        std::chrono::milliseconds(1);
+    established_frame.control_center_x = 160.0f;
+    established_frame.lock_active = true;
+    established_frame.detections = {body(170.0f, 160.0f)};
+    const AimResult established = aim.process(established_frame);
+    expect(established.status == AimStatus::SUCCESS &&
+               established.has_target &&
+               established.command.dx_counts > 0,
+           "共同平移反向回归必须先建立 +X 物理输出");
+
+    int pending_frames = 0;
+    int first_negative_offset = -1;
+    int translation_reset_offset = -1;
+    bool first_negative_translation_ready = false;
+    bool first_negative_position_ready = false;
+    bool first_negative_probe_limited = false;
+    float first_negative_translation_ms = 0.0f;
+    float body_center_x = 170.0f;
+    bool inject_stationary_frame = false;
+    bool stationary_frame_injected = false;
+    std::string first_context;
+    for (int offset = 0; offset < 24; ++offset) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(offset + 2),
+            base + std::chrono::microseconds(
+                static_cast<long long>(offset + 1) * 4167));
+        frame.control_at = frame.captured_at +
+            std::chrono::milliseconds(1);
+        frame.control_center_x = 171.0f;
+        frame.lock_active = true;
+        // 固定宽高框连续向候选 -X 平移；两条边的一致性为 1。
+        // 旧 +X 库存退出前不得累计，退出后连续 15 ms 才可进入
+        // 原有 3-count 反馈确认窗。
+        if (!inject_stationary_frame) {
+            body_center_x -= 1.0f;
+        }
+        frame.detections = {body(body_center_x, 160.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "共同平移反向回归必须逐帧保留确认目标");
+        if (!result.has_target) continue;
+        if (result.control.reverse_previous_direction_pending_x) {
+            ++pending_frames;
+        }
+        if (inject_stationary_frame) {
+            stationary_frame_injected = true;
+            translation_reset_offset = offset;
+            expect(result.command.dx_counts == 0 &&
+                       result.control.reverse_translation_seconds_x == 0.0f &&
+                       !result.control.reverse_translation_ready_x,
+                   "共同平移驻留中插入一帧静止观测必须清零且不得提前反向");
+            inject_stationary_frame = false;
+        } else if (!stationary_frame_injected &&
+                   !result.control.reverse_previous_direction_pending_x &&
+                   result.control.reverse_translation_seconds_x > 0.0f &&
+                   !result.control.reverse_translation_ready_x) {
+            // 下一帧保持两边不动，证明连续驻留不能跨过零证据拼接。
+            inject_stationary_frame = true;
+        }
+        if (first_negative_offset < 0 &&
+            result.command.dx_counts < 0) {
+            first_negative_offset = offset;
+            first_negative_translation_ready =
+                result.control.reverse_translation_ready_x;
+            first_negative_position_ready =
+                result.control.reverse_position_ready_x;
+            first_negative_probe_limited =
+                result.control.reverse_probe_limited_x;
+            first_negative_translation_ms =
+                result.control.reverse_translation_seconds_x * 1000.0f;
+            first_context =
+                "offset=" + std::to_string(offset) +
+                ",base=" + std::to_string(result.target.base_aim_x) +
+                ",cmd=" + std::to_string(result.command.dx_counts) +
+                ",translation_ms=" +
+                std::to_string(first_negative_translation_ms) +
+                ",position=" +
+                std::to_string(
+                    result.control.reverse_position_ratio_seconds_x);
+        }
+    }
+
+    expect(pending_frames > 0 &&
+               stationary_frame_injected &&
+               translation_reset_offset >= 0 &&
+               first_negative_offset >= 6 &&
+               first_negative_offset >= translation_reset_offset + 4 &&
+               first_negative_offset < 20 &&
+               first_negative_translation_ready &&
+               !first_negative_position_ready &&
+               first_negative_probe_limited &&
+               first_negative_translation_ms >= 15.0f,
+           "旧方向库存退出后，候选方向共同边连续覆盖一个反馈窗应先于"
+           "30% 位置门进入有界确认；库存帧/驻留清零/首负/平移就绪/"
+           "位置就绪/探测限幅/上下文=" +
+               std::to_string(pending_frames) + "/" +
+               std::to_string(translation_reset_offset) + "/" +
+               std::to_string(first_negative_offset) + "/" +
+               std::to_string(first_negative_translation_ready) + "/" +
+               std::to_string(first_negative_position_ready) + "/" +
+               std::to_string(first_negative_probe_limited) + "/" +
+               first_context);
+}
+
 void test_tracking_reverse_position_fallback_releases_after_old_inventory() {
     struct Trace {
         int first_negative_command_offset = -1;
@@ -8488,6 +8613,7 @@ int main() {
     test_pending_command_age_uses_control_execution_time();
     test_tracking_pending_direction_does_not_cancel_opposite_inventory();
     test_tracking_reverse_requires_base_and_common_edge_direction();
+    test_tracking_reverse_consecutive_common_translation_releases();
     test_tracking_reverse_position_fallback_releases_after_old_inventory();
     test_tracking_reverse_fixed_center_pose_episode_is_bounded();
     test_tracking_reverse_partial_semantics_discards_stale_position_area();

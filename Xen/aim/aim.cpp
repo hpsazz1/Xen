@@ -702,6 +702,7 @@ struct Aim::Impl {
     float tracking_horizontal_output_direction = 0.0f;
     float tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
     float tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+    float tracking_horizontal_reverse_translation_seconds = 0.0f;
     float tracking_horizontal_reverse_deformation_seconds = 0.0f;
     bool tracking_horizontal_reverse_deformation_active = false;
     float tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -937,6 +938,7 @@ struct Aim::Impl {
             // 保留已经发出的方向库存和控制连续性。
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_translation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
         }
@@ -2374,6 +2376,7 @@ struct Aim::Impl {
         tracking_horizontal_output_direction = 0.0f;
         tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
         tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+        tracking_horizontal_reverse_translation_seconds = 0.0f;
         tracking_horizontal_reverse_deformation_seconds = 0.0f;
         tracking_horizontal_reverse_deformation_active = false;
         tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -3009,6 +3012,7 @@ struct Aim::Impl {
             // 恢复帧仍明确知道哪一侧属于真正反向。
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_translation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -3306,6 +3310,7 @@ struct Aim::Impl {
         // “已确认输出方向”提前改成候选方向。函数末尾使用
         // 该标志区分首个探测脉冲与延迟反馈后确认的换向。
         bool reverse_release_probe_x = false;
+        bool reverse_translation_ready_x = false;
         if (config.enable_delay_compensation &&
             config.control_delay_ms > 0.0f &&
             !config.enable_prediction) {
@@ -3340,6 +3345,7 @@ struct Aim::Impl {
                         desired_direction_x) {
                     tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
                     tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+                    tracking_horizontal_reverse_translation_seconds = 0.0f;
                     tracking_horizontal_reverse_deformation_seconds = 0.0f;
                     tracking_horizontal_reverse_deformation_active = false;
                     tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -3404,12 +3410,28 @@ struct Aim::Impl {
                             0.0f;
                         tracking_horizontal_reverse_position_ratio_seconds =
                             0.0f;
+                        tracking_horizontal_reverse_translation_seconds =
+                            0.0f;
                         tracking_horizontal_reverse_deformation_seconds =
                             0.0f;
                         tracking_horizontal_reverse_deformation_active = false;
                         tracking_horizontal_reverse_probe_direction = 0.0f;
                         tracking_horizontal_reverse_probe_started_at = {};
                     } else {
+                        // 实际整体平移不应再乘基础误差幅值后等待几十毫秒。
+                        // 候选方向的两条框边共同移动且连续覆盖一个反馈窗时，
+                        // 方向事实已经独立于人物速度和框宽成立。旧方向仍在途、
+                        // 单帧置信度下降或方向相反都会清零，不能把断续姿态
+                        // 形变拼成真实反向。
+                        if (previous_direction_pending ||
+                            aligned_translation_evidence <
+                                kHorizontalTranslationEvidenceConsistencyMinimum) {
+                            tracking_horizontal_reverse_translation_seconds =
+                                0.0f;
+                        } else {
+                            tracking_horizontal_reverse_translation_seconds +=
+                                controller_dt;
+                        }
                         // 姿态 episode 是观测几何生命周期，不能在等待同向
                         // 旧库存过期时或被单帧共同边置信度抹掉。库存期允许
                         // 年龄与真实 dt 并行增长，但位置面积仍保持为零；这样不会
@@ -3467,6 +3489,9 @@ struct Aim::Impl {
                     const bool evidence_ready =
                         tracking_horizontal_reverse_evidence_ratio_seconds >=
                         required_evidence;
+                    reverse_translation_ready_x =
+                        tracking_horizontal_reverse_translation_seconds >=
+                        config.control_delay_ms / 1000.0f;
                     const bool deformation_dwell_ready =
                         !tracking_horizontal_reverse_deformation_active ||
                         tracking_horizontal_reverse_deformation_seconds >=
@@ -3500,7 +3525,9 @@ struct Aim::Impl {
                             // 反向的最低活性，同时把形变假反向脉冲限在平坦边界层。
                             reverse_release_probe_x = true;
                         }
-                    } else if (!evidence_ready && !position_ready) {
+                    } else if (!evidence_ready &&
+                               !reverse_translation_ready_x &&
+                               !position_ready) {
                         tracking_horizontal_reverse_probe_direction = 0.0f;
                         tracking_horizontal_reverse_probe_started_at = {};
                         desired_x = 0.0f;
@@ -3519,6 +3546,7 @@ struct Aim::Impl {
             } else {
                 tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
                 tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+                tracking_horizontal_reverse_translation_seconds = 0.0f;
                 tracking_horizontal_reverse_deformation_seconds = 0.0f;
                 tracking_horizontal_reverse_deformation_active = false;
                 // 探测命令未产生反馈前，单帧候选消失可能只是延迟投影或
@@ -3626,6 +3654,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_evidence_ratio_seconds;
         diagnostics.reverse_position_ratio_seconds_x =
             tracking_horizontal_reverse_position_ratio_seconds;
+        diagnostics.reverse_translation_seconds_x =
+            tracking_horizontal_reverse_translation_seconds;
         diagnostics.reverse_deformation_seconds_x =
             tracking_horizontal_reverse_deformation_seconds;
         diagnostics.reverse_deformation_active_x =
@@ -3635,6 +3665,8 @@ struct Aim::Impl {
         diagnostics.reverse_probe_active_x =
             tracking_horizontal_reverse_probe_direction != 0.0f;
         diagnostics.reverse_probe_limited_x = reverse_release_probe_x;
+        diagnostics.reverse_translation_ready_x =
+            reverse_translation_ready_x;
         if (tracking_horizontal_reverse_probe_started_at !=
             std::chrono::steady_clock::time_point{}) {
             diagnostics.reverse_probe_age_ms_x = static_cast<float>(
@@ -3666,6 +3698,7 @@ struct Aim::Impl {
             tracking_horizontal_output_direction = 0.0f;
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_translation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -3919,6 +3952,7 @@ struct Aim::Impl {
             tracking_horizontal_output_direction = 0.0f;
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_translation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
@@ -3938,6 +3972,7 @@ struct Aim::Impl {
                 1.0f, static_cast<float>(command.dx_counts));
             tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
             tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
+            tracking_horizontal_reverse_translation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_seconds = 0.0f;
             tracking_horizontal_reverse_deformation_active = false;
             tracking_horizontal_reverse_probe_direction = 0.0f;
