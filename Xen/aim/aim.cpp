@@ -106,6 +106,10 @@ struct Track {
     // 三点中值同向，因此静止、符号反转和语义切换仍会立即归零；中值只
     // 修复单帧边界幅值噪声，不能凭历史方向跨帧伪造平移。
     float horizontal_control_translation_evidence_x = 0.0f;
+    // 保留反向门真正读取的相邻原始框边位移，供 Runtime 报告精确复盘；
+    // 这些标量不参与轨迹或控制更新，语义切换/缺帧时立即归零。
+    float horizontal_raw_left_motion_x = 0.0f;
+    float horizontal_raw_right_motion_x = 0.0f;
     float last_observation_x1 = 0.0f;
     float last_observation_x2 = 0.0f;
     std::chrono::steady_clock::time_point last_observation_at{};
@@ -1006,6 +1010,8 @@ struct Aim::Impl {
         HorizontalTrendEstimate horizontal_trend;
         track.horizontal_translation_evidence_x = 0.0f;
         track.horizontal_control_translation_evidence_x = 0.0f;
+        track.horizontal_raw_left_motion_x = 0.0f;
+        track.horizontal_raw_right_motion_x = 0.0f;
 
         // 趋势窗口只接收连续的身体框中心。原始 head 框是否出现不会改变
         // 身体坐标系；真正切到 head-only 或轨迹丢帧才重建窗口，避免把两种
@@ -1040,6 +1046,8 @@ struct Aim::Impl {
                 observation.x1 - track.last_observation_x1;
             const float raw_x2_motion =
                 observation.x2 - track.last_observation_x2;
+            track.horizontal_raw_left_motion_x = raw_x1_motion;
+            track.horizontal_raw_right_motion_x = raw_x2_motion;
             const float raw_common_motion =
                 common_edge_motion(raw_x1_motion, raw_x2_motion);
             const float raw_shape_motion =
@@ -2009,6 +2017,8 @@ struct Aim::Impl {
             track.horizontal_maneuver_direction = 0.0f;
             track.horizontal_translation_evidence_x = 0.0f;
             track.horizontal_control_translation_evidence_x = 0.0f;
+            track.horizontal_raw_left_motion_x = 0.0f;
+            track.horizontal_raw_right_motion_x = 0.0f;
             track.horizontal_observation_initialized = false;
             track.last_observation_at = {};
             reset_horizontal_raw_motion(track);
@@ -3021,6 +3031,16 @@ struct Aim::Impl {
         diagnostics.evaluated = true;
         diagnostics.reverse_output_direction_x =
             tracking_horizontal_output_direction;
+        diagnostics.reverse_translation_raw_left_x_roi_pixels =
+            track.horizontal_raw_left_motion_x;
+        diagnostics.reverse_translation_raw_right_x_roi_pixels =
+            track.horizontal_raw_right_motion_x;
+        diagnostics.reverse_translation_raw_common_x_roi_pixels =
+            common_edge_motion(
+                track.horizontal_raw_left_motion_x,
+                track.horizontal_raw_right_motion_x);
+        diagnostics.reverse_translation_control_evidence_x =
+            track.horizontal_control_translation_evidence_x;
         // 轨迹估计继续严格使用 captured_at；控制滤波、泄漏、slew 与
         // 命令库存统一使用 process() 解析出的同一控制时刻。
         if (track.predicted && !config.enable_prediction) {
@@ -3351,6 +3371,8 @@ struct Aim::Impl {
         bool reverse_translation_ready_x = false;
         bool reverse_translation_fresh_evidence_x = false;
         bool reverse_position_improvement_reset_x = false;
+        AimReverseTranslationResetReason reverse_translation_reset_reason_x =
+            AimReverseTranslationResetReason::NONE;
         if (config.enable_delay_compensation &&
             config.control_delay_ms > 0.0f &&
             !config.enable_prediction) {
@@ -3394,6 +3416,8 @@ struct Aim::Impl {
                     tracking_horizontal_reverse_probe_started_at = {};
                     desired_x = 0.0f;
                     diagnostics.reverse_gate_blocked_x = true;
+                    reverse_translation_reset_reason_x =
+                        AimReverseTranslationResetReason::BASE_NOT_ALIGNED;
                 } else {
                     // 采用带参考漂移的 Page/CUSUM：候选方向共同边增加
                     // 证据，反方向平移抵消；allowance 只按既有几何语义
@@ -3463,6 +3487,8 @@ struct Aim::Impl {
                         tracking_horizontal_reverse_deformation_active = false;
                         tracking_horizontal_reverse_probe_direction = 0.0f;
                         tracking_horizontal_reverse_probe_started_at = {};
+                        reverse_translation_reset_reason_x =
+                            AimReverseTranslationResetReason::PARTIAL_SEMANTICS;
                     } else {
                         // 实际整体平移不应再乘基础误差幅值后等待几十毫秒。
                         // 候选方向的两条框边共同移动且累计覆盖一个反馈窗时，
@@ -3480,12 +3506,30 @@ struct Aim::Impl {
                             kHorizontalTranslationEvidenceConsistencyMinimum;
                         const bool translation_evidence_same_direction =
                             aligned_translation_evidence > 0.0f;
-                        if (previous_direction_pending ||
-                            !translation_evidence_same_direction) {
+                        if (previous_direction_pending) {
                             tracking_horizontal_reverse_translation_seconds =
                                 0.0f;
                             tracking_horizontal_reverse_translation_gap_seconds =
                                 0.0f;
+                            reverse_translation_reset_reason_x =
+                                AimReverseTranslationResetReason::
+                                    PREVIOUS_DIRECTION_PENDING;
+                        } else if (aligned_translation_evidence == 0.0f) {
+                            tracking_horizontal_reverse_translation_seconds =
+                                0.0f;
+                            tracking_horizontal_reverse_translation_gap_seconds =
+                                0.0f;
+                            reverse_translation_reset_reason_x =
+                                AimReverseTranslationResetReason::
+                                    ZERO_TRANSLATION;
+                        } else if (!translation_evidence_same_direction) {
+                            tracking_horizontal_reverse_translation_seconds =
+                                0.0f;
+                            tracking_horizontal_reverse_translation_gap_seconds =
+                                0.0f;
+                            reverse_translation_reset_reason_x =
+                                AimReverseTranslationResetReason::
+                                    OPPOSING_TRANSLATION;
                         } else if (translation_evidence_consistent) {
                             tracking_horizontal_reverse_translation_seconds +=
                                 controller_dt;
@@ -3503,12 +3547,18 @@ struct Aim::Impl {
                                     0.0f;
                                 tracking_horizontal_reverse_translation_gap_seconds =
                                     0.0f;
+                                reverse_translation_reset_reason_x =
+                                    AimReverseTranslationResetReason::
+                                        WEAK_BUDGET_EXHAUSTED;
                             }
                         } else {
                             tracking_horizontal_reverse_translation_seconds =
                                 0.0f;
                             tracking_horizontal_reverse_translation_gap_seconds =
                                 0.0f;
+                            reverse_translation_reset_reason_x =
+                                AimReverseTranslationResetReason::
+                                    WEAK_WITHOUT_STRONG_HISTORY;
                         }
                         // 姿态 episode 是观测几何生命周期，不能在等待同向
                         // 旧库存过期时或被单帧共同边置信度抹掉。库存期允许
@@ -3688,6 +3738,8 @@ struct Aim::Impl {
                     tracking_horizontal_reverse_probe_direction = 0.0f;
                     tracking_horizontal_reverse_probe_started_at = {};
                 }
+                reverse_translation_reset_reason_x =
+                    AimReverseTranslationResetReason::CANDIDATE_INACTIVE;
             }
         }
         if (config.enable_delay_compensation &&
@@ -3781,6 +3833,8 @@ struct Aim::Impl {
             tracking_horizontal_reverse_position_peak_error;
         diagnostics.reverse_translation_seconds_x =
             tracking_horizontal_reverse_translation_seconds;
+        diagnostics.reverse_translation_gap_seconds_x =
+            tracking_horizontal_reverse_translation_gap_seconds;
         diagnostics.reverse_deformation_seconds_x =
             tracking_horizontal_reverse_deformation_seconds;
         diagnostics.reverse_deformation_active_x =
@@ -3792,6 +3846,10 @@ struct Aim::Impl {
         diagnostics.reverse_probe_limited_x = reverse_release_probe_x;
         diagnostics.reverse_translation_ready_x =
             reverse_translation_ready_x;
+        diagnostics.reverse_translation_fresh_evidence_x =
+            reverse_translation_fresh_evidence_x;
+        diagnostics.reverse_translation_reset_reason_x =
+            reverse_translation_reset_reason_x;
         diagnostics.reverse_position_improvement_reset_x =
             reverse_position_improvement_reset_x;
         if (tracking_horizontal_reverse_probe_started_at !=
@@ -4189,6 +4247,30 @@ const char* AimStatusName(AimStatus status) noexcept {
         case AimStatus::INVALID_INPUT: return "INVALID_INPUT";
         case AimStatus::TRACKING_FAILED: return "TRACKING_FAILED";
         case AimStatus::CONTROL_FAILED: return "CONTROL_FAILED";
+    }
+    return "UNKNOWN";
+}
+
+const char* AimReverseTranslationResetReasonName(
+        AimReverseTranslationResetReason reason) noexcept {
+    switch (reason) {
+        case AimReverseTranslationResetReason::NONE: return "NONE";
+        case AimReverseTranslationResetReason::CANDIDATE_INACTIVE:
+            return "CANDIDATE_INACTIVE";
+        case AimReverseTranslationResetReason::BASE_NOT_ALIGNED:
+            return "BASE_NOT_ALIGNED";
+        case AimReverseTranslationResetReason::PARTIAL_SEMANTICS:
+            return "PARTIAL_SEMANTICS";
+        case AimReverseTranslationResetReason::PREVIOUS_DIRECTION_PENDING:
+            return "PREVIOUS_DIRECTION_PENDING";
+        case AimReverseTranslationResetReason::ZERO_TRANSLATION:
+            return "ZERO_TRANSLATION";
+        case AimReverseTranslationResetReason::OPPOSING_TRANSLATION:
+            return "OPPOSING_TRANSLATION";
+        case AimReverseTranslationResetReason::WEAK_BUDGET_EXHAUSTED:
+            return "WEAK_BUDGET_EXHAUSTED";
+        case AimReverseTranslationResetReason::WEAK_WITHOUT_STRONG_HISTORY:
+            return "WEAK_WITHOUT_STRONG_HISTORY";
     }
     return "UNKNOWN";
 }

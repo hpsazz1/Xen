@@ -80,7 +80,8 @@ function New-ControlDiagnosticSample(
         [double]$CommandX
     }
     $sample.aim_pending_absolute_x_counts = 3.0
-    $sample.aim_reverse_candidate_x = $Sequence -eq 4
+    $sample.aim_reverse_output_direction_x = 1.0
+    $sample.aim_reverse_candidate_x = $Sequence -in @(2, 4)
     $sample.aim_reverse_previous_direction_pending_x = $false
     $sample.aim_reverse_deformation_active_x = $false
     $sample.aim_reverse_evidence_ratio_seconds_x = 0.0
@@ -89,6 +90,21 @@ function New-ControlDiagnosticSample(
     $sample.aim_reverse_translation_seconds_x = if ($Sequence -eq 4) {
         0.015
     } else { 0.0 }
+    $sample.aim_reverse_translation_raw_left_x_roi_pixels =
+        if ($Sequence -in @(2, 4)) { -2.0 } else { 0.0 }
+    $sample.aim_reverse_translation_raw_right_x_roi_pixels =
+        if ($Sequence -in @(2, 4)) { -1.0 } else { 0.0 }
+    $sample.aim_reverse_translation_raw_common_x_roi_pixels =
+        if ($Sequence -in @(2, 4)) { -1.0 } else { 0.0 }
+    $sample.aim_reverse_translation_control_evidence_x = if ($Sequence -eq 4) {
+        -0.80
+    } elseif ($Sequence -eq 2) { -0.65 } else { 0.0 }
+    $sample.aim_reverse_translation_gap_seconds_x =
+        if ($Sequence -eq 4) { 0.008 } else { 0.0 }
+    $sample.aim_reverse_translation_fresh_evidence_x = $Sequence -eq 4
+    $sample.aim_reverse_translation_reset_reason_x = if ($Sequence -eq 2) {
+        "WEAK_BUDGET_EXHAUSTED"
+    } else { "NONE" }
     $sample.aim_reverse_required_evidence_ratio_seconds_x = 0.00042
     $sample.aim_reverse_required_position_ratio_seconds_x = 0.0015
     $sample.aim_reverse_probe_direction_x = if ($Sequence -eq 4) {
@@ -146,19 +162,57 @@ Assert-Condition ($controlSummary.x.nonzero_direction_reversals -eq 2 -and
         $controlSummary.x.reversal_window_dominant_causes.shaper_direction_reset `
             -eq 1) `
     "Control diagnostics must summarize reversal zero-window causes."
-Assert-Condition ($controlSummary.schema -eq 4 -and
+Assert-Condition ($controlSummary.schema -eq 5 -and
         [bool]$controlSummary.reverse_probe_diagnostics_available -and
         [bool]$controlSummary.reverse_translation_diagnostics_available -and
+        [bool]$controlSummary.reverse_translation_detail_diagnostics_available -and
         [bool]$controlSummary.reverse_position_improvement_diagnostics_available -and
         $controlSummary.x.diagnostic_flags.reverse_probe_active -eq 1 -and
         $controlSummary.x.diagnostic_flags.reverse_probe_limited -eq 1 -and
         $controlSummary.x.diagnostic_flags.reverse_translation_ready -eq 1 -and
+        $controlSummary.x.diagnostic_flags.reverse_translation_fresh_evidence `
+            -eq 1 -and
         $controlSummary.x.diagnostic_flags.reverse_position_improvement_reset `
             -eq 1 -and
         $controlSummary.x.reverse_probe_age_ms.p50 -eq 8.0 -and
-        $controlSummary.x.reverse_translation_dwell_ms.p50 -eq 15.0 -and
+        $controlSummary.x.reverse_translation_dwell_ms.p50 -eq 7.5 -and
+        $controlSummary.x.reverse_translation_gap_ms.maximum -eq 8.0 -and
+        $controlSummary.x.reverse_translation_reset_reasons.NONE -eq 1 -and
+        $controlSummary.x.reverse_translation_reset_reasons.WEAK_BUDGET_EXHAUSTED `
+            -eq 1 -and
+        $controlSummary.x.reverse_translation_aligned_raw_common_roi_pixels.p50 `
+            -eq 1.0 -and
+        $controlSummary.x.reverse_translation_aligned_control_evidence.p50 `
+            -gt 0.72 -and
+        $controlSummary.x.reverse_translation_aligned_control_evidence.p50 `
+            -lt 0.73 -and
         $controlSummary.x.reverse_position_peak_error_pixels.p50 -eq 18.0) `
     "Control diagnostics must summarize translation probes and position resets."
+
+$schema11DetailFields = @(
+    "aim_reverse_translation_raw_left_x_roi_pixels",
+    "aim_reverse_translation_raw_right_x_roi_pixels",
+    "aim_reverse_translation_raw_common_x_roi_pixels",
+    "aim_reverse_translation_control_evidence_x",
+    "aim_reverse_translation_gap_seconds_x",
+    "aim_reverse_translation_fresh_evidence_x",
+    "aim_reverse_translation_reset_reason_x")
+$schema11ControlSamples = foreach ($controlSample in $controlSamples) {
+    $schema11 = [ordered]@{}
+    foreach ($key in $controlSample.Keys) {
+        if ($schema11DetailFields -notcontains $key) {
+            $schema11[$key] = $controlSample[$key]
+        }
+    }
+    $schema11
+}
+$schema11ControlSummary = Get-XenAimControlDiagnosticsSummary `
+    $schema11ControlSamples
+Assert-Condition ([bool]$schema11ControlSummary.reverse_translation_diagnostics_available -and
+        -not [bool]$schema11ControlSummary.reverse_translation_detail_diagnostics_available -and
+        $schema11ControlSummary.x.reverse_translation_dwell_ms.sample_count `
+            -eq 2) `
+    "Schema 11 translation dwell must remain readable without schema 12 details."
 
 $legacyControlSamples = foreach ($controlSample in $controlSamples) {
     $legacy = [ordered]@{}
@@ -176,6 +230,7 @@ $legacyControlSummary = Get-XenAimControlDiagnosticsSummary `
     $legacyControlSamples
 Assert-Condition (-not [bool]$legacyControlSummary.reverse_probe_diagnostics_available -and
         -not [bool]$legacyControlSummary.reverse_translation_diagnostics_available -and
+        -not [bool]$legacyControlSummary.reverse_translation_detail_diagnostics_available -and
         -not [bool]$legacyControlSummary.reverse_position_improvement_diagnostics_available -and
         $legacyControlSummary.x.nonzero_direction_reversals -eq 2) `
     "Schema 8/9/10 control diagnostics must remain backward-compatible."

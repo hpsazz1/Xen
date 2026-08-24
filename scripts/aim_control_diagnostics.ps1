@@ -90,6 +90,19 @@ function Get-XenAimControlDiagnosticsSummary {
     $translationDiagnosticsAvailable = @($translationFields | Where-Object {
         $availableFields -notcontains $_
     }).Count -eq 0
+    $translationDetailFields = @(
+        "aim_reverse_output_direction_x",
+        "aim_reverse_translation_raw_left_x_roi_pixels",
+        "aim_reverse_translation_raw_right_x_roi_pixels",
+        "aim_reverse_translation_raw_common_x_roi_pixels",
+        "aim_reverse_translation_control_evidence_x",
+        "aim_reverse_translation_gap_seconds_x",
+        "aim_reverse_translation_fresh_evidence_x",
+        "aim_reverse_translation_reset_reason_x")
+    $translationDetailDiagnosticsAvailable = @(
+        $translationDetailFields | Where-Object {
+            $availableFields -notcontains $_
+        }).Count -eq 0
     $positionImprovementFields = @(
         "aim_reverse_position_peak_error_x",
         "aim_reverse_position_improvement_reset_x")
@@ -110,6 +123,15 @@ function Get-XenAimControlDiagnosticsSummary {
         $reversalWindowReasons[$name] = [uint64]0
     }
     $reversalWindowReasons["no_zero"] = [uint64]0
+    $translationResetReasonNames = @(
+        "NONE", "CANDIDATE_INACTIVE", "BASE_NOT_ALIGNED",
+        "PARTIAL_SEMANTICS", "PREVIOUS_DIRECTION_PENDING",
+        "ZERO_TRANSLATION", "OPPOSING_TRANSLATION",
+        "WEAK_BUDGET_EXHAUSTED", "WEAK_WITHOUT_STRONG_HISTORY")
+    $translationResetReasons = [ordered]@{}
+    foreach ($name in $translationResetReasonNames) {
+        $translationResetReasons[$name] = [uint64]0
+    }
 
     $flags = [ordered]@{
         reverse_candidate = [uint64]0
@@ -117,6 +139,7 @@ function Get-XenAimControlDiagnosticsSummary {
         reverse_deformation_active = [uint64]0
         reverse_evidence_ready = [uint64]0
         reverse_translation_ready = [uint64]0
+        reverse_translation_fresh_evidence = [uint64]0
         reverse_position_ready = [uint64]0
         reverse_position_improvement_reset = [uint64]0
         reverse_gate_blocked = [uint64]0
@@ -132,6 +155,15 @@ function Get-XenAimControlDiagnosticsSummary {
     $positionProgress = [System.Collections.Generic.List[double]]::new()
     $positionPeakError = [System.Collections.Generic.List[double]]::new()
     $translationDwell = [System.Collections.Generic.List[double]]::new()
+    $translationGap = [System.Collections.Generic.List[double]]::new()
+    $translationAlignedRawLeft =
+        [System.Collections.Generic.List[double]]::new()
+    $translationAlignedRawRight =
+        [System.Collections.Generic.List[double]]::new()
+    $translationAlignedRawCommon =
+        [System.Collections.Generic.List[double]]::new()
+    $translationAlignedControlEvidence =
+        [System.Collections.Generic.List[double]]::new()
     $probeAge = [System.Collections.Generic.List[double]]::new()
     $reversalZeroFrames = [System.Collections.Generic.List[double]]::new()
 
@@ -212,6 +244,11 @@ function Get-XenAimControlDiagnosticsSummary {
                 "reverse_translation_ready",
                 "aim_reverse_translation_ready_x")
         }
+        if ($translationDetailDiagnosticsAvailable) {
+            $flagMappings += ,@(
+                "reverse_translation_fresh_evidence",
+                "aim_reverse_translation_fresh_evidence_x")
+        }
         if ($positionImprovementDiagnosticsAvailable) {
             $flagMappings += ,@(
                 "reverse_position_improvement_reset",
@@ -252,6 +289,32 @@ function Get-XenAimControlDiagnosticsSummary {
             [bool]$sample.aim_reverse_candidate_x) {
             $translationDwell.Add(
                 [double]$sample.aim_reverse_translation_seconds_x * 1000.0)
+        }
+        if ($translationDetailDiagnosticsAvailable -and
+            [bool]$sample.aim_reverse_candidate_x) {
+            $resetReason =
+                [string]$sample.aim_reverse_translation_reset_reason_x
+            if ($translationResetReasonNames -notcontains $resetReason) {
+                throw "序号 $sequence 的反向平移清零原因无效：$resetReason"
+            }
+            ++$translationResetReasons[$resetReason]
+            $candidateDirection = -[Math]::Sign(
+                [double]$sample.aim_reverse_output_direction_x)
+            $translationGap.Add(
+                [double]$sample.aim_reverse_translation_gap_seconds_x *
+                    1000.0)
+            $translationAlignedRawLeft.Add(
+                [double]$sample.aim_reverse_translation_raw_left_x_roi_pixels *
+                    $candidateDirection)
+            $translationAlignedRawRight.Add(
+                [double]$sample.aim_reverse_translation_raw_right_x_roi_pixels *
+                    $candidateDirection)
+            $translationAlignedRawCommon.Add(
+                [double]$sample.aim_reverse_translation_raw_common_x_roi_pixels *
+                    $candidateDirection)
+            $translationAlignedControlEvidence.Add(
+                [double]$sample.aim_reverse_translation_control_evidence_x *
+                    $candidateDirection)
         }
 
         $command = @($sample.aim_command)
@@ -311,7 +374,7 @@ function Get-XenAimControlDiagnosticsSummary {
         [double]$zeroFrames / [double]$diagnosedFrames
     }
     return [ordered]@{
-        schema = 4
+        schema = 5
         sample_count = $items.Count
         controllable_frames = $controlFrames
         diagnosed_frames = $diagnosedFrames
@@ -319,6 +382,8 @@ function Get-XenAimControlDiagnosticsSummary {
         reverse_probe_diagnostics_available = $probeDiagnosticsAvailable
         reverse_translation_diagnostics_available =
             $translationDiagnosticsAvailable
+        reverse_translation_detail_diagnostics_available =
+            $translationDetailDiagnosticsAvailable
         reverse_position_improvement_diagnostics_available =
             $positionImprovementDiagnosticsAvailable
         x = [ordered]@{
@@ -331,6 +396,7 @@ function Get-XenAimControlDiagnosticsSummary {
             stopped_final_error_over_20_pixels = $zeroOverTwentyPixels
             zero_primary_causes = $zeroReasons
             diagnostic_flags = $flags
+            reverse_translation_reset_reasons = $translationResetReasons
             nonzero_direction_reversals = $directionReversals
             reversal_window_dominant_causes = $reversalWindowReasons
             reversal_zero_frames =
@@ -350,6 +416,16 @@ function Get-XenAimControlDiagnosticsSummary {
                 Get-XenAimDistributionSummary $probeAge
             reverse_translation_dwell_ms =
                 Get-XenAimDistributionSummary $translationDwell
+            reverse_translation_gap_ms =
+                Get-XenAimDistributionSummary $translationGap
+            reverse_translation_aligned_raw_left_roi_pixels =
+                Get-XenAimDistributionSummary $translationAlignedRawLeft
+            reverse_translation_aligned_raw_right_roi_pixels =
+                Get-XenAimDistributionSummary $translationAlignedRawRight
+            reverse_translation_aligned_raw_common_roi_pixels =
+                Get-XenAimDistributionSummary $translationAlignedRawCommon
+            reverse_translation_aligned_control_evidence =
+                Get-XenAimDistributionSummary $translationAlignedControlEvidence
         }
     }
 }

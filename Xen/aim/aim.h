@@ -18,6 +18,24 @@ enum class AimStatus {
 
 const char* AimStatusName(AimStatus status) noexcept;
 
+// X 反向共同平移驻留在本控制帧没有继续累计或被清零的直接原因。
+// 该枚举只进入诊断报告，不参与控制分支；字符串名称是 Runtime schema
+// 的稳定取值，便于正式脚本按原因计数而不复刻控制状态机。
+enum class AimReverseTranslationResetReason {
+    NONE,
+    CANDIDATE_INACTIVE,
+    BASE_NOT_ALIGNED,
+    PARTIAL_SEMANTICS,
+    PREVIOUS_DIRECTION_PENDING,
+    ZERO_TRANSLATION,
+    OPPOSING_TRANSLATION,
+    WEAK_BUDGET_EXHAUSTED,
+    WEAK_WITHOUT_STRONG_HISTORY,
+};
+
+const char* AimReverseTranslationResetReasonName(
+    AimReverseTranslationResetReason reason) noexcept;
+
 enum class TrackState {
     TENTATIVE,
     CONFIRMED,
@@ -112,11 +130,21 @@ struct AimControlDiagnostics {
     float reverse_position_ratio_seconds_x = 0.0f;
     float reverse_position_peak_error_x = 0.0f;
     float reverse_translation_seconds_x = 0.0f;
+    // 当前相邻原始检测框左右边位移及其共同部分，单位为检测 ROI 像素；
+    // 正负号沿 X 方向。control_evidence 为反向门实际消费的带符号无量纲
+    // 一致性 [-1, 1]，gap 为累计同向弱证据时间（秒）。
+    float reverse_translation_raw_left_x_roi_pixels = 0.0f;
+    float reverse_translation_raw_right_x_roi_pixels = 0.0f;
+    float reverse_translation_raw_common_x_roi_pixels = 0.0f;
+    float reverse_translation_control_evidence_x = 0.0f;
+    float reverse_translation_gap_seconds_x = 0.0f;
     float reverse_deformation_seconds_x = 0.0f;
     float reverse_required_evidence_ratio_seconds_x = 0.0f;
     float reverse_required_position_ratio_seconds_x = 0.0f;
     float reverse_probe_direction_x = 0.0f;
     float reverse_probe_age_ms_x = 0.0f;
+    AimReverseTranslationResetReason reverse_translation_reset_reason_x =
+        AimReverseTranslationResetReason::NONE;
     bool pending_positive_x = false;
     bool pending_negative_x = false;
     bool reverse_candidate_x = false;
@@ -124,6 +152,7 @@ struct AimControlDiagnostics {
     bool reverse_partial_semantics_transition_x = false;
     bool reverse_deformation_active_x = false;
     bool reverse_evidence_ready_x = false;
+    bool reverse_translation_fresh_evidence_x = false;
     bool reverse_translation_ready_x = false;
     bool reverse_position_ready_x = false;
     bool reverse_position_improvement_reset_x = false;

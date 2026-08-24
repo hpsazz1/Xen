@@ -4527,7 +4527,11 @@ void test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget() {
         int preserved_weak_observations = 0;
         bool budget_exhausted_reset = false;
         bool released_during_weak_observation = false;
+        bool weak_diagnostics_valid = true;
+        bool weak_diagnostics_observed = false;
+        bool budget_reset_reason_valid = false;
         bool translation_ready = false;
+        bool translation_ready_diagnostics_valid = false;
         bool position_ready = false;
         bool probe_limited = false;
     };
@@ -4638,11 +4642,39 @@ void test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget() {
             if (weak_observation && previous_dwell_seconds > 0.0f &&
                 result.control.reverse_translation_seconds_x == 0.0f) {
                 trace.budget_exhausted_reset = true;
+                trace.budget_reset_reason_valid =
+                    result.control.reverse_translation_reset_reason_x ==
+                    AimReverseTranslationResetReason::
+                        WEAK_BUDGET_EXHAUSTED;
             }
             if (weak_observation &&
                 (result.control.reverse_translation_ready_x ||
                  result.command.dx_counts < 0)) {
                 trace.released_during_weak_observation = true;
+            }
+            if (weak_observation) {
+                trace.weak_diagnostics_observed = true;
+                const bool preserved_weak_frame =
+                    result.control.reverse_translation_seconds_x > 0.0f;
+                trace.weak_diagnostics_valid =
+                    trace.weak_diagnostics_valid &&
+                    result.control.reverse_translation_raw_left_x_roi_pixels <
+                        0.0f &&
+                    result.control.reverse_translation_raw_right_x_roi_pixels <
+                        0.0f &&
+                    result.control.reverse_translation_raw_common_x_roi_pixels <
+                        0.0f &&
+                    result.control.reverse_translation_control_evidence_x <
+                        0.0f &&
+                    std::fabs(
+                        result.control.reverse_translation_control_evidence_x) <
+                        0.70f &&
+                    !result.control.reverse_translation_fresh_evidence_x &&
+                    (!preserved_weak_frame ||
+                     (result.control.reverse_translation_gap_seconds_x >
+                          0.0f &&
+                      result.control.reverse_translation_reset_reason_x ==
+                          AimReverseTranslationResetReason::NONE));
             }
             if (!gap_scheduled &&
                 !result.control.reverse_previous_direction_pending_x &&
@@ -4665,6 +4697,11 @@ void test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget() {
                 trace.first_negative_offset = offset;
                 trace.translation_ready =
                     result.control.reverse_translation_ready_x;
+                trace.translation_ready_diagnostics_valid =
+                    result.control.reverse_translation_fresh_evidence_x &&
+                    result.control.reverse_translation_gap_seconds_x > 0.0f &&
+                    result.control.reverse_translation_reset_reason_x ==
+                        AimReverseTranslationResetReason::NONE;
                 trace.position_ready =
                     result.control.reverse_position_ready_x;
                 trace.probe_limited =
@@ -4692,18 +4729,25 @@ void test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget() {
             trace.preserved_weak_observations == 3 &&
             !trace.budget_exhausted_reset &&
             !trace.released_during_weak_observation &&
+            trace.weak_diagnostics_observed &&
+            trace.weak_diagnostics_valid &&
             trace.first_negative_offset >= 5 &&
             trace.first_negative_offset < 20 &&
             trace.translation_ready &&
+            trace.translation_ready_diagnostics_valid &&
             !trace.position_ready &&
             trace.probe_limited;
     };
     expect(within_budget_valid(normal) && within_budget_valid(doubled) &&
                exhausted.first_gap_preserved &&
                exhausted.budget_exhausted_reset &&
+               exhausted.budget_reset_reason_valid &&
+               exhausted.weak_diagnostics_valid &&
                !exhausted.released_during_weak_observation &&
                split_exhausted.first_gap_preserved &&
                split_exhausted.budget_exhausted_reset &&
+               split_exhausted.budget_reset_reason_valid &&
+               split_exhausted.weak_diagnostics_valid &&
                !split_exhausted.released_during_weak_observation,
            "连续共同平移必须按反馈窗累计同向弱证据预算且不累计弱帧 dt；"
            "预算内三帧应保持驻留并只在新强证据帧放行，累计弱时间达到 15 ms"

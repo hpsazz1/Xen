@@ -707,7 +707,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v11\n"
+        csv << "# Xen Runtime Debug Report v12\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -826,6 +826,13 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 "aim_reverse_position_ratio_seconds_x,"
                 "aim_reverse_position_peak_error_x,"
                 "aim_reverse_translation_seconds_x,"
+                "aim_reverse_translation_raw_left_x_roi_pixels,"
+                "aim_reverse_translation_raw_right_x_roi_pixels,"
+                "aim_reverse_translation_raw_common_x_roi_pixels,"
+                "aim_reverse_translation_control_evidence_x,"
+                "aim_reverse_translation_gap_seconds_x,"
+                "aim_reverse_translation_fresh_evidence_x,"
+                "aim_reverse_translation_reset_reason_x,"
                 "aim_reverse_deformation_seconds_x,"
                 "aim_reverse_required_evidence_ratio_seconds_x,"
                 "aim_reverse_required_position_ratio_seconds_x,"
@@ -963,6 +970,20 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.aim_control.reverse_position_ratio_seconds_x << ','
                 << sample.aim_control.reverse_position_peak_error_x << ','
                 << sample.aim_control.reverse_translation_seconds_x << ','
+                << sample.aim_control
+                    .reverse_translation_raw_left_x_roi_pixels << ','
+                << sample.aim_control
+                    .reverse_translation_raw_right_x_roi_pixels << ','
+                << sample.aim_control
+                    .reverse_translation_raw_common_x_roi_pixels << ','
+                << sample.aim_control
+                    .reverse_translation_control_evidence_x << ','
+                << sample.aim_control.reverse_translation_gap_seconds_x << ','
+                << bool_name(sample.aim_control
+                    .reverse_translation_fresh_evidence_x) << ','
+                << AimReverseTranslationResetReasonName(
+                    sample.aim_control.reverse_translation_reset_reason_x)
+                << ','
                 << sample.aim_control.reverse_deformation_seconds_x << ','
                 << sample.aim_control
                     .reverse_required_evidence_ratio_seconds_x << ','
@@ -1067,7 +1088,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 11,\n"
+             << "{\n  \"schema\": 12,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -1293,6 +1314,27 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << sample.aim_control.reverse_position_peak_error_x
                  << ", \"aim_reverse_translation_seconds_x\": "
                  << sample.aim_control.reverse_translation_seconds_x
+                 << ", \"aim_reverse_translation_raw_left_x_roi_pixels\": "
+                 << sample.aim_control
+                     .reverse_translation_raw_left_x_roi_pixels
+                 << ", \"aim_reverse_translation_raw_right_x_roi_pixels\": "
+                 << sample.aim_control
+                     .reverse_translation_raw_right_x_roi_pixels
+                 << ", \"aim_reverse_translation_raw_common_x_roi_pixels\": "
+                 << sample.aim_control
+                     .reverse_translation_raw_common_x_roi_pixels
+                 << ", \"aim_reverse_translation_control_evidence_x\": "
+                 << sample.aim_control
+                     .reverse_translation_control_evidence_x
+                 << ", \"aim_reverse_translation_gap_seconds_x\": "
+                 << sample.aim_control.reverse_translation_gap_seconds_x
+                 << ", \"aim_reverse_translation_fresh_evidence_x\": "
+                 << bool_name(sample.aim_control
+                     .reverse_translation_fresh_evidence_x)
+                 << ", \"aim_reverse_translation_reset_reason_x\": \""
+                 << AimReverseTranslationResetReasonName(
+                     sample.aim_control.reverse_translation_reset_reason_x)
+                 << '"'
                  << ", \"aim_reverse_deformation_seconds_x\": "
                  << sample.aim_control.reverse_deformation_seconds_x
                  << ", \"aim_reverse_required_evidence_ratio_seconds_x\": "
