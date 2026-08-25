@@ -22,6 +22,12 @@ namespace {
 constexpr std::size_t kTrackHorizontalTrendSampleCount = 51;
 constexpr std::size_t kTrackHorizontalTrendMinimumSampleCount = 5;
 constexpr std::size_t kTrackHorizontalRawMotionSampleCount = 3;
+// 最近三次原始共同边的任一次仍达到旧预测的 25% 时，不把低屏幕运动
+// 解释为预测失效。该比例只比较同一轨迹的观测/预测几何，不是速度档位。
+constexpr float kTrackHorizontalRecentMotionMaximumPredictionRatio = 0.25f;
+// 低观测运动只在旧方向基础点已走过用户水平半内窗的 60% 时撤销预测，
+// 避免正常匀速跟随在框中心附近被误当成停稳。
+constexpr float kTrackHorizontalUnsupportedMotionMinimumAimRangeRatio = 0.60f;
 // OLS 有效后，当前中心与趋势中心的 ROI 横向比例连续三次相差超过 2%
 // 才切段。它是框中心相对稳定 ROI 的空间创新，不读取身体框宽高，也不
 // 换算成像素/秒或人物速度档位；候选确认前与主趋势隔离。
@@ -126,6 +132,9 @@ struct Track {
     // predict_tracks() 实际经过二维限幅后写入基础点的 X 位移。反向快通道
     // 需要用它计算旧预测与新观测的精确差额，不能用 vx*dt 近似限幅结果。
     float predicted_motion_x = 0.0f;
+    // 连续低观测运动撤销旧 X 预测的渐入时长；只在同一匹配轨迹内跨帧
+    // 保留，语义切换、重新获得运动支持或丢帧时立即清零。
+    float horizontal_prediction_unsupported_seconds = 0.0f;
 };
 
 struct IssuedCommand {
@@ -589,6 +598,25 @@ bool latest_two_horizontal_raw_motion_same_direction(
         history.velocity_x[previous] * direction > 0.0f;
 }
 
+float horizontal_prediction_unsupported_weight(
+    const Track& track, float predicted_velocity_x) noexcept {
+    const HorizontalRawMotionHistory& history = track.horizontal_raw_motion;
+    if (history.count < kTrackHorizontalRawMotionSampleCount ||
+        predicted_velocity_x == 0.0f) {
+        return 0.0f;
+    }
+    float maximum_motion_ratio = 0.0f;
+    for (const float observed_velocity_x : history.velocity_x) {
+        maximum_motion_ratio = std::max(
+            maximum_motion_ratio,
+            std::fabs(observed_velocity_x / predicted_velocity_x));
+    }
+    return 1.0f - std::clamp(
+        maximum_motion_ratio /
+            kTrackHorizontalRecentMotionMaximumPredictionRatio,
+        0.0f, 1.0f);
+}
+
 float normalized_position(float value, float minimum,
                           float maximum) noexcept {
     const float size = maximum - minimum;
@@ -1021,7 +1049,8 @@ struct Aim::Impl {
         bool robust_horizontal_velocity_valid = false;
         bool robust_horizontal_trend_center_valid = false;
         bool horizontal_raw_motion_outlier = false;
-        float horizontal_reversal_prediction_correction_x = 0.0f;
+        float horizontal_prediction_correction_x = 0.0f;
+        bool horizontal_reversal_prediction_corrected = false;
         float horizontal_box_motion_residual_x = center_motion_residual_x;
         float velocity_beta_x = beta;
         float velocity_beta_y = beta;
@@ -1593,12 +1622,27 @@ struct Aim::Impl {
                     }
                 }
             }
+            const float horizontal_track_width = track.x2 - track.x1;
+            const float horizontal_anchor_x = track.x1 +
+                horizontal_track_width * track.aim_ratio_x;
+            const float horizontal_half_range =
+                config.body_aim_range_percent / 200.0f;
+            const bool horizontal_old_prediction_inventory_visible =
+                horizontal_track_width > 0.0f &&
+                (track.aim_x - horizontal_anchor_x) * track.vx > 0.0f &&
+                std::fabs(track.aim_x - horizontal_anchor_x) /
+                        horizontal_track_width >=
+                    horizontal_half_range *
+                        kTrackHorizontalUnsupportedMotionMinimumAimRangeRatio;
+            const bool horizontal_recent_raw_direction_confirmed =
+                latest_two_horizontal_raw_motion_same_direction(
+                    track, robust_horizontal_velocity_x);
             const bool horizontal_reversal_candidate_or_maneuver =
                 horizontal_maneuver_active ||
                 (!isolate_horizontal_center_observation &&
-                 track.horizontal_trend_change.count > 0 &&
-                 latest_two_horizontal_raw_motion_same_direction(
-                     track, robust_horizontal_velocity_x));
+                 horizontal_recent_raw_direction_confirmed &&
+                 (track.horizontal_trend_change.count > 0 ||
+                  horizontal_old_prediction_inventory_visible));
             if (horizontal_reversal_candidate_or_maneuver &&
                 robust_horizontal_velocity_valid &&
                 robust_horizontal_velocity_x * track.vx < 0.0f &&
@@ -1606,15 +1650,51 @@ struct Aim::Impl {
                     track.horizontal_control_translation_evidence_x) >=
                     kHorizontalTranslationEvidenceConsistencyMinimum) {
                 // 三点共同边已经确认与旧 vx 反向，且 OLS 位置创新已进入
-                // 独立候选或正式机动段。候选期不提前接纳中心；提交后继续
-                // 同一差额直到 vx 过零，避免候选→机动交接反向折返一帧。
+                // 独立候选/正式机动段，或旧方向基础点库存已清晰可见。
+                // 候选期不提前接纳中心；提交后继续同一差额直到 vx 过零，
+                // 避免候选→机动交接反向折返一帧。
                 const float consistency_squared =
                     robust_horizontal_translation_consistency *
                     robust_horizontal_translation_consistency;
-                horizontal_reversal_prediction_correction_x =
+                horizontal_prediction_correction_x =
                     (robust_horizontal_velocity_x * track.prediction_dt -
                      track.predicted_motion_x) *
                     consistency_squared;
+                horizontal_reversal_prediction_corrected = true;
+            }
+            // 反向分支已用“新观测位移－旧预测位移”给出完整差额；低支持
+            // 分支只处理停顿/减速，二者互斥以免重复撤销同一预测。
+            if (!horizontal_reversal_prediction_corrected &&
+                !config.enable_prediction &&
+                horizontal_old_prediction_inventory_visible &&
+                !observation.head_only && !box_semantics_changed &&
+                !isolate_horizontal_center_observation &&
+                !track.horizontal_trend_rebuilding_from_partial) {
+                const float unsupported_weight =
+                    horizontal_prediction_unsupported_weight(
+                        track, track.vx);
+                if (unsupported_weight > 0.0f) {
+                    const float ramp_seconds = std::max(
+                        track.prediction_dt,
+                        config.control_delay_ms / 1000.0f);
+                    track.horizontal_prediction_unsupported_seconds =
+                        std::min(
+                            ramp_seconds,
+                            track.horizontal_prediction_unsupported_seconds +
+                                track.prediction_dt);
+                    const float ramp =
+                        track.horizontal_prediction_unsupported_seconds /
+                        ramp_seconds;
+                    // 连续三次共同边都远小于旧预测时，只渐入撤销本帧仍被
+                    // predict_tracks() 注入的 X 位移。框、vx、Y 和 OLS 状态
+                    // 均不变；观测重新支持运动后权重立即归零。
+                    horizontal_prediction_correction_x -=
+                        track.predicted_motion_x * unsupported_weight * ramp;
+                } else {
+                    track.horizontal_prediction_unsupported_seconds = 0.0f;
+                }
+            } else {
+                track.horizontal_prediction_unsupported_seconds = 0.0f;
             }
             if (horizontal_maneuver_active &&
                 robust_horizontal_velocity_valid) {
@@ -1825,7 +1905,7 @@ struct Aim::Impl {
             // 使用与关联框相同的增益；X 宽高共同形变段则使用时间趋势端点。
             // 其余框内形变或缓慢尺度变化使用独立低增益。
             track.aim_x += stable_motion_residual_x * alpha;
-            track.aim_x += horizontal_reversal_prediction_correction_x;
+            track.aim_x += horizontal_prediction_correction_x;
             track.aim_y += stable_motion_residual_y * alpha;
             const float shape_alpha = high
                 ? kTrackAimShapeAlphaHigh : kTrackAimShapeAlphaLow;
@@ -2090,6 +2170,7 @@ struct Aim::Impl {
             track.horizontal_control_translation_evidence_x = 0.0f;
             track.horizontal_raw_left_motion_x = 0.0f;
             track.horizontal_raw_right_motion_x = 0.0f;
+            track.horizontal_prediction_unsupported_seconds = 0.0f;
             track.horizontal_observation_initialized = false;
             track.last_observation_at = {};
             reset_horizontal_raw_motion(track);

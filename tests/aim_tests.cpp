@@ -968,6 +968,149 @@ void test_horizontal_pose_trend_reversal_is_bounded() {
     }
 }
 
+void test_horizontal_unsupported_prediction_does_not_stick_at_range_boundary() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.body_aim_range_percent = 50.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float true_x = 60.0f;
+    int stop_boundary_frames = 0;
+    int stop_boundary_run = 0;
+    int maximum_stop_boundary_run = 0;
+    float stop_total_variation = 0.0f;
+    float previous_base_x = 0.0f;
+    std::vector<float> stop_base_points;
+
+    for (int index = 0; index < 220; ++index) {
+        if (index > 0 && index < 100) true_x += 0.80f;
+        if (index >= 160) true_x -= 0.80f;
+        const int pose_sample = std::min(index, 99);
+        const int phase_index = pose_sample % 34;
+        const float pose_phase = phase_index <= 17
+            ? -1.0f + static_cast<float>(phase_index) * (2.0f / 17.0f)
+            : 1.0f - static_cast<float>(phase_index - 17) *
+                (2.0f / 17.0f);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index) * 4167));
+        frame.detections = {body_box(
+            true_x + pose_phase * 3.0f, 175.0f,
+            16.0f + pose_phase * 0.5f,
+            70.0f + pose_phase * 1.8f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "水平移动转停的 hidden-inventory 回归必须逐帧保留目标");
+        if (!result.has_target) continue;
+        if (index >= 100 && index < 160) {
+            const float width = result.target.x2 - result.target.x1;
+            const float ratio = width > 0.0f
+                ? (result.target.base_aim_x - result.target.x1) / width
+                : -1.0f;
+            const bool boundary =
+                std::fabs(ratio - 0.25f) <= 0.0001f ||
+                std::fabs(ratio - 0.75f) <= 0.0001f;
+            if (boundary) {
+                ++stop_boundary_frames;
+                ++stop_boundary_run;
+                maximum_stop_boundary_run = std::max(
+                    maximum_stop_boundary_run, stop_boundary_run);
+            } else {
+                stop_boundary_run = 0;
+            }
+            if (previous_base_x != 0.0f) {
+                stop_total_variation += std::fabs(
+                    result.target.base_aim_x - previous_base_x);
+            }
+            previous_base_x = result.target.base_aim_x;
+            stop_base_points.push_back(result.target.base_aim_x);
+        }
+    }
+    float maximum_stop_step = 0.0f;
+    std::vector<float> stop_second_differences;
+    for (std::size_t index = 1; index < stop_base_points.size(); ++index) {
+        maximum_stop_step = std::max(
+            maximum_stop_step,
+            std::fabs(stop_base_points[index] - stop_base_points[index - 1]));
+        if (index >= 2) {
+            stop_second_differences.push_back(std::fabs(
+                stop_base_points[index] - 2.0f * stop_base_points[index - 1] +
+                stop_base_points[index - 2]));
+        }
+    }
+    std::sort(stop_second_differences.begin(), stop_second_differences.end());
+    const float stop_second_p95 = stop_second_differences[
+        std::min(stop_second_differences.size() - 1,
+                 static_cast<std::size_t>(
+                     stop_second_differences.size() * 0.95f))];
+    expect(stop_boundary_frames <= 5 && maximum_stop_boundary_run <= 5 &&
+               stop_total_variation <= 6.5f && maximum_stop_step <= 1.10f &&
+               stop_second_p95 <= 0.30f,
+           "连续观测不再支持旧 X 预测时，基础点不得在水平内窗边界"
+           "长期驻留或以阶跃释放，贴边帧/最长贴边/总变差/最大步长/"
+           "二阶P95=" +
+               std::to_string(stop_boundary_frames) + "/" +
+               std::to_string(maximum_stop_boundary_run) + "/" +
+               std::to_string(stop_total_variation) + "/" +
+               std::to_string(maximum_stop_step) + "/" +
+               std::to_string(stop_second_p95));
+
+    Aim reversal_aim(config);
+    float reversal_true_x = 60.0f;
+    int reversal_boundary_frames = 0;
+    int reversal_boundary_run = 0;
+    int maximum_reversal_boundary_run = 0;
+    for (int index = 0; index < 150; ++index) {
+        if (index > 0 && index < 100) reversal_true_x += 0.80f;
+        if (index >= 100) reversal_true_x -= 0.80f;
+        const int pose_sample = std::min(index, 99);
+        const int phase_index = pose_sample % 34;
+        const float pose_phase = phase_index <= 17
+            ? -1.0f + static_cast<float>(phase_index) * (2.0f / 17.0f)
+            : 1.0f - static_cast<float>(phase_index - 17) *
+                (2.0f / 17.0f);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index) * 4167));
+        frame.detections = {body_box(
+            reversal_true_x + pose_phase * 3.0f, 175.0f,
+            16.0f + pose_phase * 0.5f,
+            70.0f + pose_phase * 1.8f)};
+        const AimResult result = reversal_aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "水平窄目标立即换向的 visible-inventory 回归必须逐帧保留目标");
+        if (!result.has_target || index < 100 || index >= 130) continue;
+        const float width = result.target.x2 - result.target.x1;
+        const float ratio = width > 0.0f
+            ? (result.target.base_aim_x - result.target.x1) / width : -1.0f;
+        const bool boundary =
+            std::fabs(ratio - 0.25f) <= 0.0001f ||
+            std::fabs(ratio - 0.75f) <= 0.0001f;
+        if (boundary) {
+            ++reversal_boundary_frames;
+            ++reversal_boundary_run;
+            maximum_reversal_boundary_run = std::max(
+                maximum_reversal_boundary_run, reversal_boundary_run);
+        } else {
+            reversal_boundary_run = 0;
+        }
+    }
+    expect(reversal_boundary_frames <= 4 &&
+               maximum_reversal_boundary_run <= 4,
+           "旧方向基础点库存已清晰可见且共同边确认反向时，不得等待趋势"
+           "候选累计后才释放，换向贴边帧/最长贴边=" +
+               std::to_string(reversal_boundary_frames) + "/" +
+               std::to_string(maximum_reversal_boundary_run));
+}
+
 void test_horizontal_persistent_innovation_keeps_velocity_and_delay_continuous() {
     struct Trace {
         std::vector<float> normalized_velocity;
@@ -9957,6 +10100,7 @@ int main() {
     test_horizontal_pose_trend_is_speed_independent();
     test_horizontal_pose_trend_uses_capture_time_across_head_and_delivery_gaps();
     test_horizontal_pose_trend_reversal_is_bounded();
+    test_horizontal_unsupported_prediction_does_not_stick_at_range_boundary();
     test_horizontal_persistent_innovation_keeps_velocity_and_delay_continuous();
     test_horizontal_maneuver_accepts_coherent_second_reversal();
     test_horizontal_maneuver_rejects_short_coherent_center_outliers();
