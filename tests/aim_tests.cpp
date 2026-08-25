@@ -5267,9 +5267,14 @@ void test_tracking_reverse_quiet_inventory_probe_survives_edge_noise() {
         int pending_frames = 0;
         int identity_changes = 0;
         int legacy_maximum_dwell_frames = 0;
+        int opposing_command_x = 0;
         bool translation_ready = false;
         bool position_ready = false;
         bool probe_limited = false;
+        bool opposing_translation_injected = false;
+        bool opposing_probe_cancelled = false;
+        bool opposing_gate_blocked = false;
+        bool opposing_reset_reason_valid = false;
     };
     const auto base =
         std::chrono::steady_clock::now() + std::chrono::seconds(1);
@@ -5324,7 +5329,18 @@ void test_tracking_reverse_quiet_inventory_probe_survives_edge_noise() {
             frame.control_center_x = roi_width * 0.66875f;
             frame.control_center_y = roi_width * 0.50f;
             frame.lock_active = true;
-            center_x -= roi_width * 0.003125f;
+            const bool inject_opposing_translation =
+                trace.first_negative_offset >= 0 &&
+                !trace.opposing_translation_injected;
+            if (inject_opposing_translation) {
+                // 首个库存静默探针后的下一帧仍保持基础点位于候选侧，
+                // 但两条框边明确沿旧输出方向共同平移。它不是弱证据
+                // 空洞，而是与启动门对称的强反证，应立即撤销探针。
+                center_x += roi_width * 0.00625f;
+                trace.opposing_translation_injected = true;
+            } else {
+                center_x -= roi_width * 0.003125f;
+            }
             // 平移每帧为 0.3125% ROI；普通帧宽度增加约
             // 0.0771% ROI，原始共同平移一致性约为 0.78。每四帧
             // 改为增加约 0.1147% ROI，使原始一致性降到约 0.69。
@@ -5332,7 +5348,9 @@ void test_tracking_reverse_quiet_inventory_probe_survives_edge_noise() {
             // 旧逐帧驻留因此永远到不了 15 ms，而三观测中值仍由
             // 当前帧同向共同边授权，可补回单帧幅值噪声。
             const bool noisy_edge = offset % 4 == 2;
-            if (noisy_edge) {
+            if (inject_opposing_translation) {
+                legacy_dwell_frames = 0;
+            } else if (noisy_edge) {
                 box_width += roi_width * 0.001147f;
                 legacy_dwell_frames = 0;
             } else {
@@ -5365,6 +5383,16 @@ void test_tracking_reverse_quiet_inventory_probe_survives_edge_noise() {
                 trace.probe_limited =
                     result.control.reverse_probe_limited_x;
             }
+            if (inject_opposing_translation) {
+                trace.opposing_command_x = result.command.dx_counts;
+                trace.opposing_probe_cancelled =
+                    !result.control.reverse_probe_active_x;
+                trace.opposing_gate_blocked =
+                    result.control.reverse_gate_blocked_x;
+                trace.opposing_reset_reason_valid =
+                    result.control.reverse_translation_reset_reason_x ==
+                    AimReverseTranslationResetReason::OPPOSING_TRANSLATION;
+            }
         }
         return trace;
     };
@@ -5379,17 +5407,24 @@ void test_tracking_reverse_quiet_inventory_probe_survives_edge_noise() {
             trace.first_negative_offset < 8 &&
             !trace.translation_ready &&
             !trace.position_ready &&
-            trace.probe_limited;
+            trace.probe_limited &&
+            trace.opposing_translation_injected &&
+            trace.opposing_command_x == 0 &&
+            trace.opposing_probe_cancelled &&
+            trace.opposing_gate_blocked &&
+            trace.opposing_reset_reason_valid;
     };
     expect(valid(normal) && valid(doubled) &&
                std::abs(normal.first_negative_offset -
                         doubled.first_negative_offset) <= 1,
            "旧库存安静后，三观测中值支持的强共同边应立即产生有界探针，"
-           "无需再等待完整 15 ms 驻留，且 320/640 ROI 同构；"
-           "首负/旧逐帧最大驻留/来源=" +
+           "无需再等待完整 15 ms 驻留；启动后的对称强反证必须立即"
+           "撤销而不能维持整窗短脉冲，且 320/640 ROI 同构；"
+           "首负/旧逐帧最大驻留/反证命令/来源=" +
                std::to_string(normal.first_negative_offset) + "/" +
                std::to_string(doubled.first_negative_offset) + "/" +
                std::to_string(normal.legacy_maximum_dwell_frames) + "/" +
+               std::to_string(normal.opposing_command_x) + "/" +
                std::to_string(normal.translation_ready) + "/" +
                std::to_string(normal.position_ready));
 }
@@ -6039,7 +6074,7 @@ void test_tracking_reverse_position_probe_cancels_after_evidence_resets() {
             trace.maximum_probe_magnitude <= 3 &&
             trace.improvement_reset_seen &&
             trace.cancel_offset > trace.first_negative_offset &&
-            trace.cancel_offset - trace.first_negative_offset >= 3 &&
+            trace.cancel_offset - trace.first_negative_offset >= 1 &&
             trace.cancel_offset - trace.first_negative_offset <= 6 &&
             trace.unlimited_negative_commands == 0 &&
             trace.cancel_gate_blocked &&
@@ -6052,8 +6087,9 @@ void test_tracking_reverse_position_probe_cancels_after_evidence_resets() {
                         doubled.first_negative_offset) <= 1 &&
                std::abs(normal.cancel_offset -
                         doubled.cancel_offset) <= 1,
-           "纯位置探针在首反馈窗内丢失位置证据且没有独立快速事实时，"
-           "必须取消而不能穿透成全量输出；320/640 首负/取消偏移=" +
+           "纯位置探针在首反馈窗内出现位置改善和明确反向共同边时，"
+           "必须立即取消而不能维持整窗或穿透成全量输出；"
+           "320/640 首负/取消偏移=" +
                std::to_string(normal.first_negative_offset) + "/" +
                std::to_string(doubled.first_negative_offset) + "/" +
                std::to_string(normal.cancel_offset) + "/" +

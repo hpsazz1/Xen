@@ -4096,7 +4096,39 @@ struct Aim::Impl {
                                           .count());
                         const float feedback_window_seconds =
                             config.control_delay_ms / 1000.0f;
-                        if (probe_age_seconds < feedback_window_seconds) {
+                        const bool quiet_probe_explicitly_opposed =
+                            tracking_horizontal_reverse_probe_requires_fresh_confirmation &&
+                            !previous_direction_inventory_pending &&
+                            !previous_direction_command_effective &&
+                            aligned_translation_evidence <=
+                                -kHorizontalTranslationEvidenceConsistencyMinimum;
+                        if (quiet_probe_explicitly_opposed) {
+                            // 最新实机反事实中，29 个库存静默快探针候选里
+                            // 有 11 个最终恢复旧方向；其中 9 个在首个反馈窗
+                            // 出现 >=0.70 的明确反对证据，而 18 个旧状态机
+                            // 随后放行同方向的候选只有 1 个。弱帧和零位移
+                            // 仍保留探针；只有对称的强反证才立即撤销，避免
+                            // 把单个强帧扩成持续 3-count 的错误短脉冲。
+                            tracking_horizontal_reverse_evidence_ratio_seconds =
+                                0.0f;
+                            tracking_horizontal_reverse_position_ratio_seconds =
+                                0.0f;
+                            tracking_horizontal_reverse_position_peak_error =
+                                aligned_base_error_x;
+                            tracking_horizontal_reverse_translation_seconds =
+                                0.0f;
+                            tracking_horizontal_reverse_translation_gap_seconds =
+                                0.0f;
+                            tracking_horizontal_reverse_probe_direction = 0.0f;
+                            tracking_horizontal_reverse_probe_requires_fresh_confirmation =
+                                false;
+                            tracking_horizontal_reverse_probe_started_at = {};
+                            filtered_x = 0.0f;
+                            shaped_x = 0.0f;
+                            residual_x = 0.0f;
+                            desired_x = 0.0f;
+                            diagnostics.reverse_gate_blocked_x = true;
+                        } else if (probe_age_seconds < feedback_window_seconds) {
                             // 首个反馈窗内最多允许持续 3 counts，但不递增。
                             // 库存静默快探针的首帧仍固定为 1 count；后续帧
                             // 复用同一有界确认窗，避免重新形成多帧停发。
