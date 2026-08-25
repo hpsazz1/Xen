@@ -1062,6 +1062,85 @@ void test_horizontal_unsupported_prediction_does_not_stick_at_range_boundary() {
                std::to_string(maximum_stop_step) + "/" +
                std::to_string(stop_second_p95));
 
+    // 实机 20260825-132050 的 1157～1178 帧并非完全静止框：人物主体
+    // 中心只剩远小于旧趋势的姿态位移，而宽高共同形变仍让 OLS 保护窗
+    // 持续有效。旧用例把姿态也冻结，只能覆盖 predict_tracks() 的库存；
+    // 本段要求基础点跟随当前共同边，不能继续消费失去观测支持的 OLS 外推。
+    Aim active_pose_aim(config);
+    float active_pose_true_x = 60.0f;
+    int active_pose_boundary_frames = 0;
+    int active_pose_boundary_run = 0;
+    int maximum_active_pose_boundary_run = 0;
+    float active_pose_relative_variation = 0.0f;
+    float active_pose_maximum_relative_step = 0.0f;
+    float active_pose_maximum_relative_error = 0.0f;
+    float previous_active_pose_relative_error = 0.0f;
+    bool active_pose_stop_started = false;
+    for (int index = 0; index < 180; ++index) {
+        if (index > 0 && index < 100) active_pose_true_x += 0.80f;
+        const int phase_index = index % 34;
+        const float pose_phase = phase_index <= 17
+            ? -1.0f + static_cast<float>(phase_index) * (2.0f / 17.0f)
+            : 1.0f - static_cast<float>(phase_index - 17) *
+                (2.0f / 17.0f);
+        const float observed_center_x =
+            active_pose_true_x + pose_phase * 0.21f;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index) * 4167));
+        frame.detections = {body_box(
+            observed_center_x, 175.0f,
+            16.0f + pose_phase * 0.4f,
+            70.0f + pose_phase * 1.8f)};
+        const AimResult result = active_pose_aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "姿态仍活动的水平移动转停回归必须逐帧保留目标");
+        if (!result.has_target || index < 100 || index >= 160) continue;
+        const float width = result.target.x2 - result.target.x1;
+        const float ratio = width > 0.0f
+            ? (result.target.base_aim_x - result.target.x1) / width : -1.0f;
+        const bool boundary =
+            std::fabs(ratio - 0.25f) <= 0.0001f ||
+            std::fabs(ratio - 0.75f) <= 0.0001f;
+        if (boundary) {
+            ++active_pose_boundary_frames;
+            ++active_pose_boundary_run;
+            maximum_active_pose_boundary_run = std::max(
+                maximum_active_pose_boundary_run, active_pose_boundary_run);
+        } else {
+            active_pose_boundary_run = 0;
+        }
+        const float relative_error =
+            result.target.base_aim_x - observed_center_x;
+        active_pose_maximum_relative_error = std::max(
+            active_pose_maximum_relative_error, std::fabs(relative_error));
+        // 三次原始共同边和 15 ms 渐入最多占前四帧；总变差/阶跃从证据
+        // 完整生效后统计，贴边和最大偏差仍覆盖整个转停区间。
+        if (index >= 104 && active_pose_stop_started) {
+            const float relative_step = std::fabs(
+                relative_error - previous_active_pose_relative_error);
+            active_pose_relative_variation += relative_step;
+            active_pose_maximum_relative_step = std::max(
+                active_pose_maximum_relative_step, relative_step);
+        }
+        previous_active_pose_relative_error = relative_error;
+        active_pose_stop_started = index >= 103;
+    }
+    expect(active_pose_boundary_frames == 0 &&
+               maximum_active_pose_boundary_run == 0 &&
+               active_pose_relative_variation <= 4.0f &&
+               active_pose_maximum_relative_step <= 0.35f &&
+               active_pose_maximum_relative_error <= 2.30f,
+           "宽高形变继续活动但共同边已不支持旧 X 趋势时，OLS 不得继续"
+           "推动基础点，贴边帧/最长贴边/相对总变差/最大相对步长/"
+           "最大相对误差=" +
+               std::to_string(active_pose_boundary_frames) + "/" +
+               std::to_string(maximum_active_pose_boundary_run) + "/" +
+               std::to_string(active_pose_relative_variation) + "/" +
+               std::to_string(active_pose_maximum_relative_step) + "/" +
+               std::to_string(active_pose_maximum_relative_error));
+
     Aim reversal_aim(config);
     float reversal_true_x = 60.0f;
     int reversal_boundary_frames = 0;
