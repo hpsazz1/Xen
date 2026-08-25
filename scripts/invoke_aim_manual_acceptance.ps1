@@ -28,6 +28,7 @@
     [double]$MaxDelayCompensationMs = 16.0,
     [ValidateRange(1.0, 50.0)]
     [double]$MaxDelayCompensationPercent = 15.0,
+    # 兼容旧发布入口的调用参数；当前校验固定为 task_scoped，不再分 full/lightweight。
     [switch]$LightweightPackageValidation,
     [switch]$AllowPhysicalOutput,
     [string]$PhysicalOutputConfirmation = ""
@@ -55,18 +56,15 @@ $kmboxIp = "192.168.2.188"
 $kmboxPort = 13384
 $kmboxUuid = "7679E04E"
 $maxPredictionLeadPercent = 35.0
-$lightweightManifestPaths = @(
+$taskManifestPaths = @(
+    "XenLauncher.exe",
     "config.ini",
     "runtimes\nvidia\Xen.exe",
     "tools\invoke_aim_manual_acceptance.ps1",
     "tools\aim_report.ps1",
     "tools\aim_control_diagnostics.ps1"
 )
-$packageValidationMode = if ($LightweightPackageValidation.IsPresent) {
-    "lightweight"
-} else {
-    "full"
-}
+$packageValidationMode = "task_scoped"
 
 if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
     $PackageRoot = [System.IO.Path]::GetFullPath(
@@ -131,19 +129,15 @@ function Read-Manifest() {
     return [pscustomobject]@{ Path = $path; Value = $manifest }
 }
 
-function Test-MutablePackageFile([string]$RelativePath) {
-    return $RelativePath -match '^(cache|logs)\\.+'
-}
-
-function Assert-ManifestFiles(
+function Assert-TaskManifestFiles(
         [object]$Manifest,
-        [switch]$AllowConfigMismatch,
-        [string[]]$OnlyPaths = @()) {
+        [string]$ModelName,
+        [switch]$AllowConfigMismatch) {
     $declared = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
     $required = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($path in $OnlyPaths) {
+    foreach ($path in @($taskManifestPaths) + "models\$ModelName") {
         [void]$required.Add($path.Replace('/', '\'))
     }
     $verified = [System.Collections.Generic.HashSet[string]]::new(
@@ -156,12 +150,12 @@ function Assert-ManifestFiles(
             -not $declared.Add($relative)) {
             throw "发布清单包含非法或重复路径：$relative"
         }
-        if ($required.Count -gt 0 -and -not $required.Contains($relative)) {
+        if (-not $required.Contains($relative)) {
             continue
         }
         $path = Join-Path $PackageRoot $relative
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "发布包缺少清单文件：$relative"
+            throw "人工任务依赖文件缺失：$relative"
         }
         if ($AllowConfigMismatch -and $relative -ieq "config.ini") {
             continue
@@ -170,24 +164,14 @@ function Assert-ManifestFiles(
         $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         if ([long]$file.Length -ne [long]$record.size -or
             $hash -ne ([string]$record.sha256).ToUpperInvariant()) {
-            throw "发布包文件长度或 SHA-256 不一致：$relative"
+            throw "人工任务依赖文件长度或 SHA-256 不一致：$relative"
         }
         [void]$verified.Add($relative)
     }
     foreach ($relative in $required) {
         if (-not $verified.Contains($relative) -and
             -not ($AllowConfigMismatch -and $relative -ieq "config.ini")) {
-            throw "发布清单缺少轻量校验文件：$relative"
-        }
-    }
-    if ($required.Count -gt 0) { return }
-    foreach ($file in @(Get-ChildItem -LiteralPath $PackageRoot -Recurse -File)) {
-        $relative = $file.FullName.Substring(
-            $PackageRoot.TrimEnd('\').Length + 1)
-        if ($relative -ieq "manifest.json") { continue }
-        if (-not $declared.Contains($relative) -and
-            -not (Test-MutablePackageFile $relative)) {
-            throw "发布包包含清单外文件：$relative"
+            throw "发布清单缺少人工任务依赖文件：$relative"
         }
     }
 }
@@ -323,7 +307,7 @@ function Activate-Config(
         [object]$ManifestResult,
         [string]$ConfigText,
         [string]$SourceLabel,
-        [switch]$LightweightValidation) {
+        [string]$ModelName) {
     $configPath = Join-Path $PackageRoot "config.ini"
     Write-TextAtomically $configPath $ConfigText
     $record = @($ManifestResult.Value.files | Where-Object {
@@ -339,11 +323,7 @@ function Activate-Config(
     $record[0].source = $SourceLabel
     Write-JsonAtomically $ManifestResult.Path $ManifestResult.Value
     $verified = Read-Manifest
-    if ($LightweightValidation.IsPresent) {
-        Assert-ManifestFiles $verified.Value -OnlyPaths $lightweightManifestPaths
-    } else {
-        Assert-ManifestFiles $verified.Value
-    }
+    Assert-TaskManifestFiles $verified.Value $ModelName
     return $verified
 }
 
@@ -445,25 +425,19 @@ function New-LaunchCommand([string]$ResolvedRunDirectory) {
     } else {
         ""
     }
-    $validationSwitch = if ($LightweightPackageValidation.IsPresent) {
-        " -LightweightPackageValidation"
-    } else {
-        ""
-    }
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
         '-TaskId {1} -Mode Launch -Scenario {2} -Profile {3} ' +
         '-PackageRoot "{4}" -RunDirectory "{5}" -Smoothing {6:F6}' +
         ' -CountsPerPixelX {7:F6} -CountsPerPixelY {8:F6} ' +
         '-MaxCountsPerFrame {9:F6}{10} -ControlDelayMs {11:F6} ' +
         '-MaxDelayCompensationMs {12:F6} ' +
-        '-MaxDelayCompensationPercent {13:F6}{14} -AllowPhysicalOutput ' +
-        '-PhysicalOutputConfirmation {15}') -f
+        '-MaxDelayCompensationPercent {13:F6} -AllowPhysicalOutput ' +
+        '-PhysicalOutputConfirmation {14}') -f
         (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
         $taskId, $Scenario, $Profile, $PackageRoot, $ResolvedRunDirectory,
         $Smoothing, $resolvedCountsPerPixelX, $resolvedCountsPerPixelY,
         $MaxCountsPerFrame, $delaySwitch, $ControlDelayMs,
         $MaxDelayCompensationMs, $MaxDelayCompensationPercent,
-        $validationSwitch,
         $physicalConfirmation
 }
 
@@ -548,13 +522,9 @@ if ($Mode -eq "Prepare") {
         throw "Prepare 只生成任务，不接受 Launch 物理输出授权。"
     }
     $manifestResult = Read-Manifest
-    if ($LightweightPackageValidation.IsPresent) {
-        Assert-ManifestFiles $manifestResult.Value -AllowConfigMismatch `
-            -OnlyPaths $lightweightManifestPaths
-    } else {
-        Assert-ManifestFiles $manifestResult.Value -AllowConfigMismatch
-    }
     $modelName = Get-ModelName $manifestResult.Value
+    Assert-TaskManifestFiles $manifestResult.Value $modelName `
+        -AllowConfigMismatch
     $configText = New-ConfigText $modelName
     $definition = Get-ScenarioDefinition
     $runId = "{0}-{1}-{2}-{3}" -f
@@ -573,8 +543,7 @@ if ($Mode -eq "Prepare") {
     $configPath = Join-Path $resolvedRun "config.ini"
     Write-TextAtomically $configPath $configText
     $manifestResult = Activate-Config $manifestResult $configText `
-        "generated:$taskId/$runId" `
-        -LightweightValidation:$LightweightPackageValidation.IsPresent
+        "generated:$taskId/$runId" $modelName
     $task = [ordered]@{
         schema = 1
         task_id = $taskId
@@ -719,12 +688,8 @@ if ($manifestEvidence.length -ne [long]$task.package_manifest.length -or
     $manifestEvidence.sha256 -ne [string]$task.package_manifest.sha256) {
     throw "当前 manifest.json 不是本任务 Prepare 绑定的清单。"
 }
-if ($LightweightPackageValidation.IsPresent) {
-    Assert-ManifestFiles $manifestResult.Value `
-        -OnlyPaths $lightweightManifestPaths
-} else {
-    Assert-ManifestFiles $manifestResult.Value
-}
+$modelName = Get-ModelName $manifestResult.Value
+Assert-TaskManifestFiles $manifestResult.Value $modelName
 
 $runtimeRoot = Join-Path $PackageRoot "cache\runtime"
 $before = [System.Collections.Generic.HashSet[string]]::new(

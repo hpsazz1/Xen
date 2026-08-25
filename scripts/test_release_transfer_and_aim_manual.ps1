@@ -129,42 +129,30 @@ try {
         "runtime provider cache"
     Write-Utf8 (Join-Path $published "logs\xen.log") "runtime log"
 
-    $invalidMutablePrefix = Join-Path $published `
-        "cache-shadow\unknown.dll"
-    Write-Utf8 $invalidMutablePrefix "not mutable cache"
-    $invalidRoot = Join-Path $root "invalid-prefix-task"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
-        -Mode Prepare -Scenario Static -Profile tracking `
-        -PackageRoot $published -RunDirectory $invalidRoot
-    if ($LASTEXITCODE -eq 0) {
-        throw "cache 同名前缀目录不应绕过人工验收清单校验。"
-    }
-    Remove-Item -LiteralPath $invalidMutablePrefix -Force
-
+    Write-Utf8 (Join-Path $published "notes\local.txt") `
+        "与本轮人工任务无关的本地文件"
     $directMlWorker = Join-Path $published "runtimes\directml\Xen.exe"
     Write-Utf8 $directMlWorker "dml-not-transferred-this-round"
-    $lightweightRoot = Join-Path $root "lightweight-task"
+    $taskScopedRoot = Join-Path $root "task-scoped-task"
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
         -TaskId AIM-LATENCY-COMP-001 `
         -Mode Prepare -Scenario Static -Profile tracking `
-        -LightweightPackageValidation `
-        -PackageRoot $published -RunDirectory $lightweightRoot | Out-Null
+        -PackageRoot $published -RunDirectory $taskScopedRoot | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "轻量校验不应重复哈希未传输的 DirectML Worker。"
+        throw "任务范围校验不应扫描无关文件或重复哈希 DirectML Worker。"
     }
-    $lightweightTask = Get-Content -LiteralPath `
-        (Join-Path $lightweightRoot "task.json") -Raw -Encoding utf8 |
+    $taskScopedTask = Get-Content -LiteralPath `
+        (Join-Path $taskScopedRoot "task.json") -Raw -Encoding utf8 |
         ConvertFrom-Json
-    if ([string]$lightweightTask.package_validation -ne "lightweight" -or
-        [string]::IsNullOrWhiteSpace($lightweightTask.worker.sha256) -or
+    if ([string]$taskScopedTask.package_validation -ne "task_scoped" -or
+        [string]::IsNullOrWhiteSpace($taskScopedTask.worker.sha256) -or
         [string]::IsNullOrWhiteSpace(
-            $lightweightTask.acceptance_script.sha256) -or
-        [string]::IsNullOrWhiteSpace($lightweightTask.aim_report.sha256) -or
+            $taskScopedTask.acceptance_script.sha256) -or
+        [string]::IsNullOrWhiteSpace($taskScopedTask.aim_report.sha256) -or
         [string]::IsNullOrWhiteSpace(
-            $lightweightTask.aim_control_diagnostics.sha256)) {
-        throw "轻量任务没有绑定校验模式、Worker 或完整报告工具哈希。"
+            $taskScopedTask.aim_control_diagnostics.sha256)) {
+        throw "人工任务没有绑定任务范围校验模式、Worker 或报告工具哈希。"
     }
     Write-Utf8 $directMlWorker "dml"
 
@@ -177,16 +165,15 @@ try {
             $controlDiagnosticsTool, "`n# corrupt", `
             [System.Text.UTF8Encoding]::new($false))
         $invalidControlDiagnosticsRoot = Join-Path $root `
-            "invalid-lightweight-control-diagnostics"
+            "invalid-task-control-diagnostics"
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
             -TaskId AIM-LATENCY-COMP-001 `
             -Mode Prepare -Scenario Static -Profile tracking `
-            -LightweightPackageValidation `
             -PackageRoot $published `
             -RunDirectory $invalidControlDiagnosticsRoot
         if ($LASTEXITCODE -eq 0) {
-            throw "轻量校验必须拒绝控制诊断工具哈希变化。"
+            throw "任务范围校验必须拒绝控制诊断工具哈希变化。"
         }
     } finally {
         [System.IO.File]::WriteAllBytes(
@@ -195,17 +182,65 @@ try {
 
     $nvidiaWorker = Join-Path $published "runtimes\nvidia\Xen.exe"
     Write-Utf8 $nvidiaWorker "nvidia-corrupt"
-    $invalidWorkerRoot = Join-Path $root "invalid-lightweight-worker"
+    $invalidWorkerRoot = Join-Path $root "invalid-task-worker"
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
         -TaskId AIM-LATENCY-COMP-001 `
         -Mode Prepare -Scenario Static -Profile tracking `
-        -LightweightPackageValidation `
         -PackageRoot $published -RunDirectory $invalidWorkerRoot
     if ($LASTEXITCODE -eq 0) {
-        throw "轻量校验必须拒绝本轮传输的 NVIDIA Worker 哈希变化。"
+        throw "任务范围校验必须拒绝本轮使用的 NVIDIA Worker 哈希变化。"
     }
     Write-Utf8 $nvidiaWorker "nvidia"
+
+    $modelPath = Join-Path $published "models\14wv11.onnx"
+    $modelBytes = [System.IO.File]::ReadAllBytes($modelPath)
+    try {
+        [System.IO.File]::AppendAllText(
+            $modelPath, "`ncorrupt", [System.Text.UTF8Encoding]::new($false))
+        $invalidModelRoot = Join-Path $root "invalid-task-model"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-LATENCY-COMP-001 `
+            -Mode Prepare -Scenario Static -Profile tracking `
+            -PackageRoot $published -RunDirectory $invalidModelRoot
+        if ($LASTEXITCODE -eq 0) {
+            throw "任务范围校验必须拒绝本轮使用的模型哈希变化。"
+        }
+    } finally {
+        [System.IO.File]::WriteAllBytes($modelPath, $modelBytes)
+    }
+
+    $launcherPath = Join-Path $published "XenLauncher.exe"
+    $launcherBytes = [System.IO.File]::ReadAllBytes($launcherPath)
+    try {
+        [System.IO.File]::AppendAllText(
+            $launcherPath, "`ncorrupt",
+            [System.Text.UTF8Encoding]::new($false))
+        $invalidLauncherRoot = Join-Path $root "invalid-task-launcher"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-LATENCY-COMP-001 `
+            -Mode Prepare -Scenario Static -Profile tracking `
+            -PackageRoot $published -RunDirectory $invalidLauncherRoot
+        if ($LASTEXITCODE -eq 0) {
+            throw "任务范围校验必须拒绝本轮使用的 Launcher 哈希变化。"
+        }
+    } finally {
+        [System.IO.File]::WriteAllBytes($launcherPath, $launcherBytes)
+    }
+
+    $prepareAuthorizationRoot = Join-Path $root "invalid-prepare-authorization"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-LATENCY-COMP-001 `
+        -Mode Prepare -Scenario Static -Profile tracking `
+        -PackageRoot $published -RunDirectory $prepareAuthorizationRoot `
+        -AllowPhysicalOutput `
+        -PhysicalOutputConfirmation XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT
+    if ($LASTEXITCODE -eq 0) {
+        throw "Prepare 不得接受真实物理输出授权。"
+    }
 
     $trackingRoot = Join-Path $root "tracking-task"
     $trackingOutput = @(& powershell.exe -NoProfile `
@@ -218,7 +253,6 @@ try {
         -EnableDelayCompensation -ControlDelayMs 7.5 `
         -MaxDelayCompensationMs 18.0 `
         -MaxDelayCompensationPercent 12.0 `
-        -LightweightPackageValidation `
         -PackageRoot $published -RunDirectory $trackingRoot 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "tracking 任务准备失败。" }
     $trackingOutput | ForEach-Object { Write-Host $_ }
@@ -233,7 +267,6 @@ try {
              '-ControlDelayMs 7\.500000 ' +
              '-MaxDelayCompensationMs 18\.000000 ' +
              '-MaxDelayCompensationPercent 12\.000000 ' +
-             '-LightweightPackageValidation ' +
              '-AllowPhysicalOutput ' +
              '-PhysicalOutputConfirmation ' +
              'XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT\r?$')) {
@@ -269,7 +302,7 @@ try {
         [double]$trackingTask.aim.counts_per_pixel_y -ne 0.40 -or
         [double]$trackingTask.aim.max_counts_per_frame -ne 14.0 -or
         [bool]$trackingTask.aim.delay_compensation_enabled -ne $true -or
-        [string]$trackingTask.package_validation -ne "lightweight" -or
+        [string]$trackingTask.package_validation -ne "task_scoped" -or
         [double]$trackingTask.aim.control_delay_ms -ne 7.5 -or
         [double]$trackingTask.aim.max_delay_compensation_ms -ne 18.0 -or
         [double]$trackingTask.aim.max_delay_compensation_percent -ne 12.0) {
@@ -301,19 +334,19 @@ try {
             $publishedManifest, "`n", [System.Text.UTF8Encoding]::new($false))
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
-            -TaskId AIM-LATENCY-COMP-001 `
-            -Mode Launch -Scenario Static -Profile tracking -Smoothing 0.50 `
-            -CountsPerPixel 0.55 `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Launch -Scenario SuperJump -Profile tracking -Smoothing 0.50 `
+            -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+            -MaxCountsPerFrame 14.0 `
             -EnableDelayCompensation -ControlDelayMs 7.5 `
             -MaxDelayCompensationMs 18.0 `
             -MaxDelayCompensationPercent 12.0 `
-            -LightweightPackageValidation `
             -PackageRoot $published -RunDirectory $trackingRoot `
             -AllowPhysicalOutput `
             -PhysicalOutputConfirmation `
                 XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT
         if ($LASTEXITCODE -eq 0) {
-            throw "轻量 Launch 必须拒绝 Prepare 后变化的 manifest。"
+            throw "任务范围 Launch 必须拒绝 Prepare 后变化的 manifest。"
         }
     } finally {
         [System.IO.File]::WriteAllBytes($publishedManifest, $manifestBytes)
@@ -327,7 +360,6 @@ try {
         -EnableDelayCompensation -ControlDelayMs 7.5 `
         -MaxDelayCompensationMs 18.0 `
         -MaxDelayCompensationPercent 12.0 `
-        -LightweightPackageValidation `
         -PackageRoot $published -RunDirectory $trackingRoot `
         -AllowPhysicalOutput `
         -PhysicalOutputConfirmation XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT
@@ -356,7 +388,7 @@ try {
     if ($LASTEXITCODE -eq 0) {
         throw "缺少物理输出双重授权时 Launch 不应成功。"
     }
-    Write-Host "完整包传输、Aim 配置生成、清单更新和授权拒绝回归通过。"
+    Write-Host "完整包传输、任务范围校验、Aim 配置生成和授权拒绝回归通过。"
 } finally {
     if (Test-Path -LiteralPath $root) {
         Remove-Item -LiteralPath $root -Recurse -Force
