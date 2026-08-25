@@ -240,6 +240,14 @@ public:
     Aim& operator=(Aim&&) noexcept;
 
     AimResult process(const AimFrame& frame) noexcept;
+    // Runtime 在 Mouse 后端返回后确认本帧真正执行的整数命令。成功发送
+    // 传回原命令，安全门拒绝或后端失败传回 (0,0)，从而用真实完成时刻
+    // 和结果修正反向门读取的延迟命令与在途库存。
+    bool record_applied_command(
+        std::uint64_t sequence,
+        std::chrono::steady_clock::time_point applied_at,
+        int dx_counts,
+        int dy_counts) noexcept;
     void reset() noexcept;
 
 private:

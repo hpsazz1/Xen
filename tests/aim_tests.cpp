@@ -4110,6 +4110,76 @@ void test_vertical_shape_noise_does_not_stutter_horizontal_tracking() {
                std::to_string(error_p95));
 }
 
+void test_applied_command_feedback_contract() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 1.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 100.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame first = make_frame(1, base);
+    first.control_at = base + std::chrono::milliseconds(1);
+    first.lock_active = true;
+    first.detections = {body(200.0f, 160.0f)};
+    const AimResult first_result = aim.process(first);
+    expect(first_result.status == AimStatus::SUCCESS &&
+               first_result.has_command,
+           "实际命令反馈契约必须先生成一条可发送命令");
+    const auto first_applied_at =
+        first.control_at + std::chrono::microseconds(100);
+    expect(!aim.record_applied_command(
+               first.sequence,
+               first.control_at - std::chrono::microseconds(1),
+               first_result.command.dx_counts,
+               first_result.command.dy_counts),
+           "实际完成时刻早于控制计算时刻必须拒绝");
+    expect(!aim.record_applied_command(
+               first.sequence,
+               first_applied_at,
+               first_result.command.dx_counts + 1,
+               first_result.command.dy_counts),
+           "非零实际命令与预计算命令不一致时必须拒绝");
+    expect(aim.record_applied_command(
+               first.sequence,
+               first_applied_at,
+               first_result.command.dx_counts,
+               first_result.command.dy_counts),
+           "Mouse 成功后必须按同一帧序号确认实际整数命令");
+    expect(!aim.record_applied_command(
+               first.sequence,
+               first_applied_at,
+               first_result.command.dx_counts,
+               first_result.command.dy_counts),
+           "同一帧实际命令不得重复确认");
+
+    AimFrame second = make_frame(
+        2, base + std::chrono::milliseconds(4));
+    second.control_at = base + std::chrono::milliseconds(5);
+    second.lock_active = true;
+    second.detections = {body(200.0f, 160.0f)};
+    const AimResult second_result = aim.process(second);
+    expect(second_result.has_command &&
+               aim.record_applied_command(
+                   second.sequence,
+                   second.control_at + std::chrono::microseconds(100),
+                   0,
+                   0),
+           "Mouse 失败或二次安全门拒绝时必须把预计算命令确认为零");
+    expect(!aim.record_applied_command(
+               999,
+               second.control_at + std::chrono::microseconds(200),
+               0,
+               0),
+           "不存在的帧序号不得写入命令历史");
+}
+
 void test_delayed_partial_visibility_closed_loop_preserves_real_reversals() {
     constexpr int kFrameCount = 240;
     constexpr int kSegmentFrameCount = 80;
@@ -5038,17 +5108,16 @@ void test_tracking_reverse_consecutive_common_translation_releases() {
     expect(pending_frames > 0 &&
                stationary_frame_injected &&
                translation_reset_offset >= 0 &&
-               first_negative_offset >= 6 &&
-               first_negative_offset >= translation_reset_offset + 4 &&
-               first_negative_offset < 20 &&
-               first_negative_translation_ready &&
+               first_negative_offset == translation_reset_offset + 1 &&
+               !first_negative_translation_ready &&
                !first_negative_position_ready &&
                first_negative_probe_limited &&
                first_committed_negative_offset > first_negative_offset &&
                first_committed_negative_offset <= first_negative_offset + 5 &&
-               first_negative_translation_ms >= 15.0f,
-           "旧方向库存退出后，候选方向共同边连续覆盖一个反馈窗应先于"
-           "30% 位置门进入有界确认；库存帧/驻留清零/首负/平移就绪/"
+               first_negative_translation_ms == 0.0f,
+           "旧方向库存退出且当前共同边强一致时，应立即用 1-count 探针"
+           "取代完整反馈窗停发；探针前证据必须清零并等待新鲜反馈确认；"
+           "库存帧/驻留清零/首负/平移就绪/"
            "位置就绪/探测限幅/上下文=" +
                std::to_string(pending_frames) + "/" +
                std::to_string(translation_reset_offset) + "/" +
@@ -5192,7 +5261,7 @@ void test_tracking_reverse_effective_old_command_requires_fresh_confirmation() {
                std::to_string(doubled.cancellation_count));
 }
 
-void test_tracking_reverse_robust_common_translation_survives_edge_noise() {
+void test_tracking_reverse_quiet_inventory_probe_survives_edge_noise() {
     struct Trace {
         int first_negative_offset = -1;
         int pending_frames = 0;
@@ -5306,17 +5375,17 @@ void test_tracking_reverse_robust_common_translation_survives_edge_noise() {
         return trace.identity_changes == 0 &&
             trace.pending_frames > 0 &&
             trace.legacy_maximum_dwell_frames <= 3 &&
-            trace.first_negative_offset >= 5 &&
-            trace.first_negative_offset < 16 &&
-            trace.translation_ready &&
+            trace.first_negative_offset >= 3 &&
+            trace.first_negative_offset < 8 &&
+            !trace.translation_ready &&
             !trace.position_ready &&
             trace.probe_limited;
     };
     expect(valid(normal) && valid(doubled) &&
                std::abs(normal.first_negative_offset -
                         doubled.first_negative_offset) <= 1,
-           "当前帧共同边同向但单帧幅值一致性间歇低于 0.70 时，三观测"
-           "中值必须先于位置兜底完成 15 ms 驻留，且 320/640 ROI 同构；"
+           "旧库存安静后，三观测中值支持的强共同边应立即产生有界探针，"
+           "无需再等待完整 15 ms 驻留，且 320/640 ROI 同构；"
            "首负/旧逐帧最大驻留/来源=" +
                std::to_string(normal.first_negative_offset) + "/" +
                std::to_string(doubled.first_negative_offset) + "/" +
@@ -5542,8 +5611,7 @@ void test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget() {
             trace.weak_diagnostics_valid &&
             trace.first_negative_offset >= 5 &&
             trace.first_negative_offset < 20 &&
-            trace.translation_ready &&
-            trace.translation_ready_diagnostics_valid &&
+            !trace.translation_ready &&
             !trace.position_ready &&
             trace.probe_limited;
     };
@@ -5554,20 +5622,33 @@ void test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget() {
                exhausted.weak_diagnostics_valid &&
                !exhausted.released_during_weak_observation &&
                split_exhausted.first_gap_preserved &&
-               split_exhausted.budget_exhausted_reset &&
-               split_exhausted.budget_reset_reason_valid &&
+               !split_exhausted.budget_exhausted_reset &&
                split_exhausted.weak_diagnostics_valid &&
-               !split_exhausted.released_during_weak_observation,
+               split_exhausted.released_during_weak_observation,
            "连续共同平移必须按反馈窗累计同向弱证据预算且不累计弱帧 dt；"
-           "预算内三帧应保持驻留并只在新强证据帧放行，累计弱时间达到 15 ms"
-           "必须清零，中间强帧不得刷新预算；320/640 ROI 与 3～5 ms 节奏"
+           "库存安静后的新强证据允许启动有界探针，纯弱序列累计达到 15 ms"
+           "仍必须清零；中间强帧启动的新探针会重建并在首个反馈窗内"
+           "保持有界命令。320/640 ROI 与 3～5 ms 节奏"
            "同构；首负/空洞前后驻留/连续与分段预算清零=" +
                std::to_string(normal.first_negative_offset) + "/" +
                std::to_string(doubled.first_negative_offset) + "/" +
                std::to_string(normal.dwell_before_gap_ms) + "/" +
                std::to_string(normal.dwell_during_first_gap_ms) + "/" +
                std::to_string(exhausted.budget_exhausted_reset) + "/" +
-               std::to_string(split_exhausted.budget_exhausted_reset));
+               std::to_string(split_exhausted.budget_exhausted_reset) +
+               "，normal/doubled=" +
+               std::to_string(within_budget_valid(normal)) + "/" +
+               std::to_string(within_budget_valid(doubled)) +
+               "，exhausted=" +
+               std::to_string(exhausted.first_gap_preserved) + "/" +
+               std::to_string(exhausted.budget_reset_reason_valid) + "/" +
+               std::to_string(exhausted.weak_diagnostics_valid) + "/" +
+               std::to_string(exhausted.released_during_weak_observation) +
+               "，split=" +
+               std::to_string(split_exhausted.first_gap_preserved) + "/" +
+               std::to_string(split_exhausted.weak_diagnostics_valid) + "/" +
+               std::to_string(
+                   split_exhausted.released_during_weak_observation));
 }
 
 void test_tracking_reverse_position_probe_retries_without_unconfirmed_commit() {
@@ -10420,6 +10501,7 @@ int main() {
     test_tracking_closing_response_does_not_keep_growing_command();
     test_delayed_pose_closed_loop_keeps_tracking_observer_continuous();
     test_vertical_shape_noise_does_not_stutter_horizontal_tracking();
+    test_applied_command_feedback_contract();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_horizontal_pending_subtraction_is_axis_and_profile_scoped();
@@ -10429,7 +10511,7 @@ int main() {
     test_tracking_reverse_requires_base_and_common_edge_direction();
     test_tracking_reverse_consecutive_common_translation_releases();
     test_tracking_reverse_effective_old_command_requires_fresh_confirmation();
-    test_tracking_reverse_robust_common_translation_survives_edge_noise();
+    test_tracking_reverse_quiet_inventory_probe_survives_edge_noise();
     test_tracking_reverse_translation_dwell_uses_feedback_window_gap_budget();
     test_tracking_reverse_position_probe_retries_without_unconfirmed_commit();
     test_tracking_reverse_position_probe_cancels_after_evidence_resets();

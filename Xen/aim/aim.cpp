@@ -138,9 +138,11 @@ struct Track {
 };
 
 struct IssuedCommand {
+    std::uint64_t sequence = 0;
     std::chrono::steady_clock::time_point issued_at{};
     float dx_counts = 0.0f;
     float dy_counts = 0.0f;
+    bool applied = false;
 };
 
 struct PendingIssuedCommandInventory {
@@ -359,6 +361,13 @@ constexpr float kTrackingHorizontalReverseDeformationFallbackScale = 3.0f;
 constexpr float kTrackingHorizontalReverseProbeMaximumCounts = 3.0f;
 constexpr float kTrackingHorizontalReverseFeedbackProbeMaximumCounts = 1.0f;
 constexpr float kTrackingHorizontalReverseProbeCommitWindows = 2.0f;
+// 最新实机 Run 的反向门阻塞帧中，旧方向库存已静默且候选方向一致性
+// >=0.70 的样本为 147 帧，其中 122 帧共同边位移至少达到 ROI 宽的
+// 0.05%；而回归中的 ±0.1 px 三角微抖在 320 ROI 仅为 0.03125%。
+// 该归一化空间门只决定是否允许 1-count 辨识探针，不判断人物速度，
+// 也不随游戏或分辨率写分支。
+constexpr float kTrackingHorizontalReverseProbeMinimumRoiMotionRatio =
+    0.0005f;
 // 连续闭合响应必须跨过一个半反馈窗才卸载 1 count；单个反馈窗只冻结
 // 增长，避免在真实方向刚建立或快速反转前过早削弱追赶。
 constexpr float kTrackingHorizontalClosingResponseTaperWindowsPerCount = 1.5f;
@@ -2427,15 +2436,54 @@ struct Aim::Impl {
                                float dx_counts,
                                float dy_counts) noexcept {
         // lock_active=false 时 Runtime 不会发送物理命令，历史必须记录零而
-        // 不是预计算结果，否则观察器会补偿一段从未发生的相机自运动。
+        // 不是预计算结果，否则反向门会等待一段从未发生的在途库存。
         IssuedCommand& entry = issued_commands[issued_command_next];
+        entry.sequence = frame.sequence;
         entry.issued_at = issued_at;
         entry.dx_counts = frame.lock_active ? dx_counts : 0.0f;
         entry.dy_counts = frame.lock_active ? dy_counts : 0.0f;
+        entry.applied = false;
         issued_command_next =
             (issued_command_next + 1U) % issued_commands.size();
         issued_command_count = std::min(
             issued_command_count + 1U, issued_commands.size());
+    }
+
+    bool record_applied_command(
+            std::uint64_t sequence,
+            std::chrono::steady_clock::time_point applied_at,
+            int dx_counts,
+            int dy_counts) noexcept {
+        if (sequence == 0 ||
+            applied_at == std::chrono::steady_clock::time_point{}) {
+            return false;
+        }
+        for (std::size_t offset = 0;
+             offset < issued_command_count; ++offset) {
+            const std::size_t index =
+                (issued_command_next + issued_commands.size() - 1U - offset) %
+                issued_commands.size();
+            IssuedCommand& candidate = issued_commands[index];
+            if (candidate.sequence != sequence) continue;
+            if (candidate.applied || applied_at < candidate.issued_at) {
+                return false;
+            }
+            const bool confirms_requested_command =
+                candidate.dx_counts == static_cast<float>(dx_counts) &&
+                candidate.dy_counts == static_cast<float>(dy_counts);
+            const bool confirms_no_command_applied =
+                dx_counts == 0 && dy_counts == 0;
+            if (!confirms_requested_command &&
+                !confirms_no_command_applied) {
+                return false;
+            }
+            candidate.issued_at = applied_at;
+            candidate.dx_counts = static_cast<float>(dx_counts);
+            candidate.dy_counts = static_cast<float>(dy_counts);
+            candidate.applied = true;
+            return true;
+        }
+        return false;
     }
 
     std::pair<float, float> delayed_issued_command(
@@ -3964,6 +4012,21 @@ struct Aim::Impl {
                         tracking_horizontal_reverse_position_ratio_seconds >=
                             required_position_fallback &&
                         deformation_dwell_ready;
+                    const bool strong_translation_probe_evidence =
+                        !partial_semantics_transition &&
+                        aligned_translation_evidence >=
+                            kHorizontalTranslationEvidenceConsistencyMinimum &&
+                        std::fabs(common_edge_motion(
+                            track.horizontal_raw_left_motion_x,
+                            track.horizontal_raw_right_motion_x)) /
+                            std::max(
+                                1.0f,
+                                static_cast<float>(frame.roi_width)) >=
+                            kTrackingHorizontalReverseProbeMinimumRoiMotionRatio;
+                    const bool quiet_inventory_translation_probe_ready =
+                        !previous_direction_inventory_pending &&
+                        !previous_direction_command_effective &&
+                        strong_translation_probe_evidence;
                     diagnostics.reverse_required_evidence_ratio_seconds_x =
                         required_evidence;
                     diagnostics.reverse_required_position_ratio_seconds_x =
@@ -4035,8 +4098,8 @@ struct Aim::Impl {
                             config.control_delay_ms / 1000.0f;
                         if (probe_age_seconds < feedback_window_seconds) {
                             // 首个反馈窗内最多允许持续 3 counts，但不递增。
-                            // 相比原有 1、2、3、4… 的未反馈追赶，这保留真实
-                            // 反向的最低活性，同时把形变假反向脉冲限在平坦边界层。
+                            // 库存静默快探针的首帧仍固定为 1 count；后续帧
+                            // 复用同一有界确认窗，避免重新形成多帧停发。
                             reverse_release_probe_x = true;
                         } else if (
                             tracking_horizontal_reverse_probe_requires_fresh_confirmation &&
@@ -4079,7 +4142,8 @@ struct Aim::Impl {
                         }
                     } else if (!evidence_ready &&
                                !reverse_translation_ready_x &&
-                               !position_ready) {
+                               !position_ready &&
+                               !quiet_inventory_translation_probe_ready) {
                         tracking_horizontal_reverse_probe_direction = 0.0f;
                         tracking_horizontal_reverse_probe_requires_fresh_confirmation =
                             false;
@@ -4096,10 +4160,29 @@ struct Aim::Impl {
                             reverse_release_probe_x = true;
                             reverse_release_probe_requires_fresh_confirmation_x =
                                 previous_direction_command_effective ||
+                                quiet_inventory_translation_probe_ready ||
                                 (!evidence_ready &&
                                  !reverse_translation_ready_x &&
                                  position_ready);
-                            if (previous_direction_command_effective) {
+                            if (quiet_inventory_translation_probe_ready) {
+                                // 最新实机 Run 的 2918 个反向门帧中有 2323
+                                // 个已经没有旧方向 pending/effective 命令；
+                                // 其中 147 帧当前共同边与候选方向一致性仍
+                                // 达到 0.70，122 帧同时越过归一化微抖门。
+                                // 继续等待完整 15 ms 驻留会把每次真实反转
+                                // 切成约 24 帧零命令。已知库存安静且本帧强
+                                // 共同平移成立时，立即只发物理最小 1 count
+                                // 辨识探针；清空探针前证据，后续仍必须由新鲜
+                                // 反馈确认，不能凭等待自动提交全量换向。
+                                reverse_release_probe_maximum_counts_x =
+                                    kTrackingHorizontalReverseFeedbackProbeMaximumCounts;
+                                tracking_horizontal_reverse_evidence_ratio_seconds =
+                                    0.0f;
+                                tracking_horizontal_reverse_translation_seconds =
+                                    0.0f;
+                                tracking_horizontal_reverse_translation_gap_seconds =
+                                    0.0f;
+                            } else if (previous_direction_command_effective) {
                                 // 本帧允许发出最低活性的有界探针，但旧方向
                                 // effective 命令造成的共同边/CUSUM 到此作废。
                                 // 真反向会在探针反馈窗内用后续新鲜几何重新
@@ -4878,6 +4961,15 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
         result.status = AimStatus::TRACKING_FAILED;
         return result;
     }
+}
+
+bool Aim::record_applied_command(
+        std::uint64_t sequence,
+        std::chrono::steady_clock::time_point applied_at,
+        int dx_counts,
+        int dy_counts) noexcept {
+    return impl_ && impl_->record_applied_command(
+        sequence, applied_at, dx_counts, dy_counts);
 }
 
 void Aim::reset() noexcept {

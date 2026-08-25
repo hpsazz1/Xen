@@ -614,27 +614,46 @@ struct Runtime::Impl {
                 profile.aim = aim_result.profile;
 
                 if (aim_result.status == AimStatus::SUCCESS &&
-                    aim_result.has_command && safety_gate.can_dispatch()) {
+                    aim_result.has_command) {
                     const MouseMoveCommand command{
                         aim_result.command.dx_counts,
                         aim_result.command.dy_counts};
-                    const auto mouse_started = std::chrono::steady_clock::now();
-                    mouse_sent = mouse->move(command);
-                    const auto mouse_completed =
+                    const bool dispatch_allowed =
+                        safety_gate.can_dispatch();
+                    auto mouse_completed =
                         std::chrono::steady_clock::now();
-                    mouse_elapsed_ms =
-                        std::chrono::duration<double, std::milli>(
-                            mouse_completed -
-                            mouse_started).count();
-                    profile.mouse_completion_timing_valid = true;
-                    profile.control_to_mouse_completion_ms =
-                        std::chrono::duration<double, std::milli>(
-                            mouse_completed - aim_frame.control_at).count();
-                    profile.capture_to_mouse_completion_ms =
-                        std::chrono::duration<double, std::milli>(
-                            mouse_completed -
-                            frame->timing.captured_at).count();
-                    if (!mouse_sent) {
+                    if (dispatch_allowed) {
+                        const auto mouse_started = mouse_completed;
+                        mouse_sent = mouse->move(command);
+                        mouse_completed = std::chrono::steady_clock::now();
+                        mouse_elapsed_ms =
+                            std::chrono::duration<double, std::milli>(
+                                mouse_completed - mouse_started).count();
+                        profile.mouse_completion_timing_valid = true;
+                        profile.control_to_mouse_completion_ms =
+                            std::chrono::duration<double, std::milli>(
+                                mouse_completed -
+                                aim_frame.control_at).count();
+                        profile.capture_to_mouse_completion_ms =
+                            std::chrono::duration<double, std::milli>(
+                                mouse_completed -
+                                frame->timing.captured_at).count();
+                    }
+                    // Aim 先记录预计算命令，Mouse 返回后再用同一序号原位
+                    // 确认。安全门在两次检查间释放或后端失败时确认零，
+                    // 绝不让未执行命令进入下一帧的延迟命令与在途库存。
+                    const bool applied_recorded =
+                        aim->record_applied_command(
+                            aim_result.command.sequence,
+                            mouse_completed,
+                            mouse_sent ? command.dx_counts : 0,
+                            mouse_sent ? command.dy_counts : 0);
+                    if (!applied_recorded) {
+                        safety_gate.emergency_stop();
+                        aim_reset_requested.store(
+                            true, std::memory_order_release);
+                        set_error("Aim 实际命令反馈与预计算历史不一致");
+                    } else if (dispatch_allowed && !mouse_sent) {
                         safety_gate.emergency_stop();
                         aim_reset_requested.store(true,
                                                   std::memory_order_release);
