@@ -4005,6 +4005,111 @@ void test_delayed_pose_closed_loop_keeps_tracking_observer_continuous() {
                pose_box.first_command_reversal_context);
 }
 
+void test_vertical_shape_noise_does_not_stutter_horizontal_tracking() {
+    constexpr int kActuationDelayFrames = 4;
+    constexpr int kMotionPeriodFrames = 44;
+    constexpr float kPi = 3.14159265358979323846f;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 14.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    Aim aim(config);
+    std::array<int, kActuationDelayFrames> delayed_commands{};
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float camera_x = 0.0f;
+    int active_starvation_frames = 0;
+    int maximum_starvation_frames = 0;
+    int starvation_episodes = 0;
+    int reverse_gate_frames = 0;
+    std::vector<float> closed_loop_errors;
+
+    for (int index = 0; index < 1320; ++index) {
+        camera_x += delayed_commands[index % kActuationDelayFrames] /
+            config.counts_per_pixel_x * 0.20f;
+        delayed_commands[index % kActuationDelayFrames] = 0;
+        // 44 帧周期对应本轮真机基础点 5.39 Hz 主峰；幅值按 ROI 比例
+        // 表达。高度轮廓独立变化而水平宽度固定，专门验证 Y 形变不得
+        // 冻结 X 位置后验。
+        const float world_target_x = 320.0f * 0.10f * std::sin(
+            2.0f * kPi * static_cast<float>(index) /
+            static_cast<float>(kMotionPeriodFrames));
+        const int height_phase_index = index % 26;
+        const float height_phase = height_phase_index <= 13
+            ? -1.0f + static_cast<float>(height_phase_index) *
+                (2.0f / 13.0f)
+            : 1.0f - static_cast<float>(height_phase_index - 13) *
+                (2.0f / 13.0f);
+        const float observed_x = 160.0f + world_target_x - camera_x;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index) * 4167));
+        frame.control_at =
+            frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body_box(
+            observed_x,
+            160.0f,
+            42.0f,
+            90.0f + height_phase * 1.8f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "周期往返闭环必须逐帧保留确认目标");
+        if (!result.has_target) continue;
+
+        const int command_x = result.has_command
+            ? result.command.dx_counts : 0;
+        if (result.has_command) {
+            delayed_commands[index % kActuationDelayFrames] = command_x;
+        }
+        if (index < 120) continue;
+
+        closed_loop_errors.push_back(std::fabs(world_target_x - camera_x));
+        if (result.control.reverse_gate_blocked_x) {
+            ++reverse_gate_frames;
+        }
+        const bool controller_requests_motion =
+            std::fabs(result.control.desired_before_reverse_x_counts) >= 1.0f;
+        const bool visible_error = std::fabs(
+            result.target.base_aim_x - frame.control_center_x) >
+            config.deadzone_pixels;
+        if (controller_requests_motion && visible_error && command_x == 0) {
+            if (active_starvation_frames == 0) {
+                ++starvation_episodes;
+            }
+            ++active_starvation_frames;
+            maximum_starvation_frames = std::max(
+                maximum_starvation_frames, active_starvation_frames);
+        } else {
+            active_starvation_frames = 0;
+        }
+    }
+
+    std::sort(closed_loop_errors.begin(), closed_loop_errors.end());
+    const float error_p95 = closed_loop_errors[
+        std::min(
+            closed_loop_errors.size() - 1,
+            static_cast<std::size_t>(closed_loop_errors.size() * 0.95f))];
+    expect(maximum_starvation_frames <= 2 && error_p95 <= 47.0f,
+           "5.45 Hz 真机同构往返中，控制器已有非零需求时不得被反向"
+           "判定切成连续停发片段，最长停发/停发episode/反向门帧/误差P95=" +
+               std::to_string(maximum_starvation_frames) + "/" +
+               std::to_string(starvation_episodes) + "/" +
+               std::to_string(reverse_gate_frames) + "/" +
+               std::to_string(error_p95));
+}
+
 void test_delayed_partial_visibility_closed_loop_preserves_real_reversals() {
     constexpr int kFrameCount = 240;
     constexpr int kSegmentFrameCount = 80;
@@ -10314,6 +10419,7 @@ int main() {
     test_delayed_closed_loop_holds_moving_base_point();
     test_tracking_closing_response_does_not_keep_growing_command();
     test_delayed_pose_closed_loop_keeps_tracking_observer_continuous();
+    test_vertical_shape_noise_does_not_stutter_horizontal_tracking();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_horizontal_pending_subtraction_is_axis_and_profile_scoped();

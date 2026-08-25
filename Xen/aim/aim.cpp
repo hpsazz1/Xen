@@ -1254,11 +1254,14 @@ struct Aim::Impl {
                     --hold_frames;
                 }
             };
-            update_deformation(shape_changed,
+            // 分轴形变保护只能读取本轴尺度。旧实现把 width||height 同时
+            // 喂给 X/Y，单纯高度轮廓噪声也会冻结 X 位置后验，而 vx 继续
+            // 推进基础点，正是实机 X 追边、回摆和反向停发的跨轴根因。
+            update_deformation(width_changed,
                                horizontal_deformation_residual_x,
                                x_edges_coherent,
                                track.shape_deformation_x_frames);
-            update_deformation(shape_changed,
+            update_deformation(height_changed,
                                center_motion_residual_y,
                                y_edges_coherent,
                                track.shape_deformation_y_frames);
