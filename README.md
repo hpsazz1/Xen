@@ -117,7 +117,7 @@ Xen/                           # 仓库根目录
 - Capture 线程从 Desktop Duplication、UDP/XUDP 或 NDI 获取 ROI，并发布到三个可复用槽组成的最新帧队列。
 - Desktop Duplication 收到 `DXGI_ERROR_ACCESS_LOST` 且 D3D11 设备仍有效时，会在 1 秒
   有界窗口内重枚举同一输出并原位重建 duplication；旋转或分辨率变化、设备移除、
-  超时均仍进入 FAILED。成功重建返回 `NO_FRAME`，不发布旧帧，次数在 schema 12
+  超时均仍进入 FAILED。成功重建返回 `NO_FRAME`，不发布旧帧，次数在 schema 13
   `duplication_recoveries` 中单独记录，不混入丢帧或失败帧。
 - Pipeline 线程依次执行 Detector、Aim、安全门控和 Mouse，不增加独立控制线程。
 - Aim 对头身观测归并和高/低置信轨迹关联均执行全局一对一分配，轨迹状态按真实帧间隔使用
@@ -165,7 +165,7 @@ Xen/                           # 仓库根目录
   `xywhr` 与轴对齐外包框；默认 `detect()` 只构造外包框，继续兼容现有 Aim 热路径。
 - Runtime 每处理一帧把固定大小的 Pipeline 诊断样本写入有限环；样本同时固化主机 FOV、编码
   尺寸、ROI 和像素比例，避免网络重连或显示模式变化造成的瞬时坐标漂移被最终快照掩盖。主线程
-  在会话结束时将其发布为 schema 12 的
+  在会话结束时将其发布为 schema 13 的
   `cache/runtime/<进程-运行时钟-generation-segment>.csv/.json`。模型重载前结束当前报告，
   加载窗口不记录样本，完成后按实际活动模型和 Provider 开始新分段，避免新旧模型混合统计。
   报告按成功/失败状态隔离耗时，
@@ -352,14 +352,14 @@ DLL 的 SHA-256，逐样本校验 Provider、状态和几何，全部通过后�
   -ReportPrefix ".\cache\runtime-benchmark\dxgi-tensorrt"
 ```
 
-schema 12 正式入口会逐帧校验 Aim：基础追踪点只要离开当前目标框即失败；预测提前点允许离开
+schema 13 正式入口会逐帧校验 Aim：基础追踪点只要离开当前目标框即失败；预测提前点允许离开
 目标框，`aim_prediction_point_outside_box` 只作为观测计数，不是失败条件。真正的预测门禁是
 `lead_distance <= target_box_diagonal * max_prediction_lead_percent / 100`。环境清单同时汇总目标、
 预计算命令、预测活动、框外预测、动态范围阻断、目标切换，以及提前距离和观测年龄的
-P50/P95/P99/max。schema 12 还原样记录 X 反向门实际读取的相邻左右框边位移、共同位移、
-带符号一致性、
-累计同向弱证据间隙、新鲜强证据标志和稳定清零原因；这些字段只用于正式报告归因，不参与
-控制计算，也不会用绝对人物速度阈值替代现有 ROI/反馈窗几何判据。
+P50/P95/P99/max。schema 13 还原样记录相邻左右框边位移、共同位移、带符号一致性，以及 tracking X
+连续延迟模型预测的未显现命令响应、与 51 点趋势速度同相位的已执行命令和连续一致性权重。
+历史反向门字段仅为旧报告兼容保留并恒为零；诊断字段不会触发二次门控，也不使用绝对人物速度、
+游戏或分辨率分支。
 物理输出禁用时仍允许 Aim 持续形成预计算命令，但所有样本必须保持
 `mouse_sent=false`；动态场景可通过 `-MinimumAimPrecomputedCommandFrames` 要求至少出现一帧。
 
@@ -426,7 +426,7 @@ UDP、XUDP 和 NDI 接收正式验收使用统一包装脚本。以下命令在�
 JSON 内容，禁止靠固定延时或重定向日志中的“已监听”文本判断就绪。裸 UDP、XUDP、NDI 三种
 后端均由同一脚本强制核对实际 Capture 后端、主机 FOV/ROI、Provider、失败状态、传输统计和
 Runtime 覆盖；接收配置还会显式写入完整 `[aim]` 与 `allow_send_input=false`，只对外暴露预测
-开关和最大提前距离两个 Aim 参数。`<prefix>.network.json` 会带 schema 12 Aim 汇总，最后发布
+开关和最大提前距离两个 Aim 参数。`<prefix>.network.json` 会带 schema 13 Aim 汇总，最后发布
 才表示网络接收报告完整。
 
 辅机没有 Visual Studio、CMake、Git 或 SDK 时，主机使用便携包发布脚本。它先构建 NDI 组合的
@@ -585,8 +585,8 @@ Toggle 以及多键/鼠标快捷键等已完成 App 功能。示例：
 tracking/prediction 配置。配置固定 NDI 240 + TensorRT、`320x320`、FP16、CUDA Graph、GPU
 前处理和项目 KMBOX NET；`Prepare` 不启动程序，`Launch` 必须携带物理输出双重授权。脚本会在
 激活配置后原子更新 `manifest.json` 中 `config.ini` 的长度和 SHA-256，避免 Launcher 使用陈旧
-清单，并在应用退出后收集本轮新增 Runtime CSV/JSON、日志、Aim schema 12 汇总和 schema 5
-控制诊断；控制诊断会直接保留候选方向对齐的原始框边、共同位移、弱证据 gap 与清零原因。静止、左移、
+清单，并在应用退出后收集本轮新增 Runtime CSV/JSON、日志、Aim schema 13 汇总和 schema 6
+控制诊断；控制诊断会保留原始框边、共同位移、一致性、连续延迟响应和同相位观察器输入。静止、左移、
 右移、往复和超级跳必须按任务单逐项执行，完成 `OBSERVATION.md` 后才进入下一任务。
 
 当前辅机为无开发 SDK 的独立 Windows 目标机，已使用自包含 NVIDIA/NDI 部署完成多轮双机动态、

@@ -125,14 +125,23 @@ struct AimControlDiagnostics {
     float delayed_command_x_counts = 0.0f;
     float pending_net_x_counts = 0.0f;
     float pending_absolute_x_counts = 0.0f;
+    // tracking X 连续延迟模型的三项可观测量：从当前观测到预计控制生效
+    // 期间尚会显现的历史命令响应、与 51 点速度同相位的已执行命令，及
+    // 共同边刚体一致性的连续权重。它们只用于诊断，不参与二次决策。
+    float modelled_response_x_counts = 0.0f;
+    float observer_phase_command_x_counts = 0.0f;
+    float observer_consistency_weight_x = 0.0f;
+    // 以下 reverse_* 字段为报告 schema 兼容保留。反向门已由连续延迟
+    // 模型替代，相关状态/布尔值恒为零；原始边运动和一致性字段仍用于
+    // 解释观察器权重。
     float reverse_output_direction_x = 0.0f;
     float reverse_evidence_ratio_seconds_x = 0.0f;
     float reverse_position_ratio_seconds_x = 0.0f;
     float reverse_position_peak_error_x = 0.0f;
     float reverse_translation_seconds_x = 0.0f;
     // 当前相邻原始检测框左右边位移及其共同部分，单位为检测 ROI 像素；
-    // 正负号沿 X 方向。control_evidence 为反向门实际消费的带符号无量纲
-    // 一致性 [-1, 1]，gap 为累计同向弱证据时间（秒）。
+    // 正负号沿 X 方向。control_evidence 是观察器消费的带符号无量纲
+    // 一致性 [-1, 1]；gap 是兼容旧报告的恒零字段。
     float reverse_translation_raw_left_x_roi_pixels = 0.0f;
     float reverse_translation_raw_right_x_roi_pixels = 0.0f;
     float reverse_translation_raw_common_x_roi_pixels = 0.0f;
@@ -242,7 +251,7 @@ public:
     AimResult process(const AimFrame& frame) noexcept;
     // Runtime 在 Mouse 后端返回后确认本帧真正执行的整数命令。成功发送
     // 传回原命令，安全门拒绝或后端失败传回 (0,0)，从而用真实完成时刻
-    // 和结果修正反向门读取的延迟命令与在途库存。
+    // 和结果修正延迟模型读取的已执行命令与在途库存。
     bool record_applied_command(
         std::uint64_t sequence,
         std::chrono::steady_clock::time_point applied_at,

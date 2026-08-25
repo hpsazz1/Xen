@@ -707,7 +707,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v12\n"
+        csv << "# Xen Runtime Debug Report v13\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -816,7 +816,11 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 "aim_filtered_x_counts,aim_shaped_x_counts,"
                 "aim_residual_before_quantization_x_counts,"
                 "aim_delayed_command_x_counts,aim_pending_net_x_counts,"
-                "aim_pending_absolute_x_counts,aim_pending_positive_x,"
+                "aim_pending_absolute_x_counts,"
+                "aim_modelled_response_x_counts,"
+                "aim_observer_phase_command_x_counts,"
+                "aim_observer_consistency_weight_x,"
+                "aim_pending_positive_x,"
                 "aim_pending_negative_x,aim_reverse_output_direction_x,"
                 "aim_reverse_candidate_x,"
                 "aim_reverse_previous_direction_pending_x,"
@@ -955,6 +959,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.aim_control.delayed_command_x_counts << ','
                 << sample.aim_control.pending_net_x_counts << ','
                 << sample.aim_control.pending_absolute_x_counts << ','
+                << sample.aim_control.modelled_response_x_counts << ','
+                << sample.aim_control.observer_phase_command_x_counts << ','
+                << sample.aim_control.observer_consistency_weight_x << ','
                 << bool_name(sample.aim_control.pending_positive_x) << ','
                 << bool_name(sample.aim_control.pending_negative_x) << ','
                 << sample.aim_control.reverse_output_direction_x << ','
@@ -1091,7 +1098,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 12,\n"
+             << "{\n  \"schema\": 13,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -1293,6 +1300,12 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << sample.aim_control.pending_net_x_counts
                  << ", \"aim_pending_absolute_x_counts\": "
                  << sample.aim_control.pending_absolute_x_counts
+                 << ", \"aim_modelled_response_x_counts\": "
+                 << sample.aim_control.modelled_response_x_counts
+                 << ", \"aim_observer_phase_command_x_counts\": "
+                 << sample.aim_control.observer_phase_command_x_counts
+                 << ", \"aim_observer_consistency_weight_x\": "
+                 << sample.aim_control.observer_consistency_weight_x
                  << ", \"aim_pending_positive_x\": "
                  << bool_name(sample.aim_control.pending_positive_x)
                  << ", \"aim_pending_negative_x\": "

@@ -101,6 +101,8 @@ struct Track {
     int partial_visibility_x_frames = 0;
     float partial_visibility_x_side = 0.0f;
     float accepted_partial_visibility_x_width = 0.0f;
+    float accepted_partial_visibility_x_side = 0.0f;
+    float partial_visibility_x_reference_width = 0.0f;
     int horizontal_velocity_isolation_frames = 0;
     int horizontal_trend_observation_isolation_frames = 0;
     int horizontal_maneuver_frames = 0;
@@ -108,11 +110,11 @@ struct Track {
     // 当前相邻观测的带符号两边共同平移一致性，范围 [-1, 1]。轨迹变点
     // 继续消费这份新鲜原始几何，不读取人物像素速度或当前框宽。
     float horizontal_translation_evidence_x = 0.0f;
-    // 反向门专用的三观测鲁棒共同边一致性。当前帧原始共同边必须与
-    // 三点中值同向，因此静止、符号反转和语义切换仍会立即归零；中值只
-    // 修复单帧边界幅值噪声，不能凭历史方向跨帧伪造平移。
+    // tracking X 世界运动观察器消费的三观测鲁棒共同边一致性。当前帧
+    // 原始共同边必须与三点中值同向，因此静止、符号反转和语义切换会
+    // 自然归零；中值只修复单帧边界幅值噪声，不能凭历史伪造平移。
     float horizontal_control_translation_evidence_x = 0.0f;
-    // 保留反向门真正读取的相邻原始框边位移，供 Runtime 报告精确复盘；
+    // 保留观察器读取的相邻原始框边位移，供 Runtime 报告精确复盘；
     // 这些标量不参与轨迹或控制更新，语义切换/缺帧时立即归零。
     float horizontal_raw_left_motion_x = 0.0f;
     float horizontal_raw_right_motion_x = 0.0f;
@@ -140,6 +142,7 @@ struct Track {
 struct IssuedCommand {
     std::uint64_t sequence = 0;
     std::chrono::steady_clock::time_point issued_at{};
+    std::chrono::steady_clock::time_point applied_at{};
     float dx_counts = 0.0f;
     float dy_counts = 0.0f;
     bool applied = false;
@@ -247,12 +250,21 @@ constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
 // 第十四轮真实序列中，15 ms 窗口内约 15% 的命令位移足以解释基础点
 // 随后越过准星的幅度。这里只用于保守预测在途位移，不改变鼠标标定。
 constexpr float kControllerPendingCommandResponse = 0.15f;
-// 超级跳两个独立 tracking Run 证明固定 X 在途响应无法稳定表征不同闭环
-// 库存状态：响应从 15% 降到 11.25% 后，未触发二维限幅帧的库存 P50 从
-// 6 增到 9 counts，当前闭环仍形成约 3.2 Hz 的完整追赶—制动循环。
-// tracking X 因此不再用不确定库存模型制造提前制动，只保留连续几何投影；
-// Y 与 prediction 的在途响应系数继续使用已验证的 15%。
-constexpr float kTrackingHorizontalPendingCommandResponse = 0.0f;
+// AIM-SUPERJUMP-ACCEPT-001 的两份独立真机 Run 对“已发送 X 命令 ->
+// 下一帧原始共同边位移”做非负 FIR 辨识后，总响应分别约为 0.207 和
+// 0.211 个标定比例，主能量稳定落在 17～21 ms。tracking X 不再把
+// 整个反馈窗当成二值 pending/effective，而是用这份无速度、真实时间的
+// 有限响应模型预测当前画面尚未包含的相机位移。
+constexpr float kTrackingHorizontalPlantResponse = 0.20f;
+constexpr float kTrackingHorizontalPlantSettleDelayScale = 1.50f;
+// 同两份 Run 中，51 点趋势速度与已执行命令的相关峰均约在 68 ms，
+// 即当前 15 ms 反馈窗的 4.5 倍。观察器必须读取同相位输入；这一真实时间
+// 比例不依赖帧率、人物速度、框尺度或游戏。
+constexpr float kTrackingHorizontalVelocityObservationDelayWindows = 4.5f;
+// tracking X 的世界运动观察器只承担有限的维持量。实际 Run 旧观察器经常
+// 顶到 4 counts 并与相机反馈争抢方向；3 counts 配合 Smith 比例路径在
+// 固定框和姿态闭环中保持零漏反转，同时避免旧方向状态饱和。
+constexpr float kTrackingHorizontalObserverMaximumCounts = 3.0f;
 // 40 ms 窗口内的 pending 总和会按命令逐帧阶跃；0.12 只平滑隐藏库存
 // 投影，使实测 8～10 帧命令反馈周期内逐步制动，不改变公开 prediction 点或
 // 用户配置的 0.475 基础控制平滑。
@@ -334,49 +346,6 @@ constexpr float kControllerQuantizationMotionThresholdPixelsPerSecond = 10.0f;
 // 命令整形使用时间速率而不是固定帧步：240 Hz 下每帧最多变化 1 count，
 // 120/60 Hz 下分别为 2/4 counts，保持不同采集刷新率下的加减速时间一致。
 constexpr float kControllerMaximumSlewCountsPerSecond = 240.0f;
-// 延迟 tracking X 反向前累计“候选方向基础中心误差 ROI 比例 × 两边共同
-// 平移置信度 × 时间”。门限等价于 2.8% ROI 的一致平移误差持续一个配置
-// 反馈窗；大误差真实反转会更快通过，姿态形变造成的短暂反拉被连续降权。
-// 它不读取人物速度、当前框宽或游戏档位。
-constexpr float kTrackingHorizontalReverseEvidenceRoiRatio = 0.028f;
-// Page/CUSUM 的无量纲参考漂移：几何稳定态允许完全同向共同边每帧净
-// 贡献 0.85；姿态/半身语义保护态连续提高到 0.20 allowance，使形变
-// 反拉更难越门。两端都让零证据和随机正负微抖持续回落。
-constexpr float kTrackingHorizontalReverseStableEvidenceAllowance = 0.15f;
-constexpr float kTrackingHorizontalReverseAmbiguousEvidenceAllowance = 0.20f;
-// 丢帧重获、头身切换或目标反转后立即静止时可能没有共同边运动。此时仍
-// 允许纯中心位置误差以更严格的 10% ROI×反馈窗有界接管，避免永久停发；
-// 正常一致平移继续走更快的 2.8% CUSUM。
-constexpr float kTrackingHorizontalReverseFallbackRoiRatio = 0.10f;
-// 持续宽高形变时，ROI 中心仍提供最终活性，但可靠性低于稳定语义：
-// 稳定态使用 10% ROI×反馈窗，形变态使用 30% 并等待一个反馈窗。
-// 位置面积只降权而不永久禁用；不按当前框宽值或人物速度分档。
-constexpr float kTrackingHorizontalReverseDeformationFallbackScale = 3.0f;
-// 真机诊断表明，形变反向门放行后若在同一个反馈窗内继续
-// 递增新方向命令，会把硬停后累积的大误差转成未观测响应的追赶
-// 脉冲。快速共同边/CUSUM 通道仍在一个反馈窗后确认；只有最终活性保证的
-// 纯位置兜底连续两个反馈窗都限制到最多 3 counts，等待首窗整批探测库存
-// 进入画面后再确认新输出方向。这里按已有控制时域定义，
-// 不读取人物速度、框宽或游戏类型。
-constexpr float kTrackingHorizontalReverseProbeMaximumCounts = 3.0f;
-constexpr float kTrackingHorizontalReverseFeedbackProbeMaximumCounts = 1.0f;
-constexpr float kTrackingHorizontalReverseProbeCommitWindows = 2.0f;
-// 最新实机 Run 的反向门阻塞帧中，旧方向库存已静默且候选方向一致性
-// >=0.70 的样本为 147 帧，其中 122 帧共同边位移至少达到 ROI 宽的
-// 0.05%；而回归中的 ±0.1 px 三角微抖在 320 ROI 仅为 0.03125%。
-// 该归一化空间门只决定是否允许 1-count 辨识探针，不判断人物速度，
-// 也不随游戏或分辨率写分支。
-constexpr float kTrackingHorizontalReverseProbeMinimumRoiMotionRatio =
-    0.0005f;
-// 最新真实闭环中，已执行 X 命令到基础点反向位移的相关峰为第 5 个控制帧，
-// 约 21 ms；配置反馈窗 15 ms 结束后的 20.25～22.32 ms 又集中出现了
-// 13 个随后被强反证撤销的库存静默探针。只把“无需驻留即可提前发 1 count”
-// 的辨识资格延后到 1.5 个现有反馈窗；CUSUM、共同平移驻留和位置活性仍按
-// 原反馈窗并行累计，因此不把尾响应保护扩成新的全局控制延迟。
-constexpr float kTrackingHorizontalReverseQuietProbeTailWindows = 1.5f;
-// 连续闭合响应必须跨过一个半反馈窗才卸载 1 count；单个反馈窗只冻结
-// 增长，避免在真实方向刚建立或快速反转前过早削弱追赶。
-constexpr float kTrackingHorizontalClosingResponseTaperWindowsPerCount = 1.5f;
 bool finite_box(const Detection& detection) noexcept {
     return std::isfinite(detection.x1) && std::isfinite(detection.y1) &&
            std::isfinite(detection.x2) && std::isfinite(detection.y2) &&
@@ -779,29 +748,6 @@ struct Aim::Impl {
     std::size_t issued_command_count = 0;
     float previous_command_x = 0.0f;
     float previous_command_y = 0.0f;
-    float tracking_horizontal_output_direction = 0.0f;
-    float tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
-    float tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
-    float tracking_horizontal_reverse_position_peak_error = 0.0f;
-    float tracking_horizontal_reverse_translation_seconds = 0.0f;
-    // 连续共同平移允许在一个反馈窗内累计少量“仍同向但一致性暂时不足”的
-    // 观测空洞。空洞只消耗预算、不累计强证据驻留；零位移、反向、库存/
-    // 语义变化或累计空洞达到反馈窗仍立即清零。
-    float tracking_horizontal_reverse_translation_gap_seconds = 0.0f;
-    float tracking_horizontal_reverse_deformation_seconds = 0.0f;
-    bool tracking_horizontal_reverse_deformation_active = false;
-    float tracking_horizontal_reverse_probe_direction = 0.0f;
-    // 纯位置面积，或仍受旧方向命令响应污染的快速证据，只能启动有界
-    // 辨识探针；必须在探针启动后获得新鲜 CUSUM/共同平移才能升级全量换向。
-    bool tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
-    std::chrono::steady_clock::time_point
-        tracking_horizontal_reverse_probe_started_at{};
-    std::chrono::steady_clock::time_point
-        tracking_horizontal_reverse_output_bridge_started_at{};
-    bool tracking_horizontal_reverse_output_bridge_consumed = false;
-    std::chrono::steady_clock::time_point
-        tracking_horizontal_closing_response_started_at{};
-    float tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
     std::chrono::steady_clock::time_point controller_at{};
     bool controller_initialized = false;
     bool shaper_initialized = false;
@@ -849,6 +795,7 @@ struct Aim::Impl {
         float delay_y = 0.0f;
         float delay_seconds_x = 0.0f;
         float delay_seconds_y = 0.0f;
+        float modelled_response_x_counts = 0.0f;
         float final_x = 0.0f;
         float final_y = 0.0f;
         float observation_age_seconds = 0.0f;
@@ -1028,27 +975,17 @@ struct Aim::Impl {
             track.horizontal_observation_initialized
             ? track.last_observation_head_only != observation.head_only
             : track.head_only != observation.head_only;
-        if (box_semantics_changed && controller_track_id == track.id) {
-            // 反向证据不能跨 body/head 两种框语义拼接；只清证据面积，
-            // 保留已经发出的方向库存和控制连续性。
-            tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
-            tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
-            tracking_horizontal_reverse_position_peak_error = 0.0f;
-            tracking_horizontal_reverse_translation_seconds = 0.0f;
-            tracking_horizontal_reverse_translation_gap_seconds = 0.0f;
-            tracking_horizontal_reverse_deformation_seconds = 0.0f;
-            tracking_horizontal_reverse_deformation_active = false;
-            tracking_horizontal_reverse_output_bridge_started_at = {};
-            tracking_horizontal_reverse_output_bridge_consumed = false;
-            tracking_horizontal_closing_response_started_at = {};
-            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
-        }
         const float track_center_x = (track.x1 + track.x2) * 0.5f;
         const float track_center_y = (track.y1 + track.y2) * 0.5f;
         const float observation_center_x =
             (observation.x1 + observation.x2) * 0.5f;
         const float observation_center_x_ratio =
             observation_center_x / roi_width;
+        // 单侧裁切会改变“可见框中心”的坐标语义，却不会改变人物的物理
+        // 中心。趋势窗口统一消费由稳定边和裁切前宽度重建的中心；普通框
+        // 下它与原始中心完全相同，不增加候选、驻留或放行状态。
+        float horizontal_trend_observation_center_x_ratio =
+            observation_center_x_ratio;
         const float observation_center_y =
             (observation.y1 + observation.y2) * 0.5f;
         const float center_motion_residual_x =
@@ -1105,6 +1042,8 @@ struct Aim::Impl {
         if (observation.head_only || box_semantics_changed) {
             track.partial_visibility_x_recovery_pending = false;
             track.accepted_partial_visibility_x_width = 0.0f;
+            track.accepted_partial_visibility_x_side = 0.0f;
+            track.partial_visibility_x_reference_width = 0.0f;
             track.horizontal_velocity_isolation_frames = 0;
             track.horizontal_trend_observation_isolation_frames = 0;
             track.horizontal_maneuver_frames = 0;
@@ -1124,7 +1063,7 @@ struct Aim::Impl {
         }
         if (track.horizontal_observation_initialized &&
             track.last_observation_head_only == observation.head_only) {
-            // 物理反向门读取相邻原始框的两边共同位移，而不是已经被 vx
+            // 世界运动观察器读取相邻原始框的两边共同位移，而不是已被 vx
             // 预测抵消后的残差。这里显式使用“上一原始观测”的语义，不能
             // 使用保留身体坐标系的 track.head_only：连续只剩 head 框时，
             // 后者会始终保持 false，但第二个 head 观测起仍应提供平移证据。
@@ -1326,7 +1265,16 @@ struct Aim::Impl {
                 } else {
                     track.partial_visibility_x_side = partial_side;
                     track.partial_visibility_x_frames = 1;
+                    track.partial_visibility_x_reference_width = track_width;
                 }
+                const float reference_width = std::max(
+                    track.partial_visibility_x_reference_width,
+                    observation_width);
+                const float canonical_center_x = partial_side < 0.0f
+                    ? observation.x2 - reference_width * 0.5f
+                    : observation.x1 + reference_width * 0.5f;
+                horizontal_trend_observation_center_x_ratio =
+                    canonical_center_x / roi_width;
                 preserve_horizontal_box = track.partial_visibility_x_frames <
                                           kTrackPartialVisibilityConfirmFrames;
                 const bool confirmed_now =
@@ -1347,7 +1295,7 @@ struct Aim::Impl {
                         track,
                         partial_side,
                         track.state_at,
-                        observation_center_x_ratio);
+                        horizontal_trend_observation_center_x_ratio);
                     isolate_horizontal_center_observation = true;
                     suppress_center_velocity_x = true;
                     isolate_fast_velocity_x = true;
@@ -1363,6 +1311,8 @@ struct Aim::Impl {
                         track.partial_visibility_x_recovery_pending = true;
                         track.accepted_partial_visibility_x_width =
                             observation_width;
+                        track.accepted_partial_visibility_x_side =
+                            partial_side;
                         suppress_center_velocity_x = true;
                     }
                 }
@@ -1375,7 +1325,24 @@ struct Aim::Impl {
                 track.partial_visibility_x_side = 0.0f;
                 if (abandoned_partial_candidate) {
                     clear_horizontal_trend_change_point(track);
+                    track.partial_visibility_x_reference_width = 0.0f;
                 }
+            }
+            const bool accepted_partial_visibility_x =
+                track.partial_visibility_x_recovery_pending &&
+                track.accepted_partial_visibility_x_width > 0.0f &&
+                track.partial_visibility_x_reference_width > 0.0f &&
+                observation_width <=
+                    track.accepted_partial_visibility_x_width * 1.10f;
+            if (accepted_partial_visibility_x) {
+                const float canonical_center_x =
+                    track.accepted_partial_visibility_x_side < 0.0f
+                        ? observation.x2 -
+                            track.partial_visibility_x_reference_width * 0.5f
+                        : observation.x1 +
+                            track.partial_visibility_x_reference_width * 0.5f;
+                horizontal_trend_observation_center_x_ratio =
+                    canonical_center_x / roi_width;
             }
             const bool full_visibility_recovery_x =
                 !observation.head_only &&
@@ -1394,6 +1361,8 @@ struct Aim::Impl {
                 reset_horizontal_trend(track);
                 track.partial_visibility_x_recovery_pending = false;
                 track.accepted_partial_visibility_x_width = 0.0f;
+                track.accepted_partial_visibility_x_side = 0.0f;
+                track.partial_visibility_x_reference_width = 0.0f;
                 append_horizontal_trend(
                     track, track.state_at, observation_center_x_ratio);
                 track.horizontal_trend_rebuilding_from_partial = true;
@@ -1450,7 +1419,7 @@ struct Aim::Impl {
                         track,
                         outside_side,
                         track.state_at,
-                        observation_center_x_ratio);
+                        horizontal_trend_observation_center_x_ratio);
                     if (track.horizontal_trend_change.count <
                         kTrackHorizontalTrendChangePointConfirmSampleCount) {
                         return;
@@ -1559,7 +1528,7 @@ struct Aim::Impl {
                             isolate_horizontal_trend_observation &&
                                     robust_horizontal_trend_center_valid
                                 ? robust_horizontal_trend_center_x_ratio
-                                : observation_center_x_ratio);
+                                : horizontal_trend_observation_center_x_ratio);
                         horizontal_trend =
                             estimate_horizontal_trend(track, track.state_at);
                     }
@@ -1574,7 +1543,7 @@ struct Aim::Impl {
                         estimate_horizontal_trend(track, track.state_at);
                     if (horizontal_trend.valid) {
                         const float innovation =
-                            observation_center_x_ratio -
+                            horizontal_trend_observation_center_x_ratio -
                             horizontal_trend.position_ratio;
                         float outside_side = 0.0f;
                         if (innovation <
@@ -1612,7 +1581,7 @@ struct Aim::Impl {
                                 isolate_horizontal_trend_observation &&
                                         robust_horizontal_trend_center_valid
                                     ? robust_horizontal_trend_center_x_ratio
-                                    : observation_center_x_ratio);
+                                    : horizontal_trend_observation_center_x_ratio);
                             horizontal_trend =
                                 estimate_horizontal_trend(
                                     track, track.state_at);
@@ -1624,7 +1593,7 @@ struct Aim::Impl {
                             isolate_horizontal_trend_observation &&
                                     robust_horizontal_trend_center_valid
                                 ? robust_horizontal_trend_center_x_ratio
-                                : observation_center_x_ratio);
+                                : horizontal_trend_observation_center_x_ratio);
                     }
                 } else {
                     // OLS 尚未有效时只能继续预热；变点候选不能跨中心趋势
@@ -1635,7 +1604,7 @@ struct Aim::Impl {
                         isolate_horizontal_trend_observation &&
                                 robust_horizontal_trend_center_valid
                             ? robust_horizontal_trend_center_x_ratio
-                            : observation_center_x_ratio);
+                            : horizontal_trend_observation_center_x_ratio);
                     if (track.horizontal_center_trend_frames > 0) {
                         horizontal_trend =
                             estimate_horizontal_trend(track, track.state_at);
@@ -2256,6 +2225,8 @@ struct Aim::Impl {
             track.protected_motion_y_frames = 0;
             track.partial_visibility_x_recovery_pending = false;
             track.accepted_partial_visibility_x_width = 0.0f;
+            track.accepted_partial_visibility_x_side = 0.0f;
+            track.partial_visibility_x_reference_width = 0.0f;
             track.horizontal_velocity_isolation_frames = 0;
             track.horizontal_trend_observation_isolation_frames = 0;
             track.horizontal_maneuver_frames = 0;
@@ -2442,10 +2413,11 @@ struct Aim::Impl {
                                float dx_counts,
                                float dy_counts) noexcept {
         // lock_active=false 时 Runtime 不会发送物理命令，历史必须记录零而
-        // 不是预计算结果，否则反向门会等待一段从未发生的在途库存。
+        // 不是预计算结果，否则延迟模型会补偿一段从未发生的相机响应。
         IssuedCommand& entry = issued_commands[issued_command_next];
         entry.sequence = frame.sequence;
         entry.issued_at = issued_at;
+        entry.applied_at = {};
         entry.dx_counts = frame.lock_active ? dx_counts : 0.0f;
         entry.dy_counts = frame.lock_active ? dy_counts : 0.0f;
         entry.applied = false;
@@ -2486,17 +2458,16 @@ struct Aim::Impl {
             candidate.issued_at = applied_at;
             candidate.dx_counts = static_cast<float>(dx_counts);
             candidate.dy_counts = static_cast<float>(dy_counts);
+            candidate.applied_at = applied_at;
             candidate.applied = true;
             return true;
         }
         return false;
     }
 
-    std::pair<float, float> delayed_issued_command(
-            std::chrono::steady_clock::time_point query_at) const
-            noexcept {
-        const float delay_seconds = config.enable_delay_compensation
-            ? config.control_delay_ms / 1000.0f : 0.0f;
+    std::pair<float, float> issued_command_at_delay(
+            std::chrono::steady_clock::time_point query_at,
+            float delay_seconds) const noexcept {
         const auto effective_at = query_at -
             std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<float>(delay_seconds));
@@ -2519,6 +2490,14 @@ struct Aim::Impl {
             return {0.0f, 0.0f};
         }
         return {best->dx_counts, best->dy_counts};
+    }
+
+    std::pair<float, float> delayed_issued_command(
+            std::chrono::steady_clock::time_point query_at) const
+            noexcept {
+        const float delay_seconds = config.enable_delay_compensation
+            ? config.control_delay_ms / 1000.0f : 0.0f;
+        return issued_command_at_delay(query_at, delay_seconds);
     }
 
     PendingIssuedCommandInventory pending_issued_command_inventory(
@@ -2553,26 +2532,62 @@ struct Aim::Impl {
         return inventory;
     }
 
-    bool issued_horizontal_direction_within(
-            std::chrono::steady_clock::time_point query_at,
-            float direction, float maximum_age_seconds) const noexcept {
-        if (direction == 0.0f || maximum_age_seconds <= 0.0f) return false;
+    float horizontal_plant_step_response(float age_seconds) const noexcept {
+        if (!config.enable_delay_compensation ||
+            config.control_delay_ms <= 0.0f || age_seconds <= 0.0f) {
+            return 0.0f;
+        }
+        const float delay_seconds = config.control_delay_ms / 1000.0f;
+        if (age_seconds <= delay_seconds) return 0.0f;
+        const float settled_seconds =
+            delay_seconds * kTrackingHorizontalPlantSettleDelayScale;
+        if (age_seconds >= settled_seconds) return 1.0f;
+        const float phase = std::clamp(
+            (age_seconds - delay_seconds) /
+                std::max(1.0e-6f, settled_seconds - delay_seconds),
+            0.0f, 1.0f);
+        // 真机响应的主能量在进入反馈窗后的第一个采样周期出现，随后一帧
+        // 收尾。三次 ease-out 只描述这条单调阶跃响应，不判断目标速度、
+        // 框尺度或游戏；端点仍严格为 0/1，避免另造放行状态机。
+        const float remaining = 1.0f - phase;
+        return 1.0f - remaining * remaining * remaining;
+    }
+
+    float modelled_horizontal_command_response(
+            std::chrono::steady_clock::time_point from,
+            std::chrono::steady_clock::time_point to) const noexcept {
+        if (from == std::chrono::steady_clock::time_point{} ||
+            to <= from) {
+            return 0.0f;
+        }
+        float response_counts = 0.0f;
         for (std::size_t offset = 0; offset < issued_command_count; ++offset) {
             const std::size_t index =
                 (issued_command_next + issued_commands.size() - 1U - offset) %
                 issued_commands.size();
             const IssuedCommand& candidate = issued_commands[index];
-            if (candidate.issued_at > query_at) continue;
-            const float age_seconds = static_cast<float>(
-                std::chrono::duration<double>(query_at - candidate.issued_at)
-                    .count());
-            if (age_seconds >= maximum_age_seconds) continue;
-            // Runtime 已把发送成功精确回写为实际整数、失败/安全门回写为零。
-            // 单测未模拟 Mouse 回调时保守保留原请求，等价于“尚不能证明未
-            // 执行”；这里只判断方向和时间，不估算设备响应幅值。
-            if (candidate.dx_counts * direction > 0.0f) return true;
+            const auto command_at =
+                candidate.applied_at ==
+                        std::chrono::steady_clock::time_point{}
+                    ? candidate.issued_at
+                    : candidate.applied_at;
+            if (command_at == std::chrono::steady_clock::time_point{} ||
+                command_at > to || candidate.dx_counts == 0.0f) {
+                continue;
+            }
+            const float age_to = static_cast<float>(
+                std::chrono::duration<double>(to - command_at).count());
+            const float age_from = command_at >= from
+                ? 0.0f
+                : static_cast<float>(
+                      std::chrono::duration<double>(from - command_at)
+                          .count());
+            const float response_delta =
+                horizontal_plant_step_response(age_to) -
+                horizontal_plant_step_response(age_from);
+            response_counts += candidate.dx_counts * response_delta;
         }
-        return false;
+        return response_counts;
     }
 
     std::pair<float, float> stable_prediction_world_velocity(
@@ -2724,21 +2739,6 @@ struct Aim::Impl {
         issued_command_count = 0;
         previous_command_x = 0.0f;
         previous_command_y = 0.0f;
-        tracking_horizontal_output_direction = 0.0f;
-        tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
-        tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
-        tracking_horizontal_reverse_position_peak_error = 0.0f;
-        tracking_horizontal_reverse_translation_seconds = 0.0f;
-        tracking_horizontal_reverse_translation_gap_seconds = 0.0f;
-        tracking_horizontal_reverse_deformation_seconds = 0.0f;
-        tracking_horizontal_reverse_deformation_active = false;
-        tracking_horizontal_reverse_probe_direction = 0.0f;
-        tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
-        tracking_horizontal_reverse_probe_started_at = {};
-        tracking_horizontal_reverse_output_bridge_started_at = {};
-        tracking_horizontal_reverse_output_bridge_consumed = false;
-        tracking_horizontal_closing_response_started_at = {};
-        tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
         controller_at = {};
         controller_initialized = false;
         shaper_initialized = false;
@@ -2811,16 +2811,31 @@ struct Aim::Impl {
             if (controller_track_id == track.id) {
                 const auto pending =
                     pending_issued_command_inventory(control_at);
-                // 当前基础点尚未包含延迟窗内命令的相机位移。提前扣除该
-                // 位移可在批量命令生效前减速，避免越过后只能停发反拉。
-                const float horizontal_pending_response =
-                    config.enable_prediction
-                    ? kControllerPendingCommandResponse
-                    : kTrackingHorizontalPendingCommandResponse;
-                projection.delay_x -= pending.net_x *
-                    horizontal_pending_response /
-                    config.counts_per_pixel_x /
-                    frame.source_pixels_per_roi_pixel_x;
+                if (config.enable_prediction) {
+                    projection.delay_x -= pending.net_x *
+                        kControllerPendingCommandResponse /
+                        config.counts_per_pixel_x /
+                        frame.source_pixels_per_roi_pixel_x;
+                } else {
+                    // Smith/内部模型只预测“当前观测 -> 本次控制预计生效”
+                    // 期间历史命令会新增的相机位移。已经出现在当前框中的
+                    // 响应不会重复扣除，尚未来得及响应的命令也不会靠符号
+                    // 门停发等待；同一连续模型同时覆盖同向与反向。
+                    const auto projected_at = track.state_at +
+                        std::chrono::duration_cast<
+                            std::chrono::steady_clock::duration>(
+                            std::chrono::duration<float>(
+                                projection.delay_seconds_x));
+                    const float modelled_response_counts =
+                        modelled_horizontal_command_response(
+                            track.state_at, projected_at);
+                    projection.modelled_response_x_counts =
+                        modelled_response_counts;
+                    projection.delay_x -= modelled_response_counts *
+                        kTrackingHorizontalPlantResponse /
+                        config.counts_per_pixel_x /
+                        frame.source_pixels_per_roi_pixel_x;
+                }
                 projection.delay_y -= pending.net_y *
                     kControllerPendingCommandResponse /
                     config.counts_per_pixel_y /
@@ -3334,6 +3349,7 @@ struct Aim::Impl {
                  float base_x, float base_y,
                  float tracking_x, float tracking_y,
                  float aim_x, float aim_y,
+                 float modelled_response_x_counts,
                  std::chrono::steady_clock::time_point current_controller_at,
                  AimControlDiagnostics& diagnostics,
                  AimCommand& command) noexcept {
@@ -3343,8 +3359,6 @@ struct Aim::Impl {
         }
         diagnostics = {};
         diagnostics.evaluated = true;
-        diagnostics.reverse_output_direction_x =
-            tracking_horizontal_output_direction;
         diagnostics.reverse_translation_raw_left_x_roi_pixels =
             track.horizontal_raw_left_motion_x;
         diagnostics.reverse_translation_raw_right_x_roi_pixels =
@@ -3355,6 +3369,8 @@ struct Aim::Impl {
                 track.horizontal_raw_right_motion_x);
         diagnostics.reverse_translation_control_evidence_x =
             track.horizontal_control_translation_evidence_x;
+        diagnostics.modelled_response_x_counts =
+            modelled_response_x_counts;
         // 轨迹估计继续严格使用 captured_at；控制滤波、泄漏、slew 与
         // 命令库存统一使用 process() 解析出的同一控制时刻。
         if (track.predicted && !config.enable_prediction) {
@@ -3375,29 +3391,6 @@ struct Aim::Impl {
             diagnostics.feedforward_x_counts = feedforward_x;
             previous_command_x = 0.0f;
             previous_command_y = 0.0f;
-            // 原始观测连续性已经中断，任何未完成的反向累计都不能跨缺帧
-            // 与重获后的新几何拼接；输出方向可在持续按住时保留，以便
-            // 恢复帧仍明确知道哪一侧属于真正反向。
-            tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
-            tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
-            tracking_horizontal_reverse_position_peak_error = 0.0f;
-            tracking_horizontal_reverse_translation_seconds = 0.0f;
-            tracking_horizontal_reverse_translation_gap_seconds = 0.0f;
-            tracking_horizontal_reverse_deformation_seconds = 0.0f;
-            tracking_horizontal_reverse_deformation_active = false;
-            tracking_horizontal_reverse_probe_direction = 0.0f;
-            tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
-            tracking_horizontal_reverse_probe_started_at = {};
-            tracking_horizontal_reverse_output_bridge_started_at = {};
-            tracking_horizontal_reverse_output_bridge_consumed = false;
-            tracking_horizontal_closing_response_started_at = {};
-            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
-            if (!frame.lock_active) {
-                // 丢框早退不会经过函数末尾的公共清理。安全门已经释放时，
-                // 还必须丢弃上一次输出方向，避免恢复锁定后继承一条已经
-                // 不再获准执行的控制状态。
-                tracking_horizontal_output_direction = 0.0f;
-            }
             controller_at = current_controller_at;
             record_issued_command(
                 frame, current_controller_at, 0.0f, 0.0f);
@@ -3508,6 +3501,9 @@ struct Aim::Impl {
         controller_at = current_controller_at;
         // 比例闭环复用同一总投影偏移状态；prediction 关闭时锚点仍是原延迟点，
         // 开启时则不会把延迟点与其反向抵消量拆成不同响应速度。
+        const bool tracking_horizontal_delay_model =
+            config.enable_delay_compensation &&
+            !config.enable_prediction;
         const float proportional_x =
             error_x * config.counts_per_pixel_x * gain;
         const float proportional_y =
@@ -3535,6 +3531,7 @@ struct Aim::Impl {
                                             float source_scale,
                                             float counts_per_pixel,
                                             float delayed_command,
+                                            float observer_gain_per_second,
                                             float& feedforward,
                                             float& world_motion_measurement,
                                             bool& external_motion_evidence) {
@@ -3570,7 +3567,7 @@ struct Aim::Impl {
                     external_motion_evidence = true;
                 }
                 const float alpha = 1.0f - std::exp(
-                    -kControllerFeedforwardObserverGainPerSecond *
+                    -observer_gain_per_second *
                         controller_dt);
                 feedforward += (measurement - feedforward) * alpha;
                 // prediction 已经把准星推到人物前方后，目标停止帧不能继续
@@ -3606,14 +3603,66 @@ struct Aim::Impl {
                     kControllerFeedforwardMaximumCounts);
             }
         };
-        update_feedforward(
-            base_error_x, track.vx, frame.source_pixels_per_roi_pixel_x,
-            config.counts_per_pixel_x, delayed_command_x, feedforward_x,
-            world_motion_measurement_x,
-            prediction_external_motion_evidence_x);
+        // tracking X 的 51 点趋势速度在两份真机 Run 中相对相机响应晚约
+        // 68 ms，不能再与 15 ms 的到期命令拼成同一时刻的世界速度。
+        // 三观测共同边中值来自最近 8～13 ms 原始几何，既剔除单帧轮廓
+        // 尖峰，又与 17～21 ms 命令反馈处在同一因果窗口。它只替换 X
+        // 观察器输入；prediction、Y、增益和物理上限保持原契约。
+        if (tracking_horizontal_delay_model) {
+            // 51 点水平趋势在两份真机 Run 中相对已执行命令约晚 68 ms；
+            // 必须把它与同相位的输入配对，不能再和 15 ms 到期命令相加。
+            // 当前 15 ms 配置下 4.5 个反馈窗为 67.5 ms，且全程使用真实
+            // 时间查询，不读取人物速度、帧号或游戏。
+            const auto [phase_command_x, unused_phase_command_y] =
+                issued_command_at_delay(
+                    current_controller_at,
+                    config.control_delay_ms / 1000.0f *
+                        kTrackingHorizontalVelocityObservationDelayWindows);
+            (void)unused_phase_command_y;
+            const float translation_consistency = std::clamp(
+                std::fabs(
+                    track.horizontal_control_translation_evidence_x),
+                0.0f, 1.0f);
+            const float consistency_squared =
+                translation_consistency * translation_consistency;
+            const float consistency_fourth =
+                consistency_squared * consistency_squared;
+            // 继续以连续权重而非阈值开关隔离形变。十六次权重只让接近
+            // 刚体共同平移的边缘进入世界运动观察器；其余运动仍完整进入
+            // Smith 比例误差，不会停发或切换控制分支。
+            const float observer_weight =
+                consistency_fourth * consistency_fourth *
+                consistency_fourth * consistency_fourth;
+            diagnostics.observer_phase_command_x_counts = phase_command_x;
+            diagnostics.observer_consistency_weight_x = observer_weight;
+            update_feedforward(
+                base_error_x,
+                track.vx *
+                    (1.0f / kTrackingHorizontalPlantResponse) /
+                    kControllerFeedforwardVelocityScale * observer_weight,
+                frame.source_pixels_per_roi_pixel_x,
+                config.counts_per_pixel_x,
+                phase_command_x * observer_weight,
+                kControllerFeedforwardObserverGainPerSecond,
+                feedforward_x, world_motion_measurement_x,
+                prediction_external_motion_evidence_x);
+            feedforward_x = std::clamp(
+                feedforward_x,
+                -kTrackingHorizontalObserverMaximumCounts,
+                kTrackingHorizontalObserverMaximumCounts);
+        } else {
+            update_feedforward(
+                base_error_x, track.vx,
+                frame.source_pixels_per_roi_pixel_x,
+                config.counts_per_pixel_x, delayed_command_x,
+                kControllerFeedforwardObserverGainPerSecond,
+                feedforward_x, world_motion_measurement_x,
+                prediction_external_motion_evidence_x);
+        }
         update_feedforward(
             base_error_y, track.vy, frame.source_pixels_per_roi_pixel_y,
-            config.counts_per_pixel_y, delayed_command_y, feedforward_y,
+            config.counts_per_pixel_y, delayed_command_y,
+            kControllerFeedforwardObserverGainPerSecond, feedforward_y,
             world_motion_measurement_y,
             prediction_external_motion_evidence_y);
         float control_feedforward_x = feedforward_x;
@@ -3681,650 +3730,7 @@ struct Aim::Impl {
             desired_y = proportional_y;
         }
         diagnostics.desired_before_reverse_x_counts = desired_x;
-        const bool tracking_horizontal_closing_response_growth_guard_x =
-            config.enable_delay_compensation &&
-            config.control_delay_ms > 0.0f &&
-            !config.enable_prediction &&
-            tracking_horizontal_output_direction != 0.0f &&
-            previous_command_x * tracking_horizontal_output_direction >
-                0.0f &&
-            delayed_command_x * tracking_horizontal_output_direction >
-                0.001f &&
-            base_error_x * tracking_horizontal_output_direction > 0.0f &&
-            desired_x * tracking_horizontal_output_direction > 0.0f &&
-            track.horizontal_control_translation_evidence_x *
-                    tracking_horizontal_output_direction <=
-                -kHorizontalTranslationEvidenceConsistencyMinimum;
-        float tracking_horizontal_closing_response_maximum_x =
-            std::fabs(previous_command_x);
-        if (tracking_horizontal_closing_response_growth_guard_x) {
-            if (tracking_horizontal_closing_response_started_at ==
-                std::chrono::steady_clock::time_point{}) {
-                tracking_horizontal_closing_response_started_at =
-                    current_controller_at;
-                tracking_horizontal_closing_response_initial_magnitude_x =
-                    std::fabs(previous_command_x);
-            }
-            const float taper_step_seconds =
-                config.control_delay_ms / 1000.0f *
-                kTrackingHorizontalClosingResponseTaperWindowsPerCount;
-            const float response_age_seconds = static_cast<float>(
-                std::chrono::duration<double>(
-                    current_controller_at -
-                    tracking_horizontal_closing_response_started_at)
-                    .count());
-            const float completed_taper_steps = std::floor(
-                response_age_seconds / taper_step_seconds);
-            const float scheduled_maximum_x = std::max(
-                1.0f,
-                tracking_horizontal_closing_response_initial_magnitude_x -
-                    completed_taper_steps);
-            tracking_horizontal_closing_response_maximum_x = std::min(
-                std::fabs(previous_command_x), scheduled_maximum_x);
-        } else {
-            tracking_horizontal_closing_response_started_at = {};
-            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
-        }
-        // 首个换向帧只允许有界命令进入延迟库存，不得把
-        // “已确认输出方向”提前改成候选方向。函数末尾使用
-        // 该标志区分首个探测脉冲与延迟反馈后确认的换向。
-        bool reverse_release_probe_x = false;
-        bool reverse_release_probe_requires_fresh_confirmation_x = false;
-        float reverse_release_probe_maximum_counts_x =
-            kTrackingHorizontalReverseProbeMaximumCounts;
-        bool reverse_translation_ready_x = false;
-        bool reverse_translation_fresh_evidence_x = false;
-        bool reverse_position_improvement_reset_x = false;
-        bool reverse_output_translation_bridge_x = false;
-        AimReverseTranslationResetReason reverse_translation_reset_reason_x =
-            AimReverseTranslationResetReason::NONE;
-        if (config.enable_delay_compensation &&
-            config.control_delay_ms > 0.0f &&
-            !config.enable_prediction) {
-            const float desired_direction_x = desired_x == 0.0f
-                ? 0.0f : std::copysign(1.0f, desired_x);
-            const bool reverse_candidate =
-                tracking_horizontal_output_direction != 0.0f &&
-                desired_direction_x != 0.0f &&
-                desired_direction_x !=
-                    tracking_horizontal_output_direction;
-            diagnostics.reverse_candidate_x = reverse_candidate;
-            if (reverse_candidate) {
-                const float roi_width_source_pixels =
-                    frame.roi_width *
-                    frame.source_pixels_per_roi_pixel_x;
-                // 快速反向通道必须同时满足两条几何事实：基础中心已经位于
-                // 候选方向，且两条框边主要表现为共同平移。共同边持续歧义
-                // 时另由更严格、带有限姿态隔离的 ROI 位置面积保证活性。
-                const float aligned_base_error_x = std::max(
-                    0.0f, base_error_x * desired_direction_x);
-                const float aligned_translation_evidence =
-                    track.horizontal_control_translation_evidence_x *
-                    desired_direction_x;
-                const float translation_consistency_squared =
-                    aligned_translation_evidence *
-                    aligned_translation_evidence;
-                const float translation_consistency_fourth =
-                    translation_consistency_squared *
-                    translation_consistency_squared;
-                const bool previous_direction_inventory_pending =
-                    (tracking_horizontal_output_direction > 0.0f &&
-                     pending_inventory.has_positive_x) ||
-                    (tracking_horizontal_output_direction < 0.0f &&
-                     pending_inventory.has_negative_x);
-                const bool previous_direction_command_effective =
-                    delayed_command_x *
-                            tracking_horizontal_output_direction >
-                        0.001f;
-                const bool reverse_probe_active_before_update =
-                    tracking_horizontal_reverse_probe_direction != 0.0f;
-                const bool output_translation_supports_confirmed_direction =
-                    aligned_translation_evidence <=
-                        -kHorizontalTranslationEvidenceConsistencyMinimum;
-                // pending_inventory 只覆盖尚未到达配置延迟的命令；
-                // delayed_command_x 则是本帧预计刚开始产生画面反馈的命令。
-                // 新真机 Run 的 37 次快速探针中有 7 次恰在旧方向命令
-                // effective 时由候选方向共同边触发，7 次都在 90 ms 内
-                // 越过中心并于 180 ms 内反向，累计浪费 521 counts。
-                // 因此两者都属于“旧方向响应尚未观测完成”；刚到期响应
-                // 可以维持最低探针活性，但不能让其 CUSUM/共同平移直接
-                // 提交全量换向。
-                if (aligned_base_error_x <= 0.0f &&
-                    tracking_horizontal_reverse_probe_direction !=
-                        desired_direction_x) {
-                    tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
-                    tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
-                    tracking_horizontal_reverse_position_peak_error = 0.0f;
-                    tracking_horizontal_reverse_translation_seconds = 0.0f;
-                    tracking_horizontal_reverse_translation_gap_seconds = 0.0f;
-                    tracking_horizontal_reverse_deformation_seconds = 0.0f;
-                    tracking_horizontal_reverse_deformation_active = false;
-                    tracking_horizontal_reverse_probe_direction = 0.0f;
-                    tracking_horizontal_reverse_probe_requires_fresh_confirmation =
-                        false;
-                    tracking_horizontal_reverse_probe_started_at = {};
-                    desired_x = 0.0f;
-                    diagnostics.reverse_gate_blocked_x = true;
-                    reverse_translation_reset_reason_x =
-                        AimReverseTranslationResetReason::BASE_NOT_ALIGNED;
-                } else {
-                    // 采用带参考漂移的 Page/CUSUM：候选方向共同边增加
-                    // 证据，反方向平移抵消；allowance 只按既有几何语义
-                    // 连续插值，使零证据和随机正负微抖具有负漂移，不会
-                    // 成为最终必越门的随机游走。
-                    const float horizontal_geometry_ambiguity = std::clamp(
-                        static_cast<float>(
-                            track.horizontal_center_trend_frames) /
-                            static_cast<float>(
-                                kTrackCoherentDeformationHoldFrames),
-                        0.0f, 1.0f);
-                    const float reference_allowance =
-                        kTrackingHorizontalReverseStableEvidenceAllowance +
-                        (kTrackingHorizontalReverseAmbiguousEvidenceAllowance -
-                         kTrackingHorizontalReverseStableEvidenceAllowance) *
-                            horizontal_geometry_ambiguity;
-                    const float signed_translation_weight =
-                        std::copysign(
-                            translation_consistency_fourth,
-                            aligned_translation_evidence) -
-                        reference_allowance;
-                    const float normalized_base_error =
-                        aligned_base_error_x /
-                        std::max(1.0f, roi_width_source_pixels);
-                    const float evidence_increment =
-                        normalized_base_error *
-                        signed_translation_weight * controller_dt;
-                    tracking_horizontal_reverse_evidence_ratio_seconds =
-                        std::max(
-                            0.0f,
-                            tracking_horizontal_reverse_evidence_ratio_seconds +
-                                evidence_increment);
-                    const bool candidate_direction_pending =
-                        (desired_direction_x > 0.0f &&
-                         pending_inventory.has_positive_x) ||
-                        (desired_direction_x < 0.0f &&
-                         pending_inventory.has_negative_x);
-                    const bool partial_semantics_transition =
-                        (track.partial_visibility_x_frames > 0 &&
-                         track.partial_visibility_x_frames <
-                             kTrackPartialVisibilityConfirmFrames) ||
-                        track.horizontal_trend_rebuilding_from_partial;
-                    diagnostics.reverse_previous_direction_pending_x =
-                        previous_direction_inventory_pending;
-                    diagnostics.reverse_partial_semantics_transition_x =
-                        partial_semantics_transition;
-                    if (partial_semantics_transition) {
-                        // 单侧半框候选、确认和完整框恢复会改变可见中心语义。
-                        // 两类证据都只能从稳定重建后的新鲜观测重新累计。
-                        tracking_horizontal_reverse_evidence_ratio_seconds =
-                            0.0f;
-                        tracking_horizontal_reverse_position_ratio_seconds =
-                            0.0f;
-                        tracking_horizontal_reverse_position_peak_error =
-                            0.0f;
-                        tracking_horizontal_reverse_translation_seconds =
-                            0.0f;
-                        tracking_horizontal_reverse_translation_gap_seconds =
-                            0.0f;
-                        tracking_horizontal_reverse_deformation_seconds =
-                            0.0f;
-                        tracking_horizontal_reverse_deformation_active = false;
-                        tracking_horizontal_reverse_probe_direction = 0.0f;
-                        tracking_horizontal_reverse_probe_requires_fresh_confirmation =
-                            false;
-                        tracking_horizontal_reverse_probe_started_at = {};
-                        reverse_translation_reset_reason_x =
-                            AimReverseTranslationResetReason::PARTIAL_SEMANTICS;
-                    } else {
-                        // 实际整体平移不应再乘基础误差幅值后等待几十毫秒。
-                        // 候选方向的两条框边共同移动且累计覆盖一个反馈窗时，
-                        // 方向事实已经独立于人物速度和框宽成立。最新真机 Run
-                        // 中单观测桥接已实际命中 45 帧并把高速候选门控占比从
-                        // 86.9% 降到 81.8%，但 27 次桥接后清零中有 20 次报告
-                        // 框共同边仍沿候选方向，240 Hz 下按“第二帧”硬清仍会
-                        // 把连续运动切成短片段。这里改用既有反馈窗作为累计弱
-                        // 证据预算：弱观测不增加强证据驻留，预算也不会被中间
-                        // 强帧反复刷新；从首个强证据到放行最多只容纳一个反馈
-                        // 窗的同向弱时间。零位移、反向、旧库存或语义变化仍立即
-                        // 清零，且弱帧本身不能触发物理放行。
-                        const bool translation_evidence_consistent =
-                            aligned_translation_evidence >=
-                            kHorizontalTranslationEvidenceConsistencyMinimum;
-                        const bool translation_evidence_same_direction =
-                            aligned_translation_evidence > 0.0f;
-                        if (previous_direction_inventory_pending) {
-                            tracking_horizontal_reverse_translation_seconds =
-                                0.0f;
-                            tracking_horizontal_reverse_translation_gap_seconds =
-                                0.0f;
-                            reverse_translation_reset_reason_x =
-                                AimReverseTranslationResetReason::
-                                    PREVIOUS_DIRECTION_PENDING;
-                        } else if (aligned_translation_evidence == 0.0f) {
-                            tracking_horizontal_reverse_translation_seconds =
-                                0.0f;
-                            tracking_horizontal_reverse_translation_gap_seconds =
-                                0.0f;
-                            reverse_translation_reset_reason_x =
-                                AimReverseTranslationResetReason::
-                                    ZERO_TRANSLATION;
-                        } else if (!translation_evidence_same_direction) {
-                            tracking_horizontal_reverse_translation_seconds =
-                                0.0f;
-                            tracking_horizontal_reverse_translation_gap_seconds =
-                                0.0f;
-                            reverse_translation_reset_reason_x =
-                                AimReverseTranslationResetReason::
-                                    OPPOSING_TRANSLATION;
-                        } else if (translation_evidence_consistent) {
-                            tracking_horizontal_reverse_translation_seconds +=
-                                controller_dt;
-                            reverse_translation_fresh_evidence_x = true;
-                        } else if (
-                            tracking_horizontal_reverse_translation_seconds >
-                                0.0f) {
-                            tracking_horizontal_reverse_translation_gap_seconds +=
-                                controller_dt;
-                            const float weak_evidence_budget_seconds =
-                                config.control_delay_ms / 1000.0f;
-                            if (tracking_horizontal_reverse_translation_gap_seconds >=
-                                weak_evidence_budget_seconds) {
-                                tracking_horizontal_reverse_translation_seconds =
-                                    0.0f;
-                                tracking_horizontal_reverse_translation_gap_seconds =
-                                    0.0f;
-                                reverse_translation_reset_reason_x =
-                                    AimReverseTranslationResetReason::
-                                        WEAK_BUDGET_EXHAUSTED;
-                            }
-                        } else {
-                            tracking_horizontal_reverse_translation_seconds =
-                                0.0f;
-                            tracking_horizontal_reverse_translation_gap_seconds =
-                                0.0f;
-                            reverse_translation_reset_reason_x =
-                                AimReverseTranslationResetReason::
-                                    WEAK_WITHOUT_STRONG_HISTORY;
-                        }
-                        // 姿态 episode 是观测几何生命周期，不能在等待同向
-                        // 旧库存过期时或被单帧共同边置信度抹掉。库存期允许
-                        // 年龄与真实 dt 并行增长，但位置面积仍保持为零；这样不会
-                        // 提前反拉，也不会在库存退出后再额外空等一个反馈窗。
-                        // horizontal_center_trend_frames 已由宽高共同形变或
-                        // partial 几何确认产生，归零才代表该 episode 结束。
-                        const bool deformation_episode_continues =
-                            tracking_horizontal_reverse_deformation_active &&
-                            track.horizontal_center_trend_frames > 0;
-                        const bool deformation_episode_starts =
-                            !tracking_horizontal_reverse_deformation_active &&
-                            track.horizontal_center_trend_frames > 0 &&
-                            std::fabs(
-                                track.horizontal_translation_evidence_x) >=
-                                kHorizontalTranslationEvidenceConsistencyMinimum;
-                        if (deformation_episode_continues ||
-                            deformation_episode_starts) {
-                            if (deformation_episode_starts) {
-                                tracking_horizontal_reverse_deformation_seconds =
-                                    0.0f;
-                            }
-                            tracking_horizontal_reverse_deformation_active =
-                                true;
-                            tracking_horizontal_reverse_deformation_seconds +=
-                                controller_dt;
-                        } else {
-                            tracking_horizontal_reverse_deformation_seconds =
-                                0.0f;
-                            tracking_horizontal_reverse_deformation_active =
-                                false;
-                        }
-                        if (previous_direction_inventory_pending) {
-                            // 屏幕中心跨侧可能完全由自身相机响应造成；位置
-                            // 面积必须从零等待真实旧方向库存退出。
-                            tracking_horizontal_reverse_position_ratio_seconds =
-                                0.0f;
-                            tracking_horizontal_reverse_position_peak_error =
-                                aligned_base_error_x;
-                        } else {
-                            // 位置兜底是最后的活性保证，不是可以在对象已经
-                            // 自行回到准星时继续 windup 的积分器。实际 Run 中
-                            // 42 次位置放行有 40 次在 44 ms 内已向中心改善，
-                            // 旧面积仍越门并与共同边证据交替形成低频继电环。
-                            // 相对本 episode 峰值改善一个现有 hold band 后，
-                            // 清空旧面积并从当前误差重新开始；持续静态偏差或
-                            // 继续离开准星的真实目标仍会有界重新积累。
-                            if (tracking_horizontal_reverse_position_peak_error <=
-                                    0.0f) {
-                                tracking_horizontal_reverse_position_peak_error =
-                                    aligned_base_error_x;
-                            }
-                            if (aligned_base_error_x + hold_band <=
-                                tracking_horizontal_reverse_position_peak_error) {
-                                tracking_horizontal_reverse_position_ratio_seconds =
-                                    0.0f;
-                                tracking_horizontal_reverse_position_peak_error =
-                                    aligned_base_error_x;
-                                reverse_position_improvement_reset_x = true;
-                            } else {
-                                tracking_horizontal_reverse_position_peak_error =
-                                    std::max(
-                                        tracking_horizontal_reverse_position_peak_error,
-                                        aligned_base_error_x);
-                                tracking_horizontal_reverse_position_ratio_seconds +=
-                                    normalized_base_error * controller_dt;
-                            }
-                        }
-                    }
-                    const float required_evidence =
-                        kTrackingHorizontalReverseEvidenceRoiRatio *
-                        config.control_delay_ms / 1000.0f;
-                    const float required_position_fallback =
-                        kTrackingHorizontalReverseFallbackRoiRatio *
-                        config.control_delay_ms / 1000.0f *
-                        (tracking_horizontal_reverse_deformation_active
-                            ? kTrackingHorizontalReverseDeformationFallbackScale
-                            : 1.0f);
-                    const float required_deformation_dwell =
-                        config.control_delay_ms / 1000.0f;
-                    const bool evidence_ready =
-                        tracking_horizontal_reverse_evidence_ratio_seconds >=
-                        required_evidence;
-                    reverse_translation_ready_x =
-                        reverse_translation_fresh_evidence_x &&
-                        tracking_horizontal_reverse_translation_seconds >=
-                            config.control_delay_ms / 1000.0f;
-                    const bool deformation_dwell_ready =
-                        !tracking_horizontal_reverse_deformation_active ||
-                        tracking_horizontal_reverse_deformation_seconds >=
-                            required_deformation_dwell;
-                    const bool position_ready =
-                        tracking_horizontal_reverse_position_ratio_seconds >=
-                            required_position_fallback &&
-                        deformation_dwell_ready;
-                    const bool strong_translation_probe_evidence =
-                        !partial_semantics_transition &&
-                        aligned_translation_evidence >=
-                            kHorizontalTranslationEvidenceConsistencyMinimum &&
-                        std::fabs(common_edge_motion(
-                            track.horizontal_raw_left_motion_x,
-                            track.horizontal_raw_right_motion_x)) /
-                            std::max(
-                                1.0f,
-                                static_cast<float>(frame.roi_width)) >=
-                            kTrackingHorizontalReverseProbeMinimumRoiMotionRatio;
-                    const float quiet_probe_tail_seconds =
-                        config.control_delay_ms / 1000.0f *
-                        kTrackingHorizontalReverseQuietProbeTailWindows;
-                    const bool previous_direction_response_tail =
-                        strong_translation_probe_evidence &&
-                        issued_horizontal_direction_within(
-                            current_controller_at,
-                            tracking_horizontal_output_direction,
-                            quiet_probe_tail_seconds);
-                    const bool quiet_inventory_translation_probe_ready =
-                        !previous_direction_inventory_pending &&
-                        !previous_direction_command_effective &&
-                        !previous_direction_response_tail &&
-                        strong_translation_probe_evidence;
-                    diagnostics.reverse_required_evidence_ratio_seconds_x =
-                        required_evidence;
-                    diagnostics.reverse_required_position_ratio_seconds_x =
-                        required_position_fallback;
-                    diagnostics.reverse_evidence_ready_x = evidence_ready;
-                    diagnostics.reverse_position_ready_x = position_ready;
-                    const float output_bridge_position_ratio_limit =
-                        tracking_horizontal_reverse_deformation_active
-                        ? kTrackingHorizontalReverseEvidenceRoiRatio
-                        : kTrackingHorizontalReverseFallbackRoiRatio;
-                    const bool output_bridge_can_run =
-                        !reverse_probe_active_before_update &&
-                        !evidence_ready &&
-                        !reverse_translation_ready_x &&
-                        !position_ready &&
-                        !partial_semantics_transition &&
-                        normalized_base_error <=
-                            output_bridge_position_ratio_limit &&
-                        output_translation_supports_confirmed_direction;
-                    if (output_bridge_can_run &&
-                        !tracking_horizontal_reverse_output_bridge_consumed) {
-                        if (tracking_horizontal_reverse_output_bridge_started_at ==
-                            std::chrono::steady_clock::time_point{}) {
-                            tracking_horizontal_reverse_output_bridge_started_at =
-                                current_controller_at;
-                        }
-                        const float bridge_age_seconds = static_cast<float>(
-                            std::chrono::duration<double>(
-                                current_controller_at -
-                                tracking_horizontal_reverse_output_bridge_started_at)
-                                .count());
-                        // 最小桥接不能让真正的反向位置兜底失去活性。预算
-                        // 不超过两个反馈窗，并进一步限制为“当前归一化反侧
-                        // 误差按既有位置门理论所需的累计时间”。偏差越大，
-                        // 桥接越早让位；接近中心的真机假反向可获得更完整的
-                        // 连续性。全程不读取人物速度或游戏类型。
-                        const float output_bridge_budget_seconds = std::min(
-                            config.control_delay_ms / 1000.0f *
-                                kTrackingHorizontalReverseProbeCommitWindows,
-                            required_position_fallback /
-                                std::max(1.0e-6f, normalized_base_error));
-                        if (bridge_age_seconds <
-                            output_bridge_budget_seconds) {
-                            reverse_output_translation_bridge_x = true;
-                        } else {
-                            tracking_horizontal_reverse_output_bridge_started_at =
-                                {};
-                            tracking_horizontal_reverse_output_bridge_consumed =
-                                true;
-                        }
-                    } else if (
-                        tracking_horizontal_reverse_output_bridge_started_at !=
-                        std::chrono::steady_clock::time_point{}) {
-                        tracking_horizontal_reverse_output_bridge_started_at = {};
-                        tracking_horizontal_reverse_output_bridge_consumed = true;
-                    }
-                    if (tracking_horizontal_reverse_probe_direction ==
-                        desired_direction_x) {
-                        const float probe_age_seconds =
-                            tracking_horizontal_reverse_probe_started_at ==
-                                    std::chrono::steady_clock::time_point{}
-                                ? 0.0f
-                                : static_cast<float>(
-                                      std::chrono::duration<double>(
-                                          current_controller_at -
-                                          tracking_horizontal_reverse_probe_started_at)
-                                          .count());
-                        const float feedback_window_seconds =
-                            config.control_delay_ms / 1000.0f;
-                        const bool quiet_probe_explicitly_opposed =
-                            tracking_horizontal_reverse_probe_requires_fresh_confirmation &&
-                            !previous_direction_inventory_pending &&
-                            !previous_direction_command_effective &&
-                            aligned_translation_evidence <=
-                                -kHorizontalTranslationEvidenceConsistencyMinimum;
-                        if (quiet_probe_explicitly_opposed) {
-                            // 最新实机反事实中，29 个库存静默快探针候选里
-                            // 有 11 个最终恢复旧方向；其中 9 个在首个反馈窗
-                            // 出现 >=0.70 的明确反对证据，而 18 个旧状态机
-                            // 随后放行同方向的候选只有 1 个。弱帧和零位移
-                            // 仍保留探针；只有对称的强反证才立即撤销，避免
-                            // 把单个强帧扩成持续 3-count 的错误短脉冲。
-                            tracking_horizontal_reverse_evidence_ratio_seconds =
-                                0.0f;
-                            tracking_horizontal_reverse_position_ratio_seconds =
-                                0.0f;
-                            tracking_horizontal_reverse_position_peak_error =
-                                aligned_base_error_x;
-                            tracking_horizontal_reverse_translation_seconds =
-                                0.0f;
-                            tracking_horizontal_reverse_translation_gap_seconds =
-                                0.0f;
-                            tracking_horizontal_reverse_probe_direction = 0.0f;
-                            tracking_horizontal_reverse_probe_requires_fresh_confirmation =
-                                false;
-                            tracking_horizontal_reverse_probe_started_at = {};
-                            filtered_x = 0.0f;
-                            shaped_x = 0.0f;
-                            residual_x = 0.0f;
-                            desired_x = 0.0f;
-                            diagnostics.reverse_gate_blocked_x = true;
-                        } else if (probe_age_seconds < feedback_window_seconds) {
-                            // 首个反馈窗内最多允许持续 3 counts，但不递增。
-                            // 库存静默快探针的首帧仍固定为 1 count；后续帧
-                            // 复用同一有界确认窗，避免重新形成多帧停发。
-                            reverse_release_probe_x = true;
-                        } else if (
-                            tracking_horizontal_reverse_probe_requires_fresh_confirmation &&
-                            !evidence_ready &&
-                            !reverse_translation_ready_x) {
-                            if (position_ready &&
-                                probe_age_seconds <
-                                    feedback_window_seconds *
-                                        kTrackingHorizontalReverseProbeCommitWindows) {
-                                // 需要新鲜确认的探针在第二个反馈窗只保留
-                                // 物理最小 1 count，等待首窗库存完整进入画面。
-                                // 它只能由探针启动后的 CUSUM/共同平移事实
-                                // 升级为全量换向。
-                                reverse_release_probe_x = true;
-                                reverse_release_probe_maximum_counts_x =
-                                    kTrackingHorizontalReverseFeedbackProbeMaximumCounts;
-                            } else {
-                                // 纯位置或受旧响应污染的探针在证据失效、第二窗
-                                // 到期后都不能穿透成全量输出。没有独立确认时
-                                // 必须取消并清空位置面积；持续静态误差可从新鲜
-                                // 面积重试，但不能靠等待时间自动提交。
-                                tracking_horizontal_reverse_position_ratio_seconds =
-                                    0.0f;
-                                tracking_horizontal_reverse_position_peak_error =
-                                    aligned_base_error_x;
-                                tracking_horizontal_reverse_probe_direction = 0.0f;
-                                tracking_horizontal_reverse_probe_requires_fresh_confirmation =
-                                    false;
-                                tracking_horizontal_reverse_probe_started_at = {};
-                                // 下一轮位置面积必须对应一轮全新的有界探针；
-                                // 仅清候选标志会让平滑/整形残量跨轮继承。
-                                // 只归零 X 动态状态，Y、前馈、预测和真实在途
-                                // 命令历史均保持原样。
-                                filtered_x = 0.0f;
-                                shaped_x = 0.0f;
-                                residual_x = 0.0f;
-                                desired_x = 0.0f;
-                                diagnostics.reverse_gate_blocked_x = true;
-                            }
-                        }
-                    } else if (!evidence_ready &&
-                               !reverse_translation_ready_x &&
-                               !position_ready &&
-                               !quiet_inventory_translation_probe_ready) {
-                        tracking_horizontal_reverse_probe_direction = 0.0f;
-                        tracking_horizontal_reverse_probe_requires_fresh_confirmation =
-                            false;
-                        tracking_horizontal_reverse_probe_started_at = {};
-                        desired_x = 0.0f;
-                        diagnostics.reverse_gate_blocked_x = true;
-                    } else {
-                        // 证据门首次通过后只发一个有界探测。若候选方向
-                        // 已有未反馈命令，必须先等它退出库存，禁止同窗叠加。
-                        if (candidate_direction_pending) {
-                            desired_x = 0.0f;
-                            diagnostics.reverse_gate_blocked_x = true;
-                        } else {
-                            reverse_release_probe_x = true;
-                            reverse_release_probe_requires_fresh_confirmation_x =
-                                previous_direction_command_effective ||
-                                quiet_inventory_translation_probe_ready ||
-                                (!evidence_ready &&
-                                 !reverse_translation_ready_x &&
-                                 position_ready);
-                            if (quiet_inventory_translation_probe_ready) {
-                                // 最新实机 Run 的 2918 个反向门帧中有 2323
-                                // 个已经没有旧方向 pending/effective 命令；
-                                // 其中 147 帧当前共同边与候选方向一致性仍
-                                // 达到 0.70，122 帧同时越过归一化微抖门。
-                                // 继续等待完整 15 ms 驻留会把每次真实反转
-                                // 切成约 24 帧零命令。已知库存安静且本帧强
-                                // 共同平移成立时，立即只发物理最小 1 count
-                                // 辨识探针；清空探针前证据，后续仍必须由新鲜
-                                // 反馈确认，不能凭等待自动提交全量换向。
-                                reverse_release_probe_maximum_counts_x =
-                                    kTrackingHorizontalReverseFeedbackProbeMaximumCounts;
-                                tracking_horizontal_reverse_evidence_ratio_seconds =
-                                    0.0f;
-                                tracking_horizontal_reverse_translation_seconds =
-                                    0.0f;
-                                tracking_horizontal_reverse_translation_gap_seconds =
-                                    0.0f;
-                            } else if (previous_direction_command_effective) {
-                                // 本帧允许发出最低活性的有界探针，但旧方向
-                                // effective 命令造成的共同边/CUSUM 到此作废。
-                                // 真反向会在探针反馈窗内用后续新鲜几何重新
-                                // 确认；旧响应假反向则不能沿用污染面积自动提交。
-                                tracking_horizontal_reverse_evidence_ratio_seconds =
-                                    0.0f;
-                                tracking_horizontal_reverse_translation_seconds =
-                                    0.0f;
-                                tracking_horizontal_reverse_translation_gap_seconds =
-                                    0.0f;
-                            }
-                        }
-                    }
-                }
-            } else {
-                tracking_horizontal_reverse_output_bridge_started_at = {};
-                tracking_horizontal_reverse_output_bridge_consumed = false;
-                tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
-                tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
-                tracking_horizontal_reverse_position_peak_error = 0.0f;
-                tracking_horizontal_reverse_translation_seconds = 0.0f;
-                tracking_horizontal_reverse_translation_gap_seconds = 0.0f;
-                tracking_horizontal_reverse_deformation_seconds = 0.0f;
-                tracking_horizontal_reverse_deformation_active = false;
-                // 探测命令未产生反馈前，单帧候选消失可能只是延迟投影或
-                // 量化过零。保留探测时间戳到首个反馈窗结束；若旧方向
-                // 真的恢复非零输出，函数末尾仍会立即清理该候选。
-                const bool probe_feedback_pending =
-                    tracking_horizontal_reverse_probe_direction != 0.0f &&
-                    tracking_horizontal_reverse_probe_started_at !=
-                        std::chrono::steady_clock::time_point{} &&
-                    std::chrono::duration<double>(
-                        current_controller_at -
-                        tracking_horizontal_reverse_probe_started_at)
-                            .count() <
-                        static_cast<double>(config.control_delay_ms) / 1000.0;
-                if (!probe_feedback_pending) {
-                    tracking_horizontal_reverse_probe_direction = 0.0f;
-                    tracking_horizontal_reverse_probe_requires_fresh_confirmation =
-                        false;
-                    tracking_horizontal_reverse_probe_started_at = {};
-                }
-                reverse_translation_reset_reason_x =
-                    AimReverseTranslationResetReason::CANDIDATE_INACTIVE;
-            }
-        }
-        if (diagnostics.reverse_gate_blocked_x &&
-            reverse_output_translation_bridge_x) {
-            // 已确认方向的共同边重新占优时，保留原有一次性最小桥接；
-            // 最终整数方向门仍会剔除任何背离当前控制点的命令，因此该层
-            // 只承担保持带内的最低连续性，不替代本轮上游存量卸载。
-            desired_x = std::copysign(
-                kTrackingHorizontalReverseFeedbackProbeMaximumCounts,
-                tracking_horizontal_output_direction);
-        }
-        if (config.enable_delay_compensation &&
-            config.control_delay_ms > 0.0f &&
-            !config.enable_prediction &&
-            track.horizontal_center_trend_frames <= 0) {
-            // X 延迟窗中仍有旧方向命令时，立即发送反向命令只会让两批
-            // 库存在画面反馈前互相追赶，形成“追赶—制动”极限环。这里
-            // 不估算人物速度或库存位移，只按已知控制时域等待旧方向库存
-            // 退出；真实反转最多等待一个配置延迟窗。Y 保持原控制路径。
-            const bool pending_x_opposes_desired =
-                (desired_x > 0.0f && pending_inventory.has_negative_x) ||
-                (desired_x < 0.0f && pending_inventory.has_positive_x);
-            if (pending_x_opposes_desired &&
-                std::fabs(base_error_x) <= hold_band) {
-                desired_x = 0.0f;
-                diagnostics.pending_inventory_hold_blocked_x = true;
-            }
-        }
+        diagnostics.desired_x_counts = desired_x;
         // prediction 活动时，最终点可能已经越过基础点，但仍暂时位于准星另一侧。
         // 此时沿世界运动反方向纠偏只会把准星拉回旧位置；真实延迟闭环会将
         // 这种“追上后反拉”放大为经零反转抖动。对确有世界运动分量的轴选择
@@ -4391,41 +3797,6 @@ struct Aim::Impl {
                 desired_y = 0.0f;
             }
         }
-        diagnostics.reverse_evidence_ratio_seconds_x =
-            tracking_horizontal_reverse_evidence_ratio_seconds;
-        diagnostics.reverse_position_ratio_seconds_x =
-            tracking_horizontal_reverse_position_ratio_seconds;
-        diagnostics.reverse_position_peak_error_x =
-            tracking_horizontal_reverse_position_peak_error;
-        diagnostics.reverse_translation_seconds_x =
-            tracking_horizontal_reverse_translation_seconds;
-        diagnostics.reverse_translation_gap_seconds_x =
-            tracking_horizontal_reverse_translation_gap_seconds;
-        diagnostics.reverse_deformation_seconds_x =
-            tracking_horizontal_reverse_deformation_seconds;
-        diagnostics.reverse_deformation_active_x =
-            tracking_horizontal_reverse_deformation_active;
-        diagnostics.reverse_probe_direction_x =
-            tracking_horizontal_reverse_probe_direction;
-        diagnostics.reverse_probe_active_x =
-            tracking_horizontal_reverse_probe_direction != 0.0f;
-        diagnostics.reverse_probe_limited_x = reverse_release_probe_x;
-        diagnostics.reverse_translation_ready_x =
-            reverse_translation_ready_x;
-        diagnostics.reverse_translation_fresh_evidence_x =
-            reverse_translation_fresh_evidence_x;
-        diagnostics.reverse_translation_reset_reason_x =
-            reverse_translation_reset_reason_x;
-        diagnostics.reverse_position_improvement_reset_x =
-            reverse_position_improvement_reset_x;
-        if (tracking_horizontal_reverse_probe_started_at !=
-            std::chrono::steady_clock::time_point{}) {
-            diagnostics.reverse_probe_age_ms_x = static_cast<float>(
-                std::chrono::duration<double, std::milli>(
-                    current_controller_at -
-                    tracking_horizontal_reverse_probe_started_at)
-                    .count());
-        }
         diagnostics.desired_x_counts = desired_x;
         // 进入死区也不能按某个像素速度阈值硬清状态；只有上一命令、到期
         // 命令和整个在途窗都归零，才可证明执行器库存已经安静。
@@ -4446,21 +3817,6 @@ struct Aim::Impl {
             residual_y = 0.0f;
             previous_command_x = 0.0f;
             previous_command_y = 0.0f;
-            tracking_horizontal_output_direction = 0.0f;
-            tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
-            tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
-            tracking_horizontal_reverse_position_peak_error = 0.0f;
-            tracking_horizontal_reverse_translation_seconds = 0.0f;
-            tracking_horizontal_reverse_translation_gap_seconds = 0.0f;
-            tracking_horizontal_reverse_deformation_seconds = 0.0f;
-            tracking_horizontal_reverse_deformation_active = false;
-            tracking_horizontal_reverse_probe_direction = 0.0f;
-            tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
-            tracking_horizontal_reverse_probe_started_at = {};
-            tracking_horizontal_reverse_output_bridge_started_at = {};
-            tracking_horizontal_reverse_output_bridge_consumed = false;
-            tracking_horizontal_closing_response_started_at = {};
-            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
             controller_at = current_controller_at;
             diagnostics.deadzone_quiet = true;
             diagnostics.filtered_x_counts = filtered_x;
@@ -4565,52 +3921,8 @@ struct Aim::Impl {
                 // 非增长帧仍保留正常误差扩散，低速亚像素响应不会被关闭。
                 residual_x = 0.0f;
             }
-            if (tracking_horizontal_closing_response_growth_guard_x &&
-                previous_command_x * shaped_x > 0.0f &&
-                std::fabs(shaped_x) >
-                    tracking_horizontal_closing_response_maximum_x) {
-                // 当旧方向延迟命令已经生效、两条框边又以既有 0.70
-                // 一致性朝中心闭合时，先禁止继续加码；若该事实持续超过
-                // 1.5 个真实 control_delay 反馈窗，则每完成 1.5 窗最多卸载
-                // 1 count，直至物理最小 1 count。这样把减速节拍绑定到
-                // 已配置的反馈延迟而不是帧率/人物速度：短闭合只冻结增长，
-                // 长闭合才逐窗减小旧方向存量，任何更快的自然减速仍通过。
-                diagnostics.closing_response_tapered_x =
-                    tracking_horizontal_closing_response_maximum_x + 0.001f <
-                    std::fabs(previous_command_x);
-                shaped_x = std::copysign(
-                    tracking_horizontal_closing_response_maximum_x,
-                    previous_command_x);
-                residual_x = 0.0f;
-            }
             clamp_vector(shaped_x, shaped_y, config.max_counts_per_frame);
         }
-        if (diagnostics.reverse_gate_blocked_x &&
-            reverse_output_translation_bridge_x) {
-            // 桥接只改 X；若 Y 已占满二维上限，按剩余向量预算缩小桥接，
-            // 不压低或重整 Y 的既有输出。
-            const float remaining_x = std::sqrt(std::max(
-                0.0f,
-                config.max_counts_per_frame * config.max_counts_per_frame -
-                    shaped_y * shaped_y));
-            shaped_x = std::copysign(
-                std::min(
-                    kTrackingHorizontalReverseFeedbackProbeMaximumCounts,
-                    remaining_x),
-                tracking_horizontal_output_direction);
-            residual_x = 0.0f;
-        }
-        if (reverse_release_probe_x) {
-            // 探测仍经过比例、平滑、方向和 slew 全链路，这里只对最终
-            // X 轴幅值做 3 counts 上限。真实 dt 偶发变大时也不能让
-            // 240 counts/s 的 slew 一帧跨出多个探测 count。
-            shaped_x = std::clamp(
-                shaped_x,
-                -reverse_release_probe_maximum_counts_x,
-                reverse_release_probe_maximum_counts_x);
-            residual_x = 0.0f;
-        }
-
         diagnostics.shaped_x_counts = shaped_x;
         diagnostics.residual_before_quantization_x_counts = residual_x;
         float quantized_x = shaped_x + residual_x;
@@ -4739,77 +4051,6 @@ struct Aim::Impl {
             command.dx_counts == 0 && std::fabs(desired_x) > 0.001f;
         previous_command_x = static_cast<float>(command.dx_counts);
         previous_command_y = static_cast<float>(command.dy_counts);
-        if (!frame.lock_active) {
-            tracking_horizontal_output_direction = 0.0f;
-            tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
-            tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
-            tracking_horizontal_reverse_position_peak_error = 0.0f;
-            tracking_horizontal_reverse_translation_seconds = 0.0f;
-            tracking_horizontal_reverse_translation_gap_seconds = 0.0f;
-            tracking_horizontal_reverse_deformation_seconds = 0.0f;
-            tracking_horizontal_reverse_deformation_active = false;
-            tracking_horizontal_reverse_probe_direction = 0.0f;
-            tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
-            tracking_horizontal_reverse_probe_started_at = {};
-            tracking_horizontal_reverse_output_bridge_started_at = {};
-            tracking_horizontal_reverse_output_bridge_consumed = false;
-            tracking_horizontal_closing_response_started_at = {};
-            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
-        } else if (command.dx_counts != 0 && reverse_release_probe_x) {
-            tracking_horizontal_closing_response_started_at = {};
-            tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
-            const float command_direction = std::copysign(
-                1.0f, static_cast<float>(command.dx_counts));
-            if (tracking_horizontal_reverse_probe_direction !=
-                command_direction) {
-                tracking_horizontal_reverse_probe_direction =
-                    command_direction;
-                tracking_horizontal_reverse_probe_requires_fresh_confirmation =
-                    reverse_release_probe_requires_fresh_confirmation_x;
-                tracking_horizontal_reverse_probe_started_at =
-                    current_controller_at;
-            }
-        } else if (command.dx_counts != 0 &&
-                   reverse_output_translation_bridge_x) {
-            // 这条 1-count 命令只是已确认方向的有界连续层，不是一次
-            // 新方向提交。保留当前反向候选、位置面积和一次性桥接预算，
-            // 否则公共“非零命令即提交”路径会每帧重置预算并永久饿死
-            // 真正反向。
-        } else if (command.dx_counts != 0) {
-            const float command_direction = std::copysign(
-                1.0f, static_cast<float>(command.dx_counts));
-            if (tracking_horizontal_output_direction != 0.0f &&
-                tracking_horizontal_output_direction != command_direction) {
-                tracking_horizontal_closing_response_started_at = {};
-                tracking_horizontal_closing_response_initial_magnitude_x = 0.0f;
-            }
-            tracking_horizontal_output_direction = command_direction;
-            tracking_horizontal_reverse_evidence_ratio_seconds = 0.0f;
-            tracking_horizontal_reverse_position_ratio_seconds = 0.0f;
-            tracking_horizontal_reverse_position_peak_error = 0.0f;
-            tracking_horizontal_reverse_translation_seconds = 0.0f;
-            tracking_horizontal_reverse_translation_gap_seconds = 0.0f;
-            tracking_horizontal_reverse_deformation_seconds = 0.0f;
-            tracking_horizontal_reverse_deformation_active = false;
-            tracking_horizontal_reverse_probe_direction = 0.0f;
-            tracking_horizontal_reverse_probe_requires_fresh_confirmation = false;
-            tracking_horizontal_reverse_probe_started_at = {};
-            tracking_horizontal_reverse_output_bridge_started_at = {};
-            tracking_horizontal_reverse_output_bridge_consumed = false;
-        }
-        diagnostics.reverse_probe_direction_x =
-            tracking_horizontal_reverse_probe_direction;
-        diagnostics.reverse_probe_active_x =
-            tracking_horizontal_reverse_probe_direction != 0.0f;
-        diagnostics.reverse_probe_age_ms_x =
-            tracking_horizontal_reverse_probe_started_at ==
-                    std::chrono::steady_clock::time_point{}
-                ? 0.0f
-                : static_cast<float>(
-                      std::chrono::duration<double, std::milli>(
-                          current_controller_at -
-                          tracking_horizontal_reverse_probe_started_at)
-                          .count());
         record_issued_command(
             frame, current_controller_at,
             previous_command_x, previous_command_y);
@@ -5000,6 +4241,7 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
                     projection.delay_compensated_x,
                     projection.delay_compensated_y,
                     projection.final_x, projection.final_y,
+                    projection.modelled_response_x_counts,
                     control_at,
                     result.control,
                     result.command);

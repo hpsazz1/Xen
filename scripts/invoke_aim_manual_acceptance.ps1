@@ -784,8 +784,8 @@ foreach ($file in $jsonReports) {
     $report = Get-Content -LiteralPath $file.FullName -Raw -Encoding utf8 |
         ConvertFrom-Json
     if ($null -eq $report.samples) { continue }
-    if ([int]$report.schema -ne 12) {
-        throw "Aim 人工任务 Runtime 报告 schema 不是 12：$($file.FullName)"
+    if ([int]$report.schema -ne 13) {
+        throw "Aim 人工任务 Runtime 报告 schema 不是 13：$($file.FullName)"
     }
     $samples = @($report.samples)
     $allSamples += $samples

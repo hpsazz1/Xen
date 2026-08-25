@@ -111,6 +111,14 @@ function Get-XenAimControlDiagnosticsSummary {
         $positionImprovementFields | Where-Object {
             $availableFields -notcontains $_
         }).Count -eq 0
+    $delayModelFields = @(
+        "aim_modelled_response_x_counts",
+        "aim_observer_phase_command_x_counts",
+        "aim_observer_consistency_weight_x")
+    $delayModelDiagnosticsAvailable = @(
+        $delayModelFields | Where-Object {
+            $availableFields -notcontains $_
+        }).Count -eq 0
 
     $reasonNames = @(
         "reverse_gate", "pending_inventory_hold", "deadzone_quiet",
@@ -168,6 +176,10 @@ function Get-XenAimControlDiagnosticsSummary {
         [System.Collections.Generic.List[double]]::new()
     $probeAge = [System.Collections.Generic.List[double]]::new()
     $reversalZeroFrames = [System.Collections.Generic.List[double]]::new()
+    $modelledResponse = [System.Collections.Generic.List[double]]::new()
+    $observerPhaseCommand = [System.Collections.Generic.List[double]]::new()
+    $observerConsistencyWeight =
+        [System.Collections.Generic.List[double]]::new()
 
     [uint64]$controlFrames = 0
     [uint64]$diagnosticsMissingFrames = 0
@@ -218,6 +230,14 @@ function Get-XenAimControlDiagnosticsSummary {
         }
         $previousTrackId = $trackId
         $controllerDt.Add([double]$sample.aim_controller_dt_ms)
+        if ($delayModelDiagnosticsAvailable) {
+            $modelledResponse.Add(
+                [double]$sample.aim_modelled_response_x_counts)
+            $observerPhaseCommand.Add(
+                [double]$sample.aim_observer_phase_command_x_counts)
+            $observerConsistencyWeight.Add(
+                [double]$sample.aim_observer_consistency_weight_x)
+        }
 
         $flagMappings = @(
                 @("reverse_candidate", "aim_reverse_candidate_x"),
@@ -378,7 +398,7 @@ function Get-XenAimControlDiagnosticsSummary {
         [double]$zeroFrames / [double]$diagnosedFrames
     }
     return [ordered]@{
-        schema = 5
+        schema = 6
         sample_count = $items.Count
         controllable_frames = $controlFrames
         diagnosed_frames = $diagnosedFrames
@@ -390,6 +410,7 @@ function Get-XenAimControlDiagnosticsSummary {
             $translationDetailDiagnosticsAvailable
         reverse_position_improvement_diagnostics_available =
             $positionImprovementDiagnosticsAvailable
+        delay_model_diagnostics_available = $delayModelDiagnosticsAvailable
         x = [ordered]@{
             command_zero_frames = $zeroFrames
             command_nonzero_frames = $diagnosedFrames - $zeroFrames
@@ -410,6 +431,12 @@ function Get-XenAimControlDiagnosticsSummary {
             stopped_pending_absolute_counts =
                 Get-XenAimDistributionSummary $zeroPending
             controller_dt_ms = Get-XenAimDistributionSummary $controllerDt
+            modelled_response_x_counts =
+                Get-XenAimDistributionSummary $modelledResponse
+            observer_phase_command_x_counts =
+                Get-XenAimDistributionSummary $observerPhaseCommand
+            observer_consistency_weight_x =
+                Get-XenAimDistributionSummary $observerConsistencyWeight
             reverse_evidence_progress_ratio =
                 Get-XenAimDistributionSummary $evidenceProgress
             reverse_position_progress_ratio =

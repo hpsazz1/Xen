@@ -80,6 +80,9 @@ function New-ControlDiagnosticSample(
         [double]$CommandX
     }
     $sample.aim_pending_absolute_x_counts = 3.0
+    $sample.aim_modelled_response_x_counts = 1.5
+    $sample.aim_observer_phase_command_x_counts = -2.0
+    $sample.aim_observer_consistency_weight_x = 0.81
     $sample.aim_reverse_output_direction_x = 1.0
     $sample.aim_reverse_candidate_x = $Sequence -in @(2, 4)
     $sample.aim_reverse_previous_direction_pending_x = $false
@@ -163,7 +166,11 @@ Assert-Condition ($controlSummary.x.nonzero_direction_reversals -eq 2 -and
         $controlSummary.x.reversal_window_dominant_causes.shaper_direction_reset `
             -eq 1) `
     "Control diagnostics must summarize reversal zero-window causes."
-Assert-Condition ($controlSummary.schema -eq 5 -and
+Assert-Condition ($controlSummary.schema -eq 6 -and
+        [bool]$controlSummary.delay_model_diagnostics_available -and
+        $controlSummary.x.modelled_response_x_counts.p50 -eq 1.5 -and
+        $controlSummary.x.observer_phase_command_x_counts.p50 -eq -2.0 -and
+        $controlSummary.x.observer_consistency_weight_x.p50 -eq 0.81 -and
         [bool]$controlSummary.reverse_probe_diagnostics_available -and
         [bool]$controlSummary.reverse_translation_diagnostics_available -and
         [bool]$controlSummary.reverse_translation_detail_diagnostics_available -and
