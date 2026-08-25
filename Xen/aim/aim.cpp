@@ -142,6 +142,11 @@ struct PendingIssuedCommandInventory {
 
 constexpr float kInvalidAssignmentCost = 1000000.0f;
 constexpr float kUnmatchedAssignmentCost = 1.05f;
+constexpr float kSelectedTrackIdentityBias = 0.15f;
+// 关联矩阵的未匹配竞争比选择器多一层：多个已确认轨迹会争夺同一个
+// 观测。当前锁定获得五分之一归一化代价的软优先权；仍远低于无匹配
+// 代价，且明显更优的真实目标可以胜出，不做 selected-first 硬绑定。
+constexpr float kSelectedTrackAssociationBias = 0.20f;
 constexpr float kTrackPositionAlphaHigh = 0.72f;
 constexpr float kTrackPositionAlphaLow = 0.45f;
 constexpr float kTrackVelocityBetaHigh = 0.10f;
@@ -1960,8 +1965,15 @@ struct Aim::Impl {
                             (2.0f * std::log(4.0f)),
                         0.0f, 1.0f);
                 }
-                costs[row][column] = (1.0f - iou) * 0.50f +
+                float association_cost = (1.0f - iou) * 0.50f +
                     normalized_distance * 0.35f + shape_cost * 0.15f;
+                if (track.id == selected_track_id &&
+                    track.state == TrackState::CONFIRMED) {
+                    association_cost = std::max(
+                        0.0f,
+                        association_cost - kSelectedTrackAssociationBias);
+                }
+                costs[row][column] = association_cost;
             }
         }
 
@@ -2118,7 +2130,9 @@ struct Aim::Impl {
                     frame.source_pixels_per_roi_pixel_y) / diagonal;
             value += (1.0f - track.confidence) * 0.25f;
             if (track.predicted) value += 0.30f;
-            if (track.id == selected_track_id) value -= 0.15f;
+            if (track.id == selected_track_id) {
+                value -= kSelectedTrackIdentityBias;
+            }
             return value;
         };
 

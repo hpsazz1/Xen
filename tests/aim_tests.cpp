@@ -2493,6 +2493,106 @@ void test_tentative_duplicate_cannot_steal_confirmed_observation() {
            "短暂重复人体框消失后，确认轨迹必须优先消费唯一观测，禁止候选抢占");
 }
 
+void test_confirmed_duplicate_cannot_starve_selected_observation() {
+    AimConfig config;
+    config.min_confirmed_hits = 2;
+    config.deadzone_pixels = 0.0f;
+    config.max_center_distance = 0.25f;
+    config.switch_confirm_frames = 3;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame first = make_frame(1, base);
+    first.detections = {body(150.0f, 160.0f)};
+    aim.process(first);
+    AimFrame second = make_frame(
+        2, base + std::chrono::milliseconds(10));
+    second.detections = {body(154.0f, 160.0f)};
+    const AimResult confirmed = aim.process(second);
+    const std::uint64_t selected_id = confirmed.target.track_id;
+
+    // 真机 Run 的重复人体框并非只出现一帧：重叠候选可在两帧后也进入
+    // CONFIRMED。它消失为单框时，唯一观测若略靠近重复轨迹，原锁定会
+    // 先滑入 LOST 两帧再切 ID，造成“非零追赶—硬零—新 ID 跳变”。
+    AimFrame duplicate_once = make_frame(
+        3, base + std::chrono::milliseconds(20));
+    duplicate_once.detections = {
+        body(158.0f, 160.0f), body(170.0f, 160.0f)};
+    aim.process(duplicate_once);
+    AimFrame duplicate_twice = make_frame(
+        4, base + std::chrono::milliseconds(30));
+    duplicate_twice.detections = {
+        body(162.0f, 160.0f), body(172.0f, 160.0f)};
+    aim.process(duplicate_twice);
+    AimFrame single = make_frame(
+        5, base + std::chrono::milliseconds(40));
+    single.detections = {body(172.0f, 160.0f)};
+    const AimResult result = aim.process(single);
+
+    expect(confirmed.has_target && result.has_target &&
+               result.target.track_id == selected_id &&
+               !result.target.predicted,
+           "重叠重复轨迹已确认后，唯一可行观测仍应优先维持当前锁定，"
+           "不得先进入 LOST 再切换 ID");
+}
+
+void test_selected_association_bias_does_not_hijack_distinct_target() {
+    AimConfig config;
+    config.min_confirmed_hits = 2;
+    config.deadzone_pixels = 0.0f;
+    config.max_center_distance = 0.25f;
+    config.switch_confirm_frames = 3;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame first = make_frame(1, base);
+    first.detections = {body(150.0f, 160.0f)};
+    aim.process(first);
+    AimFrame second = make_frame(
+        2, base + std::chrono::milliseconds(10));
+    second.detections = {body(154.0f, 160.0f)};
+    const AimResult selected = aim.process(second);
+
+    AimFrame two_targets_once = make_frame(
+        3, base + std::chrono::milliseconds(20));
+    two_targets_once.detections = {
+        body(158.0f, 160.0f), body(190.0f, 160.0f)};
+    aim.process(two_targets_once);
+    AimFrame two_targets_twice = make_frame(
+        4, base + std::chrono::milliseconds(30));
+    two_targets_twice.detections = {
+        body(162.0f, 160.0f), body(194.0f, 160.0f)};
+    aim.process(two_targets_twice);
+
+    AimResult missing_selected;
+    std::string switch_trace;
+    for (int index = 0; index < 3; ++index) {
+        AimFrame only_distinct = make_frame(
+            static_cast<std::uint64_t>(5 + index),
+            base + std::chrono::milliseconds(40 + index * 10));
+        only_distinct.detections = {
+            body(198.0f + index * 4.0f, 160.0f)};
+        missing_selected = aim.process(only_distinct);
+        switch_trace += std::to_string(missing_selected.target.track_id) + ":" +
+            (missing_selected.target.predicted ? "P" : "O") + ":" +
+            std::to_string(missing_selected.target.aim_x) + ";";
+        if (index == 0) {
+            expect(missing_selected.has_target &&
+                       missing_selected.target.track_id ==
+                           selected.target.track_id &&
+                       missing_selected.target.predicted,
+                   "当前目标真实缺失时，软关联优先权不得劫持明显分离的另一目标");
+        }
+    }
+    expect(missing_selected.has_target &&
+               missing_selected.target.track_id != selected.target.track_id &&
+               !missing_selected.target.predicted,
+           "明显分离的已确认目标连续领先后仍必须按既有三帧门切换，trace=" +
+               switch_trace);
+}
+
 void test_loss_prediction_does_not_compound_time() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -9870,6 +9970,8 @@ int main() {
     test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
     test_tentative_duplicate_cannot_steal_confirmed_observation();
+    test_confirmed_duplicate_cannot_starve_selected_observation();
+    test_selected_association_bias_does_not_hijack_distinct_target();
     test_loss_prediction_does_not_compound_time();
     test_observation_age_adds_bounded_lead();
     test_prediction_lead_can_leave_box_with_bounded_distance();
