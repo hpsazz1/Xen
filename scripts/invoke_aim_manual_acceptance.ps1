@@ -420,18 +420,19 @@ function Get-ScenarioDefinition() {
         }
         "SuperJump" {
             return [ordered]@{
-                title = "超级跳垂直跟随"
+                title = "超级跳期间横纵向跟随与 X 停换向连续性"
                 actions = @(
-                    "单个目标在 ROI 附近连续超级跳，至少完成 15 次。",
-                    "按住右键覆盖起跳、腾空、落地和再次起跳。",
-                    "保持起始区域、距离和移动方向尽量一致。"
+                    "单个目标在 ROI 附近连续超级跳，至少完成 15 次，并保持可观察的横向移动。",
+                    "按住右键覆盖起跳、腾空、落地，以及 X 轴持续移动、短暂停顿和明确换向。",
+                    '至少各完成 5 次“横向移动→停顿”和“横向移动→反向”，尽量保持起点、距离和幅度一致。'
                 )
                 observations = @(
-                    "向上和向下跟随是否及时",
-                    "腾空阶段是否过冲",
-                    "落地后是否快速恢复",
-                    "头身观测变化是否导致跳点",
-                    "是否出现垂直持续震荡"
+                    "X 轴持续移动时是否落后或追不上",
+                    "X 轴停顿后基础点是否继续同向移动、贴边或晃动",
+                    "X 轴换向时是否硬停、过冲、来回修正或一顿一顿",
+                    "Y 轴起跳、腾空和落地跟随是否及时稳定",
+                    "头身观测变化是否造成 X/Y 跳点",
+                    "与上一 Run 相比 X 晃动、追赶和连续性是否改善"
                 )
             }
         }
@@ -633,6 +634,9 @@ if ($Mode -eq "Prepare") {
     Write-JsonAtomically (Join-Path $resolvedRun "task.json") $task
     Write-TextAtomically (Join-Path $resolvedRun "TASK.md") `
         (New-TaskMarkdown $definition $resolvedRun $runId)
+    $observationRecords = $definition.observations | ForEach-Object {
+        "- $_："
+    }
     Write-TextAtomically (Join-Path $resolvedRun "OBSERVATION.md") @"
 # 人工观察记录
 
@@ -649,7 +653,7 @@ if ($Mode -eq "Prepare") {
 - 开始/结束时间：
 - 是否完成全部操作：
 - 是否触发 End 急停：
-- 锁定、滞后、过冲、抖动和方向表现：
+$($observationRecords -join "`n")
 - 松开右键后的停止表现：
 - 与上一配置相比的变化：
 - 异常发生时间或复现步骤：

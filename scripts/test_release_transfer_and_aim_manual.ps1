@@ -275,6 +275,24 @@ try {
         [double]$trackingTask.aim.max_delay_compensation_percent -ne 12.0) {
         throw "task.json 没有固化任务 ID、平滑或延迟补偿参数。"
     }
+    $trackingTaskMarkdown = Get-Content -LiteralPath `
+        (Join-Path $trackingRoot "TASK.md") -Raw -Encoding utf8
+    $trackingObservation = Get-Content -LiteralPath `
+        (Join-Path $trackingRoot "OBSERVATION.md") -Raw -Encoding utf8
+    if ($trackingTaskMarkdown -notmatch [regex]::Escape(
+            "X 轴持续移动、短暂停顿和明确换向")) {
+        throw "SuperJump 操作步骤必须主动覆盖 X 持续移动、停顿和换向。"
+    }
+    foreach ($requiredText in @(
+            "X 轴持续移动时是否落后或追不上",
+            "X 轴停顿后基础点是否继续同向移动、贴边或晃动",
+            "X 轴换向时是否硬停、过冲、来回修正或一顿一顿",
+            "与上一 Run 相比 X 晃动、追赶和连续性是否改善")) {
+        if ($trackingTaskMarkdown -notmatch [regex]::Escape($requiredText) -or
+            $trackingObservation -notmatch [regex]::Escape($requiredText)) {
+            throw "SuperJump 任务和观察记录必须同时覆盖当前 X 晃动、追赶、停顿与换向门禁：$requiredText"
+        }
+    }
 
     $publishedManifest = Join-Path $published "manifest.json"
     $manifestBytes = [System.IO.File]::ReadAllBytes($publishedManifest)
