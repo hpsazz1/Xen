@@ -4621,6 +4621,72 @@ void test_base_tracking_quantization_has_no_speed_threshold() {
            "固定 320 ROI 的同向几何运动不得因跨过旧速度阈值改变亚整数分摊");
 }
 
+void test_delay_shaping_has_no_speed_threshold_before_prediction() {
+    struct Sample {
+        float velocity_x = 0.0f;
+        float shaped_x = 0.0f;
+        bool lead_active = false;
+    };
+    const auto run_case = [](float motion_per_frame) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 1.0f;
+        config.counts_per_pixel_y = 1.0f;
+        config.max_counts_per_frame = 20.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 16.0f;
+        config.max_delay_compensation_percent = 50.0f;
+        config.enable_prediction = true;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        AimResult result;
+        for (int index = 0; index < 3; ++index) {
+            const float target_x =
+                160.0f + motion_per_frame * static_cast<float>(index);
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = index < 2 ? target_x : target_x - 20.0f;
+            frame.control_center_y = 160.0f;
+            frame.lock_active = false;
+            frame.detections = {body(target_x, 160.0f)};
+            result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "延迟整形删除测试必须逐帧保留确认目标");
+        }
+        return Sample{
+            result.target.velocity_x,
+            result.control.shaped_x_counts,
+            result.target.lead_active};
+    };
+
+    const Sample below_old_threshold = run_case(0.30f);
+    const Sample above_old_threshold = run_case(1.00f);
+    expect(below_old_threshold.velocity_x < 20.0f &&
+               above_old_threshold.velocity_x > 20.0f &&
+               !below_old_threshold.lead_active &&
+               !above_old_threshold.lead_active,
+           "删除测试必须只覆盖 prediction 建立前的旧 20 px/s 延迟整形两侧，"
+           "速度=" + std::to_string(below_old_threshold.velocity_x) + "/" +
+               std::to_string(above_old_threshold.velocity_x) +
+               "，lead=" + std::to_string(below_old_threshold.lead_active) +
+               "/" + std::to_string(above_old_threshold.lead_active));
+    expect(std::fabs(below_old_threshold.shaped_x -
+                     above_old_threshold.shaped_x) <= 1.5f,
+           "相同 20-count 误差阶跃不得因目标速度跨过旧 20 px/s 判据切换延迟整形，"
+           "慢/快=" + std::to_string(below_old_threshold.shaped_x) + "/" +
+               std::to_string(above_old_threshold.shaped_x));
+}
+
 void test_tracking_public_point_is_independent_of_command_age() {
     const auto project_after = [](int age_microseconds) {
         AimConfig config;
@@ -7422,6 +7488,7 @@ int main() {
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_pi_is_separate_from_prediction_projection();
     test_base_tracking_quantization_has_no_speed_threshold();
+    test_delay_shaping_has_no_speed_threshold_before_prediction();
     test_tracking_public_point_is_independent_of_command_age();
     test_pending_command_age_uses_control_execution_time();
     test_tracking_pi_filters_axes_independently();

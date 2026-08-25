@@ -271,8 +271,6 @@ constexpr float kPredictionDirectFeedforwardScale = 1.10f;
 // 当前公开 prediction 点。超额在途命令已由隐藏控制锚提前制动，公开点
 // 保持带外不再允许额外反向物理命令，只停发等待已在途库存反馈。
 constexpr int kPredictionOppositePublicBrakeMaximumFrames = 0;
-constexpr float
-    kPredictionDelayedShapingMotionThresholdPixelsPerSecond = 20.0f;
 // prediction 从已经完成基础延迟补偿的点继续向前推 1.5 个控制延迟。
 // 真机 Run 20260809-234450 证明半个时域的最终点虽比基础点向前 2.75 px，
 // 但仍不足以覆盖 3.21 px 的比例控制稳态误差；合成闭环中的一个完整时域
@@ -3820,12 +3818,21 @@ struct Aim::Impl {
         clamp_vector(filtered_x, filtered_y, config.max_counts_per_frame);
         diagnostics.filtered_x_counts = filtered_x;
 
+        // 到期命令与屏幕相对运动同向，说明外部目标运动压过了相机反馈；
+        // 库存安静时则从同一个真实 dt 速率起步。两者都是延迟/因果证据，
+        // 不再按人物的 ROI 像素速度在两套整形策略间切档。
+        const bool causal_external_motion =
+            (std::fabs(delayed_command_x) > 0.001f &&
+             delayed_command_x *
+                     track.horizontal_control_translation_evidence_x >
+                 0.0f) ||
+            (std::fabs(delayed_command_y) > 0.001f &&
+             delayed_command_y * track.vy > 0.0f);
         const bool smooth_delayed_motion =
             config.enable_delay_compensation &&
             config.control_delay_ms > 0.0f &&
-            (!config.enable_prediction ||
-             std::hypot(track.vx, track.vy) >
-                 kPredictionDelayedShapingMotionThresholdPixelsPerSecond);
+            (!config.enable_prediction || control_inventory_quiet ||
+             causal_external_motion);
         const bool delayed_tracking_x_guard =
             config.enable_delay_compensation &&
             config.control_delay_ms > 0.0f &&
