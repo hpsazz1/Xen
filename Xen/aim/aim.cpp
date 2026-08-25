@@ -126,8 +126,6 @@ struct Track {
     bool horizontal_trend_rebuilding_from_partial = false;
     bool partial_visibility_x_recovery_pending = false;
     int pose_deformation_y_frames = 0;
-    float protected_motion_direction_y = 0.0f;
-    int protected_motion_y_frames = 0;
     HorizontalTrendHistory horizontal_trend{};
     HorizontalTrendChangePoint horizontal_trend_change{};
     HorizontalRawMotionHistory horizontal_raw_motion{};
@@ -172,10 +170,10 @@ constexpr float kTrackVelocityBetaLow = 0.04f;
 // 框内偏移使用独立低增益校正。这样真实平移仍使用原位置增益，不额外引入滞后。
 constexpr float kTrackAimShapeAlphaHigh = 0.12f;
 constexpr float kTrackAimShapeAlphaLow = 0.06f;
-// 语义证据不足时姿态保护可能短暂冻结绝对控制锚点。垂直方向允许锚点在
-// 配置高度附近保留 5% 框高的抑振余量，超过后只校正必要位移；这样不把
-// 逐帧轮廓噪声直接写回，也不允许保护状态改变瞄点语义。
-constexpr float kTrackAimVerticalDeviationMaximumTargetHeight = 0.05f;
+// 超级跳平移+交替姿态夹具中，0.50 把跟随误差 P95/误差二阶 P95 收敛到
+// 4.62/4.28 px，同时仍通过静止轮廓形变抑振；更低值增加真实平移滞后，
+// 更高值开始把交替轮廓写回基础点。它是连续增益，不产生状态边界。
+constexpr float kTrackAimVerticalShapeAlpha = 0.50f;
 // 人物姿态可能让检测框两条对边连续多帧同向摆动，单靠“对边反向即形变”
 // 或“中心逐帧反号”都无法识别。有明确尺度变化且中心创新仍属于小尺度时，
 // 保护基础锚点；尺度证据消失后按固定保持窗口恢复。X 在宽高共同形变时
@@ -224,10 +222,6 @@ constexpr int kTrackHorizontalTrendObservationIsolationFrames = 3;
 // 运动段的时间证据；单/双帧异常不会触发。快通道按两边共同平移的一致性
 // 连续降权，不锁死首次方向，因此窗口内的真实二次换向仍能及时进入状态。
 constexpr int kTrackHorizontalManeuverFrames = 10;
-// Y 保持本轮前已验证的保护状态机；本任务只替换 X 的速度门槛。
-constexpr float kTrackVerticalProtectedMotionMinimumPixelsPerSecond = 8.0f;
-constexpr int kTrackVerticalProtectedMotionConfirmFrames = 18;
-constexpr int kTrackVerticalProtectedMotionRampFrames = 4;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
 constexpr float kMaxObservationAgeSeconds = 0.10f;
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
@@ -250,21 +244,16 @@ constexpr float kControllerCommandHistoryMaximumAgeSeconds = 0.10f;
 // 第十四轮真实序列中，15 ms 窗口内约 15% 的命令位移足以解释基础点
 // 随后越过准星的幅度。这里只用于保守预测在途位移，不改变鼠标标定。
 constexpr float kControllerPendingCommandResponse = 0.15f;
-// AIM-SUPERJUMP-ACCEPT-001 的两份独立真机 Run 对“已发送 X 命令 ->
-// 下一帧原始共同边位移”做非负 FIR 辨识后，总响应分别约为 0.207 和
-// 0.211 个标定比例，主能量稳定落在 17～21 ms。tracking X 不再把
-// 整个反馈窗当成二值 pending/effective，而是用这份无速度、真实时间的
-// 有限响应模型预测当前画面尚未包含的相机位移。
-constexpr float kTrackingHorizontalPlantResponse = 0.20f;
-constexpr float kTrackingHorizontalPlantSettleDelayScale = 1.50f;
-// 同两份 Run 中，51 点趋势速度与已执行命令的相关峰均约在 68 ms，
-// 即当前 15 ms 反馈窗的 4.5 倍。观察器必须读取同相位输入；这一真实时间
-// 比例不依赖帧率、人物速度、框尺度或游戏。
-constexpr float kTrackingHorizontalVelocityObservationDelayWindows = 4.5f;
-// tracking X 的世界运动观察器只承担有限的维持量。实际 Run 旧观察器经常
-// 顶到 4 counts 并与相机反馈争抢方向；3 counts 配合 Smith 比例路径在
-// 固定框和姿态闭环中保持零漏反转，同时避免旧方向状态饱和。
-constexpr float kTrackingHorizontalObserverMaximumCounts = 3.0f;
+// tracking 的命令和图像误差来自同一个闭环，不能把二者相关性直接当作
+// 鼠标 plant。prediction 关闭时改由图像误差上的泄漏 PI 产生维持量：
+// 12/s 的积分建立约覆盖真实 15 ms 延迟后的数个采样，6/s 泄漏在静止后
+// 约 116 ms 衰减一半；4 counts 上限覆盖本轮目标框内命令 P95=3 counts。
+// 饱和差以 back-calculation 连续回写积分，避免 14-count 执行器上限形成
+// 隐藏库存。所有常量均使用真实 dt，不读取目标速度、框尺度或游戏类型。
+constexpr float kTrackingIntegralGainPerSecond = 12.0f;
+constexpr float kTrackingIntegralLeakPerSecond = 6.0f;
+constexpr float kTrackingAntiWindupGainPerSecond = 30.0f;
+constexpr float kTrackingIntegralMaximumCounts = 4.0f;
 // 40 ms 窗口内的 pending 总和会按命令逐帧阶跃；0.12 只平滑隐藏库存
 // 投影，使实测 8～10 帧命令反馈周期内逐步制动，不改变公开 prediction 点或
 // 用户配置的 0.475 基础控制平滑。
@@ -294,13 +283,6 @@ constexpr float kPredictionAdditionalHorizonScale = 1.50f;
 // 画面中的短时外推，两者不能被同一个配置值同时放大。prediction 保持
 // 已验证的双轴 16 ms 基准。
 constexpr float kGeometricProjectionMaximumSeconds = 0.016f;
-// 最新真实 tracking Run 中，X 的 16 ms 延迟把误差 P95 从 28.99 降到
-// 21.37 px，但仍略滞后；放宽到 20 ms 的同序列回放约为 19.85 px。
-// Y 的 16 ms 几乎不改善误差，却把二阶抖动从 0.715 放大到 1.886 px；
-// 4 ms 回放为 0.848 px，且误差 P95 略降。这里只拆分几何时域，不恢复
-// 已被真机否定的世界速度、动态内窗或库存控制状态。
-constexpr float kHorizontalTrackingProjectionMaximumSeconds = 0.020f;
-constexpr float kVerticalTrackingProjectionMaximumSeconds = 0.004f;
 // 基础前馈服务于每帧跟随，响应不能为 prediction 稳定方向降速。
 // prediction 单独使用慢速世界运动状态：持续运动低通，静止时快速释放。
 // 这个状态只读取基础前馈，绝不回写轨迹、基础控制点或基础控制器。
@@ -994,6 +976,7 @@ struct Aim::Impl {
             observation_center_y - track_center_y;
         float stable_motion_residual_x = center_motion_residual_x;
         float stable_motion_residual_y = center_motion_residual_y;
+        float vertical_translation_consistency = 1.0f;
         float robust_horizontal_velocity_x = track.vx;
         float robust_horizontal_translation_consistency = 0.0f;
         float robust_horizontal_trend_center_x_ratio =
@@ -1792,62 +1775,32 @@ struct Aim::Impl {
                     kTrackHorizontalTrendMinimumSampleCount) {
                 track.horizontal_trend_rebuilding_from_partial = false;
             }
-            const auto update_vertical_protected_motion =
-                [](bool shape_protected,
-                   float velocity,
-                   float& direction,
-                   int& frames) {
-                    if (!shape_protected) {
-                        direction = 0.0f;
-                        frames = 0;
-                        return;
-                    }
-                    if (frames >= kTrackVerticalProtectedMotionConfirmFrames +
-                                      kTrackVerticalProtectedMotionRampFrames) {
-                        return;
-                    }
-                    if (std::fabs(velocity) <
-                        kTrackVerticalProtectedMotionMinimumPixelsPerSecond) {
-                        direction = 0.0f;
-                        frames = 0;
-                        return;
-                    }
-                    const float current_direction =
-                        std::copysign(1.0f, velocity);
-                    if (current_direction == direction) {
-                        frames = std::min(
-                            frames + 1,
-                            kTrackVerticalProtectedMotionConfirmFrames +
-                                kTrackVerticalProtectedMotionRampFrames);
-                    } else {
-                        direction = current_direction;
-                        frames = 1;
-                    }
-                };
-            update_vertical_protected_motion(
-                track.pose_deformation_y_frames > 0, track.vy,
-                track.protected_motion_direction_y,
-                track.protected_motion_y_frames);
+            // Y 与 X 使用同一种几何分解：两条边的共同位移是平移，边缘
+            // 分歧是高度/姿态形变。旧路径用 |vy|>=8 px/s、18+4 帧状态机
+            // 冻结后验，再让绝对 aim_y 撞击配置高度 ±5% 硬边界；真机中
+            // 该边界占 31.38% 帧并发生 1781 次切换。这里改为无量纲连续
+            // 一致性，不再按速度或驻留帧切换语义。
+            const float vertical_common_motion = std::fabs(
+                common_edge_motion(y1_residual, y2_residual));
+            const float vertical_shape_motion =
+                std::fabs(y2_residual - y1_residual);
+            const float vertical_motion_total =
+                vertical_common_motion + vertical_shape_motion;
+            vertical_translation_consistency =
+                vertical_motion_total > 0.0f
+                    ? vertical_common_motion / vertical_motion_total
+                    : 0.0f;
             if (track.shape_deformation_y_frames > 0) {
-                stable_motion_residual_y = 0.0f;
-                if (y_edges_coherent) {
-                    float scale =
-                        kTrackDeformationVelocityBetaScaleMaximum;
-                    if (track.pose_deformation_y_frames > 0) {
-                        const float blend = std::clamp(
-                            static_cast<float>(
-                                track.protected_motion_y_frames -
-                                kTrackVerticalProtectedMotionConfirmFrames) /
-                                static_cast<float>(
-                                    kTrackVerticalProtectedMotionRampFrames),
-                            0.0f, 1.0f);
-                        scale = kTrackDeformationVelocityBetaScaleMinimum +
-                            (kTrackDeformationVelocityBetaScaleMaximum -
-                             kTrackDeformationVelocityBetaScaleMinimum) *
-                                blend;
-                    }
-                    velocity_beta_y *= scale;
-                }
+                const float translation_weight = y_edges_coherent
+                    ? vertical_translation_consistency *
+                          vertical_translation_consistency
+                    : 0.0f;
+                stable_motion_residual_y *= translation_weight;
+                velocity_beta_y *=
+                    kTrackDeformationVelocityBetaScaleMinimum +
+                    (kTrackDeformationVelocityBetaScaleMaximum -
+                     kTrackDeformationVelocityBetaScaleMinimum) *
+                        translation_weight;
             }
             if (!x_edges_coherent) {
                 velocity_beta_x *=
@@ -1953,16 +1906,10 @@ struct Aim::Impl {
                 ? 0.0f : shape_alpha;
             track.aim_x += (observed_aim_x - track.aim_x) *
                 horizontal_shape_alpha;
+            // 语义高度始终连续回归；姿态占主导时只按同一无量纲共同边
+            // 一致性降低形状校正，不再冻结若干帧后阶跃恢复。
             const float vertical_shape_alpha =
-                track.pose_deformation_y_frames <= 0
-                ? shape_alpha
-                : shape_alpha * std::clamp(
-                    static_cast<float>(
-                        track.protected_motion_y_frames -
-                        kTrackVerticalProtectedMotionConfirmFrames) /
-                        static_cast<float>(
-                            kTrackVerticalProtectedMotionRampFrames),
-                    0.0f, 1.0f);
+                kTrackAimVerticalShapeAlpha;
             track.aim_y += (observed_aim_y - track.aim_y) *
                 vertical_shape_alpha;
         }
@@ -1983,22 +1930,10 @@ struct Aim::Impl {
             horizontal_range_min_x,
             horizontal_range_max_x);
         track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
-        const float vertical_ratio_minimum = std::clamp(
-            track.aim_ratio_y -
-                kTrackAimVerticalDeviationMaximumTargetHeight,
-            0.0f, 1.0f);
-        const float vertical_ratio_maximum = std::clamp(
-            track.aim_ratio_y +
-                kTrackAimVerticalDeviationMaximumTargetHeight,
-            0.0f, 1.0f);
-        const float tracked_height = track.y2 - track.y1;
-        const float vertical_minimum_y =
-            track.y1 + tracked_height * vertical_ratio_minimum;
-        const float vertical_maximum_y =
-            track.y1 + tracked_height * vertical_ratio_maximum;
-        track.aim_y = std::clamp(
-            track.aim_y, vertical_minimum_y, vertical_maximum_y);
-
+        // 完整目标框是唯一几何安全边界。配置高度通过上面的连续回归定义，
+        // 不再另造 ±5% 内窗；全框投影只防止不可见状态库存，基础点仍严格
+        // 位于检测框内。
+        track.aim_y = std::clamp(track.aim_y, track.y1, track.y2);
         if (box_semantics_changed) {
             // 头框和身体框的尺度定义不同，切换时不把几何变化解释为速度。
             track.vx *= 0.5f;
@@ -2009,8 +1944,6 @@ struct Aim::Impl {
             track.partial_visibility_x_frames = 0;
             track.partial_visibility_x_side = 0.0f;
             track.pose_deformation_y_frames = 0;
-            track.protected_motion_direction_y = 0.0f;
-            track.protected_motion_y_frames = 0;
         } else {
             // 常规段仍以低 beta 消费中心残差；X 姿态段只消费两条边共同
             // 支持的预测创新。共同量相对边缘分歧越高，平移证据越强；这个
@@ -2221,8 +2154,6 @@ struct Aim::Impl {
             track.partial_visibility_x_frames = 0;
             track.partial_visibility_x_side = 0.0f;
             track.pose_deformation_y_frames = 0;
-            track.protected_motion_direction_y = 0.0f;
-            track.protected_motion_y_frames = 0;
             track.partial_visibility_x_recovery_pending = false;
             track.accepted_partial_visibility_x_width = 0.0f;
             track.accepted_partial_visibility_x_side = 0.0f;
@@ -2532,64 +2463,6 @@ struct Aim::Impl {
         return inventory;
     }
 
-    float horizontal_plant_step_response(float age_seconds) const noexcept {
-        if (!config.enable_delay_compensation ||
-            config.control_delay_ms <= 0.0f || age_seconds <= 0.0f) {
-            return 0.0f;
-        }
-        const float delay_seconds = config.control_delay_ms / 1000.0f;
-        if (age_seconds <= delay_seconds) return 0.0f;
-        const float settled_seconds =
-            delay_seconds * kTrackingHorizontalPlantSettleDelayScale;
-        if (age_seconds >= settled_seconds) return 1.0f;
-        const float phase = std::clamp(
-            (age_seconds - delay_seconds) /
-                std::max(1.0e-6f, settled_seconds - delay_seconds),
-            0.0f, 1.0f);
-        // 真机响应的主能量在进入反馈窗后的第一个采样周期出现，随后一帧
-        // 收尾。三次 ease-out 只描述这条单调阶跃响应，不判断目标速度、
-        // 框尺度或游戏；端点仍严格为 0/1，避免另造放行状态机。
-        const float remaining = 1.0f - phase;
-        return 1.0f - remaining * remaining * remaining;
-    }
-
-    float modelled_horizontal_command_response(
-            std::chrono::steady_clock::time_point from,
-            std::chrono::steady_clock::time_point to) const noexcept {
-        if (from == std::chrono::steady_clock::time_point{} ||
-            to <= from) {
-            return 0.0f;
-        }
-        float response_counts = 0.0f;
-        for (std::size_t offset = 0; offset < issued_command_count; ++offset) {
-            const std::size_t index =
-                (issued_command_next + issued_commands.size() - 1U - offset) %
-                issued_commands.size();
-            const IssuedCommand& candidate = issued_commands[index];
-            const auto command_at =
-                candidate.applied_at ==
-                        std::chrono::steady_clock::time_point{}
-                    ? candidate.issued_at
-                    : candidate.applied_at;
-            if (command_at == std::chrono::steady_clock::time_point{} ||
-                command_at > to || candidate.dx_counts == 0.0f) {
-                continue;
-            }
-            const float age_to = static_cast<float>(
-                std::chrono::duration<double>(to - command_at).count());
-            const float age_from = command_at >= from
-                ? 0.0f
-                : static_cast<float>(
-                      std::chrono::duration<double>(from - command_at)
-                          .count());
-            const float response_delta =
-                horizontal_plant_step_response(age_to) -
-                horizontal_plant_step_response(age_from);
-            response_counts += candidate.dx_counts * response_delta;
-        }
-        return response_counts;
-    }
-
     std::pair<float, float> stable_prediction_world_velocity(
             const AimFrame& frame, const Track& track) noexcept {
         if (!frame.lock_active || controller_track_id != track.id) {
@@ -2787,17 +2660,16 @@ struct Aim::Impl {
             projection.final_x = base_x + prediction_offset_x;
             projection.final_y = base_y + prediction_offset_y;
         };
-        if (config.enable_delay_compensation &&
+        if (config.enable_prediction &&
+            config.enable_delay_compensation &&
             track.state == TrackState::CONFIRMED && !track.predicted) {
             const float requested_delay_seconds =
                 projection.observation_age_seconds +
                 config.control_delay_ms / 1000.0f;
-            const float horizontal_maximum_seconds = config.enable_prediction
-                ? kGeometricProjectionMaximumSeconds
-                : kHorizontalTrackingProjectionMaximumSeconds;
-            const float vertical_maximum_seconds = config.enable_prediction
-                ? kGeometricProjectionMaximumSeconds
-                : kVerticalTrackingProjectionMaximumSeconds;
+            const float horizontal_maximum_seconds =
+                kGeometricProjectionMaximumSeconds;
+            const float vertical_maximum_seconds =
+                kGeometricProjectionMaximumSeconds;
             projection.delay_seconds_x = std::clamp(
                 requested_delay_seconds, 0.0f,
                 std::min(config.max_delay_compensation_ms / 1000.0f,
@@ -2811,31 +2683,10 @@ struct Aim::Impl {
             if (controller_track_id == track.id) {
                 const auto pending =
                     pending_issued_command_inventory(control_at);
-                if (config.enable_prediction) {
-                    projection.delay_x -= pending.net_x *
-                        kControllerPendingCommandResponse /
-                        config.counts_per_pixel_x /
-                        frame.source_pixels_per_roi_pixel_x;
-                } else {
-                    // Smith/内部模型只预测“当前观测 -> 本次控制预计生效”
-                    // 期间历史命令会新增的相机位移。已经出现在当前框中的
-                    // 响应不会重复扣除，尚未来得及响应的命令也不会靠符号
-                    // 门停发等待；同一连续模型同时覆盖同向与反向。
-                    const auto projected_at = track.state_at +
-                        std::chrono::duration_cast<
-                            std::chrono::steady_clock::duration>(
-                            std::chrono::duration<float>(
-                                projection.delay_seconds_x));
-                    const float modelled_response_counts =
-                        modelled_horizontal_command_response(
-                            track.state_at, projected_at);
-                    projection.modelled_response_x_counts =
-                        modelled_response_counts;
-                    projection.delay_x -= modelled_response_counts *
-                        kTrackingHorizontalPlantResponse /
-                        config.counts_per_pixel_x /
-                        frame.source_pixels_per_roi_pixel_x;
-                }
+                projection.delay_x -= pending.net_x *
+                    kControllerPendingCommandResponse /
+                    config.counts_per_pixel_x /
+                    frame.source_pixels_per_roi_pixel_x;
                 projection.delay_y -= pending.net_y *
                     kControllerPendingCommandResponse /
                     config.counts_per_pixel_y /
@@ -3345,6 +3196,186 @@ struct Aim::Impl {
         return projection;
     }
 
+    bool control_tracking(const AimFrame& frame, const Track& track,
+                          float base_x, float base_y,
+                          std::chrono::steady_clock::time_point
+                              current_controller_at,
+                          AimControlDiagnostics& diagnostics,
+                          AimCommand& command) noexcept {
+        diagnostics.evaluated = true;
+        const float controller_dt = controller_at ==
+                std::chrono::steady_clock::time_point{}
+            ? track.prediction_dt
+            : clamp_delta_seconds(std::chrono::duration<double>(
+                  current_controller_at - controller_at).count());
+        diagnostics.controller_dt_ms = controller_dt * 1000.0f;
+        controller_at = current_controller_at;
+
+        // 短时丢框不发送物理命令。PI 状态只按真实时间连续泄漏，不读取
+        // 丢失帧数，也不在重获时重新注入旧滤波方向。
+        if (track.predicted) {
+            const float leak = std::exp(
+                -kTrackingIntegralLeakPerSecond * controller_dt);
+            feedforward_x *= leak;
+            feedforward_y *= leak;
+            filtered_x *= leak;
+            filtered_y *= leak;
+            shaped_x = filtered_x;
+            shaped_y = filtered_y;
+            residual_x = 0.0f;
+            residual_y = 0.0f;
+            previous_command_x = 0.0f;
+            previous_command_y = 0.0f;
+            diagnostics.feedforward_x_counts = feedforward_x;
+            diagnostics.filtered_x_counts = filtered_x;
+            diagnostics.shaped_x_counts = shaped_x;
+            record_issued_command(
+                frame, current_controller_at, 0.0f, 0.0f);
+            return false;
+        }
+
+        const float error_x =
+            (base_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float error_y =
+            (base_y - frame.control_center_y) *
+            frame.source_pixels_per_roi_pixel_y;
+        const float error_magnitude = std::hypot(error_x, error_y);
+        // deadzone 使用径向软阈值：边界处比例输出连续为零，避免 X/Y 各自
+        // 开关形成方形抖动；已学习的维持量仍会平滑泄漏，不会进死区即停发。
+        const float active_error_scale = error_magnitude > 0.0f
+            ? std::max(
+                0.0f, 1.0f - config.deadzone_pixels / error_magnitude)
+            : 0.0f;
+        const float regularized_error_scale =
+            active_error_scale * active_error_scale * active_error_scale;
+        const float proportional_x = error_x * regularized_error_scale *
+            config.counts_per_pixel_x;
+        const float proportional_y = error_y * regularized_error_scale *
+            config.counts_per_pixel_y;
+
+        // 积分只消费当前图像特征误差。误差在死区外真实换边时，旧积分
+        // 表示上一方向的扰动而不再有效，直接从零重建；这不是等待证据的
+        // 换向门，当前比例项同一帧即可输出新方向。
+        if (feedforward_x != 0.0f &&
+            error_x * feedforward_x <= 0.0f) {
+            feedforward_x = 0.0f;
+        }
+        if (feedforward_y != 0.0f &&
+            error_y * feedforward_y <= 0.0f) {
+            feedforward_y = 0.0f;
+        }
+        const float integral_leak = std::exp(
+            -kTrackingIntegralLeakPerSecond * controller_dt);
+        feedforward_x = feedforward_x * integral_leak +
+            proportional_x * kTrackingIntegralGainPerSecond * controller_dt;
+        feedforward_y = feedforward_y * integral_leak +
+            proportional_y * kTrackingIntegralGainPerSecond * controller_dt;
+        feedforward_x = std::clamp(
+            feedforward_x,
+            -kTrackingIntegralMaximumCounts,
+            kTrackingIntegralMaximumCounts);
+        feedforward_y = std::clamp(
+            feedforward_y,
+            -kTrackingIntegralMaximumCounts,
+            kTrackingIntegralMaximumCounts);
+
+        const float unconstrained_x = proportional_x + feedforward_x;
+        const float unconstrained_y = proportional_y + feedforward_y;
+        float desired_x = unconstrained_x;
+        float desired_y = unconstrained_y;
+        clamp_vector(desired_x, desired_y, config.max_counts_per_frame);
+        // Åström/Rundqwist 的 tracking anti-windup：执行器实际可接受向量与
+        // 线性 PI 请求之差连续回写状态。这里唯一硬上限就是既有物理向量
+        // 上限，不再另建 pending、probe、相位或速度门。
+        const float anti_windup_alpha = 1.0f - std::exp(
+            -kTrackingAntiWindupGainPerSecond * controller_dt);
+        feedforward_x += (desired_x - unconstrained_x) * anti_windup_alpha;
+        feedforward_y += (desired_y - unconstrained_y) * anti_windup_alpha;
+        feedforward_x = std::clamp(
+            feedforward_x,
+            -kTrackingIntegralMaximumCounts,
+            kTrackingIntegralMaximumCounts);
+        feedforward_y = std::clamp(
+            feedforward_y,
+            -kTrackingIntegralMaximumCounts,
+            kTrackingIntegralMaximumCounts);
+
+        diagnostics.proportional_x_counts = proportional_x;
+        diagnostics.feedforward_x_counts = feedforward_x;
+        diagnostics.desired_before_reverse_x_counts = unconstrained_x;
+        diagnostics.desired_x_counts = desired_x;
+        const auto [delayed_command_x, delayed_command_y] =
+            delayed_issued_command(current_controller_at);
+        const auto pending =
+            pending_issued_command_inventory(current_controller_at);
+        diagnostics.delayed_command_x_counts = delayed_command_x;
+        diagnostics.pending_net_x_counts = pending.net_x;
+        diagnostics.pending_absolute_x_counts = pending.absolute_x;
+        diagnostics.pending_positive_x = pending.has_positive_x;
+        diagnostics.pending_negative_x = pending.has_negative_x;
+
+        // 分轴一阶滤波保留用户 smoothing。旧二维方向重排会把既有 Y 模长
+        // 瞬时搬到 X；这里每轴独立按自身零点连续通过，不再共享模长。
+        const auto filter_axis = [&](float desired, float error,
+                                     float& filtered) {
+            // 原始图像误差已经过零时，即使还落在软死区、比例项为零，也
+            // 必须清掉上一侧的滤波输出；否则它会继续把准星推过目标，直至
+            // 反侧走出死区才释放，形成可见的小幅往返。
+            if (filtered != 0.0f && filtered * error <= 0.0f) {
+                filtered = 0.0f;
+                return;
+            }
+            if (!controller_initialized) {
+                filtered = desired;
+                return;
+            }
+            const float candidate =
+                filtered + (desired - filtered) * config.smoothing;
+            filtered = candidate * desired < 0.0f ? 0.0f : candidate;
+        };
+        filter_axis(desired_x, error_x, filtered_x);
+        filter_axis(desired_y, error_y, filtered_y);
+        controller_initialized = true;
+        clamp_vector(filtered_x, filtered_y, config.max_counts_per_frame);
+        shaped_x = filtered_x;
+        shaped_y = filtered_y;
+        shaper_initialized = true;
+        residual_x = 0.0f;
+        residual_y = 0.0f;
+        diagnostics.filtered_x_counts = filtered_x;
+        diagnostics.shaped_x_counts = shaped_x;
+        diagnostics.residual_before_quantization_x_counts = 0.0f;
+
+        command.sequence = frame.sequence;
+        command.captured_at = frame.captured_at;
+        command.dx_counts = static_cast<int>(std::lround(shaped_x));
+        command.dy_counts = static_cast<int>(std::lround(shaped_y));
+        while (std::hypot(static_cast<float>(command.dx_counts),
+                          static_cast<float>(command.dy_counts)) >
+               config.max_counts_per_frame) {
+            if (std::abs(command.dx_counts) >=
+                std::abs(command.dy_counts) && command.dx_counts != 0) {
+                command.dx_counts += command.dx_counts > 0 ? -1 : 1;
+            } else if (command.dy_counts != 0) {
+                command.dy_counts += command.dy_counts > 0 ? -1 : 1;
+            } else {
+                break;
+            }
+        }
+        diagnostics.quantization_zero_x =
+            command.dx_counts == 0 && std::fabs(desired_x) > 0.001f;
+        diagnostics.deadzone_quiet =
+            error_magnitude <= config.deadzone_pixels &&
+            command.dx_counts == 0 && command.dy_counts == 0;
+        previous_command_x = static_cast<float>(command.dx_counts);
+        previous_command_y = static_cast<float>(command.dy_counts);
+        record_issued_command(
+            frame, current_controller_at,
+            previous_command_x, previous_command_y);
+        return command.dx_counts != 0 || command.dy_counts != 0;
+    }
+
     bool control(const AimFrame& frame, const Track& track,
                  float base_x, float base_y,
                  float tracking_x, float tracking_y,
@@ -3371,6 +3402,12 @@ struct Aim::Impl {
             track.horizontal_control_translation_evidence_x;
         diagnostics.modelled_response_x_counts =
             modelled_response_x_counts;
+        if (config.enable_delay_compensation &&
+            !config.enable_prediction) {
+            return control_tracking(
+                frame, track, base_x, base_y,
+                current_controller_at, diagnostics, command);
+        }
         // 轨迹估计继续严格使用 captured_at；控制滤波、泄漏、slew 与
         // 命令库存统一使用 process() 解析出的同一控制时刻。
         if (track.predicted && !config.enable_prediction) {
@@ -3499,11 +3536,8 @@ struct Aim::Impl {
             std::hypot(error_x, error_y) <= config.deadzone_pixels;
         const float gain = track.predicted ? config.predicted_gain : 1.0f;
         controller_at = current_controller_at;
-        // 比例闭环复用同一总投影偏移状态；prediction 关闭时锚点仍是原延迟点，
-        // 开启时则不会把延迟点与其反向抵消量拆成不同响应速度。
-        const bool tracking_horizontal_delay_model =
-            config.enable_delay_compensation &&
-            !config.enable_prediction;
+        // prediction 路径继续复用同一总投影偏移状态；prediction 关闭的
+        // tracking 已在上方进入独立图像特征 PI，不会执行本段观察器。
         const float proportional_x =
             error_x * config.counts_per_pixel_x * gain;
         const float proportional_y =
@@ -3603,62 +3637,13 @@ struct Aim::Impl {
                     kControllerFeedforwardMaximumCounts);
             }
         };
-        // tracking X 的 51 点趋势速度在两份真机 Run 中相对相机响应晚约
-        // 68 ms，不能再与 15 ms 的到期命令拼成同一时刻的世界速度。
-        // 三观测共同边中值来自最近 8～13 ms 原始几何，既剔除单帧轮廓
-        // 尖峰，又与 17～21 ms 命令反馈处在同一因果窗口。它只替换 X
-        // 观察器输入；prediction、Y、增益和物理上限保持原契约。
-        if (tracking_horizontal_delay_model) {
-            // 51 点水平趋势在两份真机 Run 中相对已执行命令约晚 68 ms；
-            // 必须把它与同相位的输入配对，不能再和 15 ms 到期命令相加。
-            // 当前 15 ms 配置下 4.5 个反馈窗为 67.5 ms，且全程使用真实
-            // 时间查询，不读取人物速度、帧号或游戏。
-            const auto [phase_command_x, unused_phase_command_y] =
-                issued_command_at_delay(
-                    current_controller_at,
-                    config.control_delay_ms / 1000.0f *
-                        kTrackingHorizontalVelocityObservationDelayWindows);
-            (void)unused_phase_command_y;
-            const float translation_consistency = std::clamp(
-                std::fabs(
-                    track.horizontal_control_translation_evidence_x),
-                0.0f, 1.0f);
-            const float consistency_squared =
-                translation_consistency * translation_consistency;
-            const float consistency_fourth =
-                consistency_squared * consistency_squared;
-            // 继续以连续权重而非阈值开关隔离形变。十六次权重只让接近
-            // 刚体共同平移的边缘进入世界运动观察器；其余运动仍完整进入
-            // Smith 比例误差，不会停发或切换控制分支。
-            const float observer_weight =
-                consistency_fourth * consistency_fourth *
-                consistency_fourth * consistency_fourth;
-            diagnostics.observer_phase_command_x_counts = phase_command_x;
-            diagnostics.observer_consistency_weight_x = observer_weight;
-            update_feedforward(
-                base_error_x,
-                track.vx *
-                    (1.0f / kTrackingHorizontalPlantResponse) /
-                    kControllerFeedforwardVelocityScale * observer_weight,
-                frame.source_pixels_per_roi_pixel_x,
-                config.counts_per_pixel_x,
-                phase_command_x * observer_weight,
-                kControllerFeedforwardObserverGainPerSecond,
-                feedforward_x, world_motion_measurement_x,
-                prediction_external_motion_evidence_x);
-            feedforward_x = std::clamp(
-                feedforward_x,
-                -kTrackingHorizontalObserverMaximumCounts,
-                kTrackingHorizontalObserverMaximumCounts);
-        } else {
-            update_feedforward(
-                base_error_x, track.vx,
-                frame.source_pixels_per_roi_pixel_x,
-                config.counts_per_pixel_x, delayed_command_x,
-                kControllerFeedforwardObserverGainPerSecond,
-                feedforward_x, world_motion_measurement_x,
-                prediction_external_motion_evidence_x);
-        }
+        update_feedforward(
+            base_error_x, track.vx,
+            frame.source_pixels_per_roi_pixel_x,
+            config.counts_per_pixel_x, delayed_command_x,
+            kControllerFeedforwardObserverGainPerSecond,
+            feedforward_x, world_motion_measurement_x,
+            prediction_external_motion_evidence_x);
         update_feedforward(
             base_error_y, track.vy, frame.source_pixels_per_roi_pixel_y,
             config.counts_per_pixel_y, delayed_command_y,
