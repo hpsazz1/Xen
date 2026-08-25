@@ -25,18 +25,10 @@ struct ReleaseRuntimeEntry {
     std::vector<BackendType> backends;
 };
 
-struct ReleaseFileEntry {
-    std::filesystem::path path;
-    std::string runtime_id;
-    std::uintmax_t size = 0;
-    std::string sha256;
-};
-
 struct ReleaseManifest {
     int schema = 0;
     std::string git_commit;
     std::vector<ReleaseRuntimeEntry> runtimes;
-    std::vector<ReleaseFileEntry> files;
 };
 
 const char* backend_config_name(BackendType backend) noexcept;

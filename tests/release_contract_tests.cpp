@@ -108,7 +108,7 @@ void test_manifest_validation() {
     expect(app::detail::load_release_manifest(
                root / "manifest.json", parsed, error) &&
                app::detail::validate_release_manifest(root, parsed, error),
-           "合法三运行时清单必须通过长度和 SHA-256 校验: " + error);
+           "合法三运行时路由必须通过启动校验: " + error);
     expect(app::detail::find_runtime_for_backend(
                parsed, BackendType::DIRECTML)->id == "directml",
            "后端必须映射到清单声明的隔离运行时");
@@ -116,22 +116,25 @@ void test_manifest_validation() {
     write_file(root / "cache/runtime/report.json", "runtime report");
     write_file(root / "cache/tensorrt/model.engine", "provider cache");
     write_file(root / "logs/xen.log", "runtime log");
+    write_file(root / "models/personal.onnx", "personal model");
+    write_file(root / "notes.txt", "personal release note");
     expect(app::detail::validate_release_manifest(root, parsed, error),
-           "cache/logs 中的运行时产物不得阻止发布包再次启动: " + error);
+           "个人新增文件不得触发 Launcher 全目录清单拒绝: " + error);
 
-    write_file(root / "cache-shadow/unknown.dll", "not mutable cache");
-    expect(!app::detail::validate_release_manifest(root, parsed, error),
-           "与 cache 同名前缀的目录不得绕过清单校验");
-    std::filesystem::remove(root / "cache-shadow/unknown.dll");
+    write_file(root / "runtimes/directml/Xen.exe", "locally rebuilt");
+    expect(app::detail::validate_release_manifest(root, parsed, error),
+           "本地重建 Worker 不得因旧 manifest 哈希而拒绝启动: " + error);
 
-    write_file(root / "models/unknown.onnx", "unlisted model");
+    std::filesystem::remove(root / "runtimes/directml/Xen.exe");
     expect(!app::detail::validate_release_manifest(root, parsed, error),
-           "模型等静态目录中的清单外文件必须失败关闭");
-    std::filesystem::remove(root / "models/unknown.onnx");
+           "所选发布运行时入口缺失时必须失败关闭");
+    write_file(root / "runtimes/directml/Xen.exe", "restored");
 
-    write_file(root / "runtimes/directml/Xen.exe", "tampered");
+    const auto original_executable = parsed.runtimes.front().executable;
+    parsed.runtimes.front().executable = "../outside.exe";
     expect(!app::detail::validate_release_manifest(root, parsed, error),
-           "运行时文件被篡改后必须失败关闭");
+           "发布运行时入口不得越过发布根目录");
+    parsed.runtimes.front().executable = original_executable;
 }
 
 } // namespace

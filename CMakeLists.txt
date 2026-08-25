@@ -527,8 +527,8 @@ FetchContent_Declare(simpleini
     SOURCE_SUBDIR  _xen_no_cmake)
 FetchContent_MakeAvailable(simpleini)
 
-# 发布入口使用严格 JSON schema 解析能力、文件长度与 SHA-256，避免用字符串扫描
-# 处理安全边界清单。该依赖仅进入 Launcher/发布契约测试，不进入推理热路径。
+# 发布入口使用严格 JSON schema 解析运行时与后端路由，避免用字符串扫描处理
+# 路径安全边界。完整文件哈希只由发布/传输脚本执行，不进入日常 Launcher。
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
@@ -706,8 +706,7 @@ target_include_directories(app_release PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(app_release
-    PUBLIC nlohmann_json::nlohmann_json
-    PRIVATE bcrypt)
+    PUBLIC nlohmann_json::nlohmann_json)
 
 add_library(runtime STATIC
     Xen/runtime/runtime.cpp

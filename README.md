@@ -54,8 +54,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 物理鼠标输出默认禁用。只有配置显式允许、Runtime 已启动、用户完成武装、按住瞄准输出键且
 急停未触发时，Pipeline 才会调用 Mouse。Capture、Detector 或 Aim 失败均不会沿用旧结果。
 开发目录直接启动时若程序同目录不存在 `config.ini`，应用会把当前代码默认参数完整写出；已有但
-无效的配置会保留原文件并报告错误。正式发布包仍由 Launcher 的 manifest 完整性门禁约束，缺失
-配置不会绕过清单自动恢复。生成配置中的 `allow_send_input` 固定为 `false`。
+无效的配置会保留原文件并报告错误。正式发布包由 Launcher 的 manifest 路由选择隔离 Worker；
+Launcher 只验证路由结构、路径安全、后端归属和 Worker 是否存在，不在每次启动时哈希整包或拒绝
+用户新增的模型/说明文件。生成配置中的 `allow_send_input` 固定为 `false`。
 运行管线启停、瞄准输出（按住）和物理输出急停都使用可保存的 Win32 虚拟键集合，支持键盘及
 鼠标左/右/中/侧键；同一功能绑定多个键时，按任意一个都生效，跨功能不得复用同一键。运行管线
 启停默认只绑定一次 F8，按当前 Runtime 状态执行“F8 启动 / F8 停止”；瞄准输出对绑定集合取
@@ -550,11 +551,12 @@ spdlog ring 锁或 Log 生命周期锁；每条紧急记录最多 512 字节，�
 ## 统一发布包
 
 正式发布根只暴露 `XenLauncher.exe`。NVIDIA Worker 承载 CPU、CUDA 和 TensorRT；DirectML 与
-OpenVINO Worker 各自保留独立 `onnxruntime.dll` 闭包。Launcher 启动前校验 schema 1
-`manifest.json` 中全部文件的长度和 SHA-256，并拒绝缺失、篡改、清单外文件、后端越权或同目录
-混放。模型、`config.ini`、日志和缓存固定属于发布根；界面只展示清单授权能力。选择跨运行时后端
-并保存时，当前 Worker 先停止 Runtime、解除武装并关闭报告，再由 Launcher 启动目标 Worker；
-新进程不会继承运行态武装。
+OpenVINO Worker 各自保留独立 `onnxruntime.dll` 闭包。Launcher 启动前解析 schema 1
+`manifest.json` 的运行时/后端路由，拒绝非法相对路径、重复或越权后端以及缺失 Worker；完整文件
+集合、长度与 SHA-256 由正式发布和跨机传输脚本在发布边界校验，不在每次本地启动时重复执行。
+用户可以在发布根增加自己的模型和说明文件。模型、`config.ini`、日志和缓存固定属于发布根；界面
+只展示清单授权能力。选择跨运行时后端并保存时，当前 Worker 先停止 Runtime、解除武装并关闭报告，
+再由 Launcher 启动目标 Worker；新进程不会继承运行态武装。
 
 统一包必须从同一干净 commit 的三套全新 Release 构建生成。脚本复核构建身份、部署报告、Provider
 闭包、源/目标 SHA-256 和许可证输入，在唯一 incoming 目录完成后原子改名；禁止从旧
