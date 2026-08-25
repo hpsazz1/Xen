@@ -5268,6 +5268,7 @@ void test_tracking_reverse_quiet_inventory_probe_survives_edge_noise() {
         int identity_changes = 0;
         int legacy_maximum_dwell_frames = 0;
         int opposing_command_x = 0;
+        float first_negative_elapsed_ms = -1.0f;
         bool translation_ready = false;
         bool position_ready = false;
         bool probe_limited = false;
@@ -5376,6 +5377,8 @@ void test_tracking_reverse_quiet_inventory_probe_survives_edge_noise() {
             if (trace.first_negative_offset < 0 &&
                 result.command.dx_counts < 0) {
                 trace.first_negative_offset = offset;
+                trace.first_negative_elapsed_ms =
+                    static_cast<float>(offset + 1) * 4.167f;
                 trace.translation_ready =
                     result.control.reverse_translation_ready_x;
                 trace.position_ready =
@@ -5403,8 +5406,10 @@ void test_tracking_reverse_quiet_inventory_probe_survives_edge_noise() {
         return trace.identity_changes == 0 &&
             trace.pending_frames > 0 &&
             trace.legacy_maximum_dwell_frames <= 3 &&
-            trace.first_negative_offset >= 3 &&
-            trace.first_negative_offset < 8 &&
+            trace.first_negative_offset >= 5 &&
+            trace.first_negative_offset < 9 &&
+            trace.first_negative_elapsed_ms >= 22.5f &&
+            trace.first_negative_elapsed_ms < 30.0f &&
             !trace.translation_ready &&
             !trace.position_ready &&
             trace.probe_limited &&
@@ -5417,13 +5422,15 @@ void test_tracking_reverse_quiet_inventory_probe_survives_edge_noise() {
     expect(valid(normal) && valid(doubled) &&
                std::abs(normal.first_negative_offset -
                         doubled.first_negative_offset) <= 1,
-           "旧库存安静后，三观测中值支持的强共同边应立即产生有界探针，"
-           "无需再等待完整 15 ms 驻留；启动后的对称强反证必须立即"
-           "撤销而不能维持整窗短脉冲，且 320/640 ROI 同构；"
-           "首负/旧逐帧最大驻留/反证命令/来源=" +
-               std::to_string(normal.first_negative_offset) + "/" +
-               std::to_string(doubled.first_negative_offset) + "/" +
-               std::to_string(normal.legacy_maximum_dwell_frames) + "/" +
+            "旧库存安静后，三观测中值支持的强共同边只需等待 1.5 个现有"
+            "反馈窗的旧命令尾响应即可产生有界探针，无需等待完整驻留；"
+            "启动后的对称强反证必须立即"
+            "撤销而不能维持整窗短脉冲，且 320/640 ROI 同构；"
+            "首负/首负毫秒/旧逐帧最大驻留/反证命令/来源=" +
+                std::to_string(normal.first_negative_offset) + "/" +
+                std::to_string(doubled.first_negative_offset) + "/" +
+                std::to_string(normal.first_negative_elapsed_ms) + "/" +
+                std::to_string(normal.legacy_maximum_dwell_frames) + "/" +
                std::to_string(normal.opposing_command_x) + "/" +
                std::to_string(normal.translation_ready) + "/" +
                std::to_string(normal.position_ready));

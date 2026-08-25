@@ -368,6 +368,12 @@ constexpr float kTrackingHorizontalReverseProbeCommitWindows = 2.0f;
 // 也不随游戏或分辨率写分支。
 constexpr float kTrackingHorizontalReverseProbeMinimumRoiMotionRatio =
     0.0005f;
+// 最新真实闭环中，已执行 X 命令到基础点反向位移的相关峰为第 5 个控制帧，
+// 约 21 ms；配置反馈窗 15 ms 结束后的 20.25～22.32 ms 又集中出现了
+// 13 个随后被强反证撤销的库存静默探针。只把“无需驻留即可提前发 1 count”
+// 的辨识资格延后到 1.5 个现有反馈窗；CUSUM、共同平移驻留和位置活性仍按
+// 原反馈窗并行累计，因此不把尾响应保护扩成新的全局控制延迟。
+constexpr float kTrackingHorizontalReverseQuietProbeTailWindows = 1.5f;
 // 连续闭合响应必须跨过一个半反馈窗才卸载 1 count；单个反馈窗只冻结
 // 增长，避免在真实方向刚建立或快速反转前过早削弱追赶。
 constexpr float kTrackingHorizontalClosingResponseTaperWindowsPerCount = 1.5f;
@@ -2547,6 +2553,28 @@ struct Aim::Impl {
         return inventory;
     }
 
+    bool issued_horizontal_direction_within(
+            std::chrono::steady_clock::time_point query_at,
+            float direction, float maximum_age_seconds) const noexcept {
+        if (direction == 0.0f || maximum_age_seconds <= 0.0f) return false;
+        for (std::size_t offset = 0; offset < issued_command_count; ++offset) {
+            const std::size_t index =
+                (issued_command_next + issued_commands.size() - 1U - offset) %
+                issued_commands.size();
+            const IssuedCommand& candidate = issued_commands[index];
+            if (candidate.issued_at > query_at) continue;
+            const float age_seconds = static_cast<float>(
+                std::chrono::duration<double>(query_at - candidate.issued_at)
+                    .count());
+            if (age_seconds >= maximum_age_seconds) continue;
+            // Runtime 已把发送成功精确回写为实际整数、失败/安全门回写为零。
+            // 单测未模拟 Mouse 回调时保守保留原请求，等价于“尚不能证明未
+            // 执行”；这里只判断方向和时间，不估算设备响应幅值。
+            if (candidate.dx_counts * direction > 0.0f) return true;
+        }
+        return false;
+    }
+
     std::pair<float, float> stable_prediction_world_velocity(
             const AimFrame& frame, const Track& track) noexcept {
         if (!frame.lock_active || controller_track_id != track.id) {
@@ -4023,9 +4051,19 @@ struct Aim::Impl {
                                 1.0f,
                                 static_cast<float>(frame.roi_width)) >=
                             kTrackingHorizontalReverseProbeMinimumRoiMotionRatio;
+                    const float quiet_probe_tail_seconds =
+                        config.control_delay_ms / 1000.0f *
+                        kTrackingHorizontalReverseQuietProbeTailWindows;
+                    const bool previous_direction_response_tail =
+                        strong_translation_probe_evidence &&
+                        issued_horizontal_direction_within(
+                            current_controller_at,
+                            tracking_horizontal_output_direction,
+                            quiet_probe_tail_seconds);
                     const bool quiet_inventory_translation_probe_ready =
                         !previous_direction_inventory_pending &&
                         !previous_direction_command_effective &&
+                        !previous_direction_response_tail &&
                         strong_translation_probe_evidence;
                     diagnostics.reverse_required_evidence_ratio_seconds_x =
                         required_evidence;
