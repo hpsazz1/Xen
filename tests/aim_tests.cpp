@@ -1190,6 +1190,112 @@ void test_horizontal_unsupported_prediction_does_not_stick_at_range_boundary() {
                std::to_string(maximum_reversal_boundary_run));
 }
 
+void test_horizontal_confirmed_release_does_not_snap_hidden_inventory() {
+    // 实机 20260825-140403 的 1458～1473、4559～4575 帧均出现公开
+    // 基础点在配置内窗边界驻留后突然穿回，单帧边界退出 P95 已增至
+    // 18.55% 框宽。这里保留相同的“持续趋势→反向→小幅二次反向”和
+    // 宽高姿态形变，只按框宽归一化验收，不引入任何速度分档。
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.body_aim_range_percent = 50.0f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float true_x = 80.0f;
+    float previous_relative_ratio = 0.0f;
+    bool have_previous_ratio = false;
+    float maximum_boundary_exit_step_ratio = 0.0f;
+    float maximum_boundary_exit_two_frame_ratio = 0.0f;
+    std::array<float, 3> recent_relative_ratios{};
+    std::size_t recent_ratio_count = 0;
+    int boundary_side_crossings = 0;
+    float previous_boundary_side = 0.0f;
+    std::string release_trace;
+
+    for (int index = 0; index < 150; ++index) {
+        if (index > 0 && index < 100) {
+            true_x += 0.80f;
+        } else if (index >= 100 && index < 120) {
+            true_x -= 5.50f;
+        } else if (index >= 120) {
+            true_x += 0.55f;
+        }
+        const int phase_index = index % 34;
+        const float pose_phase = phase_index <= 17
+            ? -1.0f + static_cast<float>(phase_index) * (2.0f / 17.0f)
+            : 1.0f - static_cast<float>(phase_index - 17) *
+                (2.0f / 17.0f);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(index) * 4167));
+        frame.detections = {body_box(
+            true_x + pose_phase * 0.21f, 175.0f,
+            17.0f + pose_phase * 0.6f,
+            70.0f + pose_phase * 1.8f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "实机同构的 X 二次换向回归必须逐帧保留目标");
+        if (!result.has_target || index < 96) continue;
+
+        const float width = result.target.x2 - result.target.x1;
+        const float center_x = (result.target.x1 + result.target.x2) * 0.5f;
+        const float relative_ratio = width > 0.0f
+            ? (result.target.base_aim_x - center_x) / width : 0.0f;
+        if (have_previous_ratio &&
+            std::fabs(previous_relative_ratio) >= 0.2499f &&
+            std::fabs(relative_ratio) < 0.2499f) {
+            maximum_boundary_exit_step_ratio = std::max(
+                maximum_boundary_exit_step_ratio,
+                std::fabs(relative_ratio - previous_relative_ratio));
+        }
+        recent_relative_ratios[recent_ratio_count % 3] = relative_ratio;
+        ++recent_ratio_count;
+        if (recent_ratio_count >= 3) {
+            const float two_frames_ago =
+                recent_relative_ratios[(recent_ratio_count - 3) % 3];
+            if (std::fabs(two_frames_ago) >= 0.2499f &&
+                std::fabs(relative_ratio) < 0.2499f) {
+                maximum_boundary_exit_two_frame_ratio = std::max(
+                    maximum_boundary_exit_two_frame_ratio,
+                    std::fabs(relative_ratio - two_frames_ago));
+            }
+        }
+        const float boundary_side = relative_ratio >= 0.2499f
+            ? 1.0f : relative_ratio <= -0.2499f ? -1.0f : 0.0f;
+        if (boundary_side != 0.0f) {
+            if (previous_boundary_side != 0.0f &&
+                boundary_side != previous_boundary_side) {
+                ++boundary_side_crossings;
+            }
+            previous_boundary_side = boundary_side;
+        }
+        if (index >= 98 && index <= 136) {
+            release_trace += std::to_string(index) + ":" +
+                std::to_string(relative_ratio) + ",";
+        }
+        previous_relative_ratio = relative_ratio;
+        have_previous_ratio = true;
+    }
+
+    expect(maximum_boundary_exit_step_ratio <= 0.05f &&
+               maximum_boundary_exit_two_frame_ratio <= 0.12f &&
+               boundary_side_crossings == 0,
+           "已有共同边证据触发 X 库存释放时，不得让隐藏状态从一个"
+           "公开内窗边界突释，单帧/两帧边界退出量/跨边次数=" +
+               std::to_string(maximum_boundary_exit_step_ratio) + "/" +
+               std::to_string(maximum_boundary_exit_two_frame_ratio) + "/" +
+               std::to_string(boundary_side_crossings) + "，轨迹=" +
+               release_trace);
+}
+
 void test_horizontal_persistent_innovation_keeps_velocity_and_delay_continuous() {
     struct Trace {
         std::vector<float> normalized_velocity;
@@ -10180,6 +10286,7 @@ int main() {
     test_horizontal_pose_trend_uses_capture_time_across_head_and_delivery_gaps();
     test_horizontal_pose_trend_reversal_is_bounded();
     test_horizontal_unsupported_prediction_does_not_stick_at_range_boundary();
+    test_horizontal_confirmed_release_does_not_snap_hidden_inventory();
     test_horizontal_persistent_innovation_keeps_velocity_and_delay_continuous();
     test_horizontal_maneuver_accepts_coherent_second_reversal();
     test_horizontal_maneuver_rejects_short_coherent_center_outliers();

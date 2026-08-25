@@ -1979,6 +1979,22 @@ struct Aim::Impl {
             track.aim_y += (observed_aim_y - track.aim_y) *
                 vertical_shape_alpha;
         }
+        // 公开基础点始终被限制在用户配置的水平内窗。若内部状态继续越过
+        // 同一边界，当前帧会被公开 clamp 遮住，但这段不可见库存会在以后
+        // 穿回内窗时突然显现。这里做与公开边界完全同构的 X 抗饱和投影：
+        // 不改变当前公开输出，只禁止累积永远不能直接输出的状态；Y、框、
+        // 速度、趋势历史及配置范围均保持不变。
+        const float horizontal_width = track.x2 - track.x1;
+        const float horizontal_half_range =
+            config.body_aim_range_percent / 200.0f;
+        const float horizontal_range_min_x = track.x1 +
+            horizontal_width * (0.5f - horizontal_half_range);
+        const float horizontal_range_max_x = track.x1 +
+            horizontal_width * (0.5f + horizontal_half_range);
+        track.aim_x = std::clamp(
+            track.aim_x,
+            horizontal_range_min_x,
+            horizontal_range_max_x);
         track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
         const float vertical_ratio_minimum = std::clamp(
             track.aim_ratio_y -
