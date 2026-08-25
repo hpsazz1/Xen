@@ -123,6 +123,9 @@ struct Track {
     HorizontalTrendHistory horizontal_trend{};
     HorizontalTrendChangePoint horizontal_trend_change{};
     HorizontalRawMotionHistory horizontal_raw_motion{};
+    // predict_tracks() 实际经过二维限幅后写入基础点的 X 位移。反向快通道
+    // 需要用它计算旧预测与新观测的精确差额，不能用 vx*dt 近似限幅结果。
+    float predicted_motion_x = 0.0f;
 };
 
 struct IssuedCommand {
@@ -572,6 +575,20 @@ float median_horizontal_raw_velocity_x(const Track& track) noexcept {
         std::max({first, second, third});
 }
 
+bool latest_two_horizontal_raw_motion_same_direction(
+    const Track& track, float direction) noexcept {
+    const HorizontalRawMotionHistory& history = track.horizontal_raw_motion;
+    if (history.count < 2 || direction == 0.0f) return false;
+    const std::size_t latest =
+        (history.next + kTrackHorizontalRawMotionSampleCount - 1) %
+        kTrackHorizontalRawMotionSampleCount;
+    const std::size_t previous =
+        (history.next + kTrackHorizontalRawMotionSampleCount - 2) %
+        kTrackHorizontalRawMotionSampleCount;
+    return history.velocity_x[latest] * direction > 0.0f &&
+        history.velocity_x[previous] * direction > 0.0f;
+}
+
 float normalized_position(float value, float minimum,
                           float maximum) noexcept {
     const float size = maximum - minimum;
@@ -944,6 +961,7 @@ struct Aim::Impl {
             track.y2 += dy;
             track.aim_x += dx;
             track.aim_y += dy;
+            track.predicted_motion_x = dx;
             track.prediction_dt = dt;
             track.state_at = now;
             track.predicted = true;
@@ -1003,6 +1021,7 @@ struct Aim::Impl {
         bool robust_horizontal_velocity_valid = false;
         bool robust_horizontal_trend_center_valid = false;
         bool horizontal_raw_motion_outlier = false;
+        float horizontal_reversal_prediction_correction_x = 0.0f;
         float horizontal_box_motion_residual_x = center_motion_residual_x;
         float velocity_beta_x = beta;
         float velocity_beta_y = beta;
@@ -1574,6 +1593,29 @@ struct Aim::Impl {
                     }
                 }
             }
+            const bool horizontal_reversal_candidate_or_maneuver =
+                horizontal_maneuver_active ||
+                (!isolate_horizontal_center_observation &&
+                 track.horizontal_trend_change.count > 0 &&
+                 latest_two_horizontal_raw_motion_same_direction(
+                     track, robust_horizontal_velocity_x));
+            if (horizontal_reversal_candidate_or_maneuver &&
+                robust_horizontal_velocity_valid &&
+                robust_horizontal_velocity_x * track.vx < 0.0f &&
+                std::fabs(
+                    track.horizontal_control_translation_evidence_x) >=
+                    kHorizontalTranslationEvidenceConsistencyMinimum) {
+                // 三点共同边已经确认与旧 vx 反向，且 OLS 位置创新已进入
+                // 独立候选或正式机动段。候选期不提前接纳中心；提交后继续
+                // 同一差额直到 vx 过零，避免候选→机动交接反向折返一帧。
+                const float consistency_squared =
+                    robust_horizontal_translation_consistency *
+                    robust_horizontal_translation_consistency;
+                horizontal_reversal_prediction_correction_x =
+                    (robust_horizontal_velocity_x * track.prediction_dt -
+                     track.predicted_motion_x) *
+                    consistency_squared;
+            }
             if (horizontal_maneuver_active &&
                 robust_horizontal_velocity_valid) {
                 // predict_tracks() 已先按旧 vx 推进控制点。三帧中值共同边
@@ -1783,6 +1825,7 @@ struct Aim::Impl {
             // 使用与关联框相同的增益；X 宽高共同形变段则使用时间趋势端点。
             // 其余框内形变或缓慢尺度变化使用独立低增益。
             track.aim_x += stable_motion_residual_x * alpha;
+            track.aim_x += horizontal_reversal_prediction_correction_x;
             track.aim_y += stable_motion_residual_y * alpha;
             const float shape_alpha = high
                 ? kTrackAimShapeAlphaHigh : kTrackAimShapeAlphaLow;

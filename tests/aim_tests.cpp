@@ -953,9 +953,10 @@ void test_horizontal_pose_trend_reversal_is_bounded() {
             static_cast<float>(wrong_direction_frames) * speed_per_frame;
         expect(maximum_reversal_error <= 16.0f && recovered_p95 <= 2.0f &&
                    direction_changes <= 1 &&
-                   reversal_boundary_frames <= 20 &&
+                   reversal_boundary_frames == 0 &&
                    wrong_direction_distance <= 12.0f,
-               "固定窗跨运动尺度换向时允许有限几何滞后但不得往返震荡，"
+               "固定窗跨运动尺度换向时允许有限几何滞后但基础点不得贴到"
+               "水平安全内窗边界或往返震荡，"
                "每帧位移/最大换向误差/恢复P95/方向变化/贴边帧/"
                "错向距离=" +
                    std::to_string(speed_per_frame) + "/" +
