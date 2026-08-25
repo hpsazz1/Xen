@@ -322,9 +322,6 @@ constexpr int kPredictionEstablishmentLowMotionGraceFrames = 1;
 // 正确方向的提前量也不能在观察器刚建立时整段跳入。按真实 dt 在约 33 ms
 // 内线性渐入，避免 prediction 状态变化绕过物理命令阶跃门禁。
 constexpr float kPredictionLeadRampPerSecond = 30.0f;
-// 量化残余需要比“保持积分是否泄漏”更低的运动门槛；否则目标已在移动但
-// 轨迹估计尚未达到 20 px/s 时，亚整数命令仍会被 floor 截断。
-constexpr float kControllerQuantizationMotionThresholdPixelsPerSecond = 10.0f;
 // 命令整形使用时间速率而不是固定帧步：240 Hz 下每帧最多变化 1 count，
 // 120/60 Hz 下分别为 2/4 counts，保持不同采集刷新率下的加减速时间一致。
 constexpr float kControllerMaximumSlewCountsPerSecond = 240.0f;
@@ -3939,12 +3936,14 @@ struct Aim::Impl {
             const bool observed_world_motion =
                 std::fabs(feedforward) > 0.01f &&
                 desired * feedforward > 0.0f;
-            const bool direct_relative_motion =
+            // 基础追踪只消费已滤波运动方向与当前需求的一致性，不再按
+            // ROI 像素/秒划分快慢档。幅度由连续 desired 和残余决定；
+            // 因而不同游戏、视场或目标尺度不会在某个速度值处切换量化策略。
+            const bool direct_motion_direction_supported =
                 !config.enable_delay_compensation &&
-                std::fabs(relative_velocity) >
-                    kControllerQuantizationMotionThresholdPixelsPerSecond &&
                 desired * relative_velocity > 0.0f;
-            if ((observed_world_motion || direct_relative_motion) &&
+            if ((observed_world_motion ||
+                 direct_motion_direction_supported) &&
                 magnitude > 0.0f) {
                 limit = static_cast<int>(std::ceil(magnitude));
             }

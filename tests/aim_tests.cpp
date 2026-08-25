@@ -4567,6 +4567,60 @@ void test_tracking_pi_is_separate_from_prediction_projection() {
                std::to_string(prediction_y_response));
 }
 
+void test_base_tracking_quantization_has_no_speed_threshold() {
+    struct Sample {
+        float velocity_x = 0.0f;
+        float desired_x = 0.0f;
+        int command_x = 0;
+    };
+    const auto run_case = [](float motion_per_frame) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 1.0f;
+        config.counts_per_pixel_x = 0.40f;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 12.0f;
+        config.acquisition_range_percent = 150.0f;
+        config.enable_delay_compensation = false;
+        config.enable_prediction = false;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        AimResult result;
+        for (int index = 0; index < 2; ++index) {
+            const float target_x = 160.0f + motion_per_frame * index;
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) * 4167));
+            frame.control_center_x = target_x - 1.0f;
+            frame.control_center_y = 160.0f;
+            frame.lock_active = true;
+            frame.detections = {body(target_x, 172.0f)};
+            result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "基础追踪速度阈值删除测试必须逐帧保留确认目标");
+        }
+        return Sample{
+            result.target.velocity_x,
+            result.control.desired_x_counts,
+            result.has_command ? result.command.dx_counts : 0};
+    };
+    const Sample below_old_threshold = run_case(0.40f);
+    const Sample above_old_threshold = run_case(0.50f);
+    expect(below_old_threshold.velocity_x < 10.0f &&
+               above_old_threshold.velocity_x > 10.0f &&
+               below_old_threshold.desired_x > 0.0f &&
+               below_old_threshold.desired_x < 1.0f &&
+               above_old_threshold.desired_x > 0.0f &&
+               above_old_threshold.desired_x < 1.0f,
+           "删除测试必须让同一亚整数需求位于旧 10 px/s 判据两侧");
+    expect(below_old_threshold.command_x == 1 &&
+               above_old_threshold.command_x == 1,
+           "固定 320 ROI 的同向几何运动不得因跨过旧速度阈值改变亚整数分摊");
+}
+
 void test_tracking_public_point_is_independent_of_command_age() {
     const auto project_after = [](int age_microseconds) {
         AimConfig config;
@@ -7367,6 +7421,7 @@ int main() {
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_pi_is_separate_from_prediction_projection();
+    test_base_tracking_quantization_has_no_speed_threshold();
     test_tracking_public_point_is_independent_of_command_age();
     test_pending_command_age_uses_control_execution_time();
     test_tracking_pi_filters_axes_independently();
