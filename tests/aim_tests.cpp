@@ -6143,6 +6143,114 @@ void test_vertical_pullback_hold_releases_while_horizontal_prediction_continues(
                std::to_string(late_vertical_correction_frames));
 }
 
+void test_prediction_pullback_timeout_has_no_absolute_velocity_mode() {
+    constexpr int kActuationDelayFrames = 4;
+    constexpr int kVerticalMovingFrames = 520;
+    constexpr int kFrameCount = 1400;
+    struct Trace {
+        int moving_vertical_lead_frames = 0;
+        int late_vertical_stop_frames = 0;
+        int late_vertical_correction_frames = 0;
+    };
+
+    const auto run = [&]() {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 0.0f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.40f;
+        // 该标定把公开几何轨迹换算到旧 60 counts/s 资格的高侧；
+        // 测试仍只观察 Aim::process() 返回的目标和命令。
+        config.counts_per_pixel_y = 4.00f;
+        config.max_counts_per_frame = 12.0f;
+        config.acquisition_range_percent = 100.0f;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 16.0f;
+        config.max_delay_compensation_percent = 15.0f;
+        config.enable_prediction = true;
+        Aim aim(config);
+
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        std::array<int, kActuationDelayFrames> delayed_commands_x{};
+        std::array<int, kActuationDelayFrames> delayed_commands_y{};
+        float world_target_x = -12.0f;
+        float world_target_y = 24.0f;
+        float camera_x = 0.0f;
+        float camera_y = 0.0f;
+        Trace trace;
+
+        for (int index = 0; index < kFrameCount; ++index) {
+            const int delay_slot = index % kActuationDelayFrames;
+            camera_x += delayed_commands_x[delay_slot] /
+                config.counts_per_pixel_x * 0.18f;
+            camera_y += delayed_commands_y[delay_slot] /
+                config.counts_per_pixel_y * 0.18f;
+            delayed_commands_x[delay_slot] = 0;
+            delayed_commands_y[delay_slot] = 0;
+            world_target_x -= 0.65f;
+            if (index < kVerticalMovingFrames) {
+                world_target_y -= 1.0f / 12.0f;
+            } else {
+                world_target_y += 0.25f;
+            }
+
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(
+                        index * 1000000.0f / 240.0f)));
+            frame.control_at =
+                frame.captured_at + std::chrono::milliseconds(1);
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                160.0f + world_target_x - camera_x,
+                172.0f + world_target_y - camera_y,
+                40.0f, 80.0f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "Y pullback 无速度模式回归必须逐帧保留合法目标");
+            if (!result.has_target) continue;
+
+            const int command_x = result.has_command
+                ? result.command.dx_counts : 0;
+            const int command_y = result.has_command
+                ? result.command.dy_counts : 0;
+            if (result.has_command) {
+                delayed_commands_x[delay_slot] = command_x;
+                delayed_commands_y[delay_slot] = command_y;
+            }
+            if (index >= 300 && index < kVerticalMovingFrames &&
+                result.target.lead_active && result.target.lead_y < -0.25f) {
+                ++trace.moving_vertical_lead_frames;
+            }
+            if (index >= kVerticalMovingFrames + 180) {
+                const float vertical_error =
+                    std::fabs(result.target.base_aim_y -
+                              frame.control_center_y);
+                if (vertical_error > 3.0f && command_y == 0) {
+                    ++trace.late_vertical_stop_frames;
+                }
+                if (vertical_error > 3.0f && command_y > 0) {
+                    ++trace.late_vertical_correction_frames;
+                }
+            }
+        }
+        return trace;
+    };
+
+    const Trace trace = run();
+    expect(trace.moving_vertical_lead_frames >= 60,
+           "固定 320 ROI/真实时序轨迹必须先建立 Y prediction，活动帧=" +
+               std::to_string(trace.moving_vertical_lead_frames));
+    expect(trace.late_vertical_stop_frames == 0 &&
+               trace.late_vertical_correction_frames > 0,
+           "同一 Y hold 超过 300 ms 后不得再用固定 counts/s 阻止释放，停发/纠正帧=" +
+               std::to_string(trace.late_vertical_stop_frames) + "/" +
+               std::to_string(trace.late_vertical_correction_frames));
+}
+
 void test_horizontal_prediction_rejects_delayed_vertical_camera_feedback() {
     constexpr int kActuationDelayFrames = 10;
     constexpr int kFrameCount = 1600;
@@ -7912,6 +8020,7 @@ int main() {
     test_prediction_closed_loop_keeps_visible_left_lead_without_pullback();
     test_horizontal_prediction_does_not_block_vertical_height_correction();
     test_vertical_pullback_hold_releases_while_horizontal_prediction_continues();
+    test_prediction_pullback_timeout_has_no_absolute_velocity_mode();
     test_horizontal_prediction_rejects_delayed_vertical_camera_feedback();
     test_long_delay_prediction_distributes_horizontal_hold_command();
     test_real_cadence_prediction_closes_public_point_error();

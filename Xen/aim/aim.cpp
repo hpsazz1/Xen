@@ -291,8 +291,8 @@ constexpr float kPredictionWorldMotionReleasePerSecond = 120.0f;
 // 阻止预测点一帧从半程跳到几何上限。1.5 diagonals/s 在 240 Hz、约 100 px
 // 人物框下每帧最多约 0.63 px，不改变稳定提前距离。
 constexpr float kPredictionOffsetMaximumSlewDiagonalsPerSecond = 1.5f;
-// prediction 退出后反拉保持只用于跨越短暂的相机反馈低谷；低运动持续超过
-// 300 ms 仍没有真实反向时必须释放，才能让基础点把准星带回配置高度。
+// prediction 退出后反拉保持只用于跨越短暂的相机反馈低谷；Y 轴单次保持
+// 持续超过 300 ms 时必须释放，才能让基础点把准星带回配置高度。
 constexpr float kPredictionPullbackHoldTimeoutSeconds = 0.30f;
 // 实机人物姿态会造成 3～10 帧的同向低运动窗口；五帧确认仍会把窗口
 // 中间误判成停止并清零 prediction。延长到 12 帧只改变停止确认，真实
@@ -301,10 +301,6 @@ constexpr int kPredictionStaticReleaseConfirmFrames = 12;
 // 世界运动只在独立慢速状态形成至少四分之一 count 的稳定维持量后
 // 才可用于 prediction；更小残余属于静止收敛和量化噪声，禁止强行前探。
 constexpr float kPredictionWorldMotionMinimumCounts = 0.25f;
-// 屏幕相对速度包含 KMBOX 命令造成的相机反馈，只能用于维持已经成立的
-// 世界运动，不能从静止状态单独启动 prediction。60 counts/s 等价于
-// 240 Hz 下每帧 0.25 count，与真实 Run 使用的世界运动门槛保持一致。
-constexpr float kPredictionEstablishedWorldVelocityCountsPerSecond = 60.0f;
 // 最新 MoveLeft 真机 Run 中，首次水平 prediction 在锁定后通常仍等待完整
 // 250 ms 运动确认，一个测量断续段甚至延长到约 600 ms。120 ms 反事实会
 // 让既有闭环在停止边界新增经零反转，最终 X 轴取最小通过值 150 ms：它仍
@@ -2838,8 +2834,7 @@ struct Aim::Impl {
             const auto update_pullback_hold = [&](
                     float world_velocity, float base_error,
                     float hold_direction, bool& hold,
-                    float& hold_time, float release_velocity,
-                    bool allow_timeout) {
+                    float& hold_time, bool allow_timeout) {
                 if (!hold) {
                     hold_time = 0.0f;
                     return;
@@ -2852,11 +2847,10 @@ struct Aim::Impl {
                     hold_time = 0.0f;
                     return;
                 }
-                // 低运动长期持续表示 prediction 已经失效，而不是一帧相机
-                // 反馈低谷。超时后释放逐轴停发，避免 Y 轴永久停在错误高度。
+                // Y 轴保持只覆盖有界相机反馈低谷；同一状态达到真实时间上限
+                // 后释放逐轴停发，避免固定速度分类让正确高度纠偏永久饿死。
                 if (allow_timeout &&
-                    hold_time >= kPredictionPullbackHoldTimeoutSeconds &&
-                    std::fabs(world_velocity) <= release_velocity) {
+                    hold_time >= kPredictionPullbackHoldTimeoutSeconds) {
                     hold = false;
                     hold_time = 0.0f;
                 }
@@ -2866,18 +2860,12 @@ struct Aim::Impl {
                 prediction_pullback_direction_x,
                 prediction_pullback_hold_x,
                 prediction_pullback_hold_time_x,
-                kPredictionEstablishedWorldVelocityCountsPerSecond /
-                    (config.counts_per_pixel_x *
-                     frame.source_pixels_per_roi_pixel_x),
                 false);
             update_pullback_hold(
                 world_velocity_y, base_y - frame.control_center_y,
                 prediction_pullback_direction_y,
                 prediction_pullback_hold_y,
                 prediction_pullback_hold_time_y,
-                kPredictionEstablishedWorldVelocityCountsPerSecond /
-                    (config.counts_per_pixel_y *
-                     frame.source_pixels_per_roi_pixel_y),
                 true);
             // 二维 prediction 可能仍因垂直姿态保持 active，但水平世界状态
             // 已先衰减到门槛以下。每轴必须在自己的前探消失时保存方向，
