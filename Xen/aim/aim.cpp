@@ -152,6 +152,7 @@ struct PendingIssuedCommandInventory {
     float net_y = 0.0f;
     float absolute_x = 0.0f;
     float absolute_y = 0.0f;
+    float backend_completed_weighted_x = 0.0f;
     bool has_positive_x = false;
     bool has_negative_x = false;
 };
@@ -2472,6 +2473,7 @@ struct Aim::Impl {
             std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<float>(
                     config.control_delay_ms / 1000.0f));
+        const float delay_seconds = config.control_delay_ms / 1000.0f;
         PendingIssuedCommandInventory inventory;
         for (std::size_t offset = 0; offset < issued_command_count; ++offset) {
             const std::size_t index =
@@ -2482,6 +2484,16 @@ struct Aim::Impl {
                 ? candidate.backend_completed_at : candidate.issued_at;
             if (command_effective_at <= effective_at) break;
             if (command_effective_at <= query_at) {
+                if (candidate.backend_completed) {
+                    const float age_seconds = static_cast<float>(
+                        std::chrono::duration<double>(
+                            query_at - candidate.backend_completed_at)
+                            .count());
+                    const float remaining_age_weight = std::clamp(
+                        1.0f - age_seconds / delay_seconds, 0.0f, 1.0f);
+                    inventory.backend_completed_weighted_x +=
+                        candidate.dx_counts * remaining_age_weight;
+                }
                 inventory.net_x += candidate.dx_counts;
                 inventory.net_y += candidate.dy_counts;
                 inventory.absolute_x += std::fabs(candidate.dx_counts);
@@ -3321,14 +3333,40 @@ struct Aim::Impl {
             -kTrackingIntegralMaximumCounts,
             kTrackingIntegralMaximumCounts);
 
-        diagnostics.proportional_x_counts = proportional_x;
-        diagnostics.feedforward_x_counts = feedforward_x;
-        diagnostics.desired_before_reverse_x_counts = unconstrained_x;
-        diagnostics.desired_x_counts = desired_x;
         const auto [delayed_command_x, delayed_command_y] =
             delayed_issued_command(current_controller_at);
         const auto pending =
             pending_issued_command_inventory(current_controller_at);
+        // backend completion 只证明整数命令已完成后端接口，不代表已经观察到
+        // 物理效果。这里不把 counts 投影成图像位移，只用完成时间在既有
+        // 15 ms 控制窗中的剩余比例形成连续有符号库存；旧向库存越多，当前
+        // 新向请求越平滑地收缩。它没有候选、驻留或锁存状态，也不会反向
+        // 生成旧方向命令，因此不是 pending/reverse 门或 plant observer。
+        if (desired_x != 0.0f) {
+            const float request_direction = desired_x > 0.0f ? 1.0f : -1.0f;
+            const float opposed_completed_x = std::max(
+                0.0f,
+                -request_direction * pending.backend_completed_weighted_x);
+            if (opposed_completed_x > 0.0f) {
+                const float requested_magnitude = std::fabs(desired_x);
+                const float history_adjusted_x = desired_x *
+                    requested_magnitude /
+                    (requested_magnitude + opposed_completed_x);
+                // 复用现有 30/s tracking time constant，把历史整形造成的
+                // 请求差连续回写 X 积分；上方饱和 back-calculation 保持原样。
+                feedforward_x +=
+                    (history_adjusted_x - desired_x) * anti_windup_alpha;
+                feedforward_x = std::clamp(
+                    feedforward_x,
+                    -kTrackingIntegralMaximumCounts,
+                    kTrackingIntegralMaximumCounts);
+                desired_x = history_adjusted_x;
+            }
+        }
+        diagnostics.proportional_x_counts = proportional_x;
+        diagnostics.feedforward_x_counts = feedforward_x;
+        diagnostics.desired_before_reverse_x_counts = unconstrained_x;
+        diagnostics.desired_x_counts = desired_x;
         diagnostics.delayed_command_x_counts = delayed_command_x;
         diagnostics.pending_net_x_counts = pending.net_x;
         diagnostics.pending_absolute_x_counts = pending.absolute_x;

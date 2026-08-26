@@ -4180,6 +4180,111 @@ void test_backend_completed_command_feedback_contract() {
            "不存在的帧序号不得写入命令历史");
 }
 
+void test_backend_completed_delay_inventory_changes_tracking_reversal_response() {
+    constexpr float kFrameSeconds = 1.0f / 240.0f;
+    constexpr float kObservedRoundTripHz = 8.0f;
+    constexpr int kFrameCount = 360;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 2.25f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 14.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+
+    Aim completed_history(config);
+    Aim rejected_history(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    int opposed_inventory_frames = 0;
+    int history_sensitive_frames = 0;
+    int premature_reversal_events = 0;
+    int previous_completed_sign = 0;
+
+    for (int index = 0; index < kFrameCount; ++index) {
+        const float elapsed_seconds = index * kFrameSeconds;
+        const float observed_error = 12.0f * std::sin(
+            2.0f * 3.14159265358979323846f * kObservedRoundTripHz *
+            elapsed_seconds);
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(elapsed_seconds * 1000000.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body(160.0f + observed_error, 160.0f)};
+
+        const AimResult completed_result = completed_history.process(frame);
+        const AimResult rejected_result = rejected_history.process(frame);
+        expect(completed_result.status == AimStatus::SUCCESS &&
+                   completed_result.has_target &&
+                   rejected_result.status == AimStatus::SUCCESS &&
+                   rejected_result.has_target,
+               "delayed-command 反事实每帧都必须保留同一公开目标");
+
+        const int completed_command = completed_result.has_command
+            ? completed_result.command.dx_counts : 0;
+        const int rejected_command = rejected_result.has_command
+            ? rejected_result.command.dx_counts : 0;
+        const float pending_x =
+            completed_result.control.pending_net_x_counts;
+        if (pending_x * observed_error < 0.0f) {
+            ++opposed_inventory_frames;
+            if (completed_command != rejected_command) {
+                ++history_sensitive_frames;
+            }
+        }
+
+        const int completed_sign = completed_command > 0
+            ? 1 : (completed_command < 0 ? -1 : 0);
+        if (completed_sign != 0) {
+            if (previous_completed_sign != 0 &&
+                completed_sign != previous_completed_sign &&
+                pending_x * static_cast<float>(previous_completed_sign) >
+                    0.0f) {
+                ++premature_reversal_events;
+            }
+            previous_completed_sign = completed_sign;
+        }
+
+        const auto backend_completed_at =
+            frame.control_at + std::chrono::microseconds(100);
+        if (completed_result.has_command) {
+            expect(completed_history.record_backend_completed_command(
+                       frame.sequence, backend_completed_at,
+                       completed_result.command.dx_counts,
+                       completed_result.command.dy_counts),
+                   "delayed-command 夹具必须写入真实后端完成命令");
+        }
+        if (rejected_result.has_command) {
+            expect(rejected_history.record_backend_completed_command(
+                       frame.sequence, backend_completed_at, 0, 0),
+                   "反事实必须把同一预计算命令确认为未实际执行");
+        }
+    }
+
+    const float measured_round_trip_hz =
+        premature_reversal_events /
+        (2.0f * kFrameCount * kFrameSeconds);
+    expect(opposed_inventory_frames >= 12,
+           "delayed-command 夹具必须稳定覆盖当前误差已换边、15 ms 窗内"
+           "仍有旧向 backend-completed 库存，实际帧数=" +
+               std::to_string(opposed_inventory_frames));
+    expect(history_sensitive_frames > 0,
+           "同一图像误差下，窗内旧向 backend-completed 历史不能只进入诊断；"
+           "旧向库存帧/控制响应差异帧/旧向库存下提前反向/完整往返Hz=" +
+               std::to_string(opposed_inventory_frames) + "/" +
+               std::to_string(history_sensitive_frames) + "/" +
+               std::to_string(premature_reversal_events) + "/" +
+               std::to_string(measured_round_trip_hz));
+}
+
 void test_delayed_partial_visibility_closed_loop_preserves_real_reversals() {
     constexpr int kFrameCount = 240;
     constexpr int kSegmentFrameCount = 80;
@@ -8065,6 +8170,7 @@ int main() {
     test_delayed_pose_closed_loop_keeps_tracking_pi_continuous();
     test_vertical_shape_noise_does_not_stutter_horizontal_tracking();
     test_backend_completed_command_feedback_contract();
+    test_backend_completed_delay_inventory_changes_tracking_reversal_response();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_pi_is_separate_from_prediction_projection();
