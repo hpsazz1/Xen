@@ -12,6 +12,8 @@
         "AIM-SUPERJUMP-ACCEPT-001")]
     [string]$TaskId = "AIM-LATENCY-COMP-001",
     [string]$Scenario = "MoveLeft",
+    [ValidateSet("None", "Static", "SustainedMove", "Stop", "Reverse")]
+    [string]$SuperJumpCase = "None",
     [string]$Profile = "tracking",
     [ValidateRange(0.0, 1.0)]
     [double]$Smoothing = 0.50,
@@ -43,6 +45,12 @@ if ($resolvedCountsPerPixelX -lt 0.01 -or
     $resolvedCountsPerPixelY -lt 0.01 -or
     $resolvedCountsPerPixelY -gt 10.0) {
     throw "分轴 counts-per-pixel 必须位于 [0.01, 10.0]。"
+}
+if ($Scenario -eq "SuperJump" -and $SuperJumpCase -eq "None") {
+    throw "SuperJump 发布必须指定一个独立 SuperJumpCase。"
+}
+if ($Scenario -ne "SuperJump" -and $SuperJumpCase -ne "None") {
+    throw "SuperJumpCase 只适用于 SuperJump 场景。"
 }
 
 function Read-Json([string]$Path, [string]$Description) {
@@ -417,7 +425,8 @@ if ($Prepare) {
     $remoteRoot = 'C:\XenLab\releases\Xen-888b04e-aim-dual'
     $remoteCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' +
         $remoteScript + '" -TaskId ' + $TaskId + ' -Scenario ' +
-        $Scenario + ' -Profile ' + $Profile +
+        $Scenario + ' -SuperJumpCase ' + $SuperJumpCase +
+        ' -Profile ' + $Profile +
         ' -Mode Prepare -PackageRoot "' + $remoteRoot +
         '" -Smoothing ' + $Smoothing.ToString(
             'F6', [Globalization.CultureInfo]::InvariantCulture) +
@@ -563,6 +572,7 @@ if ($Prepare) {
         [string]$task.run_id -ne $runId -or
         [string]$task.task_id -ne $TaskId -or
         [string]$task.scenario -ne $Scenario -or
+        [string]$task.superjump_case -ne $SuperJumpCase -or
         [string]$task.profile -ne $Profile -or
         [double]$task.aim.smoothing -ne $Smoothing -or
         [double]$task.aim.counts_per_pixel_x -ne $resolvedCountsPerPixelX -or
@@ -610,6 +620,7 @@ foreach ($entry in $finalToolEvidence.GetEnumerator()) {
 Write-Host "  package_root=$destinationRoot"
 if ($Prepare) {
     Write-Host "  run_id=$runId"
+    Write-Host "  superjump_case=$SuperJumpCase"
     Write-Host "  report_root=C:\XenLab\reports\aim-dual-manual\$runId"
     Write-Host "以下命令会发送真实 KMBOX 输入，确认现场安全后可直接复制执行："
     Write-Output $launchCommand

@@ -247,7 +247,8 @@ try {
         -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
         -TaskId AIM-SUPERJUMP-ACCEPT-001 `
-        -Mode Prepare -Scenario SuperJump -Profile tracking -Smoothing 0.50 `
+        -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -Smoothing 0.50 `
         -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
         -MaxCountsPerFrame 14.0 `
         -EnableDelayCompensation -ControlDelayMs 7.5 `
@@ -259,7 +260,8 @@ try {
     $trackingOutputText = $trackingOutput -join "`n"
     if ($trackingOutputText -notmatch
             ('(?m)^powershell\.exe .* -TaskId AIM-SUPERJUMP-ACCEPT-001 ' +
-             '-Mode Launch -Scenario SuperJump -Profile tracking .* ' +
+             '-Mode Launch -Scenario SuperJump -SuperJumpCase Static ' +
+             '-Profile tracking .* ' +
              '-Smoothing 0\.500000 -CountsPerPixelX 0\.450000 ' +
              '-CountsPerPixelY 0\.400000 ' +
              '-MaxCountsPerFrame 14\.000000 ' +
@@ -297,6 +299,7 @@ try {
         ConvertFrom-Json
     if ([string]$trackingTask.task_id -ne "AIM-SUPERJUMP-ACCEPT-001" -or
         [string]$trackingTask.scenario -ne "SuperJump" -or
+        [string]$trackingTask.superjump_case -ne "Static" -or
         [double]$trackingTask.aim.smoothing -ne 0.50 -or
         [double]$trackingTask.aim.counts_per_pixel_x -ne 0.45 -or
         [double]$trackingTask.aim.counts_per_pixel_y -ne 0.40 -or
@@ -308,40 +311,79 @@ try {
         [double]$trackingTask.aim.max_delay_compensation_percent -ne 12.0) {
         throw "task.json 没有固化任务 ID、平滑或延迟补偿参数。"
     }
-    $trackingTaskMarkdown = Get-Content -LiteralPath `
-        (Join-Path $trackingRoot "TASK.md") -Raw -Encoding utf8
-    $trackingObservation = Get-Content -LiteralPath `
-        (Join-Path $trackingRoot "OBSERVATION.md") -Raw -Encoding utf8
-    foreach ($requiredPhaseText in @(
-            "阶段 1（X 静止）",
-            "阶段 2（X 持续横移）",
-            "阶段 3（X 横移后停止）",
-            "阶段 4（X 横移后换向）",
-            "目标完全移出 ROI 并保持至少 2 秒")) {
-        if ($trackingTaskMarkdown -notmatch
-                [regex]::Escape($requiredPhaseText)) {
-            throw "SuperJump 操作步骤缺少可分段回收协议：$requiredPhaseText"
+    $superJumpCases = [ordered]@{
+        Static = [ordered]@{
+            root = $trackingRoot
+            marker = "本 Run 唯一动作：X 静止"
+        }
+        SustainedMove = [ordered]@{
+            root = Join-Path $root "superjump-sustained-move-task"
+            marker = "本 Run 唯一动作：X 持续横移"
+        }
+        Stop = [ordered]@{
+            root = Join-Path $root "superjump-stop-task"
+            marker = "本 Run 唯一动作：X 横移后停止"
+        }
+        Reverse = [ordered]@{
+            root = Join-Path $root "superjump-reverse-task"
+            marker = "本 Run 唯一动作：X 横移后换向"
         }
     }
-    foreach ($requiredText in @(
-            "阶段 1 X 静止期间基础点或准星是否自行晃动",
-            "阶段 2 X 持续横移是否落后、追不上或出框",
-            "阶段 3 停止后是否延迟停发、过冲或细碎往返",
-            "阶段 4 换向时是否硬停、过冲或细碎往返",
-            "四个阶段是否均由至少 2 秒无目标窗分隔")) {
-        if ($trackingTaskMarkdown -notmatch [regex]::Escape($requiredText) -or
-            $trackingObservation -notmatch [regex]::Escape($requiredText)) {
-            throw "SuperJump 任务和观察记录必须同时覆盖分阶段门禁：$requiredText"
+    $preparedManifestHashes = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($caseName in $superJumpCases.Keys) {
+        $caseSpec = $superJumpCases[$caseName]
+        if ($caseName -ne "Static") {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+                (Join-Path $published `
+                    "tools\invoke_aim_manual_acceptance.ps1") `
+                -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+                -Mode Prepare -Scenario SuperJump `
+                -SuperJumpCase $caseName -Profile tracking -Smoothing 0.50 `
+                -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+                -MaxCountsPerFrame 14.0 -EnableDelayCompensation `
+                -ControlDelayMs 7.5 -MaxDelayCompensationMs 18.0 `
+                -MaxDelayCompensationPercent 12.0 `
+                -PackageRoot $published -RunDirectory $caseSpec.root | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "SuperJump $caseName 独立任务准备失败。"
+            }
+        }
+        $caseFiles = @(Get-ChildItem -LiteralPath $caseSpec.root -File)
+        $caseDirectories = @(Get-ChildItem -LiteralPath $caseSpec.root -Directory)
+        if ($caseFiles.Count -ne 4 -or $caseDirectories.Count -ne 0 -or
+            (@($caseFiles.Name | Sort-Object) -join ',') -ne
+                'config.ini,OBSERVATION.md,task.json,TASK.md') {
+            throw "SuperJump $caseName 必须生成严格独立的 Run 四文件。"
+        }
+        $caseTask = Get-Content -LiteralPath `
+            (Join-Path $caseSpec.root "task.json") -Raw -Encoding utf8 |
+            ConvertFrom-Json
+        if ([string]$caseTask.scenario -ne "SuperJump" -or
+            [string]$caseTask.superjump_case -ne $caseName) {
+            throw "SuperJump $caseName task.json 没有绑定唯一动作。"
+        }
+        [void]$preparedManifestHashes.Add(
+            [string]$caseTask.package_manifest.sha256)
+        $caseTaskMarkdown = Get-Content -LiteralPath `
+            (Join-Path $caseSpec.root "TASK.md") -Raw -Encoding utf8
+        $caseObservation = Get-Content -LiteralPath `
+            (Join-Path $caseSpec.root "OBSERVATION.md") -Raw -Encoding utf8
+        foreach ($candidate in $superJumpCases.Values.marker) {
+            $expectedCount = if ($candidate -eq $caseSpec.marker) { 2 } else { 0 }
+            $actualCount = @(
+                $caseTaskMarkdown, $caseObservation |
+                    Where-Object { $_ -match [regex]::Escape($candidate) }
+            ).Count
+            if ($actualCount -ne $expectedCount) {
+                throw "SuperJump $caseName 混入其他动作或缺少唯一动作标记：$candidate"
+            }
         }
     }
-    foreach ($phaseRow in @(
-            "| 1：X 静止 |",
-            "| 2：X 持续横移 |",
-            "| 3：X 横移后停止 |",
-            "| 4：X 横移后换向 |")) {
-        if ($trackingObservation -notmatch [regex]::Escape($phaseRow)) {
-            throw "SuperJump 观察记录缺少阶段时间行：$phaseRow"
-        }
+    $activeManifestHash = (Get-FileHash -LiteralPath `
+        (Join-Path $published "manifest.json") -Algorithm SHA256).Hash
+    if ($preparedManifestHashes.Count -ne 1 -or
+        -not $preparedManifestHashes.Contains($activeManifestHash)) {
+        throw "四个 SuperJump Run 必须共享同一活动 manifest 身份。"
     }
 
     $publishedManifest = Join-Path $published "manifest.json"
@@ -352,7 +394,8 @@ try {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
             -TaskId AIM-SUPERJUMP-ACCEPT-001 `
-            -Mode Launch -Scenario SuperJump -Profile tracking -Smoothing 0.50 `
+            -Mode Launch -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -Smoothing 0.50 `
             -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
             -MaxCountsPerFrame 14.0 `
             -EnableDelayCompensation -ControlDelayMs 7.5 `

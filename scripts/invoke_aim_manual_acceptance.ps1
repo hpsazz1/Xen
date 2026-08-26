@@ -5,6 +5,8 @@
     [Parameter(Mandatory = $true)]
     [ValidateSet("Static", "MoveLeft", "MoveRight", "Shuttle", "SuperJump")]
     [string]$Scenario,
+    [ValidateSet("None", "Static", "SustainedMove", "Stop", "Reverse")]
+    [string]$SuperJumpCase = "None",
     [Parameter(Mandatory = $true)]
     [ValidateSet("tracking", "prediction")]
     [string]$Profile,
@@ -49,6 +51,12 @@ if ($resolvedCountsPerPixelX -lt 0.01 -or
     $resolvedCountsPerPixelY -lt 0.01 -or
     $resolvedCountsPerPixelY -gt 10.0) {
     throw "分轴 counts-per-pixel 必须位于 [0.01, 10.0]。"
+}
+if ($Scenario -eq "SuperJump" -and $SuperJumpCase -eq "None") {
+    throw "SuperJump 必须指定一个独立 SuperJumpCase。"
+}
+if ($Scenario -ne "SuperJump" -and $SuperJumpCase -ne "None") {
+    throw "SuperJumpCase 只适用于 SuperJump 场景。"
 }
 $physicalConfirmation = "XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT"
 $ndiSourceName = "HPSAZZ (Xen-ROI-320)"
@@ -403,25 +411,67 @@ function Get-ScenarioDefinition() {
             }
         }
         "SuperJump" {
-            return [ordered]@{
-                title = "超级跳期间横纵向跟随与 X 停换向连续性"
-                actions = @(
-                    "本 Run 固定按阶段 1（X 静止）→阶段 2（X 持续横移）→阶段 3（X 横移后停止）→阶段 4（X 横移后换向）执行，不交叉、不追加动作。",
-                    "开始每个阶段前先松开右键，将目标完全移出 ROI 并保持至少 2 秒；确认画面无目标后再进入 ROI。四段之间的无目标窗是逐帧报告的阶段标记。",
-                    "每个阶段内保持同一目标连续可见，并维持相近的超级跳节奏；阶段内不要主动离开 ROI。",
-                    "阶段 1（X 静止）：只做超级跳，X 轴和视角保持静止；目标进入后按住右键 5 秒，再松开。",
-                    "阶段 2（X 持续横移）：沿一个方向连续横移，期间不停止、不换向；按住右键覆盖完整横移。",
-                    "阶段 3（X 横移后停止）：沿同一方向横移约 2 秒后完全停止并保持约 3 秒；中途不换向。",
-                    "阶段 4（X 横移后换向）：沿一个方向横移约 2 秒后明确反向，并沿新方向继续约 3 秒；中途不停顿。"
-                )
-                observations = @(
-                    "阶段 1 X 静止期间基础点或准星是否自行晃动",
-                    "阶段 2 X 持续横移是否落后、追不上或出框",
-                    "阶段 3 停止后是否延迟停发、过冲或细碎往返",
-                    "阶段 4 换向时是否硬停、过冲或细碎往返",
-                    "四个阶段是否均由至少 2 秒无目标窗分隔",
-                    "全程 Y 起跳、腾空和落地跟随是否及时稳定"
-                )
+            switch ($SuperJumpCase) {
+                "Static" {
+                    return [ordered]@{
+                        title = "超级跳期间 X 静止稳定性"
+                        actions = @(
+                            "本 Run 唯一动作：X 静止",
+                            "选择单个目标，只做超级跳，X 轴和视角保持静止。",
+                            "目标进入后按住右键约 5 秒再松开，不追加其他动作。"
+                        )
+                        observations = @(
+                            "本 Run 唯一动作：X 静止",
+                            "基础点或准星是否自行晃动",
+                            "Y 起跳、腾空和落地跟随是否及时稳定"
+                        )
+                    }
+                }
+                "SustainedMove" {
+                    return [ordered]@{
+                        title = "超级跳期间 X 持续横移跟随"
+                        actions = @(
+                            "本 Run 唯一动作：X 持续横移",
+                            "选择单个目标，只做一个方向的连续横移并维持相近的超级跳节奏。",
+                            "目标进入后按住右键覆盖完整横移，期间不停止、不换向。"
+                        )
+                        observations = @(
+                            "本 Run 唯一动作：X 持续横移",
+                            "跟随是否落后、追不上或出框",
+                            "Y 起跳、腾空和落地跟随是否及时稳定"
+                        )
+                    }
+                }
+                "Stop" {
+                    return [ordered]@{
+                        title = "超级跳期间 X 横移后停止"
+                        actions = @(
+                            "本 Run 唯一动作：X 横移后停止",
+                            "选择单个目标，沿同一方向横移约 2 秒后完全停止并保持约 3 秒。",
+                            "按住右键覆盖横移与停止过程，中途不换向、不追加其他动作。"
+                        )
+                        observations = @(
+                            "本 Run 唯一动作：X 横移后停止",
+                            "停止后是否延迟停发、过冲或细碎往返",
+                            "Y 起跳、腾空和落地跟随是否及时稳定"
+                        )
+                    }
+                }
+                "Reverse" {
+                    return [ordered]@{
+                        title = "超级跳期间 X 横移后换向"
+                        actions = @(
+                            "本 Run 唯一动作：X 横移后换向",
+                            "选择单个目标，沿一个方向横移约 2 秒后明确反向，并沿新方向继续约 3 秒。",
+                            "按住右键覆盖换向过程，中途不停顿、不追加其他动作。"
+                        )
+                        observations = @(
+                            "本 Run 唯一动作：X 横移后换向",
+                            "换向时是否硬停、过冲或细碎往返",
+                            "Y 起跳、腾空和落地跟随是否及时稳定"
+                        )
+                    }
+                }
             }
         }
     }
@@ -434,15 +484,16 @@ function New-LaunchCommand([string]$ResolvedRunDirectory) {
         ""
     }
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
-        '-TaskId {1} -Mode Launch -Scenario {2} -Profile {3} ' +
-        '-PackageRoot "{4}" -RunDirectory "{5}" -Smoothing {6:F6}' +
-        ' -CountsPerPixelX {7:F6} -CountsPerPixelY {8:F6} ' +
-        '-MaxCountsPerFrame {9:F6}{10} -ControlDelayMs {11:F6} ' +
-        '-MaxDelayCompensationMs {12:F6} ' +
-        '-MaxDelayCompensationPercent {13:F6} -AllowPhysicalOutput ' +
-        '-PhysicalOutputConfirmation {14}') -f
+        '-TaskId {1} -Mode Launch -Scenario {2} -SuperJumpCase {3} ' +
+        '-Profile {4} -PackageRoot "{5}" -RunDirectory "{6}" ' +
+        '-Smoothing {7:F6} -CountsPerPixelX {8:F6} ' +
+        '-CountsPerPixelY {9:F6} -MaxCountsPerFrame {10:F6}{11} ' +
+        '-ControlDelayMs {12:F6} -MaxDelayCompensationMs {13:F6} ' +
+        '-MaxDelayCompensationPercent {14:F6} -AllowPhysicalOutput ' +
+        '-PhysicalOutputConfirmation {15}') -f
         (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
-        $taskId, $Scenario, $Profile, $PackageRoot, $ResolvedRunDirectory,
+        $taskId, $Scenario, $SuperJumpCase, $Profile, $PackageRoot,
+        $ResolvedRunDirectory,
         $Smoothing, $resolvedCountsPerPixelX, $resolvedCountsPerPixelY,
         $MaxCountsPerFrame, $delaySwitch, $ControlDelayMs,
         $MaxDelayCompensationMs, $MaxDelayCompensationPercent,
@@ -535,9 +586,20 @@ if ($Mode -eq "Prepare") {
         -AllowConfigMismatch
     $configText = New-ConfigText $modelName
     $definition = Get-ScenarioDefinition
+    $scenarioSlug = if ($Scenario -eq "SuperJump") {
+        $caseSlug = switch ($SuperJumpCase) {
+            "Static" { "static" }
+            "SustainedMove" { "sustained-move" }
+            "Stop" { "stop" }
+            "Reverse" { "reverse" }
+        }
+        "superjump-$caseSlug"
+    } else {
+        $Scenario.ToLowerInvariant()
+    }
     $runId = "{0}-{1}-{2}-{3}" -f
         (Get-Date -Format "yyyyMMdd-HHmmss"),
-        $Scenario.ToLowerInvariant(), $Profile,
+        $scenarioSlug, $Profile,
         [guid]::NewGuid().ToString("N").Substring(0, 8)
     $resolvedRun = if ([string]::IsNullOrWhiteSpace($RunDirectory)) {
         [System.IO.Path]::GetFullPath((Join-Path $OutputRoot $runId))
@@ -551,12 +613,13 @@ if ($Mode -eq "Prepare") {
     $configPath = Join-Path $resolvedRun "config.ini"
     Write-TextAtomically $configPath $configText
     $manifestResult = Activate-Config $manifestResult $configText `
-        "generated:$taskId/$runId" $modelName
+        "generated:$taskId/$Scenario/$Profile" $modelName
     $task = [ordered]@{
         schema = 1
         task_id = $taskId
         run_id = $runId
         scenario = $Scenario
+        superjump_case = $SuperJumpCase
         profile = $Profile
         prepared_utc = [DateTime]::UtcNow.ToString("o")
         package_root = $PackageRoot
@@ -614,21 +677,6 @@ if ($Mode -eq "Prepare") {
     $observationRecords = $definition.observations | ForEach-Object {
         "- $_："
     }
-    $phaseObservation = if ($Scenario -eq "SuperJump") {
-        @"
-## 分阶段时间与人工结论
-
-| 阶段 | 开始时间 | 结束时间 | 是否完成 | 人工结论或异常时刻 |
-|---|---|---|---|---|
-| 1：X 静止 | | | | |
-| 2：X 持续横移 | | | | |
-| 3：X 横移后停止 | | | | |
-| 4：X 横移后换向 | | | | |
-
-"@
-    } else {
-        ""
-    }
     Write-TextAtomically (Join-Path $resolvedRun "OBSERVATION.md") @"
 # 人工观察记录
 
@@ -645,7 +693,6 @@ if ($Mode -eq "Prepare") {
 - 开始/结束时间：
 - 是否完成全部操作：
 - 是否触发 End 急停：
-$phaseObservation
 $($observationRecords -join "`n")
 - 松开右键后的停止表现：
 - 与上一配置相比的变化：
@@ -655,6 +702,7 @@ $($observationRecords -join "`n")
     Write-Host "Aim 人工任务已准备：$resolvedRun"
     Write-Host "  run_id=$runId"
     Write-Host "  scenario=$Scenario"
+    Write-Host "  superjump_case=$SuperJumpCase"
     Write-Host "  profile=$Profile"
     Write-Host "  config_sha256=$($task.config.sha256)"
     Write-Host "本轮尚未启动物理输出；请先人工复核 TASK.md。"
@@ -685,6 +733,7 @@ $taskCountsPerPixelY = if ($task.aim.PSObject.Properties.Name -contains
 if ([int]$task.schema -ne 1 -or
     [string]$task.task_id -ne $taskId -or
     [string]$task.scenario -ne $Scenario -or
+    [string]$task.superjump_case -ne $SuperJumpCase -or
     [string]$task.profile -ne $Profile -or
     [string]$task.package_validation -ne $packageValidationMode -or
     [string]$task.package_root -ne $PackageRoot -or
@@ -832,6 +881,7 @@ $summary = [ordered]@{
     task_id = $taskId
     run_id = [string]$task.run_id
     scenario = $Scenario
+    superjump_case = $SuperJumpCase
     profile = $Profile
     smoothing = $Smoothing
     counts_per_pixel = if ($resolvedCountsPerPixelX -eq
