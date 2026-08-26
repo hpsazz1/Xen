@@ -2541,9 +2541,7 @@ struct Aim::Impl {
                 kPredictionWorldMotionGainPerSecond,
                 kPredictionWorldMotionReleasePerSecond,
                 prediction_velocity, low_motion_frames);
-            if (low_motion_frames >= kPredictionStaticReleaseConfirmFrames &&
-                std::fabs(prediction_velocity) <
-                    kPredictionEstablishedWorldVelocityCountsPerSecond) {
+            if (low_motion_frames >= kPredictionStaticReleaseConfirmFrames) {
                 prediction_velocity = 0.0f;
                 low_motion_frames = 0;
                 candidate_seconds = 0.0f;

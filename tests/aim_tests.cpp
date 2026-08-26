@@ -4803,6 +4803,133 @@ void test_prediction_direct_feedforward_has_no_absolute_velocity_mode() {
                std::to_string(maximum_lead_step));
 }
 
+void test_prediction_confirmed_stop_has_no_absolute_velocity_mode() {
+    constexpr float kFrameSeconds = 1.0f / 120.0f;
+    constexpr int kActuationDelayFrames = 2;
+    constexpr int kBuildFrames = 360;
+    constexpr int kMovingFrames = 480;
+    constexpr int kFrameCount = 500;
+    // 0.5 count 是整数执行的一半量化步，只用于确认连续状态清理；它不是
+    // 人物速度判据，也不得进入生产控制分支。
+    constexpr float kMaximumResidualFeedforwardCounts = 0.50f;
+    struct Sample {
+        int valid_frames = 0;
+        float before_feedforward = 0.0f;
+        float confirmed_feedforward = 0.0f;
+        float after_feedforward = 0.0f;
+        float confirmed_lead = 0.0f;
+        bool confirmed_active = false;
+    };
+    const auto run_case = [&](float build_motion_per_frame,
+                              float counts_per_pixel_x) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = counts_per_pixel_x;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 12.0f;
+        config.acquisition_range_percent = 100.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 16.0f;
+        config.max_delay_compensation_ms = 16.0f;
+        config.max_delay_compensation_percent = 15.0f;
+        config.enable_prediction = true;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        std::array<int, kActuationDelayFrames> delayed_commands{};
+        float world_target_x = 0.0f;
+        float camera_x = 0.0f;
+        Sample sample;
+
+        for (int index = 0; index < kFrameCount; ++index) {
+            const int slot = index % kActuationDelayFrames;
+            camera_x += delayed_commands[slot] /
+                config.counts_per_pixel_x;
+            delayed_commands[slot] = 0;
+            if (index < kBuildFrames) {
+                world_target_x += build_motion_per_frame;
+            } else if (index < kMovingFrames) {
+                world_target_x += 4.0f;
+            }
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(
+                        index * kFrameSeconds * 1000000.0f)));
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                160.0f + world_target_x - camera_x,
+                160.0f, 40.0f, 80.0f)};
+            const AimResult result = aim.process(frame);
+            if (result.status != AimStatus::SUCCESS ||
+                !result.has_target) {
+                continue;
+            }
+            ++sample.valid_frames;
+            if (result.has_command) {
+                delayed_commands[slot] = result.command.dx_counts;
+            }
+            if (index == kMovingFrames + 12) {
+                sample.before_feedforward =
+                    result.control.feedforward_x_counts;
+            } else if (index == kMovingFrames + 13) {
+                sample.confirmed_feedforward =
+                    result.control.feedforward_x_counts;
+                sample.confirmed_lead = result.target.lead_x;
+                sample.confirmed_active = result.target.lead_active;
+            } else if (index == kMovingFrames + 14) {
+                sample.after_feedforward =
+                    result.control.feedforward_x_counts;
+            }
+        }
+        return sample;
+    };
+
+    const Sample above_old_threshold = run_case(4.90f, 0.845f);
+    const Sample below_old_threshold = run_case(5.10f, 0.805f);
+    expect(above_old_threshold.valid_frames == kFrameCount &&
+               below_old_threshold.valid_frames == kFrameCount &&
+               above_old_threshold.confirmed_active &&
+               below_old_threshold.confirmed_active &&
+               above_old_threshold.before_feedforward >
+                   kMaximumResidualFeedforwardCounts &&
+               below_old_threshold.before_feedforward >
+                   kMaximumResidualFeedforwardCounts,
+           "confirmed-stop deletion fixture 必须保持同一目标、已建立 X lead，"
+           "并在确认帧前仍有前馈；有效帧=" +
+               std::to_string(above_old_threshold.valid_frames) + "/" +
+               std::to_string(below_old_threshold.valid_frames) +
+               "，活动=" +
+               std::to_string(above_old_threshold.confirmed_active) + "/" +
+               std::to_string(below_old_threshold.confirmed_active) +
+               "，确认前前馈=" +
+               std::to_string(above_old_threshold.before_feedforward) + "/" +
+               std::to_string(below_old_threshold.before_feedforward));
+    expect(std::fabs(above_old_threshold.confirmed_feedforward) <=
+                   kMaximumResidualFeedforwardCounts &&
+               std::fabs(below_old_threshold.confirmed_feedforward) <=
+                   kMaximumResidualFeedforwardCounts &&
+               std::fabs(above_old_threshold.after_feedforward) <=
+                   kMaximumResidualFeedforwardCounts &&
+               std::fabs(below_old_threshold.after_feedforward) <=
+                   kMaximumResidualFeedforwardCounts,
+           "同一 12 帧 confirmed-stop 不得因旧绝对 counts/s 分类决定是否清理 X "
+           "prediction，确认帧前馈=" +
+               std::to_string(above_old_threshold.confirmed_feedforward) + "/" +
+               std::to_string(below_old_threshold.confirmed_feedforward) +
+               "，后一帧=" +
+               std::to_string(above_old_threshold.after_feedforward) + "/" +
+               std::to_string(below_old_threshold.after_feedforward) +
+               "，确认帧 lead=" +
+               std::to_string(above_old_threshold.confirmed_lead) + "/" +
+               std::to_string(below_old_threshold.confirmed_lead));
+}
+
 void test_tracking_public_point_is_independent_of_command_age() {
     const auto project_after = [](int age_microseconds) {
         AimConfig config;
@@ -7606,6 +7733,7 @@ int main() {
     test_base_tracking_quantization_has_no_speed_threshold();
     test_delay_shaping_has_no_speed_threshold_before_prediction();
     test_prediction_direct_feedforward_has_no_absolute_velocity_mode();
+    test_prediction_confirmed_stop_has_no_absolute_velocity_mode();
     test_tracking_public_point_is_independent_of_command_age();
     test_pending_command_age_uses_control_execution_time();
     test_tracking_pi_filters_axes_independently();
