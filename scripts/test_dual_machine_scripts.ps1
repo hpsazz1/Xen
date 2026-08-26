@@ -78,6 +78,15 @@ Assert-True ($networkReceiverText -match
     $networkReceiverText -match '"allow_send_input=false"') `
     "网络接收脚本必须只暴露预测开关/最大提前距离，并显式固定完整 Aim 与禁用 Mouse。"
 Assert-True ($networkReceiverText -match
+    '\[string\]\$NdiClockSyncUrl\s*=\s*"udp://192\.168\.3\.10:5011"' -and
+    $networkReceiverText -match
+        '"ndi_clock_sync_url=\$NdiClockSyncUrl"' -and
+    $networkReceiverText -match
+        'source_to_capture\s*=\s*\$report\.timing\.source_to_capture' -and
+    $networkReceiverText -match
+        'uncertainty\s*=\s*\$report\.timing\.source_clock_uncertainty') `
+    "网络接收脚本必须显式配置源机时钟，并把映射摘要写入完成标记。"
+Assert-True ($networkReceiverText -match
     '-ExpectedAimPrediction\s+\$AimPrediction' -and
     $networkReceiverText -match
         '-ExpectedAimMaxPredictionLeadPercent' -and
@@ -169,6 +178,9 @@ try {
     & (Join-Path $RepositoryRoot "scripts/benchmark_network_receiver.ps1") `
         -ModelPath (Join-Path $networkPrepareRoot "missing.onnx") `
         -ReportPrefix $networkPrefix -CaptureBackend ndi `
+        -NdiClockSyncUrl "udp://10.0.0.8:5011" `
+        -NdiClockSyncIntervalMs 300 -NdiClockSyncTimeoutMs 150 `
+        -NdiClockMappingMaxAgeMs 1200 `
         -AimPrediction on -AimMaxPredictionLeadPercent 42.5 `
         -PrepareOnly | Out-Null
     $preparedConfig = [System.IO.File]::ReadAllText(
@@ -176,12 +188,20 @@ try {
     Assert-True ($preparedConfig -match '(?m)^\[aim\]\r?$' -and
         $preparedConfig -match '(?m)^person_class_ids=0,2\r?$' -and
         $preparedConfig -match '(?m)^head_class_ids=1,3\r?$' -and
+        $preparedConfig -match
+            '(?m)^ndi_clock_sync_url=udp://10\.0\.0\.8:5011\r?$' -and
+        $preparedConfig -match
+            '(?m)^ndi_clock_sync_interval_ms=300\r?$' -and
+        $preparedConfig -match
+            '(?m)^ndi_clock_sync_timeout_ms=150\r?$' -and
+        $preparedConfig -match
+            '(?m)^ndi_clock_mapping_max_age_ms=1200\r?$' -and
         $preparedConfig -match '(?m)^enable_prediction=true\r?$' -and
         $preparedConfig -match
             '(?m)^max_prediction_lead_percent=42\.500000\r?$' -and
         $preparedConfig -match '(?m)^\[mouse\]\r?$' -and
         $preparedConfig -match '(?m)^allow_send_input=false\r?$') `
-        "PrepareOnly 必须落盘完整 Aim、预测参数和显式禁用 Mouse。"
+        "PrepareOnly 必须落盘 NDI 时钟、完整 Aim、预测参数和显式禁用 Mouse。"
 } finally {
     Remove-Item -LiteralPath $networkPrepareRoot -Recurse -Force `
         -ErrorAction SilentlyContinue
@@ -207,6 +227,13 @@ Assert-True ($dualReceiverText -match
     $dualReceiverText -match
         '\$CaptureBackend -eq "udp_mjpeg"') `
     "双机入口必须透传少量 Aim 参数，并只限制裸 UDP 场景。"
+Assert-True ($dualReceiverText -match
+    '\[string\]\$NdiClockSyncUrl\s*=\s*"udp://192\.168\.3\.10:5011"' -and
+    $dualReceiverText -match
+        'NdiClockSyncUrl\s*=\s*\$NdiClockSyncUrl' -and
+    $dualReceiverText -match
+        'NdiClockMappingMaxAgeMs\s*=\s*\$NdiClockMappingMaxAgeMs') `
+    "双机远程入口必须显式透传 NDI 源机时钟参数。"
 
 . (Join-Path $RepositoryRoot "scripts/runtime_environment.ps1")
 $successQuery = {

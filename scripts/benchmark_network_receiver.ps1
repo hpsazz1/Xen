@@ -15,6 +15,13 @@
     [string]$Configuration = "Release",
     [string]$ListenUrl = "udp://0.0.0.0:5000",
     [string]$NdiSourceName = "Auto",
+    [string]$NdiClockSyncUrl = "udp://192.168.3.10:5011",
+    [ValidateRange(50, 10000)]
+    [int]$NdiClockSyncIntervalMs = 250,
+    [ValidateRange(10, 5000)]
+    [int]$NdiClockSyncTimeoutMs = 200,
+    [ValidateRange(50, 60000)]
+    [int]$NdiClockMappingMaxAgeMs = 1000,
     [ValidateSet("on", "off")]
     [string]$NdiRequireFrameMetadata = "off",
     [ValidateRange(1, 32768)]
@@ -96,12 +103,20 @@ function Remove-OwnedOutputs {
 }
 
 if ($ListenUrl.IndexOfAny([char[]]"`r`n") -ge 0 -or
-    $NdiSourceName.IndexOfAny([char[]]"`r`n") -ge 0) {
-    throw "网络地址和 NDI 源名称不得包含换行。"
+    $NdiSourceName.IndexOfAny([char[]]"`r`n") -ge 0 -or
+    $NdiClockSyncUrl.IndexOfAny([char[]]"`r`n") -ge 0) {
+    throw "网络地址、NDI 源名称和 NDI 时钟地址不得包含换行。"
 }
 if ($CaptureBackend -ne "ndi" -and
     $ListenUrl -notmatch '^udp://[^:]+:[0-9]+$') {
     throw "ListenUrl 必须是 udp://IPv4或主机名:端口。"
+}
+if ($CaptureBackend -eq "ndi" -and
+    $NdiClockSyncUrl -notmatch '^udp://[^:]+:[0-9]+$') {
+    throw "NDI 正式双机测试要求 NdiClockSyncUrl 为 udp://IPv4或主机名:端口。"
+}
+if ($NdiClockMappingMaxAgeMs -lt $NdiClockSyncIntervalMs) {
+    throw "NdiClockMappingMaxAgeMs 不得小于 NdiClockSyncIntervalMs。"
 }
 $roiX = [int](($SourceWidth - $RoiWidth) / 2)
 $roiY = [int](($SourceHeight - $RoiHeight) / 2)
@@ -171,6 +186,10 @@ $configLines = @(
     "udp_source_width=$SourceWidth",
     "udp_source_height=$SourceHeight",
     "ndi_source_name=$NdiSourceName",
+    "ndi_clock_sync_url=$NdiClockSyncUrl",
+    "ndi_clock_sync_interval_ms=$NdiClockSyncIntervalMs",
+    "ndi_clock_sync_timeout_ms=$NdiClockSyncTimeoutMs",
+    "ndi_clock_mapping_max_age_ms=$NdiClockMappingMaxAgeMs",
     "ndi_discovery_timeout_ms=5000",
     "ndi_receive_timeout_ms=50",
     "ndi_disconnect_timeout_ms=2000",
@@ -242,6 +261,7 @@ if (Test-Path -LiteralPath $receiverConfig) {
 if ($PrepareOnly) {
     Write-Host "网络接收配置已准备：$receiverConfig"
     Write-Host "主机 FOV=${SourceWidth}x${SourceHeight}, ROI=($roiX,$roiY,${RoiWidth}x${RoiHeight})"
+    Write-Host "NDI clock=$NdiClockSyncUrl, interval=${NdiClockSyncIntervalMs}ms, max_age=${NdiClockMappingMaxAgeMs}ms"
     Write-Host "Aim prediction=$AimPrediction, max_lead=$AimMaxPredictionLeadPercent%"
     Write-Host "Mouse allow_send_input=false"
     return
@@ -382,6 +402,8 @@ try {
             source_fps = [double]$snapshot.source_fps
             cross_machine_clock_basis = if ($CaptureBackend -eq "xudp_jpeg") {
                 "unsynchronized_monotonic_clocks; no strict frame age"
+            } elseif ($CaptureBackend -eq "ndi") {
+                "ndi_sdk_submission_mapped_via_source_clock_sidecar"
             } else {
                 "backend local timing only"
             }
@@ -396,6 +418,17 @@ try {
         }
         measurement = [ordered]@{
             runtime_report_schema = [int]$report.schema
+            clock_sync = [ordered]@{
+                endpoint = $NdiClockSyncUrl
+                interval_ms = $NdiClockSyncIntervalMs
+                timeout_ms = $NdiClockSyncTimeoutMs
+                mapping_max_age_ms = $NdiClockMappingMaxAgeMs
+                source_to_capture = $report.timing.source_to_capture
+                source_to_control = $report.timing.source_to_control
+                uncertainty = $report.timing.source_clock_uncertainty
+                round_trip = $report.timing.source_clock_round_trip
+                mapping_age = $report.timing.source_clock_mapping_age
+            }
             aim = [ordered]@{
                 prediction_enabled = $AimPrediction -eq "on"
                 max_prediction_lead_percent =

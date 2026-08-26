@@ -14,6 +14,13 @@
     [string]$RunRoot = "C:\XenLab\runs",
     [string]$ListenUrl = "udp://0.0.0.0:5000",
     [string]$NdiSourceName = "Auto",
+    [string]$NdiClockSyncUrl = "udp://192.168.3.10:5011",
+    [ValidateRange(50, 10000)]
+    [int]$NdiClockSyncIntervalMs = 250,
+    [ValidateRange(10, 5000)]
+    [int]$NdiClockSyncTimeoutMs = 200,
+    [ValidateRange(50, 60000)]
+    [int]$NdiClockMappingMaxAgeMs = 1000,
     [ValidateSet("on", "off")]
     [string]$EnablePerformanceProbes = "off",
     [ValidateSet("on", "off")]
@@ -88,6 +95,10 @@ $arguments = @{
     Configuration = "Release"
     ListenUrl = $ListenUrl
     NdiSourceName = $NdiSourceName
+    NdiClockSyncUrl = $NdiClockSyncUrl
+    NdiClockSyncIntervalMs = $NdiClockSyncIntervalMs
+    NdiClockSyncTimeoutMs = $NdiClockSyncTimeoutMs
+    NdiClockMappingMaxAgeMs = $NdiClockMappingMaxAgeMs
     SourceWidth = 2560
     SourceHeight = 1440
     EncodedWidth = 320
@@ -122,6 +133,7 @@ Write-Host "  run_id=$runId"
 Write-Host "  scenario=$Scenario"
 Write-Host "  capture=$CaptureBackend"
 Write-Host "  provider=$Backend"
+Write-Host "  ndi_clock_sync=$NdiClockSyncUrl"
 Write-Host "  performance_probes=$EnablePerformanceProbes"
 Write-Host "  aim_prediction=$AimPrediction"
 Write-Host "  aim_max_prediction_lead_percent=$AimMaxPredictionLeadPercent"
