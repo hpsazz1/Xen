@@ -30,6 +30,84 @@ function Add-ManifestFile(
     })
 }
 
+function New-Schema13AimSample() {
+    return [ordered]@{
+        sequence = 541
+        aim_status = "SUCCESS"
+        mouse_sent = $true
+        aim_has_target = $true
+        aim_has_command = $true
+        aim_track_id = 1
+        aim_track_state = "CONFIRMED"
+        aim_track_predicted = $false
+        aim_lead_active = $false
+        aim_base_point_inside_box = $true
+        aim_prediction_point_outside_box = $false
+        aim_command_toward_target = $true
+        aim_acquisition_range_radius = 144.0
+        aim_active_range_radius = 85.9412918
+        aim_range_locked = $true
+        aim_range_allows_control = $true
+        aim_box = @(218.163315, 154.180466, 239.103516, 215.603760)
+        aim_base_point = @(227.931946, 175.677979)
+        aim_delay_compensated_point = @(227.931946, 175.677979)
+        aim_final_point = @(227.931946, 175.677979)
+        aim_lead = @(0.0, 0.0)
+        aim_delay_compensation = @(0.0, 0.0)
+        aim_delay_compensation_active = $false
+        aim_delay_compensation_ms_x = 0.0
+        aim_delay_compensation_ms_y = 0.0
+        aim_delay_compensation_ms = 0.0
+        aim_observation_age_ms = 1.65289998
+        aim_command = @(13, 3)
+        aim_control_center_x = 160.0
+        source_pixels_per_pixel_x = 1.0
+        aim_control_evaluated = $true
+        aim_controller_dt_ms = 5.97350025
+        aim_desired_x_counts = 13.680974
+        aim_pending_absolute_x_counts = 0.0
+        aim_reverse_candidate_x = $false
+        aim_reverse_previous_direction_pending_x = $false
+        aim_reverse_deformation_active_x = $false
+        aim_reverse_evidence_ratio_seconds_x = 0.0
+        aim_reverse_position_ratio_seconds_x = 0.0
+        aim_reverse_required_evidence_ratio_seconds_x = 0.0
+        aim_reverse_required_position_ratio_seconds_x = 0.0
+        aim_reverse_evidence_ready_x = $false
+        aim_reverse_position_ready_x = $false
+        aim_reverse_gate_blocked_x = $false
+        aim_pending_inventory_hold_blocked_x = $false
+        aim_deadzone_quiet = $false
+        aim_shaper_direction_reset_x = $false
+        aim_post_alignment_sign_change_blocked_x = $false
+        aim_post_alignment_growth_limited_x = $false
+        aim_closing_response_tapered_x = $false
+        aim_integer_direction_blocked_x = $false
+        aim_command_sign_change_blocked_x = $false
+        aim_quantization_zero_x = $false
+        aim_reverse_probe_direction_x = 0
+        aim_reverse_probe_age_ms_x = 0.0
+        aim_reverse_probe_active_x = $false
+        aim_reverse_probe_limited_x = $false
+        aim_reverse_translation_seconds_x = 0.0
+        aim_reverse_translation_ready_x = $false
+        aim_reverse_output_direction_x = 0
+        aim_reverse_translation_raw_left_x_roi_pixels = 0.0799713135
+        aim_reverse_translation_raw_right_x_roi_pixels = -0.0196380615
+        aim_reverse_translation_raw_common_x_roi_pixels = 0.0
+        aim_reverse_translation_control_evidence_x = 0.0
+        aim_reverse_translation_gap_seconds_x = 0.0
+        aim_reverse_translation_fresh_evidence_x = $false
+        aim_reverse_translation_reset_reason_x = "NONE"
+        aim_reverse_position_peak_error_x = 0.0
+        aim_reverse_position_improvement_reset_x = $false
+        aim_modelled_response_x_counts = 0.0
+        aim_observer_phase_command_x_counts = 0.0
+        aim_observer_consistency_weight_x = 0.0
+        mouse_completion_timing_valid = $true
+    }
+}
+
 $root = [System.IO.Path]::GetFullPath($TestRoot)
 if ($root -match '^[A-Za-z]:\?$' -or $root -eq '\') {
     throw "拒绝在文件系统根目录运行测试。"
@@ -386,7 +464,66 @@ try {
         throw "四个 SuperJump Run 必须共享同一活动 manifest 身份。"
     }
 
+    $automaticRoot = Join-Path $trackingRoot "automatic"
+    New-Item -ItemType Directory -Path $automaticRoot -Force | Out-Null
+    Write-Utf8 (Join-Path $automaticRoot "schema13.csv") `
+        "sequence,success`n541,true`n"
+    $schema13Report = [ordered]@{
+        schema = 13
+        session_id = "schema13"
+        provider = "TensorrtExecutionProvider"
+        capture_backend = "NDI"
+        mouse_backend = "kmbox_net"
+        sample_count = 1
+        successful_samples = 1
+        failed_samples = 0
+        report_samples_dropped = 0
+        runtime_samples_dropped = 0
+        samples = @(New-Schema13AimSample)
+    }
+    Write-Utf8 (Join-Path $automaticRoot "schema13.json") `
+        (($schema13Report | ConvertTo-Json -Depth 10) + "`n")
     $publishedManifest = Join-Path $published "manifest.json"
+    $manifestBytes = [System.IO.File]::ReadAllBytes($publishedManifest)
+    try {
+        [System.IO.File]::AppendAllText(
+            $publishedManifest, "`n", [System.Text.UTF8Encoding]::new($false))
+        $recoverOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -Smoothing 0.50 `
+            -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+            -MaxCountsPerFrame 14.0 `
+            -EnableDelayCompensation -ControlDelayMs 7.5 `
+            -MaxDelayCompensationMs 18.0 `
+            -MaxDelayCompensationPercent 12.0 `
+            -PackageRoot $published -RunDirectory $trackingRoot 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $recoverOutput | ForEach-Object { Write-Host $_ }
+            throw "schema 13 离线回收失败。"
+        }
+    } finally {
+        [System.IO.File]::WriteAllBytes($publishedManifest, $manifestBytes)
+    }
+    $recoveredSummary = Get-Content -LiteralPath `
+        (Join-Path $trackingRoot "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$recoveredSummary.collection_mode -ne "Recover" -or
+        @($recoveredSummary.runtime_report_schemas).Count -ne 1 -or
+        [int]@($recoveredSummary.runtime_report_schemas)[0] -ne 13 -or
+        [uint64]$recoveredSummary.sample_count -ne 1 -or
+        [uint64]$recoveredSummary.successful_samples -ne 1 -or
+        [uint64]$recoveredSummary.failed_samples -ne 0 -or
+        [uint64]$recoveredSummary.source_timing_valid_samples -ne 0 -or
+        [uint64]$recoveredSummary.mouse_backend_completion_samples -ne 1 -or
+        [uint64]$recoveredSummary.mouse_protocol_ack_samples -ne 0 -or
+        [uint64]$recoveredSummary.mouse_physical_effect_samples -ne 0 -or
+        -not [bool]$recoveredSummary.automatic_complete) {
+        throw "schema 13 回收没有保留已知证据并把缺失时序层降级为 unknown。"
+    }
+
     $manifestBytes = [System.IO.File]::ReadAllBytes($publishedManifest)
     try {
         [System.IO.File]::AppendAllText(

@@ -10,7 +10,7 @@
     [Parameter(Mandatory = $true)]
     [ValidateSet("tracking", "prediction")]
     [string]$Profile,
-    [ValidateSet("Prepare", "Launch")]
+    [ValidateSet("Prepare", "Launch", "Recover")]
     [string]$Mode = "Prepare",
     [string]$PackageRoot = "",
     [string]$RunDirectory = "",
@@ -711,9 +711,14 @@ $($observationRecords -join "`n")
     exit 0
 }
 
-Assert-PhysicalAuthorization
+if ($Mode -eq "Launch") {
+    Assert-PhysicalAuthorization
+} elseif ($AllowPhysicalOutput.IsPresent -or
+    -not [string]::IsNullOrWhiteSpace($PhysicalOutputConfirmation)) {
+    throw "Recover 只回收已有报告，不接受真实物理输出授权。"
+}
 if ([string]::IsNullOrWhiteSpace($RunDirectory)) {
-    throw "Launch 必须指定 Prepare 生成的 RunDirectory。"
+    throw "$Mode 必须指定 Prepare 生成的 RunDirectory。"
 }
 $resolvedRun = [System.IO.Path]::GetFullPath($RunDirectory)
 $taskPath = Join-Path $resolvedRun "task.json"
@@ -748,63 +753,107 @@ if ([int]$task.schema -ne 1 -or
         $MaxDelayCompensationMs -or
     [double]$task.aim.max_delay_compensation_percent -ne
         $MaxDelayCompensationPercent) {
-    throw "Launch 参数与 Prepare 任务不一致。"
+    throw "$Mode 参数与 Prepare 任务不一致。"
 }
-$activeConfig = Join-Path $PackageRoot "config.ini"
-$activeHash = (Get-FileHash -LiteralPath $activeConfig -Algorithm SHA256).Hash
-if ($activeHash -ne [string]$task.config.sha256) {
-    throw "当前完整包 config.ini 不是本任务 Prepare 的配置。"
-}
-$manifestResult = Read-Manifest
-$manifestEvidence = Get-FileEvidence $manifestResult.Path
-if ($manifestEvidence.length -ne [long]$task.package_manifest.length -or
-    $manifestEvidence.sha256 -ne [string]$task.package_manifest.sha256) {
-    throw "当前 manifest.json 不是本任务 Prepare 绑定的清单。"
-}
-$modelName = Get-ModelName $manifestResult.Value
-Assert-TaskManifestFiles $manifestResult.Value $modelName
-
-$runtimeRoot = Join-Path $PackageRoot "cache\runtime"
-$before = [System.Collections.Generic.HashSet[string]]::new(
-    [System.StringComparer]::OrdinalIgnoreCase)
-if (Test-Path -LiteralPath $runtimeRoot) {
-    foreach ($file in @(Get-ChildItem -LiteralPath $runtimeRoot -File)) {
-        [void]$before.Add($file.FullName)
-    }
-}
-$startedUtc = [DateTime]::UtcNow
-Write-Host "即将启动真实 KMBOX 输出任务：$($task.run_id)"
-Write-Host "确认 End 急停可用；程序启动后仍需人工武装并按 TASK.md 操作。"
-$process = Start-Process -FilePath $launcher -WorkingDirectory $PackageRoot `
-    -PassThru -Wait
-$endedUtc = [DateTime]::UtcNow
 
 $automaticRoot = Join-Path $resolvedRun "automatic"
-New-Item -ItemType Directory -Path $automaticRoot -Force | Out-Null
 $newReports = @()
-if (Test-Path -LiteralPath $runtimeRoot) {
-    $newReports = @(Get-ChildItem -LiteralPath $runtimeRoot -File |
-        Where-Object { -not $before.Contains($_.FullName) } |
-        Sort-Object Name)
-}
-if ($newReports.Count -eq 0) {
-    throw "应用退出后未发现本轮新增 Runtime 报告。"
-}
 $reportEvidence = @()
-foreach ($file in $newReports) {
-    $destination = Join-Path $automaticRoot $file.Name
-    Copy-Item -LiteralPath $file.FullName -Destination $destination
-    $reportEvidence += Get-FileEvidence $destination
-}
 $logEvidence = @()
-$logRoot = Join-Path $PackageRoot "logs"
-if (Test-Path -LiteralPath $logRoot) {
+$startedUtc = $null
+$endedUtc = $null
+$process = $null
+if ($Mode -eq "Launch") {
+    $activeConfig = Join-Path $PackageRoot "config.ini"
+    $activeHash = (Get-FileHash -LiteralPath $activeConfig -Algorithm SHA256).Hash
+    if ($activeHash -ne [string]$task.config.sha256) {
+        throw "当前完整包 config.ini 不是本任务 Prepare 的配置。"
+    }
+    $manifestResult = Read-Manifest
+    $manifestEvidence = Get-FileEvidence $manifestResult.Path
+    if ($manifestEvidence.length -ne [long]$task.package_manifest.length -or
+        $manifestEvidence.sha256 -ne [string]$task.package_manifest.sha256) {
+        throw "当前 manifest.json 不是本任务 Prepare 绑定的清单。"
+    }
+    $modelName = Get-ModelName $manifestResult.Value
+    Assert-TaskManifestFiles $manifestResult.Value $modelName
+
+    $runtimeRoot = Join-Path $PackageRoot "cache\runtime"
+    $before = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    if (Test-Path -LiteralPath $runtimeRoot) {
+        foreach ($file in @(Get-ChildItem -LiteralPath $runtimeRoot -File)) {
+            [void]$before.Add($file.FullName)
+        }
+    }
+    $startedUtc = [DateTime]::UtcNow
+    Write-Host "即将启动真实 KMBOX 输出任务：$($task.run_id)"
+    Write-Host "确认 End 急停可用；程序启动后仍需人工武装并按 TASK.md 操作。"
+    $process = Start-Process -FilePath $launcher -WorkingDirectory $PackageRoot `
+        -PassThru -Wait
+    $endedUtc = [DateTime]::UtcNow
+
+    New-Item -ItemType Directory -Path $automaticRoot -Force | Out-Null
+    if (Test-Path -LiteralPath $runtimeRoot) {
+        $newReports = @(Get-ChildItem -LiteralPath $runtimeRoot -File |
+            Where-Object { -not $before.Contains($_.FullName) } |
+            Sort-Object Name)
+    }
+    if ($newReports.Count -eq 0) {
+        throw "应用退出后未发现本轮新增 Runtime 报告。"
+    }
+    foreach ($file in $newReports) {
+        $destination = Join-Path $automaticRoot $file.Name
+        Copy-Item -LiteralPath $file.FullName -Destination $destination
+        $reportEvidence += Get-FileEvidence $destination
+    }
+    $logRoot = Join-Path $PackageRoot "logs"
+    if (Test-Path -LiteralPath $logRoot) {
+        $copiedLogRoot = Join-Path $resolvedRun "logs"
+        New-Item -ItemType Directory -Path $copiedLogRoot -Force | Out-Null
+        foreach ($file in @(Get-ChildItem -LiteralPath $logRoot -File)) {
+            $destination = Join-Path $copiedLogRoot $file.Name
+            Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
+            $logEvidence += Get-FileEvidence $destination
+        }
+    }
+} else {
+    $runConfigEvidence = Get-FileEvidence (Join-Path $resolvedRun "config.ini")
+    if ($runConfigEvidence.length -ne [long]$task.config.length -or
+        $runConfigEvidence.sha256 -ne [string]$task.config.sha256) {
+        throw "Recover Run config.ini 与 Prepare 证据不一致。"
+    }
+    foreach ($helper in @(
+            [pscustomobject]@{
+                path = $aimReportScript
+                expected = $task.aim_report
+            },
+            [pscustomobject]@{
+                path = $aimControlDiagnosticsScript
+                expected = $task.aim_control_diagnostics
+            })) {
+        $actual = Get-FileEvidence $helper.path
+        if ($actual.length -ne [long]$helper.expected.length -or
+            $actual.sha256 -ne [string]$helper.expected.sha256) {
+            throw "Recover 报告助手与 Prepare 证据不一致：$($helper.path)"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $automaticRoot -PathType Container)) {
+        throw "Recover 缺少 Run automatic 目录：$resolvedRun"
+    }
+    $newReports = @(Get-ChildItem -LiteralPath $automaticRoot -File |
+        Sort-Object Name)
+    if ($newReports.Count -eq 0) {
+        throw "Recover automatic 目录没有 Runtime 报告：$resolvedRun"
+    }
+    foreach ($file in $newReports) {
+        $reportEvidence += Get-FileEvidence $file.FullName
+    }
     $copiedLogRoot = Join-Path $resolvedRun "logs"
-    New-Item -ItemType Directory -Path $copiedLogRoot -Force | Out-Null
-    foreach ($file in @(Get-ChildItem -LiteralPath $logRoot -File)) {
-        $destination = Join-Path $copiedLogRoot $file.Name
-        Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
-        $logEvidence += Get-FileEvidence $destination
+    if (Test-Path -LiteralPath $copiedLogRoot -PathType Container) {
+        foreach ($file in @(Get-ChildItem -LiteralPath $copiedLogRoot -File)) {
+            $logEvidence += Get-FileEvidence $file.FullName
+        }
     }
 }
 
@@ -818,13 +867,16 @@ $successful = [uint64]0
 $failed = [uint64]0
 $reportDropped = [uint64]0
 $runtimeDropped = [uint64]0
+$reportSchemas = [System.Collections.Generic.HashSet[int]]::new()
 foreach ($file in $jsonReports) {
     $report = Get-Content -LiteralPath $file.FullName -Raw -Encoding utf8 |
         ConvertFrom-Json
     if ($null -eq $report.samples) { continue }
-    if ([int]$report.schema -ne 14) {
-        throw "Aim 人工任务 Runtime 报告 schema 不是 14：$($file.FullName)"
+    $reportSchema = [int]$report.schema
+    if ($reportSchema -notin @(13, 14)) {
+        throw "Aim 人工任务 Runtime 报告 schema 不受支持：$reportSchema；$($file.FullName)"
     }
+    [void]$reportSchemas.Add($reportSchema)
     $samples = @($report.samples)
     $allSamples += $samples
     $sampleCount += [uint64]$report.sample_count
@@ -833,6 +885,7 @@ foreach ($file in $jsonReports) {
     $reportDropped += [uint64]$report.report_samples_dropped
     $runtimeDropped += [uint64]$report.runtime_samples_dropped
     $segments += [ordered]@{
+        schema = $reportSchema
         session_id = [string]$report.session_id
         provider = [string]$report.provider
         capture_backend = [string]$report.capture_backend
@@ -859,16 +912,23 @@ $captureMismatch = @($segments | Where-Object {
 }).Count
 $mouseCommands = @($allSamples | Where-Object { [bool]$_.mouse_sent }).Count
 $sourceTimingValidSamples = @($allSamples | Where-Object {
-    [bool]$_.source_timing_valid
+    $_.PSObject.Properties.Name -contains "source_timing_valid" -and
+        [bool]$_.source_timing_valid
 }).Count
 $mouseBackendCompletionSamples = @($allSamples | Where-Object {
-    [bool]$_.mouse_backend_completion_timing_valid
+    ($_.PSObject.Properties.Name -contains
+        "mouse_backend_completion_timing_valid" -and
+        [bool]$_.mouse_backend_completion_timing_valid) -or
+    ($_.PSObject.Properties.Name -contains "mouse_completion_timing_valid" -and
+        [bool]$_.mouse_completion_timing_valid)
 }).Count
 $mouseProtocolAckSamples = @($allSamples | Where-Object {
-    [bool]$_.mouse_protocol_ack_timing_valid
+    $_.PSObject.Properties.Name -contains "mouse_protocol_ack_timing_valid" -and
+        [bool]$_.mouse_protocol_ack_timing_valid
 }).Count
 $mousePhysicalEffectSamples = @($allSamples | Where-Object {
-    [bool]$_.mouse_physical_effect_timing_valid
+    $_.PSObject.Properties.Name -contains "mouse_physical_effect_timing_valid" -and
+        [bool]$_.mouse_physical_effect_timing_valid
 }).Count
 $complete = $failed -eq 0 -and $reportDropped -eq 0 -and
     $runtimeDropped -eq 0 -and $providerMismatch -eq 0 -and
@@ -893,9 +953,18 @@ $summary = [ordered]@{
     control_delay_ms = $ControlDelayMs
     max_delay_compensation_ms = $MaxDelayCompensationMs
     max_delay_compensation_percent = $MaxDelayCompensationPercent
-    started_utc = $startedUtc.ToString("o")
-    ended_utc = $endedUtc.ToString("o")
-    launcher_exit_code = [int]$process.ExitCode
+    collection_mode = $Mode
+    runtime_report_schemas = @($reportSchemas | Sort-Object)
+    recovered_utc = [DateTime]::UtcNow.ToString("o")
+    started_utc = if ($null -eq $startedUtc) { $null } else {
+        $startedUtc.ToString("o")
+    }
+    ended_utc = if ($null -eq $endedUtc) { $null } else {
+        $endedUtc.ToString("o")
+    }
+    launcher_exit_code = if ($null -eq $process) { $null } else {
+        [int]$process.ExitCode
+    }
     automatic_complete = $complete
     awaiting_human_observation = $true
     segment_count = $segments.Count
