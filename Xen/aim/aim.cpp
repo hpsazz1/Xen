@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -745,6 +746,38 @@ struct Aim::Impl {
     float active_range_radius = 0.0f;
     bool range_locked = false;
     bool range_allows_control = false;
+    AimStatus logged_status = AimStatus::NOT_RUN;
+
+    void log_status_transition(AimStatus status,
+                               std::uint64_t sequence,
+                               const char* reason) noexcept {
+        if (status == logged_status) return;
+        const AimStatus previous = logged_status;
+        logged_status = status;
+        switch (status) {
+            case AimStatus::SUCCESS:
+                LOG_INFO("aim", "Aim 状态变化: {} -> {}, seq={}, reason={}",
+                         AimStatusName(previous), AimStatusName(status),
+                         sequence, reason);
+                break;
+            case AimStatus::INVALID_INPUT:
+                LOG_WARN("aim", "Aim 状态变化: {} -> {}, seq={}, reason={}",
+                         AimStatusName(previous), AimStatusName(status),
+                         sequence, reason);
+                break;
+            case AimStatus::TRACKING_FAILED:
+            case AimStatus::CONTROL_FAILED:
+                LOG_ERROR("aim", "Aim 状态变化: {} -> {}, seq={}, reason={}",
+                          AimStatusName(previous), AimStatusName(status),
+                          sequence, reason);
+                break;
+            case AimStatus::NOT_RUN:
+                LOG_INFO("aim", "Aim 状态变化: {} -> {}, seq={}, reason={}",
+                         AimStatusName(previous), AimStatusName(status),
+                         sequence, reason);
+                break;
+        }
+    }
 
     bool valid_config() const noexcept {
         return aim::detail::valid_aim_config(config);
@@ -4127,6 +4160,12 @@ const char* AimReverseTranslationResetReasonName(
 
 Aim::Aim(const AimConfig& config) : impl_(std::make_unique<Impl>(config)) {
     Log::register_module("aim", LogLevel::INFO);
+    LOG_INFO(
+        "aim",
+        "Aim 已初始化: config_valid={}, prediction={}, delay_compensation={}, person_classes={}, head_classes={}",
+        impl_->valid_config(), config.enable_prediction,
+        config.enable_delay_compensation, config.person_class_ids.size(),
+        config.head_class_ids.size());
 }
 
 Aim::~Aim() = default;
@@ -4142,18 +4181,37 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
     // 此时至少钳到 captured_at，保证控制时刻从不早于其观测。
     const auto control_at = frame.control_at == clock::time_point{}
         ? std::max(invoked_at, frame.captured_at) : frame.control_at;
-    if (!impl_ || !impl_->valid_config() || frame.roi_width <= 0 ||
-        frame.roi_height <= 0 || frame.sequence == 0 ||
-        frame.captured_at == std::chrono::steady_clock::time_point{} ||
-        control_at < frame.captured_at ||
-        !std::isfinite(frame.control_center_x) ||
-        !std::isfinite(frame.control_center_y) ||
-        !std::isfinite(frame.source_pixels_per_roi_pixel_x) ||
-        !std::isfinite(frame.source_pixels_per_roi_pixel_y) ||
-        frame.source_pixels_per_roi_pixel_x <= 0.0f ||
-        frame.source_pixels_per_roi_pixel_y <= 0.0f ||
-        !impl_->valid_frame_order(frame, control_at)) {
+    const char* invalid_reason = nullptr;
+    if (!impl_) {
+        invalid_reason = "Aim 实例无效";
+    } else if (!impl_->valid_config()) {
+        invalid_reason = "AimConfig 非法";
+    } else if (frame.roi_width <= 0 || frame.roi_height <= 0) {
+        invalid_reason = "ROI 尺寸非法";
+    } else if (frame.sequence == 0) {
+        invalid_reason = "sequence 为 0";
+    } else if (frame.captured_at ==
+               std::chrono::steady_clock::time_point{}) {
+        invalid_reason = "captured_at 未设置";
+    } else if (control_at < frame.captured_at) {
+        invalid_reason = "control_at 早于 captured_at";
+    } else if (!std::isfinite(frame.control_center_x) ||
+               !std::isfinite(frame.control_center_y)) {
+        invalid_reason = "控制中心不是有限值";
+    } else if (!std::isfinite(frame.source_pixels_per_roi_pixel_x) ||
+               !std::isfinite(frame.source_pixels_per_roi_pixel_y) ||
+               frame.source_pixels_per_roi_pixel_x <= 0.0f ||
+               frame.source_pixels_per_roi_pixel_y <= 0.0f) {
+        invalid_reason = "ROI 到 source 的像素比例非法";
+    } else if (!impl_->valid_frame_order(frame, control_at)) {
+        invalid_reason = "帧序号或时间未严格递增";
+    }
+    if (invalid_reason) {
         result.status = AimStatus::INVALID_INPUT;
+        if (impl_) {
+            impl_->log_status_transition(
+                result.status, frame.sequence, invalid_reason);
+        }
         return result;
     }
 
@@ -4245,13 +4303,23 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
             std::chrono::duration_cast<milliseconds>(finished - started).count();
         result.status = AimStatus::SUCCESS;
         impl_->commit_frame_order(frame, control_at);
+        impl_->log_status_transition(
+            result.status, frame.sequence, "处理成功");
         LOG_TRACE("aim", "seq={} tracks={} target={} command={} total={:.3f}ms",
                   frame.sequence, impl_->tracks.size(), result.has_target,
                   result.has_command, result.profile.total_ms);
         return result;
+    } catch (const std::exception& error) {
+        impl_->reset_all();
+        result.status = AimStatus::TRACKING_FAILED;
+        impl_->log_status_transition(
+            result.status, frame.sequence, error.what());
+        return result;
     } catch (...) {
         impl_->reset_all();
         result.status = AimStatus::TRACKING_FAILED;
+        impl_->log_status_transition(
+            result.status, frame.sequence, "未知异常");
         return result;
     }
 }

@@ -21,6 +21,22 @@ void expect(bool condition, const std::string& message) {
     std::cerr << "[失败] " << message << '\n';
 }
 
+bool contains_log_text(const std::vector<std::string>& lines,
+                       const std::string& text) {
+    return std::any_of(
+        lines.begin(), lines.end(), [&text](const std::string& line) {
+            return line.find(text) != std::string::npos;
+        });
+}
+
+std::size_t count_log_text(const std::vector<std::string>& lines,
+                           const std::string& text) {
+    return static_cast<std::size_t>(std::count_if(
+        lines.begin(), lines.end(), [&text](const std::string& line) {
+            return line.find(text) != std::string::npos;
+        }));
+}
+
 Detection body(float center_x, float center_y,
                float confidence = 0.9f) {
     return {center_x - 20.0f, center_y - 40.0f,
@@ -68,6 +84,51 @@ AimFrame make_frame(std::uint64_t sequence,
     frame.control_center_x = 160.0f;
     frame.control_center_y = 160.0f;
     return frame;
+}
+
+void test_status_transition_logs_are_limited() {
+    Log::shutdown();
+    LogConfig log_config;
+    log_config.enable_console = false;
+    log_config.enable_file = false;
+    log_config.enable_ringbuf = true;
+    log_config.ringbuf_capacity = 32;
+    Log::init(log_config);
+
+    Aim aim(AimConfig{});
+    const auto base = std::chrono::steady_clock::now();
+    const AimFrame zero_sequence = make_frame(0, base);
+    expect(aim.process(zero_sequence).status == AimStatus::INVALID_INPUT,
+           "日志回归首个非法帧必须返回 INVALID_INPUT");
+    expect(aim.process(zero_sequence).status == AimStatus::INVALID_INPUT,
+           "日志回归重复非法帧必须保持 INVALID_INPUT");
+
+    AimFrame first = make_frame(1, base);
+    expect(aim.process(first).status == AimStatus::SUCCESS,
+           "日志回归合法帧必须从 INVALID_INPUT 恢复");
+    AimFrame second = make_frame(2, base + std::chrono::milliseconds(1));
+    expect(aim.process(second).status == AimStatus::SUCCESS,
+           "日志回归连续成功帧必须保持 SUCCESS");
+    AimFrame duplicate = make_frame(
+        2, base + std::chrono::milliseconds(2));
+    expect(aim.process(duplicate).status == AimStatus::INVALID_INPUT,
+           "日志回归重复序号必须重新进入 INVALID_INPUT");
+
+    const auto lines = Log::get_ring_buffer();
+    expect(contains_log_text(lines, "Aim 已初始化"),
+           "Aim 初始化必须留下单次 INFO 证据");
+    expect(count_log_text(
+               lines, "Aim 状态变化: NOT_RUN -> INVALID_INPUT") == 1,
+           "重复 INVALID_INPUT 不得重复写 WARN");
+    expect(count_log_text(
+               lines, "Aim 状态变化: INVALID_INPUT -> SUCCESS") == 1,
+           "从非法输入恢复必须只写一次 INFO");
+    expect(count_log_text(
+               lines, "Aim 状态变化: SUCCESS -> INVALID_INPUT") == 1,
+           "再次失败必须形成新的单次 WARN 状态转换");
+    expect(contains_log_text(lines, "reason=sequence 为 0"),
+           "INVALID_INPUT 日志必须包含可诊断原因");
+    Log::shutdown();
 }
 
 void test_invalid_input() {
@@ -7948,6 +8009,8 @@ void test_prediction_adds_continuous_delay_derived_lead() {
 } // namespace
 
 int main() {
+    test_status_transition_logs_are_limited();
+
     LogConfig log_config;
     log_config.enable_console = false;
     log_config.enable_file = false;
