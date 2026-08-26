@@ -256,6 +256,11 @@ constexpr float kTrackingIntegralGainPerSecond = 12.0f;
 constexpr float kTrackingIntegralLeakPerSecond = 6.0f;
 constexpr float kTrackingAntiWindupGainPerSecond = 30.0f;
 constexpr float kTrackingIntegralMaximumCounts = 4.0f;
+// closing-slope 只作为 X 请求的带限阻尼。20 ms 一阶滤波覆盖已观测的
+// 4～5 帧反馈时间尺度；2 ms 导数增益把高频误差等效增益限制为比例项的
+// 10%，最终仍由同号预算保证最多减到零而不会自行反向。
+constexpr float kTrackingErrorDerivativeFilterTimeSeconds = 0.020f;
+constexpr float kTrackingErrorDerivativeGainSeconds = 0.002f;
 // 40 ms 窗口内的 pending 总和会按命令逐帧阶跃；0.12 只平滑隐藏库存
 // 投影，使实测 8～10 帧命令反馈周期内逐步制动，不改变公开 prediction 点或
 // 用户配置的 0.475 基础控制平滑。
@@ -696,6 +701,9 @@ struct Aim::Impl {
     float residual_y = 0.0f;
     float feedforward_x = 0.0f;
     float feedforward_y = 0.0f;
+    float tracking_previous_error_x = 0.0f;
+    float tracking_error_derivative_x = 0.0f;
+    bool tracking_error_derivative_initialized = false;
     float world_motion_measurement_x = 0.0f;
     float world_motion_measurement_y = 0.0f;
     // 独立 prediction 状态使用 counts/second；基础控制器前馈仍保持
@@ -2629,6 +2637,9 @@ struct Aim::Impl {
         residual_y = 0.0f;
         feedforward_x = 0.0f;
         feedforward_y = 0.0f;
+        tracking_previous_error_x = 0.0f;
+        tracking_error_derivative_x = 0.0f;
+        tracking_error_derivative_initialized = false;
         world_motion_measurement_x = 0.0f;
         world_motion_measurement_y = 0.0f;
         prediction_world_velocity_x = 0.0f;
@@ -3258,6 +3269,9 @@ struct Aim::Impl {
             residual_y = 0.0f;
             previous_command_x = 0.0f;
             previous_command_y = 0.0f;
+            tracking_previous_error_x = 0.0f;
+            tracking_error_derivative_x = 0.0f;
+            tracking_error_derivative_initialized = false;
             diagnostics.feedforward_x_counts = feedforward_x;
             diagnostics.filtered_x_counts = filtered_x;
             diagnostics.shaped_x_counts = shaped_x;
@@ -3272,6 +3286,17 @@ struct Aim::Impl {
         const float error_y =
             (base_y - frame.control_center_y) *
             frame.source_pixels_per_roi_pixel_y;
+        if (tracking_error_derivative_initialized) {
+            tracking_error_derivative_x =
+                (kTrackingErrorDerivativeFilterTimeSeconds *
+                     tracking_error_derivative_x +
+                 error_x - tracking_previous_error_x) /
+                (kTrackingErrorDerivativeFilterTimeSeconds + controller_dt);
+        } else {
+            tracking_error_derivative_x = 0.0f;
+            tracking_error_derivative_initialized = true;
+        }
+        tracking_previous_error_x = error_x;
         const float error_magnitude = std::hypot(error_x, error_y);
         // deadzone 使用径向软阈值：边界处比例输出连续为零，避免 X/Y 各自
         // 开关形成方形抖动；已学习的维持量仍会平滑泄漏，不会进死区即停发。
@@ -3366,7 +3391,6 @@ struct Aim::Impl {
         diagnostics.proportional_x_counts = proportional_x;
         diagnostics.feedforward_x_counts = feedforward_x;
         diagnostics.desired_before_reverse_x_counts = unconstrained_x;
-        diagnostics.desired_x_counts = desired_x;
         diagnostics.delayed_command_x_counts = delayed_command_x;
         diagnostics.pending_net_x_counts = pending.net_x;
         diagnostics.pending_absolute_x_counts = pending.absolute_x;
@@ -3396,11 +3420,25 @@ struct Aim::Impl {
         filter_axis(desired_y, error_y, filtered_y);
         controller_initialized = true;
         clamp_vector(filtered_x, filtered_y, config.max_counts_per_frame);
-        shaped_x = filtered_x;
+        // 导数状态不回写 PI、anti-windup 或既有 smoothing。只消费朝零
+        // closing slope，并从当前误差同向的 X 请求中连续扣减；扣减预算
+        // 不超过该同向余量，因此滤波残留不能自行产生反向命令。
+        const float error_direction_x = error_x > 0.0f
+            ? 1.0f : (error_x < 0.0f ? -1.0f : 0.0f);
+        const float same_direction_request_x = std::max(
+            0.0f, error_direction_x * filtered_x);
+        const float closing_slope_x = std::max(
+            0.0f, -error_direction_x * tracking_error_derivative_x);
+        const float derivative_damping_x = std::min(
+            same_direction_request_x,
+            kTrackingErrorDerivativeGainSeconds * closing_slope_x *
+                config.counts_per_pixel_x);
+        shaped_x = filtered_x - error_direction_x * derivative_damping_x;
         shaped_y = filtered_y;
         shaper_initialized = true;
         residual_x = 0.0f;
         residual_y = 0.0f;
+        diagnostics.desired_x_counts = shaped_x;
         diagnostics.filtered_x_counts = filtered_x;
         diagnostics.shaped_x_counts = shaped_x;
         diagnostics.residual_before_quantization_x_counts = 0.0f;

@@ -4285,6 +4285,205 @@ void test_backend_completed_delay_inventory_changes_tracking_reversal_response()
                std::to_string(measured_round_trip_hz));
 }
 
+void test_faster_closing_slope_continuously_reduces_tracking_request() {
+    constexpr int kWarmupFrames = 40;
+    constexpr int kFrameCount = kWarmupFrames + 2;
+    constexpr auto kFrameStep = std::chrono::microseconds(4167);
+    constexpr float kWarmupError = 6.0f;
+    constexpr float kCurrentError = 1.5f;
+    constexpr float kStationaryPreviousError = kCurrentError;
+    constexpr float kFasterClosingPreviousError = 2.25f;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 2.25f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 14.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+
+    struct Sample {
+        AimResult previous;
+        AimResult current;
+        int valid_frames = 0;
+        int completed_frames = 0;
+    };
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    const auto run_case = [&](float previous_error) {
+        Aim aim(config);
+        Sample sample;
+        for (int index = 0; index < kFrameCount; ++index) {
+            const float error = index < kWarmupFrames
+                ? kWarmupError
+                : (index == kWarmupFrames ? previous_error : kCurrentError);
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + kFrameStep * index);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = 180.0f - error;
+            frame.lock_active = true;
+            // 身体中心 Y=172 时，默认 0.35 高度的基础点恰为 160，
+            // 使成对夹具只改变 X 图像误差。
+            frame.detections = {body(180.0f, 172.0f)};
+            const AimResult result = aim.process(frame);
+            if (result.status == AimStatus::SUCCESS && result.has_target &&
+                result.control.evaluated) {
+                ++sample.valid_frames;
+            }
+            if (index == kWarmupFrames) sample.previous = result;
+            if (index == kFrameCount - 1) {
+                sample.current = result;
+                continue;
+            }
+            if (result.has_command && aim.record_backend_completed_command(
+                    frame.sequence,
+                    frame.control_at + std::chrono::microseconds(100),
+                    result.command.dx_counts,
+                    result.command.dy_counts)) {
+                ++sample.completed_frames;
+            }
+        }
+        return sample;
+    };
+
+    const Sample stationary = run_case(kStationaryPreviousError);
+    const Sample faster_closing = run_case(kFasterClosingPreviousError);
+    const auto base_error_x = [](const AimResult& result,
+                                 float control_center_x) {
+        return result.target.base_aim_x - control_center_x;
+    };
+    const float stationary_previous_error = base_error_x(
+        stationary.previous, 180.0f - kStationaryPreviousError);
+    const float faster_previous_error = base_error_x(
+        faster_closing.previous, 180.0f - kFasterClosingPreviousError);
+    const float stationary_current_error = base_error_x(
+        stationary.current, 180.0f - kCurrentError);
+    const float faster_current_error = base_error_x(
+        faster_closing.current, 180.0f - kCurrentError);
+
+    expect(stationary.valid_frames == kFrameCount &&
+               faster_closing.valid_frames == kFrameCount &&
+               stationary.completed_frames == kFrameCount - 1 &&
+               faster_closing.completed_frames == kFrameCount - 1,
+           "closing-slope 成对夹具必须逐帧保留同一公开目标、控制求值和"
+           "backend-completed 命令，帧/完成=" +
+               std::to_string(stationary.valid_frames) + "/" +
+               std::to_string(faster_closing.valid_frames) + "/" +
+               std::to_string(stationary.completed_frames) + "/" +
+               std::to_string(faster_closing.completed_frames));
+    expect(std::fabs(stationary_current_error - faster_current_error) <
+                   0.0001f &&
+               std::fabs(stationary_current_error - kCurrentError) <
+                   0.0001f &&
+               std::fabs(stationary_previous_error -
+                         stationary_current_error) < 0.0001f &&
+               faster_previous_error > faster_current_error,
+           "成对序列最终基础误差必须相同，且只由第二条序列提供朝零闭合"
+           "斜率，前帧/当前误差=" +
+               std::to_string(stationary_previous_error) + "/" +
+               std::to_string(faster_previous_error) + "/" +
+               std::to_string(stationary_current_error) + "/" +
+               std::to_string(faster_current_error));
+    expect(stationary.current.range_locked &&
+               faster_closing.current.range_locked &&
+               stationary.current.range_allows_control &&
+               faster_closing.current.range_allows_control &&
+               stationary.current.target.track_id ==
+                   faster_closing.current.target.track_id &&
+               std::fabs(stationary.current.target.base_aim_x -
+                         faster_closing.current.target.base_aim_x) < 0.0001f &&
+               std::fabs(stationary.current.target.base_aim_y -
+                         faster_closing.current.target.base_aim_y) < 0.0001f &&
+               std::fabs(stationary.current.target.x1 -
+                         faster_closing.current.target.x1) < 0.0001f &&
+               std::fabs(stationary.current.target.x2 -
+                         faster_closing.current.target.x2) < 0.0001f &&
+               std::fabs(stationary.current.control.controller_dt_ms -
+                         faster_closing.current.control.controller_dt_ms) <
+                   0.0001f,
+           "closing-slope 分叉不得改变锁定、目标/锚点身份、框几何或真实 dt，"
+           "track/base/dt=" +
+               std::to_string(stationary.current.target.track_id) + "/" +
+               std::to_string(faster_closing.current.target.track_id) +
+               "/" +
+               std::to_string(stationary.current.target.base_aim_x) + "/" +
+               std::to_string(faster_closing.current.target.base_aim_x) +
+               "/" +
+               std::to_string(
+                   stationary.current.control.controller_dt_ms) + "/" +
+               std::to_string(
+                   faster_closing.current.control.controller_dt_ms));
+    expect(std::fabs(stationary.current.control.proportional_x_counts) <
+                   0.0001f &&
+               std::fabs(faster_closing.current.control.
+                             proportional_x_counts) < 0.0001f &&
+               std::fabs(stationary.current.control.feedforward_x_counts -
+                         faster_closing.current.control.
+                             feedforward_x_counts) < 0.0001f &&
+               std::fabs(stationary.current.control.filtered_x_counts -
+                         faster_closing.current.control.filtered_x_counts) <
+                   0.0001f,
+           "死区内分叉不得改变现有 PI 积分或分轴 smoothing 历史，P/积分/"
+           "滤波=" +
+               std::to_string(
+                   stationary.current.control.proportional_x_counts) + "/" +
+               std::to_string(
+                   faster_closing.current.control.proportional_x_counts) +
+               "/" +
+               std::to_string(
+                   stationary.current.control.feedforward_x_counts) + "/" +
+               std::to_string(
+                   faster_closing.current.control.feedforward_x_counts) +
+               "/" +
+               std::to_string(
+                   stationary.current.control.filtered_x_counts) + "/" +
+               std::to_string(
+                   faster_closing.current.control.filtered_x_counts));
+    expect(std::fabs(stationary.current.control.pending_net_x_counts -
+                     faster_closing.current.control.pending_net_x_counts) <
+                   0.0001f &&
+               std::fabs(stationary.current.control.pending_absolute_x_counts -
+                         faster_closing.current.control.
+                             pending_absolute_x_counts) < 0.0001f &&
+               stationary.current.control.pending_net_x_counts > 0.0f &&
+               stationary.current.control.pending_absolute_x_counts > 0.0f,
+           "成对序列必须保留相同且非零的 15 ms backend-completed 库存，"
+           "net/absolute=" +
+               std::to_string(
+                   stationary.current.control.pending_net_x_counts) + "/" +
+               std::to_string(
+                   faster_closing.current.control.pending_net_x_counts) +
+               "/" +
+               std::to_string(
+                   stationary.current.control.pending_absolute_x_counts) +
+               "/" +
+               std::to_string(
+                   faster_closing.current.control.pending_absolute_x_counts));
+    expect(stationary.current.control.desired_x_counts > 0.0f &&
+               faster_closing.current.control.desired_x_counts >= 0.0f,
+           "closing-slope 阻尼只能收缩当前误差同向请求，不得自行反向，"
+           "静止/闭合请求=" +
+               std::to_string(
+                   stationary.current.control.desired_x_counts) + "/" +
+               std::to_string(
+                   faster_closing.current.control.desired_x_counts));
+    expect(std::fabs(faster_closing.current.control.desired_x_counts) <
+               std::fabs(stationary.current.control.desired_x_counts),
+           "最终误差、PI 历史、smoothing 与 backend-completed 库存等价时，"
+           "更快朝零闭合必须连续减小 X 请求幅值，静止/闭合请求=" +
+               std::to_string(
+                   stationary.current.control.desired_x_counts) + "/" +
+               std::to_string(
+                   faster_closing.current.control.desired_x_counts));
+}
+
 void test_delayed_partial_visibility_closed_loop_preserves_real_reversals() {
     constexpr int kFrameCount = 240;
     constexpr int kSegmentFrameCount = 80;
@@ -8171,6 +8370,7 @@ int main() {
     test_vertical_shape_noise_does_not_stutter_horizontal_tracking();
     test_backend_completed_command_feedback_contract();
     test_backend_completed_delay_inventory_changes_tracking_reversal_response();
+    test_faster_closing_slope_continuously_reduces_tracking_request();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_pi_is_separate_from_prediction_projection();
