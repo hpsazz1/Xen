@@ -312,18 +312,35 @@ try {
         (Join-Path $trackingRoot "TASK.md") -Raw -Encoding utf8
     $trackingObservation = Get-Content -LiteralPath `
         (Join-Path $trackingRoot "OBSERVATION.md") -Raw -Encoding utf8
-    if ($trackingTaskMarkdown -notmatch [regex]::Escape(
-            "X 轴持续移动、短暂停顿和明确换向")) {
-        throw "SuperJump 操作步骤必须主动覆盖 X 持续移动、停顿和换向。"
+    foreach ($requiredPhaseText in @(
+            "阶段 1（X 静止）",
+            "阶段 2（X 持续横移）",
+            "阶段 3（X 横移后停止）",
+            "阶段 4（X 横移后换向）",
+            "目标完全移出 ROI 并保持至少 2 秒")) {
+        if ($trackingTaskMarkdown -notmatch
+                [regex]::Escape($requiredPhaseText)) {
+            throw "SuperJump 操作步骤缺少可分段回收协议：$requiredPhaseText"
+        }
     }
     foreach ($requiredText in @(
-            "X 轴持续移动时是否落后或追不上",
-            "X 轴停顿后基础点是否继续同向移动、贴边或晃动",
-            "X 轴换向时是否硬停、过冲、来回修正或一顿一顿",
-            "与上一 Run 相比 X 晃动、追赶和连续性是否改善")) {
+            "阶段 1 X 静止期间基础点或准星是否自行晃动",
+            "阶段 2 X 持续横移是否落后、追不上或出框",
+            "阶段 3 停止后是否延迟停发、过冲或细碎往返",
+            "阶段 4 换向时是否硬停、过冲或细碎往返",
+            "四个阶段是否均由至少 2 秒无目标窗分隔")) {
         if ($trackingTaskMarkdown -notmatch [regex]::Escape($requiredText) -or
             $trackingObservation -notmatch [regex]::Escape($requiredText)) {
-            throw "SuperJump 任务和观察记录必须同时覆盖当前 X 晃动、追赶、停顿与换向门禁：$requiredText"
+            throw "SuperJump 任务和观察记录必须同时覆盖分阶段门禁：$requiredText"
+        }
+    }
+    foreach ($phaseRow in @(
+            "| 1：X 静止 |",
+            "| 2：X 持续横移 |",
+            "| 3：X 横移后停止 |",
+            "| 4：X 横移后换向 |")) {
+        if ($trackingObservation -notmatch [regex]::Escape($phaseRow)) {
+            throw "SuperJump 观察记录缺少阶段时间行：$phaseRow"
         }
     }
 
