@@ -4687,6 +4687,122 @@ void test_delay_shaping_has_no_speed_threshold_before_prediction() {
                std::to_string(above_old_threshold.shaped_x));
 }
 
+void test_prediction_direct_feedforward_has_no_absolute_velocity_mode() {
+    constexpr float kFrameSeconds = 1.0f / 120.0f;
+    constexpr float kBuildMotionPerFrame = 2.50f;
+    constexpr float kMeasuredMotionPerFrame = 1.25f;
+    constexpr int kBuildFrames = 360;
+    constexpr int kActuationDelayFrames = 2;
+    constexpr int kFrameCount = 960;
+    constexpr int kMeasureFrames = 240;
+    // 0.5 count 是整数执行的一半量化步，只约束同一连续轨迹的单帧输出
+    // 跳变；它不是人物速度判据，也不得进入生产控制分支。
+    constexpr float kMaximumFeedforwardStepCounts = 0.50f;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.80f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 16.0f;
+    config.max_delay_compensation_ms = 16.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = true;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> delayed_commands{};
+    float world_target_x = 0.0f;
+    float camera_x = 0.0f;
+    float previous_feedforward = 0.0f;
+    float previous_lead_x = 0.0f;
+    bool previous_active_sample = false;
+    int valid_frames = 0;
+    int lead_active_frames = 0;
+    int discontinuous_feedforward_steps = 0;
+    float maximum_feedforward_step = 0.0f;
+    float maximum_lead_step = 0.0f;
+    float maximum_base_error = 0.0f;
+
+    for (int index = 0; index < kFrameCount; ++index) {
+        const int slot = index % kActuationDelayFrames;
+        camera_x += delayed_commands[slot] /
+            config.counts_per_pixel_x;
+        delayed_commands[slot] = 0;
+        world_target_x += index < kBuildFrames
+            ? kBuildMotionPerFrame : kMeasuredMotionPerFrame;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(
+                static_cast<long long>(
+                    index * kFrameSeconds * 1000000.0f)));
+        frame.control_at = frame.captured_at +
+            std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body_box(
+            160.0f + world_target_x - camera_x,
+            160.0f, 40.0f, 80.0f)};
+        const AimResult result = aim.process(frame);
+        if (result.status != AimStatus::SUCCESS || !result.has_target) {
+            previous_active_sample = false;
+            continue;
+        }
+        if (result.has_command) {
+            delayed_commands[slot] = result.command.dx_counts;
+        }
+        if (index < kFrameCount - kMeasureFrames) continue;
+        ++valid_frames;
+        maximum_base_error = std::max(
+            maximum_base_error,
+            std::fabs(result.target.base_aim_x -
+                      frame.control_center_x));
+        if (!result.target.lead_active) {
+            previous_active_sample = false;
+            continue;
+        }
+        ++lead_active_frames;
+        if (previous_active_sample) {
+            const float feedforward_step = std::fabs(
+                result.control.feedforward_x_counts -
+                previous_feedforward);
+            const float lead_step = std::fabs(
+                result.target.lead_x - previous_lead_x);
+            maximum_feedforward_step = std::max(
+                maximum_feedforward_step, feedforward_step);
+            maximum_lead_step = std::max(
+                maximum_lead_step, lead_step);
+            if (feedforward_step > kMaximumFeedforwardStepCounts) {
+                ++discontinuous_feedforward_steps;
+            }
+        }
+        previous_feedforward = result.control.feedforward_x_counts;
+        previous_lead_x = result.target.lead_x;
+        previous_active_sample = true;
+    }
+
+    expect(valid_frames == kMeasureFrames &&
+               lead_active_frames == kMeasureFrames &&
+               maximum_base_error < 20.0f,
+           "低 cadence X deletion fixture 必须保持同一目标、连续 lead 和框内基础控制，"
+           "有效/活动=" + std::to_string(valid_frames) + "/" +
+               std::to_string(lead_active_frames) + "，基础误差=" +
+               std::to_string(maximum_base_error));
+    expect(discontinuous_feedforward_steps == 0 &&
+               maximum_feedforward_step <=
+                   kMaximumFeedforwardStepCounts,
+           "同一连续轨迹的 X direct feedforward 不得因旧绝对 counts/s 分类"
+           "反复切换公式，超半量化步帧=" +
+               std::to_string(discontinuous_feedforward_steps) +
+               "，最大前馈步长=" +
+               std::to_string(maximum_feedforward_step) +
+               "，同期最大 lead 步长=" +
+               std::to_string(maximum_lead_step));
+}
+
 void test_tracking_public_point_is_independent_of_command_age() {
     const auto project_after = [](int age_microseconds) {
         AimConfig config;
@@ -7489,6 +7605,7 @@ int main() {
     test_tracking_pi_is_separate_from_prediction_projection();
     test_base_tracking_quantization_has_no_speed_threshold();
     test_delay_shaping_has_no_speed_threshold_before_prediction();
+    test_prediction_direct_feedforward_has_no_absolute_velocity_mode();
     test_tracking_public_point_is_independent_of_command_age();
     test_pending_command_age_uses_control_execution_time();
     test_tracking_pi_filters_axes_independently();

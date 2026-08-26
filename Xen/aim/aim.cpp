@@ -3656,14 +3656,12 @@ struct Aim::Impl {
         float control_feedforward_x = feedforward_x;
         if (use_coherent_prediction_projection_x &&
             controller_dt >=
-                kPredictionDirectFeedforwardMinimumDeltaSeconds &&
-            std::fabs(prediction_world_velocity_x) >=
-                kPredictionEstablishedWorldVelocityCountsPerSecond) {
+                kPredictionDirectFeedforwardMinimumDeltaSeconds) {
             // prediction 点与控制器必须消费同一份已确认世界速度。否则公开
             // 点按稳定速度前探，物理控制却在相机反馈低谷释放基础前馈，最终
             // 只能长期保留比例误差来维持移动，表现为准星贴不到预测标记。
             // 幅度按当前真实 dt 积分，有限校正只补偿离散命令与实际镜头
-            // 反馈之间的小幅损失，不改变高/低频选择或单帧上限。
+            // 反馈之间的小幅损失，不改变 coherent/时间前提或单帧上限。
             control_feedforward_x = std::clamp(
                 prediction_world_velocity_x * controller_dt *
                     kPredictionDirectFeedforwardScale,
