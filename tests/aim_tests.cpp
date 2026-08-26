@@ -4930,6 +4930,173 @@ void test_prediction_confirmed_stop_has_no_absolute_velocity_mode() {
                std::to_string(below_old_threshold.confirmed_lead));
 }
 
+void test_prediction_stop_measurement_has_no_absolute_velocity_mode() {
+    constexpr float kFrameSeconds = 1.0f / 120.0f;
+    constexpr int kActuationDelayFrames = 2;
+    constexpr int kBuildFrames = 360;
+    constexpr int kMovingFrames = 480;
+    constexpr int kEvidenceFrame = kMovingFrames + 19;
+    constexpr int kFrameCount = 520;
+    constexpr float kCountsPerPixelX = 0.81f;
+    constexpr float kCameraResponse = 1.10f;
+    constexpr float kRetainedFeedforwardRatio = 0.75f;
+    const auto make_config = [&] {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = kCountsPerPixelX;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 12.0f;
+        config.acquisition_range_percent = 100.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 16.0f;
+        config.max_delay_compensation_ms = 16.0f;
+        config.max_delay_compensation_percent = 15.0f;
+        config.enable_prediction = true;
+        return config;
+    };
+    struct MotionSample {
+        int valid_frames = 0;
+        float before_feedforward = 0.0f;
+        float evidence_feedforward = 0.0f;
+        float after_feedforward = 0.0f;
+        float before_lead = 0.0f;
+        float evidence_lead = 0.0f;
+        bool before_active = false;
+        bool evidence_active = false;
+        bool after_active = false;
+    };
+    const auto run_moving_case = [&] {
+        AimConfig config = make_config();
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        std::array<int, kActuationDelayFrames> delayed_commands{};
+        float world_target_x = 2.5f;
+        float camera_x = 0.0f;
+        MotionSample sample;
+        for (int index = 0; index < kFrameCount; ++index) {
+            const int slot = index % kActuationDelayFrames;
+            camera_x += delayed_commands[slot] /
+                config.counts_per_pixel_x * kCameraResponse;
+            delayed_commands[slot] = 0;
+            if (index < kBuildFrames) {
+                world_target_x += 2.5f;
+            } else if (index < kMovingFrames) {
+                world_target_x += 1.25f;
+            }
+            if (index == kEvidenceFrame) {
+                // 停稳后的同向 1.65 px 小位移只提供一次新的屏幕运动证据，
+                // 不改变 120 Hz、两帧反馈、控制参数或物理上限。
+                world_target_x += 1.65f;
+            }
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(static_cast<long long>(
+                    index * kFrameSeconds * 1000000.0f)));
+            frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                160.0f + world_target_x - camera_x,
+                160.0f, 40.0f, 80.0f)};
+            const AimResult result = aim.process(frame);
+            if (result.status != AimStatus::SUCCESS || !result.has_target) {
+                continue;
+            }
+            ++sample.valid_frames;
+            if (result.has_command) {
+                delayed_commands[slot] = result.command.dx_counts;
+            }
+            if (index == kEvidenceFrame) {
+                sample.before_feedforward =
+                    result.control.feedforward_x_counts;
+                sample.before_lead = result.target.lead_x;
+                sample.before_active = result.target.lead_active;
+            } else if (index == kEvidenceFrame + 1) {
+                sample.evidence_feedforward =
+                    result.control.feedforward_x_counts;
+                sample.evidence_lead = result.target.lead_x;
+                sample.evidence_active = result.target.lead_active;
+            } else if (index == kEvidenceFrame + 2) {
+                sample.after_feedforward =
+                    result.control.feedforward_x_counts;
+                sample.after_active = result.target.lead_active;
+            }
+        }
+        return sample;
+    };
+
+    const MotionSample moving = run_moving_case();
+    expect(moving.valid_frames == kFrameCount && moving.before_active &&
+               moving.before_feedforward > 0.0f && moving.before_lead > 0.0f,
+           "测量源 deletion fixture 必须保持同一目标和已建立的同向 X lead，"
+           "有效帧=" + std::to_string(moving.valid_frames) +
+               "，确认前活动=" + std::to_string(moving.before_active) +
+               "，前馈=" + std::to_string(moving.before_feedforward) +
+               "，lead=" + std::to_string(moving.before_lead));
+    expect(moving.evidence_active && moving.after_active &&
+               moving.evidence_feedforward >=
+                   moving.before_feedforward * kRetainedFeedforwardRatio &&
+               moving.after_feedforward >=
+                   moving.before_feedforward * kRetainedFeedforwardRatio,
+           "同一停止窗内的新同向运动证据不得仅因旧绝对 counts/s 资格被忽略，"
+           "确认前/证据帧/后一帧前馈=" +
+               std::to_string(moving.before_feedforward) + "/" +
+               std::to_string(moving.evidence_feedforward) + "/" +
+               std::to_string(moving.after_feedforward) +
+               "，活动=" + std::to_string(moving.before_active) + "/" +
+               std::to_string(moving.evidence_active) + "/" +
+               std::to_string(moving.after_active) +
+               "，证据帧 lead=" + std::to_string(moving.evidence_lead));
+
+    AimConfig static_config = make_config();
+    Aim static_aim(static_config);
+    const auto static_base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::array<int, kActuationDelayFrames> static_delayed_commands{};
+    constexpr float kStaticWorldTargetX = 2.5f;
+    float static_camera_x = 0.0f;
+    int static_command_frames = 0;
+    int static_prediction_frames = 0;
+    float maximum_static_lead = 0.0f;
+    for (int index = 0; index < kFrameCount; ++index) {
+        const int slot = index % kActuationDelayFrames;
+        static_camera_x += static_delayed_commands[slot] /
+            static_config.counts_per_pixel_x * kCameraResponse;
+        static_delayed_commands[slot] = 0;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            static_base + std::chrono::microseconds(static_cast<long long>(
+                index * kFrameSeconds * 1000000.0f)));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body_box(
+            160.0f + kStaticWorldTargetX - static_camera_x,
+            160.0f, 40.0f, 80.0f)};
+        const AimResult result = static_aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "同 cadence 静态相机反馈负例必须逐帧保留合法目标");
+        if (!result.has_target) continue;
+        const float lead = std::fabs(result.target.lead_x);
+        maximum_static_lead = std::max(maximum_static_lead, lead);
+        if (result.target.lead_active && lead > 0.25f) {
+            ++static_prediction_frames;
+        }
+        if (result.has_command) {
+            ++static_command_frames;
+            static_delayed_commands[slot] = result.command.dx_counts;
+        }
+    }
+    expect(static_command_frames > 0 && static_prediction_frames == 0 &&
+               maximum_static_lead <= 0.25f,
+           "删除测量源速度资格后，120 Hz 两帧静态相机反馈仍不得建立 X prediction，"
+           "命令帧=" + std::to_string(static_command_frames) +
+               "，prediction 帧=" + std::to_string(static_prediction_frames) +
+               "，最大 lead=" + std::to_string(maximum_static_lead));
+}
+
 void test_tracking_public_point_is_independent_of_command_age() {
     const auto project_after = [](int age_microseconds) {
         AimConfig config;
@@ -7734,6 +7901,7 @@ int main() {
     test_delay_shaping_has_no_speed_threshold_before_prediction();
     test_prediction_direct_feedforward_has_no_absolute_velocity_mode();
     test_prediction_confirmed_stop_has_no_absolute_velocity_mode();
+    test_prediction_stop_measurement_has_no_absolute_velocity_mode();
     test_tracking_public_point_is_independent_of_command_age();
     test_pending_command_age_uses_control_execution_time();
     test_tracking_pi_filters_axes_independently();

@@ -2497,13 +2497,11 @@ struct Aim::Impl {
             const float relative_counts = relative_velocity * source_scale *
                 track.prediction_dt * counts_per_pixel *
                 kControllerFeedforwardVelocityScale;
-            // 命令补偿后的世界测量负责建立运动；只有该轴 prediction 已有
-            // 足够强且与屏幕相对速度同向的世界速度时，才允许后者跨越低谷。
-            // 否则静止目标的相机归位会在 Y 轴凭空创建 prediction，随后被
-            // 反拉保护误当成真实运动方向并长期清零高度修正命令。
+            // 命令补偿后的世界测量仍负责前置候选建立；进入这里后，只在
+            // 屏幕相对运动与已确认 prediction 同向且幅值更大时允许它跨越
+            // 补偿低谷。静止目标的相机归位不能从零建立 prediction，也就
+            // 不会被 Y 轴反拉保护误当成真实运动方向。
             const bool relative_motion_confirms_world_motion =
-                std::fabs(prediction_velocity) >=
-                    kPredictionEstablishedWorldVelocityCountsPerSecond &&
                 relative_counts * prediction_velocity > 0.0f;
             return relative_motion_confirms_world_motion &&
                     std::fabs(relative_counts) > std::fabs(world_measurement)
