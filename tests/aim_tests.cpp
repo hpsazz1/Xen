@@ -4049,7 +4049,7 @@ void test_vertical_shape_noise_does_not_stutter_horizontal_tracking() {
                std::to_string(error_p95));
 }
 
-void test_applied_command_feedback_contract() {
+void test_backend_completed_command_feedback_contract() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 0.0f;
@@ -4070,33 +4070,33 @@ void test_applied_command_feedback_contract() {
     const AimResult first_result = aim.process(first);
     expect(first_result.status == AimStatus::SUCCESS &&
                first_result.has_command,
-           "实际命令反馈契约必须先生成一条可发送命令");
-    const auto first_applied_at =
+           "后端完成反馈契约必须先生成一条可发送命令");
+    const auto first_backend_completed_at =
         first.control_at + std::chrono::microseconds(100);
-    expect(!aim.record_applied_command(
+    expect(!aim.record_backend_completed_command(
                first.sequence,
                first.control_at - std::chrono::microseconds(1),
                first_result.command.dx_counts,
                first_result.command.dy_counts),
            "实际完成时刻早于控制计算时刻必须拒绝");
-    expect(!aim.record_applied_command(
+    expect(!aim.record_backend_completed_command(
                first.sequence,
-               first_applied_at,
+               first_backend_completed_at,
                first_result.command.dx_counts + 1,
                first_result.command.dy_counts),
-           "非零实际命令与预计算命令不一致时必须拒绝");
-    expect(aim.record_applied_command(
+           "非零后端完成命令与预计算命令不一致时必须拒绝");
+    expect(aim.record_backend_completed_command(
                first.sequence,
-               first_applied_at,
+               first_backend_completed_at,
                first_result.command.dx_counts,
                first_result.command.dy_counts),
            "Mouse 成功后必须按同一帧序号确认实际整数命令");
-    expect(!aim.record_applied_command(
+    expect(!aim.record_backend_completed_command(
                first.sequence,
-               first_applied_at,
+               first_backend_completed_at,
                first_result.command.dx_counts,
                first_result.command.dy_counts),
-           "同一帧实际命令不得重复确认");
+           "同一帧后端完成命令不得重复确认");
 
     AimFrame second = make_frame(
         2, base + std::chrono::milliseconds(4));
@@ -4105,13 +4105,13 @@ void test_applied_command_feedback_contract() {
     second.detections = {body(200.0f, 160.0f)};
     const AimResult second_result = aim.process(second);
     expect(second_result.has_command &&
-               aim.record_applied_command(
+               aim.record_backend_completed_command(
                    second.sequence,
                    second.control_at + std::chrono::microseconds(100),
                    0,
                    0),
            "Mouse 失败或二次安全门拒绝时必须把预计算命令确认为零");
-    expect(!aim.record_applied_command(
+    expect(!aim.record_backend_completed_command(
                999,
                second.control_at + std::chrono::microseconds(200),
                0,
@@ -7483,7 +7483,7 @@ int main() {
     test_delayed_closed_loop_holds_moving_base_point();
     test_delayed_pose_closed_loop_keeps_tracking_pi_continuous();
     test_vertical_shape_noise_does_not_stutter_horizontal_tracking();
-    test_applied_command_feedback_contract();
+    test_backend_completed_command_feedback_contract();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_pi_is_separate_from_prediction_projection();

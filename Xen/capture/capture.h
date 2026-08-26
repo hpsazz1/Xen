@@ -47,6 +47,40 @@ enum class CapturedFrameStorage {
     D3D11_BGRA8_DIRECTML,
 };
 
+enum class SourceTimeBasis {
+    UNAVAILABLE,
+    // NDI SDK 在发送端收到该帧的提交时刻；不是相机曝光或桌面采集时刻。
+    NDI_SDK_SUBMISSION,
+};
+
+enum class SourceClockStatus {
+    UNSYNCHRONIZED,
+    WARMING,
+    VALID,
+    STALE,
+    INVALID,
+};
+
+inline const char* SourceTimeBasisName(SourceTimeBasis basis) noexcept {
+    switch (basis) {
+        case SourceTimeBasis::UNAVAILABLE: return "UNAVAILABLE";
+        case SourceTimeBasis::NDI_SDK_SUBMISSION:
+            return "NDI_SDK_SUBMISSION";
+    }
+    return "UNKNOWN";
+}
+
+inline const char* SourceClockStatusName(SourceClockStatus status) noexcept {
+    switch (status) {
+        case SourceClockStatus::UNSYNCHRONIZED: return "UNSYNCHRONIZED";
+        case SourceClockStatus::WARMING: return "WARMING";
+        case SourceClockStatus::VALID: return "VALID";
+        case SourceClockStatus::STALE: return "STALE";
+        case SourceClockStatus::INVALID: return "INVALID";
+    }
+    return "UNKNOWN";
+}
+
 const char* CaptureStatusName(CaptureStatus status) noexcept;
 const char* CaptureBackendName(CaptureBackend backend) noexcept;
 const char* UdpFrameLayoutName(UdpFrameLayout layout) noexcept;
@@ -77,6 +111,12 @@ struct CaptureConfig {
     int ndi_discovery_timeout_ms = 5000;
     int ndi_receive_timeout_ms = 50;
     int ndi_disconnect_timeout_ms = 2000;
+    // NDI timestamp 使用源机 UTC；Windows Time 未锁定时必须通过该独立
+    // 四时间戳旁路映射到辅机 steady_clock。空值保持 source age unknown。
+    std::string ndi_clock_sync_url;
+    int ndi_clock_sync_interval_ms = 250;
+    int ndi_clock_sync_timeout_ms = 200;
+    int ndi_clock_mapping_max_age_ms = 1000;
     // 仅由正式性能入口临时开启，不持久化到用户配置。开启后记录 NDI
     // 分段耗时，并低频查询 SDK 队列深度；正常运行保持关闭以避免诊断扰动。
     bool enable_performance_probes = false;
@@ -149,6 +189,19 @@ struct FrameTiming {
     bool source_timecode_valid = false;
     std::int64_t source_timestamp = 0;
     bool source_timestamp_valid = false;
+    SourceTimeBasis source_time_basis = SourceTimeBasis::UNAVAILABLE;
+    SourceClockStatus source_clock_status =
+        SourceClockStatus::UNSYNCHRONIZED;
+    // 映射后的源时刻与本地 steady_clock 同域。valid=false 时 time_point
+    // 和所有质量标量均不得解释为真实零值。
+    bool source_time_timing_valid = false;
+    std::chrono::steady_clock::time_point source_time_at{};
+    double source_clock_uncertainty_ms = 0.0;
+    double source_clock_round_trip_ms = 0.0;
+    double source_clock_rate = 1.0;
+    double source_clock_mapping_age_ms = 0.0;
+    std::uint64_t source_clock_sample_count = 0;
+    std::uint64_t source_clock_session_id = 0;
 };
 
 struct CapturedFrame {

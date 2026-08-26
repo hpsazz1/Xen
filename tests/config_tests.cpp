@@ -29,6 +29,8 @@ void test_current_code_defaults() {
     expect(config.capture.backend == CaptureBackend::NDI &&
                config.capture.ndi_source_name == "HPSAZZ (Xen-ROI-320)" &&
                config.capture.ndi_discovery_timeout_ms == 10000 &&
+               config.capture.ndi_clock_sync_url ==
+                   "udp://192.168.3.10:5011" &&
                config.capture.ndi_frame_layout ==
                    NetworkFrameLayout::CENTER_CROP_1_TO_1 &&
                config.capture.ndi_source_width == 2560 &&
@@ -122,6 +124,10 @@ void test_round_trip() {
     source.capture.ndi_discovery_timeout_ms = 4500;
     source.capture.ndi_receive_timeout_ms = 40;
     source.capture.ndi_disconnect_timeout_ms = 1800;
+    source.capture.ndi_clock_sync_url = "udp://127.0.0.1:5011";
+    source.capture.ndi_clock_sync_interval_ms = 300;
+    source.capture.ndi_clock_sync_timeout_ms = 150;
+    source.capture.ndi_clock_mapping_max_age_ms = 1200;
     source.capture.ndi_frame_layout =
         NetworkFrameLayout::CENTER_CROP_1_TO_1;
     source.capture.ndi_source_width = 2560;
@@ -192,6 +198,11 @@ void test_round_trip() {
            loaded.capture.ndi_discovery_timeout_ms == 4500 &&
            loaded.capture.ndi_receive_timeout_ms == 40 &&
            loaded.capture.ndi_disconnect_timeout_ms == 1800 &&
+           loaded.capture.ndi_clock_sync_url ==
+               source.capture.ndi_clock_sync_url &&
+           loaded.capture.ndi_clock_sync_interval_ms == 300 &&
+           loaded.capture.ndi_clock_sync_timeout_ms == 150 &&
+           loaded.capture.ndi_clock_mapping_max_age_ms == 1200 &&
            loaded.capture.ndi_frame_layout ==
                NetworkFrameLayout::CENTER_CROP_1_TO_1 &&
            loaded.capture.ndi_source_width == 2560 &&

@@ -1,6 +1,7 @@
 #ifndef MOUSE_H
 #define MOUSE_H
 
+#include <chrono>
 #include <memory>
 #include <array>
 #include <cstdint>
@@ -68,6 +69,21 @@ struct MouseMoveCommand {
     int dy_counts = 0;
 };
 
+struct MouseMoveReceipt {
+    bool succeeded = false;
+    // 后端同步调用返回前的本机完成时刻。Win32 只证明事件已插入输入流；
+    // KMBOX/MAKCU 则还可能带独立 ACK，但都不能据此推导物理移动已出现。
+    std::chrono::steady_clock::time_point backend_completed_at{};
+    // 只表示后端收到了可与当前命令匹配的协议响应；不推导设备已执行，
+    // 更不推导物理移动已在屏幕或传感器上出现。
+    bool protocol_ack_received = false;
+    std::chrono::steady_clock::time_point protocol_ack_received_at{};
+    bool physical_effect_observed = false;
+    std::chrono::steady_clock::time_point physical_effect_at{};
+
+    operator bool() const noexcept { return succeeded; }
+};
+
 class IMouseController {
 public:
     virtual ~IMouseController() = default;
@@ -76,7 +92,8 @@ public:
     IMouseController& operator=(const IMouseController&) = delete;
 
     virtual bool open() noexcept = 0;
-    virtual bool move(const MouseMoveCommand& command) noexcept = 0;
+    virtual MouseMoveReceipt move(
+        const MouseMoveCommand& command) noexcept = 0;
     // 非阻塞取得与当前鼠标输出后端绑定的物理键鼠状态；只有 state_valid
     // 快照可改变键态，status 只描述链路，不得被调用方猜测为全释放。
     virtual bool poll_input(InputSnapshot& snapshot) noexcept = 0;

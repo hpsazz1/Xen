@@ -86,6 +86,7 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 | `xen_app` | `Xen.exe` | 主应用与 Overlay |
 | `xen_launcher` | `XenLauncher.exe` | 正式包 Provider 路由入口 |
 | `xen_sender` | `XenSender.exe` | DXGI → XUDP 发送端 |
+| `xen_clock_source` | `XenClockSource.exe` | NDI 源机四时间戳旁路；不接触图像或输入设备 |
 | `xen_benchmark` | `XenBenchmark.exe` | 无界面 Runtime 基准 |
 | `xen_mouse_benchmark` | `XenMouseBenchmark.exe` | 鼠标后端性能与协议验证 |
 
@@ -97,12 +98,19 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 | [scripts/build_aim_debug.ps1](scripts/build_aim_debug.ps1) | 固定 NVIDIA 环境下的 Aim/Runtime 轻量构建 |
 | [scripts/publish_release_bundle.ps1](scripts/publish_release_bundle.ps1) | 生成隔离 Provider 的正式发布包 |
 | [scripts/invoke_aim_manual_acceptance.ps1](scripts/invoke_aim_manual_acceptance.ps1) | 生成并执行受控 Aim 人工 Run |
+| [scripts/run_ndi_clock_source.ps1](scripts/run_ndi_clock_source.ps1) | 在 NDI 源机前台启动时钟旁路；不会访问 KMBOX |
 | [scripts/benchmark_runtime.ps1](scripts/benchmark_runtime.ps1) | Runtime 正式基准与原子报告 |
 | [scripts/test_tensorrt.ps1](scripts/test_tensorrt.ps1) | TensorRT 专项正确性与变化输入验证 |
 | [scripts/test_directml.ps1](scripts/test_directml.ps1) | DirectML 独立构建与专项验证 |
 | [scripts/test_openvino.ps1](scripts/test_openvino.ps1) | OpenVINO 独立构建与专项验证 |
 
 其余专项入口位于 [scripts/](scripts/)。脚本是参数和证据格式的事实源；不要长期维护一次性脚本。
+
+NDI `timestamp` 在报告中明确记为 SDK submission time，不称为桌面采集或曝光时刻。源机旁路以低频
+四时间戳交换把该 UTC 时间映射到接收机 `steady_clock`，并逐帧输出 status、RTT、uncertainty、rate、
+mapping age、sample count 和 source session；映射未就绪、过期或回跳时保持无效。Mouse 报告也分别
+记录 backend completion、匹配协议响应的 protocol ACK 和独立 physical effect；当前后端没有物理效果
+观测能力，因此不能由 API 返回或 ACK 推导真实鼠标已经移动。
 
 ## 源码结构
 
@@ -112,6 +120,8 @@ Xen/
 ├── app/                 # 应用、Launcher、模型目录与资源
 ├── benchmark/           # 无界面 Runtime 基准
 ├── capture/             # DXGI、UDP、XUDP、NDI
+├── clock_source/        # NDI 源机时钟旁路进程
+├── clock_sync/          # 双机四时间戳与 affine 映射
 ├── config/              # INI 聚合、保存与校验
 ├── crash/               # 崩溃报告与紧急日志尾部
 ├── debug/               # 有界样本与 CSV/JSON 报告

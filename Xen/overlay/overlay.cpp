@@ -1809,7 +1809,7 @@ struct Overlay::Impl {
         if (snapshot.control_latency_available) {
             ImGui::TextColored(
                 rgba(kMutedInk),
-                "端到端控制：最近 %.3f ms | P50 %.3f ms | P95 %.3f ms | 样本 %zu",
+                "Capture→鼠标后端完成：最近 %.3f ms | P50 %.3f ms | P95 %.3f ms | 样本 %zu",
                 snapshot.control_latency_last_ms,
                 snapshot.control_latency_p50_ms,
                 snapshot.control_latency_p95_ms,
@@ -1817,7 +1817,7 @@ struct Overlay::Impl {
         } else {
             ImGui::TextColored(
                 rgba(kFaintInk),
-                "端到端控制：尚无完成鼠标命令样本");
+                "Capture→鼠标后端完成：尚无样本（不等于协议 ACK 或物理效果）");
         }
         end_surface();
     }

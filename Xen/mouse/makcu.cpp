@@ -430,18 +430,19 @@ public:
         }
     }
 
-    bool move(const MouseMoveCommand& command) noexcept override {
+    MouseMoveReceipt move(
+            const MouseMoveCommand& command) noexcept override {
         std::lock_guard<std::mutex> io_lock(io_mutex_);
         if (!config_.allow_send_input) {
             set_error("MAKCU 未在配置中显式允许");
             status_.store(MouseStatus::DISABLED, std::memory_order_release);
-            return false;
+            return {};
         }
         if (command.dx_counts == 0 && command.dy_counts == 0) {
             set_error("鼠标移动命令不能同时为零");
             status_.store(MouseStatus::INVALID_COMMAND,
                           std::memory_order_release);
-            return false;
+            return {};
         }
         constexpr int kMinimumMove =
             std::numeric_limits<std::int16_t>::min();
@@ -454,13 +455,13 @@ public:
             set_error("MAKCU 相对位移超出 int16 范围");
             status_.store(MouseStatus::INVALID_COMMAND,
                           std::memory_order_release);
-            return false;
+            return {};
         }
         if (!connected_ || !transport_) {
             set_error("MAKCU 尚未连接");
             status_.store(MouseStatus::CONNECTION_FAILED,
                           std::memory_order_release);
-            return false;
+            return {};
         }
 
         try {
@@ -470,7 +471,7 @@ public:
             std::array<std::uint8_t, kSetterResponseBytes> response{};
             if (!exchange(request, response,
                           config_.makcu_command_timeout_ms, "移动命令")) {
-                return false;
+                return {};
             }
             if (response[0] != kFrameStart ||
                 response[1] != kMoveCommand || response[2] != 1U ||
@@ -478,23 +479,30 @@ public:
                 set_error("MAKCU 移动 ACK 帧头或长度非法");
                 status_.store(MouseStatus::INVALID_RESPONSE,
                               std::memory_order_release);
-                return false;
+                return {};
             }
             if (response[4] != 0U) {
                 set_error("MAKCU 设备拒绝移动命令，status=" +
                           std::to_string(response[4]));
                 status_.store(MouseStatus::SEND_FAILED,
                               std::memory_order_release);
-                return false;
+                return {};
             }
             status_.store(MouseStatus::READY, std::memory_order_release);
             set_error({});
-            return true;
+            const auto acknowledged_at =
+                std::chrono::steady_clock::now();
+            MouseMoveReceipt receipt;
+            receipt.succeeded = true;
+            receipt.protocol_ack_received = true;
+            receipt.protocol_ack_received_at = acknowledged_at;
+            receipt.backend_completed_at = acknowledged_at;
+            return receipt;
         } catch (...) {
             set_error("发送 MAKCU 移动命令时发生未知异常");
             status_.store(MouseStatus::SEND_FAILED,
                           std::memory_order_release);
-            return false;
+            return {};
         }
     }
 

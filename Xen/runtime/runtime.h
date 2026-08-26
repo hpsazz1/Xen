@@ -55,13 +55,34 @@ struct PipelineProfile {
     AimProfile aim;
     double mouse_ms = 0.0;
     double total_ms = 0.0;
+    SourceTimeBasis source_time_basis = SourceTimeBasis::UNAVAILABLE;
+    SourceClockStatus source_clock_status =
+        SourceClockStatus::UNSYNCHRONIZED;
+    bool source_timing_valid = false;
+    double source_to_capture_ms = 0.0;
+    double source_to_control_ms = 0.0;
+    double source_clock_uncertainty_ms = 0.0;
+    double source_clock_round_trip_ms = 0.0;
+    double source_clock_rate = 1.0;
+    double source_clock_mapping_age_ms = 0.0;
+    std::uint64_t source_clock_sample_count = 0;
+    std::uint64_t source_clock_session_id = 0;
     // control_at 是 Aim 消费检测结果并开始控制计算的单调时刻；只有实际
-    // 尝试发送鼠标命令时，mouse completion 三项才有效，未发送帧不是 0 ms。
+    // 尝试发送鼠标命令时，backend completion 三项才有效，未发送帧不是 0 ms。
     bool control_timing_valid = false;
-    bool mouse_completion_timing_valid = false;
+    bool mouse_backend_completion_timing_valid = false;
+    bool mouse_protocol_ack_timing_valid = false;
+    bool mouse_physical_effect_timing_valid = false;
     double capture_to_control_ms = 0.0;
-    double control_to_mouse_completion_ms = 0.0;
-    double capture_to_mouse_completion_ms = 0.0;
+    double control_to_mouse_backend_completion_ms = 0.0;
+    double capture_to_mouse_backend_completion_ms = 0.0;
+    double source_to_mouse_backend_completion_ms = 0.0;
+    double control_to_mouse_protocol_ack_ms = 0.0;
+    double capture_to_mouse_protocol_ack_ms = 0.0;
+    double source_to_mouse_protocol_ack_ms = 0.0;
+    double control_to_mouse_physical_effect_ms = 0.0;
+    double capture_to_mouse_physical_effect_ms = 0.0;
+    double source_to_mouse_physical_effect_ms = 0.0;
 };
 
 // `total_ms` 必须继续在 Aim/Mouse 完成时封口。该结构只描述随后发生的

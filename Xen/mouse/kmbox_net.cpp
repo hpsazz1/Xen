@@ -225,18 +225,19 @@ public:
         }
     }
 
-    bool move(const MouseMoveCommand& command) noexcept override {
+    MouseMoveReceipt move(
+            const MouseMoveCommand& command) noexcept override {
         std::lock_guard<std::mutex> io_lock(io_mutex_);
         if (!config_.allow_send_input) {
             set_error("KMBOX NET 未在配置中显式允许");
             status_.store(MouseStatus::DISABLED, std::memory_order_release);
-            return false;
+            return {};
         }
         if (command.dx_counts == 0 && command.dy_counts == 0) {
             set_error("鼠标移动命令不能同时为零");
             status_.store(MouseStatus::INVALID_COMMAND,
                           std::memory_order_release);
-            return false;
+            return {};
         }
         constexpr int kMinMove = std::numeric_limits<std::int16_t>::min();
         constexpr int kMaxMove = std::numeric_limits<std::int16_t>::max();
@@ -245,13 +246,13 @@ public:
             set_error("KMBOX NET 相对位移超出 int16 范围");
             status_.store(MouseStatus::INVALID_COMMAND,
                           std::memory_order_release);
-            return false;
+            return {};
         }
         if (socket_ == INVALID_SOCKET || !winsock_started_) {
             set_error("KMBOX NET 尚未连接");
             status_.store(MouseStatus::CONNECTION_FAILED,
                           std::memory_order_release);
-            return false;
+            return {};
         }
 
         try {
@@ -263,19 +264,27 @@ public:
                          static_cast<std::uint32_t>(command.dx_counts));
             write_u32_le(packet.data() + kHeaderBytes + 8,
                          static_cast<std::uint32_t>(command.dy_counts));
+            std::chrono::steady_clock::time_point acknowledged_at{};
             if (!send_and_wait_ack(packet.data(), packet.size(),
                                    kMouseMoveCommand, sequence_,
-                                   config_.kmbox_command_timeout_ms)) {
-                return false;
+                                   config_.kmbox_command_timeout_ms,
+                                   &acknowledged_at)) {
+                return {};
             }
             status_.store(MouseStatus::READY, std::memory_order_release);
             set_error({});
-            return true;
+            MouseMoveReceipt receipt;
+            receipt.succeeded = true;
+            receipt.protocol_ack_received = true;
+            receipt.protocol_ack_received_at = acknowledged_at;
+            receipt.backend_completed_at =
+                std::chrono::steady_clock::now();
+            return receipt;
         } catch (...) {
             set_error("KMBOX NET 发送移动命令时发生未知异常");
             status_.store(MouseStatus::SEND_FAILED,
                           std::memory_order_release);
-            return false;
+            return {};
         }
     }
 
@@ -372,7 +381,9 @@ private:
                            std::size_t packet_size,
                            std::uint32_t command,
                            std::uint32_t sequence,
-                           int timeout_ms) noexcept {
+                           int timeout_ms,
+                           std::chrono::steady_clock::time_point*
+                               acknowledged_at = nullptr) noexcept {
         const int sent = sendto(
             socket_, reinterpret_cast<const char*>(packet),
             static_cast<int>(packet_size), 0,
@@ -451,6 +462,9 @@ private:
                 saw_invalid_response = true;
                 invalid_reason = "KMBOX NET ACK 序号不匹配";
                 continue;
+            }
+            if (acknowledged_at) {
+                *acknowledged_at = std::chrono::steady_clock::now();
             }
             return true;
         }

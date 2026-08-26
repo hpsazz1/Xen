@@ -639,6 +639,12 @@ endif()
 
 # ─── 实时闭环模块 ───────────────────────────────────────
 
+add_library(clock_sync STATIC
+    Xen/clock_sync/clock_sync.cpp)
+target_include_directories(clock_sync PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(clock_sync
+    PRIVATE Threads::Threads bcrypt ws2_32)
+
 add_library(capture STATIC
     Xen/capture/capture.cpp
     Xen/capture/duplication.cpp
@@ -651,7 +657,7 @@ target_include_directories(capture PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(capture PUBLIC ${OpenCV_LIBS} log
-    PRIVATE bcrypt d3d11 dxgi ws2_32)
+    PRIVATE clock_sync bcrypt d3d11 dxgi ws2_32)
 if(XEN_HAS_NDI)
     target_include_directories(capture PUBLIC ${XEN_NDI_INCLUDE_DIR})
     target_link_libraries(capture PRIVATE ${XEN_NDI_LIB})
@@ -769,6 +775,11 @@ target_link_libraries(xen_sender PRIVATE sender capture crash log)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_sender OPENCV NDI)
 endif()
+
+add_executable(xen_clock_source
+    Xen/clock_source/main.cpp)
+set_target_properties(xen_clock_source PROPERTIES OUTPUT_NAME XenClockSource)
+target_link_libraries(xen_clock_source PRIVATE clock_sync)
 
 add_executable(xen_benchmark
     Xen/benchmark/main.cpp)
@@ -1009,6 +1020,11 @@ if(BUILD_TESTING)
         capture mouse keyboard log ws2_32)
     xen_deploy_runtime_dlls(io_tests OPENCV NDI)
     add_test(NAME io_tests COMMAND io_tests)
+
+    add_executable(clock_sync_tests
+        tests/clock_sync_tests.cpp)
+    target_link_libraries(clock_sync_tests PRIVATE clock_sync ws2_32)
+    add_test(NAME clock_sync_tests COMMAND clock_sync_tests)
 
     add_executable(sender_tests
         tests/sender_tests.cpp)

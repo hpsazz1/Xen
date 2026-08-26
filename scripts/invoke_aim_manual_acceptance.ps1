@@ -221,6 +221,10 @@ ndi_source_name=$ndiSourceName
 ndi_discovery_timeout_ms=10000
 ndi_receive_timeout_ms=50
 ndi_disconnect_timeout_ms=2000
+ndi_clock_sync_url=udp://192.168.3.10:5011
+ndi_clock_sync_interval_ms=250
+ndi_clock_sync_timeout_ms=200
+ndi_clock_mapping_max_age_ms=1000
 ndi_frame_layout=center_crop_1_to_1
 ndi_source_width=2560
 ndi_source_height=1440
@@ -749,8 +753,8 @@ foreach ($file in $jsonReports) {
     $report = Get-Content -LiteralPath $file.FullName -Raw -Encoding utf8 |
         ConvertFrom-Json
     if ($null -eq $report.samples) { continue }
-    if ([int]$report.schema -ne 13) {
-        throw "Aim 人工任务 Runtime 报告 schema 不是 13：$($file.FullName)"
+    if ([int]$report.schema -ne 14) {
+        throw "Aim 人工任务 Runtime 报告 schema 不是 14：$($file.FullName)"
     }
     $samples = @($report.samples)
     $allSamples += $samples
@@ -785,6 +789,18 @@ $captureMismatch = @($segments | Where-Object {
     $_.capture_backend -ne "NDI"
 }).Count
 $mouseCommands = @($allSamples | Where-Object { [bool]$_.mouse_sent }).Count
+$sourceTimingValidSamples = @($allSamples | Where-Object {
+    [bool]$_.source_timing_valid
+}).Count
+$mouseBackendCompletionSamples = @($allSamples | Where-Object {
+    [bool]$_.mouse_backend_completion_timing_valid
+}).Count
+$mouseProtocolAckSamples = @($allSamples | Where-Object {
+    [bool]$_.mouse_protocol_ack_timing_valid
+}).Count
+$mousePhysicalEffectSamples = @($allSamples | Where-Object {
+    [bool]$_.mouse_physical_effect_timing_valid
+}).Count
 $complete = $failed -eq 0 -and $reportDropped -eq 0 -and
     $runtimeDropped -eq 0 -and $providerMismatch -eq 0 -and
     $captureMismatch -eq 0 -and $mouseCommands -gt 0 -and
@@ -819,6 +835,10 @@ $summary = [ordered]@{
     report_samples_dropped = $reportDropped
     runtime_samples_dropped = $runtimeDropped
     mouse_commands = $mouseCommands
+    source_timing_valid_samples = $sourceTimingValidSamples
+    mouse_backend_completion_samples = $mouseBackendCompletionSamples
+    mouse_protocol_ack_samples = $mouseProtocolAckSamples
+    mouse_physical_effect_samples = $mousePhysicalEffectSamples
     provider_mismatch_segments = $providerMismatch
     capture_mismatch_segments = $captureMismatch
     aim = $aimSummary

@@ -38,17 +38,18 @@ public:
         return true;
     }
 
-    bool move(const MouseMoveCommand& command) noexcept override {
+    MouseMoveReceipt move(
+            const MouseMoveCommand& command) noexcept override {
         if (!config_.allow_send_input) {
             set_error("Win32 SendInput 未在配置中显式允许");
             status_.store(MouseStatus::DISABLED, std::memory_order_release);
-            return false;
+            return {};
         }
         if (command.dx_counts == 0 && command.dy_counts == 0) {
             set_error("鼠标移动命令不能同时为零");
             status_.store(MouseStatus::INVALID_COMMAND,
                           std::memory_order_release);
-            return false;
+            return {};
         }
 
         INPUT input{};
@@ -61,10 +62,13 @@ public:
                       std::to_string(GetLastError()));
             status_.store(MouseStatus::SEND_FAILED,
                           std::memory_order_release);
-            return false;
+            return {};
         }
         status_.store(MouseStatus::READY, std::memory_order_release);
-        return true;
+        MouseMoveReceipt receipt;
+        receipt.succeeded = true;
+        receipt.backend_completed_at = std::chrono::steady_clock::now();
+        return receipt;
     }
 
     bool poll_input(InputSnapshot& snapshot) noexcept override {

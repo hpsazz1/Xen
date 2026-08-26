@@ -53,11 +53,28 @@ RuntimePipelineSample make_sample(
     sample.profile.aim.total_ms = 0.6;
     sample.profile.mouse_ms = 0.7;
     sample.profile.total_ms = total_ms;
+    sample.profile.source_time_basis = SourceTimeBasis::NDI_SDK_SUBMISSION;
+    sample.profile.source_clock_status = SourceClockStatus::VALID;
+    sample.profile.source_timing_valid = true;
+    sample.profile.source_to_capture_ms = 2.4;
+    sample.profile.source_to_control_ms = 3.5;
+    sample.profile.source_clock_uncertainty_ms = 0.2;
+    sample.profile.source_clock_round_trip_ms = 0.3;
+    sample.profile.source_clock_rate = 1.000001;
+    sample.profile.source_clock_mapping_age_ms = 25.0;
+    sample.profile.source_clock_sample_count = 8;
+    sample.profile.source_clock_session_id = 99;
     sample.profile.control_timing_valid = true;
-    sample.profile.mouse_completion_timing_valid = success;
+    sample.profile.mouse_backend_completion_timing_valid = success;
+    sample.profile.mouse_protocol_ack_timing_valid = success;
+    sample.profile.mouse_physical_effect_timing_valid = false;
     sample.profile.capture_to_control_ms = 1.1;
-    sample.profile.control_to_mouse_completion_ms = 0.8;
-    sample.profile.capture_to_mouse_completion_ms = 1.9;
+    sample.profile.control_to_mouse_backend_completion_ms = 0.8;
+    sample.profile.capture_to_mouse_backend_completion_ms = 1.9;
+    sample.profile.source_to_mouse_backend_completion_ms = 4.3;
+    sample.profile.control_to_mouse_protocol_ack_ms = 0.7;
+    sample.profile.capture_to_mouse_protocol_ack_ms = 1.8;
+    sample.profile.source_to_mouse_protocol_ack_ms = 4.2;
     sample.capture_stages.ndi_valid = true;
     sample.capture_stages.runtime_handoff_valid = true;
     sample.capture_stages.receive_call_ms = 0.11;
@@ -251,9 +268,14 @@ void test_report_summary_and_atomic_files() {
                summary.total.p95_ms < 5.0,
            "失败样本不得进入成功耗时的均值和分位数");
     expect(summary.pipeline_complete.sample_count == 2 &&
+               summary.source_to_capture.sample_count == 2 &&
+               summary.source_to_control.p50_ms == 3.5 &&
+               summary.source_clock_uncertainty.p50_ms == 0.2 &&
                summary.capture_to_control.sample_count == 2 &&
-               summary.control_to_mouse_completion.sample_count == 2 &&
-               summary.capture_to_mouse_completion.p50_ms == 1.9 &&
+               summary.control_to_mouse_backend_completion.sample_count == 2 &&
+               summary.capture_to_mouse_backend_completion.p50_ms == 1.9 &&
+               summary.control_to_mouse_protocol_ack.sample_count == 2 &&
+               summary.control_to_mouse_physical_effect.sample_count == 0 &&
                summary.ndi_receive_call.sample_count == 2 &&
                summary.ndi_video_queue_depth.sample_count == 2 &&
                summary.ndi_video_queue_depth.mean_frames == 2.0 &&
@@ -269,7 +291,7 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v13") !=
+    expect(csv_text.find("Xen Runtime Debug Report v14") !=
                    std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
@@ -312,14 +334,20 @@ void test_report_summary_and_atomic_files() {
                     std::string::npos &&
                csv_text.find("ndi_receive_call_ms") != std::string::npos &&
                csv_text.find("pipeline_complete_ms") != std::string::npos &&
-               csv_text.find("capture_to_mouse_completion_ms") !=
+               csv_text.find("capture_to_mouse_backend_completion_ms") !=
+                   std::string::npos &&
+               csv_text.find("mouse_physical_effect_timing_valid") !=
+                   std::string::npos &&
+               csv_text.find("source_clock_uncertainty_ms") !=
+                   std::string::npos &&
+               csv_text.find("NDI_SDK_SUBMISSION,VALID,true") !=
                    std::string::npos &&
                csv_text.find("# coverage_phase,formal,3") !=
                    std::string::npos &&
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 13") != std::string::npos &&
+    expect(json_text.find("\"schema\": 14") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -398,8 +426,19 @@ void test_report_summary_and_atomic_files() {
                     std::string::npos &&
                json_text.find("\"aim_delay_compensation_ms_y\": 8") !=
                     std::string::npos &&
-               json_text.find("\"capture_to_mouse_completion_ms\": 1.9") !=
-                    std::string::npos &&
+               json_text.find(
+                   "\"capture_to_mouse_backend_completion_ms\": 1.9") !=
+                   std::string::npos &&
+               json_text.find(
+                   "\"mouse_protocol_ack_timing_valid\": true") !=
+                   std::string::npos &&
+               json_text.find(
+                   "\"mouse_physical_effect_timing_valid\": false") !=
+                   std::string::npos &&
+               json_text.find("\"source_clock_status\": \"VALID\"") !=
+                   std::string::npos &&
+               json_text.find("\"source_clock_session_id\": 99") !=
+                   std::string::npos &&
                 json_text.find("\"aim_active_range_radius\": 72") !=
                     std::string::npos &&
                json_text.find("\"max_head_confidence\":") !=

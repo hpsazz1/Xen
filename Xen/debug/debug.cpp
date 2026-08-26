@@ -37,9 +37,21 @@ struct TimingValues {
     std::vector<double> aim;
     std::vector<double> mouse;
     std::vector<double> total;
+    std::vector<double> source_to_capture;
+    std::vector<double> source_to_control;
+    std::vector<double> source_clock_uncertainty;
+    std::vector<double> source_clock_round_trip;
+    std::vector<double> source_clock_mapping_age;
     std::vector<double> capture_to_control;
-    std::vector<double> control_to_mouse_completion;
-    std::vector<double> capture_to_mouse_completion;
+    std::vector<double> control_to_mouse_backend_completion;
+    std::vector<double> capture_to_mouse_backend_completion;
+    std::vector<double> source_to_mouse_backend_completion;
+    std::vector<double> control_to_mouse_protocol_ack;
+    std::vector<double> capture_to_mouse_protocol_ack;
+    std::vector<double> source_to_mouse_protocol_ack;
+    std::vector<double> control_to_mouse_physical_effect;
+    std::vector<double> capture_to_mouse_physical_effect;
+    std::vector<double> source_to_mouse_physical_effect;
     std::vector<double> ndi_receive_call;
     std::vector<double> ndi_metadata;
     std::vector<double> ndi_geometry;
@@ -129,15 +141,51 @@ void collect_timing(TimingValues& values,
     values.aim.push_back(sample.profile.aim.total_ms);
     values.mouse.push_back(sample.profile.mouse_ms);
     values.total.push_back(sample.profile.total_ms);
+    if (sample.profile.source_timing_valid) {
+        values.source_to_capture.push_back(
+            sample.profile.source_to_capture_ms);
+        values.source_to_control.push_back(
+            sample.profile.source_to_control_ms);
+        values.source_clock_uncertainty.push_back(
+            sample.profile.source_clock_uncertainty_ms);
+        values.source_clock_round_trip.push_back(
+            sample.profile.source_clock_round_trip_ms);
+        values.source_clock_mapping_age.push_back(
+            sample.profile.source_clock_mapping_age_ms);
+    }
     if (sample.profile.control_timing_valid) {
         values.capture_to_control.push_back(
             sample.profile.capture_to_control_ms);
     }
-    if (sample.profile.mouse_completion_timing_valid) {
-        values.control_to_mouse_completion.push_back(
-            sample.profile.control_to_mouse_completion_ms);
-        values.capture_to_mouse_completion.push_back(
-            sample.profile.capture_to_mouse_completion_ms);
+    if (sample.profile.mouse_backend_completion_timing_valid) {
+        values.control_to_mouse_backend_completion.push_back(
+            sample.profile.control_to_mouse_backend_completion_ms);
+        values.capture_to_mouse_backend_completion.push_back(
+            sample.profile.capture_to_mouse_backend_completion_ms);
+        if (sample.profile.source_timing_valid) {
+            values.source_to_mouse_backend_completion.push_back(
+                sample.profile.source_to_mouse_backend_completion_ms);
+        }
+    }
+    if (sample.profile.mouse_protocol_ack_timing_valid) {
+        values.control_to_mouse_protocol_ack.push_back(
+            sample.profile.control_to_mouse_protocol_ack_ms);
+        values.capture_to_mouse_protocol_ack.push_back(
+            sample.profile.capture_to_mouse_protocol_ack_ms);
+        if (sample.profile.source_timing_valid) {
+            values.source_to_mouse_protocol_ack.push_back(
+                sample.profile.source_to_mouse_protocol_ack_ms);
+        }
+    }
+    if (sample.profile.mouse_physical_effect_timing_valid) {
+        values.control_to_mouse_physical_effect.push_back(
+            sample.profile.control_to_mouse_physical_effect_ms);
+        values.capture_to_mouse_physical_effect.push_back(
+            sample.profile.capture_to_mouse_physical_effect_ms);
+        if (sample.profile.source_timing_valid) {
+            values.source_to_mouse_physical_effect.push_back(
+                sample.profile.source_to_mouse_physical_effect_ms);
+        }
     }
     const auto& capture = sample.capture_stages;
     if (capture.ndi_valid) {
@@ -213,11 +261,33 @@ DebugReportSummary make_summary(
     result.aim = summarize(values.aim);
     result.mouse = summarize(values.mouse);
     result.total = summarize(values.total);
+    result.source_to_capture = summarize(values.source_to_capture);
+    result.source_to_control = summarize(values.source_to_control);
+    result.source_clock_uncertainty = summarize(
+        values.source_clock_uncertainty);
+    result.source_clock_round_trip = summarize(
+        values.source_clock_round_trip);
+    result.source_clock_mapping_age = summarize(
+        values.source_clock_mapping_age);
     result.capture_to_control = summarize(values.capture_to_control);
-    result.control_to_mouse_completion = summarize(
-        values.control_to_mouse_completion);
-    result.capture_to_mouse_completion = summarize(
-        values.capture_to_mouse_completion);
+    result.control_to_mouse_backend_completion = summarize(
+        values.control_to_mouse_backend_completion);
+    result.capture_to_mouse_backend_completion = summarize(
+        values.capture_to_mouse_backend_completion);
+    result.source_to_mouse_backend_completion = summarize(
+        values.source_to_mouse_backend_completion);
+    result.control_to_mouse_protocol_ack = summarize(
+        values.control_to_mouse_protocol_ack);
+    result.capture_to_mouse_protocol_ack = summarize(
+        values.capture_to_mouse_protocol_ack);
+    result.source_to_mouse_protocol_ack = summarize(
+        values.source_to_mouse_protocol_ack);
+    result.control_to_mouse_physical_effect = summarize(
+        values.control_to_mouse_physical_effect);
+    result.capture_to_mouse_physical_effect = summarize(
+        values.capture_to_mouse_physical_effect);
+    result.source_to_mouse_physical_effect = summarize(
+        values.source_to_mouse_physical_effect);
     result.ndi_receive_call = summarize(values.ndi_receive_call);
     result.ndi_metadata = summarize(values.ndi_metadata);
     result.ndi_geometry = summarize(values.ndi_geometry);
@@ -707,7 +777,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v13\n"
+        csv << "# Xen Runtime Debug Report v14\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -744,13 +814,47 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_csv_timing(csv, "mouse", summary_.mouse);
         append_csv_timing(csv, "total", summary_.total);
         append_csv_timing(
+            csv, "source_to_capture", summary_.source_to_capture);
+        append_csv_timing(
+            csv, "source_to_control", summary_.source_to_control);
+        append_csv_timing(
+            csv, "source_clock_uncertainty",
+            summary_.source_clock_uncertainty);
+        append_csv_timing(
+            csv, "source_clock_round_trip",
+            summary_.source_clock_round_trip);
+        append_csv_timing(
+            csv, "source_clock_mapping_age",
+            summary_.source_clock_mapping_age);
+        append_csv_timing(
             csv, "capture_to_control", summary_.capture_to_control);
         append_csv_timing(
-            csv, "control_to_mouse_completion",
-            summary_.control_to_mouse_completion);
+            csv, "control_to_mouse_backend_completion",
+            summary_.control_to_mouse_backend_completion);
         append_csv_timing(
-            csv, "capture_to_mouse_completion",
-            summary_.capture_to_mouse_completion);
+            csv, "capture_to_mouse_backend_completion",
+            summary_.capture_to_mouse_backend_completion);
+        append_csv_timing(
+            csv, "source_to_mouse_backend_completion",
+            summary_.source_to_mouse_backend_completion);
+        append_csv_timing(
+            csv, "control_to_mouse_protocol_ack",
+            summary_.control_to_mouse_protocol_ack);
+        append_csv_timing(
+            csv, "capture_to_mouse_protocol_ack",
+            summary_.capture_to_mouse_protocol_ack);
+        append_csv_timing(
+            csv, "source_to_mouse_protocol_ack",
+            summary_.source_to_mouse_protocol_ack);
+        append_csv_timing(
+            csv, "control_to_mouse_physical_effect",
+            summary_.control_to_mouse_physical_effect);
+        append_csv_timing(
+            csv, "capture_to_mouse_physical_effect",
+            summary_.capture_to_mouse_physical_effect);
+        append_csv_timing(
+            csv, "source_to_mouse_physical_effect",
+            summary_.source_to_mouse_physical_effect);
         append_csv_timing(
             csv, "ndi_receive_call", summary_.ndi_receive_call);
         append_csv_timing(csv, "ndi_metadata", summary_.ndi_metadata);
@@ -788,9 +892,18 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "h2d_ms,d3d11_to_cuda_ms,d3d11_to_directml_ms,"
                "gpu_preprocess_ms,execution_ms,d2h_ms,"
                "postprocess_ms,aim_ms,mouse_ms,"
-               "total_ms,control_timing_valid,mouse_completion_timing_valid,"
-               "capture_to_control_ms,control_to_mouse_completion_ms,"
-               "capture_to_mouse_completion_ms,detection_status,aim_status,"
+               "total_ms,control_timing_valid,"
+               "mouse_backend_completion_timing_valid,"
+               "mouse_protocol_ack_timing_valid,"
+               "mouse_physical_effect_timing_valid,capture_to_control_ms,"
+               "control_to_mouse_backend_completion_ms,"
+               "capture_to_mouse_backend_completion_ms,"
+               "source_to_mouse_backend_completion_ms,"
+               "control_to_mouse_protocol_ack_ms,"
+               "capture_to_mouse_protocol_ack_ms,source_to_mouse_protocol_ack_ms,"
+               "control_to_mouse_physical_effect_ms,"
+               "capture_to_mouse_physical_effect_ms,"
+               "source_to_mouse_physical_effect_ms,detection_status,aim_status,"
                "mouse_status,mouse_sent,"
                "aim_has_target,aim_has_command,aim_track_id,aim_track_state,"
                "aim_track_predicted,aim_lead_active,"
@@ -878,7 +991,12 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "profile_window_ms,service_tail_ms,pipeline_service_ms,"
                "pipeline_complete_ms,source_dropped_frames,"
                "transport_dropped_frames,transport_invalid_packets,"
-               "runtime_overwritten_frames\n";
+               "runtime_overwritten_frames,source_time_basis,"
+               "source_clock_status,source_timing_valid,"
+               "source_to_capture_ms,source_to_control_ms,"
+               "source_clock_uncertainty_ms,source_clock_round_trip_ms,"
+               "source_clock_rate,source_clock_mapping_age_ms,"
+               "source_clock_sample_count,source_clock_session_id\n";
         csv << std::setprecision(9);
         for (const auto& sample : samples_) {
             csv << sample.sequence << ',' << sample.profile.capture_ms << ','
@@ -896,11 +1014,22 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.profile.mouse_ms << ','
                 << sample.profile.total_ms << ','
                 << bool_name(sample.profile.control_timing_valid) << ','
+                << bool_name(sample.profile
+                    .mouse_backend_completion_timing_valid) << ','
                 << bool_name(
-                    sample.profile.mouse_completion_timing_valid) << ','
+                    sample.profile.mouse_protocol_ack_timing_valid) << ','
+                << bool_name(
+                    sample.profile.mouse_physical_effect_timing_valid) << ','
                 << sample.profile.capture_to_control_ms << ','
-                << sample.profile.control_to_mouse_completion_ms << ','
-                << sample.profile.capture_to_mouse_completion_ms << ','
+                << sample.profile.control_to_mouse_backend_completion_ms << ','
+                << sample.profile.capture_to_mouse_backend_completion_ms << ','
+                << sample.profile.source_to_mouse_backend_completion_ms << ','
+                << sample.profile.control_to_mouse_protocol_ack_ms << ','
+                << sample.profile.capture_to_mouse_protocol_ack_ms << ','
+                << sample.profile.source_to_mouse_protocol_ack_ms << ','
+                << sample.profile.control_to_mouse_physical_effect_ms << ','
+                << sample.profile.capture_to_mouse_physical_effect_ms << ','
+                << sample.profile.source_to_mouse_physical_effect_ms << ','
                 << DetectionStatusName(sample.detection_status) << ','
                 << AimStatusName(sample.aim_status) << ','
                 << MouseStatusName(sample.mouse_status) << ','
@@ -1093,12 +1222,24 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.source_dropped_frames << ','
                 << sample.transport_dropped_frames << ','
                 << sample.transport_invalid_packets << ','
-                << sample.runtime_overwritten_frames << '\n';
+                << sample.runtime_overwritten_frames << ','
+                << SourceTimeBasisName(sample.profile.source_time_basis) << ','
+                << SourceClockStatusName(
+                    sample.profile.source_clock_status) << ','
+                << bool_name(sample.profile.source_timing_valid) << ','
+                << sample.profile.source_to_capture_ms << ','
+                << sample.profile.source_to_control_ms << ','
+                << sample.profile.source_clock_uncertainty_ms << ','
+                << sample.profile.source_clock_round_trip_ms << ','
+                << sample.profile.source_clock_rate << ','
+                << sample.profile.source_clock_mapping_age_ms << ','
+                << sample.profile.source_clock_sample_count << ','
+                << sample.profile.source_clock_session_id << '\n';
         }
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 13,\n"
+             << "{\n  \"schema\": 14,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -1140,14 +1281,48 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_json_timing(json, "mouse", summary_.mouse, false);
         append_json_timing(json, "total", summary_.total, false);
         append_json_timing(
+            json, "source_to_capture", summary_.source_to_capture, false);
+        append_json_timing(
+            json, "source_to_control", summary_.source_to_control, false);
+        append_json_timing(
+            json, "source_clock_uncertainty",
+            summary_.source_clock_uncertainty, false);
+        append_json_timing(
+            json, "source_clock_round_trip",
+            summary_.source_clock_round_trip, false);
+        append_json_timing(
+            json, "source_clock_mapping_age",
+            summary_.source_clock_mapping_age, false);
+        append_json_timing(
             json, "capture_to_control", summary_.capture_to_control,
             false);
         append_json_timing(
-            json, "control_to_mouse_completion",
-            summary_.control_to_mouse_completion, false);
+            json, "control_to_mouse_backend_completion",
+            summary_.control_to_mouse_backend_completion, false);
         append_json_timing(
-            json, "capture_to_mouse_completion",
-            summary_.capture_to_mouse_completion, false);
+            json, "capture_to_mouse_backend_completion",
+            summary_.capture_to_mouse_backend_completion, false);
+        append_json_timing(
+            json, "source_to_mouse_backend_completion",
+            summary_.source_to_mouse_backend_completion, false);
+        append_json_timing(
+            json, "control_to_mouse_protocol_ack",
+            summary_.control_to_mouse_protocol_ack, false);
+        append_json_timing(
+            json, "capture_to_mouse_protocol_ack",
+            summary_.capture_to_mouse_protocol_ack, false);
+        append_json_timing(
+            json, "source_to_mouse_protocol_ack",
+            summary_.source_to_mouse_protocol_ack, false);
+        append_json_timing(
+            json, "control_to_mouse_physical_effect",
+            summary_.control_to_mouse_physical_effect, false);
+        append_json_timing(
+            json, "capture_to_mouse_physical_effect",
+            summary_.capture_to_mouse_physical_effect, false);
+        append_json_timing(
+            json, "source_to_mouse_physical_effect",
+            summary_.source_to_mouse_physical_effect, false);
         append_json_timing(
             json, "ndi_receive_call", summary_.ndi_receive_call, false);
         append_json_timing(
@@ -1201,15 +1376,35 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << bool_name(sample.mouse_sent)
                  << ", \"control_timing_valid\": "
                  << bool_name(sample.profile.control_timing_valid)
-                 << ", \"mouse_completion_timing_valid\": "
+                 << ", \"mouse_backend_completion_timing_valid\": "
+                 << bool_name(sample.profile
+                     .mouse_backend_completion_timing_valid)
+                 << ", \"mouse_protocol_ack_timing_valid\": "
                  << bool_name(
-                     sample.profile.mouse_completion_timing_valid)
+                     sample.profile.mouse_protocol_ack_timing_valid)
+                 << ", \"mouse_physical_effect_timing_valid\": "
+                 << bool_name(
+                     sample.profile.mouse_physical_effect_timing_valid)
                  << ", \"capture_to_control_ms\": "
                  << sample.profile.capture_to_control_ms
-                 << ", \"control_to_mouse_completion_ms\": "
-                 << sample.profile.control_to_mouse_completion_ms
-                 << ", \"capture_to_mouse_completion_ms\": "
-                 << sample.profile.capture_to_mouse_completion_ms
+                 << ", \"control_to_mouse_backend_completion_ms\": "
+                 << sample.profile.control_to_mouse_backend_completion_ms
+                 << ", \"capture_to_mouse_backend_completion_ms\": "
+                 << sample.profile.capture_to_mouse_backend_completion_ms
+                 << ", \"source_to_mouse_backend_completion_ms\": "
+                 << sample.profile.source_to_mouse_backend_completion_ms
+                 << ", \"control_to_mouse_protocol_ack_ms\": "
+                 << sample.profile.control_to_mouse_protocol_ack_ms
+                 << ", \"capture_to_mouse_protocol_ack_ms\": "
+                 << sample.profile.capture_to_mouse_protocol_ack_ms
+                 << ", \"source_to_mouse_protocol_ack_ms\": "
+                 << sample.profile.source_to_mouse_protocol_ack_ms
+                 << ", \"control_to_mouse_physical_effect_ms\": "
+                 << sample.profile.control_to_mouse_physical_effect_ms
+                 << ", \"capture_to_mouse_physical_effect_ms\": "
+                 << sample.profile.capture_to_mouse_physical_effect_ms
+                 << ", \"source_to_mouse_physical_effect_ms\": "
+                 << sample.profile.source_to_mouse_physical_effect_ms
                  << ", \"aim_has_target\": "
                  << bool_name(sample.aim_has_target)
                  << ", \"aim_has_command\": "
@@ -1520,7 +1715,29 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << ", \"transport_invalid_packets\": "
                  << sample.transport_invalid_packets
                  << ", \"runtime_overwritten_frames\": "
-                 << sample.runtime_overwritten_frames << "}"
+                 << sample.runtime_overwritten_frames
+                 << ", \"source_time_basis\": \""
+                 << SourceTimeBasisName(sample.profile.source_time_basis)
+                 << "\", \"source_clock_status\": \""
+                 << SourceClockStatusName(sample.profile.source_clock_status)
+                 << "\", \"source_timing_valid\": "
+                 << bool_name(sample.profile.source_timing_valid)
+                 << ", \"source_to_capture_ms\": "
+                 << sample.profile.source_to_capture_ms
+                 << ", \"source_to_control_ms\": "
+                 << sample.profile.source_to_control_ms
+                 << ", \"source_clock_uncertainty_ms\": "
+                 << sample.profile.source_clock_uncertainty_ms
+                 << ", \"source_clock_round_trip_ms\": "
+                 << sample.profile.source_clock_round_trip_ms
+                 << ", \"source_clock_rate\": "
+                 << sample.profile.source_clock_rate
+                 << ", \"source_clock_mapping_age_ms\": "
+                 << sample.profile.source_clock_mapping_age_ms
+                 << ", \"source_clock_sample_count\": "
+                 << sample.profile.source_clock_sample_count
+                 << ", \"source_clock_session_id\": "
+                 << sample.profile.source_clock_session_id << "}"
                  << (index + 1 == samples_.size() ? '\n' : ',');
         }
         json << "  ]\n}\n";

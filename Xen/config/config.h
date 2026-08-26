@@ -53,6 +53,7 @@ struct AppConfig {
         value.udp_source_height = 1440;
         value.ndi_source_name = "HPSAZZ (Xen-ROI-320)";
         value.ndi_discovery_timeout_ms = 10000;
+        value.ndi_clock_sync_url = "udp://192.168.3.10:5011";
         value.ndi_frame_layout = NetworkFrameLayout::CENTER_CROP_1_TO_1;
         value.ndi_source_width = 2560;
         value.ndi_source_height = 1440;

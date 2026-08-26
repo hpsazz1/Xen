@@ -3,6 +3,7 @@
 
 #include "capture/ndi_internal.h"
 
+#include "clock_sync/clock_sync.h"
 #include "log/log.h"
 
 #include <algorithm>
@@ -39,6 +40,23 @@ bool terminal_status(CaptureStatus status) noexcept {
 
 constexpr int kMaxSourceDimension = 16384;
 constexpr auto kQueueProbeInterval = std::chrono::milliseconds(1000);
+
+SourceClockStatus source_clock_status(
+        clock_sync::MappingStatus status) noexcept {
+    switch (status) {
+        case clock_sync::MappingStatus::UNSYNCHRONIZED:
+            return SourceClockStatus::UNSYNCHRONIZED;
+        case clock_sync::MappingStatus::WARMING:
+            return SourceClockStatus::WARMING;
+        case clock_sync::MappingStatus::VALID:
+            return SourceClockStatus::VALID;
+        case clock_sync::MappingStatus::STALE:
+            return SourceClockStatus::STALE;
+        case clock_sync::MappingStatus::INVALID:
+            return SourceClockStatus::INVALID;
+    }
+    return SourceClockStatus::INVALID;
+}
 
 NetworkGeometryConfig geometry_config(const CaptureConfig& config) noexcept {
     NetworkGeometryConfig result;
@@ -118,9 +136,22 @@ public:
                 return fail(CaptureStatus::INVALID_CONFIG,
                             "NDI Capture 配置非法");
             }
+            clock_sync::ClientConfig clock_config;
+            clock_config.source_url = config_.ndi_clock_sync_url;
+            clock_config.exchange_interval_ms =
+                config_.ndi_clock_sync_interval_ms;
+            clock_config.response_timeout_ms =
+                config_.ndi_clock_sync_timeout_ms;
+            clock_config.maximum_mapping_age_ms =
+                config_.ndi_clock_mapping_max_age_ms;
+            if (!clock_client_.open(clock_config)) {
+                return fail(CaptureStatus::INVALID_CONFIG,
+                            clock_client_.last_error());
+            }
             library_ = std::make_unique<NdiLibraryLease>();
             if (!library_ || !library_->acquired()) {
                 library_.reset();
+                clock_client_.close();
                 return fail(CaptureStatus::FAILURE,
                             "NDI Runtime 初始化失败");
             }
@@ -148,6 +179,7 @@ public:
                      NetworkFrameLayoutName(config_.ndi_frame_layout));
             return true;
         } catch (...) {
+            clock_client_.close();
             return fail(CaptureStatus::FAILURE,
                         "打开 NDI Capture 时发生未知异常");
         }
@@ -210,6 +242,7 @@ public:
         published_sequence_.store(0, std::memory_order_release);
         status_.store(CaptureStatus::CLOSED, std::memory_order_release);
         library_.reset();
+        clock_client_.close();
     }
 
     CaptureStatus status() const noexcept override {
@@ -246,6 +279,14 @@ private:
             config_.ndi_disconnect_timeout_ms >=
                 config_.ndi_receive_timeout_ms &&
             config_.ndi_disconnect_timeout_ms <= 60000 &&
+            (config_.ndi_clock_sync_url.empty() ||
+             (config_.ndi_clock_sync_interval_ms >= 50 &&
+              config_.ndi_clock_sync_interval_ms <= 10000 &&
+              config_.ndi_clock_sync_timeout_ms >= 10 &&
+              config_.ndi_clock_sync_timeout_ms <= 5000 &&
+              config_.ndi_clock_mapping_max_age_ms >=
+                  config_.ndi_clock_sync_interval_ms &&
+              config_.ndi_clock_mapping_max_age_ms <= 60000)) &&
             config_.roi_width > 0 && config_.roi_height > 0 &&
             (config_.center_roi ||
              (config_.roi_x >= 0 && config_.roi_y >= 0)) &&
@@ -421,6 +462,34 @@ private:
             write_slot->timing.source_timestamp = video.timestamp;
             write_slot->timing.source_timestamp_valid =
                 video.timestamp != NDIlib_recv_timestamp_undefined;
+            if (write_slot->timing.source_timestamp_valid) {
+                write_slot->timing.source_time_basis =
+                    SourceTimeBasis::NDI_SDK_SUBMISSION;
+                const auto mapped = clock_client_.map_utc_100ns(
+                    video.timestamp, finished);
+                write_slot->timing.source_clock_status =
+                    source_clock_status(mapped.status);
+                write_slot->timing.source_clock_uncertainty_ms =
+                    mapped.uncertainty_ms;
+                write_slot->timing.source_clock_round_trip_ms =
+                    mapped.round_trip_ms;
+                write_slot->timing.source_clock_rate = mapped.clock_rate;
+                write_slot->timing.source_clock_mapping_age_ms =
+                    mapped.mapping_age_ms;
+                write_slot->timing.source_clock_sample_count =
+                    mapped.sample_count;
+                write_slot->timing.source_clock_session_id =
+                    mapped.source_session_id;
+                // NDI submission 必须发生在辅机完成颜色转换之前；若映射给出
+                // 未来时刻，保持 INVALID，不能把负 age 钳成零。
+                if (mapped.valid && mapped.local_time <= finished) {
+                    write_slot->timing.source_time_timing_valid = true;
+                    write_slot->timing.source_time_at = mapped.local_time;
+                } else if (mapped.valid) {
+                    write_slot->timing.source_clock_status =
+                        SourceClockStatus::INVALID;
+                }
+            }
             if (performance_sample_counter_++ % 30 == 0) {
                 NDIlib_recv_performance_t total{};
                 NDIlib_recv_performance_t dropped{};
@@ -609,6 +678,7 @@ private:
 
     CaptureConfig config_;
     std::unique_ptr<NdiLibraryLease> library_;
+    clock_sync::Client clock_client_;
     NDIlib_find_instance_t finder_ = nullptr;
     NDIlib_recv_instance_t receiver_ = nullptr;
     std::string source_name_;

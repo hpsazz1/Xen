@@ -415,8 +415,16 @@ void test_packet_layout_and_sequence() {
                (mouse ? ": " + mouse->last_error() : ""));
     expect(mouse && mouse->status() == MouseStatus::READY,
            "握手后 KMBOX NET 状态必须为 READY");
-    expect(mouse && mouse->move({120, -45}),
-           "首条 KMBOX NET 相对移动应成功");
+    const MouseMoveReceipt first_receipt = mouse
+        ? mouse->move({120, -45}) : MouseMoveReceipt{};
+    expect(mouse && first_receipt.succeeded &&
+               first_receipt.backend_completed_at !=
+                   std::chrono::steady_clock::time_point{} &&
+               first_receipt.protocol_ack_received &&
+               first_receipt.protocol_ack_received_at !=
+                   std::chrono::steady_clock::time_point{} &&
+               !first_receipt.physical_effect_observed,
+           "KMBOX 匹配响应必须与 backend completion 分列，且不能冒充物理效果");
     expect(mouse && mouse->move({-32768, 32767}),
            "int16 边界 KMBOX NET 相对移动应成功");
     device.finish();
@@ -614,8 +622,14 @@ void test_makcu_binary_protocol_and_boundaries() {
                (mouse ? ": " + mouse->last_error() : ""));
     expect(mouse && mouse->status() == MouseStatus::READY,
            "MAKCU 握手成功后状态必须为 READY");
-    expect(mouse && mouse->move({120, -45}),
-           "MAKCU V2 相对移动应接受普通 int16 counts");
+    const MouseMoveReceipt first_receipt = mouse
+        ? mouse->move({120, -45}) : MouseMoveReceipt{};
+    expect(mouse && first_receipt.succeeded &&
+               first_receipt.protocol_ack_received &&
+               first_receipt.backend_completed_at !=
+                   std::chrono::steady_clock::time_point{} &&
+               !first_receipt.physical_effect_observed,
+           "MAKCU V2 move ACK 必须独立记录且不能冒充物理效果");
     expect(mouse && mouse->move({-32768, 32767}),
            "MAKCU V2 相对移动应接受 int16 边界");
     expect(state->open_calls == 1 && state->port == "COM7" &&

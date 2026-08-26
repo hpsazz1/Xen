@@ -507,9 +507,9 @@ struct Runtime::Impl {
             pipeline_samples.begin(), pipeline_samples.end());
         current_snapshot.pipeline_p50_ms = percentile(samples, 0.50);
         current_snapshot.pipeline_p95_ms = percentile(samples, 0.95);
-        if (profile.mouse_completion_timing_valid) {
+        if (profile.mouse_backend_completion_timing_valid) {
             control_latency_samples.push_back(
-                profile.capture_to_mouse_completion_ms);
+                profile.capture_to_mouse_backend_completion_ms);
             while (control_latency_samples.size() >
                    static_cast<std::size_t>(config.runtime.profile_window)) {
                 control_latency_samples.pop_front();
@@ -521,7 +521,7 @@ struct Runtime::Impl {
             current_snapshot.control_latency_sample_count =
                 control_samples.size();
             current_snapshot.control_latency_last_ms =
-                profile.capture_to_mouse_completion_ms;
+                profile.capture_to_mouse_backend_completion_ms;
             current_snapshot.control_latency_p50_ms =
                 percentile(control_samples, 0.50);
             current_snapshot.control_latency_p95_ms =
@@ -545,6 +545,9 @@ struct Runtime::Impl {
 
     void pipeline_loop() noexcept {
         std::uint64_t last_sequence = 0;
+        bool aim_uses_source_time = false;
+        std::uint64_t aim_source_clock_session_id = 0;
+        std::chrono::steady_clock::time_point last_aim_observation_at{};
         const bool probes_enabled = config.runtime.enable_performance_probes;
         while (!stop_requested.load(std::memory_order_acquire)) {
             std::uint64_t overwritten_frames_at_consume = 0;
@@ -556,6 +559,26 @@ struct Runtime::Impl {
             const auto pipeline_started = std::chrono::steady_clock::now();
             PipelineProfile profile;
             profile.capture_ms = frame->timing.capture_ms;
+            profile.source_time_basis = frame->timing.source_time_basis;
+            profile.source_clock_status = frame->timing.source_clock_status;
+            profile.source_clock_uncertainty_ms =
+                frame->timing.source_clock_uncertainty_ms;
+            profile.source_clock_round_trip_ms =
+                frame->timing.source_clock_round_trip_ms;
+            profile.source_clock_rate = frame->timing.source_clock_rate;
+            profile.source_clock_mapping_age_ms =
+                frame->timing.source_clock_mapping_age_ms;
+            profile.source_clock_sample_count =
+                frame->timing.source_clock_sample_count;
+            profile.source_clock_session_id =
+                frame->timing.source_clock_session_id;
+            if (frame->timing.source_time_timing_valid) {
+                profile.source_timing_valid = true;
+                profile.source_to_capture_ms =
+                    std::chrono::duration<double, std::milli>(
+                        frame->timing.captured_at -
+                        frame->timing.source_time_at).count();
+            }
             profile.queue_ms = std::chrono::duration<double, std::milli>(
                 pipeline_started - frame->timing.captured_at).count();
 
@@ -589,13 +612,44 @@ struct Runtime::Impl {
             double mouse_elapsed_ms = 0.0;
             if (profile.detector.status == DetectionStatus::SUCCESS) {
                 aim_frame.sequence = frame->timing.sequence;
-                aim_frame.captured_at = frame->timing.captured_at;
+                aim_frame.captured_at =
+                    frame->timing.source_time_timing_valid
+                        ? frame->timing.source_time_at
+                        : frame->timing.captured_at;
+                const bool source_time_basis_changed =
+                    frame->timing.source_time_timing_valid !=
+                        aim_uses_source_time ||
+                    (frame->timing.source_time_timing_valid &&
+                     frame->timing.source_clock_session_id !=
+                         aim_source_clock_session_id);
+                const bool observation_time_not_increasing =
+                    last_aim_observation_at !=
+                        std::chrono::steady_clock::time_point{} &&
+                    aim_frame.captured_at <= last_aim_observation_at;
+                // WARMING→VALID 会从辅机 frame-ready 切到更早的 NDI
+                // submission 时刻；source session 重启或拟合更新也可能让
+                // 映射跳回。跨时间基准的旧轨迹不能混算 dt，先重置再消费。
+                if (source_time_basis_changed ||
+                    observation_time_not_increasing) {
+                    aim->reset();
+                }
+                aim_uses_source_time =
+                    frame->timing.source_time_timing_valid;
+                aim_source_clock_session_id = aim_uses_source_time
+                    ? frame->timing.source_clock_session_id : 0;
+                last_aim_observation_at = aim_frame.captured_at;
                 aim_frame.control_at = std::chrono::steady_clock::now();
                 profile.control_timing_valid = true;
                 profile.capture_to_control_ms =
                     std::chrono::duration<double, std::milli>(
                         aim_frame.control_at -
                         frame->timing.captured_at).count();
+                if (profile.source_timing_valid) {
+                    profile.source_to_control_ms =
+                        std::chrono::duration<double, std::milli>(
+                            aim_frame.control_at -
+                            frame->timing.source_time_at).count();
+                }
                 aim_frame.roi_width = frame->width;
                 aim_frame.roi_height = frame->height;
                 aim_frame.control_center_x = static_cast<float>(
@@ -620,39 +674,90 @@ struct Runtime::Impl {
                         aim_result.command.dy_counts};
                     const bool dispatch_allowed =
                         safety_gate.can_dispatch();
-                    auto mouse_completed =
+                    auto mouse_backend_completed =
                         std::chrono::steady_clock::now();
+                    MouseMoveReceipt mouse_receipt;
                     if (dispatch_allowed) {
-                        const auto mouse_started = mouse_completed;
-                        mouse_sent = mouse->move(command);
-                        mouse_completed = std::chrono::steady_clock::now();
+                        const auto mouse_started = mouse_backend_completed;
+                        mouse_receipt = mouse->move(command);
+                        mouse_sent = mouse_receipt.succeeded;
+                        mouse_backend_completed =
+                            mouse_receipt.backend_completed_at ==
+                                std::chrono::steady_clock::time_point{}
+                                ? std::chrono::steady_clock::now()
+                                : mouse_receipt.backend_completed_at;
                         mouse_elapsed_ms =
                             std::chrono::duration<double, std::milli>(
-                                mouse_completed - mouse_started).count();
-                        profile.mouse_completion_timing_valid = true;
-                        profile.control_to_mouse_completion_ms =
+                                mouse_backend_completed - mouse_started)
+                                .count();
+                        profile.mouse_backend_completion_timing_valid = true;
+                        profile.control_to_mouse_backend_completion_ms =
                             std::chrono::duration<double, std::milli>(
-                                mouse_completed -
+                                mouse_backend_completed -
                                 aim_frame.control_at).count();
-                        profile.capture_to_mouse_completion_ms =
+                        profile.capture_to_mouse_backend_completion_ms =
                             std::chrono::duration<double, std::milli>(
-                                mouse_completed -
+                                mouse_backend_completed -
                                 frame->timing.captured_at).count();
+                        if (profile.source_timing_valid) {
+                            profile.source_to_mouse_backend_completion_ms =
+                                std::chrono::duration<double, std::milli>(
+                                    mouse_backend_completed -
+                                    frame->timing.source_time_at).count();
+                        }
+                        if (mouse_receipt.protocol_ack_received &&
+                            mouse_receipt.protocol_ack_received_at !=
+                                std::chrono::steady_clock::time_point{}) {
+                            profile.mouse_protocol_ack_timing_valid = true;
+                            profile.control_to_mouse_protocol_ack_ms =
+                                std::chrono::duration<double, std::milli>(
+                                    mouse_receipt.protocol_ack_received_at -
+                                    aim_frame.control_at).count();
+                            profile.capture_to_mouse_protocol_ack_ms =
+                                std::chrono::duration<double, std::milli>(
+                                    mouse_receipt.protocol_ack_received_at -
+                                    frame->timing.captured_at).count();
+                            if (profile.source_timing_valid) {
+                                profile.source_to_mouse_protocol_ack_ms =
+                                    std::chrono::duration<double, std::milli>(
+                                        mouse_receipt.protocol_ack_received_at -
+                                        frame->timing.source_time_at).count();
+                            }
+                        }
+                        if (mouse_receipt.physical_effect_observed &&
+                            mouse_receipt.physical_effect_at !=
+                                std::chrono::steady_clock::time_point{}) {
+                            profile.mouse_physical_effect_timing_valid = true;
+                            profile.control_to_mouse_physical_effect_ms =
+                                std::chrono::duration<double, std::milli>(
+                                    mouse_receipt.physical_effect_at -
+                                    aim_frame.control_at).count();
+                            profile.capture_to_mouse_physical_effect_ms =
+                                std::chrono::duration<double, std::milli>(
+                                    mouse_receipt.physical_effect_at -
+                                    frame->timing.captured_at).count();
+                            if (profile.source_timing_valid) {
+                                profile.source_to_mouse_physical_effect_ms =
+                                    std::chrono::duration<double, std::milli>(
+                                        mouse_receipt.physical_effect_at -
+                                        frame->timing.source_time_at).count();
+                            }
+                        }
                     }
                     // Aim 先记录预计算命令，Mouse 返回后再用同一序号原位
                     // 确认。安全门在两次检查间释放或后端失败时确认零，
-                    // 绝不让未执行命令进入下一帧的延迟命令与在途库存。
-                    const bool applied_recorded =
-                        aim->record_applied_command(
+                    // 绝不让未被后端接受的命令进入下一帧的延迟命令与在途库存。
+                    const bool backend_completion_recorded =
+                        aim->record_backend_completed_command(
                             aim_result.command.sequence,
-                            mouse_completed,
+                            mouse_backend_completed,
                             mouse_sent ? command.dx_counts : 0,
                             mouse_sent ? command.dy_counts : 0);
-                    if (!applied_recorded) {
+                    if (!backend_completion_recorded) {
                         safety_gate.emergency_stop();
                         aim_reset_requested.store(
                             true, std::memory_order_release);
-                        set_error("Aim 实际命令反馈与预计算历史不一致");
+                        set_error("Aim 后端完成反馈与预计算历史不一致");
                     } else if (dispatch_allowed && !mouse_sent) {
                         safety_gate.emergency_stop();
                         aim_reset_requested.store(true,

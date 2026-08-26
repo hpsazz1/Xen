@@ -249,12 +249,12 @@ public:
     Aim& operator=(Aim&&) noexcept;
 
     AimResult process(const AimFrame& frame) noexcept;
-    // Runtime 在 Mouse 后端返回后确认本帧真正执行的整数命令。成功发送
-    // 传回原命令，安全门拒绝或后端失败传回 (0,0)，从而用真实完成时刻
-    // 和结果修正延迟模型读取的已执行命令与在途库存。
-    bool record_applied_command(
+    // Runtime 在 Mouse 后端返回后确认本帧的后端结果。成功发送传回原命令，
+    // 安全门拒绝或后端失败传回 (0,0)。该时刻不是 protocol ACK
+    // 或物理效果；issued_at 继续保留，延迟库存只用 backend completion 生效。
+    bool record_backend_completed_command(
         std::uint64_t sequence,
-        std::chrono::steady_clock::time_point applied_at,
+        std::chrono::steady_clock::time_point backend_completed_at,
         int dx_counts,
         int dy_counts) noexcept;
     void reset() noexcept;

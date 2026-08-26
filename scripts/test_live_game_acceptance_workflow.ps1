@@ -203,7 +203,7 @@ try {
     $reportPath = Join-Path $runtimeDirectory "synthetic.json"
     $csvPath = Join-Path $runtimeDirectory "synthetic.csv"
     $synthetic = [ordered]@{
-        schema = 13
+        schema = 14
         session_id = "synthetic"
         model_path = $fixedModel
         provider = "CPUExecutionProvider"
@@ -312,7 +312,7 @@ try {
             [bool]$summary.aim_observability.contract_valid -and
             $summary.aim_observability.precomputed_command_frames -eq 1200 -and
             [bool]$summary.aim_observability.contract.prediction_points_may_leave_selected_box) `
-        "合法 schema 13 报告应完成检测和 Aim 自动汇总"
+        "合法 schema 14 报告应完成检测和 Aim 自动汇总"
 
     $synthetic.samples[0].aim_base_point_inside_box = $false
     $synthetic.samples[0].aim_base_point = @(140.0, 140.0)
@@ -342,9 +342,9 @@ try {
         -Raw -Encoding UTF8 | ConvertFrom-Json
     Expect (-not [bool]$oldSchemaSummary.automatic_complete -and
             ($oldSchemaSummary.failures -join "`n") -match
-                '报告 schema 不是 13') `
+                '报告 schema 不是 14') `
         "旧 schema 报告必须拒绝自动通过"
-    $synthetic.schema = 13
+    $synthetic.schema = 14
 
     $synthetic.performance_probes_enabled = $true
     [System.IO.File]::WriteAllText(

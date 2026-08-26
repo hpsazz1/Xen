@@ -13,6 +13,7 @@
 #include "capture/network_internal.h"
 #include "capture/udp_internal.h"
 #include "capture/xudp_internal.h"
+#include "clock_sync/clock_sync.h"
 #include "keyboard/keyboard.h"
 #include "keyboard/keyboard_internal.h"
 #include "log/log.h"
@@ -51,7 +52,8 @@ void expect(bool condition, const std::string& message) {
 class FakeInputDevice final : public IMouseController {
 public:
     bool open() noexcept override { return true; }
-    bool move(const MouseMoveCommand&) noexcept override { return false; }
+    MouseMoveReceipt move(
+            const MouseMoveCommand&) noexcept override { return {}; }
     bool poll_input(InputSnapshot& snapshot) noexcept override {
         snapshot = snapshot_;
         return true;
@@ -746,9 +748,41 @@ void test_xudp_sequence_and_geometry() {
 
 #if XEN_HAS_NDI
 
+unsigned short reserve_loopback_port();
+
 bool wait_for_capture_frame(ICapture& capture,
                             std::uint64_t after_sequence,
                             CapturedFrame& frame);
+
+class NdiClockSourceFixture final {
+public:
+    bool open() {
+        const unsigned short port = reserve_loopback_port();
+        if (port == 0) return false;
+        url_ = "udp://127.0.0.1:" + std::to_string(port);
+        if (!server_.open({url_})) return false;
+        worker_ = std::thread([this]() {
+            while (!stop_.load(std::memory_order_acquire)) {
+                server_.serve_once(20);
+            }
+        });
+        return true;
+    }
+
+    ~NdiClockSourceFixture() {
+        stop_.store(true, std::memory_order_release);
+        if (worker_.joinable()) worker_.join();
+        server_.close();
+    }
+
+    const std::string& url() const noexcept { return url_; }
+
+private:
+    clock_sync::Server server_;
+    std::atomic<bool> stop_{false};
+    std::thread worker_;
+    std::string url_;
+};
 
 void send_ndi_test_frame(NDIlib_send_instance_t sender,
                          cv::Scalar color,
@@ -759,7 +793,7 @@ void send_ndi_test_frame(NDIlib_send_instance_t sender,
     video.xres = frame.cols;
     video.yres = frame.rows;
     video.FourCC = NDIlib_FourCC_type_BGRX;
-    video.frame_rate_N = 60;
+    video.frame_rate_N = 240;
     video.frame_rate_D = 1;
     video.frame_format_type = NDIlib_frame_format_type_progressive;
     video.timecode = NDIlib_send_timecode_synthesize;
@@ -770,12 +804,21 @@ void send_ndi_test_frame(NDIlib_send_instance_t sender,
 }
 
 void test_ndi_loopback() {
+    NdiClockSourceFixture clock_source;
+    const bool clock_source_ready = clock_source.open();
+    expect(clock_source_ready,
+           "NDI 回环必须启动独立源机时钟旁路");
+
     CaptureConfig config;
     config.backend = CaptureBackend::NDI;
     config.ndi_source_name = "Auto";
     config.ndi_discovery_timeout_ms = 500;
     config.ndi_receive_timeout_ms = 50;
     config.ndi_disconnect_timeout_ms = 500;
+    config.ndi_clock_sync_url = clock_source.url();
+    config.ndi_clock_sync_interval_ms = 50;
+    config.ndi_clock_sync_timeout_ms = 40;
+    config.ndi_clock_mapping_max_age_ms = 500;
     config.enable_performance_probes = true;
     config.ndi_frame_layout = NetworkFrameLayout::CENTER_CROP_1_TO_1;
     config.ndi_require_frame_metadata = true;
@@ -805,7 +848,7 @@ void test_ndi_loopback() {
     for (int index = 0; index < 20; ++index) {
         send_ndi_test_frame(
             sender, cv::Scalar(24.0, 96.0, 208.0), metadata);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
     }
 
     CapturedFrame frame;
@@ -819,9 +862,13 @@ void test_ndi_loopback() {
                frame.source_pixels_per_pixel_x == 1.0 &&
                frame.source_pixels_per_pixel_y == 1.0,
            "NDI metadata 必须将辅机接收帧映射到主机 (1120,560)");
-    expect(received_first && frame.timing.source_fps == 60.0 &&
+    expect(received_first && frame.timing.source_fps == 240.0 &&
                frame.timing.source_received_frames > 0,
-           "NDI 帧必须携带 SDK 源帧率与接收统计");
+           "NDI 240 Hz 帧必须携带 SDK 源帧率与接收统计");
+    expect(received_first && frame.timing.source_timestamp_valid &&
+               frame.timing.source_time_basis ==
+                   SourceTimeBasis::NDI_SDK_SUBMISSION,
+           "NDI 帧必须保留 SDK submission 原始时间和明确语义");
     const auto valid_timing = [](double value) {
         return std::isfinite(value) && value >= 0.0;
     };
@@ -852,12 +899,19 @@ void test_ndi_loopback() {
          frame.timing.capture_stages.queued_video_frames >= 0 &&
          frame.timing.capture_stages.queued_audio_frames >= 0 &&
          frame.timing.capture_stages.queued_metadata_frames >= 0);
+    bool source_mapping_observed =
+        received_first && frame.timing.source_time_timing_valid;
+    bool source_mapping_valid = !source_mapping_observed ||
+        (frame.timing.source_clock_status == SourceClockStatus::VALID &&
+         frame.timing.source_clock_sample_count >= 3 &&
+         valid_timing(frame.timing.source_clock_uncertainty_ms) &&
+         frame.timing.source_time_at <= frame.timing.captured_at);
     std::uint64_t after_sequence = frame.timing.sequence;
     const auto probe_deadline = std::chrono::steady_clock::now() +
                                 std::chrono::milliseconds(1500);
     while (std::chrono::steady_clock::now() < probe_deadline &&
            (!received_second || !performance_query_observed ||
-            !queue_probe_observed)) {
+            !queue_probe_observed || !source_mapping_observed)) {
         send_ndi_test_frame(
             sender, cv::Scalar(208.0, 48.0, 20.0), metadata);
         if (wait_for_capture_frame(*capture, after_sequence, frame)) {
@@ -877,6 +931,17 @@ void test_ndi_loopback() {
                     stages.queued_audio_frames >= 0 &&
                     stages.queued_metadata_frames >= 0;
             }
+            if (frame.timing.source_time_timing_valid) {
+                source_mapping_observed = true;
+                source_mapping_valid = source_mapping_valid &&
+                    frame.timing.source_clock_status ==
+                        SourceClockStatus::VALID &&
+                    frame.timing.source_clock_sample_count >= 3 &&
+                    valid_timing(
+                        frame.timing.source_clock_uncertainty_ms) &&
+                    frame.timing.source_time_at <=
+                        frame.timing.captured_at;
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -889,6 +954,8 @@ void test_ndi_loopback() {
            "NDI 探针必须观测并计时周期性 SDK performance 查询");
     expect(queue_probe_observed && queue_probe_valid,
            "NDI 探针必须在首帧或一秒周期内发布合法 SDK queue 深度");
+    expect(source_mapping_observed && source_mapping_valid,
+           "NDI 240 Hz/320 ROI 回环必须建立 SDK submission 到本机 steady 的有效映射");
 
     NDIlib_send_destroy(sender);
     bool access_lost = false;

@@ -140,10 +140,10 @@ struct Track {
 struct IssuedCommand {
     std::uint64_t sequence = 0;
     std::chrono::steady_clock::time_point issued_at{};
-    std::chrono::steady_clock::time_point applied_at{};
+    std::chrono::steady_clock::time_point backend_completed_at{};
     float dx_counts = 0.0f;
     float dy_counts = 0.0f;
-    bool applied = false;
+    bool backend_completed = false;
 };
 
 struct PendingIssuedCommandInventory {
@@ -2343,23 +2343,24 @@ struct Aim::Impl {
         IssuedCommand& entry = issued_commands[issued_command_next];
         entry.sequence = frame.sequence;
         entry.issued_at = issued_at;
-        entry.applied_at = {};
+        entry.backend_completed_at = {};
         entry.dx_counts = frame.lock_active ? dx_counts : 0.0f;
         entry.dy_counts = frame.lock_active ? dy_counts : 0.0f;
-        entry.applied = false;
+        entry.backend_completed = false;
         issued_command_next =
             (issued_command_next + 1U) % issued_commands.size();
         issued_command_count = std::min(
             issued_command_count + 1U, issued_commands.size());
     }
 
-    bool record_applied_command(
+    bool record_backend_completed_command(
             std::uint64_t sequence,
-            std::chrono::steady_clock::time_point applied_at,
+            std::chrono::steady_clock::time_point backend_completed_at,
             int dx_counts,
             int dy_counts) noexcept {
         if (sequence == 0 ||
-            applied_at == std::chrono::steady_clock::time_point{}) {
+            backend_completed_at ==
+                std::chrono::steady_clock::time_point{}) {
             return false;
         }
         for (std::size_t offset = 0;
@@ -2369,7 +2370,8 @@ struct Aim::Impl {
                 issued_commands.size();
             IssuedCommand& candidate = issued_commands[index];
             if (candidate.sequence != sequence) continue;
-            if (candidate.applied || applied_at < candidate.issued_at) {
+            if (candidate.backend_completed ||
+                backend_completed_at < candidate.issued_at) {
                 return false;
             }
             const bool confirms_requested_command =
@@ -2381,11 +2383,10 @@ struct Aim::Impl {
                 !confirms_no_command_applied) {
                 return false;
             }
-            candidate.issued_at = applied_at;
             candidate.dx_counts = static_cast<float>(dx_counts);
             candidate.dy_counts = static_cast<float>(dy_counts);
-            candidate.applied_at = applied_at;
-            candidate.applied = true;
+            candidate.backend_completed_at = backend_completed_at;
+            candidate.backend_completed = true;
             return true;
         }
         return false;
@@ -2403,14 +2404,19 @@ struct Aim::Impl {
                 (issued_command_next + issued_commands.size() - 1U - offset) %
                 issued_commands.size();
             const IssuedCommand& candidate = issued_commands[index];
-            if (candidate.issued_at <= effective_at) {
+            const auto command_effective_at = candidate.backend_completed
+                ? candidate.backend_completed_at : candidate.issued_at;
+            if (command_effective_at <= effective_at) {
                 best = &candidate;
                 break;
             }
         }
         if (!best) return {0.0f, 0.0f};
         const float age_seconds = static_cast<float>(
-            std::chrono::duration<double>(effective_at - best->issued_at)
+            std::chrono::duration<double>(
+                effective_at -
+                (best->backend_completed
+                     ? best->backend_completed_at : best->issued_at))
                 .count());
         if (age_seconds > kControllerCommandHistoryMaximumAgeSeconds) {
             return {0.0f, 0.0f};
@@ -2443,8 +2449,10 @@ struct Aim::Impl {
                 (issued_command_next + issued_commands.size() - 1U - offset) %
                 issued_commands.size();
             const IssuedCommand& candidate = issued_commands[index];
-            if (candidate.issued_at <= effective_at) break;
-            if (candidate.issued_at <= query_at) {
+            const auto command_effective_at = candidate.backend_completed
+                ? candidate.backend_completed_at : candidate.issued_at;
+            if (command_effective_at <= effective_at) break;
+            if (command_effective_at <= query_at) {
                 inventory.net_x += candidate.dx_counts;
                 inventory.net_y += candidate.dy_counts;
                 inventory.absolute_x += std::fabs(candidate.dx_counts);
@@ -4266,13 +4274,13 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
     }
 }
 
-bool Aim::record_applied_command(
+bool Aim::record_backend_completed_command(
         std::uint64_t sequence,
-        std::chrono::steady_clock::time_point applied_at,
+        std::chrono::steady_clock::time_point backend_completed_at,
         int dx_counts,
         int dy_counts) noexcept {
-    return impl_ && impl_->record_applied_command(
-        sequence, applied_at, dx_counts, dy_counts);
+    return impl_ && impl_->record_backend_completed_command(
+        sequence, backend_completed_at, dx_counts, dy_counts);
 }
 
 void Aim::reset() noexcept {

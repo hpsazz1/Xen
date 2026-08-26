@@ -445,6 +445,14 @@ bool validate_app_config(const AppConfig& config,
              config.capture.ndi_disconnect_timeout_ms <
                  config.capture.ndi_receive_timeout_ms ||
              config.capture.ndi_disconnect_timeout_ms > 60000 ||
+             (!config.capture.ndi_clock_sync_url.empty() &&
+              (config.capture.ndi_clock_sync_interval_ms < 50 ||
+               config.capture.ndi_clock_sync_interval_ms > 10000 ||
+               config.capture.ndi_clock_sync_timeout_ms < 10 ||
+               config.capture.ndi_clock_sync_timeout_ms > 5000 ||
+               config.capture.ndi_clock_mapping_max_age_ms <
+                   config.capture.ndi_clock_sync_interval_ms ||
+               config.capture.ndi_clock_mapping_max_age_ms > 60000)) ||
              !valid_network_layout(config.capture.ndi_frame_layout,
                                    config.capture.ndi_source_width,
                                    config.capture.ndi_source_height,
@@ -665,6 +673,18 @@ bool load_app_config(const std::string& path,
         candidate.capture.ndi_disconnect_timeout_ms = static_cast<int>(
             ini.GetLongValue("capture", "ndi_disconnect_timeout_ms",
                              candidate.capture.ndi_disconnect_timeout_ms));
+        candidate.capture.ndi_clock_sync_url = ini.GetValue(
+            "capture", "ndi_clock_sync_url",
+            candidate.capture.ndi_clock_sync_url.c_str());
+        candidate.capture.ndi_clock_sync_interval_ms = static_cast<int>(
+            ini.GetLongValue("capture", "ndi_clock_sync_interval_ms",
+                             candidate.capture.ndi_clock_sync_interval_ms));
+        candidate.capture.ndi_clock_sync_timeout_ms = static_cast<int>(
+            ini.GetLongValue("capture", "ndi_clock_sync_timeout_ms",
+                             candidate.capture.ndi_clock_sync_timeout_ms));
+        candidate.capture.ndi_clock_mapping_max_age_ms = static_cast<int>(
+            ini.GetLongValue("capture", "ndi_clock_mapping_max_age_ms",
+                             candidate.capture.ndi_clock_mapping_max_age_ms));
         candidate.capture.ndi_frame_layout = parse_network_frame_layout(
             ini.GetValue("capture", "ndi_frame_layout"),
             candidate.capture.ndi_frame_layout);
@@ -889,6 +909,14 @@ bool save_app_config(const std::string& path,
                          config.capture.ndi_receive_timeout_ms);
         ini.SetLongValue("capture", "ndi_disconnect_timeout_ms",
                          config.capture.ndi_disconnect_timeout_ms);
+        ini.SetValue("capture", "ndi_clock_sync_url",
+                     config.capture.ndi_clock_sync_url.c_str());
+        ini.SetLongValue("capture", "ndi_clock_sync_interval_ms",
+                         config.capture.ndi_clock_sync_interval_ms);
+        ini.SetLongValue("capture", "ndi_clock_sync_timeout_ms",
+                         config.capture.ndi_clock_sync_timeout_ms);
+        ini.SetLongValue("capture", "ndi_clock_mapping_max_age_ms",
+                         config.capture.ndi_clock_mapping_max_age_ms);
         ini.SetValue("capture", "ndi_frame_layout",
                      network_frame_layout_name(config.capture.ndi_frame_layout));
         ini.SetLongValue("capture", "ndi_source_width",
