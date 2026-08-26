@@ -51,6 +51,18 @@ bool provider_available(const std::vector<std::string>& providers,
     return false;
 }
 
+#if XEN_HAS_CUDA_RUNTIME
+struct CudaHostMemoryDeleter {
+    void operator()(unsigned char* pointer) const noexcept {
+        if (!pointer) return;
+        (void)cudaFreeHost(pointer);
+    }
+};
+
+using CudaPinnedHostBuffer =
+    std::unique_ptr<unsigned char, CudaHostMemoryDeleter>;
+#endif
+
 } // namespace
 
 struct Session::Impl {
@@ -74,6 +86,10 @@ struct Session::Impl {
     std::unique_ptr<Ort::Allocator> device_allocator;
     Ort::Value device_input_value{nullptr};
     std::vector<Ort::Value> device_output_values;
+#if XEN_HAS_CUDA_RUNTIME
+    std::unique_ptr<Ort::MemoryInfo> pinned_output_memory;
+    std::vector<CudaPinnedHostBuffer> pinned_output_buffers;
+#endif
     std::vector<Ort::Value> output_values;
     std::unique_ptr<Ort::IoBinding> io_binding;
     int device_id = 0;
@@ -138,6 +154,10 @@ struct Session::Impl {
         // 和 Session 仍存活时销毁，避免重复 load 或失败回滚形成悬空 allocator。
         io_binding.reset();
         output_values.clear();
+#if XEN_HAS_CUDA_RUNTIME
+        pinned_output_buffers.clear();
+        pinned_output_memory.reset();
+#endif
         device_output_values.clear();
 #if XEN_HAS_DIRECTML_INTEROP
         // Binding 先释放 OrtValue 引用，随后释放外部 allocation wrapper，最后
@@ -721,6 +741,12 @@ bool Session::load(const std::string& path) {
 
             impl_->output_values.reserve(output_count);
             impl_->device_output_values.reserve(output_count);
+#if XEN_HAS_CUDA_RUNTIME
+            impl_->pinned_output_memory = std::make_unique<Ort::MemoryInfo>(
+                Ort::MemoryInfo::CreateCpu(
+                    OrtDeviceAllocator, OrtMemTypeDefault));
+            impl_->pinned_output_buffers.reserve(output_count);
+#endif
             for (size_t i = 0; i < output_count; ++i) {
                 const auto& output_shape = impl_->output_shapes[i];
                 const bool static_shape = !output_shape.empty() &&
@@ -733,13 +759,46 @@ bool Session::load(const std::string& path) {
                     impl_->session.reset();
                     return false;
                 }
+                Ort::Value device_output = Ort::Value::CreateTensor(
+                    *impl_->device_allocator,
+                    output_shape.data(), output_shape.size(),
+                    impl_->output_types[i]);
+#if XEN_HAS_CUDA_RUNTIME
+                const size_t output_bytes =
+                    device_output.GetTensorSizeInBytes();
+                void* raw_output = nullptr;
+                const cudaError_t allocation_result = cudaMallocHost(
+                    &raw_output, output_bytes);
+                if (allocation_result != cudaSuccess) {
+                    LOG_ERROR(
+                        "detector",
+                        "CUDA page-locked 输出缓冲分配失败: output={}, bytes={}, error={}",
+                        i, output_bytes,
+                        cudaGetErrorString(allocation_result));
+                    impl_->clear_execution_buffers();
+                    impl_->session.reset();
+                    return false;
+                }
+                CudaPinnedHostBuffer pinned_output(
+                    static_cast<unsigned char*>(raw_output),
+                    CudaHostMemoryDeleter{});
+                Ort::Value host_output = Ort::Value::CreateTensor(
+                    *impl_->pinned_output_memory,
+                    pinned_output.get(), output_bytes,
+                    output_shape.data(), output_shape.size(),
+                    impl_->output_types[i]);
+                // OrtValue 只借用 host backing；owner 在它之后入栈、在它之后释放，
+                // 保证跨帧复用期间地址稳定且只由 cudaFreeHost 回收。
+                impl_->output_values.push_back(std::move(host_output));
+                impl_->pinned_output_buffers.push_back(
+                    std::move(pinned_output));
+#else
                 impl_->output_values.push_back(Ort::Value::CreateTensor(
                     allocator, output_shape.data(), output_shape.size(),
                     impl_->output_types[i]));
-                impl_->device_output_values.push_back(Ort::Value::CreateTensor(
-                    *impl_->device_allocator,
-                    output_shape.data(), output_shape.size(),
-                    impl_->output_types[i]));
+#endif
+                impl_->device_output_values.push_back(
+                    std::move(device_output));
             }
 
             impl_->io_binding = std::make_unique<Ort::IoBinding>(*impl_->session);
