@@ -179,32 +179,18 @@ void test_directml_frame_requires_fence() {
 
 void test_safety_gate() {
     runtime::detail::SafetyGate gate;
-    expect(!gate.arm() && !gate.control_active() && !gate.can_dispatch(),
-           "未授权模式默认必须拒绝控制武装与物理派发");
-
-    gate.configure(runtime::detail::RuntimeControlMode::OBSERVE_ONLY);
-    expect(gate.arm(), "Observe-only 应允许同协议控制武装");
+    expect(!gate.can_dispatch(), "安全门默认必须关闭");
+    expect(gate.arm(), "无急停时允许物理武装");
     gate.set_hold(true);
-    expect(gate.control_active() && gate.control_armed() &&
-               !gate.output_armed() && !gate.can_dispatch(),
-           "Observe-only 武装并按住热键时必须激活控制但绝不允许物理派发");
+    expect(gate.can_dispatch(), "物理武装且按住热键时允许派发");
     gate.emergency_stop();
-    expect(!gate.control_active() && !gate.control_armed() &&
-               !gate.can_dispatch(),
-           "急停必须原子解除控制武装并拒绝后续命令");
+    expect(!gate.can_dispatch() && !gate.output_armed(),
+           "急停必须原子解除武装并拒绝后续命令");
     expect(!gate.reset_emergency(),
            "热键仍按住时不得复位急停");
     gate.set_hold(false);
     expect(gate.reset_emergency(), "释放热键后允许复位急停");
-    expect(!gate.control_active() && !gate.can_dispatch(),
-           "复位急停不能自动重新武装");
-
-    gate.configure(runtime::detail::RuntimeControlMode::PHYSICAL);
-    expect(gate.arm(), "Physical 模式应保持现有人工武装能力");
-    gate.set_hold(true);
-    expect(gate.control_active() && gate.control_armed() &&
-               gate.output_armed() && gate.can_dispatch(),
-           "Physical 武装并按住热键时应同时允许控制与物理派发");
+    expect(!gate.can_dispatch(), "复位急停不能自动重新武装");
 }
 
 void test_bounded_sample_ring() {

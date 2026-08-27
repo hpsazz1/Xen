@@ -142,8 +142,8 @@ struct RuntimePipelineSample {
     AimStatus aim_status = AimStatus::NOT_RUN;
     MouseStatus mouse_status = MouseStatus::CLOSED;
     bool mouse_sent = false;
-    // 本帧是否在人工武装且按住热键、急停未锁存的控制窗口内。该值与
-    // mouse_sent 分离，Observe-only 可为 true 而物理发送必须为 false。
+    // 本帧是否处于人工武装、按住热键且急停未锁存的物理派发窗口。
+    // 与 mouse_sent 分离，用于区分控制门已打开但本帧没有命令的情况。
     bool aim_lock_active = false;
     // Aim 诊断只固化固定大小快照，不复制检测容器。control_center 与几何比例
     // 可把 ROI 点、速度和命令统一换算到主机 FOV 口径做双机 A/B。
@@ -266,8 +266,6 @@ struct RuntimeSnapshot {
     double control_latency_p95_ms = 0.0;
     PipelineProfile last_profile;
     bool output_allowed_by_config = false;
-    bool observe_only_control_allowed_by_config = false;
-    bool control_armed = false;
     bool output_armed = false;
     bool aim_hold_active = false;
     bool emergency_stopped = false;

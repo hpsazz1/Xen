@@ -383,16 +383,8 @@ PreviewStats RuntimePreviewChannel::stats() const noexcept {
     }
 }
 
-void SafetyGate::configure(RuntimeControlMode mode) noexcept {
-    armed_.store(false, std::memory_order_release);
-    hold_active_.store(false, std::memory_order_release);
-    mode_.store(mode, std::memory_order_release);
-}
-
 bool SafetyGate::arm() noexcept {
-    if (mode_.load(std::memory_order_acquire) ==
-            RuntimeControlMode::DISABLED ||
-        emergency_stopped_.load(std::memory_order_acquire)) {
+    if (emergency_stopped_.load(std::memory_order_acquire)) {
         return false;
     }
     armed_.store(true, std::memory_order_release);
@@ -418,26 +410,14 @@ bool SafetyGate::reset_emergency() noexcept {
     return true;
 }
 
-bool SafetyGate::control_active() const noexcept {
+bool SafetyGate::can_dispatch() const noexcept {
     return armed_.load(std::memory_order_acquire) &&
            hold_active_.load(std::memory_order_acquire) &&
            !emergency_stopped_.load(std::memory_order_acquire);
 }
 
-bool SafetyGate::can_dispatch() const noexcept {
-    return mode_.load(std::memory_order_acquire) ==
-               RuntimeControlMode::PHYSICAL &&
-           control_active();
-}
-
-bool SafetyGate::control_armed() const noexcept {
-    return armed_.load(std::memory_order_acquire);
-}
-
 bool SafetyGate::output_armed() const noexcept {
-    return mode_.load(std::memory_order_acquire) ==
-               RuntimeControlMode::PHYSICAL &&
-           control_armed();
+    return armed_.load(std::memory_order_acquire);
 }
 
 bool SafetyGate::hold_active() const noexcept {

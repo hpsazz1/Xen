@@ -498,7 +498,6 @@ predicted_gain=0.500000
 [mouse]
 backend=win32_send_input
 allow_send_input=$allow
-allow_observe_only_control=false
 kmbox_ip=
 kmbox_port=0
 kmbox_uuid=

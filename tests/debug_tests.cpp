@@ -239,8 +239,6 @@ void test_report_summary_and_atomic_files() {
     final_snapshot.transport_invalid_packets = 4;
     final_snapshot.overwritten_frames = 1;
     final_snapshot.mouse_commands = 0;
-    final_snapshot.observe_only_control_allowed_by_config = true;
-    final_snapshot.control_armed = true;
     final_snapshot.output_allowed_by_config = false;
     final_snapshot.output_armed = false;
     final_snapshot.preview_enabled = true;
@@ -420,11 +418,6 @@ void test_report_summary_and_atomic_files() {
                     "\"aim_reverse_position_improvement_reset_x\": true") !=
                     std::string::npos &&
                json_text.find("\"final_snapshot\"") != std::string::npos &&
-               json_text.find(
-                   "\"observe_only_control_allowed_by_config\": true") !=
-                   std::string::npos &&
-               json_text.find("\"control_armed\": true") !=
-                   std::string::npos &&
                json_text.find("\"output_armed\": false") !=
                    std::string::npos &&
                json_text.find("\"source_width\": 2560") !=

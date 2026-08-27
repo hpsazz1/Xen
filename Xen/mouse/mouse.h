@@ -49,9 +49,6 @@ struct MouseConfig {
     MouseBackend backend = MouseBackend::WIN32_SEND_INPUT;
     // 双重安全门：即使 Runtime 误发命令，未显式允许时也不能注入输入。
     bool allow_send_input = false;
-    // 仅允许人工诊断进入与 Physical 相同的锁定/按键控制状态；最终 Mouse
-    // 派发仍必须由 allow_send_input 单独授权，两者不得同时启用。
-    bool allow_observe_only_control = false;
     // KMBOX NET 凭据不提供可误用的设备默认值，选择该后端时必须显式填写。
     std::string kmbox_ip;
     int kmbox_port = 0;

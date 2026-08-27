@@ -34,8 +34,6 @@ bool same_mouse_config(const MouseConfig& first,
                        const MouseConfig& second) noexcept {
     return first.backend == second.backend &&
            first.allow_send_input == second.allow_send_input &&
-           first.allow_observe_only_control ==
-               second.allow_observe_only_control &&
            first.kmbox_ip == second.kmbox_ip &&
            first.kmbox_port == second.kmbox_port &&
            first.kmbox_uuid == second.kmbox_uuid &&

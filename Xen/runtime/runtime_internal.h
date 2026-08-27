@@ -276,29 +276,19 @@ private:
     bool enabled_ = false;
 };
 
-enum class RuntimeControlMode {
-    DISABLED,
-    OBSERVE_ONLY,
-    PHYSICAL,
-};
-
 class SafetyGate {
 public:
-    void configure(RuntimeControlMode mode) noexcept;
     bool arm() noexcept;
     void disarm() noexcept;
     void set_hold(bool active) noexcept;
     void emergency_stop() noexcept;
     bool reset_emergency() noexcept;
-    bool control_active() const noexcept;
     bool can_dispatch() const noexcept;
-    bool control_armed() const noexcept;
     bool output_armed() const noexcept;
     bool hold_active() const noexcept;
     bool emergency_stopped() const noexcept;
 
 private:
-    std::atomic<RuntimeControlMode> mode_{RuntimeControlMode::DISABLED};
     std::atomic<bool> armed_{false};
     std::atomic<bool> hold_active_{false};
     std::atomic<bool> emergency_stopped_{false};

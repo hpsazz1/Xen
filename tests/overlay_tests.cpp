@@ -185,38 +185,6 @@ void test_hotkey_capture_state_machine() {
            "捕获期间按 Esc 必须清空绑定并退出捕获");
 }
 
-void test_control_arm_presentation() {
-    overlay::detail::ControlArmState state;
-    state.running = true;
-    state.observe_only_allowed = true;
-    auto presentation =
-        overlay::detail::control_arm_presentation(state);
-    expect(presentation.can_arm && presentation.observe_only &&
-               presentation.arm_label == "观测武装" &&
-               presentation.armed_status == "控制已武装（Observe-only）",
-           "Observe-only Runtime 必须提供可点击且不暗示物理输出的武装界面");
-
-    state.control_armed = true;
-    presentation = overlay::detail::control_arm_presentation(state);
-    expect(presentation.can_disarm && !presentation.can_arm,
-           "Observe-only 控制武装后必须允许解除且不得重复武装");
-
-    state = {};
-    state.running = true;
-    state.output_allowed = true;
-    presentation = overlay::detail::control_arm_presentation(state);
-    expect(presentation.can_arm && !presentation.observe_only &&
-               presentation.arm_label == "武装" &&
-               presentation.armed_status == "输出已武装",
-           "Physical Runtime 必须保持现有物理武装语义");
-
-    state = {};
-    state.running = true;
-    presentation = overlay::detail::control_arm_presentation(state);
-    expect(!presentation.can_arm && !presentation.can_disarm,
-           "未授权普通配置不得暴露任何控制武装入口");
-}
-
 } // namespace
 
 int main() {
@@ -229,7 +197,6 @@ int main() {
     test_detached_preview_refresh_state();
     test_detection_role_mapping();
     test_hotkey_capture_state_machine();
-    test_control_arm_presentation();
     if (failures != 0) {
         std::cerr << "Overlay 测试失败数: " << failures << '\n';
         return 1;

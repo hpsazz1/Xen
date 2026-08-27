@@ -561,9 +561,6 @@ void append_csv_snapshot(std::ostringstream& output,
         << bool_name(snapshot.d3d11_directml_interop) << '\n'
         << "# final_output_allowed_by_config,"
         << bool_name(snapshot.output_allowed_by_config) << '\n'
-        << "# final_observe_only_control_allowed_by_config,"
-        << bool_name(snapshot.observe_only_control_allowed_by_config) << '\n'
-        << "# final_control_armed," << bool_name(snapshot.control_armed) << '\n'
         << "# final_output_armed," << bool_name(snapshot.output_armed) << '\n'
         << "# final_emergency_stopped,"
         << bool_name(snapshot.emergency_stopped) << '\n';
@@ -646,9 +643,6 @@ void append_json_snapshot(std::ostringstream& output,
         << bool_name(snapshot.d3d11_directml_interop) << ",\n"
         << "    \"output_allowed_by_config\": "
         << bool_name(snapshot.output_allowed_by_config) << ",\n"
-        << "    \"observe_only_control_allowed_by_config\": "
-        << bool_name(snapshot.observe_only_control_allowed_by_config) << ",\n"
-        << "    \"control_armed\": " << bool_name(snapshot.control_armed) << ",\n"
         << "    \"output_armed\": " << bool_name(snapshot.output_armed)
         << ",\n    \"emergency_stopped\": "
         << bool_name(snapshot.emergency_stopped) << "\n  },\n";

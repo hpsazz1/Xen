@@ -75,8 +75,7 @@ Assert-True ($networkReceiverText -match
     $networkReceiverText -match
         '"max_prediction_lead_percent=\$aimMaxPredictionLeadText"' -and
     $networkReceiverText -match '(?m)^\s*"\[mouse\]",\s*$' -and
-    $networkReceiverText -match '"allow_send_input=false"' -and
-    $networkReceiverText -match '"allow_observe_only_control=false"') `
+    $networkReceiverText -match '"allow_send_input=false"') `
     "网络接收脚本必须只暴露预测开关/最大提前距离，并显式固定完整 Aim 与禁用 Mouse。"
 Assert-True ($networkReceiverText -match
     '\[string\]\$NdiClockSyncUrl\s*=\s*"udp://192\.168\.3\.10:5011"' -and
@@ -141,20 +140,9 @@ Assert-True ($aimDeltaText -match
     $aimDeltaText -match
         ''' -MaxDelayCompensationPercent ''\s*\+\s*') `
     "Aim 差量入口必须透传任务 ID、延迟参数，并按 profile 回读 prediction 快照。"
-Assert-True ($aimDeltaText -match
-        '\[ValidateSet\("Physical", "ObserveOnly"\)\]' -and
-    $aimDeltaText -match
-        '\[string\]\$OutputMode\s*=\s*"Physical"' -and
-    $aimDeltaText -match '\$outputModeSwitch' -and
-    $aimDeltaText -match
-        '\[string\]\$task\.output_mode\s*-ne\s*\$expectedOutputMode' -and
-    $aimDeltaText -match
-        '\[bool\]\$task\.mouse\.allow_send_input\s*-ne\s*\$expectedAllowSendInput' -and
-    $aimDeltaText -match
-        '\[bool\]\$task\.mouse\.allow_observe_only_control\s*-ne' -and
-    $aimDeltaText -match
-        '\$OutputMode\s*-eq\s*"ObserveOnly"') `
-    "Aim 差量入口必须透传并回读 Physical/Observe-only 输出身份。"
+Assert-True ($aimDeltaText -notmatch
+        'ObserveOnly|allow_observe_only_control|\$OutputMode') `
+    "Aim 差量入口不得继续暴露已删除的 Observe-only 输出模式。"
 Assert-True ($aimDeltaText -match '\$toolSpecs\s*=\s*@\(' -and
     $aimDeltaText -match 'tools/aim_report\.ps1' -and
     $aimDeltaText -match 'tools/aim_control_diagnostics\.ps1' -and
@@ -173,6 +161,14 @@ Assert-True (([regex]::Matches(
 
 $aimManualText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/invoke_aim_manual_acceptance.ps1"))
+Assert-True ($aimManualText -notmatch
+        'ObserveOnly|allow_observe_only_control|\$OutputMode|观测武装') `
+    "Aim 人工验收入口不得继续暴露已删除的 Observe-only 输出模式。"
+$overlayText = [System.IO.File]::ReadAllText(
+    (Join-Path $RepositoryRoot "Xen/overlay/overlay.cpp"))
+Assert-True ($overlayText -notmatch
+        'ObserveOnly|allow_observe_only_control|观测武装|无输出控制观察') `
+    "Overlay 不得继续暴露已删除的 Observe-only 武装界面。"
 Assert-True ($aimManualText -match
         'tools\\aim_control_diagnostics\.ps1' -and
     $aimManualText -match
@@ -185,9 +181,10 @@ Assert-True ($aimManualText -match
     $aimManualText -match 'source_timing_gate_passed' -and
     $aimManualText -match 'source_clock_sample_count_max' -and
     $aimManualText -match 'aim_lock_active_samples' -and
-    $aimManualText -match '\$reportSchemas\.Contains\(16\)' -and
+    $aimManualText -match
+        '\$reportSchema\s*-notin\s*@\(13, 14, 15, 16\)' -and
     $aimManualText -match '(?m)^\s*schema\s*=\s*2\s*$') `
-    "Aim 人工入口必须把 schema 16 控制诊断和逻辑武装证据直接写入自动汇总。"
+    "Aim 人工入口必须消费 schema 16，并把控制诊断和锁定帧计数写入自动汇总。"
 
 & (Join-Path $RepositoryRoot "scripts/test_benchmark_report_scale.ps1") `
     -SyntheticSampleCount 72002 -LegacyProbeCount 5000 -Quiet
@@ -223,9 +220,7 @@ try {
         $preparedConfig -match
             '(?m)^max_prediction_lead_percent=42\.500000\r?$' -and
         $preparedConfig -match '(?m)^\[mouse\]\r?$' -and
-        $preparedConfig -match '(?m)^allow_send_input=false\r?$' -and
-        $preparedConfig -match
-            '(?m)^allow_observe_only_control=false\r?$') `
+        $preparedConfig -match '(?m)^allow_send_input=false\r?$') `
         "PrepareOnly 必须落盘 NDI 时钟、完整 Aim、预测参数和显式禁用 Mouse。"
 } finally {
     Remove-Item -LiteralPath $networkPrepareRoot -Recurse -Force `

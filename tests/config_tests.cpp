@@ -53,7 +53,6 @@ void test_current_code_defaults() {
            "代码 Aim 默认值应匹配当前 prediction 配置");
     expect(config.mouse.backend == MouseBackend::KMBOX_NET &&
                !config.mouse.allow_send_input &&
-               !config.mouse.allow_observe_only_control &&
                config.mouse.kmbox_ip == "192.168.2.188" &&
                config.mouse.kmbox_port == 13384 &&
                config.mouse.kmbox_uuid == "7679E04E",
@@ -63,29 +62,19 @@ void test_current_code_defaults() {
            "代码 Log/UI 默认值应匹配当前配置");
 }
 
-void test_observe_only_control_config() {
+void test_removed_observe_only_control_config() {
     AppConfig source;
     source.detector.model_path = "models/test.onnx";
-    source.mouse.allow_send_input = false;
-    source.mouse.allow_observe_only_control = true;
     const auto path = std::filesystem::temp_directory_path() /
-                      "xen_observe_only_control.ini";
+                      "xen_removed_observe_only_control.ini";
     std::string error;
     expect(save_app_config(path.string(), source, error),
-           "Observe-only 控制配置应成功写入: " + error);
-    AppConfig loaded;
-    expect(load_app_config(path.string(), loaded, error) &&
-               !loaded.mouse.allow_send_input &&
-               loaded.mouse.allow_observe_only_control,
-           "Observe-only 控制身份必须完整往返且保持物理输出禁用: " + error);
-
-    source.mouse.allow_send_input = true;
-    expect(!validate_app_config(source, error),
-           "Observe-only 控制与真实物理输出不得同时启用");
-    source.mouse.allow_send_input = false;
-    source.keyboard.aim_hold_virtual_keys.clear();
-    expect(!validate_app_config(source, error),
-           "Observe-only 控制必须保留按住启用键绑定");
+           "默认配置应成功写入: " + error);
+    std::ifstream input(path, std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
+    expect(text.find("allow_observe_only_control") == std::string::npos,
+           "已删除的 Observe-only 控制接口不得继续写入配置");
 
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
@@ -745,7 +734,7 @@ int main() {
     test_current_code_defaults();
     test_load_or_create_default_config();
     test_round_trip();
-    test_observe_only_control_config();
+    test_removed_observe_only_control_config();
     test_log_defaults_and_invalid_level();
     test_legacy_keyboard_config();
     test_invalid_config();

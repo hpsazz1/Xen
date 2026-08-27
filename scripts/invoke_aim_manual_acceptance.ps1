@@ -12,8 +12,6 @@
     [string]$Profile,
     [ValidateSet("Prepare", "Launch", "Recover")]
     [string]$Mode = "Prepare",
-    [ValidateSet("Physical", "ObserveOnly")]
-    [string]$OutputMode = "Physical",
     [string]$PackageRoot = "",
     [string]$RunDirectory = "",
     [string]$OutputRoot = "C:\XenLab\reports\aim-dual-manual",
@@ -43,13 +41,6 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $taskId = $TaskId
-$observeOnly = $OutputMode -eq "ObserveOnly"
-$outputModeRecord = if ($observeOnly) { "observe_only" } else { "physical" }
-$outputModeDisplay = if ($observeOnly) {
-    "Observe-only / 无物理输出对照"
-} else {
-    "Physical / 真实 KMBOX 输出"
-}
 $resolvedCountsPerPixelX = if ($null -eq $CountsPerPixelX) {
     $CountsPerPixel
 } else { [double]$CountsPerPixelX }
@@ -206,8 +197,6 @@ function Get-ModelName([object]$Manifest) {
 
 function New-ConfigText([string]$ModelName) {
     $prediction = if ($Profile -eq "prediction") { "true" } else { "false" }
-    $allowSendInput = if ($observeOnly) { "false" } else { "true" }
-    $allowObserveOnlyControl = if ($observeOnly) { "true" } else { "false" }
     return @"
 [detector]
 model_path=$ModelName
@@ -288,8 +277,7 @@ predicted_gain=0.500000
 
 [mouse]
 backend=kmbox_net
-allow_send_input=$allowSendInput
-allow_observe_only_control=$allowObserveOnlyControl
+allow_send_input=true
 kmbox_ip=$kmboxIp
 kmbox_port=$kmboxPort
 kmbox_uuid=$kmboxUuid
@@ -501,32 +489,22 @@ function New-LaunchCommand([string]$ResolvedRunDirectory) {
     } else {
         ""
     }
-    $outputModeSwitch = if ($observeOnly) {
-        " -OutputMode ObserveOnly"
-    } else {
-        ""
-    }
-    $physicalAuthorization = if ($observeOnly) {
-        ""
-    } else {
-        " -AllowPhysicalOutput -PhysicalOutputConfirmation $physicalConfirmation"
-    }
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
-        '-TaskId {1} -Mode Launch{2} -Scenario {3} -SuperJumpCase {4} ' +
-        '-Profile {5} -PackageRoot "{6}" -RunDirectory "{7}" ' +
-        '-Smoothing {8:F6} -CountsPerPixelX {9:F6} ' +
-        '-CountsPerPixelY {10:F6} -MaxCountsPerFrame {11:F6}{12} ' +
-        '-ControlDelayMs {13:F6} -MaxDelayCompensationMs {14:F6} ' +
-        '-MaxDelayCompensationPercent {15:F6}{16}{17}') -f
+        '-TaskId {1} -Mode Launch -Scenario {2} -SuperJumpCase {3} ' +
+        '-Profile {4} -PackageRoot "{5}" -RunDirectory "{6}" ' +
+        '-Smoothing {7:F6} -CountsPerPixelX {8:F6} ' +
+        '-CountsPerPixelY {9:F6} -MaxCountsPerFrame {10:F6}{11} ' +
+        '-ControlDelayMs {12:F6} -MaxDelayCompensationMs {13:F6} ' +
+        '-MaxDelayCompensationPercent {14:F6}{15} -AllowPhysicalOutput ' +
+        '-PhysicalOutputConfirmation {16}') -f
         (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
-        $taskId, $outputModeSwitch, $Scenario, $SuperJumpCase, $Profile,
-        $PackageRoot,
+        $taskId, $Scenario, $SuperJumpCase, $Profile, $PackageRoot,
         $ResolvedRunDirectory,
         $Smoothing, $resolvedCountsPerPixelX, $resolvedCountsPerPixelY,
         $MaxCountsPerFrame, $delaySwitch, $ControlDelayMs,
         $MaxDelayCompensationMs, $MaxDelayCompensationPercent,
         $sourceTimingSwitch,
-        $physicalAuthorization
+        $physicalConfirmation
 }
 
 function New-TaskMarkdown(
@@ -538,24 +516,6 @@ function New-TaskMarkdown(
     }
     $checks = $Definition.observations | ForEach-Object { "- [ ] $_" }
     $launch = New-LaunchCommand $ResolvedRunDirectory
-    $mouseDescription = if ($observeOnly) {
-        "KMBOX NET $kmboxIp`:$kmboxPort（只读按键，Mouse 必须保持 DISABLED）"
-    } else {
-        "KMBOX NET $kmboxIp`:$kmboxPort"
-    }
-    $safetyText = if ($observeOnly) {
-@"
-本 Run 禁止发送真实 KMBOX 输入，allow_send_input=false。按住右键只驱动 Aim 计算和诊断采集，
-启动 Runtime 后点击“观测武装”，同时确认 Mouse/物理输出仍为 DISABLED；Launch 命令不接受
--AllowPhysicalOutput 或确认令牌。若出现任何非预期物理
-移动，立即结束程序并按 End，记录为安全门失败。
-"@
-    } else {
-@"
-仅在私有或离线训练环境执行。启动前确认 End 可用、现场无非预期窗口，程序启动后仍需人工武装。
-任何方向错误、持续发送、松键不停止或失控移动，立即松开右键并按 End。
-"@
-    }
     return @"
 # Xen 双机 Aim 人工测试任务
 
@@ -563,7 +523,6 @@ function New-TaskMarkdown(
 - 运行 ID：$RunId
 - 场景：$Scenario / $($Definition.title)
 - 配置：$Profile
-- 输出模式：$outputModeDisplay
 - smoothing：$('{0:F6}' -f $Smoothing)
 - counts-per-pixel X：$('{0:F6}' -f $resolvedCountsPerPixelX)
 - counts-per-pixel Y：$('{0:F6}' -f $resolvedCountsPerPixelY)
@@ -573,13 +532,14 @@ function New-TaskMarkdown(
 - 必须取得有效 source timing：$($RequireSourceTiming.IsPresent)
 - Capture：NDI / $ndiSourceName
 - Provider：TensorRT，FP16 + CUDA Graph + GPU 前处理
-- Mouse：$mouseDescription
+- Mouse：KMBOX NET $kmboxIp`:$kmboxPort
 - 自瞄按键：鼠标右键
 - 急停键：End
 
 ## 安全门
 
-$safetyText
+仅在私有或离线训练环境执行。启动前确认 End 可用、现场无非预期窗口，程序启动后仍需人工武装。
+任何方向错误、持续发送、松键不停止或失控移动，立即松开右键并按 End。
 若本任务要求 source timing，Launch 前须在源机 `HPSAZZ` 前台运行
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\Xen\scripts\run_ndi_clock_source.ps1"
 并保持到 Run 结束；缺少时钟样本会使 automatic gate 失败。
@@ -649,17 +609,10 @@ if ($Mode -eq "Prepare") {
     } else {
         $Scenario.ToLowerInvariant()
     }
-    $runId = if ($observeOnly) {
-        "{0}-{1}-{2}-observe-only-{3}" -f
-            (Get-Date -Format "yyyyMMdd-HHmmss"),
-            $scenarioSlug, $Profile,
-            [guid]::NewGuid().ToString("N").Substring(0, 8)
-    } else {
-        "{0}-{1}-{2}-{3}" -f
-            (Get-Date -Format "yyyyMMdd-HHmmss"),
-            $scenarioSlug, $Profile,
-            [guid]::NewGuid().ToString("N").Substring(0, 8)
-    }
+    $runId = "{0}-{1}-{2}-{3}" -f
+        (Get-Date -Format "yyyyMMdd-HHmmss"),
+        $scenarioSlug, $Profile,
+        [guid]::NewGuid().ToString("N").Substring(0, 8)
     $resolvedRun = if ([string]::IsNullOrWhiteSpace($RunDirectory)) {
         [System.IO.Path]::GetFullPath((Join-Path $OutputRoot $runId))
     } else {
@@ -672,15 +625,14 @@ if ($Mode -eq "Prepare") {
     $configPath = Join-Path $resolvedRun "config.ini"
     Write-TextAtomically $configPath $configText
     $manifestResult = Activate-Config $manifestResult $configText `
-        "generated:$taskId/$Scenario/$Profile/$outputModeRecord" $modelName
+        "generated:$taskId/$Scenario/$Profile" $modelName
     $task = [ordered]@{
-        schema = 2
+        schema = 1
         task_id = $taskId
         run_id = $runId
         scenario = $Scenario
         superjump_case = $SuperJumpCase
         profile = $Profile
-        output_mode = $outputModeRecord
         require_source_timing = $RequireSourceTiming.IsPresent
         prepared_utc = [DateTime]::UtcNow.ToString("o")
         package_root = $PackageRoot
@@ -729,8 +681,7 @@ if ($Mode -eq "Prepare") {
             ip = $kmboxIp
             port = $kmboxPort
             uuid = $kmboxUuid
-            allow_send_input = -not $observeOnly
-            allow_observe_only_control = $observeOnly
+            allow_send_input = $true
         }
     }
     Write-JsonAtomically (Join-Path $resolvedRun "task.json") $task
@@ -745,7 +696,6 @@ if ($Mode -eq "Prepare") {
 - 运行 ID：$runId
 - 场景：$Scenario
 - 配置：$Profile
-- 输出模式：$outputModeDisplay
 - smoothing：$('{0:F6}' -f $Smoothing)
 - counts-per-pixel X：$('{0:F6}' -f $resolvedCountsPerPixelX)
 - counts-per-pixel Y：$('{0:F6}' -f $resolvedCountsPerPixelY)
@@ -768,26 +718,14 @@ $($observationRecords -join "`n")
     Write-Host "  superjump_case=$SuperJumpCase"
     Write-Host "  profile=$Profile"
     Write-Host "  config_sha256=$($task.config.sha256)"
-    if ($observeOnly) {
-        Write-Host "本轮为无物理输出对照；请先人工复核 TASK.md。"
-        Write-Host "以下命令禁止真实 KMBOX 输出，可在前台复制执行："
-    } else {
-        Write-Host "本轮尚未启动物理输出；请先人工复核 TASK.md。"
-        Write-Host "以下命令会发送真实 KMBOX 输入，确认现场安全后可直接复制执行："
-    }
+    Write-Host "本轮尚未启动物理输出；请先人工复核 TASK.md。"
+    Write-Host "以下命令会发送真实 KMBOX 输入，确认现场安全后可直接复制执行："
     Write-Output (New-LaunchCommand $resolvedRun)
     exit 0
 }
 
 if ($Mode -eq "Launch") {
-    if ($observeOnly) {
-        if ($AllowPhysicalOutput.IsPresent -or
-            -not [string]::IsNullOrWhiteSpace($PhysicalOutputConfirmation)) {
-            throw "Observe-only Launch 禁止接受任何物理输出授权。"
-        }
-    } else {
-        Assert-PhysicalAuthorization
-    }
+    Assert-PhysicalAuthorization
 } elseif ($AllowPhysicalOutput.IsPresent -or
     -not [string]::IsNullOrWhiteSpace($PhysicalOutputConfirmation)) {
     throw "Recover 只回收已有报告，不接受真实物理输出授权。"
@@ -814,26 +752,11 @@ $taskRequireSourceTiming = if ($task.PSObject.Properties.Name -contains
     "require_source_timing") { [bool]$task.require_source_timing } else {
     $false
 }
-$taskOutputMode = if ($task.PSObject.Properties.Name -contains "output_mode") {
-    [string]$task.output_mode
-} else {
-    "physical"
-}
-$taskAllowSendInput = if ($task.mouse.PSObject.Properties.Name -contains
-    "allow_send_input") { [bool]$task.mouse.allow_send_input } else { $true }
-$taskAllowObserveOnlyControl = if (
-    $task.mouse.PSObject.Properties.Name -contains
-        "allow_observe_only_control") {
-    [bool]$task.mouse.allow_observe_only_control
-} else { $false }
-if ([int]$task.schema -notin @(1, 2) -or
+if ([int]$task.schema -ne 1 -or
     [string]$task.task_id -ne $taskId -or
     [string]$task.scenario -ne $Scenario -or
     [string]$task.superjump_case -ne $SuperJumpCase -or
     [string]$task.profile -ne $Profile -or
-    $taskOutputMode -ne $outputModeRecord -or
-    $taskAllowSendInput -ne (-not $observeOnly) -or
-    $taskAllowObserveOnlyControl -ne $observeOnly -or
     $taskRequireSourceTiming -ne $RequireSourceTiming.IsPresent -or
     [string]$task.package_validation -ne $packageValidationMode -or
     [string]$task.package_root -ne $PackageRoot -or
@@ -882,13 +805,8 @@ if ($Mode -eq "Launch") {
         }
     }
     $startedUtc = [DateTime]::UtcNow
-    if ($observeOnly) {
-        Write-Host "即将启动无物理输出对照任务：$($task.run_id)"
-        Write-Host "Mouse 必须保持 DISABLED；按 TASK.md 操作并观察画面。"
-    } else {
-        Write-Host "即将启动真实 KMBOX 输出任务：$($task.run_id)"
-        Write-Host "确认 End 急停可用；程序启动后仍需人工武装并按 TASK.md 操作。"
-    }
+    Write-Host "即将启动真实 KMBOX 输出任务：$($task.run_id)"
+    Write-Host "确认 End 急停可用；程序启动后仍需人工武装并按 TASK.md 操作。"
     $process = Start-Process -FilePath $launcher -WorkingDirectory $PackageRoot `
         -PassThru -Wait
     $endedUtc = [DateTime]::UtcNow
@@ -1038,22 +956,9 @@ $mousePhysicalEffectSamples = @($allSamples | Where-Object {
     $_.PSObject.Properties.Name -contains "mouse_physical_effect_timing_valid" -and
         [bool]$_.mouse_physical_effect_timing_valid
 }).Count
-$outputEvidenceComplete = if ($observeOnly) {
-    $reportSchemas.Count -eq 1 -and $reportSchemas.Contains(16) -and
-    $aimLockActiveSamples -gt 0 -and
-    $mouseCommands -eq 0 -and
-    $mouseBackendCompletionSamples -eq 0 -and
-    $mouseProtocolAckSamples -eq 0 -and
-    $mousePhysicalEffectSamples -eq 0 -and
-    [uint64]$aimSummary.command_frames -gt 0 -and
-    [uint64]$aimSummary.precomputed_command_frames -eq
-        [uint64]$aimSummary.command_frames
-} else {
-    $mouseCommands -gt 0
-}
 $complete = $failed -eq 0 -and $reportDropped -eq 0 -and
     $runtimeDropped -eq 0 -and $providerMismatch -eq 0 -and
-    $captureMismatch -eq 0 -and $outputEvidenceComplete -and
+    $captureMismatch -eq 0 -and $mouseCommands -gt 0 -and
     [uint64]$aimSummary.violation_count -eq 0 -and
     [uint64]$controlDiagnostics.diagnostics_missing_frames -eq 0 -and
     [bool]$controlDiagnostics.reverse_translation_detail_diagnostics_available -and
@@ -1065,8 +970,6 @@ $summary = [ordered]@{
     scenario = $Scenario
     superjump_case = $SuperJumpCase
     profile = $Profile
-    output_mode = $outputModeRecord
-    physical_output_enabled = -not $observeOnly
     smoothing = $Smoothing
     counts_per_pixel = if ($resolvedCountsPerPixelX -eq
         $resolvedCountsPerPixelY) { $resolvedCountsPerPixelX } else { $null }

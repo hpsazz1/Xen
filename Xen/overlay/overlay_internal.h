@@ -7,44 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <string_view>
 
 namespace overlay::detail {
-
-struct ControlArmPresentation {
-    bool can_arm = false;
-    bool can_disarm = false;
-    bool observe_only = false;
-    std::string_view arm_label = "武装";
-    std::string_view armed_status = "输出已武装";
-};
-
-struct ControlArmState {
-    bool running = false;
-    bool detector_loading = false;
-    bool emergency_stopped = false;
-    bool output_allowed = false;
-    bool observe_only_allowed = false;
-    bool control_armed = false;
-};
-
-inline ControlArmPresentation control_arm_presentation(
-        const ControlArmState& state) noexcept {
-    ControlArmPresentation result;
-    result.observe_only =
-        !state.output_allowed && state.observe_only_allowed;
-    if (result.observe_only) {
-        result.arm_label = "观测武装";
-        result.armed_status = "控制已武装（Observe-only）";
-    }
-    const bool authorized = state.output_allowed || result.observe_only;
-    const bool ready = state.running && authorized &&
-                       !state.emergency_stopped &&
-                       !state.detector_loading;
-    result.can_disarm = state.running && state.control_armed;
-    result.can_arm = ready && !state.control_armed;
-    return result;
-}
 
 enum class HotkeyCaptureResultType {
     NONE,

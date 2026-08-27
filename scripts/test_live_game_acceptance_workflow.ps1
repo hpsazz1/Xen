@@ -135,7 +135,6 @@ try {
     Expect ($config -match '(?m)^model_path=14wv11\.onnx$' -and
             $config -match '(?m)^backend=cpu$' -and
             $config -match '(?m)^allow_send_input=false$' -and
-            $config -match '(?m)^allow_observe_only_control=false$' -and
             $config -match
                 '(?m)^open_detached_preview_on_start=true$') `
         "观察任务必须固定模型、CPU、置顶预览和禁用物理输出"
