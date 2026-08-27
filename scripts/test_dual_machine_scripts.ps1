@@ -140,6 +140,18 @@ Assert-True ($aimDeltaText -match
     $aimDeltaText -match
         ''' -MaxDelayCompensationPercent ''\s*\+\s*') `
     "Aim 差量入口必须透传任务 ID、延迟参数，并按 profile 回读 prediction 快照。"
+Assert-True ($aimDeltaText -match
+        '\[ValidateSet\("Physical", "ObserveOnly"\)\]' -and
+    $aimDeltaText -match
+        '\[string\]\$OutputMode\s*=\s*"Physical"' -and
+    $aimDeltaText -match '\$outputModeSwitch' -and
+    $aimDeltaText -match
+        '\[string\]\$task\.output_mode\s*-ne\s*\$expectedOutputMode' -and
+    $aimDeltaText -match
+        '\[bool\]\$task\.mouse\.allow_send_input\s*-ne\s*\$expectedAllowSendInput' -and
+    $aimDeltaText -match
+        '\$OutputMode\s*-eq\s*"ObserveOnly"') `
+    "Aim 差量入口必须透传并回读 Physical/Observe-only 输出身份。"
 Assert-True ($aimDeltaText -match '\$toolSpecs\s*=\s*@\(' -and
     $aimDeltaText -match 'tools/aim_report\.ps1' -and
     $aimDeltaText -match 'tools/aim_control_diagnostics\.ps1' -and

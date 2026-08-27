@@ -15,6 +15,8 @@
     [ValidateSet("None", "Static", "SustainedMove", "Stop", "Reverse")]
     [string]$SuperJumpCase = "None",
     [string]$Profile = "tracking",
+    [ValidateSet("Physical", "ObserveOnly")]
+    [string]$OutputMode = "Physical",
     [ValidateRange(0.0, 1.0)]
     [double]$Smoothing = 0.50,
     [ValidateRange(0.01, 10.0)]
@@ -47,6 +49,10 @@ if ($resolvedCountsPerPixelX -lt 0.01 -or
     $resolvedCountsPerPixelY -gt 10.0) {
     throw "分轴 counts-per-pixel 必须位于 [0.01, 10.0]。"
 }
+$expectedOutputMode = if ($OutputMode -eq "ObserveOnly") {
+    "observe_only"
+} else { "physical" }
+$expectedAllowSendInput = $OutputMode -eq "Physical"
 if ($Scenario -eq "SuperJump" -and $SuperJumpCase -eq "None") {
     throw "SuperJump 发布必须指定一个独立 SuperJumpCase。"
 }
@@ -427,11 +433,12 @@ if ($Prepare) {
     $sourceTimingSwitch = if ($RequireSourceTiming.IsPresent) {
         ' -RequireSourceTiming'
     } else { '' }
+    $outputModeSwitch = ' -OutputMode ' + $OutputMode
     $remoteCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' +
         $remoteScript + '" -TaskId ' + $TaskId + ' -Scenario ' +
         $Scenario + ' -SuperJumpCase ' + $SuperJumpCase +
         ' -Profile ' + $Profile +
-        ' -Mode Prepare -PackageRoot "' + $remoteRoot +
+        ' -Mode Prepare' + $outputModeSwitch + ' -PackageRoot "' + $remoteRoot +
         '" -Smoothing ' + $Smoothing.ToString(
             'F6', [Globalization.CultureInfo]::InvariantCulture) +
         ' -CountsPerPixelX ' + $resolvedCountsPerPixelX.ToString(
@@ -521,11 +528,14 @@ $expectedMaximumDelay = $MaxDelayCompensationMs.ToString(
 $expectedMaximumDelayPercent = $MaxDelayCompensationPercent.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
 $expectedPrediction = if ($Profile -eq "prediction") { "true" } else { "false" }
+$expectedAllowSendInputText = $expectedAllowSendInput.ToString().ToLowerInvariant()
 if ($configText -notmatch "(?m)^smoothing=$([regex]::Escape($expectedSmoothing))\r?$" -or
     $configText -notmatch "(?m)^counts_per_pixel_x=$([regex]::Escape($expectedCountsX))\r?$" -or
     $configText -notmatch "(?m)^counts_per_pixel_y=$([regex]::Escape($expectedCountsY))\r?$" -or
     $configText -notmatch "(?m)^max_counts_per_frame=$([regex]::Escape($expectedMaximumCounts))\r?$" -or
     $configText -notmatch "(?m)^enable_prediction=$expectedPrediction\r?$" -or
+    $configText -notmatch
+        "(?m)^allow_send_input=$expectedAllowSendInputText\r?$" -or
     $configText -notmatch '(?m)^enable_delay_compensation=true\r?$' -or
     $configText -notmatch
         "(?m)^control_delay_ms=$([regex]::Escape($expectedControlDelay))\r?$" -or
@@ -557,9 +567,15 @@ if ($Prepare) {
     $outputText = $prepareOutput -join "`n"
     $runMatch = [regex]::Match(
         $outputText, '(?m)^\s*run_id=([^\r\n]+)\s*$')
-    $launchMatch = [regex]::Match(
-        $outputText, '(?m)^powershell\.exe .*AllowPhysicalOutput.*$')
-    if (-not $runMatch.Success -or -not $launchMatch.Success) {
+    $launchPattern = if ($OutputMode -eq "ObserveOnly") {
+        '(?m)^powershell\.exe .* -Mode Launch -OutputMode ObserveOnly .*$'
+    } else {
+        '(?m)^powershell\.exe .*AllowPhysicalOutput.*$'
+    }
+    $launchMatch = [regex]::Match($outputText, $launchPattern)
+    if (-not $runMatch.Success -or -not $launchMatch.Success -or
+        ($OutputMode -eq "ObserveOnly" -and
+            $launchMatch.Value -match 'AllowPhysicalOutput|PhysicalOutputConfirmation')) {
         throw "Prepare 输出缺少 Run ID 或完整 Launch 命令。"
     }
     $runId = $runMatch.Groups[1].Value.Trim()
@@ -579,6 +595,8 @@ if ($Prepare) {
         [string]$task.scenario -ne $Scenario -or
         [string]$task.superjump_case -ne $SuperJumpCase -or
         [string]$task.profile -ne $Profile -or
+        [string]$task.output_mode -ne $expectedOutputMode -or
+        [bool]$task.mouse.allow_send_input -ne $expectedAllowSendInput -or
         [bool]$task.require_source_timing -ne
             $RequireSourceTiming.IsPresent -or
         [double]$task.aim.smoothing -ne $Smoothing -or
@@ -629,6 +647,10 @@ if ($Prepare) {
     Write-Host "  run_id=$runId"
     Write-Host "  superjump_case=$SuperJumpCase"
     Write-Host "  report_root=C:\XenLab\reports\aim-dual-manual\$runId"
-    Write-Host "以下命令会发送真实 KMBOX 输入，确认现场安全后可直接复制执行："
+    if ($OutputMode -eq "ObserveOnly") {
+        Write-Host "以下命令禁止真实 KMBOX 输出，可在前台复制执行："
+    } else {
+        Write-Host "以下命令会发送真实 KMBOX 输入，确认现场安全后可直接复制执行："
+    }
     Write-Output $launchCommand
 }

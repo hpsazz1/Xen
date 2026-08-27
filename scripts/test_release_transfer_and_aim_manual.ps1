@@ -398,6 +398,124 @@ try {
         [double]$trackingTask.aim.max_delay_compensation_percent -ne 12.0) {
         throw "task.json 没有固化任务 ID、平滑或延迟补偿参数。"
     }
+
+    $observeRoot = Join-Path $root "superjump-static-observe-only-task"
+    $observeOutput = @(& powershell.exe -NoProfile `
+        -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Prepare -OutputMode ObserveOnly `
+        -Scenario SuperJump -SuperJumpCase Static -Profile tracking `
+        -Smoothing 0.50 -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+        -MaxCountsPerFrame 14.0 -EnableDelayCompensation `
+        -ControlDelayMs 7.5 -MaxDelayCompensationMs 18.0 `
+        -MaxDelayCompensationPercent 12.0 -RequireSourceTiming `
+        -PackageRoot $published -RunDirectory $observeRoot 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $observeOutput | ForEach-Object { Write-Host $_ }
+        throw "Observe-only 任务准备失败。"
+    }
+    $observeOutputText = $observeOutput -join "`n"
+    $observeConfig = Get-Content -LiteralPath `
+        (Join-Path $observeRoot "config.ini") -Raw -Encoding utf8
+    $observeTask = Get-Content -LiteralPath `
+        (Join-Path $observeRoot "task.json") -Raw -Encoding utf8 |
+        ConvertFrom-Json
+    $observeMarkdown = Get-Content -LiteralPath `
+        (Join-Path $observeRoot "TASK.md") -Raw -Encoding utf8
+    $observeObservation = Get-Content -LiteralPath `
+        (Join-Path $observeRoot "OBSERVATION.md") -Raw -Encoding utf8
+    if ([int]$observeTask.schema -ne 2 -or
+        [string]$observeTask.output_mode -ne "observe_only" -or
+        [string]$observeTask.run_id -notmatch '-observe-only-' -or
+        [bool]$observeTask.mouse.allow_send_input -or
+        $observeConfig -notmatch '(?m)^allow_send_input=false\r?$' -or
+        $observeConfig -match '(?m)^allow_send_input=true\r?$' -or
+        $observeOutputText -notmatch
+            '(?m)^powershell\.exe .* -Mode Launch -OutputMode ObserveOnly .*' -or
+        $observeOutputText -match '-AllowPhysicalOutput' -or
+        $observeOutputText -match 'XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT' -or
+        $observeMarkdown -notmatch '无物理输出' -or
+        $observeMarkdown -notmatch 'Mouse 必须保持 DISABLED' -or
+        $observeMarkdown -match '会发送真实 KMBOX 输入' -or
+        $observeObservation -notmatch '输出模式：Observe-only / 无物理输出对照') {
+        throw "Observe-only Run 没有固化无输出身份、配置、命令和人工说明。"
+    }
+
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Launch -OutputMode ObserveOnly `
+        -Scenario SuperJump -SuperJumpCase Static -Profile tracking `
+        -Smoothing 0.50 -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+        -MaxCountsPerFrame 14.0 -EnableDelayCompensation `
+        -ControlDelayMs 7.5 -MaxDelayCompensationMs 18.0 `
+        -MaxDelayCompensationPercent 12.0 -RequireSourceTiming `
+        -PackageRoot $published -RunDirectory $observeRoot `
+        -AllowPhysicalOutput `
+        -PhysicalOutputConfirmation `
+            XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT
+    if ($LASTEXITCODE -eq 0) {
+        throw "Observe-only Launch 必须拒绝任何物理输出授权。"
+    }
+
+    $observeAutomaticRoot = Join-Path $observeRoot "automatic"
+    New-Item -ItemType Directory -Path $observeAutomaticRoot -Force |
+        Out-Null
+    Write-Utf8 (Join-Path $observeAutomaticRoot "observe-schema13.csv") `
+        "sequence,success`n541,true`n"
+    $observeSample = New-Schema13AimSample
+    $observeSample["mouse_sent"] = $false
+    $observeSample["mouse_completion_timing_valid"] = $false
+    $observeSample["source_clock_status"] = "VALID"
+    $observeSample["source_timing_valid"] = $true
+    $observeSample["source_clock_sample_count"] = [uint64]8
+    $observeSample["source_clock_session_id"] = [uint64]42
+    $observeReport = [ordered]@{
+        schema = 13
+        session_id = "observe-schema13"
+        provider = "TensorrtExecutionProvider"
+        capture_backend = "NDI"
+        mouse_backend = "kmbox_net"
+        sample_count = 1
+        successful_samples = 1
+        failed_samples = 0
+        report_samples_dropped = 0
+        runtime_samples_dropped = 0
+        samples = @($observeSample)
+    }
+    Write-Utf8 (Join-Path $observeAutomaticRoot "observe-schema13.json") `
+        (($observeReport | ConvertTo-Json -Depth 10) + "`n")
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Recover -OutputMode ObserveOnly `
+        -Scenario SuperJump -SuperJumpCase Static -Profile tracking `
+        -Smoothing 0.50 -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+        -MaxCountsPerFrame 14.0 -EnableDelayCompensation `
+        -ControlDelayMs 7.5 -MaxDelayCompensationMs 18.0 `
+        -MaxDelayCompensationPercent 12.0 -RequireSourceTiming `
+        -PackageRoot $published -RunDirectory $observeRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Observe-only 自动证据回收失败。"
+    }
+    $observeSummary = Get-Content -LiteralPath `
+        (Join-Path $observeRoot "automatic-summary.json") `
+        -Raw -Encoding utf8 | ConvertFrom-Json
+    if ([string]$observeSummary.output_mode -ne "observe_only" -or
+        [bool]$observeSummary.physical_output_enabled -or
+        [uint64]$observeSummary.mouse_commands -ne 0 -or
+        [uint64]$observeSummary.mouse_backend_completion_samples -ne 0 -or
+        [uint64]$observeSummary.mouse_protocol_ack_samples -ne 0 -or
+        [uint64]$observeSummary.mouse_physical_effect_samples -ne 0 -or
+        [uint64]$observeSummary.aim.command_frames -ne 1 -or
+        [uint64]$observeSummary.aim.precomputed_command_frames -ne 1 -or
+        [string]$observeSummary.source_timing_diagnostic -ne "VALID" -or
+        -not [bool]$observeSummary.source_timing_gate_passed -or
+        -not [bool]$observeSummary.automatic_complete) {
+        throw "Observe-only 汇总没有证明 Aim 已求值、Mouse 零发送和 source timing 有效。"
+    }
+
     $superJumpCases = [ordered]@{
         Static = [ordered]@{
             root = $trackingRoot
