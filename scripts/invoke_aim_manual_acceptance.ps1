@@ -541,7 +541,8 @@ function New-TaskMarkdown(
 仅在私有或离线训练环境执行。启动前确认 End 可用、现场无非预期窗口，程序启动后仍需人工武装。
 任何方向错误、持续发送、松键不停止或失控移动，立即松开右键并按 End。
 若本任务要求 source timing，Launch 前须在源机 `HPSAZZ` 前台运行
-`E:\Xen\scripts\run_ndi_clock_source.ps1` 并保持到 Run 结束；缺少时钟样本会使 automatic gate 失败。
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\Xen\scripts\run_ndi_clock_source.ps1"
+并保持到 Run 结束；缺少时钟样本会使 automatic gate 失败。
 
 ## 操作步骤
 
@@ -557,7 +558,8 @@ $($checks -join "`n")
 $launch
 ```
 
-应用退出后脚本会收集本轮新增 Runtime CSV/JSON 和日志。完成后填写 `OBSERVATION.md`，再等待下一任务。
+应用退出后脚本会收集本轮新增 Runtime CSV/JSON 和日志。完成后请将上述人工观察直接发送到当前对话，
+由代理记录到 `OBSERVATION.md`、回收自动证据并继续后续流程；不需要手工编辑观察文件。
 "@
 }
 
@@ -1024,4 +1026,4 @@ Write-Host "  source_timing=$($sourceTimingEvidence.diagnostic), required=$($Req
 Write-Host ("  reverse_translation_details=" +
     $controlDiagnostics.reverse_translation_detail_diagnostics_available)
 Write-Host "  automatic_complete=$complete"
-Write-Host "请填写 OBSERVATION.md，并等待下一场景任务。"
+Write-Host "请将人工观察结果直接发送到当前对话；代理会记录 OBSERVATION.md 并继续回收证据。"

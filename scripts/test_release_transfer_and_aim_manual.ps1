@@ -226,16 +226,20 @@ try {
         ConvertFrom-Json
     $taskScopedMarkdown = Get-Content -LiteralPath `
         (Join-Path $taskScopedRoot "TASK.md") -Raw -Encoding utf8
+    $sourceClockCommand =
+        'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\Xen\scripts\run_ndi_clock_source.ps1"'
     if ([string]$taskScopedTask.package_validation -ne "task_scoped" -or
         -not [bool]$taskScopedTask.require_source_timing -or
-        $taskScopedMarkdown -notmatch 'run_ndi_clock_source\.ps1' -or
+        $taskScopedMarkdown -notmatch [regex]::Escape($sourceClockCommand) -or
+        $taskScopedMarkdown -match '填写 OBSERVATION\.md' -or
+        $taskScopedMarkdown -notmatch '直接发送到当前对话' -or
         [string]::IsNullOrWhiteSpace($taskScopedTask.worker.sha256) -or
         [string]::IsNullOrWhiteSpace(
             $taskScopedTask.acceptance_script.sha256) -or
         [string]::IsNullOrWhiteSpace($taskScopedTask.aim_report.sha256) -or
         [string]::IsNullOrWhiteSpace(
             $taskScopedTask.aim_control_diagnostics.sha256)) {
-        throw "人工任务没有绑定 source timing、任务范围校验模式、Worker 或报告工具哈希。"
+        throw "人工任务没有绑定可执行 source timing、对话回收、任务范围校验模式、Worker 或报告工具哈希。"
     }
     Write-Utf8 $directMlWorker "dml"
 
