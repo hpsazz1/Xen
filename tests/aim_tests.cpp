@@ -4523,6 +4523,430 @@ void test_faster_closing_slope_continuously_reduces_tracking_request() {
                    faster_closing.current.control.desired_x_counts));
 }
 
+void test_tracking_derivative_separates_in_box_reference_from_common_translation() {
+    constexpr int kReferenceFrameCount = 104;
+    constexpr int kReferenceBranchFrame = 100;
+    constexpr int kReferencePreviousFrame = 102;
+    constexpr int kReferenceCurrentFrame = 103;
+    constexpr int kCommonFrameCount = 42;
+    constexpr int kCommonPreviousFrame = 40;
+    constexpr int kCommonCurrentFrame = 41;
+    constexpr auto kFrameStep = std::chrono::microseconds(4167);
+    constexpr float kNarrowBranchWidth = 16.0f;
+    constexpr float kWideBranchWidth = 32.0f;
+    constexpr float kNarrowCurrentWidth = 16.0f;
+    // 两个值只用于让成对 public trace 在当前帧重新得到相同 base/Track；
+    // 它们不是 production 框宽阈值，也不进入控制分支。
+    constexpr float kWideCurrentWidth = 13.35f;
+    constexpr float kCurrentError = 1.5f;
+
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 2.25f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 14.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.body_aim_range_percent = 50.0f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    const auto track_center_x = [](const AimResult& result) {
+        return (result.target.x1 + result.target.x2) * 0.5f;
+    };
+    const auto reference_x = [&](const AimResult& result) {
+        return result.target.base_aim_x - track_center_x(result);
+    };
+    const auto make_reference_frame = [&](int index,
+                                           float branch_width,
+                                           float current_width) {
+        const int pose_sample = std::min(index, 99);
+        const int phase_index = pose_sample % 34;
+        const float pose_phase = phase_index <= 17
+            ? -1.0f + static_cast<float>(phase_index) * (2.0f / 17.0f)
+            : 1.0f - static_cast<float>(phase_index - 17) *
+                (2.0f / 17.0f);
+        const float true_x = 60.0f +
+            static_cast<float>(std::min(index, 99)) * 0.80f;
+        float width = 16.0f + pose_phase * 0.5f;
+        if (index == kReferenceBranchFrame) width = branch_width;
+        if (index == kReferenceCurrentFrame) width = current_width;
+        const float height = 70.0f + pose_phase * 1.8f;
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + kFrameStep * index);
+        frame.control_at = frame.captured_at +
+            std::chrono::milliseconds(1);
+        frame.control_center_y = 160.0f;
+        frame.detections = {body_box(
+            true_x + pose_phase * 3.0f,
+            175.0f,
+            width,
+            height)};
+        return frame;
+    };
+
+    struct GeometryTrace {
+        std::array<float, kReferenceFrameCount> base_x{};
+        std::array<float, kReferenceFrameCount> base_y{};
+        int valid_frames = 0;
+    };
+    // 首次 pass 仍只调用 Aim::process()；它为第二次控制 pass 提供公开
+    // base 几何，使 P/PI、smoothing 和库存能在 reference 分叉两侧等价。
+    const auto trace_geometry = [&](float branch_width,
+                                    float current_width) {
+        Aim aim(config);
+        GeometryTrace trace;
+        for (int index = 0; index < kReferenceFrameCount; ++index) {
+            AimFrame frame = make_reference_frame(
+                index, branch_width, current_width);
+            frame.lock_active = true;
+            const AimResult result = aim.process(frame);
+            if (result.status != AimStatus::SUCCESS || !result.has_target) {
+                continue;
+            }
+            ++trace.valid_frames;
+            trace.base_x[index] = result.target.base_aim_x;
+            trace.base_y[index] = result.target.base_aim_y;
+        }
+        return trace;
+    };
+
+    const GeometryTrace narrow_geometry = trace_geometry(
+        kNarrowBranchWidth, kNarrowCurrentWidth);
+    const GeometryTrace wide_geometry = trace_geometry(
+        kWideBranchWidth, kWideCurrentWidth);
+    const float previous_control_center_x =
+        narrow_geometry.base_x[kReferencePreviousFrame] - 1.48f;
+    const float current_control_center_x =
+        (narrow_geometry.base_x[kReferenceCurrentFrame] +
+         wide_geometry.base_x[kReferenceCurrentFrame]) * 0.5f -
+        kCurrentError;
+
+    struct ReferenceSample {
+        AimResult previous;
+        AimResult current;
+        float previous_control_center_x = 0.0f;
+        float current_control_center_x = 0.0f;
+        int valid_frames = 0;
+        int completed_frames = 0;
+    };
+    const auto run_reference_case = [&](float branch_width,
+                                        float current_width,
+                                        const GeometryTrace& geometry) {
+        Aim aim(config);
+        ReferenceSample sample;
+        for (int index = 0; index < kReferenceFrameCount; ++index) {
+            AimFrame frame = make_reference_frame(
+                index, branch_width, current_width);
+            frame.lock_active = true;
+            frame.control_center_y = geometry.base_y[index];
+            if (index < kReferenceBranchFrame) {
+                frame.control_center_x = geometry.base_x[index] - 6.0f;
+            } else if (index < kReferencePreviousFrame) {
+                frame.control_center_x = geometry.base_x[index] -
+                    kCurrentError;
+            } else if (index == kReferencePreviousFrame) {
+                frame.control_center_x = previous_control_center_x;
+                sample.previous_control_center_x = frame.control_center_x;
+            } else {
+                frame.control_center_x = current_control_center_x;
+                sample.current_control_center_x = frame.control_center_x;
+            }
+            const AimResult result = aim.process(frame);
+            if (result.status == AimStatus::SUCCESS && result.has_target &&
+                result.control.evaluated) {
+                ++sample.valid_frames;
+            }
+            if (index == kReferencePreviousFrame) sample.previous = result;
+            if (index == kReferenceCurrentFrame) {
+                sample.current = result;
+                continue;
+            }
+            if (result.has_command && aim.record_backend_completed_command(
+                    frame.sequence,
+                    frame.control_at + std::chrono::microseconds(100),
+                    result.command.dx_counts,
+                    result.command.dy_counts)) {
+                ++sample.completed_frames;
+            }
+        }
+        return sample;
+    };
+
+    const ReferenceSample narrow_reference = run_reference_case(
+        kNarrowBranchWidth, kNarrowCurrentWidth, narrow_geometry);
+    const ReferenceSample faster_reference = run_reference_case(
+        kWideBranchWidth, kWideCurrentWidth, wide_geometry);
+    const float narrow_previous_error =
+        narrow_reference.previous.target.base_aim_x -
+        narrow_reference.previous_control_center_x;
+    const float faster_previous_error =
+        faster_reference.previous.target.base_aim_x -
+        faster_reference.previous_control_center_x;
+    const float narrow_current_error =
+        narrow_reference.current.target.base_aim_x -
+        narrow_reference.current_control_center_x;
+    const float faster_current_error =
+        faster_reference.current.target.base_aim_x -
+        faster_reference.current_control_center_x;
+    const float narrow_reference_delta =
+        reference_x(narrow_reference.current) -
+        reference_x(narrow_reference.previous);
+    const float faster_reference_delta =
+        reference_x(faster_reference.current) -
+        reference_x(faster_reference.previous);
+    const float narrow_track_delta =
+        track_center_x(narrow_reference.current) -
+        track_center_x(narrow_reference.previous);
+    const float faster_track_delta =
+        track_center_x(faster_reference.current) -
+        track_center_x(faster_reference.previous);
+    const float narrow_reference_damping =
+        narrow_reference.current.control.filtered_x_counts -
+        narrow_reference.current.control.desired_x_counts;
+    const float faster_reference_damping =
+        faster_reference.current.control.filtered_x_counts -
+        faster_reference.current.control.desired_x_counts;
+
+    expect(narrow_geometry.valid_frames == kReferenceFrameCount &&
+               wide_geometry.valid_frames == kReferenceFrameCount &&
+               narrow_reference.valid_frames == kReferenceFrameCount &&
+               faster_reference.valid_frames == kReferenceFrameCount &&
+               narrow_reference.completed_frames ==
+                   faster_reference.completed_frames &&
+               narrow_reference.completed_frames > 0,
+           "reference-only 成对夹具必须逐帧保留公开目标、控制求值和"
+           "backend-completed 历史，geometry/control/completed=" +
+               std::to_string(narrow_geometry.valid_frames) + "/" +
+               std::to_string(wide_geometry.valid_frames) + "/" +
+               std::to_string(narrow_reference.valid_frames) + "/" +
+               std::to_string(faster_reference.valid_frames) + "/" +
+               std::to_string(narrow_reference.completed_frames) + "/" +
+               std::to_string(faster_reference.completed_frames));
+    expect(std::fabs(narrow_track_delta - faster_track_delta) < 0.0001f &&
+               std::fabs(track_center_x(narrow_reference.current) -
+                         track_center_x(faster_reference.current)) < 0.0001f &&
+               narrow_reference.current.target.matched_observation_valid &&
+               faster_reference.current.target.matched_observation_valid &&
+               !narrow_reference.current.target.
+                   matched_observation_head_only &&
+               !faster_reference.current.target.
+                   matched_observation_head_only &&
+               !narrow_reference.current.target.
+                   matched_observation_aim_from_head &&
+               !faster_reference.current.target.
+                   matched_observation_aim_from_head &&
+               std::fabs(
+                   (narrow_reference.current.target.
+                        matched_observation_x1 +
+                    narrow_reference.current.target.
+                        matched_observation_x2) * 0.5f -
+                   (faster_reference.current.target.
+                        matched_observation_x1 +
+                    faster_reference.current.target.
+                        matched_observation_x2) * 0.5f) < 0.0001f &&
+               std::fabs(narrow_current_error - faster_current_error) <
+                   0.001f &&
+               std::fabs(narrow_current_error - kCurrentError) < 0.001f &&
+               faster_previous_error > narrow_previous_error + 0.15f &&
+               faster_previous_error <= config.deadzone_pixels &&
+               faster_reference_delta < narrow_reference_delta - 0.15f,
+           "成对 reference 序列必须保持相同 Track 公共平移和当前完整误差，"
+           "只让前帧框内 reference 更快闭合，trackΔ/refΔ/prev/current=" +
+               std::to_string(narrow_track_delta) + "/" +
+               std::to_string(faster_track_delta) + "/" +
+               std::to_string(narrow_reference_delta) + "/" +
+               std::to_string(faster_reference_delta) + "/" +
+               std::to_string(narrow_previous_error) + "/" +
+               std::to_string(faster_previous_error) + "/" +
+               std::to_string(narrow_current_error) + "/" +
+               std::to_string(faster_current_error));
+    expect(std::fabs(narrow_reference.current.control.proportional_x_counts) <
+                    0.0001f &&
+               std::fabs(faster_reference.current.control.
+                             proportional_x_counts) < 0.0001f &&
+               std::fabs(narrow_reference.current.control.feedforward_x_counts -
+                         faster_reference.current.control.
+                             feedforward_x_counts) < 0.0001f &&
+               std::fabs(narrow_reference.current.control.filtered_x_counts -
+                         faster_reference.current.control.filtered_x_counts) <
+                   0.0001f &&
+               std::fabs(narrow_reference.current.control.
+                             pending_net_x_counts -
+                         faster_reference.current.control.
+                             pending_net_x_counts) < 0.0001f &&
+               std::fabs(narrow_reference.current.control.
+                             pending_absolute_x_counts -
+                         faster_reference.current.control.
+                             pending_absolute_x_counts) < 0.0001f,
+           "reference-only 分叉不得改变 PI、smoothing 或 backend-completed "
+           "库存，P/积分/滤波/net/absolute=" +
+               std::to_string(narrow_reference.current.control.
+                                  proportional_x_counts) + "/" +
+               std::to_string(faster_reference.current.control.
+                                  proportional_x_counts) + "/" +
+               std::to_string(narrow_reference.current.control.
+                                  feedforward_x_counts) + "/" +
+               std::to_string(faster_reference.current.control.
+                                  feedforward_x_counts) + "/" +
+               std::to_string(narrow_reference.current.control.
+                                  filtered_x_counts) + "/" +
+               std::to_string(faster_reference.current.control.
+                                  filtered_x_counts) + "/" +
+               std::to_string(narrow_reference.current.control.
+                                  pending_net_x_counts) + "/" +
+               std::to_string(faster_reference.current.control.
+                                  pending_net_x_counts) + "/" +
+               std::to_string(narrow_reference.current.control.
+                                  pending_absolute_x_counts) + "/" +
+               std::to_string(faster_reference.current.control.
+                                  pending_absolute_x_counts));
+    expect(std::fabs(narrow_reference_damping -
+                     faster_reference_damping) < 0.0001f &&
+               std::fabs(narrow_reference.current.control.desired_x_counts -
+                         faster_reference.current.control.desired_x_counts) <
+                   0.0001f &&
+               std::abs(faster_reference.current.command.dx_counts) <=
+                   std::abs(narrow_reference.current.command.dx_counts) &&
+               faster_reference.current.command.dy_counts ==
+                   narrow_reference.current.command.dy_counts &&
+               std::hypot(
+                   static_cast<float>(
+                       faster_reference.current.command.dx_counts),
+                   static_cast<float>(
+                       faster_reference.current.command.dy_counts)) <=
+                   config.max_counts_per_frame,
+           "Track 公共平移、当前完整误差及其他控制状态相同时，"
+           "框内 reference 斜率不得改变 X 阻尼，damping/request=" +
+               std::to_string(narrow_reference_damping) + "/" +
+               std::to_string(faster_reference_damping) + "/" +
+               std::to_string(narrow_reference.current.control.
+                                  desired_x_counts) + "/" +
+               std::to_string(faster_reference.current.control.
+                                  desired_x_counts));
+
+    struct CommonSample {
+        AimResult previous;
+        AimResult current;
+        int valid_frames = 0;
+        int completed_frames = 0;
+    };
+    const auto run_common_case = [&](bool faster_closing) {
+        Aim aim(config);
+        CommonSample sample;
+        for (int index = 0; index < kCommonFrameCount; ++index) {
+            float center_x = 180.0f;
+            if (faster_closing && index == kCommonPreviousFrame) {
+                center_x = 181.041667f;
+            } else if (faster_closing && index == kCommonCurrentFrame) {
+                center_x = 179.6680f;
+            }
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::seconds(2) + kFrameStep * index);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = index < 20 ? 174.0f : 178.5f;
+            frame.control_center_y = 160.0f;
+            frame.lock_active = true;
+            frame.detections = {body_box(center_x, 172.0f, 40.0f, 80.0f)};
+            const AimResult result = aim.process(frame);
+            if (result.status == AimStatus::SUCCESS && result.has_target &&
+                result.control.evaluated) {
+                ++sample.valid_frames;
+            }
+            if (index == kCommonPreviousFrame) sample.previous = result;
+            if (index == kCommonCurrentFrame) {
+                sample.current = result;
+                continue;
+            }
+            if (result.has_command && aim.record_backend_completed_command(
+                    frame.sequence,
+                    frame.control_at + std::chrono::microseconds(100),
+                    result.command.dx_counts,
+                    result.command.dy_counts)) {
+                ++sample.completed_frames;
+            }
+        }
+        return sample;
+    };
+
+    const CommonSample stationary_common = run_common_case(false);
+    const CommonSample faster_common = run_common_case(true);
+    const float stationary_common_previous_error =
+        stationary_common.previous.target.base_aim_x - 178.5f;
+    const float faster_common_previous_error =
+        faster_common.previous.target.base_aim_x - 178.5f;
+    const float stationary_common_current_error =
+        stationary_common.current.target.base_aim_x - 178.5f;
+    const float faster_common_current_error =
+        faster_common.current.target.base_aim_x - 178.5f;
+    const float stationary_common_damping =
+        stationary_common.current.control.filtered_x_counts -
+        stationary_common.current.control.desired_x_counts;
+    const float faster_common_damping =
+        faster_common.current.control.filtered_x_counts -
+        faster_common.current.control.desired_x_counts;
+
+    expect(stationary_common.valid_frames == kCommonFrameCount &&
+               faster_common.valid_frames == kCommonFrameCount &&
+               stationary_common.completed_frames ==
+                   faster_common.completed_frames &&
+               stationary_common.completed_frames > 0 &&
+               std::fabs(reference_x(stationary_common.previous)) < 0.0001f &&
+               std::fabs(reference_x(faster_common.previous)) < 0.0001f &&
+               std::fabs(reference_x(stationary_common.current)) < 0.0001f &&
+               std::fabs(reference_x(faster_common.current)) < 0.0001f &&
+               std::fabs(track_center_x(stationary_common.current) -
+                         track_center_x(faster_common.current)) < 0.001f &&
+               std::fabs(stationary_common_current_error -
+                         faster_common_current_error) < 0.001f &&
+               std::fabs(stationary_common_current_error -
+                         kCurrentError) < 0.001f &&
+               faster_common_previous_error >
+                   stationary_common_previous_error + 0.50f &&
+               faster_common_previous_error <= config.deadzone_pixels,
+           "common-translation 成对夹具必须保持框内 reference 与当前完整"
+           "误差相同，只让 Track 更快朝零，prev/current/ref=" +
+               std::to_string(stationary_common_previous_error) + "/" +
+               std::to_string(faster_common_previous_error) + "/" +
+               std::to_string(stationary_common_current_error) + "/" +
+               std::to_string(faster_common_current_error) + "/" +
+               std::to_string(reference_x(faster_common.previous)) + "/" +
+               std::to_string(reference_x(faster_common.current)));
+    expect(faster_common_damping > stationary_common_damping + 0.001f &&
+               faster_common.current.control.desired_x_counts >= 0.0f &&
+               faster_common.current.control.desired_x_counts <
+                   stationary_common.current.control.desired_x_counts &&
+               faster_common.current.command.dy_counts ==
+                   stationary_common.current.command.dy_counts &&
+               std::hypot(
+                   static_cast<float>(faster_common.current.command.dx_counts),
+                   static_cast<float>(faster_common.current.command.dy_counts)) <=
+                   config.max_counts_per_frame,
+           "框内 reference 不变时，更快 Track closing 必须连续减小同号 X，"
+           "不得反向、改变 Y 或提高 14-count 上限，damping/request/cmd=" +
+               std::to_string(stationary_common_damping) + "/" +
+               std::to_string(faster_common_damping) + "/" +
+               std::to_string(stationary_common.current.control.
+                                  desired_x_counts) + "/" +
+               std::to_string(faster_common.current.control.
+                                  desired_x_counts) + "/" +
+               std::to_string(stationary_common.current.command.dx_counts) +
+               "/" +
+               std::to_string(faster_common.current.command.dx_counts) + "/" +
+               std::to_string(stationary_common.current.command.dy_counts) +
+               "/" +
+               std::to_string(faster_common.current.command.dy_counts));
+}
+
 void test_delayed_partial_visibility_closed_loop_preserves_real_reversals() {
     constexpr int kFrameCount = 240;
     constexpr int kSegmentFrameCount = 80;
@@ -8411,6 +8835,7 @@ int main() {
     test_backend_completed_command_feedback_contract();
     test_backend_completed_delay_inventory_changes_tracking_reversal_response();
     test_faster_closing_slope_continuously_reduces_tracking_request();
+    test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_pi_is_separate_from_prediction_projection();

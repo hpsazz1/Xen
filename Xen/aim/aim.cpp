@@ -3317,17 +3317,32 @@ struct Aim::Impl {
         const float error_y =
             (base_y - frame.control_center_y) *
             frame.source_pixels_per_roi_pixel_y;
+        // P/PI 继续消费完整基础点误差；X 导数只观察 Track 的因果中心
+        // 趋势相对 control center 的公共平移，避免框内 reference 与短周期
+        // 框形变被误当成整个目标的 closing。趋势预热前退回当前 Track
+        // 中心；两者都不改变下方由完整误差限定的同号削减预算。
+        const HorizontalTrendEstimate tracking_center_trend =
+            estimate_horizontal_trend(track, track.state_at);
+        const bool tracking_shape_trend_active =
+            track.horizontal_center_trend_frames > 0 &&
+            tracking_center_trend.valid;
+        const float tracking_center_x = tracking_shape_trend_active
+            ? tracking_center_trend.position_ratio * frame.roi_width
+            : (track.x1 + track.x2) * 0.5f;
+        const float track_center_error_x =
+            (tracking_center_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
         if (tracking_error_derivative_initialized) {
             tracking_error_derivative_x =
                 (kTrackingErrorDerivativeFilterTimeSeconds *
                      tracking_error_derivative_x +
-                 error_x - tracking_previous_error_x) /
+                 track_center_error_x - tracking_previous_error_x) /
                 (kTrackingErrorDerivativeFilterTimeSeconds + controller_dt);
         } else {
             tracking_error_derivative_x = 0.0f;
             tracking_error_derivative_initialized = true;
         }
-        tracking_previous_error_x = error_x;
+        tracking_previous_error_x = track_center_error_x;
         const float error_magnitude = std::hypot(error_x, error_y);
         // deadzone 使用径向软阈值：边界处比例输出连续为零，避免 X/Y 各自
         // 开关形成方形抖动；已学习的维持量仍会平滑泄漏，不会进死区即停发。
