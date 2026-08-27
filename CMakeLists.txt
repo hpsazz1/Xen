@@ -1061,7 +1061,8 @@ if(BUILD_TESTING)
         add_executable(detector_model_test
             tests/detector_model_test.cpp
             Xen/detector/video_visibility.cpp)
-        target_link_libraries(detector_model_test PRIVATE detector aim bcrypt)
+        target_link_libraries(detector_model_test
+            PRIVATE detector aim config xen_debug bcrypt)
         if(WIN32)
             xen_deploy_runtime_dlls(detector_model_test OPENCV ORT)
         endif()

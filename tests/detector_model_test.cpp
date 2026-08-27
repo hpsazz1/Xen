@@ -2,6 +2,8 @@
 #include "detector/video_visibility_internal.h"
 #include "aim/aim.h"
 #include "aim/aim_evaluation_internal.h"
+#include "config/config.h"
+#include "debug/debug.h"
 #include "log/log.h"
 
 #ifndef NOMINMAX
@@ -57,6 +59,8 @@ struct CommandLineOptions {
     std::string provider_profile_prefix;
     std::string visibility_directory;
     std::string aim_annotation_directory;
+    std::string aim_config_path;
+    std::string aim_report_directory;
     OutputFormat output_format = OutputFormat::AUTO;
     bool has_video_directory = false;
     bool enable_gpu_preprocess = true;
@@ -111,6 +115,12 @@ bool parse_command_line(int argc, char* argv[],
         "--aim-annotation-directory";
     constexpr const char* kAimAnnotationDirectoryPrefix =
         "--aim-annotation-directory=";
+    constexpr const char* kAimConfigOption = "--aim-config";
+    constexpr const char* kAimConfigPrefix = "--aim-config=";
+    constexpr const char* kAimReportDirectoryOption =
+        "--aim-report-directory";
+    constexpr const char* kAimReportDirectoryPrefix =
+        "--aim-report-directory=";
     constexpr const char* kAimContinuityOption = "--aim-continuity";
     constexpr const char* kAimPredictionOption = "--aim-prediction";
     std::vector<std::string> positional;
@@ -212,6 +222,36 @@ bool parse_command_line(int argc, char* argv[],
                 return false;
             }
             continue;
+        } else if (argument == kAimConfigOption) {
+            if (++index >= argc || !argv[index] || argv[index][0] == '\0') {
+                std::cerr << "--aim-config 缺少参数\n";
+                return false;
+            }
+            options.aim_config_path = argv[index];
+            continue;
+        } else if (argument.starts_with(kAimConfigPrefix)) {
+            options.aim_config_path = argument.substr(
+                std::char_traits<char>::length(kAimConfigPrefix));
+            if (options.aim_config_path.empty()) {
+                std::cerr << "--aim-config 缺少参数\n";
+                return false;
+            }
+            continue;
+        } else if (argument == kAimReportDirectoryOption) {
+            if (++index >= argc || !argv[index] || argv[index][0] == '\0') {
+                std::cerr << "--aim-report-directory 缺少参数\n";
+                return false;
+            }
+            options.aim_report_directory = argv[index];
+            continue;
+        } else if (argument.starts_with(kAimReportDirectoryPrefix)) {
+            options.aim_report_directory = argument.substr(
+                std::char_traits<char>::length(kAimReportDirectoryPrefix));
+            if (options.aim_report_directory.empty()) {
+                std::cerr << "--aim-report-directory 缺少参数\n";
+                return false;
+            }
+            continue;
         } else if (argument == kAimContinuityOption) {
             options.enable_aim_continuity = true;
             continue;
@@ -257,6 +297,12 @@ bool parse_command_line(int argc, char* argv[],
     }
     if (options.enable_aim_continuity && !options.has_video_directory) {
         std::cerr << "Aim 控制连续性评价只能用于视频基准\n";
+        return false;
+    }
+    if ((!options.aim_config_path.empty() ||
+         !options.aim_report_directory.empty()) &&
+        !options.has_video_directory) {
+        std::cerr << "Aim 配置与逐帧报告只能用于视频基准\n";
         return false;
     }
     if (options.enable_aim_prediction &&
@@ -469,6 +515,124 @@ private:
     bool released_ = false;
 };
 
+RuntimePipelineSample make_aim_replay_sample(
+        std::size_t frame_index,
+        const cv::Mat& evaluated_frame,
+        int source_width,
+        int source_height,
+        const InferenceProfile& detector_profile,
+        const AimFrame& aim_frame,
+        const AimResult& aim_result,
+        const AimConfig& aim_config) {
+    RuntimePipelineSample sample;
+    sample.sequence = static_cast<std::uint64_t>(frame_index + 1U);
+    sample.geometry.encoded_width = source_width;
+    sample.geometry.encoded_height = source_height;
+    sample.geometry.source_width = source_width;
+    sample.geometry.source_height = source_height;
+    sample.geometry.roi_width = evaluated_frame.cols;
+    sample.geometry.roi_height = evaluated_frame.rows;
+    sample.geometry.roi_x = (source_width - evaluated_frame.cols) * 0.5;
+    sample.geometry.roi_y = (source_height - evaluated_frame.rows) * 0.5;
+    sample.geometry.source_pixels_per_pixel_x =
+        aim_frame.source_pixels_per_roi_pixel_x;
+    sample.geometry.source_pixels_per_pixel_y =
+        aim_frame.source_pixels_per_roi_pixel_y;
+    sample.profile.detector = detector_profile;
+    sample.profile.aim = aim_result.profile;
+    sample.profile.total_ms = detector_profile.total_ms +
+        aim_result.profile.total_ms;
+    sample.profile.control_timing_valid = true;
+    sample.profile.capture_to_control_ms =
+        std::chrono::duration<double, std::milli>(
+            aim_frame.control_at - aim_frame.captured_at).count();
+    sample.detection_status = detector_profile.status;
+    sample.aim_status = aim_result.status;
+    sample.mouse_status = MouseStatus::CLOSED;
+    sample.mouse_sent = false;
+    sample.aim_lock_active = aim_frame.lock_active;
+    sample.aim_control_center_x = aim_frame.control_center_x;
+    sample.aim_control_center_y = aim_frame.control_center_y;
+    sample.aim_acquisition_range_radius =
+        aim_result.acquisition_range_radius;
+    sample.aim_active_range_radius = aim_result.active_range_radius;
+    sample.aim_has_target = aim_result.has_target;
+    sample.aim_has_command = aim_result.has_command;
+    sample.aim_range_locked = aim_result.range_locked;
+    sample.aim_range_allows_control = aim_result.range_allows_control;
+    sample.aim_target = aim_result.target;
+    sample.aim_control = aim_result.control;
+    sample.aim_command = aim_result.command;
+    if (aim_result.has_target) {
+        sample.aim_base_point_inside_box =
+            aim_result.target.base_aim_x >= aim_result.target.x1 &&
+            aim_result.target.base_aim_x <= aim_result.target.x2 &&
+            aim_result.target.base_aim_y >= aim_result.target.y1 &&
+            aim_result.target.base_aim_y <= aim_result.target.y2;
+        sample.aim_prediction_point_outside_box =
+            aim_result.target.lead_active &&
+            (aim_result.target.aim_x < aim_result.target.x1 ||
+             aim_result.target.aim_x > aim_result.target.x2 ||
+             aim_result.target.aim_y < aim_result.target.y1 ||
+             aim_result.target.aim_y > aim_result.target.y2);
+    }
+    if (aim_result.has_command) {
+        const double desired_x =
+            (aim_result.target.aim_x - aim_frame.control_center_x) *
+            aim_frame.source_pixels_per_roi_pixel_x *
+            aim_config.counts_per_pixel_x;
+        const double desired_y =
+            (aim_result.target.aim_y - aim_frame.control_center_y) *
+            aim_frame.source_pixels_per_roi_pixel_y *
+            aim_config.counts_per_pixel_y;
+        const double error_magnitude = std::hypot(
+            (aim_result.target.aim_x - aim_frame.control_center_x) *
+                aim_frame.source_pixels_per_roi_pixel_x,
+            (aim_result.target.aim_y - aim_frame.control_center_y) *
+                aim_frame.source_pixels_per_roi_pixel_y);
+        const double hold_band = std::max(
+            2.0, static_cast<double>(aim_config.deadzone_pixels) * 1.5);
+        sample.aim_command_toward_target =
+            (error_magnitude <= hold_band ||
+             aim_result.command.dx_counts * desired_x +
+                     aim_result.command.dy_counts * desired_y >
+                 0.0) &&
+            std::hypot(aim_result.command.dx_counts,
+                       aim_result.command.dy_counts) <=
+                aim_config.max_counts_per_frame + 0.001;
+    }
+    for (const Detection& detection : aim_frame.detections) {
+        const float confidence = std::clamp(
+            detection.confidence, 0.0f, 1.0f);
+        if (detection.class_id >= 0 &&
+            static_cast<std::size_t>(detection.class_id) <
+                kRuntimeReportedClassCount) {
+            const auto class_index =
+                static_cast<std::size_t>(detection.class_id);
+            ++sample.detection_count_by_class[class_index];
+            sample.max_confidence_by_class[class_index] = std::max(
+                sample.max_confidence_by_class[class_index], confidence);
+        }
+        if (std::find(aim_config.person_class_ids.begin(),
+                      aim_config.person_class_ids.end(),
+                      detection.class_id) !=
+            aim_config.person_class_ids.end()) {
+            ++sample.person_detection_count;
+            sample.max_person_confidence = std::max(
+                sample.max_person_confidence, confidence);
+        }
+        if (std::find(aim_config.head_class_ids.begin(),
+                      aim_config.head_class_ids.end(),
+                      detection.class_id) !=
+            aim_config.head_class_ids.end()) {
+            ++sample.head_detection_count;
+            sample.max_head_confidence = std::max(
+                sample.max_head_confidence, confidence);
+        }
+    }
+    return sample;
+}
+
 bool benchmark_video(Detector& detector,
                      const std::filesystem::path& video_path,
                      bool use_center_crop,
@@ -478,6 +642,10 @@ bool benchmark_video(Detector& detector,
                      bool has_aim_annotations,
                      bool run_aim_continuity,
                      bool enable_aim_prediction,
+                     const AimConfig& replay_aim_config,
+                     const std::filesystem::path& aim_report_directory,
+                     const std::string& model_path,
+                     const std::string& provider,
                      VideoBenchmarkResult& result) {
     const std::string open_path = path_to_utf8(video_path);
     cv::VideoCapture capture(open_path, cv::CAP_ANY);
@@ -551,8 +719,8 @@ bool benchmark_video(Detector& detector,
     }
 
     aim::detail::AimGroundTruthAnnotation aim_annotation;
-    AimConfig aim_config;
-    aim_config.enable_prediction = enable_aim_prediction;
+    AimConfig aim_config = replay_aim_config;
+    if (enable_aim_prediction) aim_config.enable_prediction = true;
     aim::detail::AimEvaluationConfig aim_evaluation_config;
     aim_evaluation_config.max_counts_per_frame =
         aim_config.max_counts_per_frame;
@@ -617,6 +785,40 @@ bool benchmark_video(Detector& detector,
         result.aim_policy = aim_annotation.policy;
     }
 
+    const bool write_aim_report = !aim_report_directory.empty();
+    DebugReport aim_report;
+    if (write_aim_report) {
+        const double declared_frames = capture.get(cv::CAP_PROP_FRAME_COUNT);
+        const double rounded_frames = std::round(declared_frames);
+        if (!std::isfinite(declared_frames) || declared_frames <= 0.0 ||
+            std::fabs(declared_frames - rounded_frames) > 1e-6 ||
+            rounded_frames > 100000.0) {
+            std::cerr << "逐帧 Aim 报告要求视频提供 1..100000 的精确帧数："
+                      << open_path << '\n';
+            return false;
+        }
+        std::filesystem::path report_base =
+            aim_report_directory / video_path.filename();
+        report_base += ".aim-runtime";
+        DebugReportConfig report_config;
+        // DebugReportConfig 当前接收 Windows 本地窄路径；这里必须与其
+        // filesystem::path(path) 的解释保持一致，不能把 UTF-8 再按 ACP
+        // 解码，否则中文场景名会在实际文件名中形成 mojibake。
+        report_config.csv_path = report_base.string() + ".csv";
+        report_config.json_path = report_base.string() + ".json";
+        report_config.session_id = "video-replay/" + result.scene;
+        report_config.model_path = model_path;
+        report_config.provider = provider;
+        report_config.capture_backend = "VIDEO_REPLAY";
+        report_config.mouse_backend = "SIMULATED_BACKEND_COMPLETION";
+        report_config.max_samples = static_cast<std::size_t>(rounded_frames);
+        std::string report_error;
+        if (!aim_report.start(report_config, report_error)) {
+            std::cerr << "无法启动逐帧 Aim 报告：" << report_error << '\n';
+            return false;
+        }
+    }
+
     // 固定重复第一帧只用于预热 Session、GPU 时钟和缓存，不计入正式样本；
     // 输入裁剪口径必须与正式测量完全一致，否则预热了不同的前处理路径。
     constexpr int kWarmupFrames = 50;
@@ -641,6 +843,9 @@ bool benchmark_video(Detector& detector,
         ? result.source_fps : 60.0;
     if (run_aim_continuity) result.aim_timebase_fps = source_fps;
     const auto aim_time_origin = std::chrono::steady_clock::now();
+    auto previous_aim_control_at = aim_time_origin;
+    bool has_previous_aim_control = false;
+    AimResult last_aim_result;
     while (capture.read(frame)) {
         if (frame.empty()) {
             std::cerr << "视频解码产生空帧：" << open_path << '\n';
@@ -673,6 +878,40 @@ bool benchmark_video(Detector& detector,
         auto detections = detector.detect(evaluated_frame);
         const InferenceProfile profile = detector.profile();
         ++result.frame_count;
+
+        AimFrame replay_aim_frame;
+        if (run_aim_continuity) {
+            replay_aim_frame.sequence =
+                static_cast<std::uint64_t>(frame_index + 1U);
+            replay_aim_frame.captured_at = aim_time_origin +
+                std::chrono::duration_cast<
+                    std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(
+                        static_cast<double>(frame_index) / source_fps));
+            // 轨迹状态按视频时间推进；离线提前量只使用本次真实 Detector
+            // 总耗时，避免回放循环快慢把 wall clock 偶然性混入算法 A/B。
+            const auto processing_duration = std::max(
+                std::chrono::duration_cast<
+                    std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double, std::milli>(
+                        profile.total_ms)),
+                std::chrono::steady_clock::duration{1});
+            const auto processing_started_at = has_previous_aim_control
+                ? std::max(replay_aim_frame.captured_at,
+                           previous_aim_control_at)
+                : replay_aim_frame.captured_at;
+            replay_aim_frame.control_at =
+                processing_started_at + processing_duration;
+            previous_aim_control_at = replay_aim_frame.control_at;
+            has_previous_aim_control = true;
+            replay_aim_frame.roi_width = evaluated_frame.cols;
+            replay_aim_frame.roi_height = evaluated_frame.rows;
+            replay_aim_frame.control_center_x = evaluated_frame.cols * 0.5f;
+            replay_aim_frame.control_center_y = evaluated_frame.rows * 0.5f;
+            replay_aim_frame.source_pixels_per_roi_pixel_x = 1.0f;
+            replay_aim_frame.source_pixels_per_roi_pixel_y = 1.0f;
+            replay_aim_frame.lock_active = true;
+        }
 
         const auto make_aim_evaluation_frame =
             [&](const AimResult& aim_result) {
@@ -712,6 +951,7 @@ bool benchmark_video(Detector& detector,
             if (run_aim_continuity) {
                 AimResult failed_aim;
                 failed_aim.status = AimStatus::NOT_RUN;
+                last_aim_result = failed_aim;
                 const auto failed_frame = make_aim_evaluation_frame(failed_aim);
                 std::string evaluation_error;
                 if (!aim::detail::record_aim_control_continuity(
@@ -727,6 +967,16 @@ bool benchmark_video(Detector& detector,
                         result.aim_evaluation, evaluation_error)) {
                     std::cerr << "Aim 评价帧无效：" << evaluation_error << '\n';
                     return false;
+                }
+                if (write_aim_report) {
+                    const RuntimePipelineSample sample =
+                        make_aim_replay_sample(
+                            frame_index, evaluated_frame,
+                            result.source_width, result.source_height,
+                            profile, replay_aim_frame, failed_aim,
+                            aim_config);
+                    aim_report.ingest(
+                        std::span<const RuntimePipelineSample>(&sample, 1));
                 }
             }
             if (result.status == DetectionStatus::NOT_RUN ||
@@ -775,27 +1025,9 @@ bool benchmark_video(Detector& detector,
             result.best_confidence_sum += best->confidence;
         }
         if (run_aim_continuity) {
-            AimFrame aim_frame;
-            aim_frame.sequence = static_cast<std::uint64_t>(frame_index + 1U);
-            aim_frame.captured_at = aim_time_origin +
-                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                    std::chrono::duration<double>(
-                        static_cast<double>(frame_index) / source_fps));
-            // 轨迹状态按视频时间推进；离线提前量只使用本次真实 Detector
-            // 总耗时，避免回放循环快慢把 wall clock 偶然性混入算法 A/B。
-            aim_frame.control_at = aim_frame.captured_at +
-                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                    std::chrono::duration<double, std::milli>(
-                        profile.total_ms));
-            aim_frame.roi_width = evaluated_frame.cols;
-            aim_frame.roi_height = evaluated_frame.rows;
-            aim_frame.control_center_x = evaluated_frame.cols * 0.5f;
-            aim_frame.control_center_y = evaluated_frame.rows * 0.5f;
-            aim_frame.source_pixels_per_roi_pixel_x = 1.0f;
-            aim_frame.source_pixels_per_roi_pixel_y = 1.0f;
-            aim_frame.lock_active = true;
-            aim_frame.detections = std::move(detections);
-            const AimResult aim_result = aim_runner.process(aim_frame);
+            replay_aim_frame.detections = std::move(detections);
+            const AimResult aim_result = aim_runner.process(replay_aim_frame);
+            last_aim_result = aim_result;
             const auto evaluation_frame =
                 make_aim_evaluation_frame(aim_result);
             std::string evaluation_error;
@@ -839,6 +1071,25 @@ bool benchmark_video(Detector& detector,
                           << "，status=" << AimStatusName(aim_result.status)
                           << '\n';
                 return false;
+            }
+            if (write_aim_report && aim_result.has_command &&
+                !aim_runner.record_backend_completed_command(
+                    replay_aim_frame.sequence,
+                    replay_aim_frame.control_at +
+                        std::chrono::microseconds(400),
+                    aim_result.command.dx_counts,
+                    aim_result.command.dy_counts)) {
+                std::cerr << "视频回放无法记录模拟 backend completion："
+                          << open_path << "，frame=" << frame_index << '\n';
+                return false;
+            }
+            if (write_aim_report) {
+                const RuntimePipelineSample sample = make_aim_replay_sample(
+                    frame_index, evaluated_frame,
+                    result.source_width, result.source_height,
+                    profile, replay_aim_frame, aim_result, aim_config);
+                aim_report.ingest(
+                    std::span<const RuntimePipelineSample>(&sample, 1));
             }
         }
 
@@ -897,6 +1148,51 @@ bool benchmark_video(Detector& detector,
             std::cerr << "Aim 存在失败帧：" << open_path
                       << "，failed="
                       << result.aim_evaluation.invalid_aim_frames << '\n';
+            return false;
+        }
+    }
+    if (write_aim_report) {
+        RuntimeSnapshot final_snapshot;
+        final_snapshot.state = RuntimeState::STOPPED;
+        final_snapshot.capture_status = CaptureStatus::CLOSED;
+        final_snapshot.detection_status = result.status;
+        final_snapshot.aim_status = last_aim_result.status;
+        final_snapshot.mouse_status = MouseStatus::CLOSED;
+        final_snapshot.provider = provider;
+        final_snapshot.active_model_path = model_path;
+        final_snapshot.captured_frames = result.frame_count;
+        final_snapshot.processed_frames = result.frame_count;
+        final_snapshot.failed_frames = result.failed_frame_count;
+        final_snapshot.source_fps = source_fps;
+        final_snapshot.source_sequence = result.frame_count;
+        final_snapshot.source_sequence_valid = true;
+        final_snapshot.last_sequence = result.frame_count;
+        final_snapshot.encoded_width = result.source_width;
+        final_snapshot.encoded_height = result.source_height;
+        final_snapshot.source_width = result.source_width;
+        final_snapshot.source_height = result.source_height;
+        final_snapshot.capture_roi_width = result.evaluated_width;
+        final_snapshot.capture_roi_height = result.evaluated_height;
+        final_snapshot.capture_roi_x =
+            (result.source_width - result.evaluated_width) * 0.5;
+        final_snapshot.capture_roi_y =
+            (result.source_height - result.evaluated_height) * 0.5;
+        final_snapshot.source_pixels_per_pixel_x = 1.0;
+        final_snapshot.source_pixels_per_pixel_y = 1.0;
+        final_snapshot.capture_fps = source_fps;
+        final_snapshot.output_allowed_by_config = false;
+        final_snapshot.output_armed = false;
+        final_snapshot.aim_hold_active = true;
+        final_snapshot.last_aim = last_aim_result;
+        std::string report_error;
+        if (!aim_report.finalize(final_snapshot, report_error)) {
+            std::cerr << "逐帧 Aim 报告发布失败：" << report_error << '\n';
+            return false;
+        }
+        if (aim_report.summary().sample_count != result.frame_count ||
+            aim_report.summary().report_samples_dropped != 0) {
+            std::cerr << "逐帧 Aim 报告没有完整覆盖视频："
+                      << open_path << '\n';
             return false;
         }
     }
@@ -1038,11 +1334,16 @@ void write_video_result(std::ostream& output,
                << ',' << result.aim_config.switch_cooldown_frames
                << ',' << result.aim_config.acquisition_range_percent
                << ',' << result.aim_config.body_aim_height_ratio
+               << ',' << result.aim_config.body_aim_range_percent
                << ',' << result.aim_config.deadzone_pixels
                << ',' << result.aim_config.smoothing
                << ',' << result.aim_config.counts_per_pixel_x
                << ',' << result.aim_config.counts_per_pixel_y
                << ',' << result.aim_config.max_counts_per_frame
+               << ',' << (result.aim_config.enable_delay_compensation ? 1 : 0)
+               << ',' << result.aim_config.control_delay_ms
+               << ',' << result.aim_config.max_delay_compensation_ms
+               << ',' << result.aim_config.max_delay_compensation_percent
                << ',' << (result.aim_config.enable_prediction ? 1 : 0)
                << ',' << result.aim_config.max_prediction_lead_percent
                << ',' << result.aim_config.predicted_gain
@@ -1051,7 +1352,7 @@ void write_video_result(std::ostream& output,
                << ',' << result.aim_timebase_fps;
     } else {
         // 未启用控制连续性时不运行 Aim，也不伪造一套看似参与了本次基准的配置。
-        constexpr int kAimConfigurationColumns = 24;
+        constexpr int kAimConfigurationColumns = 29;
         for (int index = 0; index < kAimConfigurationColumns; ++index) {
             output << ',';
         }
@@ -1100,7 +1401,11 @@ bool benchmark_videos(Detector& detector,
                       const std::filesystem::path& aim_annotation_directory,
                       bool has_aim_annotations,
                       bool run_aim_continuity,
-                      bool enable_aim_prediction) {
+                      bool enable_aim_prediction,
+                      const AimConfig& replay_aim_config,
+                      const std::filesystem::path& aim_report_directory,
+                      const std::string& model_path,
+                      const std::string& provider) {
     std::error_code error;
     if (!std::filesystem::is_directory(video_directory, error)) {
         std::cerr << "视频目录不存在："
@@ -1279,9 +1584,13 @@ bool benchmark_videos(Detector& detector,
               "aim_max_center_distance,aim_switch_margin,"
               "aim_switch_confirm_frames,aim_switch_cooldown_frames,"
               "aim_acquisition_range_percent,"
-              "aim_body_aim_height_ratio,aim_deadzone_pixels,"
+              "aim_body_aim_height_ratio,aim_body_aim_range_percent,"
+              "aim_deadzone_pixels,"
               "aim_smoothing,aim_counts_per_pixel_x,"
               "aim_counts_per_pixel_y,aim_max_counts_per_frame,"
+              "aim_delay_compensation_enabled,aim_control_delay_ms,"
+              "aim_max_delay_compensation_ms,"
+              "aim_max_delay_compensation_percent,"
               "aim_prediction_enabled,aim_max_prediction_lead_percent,"
               "aim_predicted_gain,"
               "aim_evaluation_min_iou,"
@@ -1314,7 +1623,8 @@ bool benchmark_videos(Detector& detector,
                 detector, video_path, use_center_crop, annotation_path,
                 has_visibility_annotations, aim_annotation_path,
                 has_aim_annotations, run_aim_continuity,
-                enable_aim_prediction, result)) {
+                enable_aim_prediction, replay_aim_config,
+                aim_report_directory, model_path, provider, result)) {
             return false;
         }
         aim_visible_frames += result.aim_evaluation.visible_frames;
@@ -1404,6 +1714,8 @@ int main(int argc, char* argv[]) {
                      "[--gpu-preprocess on|off] "
                      "[--visibility-directory <标注目录>] "
                      "[--aim-annotation-directory <标注目录>] "
+                     "[--aim-config <config.ini>] "
+                     "[--aim-report-directory <目录>] "
                      "[--aim-continuity]\n";
         return 2;
     }
@@ -1639,6 +1951,19 @@ int main(int argc, char* argv[]) {
             options.visibility_directory;
         const std::filesystem::path aim_annotation_directory =
             options.aim_annotation_directory;
+        const std::filesystem::path aim_report_directory =
+            options.aim_report_directory;
+        AimConfig replay_aim_config;
+        if (!options.aim_config_path.empty()) {
+            AppConfig app_config;
+            std::string config_error;
+            if (!load_app_config(
+                    options.aim_config_path, app_config, config_error)) {
+                std::cerr << "Aim 回放配置无效：" << config_error << '\n';
+                return 2;
+            }
+            replay_aim_config = app_config.aim;
+        }
         const std::string& input_mode = options.input_mode;
         if (input_mode != "center" && input_mode != "full") {
             std::cerr << "未知视频输入模式：" << input_mode << '\n';
@@ -1651,8 +1976,11 @@ int main(int argc, char* argv[]) {
                 aim_annotation_directory,
                 !options.aim_annotation_directory.empty(),
                 options.enable_aim_continuity ||
-                    !options.aim_annotation_directory.empty(),
-                options.enable_aim_prediction)) {
+                    !options.aim_annotation_directory.empty() ||
+                    !options.aim_report_directory.empty(),
+                options.enable_aim_prediction, replay_aim_config,
+                aim_report_directory, options.model_path,
+                benchmark_detector.backend_name())) {
             return 1;
         }
     }

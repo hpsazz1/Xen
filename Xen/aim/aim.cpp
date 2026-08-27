@@ -75,6 +75,13 @@ struct HorizontalRawMotionHistory {
     std::size_t count = 0;
 };
 
+struct HorizontalDirectionHistory {
+    std::array<float, kTrackHorizontalTrendSampleCount> center_x_ratio{};
+    std::size_t next = 0;
+    std::size_t count = 0;
+    double travelled_distance = 0.0;
+};
+
 struct Track {
     std::uint64_t id = 0;
     TrackState state = TrackState::TENTATIVE;
@@ -121,6 +128,7 @@ struct Track {
     float horizontal_raw_right_motion_x = 0.0f;
     float last_observation_x1 = 0.0f;
     float last_observation_x2 = 0.0f;
+    float last_observation_aim_x = 0.0f;
     std::chrono::steady_clock::time_point last_observation_at{};
     bool horizontal_observation_initialized = false;
     bool last_observation_head_only = false;
@@ -130,6 +138,7 @@ struct Track {
     HorizontalTrendHistory horizontal_trend{};
     HorizontalTrendChangePoint horizontal_trend_change{};
     HorizontalRawMotionHistory horizontal_raw_motion{};
+    HorizontalDirectionHistory horizontal_direction{};
     // predict_tracks() 实际经过二维限幅后写入基础点的 X 位移。反向快通道
     // 需要用它计算旧预测与新观测的精确差额，不能用 vx*dt 近似限幅结果。
     float predicted_motion_x = 0.0f;
@@ -498,6 +507,60 @@ HorizontalTrendEstimate estimate_horizontal_trend(
     if (!std::isfinite(position) || !std::isfinite(velocity)) return {};
     return {true, static_cast<float>(position),
             static_cast<float>(velocity)};
+}
+
+void reset_horizontal_direction_history(Track& track) noexcept {
+    track.horizontal_direction.next = 0;
+    track.horizontal_direction.count = 0;
+    track.horizontal_direction.travelled_distance = 0.0;
+}
+
+void append_horizontal_direction_history(
+        Track& track, float center_x_ratio) noexcept {
+    HorizontalDirectionHistory& history = track.horizontal_direction;
+    if (history.count != 0) {
+        const std::size_t newest =
+            (history.next + kTrackHorizontalTrendSampleCount - 1) %
+            kTrackHorizontalTrendSampleCount;
+        if (history.count == kTrackHorizontalTrendSampleCount) {
+            const std::size_t second_oldest =
+                (history.next + 1) % kTrackHorizontalTrendSampleCount;
+            history.travelled_distance -= std::fabs(
+                static_cast<double>(
+                    history.center_x_ratio[second_oldest]) -
+                static_cast<double>(
+                    history.center_x_ratio[history.next]));
+        }
+        history.travelled_distance += std::fabs(
+            static_cast<double>(center_x_ratio) -
+            static_cast<double>(history.center_x_ratio[newest]));
+    }
+    history.center_x_ratio[history.next] = center_x_ratio;
+    history.next =
+        (history.next + 1) % kTrackHorizontalTrendSampleCount;
+    history.count = std::min(
+        history.count + 1, kTrackHorizontalTrendSampleCount);
+}
+
+float horizontal_direction_efficiency(const Track& track) noexcept {
+    const HorizontalDirectionHistory& history = track.horizontal_direction;
+    if (history.count < kTrackHorizontalTrendMinimumSampleCount) return 1.0f;
+    const std::size_t oldest =
+        (history.next + kTrackHorizontalTrendSampleCount - history.count) %
+        kTrackHorizontalTrendSampleCount;
+    const std::size_t newest =
+        (history.next + kTrackHorizontalTrendSampleCount - 1) %
+        kTrackHorizontalTrendSampleCount;
+    const double travelled_distance =
+        std::max(0.0, history.travelled_distance);
+    if (travelled_distance <= std::numeric_limits<double>::epsilon()) {
+        return 0.0f;
+    }
+    const double net_distance = std::fabs(
+        static_cast<double>(history.center_x_ratio[newest]) -
+        static_cast<double>(history.center_x_ratio[oldest]));
+    return static_cast<float>(std::clamp(
+        net_distance / travelled_distance, 0.0, 1.0));
 }
 
 void append_horizontal_trend_change_candidate(
@@ -1019,6 +1082,8 @@ struct Aim::Impl {
             observation_center_x_ratio;
         const float observation_center_y =
             (observation.y1 + observation.y2) * 0.5f;
+        const float previous_base_aim_x =
+            track.aim_x - track.predicted_motion_x;
         const float center_motion_residual_x =
             observation_center_x - track_center_x;
         const float center_motion_residual_y =
@@ -1083,6 +1148,7 @@ struct Aim::Impl {
             track.horizontal_translation_evidence_x = 0.0f;
             track.horizontal_control_translation_evidence_x = 0.0f;
             reset_horizontal_trend(track);
+            reset_horizontal_direction_history(track);
         }
         if (!observation.head_only && box_semantics_changed) {
             append_horizontal_trend(
@@ -1337,6 +1403,7 @@ struct Aim::Impl {
                             : kTrackHorizontalVelocityIsolationFrames;
                     if (confirmed_now) {
                         commit_horizontal_trend_change_point(track);
+                        reset_horizontal_direction_history(track);
                         // 第三帧只确认新的可见框语义；已有平移速度保持连续，
                         // 候选中心不能再通过清零制造延迟投影阶跃。
                         track.horizontal_trend_rebuilding_from_partial = true;
@@ -1391,6 +1458,7 @@ struct Aim::Impl {
                 // 同一 OLS。以首个完整框重新播种；满五点前既不消费原始
                 // 中心残差，也不把扩边误当成人物速度。
                 reset_horizontal_trend(track);
+                reset_horizontal_direction_history(track);
                 track.partial_visibility_x_recovery_pending = false;
                 track.accepted_partial_visibility_x_width = 0.0f;
                 track.accepted_partial_visibility_x_side = 0.0f;
@@ -1409,6 +1477,10 @@ struct Aim::Impl {
                 track.horizontal_maneuver_frames = 0;
                 track.horizontal_maneuver_direction = 0.0f;
                 horizontal_maneuver_active = false;
+            }
+            if (!observation.head_only) {
+                append_horizontal_direction_history(
+                    track, horizontal_trend_observation_center_x_ratio);
             }
             update_deformation(pose_changed,
                                center_motion_residual_y,
@@ -1979,6 +2051,42 @@ struct Aim::Impl {
             horizontal_range_min_x,
             horizontal_range_max_x);
         track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
+        if (horizontal_trend_active &&
+            track.horizontal_observation_initialized &&
+            !box_semantics_changed &&
+            track.aim_from_head == observation.aim_from_head) {
+            const float base_motion_x =
+                track.aim_x - previous_base_aim_x;
+            const float observation_motion_x =
+                observation.aim_x - track.last_observation_aim_x;
+            const float base_magnitude = std::fabs(base_motion_x);
+            const float observation_consistency = std::fabs(
+                track.horizontal_control_translation_evidence_x);
+            const float observation_magnitude =
+                std::fabs(observation_motion_x) * observation_consistency *
+                observation_consistency;
+            if (base_magnitude > observation_magnitude) {
+                // 方向持久度只约束 OLS/预测比当前共同边支持的 Observation
+                // 位移多生成的部分。精确单向平移时净位移等于总路程，
+                // candidate 完全保留；往返轮廓的净位移接近零，只去掉额外
+                // 放大量。平方把它作为连续一致性权重，不引入速度档、
+                // 场景分支或固定频率。
+                const float direction_efficiency =
+                    horizontal_direction_efficiency(track);
+                const float persistence_weight =
+                    direction_efficiency * direction_efficiency;
+                const float supported_magnitude = observation_magnitude +
+                    (base_magnitude - observation_magnitude) *
+                        persistence_weight;
+                track.aim_x = previous_base_aim_x +
+                    std::copysign(supported_magnitude, base_motion_x);
+                track.aim_x = std::clamp(
+                    track.aim_x,
+                    horizontal_range_min_x,
+                    horizontal_range_max_x);
+                track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
+            }
+        }
         // 完整目标框是唯一几何安全边界。配置高度通过上面的连续回归定义，
         // 不再另造 ±5% 内窗；全框投影只防止不可见状态库存，基础点仍严格
         // 位于检测框内。
@@ -2050,6 +2158,7 @@ struct Aim::Impl {
             (observation.confidence - track.confidence) * alpha;
         track.last_observation_x1 = observation.x1;
         track.last_observation_x2 = observation.x2;
+        track.last_observation_aim_x = observation.aim_x;
         track.last_observation_at = track.state_at;
         track.horizontal_observation_initialized = true;
         track.last_observation_head_only = observation.head_only;
@@ -2227,6 +2336,7 @@ struct Aim::Impl {
             track.last_observation_at = {};
             reset_horizontal_raw_motion(track);
             reset_horizontal_trend(track);
+            reset_horizontal_direction_history(track);
             ++track.lost_frames;
             if (track.state == TrackState::CONFIRMED ||
                 track.state == TrackState::LOST) {
@@ -2259,9 +2369,13 @@ struct Aim::Impl {
                 append_horizontal_trend(
                     created_track, frame.captured_at,
                     (observation.x1 + observation.x2) * 0.5f / roi_width);
+                append_horizontal_direction_history(
+                    created_track,
+                    (observation.x1 + observation.x2) * 0.5f / roi_width);
             }
             created_track.last_observation_x1 = observation.x1;
             created_track.last_observation_x2 = observation.x2;
+            created_track.last_observation_aim_x = observation.aim_x;
             created_track.last_observation_at = frame.captured_at;
             created_track.horizontal_observation_initialized = true;
             created_track.last_observation_head_only = observation.head_only;

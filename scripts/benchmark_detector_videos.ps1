@@ -19,6 +19,8 @@
     [string]$InputMode = "center",
     [string]$VisibilityDirectory = "",
     [string]$AimAnnotationDirectory = "",
+    [string]$AimConfigPath = "",
+    [string]$AimReportDirectory = "",
     [switch]$AimContinuity,
     [switch]$AimPrediction,
     [ValidateSet("Debug", "Release")]
@@ -317,7 +319,23 @@ if ($useAimAnnotations) {
     $AimAnnotationDirectory = [System.IO.Path]::GetFullPath(
         $AimAnnotationDirectory)
 }
-$useAimContinuity = $AimContinuity.IsPresent -or $useAimAnnotations
+$useAimConfig = -not [string]::IsNullOrWhiteSpace($AimConfigPath)
+if ($useAimConfig) {
+    if (-not (Test-Path -LiteralPath $AimConfigPath -PathType Leaf)) {
+        throw "Aim 回放配置不存在：$AimConfigPath"
+    }
+    $AimConfigPath = [System.IO.Path]::GetFullPath($AimConfigPath)
+}
+$useAimReports = -not [string]::IsNullOrWhiteSpace($AimReportDirectory)
+if ($useAimReports) {
+    $AimReportDirectory = [System.IO.Path]::GetFullPath(
+        $AimReportDirectory)
+}
+$useAimContinuity = $AimContinuity.IsPresent -or $useAimAnnotations -or
+    $useAimReports
+if ($useAimConfig -and -not $useAimContinuity) {
+    throw "AimConfigPath 必须与 AimContinuity、AimAnnotationDirectory 或 AimReportDirectory 同时使用。"
+}
 if ($AimPrediction.IsPresent -and -not $useAimContinuity) {
     throw "AimPrediction 必须与 AimContinuity 或 AimAnnotationDirectory 同时使用。"
 }
@@ -325,6 +343,17 @@ if ($AimPrediction.IsPresent -and -not $useAimContinuity) {
 $videoFiles = @(Get-VideoFiles $VideoDirectory)
 if ($videoFiles.Count -eq 0) {
     throw "视频目录中没有 MP4/AVI：$VideoDirectory"
+}
+if ($useAimReports) {
+    foreach ($video in $videoFiles) {
+        foreach ($extension in @("csv", "json")) {
+            $aimReportPath = Join-Path $AimReportDirectory `
+                ("{0}.aim-runtime.{1}" -f $video.Name, $extension)
+            if (Test-Path -LiteralPath $aimReportPath) {
+                throw "Aim 逐帧报告已存在，请使用新的输出目录：$aimReportPath"
+            }
+        }
+    }
 }
 $visibilityFiles = @()
 if ($useVisibilityAnnotations) {
@@ -441,6 +470,9 @@ if ($useAimAnnotations) {
     $snapshotAimInventory = @(Get-FileInventory $snapshotAimFiles)
     $snapshotAimFingerprint = Get-InventoryFingerprint $snapshotAimInventory
 }
+$snapshotAimConfigSha256 = if ($useAimConfig) {
+    (Get-FileHash -LiteralPath $AimConfigPath -Algorithm SHA256).Hash
+} else { $null }
 $snapshotRuntimeInventory = @(Get-DeployedRuntimeInfo $snapshotOutputDirectory)
 $snapshotRuntimeFingerprint = Get-InventoryFingerprint $snapshotRuntimeInventory
 $snapshotExecutableSha256 = (Get-FileHash -LiteralPath $testExecutable `
@@ -479,6 +511,13 @@ try {
     }
     if ($useAimContinuity) {
         $benchmarkArguments += "--aim-continuity"
+    }
+    if ($useAimConfig) {
+        $benchmarkArguments += @("--aim-config", $AimConfigPath)
+    }
+    if ($useAimReports) {
+        $benchmarkArguments += @(
+            "--aim-report-directory", $AimReportDirectory)
     }
     if ($AimPrediction.IsPresent) {
         $benchmarkArguments += "--aim-prediction"
@@ -538,6 +577,31 @@ if ($useAimAnnotations) {
     $aimInventory = @(Get-FileInventory $aimFiles)
     $aimFingerprint = Get-InventoryFingerprint $aimInventory
 }
+$aimConfigSha256 = if ($useAimConfig) {
+    (Get-FileHash -LiteralPath $AimConfigPath -Algorithm SHA256).Hash
+} else { $null }
+$aimReportInventory = @()
+if ($useAimReports) {
+    $aimReportFiles = @(Get-ChildItem -LiteralPath $AimReportDirectory `
+        -File | Where-Object {
+            $_.Name -ilike "*.aim-runtime.csv" -or
+            $_.Name -ilike "*.aim-runtime.json"
+        } | Sort-Object Name)
+    $expectedAimReportNames = @($videoFiles | ForEach-Object {
+        "$($_.Name).aim-runtime.csv"
+        "$($_.Name).aim-runtime.json"
+    } | Sort-Object)
+    $actualAimReportNames = @($aimReportFiles | ForEach-Object {
+        $_.Name
+    } | Sort-Object)
+    $aimReportDifference = @(Compare-Object `
+        -ReferenceObject $expectedAimReportNames `
+        -DifferenceObject $actualAimReportNames)
+    if ($aimReportDifference.Count -ne 0) {
+        throw "Aim 逐帧报告集合与视频清单不一致：$($aimReportDifference -join '; ')"
+    }
+    $aimReportInventory = @(Get-FileInventory $aimReportFiles)
+}
 $modelSha256 = (Get-FileHash -LiteralPath $ModelPath -Algorithm SHA256).Hash
 $deployedRuntimes = @(Get-DeployedRuntimeInfo `
     (Split-Path -Parent $testExecutable))
@@ -548,6 +612,7 @@ if ($modelSha256 -ne $snapshotModelSha256 -or
     $videoFingerprint -ne $snapshotVideoFingerprint -or
     $visibilityFingerprint -ne $snapshotVisibilityFingerprint -or
     $aimFingerprint -ne $snapshotAimFingerprint -or
+    $aimConfigSha256 -ne $snapshotAimConfigSha256 -or
     $runtimeFingerprint -ne $snapshotRuntimeFingerprint -or
     $executableSha256 -ne $snapshotExecutableSha256) {
     throw "基准运行期间模型、视频、标注、可执行文件或部署运行库发生变化，报告已拒绝发布。"
@@ -567,6 +632,35 @@ $sceneDifference = @(Compare-Object `
     -ReferenceObject $expectedScenes -DifferenceObject $actualScenes)
 if ($sceneDifference.Count -ne 0) {
     throw "Detector 视频基准场景集合与视频清单不一致：$($sceneDifference -join '; ')"
+}
+if ($useAimReports) {
+    foreach ($video in $videoFiles) {
+        $jsonPath = Join-Path $AimReportDirectory `
+            ("{0}.aim-runtime.json" -f $video.Name)
+        $runtimeReport = Get-Content -LiteralPath $jsonPath -Raw `
+            -Encoding utf8 | ConvertFrom-Json
+        $expectedFrames = [long](
+            $reportRows | Where-Object scene -eq $video.BaseName |
+                Select-Object -ExpandProperty frames)
+        if ([int]$runtimeReport.schema -ne 16 -or
+            [long]$runtimeReport.sample_count -ne $expectedFrames -or
+            [long]$runtimeReport.successful_samples -ne $expectedFrames -or
+            [long]$runtimeReport.failed_samples -ne 0 -or
+            [bool]$runtimeReport.final_snapshot.output_allowed_by_config -or
+            [bool]$runtimeReport.final_snapshot.output_armed -or
+            [long]$runtimeReport.final_snapshot.mouse_commands -ne 0 -or
+            @($runtimeReport.samples | Where-Object {
+                [bool]$_.mouse_sent
+            }).Count -ne 0 -or
+            [long]$runtimeReport.timing.control_to_mouse_physical_effect.sample_count `
+                -ne 0 -or
+            [long]$runtimeReport.timing.capture_to_mouse_physical_effect.sample_count `
+                -ne 0 -or
+            [long]$runtimeReport.timing.source_to_mouse_physical_effect.sample_count `
+                -ne 0) {
+            throw "Aim 逐帧报告未完整保持无物理输出回放契约：$jsonPath"
+        }
+    }
 }
 $sampleFrames = 0L
 $aimVisibleFramesTotal = 0L
@@ -714,9 +808,15 @@ foreach ($row in $reportRows) {
         $row.aim_switch_cooldown_frames,
         $row.aim_acquisition_range_percent,
         $row.aim_body_aim_height_ratio,
+        $row.aim_body_aim_range_percent,
         $row.aim_deadzone_pixels, $row.aim_smoothing,
         $row.aim_counts_per_pixel_x, $row.aim_counts_per_pixel_y,
-        $row.aim_max_counts_per_frame, $row.aim_prediction_enabled,
+        $row.aim_max_counts_per_frame,
+        $row.aim_delay_compensation_enabled,
+        $row.aim_control_delay_ms,
+        $row.aim_max_delay_compensation_ms,
+        $row.aim_max_delay_compensation_percent,
+        $row.aim_prediction_enabled,
         $row.aim_max_prediction_lead_percent,
         $row.aim_predicted_gain,
         $row.aim_evaluation_min_iou,
@@ -734,11 +834,15 @@ foreach ($row in $reportRows) {
             [double]$row.aim_switch_margin,
             [double]$row.aim_acquisition_range_percent,
             [double]$row.aim_body_aim_height_ratio,
+            [double]$row.aim_body_aim_range_percent,
             [double]$row.aim_deadzone_pixels,
             [double]$row.aim_smoothing,
             [double]$row.aim_counts_per_pixel_x,
             [double]$row.aim_counts_per_pixel_y,
             [double]$row.aim_max_counts_per_frame,
+            [double]$row.aim_control_delay_ms,
+            [double]$row.aim_max_delay_compensation_ms,
+            [double]$row.aim_max_delay_compensation_percent,
             [double]$row.aim_max_prediction_lead_percent,
             [double]$row.aim_predicted_gain,
             [double]$row.aim_evaluation_min_iou,
@@ -826,6 +930,8 @@ foreach ($row in $reportRows) {
             $invalidAimFloatingConfiguration -or
             [int]$row.aim_prediction_enabled -lt 0 -or
             [int]$row.aim_prediction_enabled -gt 1 -or
+            [int]$row.aim_delay_compensation_enabled -lt 0 -or
+            [int]$row.aim_delay_compensation_enabled -gt 1 -or
             [double]$row.aim_high_confidence -lt 0.0 -or
             [double]$row.aim_low_confidence -lt 0.0 -or
             [double]$row.aim_low_confidence -gt
@@ -843,12 +949,22 @@ foreach ($row in $reportRows) {
             [double]$row.aim_acquisition_range_percent -gt 150.0 -or
             [double]$row.aim_body_aim_height_ratio -lt 0.0 -or
             [double]$row.aim_body_aim_height_ratio -gt 1.0 -or
+            [double]$row.aim_body_aim_range_percent -lt 1.0 -or
+            [double]$row.aim_body_aim_range_percent -gt 100.0 -or
             [double]$row.aim_deadzone_pixels -lt 0.0 -or
             [double]$row.aim_smoothing -lt 0.0 -or
             [double]$row.aim_smoothing -gt 1.0 -or
             [double]$row.aim_counts_per_pixel_x -le 0.0 -or
             [double]$row.aim_counts_per_pixel_y -le 0.0 -or
             [double]$row.aim_max_counts_per_frame -le 0.0 -or
+            [double]$row.aim_control_delay_ms -lt 0.0 -or
+            [double]$row.aim_control_delay_ms -gt 100.0 -or
+            [double]$row.aim_max_delay_compensation_ms -lt 0.0 -or
+            [double]$row.aim_max_delay_compensation_ms -gt 100.0 -or
+            [double]$row.aim_control_delay_ms -gt
+                [double]$row.aim_max_delay_compensation_ms -or
+            [double]$row.aim_max_delay_compensation_percent -lt 1.0 -or
+            [double]$row.aim_max_delay_compensation_percent -gt 50.0 -or
             [double]$row.aim_max_prediction_lead_percent -lt 1.0 -or
             [double]$row.aim_max_prediction_lead_percent -gt 50.0 -or
             [double]$row.aim_predicted_gain -lt 0.0 -or
@@ -1003,9 +1119,15 @@ if ($useAimContinuity) {
             $_.aim_switch_cooldown_frames,
             $_.aim_acquisition_range_percent,
             $_.aim_body_aim_height_ratio,
+            $_.aim_body_aim_range_percent,
             $_.aim_deadzone_pixels, $_.aim_smoothing,
             $_.aim_counts_per_pixel_x, $_.aim_counts_per_pixel_y,
-            $_.aim_max_counts_per_frame, $_.aim_prediction_enabled,
+            $_.aim_max_counts_per_frame,
+            $_.aim_delay_compensation_enabled,
+            $_.aim_control_delay_ms,
+            $_.aim_max_delay_compensation_ms,
+            $_.aim_max_delay_compensation_percent,
+            $_.aim_prediction_enabled,
             $_.aim_max_prediction_lead_percent,
             $_.aim_predicted_gain,
             $_.aim_evaluation_min_iou,
@@ -1034,11 +1156,19 @@ if ($useAimContinuity) {
         acquisition_range_percent =
             [double]$aimRow.aim_acquisition_range_percent
         body_aim_height_ratio = [double]$aimRow.aim_body_aim_height_ratio
+        body_aim_range_percent = [double]$aimRow.aim_body_aim_range_percent
         deadzone_pixels = [double]$aimRow.aim_deadzone_pixels
         smoothing = [double]$aimRow.aim_smoothing
         counts_per_pixel_x = [double]$aimRow.aim_counts_per_pixel_x
         counts_per_pixel_y = [double]$aimRow.aim_counts_per_pixel_y
         max_counts_per_frame = [double]$aimRow.aim_max_counts_per_frame
+        delay_compensation_enabled =
+            [int]$aimRow.aim_delay_compensation_enabled -eq 1
+        control_delay_ms = [double]$aimRow.aim_control_delay_ms
+        max_delay_compensation_ms =
+            [double]$aimRow.aim_max_delay_compensation_ms
+        max_delay_compensation_percent =
+            [double]$aimRow.aim_max_delay_compensation_percent
         prediction_enabled = [int]$aimRow.aim_prediction_enabled -eq 1
         max_prediction_lead_percent =
             [double]$aimRow.aim_max_prediction_lead_percent
@@ -1051,7 +1181,7 @@ if ($useAimContinuity) {
 }
 
 $manifest = [ordered]@{
-    schema_version = 6
+    schema_version = 7
     generated_utc = [DateTime]::UtcNow.ToString("o")
     report = [ordered]@{
         csv = $finalReportPath
@@ -1111,6 +1241,23 @@ $manifest = [ordered]@{
             } else { $null }
             inventory_sha256 = $aimFingerprint
             files = $aimInventory
+            config_path = if ($useAimConfig) { $AimConfigPath } else { $null }
+            config_sha256 = $aimConfigSha256
+            replay_reports = [ordered]@{
+                enabled = $useAimReports
+                directory = if ($useAimReports) {
+                    $AimReportDirectory
+                } else { $null }
+                schema_version = if ($useAimReports) { 16 } else { $null }
+                capture_backend = if ($useAimReports) {
+                    "VIDEO_REPLAY"
+                } else { $null }
+                mouse_backend = if ($useAimReports) {
+                    "SIMULATED_BACKEND_COMPLETION"
+                } else { $null }
+                physical_output = $false
+                files = $aimReportInventory
+            }
             configuration = $aimConfiguration
         }
     }
@@ -1173,6 +1320,8 @@ $manifest = [ordered]@{
         aim_prediction_points_may_leave_selected_box = $true
         aim_commands_do_not_reverse_or_cross_target = $true
         aim_latency_uses_explicit_measurement_time = $true
+        aim_replay_reports_match_video_inventory = $true
+        aim_replay_reports_have_no_physical_output = $true
     }
     deployed_runtimes = $deployedRuntimes
 }

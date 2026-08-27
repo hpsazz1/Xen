@@ -2,11 +2,14 @@
 #include "aim/aim_prediction_internal.h"
 #include "log/log.h"
 
+#include "aim_fixed_scene_replay_fixture.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -4523,6 +4526,167 @@ void test_faster_closing_slope_continuously_reduces_tracking_request() {
                    faster_closing.current.control.desired_x_counts));
 }
 
+void test_fixed_scene_replay_does_not_amplify_horizontal_observation() {
+    using aim_fixed_scene_replay_fixture::kMeasurementStart;
+    using aim_fixed_scene_replay_fixture::kObservations;
+
+    AimConfig config;
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.10f;
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    Aim aim(config);
+    const auto started_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    std::vector<float> observation_x_differences;
+    std::vector<float> track_x_differences;
+    std::vector<float> base_x_differences;
+    std::vector<float> observation_y_differences;
+    std::vector<float> base_y_differences;
+    struct ReplayDifference {
+        std::size_t index = 0;
+        float observation_x = 0.0f;
+        float track_x = 0.0f;
+        float base_x = 0.0f;
+        float velocity_x = 0.0f;
+    };
+    std::vector<ReplayDifference> replay_differences;
+    float previous_observation_x = 0.0f;
+    float previous_observation_y = 0.0f;
+    float previous_track_x = 0.0f;
+    float previous_base_x = 0.0f;
+    float previous_base_y = 0.0f;
+
+    for (std::size_t index = 0; index < kObservations.size(); ++index) {
+        const auto& observation = kObservations[index];
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            started_at + std::chrono::microseconds(
+                static_cast<long long>(index) * 4167));
+        frame.control_at = frame.captured_at + std::chrono::microseconds(
+            static_cast<long long>(observation.observation_age_ms * 1000.0f));
+        frame.lock_active = true;
+        frame.detections = {{observation.x1,
+                             observation.y1,
+                             observation.x2,
+                             observation.y2,
+                             0.9f,
+                             0}};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "固定场景真实 Observation 回放必须逐帧处理成功");
+        if (!result.has_target) continue;
+        if (result.has_command) {
+            expect(aim.record_backend_completed_command(
+                       frame.sequence,
+                       frame.control_at + std::chrono::microseconds(400),
+                       result.command.dx_counts,
+                       result.command.dy_counts),
+                   "固定场景真实回放必须沿公开 seam 记录整数完成命令");
+        }
+        const float observation_x =
+            (observation.x1 + observation.x2) * 0.5f;
+        const float observation_y =
+            (observation.y1 + observation.y2) * 0.5f;
+        const float track_x =
+            (result.target.x1 + result.target.x2) * 0.5f;
+        if (index > kMeasurementStart) {
+            observation_x_differences.push_back(
+                std::fabs(observation_x - previous_observation_x));
+            track_x_differences.push_back(
+                std::fabs(track_x - previous_track_x));
+            base_x_differences.push_back(
+                std::fabs(result.target.base_aim_x - previous_base_x));
+            observation_y_differences.push_back(
+                std::fabs(observation_y - previous_observation_y));
+            base_y_differences.push_back(
+                std::fabs(result.target.base_aim_y - previous_base_y));
+            replay_differences.push_back({
+                index,
+                observation_x - previous_observation_x,
+                track_x - previous_track_x,
+                result.target.base_aim_x - previous_base_x,
+                result.target.velocity_x});
+        }
+        previous_observation_x = observation_x;
+        previous_observation_y = observation_y;
+        previous_track_x = track_x;
+        previous_base_x = result.target.base_aim_x;
+        previous_base_y = result.target.base_aim_y;
+    }
+
+    const auto percentile = [](std::vector<float> values, float quantile) {
+        std::sort(values.begin(), values.end());
+        const float position = quantile * (values.size() - 1);
+        const std::size_t lower = static_cast<std::size_t>(
+            std::floor(position));
+        const std::size_t upper = static_cast<std::size_t>(
+            std::ceil(position));
+        const float fraction = position - static_cast<float>(lower);
+        return values[lower] * (1.0f - fraction) +
+            values[upper] * fraction;
+    };
+    const float observation_x_p95 =
+        percentile(observation_x_differences, 0.95f);
+    const float track_x_p95 = percentile(track_x_differences, 0.95f);
+    const float base_x_p95 = percentile(base_x_differences, 0.95f);
+    const float observation_y_p95 =
+        percentile(observation_y_differences, 0.95f);
+    const float base_y_p95 = percentile(base_y_differences, 0.95f);
+    auto largest_base_differences = replay_differences;
+    std::sort(
+        largest_base_differences.begin(), largest_base_differences.end(),
+        [](const ReplayDifference& left, const ReplayDifference& right) {
+            return std::fabs(left.base_x) > std::fabs(right.base_x);
+        });
+    std::ostringstream replay_spikes;
+    const std::size_t reported_spikes = std::min<std::size_t>(
+        5, largest_base_differences.size());
+    for (std::size_t index = 0; index < reported_spikes; ++index) {
+        const auto& difference = largest_base_differences[index];
+        replay_spikes << " [i=" << difference.index
+                      << ",obs=" << difference.observation_x
+                      << ",track=" << difference.track_x
+                      << ",base=" << difference.base_x
+                      << ",vx=" << difference.velocity_x << ']';
+    }
+    expect(observation_x_differences.size() ==
+               kObservations.size() - kMeasurementStart - 1 &&
+               track_x_p95 <= observation_x_p95 + 0.02f,
+           "真实回放 fixture 必须覆盖原始 X 往返，且 Track 本身不放大 "
+           "Observation，frames/Observation/Track P95=" +
+               std::to_string(observation_x_differences.size()) + "/" +
+               std::to_string(observation_x_p95) + "/" +
+               std::to_string(track_x_p95));
+    expect(base_x_p95 <= observation_x_p95,
+           "固定场景公开 Aim 回放不得让 base X 一阶变化放大 matched "
+           "Observation，Observation/Track/base P95=" +
+               std::to_string(observation_x_p95) + "/" +
+               std::to_string(track_x_p95) + "/" +
+               std::to_string(base_x_p95) +
+               "，最大跳变=" + replay_spikes.str());
+    expect(base_y_p95 <= observation_y_p95,
+           "X-only green 必须保留 Y 起跳/腾空/落地连续性，Observation/base "
+           "Y P95=" + std::to_string(observation_y_p95) + "/" +
+               std::to_string(base_y_p95));
+    std::cout << "固定场景公开回放 P95: Observation/Track/base X="
+              << observation_x_p95 << '/' << track_x_p95 << '/'
+              << base_x_p95 << "，Observation/base Y="
+              << observation_y_p95 << '/' << base_y_p95 << '\n';
+}
+
 void test_tracking_derivative_separates_in_box_reference_from_common_translation() {
     constexpr int kReferenceFrameCount = 104;
     constexpr int kReferenceBranchFrame = 100;
@@ -8835,6 +8999,7 @@ int main() {
     test_backend_completed_command_feedback_contract();
     test_backend_completed_delay_inventory_changes_tracking_reversal_response();
     test_faster_closing_slope_continuously_reduces_tracking_request();
+    test_fixed_scene_replay_does_not_amplify_horizontal_observation();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
