@@ -196,8 +196,8 @@ function Get-XenAimControlDiagnosticsSummary {
     foreach ($sample in $items) {
         $sequence = [uint64]$sample.sequence
         if ($previousSequence -ne 0 -and $sequence -le $previousSequence) {
-            // 多段报告可能来自独立 Runtime 生命周期；序号未继续增长时，
-            // 不得把上一段末尾与下一段开头拼成一次虚假的物理反转。
+            # 多段报告可能来自独立 Runtime 生命周期；序号未继续增长时，
+            # 不得把上一段末尾与下一段开头拼成一次虚假的物理反转。
             $previousNonzeroSign = 0
             $previousTrackId = 0
             $zeroWindowReasons.Clear()

@@ -127,6 +127,7 @@ struct Runtime::Impl {
             std::lock_guard<std::mutex> lock(snapshot_mutex);
             current_snapshot.state = RuntimeState::FAILED;
             current_snapshot.last_error = error;
+            current_snapshot.control_armed = false;
             current_snapshot.output_armed = false;
             current_snapshot.emergency_stopped = true;
             current_snapshot.preview_enabled = preview_stats.enabled;
@@ -149,6 +150,12 @@ struct Runtime::Impl {
             return false;
         }
         config = value;
+        const auto control_mode = config.mouse.allow_send_input
+            ? runtime::detail::RuntimeControlMode::PHYSICAL
+            : config.mouse.allow_observe_only_control
+                ? runtime::detail::RuntimeControlMode::OBSERVE_ONLY
+                : runtime::detail::RuntimeControlMode::DISABLED;
+        safety_gate.configure(control_mode);
         frame_queue.reset();
         preview_channel.set_session_active(false);
         stop_requested.store(false, std::memory_order_release);
@@ -246,6 +253,8 @@ struct Runtime::Impl {
             current_snapshot.detector_generation = 1;
             current_snapshot.output_allowed_by_config =
                 config.mouse.allow_send_input;
+            current_snapshot.observe_only_control_allowed_by_config =
+                config.mouse.allow_observe_only_control;
             current_snapshot.preview_enabled = preview_enabled;
             current_snapshot.d3d11_cuda_interop =
                 config.capture.enable_d3d11_cuda_interop;
@@ -357,7 +366,8 @@ struct Runtime::Impl {
                                   float aim_control_center_x,
                                   float aim_control_center_y,
                                   MouseStatus mouse_status,
-                                  bool mouse_sent) {
+                                  bool mouse_sent,
+                                  bool aim_lock_active) {
         SnapshotUpdateResult result;
         const bool probes_enabled = config.runtime.enable_performance_probes;
         const auto snapshot_started = probes_enabled
@@ -389,7 +399,8 @@ struct Runtime::Impl {
             ++current_snapshot.failed_frames;
         }
         if (mouse_sent) ++current_snapshot.mouse_commands;
-        current_snapshot.output_armed = safety_gate.armed();
+        current_snapshot.control_armed = safety_gate.control_armed();
+        current_snapshot.output_armed = safety_gate.output_armed();
         current_snapshot.aim_hold_active = safety_gate.hold_active();
         current_snapshot.emergency_stopped =
             safety_gate.emergency_stopped();
@@ -424,6 +435,7 @@ struct Runtime::Impl {
         sample.aim_status = aim_result.status;
         sample.mouse_status = mouse_status;
         sample.mouse_sent = mouse_sent;
+        sample.aim_lock_active = aim_lock_active;
         sample.aim_control_center_x = aim_control_center_x;
         sample.aim_control_center_y = aim_control_center_y;
         sample.aim_acquisition_range_radius =
@@ -662,7 +674,7 @@ struct Runtime::Impl {
                     static_cast<float>(frame->source_pixels_per_pixel_x);
                 aim_frame.source_pixels_per_roi_pixel_y =
                     static_cast<float>(frame->source_pixels_per_pixel_y);
-                aim_frame.lock_active = safety_gate.can_dispatch();
+                aim_frame.lock_active = safety_gate.control_active();
                 aim_frame.detections = std::move(detections);
                 aim_result = aim->process(aim_frame);
                 profile.aim = aim_result.profile;
@@ -811,7 +823,7 @@ struct Runtime::Impl {
                 *frame, profile, service, overwritten_frames_at_consume,
                 aim_result, preview_detections,
                 aim_frame.control_center_x, aim_frame.control_center_y,
-                mouse->status(), mouse_sent);
+                mouse->status(), mouse_sent, aim_frame.lock_active);
             if (probes_enabled) {
                 const auto tail_finished = std::chrono::steady_clock::now();
                 service.valid = true;
@@ -964,6 +976,7 @@ void Runtime::stop() noexcept {
             DetectorReloadState::IDLE;
         impl_->current_snapshot.detector_reload_error.clear();
         impl_->current_snapshot.output_armed = false;
+        impl_->current_snapshot.control_armed = false;
         impl_->current_snapshot.aim_hold_active = false;
         impl_->current_snapshot.emergency_stopped = true;
         impl_->current_snapshot.preview_enabled = preview_stats.enabled;
@@ -1102,6 +1115,7 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
                     state->current_snapshot.detector_reload_error.clear();
                     generation = ++state->current_snapshot.detector_generation;
                     state->current_snapshot.output_armed = false;
+                    state->current_snapshot.control_armed = false;
                 }
 
                 // 新模型不能继承旧轨迹和旧武装状态。retired 在本加载线程析构，
@@ -1144,11 +1158,10 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
     if (!impl_) return false;
     switch (intent.type) {
         case RuntimeIntentType::ARM_OUTPUT:
-            // 重载完成会强制解除武装；加载窗口拒绝新的武装请求，避免
-            // 指针交换与主线程 ARM 意图竞争后意外恢复输出。
+            // 重载完成会强制解除控制武装；加载窗口拒绝新的武装请求，
+            // 避免指针交换与主线程 ARM 意图竞争后意外恢复状态。
             if (impl_->detector_reload_running.load(
                     std::memory_order_acquire) ||
-                !impl_->config.mouse.allow_send_input ||
                 !impl_->safety_gate.arm()) {
                 return false;
             }
@@ -1174,7 +1187,10 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
     }
     try {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
-        impl_->current_snapshot.output_armed = impl_->safety_gate.armed();
+        impl_->current_snapshot.control_armed =
+            impl_->safety_gate.control_armed();
+        impl_->current_snapshot.output_armed =
+            impl_->safety_gate.output_armed();
         impl_->current_snapshot.aim_hold_active =
             impl_->safety_gate.hold_active();
         impl_->current_snapshot.emergency_stopped =

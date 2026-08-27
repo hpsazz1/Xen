@@ -1563,9 +1563,21 @@ struct Overlay::Impl {
         }
         ImGui::SetCursorPosX(16.0f);
         ImGui::PushFont(medium_font);
+        const auto arm_presentation =
+            overlay::detail::control_arm_presentation({
+                snapshot.state == RuntimeState::RUNNING,
+                snapshot.detector_reload_state ==
+                    DetectorReloadState::LOADING,
+                snapshot.emergency_stopped,
+                snapshot.output_allowed_by_config,
+                snapshot.observe_only_control_allowed_by_config,
+                snapshot.control_armed});
         status_dot_label(
-            snapshot.output_armed ? "输出已武装" : "输出未武装",
-            snapshot.output_armed ? rgba(kSuccess) : rgba(kMutedInk));
+            snapshot.control_armed
+                ? arm_presentation.armed_status.data()
+                : arm_presentation.observe_only
+                    ? "等待观测武装" : "输出未武装",
+            snapshot.control_armed ? rgba(kSuccess) : rgba(kMutedInk));
         ImGui::PopFont();
         ImGui::SetCursorPosX(16.0f);
         ImGui::PushFont(small_font);
@@ -1644,25 +1656,34 @@ struct Overlay::Impl {
         }
 
         ImGui::SameLine(0.0f, kButtonGap);
-        if (snapshot.output_armed) {
+        const auto arm_presentation =
+            overlay::detail::control_arm_presentation({
+                snapshot.state == RuntimeState::RUNNING,
+                snapshot.detector_reload_state ==
+                    DetectorReloadState::LOADING,
+                snapshot.emergency_stopped,
+                snapshot.output_allowed_by_config,
+                snapshot.observe_only_control_allowed_by_config,
+                snapshot.control_armed});
+        if (snapshot.control_armed) {
             if (ImGui::Button("解除", ImVec2(kButtonWidth, 32.0f))) {
                 actions.runtime_intents.push_back(
                     {RuntimeIntentType::DISARM_OUTPUT, false});
             }
-            show_help_tooltip(
-                "解除本次 Runtime 会话的物理输出武装；检测和瞄准计算继续运行，但 Mouse 不再提交移动。");
+            show_help_tooltip(arm_presentation.observe_only
+                ? "解除本次 Observe-only 控制武装；Mouse 和物理输出始终保持禁用。"
+                : "解除本次 Runtime 会话的物理输出武装；检测和瞄准计算继续运行，但 Mouse 不再提交移动。");
         } else {
-            ImGui::BeginDisabled(
-                !running || snapshot.emergency_stopped ||
-                !snapshot.output_allowed_by_config ||
-                snapshot.detector_reload_state ==
-                    DetectorReloadState::LOADING);
-            if (ImGui::Button("武装", ImVec2(kButtonWidth, 32.0f))) {
+            ImGui::BeginDisabled(!arm_presentation.can_arm);
+            if (ImGui::Button(
+                    arm_presentation.arm_label.data(),
+                    ImVec2(kButtonWidth, 32.0f))) {
                 actions.runtime_intents.push_back(
                     {RuntimeIntentType::ARM_OUTPUT, true});
             }
-            show_help_tooltip(
-                "在配置允许、Runtime 运行且急停正常时武装物理输出；仍需按住瞄准输出键才会发送移动。");
+            show_help_tooltip(arm_presentation.observe_only
+                ? "只武装 Aim 控制观察；按住瞄准键会运行同协议控制，但 Mouse 和物理输出仍由配置绝对禁止。"
+                : "在配置允许、Runtime 运行且急停正常时武装物理输出；仍需按住瞄准输出键才会发送移动。");
             ImGui::EndDisabled();
         }
 
@@ -2053,18 +2074,30 @@ struct Overlay::Impl {
         std::snprintf(fps, std::size(fps), "%.1f FPS", snapshot.capture_fps);
         std::snprintf(
             p95, std::size(p95), "%.2f ms", snapshot.pipeline_p95_ms);
+        const auto arm_presentation =
+            overlay::detail::control_arm_presentation({
+                snapshot.state == RuntimeState::RUNNING,
+                snapshot.detector_reload_state ==
+                    DetectorReloadState::LOADING,
+                snapshot.emergency_stopped,
+                snapshot.output_allowed_by_config,
+                snapshot.observe_only_control_allowed_by_config,
+                snapshot.control_armed});
         const char* output = snapshot.emergency_stopped
             ? "急停锁定"
-            : snapshot.output_armed
-                ? "已武装"
+            : snapshot.control_armed
+                ? arm_presentation.armed_status.data()
+                : arm_presentation.observe_only
+                    ? "等待观测武装"
                 : snapshot.output_allowed_by_config
                     ? "等待武装"
                     : "配置禁用";
         const ImVec4 output_color = snapshot.emergency_stopped
             ? rgba(kDanger)
-            : snapshot.output_armed
+            : snapshot.control_armed
                 ? rgba(kSuccess)
-                : snapshot.output_allowed_by_config
+                : (snapshot.output_allowed_by_config ||
+                   arm_presentation.observe_only)
                     ? rgba(kWarning)
                     : rgba(kMutedInk);
 
@@ -3090,14 +3123,18 @@ struct Overlay::Impl {
             ImGui::TableSetColumnIndex(0);
             safety_gate_column(
                 "配置门",
-                snapshot.output_allowed_by_config ? "允许" : "禁止",
                 snapshot.output_allowed_by_config
+                    ? "物理允许"
+                    : snapshot.observe_only_control_allowed_by_config
+                        ? "仅观测" : "禁止",
+                (snapshot.output_allowed_by_config ||
+                 snapshot.observe_only_control_allowed_by_config)
                     ? rgba(kSuccess) : rgba(kMutedInk));
             ImGui::TableSetColumnIndex(1);
             safety_gate_column(
                 "运行门",
-                snapshot.output_armed ? "已武装" : "未武装",
-                snapshot.output_armed
+                snapshot.control_armed ? "已武装" : "未武装",
+                snapshot.control_armed
                     ? rgba(kSuccess) : rgba(kWarning));
             ImGui::TableSetColumnIndex(2);
             safety_gate_column(
@@ -3240,9 +3277,21 @@ struct Overlay::Impl {
             form_row(
                 "物理输出",
                 "配置级总开关。开启后仍必须启动 Runtime、手动武装、按住瞄准输出键且急停未锁定，Mouse 才会收到命令。");
-            toggle_switch(
-                "##allow_send_input",
-                &app_config.mouse.allow_send_input);
+            if (toggle_switch(
+                    "##allow_send_input",
+                    &app_config.mouse.allow_send_input) &&
+                app_config.mouse.allow_send_input) {
+                app_config.mouse.allow_observe_only_control = false;
+            }
+            form_row(
+                "无输出控制观察",
+                "仅允许逻辑控制武装与按键锁定，用于正式 Observe-only 对照；物理输出总开关必须保持关闭，Mouse 不会收到命令。");
+            if (toggle_switch(
+                    "##allow_observe_only_control",
+                    &app_config.mouse.allow_observe_only_control) &&
+                app_config.mouse.allow_observe_only_control) {
+                app_config.mouse.allow_send_input = false;
+            }
             ImGui::EndTable();
         }
         end_config_panel();

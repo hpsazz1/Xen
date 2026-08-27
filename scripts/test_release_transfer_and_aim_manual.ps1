@@ -429,13 +429,17 @@ try {
         [string]$observeTask.output_mode -ne "observe_only" -or
         [string]$observeTask.run_id -notmatch '-observe-only-' -or
         [bool]$observeTask.mouse.allow_send_input -or
+        -not [bool]$observeTask.mouse.allow_observe_only_control -or
         $observeConfig -notmatch '(?m)^allow_send_input=false\r?$' -or
+        $observeConfig -notmatch
+            '(?m)^allow_observe_only_control=true\r?$' -or
         $observeConfig -match '(?m)^allow_send_input=true\r?$' -or
         $observeOutputText -notmatch
             '(?m)^powershell\.exe .* -Mode Launch -OutputMode ObserveOnly .*' -or
         $observeOutputText -match '-AllowPhysicalOutput' -or
         $observeOutputText -match 'XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT' -or
         $observeMarkdown -notmatch '无物理输出' -or
+        $observeMarkdown -notmatch '观测武装' -or
         $observeMarkdown -notmatch 'Mouse 必须保持 DISABLED' -or
         $observeMarkdown -match '会发送真实 KMBOX 输入' -or
         $observeObservation -notmatch '输出模式：Observe-only / 无物理输出对照') {
@@ -462,18 +466,24 @@ try {
     $observeAutomaticRoot = Join-Path $observeRoot "automatic"
     New-Item -ItemType Directory -Path $observeAutomaticRoot -Force |
         Out-Null
-    Write-Utf8 (Join-Path $observeAutomaticRoot "observe-schema13.csv") `
+    Write-Utf8 (Join-Path $observeAutomaticRoot "observe-schema16.csv") `
         "sequence,success`n541,true`n"
     $observeSample = New-Schema13AimSample
     $observeSample["mouse_sent"] = $false
+    $observeSample["aim_lock_active"] = $true
+    $observeSample["aim_matched_observation_valid"] = $true
+    $observeSample["aim_matched_observation_box"] =
+        @($observeSample["aim_box"])
+    $observeSample["aim_matched_observation_head_only"] = $false
+    $observeSample["aim_matched_observation_aim_from_head"] = $false
     $observeSample["mouse_completion_timing_valid"] = $false
     $observeSample["source_clock_status"] = "VALID"
     $observeSample["source_timing_valid"] = $true
     $observeSample["source_clock_sample_count"] = [uint64]8
     $observeSample["source_clock_session_id"] = [uint64]42
     $observeReport = [ordered]@{
-        schema = 13
-        session_id = "observe-schema13"
+        schema = 16
+        session_id = "observe-schema16"
         provider = "TensorrtExecutionProvider"
         capture_backend = "NDI"
         mouse_backend = "kmbox_net"
@@ -484,7 +494,7 @@ try {
         runtime_samples_dropped = 0
         samples = @($observeSample)
     }
-    Write-Utf8 (Join-Path $observeAutomaticRoot "observe-schema13.json") `
+    Write-Utf8 (Join-Path $observeAutomaticRoot "observe-schema16.json") `
         (($observeReport | ConvertTo-Json -Depth 10) + "`n")
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
@@ -508,12 +518,38 @@ try {
         [uint64]$observeSummary.mouse_backend_completion_samples -ne 0 -or
         [uint64]$observeSummary.mouse_protocol_ack_samples -ne 0 -or
         [uint64]$observeSummary.mouse_physical_effect_samples -ne 0 -or
+        [uint64]$observeSummary.aim_lock_active_samples -ne 1 -or
         [uint64]$observeSummary.aim.command_frames -ne 1 -or
         [uint64]$observeSummary.aim.precomputed_command_frames -ne 1 -or
         [string]$observeSummary.source_timing_diagnostic -ne "VALID" -or
         -not [bool]$observeSummary.source_timing_gate_passed -or
         -not [bool]$observeSummary.automatic_complete) {
         throw "Observe-only 汇总没有证明 Aim 已求值、Mouse 零发送和 source timing 有效。"
+    }
+
+    $observeSample["aim_lock_active"] = $false
+    $observeReport.samples = @($observeSample)
+    Write-Utf8 (Join-Path $observeAutomaticRoot "observe-schema16.json") `
+        (($observeReport | ConvertTo-Json -Depth 10) + "`n")
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Recover -OutputMode ObserveOnly `
+        -Scenario SuperJump -SuperJumpCase Static -Profile tracking `
+        -Smoothing 0.50 -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+        -MaxCountsPerFrame 14.0 -EnableDelayCompensation `
+        -ControlDelayMs 7.5 -MaxDelayCompensationMs 18.0 `
+        -MaxDelayCompensationPercent 12.0 -RequireSourceTiming `
+        -PackageRoot $published -RunDirectory $observeRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Observe-only 无逻辑武装证据回收失败。"
+    }
+    $observeNoLockSummary = Get-Content -LiteralPath `
+        (Join-Path $observeRoot "automatic-summary.json") `
+        -Raw -Encoding utf8 | ConvertFrom-Json
+    if ([bool]$observeNoLockSummary.automatic_complete -or
+        [uint64]$observeNoLockSummary.aim_lock_active_samples -ne 0) {
+        throw "Observe-only 缺少逻辑武装帧时不得自动完成。"
     }
 
     $superJumpCases = [ordered]@{

@@ -511,12 +511,17 @@ bool validate_app_config(const AppConfig& config,
              config.mouse.makcu_connect_timeout_ms > 10000 ||
              config.mouse.makcu_command_timeout_ms <= 0 ||
              config.mouse.makcu_command_timeout_ms > 1000);
-        if (mouse_backend_invalid || kmbox_invalid || makcu_invalid) {
+        const bool mouse_authorization_invalid =
+            config.mouse.allow_send_input &&
+            config.mouse.allow_observe_only_control;
+        if (mouse_backend_invalid || kmbox_invalid || makcu_invalid ||
+            mouse_authorization_invalid) {
             error = "Mouse 配置非法";
             return false;
         }
         const bool physical_keyboard_invalid =
-            config.mouse.allow_send_input &&
+            (config.mouse.allow_send_input ||
+             config.mouse.allow_observe_only_control) &&
             (config.keyboard.aim_hold_virtual_keys.empty() ||
              config.keyboard.emergency_virtual_keys.empty());
         if (!valid_keyboard_config(config.keyboard) ||
@@ -759,6 +764,9 @@ bool load_app_config(const std::string& path,
         candidate.mouse.allow_send_input = ini.GetBoolValue(
             "mouse", "allow_send_input",
             candidate.mouse.allow_send_input);
+        candidate.mouse.allow_observe_only_control = ini.GetBoolValue(
+            "mouse", "allow_observe_only_control",
+            candidate.mouse.allow_observe_only_control);
         candidate.mouse.kmbox_ip = ini.GetValue(
             "mouse", "kmbox_ip", candidate.mouse.kmbox_ip.c_str());
         candidate.mouse.kmbox_port = static_cast<int>(ini.GetLongValue(
@@ -974,6 +982,8 @@ bool save_app_config(const std::string& path,
                      mouse_backend_name(config.mouse.backend));
         ini.SetBoolValue("mouse", "allow_send_input",
                          config.mouse.allow_send_input);
+        ini.SetBoolValue("mouse", "allow_observe_only_control",
+                         config.mouse.allow_observe_only_control);
         ini.SetValue("mouse", "kmbox_ip", config.mouse.kmbox_ip.c_str());
         ini.SetLongValue("mouse", "kmbox_port", config.mouse.kmbox_port);
         ini.SetValue("mouse", "kmbox_uuid",

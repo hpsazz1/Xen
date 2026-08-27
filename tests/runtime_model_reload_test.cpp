@@ -195,6 +195,7 @@ int main(int argc, char** argv) {
     config.capture.acquire_timeout_ms = 20;
     config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
     config.mouse.allow_send_input = false;
+    config.mouse.allow_observe_only_control = true;
 
     Runtime runtime;
     const bool started = runtime.start(config);
@@ -228,6 +229,47 @@ int main(int argc, char** argv) {
                    snapshot.source_pixels_per_pixel_x == 1.0 &&
                    snapshot.source_pixels_per_pixel_y == 1.0,
                "双机语义必须保持主机 2560x1440 的中心 320x320 ROI");
+
+        std::vector<RuntimePipelineSample> pre_observe_samples;
+        runtime.drain_pipeline_samples(pre_observe_samples);
+        expect(runtime.post_intent(
+                   {RuntimeIntentType::ARM_OUTPUT, true}),
+               "Observe-only Runtime 应接受逻辑控制武装");
+        snapshot = runtime.snapshot();
+        expect(snapshot.observe_only_control_allowed_by_config &&
+                   snapshot.control_armed &&
+                   !snapshot.output_allowed_by_config &&
+                   !snapshot.output_armed,
+               "Observe-only 武装必须与物理输出许可和输出武装分离");
+        expect(runtime.post_intent(
+                   {RuntimeIntentType::AIM_HOLD_CHANGED, true}),
+               "Observe-only Runtime 应接受按住控制状态");
+        const std::uint64_t observe_started_at =
+            runtime.snapshot().processed_frames;
+        expect(wait_until([&] {
+            return runtime.snapshot().processed_frames >=
+                   observe_started_at + 3;
+        }, 5s), "Observe-only 控制武装后 Pipeline 必须继续处理帧");
+        std::vector<RuntimePipelineSample> observe_samples;
+        expect(runtime.drain_pipeline_samples(observe_samples),
+               "Observe-only 必须允许回收逐帧控制证据");
+        const auto lock_active_samples = std::count_if(
+            observe_samples.begin(), observe_samples.end(),
+            [](const RuntimePipelineSample& sample) {
+                return sample.aim_lock_active;
+            });
+        const auto mouse_sent_samples = std::count_if(
+            observe_samples.begin(), observe_samples.end(),
+            [](const RuntimePipelineSample& sample) {
+                return sample.mouse_sent;
+            });
+        expect(lock_active_samples > 0 && mouse_sent_samples == 0,
+               "Observe-only 必须产生锁定控制帧且物理派发始终为零");
+        expect(runtime.post_intent(
+                   {RuntimeIntentType::AIM_HOLD_CHANGED, false}) &&
+                   runtime.post_intent(
+                       {RuntimeIntentType::DISARM_OUTPUT, false}),
+               "Observe-only 松键与解除武装必须保持可用");
 
         DetectorConfig invalid_config = config.detector;
         invalid_config.model_path =

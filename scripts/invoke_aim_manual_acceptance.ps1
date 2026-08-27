@@ -207,6 +207,7 @@ function Get-ModelName([object]$Manifest) {
 function New-ConfigText([string]$ModelName) {
     $prediction = if ($Profile -eq "prediction") { "true" } else { "false" }
     $allowSendInput = if ($observeOnly) { "false" } else { "true" }
+    $allowObserveOnlyControl = if ($observeOnly) { "true" } else { "false" }
     return @"
 [detector]
 model_path=$ModelName
@@ -288,6 +289,7 @@ predicted_gain=0.500000
 [mouse]
 backend=kmbox_net
 allow_send_input=$allowSendInput
+allow_observe_only_control=$allowObserveOnlyControl
 kmbox_ip=$kmboxIp
 kmbox_port=$kmboxPort
 kmbox_uuid=$kmboxUuid
@@ -544,7 +546,8 @@ function New-TaskMarkdown(
     $safetyText = if ($observeOnly) {
 @"
 本 Run 禁止发送真实 KMBOX 输入，allow_send_input=false。按住右键只驱动 Aim 计算和诊断采集，
-Mouse 必须保持 DISABLED；Launch 命令不接受 -AllowPhysicalOutput 或确认令牌。若出现任何非预期物理
+启动 Runtime 后点击“观测武装”，同时确认 Mouse/物理输出仍为 DISABLED；Launch 命令不接受
+-AllowPhysicalOutput 或确认令牌。若出现任何非预期物理
 移动，立即结束程序并按 End，记录为安全门失败。
 "@
     } else {
@@ -727,6 +730,7 @@ if ($Mode -eq "Prepare") {
             port = $kmboxPort
             uuid = $kmboxUuid
             allow_send_input = -not $observeOnly
+            allow_observe_only_control = $observeOnly
         }
     }
     Write-JsonAtomically (Join-Path $resolvedRun "task.json") $task
@@ -817,6 +821,11 @@ $taskOutputMode = if ($task.PSObject.Properties.Name -contains "output_mode") {
 }
 $taskAllowSendInput = if ($task.mouse.PSObject.Properties.Name -contains
     "allow_send_input") { [bool]$task.mouse.allow_send_input } else { $true }
+$taskAllowObserveOnlyControl = if (
+    $task.mouse.PSObject.Properties.Name -contains
+        "allow_observe_only_control") {
+    [bool]$task.mouse.allow_observe_only_control
+} else { $false }
 if ([int]$task.schema -notin @(1, 2) -or
     [string]$task.task_id -ne $taskId -or
     [string]$task.scenario -ne $Scenario -or
@@ -824,6 +833,7 @@ if ([int]$task.schema -notin @(1, 2) -or
     [string]$task.profile -ne $Profile -or
     $taskOutputMode -ne $outputModeRecord -or
     $taskAllowSendInput -ne (-not $observeOnly) -or
+    $taskAllowObserveOnlyControl -ne $observeOnly -or
     $taskRequireSourceTiming -ne $RequireSourceTiming.IsPresent -or
     [string]$task.package_validation -ne $packageValidationMode -or
     [string]$task.package_root -ne $PackageRoot -or
@@ -963,7 +973,7 @@ foreach ($file in $jsonReports) {
         ConvertFrom-Json
     if ($null -eq $report.samples) { continue }
     $reportSchema = [int]$report.schema
-    if ($reportSchema -notin @(13, 14, 15)) {
+    if ($reportSchema -notin @(13, 14, 15, 16)) {
         throw "Aim 人工任务 Runtime 报告 schema 不受支持：$reportSchema；$($file.FullName)"
     }
     [void]$reportSchemas.Add($reportSchema)
@@ -1005,6 +1015,10 @@ $captureMismatch = @($segments | Where-Object {
     $_.capture_backend -ne "NDI"
 }).Count
 $mouseCommands = @($allSamples | Where-Object { [bool]$_.mouse_sent }).Count
+$aimLockActiveSamples = @($allSamples | Where-Object {
+    $_.PSObject.Properties.Name -contains "aim_lock_active" -and
+        [bool]$_.aim_lock_active
+}).Count
 $sourceTimingEvidence = Get-XenSourceTimingEvidence -Samples $allSamples
 $sourceTimingValidSamples = [uint64]$sourceTimingEvidence.valid_samples
 $sourceTimingGatePassed = -not $RequireSourceTiming.IsPresent -or
@@ -1025,6 +1039,8 @@ $mousePhysicalEffectSamples = @($allSamples | Where-Object {
         [bool]$_.mouse_physical_effect_timing_valid
 }).Count
 $outputEvidenceComplete = if ($observeOnly) {
+    $reportSchemas.Count -eq 1 -and $reportSchemas.Contains(16) -and
+    $aimLockActiveSamples -gt 0 -and
     $mouseCommands -eq 0 -and
     $mouseBackendCompletionSamples -eq 0 -and
     $mouseProtocolAckSamples -eq 0 -and
@@ -1082,6 +1098,7 @@ $summary = [ordered]@{
     report_samples_dropped = $reportDropped
     runtime_samples_dropped = $runtimeDropped
     mouse_commands = $mouseCommands
+    aim_lock_active_samples = $aimLockActiveSamples
     source_timing_valid_samples = $sourceTimingValidSamples
     source_timing_required = $RequireSourceTiming.IsPresent
     source_timing_gate_passed = $sourceTimingGatePassed

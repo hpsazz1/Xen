@@ -243,6 +243,11 @@ Assert-Condition ($controlSummary.x.nonzero_direction_reversals -eq 2 -and
         $controlSummary.x.reversal_window_dominant_causes.shaper_direction_reset `
             -eq 1) `
     "Control diagnostics must summarize reversal zero-window causes."
+$multiSegmentControlSummary = Get-XenAimControlDiagnosticsSummary `
+    @($controlSamples + $controlSamples)
+Assert-Condition ($multiSegmentControlSummary.sample_count -eq 14 -and
+        $multiSegmentControlSummary.x.nonzero_direction_reversals -eq 4) `
+    "Control diagnostics must reset sequence state across Runtime segments."
 Assert-Condition ($controlSummary.schema -eq 6 -and
         [bool]$controlSummary.delay_model_diagnostics_available -and
         $controlSummary.x.modelled_response_x_counts.p50 -eq 1.5 -and

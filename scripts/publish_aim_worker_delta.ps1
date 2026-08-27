@@ -53,6 +53,7 @@ $expectedOutputMode = if ($OutputMode -eq "ObserveOnly") {
     "observe_only"
 } else { "physical" }
 $expectedAllowSendInput = $OutputMode -eq "Physical"
+$expectedAllowObserveOnlyControl = $OutputMode -eq "ObserveOnly"
 if ($Scenario -eq "SuperJump" -and $SuperJumpCase -eq "None") {
     throw "SuperJump 发布必须指定一个独立 SuperJumpCase。"
 }
@@ -529,6 +530,8 @@ $expectedMaximumDelayPercent = $MaxDelayCompensationPercent.ToString(
     'F6', [Globalization.CultureInfo]::InvariantCulture)
 $expectedPrediction = if ($Profile -eq "prediction") { "true" } else { "false" }
 $expectedAllowSendInputText = $expectedAllowSendInput.ToString().ToLowerInvariant()
+$expectedAllowObserveOnlyControlText =
+    $expectedAllowObserveOnlyControl.ToString().ToLowerInvariant()
 if ($configText -notmatch "(?m)^smoothing=$([regex]::Escape($expectedSmoothing))\r?$" -or
     $configText -notmatch "(?m)^counts_per_pixel_x=$([regex]::Escape($expectedCountsX))\r?$" -or
     $configText -notmatch "(?m)^counts_per_pixel_y=$([regex]::Escape($expectedCountsY))\r?$" -or
@@ -536,6 +539,8 @@ if ($configText -notmatch "(?m)^smoothing=$([regex]::Escape($expectedSmoothing))
     $configText -notmatch "(?m)^enable_prediction=$expectedPrediction\r?$" -or
     $configText -notmatch
         "(?m)^allow_send_input=$expectedAllowSendInputText\r?$" -or
+    $configText -notmatch
+        "(?m)^allow_observe_only_control=$expectedAllowObserveOnlyControlText\r?$" -or
     $configText -notmatch '(?m)^enable_delay_compensation=true\r?$' -or
     $configText -notmatch
         "(?m)^control_delay_ms=$([regex]::Escape($expectedControlDelay))\r?$" -or
@@ -597,6 +602,8 @@ if ($Prepare) {
         [string]$task.profile -ne $Profile -or
         [string]$task.output_mode -ne $expectedOutputMode -or
         [bool]$task.mouse.allow_send_input -ne $expectedAllowSendInput -or
+        [bool]$task.mouse.allow_observe_only_control -ne
+            $expectedAllowObserveOnlyControl -or
         [bool]$task.require_source_timing -ne
             $RequireSourceTiming.IsPresent -or
         [double]$task.aim.smoothing -ne $Smoothing -or

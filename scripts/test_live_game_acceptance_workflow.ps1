@@ -135,6 +135,7 @@ try {
     Expect ($config -match '(?m)^model_path=14wv11\.onnx$' -and
             $config -match '(?m)^backend=cpu$' -and
             $config -match '(?m)^allow_send_input=false$' -and
+            $config -match '(?m)^allow_observe_only_control=false$' -and
             $config -match
                 '(?m)^open_detached_preview_on_start=true$') `
         "观察任务必须固定模型、CPU、置顶预览和禁用物理输出"
@@ -207,7 +208,7 @@ try {
     $reportPath = Join-Path $runtimeDirectory "synthetic.json"
     $csvPath = Join-Path $runtimeDirectory "synthetic.csv"
     $synthetic = [ordered]@{
-        schema = 15
+        schema = 16
         session_id = "synthetic"
         model_path = $fixedModel
         provider = "CPUExecutionProvider"
@@ -316,7 +317,7 @@ try {
             [bool]$summary.aim_observability.contract_valid -and
             $summary.aim_observability.precomputed_command_frames -eq 1200 -and
             [bool]$summary.aim_observability.contract.prediction_points_may_leave_selected_box) `
-        "合法 schema 15 报告应完成检测和 Aim 自动汇总"
+        "合法 schema 16 报告应完成检测和 Aim 自动汇总"
 
     $synthetic.samples[0].aim_base_point_inside_box = $false
     $synthetic.samples[0].aim_base_point = @(140.0, 140.0)
@@ -346,9 +347,9 @@ try {
         -Raw -Encoding UTF8 | ConvertFrom-Json
     Expect (-not [bool]$oldSchemaSummary.automatic_complete -and
             ($oldSchemaSummary.failures -join "`n") -match
-                '报告 schema 不是 15') `
+                '报告 schema 不是 16') `
         "旧 schema 报告必须拒绝自动通过"
-    $synthetic.schema = 15
+    $synthetic.schema = 16
 
     $synthetic.performance_probes_enabled = $true
     [System.IO.File]::WriteAllText(

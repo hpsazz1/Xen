@@ -561,6 +561,9 @@ void append_csv_snapshot(std::ostringstream& output,
         << bool_name(snapshot.d3d11_directml_interop) << '\n'
         << "# final_output_allowed_by_config,"
         << bool_name(snapshot.output_allowed_by_config) << '\n'
+        << "# final_observe_only_control_allowed_by_config,"
+        << bool_name(snapshot.observe_only_control_allowed_by_config) << '\n'
+        << "# final_control_armed," << bool_name(snapshot.control_armed) << '\n'
         << "# final_output_armed," << bool_name(snapshot.output_armed) << '\n'
         << "# final_emergency_stopped,"
         << bool_name(snapshot.emergency_stopped) << '\n';
@@ -643,6 +646,9 @@ void append_json_snapshot(std::ostringstream& output,
         << bool_name(snapshot.d3d11_directml_interop) << ",\n"
         << "    \"output_allowed_by_config\": "
         << bool_name(snapshot.output_allowed_by_config) << ",\n"
+        << "    \"observe_only_control_allowed_by_config\": "
+        << bool_name(snapshot.observe_only_control_allowed_by_config) << ",\n"
+        << "    \"control_armed\": " << bool_name(snapshot.control_armed) << ",\n"
         << "    \"output_armed\": " << bool_name(snapshot.output_armed)
         << ",\n    \"emergency_stopped\": "
         << bool_name(snapshot.emergency_stopped) << "\n  },\n";
@@ -777,7 +783,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v15\n"
+        csv << "# Xen Runtime Debug Report v16\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -904,7 +910,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "control_to_mouse_physical_effect_ms,"
                "capture_to_mouse_physical_effect_ms,"
                "source_to_mouse_physical_effect_ms,detection_status,aim_status,"
-               "mouse_status,mouse_sent,"
+               "mouse_status,mouse_sent,aim_lock_active,"
                "aim_has_target,aim_has_command,aim_track_id,aim_track_state,"
                "aim_track_predicted,aim_lead_active,"
                "aim_delay_compensation_active,"
@@ -1038,6 +1044,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << AimStatusName(sample.aim_status) << ','
                 << MouseStatusName(sample.mouse_status) << ','
                 << bool_name(sample.mouse_sent) << ','
+                << bool_name(sample.aim_lock_active) << ','
                 << bool_name(sample.aim_has_target) << ','
                 << bool_name(sample.aim_has_command) << ','
                 << sample.aim_target.track_id << ','
@@ -1252,7 +1259,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 15,\n"
+             << "{\n  \"schema\": 16,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -1387,6 +1394,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << MouseStatusName(sample.mouse_status)
                  << "\", \"mouse_sent\": "
                  << bool_name(sample.mouse_sent)
+                 << ", \"aim_lock_active\": "
+                 << bool_name(sample.aim_lock_active)
                  << ", \"control_timing_valid\": "
                  << bool_name(sample.profile.control_timing_valid)
                  << ", \"mouse_backend_completion_timing_valid\": "

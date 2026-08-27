@@ -75,7 +75,8 @@ Assert-True ($networkReceiverText -match
     $networkReceiverText -match
         '"max_prediction_lead_percent=\$aimMaxPredictionLeadText"' -and
     $networkReceiverText -match '(?m)^\s*"\[mouse\]",\s*$' -and
-    $networkReceiverText -match '"allow_send_input=false"') `
+    $networkReceiverText -match '"allow_send_input=false"' -and
+    $networkReceiverText -match '"allow_observe_only_control=false"') `
     "网络接收脚本必须只暴露预测开关/最大提前距离，并显式固定完整 Aim 与禁用 Mouse。"
 Assert-True ($networkReceiverText -match
     '\[string\]\$NdiClockSyncUrl\s*=\s*"udp://192\.168\.3\.10:5011"' -and
@@ -92,19 +93,19 @@ Assert-True ($networkReceiverText -match
         '-ExpectedAimMaxPredictionLeadPercent' -and
     $networkReceiverText -match
         'summary\s*=\s*\$environment\.report\.aim') `
-    "网络接收脚本必须把 Aim 参数和 schema 15 汇总传入正式报告。"
+    "网络接收脚本必须把 Aim 参数和 schema 16 汇总传入正式报告。"
 
 $runtimeBenchmarkText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/benchmark_runtime.ps1"))
 Assert-True ($runtimeBenchmarkText -match
-    'if \(\$report\.schema -ne 15\)' -and
+    'if \(\$report\.schema -ne 16\)' -and
     $runtimeBenchmarkText -match 'Get-XenAimReportSummary' -and
     $runtimeBenchmarkText -match
         'prediction_point_outside_box_frames' -and
     $runtimeBenchmarkText -match 'Get-XenRuntimeSequenceValues' -and
     $runtimeBenchmarkText -notmatch
         '@\(\$report\.samples\)\[\$csvIndex\]') `
-    "Runtime 正式入口必须消费 schema 15，并把预测出框作为观测而非违规。"
+    "Runtime 正式入口必须消费 schema 16，并把预测出框作为观测而非违规。"
 
 $packageScriptText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/publish_dual_machine_package.ps1"))
@@ -150,6 +151,8 @@ Assert-True ($aimDeltaText -match
     $aimDeltaText -match
         '\[bool\]\$task\.mouse\.allow_send_input\s*-ne\s*\$expectedAllowSendInput' -and
     $aimDeltaText -match
+        '\[bool\]\$task\.mouse\.allow_observe_only_control\s*-ne' -and
+    $aimDeltaText -match
         '\$OutputMode\s*-eq\s*"ObserveOnly"') `
     "Aim 差量入口必须透传并回读 Physical/Observe-only 输出身份。"
 Assert-True ($aimDeltaText -match '\$toolSpecs\s*=\s*@\(' -and
@@ -181,8 +184,10 @@ Assert-True ($aimManualText -match
     $aimManualText -match 'Get-XenSourceTimingEvidence' -and
     $aimManualText -match 'source_timing_gate_passed' -and
     $aimManualText -match 'source_clock_sample_count_max' -and
+    $aimManualText -match 'aim_lock_active_samples' -and
+    $aimManualText -match '\$reportSchemas\.Contains\(16\)' -and
     $aimManualText -match '(?m)^\s*schema\s*=\s*2\s*$') `
-    "Aim 人工入口必须把 schema 15 控制诊断直接写入自动汇总。"
+    "Aim 人工入口必须把 schema 16 控制诊断和逻辑武装证据直接写入自动汇总。"
 
 & (Join-Path $RepositoryRoot "scripts/test_benchmark_report_scale.ps1") `
     -SyntheticSampleCount 72002 -LegacyProbeCount 5000 -Quiet
@@ -218,7 +223,9 @@ try {
         $preparedConfig -match
             '(?m)^max_prediction_lead_percent=42\.500000\r?$' -and
         $preparedConfig -match '(?m)^\[mouse\]\r?$' -and
-        $preparedConfig -match '(?m)^allow_send_input=false\r?$') `
+        $preparedConfig -match '(?m)^allow_send_input=false\r?$' -and
+        $preparedConfig -match
+            '(?m)^allow_observe_only_control=false\r?$') `
         "PrepareOnly 必须落盘 NDI 时钟、完整 Aim、预测参数和显式禁用 Mouse。"
 } finally {
     Remove-Item -LiteralPath $networkPrepareRoot -Recurse -Force `

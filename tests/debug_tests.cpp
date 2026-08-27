@@ -108,6 +108,7 @@ RuntimePipelineSample make_sample(
     sample.aim_status = success ? AimStatus::SUCCESS : AimStatus::NOT_RUN;
     sample.mouse_status = success ? MouseStatus::READY : MouseStatus::CLOSED;
     sample.mouse_sent = success;
+    sample.aim_lock_active = success;
     if (success) {
         sample.aim_control_center_x = 160.0f;
         sample.aim_control_center_y = 160.0f;
@@ -238,6 +239,10 @@ void test_report_summary_and_atomic_files() {
     final_snapshot.transport_invalid_packets = 4;
     final_snapshot.overwritten_frames = 1;
     final_snapshot.mouse_commands = 0;
+    final_snapshot.observe_only_control_allowed_by_config = true;
+    final_snapshot.control_armed = true;
+    final_snapshot.output_allowed_by_config = false;
+    final_snapshot.output_armed = false;
     final_snapshot.preview_enabled = true;
     final_snapshot.preview_sampled_frames = 123;
     final_snapshot.preview_dropped_frames = 4;
@@ -298,7 +303,7 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v15") !=
+    expect(csv_text.find("Xen Runtime Debug Report v16") !=
                    std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
@@ -322,6 +327,8 @@ void test_report_summary_and_atomic_files() {
                      std::string::npos &&
                  csv_text.find("aim_matched_observation_aim_from_head") !=
                      std::string::npos &&
+                csv_text.find("mouse_sent,aim_lock_active") !=
+                    std::string::npos &&
                 csv_text.find("aim_control_evaluated,aim_controller_dt_ms") !=
                     std::string::npos &&
                 csv_text.find("aim_reverse_gate_blocked_x") !=
@@ -360,7 +367,7 @@ void test_report_summary_and_atomic_files() {
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 15") != std::string::npos &&
+    expect(json_text.find("\"schema\": 16") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -374,6 +381,8 @@ void test_report_summary_and_atomic_files() {
                 json_text.find("\"runtime_samples_dropped\": 7") !=
                     std::string::npos &&
                 json_text.find("\"aim_controller_dt_ms\": 4.") !=
+                    std::string::npos &&
+                json_text.find("\"aim_lock_active\": true") !=
                     std::string::npos &&
                 json_text.find("\"aim_reverse_candidate_x\": true") !=
                     std::string::npos &&
@@ -411,6 +420,13 @@ void test_report_summary_and_atomic_files() {
                     "\"aim_reverse_position_improvement_reset_x\": true") !=
                     std::string::npos &&
                json_text.find("\"final_snapshot\"") != std::string::npos &&
+               json_text.find(
+                   "\"observe_only_control_allowed_by_config\": true") !=
+                   std::string::npos &&
+               json_text.find("\"control_armed\": true") !=
+                   std::string::npos &&
+               json_text.find("\"output_armed\": false") !=
+                   std::string::npos &&
                json_text.find("\"source_width\": 2560") !=
                    std::string::npos &&
                json_text.find("\"duplication_recoveries\": 6") !=
