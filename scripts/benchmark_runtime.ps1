@@ -892,8 +892,8 @@ $expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
 } else {
     $captureBackendNames[$ExpectedCaptureBackend]
 }
-if ($report.schema -ne 14) {
-    throw "报告 schema 不是 14：$($report.schema)"
+if ($report.schema -ne 15) {
+    throw "报告 schema 不是 15：$($report.schema)"
 }
 if ([bool]$report.performance_probes_enabled -ne
         $enablePerformanceProbesValue) {
@@ -921,7 +921,8 @@ if ($reportSamples.Count -ne [int]$report.sample_count) {
 $aimSummary = Get-XenAimReportSummary `
     -Samples $reportSamples `
     -PredictionEnabled $ExpectedAimPrediction `
-    -MaxPredictionLeadPercent $ExpectedAimMaxPredictionLeadPercent
+    -MaxPredictionLeadPercent $ExpectedAimMaxPredictionLeadPercent `
+    -RequireMatchedObservation
 if (-not [bool]$aimSummary.contract_valid) {
     throw "Aim 逐帧门禁未通过：$($aimSummary.violation_messages -join '；')"
 }

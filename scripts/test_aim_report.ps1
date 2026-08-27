@@ -27,6 +27,10 @@ function New-AimSample {
         aim_range_locked = $true
         aim_range_allows_control = $true
         aim_box = @(150.0, 100.0, 230.0, 220.0)
+        aim_matched_observation_valid = $true
+        aim_matched_observation_box = @(148.0, 98.0, 232.0, 222.0)
+        aim_matched_observation_head_only = $false
+        aim_matched_observation_aim_from_head = $true
         aim_base_point = @(200.0, 140.0)
         aim_delay_compensated_point = @(206.0, 140.0)
         aim_final_point = @(206.0, 140.0)
@@ -42,11 +46,26 @@ function New-AimSample {
 
 $sample = New-AimSample
 $summary = Get-XenAimReportSummary -Samples @($sample) `
-    -PredictionEnabled off -MaxPredictionLeadPercent 35.0
+    -PredictionEnabled off -MaxPredictionLeadPercent 35.0 `
+    -RequireMatchedObservation
 Assert-Condition ([bool]$summary.contract_valid) `
     "Valid delay compensation must not be reported as prediction lead."
 Assert-Condition ($summary.violation_count -eq 0) `
     "Valid delay compensation must not produce contract violations."
+Assert-Condition ([bool]$summary.matched_observation_available -and
+        $summary.matched_observation_frames -eq 1) `
+    "Schema 15 must expose the selected current matched observation."
+
+$missingObservation = New-AimSample
+$missingObservation.aim_matched_observation_valid = $false
+$missingObservation.aim_matched_observation_box = @(0.0, 0.0, 0.0, 0.0)
+$invalidObservation = Get-XenAimReportSummary `
+    -Samples @($missingObservation) -PredictionEnabled off `
+    -MaxPredictionLeadPercent 35.0 -RequireMatchedObservation
+Assert-Condition (-not [bool]$invalidObservation.contract_valid -and
+        $invalidObservation.violations.matched_observation_contract_frames `
+            -eq 1) `
+    "A current non-predicted target must not omit its matched observation."
 
 $sample.aim_delay_compensated_point = @(205.0, 140.0)
 $invalid = Get-XenAimReportSummary -Samples @($sample) `
@@ -63,6 +82,64 @@ $invalid = Get-XenAimReportSummary -Samples @($sample) `
     -PredictionEnabled off -MaxPredictionLeadPercent 35.0
 Assert-Condition (-not [bool]$invalid.contract_valid) `
     "Legacy delay horizon must equal the maximum per-axis horizon."
+
+$noClockSamples = @(
+    [ordered]@{
+        source_clock_status = "UNSYNCHRONIZED"
+        source_timing_valid = $false
+        source_clock_sample_count = 0
+        source_clock_session_id = 0
+    },
+    [ordered]@{
+        source_clock_status = "UNSYNCHRONIZED"
+        source_timing_valid = $false
+        source_clock_sample_count = 0
+        source_clock_session_id = 0
+    })
+$noClock = Get-XenSourceTimingEvidence -Samples $noClockSamples
+Assert-Condition ($noClock.diagnostic -eq "NO_CLOCK_SAMPLES" -and
+        $noClock.valid_samples -eq 0 -and
+        $noClock.no_sample_frames -eq 2 -and
+        $noClock.sample_count_max -eq 0 -and
+        $noClock.status_counts.UNSYNCHRONIZED -eq 2) `
+    "Zero clock samples must be diagnosed separately from an invalid mapping."
+
+$warmingClock = Get-XenSourceTimingEvidence -Samples @(
+    [ordered]@{
+        source_clock_status = "WARMING"
+        source_timing_valid = $false
+        source_clock_sample_count = 3
+        source_clock_session_id = 41
+    },
+    [ordered]@{
+        source_clock_status = "WARMING"
+        source_timing_valid = $false
+        source_clock_sample_count = 4
+        source_clock_session_id = 41
+    })
+Assert-Condition ($warmingClock.diagnostic -eq "MAPPING_NOT_VALID" -and
+        $warmingClock.sample_count_max -eq 4 -and
+        @($warmingClock.session_ids).Count -eq 1) `
+    "Received clock samples without a valid mapping must remain distinguishable."
+
+$validClock = Get-XenSourceTimingEvidence -Samples @(
+    [ordered]@{
+        source_clock_status = "VALID"
+        source_timing_valid = $true
+        source_clock_sample_count = 8
+        source_clock_session_id = 42
+    })
+Assert-Condition ($validClock.diagnostic -eq "VALID" -and
+        $validClock.valid_samples -eq 1 -and
+        $validClock.status_counts.VALID -eq 1) `
+    "A valid source mapping must remain an explicit evidence state."
+
+$legacyClock = Get-XenSourceTimingEvidence -Samples @([ordered]@{
+    aim_status = "SUCCESS"
+})
+Assert-Condition ($legacyClock.diagnostic -eq "REPORT_FIELDS_UNAVAILABLE" -and
+        $null -eq $legacyClock.sample_count_max) `
+    "Legacy reports without source fields must be unknown, not zero samples."
 
 function New-ControlDiagnosticSample(
         [uint64]$Sequence,

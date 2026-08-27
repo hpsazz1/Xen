@@ -28,7 +28,8 @@
     [ValidateRange(0.0, 100.0)]
     [double]$MaxDelayCompensationMs = 16.0,
     [ValidateRange(1.0, 50.0)]
-    [double]$MaxDelayCompensationPercent = 15.0
+    [double]$MaxDelayCompensationPercent = 15.0,
+    [switch]$RequireSourceTiming
 )
 
 $ErrorActionPreference = "Stop"
@@ -423,6 +424,9 @@ if ($Prepare) {
     }
     $remoteScript = 'C:\XenLab\releases\Xen-888b04e-aim-dual\tools\invoke_aim_manual_acceptance.ps1'
     $remoteRoot = 'C:\XenLab\releases\Xen-888b04e-aim-dual'
+    $sourceTimingSwitch = if ($RequireSourceTiming.IsPresent) {
+        ' -RequireSourceTiming'
+    } else { '' }
     $remoteCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' +
         $remoteScript + '" -TaskId ' + $TaskId + ' -Scenario ' +
         $Scenario + ' -SuperJumpCase ' + $SuperJumpCase +
@@ -443,7 +447,8 @@ if ($Prepare) {
             'F6', [Globalization.CultureInfo]::InvariantCulture) +
         ' -MaxDelayCompensationPercent ' +
             $MaxDelayCompensationPercent.ToString(
-                'F6', [Globalization.CultureInfo]::InvariantCulture)
+                'F6', [Globalization.CultureInfo]::InvariantCulture) +
+        $sourceTimingSwitch
     $prepareOutput = @(& ssh -i $SshIdentityFile -o IdentitiesOnly=yes `
         -o BatchMode=yes "$SshUser@$SshHost" $remoteCommand 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "辅机 Prepare 失败，退出码：$LASTEXITCODE" }
@@ -574,6 +579,8 @@ if ($Prepare) {
         [string]$task.scenario -ne $Scenario -or
         [string]$task.superjump_case -ne $SuperJumpCase -or
         [string]$task.profile -ne $Profile -or
+        [bool]$task.require_source_timing -ne
+            $RequireSourceTiming.IsPresent -or
         [double]$task.aim.smoothing -ne $Smoothing -or
         [double]$task.aim.counts_per_pixel_x -ne $resolvedCountsPerPixelX -or
         [double]$task.aim.counts_per_pixel_y -ne $resolvedCountsPerPixelY -or

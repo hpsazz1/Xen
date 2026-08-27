@@ -186,6 +186,15 @@ struct AimTargetSnapshot {
     float y1 = 0.0f;
     float x2 = 0.0f;
     float y2 = 0.0f;
+    // 当前帧实际匹配到该轨迹的 Observation。它保留关联后的检测框与
+    // head/body 语义，不参与轨迹、基础点或控制计算；预测续帧必须为 invalid。
+    bool matched_observation_valid = false;
+    float matched_observation_x1 = 0.0f;
+    float matched_observation_y1 = 0.0f;
+    float matched_observation_x2 = 0.0f;
+    float matched_observation_y2 = 0.0f;
+    bool matched_observation_head_only = false;
+    bool matched_observation_aim_from_head = false;
     // 基础瞄点来自观测/状态估计并始终位于目标框内；延迟补偿点只用于
     // 基础 tracking 的已测控制延迟；aim_* 是再应用 prediction 后的最终点。
     float base_aim_x = 0.0f;

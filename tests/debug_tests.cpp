@@ -126,6 +126,13 @@ RuntimePipelineSample make_sample(
         sample.aim_target.y1 = 100.0f;
         sample.aim_target.x2 = 230.0f;
         sample.aim_target.y2 = 220.0f;
+        sample.aim_target.matched_observation_valid = true;
+        sample.aim_target.matched_observation_x1 = 148.0f;
+        sample.aim_target.matched_observation_y1 = 98.0f;
+        sample.aim_target.matched_observation_x2 = 232.0f;
+        sample.aim_target.matched_observation_y2 = 222.0f;
+        sample.aim_target.matched_observation_head_only = false;
+        sample.aim_target.matched_observation_aim_from_head = true;
         sample.aim_target.base_aim_x = 200.0f;
         sample.aim_target.base_aim_y = 140.0f;
         sample.aim_target.delay_compensated_aim_x = 210.0f;
@@ -291,7 +298,7 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v14") !=
+    expect(csv_text.find("Xen Runtime Debug Report v15") !=
                    std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
@@ -308,6 +315,12 @@ void test_report_summary_and_atomic_files() {
                 csv_text.find("person_detection_count,head_detection_count") !=
                     std::string::npos &&
                  csv_text.find("aim_base_x,aim_base_y,aim_delay_compensated_x") !=
+                     std::string::npos &&
+                 csv_text.find("aim_matched_observation_valid") !=
+                     std::string::npos &&
+                 csv_text.find("aim_matched_observation_x1") !=
+                     std::string::npos &&
+                 csv_text.find("aim_matched_observation_aim_from_head") !=
                      std::string::npos &&
                 csv_text.find("aim_control_evaluated,aim_controller_dt_ms") !=
                     std::string::npos &&
@@ -347,7 +360,7 @@ void test_report_summary_and_atomic_files() {
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 14") != std::string::npos &&
+    expect(json_text.find("\"schema\": 15") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -410,8 +423,14 @@ void test_report_summary_and_atomic_files() {
                    std::string::npos &&
                 json_text.find("\"person_detection_count\": 1") !=
                     std::string::npos &&
-                json_text.find("\"aim_track_id\": 7") !=
-                    std::string::npos &&
+                 json_text.find("\"aim_track_id\": 7") !=
+                     std::string::npos &&
+                 json_text.find("\"aim_matched_observation_valid\"") !=
+                     std::string::npos &&
+                 json_text.find("\"aim_matched_observation_box\"") !=
+                     std::string::npos &&
+                 json_text.find("\"aim_matched_observation_aim_from_head\"") !=
+                     std::string::npos &&
                  json_text.find("\"aim_lead_active\": true") !=
                      std::string::npos &&
                  json_text.find(

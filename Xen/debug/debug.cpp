@@ -777,7 +777,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v14\n"
+        csv << "# Xen Runtime Debug Report v15\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -913,7 +913,11 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "aim_control_center_y,aim_acquisition_range_radius,"
                "aim_active_range_radius,aim_range_locked,"
                "aim_range_allows_control,aim_box_x1,aim_box_y1,aim_box_x2,"
-               "aim_box_y2,aim_base_x,aim_base_y,"
+               "aim_box_y2,aim_matched_observation_valid,"
+               "aim_matched_observation_x1,aim_matched_observation_y1,"
+               "aim_matched_observation_x2,aim_matched_observation_y2,"
+               "aim_matched_observation_head_only,"
+               "aim_matched_observation_aim_from_head,aim_base_x,aim_base_y,"
                "aim_delay_compensated_x,aim_delay_compensated_y,"
                "aim_prediction_x,aim_prediction_y,"
                "aim_final_x,aim_final_y,"
@@ -1055,6 +1059,15 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.aim_target.y1 << ','
                 << sample.aim_target.x2 << ','
                 << sample.aim_target.y2 << ','
+                << bool_name(sample.aim_target.matched_observation_valid) << ','
+                << sample.aim_target.matched_observation_x1 << ','
+                << sample.aim_target.matched_observation_y1 << ','
+                << sample.aim_target.matched_observation_x2 << ','
+                << sample.aim_target.matched_observation_y2 << ','
+                << bool_name(
+                    sample.aim_target.matched_observation_head_only) << ','
+                << bool_name(
+                    sample.aim_target.matched_observation_aim_from_head) << ','
                 << sample.aim_target.base_aim_x << ','
                 << sample.aim_target.base_aim_y << ','
                 << sample.aim_target.delay_compensated_aim_x << ','
@@ -1239,7 +1252,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 14,\n"
+             << "{\n  \"schema\": 15,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -1437,10 +1450,23 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << bool_name(sample.aim_range_locked)
                  << ", \"aim_range_allows_control\": "
                  << bool_name(sample.aim_range_allows_control)
-                 << ", \"aim_box\": [" << sample.aim_target.x1 << ", "
-                 << sample.aim_target.y1 << ", " << sample.aim_target.x2
-                 << ", " << sample.aim_target.y2 << ']'
-                 << ", \"aim_base_point\": ["
+                  << ", \"aim_box\": [" << sample.aim_target.x1 << ", "
+                  << sample.aim_target.y1 << ", " << sample.aim_target.x2
+                  << ", " << sample.aim_target.y2 << ']'
+                  << ", \"aim_matched_observation_valid\": "
+                  << bool_name(sample.aim_target.matched_observation_valid)
+                  << ", \"aim_matched_observation_box\": ["
+                  << sample.aim_target.matched_observation_x1 << ", "
+                  << sample.aim_target.matched_observation_y1 << ", "
+                  << sample.aim_target.matched_observation_x2 << ", "
+                  << sample.aim_target.matched_observation_y2 << ']'
+                  << ", \"aim_matched_observation_head_only\": "
+                  << bool_name(
+                      sample.aim_target.matched_observation_head_only)
+                  << ", \"aim_matched_observation_aim_from_head\": "
+                  << bool_name(
+                      sample.aim_target.matched_observation_aim_from_head)
+                  << ", \"aim_base_point\": ["
                  << sample.aim_target.base_aim_x << ", "
                  << sample.aim_target.base_aim_y << ']'
                  << ", \"aim_delay_compensated_point\": ["

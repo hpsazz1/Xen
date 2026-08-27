@@ -170,6 +170,13 @@ bool target_is_default(const AimTargetSnapshot& target) noexcept {
     return target.track_id == 0 && target.state == TrackState::TENTATIVE &&
            target.x1 == 0.0f && target.y1 == 0.0f &&
            target.x2 == 0.0f && target.y2 == 0.0f &&
+           !target.matched_observation_valid &&
+           target.matched_observation_x1 == 0.0f &&
+           target.matched_observation_y1 == 0.0f &&
+           target.matched_observation_x2 == 0.0f &&
+           target.matched_observation_y2 == 0.0f &&
+           !target.matched_observation_head_only &&
+           !target.matched_observation_aim_from_head &&
            target.base_aim_x == 0.0f && target.base_aim_y == 0.0f &&
            target.aim_x == 0.0f && target.aim_y == 0.0f &&
            target.velocity_x == 0.0f && target.velocity_y == 0.0f &&

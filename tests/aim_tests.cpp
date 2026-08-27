@@ -203,6 +203,45 @@ void test_head_body_merge_and_confirmation() {
            "目标超出死区时应产生移动命令");
 }
 
+void test_selected_target_exposes_only_current_matched_observation() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+
+    AimFrame detected = make_frame(1, base);
+    detected.detections = {
+        body_box(210.0f, 170.0f, 50.0f, 90.0f),
+        head_box(210.0f, 140.0f, 16.0f, 18.0f)};
+    const AimResult matched = aim.process(detected);
+    expect(matched.has_target &&
+               matched.target.matched_observation_valid &&
+               std::fabs(matched.target.matched_observation_x1 - 185.0f) <
+                   0.001f &&
+               std::fabs(matched.target.matched_observation_y1 - 125.0f) <
+                   0.001f &&
+               std::fabs(matched.target.matched_observation_x2 - 235.0f) <
+                   0.001f &&
+               std::fabs(matched.target.matched_observation_y2 - 215.0f) <
+                   0.001f &&
+               !matched.target.matched_observation_head_only &&
+               matched.target.matched_observation_aim_from_head,
+           "公开目标快照必须精确保留当前关联的 body 框与 head 瞄点语义");
+
+    AimFrame lost = make_frame(2, base + std::chrono::milliseconds(4));
+    const AimResult predicted = aim.process(lost);
+    expect(predicted.has_target && predicted.target.predicted &&
+               !predicted.target.matched_observation_valid &&
+               predicted.target.matched_observation_x1 == 0.0f &&
+               predicted.target.matched_observation_y1 == 0.0f &&
+               predicted.target.matched_observation_x2 == 0.0f &&
+               predicted.target.matched_observation_y2 == 0.0f &&
+               !predicted.target.matched_observation_head_only &&
+               !predicted.target.matched_observation_aim_from_head,
+           "预测续帧不得把上一帧 Observation 冒充为当前检测证据");
+}
+
 void test_short_loss_keeps_track_id() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -8324,6 +8363,7 @@ int main() {
     test_invalid_input();
     test_frame_order_contract();
     test_head_body_merge_and_confirmation();
+    test_selected_target_exposes_only_current_matched_observation();
     test_head_only_uses_parameterized_aim_region();
     test_short_loss_keeps_track_id();
     test_command_limit_and_reset();

@@ -216,6 +216,7 @@ try {
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
         -TaskId AIM-LATENCY-COMP-001 `
         -Mode Prepare -Scenario Static -Profile tracking `
+        -RequireSourceTiming `
         -PackageRoot $published -RunDirectory $taskScopedRoot | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "任务范围校验不应扫描无关文件或重复哈希 DirectML Worker。"
@@ -223,14 +224,18 @@ try {
     $taskScopedTask = Get-Content -LiteralPath `
         (Join-Path $taskScopedRoot "task.json") -Raw -Encoding utf8 |
         ConvertFrom-Json
+    $taskScopedMarkdown = Get-Content -LiteralPath `
+        (Join-Path $taskScopedRoot "TASK.md") -Raw -Encoding utf8
     if ([string]$taskScopedTask.package_validation -ne "task_scoped" -or
+        -not [bool]$taskScopedTask.require_source_timing -or
+        $taskScopedMarkdown -notmatch 'run_ndi_clock_source\.ps1' -or
         [string]::IsNullOrWhiteSpace($taskScopedTask.worker.sha256) -or
         [string]::IsNullOrWhiteSpace(
             $taskScopedTask.acceptance_script.sha256) -or
         [string]::IsNullOrWhiteSpace($taskScopedTask.aim_report.sha256) -or
         [string]::IsNullOrWhiteSpace(
             $taskScopedTask.aim_control_diagnostics.sha256)) {
-        throw "人工任务没有绑定任务范围校验模式、Worker 或报告工具哈希。"
+        throw "人工任务没有绑定 source timing、任务范围校验模式、Worker 或报告工具哈希。"
     }
     Write-Utf8 $directMlWorker "dml"
 
@@ -517,6 +522,9 @@ try {
         [uint64]$recoveredSummary.successful_samples -ne 1 -or
         [uint64]$recoveredSummary.failed_samples -ne 0 -or
         [uint64]$recoveredSummary.source_timing_valid_samples -ne 0 -or
+        [string]$recoveredSummary.source_timing_diagnostic -ne
+            "REPORT_FIELDS_UNAVAILABLE" -or
+        $null -ne $recoveredSummary.source_clock_sample_count_max -or
         [uint64]$recoveredSummary.mouse_backend_completion_samples -ne 1 -or
         [uint64]$recoveredSummary.mouse_protocol_ack_samples -ne 0 -or
         [uint64]$recoveredSummary.mouse_physical_effect_samples -ne 0 -or

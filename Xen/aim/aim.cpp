@@ -136,6 +136,15 @@ struct Track {
     // 连续低观测运动撤销旧 X 预测的渐入时长；只在同一匹配轨迹内跨帧
     // 保留，语义切换、重新获得运动支持或丢帧时立即清零。
     float horizontal_prediction_unsupported_seconds = 0.0f;
+    // 只读保存当前帧关联后的原始 Observation；每帧预测前清空，避免把
+    // 丢框时的状态外推误报成新检测。
+    bool matched_observation_valid = false;
+    float matched_observation_x1 = 0.0f;
+    float matched_observation_y1 = 0.0f;
+    float matched_observation_x2 = 0.0f;
+    float matched_observation_y2 = 0.0f;
+    bool matched_observation_head_only = false;
+    bool matched_observation_aim_from_head = false;
 };
 
 struct IssuedCommand {
@@ -955,6 +964,13 @@ struct Aim::Impl {
     void predict_tracks(std::chrono::steady_clock::time_point now,
                         float diagonal) noexcept {
         for (auto& track : tracks) {
+            track.matched_observation_valid = false;
+            track.matched_observation_x1 = 0.0f;
+            track.matched_observation_y1 = 0.0f;
+            track.matched_observation_x2 = 0.0f;
+            track.matched_observation_y2 = 0.0f;
+            track.matched_observation_head_only = false;
+            track.matched_observation_aim_from_head = false;
             const float dt = clamp_delta_seconds(
                 std::chrono::duration<double>(now - track.state_at).count());
             float dx = track.vx * dt;
@@ -2037,6 +2053,13 @@ struct Aim::Impl {
         track.last_observation_at = track.state_at;
         track.horizontal_observation_initialized = true;
         track.last_observation_head_only = observation.head_only;
+        track.matched_observation_valid = true;
+        track.matched_observation_x1 = observation.x1;
+        track.matched_observation_y1 = observation.y1;
+        track.matched_observation_x2 = observation.x2;
+        track.matched_observation_y2 = observation.y2;
+        track.matched_observation_head_only = observation.head_only;
+        track.matched_observation_aim_from_head = observation.aim_from_head;
         track.predicted = false;
         track.lost_frames = 0;
         ++track.hits;
@@ -2242,6 +2265,14 @@ struct Aim::Impl {
             created_track.last_observation_at = frame.captured_at;
             created_track.horizontal_observation_initialized = true;
             created_track.last_observation_head_only = observation.head_only;
+            created_track.matched_observation_valid = true;
+            created_track.matched_observation_x1 = observation.x1;
+            created_track.matched_observation_y1 = observation.y1;
+            created_track.matched_observation_x2 = observation.x2;
+            created_track.matched_observation_y2 = observation.y2;
+            created_track.matched_observation_head_only = observation.head_only;
+            created_track.matched_observation_aim_from_head =
+                observation.aim_from_head;
         }
 
         tracks.erase(std::remove_if(tracks.begin(), tracks.end(),
@@ -4314,6 +4345,20 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
             result.target.y1 = target->y1;
             result.target.x2 = target->x2;
             result.target.y2 = target->y2;
+            result.target.matched_observation_valid =
+                target->matched_observation_valid;
+            result.target.matched_observation_x1 =
+                target->matched_observation_x1;
+            result.target.matched_observation_y1 =
+                target->matched_observation_y1;
+            result.target.matched_observation_x2 =
+                target->matched_observation_x2;
+            result.target.matched_observation_y2 =
+                target->matched_observation_y2;
+            result.target.matched_observation_head_only =
+                target->matched_observation_head_only;
+            result.target.matched_observation_aim_from_head =
+                target->matched_observation_aim_from_head;
             result.target.base_aim_x = projection.base_x;
             result.target.base_aim_y = projection.base_y;
             result.target.delay_compensated_aim_x =

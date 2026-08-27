@@ -92,19 +92,19 @@ Assert-True ($networkReceiverText -match
         '-ExpectedAimMaxPredictionLeadPercent' -and
     $networkReceiverText -match
         'summary\s*=\s*\$environment\.report\.aim') `
-    "网络接收脚本必须把 Aim 参数和 schema 14 汇总传入正式报告。"
+    "网络接收脚本必须把 Aim 参数和 schema 15 汇总传入正式报告。"
 
 $runtimeBenchmarkText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/benchmark_runtime.ps1"))
 Assert-True ($runtimeBenchmarkText -match
-    'if \(\$report\.schema -ne 14\)' -and
+    'if \(\$report\.schema -ne 15\)' -and
     $runtimeBenchmarkText -match 'Get-XenAimReportSummary' -and
     $runtimeBenchmarkText -match
         'prediction_point_outside_box_frames' -and
     $runtimeBenchmarkText -match 'Get-XenRuntimeSequenceValues' -and
     $runtimeBenchmarkText -notmatch
         '@\(\$report\.samples\)\[\$csvIndex\]') `
-    "Runtime 正式入口必须消费 schema 14，并把预测出框作为观测而非违规。"
+    "Runtime 正式入口必须消费 schema 15，并把预测出框作为观测而非违规。"
 
 $packageScriptText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/publish_dual_machine_package.ps1"))
@@ -135,6 +135,9 @@ Assert-True ($aimDeltaText -match
     $aimDeltaText -match
         '\[double\]\$task\.aim\.max_delay_compensation_ms\s*-ne' -and
     $aimDeltaText -match
+        '\[bool\]\$task\.require_source_timing\s*-ne' -and
+    $aimDeltaText -match '\$sourceTimingSwitch' -and
+    $aimDeltaText -match
         ''' -MaxDelayCompensationPercent ''\s*\+\s*') `
     "Aim 差量入口必须透传任务 ID、延迟参数，并按 profile 回读 prediction 快照。"
 Assert-True ($aimDeltaText -match '\$toolSpecs\s*=\s*@\(' -and
@@ -163,8 +166,11 @@ Assert-True ($aimManualText -match
         'reverse_translation_detail_diagnostics_available' -and
     $aimManualText -match
         'control_diagnostics\s*=\s*\$controlDiagnostics' -and
+    $aimManualText -match 'Get-XenSourceTimingEvidence' -and
+    $aimManualText -match 'source_timing_gate_passed' -and
+    $aimManualText -match 'source_clock_sample_count_max' -and
     $aimManualText -match '(?m)^\s*schema\s*=\s*2\s*$') `
-    "Aim 人工入口必须把 schema 14 控制诊断直接写入自动汇总。"
+    "Aim 人工入口必须把 schema 15 控制诊断直接写入自动汇总。"
 
 & (Join-Path $RepositoryRoot "scripts/test_benchmark_report_scale.ps1") `
     -SyntheticSampleCount 72002 -LegacyProbeCount 5000 -Quiet

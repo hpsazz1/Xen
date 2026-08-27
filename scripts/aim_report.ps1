@@ -63,18 +63,111 @@ function Get-XenAimDistributionSummary {
     }
 }
 
+function Test-XenAimSampleField([object]$Sample, [string]$Name) {
+    if ($Sample -is [System.Collections.IDictionary]) {
+        return $Sample.Contains($Name)
+    }
+    return $Sample.PSObject.Properties.Name -contains $Name
+}
+
+function Get-XenAimSampleField([object]$Sample, [string]$Name) {
+    if ($Sample -is [System.Collections.IDictionary]) {
+        return $Sample[$Name]
+    }
+    return $Sample.PSObject.Properties[$Name].Value
+}
+
+function Get-XenSourceTimingEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Samples
+    )
+
+    $items = @($Samples)
+    if ($items.Count -eq 0) {
+        throw "Source timing evidence requires at least one sample."
+    }
+    $requiredFields = @(
+        "source_clock_status", "source_timing_valid",
+        "source_clock_sample_count", "source_clock_session_id")
+    $completeItems = @($items | Where-Object {
+        $sample = $_
+        @($requiredFields | Where-Object {
+            -not (Test-XenAimSampleField $sample $_)
+        }).Count -eq 0
+    })
+    $statusCounts = [ordered]@{
+        UNSYNCHRONIZED = [uint64]0
+        WARMING = [uint64]0
+        VALID = [uint64]0
+        OTHER = [uint64]0
+    }
+    if ($completeItems.Count -eq 0) {
+        return [ordered]@{
+            diagnostic = "REPORT_FIELDS_UNAVAILABLE"
+            valid_samples = [uint64]0
+            no_sample_frames = [uint64]0
+            sample_count_max = $null
+            session_ids = @()
+            status_counts = $statusCounts
+        }
+    }
+
+    [uint64]$validSamples = 0
+    [uint64]$noSampleFrames = 0
+    [uint64]$sampleCountMax = 0
+    $sessionIds = [System.Collections.Generic.HashSet[uint64]]::new()
+    foreach ($sample in $completeItems) {
+        $status = [string](Get-XenAimSampleField $sample "source_clock_status")
+        if ($statusCounts.Contains($status)) {
+            ++$statusCounts[$status]
+        } else {
+            ++$statusCounts.OTHER
+        }
+        if ([bool](Get-XenAimSampleField $sample "source_timing_valid")) {
+            ++$validSamples
+        }
+        $sampleCount = [uint64](
+            Get-XenAimSampleField $sample "source_clock_sample_count")
+        if ($sampleCount -eq 0) { ++$noSampleFrames }
+        if ($sampleCount -gt $sampleCountMax) {
+            $sampleCountMax = $sampleCount
+        }
+        $sessionId = [uint64](
+            Get-XenAimSampleField $sample "source_clock_session_id")
+        if ($sessionId -ne 0) { [void]$sessionIds.Add($sessionId) }
+    }
+    $diagnostic = if ($completeItems.Count -ne $items.Count) {
+        "REPORT_FIELDS_INCOMPLETE"
+    } elseif ($validSamples -ne 0) {
+        "VALID"
+    } elseif ($sampleCountMax -eq 0) {
+        "NO_CLOCK_SAMPLES"
+    } else {
+        "MAPPING_NOT_VALID"
+    }
+    return [ordered]@{
+        diagnostic = $diagnostic
+        valid_samples = $validSamples
+        no_sample_frames = $noSampleFrames
+        sample_count_max = $sampleCountMax
+        session_ids = @($sessionIds | Sort-Object)
+        status_counts = $statusCounts
+    }
+}
+
 function Get-XenAimReportSummary {
     param(
         [Parameter(Mandatory = $true)][object[]]$Samples,
         [Parameter(Mandatory = $true)]
         [ValidateSet("on", "off")][string]$PredictionEnabled,
         [Parameter(Mandatory = $true)]
-        [ValidateRange(1.0, 50.0)][double]$MaxPredictionLeadPercent
+        [ValidateRange(1.0, 50.0)][double]$MaxPredictionLeadPercent,
+        [switch]$RequireMatchedObservation
     )
 
     $items = @($Samples)
     if ($items.Count -eq 0) {
-        throw "Aim schema 14 报告没有正式样本。"
+        throw "Aim 报告没有正式样本。"
     }
     $requiredFields = @(
         "aim_status", "mouse_sent", "aim_has_target", "aim_has_command",
@@ -88,6 +181,13 @@ function Get-XenAimReportSummary {
         "aim_delay_compensation_active", "aim_delay_compensation_ms_x",
         "aim_delay_compensation_ms_y", "aim_delay_compensation_ms",
         "aim_observation_age_ms", "aim_command")
+    if ($RequireMatchedObservation.IsPresent) {
+        $requiredFields += @(
+            "aim_matched_observation_valid",
+            "aim_matched_observation_box",
+            "aim_matched_observation_head_only",
+            "aim_matched_observation_aim_from_head")
+    }
     $availableFields = if ($items[0] -is
             [System.Collections.IDictionary]) {
         @($items[0].Keys)
@@ -98,7 +198,7 @@ function Get-XenAimReportSummary {
         $availableFields -notcontains $_
     })
     if ($missingFields.Count -ne 0) {
-        throw "Aim schema 14 样本缺少字段：$($missingFields -join ', ')"
+        throw "Aim 样本缺少字段：$($missingFields -join ', ')"
     }
 
     $leadDistances = [System.Collections.Generic.List[double]]::new()
@@ -116,6 +216,7 @@ function Get-XenAimReportSummary {
         prediction_disabled_lead_frames = [uint64]0
         command_direction_frames = [uint64]0
         range_contract_frames = [uint64]0
+        matched_observation_contract_frames = [uint64]0
     }
     [uint64]$targetFrames = 0
     [uint64]$noTargetFrames = 0
@@ -130,6 +231,7 @@ function Get-XenAimReportSummary {
     [uint64]$targetSwitches = 0
     [uint64]$targetStateChanges = 0
     [uint64]$predictionStateChanges = 0
+    [uint64]$matchedObservationFrames = 0
     $hasPreviousTarget = $false
     [uint64]$previousTrackId = 0
     [string]$previousTrackState = ""
@@ -171,6 +273,34 @@ function Get-XenAimReportSummary {
             ++$violations.output_contract_frames
         }
         if ($trackPredicted) { ++$predictedTargetFrames }
+        if ($RequireMatchedObservation.IsPresent) {
+            $matchedObservationValid =
+                [bool]$sample.aim_matched_observation_valid
+            if ($matchedObservationValid) { ++$matchedObservationFrames }
+            $matchedObservationBox = @($sample.aim_matched_observation_box)
+            if ($matchedObservationBox.Count -ne 4) {
+                throw "第 $index 个 Aim 匹配 Observation 框维度无效。"
+            }
+            $matchedX1 = ConvertTo-XenAimFiniteDouble `
+                $matchedObservationBox[0] "第 $index 个匹配 Observation x1"
+            $matchedY1 = ConvertTo-XenAimFiniteDouble `
+                $matchedObservationBox[1] "第 $index 个匹配 Observation y1"
+            $matchedX2 = ConvertTo-XenAimFiniteDouble `
+                $matchedObservationBox[2] "第 $index 个匹配 Observation x2"
+            $matchedY2 = ConvertTo-XenAimFiniteDouble `
+                $matchedObservationBox[3] "第 $index 个匹配 Observation y2"
+            if (($trackPredicted -and $matchedObservationValid) -or
+                (-not $trackPredicted -and -not $matchedObservationValid) -or
+                ($matchedObservationValid -and
+                 ($matchedX2 -le $matchedX1 -or $matchedY2 -le $matchedY1)) -or
+                (-not $matchedObservationValid -and
+                 ($matchedX1 -ne 0.0 -or $matchedY1 -ne 0.0 -or
+                  $matchedX2 -ne 0.0 -or $matchedY2 -ne 0.0 -or
+                  [bool]$sample.aim_matched_observation_head_only -or
+                  [bool]$sample.aim_matched_observation_aim_from_head))) {
+                ++$violations.matched_observation_contract_frames
+            }
+        }
         if ($hasPreviousTarget) {
             if ($previousTrackId -ne $trackId) {
                 ++$targetSwitches
@@ -352,7 +482,8 @@ function Get-XenAimReportSummary {
     foreach ($name in @(
             "aim_status_frames", "output_contract_frames",
             "target_geometry_frames", "prediction_marker_mismatch_frames",
-            "lead_vector_consistency_frames", "range_contract_frames")) {
+            "lead_vector_consistency_frames", "range_contract_frames",
+            "matched_observation_contract_frames")) {
         if ([uint64]$violations[$name] -ne 0) {
             $messages += "Aim 契约 $name 违规：$($violations[$name]) 帧"
         }
@@ -378,6 +509,8 @@ function Get-XenAimReportSummary {
         target_switches = $targetSwitches
         target_state_changes = $targetStateChanges
         prediction_state_changes = $predictionStateChanges
+        matched_observation_available = $RequireMatchedObservation.IsPresent
+        matched_observation_frames = $matchedObservationFrames
         contract = [ordered]@{
             basic_points_must_remain_inside_selected_box = $true
             prediction_points_may_leave_selected_box = $true

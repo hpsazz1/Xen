@@ -30,6 +30,7 @@
     [double]$MaxDelayCompensationMs = 16.0,
     [ValidateRange(1.0, 50.0)]
     [double]$MaxDelayCompensationPercent = 15.0,
+    [switch]$RequireSourceTiming,
     # 兼容旧发布入口的调用参数；当前校验固定为 task_scoped，不再分 full/lightweight。
     [switch]$LightweightPackageValidation,
     [switch]$AllowPhysicalOutput,
@@ -483,20 +484,26 @@ function New-LaunchCommand([string]$ResolvedRunDirectory) {
     } else {
         ""
     }
+    $sourceTimingSwitch = if ($RequireSourceTiming.IsPresent) {
+        " -RequireSourceTiming"
+    } else {
+        ""
+    }
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
         '-TaskId {1} -Mode Launch -Scenario {2} -SuperJumpCase {3} ' +
         '-Profile {4} -PackageRoot "{5}" -RunDirectory "{6}" ' +
         '-Smoothing {7:F6} -CountsPerPixelX {8:F6} ' +
         '-CountsPerPixelY {9:F6} -MaxCountsPerFrame {10:F6}{11} ' +
         '-ControlDelayMs {12:F6} -MaxDelayCompensationMs {13:F6} ' +
-        '-MaxDelayCompensationPercent {14:F6} -AllowPhysicalOutput ' +
-        '-PhysicalOutputConfirmation {15}') -f
+        '-MaxDelayCompensationPercent {14:F6}{15} -AllowPhysicalOutput ' +
+        '-PhysicalOutputConfirmation {16}') -f
         (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
         $taskId, $Scenario, $SuperJumpCase, $Profile, $PackageRoot,
         $ResolvedRunDirectory,
         $Smoothing, $resolvedCountsPerPixelX, $resolvedCountsPerPixelY,
         $MaxCountsPerFrame, $delaySwitch, $ControlDelayMs,
         $MaxDelayCompensationMs, $MaxDelayCompensationPercent,
+        $sourceTimingSwitch,
         $physicalConfirmation
 }
 
@@ -522,6 +529,7 @@ function New-TaskMarkdown(
 - 单帧二维上限：$('{0:F6}' -f $MaxCountsPerFrame) counts
 - 延迟补偿：$($EnableDelayCompensation.IsPresent)
 - 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
+- 必须取得有效 source timing：$($RequireSourceTiming.IsPresent)
 - Capture：NDI / $ndiSourceName
 - Provider：TensorRT，FP16 + CUDA Graph + GPU 前处理
 - Mouse：KMBOX NET $kmboxIp`:$kmboxPort
@@ -532,6 +540,8 @@ function New-TaskMarkdown(
 
 仅在私有或离线训练环境执行。启动前确认 End 可用、现场无非预期窗口，程序启动后仍需人工武装。
 任何方向错误、持续发送、松键不停止或失控移动，立即松开右键并按 End。
+若本任务要求 source timing，Launch 前须在源机 `HPSAZZ` 前台运行
+`E:\Xen\scripts\run_ndi_clock_source.ps1` 并保持到 Run 结束；缺少时钟样本会使 automatic gate 失败。
 
 ## 操作步骤
 
@@ -621,6 +631,7 @@ if ($Mode -eq "Prepare") {
         scenario = $Scenario
         superjump_case = $SuperJumpCase
         profile = $Profile
+        require_source_timing = $RequireSourceTiming.IsPresent
         prepared_utc = [DateTime]::UtcNow.ToString("o")
         package_root = $PackageRoot
         package_commit = [string]$manifestResult.Value.git_commit
@@ -735,11 +746,16 @@ $taskCountsPerPixelY = if ($task.aim.PSObject.Properties.Name -contains
     "counts_per_pixel_y") { [double]$task.aim.counts_per_pixel_y } else {
     [double]$task.aim.counts_per_pixel
 }
+$taskRequireSourceTiming = if ($task.PSObject.Properties.Name -contains
+    "require_source_timing") { [bool]$task.require_source_timing } else {
+    $false
+}
 if ([int]$task.schema -ne 1 -or
     [string]$task.task_id -ne $taskId -or
     [string]$task.scenario -ne $Scenario -or
     [string]$task.superjump_case -ne $SuperJumpCase -or
     [string]$task.profile -ne $Profile -or
+    $taskRequireSourceTiming -ne $RequireSourceTiming.IsPresent -or
     [string]$task.package_validation -ne $packageValidationMode -or
     [string]$task.package_root -ne $PackageRoot -or
     [double]$task.aim.smoothing -ne $Smoothing -or
@@ -873,7 +889,7 @@ foreach ($file in $jsonReports) {
         ConvertFrom-Json
     if ($null -eq $report.samples) { continue }
     $reportSchema = [int]$report.schema
-    if ($reportSchema -notin @(13, 14)) {
+    if ($reportSchema -notin @(13, 14, 15)) {
         throw "Aim 人工任务 Runtime 报告 schema 不受支持：$reportSchema；$($file.FullName)"
     }
     [void]$reportSchemas.Add($reportSchema)
@@ -900,9 +916,13 @@ if ($allSamples.Count -eq 0) {
     throw "本轮 Runtime JSON 没有可汇总样本。"
 }
 $predictionState = if ($Profile -eq "prediction") { "on" } else { "off" }
+$requireMatchedObservation = @($reportSchemas | Where-Object {
+    $_ -lt 15
+}).Count -eq 0
 $aimSummary = Get-XenAimReportSummary -Samples $allSamples `
     -PredictionEnabled $predictionState `
-    -MaxPredictionLeadPercent $maxPredictionLeadPercent
+    -MaxPredictionLeadPercent $maxPredictionLeadPercent `
+    -RequireMatchedObservation:$requireMatchedObservation
 $controlDiagnostics = Get-XenAimControlDiagnosticsSummary -Samples $allSamples
 $providerMismatch = @($segments | Where-Object {
     $_.provider -ne "TensorrtExecutionProvider"
@@ -911,10 +931,10 @@ $captureMismatch = @($segments | Where-Object {
     $_.capture_backend -ne "NDI"
 }).Count
 $mouseCommands = @($allSamples | Where-Object { [bool]$_.mouse_sent }).Count
-$sourceTimingValidSamples = @($allSamples | Where-Object {
-    $_.PSObject.Properties.Name -contains "source_timing_valid" -and
-        [bool]$_.source_timing_valid
-}).Count
+$sourceTimingEvidence = Get-XenSourceTimingEvidence -Samples $allSamples
+$sourceTimingValidSamples = [uint64]$sourceTimingEvidence.valid_samples
+$sourceTimingGatePassed = -not $RequireSourceTiming.IsPresent -or
+    [string]$sourceTimingEvidence.diagnostic -eq "VALID"
 $mouseBackendCompletionSamples = @($allSamples | Where-Object {
     ($_.PSObject.Properties.Name -contains
         "mouse_backend_completion_timing_valid" -and
@@ -935,7 +955,8 @@ $complete = $failed -eq 0 -and $reportDropped -eq 0 -and
     $captureMismatch -eq 0 -and $mouseCommands -gt 0 -and
     [uint64]$aimSummary.violation_count -eq 0 -and
     [uint64]$controlDiagnostics.diagnostics_missing_frames -eq 0 -and
-    [bool]$controlDiagnostics.reverse_translation_detail_diagnostics_available
+    [bool]$controlDiagnostics.reverse_translation_detail_diagnostics_available -and
+    $sourceTimingGatePassed
 $summary = [ordered]@{
     schema = 2
     task_id = $taskId
@@ -975,6 +996,14 @@ $summary = [ordered]@{
     runtime_samples_dropped = $runtimeDropped
     mouse_commands = $mouseCommands
     source_timing_valid_samples = $sourceTimingValidSamples
+    source_timing_required = $RequireSourceTiming.IsPresent
+    source_timing_gate_passed = $sourceTimingGatePassed
+    source_timing_diagnostic = [string]$sourceTimingEvidence.diagnostic
+    source_clock_no_sample_frames =
+        [uint64]$sourceTimingEvidence.no_sample_frames
+    source_clock_sample_count_max = $sourceTimingEvidence.sample_count_max
+    source_clock_session_ids = @($sourceTimingEvidence.session_ids)
+    source_clock_status_counts = $sourceTimingEvidence.status_counts
     mouse_backend_completion_samples = $mouseBackendCompletionSamples
     mouse_protocol_ack_samples = $mouseProtocolAckSamples
     mouse_physical_effect_samples = $mousePhysicalEffectSamples
@@ -991,6 +1020,7 @@ Write-Host "Aim 人工任务自动证据已收集：$resolvedRun"
 Write-Host "  samples=$sampleCount, failed=$failed, mouse_commands=$mouseCommands"
 Write-Host "  aim_violations=$($aimSummary.violation_count)"
 Write-Host "  control_diagnostics_schema=$($controlDiagnostics.schema)"
+Write-Host "  source_timing=$($sourceTimingEvidence.diagnostic), required=$($RequireSourceTiming.IsPresent)"
 Write-Host ("  reverse_translation_details=" +
     $controlDiagnostics.reverse_translation_detail_diagnostics_available)
 Write-Host "  automatic_complete=$complete"
