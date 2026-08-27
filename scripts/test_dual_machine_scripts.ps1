@@ -19,6 +19,7 @@ $scriptPaths = @(
     "scripts/invoke_dual_machine_receiver.ps1",
     "scripts/aim_report.ps1",
     "scripts/aim_control_diagnostics.ps1",
+    "scripts/aim_fixed_scene_analysis.ps1",
     "scripts/runtime_report_sequence.ps1",
     "scripts/test_benchmark_report_scale.ps1",
     "scripts/publish_dual_machine_package.ps1",
@@ -146,6 +147,7 @@ Assert-True ($aimDeltaText -notmatch
 Assert-True ($aimDeltaText -match '\$toolSpecs\s*=\s*@\(' -and
     $aimDeltaText -match 'tools/aim_report\.ps1' -and
     $aimDeltaText -match 'tools/aim_control_diagnostics\.ps1' -and
+    $aimDeltaText -match 'tools/aim_fixed_scene_analysis\.ps1' -and
     $aimDeltaText -match '\$changedTools' -and
     $aimDeltaText -match
         '\$manifest\.git_commit\s*=\s*\$commit\.ToLowerInvariant\(\)' -and
@@ -172,7 +174,11 @@ Assert-True ($overlayText -notmatch
 Assert-True ($aimManualText -match
         'tools\\aim_control_diagnostics\.ps1' -and
     $aimManualText -match
+        'tools\\aim_fixed_scene_analysis\.ps1' -and
+    $aimManualText -match
         'Get-XenAimControlDiagnosticsSummary\s+-Samples\s+\$allSamples' -and
+    $aimManualText -match
+        'Get-XenAimFixedSceneAnalysis\s+-Samples\s+\$allSamples' -and
     $aimManualText -match
         'reverse_translation_detail_diagnostics_available' -and
     $aimManualText -match

@@ -119,6 +119,11 @@ $toolSpecs = @(
         relative = "tools/aim_control_diagnostics.ps1"
         repository = Join-Path $repositoryRoot `
             "scripts\aim_control_diagnostics.ps1"
+    },
+    [pscustomobject][ordered]@{
+        relative = "tools/aim_fixed_scene_analysis.ps1"
+        repository = Join-Path $repositoryRoot `
+            "scripts\aim_fixed_scene_analysis.ps1"
     }
 )
 if (-not (Test-Path -LiteralPath $destinationRoot -PathType Container)) {
@@ -598,6 +603,8 @@ if ($Prepare) {
             $finalToolEvidence["tools/aim_report.ps1"] -or
         [string]$task.aim_control_diagnostics.sha256 -ne
             $finalToolEvidence["tools/aim_control_diagnostics.ps1"] -or
+        [string]$task.aim_fixed_scene_analysis.sha256 -ne
+            $finalToolEvidence["tools/aim_fixed_scene_analysis.ps1"] -or
         [string]$task.config.sha256 -ne $remoteConfigHash -or
         [string]$task.package_manifest.sha256 -ne $remoteManifestHash) {
         throw "Prepare Run 参数或发布身份回读不一致。"

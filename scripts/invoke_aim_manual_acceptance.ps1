@@ -71,7 +71,8 @@ $taskManifestPaths = @(
     "runtimes\nvidia\Xen.exe",
     "tools\invoke_aim_manual_acceptance.ps1",
     "tools\aim_report.ps1",
-    "tools\aim_control_diagnostics.ps1"
+    "tools\aim_control_diagnostics.ps1",
+    "tools\aim_fixed_scene_analysis.ps1"
 )
 $packageValidationMode = "task_scoped"
 
@@ -586,6 +587,11 @@ $aimControlDiagnosticsScript = Join-Path $PackageRoot `
 if (-not (Test-Path -LiteralPath $aimControlDiagnosticsScript -PathType Leaf)) {
     throw "完整发布包缺少 Aim 控制诊断助手。"
 }
+$aimFixedSceneAnalysisScript = Join-Path $PackageRoot `
+    "tools\aim_fixed_scene_analysis.ps1"
+if (-not (Test-Path -LiteralPath $aimFixedSceneAnalysisScript -PathType Leaf)) {
+    throw "完整发布包缺少 Aim 固定场景分析助手。"
+}
 
 if ($Mode -eq "Prepare") {
     if ($AllowPhysicalOutput.IsPresent -or
@@ -646,6 +652,8 @@ if ($Mode -eq "Prepare") {
         aim_report = Get-FileEvidence $aimReportScript
         aim_control_diagnostics = Get-FileEvidence `
             $aimControlDiagnosticsScript
+        aim_fixed_scene_analysis = Get-FileEvidence `
+            $aimFixedSceneAnalysisScript
         launcher = Get-FileEvidence $launcher
         model = Get-FileEvidence (Join-Path $PackageRoot "models\$modelName")
         config = Get-FileEvidence $configPath
@@ -841,15 +849,23 @@ if ($Mode -eq "Launch") {
         $runConfigEvidence.sha256 -ne [string]$task.config.sha256) {
         throw "Recover Run config.ini 与 Prepare 证据不一致。"
     }
-    foreach ($helper in @(
-            [pscustomobject]@{
-                path = $aimReportScript
-                expected = $task.aim_report
-            },
-            [pscustomobject]@{
-                path = $aimControlDiagnosticsScript
-                expected = $task.aim_control_diagnostics
-            })) {
+    $reportHelpers = @(
+        [pscustomobject]@{
+            path = $aimReportScript
+            expected = $task.aim_report
+        },
+        [pscustomobject]@{
+            path = $aimControlDiagnosticsScript
+            expected = $task.aim_control_diagnostics
+        })
+    if ($task.PSObject.Properties.Name -contains
+        "aim_fixed_scene_analysis") {
+        $reportHelpers += [pscustomobject]@{
+            path = $aimFixedSceneAnalysisScript
+            expected = $task.aim_fixed_scene_analysis
+        }
+    }
+    foreach ($helper in $reportHelpers) {
         $actual = Get-FileEvidence $helper.path
         if ($actual.length -ne [long]$helper.expected.length -or
             $actual.sha256 -ne [string]$helper.expected.sha256) {
@@ -877,6 +893,7 @@ if ($Mode -eq "Launch") {
 
 . $aimReportScript
 . $aimControlDiagnosticsScript
+. $aimFixedSceneAnalysisScript
 $jsonReports = @($newReports | Where-Object { $_.Extension -ieq ".json" })
 $segments = @()
 $allSamples = @()
@@ -926,6 +943,19 @@ $aimSummary = Get-XenAimReportSummary -Samples $allSamples `
     -MaxPredictionLeadPercent $maxPredictionLeadPercent `
     -RequireMatchedObservation:$requireMatchedObservation
 $controlDiagnostics = Get-XenAimControlDiagnosticsSummary -Samples $allSamples
+$fixedSceneExpected = $Scenario -eq "Static" -or
+    ($Scenario -eq "SuperJump" -and $SuperJumpCase -eq "Static")
+$fixedSceneAnalysis = if ($fixedSceneExpected -and
+        $requireMatchedObservation) {
+    Get-XenAimFixedSceneAnalysis -Samples $allSamples `
+        -Scenario "$Scenario/$SuperJumpCase/$Profile"
+} else {
+    $null
+}
+$fixedSceneGatePassed = -not $fixedSceneExpected -or
+    -not $requireMatchedObservation -or
+    ($null -ne $fixedSceneAnalysis -and
+        [bool]$fixedSceneAnalysis.x.stability_passed)
 $providerMismatch = @($segments | Where-Object {
     $_.provider -ne "TensorrtExecutionProvider"
 }).Count
@@ -962,6 +992,7 @@ $complete = $failed -eq 0 -and $reportDropped -eq 0 -and
     [uint64]$aimSummary.violation_count -eq 0 -and
     [uint64]$controlDiagnostics.diagnostics_missing_frames -eq 0 -and
     [bool]$controlDiagnostics.reverse_translation_detail_diagnostics_available -and
+    $fixedSceneGatePassed -and
     $sourceTimingGatePassed
 $summary = [ordered]@{
     schema = 2
@@ -1011,6 +1042,9 @@ $summary = [ordered]@{
     source_clock_sample_count_max = $sourceTimingEvidence.sample_count_max
     source_clock_session_ids = @($sourceTimingEvidence.session_ids)
     source_clock_status_counts = $sourceTimingEvidence.status_counts
+    fixed_scene_analysis_required = $fixedSceneExpected
+    fixed_scene_analysis_gate_passed = $fixedSceneGatePassed
+    fixed_scene_analysis = $fixedSceneAnalysis
     mouse_backend_completion_samples = $mouseBackendCompletionSamples
     mouse_protocol_ack_samples = $mouseProtocolAckSamples
     mouse_physical_effect_samples = $mousePhysicalEffectSamples
@@ -1028,6 +1062,7 @@ Write-Host "  samples=$sampleCount, failed=$failed, mouse_commands=$mouseCommand
 Write-Host "  aim_violations=$($aimSummary.violation_count)"
 Write-Host "  control_diagnostics_schema=$($controlDiagnostics.schema)"
 Write-Host "  source_timing=$($sourceTimingEvidence.diagnostic), required=$($RequireSourceTiming.IsPresent)"
+Write-Host "  fixed_scene_analysis_required=$fixedSceneExpected, gate_passed=$fixedSceneGatePassed"
 Write-Host ("  reverse_translation_details=" +
     $controlDiagnostics.reverse_translation_detail_diagnostics_available)
 Write-Host "  automatic_complete=$complete"

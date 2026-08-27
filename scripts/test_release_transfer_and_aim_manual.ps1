@@ -141,6 +141,10 @@ try {
         -Destination (Join-Path $package `
             "tools\aim_control_diagnostics.ps1")
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot `
+        "aim_fixed_scene_analysis.ps1") `
+        -Destination (Join-Path $package `
+            "tools\aim_fixed_scene_analysis.ps1")
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot `
         "invoke_aim_manual_acceptance.ps1") `
         -Destination (Join-Path $package `
             "tools\invoke_aim_manual_acceptance.ps1")
@@ -160,6 +164,7 @@ try {
         "runtimes\openvino\Xen.exe" "openvino"
     Add-ManifestFile $files $package "tools\aim_report.ps1"
     Add-ManifestFile $files $package "tools\aim_control_diagnostics.ps1"
+    Add-ManifestFile $files $package "tools\aim_fixed_scene_analysis.ps1"
     Add-ManifestFile $files $package `
         "tools\invoke_aim_manual_acceptance.ps1"
     [ordered]@{
@@ -238,8 +243,10 @@ try {
             $taskScopedTask.acceptance_script.sha256) -or
         [string]::IsNullOrWhiteSpace($taskScopedTask.aim_report.sha256) -or
         [string]::IsNullOrWhiteSpace(
-            $taskScopedTask.aim_control_diagnostics.sha256)) {
-        throw "人工任务没有绑定可执行 source timing、对话回收、任务范围校验模式、Worker 或报告工具哈希。"
+            $taskScopedTask.aim_control_diagnostics.sha256) -or
+        [string]::IsNullOrWhiteSpace(
+            $taskScopedTask.aim_fixed_scene_analysis.sha256)) {
+        throw "人工任务没有绑定可执行 source timing、对话回收、任务范围校验模式、Worker 或通用固定场景报告工具哈希。"
     }
     Write-Utf8 $directMlWorker "dml"
 
