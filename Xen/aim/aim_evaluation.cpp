@@ -431,9 +431,10 @@ void accumulate_control_continuity(const AimEvaluationConfig& config,
     }
     const double desired_x = final_error_x * config.counts_per_pixel_x;
     const double desired_y = final_error_y * config.counts_per_pixel_y;
-    if (dx * desired_x + dy * desired_y <= 0.0 ||
-        std::fabs(dx) > std::ceil(std::fabs(desired_x)) ||
-        std::fabs(dy) > std::ceil(std::fabs(desired_y))) {
+    // PI、平滑和整数残余允许单轴命令超过本帧纯比例分量；方向合同只要求
+    // 二维命令朝向最终控制点。向量物理上限由 limit_boundary_frames 独立
+    // 统计，不能把已废弃的逐轴 P 上限重新解释成方向违规。
+    if (dx * desired_x + dy * desired_y <= 0.0) {
         ++control.control_direction_violation_frames;
     }
 

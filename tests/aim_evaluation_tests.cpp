@@ -434,6 +434,19 @@ void test_control_continuity_metrics() {
 void test_control_contract_rejections() {
     std::string error;
 
+    AimEvaluationFrame legal_pi_command = command_frame(0, 10, 2, 0);
+    legal_pi_command.control_center_x =
+        legal_pi_command.target.aim_x - 2.0f;
+    AimControlContinuityMetrics legal_pi_metrics;
+    expect(aim::detail::record_aim_control_continuity(
+               AimEvaluationConfig{}, legal_pi_command,
+               legal_pi_metrics, error) &&
+               aim::detail::finalize_aim_control_continuity(
+                   1, legal_pi_metrics, error) &&
+               legal_pi_metrics.control_direction_violation_frames == 0,
+           "有界 PI 命令可以大于当前纯比例分量；只要二维方向同向且"
+           "向量未越过配置上限，离线评价不得误报方向违规：" + error);
+
     AimEvaluationFrame legal_delay_compensation =
         output_frame(0, 10, 60, 40, 100, 120);
     legal_delay_compensation.target.delay_compensation_x = 6.0f;

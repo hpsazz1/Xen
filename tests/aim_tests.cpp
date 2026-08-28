@@ -3,6 +3,7 @@
 #include "log/log.h"
 
 #include "aim_fixed_scene_replay_fixture.h"
+#include "aim_static_closed_loop_replay_fixture.h"
 
 #include <algorithm>
 #include <array>
@@ -4687,6 +4688,174 @@ void test_fixed_scene_replay_does_not_amplify_horizontal_observation() {
               << observation_y_p95 << '/' << base_y_p95 << '\n';
 }
 
+void test_static_closed_loop_replay_does_not_repeat_horizontal_commands() {
+    using aim_static_closed_loop_replay_fixture::kMeasurementStart;
+    using aim_static_closed_loop_replay_fixture::kObservations;
+
+    AimConfig config;
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.10f;
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    Aim aim(config);
+
+    const auto started_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    auto control_at = started_at;
+    int previous_nonzero_direction = 0;
+    int command_direction_reversals = 0;
+    int absolute_x_commands = 0;
+    int command_direction_violations = 0;
+    std::vector<float> observation_x_differences;
+    std::vector<float> base_x_differences;
+    std::vector<float> observation_y_differences;
+    std::vector<float> base_y_differences;
+    float previous_observation_x = 0.0f;
+    float previous_observation_y = 0.0f;
+    float previous_base_x = 0.0f;
+    float previous_base_y = 0.0f;
+
+    for (std::size_t index = 0; index < kObservations.size(); ++index) {
+        const auto& observation = kObservations[index];
+        if (index != 0) {
+            control_at += std::chrono::nanoseconds(
+                static_cast<long long>(observation.controller_dt_ms *
+                                       1000000.0f));
+        }
+        const auto captured_at = control_at - std::chrono::nanoseconds(
+            static_cast<long long>(observation.observation_age_ms *
+                                   1000000.0f));
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1), captured_at);
+        frame.control_at = control_at;
+        frame.lock_active = true;
+        frame.detections = {{observation.x1,
+                             observation.y1,
+                             observation.x2,
+                             observation.y2,
+                             0.9f,
+                             0}};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "静态闭环真实 Observation 必须逐帧经公开 Aim seam 成功处理，"
+               "index/status=" + std::to_string(index) + "/" +
+                   std::to_string(static_cast<int>(result.status)));
+        if (!result.has_target) continue;
+        if (result.has_command) {
+            expect(aim.record_backend_completed_command(
+                       frame.sequence,
+                       frame.control_at + std::chrono::microseconds(
+                           static_cast<long long>(
+                               observation.backend_completion_ms *
+                               1000.0f)),
+                       result.command.dx_counts,
+                       result.command.dy_counts),
+                   "静态闭环回放必须写回同序列的公开整数完成命令");
+        }
+
+        const float observation_x =
+            (observation.x1 + observation.x2) * 0.5f;
+        const float observation_y =
+            (observation.y1 + observation.y2) * 0.5f;
+        if (index > kMeasurementStart) {
+            observation_x_differences.push_back(
+                std::fabs(observation_x - previous_observation_x));
+            base_x_differences.push_back(
+                std::fabs(result.target.base_aim_x - previous_base_x));
+            observation_y_differences.push_back(
+                std::fabs(observation_y - previous_observation_y));
+            base_y_differences.push_back(
+                std::fabs(result.target.base_aim_y - previous_base_y));
+            absolute_x_commands += std::abs(result.command.dx_counts);
+            if (result.has_command) {
+                const float error_x = result.target.aim_x -
+                    frame.control_center_x;
+                const float error_y = result.target.aim_y -
+                    frame.control_center_y;
+                const float command_dot_error =
+                    result.command.dx_counts * error_x +
+                    result.command.dy_counts * error_y;
+                const float command_magnitude = std::hypot(
+                    static_cast<float>(result.command.dx_counts),
+                    static_cast<float>(result.command.dy_counts));
+                if (command_dot_error <= 0.0f ||
+                    command_magnitude > config.max_counts_per_frame + 0.001f) {
+                    ++command_direction_violations;
+                }
+            }
+            const int direction = result.command.dx_counts > 0
+                ? 1 : (result.command.dx_counts < 0 ? -1 : 0);
+            if (direction != 0) {
+                if (previous_nonzero_direction != 0 &&
+                    direction != previous_nonzero_direction) {
+                    ++command_direction_reversals;
+                }
+                previous_nonzero_direction = direction;
+            }
+        }
+        previous_observation_x = observation_x;
+        previous_observation_y = observation_y;
+        previous_base_x = result.target.base_aim_x;
+        previous_base_y = result.target.base_aim_y;
+    }
+
+    const auto percentile = [](std::vector<float> values, float quantile) {
+        std::sort(values.begin(), values.end());
+        const float position = quantile * (values.size() - 1);
+        const std::size_t lower = static_cast<std::size_t>(
+            std::floor(position));
+        const std::size_t upper = static_cast<std::size_t>(
+            std::ceil(position));
+        const float fraction = position - static_cast<float>(lower);
+        return values[lower] * (1.0f - fraction) +
+            values[upper] * fraction;
+    };
+    const float observation_x_p95 =
+        percentile(observation_x_differences, 0.95f);
+    const float base_x_p95 = percentile(base_x_differences, 0.95f);
+    const float observation_y_p95 =
+        percentile(observation_y_differences, 0.95f);
+    const float base_y_p95 = percentile(base_y_differences, 0.95f);
+    expect(base_x_p95 <= observation_x_p95 &&
+               base_y_p95 <= observation_y_p95,
+           "静态闭环新 red 必须保留既有 base 不放大 Observation 的 X/Y "
+           "前提，Observation/base P95 X/Y=" +
+               std::to_string(observation_x_p95) + "/" +
+               std::to_string(base_x_p95) + "/" +
+               std::to_string(observation_y_p95) + "/" +
+               std::to_string(base_y_p95));
+    expect(command_direction_reversals <= 5 &&
+               absolute_x_commands <= 400 &&
+               base_x_p95 <= observation_x_p95 * (2.0f / 3.0f) &&
+               command_direction_violations == 0,
+           "人工已声明世界 X 静止的稳定测量段必须同时减少交替 X 命令、"
+           "绝对命令量和 base 对 Observation 的跟随变化，并保持二维"
+           "命令方向合同，反向/绝对命令/方向违规/Observation-base P95=" +
+               std::to_string(command_direction_reversals) + "/" +
+               std::to_string(absolute_x_commands) + "/" +
+               std::to_string(command_direction_violations) + "/" +
+               std::to_string(observation_x_p95) + "/" +
+               std::to_string(base_x_p95));
+    std::cout << "静态闭环公开回放: X命令反向/绝对量="
+              << command_direction_reversals << '/' << absolute_x_commands
+              << "，方向违规=" << command_direction_violations
+              << "，Observation/base P95 X=" << observation_x_p95 << '/'
+              << base_x_p95 << "，Y=" << observation_y_p95 << '/'
+              << base_y_p95 << '\n';
+}
+
 void test_tracking_derivative_separates_in_box_reference_from_common_translation() {
     constexpr int kReferenceFrameCount = 104;
     constexpr int kReferenceBranchFrame = 100;
@@ -9000,6 +9169,7 @@ int main() {
     test_backend_completed_delay_inventory_changes_tracking_reversal_response();
     test_faster_closing_slope_continuously_reduces_tracking_request();
     test_fixed_scene_replay_does_not_amplify_horizontal_observation();
+    test_static_closed_loop_replay_does_not_repeat_horizontal_commands();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();

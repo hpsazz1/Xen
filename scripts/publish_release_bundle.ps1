@@ -19,6 +19,7 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 
 function Resolve-ExistingPath([string]$Path, [string]$Description) {
     if (-not (Test-Path -LiteralPath $Path)) {

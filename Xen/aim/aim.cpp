@@ -77,9 +77,11 @@ struct HorizontalRawMotionHistory {
 
 struct HorizontalDirectionHistory {
     std::array<float, kTrackHorizontalTrendSampleCount> center_x_ratio{};
+    std::array<float, kTrackHorizontalTrendSampleCount> center_y_ratio{};
     std::size_t next = 0;
     std::size_t count = 0;
-    double travelled_distance = 0.0;
+    double travelled_distance_x = 0.0;
+    double travelled_distance_y = 0.0;
 };
 
 struct Track {
@@ -512,11 +514,12 @@ HorizontalTrendEstimate estimate_horizontal_trend(
 void reset_horizontal_direction_history(Track& track) noexcept {
     track.horizontal_direction.next = 0;
     track.horizontal_direction.count = 0;
-    track.horizontal_direction.travelled_distance = 0.0;
+    track.horizontal_direction.travelled_distance_x = 0.0;
+    track.horizontal_direction.travelled_distance_y = 0.0;
 }
 
 void append_horizontal_direction_history(
-        Track& track, float center_x_ratio) noexcept {
+        Track& track, float center_x_ratio, float center_y_ratio) noexcept {
     HorizontalDirectionHistory& history = track.horizontal_direction;
     if (history.count != 0) {
         const std::size_t newest =
@@ -525,17 +528,26 @@ void append_horizontal_direction_history(
         if (history.count == kTrackHorizontalTrendSampleCount) {
             const std::size_t second_oldest =
                 (history.next + 1) % kTrackHorizontalTrendSampleCount;
-            history.travelled_distance -= std::fabs(
+            history.travelled_distance_x -= std::fabs(
                 static_cast<double>(
                     history.center_x_ratio[second_oldest]) -
                 static_cast<double>(
                     history.center_x_ratio[history.next]));
+            history.travelled_distance_y -= std::fabs(
+                static_cast<double>(
+                    history.center_y_ratio[second_oldest]) -
+                static_cast<double>(
+                    history.center_y_ratio[history.next]));
         }
-        history.travelled_distance += std::fabs(
+        history.travelled_distance_x += std::fabs(
             static_cast<double>(center_x_ratio) -
             static_cast<double>(history.center_x_ratio[newest]));
+        history.travelled_distance_y += std::fabs(
+            static_cast<double>(center_y_ratio) -
+            static_cast<double>(history.center_y_ratio[newest]));
     }
     history.center_x_ratio[history.next] = center_x_ratio;
+    history.center_y_ratio[history.next] = center_y_ratio;
     history.next =
         (history.next + 1) % kTrackHorizontalTrendSampleCount;
     history.count = std::min(
@@ -552,7 +564,7 @@ float horizontal_direction_efficiency(const Track& track) noexcept {
         (history.next + kTrackHorizontalTrendSampleCount - 1) %
         kTrackHorizontalTrendSampleCount;
     const double travelled_distance =
-        std::max(0.0, history.travelled_distance);
+        std::max(0.0, history.travelled_distance_x);
     if (travelled_distance <= std::numeric_limits<double>::epsilon()) {
         return 0.0f;
     }
@@ -561,6 +573,16 @@ float horizontal_direction_efficiency(const Track& track) noexcept {
         static_cast<double>(history.center_x_ratio[oldest]));
     return static_cast<float>(std::clamp(
         net_distance / travelled_distance, 0.0, 1.0));
+}
+
+float horizontal_direction_path_share(const Track& track) noexcept {
+    const HorizontalDirectionHistory& history = track.horizontal_direction;
+    const double travelled_x = std::max(0.0, history.travelled_distance_x);
+    const double travelled_y = std::max(0.0, history.travelled_distance_y);
+    const double travelled = travelled_x + travelled_y;
+    if (travelled <= std::numeric_limits<double>::epsilon()) return 1.0f;
+    return static_cast<float>(std::clamp(
+        travelled_x / travelled, 0.0, 1.0));
 }
 
 void append_horizontal_trend_change_candidate(
@@ -1075,6 +1097,8 @@ struct Aim::Impl {
             (observation.x1 + observation.x2) * 0.5f;
         const float observation_center_x_ratio =
             observation_center_x / roi_width;
+        const float roi_height = std::sqrt(std::max(
+            1.0f, diagonal * diagonal - roi_width * roi_width));
         // 单侧裁切会改变“可见框中心”的坐标语义，却不会改变人物的物理
         // 中心。趋势窗口统一消费由稳定边和裁切前宽度重建的中心；普通框
         // 下它与原始中心完全相同，不增加候选、驻留或放行状态。
@@ -1082,6 +1106,8 @@ struct Aim::Impl {
             observation_center_x_ratio;
         const float observation_center_y =
             (observation.y1 + observation.y2) * 0.5f;
+        const float observation_center_y_ratio =
+            observation_center_y / roi_height;
         const float previous_base_aim_x =
             track.aim_x - track.predicted_motion_x;
         const float center_motion_residual_x =
@@ -1479,8 +1505,35 @@ struct Aim::Impl {
                 horizontal_maneuver_active = false;
             }
             if (!observation.head_only) {
+                float direction_center_y_ratio = observation_center_y_ratio;
+                if (track.horizontal_direction.count != 0) {
+                    const std::size_t newest =
+                        (track.horizontal_direction.next +
+                         kTrackHorizontalTrendSampleCount - 1) %
+                        kTrackHorizontalTrendSampleCount;
+                    const float previous_direction_center_y_ratio =
+                        track.horizontal_direction.center_y_ratio[newest];
+                    const float vertical_common_motion = std::fabs(
+                        common_edge_motion(y1_residual, y2_residual));
+                    const float vertical_shape_motion =
+                        std::fabs(y2_residual - y1_residual);
+                    const float vertical_motion_total =
+                        vertical_common_motion + vertical_shape_motion;
+                    const float vertical_path_translation_consistency =
+                        vertical_motion_total > 0.0f
+                            ? vertical_common_motion /
+                                  vertical_motion_total
+                            : 0.0f;
+                    direction_center_y_ratio =
+                        previous_direction_center_y_ratio +
+                        (direction_center_y_ratio -
+                         previous_direction_center_y_ratio) *
+                            vertical_path_translation_consistency *
+                            vertical_path_translation_consistency;
+                }
                 append_horizontal_direction_history(
-                    track, horizontal_trend_observation_center_x_ratio);
+                    track, horizontal_trend_observation_center_x_ratio,
+                    direction_center_y_ratio);
             }
             update_deformation(pose_changed,
                                center_motion_residual_y,
@@ -2065,19 +2118,32 @@ struct Aim::Impl {
             const float observation_magnitude =
                 std::fabs(observation_motion_x) * observation_consistency *
                 observation_consistency;
-            if (base_magnitude > observation_magnitude) {
-                // 方向持久度只约束 OLS/预测比当前共同边支持的 Observation
-                // 位移多生成的部分。精确单向平移时净位移等于总路程，
-                // candidate 完全保留；往返轮廓的净位移接近零，只去掉额外
-                // 放大量。平方把它作为连续一致性权重，不引入速度档、
-                // 场景分支或固定频率。
+            if (base_magnitude > 0.0f) {
+                // 水平净位移/总路程继续区分单向平移与往返轮廓；再用同窗
+                // X 路程占 X/Y 有效共同平移路程的比例，区分横移与垂直姿态。
+                // 两者只连续调度本帧 X 基础点变化，不读取速度、频率或场景。
+                // 精确单向横移的方向效率为 1，纯水平往返的路径占比为 1，
+                // 均保留 Observation 支持的普通横向运动；低效率且 Y 主导时
+                // 才降低 X 轮廓摆动，超出 Observation 的趋势放大量仍只由
+                // 既有方向持久度约束。
                 const float direction_efficiency =
                     horizontal_direction_efficiency(track);
                 const float persistence_weight =
                     direction_efficiency * direction_efficiency;
-                const float supported_magnitude = observation_magnitude +
-                    (base_magnitude - observation_magnitude) *
-                        persistence_weight;
+                const float horizontal_path_share =
+                    horizontal_direction_path_share(track);
+                const float observation_path_weight =
+                    persistence_weight +
+                    (1.0f - persistence_weight) * horizontal_path_share *
+                        horizontal_path_share;
+                const float observation_supported_magnitude =
+                    std::min(base_magnitude, observation_magnitude) *
+                    observation_path_weight;
+                const float excess_magnitude = std::max(
+                    0.0f, base_magnitude - observation_magnitude);
+                const float supported_magnitude =
+                    observation_supported_magnitude +
+                    excess_magnitude * persistence_weight;
                 track.aim_x = previous_base_aim_x +
                     std::copysign(supported_magnitude, base_motion_x);
                 track.aim_x = std::clamp(
@@ -2371,7 +2437,9 @@ struct Aim::Impl {
                     (observation.x1 + observation.x2) * 0.5f / roi_width);
                 append_horizontal_direction_history(
                     created_track,
-                    (observation.x1 + observation.x2) * 0.5f / roi_width);
+                    (observation.x1 + observation.x2) * 0.5f / roi_width,
+                    (observation.y1 + observation.y2) * 0.5f /
+                        std::max(1.0f, static_cast<float>(frame.roi_height)));
             }
             created_track.last_observation_x1 = observation.x1;
             created_track.last_observation_x2 = observation.x2;

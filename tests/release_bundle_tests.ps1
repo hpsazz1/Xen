@@ -9,6 +9,7 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 
 function Write-Utf8([string]$Path, [string]$Content) {
     $parent = Split-Path -Parent $Path
