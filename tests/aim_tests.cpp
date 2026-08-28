@@ -3,6 +3,7 @@
 #include "log/log.h"
 
 #include "aim_fixed_scene_replay_fixture.h"
+#include "aim_latest_physical_replay_fixture.h"
 #include "aim_latest_static_replay_fixture.h"
 #include "aim_static_closed_loop_replay_fixture.h"
 
@@ -4528,6 +4529,138 @@ void test_faster_closing_slope_continuously_reduces_tracking_request() {
                    faster_closing.current.control.desired_x_counts));
 }
 
+void test_same_direction_completed_inventory_brakes_closing_request() {
+    constexpr int kWarmupFrames = 40;
+    constexpr int kFrameCount = kWarmupFrames + 2;
+    constexpr auto kFrameStep = std::chrono::microseconds(4167);
+    constexpr float kWarmupError = 6.0f;
+    constexpr float kPreviousError = 2.25f;
+    constexpr float kCurrentError = 1.5f;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 2.25f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 14.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+
+    struct Sample {
+        AimResult previous;
+        AimResult current;
+        int valid_frames = 0;
+        int completed_frames = 0;
+    };
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    const auto run_case = [&](bool complete_previous_command) {
+        Aim aim(config);
+        Sample sample;
+        for (int index = 0; index < kFrameCount; ++index) {
+            const float error = index < kWarmupFrames
+                ? kWarmupError
+                : (index == kWarmupFrames ? kPreviousError : kCurrentError);
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + kFrameStep * index);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = 180.0f - error;
+            frame.lock_active = true;
+            frame.detections = {body(180.0f, 172.0f)};
+            const AimResult result = aim.process(frame);
+            if (result.status == AimStatus::SUCCESS && result.has_target &&
+                result.control.evaluated) {
+                ++sample.valid_frames;
+            }
+            if (index == kWarmupFrames) sample.previous = result;
+            if (index == kFrameCount - 1) {
+                sample.current = result;
+                continue;
+            }
+            if (result.has_command) {
+                const bool keep_previous = index != kWarmupFrames ||
+                    complete_previous_command;
+                expect(aim.record_backend_completed_command(
+                           frame.sequence,
+                           frame.control_at + std::chrono::microseconds(100),
+                           keep_previous ? result.command.dx_counts : 0,
+                           keep_previous ? result.command.dy_counts : 0),
+                       "same-direction 反事实必须逐帧确认同一预计算命令");
+                ++sample.completed_frames;
+            }
+        }
+        return sample;
+    };
+
+    const Sample completed = run_case(true);
+    const Sample rejected = run_case(false);
+    expect(completed.valid_frames == kFrameCount &&
+               rejected.valid_frames == kFrameCount &&
+               completed.completed_frames == kFrameCount - 1 &&
+               rejected.completed_frames == kFrameCount - 1,
+           "same-direction 成对夹具必须逐帧保留公开目标、控制求值和"
+           "backend completion，帧/完成=" +
+               std::to_string(completed.valid_frames) + "/" +
+               std::to_string(rejected.valid_frames) + "/" +
+               std::to_string(completed.completed_frames) + "/" +
+               std::to_string(rejected.completed_frames));
+    expect(completed.previous.has_command &&
+               rejected.previous.has_command &&
+               completed.previous.command.dx_counts > 0 &&
+               completed.previous.command.dx_counts ==
+                   rejected.previous.command.dx_counts,
+           "分叉前一帧必须产生相同且朝当前误差的非零 X 命令，completed/"
+           "rejected=" +
+               std::to_string(completed.previous.command.dx_counts) + "/" +
+               std::to_string(rejected.previous.command.dx_counts));
+    expect(completed.current.target.track_id ==
+                   rejected.current.target.track_id &&
+               std::fabs(completed.current.target.base_aim_x -
+                         rejected.current.target.base_aim_x) < 0.0001f &&
+               std::fabs(completed.current.target.base_aim_y -
+                         rejected.current.target.base_aim_y) < 0.0001f &&
+               std::fabs(completed.current.control.proportional_x_counts -
+                         rejected.current.control.proportional_x_counts) <
+                   0.0001f &&
+               std::fabs(completed.current.control.feedforward_x_counts -
+                         rejected.current.control.feedforward_x_counts) <
+                   0.0001f &&
+               std::fabs(completed.current.control.filtered_x_counts -
+                         rejected.current.control.filtered_x_counts) <
+                   0.0001f,
+           "成对分叉只能改变当前 15 ms 窗内同向完成库存，不得改变目标、"
+           "基础点、PI 或 smoothing 历史");
+    expect(completed.current.control.pending_net_x_counts >
+                   rejected.current.control.pending_net_x_counts &&
+               completed.current.control.pending_net_x_counts > 0.0f,
+           "completed 分支必须比 rejected 分支多一项当前误差同向库存，"
+           "completed/rejected=" +
+               std::to_string(
+                   completed.current.control.pending_net_x_counts) + "/" +
+               std::to_string(
+                   rejected.current.control.pending_net_x_counts));
+    expect(completed.current.control.desired_x_counts >= 0.0f &&
+               rejected.current.control.desired_x_counts > 0.0f,
+           "同向完成库存只能制动当前同向请求，不得自行生成反向，"
+           "completed/rejected=" +
+               std::to_string(
+                   completed.current.control.desired_x_counts) + "/" +
+               std::to_string(rejected.current.control.desired_x_counts));
+    expect(std::fabs(completed.current.control.desired_x_counts) <
+               std::fabs(rejected.current.control.desired_x_counts),
+           "相同闭合轨迹下，15 ms 窗内新增同向 backend-completed 库存必须"
+           "连续减小 X 请求，completed/rejected=" +
+               std::to_string(
+                   completed.current.control.desired_x_counts) + "/" +
+               std::to_string(rejected.current.control.desired_x_counts));
+}
+
 void test_fixed_scene_replay_does_not_amplify_horizontal_observation() {
     using aim_fixed_scene_replay_fixture::kMeasurementStart;
     using aim_fixed_scene_replay_fixture::kObservations;
@@ -4990,6 +5123,186 @@ void test_latest_static_replay_does_not_amplify_horizontal_base() {
     std::cout << "最新静态公开回放 P95: Observation/base X="
               << observation_x_p95 << '/' << base_x_p95
               << "，Y=" << observation_y_p95 << '/' << base_y_p95 << '\n';
+}
+
+void test_latest_physical_replay_brakes_before_horizontal_crossing() {
+    using aim_latest_physical_replay_fixture::kMeasurementStart;
+    using aim_latest_physical_replay_fixture::kObservations;
+
+    AimConfig config;
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.10f;
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    Aim aim(config);
+
+    auto control_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    int previous_nonzero_direction = 0;
+    int previous_error_direction = 0;
+    int command_direction_reversals = 0;
+    int error_direction_reversals = 0;
+    int absolute_x_commands = 0;
+    int command_direction_violations = 0;
+    std::vector<float> observation_x_differences;
+    std::vector<float> base_x_differences;
+    std::vector<float> observation_y_differences;
+    std::vector<float> base_y_differences;
+    float previous_observation_x = 0.0f;
+    float previous_observation_y = 0.0f;
+    float previous_base_x = 0.0f;
+    float previous_base_y = 0.0f;
+
+    for (std::size_t index = 0; index < kObservations.size(); ++index) {
+        const auto& observation = kObservations[index];
+        if (index != 0) {
+            control_at += std::chrono::nanoseconds(
+                static_cast<long long>(observation.controller_dt_ms *
+                                       1000000.0f));
+        }
+        const auto captured_at = control_at - std::chrono::nanoseconds(
+            static_cast<long long>(observation.observation_age_ms *
+                                   1000000.0f));
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1), captured_at);
+        frame.control_at = control_at;
+        frame.lock_active = true;
+        frame.detections = {{observation.x1,
+                             observation.y1,
+                             observation.x2,
+                             observation.y2,
+                             0.9f,
+                             0}};
+        if (observation.aim_from_head) {
+            const float center_x =
+                (observation.x1 + observation.x2) * 0.5f;
+            const float head_width =
+                (observation.x2 - observation.x1) * 0.5f;
+            frame.detections.push_back(head_box(
+                center_x, observation.y1 + 6.0f, head_width, 10.0f));
+        }
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "最新 Physical red 必须逐帧经公开 Aim seam 成功处理");
+        if (!result.has_target) continue;
+        expect(result.target.matched_observation_valid &&
+                   result.target.matched_observation_aim_from_head ==
+                       observation.aim_from_head,
+               "最新 Physical red 必须保留逐帧 body/head 关联语义");
+        if (result.has_command) {
+            expect(aim.record_backend_completed_command(
+                       frame.sequence,
+                       frame.control_at + std::chrono::microseconds(
+                           static_cast<long long>(
+                               observation.backend_completion_ms *
+                               1000.0f)),
+                       result.command.dx_counts,
+                       result.command.dy_counts),
+                   "最新 Physical red 必须写回同序列整数完成命令");
+        }
+
+        const float observation_x =
+            (observation.x1 + observation.x2) * 0.5f;
+        const float observation_y =
+            (observation.y1 + observation.y2) * 0.5f;
+        if (index > kMeasurementStart) {
+            observation_x_differences.push_back(
+                std::fabs(observation_x - previous_observation_x));
+            base_x_differences.push_back(
+                std::fabs(result.target.base_aim_x - previous_base_x));
+            observation_y_differences.push_back(
+                std::fabs(observation_y - previous_observation_y));
+            base_y_differences.push_back(
+                std::fabs(result.target.base_aim_y - previous_base_y));
+            absolute_x_commands += std::abs(result.command.dx_counts);
+            const float error_x = result.target.aim_x -
+                frame.control_center_x;
+            const int error_direction = error_x > 0.0f
+                ? 1 : (error_x < 0.0f ? -1 : 0);
+            if (error_direction != 0) {
+                if (previous_error_direction != 0 &&
+                    error_direction != previous_error_direction) {
+                    ++error_direction_reversals;
+                }
+                previous_error_direction = error_direction;
+            }
+            if (result.has_command) {
+                const float error_y = result.target.aim_y -
+                    frame.control_center_y;
+                if (result.command.dx_counts * error_x +
+                        result.command.dy_counts * error_y <= 0.0f) {
+                    ++command_direction_violations;
+                }
+            }
+            const int direction = result.command.dx_counts > 0
+                ? 1 : (result.command.dx_counts < 0 ? -1 : 0);
+            if (direction != 0) {
+                if (previous_nonzero_direction != 0 &&
+                    direction != previous_nonzero_direction) {
+                    ++command_direction_reversals;
+                }
+                previous_nonzero_direction = direction;
+            }
+        }
+        previous_observation_x = observation_x;
+        previous_observation_y = observation_y;
+        previous_base_x = result.target.base_aim_x;
+        previous_base_y = result.target.base_aim_y;
+    }
+
+    const auto percentile = [](std::vector<float> values, float quantile) {
+        std::sort(values.begin(), values.end());
+        const float position = quantile * (values.size() - 1);
+        const std::size_t lower = static_cast<std::size_t>(
+            std::floor(position));
+        const std::size_t upper = static_cast<std::size_t>(
+            std::ceil(position));
+        const float fraction = position - static_cast<float>(lower);
+        return values[lower] * (1.0f - fraction) +
+            values[upper] * fraction;
+    };
+    const float observation_x_p95 =
+        percentile(observation_x_differences, 0.95f);
+    const float base_x_p95 = percentile(base_x_differences, 0.95f);
+    const float observation_y_p95 =
+        percentile(observation_y_differences, 0.95f);
+    const float base_y_p95 = percentile(base_y_differences, 0.95f);
+    expect(base_x_p95 <= observation_x_p95 &&
+               base_y_p95 <= observation_y_p95 &&
+               command_direction_violations == 0,
+           "最新 Physical red 必须保留 base X/Y 不放大及二维方向合同，"
+           "Observation/base P95 X/Y/方向违规=" +
+               std::to_string(observation_x_p95) + "/" +
+               std::to_string(base_x_p95) + "/" +
+               std::to_string(observation_y_p95) + "/" +
+               std::to_string(base_y_p95) + "/" +
+               std::to_string(command_direction_violations));
+    expect(command_direction_reversals <= error_direction_reversals &&
+               absolute_x_commands <= 125,
+           "世界 X 静止且 15 ms 已完成命令在第三帧显现的失败窗，控制器"
+           "必须在过零前连续制动，不得新增超出可见误差换边的 X 往返，并"
+           "须降低同窗整数命令量；命令/误差反向/绝对量=" +
+               std::to_string(command_direction_reversals) + "/" +
+               std::to_string(error_direction_reversals) + "/" +
+               std::to_string(absolute_x_commands));
+    std::cout << "最新 Physical 公开回放: X命令/误差反向/绝对量="
+              << command_direction_reversals << '/'
+              << error_direction_reversals << '/' << absolute_x_commands
+              << "，Observation/base P95 X=" << observation_x_p95 << '/'
+              << base_x_p95 << "，Y=" << observation_y_p95 << '/'
+              << base_y_p95 << '\n';
 }
 
 void test_tracking_derivative_separates_in_box_reference_from_common_translation() {
@@ -9304,9 +9617,11 @@ int main() {
     test_backend_completed_command_feedback_contract();
     test_backend_completed_delay_inventory_changes_tracking_reversal_response();
     test_faster_closing_slope_continuously_reduces_tracking_request();
+    test_same_direction_completed_inventory_brakes_closing_request();
     test_fixed_scene_replay_does_not_amplify_horizontal_observation();
     test_static_closed_loop_replay_does_not_repeat_horizontal_commands();
     test_latest_static_replay_does_not_amplify_horizontal_base();
+    test_latest_physical_replay_brakes_before_horizontal_crossing();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();
