@@ -666,6 +666,15 @@ else()
     target_compile_definitions(capture PUBLIC XEN_HAS_NDI=0)
 endif()
 
+add_library(capture_evidence STATIC
+    Xen/capture_evidence/capture_evidence.cpp)
+target_include_directories(capture_evidence PUBLIC
+    ${PROJECT_SOURCE_DIR}/Xen
+    ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(capture_evidence
+    PUBLIC capture ${OpenCV_LIBS}
+    PRIVATE nlohmann_json::nlohmann_json bcrypt)
+
 add_library(sender STATIC
     Xen/sender/sender.cpp
     Xen/sender/report.cpp)
@@ -780,6 +789,17 @@ add_executable(xen_clock_source
     Xen/clock_source/main.cpp)
 set_target_properties(xen_clock_source PROPERTIES OUTPUT_NAME XenClockSource)
 target_link_libraries(xen_clock_source PRIVATE clock_sync)
+
+# 证据入口只链接 Capture 链；不链接 Runtime、Aim、Mouse 或 Keyboard，因而
+# 不具备武装或发送真实输入的能力。
+add_executable(xen_capture_evidence
+    Xen/capture_evidence/main.cpp)
+set_target_properties(
+    xen_capture_evidence PROPERTIES OUTPUT_NAME XenCaptureEvidence)
+target_link_libraries(xen_capture_evidence PRIVATE capture_evidence)
+if(WIN32)
+    xen_deploy_runtime_dlls(xen_capture_evidence OPENCV NDI)
+endif()
 
 add_executable(xen_benchmark
     Xen/benchmark/main.cpp)
@@ -930,6 +950,12 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(video_visibility_tests OPENCV)
     add_test(NAME video_visibility_tests COMMAND video_visibility_tests)
 
+    add_executable(capture_evidence_tests
+        tests/capture_evidence_tests.cpp)
+    target_link_libraries(capture_evidence_tests PRIVATE capture_evidence)
+    xen_deploy_runtime_dlls(capture_evidence_tests OPENCV NDI)
+    add_test(NAME capture_evidence_tests COMMAND capture_evidence_tests)
+
     add_executable(aim_tests
         tests/aim_tests.cpp)
     target_link_libraries(aim_tests PRIVATE aim log)
@@ -989,6 +1015,16 @@ if(BUILD_TESTING)
         message(FATAL_ERROR
             "Windows PowerShell 5 executable not found: ${XEN_WINDOWS_POWERSHELL}")
     endif()
+    add_test(NAME obs_capture_binding_tests
+        COMMAND "${XEN_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/tests/obs_capture_binding_tests.ps1"
+            -BindingScript "${PROJECT_SOURCE_DIR}/scripts/export_obs_capture_binding.ps1"
+            -TestRoot "${CMAKE_BINARY_DIR}/obs-capture-binding-tests")
+    add_test(NAME capture_evidence_cli_tests
+        COMMAND "${XEN_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/tests/capture_evidence_cli_tests.ps1"
+            -Executable "$<TARGET_FILE:xen_capture_evidence>"
+            -TestRoot "${CMAKE_BINARY_DIR}/capture-evidence-cli-tests")
     add_test(NAME release_bundle_tests
         COMMAND "${XEN_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
             -File "${PROJECT_SOURCE_DIR}/tests/release_bundle_tests.ps1"
