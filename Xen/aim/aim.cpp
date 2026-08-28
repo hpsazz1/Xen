@@ -2106,8 +2106,10 @@ struct Aim::Impl {
         track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
         if (horizontal_trend_active &&
             track.horizontal_observation_initialized &&
-            !box_semantics_changed &&
-            track.aim_from_head == observation.aim_from_head) {
+            !box_semantics_changed) {
+            // body 关联中 head 是否被检出只改变置信度来源；aim_ratio_x/y
+            // 始终仍由同一 body 配置定义。短暂 head 缺失不是框语义切换，
+            // 不能因此绕过 X 往返约束并暴露 OLS/预测放大量。
             const float base_motion_x =
                 track.aim_x - previous_base_aim_x;
             const float observation_motion_x =
