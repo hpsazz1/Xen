@@ -29,7 +29,14 @@
     [double]$MaxDelayCompensationMs = 16.0,
     [ValidateRange(1.0, 50.0)]
     [double]$MaxDelayCompensationPercent = 15.0,
-    [switch]$RequireSourceTiming
+    [switch]$RequireSourceTiming,
+    [switch]$CapturePixelEvidence,
+    [string]$PixelEvidenceToolRoot = "",
+    [string]$PixelEvidenceBindingPath = "",
+    [ValidateRange(1, 1200)]
+    [int]$PixelEvidenceFrames = 1200,
+    [ValidateRange(1, 60)]
+    [int]$PixelEvidenceMaxSeconds = 15
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +59,24 @@ if ($Scenario -eq "SuperJump" -and $SuperJumpCase -eq "None") {
 }
 if ($Scenario -ne "SuperJump" -and $SuperJumpCase -ne "None") {
     throw "SuperJumpCase 只适用于 SuperJump 场景。"
+}
+if ($CapturePixelEvidence.IsPresent) {
+    if (-not $Prepare.IsPresent -or -not $RequireSourceTiming.IsPresent) {
+        throw "同步像素 sidecar 只能随 RequireSourceTiming 的 Prepare 启用。"
+    }
+    if ([string]::IsNullOrWhiteSpace($PixelEvidenceToolRoot) -or
+        [string]::IsNullOrWhiteSpace($PixelEvidenceBindingPath) -or
+        -not [System.IO.Path]::IsPathRooted($PixelEvidenceToolRoot) -or
+        -not [System.IO.Path]::IsPathRooted($PixelEvidenceBindingPath)) {
+        throw "同步像素 sidecar 必须提供辅机本地绝对工具根和 binding 路径。"
+    }
+    if ($PixelEvidenceToolRoot.Contains('"') -or
+        $PixelEvidenceBindingPath.Contains('"')) {
+        throw "同步像素 sidecar 路径不得包含双引号。"
+    }
+} elseif (-not [string]::IsNullOrWhiteSpace($PixelEvidenceToolRoot) -or
+    -not [string]::IsNullOrWhiteSpace($PixelEvidenceBindingPath)) {
+    throw "未启用 CapturePixelEvidence 时不得传入 sidecar 路径。"
 }
 
 function Read-Json([string]$Path, [string]$Description) {
@@ -432,6 +457,13 @@ if ($Prepare) {
     $sourceTimingSwitch = if ($RequireSourceTiming.IsPresent) {
         ' -RequireSourceTiming'
     } else { '' }
+    $pixelEvidenceSwitch = if ($CapturePixelEvidence.IsPresent) {
+        ' -CapturePixelEvidence -PixelEvidenceToolRoot "' +
+            $PixelEvidenceToolRoot + '" -PixelEvidenceBindingPath "' +
+            $PixelEvidenceBindingPath + '" -PixelEvidenceFrames ' +
+            $PixelEvidenceFrames + ' -PixelEvidenceMaxSeconds ' +
+            $PixelEvidenceMaxSeconds
+    } else { '' }
     $remoteCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' +
         $remoteScript + '" -TaskId ' + $TaskId + ' -Scenario ' +
         $Scenario + ' -SuperJumpCase ' + $SuperJumpCase +
@@ -453,7 +485,7 @@ if ($Prepare) {
         ' -MaxDelayCompensationPercent ' +
             $MaxDelayCompensationPercent.ToString(
                 'F6', [Globalization.CultureInfo]::InvariantCulture) +
-        $sourceTimingSwitch
+        $sourceTimingSwitch + $pixelEvidenceSwitch
     $prepareOutput = @(& ssh -i $SshIdentityFile -o IdentitiesOnly=yes `
         -o BatchMode=yes "$SshUser@$SshHost" $remoteCommand 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "辅机 Prepare 失败，退出码：$LASTEXITCODE" }
@@ -586,6 +618,18 @@ if ($Prepare) {
         [string]$task.profile -ne $Profile -or
         [bool]$task.require_source_timing -ne
             $RequireSourceTiming.IsPresent -or
+        [bool]$task.pixel_evidence.enabled -ne
+            $CapturePixelEvidence.IsPresent -or
+        ($CapturePixelEvidence.IsPresent -and
+            ([string]$task.pixel_evidence.executable.path -ne
+                (Join-Path $PixelEvidenceToolRoot "XenCaptureEvidence.exe") -or
+            [string]$task.pixel_evidence.source_binding.path -ne
+                $PixelEvidenceBindingPath -or
+            [int]$task.pixel_evidence.frames -ne $PixelEvidenceFrames -or
+            [int]$task.pixel_evidence.max_seconds -ne
+                $PixelEvidenceMaxSeconds -or
+            [bool]$task.pixel_evidence.physical_output_capability -or
+            $launchCommand -notmatch "-CapturePixelEvidence")) -or
         [double]$task.aim.smoothing -ne $Smoothing -or
         [double]$task.aim.counts_per_pixel_x -ne $resolvedCountsPerPixelX -or
         [double]$task.aim.counts_per_pixel_y -ne $resolvedCountsPerPixelY -or

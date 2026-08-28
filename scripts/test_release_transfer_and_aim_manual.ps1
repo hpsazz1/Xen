@@ -248,6 +248,137 @@ try {
             $taskScopedTask.aim_fixed_scene_analysis.sha256)) {
         throw "人工任务没有绑定可执行 source timing、对话回收、任务范围校验模式、Worker 或通用固定场景报告工具哈希。"
     }
+
+    $pixelToolRoot = Join-Path $root "pixel-sidecar"
+    New-Item -ItemType Directory -Path $pixelToolRoot | Out-Null
+    Write-Utf8 (Join-Path $pixelToolRoot "XenCaptureEvidence.exe") `
+        "pixel evidence executable"
+    Write-Utf8 (Join-Path $pixelToolRoot "opencv_world4140.dll") `
+        "opencv runtime"
+    Write-Utf8 (Join-Path $pixelToolRoot "Processing.NDI.Lib.x64.dll") `
+        "ndi runtime"
+    $pixelBinding = Join-Path $root "obs-source-binding.json"
+    Write-Utf8 $pixelBinding '{"physical_output_capability":false}'
+    $pixelTaskRoot = Join-Path $root "pixel-sidecar-task"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -RequireSourceTiming `
+        -CapturePixelEvidence `
+        -PixelEvidenceToolRoot $pixelToolRoot `
+        -PixelEvidenceBindingPath $pixelBinding `
+        -PixelEvidenceFrames 1200 -PixelEvidenceMaxSeconds 15 `
+        -PackageRoot $published -RunDirectory $pixelTaskRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "同步像素 sidecar 的 Prepare 合同必须可生成。"
+    }
+    $pixelTask = Get-Content -LiteralPath `
+        (Join-Path $pixelTaskRoot "task.json") -Raw -Encoding utf8 |
+        ConvertFrom-Json
+    $pixelTaskMarkdown = Get-Content -LiteralPath `
+        (Join-Path $pixelTaskRoot "TASK.md") -Raw -Encoding utf8
+    if (-not [bool]$pixelTask.pixel_evidence.enabled -or
+        [int]$pixelTask.pixel_evidence.frames -ne 1200 -or
+        [int]$pixelTask.pixel_evidence.max_seconds -ne 15 -or
+        [string]$pixelTask.pixel_evidence.output_relative_path -ne
+            "pixel-evidence" -or
+        [string]::IsNullOrWhiteSpace(
+            $pixelTask.pixel_evidence.executable.sha256) -or
+        [string]::IsNullOrWhiteSpace(
+            $pixelTask.pixel_evidence.opencv_runtime.sha256) -or
+        [string]::IsNullOrWhiteSpace(
+            $pixelTask.pixel_evidence.ndi_runtime.sha256) -or
+        [string]::IsNullOrWhiteSpace(
+            $pixelTask.pixel_evidence.source_binding.sha256) -or
+        $pixelTaskMarkdown -notmatch "同步 NDI 像素 sidecar" -or
+        $pixelTaskMarkdown -notmatch "-CapturePixelEvidence" -or
+        $pixelTaskMarkdown -notmatch "-PixelEvidenceFrames 1200" -or
+        $pixelTaskMarkdown -notmatch "-PixelEvidenceMaxSeconds 15") {
+        throw "同步像素 sidecar 没有绑定工具闭包、source binding、输出目录或唯一 Launch 参数。"
+    }
+    $invalidPixelTaskRoot = Join-Path $root "pixel-sidecar-without-timing"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -CapturePixelEvidence `
+        -PixelEvidenceToolRoot $pixelToolRoot `
+        -PixelEvidenceBindingPath $pixelBinding `
+        -PackageRoot $published -RunDirectory $invalidPixelTaskRoot | Out-Null
+    if ($LASTEXITCODE -eq 0 -or
+        (Test-Path -LiteralPath $invalidPixelTaskRoot)) {
+        throw "同步像素 sidecar 缺少 RequireSourceTiming 时必须 fail-closed，且不得创建 Run。"
+    }
+    $pixelAutomaticRoot = Join-Path $pixelTaskRoot "automatic"
+    New-Item -ItemType Directory -Path $pixelAutomaticRoot -Force |
+        Out-Null
+    $pixelSchema13Report = [ordered]@{
+        schema = 13
+        session_id = "pixel-schema13"
+        provider = "TensorrtExecutionProvider"
+        capture_backend = "NDI"
+        mouse_backend = "kmbox_net"
+        sample_count = 1
+        successful_samples = 1
+        failed_samples = 0
+        report_samples_dropped = 0
+        runtime_samples_dropped = 0
+        samples = @(New-Schema13AimSample)
+    }
+    Write-Utf8 (Join-Path $pixelAutomaticRoot "schema13.json") `
+        (($pixelSchema13Report | ConvertTo-Json -Depth 10) + "`n")
+    $pixelOutputRoot = Join-Path $pixelTaskRoot "pixel-evidence"
+    New-Item -ItemType Directory -Path $pixelOutputRoot | Out-Null
+    $pixelFrames = @(for ($frame = 0; $frame -lt 1200; ++$frame) {
+        [ordered]@{
+            source_time_timing_valid = $true
+            source_clock_status = "VALID"
+        }
+    })
+    $pixelManifest = [ordered]@{
+        schema_version = 1
+        evidence_type = "output_off_capture"
+        physical_output_capability = $false
+        capture_backend = "NDI"
+        capture_source_name = "HPSAZZ (Xen-ROI-320)"
+        capture_config = [ordered]@{ require_source_timing = $true }
+        requested_frame_count = 1200
+        recorded_frame_count = 1200
+        source_binding = [ordered]@{
+            sha256 = [string]$pixelTask.pixel_evidence.source_binding.sha256
+        }
+        frames = $pixelFrames
+    }
+    Write-Utf8 (Join-Path $pixelOutputRoot "manifest.json") `
+        (($pixelManifest | ConvertTo-Json -Depth 5) + "`n")
+    $pixelRecoverOutput = @(& powershell.exe -NoProfile `
+        -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -RequireSourceTiming `
+        -CapturePixelEvidence `
+        -PixelEvidenceToolRoot $pixelToolRoot `
+        -PixelEvidenceBindingPath $pixelBinding `
+        -PixelEvidenceFrames 1200 -PixelEvidenceMaxSeconds 15 `
+        -PackageRoot $published -RunDirectory $pixelTaskRoot 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $pixelRecoverOutput | ForEach-Object { Write-Host $_ }
+        throw "同步像素 sidecar 离线回收失败。"
+    }
+    $pixelRecoveredSummary = Get-Content -LiteralPath `
+        (Join-Path $pixelTaskRoot "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not [bool]$pixelRecoveredSummary.pixel_evidence.enabled -or
+        -not [bool]$pixelRecoveredSummary.pixel_evidence.gate_passed -or
+        [string]$pixelRecoveredSummary.pixel_evidence.diagnostic -ne "VALID" -or
+        [int]$pixelRecoveredSummary.pixel_evidence.recorded_frames -ne 1200 -or
+        [int]$pixelRecoveredSummary.pixel_evidence.source_timing_valid_frames -ne
+            1200 -or
+        [bool]$pixelRecoveredSummary.automatic_complete) {
+        throw "同步像素 sidecar 回收没有独立报告有效门禁，或错误覆盖 Runtime source timing 失败。"
+    }
     Write-Utf8 $directMlWorker "dml"
 
     $controlDiagnosticsTool = Join-Path $published `

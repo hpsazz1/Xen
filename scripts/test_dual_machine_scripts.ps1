@@ -144,6 +144,13 @@ Assert-True ($aimDeltaText -match
 Assert-True ($aimDeltaText -notmatch
         'ObserveOnly|allow_observe_only_control|\$OutputMode') `
     "Aim 差量入口不得继续暴露已删除的 Observe-only 输出模式。"
+Assert-True ($aimDeltaText -match '\[switch\]\$CapturePixelEvidence' -and
+    $aimDeltaText -match '\$pixelEvidenceSwitch' -and
+    $aimDeltaText -match
+        '\[bool\]\$task\.pixel_evidence\.enabled\s*-ne' -and
+    $aimDeltaText -match '-PixelEvidenceBindingPath' -and
+    $aimDeltaText -match '-PixelEvidenceFrames') `
+    "Aim 差量入口必须透传并回读同步像素 sidecar 的任务身份。"
 Assert-True ($aimDeltaText -match '\$toolSpecs\s*=\s*@\(' -and
     $aimDeltaText -match 'tools/aim_report\.ps1' -and
     $aimDeltaText -match 'tools/aim_control_diagnostics\.ps1' -and
@@ -186,6 +193,8 @@ Assert-True ($aimManualText -match
     $aimManualText -match 'Get-XenSourceTimingEvidence' -and
     $aimManualText -match 'source_timing_gate_passed' -and
     $aimManualText -match 'source_clock_sample_count_max' -and
+    $aimManualText -match 'Get-PixelEvidenceSummary' -and
+    $aimManualText -match 'pixel_evidence\s*=\s*\$pixelEvidenceSummary' -and
     $aimManualText -match 'aim_lock_active_samples' -and
     $aimManualText -match
         '\$reportSchema\s*-notin\s*@\(13, 14, 15, 16\)' -and

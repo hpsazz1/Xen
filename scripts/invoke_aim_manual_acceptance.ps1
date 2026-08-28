@@ -31,6 +31,13 @@
     [ValidateRange(1.0, 50.0)]
     [double]$MaxDelayCompensationPercent = 15.0,
     [switch]$RequireSourceTiming,
+    [switch]$CapturePixelEvidence,
+    [string]$PixelEvidenceToolRoot = "",
+    [string]$PixelEvidenceBindingPath = "",
+    [ValidateRange(1, 1200)]
+    [int]$PixelEvidenceFrames = 1200,
+    [ValidateRange(1, 60)]
+    [int]$PixelEvidenceMaxSeconds = 15,
     # 兼容旧发布入口的调用参数；当前校验固定为 task_scoped，不再分 full/lightweight。
     [switch]$LightweightPackageValidation,
     [switch]$AllowPhysicalOutput,
@@ -59,8 +66,25 @@ if ($Scenario -eq "SuperJump" -and $SuperJumpCase -eq "None") {
 if ($Scenario -ne "SuperJump" -and $SuperJumpCase -ne "None") {
     throw "SuperJumpCase 只适用于 SuperJump 场景。"
 }
+if ($CapturePixelEvidence.IsPresent) {
+    if (-not $RequireSourceTiming.IsPresent) {
+        throw "同步像素 sidecar 必须与 RequireSourceTiming 同时启用。"
+    }
+    if ([string]::IsNullOrWhiteSpace($PixelEvidenceToolRoot) -or
+        [string]::IsNullOrWhiteSpace($PixelEvidenceBindingPath)) {
+        throw "同步像素 sidecar 必须指定工具根和 OBS source binding。"
+    }
+    $PixelEvidenceToolRoot = [System.IO.Path]::GetFullPath(
+        $PixelEvidenceToolRoot)
+    $PixelEvidenceBindingPath = [System.IO.Path]::GetFullPath(
+        $PixelEvidenceBindingPath)
+} elseif (-not [string]::IsNullOrWhiteSpace($PixelEvidenceToolRoot) -or
+    -not [string]::IsNullOrWhiteSpace($PixelEvidenceBindingPath)) {
+    throw "未启用 CapturePixelEvidence 时不得传入 sidecar 路径。"
+}
 $physicalConfirmation = "XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT"
 $ndiSourceName = "HPSAZZ (Xen-ROI-320)"
+$ndiClockSyncUrl = "udp://192.168.3.10:5011"
 $kmboxIp = "192.168.2.188"
 $kmboxPort = 13384
 $kmboxUuid = "7679E04E"
@@ -120,6 +144,178 @@ function Get-FileEvidence([string]$Path) {
         length = [long]$file.Length
         sha256 = (Get-FileHash -LiteralPath $file.FullName `
             -Algorithm SHA256).Hash
+    }
+}
+
+function Assert-FileEvidenceMatches(
+        [object]$Expected,
+        [string]$Description) {
+    $actual = Get-FileEvidence ([string]$Expected.path)
+    if ($actual.length -ne [long]$Expected.length -or
+        $actual.sha256 -ne [string]$Expected.sha256) {
+        throw "$Description 与 Prepare 绑定身份不一致：$($Expected.path)"
+    }
+}
+
+function Read-PixelEvidenceBinding([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "OBS source binding 不存在：$Path"
+    }
+    try {
+        $binding = Get-Content -LiteralPath $Path -Raw -Encoding utf8 |
+            ConvertFrom-Json
+    } catch {
+        throw "OBS source binding 不是有效 JSON：$Path；$($_.Exception.Message)"
+    }
+    if (-not ($binding.PSObject.Properties.Name -contains
+            "physical_output_capability") -or
+        [bool]$binding.physical_output_capability) {
+        throw "OBS source binding 必须明确 physical_output_capability=false：$Path"
+    }
+    return $binding
+}
+
+function New-PixelEvidenceTaskDefinition() {
+    if (-not $CapturePixelEvidence.IsPresent) {
+        return [ordered]@{ enabled = $false }
+    }
+    [void](Read-PixelEvidenceBinding $PixelEvidenceBindingPath)
+    $executable = Join-Path $PixelEvidenceToolRoot "XenCaptureEvidence.exe"
+    $opencvRuntime = Join-Path $PixelEvidenceToolRoot "opencv_world4140.dll"
+    $ndiRuntime = Join-Path $PixelEvidenceToolRoot `
+        "Processing.NDI.Lib.x64.dll"
+    return [ordered]@{
+        enabled = $true
+        frames = $PixelEvidenceFrames
+        max_seconds = $PixelEvidenceMaxSeconds
+        output_relative_path = "pixel-evidence"
+        clock_sync_url = $ndiClockSyncUrl
+        executable = Get-FileEvidence $executable
+        opencv_runtime = Get-FileEvidence $opencvRuntime
+        ndi_runtime = Get-FileEvidence $ndiRuntime
+        source_binding = Get-FileEvidence $PixelEvidenceBindingPath
+        physical_output_capability = $false
+    }
+}
+
+function Quote-NativeArgument([string]$Value) {
+    if ($Value.Contains('"')) {
+        throw "原生命令参数不得包含双引号。"
+    }
+    return '"' + $Value + '"'
+}
+
+function Get-PixelEvidenceSummary(
+        [object]$Task,
+        [string]$ResolvedRunDirectory,
+        [string]$CollectionMode,
+        [Nullable[int]]$ProcessExitCode,
+        [string]$ExecutionError) {
+    $enabled = $Task.PSObject.Properties.Name -contains "pixel_evidence" -and
+        [bool]$Task.pixel_evidence.enabled
+    if (-not $enabled) {
+        return [ordered]@{
+            enabled = $false
+            gate_passed = $true
+            diagnostic = "DISABLED"
+        }
+    }
+    $outputDirectory = Join-Path $ResolvedRunDirectory `
+        ([string]$Task.pixel_evidence.output_relative_path)
+    $manifestPath = Join-Path $outputDirectory "manifest.json"
+    $executionPassed = $CollectionMode -ne "Launch" -or
+        ($null -ne $ProcessExitCode -and $ProcessExitCode -eq 0 -and
+            [string]::IsNullOrWhiteSpace($ExecutionError))
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        return [ordered]@{
+            enabled = $true
+            gate_passed = $false
+            process_exit_code = $ProcessExitCode
+            execution_error = $ExecutionError
+            output_directory = $outputDirectory
+            diagnostic = "MANIFEST_MISSING"
+        }
+    }
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw `
+            -Encoding utf8 | ConvertFrom-Json
+    } catch {
+        return [ordered]@{
+            enabled = $true
+            gate_passed = $false
+            process_exit_code = $ProcessExitCode
+            execution_error = $ExecutionError
+            output_directory = $outputDirectory
+            diagnostic = "MANIFEST_INVALID"
+            manifest_error = $_.Exception.Message
+        }
+    }
+    $requiredManifestFields = @(
+        "schema_version", "evidence_type", "physical_output_capability",
+        "capture_backend", "capture_source_name", "capture_config",
+        "requested_frame_count", "recorded_frame_count", "source_binding",
+        "frames")
+    $missingManifestFields = @($requiredManifestFields | Where-Object {
+        $manifest.PSObject.Properties.Name -notcontains $_
+    })
+    $captureConfigFieldsAvailable =
+        $manifest.PSObject.Properties.Name -contains "capture_config" -and
+        $null -ne $manifest.capture_config -and
+        $manifest.capture_config.PSObject.Properties.Name -contains
+            "require_source_timing"
+    $sourceBindingFieldsAvailable =
+        $manifest.PSObject.Properties.Name -contains "source_binding" -and
+        $null -ne $manifest.source_binding -and
+        $manifest.source_binding.PSObject.Properties.Name -contains "sha256"
+    if ($missingManifestFields.Count -ne 0 -or
+        -not $captureConfigFieldsAvailable -or
+        -not $sourceBindingFieldsAvailable) {
+        return [ordered]@{
+            enabled = $true
+            gate_passed = $false
+            process_exit_code = $ProcessExitCode
+            execution_error = $ExecutionError
+            output_directory = $outputDirectory
+            diagnostic = "MANIFEST_FIELDS_MISSING"
+            missing_fields = $missingManifestFields
+        }
+    }
+    $frames = @($manifest.frames)
+    $timingValidFrames = @($frames | Where-Object {
+        $_.PSObject.Properties.Name -contains "source_time_timing_valid" -and
+        $_.PSObject.Properties.Name -contains "source_clock_status" -and
+        [bool]$_.source_time_timing_valid -and
+        [string]$_.source_clock_status -eq "VALID"
+    }).Count
+    $bindingMatches = [string]$manifest.source_binding.sha256 -eq
+        [string]$Task.pixel_evidence.source_binding.sha256
+    $contractPassed = [int]$manifest.schema_version -eq 1 -and
+        [string]$manifest.evidence_type -eq "output_off_capture" -and
+        -not [bool]$manifest.physical_output_capability -and
+        [string]$manifest.capture_backend -eq "NDI" -and
+        [string]$manifest.capture_source_name -eq [string]$Task.capture.source -and
+        [bool]$manifest.capture_config.require_source_timing -and
+        [int]$manifest.requested_frame_count -eq
+            [int]$Task.pixel_evidence.frames -and
+        [int]$manifest.recorded_frame_count -eq
+            [int]$Task.pixel_evidence.frames -and
+        $frames.Count -eq [int]$Task.pixel_evidence.frames -and
+        $timingValidFrames -eq [int]$Task.pixel_evidence.frames -and
+        $bindingMatches
+    return [ordered]@{
+        enabled = $true
+        gate_passed = $executionPassed -and $contractPassed
+        process_exit_code = $ProcessExitCode
+        execution_error = $ExecutionError
+        output_directory = $outputDirectory
+        diagnostic = if ($executionPassed -and $contractPassed) {
+            "VALID"
+        } else { "CONTRACT_FAILED" }
+        requested_frames = [int]$Task.pixel_evidence.frames
+        recorded_frames = [int]$manifest.recorded_frame_count
+        source_timing_valid_frames = $timingValidFrames
+        source_binding_matches = $bindingMatches
+        manifest = Get-FileEvidence $manifestPath
     }
 }
 
@@ -490,14 +686,23 @@ function New-LaunchCommand([string]$ResolvedRunDirectory) {
     } else {
         ""
     }
+    $pixelEvidenceSwitch = if ($CapturePixelEvidence.IsPresent) {
+        (' -CapturePixelEvidence -PixelEvidenceToolRoot "{0}" ' +
+            '-PixelEvidenceBindingPath "{1}" -PixelEvidenceFrames {2} ' +
+            '-PixelEvidenceMaxSeconds {3}') -f
+            $PixelEvidenceToolRoot, $PixelEvidenceBindingPath,
+            $PixelEvidenceFrames, $PixelEvidenceMaxSeconds
+    } else {
+        ""
+    }
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
         '-TaskId {1} -Mode Launch -Scenario {2} -SuperJumpCase {3} ' +
         '-Profile {4} -PackageRoot "{5}" -RunDirectory "{6}" ' +
         '-Smoothing {7:F6} -CountsPerPixelX {8:F6} ' +
         '-CountsPerPixelY {9:F6} -MaxCountsPerFrame {10:F6}{11} ' +
         '-ControlDelayMs {12:F6} -MaxDelayCompensationMs {13:F6} ' +
-        '-MaxDelayCompensationPercent {14:F6}{15} -AllowPhysicalOutput ' +
-        '-PhysicalOutputConfirmation {16}') -f
+        '-MaxDelayCompensationPercent {14:F6}{15}{16} -AllowPhysicalOutput ' +
+        '-PhysicalOutputConfirmation {17}') -f
         (Join-Path $PackageRoot "tools\invoke_aim_manual_acceptance.ps1"),
         $taskId, $Scenario, $SuperJumpCase, $Profile, $PackageRoot,
         $ResolvedRunDirectory,
@@ -505,6 +710,7 @@ function New-LaunchCommand([string]$ResolvedRunDirectory) {
         $MaxCountsPerFrame, $delaySwitch, $ControlDelayMs,
         $MaxDelayCompensationMs, $MaxDelayCompensationPercent,
         $sourceTimingSwitch,
+        $pixelEvidenceSwitch,
         $physicalConfirmation
 }
 
@@ -531,6 +737,8 @@ function New-TaskMarkdown(
 - 延迟补偿：$($EnableDelayCompensation.IsPresent)
 - 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
 - 必须取得有效 source timing：$($RequireSourceTiming.IsPresent)
+- 同步 NDI 像素 sidecar：$($CapturePixelEvidence.IsPresent)
+- sidecar 帧数/最长等待：$PixelEvidenceFrames / $PixelEvidenceMaxSeconds s
 - Capture：NDI / $ndiSourceName
 - Provider：TensorRT，FP16 + CUDA Graph + GPU 前处理
 - Mouse：KMBOX NET $kmboxIp`:$kmboxPort
@@ -544,6 +752,9 @@ function New-TaskMarkdown(
 若本任务要求 source timing，Launch 前须在源机 `HPSAZZ` 前台运行
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\Xen\scripts\run_ndi_clock_source.ps1"
 并保持到 Run 结束；缺少时钟样本会使 automatic gate 失败。
+同步 NDI 像素 sidecar 固定 `physical_output_capability=false`，只在用户执行下方唯一 Launch 命令后
+与 Runtime 并行保存最初 $PixelEvidenceFrames 帧；它不能武装或发送输入，失败会使 automatic gate
+失败，但不会放宽 KMBOX 双授权或 End 急停。
 
 ## 操作步骤
 
@@ -604,6 +815,7 @@ if ($Mode -eq "Prepare") {
         -AllowConfigMismatch
     $configText = New-ConfigText $modelName
     $definition = Get-ScenarioDefinition
+    $pixelEvidenceDefinition = New-PixelEvidenceTaskDefinition
     $scenarioSlug = if ($Scenario -eq "SuperJump") {
         $caseSlug = switch ($SuperJumpCase) {
             "Static" { "static" }
@@ -663,6 +875,7 @@ if ($Mode -eq "Prepare") {
             source_size = @(2560, 1440)
             roi_size = @(320, 320)
         }
+        pixel_evidence = $pixelEvidenceDefinition
         detector = [ordered]@{
             backend = "tensorrt"
             fp16 = $true
@@ -760,12 +973,25 @@ $taskRequireSourceTiming = if ($task.PSObject.Properties.Name -contains
     "require_source_timing") { [bool]$task.require_source_timing } else {
     $false
 }
+$taskCapturePixelEvidence = if ($task.PSObject.Properties.Name -contains
+        "pixel_evidence") {
+    [bool]$task.pixel_evidence.enabled
+} else { $false }
 if ([int]$task.schema -ne 1 -or
     [string]$task.task_id -ne $taskId -or
     [string]$task.scenario -ne $Scenario -or
     [string]$task.superjump_case -ne $SuperJumpCase -or
     [string]$task.profile -ne $Profile -or
     $taskRequireSourceTiming -ne $RequireSourceTiming.IsPresent -or
+    $taskCapturePixelEvidence -ne $CapturePixelEvidence.IsPresent -or
+    ($taskCapturePixelEvidence -and
+        ([string]$task.pixel_evidence.executable.path -ne
+            (Join-Path $PixelEvidenceToolRoot "XenCaptureEvidence.exe") -or
+        [string]$task.pixel_evidence.source_binding.path -ne
+            $PixelEvidenceBindingPath -or
+        [int]$task.pixel_evidence.frames -ne $PixelEvidenceFrames -or
+        [int]$task.pixel_evidence.max_seconds -ne
+            $PixelEvidenceMaxSeconds)) -or
     [string]$task.package_validation -ne $packageValidationMode -or
     [string]$task.package_root -ne $PackageRoot -or
     [double]$task.aim.smoothing -ne $Smoothing -or
@@ -789,6 +1015,9 @@ $logEvidence = @()
 $startedUtc = $null
 $endedUtc = $null
 $process = $null
+$pixelEvidenceProcess = $null
+$pixelEvidenceExitCode = $null
+$pixelEvidenceExecutionError = ""
 if ($Mode -eq "Launch") {
     $activeConfig = Join-Path $PackageRoot "config.ini"
     $activeHash = (Get-FileHash -LiteralPath $activeConfig -Algorithm SHA256).Hash
@@ -804,6 +1033,65 @@ if ($Mode -eq "Launch") {
     $modelName = Get-ModelName $manifestResult.Value
     Assert-TaskManifestFiles $manifestResult.Value $modelName
 
+    if ($taskCapturePixelEvidence) {
+        foreach ($item in @(
+                [pscustomobject]@{
+                    evidence = $task.pixel_evidence.executable
+                    description = "像素 sidecar 可执行文件"
+                },
+                [pscustomobject]@{
+                    evidence = $task.pixel_evidence.opencv_runtime
+                    description = "像素 sidecar OpenCV 运行库"
+                },
+                [pscustomobject]@{
+                    evidence = $task.pixel_evidence.ndi_runtime
+                    description = "像素 sidecar NDI 运行库"
+                },
+                [pscustomobject]@{
+                    evidence = $task.pixel_evidence.source_binding
+                    description = "像素 sidecar OBS source binding"
+                })) {
+            Assert-FileEvidenceMatches $item.evidence $item.description
+        }
+        [void](Read-PixelEvidenceBinding (
+            [string]$task.pixel_evidence.source_binding.path))
+        $pixelEvidenceOutput = Join-Path $resolvedRun `
+            ([string]$task.pixel_evidence.output_relative_path)
+        if (Test-Path -LiteralPath $pixelEvidenceOutput) {
+            throw "同步像素证据输出已存在，拒绝覆盖：$pixelEvidenceOutput"
+        }
+        $pixelEvidenceStdout = Join-Path $resolvedRun `
+            "pixel-evidence.stdout.log"
+        $pixelEvidenceStderr = Join-Path $resolvedRun `
+            "pixel-evidence.stderr.log"
+        foreach ($path in @($pixelEvidenceStdout, $pixelEvidenceStderr)) {
+            if (Test-Path -LiteralPath $path) {
+                throw "同步像素 sidecar 日志已存在，拒绝覆盖：$path"
+            }
+        }
+        $pixelEvidenceArguments = @(
+            "--ndi-source",
+            (Quote-NativeArgument ([string]$task.capture.source)),
+            "--binding",
+            (Quote-NativeArgument (
+                [string]$task.pixel_evidence.source_binding.path)),
+            "--output",
+            (Quote-NativeArgument $pixelEvidenceOutput),
+            "--frames", [string]$task.pixel_evidence.frames,
+            "--max-seconds", [string]$task.pixel_evidence.max_seconds,
+            "--frame-layout", "center_crop_1_to_1",
+            "--source-width", "2560", "--source-height", "1440",
+            "--roi-width", "320", "--roi-height", "320",
+            "--clock-sync-url",
+            (Quote-NativeArgument (
+                [string]$task.pixel_evidence.clock_sync_url)),
+            "--clock-sync-interval-ms", "250",
+            "--clock-sync-timeout-ms", "200",
+            "--clock-mapping-max-age-ms", "1000",
+            "--require-source-timing"
+        ) -join " "
+    }
+
     $runtimeRoot = Join-Path $PackageRoot "cache\runtime"
     $before = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
@@ -815,9 +1103,46 @@ if ($Mode -eq "Launch") {
     $startedUtc = [DateTime]::UtcNow
     Write-Host "即将启动真实 KMBOX 输出任务：$($task.run_id)"
     Write-Host "确认 End 急停可用；程序启动后仍需人工武装并按 TASK.md 操作。"
-    $process = Start-Process -FilePath $launcher -WorkingDirectory $PackageRoot `
-        -PassThru -Wait
-    $endedUtc = [DateTime]::UtcNow
+    if ($taskCapturePixelEvidence) {
+        Write-Host ("同步 NDI 像素 sidecar 将先启动；该进程固定 " +
+            "physical_output_capability=false。")
+        $pixelEvidenceProcess = Start-Process -FilePath `
+            ([string]$task.pixel_evidence.executable.path) `
+            -WorkingDirectory (Split-Path -Parent `
+                ([string]$task.pixel_evidence.executable.path)) `
+            -ArgumentList $pixelEvidenceArguments -WindowStyle Hidden `
+            -RedirectStandardOutput $pixelEvidenceStdout `
+            -RedirectStandardError $pixelEvidenceStderr -PassThru
+    }
+    try {
+        $process = Start-Process -FilePath $launcher `
+            -WorkingDirectory $PackageRoot -PassThru -Wait
+        $endedUtc = [DateTime]::UtcNow
+    } finally {
+        if ($null -ne $pixelEvidenceProcess) {
+            if (-not $pixelEvidenceProcess.HasExited -and
+                -not $pixelEvidenceProcess.WaitForExit(60000)) {
+                $pixelEvidenceExecutionError =
+                    "像素 sidecar 在 60 秒回收窗内未退出。"
+                try {
+                    $pixelEvidenceProcess.Kill()
+                    [void]$pixelEvidenceProcess.WaitForExit(5000)
+                } catch {
+                    $pixelEvidenceExecutionError +=
+                        " 终止失败：$($_.Exception.Message)"
+                }
+            }
+            if ($pixelEvidenceProcess.HasExited) {
+                $pixelEvidenceExitCode = [int]$pixelEvidenceProcess.ExitCode
+                if ($pixelEvidenceExitCode -ne 0 -and
+                    [string]::IsNullOrWhiteSpace(
+                        $pixelEvidenceExecutionError)) {
+                    $pixelEvidenceExecutionError =
+                        "像素 sidecar 退出码：$pixelEvidenceExitCode"
+                }
+            }
+        }
+    }
 
     New-Item -ItemType Directory -Path $automaticRoot -Force | Out-Null
     if (Test-Path -LiteralPath $runtimeRoot) {
@@ -971,6 +1296,10 @@ $sourceTimingEvidence = Get-XenSourceTimingEvidence -Samples $allSamples
 $sourceTimingValidSamples = [uint64]$sourceTimingEvidence.valid_samples
 $sourceTimingGatePassed = -not $RequireSourceTiming.IsPresent -or
     [string]$sourceTimingEvidence.diagnostic -eq "VALID"
+$pixelEvidenceSummary = Get-PixelEvidenceSummary `
+    -Task $task -ResolvedRunDirectory $resolvedRun `
+    -CollectionMode $Mode -ProcessExitCode $pixelEvidenceExitCode `
+    -ExecutionError $pixelEvidenceExecutionError
 $mouseBackendCompletionSamples = @($allSamples | Where-Object {
     ($_.PSObject.Properties.Name -contains
         "mouse_backend_completion_timing_valid" -and
@@ -993,7 +1322,8 @@ $complete = $failed -eq 0 -and $reportDropped -eq 0 -and
     [uint64]$controlDiagnostics.diagnostics_missing_frames -eq 0 -and
     [bool]$controlDiagnostics.reverse_translation_detail_diagnostics_available -and
     $fixedSceneGatePassed -and
-    $sourceTimingGatePassed
+    $sourceTimingGatePassed -and
+    [bool]$pixelEvidenceSummary.gate_passed
 $summary = [ordered]@{
     schema = 2
     task_id = $taskId
@@ -1045,6 +1375,7 @@ $summary = [ordered]@{
     fixed_scene_analysis_required = $fixedSceneExpected
     fixed_scene_analysis_gate_passed = $fixedSceneGatePassed
     fixed_scene_analysis = $fixedSceneAnalysis
+    pixel_evidence = $pixelEvidenceSummary
     mouse_backend_completion_samples = $mouseBackendCompletionSamples
     mouse_protocol_ack_samples = $mouseProtocolAckSamples
     mouse_physical_effect_samples = $mousePhysicalEffectSamples
@@ -1063,6 +1394,9 @@ Write-Host "  aim_violations=$($aimSummary.violation_count)"
 Write-Host "  control_diagnostics_schema=$($controlDiagnostics.schema)"
 Write-Host "  source_timing=$($sourceTimingEvidence.diagnostic), required=$($RequireSourceTiming.IsPresent)"
 Write-Host "  fixed_scene_analysis_required=$fixedSceneExpected, gate_passed=$fixedSceneGatePassed"
+Write-Host ("  pixel_evidence_enabled=$($pixelEvidenceSummary.enabled), " +
+    "gate_passed=$($pixelEvidenceSummary.gate_passed), " +
+    "diagnostic=$($pixelEvidenceSummary.diagnostic)")
 Write-Host ("  reverse_translation_details=" +
     $controlDiagnostics.reverse_translation_detail_diagnostics_available)
 Write-Host "  automatic_complete=$complete"
