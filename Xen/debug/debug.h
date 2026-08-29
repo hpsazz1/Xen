@@ -3,6 +3,7 @@
 
 #include "runtime/runtime.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -127,7 +128,7 @@ bool debug_sample_succeeded(
 class DebugReport {
 public:
     DebugReport();
-    ~DebugReport() = default;
+    ~DebugReport();
 
     DebugReport(const DebugReport&) = delete;
     DebugReport& operator=(const DebugReport&) = delete;
@@ -144,10 +145,18 @@ public:
     std::string last_error() const;
 
 private:
+    void update_aim_lock_marker(
+        bool aim_lock_active, std::uint64_t sequence) noexcept;
+    bool remove_aim_lock_marker() noexcept;
+
     DebugReportConfig config_;
     std::vector<RuntimePipelineSample> samples_;
     DebugReportSummary summary_;
     std::uint64_t report_samples_dropped_ = 0;
+    std::uint64_t aim_lock_activation_epoch_ = 0;
+    std::chrono::steady_clock::time_point aim_lock_marker_last_write_attempt_{};
+    bool aim_lock_state_active_ = false;
+    bool aim_lock_marker_published_ = false;
     bool active_ = false;
     std::string last_error_;
 };

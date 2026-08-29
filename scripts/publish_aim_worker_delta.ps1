@@ -33,10 +33,10 @@
     [switch]$CapturePixelEvidence,
     [string]$PixelEvidenceToolRoot = "",
     [string]$PixelEvidenceBindingPath = "",
-    [ValidateRange(1, 1200)]
-    [int]$PixelEvidenceFrames = 1200,
+    [ValidateRange(1, 2400)]
+    [int]$PixelEvidenceFrames = 2400,
     [ValidateRange(1, 60)]
-    [int]$PixelEvidenceMaxSeconds = 15
+    [int]$PixelEvidenceMaxSeconds = 30
 )
 
 $ErrorActionPreference = "Stop"

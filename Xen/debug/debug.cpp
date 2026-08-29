@@ -12,6 +12,7 @@
 #include "log/log.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -21,6 +22,10 @@
 #include <vector>
 
 namespace {
+
+constexpr char kAimLockMarkerSuffix[] = ".aim-lock-active";
+constexpr auto kAimLockMarkerHeartbeatInterval =
+    std::chrono::milliseconds(250);
 
 struct TimingValues {
     std::vector<double> capture;
@@ -720,6 +725,90 @@ DebugReport::DebugReport() {
     Log::register_module("debug", LogLevel::INFO);
 }
 
+DebugReport::~DebugReport() {
+    if (active_ || aim_lock_state_active_ || aim_lock_marker_published_) {
+        aim_lock_state_active_ = false;
+        remove_aim_lock_marker();
+    }
+}
+
+bool DebugReport::remove_aim_lock_marker() noexcept {
+    try {
+        if (config_.json_path.empty()) {
+            aim_lock_marker_published_ = false;
+            return true;
+        }
+        std::error_code error;
+        std::filesystem::remove(
+            std::filesystem::path(config_.json_path + kAimLockMarkerSuffix),
+            error);
+        if (error) {
+            // 删除失败时保留 published 状态，后续 inactive 样本会有界重试；
+            // 脚本侧 lease 仍会让未刷新的旧 marker 自动失效。
+            aim_lock_marker_published_ = true;
+            return false;
+        }
+        aim_lock_marker_published_ = false;
+        return true;
+    } catch (...) {
+        aim_lock_marker_published_ = true;
+        return false;
+    }
+}
+
+void DebugReport::update_aim_lock_marker(
+        bool aim_lock_active, std::uint64_t sequence) noexcept {
+    const auto now = std::chrono::steady_clock::now();
+    if (!aim_lock_active) {
+        const bool transition = aim_lock_state_active_;
+        aim_lock_state_active_ = false;
+        if (transition ||
+            (aim_lock_marker_published_ &&
+             (aim_lock_marker_last_write_attempt_.time_since_epoch().count() ==
+                  0 ||
+              now - aim_lock_marker_last_write_attempt_ >=
+                  kAimLockMarkerHeartbeatInterval))) {
+            aim_lock_marker_last_write_attempt_ = now;
+            remove_aim_lock_marker();
+        }
+        return;
+    }
+
+    if (!aim_lock_state_active_) {
+        aim_lock_state_active_ = true;
+        ++aim_lock_activation_epoch_;
+        aim_lock_marker_last_write_attempt_ = {};
+    } else if (aim_lock_marker_last_write_attempt_.time_since_epoch().count() !=
+                   0 &&
+               now - aim_lock_marker_last_write_attempt_ <
+                   kAimLockMarkerHeartbeatInterval) {
+        return;
+    }
+    aim_lock_marker_last_write_attempt_ = now;
+
+    try {
+        // activation epoch 区分轮询间隔内发生的 false→true；heartbeat
+        // 让断流后遗留文件在脚本 lease 到期后自动 fail-closed。
+        std::ostringstream marker;
+        marker << "{\n"
+               << "  \"schema\": 2,\n"
+               << "  \"session_id\": \""
+               << json_escape(config_.session_id) << "\",\n"
+               << "  \"gate\": \"AIM_LOCK_ACTIVE\",\n"
+               << "  \"activation_epoch\": "
+               << aim_lock_activation_epoch_ << ",\n"
+               << "  \"sequence\": " << sequence << "\n"
+               << "}\n";
+        std::string ignored_error;
+        aim_lock_marker_published_ = write_atomically(
+            config_.json_path + kAimLockMarkerSuffix,
+            marker.str(), ignored_error);
+        if (!aim_lock_marker_published_) remove_aim_lock_marker();
+    } catch (...) {
+        remove_aim_lock_marker();
+    }
+}
+
 bool DebugReport::start(const DebugReportConfig& config,
                         std::string& error) noexcept {
     try {
@@ -731,11 +820,20 @@ bool DebugReport::start(const DebugReportConfig& config,
             set_error(error, "Debug 报告样本容量必须在 1..100000");
             return false;
         }
+        if (active_ || aim_lock_state_active_ ||
+            aim_lock_marker_published_) {
+            aim_lock_state_active_ = false;
+            remove_aim_lock_marker();
+        }
         config_ = config;
         samples_.clear();
         samples_.reserve(config.max_samples);
         summary_ = {};
         report_samples_dropped_ = 0;
+        aim_lock_activation_epoch_ = 0;
+        aim_lock_marker_last_write_attempt_ = {};
+        aim_lock_state_active_ = false;
+        remove_aim_lock_marker();
         last_error_.clear();
         active_ = true;
         error.clear();
@@ -743,6 +841,7 @@ bool DebugReport::start(const DebugReportConfig& config,
                  config_.csv_path, config_.json_path, config_.max_samples);
         return true;
     } catch (...) {
+        remove_aim_lock_marker();
         set_error(error, "Debug 报告初始化时发生未知异常");
         return false;
     }
@@ -753,6 +852,8 @@ void DebugReport::ingest(
     if (!active_) return;
     try {
         for (const auto& sample : samples) {
+            update_aim_lock_marker(
+                sample.aim_lock_active, sample.sequence);
             if (samples_.size() == config_.max_samples) {
                 samples_.erase(samples_.begin());
                 ++report_samples_dropped_;
@@ -767,6 +868,8 @@ void DebugReport::ingest(
 bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                            std::string& error,
                            const DebugCoverageSummary* coverage) noexcept {
+    aim_lock_state_active_ = false;
+    remove_aim_lock_marker();
     if (!active_) {
         set_error(error, "Debug 报告尚未开始");
         return false;

@@ -34,10 +34,10 @@
     [switch]$CapturePixelEvidence,
     [string]$PixelEvidenceToolRoot = "",
     [string]$PixelEvidenceBindingPath = "",
-    [ValidateRange(1, 1200)]
-    [int]$PixelEvidenceFrames = 1200,
+    [ValidateRange(1, 2400)]
+    [int]$PixelEvidenceFrames = 2400,
     [ValidateRange(1, 60)]
-    [int]$PixelEvidenceMaxSeconds = 15,
+    [int]$PixelEvidenceMaxSeconds = 30,
     # 兼容旧发布入口的调用参数；当前校验固定为 task_scoped，不再分 full/lightweight。
     [switch]$LightweightPackageValidation,
     [switch]$AllowPhysicalOutput,
@@ -83,7 +83,8 @@ if ($CapturePixelEvidence.IsPresent) {
     throw "未启用 CapturePixelEvidence 时不得传入 sidecar 路径。"
 }
 $physicalConfirmation = "XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT"
-$ndiSourceName = "HPSAZZ (Xen-ROI-320)"
+$ndiOutputName = "Xen-ROI-320"
+$ndiSourceName = "HPSAZZ ($ndiOutputName)"
 $ndiClockSyncUrl = "udp://192.168.3.10:5011"
 $kmboxIp = "192.168.2.188"
 $kmboxPort = 13384
@@ -100,6 +101,10 @@ $taskManifestPaths = @(
 )
 $packageValidationMode = "task_scoped"
 $pixelEvidenceDefaultMaxAttempts = 6
+$pixelEvidenceRuntimeGate = "AIM_LOCK_ACTIVE"
+$pixelEvidenceRuntimeMarkerSuffix = ".aim-lock-active"
+$pixelEvidenceRuntimeMarkerSchema = 2
+$pixelEvidenceRuntimeMarkerMaxAgeMs = 1000
 
 if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
     $PackageRoot = [System.IO.Path]::GetFullPath(
@@ -158,7 +163,9 @@ function Assert-FileEvidenceMatches(
     }
 }
 
-function Read-PixelEvidenceBinding([string]$Path) {
+function Read-PixelEvidenceBinding(
+        [string]$Path,
+        [string]$ExpectedNdiOutputName) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "OBS source binding 不存在：$Path"
     }
@@ -173,6 +180,23 @@ function Read-PixelEvidenceBinding([string]$Path) {
         [bool]$binding.physical_output_capability) {
         throw "OBS source binding 必须明确 physical_output_capability=false：$Path"
     }
+    $requiredFields = @(
+        "schema_version", "evidence_type", "ndi_main_output")
+    $missingFields = @($requiredFields | Where-Object {
+        $binding.PSObject.Properties.Name -notcontains $_
+    })
+    $ndiFieldsAvailable = $null -ne $binding.ndi_main_output -and
+        $binding.ndi_main_output.PSObject.Properties.Name -contains
+            "enabled" -and
+        $binding.ndi_main_output.PSObject.Properties.Name -contains "name"
+    if ($missingFields.Count -ne 0 -or -not $ndiFieldsAvailable -or
+        [int]$binding.schema_version -ne 2 -or
+        [string]$binding.evidence_type -ne "obs_source_binding" -or
+        -not [bool]$binding.ndi_main_output.enabled -or
+        [string]$binding.ndi_main_output.name -ne $ExpectedNdiOutputName) {
+        throw ("OBS source binding 与精确 NDI 输出不匹配：" +
+            "expected=$ExpectedNdiOutputName；path=$Path")
+    }
     return $binding
 }
 
@@ -180,7 +204,8 @@ function New-PixelEvidenceTaskDefinition() {
     if (-not $CapturePixelEvidence.IsPresent) {
         return [ordered]@{ enabled = $false }
     }
-    [void](Read-PixelEvidenceBinding $PixelEvidenceBindingPath)
+    [void](Read-PixelEvidenceBinding `
+        $PixelEvidenceBindingPath $ndiOutputName)
     $executable = Join-Path $PixelEvidenceToolRoot "XenCaptureEvidence.exe"
     $opencvRuntime = Join-Path $PixelEvidenceToolRoot "opencv_world4140.dll"
     $ndiRuntime = Join-Path $PixelEvidenceToolRoot `
@@ -192,6 +217,13 @@ function New-PixelEvidenceTaskDefinition() {
         max_attempts = $pixelEvidenceDefaultMaxAttempts
         output_relative_path = "pixel-evidence"
         clock_sync_url = $ndiClockSyncUrl
+        runtime_alignment = [ordered]@{
+            required = $true
+            gate = $pixelEvidenceRuntimeGate
+            marker_suffix = $pixelEvidenceRuntimeMarkerSuffix
+            marker_schema = $pixelEvidenceRuntimeMarkerSchema
+            max_marker_age_ms = $pixelEvidenceRuntimeMarkerMaxAgeMs
+        }
         executable = Get-FileEvidence $executable
         opencv_runtime = Get-FileEvidence $opencvRuntime
         ndi_runtime = Get-FileEvidence $ndiRuntime
@@ -207,12 +239,75 @@ function Quote-NativeArgument([string]$Value) {
     return '"' + $Value + '"'
 }
 
+function Read-RuntimeAlignmentMarker([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Runtime aim-lock 标记不存在：$Path"
+    }
+    try {
+        $marker = Get-Content -LiteralPath $Path -Raw -Encoding utf8 |
+            ConvertFrom-Json
+    } catch {
+        throw "Runtime aim-lock 标记不是有效 JSON：$Path；$($_.Exception.Message)"
+    }
+    $required = @(
+        "schema", "session_id", "gate", "activation_epoch", "sequence")
+    $missing = @($required | Where-Object {
+        $marker.PSObject.Properties.Name -notcontains $_
+    })
+    if ($missing.Count -ne 0 -or
+        [int]$marker.schema -ne $pixelEvidenceRuntimeMarkerSchema -or
+        [string]::IsNullOrWhiteSpace([string]$marker.session_id) -or
+        [string]$marker.gate -ne $pixelEvidenceRuntimeGate -or
+        [uint64]$marker.activation_epoch -lt 1) {
+        throw "Runtime aim-lock 标记合同无效：$Path"
+    }
+    return $marker
+}
+
+function Test-RuntimeAlignmentMarkerActive(
+        [string]$Path,
+        [string]$ExpectedSessionId,
+        [uint64]$ExpectedActivationEpoch) {
+    try {
+        $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+        $ageMs = ([DateTime]::UtcNow - $file.LastWriteTimeUtc).TotalMilliseconds
+        if ($ageMs -lt -250 -or
+            $ageMs -gt $pixelEvidenceRuntimeMarkerMaxAgeMs) {
+            return $false
+        }
+        $marker = Read-RuntimeAlignmentMarker $Path
+        return [string]$marker.session_id -eq $ExpectedSessionId -and
+            [uint64]$marker.activation_epoch -eq $ExpectedActivationEpoch
+    } catch {
+        return $false
+    }
+}
+
+function Wait-ProcessExitSupervised([object]$Process) {
+    if ($null -eq $Process) { return }
+    try {
+        if (-not $Process.HasExited) {
+            [void]$Process.WaitForExit()
+        }
+        return
+    } catch {
+        $processId = try { [int]$Process.Id } catch { 0 }
+        if ($processId -le 0) { return }
+        while ($null -ne (Get-Process -Id $processId `
+                -ErrorAction SilentlyContinue)) {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 function Get-PixelEvidenceSummary(
         [object]$Task,
         [string]$ResolvedRunDirectory,
         [string]$CollectionMode,
         [Nullable[int]]$ProcessExitCode,
-        [string]$ExecutionError) {
+        [string]$ExecutionError,
+        [object]$RuntimeAlignment,
+        [string[]]$RuntimeSessionIds) {
     $enabled = $Task.PSObject.Properties.Name -contains "pixel_evidence" -and
         [bool]$Task.pixel_evidence.enabled
     if (-not $enabled) {
@@ -292,8 +387,43 @@ function Get-PixelEvidenceSummary(
         [bool]$_.source_time_timing_valid -and
         [string]$_.source_clock_status -eq "VALID"
     }).Count
-    $bindingMatches = [string]$manifest.source_binding.sha256 -eq
+    $expectedBindingHash =
         [string]$Task.pixel_evidence.source_binding.sha256
+    $manifestBindingMatches =
+        [string]$manifest.source_binding.sha256 -eq $expectedBindingHash
+    $embeddedBindingPath = Join-Path $outputDirectory "source-binding.json"
+    $embeddedBindingError = ""
+    $embeddedBindingMatches = $false
+    if (Test-Path -LiteralPath $embeddedBindingPath -PathType Leaf) {
+        try {
+            $embeddedBindingEvidence = Get-FileEvidence $embeddedBindingPath
+            [void](Read-PixelEvidenceBinding `
+                $embeddedBindingPath $ndiOutputName)
+            $embeddedBindingMatches =
+                [string]$embeddedBindingEvidence.sha256 -eq
+                    $expectedBindingHash
+        } catch {
+            $embeddedBindingError = $_.Exception.Message
+        }
+    } else {
+        $embeddedBindingError =
+            "Run 像素证据缺少内嵌 source-binding.json。"
+    }
+    $bindingMatches = $manifestBindingMatches -and
+        $embeddedBindingMatches
+    $runtimeAlignmentRequired =
+        $Task.pixel_evidence.PSObject.Properties.Name -contains
+            "runtime_alignment" -and
+        [bool]$Task.pixel_evidence.runtime_alignment.required
+    $runtimeAlignmentSessionMatches = -not $runtimeAlignmentRequired -or
+        ($null -ne $RuntimeAlignment -and
+            [bool]$RuntimeAlignment.gate_passed -and
+            [uint64]$RuntimeAlignment.activation_epoch -ge 1 -and
+            [string]$RuntimeAlignment.gate -eq
+                [string]$Task.pixel_evidence.runtime_alignment.gate -and
+            @($RuntimeSessionIds | Where-Object {
+                $_ -eq [string]$RuntimeAlignment.session_id
+            }).Count -eq 1)
     $contractPassed = [int]$manifest.schema_version -eq 1 -and
         [string]$manifest.evidence_type -eq "output_off_capture" -and
         -not [bool]$manifest.physical_output_capability -and
@@ -306,7 +436,7 @@ function Get-PixelEvidenceSummary(
             [int]$Task.pixel_evidence.frames -and
         $frames.Count -eq [int]$Task.pixel_evidence.frames -and
         $timingValidFrames -eq [int]$Task.pixel_evidence.frames -and
-        $bindingMatches
+        $bindingMatches -and $runtimeAlignmentSessionMatches
     return [ordered]@{
         enabled = $true
         gate_passed = $executionPassed -and $contractPassed
@@ -315,11 +445,38 @@ function Get-PixelEvidenceSummary(
         output_directory = $outputDirectory
         diagnostic = if ($executionPassed -and $contractPassed) {
             "VALID"
+        } elseif (-not $bindingMatches) {
+            "SOURCE_BINDING_MISMATCH"
+        } elseif ($runtimeAlignmentRequired -and
+            -not $runtimeAlignmentSessionMatches) {
+            "RUNTIME_ALIGNMENT_FAILED"
         } else { "CONTRACT_FAILED" }
         requested_frames = [int]$Task.pixel_evidence.frames
         recorded_frames = [int]$manifest.recorded_frame_count
         source_timing_valid_frames = $timingValidFrames
         source_binding_matches = $bindingMatches
+        source_binding_error = $embeddedBindingError
+        runtime_alignment = if ($runtimeAlignmentRequired) {
+            [ordered]@{
+                required = $true
+                gate = [string]$Task.pixel_evidence.runtime_alignment.gate
+                gate_passed = $runtimeAlignmentSessionMatches
+                session_id = if ($null -eq $RuntimeAlignment) { "" } else {
+                    [string]$RuntimeAlignment.session_id
+                }
+                activation_epoch = if ($null -eq $RuntimeAlignment) {
+                    [uint64]0
+                } else { [uint64]$RuntimeAlignment.activation_epoch }
+            }
+        } else {
+            [ordered]@{
+                required = $false
+                gate = ""
+                gate_passed = $true
+                session_id = ""
+                activation_epoch = [uint64]0
+            }
+        }
         manifest = Get-FileEvidence $manifestPath
     }
 }
@@ -543,6 +700,11 @@ function Activate-Config(
 }
 
 function Get-ScenarioDefinition() {
+    $superJumpStaticHoldAction = if ($CapturePixelEvidence.IsPresent) {
+        "目标进入后按住右键至少 15 秒；此后继续按住，直到前台终端提示 sidecar 已完成或未完成、可以松开右键，不追加其他动作。"
+    } else {
+        "目标进入后按住右键约 5 秒再松开，不追加其他动作。"
+    }
     switch ($Scenario) {
         "Static" {
             return [ordered]@{
@@ -621,7 +783,7 @@ function Get-ScenarioDefinition() {
                         actions = @(
                             "本 Run 唯一动作：X 静止",
                             "选择单个目标，只做超级跳，X 轴和视角保持静止。",
-                            "目标进入后按住右键约 5 秒再松开，不追加其他动作。"
+                            $superJumpStaticHoldAction
                         )
                         observations = @(
                             "本 Run 唯一动作：X 静止",
@@ -757,10 +919,14 @@ function New-TaskMarkdown(
 若本任务要求 source timing，Launch 前须在源机 `HPSAZZ` 前台运行
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\Xen\scripts\run_ndi_clock_source.ps1"
 并保持到 Run 结束；缺少时钟样本会使 automatic gate 失败。
-同步 NDI 像素 sidecar 固定 `physical_output_capability=false`，只在用户执行下方唯一 Launch 命令后
-与 Runtime 并行保存最初 $PixelEvidenceFrames 帧；仅当 Launcher 仍存活且前次明确为 NDI
-`ACCESS_LOST` 时才有界重试。它不能武装或发送输入，失败会使 automatic gate 失败，但不会放宽
-KMBOX 双授权或 End 急停。
+同步 NDI 像素 sidecar 固定 `physical_output_capability=false`。它会先等待 Runtime 进入连续
+`aim_lock_active` 窗口，再从精确源 `$ndiSourceName` 保存 $PixelEvidenceFrames 帧；开始动作后请持续按住
+右键至少 15 秒，并继续保持到前台终端显示“sidecar 已完成，可以松开右键”或
+“sidecar 未完成或已停止，可以松开右键”。若按住 15 秒仍未出现“已观察到 Runtime aim-lock”提示，
+请松开右键并结束本 Run。仅当 aim-lock 仍有效、
+Launcher 仍存活且前次明确为 NDI
+`ACCESS_LOST` 时才有界重试。它不能武装或发送输入；未覆盖完整锁定窗口会使 automatic gate 失败，
+但不会放宽 KMBOX 双授权或 End 急停。
 
 ## 操作步骤
 
@@ -985,6 +1151,10 @@ $taskCapturePixelEvidence = if ($task.PSObject.Properties.Name -contains
 } else { $false }
 $taskHasPixelEvidenceAttemptsContract = $taskCapturePixelEvidence -and
     $task.pixel_evidence.PSObject.Properties.Name -contains "max_attempts"
+$taskHasPixelEvidenceRuntimeAlignmentContract =
+    $taskCapturePixelEvidence -and
+    $task.pixel_evidence.PSObject.Properties.Name -contains
+        "runtime_alignment"
 $taskPixelEvidenceMaxAttempts = if (
         $taskHasPixelEvidenceAttemptsContract) {
     [int]$task.pixel_evidence.max_attempts
@@ -1001,13 +1171,24 @@ if ([int]$task.schema -ne 1 -or
     $taskRequireSourceTiming -ne $RequireSourceTiming.IsPresent -or
     $taskCapturePixelEvidence -ne $CapturePixelEvidence.IsPresent -or
     ($taskCapturePixelEvidence -and
-        ([string]$task.pixel_evidence.executable.path -ne
+        ([string]$task.capture.source -ne $ndiSourceName -or
+        [string]$task.pixel_evidence.executable.path -ne
             (Join-Path $PixelEvidenceToolRoot "XenCaptureEvidence.exe") -or
         [string]$task.pixel_evidence.source_binding.path -ne
             $PixelEvidenceBindingPath -or
         [int]$task.pixel_evidence.frames -ne $PixelEvidenceFrames -or
         [int]$task.pixel_evidence.max_seconds -ne
-            $PixelEvidenceMaxSeconds)) -or
+            $PixelEvidenceMaxSeconds -or
+        ($taskHasPixelEvidenceRuntimeAlignmentContract -and
+            (-not [bool]$task.pixel_evidence.runtime_alignment.required -or
+            [string]$task.pixel_evidence.runtime_alignment.gate -ne
+                $pixelEvidenceRuntimeGate -or
+            [string]$task.pixel_evidence.runtime_alignment.marker_suffix -ne
+                $pixelEvidenceRuntimeMarkerSuffix -or
+            [int]$task.pixel_evidence.runtime_alignment.marker_schema -ne
+                $pixelEvidenceRuntimeMarkerSchema -or
+            [int]$task.pixel_evidence.runtime_alignment.max_marker_age_ms -ne
+                $pixelEvidenceRuntimeMarkerMaxAgeMs)))) -or
     [string]$task.package_validation -ne $packageValidationMode -or
     [string]$task.package_root -ne $PackageRoot -or
     [double]$task.aim.smoothing -ne $Smoothing -or
@@ -1036,6 +1217,30 @@ $pixelEvidenceExitCode = $null
 $pixelEvidenceExecutionError = ""
 $pixelEvidenceAttempts = @()
 $pixelEvidenceAttemptState = $null
+$pixelEvidenceRuntimeMarkerPath = ""
+$pixelEvidenceRuntimeAlignmentBlocked = $false
+$pixelEvidencePromptState = [ordered]@{ release_prompted = $false }
+$writePixelEvidenceReleasePrompt = {
+    param([bool]$Succeeded)
+    if ([bool]$pixelEvidencePromptState.release_prompted) { return }
+    $pixelEvidencePromptState.release_prompted = $true
+    if ($Succeeded) {
+        Write-Host "sidecar 已完成，可以松开右键。"
+    } else {
+        Write-Host "sidecar 未完成或已停止，可以松开右键。"
+    }
+}
+$pixelEvidenceRuntimeAlignment = if (
+        $taskHasPixelEvidenceRuntimeAlignmentContract) {
+    [ordered]@{
+        required = $true
+        gate = $pixelEvidenceRuntimeGate
+        gate_passed = $false
+        session_id = ""
+        activation_epoch = [uint64]0
+        marker = $null
+    }
+} else { $null }
 $pixelEvidenceAttemptsPath = Join-Path $resolvedRun `
     "pixel-evidence-attempts.json"
 if ($Mode -eq "Launch") {
@@ -1073,8 +1278,9 @@ if ($Mode -eq "Launch") {
                 })) {
             Assert-FileEvidenceMatches $item.evidence $item.description
         }
-        [void](Read-PixelEvidenceBinding (
-            [string]$task.pixel_evidence.source_binding.path))
+        [void](Read-PixelEvidenceBinding `
+            ([string]$task.pixel_evidence.source_binding.path) `
+            $ndiOutputName)
         $pixelEvidenceOutput = Join-Path $resolvedRun `
             ([string]$task.pixel_evidence.output_relative_path)
         if (Test-Path -LiteralPath $pixelEvidenceOutput) {
@@ -1134,12 +1340,21 @@ if ($Mode -eq "Launch") {
                 -ArgumentList $pixelEvidenceArguments -WindowStyle Hidden `
                 -RedirectStandardOutput $stdout `
                 -RedirectStandardError $stderr -PassThru
+            $runtimeActiveAtStart =
+                -not $taskHasPixelEvidenceRuntimeAlignmentContract -or
+                (-not [string]::IsNullOrWhiteSpace(
+                    $pixelEvidenceRuntimeMarkerPath) -and
+                (Test-RuntimeAlignmentMarkerActive `
+                    $pixelEvidenceRuntimeMarkerPath `
+                    ([string]$pixelEvidenceRuntimeAlignment.session_id) `
+                    ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch)))
             return [pscustomobject]@{
                 attempt = $Attempt
                 process = $attemptProcess
                 stdout = $stdout
                 stderr = $stderr
                 started_utc = [DateTime]::UtcNow
+                runtime_active_at_start = $runtimeActiveAtStart
             }
         }
         $completePixelEvidenceAttempt = {
@@ -1157,6 +1372,14 @@ if ($Mode -eq "Launch") {
             $retryable = [bool]($stderrText -match 'status=ACCESS_LOST')
             $succeeded = [bool]($exitCode -eq 0 -and -not $retryable -and
                 $manifestPublished)
+            $runtimeActiveAtCompletion =
+                -not $taskHasPixelEvidenceRuntimeAlignmentContract -or
+                (-not [string]::IsNullOrWhiteSpace(
+                    $pixelEvidenceRuntimeMarkerPath) -and
+                (Test-RuntimeAlignmentMarkerActive `
+                    $pixelEvidenceRuntimeMarkerPath `
+                    ([string]$pixelEvidenceRuntimeAlignment.session_id) `
+                    ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch)))
             return [ordered]@{
                 attempt = [int]$State.attempt
                 started_utc = $State.started_utc.ToString("o")
@@ -1172,6 +1395,10 @@ if ($Mode -eq "Launch") {
                 succeeded = $succeeded
                 retryable = $retryable
                 manifest_published = $manifestPublished
+                runtime_active_at_start =
+                    [bool]$State.runtime_active_at_start
+                runtime_active_at_completion =
+                    $runtimeActiveAtCompletion
                 stdout_log = Split-Path -Leaf $State.stdout
                 stderr_log = Split-Path -Leaf $State.stderr
             }
@@ -1189,8 +1416,9 @@ if ($Mode -eq "Launch") {
     $startedUtc = [DateTime]::UtcNow
     Write-Host "即将启动真实 KMBOX 输出任务：$($task.run_id)"
     Write-Host "确认 End 急停可用；程序启动后仍需人工武装并按 TASK.md 操作。"
-    if ($taskCapturePixelEvidence) {
-        Write-Host ("同步 NDI 像素 sidecar 将先启动；该进程固定 " +
+    if ($taskCapturePixelEvidence -and
+        -not $taskHasPixelEvidenceRuntimeAlignmentContract) {
+        Write-Host ("旧合同同步 NDI 像素 sidecar 将先启动；该进程固定 " +
             "physical_output_capability=false。")
         $pixelEvidenceAttemptState = & $startPixelEvidenceAttempt 1
         $pixelEvidenceProcess = $pixelEvidenceAttemptState.process
@@ -1198,7 +1426,64 @@ if ($Mode -eq "Launch") {
     try {
         $process = Start-Process -FilePath $launcher `
             -WorkingDirectory $PackageRoot -PassThru
+        if ($taskCapturePixelEvidence -and
+            $taskHasPixelEvidenceRuntimeAlignmentContract) {
+            Write-Host ("Launcher 已启动；等待 Runtime 连续 aim-lock 窗口后" +
+                "再启动 output-off NDI 像素 sidecar。")
+        }
         while (-not $process.HasExited) {
+            if ($taskCapturePixelEvidence -and
+                $taskHasPixelEvidenceRuntimeAlignmentContract -and
+                -not $pixelEvidenceRuntimeAlignmentBlocked -and
+                [string]::IsNullOrWhiteSpace(
+                    $pixelEvidenceRuntimeMarkerPath)) {
+                try {
+                    $runtimeMarkers = @(if (
+                            Test-Path -LiteralPath $runtimeRoot `
+                                -PathType Container) {
+                        Get-ChildItem -LiteralPath $runtimeRoot -File |
+                            Where-Object {
+                                $_.Name.EndsWith(
+                                    $pixelEvidenceRuntimeMarkerSuffix,
+                                    [StringComparison]::Ordinal) -and
+                                -not $before.Contains($_.FullName)
+                            }
+                    })
+                    if ($runtimeMarkers.Count -gt 1) {
+                        throw "同一 Launch 发现多个新 Runtime aim-lock 标记，拒绝选择。"
+                    }
+                    if ($runtimeMarkers.Count -eq 1) {
+                        $runtimeMarker = Read-RuntimeAlignmentMarker `
+                            $runtimeMarkers[0].FullName
+                        if (-not (Test-RuntimeAlignmentMarkerActive `
+                                $runtimeMarkers[0].FullName `
+                                ([string]$runtimeMarker.session_id) `
+                                ([uint64]$runtimeMarker.activation_epoch))) {
+                            [void]$process.WaitForExit(100)
+                            continue
+                        }
+                        $pixelEvidenceRuntimeMarkerPath =
+                            $runtimeMarkers[0].FullName
+                        $pixelEvidenceRuntimeAlignment.session_id =
+                            [string]$runtimeMarker.session_id
+                        $pixelEvidenceRuntimeAlignment.activation_epoch =
+                            [uint64]$runtimeMarker.activation_epoch
+                        $pixelEvidenceRuntimeAlignment.marker =
+                            Get-FileEvidence $pixelEvidenceRuntimeMarkerPath
+                        Write-Host ("已观察到 Runtime aim-lock：session=" +
+                            "$($runtimeMarker.session_id)；开始同步像素采集。")
+                        $pixelEvidenceAttemptState =
+                            & $startPixelEvidenceAttempt 1
+                        $pixelEvidenceProcess =
+                            $pixelEvidenceAttemptState.process
+                    }
+                } catch {
+                    $pixelEvidenceRuntimeAlignmentBlocked = $true
+                    $pixelEvidenceExecutionError =
+                        "Runtime 对齐证据无效，拒绝启动 sidecar：$($_.Exception.Message)"
+                    & $writePixelEvidenceReleasePrompt $false
+                }
+            }
             if ($null -ne $pixelEvidenceAttemptState -and
                 $pixelEvidenceAttemptState.process.HasExited) {
                 $attempt = & $completePixelEvidenceAttempt `
@@ -1207,31 +1492,87 @@ if ($Mode -eq "Launch") {
                 $pixelEvidenceExitCode = [int]$attempt.exit_code
                 $launcherAliveAtSidecarCompletion = -not $process.HasExited
                 $pixelEvidenceAttemptState = $null
-                if ([bool]$attempt.succeeded -and
-                    $launcherAliveAtSidecarCompletion) {
+                $runtimeAlignedAtCompletion =
+                    -not $taskHasPixelEvidenceRuntimeAlignmentContract -or
+                    ([bool]$attempt.runtime_active_at_start -and
+                    [bool]$attempt.runtime_active_at_completion)
+                if ($pixelEvidenceRuntimeAlignmentBlocked) {
+                    # 保留 marker 消失、解析失败或 sidecar 启动失败的首个
+                    # fail-closed 原因；该次尝试仍写入生命周期证据。
+                    & $writePixelEvidenceReleasePrompt $false
+                } elseif ([bool]$attempt.succeeded -and
+                    $launcherAliveAtSidecarCompletion -and
+                    $runtimeAlignedAtCompletion) {
                     $pixelEvidenceExecutionError = ""
+                    if ($taskHasPixelEvidenceRuntimeAlignmentContract) {
+                        $pixelEvidenceRuntimeAlignment.gate_passed = $true
+                    }
+                    & $writePixelEvidenceReleasePrompt $true
+                } elseif ([bool]$attempt.succeeded -and
+                    -not $runtimeAlignedAtCompletion) {
+                    $pixelEvidenceExecutionError =
+                        "像素 sidecar 未完整处于 Runtime aim-lock 窗口。"
+                    & $writePixelEvidenceReleasePrompt $false
                 } elseif ([bool]$attempt.succeeded) {
                     $pixelEvidenceExecutionError =
                         "Launcher 已退出前未确认像素 sidecar 完成；本次采集生命周期无效。"
+                    & $writePixelEvidenceReleasePrompt $false
                 } elseif ([bool]$attempt.retryable) {
                     $pixelEvidenceExecutionError =
                         "像素 sidecar 第 $($attempt.attempt) 次发现失败：ACCESS_LOST"
+                    $retryStarted = $false
                     if ($pixelEvidenceAttempts.Count -lt
                             $taskPixelEvidenceMaxAttempts -and
-                        -not $process.WaitForExit(250)) {
+                        -not $process.WaitForExit(250) -and
+                        (-not $taskHasPixelEvidenceRuntimeAlignmentContract -or
+                        (Test-RuntimeAlignmentMarkerActive `
+                            $pixelEvidenceRuntimeMarkerPath `
+                            ([string]$pixelEvidenceRuntimeAlignment.session_id) `
+                            ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch)))) {
                         $nextAttempt = $pixelEvidenceAttempts.Count + 1
                         Write-Host ("同步像素 sidecar 第 " +
                             "$($attempt.attempt) 次发现失败；Launcher 仍存活，" +
                             "开始第 $nextAttempt 次有界重试。")
-                        $pixelEvidenceAttemptState =
-                            & $startPixelEvidenceAttempt $nextAttempt
-                        $pixelEvidenceProcess =
-                            $pixelEvidenceAttemptState.process
+                        try {
+                            $pixelEvidenceAttemptState =
+                                & $startPixelEvidenceAttempt $nextAttempt
+                            $pixelEvidenceProcess =
+                                $pixelEvidenceAttemptState.process
+                            $retryStarted = $true
+                        } catch {
+                            $pixelEvidenceRuntimeAlignmentBlocked = $true
+                            $pixelEvidenceExecutionError =
+                                "像素 sidecar 重试启动失败：$($_.Exception.Message)"
+                        }
+                    }
+                    if (-not $retryStarted) {
+                        & $writePixelEvidenceReleasePrompt $false
                     }
                 } else {
                     $pixelEvidenceExecutionError =
                         ("像素 sidecar 第 $($attempt.attempt) 次失败：" +
                         "$($attempt.diagnostic)；退出码：$pixelEvidenceExitCode")
+                    & $writePixelEvidenceReleasePrompt $false
+                }
+            }
+            if ($null -ne $pixelEvidenceAttemptState -and
+                $taskHasPixelEvidenceRuntimeAlignmentContract -and
+                -not (Test-RuntimeAlignmentMarkerActive `
+                    $pixelEvidenceRuntimeMarkerPath `
+                    ([string]$pixelEvidenceRuntimeAlignment.session_id) `
+                    ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch))) {
+                $pixelEvidenceExecutionError =
+                    "Runtime aim-lock activation 已结束、切换或 marker lease 过期。"
+                $pixelEvidenceRuntimeAlignmentBlocked = $true
+                & $writePixelEvidenceReleasePrompt $false
+                if (-not $pixelEvidenceAttemptState.process.HasExited) {
+                    try {
+                        $pixelEvidenceAttemptState.process.Kill()
+                        [void]$pixelEvidenceAttemptState.process.WaitForExit(5000)
+                    } catch {
+                        $pixelEvidenceExecutionError +=
+                            " 终止失败：$($_.Exception.Message)"
+                    }
                 }
             }
             if (-not $process.HasExited) {
@@ -1240,10 +1581,31 @@ if ($Mode -eq "Launch") {
         }
         [void]$process.WaitForExit()
         $endedUtc = [DateTime]::UtcNow
+    } catch {
+        $pixelEvidenceRuntimeAlignmentBlocked = $true
+        $supervisionError =
+            "Launch 监督循环异常：$($_.Exception.Message)"
+        if ([string]::IsNullOrWhiteSpace($pixelEvidenceExecutionError)) {
+            $pixelEvidenceExecutionError = $supervisionError
+        } else {
+            $pixelEvidenceExecutionError += " $supervisionError"
+        }
+        if ($taskCapturePixelEvidence) {
+            & $writePixelEvidenceReleasePrompt $false
+        }
+        Wait-ProcessExitSupervised $process
+        $endedUtc = [DateTime]::UtcNow
+        Write-Warning ($supervisionError +
+            "；脚本已等待 Launcher 退出，没有放弃前台监督。")
     } finally {
         if ($null -ne $pixelEvidenceAttemptState) {
-            $pixelEvidenceExecutionError =
+            $sidecarLifecycleError =
                 "Launcher 已退出前未确认像素 sidecar 完成；本次采集生命周期无效。"
+            if ([string]::IsNullOrWhiteSpace($pixelEvidenceExecutionError)) {
+                $pixelEvidenceExecutionError = $sidecarLifecycleError
+            } else {
+                $pixelEvidenceExecutionError += " $sidecarLifecycleError"
+            }
             if (-not $pixelEvidenceAttemptState.process.HasExited) {
                 try {
                     $pixelEvidenceAttemptState.process.Kill()
@@ -1261,29 +1623,44 @@ if ($Mode -eq "Launch") {
             }
         }
         if ($taskCapturePixelEvidence -and
-            $pixelEvidenceAttempts.Count -ne 0) {
+            $taskHasPixelEvidenceRuntimeAlignmentContract -and
+            [string]::IsNullOrWhiteSpace($pixelEvidenceRuntimeMarkerPath) -and
+            [string]::IsNullOrWhiteSpace($pixelEvidenceExecutionError)) {
+            $pixelEvidenceExecutionError =
+                "Launcher 退出前未观察到 Runtime aim-lock 标记。"
+        }
+        if ($taskCapturePixelEvidence) {
+            & $writePixelEvidenceReleasePrompt $false
             Write-JsonAtomically $pixelEvidenceAttemptsPath ([ordered]@{
-                schema = 1
+                schema = if ($taskHasPixelEvidenceRuntimeAlignmentContract) {
+                    2
+                } else { 1 }
                 max_attempts = $taskPixelEvidenceMaxAttempts
                 process_exit_code = $pixelEvidenceExitCode
                 execution_error = $pixelEvidenceExecutionError
+                runtime_alignment = if (
+                        $taskHasPixelEvidenceRuntimeAlignmentContract) {
+                    $pixelEvidenceRuntimeAlignment
+                } else { $null }
                 attempts = @($pixelEvidenceAttempts)
             })
-            $lastAttempt = $pixelEvidenceAttempts[-1]
-            foreach ($log in @(
-                    [pscustomobject]@{
-                        source = Join-Path $resolvedRun `
-                            ([string]$lastAttempt.stdout_log)
-                        destination = $pixelEvidenceStdout
-                    },
-                    [pscustomobject]@{
-                        source = Join-Path $resolvedRun `
-                            ([string]$lastAttempt.stderr_log)
-                        destination = $pixelEvidenceStderr
-                    })) {
-                if (Test-Path -LiteralPath $log.source -PathType Leaf) {
-                    Copy-Item -LiteralPath $log.source `
-                        -Destination $log.destination
+            if ($pixelEvidenceAttempts.Count -ne 0) {
+                $lastAttempt = $pixelEvidenceAttempts[-1]
+                foreach ($log in @(
+                        [pscustomobject]@{
+                            source = Join-Path $resolvedRun `
+                                ([string]$lastAttempt.stdout_log)
+                            destination = $pixelEvidenceStdout
+                        },
+                        [pscustomobject]@{
+                            source = Join-Path $resolvedRun `
+                                ([string]$lastAttempt.stderr_log)
+                            destination = $pixelEvidenceStderr
+                        })) {
+                    if (Test-Path -LiteralPath $log.source -PathType Leaf) {
+                        Copy-Item -LiteralPath $log.source `
+                            -Destination $log.destination
+                    }
                 }
             }
         }
@@ -1373,18 +1750,23 @@ if ($Mode -eq "Recover" -and $taskCapturePixelEvidence -and
     $requiredAttemptEvidenceFields = @(
         "schema", "max_attempts", "process_exit_code", "execution_error",
         "attempts")
+    if ($taskHasPixelEvidenceRuntimeAlignmentContract) {
+        $requiredAttemptEvidenceFields += "runtime_alignment"
+    }
     $missingAttemptEvidenceFields = @(
         $requiredAttemptEvidenceFields | Where-Object {
             $attemptEvidence.PSObject.Properties.Name -notcontains $_
         })
     if ($missingAttemptEvidenceFields.Count -ne 0 -or
-        [int]$attemptEvidence.schema -ne 1 -or
+        [int]$attemptEvidence.schema -ne $(if (
+                $taskHasPixelEvidenceRuntimeAlignmentContract) { 2 } else { 1 }) -or
         [int]$attemptEvidence.max_attempts -ne
             $taskPixelEvidenceMaxAttempts) {
         throw "Recover 像素 sidecar 尝试证据 schema 无效。"
     }
     $pixelEvidenceAttempts = @($attemptEvidence.attempts)
-    if ($pixelEvidenceAttempts.Count -lt 1 -or
+    if (($pixelEvidenceAttempts.Count -lt 1 -and
+            -not $taskHasPixelEvidenceRuntimeAlignmentContract) -or
         $pixelEvidenceAttempts.Count -gt $taskPixelEvidenceMaxAttempts) {
         throw "Recover 像素 sidecar 尝试证据数量无效。"
     }
@@ -1392,6 +1774,10 @@ if ($Mode -eq "Recover" -and $taskCapturePixelEvidence -and
         "attempt", "started_utc", "ended_utc", "exit_code", "diagnostic",
         "succeeded", "retryable", "manifest_published", "stdout_log",
         "stderr_log")
+    if ($taskHasPixelEvidenceRuntimeAlignmentContract) {
+        $requiredAttemptFields += @(
+            "runtime_active_at_start", "runtime_active_at_completion")
+    }
     for ($index = 0; $index -lt $pixelEvidenceAttempts.Count; ++$index) {
         $attempt = $pixelEvidenceAttempts[$index]
         $missingAttemptFields = @($requiredAttemptFields | Where-Object {
@@ -1412,14 +1798,40 @@ if ($Mode -eq "Recover" -and $taskCapturePixelEvidence -and
             throw "Recover 像素 sidecar 单次尝试证据无效。"
         }
     }
-    $lastPixelEvidenceAttempt = $pixelEvidenceAttempts[-1]
-    $pixelEvidenceExitCode = [int]$lastPixelEvidenceAttempt.exit_code
-    if ([int]$attemptEvidence.process_exit_code -ne
-        $pixelEvidenceExitCode) {
+    if ($taskHasPixelEvidenceRuntimeAlignmentContract) {
+        $alignment = $attemptEvidence.runtime_alignment
+        $requiredAlignmentFields = @(
+            "required", "gate", "gate_passed", "session_id",
+            "activation_epoch", "marker")
+        $missingAlignmentFields = @($requiredAlignmentFields | Where-Object {
+            $alignment.PSObject.Properties.Name -notcontains $_
+        })
+        if ($missingAlignmentFields.Count -ne 0 -or
+            -not [bool]$alignment.required -or
+            [string]$alignment.gate -ne $pixelEvidenceRuntimeGate -or
+            ([bool]$alignment.gate_passed -and
+                ([string]::IsNullOrWhiteSpace(
+                    [string]$alignment.session_id) -or
+                [uint64]$alignment.activation_epoch -lt 1))) {
+            throw "Recover Runtime aim-lock 对齐证据无效。"
+        }
+        $pixelEvidenceRuntimeAlignment = $alignment
+    }
+    $lastPixelEvidenceAttempt = if ($pixelEvidenceAttempts.Count -eq 0) {
+        $null
+    } else { $pixelEvidenceAttempts[-1] }
+    $pixelEvidenceExitCode = if ($null -eq $lastPixelEvidenceAttempt) {
+        $null
+    } else { [int]$lastPixelEvidenceAttempt.exit_code }
+    if (($null -eq $pixelEvidenceExitCode) -ne
+            ($null -eq $attemptEvidence.process_exit_code) -or
+        ($null -ne $pixelEvidenceExitCode -and
+        [int]$attemptEvidence.process_exit_code -ne $pixelEvidenceExitCode)) {
         throw "Recover 像素 sidecar 最后退出码与尝试证据不一致。"
     }
     $pixelEvidenceExecutionError = [string]$attemptEvidence.execution_error
     $lastAttemptProvesSuccess =
+        $null -ne $lastPixelEvidenceAttempt -and
         [bool]$lastPixelEvidenceAttempt.succeeded -and
         $pixelEvidenceExitCode -eq 0 -and
         [string]$lastPixelEvidenceAttempt.diagnostic -eq "SUCCESS" -and
@@ -1516,10 +1928,13 @@ $sourceTimingEvidence = Get-XenSourceTimingEvidence -Samples $allSamples
 $sourceTimingValidSamples = [uint64]$sourceTimingEvidence.valid_samples
 $sourceTimingGatePassed = -not $RequireSourceTiming.IsPresent -or
     [string]$sourceTimingEvidence.diagnostic -eq "VALID"
+$runtimeSessionIds = @($segments | ForEach-Object { [string]$_.session_id })
 $pixelEvidenceSummary = Get-PixelEvidenceSummary `
     -Task $task -ResolvedRunDirectory $resolvedRun `
     -CollectionMode $Mode -ProcessExitCode $pixelEvidenceExitCode `
-    -ExecutionError $pixelEvidenceExecutionError
+    -ExecutionError $pixelEvidenceExecutionError `
+    -RuntimeAlignment $pixelEvidenceRuntimeAlignment `
+    -RuntimeSessionIds $runtimeSessionIds
 $pixelEvidenceSummary["attempt_count"] = $pixelEvidenceAttempts.Count
 $pixelEvidenceSummary["attempts"] = @($pixelEvidenceAttempts)
 $mouseBackendCompletionSamples = @($allSamples | Where-Object {

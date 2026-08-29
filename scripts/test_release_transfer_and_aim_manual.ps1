@@ -142,6 +142,20 @@ using System.Threading;
 
 namespace XenAimManualLauncherFixture {
     public static class Program {
+        private static void WriteMarker(
+                string path, string sessionId, int sequence) {
+            string temporary = path + ".tmp." + Guid.NewGuid().ToString("N");
+            File.WriteAllText(temporary,
+                "{\"schema\":2,\"session_id\":\"" + sessionId +
+                "\",\"gate\":\"AIM_LOCK_ACTIVE\"," +
+                "\"activation_epoch\":1,\"sequence\":" + sequence + "}");
+            if (File.Exists(path)) {
+                File.Replace(temporary, path, null);
+            } else {
+                File.Move(temporary, path);
+            }
+        }
+
         public static int Main(string[] args) {
             string started = Environment.GetEnvironmentVariable(
                 "XEN_TEST_PIXEL_STARTED");
@@ -155,33 +169,55 @@ namespace XenAimManualLauncherFixture {
                 "XEN_TEST_RUNTIME_REPORT_NAME");
             string runtimeRoot = Environment.GetEnvironmentVariable(
                 "XEN_TEST_RUNTIME_ROOT");
+            string runtimeSessionId = Environment.GetEnvironmentVariable(
+                "XEN_TEST_RUNTIME_SESSION_ID");
+            string runtimeHoldText = Environment.GetEnvironmentVariable(
+                "XEN_TEST_RUNTIME_HOLD_AFTER_SUCCESS_MS");
             if (String.IsNullOrEmpty(started) || String.IsNullOrEmpty(ready) ||
                 String.IsNullOrEmpty(success) ||
                 String.IsNullOrEmpty(reportSource) ||
                 String.IsNullOrEmpty(reportName) ||
-                String.IsNullOrEmpty(runtimeRoot)) {
+                String.IsNullOrEmpty(runtimeRoot) ||
+                String.IsNullOrEmpty(runtimeSessionId)) {
                 return 20;
             }
-            DateTime deadline = DateTime.UtcNow.AddSeconds(5);
-            while (!File.Exists(started) && DateTime.UtcNow < deadline) {
-                Thread.Sleep(20);
-            }
-            if (!File.Exists(started)) return 21;
+            string runtimeMarker = Path.Combine(
+                runtimeRoot, reportName + ".aim-lock-active");
             try {
                 Thread.Sleep(250);
-                File.WriteAllText(ready, "ready");
                 Directory.CreateDirectory(runtimeRoot);
+                int sequence = 1;
+                WriteMarker(runtimeMarker, runtimeSessionId, sequence);
+                File.WriteAllText(ready, "ready");
                 File.Copy(reportSource,
                     Path.Combine(runtimeRoot, reportName), true);
-                deadline = DateTime.UtcNow.AddSeconds(2);
+                DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+                while (!File.Exists(started) && DateTime.UtcNow < deadline) {
+                    Thread.Sleep(100);
+                    WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
+                }
+                if (!File.Exists(started)) return 21;
                 while (!File.Exists(success) && DateTime.UtcNow < deadline) {
-                    Thread.Sleep(20);
+                    Thread.Sleep(100);
+                    WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
                 }
                 if (!File.Exists(success)) return 22;
-                Thread.Sleep(300);
+                int holdMilliseconds = 300;
+                int parsedHoldMilliseconds = 0;
+                if (Int32.TryParse(runtimeHoldText,
+                        out parsedHoldMilliseconds)) {
+                    holdMilliseconds = parsedHoldMilliseconds;
+                }
+                if (holdMilliseconds < 0) holdMilliseconds = 0;
+                deadline = DateTime.UtcNow.AddMilliseconds(holdMilliseconds);
+                while (DateTime.UtcNow < deadline) {
+                    Thread.Sleep(100);
+                    WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
+                }
                 return 0;
             } finally {
                 if (File.Exists(ready)) File.Delete(ready);
+                if (File.Exists(runtimeMarker)) File.Delete(runtimeMarker);
             }
         }
     }
@@ -389,7 +425,9 @@ namespace XenAimManualPixelFixture {
     Write-Utf8 (Join-Path $pixelToolRoot "Processing.NDI.Lib.x64.dll") `
         "ndi runtime"
     $pixelBinding = Join-Path $root "obs-source-binding.json"
-    Write-Utf8 $pixelBinding '{"physical_output_capability":false}'
+    Write-Utf8 $pixelBinding (@'
+{"schema_version":2,"evidence_type":"obs_source_binding","physical_output_capability":false,"ndi_main_output":{"enabled":true,"name":"Xen-ROI-320"}}
+'@)
     $pixelTaskRoot = Join-Path $root "pixel-sidecar-task"
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
@@ -399,7 +437,7 @@ namespace XenAimManualPixelFixture {
         -CapturePixelEvidence `
         -PixelEvidenceToolRoot $pixelToolRoot `
         -PixelEvidenceBindingPath $pixelBinding `
-        -PixelEvidenceFrames 1200 -PixelEvidenceMaxSeconds 15 `
+        -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
         -PackageRoot $published -RunDirectory $pixelTaskRoot | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "同步像素 sidecar 的 Prepare 合同必须可生成。"
@@ -410,8 +448,8 @@ namespace XenAimManualPixelFixture {
     $pixelTaskMarkdown = Get-Content -LiteralPath `
         (Join-Path $pixelTaskRoot "TASK.md") -Raw -Encoding utf8
     if (-not [bool]$pixelTask.pixel_evidence.enabled -or
-        [int]$pixelTask.pixel_evidence.frames -ne 1200 -or
-        [int]$pixelTask.pixel_evidence.max_seconds -ne 15 -or
+        [int]$pixelTask.pixel_evidence.frames -ne 2400 -or
+        [int]$pixelTask.pixel_evidence.max_seconds -ne 30 -or
         [string]$pixelTask.pixel_evidence.output_relative_path -ne
             "pixel-evidence" -or
         [string]::IsNullOrWhiteSpace(
@@ -422,10 +460,18 @@ namespace XenAimManualPixelFixture {
             $pixelTask.pixel_evidence.ndi_runtime.sha256) -or
         [string]::IsNullOrWhiteSpace(
             $pixelTask.pixel_evidence.source_binding.sha256) -or
+        [int]$pixelTask.pixel_evidence.runtime_alignment.marker_schema -ne 2 -or
+        [int]$pixelTask.pixel_evidence.runtime_alignment.max_marker_age_ms -ne
+            1000 -or
         $pixelTaskMarkdown -notmatch "同步 NDI 像素 sidecar" -or
+        $pixelTaskMarkdown -notmatch "至少 15 秒" -or
+        $pixelTaskMarkdown -notmatch "sidecar 已完成，可以松开右键" -or
+        $pixelTaskMarkdown -notmatch
+            "sidecar 未完成或已停止，可以松开右键" -or
+        $pixelTaskMarkdown -match "按住右键约 5 秒再松开" -or
         $pixelTaskMarkdown -notmatch "-CapturePixelEvidence" -or
-        $pixelTaskMarkdown -notmatch "-PixelEvidenceFrames 1200" -or
-        $pixelTaskMarkdown -notmatch "-PixelEvidenceMaxSeconds 15") {
+        $pixelTaskMarkdown -notmatch "-PixelEvidenceFrames 2400" -or
+        $pixelTaskMarkdown -notmatch "-PixelEvidenceMaxSeconds 30") {
         throw "同步像素 sidecar 没有绑定工具闭包、source binding、输出目录或唯一 Launch 参数。"
     }
     $invalidPixelTaskRoot = Join-Path $root "pixel-sidecar-without-timing"
@@ -461,7 +507,7 @@ namespace XenAimManualPixelFixture {
         (($pixelSchema13Report | ConvertTo-Json -Depth 10) + "`n")
     $pixelOutputRoot = Join-Path $pixelTaskRoot "pixel-evidence"
     New-Item -ItemType Directory -Path $pixelOutputRoot | Out-Null
-    $pixelFrames = @(for ($frame = 0; $frame -lt 1200; ++$frame) {
+    $pixelFrames = @(for ($frame = 0; $frame -lt 2400; ++$frame) {
         [ordered]@{
             source_time_timing_valid = $true
             source_clock_status = "VALID"
@@ -474,8 +520,8 @@ namespace XenAimManualPixelFixture {
         capture_backend = "NDI"
         capture_source_name = "HPSAZZ (Xen-ROI-320)"
         capture_config = [ordered]@{ require_source_timing = $true }
-        requested_frame_count = 1200
-        recorded_frame_count = 1200
+        requested_frame_count = 2400
+        recorded_frame_count = 2400
         source_binding = [ordered]@{
             sha256 = [string]$pixelTask.pixel_evidence.source_binding.sha256
         }
@@ -483,6 +529,8 @@ namespace XenAimManualPixelFixture {
     }
     Write-Utf8 (Join-Path $pixelOutputRoot "manifest.json") `
         (($pixelManifest | ConvertTo-Json -Depth 5) + "`n")
+    Copy-Item -LiteralPath $pixelBinding -Destination `
+        (Join-Path $pixelOutputRoot "source-binding.json")
     $pixelRecoverOutput = @(& powershell.exe -NoProfile `
         -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
@@ -492,7 +540,7 @@ namespace XenAimManualPixelFixture {
         -CapturePixelEvidence `
         -PixelEvidenceToolRoot $pixelToolRoot `
         -PixelEvidenceBindingPath $pixelBinding `
-        -PixelEvidenceFrames 1200 -PixelEvidenceMaxSeconds 15 `
+        -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
         -PackageRoot $published -RunDirectory $pixelTaskRoot 2>&1)
     if ($LASTEXITCODE -ne 0) {
         $pixelRecoverOutput | ForEach-Object { Write-Host $_ }
@@ -504,12 +552,12 @@ namespace XenAimManualPixelFixture {
     if (-not [bool]$pixelRecoveredSummary.pixel_evidence.enabled -or
         [bool]$pixelRecoveredSummary.pixel_evidence.gate_passed -or
         [string]$pixelRecoveredSummary.pixel_evidence.diagnostic -ne
-            "CONTRACT_FAILED" -or
+            "RUNTIME_ALIGNMENT_FAILED" -or
         [string]$pixelRecoveredSummary.pixel_evidence.execution_error `
             -notmatch '缺少新 sidecar 生命周期合同' -or
-        [int]$pixelRecoveredSummary.pixel_evidence.recorded_frames -ne 1200 -or
+        [int]$pixelRecoveredSummary.pixel_evidence.recorded_frames -ne 2400 -or
         [int]$pixelRecoveredSummary.pixel_evidence.source_timing_valid_frames -ne
-            1200 -or
+            2400 -or
         [bool]$pixelRecoveredSummary.automatic_complete) {
         throw "新 sidecar 合同缺 attempts 证据时 Recover 必须 fail-closed。"
     }
@@ -517,6 +565,8 @@ namespace XenAimManualPixelFixture {
     # 模拟 max_attempts 字段加入前的历史 task，证明旧 Run 仍可按 manifest
     # 离线 Recover；新任务不得走这条兼容路径。
     [void]$pixelTask.pixel_evidence.PSObject.Properties.Remove("max_attempts")
+    [void]$pixelTask.pixel_evidence.PSObject.Properties.Remove(
+        "runtime_alignment")
     Write-Utf8 (Join-Path $pixelTaskRoot "task.json") `
         (($pixelTask | ConvertTo-Json -Depth 10) + "`n")
     $pixelLegacyRecoverOutput = @(& powershell.exe -NoProfile `
@@ -528,7 +578,7 @@ namespace XenAimManualPixelFixture {
         -CapturePixelEvidence `
         -PixelEvidenceToolRoot $pixelToolRoot `
         -PixelEvidenceBindingPath $pixelBinding `
-        -PixelEvidenceFrames 1200 -PixelEvidenceMaxSeconds 15 `
+        -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
         -PackageRoot $published -RunDirectory $pixelTaskRoot 2>&1)
     if ($LASTEXITCODE -ne 0) {
         $pixelLegacyRecoverOutput | ForEach-Object { Write-Host $_ }
@@ -541,7 +591,7 @@ namespace XenAimManualPixelFixture {
         [string]$pixelLegacyRecoveredSummary.pixel_evidence.diagnostic -ne
             "VALID" -or
         [int]$pixelLegacyRecoveredSummary.pixel_evidence.recorded_frames -ne
-            1200 -or
+            2400 -or
         [bool]$pixelLegacyRecoveredSummary.automatic_complete) {
         throw "旧 task 兼容 Recover 必须保留有效像素 manifest，但不得覆盖 Runtime timing 失败。"
     }
@@ -555,7 +605,7 @@ namespace XenAimManualPixelFixture {
         -CapturePixelEvidence `
         -PixelEvidenceToolRoot $pixelToolRoot `
         -PixelEvidenceBindingPath $pixelBinding `
-        -PixelEvidenceFrames 1200 -PixelEvidenceMaxSeconds 15 `
+        -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
         -PackageRoot $published -RunDirectory $pixelLifecycleRoot | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "同步像素 sidecar 生命周期测试任务必须可 Prepare。"
@@ -572,6 +622,8 @@ namespace XenAimManualPixelFixture {
         Out-Null
     Write-Utf8 (Join-Path $pixelLifecycleEvidenceSource "manifest.json") `
         (($pixelManifest | ConvertTo-Json -Depth 5) + "`n")
+    Copy-Item -LiteralPath $pixelBinding -Destination `
+        (Join-Path $pixelLifecycleEvidenceSource "source-binding.json")
     $pixelLifecycleReportSource = Join-Path $root `
         "pixel-lifecycle-runtime.json"
     Write-Utf8 $pixelLifecycleReportSource `
@@ -587,10 +639,12 @@ namespace XenAimManualPixelFixture {
         XEN_TEST_PIXEL_SUCCESS = $pixelLifecycleSuccess
         XEN_TEST_PIXEL_COUNTER = $pixelLifecycleCounter
         XEN_TEST_PIXEL_EVIDENCE_SOURCE = $pixelLifecycleEvidenceSource
-        XEN_TEST_PIXEL_HOLD_AFTER_SUCCESS_MS = "0"
+        XEN_TEST_PIXEL_HOLD_AFTER_SUCCESS_MS = "1500"
+        XEN_TEST_RUNTIME_HOLD_AFTER_SUCCESS_MS = "2000"
         XEN_TEST_RUNTIME_REPORT_SOURCE = $pixelLifecycleReportSource
         XEN_TEST_RUNTIME_REPORT_NAME = "pixel-lifecycle-success.json"
         XEN_TEST_RUNTIME_ROOT = (Join-Path $published "cache\runtime")
+        XEN_TEST_RUNTIME_SESSION_ID = "pixel-schema13"
     }
     foreach ($name in $fixtureEnvironment.Keys) {
         $savedFixtureEnvironment[$name] = [Environment]::GetEnvironmentVariable(
@@ -600,6 +654,8 @@ namespace XenAimManualPixelFixture {
             [EnvironmentVariableTarget]::Process)
     }
     try {
+        $savedErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $pixelLifecycleOutput = @(& powershell.exe -NoProfile `
             -ExecutionPolicy Bypass -File `
             (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
@@ -609,7 +665,7 @@ namespace XenAimManualPixelFixture {
             -CapturePixelEvidence `
             -PixelEvidenceToolRoot $pixelToolRoot `
             -PixelEvidenceBindingPath $pixelBinding `
-            -PixelEvidenceFrames 1200 -PixelEvidenceMaxSeconds 15 `
+            -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
             -PackageRoot $published -RunDirectory $pixelLifecycleRoot `
             -AllowPhysicalOutput `
             -PhysicalOutputConfirmation `
@@ -619,6 +675,7 @@ namespace XenAimManualPixelFixture {
             throw "无设备能力的 sidecar 生命周期 Launch 夹具执行失败。"
         }
     } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
         foreach ($name in $fixtureEnvironment.Keys) {
             [Environment]::SetEnvironmentVariable(
                 $name, $savedFixtureEnvironment[$name],
@@ -647,6 +704,25 @@ namespace XenAimManualPixelFixture {
         -not [bool]$pixelLifecycleAttemptEvidence.attempts[-1].succeeded -or
         [bool]$pixelLifecycleAttemptEvidence.attempts[-1].retryable -or
         -not [bool]$pixelLifecycleAttemptEvidence.attempts[-1].manifest_published -or
+        -not [bool]$pixelLifecycleSummary.pixel_evidence.runtime_alignment.required -or
+        -not [bool]$pixelLifecycleSummary.pixel_evidence.runtime_alignment.gate_passed -or
+        [string]$pixelLifecycleSummary.pixel_evidence.runtime_alignment.gate -ne
+            "AIM_LOCK_ACTIVE" -or
+        [string]$pixelLifecycleSummary.pixel_evidence.runtime_alignment.session_id -ne
+            "pixel-schema13" -or
+        [uint64]$pixelLifecycleSummary.pixel_evidence.runtime_alignment.activation_epoch -ne
+            1 -or
+        -not [bool]$pixelLifecycleAttemptEvidence.runtime_alignment.gate_passed -or
+        [string]$pixelLifecycleAttemptEvidence.runtime_alignment.session_id -ne
+            "pixel-schema13" -or
+        [uint64]$pixelLifecycleAttemptEvidence.runtime_alignment.activation_epoch -ne
+            1 -or
+        ($pixelLifecycleOutput -join "`n") -notmatch
+            "sidecar 已完成，可以松开右键" -or
+        @($pixelLifecycleAttemptEvidence.attempts | Where-Object {
+            -not [bool]$_.runtime_active_at_start -or
+            -not [bool]$_.runtime_active_at_completion
+        }).Count -ne 0 -or
         -not (Test-Path -LiteralPath (Join-Path $pixelLifecycleRoot `
                 "pixel-evidence.stderr.log") -PathType Leaf)) {
         $pixelLifecycleOutput | ForEach-Object { Write-Host $_ }
@@ -660,8 +736,75 @@ namespace XenAimManualPixelFixture {
                 Get-Content -LiteralPath $_.FullName | ForEach-Object {
                     Write-Host $_
                 }
-            }
+        }
         throw "同一次 Launch 中 source 稍后可用时，sidecar 必须重试并发布 VALID manifest。"
+    }
+
+    $pixelLifecycleTaskPath = Join-Path $pixelLifecycleRoot "task.json"
+    $validPixelLifecycleTask = Get-Content -LiteralPath `
+        $pixelLifecycleTaskPath -Raw -Encoding UTF8
+    try {
+        $wrongSourceTask = $validPixelLifecycleTask | ConvertFrom-Json
+        $wrongSourceTask.capture.source = "HPSAZZ (Wrong-Output)"
+        Write-Utf8 $pixelLifecycleTaskPath `
+            (($wrongSourceTask | ConvertTo-Json -Depth 12) + "`n")
+        $savedErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $wrongSourceRecoverOutput = @(& powershell.exe -NoProfile `
+                -ExecutionPolicy Bypass -File `
+                (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+                -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+                -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
+                -Profile tracking -RequireSourceTiming `
+                -CapturePixelEvidence `
+                -PixelEvidenceToolRoot $pixelToolRoot `
+                -PixelEvidenceBindingPath $pixelBinding `
+                -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+                -PackageRoot $published -RunDirectory $pixelLifecycleRoot 2>&1)
+        } finally {
+            $ErrorActionPreference = $savedErrorActionPreference
+        }
+        if ($LASTEXITCODE -eq 0) {
+            throw "Recover 必须直接拒绝被改写为非 HPSAZZ 精确源的 task。"
+        }
+    } finally {
+        Write-Utf8 $pixelLifecycleTaskPath $validPixelLifecycleTask
+    }
+
+    $embeddedPixelBinding = Join-Path $pixelLifecycleRoot `
+        "pixel-evidence\source-binding.json"
+    $validEmbeddedPixelBinding = Get-Content -LiteralPath `
+        $embeddedPixelBinding -Raw -Encoding UTF8
+    try {
+        Write-Utf8 $embeddedPixelBinding (@'
+{"schema_version":2,"evidence_type":"obs_source_binding","physical_output_capability":false,"ndi_main_output":{"enabled":true,"name":"Wrong-Output"}}
+'@)
+        $bindingMismatchRecoverOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -RequireSourceTiming `
+            -CapturePixelEvidence `
+            -PixelEvidenceToolRoot $pixelToolRoot `
+            -PixelEvidenceBindingPath $pixelBinding `
+            -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+            -PackageRoot $published -RunDirectory $pixelLifecycleRoot 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $bindingMismatchRecoverOutput | ForEach-Object { Write-Host $_ }
+            throw "嵌入 binding 不匹配的 Run 仍应可无物理 Recover。"
+        }
+        $bindingMismatchSummary = Get-Content -LiteralPath `
+            (Join-Path $pixelLifecycleRoot "automatic-summary.json") `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([bool]$bindingMismatchSummary.pixel_evidence.gate_passed -or
+            [string]$bindingMismatchSummary.pixel_evidence.diagnostic -ne
+                "SOURCE_BINDING_MISMATCH") {
+            throw "Recover 必须拒绝被改写或输出名不匹配的 Run 内嵌 OBS binding。"
+        }
+    } finally {
+        Write-Utf8 $embeddedPixelBinding $validEmbeddedPixelBinding
     }
 
     $pixelLifecycleLateRoot = Join-Path $root `
@@ -674,7 +817,7 @@ namespace XenAimManualPixelFixture {
         -CapturePixelEvidence `
         -PixelEvidenceToolRoot $pixelToolRoot `
         -PixelEvidenceBindingPath $pixelBinding `
-        -PixelEvidenceFrames 1200 -PixelEvidenceMaxSeconds 15 `
+        -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
         -PackageRoot $published -RunDirectory $pixelLifecycleLateRoot |
         Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -694,6 +837,7 @@ namespace XenAimManualPixelFixture {
         XEN_TEST_RUNTIME_REPORT_SOURCE = $pixelLifecycleReportSource
         XEN_TEST_RUNTIME_REPORT_NAME = "pixel-lifecycle-late.json"
         XEN_TEST_RUNTIME_ROOT = (Join-Path $published "cache\runtime")
+        XEN_TEST_RUNTIME_SESSION_ID = "pixel-schema13"
     }
     $lateSavedFixtureEnvironment = @{}
     foreach ($name in $lateFixtureEnvironment.Keys) {
@@ -705,6 +849,8 @@ namespace XenAimManualPixelFixture {
             [EnvironmentVariableTarget]::Process)
     }
     try {
+        $savedErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $pixelLifecycleLateOutput = @(& powershell.exe -NoProfile `
             -ExecutionPolicy Bypass -File `
             (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
@@ -714,7 +860,7 @@ namespace XenAimManualPixelFixture {
             -CapturePixelEvidence `
             -PixelEvidenceToolRoot $pixelToolRoot `
             -PixelEvidenceBindingPath $pixelBinding `
-            -PixelEvidenceFrames 1200 -PixelEvidenceMaxSeconds 15 `
+            -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
             -PackageRoot $published -RunDirectory $pixelLifecycleLateRoot `
             -AllowPhysicalOutput `
             -PhysicalOutputConfirmation `
@@ -724,6 +870,7 @@ namespace XenAimManualPixelFixture {
             throw "无设备能力的 sidecar 同窗退出 Launch 夹具执行失败。"
         }
     } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
         foreach ($name in $lateFixtureEnvironment.Keys) {
             [Environment]::SetEnvironmentVariable(
                 $name, $lateSavedFixtureEnvironment[$name],
@@ -735,7 +882,9 @@ namespace XenAimManualPixelFixture {
         -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([bool]$pixelLifecycleLateSummary.pixel_evidence.gate_passed -or
         [string]$pixelLifecycleLateSummary.pixel_evidence.execution_error `
-            -notmatch 'Launcher 已退出') {
+            -notmatch 'Launcher 已退出' -or
+        ($pixelLifecycleLateOutput -join "`n") -notmatch
+            "sidecar 未完成或已停止，可以松开右键") {
         throw "Launcher 退出前未确认 sidecar 完成时必须保留生命周期失败。"
     }
 
@@ -748,7 +897,7 @@ namespace XenAimManualPixelFixture {
         -CapturePixelEvidence `
         -PixelEvidenceToolRoot $pixelToolRoot `
         -PixelEvidenceBindingPath $pixelBinding `
-        -PixelEvidenceFrames 1200 -PixelEvidenceMaxSeconds 15 `
+        -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
         -PackageRoot $published -RunDirectory $pixelLifecycleLateRoot 2>&1)
     if ($LASTEXITCODE -ne 0) {
         $pixelLifecycleLateRecoverOutput | ForEach-Object { Write-Host $_ }
@@ -1126,6 +1275,16 @@ namespace XenAimManualPixelFixture {
     Write-Host "完整包传输、任务范围校验、Aim 配置生成和授权拒绝回归通过。"
 } finally {
     if (Test-Path -LiteralPath $root) {
-        Remove-Item -LiteralPath $root -Recurse -Force
+        for ($attempt = 1; $attempt -le 150; ++$attempt) {
+            try {
+                Remove-Item -LiteralPath $root -Recurse -Force
+                break
+            } catch {
+                if ($attempt -eq 150) {
+                    throw "测试夹具仍被进程占用，无法清理：$root"
+                }
+                Start-Sleep -Milliseconds 100
+            }
+        }
     }
 }

@@ -2,10 +2,12 @@
 
 #include "log/log.h"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -507,6 +509,139 @@ void test_report_rejects_invalid_capacity() {
            "零容量 Debug 报告必须拒绝启动");
 }
 
+void test_aim_lock_active_marker_lifecycle() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      "xen_debug_aim_lock_marker_test";
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+
+    DebugReportConfig config;
+    config.csv_path = (root / "runtime.csv").string();
+    config.json_path = (root / "runtime.json").string();
+    config.session_id = "aim-lock-session";
+    config.max_samples = 4;
+    const auto marker = std::filesystem::path(
+        config.json_path + ".aim-lock-active");
+    std::string error;
+
+    {
+        DebugReport report;
+        expect(report.start(config, error),
+               "Aim-lock marker 测试报告应正常启动: " + error);
+        if (!report.active()) return;
+
+        RuntimePipelineSample inactive = make_sample(1, 1.0, false);
+        inactive.aim_lock_active = false;
+        report.ingest(std::span<const RuntimePipelineSample>(&inactive, 1));
+        expect(!std::filesystem::exists(marker),
+               "未激活 aim-lock 时不得发布 marker");
+
+        RuntimePipelineSample active = make_sample(2, 1.0, true);
+        active.aim_lock_active = true;
+        report.ingest(std::span<const RuntimePipelineSample>(&active, 1));
+        expect(std::filesystem::exists(marker),
+               "首次观察到 aim-lock active 时必须发布 marker");
+        std::ifstream marker_stream(marker);
+        const std::string marker_text(
+            (std::istreambuf_iterator<char>(marker_stream)),
+            std::istreambuf_iterator<char>());
+        marker_stream.close();
+        expect(marker_text.find("\"schema\": 2") != std::string::npos &&
+                   marker_text.find(
+                       "\"session_id\": \"aim-lock-session\"") !=
+                       std::string::npos &&
+                   marker_text.find(
+                       "\"gate\": \"AIM_LOCK_ACTIVE\"") !=
+                       std::string::npos &&
+                   marker_text.find("\"activation_epoch\": 1") !=
+                       std::string::npos &&
+                   marker_text.find("\"sequence\": 2") !=
+                       std::string::npos,
+               "aim-lock marker 必须公开 session、activation epoch 和 sequence");
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+        active.sequence = 3;
+        report.ingest(std::span<const RuntimePipelineSample>(&active, 1));
+        expect(std::filesystem::exists(marker),
+               "aim-lock 连续激活期间必须保留 marker");
+        std::ifstream heartbeat_stream(marker);
+        const std::string heartbeat_text(
+            (std::istreambuf_iterator<char>(heartbeat_stream)),
+            std::istreambuf_iterator<char>());
+        heartbeat_stream.close();
+        expect(heartbeat_text.find("\"activation_epoch\": 1") !=
+                       std::string::npos &&
+                   heartbeat_text.find("\"sequence\": 3") !=
+                       std::string::npos,
+               "连续 aim-lock 必须刷新同一 activation epoch 的 heartbeat");
+
+        inactive.sequence = 4;
+        report.ingest(std::span<const RuntimePipelineSample>(&inactive, 1));
+        expect(!std::filesystem::exists(marker),
+               "观察到 aim-lock inactive 时必须移除 marker");
+
+        active.sequence = 5;
+        report.ingest(std::span<const RuntimePipelineSample>(&active, 1));
+        expect(std::filesystem::exists(marker),
+               "aim-lock 再次激活时必须重新发布 marker");
+        std::ifstream reactivated_stream(marker);
+        const std::string reactivated_text(
+            (std::istreambuf_iterator<char>(reactivated_stream)),
+            std::istreambuf_iterator<char>());
+        reactivated_stream.close();
+        expect(reactivated_text.find("\"activation_epoch\": 2") !=
+                       std::string::npos &&
+                   reactivated_text.find("\"sequence\": 5") !=
+                       std::string::npos,
+               "false 到 true 必须进入新的 activation epoch");
+        RuntimeSnapshot final_snapshot;
+        expect(report.finalize(final_snapshot, error),
+               "Aim-lock marker 测试报告应正常发布: " + error);
+        expect(!std::filesystem::exists(marker),
+               "DebugReport finalize 必须移除 aim-lock marker");
+    }
+
+    {
+        DebugReport report;
+        expect(report.start(config, error),
+               "析构清理测试报告应正常启动: " + error);
+        RuntimePipelineSample active = make_sample(6, 1.0, true);
+        active.aim_lock_active = true;
+        report.ingest(std::span<const RuntimePipelineSample>(&active, 1));
+        expect(std::filesystem::exists(marker),
+               "析构清理前必须存在 aim-lock marker");
+    }
+    expect(!std::filesystem::exists(marker),
+           "DebugReport 析构必须移除 aim-lock marker");
+
+    const auto blocked_parent = root / "blocked-parent";
+    {
+        std::ofstream blocker(blocked_parent);
+        blocker << "not-a-directory";
+    }
+    DebugReportConfig blocked_config = config;
+    blocked_config.csv_path =
+        (blocked_parent / "runtime.csv").string();
+    blocked_config.json_path =
+        (blocked_parent / "runtime.json").string();
+    const auto blocked_marker = std::filesystem::path(
+        blocked_config.json_path + ".aim-lock-active");
+    {
+        DebugReport report;
+        expect(report.start(blocked_config, error),
+               "marker 路径不可写不应阻止 DebugReport 启动: " + error);
+        RuntimePipelineSample active = make_sample(7, 1.0, true);
+        active.aim_lock_active = true;
+        report.ingest(std::span<const RuntimePipelineSample>(&active, 1));
+        std::error_code marker_error;
+        expect(report.active() &&
+                   !std::filesystem::exists(blocked_marker, marker_error),
+               "marker I/O 失败必须保持缺席且不得终止 DebugReport");
+    }
+
+    std::filesystem::remove_all(root, ignored);
+}
+
 void test_disabled_probes_are_not_reported_as_zero_cost_samples() {
     const auto root = std::filesystem::temp_directory_path() /
                       "xen_debug_report_probe_off_test";
@@ -577,6 +712,7 @@ int main() {
     Log::init(log_config);
     test_report_summary_and_atomic_files();
     test_report_rejects_invalid_capacity();
+    test_aim_lock_active_marker_lifecycle();
     test_disabled_probes_are_not_reported_as_zero_cost_samples();
     test_shared_success_semantics();
     Log::shutdown();
