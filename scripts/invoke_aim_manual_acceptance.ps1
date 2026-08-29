@@ -99,6 +99,7 @@ $taskManifestPaths = @(
     "tools\aim_fixed_scene_analysis.ps1"
 )
 $packageValidationMode = "task_scoped"
+$pixelEvidenceDefaultMaxAttempts = 6
 
 if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
     $PackageRoot = [System.IO.Path]::GetFullPath(
@@ -188,6 +189,7 @@ function New-PixelEvidenceTaskDefinition() {
         enabled = $true
         frames = $PixelEvidenceFrames
         max_seconds = $PixelEvidenceMaxSeconds
+        max_attempts = $pixelEvidenceDefaultMaxAttempts
         output_relative_path = "pixel-evidence"
         clock_sync_url = $ndiClockSyncUrl
         executable = Get-FileEvidence $executable
@@ -223,7 +225,10 @@ function Get-PixelEvidenceSummary(
     $outputDirectory = Join-Path $ResolvedRunDirectory `
         ([string]$Task.pixel_evidence.output_relative_path)
     $manifestPath = Join-Path $outputDirectory "manifest.json"
-    $executionPassed = $CollectionMode -ne "Launch" -or
+    $executionEvidenceAvailable = $CollectionMode -eq "Launch" -or
+        $null -ne $ProcessExitCode -or
+        -not [string]::IsNullOrWhiteSpace($ExecutionError)
+    $executionPassed = -not $executionEvidenceAvailable -or
         ($null -ne $ProcessExitCode -and $ProcessExitCode -eq 0 -and
             [string]::IsNullOrWhiteSpace($ExecutionError))
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
@@ -738,7 +743,7 @@ function New-TaskMarkdown(
 - 固定控制延迟：$('{0:F6}' -f $ControlDelayMs) ms
 - 必须取得有效 source timing：$($RequireSourceTiming.IsPresent)
 - 同步 NDI 像素 sidecar：$($CapturePixelEvidence.IsPresent)
-- sidecar 帧数/最长等待：$PixelEvidenceFrames / $PixelEvidenceMaxSeconds s
+- sidecar 帧数/单次时限/最多尝试：$PixelEvidenceFrames / $PixelEvidenceMaxSeconds s / $pixelEvidenceDefaultMaxAttempts
 - Capture：NDI / $ndiSourceName
 - Provider：TensorRT，FP16 + CUDA Graph + GPU 前处理
 - Mouse：KMBOX NET $kmboxIp`:$kmboxPort
@@ -753,8 +758,9 @@ function New-TaskMarkdown(
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\Xen\scripts\run_ndi_clock_source.ps1"
 并保持到 Run 结束；缺少时钟样本会使 automatic gate 失败。
 同步 NDI 像素 sidecar 固定 `physical_output_capability=false`，只在用户执行下方唯一 Launch 命令后
-与 Runtime 并行保存最初 $PixelEvidenceFrames 帧；它不能武装或发送输入，失败会使 automatic gate
-失败，但不会放宽 KMBOX 双授权或 End 急停。
+与 Runtime 并行保存最初 $PixelEvidenceFrames 帧；仅当 Launcher 仍存活且前次明确为 NDI
+`ACCESS_LOST` 时才有界重试。它不能武装或发送输入，失败会使 automatic gate 失败，但不会放宽
+KMBOX 双授权或 End 急停。
 
 ## 操作步骤
 
@@ -977,6 +983,16 @@ $taskCapturePixelEvidence = if ($task.PSObject.Properties.Name -contains
         "pixel_evidence") {
     [bool]$task.pixel_evidence.enabled
 } else { $false }
+$taskHasPixelEvidenceAttemptsContract = $taskCapturePixelEvidence -and
+    $task.pixel_evidence.PSObject.Properties.Name -contains "max_attempts"
+$taskPixelEvidenceMaxAttempts = if (
+        $taskHasPixelEvidenceAttemptsContract) {
+    [int]$task.pixel_evidence.max_attempts
+} else { 1 }
+if ($taskPixelEvidenceMaxAttempts -lt 1 -or
+    $taskPixelEvidenceMaxAttempts -gt $pixelEvidenceDefaultMaxAttempts) {
+    throw "$Mode task.json 的 sidecar 最大尝试次数无效。"
+}
 if ([int]$task.schema -ne 1 -or
     [string]$task.task_id -ne $taskId -or
     [string]$task.scenario -ne $Scenario -or
@@ -1018,6 +1034,10 @@ $process = $null
 $pixelEvidenceProcess = $null
 $pixelEvidenceExitCode = $null
 $pixelEvidenceExecutionError = ""
+$pixelEvidenceAttempts = @()
+$pixelEvidenceAttemptState = $null
+$pixelEvidenceAttemptsPath = Join-Path $resolvedRun `
+    "pixel-evidence-attempts.json"
 if ($Mode -eq "Launch") {
     $activeConfig = Join-Path $PackageRoot "config.ini"
     $activeHash = (Get-FileHash -LiteralPath $activeConfig -Algorithm SHA256).Hash
@@ -1064,10 +1084,21 @@ if ($Mode -eq "Launch") {
             "pixel-evidence.stdout.log"
         $pixelEvidenceStderr = Join-Path $resolvedRun `
             "pixel-evidence.stderr.log"
-        foreach ($path in @($pixelEvidenceStdout, $pixelEvidenceStderr)) {
+        foreach ($path in @(
+                $pixelEvidenceStdout,
+                $pixelEvidenceStderr,
+                $pixelEvidenceAttemptsPath)) {
             if (Test-Path -LiteralPath $path) {
                 throw "同步像素 sidecar 日志已存在，拒绝覆盖：$path"
             }
+        }
+        $existingAttemptLogs = @(Get-ChildItem -LiteralPath $resolvedRun `
+            -File | Where-Object {
+                $_.Name -match
+                    '^pixel-evidence\.attempt-[0-9]+\.(stdout|stderr)\.log$'
+            })
+        if ($existingAttemptLogs.Count -ne 0) {
+            throw "同步像素 sidecar 尝试日志已存在，拒绝覆盖：$resolvedRun"
         }
         $pixelEvidenceArguments = @(
             "--ndi-source",
@@ -1090,6 +1121,61 @@ if ($Mode -eq "Launch") {
             "--clock-mapping-max-age-ms", "1000",
             "--require-source-timing"
         ) -join " "
+        $startPixelEvidenceAttempt = {
+            param([int]$Attempt)
+            $stdout = Join-Path $resolvedRun (
+                "pixel-evidence.attempt-{0:D2}.stdout.log" -f $Attempt)
+            $stderr = Join-Path $resolvedRun (
+                "pixel-evidence.attempt-{0:D2}.stderr.log" -f $Attempt)
+            $attemptProcess = Start-Process -FilePath `
+                ([string]$task.pixel_evidence.executable.path) `
+                -WorkingDirectory (Split-Path -Parent `
+                    ([string]$task.pixel_evidence.executable.path)) `
+                -ArgumentList $pixelEvidenceArguments -WindowStyle Hidden `
+                -RedirectStandardOutput $stdout `
+                -RedirectStandardError $stderr -PassThru
+            return [pscustomobject]@{
+                attempt = $Attempt
+                process = $attemptProcess
+                stdout = $stdout
+                stderr = $stderr
+                started_utc = [DateTime]::UtcNow
+            }
+        }
+        $completePixelEvidenceAttempt = {
+            param([object]$State)
+            [void]$State.process.WaitForExit()
+            $stderrText = if (Test-Path -LiteralPath $State.stderr `
+                    -PathType Leaf) {
+                Get-Content -LiteralPath $State.stderr -Raw -Encoding utf8
+            } else { "" }
+            $exitCode = [int]$State.process.ExitCode
+            $manifestPublished = Test-Path -LiteralPath `
+                (Join-Path $pixelEvidenceOutput "manifest.json") -PathType Leaf
+            # Start-Process 的 ExitCode 在重定向输出的短进程上不能单独充当
+            # 发布成功证据；以工具公开的诊断和原子发布 manifest 共同闭合。
+            $retryable = [bool]($stderrText -match 'status=ACCESS_LOST')
+            $succeeded = [bool]($exitCode -eq 0 -and -not $retryable -and
+                $manifestPublished)
+            return [ordered]@{
+                attempt = [int]$State.attempt
+                started_utc = $State.started_utc.ToString("o")
+                ended_utc = [DateTime]::UtcNow.ToString("o")
+                exit_code = $exitCode
+                diagnostic = if ($succeeded) {
+                    "SUCCESS"
+                } elseif ($retryable) {
+                    "ACCESS_LOST"
+                } else {
+                    "FAILED"
+                }
+                succeeded = $succeeded
+                retryable = $retryable
+                manifest_published = $manifestPublished
+                stdout_log = Split-Path -Leaf $State.stdout
+                stderr_log = Split-Path -Leaf $State.stderr
+            }
+        }
     }
 
     $runtimeRoot = Join-Path $PackageRoot "cache\runtime"
@@ -1106,39 +1192,98 @@ if ($Mode -eq "Launch") {
     if ($taskCapturePixelEvidence) {
         Write-Host ("同步 NDI 像素 sidecar 将先启动；该进程固定 " +
             "physical_output_capability=false。")
-        $pixelEvidenceProcess = Start-Process -FilePath `
-            ([string]$task.pixel_evidence.executable.path) `
-            -WorkingDirectory (Split-Path -Parent `
-                ([string]$task.pixel_evidence.executable.path)) `
-            -ArgumentList $pixelEvidenceArguments -WindowStyle Hidden `
-            -RedirectStandardOutput $pixelEvidenceStdout `
-            -RedirectStandardError $pixelEvidenceStderr -PassThru
+        $pixelEvidenceAttemptState = & $startPixelEvidenceAttempt 1
+        $pixelEvidenceProcess = $pixelEvidenceAttemptState.process
     }
     try {
         $process = Start-Process -FilePath $launcher `
-            -WorkingDirectory $PackageRoot -PassThru -Wait
+            -WorkingDirectory $PackageRoot -PassThru
+        while (-not $process.HasExited) {
+            if ($null -ne $pixelEvidenceAttemptState -and
+                $pixelEvidenceAttemptState.process.HasExited) {
+                $attempt = & $completePixelEvidenceAttempt `
+                    $pixelEvidenceAttemptState
+                $pixelEvidenceAttempts += $attempt
+                $pixelEvidenceExitCode = [int]$attempt.exit_code
+                $launcherAliveAtSidecarCompletion = -not $process.HasExited
+                $pixelEvidenceAttemptState = $null
+                if ([bool]$attempt.succeeded -and
+                    $launcherAliveAtSidecarCompletion) {
+                    $pixelEvidenceExecutionError = ""
+                } elseif ([bool]$attempt.succeeded) {
+                    $pixelEvidenceExecutionError =
+                        "Launcher 已退出前未确认像素 sidecar 完成；本次采集生命周期无效。"
+                } elseif ([bool]$attempt.retryable) {
+                    $pixelEvidenceExecutionError =
+                        "像素 sidecar 第 $($attempt.attempt) 次发现失败：ACCESS_LOST"
+                    if ($pixelEvidenceAttempts.Count -lt
+                            $taskPixelEvidenceMaxAttempts -and
+                        -not $process.WaitForExit(250)) {
+                        $nextAttempt = $pixelEvidenceAttempts.Count + 1
+                        Write-Host ("同步像素 sidecar 第 " +
+                            "$($attempt.attempt) 次发现失败；Launcher 仍存活，" +
+                            "开始第 $nextAttempt 次有界重试。")
+                        $pixelEvidenceAttemptState =
+                            & $startPixelEvidenceAttempt $nextAttempt
+                        $pixelEvidenceProcess =
+                            $pixelEvidenceAttemptState.process
+                    }
+                } else {
+                    $pixelEvidenceExecutionError =
+                        ("像素 sidecar 第 $($attempt.attempt) 次失败：" +
+                        "$($attempt.diagnostic)；退出码：$pixelEvidenceExitCode")
+                }
+            }
+            if (-not $process.HasExited) {
+                [void]$process.WaitForExit(100)
+            }
+        }
+        [void]$process.WaitForExit()
         $endedUtc = [DateTime]::UtcNow
     } finally {
-        if ($null -ne $pixelEvidenceProcess) {
-            if (-not $pixelEvidenceProcess.HasExited -and
-                -not $pixelEvidenceProcess.WaitForExit(60000)) {
-                $pixelEvidenceExecutionError =
-                    "像素 sidecar 在 60 秒回收窗内未退出。"
+        if ($null -ne $pixelEvidenceAttemptState) {
+            $pixelEvidenceExecutionError =
+                "Launcher 已退出前未确认像素 sidecar 完成；本次采集生命周期无效。"
+            if (-not $pixelEvidenceAttemptState.process.HasExited) {
                 try {
-                    $pixelEvidenceProcess.Kill()
-                    [void]$pixelEvidenceProcess.WaitForExit(5000)
+                    $pixelEvidenceAttemptState.process.Kill()
+                    [void]$pixelEvidenceAttemptState.process.WaitForExit(5000)
                 } catch {
                     $pixelEvidenceExecutionError +=
                         " 终止失败：$($_.Exception.Message)"
                 }
             }
-            if ($pixelEvidenceProcess.HasExited) {
-                $pixelEvidenceExitCode = [int]$pixelEvidenceProcess.ExitCode
-                if ($pixelEvidenceExitCode -ne 0 -and
-                    [string]::IsNullOrWhiteSpace(
-                        $pixelEvidenceExecutionError)) {
-                    $pixelEvidenceExecutionError =
-                        "像素 sidecar 退出码：$pixelEvidenceExitCode"
+            if ($pixelEvidenceAttemptState.process.HasExited) {
+                $attempt = & $completePixelEvidenceAttempt `
+                    $pixelEvidenceAttemptState
+                $pixelEvidenceAttempts += $attempt
+                $pixelEvidenceExitCode = [int]$attempt.exit_code
+            }
+        }
+        if ($taskCapturePixelEvidence -and
+            $pixelEvidenceAttempts.Count -ne 0) {
+            Write-JsonAtomically $pixelEvidenceAttemptsPath ([ordered]@{
+                schema = 1
+                max_attempts = $taskPixelEvidenceMaxAttempts
+                process_exit_code = $pixelEvidenceExitCode
+                execution_error = $pixelEvidenceExecutionError
+                attempts = @($pixelEvidenceAttempts)
+            })
+            $lastAttempt = $pixelEvidenceAttempts[-1]
+            foreach ($log in @(
+                    [pscustomobject]@{
+                        source = Join-Path $resolvedRun `
+                            ([string]$lastAttempt.stdout_log)
+                        destination = $pixelEvidenceStdout
+                    },
+                    [pscustomobject]@{
+                        source = Join-Path $resolvedRun `
+                            ([string]$lastAttempt.stderr_log)
+                        destination = $pixelEvidenceStderr
+                    })) {
+                if (Test-Path -LiteralPath $log.source -PathType Leaf) {
+                    Copy-Item -LiteralPath $log.source `
+                        -Destination $log.destination
                 }
             }
         }
@@ -1214,6 +1359,81 @@ if ($Mode -eq "Launch") {
             $logEvidence += Get-FileEvidence $file.FullName
         }
     }
+}
+
+if ($Mode -eq "Recover" -and $taskCapturePixelEvidence -and
+    (Test-Path -LiteralPath $pixelEvidenceAttemptsPath -PathType Leaf)) {
+    try {
+        $attemptEvidence = Get-Content -LiteralPath `
+            $pixelEvidenceAttemptsPath -Raw -Encoding utf8 |
+            ConvertFrom-Json
+    } catch {
+        throw "Recover 无法解析像素 sidecar 尝试证据：$($_.Exception.Message)"
+    }
+    $requiredAttemptEvidenceFields = @(
+        "schema", "max_attempts", "process_exit_code", "execution_error",
+        "attempts")
+    $missingAttemptEvidenceFields = @(
+        $requiredAttemptEvidenceFields | Where-Object {
+            $attemptEvidence.PSObject.Properties.Name -notcontains $_
+        })
+    if ($missingAttemptEvidenceFields.Count -ne 0 -or
+        [int]$attemptEvidence.schema -ne 1 -or
+        [int]$attemptEvidence.max_attempts -ne
+            $taskPixelEvidenceMaxAttempts) {
+        throw "Recover 像素 sidecar 尝试证据 schema 无效。"
+    }
+    $pixelEvidenceAttempts = @($attemptEvidence.attempts)
+    if ($pixelEvidenceAttempts.Count -lt 1 -or
+        $pixelEvidenceAttempts.Count -gt $taskPixelEvidenceMaxAttempts) {
+        throw "Recover 像素 sidecar 尝试证据数量无效。"
+    }
+    $requiredAttemptFields = @(
+        "attempt", "started_utc", "ended_utc", "exit_code", "diagnostic",
+        "succeeded", "retryable", "manifest_published", "stdout_log",
+        "stderr_log")
+    for ($index = 0; $index -lt $pixelEvidenceAttempts.Count; ++$index) {
+        $attempt = $pixelEvidenceAttempts[$index]
+        $missingAttemptFields = @($requiredAttemptFields | Where-Object {
+            $attempt.PSObject.Properties.Name -notcontains $_
+        })
+        if ($missingAttemptFields.Count -ne 0 -or
+            [int]$attempt.attempt -ne $index + 1 -or
+            [string]$attempt.diagnostic -notin @(
+                "SUCCESS", "ACCESS_LOST", "FAILED") -or
+            (([string]$attempt.diagnostic -eq "SUCCESS") -ne
+                [bool]$attempt.succeeded) -or
+            (([string]$attempt.diagnostic -eq "ACCESS_LOST") -ne
+                [bool]$attempt.retryable) -or
+            ([bool]$attempt.succeeded -and
+                -not [bool]$attempt.manifest_published) -or
+            ($index -lt $pixelEvidenceAttempts.Count - 1 -and
+                [bool]$attempt.succeeded)) {
+            throw "Recover 像素 sidecar 单次尝试证据无效。"
+        }
+    }
+    $lastPixelEvidenceAttempt = $pixelEvidenceAttempts[-1]
+    $pixelEvidenceExitCode = [int]$lastPixelEvidenceAttempt.exit_code
+    if ([int]$attemptEvidence.process_exit_code -ne
+        $pixelEvidenceExitCode) {
+        throw "Recover 像素 sidecar 最后退出码与尝试证据不一致。"
+    }
+    $pixelEvidenceExecutionError = [string]$attemptEvidence.execution_error
+    $lastAttemptProvesSuccess =
+        [bool]$lastPixelEvidenceAttempt.succeeded -and
+        $pixelEvidenceExitCode -eq 0 -and
+        [string]$lastPixelEvidenceAttempt.diagnostic -eq "SUCCESS" -and
+        -not [bool]$lastPixelEvidenceAttempt.retryable -and
+        [bool]$lastPixelEvidenceAttempt.manifest_published
+    if (-not $lastAttemptProvesSuccess -and
+        [string]::IsNullOrWhiteSpace($pixelEvidenceExecutionError)) {
+        $pixelEvidenceExecutionError =
+            "像素 sidecar 最后一次尝试未证明成功。"
+    }
+} elseif ($Mode -eq "Recover" -and $taskCapturePixelEvidence -and
+    $taskHasPixelEvidenceAttemptsContract) {
+    $pixelEvidenceExecutionError =
+        "Recover 缺少新 sidecar 生命周期合同的尝试证据。"
 }
 
 . $aimReportScript
@@ -1300,6 +1520,8 @@ $pixelEvidenceSummary = Get-PixelEvidenceSummary `
     -Task $task -ResolvedRunDirectory $resolvedRun `
     -CollectionMode $Mode -ProcessExitCode $pixelEvidenceExitCode `
     -ExecutionError $pixelEvidenceExecutionError
+$pixelEvidenceSummary["attempt_count"] = $pixelEvidenceAttempts.Count
+$pixelEvidenceSummary["attempts"] = @($pixelEvidenceAttempts)
 $mouseBackendCompletionSamples = @($allSamples | Where-Object {
     ($_.PSObject.Properties.Name -contains
         "mouse_backend_completion_timing_valid" -and
