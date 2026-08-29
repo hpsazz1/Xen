@@ -124,8 +124,8 @@ struct Track {
     // 原始共同边必须与三点中值同向，因此静止、符号反转和语义切换会
     // 自然归零；中值只修复单帧边界幅值噪声，不能凭历史伪造平移。
     float horizontal_control_translation_evidence_x = 0.0f;
-    // 保留观察器读取的相邻原始框边位移，供 Runtime 报告精确复盘；
-    // 这些标量不参与轨迹或控制更新，语义切换/缺帧时立即归零。
+    // 保留相邻原始框边位移，供 Runtime 报告精确复盘，并为 tracking X
+    // closing 提供当前帧对的因果共同平移；语义切换/缺帧时立即归零。
     float horizontal_raw_left_motion_x = 0.0f;
     float horizontal_raw_right_motion_x = 0.0f;
     float last_observation_x1 = 0.0f;
@@ -3501,10 +3501,11 @@ struct Aim::Impl {
         const float error_y =
             (base_y - frame.control_center_y) *
             frame.source_pixels_per_roi_pixel_y;
-        // P/PI 继续消费完整基础点误差；X 导数只观察 Track 的因果中心
-        // 趋势相对 control center 的公共平移，避免框内 reference 与短周期
-        // 框形变被误当成整个目标的 closing。趋势预热前退回当前 Track
-        // 中心；两者都不改变下方由完整误差限定的同号削减预算。
+        // P/PI 继续消费完整基础点误差。普通段保留 Track 当前中心的因果
+        // 误差变化；只有姿态保护正在使用 51 帧 trailing OLS 时，X closing
+        // 改读当前相邻原始框两边的共同平移。长窗可能跨过短周期闭环的
+        // 大半周期，不能代表“当前正在朝零”。共同边一致性只
+        // 连续降权本帧形变，不回写 Track/base、Y、prediction 或 PI 状态。
         const HorizontalTrendEstimate tracking_center_trend =
             estimate_horizontal_trend(track, track.state_at);
         const bool tracking_shape_trend_active =
@@ -3516,11 +3517,28 @@ struct Aim::Impl {
         const float track_center_error_x =
             (tracking_center_x - frame.control_center_x) *
             frame.source_pixels_per_roi_pixel_x;
+        const float current_common_motion_x = common_edge_motion(
+                track.horizontal_raw_left_motion_x,
+                track.horizontal_raw_right_motion_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float current_common_consistency = std::clamp(
+            std::fabs(track.horizontal_control_translation_evidence_x),
+            0.0f, 1.0f);
+        const bool use_current_common_motion_x =
+            tracking_shape_trend_active &&
+            current_common_motion_x != 0.0f &&
+            current_common_consistency > 0.0f;
         if (tracking_error_derivative_initialized) {
+            const float track_center_motion_x =
+                track_center_error_x - tracking_previous_error_x;
+            const float derivative_motion_x = use_current_common_motion_x
+                ? current_common_motion_x * current_common_consistency *
+                      current_common_consistency
+                : track_center_motion_x;
             tracking_error_derivative_x =
                 (kTrackingErrorDerivativeFilterTimeSeconds *
                      tracking_error_derivative_x +
-                 track_center_error_x - tracking_previous_error_x) /
+                 derivative_motion_x) /
                 (kTrackingErrorDerivativeFilterTimeSeconds + controller_dt);
         } else {
             tracking_error_derivative_x = 0.0f;
@@ -3657,8 +3675,13 @@ struct Aim::Impl {
             ? 1.0f : (error_x < 0.0f ? -1.0f : 0.0f);
         const float same_direction_request_x = std::max(
             0.0f, error_direction_x * filtered_x);
-        const float closing_slope_x = std::max(
-            0.0f, -error_direction_x * tracking_error_derivative_x);
+        const bool derivative_closing_evidence_x =
+            !use_current_common_motion_x ||
+            error_x * current_common_motion_x < 0.0f;
+        const float closing_slope_x = derivative_closing_evidence_x
+            ? std::max(
+                  0.0f, -error_direction_x * tracking_error_derivative_x)
+            : 0.0f;
         const float derivative_damping_x = std::min(
             same_direction_request_x,
             kTrackingErrorDerivativeGainSeconds * closing_slope_x *
