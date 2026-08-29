@@ -658,6 +658,10 @@ try {
     $recoveredSummary = Get-Content -LiteralPath `
         (Join-Path $trackingRoot "automatic-summary.json") `
         -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$recoveredSummary.scenario -ne "SuperJump" -or
+        -not [bool]$recoveredSummary.fixed_scene_analysis_required) {
+        throw "SuperJump/Static Recover 必须保留场景并要求固定场景分析。"
+    }
     if ([string]$recoveredSummary.collection_mode -ne "Recover" -or
         @($recoveredSummary.runtime_report_schemas).Count -ne 1 -or
         [int]@($recoveredSummary.runtime_report_schemas)[0] -ne 13 -or

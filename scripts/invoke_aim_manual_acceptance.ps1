@@ -1218,7 +1218,7 @@ if ($Mode -eq "Launch") {
 
 . $aimReportScript
 . $aimControlDiagnosticsScript
-. $aimFixedSceneAnalysisScript
+. $aimFixedSceneAnalysisScript -Scenario $Scenario
 $jsonReports = @($newReports | Where-Object { $_.Extension -ieq ".json" })
 $segments = @()
 $allSamples = @()
