@@ -2,6 +2,7 @@
 
 #include "log/log.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -188,6 +189,22 @@ RuntimePipelineSample make_sample(
         sample.aim_command.sequence = sequence;
         sample.aim_command.dx_counts = 20;
         sample.aim_command.dy_counts = -10;
+        sample.aim_landmark.status = aim_landmark::Status::VALID;
+        sample.aim_landmark.semantic_kind =
+            aim_landmark::SemanticKind::HEAD_BOX_CENTER;
+        sample.aim_landmark.sequence = sequence;
+        sample.aim_landmark.track_id = 7;
+        sample.aim_landmark.candidate_count = 1;
+        sample.aim_landmark.valid = true;
+        sample.aim_landmark.fresh = true;
+        sample.aim_landmark.x = 190.0f;
+        sample.aim_landmark.y = 112.0f;
+        sample.aim_landmark.x1 = 180.0f;
+        sample.aim_landmark.y1 = 102.0f;
+        sample.aim_landmark.x2 = 200.0f;
+        sample.aim_landmark.y2 = 122.0f;
+        sample.aim_landmark.confidence = 0.871f;
+        sample.aim_landmark.class_id = 1;
     }
     sample.person_detection_count = 1;
     sample.head_detection_count = 2;
@@ -303,7 +320,20 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
-    expect(csv_text.find("Xen Runtime Debug Report v16") !=
+    const std::size_t sample_header_start =
+        csv_text.find("sequence,capture_ms");
+    const std::size_t sample_header_end =
+        csv_text.find('\n', sample_header_start);
+    const std::size_t sample_row_end =
+        csv_text.find('\n', sample_header_end + 1);
+    const std::string sample_header = csv_text.substr(
+        sample_header_start, sample_header_end - sample_header_start);
+    const std::string sample_row = csv_text.substr(
+        sample_header_end + 1, sample_row_end - sample_header_end - 1);
+    expect(std::count(sample_header.begin(), sample_header.end(), ',') ==
+               std::count(sample_row.begin(), sample_row.end(), ','),
+           "schema 17 CSV 样本头与数据行必须保持完全相同的列数");
+    expect(csv_text.find("Xen Runtime Debug Report v17") !=
                    std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
@@ -326,6 +356,12 @@ void test_report_summary_and_atomic_files() {
                  csv_text.find("aim_matched_observation_x1") !=
                      std::string::npos &&
                  csv_text.find("aim_matched_observation_aim_from_head") !=
+                     std::string::npos &&
+                 csv_text.find(
+                     "aim_landmark_status,aim_landmark_semantic_kind") !=
+                     std::string::npos &&
+                 csv_text.find(
+                     "VALID,HEAD_BOX_CENTER,4,7,1,true,true,false,false") !=
                      std::string::npos &&
                 csv_text.find("mouse_sent,aim_lock_active") !=
                     std::string::npos &&
@@ -367,7 +403,7 @@ void test_report_summary_and_atomic_files() {
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 16") != std::string::npos &&
+    expect(json_text.find("\"schema\": 17") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -441,6 +477,13 @@ void test_report_summary_and_atomic_files() {
                  json_text.find("\"aim_matched_observation_box\"") !=
                      std::string::npos &&
                  json_text.find("\"aim_matched_observation_aim_from_head\"") !=
+                     std::string::npos &&
+                 json_text.find("\"aim_landmark_status\": \"VALID\"") !=
+                     std::string::npos &&
+                 json_text.find(
+                     "\"aim_landmark_semantic_kind\": \"HEAD_BOX_CENTER\"") !=
+                     std::string::npos &&
+                 json_text.find("\"aim_landmark_control_eligible\": false") !=
                      std::string::npos &&
                  json_text.find("\"aim_lead_active\": true") !=
                      std::string::npos &&

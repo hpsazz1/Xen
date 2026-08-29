@@ -693,6 +693,11 @@ target_include_directories(aim PUBLIC
     ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(aim PUBLIC log ${OpenCV_LIBS})
 
+add_library(aim_landmark STATIC
+    Xen/aim_landmark/aim_landmark.cpp)
+target_include_directories(aim_landmark PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(aim_landmark PUBLIC aim)
+
 add_library(mouse STATIC
     Xen/mouse/mouse.cpp
     Xen/mouse/kmbox_net.cpp
@@ -728,7 +733,7 @@ add_library(runtime STATIC
     Xen/runtime/runtime_queue.cpp)
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
-    PUBLIC detector capture aim mouse keyboard config log
+    PUBLIC detector capture aim aim_landmark mouse keyboard config log
     PRIVATE Threads::Threads)
 
 add_library(xen_debug STATIC
@@ -736,7 +741,7 @@ add_library(xen_debug STATIC
 target_include_directories(xen_debug PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(xen_debug PUBLIC log aim mouse)
+target_link_libraries(xen_debug PUBLIC log aim aim_landmark mouse)
 
 add_library(benchmark STATIC
     Xen/benchmark/benchmark.cpp)
@@ -963,6 +968,11 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(aim_tests OPENCV)
     add_test(NAME aim_tests COMMAND aim_tests)
 
+    add_executable(aim_landmark_tests
+        tests/aim_landmark_tests.cpp)
+    target_link_libraries(aim_landmark_tests PRIVATE aim_landmark)
+    add_test(NAME aim_landmark_tests COMMAND aim_landmark_tests)
+
     # Aim 真实视频真值解析和追踪指标保持为离线纯算法测试，不加载 ORT Session。
     add_executable(aim_evaluation_tests
         tests/aim_evaluation_tests.cpp)
@@ -1099,7 +1109,7 @@ if(BUILD_TESTING)
             tests/detector_model_test.cpp
             Xen/detector/video_visibility.cpp)
         target_link_libraries(detector_model_test
-            PRIVATE detector aim config xen_debug bcrypt)
+            PRIVATE detector aim aim_landmark config xen_debug bcrypt)
         if(WIN32)
             xen_deploy_runtime_dlls(detector_model_test OPENCV ORT)
         endif()

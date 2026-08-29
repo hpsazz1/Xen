@@ -207,7 +207,7 @@ try {
     $reportPath = Join-Path $runtimeDirectory "synthetic.json"
     $csvPath = Join-Path $runtimeDirectory "synthetic.csv"
     $synthetic = [ordered]@{
-        schema = 16
+        schema = 17
         session_id = "synthetic"
         model_path = $fixedModel
         provider = "CPUExecutionProvider"
@@ -316,7 +316,20 @@ try {
             [bool]$summary.aim_observability.contract_valid -and
             $summary.aim_observability.precomputed_command_frames -eq 1200 -and
             [bool]$summary.aim_observability.contract.prediction_points_may_leave_selected_box) `
-        "合法 schema 16 报告应完成检测和 Aim 自动汇总"
+        "合法 schema 17 报告应完成检测和 Aim 自动汇总"
+
+    $synthetic.schema = 16
+    [System.IO.File]::WriteAllText(
+        $reportPath, (($synthetic | ConvertTo-Json -Depth 8) + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    & $workflow -Mode Collect -Stage DetectionStatic `
+        -RunDirectory $observationRun | Out-Null
+    $schema16Summary = Get-Content -LiteralPath (
+        Join-Path $observationRun "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    Expect ([bool]$schema16Summary.automatic_complete) `
+        "Collect 必须兼容已存在的 schema 16 Run"
+    $synthetic.schema = 17
 
     $synthetic.samples[0].aim_base_point_inside_box = $false
     $synthetic.samples[0].aim_base_point = @(140.0, 140.0)
@@ -335,7 +348,7 @@ try {
         "基础追踪点出框必须拒绝自动通过"
     $synthetic.samples[0] = New-SyntheticAimSample -Sequence 102
 
-    $synthetic.schema = 11
+    $synthetic.schema = 15
     [System.IO.File]::WriteAllText(
         $reportPath, (($synthetic | ConvertTo-Json -Depth 8) + "`n"),
         (New-Object System.Text.UTF8Encoding($false)))
@@ -346,9 +359,9 @@ try {
         -Raw -Encoding UTF8 | ConvertFrom-Json
     Expect (-not [bool]$oldSchemaSummary.automatic_complete -and
             ($oldSchemaSummary.failures -join "`n") -match
-                '报告 schema 不是 16') `
+                '报告 schema 不是 16 或 17') `
         "旧 schema 报告必须拒绝自动通过"
-    $synthetic.schema = 16
+    $synthetic.schema = 17
 
     $synthetic.performance_probes_enabled = $true
     [System.IO.File]::WriteAllText(

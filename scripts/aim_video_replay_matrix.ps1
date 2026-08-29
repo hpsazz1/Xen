@@ -22,7 +22,7 @@ function Get-XenAimVideoReplayReportSet([string]$Directory) {
     foreach ($file in $files) {
         $report = Get-Content -LiteralPath $file.FullName -Raw `
             -Encoding utf8 | ConvertFrom-Json
-        if ([int]$report.schema -ne 16 -or
+        if ([int]$report.schema -notin @(16, 17) -or
             $report.capture_backend -ne "VIDEO_REPLAY" -or
             $report.mouse_backend -ne "SIMULATED_BACKEND_COMPLETION" -or
             [long]$report.sample_count -ne @($report.samples).Count -or

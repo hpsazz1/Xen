@@ -642,7 +642,7 @@ if ($useAimReports) {
         $expectedFrames = [long](
             $reportRows | Where-Object scene -eq $video.BaseName |
                 Select-Object -ExpandProperty frames)
-        if ([int]$runtimeReport.schema -ne 16 -or
+        if ([int]$runtimeReport.schema -ne 17 -or
             [long]$runtimeReport.sample_count -ne $expectedFrames -or
             [long]$runtimeReport.successful_samples -ne $expectedFrames -or
             [long]$runtimeReport.failed_samples -ne 0 -or
@@ -1248,7 +1248,7 @@ $manifest = [ordered]@{
                 directory = if ($useAimReports) {
                     $AimReportDirectory
                 } else { $null }
-                schema_version = if ($useAimReports) { 16 } else { $null }
+                schema_version = if ($useAimReports) { 17 } else { $null }
                 capture_backend = if ($useAimReports) {
                     "VIDEO_REPLAY"
                 } else { $null }

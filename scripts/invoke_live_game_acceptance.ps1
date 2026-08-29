@@ -846,8 +846,8 @@ function Collect-Reports {
         }
         $report = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-Json
-        if ($report.schema -ne 16) {
-            $failures += "报告 schema 不是 16：$path"
+        if ([int]$report.schema -notin @(16, 17)) {
+            $failures += "报告 schema 不是 16 或 17：$path"
         }
         if (@($report.PSObject.Properties.Name) -notcontains
                 "performance_probes_enabled" -or
@@ -896,7 +896,7 @@ function Collect-Reports {
             }
             $aimObservability = $aimSummary
         } catch {
-            $failures += "Aim schema 16 样本无效：$($_.Exception.Message)；$path"
+            $failures += "Aim schema 16/17 样本无效：$($_.Exception.Message)；$path"
         }
         if ($report.provider -ne $expectedProvider -or
             $report.final_snapshot.provider -ne $expectedProvider) {

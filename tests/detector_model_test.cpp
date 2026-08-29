@@ -2,6 +2,7 @@
 #include "detector/video_visibility_internal.h"
 #include "aim/aim.h"
 #include "aim/aim_evaluation_internal.h"
+#include "aim_landmark/aim_landmark.h"
 #include "config/config.h"
 #include "debug/debug.h"
 #include "log/log.h"
@@ -563,6 +564,8 @@ RuntimePipelineSample make_aim_replay_sample(
     sample.aim_target = aim_result.target;
     sample.aim_control = aim_result.control;
     sample.aim_command = aim_result.command;
+    sample.aim_landmark = aim_landmark::inspect_head_landmark(
+        aim_frame.sequence, aim_frame.detections, aim_config, aim_result);
     if (aim_result.has_target) {
         sample.aim_base_point_inside_box =
             aim_result.target.base_aim_x >= aim_result.target.x1 &&

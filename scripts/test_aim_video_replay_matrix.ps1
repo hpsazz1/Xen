@@ -35,9 +35,10 @@ function New-ReplaySample(
 function Write-ReplayReport(
     [string]$Path,
     [object[]]$Samples,
+    [int]$Schema = 17,
     [bool]$OutputArmed = $false) {
     $report = [ordered]@{
-        schema = 16
+        schema = $Schema
         capture_backend = "VIDEO_REPLAY"
         mouse_backend = "SIMULATED_BACKEND_COMPLETION"
         sample_count = $Samples.Count
@@ -86,9 +87,9 @@ try {
     )
     foreach ($name in @("静止.mp4", "左右横移.mp4")) {
         Write-ReplayReport (Join-Path $baseline `
-            "$name.aim-runtime.json") $before
+            "$name.aim-runtime.json") $before -Schema 16
         Write-ReplayReport (Join-Path $current `
-            "$name.aim-runtime.json") $after
+            "$name.aim-runtime.json") $after -Schema 17
     }
 
     $matrix = Get-XenAimVideoReplayMatrix `
@@ -106,7 +107,7 @@ try {
         "X-only 夹具必须证明矩阵中的 Y A/B 不变。"
 
     Write-ReplayReport (Join-Path $current `
-        "拒绝武装.mp4.aim-runtime.json") $after $true
+        "拒绝武装.mp4.aim-runtime.json") $after -OutputArmed $true
     $rejected = $false
     try {
         Get-XenAimVideoReplayMatrix -CurrentDirectory $current | Out-Null

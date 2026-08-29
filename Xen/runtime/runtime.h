@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "aim/aim.h"
+#include "aim_landmark/aim_landmark.h"
 #include "capture/capture.h"
 #include "config/config.h"
 #include "detector/detector.h"
@@ -161,6 +162,8 @@ struct RuntimePipelineSample {
     AimTargetSnapshot aim_target;
     AimControlDiagnostics aim_control;
     AimCommand aim_command;
+    // 独立视觉 landmark 仅用于同帧诊断；landmark v1 固定不可接入控制。
+    aim_landmark::Diagnostic aim_landmark;
     // 分类诊断只保留固定标量；count=0 时对应 confidence=0，避免把无检测
     // 与真实 0 置信度混为一谈，也不把动态检测集合复制进报告环。
     std::uint32_t person_detection_count = 0;

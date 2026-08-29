@@ -360,6 +360,9 @@ struct Runtime::Impl {
                                   bool mouse_sent,
                                   bool aim_lock_active) {
         SnapshotUpdateResult result;
+        const aim_landmark::Diagnostic landmark =
+            aim_landmark::inspect_head_landmark(
+                frame.timing.sequence, detections, config.aim, aim_result);
         const bool probes_enabled = config.runtime.enable_performance_probes;
         const auto snapshot_started = probes_enabled
             ? std::chrono::steady_clock::now()
@@ -438,6 +441,7 @@ struct Runtime::Impl {
         sample.aim_target = aim_result.target;
         sample.aim_control = aim_result.control;
         sample.aim_command = aim_result.command;
+        sample.aim_landmark = landmark;
         if (aim_result.has_target) {
             sample.aim_base_point_inside_box =
                 aim_result.target.base_aim_x >= aim_result.target.x1 &&

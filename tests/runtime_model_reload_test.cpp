@@ -299,12 +299,20 @@ int main(int argc, char** argv) {
         expect(runtime.drain_pipeline_samples(profile_samples),
                "Runtime 必须允许取出热重载后的诊断样本");
         std::vector<double> successful_total_ms;
+        bool landmark_contract_valid = true;
         for (const auto& sample : profile_samples) {
             if (sample.detection_status == DetectionStatus::SUCCESS &&
                 sample.aim_status == AimStatus::SUCCESS) {
                 successful_total_ms.push_back(sample.profile.total_ms);
+                landmark_contract_valid = landmark_contract_valid &&
+                    sample.aim_landmark.sequence == sample.sequence &&
+                    sample.aim_landmark.status !=
+                        aim_landmark::Status::INVALID_INPUT &&
+                    !sample.aim_landmark.control_eligible;
             }
         }
+        expect(landmark_contract_valid,
+               "Runtime 成功样本必须发布同 sequence 且不可接控制的 landmark");
         expect(successful_total_ms.size() >= 128,
                "端到端分位数必须排除失败帧并保留至少 128 个成功样本");
         if (!successful_total_ms.empty()) {

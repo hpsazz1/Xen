@@ -1735,6 +1735,51 @@ namespace XenAimManualPixelFixture {
         throw "schema 13 回收没有保留已知证据并把缺失时序层降级为 unknown。"
     }
 
+    $schema17Sample = New-Schema13AimSample
+    $schema17Sample["aim_matched_observation_valid"] = $true
+    $schema17Sample["aim_matched_observation_box"] = @(
+        218.163315, 154.180466, 239.103516, 215.603760)
+    $schema17Sample["aim_matched_observation_head_only"] = $false
+    $schema17Sample["aim_matched_observation_aim_from_head"] = $true
+    $schema17Sample["aim_control_center_y"] = 160.0
+    $schema13Report.schema = 17
+    $schema13Report.session_id = "schema17"
+    $schema13Report.samples = @($schema17Sample)
+    Write-Utf8 (Join-Path $automaticRoot "schema13.json") `
+        (($schema13Report | ConvertTo-Json -Depth 10) + "`n")
+    $manifestBytes = [System.IO.File]::ReadAllBytes($publishedManifest)
+    try {
+        [System.IO.File]::AppendAllText(
+            $publishedManifest, "`n", [System.Text.UTF8Encoding]::new($false))
+        $schema17RecoverOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -Smoothing 0.50 `
+            -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+            -MaxCountsPerFrame 14.0 `
+            -EnableDelayCompensation -ControlDelayMs 7.5 `
+            -MaxDelayCompensationMs 18.0 `
+            -MaxDelayCompensationPercent 12.0 `
+            -PackageRoot $published -RunDirectory $trackingRoot 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $schema17RecoverOutput | ForEach-Object { Write-Host $_ }
+            throw "schema 17 离线回收失败。"
+        }
+    } finally {
+        [System.IO.File]::WriteAllBytes($publishedManifest, $manifestBytes)
+    }
+    $schema17RecoveredSummary = Get-Content -LiteralPath `
+        (Join-Path $trackingRoot "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$schema17RecoveredSummary.scenario -ne "SuperJump" -or
+        -not [bool]$schema17RecoveredSummary.fixed_scene_analysis_required -or
+        @($schema17RecoveredSummary.runtime_report_schemas).Count -ne 1 -or
+        [int]@($schema17RecoveredSummary.runtime_report_schemas)[0] -ne 17) {
+        throw "schema 17 Recover 必须保留 SuperJump/Static 场景和固定场景分析要求。"
+    }
+
     $manifestBytes = [System.IO.File]::ReadAllBytes($publishedManifest)
     try {
         [System.IO.File]::AppendAllText(

@@ -880,7 +880,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v16\n"
+        csv << "# Xen Runtime Debug Report v17\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
@@ -1020,7 +1020,15 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "aim_matched_observation_x1,aim_matched_observation_y1,"
                "aim_matched_observation_x2,aim_matched_observation_y2,"
                "aim_matched_observation_head_only,"
-               "aim_matched_observation_aim_from_head,aim_base_x,aim_base_y,"
+               "aim_matched_observation_aim_from_head,"
+               "aim_landmark_status,aim_landmark_semantic_kind,"
+               "aim_landmark_sequence,aim_landmark_track_id,"
+               "aim_landmark_candidate_count,aim_landmark_valid,"
+               "aim_landmark_fresh,aim_landmark_occluded,"
+               "aim_landmark_control_eligible,aim_landmark_x,aim_landmark_y,"
+               "aim_landmark_x1,aim_landmark_y1,aim_landmark_x2,"
+               "aim_landmark_y2,aim_landmark_confidence,"
+               "aim_landmark_class_id,aim_base_x,aim_base_y,"
                "aim_delay_compensated_x,aim_delay_compensated_y,"
                "aim_prediction_x,aim_prediction_y,"
                "aim_final_x,aim_final_y,"
@@ -1172,6 +1180,24 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                     sample.aim_target.matched_observation_head_only) << ','
                 << bool_name(
                     sample.aim_target.matched_observation_aim_from_head) << ','
+                << aim_landmark::status_name(sample.aim_landmark.status) << ','
+                << aim_landmark::semantic_kind_name(
+                    sample.aim_landmark.semantic_kind) << ','
+                << sample.aim_landmark.sequence << ','
+                << sample.aim_landmark.track_id << ','
+                << sample.aim_landmark.candidate_count << ','
+                << bool_name(sample.aim_landmark.valid) << ','
+                << bool_name(sample.aim_landmark.fresh) << ','
+                << bool_name(sample.aim_landmark.occluded) << ','
+                << bool_name(sample.aim_landmark.control_eligible) << ','
+                << sample.aim_landmark.x << ','
+                << sample.aim_landmark.y << ','
+                << sample.aim_landmark.x1 << ','
+                << sample.aim_landmark.y1 << ','
+                << sample.aim_landmark.x2 << ','
+                << sample.aim_landmark.y2 << ','
+                << sample.aim_landmark.confidence << ','
+                << sample.aim_landmark.class_id << ','
                 << sample.aim_target.base_aim_x << ','
                 << sample.aim_target.base_aim_y << ','
                 << sample.aim_target.delay_compensated_aim_x << ','
@@ -1356,7 +1382,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 16,\n"
+             << "{\n  \"schema\": 17,\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -1572,6 +1598,37 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                   << ", \"aim_matched_observation_aim_from_head\": "
                   << bool_name(
                       sample.aim_target.matched_observation_aim_from_head)
+                  << ", \"aim_landmark_status\": \""
+                  << aim_landmark::status_name(sample.aim_landmark.status)
+                  << "\", \"aim_landmark_semantic_kind\": \""
+                  << aim_landmark::semantic_kind_name(
+                      sample.aim_landmark.semantic_kind)
+                  << "\", \"aim_landmark_sequence\": "
+                  << sample.aim_landmark.sequence
+                  << ", \"aim_landmark_track_id\": "
+                  << sample.aim_landmark.track_id
+                  << ", \"aim_landmark_candidate_count\": "
+                  << sample.aim_landmark.candidate_count
+                  << ", \"aim_landmark_valid\": "
+                  << bool_name(sample.aim_landmark.valid)
+                  << ", \"aim_landmark_fresh\": "
+                  << bool_name(sample.aim_landmark.fresh)
+                  << ", \"aim_landmark_occluded\": "
+                  << bool_name(sample.aim_landmark.occluded)
+                  << ", \"aim_landmark_control_eligible\": "
+                  << bool_name(sample.aim_landmark.control_eligible)
+                  << ", \"aim_landmark_point\": ["
+                  << sample.aim_landmark.x << ", "
+                  << sample.aim_landmark.y << ']'
+                  << ", \"aim_landmark_box\": ["
+                  << sample.aim_landmark.x1 << ", "
+                  << sample.aim_landmark.y1 << ", "
+                  << sample.aim_landmark.x2 << ", "
+                  << sample.aim_landmark.y2 << ']'
+                  << ", \"aim_landmark_confidence\": "
+                  << sample.aim_landmark.confidence
+                  << ", \"aim_landmark_class_id\": "
+                  << sample.aim_landmark.class_id
                   << ", \"aim_base_point\": ["
                  << sample.aim_target.base_aim_x << ", "
                  << sample.aim_target.base_aim_y << ']'
