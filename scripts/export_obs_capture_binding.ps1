@@ -231,6 +231,18 @@ if ($visibleCandidates.Count -ne 1 -or
     $visibleNames = @($visibleCandidates | ForEach-Object { $_.name }) -join ","
     throw "候选源必须只有所选源可见：selected=$SelectedSourceName；visible=$visibleNames"
 }
+$visibleSceneItems = @($items | Where-Object { [bool]$_.visible })
+$selectedIsOnlyVisibleSceneItem = $visibleSceneItems.Count -eq 1 -and
+    [int]$visibleSceneItems[0].id -eq [int]$selectedItem.id -and
+    [string]$visibleSceneItems[0].source_uuid -eq
+        [string]$selectedSource.uuid
+if (-not $selectedIsOnlyVisibleSceneItem) {
+    $visibleItemNames = @($visibleSceneItems | ForEach-Object {
+        "{0}(id={1})" -f ([string]$_.name), ([int]$_.id)
+    }) -join ","
+    throw ("OBS 保存的 Program Scene 必须只有所选源可见：" +
+        "selected=$SelectedSourceName；visible=$visibleItemNames")
+}
 
 $mediaIdentity = Get-StableFileIdentity `
     ([string]$selectedSource.settings.local_file) "所选 OBS 媒体文件"

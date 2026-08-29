@@ -105,6 +105,7 @@ $pixelEvidenceRuntimeGate = "AIM_LOCK_ACTIVE"
 $pixelEvidenceRuntimeMarkerSuffix = ".aim-lock-active"
 $pixelEvidenceRuntimeMarkerSchema = 2
 $pixelEvidenceRuntimeMarkerMaxAgeMs = 1000
+$pixelEvidencePublishingMaxWaitSeconds = 60
 
 if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
     $PackageRoot = [System.IO.Path]::GetFullPath(
@@ -268,19 +269,25 @@ function Test-RuntimeAlignmentMarkerActive(
         [string]$Path,
         [string]$ExpectedSessionId,
         [uint64]$ExpectedActivationEpoch) {
-    try {
-        $file = Get-Item -LiteralPath $Path -ErrorAction Stop
-        $ageMs = ([DateTime]::UtcNow - $file.LastWriteTimeUtc).TotalMilliseconds
-        if ($ageMs -lt -250 -or
-            $ageMs -gt $pixelEvidenceRuntimeMarkerMaxAgeMs) {
-            return $false
+    for ($readAttempt = 1; $readAttempt -le 3; ++$readAttempt) {
+        try {
+            $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+            $ageMs =
+                ([DateTime]::UtcNow - $file.LastWriteTimeUtc).TotalMilliseconds
+            if ($ageMs -lt -250 -or
+                $ageMs -gt $pixelEvidenceRuntimeMarkerMaxAgeMs) {
+                return $false
+            }
+            $marker = Read-RuntimeAlignmentMarker $Path
+            return [string]$marker.session_id -eq $ExpectedSessionId -and
+                [uint64]$marker.activation_epoch -eq $ExpectedActivationEpoch
+        } catch {
+            if ($readAttempt -lt 3) {
+                Start-Sleep -Milliseconds 10
+            }
         }
-        $marker = Read-RuntimeAlignmentMarker $Path
-        return [string]$marker.session_id -eq $ExpectedSessionId -and
-            [uint64]$marker.activation_epoch -eq $ExpectedActivationEpoch
-    } catch {
-        return $false
     }
+    return $false
 }
 
 function Wait-ProcessExitSupervised([object]$Process) {
@@ -1355,7 +1362,50 @@ if ($Mode -eq "Launch") {
                 stderr = $stderr
                 started_utc = [DateTime]::UtcNow
                 runtime_active_at_start = $runtimeActiveAtStart
+                phase = "RECORDING"
+                runtime_active_at_recording_completion = $false
             }
+        }
+        $findPixelEvidencePublishingIncoming = {
+            param([object]$State)
+            $outputParent = Split-Path -Parent $pixelEvidenceOutput
+            $outputLeaf = Split-Path -Leaf $pixelEvidenceOutput
+            $incomingPrefix = ".$outputLeaf.incoming-$([int]$State.process.Id)-"
+            $incomingDirectories = @(Get-ChildItem -LiteralPath $outputParent `
+                -Directory -ErrorAction Stop | Where-Object {
+                    $_.Name.StartsWith(
+                        $incomingPrefix, [StringComparison]::Ordinal)
+                })
+            if ($incomingDirectories.Count -gt 1) {
+                throw "当前 sidecar attempt 存在多个 PID 匹配的 incoming 目录。"
+            }
+            if ($incomingDirectories.Count -eq 0) { return $null }
+            $framesDirectory = Join-Path $incomingDirectories[0].FullName `
+                "frames"
+            if (-not (Test-Path -LiteralPath $framesDirectory `
+                    -PathType Container)) {
+                return $null
+            }
+            $firstPng = @(Get-ChildItem -LiteralPath $framesDirectory `
+                -File -Filter "*.png" -ErrorAction Stop |
+                Select-Object -First 1)
+            if ($firstPng.Count -eq 0) { return $null }
+            return $incomingDirectories[0]
+        }
+        $testPixelEvidencePublishingStarted = {
+            param([object]$IncomingDirectory)
+            $embeddedBindingPath = Join-Path `
+                $IncomingDirectory.FullName "source-binding.json"
+            if (-not (Test-Path -LiteralPath $embeddedBindingPath `
+                    -PathType Leaf)) {
+                throw "sidecar publishing incoming 缺少 source-binding.json。"
+            }
+            $embeddedBindingEvidence = Get-FileEvidence $embeddedBindingPath
+            if ([string]$embeddedBindingEvidence.sha256 -ne
+                    [string]$task.pixel_evidence.source_binding.sha256) {
+                throw "sidecar publishing incoming 的 binding 哈希与 Prepare 不一致。"
+            }
+            return $true
         }
         $completePixelEvidenceAttempt = {
             param([object]$State)
@@ -1380,6 +1430,9 @@ if ($Mode -eq "Launch") {
                     $pixelEvidenceRuntimeMarkerPath `
                     ([string]$pixelEvidenceRuntimeAlignment.session_id) `
                     ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch)))
+            $runtimeActiveAtRecordingCompletion =
+                [bool]$State.runtime_active_at_recording_completion -or
+                ($succeeded -and $runtimeActiveAtCompletion)
             return [ordered]@{
                 attempt = [int]$State.attempt
                 started_utc = $State.started_utc.ToString("o")
@@ -1397,6 +1450,8 @@ if ($Mode -eq "Launch") {
                 manifest_published = $manifestPublished
                 runtime_active_at_start =
                     [bool]$State.runtime_active_at_start
+                runtime_active_at_recording_completion =
+                    $runtimeActiveAtRecordingCompletion
                 runtime_active_at_completion =
                     $runtimeActiveAtCompletion
                 stdout_log = Split-Path -Leaf $State.stdout
@@ -1431,7 +1486,48 @@ if ($Mode -eq "Launch") {
             Write-Host ("Launcher 已启动；等待 Runtime 连续 aim-lock 窗口后" +
                 "再启动 output-off NDI 像素 sidecar。")
         }
-        while (-not $process.HasExited) {
+        $pixelEvidencePublishingWaitDeadlineUtc = $null
+        $pixelEvidencePublishingWaitExpired = $false
+        while (-not $process.HasExited -or
+            ($null -ne $pixelEvidenceAttemptState -and
+            [string]$pixelEvidenceAttemptState.phase -eq "PUBLISHING")) {
+            if ($process.HasExited -and
+                $null -ne $pixelEvidenceAttemptState -and
+                [string]$pixelEvidenceAttemptState.phase -eq "PUBLISHING" -and
+                -not $pixelEvidenceAttemptState.process.HasExited) {
+                if ($null -eq $pixelEvidencePublishingWaitDeadlineUtc) {
+                    $pixelEvidencePublishingWaitDeadlineUtc =
+                        [DateTime]::UtcNow.AddSeconds(
+                            $pixelEvidencePublishingMaxWaitSeconds)
+                    Write-Host ("Launcher 已退出；sidecar 录制已完成，最多再等待 " +
+                        "$pixelEvidencePublishingMaxWaitSeconds 秒完成原子发布。")
+                }
+                if ([DateTime]::UtcNow -ge
+                    $pixelEvidencePublishingWaitDeadlineUtc) {
+                    $pixelEvidenceExecutionError =
+                        ("Launcher 退出后等待 sidecar 原子发布超时：" +
+                        "$pixelEvidencePublishingMaxWaitSeconds 秒。")
+                    $pixelEvidenceRuntimeAlignmentBlocked = $true
+                    & $writePixelEvidenceReleasePrompt $false
+                    $sidecarStopped = $false
+                    try {
+                        $pixelEvidenceAttemptState.process.Kill()
+                        $sidecarStopped =
+                            $pixelEvidenceAttemptState.process.WaitForExit(5000)
+                    } catch {
+                        $pixelEvidenceExecutionError +=
+                            " 终止失败：$($_.Exception.Message)"
+                    }
+                    if (-not $sidecarStopped -and
+                        -not $pixelEvidenceAttemptState.process.HasExited) {
+                        $pixelEvidenceExecutionError +=
+                            " 强制终止未在 5 秒内完成，继续监督到进程退出。"
+                        Wait-ProcessExitSupervised `
+                            $pixelEvidenceAttemptState.process
+                    }
+                    $pixelEvidencePublishingWaitExpired = $true
+                }
+            }
             if ($taskCapturePixelEvidence -and
                 $taskHasPixelEvidenceRuntimeAlignmentContract -and
                 -not $pixelEvidenceRuntimeAlignmentBlocked -and
@@ -1484,34 +1580,89 @@ if ($Mode -eq "Launch") {
                     & $writePixelEvidenceReleasePrompt $false
                 }
             }
+            if ($pixelEvidencePublishingWaitExpired) { break }
+            if ($null -ne $pixelEvidenceAttemptState -and
+                $taskHasPixelEvidenceRuntimeAlignmentContract -and
+                -not $pixelEvidenceAttemptState.process.HasExited -and
+                [string]$pixelEvidenceAttemptState.phase -eq "RECORDING") {
+                try {
+                    $publishingIncoming =
+                        & $findPixelEvidencePublishingIncoming `
+                            $pixelEvidenceAttemptState
+                    if ($null -ne $publishingIncoming) {
+                        $runtimeActiveBeforePublishingProbe =
+                            Test-RuntimeAlignmentMarkerActive `
+                                $pixelEvidenceRuntimeMarkerPath `
+                                ([string]$pixelEvidenceRuntimeAlignment.session_id) `
+                                ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch)
+                    }
+                    if ($null -ne $publishingIncoming -and
+                        $runtimeActiveBeforePublishingProbe) {
+                        $publishingStarted =
+                            & $testPixelEvidencePublishingStarted `
+                                $publishingIncoming
+                        $runtimeActiveAfterPublishingProbe =
+                            Test-RuntimeAlignmentMarkerActive `
+                                $pixelEvidenceRuntimeMarkerPath `
+                                ([string]$pixelEvidenceRuntimeAlignment.session_id) `
+                                ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch)
+                        if ($publishingStarted -and
+                            $runtimeActiveAfterPublishingProbe) {
+                            $pixelEvidenceAttemptState.phase = "PUBLISHING"
+                            $pixelEvidenceAttemptState.runtime_active_at_recording_completion =
+                                $true
+                            Write-Host ("sidecar 已录满并进入 publishing；" +
+                                "继续等待原子发布完成。")
+                        }
+                    }
+                } catch {
+                    $pixelEvidenceRuntimeAlignmentBlocked = $true
+                    $pixelEvidenceExecutionError =
+                        "sidecar publishing 边界无效：$($_.Exception.Message)"
+                    & $writePixelEvidenceReleasePrompt $false
+                    if (-not $pixelEvidenceAttemptState.process.HasExited) {
+                        try {
+                            $pixelEvidenceAttemptState.process.Kill()
+                            [void]$pixelEvidenceAttemptState.process.WaitForExit(
+                                5000)
+                        } catch {
+                            $pixelEvidenceExecutionError +=
+                                " 终止失败：$($_.Exception.Message)"
+                        }
+                    }
+                }
+            }
             if ($null -ne $pixelEvidenceAttemptState -and
                 $pixelEvidenceAttemptState.process.HasExited) {
+                $pixelEvidenceAttemptPhase =
+                    [string]$pixelEvidenceAttemptState.phase
                 $attempt = & $completePixelEvidenceAttempt `
                     $pixelEvidenceAttemptState
                 $pixelEvidenceAttempts += $attempt
                 $pixelEvidenceExitCode = [int]$attempt.exit_code
                 $launcherAliveAtSidecarCompletion = -not $process.HasExited
                 $pixelEvidenceAttemptState = $null
-                $runtimeAlignedAtCompletion =
+                $runtimeAlignedAtRecordingCompletion =
                     -not $taskHasPixelEvidenceRuntimeAlignmentContract -or
                     ([bool]$attempt.runtime_active_at_start -and
-                    [bool]$attempt.runtime_active_at_completion)
+                    [bool]$attempt.runtime_active_at_recording_completion)
                 if ($pixelEvidenceRuntimeAlignmentBlocked) {
                     # 保留 marker 消失、解析失败或 sidecar 启动失败的首个
                     # fail-closed 原因；该次尝试仍写入生命周期证据。
                     & $writePixelEvidenceReleasePrompt $false
                 } elseif ([bool]$attempt.succeeded -and
-                    $launcherAliveAtSidecarCompletion -and
-                    $runtimeAlignedAtCompletion) {
+                    ($launcherAliveAtSidecarCompletion -or
+                    $pixelEvidenceAttemptPhase -eq "PUBLISHING") -and
+                    $runtimeAlignedAtRecordingCompletion) {
                     $pixelEvidenceExecutionError = ""
                     if ($taskHasPixelEvidenceRuntimeAlignmentContract) {
                         $pixelEvidenceRuntimeAlignment.gate_passed = $true
                     }
                     & $writePixelEvidenceReleasePrompt $true
                 } elseif ([bool]$attempt.succeeded -and
-                    -not $runtimeAlignedAtCompletion) {
+                    -not $runtimeAlignedAtRecordingCompletion) {
                     $pixelEvidenceExecutionError =
-                        "像素 sidecar 未完整处于 Runtime aim-lock 窗口。"
+                        "像素 sidecar 录制未完整处于 Runtime aim-lock 窗口。"
                     & $writePixelEvidenceReleasePrompt $false
                 } elseif ([bool]$attempt.succeeded) {
                     $pixelEvidenceExecutionError =
@@ -1557,6 +1708,7 @@ if ($Mode -eq "Launch") {
             }
             if ($null -ne $pixelEvidenceAttemptState -and
                 $taskHasPixelEvidenceRuntimeAlignmentContract -and
+                [string]$pixelEvidenceAttemptState.phase -eq "RECORDING" -and
                 -not (Test-RuntimeAlignmentMarkerActive `
                     $pixelEvidenceRuntimeMarkerPath `
                     ([string]$pixelEvidenceRuntimeAlignment.session_id) `
@@ -1577,6 +1729,10 @@ if ($Mode -eq "Launch") {
             }
             if (-not $process.HasExited) {
                 [void]$process.WaitForExit(100)
+            } elseif ($null -ne $pixelEvidenceAttemptState -and
+                [string]$pixelEvidenceAttemptState.phase -eq "PUBLISHING" -and
+                -not $pixelEvidenceAttemptState.process.HasExited) {
+                [void]$pixelEvidenceAttemptState.process.WaitForExit(100)
             }
         }
         [void]$process.WaitForExit()
@@ -1607,12 +1763,21 @@ if ($Mode -eq "Launch") {
                 $pixelEvidenceExecutionError += " $sidecarLifecycleError"
             }
             if (-not $pixelEvidenceAttemptState.process.HasExited) {
+                $sidecarStopped = $false
                 try {
                     $pixelEvidenceAttemptState.process.Kill()
-                    [void]$pixelEvidenceAttemptState.process.WaitForExit(5000)
+                    $sidecarStopped =
+                        $pixelEvidenceAttemptState.process.WaitForExit(5000)
                 } catch {
                     $pixelEvidenceExecutionError +=
                         " 终止失败：$($_.Exception.Message)"
+                }
+                if (-not $sidecarStopped -and
+                    -not $pixelEvidenceAttemptState.process.HasExited) {
+                    $pixelEvidenceExecutionError +=
+                        " 强制终止未在 5 秒内完成，继续监督到进程退出。"
+                    Wait-ProcessExitSupervised `
+                        $pixelEvidenceAttemptState.process
                 }
             }
             if ($pixelEvidenceAttemptState.process.HasExited) {
@@ -1830,13 +1995,27 @@ if ($Mode -eq "Recover" -and $taskCapturePixelEvidence -and
         throw "Recover 像素 sidecar 最后退出码与尝试证据不一致。"
     }
     $pixelEvidenceExecutionError = [string]$attemptEvidence.execution_error
+    $lastAttemptRuntimeActiveAtRecordingCompletion = if (
+            $null -eq $lastPixelEvidenceAttempt -or
+            -not $taskHasPixelEvidenceRuntimeAlignmentContract) {
+        $true
+    } elseif ($lastPixelEvidenceAttempt.PSObject.Properties.Name -contains
+            "runtime_active_at_recording_completion") {
+        [bool]$lastPixelEvidenceAttempt.runtime_active_at_recording_completion
+    } else {
+        # 历史 schema 2 把进程完成当作录制完成；保留其 Recover 兼容。
+        [bool]$lastPixelEvidenceAttempt.runtime_active_at_completion
+    }
     $lastAttemptProvesSuccess =
         $null -ne $lastPixelEvidenceAttempt -and
         [bool]$lastPixelEvidenceAttempt.succeeded -and
         $pixelEvidenceExitCode -eq 0 -and
         [string]$lastPixelEvidenceAttempt.diagnostic -eq "SUCCESS" -and
         -not [bool]$lastPixelEvidenceAttempt.retryable -and
-        [bool]$lastPixelEvidenceAttempt.manifest_published
+        [bool]$lastPixelEvidenceAttempt.manifest_published -and
+        (-not $taskHasPixelEvidenceRuntimeAlignmentContract -or
+            ([bool]$lastPixelEvidenceAttempt.runtime_active_at_start -and
+            $lastAttemptRuntimeActiveAtRecordingCompletion))
     if (-not $lastAttemptProvesSuccess -and
         [string]::IsNullOrWhiteSpace($pixelEvidenceExecutionError)) {
         $pixelEvidenceExecutionError =

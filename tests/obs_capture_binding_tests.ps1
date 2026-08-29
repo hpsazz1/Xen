@@ -244,6 +244,62 @@ PreviewOutputEnabled=false
         throw "候选中有多个可见源时必须失败封闭"
     }
 
+    # 公开 red：selected 候选并非 Program scene 中唯一可见的出像素项时，
+    # 即使额外项不在 SourceNames 候选列表内，也不能把 saved 配置导出为
+    # selected 媒体的排他性 binding。
+    $nonCandidateVisible = Join-Path $root "non-candidate-visible.json"
+    $nonCandidateVisibleDocument = Get-Content -LiteralPath $collection -Raw `
+        -Encoding UTF8 | ConvertFrom-Json
+    $nonCandidateVisibleDocument.sources += [pscustomobject][ordered]@{
+        name = "主画面"
+        uuid = "source-main"
+        id = "monitor_capture"
+        settings = [pscustomobject][ordered]@{ monitor = 0 }
+    }
+    $nonCandidateProgramScene = $nonCandidateVisibleDocument.sources |
+        Where-Object { $_.name -eq "固定测试输出" }
+    $nonCandidateProgramScene.settings.items += [pscustomobject][ordered]@{
+        name = "主画面"
+        source_uuid = "source-main"
+        visible = $true
+        locked = $true
+        rot = 0.0
+        scale_ref = [pscustomobject][ordered]@{ x = 320.0; y = 320.0 }
+        align = 5
+        bounds_type = 0
+        bounds_align = 0
+        bounds_crop = $false
+        crop_left = 1120
+        crop_top = 560
+        crop_right = 0
+        crop_bottom = 0
+        id = 4
+        pos = [pscustomobject][ordered]@{ x = 0.0; y = 0.0 }
+        scale = [pscustomobject][ordered]@{ x = 1.0; y = 1.0 }
+        scale_filter = "disable"
+        blend_method = "default"
+        blend_type = "normal"
+    }
+    Write-Utf8NoBom $nonCandidateVisible `
+        ($nonCandidateVisibleDocument | ConvertTo-Json -Depth 12)
+    $nonCandidateVisibleRejected = $false
+    try {
+        & $BindingScript `
+            -SceneCollectionPath $nonCandidateVisible `
+            -ObsUserConfigPath $obsUserConfig `
+            -ExpectedNdiOutputName "Xen-ROI-320" `
+            -SceneName "固定测试输出" `
+            -SourceNames @("静止", "原地跳跃", "左右横移") `
+            -SelectedSourceName "静止" `
+            -OutputPath (Join-Path $root `
+                "non-candidate-visible-binding.json")
+    } catch {
+        $nonCandidateVisibleRejected = $true
+    }
+    if (-not $nonCandidateVisibleRejected) {
+        throw "所选源之外存在可见 Program scene item 时必须失败封闭"
+    }
+
     $hiddenRejected = $false
     try {
         & $BindingScript `

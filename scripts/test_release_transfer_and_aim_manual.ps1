@@ -173,6 +173,17 @@ namespace XenAimManualLauncherFixture {
                 "XEN_TEST_RUNTIME_SESSION_ID");
             string runtimeHoldText = Environment.GetEnvironmentVariable(
                 "XEN_TEST_RUNTIME_HOLD_AFTER_SUCCESS_MS");
+            string recordingStarted = Environment.GetEnvironmentVariable(
+                "XEN_TEST_PIXEL_RECORDING_STARTED");
+            string publishingStarted = Environment.GetEnvironmentVariable(
+                "XEN_TEST_PIXEL_PUBLISHING_STARTED");
+            string dropMarkerPhase = Environment.GetEnvironmentVariable(
+                "XEN_TEST_RUNTIME_DROP_MARKER_PHASE");
+            string dropMarkerGraceText = Environment.GetEnvironmentVariable(
+                "XEN_TEST_RUNTIME_DROP_MARKER_GRACE_MS");
+            string exitAfterPublishingText =
+                Environment.GetEnvironmentVariable(
+                    "XEN_TEST_RUNTIME_EXIT_AFTER_PUBLISHING_MS");
             if (String.IsNullOrEmpty(started) || String.IsNullOrEmpty(ready) ||
                 String.IsNullOrEmpty(success) ||
                 String.IsNullOrEmpty(reportSource) ||
@@ -197,9 +208,63 @@ namespace XenAimManualLauncherFixture {
                     WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
                 }
                 if (!File.Exists(started)) return 21;
+                int dropMarkerGraceMilliseconds = 500;
+                int parsedDropMarkerGraceMilliseconds = 0;
+                if (Int32.TryParse(dropMarkerGraceText,
+                        out parsedDropMarkerGraceMilliseconds)) {
+                    dropMarkerGraceMilliseconds =
+                        parsedDropMarkerGraceMilliseconds;
+                }
+                if (dropMarkerGraceMilliseconds < 0) {
+                    dropMarkerGraceMilliseconds = 0;
+                }
+                int exitAfterPublishingMilliseconds = -1;
+                int parsedExitAfterPublishingMilliseconds = 0;
+                if (Int32.TryParse(exitAfterPublishingText,
+                        out parsedExitAfterPublishingMilliseconds)) {
+                    exitAfterPublishingMilliseconds =
+                        parsedExitAfterPublishingMilliseconds;
+                }
+                DateTime dropMarkerDeadline = DateTime.MaxValue;
+                DateTime exitAfterPublishingDeadline = DateTime.MaxValue;
+                bool markerDropped = false;
                 while (!File.Exists(success) && DateTime.UtcNow < deadline) {
                     Thread.Sleep(100);
-                    WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
+                    bool dropSignalObserved =
+                        String.Equals(dropMarkerPhase, "RECORDING",
+                            StringComparison.Ordinal) &&
+                        !String.IsNullOrEmpty(recordingStarted) &&
+                        File.Exists(recordingStarted) ||
+                        String.Equals(dropMarkerPhase, "PUBLISHING",
+                            StringComparison.Ordinal) &&
+                        !String.IsNullOrEmpty(publishingStarted) &&
+                        File.Exists(publishingStarted);
+                    if (exitAfterPublishingMilliseconds >= 0 &&
+                        !String.IsNullOrEmpty(publishingStarted) &&
+                        File.Exists(publishingStarted)) {
+                        if (exitAfterPublishingDeadline == DateTime.MaxValue) {
+                            exitAfterPublishingDeadline =
+                                DateTime.UtcNow.AddMilliseconds(
+                                    exitAfterPublishingMilliseconds);
+                        }
+                        if (DateTime.UtcNow >= exitAfterPublishingDeadline) {
+                            return 0;
+                        }
+                    }
+                    if (!markerDropped && dropSignalObserved &&
+                        dropMarkerDeadline == DateTime.MaxValue) {
+                        dropMarkerDeadline = DateTime.UtcNow.AddMilliseconds(
+                            dropMarkerGraceMilliseconds);
+                    }
+                    if (!markerDropped &&
+                        DateTime.UtcNow >= dropMarkerDeadline) {
+                        if (File.Exists(runtimeMarker)) {
+                            File.Delete(runtimeMarker);
+                        }
+                        markerDropped = true;
+                    } else if (!markerDropped) {
+                        WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
+                    }
                 }
                 if (!File.Exists(success)) return 22;
                 int holdMilliseconds = 300;
@@ -212,7 +277,9 @@ namespace XenAimManualLauncherFixture {
                 deadline = DateTime.UtcNow.AddMilliseconds(holdMilliseconds);
                 while (DateTime.UtcNow < deadline) {
                     Thread.Sleep(100);
-                    WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
+                    if (!markerDropped) {
+                        WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
+                    }
                 }
                 return 0;
             } finally {
@@ -387,6 +454,14 @@ namespace XenAimManualPixelFixture {
                 "XEN_TEST_PIXEL_EVIDENCE_SOURCE");
             string holdText = Environment.GetEnvironmentVariable(
                 "XEN_TEST_PIXEL_HOLD_AFTER_SUCCESS_MS");
+            string recordingStarted = Environment.GetEnvironmentVariable(
+                "XEN_TEST_PIXEL_RECORDING_STARTED");
+            string publishingStarted = Environment.GetEnvironmentVariable(
+                "XEN_TEST_PIXEL_PUBLISHING_STARTED");
+            string recordingHoldText = Environment.GetEnvironmentVariable(
+                "XEN_TEST_PIXEL_RECORDING_HOLD_MS");
+            string publishHoldText = Environment.GetEnvironmentVariable(
+                "XEN_TEST_PIXEL_PUBLISH_DELAY_MS");
             string output = ArgumentValue(args, "--output");
             if (String.IsNullOrEmpty(started) || String.IsNullOrEmpty(ready) ||
                 String.IsNullOrEmpty(success) ||
@@ -407,7 +482,37 @@ namespace XenAimManualPixelFixture {
                     "NDI Capture 失败：status=ACCESS_LOST；error=NDI 发现超时，未找到唯一匹配的源");
                 return 1;
             }
-            CopyDirectory(evidenceSource, output);
+            if (!String.IsNullOrEmpty(recordingStarted)) {
+                File.WriteAllText(recordingStarted, "recording");
+            }
+            int recordingHoldMilliseconds = 0;
+            if (Int32.TryParse(recordingHoldText,
+                    out recordingHoldMilliseconds) &&
+                recordingHoldMilliseconds > 0) {
+                System.Threading.Thread.Sleep(recordingHoldMilliseconds);
+            }
+            if (!String.IsNullOrEmpty(publishingStarted)) {
+                string outputName = Path.GetFileName(output);
+                string incoming = Path.Combine(Path.GetDirectoryName(output),
+                    "." + outputName + ".incoming-" +
+                    System.Diagnostics.Process.GetCurrentProcess().Id +
+                    "-fixture-0");
+                CopyDirectory(evidenceSource, incoming);
+                string frames = Path.Combine(incoming, "frames");
+                Directory.CreateDirectory(frames);
+                File.WriteAllText(Path.Combine(frames, "000000.png"),
+                    "publishing");
+                File.WriteAllText(publishingStarted, "publishing");
+                int publishHoldMilliseconds = 0;
+                if (Int32.TryParse(publishHoldText,
+                        out publishHoldMilliseconds) &&
+                    publishHoldMilliseconds > 0) {
+                    System.Threading.Thread.Sleep(publishHoldMilliseconds);
+                }
+                Directory.Move(incoming, output);
+            } else {
+                CopyDirectory(evidenceSource, output);
+            }
             File.WriteAllText(success, "success");
             Console.WriteLine("output-off NDI evidence fixture published");
             int holdMilliseconds = 0;
@@ -738,6 +843,333 @@ namespace XenAimManualPixelFixture {
                 }
         }
         throw "同一次 Launch 中 source 稍后可用时，sidecar 必须重试并发布 VALID manifest。"
+    }
+
+    # marker 在录制阶段消失时，即使 Launcher 仍存活也必须
+    # fail closed；这个负例防止后续对 publishing 放行时扩大采集窗口。
+    $pixelRecordingLossRoot = Join-Path $root `
+        "pixel-sidecar-recording-marker-loss-task"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -RequireSourceTiming `
+        -CapturePixelEvidence `
+        -PixelEvidenceToolRoot $pixelToolRoot `
+        -PixelEvidenceBindingPath $pixelBinding `
+        -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+        -PackageRoot $published -RunDirectory $pixelRecordingLossRoot |
+        Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "sidecar 录制阶段 marker 丢失负例必须可 Prepare。"
+    }
+    $recordingLossEnvironment = [ordered]@{
+        XEN_TEST_PIXEL_STARTED = (Join-Path $root `
+            "pixel-recording-loss.started")
+        XEN_TEST_PIXEL_READY = (Join-Path $root `
+            "pixel-recording-loss.ready")
+        XEN_TEST_PIXEL_SUCCESS = (Join-Path $root `
+            "pixel-recording-loss.success")
+        XEN_TEST_PIXEL_COUNTER = (Join-Path $root `
+            "pixel-recording-loss.count")
+        XEN_TEST_PIXEL_EVIDENCE_SOURCE = $pixelLifecycleEvidenceSource
+        XEN_TEST_PIXEL_RECORDING_STARTED = (Join-Path $root `
+            "pixel-recording-loss.recording")
+        XEN_TEST_PIXEL_PUBLISHING_STARTED = (Join-Path $root `
+            "pixel-recording-loss.publishing")
+        XEN_TEST_PIXEL_RECORDING_HOLD_MS = "1800"
+        XEN_TEST_PIXEL_PUBLISH_DELAY_MS = "300"
+        XEN_TEST_RUNTIME_DROP_MARKER_PHASE = "RECORDING"
+        XEN_TEST_RUNTIME_DROP_MARKER_GRACE_MS = "400"
+        XEN_TEST_RUNTIME_HOLD_AFTER_SUCCESS_MS = "1000"
+        XEN_TEST_RUNTIME_REPORT_SOURCE = $pixelLifecycleReportSource
+        XEN_TEST_RUNTIME_REPORT_NAME = "pixel-recording-loss.json"
+        XEN_TEST_RUNTIME_ROOT = (Join-Path $published "cache\runtime")
+        XEN_TEST_RUNTIME_SESSION_ID = "pixel-schema13"
+    }
+    $recordingLossSavedEnvironment = @{}
+    foreach ($name in $recordingLossEnvironment.Keys) {
+        $recordingLossSavedEnvironment[$name] =
+            [Environment]::GetEnvironmentVariable(
+                $name, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable(
+            $name, [string]$recordingLossEnvironment[$name],
+            [EnvironmentVariableTarget]::Process)
+    }
+    try {
+        $savedErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $recordingLossOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Launch -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -RequireSourceTiming `
+            -CapturePixelEvidence `
+            -PixelEvidenceToolRoot $pixelToolRoot `
+            -PixelEvidenceBindingPath $pixelBinding `
+            -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+            -PackageRoot $published -RunDirectory $pixelRecordingLossRoot `
+            -AllowPhysicalOutput `
+            -PhysicalOutputConfirmation `
+                XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT 2>&1)
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+        foreach ($name in $recordingLossEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable(
+                $name, $recordingLossSavedEnvironment[$name],
+                [EnvironmentVariableTarget]::Process)
+        }
+    }
+    $recordingLossSummary = Get-Content -LiteralPath `
+        (Join-Path $pixelRecordingLossRoot "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    $recordingLossAttemptEvidence = Get-Content -LiteralPath `
+        (Join-Path $pixelRecordingLossRoot `
+            "pixel-evidence-attempts.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    $recordingLossLastAttempt =
+        @($recordingLossAttemptEvidence.attempts)[-1]
+    if ([bool]$recordingLossSummary.pixel_evidence.gate_passed -or
+        [string]$recordingLossSummary.pixel_evidence.execution_error `
+            -notmatch 'Runtime aim-lock activation' -or
+        [bool]$recordingLossAttemptEvidence.runtime_alignment.gate_passed -or
+        [bool]$recordingLossLastAttempt.succeeded -or
+        [bool]$recordingLossLastAttempt.manifest_published -or
+        (Test-Path -LiteralPath (Join-Path $pixelRecordingLossRoot `
+            "pixel-evidence\manifest.json") -PathType Leaf) -or
+        ($recordingLossOutput -join "`n") -notmatch
+            "sidecar 未完成或已停止，可以松开右键") {
+        $recordingLossOutput | ForEach-Object { Write-Host $_ }
+        throw "marker 在 recording 阶段丢失时必须终止 sidecar 且不发布 manifest。"
+    }
+
+    # 公开 red：绑定 sidecar 已录满并在精确 PID incoming 目录
+    # 写入首张 PNG，证明已进入 publishing。此后 marker 消失不得
+    # 中断无物理能力的 PNG/hash/manifest 原子发布。
+    $pixelPublishingLossRoot = Join-Path $root `
+        "pixel-sidecar-publishing-marker-loss-task"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -RequireSourceTiming `
+        -CapturePixelEvidence `
+        -PixelEvidenceToolRoot $pixelToolRoot `
+        -PixelEvidenceBindingPath $pixelBinding `
+        -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+        -PackageRoot $published -RunDirectory $pixelPublishingLossRoot |
+        Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "sidecar publishing 阶段 marker 丢失正例必须可 Prepare。"
+    }
+    $publishingLossEnvironment = [ordered]@{
+        XEN_TEST_PIXEL_STARTED = (Join-Path $root `
+            "pixel-publishing-loss.started")
+        XEN_TEST_PIXEL_READY = (Join-Path $root `
+            "pixel-publishing-loss.ready")
+        XEN_TEST_PIXEL_SUCCESS = (Join-Path $root `
+            "pixel-publishing-loss.success")
+        XEN_TEST_PIXEL_COUNTER = (Join-Path $root `
+            "pixel-publishing-loss.count")
+        XEN_TEST_PIXEL_EVIDENCE_SOURCE = $pixelLifecycleEvidenceSource
+        XEN_TEST_PIXEL_RECORDING_STARTED = (Join-Path $root `
+            "pixel-publishing-loss.recording")
+        XEN_TEST_PIXEL_PUBLISHING_STARTED = (Join-Path $root `
+            "pixel-publishing-loss.publishing")
+        XEN_TEST_PIXEL_RECORDING_HOLD_MS = "0"
+        XEN_TEST_PIXEL_PUBLISH_DELAY_MS = "1800"
+        XEN_TEST_RUNTIME_DROP_MARKER_PHASE = "PUBLISHING"
+        XEN_TEST_RUNTIME_DROP_MARKER_GRACE_MS = "500"
+        XEN_TEST_RUNTIME_HOLD_AFTER_SUCCESS_MS = "1200"
+        XEN_TEST_RUNTIME_REPORT_SOURCE = $pixelLifecycleReportSource
+        XEN_TEST_RUNTIME_REPORT_NAME = "pixel-publishing-loss.json"
+        XEN_TEST_RUNTIME_ROOT = (Join-Path $published "cache\runtime")
+        XEN_TEST_RUNTIME_SESSION_ID = "pixel-schema13"
+    }
+    $publishingLossSavedEnvironment = @{}
+    foreach ($name in $publishingLossEnvironment.Keys) {
+        $publishingLossSavedEnvironment[$name] =
+            [Environment]::GetEnvironmentVariable(
+                $name, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable(
+            $name, [string]$publishingLossEnvironment[$name],
+            [EnvironmentVariableTarget]::Process)
+    }
+    try {
+        $savedErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $publishingLossOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Launch -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -RequireSourceTiming `
+            -CapturePixelEvidence `
+            -PixelEvidenceToolRoot $pixelToolRoot `
+            -PixelEvidenceBindingPath $pixelBinding `
+            -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+            -PackageRoot $published -RunDirectory $pixelPublishingLossRoot `
+            -AllowPhysicalOutput `
+            -PhysicalOutputConfirmation `
+                XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT 2>&1)
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+        foreach ($name in $publishingLossEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable(
+                $name, $publishingLossSavedEnvironment[$name],
+                [EnvironmentVariableTarget]::Process)
+        }
+    }
+    $publishingLossSummary = Get-Content -LiteralPath `
+        (Join-Path $pixelPublishingLossRoot "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    $publishingLossAttemptEvidence = Get-Content -LiteralPath `
+        (Join-Path $pixelPublishingLossRoot `
+            "pixel-evidence-attempts.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    $publishingLossLastAttempt =
+        @($publishingLossAttemptEvidence.attempts)[-1]
+    $hasRecordingCompletionField =
+        $publishingLossLastAttempt.PSObject.Properties.Name -contains
+            "runtime_active_at_recording_completion"
+    if (-not [bool]$publishingLossSummary.pixel_evidence.gate_passed -or
+        [string]$publishingLossSummary.pixel_evidence.diagnostic -ne "VALID" -or
+        -not [bool]$publishingLossAttemptEvidence.runtime_alignment.gate_passed -or
+        -not [bool]$publishingLossLastAttempt.runtime_active_at_start -or
+        -not $hasRecordingCompletionField -or
+        ($hasRecordingCompletionField -and
+            -not [bool]$publishingLossLastAttempt.runtime_active_at_recording_completion) -or
+        [bool]$publishingLossLastAttempt.runtime_active_at_completion -or
+        -not [bool]$publishingLossLastAttempt.succeeded -or
+        -not [bool]$publishingLossLastAttempt.manifest_published -or
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$publishingLossAttemptEvidence.execution_error) -or
+        -not (Test-Path -LiteralPath (Join-Path $pixelPublishingLossRoot `
+            "pixel-evidence\manifest.json") -PathType Leaf) -or
+        ($publishingLossOutput -join "`n") -notmatch
+            "sidecar 已完成，可以松开右键") {
+        $publishingLossOutput | ForEach-Object { Write-Host $_ }
+        Write-Host ($publishingLossSummary.pixel_evidence |
+            ConvertTo-Json -Depth 8)
+        Write-Host ($publishingLossAttemptEvidence |
+            ConvertTo-Json -Depth 8)
+        throw "sidecar 已进入 publishing 后 marker 消失仍必须完成原子发布。"
+    }
+
+    # 公开 red：sidecar 已在当前 PID incoming 目录写入 PNG，且监督器有
+    # 足够时间在前后双 marker 有效时确认 PUBLISHING。此后 Launcher 可先
+    # 退出；无物理能力的 sidecar 仍必须在独立于 1 秒采集上限的有界
+    # publishing 等待内完成 2.2 秒原子发布。
+    $pixelPublishingLauncherExitRoot = Join-Path $root `
+        "pixel-sidecar-publishing-launcher-exit-task"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -RequireSourceTiming `
+        -CapturePixelEvidence `
+        -PixelEvidenceToolRoot $pixelToolRoot `
+        -PixelEvidenceBindingPath $pixelBinding `
+        -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 1 `
+        -PackageRoot $published `
+        -RunDirectory $pixelPublishingLauncherExitRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "sidecar publishing 后 Launcher 先退出正例必须可 Prepare。"
+    }
+    $publishingLauncherExitEnvironment = [ordered]@{
+        XEN_TEST_PIXEL_STARTED = (Join-Path $root `
+            "pixel-publishing-launcher-exit.started")
+        XEN_TEST_PIXEL_READY = (Join-Path $root `
+            "pixel-publishing-launcher-exit.ready")
+        XEN_TEST_PIXEL_SUCCESS = (Join-Path $root `
+            "pixel-publishing-launcher-exit.success")
+        XEN_TEST_PIXEL_COUNTER = (Join-Path $root `
+            "pixel-publishing-launcher-exit.count")
+        XEN_TEST_PIXEL_EVIDENCE_SOURCE = $pixelLifecycleEvidenceSource
+        XEN_TEST_PIXEL_RECORDING_STARTED = (Join-Path $root `
+            "pixel-publishing-launcher-exit.recording")
+        XEN_TEST_PIXEL_PUBLISHING_STARTED = (Join-Path $root `
+            "pixel-publishing-launcher-exit.publishing")
+        XEN_TEST_PIXEL_RECORDING_HOLD_MS = "0"
+        XEN_TEST_PIXEL_PUBLISH_DELAY_MS = "2200"
+        XEN_TEST_RUNTIME_EXIT_AFTER_PUBLISHING_MS = "800"
+        XEN_TEST_RUNTIME_HOLD_AFTER_SUCCESS_MS = "0"
+        XEN_TEST_RUNTIME_REPORT_SOURCE = $pixelLifecycleReportSource
+        XEN_TEST_RUNTIME_REPORT_NAME =
+            "pixel-publishing-launcher-exit.json"
+        XEN_TEST_RUNTIME_ROOT = (Join-Path $published "cache\runtime")
+        XEN_TEST_RUNTIME_SESSION_ID = "pixel-schema13"
+    }
+    $publishingLauncherExitSavedEnvironment = @{}
+    foreach ($name in $publishingLauncherExitEnvironment.Keys) {
+        $publishingLauncherExitSavedEnvironment[$name] =
+            [Environment]::GetEnvironmentVariable(
+                $name, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable(
+            $name, [string]$publishingLauncherExitEnvironment[$name],
+            [EnvironmentVariableTarget]::Process)
+    }
+    try {
+        $savedErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $publishingLauncherExitOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Launch -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -RequireSourceTiming `
+            -CapturePixelEvidence `
+            -PixelEvidenceToolRoot $pixelToolRoot `
+            -PixelEvidenceBindingPath $pixelBinding `
+            -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 1 `
+            -PackageRoot $published `
+            -RunDirectory $pixelPublishingLauncherExitRoot `
+            -AllowPhysicalOutput `
+            -PhysicalOutputConfirmation `
+                XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT 2>&1)
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+        foreach ($name in $publishingLauncherExitEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable(
+                $name, $publishingLauncherExitSavedEnvironment[$name],
+                [EnvironmentVariableTarget]::Process)
+        }
+    }
+    $publishingLauncherExitSummary = Get-Content -LiteralPath `
+        (Join-Path $pixelPublishingLauncherExitRoot `
+            "automatic-summary.json") -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    $publishingLauncherExitAttemptEvidence = Get-Content -LiteralPath `
+        (Join-Path $pixelPublishingLauncherExitRoot `
+            "pixel-evidence-attempts.json") -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    $publishingLauncherExitLastAttempt =
+        @($publishingLauncherExitAttemptEvidence.attempts)[-1]
+    if (-not [bool]$publishingLauncherExitSummary.pixel_evidence.gate_passed -or
+        [string]$publishingLauncherExitSummary.pixel_evidence.diagnostic -ne
+            "VALID" -or
+        -not [bool]$publishingLauncherExitAttemptEvidence.runtime_alignment.gate_passed -or
+        -not [bool]$publishingLauncherExitLastAttempt.runtime_active_at_start -or
+        -not [bool]$publishingLauncherExitLastAttempt.runtime_active_at_recording_completion -or
+        [bool]$publishingLauncherExitLastAttempt.runtime_active_at_completion -or
+        -not [bool]$publishingLauncherExitLastAttempt.succeeded -or
+        -not [bool]$publishingLauncherExitLastAttempt.manifest_published -or
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$publishingLauncherExitAttemptEvidence.execution_error) -or
+        -not (Test-Path -LiteralPath `
+            (Join-Path $pixelPublishingLauncherExitRoot `
+                "pixel-evidence\manifest.json") -PathType Leaf) -or
+        ($publishingLauncherExitOutput -join "`n") -notmatch
+            "sidecar 已录满并进入 publishing" -or
+        ($publishingLauncherExitOutput -join "`n") -notmatch
+            "sidecar 已完成，可以松开右键") {
+        $publishingLauncherExitOutput | ForEach-Object { Write-Host $_ }
+        Write-Host ($publishingLauncherExitSummary.pixel_evidence |
+            ConvertTo-Json -Depth 8)
+        Write-Host ($publishingLauncherExitAttemptEvidence |
+            ConvertTo-Json -Depth 8)
+        throw "sidecar 已进入 PUBLISHING 后 Launcher 先退出仍必须完成原子发布。"
     }
 
     $pixelLifecycleTaskPath = Join-Path $pixelLifecycleRoot "task.json"
