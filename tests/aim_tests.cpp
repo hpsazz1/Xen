@@ -315,6 +315,218 @@ void test_command_limit_and_reset() {
            "reset 后不得复用旧目标或旧命令状态");
 }
 
+void test_tracking_deadzone_keeps_x_independent_of_y_error() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    const auto captured_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+
+    const auto run = [&](float center_y) {
+        Aim aim(config);
+        AimFrame frame = make_frame(1, captured_at);
+        frame.control_at = captured_at + std::chrono::milliseconds(1);
+        frame.lock_active = true;
+        frame.detections = {body(164.5f, center_y)};
+        return aim.process(frame);
+    };
+
+    const AimResult centered_y = run(160.0f);
+    const AimResult offset_y = run(180.0f);
+    expect(centered_y.has_target && offset_y.has_target &&
+               std::fabs(centered_y.target.base_aim_x -
+                         offset_y.target.base_aim_x) < 0.0001f &&
+               std::fabs(centered_y.target.base_aim_y -
+                         offset_y.target.base_aim_y) > 1.0f &&
+               std::hypot(
+                   static_cast<float>(centered_y.command.dx_counts),
+                   static_cast<float>(centered_y.command.dy_counts)) <
+                   config.max_counts_per_frame &&
+               std::hypot(
+                   static_cast<float>(offset_y.command.dx_counts),
+                   static_cast<float>(offset_y.command.dy_counts)) <
+                   config.max_counts_per_frame,
+           "deadzone 分轴回归必须只改变 Y 输入、保持同一 X 基础点，且不"
+           "进入二维 14-count 限幅");
+    expect(std::fabs(centered_y.control.proportional_x_counts -
+                     offset_y.control.proportional_x_counts) < 0.0001f &&
+               std::fabs(centered_y.control.filtered_x_counts -
+                         offset_y.control.filtered_x_counts) < 0.0001f &&
+               centered_y.command.dx_counts == offset_y.command.dx_counts,
+           "prediction-off tracking 的同一 X 误差不得因起跳 Y 误差改变而"
+           "得到不同 X 比例/滤波/整数命令；centered/offset dx=" +
+               std::to_string(centered_y.command.dx_counts) + "/" +
+               std::to_string(offset_y.command.dx_counts));
+}
+
+void test_tracking_vector_limit_preserves_y_when_x_saturates() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+
+    struct Trace {
+        std::vector<int> y_commands;
+        std::vector<int> controller_dt_microseconds;
+        bool used_full_x_budget = false;
+        float base_y = 0.0f;
+    };
+    const auto run = [&](float center_x) {
+        Aim aim(config);
+        Trace trace;
+        for (int index = 0; index < 20; ++index) {
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(index * 4167));
+            frame.control_at =
+                frame.captured_at + std::chrono::milliseconds(1);
+            frame.lock_active = true;
+            frame.detections = {
+                body(index < 12 ? center_x : 160.0f, 190.0f)};
+            const AimResult result = aim.process(frame);
+            expect(result.has_target,
+                   "二维限幅分轴回归必须逐帧保留合法目标");
+            if (!result.has_target) continue;
+            trace.base_y = result.target.base_aim_y;
+            trace.y_commands.push_back(result.command.dy_counts);
+            trace.controller_dt_microseconds.push_back(
+                static_cast<int>(std::lround(
+                    result.control.controller_dt_ms * 1000.0f)));
+            const float command_magnitude = std::hypot(
+                static_cast<float>(result.command.dx_counts),
+                static_cast<float>(result.command.dy_counts));
+            const double limit =
+                static_cast<double>(config.max_counts_per_frame);
+            const double y_command =
+                static_cast<double>(result.command.dy_counts);
+            const int x_budget = static_cast<int>(std::floor(std::sqrt(
+                std::max(0.0, limit * limit - y_command * y_command))));
+            trace.used_full_x_budget = trace.used_full_x_budget ||
+                (index < 12 && result.command.dx_counts != 0 &&
+                 std::abs(result.command.dx_counts) == x_budget &&
+                 std::fabs(
+                     result.control.desired_before_reverse_x_counts) >
+                     static_cast<float>(x_budget));
+            expect(command_magnitude <= config.max_counts_per_frame,
+                   "Y 优先分配仍必须保持二维 14-count 欧氏上限");
+        }
+        return trace;
+    };
+
+    const Trace y_only = run(160.0f);
+    const Trace x_and_y = run(190.0f);
+    expect(x_and_y.used_full_x_budget &&
+               std::fabs(y_only.base_y - x_and_y.base_y) < 0.0001f &&
+               y_only.controller_dt_microseconds ==
+                   x_and_y.controller_dt_microseconds,
+           "二维限幅分轴回归必须实际进入饱和并只改变 X 输入");
+    const auto format_trace = [](const std::vector<int>& values) {
+        std::ostringstream stream;
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            if (index != 0) stream << ',';
+            stream << values[index];
+        }
+        return stream.str();
+    };
+    expect(y_only.y_commands == x_and_y.y_commands,
+           "prediction-off tracking 的二维饱和不得让 X 挤占同一 Y 命令；"
+           "y-only/x-and-y=" + format_trace(y_only.y_commands) + "/" +
+               format_trace(x_and_y.y_commands));
+}
+
+void test_tracking_vector_limit_respects_continuous_and_integer_boundary() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 10.0f;
+    config.counts_per_pixel_y = 1.0f;
+    config.max_counts_per_frame = 9.055384635925293f;
+    config.acquisition_range_percent = 100.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    const auto captured_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+
+    AimConfig continuous_config = config;
+    continuous_config.counts_per_pixel_y = 22.0f / 21.0f;
+    continuous_config.max_counts_per_frame = 14.0f;
+    Aim continuous_aim(continuous_config);
+    AimFrame continuous_frame = make_frame(1, captured_at);
+    continuous_frame.control_at =
+        captured_at + std::chrono::milliseconds(1);
+    continuous_frame.lock_active = true;
+    continuous_frame.detections = {body(180.0f, 170.0f)};
+    const AimResult continuous = continuous_aim.process(continuous_frame);
+    const double continuous_magnitude = std::hypot(
+        static_cast<double>(continuous.control.filtered_x_counts), 11.0);
+    expect(continuous.has_target && continuous.command.dy_counts == 11,
+           "连续二维限幅回归必须构造 frozen Y=11 count 的公开边界");
+    expect(continuous_magnitude <= 14.0,
+           "连续 X 预算回写 float 后仍必须位于 14-count 圆盘内，不能"
+           "等到整数层才修正；magnitude=" +
+               std::to_string(continuous_magnitude));
+
+    Aim boundary_aim(config);
+    AimFrame boundary_frame = make_frame(1, captured_at);
+    boundary_frame.control_at =
+        captured_at + std::chrono::milliseconds(1);
+    boundary_frame.lock_active = true;
+    boundary_frame.detections = {body(180.0f, 161.0f)};
+    const AimResult boundary = boundary_aim.process(boundary_frame);
+    const double boundary_magnitude = std::hypot(
+        static_cast<double>(boundary.command.dx_counts),
+        static_cast<double>(boundary.command.dy_counts));
+    expect(boundary.has_target && boundary.command.dx_counts != 0 &&
+               boundary.command.dy_counts != 0,
+           "非整数二维限幅回归必须覆盖 X/Y 均非零的整数格点");
+    expect(boundary_magnitude <=
+               static_cast<double>(config.max_counts_per_frame),
+           "非整数二维上限在量化后仍不得因 float sqrt 舍入越界；"
+           "magnitude/max=" + std::to_string(boundary_magnitude) + "/" +
+               std::to_string(config.max_counts_per_frame));
+
+    config.max_counts_per_frame = 0.75f;
+    Aim sub_count_aim(config);
+    AimFrame sub_count_frame = make_frame(
+        1, captured_at + std::chrono::milliseconds(10));
+    sub_count_frame.control_at =
+        sub_count_frame.captured_at + std::chrono::milliseconds(1);
+    sub_count_frame.lock_active = true;
+    sub_count_frame.detections = {body(180.0f, 161.0f)};
+    const AimResult sub_count = sub_count_aim.process(sub_count_frame);
+    expect(sub_count.has_target && sub_count.command.dx_counts == 0 &&
+               sub_count.command.dy_counts == 0,
+           "小于 1 count 的合法二维上限不得放行任一非零整数命令");
+}
+
 void test_source_pixel_scale_controls_mouse_counts() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -9765,6 +9977,9 @@ int main() {
     test_head_only_uses_parameterized_aim_region();
     test_short_loss_keeps_track_id();
     test_command_limit_and_reset();
+    test_tracking_deadzone_keeps_x_independent_of_y_error();
+    test_tracking_vector_limit_preserves_y_when_x_saturates();
+    test_tracking_vector_limit_respects_continuous_and_integer_boundary();
     test_source_pixel_scale_controls_mouse_counts();
     test_global_head_body_assignment();
     test_head_body_normalized_aim_stays_stable();

@@ -389,6 +389,49 @@ void clamp_vector(float& x, float& y, float maximum) noexcept {
     y *= scale;
 }
 
+void clamp_tracking_vector_preserving_y(
+        float& x, float& y, float maximum) noexcept {
+    const double limit = std::max(0.0, static_cast<double>(maximum));
+    const float float_limit = static_cast<float>(limit);
+    y = std::clamp(y, -float_limit, float_limit);
+    const double y_value = static_cast<double>(y);
+    const double x_budget = std::sqrt(std::max(
+        0.0, limit * limit - y_value * y_value));
+    float x_limit = static_cast<float>(x_budget);
+    // double 预算转回控制状态的 float 后可能向圆盘外舍入；此时只把
+    // 实验轴 X 向零收一个 ULP，Y candidate 继续保持原值。
+    if (x_limit > 0.0f &&
+        std::hypot(static_cast<double>(x_limit), y_value) > limit) {
+        x_limit = std::nextafter(x_limit, 0.0f);
+    }
+    x = std::clamp(x, -x_limit, x_limit);
+}
+
+void clamp_tracking_command_preserving_y(
+        int& x, int& y, float maximum) noexcept {
+    const double limit = std::max(0.0, static_cast<double>(maximum));
+    const double integer_maximum =
+        static_cast<double>(std::numeric_limits<int>::max());
+    const auto floor_to_int = [&](double value) {
+        return value >= integer_maximum
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(std::floor(value));
+    };
+    const int y_limit = floor_to_int(limit);
+    y = std::clamp(y, -y_limit, y_limit);
+    const double y_value = static_cast<double>(y);
+    const double x_budget = std::sqrt(std::max(
+        0.0, limit * limit - y_value * y_value));
+    int x_limit = floor_to_int(x_budget);
+    // sqrt 紧邻整数格点时可能向上舍入；最终以整数欧氏合同再校正一次，
+    // 只收缩实验轴 X，不触碰已经冻结的 Y。
+    if (x_limit > 0 &&
+        std::hypot(static_cast<double>(x_limit), y_value) > limit) {
+        --x_limit;
+    }
+    x = std::clamp(x, -x_limit, x_limit);
+}
+
 void move_vector_toward(float target_x, float target_y,
                         float maximum_delta,
                         float& current_x, float& current_y) noexcept {
@@ -3554,7 +3597,17 @@ struct Aim::Impl {
             : 0.0f;
         const float regularized_error_scale =
             active_error_scale * active_error_scale * active_error_scale;
-        const float proportional_x = error_x * regularized_error_scale *
+        // X 是本轮唯一实验轴：它的死区比例不再被起跳/腾空的 Y 误差
+        // 放大；Y 仍逐位复用既有径向 scale 和后续全部控制状态。
+        const float x_error_magnitude = std::fabs(error_x);
+        const float active_x_error_scale = x_error_magnitude > 0.0f
+            ? std::max(
+                0.0f,
+                1.0f - config.deadzone_pixels / x_error_magnitude)
+            : 0.0f;
+        const float regularized_x_error_scale = active_x_error_scale *
+            active_x_error_scale * active_x_error_scale;
+        const float proportional_x = error_x * regularized_x_error_scale *
             config.counts_per_pixel_x;
         const float proportional_y = error_y * regularized_error_scale *
             config.counts_per_pixel_y;
@@ -3589,7 +3642,8 @@ struct Aim::Impl {
         const float unconstrained_y = proportional_y + feedforward_y;
         float desired_x = unconstrained_x;
         float desired_y = unconstrained_y;
-        clamp_vector(desired_x, desired_y, config.max_counts_per_frame);
+        clamp_tracking_vector_preserving_y(
+            desired_x, desired_y, config.max_counts_per_frame);
         // Åström/Rundqwist 的 tracking anti-windup：执行器实际可接受向量与
         // 线性 PI 请求之差连续回写状态。这里唯一硬上限就是既有物理向量
         // 上限，不再另建 pending、probe、相位或速度门。
@@ -3667,7 +3721,8 @@ struct Aim::Impl {
         filter_axis(desired_x, error_x, filtered_x);
         filter_axis(desired_y, error_y, filtered_y);
         controller_initialized = true;
-        clamp_vector(filtered_x, filtered_y, config.max_counts_per_frame);
+        clamp_tracking_vector_preserving_y(
+            filtered_x, filtered_y, config.max_counts_per_frame);
         // 导数状态不回写 PI、anti-windup 或既有 smoothing。只消费朝零
         // closing slope，并从当前误差同向的 X 请求中连续扣减；扣减预算
         // 不超过该同向余量，因此滤波残留不能自行产生反向命令。
@@ -3729,18 +3784,9 @@ struct Aim::Impl {
         command.captured_at = frame.captured_at;
         command.dx_counts = static_cast<int>(std::lround(shaped_x));
         command.dy_counts = static_cast<int>(std::lround(shaped_y));
-        while (std::hypot(static_cast<float>(command.dx_counts),
-                          static_cast<float>(command.dy_counts)) >
-               config.max_counts_per_frame) {
-            if (std::abs(command.dx_counts) >=
-                std::abs(command.dy_counts) && command.dx_counts != 0) {
-                command.dx_counts += command.dx_counts > 0 ? -1 : 1;
-            } else if (command.dy_counts != 0) {
-                command.dy_counts += command.dy_counts > 0 ? -1 : 1;
-            } else {
-                break;
-            }
-        }
+        clamp_tracking_command_preserving_y(
+            command.dx_counts, command.dy_counts,
+            config.max_counts_per_frame);
         diagnostics.quantization_zero_x =
             command.dx_counts == 0 && std::fabs(desired_x) > 0.001f;
         diagnostics.deadzone_quiet =
