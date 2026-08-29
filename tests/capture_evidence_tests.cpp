@@ -331,7 +331,7 @@ void test_invalid_or_incomplete_capture_never_publishes() {
            "帧数不足不得发布最终证据目录");
 }
 
-void test_transient_directory_rename_lock_is_retried() {
+void test_multi_second_directory_rename_lock_is_retried() {
     TemporaryDirectory temporary;
     expect(temporary.valid(), "必须创建 transient rename 测试临时目录");
     const CaptureEvidenceConfig config = test_config(temporary, 1);
@@ -361,7 +361,7 @@ void test_transient_directory_rename_lock_is_retried() {
                     pending / "manifest.json", filesystem_error) &&
                 !filesystem_error) {
                 manifest_observed = true;
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                std::this_thread::sleep_for(std::chrono::milliseconds(2500));
                 rename_lock.release();
                 return;
             }
@@ -376,7 +376,7 @@ void test_transient_directory_rename_lock_is_retried() {
     expect(manifest_observed,
            "transient rename 测试必须观察到完整 incoming manifest");
     expect(published,
-           "短暂目录 rename 冲突释放后必须在同一次 finish 原子发布：" +
+           "多秒目录 rename 冲突释放后必须在同一次 finish 原子发布：" +
                error);
     expect(std::filesystem::is_regular_file(
                config.output_directory / "manifest.json"),
@@ -471,7 +471,7 @@ void test_advertised_maximum_standard_roi_frames_are_recordable() {
 int main() {
     test_lossless_atomic_publication_and_identity();
     test_invalid_or_incomplete_capture_never_publishes();
-    test_transient_directory_rename_lock_is_retried();
+    test_multi_second_directory_rename_lock_is_retried();
     test_directory_publish_retry_never_overwrites_appearing_final();
     test_advertised_maximum_standard_roi_frames_are_recordable();
     if (failures != 0) {

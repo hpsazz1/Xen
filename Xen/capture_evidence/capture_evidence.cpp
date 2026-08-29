@@ -237,7 +237,7 @@ bool publish_directory_with_retry(
         const std::filesystem::path& pending,
         const std::filesystem::path& final,
         std::string& error) {
-    constexpr auto kBudget = std::chrono::seconds(2);
+    constexpr auto kBudget = std::chrono::seconds(30);
     constexpr auto kMaximumDelay = std::chrono::milliseconds(100);
     auto delay = std::chrono::milliseconds(10);
     const auto started = std::chrono::steady_clock::now();
