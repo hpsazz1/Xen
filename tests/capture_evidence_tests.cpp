@@ -1,5 +1,13 @@
 #include "capture_evidence/capture_evidence.h"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 
@@ -8,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -44,6 +53,49 @@ public:
 private:
     std::filesystem::path path_;
     bool valid_ = false;
+};
+
+std::filesystem::path find_unique_pending_directory(
+        const std::filesystem::path& parent,
+        const std::string& final_name) {
+    const std::string prefix = "." + final_name + ".incoming-";
+    std::filesystem::path result;
+    std::size_t count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(parent)) {
+        if (!entry.is_directory() ||
+            !entry.path().filename().string().starts_with(prefix)) {
+            continue;
+        }
+        result = entry.path();
+        ++count;
+    }
+    return count == 1 ? result : std::filesystem::path{};
+}
+
+class DirectoryRenameLock {
+public:
+    explicit DirectoryRenameLock(const std::filesystem::path& directory)
+        : handle_(CreateFileW(
+              directory.c_str(), FILE_LIST_DIRECTORY,
+              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+              FILE_FLAG_BACKUP_SEMANTICS, nullptr)) {}
+
+    ~DirectoryRenameLock() { release(); }
+
+    DirectoryRenameLock(const DirectoryRenameLock&) = delete;
+    DirectoryRenameLock& operator=(const DirectoryRenameLock&) = delete;
+
+    bool valid() const noexcept { return handle_ != INVALID_HANDLE_VALUE; }
+
+    void release() noexcept {
+        if (handle_ == INVALID_HANDLE_VALUE) return;
+        const HANDLE handle = handle_;
+        handle_ = INVALID_HANDLE_VALUE;
+        CloseHandle(handle);
+    }
+
+private:
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
 };
 
 void write_file(const std::filesystem::path& path,
@@ -279,6 +331,117 @@ void test_invalid_or_incomplete_capture_never_publishes() {
            "帧数不足不得发布最终证据目录");
 }
 
+void test_transient_directory_rename_lock_is_retried() {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), "必须创建 transient rename 测试临时目录");
+    const CaptureEvidenceConfig config = test_config(temporary, 1);
+
+    capture_evidence::CaptureEvidenceRecorder recorder;
+    std::string error;
+    expect(recorder.start(config, error),
+           "transient rename 测试必须启动：" + error);
+    expect(recorder.record(test_frame(1, 7), error),
+           "transient rename 测试必须录入一帧：" + error);
+
+    const auto pending = find_unique_pending_directory(
+        config.output_directory.parent_path(),
+        config.output_directory.filename().string());
+    expect(!pending.empty(), "必须找到唯一 Recorder incoming 目录");
+    DirectoryRenameLock rename_lock(pending);
+    expect(rename_lock.valid(),
+           "必须建立不共享 FILE_SHARE_DELETE 的目录锁");
+
+    bool manifest_observed = false;
+    std::thread releaser([&] {
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(5);
+        std::error_code filesystem_error;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (std::filesystem::is_regular_file(
+                    pending / "manifest.json", filesystem_error) &&
+                !filesystem_error) {
+                manifest_observed = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                rename_lock.release();
+                return;
+            }
+            filesystem_error.clear();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        rename_lock.release();
+    });
+
+    const bool published = recorder.finish(error);
+    releaser.join();
+    expect(manifest_observed,
+           "transient rename 测试必须观察到完整 incoming manifest");
+    expect(published,
+           "短暂目录 rename 冲突释放后必须在同一次 finish 原子发布：" +
+               error);
+    expect(std::filesystem::is_regular_file(
+               config.output_directory / "manifest.json"),
+           "重试成功后最终 manifest 必须存在");
+    expect(!std::filesystem::exists(pending),
+           "重试成功后 incoming 目录必须消失");
+}
+
+void test_directory_publish_retry_never_overwrites_appearing_final() {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), "必须创建 final 竞争测试临时目录");
+    const CaptureEvidenceConfig config = test_config(temporary, 1);
+
+    capture_evidence::CaptureEvidenceRecorder recorder;
+    std::string error;
+    expect(recorder.start(config, error),
+           "final 竞争测试必须启动：" + error);
+    expect(recorder.record(test_frame(1, 9), error),
+           "final 竞争测试必须录入一帧：" + error);
+
+    const auto pending = find_unique_pending_directory(
+        config.output_directory.parent_path(),
+        config.output_directory.filename().string());
+    expect(!pending.empty(), "final 竞争测试必须找到唯一 incoming 目录");
+    DirectoryRenameLock rename_lock(pending);
+    expect(rename_lock.valid(), "final 竞争测试必须建立目录锁");
+
+    const auto sentinel = config.output_directory / "sentinel.txt";
+    bool manifest_observed = false;
+    std::thread competitor([&] {
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(5);
+        std::error_code filesystem_error;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (std::filesystem::is_regular_file(
+                    pending / "manifest.json", filesystem_error) &&
+                !filesystem_error) {
+                manifest_observed = true;
+                std::filesystem::create_directories(
+                    config.output_directory, filesystem_error);
+                if (!filesystem_error) {
+                    write_file(sentinel, "do-not-overwrite");
+                }
+                rename_lock.release();
+                return;
+            }
+            filesystem_error.clear();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        rename_lock.release();
+    });
+
+    const bool published = recorder.finish(error);
+    competitor.join();
+    expect(manifest_observed,
+           "final 竞争测试必须观察到完整 incoming manifest");
+    expect(!published &&
+               error.find("最终证据目录在发布期间出现，拒绝覆盖") !=
+                   std::string::npos,
+           "重试期间出现 final 时必须明确拒绝覆盖：" + error);
+    expect(std::filesystem::is_regular_file(sentinel) &&
+               read_file(sentinel) == "do-not-overwrite",
+           "重试期间出现的 final sentinel 必须逐字节保持不变");
+}
+
 void test_advertised_maximum_standard_roi_frames_are_recordable() {
     TemporaryDirectory temporary;
     expect(temporary.valid(), "必须创建最大帧数测试临时目录");
@@ -308,6 +471,8 @@ void test_advertised_maximum_standard_roi_frames_are_recordable() {
 int main() {
     test_lossless_atomic_publication_and_identity();
     test_invalid_or_incomplete_capture_never_publishes();
+    test_transient_directory_rename_lock_is_retried();
+    test_directory_publish_retry_never_overwrites_appearing_final();
     test_advertised_maximum_standard_roi_frames_are_recordable();
     if (failures != 0) {
         std::cerr << failures << " 项 Capture evidence 测试失败。\n";

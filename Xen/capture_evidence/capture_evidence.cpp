@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 #include <opencv2/imgcodecs.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -21,6 +22,7 @@
 #include <new>
 #include <span>
 #include <sstream>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -218,6 +220,67 @@ bool write_text_file(const std::filesystem::path& path,
         return false;
     }
     return true;
+}
+
+bool transient_directory_publish_error(
+        const std::error_code& error) noexcept {
+    const int value = error.value();
+    return value == ERROR_ACCESS_DENIED ||
+        value == ERROR_SHARING_VIOLATION ||
+        value == ERROR_LOCK_VIOLATION;
+}
+
+// PNG、哈希和 manifest 已完成后，Windows 仍可能因缩略图、扫描器或远端
+// 读取者的短暂非 delete-share 句柄拒绝最终目录 rename。只在这三个可恢复
+// 错误上有限等待；每次尝试前重新确认 final 不存在，始终拒绝覆盖既有证据。
+bool publish_directory_with_retry(
+        const std::filesystem::path& pending,
+        const std::filesystem::path& final,
+        std::string& error) {
+    constexpr auto kBudget = std::chrono::seconds(2);
+    constexpr auto kMaximumDelay = std::chrono::milliseconds(100);
+    auto delay = std::chrono::milliseconds(10);
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + kBudget;
+    std::uint32_t attempts = 0;
+
+    while (true) {
+        std::error_code exists_error;
+        const bool final_exists = std::filesystem::exists(final, exists_error);
+        if (exists_error) {
+            set_error(error, "无法确认最终证据目录不存在：" +
+                exists_error.message());
+            return false;
+        }
+        if (final_exists) {
+            set_error(error, "最终证据目录在发布期间出现，拒绝覆盖：" +
+                path_to_utf8(final));
+            return false;
+        }
+
+        std::error_code rename_error;
+        std::filesystem::rename(pending, final, rename_error);
+        ++attempts;
+        if (!rename_error) return true;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (!transient_directory_publish_error(rename_error) ||
+            now >= deadline) {
+            const auto elapsed = std::chrono::duration_cast<
+                std::chrono::milliseconds>(now - started).count();
+            set_error(error,
+                "无法完成证据目录原子发布：" + rename_error.message() +
+                "；code=" + std::to_string(rename_error.value()) +
+                "；attempts=" + std::to_string(attempts) +
+                "；elapsed_ms=" + std::to_string(elapsed) +
+                "；incoming=" + path_to_utf8(pending) +
+                "；final=" + path_to_utf8(final));
+            return false;
+        }
+
+        std::this_thread::sleep_for(delay);
+        delay = std::min(delay * 2, kMaximumDelay);
+    }
 }
 
 } // namespace
@@ -548,12 +611,8 @@ bool CaptureEvidenceRecorder::finish(std::string& error) noexcept {
                 filesystem_error.message());
             return false;
         }
-        std::filesystem::rename(
-            impl_->pending_directory, impl_->final_directory,
-            filesystem_error);
-        if (filesystem_error) {
-            set_error(error, "无法完成证据目录原子发布：" +
-                filesystem_error.message());
+        if (!publish_directory_with_retry(
+                impl_->pending_directory, impl_->final_directory, error)) {
             return false;
         }
         impl_->pending_directory.clear();
