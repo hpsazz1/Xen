@@ -531,8 +531,72 @@ namespace XenAimManualPixelFixture {
         "ndi runtime"
     $pixelBinding = Join-Path $root "obs-source-binding.json"
     Write-Utf8 $pixelBinding (@'
-{"schema_version":2,"evidence_type":"obs_source_binding","physical_output_capability":false,"ndi_main_output":{"enabled":true,"name":"Xen-ROI-320"}}
+{"schema_version":2,"evidence_type":"obs_source_binding","binding_mode":"real_game","physical_output_capability":false,"state_basis":"obs_saved_scene_collection","ndi_main_output":{"enabled":true,"name":"Xen-ROI-320"},"selected_source":{"name":"主画面","uuid":"source-main","id":"monitor_capture","monitor_id":"fixture-monitor-2560x1440","capture_cursor":false,"crop_filter":{"id":"crop_filter","enabled":true,"settings":{"left":1120,"top":560,"cx":320,"cy":320,"relative":false}}},"program_geometry":{"mapping":"monitor_crop_filter_1_to_1","source_width":2560,"source_height":1440,"roi_width":320,"roi_height":320,"roi_x":1120,"roi_y":560},"selected_scene_item":{"source_uuid":"source-main","id":4,"visible":true,"rot":0.0,"align":5,"bounds_type":0,"bounds_crop":false,"crop_left":0,"crop_top":0,"crop_right":0,"crop_bottom":0,"pos":{"x":0.0,"y":0.0},"scale":{"x":1.0,"y":1.0}},"candidate_visibility":[{"name":"主画面","source_uuid":"source-main","scene_item_id":4,"visible":true}]}
 '@)
+    $validPixelBindingText = Get-Content -LiteralPath $pixelBinding -Raw `
+        -Encoding UTF8
+    # 公开 red：真实 KMBOX 人工验收不得绑定固定媒体回放。固定媒体可用于
+    # output-off 工具诊断，但不能代替实际游戏画面进入正式 Prepare。
+    $fixedMediaBinding = Join-Path $root "obs-source-binding-fixed-media.json"
+    Write-Utf8 $fixedMediaBinding (@'
+{"schema_version":2,"evidence_type":"obs_source_binding","binding_mode":"fixed_media","physical_output_capability":false,"ndi_main_output":{"enabled":true,"name":"Xen-ROI-320"}}
+'@)
+    $fixedMediaTaskRoot = Join-Path $root "pixel-sidecar-fixed-media-task"
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $fixedMediaPrepareOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -RequireSourceTiming `
+            -CapturePixelEvidence `
+            -PixelEvidenceToolRoot $pixelToolRoot `
+            -PixelEvidenceBindingPath $fixedMediaBinding `
+            -PackageRoot $published -RunDirectory $fixedMediaTaskRoot 2>&1)
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    $fixedMediaPrepareText = $fixedMediaPrepareOutput -join "`n"
+    if ($LASTEXITCODE -eq 0 -or
+        (Test-Path -LiteralPath $fixedMediaTaskRoot) -or
+        $fixedMediaPrepareText -notlike
+            "*OBS source binding 必须绑定实际游戏主画面：binding_mode=real_game*") {
+        throw "正式人工验收必须在公开 Prepare seam 拒绝固定媒体 OBS binding。"
+    }
+    # 可变红回归：不能只把 fixed_media 标签改成 real_game 就进入正式 Run。
+    $forgedRealGameBinding = Join-Path $root `
+        "obs-source-binding-forged-real-game.json"
+    Write-Utf8 $forgedRealGameBinding (@'
+{"schema_version":2,"evidence_type":"obs_source_binding","binding_mode":"real_game","physical_output_capability":false,"ndi_main_output":{"enabled":true,"name":"Xen-ROI-320"},"selected_source":{"name":"原地跳跃","id":"ffmpeg_source"},"program_geometry":{"mapping":"center_crop_1_to_1"}}
+'@)
+    $forgedRealGameTaskRoot = Join-Path $root `
+        "pixel-sidecar-forged-real-game-task"
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $forgedRealGamePrepareOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -RequireSourceTiming `
+            -CapturePixelEvidence `
+            -PixelEvidenceToolRoot $pixelToolRoot `
+            -PixelEvidenceBindingPath $forgedRealGameBinding `
+            -PackageRoot $published `
+            -RunDirectory $forgedRealGameTaskRoot 2>&1)
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    $forgedRealGamePrepareText = $forgedRealGamePrepareOutput -join "`n"
+    if ($LASTEXITCODE -eq 0 -or
+        (Test-Path -LiteralPath $forgedRealGameTaskRoot) -or
+        $forgedRealGamePrepareText -notlike
+            "*OBS source binding 实际游戏几何合同不匹配*") {
+        throw "正式人工验收必须拒绝只改 real_game 标签的固定媒体 binding。"
+    }
     $pixelTaskRoot = Join-Path $root "pixel-sidecar-task"
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
@@ -553,6 +617,7 @@ namespace XenAimManualPixelFixture {
     $pixelTaskMarkdown = Get-Content -LiteralPath `
         (Join-Path $pixelTaskRoot "TASK.md") -Raw -Encoding utf8
     if (-not [bool]$pixelTask.pixel_evidence.enabled -or
+        [string]$pixelTask.pixel_evidence.binding_mode -ne "real_game" -or
         [int]$pixelTask.pixel_evidence.frames -ne 2400 -or
         [int]$pixelTask.pixel_evidence.max_seconds -ne 30 -or
         [string]$pixelTask.pixel_evidence.output_relative_path -ne
@@ -632,6 +697,8 @@ namespace XenAimManualPixelFixture {
         }
         frames = $pixelFrames
     }
+    $validPixelManifestBindingHash =
+        [string]$pixelManifest.source_binding.sha256
     Write-Utf8 (Join-Path $pixelOutputRoot "manifest.json") `
         (($pixelManifest | ConvertTo-Json -Depth 5) + "`n")
     Copy-Item -LiteralPath $pixelBinding -Destination `
@@ -667,38 +734,60 @@ namespace XenAimManualPixelFixture {
         throw "新 sidecar 合同缺 attempts 证据时 Recover 必须 fail-closed。"
     }
 
-    # 模拟 max_attempts 字段加入前的历史 task，证明旧 Run 仍可按 manifest
-    # 离线 Recover；新任务不得走这条兼容路径。
+    # 模拟 binding_mode/max_attempts 字段加入前的历史 task 和内嵌 binding，
+    # 证明旧 Run 仍可按 manifest 离线 Recover；新 Prepare 不得走兼容路径。
     [void]$pixelTask.pixel_evidence.PSObject.Properties.Remove("max_attempts")
     [void]$pixelTask.pixel_evidence.PSObject.Properties.Remove(
         "runtime_alignment")
-    Write-Utf8 (Join-Path $pixelTaskRoot "task.json") `
-        (($pixelTask | ConvertTo-Json -Depth 10) + "`n")
-    $pixelLegacyRecoverOutput = @(& powershell.exe -NoProfile `
-        -ExecutionPolicy Bypass -File `
-        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
-        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
-        -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
-        -Profile tracking -RequireSourceTiming `
-        -CapturePixelEvidence `
-        -PixelEvidenceToolRoot $pixelToolRoot `
-        -PixelEvidenceBindingPath $pixelBinding `
-        -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
-        -PackageRoot $published -RunDirectory $pixelTaskRoot 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        $pixelLegacyRecoverOutput | ForEach-Object { Write-Host $_ }
-        throw "旧 sidecar task 的兼容 Recover 失败。"
-    }
-    $pixelLegacyRecoveredSummary = Get-Content -LiteralPath `
-        (Join-Path $pixelTaskRoot "automatic-summary.json") `
-        -Raw -Encoding UTF8 | ConvertFrom-Json
-    if (-not [bool]$pixelLegacyRecoveredSummary.pixel_evidence.gate_passed -or
-        [string]$pixelLegacyRecoveredSummary.pixel_evidence.diagnostic -ne
-            "VALID" -or
-        [int]$pixelLegacyRecoveredSummary.pixel_evidence.recorded_frames -ne
-            2400 -or
-        [bool]$pixelLegacyRecoveredSummary.automatic_complete) {
-        throw "旧 task 兼容 Recover 必须保留有效像素 manifest，但不得覆盖 Runtime timing 失败。"
+    [void]$pixelTask.pixel_evidence.PSObject.Properties.Remove("binding_mode")
+    $legacyBinding = $validPixelBindingText | ConvertFrom-Json
+    [void]$legacyBinding.PSObject.Properties.Remove("binding_mode")
+    $legacyBindingText = ($legacyBinding | ConvertTo-Json -Depth 12) + "`n"
+    try {
+        Write-Utf8 $pixelBinding $legacyBindingText
+        Write-Utf8 (Join-Path $pixelOutputRoot "source-binding.json") `
+            $legacyBindingText
+        $legacyBindingEvidence = Get-Item -LiteralPath $pixelBinding
+        $legacyBindingHash = (Get-FileHash -LiteralPath $pixelBinding `
+            -Algorithm SHA256).Hash
+        $pixelTask.pixel_evidence.source_binding.length =
+            [long]$legacyBindingEvidence.Length
+        $pixelTask.pixel_evidence.source_binding.sha256 = $legacyBindingHash
+        $pixelManifest.source_binding.sha256 = $legacyBindingHash
+        Write-Utf8 (Join-Path $pixelOutputRoot "manifest.json") `
+            (($pixelManifest | ConvertTo-Json -Depth 5) + "`n")
+        Write-Utf8 (Join-Path $pixelTaskRoot "task.json") `
+            (($pixelTask | ConvertTo-Json -Depth 10) + "`n")
+        $pixelLegacyRecoverOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -RequireSourceTiming `
+            -CapturePixelEvidence `
+            -PixelEvidenceToolRoot $pixelToolRoot `
+            -PixelEvidenceBindingPath $pixelBinding `
+            -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+            -PackageRoot $published -RunDirectory $pixelTaskRoot 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $pixelLegacyRecoverOutput | ForEach-Object { Write-Host $_ }
+            throw "旧 sidecar task 的兼容 Recover 失败。"
+        }
+        $pixelLegacyRecoveredSummary = Get-Content -LiteralPath `
+            (Join-Path $pixelTaskRoot "automatic-summary.json") `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not [bool]$pixelLegacyRecoveredSummary.pixel_evidence.gate_passed -or
+            [string]$pixelLegacyRecoveredSummary.pixel_evidence.diagnostic -ne
+                "VALID" -or
+            [int]$pixelLegacyRecoveredSummary.pixel_evidence.recorded_frames -ne
+                2400 -or
+            [bool]$pixelLegacyRecoveredSummary.automatic_complete) {
+            throw "旧 task 兼容 Recover 必须保留有效像素 manifest，但不得覆盖 Runtime timing 失败。"
+        }
+    } finally {
+        Write-Utf8 $pixelBinding $validPixelBindingText
+        $pixelManifest.source_binding.sha256 =
+            $validPixelManifestBindingHash
     }
 
     $pixelLifecycleRoot = Join-Path $root "pixel-sidecar-lifecycle-task"
@@ -928,9 +1017,12 @@ namespace XenAimManualPixelFixture {
         (Join-Path $pixelRecordingLossRoot `
             "pixel-evidence-attempts.json") `
         -Raw -Encoding UTF8 | ConvertFrom-Json
-    $recordingLossLastAttempt =
-        @($recordingLossAttemptEvidence.attempts)[-1]
-    if ([bool]$recordingLossSummary.pixel_evidence.gate_passed -or
+    $recordingLossAttempts = @($recordingLossAttemptEvidence.attempts)
+    $recordingLossLastAttempt = if ($recordingLossAttempts.Count -gt 0) {
+        $recordingLossAttempts[-1]
+    } else { $null }
+    if ($recordingLossAttempts.Count -eq 0 -or
+        [bool]$recordingLossSummary.pixel_evidence.gate_passed -or
         [string]$recordingLossSummary.pixel_evidence.execution_error `
             -notmatch 'Runtime aim-lock activation' -or
         [bool]$recordingLossAttemptEvidence.runtime_alignment.gate_passed -or
@@ -1210,7 +1302,7 @@ namespace XenAimManualPixelFixture {
         $embeddedPixelBinding -Raw -Encoding UTF8
     try {
         Write-Utf8 $embeddedPixelBinding (@'
-{"schema_version":2,"evidence_type":"obs_source_binding","physical_output_capability":false,"ndi_main_output":{"enabled":true,"name":"Wrong-Output"}}
+{"schema_version":2,"evidence_type":"obs_source_binding","binding_mode":"real_game","physical_output_capability":false,"ndi_main_output":{"enabled":true,"name":"Wrong-Output"}}
 '@)
         $bindingMismatchRecoverOutput = @(& powershell.exe -NoProfile `
             -ExecutionPolicy Bypass -File `

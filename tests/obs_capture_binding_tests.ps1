@@ -168,6 +168,73 @@ function Write-SceneCollection(
     Write-Utf8NoBom $Path ($document | ConvertTo-Json -Depth 12)
 }
 
+function Write-RealGameSceneCollection([string]$Path) {
+    $document = [ordered]@{
+        name = "实际游戏集合"
+        current_scene = "主画面裁剪输出"
+        current_program_scene = "主画面裁剪输出"
+        resolution = [ordered]@{ x = 320; y = 320 }
+        sources = @(
+            [ordered]@{
+                name = "主画面"
+                uuid = "source-main"
+                id = "monitor_capture"
+                settings = [ordered]@{
+                    monitor_id = "fixture-monitor-2560x1440"
+                    capture_cursor = $false
+                }
+                filters = @(
+                    [ordered]@{
+                        name = "裁剪/填充"
+                        uuid = "filter-crop"
+                        id = "crop_filter"
+                        enabled = $true
+                        settings = [ordered]@{
+                            left = 1120
+                            top = 560
+                            cx = 320
+                            cy = 320
+                            relative = $false
+                        }
+                    }
+                )
+            },
+            [ordered]@{
+                name = "主画面裁剪输出"
+                uuid = "scene-main"
+                id = "scene"
+                settings = [ordered]@{
+                    items = @(
+                        [ordered]@{
+                            name = "主画面"
+                            source_uuid = "source-main"
+                            visible = $true
+                            locked = $true
+                            rot = 0.0
+                            scale_ref = [ordered]@{ x = 2560.0; y = 1440.0 }
+                            align = 5
+                            bounds_type = 0
+                            bounds_align = 0
+                            bounds_crop = $false
+                            crop_left = 0
+                            crop_top = 0
+                            crop_right = 0
+                            crop_bottom = 0
+                            id = 4
+                            pos = [ordered]@{ x = 0.0; y = 0.0 }
+                            scale = [ordered]@{ x = 1.0; y = 1.0 }
+                            scale_filter = "disable"
+                            blend_method = "default"
+                            blend_type = "normal"
+                        }
+                    )
+                }
+            }
+        )
+    }
+    Write-Utf8NoBom $Path ($document | ConvertTo-Json -Depth 12)
+}
+
 $root = [IO.Path]::GetFullPath($TestRoot)
 if ($root -match '^[A-Za-z]:\\?$' -or $root -eq '\') {
     throw "拒绝在文件系统根目录执行 OBS binding 测试"
@@ -217,6 +284,7 @@ OutputCY=320
         ConvertFrom-Json
     if ($binding.schema_version -ne 2 -or
         $binding.evidence_type -ne "obs_source_binding" -or
+        $binding.binding_mode -ne "fixed_media" -or
         $binding.physical_output_capability -ne $false -or
         $binding.scene_collection_sha256 -ne
             (Get-TestFileSha256 $collection) -or
@@ -242,6 +310,93 @@ OutputCY=320
         $binding.selected_scene_item.scale.x -ne 1.0 -or
         @($binding.candidate_visibility | Where-Object { $_.visible }).Count -ne 1) {
         throw "合法 OBS binding 的身份、安全声明或变换不正确"
+    }
+
+    # 公开 red：正式人工验收绑定的是实际游戏 monitor_capture，经源级
+    # crop_filter 输出 320x320 ROI；不能继续复用固定媒体的场景位移合同。
+    $realGameCollection = Join-Path $obsConfigRoot `
+        "basic\scenes\real-game.json"
+    Write-RealGameSceneCollection $realGameCollection
+    $realGameUserConfig = Join-Path $obsConfigRoot "real-game-user.ini"
+    Write-ObsUserConfig $realGameUserConfig "未命名" "real-game.json"
+    $realGameOutput = Join-Path $root "real-game-binding.json"
+    & $BindingScript `
+        -BindingMode RealGame `
+        -SceneCollectionPath $realGameCollection `
+        -ObsUserConfigPath $realGameUserConfig `
+        -ObsProfileConfigPath $obsProfileConfig `
+        -ExpectedNdiOutputName "Xen-ROI-320" `
+        -SceneName "主画面裁剪输出" `
+        -SourceNames @("主画面") `
+        -SelectedSourceName "主画面" `
+        -ExpectedSourceWidth 2560 `
+        -ExpectedSourceHeight 1440 `
+        -ExpectedRoiWidth 320 `
+        -ExpectedRoiHeight 320 `
+        -OutputPath $realGameOutput
+    $realGameBinding = Get-Content -LiteralPath $realGameOutput -Raw `
+        -Encoding UTF8 | ConvertFrom-Json
+    if ($realGameBinding.binding_mode -ne "real_game" -or
+        $realGameBinding.program_geometry.mapping -ne
+            "monitor_crop_filter_1_to_1" -or
+        $realGameBinding.selected_source.id -ne "monitor_capture" -or
+        $realGameBinding.selected_source.monitor_id -ne
+            "fixture-monitor-2560x1440" -or
+        $realGameBinding.selected_source.capture_cursor -ne $false -or
+        $realGameBinding.selected_source.crop_filter.settings.left -ne 1120 -or
+        $realGameBinding.selected_source.crop_filter.settings.top -ne 560 -or
+        $realGameBinding.selected_source.crop_filter.settings.cx -ne 320 -or
+        $realGameBinding.selected_source.crop_filter.settings.cy -ne 320 -or
+        $realGameBinding.selected_source.crop_filter.settings.relative -ne
+            $false -or
+        $realGameBinding.selected_scene_item.pos.x -ne 0.0 -or
+        $realGameBinding.selected_scene_item.pos.y -ne 0.0) {
+        throw "实际游戏 OBS binding 没有绑定 monitor、crop_filter 或 Program 几何。"
+    }
+
+    # 可变红回归：实际游戏 crop_filter 左边界只差一个像素也必须在公开
+    # exporter seam 失败，且不得发布看似合法的 binding。
+    $wrongRealGameCrop = Join-Path $obsConfigRoot `
+        "basic\scenes\real-game-wrong-crop.json"
+    $wrongRealGameCropDocument = Get-Content -LiteralPath `
+        $realGameCollection -Raw -Encoding UTF8 | ConvertFrom-Json
+    (($wrongRealGameCropDocument.sources |
+        Where-Object { $_.name -eq "主画面" }).filters |
+        Where-Object { $_.id -eq "crop_filter" }).settings.left = 1119
+    Write-Utf8NoBom $wrongRealGameCrop `
+        ($wrongRealGameCropDocument | ConvertTo-Json -Depth 12)
+    $wrongRealGameCropUserConfig = Join-Path $obsConfigRoot `
+        "real-game-wrong-crop-user.ini"
+    Write-ObsUserConfig $wrongRealGameCropUserConfig "未命名" `
+        "real-game-wrong-crop.json"
+    $wrongRealGameCropOutput = Join-Path $root `
+        "real-game-wrong-crop-binding.json"
+    $wrongRealGameCropRejected = $false
+    $wrongRealGameCropError = ""
+    try {
+        & $BindingScript `
+            -BindingMode RealGame `
+            -SceneCollectionPath $wrongRealGameCrop `
+            -ObsUserConfigPath $wrongRealGameCropUserConfig `
+            -ObsProfileConfigPath $obsProfileConfig `
+            -ExpectedNdiOutputName "Xen-ROI-320" `
+            -SceneName "主画面裁剪输出" `
+            -SourceNames @("主画面") `
+            -SelectedSourceName "主画面" `
+            -ExpectedSourceWidth 2560 `
+            -ExpectedSourceHeight 1440 `
+            -ExpectedRoiWidth 320 `
+            -ExpectedRoiHeight 320 `
+            -OutputPath $wrongRealGameCropOutput
+    } catch {
+        $wrongRealGameCropRejected = $true
+        $wrongRealGameCropError = $_.Exception.Message
+    }
+    if (-not $wrongRealGameCropRejected -or
+        $wrongRealGameCropError -notlike
+            "RealGame crop_filter 必须是绝对 1:1 中心 ROI*" -or
+        (Test-Path -LiteralPath $wrongRealGameCropOutput)) {
+        throw "实际游戏 crop_filter 偏离中心 ROI 一像素时必须失败封闭。"
     }
 
     $existing = Get-Content -LiteralPath $output -Raw -Encoding UTF8

@@ -1,4 +1,6 @@
 ﻿param(
+    [ValidateSet("FixedMedia", "RealGame")]
+    [string]$BindingMode = "FixedMedia",
     [Parameter(Mandatory = $true)]
     [string]$SceneCollectionPath,
     [Parameter(Mandatory = $true)]
@@ -191,6 +193,10 @@ foreach ($sourceName in $SourceNames) {
 if (-not $sourceSet.Contains($SelectedSourceName)) {
     throw "所选源不在候选源集合中：$SelectedSourceName"
 }
+if ($BindingMode -eq "RealGame" -and
+    ($SourceNames.Count -ne 1 -or $SourceNames[0] -ne $SelectedSourceName)) {
+    throw "RealGame binding 必须且只能指定一个所选源：$SelectedSourceName"
+}
 if ($ExpectedSourceWidth -lt $ExpectedRoiWidth -or
     $ExpectedSourceHeight -lt $ExpectedRoiHeight -or
     ($ExpectedSourceWidth - $ExpectedRoiWidth) % 2 -ne 0 -or
@@ -312,9 +318,14 @@ foreach ($sourceName in $SourceNames) {
     $source = Get-UniqueMatch @($collection.sources) {
         $_.name -eq $sourceName
     } "OBS source '$sourceName'"
-    if ($source.id -ne "ffmpeg_source" -or
-        [string]::IsNullOrWhiteSpace([string]$source.settings.local_file)) {
-        throw "候选源必须是带 local_file 的 ffmpeg_source：$sourceName"
+    if ($BindingMode -eq "FixedMedia") {
+        if ($source.id -ne "ffmpeg_source" -or
+            [string]::IsNullOrWhiteSpace(
+                [string]$source.settings.local_file)) {
+            throw "候选源必须是带 local_file 的 ffmpeg_source：$sourceName"
+        }
+    } elseif ($source.id -ne "monitor_capture") {
+        throw "RealGame 所选源必须是 monitor_capture：$sourceName"
     }
     $item = Get-UniqueMatch $items {
         $_.name -eq $sourceName -and $_.source_uuid -eq $source.uuid
@@ -349,7 +360,12 @@ if (-not $selectedIsOnlyVisibleSceneItem) {
     throw ("OBS 保存的 Program Scene 必须只有所选源可见：" +
         "selected=$SelectedSourceName；visible=$visibleItemNames")
 }
-if ([double]$selectedItem.rot -ne 0.0 -or
+$selectedItemSnapshot = $selectedItem | Select-Object `
+    name, source_uuid, visible, locked, rot, scale_ref, align, bounds_type, `
+    bounds_align, bounds_crop, crop_left, crop_top, crop_right, crop_bottom, `
+    id, pos, pos_rel, scale, scale_rel, bounds, bounds_rel, scale_filter, `
+    blend_method, blend_type
+$commonItemGeometryInvalid = [double]$selectedItem.rot -ne 0.0 -or
     [int]$selectedItem.align -ne 5 -or
     [int]$selectedItem.bounds_type -ne 0 -or
     [bool]$selectedItem.bounds_crop -or
@@ -358,44 +374,99 @@ if ([double]$selectedItem.rot -ne 0.0 -or
     [int]$selectedItem.crop_right -ne 0 -or
     [int]$selectedItem.crop_bottom -ne 0 -or
     [double]$selectedItem.scale.x -ne 1.0 -or
-    [double]$selectedItem.scale.y -ne 1.0 -or
-    [double]$selectedItem.pos.x -ne -$expectedRoiX -or
-    [double]$selectedItem.pos.y -ne -$expectedRoiY) {
-    throw ("所选视频必须以 1:1、无旋转/二次裁剪方式对齐 Program 中心 ROI：" +
-        "expected_pos=(-$expectedRoiX,-$expectedRoiY)；" +
-        "actual_pos=($($selectedItem.pos.x),$($selectedItem.pos.y))")
-}
-
-$mediaIdentity = Get-StableFileIdentity `
-    ([string]$selectedSource.settings.local_file) "所选 OBS 媒体文件"
-$looping = Get-OptionalProperty $selectedSource.settings "looping"
-$restartOnActivate = Get-OptionalProperty `
-    $selectedSource.settings "restart_on_activate"
-if ($looping -ne $true -or $restartOnActivate -ne $true) {
-    throw "固定回放源必须启用 looping 和 restart_on_activate：$SelectedSourceName"
-}
-$selectedItemSnapshot = $selectedItem | Select-Object `
-    name, source_uuid, visible, locked, rot, scale_ref, align, bounds_type, `
-    bounds_align, bounds_crop, crop_left, crop_top, crop_right, crop_bottom, `
-    id, pos, pos_rel, scale, scale_rel, bounds, bounds_rel, scale_filter, `
-    blend_method, blend_type
-$selectedSourceSnapshot = [ordered]@{
-    name = [string]$selectedSource.name
-    uuid = [string]$selectedSource.uuid
-    id = [string]$selectedSource.id
-    media_file = $mediaIdentity.path
-    media_file_size = $mediaIdentity.size
-    media_file_sha256 = $mediaIdentity.sha256
-    media_file_last_write_utc = $mediaIdentity.last_write_utc
-    looping = $looping
-    restart_on_activate = $restartOnActivate
-    close_when_inactive = Get-OptionalProperty `
-        $selectedSource.settings "close_when_inactive"
-    hw_decode = Get-OptionalProperty $selectedSource.settings "hw_decode"
+    [double]$selectedItem.scale.y -ne 1.0
+$selectedSourceSnapshot = $null
+if ($BindingMode -eq "FixedMedia") {
+    if ($commonItemGeometryInvalid -or
+        [double]$selectedItem.pos.x -ne -$expectedRoiX -or
+        [double]$selectedItem.pos.y -ne -$expectedRoiY) {
+        throw ("所选视频必须以 1:1、无旋转/二次裁剪方式对齐 Program 中心 ROI：" +
+            "expected_pos=(-$expectedRoiX,-$expectedRoiY)；" +
+            "actual_pos=($($selectedItem.pos.x),$($selectedItem.pos.y))")
+    }
+    $mediaIdentity = Get-StableFileIdentity `
+        ([string]$selectedSource.settings.local_file) "所选 OBS 媒体文件"
+    $looping = Get-OptionalProperty $selectedSource.settings "looping"
+    $restartOnActivate = Get-OptionalProperty `
+        $selectedSource.settings "restart_on_activate"
+    if ($looping -ne $true -or $restartOnActivate -ne $true) {
+        throw "固定回放源必须启用 looping 和 restart_on_activate：$SelectedSourceName"
+    }
+    $selectedSourceSnapshot = [ordered]@{
+        name = [string]$selectedSource.name
+        uuid = [string]$selectedSource.uuid
+        id = [string]$selectedSource.id
+        media_file = $mediaIdentity.path
+        media_file_size = $mediaIdentity.size
+        media_file_sha256 = $mediaIdentity.sha256
+        media_file_last_write_utc = $mediaIdentity.last_write_utc
+        looping = $looping
+        restart_on_activate = $restartOnActivate
+        close_when_inactive = Get-OptionalProperty `
+            $selectedSource.settings "close_when_inactive"
+        hw_decode = Get-OptionalProperty $selectedSource.settings "hw_decode"
+    }
+} else {
+    if ($commonItemGeometryInvalid -or
+        [double]$selectedItem.pos.x -ne 0.0 -or
+        [double]$selectedItem.pos.y -ne 0.0 -or
+        [double]$selectedItem.scale_ref.x -ne $ExpectedSourceWidth -or
+        [double]$selectedItem.scale_ref.y -ne $ExpectedSourceHeight) {
+        throw ("RealGame scene item 必须以 1:1、无旋转/二次裁剪方式放置在 Program 原点：" +
+            "actual_pos=($($selectedItem.pos.x),$($selectedItem.pos.y))")
+    }
+    $sourceSettings = $selectedSource.settings
+    $monitorFieldsAvailable = $null -ne $sourceSettings -and
+        $sourceSettings.PSObject.Properties.Name -contains "monitor_id" -and
+        $sourceSettings.PSObject.Properties.Name -contains "capture_cursor"
+    if (-not $monitorFieldsAvailable -or
+        [string]::IsNullOrWhiteSpace([string]$sourceSettings.monitor_id) -or
+        [bool]$sourceSettings.capture_cursor) {
+        throw ("RealGame monitor_capture 必须绑定非空 monitor_id 且 " +
+            "capture_cursor=false：$SelectedSourceName")
+    }
+    $sourceFilters = @(Get-OptionalProperty $selectedSource "filters")
+    if ($sourceFilters.Count -ne 1 -or
+        [string]$sourceFilters[0].id -ne "crop_filter" -or
+        -not ($sourceFilters[0].PSObject.Properties.Name -contains "enabled") -or
+        -not [bool]$sourceFilters[0].enabled) {
+        throw ("RealGame monitor_capture 必须且只能包含一个启用的 " +
+            "crop_filter：$SelectedSourceName")
+    }
+    $cropFilter = $sourceFilters[0]
+    $cropSettings = $cropFilter.settings
+    $requiredCropSettings = @("left", "top", "cx", "cy", "relative")
+    $missingCropSettings = @($requiredCropSettings | Where-Object {
+        $null -eq $cropSettings -or
+            $cropSettings.PSObject.Properties.Name -notcontains $_
+    })
+    $cropGeometryInvalid = $missingCropSettings.Count -ne 0 -or
+        [int]$cropSettings.left -ne $expectedRoiX -or
+        [int]$cropSettings.top -ne $expectedRoiY -or
+        [int]$cropSettings.cx -ne $ExpectedRoiWidth -or
+        [int]$cropSettings.cy -ne $ExpectedRoiHeight -or
+        [bool]$cropSettings.relative
+    if ($cropGeometryInvalid) {
+        throw ("RealGame crop_filter 必须是绝对 1:1 中心 ROI：" +
+            "expected=($expectedRoiX,$expectedRoiY," +
+            "$ExpectedRoiWidth,$ExpectedRoiHeight)")
+    }
+    $selectedSourceSnapshot = [ordered]@{
+        name = [string]$selectedSource.name
+        uuid = [string]$selectedSource.uuid
+        id = [string]$selectedSource.id
+        monitor_id = [string]$sourceSettings.monitor_id
+        capture_cursor = [bool]$sourceSettings.capture_cursor
+        crop_filter = $cropFilter | Select-Object `
+            name, uuid, id, enabled, settings
+    }
 }
 $binding = [ordered]@{
     schema_version = 2
     evidence_type = "obs_source_binding"
+    binding_mode = if ($BindingMode -eq "RealGame") {
+        "real_game"
+    } else { "fixed_media" }
     physical_output_capability = $false
     state_basis = "obs_saved_scene_collection"
     scene_collection = $collectionResolved
@@ -420,7 +491,9 @@ $binding = [ordered]@{
         name = [string]$ndiPlugin.MainOutputName
     }
     program_geometry = [ordered]@{
-        mapping = "center_crop_1_to_1"
+        mapping = if ($BindingMode -eq "RealGame") {
+            "monitor_crop_filter_1_to_1"
+        } else { "center_crop_1_to_1" }
         source_width = $ExpectedSourceWidth
         source_height = $ExpectedSourceHeight
         roi_width = $ExpectedRoiWidth

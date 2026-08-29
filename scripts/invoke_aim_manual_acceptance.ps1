@@ -164,9 +164,35 @@ function Assert-FileEvidenceMatches(
     }
 }
 
+function Test-ObjectFields([object]$Value, [string[]]$Names) {
+    if ($null -eq $Value) { return $false }
+    foreach ($name in $Names) {
+        if ($Value.PSObject.Properties.Name -notcontains $name) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-ExactJsonNumber([object]$Value, [double]$Expected) {
+    if ($null -eq $Value) { return $false }
+    $numericTypeCodes = @(
+        [TypeCode]::SByte, [TypeCode]::Byte, [TypeCode]::Int16,
+        [TypeCode]::UInt16, [TypeCode]::Int32, [TypeCode]::UInt32,
+        [TypeCode]::Int64, [TypeCode]::UInt64, [TypeCode]::Single,
+        [TypeCode]::Double, [TypeCode]::Decimal)
+    $typeCode = [Type]::GetTypeCode($Value.GetType())
+    if ($numericTypeCodes -notcontains $typeCode) { return $false }
+    $number = [Convert]::ToDouble(
+        $Value, [Globalization.CultureInfo]::InvariantCulture)
+    return -not [double]::IsNaN($number) -and
+        -not [double]::IsInfinity($number) -and $number -eq $Expected
+}
+
 function Read-PixelEvidenceBinding(
         [string]$Path,
-        [string]$ExpectedNdiOutputName) {
+        [string]$ExpectedNdiOutputName,
+        [switch]$AllowLegacy) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "OBS source binding 不存在：$Path"
     }
@@ -198,6 +224,108 @@ function Read-PixelEvidenceBinding(
         throw ("OBS source binding 与精确 NDI 输出不匹配：" +
             "expected=$ExpectedNdiOutputName；path=$Path")
     }
+    $bindingModeAvailable =
+        $binding.PSObject.Properties.Name -contains "binding_mode"
+    if (-not $bindingModeAvailable -and $AllowLegacy.IsPresent) {
+        return $binding
+    }
+    if (-not $bindingModeAvailable -or
+        [string]$binding.binding_mode -ne "real_game") {
+        throw ("OBS source binding 必须绑定实际游戏主画面：" +
+            "binding_mode=real_game；path=$Path")
+    }
+    $selectedSource = if (Test-ObjectFields $binding @("selected_source")) {
+        $binding.selected_source
+    } else { $null }
+    $cropFilter = if (Test-ObjectFields $selectedSource @("crop_filter")) {
+        $selectedSource.crop_filter
+    } else { $null }
+    $cropSettings = if (Test-ObjectFields $cropFilter @("settings")) {
+        $cropFilter.settings
+    } else { $null }
+    $programGeometry = if (Test-ObjectFields $binding @("program_geometry")) {
+        $binding.program_geometry
+    } else { $null }
+    $selectedSceneItem = if (Test-ObjectFields `
+            $binding @("selected_scene_item")) {
+        $binding.selected_scene_item
+    } else { $null }
+    $realGameFieldsAvailable =
+        (Test-ObjectFields $binding @(
+            "state_basis", "candidate_visibility")) -and
+        (Test-ObjectFields $selectedSource @(
+            "name", "uuid", "id", "monitor_id", "capture_cursor")) -and
+        (Test-ObjectFields $cropFilter @("id", "enabled")) -and
+        (Test-ObjectFields $cropSettings @(
+            "left", "top", "cx", "cy", "relative")) -and
+        (Test-ObjectFields $programGeometry @(
+            "mapping", "source_width", "source_height", "roi_width",
+            "roi_height", "roi_x", "roi_y")) -and
+        (Test-ObjectFields $selectedSceneItem @(
+            "visible", "rot", "align", "bounds_type", "bounds_crop",
+            "crop_left", "crop_top", "crop_right", "crop_bottom", "pos",
+            "scale", "source_uuid", "id")) -and
+        (Test-ObjectFields $selectedSceneItem.pos @("x", "y")) -and
+        (Test-ObjectFields $selectedSceneItem.scale @("x", "y"))
+    $visibleCandidates = @()
+    if ($realGameFieldsAvailable) {
+        $visibleCandidates = @($binding.candidate_visibility | Where-Object {
+            $_.PSObject.Properties.Name -contains "visible" -and
+                $_.visible -is [bool] -and $_.visible
+        })
+    }
+    $realGameContractPassed = $realGameFieldsAvailable -and
+        [string]$binding.state_basis -eq "obs_saved_scene_collection" -and
+        [string]$selectedSource.name -eq "主画面" -and
+        [string]$selectedSource.id -eq "monitor_capture" -and
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$selectedSource.monitor_id) -and
+        $selectedSource.capture_cursor -is [bool] -and
+        -not $selectedSource.capture_cursor -and
+        [string]$cropFilter.id -eq "crop_filter" -and
+        $cropFilter.enabled -is [bool] -and $cropFilter.enabled -and
+        (Test-ExactJsonNumber $cropSettings.left 1120) -and
+        (Test-ExactJsonNumber $cropSettings.top 560) -and
+        (Test-ExactJsonNumber $cropSettings.cx 320) -and
+        (Test-ExactJsonNumber $cropSettings.cy 320) -and
+        $cropSettings.relative -is [bool] -and
+        -not $cropSettings.relative -and
+        [string]$programGeometry.mapping -eq
+            "monitor_crop_filter_1_to_1" -and
+        (Test-ExactJsonNumber $programGeometry.source_width 2560) -and
+        (Test-ExactJsonNumber $programGeometry.source_height 1440) -and
+        (Test-ExactJsonNumber $programGeometry.roi_width 320) -and
+        (Test-ExactJsonNumber $programGeometry.roi_height 320) -and
+        (Test-ExactJsonNumber $programGeometry.roi_x 1120) -and
+        (Test-ExactJsonNumber $programGeometry.roi_y 560) -and
+        $selectedSceneItem.visible -is [bool] -and
+        $selectedSceneItem.visible -and
+        (Test-ExactJsonNumber $selectedSceneItem.rot 0.0) -and
+        (Test-ExactJsonNumber $selectedSceneItem.align 5) -and
+        (Test-ExactJsonNumber $selectedSceneItem.bounds_type 0) -and
+        $selectedSceneItem.bounds_crop -is [bool] -and
+        -not $selectedSceneItem.bounds_crop -and
+        (Test-ExactJsonNumber $selectedSceneItem.crop_left 0) -and
+        (Test-ExactJsonNumber $selectedSceneItem.crop_top 0) -and
+        (Test-ExactJsonNumber $selectedSceneItem.crop_right 0) -and
+        (Test-ExactJsonNumber $selectedSceneItem.crop_bottom 0) -and
+        (Test-ExactJsonNumber $selectedSceneItem.pos.x 0.0) -and
+        (Test-ExactJsonNumber $selectedSceneItem.pos.y 0.0) -and
+        (Test-ExactJsonNumber $selectedSceneItem.scale.x 1.0) -and
+        (Test-ExactJsonNumber $selectedSceneItem.scale.y 1.0) -and
+        [string]$selectedSceneItem.source_uuid -eq
+            [string]$selectedSource.uuid -and
+        $visibleCandidates.Count -eq 1 -and
+        (Test-ObjectFields $visibleCandidates[0] @(
+            "name", "source_uuid", "scene_item_id", "visible")) -and
+        [string]$visibleCandidates[0].name -eq "主画面" -and
+        [string]$visibleCandidates[0].source_uuid -eq
+            [string]$selectedSource.uuid -and
+        (Test-ExactJsonNumber $visibleCandidates[0].scene_item_id `
+            ([double]$selectedSceneItem.id))
+    if (-not $realGameContractPassed) {
+        throw "OBS source binding 实际游戏几何合同不匹配：$Path"
+    }
     return $binding
 }
 
@@ -205,8 +333,8 @@ function New-PixelEvidenceTaskDefinition() {
     if (-not $CapturePixelEvidence.IsPresent) {
         return [ordered]@{ enabled = $false }
     }
-    [void](Read-PixelEvidenceBinding `
-        $PixelEvidenceBindingPath $ndiOutputName)
+    $binding = Read-PixelEvidenceBinding `
+        $PixelEvidenceBindingPath $ndiOutputName
     $executable = Join-Path $PixelEvidenceToolRoot "XenCaptureEvidence.exe"
     $opencvRuntime = Join-Path $PixelEvidenceToolRoot "opencv_world4140.dll"
     $ndiRuntime = Join-Path $PixelEvidenceToolRoot `
@@ -229,6 +357,7 @@ function New-PixelEvidenceTaskDefinition() {
         opencv_runtime = Get-FileEvidence $opencvRuntime
         ndi_runtime = Get-FileEvidence $ndiRuntime
         source_binding = Get-FileEvidence $PixelEvidenceBindingPath
+        binding_mode = [string]$binding.binding_mode
         physical_output_capability = $false
     }
 }
@@ -404,8 +533,12 @@ function Get-PixelEvidenceSummary(
     if (Test-Path -LiteralPath $embeddedBindingPath -PathType Leaf) {
         try {
             $embeddedBindingEvidence = Get-FileEvidence $embeddedBindingPath
+            $allowLegacyBinding = $CollectionMode -eq "Recover" -and
+                -not (Test-ObjectFields `
+                    $Task.pixel_evidence @("binding_mode"))
             [void](Read-PixelEvidenceBinding `
-                $embeddedBindingPath $ndiOutputName)
+                $embeddedBindingPath $ndiOutputName `
+                -AllowLegacy:$allowLegacyBinding)
             $embeddedBindingMatches =
                 [string]$embeddedBindingEvidence.sha256 -eq
                     $expectedBindingHash
