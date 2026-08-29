@@ -4,6 +4,8 @@
     [Parameter(Mandatory = $true)]
     [string]$ObsUserConfigPath,
     [Parameter(Mandatory = $true)]
+    [string]$ObsProfileConfigPath,
+    [Parameter(Mandatory = $true)]
     [string]$ExpectedNdiOutputName,
     [Parameter(Mandatory = $true)]
     [string]$SceneName,
@@ -11,6 +13,18 @@
     [string[]]$SourceNames,
     [Parameter(Mandatory = $true)]
     [string]$SelectedSourceName,
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(1, 16384)]
+    [int]$ExpectedSourceWidth,
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(1, 16384)]
+    [int]$ExpectedSourceHeight,
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(1, 16384)]
+    [int]$ExpectedRoiWidth,
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(1, 16384)]
+    [int]$ExpectedRoiHeight,
     [Parameter(Mandatory = $true)]
     [string]$OutputPath
 )
@@ -146,6 +160,21 @@ function Get-OptionalProperty([object]$Value, [string]$Name) {
     return $property.Value
 }
 
+function Get-RequiredPositiveIniInteger(
+        [Collections.Specialized.OrderedDictionary]$Values,
+        [string]$Name,
+        [string]$Description) {
+    if (-not $Values.Contains($Name) -or
+        [string]$Values[$Name] -notmatch '^[1-9][0-9]*$') {
+        throw "$Description 的 $Name 必须是正整数"
+    }
+    try {
+        return [int]$Values[$Name]
+    } catch {
+        throw "$Description 的 $Name 超出整数范围：$($Values[$Name])"
+    }
+}
+
 if ($SourceNames.Count -eq 0 -or [string]::IsNullOrWhiteSpace($SceneName) -or
     [string]::IsNullOrWhiteSpace($SelectedSourceName) -or
     [string]::IsNullOrWhiteSpace($ExpectedNdiOutputName)) {
@@ -162,8 +191,39 @@ foreach ($sourceName in $SourceNames) {
 if (-not $sourceSet.Contains($SelectedSourceName)) {
     throw "所选源不在候选源集合中：$SelectedSourceName"
 }
+if ($ExpectedSourceWidth -lt $ExpectedRoiWidth -or
+    $ExpectedSourceHeight -lt $ExpectedRoiHeight -or
+    ($ExpectedSourceWidth - $ExpectedRoiWidth) % 2 -ne 0 -or
+    ($ExpectedSourceHeight - $ExpectedRoiHeight) % 2 -ne 0) {
+    throw "预期源尺寸必须覆盖 ROI，且中心 ROI 原点必须落在整数像素"
+}
+$expectedRoiX = [int](
+    ($ExpectedSourceWidth - $ExpectedRoiWidth) / 2)
+$expectedRoiY = [int](
+    ($ExpectedSourceHeight - $ExpectedRoiHeight) / 2)
 $obsUserConfig = Get-StableUtf8Identity `
     $ObsUserConfigPath "OBS user.ini"
+$obsBasic = Get-IniSection `
+    $obsUserConfig.text "Basic" "OBS user.ini"
+foreach ($name in @("ProfileDir", "SceneCollectionFile")) {
+    if (-not $obsBasic.Contains($name) -or
+        [string]::IsNullOrWhiteSpace([string]$obsBasic[$name])) {
+        throw "OBS user.ini [Basic] 缺少活动配置指针：$name"
+    }
+}
+$activeProfileDirectory = [string]$obsBasic.ProfileDir
+$activeSceneCollectionFile = [string]$obsBasic.SceneCollectionFile
+if ([IO.Path]::GetFileName($activeProfileDirectory) -ne
+        $activeProfileDirectory -or
+    [IO.Path]::GetFileName($activeSceneCollectionFile) -ne
+        $activeSceneCollectionFile) {
+    throw "OBS user.ini [Basic] 活动配置指针必须是单一文件名"
+}
+$obsConfigRoot = Split-Path -Parent $obsUserConfig.path
+$activeProfilePath = [IO.Path]::GetFullPath((Join-Path $obsConfigRoot `
+    "basic\profiles\$activeProfileDirectory\basic.ini"))
+$activeSceneCollectionPath = [IO.Path]::GetFullPath((Join-Path `
+    $obsConfigRoot "basic\scenes\$activeSceneCollectionFile"))
 $ndiPlugin = Get-IniSection `
     $obsUserConfig.text "NDIPlugin" "OBS user.ini"
 if (-not $ndiPlugin.Contains("MainOutputEnabled") -or
@@ -174,10 +234,43 @@ if (-not $ndiPlugin.Contains("MainOutputName") -or
     $ndiPlugin.MainOutputName -ne $ExpectedNdiOutputName) {
     throw "OBS NDI 主输出名不匹配：expected=$ExpectedNdiOutputName；actual=$($ndiPlugin.MainOutputName)"
 }
+$obsProfileConfig = Get-StableUtf8Identity `
+    $ObsProfileConfigPath "OBS profile basic.ini"
+if (-not [string]::Equals(
+        $obsProfileConfig.path, $activeProfilePath,
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw ("传入 OBS profile 不是 user.ini 指向的当前活动 profile：" +
+        "expected=$activeProfilePath；actual=$($obsProfileConfig.path)")
+}
+$videoProfile = Get-IniSection `
+    $obsProfileConfig.text "Video" "OBS profile basic.ini"
+$profileBaseWidth = Get-RequiredPositiveIniInteger `
+    $videoProfile "BaseCX" "OBS profile basic.ini [Video]"
+$profileBaseHeight = Get-RequiredPositiveIniInteger `
+    $videoProfile "BaseCY" "OBS profile basic.ini [Video]"
+$profileOutputWidth = Get-RequiredPositiveIniInteger `
+    $videoProfile "OutputCX" "OBS profile basic.ini [Video]"
+$profileOutputHeight = Get-RequiredPositiveIniInteger `
+    $videoProfile "OutputCY" "OBS profile basic.ini [Video]"
+if ($profileBaseWidth -ne $ExpectedRoiWidth -or
+    $profileBaseHeight -ne $ExpectedRoiHeight -or
+    $profileOutputWidth -ne $ExpectedRoiWidth -or
+    $profileOutputHeight -ne $ExpectedRoiHeight) {
+    throw ("OBS Program profile 必须与预期 ROI 完全一致：" +
+        "expected=$($ExpectedRoiWidth)x$($ExpectedRoiHeight)；" +
+        "base=$($profileBaseWidth)x$($profileBaseHeight)；" +
+        "output=$($profileOutputWidth)x$($profileOutputHeight)")
+}
 if (-not (Test-Path -LiteralPath $SceneCollectionPath -PathType Leaf)) {
     throw "OBS 场景集合不是普通文件：$SceneCollectionPath"
 }
 $collectionResolved = (Resolve-Path -LiteralPath $SceneCollectionPath).Path
+if (-not [string]::Equals(
+        $collectionResolved, $activeSceneCollectionPath,
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw ("传入 OBS scene collection 不是 user.ini 指向的当前活动集合：" +
+        "expected=$activeSceneCollectionPath；actual=$collectionResolved")
+}
 $collectionBytes = [IO.File]::ReadAllBytes($collectionResolved)
 $collectionHash = Get-BytesSha256 $collectionBytes
 $utf8 = [Text.UTF8Encoding]::new($false, $true)
@@ -193,6 +286,19 @@ try {
 }
 if ([string]$collection.current_program_scene -ne $SceneName) {
     throw "指定场景不是 OBS 保存的 Program Scene：expected=$SceneName；actual=$($collection.current_program_scene)"
+}
+$collectionResolution = Get-OptionalProperty $collection "resolution"
+if ($null -eq $collectionResolution -or
+    [int]$collectionResolution.x -ne $ExpectedRoiWidth -or
+    [int]$collectionResolution.y -ne $ExpectedRoiHeight) {
+    $actualCollectionResolution = if ($null -eq $collectionResolution) {
+        "missing"
+    } else {
+        "$($collectionResolution.x)x$($collectionResolution.y)"
+    }
+    throw ("OBS 场景集合 resolution 必须与预期 ROI 完全一致：" +
+        "expected=$($ExpectedRoiWidth)x$($ExpectedRoiHeight)；" +
+        "actual=$actualCollectionResolution")
 }
 $scene = Get-UniqueMatch @($collection.sources) {
     $_.id -eq "scene" -and $_.name -eq $SceneName
@@ -243,6 +349,22 @@ if (-not $selectedIsOnlyVisibleSceneItem) {
     throw ("OBS 保存的 Program Scene 必须只有所选源可见：" +
         "selected=$SelectedSourceName；visible=$visibleItemNames")
 }
+if ([double]$selectedItem.rot -ne 0.0 -or
+    [int]$selectedItem.align -ne 5 -or
+    [int]$selectedItem.bounds_type -ne 0 -or
+    [bool]$selectedItem.bounds_crop -or
+    [int]$selectedItem.crop_left -ne 0 -or
+    [int]$selectedItem.crop_top -ne 0 -or
+    [int]$selectedItem.crop_right -ne 0 -or
+    [int]$selectedItem.crop_bottom -ne 0 -or
+    [double]$selectedItem.scale.x -ne 1.0 -or
+    [double]$selectedItem.scale.y -ne 1.0 -or
+    [double]$selectedItem.pos.x -ne -$expectedRoiX -or
+    [double]$selectedItem.pos.y -ne -$expectedRoiY) {
+    throw ("所选视频必须以 1:1、无旋转/二次裁剪方式对齐 Program 中心 ROI：" +
+        "expected_pos=(-$expectedRoiX,-$expectedRoiY)；" +
+        "actual_pos=($($selectedItem.pos.x),$($selectedItem.pos.y))")
+}
 
 $mediaIdentity = Get-StableFileIdentity `
     ([string]$selectedSource.settings.local_file) "所选 OBS 媒体文件"
@@ -284,10 +406,31 @@ $binding = [ordered]@{
         size = $obsUserConfig.size
         sha256 = $obsUserConfig.sha256
         last_write_utc = $obsUserConfig.last_write_utc
+        active_profile_directory = $activeProfileDirectory
+        active_scene_collection_file = $activeSceneCollectionFile
+    }
+    obs_profile_config = [ordered]@{
+        path = $obsProfileConfig.path
+        size = $obsProfileConfig.size
+        sha256 = $obsProfileConfig.sha256
+        last_write_utc = $obsProfileConfig.last_write_utc
     }
     ndi_main_output = [ordered]@{
         enabled = $true
         name = [string]$ndiPlugin.MainOutputName
+    }
+    program_geometry = [ordered]@{
+        mapping = "center_crop_1_to_1"
+        source_width = $ExpectedSourceWidth
+        source_height = $ExpectedSourceHeight
+        roi_width = $ExpectedRoiWidth
+        roi_height = $ExpectedRoiHeight
+        roi_x = $expectedRoiX
+        roi_y = $expectedRoiY
+        profile_base_width = $profileBaseWidth
+        profile_base_height = $profileBaseHeight
+        profile_output_width = $profileOutputWidth
+        profile_output_height = $profileOutputHeight
     }
     collection_name = [string]$collection.name
     current_scene = [string]$collection.current_scene
