@@ -279,11 +279,36 @@ void test_invalid_or_incomplete_capture_never_publishes() {
            "帧数不足不得发布最终证据目录");
 }
 
+void test_advertised_maximum_standard_roi_frames_are_recordable() {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), "必须创建最大帧数测试临时目录");
+    constexpr std::uint64_t kRequestedFrames = 2400;
+    const CaptureEvidenceConfig config = test_config(
+        temporary, kRequestedFrames);
+
+    capture_evidence::CaptureEvidenceRecorder recorder;
+    std::string error;
+    expect(recorder.start(config, error),
+           "公开允许的 2400 帧任务必须启动：" + error);
+    CapturedFrame frame = test_frame(1, 1);
+    frame.bgr = cv::Mat(320, 320, CV_8UC3, cv::Scalar(1, 2, 3));
+    frame.width = frame.bgr.cols;
+    frame.height = frame.bgr.rows;
+    for (std::uint64_t index = 0; index < kRequestedFrames; ++index) {
+        frame.timing.sequence = index + 1;
+        if (!recorder.record(frame, error)) break;
+    }
+    expect(recorder.recorded_frame_count() == kRequestedFrames,
+           "公开允许的 2400 张 320x320 BGR 帧必须全部被 Recorder 接收：" +
+               error);
+}
+
 } // namespace
 
 int main() {
     test_lossless_atomic_publication_and_identity();
     test_invalid_or_incomplete_capture_never_publishes();
+    test_advertised_maximum_standard_roi_frames_are_recordable();
     if (failures != 0) {
         std::cerr << failures << " 项 Capture evidence 测试失败。\n";
         return 1;

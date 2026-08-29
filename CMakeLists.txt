@@ -955,6 +955,7 @@ if(BUILD_TESTING)
     target_link_libraries(capture_evidence_tests PRIVATE capture_evidence)
     xen_deploy_runtime_dlls(capture_evidence_tests OPENCV NDI)
     add_test(NAME capture_evidence_tests COMMAND capture_evidence_tests)
+    set_tests_properties(capture_evidence_tests PROPERTIES RUN_SERIAL TRUE)
 
     add_executable(aim_tests
         tests/aim_tests.cpp)

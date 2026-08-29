@@ -29,7 +29,7 @@ namespace {
 
 constexpr std::uint64_t kMaximumEvidenceFrames = 2400;
 constexpr std::uint64_t kMaximumBufferedBgrBytes =
-    384ULL * 1024ULL * 1024ULL;
+    768ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kHashBufferBytes = 64U * 1024U;
 std::atomic<std::uint64_t> g_pending_sequence{0};
 
@@ -386,7 +386,7 @@ bool CaptureEvidenceRecorder::record(
             impl_->buffered_bgr_bytes >
                 kMaximumBufferedBgrBytes - frame_bytes) {
             set_error(error,
-                "Capture evidence 超出 384 MiB 有界 BGR 缓冲上限");
+                "Capture evidence 超出 768 MiB 有界 BGR 缓冲上限");
             return false;
         }
 
