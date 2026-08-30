@@ -303,6 +303,81 @@ void test_output_arm_requires_input_health() {
            "运行、急停、配置和重载任一门关闭时都不得武装");
 }
 
+bool delay_compensation_tooltip_contract(std::string_view source) {
+    constexpr std::string_view kLabel = "\"启用延迟补偿\"";
+    constexpr std::string_view kToggle =
+        "\"##enable_delay_compensation\"";
+    constexpr std::string_view kToggleCall = "toggle_switch(";
+    constexpr std::array<std::string_view, 4> kControlBoundaries{
+        "form_row(",
+        kToggleCall,
+        "slider_float_control(",
+        "slider_int_control(",
+    };
+    constexpr std::string_view kExpectedDefault =
+        "新生成的 App 配置默认开启。";
+
+    const std::size_t label = source.find(kLabel);
+    const std::size_t toggle = source.find(kToggle);
+    if (label == std::string::npos || toggle == std::string::npos ||
+        source.find(kLabel, label + kLabel.size()) != std::string::npos ||
+        source.find(kToggle, toggle + kToggle.size()) != std::string::npos) {
+        return false;
+    }
+
+    const std::size_t label_end = label + kLabel.size();
+    if (toggle <= label_end) return false;
+    const std::size_t toggle_call = source.find(kToggleCall, label_end);
+    std::size_t first_control_boundary = std::string_view::npos;
+    for (const std::string_view boundary : kControlBoundaries) {
+        const std::size_t position = source.find(boundary, label_end);
+        if (position != std::string_view::npos &&
+            (first_control_boundary == std::string_view::npos ||
+             position < first_control_boundary)) {
+            first_control_boundary = position;
+        }
+    }
+    const std::size_t toggle_call_end = toggle_call == std::string_view::npos
+        ? std::string_view::npos
+        : source.find(");", toggle_call);
+    if (first_control_boundary != toggle_call || toggle <= toggle_call ||
+        toggle_call_end == std::string_view::npos ||
+        toggle >= toggle_call_end) {
+        return false;
+    }
+
+    const std::string_view tooltip =
+        source.substr(label_end, toggle - label_end);
+    return tooltip.find(kExpectedDefault) != std::string_view::npos &&
+        tooltip.find("默认关闭") == std::string_view::npos;
+}
+
+void test_delay_compensation_tooltip_contract_rejects_ambiguous_pairing() {
+    constexpr std::string_view kDuplicateToggle = R"cpp(
+form_row(
+    "启用延迟补偿",
+    "新生成的 App 配置默认开启。");
+toggle_switch(
+    "##enable_delay_compensation", &first);
+toggle_switch(
+    "##enable_delay_compensation", &duplicate);
+)cpp";
+    constexpr std::string_view kDisplacedToggle = R"cpp(
+form_row(
+    "启用延迟补偿",
+    "新生成的 App 配置默认开启。");
+toggle_switch("##another_toggle", &other);
+form_row("另一项", "另一项说明");
+toggle_switch(
+    "##enable_delay_compensation", &later);
+)cpp";
+
+    expect(!delay_compensation_tooltip_contract(kDuplicateToggle),
+           "tooltip source seam 必须拒绝全局重复的目标 toggle token");
+    expect(!delay_compensation_tooltip_contract(kDisplacedToggle),
+           "tooltip source seam 必须拒绝跨越下一 form/control 的错误配对");
+}
+
 void test_delay_compensation_tooltip_states_new_app_default() {
     const auto source_path = std::filesystem::path(__FILE__)
                                  .parent_path()
@@ -313,26 +388,7 @@ void test_delay_compensation_tooltip_states_new_app_default() {
     const std::string source{
         std::istreambuf_iterator<char>(input),
         std::istreambuf_iterator<char>()};
-    constexpr std::string_view kLabel = "\"启用延迟补偿\"";
-    constexpr std::string_view kToggle =
-        "\"##enable_delay_compensation\"";
-    constexpr std::string_view kExpectedDefault =
-        "新生成的 App 配置默认开启。";
-
-    const std::size_t label = source.find(kLabel);
-    const std::size_t toggle = label == std::string::npos
-        ? std::string::npos
-        : source.find(kToggle, label);
-    const std::string_view tooltip =
-        label != std::string::npos && toggle != std::string::npos
-        ? std::string_view(source).substr(label, toggle - label)
-        : std::string_view{};
-    expect(source_opened && label != std::string::npos &&
-               source.find(kLabel, label + kLabel.size()) ==
-                   std::string::npos &&
-               toggle != std::string::npos &&
-               tooltip.find(kExpectedDefault) != std::string_view::npos &&
-               tooltip.find("默认关闭") == std::string_view::npos,
+    expect(source_opened && delay_compensation_tooltip_contract(source),
            "延迟补偿 tooltip 必须说明新生成的 App 配置默认开启，"
            "且不得继续声称默认关闭");
 }
@@ -354,6 +410,7 @@ int main() {
     test_detection_role_mapping();
     test_hotkey_capture_state_machine();
     test_output_arm_requires_input_health();
+    test_delay_compensation_tooltip_contract_rejects_ambiguous_pairing();
     test_delay_compensation_tooltip_states_new_app_default();
     if (failures != 0) {
         std::cerr << "Overlay 测试失败数: " << failures << '\n';
