@@ -10,6 +10,7 @@
 #include "benchmark/benchmark.h"
 #include "benchmark/benchmark_internal.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -19,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -36,12 +38,18 @@ struct Win32HandleCloser {
 
 using ScopedWin32Handle = std::unique_ptr<void, Win32HandleCloser>;
 
-struct OwnedBenchmarkReportRoot {
+struct OwnedBenchmarkTemporaryRoot {
     std::filesystem::path temporary_base;
     std::filesystem::path path;
     std::filesystem::path owner_path;
+    std::string leaf_name;
     std::string guid;
 };
+
+constexpr std::string_view kCancellationRootPrefix =
+    "xen-benchmark-cancel-tests-";
+constexpr std::string_view kReportConsumerRootPrefix =
+    "xen-benchmark-report-consumer-";
 
 std::string make_test_guid() {
     std::string guid = "00000000-0000-4000-8000-000000000000";
@@ -74,9 +82,16 @@ bool non_reparse_chain(const std::filesystem::path& path,
     }
 }
 
-bool create_owned_report_root(OwnedBenchmarkReportRoot& root,
-                              std::string& error) {
+bool create_owned_benchmark_temporary_root(
+        OwnedBenchmarkTemporaryRoot& root,
+        std::string_view leaf_prefix,
+        std::string& error) {
     root = {};
+    if (leaf_prefix != kCancellationRootPrefix &&
+        leaf_prefix != kReportConsumerRootPrefix) {
+        error = "Benchmark 临时根前缀不属于已登记用途";
+        return false;
+    }
     root.temporary_base = std::filesystem::absolute(
         std::filesystem::temp_directory_path()).lexically_normal();
     if (root.temporary_base.filename().empty()) {
@@ -84,11 +99,11 @@ bool create_owned_report_root(OwnedBenchmarkReportRoot& root,
     }
     if (!non_reparse_chain(root.temporary_base, error)) return false;
     root.guid = make_test_guid();
-    root.path = root.temporary_base /
-        ("xen-benchmark-report-consumer-" + root.guid);
+    root.leaf_name = std::string(leaf_prefix) + root.guid;
+    root.path = root.temporary_base / root.leaf_name;
     std::error_code create_error;
     if (!std::filesystem::create_directory(root.path, create_error)) {
-        error = "创建本轮 Benchmark 报告临时根失败: " +
+        error = "创建本轮 Benchmark 临时根失败: " +
             create_error.message();
         return false;
     }
@@ -110,23 +125,72 @@ std::string read_file(const std::filesystem::path& path) {
         std::istreambuf_iterator<char>());
 }
 
-bool cleanup_owned_report_root(
-        const OwnedBenchmarkReportRoot& root,
-        const std::filesystem::path& csv_path,
-        const std::filesystem::path& json_path,
+bool cleanup_owned_benchmark_temporary_root(
+        const OwnedBenchmarkTemporaryRoot& root,
+        std::span<const std::filesystem::path> owned_files,
         std::string& error) {
+    if (root.temporary_base.empty() || root.path.empty() ||
+        root.owner_path.empty() || root.leaf_name.empty() ||
+        root.guid.empty()) {
+        error = "Benchmark 临时根所有权信息不完整";
+        return false;
+    }
     const auto normalized =
         std::filesystem::absolute(root.path).lexically_normal();
-    if (normalized.parent_path() != root.temporary_base ||
-        normalized.filename() !=
-            "xen-benchmark-report-consumer-" + root.guid ||
-        root.owner_path != normalized / ".xen-benchmark-report-owner" ||
+    const auto normalized_base =
+        std::filesystem::absolute(root.temporary_base).lexically_normal();
+    auto expected_base = std::filesystem::absolute(
+        std::filesystem::temp_directory_path()).lexically_normal();
+    if (expected_base.filename().empty()) {
+        expected_base = expected_base.parent_path();
+    }
+    const auto normalized_owner =
+        std::filesystem::absolute(root.owner_path).lexically_normal();
+    const bool registered_prefix =
+        root.leaf_name.starts_with(kCancellationRootPrefix) ||
+        root.leaf_name.starts_with(kReportConsumerRootPrefix);
+    if (normalized_base != expected_base ||
+        normalized.parent_path() != normalized_base ||
+        normalized.filename() != root.leaf_name ||
+        !registered_prefix ||
+        root.leaf_name.size() <= root.guid.size() ||
+        !root.leaf_name.ends_with(root.guid) ||
+        normalized_owner != normalized / ".xen-benchmark-report-owner" ||
         !non_reparse_chain(normalized, error) ||
-        read_file(root.owner_path) != root.guid) {
+        !non_reparse_chain(normalized_owner, error) ||
+        read_file(normalized_owner) != root.guid) {
         if (error.empty()) error = "Benchmark 临时根不属于本轮";
         return false;
     }
-    for (const auto& path : {csv_path, json_path, root.owner_path}) {
+
+    std::vector<std::filesystem::path> normalized_owned_files;
+    normalized_owned_files.reserve(owned_files.size() + 1U);
+    for (const auto& path : owned_files) {
+        const auto normalized_file =
+            std::filesystem::absolute(path).lexically_normal();
+        if (normalized_file.parent_path() != normalized ||
+            normalized_file == normalized_owner ||
+            std::find(normalized_owned_files.begin(),
+                      normalized_owned_files.end(), normalized_file) !=
+                normalized_owned_files.end()) {
+            error = "Benchmark 临时文件不属于本轮根或重复登记";
+            return false;
+        }
+        normalized_owned_files.push_back(normalized_file);
+    }
+    normalized_owned_files.push_back(normalized_owner);
+
+    for (const auto& entry : std::filesystem::directory_iterator(normalized)) {
+        const auto entry_path =
+            std::filesystem::absolute(entry.path()).lexically_normal();
+        if (std::find(normalized_owned_files.begin(),
+                      normalized_owned_files.end(), entry_path) ==
+            normalized_owned_files.end()) {
+            error = "Benchmark 临时根包含非本轮登记文件";
+            return false;
+        }
+    }
+    for (const auto& path : normalized_owned_files) {
         const DWORD attributes = GetFileAttributesW(path.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES) {
             const DWORD win32_error = GetLastError();
@@ -174,40 +238,36 @@ BenchmarkParseStatus parse(
 class TemporaryBenchmarkRun final {
 public:
     TemporaryBenchmarkRun() noexcept {
-        std::error_code error;
-        const auto root = std::filesystem::temp_directory_path(error);
-        if (error) return;
-        const auto nonce = std::chrono::steady_clock::now()
-            .time_since_epoch().count();
-        for (int attempt = 0; attempt < 32; ++attempt) {
-            auto candidate = root /
-                ("xen-benchmark-cancel-tests-" + std::to_string(nonce) +
-                 '-' + std::to_string(attempt));
-            error.clear();
-            if (std::filesystem::create_directory(candidate, error)) {
-                path_ = std::move(candidate);
-                break;
+        try {
+            std::string error;
+            if (!create_owned_benchmark_temporary_root(
+                    owned_root_, kCancellationRootPrefix, error)) {
+                return;
             }
-            if (error) return;
+            model_path_ = owned_root_.path / "model.onnx";
+            sentinel_path_ = owned_root_.path / "sentinel.txt";
+            std::ofstream model(
+                model_path_, std::ios::binary | std::ios::trunc);
+            std::ofstream sentinel(
+                sentinel_path_, std::ios::binary | std::ios::trunc);
+            model << "test-model-placeholder";
+            sentinel << "keep";
+            valid_ = model.good() && sentinel.good();
+        } catch (...) {
         }
-        if (path_.empty()) return;
-        model_path_ = path_ / "model.onnx";
-        sentinel_path_ = path_ / "sentinel.txt";
-        std::ofstream model(model_path_, std::ios::binary | std::ios::trunc);
-        std::ofstream sentinel(
-            sentinel_path_, std::ios::binary | std::ios::trunc);
-        model << "test-model-placeholder";
-        sentinel << "keep";
-        valid_ = model.good() && sentinel.good();
     }
 
     TemporaryBenchmarkRun(const TemporaryBenchmarkRun&) = delete;
     TemporaryBenchmarkRun& operator=(const TemporaryBenchmarkRun&) = delete;
 
     ~TemporaryBenchmarkRun() noexcept {
-        if (path_.empty()) return;
-        std::error_code ignored;
-        std::filesystem::remove_all(path_, ignored);
+        try {
+            const std::array owned_files{model_path_, sentinel_path_};
+            std::string ignored;
+            (void)cleanup_owned_benchmark_temporary_root(
+                owned_root_, owned_files, ignored);
+        } catch (...) {
+        }
     }
 
     bool valid() const noexcept { return valid_; }
@@ -215,10 +275,11 @@ public:
     BenchmarkOptions options() const {
         BenchmarkOptions options;
         options.model_path = model_path_.string();
-        options.report_prefix = (path_ / "result").string();
-        options.ready_file_path = (path_ / "result.ready.json").string();
+        options.report_prefix = (owned_root_.path / "result").string();
+        options.ready_file_path =
+            (owned_root_.path / "result.ready.json").string();
         options.provider_profile_path =
-            (path_ / "result.provider-profile.json").string();
+            (owned_root_.path / "result.provider-profile.json").string();
         options.backend = BackendType::TENSORRT;
         options.backend_explicit = true;
         options.warmup_samples = 0;
@@ -238,7 +299,7 @@ public:
                 return false;
             }
             for (const auto& entry :
-                 std::filesystem::directory_iterator(path_)) {
+                 std::filesystem::directory_iterator(owned_root_.path)) {
                 const std::string name = entry.path().filename().string();
                 if (name.find(".pending.") != std::string::npos ||
                     name.find(".tmp.") != std::string::npos) {
@@ -256,11 +317,60 @@ public:
     }
 
 private:
-    std::filesystem::path path_;
+    OwnedBenchmarkTemporaryRoot owned_root_;
     std::filesystem::path model_path_;
     std::filesystem::path sentinel_path_;
     bool valid_ = false;
 };
+
+void test_owned_benchmark_temporary_root_requires_precise_boundary_and_owner() {
+    OwnedBenchmarkTemporaryRoot root;
+    std::string error;
+    const bool root_created = create_owned_benchmark_temporary_root(
+        root, kCancellationRootPrefix, error);
+    expect(root_created,
+           "Benchmark 清理测试必须创建本轮 owned 临时根: " + error);
+    if (!root_created) return;
+
+    const auto owned_path = root.path / "owned.txt";
+    {
+        std::ofstream owned(owned_path, std::ios::binary | std::ios::trunc);
+        owned << "owned";
+    }
+    const auto outside_path = root.temporary_base /
+        ("xen-benchmark-outside-" + root.guid + ".txt");
+    const std::array out_of_boundary{owned_path, outside_path};
+    error.clear();
+    expect(!cleanup_owned_benchmark_temporary_root(
+               root, out_of_boundary, error) &&
+               std::filesystem::is_regular_file(owned_path) &&
+               std::filesystem::is_directory(root.path),
+           "Benchmark 临时根清理必须先拒绝越界目标且不做部分删除");
+
+    {
+        std::ofstream foreign_owner(
+            root.owner_path, std::ios::binary | std::ios::trunc);
+        foreign_owner << "foreign-owner";
+    }
+    const std::array owned_files{owned_path};
+    error.clear();
+    expect(!cleanup_owned_benchmark_temporary_root(
+               root, owned_files, error) &&
+               std::filesystem::is_regular_file(owned_path) &&
+               std::filesystem::is_directory(root.path),
+           "Benchmark 临时根清理必须拒绝失配 owner 且不做部分删除");
+
+    {
+        std::ofstream owner(
+            root.owner_path, std::ios::binary | std::ios::trunc);
+        owner << root.guid;
+    }
+    error.clear();
+    expect(cleanup_owned_benchmark_temporary_root(
+               root, owned_files, error) &&
+               !std::filesystem::exists(root.path),
+           "恢复精确 owner 后只应删除本轮登记文件与空根: " + error);
+}
 
 struct BenchmarkRunAdapterState {
     bool fail_setup = false;
@@ -572,9 +682,10 @@ void test_performance_probe_option() {
 }
 
 void test_benchmark_report_consumer_pair_publication() {
-    OwnedBenchmarkReportRoot owned_root;
+    OwnedBenchmarkTemporaryRoot owned_root;
     std::string error;
-    const bool root_created = create_owned_report_root(owned_root, error);
+    const bool root_created = create_owned_benchmark_temporary_root(
+        owned_root, kReportConsumerRootPrefix, error);
     expect(root_created,
            "Benchmark consumer 测试必须创建本轮 owned 临时根: " + error);
     if (!root_created) return;
@@ -635,8 +746,9 @@ void test_benchmark_report_consumer_pair_publication() {
                read_file(json_path) == old_json,
            "Benchmark consumer 失败后必须保留完整旧 pair");
     std::string cleanup_error;
-    expect(cleanup_owned_report_root(
-               owned_root, csv_path, json_path, cleanup_error),
+    const std::array owned_files{csv_path, json_path};
+    expect(cleanup_owned_benchmark_temporary_root(
+               owned_root, owned_files, cleanup_error),
            "Benchmark consumer 失败后不得遗留临时/回滚文件: " +
                cleanup_error);
 }
@@ -1067,6 +1179,7 @@ void test_per_frame_geometry_validation() {
 } // namespace
 
 int main() {
+    test_owned_benchmark_temporary_root_requires_precise_boundary_and_owner();
     test_normal_setup_reaches_runtime_factory_and_cleans_outputs();
     test_failed_setup_skips_runtime_and_cleans_outputs();
     test_stop_during_blocking_setup_skips_runtime_and_allows_next_run();
