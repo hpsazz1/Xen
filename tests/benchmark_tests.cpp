@@ -272,6 +272,81 @@ void test_sample_phase_tracker() {
            "warmup=0 必须在 startup 后立即开始 formal 计时");
 }
 
+void test_formal_sample_tracker_waits_for_time_gate_after_retention_limit() {
+    constexpr std::uint64_t retention_capacity = 100000;
+    benchmark::detail::FormalSampleTracker tracker(retention_capacity);
+    const std::size_t storage_bytes = tracker.retention_storage_bytes();
+    std::string error;
+    for (std::uint64_t sequence = 1;
+         sequence <= retention_capacity;
+         ++sequence) {
+        expect(tracker.observe(
+                   successful_phase_sample(sequence), error),
+               "容量内 formal 成功样本必须完整聚合: " +
+                   error);
+    }
+    const auto& short_summary = tracker.summary();
+    const auto short_spans = tracker.retained_sample_spans();
+    expect(short_summary.formal_sample_count == retention_capacity &&
+               short_summary.retained_sample_count == retention_capacity &&
+               short_summary.omitted_sample_count == 0 &&
+               short_spans[0].size() == retention_capacity &&
+               short_spans[1].empty() &&
+               short_spans[0].front().sequence == 1 &&
+               short_spans[0].back().sequence == retention_capacity,
+           "不超过容量的短报告必须完整留样");
+
+    expect(tracker.observe(
+               successful_phase_sample(retention_capacity + 1), error),
+           "时间门未满足时，第 100001 个 formal 成功样本仍必须继续聚合: " +
+               error);
+
+    const auto& summary = tracker.summary();
+    const auto retained_spans = tracker.retained_sample_spans();
+    expect(!tracker.gates_satisfied(10000, false) &&
+               summary.formal_sample_count == retention_capacity + 1 &&
+               summary.successful_samples == retention_capacity + 1 &&
+               summary.failed_samples == 0 &&
+               summary.retained_sample_count == retention_capacity &&
+               summary.omitted_sample_count == 1 &&
+               summary.retained_sample_count + summary.omitted_sample_count ==
+                   summary.formal_sample_count &&
+               retained_spans[0].size() + retained_spans[1].size() ==
+                   retention_capacity &&
+               retained_spans[0].front().sequence == 2 &&
+               retained_spans[1].back().sequence == retention_capacity + 1 &&
+               tracker.retention_capacity() == retention_capacity &&
+               tracker.retention_storage_bytes() == storage_bytes,
+           "formal tracker 必须等待时间门，同时保持聚合、计数守恒和固定容量尾窗");
+
+    tracker.release_retained_storage();
+    const auto released_spans = tracker.retained_sample_spans();
+    expect(tracker.retention_storage_bytes() == 0 &&
+               released_spans[0].empty() && released_spans[1].empty() &&
+               summary.formal_sample_count == retention_capacity + 1 &&
+               summary.retained_sample_count == retention_capacity &&
+               summary.omitted_sample_count == 1,
+           "尾窗复制后必须释放样本库存，同时保留发布所需守恒计数");
+}
+
+void test_bounded_report_metadata_line() {
+    std::string rewritten;
+    expect(benchmark::detail::rewrite_report_samples_dropped_line(
+               "# report_samples_dropped,0",
+               benchmark::detail::ReportFileFormat::CSV, 1, rewritten) &&
+               rewritten == "# report_samples_dropped,1",
+           "CSV staging 报告必须显式写入省略样本数");
+    expect(benchmark::detail::rewrite_report_samples_dropped_line(
+               "  \"report_samples_dropped\": 0,",
+               benchmark::detail::ReportFileFormat::JSON, 1, rewritten) &&
+               rewritten == "  \"report_samples_dropped\": 1,",
+           "JSON staging 报告必须显式写入省略样本数");
+    expect(!benchmark::detail::rewrite_report_samples_dropped_line(
+               "# sample_count,100000",
+               benchmark::detail::ReportFileFormat::CSV, 1, rewritten),
+           "非省略计数行不得被 staging 补写 seam 改动");
+}
+
 void test_invalid_options() {
     BenchmarkOptions options;
     std::string error;
@@ -470,6 +545,8 @@ int main() {
     test_performance_probe_option();
     test_coverage_phase_tracker();
     test_sample_phase_tracker();
+    test_formal_sample_tracker_waits_for_time_gate_after_retention_limit();
+    test_bounded_report_metadata_line();
     test_invalid_options();
     test_provider_mapping();
     test_openvino_options();

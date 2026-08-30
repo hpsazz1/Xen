@@ -66,6 +66,7 @@
 )
 
 $ErrorActionPreference = "Stop"
+$reportRetentionCapacity = 100000
 
 $environmentScript = Join-Path $PSScriptRoot "runtime_environment.ps1"
 if (-not (Test-Path -LiteralPath $environmentScript -PathType Leaf)) {
@@ -895,6 +896,16 @@ $expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
 if ($report.schema -ne 17) {
     throw "报告 schema 不是 17：$($report.schema)"
 }
+$retention = Get-XenRuntimeReportRetention `
+    -Report $report -RetentionCapacity $reportRetentionCapacity
+[uint64]$formalSampleCount = $retention.formal_sample_count
+[uint64]$retainedSampleCount = $retention.retained_sample_count
+[uint64]$omittedSampleCount = $retention.omitted_sample_count
+$csvLines = @(Get-Content -LiteralPath $pendingCsv -Encoding UTF8)
+$csvRetention = Get-XenRuntimeCsvRetentionMetadata -Lines $csvLines
+if ([uint64]$csvRetention.omitted_sample_count -ne $omittedSampleCount) {
+    throw "CSV 与 JSON 的 report_samples_dropped 不一致。"
+}
 if ([bool]$report.performance_probes_enabled -ne
         $enablePerformanceProbesValue) {
     throw "报告性能探针状态不符合请求。"
@@ -907,15 +918,14 @@ if ($report.provider -ne $expectedProvider -or
     $report.final_snapshot.provider -ne $expectedProvider) {
     throw "实际 Provider 不符合请求：expected=$expectedProvider, report=$($report.provider)"
 }
-if ($report.sample_count -lt $MinimumSamples -or
-    $report.successful_samples -ne $report.sample_count -or
+if ($formalSampleCount -lt $MinimumSamples -or
+    [uint64]$report.successful_samples -ne $retainedSampleCount -or
     $report.failed_samples -ne 0 -or
-    $report.report_samples_dropped -ne 0 -or
     $report.runtime_samples_dropped -ne 0) {
-    throw "报告样本数、失败数或丢弃数不符合正式基准门槛。"
+    throw "报告 formal/留样数、失败数或 Runtime 丢弃数不符合正式基准门槛。"
 }
 $reportSamples = @($report.samples)
-if ($reportSamples.Count -ne [int]$report.sample_count) {
+if ([uint64]$reportSamples.Count -ne $retainedSampleCount) {
     throw "JSON 样本数组长度与 sample_count 不一致。"
 }
 $aimSummary = Get-XenAimReportSummary `
@@ -1024,8 +1034,7 @@ foreach ($sample in $reportSamples) {
         "第 $sampleIndex 个样本 Y 比例"
     ++$sampleIndex
 }
-$csvDataLines = @(Get-Content -LiteralPath $pendingCsv -Encoding UTF8 |
-    Where-Object {
+$csvDataLines = @($csvLines | Where-Object {
         -not [string]::IsNullOrWhiteSpace($_) -and
         -not $_.StartsWith("#", [System.StringComparison]::Ordinal)
     })
@@ -1037,7 +1046,7 @@ try {
 } catch {
     throw "CSV 结构化解析失败：$($_.Exception.Message)"
 }
-if ($csvRows.Count -ne [int]$report.sample_count) {
+if ([uint64]$csvRows.Count -ne $retainedSampleCount) {
     throw "CSV 正式样本行数与 JSON sample_count 不一致。"
 }
 [uint64[]]$csvSequences = Get-XenRuntimeSequenceValues `
@@ -1046,7 +1055,6 @@ $coverage = $report.coverage
 if (-not [bool]$coverage.available -or
     [uint64]$coverage.startup.sample_count -ne 1 -or
     [uint64]$coverage.warmup.sample_count -ne $WarmupSamples -or
-    [uint64]$coverage.formal.sample_count -ne $report.sample_count -or
     [uint64]$coverage.startup.runtime_overwritten_frames -ne
         [uint64]$coverage.warmup_start_overwritten_frames -or
     [uint64]$coverage.warmup.runtime_overwritten_frames -ne
@@ -1062,16 +1070,21 @@ $previousFormalSequence = if ($WarmupSamples -gt 0) {
 } else {
     [uint64]$coverage.startup.last_sequence
 }
-[uint64]$formalSequenceGaps = 0
-foreach ($sequence in $csvSequences) {
-    if ($sequence -le $previousFormalSequence) {
-        throw "正式 CSV sequence 不是严格递增。"
-    }
-    $formalSequenceGaps += $sequence - $previousFormalSequence - 1
-    $previousFormalSequence = $sequence
-}
-if ($formalSequenceGaps -ne [uint64]$coverage.formal.sequence_gaps) {
-    throw "正式 CSV sequence 缺口与 coverage 交叉统计不一致。"
+$sequenceEvidence = Get-XenRuntimeRetainedSequenceEvidence `
+    -Sequences $csvSequences `
+    -PreviousFormalSequence $previousFormalSequence `
+    -OmittedSampleCount $omittedSampleCount
+if ([uint64]$sequenceEvidence.last_sequence -ne
+        [uint64]$coverage.formal.last_sequence -or
+    ($omittedSampleCount -eq 0 -and
+     [uint64]$sequenceEvidence.first_sequence -ne
+        [uint64]$coverage.formal.first_sequence) -or
+    ($omittedSampleCount -gt 0 -and
+     [uint64]$sequenceEvidence.first_sequence -le
+        [uint64]$coverage.formal.first_sequence) -or
+    [uint64]$sequenceEvidence.formal_sequence_gaps -ne
+        [uint64]$coverage.formal.sequence_gaps) {
+    throw "正式留样尾窗、sequence 缺口与 coverage 交叉统计不一致。"
 }
 if ([uint64]$snapshot.source_dropped_frames -eq 0) {
     $formalCounterExpected =
@@ -1229,7 +1242,7 @@ $environment = [ordered]@{
         detector_inter_threads = 0
         runtime_queue_policy = "latest-only"
         runtime_debug_ring_capacity = 4096
-        report_capacity = 100000
+        report_capacity = $reportRetentionCapacity
         expected_geometry = [ordered]@{
             source_width = $ExpectedSourceWidth
             source_height = $ExpectedSourceHeight
@@ -1256,7 +1269,14 @@ $environment = [ordered]@{
             -Algorithm SHA256).Hash
         json_sha256 = (Get-FileHash -LiteralPath $pendingJson `
             -Algorithm SHA256).Hash
-        sample_count = [long]$report.sample_count
+        sample_count = [long]$retainedSampleCount
+        formal_sample_count = [long]$formalSampleCount
+        retained_sample_count = [long]$retainedSampleCount
+        omitted_sample_count = [long]$omittedSampleCount
+        retention_capacity = [long]$retention.retention_capacity
+        retention_policy = [string]$retention.retention_policy
+        summary_scope = [string]$retention.summary_scope
+        aim_validation_scope = [string]$retention.summary_scope
         total = $report.timing.total
         pipeline_complete = $report.timing.pipeline_complete
         coverage = $report.coverage
@@ -1295,10 +1315,12 @@ try {
 }
 
 Write-Host "Runtime 正式基准通过："
-Write-Host "  samples=$($report.sample_count), provider=$expectedProvider"
-Write-Host "  total P50=$($report.timing.total.p50_ms) ms"
-Write-Host "  total P95=$($report.timing.total.p95_ms) ms"
-Write-Host "  total P99=$($report.timing.total.p99_ms) ms"
+Write-Host ("  formal_samples={0}, retained_samples={1}, omitted_samples={2}, provider={3}" -f
+    $formalSampleCount, $retainedSampleCount, $omittedSampleCount,
+    $expectedProvider)
+Write-Host "  retained total P50=$($report.timing.total.p50_ms) ms"
+Write-Host "  retained total P95=$($report.timing.total.p95_ms) ms"
+Write-Host "  retained total P99=$($report.timing.total.p99_ms) ms"
 Write-Host (("  Aim：targets={0}, commands={1}, lead_active={2}, " +
     "prediction_outside_box={3}, switches={4}") -f
     $aimSummary.target_frames, $aimSummary.command_frames,

@@ -1,6 +1,6 @@
 ﻿param(
-    [ValidateRange(1000, 100000)]
-    [int]$SyntheticSampleCount = 72002,
+    [ValidateRange(1000, 1000000)]
+    [int]$SyntheticSampleCount = 100001,
     [ValidateRange(1000, 10000)]
     [int]$LegacyProbeCount = 5000,
     [ValidateRange(2.0, 1000000.0)]
@@ -19,6 +19,7 @@
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "runtime_report_sequence.ps1")
+$reportRetentionCapacity = 100000
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -99,8 +100,12 @@ function Get-RejectionMessage {
     }
 }
 
-$jsonSamples = [object[]]::new($SyntheticSampleCount)
-$csvRows = [object[]]::new($SyntheticSampleCount)
+$retainedSampleCount = [Math]::Min(
+    $SyntheticSampleCount, $reportRetentionCapacity)
+$omittedSampleCount = $SyntheticSampleCount - $retainedSampleCount
+$firstRetainedIndex = $omittedSampleCount
+$jsonSamples = [object[]]::new($retainedSampleCount)
+$csvRows = [object[]]::new($retainedSampleCount)
 $firstGapIndex = [Math]::Max(1, [int]($SyntheticSampleCount / 3))
 $secondGapIndex = [Math]::Max(
     $firstGapIndex + 1, [int](2 * $SyntheticSampleCount / 3))
@@ -110,29 +115,175 @@ for ($index = 0; $index -lt $SyntheticSampleCount; ++$index) {
     if ($index -eq $firstGapIndex -or $index -eq $secondGapIndex) {
         ++$sequence
     }
-    $jsonSamples[$index] = [pscustomobject]@{ sequence = $sequence }
-    $csvRows[$index] = [pscustomobject]@{
-        sequence = $sequence.ToString(
-            [System.Globalization.CultureInfo]::InvariantCulture)
+    if ($index -ge $firstRetainedIndex) {
+        $retainedIndex = $index - $firstRetainedIndex
+        $jsonSamples[$retainedIndex] = [pscustomobject]@{
+            sequence = $sequence
+        }
+        $csvRows[$retainedIndex] = [pscustomobject]@{
+            sequence = $sequence.ToString(
+                [System.Globalization.CultureInfo]::InvariantCulture)
+        }
     }
 }
-$report = [pscustomobject]@{ samples = $jsonSamples }
+$report = [pscustomobject]@{
+    schema = 17
+    sample_count = $retainedSampleCount
+    successful_samples = $retainedSampleCount
+    failed_samples = 0
+    report_samples_dropped = $omittedSampleCount
+    coverage = [pscustomobject]@{
+        formal = [pscustomobject]@{
+            sample_count = $SyntheticSampleCount
+        }
+    }
+    samples = $jsonSamples
+}
+$csvRetentionLines = @(
+    "# Xen Runtime Debug Report v17",
+    "# report_samples_dropped,$omittedSampleCount")
 
 $fullWatch = [System.Diagnostics.Stopwatch]::StartNew()
 [uint64[]]$fullValues = Get-XenRuntimeSequenceValues `
     -JsonSamples $jsonSamples -CsvRows $csvRows
-$fullEvidence = Get-SequenceEvidence $fullValues 115
+$retention = Get-XenRuntimeReportRetention `
+    -Report $report -RetentionCapacity $reportRetentionCapacity
+$csvRetention = Get-XenRuntimeCsvRetentionMetadata `
+    -Lines $csvRetentionLines
+$fullEvidence = Get-XenRuntimeRetainedSequenceEvidence `
+    -Sequences $fullValues -PreviousFormalSequence 115 `
+    -OmittedSampleCount $retention.omitted_sample_count
 $fullWatch.Stop()
-Assert-True ($fullEvidence.sample_count -eq $SyntheticSampleCount -and
-        $fullEvidence.sequence_gaps -eq 2) `
-    "72k 合成报告的样本数或 sequence gap 不符合预期。"
+$expectedRetentionPolicy = if ($omittedSampleCount -eq 0) {
+    "complete"
+} else {
+    "tail"
+}
+$expectedSummaryScope = if ($omittedSampleCount -eq 0) {
+    "all_formal_samples"
+} else {
+    "retained_tail_samples"
+}
+Assert-True ($retention.formal_sample_count -eq $SyntheticSampleCount -and
+        $retention.retained_sample_count -eq $retainedSampleCount -and
+        $retention.omitted_sample_count -eq $omittedSampleCount -and
+        $retention.retention_policy -eq $expectedRetentionPolicy -and
+        $retention.summary_scope -eq $expectedSummaryScope -and
+        [uint64]$csvRetention.omitted_sample_count -eq
+            $retention.omitted_sample_count -and
+        $fullEvidence.retained_sample_count -eq $retainedSampleCount -and
+        $fullEvidence.formal_sequence_gaps -eq 2) `
+    "合成报告的 formal/留样/省略计数或 sequence gap 不符合预期。"
+$shortReport = [pscustomobject]@{
+    sample_count = 1000
+    successful_samples = 1000
+    failed_samples = 0
+    report_samples_dropped = 0
+    coverage = [pscustomobject]@{
+        formal = [pscustomobject]@{ sample_count = 1000 }
+    }
+}
+$shortRetention = Get-XenRuntimeReportRetention `
+    -Report $shortReport -RetentionCapacity $reportRetentionCapacity
+Assert-True ($shortRetention.formal_sample_count -eq 1000 -and
+        $shortRetention.retained_sample_count -eq 1000 -and
+        $shortRetention.omitted_sample_count -eq 0 -and
+        $shortRetention.retention_policy -eq "complete" -and
+        $shortRetention.summary_scope -eq "all_formal_samples") `
+    "容量内短报告必须保持逐样本完整。"
+
+$missingDroppedReport = [pscustomobject]@{
+    sample_count = 1000
+    successful_samples = 1000
+    failed_samples = 0
+    coverage = [pscustomobject]@{
+        formal = [pscustomobject]@{ sample_count = 1000 }
+    }
+}
+$missingDroppedRejection = Get-RejectionMessage {
+    Get-XenRuntimeReportRetention `
+        -Report $missingDroppedReport `
+        -RetentionCapacity $reportRetentionCapacity
+}
+Assert-True (-not [string]::IsNullOrWhiteSpace(
+        $missingDroppedRejection)) `
+    "缺失 report_samples_dropped 的短报告必须拒绝。"
+$nullDroppedReport = [pscustomobject]@{
+    sample_count = 1000
+    successful_samples = 1000
+    failed_samples = 0
+    report_samples_dropped = $null
+    coverage = [pscustomobject]@{
+        formal = [pscustomobject]@{ sample_count = 1000 }
+    }
+}
+$nullDroppedRejection = Get-RejectionMessage {
+    Get-XenRuntimeReportRetention `
+        -Report $nullDroppedReport `
+        -RetentionCapacity $reportRetentionCapacity
+}
+Assert-True (-not [string]::IsNullOrWhiteSpace($nullDroppedRejection)) `
+    "空 report_samples_dropped 不得在 PowerShell 5 中退化为 0。"
+
+$invalidRetentionReport = [pscustomobject]@{
+    sample_count = $retainedSampleCount
+    successful_samples = $retainedSampleCount
+    failed_samples = 0
+    report_samples_dropped = $omittedSampleCount + 1
+    coverage = [pscustomobject]@{
+        formal = [pscustomobject]@{
+            sample_count = $SyntheticSampleCount
+        }
+    }
+}
+$retentionRejection = Get-RejectionMessage {
+    Get-XenRuntimeReportRetention `
+        -Report $invalidRetentionReport `
+        -RetentionCapacity $reportRetentionCapacity
+}
+Assert-True (-not [string]::IsNullOrWhiteSpace($retentionRejection)) `
+    "formal 总数、留样数和省略数不守恒时必须拒绝。"
+$csvMismatchRejection = Get-RejectionMessage {
+    $invalidCsvRetention = Get-XenRuntimeCsvRetentionMetadata `
+        -Lines @("# report_samples_dropped,$($omittedSampleCount + 1)")
+    if ([uint64]$invalidCsvRetention.omitted_sample_count -ne
+        [uint64]$retention.omitted_sample_count) {
+        throw "CSV 与 JSON 的 report_samples_dropped 不一致。"
+    }
+}
+Assert-True (-not [string]::IsNullOrWhiteSpace($csvMismatchRejection)) `
+    "CSV/JSON 省略计数不一致时必须拒绝。"
+$duplicateCsvMetadataRejection = Get-RejectionMessage {
+    Get-XenRuntimeCsvRetentionMetadata -Lines @(
+        "# report_samples_dropped,$omittedSampleCount",
+        "# report_samples_dropped,$omittedSampleCount")
+}
+Assert-True (-not [string]::IsNullOrWhiteSpace(
+        $duplicateCsvMetadataRejection)) `
+    "CSV 省略计数元数据重复时必须拒绝。"
+$missingCsvMetadataRejection = Get-RejectionMessage {
+    Get-XenRuntimeCsvRetentionMetadata -Lines @("# sample_count,100000")
+}
+Assert-True (-not [string]::IsNullOrWhiteSpace(
+        $missingCsvMetadataRejection)) `
+    "CSV 缺失省略计数元数据时必须拒绝。"
+$invalidSequenceValues = [uint64[]]$fullValues.Clone()
+$invalidSequenceValues[0] = $invalidSequenceValues[0] + 1
+$sequenceRejection = Get-RejectionMessage {
+    Get-XenRuntimeRetainedSequenceEvidence `
+        -Sequences $invalidSequenceValues `
+        -PreviousFormalSequence 115 `
+        -OmittedSampleCount $retention.omitted_sample_count
+}
+Assert-True (-not [string]::IsNullOrWhiteSpace($sequenceRejection)) `
+    "formal 留样 sequence 被篡改时必须拒绝。"
 Assert-True ($fullWatch.Elapsed.TotalMilliseconds -le
         $MaximumFullScanMilliseconds) `
     ("缓存扫描耗时超限：actual={0:F3} ms, limit={1:F3} ms" -f
         $fullWatch.Elapsed.TotalMilliseconds,
         $MaximumFullScanMilliseconds)
 
-$probeCount = [Math]::Min($LegacyProbeCount, $SyntheticSampleCount)
+$probeCount = [Math]::Min($LegacyProbeCount, $retainedSampleCount)
 $probeJson = [object[]]::new($probeCount)
 $probeCsv = [object[]]::new($probeCount)
 [Array]::Copy($jsonSamples, $probeJson, $probeCount)
@@ -227,9 +378,14 @@ if (-not [string]::IsNullOrWhiteSpace($RecordedCsvPath)) {
 $summary = [ordered]@{
     schema = 1
     synthetic = [ordered]@{
-        sample_count = $SyntheticSampleCount
+        formal_sample_count = $SyntheticSampleCount
+        sample_count = $retainedSampleCount
+        retained_sample_count = $retainedSampleCount
+        omitted_sample_count = $omittedSampleCount
+        retention_policy = $retention.retention_policy
+        summary_scope = $retention.summary_scope
         full_scan_ms = $fullWatch.Elapsed.TotalMilliseconds
-        sequence_gaps = $fullEvidence.sequence_gaps
+        sequence_gaps = $fullEvidence.formal_sequence_gaps
         legacy_probe_count = $probeCount
         legacy_ms = $legacyWatch.Elapsed.TotalMilliseconds
         cached_ms = $cachedWatch.Elapsed.TotalMilliseconds

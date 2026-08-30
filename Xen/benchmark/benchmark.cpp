@@ -452,25 +452,234 @@ private:
 void remove_benchmark_outputs(
         const std::string& csv_path,
         const std::string& json_path,
+        const std::string& csv_staging_path,
+        const std::string& json_staging_path,
         const std::string& provider_profile_path) noexcept {
     try {
         std::error_code ignored;
         std::filesystem::remove(csv_path, ignored);
         ignored.clear();
         std::filesystem::remove(json_path, ignored);
-        const std::string temporary_suffix = ".tmp." +
+        const std::string debug_temporary_suffix = ".tmp." +
             std::to_string(static_cast<unsigned long long>(
                 GetCurrentProcessId()));
-        ignored.clear();
-        std::filesystem::remove(csv_path + temporary_suffix, ignored);
-        ignored.clear();
-        std::filesystem::remove(json_path + temporary_suffix, ignored);
+        const std::string retention_temporary_suffix =
+            ".retention.tmp." +
+            std::to_string(static_cast<unsigned long long>(
+                GetCurrentProcessId()));
+        for (const auto* staging_path : {
+                 &csv_staging_path, &json_staging_path}) {
+            if (staging_path->empty()) continue;
+            ignored.clear();
+            std::filesystem::remove(*staging_path, ignored);
+            ignored.clear();
+            std::filesystem::remove(
+                *staging_path + debug_temporary_suffix, ignored);
+            ignored.clear();
+            std::filesystem::remove(
+                *staging_path + retention_temporary_suffix, ignored);
+        }
         if (!provider_profile_path.empty()) {
             ignored.clear();
             std::filesystem::remove(provider_profile_path, ignored);
         }
     } catch (...) {
         // 失败收口不能覆盖原始错误；PowerShell 外层还会清理 pending 文件。
+    }
+}
+
+bool read_report_samples_dropped(
+        const std::string& path,
+        benchmark::detail::ReportFileFormat format,
+        std::uint64_t& value,
+        std::string& error) noexcept {
+    try {
+        std::ifstream input(std::filesystem::u8path(path), std::ios::binary);
+        if (!input) {
+            set_error(error, "无法回读 staging 报告省略计数: " + path);
+            return false;
+        }
+        const std::string_view prefix =
+            format == benchmark::detail::ReportFileFormat::CSV
+            ? "# report_samples_dropped,"
+            : "  \"report_samples_dropped\": ";
+        std::size_t matches = 0;
+        std::uint64_t parsed_value = 0;
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.starts_with(prefix)) continue;
+            std::string_view encoded(line);
+            encoded.remove_prefix(prefix.size());
+            if (format == benchmark::detail::ReportFileFormat::JSON) {
+                if (encoded.empty() || encoded.back() != ',') {
+                    set_error(error,
+                        "staging JSON 省略计数行格式非法");
+                    return false;
+                }
+                encoded.remove_suffix(1);
+            }
+            std::uint64_t candidate = 0;
+            const auto [end, result] = std::from_chars(
+                encoded.data(), encoded.data() + encoded.size(), candidate);
+            if (result != std::errc{} ||
+                end != encoded.data() + encoded.size()) {
+                set_error(error, "staging 报告省略计数不是 uint64");
+                return false;
+            }
+            parsed_value = candidate;
+            ++matches;
+        }
+        if (!input.eof() || matches != 1) {
+            set_error(error,
+                "staging 报告必须且只能包含一条省略计数元数据");
+            return false;
+        }
+        value = parsed_value;
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        set_error(error, std::string("回读 staging 报告异常: ") +
+                          exception.what());
+        return false;
+    } catch (...) {
+        set_error(error, "回读 staging 报告时发生未知异常");
+        return false;
+    }
+}
+
+bool rewrite_report_samples_dropped(
+        const std::string& path,
+        benchmark::detail::ReportFileFormat format,
+        std::uint64_t omitted_sample_count,
+        std::string& error) noexcept {
+    if (omitted_sample_count == 0) return true;
+    std::filesystem::path temporary;
+    try {
+        const auto target = std::filesystem::u8path(path);
+        if (!std::filesystem::is_regular_file(target)) {
+            set_error(error, "staging 报告不存在: " + path);
+            return false;
+        }
+        temporary = target;
+        temporary += ".retention.tmp." +
+            std::to_string(static_cast<unsigned long long>(
+                GetCurrentProcessId()));
+        if (std::filesystem::exists(temporary)) {
+            set_error(error, "staging 补写临时目标已存在");
+            return false;
+        }
+
+        std::ifstream input(target, std::ios::binary);
+        std::ofstream output(
+            temporary, std::ios::binary | std::ios::trunc);
+        if (!input || !output) {
+            set_error(error, "无法打开 staging 报告或补写临时文件");
+            return false;
+        }
+        std::size_t matches = 0;
+        std::string line;
+        std::string rewritten;
+        while (std::getline(input, line)) {
+            if (benchmark::detail::rewrite_report_samples_dropped_line(
+                    line, format, omitted_sample_count, rewritten)) {
+                ++matches;
+                output << rewritten << '\n';
+            } else {
+                output << line << '\n';
+            }
+        }
+        output.flush();
+        const bool stream_valid = input.eof() && output.good();
+        input.close();
+        output.close();
+        if (!stream_valid || matches != 1) {
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            set_error(error,
+                "staging 报告补写失败或省略计数标记不唯一");
+            return false;
+        }
+        if (!MoveFileExW(
+                temporary.c_str(), target.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            const DWORD win32_error = GetLastError();
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            set_error(error, "staging 报告补写发布失败，Win32Error=" +
+                              std::to_string(win32_error));
+            return false;
+        }
+        temporary.clear();
+        std::uint64_t verified = 0;
+        if (!read_report_samples_dropped(
+                path, format, verified, error) ||
+            verified != omitted_sample_count) {
+            if (error.empty()) {
+                set_error(error, "staging 报告省略计数回读不一致");
+            }
+            return false;
+        }
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        set_error(error, std::string("补写 staging 报告异常: ") +
+                          exception.what());
+    } catch (...) {
+        set_error(error, "补写 staging 报告时发生未知异常");
+    }
+    if (!temporary.empty()) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+    }
+    return false;
+}
+
+bool publish_benchmark_reports(
+        const std::string& csv_staging_path,
+        const std::string& json_staging_path,
+        const std::string& csv_path,
+        const std::string& json_path,
+        std::string& error) noexcept {
+    try {
+        const auto csv_staging =
+            std::filesystem::u8path(csv_staging_path);
+        const auto json_staging =
+            std::filesystem::u8path(json_staging_path);
+        const auto csv_target = std::filesystem::u8path(csv_path);
+        const auto json_target = std::filesystem::u8path(json_path);
+        if (!std::filesystem::is_regular_file(csv_staging) ||
+            !std::filesystem::is_regular_file(json_staging) ||
+            std::filesystem::exists(csv_target) ||
+            std::filesystem::exists(json_target)) {
+            set_error(error, "staging 报告不完整或正式目标已存在");
+            return false;
+        }
+        if (!MoveFileExW(
+                csv_staging.c_str(), csv_target.c_str(),
+                MOVEFILE_WRITE_THROUGH)) {
+            set_error(error, "CSV 正式报告发布失败，Win32Error=" +
+                              std::to_string(GetLastError()));
+            return false;
+        }
+        if (!MoveFileExW(
+                json_staging.c_str(), json_target.c_str(),
+                MOVEFILE_WRITE_THROUGH)) {
+            const DWORD win32_error = GetLastError();
+            std::error_code ignored;
+            std::filesystem::remove(csv_target, ignored);
+            set_error(error, "JSON 正式报告发布失败，Win32Error=" +
+                              std::to_string(win32_error));
+            return false;
+        }
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        set_error(error, std::string("发布正式报告异常: ") +
+                          exception.what());
+        return false;
+    } catch (...) {
+        set_error(error, "发布正式报告时发生未知异常");
+        return false;
     }
 }
 
@@ -949,6 +1158,8 @@ bool run_runtime_benchmark(
         std::string& error) noexcept {
     std::string csv_path;
     std::string json_path;
+    std::string csv_staging_path;
+    std::string json_staging_path;
     std::string provider_profile_path;
     bool report_outputs_owned = false;
     ReadyFileGuard ready_file(options.ready_file_path);
@@ -989,6 +1200,30 @@ bool run_runtime_benchmark(
              std::filesystem::exists(provider_profile_path))) {
             set_error(error, "报告目标已存在，拒绝覆盖: " +
                               options.report_prefix);
+            return false;
+        }
+        const std::string staging_suffix = ".pending." +
+            std::to_string(static_cast<unsigned long long>(
+                GetCurrentProcessId())) + '-' +
+            std::to_string(static_cast<unsigned long long>(
+                GetTickCount64()));
+        csv_staging_path = csv_path + staging_suffix;
+        json_staging_path = json_path + staging_suffix;
+        const std::string debug_temporary_suffix = ".tmp." +
+            std::to_string(static_cast<unsigned long long>(
+                GetCurrentProcessId()));
+        const std::string retention_temporary_suffix =
+            ".retention.tmp." +
+            std::to_string(static_cast<unsigned long long>(
+                GetCurrentProcessId()));
+        const auto staging_path_exists = [&](const std::string& path) {
+            return std::filesystem::exists(path) ||
+                std::filesystem::exists(path + debug_temporary_suffix) ||
+                std::filesystem::exists(path + retention_temporary_suffix);
+        };
+        if (staging_path_exists(csv_staging_path) ||
+            staging_path_exists(json_staging_path)) {
+            set_error(error, "本轮 staging 报告目标已存在，拒绝覆盖");
             return false;
         }
         report_outputs_owned = true;
@@ -1061,8 +1296,8 @@ bool run_runtime_benchmark(
                         runtime.stop();
                     } else {
                         DebugReportConfig report_config;
-                        report_config.csv_path = csv_path;
-                        report_config.json_path = json_path;
+                        report_config.csv_path = csv_staging_path;
+                        report_config.json_path = json_staging_path;
                         report_config.session_id =
                             std::to_string(GetCurrentProcessId()) + "-" +
                             std::to_string(GetTickCount64());
@@ -1075,12 +1310,12 @@ bool run_runtime_benchmark(
                         report_config.max_samples = kMaximumReportSamples;
                         report_config.performance_probes_enabled =
                             options.enable_performance_probes;
-                        if (!report.start(report_config, error)) {
-                            runtime.stop();
-                        } else {
+                        {
                             std::vector<RuntimePipelineSample> pending;
                             benchmark::detail::SamplePhaseTracker phase_tracker(
                                 options.warmup_samples);
+                            benchmark::detail::FormalSampleTracker formal_tracker(
+                                kMaximumReportSamples);
                             bool measurement_started = false;
                             auto measurement_started_at = runtime_started;
                             bool gates_satisfied = false;
@@ -1088,7 +1323,6 @@ bool run_runtime_benchmark(
 
                             const auto consume_pending = [&]() noexcept {
                                 try {
-                                    std::size_t formal_begin = pending.size();
                                     for (std::size_t index = 0;
                                          index < pending.size(); ++index) {
                                         const auto& sample = pending[index];
@@ -1178,19 +1412,10 @@ bool run_runtime_benchmark(
                                                     CoveragePhase::FORMAL) {
                                             continue;
                                         }
-                                        if (formal_begin == pending.size()) {
-                                            formal_begin = index;
-                                        }
-                                    }
-                                    if (formal_begin < pending.size()) {
-                                        if (phase_tracker.formal_successful() >
-                                                kMaximumReportSamples) {
-                                            set_error(error,
-                                                "正式样本超过报告固定容量");
+                                        if (!formal_tracker.observe(
+                                                sample, error)) {
                                             return false;
                                         }
-                                        report.ingest(std::span(
-                                            pending).subspan(formal_begin));
                                     }
                                     return true;
                                 } catch (...) {
@@ -1255,11 +1480,11 @@ bool run_runtime_benchmark(
                                                 now - measurement_started_at)
                                             .count();
                                     gates_satisfied =
-                                        phase_tracker.formal_successful() >=
-                                            options.minimum_samples &&
-                                        measurement_seconds >=
-                                            static_cast<long long>(
-                                                options.minimum_seconds);
+                                        formal_tracker.gates_satisfied(
+                                            options.minimum_samples,
+                                            measurement_seconds >=
+                                                static_cast<long long>(
+                                                    options.minimum_seconds));
                                 }
                                 if (!gates_satisfied) {
                                     std::this_thread::sleep_for(kPollInterval);
@@ -1288,7 +1513,7 @@ bool run_runtime_benchmark(
                                 run_failed = true;
                             }
                             if (!run_failed &&
-                                phase_tracker.formal_successful() <
+                                formal_tracker.summary().formal_sample_count <
                                     options.minimum_samples) {
                                 set_error(error,
                                     "正式成功样本未达到门槛");
@@ -1298,22 +1523,41 @@ bool run_runtime_benchmark(
                                     final_snapshot, error)) {
                                 run_failed = true;
                             }
+                            if (!run_failed &&
+                                !report.start(report_config, error)) {
+                                run_failed = true;
+                            }
+                            if (!run_failed) {
+                                for (const auto retained_span :
+                                     formal_tracker.retained_sample_spans()) {
+                                    if (!retained_span.empty()) {
+                                        report.ingest(retained_span);
+                                    }
+                                }
+                                // DebugReport 已复制尾窗；在构造 CSV/JSON 前释放
+                                // tracker 库存，避免序列化阶段继续持有双份样本。
+                                formal_tracker.release_retained_storage();
+                            }
                             if (!run_failed && report.finalize(
                                     final_snapshot, error,
                                     &phase_tracker.coverage())) {
                                 const auto& summary = report.summary();
+                                const auto& formal_summary =
+                                    formal_tracker.summary();
                                 const std::uint64_t formal_samples =
-                                    phase_tracker.formal_successful();
+                                    formal_summary.formal_sample_count;
+                                const std::size_t retained_samples =
+                                    formal_summary.retained_sample_count;
                                 const bool probe_summary_valid =
                                     options.enable_performance_probes
                                     ? summary.pipeline_complete.sample_count ==
-                                          formal_samples &&
+                                          retained_samples &&
                                       summary.runtime_handoff.sample_count ==
-                                          formal_samples &&
+                                          retained_samples &&
                                       (config.capture.backend !=
                                            CaptureBackend::NDI ||
                                        (summary.ndi_receive_call.sample_count ==
-                                            formal_samples &&
+                                            retained_samples &&
                                         summary.ndi_video_queue_depth
                                                 .sample_count > 0))
                                     : summary.pipeline_complete.sample_count == 0 &&
@@ -1321,28 +1565,86 @@ bool run_runtime_benchmark(
                                       summary.ndi_receive_call.sample_count == 0 &&
                                       summary.ndi_video_queue_depth.sample_count ==
                                           0;
-                                if (summary.sample_count == formal_samples &&
-                                    summary.successful_samples == formal_samples &&
+                                if (phase_tracker.formal_successful() ==
+                                        formal_samples &&
+                                    formal_summary.successful_samples ==
+                                        formal_samples &&
+                                    formal_summary.failed_samples == 0 &&
+                                    static_cast<std::uint64_t>(
+                                        retained_samples) +
+                                            formal_summary.omitted_sample_count ==
+                                        formal_samples &&
+                                    summary.sample_count == retained_samples &&
+                                    summary.successful_samples ==
+                                        retained_samples &&
                                     summary.failed_samples == 0 &&
                                     summary.report_samples_dropped == 0 &&
                                     summary.runtime_samples_dropped == 0 &&
                                     summary.coverage.available &&
+                                    summary.coverage.formal.sample_count ==
+                                        formal_samples &&
                                     probe_summary_valid) {
-                                    success = true;
-                                    LOG_INFO(
-                                        "benchmark",
-                                        "正式基准完成: startup={}, warmup={}, samples={}, "
-                                        "total_p50={:.3f}ms, total_p95={:.3f}ms, "
-                                        "total_p99={:.3f}ms",
-                                        phase_tracker.startup_successful(),
-                                        phase_tracker.warmup_successful(),
-                                        formal_samples,
-                                        summary.total.p50_ms,
-                                        summary.total.p95_ms,
-                                        summary.total.p99_ms);
+                                    const auto omitted_samples =
+                                        formal_summary.omitted_sample_count;
+                                    bool metadata_valid = true;
+                                    if (omitted_samples > 0) {
+                                        metadata_valid =
+                                            rewrite_report_samples_dropped(
+                                                csv_staging_path,
+                                                benchmark::detail::
+                                                    ReportFileFormat::CSV,
+                                                omitted_samples, error) &&
+                                            rewrite_report_samples_dropped(
+                                                json_staging_path,
+                                                benchmark::detail::
+                                                    ReportFileFormat::JSON,
+                                                omitted_samples, error);
+                                    } else {
+                                        std::uint64_t csv_omitted = 0;
+                                        std::uint64_t json_omitted = 0;
+                                        metadata_valid =
+                                            read_report_samples_dropped(
+                                                csv_staging_path,
+                                                benchmark::detail::
+                                                    ReportFileFormat::CSV,
+                                                csv_omitted, error) &&
+                                            read_report_samples_dropped(
+                                                json_staging_path,
+                                                benchmark::detail::
+                                                    ReportFileFormat::JSON,
+                                                json_omitted, error) &&
+                                            csv_omitted == 0 &&
+                                            json_omitted == 0;
+                                    }
+                                    if (!metadata_valid && error.empty()) {
+                                        set_error(error,
+                                            "CSV/JSON staging 省略计数不一致");
+                                    }
+                                    if (metadata_valid &&
+                                        publish_benchmark_reports(
+                                            csv_staging_path,
+                                            json_staging_path,
+                                            csv_path, json_path, error)) {
+                                        success = true;
+                                        LOG_INFO(
+                                            "benchmark",
+                                            "正式基准完成: startup={}, warmup={}, formal_samples={}, "
+                                            "retained_samples={}, omitted_samples={}, "
+                                            "retained_total_p50={:.3f}ms, "
+                                            "retained_total_p95={:.3f}ms, "
+                                            "retained_total_p99={:.3f}ms",
+                                            phase_tracker.startup_successful(),
+                                            phase_tracker.warmup_successful(),
+                                            formal_samples,
+                                            retained_samples,
+                                            omitted_samples,
+                                            summary.total.p50_ms,
+                                            summary.total.p95_ms,
+                                            summary.total.p99_ms);
+                                    }
                                 } else {
                                     set_error(error,
-                                        "发布后的报告汇总不符合零失败契约");
+                                        "staging 报告汇总不符合有界留样契约");
                                 }
                             }
                         }
@@ -1353,11 +1655,13 @@ bool run_runtime_benchmark(
             }
         }
         if (!success && report_outputs_owned) {
-            // 报告目标在入口已确认不存在，因此这里只清理本轮创建的精确
-            // CSV、JSON 和 Provider profile。即使 JSON 原子发布或发布后汇总
-            // 校验失败，也不能留下可被误认为有效结果的单个文件。
+            // 正式和 staging 目标在入口均确认不存在，因此这里只清理本轮
+            // 创建的精确 CSV、JSON、临时文件和 Provider profile。补写或成对
+            // 发布失败时不能留下可被误认为有效结果的单个文件。
             remove_benchmark_outputs(
-                csv_path, json_path, provider_profile_path);
+                csv_path, json_path,
+                csv_staging_path, json_staging_path,
+                provider_profile_path);
         }
         Log::shutdown();
         if (success) error.clear();
@@ -1365,7 +1669,9 @@ bool run_runtime_benchmark(
     } catch (const std::exception& exception) {
         if (report_outputs_owned) {
             remove_benchmark_outputs(
-                csv_path, json_path, provider_profile_path);
+                csv_path, json_path,
+                csv_staging_path, json_staging_path,
+                provider_profile_path);
         }
         Log::shutdown();
         set_error(error, std::string("执行 Runtime 基准异常: ") +
@@ -1374,7 +1680,9 @@ bool run_runtime_benchmark(
     } catch (...) {
         if (report_outputs_owned) {
             remove_benchmark_outputs(
-                csv_path, json_path, provider_profile_path);
+                csv_path, json_path,
+                csv_staging_path, json_staging_path,
+                provider_profile_path);
         }
         Log::shutdown();
         set_error(error, "执行 Runtime 基准时发生未知异常");

@@ -4,8 +4,14 @@
 #include "debug/debug.h"
 #include "runtime/runtime.h"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace benchmark::detail {
 
@@ -233,6 +239,134 @@ private:
     std::uint64_t warmup_successful_ = 0;
     std::uint64_t formal_successful_ = 0;
 };
+
+struct FormalSampleSummary {
+    // raw schema 17 的 sample_count 只表示留样数；这里显式命名为
+    // formal_sample_count，避免把全程成功总数误写成留样窗口大小。
+    std::uint64_t formal_sample_count = 0;
+    std::uint64_t successful_samples = 0;
+    std::uint64_t failed_samples = 0;
+    std::size_t retained_sample_count = 0;
+    std::uint64_t omitted_sample_count = 0;
+};
+
+// formal 成功样本由这里统一聚合并写入固定容量环。生产循环与测试读取
+// 同一组按 sequence 排序的 span，避免 DebugReport 满容量后逐样本搬移。
+class FormalSampleTracker final {
+public:
+    explicit FormalSampleTracker(std::size_t retention_capacity)
+        : retention_capacity_(retention_capacity) {
+        retained_samples_.reserve(retention_capacity_);
+    }
+
+    bool observe(const RuntimePipelineSample& sample,
+                 std::string& error) noexcept {
+        if (!debug_sample_succeeded(sample)) {
+            error = "失败 Pipeline 样本不得进入 formal 报告";
+            return false;
+        }
+        if (summary_.formal_sample_count ==
+                std::numeric_limits<std::uint64_t>::max()) {
+            error = "formal 成功样本计数溢出";
+            return false;
+        }
+        if (retention_capacity_ == 0 || storage_released_) {
+            error = "formal 报告留样库存不可用";
+            return false;
+        }
+
+        try {
+            if (retained_samples_.size() < retention_capacity_) {
+                retained_samples_.push_back(sample);
+            } else {
+                retained_samples_[next_write_index_] = sample;
+                next_write_index_ =
+                    (next_write_index_ + 1) % retention_capacity_;
+                ++summary_.omitted_sample_count;
+            }
+            ++summary_.formal_sample_count;
+            ++summary_.successful_samples;
+            summary_.retained_sample_count = retained_samples_.size();
+        } catch (...) {
+            error = "写入 formal 固定容量留样环失败";
+            return false;
+        }
+        error.clear();
+        return true;
+    }
+
+    bool gates_satisfied(std::uint64_t minimum_samples,
+                         bool time_gate_satisfied) const noexcept {
+        return summary_.formal_sample_count >= minimum_samples &&
+            time_gate_satisfied;
+    }
+
+    const FormalSampleSummary& summary() const noexcept {
+        return summary_;
+    }
+
+    std::size_t retention_capacity() const noexcept {
+        return retention_capacity_;
+    }
+
+    std::size_t retention_storage_bytes() const noexcept {
+        return retained_samples_.capacity() *
+            sizeof(RuntimePipelineSample);
+    }
+
+    std::array<std::span<const RuntimePipelineSample>, 2>
+    retained_sample_spans() const noexcept {
+        std::array<std::span<const RuntimePipelineSample>, 2> spans;
+        if (retained_samples_.empty()) return spans;
+        if (retained_samples_.size() < retention_capacity_ ||
+            next_write_index_ == 0) {
+            spans[0] = std::span(retained_samples_);
+            return spans;
+        }
+        spans[0] = std::span(retained_samples_).subspan(next_write_index_);
+        spans[1] = std::span(retained_samples_).first(next_write_index_);
+        return spans;
+    }
+
+    void release_retained_storage() noexcept {
+        std::vector<RuntimePipelineSample>().swap(retained_samples_);
+        next_write_index_ = 0;
+        storage_released_ = true;
+    }
+
+private:
+    FormalSampleSummary summary_;
+    std::vector<RuntimePipelineSample> retained_samples_;
+    std::size_t retention_capacity_ = 0;
+    std::size_t next_write_index_ = 0;
+    bool storage_released_ = false;
+};
+
+enum class ReportFileFormat {
+    CSV,
+    JSON,
+};
+
+// DebugReport 在 staging 中只接收最终尾窗，因此其内部 dropped 为 0。
+// 正式报告发布前只允许精确改写这一条元数据，逐样本正文保持不变。
+inline bool rewrite_report_samples_dropped_line(
+        std::string_view line,
+        ReportFileFormat format,
+        std::uint64_t omitted_sample_count,
+        std::string& rewritten) {
+    const std::string_view marker = format == ReportFileFormat::CSV
+        ? "# report_samples_dropped,0"
+        : "  \"report_samples_dropped\": 0,";
+    if (line != marker) {
+        rewritten.clear();
+        return false;
+    }
+    const std::string value = std::to_string(omitted_sample_count);
+    rewritten = format == ReportFileFormat::CSV
+        ? "# report_samples_dropped," + value
+        : "  \"report_samples_dropped\": " + value + ',';
+    return true;
+}
 
 } // namespace benchmark::detail
 
