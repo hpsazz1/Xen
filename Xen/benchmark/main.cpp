@@ -8,6 +8,7 @@
 #endif
 
 #include "benchmark/benchmark.h"
+#include "benchmark/benchmark_internal.h"
 
 #include <iostream>
 #include <string>
@@ -17,13 +18,8 @@
 namespace {
 
 BOOL WINAPI benchmark_control_handler(DWORD control_type) noexcept {
-    if (control_type == CTRL_C_EVENT || control_type == CTRL_BREAK_EVENT ||
-        control_type == CTRL_CLOSE_EVENT ||
-        control_type == CTRL_SHUTDOWN_EVENT) {
-        request_benchmark_stop();
-        return TRUE;
-    }
-    return FALSE;
+    return benchmark::detail::handle_benchmark_console_control(control_type)
+        ? TRUE : FALSE;
 }
 
 } // namespace
@@ -49,6 +45,7 @@ int wmain(int argc, wchar_t* argv[]) {
                   << benchmark_usage();
         return 2;
     }
+    benchmark::detail::prepare_benchmark_console_control();
     if (!SetConsoleCtrlHandler(benchmark_control_handler, TRUE)) {
         std::cerr << "无法安装控制台中止处理器，Win32Error="
                   << GetLastError() << '\n';

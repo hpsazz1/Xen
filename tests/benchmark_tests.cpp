@@ -1,17 +1,28 @@
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+
+#include <Windows.h>
+
+#ifdef ERROR
+#undef ERROR
+#endif
+
 #include "benchmark/benchmark.h"
 #include "benchmark/benchmark_internal.h"
 
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
-
-#include <windows.h>
 
 namespace {
 
@@ -160,6 +171,311 @@ BenchmarkParseStatus parse(
     return parse_benchmark_options(arguments, options, error);
 }
 
+class TemporaryBenchmarkRun final {
+public:
+    TemporaryBenchmarkRun() noexcept {
+        std::error_code error;
+        const auto root = std::filesystem::temp_directory_path(error);
+        if (error) return;
+        const auto nonce = std::chrono::steady_clock::now()
+            .time_since_epoch().count();
+        for (int attempt = 0; attempt < 32; ++attempt) {
+            auto candidate = root /
+                ("xen-benchmark-cancel-tests-" + std::to_string(nonce) +
+                 '-' + std::to_string(attempt));
+            error.clear();
+            if (std::filesystem::create_directory(candidate, error)) {
+                path_ = std::move(candidate);
+                break;
+            }
+            if (error) return;
+        }
+        if (path_.empty()) return;
+        model_path_ = path_ / "model.onnx";
+        sentinel_path_ = path_ / "sentinel.txt";
+        std::ofstream model(model_path_, std::ios::binary | std::ios::trunc);
+        std::ofstream sentinel(
+            sentinel_path_, std::ios::binary | std::ios::trunc);
+        model << "test-model-placeholder";
+        sentinel << "keep";
+        valid_ = model.good() && sentinel.good();
+    }
+
+    TemporaryBenchmarkRun(const TemporaryBenchmarkRun&) = delete;
+    TemporaryBenchmarkRun& operator=(const TemporaryBenchmarkRun&) = delete;
+
+    ~TemporaryBenchmarkRun() noexcept {
+        if (path_.empty()) return;
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+
+    bool valid() const noexcept { return valid_; }
+
+    BenchmarkOptions options() const {
+        BenchmarkOptions options;
+        options.model_path = model_path_.string();
+        options.report_prefix = (path_ / "result").string();
+        options.ready_file_path = (path_ / "result.ready.json").string();
+        options.provider_profile_path =
+            (path_ / "result.provider-profile.json").string();
+        options.backend = BackendType::TENSORRT;
+        options.backend_explicit = true;
+        options.warmup_samples = 0;
+        options.minimum_samples = 1;
+        options.minimum_seconds = 0;
+        options.maximum_seconds = 1;
+        return options;
+    }
+
+    bool outputs_clean() const noexcept {
+        try {
+            const auto options_value = options();
+            if (std::filesystem::exists(options_value.report_prefix + ".csv") ||
+                std::filesystem::exists(options_value.report_prefix + ".json") ||
+                std::filesystem::exists(options_value.ready_file_path) ||
+                std::filesystem::exists(options_value.provider_profile_path)) {
+                return false;
+            }
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(path_)) {
+                const std::string name = entry.path().filename().string();
+                if (name.find(".pending.") != std::string::npos ||
+                    name.find(".tmp.") != std::string::npos) {
+                    return false;
+                }
+            }
+            std::ifstream sentinel(sentinel_path_, std::ios::binary);
+            std::string contents;
+            sentinel >> contents;
+            return std::filesystem::is_regular_file(model_path_) &&
+                contents == "keep";
+        } catch (...) {
+            return false;
+        }
+    }
+
+private:
+    std::filesystem::path path_;
+    std::filesystem::path model_path_;
+    std::filesystem::path sentinel_path_;
+    bool valid_ = false;
+};
+
+struct BenchmarkRunAdapterState {
+    bool fail_setup = false;
+    bool block_setup = false;
+    bool request_stop_in_runtime_factory = false;
+    bool setup_entered = false;
+    bool release_setup = false;
+    int setup_calls = 0;
+    int runtime_factory_calls = 0;
+    std::mutex mutex;
+    std::condition_variable condition;
+};
+
+bool fake_provider_setup(
+        void* context,
+        const DetectorConfig&,
+        const std::string& output_path,
+        const char*,
+        std::string& error) {
+    auto& state = *static_cast<BenchmarkRunAdapterState*>(context);
+    ++state.setup_calls;
+    try {
+        std::ofstream output(
+            std::filesystem::u8path(output_path),
+            std::ios::binary | std::ios::trunc);
+        output << "{\"provider_profile\":true}\n";
+        output.flush();
+        if (!output.good()) {
+            error = "注入 setup 无法创建 Provider profile";
+            return false;
+        }
+    } catch (...) {
+        error = "注入 setup 写入 Provider profile 异常";
+        return false;
+    }
+    {
+        std::unique_lock lock(state.mutex);
+        state.setup_entered = true;
+        state.condition.notify_all();
+        state.condition.wait(lock, [&state] {
+            return !state.block_setup || state.release_setup;
+        });
+    }
+    if (state.fail_setup) {
+        error = "注入 setup 失败";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+std::unique_ptr<Runtime> fake_runtime_factory(void* context) {
+    auto& state = *static_cast<BenchmarkRunAdapterState*>(context);
+    ++state.runtime_factory_calls;
+    if (state.request_stop_in_runtime_factory) {
+        request_benchmark_stop();
+    }
+    return {};
+}
+
+benchmark::detail::BenchmarkRunAdapter adapter_for(
+        BenchmarkRunAdapterState& state) noexcept {
+    return {&state, fake_provider_setup, fake_runtime_factory};
+}
+
+bool wait_for_setup(BenchmarkRunAdapterState& state) {
+    std::unique_lock lock(state.mutex);
+    return state.condition.wait_for(
+        lock, std::chrono::seconds(2), [&state] {
+            return state.setup_entered;
+        });
+}
+
+void release_setup(BenchmarkRunAdapterState& state) noexcept {
+    std::lock_guard lock(state.mutex);
+    state.release_setup = true;
+    state.condition.notify_all();
+}
+
+void test_normal_setup_reaches_runtime_factory_and_cleans_outputs() {
+    TemporaryBenchmarkRun run;
+    expect(run.valid(), "正常 setup fixture 必须创建成功");
+    if (!run.valid()) return;
+
+    BenchmarkRunAdapterState state;
+    std::string error;
+    expect(!benchmark::detail::run_runtime_benchmark_with_adapter(
+               run.options(), adapter_for(state), error),
+           "fake Runtime factory 拒绝后正式编排应失败");
+    expect(state.setup_calls == 1 && state.runtime_factory_calls == 1 &&
+               error.find("创建 Runtime") != std::string::npos,
+           "正常 setup 必须恰好到达一次 Runtime factory: " + error);
+    expect(run.outputs_clean(),
+           "fake Runtime factory 拒绝后必须清理本轮 profile/ready/pending");
+}
+
+void test_failed_setup_skips_runtime_and_cleans_outputs() {
+    TemporaryBenchmarkRun run;
+    expect(run.valid(), "失败 setup fixture 必须创建成功");
+    if (!run.valid()) return;
+
+    BenchmarkRunAdapterState state;
+    state.fail_setup = true;
+    std::string error;
+    expect(!benchmark::detail::run_runtime_benchmark_with_adapter(
+               run.options(), adapter_for(state), error),
+           "setup 失败必须使正式编排失败");
+    expect(state.setup_calls == 1 && state.runtime_factory_calls == 0 &&
+               error == "注入 setup 失败",
+           "setup 失败不得进入 Runtime 且必须保留原始错误: " + error);
+    expect(run.outputs_clean(),
+           "setup 失败后必须清理本轮 profile/ready/pending");
+}
+
+void test_stop_during_blocking_setup_skips_runtime_and_allows_next_run() {
+    TemporaryBenchmarkRun run;
+    expect(run.valid(), "阻塞 setup fixture 必须创建成功");
+    if (!run.valid()) return;
+
+    BenchmarkRunAdapterState cancelled;
+    cancelled.block_setup = true;
+    bool cancelled_result = true;
+    std::string cancelled_error;
+    const auto options = run.options();
+    std::thread worker([&] {
+        cancelled_result =
+            benchmark::detail::run_runtime_benchmark_with_adapter(
+                options, adapter_for(cancelled), cancelled_error);
+    });
+    const bool setup_is_blocked = wait_for_setup(cancelled);
+    expect(setup_is_blocked,
+           "测试必须先确认 production setup seam 已经阻塞");
+    if (setup_is_blocked) {
+        expect(benchmark::detail::handle_benchmark_console_control(
+                   CTRL_C_EVENT),
+               "CLI Ctrl+C handler 必须确认已处理 stop 事件");
+    }
+    release_setup(cancelled);
+    worker.join();
+
+    expect(!cancelled_result && cancelled.setup_calls == 1 &&
+               cancelled.runtime_factory_calls == 0 &&
+               cancelled_error.find("人工中止") != std::string::npos,
+           "setup 期间 stop 必须在 Runtime factory 前失败: " +
+               cancelled_error);
+    expect(run.outputs_clean(),
+           "setup 取消后必须清理 profile/ready/pending 且保留 fixture");
+
+    BenchmarkRunAdapterState retry;
+    std::string retry_error;
+    expect(!benchmark::detail::run_runtime_benchmark_with_adapter(
+               options, adapter_for(retry), retry_error),
+           "重复运行到 fake Runtime factory 后应按注入边界失败");
+    expect(retry.setup_calls == 1 && retry.runtime_factory_calls == 1 &&
+               retry_error.find("创建 Runtime") != std::string::npos,
+           "取消后的下一轮正常 setup 不得继承旧 stop: " + retry_error);
+    expect(run.outputs_clean(),
+           "重复运行失败后仍必须清理本轮全部临时产物");
+}
+
+void test_stop_after_runtime_factory_is_observed_before_start() {
+    TemporaryBenchmarkRun run;
+    expect(run.valid(), "Runtime start 前 stop fixture 必须创建成功");
+    if (!run.valid()) return;
+
+    BenchmarkRunAdapterState state;
+    state.request_stop_in_runtime_factory = true;
+    std::string error;
+    expect(!benchmark::detail::run_runtime_benchmark_with_adapter(
+               run.options(), adapter_for(state), error),
+           "Runtime factory 期间 stop 必须使正式编排失败");
+    expect(state.setup_calls == 1 && state.runtime_factory_calls == 1 &&
+               error.find("人工中止") != std::string::npos,
+           "Runtime factory 返回后必须在 start 紧邻前重新观察 stop: " +
+               error);
+    expect(run.outputs_clean(),
+           "Runtime start 前取消必须清理 profile/ready/pending");
+}
+
+void test_console_handler_only_claims_interrupt_events() {
+    expect(!benchmark::detail::handle_benchmark_console_control(
+               CTRL_CLOSE_EVENT),
+           "CTRL_CLOSE 不得被当作普通可清理中止事件吞掉");
+    expect(!benchmark::detail::handle_benchmark_console_control(
+               CTRL_LOGOFF_EVENT),
+           "CTRL_LOGOFF 不得被 Benchmark handler 吞掉");
+    expect(!benchmark::detail::handle_benchmark_console_control(
+               CTRL_SHUTDOWN_EVENT),
+           "CTRL_SHUTDOWN 不得被当作普通可清理中止事件吞掉");
+    expect(benchmark::detail::handle_benchmark_console_control(
+               CTRL_BREAK_EVENT),
+           "Ctrl+Break 必须与 Ctrl+C 一样只登记 stop 请求");
+}
+
+void test_console_stop_before_run_is_not_reset() {
+    TemporaryBenchmarkRun run;
+    expect(run.valid(), "run 前 console stop fixture 必须创建成功");
+    if (!run.valid()) return;
+
+    BenchmarkRunAdapterState state;
+    benchmark::detail::prepare_benchmark_console_control();
+    expect(benchmark::detail::handle_benchmark_console_control(
+               CTRL_C_EVENT),
+           "handler 安装后的 Ctrl+C 必须被当前 run 接收");
+    std::string error;
+    expect(!benchmark::detail::run_runtime_benchmark_with_adapter(
+               run.options(), adapter_for(state), error),
+           "run 前 Ctrl+C 必须使正式编排失败");
+    expect(state.setup_calls == 1 && state.runtime_factory_calls == 0 &&
+               error.find("人工中止") != std::string::npos,
+           "runner 不得清除 handler 已接收的当前 run stop: " + error);
+    expect(run.outputs_clean(),
+           "run 前 stop 也必须沿公共收口清理全部临时产物");
+}
+
 void test_main_machine_defaults() {
     const std::vector<std::wstring_view> arguments{
         L"--model", L"model.onnx",
@@ -192,6 +508,11 @@ void test_main_machine_defaults() {
                options.provider_profile_path ==
                    "reports/runtime.provider-profile.json",
             "正式门槛和 TensorRT 优化默认值必须稳定");
+    const std::string usage = benchmark_usage();
+    expect(usage.find("Ctrl+C") != std::string::npos &&
+               usage.find("setup") != std::string::npos &&
+               usage.find("不发布") != std::string::npos,
+           "CLI help 必须说明 setup/正式阶段取消且不发布本轮产物");
 }
 
 void test_network_encoded_override() {
@@ -746,6 +1067,12 @@ void test_per_frame_geometry_validation() {
 } // namespace
 
 int main() {
+    test_normal_setup_reaches_runtime_factory_and_cleans_outputs();
+    test_failed_setup_skips_runtime_and_cleans_outputs();
+    test_stop_during_blocking_setup_skips_runtime_and_allows_next_run();
+    test_stop_after_runtime_factory_is_observed_before_start();
+    test_console_handler_only_claims_interrupt_events();
+    test_console_stop_before_run_is_not_reset();
     test_main_machine_defaults();
     test_network_encoded_override();
     test_performance_probe_option();

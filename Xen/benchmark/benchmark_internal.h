@@ -1,6 +1,7 @@
 #ifndef BENCHMARK_INTERNAL_H
 #define BENCHMARK_INTERNAL_H
 
+#include "benchmark/benchmark.h"
 #include "debug/debug.h"
 #include "runtime/runtime.h"
 
@@ -8,12 +9,37 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace benchmark::detail {
+
+struct BenchmarkRunAdapter {
+    void* context = nullptr;
+    bool (*setup_provider_profile)(
+        void* context,
+        const DetectorConfig& runtime_config,
+        const std::string& output_path,
+        const char* expected_provider,
+        std::string& error) = nullptr;
+    std::unique_ptr<Runtime> (*create_runtime)(void* context) = nullptr;
+};
+
+// 正式入口与测试共用同一编排，只替换昂贵 Provider setup 和 Runtime
+// 构造两个冷启动 seam；采样循环、Provider 配置和报告合同保持在生产实现内。
+bool run_runtime_benchmark_with_adapter(
+    const BenchmarkOptions& options,
+    const BenchmarkRunAdapter& adapter,
+    std::string& error) noexcept;
+
+// XenBenchmark 控制台入口委托到这里；handler 只置无锁原子 stop 标志，
+// 文件清理与 Runtime 收口仍由普通执行流完成。
+void prepare_benchmark_console_control() noexcept;
+bool handle_benchmark_console_control(
+    std::uint32_t control_type) noexcept;
 
 enum class CoveragePhase {
     STARTUP,

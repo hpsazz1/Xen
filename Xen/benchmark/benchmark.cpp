@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -36,6 +37,10 @@ constexpr std::uint64_t kMaximumBenchmarkSeconds = 86400;
 constexpr auto kPollInterval = std::chrono::milliseconds(2);
 
 std::atomic<bool> benchmark_stop_requested{false};
+std::atomic<bool> benchmark_stop_epoch_prepared{false};
+static_assert(
+    decltype(benchmark_stop_requested)::is_always_lock_free,
+    "控制台 handler 的 stop 标志必须始终无锁");
 
 void set_error(std::string& output, const std::string& value) noexcept {
     try {
@@ -786,6 +791,20 @@ bool generate_provider_profile(
     return false;
 }
 
+bool setup_production_provider_profile(
+        void*,
+        const DetectorConfig& runtime_config,
+        const std::string& output_path,
+        const char* expected_provider,
+        std::string& error) noexcept {
+    return generate_provider_profile(
+        runtime_config, output_path, expected_provider, error);
+}
+
+std::unique_ptr<Runtime> create_production_runtime(void*) {
+    return std::make_unique<Runtime>();
+}
+
 } // namespace
 
 bool benchmark::detail::finalize_report(
@@ -1168,7 +1187,8 @@ std::string benchmark_usage() {
         "  --backend NAME           tensorrt/cuda/directml/openvino/cpu\n"
         "  --report-prefix PATH     成功后发布 PATH.csv 和 PATH.json\n\n"
         "进程协调:\n"
-        "  --ready-file PATH        Runtime 就绪后原子发布，退出时删除\n\n"
+        "  --ready-file PATH        Runtime 就绪后原子发布，退出时删除\n"
+        "  Ctrl+C/Ctrl+Break       setup 中请求会在 Runtime 前中止，正式阶段也中止且不发布本轮产物\n\n"
         "Provider 证据:\n"
         "  --provider-profile PATH  TensorRT/CUDA/OpenVINO 必选，独立 ORT trace JSON\n\n"
         "运行门槛:\n"
@@ -1198,9 +1218,43 @@ void request_benchmark_stop() noexcept {
     benchmark_stop_requested.store(true, std::memory_order_release);
 }
 
+void benchmark::detail::prepare_benchmark_console_control() noexcept {
+    // CLI 必须在安装 handler 前建立本轮 epoch；这样安装后立即到达的
+    // Ctrl+C 也不会被 runner 的重复运行初始化覆盖。
+    benchmark_stop_requested.store(false, std::memory_order_release);
+    benchmark_stop_epoch_prepared.store(true, std::memory_order_release);
+}
+
+bool benchmark::detail::handle_benchmark_console_control(
+        std::uint32_t control_type) noexcept {
+    if (control_type == CTRL_C_EVENT || control_type == CTRL_BREAK_EVENT) {
+        request_benchmark_stop();
+        return true;
+    }
+    return false;
+}
+
 bool run_runtime_benchmark(
         const BenchmarkOptions& options,
         std::string& error) noexcept {
+    const benchmark::detail::BenchmarkRunAdapter adapter{
+        nullptr,
+        setup_production_provider_profile,
+        create_production_runtime};
+    return benchmark::detail::run_runtime_benchmark_with_adapter(
+        options, adapter, error);
+}
+
+bool benchmark::detail::run_runtime_benchmark_with_adapter(
+        const BenchmarkOptions& options,
+        const BenchmarkRunAdapter& adapter,
+        std::string& error) noexcept {
+    const bool stop_epoch_prepared = benchmark_stop_epoch_prepared.exchange(
+        false, std::memory_order_acq_rel);
+    if (!stop_epoch_prepared) {
+        // 非 CLI 调用在函数入口建立新 epoch；同进程重复 run 不继承旧 stop。
+        benchmark_stop_requested.store(false, std::memory_order_release);
+    }
     std::string csv_path;
     std::string json_path;
     std::string csv_staging_path;
@@ -1209,6 +1263,10 @@ bool run_runtime_benchmark(
     bool report_outputs_owned = false;
     ReadyFileGuard ready_file(options.ready_file_path);
     try {
+        if (!adapter.setup_provider_profile || !adapter.create_runtime) {
+            set_error(error, "Benchmark Run adapter 不完整");
+            return false;
+        }
         if (!validate_benchmark_options(options, error)) return false;
         const std::filesystem::path model_path(options.model_path);
         if (!std::filesystem::is_regular_file(model_path)) {
@@ -1317,15 +1375,28 @@ bool run_runtime_benchmark(
                 set_error(error, "崩溃诊断安装失败");
             } else {
                 const bool profile_ready = provider_profile_path.empty() ||
-                    generate_provider_profile(
-                        config.detector, provider_profile_path,
+                    adapter.setup_provider_profile(
+                        adapter.context, config.detector, provider_profile_path,
                         expected_provider_name(options.backend), error);
                 if (profile_ready) {
-                Runtime runtime;
+                if (benchmark_stop_requested.load(
+                        std::memory_order_acquire)) {
+                    set_error(error, "基准在 Runtime 启动前被人工中止");
+                } else {
+                auto runtime_instance =
+                    adapter.create_runtime(adapter.context);
+                if (benchmark_stop_requested.load(
+                        std::memory_order_acquire)) {
+                    set_error(error, "基准在 Runtime 启动前被人工中止");
+                } else if (!runtime_instance) {
+                    set_error(error, "创建 Runtime 失败");
+                } else {
+                Runtime& runtime = *runtime_instance;
                 DebugReport report;
-                benchmark_stop_requested.store(false,
-                                                std::memory_order_release);
-                if (!runtime.start(config)) {
+                if (benchmark_stop_requested.load(
+                        std::memory_order_acquire)) {
+                    set_error(error, "基准在 Runtime 启动前被人工中止");
+                } else if (!runtime.start(config)) {
                     const RuntimeSnapshot snapshot = runtime.snapshot();
                     set_error(error, snapshot.last_error.empty()
                         ? "Runtime 启动失败" : snapshot.last_error);
@@ -1659,6 +1730,8 @@ bool run_runtime_benchmark(
                             }
                         }
                     }
+                }
+                }
                 }
                 }
                 crash_handler.uninstall();
