@@ -7524,10 +7524,20 @@ void test_vertical_prediction_reversal_rewarms_vertical_evidence() {
 void test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale() {
     constexpr int kFrameCount = 480;
     constexpr int kFrameIntervalMicroseconds = 8000;
+    struct Sample {
+        bool lead_active = false;
+        bool has_command = false;
+        float final_source_x = 0.0f;
+        float final_source_y = 0.0f;
+        float lead_source_x = 0.0f;
+        float lead_source_y = 0.0f;
+        int command_x = 0;
+        int command_y = 0;
+    };
     struct Trace {
         std::uint64_t track_id = 0;
         long long first_active_microseconds = -1;
-        std::vector<bool> lead_active;
+        std::vector<Sample> samples;
     };
     const auto run_case = [&](int vertical_scale) {
         AimConfig config;
@@ -7539,13 +7549,14 @@ void test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale() {
         config.max_counts_per_frame = 12.0f;
         config.acquisition_range_percent = 100.0f;
         config.body_aim_height_ratio = 0.50f;
+        config.max_prediction_lead_percent = 1.0f;
         config.enable_delay_compensation = false;
         config.enable_prediction = true;
         Aim aim(config);
         const auto base = std::chrono::steady_clock::now() +
             std::chrono::seconds(1);
         Trace trace;
-        trace.lead_active.reserve(kFrameCount);
+        trace.samples.reserve(kFrameCount);
         const float frame_seconds =
             static_cast<float>(kFrameIntervalMicroseconds) / 1000000.0f;
         for (int index = 0; index < kFrameCount; ++index) {
@@ -7554,8 +7565,8 @@ void test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale() {
             const int y_phase = index % 40;
             const float y_source_offset =
                 static_cast<float>(y_phase <= 20 ? y_phase : 40 - y_phase) *
-                frame_seconds;
-            const float source_x = 208.0f + 1.5f * elapsed_seconds;
+                7.0f * frame_seconds;
+            const float source_x = 208.0f + 10.0f * elapsed_seconds;
             const float source_y = 160.0f + y_source_offset;
             const float y_scale = static_cast<float>(vertical_scale);
             AimFrame frame = make_frame(
@@ -7564,10 +7575,10 @@ void test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale() {
                     static_cast<long long>(index) *
                     kFrameIntervalMicroseconds));
             frame.control_at = frame.captured_at +
-                std::chrono::milliseconds(4);
+                std::chrono::milliseconds(100);
             frame.roi_height = 320 * vertical_scale;
             frame.control_center_x = source_x - 32.0f;
-            frame.control_center_y = source_y * y_scale;
+            frame.control_center_y = (source_y - 24.0f) * y_scale;
             frame.source_pixels_per_roi_pixel_y = 1.0f / y_scale;
             frame.lock_active = true;
             frame.detections = {body_box(
@@ -7578,7 +7589,17 @@ void test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale() {
                    "非等比 ROI MR-S 必须逐帧命中 Aim::process");
             if (!result.has_target) continue;
             trace.track_id = result.target.track_id;
-            trace.lead_active.push_back(result.target.lead_active);
+            trace.samples.push_back({
+                result.target.lead_active,
+                result.has_command,
+                result.target.prediction_aim_x *
+                    frame.source_pixels_per_roi_pixel_x,
+                result.target.prediction_aim_y *
+                    frame.source_pixels_per_roi_pixel_y,
+                result.target.lead_x * frame.source_pixels_per_roi_pixel_x,
+                result.target.lead_y * frame.source_pixels_per_roi_pixel_y,
+                result.command.dx_counts,
+                result.command.dy_counts});
             if (result.target.lead_active &&
                 trace.first_active_microseconds < 0) {
                 trace.first_active_microseconds =
@@ -7591,11 +7612,29 @@ void test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale() {
     const Trace source = run_case(1);
     const Trace stretched_y = run_case(2);
     int state_mismatches = 0;
+    int command_mismatches = 0;
+    float maximum_final_source_delta = 0.0f;
+    float maximum_lead_source_delta = 0.0f;
     for (std::size_t index = 0;
-         index < std::min(source.lead_active.size(),
-                          stretched_y.lead_active.size()); ++index) {
-        state_mismatches += source.lead_active[index] !=
-            stretched_y.lead_active[index] ? 1 : 0;
+         index < std::min(source.samples.size(),
+                          stretched_y.samples.size()); ++index) {
+        const Sample& expected = source.samples[index];
+        const Sample& actual = stretched_y.samples[index];
+        state_mismatches += expected.lead_active != actual.lead_active ? 1 : 0;
+        command_mismatches +=
+            expected.has_command != actual.has_command ||
+                expected.command_x != actual.command_x ||
+                expected.command_y != actual.command_y ? 1 : 0;
+        maximum_final_source_delta = std::max(
+            maximum_final_source_delta,
+            std::hypot(
+                expected.final_source_x - actual.final_source_x,
+                expected.final_source_y - actual.final_source_y));
+        maximum_lead_source_delta = std::max(
+            maximum_lead_source_delta,
+            std::hypot(
+                expected.lead_source_x - actual.lead_source_x,
+                expected.lead_source_y - actual.lead_source_y));
     }
     expect(source.track_id != 0 && source.track_id == stretched_y.track_id &&
                source.first_active_microseconds >= 0 &&
@@ -7603,11 +7642,17 @@ void test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale() {
                std::llabs(source.first_active_microseconds -
                           stretched_y.first_active_microseconds) <=
                    kFrameIntervalMicroseconds &&
-               state_mismatches == 0,
-           "同一源轨迹不得因 Y-only ROI 表示缩放切换主轴 evidence，首次=" +
+               state_mismatches == 0 && command_mismatches == 0 &&
+               maximum_final_source_delta <= 0.05f &&
+               maximum_lead_source_delta <= 0.05f,
+           "同一二维源轨迹不得因 Y-only ROI 表示缩放改变状态/final/lead/命令，首次=" +
                std::to_string(source.first_active_microseconds) + "/" +
                std::to_string(stretched_y.first_active_microseconds) +
-               "，状态差=" + std::to_string(state_mismatches));
+               "，状态/命令差=" + std::to_string(state_mismatches) + "/" +
+               std::to_string(command_mismatches) +
+               "，final/lead source最大差=" +
+               std::to_string(maximum_final_source_delta) + "/" +
+               std::to_string(maximum_lead_source_delta));
 }
 
 void test_prediction_direct_feedforward_has_no_absolute_velocity_mode() {

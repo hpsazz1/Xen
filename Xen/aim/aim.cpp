@@ -3512,20 +3512,38 @@ struct Aim::Impl {
             projection.delay_compensated_x - frame.control_center_x;
         const float error_y =
             projection.delay_compensated_y - frame.control_center_y;
-        const float error_magnitude = std::hypot(error_x, error_y);
-        const float velocity_magnitude = std::hypot(track.vx, track.vy);
-        const float alignment = error_x * track.vx + error_y * track.vy;
+        // 无延迟分支的状态门统一在主机完整 FOV 像素空间计算；否则 X/Y
+        // 非等比 ROI 会改变向量长度、夹角、主轴和框对角线，进而把同一源
+        // 轨迹分成不同 prediction 状态。最终公开点再逐轴换回 ROI 坐标。
+        const float source_error_x =
+            error_x * frame.source_pixels_per_roi_pixel_x;
+        const float source_error_y =
+            error_y * frame.source_pixels_per_roi_pixel_y;
+        const float source_velocity_x =
+            track.vx * frame.source_pixels_per_roi_pixel_x;
+        const float source_velocity_y =
+            track.vy * frame.source_pixels_per_roi_pixel_y;
+        const float source_error_magnitude =
+            std::hypot(source_error_x, source_error_y);
+        const float source_velocity_magnitude =
+            std::hypot(source_velocity_x, source_velocity_y);
+        const float source_alignment =
+            source_error_x * source_velocity_x +
+            source_error_y * source_velocity_y;
+        const float source_box_diagonal = std::hypot(
+            (track.x2 - track.x1) * frame.source_pixels_per_roi_pixel_x,
+            (track.y2 - track.y1) * frame.source_pixels_per_roi_pixel_y);
         const float velocity_epsilon =
             std::numeric_limits<float>::epsilon();
-        const float longitudinal_error = velocity_magnitude > velocity_epsilon
-            ? std::fabs(alignment) / velocity_magnitude : 0.0f;
+        const float longitudinal_error =
+            source_velocity_magnitude > velocity_epsilon
+            ? std::fabs(source_alignment) / source_velocity_magnitude : 0.0f;
         const float enter_distance = std::max(
-            config.deadzone_pixels * 2.0f, box_diagonal * 0.12f);
+            config.deadzone_pixels * 2.0f, source_box_diagonal * 0.12f);
         const float exit_distance = std::max(
-            config.deadzone_pixels, box_diagonal * 0.05f);
+            config.deadzone_pixels, source_box_diagonal * 0.05f);
         const bool horizontal_motion_dominates =
-            std::fabs(track.vx * frame.source_pixels_per_roi_pixel_x) >=
-            std::fabs(track.vy * frame.source_pixels_per_roi_pixel_y);
+            std::fabs(source_velocity_x) >= std::fabs(source_velocity_y);
         const float minimum_displacement_ratio = config.deadzone_pixels /
             std::max(
                 1.0f,
@@ -3538,17 +3556,19 @@ struct Aim::Impl {
             track, !horizontal_motion_dominates,
             0.0f,
             minimum_displacement_ratio);
-        const bool moving_away = velocity_magnitude > velocity_epsilon &&
-            alignment > 0.0f && motion_established;
+        const bool moving_away =
+            source_velocity_magnitude > velocity_epsilon &&
+            source_alignment > 0.0f && motion_established;
         const bool velocity_reversed = lead_active &&
-            lead_direction_x * track.vx + lead_direction_y * track.vy <= 0.0f;
+            lead_direction_x * source_velocity_x +
+                lead_direction_y * source_velocity_y <= 0.0f;
         const float lead_axis_error =
-            std::fabs(error_x * lead_direction_x +
-                      error_y * lead_direction_y);
+            std::fabs(source_error_x * lead_direction_x +
+                      source_error_y * lead_direction_y);
 
         if (lead_active) {
             if (!moving_away || velocity_reversed ||
-                error_magnitude <= exit_distance) {
+                source_error_magnitude <= exit_distance) {
                 lead_active = false;
                 lead_axis_active_x = false;
                 lead_axis_active_y = false;
@@ -3591,21 +3611,26 @@ struct Aim::Impl {
         }
         if (!lead_active) return projection;
 
-        lead_direction_x = track.vx / velocity_magnitude;
-        lead_direction_y = track.vy / velocity_magnitude;
+        lead_direction_x = source_velocity_x / source_velocity_magnitude;
+        lead_direction_y = source_velocity_y / source_velocity_magnitude;
         const float lead_gain = track.predicted
             ? config.predicted_gain : 1.0f;
-        float lead_x = track.vx * projection.observation_age_seconds * lead_gain;
-        float lead_y = track.vy * projection.observation_age_seconds * lead_gain;
+        float source_lead_x = source_velocity_x *
+            projection.observation_age_seconds * lead_gain;
+        float source_lead_y = source_velocity_y *
+            projection.observation_age_seconds * lead_gain;
         // 用户只需要控制一个与目标尺度归一化的最远提前距离。高速、低速
         // 或加速度变化都不能绕过该向量硬门禁生成大范围提前点。
         clamp_vector(
-            lead_x, lead_y,
-            box_diagonal * config.max_prediction_lead_percent / 100.0f);
+            source_lead_x, source_lead_y,
+            source_box_diagonal *
+                config.max_prediction_lead_percent / 100.0f);
         // 基础追踪点必须锁在模型框内；预测提前点允许越过框边界，否则高速
         // 目标只能追到当前观测位置，失去提前量的意义。
-        projection.final_x = projection.delay_compensated_x + lead_x;
-        projection.final_y = projection.delay_compensated_y + lead_y;
+        projection.final_x = projection.delay_compensated_x +
+            source_lead_x / frame.source_pixels_per_roi_pixel_x;
+        projection.final_y = projection.delay_compensated_y +
+            source_lead_y / frame.source_pixels_per_roi_pixel_y;
         projection.active = true;
         return projection;
     }
