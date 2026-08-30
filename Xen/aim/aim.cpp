@@ -598,11 +598,9 @@ void update_axis_motion_evidence(
     const float displacement = position_ratio - evidence.last_position_ratio;
     const float displacement_epsilon =
         std::numeric_limits<float>::epsilon();
-    if (std::fabs(displacement) <= displacement_epsilon) {
-        evidence.consistent_elapsed_seconds = 0.0f;
-        evidence.consistent_displacement_ratio = 0.0f;
-        evidence.direction = 0.0f;
-    } else {
+    // 坐标量化会在真实单调运动中产生重复样本。零位移只暂停本样本，
+    // 并在下方推进时间/位置锚；失序时间与真实反向仍由各自分支重置。
+    if (std::fabs(displacement) > displacement_epsilon) {
         const float direction = std::copysign(1.0f, displacement);
         if (direction != evidence.direction) {
             evidence.consistent_elapsed_seconds = elapsed_seconds;

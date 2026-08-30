@@ -7228,6 +7228,86 @@ void test_prediction_state_is_invariant_to_roi_representation_scale() {
     check_axis(true);
 }
 
+void test_prediction_motion_evidence_pauses_on_repeated_coordinates() {
+    constexpr int kFrameCount = 480;
+    constexpr int kFrameIntervalMicroseconds = 8000;
+    constexpr float kMotionPixelsPerSecond = 0.90f;
+    enum class Sampling { SMOOTH, REPEATED, STATIONARY };
+    struct Trace {
+        int first_active_index = -1;
+        int active_frames = 0;
+        std::uint64_t track_id = 0;
+    };
+    const auto run_case = [&](Sampling sampling) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.40f;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 12.0f;
+        config.acquisition_range_percent = 100.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_delay_compensation = false;
+        config.enable_prediction = true;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        Trace trace;
+        for (int index = 0; index < kFrameCount; ++index) {
+            const int geometry_sample = sampling == Sampling::REPEATED
+                ? (index / 2) * 2 : index;
+            const float elapsed_seconds =
+                sampling == Sampling::STATIONARY ? 0.0f :
+                static_cast<float>(geometry_sample *
+                                   kFrameIntervalMicroseconds) /
+                    1000000.0f;
+            const float source_x =
+                176.0f + kMotionPixelsPerSecond * elapsed_seconds;
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) *
+                    kFrameIntervalMicroseconds));
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(4);
+            frame.control_center_x = 160.0f;
+            frame.control_center_y = 160.0f;
+            frame.lock_active = true;
+            frame.detections = {
+                body_box(source_x, 160.0f, 40.0f, 80.0f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "重复坐标 S2c 回放必须逐帧命中 Aim::process");
+            if (!result.has_target) continue;
+            if (trace.track_id == 0) trace.track_id = result.target.track_id;
+            expect(result.target.track_id == trace.track_id,
+                   "重复坐标重采样不得切换 Track identity");
+            if (result.target.lead_active) {
+                ++trace.active_frames;
+                if (trace.first_active_index < 0) {
+                    trace.first_active_index = index;
+                }
+            }
+        }
+        return trace;
+    };
+
+    const Trace smooth = run_case(Sampling::SMOOTH);
+    const Trace repeated = run_case(Sampling::REPEATED);
+    expect(smooth.first_active_index >= 0 &&
+               repeated.first_active_index >= 0 &&
+               std::abs(smooth.first_active_index -
+                        repeated.first_active_index) <= 1,
+           "同一单调几何的 smooth 与重复坐标重采样必须在一个 sample 内同态建立，首次=" +
+               std::to_string(smooth.first_active_index) + "/" +
+               std::to_string(repeated.first_active_index));
+    const Trace stationary = run_case(Sampling::STATIONARY);
+    expect(stationary.first_active_index < 0 &&
+               stationary.active_frames == 0,
+           "重复坐标暂停语义不得把真正静止轨迹升级为 prediction");
+}
+
 void test_prediction_motion_evidence_rewarms_after_track_discontinuity() {
     constexpr int kFrameIntervalMicroseconds = 8000;
     constexpr int kBuildFrames = 220;
@@ -7451,7 +7531,15 @@ void test_vertical_prediction_reversal_rewarms_vertical_evidence() {
     constexpr int kFrameIntervalMicroseconds = 8000;
     constexpr int kBuildFrames = 220;
     constexpr int kSettleFrames = 8;
-    constexpr int kProbeFrames = 50;
+    constexpr int kProbeFrames = 140;
+    constexpr int kEarlyProbeFrames = 50;
+    constexpr int kLateProbeFrames = 20;
+    constexpr float kReversePixelsPerSecond = 3.0f;
+    constexpr float kReverseDisplacementPixels =
+        static_cast<float>(kSettleFrames + kProbeFrames) *
+        kReversePixelsPerSecond *
+        (static_cast<float>(kFrameIntervalMicroseconds) / 1000000.0f);
+    static_assert(kReverseDisplacementPixels > 1.5f);
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 1.5f;
@@ -7472,6 +7560,7 @@ void test_vertical_prediction_reversal_rewarms_vertical_evidence() {
     bool vertical_lead_built = false;
     std::uint64_t track_id = 0;
     int early_vertical_reactivation_frames = 0;
+    int late_vertical_reactivation_frames = 0;
     const auto process = [&](bool settle, float control_center_offset_y) {
         const long long elapsed_microseconds =
             static_cast<long long>(sequence - 1) *
@@ -7504,14 +7593,21 @@ void test_vertical_prediction_reversal_rewarms_vertical_evidence() {
     }
     for (int index = 0; index < kSettleFrames + kProbeFrames; ++index) {
         source_x += 2.0f * frame_seconds;
-        source_y -= 3.0f * frame_seconds;
+        source_y -= kReversePixelsPerSecond * frame_seconds;
         const AimResult result = process(index < kSettleFrames, 16.0f);
         expect(result.status == AimStatus::SUCCESS && result.has_target &&
                    result.target.track_id == track_id,
                "Y reverse 必须在同一 Track 的真实反向段验证");
-        if (index >= kSettleFrames && result.has_target &&
+        if (index >= kSettleFrames &&
+            index < kSettleFrames + kEarlyProbeFrames &&
+            result.has_target &&
             std::fabs(result.target.lead_y) > 0.001f) {
             ++early_vertical_reactivation_frames;
+        }
+        if (index >= kSettleFrames + kProbeFrames - kLateProbeFrames &&
+            result.has_target &&
+            std::fabs(result.target.lead_y) > 0.001f) {
+            ++late_vertical_reactivation_frames;
         }
     }
     expect(vertical_lead_built,
@@ -7519,6 +7615,9 @@ void test_vertical_prediction_reversal_rewarms_vertical_evidence() {
     expect(early_vertical_reactivation_frames == 0,
            "Y 反向后不得复用反向前 motion evidence 提前恢复 lead_y，实际=" +
                std::to_string(early_vertical_reactivation_frames));
+    expect(late_vertical_reactivation_frames > 0,
+           "Y 反向累计超过 deadzone 后必须最终重暖合法 lead_y，实际=" +
+               std::to_string(late_vertical_reactivation_frames));
 }
 
 void test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale() {
@@ -10994,6 +11093,7 @@ int main() {
     test_base_tracking_quantization_has_no_speed_threshold();
     test_delay_shaping_has_no_speed_threshold_before_prediction();
     test_prediction_state_is_invariant_to_roi_representation_scale();
+    test_prediction_motion_evidence_pauses_on_repeated_coordinates();
     test_prediction_motion_evidence_rewarms_after_track_discontinuity();
     test_horizontal_partial_visibility_preserves_vertical_motion_evidence();
     test_vertical_prediction_reversal_rewarms_vertical_evidence();
