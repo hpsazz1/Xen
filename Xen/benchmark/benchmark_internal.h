@@ -26,10 +26,16 @@ struct BenchmarkRunAdapter {
         const char* expected_provider,
         std::string& error) = nullptr;
     std::unique_ptr<Runtime> (*create_runtime)(void* context) = nullptr;
+    bool (*start_runtime)(
+        void* context,
+        Runtime& runtime,
+        const AppConfig& config) noexcept = nullptr;
+    void (*before_runtime_start)(void* context) noexcept = nullptr;
 };
 
 // 正式入口与测试共用同一编排，只替换昂贵 Provider setup 和 Runtime
-// 构造两个冷启动 seam；采样循环、Provider 配置和报告合同保持在生产实现内。
+// 构造/启动冷 seam；before_runtime_start 只用于在最终启动门前注入事件。
+// 采样循环、Provider 配置和报告合同保持在生产实现内。
 bool run_runtime_benchmark_with_adapter(
     const BenchmarkOptions& options,
     const BenchmarkRunAdapter& adapter,
@@ -286,6 +292,14 @@ bool finalize_report(
     std::uint64_t phase_formal_samples,
     bool performance_probes_enabled,
     CaptureBackend capture_backend,
+    std::string& error) noexcept;
+
+// 已成对生成 staging 报告后的最终提交 seam；正式目标在入口保证不存在。
+bool publish_benchmark_reports(
+    const std::string& csv_staging_path,
+    const std::string& json_staging_path,
+    const std::string& csv_path,
+    const std::string& json_path,
     std::string& error) noexcept;
 
 // formal 成功样本由这里统一聚合并写入固定容量环。生产循环与测试读取

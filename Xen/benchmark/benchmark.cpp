@@ -49,6 +49,14 @@ void set_error(std::string& output, const std::string& value) noexcept {
     }
 }
 
+bool fail_if_benchmark_stop_requested(std::string& error) noexcept {
+    if (!benchmark_stop_requested.load(std::memory_order_acquire)) {
+        return false;
+    }
+    set_error(error, "基准被人工中止");
+    return true;
+}
+
 bool wide_to_utf8(std::wstring_view input, std::string& output) noexcept {
     try {
         if (input.empty()) {
@@ -639,7 +647,7 @@ bool rewrite_report_samples_dropped(
     return false;
 }
 
-bool publish_benchmark_reports(
+bool publish_benchmark_reports_impl(
         const std::string& csv_staging_path,
         const std::string& json_staging_path,
         const std::string& csv_path,
@@ -805,7 +813,26 @@ std::unique_ptr<Runtime> create_production_runtime(void*) {
     return std::make_unique<Runtime>();
 }
 
+bool start_production_runtime(
+        void*,
+        Runtime& runtime,
+        const AppConfig& config) noexcept {
+    return runtime.start(config);
+}
+
 } // namespace
+
+bool benchmark::detail::publish_benchmark_reports(
+        const std::string& csv_staging_path,
+        const std::string& json_staging_path,
+        const std::string& csv_path,
+        const std::string& json_path,
+        std::string& error) noexcept {
+    if (fail_if_benchmark_stop_requested(error)) return false;
+    return publish_benchmark_reports_impl(
+        csv_staging_path, json_staging_path,
+        csv_path, json_path, error);
+}
 
 bool benchmark::detail::finalize_report(
         DebugReport& report,
@@ -816,7 +843,9 @@ bool benchmark::detail::finalize_report(
         bool performance_probes_enabled,
         CaptureBackend capture_backend,
         std::string& error) noexcept {
+    if (fail_if_benchmark_stop_requested(error)) return false;
     if (!report.finalize(final_snapshot, error, &coverage)) return false;
+    if (fail_if_benchmark_stop_requested(error)) return false;
 
     const auto& summary = report.summary();
     const std::uint64_t formal_samples =
@@ -1237,10 +1266,10 @@ bool benchmark::detail::handle_benchmark_console_control(
 bool run_runtime_benchmark(
         const BenchmarkOptions& options,
         std::string& error) noexcept {
-    const benchmark::detail::BenchmarkRunAdapter adapter{
-        nullptr,
-        setup_production_provider_profile,
-        create_production_runtime};
+    benchmark::detail::BenchmarkRunAdapter adapter;
+    adapter.setup_provider_profile = setup_production_provider_profile;
+    adapter.create_runtime = create_production_runtime;
+    adapter.start_runtime = start_production_runtime;
     return benchmark::detail::run_runtime_benchmark_with_adapter(
         options, adapter, error);
 }
@@ -1263,7 +1292,8 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
     bool report_outputs_owned = false;
     ReadyFileGuard ready_file(options.ready_file_path);
     try {
-        if (!adapter.setup_provider_profile || !adapter.create_runtime) {
+        if (!adapter.setup_provider_profile || !adapter.create_runtime ||
+            !adapter.start_runtime) {
             set_error(error, "Benchmark Run adapter 不完整");
             return false;
         }
@@ -1393,10 +1423,14 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
                 } else {
                 Runtime& runtime = *runtime_instance;
                 DebugReport report;
+                if (adapter.before_runtime_start) {
+                    adapter.before_runtime_start(adapter.context);
+                }
                 if (benchmark_stop_requested.load(
                         std::memory_order_acquire)) {
                     set_error(error, "基准在 Runtime 启动前被人工中止");
-                } else if (!runtime.start(config)) {
+                } else if (!adapter.start_runtime(
+                               adapter.context, runtime, config)) {
                     const RuntimeSnapshot snapshot = runtime.snapshot();
                     set_error(error, snapshot.last_error.empty()
                         ? "Runtime 启动失败" : snapshot.last_error);
@@ -1608,6 +1642,10 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
                             }
 
                             runtime.stop();
+                            if (!run_failed &&
+                                fail_if_benchmark_stop_requested(error)) {
+                                run_failed = true;
+                            }
                             if (!run_failed) {
                                 if (!runtime.drain_pipeline_samples(pending) ||
                                     !consume_pending()) {
@@ -1637,6 +1675,10 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
                             }
                             if (!run_failed && !phase_tracker.finish(
                                     final_snapshot, error)) {
+                                run_failed = true;
+                            }
+                            if (!run_failed &&
+                                fail_if_benchmark_stop_requested(error)) {
                                 run_failed = true;
                             }
                             if (!run_failed &&
@@ -1706,7 +1748,8 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
                                         "CSV/JSON staging 省略计数不一致");
                                 }
                                 if (metadata_valid &&
-                                    publish_benchmark_reports(
+                                    benchmark::detail::
+                                        publish_benchmark_reports(
                                         csv_staging_path,
                                         json_staging_path,
                                         csv_path, json_path, error)) {

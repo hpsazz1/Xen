@@ -146,15 +146,15 @@ bool cleanup_owned_benchmark_temporary_root(
     }
     const auto normalized_owner =
         std::filesystem::absolute(root.owner_path).lexically_normal();
-    const bool registered_prefix =
-        root.leaf_name.starts_with(kCancellationRootPrefix) ||
-        root.leaf_name.starts_with(kReportConsumerRootPrefix);
+    const bool registered_leaf =
+        root.leaf_name ==
+            std::string(kCancellationRootPrefix) + root.guid ||
+        root.leaf_name ==
+            std::string(kReportConsumerRootPrefix) + root.guid;
     if (normalized_base != expected_base ||
         normalized.parent_path() != normalized_base ||
         normalized.filename() != root.leaf_name ||
-        !registered_prefix ||
-        root.leaf_name.size() <= root.guid.size() ||
-        !root.leaf_name.ends_with(root.guid) ||
+        !registered_leaf ||
         normalized_owner != normalized / ".xen-benchmark-report-owner" ||
         !non_reparse_chain(normalized, error) ||
         !non_reparse_chain(normalized_owner, error) ||
@@ -372,14 +372,86 @@ void test_owned_benchmark_temporary_root_requires_precise_boundary_and_owner() {
            "恢复精确 owner 后只应删除本轮登记文件与空根: " + error);
 }
 
+void test_owned_benchmark_temporary_root_rejects_foreign_leaf_without_deletion() {
+    OwnedBenchmarkTemporaryRoot root;
+    std::string error;
+    const bool root_created = create_owned_benchmark_temporary_root(
+        root, kCancellationRootPrefix, error);
+    expect(root_created,
+           "foreign leaf 测试必须创建本轮 owned 临时根: " + error);
+    if (!root_created) return;
+
+    const std::string expected_leaf = root.leaf_name;
+    const auto expected_path = root.path;
+    const auto expected_owned_path = expected_path / "owned.txt";
+    {
+        std::ofstream owned(
+            expected_owned_path, std::ios::binary | std::ios::trunc);
+        owned << "owned";
+    }
+    const std::string foreign_leaf = std::string(kCancellationRootPrefix) +
+        "foreign-" + root.guid;
+    const auto foreign_path = root.temporary_base / foreign_leaf;
+    std::error_code rename_error;
+    std::filesystem::rename(expected_path, foreign_path, rename_error);
+    expect(!rename_error,
+           "测试必须把 owned 根改名为 prefix+foreign+guid: " +
+               rename_error.message());
+    if (rename_error) {
+        const std::array owned_files{expected_owned_path};
+        std::string cleanup_error;
+        (void)cleanup_owned_benchmark_temporary_root(
+            root, owned_files, cleanup_error);
+        return;
+    }
+
+    root.leaf_name = foreign_leaf;
+    root.path = foreign_path;
+    root.owner_path = foreign_path / ".xen-benchmark-report-owner";
+    const auto foreign_owned_path = foreign_path / "owned.txt";
+    const std::array foreign_owned_files{foreign_owned_path};
+    error.clear();
+    const bool rejected = !cleanup_owned_benchmark_temporary_root(
+        root, foreign_owned_files, error);
+    expect(rejected &&
+               std::filesystem::is_regular_file(foreign_owned_path) &&
+               std::filesystem::is_regular_file(root.owner_path) &&
+               std::filesystem::is_directory(foreign_path),
+           "cleanup 必须拒绝 prefix+foreign+guid 且保持零删除");
+
+    if (std::filesystem::is_directory(foreign_path)) {
+        rename_error.clear();
+        std::filesystem::rename(foreign_path, expected_path, rename_error);
+        expect(!rename_error,
+               "foreign leaf 测试必须恢复精确 owned 根: " +
+                   rename_error.message());
+        if (!rename_error) {
+            root.leaf_name = expected_leaf;
+            root.path = expected_path;
+            root.owner_path =
+                expected_path / ".xen-benchmark-report-owner";
+            const std::array owned_files{expected_owned_path};
+            std::string cleanup_error;
+            expect(cleanup_owned_benchmark_temporary_root(
+                       root, owned_files, cleanup_error),
+                   "foreign leaf 测试收口不得遗留 owned 根: " +
+                       cleanup_error);
+        }
+    }
+}
+
 struct BenchmarkRunAdapterState {
     bool fail_setup = false;
     bool block_setup = false;
-    bool request_stop_in_runtime_factory = false;
+    bool return_runtime = false;
+    bool request_ctrl_break_before_runtime_start = false;
+    bool ctrl_break_handled = false;
     bool setup_entered = false;
     bool release_setup = false;
     int setup_calls = 0;
     int runtime_factory_calls = 0;
+    int before_runtime_start_calls = 0;
+    int runtime_start_calls = 0;
     std::mutex mutex;
     std::condition_variable condition;
 };
@@ -425,15 +497,38 @@ bool fake_provider_setup(
 std::unique_ptr<Runtime> fake_runtime_factory(void* context) {
     auto& state = *static_cast<BenchmarkRunAdapterState*>(context);
     ++state.runtime_factory_calls;
-    if (state.request_stop_in_runtime_factory) {
-        request_benchmark_stop();
-    }
+    if (state.return_runtime) return std::make_unique<Runtime>();
     return {};
+}
+
+bool fake_runtime_start(
+        void* context,
+        Runtime&,
+        const AppConfig&) noexcept {
+    auto& state = *static_cast<BenchmarkRunAdapterState*>(context);
+    ++state.runtime_start_calls;
+    return false;
+}
+
+void fake_before_runtime_start(void* context) noexcept {
+    auto& state = *static_cast<BenchmarkRunAdapterState*>(context);
+    ++state.before_runtime_start_calls;
+    if (state.request_ctrl_break_before_runtime_start) {
+        state.ctrl_break_handled =
+            benchmark::detail::handle_benchmark_console_control(
+                CTRL_BREAK_EVENT);
+    }
 }
 
 benchmark::detail::BenchmarkRunAdapter adapter_for(
         BenchmarkRunAdapterState& state) noexcept {
-    return {&state, fake_provider_setup, fake_runtime_factory};
+    benchmark::detail::BenchmarkRunAdapter adapter;
+    adapter.context = &state;
+    adapter.setup_provider_profile = fake_provider_setup;
+    adapter.create_runtime = fake_runtime_factory;
+    adapter.start_runtime = fake_runtime_start;
+    adapter.before_runtime_start = fake_before_runtime_start;
+    return adapter;
 }
 
 bool wait_for_setup(BenchmarkRunAdapterState& state) {
@@ -537,14 +632,17 @@ void test_stop_after_runtime_factory_is_observed_before_start() {
     if (!run.valid()) return;
 
     BenchmarkRunAdapterState state;
-    state.request_stop_in_runtime_factory = true;
+    state.return_runtime = true;
+    state.request_ctrl_break_before_runtime_start = true;
     std::string error;
     expect(!benchmark::detail::run_runtime_benchmark_with_adapter(
                run.options(), adapter_for(state), error),
            "Runtime factory 期间 stop 必须使正式编排失败");
     expect(state.setup_calls == 1 && state.runtime_factory_calls == 1 &&
+               state.before_runtime_start_calls == 1 &&
+               state.ctrl_break_handled && state.runtime_start_calls == 0 &&
                error.find("人工中止") != std::string::npos,
-           "Runtime factory 返回后必须在 start 紧邻前重新观察 stop: " +
+           "Ctrl+Break 必须在非空 Runtime 的 start 紧邻门被观察: " +
                error);
     expect(run.outputs_clean(),
            "Runtime start 前取消必须清理 profile/ready/pending");
@@ -681,7 +779,139 @@ void test_performance_probe_option() {
            "性能探针非法开关必须拒绝");
 }
 
+void test_stop_after_formal_gate_prevents_report_finalize() {
+    OwnedBenchmarkTemporaryRoot owned_root;
+    std::string error;
+    const bool root_created = create_owned_benchmark_temporary_root(
+        owned_root, kReportConsumerRootPrefix, error);
+    expect(root_created,
+           "正式门槛后 stop 测试必须创建 owned 临时根: " + error);
+    if (!root_created) return;
+
+    const auto csv_path = owned_root.path / "cancelled.csv";
+    const auto json_path = owned_root.path / "cancelled.json";
+    DebugReportConfig config;
+    config.csv_path = csv_path.string();
+    config.json_path = json_path.string();
+    config.session_id = "cancelled-after-formal-gate";
+    config.max_samples = 1;
+
+    RuntimePipelineSample sample;
+    sample.sequence = 1;
+    sample.profile.total_ms = 1.0;
+    sample.detection_status = DetectionStatus::SUCCESS;
+    sample.aim_status = AimStatus::SUCCESS;
+    sample.mouse_status = MouseStatus::READY;
+    benchmark::detail::FormalSampleTracker formal_tracker(1);
+    expect(formal_tracker.observe(sample, error) &&
+               formal_tracker.gates_satisfied(1, true),
+           "测试必须先确认正式样本与时间门槛均已满足: " + error);
+
+    DebugReport report;
+    expect(report.start(config, error),
+           "正式门槛后 stop 测试报告必须启动: " + error);
+    report.ingest(std::span<const RuntimePipelineSample>(&sample, 1));
+    RuntimeSnapshot final_snapshot;
+    DebugCoverageSummary coverage;
+    coverage.available = true;
+    coverage.formal.sample_count = 1;
+
+    benchmark::detail::prepare_benchmark_console_control();
+    expect(benchmark::detail::handle_benchmark_console_control(
+               CTRL_C_EVENT),
+           "正式门槛满足后 Ctrl+C 必须登记 stop");
+    error.clear();
+    const bool finalized = benchmark::detail::finalize_report(
+        report, final_snapshot, coverage, formal_tracker.summary(), 1,
+        false, CaptureBackend::DESKTOP_DUPLICATION, error);
+    expect(!finalized && error.find("人工中止") != std::string::npos &&
+               !std::filesystem::exists(csv_path) &&
+               !std::filesystem::exists(json_path),
+           "正式阶段 stop 必须在 report finalize 前失败且不生成 pair: " +
+               error);
+    benchmark::detail::prepare_benchmark_console_control();
+
+    const std::array owned_files{csv_path, json_path};
+    std::string cleanup_error;
+    expect(cleanup_owned_benchmark_temporary_root(
+               owned_root, owned_files, cleanup_error),
+           "正式门槛后 stop 测试不得遗留报告文件: " + cleanup_error);
+}
+
+void test_stop_at_benchmark_report_publish_boundary_keeps_staging_pair() {
+    benchmark::detail::prepare_benchmark_console_control();
+    OwnedBenchmarkTemporaryRoot owned_root;
+    std::string error;
+    const bool root_created = create_owned_benchmark_temporary_root(
+        owned_root, kReportConsumerRootPrefix, error);
+    expect(root_created,
+           "最终发布 stop 测试必须创建 owned 临时根: " + error);
+    if (!root_created) return;
+
+    const auto csv_staging_path = owned_root.path / "result.csv.pending";
+    const auto json_staging_path = owned_root.path / "result.json.pending";
+    const auto csv_path = owned_root.path / "result.csv";
+    const auto json_path = owned_root.path / "result.json";
+    DebugReportConfig config;
+    config.csv_path = csv_staging_path.string();
+    config.json_path = json_staging_path.string();
+    config.session_id = "cancelled-before-final-promotion";
+    config.max_samples = 1;
+
+    RuntimePipelineSample sample;
+    sample.sequence = 1;
+    sample.profile.total_ms = 1.0;
+    sample.detection_status = DetectionStatus::SUCCESS;
+    sample.aim_status = AimStatus::SUCCESS;
+    sample.mouse_status = MouseStatus::READY;
+    RuntimeSnapshot final_snapshot;
+    DebugCoverageSummary coverage;
+    coverage.available = true;
+    coverage.formal.sample_count = 1;
+    benchmark::detail::FormalSampleSummary formal_summary;
+    formal_summary.formal_sample_count = 1;
+    formal_summary.successful_samples = 1;
+    formal_summary.retained_sample_count = 1;
+    DebugReport report;
+    expect(report.start(config, error),
+           "最终发布 stop 测试报告必须启动: " + error);
+    report.ingest(std::span<const RuntimePipelineSample>(&sample, 1));
+    expect(benchmark::detail::finalize_report(
+               report, final_snapshot, coverage, formal_summary, 1, false,
+               CaptureBackend::DESKTOP_DUPLICATION, error) &&
+               std::filesystem::is_regular_file(csv_staging_path) &&
+               std::filesystem::is_regular_file(json_staging_path) &&
+               !std::filesystem::exists(csv_path) &&
+               !std::filesystem::exists(json_path),
+           "测试必须先形成完整 staging pair 且尚未发布 final: " + error);
+
+    expect(benchmark::detail::handle_benchmark_console_control(
+               CTRL_C_EVENT),
+           "最终 promotion 前 Ctrl+C 必须登记 stop");
+    error.clear();
+    const bool published = benchmark::detail::publish_benchmark_reports(
+        csv_staging_path.string(), json_staging_path.string(),
+        csv_path.string(), json_path.string(), error);
+    expect(!published && error.find("人工中止") != std::string::npos &&
+               std::filesystem::is_regular_file(csv_staging_path) &&
+               std::filesystem::is_regular_file(json_staging_path) &&
+               !std::filesystem::exists(csv_path) &&
+               !std::filesystem::exists(json_path),
+           "最终发布提交边界必须 fail-closed 并保留完整 staging pair: " +
+               error);
+    benchmark::detail::prepare_benchmark_console_control();
+
+    const std::array owned_files{
+        csv_staging_path, json_staging_path, csv_path, json_path};
+    std::string cleanup_error;
+    expect(cleanup_owned_benchmark_temporary_root(
+               owned_root, owned_files, cleanup_error),
+           "最终发布 stop 测试不得遗留 staging/final 文件: " +
+               cleanup_error);
+}
+
 void test_benchmark_report_consumer_pair_publication() {
+    benchmark::detail::prepare_benchmark_console_control();
     OwnedBenchmarkTemporaryRoot owned_root;
     std::string error;
     const bool root_created = create_owned_benchmark_temporary_root(
@@ -1180,6 +1410,7 @@ void test_per_frame_geometry_validation() {
 
 int main() {
     test_owned_benchmark_temporary_root_requires_precise_boundary_and_owner();
+    test_owned_benchmark_temporary_root_rejects_foreign_leaf_without_deletion();
     test_normal_setup_reaches_runtime_factory_and_cleans_outputs();
     test_failed_setup_skips_runtime_and_cleans_outputs();
     test_stop_during_blocking_setup_skips_runtime_and_allows_next_run();
@@ -1190,6 +1421,8 @@ int main() {
     test_network_encoded_override();
     test_performance_probe_option();
     test_benchmark_report_consumer_pair_publication();
+    test_stop_after_formal_gate_prevents_report_finalize();
+    test_stop_at_benchmark_report_publish_boundary_keeps_staging_pair();
     test_coverage_phase_tracker();
     test_sample_phase_tracker();
     test_formal_sample_tracker_waits_for_time_gate_after_retention_limit();
