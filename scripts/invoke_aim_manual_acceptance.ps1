@@ -5,7 +5,7 @@
     [Parameter(Mandatory = $true)]
     [ValidateSet("Static", "MoveLeft", "MoveRight", "Shuttle", "SuperJump")]
     [string]$Scenario,
-    [ValidateSet("None", "Static", "SustainedMove", "Stop", "Reverse")]
+    [ValidateSet("None", "Static", "SustainedMove", "RandomMove", "Stop", "Reverse")]
     [string]$SuperJumpCase = "None",
     [Parameter(Mandatory = $true)]
     [ValidateSet("tracking", "prediction")]
@@ -850,6 +850,11 @@ function Get-ScenarioDefinition() {
     } else {
         "目标进入后按住右键覆盖完整横移，期间不停止、不换向。"
     }
+    $superJumpRandomMoveHoldAction = if ($CapturePixelEvidence.IsPresent) {
+        "目标进入后按住右键至少 15 秒，保持冲刺超级跳和大幅 X/Y 联动；此后继续按住，直到前台终端提示 sidecar 已完成或未完成、可以松开右键，不人为限制方向或换向次数。"
+    } else {
+        "目标进入后按住右键覆盖完整随机左右移动过程，不人为限制方向或换向次数。"
+    }
     switch ($Scenario) {
         "Static" {
             return [ordered]@{
@@ -949,6 +954,22 @@ function Get-ScenarioDefinition() {
                             "本 Run 唯一动作：X 持续横移",
                             "跟随是否落后、追不上或出框",
                             "Y 起跳、腾空和落地跟随是否及时稳定"
+                        )
+                    }
+                }
+                "RandomMove" {
+                    return [ordered]@{
+                        title = "冲刺超级跳随机左右移动大幅 X/Y 联动"
+                        actions = @(
+                            "本 Run 唯一动作：冲刺超级跳随机左右移动",
+                            "选择单个目标，人物在冲刺超级跳过程中随机向左或向右移动，方向和换向时刻不预设。",
+                            $superJumpRandomMoveHoldAction
+                        )
+                        observations = @(
+                            "本 Run 唯一动作：冲刺超级跳随机左右移动",
+                            "随机换向时 X 跟随是否落后、错向、过冲、细碎往返或出框",
+                            "Y 起跳、腾空和落地跟随是否及时稳定",
+                            "X/Y 同时大幅位移时是否出现跨轴压制或方向错误"
                         )
                     }
                 }
@@ -1137,6 +1158,7 @@ if ($Mode -eq "Prepare") {
         $caseSlug = switch ($SuperJumpCase) {
             "Static" { "static" }
             "SustainedMove" { "sustained-move" }
+            "RandomMove" { "random-move" }
             "Stop" { "stop" }
             "Reverse" { "reverse" }
         }

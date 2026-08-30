@@ -12,7 +12,7 @@
         "AIM-SUPERJUMP-ACCEPT-001")]
     [string]$TaskId = "AIM-LATENCY-COMP-001",
     [string]$Scenario = "MoveLeft",
-    [ValidateSet("None", "Static", "SustainedMove", "Stop", "Reverse")]
+    [ValidateSet("None", "Static", "SustainedMove", "RandomMove", "Stop", "Reverse")]
     [string]$SuperJumpCase = "None",
     [string]$Profile = "tracking",
     [ValidateRange(0.0, 1.0)]

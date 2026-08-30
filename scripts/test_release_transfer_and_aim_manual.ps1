@@ -1602,6 +1602,10 @@ namespace XenAimManualPixelFixture {
             root = Join-Path $root "superjump-sustained-move-task"
             marker = "本 Run 唯一动作：X 持续横移"
         }
+        RandomMove = [ordered]@{
+            root = Join-Path $root "superjump-random-move-task"
+            marker = "本 Run 唯一动作：冲刺超级跳随机左右移动"
+        }
         Stop = [ordered]@{
             root = Join-Path $root "superjump-stop-task"
             marker = "本 Run 唯一动作：X 横移后停止"
@@ -1662,11 +1666,11 @@ namespace XenAimManualPixelFixture {
         }
     }
 
-    $sprintPixelRoot = Join-Path $root "superjump-sustained-move-pixel-task"
+    $sprintPixelRoot = Join-Path $root "superjump-random-move-pixel-task"
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
         (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
         -TaskId AIM-SUPERJUMP-ACCEPT-001 `
-        -Mode Prepare -Scenario SuperJump -SuperJumpCase SustainedMove `
+        -Mode Prepare -Scenario SuperJump -SuperJumpCase RandomMove `
         -Profile tracking -Smoothing 0.50 `
         -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
         -MaxCountsPerFrame 14.0 -EnableDelayCompensation `
@@ -1681,13 +1685,30 @@ namespace XenAimManualPixelFixture {
     }
     $sprintPixelTaskMarkdown = Get-Content -LiteralPath `
         (Join-Path $sprintPixelRoot "TASK.md") -Raw -Encoding utf8
+    $sprintPixelTask = Get-Content -LiteralPath `
+        (Join-Path $sprintPixelRoot "task.json") -Raw -Encoding utf8 |
+        ConvertFrom-Json
     $expectedSprintHoldAction =
-        "目标进入后按住右键至少 15 秒，持续执行单方向冲刺超级跳并保持大幅 X/Y 联动；" +
+        "目标进入后按住右键至少 15 秒，保持冲刺超级跳和大幅 X/Y 联动；" +
         "此后继续按住，直到前台终端提示 sidecar 已完成或未完成、可以松开右键，" +
-        "期间不停止、不换向。"
+        "不人为限制方向或换向次数。"
     if ($sprintPixelTaskMarkdown -notmatch
             [regex]::Escape($expectedSprintHoldAction)) {
-        throw "冲刺超级跳操作步骤必须覆盖 2400 帧 sidecar 的完整有效锁定窗口。"
+        throw "随机左右冲刺超级跳操作步骤必须覆盖 2400 帧 sidecar 的完整有效锁定窗口。"
+    }
+    $expectedRandomAction =
+        "选择单个目标，人物在冲刺超级跳过程中随机向左或向右移动，方向和换向时刻不预设。"
+    $expectedRandomObservation =
+        "随机换向时 X 跟随是否落后、错向、过冲、细碎往返或出框"
+    if ([string]$sprintPixelTask.superjump_case -ne "RandomMove" -or
+        $sprintPixelTaskMarkdown -notmatch [regex]::Escape($expectedRandomAction) -or
+        $sprintPixelTaskMarkdown -notmatch [regex]::Escape($expectedRandomObservation) -or
+        $sprintPixelTaskMarkdown -notmatch
+            [regex]::Escape("Y 起跳、腾空和落地跟随是否及时稳定") -or
+        $sprintPixelTaskMarkdown -notmatch
+            [regex]::Escape("X/Y 同时大幅位移时是否出现跨轴压制或方向错误") -or
+        $sprintPixelTaskMarkdown -match "单方向|期间不停止、不换向") {
+        throw "随机左右冲刺超级跳任务没有固化随机方向、换向与大幅 X/Y 联动语义。"
     }
     if ($sprintPixelTaskMarkdown.Contains([char]7) -or
         $sprintPixelTaskMarkdown -notmatch
@@ -1703,7 +1724,7 @@ namespace XenAimManualPixelFixture {
         (Join-Path $published "manifest.json") -Algorithm SHA256).Hash
     if ($preparedManifestHashes.Count -ne 1 -or
         -not $preparedManifestHashes.Contains($activeManifestHash)) {
-        throw "四个 SuperJump Run 必须共享同一活动 manifest 身份。"
+        throw "全部 SuperJump Run 必须共享同一活动 manifest 身份。"
     }
 
     $automaticRoot = Join-Path $trackingRoot "automatic"
