@@ -4,6 +4,7 @@
 #include "app/input_router.h"
 #include "app/model_catalog_internal.h"
 #include "app/release_contract_internal.h"
+#include "app/startup_internal.h"
 #include "config/config.h"
 #include "crash/crash.h"
 #include "debug/debug.h"
@@ -29,6 +30,23 @@ void append_message(std::string& message, const std::string& addition) {
     if (addition.empty()) return;
     if (!message.empty()) message += "；";
     message += addition;
+}
+
+void show_startup_error(void*, const std::string& message) {
+    const int length = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, message.data(),
+        static_cast<int>(message.size()), nullptr, 0);
+    std::wstring wide(
+        length > 0 ? static_cast<std::size_t>(length) : 0, L'\0');
+    if (length > 0) {
+        MultiByteToWideChar(
+            CP_UTF8, MB_ERR_INVALID_CHARS, message.data(),
+            static_cast<int>(message.size()), wide.data(), length);
+    } else {
+        wide = L"Xen 启动失败";
+    }
+    MessageBoxW(
+        nullptr, wide.c_str(), L"Xen", MB_OK | MB_ICONERROR);
 }
 
 bool same_mouse_config(const MouseConfig& first,
@@ -140,7 +158,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return true;
     };
 
+    app::detail::AppStartupBoundary startup_boundary(
+        {nullptr, show_startup_error});
     Log::init(config.log);
+    if (!startup_boundary.observe_log_initialization(Log::initialized())) {
+        Log::shutdown();
+        return startup_boundary.finish(0);
+    }
     Log::register_module("app", LogLevel::INFO);
     if (model_directory_ready) {
         LOG_INFO(
@@ -180,11 +204,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     std::uint64_t debug_segment = 0;
     std::vector<RuntimePipelineSample> pending_debug_samples;
     Overlay overlay;
-    if (!overlay.init(config.ui)) {
+    if (!startup_boundary.observe_overlay_initialization(
+            overlay.init(config.ui))) {
         LOG_ERROR("app", "Overlay 初始化失败");
         crash_handler.uninstall();
         Log::shutdown();
-        return 1;
+        return startup_boundary.finish(0);
     }
 
     const auto drain_debug_samples = [&]() noexcept {
@@ -295,9 +320,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         const auto preview = snapshot.preview_enabled
             ? runtime.preview_frame()
             : nullptr;
-        if (!overlay.render(
-                snapshot, preview, model_catalog, backend_catalog,
-                config, app_message, actions)) {
+        if (!startup_boundary.observe_overlay_render(
+                overlay.render(
+                    snapshot, preview, model_catalog, backend_catalog,
+                    config, app_message, actions))) {
             LOG_ERROR("app", "Overlay 渲染失败");
             break;
         }
@@ -465,7 +491,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     overlay.shutdown();
     crash_handler.uninstall();
     Log::shutdown();
-    return release_restart_requested
-        ? static_cast<int>(app::detail::kReleaseRestartExitCode)
-        : 0;
+    return startup_boundary.finish(
+        release_restart_requested
+            ? static_cast<int>(app::detail::kReleaseRestartExitCode)
+            : 0);
 }

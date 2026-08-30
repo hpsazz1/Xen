@@ -825,6 +825,10 @@ target_link_libraries(app_launcher
     PUBLIC app_release
     PRIVATE config)
 
+add_library(app_startup STATIC
+    Xen/app/startup.cpp)
+target_include_directories(app_startup PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+
 add_library(runtime STATIC
     Xen/runtime/runtime.cpp
     Xen/runtime/runtime_queue.cpp)
@@ -872,7 +876,7 @@ add_executable(xen_app WIN32
     Xen/app/xen.rc)
 set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
 target_link_libraries(xen_app PRIVATE
-    overlay app_input runtime xen_debug config crash log app_release)
+    overlay app_input app_startup runtime xen_debug config crash log app_release)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_app OPENCV ORT NDI)
 endif()
@@ -1157,6 +1161,13 @@ if(BUILD_TESTING)
         tests/launcher_decision_tests.cpp)
     target_link_libraries(launcher_decision_tests PRIVATE app_launcher)
     add_test(NAME launcher_decision_tests COMMAND launcher_decision_tests)
+
+    # GUI 启动失败专项只注入 Log/Overlay 结果与错误展示 adapter；不创建
+    # Win32/D3D11 窗口，也不启动 Runtime、Worker 或任何物理输出。
+    add_executable(app_startup_tests
+        tests/app_startup_tests.cpp)
+    target_link_libraries(app_startup_tests PRIVATE app_startup app_release)
+    add_test(NAME app_startup_tests COMMAND app_startup_tests)
 
     set(XEN_WINDOWS_POWERSHELL
         "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe")
