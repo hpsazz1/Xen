@@ -263,35 +263,40 @@ struct Runtime::Impl {
 
     void capture_loop() noexcept {
         const bool probes_enabled = config.runtime.enable_performance_probes;
+        runtime::detail::CaptureFramePublisher frame_publisher(frame_queue);
         while (!stop_requested.load(std::memory_order_acquire)) {
             auto write_slot = frame_queue.acquire_write();
             if (!write_slot) {
                 std::this_thread::yield();
                 continue;
             }
-            const auto grab_started = probes_enabled
-                ? std::chrono::steady_clock::now()
-                : std::chrono::steady_clock::time_point{};
-            const CaptureStatus capture_status = capture->grab(*write_slot);
-            const auto grab_finished = probes_enabled
-                ? std::chrono::steady_clock::now()
-                : std::chrono::steady_clock::time_point{};
+            const auto outcome = frame_publisher.capture_and_publish(
+                *capture, write_slot, probes_enabled);
+            const CaptureStatus capture_status = outcome.capture_status;
             if (capture_status == CaptureStatus::FRAME) {
-                if (probes_enabled) {
-                    write_slot->timing.capture_stages.runtime_handoff_valid =
-                        true;
-                    write_slot->timing.capture_stages.runtime_capture_grab_ms =
-                        std::chrono::duration<double, std::milli>(
-                            grab_finished - grab_started).count();
+                if (!outcome.frame_publish_result ||
+                    *outcome.frame_publish_result ==
+                        runtime::detail::FramePublishResult::INTERNAL_ERROR) {
+                    fail_runtime("Runtime 帧队列发布失败");
+                    return;
                 }
-                frame_queue.publish(write_slot, grab_finished);
+                if (*outcome.frame_publish_result ==
+                    runtime::detail::FramePublishResult::INVALID) {
+                    fail_runtime("Capture 返回不符合 Runtime 契约的 FRAME");
+                    return;
+                }
+                if (*outcome.frame_publish_result ==
+                    runtime::detail::FramePublishResult::STOPPED) {
+                    return;
+                }
                 const auto now = std::chrono::steady_clock::now();
                 ++fps_frame_count;
                 const double elapsed =
                     std::chrono::duration<double>(now - fps_started).count();
                 std::lock_guard<std::mutex> lock(snapshot_mutex);
                 current_snapshot.capture_status = capture_status;
-                ++current_snapshot.captured_frames;
+                current_snapshot.captured_frames =
+                    frame_publisher.published_frames();
                 current_snapshot.last_profile.capture_ms =
                     write_slot->timing.capture_ms;
                 current_snapshot.source_dropped_frames =

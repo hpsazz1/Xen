@@ -24,6 +24,39 @@ struct ReleaseProbe {
     }
 };
 
+class MalformedFrameCapture final : public ICapture {
+public:
+    bool open() noexcept override {
+        status_ = CaptureStatus::READY;
+        return true;
+    }
+
+    CaptureStatus grab(CapturedFrame& frame) noexcept override {
+        frame.storage = CapturedFrameStorage::CPU_BGR;
+        frame.bgr.release();
+        frame.width = 2;
+        frame.height = 2;
+        frame.timing.sequence = 1;
+        status_ = CaptureStatus::FRAME;
+        return status_;
+    }
+
+    void close() noexcept override {
+        status_ = CaptureStatus::CLOSED;
+    }
+
+    CaptureStatus status() const noexcept override {
+        return status_;
+    }
+
+    std::string last_error() const override {
+        return {};
+    }
+
+private:
+    CaptureStatus status_ = CaptureStatus::CLOSED;
+};
+
 void expect(bool condition, const std::string& message) {
     if (condition) return;
     ++failures;
@@ -43,7 +76,30 @@ void publish(runtime::detail::LatestFrameQueue& queue,
     slot->height = 2;
     slot->timing.sequence = sequence;
     slot->timing.captured_at = std::chrono::steady_clock::now();
-    queue.publish(slot);
+    expect(queue.publish(slot) ==
+               runtime::detail::FramePublishResult::PUBLISHED,
+           "合法 CPU 帧应显式报告发布成功");
+}
+
+void test_malformed_capture_frame_is_not_counted_as_published() {
+    runtime::detail::LatestFrameQueue queue;
+    runtime::detail::CaptureFramePublisher publisher(queue);
+    MalformedFrameCapture capture;
+    expect(capture.open(), "malformed fake Capture 应能进入 READY");
+    auto slot = queue.acquire_write();
+    expect(slot != nullptr, "malformed fake Capture 应取得真实 Runtime 队列槽");
+    if (!slot) return;
+
+    const auto outcome = publisher.capture_and_publish(capture, slot, false);
+    std::atomic<bool> stop{false};
+    const auto queued = queue.wait_latest(0, stop);
+    expect(outcome.capture_status == CaptureStatus::FRAME,
+           "fake ICapture 必须真实返回 FRAME，不能用 Capture error 代替");
+    expect(outcome.frame_publish_result ==
+               runtime::detail::FramePublishResult::INVALID &&
+               publisher.published_frames() == 0 && !queued,
+           "真实 capture-loop publisher 必须让 malformed FRAME 显式失败，"
+           "且不得增加 captured snapshot");
 }
 
 void test_latest_frame_queue() {
@@ -80,7 +136,21 @@ void test_latest_frame_queue() {
     expect(overwritten_at_consume == 1,
            "消费端点覆盖累计值必须与 sequence 缺口一致");
 
+    auto stopped_slot = queue.acquire_write();
+    expect(stopped_slot != nullptr, "停止语义测试应先取得一个可写槽");
+    if (stopped_slot) {
+        stopped_slot->bgr.create(2, 2, CV_8UC3);
+        stopped_slot->storage = CapturedFrameStorage::CPU_BGR;
+        stopped_slot->width = 2;
+        stopped_slot->height = 2;
+        stopped_slot->timing.sequence = 4;
+    }
     queue.stop();
+    if (stopped_slot) {
+        expect(queue.publish(stopped_slot) ==
+                   runtime::detail::FramePublishResult::STOPPED,
+               "已停止队列必须显式返回 STOPPED，而不是报告发布失败");
+    }
     expect(!queue.wait_latest(3, stop),
            "停止队列后等待者必须立即退出");
 }
@@ -126,8 +196,13 @@ void test_network_storage_released_on_reset() {
     auto storage = std::make_shared<cv::Mat>(2, 2, CV_8UC3);
     slot->bgr_storage = storage;
     slot->bgr = *storage;
+    slot->storage = CapturedFrameStorage::CPU_BGR;
+    slot->width = 2;
+    slot->height = 2;
     slot->timing.sequence = 1;
-    queue.publish(slot);
+    expect(queue.publish(slot) ==
+               runtime::detail::FramePublishResult::PUBLISHED,
+           "合法网络别名帧应进入 Runtime 队列");
     queue.reset();
     expect(!slot->bgr_storage && slot->bgr.empty(),
            "Runtime 重置时必须归还异步 Capture 缓冲槽");
@@ -145,7 +220,9 @@ void test_gpu_storage_released_on_reset() {
     slot->width = 320;
     slot->height = 320;
     slot->timing.sequence = 1;
-    queue.publish(slot);
+    expect(queue.publish(slot) ==
+               runtime::detail::FramePublishResult::PUBLISHED,
+           "合法 D3D11 GPU 帧应显式报告发布成功");
     queue.reset();
     expect(!slot->native_storage && !slot->native_synchronization &&
                slot->storage == CapturedFrameStorage::CPU_BGR &&
@@ -164,14 +241,18 @@ void test_directml_frame_requires_fence() {
     slot->width = 320;
     slot->height = 320;
     slot->timing.sequence = 1;
-    queue.publish(slot);
+    expect(queue.publish(slot) ==
+               runtime::detail::FramePublishResult::INVALID,
+           "缺少 shared fence 的 DirectML GPU 帧必须显式报告 INVALID");
     std::atomic<bool> stop{false};
     expect(!queue.wait_latest(0, stop),
            "缺少 shared fence 的 DirectML GPU 帧必须拒绝发布");
 
     slot->native_fence = std::make_shared<int>(2);
     slot->native_fence_value = 1;
-    queue.publish(slot);
+    expect(queue.publish(slot) ==
+               runtime::detail::FramePublishResult::PUBLISHED,
+           "DirectML fence 合同时应显式报告发布成功");
     const auto published = queue.wait_latest(0, stop);
     expect(published && published->timing.sequence == 1,
            "纹理、提交锁和非零 fence 完整时才允许发布 DirectML 帧");
@@ -479,6 +560,7 @@ void test_runtime_preview_held_slots_and_reset() {
 
 int main() {
     test_latest_frame_queue();
+    test_malformed_capture_frame_is_not_counted_as_published();
     test_detection_observability_preserves_team_classes();
     test_network_storage_released_on_reset();
     test_gpu_storage_released_on_reset();

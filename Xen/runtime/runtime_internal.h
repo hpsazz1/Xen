@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -195,6 +196,13 @@ private:
     std::uint64_t next_generation_ = 0;
 };
 
+enum class FramePublishResult : std::uint8_t {
+    PUBLISHED,
+    INVALID,
+    STOPPED,
+    INTERNAL_ERROR,
+};
+
 class LatestFrameQueue {
 public:
     LatestFrameQueue();
@@ -202,7 +210,7 @@ public:
     std::array<std::shared_ptr<CapturedFrame>, 3>
         initialization_slots() noexcept;
     std::shared_ptr<CapturedFrame> acquire_write() noexcept;
-    void publish(
+    FramePublishResult publish(
         const std::shared_ptr<CapturedFrame>& frame,
         std::chrono::steady_clock::time_point probe_started = {}) noexcept;
     std::shared_ptr<const CapturedFrame> wait_latest(
@@ -221,6 +229,29 @@ private:
     std::uint64_t consumed_sequence_ = 0;
     std::uint64_t overwritten_frames_ = 0;
     bool stopped_ = false;
+};
+
+struct CaptureFramePublishOutcome {
+    CaptureStatus capture_status = CaptureStatus::CLOSED;
+    std::optional<FramePublishResult> frame_publish_result;
+};
+
+// Capture loop 的单帧系统边界：调用公有 ICapture，固化可选阶段耗时，
+// 再把 FRAME 交给 Runtime 最新帧队列。发布成功计数由该对象独占维护，
+// 避免调用者把 Capture 的 FRAME 状态误当成已进入 Pipeline 的帧。
+class CaptureFramePublisher {
+public:
+    explicit CaptureFramePublisher(LatestFrameQueue& queue) noexcept;
+
+    CaptureFramePublishOutcome capture_and_publish(
+        ICapture& capture,
+        const std::shared_ptr<CapturedFrame>& frame,
+        bool probes_enabled) noexcept;
+    std::uint64_t published_frames() const noexcept;
+
+private:
+    LatestFrameQueue& queue_;
+    std::uint64_t published_frames_ = 0;
 };
 
 struct PreviewStats {

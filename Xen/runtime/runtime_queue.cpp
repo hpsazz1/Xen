@@ -39,30 +39,30 @@ std::shared_ptr<CapturedFrame> LatestFrameQueue::acquire_write() noexcept {
     return nullptr;
 }
 
-void LatestFrameQueue::publish(
+FramePublishResult LatestFrameQueue::publish(
         const std::shared_ptr<CapturedFrame>& frame,
         std::chrono::steady_clock::time_point probe_started) noexcept {
     if (!frame || frame->timing.sequence == 0 ||
         frame->width <= 0 || frame->height <= 0) {
-        return;
+        return FramePublishResult::INVALID;
     }
     if (frame->storage == CapturedFrameStorage::CPU_BGR) {
         if (frame->bgr.empty() || frame->bgr.type() != CV_8UC3 ||
             frame->bgr.cols != frame->width ||
             frame->bgr.rows != frame->height) {
-            return;
+            return FramePublishResult::INVALID;
         }
     } else if (!frame->native_storage || !frame->native_synchronization ||
                !frame->bgr.empty() ||
                (frame->storage ==
                     CapturedFrameStorage::D3D11_BGRA8_DIRECTML &&
                 (!frame->native_fence || frame->native_fence_value == 0))) {
-        return;
+        return FramePublishResult::INVALID;
     }
     try {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (stopped_) return;
+            if (stopped_) return FramePublishResult::STOPPED;
             if (latest_ && latest_->timing.sequence != consumed_sequence_) {
                 ++overwritten_frames_;
             }
@@ -78,8 +78,51 @@ void LatestFrameQueue::publish(
             latest_ = frame;
         }
         condition_.notify_one();
+        return FramePublishResult::PUBLISHED;
     } catch (...) {
+        return FramePublishResult::INTERNAL_ERROR;
     }
+}
+
+CaptureFramePublisher::CaptureFramePublisher(
+        LatestFrameQueue& queue) noexcept
+    : queue_(queue) {}
+
+CaptureFramePublishOutcome CaptureFramePublisher::capture_and_publish(
+        ICapture& capture,
+        const std::shared_ptr<CapturedFrame>& frame,
+        bool probes_enabled) noexcept {
+    CaptureFramePublishOutcome outcome;
+    if (!frame) {
+        outcome.capture_status = CaptureStatus::FAILURE;
+        outcome.frame_publish_result = FramePublishResult::INTERNAL_ERROR;
+        return outcome;
+    }
+
+    const auto grab_started = probes_enabled
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
+    outcome.capture_status = capture.grab(*frame);
+    const auto grab_finished = probes_enabled
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
+    if (outcome.capture_status != CaptureStatus::FRAME) return outcome;
+
+    if (probes_enabled) {
+        frame->timing.capture_stages.runtime_handoff_valid = true;
+        frame->timing.capture_stages.runtime_capture_grab_ms =
+            std::chrono::duration<double, std::milli>(
+                grab_finished - grab_started).count();
+    }
+    outcome.frame_publish_result = queue_.publish(frame, grab_finished);
+    if (outcome.frame_publish_result == FramePublishResult::PUBLISHED) {
+        ++published_frames_;
+    }
+    return outcome;
+}
+
+std::uint64_t CaptureFramePublisher::published_frames() const noexcept {
+    return published_frames_;
 }
 
 std::shared_ptr<const CapturedFrame> LatestFrameQueue::wait_latest(
