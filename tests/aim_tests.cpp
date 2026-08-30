@@ -7228,6 +7228,278 @@ void test_prediction_state_is_invariant_to_roi_representation_scale() {
     check_axis(true);
 }
 
+void test_prediction_motion_evidence_rewarms_after_track_discontinuity() {
+    constexpr int kFrameIntervalMicroseconds = 8000;
+    constexpr int kBuildFrames = 220;
+    constexpr int kSettleFrames = 8;
+    constexpr int kProbeFrames = 50;
+    enum class Discontinuity { LOSS, BODY_HEAD_BODY };
+    struct Trace {
+        bool built = false;
+        std::uint64_t track_id_before = 0;
+        std::uint64_t track_id_after = 0;
+        int early_reactivation_frames = 0;
+    };
+    const auto run_case = [&](Discontinuity discontinuity) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.max_lost_frames = 3;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.40f;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 12.0f;
+        config.acquisition_range_percent = 100.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_delay_compensation = false;
+        config.enable_prediction = true;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        Trace trace;
+        std::uint64_t sequence = 1;
+        const auto process = [&](float source_x, bool empty, bool head_only,
+                                 bool settle) {
+            const long long elapsed_microseconds =
+                static_cast<long long>(sequence - 1) *
+                kFrameIntervalMicroseconds;
+            AimFrame frame = make_frame(
+                sequence++, base +
+                    std::chrono::microseconds(elapsed_microseconds));
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(4);
+            frame.control_center_x = settle ? source_x : source_x - 16.0f;
+            frame.control_center_y = 160.0f;
+            frame.lock_active = true;
+            if (!empty) {
+                frame.detections = {head_only
+                    ? head_box(source_x, 140.0f, 16.0f, 18.0f)
+                    : body_box(source_x, 160.0f, 40.0f, 80.0f)};
+            }
+            return aim.process(frame);
+        };
+
+        float source_x = 176.0f;
+        for (int index = 0; index < kBuildFrames; ++index) {
+            source_x += 2.0f *
+                (static_cast<float>(kFrameIntervalMicroseconds) / 1000000.0f);
+            const AimResult result = process(source_x, false, false, false);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "S 生命周期夹具建立段必须命中 Aim::process");
+            if (!result.has_target) continue;
+            trace.track_id_before = result.target.track_id;
+            trace.built = trace.built || result.target.lead_active;
+        }
+        if (discontinuity == Discontinuity::LOSS) {
+            const AimResult lost = process(source_x, true, false, true);
+            expect(lost.status == AimStatus::SUCCESS,
+                   "S 生命周期丢失帧必须走生产 success/empty seam");
+        } else {
+            for (int index = 0; index < 3; ++index) {
+                source_x += 2.0f *
+                    (static_cast<float>(kFrameIntervalMicroseconds) /
+                     1000000.0f);
+                const AimResult head_result =
+                    process(source_x, false, true, true);
+                expect(head_result.status == AimStatus::SUCCESS &&
+                           head_result.has_target,
+                       "S 生命周期语义切换必须保持同一生产 Track");
+            }
+        }
+        for (int index = 0; index < kSettleFrames + kProbeFrames; ++index) {
+            source_x += 2.0f *
+                (static_cast<float>(kFrameIntervalMicroseconds) / 1000000.0f);
+            const AimResult result = process(
+                source_x, false, false, index < kSettleFrames);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "S 生命周期恢复段必须命中 Aim::process");
+            if (!result.has_target) continue;
+            trace.track_id_after = result.target.track_id;
+            if (index >= kSettleFrames && result.target.lead_active) {
+                ++trace.early_reactivation_frames;
+            }
+        }
+        return trace;
+    };
+    for (const Discontinuity discontinuity : {
+             Discontinuity::LOSS, Discontinuity::BODY_HEAD_BODY}) {
+        const Trace trace = run_case(discontinuity);
+        const std::string name = discontinuity == Discontinuity::LOSS
+            ? "loss" : "body-head-body";
+        expect(trace.built,
+               name + " reset 夹具必须先建立 prediction");
+        expect(trace.track_id_before != 0 &&
+                   trace.track_id_before == trace.track_id_after,
+               name + " 必须在同一 Track identity 内验证 epoch reset");
+        expect(trace.early_reactivation_frames == 0,
+               name + " 后不得继承旧 motion evidence 提前重入，实际=" +
+                   std::to_string(trace.early_reactivation_frames));
+    }
+}
+
+void test_vertical_prediction_reversal_rewarms_vertical_evidence() {
+    constexpr int kFrameIntervalMicroseconds = 8000;
+    constexpr int kBuildFrames = 220;
+    constexpr int kSettleFrames = 8;
+    constexpr int kProbeFrames = 50;
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.40f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 12.0f;
+    config.acquisition_range_percent = 100.0f;
+    config.body_aim_height_ratio = 0.50f;
+    config.enable_delay_compensation = false;
+    config.enable_prediction = true;
+    Aim aim(config);
+    const auto base = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    std::uint64_t sequence = 1;
+    float source_x = 176.0f;
+    float source_y = 176.0f;
+    bool vertical_lead_built = false;
+    std::uint64_t track_id = 0;
+    int early_vertical_reactivation_frames = 0;
+    const auto process = [&](bool settle, float control_center_offset_y) {
+        const long long elapsed_microseconds =
+            static_cast<long long>(sequence - 1) *
+            kFrameIntervalMicroseconds;
+        AimFrame frame = make_frame(
+            sequence++, base +
+                std::chrono::microseconds(elapsed_microseconds));
+        frame.control_at = frame.captured_at +
+            std::chrono::milliseconds(4);
+        frame.control_center_x = source_x;
+        frame.control_center_y = settle
+            ? source_y : source_y + control_center_offset_y;
+        frame.lock_active = true;
+        frame.detections = {
+            body_box(source_x, source_y, 40.0f, 80.0f)};
+        return aim.process(frame);
+    };
+    const float frame_seconds =
+        static_cast<float>(kFrameIntervalMicroseconds) / 1000000.0f;
+    for (int index = 0; index < kBuildFrames; ++index) {
+        source_x += 2.0f * frame_seconds;
+        source_y += 3.0f * frame_seconds;
+        const AimResult result = process(false, -16.0f);
+        expect(result.status == AimStatus::SUCCESS && result.has_target,
+               "Y reverse 建立段必须命中 Aim::process");
+        if (!result.has_target) continue;
+        track_id = result.target.track_id;
+        vertical_lead_built = vertical_lead_built ||
+            std::fabs(result.target.lead_y) > 0.001f;
+    }
+    for (int index = 0; index < kSettleFrames + kProbeFrames; ++index) {
+        source_x += 2.0f * frame_seconds;
+        source_y -= 3.0f * frame_seconds;
+        const AimResult result = process(index < kSettleFrames, 16.0f);
+        expect(result.status == AimStatus::SUCCESS && result.has_target &&
+                   result.target.track_id == track_id,
+               "Y reverse 必须在同一 Track 的真实反向段验证");
+        if (index >= kSettleFrames && result.has_target &&
+            std::fabs(result.target.lead_y) > 0.001f) {
+            ++early_vertical_reactivation_frames;
+        }
+    }
+    expect(vertical_lead_built,
+           "Y reverse 夹具必须先通过公开 lead_y 建立纵向 prediction");
+    expect(early_vertical_reactivation_frames == 0,
+           "Y 反向后不得复用反向前 motion evidence 提前恢复 lead_y，实际=" +
+               std::to_string(early_vertical_reactivation_frames));
+}
+
+void test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale() {
+    constexpr int kFrameCount = 480;
+    constexpr int kFrameIntervalMicroseconds = 8000;
+    struct Trace {
+        std::uint64_t track_id = 0;
+        long long first_active_microseconds = -1;
+        std::vector<bool> lead_active;
+    };
+    const auto run_case = [&](int vertical_scale) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.40f;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 12.0f;
+        config.acquisition_range_percent = 100.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_delay_compensation = false;
+        config.enable_prediction = true;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        Trace trace;
+        trace.lead_active.reserve(kFrameCount);
+        const float frame_seconds =
+            static_cast<float>(kFrameIntervalMicroseconds) / 1000000.0f;
+        for (int index = 0; index < kFrameCount; ++index) {
+            const float elapsed_seconds =
+                static_cast<float>(index) * frame_seconds;
+            const int y_phase = index % 40;
+            const float y_source_offset =
+                static_cast<float>(y_phase <= 20 ? y_phase : 40 - y_phase) *
+                frame_seconds;
+            const float source_x = 208.0f + 1.5f * elapsed_seconds;
+            const float source_y = 160.0f + y_source_offset;
+            const float y_scale = static_cast<float>(vertical_scale);
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) *
+                    kFrameIntervalMicroseconds));
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(4);
+            frame.roi_height = 320 * vertical_scale;
+            frame.control_center_x = source_x - 32.0f;
+            frame.control_center_y = source_y * y_scale;
+            frame.source_pixels_per_roi_pixel_y = 1.0f / y_scale;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                source_x, source_y * y_scale,
+                40.0f, 80.0f * y_scale)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "非等比 ROI MR-S 必须逐帧命中 Aim::process");
+            if (!result.has_target) continue;
+            trace.track_id = result.target.track_id;
+            trace.lead_active.push_back(result.target.lead_active);
+            if (result.target.lead_active &&
+                trace.first_active_microseconds < 0) {
+                trace.first_active_microseconds =
+                    static_cast<long long>(index) *
+                    kFrameIntervalMicroseconds;
+            }
+        }
+        return trace;
+    };
+    const Trace source = run_case(1);
+    const Trace stretched_y = run_case(2);
+    int state_mismatches = 0;
+    for (std::size_t index = 0;
+         index < std::min(source.lead_active.size(),
+                          stretched_y.lead_active.size()); ++index) {
+        state_mismatches += source.lead_active[index] !=
+            stretched_y.lead_active[index] ? 1 : 0;
+    }
+    expect(source.track_id != 0 && source.track_id == stretched_y.track_id &&
+               source.first_active_microseconds >= 0 &&
+               stretched_y.first_active_microseconds >= 0 &&
+               std::llabs(source.first_active_microseconds -
+                          stretched_y.first_active_microseconds) <=
+                   kFrameIntervalMicroseconds &&
+               state_mismatches == 0,
+           "同一源轨迹不得因 Y-only ROI 表示缩放切换主轴 evidence，首次=" +
+               std::to_string(source.first_active_microseconds) + "/" +
+               std::to_string(stretched_y.first_active_microseconds) +
+               "，状态差=" + std::to_string(state_mismatches));
+}
+
 void test_prediction_direct_feedforward_has_no_absolute_velocity_mode() {
     constexpr float kFrameSeconds = 1.0f / 120.0f;
     constexpr float kBuildMotionPerFrame = 2.50f;
@@ -10567,6 +10839,9 @@ int main() {
     test_base_tracking_quantization_has_no_speed_threshold();
     test_delay_shaping_has_no_speed_threshold_before_prediction();
     test_prediction_state_is_invariant_to_roi_representation_scale();
+    test_prediction_motion_evidence_rewarms_after_track_discontinuity();
+    test_vertical_prediction_reversal_rewarms_vertical_evidence();
+    test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale();
     test_prediction_direct_feedforward_has_no_absolute_velocity_mode();
     test_prediction_confirmed_stop_has_no_absolute_velocity_mode();
     test_prediction_stop_measurement_has_no_absolute_velocity_mode();

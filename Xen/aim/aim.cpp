@@ -3520,7 +3520,8 @@ struct Aim::Impl {
         const float exit_distance = std::max(
             config.deadzone_pixels, box_diagonal * 0.05f);
         const bool horizontal_motion_dominates =
-            std::fabs(track.vx) >= std::fabs(track.vy);
+            std::fabs(track.vx * frame.source_pixels_per_roi_pixel_x) >=
+            std::fabs(track.vy * frame.source_pixels_per_roi_pixel_y);
         const float minimum_displacement_ratio = config.deadzone_pixels /
             std::max(
                 1.0f,
