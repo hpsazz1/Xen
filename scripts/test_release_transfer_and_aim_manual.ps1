@@ -1689,6 +1689,16 @@ namespace XenAimManualPixelFixture {
             [regex]::Escape($expectedSprintHoldAction)) {
         throw "冲刺超级跳操作步骤必须覆盖 2400 帧 sidecar 的完整有效锁定窗口。"
     }
+    if ($sprintPixelTaskMarkdown.Contains([char]7) -or
+        $sprintPixelTaskMarkdown -notmatch
+            [regex]::Escape('`aim_lock_active`') -or
+        $sprintPixelTaskMarkdown -notmatch
+            [regex]::Escape('`physical_output_capability=false`') -or
+        $sprintPixelTaskMarkdown -notmatch
+            [regex]::Escape('`HPSAZZ (Xen-ROI-320)`') -or
+        $sprintPixelTaskMarkdown.Contains('$ndiSourceName')) {
+        throw "同步像素任务必须原样显示 marker、能力和精确 NDI 源。"
+    }
     $activeManifestHash = (Get-FileHash -LiteralPath `
         (Join-Path $published "manifest.json") -Algorithm SHA256).Hash
     if ($preparedManifestHashes.Count -ne 1 -or

@@ -1061,11 +1061,11 @@ function New-TaskMarkdown(
 
 仅在私有或离线训练环境执行。启动前确认 End 可用、现场无非预期窗口，程序启动后仍需人工武装。
 任何方向错误、持续发送、松键不停止或失控移动，立即松开右键并按 End。
-若本任务要求 source timing，Launch 前须在源机 `HPSAZZ` 前台运行
+若本任务要求 source timing，Launch 前须在源机 ``HPSAZZ`` 前台运行
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\Xen\scripts\run_ndi_clock_source.ps1"
 并保持到 Run 结束；缺少时钟样本会使 automatic gate 失败。
-同步 NDI 像素 sidecar 固定 `physical_output_capability=false`。它会先等待 Runtime 进入连续
-`aim_lock_active` 窗口，再从精确源 `$ndiSourceName` 保存 $PixelEvidenceFrames 帧；开始动作后请持续按住
+同步 NDI 像素 sidecar 固定 ``physical_output_capability=false``。它会先等待 Runtime 进入连续
+``aim_lock_active`` 窗口，再从精确源 ``$ndiSourceName`` 保存 $PixelEvidenceFrames 帧；开始动作后请持续按住
 右键至少 15 秒，并继续保持到前台终端显示“sidecar 已完成，可以松开右键”或
 “sidecar 未完成或已停止，可以松开右键”。若按住 15 秒仍未出现“已观察到 Runtime aim-lock”提示，
 请松开右键并结束本 Run。仅当 aim-lock 仍有效、
