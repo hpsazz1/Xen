@@ -75,6 +75,15 @@ struct HorizontalRawMotionHistory {
     std::size_t count = 0;
 };
 
+struct AxisMotionEvidence {
+    std::chrono::steady_clock::time_point last_at{};
+    float last_position_ratio = 0.0f;
+    float consistent_elapsed_seconds = 0.0f;
+    float consistent_displacement_ratio = 0.0f;
+    float direction = 0.0f;
+    bool initialized = false;
+};
+
 struct HorizontalDirectionHistory {
     std::array<float, kTrackHorizontalTrendSampleCount> center_x_ratio{};
     std::array<float, kTrackHorizontalTrendSampleCount> center_y_ratio{};
@@ -82,6 +91,8 @@ struct HorizontalDirectionHistory {
     std::size_t count = 0;
     double travelled_distance_x = 0.0;
     double travelled_distance_y = 0.0;
+    AxisMotionEvidence motion_x{};
+    AxisMotionEvidence motion_y{};
 };
 
 struct Track {
@@ -562,10 +573,50 @@ void reset_horizontal_direction_history(Track& track) noexcept {
     track.horizontal_direction.count = 0;
     track.horizontal_direction.travelled_distance_x = 0.0;
     track.horizontal_direction.travelled_distance_y = 0.0;
+    track.horizontal_direction.motion_x = {};
+    track.horizontal_direction.motion_y = {};
+}
+
+void update_axis_motion_evidence(
+        AxisMotionEvidence& evidence, float position_ratio,
+        std::chrono::steady_clock::time_point captured_at) noexcept {
+    if (!evidence.initialized || captured_at <= evidence.last_at) {
+        evidence.last_at = captured_at;
+        evidence.last_position_ratio = position_ratio;
+        evidence.consistent_elapsed_seconds = 0.0f;
+        evidence.consistent_displacement_ratio = 0.0f;
+        evidence.direction = 0.0f;
+        evidence.initialized = true;
+        return;
+    }
+    const float elapsed_seconds = static_cast<float>(
+        std::chrono::duration<double>(captured_at - evidence.last_at).count());
+    const float displacement = position_ratio - evidence.last_position_ratio;
+    const float displacement_epsilon =
+        std::numeric_limits<float>::epsilon();
+    if (std::fabs(displacement) <= displacement_epsilon) {
+        evidence.consistent_elapsed_seconds = 0.0f;
+        evidence.consistent_displacement_ratio = 0.0f;
+        evidence.direction = 0.0f;
+    } else {
+        const float direction = std::copysign(1.0f, displacement);
+        if (direction != evidence.direction) {
+            evidence.consistent_elapsed_seconds = elapsed_seconds;
+            evidence.consistent_displacement_ratio = displacement;
+            evidence.direction = direction;
+        } else {
+            evidence.consistent_elapsed_seconds += elapsed_seconds;
+            evidence.consistent_displacement_ratio += displacement;
+        }
+    }
+    evidence.last_at = captured_at;
+    evidence.last_position_ratio = position_ratio;
 }
 
 void append_horizontal_direction_history(
-        Track& track, float center_x_ratio, float center_y_ratio) noexcept {
+        Track& track, std::chrono::steady_clock::time_point captured_at,
+        float center_x_ratio, float center_y_ratio,
+        float motion_center_y_ratio) noexcept {
     HorizontalDirectionHistory& history = track.horizontal_direction;
     if (history.count != 0) {
         const std::size_t newest =
@@ -598,6 +649,26 @@ void append_horizontal_direction_history(
         (history.next + 1) % kTrackHorizontalTrendSampleCount;
     history.count = std::min(
         history.count + 1, kTrackHorizontalTrendSampleCount);
+    update_axis_motion_evidence(
+        history.motion_x, center_x_ratio, captured_at);
+    update_axis_motion_evidence(
+        history.motion_y, motion_center_y_ratio, captured_at);
+}
+
+bool axis_motion_is_consistent_for(
+        const Track& track, bool vertical,
+        float minimum_seconds,
+        float minimum_displacement_ratio) noexcept {
+    const AxisMotionEvidence& evidence = vertical
+        ? track.horizontal_direction.motion_y
+        : track.horizontal_direction.motion_x;
+    const float velocity = vertical ? track.vy : track.vx;
+    return evidence.initialized &&
+        evidence.consistent_elapsed_seconds > 0.0f &&
+        evidence.consistent_elapsed_seconds >= minimum_seconds &&
+        std::fabs(evidence.consistent_displacement_ratio) >=
+            minimum_displacement_ratio &&
+        evidence.direction * velocity > 0.0f;
 }
 
 float horizontal_direction_efficiency(const Track& track) noexcept {
@@ -1583,8 +1654,9 @@ struct Aim::Impl {
                             vertical_path_translation_consistency;
                 }
                 append_horizontal_direction_history(
-                    track, horizontal_trend_observation_center_x_ratio,
-                    direction_center_y_ratio);
+                    track, track.state_at,
+                    horizontal_trend_observation_center_x_ratio,
+                    direction_center_y_ratio, observation_center_y_ratio);
             }
             update_deformation(pose_changed,
                                center_motion_residual_y,
@@ -2495,8 +2567,10 @@ struct Aim::Impl {
                     created_track, frame.captured_at,
                     (observation.x1 + observation.x2) * 0.5f / roi_width);
                 append_horizontal_direction_history(
-                    created_track,
+                    created_track, frame.captured_at,
                     (observation.x1 + observation.x2) * 0.5f / roi_width,
+                    (observation.y1 + observation.y2) * 0.5f /
+                        std::max(1.0f, static_cast<float>(frame.roi_height)),
                     (observation.y1 + observation.y2) * 0.5f /
                         std::max(1.0f, static_cast<float>(frame.roi_height)));
             }
@@ -3437,13 +3511,30 @@ struct Aim::Impl {
         const float error_magnitude = std::hypot(error_x, error_y);
         const float velocity_magnitude = std::hypot(track.vx, track.vy);
         const float alignment = error_x * track.vx + error_y * track.vy;
-        const float longitudinal_error = velocity_magnitude > 1.0f
+        const float velocity_epsilon =
+            std::numeric_limits<float>::epsilon();
+        const float longitudinal_error = velocity_magnitude > velocity_epsilon
             ? std::fabs(alignment) / velocity_magnitude : 0.0f;
         const float enter_distance = std::max(
             config.deadzone_pixels * 2.0f, box_diagonal * 0.12f);
         const float exit_distance = std::max(
             config.deadzone_pixels, box_diagonal * 0.05f);
-        const bool moving_away = velocity_magnitude > 1.0f && alignment > 0.0f;
+        const bool horizontal_motion_dominates =
+            std::fabs(track.vx) >= std::fabs(track.vy);
+        const float minimum_displacement_ratio = config.deadzone_pixels /
+            std::max(
+                1.0f,
+                (horizontal_motion_dominates
+                     ? frame.source_pixels_per_roi_pixel_x *
+                           static_cast<float>(frame.roi_width)
+                     : frame.source_pixels_per_roi_pixel_y *
+                           static_cast<float>(frame.roi_height)));
+        const bool motion_established = axis_motion_is_consistent_for(
+            track, !horizontal_motion_dominates,
+            0.0f,
+            minimum_displacement_ratio);
+        const bool moving_away = velocity_magnitude > velocity_epsilon &&
+            alignment > 0.0f && motion_established;
         const bool velocity_reversed = lead_active &&
             lead_direction_x * track.vx + lead_direction_y * track.vy <= 0.0f;
         const float lead_axis_error =

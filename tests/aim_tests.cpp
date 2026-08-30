@@ -7109,6 +7109,125 @@ void test_delay_shaping_has_no_speed_threshold_before_prediction() {
                std::to_string(above_old_threshold.shaped_x));
 }
 
+void test_prediction_state_is_invariant_to_roi_representation_scale() {
+    constexpr int kFrameCount = 480;
+    constexpr int kFrameIntervalMicroseconds = 8000;
+    enum class MotionKind { MOVING, ALTERNATING_NOISE, MONOTONIC_DRIFT };
+    struct Trace {
+        int active_frames = 0;
+        float maximum_axis_velocity = 0.0f;
+        std::vector<bool> lead_active;
+        std::vector<float> source_base_axis;
+        std::vector<int> command_axis;
+    };
+    const auto run_case = [&](int representation_scale, bool vertical,
+                              MotionKind motion) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.40f;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 12.0f;
+        config.acquisition_range_percent = 100.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_delay_compensation = false;
+        config.enable_prediction = true;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        Trace trace;
+        trace.lead_active.reserve(kFrameCount);
+        trace.source_base_axis.reserve(kFrameCount);
+        trace.command_axis.reserve(kFrameCount);
+        for (int index = 0; index < kFrameCount; ++index) {
+            const float elapsed_seconds =
+                static_cast<float>(index * kFrameIntervalMicroseconds) /
+                1000000.0f;
+            float source_offset = 0.90f * elapsed_seconds;
+            if (motion == MotionKind::ALTERNATING_NOISE) {
+                source_offset = index % 2 == 0 ? 0.01f : -0.01f;
+            } else if (motion == MotionKind::MONOTONIC_DRIFT) {
+                source_offset = 0.02f * elapsed_seconds;
+            }
+            const float scale = static_cast<float>(representation_scale);
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) *
+                    kFrameIntervalMicroseconds));
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(4);
+            frame.roi_width = 320 * representation_scale;
+            frame.roi_height = 320 * representation_scale;
+            frame.control_center_x = 160.0f * scale;
+            frame.control_center_y = 160.0f * scale;
+            frame.source_pixels_per_roi_pixel_x = 1.0f / scale;
+            frame.source_pixels_per_roi_pixel_y = 1.0f / scale;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                (176.0f + (vertical ? 0.0f : source_offset)) * scale,
+                (vertical ? 176.0f + source_offset : 160.0f) * scale,
+                40.0f * scale, 80.0f * scale)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "ROI scale 等价测试必须逐帧命中 Aim::process");
+            if (!result.has_target) continue;
+            trace.active_frames += result.target.lead_active ? 1 : 0;
+            trace.maximum_axis_velocity = std::max(
+                trace.maximum_axis_velocity,
+                std::fabs(vertical ? result.target.velocity_y :
+                                     result.target.velocity_x));
+            trace.lead_active.push_back(result.target.lead_active);
+            trace.source_base_axis.push_back(
+                (vertical ? result.target.base_aim_y :
+                            result.target.base_aim_x) / scale);
+            trace.command_axis.push_back(result.has_command
+                ? (vertical ? result.command.dy_counts :
+                              result.command.dx_counts)
+                : 0);
+        }
+        return trace;
+    };
+    const auto check_axis = [&](bool vertical) {
+        const Trace source = run_case(1, vertical, MotionKind::MOVING);
+        const Trace enlarged = run_case(4, vertical, MotionKind::MOVING);
+        int state_mismatches = 0;
+        int command_mismatches = 0;
+        float maximum_base_difference = 0.0f;
+        for (std::size_t index = 0; index < source.lead_active.size(); ++index) {
+            state_mismatches += source.lead_active[index] !=
+                    enlarged.lead_active[index] ? 1 : 0;
+            command_mismatches += source.command_axis[index] !=
+                    enlarged.command_axis[index] ? 1 : 0;
+            maximum_base_difference = std::max(
+                maximum_base_difference,
+                std::fabs(source.source_base_axis[index] -
+                          enlarged.source_base_axis[index]));
+        }
+        const std::string axis = vertical ? "Y" : "X";
+        expect(source.maximum_axis_velocity < 1.0f &&
+                   enlarged.maximum_axis_velocity > 1.0f,
+               axis + " scale pair 必须跨过旧 1 ROI px/s read");
+        expect(source.active_frames >= kFrameCount / 2 &&
+                   enlarged.active_frames >= kFrameCount / 2 &&
+                   state_mismatches == 0 && command_mismatches == 0 &&
+                   maximum_base_difference <= 0.001f,
+               axis + " 同一源几何不得因 ROI 尺度改变 prediction/命令");
+        for (const MotionKind negative : {
+                 MotionKind::ALTERNATING_NOISE,
+                 MotionKind::MONOTONIC_DRIFT}) {
+            const Trace negative_source = run_case(1, vertical, negative);
+            const Trace negative_enlarged = run_case(4, vertical, negative);
+            expect(negative_source.active_frames == 0 &&
+                       negative_enlarged.active_frames == 0,
+                   axis + " 静止噪声或亚 deadzone 漂移不得建立 prediction");
+        }
+    };
+    check_axis(false);
+    check_axis(true);
+}
+
 void test_prediction_direct_feedforward_has_no_absolute_velocity_mode() {
     constexpr float kFrameSeconds = 1.0f / 120.0f;
     constexpr float kBuildMotionPerFrame = 2.50f;
@@ -10447,6 +10566,7 @@ int main() {
     test_tracking_pi_is_separate_from_prediction_projection();
     test_base_tracking_quantization_has_no_speed_threshold();
     test_delay_shaping_has_no_speed_threshold_before_prediction();
+    test_prediction_state_is_invariant_to_roi_representation_scale();
     test_prediction_direct_feedforward_has_no_absolute_velocity_mode();
     test_prediction_confirmed_stop_has_no_absolute_velocity_mode();
     test_prediction_stop_measurement_has_no_absolute_velocity_mode();
