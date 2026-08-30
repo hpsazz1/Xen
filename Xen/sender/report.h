@@ -9,6 +9,17 @@
 
 namespace sender::detail {
 
+inline constexpr std::uint64_t kMaximumSenderReportSamples = 200'000U;
+
+// 0 表示未声明时长上限，不能单独证明报告有界；显式时长必须保证按声明
+// FPS 计算的理论样本不超过固定容量。
+// 使用除法比较，避免先计算 fps * maximum_seconds 产生溢出。
+constexpr bool sender_report_duration_fits_capacity(
+        std::uint32_t fps, std::uint64_t maximum_seconds) noexcept {
+    return fps != 0 && maximum_seconds != 0 &&
+        maximum_seconds <= kMaximumSenderReportSamples / fps;
+}
+
 struct SenderFrameSample {
     std::uint64_t frame_id = 0;
     double capture_ms = 0.0;

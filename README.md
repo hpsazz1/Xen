@@ -90,6 +90,11 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 | `xen_benchmark` | `XenBenchmark.exe` | 无界面 Runtime 基准 |
 | `xen_mouse_benchmark` | `XenMouseBenchmark.exe` | 鼠标后端性能与协议验证 |
 
+`XenSender.exe --report PATH` 必须声明至少一个非零退出上限：`--max-frames` 不超过
+200000，或 `--fps × --max-seconds` 的理论样本数不超过 200000；两者都提供时任一安全上限即可。
+其中 0 表示不限帧/不限时，不能单独证明报告有界。无安全容量边界的组合会在 Log、Capture、网络
+和报告目录副作用前以命令行用法错误退出。
+
 ## 常用脚本
 
 | 入口 | 用途 |

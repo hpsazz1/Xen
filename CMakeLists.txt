@@ -1185,6 +1185,11 @@ if(BUILD_TESTING)
             -File "${PROJECT_SOURCE_DIR}/tests/capture_evidence_cli_tests.ps1"
             -Executable "$<TARGET_FILE:xen_capture_evidence>"
             -TestRoot "${CMAKE_BINARY_DIR}/capture-evidence-cli-tests")
+    add_test(NAME sender_cli_tests
+        COMMAND "${XEN_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/tests/sender_cli_tests.ps1"
+            -Executable "$<TARGET_FILE:xen_sender>"
+            -TestRoot "${CMAKE_BINARY_DIR}/sender-cli-tests")
     add_test(NAME release_bundle_tests
         COMMAND "${XEN_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
             -File "${PROJECT_SOURCE_DIR}/tests/release_bundle_tests.ps1"

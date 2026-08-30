@@ -20,8 +20,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include <opencv2/core.hpp>
 
@@ -196,6 +198,21 @@ sender::detail::SenderRunReport make_valid_report() {
         {2, 0.6, 0.4, 0.2, 0.10, 0.70, 2, 2000, 2248},
     };
     return report;
+}
+
+void test_sender_report_duration_capacity() {
+    expect(!sender::detail::sender_report_duration_fits_capacity(240, 0),
+           "未声明非零时长上限不得证明报告容量有界");
+    expect(sender::detail::sender_report_duration_fits_capacity(240, 833),
+           "199920 个理论样本必须保持在报告容量内");
+    expect(!sender::detail::sender_report_duration_fits_capacity(240, 834),
+           "200160 个理论样本必须在发送前拒绝");
+    expect(sender::detail::sender_report_duration_fits_capacity(
+               200'000, 1),
+           "恰好 200000 个理论样本必须继续允许");
+    expect(!sender::detail::sender_report_duration_fits_capacity(
+               1'000'000, std::numeric_limits<std::uint64_t>::max()),
+           "极大时长必须无乘法溢出地拒绝");
 }
 
 void test_sender_report_atomic_publish() {
@@ -379,17 +396,26 @@ void test_production_sender_to_capture_loopback() {
 
 } // namespace
 
-int main() {
+int main(int argc, char* argv[]) {
+    if (argc > 2 ||
+        (argc == 2 && std::string_view(argv[1]) != "--report-only")) {
+        std::cerr << "发送端测试未知参数。\n";
+        return 2;
+    }
+    const bool report_only = argc == 2;
     LogConfig log_config;
     log_config.enable_console = false;
     log_config.enable_file = false;
     log_config.enable_ringbuf = false;
     Log::init(log_config);
-    test_invalid_sender_config();
-    test_sender_frame_pacer_uses_absolute_deadline();
-    test_sender_frame_pacer_does_not_advance_on_failure();
+    if (!report_only) {
+        test_invalid_sender_config();
+        test_sender_frame_pacer_uses_absolute_deadline();
+        test_sender_frame_pacer_does_not_advance_on_failure();
+    }
+    test_sender_report_duration_capacity();
     test_sender_report_atomic_publish();
-    test_production_sender_to_capture_loopback();
+    if (!report_only) test_production_sender_to_capture_loopback();
     Log::shutdown();
 
     if (failures != 0) {

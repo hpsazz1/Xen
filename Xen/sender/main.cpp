@@ -209,6 +209,20 @@ bool parse_options(int argc, wchar_t* argv[], SenderOptions& options,
             error = "命令行参数超出允许范围";
             return false;
         }
+        const bool frame_limit_fits_report_capacity =
+            options.max_frames != 0 &&
+            options.max_frames <=
+                sender::detail::kMaximumSenderReportSamples;
+        if (!options.report_path.empty() &&
+            !frame_limit_fits_report_capacity &&
+            !sender::detail::sender_report_duration_fits_capacity(
+                options.fps, options.max_seconds)) {
+            error = "--report 必须由非零 --max-frames 或 --max-seconds "
+                "限界，且理论样本不得超过 " +
+                std::to_string(
+                    sender::detail::kMaximumSenderReportSamples);
+            return false;
+        }
         return true;
     } catch (...) {
         error = "解析命令行时发生未知异常";
@@ -232,7 +246,11 @@ void print_help() {
         << "  --datagram-bytes N   XUDP 数据报上限，默认 1400\n"
         << "  --max-frames N       成功发送 N 帧后退出，0 表示持续运行\n"
         << "  --max-seconds N      运行 N 秒后退出，0 表示不限时，最大 86400\n"
-        << "  --report PATH        成功退出后原子发布逐帧 JSON 报告\n"
+        << "  --report PATH        成功退出后原子发布最多 "
+        << sender::detail::kMaximumSenderReportSamples
+        << " 个逐帧 JSON 样本\n"
+        << "                       必须至少提供一个非零退出上限；"
+        << "帧数或 FPS×秒数任一不超容量即可\n"
         << "  --help                显示帮助\n";
 }
 
@@ -307,11 +325,11 @@ int run_sender(const SenderOptions& options) noexcept {
     bool geometry_logged = false;
     sender::detail::SenderRunGeometry report_geometry;
     bool report_geometry_ready = false;
-    constexpr std::size_t kMaximumReportSamples = 200'000U;
     std::vector<sender::detail::SenderFrameSample> report_samples;
     std::uint64_t report_samples_dropped = 0;
     if (!options.report_path.empty()) {
-        report_samples.reserve(kMaximumReportSamples);
+        report_samples.reserve(
+            sender::detail::kMaximumSenderReportSamples);
     }
     std::string stop_reason = "signal";
     int exit_code = 0;
@@ -392,7 +410,8 @@ int run_sender(const SenderOptions& options) noexcept {
                 sample.datagrams = current_stats.last_frame_datagrams;
                 sample.jpeg_bytes = current_stats.last_frame_jpeg_bytes;
                 sample.wire_bytes = current_stats.last_frame_wire_bytes;
-                if (report_samples.size() < kMaximumReportSamples) {
+                if (report_samples.size() <
+                    sender::detail::kMaximumSenderReportSamples) {
                     report_samples.push_back(sample);
                 } else if (report_samples_dropped !=
                            std::numeric_limits<std::uint64_t>::max()) {
