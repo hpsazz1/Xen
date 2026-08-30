@@ -734,6 +734,185 @@ namespace XenAimManualPixelFixture {
         throw "新 sidecar 合同缺 attempts 证据时 Recover 必须 fail-closed。"
     }
 
+    # 公开 red：sidecar 已完成 PNG/binding/manifest，只在最终目录 rename
+    # 上失败时，Recover 必须验证并原子发布保留下来的 incoming；不得要求
+    # 再次 Launch，也不得把原始失败 attempt 改写成成功。
+    $pixelPreservedRoot = Join-Path $root `
+        "pixel-sidecar-preserved-incoming-task"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -RequireSourceTiming `
+        -CapturePixelEvidence `
+        -PixelEvidenceToolRoot $pixelToolRoot `
+        -PixelEvidenceBindingPath $pixelBinding `
+        -PixelEvidenceFrames 1 -PixelEvidenceMaxSeconds 30 `
+        -PackageRoot $published -RunDirectory $pixelPreservedRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "完整 incoming Recover 正例必须可 Prepare。"
+    }
+    $pixelPreservedTask = Get-Content -LiteralPath `
+        (Join-Path $pixelPreservedRoot "task.json") -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    $pixelPreservedAutomaticRoot = Join-Path $pixelPreservedRoot "automatic"
+    New-Item -ItemType Directory -Path $pixelPreservedAutomaticRoot -Force |
+        Out-Null
+    Copy-Item -LiteralPath (Join-Path $pixelAutomaticRoot "schema13.json") `
+        -Destination (Join-Path $pixelPreservedAutomaticRoot "schema13.json")
+    $pixelPreservedIncoming = Join-Path $pixelPreservedRoot `
+        ".pixel-evidence.incoming-4242-123456-0"
+    $pixelPreservedFrames = Join-Path $pixelPreservedIncoming "frames"
+    New-Item -ItemType Directory -Path $pixelPreservedFrames -Force |
+        Out-Null
+    $pixelPreservedFramePath = Join-Path $pixelPreservedFrames "000000.png"
+    Write-Utf8 $pixelPreservedFramePath "fixture-png"
+    $pixelPreservedFrameHash = (Get-FileHash -LiteralPath `
+        $pixelPreservedFramePath -Algorithm SHA256).Hash
+    Copy-Item -LiteralPath $pixelBinding -Destination `
+        (Join-Path $pixelPreservedIncoming "source-binding.json")
+    $pixelPreservedManifest = [ordered]@{
+        schema_version = 1
+        evidence_type = "output_off_capture"
+        physical_output_capability = $false
+        capture_backend = "NDI"
+        capture_source_name = "HPSAZZ (Xen-ROI-320)"
+        capture_config = [ordered]@{ require_source_timing = $true }
+        requested_frame_count = 1
+        recorded_frame_count = 1
+        source_binding = [ordered]@{
+            sha256 = [string]$pixelPreservedTask.pixel_evidence.source_binding.sha256
+        }
+        frames = @([ordered]@{
+            file = "frames/000000.png"
+            png_sha256 = "0" * 64
+            source_time_timing_valid = $true
+            source_clock_status = "VALID"
+        })
+    }
+    Write-Utf8 (Join-Path $pixelPreservedIncoming "manifest.json") `
+        (($pixelPreservedManifest | ConvertTo-Json -Depth 8) + "`n")
+    $pixelPreservedStderrName = `
+        "pixel-evidence.attempt-01.stderr.log"
+    $pixelPreservedStdoutName = `
+        "pixel-evidence.attempt-01.stdout.log"
+    $pixelPreservedFinal = Join-Path $pixelPreservedRoot "pixel-evidence"
+    $pixelPreservedReportedRun = Join-Path `
+        "C:\XenLab\reports\aim-dual-manual" `
+        (Split-Path -Leaf $pixelPreservedRoot)
+    $pixelPreservedReportedIncoming = Join-Path `
+        $pixelPreservedReportedRun `
+        (Split-Path -Leaf $pixelPreservedIncoming)
+    $pixelPreservedReportedFinal = Join-Path `
+        $pixelPreservedReportedRun "pixel-evidence"
+    Write-Utf8 (Join-Path $pixelPreservedRoot $pixelPreservedStdoutName) ""
+    Write-Utf8 (Join-Path $pixelPreservedRoot $pixelPreservedStderrName) `
+        ("发布证据失败：无法完成证据目录原子发布：Access is denied." +
+        "；code=5；attempts=301；elapsed_ms=30069" +
+        "；incoming=$pixelPreservedReportedIncoming" +
+        "；final=$pixelPreservedReportedFinal`n")
+    $pixelPreservedAttempts = [ordered]@{
+        schema = 2
+        max_attempts = [int]$pixelPreservedTask.pixel_evidence.max_attempts
+        process_exit_code = 1
+        execution_error = ""
+        runtime_alignment = [ordered]@{
+            required = $true
+            gate = "AIM_LOCK_ACTIVE"
+            gate_passed = $true
+            session_id = "pixel-schema13"
+            activation_epoch = [uint64]1
+            marker = $null
+        }
+        attempts = @([ordered]@{
+            attempt = 1
+            started_utc = "2026-08-30T03:32:31.2214011Z"
+            ended_utc = "2026-08-30T03:33:39.2757043Z"
+            exit_code = 1
+            diagnostic = "FAILED"
+            succeeded = $false
+            retryable = $false
+            manifest_published = $false
+            runtime_active_at_start = $true
+            runtime_active_at_recording_completion = $true
+            runtime_active_at_completion = $false
+            stdout_log = $pixelPreservedStdoutName
+            stderr_log = $pixelPreservedStderrName
+        })
+    }
+    Write-Utf8 (Join-Path $pixelPreservedRoot `
+        "pixel-evidence-attempts.json") `
+        (($pixelPreservedAttempts | ConvertTo-Json -Depth 10) + "`n")
+    $pixelTamperedRecoverOutput = @(& powershell.exe -NoProfile `
+        -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -RequireSourceTiming `
+        -CapturePixelEvidence `
+        -PixelEvidenceToolRoot $pixelToolRoot `
+        -PixelEvidenceBindingPath $pixelBinding `
+        -PixelEvidenceFrames 1 -PixelEvidenceMaxSeconds 30 `
+        -PackageRoot $published -RunDirectory $pixelPreservedRoot 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $pixelTamperedRecoverOutput | ForEach-Object { Write-Host $_ }
+        throw "被篡改 incoming 的 fail-closed Recover 执行失败。"
+    }
+    $pixelTamperedSummary = Get-Content -LiteralPath `
+        (Join-Path $pixelPreservedRoot "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ((Test-Path -LiteralPath $pixelPreservedFinal) -or
+        -not (Test-Path -LiteralPath $pixelPreservedIncoming `
+            -PathType Container) -or
+        [string]$pixelTamperedSummary.pixel_evidence.publication_recovery.diagnostic `
+            -ne "INCOMING_VALIDATION_FAILED" -or
+        [string]$pixelTamperedSummary.pixel_evidence.publication_recovery.error `
+            -notmatch "PNG 哈希不一致") {
+        $pixelTamperedRecoverOutput | ForEach-Object { Write-Host $_ }
+        Write-Host ($pixelTamperedSummary.pixel_evidence |
+            ConvertTo-Json -Depth 10)
+        throw "PNG 哈希不一致的 incoming 必须保留原位并拒绝发布。"
+    }
+    $pixelPreservedManifest.frames[0].png_sha256 =
+        $pixelPreservedFrameHash
+    Write-Utf8 (Join-Path $pixelPreservedIncoming "manifest.json") `
+        (($pixelPreservedManifest | ConvertTo-Json -Depth 8) + "`n")
+    $pixelPreservedRecoverOutput = @(& powershell.exe -NoProfile `
+        -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -RequireSourceTiming `
+        -CapturePixelEvidence `
+        -PixelEvidenceToolRoot $pixelToolRoot `
+        -PixelEvidenceBindingPath $pixelBinding `
+        -PixelEvidenceFrames 1 -PixelEvidenceMaxSeconds 30 `
+        -PackageRoot $published -RunDirectory $pixelPreservedRoot 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $pixelPreservedRecoverOutput | ForEach-Object { Write-Host $_ }
+        throw "完整 incoming 离线 Recover 执行失败。"
+    }
+    $pixelPreservedSummary = Get-Content -LiteralPath `
+        (Join-Path $pixelPreservedRoot "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    $pixelPreservedRecoveryFields =
+        $pixelPreservedSummary.pixel_evidence.PSObject.Properties.Name
+    if (-not (Test-Path -LiteralPath (Join-Path $pixelPreservedFinal `
+                "manifest.json") -PathType Leaf) -or
+        (Test-Path -LiteralPath $pixelPreservedIncoming) -or
+        $pixelPreservedRecoveryFields -notcontains "publication_recovered" -or
+        -not [bool]$pixelPreservedSummary.pixel_evidence.publication_recovered -or
+        -not [bool]$pixelPreservedSummary.pixel_evidence.gate_passed -or
+        [string]$pixelPreservedSummary.pixel_evidence.diagnostic -ne
+            "VALID_RECOVERED" -or
+        [bool]$pixelPreservedSummary.pixel_evidence.attempts[0].succeeded -or
+        [bool]$pixelPreservedSummary.pixel_evidence.attempts[0].manifest_published) {
+        $pixelPreservedRecoverOutput | ForEach-Object { Write-Host $_ }
+        Write-Host ($pixelPreservedSummary.pixel_evidence |
+            ConvertTo-Json -Depth 10)
+        throw "完整 incoming 必须由 Recover 验证后原子发布并保留原始失败 attempt。"
+    }
+
     # 模拟 binding_mode/max_attempts 字段加入前的历史 task 和内嵌 binding，
     # 证明旧 Run 仍可按 manifest 离线 Recover；新 Prepare 不得走兼容路径。
     [void]$pixelTask.pixel_evidence.PSObject.Properties.Remove("max_attempts")

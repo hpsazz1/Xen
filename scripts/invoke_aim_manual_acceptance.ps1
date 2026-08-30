@@ -443,7 +443,10 @@ function Get-PixelEvidenceSummary(
         [Nullable[int]]$ProcessExitCode,
         [string]$ExecutionError,
         [object]$RuntimeAlignment,
-        [string[]]$RuntimeSessionIds) {
+        [string[]]$RuntimeSessionIds,
+        [string]$OutputDirectoryOverride = "",
+        [switch]$ValidateContentOnly,
+        [switch]$PublicationRecovered) {
     $enabled = $Task.PSObject.Properties.Name -contains "pixel_evidence" -and
         [bool]$Task.pixel_evidence.enabled
     if (-not $enabled) {
@@ -453,13 +456,20 @@ function Get-PixelEvidenceSummary(
             diagnostic = "DISABLED"
         }
     }
-    $outputDirectory = Join-Path $ResolvedRunDirectory `
-        ([string]$Task.pixel_evidence.output_relative_path)
+    $outputDirectory = if ([string]::IsNullOrWhiteSpace(
+            $OutputDirectoryOverride)) {
+        Join-Path $ResolvedRunDirectory `
+            ([string]$Task.pixel_evidence.output_relative_path)
+    } else {
+        [System.IO.Path]::GetFullPath($OutputDirectoryOverride)
+    }
     $manifestPath = Join-Path $outputDirectory "manifest.json"
-    $executionEvidenceAvailable = $CollectionMode -eq "Launch" -or
+    $executionEvidenceAvailable = -not $ValidateContentOnly.IsPresent -and
+        ($CollectionMode -eq "Launch" -or
         $null -ne $ProcessExitCode -or
-        -not [string]::IsNullOrWhiteSpace($ExecutionError)
-    $executionPassed = -not $executionEvidenceAvailable -or
+        -not [string]::IsNullOrWhiteSpace($ExecutionError))
+    $executionPassed = $PublicationRecovered.IsPresent -or
+        -not $executionEvidenceAvailable -or
         ($null -ne $ProcessExitCode -and $ProcessExitCode -eq 0 -and
             [string]::IsNullOrWhiteSpace($ExecutionError))
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
@@ -470,6 +480,7 @@ function Get-PixelEvidenceSummary(
             execution_error = $ExecutionError
             output_directory = $outputDirectory
             diagnostic = "MANIFEST_MISSING"
+            publication_recovered = $PublicationRecovered.IsPresent
         }
     }
     try {
@@ -484,6 +495,7 @@ function Get-PixelEvidenceSummary(
             output_directory = $outputDirectory
             diagnostic = "MANIFEST_INVALID"
             manifest_error = $_.Exception.Message
+            publication_recovered = $PublicationRecovered.IsPresent
         }
     }
     $requiredManifestFields = @(
@@ -514,6 +526,7 @@ function Get-PixelEvidenceSummary(
             output_directory = $outputDirectory
             diagnostic = "MANIFEST_FIELDS_MISSING"
             missing_fields = $missingManifestFields
+            publication_recovered = $PublicationRecovered.IsPresent
         }
     }
     $frames = @($manifest.frames)
@@ -564,6 +577,39 @@ function Get-PixelEvidenceSummary(
             @($RuntimeSessionIds | Where-Object {
                 $_ -eq [string]$RuntimeAlignment.session_id
             }).Count -eq 1)
+    $contentFilesValid = $true
+    $contentFilesError = ""
+    if ($ValidateContentOnly.IsPresent) {
+        for ($index = 0; $index -lt $frames.Count; ++$index) {
+            $frame = $frames[$index]
+            $expectedRelativePath = "frames/{0:D6}.png" -f $index
+            $frameFieldsAvailable =
+                $frame.PSObject.Properties.Name -contains "file" -and
+                $frame.PSObject.Properties.Name -contains "png_sha256"
+            if (-not $frameFieldsAvailable -or
+                [string]$frame.file -cne $expectedRelativePath -or
+                [string]$frame.png_sha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+                $contentFilesValid = $false
+                $contentFilesError =
+                    "manifest 第 $index 帧的文件身份或 PNG 哈希字段无效。"
+                break
+            }
+            $framePath = Join-Path $outputDirectory `
+                ([string]$frame.file).Replace('/', '\')
+            if (-not (Test-Path -LiteralPath $framePath -PathType Leaf)) {
+                $contentFilesValid = $false
+                $contentFilesError = "manifest 第 $index 帧文件不存在。"
+                break
+            }
+            $actualFrameHash = (Get-FileHash -LiteralPath $framePath `
+                -Algorithm SHA256).Hash
+            if ($actualFrameHash -ine [string]$frame.png_sha256) {
+                $contentFilesValid = $false
+                $contentFilesError = "manifest 第 $index 帧 PNG 哈希不一致。"
+                break
+            }
+        }
+    }
     $contractPassed = [int]$manifest.schema_version -eq 1 -and
         [string]$manifest.evidence_type -eq "output_off_capture" -and
         -not [bool]$manifest.physical_output_capability -and
@@ -576,7 +622,8 @@ function Get-PixelEvidenceSummary(
             [int]$Task.pixel_evidence.frames -and
         $frames.Count -eq [int]$Task.pixel_evidence.frames -and
         $timingValidFrames -eq [int]$Task.pixel_evidence.frames -and
-        $bindingMatches -and $runtimeAlignmentSessionMatches
+        $bindingMatches -and $runtimeAlignmentSessionMatches -and
+        $contentFilesValid
     return [ordered]@{
         enabled = $true
         gate_passed = $executionPassed -and $contractPassed
@@ -584,7 +631,9 @@ function Get-PixelEvidenceSummary(
         execution_error = $ExecutionError
         output_directory = $outputDirectory
         diagnostic = if ($executionPassed -and $contractPassed) {
-            "VALID"
+            if ($PublicationRecovered.IsPresent) {
+                "VALID_RECOVERED"
+            } else { "VALID" }
         } elseif (-not $bindingMatches) {
             "SOURCE_BINDING_MISMATCH"
         } elseif ($runtimeAlignmentRequired -and
@@ -596,6 +645,9 @@ function Get-PixelEvidenceSummary(
         source_timing_valid_frames = $timingValidFrames
         source_binding_matches = $bindingMatches
         source_binding_error = $embeddedBindingError
+        content_files_valid = $contentFilesValid
+        content_files_error = $contentFilesError
+        publication_recovered = $PublicationRecovered.IsPresent
         runtime_alignment = if ($runtimeAlignmentRequired) {
             [ordered]@{
                 required = $true
@@ -619,6 +671,176 @@ function Get-PixelEvidenceSummary(
         }
         manifest = Get-FileEvidence $manifestPath
     }
+}
+
+function Publish-CompletedPixelEvidenceIncoming(
+        [object]$Task,
+        [string]$ResolvedRunDirectory,
+        [string]$CollectionMode,
+        [object]$RuntimeAlignment,
+        [string[]]$RuntimeSessionIds,
+        [object[]]$Attempts) {
+    $result = [ordered]@{
+        attempted = $false
+        recovered = $false
+        incoming = ""
+        final = ""
+        diagnostic = "NOT_APPLICABLE"
+        error = ""
+    }
+    $enabled = $Task.PSObject.Properties.Name -contains "pixel_evidence" -and
+        [bool]$Task.pixel_evidence.enabled
+    if (-not $enabled) { return $result }
+
+    $finalDirectory = Join-Path $ResolvedRunDirectory `
+        ([string]$Task.pixel_evidence.output_relative_path)
+    $result.final = $finalDirectory
+    if (Test-Path -LiteralPath $finalDirectory) {
+        $result.diagnostic = "FINAL_ALREADY_EXISTS"
+        return $result
+    }
+
+    $parent = Split-Path -Parent $finalDirectory
+    $leaf = Split-Path -Leaf $finalDirectory
+    $prefix = ".$leaf.incoming-"
+    $incomingDirectories = @(Get-ChildItem -LiteralPath $parent -Directory `
+        -ErrorAction Stop | Where-Object {
+            $_.Name.StartsWith($prefix, [StringComparison]::Ordinal)
+        })
+    if ($incomingDirectories.Count -eq 0) {
+        $result.diagnostic = "INCOMING_MISSING"
+        return $result
+    }
+    $result.attempted = $true
+    if ($incomingDirectories.Count -ne 1) {
+        $result.diagnostic = "INCOMING_AMBIGUOUS"
+        $result.error =
+            "发现 $($incomingDirectories.Count) 个 pixel-evidence incoming，拒绝猜测。"
+        return $result
+    }
+
+    $incoming = $incomingDirectories[0].FullName
+    $result.incoming = $incoming
+    if (-not (Test-Path -LiteralPath (Join-Path $incoming "manifest.json") `
+            -PathType Leaf)) {
+        $result.diagnostic = "INCOMING_INCOMPLETE"
+        $result.error = "唯一 incoming 尚无完整 manifest，拒绝发布。"
+        return $result
+    }
+
+    $hasRuntimeRecoveryContract =
+        $Task.pixel_evidence.PSObject.Properties.Name -contains
+            "runtime_alignment" -and
+        $null -ne $Task.pixel_evidence.runtime_alignment -and
+        [bool]$Task.pixel_evidence.runtime_alignment.required
+    if (-not $hasRuntimeRecoveryContract) {
+        $result.diagnostic = "RECOVERY_CONTRACT_UNAVAILABLE"
+        $result.error =
+            "历史 task 没有 Runtime 对齐合同，拒绝提升 incoming。"
+        return $result
+    }
+
+    $lastAttempt = if ($Attempts.Count -eq 0) { $null } else {
+        $Attempts[-1]
+    }
+    $lastAttemptHasRecordingCompletion = $null -ne $lastAttempt -and
+        $lastAttempt.PSObject.Properties.Name -contains
+            "runtime_active_at_recording_completion"
+    if ($null -eq $lastAttempt -or
+        [string]$lastAttempt.diagnostic -ne "FAILED" -or
+        [bool]$lastAttempt.succeeded -or
+        [bool]$lastAttempt.retryable -or
+        [bool]$lastAttempt.manifest_published -or
+        -not [bool]$lastAttempt.runtime_active_at_start -or
+        ($lastAttemptHasRecordingCompletion -and
+            -not [bool]$lastAttempt.runtime_active_at_recording_completion)) {
+        $result.diagnostic = "ATTEMPT_NOT_PUBLISH_FAILURE"
+        $result.error =
+            "最后 attempt 未证明录制完成后的非重试型发布失败，拒绝恢复。"
+        return $result
+    }
+
+    $stderrPath = Join-Path $ResolvedRunDirectory `
+        ([string]$lastAttempt.stderr_log)
+    if (-not (Test-Path -LiteralPath $stderrPath -PathType Leaf)) {
+        $result.diagnostic = "PUBLISH_FAILURE_PROVENANCE_MISSING"
+        $result.error = "最后 attempt 缺少 stderr，无法绑定 incoming。"
+        return $result
+    }
+    $stderrText = Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8
+    $hasPublishFailure = $stderrText.IndexOf(
+        "无法完成证据目录原子发布", [StringComparison]::Ordinal) -ge 0
+    $reportedPaths = [regex]::Match(
+        $stderrText, '；incoming=(?<incoming>.+?)；final=(?<final>[^\r\n]+)')
+    $reportedIncoming = if ($reportedPaths.Success) {
+        $reportedPaths.Groups["incoming"].Value.Trim()
+    } else { "" }
+    $reportedFinal = if ($reportedPaths.Success) {
+        $reportedPaths.Groups["final"].Value.Trim()
+    } else { "" }
+    # Launch stderr 可能记录辅机 C: 路径，而 Recover 从主机通过 UNC 打开
+    # 同一 Run。绑定唯一目录名及其 Run 父目录名，避免把盘符表示差异误判
+    # 为不同证据；内容仍须通过 task/binding/runtime/逐帧哈希完整验证。
+    $incomingMatches = -not [string]::IsNullOrWhiteSpace(
+            $reportedIncoming) -and
+        [string]::Equals(
+            (Split-Path -Leaf $reportedIncoming),
+            (Split-Path -Leaf $incoming),
+            [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals(
+            (Split-Path -Leaf (Split-Path -Parent $reportedIncoming)),
+            (Split-Path -Leaf (Split-Path -Parent $incoming)),
+            [StringComparison]::OrdinalIgnoreCase)
+    $finalMatches = -not [string]::IsNullOrWhiteSpace($reportedFinal) -and
+        [string]::Equals(
+            (Split-Path -Leaf $reportedFinal),
+            (Split-Path -Leaf $finalDirectory),
+            [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals(
+            (Split-Path -Leaf (Split-Path -Parent $reportedFinal)),
+            (Split-Path -Leaf (Split-Path -Parent $finalDirectory)),
+            [StringComparison]::OrdinalIgnoreCase)
+    if (-not $hasPublishFailure -or -not $incomingMatches -or
+        -not $finalMatches) {
+        $result.diagnostic = "PUBLISH_FAILURE_PROVENANCE_MISMATCH"
+        $result.error =
+            "stderr 未把目录发布失败精确绑定到当前 incoming/final。"
+        return $result
+    }
+
+    $validation = Get-PixelEvidenceSummary `
+        -Task $Task -ResolvedRunDirectory $ResolvedRunDirectory `
+        -CollectionMode $CollectionMode -ProcessExitCode $null `
+        -ExecutionError "" -RuntimeAlignment $RuntimeAlignment `
+        -RuntimeSessionIds $RuntimeSessionIds `
+        -OutputDirectoryOverride $incoming -ValidateContentOnly
+    if (-not [bool]$validation.gate_passed) {
+        $validationContentError =
+            [string]$validation["content_files_error"]
+        $result.diagnostic = "INCOMING_VALIDATION_FAILED"
+        $result.error = "完整 incoming 合同验证失败：$($validation.diagnostic)" +
+            $(if ([string]::IsNullOrWhiteSpace($validationContentError)) {
+                ""
+            } else { "；$validationContentError" })
+        return $result
+    }
+
+    try {
+        [System.IO.Directory]::Move($incoming, $finalDirectory)
+    } catch {
+        $result.diagnostic = "ATOMIC_RENAME_FAILED"
+        $result.error = "完整 incoming 原子发布仍失败：$($_.Exception.Message)"
+        return $result
+    }
+    if (-not (Test-Path -LiteralPath `
+            (Join-Path $finalDirectory "manifest.json") -PathType Leaf)) {
+        $result.diagnostic = "POST_RENAME_MANIFEST_MISSING"
+        $result.error = "原子 rename 返回后最终 manifest 不存在。"
+        return $result
+    }
+    $result.recovered = $true
+    $result.diagnostic = "VALID_RECOVERED"
+    return $result
 }
 
 function Read-Manifest() {
@@ -2268,14 +2490,24 @@ $sourceTimingValidSamples = [uint64]$sourceTimingEvidence.valid_samples
 $sourceTimingGatePassed = -not $RequireSourceTiming.IsPresent -or
     [string]$sourceTimingEvidence.diagnostic -eq "VALID"
 $runtimeSessionIds = @($segments | ForEach-Object { [string]$_.session_id })
+$pixelEvidencePublicationRecovery =
+    Publish-CompletedPixelEvidenceIncoming `
+        -Task $task -ResolvedRunDirectory $resolvedRun `
+        -CollectionMode $Mode `
+        -RuntimeAlignment $pixelEvidenceRuntimeAlignment `
+        -RuntimeSessionIds $runtimeSessionIds `
+        -Attempts @($pixelEvidenceAttempts)
 $pixelEvidenceSummary = Get-PixelEvidenceSummary `
     -Task $task -ResolvedRunDirectory $resolvedRun `
     -CollectionMode $Mode -ProcessExitCode $pixelEvidenceExitCode `
     -ExecutionError $pixelEvidenceExecutionError `
     -RuntimeAlignment $pixelEvidenceRuntimeAlignment `
-    -RuntimeSessionIds $runtimeSessionIds
+    -RuntimeSessionIds $runtimeSessionIds `
+    -PublicationRecovered:$pixelEvidencePublicationRecovery.recovered
 $pixelEvidenceSummary["attempt_count"] = $pixelEvidenceAttempts.Count
 $pixelEvidenceSummary["attempts"] = @($pixelEvidenceAttempts)
+$pixelEvidenceSummary["publication_recovery"] =
+    $pixelEvidencePublicationRecovery
 $mouseBackendCompletionSamples = @($allSamples | Where-Object {
     ($_.PSObject.Properties.Name -contains
         "mouse_backend_completion_timing_valid" -and

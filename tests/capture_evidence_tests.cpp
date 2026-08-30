@@ -312,6 +312,10 @@ void test_invalid_or_incomplete_capture_never_publishes() {
     }
     expect(!std::filesystem::exists(invalid_config.output_directory),
            "非法帧不得发布最终证据目录");
+    expect(find_unique_pending_directory(
+               invalid_config.output_directory.parent_path(),
+               invalid_config.output_directory.filename().string()).empty(),
+           "没有完整 manifest 的非法录制仍必须清理 incoming");
 
     TemporaryDirectory incomplete_temporary;
     expect(incomplete_temporary.valid(), "必须创建未录满测试临时目录");
@@ -329,6 +333,10 @@ void test_invalid_or_incomplete_capture_never_publishes() {
     }
     expect(!std::filesystem::exists(incomplete_config.output_directory),
            "帧数不足不得发布最终证据目录");
+    expect(find_unique_pending_directory(
+               incomplete_config.output_directory.parent_path(),
+               incomplete_config.output_directory.filename().string()).empty(),
+           "没有完整 manifest 的未录满录制仍必须清理 incoming");
 }
 
 void test_multi_second_directory_rename_lock_is_retried() {
@@ -442,6 +450,66 @@ void test_directory_publish_retry_never_overwrites_appearing_final() {
            "重试期间出现的 final sentinel 必须逐字节保持不变");
 }
 
+void test_completed_incoming_survives_publish_failure() {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), "必须创建完整 incoming 保留测试临时目录");
+    const CaptureEvidenceConfig config = test_config(temporary, 1);
+    std::filesystem::path pending;
+
+    {
+        capture_evidence::CaptureEvidenceRecorder recorder;
+        std::string error;
+        expect(recorder.start(config, error),
+               "完整 incoming 保留测试必须启动：" + error);
+        expect(recorder.record(test_frame(1, 13), error),
+               "完整 incoming 保留测试必须录入一帧：" + error);
+
+        pending = find_unique_pending_directory(
+            config.output_directory.parent_path(),
+            config.output_directory.filename().string());
+        expect(!pending.empty(),
+               "完整 incoming 保留测试必须找到唯一 incoming 目录");
+        DirectoryRenameLock rename_lock(pending);
+        expect(rename_lock.valid(),
+               "完整 incoming 保留测试必须建立目录锁");
+
+        bool manifest_observed = false;
+        std::thread competitor([&] {
+            const auto deadline = std::chrono::steady_clock::now() +
+                std::chrono::seconds(5);
+            std::error_code filesystem_error;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (std::filesystem::is_regular_file(
+                        pending / "manifest.json", filesystem_error) &&
+                    !filesystem_error) {
+                    manifest_observed = true;
+                    std::filesystem::create_directories(
+                        config.output_directory, filesystem_error);
+                    rename_lock.release();
+                    return;
+                }
+                filesystem_error.clear();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            rename_lock.release();
+        });
+
+        const bool published = recorder.finish(error);
+        competitor.join();
+        expect(manifest_observed,
+               "完整 incoming 保留测试必须观察到原子 manifest");
+        expect(!published,
+               "最终目录竞争出现时发布必须失败且不得覆盖");
+    }
+
+    expect(std::filesystem::is_regular_file(pending / "manifest.json") &&
+               std::filesystem::is_regular_file(
+                   pending / "source-binding.json") &&
+               std::filesystem::is_regular_file(
+                   pending / "frames" / "000000.png"),
+           "完整 manifest 已落盘后发布失败，Recorder 析构不得删除可恢复 incoming");
+}
+
 void test_advertised_maximum_standard_roi_frames_are_recordable() {
     TemporaryDirectory temporary;
     expect(temporary.valid(), "必须创建最大帧数测试临时目录");
@@ -473,6 +541,7 @@ int main() {
     test_invalid_or_incomplete_capture_never_publishes();
     test_multi_second_directory_rename_lock_is_retried();
     test_directory_publish_retry_never_overwrites_appearing_final();
+    test_completed_incoming_survives_publish_failure();
     test_advertised_maximum_standard_roi_frames_are_recordable();
     if (failures != 0) {
         std::cerr << failures << " 项 Capture evidence 测试失败。\n";

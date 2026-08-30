@@ -287,14 +287,26 @@ bool publish_directory_with_retry(
 
 class CaptureEvidenceRecorder::Impl {
 public:
-    enum class State { IDLE, RECORDING, PUBLISHED };
+    enum class State {
+        IDLE,
+        RECORDING,
+        COMPLETE_PENDING_PUBLICATION,
+        PUBLISHED,
+    };
 
     struct BufferedFrame {
         cv::Mat bgr;
         nlohmann::json descriptor;
     };
 
-    ~Impl() { cleanup_pending(); }
+    ~Impl() {
+        // manifest 已原子落盘后，incoming 是完整且可恢复的证据，不再属于
+        // 录制失败垃圾。最终目录 rename 失败时保留它，由显式恢复流程在
+        // 重新验证身份与完整性后发布；其余未完成状态仍按 fail-closed 清理。
+        if (state != State::COMPLETE_PENDING_PUBLICATION) {
+            cleanup_pending();
+        }
+    }
 
     void cleanup_pending() noexcept {
         if (pending_directory.empty()) return;
@@ -611,6 +623,7 @@ bool CaptureEvidenceRecorder::finish(std::string& error) noexcept {
                 filesystem_error.message());
             return false;
         }
+        impl_->state = Impl::State::COMPLETE_PENDING_PUBLICATION;
         if (!publish_directory_with_retry(
                 impl_->pending_directory, impl_->final_directory, error)) {
             return false;
