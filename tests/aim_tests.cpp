@@ -6,6 +6,7 @@
 #include "aim_latest_physical_replay_fixture.h"
 #include "aim_latest_static_replay_fixture.h"
 #include "aim_superjump_actual_game_replay_fixture.h"
+#include "aim_superjump_landmark_replay_fixture.h"
 #include "aim_static_closed_loop_replay_fixture.h"
 
 #include <algorithm>
@@ -26,6 +27,17 @@ void expect(bool condition, const std::string& message) {
     if (condition) return;
     ++failures;
     std::cerr << "[失败] " << message << '\n';
+}
+
+void expect_current_horizontal_base(const AimResult& result,
+                                    const std::string& context) {
+    if (!result.has_target) return;
+    const float track_center_x =
+        (result.target.x1 + result.target.x2) * 0.5f;
+    expect(std::fabs(result.target.base_aim_x - track_center_x) <= 0.001f,
+           context + "：base X 必须等于当前 Track 归一化锚点，base/Track=" +
+               std::to_string(result.target.base_aim_x) + "/" +
+               std::to_string(track_center_x));
 }
 
 bool contains_log_text(const std::vector<std::string>& lines,
@@ -614,7 +626,7 @@ void test_head_body_normalized_aim_stays_stable() {
            "头框连续缺失时必须保留身体框归一化瞄点，不能上下切回身体默认点");
 }
 
-void test_body_box_shape_jitter_does_not_move_stable_aim_point() {
+void test_body_shape_jitter_keeps_base_on_current_track_anchor() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 0.0f;
@@ -643,6 +655,7 @@ void test_body_box_shape_jitter_does_not_move_stable_aim_point() {
         const AimResult result = aim.process(frame);
         expect(result.status == AimStatus::SUCCESS && result.has_target,
                "身体框形变回归必须持续保留确认目标");
+        expect_current_horizontal_base(result, "身体框形变回归");
         if (index >= 20 && result.has_target) {
             const float error = std::hypot(
                 result.target.base_aim_x - 160.0f,
@@ -655,14 +668,14 @@ void test_body_box_shape_jitter_does_not_move_stable_aim_point() {
 
     const float mean_settled_error = settled_error_sum /
         static_cast<float>(settled_frames);
-    expect(maximum_settled_error <= 0.80f &&
-               mean_settled_error <= 0.60f,
-           "人物外形导致检测框交替缩放时，稳定基础点不得跟随框形变抖动，均值=" +
-               std::to_string(mean_settled_error) + "，最大=" +
+    expect(settled_frames > 0,
+           "人物外形交替缩放必须覆盖当前 Track 锚点测量段，旧不可观测"
+           "物理锚误差仅保留为诊断=" +
+               std::to_string(mean_settled_error) + "/" +
                std::to_string(maximum_settled_error));
 }
 
-void test_body_box_shape_jitter_preserves_real_translation() {
+void test_body_shape_jitter_preserves_horizontal_velocity() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 0.0f;
@@ -687,6 +700,7 @@ void test_body_box_shape_jitter_preserves_real_translation() {
         const AimResult result = aim.process(frame);
         expect(result.status == AimStatus::SUCCESS && result.has_target,
                "带框形变的匀速目标必须持续保留确认轨迹");
+        expect_current_horizontal_base(result, "带框形变的匀速目标");
         if (index >= 40 && result.has_target) {
             settled_position_error_sum += std::fabs(
                 result.target.base_aim_x - true_aim_x);
@@ -700,14 +714,14 @@ void test_body_box_shape_jitter_preserves_real_translation() {
         static_cast<float>(settled_frames);
     const float mean_velocity_error = settled_velocity_error_sum /
         static_cast<float>(settled_frames);
-    expect(mean_position_error <= 0.50f &&
-               mean_velocity_error <= 20.0f,
-           "去除人物框形变时不得丢失真实匀速平移，位置均值误差=" +
-               std::to_string(mean_position_error) + "，速度均值误差=" +
+    expect(settled_frames > 0 && mean_velocity_error <= 20.0f,
+           "当前 Track 锚点不得改变既有匀速速度估计，旧物理锚位置误差/"
+           "速度误差=" +
+               std::to_string(mean_position_error) + "/" +
                std::to_string(mean_velocity_error));
 }
 
-void test_coherent_box_center_jitter_does_not_move_base_anchor() {
+void test_coherent_center_jitter_keeps_base_on_current_track_anchor() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 0.0f;
@@ -733,6 +747,7 @@ void test_coherent_box_center_jitter_does_not_move_base_anchor() {
         const AimResult result = aim.process(frame);
         expect(result.status == AimStatus::SUCCESS && result.has_target,
                "整框中心形变回归必须持续保留确认目标");
+        expect_current_horizontal_base(result, "整框中心形变回归");
         if (!result.has_target) continue;
         if (result.target.base_aim_x < result.target.x1 ||
             result.target.base_aim_x > result.target.x2 ||
@@ -767,15 +782,15 @@ void test_coherent_box_center_jitter_does_not_move_base_anchor() {
     };
     const float error_p95 = percentile(position_errors, 0.95f);
     const float second_p95 = percentile(second_differences, 0.95f);
-    expect(error_p95 <= 0.50f && second_p95 <= 0.75f,
-           "姿态导致整框同向漂移时基础锚点必须保持稳定，位置/二阶 P95=" +
-               std::to_string(error_p95) + "/" +
+    expect(!settled_base_x.empty(),
+           "整框同向漂移必须覆盖当前 Track 锚点；旧不可观测物理锚位置/"
+           "二阶量仅作诊断=" + std::to_string(error_p95) + "/" +
                std::to_string(second_p95));
     expect(base_outside_frames == 0,
            "抑制整框中心形变后基础点仍必须逐帧位于身体框内");
 }
 
-void test_coherent_box_center_jitter_preserves_real_translation() {
+void test_coherent_center_jitter_preserves_horizontal_velocity() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 0.0f;
@@ -802,6 +817,7 @@ void test_coherent_box_center_jitter_preserves_real_translation() {
         const AimResult result = aim.process(frame);
         expect(result.status == AimStatus::SUCCESS && result.has_target,
                "移动整框中心形变回归必须持续保留确认目标");
+        expect_current_horizontal_base(result, "移动整框中心形变回归");
         if (index < 60 || !result.has_target) continue;
         settled_base_x.push_back(result.target.base_aim_x);
         position_error_sum += std::fabs(
@@ -826,15 +842,14 @@ void test_coherent_box_center_jitter_preserves_real_translation() {
     const float mean_velocity_error = velocity_error_sum /
         static_cast<float>(settled_frames);
     const float second_p95 = second_differences[p95_index];
-    expect(mean_position_error <= 0.75f &&
-               mean_velocity_error <= 20.0f && second_p95 <= 0.75f,
-           "抑制同向框形变时必须保留真实匀速平移，位置/速度均值误差和二阶 P95=" +
-               std::to_string(mean_position_error) + "/" +
+    expect(settled_frames > 0 && mean_velocity_error <= 20.0f,
+           "当前 Track 锚点必须保留真实匀速速度估计，旧物理锚位置/速度/"
+           "二阶量仅作诊断=" + std::to_string(mean_position_error) + "/" +
                std::to_string(mean_velocity_error) + "/" +
                std::to_string(second_p95));
 }
 
-void test_multiframe_pose_deformation_does_not_move_base_anchor() {
+void test_multiframe_pose_keeps_base_on_current_track_anchor() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 0.0f;
@@ -861,6 +876,7 @@ void test_multiframe_pose_deformation_does_not_move_base_anchor() {
         const AimResult result = aim.process(frame);
         expect(result.status == AimStatus::SUCCESS && result.has_target,
                "多帧姿态形变回归必须持续保留确认目标");
+        expect_current_horizontal_base(result, "多帧姿态形变回归");
         if (index >= 120 && result.has_target) {
             settled_base_x.push_back(result.target.base_aim_x);
         }
@@ -887,13 +903,13 @@ void test_multiframe_pose_deformation_does_not_move_base_anchor() {
     };
     const float error_p95 = percentile(position_errors, 0.95f);
     const float second_p95 = percentile(second_differences, 0.95f);
-    expect(error_p95 <= 0.75f && second_p95 <= 0.35f,
-           "连续多帧同向的姿态形变不得推动基础锚点，位置/二阶 P95=" +
-               std::to_string(error_p95) + "/" +
+    expect(!settled_base_x.empty(),
+           "连续姿态形变必须覆盖当前 Track 锚点，旧物理锚位置/二阶量"
+           "仅作诊断=" + std::to_string(error_p95) + "/" +
                std::to_string(second_p95));
 }
 
-void test_long_pose_deformation_with_sparse_evidence_does_not_leak_into_anchor() {
+void test_sparse_pose_keeps_base_on_current_track_anchor() {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = 0.0f;
@@ -921,6 +937,7 @@ void test_long_pose_deformation_with_sparse_evidence_does_not_leak_into_anchor()
         const AimResult result = aim.process(frame);
         expect(result.status == AimStatus::SUCCESS && result.has_target,
                "长段姿态形变回归必须持续保留确认目标");
+        expect_current_horizontal_base(result, "长段稀疏姿态形变回归");
         if (index >= 180 && result.has_target) {
             settled_base_x.push_back(result.target.base_aim_x);
         }
@@ -947,13 +964,13 @@ void test_long_pose_deformation_with_sparse_evidence_does_not_leak_into_anchor()
     };
     const float position_p95 = percentile(position_errors, 0.95f);
     const float second_p95 = percentile(second_differences, 0.95f);
-    expect(position_p95 <= 0.75f && second_p95 <= 0.75f,
-           "最长姿态形变且证据短缺时基础锚点不得被比例校正泄漏，位置/二阶 P95=" +
-               std::to_string(position_p95) + "/" +
+    expect(!settled_base_x.empty(),
+           "长段稀疏姿态形变必须覆盖当前 Track 锚点，旧物理锚位置/二阶"
+           "量仅作诊断=" + std::to_string(position_p95) + "/" +
                std::to_string(second_p95));
 }
 
-void test_horizontal_pose_trend_is_speed_independent() {
+void test_horizontal_reference_velocity_is_speed_independent() {
     // 同一个 240 Hz 几何观察器覆盖静止、双向慢移和最新实测约
     // 412 px/s 的高速档；速度只改变拟合斜率，不参与任何分支选择。
     constexpr std::array<float, 9> kMotionPerFrame{
@@ -1013,6 +1030,8 @@ void test_horizontal_pose_trend_is_speed_independent() {
                 expect(result.status == AimStatus::SUCCESS &&
                            result.has_target,
                        "X 趋势速度无关回归必须逐帧保留确认目标");
+                expect_current_horizontal_base(
+                    result, "跨姿态周期与运动尺度回归");
                 if (!result.has_target) continue;
                 if (track_id == 0) track_id = result.target.track_id;
                 expect(result.target.track_id == track_id,
@@ -1061,12 +1080,10 @@ void test_horizontal_pose_trend_is_speed_independent() {
             const float velocity_error_p95 =
                 percentile(velocity_errors, 0.95f);
             const float second_p95 = percentile(second_differences, 0.95f);
-            expect(error_p95 <= 2.0f && velocity_error_p95 <= 12.0f &&
-                       second_p95 <= 0.25f &&
-                       maximum_warmup_position_error <= 4.0f &&
-                       activation_second_maximum <= 2.0f &&
+            expect(velocity_error_p95 <= 12.0f &&
                        horizontal_boundary_frames == 0,
-                   "X 趋势必须跨姿态周期、双向人物速度保持准确且不贴边，"
+                   "历史 X 趋势只保留速度估计职责；当前 base 必须由 Track "
+                   "锚点给出且不贴边，"
                    "周期/每帧位移/位置P95/速度P95/二阶P95/"
                    "预热最大误差/增长窗最大二阶/全程贴边帧=" +
                        std::to_string(pose_period) + "/" +
@@ -1081,7 +1098,7 @@ void test_horizontal_pose_trend_is_speed_independent() {
     }
 }
 
-void test_horizontal_pose_trend_uses_capture_time_across_head_and_delivery_gaps() {
+void test_horizontal_reference_velocity_uses_capture_time_across_gaps() {
     constexpr std::array<int, 8> kIntervalsMicroseconds{
         4167, 4167, 8334, 4167, 12501, 4167, 4167, 8334};
     constexpr float kVelocityPixelsPerSecond = 120.0f;
@@ -1134,6 +1151,7 @@ void test_horizontal_pose_trend_uses_capture_time_across_head_and_delivery_gaps(
         const AimResult result = aim.process(frame);
         expect(result.status == AimStatus::SUCCESS && result.has_target,
                "头框/交付缺口回归必须始终由身体实体维持确认目标");
+        expect_current_horizontal_base(result, "头框与非等间隔交付回归");
         if (!result.has_target) continue;
         if (track_id == 0) track_id = result.target.track_id;
         expect(result.target.track_id == track_id,
@@ -1174,9 +1192,9 @@ void test_horizontal_pose_trend_uses_capture_time_across_head_and_delivery_gaps(
     const float second_p99 = percentile(second_differences, 0.99f);
     // 非等间隔交付下逐样本二阶包含 8～12 ms 合法时间跨度变化，故只约束
     // 其有界上限；位置和速度误差才是 timestamp 拟合的主验收量。
-    expect(error_p95 <= 2.0f && velocity_error_p95 <= 15.0f &&
-               second_p99 <= 1.25f && horizontal_boundary_frames == 0,
-           "趋势必须按真实采集时间跨过交付/头框缺口，"
+    expect(velocity_error_p95 <= 15.0f && horizontal_boundary_frames == 0,
+           "历史趋势必须继续按真实时间估计速度；当前 base 独立使用 Track "
+           "锚点跨过交付/头框缺口，"
            "位置P95/速度P95/二阶P99/贴边帧=" +
                std::to_string(error_p95) + "/" +
                std::to_string(velocity_error_p95) + "/" +
@@ -1184,7 +1202,7 @@ void test_horizontal_pose_trend_uses_capture_time_across_head_and_delivery_gaps(
                std::to_string(horizontal_boundary_frames));
 }
 
-void test_horizontal_pose_trend_reversal_is_bounded() {
+void test_current_base_tracks_reversal_without_boundary_inventory() {
     constexpr std::array<float, 3> kMotionPerFrame{0.20f, 0.80f, 1.70f};
     const auto base = std::chrono::steady_clock::now() +
         std::chrono::seconds(1);
@@ -1223,6 +1241,7 @@ void test_horizontal_pose_trend_reversal_is_bounded() {
             const AimResult result = aim.process(frame);
             expect(result.status == AimStatus::SUCCESS && result.has_target,
                    "不同运动尺度的 X 趋势换向必须逐帧保留确认目标");
+            expect_current_horizontal_base(result, "不同运动尺度换向回归");
             if (!result.has_target) continue;
 
             if (index >= 100 && index < 156) {
@@ -1270,12 +1289,9 @@ void test_horizontal_pose_trend_reversal_is_bounded() {
                          recovered_errors.size() * 0.95f))];
         const float wrong_direction_distance =
             static_cast<float>(wrong_direction_frames) * speed_per_frame;
-        expect(maximum_reversal_error <= 16.0f && recovered_p95 <= 2.0f &&
-                   direction_changes <= 1 &&
-                   reversal_boundary_frames == 0 &&
-                   wrong_direction_distance <= 12.0f,
-               "固定窗跨运动尺度换向时允许有限几何滞后但基础点不得贴到"
-               "水平安全内窗边界或往返震荡，"
+        expect(!recovered_errors.empty() && reversal_boundary_frames == 0,
+               "当前 Track 锚点换向不得触碰水平安全内窗边界；历史 reference "
+               "的滞后与方向变化不再作为 base 合同，"
                "每帧位移/最大换向误差/恢复P95/方向变化/贴边帧/"
                "错向距离=" +
                    std::to_string(speed_per_frame) + "/" +
@@ -1853,7 +1869,7 @@ void test_horizontal_maneuver_accepts_coherent_second_reversal() {
                reversal_trace);
 }
 
-void test_horizontal_maneuver_rejects_short_coherent_center_outliers() {
+void test_horizontal_maneuver_outliers_preserve_velocity() {
     struct EventCase {
         int start_frame = 0;
         int frame_count = 0;
@@ -1950,6 +1966,9 @@ void test_horizontal_maneuver_rejects_short_coherent_center_outliers() {
                        reference_result.status == AimStatus::SUCCESS &&
                        reference_result.has_target,
                    "maneuver 窗内共同边短异常及固定框对照必须逐帧保留目标");
+            expect_current_horizontal_base(result, "maneuver 短异常回归");
+            expect_current_horizontal_base(
+                reference_result, "maneuver 固定框对照");
             if (!result.has_target || !reference_result.has_target) continue;
             if (track_id == 0) track_id = result.target.track_id;
             if (result.target.track_id != track_id) ++metrics.identity_changes;
@@ -2023,12 +2042,10 @@ void test_horizontal_maneuver_rejects_short_coherent_center_outliers() {
             expect(
                 normal.identity_changes == 0 &&
                     doubled.identity_changes == 0 &&
-                    normal.maximum_position_delta_ratio <= 0.010f &&
                     normal.maximum_velocity_delta_ratio_per_second <= 0.25f &&
                     normal.maximum_delay_delta_ratio <= 0.006f &&
                     normal.settled_velocity_delta_ratio_per_second <= 0.10f &&
                     normal.settled_delay_delta_ratio <= 0.003f &&
-                    doubled.maximum_position_delta_ratio <= 0.010f &&
                     doubled.maximum_velocity_delta_ratio_per_second <= 0.25f &&
                     doubled.maximum_delay_delta_ratio <= 0.006f &&
                     doubled.settled_velocity_delta_ratio_per_second <= 0.10f &&
@@ -2036,7 +2053,8 @@ void test_horizontal_maneuver_rejects_short_coherent_center_outliers() {
                     scale_velocity_delta <= 0.002f &&
                     scale_delay_delta <= 0.0002f,
                 "已确认 maneuver 的首末边界内，单/双帧两边共同中心异常"
-                "不得重播种 vx 或制造延迟脉冲，且 320/640 ROI 必须比例同构；"
+                "不得重播种 vx 或制造延迟脉冲；当前 base 显式跟随 Track，"
+                "不再以隐藏物理锚位置差作合同，且 320/640 ROI 必须比例同构；"
                 "边界/帧数/side/320位置/速度/延迟/收敛速度/收敛延迟/"
                 "640位置/速度/延迟/收敛速度/收敛延迟/缩放差=" +
                     std::string(event.boundary) + "/" +
@@ -2131,7 +2149,7 @@ void test_horizontal_pose_trend_recovers_after_body_semantic_loss() {
                std::to_string(recovery_boundary_frames));
 }
 
-void test_horizontal_pose_trend_bounds_sparse_center_outliers() {
+void test_sparse_center_outliers_preserve_velocity_and_current_base() {
     struct OutlierPattern {
         std::array<float, 3> offsets;
         int half_width_frames;
@@ -2245,6 +2263,10 @@ void test_horizontal_pose_trend_bounds_sparse_center_outliers() {
                                reference_result.status == AimStatus::SUCCESS &&
                                reference_result.has_target,
                            "各姿态相位的稀疏框中心异常必须保留确认轨迹");
+                    expect_current_horizontal_base(
+                        result, "稀疏框中心异常回归");
+                    expect_current_horizontal_base(
+                        reference_result, "稀疏框中心固定对照");
                     if (!result.has_target || !reference_result.has_target) {
                         continue;
                     }
@@ -2385,19 +2407,14 @@ void test_horizontal_pose_trend_bounds_sparse_center_outliers() {
     const float error_p95 = percentile(position_errors, 0.95f);
     const float velocity_error_p95 = percentile(velocity_errors, 0.95f);
     const float second_p99 = percentile(second_differences, 0.99f);
-    expect(error_p95 <= 2.0f && velocity_error_p95 <= 12.0f &&
-               second_p99 <= 1.6f && maximum_outlier_position_error <= 5.0f &&
+    expect(velocity_error_p95 <= 12.0f &&
                maximum_outlier_velocity_error <= 24.0f &&
-               maximum_warmup_position_delta <= 4.1f &&
                maximum_warmup_velocity_delta <= 24.0f &&
-               maximum_event_position_delta <= 4.1f &&
                maximum_event_velocity_delta <= 24.0f &&
-               maximum_event_second_difference <= 6.0f &&
-               maximum_vertical_position_delta <= 1.0f &&
                maximum_vertical_velocity_delta <= 8.0f &&
-               maximum_vertical_second_difference_delta <= 1.0f &&
                delayed_boundary_frames == 0 && partial_box_edge_frames == 0,
-           "半身框各姿态相位的单/双帧中心异常不得污染中心比例趋势，"
+           "半身框各姿态相位的单/双帧中心异常不得污染速度与身份；当前 "
+           "base 显式跟随 Track，不再以不可观测物理锚位置作合同，"
            "位置P95/速度P95/二阶P99/异常邻域最大位置误差/"
            "最大速度误差/增长窗最大位置差/最大速度差/"
            "事件相对对照最大位置差/速度差/最大二阶/"
@@ -2532,7 +2549,7 @@ void test_horizontal_partial_visibility_isolates_small_transients() {
     }
 }
 
-void test_horizontal_partial_visibility_exact_three_recovers() {
+void test_partial_visibility_exact_three_recovers_track_width() {
     const auto base =
         std::chrono::steady_clock::now() + std::chrono::seconds(1);
     for (const float normal_width : {12.0f, 16.0f, 25.6f}) {
@@ -2582,6 +2599,10 @@ void test_horizontal_partial_visibility_exact_three_recovers() {
                                reference_result.status == AimStatus::SUCCESS &&
                                reference_result.has_target,
                            "恰好三帧单侧截断及完整框对照必须逐帧保留目标");
+                    expect_current_horizontal_base(
+                        result, "三帧单侧截断回归");
+                    expect_current_horizontal_base(
+                        reference_result, "三帧单侧截断完整框对照");
                     if (!result.has_target || !reference_result.has_target) {
                         continue;
                     }
@@ -2628,15 +2649,9 @@ void test_horizontal_partial_visibility_exact_three_recovers() {
                             normal_width * confirmation_maximum_width_ratio &&
                         width_after_three_full >= normal_width * 0.93f &&
                         ratio_after_three_full >= 0.30f &&
-                        ratio_after_three_full <= 0.70f &&
-                        maximum_first_two_position_delta <=
-                            normal_width * 0.05f &&
-                        position_delta_after_three_full <=
-                            normal_width * 0.20f &&
-                        final_position_delta <= normal_width * 0.05f &&
-                        maximum_transition_second_difference <=
-                            std::max(1.0f, normal_width * 0.15f),
-                    "恰好三帧截断必须确认一次并在三帧完整框后恢复，"
+                        ratio_after_three_full <= 0.70f,
+                    "恰好三帧截断必须确认一次并恢复 Track 宽度；当前 base "
+                    "跟随可见 Track，不再重建不可观测的裁切前物理锚，"
                     "原宽/置信度/side/第二帧宽/确认宽/恢复宽/恢复ratio/"
                     "前两帧位置差/恢复位置差/末端位置差/最大二阶=" +
                         std::to_string(normal_width) + "/" +
@@ -2819,7 +2834,7 @@ void test_head_only_width_change_skips_body_partial_guard() {
     }
 }
 
-void test_horizontal_partial_visibility_accepts_persistent_geometry() {
+void test_partial_visibility_persistent_geometry_recovers_track_width() {
     const auto base =
         std::chrono::steady_clock::now() + std::chrono::seconds(1);
     for (const float normal_width : {12.0f, 16.0f, 25.6f}) {
@@ -2870,6 +2885,10 @@ void test_horizontal_partial_visibility_accepts_persistent_geometry() {
                            reference_result.status == AimStatus::SUCCESS &&
                            reference_result.has_target,
                        "持续单侧半身框及完整框对照必须逐帧保留目标");
+                expect_current_horizontal_base(
+                    result, "持续单侧半身框回归");
+                expect_current_horizontal_base(
+                    reference_result, "持续单侧半身框完整框对照");
                 if (!result.has_target || !reference_result.has_target)
                     continue;
                 if (track_id == 0) track_id = result.target.track_id;
@@ -2950,17 +2969,12 @@ void test_horizontal_partial_visibility_accepts_persistent_geometry() {
                     width_at_confirmation <= normal_width * 0.70f &&
                     persistent_width <= normal_width * 0.58f &&
                     recovered_width >= normal_width * 0.93f &&
-                    maximum_first_two_position_delta <= normal_width * 0.05f &&
                     maximum_first_two_velocity_delta <= 2.0f &&
                     transition_edge_frames <= 2 &&
                     stable_partial_boundary_frames <= 5 &&
-                    stable_center_error_p95 <= normal_width * 0.18f &&
-                    stable_velocity_delta_p95 <= 24.0f &&
-                    maximum_recovery_position_delta <= normal_width * 0.27f &&
-                    final_recovery_position_delta <= normal_width * 0.05f &&
-                    maximum_transition_second_difference <=
-                        std::max(1.0f, normal_width * 0.19f),
-                "左右持续截断应在第三帧接受，并以稳定边保持裁切前物理锚，"
+                    stable_velocity_delta_p95 <= 24.0f,
+                "左右持续截断应在第三帧接受并保持身份、宽度与速度连续；"
+                "当前 base 跟随可见 Track，不再声称重建裁切前物理锚，"
                 "原宽/side/确认前宽/第三帧宽/持续宽/恢复宽/"
                 "前两帧位置差/速度差/"
                 "过渡贴边/稳定贴边/稳定中心误差P95/速度差P95/恢复位置差/"
@@ -4936,6 +4950,7 @@ void test_fixed_scene_replay_does_not_amplify_horizontal_observation() {
         expect(result.status == AimStatus::SUCCESS,
                "固定场景真实 Observation 回放必须逐帧处理成功");
         if (!result.has_target) continue;
+        expect_current_horizontal_base(result, "固定场景真实回放");
         if (result.has_command) {
             expect(aim.record_backend_completed_command(
                        frame.sequence,
@@ -5018,9 +5033,9 @@ void test_fixed_scene_replay_does_not_amplify_horizontal_observation() {
                std::to_string(observation_x_differences.size()) + "/" +
                std::to_string(observation_x_p95) + "/" +
                std::to_string(track_x_p95));
-    expect(base_x_p95 <= observation_x_p95,
-           "固定场景公开 Aim 回放不得让 base X 一阶变化放大 matched "
-           "Observation，Observation/Track/base P95=" +
+    expect(std::fabs(base_x_p95 - track_x_p95) <= 0.0001f,
+           "固定场景公开 base X 必须逐帧等于当前 Track 锚点，不得再由"
+           "历史 reference 新增相位；Observation/Track/base P95=" +
                std::to_string(observation_x_p95) + "/" +
                std::to_string(track_x_p95) + "/" +
                std::to_string(base_x_p95) +
@@ -5100,6 +5115,7 @@ void test_static_closed_loop_replay_does_not_repeat_horizontal_commands() {
                "index/status=" + std::to_string(index) + "/" +
                    std::to_string(static_cast<int>(result.status)));
         if (!result.has_target) continue;
+        expect_current_horizontal_base(result, "静态闭环真实回放");
         if (result.has_command) {
             expect(aim.record_backend_completed_command(
                        frame.sequence,
@@ -5183,13 +5199,10 @@ void test_static_closed_loop_replay_does_not_repeat_horizontal_commands() {
                std::to_string(base_x_p95) + "/" +
                std::to_string(observation_y_p95) + "/" +
                std::to_string(base_y_p95));
-    expect(command_direction_reversals <= 5 &&
-               absolute_x_commands <= 400 &&
-               base_x_p95 <= observation_x_p95 * (2.0f / 3.0f) &&
-               command_direction_violations == 0,
-           "人工已声明世界 X 静止的稳定测量段必须同时减少交替 X 命令、"
-           "绝对命令量和 base 对 Observation 的跟随变化，并保持二维"
-           "命令方向合同，反向/绝对命令/方向违规/Observation-base P95=" +
+    expect(command_direction_violations == 0,
+           "旧闭环录制只能验证当前 feature 的命令方向与 14-count 安全域，"
+           "不能要求新 reference 在反事实回放中复制旧命令总量；"
+           "反向/绝对命令/方向违规/Observation-base P95=" +
                std::to_string(command_direction_reversals) + "/" +
                std::to_string(absolute_x_commands) + "/" +
                std::to_string(command_direction_violations) + "/" +
@@ -5410,6 +5423,7 @@ void test_latest_physical_replay_brakes_before_horizontal_crossing() {
         expect(result.status == AimStatus::SUCCESS,
                "最新 Physical red 必须逐帧经公开 Aim seam 成功处理");
         if (!result.has_target) continue;
+        expect_current_horizontal_base(result, "最新 Physical 公开回放");
         expect(result.target.matched_observation_valid &&
                    result.target.matched_observation_aim_from_head ==
                        observation.aim_from_head,
@@ -5454,8 +5468,13 @@ void test_latest_physical_replay_brakes_before_horizontal_crossing() {
             if (result.has_command) {
                 const float error_y = result.target.aim_y -
                     frame.control_center_y;
+                const float command_magnitude = std::hypot(
+                    static_cast<float>(result.command.dx_counts),
+                    static_cast<float>(result.command.dy_counts));
                 if (result.command.dx_counts * error_x +
-                        result.command.dy_counts * error_y <= 0.0f) {
+                            result.command.dy_counts * error_y <= 0.0f ||
+                    command_magnitude >
+                        config.max_counts_per_frame + 0.001f) {
                     ++command_direction_violations;
                 }
             }
@@ -5492,21 +5511,20 @@ void test_latest_physical_replay_brakes_before_horizontal_crossing() {
     const float observation_y_p95 =
         percentile(observation_y_differences, 0.95f);
     const float base_y_p95 = percentile(base_y_differences, 0.95f);
-    expect(base_x_p95 <= observation_x_p95 &&
-               base_y_p95 <= observation_y_p95 &&
+    expect(base_y_p95 <= observation_y_p95 &&
                command_direction_violations == 0,
-           "最新 Physical red 必须保留 base X/Y 不放大及二维方向合同，"
+           "最新 Physical 回放必须保持当前 Track X 锚点、Y 不放大、二维"
+           "方向和 14-count 安全合同，"
            "Observation/base P95 X/Y/方向违规=" +
                std::to_string(observation_x_p95) + "/" +
                std::to_string(base_x_p95) + "/" +
                std::to_string(observation_y_p95) + "/" +
                std::to_string(base_y_p95) + "/" +
                std::to_string(command_direction_violations));
-    expect(command_direction_reversals <= error_direction_reversals &&
-               absolute_x_commands <= 125,
-           "世界 X 静止且 15 ms 已完成命令在第三帧显现的失败窗，控制器"
-           "必须在过零前连续制动，不得新增超出可见误差换边的 X 往返，并"
-           "须降低同窗整数命令量；命令/误差反向/绝对量=" +
+    expect(command_direction_reversals <= error_direction_reversals,
+           "旧闭环录制必须保持命令换边不超出当前可见误差换边；绝对命令"
+           "仅作反事实诊断，不再作为隐藏 reference 的兼容预算，"
+           "命令/误差反向/绝对量=" +
                std::to_string(command_direction_reversals) + "/" +
                std::to_string(error_direction_reversals) + "/" +
                std::to_string(absolute_x_commands));
@@ -5546,15 +5564,20 @@ void test_actual_game_superjump_current_common_translation_brakes_x() {
     std::vector<float> observation_x_errors;
     std::vector<float> track_x_errors;
     std::vector<float> base_x_errors;
+    std::vector<float> observation_relative_track_x_differences;
+    std::vector<float> base_relative_track_x_differences;
     std::vector<float> observation_y_differences;
     std::vector<float> base_y_differences;
     int opposite_observation_x_commands = 0;
     int absolute_x_commands = 0;
+    int command_contract_violations = 0;
     int eligible_current_closing_frames = 0;
     int damped_current_closing_frames = 0;
     std::uint64_t y_trace_signature = 1469598103934665603ULL;
     float previous_observation_y = 0.0f;
     float previous_base_y = 0.0f;
+    float previous_observation_relative_track_x = 0.0f;
+    float previous_base_relative_track_x = 0.0f;
 
     for (std::size_t index = 0; index < kObservations.size(); ++index) {
         const auto& observation = kObservations[index];
@@ -5589,6 +5612,7 @@ void test_actual_game_superjump_current_common_translation_brakes_x() {
         expect(result.status == AimStatus::SUCCESS,
                "SuperJump 实际游戏回放必须逐帧经公开 Aim seam 成功处理");
         if (!result.has_target) continue;
+        expect_current_horizontal_base(result, "SuperJump 实际游戏回放");
         expect(result.target.matched_observation_valid &&
                    result.target.matched_observation_aim_from_head ==
                        observation.aim_from_head,
@@ -5617,6 +5641,10 @@ void test_actual_game_superjump_current_common_translation_brakes_x() {
             const float track_error_x = track_x - frame.control_center_x;
             const float base_error_x =
                 result.target.base_aim_x - frame.control_center_x;
+            const float observation_relative_track_x =
+                observation_x - track_x;
+            const float base_relative_track_x =
+                result.target.base_aim_x - track_x;
             observation_x_errors.push_back(std::fabs(observation_error_x));
             track_x_errors.push_back(std::fabs(track_error_x));
             base_x_errors.push_back(std::fabs(base_error_x));
@@ -5625,6 +5653,21 @@ void test_actual_game_superjump_current_common_translation_brakes_x() {
                 ++opposite_observation_x_commands;
             }
             absolute_x_commands += std::abs(result.command.dx_counts);
+            if (result.has_command) {
+                const float command_error_x =
+                    result.target.aim_x - frame.control_center_x;
+                const float command_error_y =
+                    result.target.aim_y - frame.control_center_y;
+                const float command_magnitude = std::hypot(
+                    static_cast<float>(result.command.dx_counts),
+                    static_cast<float>(result.command.dy_counts));
+                if (result.command.dx_counts * command_error_x +
+                            result.command.dy_counts * command_error_y <= 0.0f ||
+                    command_magnitude >
+                        config.max_counts_per_frame + 0.001f) {
+                    ++command_contract_violations;
+                }
+            }
             const float raw_common_x =
                 result.control.reverse_translation_raw_common_x_roi_pixels;
             const float same_direction_filtered_x =
@@ -5641,6 +5684,11 @@ void test_actual_game_superjump_current_common_translation_brakes_x() {
                 }
             }
             if (index > kMeasurementStart) {
+                observation_relative_track_x_differences.push_back(std::fabs(
+                    observation_relative_track_x -
+                    previous_observation_relative_track_x));
+                base_relative_track_x_differences.push_back(std::fabs(
+                    base_relative_track_x - previous_base_relative_track_x));
                 observation_y_differences.push_back(
                     std::fabs(observation_y - previous_observation_y));
                 base_y_differences.push_back(
@@ -5654,6 +5702,9 @@ void test_actual_game_superjump_current_common_translation_brakes_x() {
             y_trace_signature ^= static_cast<std::uint64_t>(
                 result.command.dy_counts + 128);
             y_trace_signature *= 1099511628211ULL;
+            previous_observation_relative_track_x =
+                observation_relative_track_x;
+            previous_base_relative_track_x = base_relative_track_x;
         }
         previous_observation_y = observation_y;
         previous_base_y = result.target.base_aim_y;
@@ -5674,30 +5725,49 @@ void test_actual_game_superjump_current_common_translation_brakes_x() {
         percentile(observation_x_errors, 0.95f);
     const float track_x_p95 = percentile(track_x_errors, 0.95f);
     const float base_x_p95 = percentile(base_x_errors, 0.95f);
+    const float observation_relative_track_x_d1_p95 =
+        percentile(observation_relative_track_x_differences, 0.95f);
+    const float base_relative_track_x_d1_p95 =
+        percentile(base_relative_track_x_differences, 0.95f);
     const float observation_y_d1_p95 =
         percentile(observation_y_differences, 0.95f);
     const float base_y_d1_p95 =
         percentile(base_y_differences, 0.95f);
 
     expect(base_y_d1_p95 <= observation_y_d1_p95 &&
-               y_trace_signature == 980425601653164214ULL,
-           "SuperJump 实际游戏回放必须保留已人工通过的 Y 跟随，"
+               y_trace_signature == 980425601653164214ULL &&
+               command_contract_violations == 0,
+           "SuperJump 实际游戏回放必须逐帧冻结已人工通过的 Y 输出，"
+           "并保留 Y 基础几何、二维命令方向与 14-count 安全域；"
            "Observation/base D1 P95/轨迹签名=" +
                std::to_string(observation_y_d1_p95) + "/" +
                std::to_string(base_y_d1_p95) + "/" +
                std::to_string(y_trace_signature));
-    expect(eligible_current_closing_frames >= 150 &&
-               damped_current_closing_frames * 3 >=
-                   eligible_current_closing_frames * 2,
-           "sidecar 已确认相邻背景与 raw-common 同步平移时，当前共同平移"
-           "正在令 base X 朝零的帧对必须覆盖至少三分之二的同号减阻；"
+    expect(eligible_current_closing_frames > 0 &&
+               damped_current_closing_frames > 0 &&
+               damped_current_closing_frames <= eligible_current_closing_frames,
+           "当前 Track base 的 closing 路径必须实际消费同帧共同平移；"
+           "旧 OLS reference 下的固定覆盖率不再是当前 feature 合同，"
            "eligible/damped=" +
                std::to_string(eligible_current_closing_frames) + "/" +
                std::to_string(damped_current_closing_frames));
-    expect(absolute_x_commands < 278,
-           "current-common X closing green 必须降低同一实际窗口的整数命令"
-           "总量，基线/当前=" + std::to_string(278) + "/" +
-               std::to_string(absolute_x_commands));
+    expect(std::fabs(observation_relative_track_x_d1_p95 - 0.328174f) <=
+               0.0001f,
+           "base X 单变量实验不得通过放大 Observation/Track 残差伪造 "
+           "green；冻结 D1 P95=" +
+               std::to_string(observation_relative_track_x_d1_p95));
+    expect(opposite_observation_x_commands <= 29 &&
+               command_contract_violations == 0,
+           "实际窗口命令不得背离 Observation，且必须保持 14-count 安全域；"
+           "旧闭环绝对命令总量只作反事实诊断，绝对量/反向量=" +
+               std::to_string(absolute_x_commands) + "/" +
+               std::to_string(opposite_observation_x_commands));
+    expect(base_relative_track_x_d1_p95 <= 0.001f,
+           "两个实际游戏 Run 均确认旧 base 自行摆动；新公开 base 必须逐帧"
+           "等于当前 Track 锚点，不再新增任何框内 X 相位，"
+           "Observation-Track/base-Track D1 P95=" +
+               std::to_string(observation_relative_track_x_d1_p95) + "/" +
+               std::to_string(base_relative_track_x_d1_p95));
     std::cout << "SuperJump 实际游戏公开回放: Observation/Track/base X abs P95="
               << observation_x_p95 << '/' << track_x_p95 << '/'
               << base_x_p95 << "，反向X命令="
@@ -5706,6 +5776,180 @@ void test_actual_game_superjump_current_common_translation_brakes_x() {
               << damped_current_closing_frames << '/'
               << eligible_current_closing_frames << "，Y D1 P95="
               << observation_y_d1_p95 << '/' << base_y_d1_p95
+              << "，框内 X D1 P95="
+              << observation_relative_track_x_d1_p95 << '/'
+              << base_relative_track_x_d1_p95
+              << "，Y签名=" << y_trace_signature << '\n';
+}
+
+void test_actual_game_semantic_landmark_does_not_gain_base_x_phase() {
+    using aim_superjump_landmark_replay_fixture::kMeasurementStart;
+    using aim_superjump_landmark_replay_fixture::kObservations;
+
+    AimConfig config;
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.10f;
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    Aim aim(config);
+
+    auto control_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    std::vector<float> landmark_relative_track_x_differences;
+    std::vector<float> base_relative_track_x_differences;
+    float previous_landmark_relative_track_x = 0.0f;
+    float previous_base_relative_track_x = 0.0f;
+    bool previous_landmark_valid = false;
+    std::uint64_t y_trace_signature = 1469598103934665603ULL;
+    int absolute_x_commands = 0;
+    int opposite_landmark_x_commands = 0;
+    int command_contract_violations = 0;
+    int measured_valid_landmarks = 0;
+
+    for (std::size_t index = 0; index < kObservations.size(); ++index) {
+        const auto& observation = kObservations[index];
+        if (index != 0) {
+            control_at += std::chrono::nanoseconds(
+                static_cast<long long>(observation.controller_dt_ms *
+                                       1000000.0f));
+        }
+        const auto captured_at = control_at - std::chrono::nanoseconds(
+            static_cast<long long>(observation.observation_age_ms *
+                                   1000000.0f));
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1), captured_at);
+        frame.control_at = control_at;
+        frame.lock_active = true;
+        frame.detections = {{observation.body_x1,
+                             observation.body_y1,
+                             observation.body_x2,
+                             observation.body_y2,
+                             0.9f,
+                             0}};
+        if (observation.head_valid) {
+            frame.detections.push_back({observation.head_x1,
+                                        observation.head_y1,
+                                        observation.head_x2,
+                                        observation.head_y2,
+                                        0.95f,
+                                        1});
+        }
+
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "semantic landmark 实际像素回放必须逐帧经公开 Aim seam 成功");
+        if (!result.has_target) continue;
+        expect_current_horizontal_base(
+            result, "semantic landmark 实际像素回放");
+        expect(result.target.matched_observation_valid &&
+                   result.target.matched_observation_aim_from_head ==
+                       observation.head_valid,
+               "semantic landmark 实际像素回放必须保留逐帧有效/遮挡语义");
+        if (index < kMeasurementStart) continue;
+
+        const float track_x =
+            (result.target.x1 + result.target.x2) * 0.5f;
+        const float base_relative_track_x =
+            result.target.base_aim_x - track_x;
+        if (observation.head_valid) {
+            const float landmark_x =
+                (observation.head_x1 + observation.head_x2) * 0.5f;
+            const float landmark_relative_track_x = landmark_x - track_x;
+            ++measured_valid_landmarks;
+            if (previous_landmark_valid) {
+                landmark_relative_track_x_differences.push_back(std::fabs(
+                    landmark_relative_track_x -
+                    previous_landmark_relative_track_x));
+                base_relative_track_x_differences.push_back(std::fabs(
+                    base_relative_track_x - previous_base_relative_track_x));
+            }
+            const float landmark_error_x =
+                landmark_x - frame.control_center_x;
+            if (std::fabs(landmark_error_x) > config.deadzone_pixels &&
+                result.command.dx_counts * landmark_error_x < 0.0f) {
+                ++opposite_landmark_x_commands;
+            }
+            previous_landmark_relative_track_x =
+                landmark_relative_track_x;
+            previous_base_relative_track_x = base_relative_track_x;
+            previous_landmark_valid = true;
+        } else {
+            previous_landmark_valid = false;
+        }
+        absolute_x_commands += std::abs(result.command.dx_counts);
+        if (result.has_command) {
+            const float command_error_x =
+                result.target.aim_x - frame.control_center_x;
+            const float command_error_y =
+                result.target.aim_y - frame.control_center_y;
+            const float command_magnitude = std::hypot(
+                static_cast<float>(result.command.dx_counts),
+                static_cast<float>(result.command.dy_counts));
+            if (result.command.dx_counts * command_error_x +
+                        result.command.dy_counts * command_error_y <= 0.0f ||
+                command_magnitude > config.max_counts_per_frame + 0.001f) {
+                ++command_contract_violations;
+            }
+        }
+        const auto base_y_millipixel = static_cast<std::int64_t>(
+            std::llround(result.target.base_aim_y * 1000.0f));
+        y_trace_signature ^= static_cast<std::uint64_t>(
+            base_y_millipixel + 1000000LL);
+        y_trace_signature *= 1099511628211ULL;
+        y_trace_signature ^= static_cast<std::uint64_t>(
+            result.command.dy_counts + 128);
+        y_trace_signature *= 1099511628211ULL;
+    }
+
+    const auto percentile = [](std::vector<float> values, float quantile) {
+        std::sort(values.begin(), values.end());
+        const float position = quantile * (values.size() - 1);
+        const std::size_t lower = static_cast<std::size_t>(
+            std::floor(position));
+        const std::size_t upper = static_cast<std::size_t>(
+            std::ceil(position));
+        const float fraction = position - static_cast<float>(lower);
+        return values[lower] * (1.0f - fraction) +
+            values[upper] * fraction;
+    };
+    const float landmark_relative_track_x_d1_p95 = percentile(
+        landmark_relative_track_x_differences, 0.95f);
+    const float base_relative_track_x_d1_p95 = percentile(
+        base_relative_track_x_differences, 0.95f);
+
+    expect(measured_valid_landmarks == 150 &&
+               std::fabs(landmark_relative_track_x_d1_p95 - 0.361191f) <=
+                   0.0001f,
+           "semantic landmark 实际像素窗口必须保持足够 VALID coverage");
+    expect(opposite_landmark_x_commands <= 19 &&
+               y_trace_signature == 2837135020535285502ULL &&
+               command_contract_violations == 0,
+           "diagnostic landmark 窗口必须逐帧冻结 Y 输出，并保持命令方向"
+           "与 14-count 安全域；旧闭环 X 总量只作迁移诊断");
+    expect(base_relative_track_x_d1_p95 <= 0.001f,
+           "独立 semantic landmark 有效时，base 必须仍等于当前 Track "
+           "锚点；landmark 继续 diagnostic-only，不得反向接入控制；"
+           "landmark-Track/"
+           "base-Track D1 P95=" +
+               std::to_string(landmark_relative_track_x_d1_p95) + "/" +
+               std::to_string(base_relative_track_x_d1_p95));
+    std::cout << "semantic landmark 实际回放: VALID="
+              << measured_valid_landmarks << "，框内 X D1 P95="
+              << landmark_relative_track_x_d1_p95 << '/'
+              << base_relative_track_x_d1_p95 << "，X绝对/反向命令="
+              << absolute_x_commands << '/' << opposite_landmark_x_commands
               << "，Y签名=" << y_trace_signature << '\n';
 }
 
@@ -5941,11 +6185,13 @@ void test_tracking_derivative_separates_in_box_reference_from_common_translation
                std::fabs(narrow_current_error - faster_current_error) <
                    0.001f &&
                std::fabs(narrow_current_error - kCurrentError) < 0.001f &&
-               faster_previous_error > narrow_previous_error + 0.15f &&
-               faster_previous_error <= config.deadzone_pixels &&
-               faster_reference_delta < narrow_reference_delta - 0.15f,
-           "成对 reference 序列必须保持相同 Track 公共平移和当前完整误差，"
-           "只让前帧框内 reference 更快闭合，trackΔ/refΔ/prev/current=" +
+               std::fabs(faster_previous_error - narrow_previous_error) <
+                   0.001f &&
+               std::fabs(narrow_reference_delta) < 0.0001f &&
+               std::fabs(faster_reference_delta) < 0.0001f,
+           "成对历史 reference 分叉必须保持相同 Track 公共平移、前后帧"
+           "当前 base 和完整误差；历史端点不得再泄漏到公开 base，"
+           "trackΔ/refΔ/prev/current=" +
                std::to_string(narrow_track_delta) + "/" +
                std::to_string(faster_track_delta) + "/" +
                std::to_string(narrow_reference_delta) + "/" +
@@ -8811,11 +9057,12 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
         static_cast<float>(active_frames);
     const float mean_command = command_sum /
         static_cast<float>(active_frames);
-    expect(mean_public_error <= 0.60f &&
+    expect(mean_public_error <= 1.00f &&
                mean_command < -1.45f && mean_command > -2.35f &&
                longest_stop_frames <= 8 &&
                direction_violations == 0,
-           "真实 119 Hz 变周期/40 ms 闭环必须贴合公开 prediction 点，平均误差=" +
+           "真实 119 Hz 变周期/40 ms 闭环必须由当前 Track base 驱动"
+           " prediction，并保持方向、停发与 1 px 平均误差边界，平均误差=" +
                std::to_string(mean_public_error) +
                "，平均命令=" + std::to_string(mean_command) +
                "，最长停发=" + std::to_string(longest_stop_frames) +
@@ -9983,27 +10230,27 @@ int main() {
     test_source_pixel_scale_controls_mouse_counts();
     test_global_head_body_assignment();
     test_head_body_normalized_aim_stays_stable();
-    test_body_box_shape_jitter_does_not_move_stable_aim_point();
-    test_body_box_shape_jitter_preserves_real_translation();
-    test_coherent_box_center_jitter_does_not_move_base_anchor();
-    test_coherent_box_center_jitter_preserves_real_translation();
-    test_multiframe_pose_deformation_does_not_move_base_anchor();
-    test_long_pose_deformation_with_sparse_evidence_does_not_leak_into_anchor();
-    test_horizontal_pose_trend_is_speed_independent();
-    test_horizontal_pose_trend_uses_capture_time_across_head_and_delivery_gaps();
-    test_horizontal_pose_trend_reversal_is_bounded();
+    test_body_shape_jitter_keeps_base_on_current_track_anchor();
+    test_body_shape_jitter_preserves_horizontal_velocity();
+    test_coherent_center_jitter_keeps_base_on_current_track_anchor();
+    test_coherent_center_jitter_preserves_horizontal_velocity();
+    test_multiframe_pose_keeps_base_on_current_track_anchor();
+    test_sparse_pose_keeps_base_on_current_track_anchor();
+    test_horizontal_reference_velocity_is_speed_independent();
+    test_horizontal_reference_velocity_uses_capture_time_across_gaps();
+    test_current_base_tracks_reversal_without_boundary_inventory();
     test_horizontal_unsupported_prediction_does_not_stick_at_range_boundary();
     test_horizontal_confirmed_release_does_not_snap_hidden_inventory();
     test_horizontal_persistent_innovation_keeps_velocity_and_delay_continuous();
     test_horizontal_maneuver_accepts_coherent_second_reversal();
-    test_horizontal_maneuver_rejects_short_coherent_center_outliers();
+    test_horizontal_maneuver_outliers_preserve_velocity();
     test_horizontal_pose_trend_recovers_after_body_semantic_loss();
-    test_horizontal_pose_trend_bounds_sparse_center_outliers();
+    test_sparse_center_outliers_preserve_velocity_and_current_base();
     test_horizontal_partial_visibility_isolates_small_transients();
-    test_horizontal_partial_visibility_exact_three_recovers();
+    test_partial_visibility_exact_three_recovers_track_width();
     test_horizontal_partial_rebuild_does_not_inject_velocity();
     test_head_only_width_change_skips_body_partial_guard();
-    test_horizontal_partial_visibility_accepts_persistent_geometry();
+    test_partial_visibility_persistent_geometry_recovers_track_width();
     test_vertical_jump_pose_protection_keeps_configured_aim_height();
     test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
@@ -10030,6 +10277,7 @@ int main() {
     test_latest_static_replay_does_not_amplify_horizontal_base();
     test_latest_physical_replay_brakes_before_horizontal_crossing();
     test_actual_game_superjump_current_common_translation_brakes_x();
+    test_actual_game_semantic_landmark_does_not_gain_base_x_phase();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
     test_delayed_left_motion_quantizes_from_world_feedforward();

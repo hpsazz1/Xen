@@ -58,7 +58,7 @@ struct AimConfig {
     // 挑战者切换和鼠标命令，不裁剪 Detector 输入或停止轨迹状态更新。
     float acquisition_range_percent = 90.0f;
     float body_aim_height_ratio = 0.35f;
-    // 身体框内基础瞄点允许活动的横向有效范围百分比；50 表示身体框中间 50%。
+    // 身体框内基础瞄点的横向安全范围百分比；50 表示身体框中间 50%。
     float body_aim_range_percent = 50.0f;
     float deadzone_pixels = 1.5f;
     float smoothing = 0.35f;
@@ -195,7 +195,8 @@ struct AimTargetSnapshot {
     float matched_observation_y2 = 0.0f;
     bool matched_observation_head_only = false;
     bool matched_observation_aim_from_head = false;
-    // 基础瞄点来自观测/状态估计并始终位于目标框内；延迟补偿点只用于
+    // base_aim_x 是当前 Track 框内的归一化锚点，不消费历史 X reference；
+    // base_aim_y 保留现有状态估计并始终位于目标框内。延迟补偿点只用于
     // 基础 tracking 的已测控制延迟；aim_* 是再应用 prediction 后的最终点。
     float base_aim_x = 0.0f;
     float base_aim_y = 0.0f;

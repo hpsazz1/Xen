@@ -26,7 +26,7 @@ constexpr std::size_t kTrackHorizontalRawMotionSampleCount = 3;
 // 最近三次原始共同边的任一次仍达到旧预测的 25% 时，不把低屏幕运动
 // 解释为预测失效。该比例只比较同一轨迹的观测/预测几何，不是速度档位。
 constexpr float kTrackHorizontalRecentMotionMaximumPredictionRatio = 0.25f;
-// 低观测运动只在旧方向基础点已走过用户水平半内窗的 60% 时撤销预测，
+// 低观测运动只在旧方向历史 reference 已走过用户水平半内窗的 60% 时撤销预测，
 // 避免正常匀速跟随在框中心附近被误当成停稳。
 constexpr float kTrackHorizontalUnsupportedMotionMinimumAimRangeRatio = 0.60f;
 // OLS 有效后，当前中心与趋势中心的 ROI 横向比例连续三次相差超过 2%
@@ -91,7 +91,9 @@ struct Track {
     float y1 = 0.0f;
     float x2 = 0.0f;
     float y2 = 0.0f;
-    float aim_x = 0.0f;
+    // 历史水平估计器的内部 reference。它只服务速度、遮挡历史和
+    // prediction 库存，不再冒充当前帧可观测的基础瞄点。
+    float horizontal_reference_x = 0.0f;
     float aim_y = 0.0f;
     float aim_ratio_x = 0.5f;
     float aim_ratio_y = 0.5f;
@@ -141,7 +143,7 @@ struct Track {
     HorizontalTrendChangePoint horizontal_trend_change{};
     HorizontalRawMotionHistory horizontal_raw_motion{};
     HorizontalDirectionHistory horizontal_direction{};
-    // predict_tracks() 实际经过二维限幅后写入基础点的 X 位移。反向快通道
+    // predict_tracks() 实际经过二维限幅后写入历史 reference 的 X 位移。反向快通道
     // 需要用它计算旧预测与新观测的精确差额，不能用 vx*dt 近似限幅结果。
     float predicted_motion_x = 0.0f;
     // 连续低观测运动撤销旧 X 预测的渐入时长；只在同一匹配轨迹内跨帧
@@ -733,6 +735,11 @@ std::pair<float, float> point_from_ratio(
         y1 + (y2 - y1) * std::clamp(ratio_y, 0.0f, 1.0f)};
 }
 
+float current_horizontal_aim_x(const Track& track) noexcept {
+    return track.x1 + (track.x2 - track.x1) *
+        std::clamp(track.aim_ratio_x, 0.0f, 1.0f);
+}
+
 // 目标数通常很小，但贪心边排序仍会在交叉和遮挡场景受输入顺序影响。
 // 这里使用经典匈牙利算法求全局最小代价，并通过虚拟行列显式表达未匹配。
 std::vector<int> minimum_cost_assignment(
@@ -1108,7 +1115,7 @@ struct Aim::Impl {
             track.x2 += dx;
             track.y1 += dy;
             track.y2 += dy;
-            track.aim_x += dx;
+            track.horizontal_reference_x += dx;
             track.aim_y += dy;
             track.predicted_motion_x = dx;
             track.prediction_dt = dt;
@@ -1151,8 +1158,8 @@ struct Aim::Impl {
             (observation.y1 + observation.y2) * 0.5f;
         const float observation_center_y_ratio =
             observation_center_y / roi_height;
-        const float previous_base_aim_x =
-            track.aim_x - track.predicted_motion_x;
+        const float previous_horizontal_reference_x =
+            track.horizontal_reference_x - track.predicted_motion_x;
         const float center_motion_residual_x =
             observation_center_x - track_center_x;
         const float center_motion_residual_y =
@@ -1377,7 +1384,7 @@ struct Aim::Impl {
             };
             // 分轴形变保护只能读取本轴尺度。旧实现把 width||height 同时
             // 喂给 X/Y，单纯高度轮廓噪声也会冻结 X 位置后验，而 vx 继续
-            // 推进基础点，正是实机 X 追边、回摆和反向停发的跨轴根因。
+            // 推进历史 reference，曾是实机 X 追边、回摆和反向停发的跨轴根因。
             update_deformation(width_changed,
                                horizontal_deformation_residual_x,
                                x_edges_coherent,
@@ -1814,28 +1821,32 @@ struct Aim::Impl {
             const float horizontal_track_width = track.x2 - track.x1;
             const float horizontal_track_anchor_x = track.x1 +
                 horizontal_track_width * track.aim_ratio_x;
-            // 原 track 锚继续服务已验证的换向/普通预测库存路径。OLS 姿态段
-            // 另看同帧观测框：predict_tracks() 会让旧框和基础点一起前移，
-            // 只比较两者会漏掉当前观测把公开框拉回后才显出的趋势库存。
+            // 历史 reference 继续服务已验证的换向/普通 prediction 库存。
+            // OLS 姿态段另看同帧观测框：predict_tracks() 会让旧框和 reference
+            // 一起前移，只比较两者会漏掉当前观测拉回框后显出的趋势库存。
             const float horizontal_observation_anchor_x = observation.x1 +
                 observation_width * track.aim_ratio_x;
             const float horizontal_half_range =
                 config.body_aim_range_percent / 200.0f;
             const bool horizontal_old_prediction_inventory_visible =
                 horizontal_track_width > 0.0f &&
-                (track.aim_x - horizontal_track_anchor_x) * track.vx > 0.0f &&
-                std::fabs(track.aim_x - horizontal_track_anchor_x) /
+                (track.horizontal_reference_x - horizontal_track_anchor_x) *
+                    track.vx > 0.0f &&
+                std::fabs(
+                    track.horizontal_reference_x - horizontal_track_anchor_x) /
                         horizontal_track_width >=
                     horizontal_half_range *
                         kTrackHorizontalUnsupportedMotionMinimumAimRangeRatio;
             const bool horizontal_trend_prediction_inventory_same_side =
                 track.horizontal_center_trend_frames > 0 &&
                 observation_width > 0.0f &&
-                (track.aim_x - horizontal_observation_anchor_x) * track.vx >
-                    0.0f;
+                (track.horizontal_reference_x -
+                 horizontal_observation_anchor_x) * track.vx > 0.0f;
             const bool horizontal_trend_prediction_inventory_visible =
                 horizontal_trend_prediction_inventory_same_side &&
-                std::fabs(track.aim_x - horizontal_observation_anchor_x) /
+                std::fabs(
+                    track.horizontal_reference_x -
+                    horizontal_observation_anchor_x) /
                         observation_width >=
                     horizontal_half_range *
                         kTrackHorizontalUnsupportedMotionMinimumAimRangeRatio;
@@ -1859,7 +1870,7 @@ struct Aim::Impl {
                     track.horizontal_control_translation_evidence_x) >=
                     kHorizontalTranslationEvidenceConsistencyMinimum) {
                 // 三点共同边已经确认与旧 vx 反向，且 OLS 位置创新已进入
-                // 独立候选/正式机动段，或旧方向基础点库存已清晰可见。
+                // 独立候选/正式机动段，或旧方向 reference 库存已清晰可见。
                 // 候选期不提前接纳中心；提交后继续同一差额直到 vx 过零，
                 // 避免候选→机动交接反向折返一帧。
                 const float consistency_squared =
@@ -1925,7 +1936,7 @@ struct Aim::Impl {
                 robust_horizontal_velocity_valid) {
                 // predict_tracks() 已先按旧 vx 推进控制点。三帧中值共同边
                 // 速度给出本帧鲁棒位移，只校正“测量速度－预测速度”的
-                // 差额；单/双帧中心跳变及其恢复脉冲不会直接移动基础点。
+                // 差额；单/双帧中心跳变及其恢复脉冲不会直接移动 reference。
                 stable_motion_residual_x =
                     (robust_horizontal_velocity_x - track.vx) *
                     track.prediction_dt;
@@ -1943,10 +1954,10 @@ struct Aim::Impl {
                     // alpha 合入；不会在第 51 帧形成一步状态切换。
                     const float trend_position_residual_x =
                         horizontal_trend.position_ratio * roi_width -
-                        track.aim_x;
+                        track.horizontal_reference_x;
                     if (horizontal_maneuver_active) {
                         // 新窗第五点首次满足 OLS 有效条件，不能把快通道与
-                        // OLS 端点的相位差一次写入基础点。仅在 5/6/7/8 点
+                        // OLS 端点的相位差一次写入历史 reference。仅在 5/6/7/8 点
                         // 按 1/4、1/2、3/4、1 连续交接；权重只由有效样本
                         // 数决定，不读取人物速度。
                         const float trend_blend = std::clamp(
@@ -1964,7 +1975,7 @@ struct Aim::Impl {
                     }
                     if (!horizontal_maneuver_active &&
                         horizontal_trend_unsupported_blend > 0.0f) {
-                        // predict_tracks() 已把旧 vx 同时写入身份框和基础点，
+                        // predict_tracks() 已把旧 vx 同时写入身份框和 reference，
                         // 所以共同边残差是“当前观测位移－旧预测位移”。这里
                         // 补回同帧 predicted_motion_x，得到预测前坐标系下的新鲜
                         // 观测位移；再与上方等权撤销旧预测，避免重复反拉。
@@ -2031,7 +2042,8 @@ struct Aim::Impl {
         // 身体框短时消失、只剩头框时保留既有身体尺度，只用头部观测平移状态。
         // 否则下一帧身体框恢复会制造一次无意义的尺度突变并破坏多目标关联。
         if (observation.head_only && !track.head_only) {
-            stable_motion_residual_x = observation.aim_x - track.aim_x;
+            stable_motion_residual_x =
+                observation.aim_x - current_horizontal_aim_x(track);
             stable_motion_residual_y = observation.aim_y - track.aim_y;
             track.x1 += stable_motion_residual_x * alpha;
             track.x2 += stable_motion_residual_x * alpha;
@@ -2107,21 +2119,22 @@ struct Aim::Impl {
         if (box_semantics_changed) {
             // 头框和身体框的坐标语义不同，切换时直接采用已归一化的新点，
             // 避免把合法尺度切换长期滞留在旧框内。
-            track.aim_x = observed_aim_x;
+            track.horizontal_reference_x = observed_aim_x;
             track.aim_y = observed_aim_y;
         } else {
             // predict_tracks() 已按速度完成本帧推进。常规段的共同边缘位移
             // 使用与关联框相同的增益；X 宽高共同形变段则使用时间趋势端点。
             // 其余框内形变或缓慢尺度变化使用独立低增益。
-            track.aim_x += stable_motion_residual_x * alpha;
-            track.aim_x += horizontal_prediction_correction_x;
+            track.horizontal_reference_x += stable_motion_residual_x * alpha;
+            track.horizontal_reference_x += horizontal_prediction_correction_x;
             track.aim_y += stable_motion_residual_y * alpha;
             const float shape_alpha = high
                 ? kTrackAimShapeAlphaHigh : kTrackAimShapeAlphaLow;
             const float horizontal_shape_alpha =
                 track.horizontal_center_trend_frames > 0
                 ? 0.0f : shape_alpha;
-            track.aim_x += (observed_aim_x - track.aim_x) *
+            track.horizontal_reference_x +=
+                (observed_aim_x - track.horizontal_reference_x) *
                 horizontal_shape_alpha;
             // 语义高度始终连续回归；姿态占主导时只按同一无量纲共同边
             // 一致性降低形状校正，不再冻结若干帧后阶跃恢复。
@@ -2130,11 +2143,8 @@ struct Aim::Impl {
             track.aim_y += (observed_aim_y - track.aim_y) *
                 vertical_shape_alpha;
         }
-        // 公开基础点始终被限制在用户配置的水平内窗。若内部状态继续越过
-        // 同一边界，当前帧会被公开 clamp 遮住，但这段不可见库存会在以后
-        // 穿回内窗时突然显现。这里做与公开边界完全同构的 X 抗饱和投影：
-        // 不改变当前公开输出，只禁止累积永远不能直接输出的状态；Y、框、
-        // 速度、趋势历史及配置范围均保持不变。
+        // 历史 reference 只服务速度/prediction 库存，仍限制在用户配置内窗，
+        // 防止不可消费状态无限累积；该投影不再决定公开 base X。
         const float horizontal_width = track.x2 - track.x1;
         const float horizontal_half_range =
             config.body_aim_range_percent / 200.0f;
@@ -2142,31 +2152,33 @@ struct Aim::Impl {
             horizontal_width * (0.5f - horizontal_half_range);
         const float horizontal_range_max_x = track.x1 +
             horizontal_width * (0.5f + horizontal_half_range);
-        track.aim_x = std::clamp(
-            track.aim_x,
+        track.horizontal_reference_x = std::clamp(
+            track.horizontal_reference_x,
             horizontal_range_min_x,
             horizontal_range_max_x);
-        track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
+        track.horizontal_reference_x = std::clamp(
+            track.horizontal_reference_x, track.x1, track.x2);
         if (horizontal_trend_active &&
             track.horizontal_observation_initialized &&
             !box_semantics_changed) {
             // body 关联中 head 是否被检出只改变置信度来源；aim_ratio_x/y
             // 始终仍由同一 body 配置定义。短暂 head 缺失不是框语义切换，
             // 不能因此绕过 X 往返约束并暴露 OLS/预测放大量。
-            const float base_motion_x =
-                track.aim_x - previous_base_aim_x;
+            const float reference_motion_x =
+                track.horizontal_reference_x -
+                previous_horizontal_reference_x;
             const float observation_motion_x =
                 observation.aim_x - track.last_observation_aim_x;
-            const float base_magnitude = std::fabs(base_motion_x);
+            const float reference_magnitude = std::fabs(reference_motion_x);
             const float observation_consistency = std::fabs(
                 track.horizontal_control_translation_evidence_x);
             const float observation_magnitude =
                 std::fabs(observation_motion_x) * observation_consistency *
                 observation_consistency;
-            if (base_magnitude > 0.0f) {
+            if (reference_magnitude > 0.0f) {
                 // 水平净位移/总路程继续区分单向平移与往返轮廓；再用同窗
                 // X 路程占 X/Y 有效共同平移路程的比例，区分横移与垂直姿态。
-                // 两者只连续调度本帧 X 基础点变化，不读取速度、频率或场景。
+                // 两者只连续调度本帧历史 reference 变化，不读取速度、频率或场景。
                 // 精确单向横移的方向效率为 1，纯水平往返的路径占比为 1，
                 // 均保留 Observation 支持的普通横向运动；低效率且 Y 主导时
                 // 才降低 X 轮廓摆动，超出 Observation 的趋势放大量仍只由
@@ -2182,25 +2194,26 @@ struct Aim::Impl {
                     (1.0f - persistence_weight) * horizontal_path_share *
                         horizontal_path_share;
                 const float observation_supported_magnitude =
-                    std::min(base_magnitude, observation_magnitude) *
+                    std::min(reference_magnitude, observation_magnitude) *
                     observation_path_weight;
                 const float excess_magnitude = std::max(
-                    0.0f, base_magnitude - observation_magnitude);
+                    0.0f, reference_magnitude - observation_magnitude);
                 const float supported_magnitude =
                     observation_supported_magnitude +
                     excess_magnitude * persistence_weight;
-                track.aim_x = previous_base_aim_x +
-                    std::copysign(supported_magnitude, base_motion_x);
-                track.aim_x = std::clamp(
-                    track.aim_x,
+                track.horizontal_reference_x =
+                    previous_horizontal_reference_x +
+                    std::copysign(supported_magnitude, reference_motion_x);
+                track.horizontal_reference_x = std::clamp(
+                    track.horizontal_reference_x,
                     horizontal_range_min_x,
                     horizontal_range_max_x);
-                track.aim_x = std::clamp(track.aim_x, track.x1, track.x2);
+                track.horizontal_reference_x = std::clamp(
+                    track.horizontal_reference_x, track.x1, track.x2);
             }
         }
-        // 完整目标框是唯一几何安全边界。配置高度通过上面的连续回归定义，
-        // 不再另造 ±5% 内窗；全框投影只防止不可见状态库存，基础点仍严格
-        // 位于检测框内。
+        // Y 配置高度仍通过连续回归定义，并投影到完整目标框；X 当前 base
+        // 已由 Track 归一化锚点直接导出。
         track.aim_y = std::clamp(track.aim_y, track.y1, track.y2);
         if (box_semantics_changed) {
             // 头框和身体框的尺度定义不同，切换时不把几何变化解释为速度。
@@ -2535,7 +2548,7 @@ struct Aim::Impl {
                     frame.source_pixels_per_roi_pixel_y * 0.5f));
         auto score = [&](const Track& track) {
             float value = std::hypot(
-                (track.aim_x - center_x) *
+                (current_horizontal_aim_x(track) - center_x) *
                     frame.source_pixels_per_roi_pixel_x,
                 (track.aim_y - center_y) *
                     frame.source_pixels_per_roi_pixel_y) / diagonal;
@@ -2549,7 +2562,8 @@ struct Aim::Impl {
 
         const auto range_distance = [&](const Track& track) {
             return std::hypot(
-                track.aim_x - center_x, track.aim_y - center_y);
+                current_horizontal_aim_x(track) - center_x,
+                track.aim_y - center_y);
         };
 
         Track* current = nullptr;
@@ -2930,16 +2944,18 @@ struct Aim::Impl {
         const AimFrame& frame,
         const Track& track,
         std::chrono::steady_clock::time_point control_at) noexcept {
-        // 无论趋势或可见性状态如何，基础点都必须遵守用户配置的身体水平
-        // 瞄准范围。估计器负责减少触边，不能靠扩大公开安全范围掩盖误差。
+        // 当前基础 X 只由同帧 Track 框与配置比例导出。历史 OLS reference
+        // 仍可服务速度/prediction，但不得在这里冒充 current feature。
         const float half_range = config.body_aim_range_percent / 200.0f;
         const float range_min_x = track.x1 + (track.x2 - track.x1) *
             (0.5f - half_range);
         const float range_max_x = track.x1 + (track.x2 - track.x1) *
             (0.5f + half_range);
-        // 基础点直接取状态估计点在配置内窗中的位置，不按速度逐帧补偿；
-        // 这样检测抖动不会把瞄点反复推向内窗两侧。预测层仍独立处理提前量。
-        const float base_x = std::clamp(track.aim_x, range_min_x, range_max_x);
+        // 配置范围只作几何安全投影；prediction 层仍独立处理提前量。
+        const float base_x = std::clamp(
+            current_horizontal_aim_x(track),
+            range_min_x,
+            range_max_x);
         const float base_y = std::clamp(track.aim_y, track.y1, track.y2);
         LeadProjection projection;
         projection.base_x = base_x;
@@ -3544,19 +3560,10 @@ struct Aim::Impl {
         const float error_y =
             (base_y - frame.control_center_y) *
             frame.source_pixels_per_roi_pixel_y;
-        // P/PI 继续消费完整基础点误差。普通段保留 Track 当前中心的因果
-        // 误差变化；只有姿态保护正在使用 51 帧 trailing OLS 时，X closing
-        // 改读当前相邻原始框两边的共同平移。长窗可能跨过短周期闭环的
-        // 大半周期，不能代表“当前正在朝零”。共同边一致性只
-        // 连续降权本帧形变，不回写 Track/base、Y、prediction 或 PI 状态。
-        const HorizontalTrendEstimate tracking_center_trend =
-            estimate_horizontal_trend(track, track.state_at);
-        const bool tracking_shape_trend_active =
-            track.horizontal_center_trend_frames > 0 &&
-            tracking_center_trend.valid;
-        const float tracking_center_x = tracking_shape_trend_active
-            ? tracking_center_trend.position_ratio * frame.roi_width
-            : (track.x1 + track.x2) * 0.5f;
+        // 当前控制误差与 closing 导数使用同一帧 Track 锚点。51 点历史
+        // reference 仍可服务速度/prediction，但不能再决定“当前”控制特征
+        // 或是否消费本帧共同平移，否则会把 endpoint 的相位重新带回控制。
+        const float tracking_center_x = current_horizontal_aim_x(track);
         const float track_center_error_x =
             (tracking_center_x - frame.control_center_x) *
             frame.source_pixels_per_roi_pixel_x;
@@ -3568,7 +3575,6 @@ struct Aim::Impl {
             std::fabs(track.horizontal_control_translation_evidence_x),
             0.0f, 1.0f);
         const bool use_current_common_motion_x =
-            tracking_shape_trend_active &&
             current_common_motion_x != 0.0f &&
             current_common_consistency > 0.0f;
         if (tracking_error_derivative_initialized) {
@@ -3588,12 +3594,18 @@ struct Aim::Impl {
             tracking_error_derivative_initialized = true;
         }
         tracking_previous_error_x = track_center_error_x;
-        const float error_magnitude = std::hypot(error_x, error_y);
-        // deadzone 使用径向软阈值：边界处比例输出连续为零，避免 X/Y 各自
-        // 开关形成方形抖动；已学习的维持量仍会平滑泄漏，不会进死区即停发。
-        const float active_error_scale = error_magnitude > 0.0f
+        // Y 保留 fdf6b00 已经实机通过的径向 deadzone 输入。公开/current
+        // base X 的语义变化不得借共享模长改写 Y；内部历史 reference 在此
+        // 只作为冻结的 Y 尺度输入，不回到 X base、选择或 closing 路径。
+        const float vertical_reference_error_x =
+            (track.horizontal_reference_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float vertical_error_magnitude =
+            std::hypot(vertical_reference_error_x, error_y);
+        const float active_error_scale = vertical_error_magnitude > 0.0f
             ? std::max(
-                0.0f, 1.0f - config.deadzone_pixels / error_magnitude)
+                0.0f,
+                1.0f - config.deadzone_pixels / vertical_error_magnitude)
             : 0.0f;
         const float regularized_error_scale =
             active_error_scale * active_error_scale * active_error_scale;
@@ -3790,7 +3802,8 @@ struct Aim::Impl {
         diagnostics.quantization_zero_x =
             command.dx_counts == 0 && std::fabs(desired_x) > 0.001f;
         diagnostics.deadzone_quiet =
-            error_magnitude <= config.deadzone_pixels &&
+            x_error_magnitude <= config.deadzone_pixels &&
+            vertical_error_magnitude <= config.deadzone_pixels &&
             command.dx_counts == 0 && command.dy_counts == 0;
         previous_command_x = static_cast<float>(command.dx_counts);
         previous_command_y = static_cast<float>(command.dy_counts);
