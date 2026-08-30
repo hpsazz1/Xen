@@ -12,8 +12,12 @@
 
 #include <array>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -299,6 +303,40 @@ void test_output_arm_requires_input_health() {
            "运行、急停、配置和重载任一门关闭时都不得武装");
 }
 
+void test_delay_compensation_tooltip_states_new_app_default() {
+    const auto source_path = std::filesystem::path(__FILE__)
+                                 .parent_path()
+                                 .parent_path() /
+                             "Xen/overlay/overlay.cpp";
+    std::ifstream input(source_path, std::ios::binary);
+    const bool source_opened = input.is_open();
+    const std::string source{
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()};
+    constexpr std::string_view kLabel = "\"启用延迟补偿\"";
+    constexpr std::string_view kToggle =
+        "\"##enable_delay_compensation\"";
+    constexpr std::string_view kExpectedDefault =
+        "新生成的 App 配置默认开启。";
+
+    const std::size_t label = source.find(kLabel);
+    const std::size_t toggle = label == std::string::npos
+        ? std::string::npos
+        : source.find(kToggle, label);
+    const std::string_view tooltip =
+        label != std::string::npos && toggle != std::string::npos
+        ? std::string_view(source).substr(label, toggle - label)
+        : std::string_view{};
+    expect(source_opened && label != std::string::npos &&
+               source.find(kLabel, label + kLabel.size()) ==
+                   std::string::npos &&
+               toggle != std::string::npos &&
+               tooltip.find(kExpectedDefault) != std::string_view::npos &&
+               tooltip.find("默认关闭") == std::string_view::npos,
+           "延迟补偿 tooltip 必须说明新生成的 App 配置默认开启，"
+           "且不得继续声称默认关闭");
+}
+
 } // namespace
 
 int main() {
@@ -316,6 +354,7 @@ int main() {
     test_detection_role_mapping();
     test_hotkey_capture_state_machine();
     test_output_arm_requires_input_health();
+    test_delay_compensation_tooltip_states_new_app_default();
     if (failures != 0) {
         std::cerr << "Overlay 测试失败数: " << failures << '\n';
         return 1;

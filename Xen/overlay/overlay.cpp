@@ -3047,7 +3047,7 @@ struct Overlay::Impl {
         if (begin_form("prediction_form", 278.0f)) {
             form_row(
                 "启用延迟补偿",
-                "只把已测的截图到输入完成延迟乘以当前确认轨迹速度，生成基础 tracking 补偿点；不移动原始检测框。可与 prediction 同时开启，顺序为基础瞄点、延迟补偿、prediction。默认关闭。 ");
+                "只把已测的截图到输入完成延迟乘以当前确认轨迹速度，生成基础 tracking 补偿点；不移动原始检测框。可与 prediction 同时开启，顺序为基础瞄点、延迟补偿、prediction。新生成的 App 配置默认开启。 ");
             toggle_switch(
                 "##enable_delay_compensation",
                 &app_config.aim.enable_delay_compensation);

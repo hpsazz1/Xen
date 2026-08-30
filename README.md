@@ -87,6 +87,7 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 | `xen_launcher` | `XenLauncher.exe` | 正式包 Provider 路由入口 |
 | `xen_sender` | `XenSender.exe` | DXGI → XUDP 发送端 |
 | `xen_clock_source` | `XenClockSource.exe` | NDI 源机四时间戳旁路；不接触图像或输入设备 |
+| `xen_capture_evidence` | `XenCaptureEvidence.exe` | 不可武装的 Capture/NDI 像素证据录制入口 |
 | `xen_benchmark` | `XenBenchmark.exe` | 无界面 Runtime 基准 |
 | `xen_mouse_benchmark` | `XenMouseBenchmark.exe` | 鼠标后端性能与协议验证 |
 
@@ -127,9 +128,11 @@ Win32 的 execution boundary 内生为 `local_os_api`；KMBOX/MAKCU 不再从 en
 ```text
 Xen/
 ├── aim/                 # 追踪、选择、控制与评价
+├── aim_landmark/        # 诊断用头部 landmark 关联
 ├── app/                 # 应用、Launcher、模型目录与资源
 ├── benchmark/           # 无界面 Runtime 基准
 ├── capture/             # DXGI、UDP、XUDP、NDI
+├── capture_evidence/    # Capture 像素证据录制与发布
 ├── clock_source/        # NDI 源机时钟旁路进程
 ├── clock_sync/          # 双机四时间戳与 affine 映射
 ├── config/              # INI 聚合、保存与校验
@@ -139,6 +142,7 @@ Xen/
 ├── keyboard/            # 热键与急停事件
 ├── log/                 # 全局日志基础设施
 ├── mouse/               # Win32、KMBOX NET、MAKCU
+├── mouse_benchmark/     # 鼠标后端基准与报告
 ├── overlay/             # Win32/D3D11/ImGui 控制台
 ├── runtime/             # 生命周期、队列与安全门
 └── sender/              # 生产发送端
