@@ -80,6 +80,7 @@ struct AxisMotionEvidence {
     float last_position_ratio = 0.0f;
     float consistent_elapsed_seconds = 0.0f;
     float consistent_displacement_ratio = 0.0f;
+    float zero_gap_elapsed_seconds = 0.0f;
     float direction = 0.0f;
     bool initialized = false;
 };
@@ -335,10 +336,11 @@ constexpr float kPredictionOffsetMaximumSlewDiagonalsPerSecond = 1.5f;
 // prediction 退出后反拉保持只用于跨越短暂的相机反馈低谷；Y 轴单次保持
 // 持续超过 300 ms 时必须释放，才能让基础点把准星带回配置高度。
 constexpr float kPredictionPullbackHoldTimeoutSeconds = 0.30f;
-// 实机人物姿态会造成 3～10 帧的同向低运动窗口；五帧确认仍会把窗口
-// 中间误判成停止并清零 prediction。延长到 12 帧只改变停止确认，真实
-// 停止尾窗仍受快速释放增益限制，基础前馈状态不受影响。
+// 历史 release 合同按名义 240 Hz 连续 12 个采样确认停止，对应 50 ms；
+// 这是旧合同的时间表达，不是实测帧间隔分布。旧 frames read 保留给后续
+// release/F2 迁移；candidate 原始几何证据的空洞不得比已建立状态更长。
 constexpr int kPredictionStaticReleaseConfirmFrames = 12;
+constexpr float kPredictionStaticReleaseConfirmSeconds = 12.0f / 240.0f;
 // 世界运动只在独立慢速状态形成至少四分之一 count 的稳定维持量后
 // 才可用于 prediction；更小残余属于静止收敛和量化噪声，禁止强行前探。
 constexpr float kPredictionWorldMotionMinimumCounts = 0.25f;
@@ -589,6 +591,7 @@ void update_axis_motion_evidence(
         evidence.last_position_ratio = position_ratio;
         evidence.consistent_elapsed_seconds = 0.0f;
         evidence.consistent_displacement_ratio = 0.0f;
+        evidence.zero_gap_elapsed_seconds = 0.0f;
         evidence.direction = 0.0f;
         evidence.initialized = true;
         return;
@@ -599,8 +602,11 @@ void update_axis_motion_evidence(
     const float displacement_epsilon =
         std::numeric_limits<float>::epsilon();
     // 坐标量化会在真实单调运动中产生重复样本。零位移只暂停本样本，
-    // 并在下方推进时间/位置锚；失序时间与真实反向仍由各自分支重置。
+    // 并在下方推进时间/位置锚；但空洞达到已建立 prediction 的历史
+    // release 时域后，旧方向已不再是当前因果证据。失序时间与真实反向
+    // 仍由各自分支重置。
     if (std::fabs(displacement) > displacement_epsilon) {
+        evidence.zero_gap_elapsed_seconds = 0.0f;
         const float direction = std::copysign(1.0f, displacement);
         if (direction != evidence.direction) {
             evidence.consistent_elapsed_seconds = elapsed_seconds;
@@ -609,6 +615,16 @@ void update_axis_motion_evidence(
         } else {
             evidence.consistent_elapsed_seconds += elapsed_seconds;
             evidence.consistent_displacement_ratio += displacement;
+        }
+    } else {
+        evidence.zero_gap_elapsed_seconds = std::min(
+            evidence.zero_gap_elapsed_seconds + elapsed_seconds,
+            kPredictionStaticReleaseConfirmSeconds);
+        if (evidence.zero_gap_elapsed_seconds >=
+            kPredictionStaticReleaseConfirmSeconds) {
+            evidence.consistent_elapsed_seconds = 0.0f;
+            evidence.consistent_displacement_ratio = 0.0f;
+            evidence.direction = 0.0f;
         }
     }
     evidence.last_at = captured_at;

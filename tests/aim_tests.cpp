@@ -7228,20 +7228,42 @@ void test_prediction_state_is_invariant_to_roi_representation_scale() {
     check_axis(true);
 }
 
+constexpr float kPredictionMotionEvidenceDeadzonePixels = 1.5f;
+
 void test_prediction_motion_evidence_pauses_on_repeated_coordinates() {
-    constexpr int kFrameCount = 480;
-    constexpr int kFrameIntervalMicroseconds = 8000;
-    constexpr float kMotionPixelsPerSecond = 0.90f;
-    enum class Sampling { SMOOTH, REPEATED, STATIONARY };
+    constexpr std::array<int, 3> kCadencesHertz{60, 120, 240};
+    constexpr long long kReplayDurationMicroseconds = 2000000;
+    constexpr float kMotionPixelsPerSecond = 1.50f;
+    constexpr float kQuantizationStepPixels = 0.06f;
+    constexpr float kQuantizationPlateauSeconds =
+        kQuantizationStepPixels / kMotionPixelsPerSecond;
+    constexpr float kSlowestSampleSeconds = 1.0f / 60.0f;
+    constexpr float kNominalReleaseContractSeconds = 12.0f / 240.0f;
+    constexpr float kActivationElapsedBudgetSeconds =
+        kQuantizationPlateauSeconds + kSlowestSampleSeconds;
+    constexpr long long kStaleHoldMicroseconds = 80000;
+    constexpr float kPreHoldTargetPixels =
+        kPredictionMotionEvidenceDeadzonePixels - 0.01f;
+    constexpr float kResumeDisplacementPixels = 0.04f;
+    static_assert(
+        kQuantizationPlateauSeconds < kNominalReleaseContractSeconds);
+    static_assert(
+        kResumeDisplacementPixels >
+        (kPredictionMotionEvidenceDeadzonePixels -
+         kPreHoldTargetPixels) +
+            kMotionPixelsPerSecond * kSlowestSampleSeconds);
+    enum class Sampling { SMOOTH, QUANTIZED, STATIONARY };
     struct Trace {
-        int first_active_index = -1;
+        long long first_active_microseconds = -1;
         int active_frames = 0;
         std::uint64_t track_id = 0;
+        bool stable_track_id = true;
     };
-    const auto run_case = [&](Sampling sampling) {
+    const auto make_config = [] {
         AimConfig config;
         config.min_confirmed_hits = 1;
-        config.deadzone_pixels = 1.5f;
+        config.deadzone_pixels =
+            kPredictionMotionEvidenceDeadzonePixels;
         config.smoothing = 0.475f;
         config.counts_per_pixel_x = 0.40f;
         config.counts_per_pixel_y = 0.40f;
@@ -7250,25 +7272,36 @@ void test_prediction_motion_evidence_pauses_on_repeated_coordinates() {
         config.body_aim_height_ratio = 0.50f;
         config.enable_delay_compensation = false;
         config.enable_prediction = true;
-        Aim aim(config);
+        return config;
+    };
+    const auto run_case = [&](int cadence_hertz, Sampling sampling) {
+        Aim aim(make_config());
         const auto base = std::chrono::steady_clock::now() +
             std::chrono::seconds(1);
+        const long long frame_interval_microseconds =
+            (1000000LL + cadence_hertz / 2) / cadence_hertz;
         Trace trace;
-        for (int index = 0; index < kFrameCount; ++index) {
-            const int geometry_sample = sampling == Sampling::REPEATED
-                ? (index / 2) * 2 : index;
+        for (long long elapsed_microseconds = 0;
+             elapsed_microseconds <= kReplayDurationMicroseconds;
+             elapsed_microseconds += frame_interval_microseconds) {
             const float elapsed_seconds =
-                sampling == Sampling::STATIONARY ? 0.0f :
-                static_cast<float>(geometry_sample *
-                                   kFrameIntervalMicroseconds) /
-                    1000000.0f;
-            const float source_x =
-                176.0f + kMotionPixelsPerSecond * elapsed_seconds;
+                static_cast<float>(elapsed_microseconds) / 1000000.0f;
+            const float continuous_displacement =
+                kMotionPixelsPerSecond * elapsed_seconds;
+            const float source_displacement = sampling == Sampling::STATIONARY
+                ? 0.0f
+                : sampling == Sampling::QUANTIZED
+                    ? std::floor(
+                          continuous_displacement /
+                          kQuantizationStepPixels) *
+                          kQuantizationStepPixels
+                    : continuous_displacement;
+            const float source_x = 176.0f + source_displacement;
             AimFrame frame = make_frame(
-                static_cast<std::uint64_t>(index + 1),
+                static_cast<std::uint64_t>(
+                    elapsed_microseconds / frame_interval_microseconds + 1),
                 base + std::chrono::microseconds(
-                    static_cast<long long>(index) *
-                    kFrameIntervalMicroseconds));
+                    elapsed_microseconds));
             frame.control_at = frame.captured_at +
                 std::chrono::milliseconds(4);
             frame.control_center_x = 160.0f;
@@ -7278,34 +7311,136 @@ void test_prediction_motion_evidence_pauses_on_repeated_coordinates() {
                 body_box(source_x, 160.0f, 40.0f, 80.0f)};
             const AimResult result = aim.process(frame);
             expect(result.status == AimStatus::SUCCESS && result.has_target,
-                   "重复坐标 S2c 回放必须逐帧命中 Aim::process");
+                   "量化坐标 S2e 回放必须逐帧命中 Aim::process");
             if (!result.has_target) continue;
-            if (trace.track_id == 0) trace.track_id = result.target.track_id;
-            expect(result.target.track_id == trace.track_id,
-                   "重复坐标重采样不得切换 Track identity");
+            if (trace.track_id == 0) {
+                trace.track_id = result.target.track_id;
+            } else {
+                trace.stable_track_id = trace.stable_track_id &&
+                    result.target.track_id == trace.track_id;
+            }
             if (result.target.lead_active) {
                 ++trace.active_frames;
-                if (trace.first_active_index < 0) {
-                    trace.first_active_index = index;
+                if (trace.first_active_microseconds < 0) {
+                    trace.first_active_microseconds = elapsed_microseconds;
                 }
             }
         }
         return trace;
     };
+    struct StaleTrace {
+        std::uint64_t track_id = 0;
+        bool stable_track_id = true;
+        int active_before_resume = 0;
+        bool active_at_resume = false;
+        float pre_hold_displacement_pixels = 0.0f;
+        long long hold_microseconds = 0;
+    };
+    const auto run_stale_case = [&](int cadence_hertz) {
+        Aim aim(make_config());
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        const long long frame_interval_microseconds =
+            (1000000LL + cadence_hertz / 2) / cadence_hertz;
+        StaleTrace trace;
+        std::uint64_t sequence = 1;
+        const auto process = [&](long long elapsed_microseconds,
+                                 float source_displacement) {
+            AimFrame frame = make_frame(
+                sequence++, base +
+                    std::chrono::microseconds(elapsed_microseconds));
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(4);
+            frame.control_center_x = 160.0f;
+            frame.control_center_y = 160.0f;
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                176.0f + source_displacement,
+                160.0f, 40.0f, 80.0f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "陈旧 gap S2e 回放必须逐帧命中 Aim::process");
+            if (!result.has_target) return false;
+            if (trace.track_id == 0) {
+                trace.track_id = result.target.track_id;
+            } else {
+                trace.stable_track_id = trace.stable_track_id &&
+                    result.target.track_id == trace.track_id;
+            }
+            return result.target.lead_active;
+        };
 
-    const Trace smooth = run_case(Sampling::SMOOTH);
-    const Trace repeated = run_case(Sampling::REPEATED);
-    expect(smooth.first_active_index >= 0 &&
-               repeated.first_active_index >= 0 &&
-               std::abs(smooth.first_active_index -
-                        repeated.first_active_index) <= 1,
-           "同一单调几何的 smooth 与重复坐标重采样必须在一个 sample 内同态建立，首次=" +
-               std::to_string(smooth.first_active_index) + "/" +
-               std::to_string(repeated.first_active_index));
-    const Trace stationary = run_case(Sampling::STATIONARY);
-    expect(stationary.first_active_index < 0 &&
-               stationary.active_frames == 0,
-           "重复坐标暂停语义不得把真正静止轨迹升级为 prediction");
+        long long elapsed_microseconds = 0;
+        while (true) {
+            const float displacement = kMotionPixelsPerSecond *
+                static_cast<float>(elapsed_microseconds) / 1000000.0f;
+            if (displacement > kPreHoldTargetPixels) break;
+            trace.pre_hold_displacement_pixels = displacement;
+            trace.active_before_resume +=
+                process(elapsed_microseconds, displacement) ? 1 : 0;
+            elapsed_microseconds += frame_interval_microseconds;
+        }
+        const int hold_samples = static_cast<int>(
+            (kStaleHoldMicroseconds + frame_interval_microseconds - 1) /
+            frame_interval_microseconds);
+        for (int index = 0; index < hold_samples; ++index) {
+            trace.active_before_resume += process(
+                elapsed_microseconds,
+                trace.pre_hold_displacement_pixels) ? 1 : 0;
+            elapsed_microseconds += frame_interval_microseconds;
+        }
+        trace.hold_microseconds =
+            static_cast<long long>(hold_samples) *
+            frame_interval_microseconds;
+        trace.active_at_resume = process(
+            elapsed_microseconds,
+            trace.pre_hold_displacement_pixels +
+                kResumeDisplacementPixels);
+        return trace;
+    };
+
+    const long long activation_elapsed_budget_microseconds =
+        static_cast<long long>(
+            kActivationElapsedBudgetSeconds * 1000000.0f + 0.5f);
+    for (const int cadence_hertz : kCadencesHertz) {
+        const Trace smooth = run_case(cadence_hertz, Sampling::SMOOTH);
+        const Trace quantized = run_case(
+            cadence_hertz, Sampling::QUANTIZED);
+        expect(smooth.track_id != 0 && quantized.track_id != 0 &&
+                   smooth.stable_track_id && quantized.stable_track_id &&
+                   smooth.first_active_microseconds >= 0 &&
+                   quantized.first_active_microseconds >= 0 &&
+                   std::llabs(smooth.first_active_microseconds -
+                              quantized.first_active_microseconds) <=
+                       activation_elapsed_budget_microseconds,
+               std::to_string(cadence_hertz) +
+                   "Hz 同一 position=v*t 的 smooth/固定FOV量化轨迹必须在 Q/v+一个最慢sample 内建立，首次us=" +
+                   std::to_string(smooth.first_active_microseconds) + "/" +
+                   std::to_string(quantized.first_active_microseconds));
+        const Trace stationary = run_case(
+            cadence_hertz, Sampling::STATIONARY);
+        expect(stationary.track_id != 0 && stationary.stable_track_id &&
+                   stationary.first_active_microseconds < 0 &&
+                   stationary.active_frames == 0,
+               std::to_string(cadence_hertz) +
+                   "Hz fresh stationary 不得建立 prediction");
+
+        const StaleTrace stale = run_stale_case(cadence_hertz);
+        expect(stale.track_id != 0 && stale.stable_track_id &&
+                   stale.pre_hold_displacement_pixels <
+                       kPredictionMotionEvidenceDeadzonePixels &&
+                   stale.pre_hold_displacement_pixels +
+                           kResumeDisplacementPixels >
+                       kPredictionMotionEvidenceDeadzonePixels,
+               std::to_string(cadence_hertz) +
+                   "Hz stale-negative 夹具必须在 deadzone 两侧构造微步");
+        expect(stale.hold_microseconds >= kStaleHoldMicroseconds &&
+                   stale.active_before_resume == 0 &&
+                   !stale.active_at_resume,
+               std::to_string(cadence_hertz) +
+                   "Hz 80ms 真零后微步不得继承陈旧 evidence 直接建立 prediction，hold us=" +
+                   std::to_string(stale.hold_microseconds));
+    }
 }
 
 void test_prediction_motion_evidence_rewarms_after_track_discontinuity() {
@@ -7539,10 +7674,12 @@ void test_vertical_prediction_reversal_rewarms_vertical_evidence() {
         static_cast<float>(kSettleFrames + kProbeFrames) *
         kReversePixelsPerSecond *
         (static_cast<float>(kFrameIntervalMicroseconds) / 1000000.0f);
-    static_assert(kReverseDisplacementPixels > 1.5f);
+    static_assert(
+        kReverseDisplacementPixels >
+        kPredictionMotionEvidenceDeadzonePixels);
     AimConfig config;
     config.min_confirmed_hits = 1;
-    config.deadzone_pixels = 1.5f;
+    config.deadzone_pixels = kPredictionMotionEvidenceDeadzonePixels;
     config.smoothing = 0.475f;
     config.counts_per_pixel_x = 0.40f;
     config.counts_per_pixel_y = 0.40f;
