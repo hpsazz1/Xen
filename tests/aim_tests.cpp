@@ -7232,13 +7232,16 @@ void test_prediction_motion_evidence_rewarms_after_track_discontinuity() {
     constexpr int kFrameIntervalMicroseconds = 8000;
     constexpr int kBuildFrames = 220;
     constexpr int kSettleFrames = 8;
-    constexpr int kProbeFrames = 50;
+    constexpr int kProbeFrames = 140;
+    constexpr int kEarlyProbeFrames = 50;
+    constexpr int kLateProbeFrames = 20;
     enum class Discontinuity { LOSS, BODY_HEAD_BODY };
     struct Trace {
         bool built = false;
         std::uint64_t track_id_before = 0;
         std::uint64_t track_id_after = 0;
         int early_reactivation_frames = 0;
+        int late_reactivation_frames = 0;
     };
     const auto run_case = [&](Discontinuity discontinuity) {
         AimConfig config;
@@ -7315,8 +7318,14 @@ void test_prediction_motion_evidence_rewarms_after_track_discontinuity() {
                    "S 生命周期恢复段必须命中 Aim::process");
             if (!result.has_target) continue;
             trace.track_id_after = result.target.track_id;
-            if (index >= kSettleFrames && result.target.lead_active) {
+            if (index >= kSettleFrames &&
+                index < kSettleFrames + kEarlyProbeFrames &&
+                result.target.lead_active) {
                 ++trace.early_reactivation_frames;
+            }
+            if (index >= kSettleFrames + kProbeFrames - kLateProbeFrames &&
+                result.target.lead_active) {
+                ++trace.late_reactivation_frames;
             }
         }
         return trace;
@@ -7334,7 +7343,108 @@ void test_prediction_motion_evidence_rewarms_after_track_discontinuity() {
         expect(trace.early_reactivation_frames == 0,
                name + " 后不得继承旧 motion evidence 提前重入，实际=" +
                    std::to_string(trace.early_reactivation_frames));
+        expect(trace.late_reactivation_frames > 0,
+               name + " reset 后达到同一真实位移证据必须最终恢复 prediction，实际=" +
+                   std::to_string(trace.late_reactivation_frames));
     }
+}
+
+void test_horizontal_partial_visibility_preserves_vertical_motion_evidence() {
+    constexpr int kFrameIntervalMicroseconds = 8000;
+    constexpr int kFrameCount = 280;
+    constexpr int kPartialBegin = 220;
+    constexpr int kPartialEnd = 223;
+    struct Sample {
+        bool lead_active = false;
+        float lead_y = 0.0f;
+        int command_y = 0;
+    };
+    struct Trace {
+        bool built = false;
+        std::uint64_t track_id = 0;
+        std::vector<Sample> samples;
+    };
+    const auto run_case = [&](bool partial_enabled) {
+        AimConfig config;
+        config.min_confirmed_hits = 1;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.40f;
+        config.counts_per_pixel_y = 0.40f;
+        config.max_counts_per_frame = 12.0f;
+        config.acquisition_range_percent = 100.0f;
+        config.body_aim_height_ratio = 0.50f;
+        config.enable_delay_compensation = false;
+        config.enable_prediction = true;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        Trace trace;
+        trace.samples.reserve(kFrameCount);
+        float source_y = 128.0f;
+        const float frame_seconds =
+            static_cast<float>(kFrameIntervalMicroseconds) / 1000000.0f;
+        for (int index = 0; index < kFrameCount; ++index) {
+            source_y += 4.0f * frame_seconds;
+            const bool partial = partial_enabled &&
+                index >= kPartialBegin && index < kPartialEnd;
+            const float width = partial ? 20.0f : 40.0f;
+            const float center_x = partial ? 170.0f : 180.0f;
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(
+                    static_cast<long long>(index) *
+                    kFrameIntervalMicroseconds));
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(4);
+            frame.control_center_x = 180.0f;
+            frame.control_center_y = source_y - 20.0f;
+            frame.lock_active = true;
+            frame.detections = {
+                body_box(center_x, source_y, width, 80.0f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "X-only partial/Y evidence 回放必须逐帧命中 Aim::process");
+            if (!result.has_target) continue;
+            if (trace.track_id == 0) trace.track_id = result.target.track_id;
+            expect(result.target.track_id == trace.track_id,
+                   "X-only partial 不得切换 Y-dominant Track identity");
+            if (index < kPartialBegin) {
+                trace.built = trace.built ||
+                    std::fabs(result.target.lead_y) > 0.001f;
+            }
+            trace.samples.push_back({
+                result.target.lead_active,
+                result.target.lead_y,
+                result.command.dy_counts});
+        }
+        return trace;
+    };
+    const Trace reference = run_case(false);
+    const Trace partial = run_case(true);
+    int state_mismatches = 0;
+    int command_mismatches = 0;
+    float maximum_lead_y_delta = 0.0f;
+    for (int index = kPartialBegin;
+         index < std::min(
+             kFrameCount, kPartialEnd + 24); ++index) {
+        const Sample& expected = reference.samples[static_cast<std::size_t>(index)];
+        const Sample& actual = partial.samples[static_cast<std::size_t>(index)];
+        state_mismatches += expected.lead_active != actual.lead_active ? 1 : 0;
+        command_mismatches += expected.command_y != actual.command_y ? 1 : 0;
+        maximum_lead_y_delta = std::max(
+            maximum_lead_y_delta,
+            std::fabs(expected.lead_y - actual.lead_y));
+    }
+    expect(reference.built && partial.built &&
+               reference.track_id == partial.track_id,
+           "X-only partial 夹具必须先建立同一 Y-dominant prediction");
+    expect(state_mismatches == 0 && command_mismatches == 0 &&
+               maximum_lead_y_delta <= 0.01f,
+           "X-only partial 不得清除独立 Y motion evidence，状态/命令/lead差=" +
+               std::to_string(state_mismatches) + "/" +
+               std::to_string(command_mismatches) + "/" +
+               std::to_string(maximum_lead_y_delta));
 }
 
 void test_vertical_prediction_reversal_rewarms_vertical_evidence() {
@@ -10840,6 +10950,7 @@ int main() {
     test_delay_shaping_has_no_speed_threshold_before_prediction();
     test_prediction_state_is_invariant_to_roi_representation_scale();
     test_prediction_motion_evidence_rewarms_after_track_discontinuity();
+    test_horizontal_partial_visibility_preserves_vertical_motion_evidence();
     test_vertical_prediction_reversal_rewarms_vertical_evidence();
     test_prediction_dominant_axis_is_invariant_to_anisotropic_roi_scale();
     test_prediction_direct_feedforward_has_no_absolute_velocity_mode();

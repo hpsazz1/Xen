@@ -568,12 +568,16 @@ HorizontalTrendEstimate estimate_horizontal_trend(
             static_cast<float>(velocity)};
 }
 
-void reset_horizontal_direction_history(Track& track) noexcept {
+void reset_horizontal_geometry_history(Track& track) noexcept {
     track.horizontal_direction.next = 0;
     track.horizontal_direction.count = 0;
     track.horizontal_direction.travelled_distance_x = 0.0;
     track.horizontal_direction.travelled_distance_y = 0.0;
     track.horizontal_direction.motion_x = {};
+}
+
+void reset_horizontal_direction_history(Track& track) noexcept {
+    reset_horizontal_geometry_history(track);
     track.horizontal_direction.motion_y = {};
 }
 
@@ -1551,7 +1555,7 @@ struct Aim::Impl {
                             : kTrackHorizontalVelocityIsolationFrames;
                     if (confirmed_now) {
                         commit_horizontal_trend_change_point(track);
-                        reset_horizontal_direction_history(track);
+                        reset_horizontal_geometry_history(track);
                         // 第三帧只确认新的可见框语义；已有平移速度保持连续，
                         // 候选中心不能再通过清零制造延迟投影阶跃。
                         track.horizontal_trend_rebuilding_from_partial = true;
@@ -1606,7 +1610,7 @@ struct Aim::Impl {
                 // 同一 OLS。以首个完整框重新播种；满五点前既不消费原始
                 // 中心残差，也不把扩边误当成人物速度。
                 reset_horizontal_trend(track);
-                reset_horizontal_direction_history(track);
+                reset_horizontal_geometry_history(track);
                 track.partial_visibility_x_recovery_pending = false;
                 track.accepted_partial_visibility_x_width = 0.0f;
                 track.accepted_partial_visibility_x_side = 0.0f;
