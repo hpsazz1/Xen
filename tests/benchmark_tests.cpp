@@ -487,15 +487,16 @@ bool fake_provider_setup(
                 return false;
             }
         }
-        state.locked_cleanup_path.reset(CreateFileW(
+        const HANDLE locked_handle = CreateFileW(
             cleanup_path.c_str(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (!state.locked_cleanup_path) {
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (locked_handle == INVALID_HANDLE_VALUE) {
             error = "注入 setup 无法锁定待清理文件，Win32Error=" +
                 std::to_string(GetLastError());
             return false;
         }
+        state.locked_cleanup_path.reset(locked_handle);
     }
     {
         std::unique_lock lock(state.mutex);
@@ -831,7 +832,7 @@ void test_failed_setup_surfaces_cleanup_error_and_continues() {
     expect(!succeeded && state.setup_calls == 1 &&
                state.runtime_factory_calls == 0 &&
                state.runtime_start_calls == 0 &&
-               state.locked_cleanup_path &&
+               state.locked_cleanup_path.get() != INVALID_HANDLE_VALUE &&
                error.starts_with(expected_error_prefix) &&
                std::filesystem::is_regular_file(
                    std::filesystem::u8path(locked_csv_path)) &&
