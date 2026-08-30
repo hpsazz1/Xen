@@ -12,6 +12,8 @@
     [string]$BuildDirectory = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
+    [ValidateSet("Auto", "ConfiguredExternalDevicePeer", "LoopbackUdpFake")]
+    [string]$PeerTestBoundary = "Auto",
     [ValidateRange(0, 100000)]
     [int]$WarmupPairs = 100,
     [ValidateRange(1, 500000)]
@@ -79,12 +81,31 @@ if (-not $AllowPhysicalOutput.IsPresent -or
 if ($DxCounts -eq 0 -and $DyCounts -eq 0) {
     throw "DxCounts 与 DyCounts 不能同时为零。"
 }
+if ($PeerTestBoundary -eq "LoopbackUdpFake" -and
+    $Backend -ne "KmboxNet") {
+    throw "LoopbackUdpFake boundary 只适用于 KmboxNet 专项。"
+}
+if (($Backend -eq "KmboxNet" -or $Backend -eq "Makcu") -and
+    $PeerTestBoundary -eq "Auto") {
+    throw "$Backend 必须显式声明 ConfiguredExternalDevicePeer；" +
+        "127/8 KMBOX fake 必须显式声明 LoopbackUdpFake。"
+}
 if ($Backend -eq "KmboxNet") {
     if ($KmboxIp -notmatch `
             '^(25[0-5]|2[0-4][0-9]|[01]?[0-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9]?[0-9])){3}$' -or
         $KmboxPort -le 0 -or
         $KmboxUuid -notmatch '^[0-9A-Fa-f]{8}$') {
         throw "KmboxNet 必须提供有效 IPv4、端口和 8 位十六进制 UUID。"
+    }
+    $isLoopbackEndpoint = $KmboxIp -match '^127\.'
+    if ($PeerTestBoundary -eq "LoopbackUdpFake" -and
+        -not $isLoopbackEndpoint) {
+        throw "LoopbackUdpFake boundary 只允许 127/8 endpoint。"
+    }
+    if ($PeerTestBoundary -eq "ConfiguredExternalDevicePeer" -and
+        $isLoopbackEndpoint) {
+        throw "127/8 endpoint 不能声明 ConfiguredExternalDevicePeer；" +
+            "必须显式声明 LoopbackUdpFake boundary。"
     }
     if (-not [string]::IsNullOrEmpty($MakcuPort) -or
         $PSBoundParameters.ContainsKey("MakcuBaudRate")) {
@@ -99,6 +120,8 @@ if ($Backend -eq "KmboxNet") {
         -not [string]::IsNullOrEmpty($KmboxUuid)) {
         throw "Makcu 基准不得携带 KMBOX 设备参数。"
     }
+} elseif ($PeerTestBoundary -ne "Auto") {
+    throw "Win32 execution boundary 内生为 local_os_api，不接受设备 peer 声明。"
 } elseif (-not [string]::IsNullOrEmpty($KmboxIp) -or
           $KmboxPort -ne 0 -or
           -not [string]::IsNullOrEmpty($KmboxUuid) -or
@@ -127,7 +150,8 @@ $reportDirectory = Split-Path -Parent $ReportPrefix
 New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
 $finalReport = "$ReportPrefix.mouse.json"
 $finalEnvironment = "$ReportPrefix.mouse.environment.json"
-$pendingId = [guid]::NewGuid().ToString("N")
+$runUuid = [guid]::NewGuid().ToString("D")
+$pendingId = $runUuid.Replace("-", "")
 $pendingReport = "$finalReport.pending-$pendingId"
 $pendingEnvironment = "$finalEnvironment.pending-$pendingId"
 foreach ($path in @($finalReport, $finalEnvironment,
@@ -145,9 +169,33 @@ $backendArgument = switch ($Backend) {
     "KmboxNet" { "kmbox_net" }
     "Makcu" { "makcu" }
 }
+$backendReportName = switch ($Backend) {
+    "Win32" { "win32_send_input" }
+    "KmboxNet" { "kmbox_net" }
+    "Makcu" { "makcu" }
+}
+$expectedCompletionSemantic = switch ($Backend) {
+    "Win32" { "windows_input_stream_insertion" }
+    "KmboxNet" { "kmbox_matched_udp_protocol_ack" }
+    "Makcu" { "makcu_matched_serial_device_status_ack" }
+}
+$expectedPeerTestBoundary = if (
+        $PeerTestBoundary -eq "LoopbackUdpFake") {
+    "loopback_udp_fake"
+} elseif ($Backend -eq "Win32") {
+    "local_os_api"
+} else {
+    "configured_external_device_peer"
+}
+$expectedProtocolAckObserved = $Backend -ne "Win32"
+$expectedAggregationKey =
+    "$backendReportName|$expectedCompletionSemantic|" +
+    "$expectedPeerTestBoundary|none"
 $arguments = @(
     "--backend", $backendArgument,
     "--report", $pendingReport,
+    "--run-uuid", $runUuid,
+    "--peer-test-boundary", $expectedPeerTestBoundary,
     "--warmup-pairs", [string]$WarmupPairs,
     "--sample-pairs", [string]$SamplePairs,
     "--dx-counts", [string]$DxCounts,
@@ -221,11 +269,7 @@ try {
     $expectedFormalCommands = [uint64]$SamplePairs * 2L
     $expectedTotalCommands = `
         ([uint64]$WarmupPairs + [uint64]$SamplePairs + 1L) * 2L
-    $expectedBackend = switch ($Backend) {
-        "Win32" { "win32_send_input" }
-        "KmboxNet" { "kmbox_net" }
-        "Makcu" { "makcu" }
-    }
+    $expectedBackend = $backendReportName
     $expectedEndpoint = switch ($Backend) {
         "Win32" { "" }
         "KmboxNet" { "${KmboxIp}:$KmboxPort" }
@@ -236,7 +280,36 @@ try {
     } else {
         0
     }
-    if ($report.schema -ne 1 -or -not $report.complete -or
+    $parsedRunUuid = [guid]::Empty
+    $provenance = $report.provenance
+    $requiredProvenanceFields = @(
+        "completion_semantic", "peer_test_boundary",
+        "protocol_ack_observed", "physical_effect_observation_method",
+        "physical_effect_observed", "aggregation_key")
+    if ($null -eq $provenance) {
+        throw "鼠标基准报告缺少 completion/peer/effect provenance。"
+    }
+    foreach ($field in $requiredProvenanceFields) {
+        if ($null -eq $provenance.PSObject.Properties[$field]) {
+            throw "鼠标基准报告 provenance 缺少字段：$field"
+        }
+    }
+    if ($report.schema -ne 2 -or
+        -not [guid]::TryParseExact([string]$report.run_uuid, "D",
+                                   [ref]$parsedRunUuid) -or
+        [string]$report.run_uuid -ne $runUuid -or
+        [string]$provenance.completion_semantic -ne
+            $expectedCompletionSemantic -or
+        [string]$provenance.peer_test_boundary -ne
+            $expectedPeerTestBoundary -or
+        [bool]$provenance.protocol_ack_observed -ne
+            $expectedProtocolAckObserved -or
+        [string]$provenance.physical_effect_observation_method -ne "none" -or
+        [bool]$provenance.physical_effect_observed -ne $false -or
+        [string]$provenance.aggregation_key -ne $expectedAggregationKey) {
+        throw "鼠标基准 run UUID 或 completion/peer/effect 聚合键不匹配，拒绝跨语义合并。"
+    }
+    if (-not $report.complete -or
         $report.backend -ne $expectedBackend -or
         $report.endpoint -ne $expectedEndpoint -or
         -not $report.authorization.physical_output -or
@@ -263,7 +336,7 @@ try {
     foreach ($sample in @($report.samples)) {
         $sequence = [uint64]$sample.sequence
         $expectedDirection = if (($sequence % 2L) -eq 1L) { 1 } else { -1 }
-        $expectedPair = [uint64](($sequence + 1L) / 2L)
+        $expectedPair = [uint64](($sequence + 1L) -shr 1)
         if ($sequence -ne $expectedSequence -or
             [uint64]$sample.pair_index -ne $expectedPair -or
             [int]$sample.direction -ne $expectedDirection -or
@@ -293,7 +366,8 @@ try {
     $operatingSystem = Get-CimInstance Win32_OperatingSystem |
         Select-Object Caption, Version, BuildNumber, OSArchitecture
     $environment = [ordered]@{
-        schema = 1
+        schema = 2
+        run_uuid = $runUuid
         complete = $true
         started_utc = $startedUtc.ToString("o")
         finished_utc = $finishedUtc.ToString("o")
@@ -332,6 +406,19 @@ try {
             successful_commands = $expectedTotalCommands
             formal_successful_commands = $expectedFormalCommands
             failed_commands = 0
+            provenance = [ordered]@{
+                completion_semantic =
+                    [string]$provenance.completion_semantic
+                peer_test_boundary =
+                    [string]$provenance.peer_test_boundary
+                protocol_ack_observed =
+                    [bool]$provenance.protocol_ack_observed
+                physical_effect_observation_method =
+                    [string]$provenance.physical_effect_observation_method
+                physical_effect_observed =
+                    [bool]$provenance.physical_effect_observed
+                aggregation_key = [string]$provenance.aggregation_key
+            }
             timing = $report.timing
         }
         report = Get-FileEvidence $pendingReport
@@ -348,6 +435,7 @@ try {
     $published.Add($finalEnvironment)
     Write-Host "鼠标正式基准通过："
     Write-Host "  backend=$expectedBackend, commands=$expectedTotalCommands, formal=$expectedFormalCommands, failed=0"
+    Write-Host "  semantic=$expectedCompletionSemantic, boundary=$expectedPeerTestBoundary, physical_effect_observed=false"
     Write-Host "  mean=$($timing.mean_ms) ms, P95=$($timing.p95_ms) ms, P99=$($timing.p99_ms) ms"
     Write-Host "  报告：$finalReport"
     Write-Host "  环境清单：$finalEnvironment"

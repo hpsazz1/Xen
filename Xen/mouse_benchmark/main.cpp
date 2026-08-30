@@ -67,6 +67,16 @@ int wmain(int argc, wchar_t* argv[]) {
               << result.successful_commands
               << ", formal_commands="
               << result.formal_successful_commands
+              << ", semantic="
+              << mouse_benchmark_completion_semantic_name(
+                     result.completion_semantic)
+              << ", boundary="
+              << mouse_benchmark_peer_test_boundary_name(
+                     options.peer_test_boundary)
+              << ", protocol_ack_observed="
+              << (result.protocol_ack_observed ? "true" : "false")
+              << ", physical_effect_observed="
+              << (result.physical_effect_observed ? "true" : "false")
               << ", mean=" << result.command_latency.mean_ms
               << "ms, P50=" << result.command_latency.p50_ms
               << "ms, P95=" << result.command_latency.p95_ms

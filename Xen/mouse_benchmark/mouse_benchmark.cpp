@@ -13,6 +13,7 @@
 #include "log/log.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -22,6 +23,7 @@
 #include <iomanip>
 #include <limits>
 #include <numeric>
+#include <random>
 
 namespace {
 
@@ -88,6 +90,160 @@ bool valid_kmbox_uuid(std::string_view value) noexcept {
                (character >= 'a' && character <= 'f') ||
                (character >= 'A' && character <= 'F');
     });
+}
+
+bool valid_run_uuid(std::string_view value) noexcept {
+    if (value.size() != 36U) return false;
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        if (index == 8U || index == 13U || index == 18U || index == 23U) {
+            if (value[index] != '-') return false;
+            continue;
+        }
+        const char character = value[index];
+        if (!((character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'f') ||
+              (character >= 'A' && character <= 'F'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string make_run_uuid() {
+    std::array<std::uint8_t, 16U> bytes{};
+    std::random_device random;
+    for (auto& byte : bytes) {
+        byte = static_cast<std::uint8_t>(random());
+    }
+    bytes[6] = static_cast<std::uint8_t>((bytes[6] & 0x0fU) | 0x40U);
+    bytes[8] = static_cast<std::uint8_t>((bytes[8] & 0x3fU) | 0x80U);
+
+    constexpr char hexadecimal[] = "0123456789abcdef";
+    std::string output;
+    output.reserve(36U);
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        if (index == 4U || index == 6U || index == 8U || index == 10U) {
+            output.push_back('-');
+        }
+        output.push_back(hexadecimal[bytes[index] >> 4U]);
+        output.push_back(hexadecimal[bytes[index] & 0x0fU]);
+    }
+    return output;
+}
+
+MouseBenchmarkCompletionSemantic completion_semantic_for(
+        MouseBackend backend) noexcept {
+    switch (backend) {
+        case MouseBackend::WIN32_SEND_INPUT:
+            return MouseBenchmarkCompletionSemantic::
+                WINDOWS_INPUT_STREAM_INSERTION;
+        case MouseBackend::KMBOX_NET:
+            return MouseBenchmarkCompletionSemantic::
+                KMBOX_MATCHED_UDP_PROTOCOL_ACK;
+        case MouseBackend::MAKCU:
+            return MouseBenchmarkCompletionSemantic::
+                MAKCU_MATCHED_SERIAL_DEVICE_STATUS_ACK;
+    }
+    return MouseBenchmarkCompletionSemantic::UNSPECIFIED;
+}
+
+const char* completion_semantic_name(
+        MouseBenchmarkCompletionSemantic semantic) noexcept {
+    switch (semantic) {
+        case MouseBenchmarkCompletionSemantic::WINDOWS_INPUT_STREAM_INSERTION:
+            return "windows_input_stream_insertion";
+        case MouseBenchmarkCompletionSemantic::KMBOX_MATCHED_UDP_PROTOCOL_ACK:
+            return "kmbox_matched_udp_protocol_ack";
+        case MouseBenchmarkCompletionSemantic::
+                MAKCU_MATCHED_SERIAL_DEVICE_STATUS_ACK:
+            return "makcu_matched_serial_device_status_ack";
+        case MouseBenchmarkCompletionSemantic::UNSPECIFIED:
+            return "unspecified";
+    }
+    return "unspecified";
+}
+
+const char* peer_test_boundary_name(
+        MouseBenchmarkPeerTestBoundary boundary) noexcept {
+    switch (boundary) {
+        case MouseBenchmarkPeerTestBoundary::LOCAL_OS_API:
+            return "local_os_api";
+        case MouseBenchmarkPeerTestBoundary::CONFIGURED_EXTERNAL_DEVICE_PEER:
+            return "configured_external_device_peer";
+        case MouseBenchmarkPeerTestBoundary::LOOPBACK_UDP_FAKE:
+            return "loopback_udp_fake";
+        case MouseBenchmarkPeerTestBoundary::IN_MEMORY_SERIAL_FAKE:
+            return "in_memory_serial_fake";
+        case MouseBenchmarkPeerTestBoundary::UNSPECIFIED:
+            return "unspecified";
+    }
+    return "unspecified";
+}
+
+bool valid_peer_test_boundary(
+        MouseBackend backend,
+        MouseBenchmarkPeerTestBoundary boundary) noexcept {
+    switch (backend) {
+        case MouseBackend::WIN32_SEND_INPUT:
+            return boundary == MouseBenchmarkPeerTestBoundary::LOCAL_OS_API;
+        case MouseBackend::KMBOX_NET:
+            return boundary == MouseBenchmarkPeerTestBoundary::
+                       CONFIGURED_EXTERNAL_DEVICE_PEER ||
+                   boundary == MouseBenchmarkPeerTestBoundary::
+                       LOOPBACK_UDP_FAKE;
+        case MouseBackend::MAKCU:
+            return boundary == MouseBenchmarkPeerTestBoundary::
+                       CONFIGURED_EXTERNAL_DEVICE_PEER ||
+                   boundary == MouseBenchmarkPeerTestBoundary::
+                       IN_MEMORY_SERIAL_FAKE;
+    }
+    return false;
+}
+
+bool is_loopback_ipv4(std::string_view address) noexcept {
+    return address.rfind("127.", 0) == 0;
+}
+
+bool protocol_ack_expected(MouseBackend backend) noexcept {
+    return backend == MouseBackend::KMBOX_NET ||
+           backend == MouseBackend::MAKCU;
+}
+
+std::string aggregation_key(
+        MouseBackend backend,
+        MouseBenchmarkCompletionSemantic semantic,
+        MouseBenchmarkPeerTestBoundary boundary) {
+    return std::string(MouseBackendName(backend)) + '|' +
+        completion_semantic_name(semantic) + '|' +
+        peer_test_boundary_name(boundary) + "|none";
+}
+
+bool valid_successful_receipt(
+        MouseBackend backend,
+        const MouseMoveReceipt& receipt,
+        std::chrono::steady_clock::time_point started,
+        std::chrono::steady_clock::time_point returned) noexcept {
+    if (!receipt.succeeded ||
+        receipt.backend_completed_at ==
+            std::chrono::steady_clock::time_point{} ||
+        receipt.backend_completed_at < started ||
+        receipt.backend_completed_at > returned ||
+        receipt.physical_effect_observed ||
+        receipt.physical_effect_at !=
+            std::chrono::steady_clock::time_point{}) {
+        return false;
+    }
+    const bool expects_ack = protocol_ack_expected(backend);
+    if (receipt.protocol_ack_received != expects_ack) return false;
+    if (!expects_ack) {
+        return receipt.protocol_ack_received_at ==
+            std::chrono::steady_clock::time_point{};
+    }
+    return receipt.protocol_ack_received_at !=
+               std::chrono::steady_clock::time_point{} &&
+           receipt.protocol_ack_received_at >= started &&
+           receipt.protocol_ack_received_at <=
+               receipt.backend_completed_at;
 }
 
 bool valid_makcu_port(std::string_view value) noexcept {
@@ -190,7 +346,17 @@ bool valid_report_data(const MouseBenchmarkOptions& options,
     const std::uint64_t expected_formal_commands = options.sample_pairs * 2U;
     const std::uint64_t expected_total_commands =
         (options.warmup_pairs + options.sample_pairs + 1U) * 2U;
-    if (!result.complete || result.failed_commands != 0 ||
+    if (!result.complete || !valid_run_uuid(result.run_uuid) ||
+        (!options.run_uuid.empty() &&
+         result.run_uuid != options.run_uuid) ||
+        result.completion_semantic !=
+            completion_semantic_for(options.mouse.backend) ||
+        result.protocol_ack_observed !=
+            protocol_ack_expected(options.mouse.backend) ||
+        result.physical_effect_observed ||
+        !valid_peer_test_boundary(options.mouse.backend,
+                                  options.peer_test_boundary) ||
+        result.failed_commands != 0 ||
         result.final_status != MouseStatus::READY ||
         !finite_nonnegative(result.open_ms) ||
         !finite_nonnegative(result.first_command_ms) ||
@@ -226,13 +392,28 @@ bool write_json(const std::filesystem::path& path,
                 const MouseBenchmarkResult& result) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) return false;
+    const auto group_key = aggregation_key(
+        options.mouse.backend, result.completion_semantic,
+        options.peer_test_boundary);
     output << std::setprecision(9)
-           << "{\n  \"schema\": 1,\n  \"complete\": true,\n"
+           << "{\n  \"schema\": 2,\n  \"run_uuid\": \""
+           << result.run_uuid << "\",\n  \"complete\": true,\n"
            << "  \"backend\": \""
            << MouseBackendName(options.mouse.backend) << "\",\n"
            << "  \"endpoint\": \""
            << json_escape(mouse_endpoint(options.mouse))
            << "\",\n"
+           << "  \"provenance\": {\"completion_semantic\": \""
+           << completion_semantic_name(result.completion_semantic)
+           << "\", \"peer_test_boundary\": \""
+           << peer_test_boundary_name(options.peer_test_boundary)
+           << "\", \"protocol_ack_observed\": "
+           << (result.protocol_ack_observed ? "true" : "false")
+           << ", \"physical_effect_observation_method\": \"none\", "
+              "\"physical_effect_observed\": "
+           << (result.physical_effect_observed ? "true" : "false")
+           << ", \"aggregation_key\": \""
+           << group_key << "\"},\n"
            << "  \"authorization\": {\"physical_output\": true, "
               "\"confirmation_token\": true},\n"
            << "  \"command\": {\"dx_counts\": "
@@ -304,6 +485,16 @@ std::string move_failure_message(const char* phase,
 
 } // namespace
 
+const char* mouse_benchmark_completion_semantic_name(
+        MouseBenchmarkCompletionSemantic semantic) noexcept {
+    return completion_semantic_name(semantic);
+}
+
+const char* mouse_benchmark_peer_test_boundary_name(
+        MouseBenchmarkPeerTestBoundary boundary) noexcept {
+    return peer_test_boundary_name(boundary);
+}
+
 MouseBenchmarkTimingSummary summarize_mouse_benchmark_timings(
         std::span<const double> values) noexcept {
     MouseBenchmarkTimingSummary summary;
@@ -336,6 +527,13 @@ bool validate_mouse_benchmark_options(
         set_error(error, "必须提供 --report");
         return false;
     }
+    if ((!options.run_uuid.empty() &&
+         !valid_run_uuid(options.run_uuid)) ||
+        !valid_peer_test_boundary(options.mouse.backend,
+                                  options.peer_test_boundary)) {
+        set_error(error, "run UUID 或 peer/test boundary 非法");
+        return false;
+    }
     if (!options.allow_physical_output ||
         !options.physical_output_confirmed) {
         set_error(error,
@@ -365,6 +563,18 @@ bool validate_mouse_benchmark_options(
             options.mouse.kmbox_command_timeout_ms <= 0 ||
             options.mouse.kmbox_command_timeout_ms > 1000) {
             set_error(error, "KMBOX NET 地址、UUID 或超时参数非法");
+            return false;
+        }
+        const bool loopback_endpoint =
+            is_loopback_ipv4(options.mouse.kmbox_ip);
+        if ((options.peer_test_boundary ==
+                 MouseBenchmarkPeerTestBoundary::LOOPBACK_UDP_FAKE &&
+             !loopback_endpoint) ||
+            (options.peer_test_boundary == MouseBenchmarkPeerTestBoundary::
+                 CONFIGURED_EXTERNAL_DEVICE_PEER &&
+             loopback_endpoint)) {
+            set_error(error,
+                "KMBOX NET endpoint 与显式 peer/test boundary 不一致");
             return false;
         }
         if (!options.mouse.makcu_port.empty()) {
@@ -412,6 +622,8 @@ MouseBenchmarkParseStatus parse_mouse_benchmark_options(
         error.clear();
         bool seen_backend = false;
         bool seen_report = false;
+        bool seen_run_uuid = false;
+        bool seen_peer_test_boundary = false;
         bool seen_warmup = false;
         bool seen_samples = false;
         bool seen_dx = false;
@@ -473,6 +685,34 @@ MouseBenchmarkParseStatus parse_mouse_benchmark_options(
                 if (duplicate(seen_report, "--report") ||
                     !wide_to_utf8(value, options.report_path)) {
                     if (error.empty()) set_error(error, "--report 不是有效 UTF-8 路径");
+                    return MouseBenchmarkParseStatus::INVALID;
+                }
+            } else if (argument == L"--run-uuid") {
+                if (duplicate(seen_run_uuid, "--run-uuid") ||
+                    !wide_to_utf8(value, options.run_uuid) ||
+                    !valid_run_uuid(options.run_uuid)) {
+                    if (error.empty()) set_error(error, "--run-uuid 非法");
+                    return MouseBenchmarkParseStatus::INVALID;
+                }
+            } else if (argument == L"--peer-test-boundary") {
+                if (duplicate(seen_peer_test_boundary,
+                              "--peer-test-boundary")) {
+                    return MouseBenchmarkParseStatus::INVALID;
+                }
+                if (value == L"local_os_api") {
+                    options.peer_test_boundary =
+                        MouseBenchmarkPeerTestBoundary::LOCAL_OS_API;
+                } else if (value == L"configured_external_device_peer") {
+                    options.peer_test_boundary = MouseBenchmarkPeerTestBoundary::
+                        CONFIGURED_EXTERNAL_DEVICE_PEER;
+                } else if (value == L"loopback_udp_fake") {
+                    options.peer_test_boundary =
+                        MouseBenchmarkPeerTestBoundary::LOOPBACK_UDP_FAKE;
+                } else if (value == L"in_memory_serial_fake") {
+                    options.peer_test_boundary =
+                        MouseBenchmarkPeerTestBoundary::IN_MEMORY_SERIAL_FAKE;
+                } else {
+                    set_error(error, "--peer-test-boundary 非法");
                     return MouseBenchmarkParseStatus::INVALID;
                 }
             } else if (argument == L"--warmup-pairs") {
@@ -567,6 +807,11 @@ MouseBenchmarkParseStatus parse_mouse_benchmark_options(
                 set_error(error, "未知参数");
                 return MouseBenchmarkParseStatus::INVALID;
             }
+        }
+        if (options.backend_explicit && !seen_peer_test_boundary &&
+            options.mouse.backend == MouseBackend::WIN32_SEND_INPUT) {
+            options.peer_test_boundary =
+                MouseBenchmarkPeerTestBoundary::LOCAL_OS_API;
         }
         if (!validate_mouse_benchmark_options(options, error)) {
             return MouseBenchmarkParseStatus::INVALID;
@@ -669,8 +914,20 @@ bool run_mouse_benchmark(
         std::string& error) noexcept {
     result = {};
     if (!validate_mouse_benchmark_options(options, error)) return false;
+    if (options.peer_test_boundary ==
+            MouseBenchmarkPeerTestBoundary::IN_MEMORY_SERIAL_FAKE) {
+        set_error(error,
+            "in-memory serial fake 只允许通过公有 writer 验证，不得打开设备");
+        return false;
+    }
     bool owns_log = false;
     try {
+        result.run_uuid = options.run_uuid.empty()
+            ? make_run_uuid() : options.run_uuid;
+        result.completion_semantic =
+            completion_semantic_for(options.mouse.backend);
+        result.protocol_ack_observed = false;
+        result.physical_effect_observed = false;
         const auto report_path = std::filesystem::absolute(
             std::filesystem::u8path(options.report_path));
         if (std::filesystem::exists(report_path)) {
@@ -736,12 +993,24 @@ bool run_mouse_benchmark(
                                 const MouseMoveCommand& command,
                                 double& latency_ms) noexcept {
                             const auto started = std::chrono::steady_clock::now();
-                            const bool moved = mouse->move(command);
+                            const MouseMoveReceipt receipt =
+                                mouse->move(command);
                             const auto finished = std::chrono::steady_clock::now();
                             latency_ms =
                                 std::chrono::duration<double, std::milli>(
                                     finished - started).count();
-                            return moved;
+                            if (!receipt) return false;
+                            if (!valid_successful_receipt(
+                                    options.mouse.backend, receipt,
+                                    started, finished)) {
+                                set_error(error,
+                                    "鼠标后端完成回执与声明的 completion semantic 不一致");
+                                return false;
+                            }
+                            if (receipt.protocol_ack_received) {
+                                result.protocol_ack_observed = true;
+                            }
+                            return true;
                         };
 
                         bool run_ok = !stop_requested.load(
@@ -907,6 +1176,8 @@ std::string mouse_benchmark_usage() {
         "用法: XenMouseBenchmark --backend <win32|kmbox_net|makcu> --report <json>\n"
         "  --allow-physical-output\n"
         "  --confirm-physical-output XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT\n"
+        "  [--run-uuid <xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx>]\n"
+        "  [--peer-test-boundary <local_os_api|configured_external_device_peer|loopback_udp_fake>]\n"
         "  [--warmup-pairs 100] [--sample-pairs 10000]\n"
         "  [--dx-counts 1] [--dy-counts 0]\n"
         "  KMBOX: --kmbox-ip <IPv4> --kmbox-port <1..65535>\n"

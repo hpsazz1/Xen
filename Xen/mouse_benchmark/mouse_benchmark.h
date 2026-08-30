@@ -15,13 +15,38 @@ enum class MouseBenchmarkParseStatus {
     INVALID,
 };
 
+enum class MouseBenchmarkCompletionSemantic {
+    UNSPECIFIED,
+    WINDOWS_INPUT_STREAM_INSERTION,
+    KMBOX_MATCHED_UDP_PROTOCOL_ACK,
+    MAKCU_MATCHED_SERIAL_DEVICE_STATUS_ACK,
+};
+
+enum class MouseBenchmarkPeerTestBoundary {
+    UNSPECIFIED,
+    LOCAL_OS_API,
+    CONFIGURED_EXTERNAL_DEVICE_PEER,
+    LOOPBACK_UDP_FAKE,
+    IN_MEMORY_SERIAL_FAKE,
+};
+
+const char* mouse_benchmark_completion_semantic_name(
+    MouseBenchmarkCompletionSemantic semantic) noexcept;
+const char* mouse_benchmark_peer_test_boundary_name(
+    MouseBenchmarkPeerTestBoundary boundary) noexcept;
+
 struct MouseBenchmarkOptions {
     MouseConfig mouse;
     std::string report_path;
+    // 正式脚本传入同一 run UUID；直接入口未传时由 runner 生成并写回 result。
+    std::string run_uuid;
     std::uint64_t warmup_pairs = 100;
     std::uint64_t sample_pairs = 10000;
     int dx_counts = 1;
     int dy_counts = 0;
+    // 由公有入口或 fake seam 显式声明，writer 不得从 endpoint 反推测试边界。
+    MouseBenchmarkPeerTestBoundary peer_test_boundary =
+        MouseBenchmarkPeerTestBoundary::UNSPECIFIED;
     bool backend_explicit = false;
     bool allow_physical_output = false;
     bool physical_output_confirmed = false;
@@ -46,6 +71,11 @@ struct MouseBenchmarkSample {
 
 struct MouseBenchmarkResult {
     bool complete = false;
+    std::string run_uuid;
+    MouseBenchmarkCompletionSemantic completion_semantic =
+        MouseBenchmarkCompletionSemantic::UNSPECIFIED;
+    bool protocol_ack_observed = false;
+    bool physical_effect_observed = false;
     double open_ms = 0.0;
     double first_command_ms = 0.0;
     double first_compensation_ms = 0.0;

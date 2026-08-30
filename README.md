@@ -115,7 +115,12 @@ NDI `timestamp` 在报告中明确记为 SDK submission time，不称为桌面�
 四时间戳交换把该 UTC 时间映射到接收机 `steady_clock`，并逐帧输出 status、RTT、uncertainty、rate、
 mapping age、sample count 和 source session；映射未就绪、过期或回跳时保持无效。Mouse 报告也分别
 记录 backend completion、匹配协议响应的 protocol ACK 和独立 physical effect；当前后端没有物理效果
-观测能力，因此不能由 API 返回或 ACK 推导真实鼠标已经移动。
+观测能力，因此不能由 API 返回或 ACK 推导真实鼠标已经移动。Mouse Benchmark schema 2 另行绑定
+run UUID、completion semantic 与 peer/test boundary；正式脚本只在完整聚合键一致时复制 timing，
+loopback/in-memory fake 不与真实设备报告合并，并始终显式记录 `physical_effect_observed=false`。
+Win32 的 execution boundary 内生为 `local_os_api`；KMBOX/MAKCU 不再从 endpoint 或脚本默认值推断
+外部设备，必须显式传入 `ConfiguredExternalDevicePeer`，127/8 KMBOX fake 则必须显式传入
+`LoopbackUdpFake`，且在创建报告目录或打开设备前完成拒绝。
 
 ## 源码结构
 

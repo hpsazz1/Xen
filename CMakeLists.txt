@@ -1192,6 +1192,9 @@ if(BUILD_TESTING)
         -CTestCommand "${CMAKE_CTEST_COMMAND}"
         -BuildDirectory "${CMAKE_BINARY_DIR}"
         -Configuration "$<CONFIG>")
+    xen_add_windows_powershell_test(benchmark_mouse_script_tests
+        "${PROJECT_SOURCE_DIR}/tests/benchmark_mouse_script_tests.ps1"
+        -BuildDirectory "${CMAKE_BINARY_DIR}")
     xen_add_windows_powershell_test(obs_capture_binding_tests
         "${PROJECT_SOURCE_DIR}/tests/obs_capture_binding_tests.ps1"
         -BindingScript "${PROJECT_SOURCE_DIR}/scripts/export_obs_capture_binding.ps1"
