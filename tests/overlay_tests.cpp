@@ -185,6 +185,19 @@ void test_hotkey_capture_state_machine() {
            "捕获期间按 Esc 必须清空绑定并退出捕获");
 }
 
+void test_output_arm_requires_input_health() {
+    using overlay::detail::output_arm_available;
+    expect(output_arm_available(true, false, true, true, false),
+           "所有安全门满足时必须允许请求武装");
+    expect(!output_arm_available(true, false, true, false, false),
+           "输入健康未验证时必须禁用武装");
+    expect(!output_arm_available(false, false, true, true, false) &&
+               !output_arm_available(true, true, true, true, false) &&
+               !output_arm_available(true, false, false, true, false) &&
+               !output_arm_available(true, false, true, true, true),
+           "运行、急停、配置和重载任一门关闭时都不得武装");
+}
+
 } // namespace
 
 int main() {
@@ -197,6 +210,7 @@ int main() {
     test_detached_preview_refresh_state();
     test_detection_role_mapping();
     test_hotkey_capture_state_machine();
+    test_output_arm_requires_input_health();
     if (failures != 0) {
         std::cerr << "Overlay 测试失败数: " << failures << '\n';
         return 1;

@@ -1,9 +1,15 @@
 ﻿param(
-    [string[]]$ReportPath = @(),
-    [string]$RunDirectory = "",
-    [string]$Scenario = "",
-    [string]$OutputPath = "",
-    [switch]$RequireXStability
+    # 旧 CLI 参数名通过 Alias 保持；内部名避免 legacy dot-source 覆盖调用者变量。
+    [Alias("ReportPath")]
+    [string[]]$XenFixedSceneReportPath = @(),
+    [Alias("RunDirectory")]
+    [string]$XenFixedSceneRunDirectory = "",
+    [Alias("Scenario")]
+    [string]$XenFixedSceneScenario = "",
+    [Alias("OutputPath")]
+    [string]$XenFixedSceneOutputPath = "",
+    [Alias("RequireXStability")]
+    [switch]$XenFixedSceneRequireXStability
 )
 
 $ErrorActionPreference = "Stop"
@@ -414,7 +420,15 @@ function Get-XenAimFixedSceneAnalysis {
     return $result
 }
 
-if ($MyInvocation.InvocationName -ne ".") {
+function Invoke-XenAimFixedSceneAnalysisCli {
+    param(
+        [string[]]$ReportPath = @(),
+        [string]$RunDirectory = "",
+        [string]$Scenario = "",
+        [string]$OutputPath = "",
+        [switch]$RequireXStability
+    )
+
     if ($ReportPath.Count -ne 0 -and
         -not [string]::IsNullOrWhiteSpace($RunDirectory)) {
         throw "-ReportPath 与 -RunDirectory 只能使用一个。"
@@ -466,4 +480,22 @@ if ($MyInvocation.InvocationName -ne ".") {
             "固定场景 X 稳定性门禁失败：base 放大了 Observation。")
         exit 2
     }
+}
+
+if (-not [string]::IsNullOrEmpty($MyInvocation.InvocationName) -and
+    $MyInvocation.InvocationName -ne ".") {
+    Invoke-XenAimFixedSceneAnalysisCli `
+        -ReportPath $XenFixedSceneReportPath `
+        -RunDirectory $XenFixedSceneRunDirectory `
+        -Scenario $XenFixedSceneScenario `
+        -OutputPath $XenFixedSceneOutputPath `
+        -RequireXStability:(
+            [bool]$XenFixedSceneRequireXStability.IsPresent)
+} elseif ($MyInvocation.InvocationName -eq ".") {
+    Remove-Variable -Name @(
+        "XenFixedSceneReportPath",
+        "XenFixedSceneRunDirectory",
+        "XenFixedSceneScenario",
+        "XenFixedSceneOutputPath",
+        "XenFixedSceneRequireXStability") -Scope 0 -ErrorAction SilentlyContinue
 }

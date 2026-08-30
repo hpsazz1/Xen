@@ -35,6 +35,25 @@ constexpr std::uint64_t kMaximumBufferedBgrBytes =
 constexpr std::size_t kHashBufferBytes = 64U * 1024U;
 std::atomic<std::uint64_t> g_pending_sequence{0};
 
+bool configured_bgr_buffer_fits(
+        const CaptureEvidenceConfig& config) noexcept {
+    if (config.capture.roi_width <= 0 || config.capture.roi_height <= 0 ||
+        config.requested_frame_count == 0) {
+        return false;
+    }
+    const auto width = static_cast<std::uint64_t>(config.capture.roi_width);
+    const auto height = static_cast<std::uint64_t>(config.capture.roi_height);
+    if (width > std::numeric_limits<std::uint64_t>::max() / height) {
+        return false;
+    }
+    const std::uint64_t pixels = width * height;
+    constexpr std::uint64_t kBgrChannels = 3;
+    if (pixels > kMaximumBufferedBgrBytes / kBgrChannels) return false;
+    const std::uint64_t frame_bytes = pixels * kBgrChannels;
+    return config.requested_frame_count <=
+        kMaximumBufferedBgrBytes / frame_bytes;
+}
+
 void set_error(std::string& output, const std::string& value) noexcept {
     try {
         output = value;
@@ -350,6 +369,11 @@ bool CaptureEvidenceRecorder::start(
             set_error(error, "Capture evidence 配置为空或超出 2400 帧短证据上限");
             return false;
         }
+        if (!configured_bgr_buffer_fits(config)) {
+            set_error(error,
+                "Capture evidence 配置超出 768 MiB 有界 BGR 缓冲上限");
+            return false;
+        }
 
         std::error_code filesystem_error;
         if (!std::filesystem::is_regular_file(
@@ -438,6 +462,13 @@ bool CaptureEvidenceRecorder::record(
         }
         if (impl_->frames.size() >= impl_->config.requested_frame_count) {
             set_error(error, "Capture evidence 已录满声明帧数");
+            return false;
+        }
+        if (impl_->config.require_source_timing &&
+            (!frame.timing.source_time_timing_valid ||
+             frame.timing.source_clock_status != SourceClockStatus::VALID)) {
+            set_error(error,
+                "Capture evidence 要求每帧具备 VALID source timing");
             return false;
         }
         if (frame.storage != CapturedFrameStorage::CPU_BGR ||

@@ -8,7 +8,7 @@
     [Parameter(Mandatory = $true)]
     [string]$ModelPath,
     [Parameter(Mandatory = $true)]
-    [string[]]$LicenseFiles,
+    [string[]]$LicenseEvidence,
     [string]$ConfigPath = "",
     [string[]]$ToolFiles = @(),
     [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
@@ -20,12 +20,22 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot "path_safety.psm1") -Force
 
 function Resolve-ExistingPath([string]$Path, [string]$Description) {
     if (-not (Test-Path -LiteralPath $Path)) {
         throw "$Description 不存在：$Path"
     }
     return (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Resolve-ExistingNonEmptyFile([string]$Path, [string]$Description) {
+    $resolved = Resolve-ExistingPath $Path $Description
+    $item = Get-Item -LiteralPath $resolved -Force
+    if ($item -isnot [IO.FileInfo] -or $item.Length -eq 0) {
+        throw "$Description must be an ordinary non-empty file: $Path"
+    }
+    return $item.FullName
 }
 
 function Read-Json([string]$Path, [string]$Description) {
@@ -48,6 +58,29 @@ function Assert-BuildIdentity(
         $identity.runtime -ne $ExpectedRuntime) {
         throw "构建身份不符合正式组包要求：$identityPath"
     }
+    if (-not $identity.PSObject.Properties["components"]) {
+        throw "Build identity has no components contract: $identityPath"
+    }
+    $components = [System.Collections.Generic.List[string]]::new()
+    $componentIds = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($component in @($identity.components)) {
+        if ($component -isnot [string]) {
+            throw "Build identity component id is not a string: $identityPath"
+        }
+        $componentId = [string]$component
+        if ($componentId -cne $componentId.Trim() -or
+            $componentId -notmatch '^[a-z0-9][a-z0-9._-]*$') {
+            throw "Build identity contains an invalid component id: $identityPath"
+        }
+        if (-not $componentIds.Add($componentId)) {
+            throw "Build identity contains a duplicate component id: $componentId"
+        }
+        $components.Add($componentId.ToLowerInvariant())
+    }
+    if ($components.Count -eq 0) {
+        throw "Build identity components contract is empty: $identityPath"
+    }
     $releaseDirectory = Join-Path $BuildDirectory "Release"
     $worker = Join-Path $releaseDirectory "Xen.exe"
     $launcher = Join-Path $releaseDirectory "XenLauncher.exe"
@@ -61,8 +94,17 @@ function Assert-BuildIdentity(
     if ($report.schema -ne 1 -or $report.configuration -ne "Release") {
         throw "运行库部署报告不是 Release schema 1：$deployment"
     }
+    $deploymentNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
     foreach ($file in @($report.files)) {
-        $deployed = Join-Path $releaseDirectory ([string]$file.name)
+        $fileName = [string]$file.name
+        $deployed = Resolve-XenDirectChildPath `
+            -RootPath $releaseDirectory `
+            -Name $fileName `
+            -Description "Deployment report file name"
+        if (-not $deploymentNames.Add($fileName)) {
+            throw "Deployment report contains a duplicate basename: $fileName"
+        }
         if (-not (Test-Path -LiteralPath $deployed -PathType Leaf)) {
             throw "部署报告授权文件缺失：$deployed"
         }
@@ -121,7 +163,61 @@ function Assert-BuildIdentity(
         Launcher = $launcher
         DeploymentPath = $deployment
         Deployment = $report
+        Components = @($components)
     }
+}
+
+function Resolve-LicenseEvidenceClosure(
+        [string[]]$Entries,
+        [string[]]$RequiredComponents) {
+    if (@($Entries).Count -eq 0) {
+        throw "Release requires license evidence for every build component."
+    }
+    $required = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($componentId in $RequiredComponents) {
+        $null = $required.Add($componentId)
+    }
+    $covered = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    $evidencePaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    $evidenceKeys = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    $resolvedEvidence = [System.Collections.Generic.List[object]]::new()
+    foreach ($entry in @($Entries)) {
+        $separator = if ($null -eq $entry) { -1 } else { $entry.IndexOf('=') }
+        if ($separator -le 0 -or $separator -eq ($entry.Length - 1)) {
+            throw "License evidence must use component_id=path: $entry"
+        }
+        $componentId = $entry.Substring(0, $separator)
+        $path = $entry.Substring($separator + 1)
+        if ($componentId -cne $componentId.Trim() -or
+            $componentId -notmatch '^[a-z0-9][a-z0-9._-]*$') {
+            throw "License evidence contains an invalid component id: $componentId"
+        }
+        if (-not $required.Contains($componentId)) {
+            throw "License evidence names an unknown component: $componentId"
+        }
+        $resolved = Resolve-ExistingNonEmptyFile $path `
+            "License evidence for component $componentId"
+        $evidenceKey = "$componentId`0$resolved"
+        if (-not $evidenceKeys.Add($evidenceKey) -or
+            -not $evidencePaths.Add($resolved)) {
+            throw "License evidence contains a duplicate file mapping: $entry"
+        }
+        $null = $covered.Add($componentId)
+        $resolvedEvidence.Add([pscustomobject]@{
+            ComponentId = $componentId.ToLowerInvariant()
+            Path = $resolved
+        })
+    }
+    $missing = @($required | Where-Object { -not $covered.Contains($_) } |
+        Sort-Object)
+    if ($missing.Count -ne 0) {
+        throw "Build components are missing license evidence: $($missing -join ', ')"
+    }
+    return @($resolvedEvidence | Sort-Object ComponentId, Path)
 }
 
 function Copy-VerifiedFile(
@@ -130,7 +226,8 @@ function Copy-VerifiedFile(
         [string]$Runtime,
         [string]$Origin,
         [string]$IncomingRoot,
-        [System.Collections.Generic.List[object]]$ManifestFiles) {
+        [System.Collections.Generic.List[object]]$ManifestFiles,
+        [string]$ComponentId = "") {
     $destination = Join-Path $IncomingRoot $RelativePath
     $parent = Split-Path -Parent $destination
     if ($parent) {
@@ -144,13 +241,17 @@ function Copy-VerifiedFile(
         throw "组包复制后哈希不一致：$RelativePath"
     }
     $item = Get-Item -LiteralPath $destination
-    $ManifestFiles.Add([ordered]@{
+    $entry = [ordered]@{
         path = $RelativePath.Replace('\', '/')
         runtime = $Runtime
         size = [UInt64]$item.Length
         sha256 = $destinationHash.ToLowerInvariant()
         source = $Origin
-    })
+    }
+    if ($ComponentId) {
+        $entry["component_id"] = $ComponentId
+    }
+    $ManifestFiles.Add($entry)
 }
 
 $repository = Resolve-ExistingPath $RepositoryRoot "仓库根目录"
@@ -164,20 +265,23 @@ if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-fA-F]{40}$') {
 }
 
 $model = Resolve-ExistingPath $ModelPath "发布模型"
-$licenses = @($LicenseFiles | ForEach-Object {
-    Resolve-ExistingPath $_ "许可证文件"
-})
 $tools = @($ToolFiles | ForEach-Object {
     Resolve-ExistingPath $_ "发布工具"
 })
-if ($licenses.Count -eq 0) {
-    throw "正式发布必须至少提供一份许可证文件"
-}
 $builds = @(
     Assert-BuildIdentity (Resolve-ExistingPath $NvidiaBuildDirectory "NVIDIA 构建目录") "nvidia" $commit
     Assert-BuildIdentity (Resolve-ExistingPath $DirectMlBuildDirectory "DirectML 构建目录") "directml" $commit
     Assert-BuildIdentity (Resolve-ExistingPath $OpenVinoBuildDirectory "OpenVINO 构建目录") "openvino" $commit
 )
+$requiredComponents = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase)
+foreach ($build in $builds) {
+    foreach ($componentId in @($build.Components)) {
+        $null = $requiredComponents.Add($componentId)
+    }
+}
+$licenses = @(Resolve-LicenseEvidenceClosure $LicenseEvidence `
+    @($requiredComponents))
 
 $outputParent = Split-Path -Parent ([IO.Path]::GetFullPath($OutputDirectory))
 $outputName = Split-Path -Leaf ([IO.Path]::GetFullPath($OutputDirectory))
@@ -211,7 +315,10 @@ try {
             "$runtimePrefix/xen-runtime-deployment.json" `
             $build.Runtime $build.DeploymentPath $incoming $manifestFiles
         foreach ($file in @($build.Deployment.files)) {
-            $source = Join-Path $build.ReleaseDirectory ([string]$file.name)
+            $source = Resolve-XenDirectChildPath `
+                -RootPath $build.ReleaseDirectory `
+                -Name ([string]$file.name) `
+                -Description "Deployment report file name"
             Copy-VerifiedFile $source "$runtimePrefix/$($file.name)" `
                 $build.Runtime ([string]$file.source) $incoming $manifestFiles
         }
@@ -236,9 +343,11 @@ try {
     $licenseIndex = 0
     foreach ($license in $licenses) {
         ++$licenseIndex
-        $licenseName = "{0:D2}-{1}" -f $licenseIndex, (Split-Path -Leaf $license)
-        Copy-VerifiedFile $license "licenses/$licenseName" "" `
-            $license $incoming $manifestFiles
+        $licenseName = "{0:D2}-{1}-{2}" -f $licenseIndex, `
+            $license.ComponentId, (Split-Path -Leaf $license.Path)
+        $relativePath = "licenses/$licenseName"
+        Copy-VerifiedFile $license.Path $relativePath "" `
+            $license.Path $incoming $manifestFiles $license.ComponentId
     }
 
     $manifest = [ordered]@{

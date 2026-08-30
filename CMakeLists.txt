@@ -197,6 +197,68 @@ else()
     set(XEN_ONNXRUNTIME_HAS_CUDA FALSE)
 endif()
 
+# NVIDIA ORT Provider 的发布闭包必须由当前已验证文件集合显式组成。SDK 根目录
+# 只用于定位这些文件，不能把其中任意 DLL 自动提升为发布组件。
+set(XEN_CUDNN_RUNTIME_DLLS)
+set(XEN_CUDA_RUNTIME_DLLS)
+if(XEN_ONNXRUNTIME_HAS_CUDA)
+    if(NOT XEN_CUDNN_ROOT OR NOT IS_DIRECTORY "${XEN_CUDNN_ROOT}")
+        message(FATAL_ERROR
+            "NVIDIA ONNX Runtime requires an explicit cuDNN runtime root.")
+    endif()
+    foreach(runtime_name IN ITEMS
+            cudnn64_9.dll
+            cudnn_adv64_9.dll
+            cudnn_cnn64_9.dll
+            cudnn_engines_precompiled64_9.dll
+            cudnn_engines_runtime_compiled64_9.dll
+            cudnn_engines_tensor_ir64_9.dll
+            cudnn_graph64_9.dll
+            cudnn_heuristic64_9.dll
+            cudnn_ops64_9.dll)
+        file(GLOB_RECURSE runtime_matches LIST_DIRECTORIES FALSE
+            "${XEN_CUDNN_ROOT}/${runtime_name}")
+        list(REMOVE_DUPLICATES runtime_matches)
+        list(LENGTH runtime_matches runtime_match_count)
+        if(NOT runtime_match_count EQUAL 1)
+            message(FATAL_ERROR
+                "Required cuDNN runtime component file ${runtime_name} must exist exactly once under "
+                "XEN_CUDNN_ROOT; found ${runtime_match_count}: ${XEN_CUDNN_ROOT}")
+        endif()
+        list(GET runtime_matches 0 runtime_file)
+        list(APPEND XEN_CUDNN_RUNTIME_DLLS "${runtime_file}")
+    endforeach()
+
+    if(NOT XEN_CUDA_ROOT OR NOT IS_DIRECTORY "${XEN_CUDA_ROOT}")
+        message(FATAL_ERROR
+            "NVIDIA ONNX Runtime requires an explicit CUDA runtime root.")
+    endif()
+    foreach(runtime_name IN ITEMS
+            cublas64_13.dll
+            cublasLt64_13.dll
+            cufft64_12.dll)
+        set(runtime_file "${XEN_CUDA_ROOT}/bin/x64/${runtime_name}")
+        if(NOT EXISTS "${runtime_file}")
+            message(FATAL_ERROR
+                "Required CUDA runtime component file not found: ${runtime_file}")
+        endif()
+        list(APPEND XEN_CUDA_RUNTIME_DLLS "${runtime_file}")
+    endforeach()
+    # FindCUDAToolkit 的 CUDA::cudart TARGET_FILE 在 Windows 指向导入库，
+    # 因而继续从当前 Toolkit 的 bin 目录解析唯一运行时 DLL。
+    file(GLOB CUDA_CUDART_RUNTIME_DLLS CONFIGURE_DEPENDS
+        "${XEN_CUDA_ROOT}/bin/x64/cudart64_*.dll"
+        "${XEN_CUDA_ROOT}/bin/cudart64_*.dll")
+    list(REMOVE_DUPLICATES CUDA_CUDART_RUNTIME_DLLS)
+    list(LENGTH CUDA_CUDART_RUNTIME_DLLS CUDA_CUDART_RUNTIME_COUNT)
+    if(NOT CUDA_CUDART_RUNTIME_COUNT EQUAL 1)
+        message(FATAL_ERROR
+            "Expected exactly one cudart64_*.dll under XEN_CUDA_ROOT, found "
+            "${CUDA_CUDART_RUNTIME_COUNT}: ${XEN_CUDA_ROOT}")
+    endif()
+    list(APPEND XEN_CUDA_RUNTIME_DLLS ${CUDA_CUDART_RUNTIME_DLLS})
+endif()
+
 # 每个独立构建目录记录配置时的源码提交和运行时归属。正式组包只消费
 # dirty=false、提交一致且归属唯一的全新构建，拒绝用旧矩阵二进制拼包。
 if(XEN_ONNXRUNTIME_HAS_DIRECTML)
@@ -232,10 +294,6 @@ else()
     set(XEN_BUILD_GIT_DIRTY true)
 endif()
 file(TO_CMAKE_PATH "${PROJECT_SOURCE_DIR}" XEN_BUILD_SOURCE_ROOT)
-configure_file(
-    "${PROJECT_SOURCE_DIR}/scripts/build_identity.json.in"
-    "${CMAKE_BINARY_DIR}/xen-build-identity.json"
-    @ONLY)
 
 # TensorRT SDK 的 DLL major 必须与 ORT TensorRT Provider 的导入依赖一致。
 # 不能根据本机安装版本猜测，否则 Provider 会在 Session 创建时才因 ABI 不匹配失败。
@@ -296,9 +354,80 @@ if(XEN_TENSORRT_ROOT)
         message(WARNING
             "XEN_TENSORRT_ROOT is set, but the selected ONNX Runtime package has no TensorRT Provider.")
     endif()
+elseif(XEN_ONNXRUNTIME_HAS_TENSORRT)
+    message(FATAL_ERROR
+        "Selected ONNX Runtime TensorRT Provider requires XEN_TENSORRT_ROOT.")
 elseif(XEN_TENSORRT_MAJOR)
     message(FATAL_ERROR "XEN_TENSORRT_MAJOR is set but XEN_TENSORRT_ROOT is empty.")
 endif()
+
+set(XEN_TENSORRT_RUNTIME_DLLS)
+if(XEN_ONNXRUNTIME_HAS_TENSORRT)
+    set(XEN_TENSORRT_RUNTIME_DLLS
+        "${XEN_TENSORRT_CORE_DLL}"
+        "${XEN_TENSORRT_PARSER_DLL}")
+    # 当前 TensorRT 10.16 发布闭包只授权已经验证的 PTX 与目标架构资源。
+    # 新架构或新文件名必须显式评审，不能通过 wildcard 自动扩包。
+    foreach(resource_id IN ITEMS
+            ptx
+            sm75
+            sm80
+            sm86
+            sm89
+            sm90
+            sm100
+            sm120)
+        set(runtime_file
+            "${XEN_TENSORRT_ROOT}/bin/nvinfer_builder_resource_${resource_id}_${XEN_TENSORRT_MAJOR}.dll")
+        if(NOT EXISTS "${runtime_file}")
+            message(FATAL_ERROR
+                "Required TensorRT builder runtime component file not found: ${runtime_file}")
+        endif()
+        list(APPEND XEN_TENSORRT_RUNTIME_DLLS "${runtime_file}")
+    endforeach()
+endif()
+
+# 许可证 consumer 只认识稳定 dependency component id。运行时 ID 和 DLL 文件名
+# 分别保留在既有字段/部署报告中，不得混入 components 冒充依赖闭包。
+set(XEN_BUILD_COMPONENT_IDS
+    imgui
+    nlohmann-json
+    onnxruntime
+    opencv
+    simpleini
+    spdlog)
+if(XEN_HAS_NDI)
+    list(APPEND XEN_BUILD_COMPONENT_IDS ndi)
+endif()
+if(XEN_ONNXRUNTIME_HAS_DIRECTML)
+    list(APPEND XEN_BUILD_COMPONENT_IDS directml)
+endif()
+if(XEN_ONNXRUNTIME_HAS_OPENVINO)
+    list(APPEND XEN_BUILD_COMPONENT_IDS openvino)
+endif()
+if(XEN_ONNXRUNTIME_HAS_CUDA)
+    list(APPEND XEN_BUILD_COMPONENT_IDS cuda cudnn)
+endif()
+if(XEN_ONNXRUNTIME_HAS_TENSORRT)
+    list(APPEND XEN_BUILD_COMPONENT_IDS tensorrt)
+endif()
+list(REMOVE_DUPLICATES XEN_BUILD_COMPONENT_IDS)
+list(SORT XEN_BUILD_COMPONENT_IDS)
+set(XEN_BUILD_COMPONENTS_JSON "")
+foreach(component_id IN LISTS XEN_BUILD_COMPONENT_IDS)
+    if(NOT component_id MATCHES "^[a-z0-9][a-z0-9._-]*$")
+        message(FATAL_ERROR
+            "Build identity component id is invalid: ${component_id}")
+    endif()
+    if(NOT XEN_BUILD_COMPONENTS_JSON STREQUAL "")
+        string(APPEND XEN_BUILD_COMPONENTS_JSON ", ")
+    endif()
+    string(APPEND XEN_BUILD_COMPONENTS_JSON "\"${component_id}\"")
+endforeach()
+configure_file(
+    "${PROJECT_SOURCE_DIR}/scripts/build_identity.json.in"
+    "${CMAKE_BINARY_DIR}/xen-build-identity.json"
+    @ONLY)
 
 # Visual Studio 的同一配置共享一个可执行输出目录。这里只登记当前配置授权的
 # 运行文件，全部目标声明完毕后再由单一构建目标加锁完成清理、复制和哈希报告；
@@ -395,57 +524,18 @@ function(xen_deploy_runtime_dlls target)
             xen_copy_runtime_files(${target} ${OPENVINO_RUNTIME_DLLS})
         endif()
 
-        if(XEN_ORT_USES_NVIDIA AND XEN_TENSORRT_ROOT)
-            set(TENSORRT_RUNTIME_DLLS
-                "${XEN_TENSORRT_CORE_DLL}"
-                "${XEN_TENSORRT_PARSER_DLL}")
-            # Engine Cache 不能跨 GPU 架构复用；部署 SDK 提供的全部 Builder Resource，
-            # 使同一构建目录可在不同 NVIDIA 架构上首次生成各自的 Engine。
-            file(GLOB TENSORRT_BUILDER_RUNTIME_DLLS CONFIGURE_DEPENDS
-                "${XEN_TENSORRT_ROOT}/bin/nvinfer_builder_resource_*_${XEN_TENSORRT_MAJOR}.dll")
-            list(APPEND TENSORRT_RUNTIME_DLLS ${TENSORRT_BUILDER_RUNTIME_DLLS})
-            xen_copy_runtime_files(${target} ${TENSORRT_RUNTIME_DLLS})
+        if(XEN_ONNXRUNTIME_HAS_TENSORRT)
+            xen_copy_runtime_files(${target} ${XEN_TENSORRT_RUNTIME_DLLS})
         elseif(XEN_ORT_USES_NVIDIA)
             message(STATUS "TensorRT runtime deployment skipped: XEN_TENSORRT_ROOT is empty")
         endif()
 
-        if(XEN_ORT_USES_NVIDIA AND
-           XEN_CUDNN_ROOT AND IS_DIRECTORY "${XEN_CUDNN_ROOT}")
-            file(GLOB_RECURSE CUDNN_RUNTIME_DLLS CONFIGURE_DEPENDS
-                "${XEN_CUDNN_ROOT}/*.dll")
-            xen_copy_runtime_files(${target} ${CUDNN_RUNTIME_DLLS})
-        elseif(XEN_ORT_USES_NVIDIA)
-            message(STATUS "cuDNN runtime deployment skipped: XEN_CUDNN_ROOT is empty")
+        if(XEN_ORT_USES_NVIDIA)
+            xen_copy_runtime_files(${target} ${XEN_CUDNN_RUNTIME_DLLS})
         endif()
 
-        if(XEN_ORT_USES_NVIDIA AND
-           XEN_CUDA_ROOT AND IS_DIRECTORY "${XEN_CUDA_ROOT}")
-            set(CUDA_RUNTIME_DLLS)
-            foreach(runtime_name
-                    cublas64_13.dll
-                    cublasLt64_13.dll
-                    cufft64_12.dll)
-                set(runtime_file "${XEN_CUDA_ROOT}/bin/x64/${runtime_name}")
-                if(EXISTS "${runtime_file}")
-                    list(APPEND CUDA_RUNTIME_DLLS "${runtime_file}")
-                endif()
-            endforeach()
-            xen_copy_runtime_files(${target} ${CUDA_RUNTIME_DLLS})
-            # FindCUDAToolkit 在 Windows 上的 CUDA::cudart TARGET_FILE 指向导入库
-            # cudart.lib，不是运行时 DLL。必须从 Toolkit bin 目录解析实际 DLL。
-            file(GLOB CUDA_CUDART_RUNTIME_DLLS CONFIGURE_DEPENDS
-                "${XEN_CUDA_ROOT}/bin/x64/cudart64_*.dll"
-                "${XEN_CUDA_ROOT}/bin/cudart64_*.dll")
-            list(REMOVE_DUPLICATES CUDA_CUDART_RUNTIME_DLLS)
-            list(LENGTH CUDA_CUDART_RUNTIME_DLLS CUDA_CUDART_RUNTIME_COUNT)
-            if(NOT CUDA_CUDART_RUNTIME_COUNT EQUAL 1)
-                message(FATAL_ERROR
-                    "Expected exactly one cudart64_*.dll under XEN_CUDA_ROOT, found "
-                    "${CUDA_CUDART_RUNTIME_COUNT}: ${XEN_CUDA_ROOT}")
-            endif()
-            xen_copy_runtime_files(${target} ${CUDA_CUDART_RUNTIME_DLLS})
-        elseif(XEN_ORT_USES_NVIDIA)
-            message(STATUS "CUDA runtime deployment skipped: XEN_CUDA_ROOT is empty")
+        if(XEN_ORT_USES_NVIDIA)
+            xen_copy_runtime_files(${target} ${XEN_CUDA_RUNTIME_DLLS})
         endif()
 
         # DML EP 编译进 onnxruntime.dll，但 DirectML 可再发行 DLL 必须位于进程
@@ -728,6 +818,13 @@ target_include_directories(app_release PUBLIC
 target_link_libraries(app_release
     PUBLIC nlohmann_json::nlohmann_json)
 
+add_library(app_launcher STATIC
+    Xen/app/launcher_decision.cpp)
+target_include_directories(app_launcher PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(app_launcher
+    PUBLIC app_release
+    PRIVATE config)
+
 add_library(runtime STATIC
     Xen/runtime/runtime.cpp
     Xen/runtime/runtime_queue.cpp)
@@ -735,6 +832,11 @@ target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
     PUBLIC detector capture aim aim_landmark mouse keyboard config log
     PRIVATE Threads::Threads)
+
+add_library(app_input STATIC
+    Xen/app/input_router.cpp)
+target_include_directories(app_input PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(app_input PUBLIC runtime)
 
 add_library(xen_debug STATIC
     Xen/debug/debug.cpp)
@@ -770,7 +872,7 @@ add_executable(xen_app WIN32
     Xen/app/xen.rc)
 set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
 target_link_libraries(xen_app PRIVATE
-    overlay runtime xen_debug config crash log app_release)
+    overlay app_input runtime xen_debug config crash log app_release)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_app OPENCV ORT NDI)
 endif()
@@ -781,6 +883,7 @@ add_executable(xen_launcher WIN32
     Xen/app/xen.rc)
 set_target_properties(xen_launcher PROPERTIES OUTPUT_NAME XenLauncher)
 target_link_libraries(xen_launcher PRIVATE app_release config)
+target_link_libraries(xen_launcher PRIVATE app_launcher)
 
 add_executable(xen_sender
     Xen/sender/main.cpp)
@@ -842,6 +945,26 @@ if(BUILD_TESTING)
             "-DXEN_DEPLOY_SCRIPT=${PROJECT_SOURCE_DIR}/scripts/deploy_runtime_file.cmake"
             "-DXEN_DEPLOY_TEST_ROOT=${CMAKE_BINARY_DIR}/runtime-deployment-tests"
             -P "${PROJECT_SOURCE_DIR}/tests/runtime_deployment_tests.cmake")
+
+    if(WIN32 AND XEN_ONNXRUNTIME_HAS_TENSORRT)
+        # NVIDIA 运行库 producer 通过正式根配置 seam 校验固定 component id、
+        # SDK allowlist 与缺件配置失败；夹具只创建独立 owned 临时构建目录。
+        add_test(NAME runtime_component_producer_tests
+            COMMAND ${CMAKE_COMMAND}
+                "-DXEN_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+                "-DXEN_COMPONENT_TEST_ROOT=${CMAKE_BINARY_DIR}/runtime-component-producer-tests"
+                "-DXEN_GENERATOR=${CMAKE_GENERATOR}"
+                "-DXEN_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+                "-DXEN_OPENCV_DIR=${OpenCV_DIR}"
+                "-DXEN_CUDA_ROOT=${XEN_CUDA_ROOT}"
+                "-DXEN_TENSORRT_PROVIDER_DLL=${ONNXRUNTIME_RUNTIME_DIR}/onnxruntime_providers_tensorrt.dll"
+                "-DXEN_TENSORRT_MAJOR=${XEN_TENSORRT_MAJOR}"
+                "-DXEN_SPDLOG_SOURCE_DIR=${spdlog_SOURCE_DIR}"
+                "-DXEN_SIMPLEINI_SOURCE_DIR=${simpleini_SOURCE_DIR}"
+                "-DXEN_NLOHMANN_JSON_SOURCE_DIR=${nlohmann_json_SOURCE_DIR}"
+                "-DXEN_IMGUI_SOURCE_DIR=${imgui_SOURCE_DIR}"
+                -P "${PROJECT_SOURCE_DIR}/tests/runtime_component_producer_tests.cmake")
+    endif()
 
     # 纯算法测试不链接 ORT Session，避免测试解码和坐标数学时依赖 GPU
     # 运行环境；同时复用生产源码，防止测试复制一套实现。
@@ -1001,6 +1124,14 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(runtime_tests OPENCV)
     add_test(NAME runtime_tests COMMAND runtime_tests)
 
+    # 输入健康专项串联公开 KeyboardListener 与 Runtime intent；不启动
+    # Capture、Detector 或真实鼠标后端，也不触发任何物理输出。
+    add_executable(input_safety_tests
+        tests/input_safety_tests.cpp)
+    target_link_libraries(input_safety_tests PRIVATE app_input)
+    xen_deploy_runtime_dlls(input_safety_tests OPENCV ORT NDI)
+    add_test(NAME input_safety_tests COMMAND input_safety_tests)
+
     # Overlay 标量历史环是纯算法契约；测试不创建 Win32/D3D11 窗口，也不链接 ImGui。
     add_executable(overlay_tests
         tests/overlay_tests.cpp)
@@ -1019,6 +1150,13 @@ if(BUILD_TESTING)
         tests/release_contract_tests.cpp)
     target_link_libraries(release_contract_tests PRIVATE app_release)
     add_test(NAME release_contract_tests COMMAND release_contract_tests)
+
+    # Launcher 决策专项只解析隔离临时配置并选择清单 Worker；不调用
+    # CreateProcessW，也不启动 GUI、Runtime 或任何物理输出。
+    add_executable(launcher_decision_tests
+        tests/launcher_decision_tests.cpp)
+    target_link_libraries(launcher_decision_tests PRIVATE app_launcher)
+    add_test(NAME launcher_decision_tests COMMAND launcher_decision_tests)
 
     set(XEN_WINDOWS_POWERSHELL
         "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe")

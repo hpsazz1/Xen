@@ -29,6 +29,8 @@ enum class MouseStatus {
 
 enum class InputMonitorStatus {
     CLOSED,
+    // 输入 adapter 存在，但当前 API 无法证明完整键态快照是否有效。
+    UNVERIFIED,
     WAITING,
     READY,
     STALE,
@@ -37,7 +39,8 @@ enum class InputMonitorStatus {
 
 struct InputSnapshot {
     InputMonitorStatus status = InputMonitorStatus::CLOSED;
-    // 仅当键态来自真实输入报告时为 true；链路状态本身不能推导按键释放。
+    // 仅当键态来自可排序的真实输入事实时为 true；链路状态本身不能
+    // 推导按键释放。同一设备代际内 sequence 必须随新事实严格递增。
     bool state_valid = false;
     std::array<bool, 256> virtual_keys{};
     std::uint64_t sequence = 0;

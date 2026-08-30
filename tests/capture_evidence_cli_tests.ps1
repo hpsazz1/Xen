@@ -7,6 +7,7 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot "..\scripts\path_safety.psm1") -Force
 
 $help = (& $Executable --help 2>&1) -join [Environment]::NewLine
 if ($LASTEXITCODE -ne 0 -or
@@ -24,14 +25,10 @@ if ($unknownExitCode -ne 2 -or $unknown -notmatch "未知") {
     throw "未知参数必须以用法错误退出"
 }
 
-$root = [IO.Path]::GetFullPath($TestRoot)
-if ($root -match '^[A-Za-z]:\\?$' -or $root -eq '\') {
-    throw "拒绝在文件系统根目录执行 Capture evidence CLI 测试"
-}
-if (Test-Path -LiteralPath $root) {
-    Remove-Item -LiteralPath $root -Recurse -Force
-}
-New-Item -ItemType Directory -Path $root | Out-Null
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$ownedTest = New-XenOwnedTestDirectory -BasePath $TestRoot `
+    -RepositoryRoot $repositoryRoot
+$root = $ownedTest.RootPath
 try {
     $output = Join-Path $root "must-not-exist"
     $ErrorActionPreference = "Continue"
@@ -50,6 +47,9 @@ try {
     Write-Host "Capture evidence CLI 安全边界和失败封闭测试通过。"
 } finally {
     if (Test-Path -LiteralPath $root) {
-        Remove-Item -LiteralPath $root -Recurse -Force
+        Remove-XenOwnedTestDirectory -RootPath $root `
+            -BasePath $ownedTest.BasePath `
+            -RepositoryRoot $repositoryRoot `
+            -OwnerId $ownedTest.OwnerId
     }
 }

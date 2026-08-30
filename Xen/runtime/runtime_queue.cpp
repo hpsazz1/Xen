@@ -383,8 +383,15 @@ PreviewStats RuntimePreviewChannel::stats() const noexcept {
     }
 }
 
+void SafetyGate::reset_session() noexcept {
+    armed_.store(false, std::memory_order_release);
+    hold_active_.store(false, std::memory_order_release);
+    emergency_stopped_.store(false, std::memory_order_release);
+}
+
 bool SafetyGate::arm() noexcept {
-    if (emergency_stopped_.load(std::memory_order_acquire)) {
+    if (!input_healthy_.load(std::memory_order_acquire) ||
+        emergency_stopped_.load(std::memory_order_acquire)) {
         return false;
     }
     armed_.store(true, std::memory_order_release);
@@ -393,6 +400,15 @@ bool SafetyGate::arm() noexcept {
 
 void SafetyGate::disarm() noexcept {
     armed_.store(false, std::memory_order_release);
+}
+
+void SafetyGate::set_input_health(bool healthy) noexcept {
+    input_healthy_.store(healthy, std::memory_order_release);
+    if (!healthy) {
+        // 健康失败只关闭独立输入门并解除武装，不伪装成用户急停，
+        // 也不改写最近一次真实 hold 事实。
+        armed_.store(false, std::memory_order_release);
+    }
 }
 
 void SafetyGate::set_hold(bool active) noexcept {
@@ -405,15 +421,23 @@ void SafetyGate::emergency_stop() noexcept {
 }
 
 bool SafetyGate::reset_emergency() noexcept {
-    if (hold_active_.load(std::memory_order_acquire)) return false;
+    if (!input_healthy_.load(std::memory_order_acquire) ||
+        hold_active_.load(std::memory_order_acquire)) {
+        return false;
+    }
     emergency_stopped_.store(false, std::memory_order_release);
     return true;
 }
 
 bool SafetyGate::can_dispatch() const noexcept {
-    return armed_.load(std::memory_order_acquire) &&
+    return input_healthy_.load(std::memory_order_acquire) &&
+           armed_.load(std::memory_order_acquire) &&
            hold_active_.load(std::memory_order_acquire) &&
            !emergency_stopped_.load(std::memory_order_acquire);
+}
+
+bool SafetyGate::input_healthy() const noexcept {
+    return input_healthy_.load(std::memory_order_acquire);
 }
 
 bool SafetyGate::output_armed() const noexcept {

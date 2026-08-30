@@ -7,6 +7,7 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot "..\scripts\path_safety.psm1") -Force
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
     $parent = Split-Path -Parent $Path
@@ -235,14 +236,10 @@ function Write-RealGameSceneCollection([string]$Path) {
     Write-Utf8NoBom $Path ($document | ConvertTo-Json -Depth 12)
 }
 
-$root = [IO.Path]::GetFullPath($TestRoot)
-if ($root -match '^[A-Za-z]:\\?$' -or $root -eq '\') {
-    throw "拒绝在文件系统根目录执行 OBS binding 测试"
-}
-if (Test-Path -LiteralPath $root) {
-    Remove-Item -LiteralPath $root -Recurse -Force
-}
-New-Item -ItemType Directory -Path $root | Out-Null
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$ownedTest = New-XenOwnedTestDirectory -BasePath $TestRoot `
+    -RepositoryRoot $repositoryRoot
+$root = $ownedTest.RootPath
 
 try {
     $static = Join-Path $root "静止.mp4"
@@ -825,6 +822,9 @@ OutputCY=360
     Write-Host "OBS source/transform/file/NDI binding 测试通过。"
 } finally {
     if (Test-Path -LiteralPath $root) {
-        Remove-Item -LiteralPath $root -Recurse -Force
+        Remove-XenOwnedTestDirectory -RootPath $root `
+            -BasePath $ownedTest.BasePath `
+            -RepositoryRoot $repositoryRoot `
+            -OwnerId $ownedTest.OwnerId
     }
 }

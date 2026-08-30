@@ -153,9 +153,9 @@ struct Runtime::Impl {
         preview_channel.set_session_active(false);
         stop_requested.store(false, std::memory_order_release);
         aim_reset_requested.store(false, std::memory_order_release);
-        safety_gate.emergency_stop();
-        safety_gate.set_hold(false);
-        safety_gate.reset_emergency();
+        // 新会话清除上次武装/按住/急停，但保留 App 持续投递的独立
+        // input-health；未验证输入时可以运行计算链，仍不能武装。
+        safety_gate.reset_session();
 
         detector = std::make_unique<Detector>(config.detector);
         if (!detector->load()) {
@@ -246,6 +246,7 @@ struct Runtime::Impl {
             current_snapshot.detector_generation = 1;
             current_snapshot.output_allowed_by_config =
                 config.mouse.allow_send_input;
+            current_snapshot.input_healthy = safety_gate.input_healthy();
             current_snapshot.preview_enabled = preview_enabled;
             current_snapshot.d3d11_cuda_interop =
                 config.capture.enable_d3d11_cuda_interop;
@@ -394,6 +395,7 @@ struct Runtime::Impl {
         }
         if (mouse_sent) ++current_snapshot.mouse_commands;
         current_snapshot.output_armed = safety_gate.output_armed();
+        current_snapshot.input_healthy = safety_gate.input_healthy();
         current_snapshot.aim_hold_active = safety_gate.hold_active();
         current_snapshot.emergency_stopped =
             safety_gate.emergency_stopped();
@@ -970,6 +972,8 @@ void Runtime::stop() noexcept {
             DetectorReloadState::IDLE;
         impl_->current_snapshot.detector_reload_error.clear();
         impl_->current_snapshot.output_armed = false;
+        impl_->current_snapshot.input_healthy =
+            impl_->safety_gate.input_healthy();
         impl_->current_snapshot.aim_hold_active = false;
         impl_->current_snapshot.emergency_stopped = true;
         impl_->current_snapshot.preview_enabled = preview_stats.enabled;
@@ -1161,6 +1165,9 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
         case RuntimeIntentType::DISARM_OUTPUT:
             impl_->safety_gate.disarm();
             break;
+        case RuntimeIntentType::INPUT_HEALTH_CHANGED:
+            impl_->safety_gate.set_input_health(intent.active);
+            break;
         case RuntimeIntentType::AIM_HOLD_CHANGED:
             impl_->safety_gate.set_hold(intent.active);
             // 按住键只控制物理发送门。Aim 在未按键期间仍按每个观测帧持续
@@ -1181,6 +1188,8 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
         impl_->current_snapshot.output_armed =
             impl_->safety_gate.output_armed();
+        impl_->current_snapshot.input_healthy =
+            impl_->safety_gate.input_healthy();
         impl_->current_snapshot.aim_hold_active =
             impl_->safety_gate.hold_active();
         impl_->current_snapshot.emergency_stopped =

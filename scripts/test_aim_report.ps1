@@ -1,8 +1,21 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-. (Join-Path $PSScriptRoot "aim_report.ps1")
-. (Join-Path $PSScriptRoot "aim_control_diagnostics.ps1")
+function Import-XenAimReportTestModule(
+        [string]$Path,
+        [string]$Name) {
+    $module = New-Module -Name $Name -ArgumentList $Path -ScriptBlock {
+        param([string]$AnalysisScriptPath)
+        . $AnalysisScriptPath
+    }
+    Import-Module $module -Force -Scope Local -ErrorAction Stop
+}
+
+Import-XenAimReportTestModule `
+    (Join-Path $PSScriptRoot "aim_report.ps1") "XenAimReportTest"
+Import-XenAimReportTestModule `
+    (Join-Path $PSScriptRoot "aim_control_diagnostics.ps1") `
+    "XenAimControlDiagnosticsTest"
 
 function Assert-Condition([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }

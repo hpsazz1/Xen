@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -50,6 +51,16 @@ struct KeyboardEvent {
     bool active = false;
 };
 
+// 一次轮询同时发布语义按键事件与独立输入健康。events 只来自新输入
+// 事实；健康变坏不会伪造 release 或 emergency key。
+struct KeyboardPollResult {
+    std::vector<KeyboardEvent> events;
+    InputMonitorStatus monitor_status = InputMonitorStatus::CLOSED;
+    bool input_healthy = false;
+    bool new_input_fact = false;
+    std::uint64_t sequence = 0;
+};
+
 class KeyboardListener {
 public:
     explicit KeyboardListener(const KeyboardConfig& config);
@@ -63,7 +74,7 @@ public:
     KeyboardListener& operator=(KeyboardListener&&) noexcept;
 
     bool open() noexcept;
-    std::vector<KeyboardEvent> poll() noexcept;
+    KeyboardPollResult poll() noexcept;
     void close() noexcept;
     KeyboardStatus status() const noexcept;
 

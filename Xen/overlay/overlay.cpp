@@ -1652,17 +1652,19 @@ struct Overlay::Impl {
             show_help_tooltip(
                 "解除本次 Runtime 会话的物理输出武装；检测和瞄准计算继续运行，但 Mouse 不再提交移动。");
         } else {
-            ImGui::BeginDisabled(
-                !running || snapshot.emergency_stopped ||
-                !snapshot.output_allowed_by_config ||
+            ImGui::BeginDisabled(!overlay::detail::output_arm_available(
+                running,
+                snapshot.emergency_stopped,
+                snapshot.output_allowed_by_config,
+                snapshot.input_healthy,
                 snapshot.detector_reload_state ==
-                    DetectorReloadState::LOADING);
+                    DetectorReloadState::LOADING));
             if (ImGui::Button("武装", ImVec2(kButtonWidth, 32.0f))) {
                 actions.runtime_intents.push_back(
                     {RuntimeIntentType::ARM_OUTPUT, true});
             }
             show_help_tooltip(
-                "在配置允许、Runtime 运行且急停正常时武装物理输出；仍需按住瞄准输出键才会发送移动。");
+                "仅在配置允许、Runtime 运行、输入健康可验证且急停正常时武装物理输出；仍需按住瞄准输出键才会发送移动。");
             ImGui::EndDisabled();
         }
 
@@ -3083,7 +3085,7 @@ struct Overlay::Impl {
                              OverlayActions& actions) {
         begin_config_panel("safety_panel", "安全门", 72.0f);
         if (ImGui::BeginTable(
-                "safety_grid", 4,
+                "safety_grid", 5,
                 ImGuiTableFlags_SizingStretchSame |
                 ImGuiTableFlags_BordersInnerV)) {
             ImGui::TableNextRow();
@@ -3095,17 +3097,23 @@ struct Overlay::Impl {
                     ? rgba(kSuccess) : rgba(kMutedInk));
             ImGui::TableSetColumnIndex(1);
             safety_gate_column(
+                "输入门",
+                snapshot.input_healthy ? "健康" : "未验证",
+                snapshot.input_healthy
+                    ? rgba(kSuccess) : rgba(kDanger));
+            ImGui::TableSetColumnIndex(2);
+            safety_gate_column(
                 "运行门",
                 snapshot.output_armed ? "已武装" : "未武装",
                 snapshot.output_armed
                     ? rgba(kSuccess) : rgba(kWarning));
-            ImGui::TableSetColumnIndex(2);
+            ImGui::TableSetColumnIndex(3);
             safety_gate_column(
                 "急停门",
                 snapshot.emergency_stopped ? "已锁定" : "正常",
                 snapshot.emergency_stopped
                     ? rgba(kDanger) : rgba(kSuccess));
-            ImGui::TableSetColumnIndex(3);
+            ImGui::TableSetColumnIndex(4);
             safety_gate_column(
                 "按住门",
                 snapshot.aim_hold_active ? "已按下" : "已释放",
@@ -3127,13 +3135,14 @@ struct Overlay::Impl {
             ImGui::TextColored(rgba(kDanger), "急停已锁定");
             ImGui::SetCursorPos(ImVec2(
                 ImGui::GetWindowWidth() - 110.0f, 9.0f));
-            ImGui::BeginDisabled(snapshot.aim_hold_active);
+            ImGui::BeginDisabled(
+                snapshot.aim_hold_active || !snapshot.input_healthy);
             if (ImGui::Button("复位急停", ImVec2(96.0f, 34.0f))) {
                 actions.runtime_intents.push_back(
                     {RuntimeIntentType::RESET_EMERGENCY, false});
             }
             show_help_tooltip(
-                "仅在所有瞄准输出按键已释放时清除急停锁存；复位后仍保持未武装，必须再次手动武装。");
+                "仅在输入健康可验证且所有瞄准输出按键已释放时清除急停锁存；复位后仍保持未武装，必须再次手动武装。");
             ImGui::EndDisabled();
             ImGui::EndChild();
             ImGui::PopStyleVar();

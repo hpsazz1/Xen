@@ -14,14 +14,14 @@ struct KeyboardEventState {
     std::array<bool, 256> previous_key_active{};
 };
 
-struct KeyboardPollResult {
+struct KeyboardEventPollResult {
     std::array<KeyboardEvent, 3> events{};
     std::size_t count = 0;
 };
 
 // 按住类对绑定集合取 OR；切换类按每个物理键的独立上升沿触发，避免一个键
 // 持续按住时屏蔽同组其他绑定键。
-inline KeyboardPollResult update_keyboard_events(
+inline KeyboardEventPollResult update_keyboard_events(
         KeyboardEventState& state,
         const KeyboardConfig& config,
         const std::array<bool, 256>& key_active) noexcept {
@@ -46,7 +46,7 @@ inline KeyboardPollResult update_keyboard_events(
     const bool emergency_pressed = any_pressed(config.emergency_virtual_keys);
     const bool runtime_toggle_pressed =
         any_pressed(config.runtime_toggle_virtual_keys);
-    KeyboardPollResult result;
+    KeyboardEventPollResult result;
     if (aim_hold_active != state.aim_hold_active) {
         result.events[result.count++] = {
             KeyboardEventType::AIM_HOLD_CHANGED, aim_hold_active};

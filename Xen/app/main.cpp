@@ -1,6 +1,7 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 
+#include "app/input_router.h"
 #include "app/model_catalog_internal.h"
 #include "app/release_contract_internal.h"
 #include "config/config.h"
@@ -262,7 +263,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     };
 
     while (overlay.pump_messages()) {
-        const std::vector<KeyboardEvent> keyboard_events = keyboard.poll();
+        const KeyboardPollResult keyboard_poll = keyboard.poll();
+        // health 不属于可被热键绑定 UI 吞掉的语义事件；先投递后再生成
+        // Snapshot 和渲染，保证武装控件与实际 SafetyGate 同帧一致。
+        app::detail::route_input_health(runtime, keyboard_poll);
         drain_debug_samples();
         RuntimeSnapshot snapshot = runtime.snapshot();
         if (detector_reload_pending &&
@@ -298,23 +302,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             break;
         }
 
-        bool emergency_pressed = false;
-        bool runtime_toggle_pressed = false;
-        if (!actions.hotkey_capture_consumed) {
-            for (const auto& event : keyboard_events) {
-                if (event.type == KeyboardEventType::AIM_HOLD_CHANGED) {
-                    runtime.post_intent({
-                        RuntimeIntentType::AIM_HOLD_CHANGED, event.active});
-                } else if (event.type ==
-                           KeyboardEventType::EMERGENCY_STOP) {
-                    emergency_pressed = true;
-                    runtime.post_intent({
-                        RuntimeIntentType::EMERGENCY_STOP, true});
-                } else if (event.type == KeyboardEventType::RUNTIME_TOGGLE) {
-                    runtime_toggle_pressed = true;
-                }
-            }
-        }
+        const auto keyboard_routing = app::detail::route_keyboard_events(
+            runtime, keyboard_poll, actions.hotkey_capture_consumed);
+        const bool emergency_pressed =
+            keyboard_routing.emergency_pressed;
+        const bool runtime_toggle_pressed =
+            keyboard_routing.runtime_toggle_pressed;
 
         if (actions.preview_enabled_changed &&
             !runtime.set_preview_enabled(actions.preview_enabled)) {

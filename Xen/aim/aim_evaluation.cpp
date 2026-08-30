@@ -178,6 +178,8 @@ bool target_is_default(const AimTargetSnapshot& target) noexcept {
            !target.matched_observation_head_only &&
            !target.matched_observation_aim_from_head &&
            target.base_aim_x == 0.0f && target.base_aim_y == 0.0f &&
+           target.prediction_aim_x == 0.0f &&
+           target.prediction_aim_y == 0.0f &&
            target.aim_x == 0.0f && target.aim_y == 0.0f &&
            target.velocity_x == 0.0f && target.velocity_y == 0.0f &&
            target.delay_compensated_aim_x == 0.0f &&
@@ -190,6 +192,7 @@ bool target_is_default(const AimTargetSnapshot& target) noexcept {
            target.delay_compensation_ms == 0.0f &&
            target.observation_age_ms == 0.0f &&
            target.confidence == 0.0f && !target.lead_active &&
+           !target.delay_compensation_active &&
            !target.predicted;
 }
 
@@ -214,6 +217,39 @@ bool inactive_command_is_valid(const AimEvaluationFrame& frame) noexcept {
 
 bool valid_box(float x1, float y1, float x2, float y2) noexcept;
 
+bool valid_prediction_point(const AimTargetSnapshot& target) noexcept {
+    if (!std::isfinite(target.prediction_aim_x) ||
+        !std::isfinite(target.prediction_aim_y)) {
+        return false;
+    }
+    // 旧评价输入没有独立 prediction 字段，反序列化后保持成对零值；
+    // 新输入必须与生产 Aim 当前公开的最终点保持同一坐标合同。
+    const bool historical_default = target.prediction_aim_x == 0.0f &&
+                                    target.prediction_aim_y == 0.0f;
+    return historical_default ||
+           (std::fabs(target.prediction_aim_x - target.aim_x) <=
+                kGeometryTolerance &&
+            std::fabs(target.prediction_aim_y - target.aim_y) <=
+                kGeometryTolerance);
+}
+
+bool valid_matched_observation(const AimTargetSnapshot& target) noexcept {
+    if (!target.matched_observation_valid) {
+        return target.matched_observation_x1 == 0.0f &&
+               target.matched_observation_y1 == 0.0f &&
+               target.matched_observation_x2 == 0.0f &&
+               target.matched_observation_y2 == 0.0f &&
+               !target.matched_observation_head_only &&
+               !target.matched_observation_aim_from_head;
+    }
+    // predicted/LOST 续帧不能把上一帧检测冒充为当前 Observation。
+    return !target.predicted &&
+           valid_box(target.matched_observation_x1,
+                     target.matched_observation_y1,
+                     target.matched_observation_x2,
+                     target.matched_observation_y2);
+}
+
 bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
     return !((frame.aim_status == AimStatus::SUCCESS &&
               (!std::isfinite(frame.acquisition_range_radius) ||
@@ -231,8 +267,9 @@ bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
              (frame.has_target &&
               (frame.target.track_id == 0 ||
                !valid_track_state(frame.target.state) ||
-               frame.target.predicted !=
-                   (frame.target.state == TrackState::LOST) ||
+                frame.target.predicted !=
+                    (frame.target.state == TrackState::LOST) ||
+                !valid_matched_observation(frame.target) ||
                 !valid_box(frame.target.x1, frame.target.y1,
                            frame.target.x2, frame.target.y2) ||
                 !std::isfinite(frame.target.base_aim_x) ||
@@ -243,6 +280,7 @@ bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
                 !std::isfinite(frame.target.velocity_y) ||
                 !std::isfinite(frame.target.delay_compensated_aim_x) ||
                 !std::isfinite(frame.target.delay_compensated_aim_y) ||
+                !valid_prediction_point(frame.target) ||
                 !std::isfinite(frame.target.lead_x) ||
                 !std::isfinite(frame.target.lead_y) ||
                 !std::isfinite(frame.target.delay_compensation_x) ||

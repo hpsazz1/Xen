@@ -1,5 +1,13 @@
 #include "config/config.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -15,6 +23,66 @@ void expect(bool condition, const std::string& message) {
     if (condition) return;
     ++failures;
     std::cerr << "[失败] " << message << '\n';
+}
+
+class ScopedHandle {
+public:
+    explicit ScopedHandle(HANDLE handle) : handle_(handle) {}
+    ~ScopedHandle() {
+        if (handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
+    }
+
+    ScopedHandle(const ScopedHandle&) = delete;
+    ScopedHandle& operator=(const ScopedHandle&) = delete;
+
+    [[nodiscard]] bool valid() const {
+        return handle_ != INVALID_HANDLE_VALUE;
+    }
+
+private:
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+};
+
+std::filesystem::path make_temp_test_directory(const char* name) {
+    const auto base = std::filesystem::temp_directory_path();
+    const std::string prefix =
+        std::string("xen_config_") + name + "_" +
+        std::to_string(GetCurrentProcessId()) + "_" +
+        std::to_string(GetTickCount64());
+    for (unsigned int attempt = 0; attempt < 100; ++attempt) {
+        const auto path = base / (prefix + "_" + std::to_string(attempt));
+        std::error_code error;
+        if (std::filesystem::create_directory(path, error)) return path;
+    }
+    return {};
+}
+
+bool write_file_bytes(const std::filesystem::path& path,
+                      const std::string& bytes) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    return output.good();
+}
+
+std::string read_file_bytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()};
+}
+
+bool directory_contains_only(const std::filesystem::path& directory,
+                             const std::filesystem::path& expected) {
+    std::error_code error;
+    std::size_t entry_count = 0;
+    bool found_expected = false;
+    for (std::filesystem::directory_iterator iterator(directory, error), end;
+         !error && iterator != end;
+         iterator.increment(error)) {
+        ++entry_count;
+        found_expected = found_expected || iterator->path() == expected;
+    }
+    return !error && entry_count == 1 && found_expected;
 }
 
 void test_current_code_defaults() {
@@ -364,6 +432,157 @@ void test_log_defaults_and_invalid_level() {
                error.find("detector") != std::string::npos,
            "未知模块日志等级必须明确拒绝并返回模块名");
     std::filesystem::remove(invalid_module_path, ignored);
+}
+
+void test_existing_file_rejects_malformed_typed_values() {
+    struct InvalidValueCase {
+        const char* name;
+        const char* content;
+        const char* expected_key;
+    };
+    const InvalidValueCase cases[]{
+        {
+            "enum",
+            "[detector]\nmodel_path=mutated.onnx\nbackend=tensor_rt_typo\n",
+            "detector.backend",
+        },
+        {
+            "number",
+            "[detector]\nmodel_path=mutated.onnx\n"
+            "[runtime]\nprofile_window=not-a-number\n",
+            "runtime.profile_window",
+        },
+        {
+            "bool",
+            "[detector]\nmodel_path=mutated.onnx\n"
+            "[ui]\nenable_vsync=sometimes\n",
+            "ui.enable_vsync",
+        },
+        {
+            "list",
+            "[detector]\nmodel_path=mutated.onnx\n"
+            "[aim]\nperson_class_ids=0,typo\n",
+            "aim.person_class_ids",
+        },
+    };
+
+    for (const auto& test_case : cases) {
+        const auto path = std::filesystem::temp_directory_path() /
+            (std::string("xen_config_invalid_existing_") +
+             test_case.name + ".ini");
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << test_case.content;
+        }
+
+        AppConfig config;
+        config.detector.model_path = "original-before-load.onnx";
+        const BackendType original_backend = config.detector.backend;
+        const int original_profile_window = config.runtime.profile_window;
+        const bool original_vsync = config.ui.enable_vsync;
+        const std::vector<int> original_person_ids =
+            config.aim.person_class_ids;
+        std::string error;
+        expect(!load_app_config(path.string(), config, error) &&
+                   error.find(test_case.expected_key) != std::string::npos &&
+                   config.detector.model_path ==
+                       "original-before-load.onnx" &&
+                   config.detector.backend == original_backend &&
+                   config.runtime.profile_window == original_profile_window &&
+                   config.ui.enable_vsync == original_vsync &&
+                   config.aim.person_class_ids == original_person_ids,
+               std::string("已有配置的非法 typed value 必须拒绝且保持 caller config：") +
+                   test_case.expected_key + "；error=" + error);
+
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+    }
+}
+
+void test_atomic_save_preserves_existing_file_on_write_failure() {
+    const auto directory = make_temp_test_directory("save_write_failure");
+    expect(!directory.empty(), "应能创建配置原子保存的隔离测试目录");
+    if (directory.empty()) return;
+
+    const auto path = directory / "config.ini";
+    const std::string old_bytes =
+        "; old config sentinel\r\n"
+        "[detector]\r\n"
+        "model_path=old-model.onnx\r\n";
+    expect(write_file_bytes(path, old_bytes),
+           "写故障测试应能预置旧配置字节");
+
+    AppConfig replacement;
+    replacement.detector.model_path = "replacement-model.onnx";
+    std::string error;
+    bool saved = true;
+    {
+        // 允许其他读取，但拒绝普通写入以及 replace/rename 所需的
+        // DELETE 共享；测试只锁定隔离目录内的 config.ini。
+        ScopedHandle lock(CreateFileW(
+            path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        expect(lock.valid(),
+               "写故障测试应能锁定隔离配置，Win32 error=" +
+                   std::to_string(GetLastError()));
+        if (lock.valid()) {
+            saved = save_app_config(path.string(), replacement, error);
+        }
+    }
+
+    expect(!saved && !error.empty(),
+           "目标写入被拒绝时 save_app_config 必须明确失败");
+    expect(read_file_bytes(path) == old_bytes,
+           "目标写入被拒绝时必须逐字节保留旧配置");
+    expect(directory_contains_only(directory, path),
+           "目标写入被拒绝后不得遗留临时文件");
+
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
+void test_atomic_save_preserves_existing_file_on_replace_failure() {
+    const auto directory = make_temp_test_directory("save_replace_failure");
+    expect(!directory.empty(), "应能创建配置原子替换的隔离测试目录");
+    if (directory.empty()) return;
+
+    const auto path = directory / "config.ini";
+    const std::string old_bytes =
+        "; old config sentinel\r\n"
+        "[detector]\r\n"
+        "model_path=old-model.onnx\r\n";
+    expect(write_file_bytes(path, old_bytes),
+           "替换故障测试应能预置旧配置字节");
+
+    AppConfig replacement;
+    replacement.detector.model_path = "replacement-model.onnx";
+    std::string error;
+    bool saved = true;
+    {
+        // 零访问句柄不与 CRT 独占 fopen 的访问需求冲突；它允许
+        // 普通覆盖写，但拒绝 ReplaceFileW/rename 所需的 DELETE 共享。
+        // 因而旧版直接 SaveFile 会稳定暴露为红灯。
+        ScopedHandle lock(CreateFileW(
+            path.c_str(), 0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr));
+        expect(lock.valid(),
+               "替换故障测试应能锁定隔离配置，Win32 error=" +
+                   std::to_string(GetLastError()));
+        if (lock.valid()) {
+            saved = save_app_config(path.string(), replacement, error);
+        }
+    }
+
+    expect(!saved && !error.empty(),
+           "原子替换被拒绝时 save_app_config 必须明确失败");
+    expect(read_file_bytes(path) == old_bytes,
+           "原子替换被拒绝时必须逐字节保留旧配置");
+    expect(directory_contains_only(directory, path),
+           "原子替换被拒绝后不得遗留临时文件");
+
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
 }
 
 void test_legacy_keyboard_config() {
@@ -736,6 +955,9 @@ int main() {
     test_round_trip();
     test_removed_observe_only_control_config();
     test_log_defaults_and_invalid_level();
+    test_existing_file_rejects_malformed_typed_values();
+    test_atomic_save_preserves_existing_file_on_write_failure();
+    test_atomic_save_preserves_existing_file_on_replace_failure();
     test_legacy_keyboard_config();
     test_invalid_config();
     test_complete_aim_config_validation();

@@ -2409,9 +2409,22 @@ if ($Mode -eq "Recover" -and $taskCapturePixelEvidence -and
         "Recover 缺少新 sidecar 生命周期合同的尝试证据。"
 }
 
-. $aimReportScript
-. $aimControlDiagnosticsScript
-. $aimFixedSceneAnalysisScript -Scenario $Scenario
+function Import-XenAimAnalysisModule(
+        [string]$Path,
+        [string]$Name) {
+    # 分析脚本在真实 module scope 中加载，隔离其参数、严格模式和临时变量。
+    $module = New-Module -Name $Name -ArgumentList $Path -ScriptBlock {
+        param([string]$AnalysisScriptPath)
+        . $AnalysisScriptPath
+    }
+    Import-Module $module -Force -Scope Local -ErrorAction Stop
+}
+
+Import-XenAimAnalysisModule $aimReportScript "XenAimReport"
+Import-XenAimAnalysisModule $aimControlDiagnosticsScript `
+    "XenAimControlDiagnostics"
+Import-XenAimAnalysisModule $aimFixedSceneAnalysisScript `
+    "XenAimFixedSceneAnalysis"
 $jsonReports = @($newReports | Where-Object { $_.Extension -ieq ".json" })
 $segments = @()
 $allSamples = @()

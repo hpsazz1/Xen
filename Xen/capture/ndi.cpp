@@ -19,6 +19,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <opencv2/imgproc.hpp>
 
@@ -40,6 +41,7 @@ bool terminal_status(CaptureStatus status) noexcept {
 
 constexpr int kMaxSourceDimension = 16384;
 constexpr auto kQueueProbeInterval = std::chrono::milliseconds(1000);
+constexpr auto kConnectionProbeInterval = std::chrono::milliseconds(250);
 
 SourceClockStatus source_clock_status(
         clock_sync::MappingStatus status) noexcept {
@@ -69,6 +71,230 @@ NetworkGeometryConfig geometry_config(const CaptureConfig& config) noexcept {
     result.roi_x = config.roi_x;
     result.roi_y = config.roi_y;
     return result;
+}
+
+} // namespace
+
+void NdiSessionState::reset(std::string configured_source_name) {
+    configured_source_name_ = std::move(configured_source_name);
+    snapshot_ = {};
+}
+
+bool NdiSessionState::observe_sources(
+        std::span<const NdiSourceView> sources) {
+    NdiSessionSnapshot next = snapshot_;
+    next.source_snapshot_observed = true;
+    next.source_count = sources.size();
+    next.candidate_source_names.clear();
+    for (const auto& source : sources) {
+        if (!source.name.empty()) {
+            next.candidate_source_names.emplace_back(source.name);
+        }
+    }
+    std::sort(next.candidate_source_names.begin(),
+              next.candidate_source_names.end());
+
+    const NdiSourceView* selected = nullptr;
+    const bool automatic = configured_source_name_ == "Auto" ||
+                           configured_source_name_ == "auto";
+    if (automatic && sources.size() == 1U) {
+        if (!sources.front().name.empty()) selected = &sources.front();
+    } else {
+        for (const auto& source : sources) {
+            if (source.name == configured_source_name_) {
+                selected = &source;
+                break;
+            }
+        }
+    }
+    next.selected_source.reset();
+    if (selected) {
+        next.selection_reason = NdiSessionFailureReason::NONE;
+        next.stage = NdiSessionStage::SOURCE_SELECTED;
+        next.selected_source = NdiOwnedSource{
+            std::string(selected->name), std::string(selected->url)};
+    } else {
+        next.stage = NdiSessionStage::DISCOVERING;
+        if (sources.empty()) {
+            next.selection_reason = NdiSessionFailureReason::ZERO_SOURCES;
+        } else if (automatic && sources.size() > 1U) {
+            next.selection_reason =
+                NdiSessionFailureReason::SOURCE_SELECTION_AMBIGUOUS;
+        } else {
+            next.selection_reason =
+                NdiSessionFailureReason::SOURCE_NAME_NOT_FOUND;
+        }
+    }
+
+    const bool changed =
+        next.stage != snapshot_.stage ||
+        next.selection_reason != snapshot_.selection_reason ||
+        next.source_snapshot_observed !=
+            snapshot_.source_snapshot_observed ||
+        next.source_count != snapshot_.source_count ||
+        next.candidate_source_names != snapshot_.candidate_source_names ||
+        next.receiver_create_failed != snapshot_.receiver_create_failed ||
+        next.selected_source.has_value() !=
+            snapshot_.selected_source.has_value() ||
+        (next.selected_source &&
+         (next.selected_source->name != snapshot_.selected_source->name ||
+          next.selected_source->url != snapshot_.selected_source->url));
+    snapshot_ = std::move(next);
+    return changed;
+}
+
+bool NdiSessionState::record_receiver_created(bool created) noexcept {
+    const NdiSessionStage next_stage = snapshot_.selected_source
+        ? NdiSessionStage::SOURCE_SELECTED
+        : NdiSessionStage::DISCOVERING;
+    const bool changed =
+        snapshot_.receiver_create_failed != !created ||
+        snapshot_.receiver_instance_created != created ||
+        snapshot_.receiver_active_connections != 0 ||
+        snapshot_.stage != (created
+            ? NdiSessionStage::RECEIVER_CREATED : next_stage);
+    snapshot_.receiver_create_failed = !created;
+    snapshot_.receiver_instance_created = created;
+    snapshot_.receiver_active_connections = 0;
+    snapshot_.stage = created
+        ? NdiSessionStage::RECEIVER_CREATED : next_stage;
+    return changed;
+}
+
+bool NdiSessionState::record_active_connections(int connections) noexcept {
+    connections = std::max(0, connections);
+    const bool activates = connections > 0 &&
+        snapshot_.stage != NdiSessionStage::FIRST_VIDEO_FRAME;
+    const bool changed =
+        snapshot_.receiver_active_connections != connections ||
+        (activates && snapshot_.stage != NdiSessionStage::ACTIVE_CONNECTION);
+    snapshot_.receiver_active_connections = connections;
+    if (connections > 0) {
+        snapshot_.receiver_ever_connected = true;
+        if (snapshot_.stage != NdiSessionStage::FIRST_VIDEO_FRAME) {
+            snapshot_.stage = NdiSessionStage::ACTIVE_CONNECTION;
+        }
+    }
+    return changed;
+}
+
+bool NdiSessionState::record_valid_frame() noexcept {
+    const bool changed = !snapshot_.first_video_frame_received ||
+        snapshot_.stage != NdiSessionStage::FIRST_VIDEO_FRAME ||
+        snapshot_.receiver_connection_lost;
+    snapshot_.receiver_instance_created = true;
+    snapshot_.receiver_create_failed = false;
+    snapshot_.receiver_active_connections =
+        std::max(1, snapshot_.receiver_active_connections);
+    snapshot_.receiver_ever_connected = true;
+    snapshot_.first_video_frame_received = true;
+    snapshot_.receiver_connection_lost = false;
+    snapshot_.stage = NdiSessionStage::FIRST_VIDEO_FRAME;
+    return changed;
+}
+
+bool NdiSessionState::record_receiver_error() noexcept {
+    const bool changed = snapshot_.receiver_instance_created ||
+        snapshot_.receiver_active_connections != 0 ||
+        !snapshot_.receiver_connection_lost;
+    snapshot_.receiver_instance_created = false;
+    snapshot_.receiver_create_failed = false;
+    snapshot_.receiver_active_connections = 0;
+    snapshot_.receiver_connection_lost =
+        snapshot_.first_video_frame_received;
+    snapshot_.stage = snapshot_.selected_source
+        ? NdiSessionStage::SOURCE_SELECTED
+        : NdiSessionStage::DISCOVERING;
+    return changed;
+}
+
+NdiSessionFailureReason NdiSessionState::terminal_reason() const noexcept {
+    if (snapshot_.receiver_connection_lost ||
+        snapshot_.first_video_frame_received) {
+        return NdiSessionFailureReason::RECEIVER_CONNECTION_LOST;
+    }
+    if (snapshot_.receiver_create_failed) {
+        return NdiSessionFailureReason::RECEIVER_CREATE_FAILED;
+    }
+    if (snapshot_.receiver_ever_connected) {
+        return NdiSessionFailureReason::FIRST_FRAME_TIMEOUT;
+    }
+    if (snapshot_.receiver_instance_created) {
+        return NdiSessionFailureReason::RECEIVER_CONNECT_TIMEOUT;
+    }
+    return snapshot_.selection_reason;
+}
+
+NdiReceiveLoopDecision advance_ndi_receive_loop(
+        NdiReceiveLoopEvent event,
+        NdiSessionState& session_state,
+        const NdiSilenceWatchdog& silence_watchdog,
+        NdiSilenceWatchdog::Clock::time_point now,
+        int discovery_timeout_ms,
+        int disconnect_timeout_ms) noexcept {
+    const NdiSessionFailureReason terminal_reason =
+        session_state.terminal_reason();
+    if (event == NdiReceiveLoopEvent::RECEIVER_ERROR) {
+        session_state.record_receiver_error();
+    }
+    if (silence_watchdog.expired(
+            now, discovery_timeout_ms, disconnect_timeout_ms)) {
+        return {NdiReceiveLoopAction::ACCESS_LOST, terminal_reason};
+    }
+    if (event == NdiReceiveLoopEvent::RECEIVER_ERROR) {
+        return {
+            NdiReceiveLoopAction::RECONNECT_RECEIVER,
+            terminal_reason};
+    }
+    return {NdiReceiveLoopAction::KEEP_RECEIVING, terminal_reason};
+}
+
+namespace {
+
+std::string candidate_names_text(
+        const std::vector<std::string>& names) {
+    std::string result;
+    for (const auto& name : names) {
+        if (!result.empty()) result += ", ";
+        result += name;
+    }
+    return result.empty() ? "<none>" : result;
+}
+
+std::string ndi_terminal_message(
+        NdiSessionFailureReason reason,
+        std::string_view configured_source_name,
+        const NdiSessionSnapshot& snapshot) {
+    const std::string candidates =
+        candidate_names_text(snapshot.candidate_source_names);
+    switch (reason) {
+        case NdiSessionFailureReason::ZERO_SOURCES:
+            return "NDI 发现超时：未观察到候选源";
+        case NdiSessionFailureReason::SOURCE_NAME_NOT_FOUND:
+            return "NDI 发现超时：配置源未精确匹配；source=" +
+                std::string(configured_source_name) +
+                "，candidates=" + candidates;
+        case NdiSessionFailureReason::SOURCE_SELECTION_AMBIGUOUS:
+            return "NDI 发现超时：Auto 模式候选源不唯一；candidates=" +
+                candidates;
+        case NdiSessionFailureReason::RECEIVER_CREATE_FAILED:
+            return "NDI Receiver 实例创建失败；source=" +
+                (snapshot.selected_source
+                    ? snapshot.selected_source->name : "<none>");
+        case NdiSessionFailureReason::RECEIVER_CONNECT_TIMEOUT:
+            return "NDI Receiver 活动连接超时；source=" +
+                (snapshot.selected_source
+                    ? snapshot.selected_source->name : "<none>");
+        case NdiSessionFailureReason::FIRST_FRAME_TIMEOUT:
+            return "NDI Receiver 已有活动连接但未交付首个有效视频帧；source=" +
+                (snapshot.selected_source
+                    ? snapshot.selected_source->name : "<none>");
+        case NdiSessionFailureReason::RECEIVER_CONNECTION_LOST:
+            return "NDI 源长时间无可用视频帧，采集会话已失效";
+        case NdiSessionFailureReason::NONE:
+            break;
+    }
+    return "NDI 会话在未知阶段超时";
 }
 
 } // namespace
@@ -157,13 +383,13 @@ public:
             }
             frames_.reset();
             last_metadata_.reset();
-            source_name_.clear();
-            source_url_.clear();
+            session_state_.reset(config_.ndi_source_name);
             sequence_ = 0;
             performance_sample_counter_ = 0;
             source_received_frames_ = 0;
             transport_dropped_frames_ = 0;
             last_queue_probe_at_ = {};
+            last_connection_probe_at_ = {};
             last_delivered_sequence_ = 0;
             published_sequence_.store(0, std::memory_order_release);
             stop_requested_.store(false, std::memory_order_release);
@@ -237,8 +463,6 @@ public:
         destroy_finder();
         frames_.reset();
         last_metadata_.reset();
-        source_name_.clear();
-        source_url_.clear();
         published_sequence_.store(0, std::memory_order_release);
         status_.store(CaptureStatus::CLOSED, std::memory_order_release);
         library_.reset();
@@ -319,7 +543,7 @@ private:
         }
     }
 
-    bool connect_source() noexcept {
+    bool connect_source() {
         if (receiver_ || !finder_) return receiver_ != nullptr;
         const std::uint32_t wait_ms = static_cast<std::uint32_t>(
             std::min(config_.ndi_discovery_timeout_ms, 250));
@@ -327,28 +551,27 @@ private:
         std::uint32_t count = 0;
         const NDIlib_source_t* sources =
             NDIlib_find_get_current_sources(finder_, &count);
-        if (!sources || count == 0) return false;
-
-        const NDIlib_source_t* selected = nullptr;
-        if (config_.ndi_source_name == "Auto" ||
-            config_.ndi_source_name == "auto") {
-            if (count == 1) selected = &sources[0];
-        } else {
+        std::vector<NdiSourceView> source_views;
+        if (sources) {
+            source_views.reserve(count);
             for (std::uint32_t index = 0; index < count; ++index) {
-                if (sources[index].p_ndi_name &&
-                    config_.ndi_source_name == sources[index].p_ndi_name) {
-                    selected = &sources[index];
-                    break;
-                }
+                source_views.push_back({
+                    sources[index].p_ndi_name
+                        ? std::string_view(sources[index].p_ndi_name)
+                        : std::string_view{},
+                    sources[index].p_url_address
+                        ? std::string_view(sources[index].p_url_address)
+                        : std::string_view{}});
             }
         }
-        if (!selected || !selected->p_ndi_name) return false;
+        session_state_.observe_sources(source_views);
+        const auto& selected = session_state_.snapshot().selected_source;
+        if (!selected) return false;
 
-        source_name_ = selected->p_ndi_name;
-        source_url_ = selected->p_url_address ? selected->p_url_address : "";
         NDIlib_source_t source{};
-        source.p_ndi_name = source_name_.c_str();
-        source.p_url_address = source_url_.empty() ? nullptr : source_url_.c_str();
+        source.p_ndi_name = selected->name.c_str();
+        source.p_url_address = selected->url.empty()
+            ? nullptr : selected->url.c_str();
         NDIlib_recv_create_v3_t settings{};
         settings.source_to_connect_to = source;
         settings.color_format = NDIlib_recv_color_format_BGRX_BGRA;
@@ -356,17 +579,42 @@ private:
         settings.allow_video_fields = false;
         settings.p_ndi_recv_name = "Xen NDI Capture";
         receiver_ = NDIlib_recv_create_v3(&settings);
+        session_state_.record_receiver_created(receiver_ != nullptr);
         if (!receiver_) {
-            source_name_.clear();
-            source_url_.clear();
             return false;
         }
         performance_sample_counter_ = 0;
         source_received_frames_ = 0;
         transport_dropped_frames_ = 0;
         last_queue_probe_at_ = {};
-        LOG_INFO("capture", "NDI 已连接源: {}", source_name_);
+        last_connection_probe_at_ = {};
+        LOG_INFO("capture", "NDI Receiver 实例已创建: source={}",
+                 selected->name);
         return true;
+    }
+
+    void observe_active_connections(
+            std::chrono::steady_clock::time_point now) noexcept {
+        if (!receiver_ ||
+            (last_connection_probe_at_ !=
+                 std::chrono::steady_clock::time_point{} &&
+             now - last_connection_probe_at_ < kConnectionProbeInterval)) {
+            return;
+        }
+        last_connection_probe_at_ = now;
+        const int previous =
+            session_state_.snapshot().receiver_active_connections;
+        const int current = NDIlib_recv_get_no_connections(receiver_);
+        if (!session_state_.record_active_connections(current)) return;
+        if (previous <= 0 && current > 0) {
+            LOG_INFO("capture", "NDI 活动连接已建立: source={}",
+                     session_state_.snapshot().selected_source
+                         ? session_state_.snapshot().selected_source->name
+                         : "<none>");
+        } else {
+            LOG_TRACE("capture", "NDI 活动连接数变化: previous={}, current={}",
+                      previous, std::max(0, current));
+        }
     }
 
     bool publish_video(const NDIlib_video_frame_v2_t& video,
@@ -580,9 +828,10 @@ private:
                         config_.ndi_discovery_timeout_ms,
                         config_.ndi_disconnect_timeout_ms)) {
                     fail(CaptureStatus::ACCESS_LOST,
-                         silence_watchdog_.received_valid_frame()
-                             ? "NDI 源长时间无可用视频帧，采集会话已失效"
-                             : "NDI 发现超时，未找到唯一匹配的源");
+                         ndi_terminal_message(
+                             session_state_.terminal_reason(),
+                             config_.ndi_source_name,
+                             session_state_.snapshot()));
                     return;
                 }
                 status_.store(CaptureStatus::NO_FRAME,
@@ -590,6 +839,7 @@ private:
                 continue;
             }
 
+            observe_active_connections(std::chrono::steady_clock::now());
             NDIlib_video_frame_v2_t video{};
             NDIlib_metadata_frame_t metadata_frame{};
             const auto received_at = std::chrono::steady_clock::now();
@@ -651,27 +901,58 @@ private:
                 if (published) {
                     silence_watchdog_.record_valid_frame(
                         std::chrono::steady_clock::now());
+                    const bool recovering = session_state_.snapshot().
+                        receiver_connection_lost;
+                    if (session_state_.record_valid_frame()) {
+                        if (recovering) {
+                            LOG_INFO("capture",
+                                "NDI 有效视频帧已恢复: source={}",
+                                session_state_.snapshot().selected_source
+                                    ? session_state_.snapshot().
+                                        selected_source->name
+                                    : "<none>");
+                        } else {
+                            LOG_INFO("capture",
+                                "NDI 首个有效视频帧已收到: source={}",
+                                session_state_.snapshot().selected_source
+                                    ? session_state_.snapshot().
+                                        selected_source->name
+                                    : "<none>");
+                        }
+                    }
                 }
                 continue;
             }
+            const NdiReceiveLoopDecision loop_decision =
+                advance_ndi_receive_loop(
+                    type == NDIlib_frame_type_error
+                        ? NdiReceiveLoopEvent::RECEIVER_ERROR
+                        : NdiReceiveLoopEvent::NON_VIDEO_FRAME,
+                    session_state_, silence_watchdog_,
+                    std::chrono::steady_clock::now(),
+                    config_.ndi_discovery_timeout_ms,
+                    config_.ndi_disconnect_timeout_ms);
             if (type == NDIlib_frame_type_error) {
+                last_connection_probe_at_ = {};
                 destroy_receiver();
                 last_metadata_.reset();
+            }
+            if (loop_decision.action ==
+                    NdiReceiveLoopAction::ACCESS_LOST) {
+                fail(CaptureStatus::ACCESS_LOST,
+                     ndi_terminal_message(
+                         loop_decision.terminal_reason,
+                         config_.ndi_source_name,
+                         session_state_.snapshot()));
+                return;
+            }
+            if (loop_decision.action ==
+                    NdiReceiveLoopAction::RECONNECT_RECEIVER) {
                 continue;
             }
             if (type == NDIlib_frame_type_none) {
                 status_.store(CaptureStatus::NO_FRAME,
                               std::memory_order_release);
-            }
-            if (silence_watchdog_.expired(
-                    std::chrono::steady_clock::now(),
-                    config_.ndi_discovery_timeout_ms,
-                    config_.ndi_disconnect_timeout_ms)) {
-                fail(CaptureStatus::ACCESS_LOST,
-                     silence_watchdog_.received_valid_frame()
-                         ? "NDI 源长时间无可用视频帧，采集会话已失效"
-                         : "NDI 发现超时，源未交付首个有效视频帧");
-                return;
             }
         }
     }
@@ -681,8 +962,7 @@ private:
     clock_sync::Client clock_client_;
     NDIlib_find_instance_t finder_ = nullptr;
     NDIlib_recv_instance_t receiver_ = nullptr;
-    std::string source_name_;
-    std::string source_url_;
+    NdiSessionState session_state_;
     std::optional<XenFrameMetadata> last_metadata_;
     NetworkLatestFramePool frames_;
     std::thread worker_;
@@ -698,6 +978,7 @@ private:
     std::uint64_t source_received_frames_ = 0;
     std::uint64_t transport_dropped_frames_ = 0;
     std::chrono::steady_clock::time_point last_queue_probe_at_{};
+    std::chrono::steady_clock::time_point last_connection_probe_at_{};
     std::uint64_t last_delivered_sequence_ = 0;
     NdiSilenceWatchdog silence_watchdog_;
 };

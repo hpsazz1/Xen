@@ -5,7 +5,13 @@
 #include "capture/network_internal.h"
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace capture::detail {
 
@@ -50,6 +56,96 @@ private:
     bool received_valid_frame_ = false;
     Clock::time_point last_valid_frame_at_{};
 };
+
+enum class NdiSessionStage : std::uint8_t {
+    DISCOVERING,
+    SOURCE_SELECTED,
+    RECEIVER_CREATED,
+    ACTIVE_CONNECTION,
+    FIRST_VIDEO_FRAME,
+};
+
+enum class NdiSessionFailureReason : std::uint8_t {
+    NONE,
+    ZERO_SOURCES,
+    SOURCE_NAME_NOT_FOUND,
+    SOURCE_SELECTION_AMBIGUOUS,
+    RECEIVER_CREATE_FAILED,
+    RECEIVER_CONNECT_TIMEOUT,
+    FIRST_FRAME_TIMEOUT,
+    RECEIVER_CONNECTION_LOST,
+};
+
+struct NdiSourceView {
+    std::string_view name;
+    std::string_view url;
+};
+
+struct NdiOwnedSource {
+    std::string name;
+    std::string url;
+};
+
+struct NdiSessionSnapshot {
+    NdiSessionStage stage = NdiSessionStage::DISCOVERING;
+    NdiSessionFailureReason selection_reason =
+        NdiSessionFailureReason::ZERO_SOURCES;
+    bool source_snapshot_observed = false;
+    std::size_t source_count = 0;
+    std::vector<std::string> candidate_source_names;
+    std::optional<NdiOwnedSource> selected_source;
+    bool receiver_create_failed = false;
+    bool receiver_instance_created = false;
+    int receiver_active_connections = 0;
+    bool receiver_ever_connected = false;
+    bool first_video_frame_received = false;
+    bool receiver_connection_lost = false;
+};
+
+// Finder/Receiver 只提供借用 SDK 快照；本状态 owner 在一次调用内复制字符串，
+// 并把发现、实例、活动连接和首帧保持为互不冒充的证据层。
+class NdiSessionState final {
+public:
+    void reset(std::string configured_source_name);
+    bool observe_sources(std::span<const NdiSourceView> sources);
+    bool record_receiver_created(bool created) noexcept;
+    bool record_active_connections(int connections) noexcept;
+    bool record_valid_frame() noexcept;
+    bool record_receiver_error() noexcept;
+
+    NdiSessionFailureReason terminal_reason() const noexcept;
+    const NdiSessionSnapshot& snapshot() const noexcept { return snapshot_; }
+
+private:
+    std::string configured_source_name_;
+    NdiSessionSnapshot snapshot_;
+};
+
+enum class NdiReceiveLoopEvent : std::uint8_t {
+    NON_VIDEO_FRAME,
+    RECEIVER_ERROR,
+};
+
+enum class NdiReceiveLoopAction : std::uint8_t {
+    KEEP_RECEIVING,
+    RECONNECT_RECEIVER,
+    ACCESS_LOST,
+};
+
+struct NdiReceiveLoopDecision {
+    NdiReceiveLoopAction action = NdiReceiveLoopAction::KEEP_RECEIVING;
+    NdiSessionFailureReason terminal_reason = NdiSessionFailureReason::NONE;
+};
+
+// SDK frame 资源仍由 NdiCapture 释放；这里只推进接收循环的状态与有界静默判定，
+// 使真实 error/none 分支和可注入时钟测试共用同一条决策路径。
+NdiReceiveLoopDecision advance_ndi_receive_loop(
+    NdiReceiveLoopEvent event,
+    NdiSessionState& session_state,
+    const NdiSilenceWatchdog& silence_watchdog,
+    NdiSilenceWatchdog::Clock::time_point now,
+    int discovery_timeout_ms,
+    int disconnect_timeout_ms) noexcept;
 
 std::unique_ptr<ICapture> create_ndi_capture(
     const CaptureConfig& config) noexcept;

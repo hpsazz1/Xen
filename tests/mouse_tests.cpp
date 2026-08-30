@@ -46,6 +46,23 @@ void expect(bool condition, const std::string& message) {
     std::cerr << "[失败] " << message << '\n';
 }
 
+void test_win32_input_stays_unverified_without_owned_source() {
+    MouseConfig config;
+    config.backend = MouseBackend::WIN32_SEND_INPUT;
+    config.allow_send_input = false;
+    auto mouse = MouseDeviceFactory::create(config);
+    expect(mouse && mouse->open(),
+           "Win32 输出 adapter 必须能在物理输出禁用态打开");
+    InputSnapshot first;
+    InputSnapshot second;
+    expect(mouse && mouse->poll_input(first) && mouse->poll_input(second) &&
+               first.status == InputMonitorStatus::UNVERIFIED &&
+               second.status == InputMonitorStatus::UNVERIFIED &&
+               !first.state_valid && !second.state_valid &&
+               first.sequence == 0 && second.sequence == 0,
+           "GetAsyncKeyState 不得被包装成可验证的完整键态或推进事实序号");
+}
+
 std::uint32_t read_u32_le(const std::uint8_t* input) noexcept {
     return static_cast<std::uint32_t>(input[0]) |
            (static_cast<std::uint32_t>(input[1]) << 8U) |
@@ -845,6 +862,7 @@ int main() {
     log_config.enable_ringbuf = false;
     Log::init(log_config);
 
+    test_win32_input_stays_unverified_without_owned_source();
     test_disabled_does_not_access_network();
     test_packet_layout_and_sequence();
     test_kmbox_monitor_retains_state_until_explicit_release();

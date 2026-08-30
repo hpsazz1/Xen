@@ -7,11 +7,38 @@ if(NOT DEFINED XEN_DEPLOY_TEST_ROOT OR XEN_DEPLOY_TEST_ROOT STREQUAL "")
     message(FATAL_ERROR "缺少运行库部署测试目录。")
 endif()
 
-get_filename_component(test_root "${XEN_DEPLOY_TEST_ROOT}" ABSOLUTE)
-file(TO_CMAKE_PATH "${test_root}" test_root)
-if(test_root MATCHES "^[A-Za-z]:/?$" OR test_root STREQUAL "/")
-    message(FATAL_ERROR "拒绝使用文件系统根目录执行部署测试：${test_root}")
+get_filename_component(test_base "${XEN_DEPLOY_TEST_ROOT}" ABSOLUTE)
+get_filename_component(repository_root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+set(path_safety_script
+    "${repository_root}/scripts/invoke_path_safety.ps1")
+set(windows_powershell
+    "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe")
+if(NOT EXISTS "${windows_powershell}" OR NOT EXISTS "${path_safety_script}")
+    message(FATAL_ERROR "缺少 Windows PowerShell 或路径 owner adapter。")
 endif()
+execute_process(
+    COMMAND "${windows_powershell}" -NoProfile -ExecutionPolicy Bypass
+        -File "${path_safety_script}"
+        -Action New
+        -BasePath "${test_base}"
+        -RepositoryRoot "${repository_root}"
+    RESULT_VARIABLE owner_create_result
+    OUTPUT_VARIABLE owner_create_output
+    ERROR_VARIABLE owner_create_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT owner_create_result EQUAL 0)
+    message(FATAL_ERROR
+        "无法创建 owner 测试目录：${owner_create_error}")
+endif()
+string(REPLACE "\r" "" owner_create_output "${owner_create_output}")
+string(REPLACE "\t" ";" owner_record "${owner_create_output}")
+list(LENGTH owner_record owner_record_count)
+if(NOT owner_record_count EQUAL 2)
+    message(FATAL_ERROR "路径 owner adapter 返回格式无效：${owner_create_output}")
+endif()
+list(GET owner_record 0 test_root)
+list(GET owner_record 1 owner_id)
+file(TO_CMAKE_PATH "${test_root}" test_root)
 
 set(source_a "${test_root}/source-a")
 set(source_b "${test_root}/source-b")
@@ -20,7 +47,6 @@ set(lock_path "${test_root}/runtime-deployment.lock")
 set(manifest_a "${test_root}/manifest-a.cmake")
 set(manifest_b "${test_root}/manifest-b.cmake")
 
-file(REMOVE_RECURSE "${test_root}")
 file(MAKE_DIRECTORY "${source_a}" "${source_b}" "${output_directory}")
 
 function(assert_exists path description)
@@ -162,5 +188,21 @@ foreach(forbidden_text IN ITEMS
             "部署报告仍包含上一配置记录：${forbidden_text}")
     endif()
 endforeach()
+
+execute_process(
+    COMMAND "${windows_powershell}" -NoProfile -ExecutionPolicy Bypass
+        -File "${path_safety_script}"
+        -Action Remove
+        -BasePath "${test_base}"
+        -RepositoryRoot "${repository_root}"
+        -RootPath "${test_root}"
+        -OwnerId "${owner_id}"
+    RESULT_VARIABLE owner_remove_result
+    OUTPUT_VARIABLE owner_remove_output
+    ERROR_VARIABLE owner_remove_error)
+if(NOT owner_remove_result EQUAL 0)
+    message(FATAL_ERROR
+        "owner 测试目录清理失败：${owner_remove_error}")
+endif()
 
 message(STATUS "运行库授权清单、陈旧清理、来源切换与 SHA-256 报告测试通过。")

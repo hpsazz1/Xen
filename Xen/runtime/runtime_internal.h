@@ -278,17 +278,21 @@ private:
 
 class SafetyGate {
 public:
+    void reset_session() noexcept;
     bool arm() noexcept;
     void disarm() noexcept;
+    void set_input_health(bool healthy) noexcept;
     void set_hold(bool active) noexcept;
     void emergency_stop() noexcept;
     bool reset_emergency() noexcept;
     bool can_dispatch() const noexcept;
+    bool input_healthy() const noexcept;
     bool output_armed() const noexcept;
     bool hold_active() const noexcept;
     bool emergency_stopped() const noexcept;
 
 private:
+    std::atomic<bool> input_healthy_{false};
     std::atomic<bool> armed_{false};
     std::atomic<bool> hold_active_{false};
     std::atomic<bool> emergency_stopped_{false};

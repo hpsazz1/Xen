@@ -39,6 +39,7 @@ enum class RuntimeIntentType {
     STOP,
     ARM_OUTPUT,
     DISARM_OUTPUT,
+    INPUT_HEALTH_CHANGED,
     AIM_HOLD_CHANGED,
     EMERGENCY_STOP,
     RESET_EMERGENCY,
@@ -269,6 +270,7 @@ struct RuntimeSnapshot {
     double control_latency_p95_ms = 0.0;
     PipelineProfile last_profile;
     bool output_allowed_by_config = false;
+    bool input_healthy = false;
     bool output_armed = false;
     bool aim_hold_active = false;
     bool emergency_stopped = false;

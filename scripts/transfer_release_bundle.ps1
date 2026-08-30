@@ -7,6 +7,7 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot "path_safety.psm1") -Force
 
 function Resolve-RequiredDirectory(
         [string]$Path,
@@ -81,7 +82,6 @@ function Copy-PackageWithProgress(
         [string]$TargetRoot,
         [object]$Manifest,
         [string]$ManifestPath) {
-    New-Item -ItemType Directory -Path $TargetRoot | Out-Null
     $entries = @($Manifest.files | ForEach-Object {
         [pscustomobject]@{
             path = [string]$_.path
@@ -152,11 +152,25 @@ Write-Host "[1/4] 校验本地完整发布包文件与 SHA-256..."
 Assert-PackageFiles $package $manifest
 
 $destination = Resolve-RequiredDirectory $DestinationRoot "辅机 XenLab 共享"
-$releaseRoot = Join-Path $destination $DestinationDirectory
+$releaseRoot = Resolve-XenDirectChildPath `
+    -RootPath $destination `
+    -Name $DestinationDirectory `
+    -Description "DestinationDirectory"
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
+$releaseRoot = Resolve-XenDirectChildPath `
+    -RootPath $destination `
+    -Name $DestinationDirectory `
+    -Description "DestinationDirectory after creation"
 $releaseRoot = Resolve-RequiredDirectory $releaseRoot "辅机发布目录"
-$published = Join-Path $releaseRoot $packageName
-$incoming = Join-Path $releaseRoot ".incoming-$packageName"
+$published = Resolve-XenDirectChildPath `
+    -RootPath $releaseRoot `
+    -Name $packageName `
+    -Description "Published package directory"
+$incomingName = ".incoming-$packageName"
+$incoming = Resolve-XenDirectChildPath `
+    -RootPath $releaseRoot `
+    -Name $incomingName `
+    -Description "Incoming package directory"
 if ((Test-Path -LiteralPath $published) -or
     (Test-Path -LiteralPath $incoming)) {
     throw "辅机正式目录或临时目录已存在，拒绝覆盖：$packageName"
@@ -164,6 +178,15 @@ if ((Test-Path -LiteralPath $published) -or
 
 try {
     Write-Host "[2/4] 复制到辅机临时目录：$incoming"
+    $incoming = Resolve-XenDirectChildPath `
+        -RootPath $releaseRoot `
+        -Name $incomingName `
+        -Description "Incoming package directory before creation"
+    New-Item -ItemType Directory -Path $incoming | Out-Null
+    $incoming = Resolve-XenDirectChildPath `
+        -RootPath $releaseRoot `
+        -Name $incomingName `
+        -Description "Incoming package directory after creation"
     Copy-PackageWithProgress $package $incoming $manifest `
         $manifestResult.Path
     Write-Host "[3/4] 回读辅机文件并复核 SHA-256..."
@@ -177,11 +200,21 @@ try {
         throw "辅机 manifest.json 回读哈希不一致。"
     }
     Write-Host "[4/4] 全部校验通过，原子发布正式目录..."
+    $incoming = Resolve-XenDirectChildPath `
+        -RootPath $releaseRoot `
+        -Name $incomingName `
+        -Description "Incoming package directory before publish"
     Rename-Item -LiteralPath $incoming -NewName $packageName
 } catch {
     if (Test-Path -LiteralPath $incoming) {
-        Remove-Item -LiteralPath $incoming -Recurse -Force `
-            -ErrorAction SilentlyContinue
+        $verifiedIncoming = Resolve-XenDirectChildPath `
+            -RootPath $releaseRoot `
+            -Name $incomingName `
+            -Description "Incoming package directory before cleanup"
+        if ($verifiedIncoming -ine $incoming) {
+            throw "Incoming cleanup path changed after validation: $incoming"
+        }
+        Remove-Item -LiteralPath $verifiedIncoming -Recurse -Force
     }
     throw
 }

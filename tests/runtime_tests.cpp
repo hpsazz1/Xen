@@ -179,10 +179,23 @@ void test_directml_frame_requires_fence() {
 
 void test_safety_gate() {
     runtime::detail::SafetyGate gate;
-    expect(!gate.can_dispatch(), "安全门默认必须关闭");
-    expect(gate.arm(), "无急停时允许物理武装");
+    expect(!gate.input_healthy() && !gate.can_dispatch(),
+           "输入健康默认未验证，安全门必须关闭");
+    expect(!gate.arm(), "输入健康未验证时不得物理武装");
+    gate.set_input_health(true);
+    expect(gate.input_healthy() && gate.arm(),
+           "输入健康且无急停时允许物理武装");
     gate.set_hold(true);
     expect(gate.can_dispatch(), "物理武装且按住热键时允许派发");
+    gate.set_input_health(false);
+    expect(!gate.can_dispatch() && !gate.output_armed() &&
+               gate.hold_active() && !gate.emergency_stopped(),
+           "输入健康失败必须解除武装并保留按住和急停事实");
+    gate.set_input_health(true);
+    expect(!gate.can_dispatch() && !gate.output_armed(),
+           "输入健康恢复不得自动重新武装");
+    expect(gate.arm() && gate.can_dispatch(),
+           "恢复后只允许显式重新武装");
     gate.emergency_stop();
     expect(!gate.can_dispatch() && !gate.output_armed(),
            "急停必须原子解除武装并拒绝后续命令");
@@ -191,6 +204,14 @@ void test_safety_gate() {
     gate.set_hold(false);
     expect(gate.reset_emergency(), "释放热键后允许复位急停");
     expect(!gate.can_dispatch(), "复位急停不能自动重新武装");
+    gate.set_input_health(false);
+    gate.emergency_stop();
+    expect(!gate.reset_emergency(),
+           "输入健康未验证时不得用缓存释放复位急停");
+    gate.reset_session();
+    expect(!gate.emergency_stopped() && !gate.output_armed() &&
+               !gate.hold_active() && !gate.input_healthy(),
+           "新会话应清安全状态但保留独立输入健康门");
 }
 
 void test_bounded_sample_ring() {

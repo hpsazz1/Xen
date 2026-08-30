@@ -196,6 +196,37 @@ AimEvaluationFrame command_frame(std::size_t index,
     return frame;
 }
 
+bool evaluation_metrics_are_default(
+    const AimEvaluationMetrics& metrics) noexcept {
+    return !metrics.annotations_present && !metrics.complete &&
+           metrics.annotated_frames == 0 && metrics.visible_frames == 0 &&
+           metrics.matched_visible_frames == 0 &&
+           metrics.missed_visible_frames == 0 &&
+           metrics.not_visible_frames == 0 && metrics.ignored_frames == 0 &&
+           metrics.output_target_frames == 0 &&
+           metrics.invalid_aim_frames == 0 && metrics.id_switches == 0 &&
+           metrics.track_fragments == 0 &&
+           metrics.track_fragmentation_events == 0 &&
+           metrics.unnecessary_switches == 0 && !metrics.has_previous_frame &&
+           metrics.previous_frame_index == 0 && !metrics.previous_visible &&
+           !metrics.previous_matched &&
+           metrics.previous_ground_truth_id == 0 &&
+           metrics.previous_track_id == 0 &&
+           metrics.last_track_by_ground_truth.empty() &&
+           metrics.last_frame_by_ground_truth.empty() &&
+           metrics.fragment_count_by_ground_truth.empty();
+}
+
+bool rejects_without_metrics_mutation(
+    const AimGroundTruthAnnotation& annotation,
+    const AimEvaluationFrame& frame,
+    std::string& error) {
+    AimEvaluationMetrics metrics;
+    return !aim::detail::record_aim_evaluation(
+               annotation, AimEvaluationConfig{}, frame, metrics, error) &&
+           evaluation_metrics_are_default(metrics);
+}
+
 void test_annotation_contract() {
     AimGroundTruthAnnotation annotation;
     std::string error;
@@ -630,6 +661,78 @@ void test_control_contract_rejections() {
            "未覆盖全部视频帧的控制连续性不得发布");
 }
 
+void test_snapshot_schema_contract_rejections() {
+    AimGroundTruthAnnotation annotation;
+    std::string error;
+    expect(aim::detail::parse_aim_ground_truth_annotation(
+               valid_json(), expectation(), annotation, error),
+           "snapshot 合同测试真值必须可解析：" + error);
+    if (annotation.frames.empty()) return;
+
+    AimEvaluationFrame historical =
+        output_frame(0, 10, 60, 40, 100, 120);
+    AimEvaluationMetrics historical_metrics;
+    expect(aim::detail::record_aim_evaluation(
+               annotation, AimEvaluationConfig{}, historical,
+               historical_metrics, error),
+           "未填写新增 prediction/Observation 字段的历史评价帧必须兼容：" +
+               error);
+
+    AimEvaluationFrame no_target = output_frame(0, 0, 0, 0, 0, 0);
+    AimEvaluationMetrics no_target_metrics;
+    expect(aim::detail::record_aim_evaluation(
+               annotation, AimEvaluationConfig{}, no_target,
+               no_target_metrics, error),
+           "默认无目标评价帧必须保持合法：" + error);
+
+    AimEvaluationFrame stale_delay_flag = no_target;
+    stale_delay_flag.target.delay_compensation_active = true;
+    expect(rejects_without_metrics_mutation(
+               annotation, stale_delay_flag, error),
+           "无目标默认快照残留 delay compensation active 时必须拒绝且不得修改评价指标");
+
+    AimEvaluationFrame non_finite_prediction =
+        output_frame(0, 10, 60, 40, 100, 120);
+    non_finite_prediction.target.prediction_aim_x =
+        std::numeric_limits<float>::quiet_NaN();
+    expect(rejects_without_metrics_mutation(
+               annotation, non_finite_prediction, error),
+           "prediction 点含非有限数时必须拒绝且不得修改评价指标");
+
+    AimEvaluationFrame inconsistent_prediction =
+        output_frame(0, 10, 60, 40, 100, 120);
+    inconsistent_prediction.target.prediction_aim_x =
+        inconsistent_prediction.target.aim_x + 1.0f;
+    inconsistent_prediction.target.prediction_aim_y =
+        inconsistent_prediction.target.aim_y;
+    expect(rejects_without_metrics_mutation(
+               annotation, inconsistent_prediction, error),
+           "非零 prediction 点与最终点不一致时必须拒绝且不得修改评价指标");
+
+    AimEvaluationFrame stale_prediction = output_frame(0, 0, 0, 0, 0, 0);
+    stale_prediction.target.prediction_aim_x = 1.0f;
+    expect(rejects_without_metrics_mutation(
+               annotation, stale_prediction, error),
+           "无目标帧残留非零 prediction 点时必须拒绝且不得修改评价指标");
+
+    AimEvaluationFrame stale_observation =
+        output_frame(0, 10, 60, 40, 100, 120);
+    stale_observation.target.matched_observation_x1 = 60.0f;
+    stale_observation.target.matched_observation_y1 = 40.0f;
+    stale_observation.target.matched_observation_x2 = 100.0f;
+    stale_observation.target.matched_observation_y2 = 120.0f;
+    expect(rejects_without_metrics_mutation(
+               annotation, stale_observation, error),
+           "Observation 标志无效却残留框时必须拒绝且不得修改评价指标");
+
+    AimEvaluationFrame invalid_observation =
+        output_frame(0, 10, 60, 40, 100, 120);
+    invalid_observation.target.matched_observation_valid = true;
+    expect(rejects_without_metrics_mutation(
+               annotation, invalid_observation, error),
+           "Observation 标志有效却没有合法框时必须拒绝且不得修改评价指标");
+}
+
 void test_sequence_and_annotation_set() {
     AimGroundTruthAnnotation annotation;
     std::string error;
@@ -680,6 +783,7 @@ int main() {
     test_source_to_scaled_roi_coordinates();
     test_control_continuity_metrics();
     test_control_contract_rejections();
+    test_snapshot_schema_contract_rejections();
     test_sequence_and_annotation_set();
 
     if (failures != 0) {

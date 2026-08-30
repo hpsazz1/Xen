@@ -339,6 +339,46 @@ void test_invalid_or_incomplete_capture_never_publishes() {
            "没有完整 manifest 的未录满录制仍必须清理 incoming");
 }
 
+void test_required_source_timing_rejects_invalid_frames() {
+    {
+        TemporaryDirectory temporary;
+        expect(temporary.valid(), "必须创建无效源时钟测试临时目录");
+        const CaptureEvidenceConfig config = test_config(temporary, 1);
+        capture_evidence::CaptureEvidenceRecorder recorder;
+        std::string error;
+        expect(recorder.start(config, error),
+               "无效源时钟测试必须先正常启动：" + error);
+
+        CapturedFrame frame = test_frame(1, 1);
+        frame.timing.source_time_timing_valid = false;
+        expect(!recorder.record(frame, error) && !error.empty() &&
+                   recorder.recorded_frame_count() == 0,
+               "require_source_timing 必须拒绝 timing_valid=false 的帧");
+        expect(!recorder.finish(error) &&
+                   !std::filesystem::exists(config.output_directory),
+               "无效源时钟帧不得形成正式证据目录");
+    }
+
+    {
+        TemporaryDirectory temporary;
+        expect(temporary.valid(), "必须创建非 VALID 源时钟测试临时目录");
+        const CaptureEvidenceConfig config = test_config(temporary, 1);
+        capture_evidence::CaptureEvidenceRecorder recorder;
+        std::string error;
+        expect(recorder.start(config, error),
+               "非 VALID 源时钟测试必须先正常启动：" + error);
+
+        CapturedFrame frame = test_frame(1, 1);
+        frame.timing.source_clock_status = SourceClockStatus::STALE;
+        expect(!recorder.record(frame, error) && !error.empty() &&
+                   recorder.recorded_frame_count() == 0,
+               "require_source_timing 必须拒绝 source clock 非 VALID 的帧");
+        expect(!recorder.finish(error) &&
+                   !std::filesystem::exists(config.output_directory),
+               "非 VALID 源时钟帧不得形成正式证据目录");
+    }
+}
+
 void test_multi_second_directory_rename_lock_is_retried() {
     TemporaryDirectory temporary;
     expect(temporary.valid(), "必须创建 transient rename 测试临时目录");
@@ -534,14 +574,31 @@ void test_advertised_maximum_standard_roi_frames_are_recordable() {
                error);
 }
 
+void test_impossible_frame_byte_budget_is_rejected_at_start() {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), "必须创建帧字节预算测试临时目录");
+    constexpr std::uint64_t kRequestedFrames = 656;
+    CaptureEvidenceConfig config = test_config(temporary, kRequestedFrames);
+    config.capture.roi_width = 640;
+    config.capture.roi_height = 640;
+
+    capture_evidence::CaptureEvidenceRecorder recorder;
+    std::string error;
+    expect(!recorder.start(config, error) && !error.empty() &&
+               !std::filesystem::exists(config.output_directory),
+           "640x640x656 BGR 超过 768 MiB 的任务必须在 start 前置拒绝");
+}
+
 } // namespace
 
 int main() {
     test_lossless_atomic_publication_and_identity();
     test_invalid_or_incomplete_capture_never_publishes();
+    test_required_source_timing_rejects_invalid_frames();
     test_multi_second_directory_rename_lock_is_retried();
     test_directory_publish_retry_never_overwrites_appearing_final();
     test_completed_incoming_survives_publish_failure();
+    test_impossible_frame_byte_budget_is_rejected_at_start();
     test_advertised_maximum_standard_roi_frames_are_recordable();
     if (failures != 0) {
         std::cerr << failures << " 项 Capture evidence 测试失败。\n";

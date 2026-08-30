@@ -24,6 +24,10 @@ struct KeyboardListener::Impl {
     std::shared_ptr<IMouseController> device;
     KeyboardStatus status = KeyboardStatus::CLOSED;
     keyboard::detail::KeyboardEventState event_state;
+    InputMonitorStatus monitor_status = InputMonitorStatus::CLOSED;
+    bool input_healthy = false;
+    bool have_input_fact = false;
+    std::uint64_t last_input_sequence = 0;
 };
 
 KeyboardListener::KeyboardListener(const KeyboardConfig& config)
@@ -48,6 +52,12 @@ bool KeyboardListener::open() noexcept {
     }
     Log::register_module("keyboard", LogLevel::INFO);
     impl_->event_state = {};
+    impl_->monitor_status = impl_->device
+        ? InputMonitorStatus::WAITING
+        : InputMonitorStatus::UNVERIFIED;
+    impl_->input_healthy = false;
+    impl_->have_input_fact = false;
+    impl_->last_input_sequence = 0;
     impl_->status = KeyboardStatus::READY;
     LOG_INFO("keyboard", "全局按键轮询已启用: hold_keys={}, emergency_keys={}, toggle_keys={}",
              impl_->config.aim_hold_virtual_keys.size(),
@@ -56,48 +66,88 @@ bool KeyboardListener::open() noexcept {
     return true;
 }
 
-std::vector<KeyboardEvent> KeyboardListener::poll() noexcept {
-    std::vector<KeyboardEvent> events;
-    if (!impl_ || impl_->status != KeyboardStatus::READY) return events;
+KeyboardPollResult KeyboardListener::poll() noexcept {
+    KeyboardPollResult result;
+    if (!impl_) {
+        result.monitor_status = InputMonitorStatus::FAILURE;
+        return result;
+    }
+    const auto publish_state = [&]() noexcept {
+        result.monitor_status = impl_->monitor_status;
+        result.input_healthy = impl_->input_healthy;
+        result.sequence = impl_->have_input_fact
+            ? impl_->last_input_sequence : 0;
+    };
+    publish_state();
+    if (impl_->status != KeyboardStatus::READY) return result;
     try {
-        std::array<bool, 256> key_active{};
-        if (impl_->device) {
-            InputSnapshot snapshot;
-            if (!impl_->device->poll_input(snapshot)) {
-                impl_->status = KeyboardStatus::FAILURE;
-                return events;
+        if (!impl_->device) {
+            // GetAsyncKeyState 的全零结果无法区分释放与查询失败；无 owned
+            // input source 时只报告 UNVERIFIED，不推进任何语义按键事实。
+            impl_->monitor_status = InputMonitorStatus::UNVERIFIED;
+            impl_->input_healthy = false;
+            publish_state();
+            return result;
+        }
+
+        InputSnapshot snapshot;
+        if (!impl_->device->poll_input(snapshot)) {
+            impl_->monitor_status = InputMonitorStatus::FAILURE;
+            impl_->input_healthy = false;
+            impl_->status = KeyboardStatus::FAILURE;
+            publish_state();
+            return result;
+        }
+
+        impl_->monitor_status = snapshot.status;
+        bool new_input_fact = false;
+        if (snapshot.state_valid &&
+            (!impl_->have_input_fact ||
+             snapshot.sequence > impl_->last_input_sequence)) {
+            new_input_fact = true;
+            impl_->have_input_fact = true;
+            impl_->last_input_sequence = snapshot.sequence;
+
+            const auto polled = keyboard::detail::update_keyboard_events(
+                impl_->event_state, impl_->config, snapshot.virtual_keys);
+            result.events.reserve(polled.count);
+            for (std::size_t index = 0; index < polled.count; ++index) {
+                result.events.push_back(polled.events[index]);
             }
-            // 只有来自真实输入报告的快照才能推进按键状态。status 只描述链路，
-            // 等待、陈旧、故障或关闭都不能被猜测成“所有键已释放”。
-            if (!snapshot.state_valid) return events;
-            key_active = snapshot.virtual_keys;
+        }
+
+        // READY 的同序号可维持 change-only monitor 的健康；发生过故障后，
+        // 同一缓存序号不能恢复健康，必须等新的有效输入事实。
+        const bool current_sequence = snapshot.state_valid &&
+            impl_->have_input_fact &&
+            snapshot.sequence == impl_->last_input_sequence;
+        if (snapshot.status == InputMonitorStatus::READY &&
+            current_sequence &&
+            (new_input_fact || impl_->input_healthy)) {
+            impl_->input_healthy = true;
         } else {
-            const auto poll_binding = [&](const std::vector<int>& virtual_keys) {
-                for (const int virtual_key : virtual_keys) {
-                    key_active[static_cast<std::size_t>(virtual_key)] =
-                        (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
-                }
-            };
-            poll_binding(impl_->config.aim_hold_virtual_keys);
-            poll_binding(impl_->config.emergency_virtual_keys);
-            poll_binding(impl_->config.runtime_toggle_virtual_keys);
+            impl_->input_healthy = false;
         }
-        const auto polled = keyboard::detail::update_keyboard_events(
-            impl_->event_state, impl_->config, key_active);
-        events.reserve(polled.count);
-        for (std::size_t index = 0; index < polled.count; ++index) {
-            events.push_back(polled.events[index]);
-        }
+        result.new_input_fact = new_input_fact;
+        publish_state();
     } catch (...) {
         impl_->status = KeyboardStatus::FAILURE;
-        events.clear();
+        impl_->monitor_status = InputMonitorStatus::FAILURE;
+        impl_->input_healthy = false;
+        result.events.clear();
+        result.new_input_fact = false;
+        publish_state();
     }
-    return events;
+    return result;
 }
 
 void KeyboardListener::close() noexcept {
     if (!impl_) return;
     impl_->event_state = {};
+    impl_->monitor_status = InputMonitorStatus::CLOSED;
+    impl_->input_healthy = false;
+    impl_->have_input_fact = false;
+    impl_->last_input_sequence = 0;
     impl_->status = KeyboardStatus::CLOSED;
 }
 

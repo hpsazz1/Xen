@@ -1,6 +1,7 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 
+#include "app/launcher_decision_internal.h"
 #include "app/release_contract_internal.h"
 #include "app/model_catalog_internal.h"
 #include "config/config.h"
@@ -25,6 +26,10 @@ void show_error(const std::string& message) {
         wide = L"发布入口发生未知错误";
     }
     MessageBoxW(nullptr, wide.c_str(), L"Xen", MB_OK | MB_ICONERROR);
+}
+
+void show_decision_error(void*, const std::string& message) {
+    show_error(message);
 }
 
 std::filesystem::path executable_path() {
@@ -72,17 +77,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     for (;;) {
-        AppConfig config;
-        std::string config_error;
-        load_app_config(
+        const app::detail::ReleaseRuntimeEntry* runtime = nullptr;
+        const app::detail::LauncherDecisionAdapter decision_adapter{
+            nullptr, show_decision_error};
+        const int decision_exit = app::detail::resolve_launcher_runtime(
+            manifest,
             app::detail::path_to_utf8(root / L"config.ini"),
-            config, config_error);
-        const auto* runtime = app::detail::find_runtime_for_backend(
-            manifest, config.detector.backend);
-        if (!runtime) {
-            show_error("配置请求的推理后端未被发布清单授权");
-            return 1;
-        }
+            decision_adapter, runtime);
+        if (decision_exit != 0) return decision_exit;
 
         const std::wstring root_value = root.wstring();
         const std::wstring runtime_value(

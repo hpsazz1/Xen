@@ -77,19 +77,11 @@ public:
             snapshot.status = InputMonitorStatus::CLOSED;
             return true;
         }
-        try {
-            for (int virtual_key = 1; virtual_key <= 0xff; ++virtual_key) {
-                snapshot.virtual_keys[static_cast<std::size_t>(virtual_key)] =
-                    (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
-            }
-            snapshot.status = InputMonitorStatus::READY;
-            snapshot.state_valid = true;
-            snapshot.sequence = ++input_sequence_;
-            return true;
-        } catch (...) {
-            snapshot.status = InputMonitorStatus::FAILURE;
-            return false;
-        }
+        // GetAsyncKeyState 返回 0 同时可能表示未按下或 desktop/UIPI 失败，
+        // API 没有可据此验证完整 256 键快照的错误合同。在引入有明确
+        // health owner 的输入源前，Win32 输出 adapter 必须保持输入未验证。
+        snapshot.status = InputMonitorStatus::UNVERIFIED;
+        return true;
     }
 
     void close() noexcept override {
@@ -116,7 +108,6 @@ private:
 
     MouseConfig config_;
     std::atomic<MouseStatus> status_{MouseStatus::CLOSED};
-    std::uint64_t input_sequence_ = 0;
     mutable std::mutex error_mutex_;
     std::string last_error_;
 };

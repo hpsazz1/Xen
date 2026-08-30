@@ -2,6 +2,14 @@
 
 #include "aim/aim_config_internal.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
 #include <SimpleIni.h>
 
 #ifdef ERROR
@@ -9,11 +17,14 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -317,6 +328,398 @@ void set_error(std::string& error, const std::string& value) noexcept {
     }
 }
 
+class ScopedFileHandle {
+public:
+    ScopedFileHandle() = default;
+    explicit ScopedFileHandle(HANDLE handle) noexcept : handle_(handle) {}
+    ~ScopedFileHandle() { close(); }
+
+    ScopedFileHandle(const ScopedFileHandle&) = delete;
+    ScopedFileHandle& operator=(const ScopedFileHandle&) = delete;
+
+    ScopedFileHandle(ScopedFileHandle&& other) noexcept
+        : handle_(std::exchange(other.handle_, INVALID_HANDLE_VALUE)) {}
+
+    ScopedFileHandle& operator=(ScopedFileHandle&& other) noexcept {
+        if (this == &other) return *this;
+        close();
+        handle_ = std::exchange(other.handle_, INVALID_HANDLE_VALUE);
+        return *this;
+    }
+
+    [[nodiscard]] bool valid() const noexcept {
+        return handle_ != INVALID_HANDLE_VALUE;
+    }
+
+    [[nodiscard]] HANDLE get() const noexcept { return handle_; }
+
+    bool close() noexcept {
+        if (!valid()) return true;
+        const HANDLE handle =
+            std::exchange(handle_, INVALID_HANDLE_VALUE);
+        return CloseHandle(handle) != FALSE;
+    }
+
+private:
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+};
+
+class ScopedTemporaryPath {
+public:
+    explicit ScopedTemporaryPath(
+            const std::filesystem::path& path) noexcept
+        : path_(&path) {}
+
+    ~ScopedTemporaryPath() {
+        if (path_) DeleteFileW(path_->c_str());
+    }
+
+    ScopedTemporaryPath(const ScopedTemporaryPath&) = delete;
+    ScopedTemporaryPath& operator=(const ScopedTemporaryPath&) = delete;
+
+    void release() noexcept { path_ = nullptr; }
+
+private:
+    const std::filesystem::path* path_ = nullptr;
+};
+
+void set_file_error(std::string& error,
+                    std::string_view operation,
+                    const std::string& path,
+                    DWORD win32_error) {
+    set_error(error,
+              std::string(operation) + ": " + path +
+                  " (Win32=" + std::to_string(win32_error) + ")");
+}
+
+bool write_file_atomically(const std::string& path,
+                           const std::string& bytes,
+                           std::string& error) {
+    const std::filesystem::path target_path(path);
+    if (target_path.empty()) {
+        set_error(error, "配置文件路径不能为空");
+        return false;
+    }
+
+    // 临时文件名直接派生自目标路径，确保创建在同一目录和同一卷；
+    // CREATE_NEW 让并发保存只会换一个候选名，不会复用残留文件。
+    static std::atomic<unsigned long long> next_temporary_id{0};
+    std::filesystem::path temporary_path;
+    ScopedFileHandle temporary_file;
+    DWORD create_error = ERROR_FILE_EXISTS;
+    for (unsigned int attempt = 0; attempt < 128; ++attempt) {
+        auto candidate = target_path;
+        candidate +=
+            ".tmp." + std::to_string(GetCurrentProcessId()) + "." +
+            std::to_string(next_temporary_id.fetch_add(
+                1, std::memory_order_relaxed));
+        ScopedFileHandle candidate_file(CreateFileW(
+            candidate.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (candidate_file.valid()) {
+            temporary_path = std::move(candidate);
+            temporary_file = std::move(candidate_file);
+            break;
+        }
+
+        create_error = GetLastError();
+        if (create_error != ERROR_FILE_EXISTS &&
+            create_error != ERROR_ALREADY_EXISTS) {
+            set_file_error(
+                error, "无法创建同目录配置临时文件", path, create_error);
+            return false;
+        }
+    }
+    if (!temporary_file.valid()) {
+        set_file_error(
+            error, "无法创建唯一配置临时文件", path, create_error);
+        return false;
+    }
+
+    ScopedTemporaryPath cleanup(temporary_path);
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const std::size_t remaining = bytes.size() - offset;
+        const DWORD requested = static_cast<DWORD>((std::min)(
+            remaining,
+            static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
+        DWORD written = 0;
+        if (!WriteFile(temporary_file.get(), bytes.data() + offset,
+                       requested, &written, nullptr) ||
+            written == 0) {
+            const DWORD write_error = GetLastError();
+            temporary_file.close();
+            set_file_error(
+                error, "无法写入配置临时文件", path, write_error);
+            return false;
+        }
+        offset += written;
+    }
+
+    if (!FlushFileBuffers(temporary_file.get())) {
+        const DWORD flush_error = GetLastError();
+        temporary_file.close();
+        set_file_error(
+            error, "无法刷新配置临时文件", path, flush_error);
+        return false;
+    }
+    if (!temporary_file.close()) {
+        const DWORD close_error = GetLastError();
+        set_file_error(
+            error, "无法关闭配置临时文件", path, close_error);
+        return false;
+    }
+
+    // 同卷 MoveFileExW 是一次 rename；只有 rename 成功后旧目标才会
+    // 被替换，失败路径仍由 cleanup 删除未发布的临时文件。
+    if (!MoveFileExW(
+            temporary_path.c_str(), target_path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD replace_error = GetLastError();
+        set_file_error(
+            error, "无法原子替换配置文件", path, replace_error);
+        return false;
+    }
+
+    cleanup.release();
+    error.clear();
+    return true;
+}
+
+struct TypedConfigKey {
+    const char* section;
+    const char* key;
+};
+
+std::string qualified_key(const TypedConfigKey& key) {
+    return std::string(key.section) + "." + key.key;
+}
+
+bool has_strict_integer(const CSimpleIniA& ini,
+                        const TypedConfigKey& key) noexcept {
+    if (!ini.GetValue(key.section, key.key, nullptr)) return true;
+    return ini.GetLongValue(
+               key.section, key.key,
+               (std::numeric_limits<long>::min)()) ==
+           ini.GetLongValue(
+               key.section, key.key,
+               (std::numeric_limits<long>::max)());
+}
+
+bool has_strict_number(const CSimpleIniA& ini,
+                       const TypedConfigKey& key) noexcept {
+    if (!ini.GetValue(key.section, key.key, nullptr)) return true;
+    const double first = ini.GetDoubleValue(key.section, key.key, -1.0);
+    const double second = ini.GetDoubleValue(key.section, key.key, 1.0);
+    return first == second && std::isfinite(first);
+}
+
+bool has_strict_bool(const CSimpleIniA& ini,
+                     const TypedConfigKey& key) {
+    const char* value = ini.GetValue(key.section, key.key, nullptr);
+    if (!value) return true;
+    const std::string normalized = lowercase_ascii(value);
+    return normalized == "true" || normalized == "false" ||
+           normalized == "yes" || normalized == "no" ||
+           normalized == "on" || normalized == "off" ||
+           normalized == "1" || normalized == "0" ||
+           normalized == "t" || normalized == "f" ||
+           normalized == "y" || normalized == "n";
+}
+
+bool has_strict_int_list(const CSimpleIniA& ini,
+                         const TypedConfigKey& key,
+                         bool allow_empty) {
+    const char* value = ini.GetValue(key.section, key.key, nullptr);
+    if (!value || (allow_empty && *value == '\0')) return true;
+    const std::vector<int> first_fallback{256};
+    const std::vector<int> second_fallback{257};
+    return parse_int_list(value, first_fallback) ==
+           parse_int_list(value, second_fallback);
+}
+
+bool validate_typed_config_values(const CSimpleIniA& ini,
+                                  std::string& error) {
+    constexpr TypedConfigKey kIntegerKeys[]{
+        {"log", "ringbuf_capacity"},
+        {"log", "file_max_size_mb"},
+        {"log", "file_max_count"},
+        {"detector", "device_id"},
+        {"detector", "input_width"},
+        {"detector", "input_height"},
+        {"detector", "top_k"},
+        {"capture", "adapter_index"},
+        {"capture", "output_index"},
+        {"capture", "udp_read_timeout_ms"},
+        {"capture", "udp_disconnect_timeout_ms"},
+        {"capture", "udp_source_width"},
+        {"capture", "udp_source_height"},
+        {"capture", "ndi_discovery_timeout_ms"},
+        {"capture", "ndi_receive_timeout_ms"},
+        {"capture", "ndi_disconnect_timeout_ms"},
+        {"capture", "ndi_clock_sync_interval_ms"},
+        {"capture", "ndi_clock_sync_timeout_ms"},
+        {"capture", "ndi_clock_mapping_max_age_ms"},
+        {"capture", "ndi_source_width"},
+        {"capture", "ndi_source_height"},
+        {"capture", "roi_width"},
+        {"capture", "roi_height"},
+        {"capture", "roi_x"},
+        {"capture", "roi_y"},
+        {"capture", "acquire_timeout_ms"},
+        {"aim", "min_confirmed_hits"},
+        {"aim", "max_lost_frames"},
+        {"aim", "switch_confirm_frames"},
+        {"aim", "switch_cooldown_frames"},
+        {"mouse", "kmbox_port"},
+        {"mouse", "kmbox_connect_timeout_ms"},
+        {"mouse", "kmbox_command_timeout_ms"},
+        {"mouse", "makcu_baud_rate"},
+        {"mouse", "makcu_connect_timeout_ms"},
+        {"mouse", "makcu_command_timeout_ms"},
+        {"keyboard", "aim_hold_virtual_key"},
+        {"keyboard", "emergency_virtual_key"},
+        {"keyboard", "runtime_toggle_virtual_key"},
+        {"runtime", "profile_window"},
+        {"ui", "width"},
+        {"ui", "height"},
+    };
+    for (const auto& key : kIntegerKeys) {
+        if (has_strict_integer(ini, key)) continue;
+        set_error(error, "配置项 " + qualified_key(key) + " 类型非法");
+        return false;
+    }
+
+    constexpr TypedConfigKey kNumberKeys[]{
+        {"detector", "conf_threshold"},
+        {"detector", "nms_threshold"},
+        {"aim", "high_confidence"},
+        {"aim", "low_confidence"},
+        {"aim", "min_iou"},
+        {"aim", "max_center_distance"},
+        {"aim", "switch_margin"},
+        {"aim", "acquisition_range_percent"},
+        {"aim", "body_aim_height_ratio"},
+        {"aim", "body_aim_range_percent"},
+        {"aim", "deadzone_pixels"},
+        {"aim", "smoothing"},
+        {"aim", "counts_per_pixel_x"},
+        {"aim", "counts_per_pixel_y"},
+        {"aim", "max_counts_per_frame"},
+        {"aim", "control_delay_ms"},
+        {"aim", "max_delay_compensation_ms"},
+        {"aim", "max_delay_compensation_percent"},
+        {"aim", "max_prediction_lead_percent"},
+        {"aim", "predicted_gain"},
+    };
+    for (const auto& key : kNumberKeys) {
+        if (has_strict_number(ini, key)) continue;
+        set_error(error, "配置项 " + qualified_key(key) + " 类型非法");
+        return false;
+    }
+
+    constexpr TypedConfigKey kBoolKeys[]{
+        {"log", "enable_console"},
+        {"log", "enable_file"},
+        {"log", "enable_debug_file"},
+        {"log", "enable_ringbuf"},
+        {"detector", "enable_fp16"},
+        {"detector", "enable_trt_cuda_graph"},
+        {"detector", "enable_gpu_preprocess"},
+        {"capture", "enable_d3d11_cuda_interop"},
+        {"capture", "enable_d3d11_directml_interop"},
+        {"capture", "ndi_require_frame_metadata"},
+        {"capture", "center_roi"},
+        {"aim", "enable_delay_compensation"},
+        {"aim", "enable_prediction"},
+        {"mouse", "allow_send_input"},
+        {"ui", "enable_vsync"},
+        {"ui", "open_detached_preview_on_start"},
+    };
+    for (const auto& key : kBoolKeys) {
+        if (has_strict_bool(ini, key)) continue;
+        set_error(error, "配置项 " + qualified_key(key) + " 类型非法");
+        return false;
+    }
+
+    const auto valid_enum = [&ini](
+            const TypedConfigKey& key, auto first, auto second, auto parser) {
+        const char* value = ini.GetValue(key.section, key.key, nullptr);
+        return !value || parser(value, first) == parser(value, second);
+    };
+    const TypedConfigKey detector_backend{"detector", "backend"};
+    const TypedConfigKey openvino_device{"detector", "openvino_device"};
+    const TypedConfigKey output_format{"detector", "output_format"};
+    const TypedConfigKey capture_backend{"capture", "backend"};
+    const TypedConfigKey udp_layout{"capture", "udp_frame_layout"};
+    const TypedConfigKey ndi_layout{"capture", "ndi_frame_layout"};
+    const TypedConfigKey mouse_backend{"mouse", "backend"};
+    const TypedConfigKey ui_theme{"ui", "theme"};
+    if (!valid_enum(detector_backend, BackendType::CUDA, BackendType::CPU,
+                    parse_backend)) {
+        set_error(error, "配置项 detector.backend 类型非法");
+        return false;
+    }
+    if (!valid_enum(openvino_device, OpenVinoDevice::GPU,
+                    OpenVinoDevice::CPU, parse_openvino_device)) {
+        set_error(error, "配置项 detector.openvino_device 类型非法");
+        return false;
+    }
+    if (!valid_enum(output_format, OutputFormat::AUTO,
+                    OutputFormat::CHANNEL_FIRST, parse_output_format)) {
+        set_error(error, "配置项 detector.output_format 类型非法");
+        return false;
+    }
+    if (!valid_enum(capture_backend, CaptureBackend::DESKTOP_DUPLICATION,
+                    CaptureBackend::NDI, parse_capture_backend)) {
+        set_error(error, "配置项 capture.backend 类型非法");
+        return false;
+    }
+    if (!valid_enum(udp_layout, NetworkFrameLayout::FULL_FRAME_1_TO_1,
+                    NetworkFrameLayout::FULL_FRAME_SCALED,
+                    parse_network_frame_layout)) {
+        set_error(error, "配置项 capture.udp_frame_layout 类型非法");
+        return false;
+    }
+    if (!valid_enum(ndi_layout, NetworkFrameLayout::FULL_FRAME_1_TO_1,
+                    NetworkFrameLayout::FULL_FRAME_SCALED,
+                    parse_network_frame_layout)) {
+        set_error(error, "配置项 capture.ndi_frame_layout 类型非法");
+        return false;
+    }
+    if (!valid_enum(mouse_backend, MouseBackend::WIN32_SEND_INPUT,
+                    MouseBackend::KMBOX_NET, parse_mouse_backend)) {
+        set_error(error, "配置项 mouse.backend 类型非法");
+        return false;
+    }
+    if (!valid_enum(ui_theme, UiTheme::LIGHT, UiTheme::DARK,
+                    parse_ui_theme)) {
+        set_error(error, "配置项 ui.theme 类型非法");
+        return false;
+    }
+
+    constexpr TypedConfigKey kRequiredListKeys[]{
+        {"aim", "person_class_ids"},
+        {"aim", "head_class_ids"},
+    };
+    for (const auto& key : kRequiredListKeys) {
+        if (has_strict_int_list(ini, key, false)) continue;
+        set_error(error, "配置项 " + qualified_key(key) + " 类型非法");
+        return false;
+    }
+    constexpr TypedConfigKey kOptionalListKeys[]{
+        {"keyboard", "aim_hold_virtual_keys"},
+        {"keyboard", "emergency_virtual_keys"},
+        {"keyboard", "runtime_toggle_virtual_keys"},
+    };
+    for (const auto& key : kOptionalListKeys) {
+        if (has_strict_int_list(ini, key, true)) continue;
+        set_error(error, "配置项 " + qualified_key(key) + " 类型非法");
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 bool validate_app_config(const AppConfig& config,
@@ -549,6 +952,7 @@ bool load_app_config(const std::string& path,
             error = "无法读取配置文件: " + path;
             return false;
         }
+        if (!validate_typed_config_values(ini, error)) return false;
 
         AppConfig candidate = config;
         const char* configured_log_level = ini.GetValue(
@@ -1037,12 +1441,12 @@ bool save_app_config(const std::string& path,
             config.ui.open_detached_preview_on_start);
         ini.SetValue("ui", "theme", ui_theme_name(config.ui.theme));
 
-        if (ini.SaveFile(path.c_str()) < 0) {
-            error = "无法写入配置文件: " + path;
+        std::string serialized;
+        if (ini.Save(serialized, true) < 0) {
+            error = "无法序列化配置文件: " + path;
             return false;
         }
-        error.clear();
-        return true;
+        return write_file_atomically(path, serialized, error);
     } catch (...) {
         set_error(error, "写入配置时发生未知异常");
         return false;

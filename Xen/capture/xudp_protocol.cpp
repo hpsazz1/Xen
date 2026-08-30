@@ -454,6 +454,7 @@ struct XudpFrameAssembler::Impl {
 
     struct Assembly {
         bool active = false;
+        bool challenger = false;
         XudpPacketHeader header;
         std::vector<std::uint8_t> bytes;
         std::vector<FragmentRange> fragments;
@@ -462,7 +463,10 @@ struct XudpFrameAssembler::Impl {
     };
 
     void reset_stream(std::uint64_t stream_id) noexcept {
-        for (auto& assembly : assemblies) assembly.active = false;
+        for (auto& assembly : assemblies) {
+            assembly.active = false;
+            assembly.challenger = false;
+        }
         current_stream_id = stream_id;
         last_published_frame_id = 0;
         rejected_through_frame_id = 0;
@@ -482,7 +486,8 @@ struct XudpFrameAssembler::Impl {
 
     Assembly* find(std::uint64_t frame_id) noexcept {
         for (auto& assembly : assemblies) {
-            if (assembly.active && assembly.header.frame.frame_id == frame_id) {
+            if (assembly.active && !assembly.challenger &&
+                assembly.header.frame.frame_id == frame_id) {
                 return &assembly;
             }
         }
@@ -499,26 +504,35 @@ struct XudpFrameAssembler::Impl {
             }
         }
         if (!selected) {
-            auto oldest = std::min_element(
-                assemblies.begin(), assemblies.end(),
-                [](const Assembly& left, const Assembly& right) {
-                    return left.header.frame.frame_id <
-                           right.header.frame.frame_id;
-                });
+            for (auto& assembly : assemblies) {
+                if (assembly.challenger) continue;
+                if (!selected || assembly.header.frame.frame_id <
+                                     selected->header.frame.frame_id) {
+                    selected = &assembly;
+                }
+            }
+            if (!selected) return nullptr;
             // 三槽都被更新帧占用时，迟到旧帧不得挤掉较新的在途帧。
-            if (header.frame.frame_id < oldest->header.frame.frame_id) {
+            if (header.frame.frame_id < selected->header.frame.frame_id) {
                 return nullptr;
             }
-            selected = &*oldest;
         }
-        selected->active = true;
-        selected->header = header;
-        selected->bytes.resize(header.frame.frame_size);
-        selected->fragments.clear();
-        selected->fragments.resize(header.fragment_count);
-        selected->received_fragments = 0;
-        selected->started_at = received_at;
+        activate(*selected, header, received_at);
         return selected;
+    }
+
+    void activate(Assembly& assembly,
+                  const XudpPacketHeader& header,
+                  std::chrono::steady_clock::time_point received_at,
+                  bool challenger = false) {
+        assembly.active = true;
+        assembly.challenger = challenger;
+        assembly.header = header;
+        assembly.bytes.resize(header.frame.frame_size);
+        assembly.fragments.clear();
+        assembly.fragments.resize(header.fragment_count);
+        assembly.received_fragments = 0;
+        assembly.started_at = received_at;
     }
 
     bool ranges_cover_frame(Assembly& assembly) noexcept {
@@ -539,6 +553,140 @@ struct XudpFrameAssembler::Impl {
         return expected_offset == assembly.header.frame.frame_size;
     }
 
+    XudpConsumeResult append_fragment(
+        Assembly& assembly,
+        const XudpPacketHeader& header,
+        std::span<const std::uint8_t> payload) noexcept {
+        auto& fragment = assembly.fragments[header.fragment_index];
+        if (fragment.received) {
+            const bool same_range =
+                fragment.offset == header.fragment_offset &&
+                fragment.size == header.fragment_payload_size;
+            const bool same_payload = same_range && std::equal(
+                payload.begin(), payload.end(),
+                assembly.bytes.begin() + fragment.offset);
+            if (!same_payload) {
+                assembly.active = false;
+                saturating_add(invalid_packets, 1);
+                return XudpConsumeResult::INVALID_PACKET;
+            }
+            return XudpConsumeResult::IGNORED;
+        }
+
+        std::copy(payload.begin(), payload.end(),
+                  assembly.bytes.begin() + header.fragment_offset);
+        fragment.offset = header.fragment_offset;
+        fragment.size = header.fragment_payload_size;
+        fragment.received = true;
+        ++assembly.received_fragments;
+        if (assembly.received_fragments != header.fragment_count) {
+            return XudpConsumeResult::INCOMPLETE;
+        }
+        if (!ranges_cover_frame(assembly)) {
+            assembly.active = false;
+            saturating_add(invalid_packets, 1);
+            return XudpConsumeResult::INVALID_PACKET;
+        }
+
+        std::array<std::uint8_t, kXudpSha256Bytes> actual_sha256{};
+        if (!hasher.compute(assembly.header.frame, assembly.bytes,
+                            actual_sha256) ||
+            actual_sha256 != assembly.header.frame_sha256) {
+            assembly.active = false;
+            saturating_add(invalid_packets, 1);
+            return XudpConsumeResult::INVALID_PACKET;
+        }
+        return XudpConsumeResult::FRAME;
+    }
+
+    void publish(Assembly& assembly,
+                 XudpCompletedFrame& completed) noexcept {
+        const std::uint64_t frame_id = assembly.header.frame.frame_id;
+        if (last_published_frame_id != 0 &&
+            frame_id > last_published_frame_id + 1) {
+            saturating_add(
+                dropped_frames, frame_id - last_published_frame_id - 1);
+        }
+        last_published_frame_id = frame_id;
+        saturating_add(received_frames, 1);
+        completed.descriptor = assembly.header.frame;
+        completed.jpeg = std::span<const std::uint8_t>(assembly.bytes);
+        completed.started_at = assembly.started_at;
+        completed.source_received_frames = received_frames;
+        completed.transport_dropped_frames = dropped_frames;
+        completed.transport_invalid_packets = invalid_packets;
+
+        for (auto& candidate : assemblies) {
+            if (candidate.active && !candidate.challenger &&
+                candidate.header.frame.frame_id <= frame_id) {
+                candidate.active = false;
+            }
+        }
+    }
+
+    XudpConsumeResult consume_challenger(
+        const XudpPacketHeader& header,
+        std::span<const std::uint8_t> payload,
+        std::chrono::steady_clock::time_point received_at,
+        XudpCompletedFrame& completed) noexcept {
+        Assembly* challenger = nullptr;
+        for (auto& assembly : assemblies) {
+            if (assembly.active && assembly.challenger) {
+                challenger = &assembly;
+                break;
+            }
+        }
+        if (challenger &&
+            challenger->header.frame.stream_id == header.frame.stream_id &&
+            challenger->header.frame.frame_id == header.frame.frame_id) {
+            if (!same_frame(challenger->header, header)) {
+                challenger->active = false;
+                saturating_add(invalid_packets, 1);
+                return XudpConsumeResult::INVALID_PACKET;
+            }
+        } else {
+            if (challenger &&
+                challenger->header.frame.stream_id == header.frame.stream_id &&
+                header.frame.frame_id < challenger->header.frame.frame_id) {
+                return XudpConsumeResult::IGNORED;
+            }
+            try {
+                if (!challenger) {
+                    for (auto& assembly : assemblies) {
+                        if (!assembly.active) {
+                            challenger = &assembly;
+                            break;
+                        }
+                    }
+                }
+                if (!challenger) {
+                    for (auto& assembly : assemblies) {
+                        if (assembly.challenger) continue;
+                        if (!challenger || assembly.header.frame.frame_id <
+                                               challenger->header.frame.frame_id) {
+                            challenger = &assembly;
+                        }
+                    }
+                }
+                if (!challenger) return XudpConsumeResult::IGNORED;
+                activate(*challenger, header, received_at, true);
+            } catch (...) {
+                if (challenger) challenger->active = false;
+                saturating_add(invalid_packets, 1);
+                return XudpConsumeResult::INVALID_PACKET;
+            }
+        }
+
+        const auto result = append_fragment(*challenger, header, payload);
+        if (result != XudpConsumeResult::FRAME) return result;
+
+        retire_current_stream();
+        reset_stream(header.frame.stream_id);
+        publish(*challenger, completed);
+        challenger->active = false;
+        return XudpConsumeResult::FRAME;
+    }
+
     XudpConsumeResult consume(
         std::span<const std::uint8_t> packet,
         std::chrono::steady_clock::time_point received_at,
@@ -549,13 +697,17 @@ struct XudpFrameAssembler::Impl {
             saturating_add(invalid_packets, 1);
             return XudpConsumeResult::INVALID_PACKET;
         }
-        if (current_stream_id != header.frame.stream_id) {
+        if (current_stream_id == 0) {
+            reset_stream(header.frame.stream_id);
+        } else if (current_stream_id != header.frame.stream_id) {
             // 发送端重启换 stream_id 后，旧会话迟到包不得把接收器切回旧流。
             if (is_retired_stream(header.frame.stream_id)) {
                 return XudpConsumeResult::IGNORED;
             }
-            retire_current_stream();
-            reset_stream(header.frame.stream_id);
+            // 只有新流首个完整帧通过范围与哈希校验后才提交切换；单个陌生
+            // 分片不得驱逐仍可继续发布的活动流。
+            return consume_challenger(
+                header, payload, received_at, completed);
         }
         if (header.frame.frame_id <= last_published_frame_id) {
             return XudpConsumeResult::IGNORED;
@@ -581,77 +733,18 @@ struct XudpFrameAssembler::Impl {
             return XudpConsumeResult::INVALID_PACKET;
         }
 
-        auto& fragment = assembly->fragments[header.fragment_index];
-        if (fragment.received) {
-            const bool same_range =
-                fragment.offset == header.fragment_offset &&
-                fragment.size == header.fragment_payload_size;
-            const bool same_payload = same_range && std::equal(
-                payload.begin(), payload.end(),
-                assembly->bytes.begin() + fragment.offset);
-            if (!same_payload) {
-                assembly->active = false;
-                rejected_through_frame_id = std::max(
-                    rejected_through_frame_id, header.frame.frame_id);
-                saturating_add(invalid_packets, 1);
-                return XudpConsumeResult::INVALID_PACKET;
-            }
-            return XudpConsumeResult::IGNORED;
-        }
-
-        std::copy(payload.begin(), payload.end(),
-                  assembly->bytes.begin() + header.fragment_offset);
-        fragment.offset = header.fragment_offset;
-        fragment.size = header.fragment_payload_size;
-        fragment.received = true;
-        ++assembly->received_fragments;
-        if (assembly->received_fragments != header.fragment_count) {
-            return XudpConsumeResult::INCOMPLETE;
-        }
-        if (!ranges_cover_frame(*assembly)) {
-            assembly->active = false;
+        const auto result = append_fragment(*assembly, header, payload);
+        if (result == XudpConsumeResult::INVALID_PACKET) {
             rejected_through_frame_id = std::max(
                 rejected_through_frame_id, header.frame.frame_id);
-            saturating_add(invalid_packets, 1);
-            return XudpConsumeResult::INVALID_PACKET;
         }
-
-        std::array<std::uint8_t, kXudpSha256Bytes> actual_sha256{};
-        if (!hasher.compute(assembly->header.frame, assembly->bytes,
-                            actual_sha256) ||
-            actual_sha256 != assembly->header.frame_sha256) {
-            assembly->active = false;
-            rejected_through_frame_id = std::max(
-                rejected_through_frame_id, header.frame.frame_id);
-            saturating_add(invalid_packets, 1);
-            return XudpConsumeResult::INVALID_PACKET;
-        }
-
-        const std::uint64_t frame_id = assembly->header.frame.frame_id;
-        if (last_published_frame_id != 0 &&
-            frame_id > last_published_frame_id + 1) {
-            saturating_add(
-                dropped_frames, frame_id - last_published_frame_id - 1);
-        }
-        last_published_frame_id = frame_id;
-        saturating_add(received_frames, 1);
-        completed.descriptor = assembly->header.frame;
-        completed.jpeg = std::span<const std::uint8_t>(assembly->bytes);
-        completed.started_at = assembly->started_at;
-        completed.source_received_frames = received_frames;
-        completed.transport_dropped_frames = dropped_frames;
-        completed.transport_invalid_packets = invalid_packets;
-
-        for (auto& candidate : assemblies) {
-            if (candidate.active &&
-                candidate.header.frame.frame_id <= frame_id) {
-                candidate.active = false;
-            }
-        }
+        if (result != XudpConsumeResult::FRAME) return result;
+        publish(*assembly, completed);
         return XudpConsumeResult::FRAME;
     }
 
     std::array<Assembly, kAssemblyCount> assemblies;
+    // 待确认新流与活动流共享既有三槽，不按 stream_id 或包数扩容。
     Sha256Hasher hasher;
     std::uint64_t current_stream_id = 0;
     std::uint64_t last_published_frame_id = 0;
@@ -703,6 +796,15 @@ std::uint64_t XudpFrameAssembler::transport_dropped_frames() const noexcept {
 
 std::uint64_t XudpFrameAssembler::transport_invalid_packets() const noexcept {
     return impl_ ? impl_->invalid_packets : 0;
+}
+
+std::size_t XudpFrameAssembler::retained_payload_capacity_bytes() const noexcept {
+    if (!impl_) return 0;
+    std::size_t total = 0;
+    for (const auto& assembly : impl_->assemblies) {
+        total += assembly.bytes.capacity();
+    }
+    return total;
 }
 
 void XudpFrameAssembler::record_invalid_frame() noexcept {

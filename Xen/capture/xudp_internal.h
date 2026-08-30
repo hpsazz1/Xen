@@ -121,6 +121,9 @@ public:
     std::uint64_t source_received_frames() const noexcept;
     std::uint64_t transport_dropped_frames() const noexcept;
     std::uint64_t transport_invalid_packets() const noexcept;
+    // 内部资源合同：活动流与待确认流共享固定三槽，此值用于专项验证
+    // retained payload capacity 未因 challenger 暗增为第四槽。
+    std::size_t retained_payload_capacity_bytes() const noexcept;
     // 完整分片通过协议校验后，若 JPEG 解码或尺寸契约仍失败，由生产后端补记。
     void record_invalid_frame() noexcept;
 

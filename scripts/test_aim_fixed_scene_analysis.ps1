@@ -1,7 +1,13 @@
 ﻿$ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-. (Join-Path $PSScriptRoot "aim_fixed_scene_analysis.ps1")
+$fixedSceneScript = Join-Path $PSScriptRoot "aim_fixed_scene_analysis.ps1"
+$fixedSceneModule = New-Module -Name "XenAimFixedSceneAnalysisTest" `
+    -ArgumentList $fixedSceneScript -ScriptBlock {
+        param([string]$AnalysisScriptPath)
+        . $AnalysisScriptPath
+    }
+Import-Module $fixedSceneModule -Force -Scope Local -ErrorAction Stop
 
 function Assert-Condition([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }

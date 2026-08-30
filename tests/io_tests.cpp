@@ -110,6 +110,181 @@ void test_ndi_silence_watchdog_tracks_first_frame_and_reopen() {
            "NDI 同进程重新打开后必须重新进入首帧发现阶段");
 }
 
+void test_ndi_session_state_owns_discovery_and_connection_reasons() {
+    using capture::detail::NdiSessionFailureReason;
+    using capture::detail::NdiSessionStage;
+    using capture::detail::NdiSessionState;
+    using capture::detail::NdiSourceView;
+
+    NdiSessionState state;
+    const std::array<NdiSourceView, 1> exact_source{{
+        {"Wanted Source", "ndi://wanted"}}};
+    state.reset("Wanted Source");
+    expect(state.observe_sources({}) &&
+               state.terminal_reason() ==
+                   NdiSessionFailureReason::ZERO_SOURCES &&
+               !state.observe_sources({}),
+           "NDI 零源必须有稳定 owned reason，重复快照不得形成状态迁移");
+    expect(state.observe_sources(exact_source) &&
+               state.snapshot().stage == NdiSessionStage::SOURCE_SELECTED,
+           "NDI 首次 wait 无变化后仍必须读取后续快照并选中精确源");
+
+    const std::array<NdiSourceView, 1> other_source{{
+        {"Other Source", "ndi://other"}}};
+    state.reset("Wanted Source");
+    expect(state.observe_sources(other_source) &&
+               state.terminal_reason() ==
+                   NdiSessionFailureReason::SOURCE_NAME_NOT_FOUND &&
+               state.snapshot().candidate_source_names ==
+                   std::vector<std::string>{"Other Source"},
+           "NDI 精确名称未匹配必须区别于零源并保留候选名");
+
+    const std::array<NdiSourceView, 2> multiple_sources{{
+        {"Source B", "ndi://b"}, {"Source A", "ndi://a"}}};
+    state.reset("Auto");
+    expect(state.observe_sources(multiple_sources) &&
+               state.terminal_reason() ==
+                   NdiSessionFailureReason::SOURCE_SELECTION_AMBIGUOUS &&
+               state.snapshot().candidate_source_names ==
+                   std::vector<std::string>{"Source A", "Source B"},
+           "NDI Auto 多源必须拒绝歧义并确定性拥有候选名");
+
+    std::string selected_name = "Wanted Source";
+    std::string selected_url = "ndi://wanted";
+    const std::array<NdiSourceView, 1> selected_source{{
+        {selected_name, selected_url}}};
+    state.reset("Wanted Source");
+    expect(state.observe_sources(selected_source) &&
+               state.snapshot().stage == NdiSessionStage::SOURCE_SELECTED &&
+               state.snapshot().selected_source.has_value(),
+           "NDI 精确源必须推进到已选择层");
+    selected_name.assign("mutated");
+    selected_url.assign("mutated");
+    expect(state.snapshot().selected_source->name == "Wanted Source" &&
+               state.snapshot().selected_source->url == "ndi://wanted",
+           "NDI 选源结果必须拥有 SDK 快照字符串，不能保存借用指针");
+
+    expect(state.record_receiver_created(false) &&
+               state.terminal_reason() ==
+                   NdiSessionFailureReason::RECEIVER_CREATE_FAILED,
+           "NDI Receiver 创建失败不得回退为发现失败");
+    state.observe_sources({});
+    expect(state.terminal_reason() ==
+               NdiSessionFailureReason::RECEIVER_CREATE_FAILED,
+           "NDI 曾精确选源但 Receiver 创建失败后，不得被后续零源快照降级");
+
+    state.reset("Wanted Source");
+    state.observe_sources(exact_source);
+    expect(state.record_receiver_created(true) &&
+               state.snapshot().stage == NdiSessionStage::RECEIVER_CREATED &&
+               state.terminal_reason() ==
+                   NdiSessionFailureReason::RECEIVER_CONNECT_TIMEOUT,
+           "NDI Receiver 句柄创建不得冒充活动连接");
+    expect(state.record_active_connections(1) &&
+               state.snapshot().stage == NdiSessionStage::ACTIVE_CONNECTION &&
+               state.terminal_reason() ==
+                   NdiSessionFailureReason::FIRST_FRAME_TIMEOUT &&
+               !state.record_active_connections(1),
+           "NDI 活动连接必须独立推进且重复轮询不得重复迁移");
+    expect(state.record_valid_frame() &&
+               state.snapshot().stage == NdiSessionStage::FIRST_VIDEO_FRAME,
+           "NDI 首个有效视频帧必须形成独立完成证据");
+    expect(state.record_receiver_error() &&
+               state.terminal_reason() ==
+                   NdiSessionFailureReason::RECEIVER_CONNECTION_LOST,
+           "NDI 首帧后的 receiver error 必须归为连接丢失");
+    state.observe_sources(exact_source);
+    state.record_receiver_created(true);
+    state.record_active_connections(1);
+    expect(state.record_valid_frame() &&
+               state.snapshot().stage == NdiSessionStage::FIRST_VIDEO_FRAME &&
+               !state.snapshot().receiver_connection_lost,
+           "NDI receiver error 后必须允许同一会话重连并恢复首帧证据");
+
+    state.reset("Wanted Source");
+    expect(state.snapshot().stage == NdiSessionStage::DISCOVERING &&
+               state.terminal_reason() ==
+                   NdiSessionFailureReason::ZERO_SOURCES,
+           "NDI 同进程 reopen 必须清除上一会话的连接和首帧状态");
+}
+
+void test_ndi_receive_loop_watchdog_covers_receiver_errors() {
+    using capture::detail::NdiReceiveLoopAction;
+    using capture::detail::NdiReceiveLoopEvent;
+    using capture::detail::NdiSessionFailureReason;
+    using capture::detail::NdiSessionState;
+    using capture::detail::NdiSilenceWatchdog;
+    using capture::detail::NdiSourceView;
+
+    constexpr int discovery_timeout_ms = 1000;
+    constexpr int disconnect_timeout_ms = 200;
+    const auto started = NdiSilenceWatchdog::Clock::time_point{};
+    const std::array<NdiSourceView, 1> exact_source{{
+        {"Wanted Source", "ndi://wanted"}}};
+
+    NdiSessionState state;
+    NdiSilenceWatchdog watchdog;
+    state.reset("Wanted Source");
+    state.observe_sources(exact_source);
+    state.record_receiver_created(true);
+    watchdog.reset(started);
+
+    const auto single_none = capture::detail::advance_ndi_receive_loop(
+        NdiReceiveLoopEvent::NON_VIDEO_FRAME, state, watchdog,
+        started + std::chrono::milliseconds(1), discovery_timeout_ms,
+        disconnect_timeout_ms);
+    expect(single_none.action == NdiReceiveLoopAction::KEEP_RECEIVING &&
+               state.terminal_reason() ==
+                   NdiSessionFailureReason::RECEIVER_CONNECT_TIMEOUT,
+           "NDI 单次 none 不得销毁已创建的 Receiver 或提前终止首帧等待");
+
+    capture::detail::NdiReceiveLoopDecision error_decision;
+    for (int elapsed_ms = 250;
+         elapsed_ms <= discovery_timeout_ms;
+         elapsed_ms += 250) {
+        error_decision = capture::detail::advance_ndi_receive_loop(
+            NdiReceiveLoopEvent::RECEIVER_ERROR, state, watchdog,
+            started + std::chrono::milliseconds(elapsed_ms),
+            discovery_timeout_ms, disconnect_timeout_ms);
+        if (error_decision.action ==
+                NdiReceiveLoopAction::RECONNECT_RECEIVER) {
+            state.observe_sources(exact_source);
+            state.record_receiver_created(true);
+        }
+    }
+    expect(error_decision.action == NdiReceiveLoopAction::ACCESS_LOST &&
+               error_decision.terminal_reason ==
+                   NdiSessionFailureReason::RECEIVER_CONNECT_TIMEOUT,
+           "NDI 连续 receiver error 越过首帧预算后必须有界 ACCESS_LOST，"
+           "且不得降级为未知发现原因");
+
+    state.reset("Wanted Source");
+    state.observe_sources(exact_source);
+    state.record_receiver_created(true);
+    watchdog.reset(started);
+    const auto reconnect = capture::detail::advance_ndi_receive_loop(
+        NdiReceiveLoopEvent::RECEIVER_ERROR, state, watchdog,
+        started + std::chrono::milliseconds(250), discovery_timeout_ms,
+        disconnect_timeout_ms);
+    expect(reconnect.action == NdiReceiveLoopAction::RECONNECT_RECEIVER &&
+               reconnect.terminal_reason ==
+                   NdiSessionFailureReason::RECEIVER_CONNECT_TIMEOUT,
+           "NDI 截止前 receiver error 必须保留阶段 reason 并允许重连");
+    state.observe_sources(exact_source);
+    state.record_receiver_created(true);
+    state.record_active_connections(1);
+    state.record_valid_frame();
+    const auto first_frame_at =
+        started + std::chrono::milliseconds(900);
+    watchdog.record_valid_frame(first_frame_at);
+    const auto recovered = capture::detail::advance_ndi_receive_loop(
+        NdiReceiveLoopEvent::NON_VIDEO_FRAME, state, watchdog,
+        started + std::chrono::milliseconds(discovery_timeout_ms),
+        discovery_timeout_ms, disconnect_timeout_ms);
+    expect(recovered.action == NdiReceiveLoopAction::KEEP_RECEIVING,
+           "NDI 截止前恢复首帧后必须切换到断流预算，不得按旧发现截止终止");
+}
+
 void test_invalid_keyboard_config() {
     KeyboardConfig config;
     config.aim_hold_virtual_keys = {0};
@@ -196,14 +371,17 @@ void test_keyboard_listener_uses_selected_device() {
     auto device = std::make_shared<FakeInputDevice>();
     device->snapshot_.status = InputMonitorStatus::READY;
     device->snapshot_.state_valid = true;
+    device->snapshot_.sequence = 1;
     KeyboardListener listener(KeyboardConfig{}, device);
     expect(listener.open(), "共享输入设备监听器必须可初始化");
 
     device->snapshot_.virtual_keys[0x02] = true;
-    auto events = listener.poll();
-    expect(events.size() == 1U &&
-               events[0].type == KeyboardEventType::AIM_HOLD_CHANGED &&
-               events[0].active,
+    auto polled = listener.poll();
+    expect(polled.input_healthy && polled.new_input_fact &&
+               polled.sequence == 1 && polled.events.size() == 1U &&
+               polled.events[0].type ==
+                   KeyboardEventType::AIM_HOLD_CHANGED &&
+               polled.events[0].active,
            "所选设备右键必须产生瞄准按住事件");
 
     for (const InputMonitorStatus status : {
@@ -213,30 +391,51 @@ void test_keyboard_listener_uses_selected_device() {
              InputMonitorStatus::CLOSED}) {
         device->snapshot_.status = status;
         device->snapshot_.state_valid = false;
-        events = listener.poll();
-        expect(events.empty(),
-               "所选设备非 READY 状态不得被猜测为瞄准释放事件");
+        polled = listener.poll();
+        expect(polled.events.empty() && !polled.input_healthy &&
+                   !polled.new_input_fact && polled.sequence == 1,
+               "所选设备非 READY 状态不得猜测释放或清除最近输入事实");
     }
 
     device->snapshot_ = {};
     device->snapshot_.status = InputMonitorStatus::FAILURE;
     device->snapshot_.state_valid = true;
-    events = listener.poll();
-    expect(events.size() == 1U &&
-               events[0].type == KeyboardEventType::AIM_HOLD_CHANGED &&
-               !events[0].active,
-           "明确全释放快照即使伴随链路故障也必须产生瞄准释放事件");
+    device->snapshot_.sequence = 1;
+    polled = listener.poll();
+    expect(polled.events.empty() && !polled.input_healthy &&
+               !polled.new_input_fact,
+           "故障状态的同序号缓存不得伪造瞄准释放事件");
+
+    device->snapshot_.sequence = 2;
+    polled = listener.poll();
+    expect(polled.events.size() == 1U &&
+               polled.events[0].type ==
+                   KeyboardEventType::AIM_HOLD_CHANGED &&
+               !polled.events[0].active && polled.new_input_fact &&
+               !polled.input_healthy,
+           "故障同时携带严格新序号时，真实释放事实仍必须到达");
 
     device->snapshot_ = {};
     device->snapshot_.status = InputMonitorStatus::READY;
     device->snapshot_.state_valid = true;
+    device->snapshot_.sequence = 3;
     device->snapshot_.virtual_keys[0x23] = true;
     device->snapshot_.virtual_keys[0x77] = true;
-    events = listener.poll();
-    expect(events.size() == 2U &&
-               events[0].type == KeyboardEventType::EMERGENCY_STOP &&
-               events[1].type == KeyboardEventType::RUNTIME_TOGGLE,
+    polled = listener.poll();
+    expect(polled.input_healthy && polled.events.size() == 2U &&
+               polled.events[0].type ==
+                   KeyboardEventType::EMERGENCY_STOP &&
+               polled.events[1].type ==
+                   KeyboardEventType::RUNTIME_TOGGLE,
            "所选设备 End/F8 必须按急停优先顺序生成事件");
+
+    KeyboardListener unverified_listener(KeyboardConfig{});
+    expect(unverified_listener.open(),
+           "无 owned input source 的 Listener 仍应允许 UI 生命周期初始化");
+    polled = unverified_listener.poll();
+    expect(polled.monitor_status == InputMonitorStatus::UNVERIFIED &&
+               !polled.input_healthy && polled.events.empty(),
+           "GetAsyncKeyState fallback 不得声明可验证输入或按键事实");
 }
 
 void test_invalid_capture_config() {
@@ -471,6 +670,22 @@ std::vector<std::vector<std::uint8_t>> make_xudp_packets(
         packets.push_back(std::move(packet));
     }
     return packets;
+}
+
+std::vector<std::uint8_t> make_xudp_incomplete_packet(
+        const capture::detail::XudpFrameDescriptor& descriptor) {
+    capture::detail::XudpPacketHeader header;
+    header.frame = descriptor;
+    header.fragment_index = 0;
+    header.fragment_count = 2;
+    header.fragment_offset = 0;
+    header.fragment_payload_size = 1;
+    const std::array<std::uint8_t, 1> payload{{0x5a}};
+    std::vector<std::uint8_t> packet;
+    expect(capture::detail::serialize_xudp_packet(
+               header, payload, packet),
+           "XUDP 大帧资源测试首片必须可序列化");
+    return packet;
 }
 
 capture::detail::XudpConsumeResult consume_xudp_packets(
@@ -744,6 +959,67 @@ void test_xudp_sequence_and_geometry() {
                geometry.source_pixels_per_pixel_x == 4.0 &&
                geometry.source_pixels_per_pixel_y == 4.0,
            "XUDP 缩放完整帧必须按 (4,4) 比例还原主机坐标");
+}
+
+void test_xudp_incomplete_challenger_preserves_active_stream() {
+    const std::vector<std::uint8_t> payload{1, 2, 3, 4, 5, 6};
+    const std::array<std::size_t, 3> order{{0, 1, 2}};
+    capture::detail::XudpFrameAssembler assembler;
+    capture::detail::XudpCompletedFrame completed;
+
+    const auto active_frame1 = make_xudp_packets(
+        make_xudp_descriptor(1, payload.size(), 2, 3), payload);
+    expect(consume_xudp_packets(
+               assembler, active_frame1, order, completed) ==
+               capture::detail::XudpConsumeResult::FRAME,
+           "XUDP 活动流首帧必须完整发布");
+
+    auto challenger_descriptor =
+        make_xudp_descriptor(1, payload.size(), 2, 3);
+    ++challenger_descriptor.stream_id;
+    const auto challenger_frame = make_xudp_packets(
+        challenger_descriptor, payload);
+    expect(assembler.consume_packet(
+               challenger_frame[0], std::chrono::steady_clock::now(),
+               completed) == capture::detail::XudpConsumeResult::INCOMPLETE,
+           "XUDP 新 stream 的单个合法分片只能建立待确认流");
+
+    const auto active_frame2 = make_xudp_packets(
+        make_xudp_descriptor(2, payload.size(), 2, 3), payload);
+    expect(consume_xudp_packets(
+               assembler, active_frame2, order, completed) ==
+               capture::detail::XudpConsumeResult::FRAME &&
+               completed.descriptor.stream_id ==
+                   make_xudp_descriptor(2, payload.size(), 2, 3).stream_id &&
+               completed.descriptor.frame_id == 2,
+           "未完成的新 stream 不得驱逐仍可产出完整帧的活动流");
+}
+
+void test_xudp_challenger_shares_three_slot_payload_budget() {
+    capture::detail::XudpFrameAssembler assembler;
+    capture::detail::XudpCompletedFrame completed;
+    for (std::uint64_t frame_id = 10; frame_id < 13; ++frame_id) {
+        const auto packet = make_xudp_incomplete_packet(
+            make_xudp_descriptor(
+                frame_id, capture::detail::kXudpMaxFrameBytes));
+        expect(assembler.consume_packet(
+                   packet, std::chrono::steady_clock::now(), completed) ==
+                   capture::detail::XudpConsumeResult::INCOMPLETE,
+               "XUDP 三个最大在途帧必须占满既有固定槽");
+    }
+
+    auto challenger_descriptor = make_xudp_descriptor(
+        1, capture::detail::kXudpMaxFrameBytes);
+    ++challenger_descriptor.stream_id;
+    const auto challenger_packet =
+        make_xudp_incomplete_packet(challenger_descriptor);
+    expect(assembler.consume_packet(
+               challenger_packet, std::chrono::steady_clock::now(),
+               completed) == capture::detail::XudpConsumeResult::INCOMPLETE,
+           "XUDP 待确认流首片必须保持 probation");
+    expect(assembler.retained_payload_capacity_bytes() <=
+               3 * capture::detail::kXudpMaxFrameBytes,
+           "XUDP challenger 必须复用三槽 payload budget，不能暗增第四个 8MiB buffer");
 }
 
 #if XEN_HAS_NDI
@@ -1325,6 +1601,8 @@ int main() {
     Log::init(log_config);
     test_mouse_disabled_by_default();
     test_ndi_silence_watchdog_tracks_first_frame_and_reopen();
+    test_ndi_session_state_owns_discovery_and_connection_reasons();
+    test_ndi_receive_loop_watchdog_covers_receiver_errors();
     test_invalid_keyboard_config();
     test_keyboard_event_state_machine();
     test_keyboard_listener_uses_selected_device();
@@ -1338,6 +1616,8 @@ int main() {
     test_xudp_serialization_and_reassembly();
     test_xudp_rejects_invalid_fragments();
     test_xudp_sequence_and_geometry();
+    test_xudp_incomplete_challenger_preserves_active_stream();
+    test_xudp_challenger_shares_three_slot_payload_budget();
 #if XEN_HAS_NDI
     test_ndi_loopback();
 #else

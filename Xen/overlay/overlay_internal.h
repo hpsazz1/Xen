@@ -10,6 +10,16 @@
 
 namespace overlay::detail {
 
+inline bool output_arm_available(
+        bool running,
+        bool emergency_stopped,
+        bool output_allowed_by_config,
+        bool input_healthy,
+        bool detector_reload_running) noexcept {
+    return running && !emergency_stopped && output_allowed_by_config &&
+           input_healthy && !detector_reload_running;
+}
+
 enum class HotkeyCaptureResultType {
     NONE,
     ASSIGNED,

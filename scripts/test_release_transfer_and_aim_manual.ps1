@@ -1,10 +1,22 @@
 ﻿param(
     [string]$TestRoot = (Join-Path $PSScriptRoot `
-        "..\cache\release-transfer-aim-manual-test")
+        "..\cache\release-transfer-aim-manual-test"),
+    [switch]$ReleasePathSafetyOnly,
+    [switch]$HostContractOnly
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+if ($PSVersionTable.PSEdition -ne "Desktop" -or
+    $PSVersionTable.PSVersion.Major -ne 5 -or
+    $PSVersionTable.PSVersion.Minor -lt 1) {
+    throw "XEN_PS_HOST_UNSUPPORTED: requires Windows PowerShell 5.1."
+}
+if ($HostContractOnly) {
+    Write-Host "XEN_PS_HOST_SUPPORTED: Windows PowerShell 5.1."
+    return
+}
+Import-Module (Join-Path $PSScriptRoot "path_safety.psm1") -Force
 
 function Write-Utf8([string]$Path, [string]$Content) {
     $parent = Split-Path -Parent $Path
@@ -118,14 +130,10 @@ function New-Schema13AimSample() {
     }
 }
 
-$root = [System.IO.Path]::GetFullPath($TestRoot)
-if ($root -match '^[A-Za-z]:\?$' -or $root -eq '\') {
-    throw "拒绝在文件系统根目录运行测试。"
-}
-if (Test-Path -LiteralPath $root) {
-    Remove-Item -LiteralPath $root -Recurse -Force
-}
-New-Item -ItemType Directory -Path $root | Out-Null
+$repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$ownedTest = New-XenOwnedTestDirectory -BasePath $TestRoot `
+    -RepositoryRoot $repositoryRoot
+$root = $ownedTest.RootPath
 
 try {
     $package = Join-Path $root "Xen-fixture"
@@ -370,6 +378,89 @@ namespace XenAimManualLauncherFixture {
         @(Get-ChildItem -LiteralPath (Join-Path $destination "releases") `
             -Force | Where-Object { $_.Name -like ".incoming-*" }).Count -ne 0) {
         throw "完整发布包传输未原子收口。"
+    }
+
+    $transferSentinel = Join-Path $root "transfer-path-sentinel.txt"
+    Write-Utf8 $transferSentinel "must-stay-unchanged"
+    $transferSentinelHash = (Get-FileHash -LiteralPath $transferSentinel `
+        -Algorithm SHA256).Hash
+    $invalidDestinationDirectories = @(
+        "..\escape",
+        (Join-Path $root "absolute-destination"),
+        "nested\releases")
+    foreach ($invalidDestinationDirectory in $invalidDestinationDirectories) {
+        $directoriesBefore = @(
+            Get-ChildItem -LiteralPath $root -Directory -Recurse -Force |
+                ForEach-Object { $_.FullName } | Sort-Object)
+        $savedErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $failure = (& powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File (Join-Path $PSScriptRoot "transfer_release_bundle.ps1") `
+            -PackagePath $package `
+            -DestinationRoot $destination `
+            -DestinationDirectory $invalidDestinationDirectory 2>&1) -join `
+                [Environment]::NewLine
+        $failureExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $savedErrorActionPreference
+        $directoriesAfter = @(
+            Get-ChildItem -LiteralPath $root -Directory -Recurse -Force |
+                ForEach-Object { $_.FullName } | Sort-Object)
+        if ($failureExitCode -eq 0 -or
+            $failure -notmatch "safe basename" -or
+            (Compare-Object $directoriesBefore $directoriesAfter) -or
+            (Get-FileHash -LiteralPath $transferSentinel `
+                -Algorithm SHA256).Hash -ne $transferSentinelHash) {
+            throw "DestinationDirectory 未在 mkdir 前失败封闭：$invalidDestinationDirectory；$failure"
+        }
+    }
+
+    $junctionDestination = Join-Path $root "remote-junction"
+    $junctionTarget = Join-Path $root "remote-junction-target"
+    New-Item -ItemType Directory -Path $junctionDestination | Out-Null
+    New-Item -ItemType Directory -Path $junctionTarget | Out-Null
+    $releaseJunction = Join-Path $junctionDestination "releases"
+    New-Item -ItemType Junction -Path $releaseJunction `
+        -Value $junctionTarget -ErrorAction Stop | Out-Null
+    $junctionAttributes = [IO.File]::GetAttributes($releaseJunction)
+    if (($junctionAttributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+        throw "Transfer junction fixture was not created as a reparse point."
+    }
+    $junctionSentinel = Join-Path $junctionTarget "keep.txt"
+    Write-Utf8 $junctionSentinel "must-stay-unchanged"
+    $junctionSentinelHash = (Get-FileHash -LiteralPath $junctionSentinel `
+        -Algorithm SHA256).Hash
+    try {
+        $savedErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $failure = (& powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File (Join-Path $PSScriptRoot "transfer_release_bundle.ps1") `
+            -PackagePath $package `
+            -DestinationRoot $junctionDestination 2>&1) -join `
+                [Environment]::NewLine
+        $failureExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $savedErrorActionPreference
+        $targetDirectories = @(
+            Get-ChildItem -LiteralPath $junctionTarget -Directory -Force)
+        if ($failureExitCode -eq 0 -or
+            $failure -notmatch "reparse" -or
+            $targetDirectories.Count -ne 0 -or
+            (Get-FileHash -LiteralPath $junctionSentinel `
+                -Algorithm SHA256).Hash -ne $junctionSentinelHash) {
+            throw "DestinationDirectory junction 未在 mkdir/copy 前失败封闭：$failure"
+        }
+    } finally {
+        if (Test-Path -LiteralPath $releaseJunction) {
+            $junctionAttributes = [IO.File]::GetAttributes($releaseJunction)
+            if (($junctionAttributes -band [IO.FileAttributes]::ReparsePoint) `
+                    -eq 0) {
+                throw "拒绝清理非 junction 的 Transfer 测试路径。"
+            }
+            [IO.Directory]::Delete($releaseJunction, $false)
+        }
+    }
+    if ($ReleasePathSafetyOnly) {
+        Write-Host "完整包传输与 DestinationDirectory 失败封闭回归通过。"
+        return
     }
 
     Write-Utf8 (Join-Path $published "cache\tensorrt\fixture.engine") `
@@ -2084,7 +2175,10 @@ namespace XenAimManualPixelFixture {
     if (Test-Path -LiteralPath $root) {
         for ($attempt = 1; $attempt -le 150; ++$attempt) {
             try {
-                Remove-Item -LiteralPath $root -Recurse -Force
+                Remove-XenOwnedTestDirectory -RootPath $root `
+                    -BasePath $ownedTest.BasePath `
+                    -RepositoryRoot $repositoryRoot `
+                    -OwnerId $ownedTest.OwnerId
                 break
             } catch {
                 if ($attempt -eq 150) {
