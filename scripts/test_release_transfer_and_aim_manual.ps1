@@ -1661,6 +1661,34 @@ namespace XenAimManualPixelFixture {
             }
         }
     }
+
+    $sprintPixelRoot = Join-Path $root "superjump-sustained-move-pixel-task"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Prepare -Scenario SuperJump -SuperJumpCase SustainedMove `
+        -Profile tracking -Smoothing 0.50 `
+        -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+        -MaxCountsPerFrame 14.0 -EnableDelayCompensation `
+        -ControlDelayMs 7.5 -MaxDelayCompensationMs 18.0 `
+        -MaxDelayCompensationPercent 12.0 -RequireSourceTiming `
+        -CapturePixelEvidence -PixelEvidenceToolRoot $pixelToolRoot `
+        -PixelEvidenceBindingPath $pixelBinding -PixelEvidenceFrames 2400 `
+        -PixelEvidenceMaxSeconds 60 -PackageRoot $published `
+        -RunDirectory $sprintPixelRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "冲刺超级跳同步像素任务准备失败。"
+    }
+    $sprintPixelTaskMarkdown = Get-Content -LiteralPath `
+        (Join-Path $sprintPixelRoot "TASK.md") -Raw -Encoding utf8
+    $expectedSprintHoldAction =
+        "目标进入后按住右键至少 15 秒，持续执行单方向冲刺超级跳并保持大幅 X/Y 联动；" +
+        "此后继续按住，直到前台终端提示 sidecar 已完成或未完成、可以松开右键，" +
+        "期间不停止、不换向。"
+    if ($sprintPixelTaskMarkdown -notmatch
+            [regex]::Escape($expectedSprintHoldAction)) {
+        throw "冲刺超级跳操作步骤必须覆盖 2400 帧 sidecar 的完整有效锁定窗口。"
+    }
     $activeManifestHash = (Get-FileHash -LiteralPath `
         (Join-Path $published "manifest.json") -Algorithm SHA256).Hash
     if ($preparedManifestHashes.Count -ne 1 -or

@@ -845,6 +845,11 @@ function Get-ScenarioDefinition() {
     } else {
         "目标进入后按住右键约 5 秒再松开，不追加其他动作。"
     }
+    $superJumpSustainedMoveHoldAction = if ($CapturePixelEvidence.IsPresent) {
+        "目标进入后按住右键至少 15 秒，持续执行单方向冲刺超级跳并保持大幅 X/Y 联动；此后继续按住，直到前台终端提示 sidecar 已完成或未完成、可以松开右键，期间不停止、不换向。"
+    } else {
+        "目标进入后按住右键覆盖完整横移，期间不停止、不换向。"
+    }
     switch ($Scenario) {
         "Static" {
             return [ordered]@{
@@ -938,7 +943,7 @@ function Get-ScenarioDefinition() {
                         actions = @(
                             "本 Run 唯一动作：X 持续横移",
                             "选择单个目标，只做一个方向的连续横移并维持相近的超级跳节奏。",
-                            "目标进入后按住右键覆盖完整横移，期间不停止、不换向。"
+                            $superJumpSustainedMoveHoldAction
                         )
                         observations = @(
                             "本 Run 唯一动作：X 持续横移",
