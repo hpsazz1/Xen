@@ -6,9 +6,77 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <span>
+#include <string>
+
+#include <winerror.h>
 
 namespace overlay::detail {
+
+inline bool should_post_quit_on_main_window_destroy(
+        bool programmatic_shutdown) noexcept {
+    return !programmatic_shutdown;
+}
+
+struct PresentAdapter {
+    void* context = nullptr;
+    HRESULT (*present)(
+        void* context,
+        unsigned int sync_interval,
+        unsigned int flags) noexcept = nullptr;
+};
+
+// Overlay 真实渲染路径与测试 fake 共用此 Present 系统 seam。失败后锁存，
+// 防止调用方误入下一轮提交；App 可在 Overlay 销毁前复制具体错误。
+class PresentBoundary final {
+public:
+    explicit PresentBoundary(PresentAdapter adapter) noexcept
+        : adapter_(adapter) {}
+
+    bool present(unsigned int sync_interval, unsigned int flags) noexcept {
+        if (failed_) return false;
+        const HRESULT result = adapter_.present
+            ? adapter_.present(adapter_.context, sync_interval, flags)
+            : E_POINTER;
+        if (!FAILED(result)) return true;
+
+        failed_ = true;
+        const std::uint32_t code = static_cast<std::uint32_t>(result);
+        const char* name = nullptr;
+        if (result == DXGI_ERROR_DEVICE_REMOVED) {
+            name = "DXGI_ERROR_DEVICE_REMOVED";
+        } else if (result == DXGI_ERROR_DEVICE_RESET) {
+            name = "DXGI_ERROR_DEVICE_RESET";
+        }
+
+        std::array<char, 160> message{};
+        if (name) {
+            std::snprintf(
+                message.data(), message.size(),
+                "IDXGISwapChain::Present 失败，HRESULT=0x%08X (%s)。",
+                static_cast<unsigned int>(code), name);
+        } else {
+            std::snprintf(
+                message.data(), message.size(),
+                "IDXGISwapChain::Present 失败，HRESULT=0x%08X。",
+                static_cast<unsigned int>(code));
+        }
+        try {
+            last_error_ = message.data();
+        } catch (...) {
+        }
+        return false;
+    }
+
+    bool failed() const noexcept { return failed_; }
+    const std::string& last_error() const noexcept { return last_error_; }
+
+private:
+    PresentAdapter adapter_;
+    bool failed_ = false;
+    std::string last_error_;
+};
 
 inline bool output_arm_available(
         bool running,

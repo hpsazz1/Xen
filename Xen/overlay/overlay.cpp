@@ -640,6 +640,19 @@ void draw_timing_bar(double value,
 } // namespace
 
 struct Overlay::Impl {
+    static HRESULT present_swap_chain(
+            void* context,
+            unsigned int sync_interval,
+            unsigned int flags) noexcept {
+        auto* self = static_cast<Impl*>(context);
+        return self && self->swap_chain
+            ? self->swap_chain->Present(sync_interval, flags)
+            : E_POINTER;
+    }
+
+    Impl() noexcept
+        : present_boundary({this, present_swap_chain}) {}
+
     UiConfig config;
     HWND window = nullptr;
     HWND detached_preview_window = nullptr;
@@ -651,6 +664,7 @@ struct Overlay::Impl {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain> swap_chain;
+    overlay::detail::PresentBoundary present_boundary;
     ComPtr<ID3D11RenderTargetView> render_target;
     ComPtr<ID3D11Texture2D> preview_texture;
     ComPtr<ID3D11ShaderResourceView> preview_srv;
@@ -664,6 +678,7 @@ struct Overlay::Impl {
     WorkspacePage active_page = WorkspacePage::OVERVIEW;
     bool initialized = false;
     bool close_requested = false;
+    bool programmatic_shutdown = false;
     bool show_log_panel = false;
     bool preview_requested = false;
     bool detached_preview_requested = false;
@@ -776,7 +791,10 @@ struct Overlay::Impl {
                 if (self) self->close_requested = true;
                 return 0;
             case WM_DESTROY:
-                PostQuitMessage(0);
+                if (overlay::detail::should_post_quit_on_main_window_destroy(
+                        self && self->programmatic_shutdown)) {
+                    PostQuitMessage(0);
+                }
                 return 0;
         }
         return DefWindowProcW(hwnd, message, wparam, lparam);
@@ -3520,6 +3538,7 @@ Overlay::~Overlay() { shutdown(); }
 bool Overlay::init(const UiConfig& config) noexcept {
     if (!impl_) return false;
     try {
+        impl_->programmatic_shutdown = false;
         Log::register_module("overlay", LogLevel::INFO);
         impl_->config = config;
         impl_->detached_preview_requested =
@@ -3640,7 +3659,9 @@ bool Overlay::render(
         AppConfig& config,
         const std::string& app_message,
         OverlayActions& actions) noexcept {
-    if (!impl_ || !impl_->initialized) return false;
+    if (!impl_ || !impl_->initialized || impl_->present_boundary.failed()) {
+        return false;
+    }
     try {
         actions = {};
         impl_->update_metric_history(snapshot);
@@ -3723,16 +3744,23 @@ bool Overlay::render(
         impl_->context->ClearRenderTargetView(
             impl_->render_target.Get(), kClearColor);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        impl_->swap_chain->Present(
-            config.ui.enable_vsync ? 1 : 0, 0);
-        return true;
+        return impl_->present_boundary.present(
+            config.ui.enable_vsync ? 1U : 0U, 0U);
     } catch (...) {
         return false;
     }
 }
 
+const std::string& Overlay::last_error() const noexcept {
+    static const std::string kEmptyError;
+    return impl_ ? impl_->present_boundary.last_error() : kEmptyError;
+}
+
 void Overlay::shutdown() noexcept {
     if (!impl_) return;
+    // App 可能在完整资源清理后展示终局错误；整个程序化销毁阶段都不得
+    // 用 WM_QUIT 抢先终止 MessageBox 的模态循环。
+    impl_->programmatic_shutdown = true;
     impl_->release_preview_texture();
     impl_->detached_preview_frame.reset();
     if (impl_->detached_preview_window) {

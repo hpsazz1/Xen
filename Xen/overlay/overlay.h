@@ -48,6 +48,7 @@ public:
                 AppConfig& config,
                 const std::string& app_message,
                 OverlayActions& actions) noexcept;
+    const std::string& last_error() const noexcept;
     void shutdown() noexcept;
 
 private:

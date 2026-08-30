@@ -1136,7 +1136,8 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(input_safety_tests OPENCV ORT NDI)
     add_test(NAME input_safety_tests COMMAND input_safety_tests)
 
-    # Overlay 标量历史环是纯算法契约；测试不创建 Win32/D3D11 窗口，也不链接 ImGui。
+    # Overlay Present 系统 seam 与标量 helper 均不创建 Win32/D3D11 窗口，
+    # 测试只注入 HRESULT，也不链接 ImGui。
     add_executable(overlay_tests
         tests/overlay_tests.cpp)
     target_include_directories(overlay_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)

@@ -1,5 +1,16 @@
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+
+#include <Windows.h>
+#include <dxgi.h>
+
+#ifdef ERROR
+#undef ERROR
+#endif
+
 #include "overlay/overlay_internal.h"
 
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -16,6 +27,96 @@ void expect(bool condition, const std::string& message) {
 
 bool nearly_equal(float lhs, float rhs) {
     return std::abs(lhs - rhs) < 0.0001f;
+}
+
+struct PresentCapture {
+    std::array<HRESULT, 4> results{};
+    std::array<UINT, 4> sync_intervals{};
+    std::array<UINT, 4> flags{};
+    std::size_t result_count = 0;
+    std::size_t call_count = 0;
+};
+
+HRESULT present_from_capture(
+        void* context, UINT sync_interval, UINT flags) noexcept {
+    auto& capture = *static_cast<PresentCapture*>(context);
+    const std::size_t index = capture.call_count++;
+    capture.sync_intervals[index] = sync_interval;
+    capture.flags[index] = flags;
+    return index < capture.result_count ? capture.results[index] : E_FAIL;
+}
+
+overlay::detail::PresentAdapter adapter_for(
+        PresentCapture& capture) noexcept {
+    return {&capture, present_from_capture};
+}
+
+void test_present_success_statuses_preserve_submission() {
+    PresentCapture capture;
+    capture.results[0] = S_OK;
+    capture.results[1] = DXGI_STATUS_OCCLUDED;
+    capture.result_count = 2;
+    overlay::detail::PresentBoundary boundary(adapter_for(capture));
+
+    expect(boundary.present(1, 0) && boundary.present(0, 0) &&
+               !boundary.failed() && boundary.last_error().empty() &&
+               capture.call_count == 2 &&
+               capture.sync_intervals[0] == 1 &&
+               capture.sync_intervals[1] == 0 &&
+               capture.flags[0] == 0 && capture.flags[1] == 0,
+           "Present 必须用 FAILED 语义接受 S_OK/DXGI_STATUS_OCCLUDED，"
+           "并原样传递 vsync 与 flags");
+}
+
+void test_present_device_removed_failure_is_owned_and_latched() {
+    PresentCapture capture;
+    capture.results[0] = DXGI_ERROR_DEVICE_REMOVED;
+    capture.results[1] = S_OK;
+    capture.result_count = 2;
+    overlay::detail::PresentBoundary boundary(adapter_for(capture));
+
+    const bool first = boundary.present(1, 0);
+    const std::string owned_error = boundary.last_error();
+    const bool repeated = boundary.present(1, 0);
+    expect(!first && !repeated && boundary.failed() &&
+               capture.call_count == 1 &&
+               owned_error ==
+                   "IDXGISwapChain::Present 失败，HRESULT=0x887A0005 "
+                   "(DXGI_ERROR_DEVICE_REMOVED)。" &&
+               boundary.last_error() == owned_error,
+           "DEVICE_REMOVED 必须形成含原始 HRESULT 的 owned error，"
+           "并锁存失败以禁止下一轮 Present");
+}
+
+void test_present_device_reset_and_generic_failures_are_rejected() {
+    PresentCapture reset_capture;
+    reset_capture.results[0] = DXGI_ERROR_DEVICE_RESET;
+    reset_capture.result_count = 1;
+    overlay::detail::PresentBoundary reset_boundary(
+        adapter_for(reset_capture));
+    expect(!reset_boundary.present(0, 0) &&
+               reset_boundary.last_error() ==
+                   "IDXGISwapChain::Present 失败，HRESULT=0x887A0007 "
+                   "(DXGI_ERROR_DEVICE_RESET)。",
+           "DEVICE_RESET 必须保留具体 HRESULT 与符号名");
+
+    PresentCapture generic_capture;
+    generic_capture.results[0] = E_FAIL;
+    generic_capture.result_count = 1;
+    overlay::detail::PresentBoundary generic_boundary(
+        adapter_for(generic_capture));
+    expect(!generic_boundary.present(0, 0) &&
+               generic_boundary.last_error() ==
+                   "IDXGISwapChain::Present 失败，HRESULT=0x80004005。",
+           "Present seam 必须拒绝所有 FAILED HRESULT，而非只枚举设备错误");
+}
+
+void test_programmatic_shutdown_preserves_terminal_error_visibility() {
+    expect(
+        !overlay::detail::should_post_quit_on_main_window_destroy(true) &&
+            overlay::detail::should_post_quit_on_main_window_destroy(false),
+        "程序化 shutdown 销毁主窗口时不得投递 WM_QUIT 终止后续错误框，"
+        "非程序化销毁仍必须通知 App 退出");
 }
 
 void test_extended_key_name_lparam() {
@@ -201,6 +302,10 @@ void test_output_arm_requires_input_health() {
 } // namespace
 
 int main() {
+    test_present_success_statuses_preserve_submission();
+    test_present_device_removed_failure_is_owned_and_latched();
+    test_present_device_reset_and_generic_failures_are_rejected();
+    test_programmatic_shutdown_preserves_terminal_error_visibility();
     test_extended_key_name_lparam();
     test_metric_history_order_and_overwrite();
     test_metric_history_clear_and_floor();

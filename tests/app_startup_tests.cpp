@@ -55,7 +55,7 @@ bool overlay_render_failure_is_owned() {
     const bool observed =
         boundary.observe_log_initialization(true) &&
         boundary.observe_overlay_initialization(true) &&
-        !boundary.observe_overlay_render(false);
+        !boundary.observe_overlay_render(false, {});
     const int exit_code = boundary.finish(0);
     const int repeated_exit_code = boundary.finish(0);
     return observed &&
@@ -65,12 +65,35 @@ bool overlay_render_failure_is_owned() {
            error.message == "Overlay 渲染失败，Xen 已安全停止。";
 }
 
+bool overlay_present_error_is_copied_into_visible_terminal() {
+    ErrorCapture error;
+    app::detail::AppStartupBoundary boundary(adapter_for(error));
+    std::string present_error =
+        "IDXGISwapChain::Present 失败，HRESULT=0x887A0005 "
+        "(DXGI_ERROR_DEVICE_REMOVED)。";
+    const bool observed =
+        boundary.observe_log_initialization(true) &&
+        boundary.observe_overlay_initialization(true) &&
+        !boundary.observe_overlay_render(false, present_error);
+    present_error = "调用方错误缓冲已被覆盖";
+    const int exit_code = boundary.finish(0);
+    const int repeated_exit_code = boundary.finish(0);
+    return observed &&
+           exit_code == app::detail::kAppStartupFailureExitCode &&
+           repeated_exit_code == app::detail::kAppStartupFailureExitCode &&
+           error.call_count == 1 &&
+           error.message ==
+               "Overlay 渲染失败，Xen 已安全停止。原因："
+               "IDXGISwapChain::Present 失败，HRESULT=0x887A0005 "
+               "(DXGI_ERROR_DEVICE_REMOVED)。";
+}
+
 bool normal_and_restart_exits_are_preserved() {
     ErrorCapture error;
     app::detail::AppStartupBoundary boundary(adapter_for(error));
     return boundary.observe_log_initialization(true) &&
            boundary.observe_overlay_initialization(true) &&
-           boundary.observe_overlay_render(true) &&
+           boundary.observe_overlay_render(true, {}) &&
            boundary.finish(0) == 0 &&
            boundary.finish(
                static_cast<int>(app::detail::kReleaseRestartExitCode)) ==
@@ -84,6 +107,7 @@ int main() {
     expect(log_failure_is_owned() &&
                overlay_init_failure_is_owned() &&
                overlay_render_failure_is_owned() &&
+               overlay_present_error_is_copied_into_visible_terminal() &&
                normal_and_restart_exits_are_preserved(),
            "GUI 生产启动边界必须把 Log/Overlay init/render 失败映射为"
            "固定非零退出和一次用户可见错误，并保留正常/重启终局");

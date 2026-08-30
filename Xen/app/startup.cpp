@@ -34,7 +34,17 @@ bool AppStartupBoundary::observe_overlay_initialization(
         initialized, AppStartupFailure::OVERLAY_INITIALIZATION);
 }
 
-bool AppStartupBoundary::observe_overlay_render(bool rendered) noexcept {
+bool AppStartupBoundary::observe_overlay_render(
+        bool rendered, const std::string& detail) noexcept {
+    if (!rendered && failure_ == AppStartupFailure::NONE &&
+        !detail.empty()) {
+        try {
+            owned_failure_message_ =
+                "Overlay 渲染失败，Xen 已安全停止。原因：" + detail;
+        } catch (...) {
+            owned_failure_message_.clear();
+        }
+    }
     return observe(rendered, AppStartupFailure::OVERLAY_RENDER);
 }
 
@@ -55,8 +65,12 @@ void AppStartupBoundary::present_failure() noexcept {
     if (failure_presented_ || !adapter_.show_error) return;
     failure_presented_ = true;
     try {
-        adapter_.show_error(
-            adapter_.context, failure_message(failure_));
+        if (!owned_failure_message_.empty()) {
+            adapter_.show_error(adapter_.context, owned_failure_message_);
+        } else {
+            adapter_.show_error(
+                adapter_.context, failure_message(failure_));
+        }
     } catch (...) {
     }
 }

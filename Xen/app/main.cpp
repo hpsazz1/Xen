@@ -320,10 +320,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         const auto preview = snapshot.preview_enabled
             ? runtime.preview_frame()
             : nullptr;
+        const bool overlay_rendered = overlay.render(
+            snapshot, preview, model_catalog, backend_catalog,
+            config, app_message, actions);
         if (!startup_boundary.observe_overlay_render(
-                overlay.render(
-                    snapshot, preview, model_catalog, backend_catalog,
-                    config, app_message, actions))) {
+                overlay_rendered,
+                overlay.last_error())) {
             LOG_ERROR("app", "Overlay 渲染失败");
             break;
         }

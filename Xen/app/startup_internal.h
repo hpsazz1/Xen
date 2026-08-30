@@ -28,7 +28,8 @@ public:
 
     bool observe_log_initialization(bool initialized) noexcept;
     bool observe_overlay_initialization(bool initialized) noexcept;
-    bool observe_overlay_render(bool rendered) noexcept;
+    bool observe_overlay_render(
+        bool rendered, const std::string& detail) noexcept;
 
     int finish(int successful_exit_code) noexcept;
     AppStartupFailure failure() const noexcept { return failure_; }
@@ -39,6 +40,7 @@ private:
 
     AppStartupErrorAdapter adapter_;
     AppStartupFailure failure_ = AppStartupFailure::NONE;
+    std::string owned_failure_message_;
     bool failure_presented_ = false;
 };
 
