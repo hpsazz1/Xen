@@ -49,6 +49,18 @@ void set_error(std::string& output, const std::string& value) noexcept {
     }
 }
 
+void append_cleanup_error(
+        std::string& error,
+        std::string_view path,
+        std::string_view detail) noexcept {
+    try {
+        if (!error.empty()) error += "; ";
+        error += "CleanupError(path=" + std::string(path) + ", " +
+            std::string(detail) + ')';
+    } catch (...) {
+    }
+}
+
 bool fail_if_benchmark_stop_requested(std::string& error) noexcept {
     if (!benchmark_stop_requested.load(std::memory_order_acquire)) {
         return false;
@@ -467,12 +479,31 @@ void remove_benchmark_outputs(
         const std::string& json_path,
         const std::string& csv_staging_path,
         const std::string& json_staging_path,
-        const std::string& provider_profile_path) noexcept {
+        const std::string& provider_profile_path,
+        std::string& error) noexcept {
+    const auto remove = [&](const std::string& path) noexcept {
+        if (path.empty()) return;
+        try {
+            std::error_code cleanup_error;
+            (void)std::filesystem::remove(
+                std::filesystem::u8path(path), cleanup_error);
+            if (cleanup_error) {
+                append_cleanup_error(
+                    error, path,
+                    "code=" + std::to_string(cleanup_error.value()) +
+                        ", message=" + cleanup_error.message());
+            }
+        } catch (const std::exception& exception) {
+            append_cleanup_error(
+                error, path, exception.what());
+        } catch (...) {
+            append_cleanup_error(
+                error, path, "unknown exception");
+        }
+    };
     try {
-        std::error_code ignored;
-        std::filesystem::remove(csv_path, ignored);
-        ignored.clear();
-        std::filesystem::remove(json_path, ignored);
+        remove(csv_path);
+        remove(json_path);
         const std::string debug_temporary_suffix = ".tmp." +
             std::to_string(static_cast<unsigned long long>(
                 GetCurrentProcessId()));
@@ -483,21 +514,15 @@ void remove_benchmark_outputs(
         for (const auto* staging_path : {
                  &csv_staging_path, &json_staging_path}) {
             if (staging_path->empty()) continue;
-            ignored.clear();
-            std::filesystem::remove(*staging_path, ignored);
-            ignored.clear();
-            std::filesystem::remove(
-                *staging_path + debug_temporary_suffix, ignored);
-            ignored.clear();
-            std::filesystem::remove(
-                *staging_path + retention_temporary_suffix, ignored);
+            remove(*staging_path);
+            remove(*staging_path + debug_temporary_suffix);
+            remove(*staging_path + retention_temporary_suffix);
         }
-        if (!provider_profile_path.empty()) {
-            ignored.clear();
-            std::filesystem::remove(provider_profile_path, ignored);
-        }
+        remove(provider_profile_path);
     } catch (...) {
-        // 失败收口不能覆盖原始错误；PowerShell 外层还会清理 pending 文件。
+        append_cleanup_error(
+            error, "<benchmark-outputs>",
+            "cleanup sequence exception");
     }
 }
 
@@ -647,13 +672,39 @@ bool rewrite_report_samples_dropped(
     return false;
 }
 
+bool move_benchmark_report_file(
+        void*,
+        const std::filesystem::path& source,
+        const std::filesystem::path& target,
+        std::uint32_t& win32_error) noexcept {
+    if (MoveFileExW(
+            source.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        win32_error = ERROR_SUCCESS;
+        return true;
+    }
+    win32_error = GetLastError();
+    return false;
+}
+
+bool remove_benchmark_report_file(
+        void*,
+        const std::filesystem::path& path,
+        std::error_code& error) noexcept {
+    return std::filesystem::remove(path, error);
+}
+
 bool publish_benchmark_reports_impl(
         const std::string& csv_staging_path,
         const std::string& json_staging_path,
         const std::string& csv_path,
         const std::string& json_path,
+        const benchmark::detail::BenchmarkReportPublishFileAdapter& adapter,
         std::string& error) noexcept {
     try {
+        if (!adapter.move_file || !adapter.remove_file) {
+            set_error(error, "Benchmark 报告发布 adapter 不完整");
+            return false;
+        }
         const auto csv_staging =
             std::filesystem::u8path(csv_staging_path);
         const auto json_staging =
@@ -667,21 +718,28 @@ bool publish_benchmark_reports_impl(
             set_error(error, "staging 报告不完整或正式目标已存在");
             return false;
         }
-        if (!MoveFileExW(
-                csv_staging.c_str(), csv_target.c_str(),
-                MOVEFILE_WRITE_THROUGH)) {
+        std::uint32_t win32_error = ERROR_SUCCESS;
+        if (!adapter.move_file(
+                adapter.context, csv_staging, csv_target, win32_error)) {
             set_error(error, "CSV 正式报告发布失败，Win32Error=" +
-                              std::to_string(GetLastError()));
+                              std::to_string(win32_error));
             return false;
         }
-        if (!MoveFileExW(
-                json_staging.c_str(), json_target.c_str(),
-                MOVEFILE_WRITE_THROUGH)) {
-            const DWORD win32_error = GetLastError();
-            std::error_code ignored;
-            std::filesystem::remove(csv_target, ignored);
+        win32_error = ERROR_SUCCESS;
+        if (!adapter.move_file(
+                adapter.context, json_staging, json_target, win32_error)) {
+            std::error_code rollback_error;
+            const bool rolled_back = adapter.remove_file(
+                adapter.context, csv_target, rollback_error);
             set_error(error, "JSON 正式报告发布失败，Win32Error=" +
                               std::to_string(win32_error));
+            if (!rolled_back || rollback_error) {
+                const std::string detail = rollback_error
+                    ? "code=" + std::to_string(rollback_error.value()) +
+                        ", message=" + rollback_error.message()
+                    : "remove returned false";
+                append_cleanup_error(error, csv_path, detail);
+            }
             return false;
         }
         error.clear();
@@ -828,10 +886,25 @@ bool benchmark::detail::publish_benchmark_reports(
         const std::string& csv_path,
         const std::string& json_path,
         std::string& error) noexcept {
+    BenchmarkReportPublishFileAdapter adapter;
+    adapter.move_file = move_benchmark_report_file;
+    adapter.remove_file = remove_benchmark_report_file;
+    return publish_benchmark_reports_with_adapter(
+        csv_staging_path, json_staging_path,
+        csv_path, json_path, adapter, error);
+}
+
+bool benchmark::detail::publish_benchmark_reports_with_adapter(
+        const std::string& csv_staging_path,
+        const std::string& json_staging_path,
+        const std::string& csv_path,
+        const std::string& json_path,
+        const BenchmarkReportPublishFileAdapter& adapter,
+        std::string& error) noexcept {
     if (fail_if_benchmark_stop_requested(error)) return false;
     return publish_benchmark_reports_impl(
         csv_staging_path, json_staging_path,
-        csv_path, json_path, error);
+        csv_path, json_path, adapter, error);
 }
 
 bool benchmark::detail::finalize_report(
@@ -1787,31 +1860,31 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
             remove_benchmark_outputs(
                 csv_path, json_path,
                 csv_staging_path, json_staging_path,
-                provider_profile_path);
+                provider_profile_path, error);
         }
         Log::shutdown();
         if (success) error.clear();
         return success;
     } catch (const std::exception& exception) {
-        if (report_outputs_owned) {
-            remove_benchmark_outputs(
-                csv_path, json_path,
-                csv_staging_path, json_staging_path,
-                provider_profile_path);
-        }
-        Log::shutdown();
         set_error(error, std::string("执行 Runtime 基准异常: ") +
                           exception.what());
-        return false;
-    } catch (...) {
         if (report_outputs_owned) {
             remove_benchmark_outputs(
                 csv_path, json_path,
                 csv_staging_path, json_staging_path,
-                provider_profile_path);
+                provider_profile_path, error);
         }
         Log::shutdown();
+        return false;
+    } catch (...) {
         set_error(error, "执行 Runtime 基准时发生未知异常");
+        if (report_outputs_owned) {
+            remove_benchmark_outputs(
+                csv_path, json_path,
+                csv_staging_path, json_staging_path,
+                provider_profile_path, error);
+        }
+        Log::shutdown();
         return false;
     }
 }

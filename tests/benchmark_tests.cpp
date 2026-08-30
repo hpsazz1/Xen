@@ -23,6 +23,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -381,63 +382,35 @@ void test_owned_benchmark_temporary_root_rejects_foreign_leaf_without_deletion()
            "foreign leaf 测试必须创建本轮 owned 临时根: " + error);
     if (!root_created) return;
 
-    const std::string expected_leaf = root.leaf_name;
-    const auto expected_path = root.path;
-    const auto expected_owned_path = expected_path / "owned.txt";
+    const auto owned_path = root.path / "owned.txt";
     {
         std::ofstream owned(
-            expected_owned_path, std::ios::binary | std::ios::trunc);
+            owned_path, std::ios::binary | std::ios::trunc);
         owned << "owned";
     }
-    const std::string foreign_leaf = std::string(kCancellationRootPrefix) +
-        "foreign-" + root.guid;
-    const auto foreign_path = root.temporary_base / foreign_leaf;
-    std::error_code rename_error;
-    std::filesystem::rename(expected_path, foreign_path, rename_error);
-    expect(!rename_error,
-           "测试必须把 owned 根改名为 prefix+foreign+guid: " +
-               rename_error.message());
-    if (rename_error) {
-        const std::array owned_files{expected_owned_path};
-        std::string cleanup_error;
-        (void)cleanup_owned_benchmark_temporary_root(
-            root, owned_files, cleanup_error);
-        return;
-    }
 
-    root.leaf_name = foreign_leaf;
-    root.path = foreign_path;
-    root.owner_path = foreign_path / ".xen-benchmark-report-owner";
-    const auto foreign_owned_path = foreign_path / "owned.txt";
-    const std::array foreign_owned_files{foreign_owned_path};
+    auto foreign = root;
+    foreign.leaf_name = std::string(kCancellationRootPrefix) +
+        "foreign-" + root.guid;
+    foreign.path = root.temporary_base / foreign.leaf_name;
+    foreign.owner_path =
+        foreign.path / ".xen-benchmark-report-owner";
+    const std::array<std::filesystem::path, 0> no_owned_files{};
     error.clear();
     const bool rejected = !cleanup_owned_benchmark_temporary_root(
-        root, foreign_owned_files, error);
-    expect(rejected &&
-               std::filesystem::is_regular_file(foreign_owned_path) &&
+        foreign, no_owned_files, error);
+    expect(rejected && error == "Benchmark 临时根不属于本轮" &&
+               std::filesystem::is_regular_file(owned_path) &&
                std::filesystem::is_regular_file(root.owner_path) &&
-               std::filesystem::is_directory(foreign_path),
-           "cleanup 必须拒绝 prefix+foreign+guid 且保持零删除");
+               std::filesystem::is_directory(root.path),
+           "cleanup 必须在文件系统操作前拒绝 prefix+foreign+guid");
 
-    if (std::filesystem::is_directory(foreign_path)) {
-        rename_error.clear();
-        std::filesystem::rename(foreign_path, expected_path, rename_error);
-        expect(!rename_error,
-               "foreign leaf 测试必须恢复精确 owned 根: " +
-                   rename_error.message());
-        if (!rename_error) {
-            root.leaf_name = expected_leaf;
-            root.path = expected_path;
-            root.owner_path =
-                expected_path / ".xen-benchmark-report-owner";
-            const std::array owned_files{expected_owned_path};
-            std::string cleanup_error;
-            expect(cleanup_owned_benchmark_temporary_root(
-                       root, owned_files, cleanup_error),
-                   "foreign leaf 测试收口不得遗留 owned 根: " +
-                       cleanup_error);
-        }
-    }
+    const std::array owned_files{owned_path};
+    std::string cleanup_error;
+    expect(cleanup_owned_benchmark_temporary_root(
+               root, owned_files, cleanup_error),
+           "foreign leaf 纯 predicate 测试不得遗留 owned 根: " +
+               cleanup_error);
 }
 
 struct BenchmarkRunAdapterState {
@@ -907,6 +880,92 @@ void test_stop_at_benchmark_report_publish_boundary_keeps_staging_pair() {
     expect(cleanup_owned_benchmark_temporary_root(
                owned_root, owned_files, cleanup_error),
            "最终发布 stop 测试不得遗留 staging/final 文件: " +
+               cleanup_error);
+}
+
+struct BenchmarkReportPublishFaultState {
+    int move_calls = 0;
+    int remove_calls = 0;
+};
+
+bool fake_benchmark_report_move(
+        void* context,
+        const std::filesystem::path& source,
+        const std::filesystem::path& target,
+        std::uint32_t& win32_error) noexcept {
+    auto& state = *static_cast<BenchmarkReportPublishFaultState*>(context);
+    ++state.move_calls;
+    if (state.move_calls == 1) {
+        std::error_code move_error;
+        std::filesystem::rename(source, target, move_error);
+        if (!move_error) {
+            win32_error = ERROR_SUCCESS;
+            return true;
+        }
+        win32_error = ERROR_WRITE_FAULT;
+        return false;
+    }
+    win32_error = ERROR_ACCESS_DENIED;
+    return false;
+}
+
+bool fake_benchmark_report_remove_failure(
+        void* context,
+        const std::filesystem::path&,
+        std::error_code& error) noexcept {
+    auto& state = *static_cast<BenchmarkReportPublishFaultState*>(context);
+    ++state.remove_calls;
+    error = std::make_error_code(std::errc::permission_denied);
+    return false;
+}
+
+void test_benchmark_report_publish_surfaces_rollback_failure() {
+    benchmark::detail::prepare_benchmark_console_control();
+    OwnedBenchmarkTemporaryRoot owned_root;
+    std::string error;
+    const bool root_created = create_owned_benchmark_temporary_root(
+        owned_root, kReportConsumerRootPrefix, error);
+    expect(root_created,
+           "promotion rollback fault 测试必须创建 owned 临时根: " + error);
+    if (!root_created) return;
+
+    const auto csv_staging_path = owned_root.path / "fault.csv.pending";
+    const auto json_staging_path = owned_root.path / "fault.json.pending";
+    const auto csv_path = owned_root.path / "fault.csv";
+    const auto json_path = owned_root.path / "fault.json";
+    {
+        std::ofstream csv(csv_staging_path, std::ios::binary);
+        std::ofstream json(json_staging_path, std::ios::binary);
+        csv << "csv";
+        json << "json";
+    }
+
+    BenchmarkReportPublishFaultState state;
+    benchmark::detail::BenchmarkReportPublishFileAdapter adapter;
+    adapter.context = &state;
+    adapter.move_file = fake_benchmark_report_move;
+    adapter.remove_file = fake_benchmark_report_remove_failure;
+    const bool published =
+        benchmark::detail::publish_benchmark_reports_with_adapter(
+            csv_staging_path.string(), json_staging_path.string(),
+            csv_path.string(), json_path.string(), adapter, error);
+    expect(!published && state.move_calls == 2 && state.remove_calls == 1 &&
+               error.find("JSON 正式报告发布失败") != std::string::npos &&
+               error.find("CleanupError") != std::string::npos &&
+               error.find(csv_path.string()) != std::string::npos &&
+               std::filesystem::is_regular_file(csv_path) &&
+               std::filesystem::is_regular_file(json_staging_path) &&
+               !std::filesystem::exists(csv_staging_path) &&
+               !std::filesystem::exists(json_path),
+           "JSON promotion 与 CSV rollback 双失败必须显式上报精确残留: " +
+               error);
+
+    const std::array owned_files{
+        csv_staging_path, json_staging_path, csv_path, json_path};
+    std::string cleanup_error;
+    expect(cleanup_owned_benchmark_temporary_root(
+               owned_root, owned_files, cleanup_error),
+           "promotion rollback fault 测试不得遗留 staging/final: " +
                cleanup_error);
 }
 
@@ -1423,6 +1482,7 @@ int main() {
     test_benchmark_report_consumer_pair_publication();
     test_stop_after_formal_gate_prevents_report_finalize();
     test_stop_at_benchmark_report_publish_boundary_keeps_staging_pair();
+    test_benchmark_report_publish_surfaces_rollback_failure();
     test_coverage_phase_tracker();
     test_sample_phase_tracker();
     test_formal_sample_tracker_waits_for_time_gate_after_retention_limit();

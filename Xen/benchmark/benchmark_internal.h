@@ -8,11 +8,13 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace benchmark::detail {
@@ -295,11 +297,31 @@ bool finalize_report(
     std::string& error) noexcept;
 
 // 已成对生成 staging 报告后的最终提交 seam；正式目标在入口保证不存在。
+struct BenchmarkReportPublishFileAdapter {
+    void* context = nullptr;
+    bool (*move_file)(
+        void* context,
+        const std::filesystem::path& source,
+        const std::filesystem::path& target,
+        std::uint32_t& win32_error) noexcept = nullptr;
+    bool (*remove_file)(
+        void* context,
+        const std::filesystem::path& path,
+        std::error_code& error) noexcept = nullptr;
+};
+
 bool publish_benchmark_reports(
     const std::string& csv_staging_path,
     const std::string& json_staging_path,
     const std::string& csv_path,
     const std::string& json_path,
+    std::string& error) noexcept;
+bool publish_benchmark_reports_with_adapter(
+    const std::string& csv_staging_path,
+    const std::string& json_staging_path,
+    const std::string& csv_path,
+    const std::string& json_path,
+    const BenchmarkReportPublishFileAdapter& adapter,
     std::string& error) noexcept;
 
 // formal 成功样本由这里统一聚合并写入固定容量环。生产循环与测试读取
