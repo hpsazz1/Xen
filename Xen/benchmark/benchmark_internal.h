@@ -304,6 +304,7 @@ struct BenchmarkReportPublishFileAdapter {
         const std::filesystem::path& source,
         const std::filesystem::path& target,
         std::uint32_t& win32_error) noexcept = nullptr;
+    // false + 空 error 表示目标已不存在；只有非空 error 才是失败。
     bool (*remove_file)(
         void* context,
         const std::filesystem::path& path,

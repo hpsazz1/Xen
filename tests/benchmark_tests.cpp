@@ -317,6 +317,28 @@ public:
         }
     }
 
+    bool cleanup_with_outputs(
+            std::span<const std::filesystem::path> output_paths,
+            std::string& error) noexcept {
+        try {
+            std::vector<std::filesystem::path> owned_files{
+                model_path_, sentinel_path_};
+            owned_files.insert(
+                owned_files.end(), output_paths.begin(), output_paths.end());
+            const bool cleaned = cleanup_owned_benchmark_temporary_root(
+                owned_root_, owned_files, error);
+            if (cleaned) valid_ = false;
+            return cleaned;
+        } catch (const std::exception& exception) {
+            error = std::string("Benchmark fixture cleanup 异常: ") +
+                exception.what();
+            return false;
+        } catch (...) {
+            error = "Benchmark fixture cleanup 未知异常";
+            return false;
+        }
+    }
+
 private:
     OwnedBenchmarkTemporaryRoot owned_root_;
     std::filesystem::path model_path_;
@@ -416,6 +438,7 @@ void test_owned_benchmark_temporary_root_rejects_foreign_leaf_without_deletion()
 struct BenchmarkRunAdapterState {
     bool fail_setup = false;
     bool block_setup = false;
+    std::string cleanup_path_to_lock;
     bool return_runtime = false;
     bool request_ctrl_break_before_runtime_start = false;
     bool ctrl_break_handled = false;
@@ -425,6 +448,7 @@ struct BenchmarkRunAdapterState {
     int runtime_factory_calls = 0;
     int before_runtime_start_calls = 0;
     int runtime_start_calls = 0;
+    ScopedWin32Handle locked_cleanup_path{nullptr};
     std::mutex mutex;
     std::condition_variable condition;
 };
@@ -450,6 +474,28 @@ bool fake_provider_setup(
     } catch (...) {
         error = "注入 setup 写入 Provider profile 异常";
         return false;
+    }
+    if (!state.cleanup_path_to_lock.empty()) {
+        const auto cleanup_path =
+            std::filesystem::u8path(state.cleanup_path_to_lock);
+        {
+            std::ofstream locked_output(
+                cleanup_path, std::ios::binary | std::ios::trunc);
+            locked_output << "locked-cleanup-output";
+            if (!locked_output.good()) {
+                error = "注入 setup 无法创建待清理文件";
+                return false;
+            }
+        }
+        state.locked_cleanup_path.reset(CreateFileW(
+            cleanup_path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!state.locked_cleanup_path) {
+            error = "注入 setup 无法锁定待清理文件，Win32Error=" +
+                std::to_string(GetLastError());
+            return false;
+        }
     }
     {
         std::unique_lock lock(state.mutex);
@@ -752,6 +798,59 @@ void test_performance_probe_option() {
            "性能探针非法开关必须拒绝");
 }
 
+void test_failed_setup_surfaces_cleanup_error_and_continues() {
+    TemporaryBenchmarkRun run;
+    expect(run.valid(), "cleanup failure fixture 必须创建成功");
+    if (!run.valid()) return;
+
+    BenchmarkRunAdapterState state;
+    state.fail_setup = true;
+    const auto options = run.options();
+    const std::string locked_csv_path = options.report_prefix + ".csv";
+    state.cleanup_path_to_lock = locked_csv_path;
+    std::string error;
+    const bool succeeded =
+        benchmark::detail::run_runtime_benchmark_with_adapter(
+            options, adapter_for(state), error);
+    const std::string expected_error_prefix =
+        "注入 setup 失败; CleanupError(path=" +
+        locked_csv_path + ", code=32,";
+    bool pending_outputs_absent = true;
+    std::error_code scan_error;
+    const auto report_directory =
+        std::filesystem::u8path(options.report_prefix).parent_path();
+    std::filesystem::directory_iterator entry(report_directory, scan_error);
+    const std::filesystem::directory_iterator end;
+    for (; !scan_error && entry != end; entry.increment(scan_error)) {
+        const std::string name = entry->path().filename().string();
+        if (name.find(".pending.") != std::string::npos ||
+            name.find(".tmp.") != std::string::npos) {
+            pending_outputs_absent = false;
+        }
+    }
+    expect(!succeeded && state.setup_calls == 1 &&
+               state.runtime_factory_calls == 0 &&
+               state.runtime_start_calls == 0 &&
+               state.locked_cleanup_path &&
+               error.starts_with(expected_error_prefix) &&
+               std::filesystem::is_regular_file(
+                   std::filesystem::u8path(locked_csv_path)) &&
+               !std::filesystem::exists(options.provider_profile_path) &&
+               !std::filesystem::exists(options.report_prefix + ".json") &&
+               !std::filesystem::exists(options.ready_file_path) &&
+               !scan_error && pending_outputs_absent,
+           "统一 cleanup 必须保留 setup 原错、上报精确残留并继续清理: " +
+               error);
+
+    state.locked_cleanup_path.reset();
+    const std::array remaining_outputs{
+        std::filesystem::u8path(locked_csv_path)};
+    std::string cleanup_error;
+    expect(run.cleanup_with_outputs(remaining_outputs, cleanup_error),
+           "释放共享锁后 fixture 必须精确清理残留 CSV 与根: " +
+               cleanup_error);
+}
+
 void test_stop_after_formal_gate_prevents_report_finalize() {
     OwnedBenchmarkTemporaryRoot owned_root;
     std::string error;
@@ -919,6 +1018,22 @@ bool fake_benchmark_report_remove_failure(
     return false;
 }
 
+bool fake_benchmark_report_remove_already_absent(
+        void* context,
+        const std::filesystem::path& path,
+        std::error_code& error) noexcept {
+    auto& state = *static_cast<BenchmarkReportPublishFaultState*>(context);
+    ++state.remove_calls;
+    std::error_code remove_error;
+    (void)std::filesystem::remove(path, remove_error);
+    if (remove_error) {
+        error = remove_error;
+        return false;
+    }
+    error.clear();
+    return false;
+}
+
 void test_benchmark_report_publish_surfaces_rollback_failure() {
     benchmark::detail::prepare_benchmark_console_control();
     OwnedBenchmarkTemporaryRoot owned_root;
@@ -966,6 +1081,56 @@ void test_benchmark_report_publish_surfaces_rollback_failure() {
     expect(cleanup_owned_benchmark_temporary_root(
                owned_root, owned_files, cleanup_error),
            "promotion rollback fault 测试不得遗留 staging/final: " +
+               cleanup_error);
+}
+
+void test_benchmark_report_publish_accepts_already_absent_rollback() {
+    benchmark::detail::prepare_benchmark_console_control();
+    OwnedBenchmarkTemporaryRoot owned_root;
+    std::string error;
+    const bool root_created = create_owned_benchmark_temporary_root(
+        owned_root, kReportConsumerRootPrefix, error);
+    expect(root_created,
+           "already-absent rollback 测试必须创建 owned 临时根: " + error);
+    if (!root_created) return;
+
+    const auto csv_staging_path =
+        owned_root.path / "already-absent.csv.pending";
+    const auto json_staging_path =
+        owned_root.path / "already-absent.json.pending";
+    const auto csv_path = owned_root.path / "already-absent.csv";
+    const auto json_path = owned_root.path / "already-absent.json";
+    {
+        std::ofstream csv(csv_staging_path, std::ios::binary);
+        std::ofstream json(json_staging_path, std::ios::binary);
+        csv << "csv";
+        json << "json";
+    }
+
+    BenchmarkReportPublishFaultState state;
+    benchmark::detail::BenchmarkReportPublishFileAdapter adapter;
+    adapter.context = &state;
+    adapter.move_file = fake_benchmark_report_move;
+    adapter.remove_file = fake_benchmark_report_remove_already_absent;
+    const bool published =
+        benchmark::detail::publish_benchmark_reports_with_adapter(
+            csv_staging_path.string(), json_staging_path.string(),
+            csv_path.string(), json_path.string(), adapter, error);
+    expect(!published && state.move_calls == 2 && state.remove_calls == 1 &&
+               error == "JSON 正式报告发布失败，Win32Error=5" &&
+               !std::filesystem::exists(csv_path) &&
+               std::filesystem::is_regular_file(json_staging_path) &&
+               !std::filesystem::exists(csv_staging_path) &&
+               !std::filesystem::exists(json_path),
+           "false + clear error_code 必须按 rollback 目标已不存在处理: " +
+               error);
+
+    const std::array owned_files{
+        csv_staging_path, json_staging_path, csv_path, json_path};
+    std::string cleanup_error;
+    expect(cleanup_owned_benchmark_temporary_root(
+               owned_root, owned_files, cleanup_error),
+           "already-absent rollback 测试不得遗留 staging/final: " +
                cleanup_error);
 }
 
@@ -1472,6 +1637,7 @@ int main() {
     test_owned_benchmark_temporary_root_rejects_foreign_leaf_without_deletion();
     test_normal_setup_reaches_runtime_factory_and_cleans_outputs();
     test_failed_setup_skips_runtime_and_cleans_outputs();
+    test_failed_setup_surfaces_cleanup_error_and_continues();
     test_stop_during_blocking_setup_skips_runtime_and_allows_next_run();
     test_stop_after_runtime_factory_is_observed_before_start();
     test_console_handler_only_claims_interrupt_events();
@@ -1483,6 +1649,7 @@ int main() {
     test_stop_after_formal_gate_prevents_report_finalize();
     test_stop_at_benchmark_report_publish_boundary_keeps_staging_pair();
     test_benchmark_report_publish_surfaces_rollback_failure();
+    test_benchmark_report_publish_accepts_already_absent_rollback();
     test_coverage_phase_tracker();
     test_sample_phase_tracker();
     test_formal_sample_tracker_waits_for_time_gate_after_retention_limit();

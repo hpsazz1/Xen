@@ -729,16 +729,15 @@ bool publish_benchmark_reports_impl(
         if (!adapter.move_file(
                 adapter.context, json_staging, json_target, win32_error)) {
             std::error_code rollback_error;
-            const bool rolled_back = adapter.remove_file(
+            (void)adapter.remove_file(
                 adapter.context, csv_target, rollback_error);
             set_error(error, "JSON 正式报告发布失败，Win32Error=" +
                               std::to_string(win32_error));
-            if (!rolled_back || rollback_error) {
-                const std::string detail = rollback_error
-                    ? "code=" + std::to_string(rollback_error.value()) +
-                        ", message=" + rollback_error.message()
-                    : "remove returned false";
-                append_cleanup_error(error, csv_path, detail);
+            if (rollback_error) {
+                append_cleanup_error(
+                    error, csv_path,
+                    "code=" + std::to_string(rollback_error.value()) +
+                        ", message=" + rollback_error.message());
             }
             return false;
         }
