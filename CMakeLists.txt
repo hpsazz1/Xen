@@ -1175,27 +1175,47 @@ if(BUILD_TESTING)
         message(FATAL_ERROR
             "Windows PowerShell 5 executable not found: ${XEN_WINDOWS_POWERSHELL}")
     endif()
-    add_test(NAME obs_capture_binding_tests
-        COMMAND "${XEN_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
-            -File "${PROJECT_SOURCE_DIR}/tests/obs_capture_binding_tests.ps1"
-            -BindingScript "${PROJECT_SOURCE_DIR}/scripts/export_obs_capture_binding.ps1"
-            -TestRoot "${CMAKE_BINARY_DIR}/obs-capture-binding-tests")
-    add_test(NAME capture_evidence_cli_tests
-        COMMAND "${XEN_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
-            -File "${PROJECT_SOURCE_DIR}/tests/capture_evidence_cli_tests.ps1"
-            -Executable "$<TARGET_FILE:xen_capture_evidence>"
-            -TestRoot "${CMAKE_BINARY_DIR}/capture-evidence-cli-tests")
-    add_test(NAME sender_cli_tests
-        COMMAND "${XEN_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
-            -File "${PROJECT_SOURCE_DIR}/tests/sender_cli_tests.ps1"
-            -Executable "$<TARGET_FILE:xen_sender>"
-            -TestRoot "${CMAKE_BINARY_DIR}/sender-cli-tests")
-    add_test(NAME release_bundle_tests
-        COMMAND "${XEN_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
-            -File "${PROJECT_SOURCE_DIR}/tests/release_bundle_tests.ps1"
-            -PublishScript "${PROJECT_SOURCE_DIR}/scripts/publish_release_bundle.ps1"
-            -GitExecutable "${GIT_EXECUTABLE}"
-            -TestRoot "${CMAKE_BINARY_DIR}/release-bundle-tests")
+    # 固定 powershell.exe 仍会继承调用方的 PSModulePath。统一清除该变量，
+    # 让 Windows PowerShell 5 按自身 PSHOME 重建系统模块路径；cmake -E env
+    # 只改变测试子进程，不修改调用 CTest 的父环境。
+    function(xen_add_windows_powershell_test test_name script_path)
+        add_test(NAME ${test_name}
+            COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath --
+                "${XEN_WINDOWS_POWERSHELL}"
+                -NoProfile -ExecutionPolicy Bypass
+                -File "${script_path}" ${ARGN})
+    endfunction()
+
+    xen_add_windows_powershell_test(powershell_module_path_tests
+        "${PROJECT_SOURCE_DIR}/tests/powershell_module_path_tests.ps1"
+        -CMakeCommand "${CMAKE_COMMAND}"
+        -CTestCommand "${CMAKE_CTEST_COMMAND}"
+        -BuildDirectory "${CMAKE_BINARY_DIR}"
+        -Configuration "$<CONFIG>")
+    xen_add_windows_powershell_test(obs_capture_binding_tests
+        "${PROJECT_SOURCE_DIR}/tests/obs_capture_binding_tests.ps1"
+        -BindingScript "${PROJECT_SOURCE_DIR}/scripts/export_obs_capture_binding.ps1"
+        -TestRoot "${CMAKE_BINARY_DIR}/obs-capture-binding-tests")
+    xen_add_windows_powershell_test(capture_evidence_cli_tests
+        "${PROJECT_SOURCE_DIR}/tests/capture_evidence_cli_tests.ps1"
+        -Executable "$<TARGET_FILE:xen_capture_evidence>"
+        -TestRoot "${CMAKE_BINARY_DIR}/capture-evidence-cli-tests")
+    xen_add_windows_powershell_test(sender_cli_tests
+        "${PROJECT_SOURCE_DIR}/tests/sender_cli_tests.ps1"
+        -Executable "$<TARGET_FILE:xen_sender>"
+        -TestRoot "${CMAKE_BINARY_DIR}/sender-cli-tests")
+    xen_add_windows_powershell_test(release_bundle_tests
+        "${PROJECT_SOURCE_DIR}/tests/release_bundle_tests.ps1"
+        -PublishScript "${PROJECT_SOURCE_DIR}/scripts/publish_release_bundle.ps1"
+        -GitExecutable "${GIT_EXECUTABLE}"
+        -TestRoot "${CMAKE_BINARY_DIR}/release-bundle-tests")
+    xen_add_windows_powershell_test(aim_analysis_import_scope_tests
+        "${PROJECT_SOURCE_DIR}/tests/aim_analysis_import_scope_tests.ps1"
+        -ScriptsRoot "${PROJECT_SOURCE_DIR}/scripts")
+    xen_add_windows_powershell_test(powershell_host_contract_tests
+        "${PROJECT_SOURCE_DIR}/tests/powershell_host_contract_tests.ps1"
+        -WorkflowScript
+            "${PROJECT_SOURCE_DIR}/scripts/test_release_transfer_and_aim_manual.ps1")
 
     add_executable(debug_tests
         tests/debug_tests.cpp)
