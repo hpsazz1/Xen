@@ -788,6 +788,51 @@ bool generate_provider_profile(
 
 } // namespace
 
+bool benchmark::detail::finalize_report(
+        DebugReport& report,
+        const RuntimeSnapshot& final_snapshot,
+        const DebugCoverageSummary& coverage,
+        const FormalSampleSummary& formal_summary,
+        std::uint64_t phase_formal_samples,
+        bool performance_probes_enabled,
+        CaptureBackend capture_backend,
+        std::string& error) noexcept {
+    if (!report.finalize(final_snapshot, error, &coverage)) return false;
+
+    const auto& summary = report.summary();
+    const std::uint64_t formal_samples =
+        formal_summary.formal_sample_count;
+    const std::size_t retained_samples =
+        formal_summary.retained_sample_count;
+    const bool probe_summary_valid = performance_probes_enabled
+        ? summary.pipeline_complete.sample_count == retained_samples &&
+          summary.runtime_handoff.sample_count == retained_samples &&
+          (capture_backend != CaptureBackend::NDI ||
+           (summary.ndi_receive_call.sample_count == retained_samples &&
+            summary.ndi_video_queue_depth.sample_count > 0))
+        : summary.pipeline_complete.sample_count == 0 &&
+          summary.runtime_handoff.sample_count == 0 &&
+          summary.ndi_receive_call.sample_count == 0 &&
+          summary.ndi_video_queue_depth.sample_count == 0;
+    if (phase_formal_samples == formal_samples &&
+        formal_summary.successful_samples == formal_samples &&
+        formal_summary.failed_samples == 0 &&
+        static_cast<std::uint64_t>(retained_samples) +
+                formal_summary.omitted_sample_count == formal_samples &&
+        summary.sample_count == retained_samples &&
+        summary.successful_samples == retained_samples &&
+        summary.failed_samples == 0 &&
+        summary.report_samples_dropped == 0 &&
+        summary.runtime_samples_dropped == 0 &&
+        summary.coverage.available &&
+        summary.coverage.formal.sample_count == formal_samples &&
+        probe_summary_valid) {
+        return true;
+    }
+    set_error(error, "staging 报告汇总不符合有界留样契约");
+    return false;
+}
+
 BenchmarkParseStatus parse_benchmark_options(
         std::span<const std::wstring_view> arguments,
         BenchmarkOptions& options,
@@ -1538,113 +1583,78 @@ bool run_runtime_benchmark(
                                 // tracker 库存，避免序列化阶段继续持有双份样本。
                                 formal_tracker.release_retained_storage();
                             }
-                            if (!run_failed && report.finalize(
-                                    final_snapshot, error,
-                                    &phase_tracker.coverage())) {
+                            const auto& formal_summary =
+                                formal_tracker.summary();
+                            if (!run_failed &&
+                                benchmark::detail::finalize_report(
+                                    report, final_snapshot,
+                                    phase_tracker.coverage(),
+                                    formal_summary,
+                                    phase_tracker.formal_successful(),
+                                    options.enable_performance_probes,
+                                    config.capture.backend, error)) {
                                 const auto& summary = report.summary();
-                                const auto& formal_summary =
-                                    formal_tracker.summary();
                                 const std::uint64_t formal_samples =
                                     formal_summary.formal_sample_count;
                                 const std::size_t retained_samples =
                                     formal_summary.retained_sample_count;
-                                const bool probe_summary_valid =
-                                    options.enable_performance_probes
-                                    ? summary.pipeline_complete.sample_count ==
-                                          retained_samples &&
-                                      summary.runtime_handoff.sample_count ==
-                                          retained_samples &&
-                                      (config.capture.backend !=
-                                           CaptureBackend::NDI ||
-                                       (summary.ndi_receive_call.sample_count ==
-                                            retained_samples &&
-                                        summary.ndi_video_queue_depth
-                                                .sample_count > 0))
-                                    : summary.pipeline_complete.sample_count == 0 &&
-                                      summary.runtime_handoff.sample_count == 0 &&
-                                      summary.ndi_receive_call.sample_count == 0 &&
-                                      summary.ndi_video_queue_depth.sample_count ==
-                                          0;
-                                if (phase_tracker.formal_successful() ==
-                                        formal_samples &&
-                                    formal_summary.successful_samples ==
-                                        formal_samples &&
-                                    formal_summary.failed_samples == 0 &&
-                                    static_cast<std::uint64_t>(
-                                        retained_samples) +
-                                            formal_summary.omitted_sample_count ==
-                                        formal_samples &&
-                                    summary.sample_count == retained_samples &&
-                                    summary.successful_samples ==
-                                        retained_samples &&
-                                    summary.failed_samples == 0 &&
-                                    summary.report_samples_dropped == 0 &&
-                                    summary.runtime_samples_dropped == 0 &&
-                                    summary.coverage.available &&
-                                    summary.coverage.formal.sample_count ==
-                                        formal_samples &&
-                                    probe_summary_valid) {
-                                    const auto omitted_samples =
-                                        formal_summary.omitted_sample_count;
-                                    bool metadata_valid = true;
-                                    if (omitted_samples > 0) {
-                                        metadata_valid =
-                                            rewrite_report_samples_dropped(
-                                                csv_staging_path,
-                                                benchmark::detail::
-                                                    ReportFileFormat::CSV,
-                                                omitted_samples, error) &&
-                                            rewrite_report_samples_dropped(
-                                                json_staging_path,
-                                                benchmark::detail::
-                                                    ReportFileFormat::JSON,
-                                                omitted_samples, error);
-                                    } else {
-                                        std::uint64_t csv_omitted = 0;
-                                        std::uint64_t json_omitted = 0;
-                                        metadata_valid =
-                                            read_report_samples_dropped(
-                                                csv_staging_path,
-                                                benchmark::detail::
-                                                    ReportFileFormat::CSV,
-                                                csv_omitted, error) &&
-                                            read_report_samples_dropped(
-                                                json_staging_path,
-                                                benchmark::detail::
-                                                    ReportFileFormat::JSON,
-                                                json_omitted, error) &&
-                                            csv_omitted == 0 &&
-                                            json_omitted == 0;
-                                    }
-                                    if (!metadata_valid && error.empty()) {
-                                        set_error(error,
-                                            "CSV/JSON staging 省略计数不一致");
-                                    }
-                                    if (metadata_valid &&
-                                        publish_benchmark_reports(
+                                const auto omitted_samples =
+                                    formal_summary.omitted_sample_count;
+                                bool metadata_valid = true;
+                                if (omitted_samples > 0) {
+                                    metadata_valid =
+                                        rewrite_report_samples_dropped(
                                             csv_staging_path,
+                                            benchmark::detail::
+                                                ReportFileFormat::CSV,
+                                            omitted_samples, error) &&
+                                        rewrite_report_samples_dropped(
                                             json_staging_path,
-                                            csv_path, json_path, error)) {
-                                        success = true;
-                                        LOG_INFO(
-                                            "benchmark",
-                                            "正式基准完成: startup={}, warmup={}, formal_samples={}, "
-                                            "retained_samples={}, omitted_samples={}, "
-                                            "retained_total_p50={:.3f}ms, "
-                                            "retained_total_p95={:.3f}ms, "
-                                            "retained_total_p99={:.3f}ms",
-                                            phase_tracker.startup_successful(),
-                                            phase_tracker.warmup_successful(),
-                                            formal_samples,
-                                            retained_samples,
-                                            omitted_samples,
-                                            summary.total.p50_ms,
-                                            summary.total.p95_ms,
-                                            summary.total.p99_ms);
-                                    }
+                                            benchmark::detail::
+                                                ReportFileFormat::JSON,
+                                            omitted_samples, error);
                                 } else {
+                                    std::uint64_t csv_omitted = 0;
+                                    std::uint64_t json_omitted = 0;
+                                    metadata_valid =
+                                        read_report_samples_dropped(
+                                            csv_staging_path,
+                                            benchmark::detail::
+                                                ReportFileFormat::CSV,
+                                            csv_omitted, error) &&
+                                        read_report_samples_dropped(
+                                            json_staging_path,
+                                            benchmark::detail::
+                                                ReportFileFormat::JSON,
+                                            json_omitted, error) &&
+                                        csv_omitted == 0 &&
+                                        json_omitted == 0;
+                                }
+                                if (!metadata_valid && error.empty()) {
                                     set_error(error,
-                                        "staging 报告汇总不符合有界留样契约");
+                                        "CSV/JSON staging 省略计数不一致");
+                                }
+                                if (metadata_valid &&
+                                    publish_benchmark_reports(
+                                        csv_staging_path,
+                                        json_staging_path,
+                                        csv_path, json_path, error)) {
+                                    success = true;
+                                    LOG_INFO(
+                                        "benchmark",
+                                        "正式基准完成: startup={}, warmup={}, formal_samples={}, "
+                                        "retained_samples={}, omitted_samples={}, "
+                                        "retained_total_p50={:.3f}ms, "
+                                        "retained_total_p95={:.3f}ms, "
+                                        "retained_total_p99={:.3f}ms",
+                                        phase_tracker.startup_successful(),
+                                        phase_tracker.warmup_successful(),
+                                        formal_samples,
+                                        retained_samples,
+                                        omitted_samples,
+                                        summary.total.p50_ms,
+                                        summary.total.p95_ms,
+                                        summary.total.p99_ms);
                                 }
                             }
                         }

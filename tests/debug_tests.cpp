@@ -7,13 +7,184 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <random>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
+
+#include <windows.h>
 
 namespace {
 
 int failures = 0;
+
+struct Win32HandleCloser {
+    void operator()(void* handle) const noexcept {
+        if (handle && handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+    }
+};
+
+using ScopedWin32Handle = std::unique_ptr<void, Win32HandleCloser>;
+
+constexpr std::string_view kDebugPairTestRootPrefix =
+    "xen-debug-pair-test-";
+constexpr std::string_view kDebugPairTestOwnerFile =
+    ".xen-debug-pair-test-owner";
+
+struct OwnedDebugPairTestRoot {
+    std::filesystem::path temporary_base;
+    std::filesystem::path path;
+    std::filesystem::path owner_path;
+    std::string guid;
+    std::string owner_value;
+};
+
+std::string make_test_run_guid() {
+    std::string guid = "00000000-0000-4000-8000-000000000000";
+    constexpr char hexadecimal[] = "0123456789abcdef";
+    std::random_device random;
+    for (char& character : guid) {
+        if (character == '0') {
+            character = hexadecimal[random() & 0x0fU];
+        }
+    }
+    guid[14] = '4';
+    guid[19] = hexadecimal[8U + (random() & 0x03U)];
+    return guid;
+}
+
+bool query_non_reparse_path(const std::filesystem::path& path,
+                            std::string& error,
+                            DWORD* attributes = nullptr) {
+    const DWORD value = GetFileAttributesW(path.c_str());
+    if (value == INVALID_FILE_ATTRIBUTES) {
+        error = "无法读取临时测试路径属性，Win32Error=" +
+            std::to_string(GetLastError()) + ", path=" + path.string();
+        return false;
+    }
+    if ((value & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
+        error = "临时测试路径包含 reparse point，拒绝清理: " +
+            path.string();
+        return false;
+    }
+    if (attributes) *attributes = value;
+    return true;
+}
+
+bool validate_existing_path_chain(const std::filesystem::path& path,
+                                  std::string& error) {
+    auto current = std::filesystem::absolute(path).lexically_normal();
+    for (;;) {
+        if (!query_non_reparse_path(current, error)) return false;
+        const auto parent = current.parent_path();
+        if (parent.empty() || parent == current) return true;
+        current = parent;
+    }
+}
+
+bool owner_sentinel_matches(const OwnedDebugPairTestRoot& root,
+                            std::string& error) {
+    DWORD attributes = 0;
+    if (!query_non_reparse_path(root.owner_path, error, &attributes) ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U) {
+        if (error.empty()) error = "临时测试 owner sentinel 不是文件";
+        return false;
+    }
+    std::ifstream input(root.owner_path, std::ios::binary);
+    const std::string actual(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    if (!input.is_open() || actual != root.owner_value) {
+        error = "临时测试 owner sentinel 不属于本轮";
+        return false;
+    }
+    return true;
+}
+
+bool create_owned_debug_pair_test_root(
+        OwnedDebugPairTestRoot& root,
+        std::string& error) {
+    root = {};
+    root.temporary_base = std::filesystem::absolute(
+        std::filesystem::temp_directory_path()).lexically_normal();
+    if (root.temporary_base.filename().empty()) {
+        root.temporary_base = root.temporary_base.parent_path();
+    }
+    if (!validate_existing_path_chain(root.temporary_base, error)) {
+        return false;
+    }
+    root.guid = make_test_run_guid();
+    root.path = root.temporary_base /
+        (std::string(kDebugPairTestRootPrefix) + root.guid);
+    std::error_code create_error;
+    if (!std::filesystem::create_directory(root.path, create_error)) {
+        error = create_error
+            ? "创建本轮 GUID 临时测试根失败: " + create_error.message()
+            : "本轮 GUID 临时测试根已存在，拒绝复用";
+        return false;
+    }
+    root.owner_path = root.path / std::string(kDebugPairTestOwnerFile);
+    root.owner_value = "xen-debug-pair-test-owner:" + root.guid;
+    std::ofstream owner(root.owner_path, std::ios::binary);
+    owner << root.owner_value;
+    owner.close();
+    if (!owner) {
+        error = "写入本轮临时测试 owner sentinel 失败";
+        return false;
+    }
+    return owner_sentinel_matches(root, error);
+}
+
+bool cleanup_owned_debug_pair_test_root(
+        const OwnedDebugPairTestRoot& root,
+        std::string& error) {
+    const auto normalized_root =
+        std::filesystem::absolute(root.path).lexically_normal();
+    const auto expected_leaf =
+        std::string(kDebugPairTestRootPrefix) + root.guid;
+    if (normalized_root.parent_path() != root.temporary_base ||
+        normalized_root.filename() != expected_leaf ||
+        root.owner_path != normalized_root /
+            std::string(kDebugPairTestOwnerFile)) {
+        error = "临时测试根不是本轮 temp base 的 GUID direct child";
+        return false;
+    }
+    DWORD root_attributes = 0;
+    if (!validate_existing_path_chain(normalized_root, error) ||
+        !query_non_reparse_path(
+            normalized_root, error, &root_attributes) ||
+        (root_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U ||
+        !owner_sentinel_matches(root, error)) {
+        if (error.empty()) error = "本轮临时测试根不是目录";
+        return false;
+    }
+
+    try {
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(normalized_root)) {
+            if (!query_non_reparse_path(entry.path(), error)) return false;
+        }
+    } catch (const std::filesystem::filesystem_error& exception) {
+        error = "枚举本轮临时测试根失败: " +
+            std::string(exception.what());
+        return false;
+    }
+
+    std::error_code remove_error;
+    std::filesystem::remove_all(normalized_root, remove_error);
+    std::error_code exists_error;
+    const bool still_exists =
+        std::filesystem::exists(normalized_root, exists_error);
+    if (remove_error || exists_error || still_exists) {
+        error = "清理本轮临时测试根失败: remove=" +
+            remove_error.message() + ", exists=" +
+            exists_error.message();
+        return false;
+    }
+    return true;
+}
 
 void expect(bool condition, const std::string& message) {
     if (condition) return;
@@ -542,6 +713,138 @@ void test_report_summary_and_atomic_files() {
     std::filesystem::remove_all(root, ignored);
 }
 
+void test_report_pair_publish_failure_preserves_previous_pair() {
+    OwnedDebugPairTestRoot owned_root;
+    std::string ownership_error;
+    const bool root_created = create_owned_debug_pair_test_root(
+        owned_root, ownership_error);
+    expect(root_created,
+           "必须创建带 owner sentinel 的本轮 GUID 临时测试根: " +
+               ownership_error);
+    if (!root_created) return;
+    const auto& root = owned_root.path;
+    const auto cleanup_root = [&]() {
+        std::string cleanup_error;
+        const bool cleaned = cleanup_owned_debug_pair_test_root(
+            owned_root, cleanup_error);
+        expect(cleaned,
+               "只能清理本轮 owner sentinel 未变且无 reparse 的临时根: " +
+                   cleanup_error);
+    };
+
+    const auto csv_path = root / "runtime.csv";
+    const auto json_path = root / "runtime.json";
+    DebugReportConfig config;
+    config.csv_path = csv_path.string();
+    config.json_path = json_path.string();
+    config.session_id = "old-session";
+    config.max_samples = 1;
+    std::string error;
+    {
+        DebugReport previous_report;
+        expect(previous_report.start(config, error),
+               "旧 report pair 应通过 DebugReport 公有 seam 启动: " + error);
+        if (!previous_report.active()) {
+            cleanup_root();
+            return;
+        }
+        const RuntimePipelineSample sample = make_sample(1, 1.0, true);
+        previous_report.ingest(
+            std::span<const RuntimePipelineSample>(&sample, 1));
+        RuntimeSnapshot final_snapshot;
+        expect(previous_report.finalize(final_snapshot, error),
+               "旧 report pair 应通过 DebugReport 公有 seam 发布: " + error);
+    }
+    std::ifstream previous_csv_stream(csv_path, std::ios::binary);
+    std::ifstream previous_json_stream(json_path, std::ios::binary);
+    const std::string previous_csv(
+        (std::istreambuf_iterator<char>(previous_csv_stream)),
+        std::istreambuf_iterator<char>());
+    const std::string previous_json(
+        (std::istreambuf_iterator<char>(previous_json_stream)),
+        std::istreambuf_iterator<char>());
+    previous_csv_stream.close();
+    previous_json_stream.close();
+    expect(previous_csv.find("# session_id,\"old-session\"") !=
+                   std::string::npos &&
+               previous_json.find("\"session_id\": \"old-session\"") !=
+                   std::string::npos,
+           "公有 seam 必须预置可识别的完整旧 report pair");
+
+    ScopedWin32Handle json_reader(CreateFileW(
+        json_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    expect(json_reader.get() != INVALID_HANDLE_VALUE,
+           "测试必须成功锁定旧 JSON 才能注入第二次发布失败");
+    if (json_reader.get() == INVALID_HANDLE_VALUE) {
+        cleanup_root();
+        return;
+    }
+
+    DebugReport report;
+    config.session_id = "new-session";
+    expect(report.start(config, error),
+           "Debug report pair 测试应成功启动: " + error);
+    if (report.active()) {
+        const RuntimePipelineSample sample = make_sample(1, 1.0, true);
+        report.ingest(std::span<const RuntimePipelineSample>(&sample, 1));
+        RuntimeSnapshot final_snapshot;
+        const bool finalized = report.finalize(final_snapshot, error);
+        expect(!finalized && !error.empty(),
+               "锁定 JSON 必须让第二次报告发布显式失败");
+    }
+    json_reader.reset();
+
+    std::ifstream csv(csv_path, std::ios::binary);
+    std::ifstream json(json_path, std::ios::binary);
+    const std::string csv_text(
+        (std::istreambuf_iterator<char>(csv)),
+        std::istreambuf_iterator<char>());
+    const std::string json_text(
+        (std::istreambuf_iterator<char>(json)),
+        std::istreambuf_iterator<char>());
+    expect(csv_text == previous_csv && json_text == previous_json,
+           "第二次发布失败后消费者必须仍读到完整旧 report pair");
+    csv.close();
+    json.close();
+
+    const auto directory_has_only_pair = [&]() {
+        std::size_t target_file_count = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(root)) {
+            if (entry.path() == owned_root.owner_path) continue;
+            if (entry.path() != csv_path && entry.path() != json_path) {
+                return false;
+            }
+            ++target_file_count;
+        }
+        return target_file_count == 2;
+    };
+    expect(directory_has_only_pair(),
+           "report pair 发布失败后目录只能保留旧 CSV/JSON 目标");
+
+    RuntimeSnapshot retry_snapshot;
+    expect(report.finalize(retry_snapshot, error),
+           "解除第二次发布故障后应提交新 report pair: " + error);
+    std::ifstream committed_csv_stream(csv_path, std::ios::binary);
+    std::ifstream committed_json_stream(json_path, std::ios::binary);
+    const std::string committed_csv(
+        (std::istreambuf_iterator<char>(committed_csv_stream)),
+        std::istreambuf_iterator<char>());
+    const std::string committed_json(
+        (std::istreambuf_iterator<char>(committed_json_stream)),
+        std::istreambuf_iterator<char>());
+    expect(committed_csv.find("# session_id,\"new-session\"") !=
+                   std::string::npos &&
+               committed_json.find("\"session_id\": \"new-session\"") !=
+                   std::string::npos,
+           "故障解除后的提交必须让 CSV/JSON 同时属于新 session");
+    committed_csv_stream.close();
+    committed_json_stream.close();
+    expect(directory_has_only_pair(),
+           "已有 pair 成功提交后不得遗留临时或回滚文件");
+    cleanup_root();
+}
+
 void test_report_rejects_invalid_capacity() {
     DebugReport report;
     DebugReportConfig config;
@@ -754,6 +1057,7 @@ int main() {
     log_config.enable_ringbuf = false;
     Log::init(log_config);
     test_report_summary_and_atomic_files();
+    test_report_pair_publish_failure_preserves_previous_pair();
     test_report_rejects_invalid_capacity();
     test_aim_lock_active_marker_lifecycle();
     test_disabled_probes_are_not_reported_as_zero_cost_samples();

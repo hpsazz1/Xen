@@ -2,14 +2,150 @@
 #include "benchmark/benchmark_internal.h"
 
 #include <array>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <memory>
+#include <random>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include <windows.h>
+
 namespace {
 
 int failures = 0;
+
+struct Win32HandleCloser {
+    void operator()(void* handle) const noexcept {
+        if (handle && handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+    }
+};
+
+using ScopedWin32Handle = std::unique_ptr<void, Win32HandleCloser>;
+
+struct OwnedBenchmarkReportRoot {
+    std::filesystem::path temporary_base;
+    std::filesystem::path path;
+    std::filesystem::path owner_path;
+    std::string guid;
+};
+
+std::string make_test_guid() {
+    std::string guid = "00000000-0000-4000-8000-000000000000";
+    constexpr char hexadecimal[] = "0123456789abcdef";
+    std::random_device random;
+    for (char& character : guid) {
+        if (character == '0') {
+            character = hexadecimal[random() & 0x0fU];
+        }
+    }
+    guid[14] = '4';
+    guid[19] = hexadecimal[8U + (random() & 0x03U)];
+    return guid;
+}
+
+bool non_reparse_chain(const std::filesystem::path& path,
+                       std::string& error) {
+    auto current = std::filesystem::absolute(path).lexically_normal();
+    for (;;) {
+        const DWORD attributes = GetFileAttributesW(current.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
+            error = "临时测试路径属性不可确认或包含 reparse point: " +
+                current.string();
+            return false;
+        }
+        const auto parent = current.parent_path();
+        if (parent.empty() || parent == current) return true;
+        current = parent;
+    }
+}
+
+bool create_owned_report_root(OwnedBenchmarkReportRoot& root,
+                              std::string& error) {
+    root = {};
+    root.temporary_base = std::filesystem::absolute(
+        std::filesystem::temp_directory_path()).lexically_normal();
+    if (root.temporary_base.filename().empty()) {
+        root.temporary_base = root.temporary_base.parent_path();
+    }
+    if (!non_reparse_chain(root.temporary_base, error)) return false;
+    root.guid = make_test_guid();
+    root.path = root.temporary_base /
+        ("xen-benchmark-report-consumer-" + root.guid);
+    std::error_code create_error;
+    if (!std::filesystem::create_directory(root.path, create_error)) {
+        error = "创建本轮 Benchmark 报告临时根失败: " +
+            create_error.message();
+        return false;
+    }
+    root.owner_path = root.path / ".xen-benchmark-report-owner";
+    std::ofstream owner(root.owner_path, std::ios::binary);
+    owner << root.guid;
+    owner.close();
+    if (!owner || !non_reparse_chain(root.owner_path, error)) {
+        if (error.empty()) error = "写入本轮 Benchmark owner 失败";
+        return false;
+    }
+    return true;
+}
+
+std::string read_file(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string(
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>());
+}
+
+bool cleanup_owned_report_root(
+        const OwnedBenchmarkReportRoot& root,
+        const std::filesystem::path& csv_path,
+        const std::filesystem::path& json_path,
+        std::string& error) {
+    const auto normalized =
+        std::filesystem::absolute(root.path).lexically_normal();
+    if (normalized.parent_path() != root.temporary_base ||
+        normalized.filename() !=
+            "xen-benchmark-report-consumer-" + root.guid ||
+        root.owner_path != normalized / ".xen-benchmark-report-owner" ||
+        !non_reparse_chain(normalized, error) ||
+        read_file(root.owner_path) != root.guid) {
+        if (error.empty()) error = "Benchmark 临时根不属于本轮";
+        return false;
+    }
+    for (const auto& path : {csv_path, json_path, root.owner_path}) {
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            const DWORD win32_error = GetLastError();
+            if (win32_error == ERROR_FILE_NOT_FOUND ||
+                win32_error == ERROR_PATH_NOT_FOUND) {
+                continue;
+            }
+            error = "无法确认本轮 Benchmark 临时文件属性";
+            return false;
+        }
+        if ((attributes & (FILE_ATTRIBUTE_DIRECTORY |
+                           FILE_ATTRIBUTE_REPARSE_POINT)) != 0U) {
+            error = "Benchmark 临时根包含不可安全删除的目标文件";
+            return false;
+        }
+        std::error_code remove_error;
+        if (!std::filesystem::remove(path, remove_error) || remove_error) {
+            error = "删除本轮 Benchmark 临时文件失败: " +
+                remove_error.message();
+            return false;
+        }
+    }
+    std::error_code remove_error;
+    if (!std::filesystem::remove(normalized, remove_error) || remove_error) {
+        error = "删除本轮 Benchmark 临时根失败（可能存在报告残留）: " +
+            remove_error.message();
+        return false;
+    }
+    return true;
+}
 
 void expect(bool condition, const std::string& message) {
     if (condition) return;
@@ -112,6 +248,76 @@ void test_performance_probe_option() {
                BenchmarkParseStatus::INVALID &&
                error.find("--performance-probes") != std::string::npos,
            "性能探针非法开关必须拒绝");
+}
+
+void test_benchmark_report_consumer_pair_publication() {
+    OwnedBenchmarkReportRoot owned_root;
+    std::string error;
+    const bool root_created = create_owned_report_root(owned_root, error);
+    expect(root_created,
+           "Benchmark consumer 测试必须创建本轮 owned 临时根: " + error);
+    if (!root_created) return;
+
+    const auto csv_path = owned_root.path / "runtime.csv";
+    const auto json_path = owned_root.path / "runtime.json";
+    DebugReportConfig config;
+    config.csv_path = csv_path.string();
+    config.json_path = json_path.string();
+    config.max_samples = 1;
+
+    RuntimePipelineSample sample;
+    sample.sequence = 1;
+    sample.profile.total_ms = 1.0;
+    sample.detection_status = DetectionStatus::SUCCESS;
+    sample.aim_status = AimStatus::SUCCESS;
+    sample.mouse_status = MouseStatus::READY;
+    RuntimeSnapshot final_snapshot;
+    DebugCoverageSummary coverage;
+    coverage.available = true;
+    coverage.formal.sample_count = 1;
+    benchmark::detail::FormalSampleSummary formal_summary;
+    formal_summary.formal_sample_count = 1;
+    formal_summary.successful_samples = 1;
+    formal_summary.retained_sample_count = 1;
+    const auto publish = [&](std::string_view session_id) {
+        DebugReport report;
+        config.session_id = session_id;
+        const bool started = report.start(config, error);
+        expect(started, "Benchmark consumer 报告应启动: " + error);
+        if (!started) return false;
+        report.ingest(std::span<const RuntimePipelineSample>(&sample, 1));
+        return benchmark::detail::finalize_report(
+            report, final_snapshot, coverage, formal_summary, 1, false,
+            CaptureBackend::DESKTOP_DUPLICATION, error);
+    };
+
+    expect(publish("old-benchmark-session"),
+           "Benchmark 生产 consumer seam 应发布成功 pair: " + error);
+    const std::string old_csv = read_file(csv_path);
+    const std::string old_json = read_file(json_path);
+    expect(old_csv.find("old-benchmark-session") != std::string::npos &&
+               old_json.find("old-benchmark-session") != std::string::npos,
+           "Benchmark consumer 成功路径必须发布同一旧 session pair");
+
+    ScopedWin32Handle json_reader(CreateFileW(
+        json_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    expect(json_reader.get() != INVALID_HANDLE_VALUE,
+           "测试必须锁定旧 JSON 注入第二文件发布失败");
+    if (json_reader.get() != INVALID_HANDLE_VALUE) {
+        expect(!publish("new-benchmark-session") && !error.empty(),
+               "第二文件发布失败必须由 Benchmark consumer 显式拒绝");
+    }
+    json_reader.reset();
+
+    expect(read_file(csv_path) == old_csv &&
+               read_file(json_path) == old_json,
+           "Benchmark consumer 失败后必须保留完整旧 pair");
+    std::string cleanup_error;
+    expect(cleanup_owned_report_root(
+               owned_root, csv_path, json_path, cleanup_error),
+           "Benchmark consumer 失败后不得遗留临时/回滚文件: " +
+               cleanup_error);
 }
 
 RuntimePipelineSample coverage_sample(
@@ -543,6 +749,7 @@ int main() {
     test_main_machine_defaults();
     test_network_encoded_override();
     test_performance_probe_option();
+    test_benchmark_report_consumer_pair_publication();
     test_coverage_phase_tracker();
     test_sample_phase_tracker();
     test_formal_sample_tracker_waits_for_time_gate_after_retention_limit();

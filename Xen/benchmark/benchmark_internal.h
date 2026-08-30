@@ -250,6 +250,18 @@ struct FormalSampleSummary {
     std::uint64_t omitted_sample_count = 0;
 };
 
+// 正式 Benchmark 唯一的 staging 报告提交 seam：成对生成报告后，按
+// formal 总数、固定容量尾窗与 omitted 守恒校验发布前汇总。
+bool finalize_report(
+    DebugReport& report,
+    const RuntimeSnapshot& final_snapshot,
+    const DebugCoverageSummary& coverage,
+    const FormalSampleSummary& formal_summary,
+    std::uint64_t phase_formal_samples,
+    bool performance_probes_enabled,
+    CaptureBackend capture_backend,
+    std::string& error) noexcept;
+
 // formal 成功样本由这里统一聚合并写入固定容量环。生产循环与测试读取
 // 同一组按 sequence 排序的 span，避免 DebugReport 满容量后逐样本搬移。
 class FormalSampleTracker final {

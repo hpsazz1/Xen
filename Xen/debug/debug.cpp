@@ -710,6 +710,164 @@ bool write_atomically(const std::string& path,
     }
 }
 
+struct ReportCsvRollback {
+    std::filesystem::path path;
+    std::wstring target_name;
+    std::wstring path_name;
+    bool had_previous = false;
+    bool owned = false;
+    bool csv_published = false;
+};
+
+DWORD restore_report_csv(ReportCsvRollback& rollback) noexcept {
+    if (!rollback.csv_published) return ERROR_SUCCESS;
+    if (rollback.had_previous) {
+        if (!MoveFileExW(rollback.path_name.c_str(),
+                         rollback.target_name.c_str(),
+                         MOVEFILE_REPLACE_EXISTING |
+                             MOVEFILE_WRITE_THROUGH)) {
+            return GetLastError();
+        }
+        rollback.owned = false;
+    } else if (!DeleteFileW(rollback.target_name.c_str())) {
+        const DWORD win32_error = GetLastError();
+        if (win32_error != ERROR_FILE_NOT_FOUND &&
+            win32_error != ERROR_PATH_NOT_FOUND) {
+            return win32_error;
+        }
+    }
+    rollback.csv_published = false;
+    return ERROR_SUCCESS;
+}
+
+DWORD cleanup_report_csv_rollback(ReportCsvRollback& rollback) noexcept {
+    if (!rollback.owned) return ERROR_SUCCESS;
+    if (!DeleteFileW(rollback.path_name.c_str())) {
+        const DWORD win32_error = GetLastError();
+        if (win32_error != ERROR_FILE_NOT_FOUND &&
+            win32_error != ERROR_PATH_NOT_FOUND) {
+            return win32_error;
+        }
+    }
+    rollback.owned = false;
+    return ERROR_SUCCESS;
+}
+
+bool publish_report_pair(const std::string& csv_path,
+                         const std::string& csv_content,
+                         const std::string& json_path,
+                         const std::string& json_content,
+                         std::string& error) noexcept {
+    ReportCsvRollback rollback;
+    try {
+        const std::filesystem::path csv_target(csv_path);
+        rollback.path = csv_target;
+        rollback.path += ".rollback." +
+            std::to_string(static_cast<unsigned long long>(
+                GetCurrentProcessId())) + "." +
+            std::to_string(static_cast<unsigned long long>(GetTickCount64()));
+        rollback.target_name = csv_target.wstring();
+        rollback.path_name = rollback.path.wstring();
+
+        const DWORD csv_attributes =
+            GetFileAttributesW(rollback.target_name.c_str());
+        rollback.had_previous =
+            csv_attributes != INVALID_FILE_ATTRIBUTES;
+        if (!rollback.had_previous) {
+            const DWORD probe_error = GetLastError();
+            if (probe_error != ERROR_FILE_NOT_FOUND &&
+                probe_error != ERROR_PATH_NOT_FOUND) {
+                set_error(error,
+                          "无法检查旧 Debug CSV，Win32Error=" +
+                              std::to_string(probe_error));
+                return false;
+            }
+        } else {
+            if ((csv_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                set_error(error, "Debug CSV 目标不能是目录");
+                return false;
+            }
+            if (!CopyFileW(rollback.target_name.c_str(),
+                           rollback.path_name.c_str(), TRUE)) {
+                const DWORD copy_error = GetLastError();
+                DWORD cleanup_error = ERROR_SUCCESS;
+                if (copy_error != ERROR_FILE_EXISTS &&
+                    copy_error != ERROR_ALREADY_EXISTS &&
+                    GetFileAttributesW(rollback.path_name.c_str()) !=
+                        INVALID_FILE_ATTRIBUTES &&
+                    !DeleteFileW(rollback.path_name.c_str())) {
+                    cleanup_error = GetLastError();
+                }
+                set_error(error, cleanup_error == ERROR_SUCCESS
+                    ? "无法创建 Debug CSV 同目录回滚文件，Win32Error=" +
+                          std::to_string(copy_error)
+                    : "Debug CSV 回滚复制与清理均失败，CopyError=" +
+                          std::to_string(copy_error) + ", CleanupError=" +
+                          std::to_string(cleanup_error) + ", path=" +
+                          rollback.path.string());
+                return false;
+            }
+            rollback.owned = true;
+        }
+
+        std::string publish_error;
+        if (!write_atomically(csv_path, csv_content, publish_error)) {
+            const DWORD cleanup_error =
+                cleanup_report_csv_rollback(rollback);
+            set_error(error, cleanup_error == ERROR_SUCCESS
+                ? publish_error
+                : publish_error +
+                      "; Debug CSV 回滚文件清理失败，Win32Error=" +
+                      std::to_string(cleanup_error) + ", path=" +
+                      rollback.path.string());
+            return false;
+        }
+        rollback.csv_published = true;
+
+        if (!write_atomically(json_path, json_content, publish_error)) {
+            const DWORD rollback_error = restore_report_csv(rollback);
+            if (rollback_error != ERROR_SUCCESS) {
+                set_error(error, publish_error +
+                    "; Debug CSV 回滚失败，Win32Error=" +
+                    std::to_string(rollback_error) + ", path=" +
+                    rollback.path.string());
+                return false;
+            }
+            set_error(error, publish_error);
+            return false;
+        }
+
+        // 本实现未把两个固定路径纳入同一事务。旧 CSV 只作为同卷、拒绝覆盖的
+        // 回滚所有者；补偿只覆盖单写者进程内且恢复成功的第二步发布失败，不提供
+        // 并发读取隔离，也不承诺进程崩溃或断电持久性。
+        rollback.csv_published = false;
+        const DWORD cleanup_error = cleanup_report_csv_rollback(rollback);
+        if (cleanup_error != ERROR_SUCCESS) {
+            set_error(error,
+                      "Debug report pair 已提交，但回滚文件清理失败，Win32Error=" +
+                          std::to_string(cleanup_error) + ", path=" +
+                          rollback.path.string());
+            return false;
+        }
+        return true;
+    } catch (...) {
+        const DWORD rollback_error = restore_report_csv(rollback);
+        const DWORD cleanup_error = rollback_error == ERROR_SUCCESS
+            ? cleanup_report_csv_rollback(rollback)
+            : ERROR_SUCCESS;
+        set_error(error, rollback_error != ERROR_SUCCESS
+            ? "Debug report pair 发布异常且 CSV 回滚失败，Win32Error=" +
+                  std::to_string(rollback_error) + ", path=" +
+                  rollback.path.string()
+            : cleanup_error != ERROR_SUCCESS
+                ? "Debug report pair 发布异常且回滚文件清理失败，Win32Error=" +
+                      std::to_string(cleanup_error) + ", path=" +
+                      rollback.path.string()
+                : "Debug report pair 发布时发生未知异常");
+        return false;
+    }
+}
+
 } // namespace
 
 bool debug_sample_succeeded(
@@ -1932,16 +2090,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         json << "  ]\n}\n";
 
         std::string publish_error;
-        const bool csv_ok = write_atomically(
-            config_.csv_path, csv.str(), publish_error);
-        if (!csv_ok) {
-            set_error(error, publish_error);
-            set_error(last_error_, publish_error);
-            return false;
-        }
-        const bool json_ok = write_atomically(
-            config_.json_path, json.str(), publish_error);
-        if (!json_ok) {
+        if (!publish_report_pair(
+                config_.csv_path, csv.str(), config_.json_path, json.str(),
+                publish_error)) {
             set_error(error, publish_error);
             set_error(last_error_, publish_error);
             return false;
