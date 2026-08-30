@@ -271,13 +271,14 @@ constexpr float kControllerPendingCommandResponse = 0.15f;
 // tracking 的命令和图像误差来自同一个闭环，不能把二者相关性直接当作
 // 鼠标 plant。prediction 关闭时改由图像误差上的泄漏 PI 产生维持量：
 // 12/s 的积分建立约覆盖真实 15 ms 延迟后的数个采样，6/s 泄漏在静止后
-// 约 116 ms 衰减一半；4 counts 上限覆盖本轮目标框内命令 P95=3 counts。
-// 饱和差以 back-calculation 连续回写积分，避免 14-count 执行器上限形成
-// 隐藏库存。所有常量均使用真实 dt，不读取目标速度、框尺度或游戏类型。
+// 约 116 ms 衰减一半。Y 保留既有 4 counts 状态边界；X 不再沿用旧场景
+// P95 推导出的次级天花板，而由既有每帧物理向量上限、Y 优先分配与
+// back-calculation 共同约束。所有常量均使用真实 dt，不读取目标速度、
+// 框尺度或游戏类型。
 constexpr float kTrackingIntegralGainPerSecond = 12.0f;
 constexpr float kTrackingIntegralLeakPerSecond = 6.0f;
 constexpr float kTrackingAntiWindupGainPerSecond = 30.0f;
-constexpr float kTrackingIntegralMaximumCounts = 4.0f;
+constexpr float kTrackingVerticalIntegralMaximumCounts = 4.0f;
 // closing-slope 只作为 X 请求的带限阻尼。20 ms 一阶滤波覆盖已观测的
 // 4～5 帧反馈时间尺度；2 ms 导数增益把高频误差等效增益限制为比例项的
 // 10%，最终仍由同号预算保证最多减到零而不会自行反向。
@@ -3643,12 +3644,12 @@ struct Aim::Impl {
             proportional_y * kTrackingIntegralGainPerSecond * controller_dt;
         feedforward_x = std::clamp(
             feedforward_x,
-            -kTrackingIntegralMaximumCounts,
-            kTrackingIntegralMaximumCounts);
+            -config.max_counts_per_frame,
+            config.max_counts_per_frame);
         feedforward_y = std::clamp(
             feedforward_y,
-            -kTrackingIntegralMaximumCounts,
-            kTrackingIntegralMaximumCounts);
+            -kTrackingVerticalIntegralMaximumCounts,
+            kTrackingVerticalIntegralMaximumCounts);
 
         const float unconstrained_x = proportional_x + feedforward_x;
         const float unconstrained_y = proportional_y + feedforward_y;
@@ -3665,12 +3666,12 @@ struct Aim::Impl {
         feedforward_y += (desired_y - unconstrained_y) * anti_windup_alpha;
         feedforward_x = std::clamp(
             feedforward_x,
-            -kTrackingIntegralMaximumCounts,
-            kTrackingIntegralMaximumCounts);
+            -config.max_counts_per_frame,
+            config.max_counts_per_frame);
         feedforward_y = std::clamp(
             feedforward_y,
-            -kTrackingIntegralMaximumCounts,
-            kTrackingIntegralMaximumCounts);
+            -kTrackingVerticalIntegralMaximumCounts,
+            kTrackingVerticalIntegralMaximumCounts);
 
         const auto [delayed_command_x, delayed_command_y] =
             delayed_issued_command(current_controller_at);
@@ -3697,8 +3698,8 @@ struct Aim::Impl {
                     (history_adjusted_x - desired_x) * anti_windup_alpha;
                 feedforward_x = std::clamp(
                     feedforward_x,
-                    -kTrackingIntegralMaximumCounts,
-                    kTrackingIntegralMaximumCounts);
+                    -config.max_counts_per_frame,
+                    config.max_counts_per_frame);
                 desired_x = history_adjusted_x;
             }
         }

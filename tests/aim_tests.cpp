@@ -7,6 +7,7 @@
 #include "aim_latest_static_replay_fixture.h"
 #include "aim_superjump_actual_game_replay_fixture.h"
 #include "aim_superjump_landmark_replay_fixture.h"
+#include "aim_superjump_random_move_replay_fixture.h"
 #include "aim_static_closed_loop_replay_fixture.h"
 
 #include <algorithm>
@@ -5782,6 +5783,167 @@ void test_actual_game_superjump_current_common_translation_brakes_x() {
               << "，Y签名=" << y_trace_signature << '\n';
 }
 
+void test_random_move_superjump_uses_available_x_integral_headroom() {
+    using aim_superjump_random_move_replay_fixture::kMeasurementStart;
+    using aim_superjump_random_move_replay_fixture::kObservations;
+
+    AimConfig config;
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.10f;
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    Aim aim(config);
+
+    auto control_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    int crosshair_x_outside_target_box_frames = 0;
+    int legacy_x_integral_cap_frames = 0;
+    int x_integral_physical_headroom_frames = 0;
+    int opposite_observation_x_commands = 0;
+    int command_contract_violations = 0;
+    float maximum_absolute_x_integral = 0.0f;
+    float maximum_command_magnitude = 0.0f;
+    std::uint64_t y_trace_signature = 1469598103934665603ULL;
+
+    for (std::size_t index = 0; index < kObservations.size(); ++index) {
+        const auto& observation = kObservations[index];
+        if (index != 0) {
+            control_at += std::chrono::nanoseconds(
+                static_cast<long long>(observation.controller_dt_ms *
+                                       1000000.0f));
+        }
+        const auto captured_at = control_at - std::chrono::nanoseconds(
+            static_cast<long long>(observation.observation_age_ms *
+                                   1000000.0f));
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1), captured_at);
+        frame.control_at = control_at;
+        frame.lock_active = true;
+        frame.detections = {{observation.x1,
+                             observation.y1,
+                             observation.x2,
+                             observation.y2,
+                             0.9f,
+                             0}};
+        if (observation.aim_from_head) {
+            const float center_x =
+                (observation.x1 + observation.x2) * 0.5f;
+            const float head_width =
+                (observation.x2 - observation.x1) * 0.5f;
+            frame.detections.push_back(head_box(
+                center_x, observation.y1 + 6.0f, head_width, 10.0f));
+        }
+
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "RandomMove 实际游戏回放必须逐帧经公开 Aim seam 成功处理");
+        if (!result.has_target) continue;
+        expect_current_horizontal_base(result, "RandomMove 实际游戏回放");
+        if (result.has_command) {
+            expect(aim.record_backend_completed_command(
+                       frame.sequence,
+                       frame.control_at + std::chrono::microseconds(
+                           static_cast<long long>(
+                               observation.backend_completion_ms *
+                               1000.0f)),
+                       result.command.dx_counts,
+                       result.command.dy_counts),
+                   "RandomMove 实际游戏回放必须写回同序列整数完成命令");
+        }
+        if (index < kMeasurementStart) continue;
+
+        const float observation_x =
+            (observation.x1 + observation.x2) * 0.5f;
+        const float observation_error_x =
+            observation_x - frame.control_center_x;
+        const bool crosshair_x_outside_target_box =
+            frame.control_center_x < result.target.x1 ||
+            frame.control_center_x > result.target.x2;
+        if (crosshair_x_outside_target_box) {
+            ++crosshair_x_outside_target_box_frames;
+            const float absolute_x_integral =
+                std::fabs(result.control.feedforward_x_counts);
+            maximum_absolute_x_integral = std::max(
+                maximum_absolute_x_integral, absolute_x_integral);
+            if (std::fabs(absolute_x_integral - 4.0f) <= 0.001f) {
+                ++legacy_x_integral_cap_frames;
+            }
+            if (absolute_x_integral > 4.001f) {
+                ++x_integral_physical_headroom_frames;
+            }
+        }
+        if (result.has_command &&
+            std::fabs(observation_error_x) > config.deadzone_pixels &&
+            result.command.dx_counts * observation_error_x < 0.0f) {
+            ++opposite_observation_x_commands;
+        }
+        if (result.has_command) {
+            const float command_error_x =
+                result.target.aim_x - frame.control_center_x;
+            const float command_error_y =
+                result.target.aim_y - frame.control_center_y;
+            const float command_magnitude = std::hypot(
+                static_cast<float>(result.command.dx_counts),
+                static_cast<float>(result.command.dy_counts));
+            maximum_command_magnitude = std::max(
+                maximum_command_magnitude, command_magnitude);
+            if (result.command.dx_counts * command_error_x +
+                        result.command.dy_counts * command_error_y <= 0.0f ||
+                command_magnitude > config.max_counts_per_frame + 0.001f) {
+                ++command_contract_violations;
+            }
+        }
+        const auto base_y_millipixel = static_cast<std::int64_t>(
+            std::llround(result.target.base_aim_y * 1000.0f));
+        y_trace_signature ^= static_cast<std::uint64_t>(
+            base_y_millipixel + 1000000LL);
+        y_trace_signature *= 1099511628211ULL;
+        y_trace_signature ^= static_cast<std::uint64_t>(
+            result.command.dy_counts + 128);
+        y_trace_signature *= 1099511628211ULL;
+    }
+
+    expect(crosshair_x_outside_target_box_frames > 0,
+           "RandomMove fixture 必须覆盖人工报告的 X 落后出框；"
+           "越框/旧 4-count 上限帧=" +
+               std::to_string(crosshair_x_outside_target_box_frames) + "/" +
+               std::to_string(legacy_x_integral_cap_frames));
+    expect(x_integral_physical_headroom_frames > 0 &&
+               opposite_observation_x_commands == 0 &&
+               command_contract_violations == 0 &&
+               y_trace_signature == 11072029325967839443ULL,
+           "RandomMove 越框追赶必须允许 X 泄漏积分使用 4-count 以上、"
+           "14-count 以内的既有物理余量，同时保持命令方向与二维安全域；"
+           "headroom/反向/违规/max积分/max命令/Y签名=" +
+               std::to_string(x_integral_physical_headroom_frames) + "/" +
+               std::to_string(opposite_observation_x_commands) + "/" +
+               std::to_string(command_contract_violations) + "/" +
+               std::to_string(maximum_absolute_x_integral) + "/" +
+               std::to_string(maximum_command_magnitude) + "/" +
+               std::to_string(y_trace_signature));
+    std::cout << "RandomMove 实际游戏公开回放: 越框/旧4-count/headroom="
+              << crosshair_x_outside_target_box_frames << "/"
+              << legacy_x_integral_cap_frames << "/"
+              << x_integral_physical_headroom_frames
+              << "，反向/二维违规=" << opposite_observation_x_commands
+              << "/" << command_contract_violations
+              << "，max积分/max命令=" << maximum_absolute_x_integral
+              << "/" << maximum_command_magnitude
+              << "，Y签名=" << y_trace_signature << '\n';
+}
+
 void test_actual_game_semantic_landmark_does_not_gain_base_x_phase() {
     using aim_superjump_landmark_replay_fixture::kMeasurementStart;
     using aim_superjump_landmark_replay_fixture::kObservations;
@@ -10277,6 +10439,7 @@ int main() {
     test_latest_static_replay_does_not_amplify_horizontal_base();
     test_latest_physical_replay_brakes_before_horizontal_crossing();
     test_actual_game_superjump_current_common_translation_brakes_x();
+    test_random_move_superjump_uses_available_x_integral_headroom();
     test_actual_game_semantic_landmark_does_not_gain_base_x_phase();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
