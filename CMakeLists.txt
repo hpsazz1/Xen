@@ -1251,6 +1251,21 @@ if(BUILD_TESTING)
     target_link_libraries(clock_sync_tests PRIVATE clock_sync ws2_32)
     add_test(NAME clock_sync_tests COMMAND clock_sync_tests)
 
+    # 参数化离线量化 clock mapping 误差对 Aim 公有输出的非时序
+    # synthetic sequence stress。clock 与 Aim cadence 仅显式报告，不伪装对齐、
+    # 真实因果或生产阈值；不启动 NDI、Runtime 或任何物理输入后端。
+    add_executable(clock_quality_measurement
+        tests/clock_quality_measurement.cpp)
+    target_link_libraries(clock_quality_measurement
+        PRIVATE clock_sync aim log)
+    xen_deploy_runtime_dlls(clock_quality_measurement OPENCV)
+    # 数值 oracle 只验证测量器的逐样本消费、单位、符号和 Aim 差异，
+    # fixture 数值不构成生产门槛。
+    xen_add_windows_powershell_test(clock_quality_measurement_numeric_oracle
+        "${PROJECT_SOURCE_DIR}/tests/clock_quality_measurement_tests.ps1"
+        -Executable "$<TARGET_FILE:clock_quality_measurement>"
+        -TestRoot "${CMAKE_BINARY_DIR}/clock-quality-measurement-tests")
+
     add_executable(sender_tests
         tests/sender_tests.cpp)
     target_link_libraries(sender_tests PRIVATE
