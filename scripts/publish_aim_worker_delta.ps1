@@ -125,6 +125,22 @@ function ConvertTo-PowerShellEncodedCommand([string]$Command) {
         [Text.Encoding]::Unicode.GetBytes($Command))
 }
 
+function Get-NormalizedTextSha256([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "文本身份文件不存在：$Path"
+    }
+    $text = [System.IO.File]::ReadAllText($Path).
+        Replace("`r`n", "`n").Replace("`r", "`n")
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($text)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return [System.BitConverter]::ToString(
+            $sha256.ComputeHash($bytes)).Replace('-', '')
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $packageRoot = (Resolve-Path -LiteralPath $PackageRoot).Path
 $destinationRoot = $DestinationRoot.TrimEnd('\')
@@ -304,7 +320,36 @@ foreach ($spec in $toolSpecs) {
     if ($records.Count -gt 1) {
         throw "manifest 中 Aim 报告工具记录重复：$($spec.relative)"
     }
-    if ($records.Count -eq 0) {
+    $repositoryItem = Get-Item -LiteralPath $spec.repository
+    $repositoryHash = (Get-FileHash -LiteralPath $spec.repository `
+        -Algorithm SHA256).Hash
+    $source = "$($spec.repository)@$($commit.Substring(0, 7))"
+    $packageItem = if (Test-Path -LiteralPath $packagePath -PathType Leaf) {
+        Get-Item -LiteralPath $packagePath
+    } else { $null }
+    $remoteItem = if (Test-Path -LiteralPath $remotePath -PathType Leaf) {
+        Get-Item -LiteralPath $remotePath
+    } else { $null }
+    $packageHash = if ($null -ne $packageItem) {
+        (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash
+    } else { "" }
+    $remoteHash = if ($null -ne $remoteItem) {
+        (Get-FileHash -LiteralPath $remotePath -Algorithm SHA256).Hash
+    } else { "" }
+    $record = if ($records.Count -eq 1) { $records[0] } else { $null }
+    $publishedIdentityValid = $null -ne $record -and
+        $null -ne $packageItem -and $null -ne $remoteItem -and
+        $packageHash -eq $remoteHash -and
+        $packageHash -eq ([string]$record.sha256).ToUpperInvariant() -and
+        [long]$record.size -eq [long]$packageItem.Length -and
+        [long]$record.size -eq [long]$remoteItem.Length
+    $repositoryEquivalent = $publishedIdentityValid -and
+        (Get-NormalizedTextSha256 $spec.repository) -eq
+            (Get-NormalizedTextSha256 $packagePath)
+    if ($publishedIdentityValid -and $repositoryEquivalent) {
+        continue
+    }
+    if ($null -eq $record) {
         $record = [pscustomobject][ordered]@{
             path = [string]$spec.relative
             runtime = ""
@@ -313,14 +358,7 @@ foreach ($spec in $toolSpecs) {
             source = ""
         }
         $manifest.files = @($manifest.files) + $record
-        $toolManifestChanged = $true
-    } else {
-        $record = $records[0]
     }
-    $repositoryItem = Get-Item -LiteralPath $spec.repository
-    $repositoryHash = (Get-FileHash -LiteralPath $spec.repository `
-        -Algorithm SHA256).Hash
-    $source = "$($spec.repository)@$($commit.Substring(0, 7))"
     if ([long]$record.size -ne [long]$repositoryItem.Length -or
         ([string]$record.sha256).ToUpperInvariant() -ne $repositoryHash -or
         [string]$record.source -ne $source) {
@@ -329,13 +367,8 @@ foreach ($spec in $toolSpecs) {
     $record.size = [long]$repositoryItem.Length
     $record.sha256 = $repositoryHash.ToLowerInvariant()
     $record.source = $source
-    $packageHash = if (Test-Path -LiteralPath $packagePath -PathType Leaf) {
-        (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash
-    } else { "" }
-    $remoteHash = if (Test-Path -LiteralPath $remotePath -PathType Leaf) {
-        (Get-FileHash -LiteralPath $remotePath -Algorithm SHA256).Hash
-    } else { "" }
-    if ($packageHash -ne $repositoryHash -or $remoteHash -ne $repositoryHash) {
+    if ($packageHash -ne $repositoryHash -or
+        $remoteHash -ne $repositoryHash) {
         $changedTools.Add([pscustomobject][ordered]@{
             relative = [string]$spec.relative
             repository = [string]$spec.repository
@@ -452,8 +485,11 @@ if ($Prepare) {
     if (-not (Test-Path -LiteralPath $SshIdentityFile -PathType Leaf)) {
         throw "SSH 身份文件不存在：$SshIdentityFile"
     }
-    $remoteScript = 'C:\XenLab\releases\Xen-888b04e-aim-dual\tools\invoke_aim_manual_acceptance.ps1'
-    $remoteRoot = 'C:\XenLab\releases\Xen-888b04e-aim-dual'
+    $remoteRoot = [System.IO.Path]::GetFullPath($RemotePackageRoot).TrimEnd('\')
+    if ($remoteRoot.Contains('"')) {
+        throw "辅机本地包根不得包含双引号：$remoteRoot"
+    }
+    $remoteScript = Join-Path $remoteRoot "tools\invoke_aim_manual_acceptance.ps1"
     $sourceTimingSwitch = if ($RequireSourceTiming.IsPresent) {
         ' -RequireSourceTiming'
     } else { '' }
@@ -509,25 +545,24 @@ foreach ($spec in $toolSpecs) {
     $relativeWindows = ([string]$spec.relative).Replace('/', '\')
     $packagePath = Join-Path $packageRoot $relativeWindows
     $remotePath = Join-Path $destinationRoot $relativeWindows
-    $repositoryItem = Get-Item -LiteralPath $spec.repository
     $packageItem = Get-Item -LiteralPath $packagePath
     $remoteItem = Get-Item -LiteralPath $remotePath
-    $repositoryHash = (Get-FileHash -LiteralPath $spec.repository `
-        -Algorithm SHA256).Hash
     $packageHash = (Get-FileHash -LiteralPath $packagePath `
         -Algorithm SHA256).Hash
     $remoteHash = (Get-FileHash -LiteralPath $remotePath `
         -Algorithm SHA256).Hash
     $declaredHash = ([string]$records[0].sha256).ToUpperInvariant()
-    if ($packageHash -ne $repositoryHash -or
-        $remoteHash -ne $repositoryHash -or
-        $declaredHash -ne $repositoryHash -or
-        [long]$records[0].size -ne [long]$repositoryItem.Length -or
-        [long]$packageItem.Length -ne [long]$repositoryItem.Length -or
-        [long]$remoteItem.Length -ne [long]$repositoryItem.Length) {
+    $repositoryEquivalent =
+        (Get-NormalizedTextSha256 $spec.repository) -eq
+            (Get-NormalizedTextSha256 $packagePath)
+    if ($packageHash -ne $remoteHash -or
+        $declaredHash -ne $packageHash -or
+        [long]$records[0].size -ne [long]$packageItem.Length -or
+        [long]$packageItem.Length -ne [long]$remoteItem.Length -or
+        -not $repositoryEquivalent) {
         throw "Aim 报告工具闭包回读不一致：$($spec.relative)"
     }
-    $finalToolEvidence[[string]$spec.relative] = $repositoryHash
+    $finalToolEvidence[[string]$spec.relative] = $packageHash
 }
 $finalConfigRecord = @($finalManifest.files) | Where-Object {
     [string]$_.path -eq "config.ini"

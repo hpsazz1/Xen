@@ -132,6 +132,13 @@ Assert-True ($packageScriptText -match '"aim_report\.ps1"' -and
 $aimDeltaText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/publish_aim_worker_delta.ps1"))
 Assert-True ($aimDeltaText -match
+        '\$remoteRoot\s*=\s*\[System\.IO\.Path\]::GetFullPath\(\$RemotePackageRoot\)' -and
+    $aimDeltaText -match
+        '\$remoteScript\s*=\s*Join-Path\s+\$remoteRoot\s+"tools\\invoke_aim_manual_acceptance\.ps1"' -and
+    $aimDeltaText -notmatch
+        '\$remoteScript\s*=\s*''C:\\XenLab\\releases\\Xen-888b04e-aim-dual') `
+    "Aim 差量入口的远程 Prepare 必须使用调用方传入的辅机包根，不能回退到历史固定包。"
+Assert-True ($aimDeltaText -match
         '"AIM-SUPERJUMP-ACCEPT-001"\)\]' -and
     $aimDeltaText -match
         '\[string\]\$TaskId\s*=\s*"AIM-LATENCY-COMP-001"' -and
@@ -183,6 +190,132 @@ Assert-True (([regex]::Matches(
         $aimDeltaText,
         '\$records\s*=\s*@\(@\(\$(?:manifest|finalManifest)\.files\)\s*\|\s*Where-Object')).Count -eq 2) `
     "Aim 差量入口的单项 manifest 查询必须保持显式数组，不能在严格模式下退化为标量。"
+
+$aimDeltaFixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ("xen-aim-delta-eol-{0}" -f [guid]::NewGuid().ToString("N"))
+try {
+    $fixtureRepository = Join-Path $aimDeltaFixtureRoot "repo"
+    $fixtureScripts = Join-Path $fixtureRepository "scripts"
+    $fixturePackage = Join-Path $aimDeltaFixtureRoot "package"
+    $fixtureDestination = Join-Path $aimDeltaFixtureRoot "destination"
+    foreach ($path in @(
+            $fixtureScripts,
+            (Join-Path $fixturePackage "runtimes\nvidia"),
+            (Join-Path $fixturePackage "tools"),
+            (Join-Path $fixtureDestination "runtimes\nvidia"),
+            (Join-Path $fixtureDestination "tools"))) {
+        New-Item -ItemType Directory -Path $path -Force | Out-Null
+    }
+    $fixtureToolNames = @(
+        "invoke_aim_manual_acceptance.ps1",
+        "aim_report.ps1",
+        "aim_control_diagnostics.ps1",
+        "aim_fixed_scene_analysis.ps1"
+    )
+    Copy-Item -LiteralPath (Join-Path $RepositoryRoot `
+            "scripts/publish_aim_worker_delta.ps1") `
+        -Destination $fixtureScripts
+    foreach ($name in $fixtureToolNames) {
+        Copy-Item -LiteralPath (Join-Path $RepositoryRoot "scripts\$name") `
+            -Destination $fixtureScripts
+    }
+    & git -C $fixtureRepository init --quiet
+    & git -C $fixtureRepository config core.autocrlf false
+    & git -C $fixtureRepository config user.email "xen-test@example.invalid"
+    & git -C $fixtureRepository config user.name "Xen Test"
+    & git -C $fixtureRepository add scripts
+    & git -C $fixtureRepository commit --quiet -m "fixture"
+    Assert-True ($LASTEXITCODE -eq 0) `
+        "Aim 差量换行回归无法建立临时干净 Git fixture。"
+    $fixtureCommit = (& git -C $fixtureRepository rev-parse HEAD).Trim()
+
+    $workerBytes = [Text.Encoding]::ASCII.GetBytes("fixture-worker")
+    foreach ($root in @($fixturePackage, $fixtureDestination)) {
+        [System.IO.File]::WriteAllBytes(
+            (Join-Path $root "runtimes\nvidia\Xen.exe"), $workerBytes)
+        [System.IO.File]::WriteAllText(
+            (Join-Path $root "config.ini"), "fixture=true`r`n",
+            [System.Text.UTF8Encoding]::new($false))
+    }
+    $workerHash = (Get-FileHash -LiteralPath `
+        (Join-Path $fixturePackage "runtimes\nvidia\Xen.exe") `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
+    $manifestFiles = [System.Collections.Generic.List[object]]::new()
+    $manifestFiles.Add([pscustomobject][ordered]@{
+        path = "runtimes/nvidia/Xen.exe"
+        runtime = "nvidia"
+        size = [long]$workerBytes.Length
+        sha256 = $workerHash
+        source = "fixture@$($fixtureCommit.Substring(0, 7))"
+    })
+    foreach ($name in $fixtureToolNames) {
+        $repositoryTool = Join-Path $fixtureScripts $name
+        $crlfText = [System.IO.File]::ReadAllText($repositoryTool).
+            Replace("`r`n", "`n").Replace("`r", "`n").Replace("`n", "`r`n")
+        foreach ($root in @($fixturePackage, $fixtureDestination)) {
+            [System.IO.File]::WriteAllText(
+                (Join-Path $root "tools\$name"), $crlfText,
+                [System.Text.UTF8Encoding]::new($false))
+        }
+        $packageTool = Join-Path $fixturePackage "tools\$name"
+        $manifestFiles.Add([pscustomobject][ordered]@{
+            path = "tools/$name"
+            runtime = ""
+            size = [long](Get-Item -LiteralPath $packageTool).Length
+            sha256 = (Get-FileHash -LiteralPath $packageTool `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+            source = "$repositoryTool@dbbb97d"
+        })
+    }
+    $fixtureManifest = [pscustomobject][ordered]@{
+        schema = 1
+        git_commit = "dbbb97dec67d2cf5eaef3cdcb889b5847ee80edd"
+        files = @($manifestFiles)
+    }
+    $manifestText = $fixtureManifest | ConvertTo-Json -Depth 8
+    foreach ($root in @($fixturePackage, $fixtureDestination)) {
+        [System.IO.File]::WriteAllText(
+            (Join-Path $root "manifest.json"), $manifestText,
+            [System.Text.UTF8Encoding]::new($false))
+    }
+    $beforeManifestHash = (Get-FileHash -LiteralPath `
+        (Join-Path $fixturePackage "manifest.json") -Algorithm SHA256).Hash
+    $beforeToolHashes = @($fixtureToolNames | ForEach-Object {
+        (Get-FileHash -LiteralPath (Join-Path $fixturePackage "tools\$_") `
+            -Algorithm SHA256).Hash
+    })
+    $fixturePublish = Join-Path $fixtureScripts `
+        "publish_aim_worker_delta.ps1"
+    $missingIdentity = Join-Path $aimDeltaFixtureRoot "missing-identity"
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $fixtureOutput = @(& powershell.exe -NoProfile `
+            -ExecutionPolicy Bypass -File $fixturePublish `
+            -PackageRoot $fixturePackage `
+            -DestinationRoot $fixtureDestination `
+            -RemotePackageRoot "C:\XenLab\releases\fixture-new-package" `
+            -SshIdentityFile $missingIdentity -ConfigOnly -Prepare 2>&1)
+        $fixtureExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    Assert-True ($fixtureExitCode -ne 0 -and
+        ($fixtureOutput -join "`n") -match "SSH 身份文件不存在") `
+        "Aim 差量换行回归必须在 Prepare 的 SSH 身份门安全停止。"
+    $afterManifestHash = (Get-FileHash -LiteralPath `
+        (Join-Path $fixturePackage "manifest.json") -Algorithm SHA256).Hash
+    $afterToolHashes = @($fixtureToolNames | ForEach-Object {
+        (Get-FileHash -LiteralPath (Join-Path $fixturePackage "tools\$_") `
+            -Algorithm SHA256).Hash
+    })
+    Assert-True ($afterManifestHash -eq $beforeManifestHash -and
+        (@(Compare-Object $beforeToolHashes $afterToolHashes).Count -eq 0)) `
+        "同一 Git 内容仅换行不同不得让 ConfigOnly Prepare 改写工具或 manifest。"
+} finally {
+    Remove-Item -LiteralPath $aimDeltaFixtureRoot -Recurse -Force `
+        -ErrorAction SilentlyContinue
+}
 
 $aimManualText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/invoke_aim_manual_acceptance.ps1"))
