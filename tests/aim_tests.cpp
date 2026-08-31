@@ -3,6 +3,7 @@
 #include "log/log.h"
 
 #include "aim_fixed_scene_replay_fixture.h"
+#include "aim_superjump_current_random_move_replay_fixture.h"
 #include "aim_latest_physical_replay_fixture.h"
 #include "aim_latest_static_replay_fixture.h"
 #include "aim_superjump_actual_game_replay_fixture.h"
@@ -5584,7 +5585,7 @@ void test_delayed_pose_closed_loop_keeps_tracking_pi_continuous() {
         int maximum_reverse_zero_frames = 0;
         int legacy_reverse_state_frames = 0;
         int modelled_response_frames = 0;
-        int phase_aligned_command_frames = 0;
+        int source_phase_request_frames = 0;
         int weighted_observer_frames = 0;
         std::string first_command_reversal_context;
     };
@@ -5694,7 +5695,7 @@ void test_delayed_pose_closed_loop_keeps_tracking_pi_continuous() {
                 if (std::fabs(
                         result.control.observer_phase_command_x_counts) >
                         0.001f) {
-                    ++trace.phase_aligned_command_frames;
+                    ++trace.source_phase_request_frames;
                 }
                 if (result.control.observer_consistency_weight_x > 0.01f) {
                     ++trace.weighted_observer_frames;
@@ -5855,12 +5856,12 @@ void test_delayed_pose_closed_loop_keeps_tracking_pi_continuous() {
                fixed_box.maximum_reverse_zero_frames <= 2 &&
                fixed_box.legacy_reverse_state_frames == 0 &&
                fixed_box.modelled_response_frames == 0 &&
-               fixed_box.phase_aligned_command_frames == 0 &&
+               fixed_box.source_phase_request_frames > 0 &&
                fixed_box.weighted_observer_frames == 0,
            "固定框双向变速闭环必须同时证明高速追赶、基础点连续和真实"
            "反向及时，误差P95/输入二阶P95/基础点二阶P95/最终点二阶P95/延迟二阶P95/"
            "边界基础二阶P95/边界最终二阶P95/全部反转/漏反转/过线后错向/"
-           "高速反向延迟/低速反向延迟/反向零命令=" +
+           "高速反向延迟/低速反向延迟/反向零命令/source phase=" +
                std::to_string(fixed_box.error_p95) + "/" +
                std::to_string(fixed_box.input_second_p95) + "/" +
                std::to_string(fixed_box.base_second_p95) + "/" +
@@ -5877,6 +5878,7 @@ void test_delayed_pose_closed_loop_keeps_tracking_pi_continuous() {
                "/" + std::to_string(
                    fixed_box.maximum_low_speed_reverse_latency_frames) +
                "/" + std::to_string(fixed_box.maximum_reverse_zero_frames) +
+               "/" + std::to_string(fixed_box.source_phase_request_frames) +
                "，首个反转=" +
                fixed_box.first_command_reversal_context);
     expect(pose_box.error_p95 <= 23.0f &&
@@ -5897,7 +5899,7 @@ void test_delayed_pose_closed_loop_keeps_tracking_pi_continuous() {
                pose_box.maximum_reverse_zero_frames <= 2 &&
                pose_box.legacy_reverse_state_frames == 0 &&
                pose_box.modelled_response_frames == 0 &&
-               pose_box.phase_aligned_command_frames == 0 &&
+               pose_box.source_phase_request_frames > 0 &&
                pose_box.weighted_observer_frames == 0 &&
                pose_box.error_p95 - fixed_box.error_p95 <= 12.0f &&
                pose_box.base_second_p95 -
@@ -5908,7 +5910,7 @@ void test_delayed_pose_closed_loop_keeps_tracking_pi_continuous() {
            "高频泵振或阻塞真实反向，误差P95/输入二阶P95/基础点二阶P95/最终点二阶P95/"
            "延迟二阶P95/边界基础二阶P95/边界最终二阶P95/全部反转/漏反转/"
            "过线后错向/高速反向延迟/低速反向延迟/反向零命令/"
-           "相对固定框误差增量/基础二阶增量/最终二阶增量=" +
+           "source phase/相对固定框误差增量/基础二阶增量/最终二阶增量=" +
                std::to_string(pose_box.error_p95) + "/" +
                std::to_string(pose_box.input_second_p95) + "/" +
                std::to_string(pose_box.base_second_p95) + "/" +
@@ -5925,6 +5927,7 @@ void test_delayed_pose_closed_loop_keeps_tracking_pi_continuous() {
                "/" + std::to_string(
                    pose_box.maximum_low_speed_reverse_latency_frames) +
                "/" + std::to_string(pose_box.maximum_reverse_zero_frames) +
+               "/" + std::to_string(pose_box.source_phase_request_frames) +
                "/" +
                std::to_string(pose_box.error_p95 - fixed_box.error_p95) +
                "/" +
@@ -7911,6 +7914,207 @@ void test_latest_random_move_tracking_x_uses_continuous_opening_evidence() {
               << "，opening零帧/绝对X=" << opening_zero_command_frames
               << "/" << opening_absolute_x_counts
               << "，Y签名=" << y_trace_signature << '\n';
+}
+
+void test_current_random_move_tracking_consumes_source_time_opening_phase() {
+    using aim_superjump_current_random_move_replay_fixture::kMeasurementStart;
+    using aim_superjump_current_random_move_replay_fixture::kObservations;
+
+    AimConfig config;
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.10f;
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    Aim aim(config);
+
+    auto control_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    int opening_evidence_frames = 0;
+    int source_phase_request_frames = 0;
+    int source_phase_consumption_frames = 0;
+    int source_phase_consumption_mismatches = 0;
+    int source_phase_direction_violations = 0;
+    int source_phase_scope_violations = 0;
+    int opposite_x_commands = 0;
+    int command_contract_violations = 0;
+    float absolute_source_phase_counts = 0.0f;
+    std::uint64_t y_trace_signature = 1469598103934665603ULL;
+
+    for (std::size_t index = 0; index < kObservations.size(); ++index) {
+        const auto& observation = kObservations[index];
+        if (index != 0) {
+            control_at += std::chrono::nanoseconds(
+                static_cast<long long>(observation.controller_dt_ms *
+                                       1000000.0f));
+        }
+        const auto captured_at = control_at - std::chrono::nanoseconds(
+            static_cast<long long>(observation.observation_age_ms *
+                                   1000000.0f));
+        AimFrame frame = make_frame(observation.source_sequence, captured_at);
+        frame.control_at = control_at;
+        frame.lock_active = true;
+        frame.detections = {{observation.x1,
+                             observation.y1,
+                             observation.x2,
+                             observation.y2,
+                             0.9f,
+                             0}};
+        if (observation.aim_from_head) {
+            const float center_x =
+                (observation.x1 + observation.x2) * 0.5f;
+            const float head_width =
+                (observation.x2 - observation.x1) * 0.5f;
+            frame.detections.push_back(head_box(
+                center_x, observation.y1 + 6.0f, head_width, 10.0f));
+        }
+
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "42949ce current RandomMove 回放必须逐帧成功处理");
+        if (!result.has_target) continue;
+        expect_current_horizontal_base(
+            result, "42949ce current RandomMove source-time 回放");
+        if (result.has_command) {
+            expect(aim.record_backend_completed_command(
+                       frame.sequence,
+                       frame.control_at + std::chrono::microseconds(
+                           static_cast<long long>(
+                               observation.backend_completion_ms * 1000.0f)),
+                       result.command.dx_counts,
+                       result.command.dy_counts),
+                   "42949ce current RandomMove 回放必须写回同序列完成命令");
+        }
+        if (index < kMeasurementStart) continue;
+
+        const float error_x =
+            (result.target.aim_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float error_y =
+            (result.target.aim_y - frame.control_center_y) *
+            frame.source_pixels_per_roi_pixel_y;
+        const float common_motion_x =
+            result.control.reverse_translation_raw_common_x_roi_pixels *
+            frame.source_pixels_per_roi_pixel_x;
+        const float common_consistency = std::clamp(
+            std::fabs(
+                result.control.reverse_translation_control_evidence_x),
+            0.0f,
+            1.0f);
+        if (error_x * common_motion_x > 0.0f &&
+            common_consistency > 0.0f) {
+            ++opening_evidence_frames;
+        }
+
+        const float source_phase_request =
+            result.control.observer_phase_command_x_counts;
+        if (std::fabs(source_phase_request) > 0.0001f) {
+            ++source_phase_request_frames;
+            absolute_source_phase_counts +=
+                std::fabs(source_phase_request);
+            if (source_phase_request * error_x <= 0.0f) {
+                ++source_phase_direction_violations;
+            }
+            if (error_x * common_motion_x <= 0.0f ||
+                common_consistency <= 0.0f ||
+                std::fabs(source_phase_request) >
+                    std::fabs(result.control.proportional_x_counts) +
+                        0.0001f) {
+                ++source_phase_scope_violations;
+            }
+            const bool isolated_unconstrained_request =
+                result.control.pending_absolute_x_counts < 0.0001f &&
+                result.command.dy_counts == 0 &&
+                std::fabs(
+                    result.control.desired_before_reverse_x_counts) <
+                    config.max_counts_per_frame - 1.0f;
+            if (isolated_unconstrained_request) {
+                ++source_phase_consumption_frames;
+                const float reconstructed_request =
+                    result.control.proportional_x_counts +
+                    result.control.feedforward_x_counts +
+                    source_phase_request;
+                if (std::fabs(
+                        result.control.desired_before_reverse_x_counts -
+                        reconstructed_request) > 0.0001f) {
+                    ++source_phase_consumption_mismatches;
+                }
+            }
+        }
+        if (result.has_command &&
+            result.command.dx_counts * error_x < 0.0f) {
+            ++opposite_x_commands;
+        }
+        if (result.has_command) {
+            const float magnitude = std::hypot(
+                static_cast<float>(result.command.dx_counts),
+                static_cast<float>(result.command.dy_counts));
+            if (result.command.dx_counts * error_x +
+                        result.command.dy_counts * error_y <= 0.0f ||
+                magnitude > config.max_counts_per_frame + 0.001f) {
+                ++command_contract_violations;
+            }
+        }
+        const auto base_y_millipixel = static_cast<std::int64_t>(
+            std::llround(result.target.base_aim_y * 1000.0f));
+        y_trace_signature ^= static_cast<std::uint64_t>(
+            base_y_millipixel + 1000000LL);
+        y_trace_signature *= 1099511628211ULL;
+        y_trace_signature ^= static_cast<std::uint64_t>(
+            result.command.dy_counts + 128);
+        y_trace_signature *= 1099511628211ULL;
+    }
+
+    std::cout << "42949ce current RandomMove source-time phase: opening/phase/"
+                 "abs counts="
+              << opening_evidence_frames << "/"
+              << source_phase_request_frames << "/"
+              << absolute_source_phase_counts
+              << "，消费/不匹配=" << source_phase_consumption_frames
+              << "/" << source_phase_consumption_mismatches
+              << "，phase反向/范围/X反向/二维违规="
+              << source_phase_direction_violations << "/"
+              << source_phase_scope_violations << "/"
+              << opposite_x_commands << "/"
+              << command_contract_violations << "，Y签名="
+              << y_trace_signature << '\n';
+    expect(opening_evidence_frames == 122 &&
+               source_phase_request_frames == 79 &&
+               absolute_source_phase_counts > 3.9f &&
+               absolute_source_phase_counts < 4.0f,
+           "current Run 已有 source-time opening 证据时，prediction-off "
+           "tracking 必须形成连续同向相位请求；opening/phase/counts=" +
+               std::to_string(opening_evidence_frames) + "/" +
+               std::to_string(source_phase_request_frames) + "/" +
+               std::to_string(absolute_source_phase_counts));
+    expect(source_phase_direction_violations == 0 &&
+               source_phase_scope_violations == 0 &&
+               source_phase_consumption_frames > 0 &&
+               source_phase_consumption_mismatches == 0 &&
+               opposite_x_commands == 0 &&
+               command_contract_violations == 0 &&
+               y_trace_signature == 11409656786570397192ULL,
+           "source-time 相位请求不得自行反向，也不得改变逐帧方向与二维"
+           "安全合同和 current Y 签名，消费/不匹配/phase反向/范围/"
+           "X反向/违规/Y=" +
+               std::to_string(source_phase_consumption_frames) + "/" +
+               std::to_string(source_phase_consumption_mismatches) + "/" +
+               std::to_string(source_phase_direction_violations) + "/" +
+               std::to_string(source_phase_scope_violations) + "/" +
+               std::to_string(opposite_x_commands) + "/" +
+               std::to_string(command_contract_violations) + "/" +
+               std::to_string(y_trace_signature));
 }
 
 void test_actual_game_semantic_landmark_does_not_gain_base_x_phase() {
@@ -10660,9 +10864,7 @@ void test_tracking_public_point_is_independent_of_command_age() {
                 0.001f &&
             std::fabs(result.target.aim_y - result.target.base_aim_y) <
                 0.001f &&
-            std::fabs(result.control.modelled_response_x_counts) < 0.001f &&
-            std::fabs(result.control.observer_phase_command_x_counts) <
-                0.001f;
+            std::fabs(result.control.modelled_response_x_counts) < 0.001f;
     };
     expect(is_base_only(young) && is_base_only(before) &&
                is_base_only(after) && is_base_only(expired),
@@ -12685,9 +12887,7 @@ void test_tracking_public_point_stays_on_base_feature() {
             result.target.aim_x <= result.target.x2 &&
             result.target.aim_y >= result.target.y1 &&
             result.target.aim_y <= result.target.y2 &&
-            std::fabs(result.control.modelled_response_x_counts) < 0.001f &&
-            std::fabs(result.control.observer_phase_command_x_counts) <
-                0.001f;
+            std::fabs(result.control.modelled_response_x_counts) < 0.001f;
     };
 
     // 先建立向左的连续控制，再以约 100 px/s 向右回穿。该序列曾让
@@ -13533,6 +13733,7 @@ int main() {
     test_actual_game_superjump_current_common_translation_brakes_x();
     test_random_move_superjump_uses_available_x_integral_headroom();
     test_latest_random_move_tracking_x_uses_continuous_opening_evidence();
+    test_current_random_move_tracking_consumes_source_time_opening_phase();
     test_actual_game_semantic_landmark_does_not_gain_base_x_phase();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();

@@ -291,9 +291,11 @@ constexpr float kTrackingIntegralGainPerSecond = 12.0f;
 constexpr float kTrackingIntegralLeakPerSecond = 6.0f;
 constexpr float kTrackingAntiWindupGainPerSecond = 30.0f;
 constexpr float kTrackingVerticalIntegralMaximumCounts = 4.0f;
-// closing-slope 只作为 X 请求的带限阻尼。20 ms 一阶滤波覆盖已观测的
-// 4～5 帧反馈时间尺度；2 ms 导数增益把高频误差等效增益限制为比例项的
-// 10%，最终仍由同号预算保证最多减到零而不会自行反向。
+// source-time 误差斜率同时服务 opening 相位补偿与 closing 带限阻尼。
+// 20 ms 一阶滤波覆盖已观测的 4～5 帧反馈时间尺度；closing 的 2 ms
+// 导数增益仍把高频等效增益限制为比例项的 10%。opening 只使用本帧
+// observation age；配置输出延迟已由 pending/inventory 单独表达，不能
+// 在这里重复计入。不另设速度档或固定运动阈值。
 constexpr float kTrackingErrorDerivativeFilterTimeSeconds = 0.020f;
 constexpr float kTrackingErrorDerivativeGainSeconds = 0.002f;
 // 40 ms 窗口内的 pending 总和会按命令逐帧阶跃；0.12 只平滑隐藏库存
@@ -3966,7 +3968,36 @@ struct Aim::Impl {
             -kTrackingVerticalIntegralMaximumCounts,
             kTrackingVerticalIntegralMaximumCounts);
 
-        const float unconstrained_x = proportional_x + feedforward_x;
+        // prediction 关闭时公有控制点必须继续等于当前 Track 锚点，不能用
+        // 历史 endpoint 改写目标几何。但当前帧从 source time 到 control
+        // time 已经发生一段真实时域：只在滤波误差继续同向 opening 时，
+        // 把该时域内尚会增长的误差换算为同向请求。配置输出延迟仍只由
+        // pending/inventory 表达，避免重复预测同一在途命令。位移不超过
+        // 当前误差，且 deadzone scale 连续归零，避免在基础点附近凭导数
+        // 自行造命令。
+        const float observation_age_seconds = static_cast<float>(std::clamp(
+            std::chrono::duration<double>(
+                current_controller_at - frame.captured_at).count(),
+            0.0,
+            static_cast<double>(kMaxObservationAgeSeconds)));
+        const float source_phase_horizon_seconds = observation_age_seconds;
+        const float opening_error_slope_x = std::max(
+            0.0f, x_error_direction * tracking_error_derivative_x);
+        const float source_phase_displacement_x = std::min(
+            x_error_magnitude,
+            opening_error_slope_x * source_phase_horizon_seconds);
+        const float source_phase_request_magnitude_x = std::min(
+            std::fabs(proportional_x),
+            source_phase_displacement_x * active_x_error_scale *
+                active_x_error_scale *
+                opening_x_weight * config.counts_per_pixel_x);
+        const float source_phase_request_x =
+            x_error_direction * source_phase_request_magnitude_x;
+        diagnostics.observer_phase_command_x_counts =
+            source_phase_request_x;
+
+        const float unconstrained_x =
+            proportional_x + feedforward_x + source_phase_request_x;
         const float unconstrained_y = proportional_y + feedforward_y;
         float desired_x = unconstrained_x;
         float desired_y = unconstrained_y;
