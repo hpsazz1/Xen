@@ -1,4 +1,6 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [string]$PowerShell7Executable,
     [string]$WorkflowScript = (Join-Path $PSScriptRoot `
         "..\scripts\test_release_transfer_and_aim_manual.ps1")
 )
@@ -30,7 +32,8 @@ $probeRoot = Join-Path $temporaryParent $probeName
 $testRoot = Join-Path $probeRoot "must-not-exist"
 $windowsPowerShell = Join-Path $env:SystemRoot `
     "System32\WindowsPowerShell\v1.0\powershell.exe"
-$powerShell7 = (Get-Command pwsh -ErrorAction Stop).Source
+$powerShell7 = (Get-Item -LiteralPath $PowerShell7Executable `
+    -ErrorAction Stop).FullName
 
 try {
     $desktop = Invoke-HostProbe $windowsPowerShell $testRoot

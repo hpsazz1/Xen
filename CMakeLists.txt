@@ -1176,6 +1176,10 @@ if(BUILD_TESTING)
         message(FATAL_ERROR
             "Windows PowerShell 5 executable not found: ${XEN_WINDOWS_POWERSHELL}")
     endif()
+    find_program(XEN_POWERSHELL7_EXECUTABLE NAMES pwsh)
+    if(NOT XEN_POWERSHELL7_EXECUTABLE)
+        message(FATAL_ERROR "PowerShell 7 executable not found: pwsh")
+    endif()
     # 固定 powershell.exe 仍会继承调用方的 PSModulePath。统一清除该变量，
     # 让 Windows PowerShell 5 按自身 PSHOME 重建系统模块路径；cmake -E env
     # 只改变测试子进程，不修改调用 CTest 的父环境。
@@ -1191,11 +1195,13 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/tests/powershell_module_path_tests.ps1"
         -CMakeCommand "${CMAKE_COMMAND}"
         -CTestCommand "${CMAKE_CTEST_COMMAND}"
+        -PowerShell7Executable "${XEN_POWERSHELL7_EXECUTABLE}"
         -BuildDirectory "${CMAKE_BINARY_DIR}"
         -Configuration "$<CONFIG>")
     xen_add_windows_powershell_test(benchmark_mouse_script_tests
         "${PROJECT_SOURCE_DIR}/tests/benchmark_mouse_script_tests.ps1"
-        -BuildDirectory "${CMAKE_BINARY_DIR}")
+        -BuildDirectory "${CMAKE_BINARY_DIR}"
+        -GitExecutable "${GIT_EXECUTABLE}")
     xen_add_windows_powershell_test(obs_capture_binding_tests
         "${PROJECT_SOURCE_DIR}/tests/obs_capture_binding_tests.ps1"
         -BindingScript "${PROJECT_SOURCE_DIR}/scripts/export_obs_capture_binding.ps1"
@@ -1218,6 +1224,7 @@ if(BUILD_TESTING)
         -ScriptsRoot "${PROJECT_SOURCE_DIR}/scripts")
     xen_add_windows_powershell_test(powershell_host_contract_tests
         "${PROJECT_SOURCE_DIR}/tests/powershell_host_contract_tests.ps1"
+        -PowerShell7Executable "${XEN_POWERSHELL7_EXECUTABLE}"
         -WorkflowScript
             "${PROJECT_SOURCE_DIR}/scripts/test_release_transfer_and_aim_manual.ps1")
 

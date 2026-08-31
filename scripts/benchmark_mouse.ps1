@@ -32,7 +32,8 @@
     [ValidateRange(1, 10000)]
     [int]$ConnectTimeoutMs = 1000,
     [ValidateRange(1, 1000)]
-    [int]$CommandTimeoutMs = 300
+    [int]$CommandTimeoutMs = 300,
+    [string]$GitExecutable = "git"
 )
 
 $ErrorActionPreference = "Stop"
@@ -356,9 +357,9 @@ try {
         throw "鼠标命令耗时汇总非法。"
     }
 
-    $gitCommit = (& git -C $repositoryRoot rev-parse HEAD).Trim()
+    $gitCommit = (& $GitExecutable -C $repositoryRoot rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0) { throw "读取 Git commit 失败。" }
-    $gitStatus = @(& git -C $repositoryRoot status --porcelain)
+    $gitStatus = @(& $GitExecutable -C $repositoryRoot status --porcelain)
     if ($LASTEXITCODE -ne 0) { throw "读取 Git 工作树状态失败。" }
     $processor = Get-CimInstance Win32_Processor |
         Select-Object -First 1 Name, Manufacturer, NumberOfCores,`

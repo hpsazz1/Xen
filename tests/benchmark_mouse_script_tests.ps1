@@ -1,5 +1,7 @@
 ﻿param(
-    [string]$BuildDirectory = ""
+    [string]$BuildDirectory = "",
+    [Parameter(Mandatory = $true)]
+    [string]$GitExecutable
 )
 
 $ErrorActionPreference = "Stop"
@@ -115,6 +117,7 @@ public static class ScriptReportFixture
         -AllowPhysicalOutput `
         -PhysicalOutputConfirmation XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT `
         -BuildDirectory $fixtureBuild `
+        -GitExecutable $GitExecutable `
         -Configuration Release `
         -WarmupPairs 0 `
         -SamplePairs 1 `
@@ -136,6 +139,7 @@ public static class ScriptReportFixture
             -AllowPhysicalOutput `
             -PhysicalOutputConfirmation XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT `
             -BuildDirectory $fixtureBuild `
+            -GitExecutable $GitExecutable `
             -Configuration Release `
             -WarmupPairs 0 `
             -SamplePairs 1 `
@@ -163,6 +167,7 @@ public static class ScriptReportFixture
             -AllowPhysicalOutput `
             -PhysicalOutputConfirmation XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT `
             -BuildDirectory $fixtureBuild `
+            -GitExecutable $GitExecutable `
             -Configuration Release `
             -PeerTestBoundary Auto `
             -WarmupPairs 0 `
@@ -191,6 +196,7 @@ public static class ScriptReportFixture
             -AllowPhysicalOutput `
             -PhysicalOutputConfirmation XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT `
             -BuildDirectory $fixtureBuild `
+            -GitExecutable $GitExecutable `
             -Configuration Release `
             -WarmupPairs 0 `
             -SamplePairs 1 `
@@ -215,6 +221,7 @@ public static class ScriptReportFixture
             -AllowPhysicalOutput `
             -PhysicalOutputConfirmation XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT `
             -BuildDirectory $BuildDirectory `
+            -GitExecutable $GitExecutable `
             -Configuration Release `
             -PeerTestBoundary LoopbackUdpFake `
             -WarmupPairs 0 `
@@ -241,6 +248,7 @@ public static class ScriptReportFixture
             -AllowPhysicalOutput `
             -PhysicalOutputConfirmation XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT `
             -BuildDirectory $BuildDirectory `
+            -GitExecutable $GitExecutable `
             -Configuration Release `
             -PeerTestBoundary Auto `
             -WarmupPairs 0 `
@@ -285,6 +293,7 @@ public static class ScriptReportFixture
         -AllowPhysicalOutput `
         -PhysicalOutputConfirmation XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT `
         -BuildDirectory $BuildDirectory `
+        -GitExecutable $GitExecutable `
         -Configuration Release `
         -PeerTestBoundary LoopbackUdpFake `
         -WarmupPairs 0 `

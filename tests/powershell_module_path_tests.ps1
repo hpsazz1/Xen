@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$CTestCommand,
     [Parameter(Mandatory = $true)]
+    [string]$PowerShell7Executable,
+    [Parameter(Mandatory = $true)]
     [string]$BuildDirectory,
     [Parameter(Mandatory = $true)]
     [string]$Configuration
@@ -45,8 +47,8 @@ if ($env:XEN_PSMODULEPATH_PROBE -ceq "1") {
     return
 }
 
-$powerShell7 = (Get-Command pwsh -CommandType Application `
-    -ErrorAction Stop).Source
+$powerShell7 = (Get-Item -LiteralPath $PowerShell7Executable `
+    -ErrorAction Stop).FullName
 $powerShell7Home = (& $powerShell7 -NoProfile -Command '$PSHOME').Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($powerShell7Home)) {
     throw "Cannot resolve the PowerShell 7 module directory."
