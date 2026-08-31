@@ -358,10 +358,12 @@ constexpr float kPredictionVerticalMotionEstablishmentSeconds = 0.25f;
 constexpr int kPredictionEstablishmentLowMotionGraceFrames = 1;
 // 既有 10 ms public hysteresis 夹具把重入连续确认固定为 4 个采样；
 // 这里恢复为 40 ms 状态驻留，不把合同重新绑定到任何采集 Hz。
-constexpr float kPredictionLeadReentrySeconds = 0.040f;
+constexpr auto kPredictionLeadReentryDuration =
+    std::chrono::milliseconds(40);
 // 同一 10 ms public 夹具的 5 个 centered 确认恢复为 50 ms；只在
 // 当前真实观测仍位于旧 lead 轴中心范围时累计。
-constexpr float kPredictionLeadRearmCenteredSeconds = 0.050f;
+constexpr auto kPredictionLeadRearmCenteredDuration =
+    std::chrono::milliseconds(50);
 // 正确方向的提前量也不能在观察器刚建立时整段跳入。按真实 dt 在约 33 ms
 // 内线性渐入，避免 prediction 状态变化绕过物理命令阶跃门禁。
 constexpr float kPredictionLeadRampPerSecond = 30.0f;
@@ -931,7 +933,7 @@ struct Aim::Impl {
 
         [[nodiscard]] bool observe_qualifying_sample(
                 std::chrono::steady_clock::time_point captured_at,
-                float required_seconds) noexcept {
+                std::chrono::steady_clock::duration required_duration) noexcept {
             if (!started_) {
                 started_ = true;
                 started_at_ = captured_at;
@@ -943,10 +945,7 @@ struct Aim::Impl {
             } else {
                 last_captured_at_ = captured_at;
             }
-            const double elapsed_seconds =
-                std::chrono::duration<double>(
-                    captured_at - started_at_).count();
-            return elapsed_seconds + 0.000001 >= required_seconds;
+            return captured_at - started_at_ >= required_duration;
         }
 
         void reset() noexcept {
@@ -972,7 +971,7 @@ struct Aim::Impl {
 
         [[nodiscard]] bool observe_qualifying_sample(
                 std::chrono::steady_clock::time_point captured_at,
-                float required_seconds,
+                std::chrono::steady_clock::duration required_duration,
                 float direction_x,
                 float direction_y) noexcept {
             const auto axis_sign = [](float value) {
@@ -1010,7 +1009,7 @@ struct Aim::Impl {
                 witness_axes_ = continuing_axes;
             }
             return dwell_.observe_qualifying_sample(
-                captured_at, required_seconds);
+                captured_at, required_duration);
         }
 
         void reset() noexcept {
@@ -3577,7 +3576,7 @@ struct Aim::Impl {
                         lead_timing.delay_candidate.
                         observe_qualifying_sample(
                             frame.captured_at,
-                            kPredictionLeadReentrySeconds,
+                            kPredictionLeadReentryDuration,
                             std::fabs(desired_lead_x) >
                                     activation_distance_x
                                 ? world_motion_measurement_x : 0.0f,
@@ -3750,7 +3749,7 @@ struct Aim::Impl {
                     if (lead_timing.no_delay_centered.
                             observe_qualifying_sample(
                             frame.captured_at,
-                            kPredictionLeadRearmCenteredSeconds)) {
+                            kPredictionLeadRearmCenteredDuration)) {
                         lead_rearm_ready = true;
                         lead_timing.no_delay_centered.reset();
                     }
@@ -3766,7 +3765,7 @@ struct Aim::Impl {
                         lead_timing.no_delay_candidate.
                             observe_qualifying_sample(
                             frame.captured_at,
-                            kPredictionLeadReentrySeconds,
+                            kPredictionLeadReentryDuration,
                             horizontal_motion_dominates
                                 ? source_velocity_x : 0.0f,
                             horizontal_motion_dominates

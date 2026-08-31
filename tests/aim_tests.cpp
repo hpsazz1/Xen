@@ -3462,9 +3462,35 @@ constexpr std::array<double, 3> kPredictionTimingCadences{
     60.0, 120.0, 240.0};
 constexpr double kSubMillisecondPredictionTimingCadence = 2000.0;
 
-AimConfig prediction_timing_config(bool delay_enabled,
-                                   float max_center_distance = 2.0f,
-                                   bool commands_enabled = false) {
+enum class PredictionTimingAxis {
+    HORIZONTAL,
+    VERTICAL,
+};
+
+enum class PredictionTimingDelay {
+    DISABLED,
+    ENABLED,
+};
+
+enum class PredictionTimingCommands {
+    DISABLED,
+    COMPLETE,
+};
+
+PredictionTimingAxis prediction_timing_axis(bool vertical) {
+    return vertical ? PredictionTimingAxis::VERTICAL
+                    : PredictionTimingAxis::HORIZONTAL;
+}
+
+AimConfig prediction_timing_config(
+        PredictionTimingDelay delay_mode,
+        float max_center_distance = 2.0f,
+        PredictionTimingCommands command_mode =
+            PredictionTimingCommands::DISABLED) {
+    const bool delay_enabled =
+        delay_mode == PredictionTimingDelay::ENABLED;
+    const bool commands_enabled =
+        command_mode == PredictionTimingCommands::COMPLETE;
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.deadzone_pixels = delay_enabled ? 0.0f : 1.5f;
@@ -3489,15 +3515,18 @@ struct PredictionTimingPublicSample {
 };
 
 struct PredictionTimingDriver {
-    PredictionTimingDriver(bool vertical_axis, bool delay_enabled,
-                           float max_center_distance = 2.0f,
-                           bool commands_enabled = false)
+    PredictionTimingDriver(
+            PredictionTimingAxis axis_value,
+            PredictionTimingDelay delay_value,
+            float max_center_distance = 2.0f,
+            PredictionTimingCommands command_value =
+                PredictionTimingCommands::DISABLED)
         : config(prediction_timing_config(
-              delay_enabled, max_center_distance, commands_enabled)),
+              delay_value, max_center_distance, command_value)),
           aim(config),
-          vertical(vertical_axis),
-          delay_mode(delay_enabled),
-          complete_commands(commands_enabled),
+          axis(axis_value),
+          delay_mode(delay_value),
+          command_mode(command_value),
           base(std::chrono::steady_clock::now() +
                std::chrono::seconds(1)) {}
 
@@ -3516,7 +3545,8 @@ struct PredictionTimingDriver {
         frame.lock_active = lock_active;
         AimResult result = aim.process(frame);
         expect_observed_result(result, context);
-        if (complete_commands && result.has_command && frame.lock_active) {
+        if (command_mode == PredictionTimingCommands::COMPLETE &&
+            result.has_command && frame.lock_active) {
             expect(aim.record_backend_completed_command(
                        frame.sequence,
                        frame.control_at + std::chrono::microseconds(100),
@@ -3565,7 +3595,8 @@ struct PredictionTimingDriver {
                 static_cast<long long>(
                     std::llround(elapsed_seconds * 1000000.0))));
         frame.control_at = frame.captured_at + std::chrono::milliseconds(
-            delay_mode ? 1 : 4);
+            delay_mode == PredictionTimingDelay::ENABLED ? 1 : 4);
+        const bool vertical = axis == PredictionTimingAxis::VERTICAL;
         frame.control_center_x = vertical
             ? orthogonal_position - orthogonal_error
             : axis_position - axis_error;
@@ -3590,11 +3621,11 @@ struct PredictionTimingDriver {
                        !result.target.predicted &&
                        result.target.matched_observation_valid,
                    context + " 必须保持同一真实观测 Track");
-            if (!complete_commands) {
+            if (command_mode == PredictionTimingCommands::DISABLED) {
                 expect(!result.has_command,
                        context + " 计时夹具不得引入控制命令反馈");
             }
-            if (!delay_mode) {
+            if (delay_mode == PredictionTimingDelay::DISABLED) {
                 expect(!result.target.delay_compensation_active &&
                            std::fabs(
                                result.target.delay_compensation_x) <=
@@ -3609,9 +3640,10 @@ struct PredictionTimingDriver {
 
     AimConfig config;
     Aim aim;
-    bool vertical = false;
-    bool delay_mode = false;
-    bool complete_commands = false;
+    PredictionTimingAxis axis = PredictionTimingAxis::HORIZONTAL;
+    PredictionTimingDelay delay_mode = PredictionTimingDelay::DISABLED;
+    PredictionTimingCommands command_mode =
+        PredictionTimingCommands::DISABLED;
     std::chrono::steady_clock::time_point base{};
     std::uint64_t track_id = 0;
 };
@@ -3789,7 +3821,9 @@ void test_delayed_prediction_reentry_uses_elapsed_time() {
     };
 
     const auto run_case = [&](bool vertical, double cadence) {
-        PredictionTimingDriver driver(vertical, true);
+        PredictionTimingDriver driver(
+            prediction_timing_axis(vertical),
+            PredictionTimingDelay::ENABLED);
         const int sample_count = static_cast<int>(
             std::llround(kTraceEndSeconds * cadence));
         Trace trace;
@@ -3903,54 +3937,86 @@ void test_delayed_prediction_reentry_uses_elapsed_time() {
 }
 
 void test_no_delay_prediction_reentry_uses_submillisecond_capture_time() {
-    PredictionTimingDriver driver(false, false);
-    std::uint64_t sequence = 1;
-    double elapsed_seconds = 0.0;
-    float position_x = 140.0f;
     constexpr float kPositionY = 160.0f;
-    const auto step = [&](float delta_x, float axis_error,
-                          double delta_seconds,
-                          const std::string& phase) {
-        position_x += delta_x;
-        const PredictionTimingPublicSample sample = driver.process(
-            sequence++, elapsed_seconds, position_x, axis_error,
-            "submillisecond no-delay " + phase, kPositionY, 0.0f);
-        elapsed_seconds += delta_seconds;
-        return sample.result;
+    struct Trace {
+        int activation_sample = -1;
+        bool setup_completed = false;
+        bool active_before_35_ms = false;
+        bool active_at_adjusted_sample = false;
     };
 
-    AimResult result = step(0.0f, 0.0f, 0.010, "initial");
-    bool first_activation_seen = false;
-    for (int sample = 0; sample < 100 && !first_activation_seen; ++sample) {
-        result = step(0.2f, 18.0f, 0.010, "first lifecycle");
-        first_activation_seen = result.target.lead_active;
-    }
-    bool release_seen = false;
-    for (int sample = 0; sample < 20; ++sample) {
-        result = step(0.2f, 0.0f, 0.010, "centered rearm");
-        release_seen = release_seen ||
-            (first_activation_seen && !result.target.lead_active);
-    }
-    expect(first_activation_seen && release_seen &&
-               !result.target.lead_active,
+    const auto run_case = [&](int adjusted_sample) {
+        PredictionTimingDriver driver(
+            PredictionTimingAxis::HORIZONTAL,
+            PredictionTimingDelay::DISABLED);
+        std::uint64_t sequence = 1;
+        long long elapsed_microseconds = 0;
+        float position_x = 140.0f;
+        const auto step = [&](float delta_x, float axis_error,
+                              long long delta_microseconds,
+                              const std::string& phase,
+                              long long timestamp_adjustment = 0) {
+            position_x += delta_x;
+            const double elapsed_seconds = static_cast<double>(
+                elapsed_microseconds + timestamp_adjustment) / 1000000.0;
+            const PredictionTimingPublicSample sample = driver.process(
+                sequence++, elapsed_seconds, position_x, axis_error,
+                "submillisecond no-delay " + phase, kPositionY, 0.0f);
+            elapsed_microseconds += delta_microseconds;
+            return sample.result;
+        };
+
+        AimResult result = step(0.0f, 0.0f, 10000, "initial");
+        bool first_activation_seen = false;
+        for (int sample = 0;
+             sample < 100 && !first_activation_seen; ++sample) {
+            result = step(0.2f, 18.0f, 10000, "first lifecycle");
+            first_activation_seen = result.target.lead_active;
+        }
+        bool release_seen = false;
+        for (int sample = 0; sample < 20; ++sample) {
+            result = step(0.2f, 0.0f, 10000, "centered rearm");
+            release_seen = release_seen ||
+                (first_activation_seen && !result.target.lead_active);
+        }
+
+        Trace trace;
+        trace.setup_completed = first_activation_seen && release_seen &&
+            !result.target.lead_active;
+        for (int sample = 0; sample < 160; ++sample) {
+            const long long adjustment = sample == adjusted_sample ? -1 : 0;
+            result = step(
+                0.01f, 18.0f, 500, "0.5ms boundary", adjustment);
+            trace.active_before_35_ms = trace.active_before_35_ms ||
+                (sample < 70 && result.target.lead_active);
+            if (sample == adjusted_sample) {
+                trace.active_at_adjusted_sample = result.target.lead_active;
+            }
+            if (trace.activation_sample < 0 && result.target.lead_active) {
+                trace.activation_sample = sample;
+            }
+        }
+        return trace;
+    };
+
+    const Trace exact_boundary = run_case(-1);
+    expect(exact_boundary.setup_completed,
            "submillisecond no-delay 夹具必须先完成公开 activation/release/centered rearm");
-
-    bool activated_before_35_ms = false;
-    for (int sample = 0; sample < 70; ++sample) {
-        result = step(0.01f, 18.0f, 0.0005, "0.5ms guard");
-        activated_before_35_ms = activated_before_35_ms ||
-            result.target.lead_active;
-    }
-    expect(!activated_before_35_ms,
+    expect(!exact_boundary.active_before_35_ms,
            "0.5ms captured_at 样本累计35ms真实时间不得完成40ms no-delay 重入");
+    expect(exact_boundary.activation_sample >= 80,
+           "0.5ms captured_at 样本必须在原始40ms边界或之后公开重入，sample=" +
+               std::to_string(exact_boundary.activation_sample));
 
-    bool activated_after_40_ms = false;
-    for (int sample = 0; sample < 40 && !activated_after_40_ms; ++sample) {
-        result = step(0.01f, 18.0f, 0.0005, "0.5ms completion");
-        activated_after_40_ms = result.target.lead_active;
-    }
-    expect(activated_after_40_ms,
-           "0.5ms captured_at 样本连续超过40ms后必须能够完成 no-delay 重入");
+    const Trace just_below_boundary =
+        run_case(exact_boundary.activation_sample);
+    expect(just_below_boundary.setup_completed &&
+               !just_below_boundary.active_at_adjusted_sample &&
+               just_below_boundary.activation_sample >
+                   exact_boundary.activation_sample,
+           "同一公开生命周期把边界样本提前1us至39.999ms时不得激活，exact/below=" +
+               std::to_string(exact_boundary.activation_sample) + "/" +
+               std::to_string(just_below_boundary.activation_sample));
 }
 
 void test_no_delay_prediction_rearm_uses_elapsed_time() {
@@ -3972,7 +4038,9 @@ void test_no_delay_prediction_rearm_uses_elapsed_time() {
 
     const auto run_case = [&](bool vertical, double cadence,
                               double centered_seconds) {
-        PredictionTimingDriver driver(vertical, false);
+        PredictionTimingDriver driver(
+            prediction_timing_axis(vertical),
+            PredictionTimingDelay::DISABLED);
         const double second_ramp_start =
             kCenteredStartSeconds + centered_seconds;
         const double second_ramp_end =
@@ -4032,7 +4100,9 @@ void test_no_delay_prediction_rearm_uses_elapsed_time() {
         constexpr double kLossEndSeconds = 0.655;
         constexpr double kSecondRampStartSeconds = 0.700;
         constexpr double kTraceEndSeconds = 0.89;
-        PredictionTimingDriver driver(vertical, false);
+        PredictionTimingDriver driver(
+            prediction_timing_axis(vertical),
+            PredictionTimingDelay::DISABLED);
         int rising_edges = 0;
         bool previous_axis_active = false;
         bool predicted_loss_seen = false;
@@ -4195,7 +4265,9 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
     };
 
     const auto run_case = [&](bool vertical, double cadence) {
-        PredictionTimingDriver driver(vertical, false);
+        PredictionTimingDriver driver(
+            prediction_timing_axis(vertical),
+            PredictionTimingDelay::DISABLED);
         Trace trace;
         bool previous_axis_active = false;
 
@@ -4323,7 +4395,7 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
                 trace.second_activation_seconds -
                 trace.second_candidate_event_seconds;
             const double sample_seconds = 1.0 / cadence;
-            expect(reentry_seconds + 0.000001 >= kReentrySeconds &&
+            expect(reentry_seconds >= kReentrySeconds &&
                        reentry_seconds <=
                            kReentrySeconds +
                                sample_seconds + 0.001,
@@ -4367,7 +4439,9 @@ void test_no_delay_prediction_precomputes_while_unlocked() {
     for (const bool vertical : {false, true}) {
         for (const double cadence : kPredictionTimingCadences) {
             PredictionTimingDriver driver(
-                vertical, false, 2.0f, true);
+                prediction_timing_axis(vertical),
+                PredictionTimingDelay::DISABLED, 2.0f,
+                PredictionTimingCommands::COMPLETE);
             bool first_active_seen = false;
             bool release_seen_while_unlocked = false;
             bool unlocked_candidate_event_seen = false;
@@ -4483,7 +4557,9 @@ void test_prediction_reentry_requires_one_continuous_direction() {
                 elapsed_seconds, 0.64, 160.0f, 0.030, 15.0f);
         };
 
-        PredictionTimingDriver driver(vertical, false);
+        PredictionTimingDriver driver(
+            prediction_timing_axis(vertical),
+            PredictionTimingDelay::DISABLED);
         NoDelayDirectionTrace trace;
         bool previous_active = false;
         double first_negative_motion_seconds = -1.0;
@@ -4547,7 +4623,7 @@ void test_prediction_reentry_requires_one_continuous_direction() {
             }
             if (active && first_negative_motion_seconds >= 0.0 &&
                 elapsed_seconds >= first_negative_motion_seconds &&
-                elapsed_seconds + 0.000001 <
+                elapsed_seconds <
                     first_negative_motion_seconds + kReentrySeconds) {
                 trace.active_before_negative_dwell = true;
             }
@@ -4648,7 +4724,9 @@ void test_prediction_reentry_requires_one_continuous_direction() {
                 kHalfPeriodSeconds, kNoiseVelocityPixelsPerSecond);
         };
 
-        PredictionTimingDriver driver(vertical, true);
+        PredictionTimingDriver driver(
+            prediction_timing_axis(vertical),
+            PredictionTimingDelay::ENABLED);
         DelayDirectionTrace trace;
         bool previous_lead_active = false;
         int previous_observed_direction = 0;
@@ -4791,8 +4869,36 @@ void test_prediction_reentry_requires_one_continuous_direction() {
     }
 }
 
+struct DelayedPredictionReentrySetup {
+    AimResult result;
+    bool first_activation_seen = false;
+    bool release_seen = false;
+};
+
+template <typename Step>
+DelayedPredictionReentrySetup prepare_delayed_prediction_reentry(
+        Step& step) {
+    DelayedPredictionReentrySetup setup;
+    setup.result = step(0.0f, "initial");
+    for (int sample = 0;
+         sample < 100 && !setup.first_activation_seen; ++sample) {
+        setup.result = step(0.8f, "first lifecycle");
+        setup.first_activation_seen = setup.result.target.lead_active;
+    }
+    for (int sample = 0; sample < 80 && !setup.release_seen; ++sample) {
+        setup.result = step(-2.0f, "reversal release");
+        setup.release_seen = setup.first_activation_seen &&
+            !setup.result.target.lead_active;
+    }
+    setup.result = step(0.0f, "candidate reset one");
+    setup.result = step(0.0f, "candidate reset two");
+    return setup;
+}
+
 void test_delayed_prediction_reentry_keeps_one_axis_witness() {
-    PredictionTimingDriver driver(false, true);
+    PredictionTimingDriver driver(
+        PredictionTimingAxis::HORIZONTAL,
+        PredictionTimingDelay::ENABLED);
     std::uint64_t sequence = 1;
     double elapsed_seconds = 0.0;
     float position_x = 100.0f;
@@ -4884,7 +4990,9 @@ void test_delayed_prediction_candidate_clears_on_predicted_loss() {
     };
 
     const auto run_case = [&](int loss_sample) {
-        PredictionTimingDriver driver(false, true);
+        PredictionTimingDriver driver(
+            PredictionTimingAxis::HORIZONTAL,
+            PredictionTimingDelay::ENABLED);
         std::uint64_t sequence = 1;
         double elapsed_seconds = 0.0;
         float position_x = 100.0f;
@@ -4898,19 +5006,11 @@ void test_delayed_prediction_candidate_clears_on_predicted_loss() {
         };
 
         Trace trace;
-        AimResult result = step(0.0f, "initial");
-        for (int sample = 0;
-             sample < 100 && !trace.first_activation_seen; ++sample) {
-            result = step(0.8f, "first lifecycle");
-            trace.first_activation_seen = result.target.lead_active;
-        }
-        for (int sample = 0; sample < 80 && !trace.release_seen; ++sample) {
-            result = step(-2.0f, "reversal release");
-            trace.release_seen = trace.first_activation_seen &&
-                !result.target.lead_active;
-        }
-        result = step(0.0f, "candidate reset one");
-        result = step(0.0f, "candidate reset two");
+        DelayedPredictionReentrySetup setup =
+            prepare_delayed_prediction_reentry(step);
+        trace.first_activation_seen = setup.first_activation_seen;
+        trace.release_seen = setup.release_seen;
+        AimResult result = std::move(setup.result);
         const std::uint64_t original_track_id = result.target.track_id;
 
         for (int sample = 0; sample < 30; ++sample) {
@@ -4959,7 +5059,9 @@ void test_delayed_prediction_candidate_clears_on_predicted_loss() {
 }
 
 void test_delayed_prediction_candidate_clears_on_identity_switch() {
-    PredictionTimingDriver driver(false, true);
+    PredictionTimingDriver driver(
+        PredictionTimingAxis::HORIZONTAL,
+        PredictionTimingDelay::ENABLED);
     std::uint64_t sequence = 1;
     double elapsed_seconds = 0.0;
     float selected_position_x = 100.0f;
@@ -4974,24 +5076,14 @@ void test_delayed_prediction_candidate_clears_on_identity_switch() {
         return sample.result;
     };
 
-    AimResult result = step_selected(0.0f, "initial");
-    bool first_activation_seen = false;
-    for (int sample = 0; sample < 100 && !first_activation_seen; ++sample) {
-        result = step_selected(0.8f, "first lifecycle");
-        first_activation_seen = result.target.lead_active;
-    }
-    bool release_seen = false;
-    for (int sample = 0; sample < 80 && !release_seen; ++sample) {
-        result = step_selected(-2.0f, "reversal release");
-        release_seen = first_activation_seen && !result.target.lead_active;
-    }
-    result = step_selected(0.0f, "candidate reset one");
-    result = step_selected(0.0f, "candidate reset two");
+    DelayedPredictionReentrySetup setup =
+        prepare_delayed_prediction_reentry(step_selected);
+    AimResult result = std::move(setup.result);
     for (int sample = 0; sample < 9; ++sample) {
         result = step_selected(-2.0f, "partial candidate");
     }
     const std::uint64_t original_track_id = result.target.track_id;
-    expect(first_activation_seen && release_seen &&
+    expect(setup.first_activation_seen && setup.release_seen &&
                !result.target.lead_active,
            "identity switch 夹具必须从 A 的未满40ms delay candidate 开始");
 
@@ -5053,7 +5145,9 @@ void test_delayed_prediction_candidate_clears_on_identity_switch() {
 }
 
 void test_delayed_prediction_candidate_reset_matches_fresh_instance() {
-    PredictionTimingDriver reset_driver(false, true);
+    PredictionTimingDriver reset_driver(
+        PredictionTimingAxis::HORIZONTAL,
+        PredictionTimingDelay::ENABLED);
     std::uint64_t sequence = 1;
     double elapsed_seconds = 0.0;
     float position_x = 100.0f;
@@ -5067,29 +5161,21 @@ void test_delayed_prediction_candidate_reset_matches_fresh_instance() {
         return sample.result;
     };
 
-    AimResult result = step(0.0f, "initial");
-    bool first_activation_seen = false;
-    for (int sample = 0; sample < 100 && !first_activation_seen; ++sample) {
-        result = step(0.8f, "first lifecycle");
-        first_activation_seen = result.target.lead_active;
-    }
-    bool release_seen = false;
-    for (int sample = 0; sample < 80 && !release_seen; ++sample) {
-        result = step(-2.0f, "reversal release");
-        release_seen = first_activation_seen && !result.target.lead_active;
-    }
-    result = step(0.0f, "candidate reset one");
-    result = step(0.0f, "candidate reset two");
+    DelayedPredictionReentrySetup setup =
+        prepare_delayed_prediction_reentry(step);
+    AimResult result = std::move(setup.result);
     for (int sample = 0; sample < 4; ++sample) {
         result = step(-2.0f, "partial candidate");
     }
-    expect(first_activation_seen && release_seen &&
+    expect(setup.first_activation_seen && setup.release_seen &&
                !result.target.lead_active,
            "delay reset 夹具必须在未满40ms的候选中调用 Aim::reset");
 
     const auto reset_base = reset_driver.base + std::chrono::seconds(2);
     reset_driver.reset_epoch(reset_base);
-    PredictionTimingDriver fresh_driver(false, true);
+    PredictionTimingDriver fresh_driver(
+        PredictionTimingAxis::HORIZONTAL,
+        PredictionTimingDelay::ENABLED);
     fresh_driver.base = reset_base;
     sequence = 1;
     elapsed_seconds = 0.0;
