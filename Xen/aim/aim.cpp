@@ -4116,17 +4116,17 @@ struct Aim::Impl {
         const int independently_rounded_x =
             static_cast<int>(std::lround(shaped_x));
         float quantized_x = shaped_x;
-        const bool subcount_x_request =
+        const bool quantization_residual_eligible_x =
             frame.lock_active &&
             x_error_magnitude > config.deadzone_pixels &&
-            independently_rounded_x == 0 && std::fabs(shaped_x) > 0.001f;
-        if (subcount_x_request) {
+            std::fabs(shaped_x) > 0.001f;
+        if (quantization_residual_eligible_x) {
             diagnostics.residual_before_quantization_x_counts = residual_x;
             quantized_x += residual_x;
             command.dx_counts = static_cast<int>(std::lround(quantized_x));
-            // 最近整数残余可能与新一帧请求异号，但只要仍量化为零，它只是
-            // 对上一枚脉冲的时间平均补偿。只有它将生成反向整数命令时才
-            // 丢弃旧残余，并按当前亚计数请求从零重新累计。
+            // 最近整数残余可能与新一帧请求异号，但它只是在同一连续请求中
+            // 补回上一帧的舍入差。只有它将生成反向整数命令时才丢弃旧残余，
+            // 并按当前请求从零重新累计，避免跨过基础点后补发旧方向命令。
             if (command.dx_counts != 0 &&
                 command.dx_counts * shaped_x < 0.0f) {
                 residual_x = 0.0f;
@@ -4135,8 +4135,8 @@ struct Aim::Impl {
                 command.dx_counts = independently_rounded_x;
             }
         } else {
-            // 已能独立量化的请求完全沿用原命令；残余只补回原本会永久
-            // 停发的亚计数 X，不改变既有强请求、增益或单帧上限。
+            // 未按键、进入 deadzone 或浮点请求归零时立即清掉旧余数；后续
+            // 不得凭历史舍入差单独生成物理命令。
             residual_x = 0.0f;
             diagnostics.residual_before_quantization_x_counts = 0.0f;
             command.dx_counts = independently_rounded_x;
@@ -4148,7 +4148,7 @@ struct Aim::Impl {
             config.max_counts_per_frame);
         // 残余只表示最近整数舍入误差。若二维安全域收缩了 X，则不把
         // 执行器饱和差伪装成后续量化库存；Y 的候选和整数命令保持原样。
-        residual_x = subcount_x_request &&
+        residual_x = quantization_residual_eligible_x &&
                 command.dx_counts == quantized_command_x
             ? quantized_x - static_cast<float>(quantized_command_x)
             : 0.0f;

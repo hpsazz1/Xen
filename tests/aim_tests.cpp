@@ -4,6 +4,7 @@
 
 #include "aim_fixed_scene_replay_fixture.h"
 #include "aim_superjump_current_random_move_replay_fixture.h"
+#include "aim_superjump_quantization_lag_replay_fixture.h"
 #include "aim_latest_physical_replay_fixture.h"
 #include "aim_latest_static_replay_fixture.h"
 #include "aim_superjump_actual_game_replay_fixture.h"
@@ -6317,10 +6318,12 @@ void test_faster_closing_slope_continuously_reduces_tracking_request() {
 
     expect(stationary.valid_frames == kFrameCount &&
                faster_closing.valid_frames == kFrameCount &&
-               stationary.completed_frames == kFrameCount - 1 &&
-               faster_closing.completed_frames == kFrameCount - 1,
+               stationary.completed_frames > 0 &&
+               stationary.completed_frames ==
+                   faster_closing.completed_frames,
            "closing-slope 成对夹具必须逐帧保留同一公开目标、控制求值和"
-           "backend-completed 命令，帧/完成=" +
+           "相同且非空的 backend-completed 整数序列；误差反馈量化允许"
+           "浮点请求由间隔脉冲表示，帧/完成=" +
                std::to_string(stationary.valid_frames) + "/" +
                std::to_string(faster_closing.valid_frames) + "/" +
                std::to_string(stationary.completed_frames) + "/" +
@@ -6504,10 +6507,11 @@ void test_backend_completion_does_not_brake_closing_request() {
     const Sample rejected = run_case(false);
     expect(completed.valid_frames == kFrameCount &&
                rejected.valid_frames == kFrameCount &&
-               completed.completed_frames == kFrameCount - 1 &&
-               rejected.completed_frames == kFrameCount - 1,
+               completed.completed_frames > 0 &&
+               completed.completed_frames == rejected.completed_frames,
            "same-direction 成对夹具必须逐帧保留公开目标、控制求值和"
-           "backend completion，帧/完成=" +
+           "相同且非空的 backend completion 整数序列；误差反馈量化"
+           "允许浮点请求由间隔脉冲表示，帧/完成=" +
                std::to_string(completed.valid_frames) + "/" +
                std::to_string(rejected.valid_frames) + "/" +
                std::to_string(completed.completed_frames) + "/" +
@@ -7887,11 +7891,10 @@ void test_latest_random_move_tracking_x_uses_continuous_opening_evidence() {
                std::to_string(mismatch_zero_command_frames) + "/" +
                std::to_string(underweighted_controller_ms));
     expect(moderate_absolute_x_counts > 234 &&
-               opening_absolute_x_counts > 94 &&
-               opening_zero_command_frames <= 6,
+               opening_absolute_x_counts > 94,
            "追赶相位增强必须让同一实际回放的中等误差与 opening 帧"
-           "整数 X 总量高于 cubic 基线 234/94，且不得增加 opening"
-           "零帧。moderate/opening/zero=" +
+           "整数 X 总量高于 cubic 基线 234/94；单帧零命令由独立的"
+           "累计量化守恒合同约束。moderate/opening/zero=" +
                std::to_string(moderate_absolute_x_counts) + "/" +
                std::to_string(opening_absolute_x_counts) + "/" +
                std::to_string(opening_zero_command_frames));
@@ -8115,6 +8118,177 @@ void test_current_random_move_tracking_consumes_source_time_opening_phase() {
                std::to_string(opposite_x_commands) + "/" +
                std::to_string(command_contract_violations) + "/" +
                std::to_string(y_trace_signature));
+}
+
+void test_current_random_move_conserves_nonzero_x_quantization() {
+    using aim_superjump_quantization_lag_replay_fixture::kMeasurementStart;
+    using aim_superjump_quantization_lag_replay_fixture::kObservations;
+
+    AimConfig config;
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.10f;
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    Aim aim(config);
+
+    auto control_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    int measurement_frames = 0;
+    int opposite_error_x_frames = 0;
+    int opposite_command_x_frames = 0;
+    int saturated_request_frames = 0;
+    int command_contract_violations = 0;
+    float continuous_x_counts = 0.0f;
+    int integer_x_counts = 0;
+    float cumulative_quantization_gap = 0.0f;
+    float maximum_absolute_quantization_gap = 0.0f;
+    bool quantization_gap_initialized = false;
+    std::uint64_t y_trace_signature = 1469598103934665603ULL;
+
+    for (std::size_t index = 0; index < kObservations.size(); ++index) {
+        const auto& observation = kObservations[index];
+        if (index != 0) {
+            control_at += std::chrono::nanoseconds(
+                static_cast<long long>(observation.controller_dt_ms *
+                                       1000000.0f));
+        }
+        const auto captured_at = control_at - std::chrono::nanoseconds(
+            static_cast<long long>(observation.observation_age_ms *
+                                   1000000.0f));
+        AimFrame frame = make_frame(observation.source_sequence, captured_at);
+        frame.control_at = control_at;
+        frame.lock_active = true;
+        frame.detections = {{observation.x1,
+                             observation.y1,
+                             observation.x2,
+                             observation.y2,
+                             0.9f,
+                             0}};
+        if (observation.aim_from_head) {
+            const float center_x =
+                (observation.x1 + observation.x2) * 0.5f;
+            const float head_width =
+                (observation.x2 - observation.x1) * 0.5f;
+            frame.detections.push_back(head_box(
+                center_x, observation.y1 + 6.0f, head_width, 10.0f));
+        }
+
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "e58255d RandomMove 量化回放必须逐帧成功处理");
+        if (!result.has_target) continue;
+        expect_current_horizontal_base(
+            result, "e58255d RandomMove 量化回放");
+        if (result.has_command) {
+            expect(aim.record_backend_completed_command(
+                       frame.sequence,
+                       frame.control_at + std::chrono::microseconds(
+                           static_cast<long long>(
+                               observation.backend_completion_ms * 1000.0f)),
+                       result.command.dx_counts,
+                       result.command.dy_counts),
+                   "e58255d RandomMove 量化回放必须写回同序列完成命令");
+        }
+        if (index < kMeasurementStart) continue;
+
+        ++measurement_frames;
+        const float error_x =
+            (result.target.aim_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float error_y =
+            (result.target.aim_y - frame.control_center_y) *
+            frame.source_pixels_per_roi_pixel_y;
+        if (error_x <= 0.0f ||
+            result.control.shaped_x_counts <= 0.0f) {
+            ++opposite_error_x_frames;
+        }
+        if (result.command.dx_counts * error_x < 0.0f) {
+            ++opposite_command_x_frames;
+        }
+        if (std::fabs(result.control.desired_before_reverse_x_counts) >=
+            config.max_counts_per_frame - 0.001f) {
+            ++saturated_request_frames;
+        }
+        const float magnitude = std::hypot(
+            static_cast<float>(result.command.dx_counts),
+            static_cast<float>(result.command.dy_counts));
+        if (result.has_command &&
+            (result.command.dx_counts * error_x +
+                     result.command.dy_counts * error_y <=
+                 0.0f ||
+             magnitude > config.max_counts_per_frame + 0.001f)) {
+            ++command_contract_violations;
+        }
+
+        if (!quantization_gap_initialized) {
+            cumulative_quantization_gap =
+                result.control.residual_before_quantization_x_counts;
+            quantization_gap_initialized = true;
+        }
+        continuous_x_counts += result.control.shaped_x_counts;
+        integer_x_counts += result.command.dx_counts;
+        cumulative_quantization_gap +=
+            result.control.shaped_x_counts -
+            static_cast<float>(result.command.dx_counts);
+        maximum_absolute_quantization_gap = std::max(
+            maximum_absolute_quantization_gap,
+            std::fabs(cumulative_quantization_gap));
+
+        const auto base_y_millipixel = static_cast<std::int64_t>(
+            std::llround(result.target.base_aim_y * 1000.0f));
+        y_trace_signature ^= static_cast<std::uint64_t>(
+            base_y_millipixel + 1000000LL);
+        y_trace_signature *= 1099511628211ULL;
+        y_trace_signature ^= static_cast<std::uint64_t>(
+            result.command.dy_counts + 128);
+        y_trace_signature *= 1099511628211ULL;
+    }
+
+    std::cout << "e58255d sidecar 终段 X 量化守恒: 帧/浮点/整数/终差/最大差="
+              << measurement_frames << "/" << continuous_x_counts << "/"
+              << integer_x_counts << "/" << cumulative_quantization_gap
+              << "/" << maximum_absolute_quantization_gap
+              << "，非同向误差/反向命令/饱和/二维违规="
+              << opposite_error_x_frames << "/"
+              << opposite_command_x_frames << "/"
+              << saturated_request_frames << "/"
+              << command_contract_violations << "，Y签名="
+              << y_trace_signature << '\n';
+    expect(measurement_frames == 240 &&
+               opposite_error_x_frames == 0 &&
+               opposite_command_x_frames == 0 &&
+               saturated_request_frames == 0 &&
+               command_contract_violations == 0 &&
+               y_trace_signature == 10589705341803640821ULL,
+           "e58255d sidecar 终段必须先证明为持续同向、未饱和且满足二维"
+           "安全合同的 X 追赶段，并冻结已获人工稳定的 Y 逐帧签名，"
+           "帧/误差异号/命令反向/饱和/违规/Y=" +
+               std::to_string(measurement_frames) + "/" +
+               std::to_string(opposite_error_x_frames) + "/" +
+               std::to_string(opposite_command_x_frames) + "/" +
+               std::to_string(saturated_request_frames) + "/" +
+               std::to_string(command_contract_violations) + "/" +
+               std::to_string(y_trace_signature));
+    expect(std::fabs(cumulative_quantization_gap) <= 0.5001f &&
+               maximum_absolute_quantization_gap <= 0.5001f,
+           "持续同向且未饱和的 X 浮点请求必须跨非零整数命令守恒；累计"
+           "舍入差只能留在最近半个量化单位内，浮点/整数/终差/最大差=" +
+               std::to_string(continuous_x_counts) + "/" +
+               std::to_string(integer_x_counts) + "/" +
+               std::to_string(cumulative_quantization_gap) + "/" +
+               std::to_string(maximum_absolute_quantization_gap));
 }
 
 void test_actual_game_semantic_landmark_does_not_gain_base_x_phase() {
@@ -13734,6 +13908,7 @@ int main() {
     test_random_move_superjump_uses_available_x_integral_headroom();
     test_latest_random_move_tracking_x_uses_continuous_opening_evidence();
     test_current_random_move_tracking_consumes_source_time_opening_phase();
+    test_current_random_move_conserves_nonzero_x_quantization();
     test_actual_game_semantic_landmark_does_not_gain_base_x_phase();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
