@@ -3460,6 +3460,7 @@ void test_dynamic_control_range_does_not_reduce_observation() {
 
 constexpr std::array<double, 3> kPredictionTimingCadences{
     60.0, 120.0, 240.0};
+constexpr double kSubMillisecondPredictionTimingCadence = 2000.0;
 
 AimConfig prediction_timing_config(bool delay_enabled,
                                    float max_center_distance = 2.0f,
@@ -3624,38 +3625,6 @@ bool prediction_timing_axis_active(const AimResult& result,
                                    bool vertical) {
     return result.target.lead_active &&
         prediction_timing_axis_lead(result, vertical) > 0.001f;
-}
-
-bool prediction_timing_publicly_eligible(const AimResult& result,
-                                         const AimFrame& frame,
-                                         float deadzone_pixels) {
-    if (!result.has_target || result.target.predicted) return false;
-    const float error_x =
-        (result.target.base_aim_x - frame.control_center_x) *
-        frame.source_pixels_per_roi_pixel_x;
-    const float error_y =
-        (result.target.base_aim_y - frame.control_center_y) *
-        frame.source_pixels_per_roi_pixel_y;
-    const float velocity_x = result.target.velocity_x *
-        frame.source_pixels_per_roi_pixel_x;
-    const float velocity_y = result.target.velocity_y *
-        frame.source_pixels_per_roi_pixel_y;
-    const float velocity_magnitude = std::hypot(velocity_x, velocity_y);
-    if (velocity_magnitude <=
-        std::numeric_limits<float>::epsilon()) {
-        return false;
-    }
-    const float alignment = error_x * velocity_x + error_y * velocity_y;
-    const float longitudinal_error =
-        std::fabs(alignment) / velocity_magnitude;
-    const float box_diagonal = std::hypot(
-        (result.target.x2 - result.target.x1) *
-            frame.source_pixels_per_roi_pixel_x,
-        (result.target.y2 - result.target.y1) *
-            frame.source_pixels_per_roi_pixel_y);
-    const float enter_distance = std::max(
-        deadzone_pixels * 2.0f, box_diagonal * 0.12f);
-    return alignment > 0.0f && longitudinal_error >= enter_distance;
 }
 
 float prediction_timing_linear_transition(double elapsed_seconds,
@@ -3912,7 +3881,7 @@ void test_delayed_prediction_reentry_uses_elapsed_time() {
             // 两段运动起点在每个 cadence 都同相位；首次资格样本自身不累计
             // dt，public rising 还会跨过一次轨迹/观察器采样相位，因此总共
             // 只容纳两个本地 sample；240 Hz 的下界能杀死30ms early
-            // mutation。40ms与50ms的精度由 F5 直接锚定 eligibility 判定。
+            // mutation。40ms与50ms的精度由 F5 的明确输入事件直接锚定。
             expect(reentry_delta >=
                        kReentrySeconds - 2.0 * sample_seconds - 0.001 &&
                        reentry_delta <=
@@ -3931,6 +3900,57 @@ void test_delayed_prediction_reentry_uses_elapsed_time() {
                    " 第二次相对首次的40ms事件在60/120/240Hz间只能相差一个最慢sample，跨度=" +
                    std::to_string(reentry_delta_max - reentry_delta_min));
     }
+}
+
+void test_no_delay_prediction_reentry_uses_submillisecond_capture_time() {
+    PredictionTimingDriver driver(false, false);
+    std::uint64_t sequence = 1;
+    double elapsed_seconds = 0.0;
+    float position_x = 140.0f;
+    constexpr float kPositionY = 160.0f;
+    const auto step = [&](float delta_x, float axis_error,
+                          double delta_seconds,
+                          const std::string& phase) {
+        position_x += delta_x;
+        const PredictionTimingPublicSample sample = driver.process(
+            sequence++, elapsed_seconds, position_x, axis_error,
+            "submillisecond no-delay " + phase, kPositionY, 0.0f);
+        elapsed_seconds += delta_seconds;
+        return sample.result;
+    };
+
+    AimResult result = step(0.0f, 0.0f, 0.010, "initial");
+    bool first_activation_seen = false;
+    for (int sample = 0; sample < 100 && !first_activation_seen; ++sample) {
+        result = step(0.2f, 18.0f, 0.010, "first lifecycle");
+        first_activation_seen = result.target.lead_active;
+    }
+    bool release_seen = false;
+    for (int sample = 0; sample < 20; ++sample) {
+        result = step(0.2f, 0.0f, 0.010, "centered rearm");
+        release_seen = release_seen ||
+            (first_activation_seen && !result.target.lead_active);
+    }
+    expect(first_activation_seen && release_seen &&
+               !result.target.lead_active,
+           "submillisecond no-delay 夹具必须先完成公开 activation/release/centered rearm");
+
+    bool activated_before_35_ms = false;
+    for (int sample = 0; sample < 70; ++sample) {
+        result = step(0.01f, 18.0f, 0.0005, "0.5ms guard");
+        activated_before_35_ms = activated_before_35_ms ||
+            result.target.lead_active;
+    }
+    expect(!activated_before_35_ms,
+           "0.5ms captured_at 样本累计35ms真实时间不得完成40ms no-delay 重入");
+
+    bool activated_after_40_ms = false;
+    for (int sample = 0; sample < 40 && !activated_after_40_ms; ++sample) {
+        result = step(0.01f, 18.0f, 0.0005, "0.5ms completion");
+        activated_after_40_ms = result.target.lead_active;
+    }
+    expect(activated_after_40_ms,
+           "0.5ms captured_at 样本连续超过40ms后必须能够完成 no-delay 重入");
 }
 
 void test_no_delay_prediction_rearm_uses_elapsed_time() {
@@ -4114,14 +4134,49 @@ void test_no_delay_prediction_rearm_uses_elapsed_time() {
                        std::to_string(loss_second_built) + "/" +
                        std::to_string(loss_rising_edges));
         }
+        constexpr double kBeforeRearmBoundarySeconds = 0.049;
+        constexpr double kAfterRearmBoundarySeconds = 0.051;
+        const Trace before_boundary = run_case(
+            vertical, kSubMillisecondPredictionTimingCadence,
+            kBeforeRearmBoundarySeconds);
+        const Trace after_boundary = run_case(
+            vertical, kSubMillisecondPredictionTimingCadence,
+            kAfterRearmBoundarySeconds);
+        expect(before_boundary.first_built &&
+                   before_boundary.released_before_centered &&
+                   !before_boundary.active_during_centered &&
+                   !before_boundary.second_built &&
+                   before_boundary.rising_edges == 1,
+               std::string("F4 no-delay ") +
+                   (vertical ? "Y" : "X") +
+                   "@2000 的49ms centered 真实窗不得完成50ms重武装，first/release/center/second/edges=" +
+                   std::to_string(before_boundary.first_built) + "/" +
+                   std::to_string(
+                       before_boundary.released_before_centered) + "/" +
+                   std::to_string(before_boundary.active_during_centered) +
+                   "/" + std::to_string(before_boundary.second_built) +
+                   "/" + std::to_string(before_boundary.rising_edges));
+        expect(after_boundary.first_built &&
+                   after_boundary.released_before_centered &&
+                   !after_boundary.active_during_centered &&
+                   after_boundary.second_built &&
+                   after_boundary.rising_edges == 2,
+               std::string("F4 no-delay ") +
+                   (vertical ? "Y" : "X") +
+                   "@2000 的51ms centered 真实窗必须完成50ms重武装，first/release/center/second/edges=" +
+                   std::to_string(after_boundary.first_built) + "/" +
+                   std::to_string(
+                       after_boundary.released_before_centered) + "/" +
+                   std::to_string(after_boundary.active_during_centered) +
+                   "/" + std::to_string(after_boundary.second_built) +
+                   "/" + std::to_string(after_boundary.rising_edges));
     }
 }
 
 void test_no_delay_prediction_reentry_uses_elapsed_time() {
     constexpr double kFirstHoldEndSeconds = 0.55;
     constexpr double kCenteredStartSeconds = 0.60;
-    constexpr double kSecondRampStartSeconds = 0.72;
-    constexpr double kSecondRampEndSeconds = 0.77;
+    constexpr double kSecondCandidateStartSeconds = 0.72;
     constexpr double kTraceEndSeconds = 0.94;
     constexpr double kReentrySeconds = 0.040;
     constexpr double kSlowestSampleSeconds =
@@ -4130,14 +4185,13 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
     constexpr float kEnteredErrorPixels = 18.0f;
 
     struct Trace {
-        double first_eligibility_seconds = -1.0;
         double first_activation_seconds = -1.0;
-        double second_eligibility_seconds = -1.0;
+        double second_candidate_event_seconds = -1.0;
         double second_activation_seconds = -1.0;
         int rising_edges = 0;
         bool released_before_second = false;
         bool active_during_centered = false;
-        bool reset_first_immediate = false;
+        bool reset_first_activation_seen = false;
     };
 
     const auto run_case = [&](bool vertical, double cadence) {
@@ -4148,11 +4202,8 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
         const auto error_at = [](double elapsed_seconds) {
             float error_pixels = prediction_timing_first_lifecycle_error(
                 elapsed_seconds, kFirstHoldEndSeconds);
-            if (elapsed_seconds >= kSecondRampStartSeconds) {
-                error_pixels = prediction_timing_linear_transition(
-                    elapsed_seconds, kSecondRampStartSeconds,
-                    kSecondRampEndSeconds, 0.0f,
-                    kEnteredErrorPixels);
+            if (elapsed_seconds >= kSecondCandidateStartSeconds) {
+                error_pixels = kEnteredErrorPixels;
             }
             return error_pixels;
         };
@@ -4169,27 +4220,18 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
             const PredictionTimingPublicSample public_sample = driver.process(
                 static_cast<std::uint64_t>(sample + 1),
                 elapsed_seconds, axis_position, error_pixels, context);
-            const AimFrame& frame = public_sample.frame;
             const AimResult& result = public_sample.result;
             if (!result.has_target) return;
 
-            const bool eligible = prediction_timing_publicly_eligible(
-                result, frame, driver.config.deadzone_pixels);
-            if (eligible &&
-                elapsed_seconds < kSecondRampStartSeconds &&
-                trace.first_eligibility_seconds < 0.0) {
-                trace.first_eligibility_seconds = elapsed_seconds;
-            }
-            if (eligible &&
-                elapsed_seconds >= kSecondRampStartSeconds &&
-                trace.second_eligibility_seconds < 0.0) {
-                trace.second_eligibility_seconds = elapsed_seconds;
+            if (elapsed_seconds >= kSecondCandidateStartSeconds &&
+                trace.second_candidate_event_seconds < 0.0) {
+                trace.second_candidate_event_seconds = elapsed_seconds;
             }
             const bool axis_active =
                 prediction_timing_axis_active(result, vertical);
             if (axis_active && !previous_axis_active) {
                 ++trace.rising_edges;
-                if (elapsed_seconds < kSecondRampStartSeconds) {
+                if (elapsed_seconds < kSecondCandidateStartSeconds) {
                     if (trace.first_activation_seconds < 0.0) {
                         trace.first_activation_seconds = elapsed_seconds;
                     }
@@ -4198,12 +4240,12 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
                 }
             }
             if (trace.first_activation_seconds >= 0.0 &&
-                elapsed_seconds < kSecondRampStartSeconds &&
+                elapsed_seconds < kSecondCandidateStartSeconds &&
                 !axis_active) {
                 trace.released_before_second = true;
             }
             if (elapsed_seconds >= kCenteredStartSeconds &&
-                elapsed_seconds < kSecondRampStartSeconds &&
+                elapsed_seconds < kSecondCandidateStartSeconds &&
                 axis_active) {
                 trace.active_during_centered = true;
             }
@@ -4222,9 +4264,10 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
             driver.base = reset_base + std::chrono::milliseconds(1);
             const int reset_sample_count = static_cast<int>(
                 std::ceil(0.54 * cadence));
-            bool reset_eligibility_seen = false;
+            bool reset_observation_seen = false;
             for (int sample = 0;
-                 sample <= reset_sample_count && !reset_eligibility_seen;
+                 sample <= reset_sample_count &&
+                     !trace.reset_first_activation_seen;
                  ++sample) {
                 const double elapsed_seconds =
                     static_cast<double>(sample) / cadence;
@@ -4237,18 +4280,15 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
                     elapsed_seconds, axis_position, error_pixels,
                     "F5 no-delay reset@120");
                 const AimResult& result = public_sample.result;
-                if (!prediction_timing_publicly_eligible(
-                        result, public_sample.frame,
-                        driver.config.deadzone_pixels)) {
-                    continue;
+                if (result.target.lead_active &&
+                    result.target.lead_x > 0.001f) {
+                    trace.reset_first_activation_seen = true;
                 }
-                reset_eligibility_seen = true;
-                trace.reset_first_immediate =
-                    result.target.lead_active &&
-                    result.target.lead_x > 0.001f;
+                reset_observation_seen =
+                    reset_observation_seen || result.has_target;
             }
-            expect(reset_eligibility_seen,
-                   "F5 no-delay reset@120 必须再次形成公开 eligibility");
+            expect(reset_observation_seen,
+                   "F5 no-delay reset@120 必须重新形成公开观察生命周期");
         }
         return trace;
     };
@@ -4261,41 +4301,40 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
             const std::string context =
                 std::string(vertical ? "Y" : "X") + "@" +
                 std::to_string(static_cast<int>(cadence));
-            expect(trace.first_eligibility_seconds >= 0.0 &&
-                       trace.first_activation_seconds ==
-                           trace.first_eligibility_seconds,
+            expect(trace.first_activation_seconds >= 0.0 &&
+                       trace.first_activation_seconds <
+                           kFirstHoldEndSeconds,
                    "F5 no-delay " + context +
-                       " 首次 public eligibility 样本必须立即激活，eligible/active=" +
-                       std::to_string(trace.first_eligibility_seconds) + "/" +
+                       " 首次输入生命周期必须公开激活，active=" +
                        std::to_string(trace.first_activation_seconds));
             expect(trace.released_before_second &&
                        !trace.active_during_centered,
                    "F5 no-delay " + context +
                        " 二次进入前必须完成 public release 与 centered 重武装");
-            expect(trace.second_eligibility_seconds >= 0.0 &&
+            expect(trace.second_candidate_event_seconds >= 0.0 &&
                        trace.second_activation_seconds >= 0.0 &&
                        trace.rising_edges == 2,
                    "F5 no-delay " + context +
-                       " 必须观察两次且仅两次 public rising，eligible/active/edges=" +
-                       std::to_string(trace.second_eligibility_seconds) + "/" +
+                       " 必须观察两次且仅两次 public rising，event/active/edges=" +
+                       std::to_string(trace.second_candidate_event_seconds) + "/" +
                        std::to_string(trace.second_activation_seconds) + "/" +
                        std::to_string(trace.rising_edges));
             const double reentry_seconds =
                 trace.second_activation_seconds -
-                trace.second_eligibility_seconds;
+                trace.second_candidate_event_seconds;
             const double sample_seconds = 1.0 / cadence;
             expect(reentry_seconds + 0.000001 >= kReentrySeconds &&
                        reentry_seconds <=
                            kReentrySeconds +
                                sample_seconds + 0.001,
                    "F5 no-delay " + context +
-                       " 二次 eligibility 后只应等待40ms，实际=" +
+                       " 二次明确输入事件后只应等待40ms，实际=" +
                        std::to_string(reentry_seconds));
             reentry_min = std::min(reentry_min, reentry_seconds);
             reentry_max = std::max(reentry_max, reentry_seconds);
             if (!vertical && std::fabs(cadence - 120.0) < 0.001) {
-                expect(trace.reset_first_immediate,
-                       "F5 no-delay Aim::reset 后首次 eligibility 必须恢复立即激活");
+                expect(trace.reset_first_activation_seen,
+                       "F5 no-delay Aim::reset 后必须恢复全新的首次公开激活");
             }
         }
         expect(reentry_max - reentry_min <=
@@ -4331,7 +4370,7 @@ void test_no_delay_prediction_precomputes_while_unlocked() {
                 vertical, false, 2.0f, true);
             bool first_active_seen = false;
             bool release_seen_while_unlocked = false;
-            bool unlocked_eligibility_seen = false;
+            bool unlocked_candidate_event_seen = false;
             bool unlocked_lead_seen = false;
             bool unlocked_control_seen = false;
             bool unlocked_command_seen = false;
@@ -4369,12 +4408,10 @@ void test_no_delay_prediction_precomputes_while_unlocked() {
                     elapsed_seconds < kSecondRampStartSeconds) {
                     release_seen_while_unlocked = true;
                 }
-                const bool eligible = prediction_timing_publicly_eligible(
-                    result, public_sample.frame,
-                    driver.config.deadzone_pixels);
                 if (!lock_active &&
-                    elapsed_seconds >= kSecondRampStartSeconds && eligible) {
-                    unlocked_eligibility_seen = true;
+                    elapsed_seconds >= kSecondRampStartSeconds &&
+                    result.has_target && !result.target.predicted) {
+                    unlocked_candidate_event_seen = true;
                     unlocked_lead_seen = unlocked_lead_seen || axis_active;
                     unlocked_control_seen = unlocked_control_seen ||
                         result.control.evaluated;
@@ -4392,14 +4429,14 @@ void test_no_delay_prediction_precomputes_while_unlocked() {
             });
 
             expect(first_active_seen && release_seen_while_unlocked &&
-                       unlocked_eligibility_seen && unlocked_lead_seen &&
+                       unlocked_candidate_event_seen && unlocked_lead_seen &&
                        unlocked_control_seen && unlocked_command_seen &&
                        relock_seen && relock_continuous,
                    context +
-                       " 解锁期间必须继续同一Track的centered/candidate/lead/control/command预计算，重锁首帧直接延续，first/release/eligible/lead/control/cmd/relock=" +
+                       " 解锁期间必须继续同一Track的centered/candidate/lead/control/command预计算，重锁首帧直接延续，first/release/event/lead/control/cmd/relock=" +
                        std::to_string(first_active_seen) + "/" +
                        std::to_string(release_seen_while_unlocked) + "/" +
-                       std::to_string(unlocked_eligibility_seen) + "/" +
+                       std::to_string(unlocked_candidate_event_seen) + "/" +
                        std::to_string(unlocked_lead_seen) + "/" +
                        std::to_string(unlocked_control_seen) + "/" +
                        std::to_string(unlocked_command_seen) + "/" +
@@ -4412,8 +4449,8 @@ void test_prediction_reentry_requires_one_continuous_direction() {
     constexpr double kReentrySeconds = 0.040;
 
     struct NoDelayDirectionTrace {
-        bool positive_eligible_seen = false;
-        bool negative_eligible_seen = false;
+        bool positive_motion_seen = false;
+        bool negative_motion_seen = false;
         bool orthogonal_positive_seen = false;
         bool orthogonal_negative_seen = false;
         bool active_before_negative_dwell = false;
@@ -4449,7 +4486,7 @@ void test_prediction_reentry_requires_one_continuous_direction() {
         PredictionTimingDriver driver(vertical, false);
         NoDelayDirectionTrace trace;
         bool previous_active = false;
-        double first_negative_eligible_seconds = -1.0;
+        double first_negative_motion_seconds = -1.0;
         for_each_prediction_timing_sample(
             cadence, kTraceEndSeconds,
             [&](int sample, double elapsed_seconds) {
@@ -4475,23 +4512,20 @@ void test_prediction_reentry_requires_one_continuous_direction() {
                 axis_position_at(elapsed_seconds), error_pixels, context,
                 orthogonal_position_at(elapsed_seconds));
             const AimResult& result = public_sample.result;
-            const bool eligible = prediction_timing_publicly_eligible(
-                result, public_sample.frame,
-                driver.config.deadzone_pixels);
             const float axis_velocity = vertical
                 ? result.target.velocity_y : result.target.velocity_x;
             const float orthogonal_velocity = vertical
                 ? result.target.velocity_x : result.target.velocity_y;
-            if (elapsed_seconds >= kSecondCandidateStartSeconds && eligible) {
-                trace.positive_eligible_seen =
-                    trace.positive_eligible_seen ||
+            if (elapsed_seconds >= kSecondCandidateStartSeconds) {
+                trace.positive_motion_seen =
+                    trace.positive_motion_seen ||
                     axis_velocity > 0.001f;
-                trace.negative_eligible_seen =
-                    trace.negative_eligible_seen ||
+                trace.negative_motion_seen =
+                    trace.negative_motion_seen ||
                     axis_velocity < -0.001f;
                 if (axis_velocity < -0.001f &&
-                    first_negative_eligible_seconds < 0.0) {
-                    first_negative_eligible_seconds = elapsed_seconds;
+                    first_negative_motion_seconds < 0.0) {
+                    first_negative_motion_seconds = elapsed_seconds;
                 }
                 trace.orthogonal_positive_seen =
                     trace.orthogonal_positive_seen ||
@@ -4511,10 +4545,10 @@ void test_prediction_reentry_requires_one_continuous_direction() {
                         prediction_timing_axis_lead(result, vertical);
                 }
             }
-            if (active && first_negative_eligible_seconds >= 0.0 &&
-                elapsed_seconds >= first_negative_eligible_seconds &&
+            if (active && first_negative_motion_seconds >= 0.0 &&
+                elapsed_seconds >= first_negative_motion_seconds &&
                 elapsed_seconds + 0.000001 <
-                    first_negative_eligible_seconds + kReentrySeconds) {
+                    first_negative_motion_seconds + kReentrySeconds) {
                 trace.active_before_negative_dwell = true;
             }
             previous_active = active;
@@ -4695,8 +4729,8 @@ void test_prediction_reentry_requires_one_continuous_direction() {
                 std::to_string(static_cast<int>(cadence));
             const NoDelayDirectionTrace no_delay_trace =
                 run_no_delay_case(vertical, cadence);
-            expect(no_delay_trace.positive_eligible_seen &&
-                       no_delay_trace.negative_eligible_seen &&
+            expect(no_delay_trace.positive_motion_seen &&
+                       no_delay_trace.negative_motion_seen &&
                        no_delay_trace.orthogonal_positive_seen &&
                        no_delay_trace.orthogonal_negative_seen &&
                        !no_delay_trace.active_before_negative_dwell &&
@@ -4705,10 +4739,10 @@ void test_prediction_reentry_requires_one_continuous_direction() {
                        no_delay_trace.second_activation_lead < -0.001f,
                    "direction no-delay " + context +
                        " 正/反候选不得拼接，pos/neg/orth+/orth-/early/edges/at/lead=" +
+                        std::to_string(
+                           no_delay_trace.positive_motion_seen) + "/" +
                        std::to_string(
-                           no_delay_trace.positive_eligible_seen) + "/" +
-                       std::to_string(
-                           no_delay_trace.negative_eligible_seen) + "/" +
+                           no_delay_trace.negative_motion_seen) + "/" +
                        std::to_string(
                            no_delay_trace.orthogonal_positive_seen) + "/" +
                        std::to_string(
@@ -4754,6 +4788,336 @@ void test_prediction_reentry_requires_one_continuous_direction() {
                        std::to_string(
                            delay_trace.final_activation_seconds));
         }
+    }
+}
+
+void test_delayed_prediction_reentry_keeps_one_axis_witness() {
+    PredictionTimingDriver driver(false, true);
+    std::uint64_t sequence = 1;
+    double elapsed_seconds = 0.0;
+    float position_x = 100.0f;
+    float position_y = 120.0f;
+    const auto step = [&](float delta_x, float delta_y,
+                          const std::string& phase) {
+        position_x += delta_x;
+        position_y += delta_y;
+        const PredictionTimingPublicSample sample = driver.process(
+            sequence++, elapsed_seconds, position_x, 0.0f,
+            "axis witness " + phase, position_y, 0.0f);
+        elapsed_seconds += 0.010;
+        return sample.result;
+    };
+
+    AimResult result = step(0.0f, 0.0f, "initial");
+    bool first_activation_seen = false;
+    for (int sample = 0; sample < 100 && !first_activation_seen; ++sample) {
+        result = step(0.8f, 0.8f, "first diagonal lifecycle");
+        first_activation_seen = result.target.lead_active;
+    }
+
+    bool release_seen = false;
+    for (int sample = 0; sample < 80 && !release_seen; ++sample) {
+        result = step(0.0f, 0.0f, "stationary release");
+        release_seen = first_activation_seen && !result.target.lead_active;
+    }
+    expect(first_activation_seen && release_seen,
+           "axis witness 夹具必须先完成一次公开 activation/release，activation/release=" +
+               std::to_string(first_activation_seen) + "/" +
+               std::to_string(release_seen));
+
+    // 静止释放先排除既有反向 pullback hold。对角运动只用于重新建立两轴
+    // 世界状态；尚未完成40ms重入时再用零位移样本清除部分候选。
+    for (int sample = 0; sample < 6; ++sample) {
+        result = step(2.0f, 2.0f, "diagonal rewarm");
+        expect(!result.target.lead_active,
+               "axis witness 的对角重热阶段不得提前完成40ms重入");
+    }
+    // projection 消费上一控制周期缓存的世界运动测量；两个零位移样本让
+    // Directional dwell 看到明确中断，再从 X-only 事件开始新候选。
+    result = step(0.0f, 0.0f, "candidate reset one");
+    result = step(0.0f, 0.0f, "candidate reset two");
+    expect(!result.target.lead_active,
+           "axis witness 新候选开始前必须保持公开 lead 关闭");
+
+    for (int sample = 0; sample < 3; ++sample) {
+        result = step(2.0f, 0.0f, "X only");
+        expect(!result.target.lead_active,
+               "axis witness 的 X-only 未满40ms时不得重入");
+    }
+    result = step(2.0f, 2.0f, "XY bridge");
+    expect(!result.target.lead_active,
+           "axis witness 的 XY 桥接样本不得单独完成重入");
+    result = step(0.0f, 2.0f, "Y only one");
+    expect(!result.target.lead_active,
+           "axis witness 切到 Y-only 后仍不得继承 X 时间");
+    result = step(0.0f, 2.0f, "Y only two");
+    const bool activated_by_axis_bridge = result.target.lead_active;
+    expect(!activated_by_axis_bridge,
+           "X→XY→Y 总链超过40ms、但没有单一轴持续40ms时不得重入，lead_x/lead_y=" +
+               std::to_string(result.target.lead_x) + "/" +
+               std::to_string(result.target.lead_y));
+
+    result = step(0.0f, 2.0f, "Y bridge guard");
+    expect(!result.target.lead_active,
+           "X→XY→Y 的相邻轴桥接达到总链时长后仍不得重入，lead_x/lead_y=" +
+               std::to_string(result.target.lead_x) + "/" +
+               std::to_string(result.target.lead_y));
+
+    bool continuous_y_activation_seen = false;
+    for (int sample = 0; sample < 20 && !continuous_y_activation_seen;
+         ++sample) {
+        result = step(0.0f, 2.0f, "continuous Y completion");
+        continuous_y_activation_seen = result.target.lead_active &&
+            std::fabs(result.target.lead_y) > 0.001f;
+    }
+    expect(continuous_y_activation_seen,
+           "轴身份重置后，新的 Y-only 候选连续满40ms必须能够公开重入");
+}
+
+void test_delayed_prediction_candidate_clears_on_predicted_loss() {
+    constexpr float kPositionY = 160.0f;
+    struct Trace {
+        int activation_sample = -1;
+        bool first_activation_seen = false;
+        bool release_seen = false;
+        bool loss_contract_seen = false;
+    };
+
+    const auto run_case = [&](int loss_sample) {
+        PredictionTimingDriver driver(false, true);
+        std::uint64_t sequence = 1;
+        double elapsed_seconds = 0.0;
+        float position_x = 100.0f;
+        const auto step = [&](float delta_x, const std::string& phase) {
+            position_x += delta_x;
+            const PredictionTimingPublicSample sample = driver.process(
+                sequence++, elapsed_seconds, position_x, 0.0f,
+                "delay loss " + phase, kPositionY, 0.0f);
+            elapsed_seconds += 0.010;
+            return sample.result;
+        };
+
+        Trace trace;
+        AimResult result = step(0.0f, "initial");
+        for (int sample = 0;
+             sample < 100 && !trace.first_activation_seen; ++sample) {
+            result = step(0.8f, "first lifecycle");
+            trace.first_activation_seen = result.target.lead_active;
+        }
+        for (int sample = 0; sample < 80 && !trace.release_seen; ++sample) {
+            result = step(-2.0f, "reversal release");
+            trace.release_seen = trace.first_activation_seen &&
+                !result.target.lead_active;
+        }
+        result = step(0.0f, "candidate reset one");
+        result = step(0.0f, "candidate reset two");
+        const std::uint64_t original_track_id = result.target.track_id;
+
+        for (int sample = 0; sample < 30; ++sample) {
+            position_x -= 2.0f;
+            if (sample == loss_sample) {
+                const PredictionTimingPublicSample lost =
+                    driver.process_missing(
+                        sequence++, elapsed_seconds, position_x, 0.0f,
+                        "delay loss interruption");
+                result = lost.result;
+                trace.loss_contract_seen =
+                    result.has_target &&
+                    result.target.track_id == original_track_id &&
+                    result.target.predicted &&
+                    !result.target.lead_active;
+            } else {
+                const PredictionTimingPublicSample observed = driver.process(
+                    sequence++, elapsed_seconds, position_x, 0.0f,
+                    "delay loss candidate", kPositionY, 0.0f);
+                result = observed.result;
+            }
+            elapsed_seconds += 0.010;
+            if (trace.activation_sample < 0 && result.has_target &&
+                result.target.lead_active) {
+                trace.activation_sample = sample;
+            }
+        }
+        return trace;
+    };
+
+    const Trace baseline = run_case(-1);
+    expect(baseline.first_activation_seen && baseline.release_seen &&
+               baseline.activation_sample >= 2,
+           "delay loss 无中断基准必须完成 activation/release/reentry，activation=" +
+               std::to_string(baseline.activation_sample));
+    const int loss_sample = std::max(1, baseline.activation_sample - 1);
+    const Trace interrupted = run_case(loss_sample);
+    expect(interrupted.first_activation_seen && interrupted.release_seen &&
+               interrupted.loss_contract_seen,
+           "delay candidate 边界前的短时 loss 必须保留 Track identity、公开 predicted 且关闭 lead");
+    expect(interrupted.activation_sample >= loss_sample + 5,
+           "predicted loss 后恢复真实观察必须重新等待完整40ms，不得继承中断前候选，baseline/loss/restored=" +
+               std::to_string(baseline.activation_sample) + "/" +
+               std::to_string(loss_sample) + "/" +
+               std::to_string(interrupted.activation_sample));
+}
+
+void test_delayed_prediction_candidate_clears_on_identity_switch() {
+    PredictionTimingDriver driver(false, true);
+    std::uint64_t sequence = 1;
+    double elapsed_seconds = 0.0;
+    float selected_position_x = 100.0f;
+    constexpr float kPositionY = 160.0f;
+    const auto step_selected = [&](float delta_x,
+                                   const std::string& phase) {
+        selected_position_x += delta_x;
+        const PredictionTimingPublicSample sample = driver.process(
+            sequence++, elapsed_seconds, selected_position_x, 0.0f,
+            "identity switch " + phase, kPositionY, 0.0f);
+        elapsed_seconds += 0.010;
+        return sample.result;
+    };
+
+    AimResult result = step_selected(0.0f, "initial");
+    bool first_activation_seen = false;
+    for (int sample = 0; sample < 100 && !first_activation_seen; ++sample) {
+        result = step_selected(0.8f, "first lifecycle");
+        first_activation_seen = result.target.lead_active;
+    }
+    bool release_seen = false;
+    for (int sample = 0; sample < 80 && !release_seen; ++sample) {
+        result = step_selected(-2.0f, "reversal release");
+        release_seen = first_activation_seen && !result.target.lead_active;
+    }
+    result = step_selected(0.0f, "candidate reset one");
+    result = step_selected(0.0f, "candidate reset two");
+    for (int sample = 0; sample < 9; ++sample) {
+        result = step_selected(-2.0f, "partial candidate");
+    }
+    const std::uint64_t original_track_id = result.target.track_id;
+    expect(first_activation_seen && release_seen &&
+               !result.target.lead_active,
+           "identity switch 夹具必须从 A 的未满40ms delay candidate 开始");
+
+    Aim fresh(driver.config);
+    float distinct_position_x = 220.0f;
+    bool identity_switched = false;
+    bool differs_from_fresh_lifecycle = false;
+    int switch_sample = -1;
+    for (int sample = 0; sample < 8; ++sample) {
+        selected_position_x -= 2.0f;
+        distinct_position_x -= 2.0f;
+        AimFrame switched_frame = make_frame(
+            sequence,
+            driver.base + std::chrono::microseconds(
+                static_cast<long long>(
+                    std::llround(elapsed_seconds * 1000000.0))));
+        switched_frame.control_at = switched_frame.captured_at +
+            std::chrono::milliseconds(1);
+        switched_frame.control_center_x = distinct_position_x;
+        switched_frame.control_center_y = kPositionY;
+        switched_frame.lock_active = true;
+        switched_frame.detections = {
+            body_box(selected_position_x, kPositionY, 40.0f, 80.0f),
+            body_box(distinct_position_x, kPositionY, 40.0f, 80.0f)};
+        const AimResult switched_result = driver.aim.process(switched_frame);
+
+        AimFrame fresh_frame = switched_frame;
+        fresh_frame.detections = {
+            body_box(distinct_position_x, kPositionY, 40.0f, 80.0f)};
+        const AimResult fresh_result = fresh.process(fresh_frame);
+        expect(switched_result.status == AimStatus::SUCCESS &&
+                   switched_result.has_target &&
+                   fresh_result.status == AimStatus::SUCCESS &&
+                   fresh_result.has_target,
+               "identity switch 双目标与独立 B 对照必须逐帧命中 Aim::process");
+        if (switched_result.target.track_id != original_track_id) {
+            if (!identity_switched) switch_sample = sample;
+            identity_switched = true;
+            differs_from_fresh_lifecycle =
+                differs_from_fresh_lifecycle ||
+                switched_result.target.predicted !=
+                    fresh_result.target.predicted ||
+                switched_result.target.lead_active !=
+                    fresh_result.target.lead_active ||
+                std::fabs(switched_result.target.lead_x -
+                          fresh_result.target.lead_x) > 0.000001f ||
+                std::fabs(switched_result.target.lead_y -
+                          fresh_result.target.lead_y) > 0.000001f;
+        }
+        ++sequence;
+        elapsed_seconds += 0.010;
+    }
+    expect(identity_switched && switch_sample >= 0 &&
+               !differs_from_fresh_lifecycle,
+           "真实 Track identity switch 后必须与只接收 B 的全新实例共享公开 prediction 生命周期，switched/sample/diff=" +
+               std::to_string(identity_switched) + "/" +
+               std::to_string(switch_sample) + "/" +
+               std::to_string(differs_from_fresh_lifecycle));
+}
+
+void test_delayed_prediction_candidate_reset_matches_fresh_instance() {
+    PredictionTimingDriver reset_driver(false, true);
+    std::uint64_t sequence = 1;
+    double elapsed_seconds = 0.0;
+    float position_x = 100.0f;
+    constexpr float kPositionY = 160.0f;
+    const auto step = [&](float delta_x, const std::string& phase) {
+        position_x += delta_x;
+        const PredictionTimingPublicSample sample = reset_driver.process(
+            sequence++, elapsed_seconds, position_x, 0.0f,
+            "delay reset " + phase, kPositionY, 0.0f);
+        elapsed_seconds += 0.010;
+        return sample.result;
+    };
+
+    AimResult result = step(0.0f, "initial");
+    bool first_activation_seen = false;
+    for (int sample = 0; sample < 100 && !first_activation_seen; ++sample) {
+        result = step(0.8f, "first lifecycle");
+        first_activation_seen = result.target.lead_active;
+    }
+    bool release_seen = false;
+    for (int sample = 0; sample < 80 && !release_seen; ++sample) {
+        result = step(-2.0f, "reversal release");
+        release_seen = first_activation_seen && !result.target.lead_active;
+    }
+    result = step(0.0f, "candidate reset one");
+    result = step(0.0f, "candidate reset two");
+    for (int sample = 0; sample < 4; ++sample) {
+        result = step(-2.0f, "partial candidate");
+    }
+    expect(first_activation_seen && release_seen &&
+               !result.target.lead_active,
+           "delay reset 夹具必须在未满40ms的候选中调用 Aim::reset");
+
+    const auto reset_base = reset_driver.base + std::chrono::seconds(2);
+    reset_driver.reset_epoch(reset_base);
+    PredictionTimingDriver fresh_driver(false, true);
+    fresh_driver.base = reset_base;
+    sequence = 1;
+    elapsed_seconds = 0.0;
+    position_x = 100.0f;
+    for (int sample = 0; sample < 80; ++sample) {
+        position_x += 0.8f;
+        const PredictionTimingPublicSample after_reset =
+            reset_driver.process(
+                sequence, elapsed_seconds, position_x, 0.0f,
+                "delay reset restarted", kPositionY, 0.0f);
+        const PredictionTimingPublicSample fresh = fresh_driver.process(
+            sequence, elapsed_seconds, position_x, 0.0f,
+            "delay reset fresh", kPositionY, 0.0f);
+        expect(after_reset.result.has_target == fresh.result.has_target &&
+                   after_reset.result.target.track_id ==
+                       fresh.result.target.track_id &&
+                   after_reset.result.target.predicted ==
+                       fresh.result.target.predicted &&
+                   after_reset.result.target.lead_active ==
+                       fresh.result.target.lead_active &&
+                   std::fabs(after_reset.result.target.lead_x -
+                             fresh.result.target.lead_x) <= 0.000001f &&
+                   std::fabs(after_reset.result.target.lead_y -
+                             fresh.result.target.lead_y) <= 0.000001f,
+               "delay candidate 中 Aim::reset 后必须与全新实例逐帧等价，sample=" +
+                   std::to_string(sample));
+        ++sequence;
+        elapsed_seconds += 0.010;
     }
 }
 
@@ -12480,10 +12844,15 @@ int main() {
     test_dynamic_control_range_does_not_reduce_observation();
     test_prediction_hysteresis_avoids_crosshair_oscillation();
     test_delayed_prediction_reentry_uses_elapsed_time();
+    test_no_delay_prediction_reentry_uses_submillisecond_capture_time();
     test_no_delay_prediction_rearm_uses_elapsed_time();
     test_no_delay_prediction_reentry_uses_elapsed_time();
     test_no_delay_prediction_precomputes_while_unlocked();
     test_prediction_reentry_requires_one_continuous_direction();
+    test_delayed_prediction_reentry_keeps_one_axis_witness();
+    test_delayed_prediction_candidate_clears_on_predicted_loss();
+    test_delayed_prediction_candidate_clears_on_identity_switch();
+    test_delayed_prediction_candidate_reset_matches_fresh_instance();
     test_closed_loop_view_feedback_converges_without_limit_cycle();
     test_control_trajectory_never_moves_away_from_target();
     test_integral_tracks_constant_velocity_with_bounded_error();

@@ -930,25 +930,35 @@ struct Aim::Impl {
         ElapsedDwell& operator=(ElapsedDwell&&) = delete;
 
         [[nodiscard]] bool observe_qualifying_sample(
-                float delta_seconds,
+                std::chrono::steady_clock::time_point captured_at,
                 float required_seconds) noexcept {
             if (!started_) {
                 started_ = true;
-                elapsed_seconds_ = 0.0f;
+                started_at_ = captured_at;
+                last_captured_at_ = captured_at;
+            } else if (captured_at <= last_captured_at_) {
+                started_at_ = captured_at;
+                last_captured_at_ = captured_at;
+                return false;
             } else {
-                elapsed_seconds_ += delta_seconds;
+                last_captured_at_ = captured_at;
             }
-            return elapsed_seconds_ + 0.000001f >= required_seconds;
+            const double elapsed_seconds =
+                std::chrono::duration<double>(
+                    captured_at - started_at_).count();
+            return elapsed_seconds + 0.000001 >= required_seconds;
         }
 
         void reset() noexcept {
-            elapsed_seconds_ = 0.0f;
             started_ = false;
+            started_at_ = {};
+            last_captured_at_ = {};
         }
 
     private:
-        float elapsed_seconds_ = 0.0f;
         bool started_ = false;
+        std::chrono::steady_clock::time_point started_at_{};
+        std::chrono::steady_clock::time_point last_captured_at_{};
     };
 
     struct DirectionalElapsedDwell final {
@@ -961,7 +971,7 @@ struct Aim::Impl {
             DirectionalElapsedDwell&&) = delete;
 
         [[nodiscard]] bool observe_qualifying_sample(
-                float delta_seconds,
+                std::chrono::steady_clock::time_point captured_at,
                 float required_seconds,
                 float direction_x,
                 float direction_y) noexcept {
@@ -970,53 +980,51 @@ struct Aim::Impl {
             };
             const int direction_sign_x = axis_sign(direction_x);
             const int direction_sign_y = axis_sign(direction_y);
-            if (direction_sign_x == 0 && direction_sign_y == 0) {
+            constexpr int kAxisX = 1;
+            constexpr int kAxisY = 2;
+            const int current_axes =
+                (direction_sign_x != 0 ? kAxisX : 0) |
+                (direction_sign_y != 0 ? kAxisY : 0);
+            if (current_axes == 0) {
                 reset();
                 return false;
             }
-            const bool has_common_axis =
-                (previous_sample_direction_x_ != 0 &&
-                 direction_sign_x != 0) ||
-                (previous_sample_direction_y_ != 0 &&
-                 direction_sign_y != 0);
-            const bool direction_changed =
-                (last_nonzero_direction_x_ != 0 &&
-                 direction_sign_x != 0 &&
-                 last_nonzero_direction_x_ != direction_sign_x) ||
-                (last_nonzero_direction_y_ != 0 &&
-                 direction_sign_y != 0 &&
-                 last_nonzero_direction_y_ != direction_sign_y);
-            if (!has_common_axis || direction_changed) {
+
+            int continuing_axes = 0;
+            if ((witness_axes_ & kAxisX) != 0 &&
+                direction_sign_x == witness_direction_x_) {
+                continuing_axes |= kAxisX;
+            }
+            if ((witness_axes_ & kAxisY) != 0 &&
+                direction_sign_y == witness_direction_y_) {
+                continuing_axes |= kAxisY;
+            }
+            if (witness_axes_ == 0 || continuing_axes == 0) {
                 dwell_.reset();
-                last_nonzero_direction_x_ = 0;
-                last_nonzero_direction_y_ = 0;
-            }
-            previous_sample_direction_x_ = direction_sign_x;
-            previous_sample_direction_y_ = direction_sign_y;
-            if (direction_sign_x != 0) {
-                last_nonzero_direction_x_ = direction_sign_x;
-            }
-            if (direction_sign_y != 0) {
-                last_nonzero_direction_y_ = direction_sign_y;
+                witness_axes_ = current_axes;
+                witness_direction_x_ = direction_sign_x;
+                witness_direction_y_ = direction_sign_y;
+            } else {
+                // 候选轴只能随样本求交，不能通过 XY 桥接从 X 重选为 Y。
+                // 因此整段驻留始终由至少一个从起点持续存在且同号的轴见证。
+                witness_axes_ = continuing_axes;
             }
             return dwell_.observe_qualifying_sample(
-                delta_seconds, required_seconds);
+                captured_at, required_seconds);
         }
 
         void reset() noexcept {
             dwell_.reset();
-            previous_sample_direction_x_ = 0;
-            previous_sample_direction_y_ = 0;
-            last_nonzero_direction_x_ = 0;
-            last_nonzero_direction_y_ = 0;
+            witness_axes_ = 0;
+            witness_direction_x_ = 0;
+            witness_direction_y_ = 0;
         }
 
     private:
         ElapsedDwell dwell_;
-        int previous_sample_direction_x_ = 0;
-        int previous_sample_direction_y_ = 0;
-        int last_nonzero_direction_x_ = 0;
-        int last_nonzero_direction_y_ = 0;
+        int witness_axes_ = 0;
+        int witness_direction_x_ = 0;
+        int witness_direction_y_ = 0;
     };
 
     struct PredictionLeadTimingState final {
@@ -3568,7 +3576,7 @@ struct Aim::Impl {
                     const bool candidate_ready =
                         lead_timing.delay_candidate.
                         observe_qualifying_sample(
-                            track.prediction_dt,
+                            frame.captured_at,
                             kPredictionLeadReentrySeconds,
                             std::fabs(desired_lead_x) >
                                     activation_distance_x
@@ -3741,7 +3749,7 @@ struct Aim::Impl {
                     lead_axis_error <= exit_distance) {
                     if (lead_timing.no_delay_centered.
                             observe_qualifying_sample(
-                            track.prediction_dt,
+                            frame.captured_at,
                             kPredictionLeadRearmCenteredSeconds)) {
                         lead_rearm_ready = true;
                         lead_timing.no_delay_centered.reset();
@@ -3757,7 +3765,7 @@ struct Aim::Impl {
                     activation_ready =
                         lead_timing.no_delay_candidate.
                             observe_qualifying_sample(
-                            track.prediction_dt,
+                            frame.captured_at,
                             kPredictionLeadReentrySeconds,
                             horizontal_motion_dominates
                                 ? source_velocity_x : 0.0f,
