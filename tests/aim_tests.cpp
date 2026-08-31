@@ -6135,7 +6135,8 @@ void test_backend_completed_delay_inventory_changes_tracking_reversal_response()
     const auto base = std::chrono::steady_clock::now() +
         std::chrono::seconds(1);
     int opposed_inventory_frames = 0;
-    int history_sensitive_frames = 0;
+    int history_shaping_frames = 0;
+    int quantized_response_difference_frames = 0;
     int premature_reversal_events = 0;
     int previous_completed_sign = 0;
 
@@ -6168,8 +6169,14 @@ void test_backend_completed_delay_inventory_changes_tracking_reversal_response()
             completed_result.control.pending_net_x_counts;
         if (pending_x * observed_error < 0.0f) {
             ++opposed_inventory_frames;
+            if (std::fabs(
+                    completed_result.control.feedforward_x_counts -
+                    rejected_result.control.feedforward_x_counts) >
+                0.0001f) {
+                ++history_shaping_frames;
+            }
             if (completed_command != rejected_command) {
-                ++history_sensitive_frames;
+                ++quantized_response_difference_frames;
             }
         }
 
@@ -6208,11 +6215,15 @@ void test_backend_completed_delay_inventory_changes_tracking_reversal_response()
            "delayed-command 夹具必须稳定覆盖当前误差已换边、15 ms 窗内"
            "仍有旧向 backend-completed 库存，实际帧数=" +
                std::to_string(opposed_inventory_frames));
-    expect(history_sensitive_frames > 0,
-           "同一图像误差下，窗内旧向 backend-completed 历史不能只进入诊断；"
-           "旧向库存帧/控制响应差异帧/旧向库存下提前反向/完整往返Hz=" +
+    expect(history_shaping_frames > 0 &&
+               premature_reversal_events == 0,
+           "同一图像误差下，窗内旧向 backend-completed 历史必须继续"
+           "连续回写控制状态，且不得在旧向库存尚未出窗时提前反向；"
+           "最终整数命令可以因量化保持相同。旧向库存帧/连续状态差异帧/"
+           "整数命令差异帧/提前反向/完整往返Hz=" +
                std::to_string(opposed_inventory_frames) + "/" +
-               std::to_string(history_sensitive_frames) + "/" +
+               std::to_string(history_shaping_frames) + "/" +
+               std::to_string(quantized_response_difference_frames) + "/" +
                std::to_string(premature_reversal_events) + "/" +
                std::to_string(measured_round_trip_hz));
 }
@@ -6416,7 +6427,7 @@ void test_faster_closing_slope_continuously_reduces_tracking_request() {
                    faster_closing.current.control.desired_x_counts));
 }
 
-void test_same_direction_completed_inventory_brakes_closing_request() {
+void test_backend_completion_does_not_brake_closing_request() {
     constexpr int kWarmupFrames = 40;
     constexpr int kFrameCount = kWarmupFrames + 2;
     constexpr auto kFrameStep = std::chrono::microseconds(4167);
@@ -6532,20 +6543,29 @@ void test_same_direction_completed_inventory_brakes_closing_request() {
                    completed.current.control.pending_net_x_counts) + "/" +
                std::to_string(
                    rejected.current.control.pending_net_x_counts));
-    expect(completed.current.control.desired_x_counts >= 0.0f &&
+    expect(completed.current.control.desired_x_counts > 0.0f &&
                rejected.current.control.desired_x_counts > 0.0f,
-           "同向完成库存只能制动当前同向请求，不得自行生成反向，"
+           "成对分支的当前 X 请求都必须保持误差同向，不得自行生成反向，"
            "completed/rejected=" +
                std::to_string(
                    completed.current.control.desired_x_counts) + "/" +
                std::to_string(rejected.current.control.desired_x_counts));
-    expect(std::fabs(completed.current.control.desired_x_counts) <
-               std::fabs(rejected.current.control.desired_x_counts),
-           "相同闭合轨迹下，15 ms 窗内新增同向 backend-completed 库存必须"
-           "连续减小 X 请求，completed/rejected=" +
+    expect(std::fabs(completed.current.control.desired_x_counts -
+                     rejected.current.control.desired_x_counts) < 0.0001f &&
+               !completed.current.control.closing_response_tapered_x &&
+               !rejected.current.control.closing_response_tapered_x,
+           "相同 Observation 闭合轨迹、PI 与 smoothing 历史下，只有后端"
+           "完成库存不同不得额外制动 X；ACK 不等于已观察物理效果，"
+           "completed/rejected/taper=" +
                std::to_string(
                    completed.current.control.desired_x_counts) + "/" +
-               std::to_string(rejected.current.control.desired_x_counts));
+               std::to_string(rejected.current.control.desired_x_counts) +
+               "/" +
+               std::to_string(
+                   completed.current.control.closing_response_tapered_x) +
+               "/" +
+               std::to_string(
+                   rejected.current.control.closing_response_tapered_x));
 }
 
 void test_fixed_scene_replay_does_not_amplify_horizontal_observation() {
@@ -7472,6 +7492,7 @@ void test_random_move_superjump_uses_available_x_integral_headroom() {
     int x_integral_physical_headroom_frames = 0;
     int opposite_observation_x_commands = 0;
     int command_contract_violations = 0;
+    int backend_completion_tapered_x_frames = 0;
     float maximum_absolute_x_integral = 0.0f;
     float maximum_command_magnitude = 0.0f;
     std::uint64_t y_trace_signature = 1469598103934665603ULL;
@@ -7522,6 +7543,10 @@ void test_random_move_superjump_uses_available_x_integral_headroom() {
                    "RandomMove 实际游戏回放必须写回同序列整数完成命令");
         }
         if (index < kMeasurementStart) continue;
+
+        if (result.control.closing_response_tapered_x) {
+            ++backend_completion_tapered_x_frames;
+        }
 
         const float observation_x =
             (observation.x1 + observation.x2) * 0.5f;
@@ -7579,6 +7604,10 @@ void test_random_move_superjump_uses_available_x_integral_headroom() {
            "越框/旧 4-count 上限帧=" +
                std::to_string(crosshair_x_outside_target_box_frames) + "/" +
                std::to_string(legacy_x_integral_cap_frames));
+    expect(backend_completion_tapered_x_frames == 0,
+           "RandomMove 实际回放不得把 backend completion 当作已观察物理"
+           "效果额外制动 X，taper 帧=" +
+               std::to_string(backend_completion_tapered_x_frames));
     expect(x_integral_physical_headroom_frames > 0 &&
                opposite_observation_x_commands == 0 &&
                command_contract_violations == 0 &&
@@ -7598,6 +7627,8 @@ void test_random_move_superjump_uses_available_x_integral_headroom() {
               << x_integral_physical_headroom_frames
               << "，反向/二维违规=" << opposite_observation_x_commands
               << "/" << command_contract_violations
+              << "，completion taper="
+              << backend_completion_tapered_x_frames
               << "，max积分/max命令=" << maximum_absolute_x_integral
               << "/" << maximum_command_magnitude
               << "，Y签名=" << y_trace_signature << '\n';
@@ -12926,7 +12957,7 @@ int main() {
     test_backend_completed_command_feedback_contract();
     test_backend_completed_delay_inventory_changes_tracking_reversal_response();
     test_faster_closing_slope_continuously_reduces_tracking_request();
-    test_same_direction_completed_inventory_brakes_closing_request();
+    test_backend_completion_does_not_brake_closing_request();
     test_fixed_scene_replay_does_not_amplify_horizontal_observation();
     test_static_closed_loop_replay_does_not_repeat_horizontal_commands();
     test_latest_static_replay_does_not_amplify_horizontal_base();

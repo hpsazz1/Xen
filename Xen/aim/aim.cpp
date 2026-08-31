@@ -4046,36 +4046,12 @@ struct Aim::Impl {
             same_direction_request_x,
             kTrackingErrorDerivativeGainSeconds * closing_slope_x *
                 config.counts_per_pixel_x);
-        // backend completion 不是物理位移；只有当前 Observation 已确认误差
-        // 朝零闭合时，才把同向完成库存作为“响应仍在控制窗内”的连续预算。
-        // 用真实 closing slope 在既有控制延迟内可覆盖当前误差的比例调度该
-        // 预算，不新增 counts→pixels plant 换算、固定速度/频率阈值或状态
-        // 门，并且最多把剩余请求收缩到零。
-        const float same_direction_completed_x = std::max(
-            0.0f,
-            error_direction_x * pending.backend_completed_weighted_x);
-        const float closing_horizon_x = closing_slope_x *
-            config.control_delay_ms / 1000.0f;
-        const float closing_response_share =
-            std::fabs(error_x) + closing_horizon_x > 0.0f
-            ? closing_horizon_x /
-                (std::fabs(error_x) + closing_horizon_x)
-            : 0.0f;
-        const float remaining_same_direction_request_x =
-            same_direction_request_x - derivative_damping_x;
-        const float closing_response_budget_x =
-            remaining_same_direction_request_x +
-            same_direction_completed_x;
-        const float closing_response_taper_x =
-            closing_response_budget_x > 0.0f
-            ? remaining_same_direction_request_x *
-                same_direction_completed_x /
-                closing_response_budget_x * closing_response_share
-            : 0.0f;
-        diagnostics.closing_response_tapered_x =
-            closing_response_taper_x > 0.0f;
-        shaped_x = filtered_x - error_direction_x *
-            (derivative_damping_x + closing_response_taper_x);
+        // backend completion/ACK 不是已经从 Observation 见证的物理位移，
+        // 不能作为同向追赶的额外制动量。X 只保留由当前图像误差闭合斜率
+        // 形成的连续导数阻尼；诊断字段保留为 false 以兼容既有报告契约。
+        diagnostics.closing_response_tapered_x = false;
+        shaped_x = filtered_x -
+            error_direction_x * derivative_damping_x;
         shaped_y = filtered_y;
         shaper_initialized = true;
         residual_x = 0.0f;
