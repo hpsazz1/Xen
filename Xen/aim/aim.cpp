@@ -4054,20 +4054,52 @@ struct Aim::Impl {
             error_direction_x * derivative_damping_x;
         shaped_y = filtered_y;
         shaper_initialized = true;
-        residual_x = 0.0f;
         residual_y = 0.0f;
         diagnostics.desired_x_counts = shaped_x;
         diagnostics.filtered_x_counts = filtered_x;
         diagnostics.shaped_x_counts = shaped_x;
-        diagnostics.residual_before_quantization_x_counts = 0.0f;
 
         command.sequence = frame.sequence;
         command.captured_at = frame.captured_at;
-        command.dx_counts = static_cast<int>(std::lround(shaped_x));
+        const int independently_rounded_x =
+            static_cast<int>(std::lround(shaped_x));
+        float quantized_x = shaped_x;
+        const bool subcount_x_request =
+            frame.lock_active &&
+            x_error_magnitude > config.deadzone_pixels &&
+            independently_rounded_x == 0 && std::fabs(shaped_x) > 0.001f;
+        if (subcount_x_request) {
+            diagnostics.residual_before_quantization_x_counts = residual_x;
+            quantized_x += residual_x;
+            command.dx_counts = static_cast<int>(std::lround(quantized_x));
+            // 最近整数残余可能与新一帧请求异号，但只要仍量化为零，它只是
+            // 对上一枚脉冲的时间平均补偿。只有它将生成反向整数命令时才
+            // 丢弃旧残余，并按当前亚计数请求从零重新累计。
+            if (command.dx_counts != 0 &&
+                command.dx_counts * shaped_x < 0.0f) {
+                residual_x = 0.0f;
+                diagnostics.residual_before_quantization_x_counts = 0.0f;
+                quantized_x = shaped_x;
+                command.dx_counts = independently_rounded_x;
+            }
+        } else {
+            // 已能独立量化的请求完全沿用原命令；残余只补回原本会永久
+            // 停发的亚计数 X，不改变既有强请求、增益或单帧上限。
+            residual_x = 0.0f;
+            diagnostics.residual_before_quantization_x_counts = 0.0f;
+            command.dx_counts = independently_rounded_x;
+        }
         command.dy_counts = static_cast<int>(std::lround(shaped_y));
+        const int quantized_command_x = command.dx_counts;
         clamp_tracking_command_preserving_y(
             command.dx_counts, command.dy_counts,
             config.max_counts_per_frame);
+        // 残余只表示最近整数舍入误差。若二维安全域收缩了 X，则不把
+        // 执行器饱和差伪装成后续量化库存；Y 的候选和整数命令保持原样。
+        residual_x = subcount_x_request &&
+                command.dx_counts == quantized_command_x
+            ? quantized_x - static_cast<float>(quantized_command_x)
+            : 0.0f;
         diagnostics.quantization_zero_x =
             command.dx_counts == 0 && std::fabs(desired_x) > 0.001f;
         diagnostics.deadzone_quiet =

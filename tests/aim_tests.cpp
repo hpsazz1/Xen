@@ -7496,6 +7496,13 @@ void test_random_move_superjump_uses_available_x_integral_headroom() {
     float maximum_absolute_x_integral = 0.0f;
     float maximum_command_magnitude = 0.0f;
     std::uint64_t y_trace_signature = 1469598103934665603ULL;
+    float active_same_direction_zero_request = 0.0f;
+    float active_same_direction_zero_direction = 0.0f;
+    float maximum_same_direction_zero_request = 0.0f;
+    int accumulated_subcount_zero_runs = 0;
+    bool active_zero_run_exceeded_nearest_integer_boundary = false;
+    std::string active_subcount_zero_trace;
+    std::string maximum_subcount_zero_trace;
 
     for (std::size_t index = 0; index < kObservations.size(); ++index) {
         const auto& observation = kObservations[index];
@@ -7552,6 +7559,56 @@ void test_random_move_superjump_uses_available_x_integral_headroom() {
             (observation.x1 + observation.x2) * 0.5f;
         const float observation_error_x =
             observation_x - frame.control_center_x;
+        const float control_error_x =
+            (result.target.aim_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float shaped_x = result.control.shaped_x_counts;
+        const float shaped_direction_x = shaped_x > 0.0f
+            ? 1.0f : (shaped_x < 0.0f ? -1.0f : 0.0f);
+        const float hold_band = std::max(
+            2.0f, config.deadzone_pixels * 1.5f);
+        const bool one_x_count_fits_integer_vector = std::hypot(
+            1.0f, static_cast<float>(result.command.dy_counts)) <=
+            config.max_counts_per_frame;
+        const bool same_direction_subcount_zero =
+            result.control.quantization_zero_x &&
+            std::fabs(control_error_x) > hold_band &&
+            shaped_x * control_error_x > 0.0f &&
+            std::fabs(shaped_x) < 0.5f &&
+            one_x_count_fits_integer_vector;
+        if (same_direction_subcount_zero) {
+            if (active_same_direction_zero_direction !=
+                    shaped_direction_x) {
+                active_same_direction_zero_direction = shaped_direction_x;
+                active_same_direction_zero_request = shaped_direction_x *
+                    result.control.residual_before_quantization_x_counts;
+                active_zero_run_exceeded_nearest_integer_boundary = false;
+                active_subcount_zero_trace.clear();
+            }
+            active_same_direction_zero_request += std::fabs(shaped_x);
+            active_subcount_zero_trace += " [" + std::to_string(index) +
+                ":" + std::to_string(shaped_x) + "," +
+                std::to_string(
+                    result.control.residual_before_quantization_x_counts) +
+                "," + std::to_string(result.command.dx_counts) + "," +
+                std::to_string(result.command.dy_counts) + "]";
+            if (active_same_direction_zero_request >
+                maximum_same_direction_zero_request) {
+                maximum_same_direction_zero_request =
+                    active_same_direction_zero_request;
+                maximum_subcount_zero_trace = active_subcount_zero_trace;
+            }
+            if (!active_zero_run_exceeded_nearest_integer_boundary &&
+                active_same_direction_zero_request >= 0.5f) {
+                ++accumulated_subcount_zero_runs;
+                active_zero_run_exceeded_nearest_integer_boundary = true;
+            }
+        } else {
+            active_same_direction_zero_request = 0.0f;
+            active_same_direction_zero_direction = 0.0f;
+            active_zero_run_exceeded_nearest_integer_boundary = false;
+            active_subcount_zero_trace.clear();
+        }
         const bool crosshair_x_outside_target_box =
             frame.control_center_x < result.target.x1 ||
             frame.control_center_x > result.target.x2;
@@ -7608,6 +7665,14 @@ void test_random_move_superjump_uses_available_x_integral_headroom() {
            "RandomMove 实际回放不得把 backend completion 当作已观察物理"
            "效果额外制动 X，taper 帧=" +
                std::to_string(backend_completion_tapered_x_frames));
+    expect(accumulated_subcount_zero_runs == 0 &&
+               maximum_same_direction_zero_request < 0.5f,
+           "RandomMove 实际回放中，同向且保持带外的亚计数 X 请求必须跨帧"
+           "守恒；扣除上一枚脉冲的舍入债务后，连续零命令净累计不得越过"
+           "最近整数边界，越界段/最大净累计=" +
+               std::to_string(accumulated_subcount_zero_runs) + "/" +
+               std::to_string(maximum_same_direction_zero_request) +
+               "，轨迹=" + maximum_subcount_zero_trace);
     expect(x_integral_physical_headroom_frames > 0 &&
                opposite_observation_x_commands == 0 &&
                command_contract_violations == 0 &&
@@ -7629,6 +7694,9 @@ void test_random_move_superjump_uses_available_x_integral_headroom() {
               << "/" << command_contract_violations
               << "，completion taper="
               << backend_completion_tapered_x_frames
+              << "，亚计数零命令越界段/最大累计="
+              << accumulated_subcount_zero_runs << "/"
+              << maximum_same_direction_zero_request
               << "，max积分/max命令=" << maximum_absolute_x_integral
               << "/" << maximum_command_magnitude
               << "，Y签名=" << y_trace_signature << '\n';
@@ -8731,6 +8799,295 @@ void test_base_tracking_quantization_has_no_speed_threshold() {
     expect(below_old_threshold.command_x == 1 &&
                above_old_threshold.command_x == 1,
            "固定 320 ROI 的同向几何运动不得因跨过旧速度阈值改变亚整数分摊");
+}
+
+void test_delayed_tracking_distributes_subcount_x_without_touching_y() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 0.10f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 14.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    Aim aim(config);
+    auto control_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    std::uint64_t sequence = 1;
+
+    struct Phase {
+        float shaped_sum = 0.0f;
+        int command_sum = 0;
+        int nonzero_commands = 0;
+        int opposite_commands = 0;
+        int nonzero_y_commands = 0;
+        bool all_requests_subcount = true;
+    };
+    const auto run_phase = [&](float control_center_x, float direction) {
+        Phase phase;
+        for (int index = 0; index < 80; ++index) {
+            AimFrame frame = make_frame(sequence++, control_at);
+            control_at += std::chrono::microseconds(4167);
+            frame.control_at = frame.captured_at +
+                std::chrono::milliseconds(1);
+            frame.control_center_x = control_center_x;
+            frame.control_center_y = 160.0f;
+            frame.lock_active = true;
+            frame.detections = {body(160.0f, 172.0f)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_target &&
+                       result.control.evaluated,
+                   "tracking 亚计数量化回归必须逐帧经公开 Aim seam 求值");
+            if (!result.has_target || !result.control.evaluated) continue;
+
+            const float shaped_x = result.control.shaped_x_counts;
+            const int command_x = result.has_command
+                ? result.command.dx_counts : 0;
+            const int command_y = result.has_command
+                ? result.command.dy_counts : 0;
+            if (std::fabs(shaped_x) > 0.001f) {
+                phase.shaped_sum += shaped_x;
+                phase.command_sum += command_x;
+                phase.all_requests_subcount =
+                    phase.all_requests_subcount &&
+                    std::fabs(shaped_x) < 0.5f;
+            }
+            if (command_x != 0) ++phase.nonzero_commands;
+            if (command_x * direction < 0.0f) ++phase.opposite_commands;
+            if (command_y != 0) ++phase.nonzero_y_commands;
+            if (result.has_command) {
+                expect(aim.record_backend_completed_command(
+                           frame.sequence,
+                           frame.control_at + std::chrono::microseconds(100),
+                           result.command.dx_counts,
+                           result.command.dy_counts),
+                       "tracking 亚计数量化回归必须写回同序列整数完成命令");
+            }
+        }
+        return phase;
+    };
+
+    const Phase positive = run_phase(159.0f, 1.0f);
+    const Phase negative = run_phase(161.0f, -1.0f);
+    expect(positive.all_requests_subcount && negative.all_requests_subcount &&
+               positive.nonzero_commands > 0 &&
+               negative.nonzero_commands > 0 &&
+               positive.opposite_commands == 0 &&
+               negative.opposite_commands == 0 &&
+               positive.nonzero_y_commands == 0 &&
+               negative.nonzero_y_commands == 0 &&
+               std::fabs(positive.shaped_sum - positive.command_sum) < 0.5f &&
+               std::fabs(negative.shaped_sum - negative.command_sum) < 0.5f,
+           "prediction-off tracking 的同向亚计数 X 请求必须按最近整数跨帧"
+           "分摊，换向不得继承旧向整数命令，且 Y 必须逐帧保持零；"
+           "正向请求/命令/脉冲/反向/Y=" +
+               std::to_string(positive.shaped_sum) + "/" +
+               std::to_string(positive.command_sum) + "/" +
+               std::to_string(positive.nonzero_commands) + "/" +
+               std::to_string(positive.opposite_commands) + "/" +
+               std::to_string(positive.nonzero_y_commands) +
+               "，负向=" + std::to_string(negative.shaped_sum) + "/" +
+               std::to_string(negative.command_sum) + "/" +
+               std::to_string(negative.nonzero_commands) + "/" +
+               std::to_string(negative.opposite_commands) + "/" +
+               std::to_string(negative.nonzero_y_commands));
+
+    for (int index = 0; index < 4; ++index) {
+        AimFrame frame = make_frame(sequence++, control_at);
+        control_at += std::chrono::microseconds(4167);
+        frame.control_at = frame.captured_at +
+            std::chrono::milliseconds(1);
+        frame.control_center_x = 160.0f;
+        frame.control_center_y = 160.0f;
+        frame.lock_active = true;
+        frame.detections = {body(160.0f, 172.0f)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target &&
+                   !result.has_command &&
+                   std::fabs(
+                       result.control.residual_before_quantization_x_counts) <
+                       0.001f,
+               "tracking X 到达零误差后必须立即清空量化残余，不能形成"
+               "静态周期 1-count 命令");
+    }
+}
+
+void test_delayed_tracking_subcount_residual_respects_output_lifecycle() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.deadzone_pixels = 0.0f;
+    config.smoothing = 1.0f;
+    config.counts_per_pixel_x = 0.10f;
+    config.counts_per_pixel_y = 0.40f;
+    config.max_counts_per_frame = 14.0f;
+    config.acquisition_range_percent = 150.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+
+    const auto base =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    Aim unlocked(config);
+    for (int index = 0; index < 32; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::microseconds(index * 4167));
+        frame.control_at = frame.captured_at +
+            std::chrono::milliseconds(1);
+        frame.control_center_x = 159.0f;
+        frame.control_center_y = 160.0f;
+        frame.lock_active = false;
+        frame.detections = {body(160.0f, 172.0f)};
+        const AimResult result = unlocked.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target &&
+                   result.control.evaluated && !result.has_command &&
+                   std::fabs(
+                       result.control.residual_before_quantization_x_counts) <
+                       0.001f,
+               "lock_active=false 的未按键 tracking 只能预计算原有亚计数"
+               "请求，不得累计随后"
+               "可能变成真实输出的量化残余");
+    }
+    AimFrame relocked = make_frame(
+        33, base + std::chrono::microseconds(32 * 4167));
+    relocked.control_at = relocked.captured_at +
+        std::chrono::milliseconds(1);
+    relocked.control_center_x = 159.0f;
+    relocked.control_center_y = 160.0f;
+    relocked.lock_active = true;
+    relocked.detections = {body(160.0f, 172.0f)};
+    const AimResult relocked_result = unlocked.process(relocked);
+    expect(relocked_result.status == AimStatus::SUCCESS &&
+               relocked_result.has_target &&
+               std::fabs(relocked_result.control.
+                   residual_before_quantization_x_counts) < 0.001f,
+           "重新按键首帧不得继承未实际发送阶段的亚计数债务");
+
+    AimConfig deadzone_config = config;
+    deadzone_config.deadzone_pixels = 1.5f;
+    Aim deadzone(deadzone_config);
+    bool exercised_nonzero_residual = false;
+    for (int index = 0; index < 32; ++index) {
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1),
+            base + std::chrono::seconds(1) +
+                std::chrono::microseconds(index * 4167));
+        frame.control_at = frame.captured_at +
+            std::chrono::milliseconds(1);
+        frame.control_center_x = 157.0f;
+        frame.control_center_y = 160.0f;
+        frame.lock_active = true;
+        frame.detections = {body(160.0f, 172.0f)};
+        const AimResult result = deadzone.process(frame);
+        exercised_nonzero_residual = exercised_nonzero_residual ||
+            std::fabs(result.control.
+                residual_before_quantization_x_counts) > 0.01f;
+    }
+    AimFrame inside_deadzone = make_frame(
+        33, base + std::chrono::seconds(1) +
+            std::chrono::microseconds(32 * 4167));
+    inside_deadzone.control_at = inside_deadzone.captured_at +
+        std::chrono::milliseconds(1);
+    inside_deadzone.control_center_x = 159.0f;
+    inside_deadzone.control_center_y = 160.0f;
+    inside_deadzone.lock_active = true;
+    inside_deadzone.detections = {body(160.0f, 172.0f)};
+    const AimResult deadzone_result = deadzone.process(inside_deadzone);
+    expect(exercised_nonzero_residual &&
+               deadzone_result.status == AimStatus::SUCCESS &&
+               deadzone_result.has_target && !deadzone_result.has_command &&
+               std::fabs(deadzone_result.control.
+                   residual_before_quantization_x_counts) < 0.001f,
+           "X 进入既有 deadzone 时必须清空已建立的量化残余，不能把"
+           "跨帧 1-count 脉冲带回静态基础点");
+
+    AimConfig limiter_config = config;
+    limiter_config.counts_per_pixel_y = 1.0f;
+    limiter_config.max_counts_per_frame = 1.0f;
+    limiter_config.body_aim_height_ratio = 0.5f;
+    Aim limiter(limiter_config);
+    bool exercised_integer_limiter = false;
+    std::uint64_t limiter_sequence = 1;
+    auto limiter_time = base + std::chrono::seconds(2);
+    float limited_shaped_x = 0.0f;
+    float limited_residual_before = 0.0f;
+    int limited_rounded_x = 0;
+    int limited_command_y = 0;
+    for (int index = 0; index < 16; ++index) {
+        AimFrame frame = make_frame(limiter_sequence++, limiter_time);
+        limiter_time += std::chrono::microseconds(4167);
+        frame.control_at = frame.captured_at +
+            std::chrono::milliseconds(1);
+        frame.control_center_x = 159.0f;
+        frame.control_center_y = 160.0f;
+        frame.lock_active = true;
+        frame.detections = {body(160.0f, 160.8f)};
+        const AimResult result = limiter.process(frame);
+        expect(result.status == AimStatus::SUCCESS && result.has_target &&
+                   result.control.evaluated && result.has_command,
+               "量化残余限幅回归必须经公开 Aim seam 产生 Y 命令");
+        if (!result.has_target || !result.control.evaluated) continue;
+
+        limited_shaped_x = result.control.shaped_x_counts;
+        limited_residual_before =
+            result.control.residual_before_quantization_x_counts;
+        limited_rounded_x = static_cast<int>(std::lround(
+            limited_shaped_x + limited_residual_before));
+        limited_command_y = result.command.dy_counts;
+        exercised_integer_limiter =
+            limited_rounded_x != 0 && result.command.dx_counts == 0 &&
+            std::abs(result.command.dy_counts) == 1;
+        expect(std::hypot(
+                   static_cast<float>(result.command.dx_counts),
+                   static_cast<float>(result.command.dy_counts)) <=
+                   limiter_config.max_counts_per_frame,
+               "量化残余测试仍必须保持二维 1-count 欧氏上限");
+        if (result.has_command) {
+            expect(limiter.record_backend_completed_command(
+                       frame.sequence,
+                       frame.control_at + std::chrono::microseconds(100),
+                       result.command.dx_counts,
+                       result.command.dy_counts),
+                   "量化残余限幅回归必须写回同序列完成命令");
+        }
+        if (exercised_integer_limiter) break;
+    }
+
+    AimFrame released = make_frame(limiter_sequence, limiter_time);
+    released.control_at = released.captured_at +
+        std::chrono::milliseconds(1);
+    released.control_center_x = 159.0f;
+    released.control_center_y = 160.0f;
+    released.lock_active = true;
+    released.detections = {body(160.0f, 160.0f)};
+    const AimResult released_result = limiter.process(released);
+    expect(exercised_integer_limiter &&
+               released_result.status == AimStatus::SUCCESS &&
+               released_result.has_target &&
+               std::abs(released_result.command.dy_counts) == 0 &&
+               std::fabs(released_result.control.shaped_x_counts) < 0.5f &&
+               std::fabs(released_result.control.
+                   residual_before_quantization_x_counts) < 0.001f &&
+               released_result.command.dx_counts == 0,
+           "Y 占满整数预算并拒绝 X 时必须丢弃 saturation 差；Y 释放"
+           "后的首帧不得补发旧 X，limit shaped/residual/rounded/dy=" +
+               std::to_string(limited_shaped_x) + "/" +
+               std::to_string(limited_residual_before) + "/" +
+               std::to_string(limited_rounded_x) + "/" +
+               std::to_string(limited_command_y) +
+               "，release shaped/residual/dx/dy=" +
+               std::to_string(released_result.control.shaped_x_counts) +
+               "/" + std::to_string(released_result.control.
+                   residual_before_quantization_x_counts) + "/" +
+               std::to_string(released_result.command.dx_counts) + "/" +
+               std::to_string(released_result.command.dy_counts));
 }
 
 void test_delay_shaping_has_no_speed_threshold_before_prediction() {
@@ -12970,6 +13327,8 @@ int main() {
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_pi_is_separate_from_prediction_projection();
     test_base_tracking_quantization_has_no_speed_threshold();
+    test_delayed_tracking_distributes_subcount_x_without_touching_y();
+    test_delayed_tracking_subcount_residual_respects_output_lifecycle();
     test_delay_shaping_has_no_speed_threshold_before_prediction();
     test_prediction_state_is_invariant_to_roi_representation_scale();
     test_prediction_motion_evidence_pauses_on_repeated_coordinates();
