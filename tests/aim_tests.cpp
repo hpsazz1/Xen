@@ -6,6 +6,7 @@
 #include "aim_latest_physical_replay_fixture.h"
 #include "aim_latest_static_replay_fixture.h"
 #include "aim_superjump_actual_game_replay_fixture.h"
+#include "aim_superjump_latest_random_move_replay_fixture.h"
 #include "aim_superjump_landmark_replay_fixture.h"
 #include "aim_superjump_random_move_replay_fixture.h"
 #include "aim_static_closed_loop_replay_fixture.h"
@@ -7702,6 +7703,216 @@ void test_random_move_superjump_uses_available_x_integral_headroom() {
               << "，Y签名=" << y_trace_signature << '\n';
 }
 
+void test_latest_random_move_tracking_x_uses_continuous_opening_evidence() {
+    using aim_superjump_latest_random_move_replay_fixture::kMeasurementStart;
+    using aim_superjump_latest_random_move_replay_fixture::kObservations;
+
+    AimConfig config;
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.10f;
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    Aim aim(config);
+
+    auto control_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    int moderate_error_frames = 0;
+    int opening_evidence_frames = 0;
+    int opening_zero_command_frames = 0;
+    int opening_absolute_x_counts = 0;
+    int opening_curve_mismatch_frames = 0;
+    int mismatch_zero_command_frames = 0;
+    int moderate_zero_command_frames = 0;
+    int moderate_absolute_x_counts = 0;
+    int opposite_x_commands = 0;
+    int command_contract_violations = 0;
+    double underweighted_controller_ms = 0.0;
+    std::uint64_t y_trace_signature = 1469598103934665603ULL;
+
+    for (std::size_t index = 0; index < kObservations.size(); ++index) {
+        const auto& observation = kObservations[index];
+        if (index != 0) {
+            control_at += std::chrono::nanoseconds(
+                static_cast<long long>(observation.controller_dt_ms *
+                                       1000000.0f));
+        }
+        const auto captured_at = control_at - std::chrono::nanoseconds(
+            static_cast<long long>(observation.observation_age_ms *
+                                   1000000.0f));
+        AimFrame frame = make_frame(observation.source_sequence, captured_at);
+        frame.control_at = control_at;
+        frame.lock_active = true;
+        frame.detections = {{observation.x1,
+                             observation.y1,
+                             observation.x2,
+                             observation.y2,
+                             0.9f,
+                             0}};
+        if (observation.aim_from_head) {
+            const float center_x =
+                (observation.x1 + observation.x2) * 0.5f;
+            const float head_width =
+                (observation.x2 - observation.x1) * 0.5f;
+            frame.detections.push_back(head_box(
+                center_x, observation.y1 + 6.0f, head_width, 10.0f));
+        }
+
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "最新 RandomMove 实际回放必须逐帧经公开 Aim seam 成功处理");
+        if (!result.has_target) continue;
+        expect_current_horizontal_base(result, "最新 RandomMove 实际回放");
+        if (result.has_command) {
+            expect(aim.record_backend_completed_command(
+                       frame.sequence,
+                       frame.control_at + std::chrono::microseconds(
+                           static_cast<long long>(
+                               observation.backend_completion_ms * 1000.0f)),
+                       result.command.dx_counts,
+                       result.command.dy_counts),
+                   "最新 RandomMove 实际回放必须写回同序列整数完成命令");
+        }
+        if (index < kMeasurementStart) continue;
+
+        const float error_x =
+            (result.target.aim_x - frame.control_center_x) *
+            frame.source_pixels_per_roi_pixel_x;
+        const float absolute_error_x = std::fabs(error_x);
+        const float hold_band = std::max(
+            2.0f, config.deadzone_pixels * 1.5f);
+        if (absolute_error_x > hold_band && absolute_error_x <= 6.0f) {
+            ++moderate_error_frames;
+            moderate_absolute_x_counts += std::abs(result.command.dx_counts);
+            if (result.command.dx_counts == 0) {
+                ++moderate_zero_command_frames;
+            }
+            const float active_x_error_scale =
+                1.0f - config.deadzone_pixels / absolute_error_x;
+            const float common_motion_x =
+                result.control.reverse_translation_raw_common_x_roi_pixels;
+            const float common_consistency = std::clamp(
+                std::fabs(result.control.
+                              reverse_translation_control_evidence_x),
+                0.0f,
+                1.0f);
+            const float error_direction = error_x > 0.0f ? 1.0f : -1.0f;
+            const float pending_alignment_weight =
+                result.control.pending_absolute_x_counts > 0.0f
+                ? std::clamp(
+                      0.5f *
+                          (1.0f + error_direction *
+                               result.control.pending_net_x_counts /
+                               result.control.pending_absolute_x_counts),
+                      0.0f,
+                      1.0f)
+                : 1.0f;
+            const float opening_weight =
+                error_x * common_motion_x > 0.0f
+                ? common_consistency * common_consistency *
+                      pending_alignment_weight
+                : 0.0f;
+            if (opening_weight > 0.0f) {
+                ++opening_evidence_frames;
+                opening_absolute_x_counts +=
+                    std::abs(result.command.dx_counts);
+                if (result.command.dx_counts == 0) {
+                    ++opening_zero_command_frames;
+                }
+            }
+            const float opening_regularized_scale =
+                active_x_error_scale * active_x_error_scale *
+                (active_x_error_scale +
+                 opening_weight * (1.0f - active_x_error_scale));
+            const float opening_deadzone_request = absolute_error_x *
+                opening_regularized_scale * config.counts_per_pixel_x;
+            if (std::fabs(
+                    std::fabs(result.control.proportional_x_counts) -
+                    opening_deadzone_request) > 0.0001f) {
+                ++opening_curve_mismatch_frames;
+                underweighted_controller_ms += observation.controller_dt_ms;
+                if (result.command.dx_counts == 0) {
+                    ++mismatch_zero_command_frames;
+                }
+            }
+        }
+        if (result.has_command &&
+            result.command.dx_counts * error_x < 0.0f) {
+            ++opposite_x_commands;
+        }
+        if (result.has_command) {
+            const float command_error_y =
+                result.target.aim_y - frame.control_center_y;
+            const float magnitude = std::hypot(
+                static_cast<float>(result.command.dx_counts),
+                static_cast<float>(result.command.dy_counts));
+            if (result.command.dx_counts * error_x +
+                        result.command.dy_counts * command_error_y <= 0.0f ||
+                magnitude > config.max_counts_per_frame + 0.001f) {
+                ++command_contract_violations;
+            }
+        }
+        const auto base_y_millipixel = static_cast<std::int64_t>(
+            std::llround(result.target.base_aim_y * 1000.0f));
+        y_trace_signature ^= static_cast<std::uint64_t>(
+            base_y_millipixel + 1000000LL);
+        y_trace_signature *= 1099511628211ULL;
+        y_trace_signature ^= static_cast<std::uint64_t>(
+            result.command.dy_counts + 128);
+        y_trace_signature *= 1099511628211ULL;
+    }
+
+    expect(moderate_error_frames > 0 && opening_evidence_frames > 0 &&
+               opening_curve_mismatch_frames == 0,
+           "1309108 新 Run 中 2.25～6 px 的 X 追赶请求必须只随同向"
+           "共同平移的一致性从 cubic 连续靠近 quadratic；反向库存、闭合、"
+           "静止和形变相位仍保持 cubic。moderate/opening/mismatch/zero/ms=" +
+               std::to_string(moderate_error_frames) + "/" +
+               std::to_string(opening_evidence_frames) + "/" +
+               std::to_string(opening_curve_mismatch_frames) + "/" +
+               std::to_string(mismatch_zero_command_frames) + "/" +
+               std::to_string(underweighted_controller_ms));
+    expect(moderate_absolute_x_counts > 234 &&
+               opening_absolute_x_counts > 94 &&
+               opening_zero_command_frames <= 6,
+           "追赶相位增强必须让同一实际回放的中等误差与 opening 帧"
+           "整数 X 总量高于 cubic 基线 234/94，且不得增加 opening"
+           "零帧。moderate/opening/zero=" +
+               std::to_string(moderate_absolute_x_counts) + "/" +
+               std::to_string(opening_absolute_x_counts) + "/" +
+               std::to_string(opening_zero_command_frames));
+    expect(opposite_x_commands == 0 && command_contract_violations == 0 &&
+               y_trace_signature == 37477423703017431ULL,
+           "X 追赶 red 自身必须保持当前方向、二维安全合同和已获人工稳定"
+           "的 Y 逐帧签名，反向/违规/Y=" +
+               std::to_string(opposite_x_commands) + "/" +
+               std::to_string(command_contract_violations) + "/" +
+               std::to_string(y_trace_signature));
+    std::cout << "1309108 最新 RandomMove X 追赶: "
+                 "moderate/opening/mismatch/zero/ms="
+              << moderate_error_frames << "/" << opening_evidence_frames
+              << "/" << opening_curve_mismatch_frames << "/"
+              << mismatch_zero_command_frames << "/"
+              << underweighted_controller_ms << "，moderate零帧/绝对X="
+              << moderate_zero_command_frames << "/"
+              << moderate_absolute_x_counts << "，反向/二维违规="
+              << opposite_x_commands << "/" << command_contract_violations
+              << "，opening零帧/绝对X=" << opening_zero_command_frames
+              << "/" << opening_absolute_x_counts
+              << "，Y签名=" << y_trace_signature << '\n';
+}
+
 void test_actual_game_semantic_landmark_does_not_gain_base_x_phase() {
     using aim_superjump_landmark_replay_fixture::kMeasurementStart;
     using aim_superjump_landmark_replay_fixture::kObservations;
@@ -13321,6 +13532,7 @@ int main() {
     test_latest_physical_replay_brakes_before_horizontal_crossing();
     test_actual_game_superjump_current_common_translation_brakes_x();
     test_random_move_superjump_uses_available_x_integral_headroom();
+    test_latest_random_move_tracking_x_uses_continuous_opening_evidence();
     test_actual_game_semantic_landmark_does_not_gain_base_x_phase();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();

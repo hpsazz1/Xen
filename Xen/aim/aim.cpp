@@ -3887,6 +3887,8 @@ struct Aim::Impl {
             tracking_error_derivative_initialized = true;
         }
         tracking_previous_error_x = track_center_error_x;
+        const auto pending =
+            pending_issued_command_inventory(current_controller_at);
         // Y 保留 fdf6b00 已经实机通过的径向 deadzone 输入。公开/current
         // base X 的语义变化不得借共享模长改写 Y；内部历史 reference 在此
         // 只作为冻结的 Y 尺度输入，不回到 X base、选择或 closing 路径。
@@ -3910,8 +3912,29 @@ struct Aim::Impl {
                 0.0f,
                 1.0f - config.deadzone_pixels / x_error_magnitude)
             : 0.0f;
-        const float regularized_x_error_scale = active_x_error_scale *
-            active_x_error_scale * active_x_error_scale;
+        // 共同边与当前误差同向时，目标正在把 X 误差拉大；只在这一追赶
+        // 相位按既有刚体一致性从 cubic 连续靠近 quadratic。当前控制窗
+        // 中若仍混有反向命令，则按其方向构成连续减小增强量；这不把 ACK
+        // 当物理效果，也不改变后续既有库存整形。
+        const float x_error_direction = error_x > 0.0f
+            ? 1.0f : (error_x < 0.0f ? -1.0f : 0.0f);
+        const float pending_alignment_weight = pending.absolute_x > 0.0f
+            ? std::clamp(
+                  0.5f *
+                      (1.0f + x_error_direction * pending.net_x /
+                           pending.absolute_x),
+                  0.0f,
+                  1.0f)
+            : 1.0f;
+        const float opening_x_weight =
+            error_x * current_common_motion_x > 0.0f
+            ? current_common_consistency * current_common_consistency *
+                  pending_alignment_weight
+            : 0.0f;
+        const float regularized_x_error_scale =
+            active_x_error_scale * active_x_error_scale *
+            (active_x_error_scale +
+             opening_x_weight * (1.0f - active_x_error_scale));
         const float proportional_x = error_x * regularized_x_error_scale *
             config.counts_per_pixel_x;
         const float proportional_y = error_y * regularized_error_scale *
@@ -3967,8 +3990,6 @@ struct Aim::Impl {
 
         const auto [delayed_command_x, delayed_command_y] =
             delayed_issued_command(current_controller_at);
-        const auto pending =
-            pending_issued_command_inventory(current_controller_at);
         // backend completion 只证明整数命令已完成后端接口，不代表已经观察到
         // 物理效果。这里不把 counts 投影成图像位移，只用完成时间在既有
         // 15 ms 控制窗中的剩余比例形成连续有符号库存；旧向库存越多，当前
