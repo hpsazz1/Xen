@@ -15,7 +15,6 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
-#include <limits>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -3509,11 +3508,6 @@ AimConfig prediction_timing_config(
     return config;
 }
 
-struct PredictionTimingPublicSample {
-    AimFrame frame;
-    AimResult result;
-};
-
 struct PredictionTimingDriver {
     PredictionTimingDriver(
             PredictionTimingAxis axis_value,
@@ -3530,7 +3524,7 @@ struct PredictionTimingDriver {
           base(std::chrono::steady_clock::now() +
                std::chrono::seconds(1)) {}
 
-    PredictionTimingPublicSample process(
+    AimResult process(
             std::uint64_t sequence,
             double elapsed_seconds,
             float axis_position,
@@ -3554,10 +3548,10 @@ struct PredictionTimingDriver {
                        result.command.dy_counts),
                    context + " 必须记录公开命令的 backend completion");
         }
-        return {std::move(frame), std::move(result)};
+        return result;
     }
 
-    PredictionTimingPublicSample process_missing(
+    AimResult process_missing(
             std::uint64_t sequence,
             double elapsed_seconds,
             float axis_position,
@@ -3574,7 +3568,7 @@ struct PredictionTimingDriver {
                context + " 短时丢框必须保留同一 predicted Track");
         expect(!result.has_command,
                context + " 短时丢框不得生成控制命令");
-        return {std::move(frame), std::move(result)};
+        return result;
     }
 
     void reset_epoch(std::chrono::steady_clock::time_point new_base) {
@@ -3851,10 +3845,9 @@ void test_delayed_prediction_reentry_uses_elapsed_time() {
             const std::string context = "F3 delay " +
                 std::string(vertical ? "Y" : "X") + "@" +
                 std::to_string(static_cast<int>(cadence));
-            const PredictionTimingPublicSample public_sample = driver.process(
+            const AimResult result = driver.process(
                 static_cast<std::uint64_t>(sample + 1),
                 elapsed_seconds, axis_position, 0.0f, context);
-            const AimResult& result = public_sample.result;
             if (!result.has_target) continue;
 
             const float signed_axis_lead =
@@ -3959,11 +3952,11 @@ void test_no_delay_prediction_reentry_uses_submillisecond_capture_time() {
             position_x += delta_x;
             const double elapsed_seconds = static_cast<double>(
                 elapsed_microseconds + timestamp_adjustment) / 1000000.0;
-            const PredictionTimingPublicSample sample = driver.process(
+            AimResult result = driver.process(
                 sequence++, elapsed_seconds, position_x, axis_error,
                 "submillisecond no-delay " + phase, kPositionY, 0.0f);
             elapsed_microseconds += delta_microseconds;
-            return sample.result;
+            return result;
         };
 
         AimResult result = step(0.0f, 0.0f, 10000, "initial");
@@ -4066,10 +4059,9 @@ void test_no_delay_prediction_rearm_uses_elapsed_time() {
                 std::to_string(
                     static_cast<int>(centered_seconds * 1000.0)) +
                 "ms";
-            const PredictionTimingPublicSample public_sample = driver.process(
+            const AimResult result = driver.process(
                 static_cast<std::uint64_t>(sample + 1),
                 elapsed_seconds, axis_position, error_pixels, context);
-            const AimResult& result = public_sample.result;
             if (!result.has_target) return;
             const bool axis_active =
                 prediction_timing_axis_active(result, vertical);
@@ -4125,17 +4117,16 @@ void test_no_delay_prediction_rearm_uses_elapsed_time() {
                 std::to_string(static_cast<int>(cadence));
             const bool missing = elapsed_seconds >= kLossStartSeconds &&
                 elapsed_seconds < kLossEndSeconds;
-            const PredictionTimingPublicSample public_sample = missing
+            const AimResult result = missing
                 ? driver.process_missing(
                     static_cast<std::uint64_t>(sample + 1),
                     elapsed_seconds, axis_position, error_pixels, context)
                 : driver.process(
                     static_cast<std::uint64_t>(sample + 1),
                     elapsed_seconds, axis_position, error_pixels, context);
-            const bool axis_active = public_sample.result.has_target &&
-                prediction_timing_axis_active(
-                    public_sample.result, vertical);
-            if (missing && public_sample.result.target.predicted) {
+            const bool axis_active = result.has_target &&
+                prediction_timing_axis_active(result, vertical);
+            if (missing && result.target.predicted) {
                 predicted_loss_seen = true;
             }
             if (axis_active && !previous_axis_active) {
@@ -4289,10 +4280,9 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
             const std::string context = "F5 no-delay " +
                 std::string(vertical ? "Y" : "X") + "@" +
                 std::to_string(static_cast<int>(cadence));
-            const PredictionTimingPublicSample public_sample = driver.process(
+            const AimResult result = driver.process(
                 static_cast<std::uint64_t>(sample + 1),
                 elapsed_seconds, axis_position, error_pixels, context);
-            const AimResult& result = public_sample.result;
             if (!result.has_target) return;
 
             if (elapsed_seconds >= kSecondCandidateStartSeconds &&
@@ -4346,12 +4336,10 @@ void test_no_delay_prediction_reentry_uses_elapsed_time() {
                 const float error_pixels = error_at(elapsed_seconds);
                 const float axis_position = prediction_timing_axis_position(
                     elapsed_seconds, kAxisVelocityPixelsPerSecond);
-                const PredictionTimingPublicSample public_sample =
-                    driver.process(
+                const AimResult result = driver.process(
                     static_cast<std::uint64_t>(sample + 2),
                     elapsed_seconds, axis_position, error_pixels,
                     "F5 no-delay reset@120");
-                const AimResult& result = public_sample.result;
                 if (result.target.lead_active &&
                     result.target.lead_x > 0.001f) {
                     trace.reset_first_activation_seen = true;
@@ -4461,14 +4449,12 @@ void test_no_delay_prediction_precomputes_while_unlocked() {
                 const bool lock_active =
                     elapsed_seconds < kUnlockStartSeconds ||
                     elapsed_seconds >= kRelockSeconds;
-                const PredictionTimingPublicSample public_sample =
-                    driver.process(
+                const AimResult result = driver.process(
                         static_cast<std::uint64_t>(sample + 1),
                         elapsed_seconds,
                         prediction_timing_axis_position(elapsed_seconds),
                         error_at(elapsed_seconds), context,
                         160.0f, 0.0f, lock_active);
-                const AimResult& result = public_sample.result;
                 if (public_track_id == 0) {
                     public_track_id = result.target.track_id;
                 }
@@ -4583,11 +4569,10 @@ void test_prediction_reentry_requires_one_continuous_direction() {
             const std::string context = "direction no-delay " +
                 std::string(vertical ? "Y" : "X") + "@" +
                 std::to_string(static_cast<int>(cadence));
-            const PredictionTimingPublicSample public_sample = driver.process(
+            const AimResult result = driver.process(
                 static_cast<std::uint64_t>(sample + 1), elapsed_seconds,
                 axis_position_at(elapsed_seconds), error_pixels, context,
                 orthogonal_position_at(elapsed_seconds));
-            const AimResult& result = public_sample.result;
             const float axis_velocity = vertical
                 ? result.target.velocity_y : result.target.velocity_x;
             const float orthogonal_velocity = vertical
@@ -4743,11 +4728,10 @@ void test_prediction_reentry_requires_one_continuous_direction() {
             const std::string context = "direction delay " +
                 std::string(vertical ? "Y" : "X") + "@" +
                 std::to_string(static_cast<int>(cadence));
-            const PredictionTimingPublicSample public_sample = driver.process(
+            const AimResult result = driver.process(
                 static_cast<std::uint64_t>(sample + 1), elapsed_seconds,
                 axis_position, axis_error, context, orthogonal_position,
                 orthogonal_position - 160.0f);
-            const AimResult& result = public_sample.result;
             const bool lead_active = result.target.lead_active;
             const float axis_velocity = vertical
                 ? result.target.velocity_y : result.target.velocity_x;
@@ -4907,11 +4891,11 @@ void test_delayed_prediction_reentry_keeps_one_axis_witness() {
                           const std::string& phase) {
         position_x += delta_x;
         position_y += delta_y;
-        const PredictionTimingPublicSample sample = driver.process(
+        AimResult result = driver.process(
             sequence++, elapsed_seconds, position_x, 0.0f,
             "axis witness " + phase, position_y, 0.0f);
         elapsed_seconds += 0.010;
-        return sample.result;
+        return result;
     };
 
     AimResult result = step(0.0f, 0.0f, "initial");
@@ -4998,11 +4982,11 @@ void test_delayed_prediction_candidate_clears_on_predicted_loss() {
         float position_x = 100.0f;
         const auto step = [&](float delta_x, const std::string& phase) {
             position_x += delta_x;
-            const PredictionTimingPublicSample sample = driver.process(
+            AimResult result = driver.process(
                 sequence++, elapsed_seconds, position_x, 0.0f,
                 "delay loss " + phase, kPositionY, 0.0f);
             elapsed_seconds += 0.010;
-            return sample.result;
+            return result;
         };
 
         Trace trace;
@@ -5016,21 +5000,18 @@ void test_delayed_prediction_candidate_clears_on_predicted_loss() {
         for (int sample = 0; sample < 30; ++sample) {
             position_x -= 2.0f;
             if (sample == loss_sample) {
-                const PredictionTimingPublicSample lost =
-                    driver.process_missing(
-                        sequence++, elapsed_seconds, position_x, 0.0f,
-                        "delay loss interruption");
-                result = lost.result;
+                result = driver.process_missing(
+                    sequence++, elapsed_seconds, position_x, 0.0f,
+                    "delay loss interruption");
                 trace.loss_contract_seen =
                     result.has_target &&
                     result.target.track_id == original_track_id &&
                     result.target.predicted &&
                     !result.target.lead_active;
             } else {
-                const PredictionTimingPublicSample observed = driver.process(
+                result = driver.process(
                     sequence++, elapsed_seconds, position_x, 0.0f,
                     "delay loss candidate", kPositionY, 0.0f);
-                result = observed.result;
             }
             elapsed_seconds += 0.010;
             if (trace.activation_sample < 0 && result.has_target &&
@@ -5069,11 +5050,11 @@ void test_delayed_prediction_candidate_clears_on_identity_switch() {
     const auto step_selected = [&](float delta_x,
                                    const std::string& phase) {
         selected_position_x += delta_x;
-        const PredictionTimingPublicSample sample = driver.process(
+        AimResult result = driver.process(
             sequence++, elapsed_seconds, selected_position_x, 0.0f,
             "identity switch " + phase, kPositionY, 0.0f);
         elapsed_seconds += 0.010;
-        return sample.result;
+        return result;
     };
 
     DelayedPredictionReentrySetup setup =
@@ -5154,11 +5135,11 @@ void test_delayed_prediction_candidate_reset_matches_fresh_instance() {
     constexpr float kPositionY = 160.0f;
     const auto step = [&](float delta_x, const std::string& phase) {
         position_x += delta_x;
-        const PredictionTimingPublicSample sample = reset_driver.process(
+        AimResult result = reset_driver.process(
             sequence++, elapsed_seconds, position_x, 0.0f,
             "delay reset " + phase, kPositionY, 0.0f);
         elapsed_seconds += 0.010;
-        return sample.result;
+        return result;
     };
 
     DelayedPredictionReentrySetup setup =
@@ -5182,24 +5163,21 @@ void test_delayed_prediction_candidate_reset_matches_fresh_instance() {
     position_x = 100.0f;
     for (int sample = 0; sample < 80; ++sample) {
         position_x += 0.8f;
-        const PredictionTimingPublicSample after_reset =
-            reset_driver.process(
+        const AimResult after_reset = reset_driver.process(
                 sequence, elapsed_seconds, position_x, 0.0f,
                 "delay reset restarted", kPositionY, 0.0f);
-        const PredictionTimingPublicSample fresh = fresh_driver.process(
+        const AimResult fresh = fresh_driver.process(
             sequence, elapsed_seconds, position_x, 0.0f,
             "delay reset fresh", kPositionY, 0.0f);
-        expect(after_reset.result.has_target == fresh.result.has_target &&
-                   after_reset.result.target.track_id ==
-                       fresh.result.target.track_id &&
-                   after_reset.result.target.predicted ==
-                       fresh.result.target.predicted &&
-                   after_reset.result.target.lead_active ==
-                       fresh.result.target.lead_active &&
-                   std::fabs(after_reset.result.target.lead_x -
-                             fresh.result.target.lead_x) <= 0.000001f &&
-                   std::fabs(after_reset.result.target.lead_y -
-                             fresh.result.target.lead_y) <= 0.000001f,
+        expect(after_reset.has_target == fresh.has_target &&
+                   after_reset.target.track_id == fresh.target.track_id &&
+                   after_reset.target.predicted == fresh.target.predicted &&
+                   after_reset.target.lead_active ==
+                       fresh.target.lead_active &&
+                   std::fabs(after_reset.target.lead_x -
+                             fresh.target.lead_x) <= 0.000001f &&
+                   std::fabs(after_reset.target.lead_y -
+                             fresh.target.lead_y) <= 0.000001f,
                "delay candidate 中 Aim::reset 后必须与全新实例逐帧等价，sample=" +
                    std::to_string(sample));
         ++sequence;
