@@ -356,6 +356,12 @@ constexpr float kPredictionVerticalMotionEstablishmentSeconds = 0.25f;
 // 真机反事实未缩短首次进入，因此撤回；连续第二个低谷仍清空累计，
 // 不能把断续相机反馈拼成真实运动。
 constexpr int kPredictionEstablishmentLowMotionGraceFrames = 1;
+// 既有 10 ms public hysteresis 夹具把重入连续确认固定为 4 个采样；
+// 这里恢复为 40 ms 状态驻留，不把合同重新绑定到任何采集 Hz。
+constexpr float kPredictionLeadReentrySeconds = 0.040f;
+// 同一 10 ms public 夹具的 5 个 centered 确认恢复为 50 ms；只在
+// 当前真实观测仍位于旧 lead 轴中心范围时累计。
+constexpr float kPredictionLeadRearmCenteredSeconds = 0.050f;
 // 正确方向的提前量也不能在观察器刚建立时整段跳入。按真实 dt 在约 33 ms
 // 内线性渐入，避免 prediction 状态变化绕过物理命令阶跃门禁。
 constexpr float kPredictionLeadRampPerSecond = 30.0f;
@@ -916,6 +922,128 @@ std::vector<int> minimum_cost_assignment(
 struct Aim::Impl {
     explicit Impl(const AimConfig& value) : config(value) {}
 
+    struct ElapsedDwell final {
+        ElapsedDwell() noexcept = default;
+        ElapsedDwell(const ElapsedDwell&) = delete;
+        ElapsedDwell& operator=(const ElapsedDwell&) = delete;
+        ElapsedDwell(ElapsedDwell&&) = delete;
+        ElapsedDwell& operator=(ElapsedDwell&&) = delete;
+
+        [[nodiscard]] bool observe_qualifying_sample(
+                float delta_seconds,
+                float required_seconds) noexcept {
+            if (!started_) {
+                started_ = true;
+                elapsed_seconds_ = 0.0f;
+            } else {
+                elapsed_seconds_ += delta_seconds;
+            }
+            return elapsed_seconds_ + 0.000001f >= required_seconds;
+        }
+
+        void reset() noexcept {
+            elapsed_seconds_ = 0.0f;
+            started_ = false;
+        }
+
+    private:
+        float elapsed_seconds_ = 0.0f;
+        bool started_ = false;
+    };
+
+    struct DirectionalElapsedDwell final {
+        DirectionalElapsedDwell() noexcept = default;
+        DirectionalElapsedDwell(const DirectionalElapsedDwell&) = delete;
+        DirectionalElapsedDwell& operator=(
+            const DirectionalElapsedDwell&) = delete;
+        DirectionalElapsedDwell(DirectionalElapsedDwell&&) = delete;
+        DirectionalElapsedDwell& operator=(
+            DirectionalElapsedDwell&&) = delete;
+
+        [[nodiscard]] bool observe_qualifying_sample(
+                float delta_seconds,
+                float required_seconds,
+                float direction_x,
+                float direction_y) noexcept {
+            const auto axis_sign = [](float value) {
+                return value < 0.0f ? -1 : value > 0.0f ? 1 : 0;
+            };
+            const int direction_sign_x = axis_sign(direction_x);
+            const int direction_sign_y = axis_sign(direction_y);
+            if (direction_sign_x == 0 && direction_sign_y == 0) {
+                reset();
+                return false;
+            }
+            const bool has_common_axis =
+                (previous_sample_direction_x_ != 0 &&
+                 direction_sign_x != 0) ||
+                (previous_sample_direction_y_ != 0 &&
+                 direction_sign_y != 0);
+            const bool direction_changed =
+                (last_nonzero_direction_x_ != 0 &&
+                 direction_sign_x != 0 &&
+                 last_nonzero_direction_x_ != direction_sign_x) ||
+                (last_nonzero_direction_y_ != 0 &&
+                 direction_sign_y != 0 &&
+                 last_nonzero_direction_y_ != direction_sign_y);
+            if (!has_common_axis || direction_changed) {
+                dwell_.reset();
+                last_nonzero_direction_x_ = 0;
+                last_nonzero_direction_y_ = 0;
+            }
+            previous_sample_direction_x_ = direction_sign_x;
+            previous_sample_direction_y_ = direction_sign_y;
+            if (direction_sign_x != 0) {
+                last_nonzero_direction_x_ = direction_sign_x;
+            }
+            if (direction_sign_y != 0) {
+                last_nonzero_direction_y_ = direction_sign_y;
+            }
+            return dwell_.observe_qualifying_sample(
+                delta_seconds, required_seconds);
+        }
+
+        void reset() noexcept {
+            dwell_.reset();
+            previous_sample_direction_x_ = 0;
+            previous_sample_direction_y_ = 0;
+            last_nonzero_direction_x_ = 0;
+            last_nonzero_direction_y_ = 0;
+        }
+
+    private:
+        ElapsedDwell dwell_;
+        int previous_sample_direction_x_ = 0;
+        int previous_sample_direction_y_ = 0;
+        int last_nonzero_direction_x_ = 0;
+        int last_nonzero_direction_y_ = 0;
+    };
+
+    struct PredictionLeadTimingState final {
+        PredictionLeadTimingState() noexcept = default;
+        PredictionLeadTimingState(
+            const PredictionLeadTimingState&) = delete;
+        PredictionLeadTimingState& operator=(
+            const PredictionLeadTimingState&) = delete;
+        PredictionLeadTimingState(PredictionLeadTimingState&&) = delete;
+        PredictionLeadTimingState& operator=(
+            PredictionLeadTimingState&&) = delete;
+
+        DirectionalElapsedDwell delay_candidate;
+        ElapsedDwell no_delay_centered;
+        DirectionalElapsedDwell no_delay_candidate;
+
+        void reset_no_delay() noexcept {
+            no_delay_centered.reset();
+            no_delay_candidate.reset();
+        }
+
+        void reset() noexcept {
+            delay_candidate.reset();
+            reset_no_delay();
+        }
+    };
+
     AimConfig config;
     std::vector<Track> tracks;
     std::uint64_t next_track_id = 1;
@@ -980,8 +1108,7 @@ struct Aim::Impl {
     float prediction_pullback_direction_y = 0.0f;
     float prediction_pullback_hold_time_x = 0.0f;
     float prediction_pullback_hold_time_y = 0.0f;
-    int lead_settle_frames = 0;
-    int lead_candidate_frames = 0;
+    PredictionLeadTimingState lead_timing;
     float lead_direction_x = 0.0f;
     float lead_direction_y = 0.0f;
     float delay_lead_scale = 0.0f;
@@ -3138,8 +3265,7 @@ struct Aim::Impl {
             prediction_pullback_direction_y = 0.0f;
             prediction_pullback_hold_time_x = 0.0f;
             prediction_pullback_hold_time_y = 0.0f;
-            lead_settle_frames = 0;
-            lead_candidate_frames = 0;
+            lead_timing.reset();
             lead_direction_x = 0.0f;
             lead_direction_y = 0.0f;
             delay_lead_scale = 0.0f;
@@ -3168,8 +3294,7 @@ struct Aim::Impl {
             prediction_pullback_direction_y = 0.0f;
             prediction_pullback_hold_time_x = 0.0f;
             prediction_pullback_hold_time_y = 0.0f;
-            lead_settle_frames = 0;
-            lead_candidate_frames = 0;
+            lead_timing.reset();
             delay_lead_scale = 0.0f;
             prediction_world_velocity_x = 0.0f;
             prediction_world_velocity_y = 0.0f;
@@ -3199,8 +3324,7 @@ struct Aim::Impl {
             prediction_pullback_direction_y = 0.0f;
             prediction_pullback_hold_time_x = 0.0f;
             prediction_pullback_hold_time_y = 0.0f;
-            lead_settle_frames = 0;
-            lead_candidate_frames = 0;
+            lead_timing.reset();
             lead_direction_x = 0.0f;
             lead_direction_y = 0.0f;
             delay_lead_scale = 0.0f;
@@ -3343,7 +3467,7 @@ struct Aim::Impl {
                         lead_axis_active_y =
                             std::fabs(remaining_lead_y) > activation_distance_y;
                         projection.active = true;
-                        lead_candidate_frames = 0;
+                        lead_timing.delay_candidate.reset();
                         delay_lead_scale = 0.0f;
                         return projection;
                     }
@@ -3351,7 +3475,7 @@ struct Aim::Impl {
                 lead_active = false;
                 lead_axis_active_x = false;
                 lead_axis_active_y = false;
-                lead_candidate_frames = 0;
+                lead_timing.delay_candidate.reset();
                 delay_lead_scale = 0.0f;
                 prediction_offset_x = 0.0f;
                 prediction_offset_y = 0.0f;
@@ -3428,21 +3552,37 @@ struct Aim::Impl {
                 lead_active = false;
                 lead_axis_active_x = false;
                 lead_axis_active_y = false;
-                lead_candidate_frames = 0;
+                lead_timing.delay_candidate.reset();
                 delay_lead_scale = 0.0f;
                 prediction_offset_x = 0.0f;
                 prediction_offset_y = 0.0f;
                 return projection;
             }
             if (!lead_active) {
-                ++lead_candidate_frames;
-                // 退出过 prediction 后要求连续 4 帧运动确认，避免低谷噪声
-                // 让最终点在基础点和 prediction 点之间快速来回切换。
-                const int required_frames = lead_ever_activated ? 4 : 1;
-                if (lead_candidate_frames < required_frames) return projection;
+                if (lead_ever_activated) {
+                    // 首个满足全部 predicate 的样本是时间锚；同一生命周期
+                    // 的重入从该样本起经过 40 ms 才激活。几何资格仍由稳定
+                    // 世界速度决定；连续方向取上一控制周期缓存的、按当时有效
+                    // 命令补偿后的外部运动测量，避免低通世界速度在人物已经
+                    // 反向后把两侧样本拼成同一候选。
+                    const bool candidate_ready =
+                        lead_timing.delay_candidate.
+                        observe_qualifying_sample(
+                            track.prediction_dt,
+                            kPredictionLeadReentrySeconds,
+                            std::fabs(desired_lead_x) >
+                                    activation_distance_x
+                                ? world_motion_measurement_x : 0.0f,
+                            std::fabs(desired_lead_y) >
+                                    activation_distance_y
+                                ? world_motion_measurement_y : 0.0f);
+                    if (!candidate_ready) {
+                        return projection;
+                    }
+                }
                 lead_active = true;
                 lead_ever_activated = true;
-                lead_candidate_frames = 0;
+                lead_timing.delay_candidate.reset();
             }
             lead_direction_x = world_velocity_x / world_velocity_magnitude;
             lead_direction_y = world_velocity_y / world_velocity_magnitude;
@@ -3511,6 +3651,7 @@ struct Aim::Impl {
 
         // 未启用延迟补偿时保留原有的准星闭环迟滞语义。此分支没有可
         // 复用的延迟向量，只能按相对速度和观测年龄做保守预测。
+        lead_timing.delay_candidate.reset();
         delay_lead_scale = 0.0f;
         prediction_pullback_hold_x = false;
         prediction_pullback_hold_y = false;
@@ -3587,8 +3728,7 @@ struct Aim::Impl {
                 lead_axis_active_x = false;
                 lead_axis_active_y = false;
                 lead_rearm_ready = false;
-                lead_settle_frames = 0;
-                lead_candidate_frames = 0;
+                lead_timing.reset_no_delay();
             }
         } else {
             // 准星移动会反向改变目标的屏幕速度。预测退出后若立即按该相对
@@ -3597,30 +3737,40 @@ struct Aim::Impl {
             if (!lead_rearm_ready) {
                 // 只判断上一预测方向上的归位；身体默认瞄点在正交方向的
                 // 天然偏移不能永久阻塞水平预测恢复。
-                if (lead_axis_error <= exit_distance) {
-                    ++lead_settle_frames;
-                    constexpr int kLeadSettleConfirmFrames = 5;
-                    if (lead_settle_frames >= kLeadSettleConfirmFrames) {
+                if (!track.predicted &&
+                    lead_axis_error <= exit_distance) {
+                    if (lead_timing.no_delay_centered.
+                            observe_qualifying_sample(
+                            track.prediction_dt,
+                            kPredictionLeadRearmCenteredSeconds)) {
                         lead_rearm_ready = true;
+                        lead_timing.no_delay_centered.reset();
                     }
                 } else {
-                    lead_settle_frames = 0;
+                    lead_timing.no_delay_centered.reset();
                 }
             }
             if (lead_rearm_ready && !track.predicted && moving_away &&
                 longitudinal_error >= enter_distance) {
-                ++lead_candidate_frames;
-                constexpr int kLeadReenterConfirmFrames = 4;
-                const int required_frames = lead_ever_activated
-                    ? kLeadReenterConfirmFrames : 1;
-                if (lead_candidate_frames >= required_frames) {
+                bool activation_ready = !lead_ever_activated;
+                if (lead_ever_activated) {
+                    activation_ready =
+                        lead_timing.no_delay_candidate.
+                            observe_qualifying_sample(
+                            track.prediction_dt,
+                            kPredictionLeadReentrySeconds,
+                            horizontal_motion_dominates
+                                ? source_velocity_x : 0.0f,
+                            horizontal_motion_dominates
+                                ? 0.0f : source_velocity_y);
+                }
+                if (activation_ready) {
                     lead_active = true;
                     lead_ever_activated = true;
-                    lead_settle_frames = 0;
-                    lead_candidate_frames = 0;
+                    lead_timing.reset_no_delay();
                 }
             } else {
-                lead_candidate_frames = 0;
+                lead_timing.no_delay_candidate.reset();
             }
         }
         if (!lead_active) return projection;
@@ -4646,8 +4796,7 @@ struct Aim::Impl {
         prediction_pullback_direction_y = 0.0f;
         prediction_pullback_hold_time_x = 0.0f;
         prediction_pullback_hold_time_y = 0.0f;
-        lead_settle_frames = 0;
-        lead_candidate_frames = 0;
+        lead_timing.reset();
         lead_direction_x = 0.0f;
         lead_direction_y = 0.0f;
         prediction_world_velocity_x = 0.0f;
