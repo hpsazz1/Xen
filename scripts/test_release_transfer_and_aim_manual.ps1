@@ -151,12 +151,14 @@ using System.Threading;
 namespace XenAimManualLauncherFixture {
     public static class Program {
         private static void WriteMarker(
-                string path, string sessionId, int sequence) {
+                string path, string sessionId, int activationEpoch,
+                int sequence) {
             string temporary = path + ".tmp." + Guid.NewGuid().ToString("N");
             File.WriteAllText(temporary,
                 "{\"schema\":2,\"session_id\":\"" + sessionId +
                 "\",\"gate\":\"AIM_LOCK_ACTIVE\"," +
-                "\"activation_epoch\":1,\"sequence\":" + sequence + "}");
+                "\"activation_epoch\":" + activationEpoch +
+                ",\"sequence\":" + sequence + "}");
             if (File.Exists(path)) {
                 File.Replace(temporary, path, null);
             } else {
@@ -189,6 +191,16 @@ namespace XenAimManualLauncherFixture {
                 "XEN_TEST_RUNTIME_DROP_MARKER_PHASE");
             string dropMarkerGraceText = Environment.GetEnvironmentVariable(
                 "XEN_TEST_RUNTIME_DROP_MARKER_GRACE_MS");
+            string dropMarkerMode = Environment.GetEnvironmentVariable(
+                "XEN_TEST_RUNTIME_DROP_MARKER_MODE");
+            string restoreMarkerText = Environment.GetEnvironmentVariable(
+                "XEN_TEST_RUNTIME_RESTORE_MARKER_MS");
+            string restoreMarkerSessionId =
+                Environment.GetEnvironmentVariable(
+                    "XEN_TEST_RUNTIME_RESTORE_MARKER_SESSION_ID");
+            string restoreMarkerEpochText =
+                Environment.GetEnvironmentVariable(
+                    "XEN_TEST_RUNTIME_RESTORE_MARKER_EPOCH");
             string exitAfterPublishingText =
                 Environment.GetEnvironmentVariable(
                     "XEN_TEST_RUNTIME_EXIT_AFTER_PUBLISHING_MS");
@@ -206,14 +218,18 @@ namespace XenAimManualLauncherFixture {
                 Thread.Sleep(250);
                 Directory.CreateDirectory(runtimeRoot);
                 int sequence = 1;
-                WriteMarker(runtimeMarker, runtimeSessionId, sequence);
+                string markerSessionId = runtimeSessionId;
+                int markerActivationEpoch = 1;
+                WriteMarker(runtimeMarker, markerSessionId,
+                    markerActivationEpoch, sequence);
                 File.WriteAllText(ready, "ready");
                 File.Copy(reportSource,
                     Path.Combine(runtimeRoot, reportName), true);
                 DateTime deadline = DateTime.UtcNow.AddSeconds(5);
                 while (!File.Exists(started) && DateTime.UtcNow < deadline) {
                     Thread.Sleep(100);
-                    WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
+                    WriteMarker(runtimeMarker, markerSessionId,
+                        markerActivationEpoch, ++sequence);
                 }
                 if (!File.Exists(started)) return 21;
                 int dropMarkerGraceMilliseconds = 500;
@@ -226,6 +242,20 @@ namespace XenAimManualLauncherFixture {
                 if (dropMarkerGraceMilliseconds < 0) {
                     dropMarkerGraceMilliseconds = 0;
                 }
+                int restoreMarkerMilliseconds = -1;
+                int parsedRestoreMarkerMilliseconds = 0;
+                if (Int32.TryParse(restoreMarkerText,
+                        out parsedRestoreMarkerMilliseconds)) {
+                    restoreMarkerMilliseconds =
+                        parsedRestoreMarkerMilliseconds;
+                }
+                int restoreMarkerEpoch = 1;
+                int parsedRestoreMarkerEpoch = 0;
+                if (Int32.TryParse(restoreMarkerEpochText,
+                        out parsedRestoreMarkerEpoch) &&
+                    parsedRestoreMarkerEpoch > 0) {
+                    restoreMarkerEpoch = parsedRestoreMarkerEpoch;
+                }
                 int exitAfterPublishingMilliseconds = -1;
                 int parsedExitAfterPublishingMilliseconds = 0;
                 if (Int32.TryParse(exitAfterPublishingText,
@@ -234,8 +264,10 @@ namespace XenAimManualLauncherFixture {
                         parsedExitAfterPublishingMilliseconds;
                 }
                 DateTime dropMarkerDeadline = DateTime.MaxValue;
+                DateTime restoreMarkerDeadline = DateTime.MaxValue;
                 DateTime exitAfterPublishingDeadline = DateTime.MaxValue;
                 bool markerDropped = false;
+                bool markerDropPerformed = false;
                 while (!File.Exists(success) && DateTime.UtcNow < deadline) {
                     Thread.Sleep(100);
                     bool dropSignalObserved =
@@ -259,19 +291,38 @@ namespace XenAimManualLauncherFixture {
                             return 0;
                         }
                     }
-                    if (!markerDropped && dropSignalObserved &&
+                    if (!markerDropPerformed && dropSignalObserved &&
                         dropMarkerDeadline == DateTime.MaxValue) {
                         dropMarkerDeadline = DateTime.UtcNow.AddMilliseconds(
                             dropMarkerGraceMilliseconds);
                     }
-                    if (!markerDropped &&
+                    if (!markerDropPerformed &&
                         DateTime.UtcNow >= dropMarkerDeadline) {
-                        if (File.Exists(runtimeMarker)) {
+                        if (String.Equals(dropMarkerMode, "READ_ERROR",
+                                StringComparison.Ordinal)) {
+                            File.WriteAllText(runtimeMarker, "{");
+                        } else if (File.Exists(runtimeMarker)) {
                             File.Delete(runtimeMarker);
                         }
                         markerDropped = true;
+                        markerDropPerformed = true;
+                        if (restoreMarkerMilliseconds >= 0) {
+                            restoreMarkerDeadline =
+                                DateTime.UtcNow.AddMilliseconds(
+                                    restoreMarkerMilliseconds);
+                        }
+                    } else if (markerDropped &&
+                        DateTime.UtcNow >= restoreMarkerDeadline) {
+                        if (!String.IsNullOrEmpty(restoreMarkerSessionId)) {
+                            markerSessionId = restoreMarkerSessionId;
+                        }
+                        markerActivationEpoch = restoreMarkerEpoch;
+                        WriteMarker(runtimeMarker, markerSessionId,
+                            markerActivationEpoch, ++sequence);
+                        markerDropped = false;
                     } else if (!markerDropped) {
-                        WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
+                        WriteMarker(runtimeMarker, markerSessionId,
+                            markerActivationEpoch, ++sequence);
                     }
                 }
                 if (!File.Exists(success)) return 22;
@@ -286,7 +337,8 @@ namespace XenAimManualLauncherFixture {
                 while (DateTime.UtcNow < deadline) {
                     Thread.Sleep(100);
                     if (!markerDropped) {
-                        WriteMarker(runtimeMarker, runtimeSessionId, ++sequence);
+                        WriteMarker(runtimeMarker, markerSessionId,
+                            markerActivationEpoch, ++sequence);
                     }
                 }
                 return 0;
@@ -1204,8 +1256,276 @@ namespace XenAimManualPixelFixture {
         throw "同一次 Launch 中 source 稍后可用时，sidecar 必须重试并发布 VALID manifest。"
     }
 
-    # marker 在录制阶段消失时，即使 Launcher 仍存活也必须
-    # fail closed；这个负例防止后续对 publishing 放行时扩大采集窗口。
+    function Assert-PixelMarkerTransientRecoveryValid(
+            [string]$CaseName,
+            [string]$DropMode,
+            [string]$ExpectedReason) {
+        $caseRoot = Join-Path $root `
+            "pixel-sidecar-transient-$CaseName-task"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -RequireSourceTiming `
+            -CapturePixelEvidence `
+            -PixelEvidenceToolRoot $pixelToolRoot `
+            -PixelEvidenceBindingPath $pixelBinding `
+            -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+            -PackageRoot $published -RunDirectory $caseRoot |
+            Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "sidecar 短暂 marker 故障回归必须可 Prepare：$CaseName"
+        }
+        $caseCounter = Join-Path $root "pixel-transient-$CaseName.count"
+        # 跳过夹具固定的首次 ACCESS_LOST，只隔离 marker lease。
+        Write-Utf8 $caseCounter "1"
+        $caseEnvironment = [ordered]@{
+            XEN_TEST_PIXEL_STARTED = (Join-Path $root `
+                "pixel-transient-$CaseName.started")
+            XEN_TEST_PIXEL_READY = (Join-Path $root `
+                "pixel-transient-$CaseName.ready")
+            XEN_TEST_PIXEL_SUCCESS = (Join-Path $root `
+                "pixel-transient-$CaseName.success")
+            XEN_TEST_PIXEL_COUNTER = $caseCounter
+            XEN_TEST_PIXEL_EVIDENCE_SOURCE = $pixelLifecycleEvidenceSource
+            XEN_TEST_PIXEL_RECORDING_STARTED = (Join-Path $root `
+                "pixel-transient-$CaseName.recording")
+            XEN_TEST_PIXEL_PUBLISHING_STARTED = (Join-Path $root `
+                "pixel-transient-$CaseName.publishing")
+            XEN_TEST_PIXEL_RECORDING_HOLD_MS = "1800"
+            XEN_TEST_PIXEL_PUBLISH_DELAY_MS = "300"
+            XEN_TEST_RUNTIME_DROP_MARKER_PHASE = "RECORDING"
+            XEN_TEST_RUNTIME_DROP_MARKER_GRACE_MS = "400"
+            XEN_TEST_RUNTIME_DROP_MARKER_MODE = $DropMode
+            XEN_TEST_RUNTIME_RESTORE_MARKER_MS = "200"
+            XEN_TEST_RUNTIME_HOLD_AFTER_SUCCESS_MS = "1000"
+            XEN_TEST_RUNTIME_REPORT_SOURCE = $pixelLifecycleReportSource
+            XEN_TEST_RUNTIME_REPORT_NAME = "pixel-transient-$CaseName.json"
+            XEN_TEST_RUNTIME_ROOT = (Join-Path $published "cache\runtime")
+            XEN_TEST_RUNTIME_SESSION_ID = "pixel-schema13"
+        }
+        $savedEnvironment = @{}
+        foreach ($name in $caseEnvironment.Keys) {
+            $savedEnvironment[$name] =
+                [Environment]::GetEnvironmentVariable(
+                    $name, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable(
+                $name, [string]$caseEnvironment[$name],
+                [EnvironmentVariableTarget]::Process)
+        }
+        try {
+            $savedErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $caseOutput = @(& powershell.exe -NoProfile `
+                -ExecutionPolicy Bypass -File `
+                (Join-Path $published `
+                    "tools\invoke_aim_manual_acceptance.ps1") `
+                -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+                -Mode Launch -Scenario SuperJump -SuperJumpCase Static `
+                -Profile tracking -RequireSourceTiming `
+                -CapturePixelEvidence `
+                -PixelEvidenceToolRoot $pixelToolRoot `
+                -PixelEvidenceBindingPath $pixelBinding `
+                -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+                -PackageRoot $published -RunDirectory $caseRoot `
+                -AllowPhysicalOutput `
+                -PhysicalOutputConfirmation `
+                    XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT 2>&1)
+        } finally {
+            $ErrorActionPreference = $savedErrorActionPreference
+            foreach ($name in $caseEnvironment.Keys) {
+                [Environment]::SetEnvironmentVariable(
+                    $name, $savedEnvironment[$name],
+                    [EnvironmentVariableTarget]::Process)
+            }
+        }
+        $summary = Get-Content -LiteralPath `
+            (Join-Path $caseRoot "automatic-summary.json") `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+        $attemptEvidence = Get-Content -LiteralPath `
+            (Join-Path $caseRoot "pixel-evidence-attempts.json") `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+        $attempts = @($attemptEvidence.attempts)
+        $lastAttempt = if ($attempts.Count -gt 0) {
+            $attempts[-1]
+        } else { $null }
+        $lastTransientFailure = if ($null -ne $lastAttempt -and
+                $lastAttempt.PSObject.Properties.Name -contains
+                    "runtime_marker_last_transient_failure") {
+            $lastAttempt.runtime_marker_last_transient_failure
+        } else { $null }
+        $probeFieldsAvailable =
+            $null -ne $lastAttempt -and
+            $lastAttempt.PSObject.Properties.Name -contains
+                "runtime_marker_transient_failure_count" -and
+            $lastAttempt.PSObject.Properties.Name -contains
+                "runtime_marker_last_valid_sequence" -and
+            $null -ne $lastTransientFailure -and
+            $lastTransientFailure.PSObject.Properties.Name -contains
+                "last_valid_age_ms"
+        if (-not [bool]$summary.pixel_evidence.gate_passed -or
+            [string]$summary.pixel_evidence.diagnostic -ne "VALID" -or
+            -not [bool]$attemptEvidence.runtime_alignment.gate_passed -or
+            $attempts.Count -ne 1 -or
+            -not [bool]$lastAttempt.succeeded -or
+            -not [bool]$lastAttempt.manifest_published -or
+            -not [bool]$lastAttempt.runtime_active_at_start -or
+            -not [bool]$lastAttempt.runtime_active_at_recording_completion -or
+            -not $probeFieldsAvailable -or
+            ($probeFieldsAvailable -and
+                [int]$lastAttempt.runtime_marker_transient_failure_count -lt
+                    1) -or
+            ($probeFieldsAvailable -and
+                [string]$lastTransientFailure.reason -ne $ExpectedReason) -or
+            ($probeFieldsAvailable -and
+                [uint64]$lastTransientFailure.last_valid_sequence -lt 1) -or
+            ($probeFieldsAvailable -and
+                [double]$lastTransientFailure.last_valid_age_ms -ge 1000.0) -or
+            ($probeFieldsAvailable -and
+                [uint64]$lastAttempt.runtime_marker_last_valid_sequence -le
+                    [uint64]$lastTransientFailure.last_valid_sequence) -or
+            -not [string]::IsNullOrWhiteSpace(
+                [string]$attemptEvidence.execution_error) -or
+            ($caseOutput -join "`n") -notmatch
+                "sidecar 已完成，可以松开右键") {
+            $caseOutput | ForEach-Object { Write-Host $_ }
+            Write-Host ($summary.pixel_evidence | ConvertTo-Json -Depth 8)
+            Write-Host ($attemptEvidence | ConvertTo-Json -Depth 8)
+            throw ("同一 activation 的短暂 marker 故障恢复后必须 " +
+                "VALID：$CaseName/$ExpectedReason")
+        }
+    }
+
+    # recording 中短暂 MISSING 或 READ_ERROR 不等于 activation 已结束；
+    # 同一 session/epoch 在既有 lease 内以递增 sequence 恢复时继续。
+    Assert-PixelMarkerTransientRecoveryValid "missing" "MISSING" "MISSING"
+    Assert-PixelMarkerTransientRecoveryValid `
+        "read-error" "READ_ERROR" "READ_ERROR"
+
+    function Assert-PixelMarkerIdentitySwitchFails(
+            [string]$CaseName,
+            [string]$RestoreSessionId,
+            [string]$RestoreEpoch,
+            [string]$ExpectedReason) {
+        $caseRoot = Join-Path $root "pixel-sidecar-$CaseName-task"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+            -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+            -Mode Prepare -Scenario SuperJump -SuperJumpCase Static `
+            -Profile tracking -RequireSourceTiming `
+            -CapturePixelEvidence `
+            -PixelEvidenceToolRoot $pixelToolRoot `
+            -PixelEvidenceBindingPath $pixelBinding `
+            -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+            -PackageRoot $published -RunDirectory $caseRoot |
+            Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "sidecar marker 身份切换负例必须可 Prepare：$CaseName"
+        }
+        $caseCounter = Join-Path $root "pixel-$CaseName.count"
+        # 跳过夹具固定的首次 ACCESS_LOST，只隔离 marker 身份切换。
+        Write-Utf8 $caseCounter "1"
+        $caseEnvironment = [ordered]@{
+            XEN_TEST_PIXEL_STARTED = (Join-Path $root `
+                "pixel-$CaseName.started")
+            XEN_TEST_PIXEL_READY = (Join-Path $root `
+                "pixel-$CaseName.ready")
+            XEN_TEST_PIXEL_SUCCESS = (Join-Path $root `
+                "pixel-$CaseName.success")
+            XEN_TEST_PIXEL_COUNTER = $caseCounter
+            XEN_TEST_PIXEL_EVIDENCE_SOURCE = $pixelLifecycleEvidenceSource
+            XEN_TEST_PIXEL_RECORDING_STARTED = (Join-Path $root `
+                "pixel-$CaseName.recording")
+            XEN_TEST_PIXEL_PUBLISHING_STARTED = (Join-Path $root `
+                "pixel-$CaseName.publishing")
+            XEN_TEST_PIXEL_RECORDING_HOLD_MS = "1800"
+            XEN_TEST_PIXEL_PUBLISH_DELAY_MS = "300"
+            XEN_TEST_RUNTIME_DROP_MARKER_PHASE = "RECORDING"
+            XEN_TEST_RUNTIME_DROP_MARKER_GRACE_MS = "400"
+            XEN_TEST_RUNTIME_RESTORE_MARKER_MS = "200"
+            XEN_TEST_RUNTIME_RESTORE_MARKER_SESSION_ID = $RestoreSessionId
+            XEN_TEST_RUNTIME_RESTORE_MARKER_EPOCH = $RestoreEpoch
+            XEN_TEST_RUNTIME_HOLD_AFTER_SUCCESS_MS = "1000"
+            XEN_TEST_RUNTIME_REPORT_SOURCE = $pixelLifecycleReportSource
+            XEN_TEST_RUNTIME_REPORT_NAME = "pixel-$CaseName.json"
+            XEN_TEST_RUNTIME_ROOT = (Join-Path $published "cache\runtime")
+            XEN_TEST_RUNTIME_SESSION_ID = "pixel-schema13"
+        }
+        $savedEnvironment = @{}
+        foreach ($name in $caseEnvironment.Keys) {
+            $savedEnvironment[$name] =
+                [Environment]::GetEnvironmentVariable(
+                    $name, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable(
+                $name, [string]$caseEnvironment[$name],
+                [EnvironmentVariableTarget]::Process)
+        }
+        try {
+            $savedErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $caseOutput = @(& powershell.exe -NoProfile `
+                -ExecutionPolicy Bypass -File `
+                (Join-Path $published `
+                    "tools\invoke_aim_manual_acceptance.ps1") `
+                -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+                -Mode Launch -Scenario SuperJump -SuperJumpCase Static `
+                -Profile tracking -RequireSourceTiming `
+                -CapturePixelEvidence `
+                -PixelEvidenceToolRoot $pixelToolRoot `
+                -PixelEvidenceBindingPath $pixelBinding `
+                -PixelEvidenceFrames 2400 -PixelEvidenceMaxSeconds 30 `
+                -PackageRoot $published -RunDirectory $caseRoot `
+                -AllowPhysicalOutput `
+                -PhysicalOutputConfirmation `
+                    XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT 2>&1)
+        } finally {
+            $ErrorActionPreference = $savedErrorActionPreference
+            foreach ($name in $caseEnvironment.Keys) {
+                [Environment]::SetEnvironmentVariable(
+                    $name, $savedEnvironment[$name],
+                    [EnvironmentVariableTarget]::Process)
+            }
+        }
+        $summary = Get-Content -LiteralPath `
+            (Join-Path $caseRoot "automatic-summary.json") `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+        $attemptEvidence = Get-Content -LiteralPath `
+            (Join-Path $caseRoot "pixel-evidence-attempts.json") `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+        $attempts = @($attemptEvidence.attempts)
+        $lastAttempt = if ($attempts.Count -gt 0) {
+            $attempts[-1]
+        } else { $null }
+        if ($attempts.Count -eq 0 -or
+            [bool]$summary.pixel_evidence.gate_passed -or
+            [bool]$attemptEvidence.runtime_alignment.gate_passed -or
+            [bool]$lastAttempt.succeeded -or
+            [bool]$lastAttempt.manifest_published -or
+            [string]$lastAttempt.runtime_marker_terminal_probe.reason -ne
+                $ExpectedReason -or
+            [string]$attemptEvidence.execution_error -notmatch
+                [regex]::Escape($ExpectedReason) -or
+            (Test-Path -LiteralPath (Join-Path $caseRoot `
+                "pixel-evidence\manifest.json") -PathType Leaf) -or
+            ($caseOutput -join "`n") -notmatch
+                "sidecar 未完成或已停止，可以松开右键") {
+            $caseOutput | ForEach-Object { Write-Host $_ }
+            Write-Host ($summary.pixel_evidence | ConvertTo-Json -Depth 8)
+            Write-Host ($attemptEvidence | ConvertTo-Json -Depth 8)
+            throw ("marker 身份切换必须立即 fail closed 且保留原因：" +
+                "$CaseName/$ExpectedReason")
+        }
+    }
+
+    # MISSING/READ_ERROR 的 lease 只允许同一身份恢复；session 或
+    # activation epoch 变化均代表真正 activation 切换，必须立即终止。
+    Assert-PixelMarkerIdentitySwitchFails `
+        "session-switch" "pixel-schema13-switched" "1" "SESSION_MISMATCH"
+    Assert-PixelMarkerIdentitySwitchFails `
+        "epoch-switch" "" "2" "ACTIVATION_EPOCH_MISMATCH"
+
+    # marker 在录制阶段永久消失时只能消耗既有 lease；lease 到期后即使
+    # Launcher 仍存活也必须 fail closed，且不得扩大 publishing 窗口。
     $pixelRecordingLossRoot = Join-Path $root `
         "pixel-sidecar-recording-marker-loss-task"
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
@@ -1291,19 +1611,34 @@ namespace XenAimManualPixelFixture {
     $recordingLossLastAttempt = if ($recordingLossAttempts.Count -gt 0) {
         $recordingLossAttempts[-1]
     } else { $null }
+    $recordingLossTerminalProbe = if ($null -ne $recordingLossLastAttempt) {
+        $recordingLossLastAttempt.runtime_marker_terminal_probe
+    } else { $null }
+    $recordingLossTransientProbe = if (
+            $null -ne $recordingLossLastAttempt) {
+        $recordingLossLastAttempt.runtime_marker_last_transient_failure
+    } else { $null }
     if ($recordingLossAttempts.Count -eq 0 -or
         [bool]$recordingLossSummary.pixel_evidence.gate_passed -or
         [string]$recordingLossSummary.pixel_evidence.execution_error `
-            -notmatch 'Runtime aim-lock activation' -or
+            -notmatch 'MISSING_LEASE_EXPIRED' -or
         [bool]$recordingLossAttemptEvidence.runtime_alignment.gate_passed -or
         [bool]$recordingLossLastAttempt.succeeded -or
         [bool]$recordingLossLastAttempt.manifest_published -or
+        [int]$recordingLossLastAttempt.runtime_marker_transient_failure_count `
+            -lt 1 -or
+        [string]$recordingLossTransientProbe.reason -ne "MISSING" -or
+        [string]$recordingLossTerminalProbe.reason -ne
+            "MISSING_LEASE_EXPIRED" -or
+        [double]$recordingLossTerminalProbe.age_ms -lt 1000.0 -or
+        [uint64]$recordingLossTerminalProbe.sequence -lt 1 -or
         (Test-Path -LiteralPath (Join-Path $pixelRecordingLossRoot `
             "pixel-evidence\manifest.json") -PathType Leaf) -or
         ($recordingLossOutput -join "`n") -notmatch
             "sidecar 未完成或已停止，可以松开右键") {
         $recordingLossOutput | ForEach-Object { Write-Host $_ }
-        throw "marker 在 recording 阶段丢失时必须终止 sidecar 且不发布 manifest。"
+        Write-Host ($recordingLossAttemptEvidence | ConvertTo-Json -Depth 8)
+        throw "marker 永久丢失必须在既有 lease 到期后终止且不发布 manifest。"
     }
 
     # 公开 red：绑定 sidecar 已录满并在精确 PID incoming 目录

@@ -13,6 +13,7 @@
 #include "aim_superjump_random_move_replay_fixture.h"
 #include "aim_static_closed_loop_replay_fixture.h"
 #include "aim_x_plant_holdout_fixture.h"
+#include "aim_x_latest_automatic_holdout_fixture.h"
 #include "aim_x_plant_replay_fixture.h"
 #include "aim_x_two_dof_holdout_fixture.h"
 
@@ -14337,6 +14338,181 @@ void test_latest_physical_opening_responsibility_reduces_x_lag() {
                std::to_string(vertical_command_frames));
 }
 
+void test_latest_automatic_tail_rejects_regressive_x_candidates() {
+    using aim_x_latest_automatic_holdout_fixture::kMeasurementStart;
+    using aim_x_latest_automatic_holdout_fixture::kInitialWorldCenterX;
+    using aim_x_latest_automatic_holdout_fixture::kPlantDelayFrames;
+    using aim_x_latest_automatic_holdout_fixture::kPlantPixelsPerCount;
+    using aim_x_latest_automatic_holdout_fixture::kSamples;
+
+    AimConfig config;
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.10f;
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+
+    Aim aim(config);
+    std::array<int, kPlantDelayFrames> delayed_commands{};
+    auto captured_at = std::chrono::steady_clock::now() +
+        std::chrono::seconds(1);
+    float world_center_x = kInitialWorldCenterX;
+    float camera_background_x = 0.0f;
+    std::vector<float> absolute_errors;
+    int crosshair_outside_x_frames = 0;
+    int longest_outside_x_streak = 0;
+    int current_outside_x_streak = 0;
+    int outside_quantization_zero_frames = 0;
+    int command_direction_violations = 0;
+    int command_limit_violations = 0;
+    int vertical_command_frames = 0;
+    std::string outside_trace;
+
+    for (std::size_t index = 0; index < kSamples.size(); ++index) {
+        const auto& sample = kSamples[index];
+        const std::size_t delay_slot = index % delayed_commands.size();
+        camera_background_x -=
+            static_cast<float>(delayed_commands[delay_slot]) *
+            kPlantPixelsPerCount;
+        delayed_commands[delay_slot] = 0;
+        if (index != 0) {
+            captured_at += std::chrono::microseconds(sample.dt_microseconds);
+        }
+        world_center_x +=
+            static_cast<float>(sample.world_delta_millipixels) / 1000.0f;
+        const float width =
+            static_cast<float>(sample.width_centipixels) / 100.0f;
+        const float height =
+            static_cast<float>(sample.height_centipixels) / 100.0f;
+        const float observed_center_x =
+            world_center_x + camera_background_x;
+
+        AimFrame frame = make_frame(
+            static_cast<std::uint64_t>(index + 1), captured_at);
+        frame.control_at = captured_at + std::chrono::milliseconds(3);
+        frame.lock_active = true;
+        frame.detections = {body_box(
+            observed_center_x,
+            frame.control_center_y + height * 0.15f,
+            width, height)};
+        const AimResult result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS &&
+                   (index == 0 || result.has_target),
+               "772db8c9 automatic 尾段代理除首个 tentative 样本外必须保留目标");
+        if (!result.has_target) continue;
+        expect_current_horizontal_base(
+            result, "772db8c9 automatic 尾段代理");
+
+        if (result.has_command) {
+            delayed_commands[delay_slot] = result.command.dx_counts;
+            expect(aim.record_backend_completed_command(
+                       frame.sequence,
+                       frame.control_at + std::chrono::microseconds(100),
+                       result.command.dx_counts,
+                       result.command.dy_counts),
+                   "772db8c9 automatic 尾段代理必须写回同序列完成命令");
+        }
+        if (index < kMeasurementStart) continue;
+
+        const float error_x =
+            result.target.base_aim_x - frame.control_center_x;
+        absolute_errors.push_back(std::fabs(error_x));
+        const bool outside_x =
+            frame.control_center_x < result.target.matched_observation_x1 ||
+            frame.control_center_x > result.target.matched_observation_x2;
+        if (outside_x) {
+            ++crosshair_outside_x_frames;
+            ++current_outside_x_streak;
+            longest_outside_x_streak = std::max(
+                longest_outside_x_streak, current_outside_x_streak);
+            if (result.control.quantization_zero_x) {
+                ++outside_quantization_zero_frames;
+            }
+            outside_trace +=
+                std::to_string(index) + ":e=" + std::to_string(error_x) +
+                ",w=" + std::to_string(width) +
+                ",P=" + std::to_string(
+                    result.control.proportional_x_counts) +
+                ",I=" + std::to_string(
+                    result.control.feedforward_x_counts) +
+                ",R=" + std::to_string(
+                    result.control.modelled_response_x_counts) +
+                ",F=" + std::to_string(
+                    result.control.filtered_x_counts) +
+                ",S=" + std::to_string(
+                    result.control.shaped_x_counts) +
+                ",C=" + std::to_string(result.command.dx_counts) + ";";
+        } else {
+            current_outside_x_streak = 0;
+        }
+        if (result.command.dx_counts != 0 &&
+            result.command.dx_counts * error_x <= 0.0f) {
+            ++command_direction_violations;
+        }
+        if (std::hypot(
+                static_cast<float>(result.command.dx_counts),
+                static_cast<float>(result.command.dy_counts)) >
+            config.max_counts_per_frame + 0.001f) {
+            ++command_limit_violations;
+        }
+        if (result.command.dy_counts != 0) {
+            ++vertical_command_frames;
+        }
+    }
+
+    const auto percentile = [](std::vector<float> values, float ratio) {
+        std::sort(values.begin(), values.end());
+        const std::size_t index = static_cast<std::size_t>(std::clamp(
+            ratio * static_cast<float>(values.size() - 1),
+            0.0f, static_cast<float>(values.size() - 1)));
+        return values[index];
+    };
+    const float error_p50 = percentile(absolute_errors, 0.50f);
+    const float error_p95 = percentile(absolute_errors, 0.95f);
+    const float maximum_error =
+        *std::max_element(absolute_errors.begin(), absolute_errors.end());
+    std::cout << "772db8c9 automatic X 尾段代理: 误差 P50/P95/max="
+              << error_p50 << "/" << error_p95 << "/" << maximum_error
+              << "，X 出框/最长/量化零=" << crosshair_outside_x_frames
+              << "/" << longest_outside_x_streak << "/"
+              << outside_quantization_zero_frames << '\n';
+    // 613c3ce 的固定代理基线为 3.588/6.864/9.715 px、5 个出框帧、
+    // 最长 3 帧。该 fixture 不把尚未解决的 Physical 观察改写为 green；
+    // 它只作为 deletion holdout，拒绝为改善其他 Run 而扩大当前尾段。
+    expect(error_p50 <= 3.60f && error_p95 <= 6.90f &&
+               maximum_error <= 9.80f && crosshair_outside_x_frames <= 5 &&
+               longest_outside_x_streak <= 3,
+           "772db8c9 automatic 固定尾段不得扩大连续 X 滞后和出框代理；"
+           "该代理不替代缺失的同步 pixel/Physical 证据，误差 P50/P95/max=" +
+               std::to_string(error_p50) + "/" +
+               std::to_string(error_p95) + "/" +
+               std::to_string(maximum_error) + "，出框/最长/量化零=" +
+               std::to_string(crosshair_outside_x_frames) + "/" +
+               std::to_string(longest_outside_x_streak) + "/" +
+               std::to_string(outside_quantization_zero_frames) +
+               "，trace=" + outside_trace);
+    expect(outside_quantization_zero_frames == 0 &&
+               command_direction_violations == 0 &&
+               command_limit_violations == 0 && vertical_command_frames == 0,
+           "772db8c9 automatic 尾段候选不得把出框归因给量化，也不得改变"
+           "方向、二维上限或冻结 Y，违规=" +
+               std::to_string(outside_quantization_zero_frames) + "/" +
+               std::to_string(command_direction_violations) + "/" +
+               std::to_string(command_limit_violations) + "/" +
+               std::to_string(vertical_command_frames));
+}
+
 int main() {
     test_status_transition_logs_are_limited();
 
@@ -14423,6 +14599,7 @@ int main() {
     test_identified_x_plant_random_move_closes_physical_lag();
     test_identified_x_plant_holdout_does_not_cap_motion_at_position_error();
     test_latest_physical_opening_responsibility_reduces_x_lag();
+    test_latest_automatic_tail_rejects_regressive_x_candidates();
     test_actual_game_semantic_landmark_does_not_gain_base_x_phase();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();

@@ -394,29 +394,257 @@ function Read-RuntimeAlignmentMarker([string]$Path) {
     return $marker
 }
 
+function Get-RuntimeAlignmentMarkerProbe(
+        [string]$Path,
+        [string]$ExpectedSessionId,
+        [uint64]$ExpectedActivationEpoch) {
+    $observedUtc = [DateTime]::UtcNow
+    $file = $null
+    try {
+        $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+    } catch {
+        $pathStillExists = try {
+            Test-Path -LiteralPath $Path -PathType Leaf -ErrorAction Stop
+        } catch { $true }
+        $reason = if ($pathStillExists) { "READ_ERROR" } else { "MISSING" }
+        return [pscustomobject][ordered]@{
+            active = $false
+            recoverable = $true
+            reason = $reason
+            observed_utc = $observedUtc
+            last_write_utc = $null
+            age_ms = $null
+            sequence = [uint64]0
+        }
+    }
+    $ageMs = ($observedUtc - $file.LastWriteTimeUtc).TotalMilliseconds
+    if ($ageMs -lt -250) {
+        return [pscustomobject][ordered]@{
+            active = $false
+            recoverable = $false
+            reason = "CLOCK_SKEW"
+            observed_utc = $observedUtc
+            last_write_utc = $file.LastWriteTimeUtc
+            age_ms = $ageMs
+            sequence = [uint64]0
+        }
+    }
+    if ($ageMs -gt $pixelEvidenceRuntimeMarkerMaxAgeMs) {
+        return [pscustomobject][ordered]@{
+            active = $false
+            recoverable = $false
+            reason = "STALE"
+            observed_utc = $observedUtc
+            last_write_utc = $file.LastWriteTimeUtc
+            age_ms = $ageMs
+            sequence = [uint64]0
+        }
+    }
+    try {
+        $marker = Get-Content -LiteralPath $Path -Raw -Encoding utf8 |
+            ConvertFrom-Json
+    } catch {
+        return [pscustomobject][ordered]@{
+            active = $false
+            recoverable = $true
+            reason = "READ_ERROR"
+            observed_utc = $observedUtc
+            last_write_utc = $file.LastWriteTimeUtc
+            age_ms = $ageMs
+            sequence = [uint64]0
+        }
+    }
+    $required = @(
+        "schema", "session_id", "gate", "activation_epoch", "sequence")
+    $missing = @($required | Where-Object {
+        $marker.PSObject.Properties.Name -notcontains $_
+    })
+    try {
+        $markerSchema = [int]$marker.schema
+        $markerSessionId = [string]$marker.session_id
+        $markerGate = [string]$marker.gate
+        $markerActivationEpoch = [uint64]$marker.activation_epoch
+        $markerSequence = [uint64]$marker.sequence
+    } catch {
+        $markerSchema = 0
+        $markerSessionId = ""
+        $markerGate = ""
+        $markerActivationEpoch = [uint64]0
+        $markerSequence = [uint64]0
+        $missing = @("TYPE_CONVERSION")
+    }
+    if ($missing.Count -ne 0 -or
+        $markerSchema -ne $pixelEvidenceRuntimeMarkerSchema -or
+        [string]::IsNullOrWhiteSpace($markerSessionId) -or
+        $markerGate -ne $pixelEvidenceRuntimeGate -or
+        $markerActivationEpoch -lt 1) {
+        return [pscustomobject][ordered]@{
+            active = $false
+            recoverable = $false
+            reason = "CONTRACT_INVALID"
+            observed_utc = $observedUtc
+            last_write_utc = $file.LastWriteTimeUtc
+            age_ms = $ageMs
+            sequence = $markerSequence
+        }
+    }
+    if ($markerSessionId -ne $ExpectedSessionId) {
+        return [pscustomobject][ordered]@{
+            active = $false
+            recoverable = $false
+            reason = "SESSION_MISMATCH"
+            observed_utc = $observedUtc
+            last_write_utc = $file.LastWriteTimeUtc
+            age_ms = $ageMs
+            sequence = $markerSequence
+        }
+    }
+    if ($markerActivationEpoch -ne $ExpectedActivationEpoch) {
+        return [pscustomobject][ordered]@{
+            active = $false
+            recoverable = $false
+            reason = "ACTIVATION_EPOCH_MISMATCH"
+            observed_utc = $observedUtc
+            last_write_utc = $file.LastWriteTimeUtc
+            age_ms = $ageMs
+            sequence = $markerSequence
+        }
+    }
+    return [pscustomobject][ordered]@{
+        active = $true
+        recoverable = $false
+        reason = "ACTIVE"
+        observed_utc = $observedUtc
+        last_write_utc = $file.LastWriteTimeUtc
+        age_ms = $ageMs
+        sequence = $markerSequence
+    }
+}
+
+function Get-RuntimeAlignmentMarkerProbeWithRetry(
+        [string]$Path,
+        [string]$ExpectedSessionId,
+        [uint64]$ExpectedActivationEpoch) {
+    $probe = $null
+    for ($readAttempt = 1; $readAttempt -le 3; ++$readAttempt) {
+        $probe = Get-RuntimeAlignmentMarkerProbe `
+            $Path $ExpectedSessionId $ExpectedActivationEpoch
+        if ([bool]$probe.active -or -not [bool]$probe.recoverable) {
+            return $probe
+        }
+        if ($readAttempt -lt 3) {
+            Start-Sleep -Milliseconds 10
+        }
+    }
+    return $probe
+}
+
 function Test-RuntimeAlignmentMarkerActive(
         [string]$Path,
         [string]$ExpectedSessionId,
         [uint64]$ExpectedActivationEpoch) {
-    for ($readAttempt = 1; $readAttempt -le 3; ++$readAttempt) {
-        try {
-            $file = Get-Item -LiteralPath $Path -ErrorAction Stop
-            $ageMs =
-                ([DateTime]::UtcNow - $file.LastWriteTimeUtc).TotalMilliseconds
-            if ($ageMs -lt -250 -or
-                $ageMs -gt $pixelEvidenceRuntimeMarkerMaxAgeMs) {
-                return $false
-            }
-            $marker = Read-RuntimeAlignmentMarker $Path
-            return [string]$marker.session_id -eq $ExpectedSessionId -and
-                [uint64]$marker.activation_epoch -eq $ExpectedActivationEpoch
-        } catch {
-            if ($readAttempt -lt 3) {
-                Start-Sleep -Milliseconds 10
-            }
+    $probe = Get-RuntimeAlignmentMarkerProbeWithRetry `
+        $Path $ExpectedSessionId $ExpectedActivationEpoch
+    return [bool]$probe.active
+}
+
+function ConvertTo-RuntimeAlignmentMarkerProbeEvidence([object]$Probe) {
+    return [ordered]@{
+        reason = [string]$Probe.reason
+        observed_utc = ([DateTime]$Probe.observed_utc).ToString("o")
+        last_write_utc = if ($null -eq $Probe.last_write_utc) { "" } else {
+            ([DateTime]$Probe.last_write_utc).ToString("o")
         }
+        age_ms = if ($null -eq $Probe.age_ms) { $null } else {
+            [double]$Probe.age_ms
+        }
+        sequence = [uint64]$Probe.sequence
     }
-    return $false
+}
+
+function Confirm-RuntimeAlignmentMarkerActive(
+        [object]$State,
+        [string]$Path,
+        [string]$ExpectedSessionId,
+        [uint64]$ExpectedActivationEpoch) {
+    $probe = Get-RuntimeAlignmentMarkerProbeWithRetry `
+        $Path $ExpectedSessionId $ExpectedActivationEpoch
+    if ([bool]$probe.active) {
+        if ([uint64]$State.runtime_marker_last_valid_sequence -gt 0 -and
+            [uint64]$probe.sequence -lt
+                [uint64]$State.runtime_marker_last_valid_sequence) {
+            $probe.active = $false
+            $probe.recoverable = $false
+            $probe.reason = "SEQUENCE_REGRESSED"
+            return $probe
+        }
+        $State.runtime_marker_last_valid_write_utc =
+            [DateTime]$probe.last_write_utc
+        $State.runtime_marker_last_valid_sequence = [uint64]$probe.sequence
+        return $probe
+    }
+    if (-not [bool]$probe.recoverable -or
+        $null -eq $State.runtime_marker_last_valid_write_utc) {
+        return $probe
+    }
+
+    $State.runtime_marker_transient_failure_count =
+        [int]$State.runtime_marker_transient_failure_count + 1
+    $leaseDeadlineUtc =
+        ([DateTime]$State.runtime_marker_last_valid_write_utc).AddMilliseconds(
+            $pixelEvidenceRuntimeMarkerMaxAgeMs)
+    $transientEvidence = ConvertTo-RuntimeAlignmentMarkerProbeEvidence $probe
+    $transientEvidence["last_valid_write_utc"] =
+        ([DateTime]$State.runtime_marker_last_valid_write_utc).ToString("o")
+    $transientEvidence["last_valid_sequence"] =
+        [uint64]$State.runtime_marker_last_valid_sequence
+    $transientEvidence["last_valid_age_ms"] =
+        (([DateTime]$probe.observed_utc -
+        [DateTime]$State.runtime_marker_last_valid_write_utc).TotalMilliseconds)
+    $transientEvidence["lease_deadline_utc"] =
+        $leaseDeadlineUtc.ToString("o")
+    $State.runtime_marker_last_transient_failure = $transientEvidence
+
+    while ([DateTime]::UtcNow -lt $leaseDeadlineUtc) {
+        Start-Sleep -Milliseconds 25
+        $probe = Get-RuntimeAlignmentMarkerProbeWithRetry `
+            $Path $ExpectedSessionId $ExpectedActivationEpoch
+        if ([bool]$probe.active) {
+            if ([uint64]$probe.sequence -lt
+                    [uint64]$State.runtime_marker_last_valid_sequence) {
+                $probe.active = $false
+                $probe.recoverable = $false
+                $probe.reason = "SEQUENCE_REGRESSED"
+                return $probe
+            }
+            if ([uint64]$probe.sequence -eq
+                    [uint64]$State.runtime_marker_last_valid_sequence) {
+                continue
+            }
+            $State.runtime_marker_last_valid_write_utc =
+                [DateTime]$probe.last_write_utc
+            $State.runtime_marker_last_valid_sequence =
+                [uint64]$probe.sequence
+            return $probe
+        }
+        if (-not [bool]$probe.recoverable) { return $probe }
+    }
+
+    $expiredObservedUtc = [DateTime]::UtcNow
+    $expiredAgeMs = ($expiredObservedUtc -
+        [DateTime]$State.runtime_marker_last_valid_write_utc).TotalMilliseconds
+    return [pscustomobject][ordered]@{
+        active = $false
+        recoverable = $false
+        reason = if ([bool]$probe.active) {
+            "SEQUENCE_NOT_ADVANCED_LEASE_EXPIRED"
+        } else { "$([string]$probe.reason)_LEASE_EXPIRED" }
+        observed_utc = $expiredObservedUtc
+        last_write_utc =
+            [DateTime]$State.runtime_marker_last_valid_write_utc
+        age_ms = $expiredAgeMs
+        sequence = [uint64]$State.runtime_marker_last_valid_sequence
+    }
 }
 
 function Wait-ProcessExitSupervised([object]$Process) {
@@ -1729,14 +1957,22 @@ if ($Mode -eq "Launch") {
                 -ArgumentList $pixelEvidenceArguments -WindowStyle Hidden `
                 -RedirectStandardOutput $stdout `
                 -RedirectStandardError $stderr -PassThru
-            $runtimeActiveAtStart =
-                -not $taskHasPixelEvidenceRuntimeAlignmentContract -or
-                (-not [string]::IsNullOrWhiteSpace(
-                    $pixelEvidenceRuntimeMarkerPath) -and
-                (Test-RuntimeAlignmentMarkerActive `
+            $runtimeStartProbe = if (
+                    -not $taskHasPixelEvidenceRuntimeAlignmentContract) {
+                $null
+            } elseif ([string]::IsNullOrWhiteSpace(
+                    $pixelEvidenceRuntimeMarkerPath)) {
+                $null
+            } else {
+                Get-RuntimeAlignmentMarkerProbeWithRetry `
                     $pixelEvidenceRuntimeMarkerPath `
                     ([string]$pixelEvidenceRuntimeAlignment.session_id) `
-                    ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch)))
+                    ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch)
+            }
+            $runtimeActiveAtStart =
+                -not $taskHasPixelEvidenceRuntimeAlignmentContract -or
+                ($null -ne $runtimeStartProbe -and
+                [bool]$runtimeStartProbe.active)
             return [pscustomobject]@{
                 attempt = $Attempt
                 process = $attemptProcess
@@ -1746,6 +1982,19 @@ if ($Mode -eq "Launch") {
                 runtime_active_at_start = $runtimeActiveAtStart
                 phase = "RECORDING"
                 runtime_active_at_recording_completion = $false
+                runtime_marker_last_valid_write_utc = if (
+                        $null -ne $runtimeStartProbe -and
+                        [bool]$runtimeStartProbe.active) {
+                    [DateTime]$runtimeStartProbe.last_write_utc
+                } else { $null }
+                runtime_marker_last_valid_sequence = if (
+                        $null -ne $runtimeStartProbe -and
+                        [bool]$runtimeStartProbe.active) {
+                    [uint64]$runtimeStartProbe.sequence
+                } else { [uint64]0 }
+                runtime_marker_transient_failure_count = 0
+                runtime_marker_last_transient_failure = $null
+                runtime_marker_terminal_probe = $null
             }
         }
         $findPixelEvidencePublishingIncoming = {
@@ -1836,6 +2085,14 @@ if ($Mode -eq "Launch") {
                     $runtimeActiveAtRecordingCompletion
                 runtime_active_at_completion =
                     $runtimeActiveAtCompletion
+                runtime_marker_transient_failure_count =
+                    [int]$State.runtime_marker_transient_failure_count
+                runtime_marker_last_transient_failure =
+                    $State.runtime_marker_last_transient_failure
+                runtime_marker_last_valid_sequence =
+                    [uint64]$State.runtime_marker_last_valid_sequence
+                runtime_marker_terminal_probe =
+                    $State.runtime_marker_terminal_probe
                 stdout_log = Split-Path -Leaf $State.stdout
                 stderr_log = Split-Path -Leaf $State.stderr
             }
@@ -2090,22 +2347,41 @@ if ($Mode -eq "Launch") {
             }
             if ($null -ne $pixelEvidenceAttemptState -and
                 $taskHasPixelEvidenceRuntimeAlignmentContract -and
-                [string]$pixelEvidenceAttemptState.phase -eq "RECORDING" -and
-                -not (Test-RuntimeAlignmentMarkerActive `
-                    $pixelEvidenceRuntimeMarkerPath `
-                    ([string]$pixelEvidenceRuntimeAlignment.session_id) `
-                    ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch))) {
-                $pixelEvidenceExecutionError =
-                    "Runtime aim-lock activation 已结束、切换或 marker lease 过期。"
-                $pixelEvidenceRuntimeAlignmentBlocked = $true
-                & $writePixelEvidenceReleasePrompt $false
-                if (-not $pixelEvidenceAttemptState.process.HasExited) {
-                    try {
-                        $pixelEvidenceAttemptState.process.Kill()
-                        [void]$pixelEvidenceAttemptState.process.WaitForExit(5000)
-                    } catch {
-                        $pixelEvidenceExecutionError +=
-                            " 终止失败：$($_.Exception.Message)"
+                [string]$pixelEvidenceAttemptState.phase -eq "RECORDING") {
+                # 文件短暂缺席或读冲突只能消耗现有 heartbeat lease；同一
+                # session/epoch 在 lease 内恢复后继续。STALE、身份切换、
+                # epoch 切换和 sequence 回退仍立即 fail closed。
+                $runtimeMarkerProbe =
+                    Confirm-RuntimeAlignmentMarkerActive `
+                        $pixelEvidenceAttemptState `
+                        $pixelEvidenceRuntimeMarkerPath `
+                        ([string]$pixelEvidenceRuntimeAlignment.session_id) `
+                        ([uint64]$pixelEvidenceRuntimeAlignment.activation_epoch)
+                if (-not [bool]$runtimeMarkerProbe.active) {
+                    $pixelEvidenceAttemptState.runtime_marker_terminal_probe =
+                        ConvertTo-RuntimeAlignmentMarkerProbeEvidence `
+                            $runtimeMarkerProbe
+                    $markerAge = if ($null -eq $runtimeMarkerProbe.age_ms) {
+                        "unknown"
+                    } else {
+                        "{0:F3}" -f [double]$runtimeMarkerProbe.age_ms
+                    }
+                    $pixelEvidenceExecutionError =
+                        ("Runtime aim-lock activation 已结束、切换或 " +
+                        "marker lease 过期。reason=" +
+                        "$($runtimeMarkerProbe.reason)；age_ms=$markerAge；" +
+                        "sequence=$($runtimeMarkerProbe.sequence)")
+                    $pixelEvidenceRuntimeAlignmentBlocked = $true
+                    & $writePixelEvidenceReleasePrompt $false
+                    if (-not $pixelEvidenceAttemptState.process.HasExited) {
+                        try {
+                            $pixelEvidenceAttemptState.process.Kill()
+                            [void]$pixelEvidenceAttemptState.process.WaitForExit(
+                                5000)
+                        } catch {
+                            $pixelEvidenceExecutionError +=
+                                " 终止失败：$($_.Exception.Message)"
+                        }
                     }
                 }
             }
