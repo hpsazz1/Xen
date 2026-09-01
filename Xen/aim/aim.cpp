@@ -4141,9 +4141,12 @@ struct Aim::Impl {
         controller_initialized = true;
         clamp_tracking_vector_preserving_y(
             filtered_x, filtered_y, config.max_counts_per_frame);
-        // 同向 PI 积分与目标运动观察器都表示维持量，取缺口而不是相加。
-        // 位置余量使用同一独立 plant 将死区外误差换算为 counts；它允许
-        // 观察器超过软化后的 P，却仍在当前可见误差和二维上限内收敛。
+        // PI 校正图像特征位置残差，目标运动观察器提供目标运动维持量。
+        // 未见 opening 时，同向积分可能已学习到同一扰动，继续只补二者
+        // 缺口，避免重复支付；当前左右边共同位移仍让误差增大时，则按既有
+        // opening 连续证据保留相同比例的积分残差，不再每帧把观察器维持量
+        // 全部抵消。该职责分配没有速度阈值、档位或新状态，且位置余量仍
+        // 使用同一独立 plant，所以不会越过可见误差或二维物理上限。
         const float integral_x_toward_target = std::max(
             0.0f, x_error_direction * feedforward_x);
         const float target_motion_request_magnitude_x = std::min(
@@ -4151,7 +4154,7 @@ struct Aim::Impl {
             std::max(
                 0.0f,
                 target_motion_maintenance_magnitude_x -
-                    integral_x_toward_target));
+                    integral_x_toward_target * (1.0f - opening_x_weight)));
         const float target_motion_request_x =
             x_error_direction * target_motion_request_magnitude_x;
         float motion_compensated_x = filtered_x + target_motion_request_x;
