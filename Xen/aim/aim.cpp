@@ -3889,21 +3889,26 @@ struct Aim::Impl {
             0.0f, 1.0f);
         const auto [delayed_command_x, delayed_command_y] =
             delayed_issued_command(current_controller_at);
+        const float tracking_plant_pixels_per_count_x =
+            kTrackingPlantResponseX / config.counts_per_pixel_x;
         // 当前共同边位移同时包含世界目标运动和历史鼠标造成的反向相机
         // 运动。独立背景辨识给出 camera = -gain * delayed_command，因此
-        // 二者相减后才是当前目标运动；两边形变差继续由既有连续一致性
-        // 权重衰减，不能把单边轮廓变化当成维持量。
+        // 二者相减后才是当前目标运动。实测留出证明不能把共同位移本身
+        // 再按一致性平方衰减；这里只让推断出的 camera 扣除量随两边几何
+        // 一致性连续收敛。第四根保持零证据为零，并避免中等一致性被重复
+        // 衰减；它不读取速度或场景。
         // 未按锁键时 Runtime 不会执行本帧预计算命令，清空状态，避免再次
         // 按下时消费一段从未闭环控制过的历史运动。
         if (frame.lock_active && config.control_delay_ms > 0.0f) {
-            const float tracking_plant_pixels_per_count_x =
-                kTrackingPlantResponseX / config.counts_per_pixel_x;
             const float modelled_camera_motion_x =
                 -delayed_command_x * tracking_plant_pixels_per_count_x;
+            const float camera_motion_evidence_weight =
+                std::sqrt(std::sqrt(current_common_consistency));
             const float target_velocity_measurement_counts_per_second_x =
-                (current_common_motion_x - modelled_camera_motion_x) /
-                tracking_plant_pixels_per_count_x / controller_dt *
-                current_common_consistency * current_common_consistency;
+                (current_common_motion_x -
+                 modelled_camera_motion_x *
+                     camera_motion_evidence_weight) /
+                tracking_plant_pixels_per_count_x / controller_dt;
             const float target_motion_alpha = controller_dt /
                 (kTrackingTargetMotionFilterTimeSeconds + controller_dt);
             tracking_target_velocity_counts_per_second_x +=
@@ -3984,18 +3989,21 @@ struct Aim::Impl {
         const float proportional_y = error_y * regularized_error_scale *
             config.counts_per_pixel_y;
         // plant 扣除后的目标速度换算为本帧维持量，而不是把整个延迟窗
-        // 位移每帧重复支付。请求仍受当前比例预算及 pending alignment
-        // 连续约束，不按速度或场景切档。
-        const float target_motion_request_magnitude_x = std::min(
-            std::fabs(proportional_x),
-            std::max(
-                0.0f,
-                x_error_direction *
-                    tracking_target_velocity_counts_per_second_x *
-                    controller_dt) *
-                pending_alignment_weight);
-        const float target_motion_request_x =
-            x_error_direction * target_motion_request_magnitude_x;
+        // 位移每帧重复支付。维持量若被当前位置 P 项封顶，就必须永久
+        // 保留一份位置误差才能支付目标运动；b4efc021 留出数据中该封顶
+        // 覆盖了绝大多数 opening 样本。这里先保存目标维持预算；后续只
+        // 补足既有 PI 积分维持量尚未覆盖的部分，P 仍只负责位置修正，
+        // 避免把两份维持量直接相加。
+        const float target_motion_position_headroom_x = std::max(
+            0.0f,
+            (x_error_magnitude - config.deadzone_pixels) /
+                tracking_plant_pixels_per_count_x);
+        const float target_motion_maintenance_magnitude_x = std::max(
+            0.0f,
+            x_error_direction *
+                tracking_target_velocity_counts_per_second_x *
+                controller_dt) *
+            pending_alignment_weight;
 
         // 积分只消费当前图像特征误差。误差在死区外真实换边时，旧积分
         // 表示上一方向的扰动而不再有效，直接从零重建；这不是等待证据的
@@ -4133,6 +4141,19 @@ struct Aim::Impl {
         controller_initialized = true;
         clamp_tracking_vector_preserving_y(
             filtered_x, filtered_y, config.max_counts_per_frame);
+        // 同向 PI 积分与目标运动观察器都表示维持量，取缺口而不是相加。
+        // 位置余量使用同一独立 plant 将死区外误差换算为 counts；它允许
+        // 观察器超过软化后的 P，却仍在当前可见误差和二维上限内收敛。
+        const float integral_x_toward_target = std::max(
+            0.0f, x_error_direction * feedforward_x);
+        const float target_motion_request_magnitude_x = std::min(
+            target_motion_position_headroom_x,
+            std::max(
+                0.0f,
+                target_motion_maintenance_magnitude_x -
+                    integral_x_toward_target));
+        const float target_motion_request_x =
+            x_error_direction * target_motion_request_magnitude_x;
         float motion_compensated_x = filtered_x + target_motion_request_x;
         float motion_compensated_y = filtered_y;
         clamp_tracking_vector_preserving_y(
