@@ -174,6 +174,86 @@ void test_sparse_pulse_sequence_is_x_only_balanced_and_order_swapped() {
            "第二块必须交换脉冲方向顺序以隔离场景单调漂移");
 }
 
+void test_a2_dependency_calibration_sequences_are_balanced_and_independent() {
+    using mouse_effect_probe::DependencyCalibrationRunRole;
+
+    const mouse_effect_probe::DependencyCalibrationSequenceRequest primary_request{
+        .baseline_sample_count = 2,
+        .response_sample_count = 3,
+        .guard_sample_count = 2,
+        .block_count = 4,
+        .run_role = DependencyCalibrationRunRole::P_CAL,
+    };
+    auto holdout_request = primary_request;
+    holdout_request.run_role = DependencyCalibrationRunRole::P_HOLDOUT;
+
+    mouse_effect_probe::MouseEffectProbeSequence primary;
+    mouse_effect_probe::MouseEffectProbeSequence holdout;
+    std::string error;
+    expect(mouse_effect_probe::make_dependency_calibration_sequence(
+               primary_request, primary, error),
+           "A2 P-CAL 序列应生成成功: " + error);
+    expect(mouse_effect_probe::make_dependency_calibration_sequence(
+               holdout_request, holdout, error),
+           "A2 P-HOLDOUT 序列应生成成功: " + error);
+    expect(mouse_effect_probe::validate_mouse_effect_probe_sequence(
+               primary, error) &&
+               mouse_effect_probe::validate_mouse_effect_probe_sequence(
+                   holdout, error),
+           "A2 两个角色必须通过同一生产 reader/validator: " + error);
+
+    expect(primary.schema == 2 &&
+               primary.profile == "dependency_calibration_a2_p_cal" &&
+               holdout.schema == 2 &&
+               holdout.profile ==
+                   "dependency_calibration_a2_p_holdout" &&
+               primary.sequence_sha256 != holdout.sequence_sha256,
+           "P-CAL/P-HOLDOUT 必须有显式角色、schema 与不同语义 SHA");
+    expect(primary.blocks.size() == 4 && holdout.blocks.size() == 4 &&
+               primary.samples.size() == 50 &&
+               holdout.samples.size() == 50,
+           "每个 A2 block 必须有独立 pre/post guard、两个 transition 和完整 hold");
+
+    const auto pulse_directions = [](const auto& sequence) {
+        std::vector<int> result;
+        for (const auto& sample : sequence.samples) {
+            if (sample.dx_counts != 0) result.push_back(sample.dx_counts);
+            expect(sample.dy_counts == 0 && sample.dx_counts >= -1 &&
+                       sample.dx_counts <= 1,
+                   "A2 sample 必须保持 X-only 且仅为 -1/0/+1");
+        }
+        return result;
+    };
+    expect(pulse_directions(primary) ==
+               std::vector<int>({1, -1, -1, 1, -1, 1, 1, -1}),
+           "P-CAL 必须使用预注册 ABBA 平衡方向顺序");
+    expect(pulse_directions(holdout) ==
+               std::vector<int>({-1, 1, 1, -1, 1, -1, -1, 1}),
+           "P-HOLDOUT 必须使用与 P-CAL 相反且未参与调参的顺序");
+    expect(primary.net_x_counts == 0 && holdout.net_x_counts == 0 &&
+               primary.max_abs_prefix_x_counts == 1 &&
+               holdout.max_abs_prefix_x_counts == 1,
+           "A2 正常完成必须逐 block 回 anchor、全局净零且任意前缀不超过 1 count");
+
+    TemporaryDirectory temporary;
+    for (const auto* original : {&primary, &holdout}) {
+        const auto path = temporary.path() /
+            (original->profile + ".json");
+        expect(mouse_effect_probe::write_mouse_effect_probe_sequence(
+                   path, *original, error),
+               "A2 序列文件应原子写入成功: " + error);
+        mouse_effect_probe::MouseEffectProbeSequence round_trip;
+        expect(mouse_effect_probe::read_mouse_effect_probe_sequence(
+                   path, round_trip, error),
+               "A2 序列必须通过生产 reader round-trip: " + error);
+        expect(round_trip.profile == original->profile &&
+                   round_trip.sequence_sha256 == original->sequence_sha256 &&
+                   round_trip.blocks.size() == original->blocks.size() &&
+                   round_trip.samples.size() == original->samples.size(),
+               "A2 round-trip 必须保持 role/profile/SHA/block/sample 身份");
+    }
+}
+
 void test_sequence_file_round_trip_rejects_overwrite_and_tampering() {
     TemporaryDirectory temporary;
     mouse_effect_probe::MouseEffectProbeSequence sequence;
@@ -671,6 +751,7 @@ void test_source_sidecar_safety_and_external_stop_are_fail_closed() {
 
 int main() {
     test_sparse_pulse_sequence_is_x_only_balanced_and_order_swapped();
+    test_a2_dependency_calibration_sequences_are_balanced_and_independent();
     test_sequence_file_round_trip_rejects_overwrite_and_tampering();
     test_executor_consumes_one_sample_per_frame_and_never_catches_up();
     test_executor_failure_stops_without_compensation();

@@ -105,8 +105,15 @@ if (-not (Test-Path -LiteralPath $taskPath -PathType Leaf)) {
 }
 $task = Get-Content -LiteralPath $taskPath -Raw -Encoding utf8 |
     ConvertFrom-Json
-if ([int]$task.schema_version -ne 1 -or
-    [string]$task.evidence_type -ne "mouse_effect_probe_a_task" -or
+$isA1Task =
+    [int]$task.schema_version -eq 1 -and
+    [string]$task.evidence_type -eq "mouse_effect_probe_a_task" -and
+    [string]$task.profile -eq "sparse_pulse_a"
+$isA2Task =
+    [int]$task.schema_version -eq 2 -and
+    [string]$task.evidence_type -eq "mouse_effect_probe_a2_task" -and
+    [string]$task.profile -like "dependency_calibration_a2_*"
+if ((-not $isA1Task -and -not $isA2Task) -or
     [string]$task.status -ne "PREPARED" -or
     [string]$task.dispatch_mode -ne "physical_a" -or
     -not [bool]$task.physical_output_capability -or
@@ -114,8 +121,21 @@ if ([int]$task.schema_version -ne 1 -or
     [string]$task.physical_output_confirmation -ne $confirmation) {
     throw "Physical A task 身份或授权合同无效"
 }
+if ($isA2Task) {
+    $expectedProfile = if ([string]$task.run_role -eq "p-cal") {
+        "dependency_calibration_a2_p_cal"
+    } elseif ([string]$task.run_role -eq "p-holdout") {
+        "dependency_calibration_a2_p_holdout"
+    } else {
+        throw "Physical A2 run_role 非法"
+    }
+    if ([string]$task.profile -ne $expectedProfile -or
+        [uint64]$task.expected_nonzero_transition_count -eq 0) {
+        throw "Physical A2 role/profile/transition 合同无效"
+    }
+}
 
-foreach ($entry in @(
+$fileEntries = @(
         [pscustomobject]@{ value = $task.files.launch_script; name = "Launch script" },
         [pscustomobject]@{ value = $task.files.probe_executable; name = "probe executable" },
         [pscustomobject]@{ value = $task.files.sidecar_executable; name = "sidecar executable" },
@@ -125,7 +145,17 @@ foreach ($entry in @(
         [pscustomobject]@{ value = $task.files.config; name = "config.ini" },
         [pscustomobject]@{ value = $task.files.sequence; name = "sequence" },
         [pscustomobject]@{ value = $task.files.probe_binding; name = "probe binding" },
-        [pscustomobject]@{ value = $task.files.obs_source_binding; name = "OBS source binding" })) {
+        [pscustomobject]@{ value = $task.files.obs_source_binding; name = "OBS source binding" })
+if ($isA2Task) {
+    $fileEntries += @(
+        [pscustomobject]@{ value = $task.files.sequence_executable; name = "sequence executable" },
+        [pscustomobject]@{ value = $task.files.physical_analyzer; name = "physical analyzer" },
+        [pscustomobject]@{ value = $task.files.dependency_calibrator; name = "dependency calibrator" },
+        [pscustomobject]@{ value = $task.files.synthetic_calibration; name = "S0 calibration" },
+        [pscustomobject]@{ value = $task.files.zero_input_calibration; name = "S1 calibration" },
+        [pscustomobject]@{ value = $task.files.calibration_plan; name = "A2 calibration plan" })
+}
+foreach ($entry in $fileEntries) {
     Assert-FileEvidence $entry.value $entry.name
 }
 if ((Get-FileSha256 $PSCommandPath) -ne
@@ -183,7 +213,12 @@ if ([bool]$capture.require_frame_metadata) {
     $sidecarArguments += "--require-frame-metadata"
 }
 
-Write-Host "即将执行 A 级稀疏 ±1 X probe。启动命令时请先保持右键松开；probe 提示 monitor 已就绪后，再在 5 秒内按住右键并持续保持。随后松开右键、End 或 F8 会立即停发，且不会补偿。"
+$probeLabel = if ($isA2Task) {
+    "A2 依赖校准 $([string]$task.run_role) ±1 X probe"
+} else {
+    "A 级稀疏 ±1 X probe"
+}
+Write-Host "即将执行 $probeLabel。启动命令时请先保持右键松开；probe 提示 monitor 已就绪后，再在 5 秒内按住右键并持续保持。随后松开右键、End 或 F8 会立即停发，且不会补偿。"
 $sidecarProcess = Start-Process -FilePath `
     ([string]$task.files.sidecar_executable.path) `
     -WorkingDirectory (Split-Path -Parent `
@@ -256,6 +291,8 @@ try {
             [string]$task.files.probe_binding.sha256 -or
         [string]$report.run_uuid -ne [string]$task.run_uuid -or
         [string]$report.dispatch_mode -ne "physical_a" -or
+        [string]$report.profile -ne [string]$task.profile -or
+        [string]$sequence.profile -ne [string]$task.profile -or
         [string]$report.sequence_sha256 -ne
             [string]$task.sequence_sha256) {
         throw "Physical A manifest/report 顶层身份无效"
@@ -316,18 +353,27 @@ try {
         $matchedEvents++
     }
 
+    $expectedPulseCount = if ($isA2Task) {
+        [uint64]$task.expected_nonzero_transition_count
+    } else {
+        [uint64]4
+    }
     $executionComplete =
         $probeExitCode -eq 0 -and
         [string]$report.result.state -eq "completed" -and
         [bool]$report.result.complete -and
         [string]$report.result.stop_reason -eq "normal_completion" -and
         $events.Count -eq $samples.Count -and
-        $completedPulses -eq 4 -and
+        $completedPulses -eq $expectedPulseCount -and
         [int64]$report.result.cumulative_requested_x_counts -eq 0 -and
         [int64]$report.result.cumulative_backend_completed_x_counts -eq 0
     $summary = [ordered]@{
-        schema_version = 1
-        evidence_type = "mouse_effect_probe_a_launch"
+        schema_version = if ($isA2Task) { 2 } else { 1 }
+        evidence_type = if ($isA2Task) {
+            "mouse_effect_probe_a2_launch"
+        } else {
+            "mouse_effect_probe_a_launch"
+        }
         status = if ($executionComplete) {
             "RECORDED_UNANALYZED"
         } else {
@@ -336,6 +382,8 @@ try {
         run_uuid = [string]$task.run_uuid
         activation_epoch = [uint64]$task.activation_epoch
         sequence_sha256 = [string]$task.sequence_sha256
+        profile = [string]$task.profile
+        expected_nonzero_transition_count = $expectedPulseCount
         command_report_sha256 = [string]$report.report_sha256
         sidecar_manifest_sha256 = Get-FileSha256 $manifestPath
         stop_reason = [string]$report.result.stop_reason
@@ -349,11 +397,16 @@ try {
         visible_effect_analyzed = $false
         human_observation_received = $false
     }
+    if ($isA2Task) {
+        $summary.run_role = [string]$task.run_role
+        $summary.scope_id = [string]$task.scope_id
+    }
     Write-NewUtf8Json $launchSummaryPath $summary
     if (-not $executionComplete) {
         throw "Physical A 已停止且未补偿：stop_reason=$($report.result.stop_reason)"
     }
-    Write-Host ("Physical A 已完整记录：pulse/backend/ACK=4/4/4；" +
+    Write-Host ("Physical A 已完整记录：pulse/backend/ACK=" +
+        "$completedPulses/$expectedPulseCount/$expectedPulseCount；" +
         "sidecar=$($frames.Count)/$($frames.Count)；尚未分析 visible effect。")
     Write-Host "请松开右键，并把方向/可见性/异常或急停情况直接发回当前对话。"
 } finally {

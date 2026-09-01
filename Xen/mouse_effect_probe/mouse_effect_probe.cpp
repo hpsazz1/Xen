@@ -22,8 +22,14 @@ namespace mouse_effect_probe {
 namespace {
 
 constexpr std::uint32_t kSequenceSchema = 1;
+constexpr std::uint32_t kDependencyCalibrationSequenceSchema = 2;
 constexpr std::string_view kSparsePulseProfile = "sparse_pulse_a";
+constexpr std::string_view kDependencyCalibrationPrimaryProfile =
+    "dependency_calibration_a2_p_cal";
+constexpr std::string_view kDependencyCalibrationHoldoutProfile =
+    "dependency_calibration_a2_p_holdout";
 constexpr std::uint64_t kMaximumSequenceSamples = 1'000'000;
+constexpr std::uint64_t kMaximumDependencyCalibrationBlocks = 64;
 constexpr std::uintmax_t kMaximumSequenceFileBytes = 128U * 1024U * 1024U;
 constexpr std::uint32_t kReportSchema = 1;
 constexpr std::string_view kReportEvidenceType =
@@ -82,6 +88,40 @@ bool expected_sample_count(const SparsePulseSequenceRequest& request,
     return true;
 }
 
+bool expected_dependency_calibration_sample_count(
+        const DependencyCalibrationSequenceRequest& request,
+        std::uint64_t& output) noexcept {
+    if (request.baseline_sample_count == 0 ||
+        request.response_sample_count == 0 ||
+        request.guard_sample_count == 0 ||
+        request.block_count < 4 ||
+        request.block_count > kMaximumDependencyCalibrationBlocks ||
+        request.block_count % 4U != 0U) {
+        return false;
+    }
+    std::uint64_t response_and_guard = 0;
+    std::uint64_t per_block = 0;
+    std::uint64_t all_blocks = 0;
+    if (!checked_add(request.response_sample_count,
+                     request.guard_sample_count,
+                     response_and_guard) ||
+        response_and_guard >
+            (std::numeric_limits<std::uint64_t>::max() - 2U) / 2U) {
+        return false;
+    }
+    per_block = response_and_guard * 2U + 2U;
+    if (request.block_count >
+            std::numeric_limits<std::uint64_t>::max() / per_block) {
+        return false;
+    }
+    all_blocks = request.block_count * per_block;
+    if (!checked_add(request.baseline_sample_count, all_blocks, output) ||
+        output > kMaximumSequenceSamples) {
+        return false;
+    }
+    return true;
+}
+
 void append_sample(MouseEffectProbeSequence& sequence,
                    std::uint64_t block_id,
                    ProbeSamplePhase phase,
@@ -128,6 +168,48 @@ void append_sparse_block(MouseEffectProbeSequence& sequence,
     sequence.blocks.push_back(block);
 }
 
+void append_dependency_calibration_block(
+        MouseEffectProbeSequence& sequence,
+        std::uint64_t block_id,
+        int first_direction,
+        const DependencyCalibrationSequenceRequest& request) {
+    ProbeSequenceBlock block;
+    block.block_id = block_id;
+    block.first_sample_index = sequence.samples.size();
+    block.first_pulse_dx_counts = first_direction;
+    block.second_pulse_dx_counts = -first_direction;
+
+    append_zeros(sequence, block_id, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
+    append_sample(sequence, block_id, ProbeSamplePhase::PULSE,
+                  first_direction);
+    append_zeros(sequence, block_id, ProbeSamplePhase::RESPONSE,
+                 request.response_sample_count);
+    append_sample(sequence, block_id, ProbeSamplePhase::PULSE,
+                  -first_direction);
+    append_zeros(sequence, block_id, ProbeSamplePhase::RESPONSE,
+                 request.response_sample_count);
+    append_zeros(sequence, block_id, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
+
+    block.sample_count = sequence.samples.size() - block.first_sample_index;
+    sequence.blocks.push_back(block);
+}
+
+void summarize_sequence(MouseEffectProbeSequence& sequence) {
+    std::int64_t prefix = 0;
+    std::uint64_t maximum = 0;
+    for (const auto& sample : sequence.samples) {
+        prefix += sample.dx_counts;
+        const auto absolute = prefix < 0
+            ? static_cast<std::uint64_t>(-prefix)
+            : static_cast<std::uint64_t>(prefix);
+        maximum = std::max(maximum, absolute);
+    }
+    sequence.net_x_counts = prefix;
+    sequence.max_abs_prefix_x_counts = maximum;
+}
+
 bool build_sparse_sequence(const SparsePulseSequenceRequest& request,
                            MouseEffectProbeSequence& sequence,
                            std::string& error) {
@@ -151,17 +233,45 @@ bool build_sparse_sequence(const SparsePulseSequenceRequest& request,
                  request.guard_sample_count);
     append_sparse_block(sequence, 2, -1);
 
-    std::int64_t prefix = 0;
-    std::uint64_t maximum = 0;
-    for (const auto& sample : sequence.samples) {
-        prefix += sample.dx_counts;
-        const auto absolute = prefix < 0
-            ? static_cast<std::uint64_t>(-prefix)
-            : static_cast<std::uint64_t>(prefix);
-        maximum = std::max(maximum, absolute);
+    summarize_sequence(sequence);
+    error.clear();
+    return true;
+}
+
+bool build_dependency_calibration_sequence(
+        const DependencyCalibrationSequenceRequest& request,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) {
+    std::uint64_t sample_count = 0;
+    if (!expected_dependency_calibration_sample_count(
+            request, sample_count)) {
+        set_error(error,
+            "A2 baseline/response/guard 必须为正，block_count 必须为 4 的倍数且总样本在容量内");
+        return false;
     }
-    sequence.net_x_counts = prefix;
-    sequence.max_abs_prefix_x_counts = maximum;
+    sequence = {};
+    sequence.schema = kDependencyCalibrationSequenceSchema;
+    sequence.profile = request.run_role ==
+            DependencyCalibrationRunRole::P_CAL
+        ? kDependencyCalibrationPrimaryProfile
+        : kDependencyCalibrationHoldoutProfile;
+    sequence.dependency_calibration_request = request;
+    sequence.samples.reserve(static_cast<std::size_t>(sample_count));
+    sequence.blocks.reserve(static_cast<std::size_t>(request.block_count));
+
+    append_zeros(sequence, 0, ProbeSamplePhase::BASELINE,
+                 request.baseline_sample_count);
+    constexpr std::array<int, 4> primary_order{1, -1, -1, 1};
+    const int role_sign = request.run_role ==
+            DependencyCalibrationRunRole::P_CAL ? 1 : -1;
+    for (std::uint64_t index = 0; index < request.block_count; ++index) {
+        append_dependency_calibration_block(
+            sequence, index + 1U,
+            primary_order[static_cast<std::size_t>(index % 4U)] *
+                role_sign,
+            request);
+    }
+    summarize_sequence(sequence);
     error.clear();
     return true;
 }
@@ -188,16 +298,34 @@ nlohmann::ordered_json canonical_payload(
             {"dy_counts", sample.dy_counts},
         });
     }
-    return {
-        {"schema", sequence.schema},
-        {"profile", sequence.profile},
-        {"request", {
+    nlohmann::ordered_json request;
+    if (sequence.schema == kSequenceSchema &&
+        sequence.profile == kSparsePulseProfile) {
+        request = {
             {"baseline_sample_count",
              sequence.request.baseline_sample_count},
             {"response_sample_count",
              sequence.request.response_sample_count},
             {"guard_sample_count", sequence.request.guard_sample_count},
-        }},
+        };
+    } else {
+        request = {
+            {"baseline_sample_count",
+             sequence.dependency_calibration_request.baseline_sample_count},
+            {"response_sample_count",
+             sequence.dependency_calibration_request.response_sample_count},
+            {"guard_sample_count",
+             sequence.dependency_calibration_request.guard_sample_count},
+            {"block_count",
+             sequence.dependency_calibration_request.block_count},
+            {"run_role", dependency_calibration_run_role_name(
+                sequence.dependency_calibration_request.run_role)},
+        };
+    }
+    return {
+        {"schema", sequence.schema},
+        {"profile", sequence.profile},
+        {"request", std::move(request)},
         {"blocks", std::move(blocks)},
         {"samples", std::move(samples)},
         {"summary", {
@@ -283,6 +411,16 @@ bool same_request(const SparsePulseSequenceRequest& first,
            first.guard_sample_count == second.guard_sample_count;
 }
 
+bool same_dependency_calibration_request(
+        const DependencyCalibrationSequenceRequest& first,
+        const DependencyCalibrationSequenceRequest& second) noexcept {
+    return first.baseline_sample_count == second.baseline_sample_count &&
+           first.response_sample_count == second.response_sample_count &&
+           first.guard_sample_count == second.guard_sample_count &&
+           first.block_count == second.block_count &&
+           first.run_role == second.run_role;
+}
+
 bool same_block(const ProbeSequenceBlock& first,
                 const ProbeSequenceBlock& second) noexcept {
     return first.block_id == second.block_id &&
@@ -364,6 +502,20 @@ bool parse_phase(std::string_view value, ProbeSamplePhase& output) noexcept {
     return true;
 }
 
+bool parse_dependency_calibration_run_role(
+        std::string_view value,
+        DependencyCalibrationRunRole& output) noexcept {
+    if (value == "p_cal") {
+        output = DependencyCalibrationRunRole::P_CAL;
+        return true;
+    }
+    if (value == "p_holdout") {
+        output = DependencyCalibrationRunRole::P_HOLDOUT;
+        return true;
+    }
+    return false;
+}
+
 bool valid_run_uuid(std::string_view value) noexcept {
     if (value.size() != 36U) return false;
     for (std::size_t index = 0; index < value.size(); ++index) {
@@ -405,21 +557,63 @@ bool parse_document(const nlohmann::ordered_json& document,
         document.at("sequence_sha256").get<std::string>();
 
     const auto& request = document.at("request");
-    if (!has_exact_keys(request,
-            {"baseline_sample_count", "response_sample_count",
-             "guard_sample_count"}) ||
-        !read_u64(request, "baseline_sample_count",
-                  candidate.request.baseline_sample_count) ||
-        !read_u64(request, "response_sample_count",
-                  candidate.request.response_sample_count) ||
-        !read_u64(request, "guard_sample_count",
-                  candidate.request.guard_sample_count)) {
-        set_error(error, "序列 request 字段集合或类型非法");
+    const bool sparse_profile =
+        candidate.schema == kSequenceSchema &&
+        candidate.profile == kSparsePulseProfile;
+    const bool dependency_profile =
+        candidate.schema == kDependencyCalibrationSequenceSchema &&
+        (candidate.profile == kDependencyCalibrationPrimaryProfile ||
+         candidate.profile == kDependencyCalibrationHoldoutProfile);
+    if (sparse_profile) {
+        if (!has_exact_keys(request,
+                {"baseline_sample_count", "response_sample_count",
+                 "guard_sample_count"}) ||
+            !read_u64(request, "baseline_sample_count",
+                      candidate.request.baseline_sample_count) ||
+            !read_u64(request, "response_sample_count",
+                      candidate.request.response_sample_count) ||
+            !read_u64(request, "guard_sample_count",
+                      candidate.request.guard_sample_count)) {
+            set_error(error, "A 级序列 request 字段集合或类型非法");
+            return false;
+        }
+    } else if (dependency_profile) {
+        std::string run_role;
+        if (!has_exact_keys(request,
+                {"baseline_sample_count", "response_sample_count",
+                 "guard_sample_count", "block_count", "run_role"}) ||
+            !read_u64(request, "baseline_sample_count",
+                      candidate.dependency_calibration_request.
+                          baseline_sample_count) ||
+            !read_u64(request, "response_sample_count",
+                      candidate.dependency_calibration_request.
+                          response_sample_count) ||
+            !read_u64(request, "guard_sample_count",
+                      candidate.dependency_calibration_request.
+                          guard_sample_count) ||
+            !read_u64(request, "block_count",
+                      candidate.dependency_calibration_request.block_count) ||
+            !request.at("run_role").is_string()) {
+            set_error(error, "A2 序列 request 字段集合或类型非法");
+            return false;
+        }
+        run_role = request.at("run_role").get<std::string>();
+        if (!parse_dependency_calibration_run_role(
+                run_role,
+                candidate.dependency_calibration_request.run_role)) {
+            set_error(error, "A2 序列 run_role 非法");
+            return false;
+        }
+    } else {
+        set_error(error, "序列 schema/profile 组合不受支持");
         return false;
     }
 
     const auto& blocks = document.at("blocks");
-    if (!blocks.is_array() || blocks.size() > 2U) {
+    const std::size_t maximum_blocks = sparse_profile
+        ? 2U
+        : static_cast<std::size_t>(kMaximumDependencyCalibrationBlocks);
+    if (!blocks.is_array() || blocks.size() > maximum_blocks) {
         set_error(error, "序列 blocks 必须是固定容量数组");
         return false;
     }
@@ -500,6 +694,15 @@ const char* probe_sample_phase_name(ProbeSamplePhase phase) noexcept {
     return "unknown";
 }
 
+const char* dependency_calibration_run_role_name(
+        DependencyCalibrationRunRole role) noexcept {
+    switch (role) {
+        case DependencyCalibrationRunRole::P_CAL: return "p_cal";
+        case DependencyCalibrationRunRole::P_HOLDOUT: return "p_holdout";
+    }
+    return "unknown";
+}
+
 bool make_sparse_pulse_sequence(
         const SparsePulseSequenceRequest& request,
         MouseEffectProbeSequence& sequence,
@@ -524,46 +727,95 @@ bool make_sparse_pulse_sequence(
     }
 }
 
+bool make_dependency_calibration_sequence(
+        const DependencyCalibrationSequenceRequest& request,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) noexcept {
+    try {
+        MouseEffectProbeSequence candidate;
+        if (!build_dependency_calibration_sequence(
+                request, candidate, error)) {
+            return false;
+        }
+        const std::string payload = canonical_payload(candidate).dump();
+        if (!sha256(payload, candidate.sequence_sha256, error)) return false;
+        sequence = std::move(candidate);
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        sequence = {};
+        set_error(error, std::string("生成 A2 依赖校准序列异常: ") +
+                         exception.what());
+        return false;
+    } catch (...) {
+        sequence = {};
+        set_error(error, "生成 A2 依赖校准序列时发生未知异常");
+        return false;
+    }
+}
+
 bool validate_mouse_effect_probe_sequence(
         const MouseEffectProbeSequence& sequence,
         std::string& error) noexcept {
     try {
         MouseEffectProbeSequence expected;
-        if (!make_sparse_pulse_sequence(sequence.request, expected, error)) {
+        const bool sparse = sequence.schema == kSequenceSchema &&
+            sequence.profile == kSparsePulseProfile;
+        const bool dependency =
+            sequence.schema == kDependencyCalibrationSequenceSchema &&
+            (sequence.profile == kDependencyCalibrationPrimaryProfile ||
+             sequence.profile == kDependencyCalibrationHoldoutProfile);
+        if (sparse) {
+            if (!make_sparse_pulse_sequence(
+                    sequence.request, expected, error)) {
+                return false;
+            }
+        } else if (dependency) {
+            if (!make_dependency_calibration_sequence(
+                    sequence.dependency_calibration_request,
+                    expected, error)) {
+                return false;
+            }
+        } else {
+            set_error(error, "序列 schema/profile 组合不受支持");
             return false;
         }
         if (sequence.schema != expected.schema ||
             sequence.profile != expected.profile ||
-            !same_request(sequence.request, expected.request) ||
+            (sparse && !same_request(
+                sequence.request, expected.request)) ||
+            (dependency && !same_dependency_calibration_request(
+                sequence.dependency_calibration_request,
+                expected.dependency_calibration_request)) ||
             sequence.net_x_counts != expected.net_x_counts ||
             sequence.max_abs_prefix_x_counts !=
                 expected.max_abs_prefix_x_counts ||
             sequence.blocks.size() != expected.blocks.size() ||
             sequence.samples.size() != expected.samples.size()) {
-            set_error(error, "稀疏脉冲序列结构或汇总不符合固定合同");
+            set_error(error, "Mouse Effect Probe 序列结构或汇总不符合固定合同");
             return false;
         }
         for (std::size_t index = 0; index < sequence.blocks.size(); ++index) {
             if (!same_block(sequence.blocks[index], expected.blocks[index])) {
-                set_error(error, "稀疏脉冲 block 边界或方向非法");
+                set_error(error, "Mouse Effect Probe block 边界或方向非法");
                 return false;
             }
         }
         for (std::size_t index = 0; index < sequence.samples.size(); ++index) {
             if (!same_sample(sequence.samples[index], expected.samples[index])) {
                 set_error(error,
-                    "稀疏脉冲 sample 顺序、相位或 X/Y 位移非法");
+                    "Mouse Effect Probe sample 顺序、相位或 X/Y 位移非法");
                 return false;
             }
         }
         if (sequence.sequence_sha256 != expected.sequence_sha256) {
-            set_error(error, "稀疏脉冲规范语义 SHA-256 不匹配");
+            set_error(error, "Mouse Effect Probe 规范语义 SHA-256 不匹配");
             return false;
         }
         error.clear();
         return true;
     } catch (...) {
-        set_error(error, "校验稀疏脉冲序列时发生未知异常");
+        set_error(error, "校验 Mouse Effect Probe 序列时发生未知异常");
         return false;
     }
 }

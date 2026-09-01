@@ -1252,6 +1252,26 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_a.ps1"
         -LaunchScript
             "${PROJECT_SOURCE_DIR}/scripts/launch_mouse_effect_probe_a.ps1")
+    xen_add_windows_powershell_test(
+        mouse_effect_probe_a2_s1_script_contract_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_a2_s1_script_contract_tests.ps1"
+        -CaptureScript
+            "${PROJECT_SOURCE_DIR}/scripts/capture_mouse_effect_probe_a2_s1.ps1")
+    xen_add_windows_powershell_test(
+        mouse_effect_probe_a2_prepare_contract_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_a2_prepare_contract_tests.ps1"
+        -PrepareScript
+            "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_a2.ps1"
+        -LaunchScript
+            "${PROJECT_SOURCE_DIR}/scripts/launch_mouse_effect_probe_a.ps1")
+    xen_add_windows_powershell_test(
+        mouse_effect_probe_a2_prepare_integration_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_a2_prepare_integration_tests.ps1"
+        -PrepareScript
+            "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_a2.ps1"
+        -ToolRoot "$<TARGET_FILE_DIR:xen_mouse_effect_probe>"
+        -TestRoot
+            "${CMAKE_BINARY_DIR}/mouse-effect-probe-a2-prepare-integration-tests")
     xen_add_windows_powershell_test(obs_capture_binding_tests
         "${PROJECT_SOURCE_DIR}/tests/obs_capture_binding_tests.ps1"
         -BindingScript "${PROJECT_SOURCE_DIR}/scripts/export_obs_capture_binding.ps1"

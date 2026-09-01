@@ -25,6 +25,20 @@ struct SparsePulseSequenceRequest {
     std::uint64_t guard_sample_count = 0;
 };
 
+enum class DependencyCalibrationRunRole {
+    P_CAL,
+    P_HOLDOUT,
+};
+
+struct DependencyCalibrationSequenceRequest {
+    std::uint64_t baseline_sample_count = 0;
+    std::uint64_t response_sample_count = 0;
+    std::uint64_t guard_sample_count = 0;
+    std::uint64_t block_count = 0;
+    DependencyCalibrationRunRole run_role =
+        DependencyCalibrationRunRole::P_CAL;
+};
+
 struct ProbeSequenceSample {
     std::uint64_t sample_index = 0;
     std::uint64_t block_id = 0;
@@ -45,6 +59,7 @@ struct MouseEffectProbeSequence {
     std::uint32_t schema = 0;
     std::string profile;
     SparsePulseSequenceRequest request;
+    DependencyCalibrationSequenceRequest dependency_calibration_request;
     std::vector<ProbeSequenceBlock> blocks;
     std::vector<ProbeSequenceSample> samples;
     std::int64_t net_x_counts = 0;
@@ -56,6 +71,14 @@ struct MouseEffectProbeSequence {
 // executor 决定，本模块不拥有 Mouse、时钟或物理输出。
 bool make_sparse_pulse_sequence(
     const SparsePulseSequenceRequest& request,
+    MouseEffectProbeSequence& sequence,
+    std::string& error) noexcept;
+
+// A2 依赖校准只复用 A 级安全骨架。每个完整 block 都包含独立 pre/post
+// zero guard，并在 0 与单 count 位置间往返；P-CAL 与 P-HOLDOUT 使用相反
+// 的预注册平衡顺序和不同语义 SHA，不在执行期随机化或自动追加。
+bool make_dependency_calibration_sequence(
+    const DependencyCalibrationSequenceRequest& request,
     MouseEffectProbeSequence& sequence,
     std::string& error) noexcept;
 
@@ -75,6 +98,8 @@ bool read_mouse_effect_probe_sequence(
     std::string& error) noexcept;
 
 const char* probe_sample_phase_name(ProbeSamplePhase phase) noexcept;
+const char* dependency_calibration_run_role_name(
+    DependencyCalibrationRunRole role) noexcept;
 
 enum class ProbeExecutionState {
     IDLE,

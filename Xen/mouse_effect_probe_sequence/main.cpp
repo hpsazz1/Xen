@@ -46,12 +46,17 @@ bool parse_u64(std::wstring_view input, std::uint64_t& output) noexcept {
 
 void print_usage() {
     std::cout
-        << "XenMouseEffectProbeSequence 只生成离线 sparse-pulse A 序列，"
+        << "XenMouseEffectProbeSequence 只生成离线 A/A2 X-only 序列，"
            "不打开 Capture 或 Mouse。\n\n"
         << "用法:\n"
         << "  XenMouseEffectProbeSequence --output <new-json> "
            "--baseline-samples <n> --response-samples <n> "
-           "--guard-samples <n>\n";
+           "--guard-samples <n> "
+           "[--profile sparse-pulse-a]\n"
+        << "  XenMouseEffectProbeSequence --output <new-json> "
+           "--baseline-samples <n> --response-samples <n> "
+           "--guard-samples <n> --profile dependency-calibration-a2 "
+           "--blocks <multiple-of-4> --run-role <p-cal|p-holdout>\n";
 }
 
 } // namespace
@@ -66,10 +71,16 @@ int wmain(int argc, wchar_t* argv[]) {
     }
     std::filesystem::path output_path;
     mouse_effect_probe::SparsePulseSequenceRequest request;
+    mouse_effect_probe::DependencyCalibrationSequenceRequest
+        dependency_request;
+    std::wstring profile = L"sparse-pulse-a";
     bool seen_output = false;
     bool seen_baseline = false;
     bool seen_response = false;
     bool seen_guard = false;
+    bool seen_profile = false;
+    bool seen_blocks = false;
+    bool seen_run_role = false;
     for (int index = 1; index < argc; ++index) {
         if (index + 1 >= argc) {
             std::cerr << "参数缺少值。\n";
@@ -90,14 +101,32 @@ int wmain(int argc, wchar_t* argv[]) {
         } else if (argument == L"--guard-samples" && !seen_guard &&
                    parse_u64(value, request.guard_sample_count)) {
             seen_guard = true;
+        } else if (argument == L"--profile" && !seen_profile &&
+                   (value == L"sparse-pulse-a" ||
+                    value == L"dependency-calibration-a2")) {
+            profile.assign(value);
+            seen_profile = true;
+        } else if (argument == L"--blocks" && !seen_blocks &&
+                   parse_u64(value, dependency_request.block_count)) {
+            seen_blocks = true;
+        } else if (argument == L"--run-role" && !seen_run_role &&
+                   (value == L"p-cal" || value == L"p-holdout")) {
+            dependency_request.run_role = value == L"p-cal"
+                ? mouse_effect_probe::DependencyCalibrationRunRole::P_CAL
+                : mouse_effect_probe::DependencyCalibrationRunRole::P_HOLDOUT;
+            seen_run_role = true;
         } else {
             std::cerr << "未知、重复或非法参数。\n";
             print_usage();
             return 2;
         }
     }
+    const bool dependency_profile =
+        profile == L"dependency-calibration-a2";
     if (!seen_output || !seen_baseline || !seen_response || !seen_guard ||
-        output_path.empty() || !output_path.is_absolute()) {
+        output_path.empty() || !output_path.is_absolute() ||
+        (dependency_profile && (!seen_blocks || !seen_run_role)) ||
+        (!dependency_profile && (seen_blocks || seen_run_role))) {
         std::cerr << "缺少必填参数，且 output 必须是绝对路径。\n";
         print_usage();
         return 2;
@@ -105,14 +134,27 @@ int wmain(int argc, wchar_t* argv[]) {
 
     mouse_effect_probe::MouseEffectProbeSequence sequence;
     std::string error;
-    if (!mouse_effect_probe::make_sparse_pulse_sequence(
-            request, sequence, error) ||
+    bool generated = false;
+    if (dependency_profile) {
+        dependency_request.baseline_sample_count =
+            request.baseline_sample_count;
+        dependency_request.response_sample_count =
+            request.response_sample_count;
+        dependency_request.guard_sample_count = request.guard_sample_count;
+        generated = mouse_effect_probe::make_dependency_calibration_sequence(
+            dependency_request, sequence, error);
+    } else {
+        generated = mouse_effect_probe::make_sparse_pulse_sequence(
+            request, sequence, error);
+    }
+    if (!generated ||
         !mouse_effect_probe::write_mouse_effect_probe_sequence(
             output_path, sequence, error)) {
-        std::cerr << "生成 sparse-pulse A 序列失败: " << error << '\n';
+        std::cerr << "生成 Mouse Effect Probe 序列失败: " << error << '\n';
         return 1;
     }
     std::cout << "序列已原子发布: path=" << output_path
+              << ", profile=" << sequence.profile
               << ", samples=" << sequence.samples.size()
               << ", net_x_counts=" << sequence.net_x_counts
               << ", max_abs_prefix_x_counts="

@@ -593,8 +593,47 @@ def _match_physical_events(
         matched.append((event, sample, frame, manifest_index))
 
     pulse_signs = [int(samples[position]["dx_counts"]) for position in pulse_positions]
+    profile = str(sequence.get("profile", ""))
+    if profile == "sparse_pulse_a":
+        sequence_shape_valid = pulse_signs == [1, -1, -1, 1]
+    else:
+        blocks = sequence.get("blocks")
+        request = sequence.get("request", {})
+        run_role = str(request.get("run_role", ""))
+        expected_profile = {
+            "p_cal": "dependency_calibration_a2_p_cal",
+            "p_holdout": "dependency_calibration_a2_p_holdout",
+        }.get(run_role)
+        block_count = int(request.get("block_count", 0))
+        expected_pattern = [1, -1, -1, 1] if run_role == "p_cal" else [-1, 1, 1, -1]
+        sequence_shape_valid = (
+            expected_profile == profile
+            and isinstance(blocks, list)
+            and block_count >= 4
+            and block_count % 4 == 0
+            and len(blocks) == block_count
+            and len(pulse_positions) == block_count * 2
+        )
+        if sequence_shape_valid:
+            for block_index, block in enumerate(blocks):
+                first_position = pulse_positions[block_index * 2]
+                second_position = pulse_positions[block_index * 2 + 1]
+                first_sample = samples[first_position]
+                second_sample = samples[second_position]
+                expected_first = expected_pattern[block_index % 4]
+                if (
+                    int(block.get("block_id", -1)) != block_index + 1
+                    or int(first_sample.get("block_id", -1)) != block_index + 1
+                    or int(second_sample.get("block_id", -1)) != block_index + 1
+                    or int(first_sample.get("dx_counts", 0)) != expected_first
+                    or int(second_sample.get("dx_counts", 0)) != -expected_first
+                    or int(block.get("first_pulse_dx_counts", 0)) != expected_first
+                    or int(block.get("second_pulse_dx_counts", 0)) != -expected_first
+                ):
+                    sequence_shape_valid = False
+                    break
     if (
-        pulse_signs != [1, -1, -1, 1]
+        not sequence_shape_valid
         or int(sequence.get("summary", {}).get("net_x_counts", 1)) != 0
         or int(sequence.get("summary", {}).get("max_abs_prefix_x_counts", 0)) != 1
         or requested_x != 0
@@ -602,7 +641,7 @@ def _match_physical_events(
         or int(result.get("cumulative_requested_x_counts", 1)) != 0
         or int(result.get("cumulative_backend_completed_x_counts", 1)) != 0
     ):
-        raise ValueError("Physical sparse-pulse A 不是四脉冲 ±1 成对净零序列")
+        raise ValueError("Physical sparse-pulse 序列不是按 profile 预注册的 ±1 成对净零序列")
     return matched, pulse_positions
 
 
@@ -667,12 +706,19 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
     result = report.get("result", {})
     binding = report.get("binding", {})
     source_binding = manifest.get("source_binding", {})
+    profile = str(sequence.get("profile", ""))
+    is_a1 = int(sequence.get("schema", 0)) == 1 and profile == "sparse_pulse_a"
+    a2_role = {
+        "dependency_calibration_a2_p_cal": "p-cal",
+        "dependency_calibration_a2_p_holdout": "p-holdout",
+    }.get(profile)
+    is_a2 = int(sequence.get("schema", 0)) == 2 and a2_role is not None
     if (
         manifest.get("evidence_type") != "output_off_capture"
         or manifest.get("physical_output_capability") is not False
         or report.get("dispatch_mode") != "physical_a"
-        or report.get("profile") != "sparse_pulse_a"
-        or sequence.get("profile") != "sparse_pulse_a"
+        or report.get("profile") != profile
+        or not (is_a1 or is_a2)
         or result.get("state") != "completed"
         or result.get("stop_reason") != "normal_completion"
         or result.get("complete") is not True
@@ -685,7 +731,7 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
         or int(report.get("executor_timebase", {}).get("ticks_per_second", 0))
         != 1_000_000_000
     ):
-        raise ValueError("输入证据不是同一完整 Physical sparse-pulse A Run")
+        raise ValueError("输入证据不是同一完整 Physical sparse-pulse A/A2 Run")
 
     frames = manifest.get("frames")
     if (
@@ -696,6 +742,13 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
     ):
         raise ValueError("Physical sidecar manifest frame 容量不完整")
     frame_by_timestamp = _physical_frame_index(frames)
+    source_mapping_uncertainty_ms: list[float] = []
+    if is_a2:
+        for frame in frames:
+            uncertainty = float(frame.get("source_clock_uncertainty_ms", -1.0))
+            if not math.isfinite(uncertainty) or uncertainty < 0.0:
+                raise ValueError("Physical A2 frame 缺少有效 source mapping uncertainty")
+            source_mapping_uncertainty_ms.append(uncertainty)
     matched, pulse_positions = _match_physical_events(
         report, sequence, frame_by_timestamp
     )
@@ -789,6 +842,16 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
                 "frame_lag": frame_lag,
                 "manifest_index": current_manifest_index,
                 "source_timestamp": int(current_frame["source_timestamp"]),
+                "source_clock_session_id": str(
+                    current_frame["source_clock_session_id"]
+                ),
+                "source_clock_uncertainty_ms": (
+                    float(current_frame.get("source_clock_uncertainty_ms"))
+                    if is_a2
+                    else None
+                ),
+                "png_sha256": str(current_frame.get("png_sha256", "")),
+                "bgr_sha256": str(current_frame.get("bgr_sha256", "")),
                 "phase": str(current_sample["phase"]),
                 "source_submission_after_pulse_ms": _milliseconds(
                     current_source_ns - int(event["source_time_at_steady_ns"])
@@ -952,9 +1015,12 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
         )
 
     paired_closure: list[dict] = []
-    for first_index, second_index in ((0, 1), (2, 3)):
+    for first_index in range(0, len(pulse_responses), 2):
+        second_index = first_index + 1
         first = pulse_responses[first_index]
         second = pulse_responses[second_index]
+        if int(first["block_id"]) != int(second["block_id"]):
+            raise ValueError("Physical pulse pair 跨越了 block 边界")
         paired_closure.append(
             {
                 "block_id": int(first["block_id"]),
@@ -991,8 +1057,12 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
     if min(reference_gradient_left) <= 0.0 or min(reference_gradient_right) <= 0.0:
         invalid_reasons.append("NO_WITNESS_GRADIENT")
     physical_result = {
-        "schema_version": 1,
-        "evidence_type": "mouse_effect_probe_physical_background_response",
+        "schema_version": 2 if is_a2 else 1,
+        "evidence_type": (
+            "mouse_effect_probe_a2_physical_background_response"
+            if is_a2
+            else "mouse_effect_probe_physical_background_response"
+        ),
         "status": "VALID" if not invalid_reasons else "INVALID",
         "invalid_reasons": invalid_reasons,
         "physical_output_capability": False,
@@ -1002,6 +1072,9 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
             for pulse in pulse_responses
         ),
         "human_physical_acceptance": "NOT_INFERRED_BY_ANALYZER",
+        "profile": profile,
+        "run_role": a2_role,
+        "a2_dependency_gate_claimed": False,
         "method": {
             "name": "exact_witness_change_plus_opencv_phase_correlate",
             "onset_semantic": "first_exact_left_and_right_witness_pixel_change",
@@ -1039,6 +1112,16 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
             int(event["source_time_at_steady_ns"])
             - int(frame["source_time_at_steady_ns"])
             for event, _, frame, _ in matched
+        ),
+        "source_mapping_uncertainty_ms": (
+            distribution_summary(source_mapping_uncertainty_ms)
+            if is_a2
+            else None
+        ),
+        "source_mapping_uncertainty_px": (
+            "PENDING_CANDIDATE_FRAME_HULL_NO_TIME_TIMES_FIXED_SPEED"
+            if is_a2
+            else None
         ),
         "backend_completed_pulse_count": len(pulse_positions),
         "texture": {
