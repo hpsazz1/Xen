@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <thread>
@@ -243,6 +244,10 @@ SafetyPollResult poll_physical_safety(
 }
 
 } // namespace
+
+std::string_view mouse_effect_probe_deadman_arming_prompt() noexcept {
+    return "KMBOX monitor 已就绪；不要提前按住。请在 5 秒内按住右键并持续保持。";
+}
 
 MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
         std::span<const std::wstring_view> arguments,
@@ -614,6 +619,8 @@ bool run_mouse_effect_probe(
 
         if (options.dispatch_mode ==
                 mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
+            std::cout << mouse_effect_probe_deadman_arming_prompt() << '\n'
+                      << std::flush;
             const auto arming_deadline = std::chrono::steady_clock::now() +
                 std::chrono::seconds(5);
             bool armed = false;

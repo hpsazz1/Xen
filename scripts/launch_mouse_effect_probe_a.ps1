@@ -183,7 +183,7 @@ if ([bool]$capture.require_frame_metadata) {
     $sidecarArguments += "--require-frame-metadata"
 }
 
-Write-Host "即将执行 A 级稀疏 ±1 X probe。请保持静止背景、持续按住右键；松开右键、End 或 F8 会立即停发，且不会补偿。"
+Write-Host "即将执行 A 级稀疏 ±1 X probe。启动命令时请先保持右键松开；probe 提示 monitor 已就绪后，再在 5 秒内按住右键并持续保持。随后松开右键、End 或 F8 会立即停发，且不会补偿。"
 $sidecarProcess = Start-Process -FilePath `
     ([string]$task.files.sidecar_executable.path) `
     -WorkingDirectory (Split-Path -Parent `

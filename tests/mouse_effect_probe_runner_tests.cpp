@@ -149,12 +149,23 @@ void test_frame_mapping_preserves_source_identity_and_quality() {
            "非 VALID source timing 不得进入 probe executor");
 }
 
+void test_physical_deadman_prompt_contract() {
+    const std::string_view prompt =
+        mouse_effect_probe_deadman_arming_prompt();
+    expect(prompt.find("monitor 已就绪") != std::string_view::npos &&
+               prompt.find("5 秒内") != std::string_view::npos &&
+               prompt.find("按住右键") != std::string_view::npos &&
+               prompt.find("不要提前按住") != std::string_view::npos,
+           "Physical A 必须在 monitor 打开后提示新鲜右键按下，不能要求提前按住");
+}
+
 } // namespace
 
 int main() {
     test_parser_separates_output_off_and_physical_authority();
     test_parser_rejects_missing_duplicate_and_invalid_identity();
     test_frame_mapping_preserves_source_identity_and_quality();
+    test_physical_deadman_prompt_contract();
     if (failures != 0) {
         std::cerr << "Mouse Effect Probe Runner 测试失败数: "
                   << failures << '\n';

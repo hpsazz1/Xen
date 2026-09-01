@@ -1246,6 +1246,12 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/tests/benchmark_mouse_script_tests.ps1"
         -BuildDirectory "${CMAKE_BINARY_DIR}"
         -GitExecutable "${GIT_EXECUTABLE}")
+    xen_add_windows_powershell_test(mouse_effect_probe_script_contract_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_script_contract_tests.ps1"
+        -PrepareScript
+            "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_a.ps1"
+        -LaunchScript
+            "${PROJECT_SOURCE_DIR}/scripts/launch_mouse_effect_probe_a.ps1")
     xen_add_windows_powershell_test(obs_capture_binding_tests
         "${PROJECT_SOURCE_DIR}/tests/obs_capture_binding_tests.ps1"
         -BindingScript "${PROJECT_SOURCE_DIR}/scripts/export_obs_capture_binding.ps1"
