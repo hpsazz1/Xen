@@ -44,6 +44,8 @@ struct MouseBenchmarkOptions {
     std::uint64_t sample_pairs = 10000;
     int dx_counts = 1;
     int dy_counts = 0;
+    // 正式入口固定 PRODUCTION；loopback 单测使用进程隔离 scope。
+    MouseOutputOwnerScope owner_scope = MouseOutputOwnerScope::PRODUCTION;
     // 由公有入口或 fake seam 显式声明，writer 不得从 endpoint 反推测试边界。
     MouseBenchmarkPeerTestBoundary peer_test_boundary =
         MouseBenchmarkPeerTestBoundary::UNSPECIFIED;

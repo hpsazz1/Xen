@@ -25,6 +25,7 @@ enum class MouseStatus {
     SEND_FAILED,
     RESPONSE_TIMEOUT,
     INVALID_RESPONSE,
+    OWNER_CONFLICT,
 };
 
 enum class InputMonitorStatus {
@@ -47,6 +48,32 @@ struct InputSnapshot {
 };
 
 const char* MouseStatusName(MouseStatus status) noexcept;
+
+enum class MouseOutputOwnerScope {
+    PRODUCTION,
+    CURRENT_PROCESS_TEST,
+};
+
+// 跨进程独占 Mouse 输出所有权。生产 scope 使用同一用户临时目录的固定
+// 文件共享锁；进程异常退出时 Windows 自动释放句柄，不发送任何清理命令。
+class MouseOutputOwnerLease {
+public:
+    MouseOutputOwnerLease() noexcept;
+    ~MouseOutputOwnerLease();
+
+    MouseOutputOwnerLease(const MouseOutputOwnerLease&) = delete;
+    MouseOutputOwnerLease& operator=(const MouseOutputOwnerLease&) = delete;
+
+    bool acquire(MouseOutputOwnerScope scope,
+                 const std::string& owner,
+                 std::string& error) noexcept;
+    void release() noexcept;
+    bool held() const noexcept;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 struct MouseConfig {
     MouseBackend backend = MouseBackend::WIN32_SEND_INPUT;
@@ -100,6 +127,9 @@ public:
     // 非阻塞取得与当前鼠标输出后端绑定的物理键鼠状态；只有 state_valid
     // 快照可改变键态，status 只描述链路，不得被调用方猜测为全释放。
     virtual bool poll_input(InputSnapshot& snapshot) noexcept = 0;
+    // 仅 MouseDeviceFactory 的跨进程 lease adapter 在成功 open 后返回 true；
+    // 测试 fake 默认 false，不能用调用方布尔声明冒充生产独占事实。
+    virtual bool output_owner_exclusive() const noexcept { return false; }
     virtual void close() noexcept = 0;
     virtual MouseStatus status() const noexcept = 0;
     virtual std::string last_error() const = 0;
@@ -111,7 +141,9 @@ protected:
 class MouseDeviceFactory {
 public:
     static std::unique_ptr<IMouseController> create(
-        const MouseConfig& config) noexcept;
+        const MouseConfig& config,
+        MouseOutputOwnerScope owner_scope =
+            MouseOutputOwnerScope::PRODUCTION) noexcept;
 
 private:
     MouseDeviceFactory() = delete;

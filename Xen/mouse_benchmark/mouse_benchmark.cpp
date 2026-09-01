@@ -969,7 +969,8 @@ bool run_mouse_benchmark(
                 MouseConfig mouse_config = options.mouse;
                 // 只有双重 CLI 授权通过后，才在局部生产配置中打开物理输出门。
                 mouse_config.allow_send_input = true;
-                auto mouse = MouseDeviceFactory::create(mouse_config);
+                auto mouse = MouseDeviceFactory::create(
+                    mouse_config, options.owner_scope);
                 if (!mouse) {
                     set_error(error, "创建鼠标后端失败");
                 } else {

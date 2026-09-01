@@ -178,6 +178,7 @@ MouseBenchmarkOptions make_kmbox_options(
     options.sample_pairs = 2;
     options.dx_counts = 7;
     options.dy_counts = -3;
+    options.owner_scope = MouseOutputOwnerScope::CURRENT_PROCESS_TEST;
     options.peer_test_boundary =
         MouseBenchmarkPeerTestBoundary::LOOPBACK_UDP_FAKE;
     options.allow_physical_output = true;
@@ -627,6 +628,25 @@ void test_open_failure_and_first_move_timeout_do_not_observe_ack() {
     }
 }
 
+void test_run_rejects_mouse_output_owner_conflict_before_device_open() {
+    MouseOutputOwnerLease blocker;
+    std::string error;
+    expect(blocker.acquire(MouseOutputOwnerScope::CURRENT_PROCESS_TEST,
+                           "mouse-benchmark-test-blocker", error),
+           "benchmark owner 冲突测试必须先持有隔离 lease: " + error);
+    const auto report_path = unique_report_path(L"owner-conflict");
+    std::error_code ignored;
+    std::filesystem::remove(report_path, ignored);
+    auto options = make_kmbox_options(12345, report_path);
+    MouseBenchmarkResult result;
+    expect(!run_mouse_benchmark(options, result, error) &&
+               error.find("owner") != std::string::npos &&
+               result.successful_commands == 0 &&
+               !std::filesystem::exists(report_path),
+           "benchmark 必须在打开设备和发送命令前拒绝 Mouse owner 冲突");
+    blocker.release();
+}
+
 int serve_script_kmbox_fake() {
     // 正式脚本专项只连接本机 UDP peer；六个响应覆盖握手、monitor、首组和正式组。
     // 子进程先发布 ready port，随后允许 wrapper 完成文件/部署快照；单元
@@ -664,6 +684,7 @@ int main(int argc, char* argv[]) {
     test_successful_kmbox_run_and_report();
     test_failed_command_does_not_publish();
     test_open_failure_and_first_move_timeout_do_not_observe_ack();
+    test_run_rejects_mouse_output_owner_conflict_before_device_open();
     test_makcu_report_contract_without_physical_output();
 
     Log::shutdown();

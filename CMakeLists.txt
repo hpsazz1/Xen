@@ -863,6 +863,21 @@ target_link_libraries(mouse_benchmark
     PUBLIC mouse
     PRIVATE crash log)
 
+add_library(mouse_effect_probe STATIC
+    Xen/mouse_effect_probe/mouse_effect_probe.cpp)
+target_include_directories(mouse_effect_probe PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(mouse_effect_probe
+    PUBLIC mouse
+    PRIVATE nlohmann_json::nlohmann_json bcrypt)
+
+add_library(mouse_effect_probe_runner STATIC
+    Xen/mouse_effect_probe_runner/mouse_effect_probe_runner.cpp)
+target_include_directories(mouse_effect_probe_runner
+    PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(mouse_effect_probe_runner
+    PUBLIC mouse_effect_probe capture
+    PRIVATE config)
+
 add_library(overlay STATIC
     Xen/overlay/overlay.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -926,6 +941,23 @@ add_executable(xen_mouse_benchmark
 set_target_properties(
     xen_mouse_benchmark PROPERTIES OUTPUT_NAME XenMouseBenchmark)
 target_link_libraries(xen_mouse_benchmark PRIVATE mouse_benchmark)
+
+add_executable(xen_mouse_effect_probe
+    Xen/mouse_effect_probe_runner/main.cpp)
+set_target_properties(
+    xen_mouse_effect_probe PROPERTIES OUTPUT_NAME XenMouseEffectProbe)
+target_link_libraries(xen_mouse_effect_probe
+    PRIVATE mouse_effect_probe_runner)
+if(WIN32)
+    xen_deploy_runtime_dlls(xen_mouse_effect_probe OPENCV NDI)
+endif()
+
+add_executable(xen_mouse_effect_probe_sequence
+    Xen/mouse_effect_probe_sequence/main.cpp)
+set_target_properties(xen_mouse_effect_probe_sequence
+    PROPERTIES OUTPUT_NAME XenMouseEffectProbeSequence)
+target_link_libraries(xen_mouse_effect_probe_sequence
+    PRIVATE mouse_effect_probe)
 
 # ─── 测试 ───────────────────────────────────────────────
 
@@ -1117,6 +1149,18 @@ if(BUILD_TESTING)
     target_link_libraries(mouse_benchmark_tests PRIVATE
         mouse_benchmark ws2_32)
     add_test(NAME mouse_benchmark_tests COMMAND mouse_benchmark_tests)
+
+    add_executable(mouse_effect_probe_tests
+        tests/mouse_effect_probe_tests.cpp)
+    target_link_libraries(mouse_effect_probe_tests PRIVATE mouse_effect_probe)
+    add_test(NAME mouse_effect_probe_tests COMMAND mouse_effect_probe_tests)
+
+    add_executable(mouse_effect_probe_runner_tests
+        tests/mouse_effect_probe_runner_tests.cpp)
+    target_link_libraries(mouse_effect_probe_runner_tests
+        PRIVATE mouse_effect_probe_runner)
+    add_test(NAME mouse_effect_probe_runner_tests
+        COMMAND mouse_effect_probe_runner_tests)
 
     add_executable(runtime_tests
         tests/runtime_tests.cpp

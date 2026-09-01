@@ -67,7 +67,8 @@ public:
 
 void test_mouse_disabled_by_default() {
     MouseConfig config;
-    auto mouse = MouseDeviceFactory::create(config);
+    auto mouse = MouseDeviceFactory::create(
+        config, MouseOutputOwnerScope::CURRENT_PROCESS_TEST);
     expect(mouse && mouse->open(), "Win32 Mouse 后端应可初始化");
     expect(mouse && mouse->status() == MouseStatus::DISABLED,
            "物理输出默认必须为 DISABLED");

@@ -14,3 +14,7 @@ cache/
 
 # 本地运行日志。
 logs/
+
+# Python 专项工具的字节码缓存。
+__pycache__/
+*.pyc

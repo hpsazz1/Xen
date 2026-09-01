@@ -15,11 +15,56 @@
 #endif
 
 #include <atomic>
+#include <array>
+#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
+#include <string_view>
 
 namespace {
+
+void set_output_owner_error(std::string& output,
+                            std::string_view value) noexcept {
+    try {
+        output.assign(value);
+    } catch (...) {
+    }
+}
+
+bool output_owner_lock_path(MouseOutputOwnerScope scope,
+                            std::filesystem::path& path,
+                            std::string& error) noexcept {
+    try {
+        std::array<wchar_t, 32768> buffer{};
+        const DWORD length = GetTempPathW(
+            static_cast<DWORD>(buffer.size()), buffer.data());
+        if (length == 0 || length >= buffer.size()) {
+            set_output_owner_error(error,
+                "无法解析 Mouse owner 临时锁目录");
+            return false;
+        }
+        path = std::filesystem::path(
+            std::wstring_view(buffer.data(), length));
+        if (scope == MouseOutputOwnerScope::PRODUCTION) {
+            path /= L"Xen-mouse-output-owner-v1.lock";
+        } else if (scope ==
+                       MouseOutputOwnerScope::CURRENT_PROCESS_TEST) {
+            path /= L"Xen-mouse-output-owner-test-" +
+                std::to_wstring(GetCurrentProcessId()) + L".lock";
+        } else {
+            set_output_owner_error(error, "Mouse owner scope 非法");
+            return false;
+        }
+        error.clear();
+        return true;
+    } catch (...) {
+        set_output_owner_error(error,
+            "解析 Mouse owner 临时锁路径时发生未知异常");
+        return false;
+    }
+}
 
 class Win32MouseController final : public IMouseController {
 public:
@@ -112,7 +157,162 @@ private:
     std::string last_error_;
 };
 
+class ExclusiveMouseController final : public IMouseController {
+public:
+    ExclusiveMouseController(std::unique_ptr<IMouseController> inner,
+                             MouseOutputOwnerScope owner_scope)
+        : inner_(std::move(inner)), owner_scope_(owner_scope) {}
+
+    ~ExclusiveMouseController() override { close(); }
+
+    bool open() noexcept override {
+        close();
+        if (!inner_) {
+            owner_conflict_ = true;
+            conflict_error_ = "Mouse factory adapter 缺少内部后端";
+            return false;
+        }
+        std::string lease_error;
+        if (!output_owner_.acquire(
+                owner_scope_, "mouse-device-factory", lease_error)) {
+            owner_conflict_ = true;
+            try {
+                conflict_error_ = std::move(lease_error);
+            } catch (...) {
+            }
+            return false;
+        }
+        owner_conflict_ = false;
+        conflict_error_.clear();
+        if (!inner_->open()) {
+            output_owner_.release();
+            return false;
+        }
+        return true;
+    }
+
+    MouseMoveReceipt move(
+            const MouseMoveCommand& command) noexcept override {
+        if (!inner_ || !output_owner_.held()) return {};
+        return inner_->move(command);
+    }
+
+    bool poll_input(InputSnapshot& snapshot) noexcept override {
+        if (!inner_ || !output_owner_.held()) {
+            snapshot = {};
+            snapshot.status = owner_conflict_
+                ? InputMonitorStatus::FAILURE
+                : InputMonitorStatus::CLOSED;
+            return true;
+        }
+        return inner_->poll_input(snapshot);
+    }
+
+    bool output_owner_exclusive() const noexcept override {
+        return output_owner_.held();
+    }
+
+    void close() noexcept override {
+        if (inner_) inner_->close();
+        output_owner_.release();
+        owner_conflict_ = false;
+        conflict_error_.clear();
+    }
+
+    MouseStatus status() const noexcept override {
+        if (owner_conflict_) return MouseStatus::OWNER_CONFLICT;
+        return inner_ ? inner_->status() : MouseStatus::INVALID_CONFIG;
+    }
+
+    std::string last_error() const override {
+        if (owner_conflict_) return conflict_error_;
+        return inner_ ? inner_->last_error()
+                      : "Mouse factory adapter 缺少内部后端";
+    }
+
+private:
+    std::unique_ptr<IMouseController> inner_;
+    MouseOutputOwnerScope owner_scope_ = MouseOutputOwnerScope::PRODUCTION;
+    MouseOutputOwnerLease output_owner_;
+    bool owner_conflict_ = false;
+    std::string conflict_error_;
+};
+
 } // namespace
+
+class MouseOutputOwnerLease::Impl {
+public:
+    ~Impl() {
+        if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+    }
+
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    std::filesystem::path path;
+    std::string owner;
+};
+
+MouseOutputOwnerLease::MouseOutputOwnerLease() noexcept
+    : impl_(new (std::nothrow) Impl) {}
+
+MouseOutputOwnerLease::~MouseOutputOwnerLease() = default;
+
+bool MouseOutputOwnerLease::acquire(
+        MouseOutputOwnerScope scope,
+        const std::string& owner,
+        std::string& error) noexcept {
+    if (!impl_) {
+        set_output_owner_error(error, "无法分配 Mouse owner lease 状态");
+        return false;
+    }
+    if (impl_->handle != INVALID_HANDLE_VALUE) {
+        set_output_owner_error(error, "当前对象已持有 Mouse owner lease");
+        return false;
+    }
+    if (owner.empty() || owner.size() > 128U ||
+        owner.find_first_of("\r\n") != std::string::npos) {
+        set_output_owner_error(error, "Mouse owner 名称非法");
+        return false;
+    }
+    std::filesystem::path lock_path;
+    if (!output_owner_lock_path(scope, lock_path, error)) return false;
+    const HANDLE handle = CreateFileW(
+        lock_path.c_str(), GENERIC_READ | GENERIC_WRITE,
+        0, nullptr, OPEN_ALWAYS,
+        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
+        nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD code = GetLastError();
+        set_output_owner_error(error,
+            "Mouse 输出已由另一 owner 独占或锁文件不可用，Win32Error=" +
+            std::to_string(code));
+        return false;
+    }
+    impl_->handle = handle;
+    impl_->path = std::move(lock_path);
+    try {
+        impl_->owner = owner;
+    } catch (...) {
+        CloseHandle(impl_->handle);
+        impl_->handle = INVALID_HANDLE_VALUE;
+        impl_->path.clear();
+        set_output_owner_error(error, "记录 Mouse owner 名称失败");
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+void MouseOutputOwnerLease::release() noexcept {
+    if (!impl_ || impl_->handle == INVALID_HANDLE_VALUE) return;
+    CloseHandle(impl_->handle);
+    impl_->handle = INVALID_HANDLE_VALUE;
+    impl_->path.clear();
+    impl_->owner.clear();
+}
+
+bool MouseOutputOwnerLease::held() const noexcept {
+    return impl_ && impl_->handle != INVALID_HANDLE_VALUE;
+}
 
 const char* MouseStatusName(MouseStatus status) noexcept {
     switch (status) {
@@ -125,6 +325,7 @@ const char* MouseStatusName(MouseStatus status) noexcept {
         case MouseStatus::SEND_FAILED: return "SEND_FAILED";
         case MouseStatus::RESPONSE_TIMEOUT: return "RESPONSE_TIMEOUT";
         case MouseStatus::INVALID_RESPONSE: return "INVALID_RESPONSE";
+        case MouseStatus::OWNER_CONFLICT: return "OWNER_CONFLICT";
     }
     return "UNKNOWN";
 }
@@ -139,17 +340,20 @@ const char* MouseBackendName(MouseBackend backend) noexcept {
 }
 
 std::unique_ptr<IMouseController> MouseDeviceFactory::create(
-        const MouseConfig& config) noexcept {
+        const MouseConfig& config,
+        MouseOutputOwnerScope owner_scope) noexcept {
     try {
+        std::unique_ptr<IMouseController> inner;
         if (config.backend == MouseBackend::WIN32_SEND_INPUT) {
-            return std::make_unique<Win32MouseController>(config);
+            inner = std::make_unique<Win32MouseController>(config);
+        } else if (config.backend == MouseBackend::KMBOX_NET) {
+            inner = mouse::detail::create_kmbox_net_controller(config);
+        } else if (config.backend == MouseBackend::MAKCU) {
+            inner = mouse::detail::create_makcu_controller(config);
         }
-        if (config.backend == MouseBackend::KMBOX_NET) {
-            return mouse::detail::create_kmbox_net_controller(config);
-        }
-        if (config.backend == MouseBackend::MAKCU) {
-            return mouse::detail::create_makcu_controller(config);
-        }
+        if (!inner) return nullptr;
+        return std::make_unique<ExclusiveMouseController>(
+            std::move(inner), owner_scope);
     } catch (...) {
         LOG_ERROR("mouse", "创建鼠标后端时发生未知异常");
     }

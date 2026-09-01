@@ -46,11 +46,17 @@ void expect(bool condition, const std::string& message) {
     std::cerr << "[失败] " << message << '\n';
 }
 
+std::unique_ptr<IMouseController> create_test_mouse(
+        const MouseConfig& config) {
+    return MouseDeviceFactory::create(
+        config, MouseOutputOwnerScope::CURRENT_PROCESS_TEST);
+}
+
 void test_win32_input_stays_unverified_without_owned_source() {
     MouseConfig config;
     config.backend = MouseBackend::WIN32_SEND_INPUT;
     config.allow_send_input = false;
-    auto mouse = MouseDeviceFactory::create(config);
+    auto mouse = create_test_mouse(config);
     expect(mouse && mouse->open(),
            "Win32 输出 adapter 必须能在物理输出禁用态打开");
     InputSnapshot first;
@@ -408,7 +414,7 @@ void test_disabled_does_not_access_network() {
     config.kmbox_ip = "127.0.0.1";
     config.kmbox_port = device.port();
     config.kmbox_uuid = "A1B2C3D4";
-    auto mouse = MouseDeviceFactory::create(config);
+    auto mouse = create_test_mouse(config);
     expect(mouse && mouse->open(),
            "未授权 KMBOX NET 应直接初始化为禁用状态");
     expect(mouse && mouse->status() == MouseStatus::DISABLED,
@@ -427,7 +433,7 @@ void test_packet_layout_and_sequence() {
         {AckMode::VALID, AckMode::VALID, AckMode::VALID, AckMode::VALID});
     expect(device.valid(), "成功路径假设备必须创建成功");
     if (!device.valid()) return;
-    auto mouse = MouseDeviceFactory::create(make_config(device.port()));
+    auto mouse = create_test_mouse(make_config(device.port()));
     expect(mouse && mouse->open(), "合法 ACK 应完成 KMBOX NET 握手" +
                (mouse ? ": " + mouse->last_error() : ""));
     expect(mouse && mouse->status() == MouseStatus::READY,
@@ -479,7 +485,7 @@ void test_packet_layout_and_sequence() {
 
 void test_kmbox_monitor_retains_state_until_explicit_release() {
     FakeKmboxDevice device({AckMode::VALID, AckMode::VALID});
-    auto mouse = MouseDeviceFactory::create(make_config(device.port()));
+    auto mouse = create_test_mouse(make_config(device.port()));
     expect(mouse && mouse->open(), "KMBOX monitor 输入测试必须先连接");
     expect(device.send_monitor(0x02U, {0x4dU, 0x41U}),
            "假 KMBOX 必须能发送右键、End 与 F8 物理报告");
@@ -544,7 +550,7 @@ void test_invalid_commands_are_not_sent() {
     FakeKmboxDevice device({AckMode::VALID, AckMode::VALID});
     expect(device.valid(), "非法命令测试假设备必须创建成功");
     if (!device.valid()) return;
-    auto mouse = MouseDeviceFactory::create(make_config(device.port()));
+    auto mouse = create_test_mouse(make_config(device.port()));
     expect(mouse && mouse->open(), "非法命令测试必须先握手成功");
     expect(mouse && !mouse->move({0, 0}) &&
                mouse->status() == MouseStatus::INVALID_COMMAND,
@@ -564,7 +570,7 @@ void test_invalid_config() {
     MouseConfig config;
     config.backend = MouseBackend::KMBOX_NET;
     config.allow_send_input = true;
-    auto mouse = MouseDeviceFactory::create(config);
+    auto mouse = create_test_mouse(config);
     expect(mouse && !mouse->open() &&
                mouse->status() == MouseStatus::INVALID_CONFIG,
            "缺少 KMBOX NET 设备配置必须在创建 socket 前失败");
@@ -576,7 +582,7 @@ void test_open_response_failure(AckMode mode,
     FakeKmboxDevice device({mode});
     expect(device.valid(), name + " 假设备必须创建成功");
     if (!device.valid()) return;
-    auto mouse = MouseDeviceFactory::create(make_config(device.port()));
+    auto mouse = create_test_mouse(make_config(device.port()));
     expect(mouse && !mouse->open(), name + " 必须导致握手失败");
     expect(mouse && mouse->status() == expected_status,
            name + " 必须返回明确 MouseStatus");
@@ -590,7 +596,7 @@ void test_move_response_failure() {
                              AckMode::WRONG_SEQUENCE});
     expect(device.valid(), "移动 ACK 失败假设备必须创建成功");
     if (!device.valid()) return;
-    auto mouse = MouseDeviceFactory::create(make_config(device.port()));
+    auto mouse = create_test_mouse(make_config(device.port()));
     expect(mouse && mouse->open(), "移动 ACK 失败测试必须先握手成功");
     expect(mouse && !mouse->move({4, -3}) &&
                mouse->status() == MouseStatus::INVALID_RESPONSE,
@@ -618,7 +624,7 @@ void test_makcu_disabled_does_not_access_serial() {
     expect(state->open_calls == 1 && state->writes.size() == 3U,
            "未授权 MAKCU 只允许 baud 与两条监听配置，不得发送移动帧");
 
-    auto production_mouse = MouseDeviceFactory::create(config);
+    auto production_mouse = create_test_mouse(config);
     expect(std::string(MouseBackendName(MouseBackend::MAKCU)) == "makcu" &&
                production_mouse && !production_mouse->open(),
            "生产工厂必须创建 MAKCU 且校验监听所需 COM 口");
@@ -848,6 +854,46 @@ void test_makcu_interleaved_input_streams() {
            "MAKCU 输入流陈旧后必须失败关闭为全释放");
 }
 
+void test_mouse_output_owner_lease_is_process_exclusive_and_recoverable() {
+    MouseOutputOwnerLease first;
+    MouseOutputOwnerLease second;
+    std::string error;
+    expect(first.acquire(MouseOutputOwnerScope::CURRENT_PROCESS_TEST,
+                         "mouse-tests-first", error) && first.held(),
+           "首个测试 Mouse owner lease 应获取成功: " + error);
+    expect(!second.acquire(MouseOutputOwnerScope::CURRENT_PROCESS_TEST,
+                           "mouse-tests-second", error) && !second.held(),
+           "同一测试 scope 的第二个 Mouse owner 必须 fail-closed");
+    first.release();
+    expect(!first.held() &&
+               second.acquire(MouseOutputOwnerScope::CURRENT_PROCESS_TEST,
+                              "mouse-tests-second", error) &&
+               second.held(),
+           "首 owner 释放后另一个 owner 应能获取同一锁: " + error);
+    second.release();
+}
+
+void test_factory_adapter_owns_output_lease_for_open_lifetime() {
+    MouseConfig config;
+    config.backend = MouseBackend::WIN32_SEND_INPUT;
+    config.allow_send_input = false;
+    auto first = MouseDeviceFactory::create(
+        config, MouseOutputOwnerScope::CURRENT_PROCESS_TEST);
+    auto second = MouseDeviceFactory::create(
+        config, MouseOutputOwnerScope::CURRENT_PROCESS_TEST);
+    expect(first && second && first->open() &&
+               first->output_owner_exclusive(),
+           "首个 factory adapter 必须在 open 生命周期持有 owner lease");
+    expect(!second->open() &&
+               second->status() == MouseStatus::OWNER_CONFLICT &&
+               !second->output_owner_exclusive(),
+           "第二个 factory adapter 必须在设备初始化前报告 OWNER_CONFLICT");
+    first->close();
+    expect(second->open() && second->output_owner_exclusive(),
+           "首 adapter close 后第二个 adapter 必须能获取 lease");
+    second->close();
+}
+
 } // namespace
 
 int main() {
@@ -886,6 +932,8 @@ int main() {
     test_makcu_invalid_config_and_commands();
     test_makcu_response_failures();
     test_makcu_interleaved_input_streams();
+    test_mouse_output_owner_lease_is_process_exclusive_and_recoverable();
+    test_factory_adapter_owns_output_lease_for_open_lifetime();
 
     Log::shutdown();
     WSACleanup();
