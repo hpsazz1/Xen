@@ -14,6 +14,7 @@
 #include "aim_static_closed_loop_replay_fixture.h"
 #include "aim_x_plant_holdout_fixture.h"
 #include "aim_x_latest_automatic_holdout_fixture.h"
+#include "aim_x_latest_pixel_holdout_fixture.h"
 #include "aim_x_plant_replay_fixture.h"
 #include "aim_x_two_dof_holdout_fixture.h"
 
@@ -14513,6 +14514,197 @@ void test_latest_automatic_tail_rejects_regressive_x_candidates() {
                std::to_string(vertical_command_frames));
 }
 
+void test_latest_physical_pixel_holdout_rejects_regressive_x_candidates() {
+    using aim_x_latest_pixel_holdout_fixture::kPlantDelayFrames;
+    using aim_x_latest_pixel_holdout_fixture::kPlantPixelsPerCount;
+    using aim_x_latest_pixel_holdout_fixture::kSamples;
+    using aim_x_latest_pixel_holdout_fixture::kSegmentCount;
+    using aim_x_latest_pixel_holdout_fixture::kSegmentSamples;
+    using aim_x_latest_pixel_holdout_fixture::kWarmupSamplesPerSegment;
+
+    AimConfig config;
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.10f;
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.400f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+
+    std::vector<float> absolute_errors;
+    int crosshair_outside_x_frames = 0;
+    int longest_outside_x_streak = 0;
+    int outside_x_streak = 0;
+    int outside_without_modelled_response_frames = 0;
+    int outside_quantization_zero_frames = 0;
+    int command_direction_violations = 0;
+    int command_limit_violations = 0;
+    int vertical_command_frames = 0;
+
+    for (int segment = 0; segment < kSegmentCount; ++segment) {
+        Aim aim(config);
+        std::array<int, kPlantDelayFrames> delayed_commands{};
+        auto captured_at = std::chrono::steady_clock::now() +
+            std::chrono::seconds(1);
+        float world_center_x = 160.0f;
+        float camera_background_x = 0.0f;
+        outside_x_streak = 0;
+        const std::size_t begin = static_cast<std::size_t>(
+            segment * kSegmentSamples);
+        const std::size_t end = begin + kSegmentSamples;
+
+        for (std::size_t index = begin; index < end; ++index) {
+            const auto& sample = kSamples[index];
+            const std::size_t local_index = index - begin;
+            expect(sample.reset == (local_index == 0),
+                   "dbed788b 同步像素留出 fixture 必须显式标记四个固定时间窗");
+            const std::size_t delay_slot =
+                local_index % delayed_commands.size();
+            camera_background_x -=
+                static_cast<float>(delayed_commands[delay_slot]) *
+                kPlantPixelsPerCount;
+            delayed_commands[delay_slot] = 0;
+            if (local_index != 0) {
+                captured_at += std::chrono::microseconds(
+                    sample.dt_microseconds);
+            }
+            world_center_x +=
+                static_cast<float>(sample.world_delta_millipixels) /
+                1000.0f;
+            const float width =
+                static_cast<float>(sample.width_centipixels) / 100.0f;
+            const float height =
+                static_cast<float>(sample.height_centipixels) / 100.0f;
+            const float observed_center_x =
+                world_center_x + camera_background_x;
+
+            AimFrame frame = make_frame(
+                static_cast<std::uint64_t>(local_index + 1), captured_at);
+            frame.control_at = captured_at + std::chrono::milliseconds(3);
+            frame.lock_active = true;
+            frame.detections = {body_box(
+                observed_center_x,
+                frame.control_center_y + height * 0.15f,
+                width, height)};
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS &&
+                       (local_index == 0 || result.has_target),
+                   "dbed788b 同步像素留出闭环除每段首个 tentative 样本外必须保留目标");
+            if (!result.has_target) continue;
+            expect_current_horizontal_base(
+                result, "dbed788b 同步像素留出闭环");
+
+            if (result.has_command) {
+                delayed_commands[delay_slot] = result.command.dx_counts;
+                expect(aim.record_backend_completed_command(
+                           frame.sequence,
+                           frame.control_at + std::chrono::microseconds(100),
+                           result.command.dx_counts,
+                           result.command.dy_counts),
+                       "dbed788b 同步像素留出必须写回同序列完成命令");
+            }
+            if (local_index < static_cast<std::size_t>(
+                                  kWarmupSamplesPerSegment)) {
+                continue;
+            }
+
+            const float error_x =
+                result.target.base_aim_x - frame.control_center_x;
+            absolute_errors.push_back(std::fabs(error_x));
+            const bool outside_x =
+                frame.control_center_x <
+                    result.target.matched_observation_x1 ||
+                frame.control_center_x >
+                    result.target.matched_observation_x2;
+            if (outside_x) {
+                ++crosshair_outside_x_frames;
+                ++outside_x_streak;
+                longest_outside_x_streak = std::max(
+                    longest_outside_x_streak, outside_x_streak);
+                if (std::fabs(
+                        result.control.modelled_response_x_counts) <=
+                    0.001f) {
+                    ++outside_without_modelled_response_frames;
+                }
+                if (result.control.quantization_zero_x) {
+                    ++outside_quantization_zero_frames;
+                }
+            } else {
+                outside_x_streak = 0;
+            }
+            if (result.command.dx_counts != 0 &&
+                result.command.dx_counts * error_x <= 0.0f) {
+                ++command_direction_violations;
+            }
+            if (std::hypot(
+                    static_cast<float>(result.command.dx_counts),
+                    static_cast<float>(result.command.dy_counts)) >
+                config.max_counts_per_frame + 0.001f) {
+                ++command_limit_violations;
+            }
+            if (result.command.dy_counts != 0) {
+                ++vertical_command_frames;
+            }
+        }
+    }
+
+    const auto percentile = [](std::vector<float> values, float ratio) {
+        std::sort(values.begin(), values.end());
+        const std::size_t index = static_cast<std::size_t>(std::clamp(
+            ratio * static_cast<float>(values.size() - 1),
+            0.0f, static_cast<float>(values.size() - 1)));
+        return values[index];
+    };
+    const float error_p50 = percentile(absolute_errors, 0.50f);
+    const float error_p95 = percentile(absolute_errors, 0.95f);
+    const float maximum_error =
+        *std::max_element(absolute_errors.begin(), absolute_errors.end());
+    std::cout << "dbed788b 同步像素 X 闭环: 误差 P50/P95/max="
+              << error_p50 << "/" << error_p95 << "/" << maximum_error
+              << "，X 出框/最长/model零/量化零="
+              << crosshair_outside_x_frames << "/"
+              << longest_outside_x_streak << "/"
+              << outside_without_modelled_response_frames << "/"
+              << outside_quantization_zero_frames << '\n';
+    // 未改生产控制的固定基线为 3.682/7.466/13.229 px、出框 6、最长 3。
+    // 当前数据尚不足以形成可执行 plant green，因此这里只冻结删除上界；
+    // 后续候选仍需在本夹具和独立留出中成对改善，不能把“未回归”写成
+    // Physical 通过。
+    expect(error_p50 <= 3.70f && error_p95 <= 7.50f &&
+               maximum_error <= 13.30f &&
+               crosshair_outside_x_frames <= 6 &&
+               longest_outside_x_streak <= 3,
+           "dbed788b 同步像素固定留出不得回归 X 中位/尾部滞后或连续"
+           "出框；误差 P50/P95/max=" +
+               std::to_string(error_p50) + "/" +
+               std::to_string(error_p95) + "/" +
+               std::to_string(maximum_error) + "，出框/最长/model零=" +
+               std::to_string(crosshair_outside_x_frames) + "/" +
+               std::to_string(longest_outside_x_streak) + "/" +
+               std::to_string(outside_without_modelled_response_frames));
+    expect(outside_without_modelled_response_frames == 0 &&
+               outside_quantization_zero_frames == 0 &&
+               command_direction_violations == 0 &&
+               command_limit_violations == 0 && vertical_command_frames == 0,
+           "dbed788b 同步像素 X 候选不得新增 modelled-response 空洞、"
+           "量化空洞，也不得改变方向、二维上限或冻结 Y，违规=" +
+               std::to_string(outside_without_modelled_response_frames) +
+               "/" +
+               std::to_string(outside_quantization_zero_frames) + "/" +
+               std::to_string(command_direction_violations) + "/" +
+               std::to_string(command_limit_violations) + "/" +
+               std::to_string(vertical_command_frames));
+}
+
 int main() {
     test_status_transition_logs_are_limited();
 
@@ -14600,6 +14792,7 @@ int main() {
     test_identified_x_plant_holdout_does_not_cap_motion_at_position_error();
     test_latest_physical_opening_responsibility_reduces_x_lag();
     test_latest_automatic_tail_rejects_regressive_x_candidates();
+    test_latest_physical_pixel_holdout_rejects_regressive_x_candidates();
     test_actual_game_semantic_landmark_does_not_gain_base_x_phase();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
