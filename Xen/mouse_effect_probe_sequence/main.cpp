@@ -56,7 +56,11 @@ void print_usage() {
         << "  XenMouseEffectProbeSequence --output <new-json> "
            "--baseline-samples <n> --response-samples <n> "
            "--guard-samples <n> --profile dependency-calibration-a2 "
-           "--blocks <multiple-of-4> --run-role <p-cal|p-holdout>\n";
+           "--blocks <multiple-of-4> --run-role <p-cal|p-holdout>\n"
+        << "  XenMouseEffectProbeSequence --output <new-json> "
+           "--profile s1-liveness-a2 --run-role <primary|validation> "
+           "--challenge-pulses <n> --challenge-stride-samples <n> "
+           "--settle-samples <n> --baseline-samples <n>\n";
 }
 
 } // namespace
@@ -73,7 +77,9 @@ int wmain(int argc, wchar_t* argv[]) {
     mouse_effect_probe::SparsePulseSequenceRequest request;
     mouse_effect_probe::DependencyCalibrationSequenceRequest
         dependency_request;
+    mouse_effect_probe::S1LivenessSequenceRequest s1_liveness_request;
     std::wstring profile = L"sparse-pulse-a";
+    std::wstring run_role;
     bool seen_output = false;
     bool seen_baseline = false;
     bool seen_response = false;
@@ -81,6 +87,9 @@ int wmain(int argc, wchar_t* argv[]) {
     bool seen_profile = false;
     bool seen_blocks = false;
     bool seen_run_role = false;
+    bool seen_challenge_pulses = false;
+    bool seen_challenge_stride = false;
+    bool seen_settle = false;
     for (int index = 1; index < argc; ++index) {
         if (index + 1 >= argc) {
             std::cerr << "参数缺少值。\n";
@@ -103,18 +112,32 @@ int wmain(int argc, wchar_t* argv[]) {
             seen_guard = true;
         } else if (argument == L"--profile" && !seen_profile &&
                    (value == L"sparse-pulse-a" ||
-                    value == L"dependency-calibration-a2")) {
+                    value == L"dependency-calibration-a2" ||
+                    value == L"s1-liveness-a2")) {
             profile.assign(value);
             seen_profile = true;
         } else if (argument == L"--blocks" && !seen_blocks &&
                    parse_u64(value, dependency_request.block_count)) {
             seen_blocks = true;
         } else if (argument == L"--run-role" && !seen_run_role &&
-                   (value == L"p-cal" || value == L"p-holdout")) {
-            dependency_request.run_role = value == L"p-cal"
-                ? mouse_effect_probe::DependencyCalibrationRunRole::P_CAL
-                : mouse_effect_probe::DependencyCalibrationRunRole::P_HOLDOUT;
+                   (value == L"p-cal" || value == L"p-holdout" ||
+                    value == L"primary" || value == L"validation")) {
+            run_role.assign(value);
             seen_run_role = true;
+        } else if (argument == L"--challenge-pulses" &&
+                   !seen_challenge_pulses &&
+                   parse_u64(value,
+                       s1_liveness_request.challenge_pulse_count)) {
+            seen_challenge_pulses = true;
+        } else if (argument == L"--challenge-stride-samples" &&
+                   !seen_challenge_stride &&
+                   parse_u64(value,
+                       s1_liveness_request.challenge_stride_sample_count)) {
+            seen_challenge_stride = true;
+        } else if (argument == L"--settle-samples" && !seen_settle &&
+                   parse_u64(value,
+                       s1_liveness_request.settle_sample_count)) {
+            seen_settle = true;
         } else {
             std::cerr << "未知、重复或非法参数。\n";
             print_usage();
@@ -123,10 +146,22 @@ int wmain(int argc, wchar_t* argv[]) {
     }
     const bool dependency_profile =
         profile == L"dependency-calibration-a2";
-    if (!seen_output || !seen_baseline || !seen_response || !seen_guard ||
-        output_path.empty() || !output_path.is_absolute() ||
-        (dependency_profile && (!seen_blocks || !seen_run_role)) ||
-        (!dependency_profile && (seen_blocks || seen_run_role))) {
+    const bool s1_liveness_profile = profile == L"s1-liveness-a2";
+    const bool common_valid = seen_output && seen_baseline &&
+        !output_path.empty() && output_path.is_absolute();
+    const bool sparse_valid = !dependency_profile && !s1_liveness_profile &&
+        seen_response && seen_guard && !seen_blocks && !seen_run_role &&
+        !seen_challenge_pulses && !seen_challenge_stride && !seen_settle;
+    const bool dependency_valid = dependency_profile && seen_response &&
+        seen_guard && seen_blocks && seen_run_role &&
+        (run_role == L"p-cal" || run_role == L"p-holdout") &&
+        !seen_challenge_pulses && !seen_challenge_stride && !seen_settle;
+    const bool s1_liveness_valid = s1_liveness_profile &&
+        !seen_response && !seen_guard && !seen_blocks && seen_run_role &&
+        (run_role == L"primary" || run_role == L"validation") &&
+        seen_challenge_pulses && seen_challenge_stride && seen_settle;
+    if (!common_valid ||
+        (!sparse_valid && !dependency_valid && !s1_liveness_valid)) {
         std::cerr << "缺少必填参数，且 output 必须是绝对路径。\n";
         print_usage();
         return 2;
@@ -136,6 +171,9 @@ int wmain(int argc, wchar_t* argv[]) {
     std::string error;
     bool generated = false;
     if (dependency_profile) {
+        dependency_request.run_role = run_role == L"p-cal"
+            ? mouse_effect_probe::DependencyCalibrationRunRole::P_CAL
+            : mouse_effect_probe::DependencyCalibrationRunRole::P_HOLDOUT;
         dependency_request.baseline_sample_count =
             request.baseline_sample_count;
         dependency_request.response_sample_count =
@@ -143,6 +181,14 @@ int wmain(int argc, wchar_t* argv[]) {
         dependency_request.guard_sample_count = request.guard_sample_count;
         generated = mouse_effect_probe::make_dependency_calibration_sequence(
             dependency_request, sequence, error);
+    } else if (s1_liveness_profile) {
+        s1_liveness_request.baseline_sample_count =
+            request.baseline_sample_count;
+        s1_liveness_request.run_role = run_role == L"primary"
+            ? mouse_effect_probe::S1LivenessRunRole::PRIMARY
+            : mouse_effect_probe::S1LivenessRunRole::VALIDATION;
+        generated = mouse_effect_probe::make_s1_liveness_sequence(
+            s1_liveness_request, sequence, error);
     } else {
         generated = mouse_effect_probe::make_sparse_pulse_sequence(
             request, sequence, error);

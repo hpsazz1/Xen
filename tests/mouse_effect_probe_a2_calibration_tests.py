@@ -118,8 +118,292 @@ def _make_s1_session(
         "capture_process_session_id": f"capture-{role}",
         "manifest_sha256": "fixture-manifest-sha",
         "obs_source_binding_sha256": binding_sha,
+        "probe_binding_sha256": binding_sha,
     }
     _write_json(run / "pixel-evidence" / "manifest.json", manifest)
+    _write_json(run / "s1-session.json", session)
+    return run
+
+
+def _make_bracketed_static_s1_session(
+    root: pathlib.Path,
+    role: str,
+    run_uuid: str,
+    source_clock_session_id: str,
+    source_start_ns: int,
+    *,
+    post_challenge_changes: bool = True,
+) -> pathlib.Path:
+    run = root / role
+    frame_root = run / "pixel-evidence" / "frames"
+    frame_root.mkdir(parents=True)
+    rng = np.random.default_rng(20260902)
+    base = rng.integers(0, 256, (128, 256, 3), dtype=np.uint8)
+    if role == "validation":
+        # 新 capture asset 不复用 primary 的完整 decoded frame；
+        # witness 内容仍属于同一 scope。
+        base[0, 0, 0] = np.uint8((int(base[0, 0, 0]) + 1) % 256)
+
+    pre_count = 8
+    settle_count = 4
+    baseline_count = 32
+    post_count = 8
+    pre_shifts = [0.0, 0.4, 0.8, 0.4, 0.0, -0.4, 0.0, 0.0]
+    settle_shifts = [0.0] * settle_count
+    baseline_shifts = [0.0] * baseline_count
+    post_shifts = (
+        [0.0, -0.4, -0.8, -0.4, 0.0, 0.4, 0.0, 0.0]
+        if post_challenge_changes else [0.0] * post_count
+    )
+    shifts = pre_shifts + settle_shifts + baseline_shifts + post_shifts
+
+    frames: list[dict] = []
+    for index, shift in enumerate(shifts):
+        bgr = _shift_image(base, float(shift))
+        frame_path = frame_root / f"{index:06d}.png"
+        expect(cv2.imwrite(str(frame_path), bgr), "bracketed S1 PNG 写入失败")
+        captured_ns = source_start_ns + index * 4_000_000
+        frames.append(
+            {
+                "index": index,
+                "file": f"frames/{index:06d}.png",
+                "width": 256,
+                "height": 128,
+                "bgr_sha256": hashlib.sha256(bgr.tobytes()).hexdigest(),
+                "captured_at_steady_ns": captured_ns,
+                "source_timestamp": 1_000_000 + index + source_start_ns,
+                "source_timestamp_valid": True,
+                "source_time_at_steady_ns": captured_ns,
+                "source_time_basis": "NDI_SDK_SUBMISSION",
+                "source_time_timing_valid": True,
+                "source_clock_status": "VALID",
+                "source_clock_session_id": source_clock_session_id,
+                "source_clock_uncertainty_ms": 0.05,
+                "source_clock_rtt_ms": 0.10,
+                "source_clock_mapping_age_ms": 1.0,
+                "source_clock_sample_count": 12,
+                "source_dropped_frames": 0,
+                "transport_dropped_frames": 0,
+                "transport_invalid_packets": 0,
+                "duplication_recoveries": 0,
+            }
+        )
+
+    pre_last = pre_count - 1
+    settle_first = pre_count
+    settle_last = settle_first + settle_count - 1
+    baseline_first = settle_last + 1
+    baseline_last = baseline_first + baseline_count - 1
+    post_first = baseline_last + 1
+    post_last = len(frames) - 1
+    role_sign = 1 if role == "primary" else -1
+    pre_dx = [
+        role_sign, 0, role_sign, 0, -role_sign, 0, -role_sign, 0
+    ]
+    post_dx = [
+        -role_sign, 0, -role_sign, 0, role_sign, 0, role_sign, 0
+    ]
+    dx_values = (
+        pre_dx + [0] * settle_count + [0] * baseline_count + post_dx
+    )
+    sequence_sha = hashlib.sha256(
+        f"fixture-s1-sequence-{role}".encode()
+    ).hexdigest()
+    profile = f"dependency_calibration_a2_s1_{role}"
+    samples: list[dict] = []
+    events: list[dict] = []
+    cumulative = 0
+    for index, (frame, dx) in enumerate(zip(frames, dx_values, strict=True)):
+        if index <= pre_last:
+            block_id = 1
+            phase = "pulse" if dx else "response"
+        elif index <= settle_last:
+            block_id = 0
+            phase = "guard"
+        elif index <= baseline_last:
+            block_id = 0
+            phase = "baseline"
+        else:
+            block_id = 2
+            phase = "pulse" if dx else "response"
+        cumulative += dx
+        samples.append(
+            {
+                "sample_index": index,
+                "block_id": block_id,
+                "phase": phase,
+                "dx_counts": dx,
+                "dy_counts": 0,
+            }
+        )
+        dispatched = dx != 0
+        events.append(
+            {
+                "run_uuid": run_uuid,
+                "sample_index": index,
+                "block_id": block_id,
+                "sequence_sha256": sequence_sha,
+                "source_timestamp": frame["source_timestamp"],
+                "source_timestamp_valid": True,
+                "source_time_at_steady_ns": frame["source_time_at_steady_ns"],
+                "source_time_basis": "NDI_SDK_SUBMISSION",
+                "source_clock_status": "VALID",
+                "source_dropped_frames": 0,
+                "transport_dropped_frames": 0,
+                "transport_invalid_packets": 0,
+                "nominal_dx_counts": dx,
+                "nominal_dy_counts": 0,
+                "requested_dx_counts": dx if dispatched else 0,
+                "requested_dy_counts": 0,
+                "dispatch_attempted": dispatched,
+                "backend_succeeded": dispatched,
+                "protocol_ack_received": dispatched,
+                "cumulative_requested_x_counts": cumulative,
+                "cumulative_backend_completed_x_counts": cumulative,
+            }
+        )
+    sequence = {
+        "schema": 3,
+        "profile": profile,
+        "request": {
+            "challenge_pulse_count": 2,
+            "challenge_stride_sample_count": 2,
+            "settle_sample_count": settle_count,
+            "baseline_sample_count": baseline_count,
+            "run_role": role,
+        },
+        "blocks": [
+            {
+                "block_id": 1,
+                "first_sample_index": 0,
+                "sample_count": pre_count,
+                "first_pulse_dx_counts": 1 if role == "primary" else -1,
+                "second_pulse_dx_counts": -1 if role == "primary" else 1,
+            },
+            {
+                "block_id": 2,
+                "first_sample_index": post_first,
+                "sample_count": post_count,
+                "first_pulse_dx_counts": -1 if role == "primary" else 1,
+                "second_pulse_dx_counts": 1 if role == "primary" else -1,
+            },
+        ],
+        "samples": samples,
+        "summary": {
+            "net_x_counts": 0,
+            "max_abs_prefix_x_counts": 2,
+        },
+        "sequence_sha256": sequence_sha,
+    }
+    sequence_path = run / "sequence.json"
+    _write_json(sequence_path, sequence)
+    sequence_file_sha = hashlib.sha256(sequence_path.read_bytes()).hexdigest()
+    report = {
+        "evidence_type": "backend_completed_command_to_visible_background_response",
+        "run_uuid": run_uuid,
+        "dispatch_mode": "physical_a",
+        "profile": profile,
+        "sequence_sha256": sequence_sha,
+        "result": {
+            "state": "completed",
+            "stop_reason": "normal_completion",
+            "complete": True,
+            "consumed_sample_count": len(samples),
+            "cumulative_requested_x_counts": 0,
+            "cumulative_backend_completed_x_counts": 0,
+            "events": events,
+        },
+    }
+    report_path = run / "command-report.json"
+    _write_json(report_path, report)
+    report_sha = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    bracket = {
+        "schema_version": 2,
+        "evidence_type": "mouse_effect_probe_a2_s1_liveness_bracket",
+        "physical_output_capability": True,
+        "automated_input_generated": True,
+        "input_backend": "kmbox_net",
+        "manual_motion_required": False,
+        "phase_join_basis": "command_event_source_timestamp_to_manifest",
+        "sequence_sha256": sequence_sha,
+        "sequence_file_sha256": sequence_file_sha,
+        "command_report_sha256": report_sha,
+        "policy": {
+            "policy_id": "fixture-kmbox-bracket-policy-v1",
+            "baseline_frame_count": baseline_count,
+            "challenge_pulse_count": 2,
+            "challenge_stride_sample_count": 2,
+            "challenge_frames_eligible_for_estimands": False,
+            "settle_frames_eligible_for_estimands": False,
+        },
+        "phases": [
+            {
+                "name": "PRE_LIVENESS_CHALLENGE",
+                "first_sample_index": 0,
+                "last_sample_index": pre_last,
+            },
+            {
+                "name": "RELEASE_AND_SETTLE",
+                "first_sample_index": settle_first,
+                "last_sample_index": settle_last,
+            },
+            {
+                "name": "BASELINE_ZERO",
+                "first_sample_index": baseline_first,
+                "last_sample_index": baseline_last,
+            },
+            {
+                "name": "POST_LIVENESS_CHALLENGE",
+                "first_sample_index": post_first,
+                "last_sample_index": post_last,
+            },
+        ],
+    }
+    bracket_path = run / "s1-liveness-bracket.json"
+    _write_json(bracket_path, bracket)
+    bracket_sha = hashlib.sha256(bracket_path.read_bytes()).hexdigest()
+    binding_sha = hashlib.sha256(b"binding-bracketed-scope").hexdigest()
+    manifest = {
+        "schema_version": 1,
+        "evidence_type": "output_off_capture",
+        "physical_output_capability": False,
+        "capture_source_name": "fixture-scope",
+        "requested_frame_count": len(frames),
+        "recorded_frame_count": len(frames),
+        "source_binding": {
+            "file": "source-binding.json",
+            "sha256": binding_sha,
+        },
+        "frames": frames,
+    }
+    manifest_path = run / "pixel-evidence" / "manifest.json"
+    _write_json(manifest_path, manifest)
+    session = {
+        "schema_version": 2,
+        "evidence_type": "mouse_effect_probe_a2_s1_session",
+        "status": "RECORDED_UNANALYZED",
+        "capture_mode": "bracketed_kmbox",
+        "physical_output_capability": True,
+        "probe_started": True,
+        "mouse_opened": True,
+        "actual_command_zero": False,
+        "probe_command_zero": False,
+        "baseline_actual_command_zero": True,
+        "automated_kmbox_challenge": True,
+        "challenge_frames_excluded_from_estimands": True,
+        "aim_off": True,
+        "run_uuid": run_uuid,
+        "run_role": role,
+        "scope_id": "fixture-bracketed-scope",
+        "capture_process_session_id": f"capture-bracketed-{role}",
+        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "obs_source_binding_sha256": binding_sha,
+        "probe_binding_sha256": binding_sha,
+        "sequence_sha256": sequence_sha,
+        "sequence_file_sha256": sequence_file_sha,
+        "command_report_sha256": report_sha,
+        "liveness_bracket_sha256": bracket_sha,
+    }
     _write_json(run / "s1-session.json", session)
     return run
 
@@ -290,9 +574,150 @@ def test_s1_allows_separate_timing_observations_of_the_same_clock_epoch() -> Non
                "报告必须分开记录 clock epoch 与本次 timing observation 身份")
 
 
+def test_s1_accepts_bracketed_resolution_censored_static_baseline() -> None:
+    with tempfile.TemporaryDirectory(prefix="xen-a2-s1-bracketed-") as directory:
+        root = pathlib.Path(directory)
+        primary = _make_bracketed_static_s1_session(
+            root,
+            "primary",
+            "11111111-2222-4333-8444-555555555555",
+            "shared-clock-epoch",
+            10_000_000_000,
+        )
+        validation = _make_bracketed_static_s1_session(
+            root,
+            "validation",
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "shared-clock-epoch",
+            20_000_000_000,
+        )
+        result, rows = MODULE.analyze_zero_input_sessions(
+            primary,
+            validation,
+            (16, 16, 80, 96),
+            (160, 16, 80, 96),
+            block_count=4,
+        )
+        expect(result["status"] == "VALID"
+               and result["measurement_state"]
+               == "VALID_BRACKETED_CENSORED_ZERO",
+               "活性括号与 Type B null interval 应允许数字静态 baseline")
+        expect(len(rows) == 64
+               and all(row["phase"] == "BASELINE_ZERO" for row in rows),
+               "challenge/settle frame 必须全部排除，只输出 baseline rows")
+        bracket = result["liveness_bracket"]
+        expect(bracket["policy_frozen_across_runs"] is True
+               and bracket["challenge_frames_excluded_from_estimands"] is True
+               and bracket["automated_kmbox_challenge"] is True
+               and bracket["fixed_pixel_speed_used_as_gate"] is False
+               and bracket["primary"]["pre_command_ledger_pass"] is True
+               and bracket["primary"]["post_command_ledger_pass"] is True
+               and bracket["primary"]["pre_image_change_pass"] is True
+               and bracket["primary"]["post_image_change_pass"] is True
+               and bracket["validation"]["pre_command_ledger_pass"] is True
+               and bracket["validation"]["post_command_ledger_pass"] is True
+               and bracket["validation"]["pre_image_change_pass"] is True
+               and bracket["validation"]["post_image_change_pass"] is True,
+               "primary/validation 都必须有独立 pre/post decoded-image 活性证据")
+        for witness in ("left", "right"):
+            model = result["noise_model"][witness]
+            expect(model["nondegenerate"] is False
+                   and model["variability_resolved"] is False
+                   and model["observed_interval_px"] == [0.0, 0.0]
+                   and model["noise_distribution_claimed"] is False
+                   and model["artificial_epsilon_added"] is False,
+                   "静态 baseline 只能报告 resolution-censored zero")
+            null_interval = model["null_displacement_interval_px"]
+            expect(np.isfinite(null_interval[0])
+                   and np.isfinite(null_interval[1])
+                   and null_interval[0] < 0.0 < null_interval[1],
+                   "Type B null interval 必须来自非人为的近零 shift 校准")
+        plan = MODULE.derive_dependency_calibration_plan(
+            MODULE.build_synthetic_calibration(),
+            result,
+            observed_lag_reference=4,
+            candidate_horizons=(4, 8, 16, 32),
+        )
+        state = plan["dependency_state_after_plan"]
+        expect(state["zero_command_disturbance_bound"]
+               == "GREEN_S1_BRACKETED_CENSORED_ZERO"
+               and state["independent_nondegenerate_noise"]
+               == "NOT_CLAIMED_STATIC_DIGITAL_SCOPE",
+               "plan 必须使用 null interval，不得偷称 nondegenerate noise")
+
+
+def test_s1_bracket_rejects_missing_post_change_and_baseline_command() -> None:
+    with tempfile.TemporaryDirectory(prefix="xen-a2-s1-bracket-red-") as directory:
+        root = pathlib.Path(directory)
+        primary = _make_bracketed_static_s1_session(
+            root,
+            "primary",
+            "11111111-2222-4333-8444-555555555555",
+            "shared-clock-epoch",
+            10_000_000_000,
+            post_challenge_changes=False,
+        )
+        validation = _make_bracketed_static_s1_session(
+            root,
+            "validation",
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "shared-clock-epoch",
+            20_000_000_000,
+        )
+        result, _ = MODULE.analyze_zero_input_sessions(
+            primary,
+            validation,
+            (16, 16, 80, 96),
+            (160, 16, 80, 96),
+            block_count=4,
+        )
+        expect(result["status"] == "INVALID"
+               and "PRIMARY_POST_LIVENESS_CHALLENGE_MISSING"
+               in result["invalid_reasons"]
+               and result["liveness_bracket"]["primary"]
+               ["post_command_ledger_pass"] is True,
+               "固定 command/ACK 不能替代 post decoded-image change")
+
+        report_path = validation / "command-report.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        baseline_event = report["result"]["events"][12]
+        baseline_event["nominal_dx_counts"] = 1
+        baseline_event["requested_dx_counts"] = 1
+        baseline_event["dispatch_attempted"] = True
+        baseline_event["backend_succeeded"] = True
+        baseline_event["protocol_ack_received"] = True
+        _write_json(report_path, report)
+        report_sha = hashlib.sha256(report_path.read_bytes()).hexdigest()
+        bracket_path = validation / "s1-liveness-bracket.json"
+        bracket = json.loads(bracket_path.read_text(encoding="utf-8"))
+        bracket["command_report_sha256"] = report_sha
+        _write_json(bracket_path, bracket)
+        session_path = validation / "s1-session.json"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        session["command_report_sha256"] = report_sha
+        session["liveness_bracket_sha256"] = hashlib.sha256(
+            bracket_path.read_bytes()
+        ).hexdigest()
+        _write_json(session_path, session)
+        try:
+            MODULE.analyze_zero_input_sessions(
+                primary,
+                validation,
+                (16, 16, 80, 96),
+                (160, 16, 80, 96),
+                block_count=4,
+            )
+            raise AssertionError("baseline 非零 command 必须 fail closed")
+        except ValueError as exception:
+            expect("command ledger" in str(exception),
+                   "重哈希也不得掩盖 sequence/baseline command 不守恒")
+
+
 if __name__ == "__main__":
     test_s0_uses_untouched_holdout_and_calibrates_spatial_operations()
     test_s1_requires_two_nonoverlapping_nondegenerate_capture_sessions()
     test_s1_rejects_reused_or_degenerate_frames_without_epsilon()
     test_s1_allows_separate_timing_observations_of_the_same_clock_epoch()
+    test_s1_accepts_bracketed_resolution_censored_static_baseline()
+    test_s1_bracket_rejects_missing_post_change_and_baseline_command()
     print("Mouse Effect Probe A2 dependency calibration 测试全部通过。")

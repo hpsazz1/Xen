@@ -254,6 +254,112 @@ void test_a2_dependency_calibration_sequences_are_balanced_and_independent() {
     }
 }
 
+void test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline() {
+    using mouse_effect_probe::S1LivenessRunRole;
+
+    const mouse_effect_probe::S1LivenessSequenceRequest primary_request{
+        .challenge_pulse_count = 2,
+        .challenge_stride_sample_count = 3,
+        .settle_sample_count = 4,
+        .baseline_sample_count = 8,
+        .run_role = S1LivenessRunRole::PRIMARY,
+    };
+    auto validation_request = primary_request;
+    validation_request.run_role = S1LivenessRunRole::VALIDATION;
+
+    mouse_effect_probe::MouseEffectProbeSequence primary;
+    mouse_effect_probe::MouseEffectProbeSequence validation;
+    std::string error;
+    expect(mouse_effect_probe::make_s1_liveness_sequence(
+               primary_request, primary, error) &&
+               mouse_effect_probe::make_s1_liveness_sequence(
+                   validation_request, validation, error),
+           "A2 S1 primary/validation 活性序列应生成成功: " + error);
+    expect(mouse_effect_probe::validate_mouse_effect_probe_sequence(
+               primary, error) &&
+               mouse_effect_probe::validate_mouse_effect_probe_sequence(
+                   validation, error),
+           "A2 S1 活性序列必须通过生产 reader/validator: " + error);
+    expect(primary.schema == 3 &&
+               primary.profile == "dependency_calibration_a2_s1_primary" &&
+               validation.schema == 3 &&
+               validation.profile ==
+                   "dependency_calibration_a2_s1_validation" &&
+               primary.sequence_sha256 != validation.sequence_sha256,
+           "A2 S1 两个角色必须有独立 profile 与规范语义 SHA");
+    expect(primary.samples.size() == 36 && primary.blocks.size() == 2 &&
+               primary.net_x_counts == 0 &&
+               primary.max_abs_prefix_x_counts == 2,
+           "A2 S1 序列必须是两段回锚挑战夹住 settle 与 baseline");
+
+    std::vector<int> primary_pulses;
+    std::vector<int> validation_pulses;
+    for (const auto& sample : primary.samples) {
+        if (sample.dx_counts != 0) primary_pulses.push_back(sample.dx_counts);
+        expect(sample.dy_counts == 0 && sample.dx_counts >= -1 &&
+                   sample.dx_counts <= 1,
+               "A2 S1 只能发送 X-only 单 count pulse");
+    }
+    for (const auto& sample : validation.samples) {
+        if (sample.dx_counts != 0) {
+            validation_pulses.push_back(sample.dx_counts);
+        }
+    }
+    expect(primary_pulses ==
+               std::vector<int>({1, 1, -1, -1, -1, -1, 1, 1}) &&
+               validation_pulses ==
+               std::vector<int>({-1, -1, 1, 1, 1, 1, -1, -1}),
+           "validation 必须镜像 primary，且每段挑战正常完成都回到 anchor");
+    for (std::size_t index = 12; index < 16; ++index) {
+        expect(primary.samples[index].phase ==
+                   mouse_effect_probe::ProbeSamplePhase::GUARD &&
+                   primary.samples[index].dx_counts == 0,
+               "pre challenge 后必须有预注册零命令 settle");
+    }
+    for (std::size_t index = 16; index < 24; ++index) {
+        expect(primary.samples[index].phase ==
+                   mouse_effect_probe::ProbeSamplePhase::BASELINE &&
+                   primary.samples[index].dx_counts == 0,
+               "baseline 必须是独立连续的精确零命令窗口");
+    }
+
+    TemporaryDirectory temporary;
+    const auto path = temporary.path() / "s1-liveness-primary.json";
+    expect(mouse_effect_probe::write_mouse_effect_probe_sequence(
+               path, primary, error),
+           "A2 S1 活性序列应原子发布: " + error);
+    mouse_effect_probe::MouseEffectProbeSequence round_trip;
+    expect(mouse_effect_probe::read_mouse_effect_probe_sequence(
+               path, round_trip, error) &&
+               round_trip.sequence_sha256 == primary.sequence_sha256 &&
+               round_trip.s1_liveness_request.challenge_pulse_count == 2 &&
+               round_trip.s1_liveness_request.baseline_sample_count == 8,
+           "A2 S1 活性序列必须经生产 reader 精确 round-trip: " + error);
+
+    auto mouse = std::make_shared<FakeMouseController>();
+    mouse_effect_probe::MouseEffectProbeExecutor executor;
+    expect(executor.start(
+               execution_options(), round_trip, mouse, error),
+           "A2 S1 活性序列应通过同一物理 executor 启动: " + error);
+    for (std::size_t index = 0; index < round_trip.samples.size(); ++index) {
+        expect(executor.consume_source_frame(
+                   source_frame(1'000 + index), error),
+               "A2 S1 executor 应逐 source frame 消费且不得追发: " + error);
+    }
+    expect(executor.result().complete && mouse->commands().size() == 8 &&
+               executor.result().cumulative_requested_x_counts == 0 &&
+               executor.result().cumulative_backend_completed_x_counts == 0,
+           "A2 S1 正常完成必须有完整 ACK 命令账本并净 X=0");
+    for (std::size_t index = 16; index < 24; ++index) {
+        const auto& event = executor.result().events[index];
+        expect(event.nominal_dx_counts == 0 && !event.dispatch_attempted &&
+                   event.requested_dx_counts == 0 &&
+                   !event.backend_succeeded &&
+                   !event.protocol_ack_received,
+               "A2 S1 baseline event 必须证明 Probe 未发送命令");
+    }
+}
+
 void test_sequence_file_round_trip_rejects_overwrite_and_tampering() {
     TemporaryDirectory temporary;
     mouse_effect_probe::MouseEffectProbeSequence sequence;
@@ -752,6 +858,7 @@ void test_source_sidecar_safety_and_external_stop_are_fail_closed() {
 int main() {
     test_sparse_pulse_sequence_is_x_only_balanced_and_order_swapped();
     test_a2_dependency_calibration_sequences_are_balanced_and_independent();
+    test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline();
     test_sequence_file_round_trip_rejects_overwrite_and_tampering();
     test_executor_consumes_one_sample_per_frame_and_never_catches_up();
     test_executor_failure_stops_without_compensation();

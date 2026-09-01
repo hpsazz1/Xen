@@ -23,13 +23,20 @@ namespace {
 
 constexpr std::uint32_t kSequenceSchema = 1;
 constexpr std::uint32_t kDependencyCalibrationSequenceSchema = 2;
+constexpr std::uint32_t kS1LivenessSequenceSchema = 3;
 constexpr std::string_view kSparsePulseProfile = "sparse_pulse_a";
 constexpr std::string_view kDependencyCalibrationPrimaryProfile =
     "dependency_calibration_a2_p_cal";
 constexpr std::string_view kDependencyCalibrationHoldoutProfile =
     "dependency_calibration_a2_p_holdout";
+constexpr std::string_view kS1LivenessPrimaryProfile =
+    "dependency_calibration_a2_s1_primary";
+constexpr std::string_view kS1LivenessValidationProfile =
+    "dependency_calibration_a2_s1_validation";
 constexpr std::uint64_t kMaximumSequenceSamples = 1'000'000;
 constexpr std::uint64_t kMaximumDependencyCalibrationBlocks = 64;
+constexpr std::uint64_t kMaximumS1LivenessSamples = 2'400;
+constexpr std::uint64_t kMaximumS1LivenessChallengePulseCount = 64;
 constexpr std::uintmax_t kMaximumSequenceFileBytes = 128U * 1024U * 1024U;
 constexpr std::uint32_t kReportSchema = 1;
 constexpr std::string_view kReportEvidenceType =
@@ -122,6 +129,38 @@ bool expected_dependency_calibration_sample_count(
     return true;
 }
 
+bool expected_s1_liveness_sample_count(
+        const S1LivenessSequenceRequest& request,
+        std::uint64_t& output) noexcept {
+    if (request.challenge_pulse_count == 0 ||
+        request.challenge_pulse_count >
+            kMaximumS1LivenessChallengePulseCount ||
+        request.challenge_stride_sample_count == 0 ||
+        request.settle_sample_count == 0 ||
+        request.baseline_sample_count == 0) {
+        return false;
+    }
+    if (request.challenge_pulse_count >
+            std::numeric_limits<std::uint64_t>::max() /
+                request.challenge_stride_sample_count) {
+        return false;
+    }
+    const auto one_direction = request.challenge_pulse_count *
+        request.challenge_stride_sample_count;
+    if (one_direction >
+            std::numeric_limits<std::uint64_t>::max() / 4U) {
+        return false;
+    }
+    std::uint64_t total = one_direction * 4U;
+    if (!checked_add(total, request.settle_sample_count, total) ||
+        !checked_add(total, request.baseline_sample_count, total) ||
+        total > kMaximumS1LivenessSamples) {
+        return false;
+    }
+    output = total;
+    return true;
+}
+
 void append_sample(MouseEffectProbeSequence& sequence,
                    std::uint64_t block_id,
                    ProbeSamplePhase phase,
@@ -192,6 +231,30 @@ void append_dependency_calibration_block(
     append_zeros(sequence, block_id, ProbeSamplePhase::GUARD,
                  request.guard_sample_count);
 
+    block.sample_count = sequence.samples.size() - block.first_sample_index;
+    sequence.blocks.push_back(block);
+}
+
+void append_s1_liveness_challenge(
+        MouseEffectProbeSequence& sequence,
+        std::uint64_t block_id,
+        int first_direction,
+        const S1LivenessSequenceRequest& request) {
+    ProbeSequenceBlock block;
+    block.block_id = block_id;
+    block.first_sample_index = sequence.samples.size();
+    block.first_pulse_dx_counts = first_direction;
+    block.second_pulse_dx_counts = -first_direction;
+    for (const int direction : {first_direction, -first_direction}) {
+        for (std::uint64_t pulse = 0;
+             pulse < request.challenge_pulse_count; ++pulse) {
+            append_sample(sequence, block_id, ProbeSamplePhase::PULSE,
+                          direction);
+            append_zeros(
+                sequence, block_id, ProbeSamplePhase::RESPONSE,
+                request.challenge_stride_sample_count - 1U);
+        }
+    }
     block.sample_count = sequence.samples.size() - block.first_sample_index;
     sequence.blocks.push_back(block);
 }
@@ -276,6 +339,38 @@ bool build_dependency_calibration_sequence(
     return true;
 }
 
+bool build_s1_liveness_sequence(
+        const S1LivenessSequenceRequest& request,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) {
+    std::uint64_t sample_count = 0;
+    if (!expected_s1_liveness_sample_count(request, sample_count)) {
+        set_error(error,
+            "A2 S1 challenge/stride/settle/baseline 必须为正，单段幅度和总样本必须在安全容量内");
+        return false;
+    }
+    sequence = {};
+    sequence.schema = kS1LivenessSequenceSchema;
+    sequence.profile = request.run_role == S1LivenessRunRole::PRIMARY
+        ? kS1LivenessPrimaryProfile
+        : kS1LivenessValidationProfile;
+    sequence.s1_liveness_request = request;
+    sequence.samples.reserve(static_cast<std::size_t>(sample_count));
+    sequence.blocks.reserve(2U);
+
+    const int role_sign = request.run_role == S1LivenessRunRole::PRIMARY
+        ? 1 : -1;
+    append_s1_liveness_challenge(sequence, 1U, role_sign, request);
+    append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                 request.settle_sample_count);
+    append_zeros(sequence, 0U, ProbeSamplePhase::BASELINE,
+                 request.baseline_sample_count);
+    append_s1_liveness_challenge(sequence, 2U, -role_sign, request);
+    summarize_sequence(sequence);
+    error.clear();
+    return true;
+}
+
 nlohmann::ordered_json canonical_payload(
         const MouseEffectProbeSequence& sequence) {
     nlohmann::ordered_json blocks = nlohmann::ordered_json::array();
@@ -308,7 +403,7 @@ nlohmann::ordered_json canonical_payload(
              sequence.request.response_sample_count},
             {"guard_sample_count", sequence.request.guard_sample_count},
         };
-    } else {
+    } else if (sequence.schema == kDependencyCalibrationSequenceSchema) {
         request = {
             {"baseline_sample_count",
              sequence.dependency_calibration_request.baseline_sample_count},
@@ -319,7 +414,20 @@ nlohmann::ordered_json canonical_payload(
             {"block_count",
              sequence.dependency_calibration_request.block_count},
             {"run_role", dependency_calibration_run_role_name(
-                sequence.dependency_calibration_request.run_role)},
+             sequence.dependency_calibration_request.run_role)},
+        };
+    } else {
+        request = {
+            {"challenge_pulse_count",
+             sequence.s1_liveness_request.challenge_pulse_count},
+            {"challenge_stride_sample_count",
+             sequence.s1_liveness_request.challenge_stride_sample_count},
+            {"settle_sample_count",
+             sequence.s1_liveness_request.settle_sample_count},
+            {"baseline_sample_count",
+             sequence.s1_liveness_request.baseline_sample_count},
+            {"run_role", s1_liveness_run_role_name(
+                sequence.s1_liveness_request.run_role)},
         };
     }
     return {
@@ -421,6 +529,17 @@ bool same_dependency_calibration_request(
            first.run_role == second.run_role;
 }
 
+bool same_s1_liveness_request(
+        const S1LivenessSequenceRequest& first,
+        const S1LivenessSequenceRequest& second) noexcept {
+    return first.challenge_pulse_count == second.challenge_pulse_count &&
+           first.challenge_stride_sample_count ==
+               second.challenge_stride_sample_count &&
+           first.settle_sample_count == second.settle_sample_count &&
+           first.baseline_sample_count == second.baseline_sample_count &&
+           first.run_role == second.run_role;
+}
+
 bool same_block(const ProbeSequenceBlock& first,
                 const ProbeSequenceBlock& second) noexcept {
     return first.block_id == second.block_id &&
@@ -516,6 +635,20 @@ bool parse_dependency_calibration_run_role(
     return false;
 }
 
+bool parse_s1_liveness_run_role(
+        std::string_view value,
+        S1LivenessRunRole& output) noexcept {
+    if (value == "primary") {
+        output = S1LivenessRunRole::PRIMARY;
+        return true;
+    }
+    if (value == "validation") {
+        output = S1LivenessRunRole::VALIDATION;
+        return true;
+    }
+    return false;
+}
+
 bool valid_run_uuid(std::string_view value) noexcept {
     if (value.size() != 36U) return false;
     for (std::size_t index = 0; index < value.size(); ++index) {
@@ -564,6 +697,10 @@ bool parse_document(const nlohmann::ordered_json& document,
         candidate.schema == kDependencyCalibrationSequenceSchema &&
         (candidate.profile == kDependencyCalibrationPrimaryProfile ||
          candidate.profile == kDependencyCalibrationHoldoutProfile);
+    const bool s1_liveness_profile =
+        candidate.schema == kS1LivenessSequenceSchema &&
+        (candidate.profile == kS1LivenessPrimaryProfile ||
+         candidate.profile == kS1LivenessValidationProfile);
     if (sparse_profile) {
         if (!has_exact_keys(request,
                 {"baseline_sample_count", "response_sample_count",
@@ -604,13 +741,39 @@ bool parse_document(const nlohmann::ordered_json& document,
             set_error(error, "A2 序列 run_role 非法");
             return false;
         }
+    } else if (s1_liveness_profile) {
+        std::string run_role;
+        if (!has_exact_keys(request,
+                {"challenge_pulse_count",
+                 "challenge_stride_sample_count", "settle_sample_count",
+                 "baseline_sample_count", "run_role"}) ||
+            !read_u64(request, "challenge_pulse_count",
+                      candidate.s1_liveness_request.
+                          challenge_pulse_count) ||
+            !read_u64(request, "challenge_stride_sample_count",
+                      candidate.s1_liveness_request.
+                          challenge_stride_sample_count) ||
+            !read_u64(request, "settle_sample_count",
+                      candidate.s1_liveness_request.settle_sample_count) ||
+            !read_u64(request, "baseline_sample_count",
+                      candidate.s1_liveness_request.baseline_sample_count) ||
+            !request.at("run_role").is_string()) {
+            set_error(error, "A2 S1 活性序列 request 字段集合或类型非法");
+            return false;
+        }
+        run_role = request.at("run_role").get<std::string>();
+        if (!parse_s1_liveness_run_role(
+                run_role, candidate.s1_liveness_request.run_role)) {
+            set_error(error, "A2 S1 活性序列 run_role 非法");
+            return false;
+        }
     } else {
         set_error(error, "序列 schema/profile 组合不受支持");
         return false;
     }
 
     const auto& blocks = document.at("blocks");
-    const std::size_t maximum_blocks = sparse_profile
+    const std::size_t maximum_blocks = sparse_profile || s1_liveness_profile
         ? 2U
         : static_cast<std::size_t>(kMaximumDependencyCalibrationBlocks);
     if (!blocks.is_array() || blocks.size() > maximum_blocks) {
@@ -703,6 +866,14 @@ const char* dependency_calibration_run_role_name(
     return "unknown";
 }
 
+const char* s1_liveness_run_role_name(S1LivenessRunRole role) noexcept {
+    switch (role) {
+        case S1LivenessRunRole::PRIMARY: return "primary";
+        case S1LivenessRunRole::VALIDATION: return "validation";
+    }
+    return "unknown";
+}
+
 bool make_sparse_pulse_sequence(
         const SparsePulseSequenceRequest& request,
         MouseEffectProbeSequence& sequence,
@@ -754,6 +925,32 @@ bool make_dependency_calibration_sequence(
     }
 }
 
+bool make_s1_liveness_sequence(
+        const S1LivenessSequenceRequest& request,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) noexcept {
+    try {
+        MouseEffectProbeSequence candidate;
+        if (!build_s1_liveness_sequence(request, candidate, error)) {
+            return false;
+        }
+        const std::string payload = canonical_payload(candidate).dump();
+        if (!sha256(payload, candidate.sequence_sha256, error)) return false;
+        sequence = std::move(candidate);
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        sequence = {};
+        set_error(error, std::string("生成 A2 S1 活性序列异常: ") +
+                         exception.what());
+        return false;
+    } catch (...) {
+        sequence = {};
+        set_error(error, "生成 A2 S1 活性序列时发生未知异常");
+        return false;
+    }
+}
+
 bool validate_mouse_effect_probe_sequence(
         const MouseEffectProbeSequence& sequence,
         std::string& error) noexcept {
@@ -765,6 +962,10 @@ bool validate_mouse_effect_probe_sequence(
             sequence.schema == kDependencyCalibrationSequenceSchema &&
             (sequence.profile == kDependencyCalibrationPrimaryProfile ||
              sequence.profile == kDependencyCalibrationHoldoutProfile);
+        const bool s1_liveness =
+            sequence.schema == kS1LivenessSequenceSchema &&
+            (sequence.profile == kS1LivenessPrimaryProfile ||
+             sequence.profile == kS1LivenessValidationProfile);
         if (sparse) {
             if (!make_sparse_pulse_sequence(
                     sequence.request, expected, error)) {
@@ -774,6 +975,11 @@ bool validate_mouse_effect_probe_sequence(
             if (!make_dependency_calibration_sequence(
                     sequence.dependency_calibration_request,
                     expected, error)) {
+                return false;
+            }
+        } else if (s1_liveness) {
+            if (!make_s1_liveness_sequence(
+                    sequence.s1_liveness_request, expected, error)) {
                 return false;
             }
         } else {
@@ -787,6 +993,9 @@ bool validate_mouse_effect_probe_sequence(
             (dependency && !same_dependency_calibration_request(
                 sequence.dependency_calibration_request,
                 expected.dependency_calibration_request)) ||
+            (s1_liveness && !same_s1_liveness_request(
+                sequence.s1_liveness_request,
+                expected.s1_liveness_request)) ||
             sequence.net_x_counts != expected.net_x_counts ||
             sequence.max_abs_prefix_x_counts !=
                 expected.max_abs_prefix_x_counts ||

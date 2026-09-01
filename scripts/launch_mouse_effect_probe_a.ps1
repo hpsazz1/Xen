@@ -113,7 +113,11 @@ $isA2Task =
     [int]$task.schema_version -eq 2 -and
     [string]$task.evidence_type -eq "mouse_effect_probe_a2_task" -and
     [string]$task.profile -like "dependency_calibration_a2_*"
-if ((-not $isA1Task -and -not $isA2Task) -or
+$isA2S1Task =
+    [int]$task.schema_version -eq 3 -and
+    [string]$task.evidence_type -eq "mouse_effect_probe_a2_s1_task" -and
+    [string]$task.profile -like "dependency_calibration_a2_s1_*"
+if ((-not $isA1Task -and -not $isA2Task -and -not $isA2S1Task) -or
     [string]$task.status -ne "PREPARED" -or
     [string]$task.dispatch_mode -ne "physical_a" -or
     -not [bool]$task.physical_output_capability -or
@@ -132,6 +136,22 @@ if ($isA2Task) {
     if ([string]$task.profile -ne $expectedProfile -or
         [uint64]$task.expected_nonzero_transition_count -eq 0) {
         throw "Physical A2 role/profile/transition 合同无效"
+    }
+}
+if ($isA2S1Task) {
+    $expectedProfile = if ([string]$task.run_role -eq "primary") {
+        "dependency_calibration_a2_s1_primary"
+    } elseif ([string]$task.run_role -eq "validation") {
+        "dependency_calibration_a2_s1_validation"
+    } else {
+        throw "Physical A2 S1 run_role 非法"
+    }
+    if ([string]$task.profile -ne $expectedProfile -or
+        [uint64]$task.expected_nonzero_transition_count -eq 0 -or
+        [bool]$task.liveness_policy.challenge_frames_eligible_for_estimands -or
+        [bool]$task.liveness_policy.settle_frames_eligible_for_estimands -or
+        [bool]$task.liveness_policy.fixed_pixel_speed_used_as_gate) {
+        throw "Physical A2 S1 role/profile/liveness policy 合同无效"
     }
 }
 
@@ -155,6 +175,11 @@ if ($isA2Task) {
         [pscustomobject]@{ value = $task.files.zero_input_calibration; name = "S1 calibration" },
         [pscustomobject]@{ value = $task.files.calibration_plan; name = "A2 calibration plan" })
 }
+if ($isA2S1Task) {
+    $fileEntries += @(
+        [pscustomobject]@{ value = $task.files.sequence_executable; name = "sequence executable" },
+        [pscustomobject]@{ value = $task.files.dependency_calibrator; name = "dependency calibrator" })
+}
 foreach ($entry in $fileEntries) {
     Assert-FileEvidence $entry.value $entry.name
 }
@@ -173,10 +198,13 @@ if ($forbiddenProcesses.Count -ne 0) {
 $pixelOutput = Join-Path $resolvedRun "pixel-evidence"
 $reportPath = Join-Path $resolvedRun "command-report.json"
 $launchSummaryPath = Join-Path $resolvedRun "launch-summary.json"
+$s1BracketPath = Join-Path $resolvedRun "s1-liveness-bracket.json"
+$s1SessionPath = Join-Path $resolvedRun "s1-session.json"
 $sidecarStdout = Join-Path $resolvedRun "pixel-sidecar.stdout.log"
 $sidecarStderr = Join-Path $resolvedRun "pixel-sidecar.stderr.log"
 foreach ($path in @(
         $pixelOutput, $reportPath, $launchSummaryPath,
+        $s1BracketPath, $s1SessionPath,
         $sidecarStdout, $sidecarStderr)) {
     if (Test-Path -LiteralPath $path) {
         throw "Physical A 输出已存在，拒绝重复 Launch：$path"
@@ -213,7 +241,9 @@ if ([bool]$capture.require_frame_metadata) {
     $sidecarArguments += "--require-frame-metadata"
 }
 
-$probeLabel = if ($isA2Task) {
+$probeLabel = if ($isA2S1Task) {
+    "A2 S1 $([string]$task.run_role) 固定 cadence X-only 活性 bracket"
+} elseif ($isA2Task) {
     "A2 依赖校准 $([string]$task.run_role) ±1 X probe"
 } else {
     "A 级稀疏 ±1 X probe"
@@ -353,7 +383,7 @@ try {
         $matchedEvents++
     }
 
-    $expectedPulseCount = if ($isA2Task) {
+    $expectedPulseCount = if ($isA2Task -or $isA2S1Task) {
         [uint64]$task.expected_nonzero_transition_count
     } else {
         [uint64]4
@@ -368,8 +398,10 @@ try {
         [int64]$report.result.cumulative_requested_x_counts -eq 0 -and
         [int64]$report.result.cumulative_backend_completed_x_counts -eq 0
     $summary = [ordered]@{
-        schema_version = if ($isA2Task) { 2 } else { 1 }
-        evidence_type = if ($isA2Task) {
+        schema_version = if ($isA2S1Task) { 3 } elseif ($isA2Task) { 2 } else { 1 }
+        evidence_type = if ($isA2S1Task) {
+            "mouse_effect_probe_a2_s1_launch"
+        } elseif ($isA2Task) {
             "mouse_effect_probe_a2_launch"
         } else {
             "mouse_effect_probe_a_launch"
@@ -397,13 +429,141 @@ try {
         visible_effect_analyzed = $false
         human_observation_received = $false
     }
-    if ($isA2Task) {
+    if ($isA2Task -or $isA2S1Task) {
         $summary.run_role = [string]$task.run_role
         $summary.scope_id = [string]$task.scope_id
     }
     Write-NewUtf8Json $launchSummaryPath $summary
     if (-not $executionComplete) {
         throw "Physical A 已停止且未补偿：stop_reason=$($report.result.stop_reason)"
+    }
+    if ($isA2S1Task) {
+        $request = $sequence.request
+        $policy = $task.liveness_policy
+        $challengePulseCount = [uint64]$request.challenge_pulse_count
+        $challengeStride = [uint64]$request.challenge_stride_sample_count
+        $settleCount = [uint64]$request.settle_sample_count
+        $baselineCount = [uint64]$request.baseline_sample_count
+        $challengeCount = 2 * $challengePulseCount * $challengeStride
+        $expectedSamples = 2 * $challengeCount + $settleCount + $baselineCount
+        if ($challengePulseCount -ne
+                [uint64]$policy.challenge_pulse_count -or
+            $challengeStride -ne
+                [uint64]$policy.challenge_stride_sample_count -or
+            $settleCount -ne [uint64]$policy.settle_sample_count -or
+            $baselineCount -ne [uint64]$policy.baseline_frame_count -or
+            $expectedSamples -ne $samples.Count) {
+            throw "Physical A2 S1 sequence/request/policy 容量不守恒"
+        }
+
+        $phaseDefinitions = @(
+            [ordered]@{
+                name = "PRE_LIVENESS_CHALLENGE"
+                first_sample_index = [uint64]0
+                last_sample_index = [uint64]($challengeCount - 1)
+            },
+            [ordered]@{
+                name = "RELEASE_AND_SETTLE"
+                first_sample_index = [uint64]$challengeCount
+                last_sample_index = [uint64](
+                    $challengeCount + $settleCount - 1)
+            },
+            [ordered]@{
+                name = "BASELINE_ZERO"
+                first_sample_index = [uint64](
+                    $challengeCount + $settleCount)
+                last_sample_index = [uint64](
+                    $challengeCount + $settleCount + $baselineCount - 1)
+            },
+            [ordered]@{
+                name = "POST_LIVENESS_CHALLENGE"
+                first_sample_index = [uint64](
+                    $challengeCount + $settleCount + $baselineCount)
+                last_sample_index = [uint64]($samples.Count - 1)
+            }
+        )
+        foreach ($phase in $phaseDefinitions) {
+            $first = [int]$phase.first_sample_index
+            $last = [int]$phase.last_sample_index
+            $phaseSamples = @($samples[$first..$last])
+            $phaseEvents = @($events[$first..$last])
+            if ($phaseSamples.Count -ne $phaseEvents.Count -or
+                [int]$phaseEvents[0].sample_index -ne $first -or
+                [int]$phaseEvents[-1].sample_index -ne $last) {
+                throw "Physical A2 S1 phase sample/event 边界不一致"
+            }
+            if ([string]$phase.name -eq "RELEASE_AND_SETTLE" -and
+                @($phaseSamples | Where-Object {
+                    [string]$_.phase -ne "guard" -or
+                    [int]$_.dx_counts -ne 0 -or [int]$_.dy_counts -ne 0
+                }).Count -ne 0) {
+                throw "Physical A2 S1 settle 不是精确零命令 guard"
+            }
+            if ([string]$phase.name -eq "BASELINE_ZERO" -and
+                @($phaseSamples | Where-Object {
+                    [string]$_.phase -ne "baseline" -or
+                    [int]$_.dx_counts -ne 0 -or [int]$_.dy_counts -ne 0 -or
+                    [bool]$phaseEvents[$_.sample_index - $first].dispatch_attempted
+                }).Count -ne 0) {
+                throw "Physical A2 S1 baseline 不是精确零命令窗口"
+            }
+        }
+
+        $commandReportFileSha = Get-FileSha256 $reportPath
+        $bracket = [ordered]@{
+            schema_version = 2
+            evidence_type = "mouse_effect_probe_a2_s1_liveness_bracket"
+            physical_output_capability = $true
+            automated_input_generated = $true
+            input_backend = "kmbox_net"
+            manual_motion_required = $false
+            phase_join_basis =
+                "command_event_source_timestamp_to_manifest"
+            sequence_sha256 = [string]$sequence.sequence_sha256
+            sequence_file_sha256 = [string]$task.files.sequence.sha256
+            command_report_sha256 = $commandReportFileSha
+            policy = [ordered]@{
+                policy_id = [string]$policy.policy_id
+                baseline_frame_count = $baselineCount
+                challenge_pulse_count = $challengePulseCount
+                challenge_stride_sample_count = $challengeStride
+                challenge_frames_eligible_for_estimands = $false
+                settle_frames_eligible_for_estimands = $false
+            }
+            phases = $phaseDefinitions
+        }
+        Write-NewUtf8Json $s1BracketPath $bracket
+
+        $session = [ordered]@{
+            schema_version = 2
+            evidence_type = "mouse_effect_probe_a2_s1_session"
+            status = "RECORDED_UNANALYZED"
+            capture_mode = "bracketed_kmbox"
+            physical_output_capability = $true
+            probe_started = $true
+            mouse_opened = $true
+            actual_command_zero = $false
+            probe_command_zero = $false
+            baseline_actual_command_zero = $true
+            automated_kmbox_challenge = $true
+            challenge_frames_excluded_from_estimands = $true
+            aim_off = $true
+            run_uuid = [string]$task.run_uuid
+            run_role = [string]$task.run_role
+            scope_id = [string]$task.scope_id
+            capture_process_session_id = [guid]::NewGuid().ToString()
+            frame_count = [uint64]$frames.Count
+            obs_source_binding_sha256 =
+                [string]$task.files.obs_source_binding.sha256
+            probe_binding_sha256 =
+                [string]$task.files.probe_binding.sha256
+            manifest_sha256 = Get-FileSha256 $manifestPath
+            sequence_sha256 = [string]$sequence.sequence_sha256
+            sequence_file_sha256 = [string]$task.files.sequence.sha256
+            command_report_sha256 = $commandReportFileSha
+            liveness_bracket_sha256 = Get-FileSha256 $s1BracketPath
+        }
+        Write-NewUtf8Json $s1SessionPath $session
     }
     Write-Host ("Physical A 已完整记录：pulse/backend/ACK=" +
         "$completedPulses/$expectedPulseCount/$expectedPulseCount；" +

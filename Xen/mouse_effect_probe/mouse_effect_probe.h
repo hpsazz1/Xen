@@ -39,6 +39,19 @@ struct DependencyCalibrationSequenceRequest {
         DependencyCalibrationRunRole::P_CAL;
 };
 
+enum class S1LivenessRunRole {
+    PRIMARY,
+    VALIDATION,
+};
+
+struct S1LivenessSequenceRequest {
+    std::uint64_t challenge_pulse_count = 0;
+    std::uint64_t challenge_stride_sample_count = 0;
+    std::uint64_t settle_sample_count = 0;
+    std::uint64_t baseline_sample_count = 0;
+    S1LivenessRunRole run_role = S1LivenessRunRole::PRIMARY;
+};
+
 struct ProbeSequenceSample {
     std::uint64_t sample_index = 0;
     std::uint64_t block_id = 0;
@@ -60,6 +73,7 @@ struct MouseEffectProbeSequence {
     std::string profile;
     SparsePulseSequenceRequest request;
     DependencyCalibrationSequenceRequest dependency_calibration_request;
+    S1LivenessSequenceRequest s1_liveness_request;
     std::vector<ProbeSequenceBlock> blocks;
     std::vector<ProbeSequenceSample> samples;
     std::int64_t net_x_counts = 0;
@@ -82,6 +96,14 @@ bool make_dependency_calibration_sequence(
     MouseEffectProbeSequence& sequence,
     std::string& error) noexcept;
 
+// S1 活性序列只为静态数字 baseline 提供前后正控制。两段挑战以固定
+// source-frame cadence 发送 X-only 单 count 并各自回锚；settle 与 baseline
+// 全零，challenge/settle 永远不得进入零扰动或分辨率估计。
+bool make_s1_liveness_sequence(
+    const S1LivenessSequenceRequest& request,
+    MouseEffectProbeSequence& sequence,
+    std::string& error) noexcept;
+
 bool validate_mouse_effect_probe_sequence(
     const MouseEffectProbeSequence& sequence,
     std::string& error) noexcept;
@@ -100,6 +122,7 @@ bool read_mouse_effect_probe_sequence(
 const char* probe_sample_phase_name(ProbeSamplePhase phase) noexcept;
 const char* dependency_calibration_run_role_name(
     DependencyCalibrationRunRole role) noexcept;
+const char* s1_liveness_run_role_name(S1LivenessRunRole role) noexcept;
 
 enum class ProbeExecutionState {
     IDLE,

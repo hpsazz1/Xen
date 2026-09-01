@@ -6,18 +6,26 @@
     [Parameter(Mandatory = $true)]
     [string]$ObsSourceBindingPath,
     [Parameter(Mandatory = $true)]
-    [string]$SyntheticCalibrationPath,
-    [Parameter(Mandatory = $true)]
-    [string]$ZeroInputCalibrationPath,
-    [Parameter(Mandatory = $true)]
-    [string]$CalibrationPlanPath,
-    [Parameter(Mandatory = $true)]
     [string]$RunDirectory,
     [Parameter(Mandatory = $true)]
     [string]$PublishedRunDirectory,
     [Parameter(Mandatory = $true)]
-    [ValidateSet("p-cal", "p-holdout")]
-    [string]$RunRole
+    [ValidateSet("primary", "validation")]
+    [string]$RunRole,
+    [ValidateRange(1, 64)]
+    [uint64]$ChallengePulseCount = 16,
+    [ValidateRange(1, 64)]
+    [uint64]$ChallengeStrideSampleCount = 4,
+    [ValidateRange(32, 1024)]
+    [uint64]$SettleSampleCount = 128,
+    [ValidateRange(32, 1600)]
+    [uint64]$BaselineSampleCount = 512,
+    [ValidateRange(32, 2400)]
+    [uint64]$SidecarFrames = 2400,
+    [ValidateRange(1, 60)]
+    [uint64]$MaxSeconds = 15,
+    [string]$LeftWitnessRoi = "16,48,96,224",
+    [string]$RightWitnessRoi = "208,48,96,224"
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +41,17 @@ function Get-FileSha256([string]$Path) {
             Replace("-", "").ToLowerInvariant()
     } finally {
         $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+
+function Get-TextSha256([string]$Text) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($algorithm.ComputeHash(
+            [Text.Encoding]::UTF8.GetBytes($Text))).
+            Replace("-", "").ToLowerInvariant()
+    } finally {
         $algorithm.Dispose()
     }
 }
@@ -141,34 +160,57 @@ function Get-RequiredValue(
 function Get-RequiredInteger(
         [Collections.Specialized.OrderedDictionary]$Values,
         [string]$Name) {
-    $value = Get-RequiredValue $Values $Name
-    if ($value -notmatch '^[0-9]+$') {
+    $text = Get-RequiredValue $Values $Name
+    if ($text -notmatch '^[0-9]+$') {
         throw "config 的 $Name 不是非负整数"
     }
-    return [int]$value
+    return [int]$text
 }
 
 function Get-RequiredBoolean(
         [Collections.Specialized.OrderedDictionary]$Values,
         [string]$Name) {
-    $value = (Get-RequiredValue $Values $Name).ToLowerInvariant()
-    if ($value -eq "true") { return $true }
-    if ($value -eq "false") { return $false }
+    $text = (Get-RequiredValue $Values $Name).ToLowerInvariant()
+    if ($text -eq "true") { return $true }
+    if ($text -eq "false") { return $false }
     throw "config 的 $Name 不是布尔值"
+}
+
+function Parse-Roi([string]$Text, [string]$Name) {
+    if ($Text -notmatch '^(\d+),(\d+),(\d+),(\d+)$') {
+        throw "$Name 必须为 x,y,width,height"
+    }
+    $roi = [ordered]@{
+        x = [int]$Matches[1]
+        y = [int]$Matches[2]
+        width = [int]$Matches[3]
+        height = [int]$Matches[4]
+    }
+    if ($roi.width -le 1 -or $roi.height -le 1) {
+        throw "$Name 尺寸不足"
+    }
+    return $roi
+}
+
+$sequenceSampleCount =
+    4 * $ChallengePulseCount * $ChallengeStrideSampleCount +
+    $SettleSampleCount + $BaselineSampleCount
+if ($sequenceSampleCount -gt 2400 -or
+    $sequenceSampleCount -ge $SidecarFrames) {
+    throw "A2 S1 序列必须小于 sidecar frame 容量且不超过 2400 samples"
 }
 
 $resolvedRun = [IO.Path]::GetFullPath($RunDirectory)
 $resolvedPublishedRun = [IO.Path]::GetFullPath($PublishedRunDirectory)
 if (Test-Path -LiteralPath $resolvedRun) {
-    throw "A2 RunDirectory 已存在，拒绝覆盖：$resolvedRun"
+    throw "A2 S1 RunDirectory 已存在，拒绝覆盖：$resolvedRun"
 }
-if ([string]::Equals(
-        $resolvedRun, [IO.Path]::GetPathRoot($resolvedRun),
-        [StringComparison]::OrdinalIgnoreCase) -or
-    [string]::Equals(
-        $resolvedPublishedRun, [IO.Path]::GetPathRoot($resolvedPublishedRun),
-        [StringComparison]::OrdinalIgnoreCase)) {
-    throw "A2 RunDirectory/PublishedRunDirectory 不能是根目录"
+foreach ($candidate in @($resolvedRun, $resolvedPublishedRun)) {
+    if ([string]::Equals(
+            $candidate, [IO.Path]::GetPathRoot($candidate),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "A2 S1 RunDirectory 不能是根目录"
+    }
 }
 $runParent = Split-Path -Parent $resolvedRun
 if (-not (Test-Path -LiteralPath $runParent -PathType Container)) {
@@ -178,84 +220,15 @@ $runName = Split-Path -Leaf $resolvedRun
 $stagingDirectory = Join-Path $runParent (
     ".{0}.incoming-{1}" -f $runName, [guid]::NewGuid().ToString("N"))
 if (Test-Path -LiteralPath $stagingDirectory) {
-    throw "A2 staging 已存在：$stagingDirectory"
+    throw "A2 S1 staging 已存在：$stagingDirectory"
 }
 [void](New-Item -ItemType Directory -Path $stagingDirectory)
 $toolDirectory = Join-Path $stagingDirectory "tool"
-$calibrationDirectory = Join-Path $stagingDirectory "calibration"
 [void](New-Item -ItemType Directory -Path $toolDirectory)
-[void](New-Item -ItemType Directory -Path $calibrationDirectory)
 
-$s0Source = Get-FileIdentity `
-    $SyntheticCalibrationPath "A2 S0 synthetic calibration"
-$s1Source = Get-FileIdentity `
-    $ZeroInputCalibrationPath "A2 S1 zero-input calibration"
-$planSource = Get-FileIdentity `
-    $CalibrationPlanPath "A2 dependency calibration plan"
-$s0 = Get-Content -LiteralPath $s0Source.path -Raw -Encoding utf8 |
-    ConvertFrom-Json
-$s1 = Get-Content -LiteralPath $s1Source.path -Raw -Encoding utf8 |
-    ConvertFrom-Json
-$plan = Get-Content -LiteralPath $planSource.path -Raw -Encoding utf8 |
-    ConvertFrom-Json
-$s1ContinuousZero =
-    -not [bool]$s1.probe_started -and
-    -not [bool]$s1.mouse_opened -and
-    [bool]$s1.actual_command_zero
-$s1MeasurementState = if (
-        $s1.PSObject.Properties.Name -contains "measurement_state") {
-    [string]$s1.measurement_state
-} else {
-    ""
-}
-$s1BracketedCensoredZero =
-    $s1MeasurementState -eq "VALID_BRACKETED_CENSORED_ZERO" -and
-    [bool]$s1.probe_started -and
-    [bool]$s1.mouse_opened -and
-    [bool]$s1.physical_challenge_executed -and
-    [bool]$s1.baseline_actual_command_zero -and
-    -not [bool]$s1.actual_command_zero
-if ([string]$s0.evidence_type -ne
-        "mouse_effect_probe_a2_s0_synthetic_calibration" -or
-    [string]$s0.status -ne "VALID" -or
-    [bool]$s0.physical_output_capability -or
-    [string]$s1.evidence_type -ne
-        "mouse_effect_probe_a2_s1_zero_input_calibration" -or
-    [string]$s1.status -ne "VALID" -or
-    [bool]$s1.physical_output_capability -or
-    (-not $s1ContinuousZero -and -not $s1BracketedCensoredZero) -or
-    [string]$plan.evidence_type -ne
-        "mouse_effect_probe_a2_dependency_calibration_plan" -or
-    [string]$plan.status -ne "VALID_OFFLINE_PLAN" -or
-    [bool]$plan.physical_output_capability -or
-    [bool]$plan.physical_launch_authorized -or
-    [string]$plan.scope_id -ne [string]$s1.scope_id) {
-    throw "A2 Prepare 要求同 scope 的 VALID S0/S1/离线 plan"
-}
-$request = $plan.sequence_request
-if ([uint64]$request.baseline_sample_count -eq 0 -or
-    [uint64]$request.response_sample_count -eq 0 -or
-    [uint64]$request.guard_sample_count -eq 0 -or
-    [uint64]$request.block_count -lt 4 -or
-    [uint64]$request.block_count % 4 -ne 0 -or
-    [int64]$request.net_x_counts -ne 0 -or
-    [uint64]$request.max_abs_prefix_x_counts -ne 1 -or
-    [int]$request.dy_counts_required -ne 0 -or
-    [uint64]$plan.sidecar.frame_count -gt 2400) {
-    throw "A2 plan 的 sequence/sidecar 安全合同无效"
-}
-$expectedProfile = if ($RunRole -eq "p-cal") {
-    "dependency_calibration_a2_p_cal"
-} else {
-    "dependency_calibration_a2_p_holdout"
-}
-if ([string]$plan.roles.$RunRole.profile -ne $expectedProfile) {
-    throw "A2 plan 与 RunRole/profile 不一致"
-}
-
-$sourceConfig = Get-FileIdentity $ConfigPath "A2 config.ini"
+$sourceConfig = Get-FileIdentity $ConfigPath "A2 S1 config.ini"
 $sourceObsBinding = Get-FileIdentity `
-    $ObsSourceBindingPath "A2 OBS source binding"
+    $ObsSourceBindingPath "A2 S1 OBS source binding"
 $capture = Read-IniSection $sourceConfig.path "capture"
 $mouse = Read-IniSection $sourceConfig.path "mouse"
 if ((Get-RequiredValue $capture "backend").ToLowerInvariant() -ne "ndi" -or
@@ -265,24 +238,38 @@ if ((Get-RequiredValue $capture "backend").ToLowerInvariant() -ne "ndi" -or
     (Get-RequiredValue $mouse "backend").ToLowerInvariant() -ne
         "kmbox_net" -or
     (Get-RequiredBoolean $mouse "allow_send_input")) {
-    throw "A2 Prepare 要求精确 NDI/source clock、KMBOX NET 且默认输出关闭"
+    throw "A2 S1 Prepare 要求精确 NDI/source clock、KMBOX NET 且默认输出关闭"
 }
 $ndiSource = Get-RequiredValue $capture "ndi_source_name"
 $roiWidth = Get-RequiredInteger $capture "roi_width"
 $roiHeight = Get-RequiredInteger $capture "roi_height"
-$leftRoi = @($s1.geometry.left_roi)
-$rightRoi = @($s1.geometry.right_roi)
-if ($leftRoi.Count -ne 4 -or $rightRoi.Count -ne 4 -or
-    [int]$leftRoi[0] + [int]$leftRoi[2] -gt $roiWidth -or
-    [int]$rightRoi[0] + [int]$rightRoi[2] -gt $roiWidth -or
-    [int]$leftRoi[1] + [int]$leftRoi[3] -gt $roiHeight -or
-    [int]$rightRoi[1] + [int]$rightRoi[3] -gt $roiHeight) {
-    throw "A2 S1 witness ROI 与 config 几何不一致"
+$leftRoi = Parse-Roi $LeftWitnessRoi "LeftWitnessRoi"
+$rightRoi = Parse-Roi $RightWitnessRoi "RightWitnessRoi"
+foreach ($roi in @($leftRoi, $rightRoi)) {
+    if ($roi.x + $roi.width -gt $roiWidth -or
+        $roi.y + $roi.height -gt $roiHeight) {
+        throw "A2 S1 witness ROI 超出 Capture ROI"
+    }
+}
+if ($leftRoi.x + $leftRoi.width -gt $rightRoi.x) {
+    throw "A2 S1 左右 witness ROI 不得重叠"
+}
+$obsBinding = Get-Content -LiteralPath $sourceObsBinding.path `
+    -Raw -Encoding utf8 | ConvertFrom-Json
+$bindingOutputName = [string]$obsBinding.ndi_main_output.name
+$ndiSourceMatchesBinding = [string]::Equals(
+    $ndiSource, $bindingOutputName, [StringComparison]::Ordinal) -or
+    $ndiSource.EndsWith(" ($bindingOutputName)")
+if ([string]$obsBinding.evidence_type -ne "obs_source_binding" -or
+    [bool]$obsBinding.physical_output_capability -or
+    -not $ndiSourceMatchesBinding -or
+    [int]$obsBinding.program_geometry.roi_width -ne $roiWidth -or
+    [int]$obsBinding.program_geometry.roi_height -ne $roiHeight) {
+    throw "A2 S1 OBS binding 与 config/ROI scope 不一致"
 }
 
 $resolvedToolRoot = (Resolve-Path -LiteralPath $ToolRoot).Path
 $publishedTool = Join-Path $resolvedPublishedRun "tool"
-$publishedCalibration = Join-Path $resolvedPublishedRun "calibration"
 function Copy-Tool([string]$Name, [string]$Description) {
     return Copy-NewPublishedFile `
         (Join-Path $resolvedToolRoot $Name) `
@@ -290,134 +277,159 @@ function Copy-Tool([string]$Name, [string]$Description) {
         (Join-Path $publishedTool $Name) $Description
 }
 $probeExecutable = Copy-Tool `
-    "XenMouseEffectProbe.exe" "A2 probe executable"
+    "XenMouseEffectProbe.exe" "A2 S1 probe executable"
 $sidecarExecutable = Copy-Tool `
-    "XenCaptureEvidence.exe" "A2 sidecar executable"
+    "XenCaptureEvidence.exe" "A2 S1 sidecar executable"
 $sequenceExecutable = Copy-Tool `
-    "XenMouseEffectProbeSequence.exe" "A2 sequence executable"
-$opencvRuntime = Copy-Tool "opencv_world4140.dll" "A2 OpenCV runtime"
+    "XenMouseEffectProbeSequence.exe" "A2 S1 sequence executable"
+$opencvRuntime = Copy-Tool "opencv_world4140.dll" "A2 S1 OpenCV runtime"
 $ndiRuntime = Copy-Tool `
-    "Processing.NDI.Lib.x64.dll" "A2 NDI runtime"
+    "Processing.NDI.Lib.x64.dll" "A2 S1 NDI runtime"
 $ndiLicense = Copy-Tool `
-    "Processing.NDI.Lib.Licenses.txt" "A2 NDI license"
+    "Processing.NDI.Lib.Licenses.txt" "A2 S1 NDI license"
 $launchScript = Copy-NewPublishedFile `
     (Join-Path $PSScriptRoot "launch_mouse_effect_probe_a.ps1") `
     (Join-Path $toolDirectory "launch_mouse_effect_probe_a.ps1") `
     (Join-Path $publishedTool "launch_mouse_effect_probe_a.ps1") `
-    "A2 Launch script"
-$physicalAnalyzer = Copy-NewPublishedFile `
-    (Join-Path $PSScriptRoot "analyze_mouse_effect_probe_pixels.py") `
-    (Join-Path $toolDirectory "analyze_mouse_effect_probe_pixels.py") `
-    (Join-Path $publishedTool "analyze_mouse_effect_probe_pixels.py") `
-    "A2 physical analyzer"
+    "A2 S1 Launch script"
 $calibrator = Copy-NewPublishedFile `
     (Join-Path $PSScriptRoot "calibrate_mouse_effect_probe_a2.py") `
     (Join-Path $toolDirectory "calibrate_mouse_effect_probe_a2.py") `
     (Join-Path $publishedTool "calibrate_mouse_effect_probe_a2.py") `
-    "A2 dependency calibrator"
+    "A2 S1 dependency calibrator"
 $configCopy = Copy-NewPublishedFile `
     $sourceConfig.path (Join-Path $stagingDirectory "config.ini") `
-    (Join-Path $resolvedPublishedRun "config.ini") "A2 config copy"
+    (Join-Path $resolvedPublishedRun "config.ini") "A2 S1 config copy"
 $obsCopy = Copy-NewPublishedFile `
     $sourceObsBinding.path `
     (Join-Path $stagingDirectory "obs-source-binding.json") `
     (Join-Path $resolvedPublishedRun "obs-source-binding.json") `
-    "A2 OBS binding copy"
-$s0Copy = Copy-NewPublishedFile `
-    $s0Source.path (Join-Path $calibrationDirectory "s0.json") `
-    (Join-Path $publishedCalibration "s0.json") "A2 S0 copy"
-$s1Copy = Copy-NewPublishedFile `
-    $s1Source.path (Join-Path $calibrationDirectory "s1.json") `
-    (Join-Path $publishedCalibration "s1.json") "A2 S1 copy"
-$planCopy = Copy-NewPublishedFile `
-    $planSource.path (Join-Path $calibrationDirectory "plan.json") `
-    (Join-Path $publishedCalibration "plan.json") "A2 plan copy"
+    "A2 S1 OBS binding copy"
 
 $sequencePath = Join-Path $stagingDirectory "sequence.json"
 & (Join-Path $toolDirectory "XenMouseEffectProbeSequence.exe") `
     --output $sequencePath `
-    --baseline-samples ([uint64]$request.baseline_sample_count) `
-    --response-samples ([uint64]$request.response_sample_count) `
-    --guard-samples ([uint64]$request.guard_sample_count) `
-    --profile dependency-calibration-a2 `
-    --blocks ([uint64]$request.block_count) `
-    --run-role $RunRole
+    --profile s1-liveness-a2 `
+    --run-role $RunRole `
+    --challenge-pulses $ChallengePulseCount `
+    --challenge-stride-samples $ChallengeStrideSampleCount `
+    --settle-samples $SettleSampleCount `
+    --baseline-samples $BaselineSampleCount
 if ($LASTEXITCODE -ne 0) {
-    throw "A2 sequence tool 失败，ExitCode=$LASTEXITCODE"
+    throw "A2 S1 sequence tool 失败，ExitCode=$LASTEXITCODE"
 }
 $sequence = Get-Content -LiteralPath $sequencePath -Raw -Encoding utf8 |
     ConvertFrom-Json
 $samples = @($sequence.samples)
 $pulses = @($samples | Where-Object { [int]$_.dx_counts -ne 0 })
-$expectedDirections = if ($RunRole -eq "p-cal") {
-    @(1, -1, -1, 1)
+$expectedProfile = "dependency_calibration_a2_s1_$RunRole"
+$expectedFirstDirections = if ($RunRole -eq "primary") {
+    @(1, -1)
 } else {
-    @(-1, 1, 1, -1)
+    @(-1, 1)
 }
 $actualFirstDirections = @($sequence.blocks | ForEach-Object {
     [int]$_.first_pulse_dx_counts
 })
-if ([int]$sequence.schema -ne 2 -or
+if ([int]$sequence.schema -ne 3 -or
     [string]$sequence.profile -ne $expectedProfile -or
     [int64]$sequence.summary.net_x_counts -ne 0 -or
-    [uint64]$sequence.summary.max_abs_prefix_x_counts -ne 1 -or
-    $samples.Count -ne [uint64]$request.sample_count -or
-    $pulses.Count -ne [uint64]$request.nonzero_transition_count -or
-    ($actualFirstDirections -join ",") -ne ($expectedDirections -join ",")) {
-    throw "A2 sequence 与 plan/role/X-only/net/prefix 合同不一致"
+    [uint64]$sequence.summary.max_abs_prefix_x_counts -ne
+        $ChallengePulseCount -or
+    $samples.Count -ne $sequenceSampleCount -or
+    $pulses.Count -ne 4 * $ChallengePulseCount -or
+    @($samples | Where-Object { [int]$_.dy_counts -ne 0 }).Count -ne 0 -or
+    @($samples | Where-Object {
+        [int]$_.dx_counts -lt -1 -or [int]$_.dx_counts -gt 1
+    }).Count -ne 0 -or
+    ($actualFirstDirections -join ",") -ne
+        ($expectedFirstDirections -join ",")) {
+    throw "A2 S1 sequence 与 role/X-only/net/prefix 合同不一致"
+}
+$baselineSamples = @($samples | Where-Object {
+    [string]$_.phase -eq "baseline"
+})
+$settleSamples = @($samples | Where-Object {
+    [string]$_.phase -eq "guard"
+})
+if ($baselineSamples.Count -ne $BaselineSampleCount -or
+    $settleSamples.Count -ne $SettleSampleCount -or
+    @($baselineSamples + $settleSamples | Where-Object {
+        [int]$_.dx_counts -ne 0 -or [int]$_.dy_counts -ne 0
+    }).Count -ne 0) {
+    throw "A2 S1 settle/baseline 不是预注册的连续零命令窗口"
 }
 $sequenceIdentity = Get-PublishedIdentity `
     $sequencePath (Join-Path $resolvedPublishedRun "sequence.json") `
-    "A2 sequence"
+    "A2 S1 sequence"
+
+$scope = [ordered]@{
+    schema_version = 2
+    config_sha256 = $configCopy.sha256
+    obs_source_binding_sha256 = $obsCopy.sha256
+    probe_executable_sha256 = $probeExecutable.sha256
+    sidecar_executable_sha256 = $sidecarExecutable.sha256
+    opencv_runtime_sha256 = $opencvRuntime.sha256
+    ndi_runtime_sha256 = $ndiRuntime.sha256
+    ndi_source_name = $ndiSource
+    frame_layout = Get-RequiredValue $capture "ndi_frame_layout"
+    source_width = Get-RequiredInteger $capture "ndi_source_width"
+    source_height = Get-RequiredInteger $capture "ndi_source_height"
+    roi_width = $roiWidth
+    roi_height = $roiHeight
+    left_witness_roi = $LeftWitnessRoi
+    right_witness_roi = $RightWitnessRoi
+    challenge_pulse_count = $ChallengePulseCount
+    challenge_stride_sample_count = $ChallengeStrideSampleCount
+    settle_sample_count = $SettleSampleCount
+    baseline_sample_count = $BaselineSampleCount
+    require_source_timing = $true
+}
+$scopeId = Get-TextSha256 (
+    $scope | ConvertTo-Json -Depth 8 -Compress)
 
 $runUuid = [guid]::NewGuid().ToString()
 $activationEpoch = [uint64][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $bindingPath = Join-Path $stagingDirectory "probe-binding.json"
 $binding = [ordered]@{
-    schema_version = 2
+    schema_version = 3
     evidence_type = "mouse_effect_probe_binding"
-    experiment = "physical_a2_dependency_calibration"
+    experiment = "physical_a2_s1_liveness_bracket"
     run_uuid = $runUuid
     activation_epoch = $activationEpoch
     dispatch_mode = "physical_a"
     profile = $expectedProfile
     run_role = $RunRole
-    scope_id = [string]$plan.scope_id
+    scope_id = $scopeId
     sequence_sha256 = [string]$sequence.sequence_sha256
     sequence_file = $sequenceIdentity
     capture_source_name = $ndiSource
     config = $configCopy
     obs_source_binding = $obsCopy
-    calibration = [ordered]@{
-        synthetic = $s0Copy
-        zero_input = $s1Copy
-        plan = $planCopy
-    }
     sidecar_physical_output_capability = $false
     normal_aim_output_required = $false
     dy_counts_required = 0
     max_abs_pulse_counts = 1
-    max_abs_prefix_x_counts = 1
-    expected_background_shift_sign_per_positive_count = -1
+    max_abs_prefix_x_counts = $ChallengePulseCount
+    challenge_and_settle_eligible_for_estimands = $false
 }
 Write-NewUtf8Json $bindingPath $binding
 $bindingIdentity = Get-PublishedIdentity `
     $bindingPath (Join-Path $resolvedPublishedRun "probe-binding.json") `
-    "A2 probe binding"
+    "A2 S1 probe binding"
 
-$taskPath = Join-Path $stagingDirectory "task.json"
 $task = [ordered]@{
-    schema_version = 2
-    evidence_type = "mouse_effect_probe_a2_task"
+    schema_version = 3
+    evidence_type = "mouse_effect_probe_a2_s1_task"
     status = "PREPARED"
-    experiment = "physical_a2_dependency_calibration"
+    experiment = "physical_a2_s1_liveness_bracket"
     run_role = $RunRole
     run_directory = $resolvedPublishedRun
     run_uuid = $runUuid
     activation_epoch = $activationEpoch
     dispatch_mode = "physical_a"
     profile = $expectedProfile
-    scope_id = [string]$plan.scope_id
+    scope_id = $scopeId
     sequence_sha256 = [string]$sequence.sequence_sha256
     sequence_sample_count = [uint64]$samples.Count
     expected_nonzero_transition_count = [uint64]$pulses.Count
@@ -432,15 +444,11 @@ $task = [ordered]@{
         opencv_runtime = $opencvRuntime
         ndi_runtime = $ndiRuntime
         ndi_license = $ndiLicense
-        physical_analyzer = $physicalAnalyzer
         dependency_calibrator = $calibrator
         config = $configCopy
         sequence = $sequenceIdentity
         probe_binding = $bindingIdentity
         obs_source_binding = $obsCopy
-        synthetic_calibration = $s0Copy
-        zero_input_calibration = $s1Copy
-        calibration_plan = $planCopy
     }
     capture = [ordered]@{
         source_name = $ndiSource
@@ -470,85 +478,82 @@ $task = [ordered]@{
             $capture "ndi_require_frame_metadata"
     }
     sidecar = [ordered]@{
-        frames = [uint64]$plan.sidecar.frame_count
-        max_seconds = [uint64]$plan.sidecar.max_seconds
+        frames = $SidecarFrames
+        max_seconds = $MaxSeconds
         physical_output_capability = $false
-        capture_source_name = $ndiSource
-        frame_layout = Get-RequiredValue $capture "ndi_frame_layout"
-        source_width = Get-RequiredInteger $capture "ndi_source_width"
-        source_height = Get-RequiredInteger $capture "ndi_source_height"
-        roi_width = $roiWidth
-        roi_height = $roiHeight
-        left_witness_roi = ($leftRoi -join ",")
-        right_witness_roi = ($rightRoi -join ",")
+        left_witness_roi = $LeftWitnessRoi
+        right_witness_roi = $RightWitnessRoi
         require_source_timing = $true
+    }
+    liveness_policy = [ordered]@{
+        policy_id = "a2-s1-kmbox-bracket-v1"
+        challenge_pulse_count = $ChallengePulseCount
+        challenge_stride_sample_count = $ChallengeStrideSampleCount
+        settle_sample_count = $SettleSampleCount
+        baseline_frame_count = $BaselineSampleCount
+        challenge_frames_eligible_for_estimands = $false
+        settle_frames_eligible_for_estimands = $false
+        fixed_pixel_speed_used_as_gate = $false
     }
     safety = [ordered]@{
         normal_aim_must_be_closed = $true
         emergency_virtual_keys = @(35, 119)
+        right_button_deadman_required = $true
         any_failure_stops_without_compensation = $true
         zero_y_required = $true
-        max_abs_prefix_x_counts = 1
+        max_abs_prefix_x_counts = $ChallengePulseCount
+        manual_mouse_motion_or_wasd_forbidden = $true
         no_runtime_amplitude_or_repetition_change = $true
-        p_holdout_never_used_for_retuning = $true
     }
-    unresolved_until_user_physical = @(
-        "INDEPENDENT_TAIL_SUPPORT",
-        "WITNESS_OCCLUSION_MARGIN",
-        "MAPPING_UNCERTAINTY_PX",
-        "SINGLE_COUNT_GAIN_UPPER_SCOPE"
-    )
 }
-Write-NewUtf8Json $taskPath $task
+Write-NewUtf8Json (Join-Path $stagingDirectory "task.json") $task
 
 $launchCommand = ('powershell.exe -NoProfile -ExecutionPolicy Bypass ' +
     '-File "{0}" -RunDirectory "{1}" -AllowPhysicalOutput ' +
     '-PhysicalOutputConfirmation {2}') -f
     $launchScript.path, $resolvedPublishedRun,
     "XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT"
-$roleLabel = if ($RunRole -eq "p-cal") { "P-CAL" } else { "P-HOLDOUT" }
+$roleLabel = if ($RunRole -eq "primary") { "PRIMARY" } else { "VALIDATION" }
 $taskMarkdown = @(
-    "# Mouse Effect Probe Physical A2 $roleLabel",
+    "# Mouse Effect Probe Physical A2 S1 $roleLabel",
     "",
-    "- Run UUID：``$runUuid``",
-    "- scope：``$($plan.scope_id)``；profile：``$expectedProfile``",
-    "- 序列：samples=$($samples.Count)，transitions=$($pulses.Count)，每个 block 均为 pre-zero → ±1 → hold → return → post-zero",
-    "- 硬边界：X-only、Y=0、净 X=0、最大前缀=1 count；运行期不加幅、不加测、不补偿",
-    "- 场景：真实游戏静止高纹理背景；左右 witness 全支持域不得含人物、HUD、Overlay、遮挡或独立动画",
-    "- 安全：启动命令时右键松开；看到 probe 提示 monitor 已就绪后在 5 秒内按住并持续保持；松键、End、F8 或任何失败立即停发",
-    "- P-HOLDOUT 不得用于回调 nuisance/noise/tail/mask/mapping/gain；失败即 A2 red",
+    "- Run UUID：``$runUuid``；scope：``$scopeId``",
+    "- 自动挑战：每 $ChallengeStrideSampleCount 个 source frame 发送 1 count，单向累计 $ChallengePulseCount counts；前后挑战均回锚，整段净 X=0、Y=0",
+    "- 零基线：settle=$SettleSampleCount samples 后连续 baseline=$BaselineSampleCount samples；challenge/settle 全部排除",
+    "- 固定 command cadence 只作 decoded-image 活性正控制，不作为像素速度阈值，也不进入 noise/tail/gain/resolution",
+    "- 启动命令时保持右键松开；看到 probe 提示 monitor 已就绪后，在 5 秒内按住右键并持续保持",
+    "- 除右键 deadman 外，不要移动物理鼠标、不要按 WASD；视角变化由 KMBOX 序列自动完成",
+    "- 松开右键、End、F8、sidecar/ACK/source 任一失败都会立即停发且不补偿",
     "",
     "下面命令会发送真实 KMBOX 输入，只能由用户在本机前台执行：",
     "",
     "``````powershell",
     $launchCommand,
     "``````",
-    "",
-    "执行后请直接回传可见方向、左右一致性、遮挡/异常/急停与完成状态；不要自行编辑观察文件。",
     "") -join [Environment]::NewLine
 Write-NewUtf8Text (Join-Path $stagingDirectory "TASK.md") $taskMarkdown
+
 $observation = @(
-    "# Physical A2 人工观察",
+    "# Physical A2 S1 现场观察",
     "",
     "- Run UUID：``$runUuid``",
     "- Run role：``$RunRole``",
+    "- 是否全程未移动物理鼠标/未按 WASD：",
+    "- 自动视角变化是否可见：",
+    "- 是否发生异常或急停：",
     "- 用户原话：",
-    "- 正/负方向：",
-    "- 左右 witness 一致性：",
-    "- 遮挡/scene cut：",
-    "- 异常/急停：",
-    "- 人工结论：",
     "") -join [Environment]::NewLine
 Write-NewUtf8Text `
     (Join-Path $stagingDirectory "OBSERVATION.md") $observation
+
 $summary = [ordered]@{
     schema_version = 1
-    evidence_type = "mouse_effect_probe_a2_prepare"
+    evidence_type = "mouse_effect_probe_a2_s1_prepare"
     status = "PREPARED_NOT_LAUNCHED"
     run_uuid = $runUuid
     run_role = $RunRole
     profile = $expectedProfile
-    scope_id = [string]$plan.scope_id
+    scope_id = $scopeId
     local_bundle_directory = $resolvedRun
     published_run_directory = $resolvedPublishedRun
     sequence_sha256 = [string]$sequence.sequence_sha256
@@ -560,7 +565,7 @@ Write-NewUtf8Json `
     (Join-Path $stagingDirectory "prepare-summary.json") $summary
 
 Move-Item -LiteralPath $stagingDirectory -Destination $resolvedRun
-Write-Host "Physical A2 $roleLabel Prepare 完成；未启动 Mouse、sidecar 或 Launch。"
+Write-Host "Physical A2 S1 $roleLabel Prepare 完成；未启动 Mouse、sidecar 或 Launch。"
 Write-Host "BundleDirectory=$resolvedRun"
 Write-Host "PublishedRunDirectory=$resolvedPublishedRun"
 Write-Host $launchCommand

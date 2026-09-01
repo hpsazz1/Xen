@@ -91,7 +91,7 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 | `xen_benchmark` | `XenBenchmark.exe` | 无界面 Runtime 基准 |
 | `xen_mouse_benchmark` | `XenMouseBenchmark.exe` | 鼠标后端性能与协议验证 |
 | `xen_mouse_effect_probe` | `XenMouseEffectProbe.exe` | source-frame 驱动的 X-only 实际命令/背景响应证据入口；Physical 仅接受用户前台双授权 |
-| `xen_mouse_effect_probe_sequence` | `XenMouseEffectProbeSequence.exe` | 离线生成平衡、净零、最大前缀 1 count 的稀疏 A 级序列 |
+| `xen_mouse_effect_probe_sequence` | `XenMouseEffectProbeSequence.exe` | 离线生成平衡净零的 A/A2 序列；S1 活性 profile 以固定 source-frame cadence 生成 X-only 回锚挑战，基线保持零命令 |
 
 `XenSender.exe --report PATH` 必须声明至少一个非零退出上限：`--max-frames` 不超过
 200000，或 `--fps × --max-seconds` 的理论样本数不超过 200000；两者都提供时任一安全上限即可。
@@ -109,6 +109,7 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 | [scripts/run_ndi_clock_source.ps1](scripts/run_ndi_clock_source.ps1) | 在 NDI 源机前台启动时钟旁路；不会访问 KMBOX |
 | [scripts/run_mouse_effect_probe_output_off.ps1](scripts/run_mouse_effect_probe_output_off.ps1) | 以零 Mouse 能力排练 probe/source/sidecar/像素绑定 |
 | [scripts/prepare_mouse_effect_probe_a.ps1](scripts/prepare_mouse_effect_probe_a.ps1) | 固化 A 级 X-only Physical Run；只 Prepare，不启动设备或 sidecar |
+| [scripts/prepare_mouse_effect_probe_a2_s1.ps1](scripts/prepare_mouse_effect_probe_a2_s1.ps1) | 固化 A2 S1 的自动 KMBOX 活性括号与零命令基线；只 Prepare，不执行 Physical Launch |
 | [scripts/benchmark_runtime.ps1](scripts/benchmark_runtime.ps1) | Runtime 正式基准与原子报告 |
 | [scripts/test_tensorrt.ps1](scripts/test_tensorrt.ps1) | TensorRT 专项正确性与变化输入验证 |
 | [scripts/test_directml.ps1](scripts/test_directml.ps1) | DirectML 独立构建与专项验证 |
