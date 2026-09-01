@@ -60,7 +60,7 @@ function Get-FileIdentity([string]$Path, [string]$Description) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "$Description 不是普通文件：$Path"
     }
-    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $resolved = (Resolve-Path -LiteralPath $Path).ProviderPath
     $before = Get-Item -LiteralPath $resolved
     $hash = Get-FileSha256 $resolved
     $after = Get-Item -LiteralPath $resolved
@@ -268,7 +268,7 @@ if ([string]$obsBinding.evidence_type -ne "obs_source_binding" -or
     throw "A2 S1 OBS binding 与 config/ROI scope 不一致"
 }
 
-$resolvedToolRoot = (Resolve-Path -LiteralPath $ToolRoot).Path
+$resolvedToolRoot = (Resolve-Path -LiteralPath $ToolRoot).ProviderPath
 $publishedTool = Join-Path $resolvedPublishedRun "tool"
 function Copy-Tool([string]$Name, [string]$Description) {
     return Copy-NewPublishedFile `

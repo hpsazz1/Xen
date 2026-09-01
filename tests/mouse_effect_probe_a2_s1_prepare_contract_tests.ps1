@@ -32,6 +32,7 @@ foreach ($required in @(
         '--profile s1-liveness-a2',
         'challenge_pulse_count',
         'challenge_stride_sample_count',
+        '.ProviderPath',
         'PREPARED_NOT_LAUNCHED',
         'physical_launch_executed = $false',
         'XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT',

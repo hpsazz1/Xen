@@ -33,6 +33,7 @@ foreach ($required in @(
         'mouse_effect_probe_a2_s0_synthetic_calibration',
         'mouse_effect_probe_a2_s1_zero_input_calibration',
         'VALID_BRACKETED_CENSORED_ZERO',
+        '.ProviderPath',
         'PublishedRunDirectory',
         'XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT',
         'P-HOLDOUT 不得用于回调')) {

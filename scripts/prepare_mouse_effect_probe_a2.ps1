@@ -41,7 +41,7 @@ function Get-FileIdentity([string]$Path, [string]$Description) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "$Description 不是普通文件：$Path"
     }
-    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $resolved = (Resolve-Path -LiteralPath $Path).ProviderPath
     $before = Get-Item -LiteralPath $resolved
     $hash = Get-FileSha256 $resolved
     $after = Get-Item -LiteralPath $resolved
@@ -280,7 +280,7 @@ if ($leftRoi.Count -ne 4 -or $rightRoi.Count -ne 4 -or
     throw "A2 S1 witness ROI 与 config 几何不一致"
 }
 
-$resolvedToolRoot = (Resolve-Path -LiteralPath $ToolRoot).Path
+$resolvedToolRoot = (Resolve-Path -LiteralPath $ToolRoot).ProviderPath
 $publishedTool = Join-Path $resolvedPublishedRun "tool"
 $publishedCalibration = Join-Path $resolvedPublishedRun "calibration"
 function Copy-Tool([string]$Name, [string]$Description) {
