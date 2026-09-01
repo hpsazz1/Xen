@@ -291,6 +291,16 @@ constexpr float kTrackingIntegralGainPerSecond = 12.0f;
 constexpr float kTrackingIntegralLeakPerSecond = 6.0f;
 constexpr float kTrackingAntiWindupGainPerSecond = 30.0f;
 constexpr float kTrackingVerticalIntegralMaximumCounts = 4.0f;
+// 20260901 RandomMove sidecar 用左右背景独立光流辨识出的 X plant：四段
+// 非相邻留出集的稳态响应为 0.5199～0.5219 source px/count，主响应位于
+// 第 3 个 240 Hz 样本。这里不把目标框与闭环命令的相关性当 plant；只用
+// 该独立响应从目标框共同平移中扣除相机运动，再按真实 dt 连续估计当前
+// 目标运动。8 ms 是 8/15/20 ms 留出候选中在三段 plant 闭环取得最低
+// X P95 且保持既有反向合同的连续滤波时间常数，不是速度档。
+// 乘以当前 0.425 counts/source-px 后的无量纲响应为 0.2216375；按配置
+// 换回 source px/count，可保持同一 FOV 的 ROI 表示缩放同构。
+constexpr float kTrackingPlantResponseX = 0.2216375f;
+constexpr float kTrackingTargetMotionFilterTimeSeconds = 0.008f;
 // source-time 误差斜率同时服务 opening 相位补偿与 closing 带限阻尼。
 // 20 ms 一阶滤波覆盖已观测的 4～5 帧反馈时间尺度；closing 的 2 ms
 // 导数增益仍把高频等效增益限制为比例项的 10%。opening 只使用本帧
@@ -1075,6 +1085,7 @@ struct Aim::Impl {
     float tracking_previous_error_x = 0.0f;
     float tracking_error_derivative_x = 0.0f;
     bool tracking_error_derivative_initialized = false;
+    float tracking_target_velocity_counts_per_second_x = 0.0f;
     float world_motion_measurement_x = 0.0f;
     float world_motion_measurement_y = 0.0f;
     // 独立 prediction 状态使用 counts/second；基础控制器前馈仍保持
@@ -3141,6 +3152,7 @@ struct Aim::Impl {
         tracking_previous_error_x = 0.0f;
         tracking_error_derivative_x = 0.0f;
         tracking_error_derivative_initialized = false;
+        tracking_target_velocity_counts_per_second_x = 0.0f;
         world_motion_measurement_x = 0.0f;
         world_motion_measurement_y = 0.0f;
         prediction_world_velocity_x = 0.0f;
@@ -3841,6 +3853,7 @@ struct Aim::Impl {
             tracking_previous_error_x = 0.0f;
             tracking_error_derivative_x = 0.0f;
             tracking_error_derivative_initialized = false;
+            tracking_target_velocity_counts_per_second_x = 0.0f;
             diagnostics.feedforward_x_counts = feedforward_x;
             diagnostics.filtered_x_counts = filtered_x;
             diagnostics.shaped_x_counts = shaped_x;
@@ -3862,6 +3875,11 @@ struct Aim::Impl {
         const float track_center_error_x =
             (tracking_center_x - frame.control_center_x) *
             frame.source_pixels_per_roi_pixel_x;
+        const bool tracking_motion_initialized =
+            tracking_error_derivative_initialized;
+        const float track_center_motion_x = tracking_motion_initialized
+            ? track_center_error_x - tracking_previous_error_x
+            : 0.0f;
         const float current_common_motion_x = common_edge_motion(
                 track.horizontal_raw_left_motion_x,
                 track.horizontal_raw_right_motion_x) *
@@ -3869,12 +3887,36 @@ struct Aim::Impl {
         const float current_common_consistency = std::clamp(
             std::fabs(track.horizontal_control_translation_evidence_x),
             0.0f, 1.0f);
+        const auto [delayed_command_x, delayed_command_y] =
+            delayed_issued_command(current_controller_at);
+        // 当前共同边位移同时包含世界目标运动和历史鼠标造成的反向相机
+        // 运动。独立背景辨识给出 camera = -gain * delayed_command，因此
+        // 二者相减后才是当前目标运动；两边形变差继续由既有连续一致性
+        // 权重衰减，不能把单边轮廓变化当成维持量。
+        // 未按锁键时 Runtime 不会执行本帧预计算命令，清空状态，避免再次
+        // 按下时消费一段从未闭环控制过的历史运动。
+        if (frame.lock_active && config.control_delay_ms > 0.0f) {
+            const float tracking_plant_pixels_per_count_x =
+                kTrackingPlantResponseX / config.counts_per_pixel_x;
+            const float modelled_camera_motion_x =
+                -delayed_command_x * tracking_plant_pixels_per_count_x;
+            const float target_velocity_measurement_counts_per_second_x =
+                (current_common_motion_x - modelled_camera_motion_x) /
+                tracking_plant_pixels_per_count_x / controller_dt *
+                current_common_consistency * current_common_consistency;
+            const float target_motion_alpha = controller_dt /
+                (kTrackingTargetMotionFilterTimeSeconds + controller_dt);
+            tracking_target_velocity_counts_per_second_x +=
+                target_motion_alpha *
+                (target_velocity_measurement_counts_per_second_x -
+                 tracking_target_velocity_counts_per_second_x);
+        } else {
+            tracking_target_velocity_counts_per_second_x = 0.0f;
+        }
         const bool use_current_common_motion_x =
             current_common_motion_x != 0.0f &&
             current_common_consistency > 0.0f;
-        if (tracking_error_derivative_initialized) {
-            const float track_center_motion_x =
-                track_center_error_x - tracking_previous_error_x;
+        if (tracking_motion_initialized) {
             const float derivative_motion_x = use_current_common_motion_x
                 ? current_common_motion_x * current_common_consistency *
                       current_common_consistency
@@ -3941,6 +3983,19 @@ struct Aim::Impl {
             config.counts_per_pixel_x;
         const float proportional_y = error_y * regularized_error_scale *
             config.counts_per_pixel_y;
+        // plant 扣除后的目标速度换算为本帧维持量，而不是把整个延迟窗
+        // 位移每帧重复支付。请求仍受当前比例预算及 pending alignment
+        // 连续约束，不按速度或场景切档。
+        const float target_motion_request_magnitude_x = std::min(
+            std::fabs(proportional_x),
+            std::max(
+                0.0f,
+                x_error_direction *
+                    tracking_target_velocity_counts_per_second_x *
+                    controller_dt) *
+                pending_alignment_weight);
+        const float target_motion_request_x =
+            x_error_direction * target_motion_request_magnitude_x;
 
         // 积分只消费当前图像特征误差。误差在死区外真实换边时，旧积分
         // 表示上一方向的扰动而不再有效，直接从零重建；这不是等待证据的
@@ -4019,8 +4074,6 @@ struct Aim::Impl {
             -kTrackingVerticalIntegralMaximumCounts,
             kTrackingVerticalIntegralMaximumCounts);
 
-        const auto [delayed_command_x, delayed_command_y] =
-            delayed_issued_command(current_controller_at);
         // backend completion 只证明整数命令已完成后端接口，不代表已经观察到
         // 物理效果。这里不把 counts 投影成图像位移，只用完成时间在既有
         // 15 ms 控制窗中的剩余比例形成连续有符号库存；旧向库存越多，当前
@@ -4080,13 +4133,20 @@ struct Aim::Impl {
         controller_initialized = true;
         clamp_tracking_vector_preserving_y(
             filtered_x, filtered_y, config.max_counts_per_frame);
+        float motion_compensated_x = filtered_x + target_motion_request_x;
+        float motion_compensated_y = filtered_y;
+        clamp_tracking_vector_preserving_y(
+            motion_compensated_x, motion_compensated_y,
+            config.max_counts_per_frame);
+        diagnostics.modelled_response_x_counts =
+            motion_compensated_x - filtered_x;
         // 导数状态不回写 PI、anti-windup 或既有 smoothing。只消费朝零
         // closing slope，并从当前误差同向的 X 请求中连续扣减；扣减预算
         // 不超过该同向余量，因此滤波残留不能自行产生反向命令。
         const float error_direction_x = error_x > 0.0f
             ? 1.0f : (error_x < 0.0f ? -1.0f : 0.0f);
         const float same_direction_request_x = std::max(
-            0.0f, error_direction_x * filtered_x);
+            0.0f, error_direction_x * motion_compensated_x);
         const bool derivative_closing_evidence_x =
             !use_current_common_motion_x ||
             error_x * current_common_motion_x < 0.0f;
@@ -4102,9 +4162,9 @@ struct Aim::Impl {
         // 不能作为同向追赶的额外制动量。X 只保留由当前图像误差闭合斜率
         // 形成的连续导数阻尼；诊断字段保留为 false 以兼容既有报告契约。
         diagnostics.closing_response_tapered_x = false;
-        shaped_x = filtered_x -
+        shaped_x = motion_compensated_x -
             error_direction_x * derivative_damping_x;
-        shaped_y = filtered_y;
+        shaped_y = motion_compensated_y;
         shaper_initialized = true;
         residual_y = 0.0f;
         diagnostics.desired_x_counts = shaped_x;

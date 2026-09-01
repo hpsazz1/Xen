@@ -125,9 +125,10 @@ struct AimControlDiagnostics {
     float delayed_command_x_counts = 0.0f;
     float pending_net_x_counts = 0.0f;
     float pending_absolute_x_counts = 0.0f;
-    // tracking X 连续延迟诊断：历史目标投影保持为零；phase command 是
-    // source-time opening 斜率在 observation age 内形成的同向请求；
-    // consistency weight 为兼容旧 schema 保留。
+    // tracking X 连续延迟诊断：modelled response 是扣除独立 plant 响应后
+    // 实际加入输出的当前目标运动请求；phase command 仍是 source-time
+    // opening 相位请求；consistency weight 为兼容旧 schema 保留。三者都
+    // 不改写公开基础瞄点几何。
     float modelled_response_x_counts = 0.0f;
     float observer_phase_command_x_counts = 0.0f;
     float observer_consistency_weight_x = 0.0f;
