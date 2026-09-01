@@ -25,14 +25,20 @@ def test_phase_translation_direction_and_quality() -> None:
     rng = np.random.default_rng(20260901)
     first = rng.normal(127.0, 35.0, (96, 128)).astype(np.float32)
     second = np.roll(first, shift=(-2, 3), axis=(0, 1))
+    first_before = first.copy()
+    second_before = second.copy()
     window = cv2.createHanningWindow((128, 96), cv2.CV_32F)
     measurement = MODULE.measure_translation(first, second, window)
     expect(abs(measurement["dx_px"] - 3.0) < 0.05,
            "src2 向右平移时 dx 必须为正")
     expect(abs(measurement["dy_px"] + 2.0) < 0.05,
            "src2 向上平移时 dy 必须为负")
-    expect(0.0 <= measurement["response"] <= 1.0,
-           "phase response 必须保留官方归一化语义")
+    expect(np.isfinite(measurement["response"]) and
+           measurement["response"] > 0.0,
+           "phase response 必须作为连续质量值保留，不能截断成概率")
+    expect(np.array_equal(first, first_before) and
+           np.array_equal(second, second_before),
+           "phaseCorrelate 的 Hann 加窗不得修改调用方持有的 witness 输入")
 
 
 def test_roi_contract_and_distribution_summary() -> None:
