@@ -1,3 +1,4 @@
+import csv
 import hashlib
 import importlib.util
 import json
@@ -785,6 +786,224 @@ def test_s1_bracket_rejects_missing_post_change_and_baseline_command() -> None:
                    "重哈希也不得掩盖 sequence/baseline command 不守恒")
 
 
+def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -> None:
+    scope_id = "a2-candidate-scope"
+    run_uuid = "11111111-2222-4333-8444-555555555555"
+    sequence_sha256 = "a" * 64
+    synthetic = {
+        "evidence_type": "mouse_effect_probe_a2_s0_synthetic_calibration",
+        "status": "VALID",
+        "physical_output_capability": False,
+        "spatial_error_interval_px": {"lower": -0.1, "upper": 0.1},
+    }
+    zero_input = {
+        "evidence_type": "mouse_effect_probe_a2_s1_zero_input_calibration",
+        "status": "VALID",
+        "physical_output_capability": False,
+        "scope_id": scope_id,
+        "noise_model": {
+            "left": {"null_displacement_interval_px": [-0.05, 0.05]},
+            "right": {"null_displacement_interval_px": [-0.05, 0.05]},
+        },
+    }
+    plan = {
+        "evidence_type": "mouse_effect_probe_a2_dependency_calibration_plan",
+        "status": "VALID_OFFLINE_PLAN",
+        "physical_output_capability": False,
+        "physical_launch_authorized": False,
+        "scope_id": scope_id,
+        "sequence_request": {
+            "response_sample_count": 5,
+            "guard_sample_count": 8,
+            "block_count": 4,
+            "nonzero_transition_count": 8,
+            "max_abs_prefix_x_counts": 1,
+            "dy_counts_required": 0,
+        },
+        "derivation": {
+            "observed_lag_reference": 2,
+            "maximum_candidate_horizon": 4,
+            "source_mapping_ambiguity_frames": 1,
+            "fixed_speed_used": False,
+        },
+        "roles": {
+            "p_holdout": {
+                "profile": "dependency_calibration_a2_p_holdout",
+                "direction_order": [-1, 1, 1, -1],
+                "uses_holdout_for_tuning": False,
+            }
+        },
+    }
+    task = {
+        "evidence_type": "mouse_effect_probe_a2_task",
+        "status": "PREPARED",
+        "run_role": "p-cal",
+        "profile": "dependency_calibration_a2_p_cal",
+        "scope_id": scope_id,
+        "run_uuid": run_uuid,
+        "sequence_sha256": sequence_sha256,
+        "expected_nonzero_transition_count": 8,
+    }
+    pulse_responses = []
+    rows = []
+    for pulse_index in range(8):
+        command = 1 if pulse_index % 2 == 0 else -1
+        shifted = -0.5 * command
+        reference_state = f"reference-{pulse_index}"
+        shifted_state = f"shifted-{pulse_index}"
+        pulse_responses.append({
+            "pulse_index": pulse_index,
+            "block_id": pulse_index // 2 + 1,
+            "command_dx_counts": command,
+            "direction_contract_matches": True,
+            "joint_exact_change_observed": True,
+            "onset": {
+                "last_joint_unchanged_frame_lag": 1,
+                "first_changed_frame_lag": 2,
+            },
+        })
+        for lag in range(1, 6):
+            changed = lag >= 2
+            rows.append({
+                "pulse_index": pulse_index,
+                "block_id": pulse_index // 2 + 1,
+                "command_dx_counts": command,
+                "frame_lag": lag,
+                "phase": "response",
+                "left_exact_changed": changed,
+                "right_exact_changed": changed,
+                "left_state_sha256": shifted_state if changed else reference_state,
+                "right_state_sha256": shifted_state if changed else reference_state,
+                "left_dx_px": shifted if changed else 0.0,
+                "right_dx_px": shifted if changed else 0.0,
+            })
+    physical = {
+        "evidence_type": "mouse_effect_probe_a2_physical_background_response",
+        "status": "VALID",
+        "invalid_reasons": [],
+        "physical_output_capability": False,
+        "visible_effect_analyzed": True,
+        "machine_visible_effect_observed": True,
+        "human_physical_acceptance": "NOT_INFERRED_BY_ANALYZER",
+        "profile": "dependency_calibration_a2_p_cal",
+        "run_role": "p-cal",
+        "a2_dependency_gate_claimed": False,
+        "run_binding": {
+            "run_uuid": run_uuid,
+            "sequence_sha256": sequence_sha256,
+        },
+        "geometry": {
+            "image_width": 256,
+            "image_height": 128,
+            "left_roi": {"x": 16, "y": 16, "width": 80, "height": 96},
+            "right_roi": {"x": 160, "y": 16, "width": 80, "height": 96},
+        },
+        "backend_completed_pulse_count": 8,
+        "pulse_responses": pulse_responses,
+        "paired_closure": [
+            {"block_id": index + 1, "exact_witness_return": True}
+            for index in range(4)
+        ],
+        "whole_sequence_closure": {
+            "net_requested_x_counts": 0,
+            "net_backend_completed_x_counts": 0,
+            "exact_witness_return": True,
+        },
+    }
+    observation = """# Physical A2 人工观察
+
+- 左右 witness 一致性：一致
+- 遮挡/scene cut：不存在
+- 异常/急停：无异常或急停
+- 人工结论：看到轻微视角偏移；没移动鼠标/WASD
+"""
+    candidate = MODULE.build_physical_candidate(
+        synthetic,
+        zero_input,
+        plan,
+        task,
+        physical,
+        rows,
+        observation_text=observation,
+        observation_sha256="b" * 64,
+    )
+    expect(candidate["status"] == "VALID_P_CAL_CANDIDATE",
+           "完整 P-CAL 必须冻结供独立 P-HOLDOUT 使用的 candidate")
+    expect(candidate["a2_dependency_gate_claimed"] is False
+           and candidate["holdout_required"] is True,
+           "P-CAL candidate 不能冒充 A2 dependency green")
+    expect(candidate["tail_support"]["tail_upper_observed_lag"] == 3
+           and candidate["tail_support"]["tail_censored"] is False,
+           "tail candidate 必须由完整 response window 的最后 exact state change 派生")
+    expect(candidate["mapping_uncertainty"]["upper_px"] == 0.65
+           and candidate["mapping_uncertainty"]["fixed_speed_used"] is False,
+           "mapping 必须用 source-frame hull，不得把时间乘固定速度")
+    expect(candidate["single_count_gain_upper_scope"]["candidate_upper_px"] == 0.65,
+           "gain candidate 必须包含 spatial 与 zero-input interval 的保守上端")
+    expect(candidate["witness_occlusion_margin"]["usable_margin_lower_px"] == 15.35
+           and candidate["physical_b_prefix_candidate"]["allowed_prefix_counts"] == 22,
+           "几何额度必须从完整 support、mapping 与 gain candidate 计算")
+
+    with tempfile.TemporaryDirectory(prefix="xen-a2-p-cal-candidate-cli-") as directory:
+        root = pathlib.Path(directory)
+        inputs = {
+            "synthetic-calibration.json": synthetic,
+            "zero-input-calibration.json": zero_input,
+            "plan.json": plan,
+            "task.json": task,
+            "physical-response.json": physical,
+        }
+        for name, value in inputs.items():
+            _write_json(root / name, value)
+        rows_path = root / "physical-response.csv"
+        with rows_path.open("w", encoding="utf-8", newline="") as output:
+            writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        observation_path = root / "OBSERVATION.md"
+        observation_path.write_text(observation, encoding="utf-8")
+        output_path = root / "candidate.json"
+        exit_code = MODULE.main([
+            "candidate",
+            "--synthetic-calibration", str(root / "synthetic-calibration.json"),
+            "--zero-input-calibration", str(root / "zero-input-calibration.json"),
+            "--calibration-plan", str(root / "plan.json"),
+            "--task", str(root / "task.json"),
+            "--physical-response", str(root / "physical-response.json"),
+            "--physical-rows-csv", str(rows_path),
+            "--observation", str(observation_path),
+            "--output", str(output_path),
+        ])
+        emitted = json.loads(output_path.read_text(encoding="utf-8"))
+        expect(exit_code == 0
+               and emitted["status"] == "VALID_P_CAL_CANDIDATE"
+               and emitted["input_files"]["calibration_plan"]["sha256"]
+               == hashlib.sha256((root / "plan.json").read_bytes()).hexdigest(),
+               "candidate CLI 必须原子发布并绑定全部输入身份")
+
+    censored_rows = json.loads(json.dumps(rows))
+    for row in censored_rows:
+        if int(row["pulse_index"]) == 0 and int(row["frame_lag"]) >= 4:
+            row["left_state_sha256"] = "late-left-state"
+            row["right_state_sha256"] = "late-right-state"
+    try:
+        MODULE.build_physical_candidate(
+            synthetic,
+            zero_input,
+            plan,
+            task,
+            physical,
+            censored_rows,
+            observation_text=observation,
+            observation_sha256="b" * 64,
+        )
+    except ValueError as exception:
+        expect("tail" in str(exception).lower(),
+               "到达 candidate horizon 的变化必须以 tail-censored 原因拒绝")
+    else:
+        raise AssertionError("tail 到达 horizon 时不得生成 P-CAL candidate")
+
+
 if __name__ == "__main__":
     test_s0_uses_untouched_holdout_and_calibrates_spatial_operations()
     test_s1_requires_two_nonoverlapping_nondegenerate_capture_sessions()
@@ -793,4 +1012,5 @@ if __name__ == "__main__":
     test_s1_accepts_bracketed_resolution_censored_static_baseline()
     test_s1_legacy_bracket_without_peak_hold_remains_readable()
     test_s1_bracket_rejects_missing_post_change_and_baseline_command()
+    test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout()
     print("Mouse Effect Probe A2 dependency calibration 测试全部通过。")

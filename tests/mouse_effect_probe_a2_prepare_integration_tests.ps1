@@ -138,19 +138,86 @@ Write-NewUtf8Json $planPath ([ordered]@{
         }
     }
 })
+$candidatePath = Join-Path $inputRoot "p-cal-candidate.json"
+Write-NewUtf8Json $candidatePath ([ordered]@{
+    schema_version = 1
+    evidence_type = "mouse_effect_probe_a2_p_cal_candidate"
+    status = "VALID_P_CAL_CANDIDATE"
+    physical_output_capability = $false
+    production_aim_changed = $false
+    run_role = "p-cal"
+    profile = "dependency_calibration_a2_p_cal"
+    scope_id = $scopeId
+    run_uuid = "11111111-2222-4333-8444-555555555555"
+    sequence_sha256 = ("a" * 64)
+    a2_dependency_gate_claimed = $false
+    holdout_required = $true
+    human_observation = [ordered]@{
+        visible_effect_reported = $true
+        manual_mouse_or_wasd_used = $false
+        left_right_witness_consistent = $true
+        occlusion_or_scene_cut_reported = $false
+        anomaly_or_emergency_stop_reported = $false
+    }
+    tail_support = [ordered]@{
+        status = "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT"
+        tail_upper_observed_lag = 6
+        tail_censored = $false
+    }
+    mapping_uncertainty = [ordered]@{
+        status = "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT"
+        upper_px = 0.75
+        fixed_speed_used = $false
+    }
+    single_count_gain_upper_scope = [ordered]@{
+        status = "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT"
+        candidate_upper_px = 1.25
+        holdout_exceedance = "PENDING_INDEPENDENT_P_HOLDOUT"
+    }
+    witness_occlusion_margin = [ordered]@{
+        status = "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT"
+        usable_margin_lower_px = 14.75
+        user_reported_no_occlusion_or_scene_cut = $true
+    }
+    holdout_contract = [ordered]@{
+        expected_profile = "dependency_calibration_a2_p_holdout"
+        uses_holdout_for_tuning = $false
+        candidate_values_frozen_before_holdout = $true
+        holdout_failure_is_a2_red = $true
+    }
+    input_files = [ordered]@{
+        synthetic_calibration = [ordered]@{
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $s0Path).
+                Hash.ToLowerInvariant()
+        }
+        zero_input_calibration = [ordered]@{
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $s1Path).
+                Hash.ToLowerInvariant()
+        }
+        calibration_plan = [ordered]@{
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $planPath).
+                Hash.ToLowerInvariant()
+        }
+    }
+})
 
 foreach ($role in @("p-cal", "p-holdout")) {
     $runDirectory = Join-Path $caseRoot $role
-    & $PrepareScript `
-        -ToolRoot $ToolRoot `
-        -ConfigPath $configPath `
-        -ObsSourceBindingPath $obsBindingPath `
-        -SyntheticCalibrationPath $s0Path `
-        -ZeroInputCalibrationPath $s1Path `
-        -CalibrationPlanPath $planPath `
-        -RunDirectory $runDirectory `
-        -PublishedRunDirectory $runDirectory `
-        -RunRole $role
+    $prepareArguments = @{
+        ToolRoot = $ToolRoot
+        ConfigPath = $configPath
+        ObsSourceBindingPath = $obsBindingPath
+        SyntheticCalibrationPath = $s0Path
+        ZeroInputCalibrationPath = $s1Path
+        CalibrationPlanPath = $planPath
+        RunDirectory = $runDirectory
+        PublishedRunDirectory = $runDirectory
+        RunRole = $role
+    }
+    if ($role -eq "p-holdout") {
+        $prepareArguments.PhysicalCandidatePath = $candidatePath
+    }
+    & $PrepareScript @prepareArguments
     if ($LASTEXITCODE -ne 0) {
         throw "A2 $role Prepare 失败，ExitCode=$LASTEXITCODE"
     }
@@ -171,6 +238,15 @@ foreach ($role in @("p-cal", "p-holdout")) {
     foreach ($property in $task.files.PSObject.Properties) {
         Assert-FileIdentity $property.Value "A2 $role $($property.Name)"
     }
+    if ($role -eq "p-holdout") {
+        if ($null -eq $task.files.p_cal_candidate -or
+            [string]$task.calibration.p_cal_candidate_sha256 -ne
+            [string]$task.files.p_cal_candidate.sha256) {
+            throw "A2 P-HOLDOUT task 未绑定冻结 P-CAL candidate"
+        }
+    } elseif ($task.files.PSObject.Properties.Name -contains "p_cal_candidate") {
+        throw "A2 P-CAL Prepare 不得伪装绑定自身 candidate"
+    }
     if ((Test-Path -LiteralPath (
                 Join-Path $runDirectory "command-report.json")) -or
         (Test-Path -LiteralPath (
@@ -189,6 +265,88 @@ foreach ($role in @("p-cal", "p-holdout")) {
         -not $taskMarkdown.Contains("P-HOLDOUT 不得用于回调")) {
         throw "A2 P-HOLDOUT 缺少禁止回调合同"
     }
+}
+
+$missingCandidateRun = Join-Path $caseRoot "rejected-missing-candidate"
+$missingCandidateRejected = $false
+try {
+    & $PrepareScript `
+        -ToolRoot $ToolRoot `
+        -ConfigPath $configPath `
+        -ObsSourceBindingPath $obsBindingPath `
+        -SyntheticCalibrationPath $s0Path `
+        -ZeroInputCalibrationPath $s1Path `
+        -CalibrationPlanPath $planPath `
+        -RunDirectory $missingCandidateRun `
+        -PublishedRunDirectory $missingCandidateRun `
+        -RunRole p-holdout
+} catch {
+    $missingCandidateRejected = $_.Exception.Message.Contains(
+        "PhysicalCandidatePath")
+}
+if (-not $missingCandidateRejected -or
+    (Test-Path -LiteralPath $missingCandidateRun)) {
+    throw "A2 P-HOLDOUT 漏传 candidate 时必须在发布前拒绝"
+}
+
+$tamperedCandidatePath = Join-Path $inputRoot "p-cal-candidate-tampered.json"
+$tamperedCandidate = Get-Content -Raw -Encoding utf8 -LiteralPath `
+    $candidatePath | ConvertFrom-Json
+$tamperedCandidate.input_files.calibration_plan.sha256 = ("f" * 64)
+Write-NewUtf8Json $tamperedCandidatePath $tamperedCandidate
+$tamperedRun = Join-Path $caseRoot "rejected-candidate-hash"
+$tamperedCandidateRejected = $false
+try {
+    & $PrepareScript `
+        -ToolRoot $ToolRoot `
+        -ConfigPath $configPath `
+        -ObsSourceBindingPath $obsBindingPath `
+        -SyntheticCalibrationPath $s0Path `
+        -ZeroInputCalibrationPath $s1Path `
+        -CalibrationPlanPath $planPath `
+        -PhysicalCandidatePath $tamperedCandidatePath `
+        -RunDirectory $tamperedRun `
+        -PublishedRunDirectory $tamperedRun `
+        -RunRole p-holdout
+} catch {
+    $tamperedCandidateRejected = $_.Exception.Message.Contains(
+        "VALID P-CAL candidate")
+}
+$tamperedStaging = @(Get-ChildItem -LiteralPath $caseRoot -Directory |
+    Where-Object { $_.Name.StartsWith(".rejected-candidate-hash.incoming-") })
+if (-not $tamperedCandidateRejected -or
+    (Test-Path -LiteralPath $tamperedRun) -or
+    $tamperedStaging.Count -ne 0) {
+    throw "A2 P-HOLDOUT candidate 输入哈希不符时必须拒绝且不遗留 staging"
+}
+
+$stringBooleanCandidatePath = Join-Path $inputRoot `
+    "p-cal-candidate-string-boolean.json"
+$stringBooleanCandidate = Get-Content -Raw -Encoding utf8 -LiteralPath `
+    $candidatePath | ConvertFrom-Json
+$stringBooleanCandidate.holdout_required = "false"
+Write-NewUtf8Json $stringBooleanCandidatePath $stringBooleanCandidate
+$stringBooleanRun = Join-Path $caseRoot "rejected-string-boolean"
+$stringBooleanRejected = $false
+try {
+    & $PrepareScript `
+        -ToolRoot $ToolRoot `
+        -ConfigPath $configPath `
+        -ObsSourceBindingPath $obsBindingPath `
+        -SyntheticCalibrationPath $s0Path `
+        -ZeroInputCalibrationPath $s1Path `
+        -CalibrationPlanPath $planPath `
+        -PhysicalCandidatePath $stringBooleanCandidatePath `
+        -RunDirectory $stringBooleanRun `
+        -PublishedRunDirectory $stringBooleanRun `
+        -RunRole p-holdout
+} catch {
+    $stringBooleanRejected = $_.Exception.Message.Contains(
+        "VALID P-CAL candidate")
+}
+if (-not $stringBooleanRejected -or
+    (Test-Path -LiteralPath $stringBooleanRun)) {
+    throw "A2 P-HOLDOUT candidate 的布尔字段必须保持 JSON boolean 类型"
 }
 
 Write-Host "Mouse Effect Probe A2 Prepare integration passed: $caseRoot"

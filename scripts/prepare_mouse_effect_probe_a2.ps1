@@ -17,7 +17,10 @@
     [string]$PublishedRunDirectory,
     [Parameter(Mandatory = $true)]
     [ValidateSet("p-cal", "p-holdout")]
-    [string]$RunRole
+    [string]$RunRole,
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$PhysicalCandidatePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -157,6 +160,19 @@ function Get-RequiredBoolean(
     throw "config 的 $Name 不是布尔值"
 }
 
+function Test-ExactBoolean([object]$Value, [bool]$Expected) {
+    return $Value -is [bool] -and [bool]$Value -eq $Expected
+}
+
+if ($RunRole -eq "p-holdout" -and
+    [string]::IsNullOrWhiteSpace($PhysicalCandidatePath)) {
+    throw "A2 P-HOLDOUT Prepare 必须提供冻结的 PhysicalCandidatePath"
+}
+if ($RunRole -eq "p-cal" -and
+    -not [string]::IsNullOrWhiteSpace($PhysicalCandidatePath)) {
+    throw "A2 P-CAL Prepare 不得绑定尚未产生的 PhysicalCandidatePath"
+}
+
 $resolvedRun = [IO.Path]::GetFullPath($RunDirectory)
 $resolvedPublishedRun = [IO.Path]::GetFullPath($PublishedRunDirectory)
 if (Test-Path -LiteralPath $resolvedRun) {
@@ -186,12 +202,22 @@ $calibrationDirectory = Join-Path $stagingDirectory "calibration"
 [void](New-Item -ItemType Directory -Path $toolDirectory)
 [void](New-Item -ItemType Directory -Path $calibrationDirectory)
 
+try {
 $s0Source = Get-FileIdentity `
     $SyntheticCalibrationPath "A2 S0 synthetic calibration"
 $s1Source = Get-FileIdentity `
     $ZeroInputCalibrationPath "A2 S1 zero-input calibration"
 $planSource = Get-FileIdentity `
     $CalibrationPlanPath "A2 dependency calibration plan"
+$candidateSource = $null
+$candidate = $null
+if ($RunRole -eq "p-holdout") {
+    $candidateSource = Get-FileIdentity `
+        $PhysicalCandidatePath "A2 P-CAL candidate"
+    $candidate = Get-Content `
+        -LiteralPath $candidateSource.path -Raw -Encoding utf8 |
+        ConvertFrom-Json
+}
 $s0 = Get-Content -LiteralPath $s0Source.path -Raw -Encoding utf8 |
     ConvertFrom-Json
 $s1 = Get-Content -LiteralPath $s1Source.path -Raw -Encoding utf8 |
@@ -254,6 +280,78 @@ $planRoleProperty = $plan.roles.PSObject.Properties[$planRoleKey]
 if ($null -eq $planRoleProperty -or
     [string]$planRoleProperty.Value.profile -ne $expectedProfile) {
     throw "A2 plan 与 RunRole/profile 不一致"
+}
+if ($RunRole -eq "p-holdout") {
+    $mappingUpper = [double]$candidate.mapping_uncertainty.upper_px
+    $gainUpper = [double]$candidate.single_count_gain_upper_scope.candidate_upper_px
+    $usableMargin = [double]$candidate.witness_occlusion_margin.usable_margin_lower_px
+    if ([string]$candidate.evidence_type -ne
+            "mouse_effect_probe_a2_p_cal_candidate" -or
+        [string]$candidate.status -ne "VALID_P_CAL_CANDIDATE" -or
+        -not (Test-ExactBoolean `
+            $candidate.physical_output_capability $false) -or
+        -not (Test-ExactBoolean $candidate.production_aim_changed $false) -or
+        [string]$candidate.run_role -ne "p-cal" -or
+        [string]$candidate.profile -ne "dependency_calibration_a2_p_cal" -or
+        [string]$candidate.scope_id -ne [string]$plan.scope_id -or
+        [string]::IsNullOrWhiteSpace([string]$candidate.run_uuid) -or
+        [string]$candidate.sequence_sha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        -not (Test-ExactBoolean `
+            $candidate.a2_dependency_gate_claimed $false) -or
+        -not (Test-ExactBoolean $candidate.holdout_required $true) -or
+        -not (Test-ExactBoolean `
+            $candidate.human_observation.visible_effect_reported $true) -or
+        -not (Test-ExactBoolean `
+            $candidate.human_observation.manual_mouse_or_wasd_used $false) -or
+        -not (Test-ExactBoolean `
+            $candidate.human_observation.left_right_witness_consistent $true) -or
+        -not (Test-ExactBoolean `
+            $candidate.human_observation.occlusion_or_scene_cut_reported $false) -or
+        -not (Test-ExactBoolean `
+            $candidate.human_observation.anomaly_or_emergency_stop_reported $false) -or
+        [string]$candidate.tail_support.status -ne
+            "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT" -or
+        -not (Test-ExactBoolean $candidate.tail_support.tail_censored $false) -or
+        [uint64]$candidate.tail_support.tail_upper_observed_lag -eq 0 -or
+        [string]$candidate.mapping_uncertainty.status -ne
+            "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT" -or
+        [double]::IsNaN($mappingUpper) -or
+        [double]::IsInfinity($mappingUpper) -or
+        $mappingUpper -lt 0.0 -or
+        -not (Test-ExactBoolean `
+            $candidate.mapping_uncertainty.fixed_speed_used $false) -or
+        [string]$candidate.single_count_gain_upper_scope.status -ne
+            "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT" -or
+        [double]::IsNaN($gainUpper) -or
+        [double]::IsInfinity($gainUpper) -or
+        $gainUpper -le 0.0 -or
+        [string]$candidate.single_count_gain_upper_scope.holdout_exceedance -ne
+            "PENDING_INDEPENDENT_P_HOLDOUT" -or
+        [string]$candidate.witness_occlusion_margin.status -ne
+            "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT" -or
+        [double]::IsNaN($usableMargin) -or
+        [double]::IsInfinity($usableMargin) -or
+        $usableMargin -le 0.0 -or
+        -not (Test-ExactBoolean `
+            $candidate.witness_occlusion_margin.user_reported_no_occlusion_or_scene_cut `
+            $true) -or
+        [string]$candidate.holdout_contract.expected_profile -ne
+            "dependency_calibration_a2_p_holdout" -or
+        -not (Test-ExactBoolean `
+            $candidate.holdout_contract.uses_holdout_for_tuning $false) -or
+        -not (Test-ExactBoolean `
+            $candidate.holdout_contract.candidate_values_frozen_before_holdout `
+            $true) -or
+        -not (Test-ExactBoolean `
+            $candidate.holdout_contract.holdout_failure_is_a2_red $true) -or
+        [string]$candidate.input_files.synthetic_calibration.sha256 -ne
+            [string]$s0Source.sha256 -or
+        [string]$candidate.input_files.zero_input_calibration.sha256 -ne
+            [string]$s1Source.sha256 -or
+        [string]$candidate.input_files.calibration_plan.sha256 -ne
+            [string]$planSource.sha256) {
+        throw "A2 P-HOLDOUT 要求同 scope、输入哈希一致且未使用 holdout 回调的 VALID P-CAL candidate"
+    }
 }
 
 $sourceConfig = Get-FileIdentity $ConfigPath "A2 config.ini"
@@ -335,6 +433,14 @@ $s1Copy = Copy-NewPublishedFile `
 $planCopy = Copy-NewPublishedFile `
     $planSource.path (Join-Path $calibrationDirectory "plan.json") `
     (Join-Path $publishedCalibration "plan.json") "A2 plan copy"
+$candidateCopy = $null
+if ($RunRole -eq "p-holdout") {
+    $candidateCopy = Copy-NewPublishedFile `
+        $candidateSource.path `
+        (Join-Path $calibrationDirectory "p-cal-candidate.json") `
+        (Join-Path $publishedCalibration "p-cal-candidate.json") `
+        "A2 P-CAL candidate copy"
+}
 
 $sequencePath = Join-Path $stagingDirectory "sequence.json"
 & (Join-Path $toolDirectory "XenMouseEffectProbeSequence.exe") `
@@ -403,6 +509,9 @@ $binding = [ordered]@{
     max_abs_prefix_x_counts = 1
     expected_background_shift_sign_per_positive_count = -1
 }
+if ($RunRole -eq "p-holdout") {
+    $binding.calibration["p_cal_candidate"] = $candidateCopy
+}
 Write-NewUtf8Json $bindingPath $binding
 $bindingIdentity = Get-PublishedIdentity `
     $bindingPath (Join-Path $resolvedPublishedRun "probe-binding.json") `
@@ -427,6 +536,11 @@ $task = [ordered]@{
     physical_output_capability = $true
     physical_output_confirmation =
         "XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT"
+    calibration = [ordered]@{
+        s0_sha256 = $s0Copy.sha256
+        s1_sha256 = $s1Copy.sha256
+        plan_sha256 = $planCopy.sha256
+    }
     files = [ordered]@{
         launch_script = $launchScript
         probe_executable = $probeExecutable
@@ -502,6 +616,10 @@ $task = [ordered]@{
         "SINGLE_COUNT_GAIN_UPPER_SCOPE"
     )
 }
+if ($RunRole -eq "p-holdout") {
+    $task.calibration["p_cal_candidate_sha256"] = $candidateCopy.sha256
+    $task.files["p_cal_candidate"] = $candidateCopy
+}
 Write-NewUtf8Json $taskPath $task
 
 $launchCommand = ('powershell.exe -NoProfile -ExecutionPolicy Bypass ' +
@@ -510,11 +628,17 @@ $launchCommand = ('powershell.exe -NoProfile -ExecutionPolicy Bypass ' +
     $launchScript.path, $resolvedPublishedRun,
     "XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT"
 $roleLabel = if ($RunRole -eq "p-cal") { "P-CAL" } else { "P-HOLDOUT" }
+$candidateTaskLine = if ($RunRole -eq "p-holdout") {
+    "- 冻结 P-CAL candidate：``$($candidateCopy.sha256)``；本次不得回调候选值"
+} else {
+    "- 本次为 P-CAL；不绑定也不预声明 P-HOLDOUT candidate"
+}
 $taskMarkdown = @(
     "# Mouse Effect Probe Physical A2 $roleLabel",
     "",
     "- Run UUID：``$runUuid``",
     "- scope：``$($plan.scope_id)``；profile：``$expectedProfile``",
+    $candidateTaskLine,
     "- 序列：samples=$($samples.Count)，transitions=$($pulses.Count)，每个 block 均为 pre-zero → ±1 → hold → return → post-zero",
     "- 硬边界：X-only、Y=0、净 X=0、最大前缀=1 count；运行期不加幅、不加测、不补偿",
     "- 场景：真实游戏静止高纹理背景；左右 witness 全支持域不得含人物、HUD、Overlay、遮挡或独立动画",
@@ -559,6 +683,9 @@ $summary = [ordered]@{
     expected_nonzero_transition_count = [uint64]$pulses.Count
     physical_launch_executed = $false
 }
+if ($RunRole -eq "p-holdout") {
+    $summary["p_cal_candidate_sha256"] = $candidateCopy.sha256
+}
 Write-NewUtf8Json `
     (Join-Path $stagingDirectory "prepare-summary.json") $summary
 
@@ -567,3 +694,25 @@ Write-Host "Physical A2 $roleLabel Prepare 完成；未启动 Mouse、sidecar �
 Write-Host "BundleDirectory=$resolvedRun"
 Write-Host "PublishedRunDirectory=$resolvedPublishedRun"
 Write-Host $launchCommand
+} catch {
+    $failure = $_
+    if (Test-Path -LiteralPath $stagingDirectory -PathType Container) {
+        $stagingFull = [IO.Path]::GetFullPath($stagingDirectory)
+        $runParentFull = [IO.Path]::GetFullPath($runParent)
+        $runParentPrefix = $runParentFull.TrimEnd(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar) +
+            [IO.Path]::DirectorySeparatorChar
+        $expectedStagingPrefix = ".{0}.incoming-" -f $runName
+        if (-not $stagingFull.StartsWith(
+                $runParentPrefix,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Split-Path -Leaf $stagingFull).StartsWith(
+                $expectedStagingPrefix,
+                [StringComparison]::Ordinal)) {
+            throw "A2 staging 清理目标越界，保留现场：$stagingFull"
+        }
+        Remove-Item -LiteralPath $stagingFull -Recurse -Force
+    }
+    throw $failure
+}

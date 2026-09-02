@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Physical A2 的 S0 合成校准与 S1 零输入分块校准。
+"""Physical A2 的 S0/S1 校准、Physical candidate 与离线计划。
 
-本入口只读取/生成像素证据，不打开 Capture、Probe 或 Mouse。真实 Physical
-tail、遮挡轨迹、source-frame 像素包络和 scope gain upper 不在这里推断。
+本入口只读取/生成已经记录的证据，不打开 Capture、Probe 或 Mouse。P-CAL
+candidate 只冻结给独立 P-HOLDOUT 的可证伪上界，不声明 A2 dependency green。
 """
 
 from __future__ import annotations
@@ -91,6 +91,18 @@ def _file_sha256(path: pathlib.Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _file_identity(path: pathlib.Path, description: str) -> dict:
+    resolved = path.resolve()
+    if not resolved.is_file():
+        raise ValueError(f"{description} 不是普通文件：{resolved}")
+    stat = resolved.stat()
+    return {
+        "path": str(resolved),
+        "size": int(stat.st_size),
+        "sha256": _file_sha256(resolved),
+    }
 
 
 def _validate_roi(roi: Roi, width: int, height: int, name: str) -> None:
@@ -1361,6 +1373,415 @@ def derive_dependency_calibration_plan(
     }
 
 
+def _finite_interval(value: object, description: str) -> tuple[float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{description} 必须是二元素区间")
+    lower = float(value[0])
+    upper = float(value[1])
+    if not math.isfinite(lower) or not math.isfinite(upper) or lower > upper:
+        raise ValueError(f"{description} 必须有限且有序")
+    return lower, upper
+
+
+def _observation_fields(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("- ") or "：" not in line:
+            continue
+        name, value = line[2:].split("：", 1)
+        fields[name.strip()] = value.strip()
+    return fields
+
+
+def _rounded_px(value: float) -> float:
+    if not math.isfinite(value):
+        raise ValueError("candidate 像素值必须有限")
+    return round(float(value), 12)
+
+
+def build_physical_candidate(
+    synthetic_calibration: dict,
+    zero_input_calibration: dict,
+    calibration_plan: dict,
+    task: dict,
+    physical_response: dict,
+    physical_rows: Sequence[dict],
+    *,
+    observation_text: str,
+    observation_sha256: str,
+) -> dict:
+    """把一个完整 P-CAL 冻结为只能由独立 P-HOLDOUT 证伪的 candidate。"""
+    scope_id = str(calibration_plan.get("scope_id", ""))
+    task_run_uuid = str(task.get("run_uuid", ""))
+    task_sequence_sha256 = str(task.get("sequence_sha256", ""))
+    if (
+        synthetic_calibration.get("evidence_type")
+        != "mouse_effect_probe_a2_s0_synthetic_calibration"
+        or synthetic_calibration.get("status") != "VALID"
+        or synthetic_calibration.get("physical_output_capability") is not False
+        or zero_input_calibration.get("evidence_type")
+        != "mouse_effect_probe_a2_s1_zero_input_calibration"
+        or zero_input_calibration.get("status") != "VALID"
+        or zero_input_calibration.get("physical_output_capability") is not False
+        or str(zero_input_calibration.get("scope_id", "")) != scope_id
+        or calibration_plan.get("evidence_type")
+        != "mouse_effect_probe_a2_dependency_calibration_plan"
+        or calibration_plan.get("status") != "VALID_OFFLINE_PLAN"
+        or calibration_plan.get("physical_output_capability") is not False
+        or calibration_plan.get("physical_launch_authorized") is not False
+        or not scope_id
+        or task.get("evidence_type") != "mouse_effect_probe_a2_task"
+        or task.get("status") != "PREPARED"
+        or task.get("run_role") != "p-cal"
+        or task.get("profile") != "dependency_calibration_a2_p_cal"
+        or str(task.get("scope_id", "")) != scope_id
+        or not task_run_uuid
+        or len(task_sequence_sha256) != 64
+    ):
+        raise ValueError("P-CAL candidate 输入不是同 scope 的有效 S0/S1/plan/task")
+
+    binding = physical_response.get("run_binding", {})
+    pulse_responses = physical_response.get("pulse_responses")
+    paired_closure = physical_response.get("paired_closure")
+    whole_closure = physical_response.get("whole_sequence_closure", {})
+    expected_pulses = int(
+        calibration_plan.get("sequence_request", {})
+        .get("nonzero_transition_count", 0)
+    )
+    if (
+        physical_response.get("evidence_type")
+        != "mouse_effect_probe_a2_physical_background_response"
+        or physical_response.get("status") != "VALID"
+        or physical_response.get("invalid_reasons") not in ([], None)
+        or physical_response.get("physical_output_capability") is not False
+        or physical_response.get("visible_effect_analyzed") is not True
+        or physical_response.get("machine_visible_effect_observed") is not True
+        or physical_response.get("human_physical_acceptance")
+        != "NOT_INFERRED_BY_ANALYZER"
+        or physical_response.get("profile") != "dependency_calibration_a2_p_cal"
+        or physical_response.get("run_role") != "p-cal"
+        or physical_response.get("a2_dependency_gate_claimed") is not False
+        or str(binding.get("run_uuid", "")) != task_run_uuid
+        or str(binding.get("sequence_sha256", "")) != task_sequence_sha256
+        or not isinstance(pulse_responses, list)
+        or len(pulse_responses) != expected_pulses
+        or int(physical_response.get("backend_completed_pulse_count", -1))
+        != expected_pulses
+        or not isinstance(paired_closure, list)
+        or len(paired_closure) * 2 != expected_pulses
+        or not all(item.get("exact_witness_return") is True for item in paired_closure)
+        or int(whole_closure.get("net_requested_x_counts", 1)) != 0
+        or int(whole_closure.get("net_backend_completed_x_counts", 1)) != 0
+        or whole_closure.get("exact_witness_return") is not True
+    ):
+        raise ValueError("P-CAL physical response 未形成完整双方向成对闭合证据")
+
+    observation = _observation_fields(observation_text)
+    human_visible = "视角偏移" in observation.get("人工结论", "")
+    no_manual_input = (
+        "没移动鼠标/WASD" in observation.get("人工结论", "")
+        or "未移动鼠标/WASD" in observation.get("人工结论", "")
+    )
+    witness_consistent = observation.get("左右 witness 一致性", "").startswith("一致")
+    scene_valid = observation.get("遮挡/scene cut", "") == "不存在"
+    no_anomaly_or_emergency = observation.get("异常/急停", "").startswith(
+        "无异常或急停"
+    )
+    if (
+        len(observation_sha256) != 64
+        or not all(
+            (
+                human_visible,
+                no_manual_input,
+                witness_consistent,
+                scene_valid,
+                no_anomaly_or_emergency,
+            )
+        )
+    ):
+        raise ValueError("P-CAL 人工观察未明确闭合可见性、无人工输入、场景与安全事实")
+
+    spatial = synthetic_calibration.get("spatial_error_interval_px", {})
+    spatial_lower = float(spatial.get("lower", math.nan))
+    spatial_upper = float(spatial.get("upper", math.nan))
+    if (
+        not math.isfinite(spatial_lower)
+        or not math.isfinite(spatial_upper)
+        or spatial_lower > spatial_upper
+        or not (spatial_lower <= 0.0 <= spatial_upper)
+    ):
+        raise ValueError("P-CAL S0 spatial error interval 无效")
+    zero_intervals = {
+        witness: _finite_interval(
+            zero_input_calibration.get("noise_model", {})
+            .get(witness, {})
+            .get("null_displacement_interval_px"),
+            f"S1 {witness} null displacement",
+        )
+        for witness in ("left", "right")
+    }
+
+    response_count = int(
+        calibration_plan.get("sequence_request", {}).get(
+            "response_sample_count", 0
+        )
+    )
+    maximum_horizon = int(
+        calibration_plan.get("derivation", {}).get(
+            "maximum_candidate_horizon", 0
+        )
+    )
+    ambiguity_frames = int(
+        calibration_plan.get("derivation", {}).get(
+            "source_mapping_ambiguity_frames", 0
+        )
+    )
+    if (
+        response_count <= 0
+        or maximum_horizon <= 0
+        or response_count < maximum_horizon
+        or ambiguity_frames <= 0
+        or calibration_plan.get("derivation", {}).get("fixed_speed_used") is not False
+    ):
+        raise ValueError("P-CAL plan 的 response/horizon/source ambiguity 合同无效")
+
+    rows_by_pulse: dict[int, list[dict]] = {}
+    for row in physical_rows:
+        pulse_index = int(row.get("pulse_index", -1))
+        if pulse_index < 0 or pulse_index >= expected_pulses:
+            raise ValueError("P-CAL rows 含未预注册 pulse index")
+        rows_by_pulse.setdefault(pulse_index, []).append(row)
+    if sorted(rows_by_pulse) != list(range(expected_pulses)):
+        raise ValueError("P-CAL rows 未覆盖全部 pulse")
+
+    tail_rows: list[dict] = []
+    mapping_rows: list[dict] = []
+    gain_rows: list[dict] = []
+    mapping_upper = 0.0
+    gain_upper = 0.0
+    tail_upper = 0
+    tail_censored = False
+    for pulse_index, response in enumerate(pulse_responses):
+        command = int(response.get("command_dx_counts", 0))
+        if (
+            int(response.get("pulse_index", -1)) != pulse_index
+            or abs(command) != 1
+            or response.get("direction_contract_matches") is not True
+            or response.get("joint_exact_change_observed") is not True
+        ):
+            raise ValueError("P-CAL pulse response 的方向或可见性合同无效")
+        pulse_rows = sorted(
+            rows_by_pulse[pulse_index], key=lambda row: int(row.get("frame_lag", -1))
+        )
+        lags = [int(row.get("frame_lag", -1)) for row in pulse_rows]
+        if lags != list(range(1, len(lags) + 1)) or len(pulse_rows) < response_count:
+            raise ValueError("P-CAL pulse rows 的 lag/response window 不完整")
+        window_rows = pulse_rows[:response_count]
+        onset = response.get("onset", {})
+        last_unchanged_lag = int(onset.get("last_joint_unchanged_frame_lag", 0))
+        first_changed_lag = int(onset.get("first_changed_frame_lag", 0))
+        if (
+            first_changed_lag <= 0
+            or last_unchanged_lag <= 0
+            or first_changed_lag - last_unchanged_lag > ambiguity_frames
+        ):
+            raise ValueError("P-CAL onset source-frame boundary 超出预注册 ambiguity")
+        row_by_lag = {int(row["frame_lag"]): row for row in window_rows}
+        if last_unchanged_lag not in row_by_lag or first_changed_lag not in row_by_lag:
+            raise ValueError("P-CAL onset boundary 不在完整 response window")
+
+        previous_state = (
+            str(window_rows[0].get("left_state_sha256", "")),
+            str(window_rows[0].get("right_state_sha256", "")),
+        )
+        last_state_change_lag = 0
+        for row in window_rows[1:]:
+            state = (
+                str(row.get("left_state_sha256", "")),
+                str(row.get("right_state_sha256", "")),
+            )
+            if not all(state):
+                raise ValueError("P-CAL row 缺少 witness state identity")
+            if state != previous_state:
+                last_state_change_lag = int(row["frame_lag"])
+            previous_state = state
+        if last_state_change_lag < first_changed_lag:
+            raise ValueError("P-CAL exact state 没有覆盖报告的 first-visible onset")
+        event_tail_upper = last_state_change_lag + 1
+        event_censored = last_state_change_lag >= maximum_horizon
+        if event_censored:
+            raise ValueError("P-CAL tail 到达 candidate horizon，不能进入 P-HOLDOUT")
+        tail_upper = max(tail_upper, event_tail_upper)
+        tail_censored = tail_censored or event_censored
+        tail_rows.append({
+            "pulse_index": pulse_index,
+            "command_dx_counts": command,
+            "first_changed_frame_lag": first_changed_lag,
+            "tail_last_supported_lag": last_state_change_lag,
+            "tail_upper_observed_lag": event_tail_upper,
+            "tail_censored": event_censored,
+        })
+
+        boundary_rows = [
+            row_by_lag[last_unchanged_lag], row_by_lag[first_changed_lag]
+        ]
+        for witness in ("left", "right"):
+            zero_lower, zero_upper = zero_intervals[witness]
+            values = [float(row[f"{witness}_dx_px"]) for row in boundary_rows]
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError("P-CAL mapping boundary shift 非有限")
+            interval_lower = min(
+                value + spatial_lower + zero_lower for value in values
+            )
+            interval_upper = max(
+                value + spatial_upper + zero_upper for value in values
+            )
+            nominal = float(row_by_lag[first_changed_lag][f"{witness}_dx_px"])
+            uncertainty = max(
+                abs(interval_lower - nominal), abs(interval_upper - nominal)
+            )
+            mapping_upper = max(mapping_upper, uncertainty)
+            mapping_rows.append({
+                "pulse_index": pulse_index,
+                "witness": witness,
+                "candidate_frame_lags": [last_unchanged_lag, first_changed_lag],
+                "effect_interval_px": [
+                    _rounded_px(interval_lower), _rounded_px(interval_upper)
+                ],
+                "nominal_px": _rounded_px(nominal),
+                "uncertainty_px": _rounded_px(uncertainty),
+            })
+
+            peak_upper = 0.0
+            for row in window_rows:
+                value = float(row[f"{witness}_dx_px"])
+                if not math.isfinite(value):
+                    raise ValueError("P-CAL response shift 非有限")
+                lower = value + spatial_lower + zero_lower
+                upper = value + spatial_upper + zero_upper
+                peak_upper = max(peak_upper, abs(lower), abs(upper))
+            gain_upper = max(gain_upper, peak_upper)
+            gain_rows.append({
+                "pulse_index": pulse_index,
+                "witness": witness,
+                "command_dx_counts": command,
+                "response_frame_count": response_count,
+                "g_upper_px_per_count": _rounded_px(peak_upper),
+            })
+
+    geometry = physical_response.get("geometry", {})
+    image_width = int(geometry.get("image_width", 0))
+    image_height = int(geometry.get("image_height", 0))
+    border_margins: list[int] = []
+    for witness in ("left", "right"):
+        roi = geometry.get(f"{witness}_roi", {})
+        x = int(roi.get("x", -1))
+        y = int(roi.get("y", -1))
+        width = int(roi.get("width", 0))
+        height = int(roi.get("height", 0))
+        if (
+            image_width <= 0
+            or image_height <= 0
+            or x < 0
+            or y < 0
+            or width <= 1
+            or height <= 1
+            or x + width > image_width
+            or y + height > image_height
+        ):
+            raise ValueError("P-CAL witness support footprint 几何无效")
+        border_margins.extend((x, image_width - (x + width)))
+    geometric_margin = float(min(border_margins))
+    usable_margin = geometric_margin - gain_upper
+    remaining_after_mapping = usable_margin - mapping_upper
+    if gain_upper <= 0.0 or usable_margin <= 0.0 or remaining_after_mapping <= 0.0:
+        raise ValueError("P-CAL witness margin 不足以形成严格正的 X-only candidate")
+    allowed_prefix_counts = int(math.floor(remaining_after_mapping / gain_upper))
+    if allowed_prefix_counts < 1:
+        raise ValueError("P-CAL candidate 无法覆盖一 count 安全前缀")
+
+    holdout_role = calibration_plan.get("roles", {}).get("p_holdout", {})
+    if (
+        holdout_role.get("profile") != "dependency_calibration_a2_p_holdout"
+        or holdout_role.get("uses_holdout_for_tuning") is not False
+    ):
+        raise ValueError("P-CAL plan 缺少不可回调的独立 P-HOLDOUT role")
+
+    return {
+        "schema_version": 1,
+        "evidence_type": "mouse_effect_probe_a2_p_cal_candidate",
+        "status": "VALID_P_CAL_CANDIDATE",
+        "invalid_reasons": [],
+        "physical_output_capability": False,
+        "production_aim_changed": False,
+        "run_role": "p-cal",
+        "profile": "dependency_calibration_a2_p_cal",
+        "scope_id": scope_id,
+        "run_uuid": task_run_uuid,
+        "sequence_sha256": task_sequence_sha256,
+        "a2_dependency_gate_claimed": False,
+        "holdout_required": True,
+        "human_observation": {
+            "observation_sha256": observation_sha256,
+            "visible_effect_reported": human_visible,
+            "manual_mouse_or_wasd_used": False,
+            "left_right_witness_consistent": witness_consistent,
+            "occlusion_or_scene_cut_reported": False,
+            "anomaly_or_emergency_stop_reported": False,
+            "acceptance_scope": "P_CAL_SCENE_FACTS_NOT_A2_DEPENDENCY_PASS",
+        },
+        "tail_support": {
+            "status": "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT",
+            "tail_upper_observed_lag": tail_upper,
+            "tail_censored": tail_censored,
+            "maximum_candidate_horizon": maximum_horizon,
+            "events": tail_rows,
+        },
+        "mapping_uncertainty": {
+            "status": "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT",
+            "upper_px": _rounded_px(mapping_upper),
+            "source_mapping_ambiguity_frames": ambiguity_frames,
+            "ambiguity_changes_decision": False,
+            "fixed_speed_used": False,
+            "events": mapping_rows,
+        },
+        "single_count_gain_upper_scope": {
+            "status": "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT",
+            "candidate_upper_px": _rounded_px(gain_upper),
+            "coverage_semantic": (
+                "max_full_response_window_interval_upper_by_witness_direction_block"
+            ),
+            "holdout_exceedance": "PENDING_INDEPENDENT_P_HOLDOUT",
+            "events": gain_rows,
+        },
+        "witness_occlusion_margin": {
+            "status": "VALID_P_CAL_CANDIDATE_PENDING_HOLDOUT",
+            "provenance": "USER_OBSERVATION_PLUS_FULL_FRAME_BORDER",
+            "observation_sha256": observation_sha256,
+            "user_reported_no_occlusion_or_scene_cut": scene_valid,
+            "geometric_support_margin_px": _rounded_px(geometric_margin),
+            "usable_margin_lower_px": _rounded_px(usable_margin),
+        },
+        "physical_b_prefix_candidate": {
+            "status": "CANDIDATE_ONLY_PENDING_P_HOLDOUT",
+            "allowed_prefix_counts": allowed_prefix_counts,
+            "formula": (
+                "floor((usable_margin_px-mapping_uncertainty_px)/"
+                "single_count_gain_upper_scope)"
+            ),
+            "physical_b_authorized": False,
+        },
+        "holdout_contract": {
+            "expected_profile": "dependency_calibration_a2_p_holdout",
+            "direction_order": list(holdout_role.get("direction_order", [])),
+            "uses_holdout_for_tuning": False,
+            "candidate_values_frozen_before_holdout": True,
+            "holdout_failure_is_a2_red": True,
+        },
+    }
+
+
 def _parse_roi(value: str) -> Roi:
     parts = value.split(",")
     if len(parts) != 4:
@@ -1411,6 +1832,20 @@ def _parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespa
     plan.add_argument("--observed-lag-reference", type=int, required=True)
     plan.add_argument("--candidate-horizons", required=True)
     plan.add_argument("--output", type=pathlib.Path, required=True)
+
+    candidate = subparsers.add_parser("candidate")
+    candidate.add_argument(
+        "--synthetic-calibration", type=pathlib.Path, required=True
+    )
+    candidate.add_argument(
+        "--zero-input-calibration", type=pathlib.Path, required=True
+    )
+    candidate.add_argument("--calibration-plan", type=pathlib.Path, required=True)
+    candidate.add_argument("--task", type=pathlib.Path, required=True)
+    candidate.add_argument("--physical-response", type=pathlib.Path, required=True)
+    candidate.add_argument("--physical-rows-csv", type=pathlib.Path, required=True)
+    candidate.add_argument("--observation", type=pathlib.Path, required=True)
+    candidate.add_argument("--output", type=pathlib.Path, required=True)
     return parser.parse_args(arguments)
 
 
@@ -1452,6 +1887,52 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 + "\n",
             )
             print(f"A2 plan VALID: output={options.output.resolve()}")
+            return 0
+
+        if options.mode == "candidate":
+            input_paths = {
+                "synthetic_calibration": options.synthetic_calibration,
+                "zero_input_calibration": options.zero_input_calibration,
+                "calibration_plan": options.calibration_plan,
+                "task": options.task,
+                "physical_response": options.physical_response,
+                "physical_rows_csv": options.physical_rows_csv,
+                "observation": options.observation,
+            }
+            identities = {
+                name: _file_identity(path, name)
+                for name, path in input_paths.items()
+            }
+            with options.physical_rows_csv.resolve().open(
+                "r", encoding="utf-8", newline=""
+            ) as source:
+                rows = list(csv.DictReader(source))
+            if not rows:
+                raise ValueError("P-CAL physical rows CSV 为空")
+            observation_text = options.observation.resolve().read_text(
+                encoding="utf-8"
+            )
+            result = build_physical_candidate(
+                _read_json(options.synthetic_calibration, "S0 synthetic calibration"),
+                _read_json(options.zero_input_calibration, "S1 zero-input calibration"),
+                _read_json(options.calibration_plan, "A2 calibration plan"),
+                _read_json(options.task, "P-CAL task"),
+                _read_json(options.physical_response, "P-CAL physical response"),
+                rows,
+                observation_text=observation_text,
+                observation_sha256=identities["observation"]["sha256"],
+            )
+            result["input_files"] = identities
+            _write_new_text(
+                options.output,
+                json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
+                + "\n",
+            )
+            print(
+                "A2 P-CAL candidate VALID: "
+                f"gain_upper={result['single_count_gain_upper_scope']['candidate_upper_px']}, "
+                f"output={options.output.resolve()}"
+            )
             return 0
 
         result, rows = analyze_zero_input_sessions(
