@@ -130,10 +130,10 @@ Write-NewUtf8Json $planPath ([ordered]@{
         max_seconds = 30
     }
     roles = [ordered]@{
-        "p-cal" = [ordered]@{
+        p_cal = [ordered]@{
             profile = "dependency_calibration_a2_p_cal"
         }
-        "p-holdout" = [ordered]@{
+        p_holdout = [ordered]@{
             profile = "dependency_calibration_a2_p_holdout"
         }
     }

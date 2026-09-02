@@ -249,7 +249,10 @@ $expectedProfile = if ($RunRole -eq "p-cal") {
 } else {
     "dependency_calibration_a2_p_holdout"
 }
-if ([string]$plan.roles.$RunRole.profile -ne $expectedProfile) {
+$planRoleKey = $RunRole.Replace("-", "_")
+$planRoleProperty = $plan.roles.PSObject.Properties[$planRoleKey]
+if ($null -eq $planRoleProperty -or
+    [string]$planRoleProperty.Value.profile -ne $expectedProfile) {
     throw "A2 plan 与 RunRole/profile 不一致"
 }
 
