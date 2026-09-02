@@ -535,7 +535,7 @@ try {
                 $capture "ndi_require_frame_metadata"
         }
         sidecar = [ordered]@{
-            frames = [uint64]3840
+            frames = [uint64]2400
             max_seconds = [uint64]25
             publishing_max_seconds = [uint64]180
             physical_output_capability = $false

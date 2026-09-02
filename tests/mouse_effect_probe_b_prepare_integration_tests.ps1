@@ -256,6 +256,59 @@ if ([string]$f0.analyzer.file_sha256 -ne
 foreach ($property in $task.files.PSObject.Properties) {
     Assert-FileIdentity $property.Value "Physical B $($property.Name)"
 }
+
+# 通过随包的真实 sidecar CLI 验证 Prepare producer 与 consumer 的参数合同。
+# 刻意使用不存在的 binding，让校验在启动 NDI 前以初始化错误退出；若 task
+# 写入 sidecar 不接受的帧数/几何/时限，则会更早以 CLI 用法错误（ExitCode=2）退出。
+$missingSidecarBinding = Join-Path $caseRoot "missing-sidecar-binding.json"
+$sidecarValidationOutput = Join-Path $caseRoot "sidecar-validation-output"
+$sidecarArguments = @(
+    "--ndi-source", [string]$task.capture.source_name,
+    "--binding", $missingSidecarBinding,
+    "--output", $sidecarValidationOutput,
+    "--frames", [string]$task.sidecar.frames,
+    "--max-seconds", [string]$task.sidecar.max_seconds,
+    "--frame-layout", [string]$task.capture.frame_layout,
+    "--source-width", [string]$task.capture.source_width,
+    "--source-height", [string]$task.capture.source_height,
+    "--roi-width", [string]$task.capture.roi_width,
+    "--roi-height", [string]$task.capture.roi_height,
+    "--discovery-timeout-ms", [string]$task.capture.discovery_timeout_ms,
+    "--receive-timeout-ms", [string]$task.capture.receive_timeout_ms,
+    "--disconnect-timeout-ms", [string]$task.capture.disconnect_timeout_ms,
+    "--clock-sync-url", [string]$task.capture.clock_sync_url,
+    "--clock-sync-interval-ms", [string]$task.capture.clock_sync_interval_ms,
+    "--clock-sync-timeout-ms", [string]$task.capture.clock_sync_timeout_ms,
+    "--clock-mapping-max-age-ms",
+        [string]$task.capture.clock_mapping_max_age_ms,
+    "--require-source-timing")
+if (-not [bool]$task.capture.center_roi) {
+    $sidecarArguments += @(
+        "--roi-x", [string]$task.capture.roi_x,
+        "--roi-y", [string]$task.capture.roi_y)
+}
+if ([bool]$task.capture.require_frame_metadata) {
+    $sidecarArguments += "--require-frame-metadata"
+}
+$savedErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = "Continue"
+    $sidecarValidationLines = @(
+        & ([string]$task.files.sidecar_executable.path) `
+            @sidecarArguments 2>&1)
+    $sidecarValidationExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $savedErrorActionPreference
+}
+$sidecarValidationText = $sidecarValidationLines -join `
+    [Environment]::NewLine
+if ($sidecarValidationExitCode -ne 1 -or
+    $sidecarValidationText -notmatch "source binding 不是可读普通文件" -or
+    (Test-Path -LiteralPath $sidecarValidationOutput)) {
+    throw ("Physical B Prepare 生成的 sidecar 参数不能被随包 CLI 消费：" +
+        "ExitCode=$sidecarValidationExitCode；output=$sidecarValidationText")
+}
+
 $taskMarkdown = Get-Content -Raw -Encoding utf8 -LiteralPath (
     Join-Path $runDirectory "TASK.md")
 if (-not $taskMarkdown.Contains("-AllowPhysicalOutput") -or
