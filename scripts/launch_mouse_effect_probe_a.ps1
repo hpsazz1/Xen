@@ -61,6 +61,35 @@ function ConvertTo-PhysicalProbeOperatorCue([string]$Line) {
     return $null
 }
 
+function Get-PhysicalEventFrameCoverage(
+        [object]$Event,
+        [object]$Sample,
+        [Collections.Generic.HashSet[int64]]$FrameTimestamps,
+        [bool]$AllowUnmatchedBaseline,
+        [uint64]$BaselineSampleCount) {
+    $matched = $FrameTimestamps.Contains([int64]$Event.source_timestamp)
+    $sampleIndex = [uint64]$Sample.sample_index
+    $unmatchedBaselineAllowed =
+        -not $matched -and
+        $AllowUnmatchedBaseline -and
+        [string]$Sample.phase -eq "baseline" -and
+        [int]$Sample.dx_counts -eq 0 -and
+        [int]$Sample.dy_counts -eq 0 -and
+        $sampleIndex -gt 0 -and
+        $sampleIndex + 1 -lt $BaselineSampleCount -and
+        -not [bool]$Event.dispatch_attempted -and
+        [int]$Event.requested_dx_counts -eq 0 -and
+        [int]$Event.requested_dy_counts -eq 0 -and
+        -not [bool]$Event.backend_succeeded -and
+        -not [bool]$Event.protocol_ack_received
+    return [pscustomobject]@{
+        matched = [bool]$matched
+        unmatched_baseline_allowed = [bool]$unmatchedBaselineAllowed
+        required_source_frame_missing =
+            [bool](-not $matched -and -not $unmatchedBaselineAllowed)
+    }
+}
+
 function Wait-SidecarIncoming(
         [Diagnostics.Process]$Process,
         [string]$Parent,
@@ -621,6 +650,8 @@ try {
     }
 
     $matchedEvents = 0
+    $unmatchedBaselineEvents = 0
+    $maxUnmatchedBaselineEvents = if ($isA2S1Task) { 0 } else { 1 }
     $completedPulses = 0
     foreach ($event in $events) {
         $sampleIndex = [int]$event.sample_index
@@ -633,9 +664,19 @@ try {
             [int]$event.requested_dy_counts -ne 0 -or
             [uint64]$event.source_dropped_frames -ne 0 -or
             [uint64]$event.transport_dropped_frames -ne 0 -or
-            [uint64]$event.transport_invalid_packets -ne 0 -or
-            -not $frameTimestamps.Contains([int64]$event.source_timestamp)) {
-            throw "Physical A event 的序列/source/零 Y 合同无效"
+            [uint64]$event.transport_invalid_packets -ne 0) {
+            throw "Physical A event 的序列/timing/零 Y 合同无效"
+        }
+        $coverage = Get-PhysicalEventFrameCoverage `
+            $event $sample $frameTimestamps (-not $isA2S1Task) `
+            ([uint64]$sequence.request.baseline_sample_count)
+        if ([bool]$coverage.required_source_frame_missing) {
+            throw "Physical A event 缺少必须的同 source timestamp sidecar frame"
+        }
+        if ([bool]$coverage.matched) {
+            $matchedEvents++
+        } elseif ([bool]$coverage.unmatched_baseline_allowed) {
+            $unmatchedBaselineEvents++
         }
         if ([int]$sample.dx_counts -eq 0) {
             if ([bool]$event.dispatch_attempted -or
@@ -653,7 +694,9 @@ try {
             }
             $completedPulses++
         }
-        $matchedEvents++
+    }
+    if ($unmatchedBaselineEvents -gt $maxUnmatchedBaselineEvents) {
+        throw "Physical A baseline 的未观测零事件超过预注册上限"
     }
 
     $expectedPulseCount = if ($isA2Task -or $isA2S1Task) {
@@ -719,6 +762,10 @@ try {
         stop_reason = [string]$report.result.stop_reason
         command_event_count = [uint64]$events.Count
         source_timestamp_matched_event_count = [uint64]$matchedEvents
+        source_timestamp_unmatched_baseline_event_count =
+            [uint64]$unmatchedBaselineEvents
+        source_timestamp_unmatched_baseline_event_limit =
+            [uint64]$maxUnmatchedBaselineEvents
         backend_completed_pulse_count = [uint64]$completedPulses
         sidecar_frame_count = [uint64]$frames.Count
         png_hash_verified_count = [uint64]$pngVerified

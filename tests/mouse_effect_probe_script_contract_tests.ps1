@@ -31,6 +31,63 @@ foreach ($path in @($PrepareScript, $LaunchScript)) {
 $prepare = Get-Content -LiteralPath $PrepareScript -Raw -Encoding utf8
 $launch = Get-Content -LiteralPath $LaunchScript -Raw -Encoding utf8
 
+$launchTokens = $null
+$launchErrors = $null
+$launchAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path -LiteralPath $LaunchScript).Path,
+    [ref]$launchTokens,
+    [ref]$launchErrors)
+$coverageFunction = $launchAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Get-PhysicalEventFrameCoverage'
+}, $true)
+if ($null -eq $coverageFunction) {
+    throw 'Physical A Launch 缺少可测试的 event/frame coverage 分类函数'
+}
+. ([scriptblock]::Create($coverageFunction.Extent.Text))
+
+$frameTimestamps = [Collections.Generic.HashSet[int64]]::new()
+[void]$frameTimestamps.Add([int64]100)
+$event = [pscustomobject]@{
+    source_timestamp = [int64]200
+    dispatch_attempted = $false
+    requested_dx_counts = 0
+    requested_dy_counts = 0
+    backend_succeeded = $false
+    protocol_ack_received = $false
+}
+$baseline = [pscustomobject]@{
+    sample_index = 1; phase = 'baseline'; dx_counts = 0; dy_counts = 0
+}
+$baselineAnchor = [pscustomobject]@{
+    sample_index = 0; phase = 'baseline'; dx_counts = 0; dy_counts = 0
+}
+$pulse = [pscustomobject]@{
+    sample_index = 2; phase = 'pulse'; dx_counts = 1; dy_counts = 0
+}
+$response = [pscustomobject]@{
+    sample_index = 2; phase = 'response'; dx_counts = 0; dy_counts = 0
+}
+$baselineCoverage = Get-PhysicalEventFrameCoverage `
+    $event $baseline $frameTimestamps $true 4
+$anchorCoverage = Get-PhysicalEventFrameCoverage `
+    $event $baselineAnchor $frameTimestamps $true 4
+$pulseCoverage = Get-PhysicalEventFrameCoverage `
+    $event $pulse $frameTimestamps $true 4
+$responseCoverage = Get-PhysicalEventFrameCoverage `
+    $event $response $frameTimestamps $true 4
+$strictBaselineCoverage = Get-PhysicalEventFrameCoverage `
+    $event $baseline $frameTimestamps $false 4
+if (-not [bool]$baselineCoverage.unmatched_baseline_allowed -or
+    [bool]$baselineCoverage.required_source_frame_missing -or
+    -not [bool]$anchorCoverage.required_source_frame_missing -or
+    -not [bool]$pulseCoverage.required_source_frame_missing -or
+    -not [bool]$responseCoverage.required_source_frame_missing -or
+    -not [bool]$strictBaselineCoverage.required_source_frame_missing) {
+    throw 'Physical A event/frame coverage 分类合同无效'
+}
+
 Assert-Contains $prepare (ConvertFrom-Utf8Base64 `
     "5omn6KGM5ZG95Luk5pe25L+d5oyB5Y+z6ZSu5p2+5byA") `
     "Physical A TASK safety protocol"
@@ -76,6 +133,10 @@ Assert-Contains $launch 'monitor_sequence_after' `
     "Physical A raw monitor sequence-after validation"
 Assert-Contains $launch 'safety_monitor_packet_identity_complete' `
     "Physical A launch summary packet identity verdict"
+Assert-Contains $launch 'source_timestamp_unmatched_baseline_event_count' `
+    "Physical A launch summary unmatched baseline coverage"
+Assert-Contains $launch '$unmatchedBaselineEvents -gt $maxUnmatchedBaselineEvents' `
+    "Physical A unmatched baseline count gate"
 
 foreach ($verbose in @(
         (ConvertFrom-Utf8Base64 `

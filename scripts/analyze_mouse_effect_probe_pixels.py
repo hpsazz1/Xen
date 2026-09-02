@@ -496,7 +496,7 @@ def _match_physical_events(
     report: dict,
     sequence: dict,
     frame_by_timestamp: dict[int, tuple[int, dict]],
-) -> tuple[list[tuple[dict, dict, dict, int]], list[int]]:
+) -> tuple[list[tuple[dict, dict, dict, int] | None], list[int]]:
     result = report["result"]
     events = result.get("events")
     samples = sequence.get("samples")
@@ -509,11 +509,14 @@ def _match_physical_events(
     ):
         raise ValueError("Physical command event 与 sequence 容量不一致")
 
-    matched: list[tuple[dict, dict, dict, int]] = []
+    matched: list[tuple[dict, dict, dict, int] | None] = []
     pulse_positions: list[int] = []
     requested_x = 0
     backend_x = 0
     previous_manifest_index = -1
+    baseline_sample_count = int(
+        sequence.get("request", {}).get("baseline_sample_count", 0)
+    )
     for index, (event, sample) in enumerate(zip(events, samples, strict=True)):
         nominal_x = int(sample.get("dx_counts", 0))
         nominal_y = int(sample.get("dy_counts", 0))
@@ -540,18 +543,6 @@ def _match_physical_events(
             or event.get("stop_reason") != "none"
         ):
             raise ValueError("Physical command event 与 sample/timing/safety 契约不一致")
-
-        frame_match = frame_by_timestamp.get(int(event["source_timestamp"]))
-        if frame_match is None:
-            raise ValueError("Physical command event 无同 timestamp sidecar frame")
-        manifest_index, frame = frame_match
-        if (
-            manifest_index <= previous_manifest_index
-            or str(frame.get("source_clock_session_id"))
-            != str(event.get("source_clock_session_id"))
-        ):
-            raise ValueError("Physical event/frame 顺序或 source-clock session 不一致")
-        previous_manifest_index = manifest_index
 
         if nominal_x == 0:
             if (
@@ -584,13 +575,40 @@ def _match_physical_events(
                 raise ValueError("Physical pulse 缺少 ±1 dispatch/backend/ACK 完整证据")
             requested_x += nominal_x
             backend_x += nominal_x
-            pulse_positions.append(index)
         if (
             int(event.get("cumulative_requested_x_counts", 0)) != requested_x
             or int(event.get("cumulative_backend_completed_x_counts", 0)) != backend_x
         ):
             raise ValueError("Physical cumulative requested/backend count 不守恒")
+
+        frame_match = frame_by_timestamp.get(int(event["source_timestamp"]))
+        if frame_match is None:
+            unmatched_baseline_allowed = (
+                nominal_x == 0
+                and str(sample.get("phase")) == "baseline"
+                and 0 < index < baseline_sample_count - 1
+            )
+            if not unmatched_baseline_allowed:
+                raise ValueError(
+                    "Physical command event 缺少必须的同 timestamp sidecar frame"
+                )
+            matched.append(None)
+            continue
+        manifest_index, frame = frame_match
+        if (
+            manifest_index <= previous_manifest_index
+            or str(frame.get("source_clock_session_id"))
+            != str(event.get("source_clock_session_id"))
+        ):
+            raise ValueError("Physical event/frame 顺序或 source-clock session 不一致")
+        previous_manifest_index = manifest_index
+        if nominal_x != 0:
+            pulse_positions.append(index)
         matched.append((event, sample, frame, manifest_index))
+
+    unmatched_baseline_event_count = sum(item is None for item in matched)
+    if unmatched_baseline_event_count > 1:
+        raise ValueError("Physical baseline 的未观测零事件超过预注册上限")
 
     pulse_signs = [int(samples[position]["dx_counts"]) for position in pulse_positions]
     profile = str(sequence.get("profile", ""))
@@ -646,7 +664,7 @@ def _match_physical_events(
 
 
 def _baseline_motion(
-    matched: Sequence[tuple[dict, dict, dict, int]],
+    matched: Sequence[tuple[dict, dict, dict, int] | None],
     baseline_sample_count: int,
     pixel_root: pathlib.Path,
     left_roi: Roi,
@@ -657,11 +675,16 @@ def _baseline_motion(
 ) -> dict:
     if baseline_sample_count < 2 or baseline_sample_count > len(matched):
         raise ValueError("Physical sequence baseline_sample_count 非法")
+    baseline_matches = [
+        item for item in matched[:baseline_sample_count] if item is not None
+    ]
+    if len(baseline_matches) < 2:
+        raise ValueError("Physical sequence baseline 同 timestamp sidecar frame 不足")
     if any(
         str(sample.get("phase")) != "baseline"
         or int(sample.get("dx_counts", 0)) != 0
         or int(sample.get("dy_counts", 0)) != 0
-        for _, sample, _, _ in matched[:baseline_sample_count]
+        for _, sample, _, _ in baseline_matches
     ):
         raise ValueError("Physical sequence baseline 不是严格零输入")
 
@@ -673,7 +696,7 @@ def _baseline_motion(
     right_states: set[str] = set()
     previous_left: np.ndarray | None = None
     previous_right: np.ndarray | None = None
-    for _, _, frame, _ in matched[:baseline_sample_count]:
+    for _, _, frame, _ in baseline_matches:
         bgr = _load_bgr_frame(pixel_root, frame, geometry)
         left, right, left_bgr, right_bgr = _witness_images(bgr, left_roi, right_roi)
         left_states.add(_array_sha256(left_bgr))
@@ -688,8 +711,11 @@ def _baseline_motion(
         previous_left = left
         previous_right = right
     return {
-        "sample_count": baseline_sample_count,
-        "pair_count": baseline_sample_count - 1,
+        "sample_count": len(baseline_matches),
+        "expected_event_count": baseline_sample_count,
+        "matched_frame_count": len(baseline_matches),
+        "unmatched_event_count": baseline_sample_count - len(baseline_matches),
+        "pair_count": len(baseline_matches) - 1,
         "left_exact_state_count": len(left_states),
         "right_exact_state_count": len(right_states),
         "left_dx_px": distribution_summary(left_dx),
@@ -754,7 +780,10 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
     )
 
     pixel_root = arguments.manifest.resolve().parent
-    first_bgr = _load_bgr_frame(pixel_root, matched[0][2])
+    matched_items = [item for item in matched if item is not None]
+    if not matched_items:
+        raise ValueError("Physical event/frame 没有任何同 timestamp 交集")
+    first_bgr = _load_bgr_frame(pixel_root, matched_items[0][2])
     image_height, image_width = first_bgr.shape[:2]
     geometry = (image_height, image_width)
     validate_roi_pair(arguments.left_roi, arguments.right_roi, image_width, image_height)
@@ -764,6 +793,7 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
     right_window = cv2.createHanningWindow(
         (arguments.right_roi[2], arguments.right_roi[3]), cv2.CV_32F
     )
+    matched_event_frame_count = len(matched_items)
 
     baseline_sample_count = int(sequence.get("request", {}).get(
         "baseline_sample_count", 0
@@ -787,7 +817,10 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
     reference_gradient_left: list[float] = []
     reference_gradient_right: list[float] = []
     for pulse_index, matched_position in enumerate(pulse_positions):
-        event, sample, reference_frame, reference_manifest_index = matched[matched_position]
+        reference_match = matched[matched_position]
+        if reference_match is None:
+            raise ValueError("Physical pulse reference frame 缺失")
+        event, sample, reference_frame, reference_manifest_index = reference_match
         next_pulse_position = (
             pulse_positions[pulse_index + 1]
             if pulse_index + 1 < len(pulse_positions)
@@ -814,12 +847,14 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
         reference_right_sha = _array_sha256(reference_right_bgr)
         pulse_rows: list[dict] = []
 
-        for frame_lag, current_position in enumerate(
-            range(matched_position + 1, next_pulse_position), start=1
-        ):
-            current_event, current_sample, current_frame, current_manifest_index = matched[
-                current_position
-            ]
+        for current_position in range(matched_position + 1, next_pulse_position):
+            current_match = matched[current_position]
+            if current_match is None:
+                continue
+            frame_lag = current_position - matched_position
+            current_event, current_sample, current_frame, current_manifest_index = (
+                current_match
+            )
             current_bgr = _load_bgr_frame(pixel_root, current_frame, geometry)
             current_left, current_right, current_left_bgr, current_right_bgr = (
                 _witness_images(current_bgr, arguments.left_roi, arguments.right_roi)
@@ -925,11 +960,14 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
             background_direction = "none"
         reference_source_ns = int(event["source_time_at_steady_ns"])
         issued_ns = int(event["issued_at_steady_ns"])
-        last_unchanged_source_ns = (
-            int(matched[last_joint_unchanged["sample_index"]][0][
-                "source_time_at_steady_ns"
-            ])
+        last_unchanged_match = (
+            matched[last_joint_unchanged["sample_index"]]
             if last_joint_unchanged is not None
+            else None
+        )
+        last_unchanged_source_ns = (
+            int(last_unchanged_match[0]["source_time_at_steady_ns"])
+            if last_unchanged_match is not None
             else reference_source_ns
         )
         onset = {
@@ -1107,11 +1145,15 @@ def analyze_physical(arguments: argparse.Namespace) -> tuple[dict, list[dict]]:
             ),
         },
         "sidecar_frame_count": len(frames),
-        "matched_event_frame_count": len(matched),
+        "matched_event_frame_count": matched_event_frame_count,
+        "source_timestamp_unmatched_baseline_event_count": (
+            len(matched) - matched_event_frame_count
+        ),
+        "source_timestamp_unmatched_baseline_event_limit": 1,
         "event_minus_manifest_source_time_mapping_ns": distribution_summary(
             int(event["source_time_at_steady_ns"])
             - int(frame["source_time_at_steady_ns"])
-            for event, _, frame, _ in matched
+            for event, _, frame, _ in matched_items
         ),
         "source_mapping_uncertainty_ms": (
             distribution_summary(source_mapping_uncertainty_ms)

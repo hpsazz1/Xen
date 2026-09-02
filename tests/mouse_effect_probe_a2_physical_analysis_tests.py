@@ -226,6 +226,23 @@ def _make_fixture(root: pathlib.Path) -> argparse.Namespace:
     )
 
 
+def _remove_manifest_frame(arguments: argparse.Namespace, sample_index: int) -> None:
+    manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+    source_timestamp = 2_000_000 + sample_index
+    frames = [
+        frame for frame in manifest["frames"]
+        if int(frame["source_timestamp"]) != source_timestamp
+    ]
+    expect(len(frames) + 1 == len(manifest["frames"]),
+           "测试必须精确移除一个 manifest frame")
+    for index, frame in enumerate(frames):
+        frame["index"] = index
+    manifest["frames"] = frames
+    manifest["recorded_frame_count"] = len(frames)
+    manifest["requested_frame_count"] = len(frames)
+    _write_json(arguments.manifest, manifest)
+
+
 def test_a2_physical_response_preserves_blocks_without_claiming_dependency_green() -> None:
     with tempfile.TemporaryDirectory(prefix="xen-probe-a2-physical-") as directory:
         arguments = _make_fixture(pathlib.Path(directory))
@@ -246,6 +263,59 @@ def test_a2_physical_response_preserves_blocks_without_claiming_dependency_green
                "A2 必须保留 source mapping uncertainty，而不是乘固定速度")
 
 
+def test_a2_allows_only_unmatched_zero_baseline_event() -> None:
+    with tempfile.TemporaryDirectory(prefix="xen-probe-a2-baseline-gap-") as directory:
+        arguments = _make_fixture(pathlib.Path(directory))
+        _remove_manifest_frame(arguments, 1)
+        result, rows = MODULE.analyze_physical(arguments)
+        expect(result["status"] == "VALID" and len(rows) > 8,
+               "单个零命令 baseline 非交集帧不得废弃完整 pulse/response 证据")
+        expect(result["matched_event_frame_count"] == 51,
+               "raw analyzer 必须显式报告 event/frame 交集数量")
+        expect(result["source_timestamp_unmatched_baseline_event_count"] == 1,
+               "raw analyzer 必须显式报告 baseline 非交集数量")
+        expect(result["source_timestamp_unmatched_baseline_event_limit"] == 1,
+               "raw analyzer 必须固化单个 interior baseline 缺口上限")
+        expect(result["zero_input_baseline"]["expected_event_count"] == 4 and
+               result["zero_input_baseline"]["matched_frame_count"] == 3,
+               "baseline 统计必须区分设计事件数与实际交集帧数")
+        expect(len(result["pulse_responses"]) == 8,
+               "baseline 缺口不得改变八个已完整匹配的 pulse 响应")
+
+    for missing_phase, sample_index in (
+        ("baseline-anchor", 0),
+        ("pulse", 6),
+        ("response", 7),
+    ):
+        with tempfile.TemporaryDirectory(
+            prefix=f"xen-probe-a2-{missing_phase}-gap-"
+        ) as directory:
+            arguments = _make_fixture(pathlib.Path(directory))
+            _remove_manifest_frame(arguments, sample_index)
+            try:
+                MODULE.analyze_physical(arguments)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(
+                    f"{missing_phase} event 无同 timestamp sidecar frame 必须拒绝"
+                )
+
+    with tempfile.TemporaryDirectory(
+        prefix="xen-probe-a2-multiple-baseline-gaps-"
+    ) as directory:
+        arguments = _make_fixture(pathlib.Path(directory))
+        _remove_manifest_frame(arguments, 1)
+        _remove_manifest_frame(arguments, 2)
+        try:
+            MODULE.analyze_physical(arguments)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("多个 interior baseline 非交集事件必须拒绝")
+
+
 if __name__ == "__main__":
     test_a2_physical_response_preserves_blocks_without_claiming_dependency_green()
+    test_a2_allows_only_unmatched_zero_baseline_event()
     print("Mouse Effect Probe A2 Physical pixel analysis 测试全部通过。")
