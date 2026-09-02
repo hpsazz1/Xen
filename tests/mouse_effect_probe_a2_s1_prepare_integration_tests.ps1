@@ -120,6 +120,7 @@ foreach ($role in @("primary", "validation")) {
         [string]$task.run_role -ne $role -or
         [uint64]$task.sequence_sample_count -ne 120 -or
         [uint64]$task.expected_nonzero_transition_count -ne 8 -or
+        [uint64]$task.sidecar.publishing_max_seconds -ne 60 -or
         [bool]$task.liveness_policy.challenge_frames_eligible_for_estimands -or
         [bool]$task.liveness_policy.settle_frames_eligible_for_estimands -or
         [bool]$task.liveness_policy.fixed_pixel_speed_used_as_gate -or
@@ -137,6 +138,7 @@ foreach ($role in @("primary", "validation")) {
     foreach ($forbidden in @(
             "command-report.json", "launch-summary.json",
             "s1-liveness-bracket.json", "s1-session.json",
+            "sidecar-lifecycle.json",
             "pixel-evidence")) {
         if (Test-Path -LiteralPath (Join-Path $runDirectory $forbidden)) {
             throw "A2 S1 $role Prepare 不得产生 Launch/Physical 产物：$forbidden"

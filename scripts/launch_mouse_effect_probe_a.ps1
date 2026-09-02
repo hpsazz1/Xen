@@ -79,6 +79,82 @@ function Wait-SidecarIncoming(
     throw "等待 sidecar incoming 就绪超时"
 }
 
+function Test-SidecarPublishingStarted([string]$IncomingDirectory) {
+    $framesDirectory = Join-Path $IncomingDirectory "frames"
+    if (-not (Test-Path -LiteralPath $framesDirectory -PathType Container)) {
+        return $false
+    }
+    return @(
+        Get-ChildItem -LiteralPath $framesDirectory -File -Filter "*.png" |
+            Select-Object -First 1
+    ).Count -eq 1
+}
+
+function Get-SidecarPngCount([string]$IncomingDirectory) {
+    $framesDirectory = Join-Path $IncomingDirectory "frames"
+    if (-not (Test-Path -LiteralPath $framesDirectory -PathType Container)) {
+        return [uint64]0
+    }
+    return [uint64]@(
+        Get-ChildItem -LiteralPath $framesDirectory -File -Filter "*.png"
+    ).Count
+}
+
+function Wait-SidecarCompletion(
+        [Diagnostics.Process]$Process,
+        [string]$IncomingDirectory,
+        [int]$RecordingTimeoutMilliseconds,
+        [int]$PublishingTimeoutMilliseconds) {
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $phase = "RECORDING"
+    $publishingStartedMilliseconds = $null
+    try {
+        while ($true) {
+            $Process.Refresh()
+            if ($Process.HasExited) {
+                return [pscustomobject]@{
+                    timed_out = $false
+                    phase = $phase
+                    elapsed_ms = [int64]$watch.ElapsedMilliseconds
+                    publishing_started_ms = $publishingStartedMilliseconds
+                    png_count = Get-SidecarPngCount $IncomingDirectory
+                }
+            }
+            if ($phase -eq "RECORDING" -and
+                (Test-SidecarPublishingStarted $IncomingDirectory)) {
+                $phase = "PUBLISHING"
+                $publishingStartedMilliseconds =
+                    [int64]$watch.ElapsedMilliseconds
+                Write-Host ("sidecar 已录满并进入 PNG/哈希 publishing；" +
+                    "继续等待原子发布完成。")
+            }
+            $phaseElapsedMilliseconds = if ($phase -eq "PUBLISHING") {
+                [int64]$watch.ElapsedMilliseconds -
+                    [int64]$publishingStartedMilliseconds
+            } else {
+                [int64]$watch.ElapsedMilliseconds
+            }
+            $phaseBudgetMilliseconds = if ($phase -eq "PUBLISHING") {
+                $PublishingTimeoutMilliseconds
+            } else {
+                $RecordingTimeoutMilliseconds
+            }
+            if ($phaseElapsedMilliseconds -ge $phaseBudgetMilliseconds) {
+                return [pscustomobject]@{
+                    timed_out = $true
+                    phase = $phase
+                    elapsed_ms = [int64]$watch.ElapsedMilliseconds
+                    publishing_started_ms = $publishingStartedMilliseconds
+                    png_count = Get-SidecarPngCount $IncomingDirectory
+                }
+            }
+            [void]$Process.WaitForExit(100)
+        }
+    } finally {
+        $watch.Stop()
+    }
+}
+
 function Write-NewUtf8Json([string]$Path, [object]$Value) {
     if (Test-Path -LiteralPath $Path) {
         throw "JSON 发布目标已存在，拒绝覆盖：$Path"
@@ -200,11 +276,13 @@ $reportPath = Join-Path $resolvedRun "command-report.json"
 $launchSummaryPath = Join-Path $resolvedRun "launch-summary.json"
 $s1BracketPath = Join-Path $resolvedRun "s1-liveness-bracket.json"
 $s1SessionPath = Join-Path $resolvedRun "s1-session.json"
+$sidecarLifecyclePath = Join-Path $resolvedRun "sidecar-lifecycle.json"
 $sidecarStdout = Join-Path $resolvedRun "pixel-sidecar.stdout.log"
 $sidecarStderr = Join-Path $resolvedRun "pixel-sidecar.stderr.log"
 foreach ($path in @(
         $pixelOutput, $reportPath, $launchSummaryPath,
         $s1BracketPath, $s1SessionPath,
+        $sidecarLifecyclePath,
         $sidecarStdout, $sidecarStderr)) {
     if (Test-Path -LiteralPath $path) {
         throw "Physical A 输出已存在，拒绝重复 Launch：$path"
@@ -286,10 +364,76 @@ try {
     & ([string]$task.files.probe_executable.path) @probeArguments
     $probeExitCode = $LASTEXITCODE
 
-    if (-not $sidecarProcess.WaitForExit(
-            [int](($task.sidecar.max_seconds + 15) * 1000))) {
-        Stop-Process -Id $sidecarProcess.Id -Force
-        throw "等待本次 Physical A sidecar 退出超时"
+    $recordingShutdownGraceSeconds = 15
+    $discoverySeconds = [int][Math]::Ceiling(
+        [double]$task.capture.discovery_timeout_ms / 1000.0)
+    $recordingWaitSeconds = [int]$task.sidecar.max_seconds +
+        $discoverySeconds + $recordingShutdownGraceSeconds
+    $publishingMaxSeconds = if (
+            $null -ne $task.sidecar.PSObject.Properties[
+                "publishing_max_seconds"]) {
+        [int]$task.sidecar.publishing_max_seconds
+    } else {
+        60
+    }
+    if ($recordingWaitSeconds -le 0 -or
+        $recordingWaitSeconds -gt 180 -or
+        $publishingMaxSeconds -le 0 -or $publishingMaxSeconds -gt 300) {
+        throw "Physical A sidecar recording/publishing 时限合同非法"
+    }
+    $sidecarWait = Wait-SidecarCompletion `
+        $sidecarProcess $incoming `
+        ($recordingWaitSeconds * 1000) `
+        ($publishingMaxSeconds * 1000)
+    $forcedStop = $false
+    $forcedStopCompleted = $false
+    if ([bool]$sidecarWait.timed_out) {
+        $forcedStop = $true
+        $sidecarProcess.Refresh()
+        if (-not $sidecarProcess.HasExited) {
+            Stop-Process -Id $sidecarProcess.Id -Force
+            $forcedStopCompleted = $sidecarProcess.WaitForExit(5000)
+        } else {
+            $forcedStopCompleted = $true
+        }
+    }
+    $lifecyclePngCount = [uint64]$sidecarWait.png_count
+    if (-not [bool]$sidecarWait.timed_out) {
+        $publishedFramesDirectory = Join-Path $pixelOutput "frames"
+        if (Test-Path -LiteralPath $publishedFramesDirectory -PathType Container) {
+            $lifecyclePngCount = [uint64]@(
+                Get-ChildItem -LiteralPath $publishedFramesDirectory `
+                    -File -Filter "*.png"
+            ).Count
+        }
+    }
+    $sidecarLifecycle = [ordered]@{
+        schema_version = 1
+        evidence_type = "mouse_effect_probe_sidecar_lifecycle"
+        physical_output_capability = $false
+        run_uuid = [string]$task.run_uuid
+        status = if ([bool]$sidecarWait.timed_out) { "TIMEOUT" } else { "EXITED" }
+        phase = [string]$sidecarWait.phase
+        elapsed_ms = [int64]$sidecarWait.elapsed_ms
+        recording_wait_seconds = $recordingWaitSeconds
+        publishing_max_seconds = $publishingMaxSeconds
+        publishing_started_ms = $sidecarWait.publishing_started_ms
+        png_count_at_completion = $lifecyclePngCount
+        forced_stop = $forcedStop
+        forced_stop_completed = $forcedStopCompleted
+    }
+    Write-NewUtf8Json $sidecarLifecyclePath $sidecarLifecycle
+    if ([bool]$sidecarWait.timed_out) {
+        $stderrTail = if (Test-Path -LiteralPath $sidecarStderr -PathType Leaf) {
+            @(Get-Content -LiteralPath $sidecarStderr -Tail 1 `
+                -ErrorAction SilentlyContinue) -join " "
+        } else { "" }
+        if ([string]::IsNullOrWhiteSpace($stderrTail)) {
+            $stderrTail = "<empty>"
+        }
+        throw ("等待本次 Physical A sidecar 退出超时：phase=" +
+            "$($sidecarWait.phase)；png_count=$($sidecarWait.png_count)；" +
+            "stderr_tail=$stderrTail")
     }
     $sidecarProcess.Refresh()
     if ($sidecarProcess.ExitCode -ne 0) {
@@ -418,6 +562,7 @@ try {
         expected_nonzero_transition_count = $expectedPulseCount
         command_report_sha256 = [string]$report.report_sha256
         sidecar_manifest_sha256 = Get-FileSha256 $manifestPath
+        sidecar_lifecycle_sha256 = Get-FileSha256 $sidecarLifecyclePath
         stop_reason = [string]$report.result.stop_reason
         command_event_count = [uint64]$events.Count
         source_timestamp_matched_event_count = [uint64]$matchedEvents
@@ -558,6 +703,7 @@ try {
             probe_binding_sha256 =
                 [string]$task.files.probe_binding.sha256
             manifest_sha256 = Get-FileSha256 $manifestPath
+            sidecar_lifecycle_sha256 = Get-FileSha256 $sidecarLifecyclePath
             sequence_sha256 = [string]$sequence.sequence_sha256
             sequence_file_sha256 = [string]$task.files.sequence.sha256
             command_report_sha256 = $commandReportFileSha

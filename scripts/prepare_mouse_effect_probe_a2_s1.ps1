@@ -480,6 +480,9 @@ $task = [ordered]@{
     sidecar = [ordered]@{
         frames = $SidecarFrames
         max_seconds = $MaxSeconds
+        # 2400 帧 PNG/双哈希在辅机实测可超过 24 秒；与采集窗分离，
+        # 复用正式 Aim sidecar 的 60 秒原子发布终局。
+        publishing_max_seconds = 60
         physical_output_capability = $false
         left_witness_roi = $LeftWitnessRoi
         right_witness_roi = $RightWitnessRoi
