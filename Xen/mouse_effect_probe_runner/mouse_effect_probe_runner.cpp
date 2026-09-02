@@ -3,6 +3,7 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#include <bcrypt.h>
 
 #ifdef ERROR
 #undef ERROR
@@ -21,6 +22,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 namespace {
@@ -28,6 +30,7 @@ namespace {
 constexpr std::wstring_view kPhysicalConfirmation =
     L"XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT";
 constexpr std::size_t kMaximumSafetyObservationCount = 8192U;
+constexpr std::size_t kMaximumMonitorPacketCount = 8192U;
 std::atomic<bool> stop_requested{false};
 
 void set_error(std::string& output, std::string_view value) noexcept {
@@ -105,6 +108,65 @@ bool valid_sha256(std::string_view value) noexcept {
 
 bool finite_nonnegative(double value) noexcept {
     return std::isfinite(value) && value >= 0.0;
+}
+
+bool sha256_payload(std::span<const std::uint8_t> payload,
+                    std::string& output) noexcept {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    try {
+        if (payload.size() > std::numeric_limits<ULONG>::max()) return false;
+        DWORD object_bytes = 0;
+        DWORD digest_bytes = 0;
+        DWORD copied = 0;
+        const auto succeeded = [](NTSTATUS status) noexcept {
+            return status >= 0;
+        };
+        if (!succeeded(BCryptOpenAlgorithmProvider(
+                &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0)) ||
+            !succeeded(BCryptGetProperty(
+                algorithm, BCRYPT_OBJECT_LENGTH,
+                reinterpret_cast<PUCHAR>(&object_bytes),
+                sizeof(object_bytes), &copied, 0)) ||
+            copied != sizeof(object_bytes) || object_bytes == 0 ||
+            !succeeded(BCryptGetProperty(
+                algorithm, BCRYPT_HASH_LENGTH,
+                reinterpret_cast<PUCHAR>(&digest_bytes),
+                sizeof(digest_bytes), &copied, 0)) ||
+            copied != sizeof(digest_bytes) || digest_bytes != 32U) {
+            if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+            return false;
+        }
+        std::vector<std::uint8_t> object(object_bytes);
+        std::array<std::uint8_t, 32> digest{};
+        if (!succeeded(BCryptCreateHash(
+                algorithm, &hash, object.data(), object_bytes,
+                nullptr, 0, 0)) ||
+            (!payload.empty() && !succeeded(BCryptHashData(
+                hash, const_cast<PUCHAR>(payload.data()),
+                static_cast<ULONG>(payload.size()), 0))) ||
+            !succeeded(BCryptFinishHash(
+                hash, digest.data(), static_cast<ULONG>(digest.size()), 0))) {
+            if (hash) BCryptDestroyHash(hash);
+            BCryptCloseAlgorithmProvider(algorithm, 0);
+            return false;
+        }
+        constexpr char hexadecimal[] = "0123456789abcdef";
+        output.clear();
+        output.reserve(digest.size() * 2U);
+        for (const auto byte : digest) {
+            output.push_back(hexadecimal[byte >> 4U]);
+            output.push_back(hexadecimal[byte & 0x0fU]);
+        }
+        BCryptDestroyHash(hash);
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+        return true;
+    } catch (...) {
+        if (hash) BCryptDestroyHash(hash);
+        if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+        output.clear();
+        return false;
+    }
 }
 
 const char* input_monitor_status_name(InputMonitorStatus status) noexcept {
@@ -252,6 +314,75 @@ private:
     std::filesystem::path copied_binding_path_;
 };
 
+class PhysicalKmboxMonitorPacketObserver final
+        : public mouse::detail::IKmboxMonitorPacketObserver {
+public:
+    PhysicalKmboxMonitorPacketObserver() {
+        packet_records_.reserve(kMaximumMonitorPacketCount);
+    }
+
+    void observe_kmbox_monitor_packet(
+            const mouse::detail::KmboxMonitorPacketObservation& observation,
+            std::span<const std::uint8_t> payload) noexcept override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (observation.datagram_size != payload.size() ||
+            payload.size() > BufferedPacketRecord::kMaximumPayloadBytes) {
+            recording_failed_ = true;
+            return;
+        }
+        BufferedPacketRecord record;
+        record.observation = observation;
+        record.payload_size = payload.size();
+        std::copy(payload.begin(), payload.end(), record.payload.begin());
+        if (packet_records_.size() < kMaximumMonitorPacketCount) {
+            packet_records_.push_back(std::move(record));
+        } else {
+            ++dropped_packet_count_;
+            packet_records_.back() = std::move(record);
+        }
+    }
+
+    void copy_to(MouseEffectProbeSafetyLedger& ledger) noexcept {
+        try {
+            std::vector<BufferedPacketRecord> packet_records;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                packet_records = std::move(packet_records_);
+                ledger.dropped_monitor_packet_count =
+                    dropped_packet_count_;
+                ledger.monitor_packet_recording_failed = recording_failed_;
+            }
+            ledger.monitor_packets.clear();
+            ledger.monitor_packets.reserve(packet_records.size());
+            for (const auto& record : packet_records) {
+                if (!record_mouse_effect_probe_monitor_packet_identity(
+                        record.observation,
+                        std::span<const std::uint8_t>(
+                            record.payload.data(), record.payload_size),
+                        ledger)) {
+                    ledger.monitor_packet_recording_failed = true;
+                    break;
+                }
+            }
+        } catch (...) {
+            ledger.monitor_packet_recording_failed = true;
+        }
+    }
+
+private:
+    struct BufferedPacketRecord {
+        static constexpr std::size_t kMaximumPayloadBytes = 1024U;
+        mouse::detail::KmboxMonitorPacketObservation observation;
+        std::array<std::uint8_t, kMaximumPayloadBytes> payload{};
+        std::size_t payload_size = 0;
+    };
+
+    std::mutex mutex_;
+    std::vector<BufferedPacketRecord> packet_records_;
+    std::uint64_t dropped_packet_count_ = 0;
+    bool recording_failed_ = false;
+};
+
 MouseEffectProbeSafetyDecision poll_physical_safety(
         const std::shared_ptr<IMouseController>& mouse,
         MouseEffectProbeSafetyPhase phase,
@@ -337,6 +468,69 @@ MouseEffectProbeSafetyDecision record_mouse_effect_probe_safety_observation(
     return decision;
 }
 
+bool record_mouse_effect_probe_monitor_packet_identity(
+        const mouse::detail::KmboxMonitorPacketObservation& observation,
+        std::span<const std::uint8_t> payload,
+        MouseEffectProbeSafetyLedger& ledger) noexcept {
+    try {
+        if (observation.datagram_size != payload.size()) {
+            ledger.monitor_packet_recording_failed = true;
+            return false;
+        }
+        MouseEffectProbeMonitorPacketIdentity identity;
+        identity.received_at_steady_ns = observation.received_at_steady_ns;
+        identity.datagram_size = observation.datagram_size;
+        identity.source_address_size = observation.source_address_size;
+        identity.source_family = observation.source_family;
+        identity.source_endpoint_valid = observation.source_endpoint_valid;
+        identity.source_ipv4 = observation.source_ipv4;
+        identity.source_port = observation.source_port;
+        identity.monitor_local_port = observation.monitor_local_port;
+        identity.configured_device_ipv4 =
+            observation.configured_device_ipv4;
+        identity.configured_device_port =
+            observation.configured_device_port;
+        identity.source_ip_matches_configured_device =
+            observation.source_ip_matches_configured_device;
+        identity.source_port_matches_configured_device =
+            observation.source_port_matches_configured_device;
+        identity.exact_monitor_packet_size =
+            observation.exact_monitor_packet_size;
+        identity.mouse_report_id_present =
+            observation.mouse_report_id_present;
+        identity.mouse_report_id = observation.mouse_report_id;
+        identity.mouse_buttons_present = observation.mouse_buttons_present;
+        identity.mouse_buttons = observation.mouse_buttons;
+        identity.keyboard_report_id_present =
+            observation.keyboard_report_id_present;
+        identity.keyboard_report_id = observation.keyboard_report_id;
+        identity.keyboard_modifiers_present =
+            observation.keyboard_modifiers_present;
+        identity.keyboard_modifiers = observation.keyboard_modifiers;
+        identity.accepted_as_monitor_state =
+            observation.accepted_as_monitor_state;
+        identity.monitor_sequence_before =
+            observation.monitor_sequence_before;
+        identity.monitor_sequence_after =
+            observation.monitor_sequence_after;
+        identity.monitor_sequence = observation.monitor_sequence;
+        if (!sha256_payload(payload, identity.payload_sha256)) {
+            ledger.monitor_packet_recording_failed = true;
+            return false;
+        }
+        if (ledger.monitor_packets.size() < kMaximumMonitorPacketCount) {
+            ledger.monitor_packets.push_back(std::move(identity));
+        } else {
+            ++ledger.dropped_monitor_packet_count;
+            ledger.monitor_packets.back() = std::move(identity);
+        }
+        return true;
+    } catch (...) {
+        ledger.monitor_packet_recording_failed = true;
+        return false;
+    }
+}
+
 bool write_mouse_effect_probe_safety_ledger(
         const std::filesystem::path& path,
         std::string_view run_uuid,
@@ -385,11 +579,71 @@ bool write_mouse_effect_probe_safety_ledger(
                 {"decision", safety_decision_name(observation.decision)},
             });
         }
+        nlohmann::ordered_json monitor_packets =
+            nlohmann::ordered_json::array();
+        for (const auto& packet : ledger.monitor_packets) {
+            const std::string source_ipv4 =
+                std::to_string(packet.source_ipv4[0]) + "." +
+                std::to_string(packet.source_ipv4[1]) + "." +
+                std::to_string(packet.source_ipv4[2]) + "." +
+                std::to_string(packet.source_ipv4[3]);
+            const std::string configured_device_ipv4 =
+                std::to_string(packet.configured_device_ipv4[0]) + "." +
+                std::to_string(packet.configured_device_ipv4[1]) + "." +
+                std::to_string(packet.configured_device_ipv4[2]) + "." +
+                std::to_string(packet.configured_device_ipv4[3]);
+            nlohmann::ordered_json packet_json = {
+                {"received_at_steady_ns", packet.received_at_steady_ns},
+                {"datagram_size", packet.datagram_size},
+                {"source_address_size", packet.source_address_size},
+                {"source_family", packet.source_family},
+                {"source_endpoint_valid", packet.source_endpoint_valid},
+                {"source_ipv4", source_ipv4},
+                {"source_port", packet.source_port},
+                {"monitor_local_port", packet.monitor_local_port},
+                {"configured_device_ipv4", configured_device_ipv4},
+                {"configured_device_port", packet.configured_device_port},
+                {"source_ip_matches_configured_device",
+                 packet.source_ip_matches_configured_device},
+                {"source_port_matches_configured_device",
+                 packet.source_port_matches_configured_device},
+                {"exact_monitor_packet_size",
+                 packet.exact_monitor_packet_size},
+                {"mouse_report_id_present",
+                 packet.mouse_report_id_present},
+                {"mouse_report_id", packet.mouse_report_id_present
+                    ? nlohmann::ordered_json(packet.mouse_report_id)
+                    : nlohmann::ordered_json(nullptr)},
+                {"mouse_buttons_present", packet.mouse_buttons_present},
+                {"mouse_buttons", packet.mouse_buttons_present
+                    ? nlohmann::ordered_json(packet.mouse_buttons)
+                    : nlohmann::ordered_json(nullptr)},
+                {"keyboard_report_id_present",
+                 packet.keyboard_report_id_present},
+                {"keyboard_report_id", packet.keyboard_report_id_present
+                    ? nlohmann::ordered_json(packet.keyboard_report_id)
+                    : nlohmann::ordered_json(nullptr)},
+                {"keyboard_modifiers_present",
+                 packet.keyboard_modifiers_present},
+                {"keyboard_modifiers", packet.keyboard_modifiers_present
+                    ? nlohmann::ordered_json(packet.keyboard_modifiers)
+                    : nlohmann::ordered_json(nullptr)},
+                {"accepted_as_monitor_state",
+                 packet.accepted_as_monitor_state},
+                {"monitor_sequence_before",
+                 packet.monitor_sequence_before},
+                {"monitor_sequence_after",
+                 packet.monitor_sequence_after},
+                {"monitor_sequence", packet.monitor_sequence},
+                {"payload_sha256", packet.payload_sha256},
+            };
+            monitor_packets.push_back(std::move(packet_json));
+        }
         const auto terminal_decision = ledger.observations.empty()
             ? "none"
             : safety_decision_name(ledger.observations.back().decision);
         const nlohmann::ordered_json document = {
-            {"schema_version", 1},
+            {"schema_version", 2},
             {"evidence_type", "mouse_effect_probe_safety_monitor_ledger"},
             {"physical_output_capability", false},
             {"run_uuid", run_uuid},
@@ -405,6 +659,11 @@ bool write_mouse_effect_probe_safety_ledger(
             {"dropped_observation_count",
              ledger.dropped_observation_count},
             {"observations", std::move(observations)},
+            {"monitor_packet_recording_failed",
+             ledger.monitor_packet_recording_failed},
+            {"dropped_monitor_packet_count",
+             ledger.dropped_monitor_packet_count},
+            {"monitor_packets", std::move(monitor_packets)},
         };
         const std::string content = document.dump(2) + '\n';
         temporary_path = final_path;
@@ -797,12 +1056,23 @@ bool run_mouse_effect_probe(
             options.physical_output_confirmed;
         execution_options.require_protocol_ack = true;
 
+        MouseEffectProbeSafetyLedger safety_ledger;
+        std::shared_ptr<PhysicalKmboxMonitorPacketObserver>
+            monitor_packet_observer;
         MouseOutputOwnerLease rehearsal_owner_guard;
         std::shared_ptr<IMouseController> mouse;
         if (options.dispatch_mode ==
                 mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
             if (app_config.mouse.backend != MouseBackend::KMBOX_NET) {
                 set_error(error, "physical A 当前只接受 KMBOX NET backend");
+                return false;
+            }
+            monitor_packet_observer =
+                std::make_shared<PhysicalKmboxMonitorPacketObserver>();
+            if (!mouse::detail::install_kmbox_monitor_packet_observer(
+                    monitor_packet_observer)) {
+                set_error(error,
+                    "physical A 无法独占 KMBOX monitor packet observer");
                 return false;
             }
             app_config.mouse.allow_send_input = true;
@@ -828,8 +1098,10 @@ bool run_mouse_effect_probe(
             options.run_uuid,
             app_config.capture.ndi_source_name,
         };
-        MouseEffectProbeSafetyLedger safety_ledger;
         const auto publish_report = [&]() {
+            if (monitor_packet_observer) {
+                monitor_packet_observer->copy_to(safety_ledger);
+            }
             result.execution = executor.result();
             result.safety_ledger = safety_ledger;
             bool safety_ledger_published = true;

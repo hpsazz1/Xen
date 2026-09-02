@@ -36,6 +36,24 @@ constexpr int kMaxConnectTimeoutMs = 10000;
 constexpr int kMaxCommandTimeoutMs = 1000;
 constexpr std::size_t kMonitorPacketBytes = 20U;
 
+std::mutex kmbox_monitor_packet_observer_mutex;
+std::weak_ptr<mouse::detail::IKmboxMonitorPacketObserver>
+    kmbox_monitor_packet_observer;
+
+void publish_kmbox_monitor_packet_observation(
+        const mouse::detail::KmboxMonitorPacketObservation& observation,
+        std::span<const std::uint8_t> payload) noexcept {
+    std::shared_ptr<mouse::detail::IKmboxMonitorPacketObserver> observer;
+    {
+        std::lock_guard<std::mutex> lock(
+            kmbox_monitor_packet_observer_mutex);
+        observer = kmbox_monitor_packet_observer.lock();
+    }
+    if (observer) {
+        observer->observe_kmbox_monitor_packet(observation, payload);
+    }
+}
+
 void write_u32_le(std::uint8_t* output, std::uint32_t value) noexcept {
     output[0] = static_cast<std::uint8_t>(value);
     output[1] = static_cast<std::uint8_t>(value >> 8U);
@@ -186,6 +204,7 @@ public:
                 return false;
             }
             const int monitor_port = ntohs(monitor_address.sin_port);
+            monitor_local_port_ = static_cast<std::uint16_t>(monitor_port);
             std::array<std::uint8_t, kHeaderBytes> monitor_packet{};
             write_header(monitor_packet.data(), kMonitorCommand, ++sequence_);
             write_u32_le(monitor_packet.data() + 4U,
@@ -524,16 +543,82 @@ private:
                 }
                 break;
             }
-            if (received < static_cast<int>(kMonitorPacketBytes) ||
-                source.sin_addr.S_un.S_addr != destination_.sin_addr.S_un.S_addr) {
-                continue;
+
+            mouse::detail::KmboxMonitorPacketObservation observation;
+            observation.received_at_steady_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            observation.datagram_size = static_cast<std::size_t>(received);
+            observation.source_address_size = source_size;
+            observation.source_family = source.sin_family;
+            observation.source_endpoint_valid =
+                source_size == sizeof(sockaddr_in) &&
+                source.sin_family == AF_INET;
+            const std::uint32_t source_ipv4 =
+                ntohl(source.sin_addr.S_un.S_addr);
+            observation.source_ipv4 = {
+                static_cast<std::uint8_t>(source_ipv4 >> 24U),
+                static_cast<std::uint8_t>(source_ipv4 >> 16U),
+                static_cast<std::uint8_t>(source_ipv4 >> 8U),
+                static_cast<std::uint8_t>(source_ipv4),
+            };
+            observation.source_port = ntohs(source.sin_port);
+            observation.monitor_local_port = monitor_local_port_;
+            const std::uint32_t configured_ipv4 =
+                ntohl(destination_.sin_addr.S_un.S_addr);
+            observation.configured_device_ipv4 = {
+                static_cast<std::uint8_t>(configured_ipv4 >> 24U),
+                static_cast<std::uint8_t>(configured_ipv4 >> 16U),
+                static_cast<std::uint8_t>(configured_ipv4 >> 8U),
+                static_cast<std::uint8_t>(configured_ipv4),
+            };
+            observation.configured_device_port =
+                ntohs(destination_.sin_port);
+            observation.source_ip_matches_configured_device =
+                source.sin_addr.S_un.S_addr ==
+                    destination_.sin_addr.S_un.S_addr;
+            observation.source_port_matches_configured_device =
+                source.sin_port == destination_.sin_port;
+            observation.exact_monitor_packet_size =
+                received == static_cast<int>(kMonitorPacketBytes);
+            observation.mouse_report_id_present = received >= 1;
+            if (observation.mouse_report_id_present) {
+                observation.mouse_report_id = packet[0];
             }
-            std::lock_guard<std::mutex> lock(monitor_mutex_);
-            mouse_buttons_ = packet[1];
-            mouse::detail::apply_hid_keyboard_report(
-                packet[9], packet.data() + 10U, 10U, keyboard_keys_);
-            monitor_received_ = true;
-            ++monitor_sequence_;
+            observation.mouse_buttons_present = received >= 2;
+            if (observation.mouse_buttons_present) {
+                observation.mouse_buttons = packet[1];
+            }
+            observation.keyboard_report_id_present = received >= 9;
+            if (observation.keyboard_report_id_present) {
+                observation.keyboard_report_id = packet[8];
+            }
+            observation.keyboard_modifiers_present = received >= 10;
+            if (observation.keyboard_modifiers_present) {
+                observation.keyboard_modifiers = packet[9];
+            }
+            observation.accepted_as_monitor_state =
+                received >= static_cast<int>(kMonitorPacketBytes) &&
+                observation.source_ip_matches_configured_device;
+            {
+                std::lock_guard<std::mutex> lock(monitor_mutex_);
+                observation.monitor_sequence_before = monitor_sequence_;
+                if (observation.accepted_as_monitor_state) {
+                    mouse_buttons_ = packet[1];
+                    mouse::detail::apply_hid_keyboard_report(
+                        packet[9], packet.data() + 10U, 10U,
+                        keyboard_keys_);
+                    monitor_received_ = true;
+                    ++monitor_sequence_;
+                    observation.monitor_sequence = monitor_sequence_;
+                }
+                observation.monitor_sequence_after = monitor_sequence_;
+            }
+            publish_kmbox_monitor_packet_observation(
+                observation,
+                std::span<const std::uint8_t>(
+                    packet.data(), static_cast<std::size_t>(received)));
         }
     }
 
@@ -570,6 +655,7 @@ private:
     bool monitor_received_ = false;
     bool monitor_failed_ = false;
     bool monitor_configured_ = false;
+    std::uint16_t monitor_local_port_ = 0;
     std::uint64_t monitor_sequence_ = 0;
     mutable std::mutex io_mutex_;
     std::atomic<MouseStatus> status_{MouseStatus::CLOSED};
@@ -580,6 +666,15 @@ private:
 } // namespace
 
 namespace mouse::detail {
+
+bool install_kmbox_monitor_packet_observer(
+        const std::shared_ptr<IKmboxMonitorPacketObserver>& observer) noexcept {
+    if (!observer) return false;
+    std::lock_guard<std::mutex> lock(kmbox_monitor_packet_observer_mutex);
+    if (!kmbox_monitor_packet_observer.expired()) return false;
+    kmbox_monitor_packet_observer = observer;
+    return true;
+}
 
 std::unique_ptr<IMouseController> create_kmbox_net_controller(
         const MouseConfig& config) noexcept {

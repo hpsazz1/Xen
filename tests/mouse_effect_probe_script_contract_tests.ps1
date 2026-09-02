@@ -55,6 +55,20 @@ Assert-Contains $launch '"--safety-ledger"' `
     "Physical A safety ledger argument"
 Assert-Contains $launch "safety_ledger_sha256" `
     "Physical A launch summary safety ledger binding"
+Assert-Contains $launch '$safetyLedger.schema_version -ne 2' `
+    "Physical A safety ledger schema 2 gate"
+Assert-Contains $launch 'monitor_packets' `
+    "Physical A raw monitor packet identity input"
+Assert-Contains $launch 'payload_sha256' `
+    "Physical A raw monitor payload digest validation"
+Assert-Contains $launch 'source_endpoint_valid' `
+    "Physical A raw monitor source endpoint validation"
+Assert-Contains $launch 'monitor_sequence_before' `
+    "Physical A raw monitor sequence-before validation"
+Assert-Contains $launch 'monitor_sequence_after' `
+    "Physical A raw monitor sequence-after validation"
+Assert-Contains $launch 'safety_monitor_packet_identity_complete' `
+    "Physical A launch summary packet identity verdict"
 
 if ($prepare.Contains((ConvertFrom-Utf8Base64 `
         "6L+b5YWl6Z2Z5q2i44CB5peg5Lq654mpL092ZXJsYXkg55qE6auY5a+55q+U6IOM5pmv5ZCO5oyB57ut5oyJ5L2P5Y+z6ZSu")) -or

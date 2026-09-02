@@ -9,6 +9,7 @@
 #endif
 
 #include "log/log.h"
+#include "mouse/kmbox_net_internal.h"
 #include "mouse/makcu_internal.h"
 #include "mouse/mouse.h"
 
@@ -314,13 +315,55 @@ public:
         std::array<std::uint8_t, 20U> report{};
         report[1] = mouse_buttons;
         std::copy(keys.begin(), keys.end(), report.begin() + 10U);
+        return send_monitor_packet(report, destination);
+    }
+
+    bool send_monitor_packet(std::span<const std::uint8_t> report) {
+        sockaddr_in destination{};
+        {
+            std::unique_lock<std::mutex> lock(monitor_mutex_);
+            if (!monitor_ready_cv_.wait_for(
+                    lock, std::chrono::milliseconds(500),
+                    [&] { return monitor_ready_; })) {
+                return false;
+            }
+            destination = monitor_destination_;
+        }
+        return send_monitor_packet(report, destination);
+    }
+
+    bool send_monitor_packet_from_alternate_source(
+            std::span<const std::uint8_t> report) {
+        sockaddr_in destination{};
+        {
+            std::unique_lock<std::mutex> lock(monitor_mutex_);
+            if (!monitor_ready_cv_.wait_for(
+                    lock, std::chrono::milliseconds(500),
+                    [&] { return monitor_ready_; })) {
+                return false;
+            }
+            destination = monitor_destination_;
+        }
+        const SOCKET alternate = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (alternate == INVALID_SOCKET) return false;
+        const bool sent = sendto(
+            alternate, reinterpret_cast<const char*>(report.data()),
+            static_cast<int>(report.size()), 0,
+            reinterpret_cast<const sockaddr*>(&destination),
+            sizeof(destination)) == static_cast<int>(report.size());
+        closesocket(alternate);
+        return sent;
+    }
+
+private:
+    bool send_monitor_packet(std::span<const std::uint8_t> report,
+                             const sockaddr_in& destination) {
         return sendto(socket_, reinterpret_cast<const char*>(report.data()),
                       static_cast<int>(report.size()), 0,
                       reinterpret_cast<const sockaddr*>(&destination),
                       sizeof(destination)) == static_cast<int>(report.size());
     }
 
-private:
     void run() noexcept {
         for (const AckMode mode : responses_) {
             std::array<std::uint8_t, 128> buffer{};
@@ -390,6 +433,44 @@ private:
     std::condition_variable monitor_ready_cv_;
     sockaddr_in monitor_destination_{};
     bool monitor_ready_ = false;
+};
+
+class CapturingKmboxMonitorPacketObserver final
+        : public mouse::detail::IKmboxMonitorPacketObserver {
+public:
+    void observe_kmbox_monitor_packet(
+            const mouse::detail::KmboxMonitorPacketObservation& observation,
+            std::span<const std::uint8_t> payload) noexcept override {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            observations_.push_back(observation);
+            payloads_.emplace_back(payload.begin(), payload.end());
+            received_cv_.notify_all();
+        } catch (...) {
+        }
+    }
+
+    bool wait_for_count(
+            std::size_t expected_count,
+            std::vector<mouse::detail::KmboxMonitorPacketObservation>&
+                observations,
+            std::vector<std::vector<std::uint8_t>>& payloads) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!received_cv_.wait_for(
+                lock, std::chrono::milliseconds(500),
+                [&] { return observations_.size() >= expected_count; })) {
+            return false;
+        }
+        observations = observations_;
+        payloads = payloads_;
+        return true;
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable received_cv_;
+    std::vector<mouse::detail::KmboxMonitorPacketObservation> observations_;
+    std::vector<std::vector<std::uint8_t>> payloads_;
 };
 
 MouseConfig make_config(int port) {
@@ -544,6 +625,91 @@ void test_kmbox_monitor_retains_state_until_explicit_release() {
                !snapshot.virtual_keys[0x02] &&
                snapshot.sequence > pressed_sequence,
            "KMBOX monitor 只有收到明确释放报告后才能清除右键状态");
+}
+
+void test_kmbox_monitor_packet_identity_observer_captures_raw_datagram() {
+    FakeKmboxDevice device({AckMode::VALID, AckMode::VALID});
+    auto observer =
+        std::make_shared<CapturingKmboxMonitorPacketObserver>();
+    expect(mouse::detail::install_kmbox_monitor_packet_observer(observer),
+           "KMBOX monitor packet observer 必须能在打开设备前唯一安装");
+    auto mouse = create_test_mouse(make_config(device.port()));
+    expect(mouse && mouse->open(),
+           "KMBOX packet identity 测试必须先连接 monitor");
+
+    std::vector<std::uint8_t> short_report(19U, 0U);
+    short_report[0] = 0x11U;
+    short_report[1] = 0x02U;
+    short_report[8] = 0x22U;
+    short_report[9] = 0x04U;
+    expect(device.send_monitor_packet(short_report),
+           "假 KMBOX 必须能发送会被状态 parser 拒绝的短数据报");
+
+    std::vector<std::uint8_t> report(24U, 0U);
+    report[0] = 0x01U;
+    report[1] = 0x02U;
+    report[8] = 0x02U;
+    report[9] = 0x08U;
+    report[10] = 0x4dU;
+    expect(device.send_monitor_packet_from_alternate_source(report),
+           "假 KMBOX 必须能发送非精确长度的同源 monitor 数据报");
+    std::vector<std::uint8_t> rejected_after_state(19U, 0U);
+    rejected_after_state[0] = 0x33U;
+    rejected_after_state[1] = 0x02U;
+    expect(device.send_monitor_packet(rejected_after_state),
+           "假 KMBOX 必须能在状态更新后发送被拒绝的数据报");
+
+    std::vector<mouse::detail::KmboxMonitorPacketObservation> observations;
+    std::vector<std::vector<std::uint8_t>> captured_payloads;
+    expect(observer->wait_for_count(3U, observations, captured_payloads),
+           "observer 必须在 parser 前收到全部数据报的原始身份");
+    expect(observations.size() == 3U && captured_payloads.size() == 3U &&
+               observations[0].datagram_size == short_report.size() &&
+               observations[0].configured_device_ipv4 ==
+                   std::array<std::uint8_t, 4>{127U, 0U, 0U, 1U} &&
+               observations[0].configured_device_port == device.port() &&
+               observations[0].keyboard_modifiers_present &&
+               observations[0].keyboard_modifiers == 0x04U &&
+               !observations[0].accepted_as_monitor_state &&
+               observations[0].monitor_sequence_before == 0U &&
+               observations[0].monitor_sequence_after == 0U &&
+               captured_payloads[0] == short_report,
+           "observer 必须记录短包但不得把它伪造成状态或 sequence");
+    const auto& observation = observations[1];
+    expect(observation.received_at_steady_ns > 0 &&
+               observation.datagram_size == report.size() &&
+               observation.source_endpoint_valid &&
+               observation.source_ipv4 ==
+                   std::array<std::uint8_t, 4>{127U, 0U, 0U, 1U} &&
+               observation.source_port > 0U &&
+               observation.source_port != device.port() &&
+               observation.monitor_local_port > 0U &&
+               observation.source_ip_matches_configured_device &&
+               !observation.source_port_matches_configured_device &&
+               observation.configured_device_ipv4 ==
+                   std::array<std::uint8_t, 4>{127U, 0U, 0U, 1U} &&
+               observation.configured_device_port == device.port() &&
+               !observation.exact_monitor_packet_size &&
+               observation.mouse_report_id_present &&
+               observation.mouse_report_id == 0x01U &&
+               observation.mouse_buttons_present &&
+               observation.mouse_buttons == 0x02U &&
+               observation.keyboard_report_id_present &&
+               observation.keyboard_report_id == 0x02U &&
+               observation.keyboard_modifiers_present &&
+               observation.keyboard_modifiers == 0x08U &&
+               observation.accepted_as_monitor_state &&
+               observation.monitor_sequence_before == 0U &&
+               observation.monitor_sequence_after == 1U &&
+               captured_payloads[1] == report,
+           "observer 必须保留长度、来源 endpoint、report-id、button、接纳结果、sequence 与原始 payload");
+    expect(!observations[2].accepted_as_monitor_state &&
+               observations[2].monitor_sequence_before == 1U &&
+               observations[2].monitor_sequence_after == 1U &&
+               observations[2].monitor_sequence == 0U &&
+               captured_payloads[2] == rejected_after_state,
+           "parser 拒绝包必须记录当时未改变的 before/after sequence");
+    if (mouse) mouse->close();
 }
 
 void test_invalid_commands_are_not_sent() {
@@ -912,6 +1078,7 @@ int main() {
     test_disabled_does_not_access_network();
     test_packet_layout_and_sequence();
     test_kmbox_monitor_retains_state_until_explicit_release();
+    test_kmbox_monitor_packet_identity_observer_captures_raw_datagram();
     test_invalid_commands_are_not_sent();
     test_invalid_config();
     test_open_response_failure(

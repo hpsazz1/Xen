@@ -220,6 +220,50 @@ void test_physical_safety_ledger_distinguishes_explicit_release() {
                ledger.observations.back().monitor_sequence == 42U,
            "账本必须把 READY 有效快照中的右键清零与 WAITING 分开记录");
 
+    mouse::detail::KmboxMonitorPacketObservation packet;
+    packet.received_at_steady_ns = 123456789;
+    packet.datagram_size = 20U;
+    packet.source_address_size = 16;
+    packet.source_family = 2;
+    packet.source_endpoint_valid = true;
+    packet.source_ipv4 = {127U, 0U, 0U, 1U};
+    packet.source_port = 12345U;
+    packet.monitor_local_port = 54321U;
+    packet.configured_device_ipv4 = {127U, 0U, 0U, 1U};
+    packet.configured_device_port = 12345U;
+    packet.source_ip_matches_configured_device = true;
+    packet.source_port_matches_configured_device = true;
+    packet.exact_monitor_packet_size = true;
+    packet.mouse_report_id_present = true;
+    packet.mouse_report_id = 1U;
+    packet.mouse_buttons_present = true;
+    packet.mouse_buttons = 2U;
+    packet.keyboard_report_id_present = true;
+    packet.keyboard_report_id = 2U;
+    packet.keyboard_modifiers_present = true;
+    packet.keyboard_modifiers = 4U;
+    packet.accepted_as_monitor_state = true;
+    packet.monitor_sequence_before = 41U;
+    packet.monitor_sequence_after = 42U;
+    packet.monitor_sequence = 42U;
+    std::vector<std::uint8_t> payload(20U, 0U);
+    payload[0] = 1U;
+    payload[1] = 2U;
+    payload[8] = 2U;
+    payload[9] = 4U;
+    payload[10] = 0x4dU;
+    expect(record_mouse_effect_probe_monitor_packet_identity(
+               packet, payload, ledger) &&
+               ledger.monitor_packets.size() == 1U &&
+               ledger.monitor_packets.back().payload_sha256 ==
+                   "5522f093a208b9fc9b9808d561537c279f4c1b1a811711a54132f0dad8798b37" &&
+               ledger.monitor_packets.back().configured_device_port ==
+                   12345U &&
+               ledger.monitor_packets.back().keyboard_modifiers == 4U &&
+               ledger.monitor_packets.back().monitor_sequence_before == 41U &&
+               ledger.monitor_packets.back().monitor_sequence_after == 42U,
+           "账本必须以 SHA-256 绑定 monitor 原始 payload，并保留 packet identity");
+
     const auto root = std::filesystem::temp_directory_path() /
         ("xen-mouse-effect-probe-safety-ledger-test-" +
          std::to_string(std::chrono::steady_clock::now()
@@ -239,15 +283,47 @@ void test_physical_safety_ledger_distinguishes_explicit_release() {
     const std::string content(
         (std::istreambuf_iterator<char>(input)),
         std::istreambuf_iterator<char>());
-    expect(content.find("\"physical_output_capability\": false") !=
+    expect(content.find("\"schema_version\": 2") !=
+               std::string::npos &&
+               content.find("\"physical_output_capability\": false") !=
                std::string::npos &&
                content.find("\"monitor_sequence\": 42") !=
                    std::string::npos &&
                content.find("\"right_button_pressed\": false") !=
                    std::string::npos &&
                content.find("\"decision\": \"released\"") !=
-                   std::string::npos,
-           "持久账本必须保存可独立判别 explicit release 的原始字段");
+                   std::string::npos &&
+               content.find("\"monitor_packets\"") !=
+                   std::string::npos &&
+               content.find("\"datagram_size\": 20") !=
+                   std::string::npos &&
+               content.find("\"source_ipv4\": \"127.0.0.1\"") !=
+                   std::string::npos &&
+               content.find("\"source_port\": 12345") !=
+                   std::string::npos &&
+               content.find("\"monitor_local_port\": 54321") !=
+                   std::string::npos &&
+               content.find("\"configured_device_ipv4\": \"127.0.0.1\"") !=
+                   std::string::npos &&
+               content.find("\"configured_device_port\": 12345") !=
+                   std::string::npos &&
+               content.find("\"mouse_report_id\": 1") !=
+                   std::string::npos &&
+               content.find("\"keyboard_report_id\": 2") !=
+                   std::string::npos &&
+               content.find("\"keyboard_modifiers\": 4") !=
+                   std::string::npos &&
+               content.find("\"monitor_sequence_before\": 41") !=
+                   std::string::npos &&
+               content.find("\"monitor_sequence_after\": 42") !=
+                   std::string::npos &&
+               content.find("\"payload_sha256\": "
+                            "\"5522f093a208b9fc9b9808d561537c27"
+                            "9f4c1b1a811711a54132f0dad8798b37\"") !=
+                   std::string::npos &&
+               content.find("\"payload\"") == std::string::npos &&
+               content.find("keyboard_data") == std::string::npos,
+           "持久账本必须同时保存 explicit release 与可独立判别的原始 packet identity");
     std::filesystem::remove_all(root, ignored);
 }
 

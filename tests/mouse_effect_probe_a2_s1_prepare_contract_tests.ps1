@@ -54,6 +54,13 @@ foreach ($required in @(
         '"--safety-ledger"',
         'safety_ledger_sha256',
         'safety_monitor_terminal_decision',
+        'monitor_packets',
+        'payload_sha256',
+        'source_endpoint_valid',
+        'monitor_sequence_before',
+        'monitor_sequence_after',
+        'safety_monitor_packet_count',
+        'safety_monitor_packet_identity_complete',
         'publishedFramesDirectory',
         'png_count_at_completion')) {
     if (-not $launch.Contains($required)) {

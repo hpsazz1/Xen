@@ -2,6 +2,7 @@
 #define MOUSE_EFFECT_PROBE_RUNNER_H
 
 #include "capture/capture.h"
+#include "mouse/kmbox_net_internal.h"
 #include "mouse_effect_probe/mouse_effect_probe.h"
 
 #include <cstdint>
@@ -45,10 +46,42 @@ struct MouseEffectProbeSafetyObservation {
         MouseEffectProbeSafetyDecision::FAILURE;
 };
 
+struct MouseEffectProbeMonitorPacketIdentity {
+    std::int64_t received_at_steady_ns = 0;
+    std::size_t datagram_size = 0;
+    int source_address_size = 0;
+    int source_family = 0;
+    bool source_endpoint_valid = false;
+    std::array<std::uint8_t, 4> source_ipv4{};
+    std::uint16_t source_port = 0;
+    std::uint16_t monitor_local_port = 0;
+    std::array<std::uint8_t, 4> configured_device_ipv4{};
+    std::uint16_t configured_device_port = 0;
+    bool source_ip_matches_configured_device = false;
+    bool source_port_matches_configured_device = false;
+    bool exact_monitor_packet_size = false;
+    bool mouse_report_id_present = false;
+    std::uint8_t mouse_report_id = 0;
+    bool mouse_buttons_present = false;
+    std::uint8_t mouse_buttons = 0;
+    bool keyboard_report_id_present = false;
+    std::uint8_t keyboard_report_id = 0;
+    bool keyboard_modifiers_present = false;
+    std::uint8_t keyboard_modifiers = 0;
+    bool accepted_as_monitor_state = false;
+    std::uint64_t monitor_sequence_before = 0;
+    std::uint64_t monitor_sequence_after = 0;
+    std::uint64_t monitor_sequence = 0;
+    std::string payload_sha256;
+};
+
 struct MouseEffectProbeSafetyLedger {
     std::vector<MouseEffectProbeSafetyObservation> observations;
     std::uint64_t dropped_observation_count = 0;
     bool recording_failed = false;
+    std::vector<MouseEffectProbeMonitorPacketIdentity> monitor_packets;
+    std::uint64_t dropped_monitor_packet_count = 0;
+    bool monitor_packet_recording_failed = false;
 };
 
 struct MouseEffectProbeRunOptions {
@@ -94,6 +127,13 @@ MouseEffectProbeSafetyDecision record_mouse_effect_probe_safety_observation(
     MouseEffectProbeSafetyPhase phase,
     bool poll_succeeded,
     const InputSnapshot& snapshot,
+    MouseEffectProbeSafetyLedger& ledger) noexcept;
+
+// 将 monitor callback 的 payload 只转换为 SHA-256 身份后丢弃原始键码；
+// 不参与按键判定，也不改变当前 parser 的接纳结果。
+bool record_mouse_effect_probe_monitor_packet_identity(
+    const mouse::detail::KmboxMonitorPacketObservation& observation,
+    std::span<const std::uint8_t> payload,
     MouseEffectProbeSafetyLedger& ledger) noexcept;
 
 // 账本不具物理输出能力；拒绝覆盖并在同目录原子发布。

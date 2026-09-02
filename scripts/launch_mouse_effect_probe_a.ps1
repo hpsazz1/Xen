@@ -456,13 +456,91 @@ try {
     $safetyLedger = Get-Content -LiteralPath $safetyLedgerPath `
         -Raw -Encoding utf8 | ConvertFrom-Json
     $safetyObservations = @($safetyLedger.observations)
-    if ([uint64]$safetyLedger.schema_version -ne 1 -or
+    $safetyMonitorPackets = @($safetyLedger.monitor_packets)
+    if ([uint64]$safetyLedger.schema_version -ne 2 -or
         [string]$safetyLedger.evidence_type -ne
             "mouse_effect_probe_safety_monitor_ledger" -or
         [bool]$safetyLedger.physical_output_capability -or
         [string]$safetyLedger.run_uuid -ne [string]$task.run_uuid -or
         [string]$safetyLedger.input_backend -ne "kmbox_net") {
         throw "Physical A safety monitor ledger 身份无效"
+    }
+    $acceptedMonitorSequences =
+        [Collections.Generic.HashSet[uint64]]::new()
+    $monitorPacketIdentityComplete =
+        -not [bool]$safetyLedger.monitor_packet_recording_failed -and
+        [uint64]$safetyLedger.dropped_monitor_packet_count -eq 0 -and
+        $safetyMonitorPackets.Count -gt 0
+    foreach ($packetIdentity in $safetyMonitorPackets) {
+        $datagramSize = [uint64]$packetIdentity.datagram_size
+        $packetSequenceBefore =
+            [uint64]$packetIdentity.monitor_sequence_before
+        $packetSequenceAfter =
+            [uint64]$packetIdentity.monitor_sequence_after
+        $packetSequence = $packetSequenceAfter
+        $acceptedAsState = [bool]$packetIdentity.accepted_as_monitor_state
+        $payloadSha256 = [string]$packetIdentity.payload_sha256
+        if ([int64]$packetIdentity.received_at_steady_ns -le 0 -or
+            [int]$packetIdentity.source_address_size -le 0 -or
+            -not [bool]$packetIdentity.source_endpoint_valid -or
+            [string]::IsNullOrWhiteSpace(
+                [string]$packetIdentity.source_ipv4) -or
+            [uint64]$packetIdentity.source_port -eq 0 -or
+            [uint64]$packetIdentity.monitor_local_port -eq 0 -or
+            [string]::IsNullOrWhiteSpace(
+                [string]$packetIdentity.configured_device_ipv4) -or
+            [uint64]$packetIdentity.configured_device_port -eq 0 -or
+            [bool]$packetIdentity.source_port_matches_configured_device -ne
+                ([uint64]$packetIdentity.source_port -eq
+                    [uint64]$packetIdentity.configured_device_port) -or
+            $payloadSha256 -notmatch '^[0-9a-f]{64}$' -or
+            [bool]$packetIdentity.exact_monitor_packet_size -ne
+                ($datagramSize -eq 20) -or
+            [uint64]$packetIdentity.monitor_sequence -ne
+                $packetSequenceAfter) {
+            $monitorPacketIdentityComplete = $false
+        }
+        if ($acceptedAsState) {
+            if ($packetSequence -eq 0 -or $datagramSize -lt 20 -or
+                $packetSequenceAfter -ne ($packetSequenceBefore + 1) -or
+                -not [bool]$packetIdentity.source_ip_matches_configured_device -or
+                -not [bool]$packetIdentity.mouse_report_id_present -or
+                -not [bool]$packetIdentity.mouse_buttons_present -or
+                -not [bool]$packetIdentity.keyboard_report_id_present -or
+                -not [bool]$packetIdentity.keyboard_modifiers_present -or
+                -not $acceptedMonitorSequences.Add($packetSequence)) {
+                $monitorPacketIdentityComplete = $false
+            }
+        } elseif ($packetSequenceBefore -ne $packetSequenceAfter -or
+            [uint64]$packetIdentity.monitor_sequence -ne 0) {
+            $monitorPacketIdentityComplete = $false
+        }
+    }
+    foreach ($safetyObservation in $safetyObservations) {
+        if ([bool]$safetyObservation.state_valid) {
+            $observationSequence =
+                [uint64]$safetyObservation.monitor_sequence
+            if ($observationSequence -eq 0 -or
+                -not $acceptedMonitorSequences.Contains(
+                    $observationSequence)) {
+                $monitorPacketIdentityComplete = $false
+            }
+        }
+    }
+    $terminalMonitorSequence = if ($safetyObservations.Count -gt 0) {
+        [uint64]$safetyObservations[-1].monitor_sequence
+    } else { [uint64]0 }
+    $terminalMonitorPacketPayloadSha256 = ""
+    if ($terminalMonitorSequence -gt 0) {
+        foreach ($packetIdentity in $safetyMonitorPackets) {
+            if ([bool]$packetIdentity.accepted_as_monitor_state -and
+                [uint64]$packetIdentity.monitor_sequence_after -eq
+                    $terminalMonitorSequence) {
+                $terminalMonitorPacketPayloadSha256 =
+                    [string]$packetIdentity.payload_sha256
+                break
+            }
+        }
     }
     $sequence = Get-Content -LiteralPath `
         ([string]$task.files.sequence.path) -Raw -Encoding utf8 |
@@ -558,6 +636,7 @@ try {
         -not [bool]$safetyLedger.recording_failed -and
         [uint64]$safetyLedger.dropped_observation_count -eq 0 -and
         $safetyObservations.Count -gt 0 -and
+        $monitorPacketIdentityComplete -and
         [int64]$report.result.cumulative_requested_x_counts -eq 0 -and
         [int64]$report.result.cumulative_backend_completed_x_counts -eq 0
     $summary = [ordered]@{
@@ -589,6 +668,17 @@ try {
             [uint64]$safetyLedger.dropped_observation_count
         safety_monitor_recording_failed =
             [bool]$safetyLedger.recording_failed
+        safety_monitor_packet_count =
+            [uint64]$safetyMonitorPackets.Count
+        safety_monitor_dropped_packet_count =
+            [uint64]$safetyLedger.dropped_monitor_packet_count
+        safety_monitor_packet_recording_failed =
+            [bool]$safetyLedger.monitor_packet_recording_failed
+        safety_monitor_packet_identity_complete =
+            [bool]$monitorPacketIdentityComplete
+        safety_monitor_terminal_sequence = $terminalMonitorSequence
+        safety_monitor_terminal_packet_payload_sha256 =
+            $terminalMonitorPacketPayloadSha256
         sidecar_manifest_sha256 = Get-FileSha256 $manifestPath
         sidecar_lifecycle_sha256 = Get-FileSha256 $sidecarLifecyclePath
         stop_reason = [string]$report.result.stop_reason

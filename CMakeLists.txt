@@ -876,7 +876,7 @@ target_include_directories(mouse_effect_probe_runner
     PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(mouse_effect_probe_runner
     PUBLIC mouse_effect_probe capture
-    PRIVATE config nlohmann_json::nlohmann_json)
+    PRIVATE config nlohmann_json::nlohmann_json bcrypt)
 
 add_library(overlay STATIC
     Xen/overlay/overlay.cpp)
