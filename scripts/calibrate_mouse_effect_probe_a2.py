@@ -1782,6 +1782,331 @@ def build_physical_candidate(
     }
 
 
+def evaluate_physical_holdout(
+    candidate: dict,
+    synthetic_calibration: dict,
+    zero_input_calibration: dict,
+    calibration_plan: dict,
+    calibration_response: dict,
+    holdout_task: dict,
+    holdout_response: dict,
+    holdout_rows: Sequence[dict],
+    *,
+    observation_text: str,
+    observation_sha256: str,
+    candidate_sha256: str,
+    input_sha256: dict[str, str],
+) -> dict:
+    """用独立 P-HOLDOUT 证伪冻结 candidate，不允许回调候选值。"""
+    scope_id = str(calibration_plan.get("scope_id", ""))
+    holdout_run_uuid = str(holdout_task.get("run_uuid", ""))
+    holdout_sequence_sha256 = str(holdout_task.get("sequence_sha256", ""))
+    candidate_inputs = candidate.get("input_files", {})
+    candidate_contract = candidate.get("holdout_contract", {})
+    expected_directions = list(
+        calibration_plan.get("roles", {})
+        .get("p_holdout", {})
+        .get("direction_order", [])
+    )
+    if (
+        candidate.get("evidence_type")
+        != "mouse_effect_probe_a2_p_cal_candidate"
+        or candidate.get("status") != "VALID_P_CAL_CANDIDATE"
+        or candidate.get("physical_output_capability") is not False
+        or candidate.get("production_aim_changed") is not False
+        or candidate.get("run_role") != "p-cal"
+        or candidate.get("profile") != "dependency_calibration_a2_p_cal"
+        or str(candidate.get("scope_id", "")) != scope_id
+        or candidate.get("a2_dependency_gate_claimed") is not False
+        or candidate.get("holdout_required") is not True
+        or candidate.get("physical_b_prefix_candidate", {}).get(
+            "physical_b_authorized"
+        )
+        is not False
+        or candidate_contract.get("expected_profile")
+        != "dependency_calibration_a2_p_holdout"
+        or candidate_contract.get("uses_holdout_for_tuning") is not False
+        or candidate_contract.get("candidate_values_frozen_before_holdout")
+        is not True
+        or candidate_contract.get("holdout_failure_is_a2_red") is not True
+        or list(candidate_contract.get("direction_order", []))
+        != expected_directions
+        or len(candidate_sha256) != 64
+        or holdout_task.get("evidence_type") != "mouse_effect_probe_a2_task"
+        or holdout_task.get("status") != "PREPARED"
+        or holdout_task.get("run_role") != "p-holdout"
+        or holdout_task.get("profile")
+        != "dependency_calibration_a2_p_holdout"
+        or str(holdout_task.get("scope_id", "")) != scope_id
+        or not holdout_run_uuid
+        or len(holdout_sequence_sha256) != 64
+        or str(
+            holdout_task.get("calibration", {}).get(
+                "p_cal_candidate_sha256", ""
+            )
+        ).lower()
+        != candidate_sha256.lower()
+    ):
+        raise ValueError("P-HOLDOUT 未绑定同 scope 的冻结 VALID P-CAL candidate")
+
+    candidate_hash_bindings = {
+        "synthetic_calibration": "synthetic_calibration",
+        "zero_input_calibration": "zero_input_calibration",
+        "calibration_plan": "calibration_plan",
+        "physical_response": "calibration_response",
+    }
+    for candidate_name, current_name in candidate_hash_bindings.items():
+        frozen_sha256 = str(
+            candidate_inputs.get(candidate_name, {}).get("sha256", "")
+        ).lower()
+        current_sha256 = str(input_sha256.get(current_name, "")).lower()
+        if (
+            len(frozen_sha256) != 64
+            or len(current_sha256) != 64
+            or frozen_sha256 != current_sha256
+        ):
+            raise ValueError(
+                f"P-HOLDOUT 的 {candidate_name} 与冻结 candidate 输入哈希不一致"
+            )
+
+    calibration_binding = calibration_response.get("run_binding", {})
+    holdout_binding = holdout_response.get("run_binding", {})
+    calibration_sidecar_sha256 = str(
+        calibration_binding.get("sidecar_manifest_file_sha256", "")
+    )
+    holdout_sidecar_sha256 = str(
+        holdout_binding.get("sidecar_manifest_file_sha256", "")
+    )
+    calibration_analyzer_sha256 = str(
+        calibration_binding.get("analyzer_file_sha256", "")
+    )
+    holdout_analyzer_sha256 = str(
+        holdout_binding.get("analyzer_file_sha256", "")
+    )
+    calibration_source_name = str(
+        calibration_binding.get("capture_source_name", "")
+    )
+    holdout_source_name = str(holdout_binding.get("capture_source_name", ""))
+    if (
+        calibration_response.get("evidence_type")
+        != "mouse_effect_probe_a2_physical_background_response"
+        or calibration_response.get("status") != "VALID"
+        or calibration_response.get("run_role") != "p-cal"
+        or calibration_response.get("profile")
+        != "dependency_calibration_a2_p_cal"
+        or str(calibration_binding.get("run_uuid", ""))
+        != str(candidate.get("run_uuid", ""))
+        or str(calibration_binding.get("sequence_sha256", ""))
+        != str(candidate.get("sequence_sha256", ""))
+        or holdout_response.get("evidence_type")
+        != "mouse_effect_probe_a2_physical_background_response"
+        or holdout_response.get("status") != "VALID"
+        or holdout_response.get("run_role") != "p-holdout"
+        or holdout_response.get("profile")
+        != "dependency_calibration_a2_p_holdout"
+        or str(holdout_binding.get("run_uuid", "")) != holdout_run_uuid
+        or str(holdout_binding.get("sequence_sha256", ""))
+        != holdout_sequence_sha256
+        or str(calibration_binding.get("run_uuid", "")) == holdout_run_uuid
+        or int(calibration_binding.get("activation_epoch", 0)) <= 0
+        or int(holdout_binding.get("activation_epoch", 0)) <= 0
+        or int(calibration_binding.get("activation_epoch", 0))
+        == int(holdout_binding.get("activation_epoch", 0))
+        or len(calibration_sidecar_sha256) != 64
+        or len(holdout_sidecar_sha256) != 64
+        or calibration_sidecar_sha256 == holdout_sidecar_sha256
+        or len(calibration_analyzer_sha256) != 64
+        or len(holdout_analyzer_sha256) != 64
+        or calibration_analyzer_sha256 != holdout_analyzer_sha256
+        or not calibration_source_name
+        or calibration_source_name != holdout_source_name
+    ):
+        raise ValueError("P-HOLDOUT 未形成同 analyzer/source 的独立 Run/sidecar 证据")
+
+    pulse_responses = holdout_response.get("pulse_responses")
+    if not isinstance(pulse_responses, list):
+        raise ValueError("P-HOLDOUT 缺少 pulse response")
+    first_direction_by_block: dict[int, int] = {}
+    for response in pulse_responses:
+        block_id = int(response.get("block_id", 0))
+        first_direction_by_block.setdefault(
+            block_id, int(response.get("command_dx_counts", 0))
+        )
+    actual_directions = [
+        first_direction_by_block[key]
+        for key in sorted(first_direction_by_block)
+    ]
+    if actual_directions != expected_directions:
+        raise ValueError("P-HOLDOUT 未执行预注册的独立 BAAB 方向顺序")
+
+    observation = _observation_fields(observation_text)
+    if (
+        observation.get("Run UUID", "").strip("`") != holdout_run_uuid
+        or observation.get("Run role", "").strip("`") != "p-holdout"
+    ):
+        raise ValueError("P-HOLDOUT Observation 未绑定当前 Run UUID/role")
+
+    # 原角色、Run 和 candidate 绑定已经在上面 fail-closed 验证。这里仅复用同一
+    # 冻结像素算术派生 holdout metrics，不修改传入对象或 candidate。
+    metric_task = dict(holdout_task)
+    metric_task["run_role"] = "p-cal"
+    metric_task["profile"] = "dependency_calibration_a2_p_cal"
+    metric_response = dict(holdout_response)
+    metric_response["run_role"] = "p-cal"
+    metric_response["profile"] = "dependency_calibration_a2_p_cal"
+    measurement = build_physical_candidate(
+        synthetic_calibration,
+        zero_input_calibration,
+        calibration_plan,
+        metric_task,
+        metric_response,
+        holdout_rows,
+        observation_text=observation_text,
+        observation_sha256=observation_sha256,
+    )
+
+    tolerance = 1e-12
+    candidate_tail = int(
+        candidate.get("tail_support", {}).get("tail_upper_observed_lag", 0)
+    )
+    observed_tail = int(
+        measurement.get("tail_support", {}).get("tail_upper_observed_lag", 0)
+    )
+    candidate_mapping = float(
+        candidate.get("mapping_uncertainty", {}).get("upper_px", math.nan)
+    )
+    observed_mapping = float(
+        measurement.get("mapping_uncertainty", {}).get("upper_px", math.nan)
+    )
+    candidate_gain = float(
+        candidate.get("single_count_gain_upper_scope", {}).get(
+            "candidate_upper_px", math.nan
+        )
+    )
+    observed_gain = float(
+        measurement.get("single_count_gain_upper_scope", {}).get(
+            "candidate_upper_px", math.nan
+        )
+    )
+    candidate_margin = float(
+        candidate.get("witness_occlusion_margin", {}).get(
+            "usable_margin_lower_px", math.nan
+        )
+    )
+    observed_margin = float(
+        measurement.get("witness_occlusion_margin", {}).get(
+            "usable_margin_lower_px", math.nan
+        )
+    )
+    candidate_prefix = int(
+        candidate.get("physical_b_prefix_candidate", {}).get(
+            "allowed_prefix_counts", 0
+        )
+    )
+    observed_prefix = int(
+        measurement.get("physical_b_prefix_candidate", {}).get(
+            "allowed_prefix_counts", 0
+        )
+    )
+    if (
+        candidate_tail <= 0
+        or observed_tail <= 0
+        or not all(
+            math.isfinite(value)
+            for value in (
+                candidate_mapping,
+                observed_mapping,
+                candidate_gain,
+                observed_gain,
+                candidate_margin,
+                observed_margin,
+            )
+        )
+        or candidate_mapping < 0.0
+        or candidate_gain <= 0.0
+        or candidate_margin <= 0.0
+        or candidate_prefix <= 0
+    ):
+        raise ValueError("P-HOLDOUT candidate/measurement 比较值无效")
+
+    checks = {
+        "tail_not_exceeded": observed_tail <= candidate_tail,
+        "mapping_not_exceeded": observed_mapping <= candidate_mapping + tolerance,
+        "gain_not_exceeded": observed_gain <= candidate_gain + tolerance,
+        "margin_not_reduced": observed_margin + tolerance >= candidate_margin,
+        "prefix_not_reduced": observed_prefix >= candidate_prefix,
+    }
+    reason_by_check = {
+        "tail_not_exceeded": "INDEPENDENT_TAIL_SUPPORT_EXCEEDED",
+        "mapping_not_exceeded": "MAPPING_UNCERTAINTY_PX_EXCEEDED",
+        "gain_not_exceeded": "SINGLE_COUNT_GAIN_UPPER_SCOPE_EXCEEDED",
+        "margin_not_reduced": "WITNESS_OCCLUSION_MARGIN_REDUCED",
+        "prefix_not_reduced": "PHYSICAL_B_PREFIX_CANDIDATE_REDUCED",
+    }
+    invalid_reasons = [
+        reason_by_check[name]
+        for name, passed in checks.items()
+        if not passed
+    ]
+    green = not invalid_reasons
+    return {
+        "schema_version": 1,
+        "evidence_type": "mouse_effect_probe_a2_dependency_holdout_decision",
+        "status": "A2_DEPENDENCY_GREEN" if green else "A2_DEPENDENCY_RED",
+        "invalid_reasons": invalid_reasons,
+        "physical_output_capability": False,
+        "production_aim_changed": False,
+        "run_role": "p-holdout",
+        "profile": "dependency_calibration_a2_p_holdout",
+        "scope_id": scope_id,
+        "run_uuid": holdout_run_uuid,
+        "sequence_sha256": holdout_sequence_sha256,
+        "candidate_sha256": candidate_sha256.lower(),
+        "candidate_run_uuid": str(candidate.get("run_uuid", "")),
+        "candidate_values_changed": False,
+        "holdout_used_for_tuning": False,
+        "a2_dependency_gate_claimed": green,
+        "physical_b_authorized": False,
+        "independence": {
+            "different_run_uuid": True,
+            "different_activation_epoch": True,
+            "different_sidecar_manifest": True,
+            "same_analyzer": True,
+            "same_capture_source": True,
+            "direction_order": actual_directions,
+        },
+        "human_observation": measurement["human_observation"],
+        "comparisons": {
+            "tail_support": {
+                "candidate_upper_lag": candidate_tail,
+                "holdout_observed_upper_lag": observed_tail,
+                "passed": checks["tail_not_exceeded"],
+            },
+            "mapping_uncertainty": {
+                "candidate_upper_px": candidate_mapping,
+                "holdout_upper_px": observed_mapping,
+                "passed": checks["mapping_not_exceeded"],
+            },
+            "single_count_gain_upper_scope": {
+                "candidate_upper_px": candidate_gain,
+                "holdout_upper_px": observed_gain,
+                "passed": checks["gain_not_exceeded"],
+            },
+            "witness_occlusion_margin": {
+                "candidate_usable_margin_lower_px": candidate_margin,
+                "holdout_usable_margin_lower_px": observed_margin,
+                "passed": checks["margin_not_reduced"],
+            },
+            "physical_b_prefix_candidate": {
+                "candidate_allowed_prefix_counts": candidate_prefix,
+                "holdout_allowed_prefix_counts": observed_prefix,
+                "passed": checks["prefix_not_reduced"],
+                "physical_b_authorized": False,
+            },
+        },
+    }
+
+
 def _parse_roi(value: str) -> Roi:
     parts = value.split(",")
     if len(parts) != 4:
@@ -1846,6 +2171,22 @@ def _parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespa
     candidate.add_argument("--physical-rows-csv", type=pathlib.Path, required=True)
     candidate.add_argument("--observation", type=pathlib.Path, required=True)
     candidate.add_argument("--output", type=pathlib.Path, required=True)
+
+    holdout = subparsers.add_parser("holdout")
+    holdout.add_argument("--candidate", type=pathlib.Path, required=True)
+    holdout.add_argument(
+        "--synthetic-calibration", type=pathlib.Path, required=True
+    )
+    holdout.add_argument(
+        "--zero-input-calibration", type=pathlib.Path, required=True
+    )
+    holdout.add_argument("--calibration-plan", type=pathlib.Path, required=True)
+    holdout.add_argument("--calibration-response", type=pathlib.Path, required=True)
+    holdout.add_argument("--holdout-task", type=pathlib.Path, required=True)
+    holdout.add_argument("--holdout-response", type=pathlib.Path, required=True)
+    holdout.add_argument("--holdout-rows-csv", type=pathlib.Path, required=True)
+    holdout.add_argument("--observation", type=pathlib.Path, required=True)
+    holdout.add_argument("--output", type=pathlib.Path, required=True)
     return parser.parse_args(arguments)
 
 
@@ -1931,6 +2272,60 @@ def main(arguments: Sequence[str] | None = None) -> int:
             print(
                 "A2 P-CAL candidate VALID: "
                 f"gain_upper={result['single_count_gain_upper_scope']['candidate_upper_px']}, "
+                f"output={options.output.resolve()}"
+            )
+            return 0
+
+        if options.mode == "holdout":
+            input_paths = {
+                "candidate": options.candidate,
+                "synthetic_calibration": options.synthetic_calibration,
+                "zero_input_calibration": options.zero_input_calibration,
+                "calibration_plan": options.calibration_plan,
+                "calibration_response": options.calibration_response,
+                "holdout_task": options.holdout_task,
+                "holdout_response": options.holdout_response,
+                "holdout_rows_csv": options.holdout_rows_csv,
+                "observation": options.observation,
+            }
+            identities = {
+                name: _file_identity(path, name)
+                for name, path in input_paths.items()
+            }
+            with options.holdout_rows_csv.resolve().open(
+                "r", encoding="utf-8", newline=""
+            ) as source:
+                rows = list(csv.DictReader(source))
+            if not rows:
+                raise ValueError("P-HOLDOUT physical rows CSV 为空")
+            observation_text = options.observation.resolve().read_text(
+                encoding="utf-8"
+            )
+            result = evaluate_physical_holdout(
+                _read_json(options.candidate, "P-CAL candidate"),
+                _read_json(options.synthetic_calibration, "S0 synthetic calibration"),
+                _read_json(options.zero_input_calibration, "S1 zero-input calibration"),
+                _read_json(options.calibration_plan, "A2 calibration plan"),
+                _read_json(options.calibration_response, "P-CAL physical response"),
+                _read_json(options.holdout_task, "P-HOLDOUT task"),
+                _read_json(options.holdout_response, "P-HOLDOUT physical response"),
+                rows,
+                observation_text=observation_text,
+                observation_sha256=identities["observation"]["sha256"],
+                candidate_sha256=identities["candidate"]["sha256"],
+                input_sha256={
+                    name: identity["sha256"]
+                    for name, identity in identities.items()
+                },
+            )
+            result["input_files"] = identities
+            _write_new_text(
+                options.output,
+                json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
+                + "\n",
+            )
+            print(
+                f"A2 P-HOLDOUT {result['status']}: "
                 f"output={options.output.resolve()}"
             )
             return 0

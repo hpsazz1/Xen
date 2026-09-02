@@ -890,7 +890,11 @@ def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -
         "a2_dependency_gate_claimed": False,
         "run_binding": {
             "run_uuid": run_uuid,
+            "activation_epoch": 100,
             "sequence_sha256": sequence_sha256,
+            "sidecar_manifest_file_sha256": "1" * 64,
+            "analyzer_file_sha256": "2" * 64,
+            "capture_source_name": "fixture-source",
         },
         "geometry": {
             "image_width": 256,
@@ -944,6 +948,171 @@ def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -
            and candidate["physical_b_prefix_candidate"]["allowed_prefix_counts"] == 22,
            "几何额度必须从完整 support、mapping 与 gain candidate 计算")
 
+    candidate_sha256 = "c" * 64
+    input_sha256 = {
+        "synthetic_calibration": "d" * 64,
+        "zero_input_calibration": "e" * 64,
+        "calibration_plan": "f" * 64,
+        "calibration_response": "1" * 64,
+    }
+    candidate["input_files"] = {
+        "synthetic_calibration": {
+            "sha256": input_sha256["synthetic_calibration"]
+        },
+        "zero_input_calibration": {
+            "sha256": input_sha256["zero_input_calibration"]
+        },
+        "calibration_plan": {
+            "sha256": input_sha256["calibration_plan"]
+        },
+        "physical_response": {
+            "sha256": input_sha256["calibration_response"]
+        },
+    }
+    holdout_uuid = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+    holdout_sequence_sha256 = "3" * 64
+    holdout_task = json.loads(json.dumps(task))
+    holdout_task.update({
+        "run_role": "p-holdout",
+        "profile": "dependency_calibration_a2_p_holdout",
+        "run_uuid": holdout_uuid,
+        "sequence_sha256": holdout_sequence_sha256,
+        "calibration": {"p_cal_candidate_sha256": candidate_sha256},
+    })
+    holdout_observation = f"""# Physical A2 人工观察
+
+- Run UUID：`{holdout_uuid}`
+- Run role：`p-holdout`
+- 左右 witness 一致性：一致
+- 遮挡/scene cut：不存在
+- 异常/急停：无异常或急停
+- 人工结论：看到轻微视角偏移；没移动鼠标/WASD
+"""
+    holdout_physical = json.loads(json.dumps(physical))
+    holdout_physical.update({
+        "run_role": "p-holdout",
+        "profile": "dependency_calibration_a2_p_holdout",
+    })
+    holdout_physical["run_binding"].update({
+        "run_uuid": holdout_uuid,
+        "activation_epoch": 200,
+        "sequence_sha256": holdout_sequence_sha256,
+        "sidecar_manifest_file_sha256": "4" * 64,
+    })
+    holdout_rows = json.loads(json.dumps(rows))
+    holdout_first_directions = (-1, 1, 1, -1)
+    for pulse_index, response in enumerate(holdout_physical["pulse_responses"]):
+        block_index = pulse_index // 2
+        command = (
+            holdout_first_directions[block_index]
+            if pulse_index % 2 == 0
+            else -holdout_first_directions[block_index]
+        )
+        response["command_dx_counts"] = command
+        for row in holdout_rows:
+            if int(row["pulse_index"]) != pulse_index:
+                continue
+            row["command_dx_counts"] = command
+            if int(row["frame_lag"]) >= 2:
+                row["left_dx_px"] = -0.45 * command
+                row["right_dx_px"] = -0.45 * command
+    decision = MODULE.evaluate_physical_holdout(
+        candidate,
+        synthetic,
+        zero_input,
+        plan,
+        physical,
+        holdout_task,
+        holdout_physical,
+        holdout_rows,
+        observation_text=holdout_observation,
+        observation_sha256="5" * 64,
+        candidate_sha256=candidate_sha256,
+        input_sha256=input_sha256,
+    )
+    expect(decision["status"] == "A2_DEPENDENCY_GREEN"
+           and decision["a2_dependency_gate_claimed"] is True,
+           "独立 P-HOLDOUT 全部不越冻结 candidate 时才能形成 A2 dependency green")
+    expect(decision["candidate_values_changed"] is False
+           and decision["holdout_used_for_tuning"] is False
+           and decision["physical_b_authorized"] is False,
+           "holdout green 不得回调 candidate 或自动授权 Physical B")
+
+    try:
+        MODULE.evaluate_physical_holdout(
+            candidate,
+            synthetic,
+            zero_input,
+            plan,
+            physical,
+            holdout_task,
+            holdout_physical,
+            holdout_rows,
+            observation_text=observation,
+            observation_sha256="5" * 64,
+            candidate_sha256=candidate_sha256,
+            input_sha256=input_sha256,
+        )
+    except ValueError as exception:
+        expect("Observation" in str(exception),
+               "错 Run observation 必须以人工证据绑定原因拒绝")
+    else:
+        raise AssertionError("未绑定 P-HOLDOUT Run 身份的 observation 不得进入裁决")
+
+    missing_source_calibration = json.loads(json.dumps(physical))
+    missing_source_holdout = json.loads(json.dumps(holdout_physical))
+    missing_source_calibration["run_binding"].pop("capture_source_name")
+    missing_source_holdout["run_binding"].pop("capture_source_name")
+    try:
+        MODULE.evaluate_physical_holdout(
+            candidate,
+            synthetic,
+            zero_input,
+            plan,
+            missing_source_calibration,
+            holdout_task,
+            missing_source_holdout,
+            holdout_rows,
+            observation_text=holdout_observation,
+            observation_sha256="5" * 64,
+            candidate_sha256=candidate_sha256,
+            input_sha256=input_sha256,
+        )
+    except ValueError as exception:
+        expect("analyzer/source" in str(exception),
+               "缺失 capture source 身份必须以独立证据原因拒绝")
+    else:
+        raise AssertionError("空 capture source 不得冒充同源独立证据")
+
+    exceeded_rows = json.loads(json.dumps(holdout_rows))
+    for row in exceeded_rows:
+        if int(row["frame_lag"]) >= 2:
+            command = int(row["command_dx_counts"])
+            row["left_dx_px"] = -0.8 * command
+            row["right_dx_px"] = -0.8 * command
+    red_decision = MODULE.evaluate_physical_holdout(
+        candidate,
+        synthetic,
+        zero_input,
+        plan,
+        physical,
+        holdout_task,
+        holdout_physical,
+        exceeded_rows,
+        observation_text=holdout_observation,
+        observation_sha256="5" * 64,
+        candidate_sha256=candidate_sha256,
+        input_sha256=input_sha256,
+    )
+    expect(red_decision["status"] == "A2_DEPENDENCY_RED"
+           and red_decision["a2_dependency_gate_claimed"] is False
+           and "SINGLE_COUNT_GAIN_UPPER_SCOPE_EXCEEDED"
+           in red_decision["invalid_reasons"],
+           "held-out gain 超过冻结 candidate 时必须持久化 A2 red")
+    expect(red_decision["candidate_values_changed"] is False
+           and red_decision["holdout_used_for_tuning"] is False,
+           "holdout red 也不得扩大 candidate 或并回 P-CAL")
+
     with tempfile.TemporaryDirectory(prefix="xen-a2-p-cal-candidate-cli-") as directory:
         root = pathlib.Path(directory)
         inputs = {
@@ -980,6 +1149,48 @@ def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -
                and emitted["input_files"]["calibration_plan"]["sha256"]
                == hashlib.sha256((root / "plan.json").read_bytes()).hexdigest(),
                "candidate CLI 必须原子发布并绑定全部输入身份")
+
+        emitted_candidate_sha256 = hashlib.sha256(
+            output_path.read_bytes()
+        ).hexdigest()
+        holdout_task["calibration"]["p_cal_candidate_sha256"] = (
+            emitted_candidate_sha256
+        )
+        _write_json(root / "holdout-task.json", holdout_task)
+        _write_json(root / "holdout-response.json", holdout_physical)
+        holdout_observation_path = root / "HOLDOUT-OBSERVATION.md"
+        holdout_observation_path.write_text(
+            holdout_observation, encoding="utf-8"
+        )
+        holdout_rows_path = root / "holdout-response.csv"
+        with holdout_rows_path.open("w", encoding="utf-8", newline="") as output:
+            writer = csv.DictWriter(
+                output, fieldnames=list(holdout_rows[0].keys())
+            )
+            writer.writeheader()
+            writer.writerows(holdout_rows)
+        decision_path = root / "holdout-decision.json"
+        holdout_exit_code = MODULE.main([
+            "holdout",
+            "--candidate", str(output_path),
+            "--synthetic-calibration", str(root / "synthetic-calibration.json"),
+            "--zero-input-calibration", str(root / "zero-input-calibration.json"),
+            "--calibration-plan", str(root / "plan.json"),
+            "--calibration-response", str(root / "physical-response.json"),
+            "--holdout-task", str(root / "holdout-task.json"),
+            "--holdout-response", str(root / "holdout-response.json"),
+            "--holdout-rows-csv", str(holdout_rows_path),
+            "--observation", str(holdout_observation_path),
+            "--output", str(decision_path),
+        ])
+        emitted_decision = json.loads(
+            decision_path.read_text(encoding="utf-8")
+        )
+        expect(holdout_exit_code == 0
+               and emitted_decision["status"] == "A2_DEPENDENCY_GREEN"
+               and emitted_decision["input_files"]["candidate"]["sha256"]
+               == emitted_candidate_sha256,
+               "holdout CLI 必须原子发布并绑定 candidate 与全部输入身份")
 
     censored_rows = json.loads(json.dumps(rows))
     for row in censored_rows:
