@@ -1,5 +1,6 @@
 #include "mouse_effect_probe/mouse_effect_probe.h"
 
+#include <array>
 #include <cstdint>
 #include <chrono>
 #include <filesystem>
@@ -405,6 +406,136 @@ void test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline() {
                    !event.protocol_ack_received,
                "A2 S1 peak hold event 必须证明零命令且未触发 backend/ACK");
     }
+}
+
+void test_physical_b_primary_sequence_is_frozen_complete_and_bounded() {
+    mouse_effect_probe::PhysicalBPrimarySequenceRequest request;
+    request.guard_sample_count = 32;
+    request.lfsr_order = 6;
+    request.feedback_mask = 0x27;
+    request.seed = 1;
+    request.phase = 49;
+    request.offline_sequence_semantic_sha256 =
+        "2132219c011c0aab75b30c246c37375496a46b4cd83b2455d9756c2f9c9c31e2";
+    mouse_effect_probe::MouseEffectProbeSequence sequence;
+    std::string error;
+    expect(mouse_effect_probe::make_physical_b_primary_sequence(
+               request, sequence, error),
+           "冻结 Physical B Primary recurrence 必须可生成: " + error);
+    expect(mouse_effect_probe::validate_mouse_effect_probe_sequence(
+               sequence, error),
+           "Physical B Primary sequence 必须通过公开 validator: " + error);
+    expect(sequence.schema == 4 &&
+               sequence.profile == "physical_b_prbs_primary" &&
+               sequence.samples.size() == 416U &&
+               sequence.blocks.size() == 4U &&
+               sequence.net_x_counts == 0 &&
+               sequence.max_abs_prefix_x_counts == 1U &&
+               sequence.sequence_sha256.size() == 64U,
+           "Physical B Primary 必须固定 schema/profile/sample/block/net/prefix");
+
+    const std::array<int, 13> expected_first_commands{
+        1, 0, -1, 0, 0, 1, 0, -1, 0, 1, 0, 0, -1,
+    };
+    for (std::size_t index = 0; index < sequence.samples.size(); ++index) {
+        const auto& sample = sequence.samples[index];
+        expect(sample.sample_index == index &&
+                   sample.dx_counts >= -1 && sample.dx_counts <= 1 &&
+                   sample.dy_counts == 0,
+               "Physical B sample 必须连续、X-only 且单 sample 不超过 1 count");
+        if (index < 32U) {
+            expect(sample.block_id == 0U &&
+                       sample.phase ==
+                           mouse_effect_probe::ProbeSamplePhase::GUARD &&
+                       sample.dx_counts == 0,
+                   "Physical B 必须以完整 32-sample zero guard 开始");
+        }
+    }
+    for (std::size_t index = 0; index < expected_first_commands.size(); ++index) {
+        const auto& sample = sequence.samples[32U + index];
+        expect(sample.phase ==
+                   mouse_effect_probe::ProbeSamplePhase::PERIOD &&
+                   sample.dx_counts == expected_first_commands[index],
+               "C++ recurrence/difference schedule 必须与冻结 offline Primary 开头一致");
+    }
+
+    const std::array<mouse_effect_probe::ProbeSequenceBlockRole, 4> roles{
+        mouse_effect_probe::ProbeSequenceBlockRole::ESTIMATION,
+        mouse_effect_probe::ProbeSequenceBlockRole::ESTIMATION,
+        mouse_effect_probe::ProbeSequenceBlockRole::WITHIN_RUN_VALIDATION,
+        mouse_effect_probe::ProbeSequenceBlockRole::WITHIN_RUN_VALIDATION,
+    };
+    const std::array<mouse_effect_probe::ProbeSequenceBlockPolarity, 4>
+        polarities{
+            mouse_effect_probe::ProbeSequenceBlockPolarity::NORMAL,
+            mouse_effect_probe::ProbeSequenceBlockPolarity::INVERTED,
+            mouse_effect_probe::ProbeSequenceBlockPolarity::NORMAL,
+            mouse_effect_probe::ProbeSequenceBlockPolarity::INVERTED,
+        };
+    for (std::size_t index = 0; index < sequence.blocks.size(); ++index) {
+        const auto& block = sequence.blocks[index];
+        expect(block.block_id == index + 1U &&
+                   block.pair_index == index / 2U + 1U &&
+                   block.role == roles[index] &&
+                   block.polarity == polarities[index] &&
+                   block.period_sample_count == 63U &&
+                   block.sample_count == 64U,
+               "Physical B block 必须保留完整 period/return 与整 pair 角色");
+    }
+
+    TemporaryDirectory temporary;
+    const auto path = temporary.path() / "physical-b-primary.json";
+    expect(mouse_effect_probe::write_mouse_effect_probe_sequence(
+               path, sequence, error),
+           "Physical B Primary sequence 必须可原子发布: " + error);
+    mouse_effect_probe::MouseEffectProbeSequence round_trip;
+    expect(mouse_effect_probe::read_mouse_effect_probe_sequence(
+               path, round_trip, error) &&
+               round_trip.sequence_sha256 == sequence.sequence_sha256 &&
+               round_trip.physical_b_primary_request.
+                   offline_sequence_semantic_sha256 ==
+               request.offline_sequence_semantic_sha256,
+            "Physical B Primary schema 4 必须精确 round-trip: " + error);
+
+    auto options = execution_options();
+    options.dispatch_mode =
+        mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B;
+    auto mouse = std::make_shared<FakeMouseController>();
+    mouse_effect_probe::MouseEffectProbeExecutor executor;
+    expect(executor.start(options, round_trip, mouse, error),
+           "Physical B 必须复用同一 fail-closed executor: " + error);
+    for (std::size_t index = 0; index < round_trip.samples.size(); ++index) {
+        expect(executor.consume_source_frame(
+                   source_frame(2'000 + index), error),
+               "Physical B 必须严格逐 source frame 消费且不追发: " + error);
+    }
+    expect(executor.result().complete &&
+               executor.result().dispatch_mode ==
+                   mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
+               executor.result().events.size() == 416U &&
+               !mouse->commands().empty() &&
+               executor.result().cumulative_requested_x_counts == 0 &&
+               executor.result().cumulative_backend_completed_x_counts == 0,
+           "Physical B 正常完成必须保留完整事件账本并回到净零");
+
+    auto safety_mouse = std::make_shared<FakeMouseController>();
+    mouse_effect_probe::MouseEffectProbeExecutor safety_released;
+    expect(safety_released.start(
+               options, round_trip, safety_mouse, error),
+           "Physical B deadman 回归 executor 应启动成功: " + error);
+    auto unsafe = source_frame(3'000);
+    unsafe.safety_allowed = false;
+    expect(!safety_released.consume_source_frame(unsafe, error) &&
+               safety_released.result().stop_reason ==
+                   mouse_effect_probe::ProbeStopReason::SAFETY_RELEASED &&
+               safety_mouse->commands().empty(),
+           "Physical B deadman 释放必须在任何命令前停发且不补偿");
+
+    auto drifted = request;
+    drifted.phase = 48;
+    expect(!mouse_effect_probe::make_physical_b_primary_sequence(
+               drifted, sequence, error),
+           "当前 Primary seam 必须拒绝未授权 phase/recurrence 漂移");
 }
 
 void test_sequence_file_round_trip_rejects_overwrite_and_tampering() {
@@ -906,6 +1037,7 @@ int main() {
     test_sparse_pulse_sequence_is_x_only_balanced_and_order_swapped();
     test_a2_dependency_calibration_sequences_are_balanced_and_independent();
     test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline();
+    test_physical_b_primary_sequence_is_frozen_complete_and_bounded();
     test_sequence_file_round_trip_rejects_overwrite_and_tampering();
     test_executor_consumes_one_sample_per_frame_and_never_catches_up();
     test_executor_failure_stops_without_compensation();

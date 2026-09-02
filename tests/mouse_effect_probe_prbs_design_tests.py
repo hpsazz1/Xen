@@ -22,6 +22,115 @@ def expect(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def semantic_sha256(value: dict, field: str) -> str:
+    payload = dict(value)
+    payload.pop(field, None)
+    return hashlib.sha256(json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
+def json_bytes(value: dict) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, indent=2,
+                       allow_nan=False) + "\n").encode("utf-8")
+
+
+def valid_physical_a_analysis() -> dict:
+    return {
+        "status": "VALID",
+        "machine_visible_effect_observed": True,
+        "human_physical_acceptance": "NOT_INFERRED_BY_ANALYZER",
+        "method": {"timestamp_semantic": "NDI_SDK_SUBMISSION_NOT_EXPOSURE"},
+        "run_binding": {
+            "run_uuid": "fixture-run",
+            "sequence_sha256": "a" * 64,
+        },
+        "geometry": {
+            "left_roi": {"left_margin_px": 16, "right_margin_px": 208},
+            "right_roi": {"left_margin_px": 208, "right_margin_px": 16},
+        },
+        "zero_input_baseline": {
+            "left_exact_state_count": 1,
+            "right_exact_state_count": 1,
+        },
+        "pulse_responses": [
+            {"onset": {"first_changed_frame_lag": 4},
+             "x_px_per_count": 0.55}
+            for _ in range(4)
+        ],
+        "witness_state_summary": {"statistical_independence_claimed": False},
+    }
+
+
+def valid_a2_dependency_decision() -> dict:
+    return {
+        "schema_version": 1,
+        "evidence_type": "mouse_effect_probe_a2_dependency_holdout_decision",
+        "status": "A2_DEPENDENCY_GREEN",
+        "invalid_reasons": [],
+        "physical_output_capability": False,
+        "production_aim_changed": False,
+        "run_role": "p-holdout",
+        "profile": "dependency_calibration_a2_p_holdout",
+        "scope_id": "b" * 64,
+        "run_uuid": "6056cd77-5e96-4276-9278-7e3b6c6ea0a2",
+        "sequence_sha256": "c" * 64,
+        "candidate_sha256": "d" * 64,
+        "candidate_run_uuid": "f00d86dc-9d2f-4d5b-9dfb-eec2bc3c56d0",
+        "candidate_values_changed": False,
+        "holdout_used_for_tuning": False,
+        "a2_dependency_gate_claimed": True,
+        "physical_b_authorized": False,
+        "independence": {
+            "different_run_uuid": True,
+            "different_activation_epoch": True,
+            "different_sidecar_manifest": True,
+            "same_analyzer": True,
+            "same_capture_source": True,
+        },
+        "human_observation": {
+            "observation_sha256": "e" * 64,
+            "visible_effect_reported": True,
+            "manual_mouse_or_wasd_used": False,
+            "left_right_witness_consistent": True,
+            "occlusion_or_scene_cut_reported": False,
+            "anomaly_or_emergency_stop_reported": False,
+        },
+        "comparisons": {
+            "tail_support": {
+                "candidate_upper_lag": 7,
+                "holdout_observed_upper_lag": 5,
+                "passed": True,
+            },
+            "mapping_uncertainty": {
+                "candidate_upper_px": 1.342895110591,
+                "holdout_upper_px": 1.332698341823,
+                "passed": True,
+            },
+            "single_count_gain_upper_scope": {
+                "candidate_upper_px": 1.342895105713,
+                "holdout_upper_px": 1.332698363329,
+                "passed": True,
+            },
+            "witness_occlusion_margin": {
+                "candidate_usable_margin_lower_px": 14.657104894287,
+                "holdout_usable_margin_lower_px": 14.667301636671,
+                "passed": True,
+            },
+            "physical_b_prefix_candidate": {
+                "candidate_allowed_prefix_counts": 9,
+                "holdout_allowed_prefix_counts": 10,
+                "passed": True,
+                "physical_b_authorized": False,
+            },
+        },
+    }
+
+
 def test_maximum_length_period_uses_explicit_recurrence() -> None:
     bits = MODULE.generate_maximum_length_period(
         order=3,
@@ -319,10 +428,163 @@ def test_cli_binds_source_and_refuses_artifact_overwrite() -> None:
                "既有设计 artifact 必须拒绝覆盖且保持字节不变")
 
 
+def test_primary_prepare_plan_binds_frozen_design_and_a2_green() -> None:
+    design = MODULE.design_physical_b_candidates(
+        valid_physical_a_analysis(),
+        orders=[5, 6, 7],
+        horizons=[4, 8, 16, 32],
+        guard_sample_count=32,
+    )
+    design["design_semantic_sha256"] = semantic_sha256(
+        design, "design_semantic_sha256")
+    design_content = json_bytes(design)
+    decision = valid_a2_dependency_decision()
+    decision_content = json_bytes(decision)
+
+    plan = MODULE.bind_physical_b_primary_prepare_plan(
+        design,
+        design_content,
+        hashlib.sha256(design_content).hexdigest(),
+        decision,
+        decision_content,
+        hashlib.sha256(decision_content).hexdigest(),
+    )
+
+    sequence = plan["primary_sequence"]
+    gate = plan["physical_b_primary_prepare_gate"]
+    expect(plan["status"] == "READY_FOR_PHYSICAL_B_PRIMARY_PREPARE" and
+           plan["evidence_type"] ==
+           "mouse_effect_probe_physical_b_primary_f0" and
+           plan["physical_output_capability"] is False and
+           plan["physical_b_launch_authorized"] is False and
+           plan["production_aim_changed"] is False,
+           "F0 只能授权后续 Primary Prepare，不能携带 Launch 或生产 Aim 能力")
+    expect(plan["model_contract"]["identification_input_definition"] ==
+           "cumulative_position_counts" and
+           plan["model_contract"]["actuator_audit_input"] ==
+           "completed_command_dx_counts" and
+           plan["candidate_horizons"] == [4, 8, 16, 32] and
+           plan["deletion_control_horizons"] == [4] and
+           plan["acceptance_eligible_horizons"] == [8, 16, 32],
+           "A2 tail=7 必须只排除 H=4，不能事后重选输入定义或 recurrence")
+    expect(plan["analysis_contract"]["contract_semantic_sha256"] ==
+           plan["analyzer"]["contract_semantic_sha256"] and
+           plan["analyzer"]["file"] ==
+           "analyze_mouse_effect_probe_b.py" and
+           len(plan["analyzer"]["file_sha256"]) == 64 and
+           plan["analysis_contract"]["selection"]
+               ["selected_must_strictly_beat_h4"] is True and
+           plan["physical_b_primary_prepare_gate"]
+               ["mapping_uncertainty_upper_px"] == 1.342895110591,
+           "F0 必须绑定可执行 analyzer、精确 selection 规则和 A2 mapping budget")
+    expect(sequence["profile"] == "physical_b_prbs_primary" and
+           sequence["offline_sequence_semantic_sha256"] ==
+           design["selected_candidate"]["sequence"]
+                 ["sequence_semantic_sha256"] and
+           sequence["sample_count"] == 416 and
+           sequence["max_abs_prefix_x_counts"] == 1 and
+           sequence["pair_roles"] ==
+           ["estimation", "within_run_validation"] and
+           sequence["lfsr"]["feedback_mask"] == 0x27 and
+           sequence["lfsr"]["phase"] == 49,
+           "Primary F0 必须原样绑定已冻结 exact sequence 与整 pair 角色")
+    expect(gate["ready"] is True and
+           gate["a2_tail_upper_lag"] == 7 and
+           gate["guard_sample_count"] == 32 and
+           gate["actual_prefix_counts"] == 1 and
+           gate["allowed_prefix_counts"] == 9 and
+           gate["holdout_used_for_tuning"] is False,
+           "A2 green、guard、prefix 与 holdout 禁调参必须同时闭合")
+    expect(plan["cross_run_holdout"]["preregistered"] is True and
+           plan["cross_run_holdout"]["prepare_allowed"] is False and
+           plan["cross_run_holdout"]["sequence_semantic_sha256"] ==
+           design["cross_run_holdout_candidate"]["sequence"]
+                 ["sequence_semantic_sha256"],
+           "cross-Run recurrence 只能预注册，当前不得物化或 Prepare")
+    expect(plan["f0_semantic_sha256"] ==
+           semantic_sha256(plan, "f0_semantic_sha256"),
+           "F0 必须有可复算的规范语义 SHA-256")
+
+    tuned = valid_a2_dependency_decision()
+    tuned["holdout_used_for_tuning"] = True
+    tuned_content = json_bytes(tuned)
+    rejected = False
+    try:
+        MODULE.bind_physical_b_primary_prepare_plan(
+            design,
+            design_content,
+            hashlib.sha256(design_content).hexdigest(),
+            tuned,
+            tuned_content,
+            hashlib.sha256(tuned_content).hexdigest(),
+        )
+    except ValueError:
+        rejected = True
+    expect(rejected, "使用 holdout 调参的 A2 decision 必须 fail closed")
+
+
+def test_primary_prepare_plan_cli_is_bound_and_refuses_overwrite() -> None:
+    design = MODULE.design_physical_b_candidates(
+        valid_physical_a_analysis(),
+        orders=[5, 6, 7],
+        horizons=[4, 8, 16, 32],
+        guard_sample_count=32,
+    )
+    design["design_semantic_sha256"] = semantic_sha256(
+        design, "design_semantic_sha256")
+    decision = valid_a2_dependency_decision()
+    with tempfile.TemporaryDirectory(prefix="xen-probe-b-f0-") as directory:
+        root = pathlib.Path(directory)
+        design_path = root / "offline-design.json"
+        decision_path = root / "a2-decision.json"
+        output_path = root / "primary-f0.json"
+        design_content = json_bytes(design)
+        decision_content = json_bytes(decision)
+        design_path.write_bytes(design_content)
+        decision_path.write_bytes(decision_content)
+        arguments = [
+            "bind-primary",
+            "--offline-design", str(design_path),
+            "--expected-offline-design-sha256",
+            hashlib.sha256(design_content).hexdigest(),
+            "--a2-decision", str(decision_path),
+            "--expected-a2-decision-sha256",
+            hashlib.sha256(decision_content).hexdigest(),
+            "--output", str(output_path),
+        ]
+        expect(MODULE.main(arguments) == 0 and output_path.is_file(),
+               "bind-primary CLI 必须发布不可变 F0 artifact")
+        artifact_bytes = output_path.read_bytes()
+        artifact = json.loads(artifact_bytes)
+        expect(artifact["source_offline_design"]["path"] ==
+               str(design_path) and
+               artifact["source_a2_dependency_decision"]["path"] ==
+               str(decision_path) and
+               artifact["f0_semantic_sha256"] ==
+               semantic_sha256(artifact, "f0_semantic_sha256"),
+               "CLI F0 必须绑定绝对源路径、文件哈希与可复算语义 SHA")
+        expect(MODULE.main(arguments) == 1 and
+               output_path.read_bytes() == artifact_bytes,
+               "F0 输出已存在时必须拒绝覆盖并保持字节不变")
+
+        wrong_output = root / "wrong-hash.json"
+        wrong_arguments = list(arguments)
+        wrong_arguments[wrong_arguments.index("--output") + 1] = \
+            str(wrong_output)
+        wrong_arguments[
+            wrong_arguments.index(
+                "--expected-a2-decision-sha256") + 1] = "0" * 64
+        expect(MODULE.main(wrong_arguments) == 1 and
+               not wrong_output.exists(),
+               "A2 decision expected SHA 不匹配时不得发布 F0")
+
+
 if __name__ == "__main__":
     test_maximum_length_period_uses_explicit_recurrence()
     test_candidate_definitions_do_not_mix_command_and_position()
     test_period_audit_reports_exact_rank_singular_values_and_frequency()
     test_design_selects_bounded_position_input_and_keeps_prepare_blocked()
     test_cli_binds_source_and_refuses_artifact_overwrite()
+    test_primary_prepare_plan_binds_frozen_design_and_a2_green()
+    test_primary_prepare_plan_cli_is_bound_and_refuses_overwrite()
     print("Mouse Effect Probe PRBS design 测试全部通过。")

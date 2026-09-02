@@ -1224,6 +1224,16 @@ if(BUILD_TESTING)
     if(NOT XEN_POWERSHELL7_EXECUTABLE)
         message(FATAL_ERROR "PowerShell 7 executable not found: pwsh")
     endif()
+    find_program(XEN_PYTHON_EXECUTABLE NAMES python python3)
+    if(NOT XEN_PYTHON_EXECUTABLE)
+        message(FATAL_ERROR "Python executable not found: python or python3")
+    endif()
+    add_test(NAME mouse_effect_probe_prbs_design_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_prbs_design_tests.py")
+    add_test(NAME mouse_effect_probe_b_analysis_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_analysis_tests.py")
     # 固定 powershell.exe 仍会继承调用方的 PSModulePath。统一清除该变量，
     # 让 Windows PowerShell 5 按自身 PSHOME 重建系统模块路径；cmake -E env
     # 只改变测试子进程，不修改调用 CTest 的父环境。
@@ -1287,6 +1297,34 @@ if(BUILD_TESTING)
         -ToolRoot "$<TARGET_FILE_DIR:xen_mouse_effect_probe>"
         -TestRoot
             "${CMAKE_BINARY_DIR}/mouse-effect-probe-a2-prepare-integration-tests")
+    xen_add_windows_powershell_test(
+        mouse_effect_probe_b_prepare_contract_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_prepare_contract_tests.ps1"
+        -PrepareScript
+            "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_b.ps1"
+        -LaunchScript
+            "${PROJECT_SOURCE_DIR}/scripts/launch_mouse_effect_probe_a.ps1")
+    xen_add_windows_powershell_test(
+        mouse_effect_probe_b_prepare_integration_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_prepare_integration_tests.ps1"
+        -PrepareScript
+            "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_b.ps1"
+        -ToolRoot "$<TARGET_FILE_DIR:xen_mouse_effect_probe>"
+        -PythonExecutable "${XEN_PYTHON_EXECUTABLE}"
+        -DesignerScript
+            "${PROJECT_SOURCE_DIR}/scripts/design_mouse_effect_probe_prbs.py"
+        -AnalyzerScript
+            "${PROJECT_SOURCE_DIR}/scripts/analyze_mouse_effect_probe_b.py"
+        -TestRoot
+            "${CMAKE_BINARY_DIR}/mouse-effect-probe-b-prepare-integration-tests")
+    xen_add_windows_powershell_test(
+        mouse_effect_probe_b_publish_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_publish_tests.ps1"
+        -PublishScript
+            "${PROJECT_SOURCE_DIR}/scripts/publish_mouse_effect_probe_b.ps1"
+        -TestRoot
+            "${CMAKE_BINARY_DIR}/mouse-effect-probe-b-publish-tests"
+        -GitExecutable "${GIT_EXECUTABLE}")
     xen_add_windows_powershell_test(obs_capture_binding_tests
         "${PROJECT_SOURCE_DIR}/tests/obs_capture_binding_tests.ps1"
         -BindingScript "${PROJECT_SOURCE_DIR}/scripts/export_obs_capture_binding.ps1"

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -24,6 +25,7 @@ namespace {
 constexpr std::uint32_t kSequenceSchema = 1;
 constexpr std::uint32_t kDependencyCalibrationSequenceSchema = 2;
 constexpr std::uint32_t kS1LivenessSequenceSchema = 3;
+constexpr std::uint32_t kPhysicalBPrimarySequenceSchema = 4;
 constexpr std::string_view kSparsePulseProfile = "sparse_pulse_a";
 constexpr std::string_view kDependencyCalibrationPrimaryProfile =
     "dependency_calibration_a2_p_cal";
@@ -33,6 +35,15 @@ constexpr std::string_view kS1LivenessPrimaryProfile =
     "dependency_calibration_a2_s1_primary";
 constexpr std::string_view kS1LivenessValidationProfile =
     "dependency_calibration_a2_s1_validation";
+constexpr std::string_view kPhysicalBPrimaryProfile =
+    "physical_b_prbs_primary";
+constexpr std::uint64_t kPhysicalBPrimaryGuardSamples = 32;
+constexpr std::uint32_t kPhysicalBPrimaryLfsrOrder = 6;
+constexpr std::uint32_t kPhysicalBPrimaryFeedbackMask = 0x27;
+constexpr std::uint64_t kPhysicalBPrimarySeed = 1;
+constexpr std::uint64_t kPhysicalBPrimaryPhase = 49;
+constexpr std::string_view kPhysicalBPrimaryOfflineSequenceSha256 =
+    "2132219c011c0aab75b30c246c37375496a46b4cd83b2455d9756c2f9c9c31e2";
 constexpr std::uint64_t kMaximumSequenceSamples = 1'000'000;
 constexpr std::uint64_t kMaximumDependencyCalibrationBlocks = 64;
 constexpr std::uint64_t kMaximumS1LivenessSamples = 2'400;
@@ -164,6 +175,29 @@ bool expected_s1_liveness_sample_count(
     }
     output = total;
     return true;
+}
+
+bool same_physical_b_primary_request(
+        const PhysicalBPrimarySequenceRequest& first,
+        const PhysicalBPrimarySequenceRequest& second) noexcept {
+    return first.guard_sample_count == second.guard_sample_count &&
+           first.lfsr_order == second.lfsr_order &&
+           first.feedback_mask == second.feedback_mask &&
+           first.seed == second.seed &&
+           first.phase == second.phase &&
+           first.offline_sequence_semantic_sha256 ==
+               second.offline_sequence_semantic_sha256;
+}
+
+bool valid_physical_b_primary_request(
+        const PhysicalBPrimarySequenceRequest& request) noexcept {
+    return request.guard_sample_count == kPhysicalBPrimaryGuardSamples &&
+           request.lfsr_order == kPhysicalBPrimaryLfsrOrder &&
+           request.feedback_mask == kPhysicalBPrimaryFeedbackMask &&
+           request.seed == kPhysicalBPrimarySeed &&
+           request.phase == kPhysicalBPrimaryPhase &&
+           request.offline_sequence_semantic_sha256 ==
+               kPhysicalBPrimaryOfflineSequenceSha256;
 }
 
 void append_sample(MouseEffectProbeSequence& sequence,
@@ -380,17 +414,164 @@ bool build_s1_liveness_sequence(
     return true;
 }
 
+bool generate_physical_b_primary_period(
+        const PhysicalBPrimarySequenceRequest& request,
+        std::vector<int>& bits,
+        std::string& error) {
+    if (!valid_physical_b_primary_request(request)) {
+        set_error(error,
+            "Physical B Primary request 与冻结 F0 recurrence/guard/SHA 不一致");
+        return false;
+    }
+    const std::uint64_t expected_period =
+        (std::uint64_t{1} << request.lfsr_order) - 1U;
+    std::uint64_t state = request.seed;
+    std::vector<bool> seen(
+        static_cast<std::size_t>(std::uint64_t{1} << request.lfsr_order),
+        false);
+    std::vector<int> unshifted;
+    unshifted.reserve(static_cast<std::size_t>(expected_period));
+    for (std::uint64_t index = 0; index < expected_period; ++index) {
+        if (state == 0 || seen[static_cast<std::size_t>(state)]) {
+            set_error(error,
+                "Physical B Primary recurrence 未覆盖完整非零状态周期");
+            return false;
+        }
+        seen[static_cast<std::size_t>(state)] = true;
+        unshifted.push_back(static_cast<int>(state & 1U));
+        const auto feedback = static_cast<std::uint64_t>(
+            std::popcount(state & request.feedback_mask) & 1U);
+        state = (state >> 1U) |
+            (feedback << (request.lfsr_order - 1U));
+    }
+    if (state != request.seed) {
+        set_error(error, "Physical B Primary recurrence 未回到冻结 seed");
+        return false;
+    }
+    const auto offset = static_cast<std::size_t>(
+        request.phase % expected_period);
+    bits.clear();
+    bits.reserve(unshifted.size());
+    bits.insert(bits.end(), unshifted.begin() + offset, unshifted.end());
+    bits.insert(bits.end(), unshifted.begin(), unshifted.begin() + offset);
+    error.clear();
+    return true;
+}
+
+void append_physical_b_primary_block(
+        MouseEffectProbeSequence& sequence,
+        std::uint64_t block_id,
+        std::uint64_t pair_index,
+        ProbeSequenceBlockRole role,
+        ProbeSequenceBlockPolarity polarity,
+        std::span<const int> bits,
+        int& position_x) {
+    ProbeSequenceBlock block;
+    block.block_id = block_id;
+    block.pair_index = pair_index;
+    block.role = role;
+    block.polarity = polarity;
+    block.first_sample_index = sequence.samples.size();
+    block.period_sample_count = bits.size();
+    const bool inverted = polarity == ProbeSequenceBlockPolarity::INVERTED;
+    for (const int bit : bits) {
+        const int target_position = inverted ? -bit : bit;
+        append_sample(
+            sequence, block_id,
+            inverted ? ProbeSamplePhase::INVERTED_PERIOD
+                     : ProbeSamplePhase::PERIOD,
+            target_position - position_x);
+        position_x = target_position;
+    }
+    append_sample(sequence, block_id, ProbeSamplePhase::RETURN_TO_ZERO,
+                  -position_x);
+    position_x = 0;
+    block.sample_count = sequence.samples.size() - block.first_sample_index;
+    sequence.blocks.push_back(block);
+}
+
+bool build_physical_b_primary_sequence(
+        const PhysicalBPrimarySequenceRequest& request,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) {
+    std::vector<int> bits;
+    if (!generate_physical_b_primary_period(request, bits, error)) {
+        return false;
+    }
+    constexpr std::uint64_t kPairCount = 2;
+    const std::uint64_t per_block = bits.size() + 1U;
+    const std::uint64_t expected_sample_count =
+        request.guard_sample_count + kPairCount * 2U *
+            (per_block + request.guard_sample_count);
+    if (expected_sample_count > kMaximumSequenceSamples) {
+        set_error(error, "Physical B Primary sample count 超出固定容量");
+        return false;
+    }
+
+    sequence = {};
+    sequence.schema = kPhysicalBPrimarySequenceSchema;
+    sequence.profile = kPhysicalBPrimaryProfile;
+    sequence.physical_b_primary_request = request;
+    sequence.samples.reserve(static_cast<std::size_t>(expected_sample_count));
+    sequence.blocks.reserve(4U);
+    append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
+
+    int position_x = 0;
+    std::uint64_t block_id = 1;
+    for (std::uint64_t pair_index = 1;
+         pair_index <= kPairCount; ++pair_index) {
+        const auto role = pair_index == 1U
+            ? ProbeSequenceBlockRole::ESTIMATION
+            : ProbeSequenceBlockRole::WITHIN_RUN_VALIDATION;
+        append_physical_b_primary_block(
+            sequence, block_id++, pair_index, role,
+            ProbeSequenceBlockPolarity::NORMAL, bits, position_x);
+        append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                     request.guard_sample_count);
+        append_physical_b_primary_block(
+            sequence, block_id++, pair_index, role,
+            ProbeSequenceBlockPolarity::INVERTED, bits, position_x);
+        append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                     request.guard_sample_count);
+    }
+    summarize_sequence(sequence);
+    if (position_x != 0 ||
+        sequence.samples.size() != expected_sample_count ||
+        sequence.net_x_counts != 0 ||
+        sequence.max_abs_prefix_x_counts != 1U) {
+        set_error(error,
+            "Physical B Primary exact schedule 未满足 sample/net/prefix 合同");
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 nlohmann::ordered_json canonical_payload(
         const MouseEffectProbeSequence& sequence) {
     nlohmann::ordered_json blocks = nlohmann::ordered_json::array();
     for (const auto& block : sequence.blocks) {
-        blocks.push_back({
-            {"block_id", block.block_id},
-            {"first_sample_index", block.first_sample_index},
-            {"sample_count", block.sample_count},
-            {"first_pulse_dx_counts", block.first_pulse_dx_counts},
-            {"second_pulse_dx_counts", block.second_pulse_dx_counts},
-        });
+        if (sequence.schema == kPhysicalBPrimarySequenceSchema) {
+            blocks.push_back({
+                {"block_id", block.block_id},
+                {"pair_index", block.pair_index},
+                {"role", probe_sequence_block_role_name(block.role)},
+                {"polarity", probe_sequence_block_polarity_name(
+                    block.polarity)},
+                {"first_sample_index", block.first_sample_index},
+                {"period_sample_count", block.period_sample_count},
+                {"sample_count", block.sample_count},
+            });
+        } else {
+            blocks.push_back({
+                {"block_id", block.block_id},
+                {"first_sample_index", block.first_sample_index},
+                {"sample_count", block.sample_count},
+                {"first_pulse_dx_counts", block.first_pulse_dx_counts},
+                {"second_pulse_dx_counts", block.second_pulse_dx_counts},
+            });
+        }
     }
     nlohmann::ordered_json samples = nlohmann::ordered_json::array();
     for (const auto& sample : sequence.samples) {
@@ -425,7 +606,7 @@ nlohmann::ordered_json canonical_payload(
             {"run_role", dependency_calibration_run_role_name(
              sequence.dependency_calibration_request.run_role)},
         };
-    } else {
+    } else if (sequence.schema == kS1LivenessSequenceSchema) {
         request = {
             {"challenge_pulse_count",
              sequence.s1_liveness_request.challenge_pulse_count},
@@ -442,6 +623,20 @@ nlohmann::ordered_json canonical_payload(
             sequence.s1_liveness_request.baseline_sample_count;
         request["run_role"] = s1_liveness_run_role_name(
             sequence.s1_liveness_request.run_role);
+    } else {
+        request = {
+            {"guard_sample_count",
+             sequence.physical_b_primary_request.guard_sample_count},
+            {"lfsr_order",
+             sequence.physical_b_primary_request.lfsr_order},
+            {"feedback_mask",
+             sequence.physical_b_primary_request.feedback_mask},
+            {"seed", sequence.physical_b_primary_request.seed},
+            {"phase", sequence.physical_b_primary_request.phase},
+            {"offline_sequence_semantic_sha256",
+             sequence.physical_b_primary_request.
+                 offline_sequence_semantic_sha256},
+        };
     }
     return {
         {"schema", sequence.schema},
@@ -557,7 +752,11 @@ bool same_s1_liveness_request(
 bool same_block(const ProbeSequenceBlock& first,
                 const ProbeSequenceBlock& second) noexcept {
     return first.block_id == second.block_id &&
+           first.pair_index == second.pair_index &&
+           first.role == second.role &&
+           first.polarity == second.polarity &&
            first.first_sample_index == second.first_sample_index &&
+           first.period_sample_count == second.period_sample_count &&
            first.sample_count == second.sample_count &&
            first.first_pulse_dx_counts == second.first_pulse_dx_counts &&
            first.second_pulse_dx_counts == second.second_pulse_dx_counts;
@@ -631,10 +830,44 @@ bool parse_phase(std::string_view value, ProbeSamplePhase& output) noexcept {
         output = ProbeSamplePhase::HOLD;
     } else if (value == "guard") {
         output = ProbeSamplePhase::GUARD;
+    } else if (value == "period") {
+        output = ProbeSamplePhase::PERIOD;
+    } else if (value == "inverted_period") {
+        output = ProbeSamplePhase::INVERTED_PERIOD;
+    } else if (value == "return_to_zero") {
+        output = ProbeSamplePhase::RETURN_TO_ZERO;
     } else {
         return false;
     }
     return true;
+}
+
+bool parse_probe_sequence_block_role(
+        std::string_view value,
+        ProbeSequenceBlockRole& output) noexcept {
+    if (value == "estimation") {
+        output = ProbeSequenceBlockRole::ESTIMATION;
+        return true;
+    }
+    if (value == "within_run_validation") {
+        output = ProbeSequenceBlockRole::WITHIN_RUN_VALIDATION;
+        return true;
+    }
+    return false;
+}
+
+bool parse_probe_sequence_block_polarity(
+        std::string_view value,
+        ProbeSequenceBlockPolarity& output) noexcept {
+    if (value == "normal") {
+        output = ProbeSequenceBlockPolarity::NORMAL;
+        return true;
+    }
+    if (value == "inverted") {
+        output = ProbeSequenceBlockPolarity::INVERTED;
+        return true;
+    }
+    return false;
 }
 
 bool parse_dependency_calibration_run_role(
@@ -717,6 +950,9 @@ bool parse_document(const nlohmann::ordered_json& document,
         candidate.schema == kS1LivenessSequenceSchema &&
         (candidate.profile == kS1LivenessPrimaryProfile ||
          candidate.profile == kS1LivenessValidationProfile);
+    const bool physical_b_primary_profile =
+        candidate.schema == kPhysicalBPrimarySequenceSchema &&
+        candidate.profile == kPhysicalBPrimaryProfile;
     if (sparse_profile) {
         if (!has_exact_keys(request,
                 {"baseline_sample_count", "response_sample_count",
@@ -793,38 +1029,90 @@ bool parse_document(const nlohmann::ordered_json& document,
             set_error(error, "A2 S1 活性序列 run_role 非法");
             return false;
         }
+    } else if (physical_b_primary_profile) {
+        std::uint64_t lfsr_order = 0;
+        std::uint64_t feedback_mask = 0;
+        if (!has_exact_keys(request,
+                {"guard_sample_count", "lfsr_order", "feedback_mask",
+                 "seed", "phase", "offline_sequence_semantic_sha256"}) ||
+            !read_u64(request, "guard_sample_count",
+                      candidate.physical_b_primary_request.
+                          guard_sample_count) ||
+            !read_u64(request, "lfsr_order", lfsr_order) ||
+            lfsr_order > std::numeric_limits<std::uint32_t>::max() ||
+            !read_u64(request, "feedback_mask", feedback_mask) ||
+            feedback_mask > std::numeric_limits<std::uint32_t>::max() ||
+            !read_u64(request, "seed",
+                      candidate.physical_b_primary_request.seed) ||
+            !read_u64(request, "phase",
+                      candidate.physical_b_primary_request.phase) ||
+            !request.at("offline_sequence_semantic_sha256").is_string()) {
+            set_error(error,
+                "Physical B Primary request 字段集合或类型非法");
+            return false;
+        }
+        candidate.physical_b_primary_request.lfsr_order =
+            static_cast<std::uint32_t>(lfsr_order);
+        candidate.physical_b_primary_request.feedback_mask =
+            static_cast<std::uint32_t>(feedback_mask);
+        candidate.physical_b_primary_request.
+            offline_sequence_semantic_sha256 = request.at(
+                "offline_sequence_semantic_sha256").get<std::string>();
     } else {
         set_error(error, "序列 schema/profile 组合不受支持");
         return false;
     }
 
     const auto& blocks = document.at("blocks");
-    const std::size_t maximum_blocks = sparse_profile || s1_liveness_profile
-        ? 2U
-        : static_cast<std::size_t>(kMaximumDependencyCalibrationBlocks);
+    const std::size_t maximum_blocks =
+        sparse_profile || s1_liveness_profile ? 2U :
+        physical_b_primary_profile ? 4U :
+        static_cast<std::size_t>(kMaximumDependencyCalibrationBlocks);
     if (!blocks.is_array() || blocks.size() > maximum_blocks) {
         set_error(error, "序列 blocks 必须是固定容量数组");
         return false;
     }
     candidate.blocks.reserve(blocks.size());
     for (const auto& value : blocks) {
-        if (!has_exact_keys(value,
-                {"block_id", "first_sample_index", "sample_count",
-                 "first_pulse_dx_counts", "second_pulse_dx_counts"})) {
-            set_error(error, "序列 block 字段集合非法");
-            return false;
-        }
         ProbeSequenceBlock block;
-        if (!read_u64(value, "block_id", block.block_id) ||
-            !read_u64(value, "first_sample_index",
-                      block.first_sample_index) ||
-            !read_u64(value, "sample_count", block.sample_count) ||
-            !read_int(value, "first_pulse_dx_counts",
-                      block.first_pulse_dx_counts) ||
-            !read_int(value, "second_pulse_dx_counts",
-                      block.second_pulse_dx_counts)) {
-            set_error(error, "序列 block 字段类型或数值非法");
-            return false;
+        if (physical_b_primary_profile) {
+            if (!has_exact_keys(value,
+                    {"block_id", "pair_index", "role", "polarity",
+                     "first_sample_index", "period_sample_count",
+                     "sample_count"}) ||
+                !value.at("role").is_string() ||
+                !value.at("polarity").is_string() ||
+                !read_u64(value, "block_id", block.block_id) ||
+                !read_u64(value, "pair_index", block.pair_index) ||
+                !parse_probe_sequence_block_role(
+                    value.at("role").get<std::string>(), block.role) ||
+                !parse_probe_sequence_block_polarity(
+                    value.at("polarity").get<std::string>(),
+                    block.polarity) ||
+                !read_u64(value, "first_sample_index",
+                          block.first_sample_index) ||
+                !read_u64(value, "period_sample_count",
+                          block.period_sample_count) ||
+                !read_u64(value, "sample_count", block.sample_count)) {
+                set_error(error,
+                    "Physical B Primary block 字段集合或类型非法");
+                return false;
+            }
+        } else {
+            if (!has_exact_keys(value,
+                    {"block_id", "first_sample_index", "sample_count",
+                     "first_pulse_dx_counts", "second_pulse_dx_counts"}) ||
+                !read_u64(value, "block_id", block.block_id) ||
+                !read_u64(value, "first_sample_index",
+                          block.first_sample_index) ||
+                !read_u64(value, "sample_count", block.sample_count) ||
+                !read_int(value, "first_pulse_dx_counts",
+                          block.first_pulse_dx_counts) ||
+                !read_int(value, "second_pulse_dx_counts",
+                          block.second_pulse_dx_counts)) {
+                set_error(error, "序列 block 字段集合、类型或数值非法");
+                return false;
+            }
         }
         candidate.blocks.push_back(block);
     }
@@ -880,6 +1168,9 @@ const char* probe_sample_phase_name(ProbeSamplePhase phase) noexcept {
         case ProbeSamplePhase::RESPONSE: return "response";
         case ProbeSamplePhase::HOLD: return "hold";
         case ProbeSamplePhase::GUARD: return "guard";
+        case ProbeSamplePhase::PERIOD: return "period";
+        case ProbeSamplePhase::INVERTED_PERIOD: return "inverted_period";
+        case ProbeSamplePhase::RETURN_TO_ZERO: return "return_to_zero";
     }
     return "unknown";
 }
@@ -897,6 +1188,27 @@ const char* s1_liveness_run_role_name(S1LivenessRunRole role) noexcept {
     switch (role) {
         case S1LivenessRunRole::PRIMARY: return "primary";
         case S1LivenessRunRole::VALIDATION: return "validation";
+    }
+    return "unknown";
+}
+
+const char* probe_sequence_block_role_name(
+        ProbeSequenceBlockRole role) noexcept {
+    switch (role) {
+        case ProbeSequenceBlockRole::UNSPECIFIED: return "unspecified";
+        case ProbeSequenceBlockRole::ESTIMATION: return "estimation";
+        case ProbeSequenceBlockRole::WITHIN_RUN_VALIDATION:
+            return "within_run_validation";
+    }
+    return "unknown";
+}
+
+const char* probe_sequence_block_polarity_name(
+        ProbeSequenceBlockPolarity polarity) noexcept {
+    switch (polarity) {
+        case ProbeSequenceBlockPolarity::UNSPECIFIED: return "unspecified";
+        case ProbeSequenceBlockPolarity::NORMAL: return "normal";
+        case ProbeSequenceBlockPolarity::INVERTED: return "inverted";
     }
     return "unknown";
 }
@@ -978,6 +1290,36 @@ bool make_s1_liveness_sequence(
     }
 }
 
+bool make_physical_b_primary_sequence(
+        const PhysicalBPrimarySequenceRequest& request,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) noexcept {
+    try {
+        MouseEffectProbeSequence candidate;
+        if (!build_physical_b_primary_sequence(request, candidate, error)) {
+            sequence = {};
+            return false;
+        }
+        const std::string payload = canonical_payload(candidate).dump();
+        if (!sha256(payload, candidate.sequence_sha256, error)) {
+            sequence = {};
+            return false;
+        }
+        sequence = std::move(candidate);
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        sequence = {};
+        set_error(error, std::string("生成 Physical B Primary 序列异常: ") +
+                         exception.what());
+        return false;
+    } catch (...) {
+        sequence = {};
+        set_error(error, "生成 Physical B Primary 序列时发生未知异常");
+        return false;
+    }
+}
+
 bool validate_mouse_effect_probe_sequence(
         const MouseEffectProbeSequence& sequence,
         std::string& error) noexcept {
@@ -993,6 +1335,9 @@ bool validate_mouse_effect_probe_sequence(
             sequence.schema == kS1LivenessSequenceSchema &&
             (sequence.profile == kS1LivenessPrimaryProfile ||
              sequence.profile == kS1LivenessValidationProfile);
+        const bool physical_b_primary =
+            sequence.schema == kPhysicalBPrimarySequenceSchema &&
+            sequence.profile == kPhysicalBPrimaryProfile;
         if (sparse) {
             if (!make_sparse_pulse_sequence(
                     sequence.request, expected, error)) {
@@ -1009,6 +1354,11 @@ bool validate_mouse_effect_probe_sequence(
                     sequence.s1_liveness_request, expected, error)) {
                 return false;
             }
+        } else if (physical_b_primary) {
+            if (!make_physical_b_primary_sequence(
+                    sequence.physical_b_primary_request, expected, error)) {
+                return false;
+            }
         } else {
             set_error(error, "序列 schema/profile 组合不受支持");
             return false;
@@ -1023,6 +1373,9 @@ bool validate_mouse_effect_probe_sequence(
             (s1_liveness && !same_s1_liveness_request(
                 sequence.s1_liveness_request,
                 expected.s1_liveness_request)) ||
+            (physical_b_primary && !same_physical_b_primary_request(
+                sequence.physical_b_primary_request,
+                expected.physical_b_primary_request)) ||
             sequence.net_x_counts != expected.net_x_counts ||
             sequence.max_abs_prefix_x_counts !=
                 expected.max_abs_prefix_x_counts ||
@@ -1357,7 +1710,8 @@ bool MouseEffectProbeExecutor::consume_source_frame(
                 ProbeStopReason::SIDECAR_UNAVAILABLE,
                 "sidecar 未证明仍在记录，probe 立即停发");
         }
-        if (impl_->options.dispatch_mode == ProbeDispatchMode::PHYSICAL_A &&
+        if (impl_->options.dispatch_mode !=
+                ProbeDispatchMode::OUTPUT_OFF_REHEARSAL &&
             !frame.safety_allowed) {
             return stop_before_sample(
                 ProbeStopReason::SAFETY_RELEASED,
@@ -2117,6 +2471,7 @@ const char* probe_dispatch_mode_name(ProbeDispatchMode mode) noexcept {
         case ProbeDispatchMode::OUTPUT_OFF_REHEARSAL:
             return "output_off_rehearsal";
         case ProbeDispatchMode::PHYSICAL_A: return "physical_a";
+        case ProbeDispatchMode::PHYSICAL_B: return "physical_b";
     }
     return "unknown";
 }

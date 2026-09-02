@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -892,6 +893,365 @@ def design_physical_b_candidates(
     }
 
 
+def _canonical_semantic_sha256(value: dict, field: str) -> str:
+    payload = dict(value)
+    payload.pop(field, None)
+    return hashlib.sha256(json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
+def _physical_b_analysis_contract() -> tuple[dict, dict]:
+    analyzer_path = pathlib.Path(__file__).resolve().with_name(
+        "analyze_mouse_effect_probe_b.py")
+    if not analyzer_path.is_file():
+        raise ValueError("Physical B analyzer 文件不存在")
+    spec = importlib.util.spec_from_file_location(
+        "xen_physical_b_f0_analyzer_contract", analyzer_path)
+    if spec is None or spec.loader is None:
+        raise ValueError("Physical B analyzer 无法加载")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    contract = module.physical_b_analysis_contract()
+    if not isinstance(contract, dict) or \
+            contract.get("contract_semantic_sha256") != \
+            module.canonical_semantic_sha256(
+                contract, "contract_semantic_sha256"):
+        raise ValueError("Physical B analyzer contract 语义 SHA 无效")
+    return contract, {
+        "file": analyzer_path.name,
+        "file_sha256": hashlib.sha256(analyzer_path.read_bytes()).hexdigest(),
+        "contract_semantic_sha256": contract["contract_semantic_sha256"],
+        "python_version": sys.version.split()[0],
+        "numpy_version": np.__version__,
+        "opencv_version": module.cv2.__version__,
+    }
+
+
+def _require_sha256(value: object, description: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"{description} 不是小写 SHA-256")
+    return value
+
+
+def _validate_bound_json(
+        value: dict,
+        content: bytes,
+        expected_file_sha256: str,
+        description: str) -> str:
+    if not isinstance(value, dict) or not isinstance(content, bytes):
+        raise ValueError(f"{description} 必须是 JSON object 与原始 bytes")
+    expected = _require_sha256(
+        expected_file_sha256, f"{description} expected file SHA-256")
+    actual = hashlib.sha256(content).hexdigest()
+    if actual != expected:
+        raise ValueError(f"{description} 文件 SHA-256 不匹配")
+    parsed = json.loads(content.decode("utf-8"))
+    if not isinstance(parsed, dict) or parsed != value:
+        raise ValueError(f"{description} object 与原始 bytes 不一致")
+    return actual
+
+
+def _require_false(value: object, description: str) -> None:
+    if value is not False:
+        raise ValueError(f"{description} 必须精确为 false")
+
+
+def _require_true(value: object, description: str) -> None:
+    if value is not True:
+        raise ValueError(f"{description} 必须精确为 true")
+
+
+def _rebuild_frozen_sequence(candidate: dict) -> dict:
+    lfsr = candidate["lfsr"]
+    sequence = candidate["sequence"]
+    pair_roles = sequence["pair_roles"]
+    bits = generate_maximum_length_period(
+        order=int(lfsr["order"]),
+        feedback_mask=int(lfsr["feedback_mask"]),
+        seed=int(lfsr["seed"]),
+        phase=int(lfsr["phase"]),
+    )
+    rebuilt = build_candidate_sequence(
+        period_bits=bits,
+        input_definition=str(candidate["input_definition"]),
+        guard_sample_count=int(sequence["guard_sample_count"]),
+        pair_repetitions=len(pair_roles),
+        role=str(pair_roles[0]),
+    )
+    _assign_pair_roles(rebuilt, list(pair_roles))
+    _bind_sequence_semantics(rebuilt)
+    if rebuilt != sequence:
+        raise ValueError("Physical B frozen sequence 无法由 recurrence 精确重建")
+    return rebuilt
+
+
+def bind_physical_b_primary_prepare_plan(
+        offline_design: dict,
+        offline_design_content: bytes,
+        expected_offline_design_sha256: str,
+        a2_decision: dict,
+        a2_decision_content: bytes,
+        expected_a2_decision_sha256: str) -> dict:
+    """把冻结离线设计与正式 A2 green 绑定成无 Launch 能力的 Primary F0。"""
+    design_file_sha256 = _validate_bound_json(
+        offline_design,
+        offline_design_content,
+        expected_offline_design_sha256,
+        "Physical B offline design",
+    )
+    decision_file_sha256 = _validate_bound_json(
+        a2_decision,
+        a2_decision_content,
+        expected_a2_decision_sha256,
+        "A2 dependency decision",
+    )
+
+    if offline_design.get("schema_version") != 1 or \
+            offline_design.get("evidence_type") != \
+            "mouse_effect_probe_physical_b_offline_design" or \
+            offline_design.get("status") != "VALID_OFFLINE_DESIGN":
+        raise ValueError("Physical B offline design 身份或状态非法")
+    _require_false(offline_design.get("physical_output_capability"),
+                   "offline design physical_output_capability")
+    _require_false(offline_design.get("physical_b_launch_authorized"),
+                   "offline design physical_b_launch_authorized")
+    _require_false(offline_design.get("production_aim_changed"),
+                   "offline design production_aim_changed")
+    claimed_design_sha = _require_sha256(
+        offline_design.get("design_semantic_sha256"),
+        "offline design semantic SHA-256",
+    )
+    if claimed_design_sha != _canonical_semantic_sha256(
+            offline_design, "design_semantic_sha256"):
+        raise ValueError("Physical B offline design 规范语义 SHA-256 不匹配")
+    if offline_design.get("candidate_horizons") != [4, 8, 16, 32]:
+        raise ValueError("Physical B candidate H 集合已漂移")
+    guard = offline_design["guard"]
+    if int(guard.get("candidate_sample_count", 0)) != 32 or \
+            guard.get("covers_candidate_horizon_envelope") is not True:
+        raise ValueError("Physical B guard 合同已漂移")
+    expected_legacy_blockers = {
+        "INDEPENDENT_NONDEGENERATE_NOISE_MISSING",
+        "INDEPENDENT_TAIL_SUPPORT_MISSING",
+        "OCCLUSION_MARGIN_MISSING",
+        "MAPPING_UNCERTAINTY_PX_MISSING",
+        "GENERAL_GAIN_UPPER_BOUND_MISSING",
+    }
+    prepare_gate = offline_design["physical_prepare_gate"]
+    if prepare_gate.get("ready") is not False or \
+            set(prepare_gate.get("blockers", [])) != expected_legacy_blockers:
+        raise ValueError("offline design 的 pre-A2 blocker 集合已漂移")
+
+    selected = offline_design["selected_candidate"]
+    cross_run = offline_design["cross_run_holdout_candidate"]
+    if selected.get("role") != \
+            "primary_estimation_and_within_run_validation" or \
+            selected.get("input_definition") != \
+            "cumulative_position_counts" or \
+            selected.get("all_horizons_full_rank") is not True or \
+            selected["sequence"].get("pair_roles") != \
+            ["estimation", "within_run_validation"]:
+        raise ValueError("Physical B Primary candidate 角色或输入定义非法")
+    if cross_run.get("role") != "cross_run_holdout" or \
+            cross_run.get("input_definition") != \
+            "cumulative_position_counts" or \
+            cross_run.get("all_horizons_full_rank") is not True or \
+            cross_run["sequence"].get("pair_roles") != \
+            ["cross_run_holdout"]:
+        raise ValueError("Physical B cross-Run candidate 角色非法")
+    primary_sequence = _rebuild_frozen_sequence(selected)
+    holdout_sequence = _rebuild_frozen_sequence(cross_run)
+    if int(selected["lfsr"]["feedback_mask"]) == \
+            int(cross_run["lfsr"]["feedback_mask"]):
+        raise ValueError("cross-Run holdout 必须使用不同 recurrence")
+    primary_summary = primary_sequence["summary"]
+    if primary_summary.get("net_command_dx_counts") != 0 or \
+            primary_summary.get("max_abs_position_x_counts") != 1 or \
+            primary_summary.get("all_commands_x_only_single_count") is not True:
+        raise ValueError("Physical B Primary X-only/net/prefix 合同非法")
+
+    if a2_decision.get("schema_version") != 1 or \
+            a2_decision.get("evidence_type") != \
+            "mouse_effect_probe_a2_dependency_holdout_decision" or \
+            a2_decision.get("status") != "A2_DEPENDENCY_GREEN" or \
+            a2_decision.get("invalid_reasons") != [] or \
+            a2_decision.get("run_role") != "p-holdout" or \
+            a2_decision.get("profile") != \
+            "dependency_calibration_a2_p_holdout":
+        raise ValueError("A2 dependency decision 身份或状态非法")
+    _require_false(a2_decision.get("physical_output_capability"),
+                   "A2 decision physical_output_capability")
+    _require_false(a2_decision.get("production_aim_changed"),
+                   "A2 decision production_aim_changed")
+    _require_false(a2_decision.get("candidate_values_changed"),
+                   "A2 decision candidate_values_changed")
+    _require_false(a2_decision.get("holdout_used_for_tuning"),
+                   "A2 decision holdout_used_for_tuning")
+    _require_true(a2_decision.get("a2_dependency_gate_claimed"),
+                  "A2 decision a2_dependency_gate_claimed")
+    _require_false(a2_decision.get("physical_b_authorized"),
+                   "historical A2 decision physical_b_authorized")
+    _require_sha256(a2_decision.get("scope_id"), "A2 scope_id")
+    _require_sha256(a2_decision.get("sequence_sha256"),
+                    "A2 sequence SHA-256")
+    _require_sha256(a2_decision.get("candidate_sha256"),
+                    "A2 candidate SHA-256")
+
+    independence = a2_decision["independence"]
+    for field in (
+            "different_run_uuid", "different_activation_epoch",
+            "different_sidecar_manifest", "same_analyzer",
+            "same_capture_source"):
+        _require_true(independence.get(field), f"A2 independence.{field}")
+    observation = a2_decision["human_observation"]
+    _require_sha256(observation.get("observation_sha256"),
+                    "A2 observation SHA-256")
+    _require_true(observation.get("visible_effect_reported"),
+                  "A2 visible effect")
+    _require_false(observation.get("manual_mouse_or_wasd_used"),
+                   "A2 manual mouse/WASD")
+    _require_true(observation.get("left_right_witness_consistent"),
+                  "A2 left/right consistency")
+    _require_false(observation.get("occlusion_or_scene_cut_reported"),
+                   "A2 occlusion/scene cut")
+    _require_false(observation.get("anomaly_or_emergency_stop_reported"),
+                   "A2 anomaly/emergency stop")
+
+    comparisons = a2_decision["comparisons"]
+    for name in (
+            "tail_support", "mapping_uncertainty",
+            "single_count_gain_upper_scope", "witness_occlusion_margin",
+            "physical_b_prefix_candidate"):
+        _require_true(comparisons[name].get("passed"),
+                      f"A2 comparisons.{name}.passed")
+    prefix_comparison = comparisons["physical_b_prefix_candidate"]
+    _require_false(prefix_comparison.get("physical_b_authorized"),
+                   "A2 prefix comparison physical_b_authorized")
+    tail_upper = int(comparisons["tail_support"]["candidate_upper_lag"])
+    observed_tail = int(
+        comparisons["tail_support"]["holdout_observed_upper_lag"])
+    guard_sample_count = int(guard["candidate_sample_count"])
+    allowed_prefix = int(
+        prefix_comparison["candidate_allowed_prefix_counts"])
+    holdout_allowed_prefix = int(
+        prefix_comparison["holdout_allowed_prefix_counts"])
+    actual_prefix = int(primary_summary["max_abs_position_x_counts"])
+    if tail_upper != 7 or observed_tail > tail_upper or \
+            guard_sample_count < tail_upper or \
+            actual_prefix > allowed_prefix or \
+            allowed_prefix > holdout_allowed_prefix:
+        raise ValueError("A2 tail/guard/prefix 未闭合 Physical B Primary F0")
+    eligible_horizons = [
+        horizon for horizon in offline_design["candidate_horizons"]
+        if horizon >= tail_upper
+    ]
+    deletion_horizons = [
+        horizon for horizon in offline_design["candidate_horizons"]
+        if horizon < tail_upper
+    ]
+    if eligible_horizons != [8, 16, 32] or deletion_horizons != [4]:
+        raise ValueError("A2 tail 对 Physical B H 集合的裁决异常")
+
+    analysis_contract, analyzer = _physical_b_analysis_contract()
+    mapping_uncertainty_upper_px = float(
+        comparisons["mapping_uncertainty"]["candidate_upper_px"])
+    if not math.isfinite(mapping_uncertainty_upper_px) or \
+            mapping_uncertainty_upper_px < 0.0:
+        raise ValueError("A2 mapping uncertainty upper 非有限或为负")
+    plan = {
+        "schema_version": 1,
+        "evidence_type": "mouse_effect_probe_physical_b_primary_f0",
+        "status": "READY_FOR_PHYSICAL_B_PRIMARY_PREPARE",
+        "physical_output_capability": False,
+        "physical_b_launch_authorized": False,
+        "production_aim_changed": False,
+        "source_offline_design": {
+            "file_size": len(offline_design_content),
+            "file_sha256": design_file_sha256,
+            "design_semantic_sha256": claimed_design_sha,
+        },
+        "source_a2_dependency_decision": {
+            "file_size": len(a2_decision_content),
+            "file_sha256": decision_file_sha256,
+            "scope_id": a2_decision["scope_id"],
+            "candidate_sha256": a2_decision["candidate_sha256"],
+            "observation_sha256": observation["observation_sha256"],
+        },
+        "model_contract": {
+            "identification_input_definition":
+                "cumulative_position_counts",
+            "actuator_audit_input": "completed_command_dx_counts",
+            "model_boundary":
+                "commanded_cumulative_position_to_visible_displacement",
+            "strictly_causal_lag_origin": 1,
+            "whole_block_only": True,
+            "random_frame_split_allowed": False,
+            "input_forced_validation_required": True,
+            "output_free_run_validation_required": True,
+            "one_step_prediction_acceptance_allowed": False,
+        },
+        "analysis_contract": analysis_contract,
+        "analyzer": analyzer,
+        "candidate_horizons": list(offline_design["candidate_horizons"]),
+        "deletion_control_horizons": deletion_horizons,
+        "acceptance_eligible_horizons": eligible_horizons,
+        "primary_sequence": {
+            "schema": 4,
+            "profile": "physical_b_prbs_primary",
+            "offline_sequence_semantic_sha256":
+                primary_sequence["sequence_semantic_sha256"],
+            "input_definition": selected["input_definition"],
+            "lfsr": dict(selected["lfsr"]),
+            "guard_sample_count": guard_sample_count,
+            "pair_roles": list(primary_sequence["pair_roles"]),
+            "sample_count": int(primary_summary["sample_count"]),
+            "net_x_counts": int(
+                primary_summary["net_command_dx_counts"]),
+            "max_abs_prefix_x_counts": actual_prefix,
+            "all_commands_x_only_single_count":
+                primary_summary["all_commands_x_only_single_count"],
+        },
+        "cross_run_holdout": {
+            "preregistered": True,
+            "prepare_allowed": False,
+            "run_required": "different_run_activation_and_session",
+            "lfsr": dict(cross_run["lfsr"]),
+            "sequence_semantic_sha256":
+                holdout_sequence["sequence_semantic_sha256"],
+            "holdout_used_for_tuning": False,
+        },
+        "physical_b_primary_prepare_gate": {
+            "ready": True,
+            "blockers": [],
+            "a2_dependency_status": "A2_DEPENDENCY_GREEN",
+            "a2_tail_upper_lag": tail_upper,
+            "a2_holdout_observed_upper_lag": observed_tail,
+            "mapping_uncertainty_upper_px": mapping_uncertainty_upper_px,
+            "guard_sample_count": guard_sample_count,
+            "actual_prefix_counts": actual_prefix,
+            "allowed_prefix_counts": allowed_prefix,
+            "holdout_allowed_prefix_counts": holdout_allowed_prefix,
+            "candidate_values_changed": False,
+            "holdout_used_for_tuning": False,
+        },
+        "authorization_boundary": {
+            "prepare_requires_current_user_authorization": True,
+            "launch_requires_separate_current_user_action": True,
+            "recover_authorized": False,
+            "cross_run_holdout_prepare_authorized": False,
+        },
+    }
+    plan["f0_semantic_sha256"] = _canonical_semantic_sha256(
+        plan, "f0_semantic_sha256")
+    return plan
+
+
 def _parse_positive_integer_list(value: str) -> list[int]:
     try:
         result = [int(item, 10) for item in value.split(",")]
@@ -932,6 +1292,37 @@ def _parse_arguments(arguments: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(arguments)
 
 
+def _parse_bind_primary_arguments(arguments: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="design_mouse_effect_probe_prbs.py bind-primary",
+        description=(
+            "把冻结的 Physical B 离线设计与正式 A2 green 绑定为 Primary "
+            "F0；只生成 Prepare 输入，不含 Launch 能力。"
+        ),
+    )
+    parser.add_argument(
+        "--offline-design", type=pathlib.Path, required=True,
+        help="冻结 Physical B offline design JSON 的绝对路径",
+    )
+    parser.add_argument(
+        "--expected-offline-design-sha256", required=True,
+        help="offline design 文件的小写 SHA-256",
+    )
+    parser.add_argument(
+        "--a2-decision", type=pathlib.Path, required=True,
+        help="正式 A2 dependency decision JSON 的绝对路径",
+    )
+    parser.add_argument(
+        "--expected-a2-decision-sha256", required=True,
+        help="A2 decision 文件的小写 SHA-256",
+    )
+    parser.add_argument(
+        "--output", type=pathlib.Path, required=True,
+        help="拒绝覆盖的新 Primary F0 JSON 绝对路径",
+    )
+    return parser.parse_args(arguments)
+
+
 def _load_json_bytes(path: pathlib.Path) -> tuple[dict, bytes]:
     if not path.is_absolute() or not path.is_file():
         raise ValueError("Physical A analysis 必须是绝对路径普通文件")
@@ -942,6 +1333,21 @@ def _load_json_bytes(path: pathlib.Path) -> tuple[dict, bytes]:
     value = json.loads(content.decode("utf-8"))
     if not isinstance(value, dict):
         raise ValueError("Physical A analysis 根对象必须是 JSON object")
+    return value, content
+
+
+def _load_bound_json_bytes(
+        path: pathlib.Path,
+        description: str) -> tuple[dict, bytes]:
+    if not path.is_absolute() or not path.is_file():
+        raise ValueError(f"{description} 必须是绝对路径普通文件")
+    size = path.stat().st_size
+    if size <= 0 or size > 128 * 1024 * 1024:
+        raise ValueError(f"{description} 为空或超过 128 MiB 固定边界")
+    content = path.read_bytes()
+    value = json.loads(content.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{description} 根对象必须是 JSON object")
     return value, content
 
 
@@ -970,9 +1376,50 @@ def _write_new_json(path: pathlib.Path, value: dict) -> None:
             temporary.unlink()
 
 
+def _bind_primary_main(arguments: list[str]) -> int:
+    options = _parse_bind_primary_arguments(arguments)
+    design, design_content = _load_bound_json_bytes(
+        options.offline_design, "Physical B offline design")
+    decision, decision_content = _load_bound_json_bytes(
+        options.a2_decision, "A2 dependency decision")
+    plan = bind_physical_b_primary_prepare_plan(
+        design,
+        design_content,
+        options.expected_offline_design_sha256,
+        decision,
+        decision_content,
+        options.expected_a2_decision_sha256,
+    )
+    plan["source_offline_design"]["path"] = str(options.offline_design)
+    plan["source_a2_dependency_decision"]["path"] = str(
+        options.a2_decision)
+    binder_path = pathlib.Path(__file__).resolve()
+    plan["binder"] = {
+        "file": str(binder_path),
+        "file_sha256": hashlib.sha256(binder_path.read_bytes()).hexdigest(),
+        "python_version": sys.version.split()[0],
+        "numpy_version": np.__version__,
+    }
+    plan["f0_semantic_sha256"] = _canonical_semantic_sha256(
+        plan, "f0_semantic_sha256")
+    _write_new_json(options.output, plan)
+    print(
+        "Physical B Primary F0 已生成: "
+        f"output={options.output}, "
+        f"sequence={plan['primary_sequence']['offline_sequence_semantic_sha256']}, "
+        f"eligible_h={plan['acceptance_eligible_horizons']}, "
+        "launch_authorized=false"
+    )
+    return 0
+
+
 def main(arguments: list[str] | None = None) -> int:
     try:
-        options = _parse_arguments(arguments)
+        effective_arguments = list(
+            sys.argv[1:] if arguments is None else arguments)
+        if effective_arguments and effective_arguments[0] == "bind-primary":
+            return _bind_primary_main(effective_arguments[1:])
+        options = _parse_arguments(effective_arguments)
         analysis, analysis_bytes = _load_json_bytes(
             options.physical_a_analysis)
         design = design_physical_b_candidates(

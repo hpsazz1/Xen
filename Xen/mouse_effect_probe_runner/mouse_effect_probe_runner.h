@@ -117,7 +117,7 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
 
 std::string mouse_effect_probe_usage();
 
-// KMBOX monitor 仅在物理输入变化时发布新事实；因此 Physical A 必须
+// KMBOX monitor 仅在物理输入变化时发布新事实；因此 Physical A/B 必须
 // 在 monitor 打开后提示用户产生一次新的右键按下，不能要求提前按住。
 std::string_view mouse_effect_probe_deadman_arming_prompt() noexcept;
 

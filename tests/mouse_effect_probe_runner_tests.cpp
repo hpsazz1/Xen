@@ -92,6 +92,44 @@ void test_parser_separates_output_off_and_physical_authority() {
            "output-off 模式携带任何物理授权必须拒绝");
 }
 
+void test_parser_isolates_physical_b_authority_from_physical_a() {
+    std::string error;
+    auto physical_b_arguments = common_arguments();
+    physical_b_arguments[1] = L"physical-b";
+    physical_b_arguments.push_back(L"--allow-physical-output");
+    physical_b_arguments.push_back(L"--confirm-physical-output");
+    physical_b_arguments.push_back(
+        L"XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT");
+    physical_b_arguments.push_back(L"--safety-ledger");
+    physical_b_arguments.push_back(L"E:\\run\\safety-ledger.json");
+    MouseEffectProbeRunOptions physical_b;
+    expect(parse_mouse_effect_probe_options(
+               physical_b_arguments, physical_b, error) ==
+               MouseEffectProbeParseStatus::READY &&
+               physical_b.dispatch_mode ==
+                   mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
+               physical_b.allow_physical_output &&
+               physical_b.physical_output_confirmed,
+           "B 专用令牌的 physical-b 参数应解析成功: " + error);
+
+    auto wrong_b = physical_b_arguments;
+    wrong_b[wrong_b.size() - 3U] =
+        L"XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT";
+    MouseEffectProbeRunOptions wrong_b_options;
+    expect(parse_mouse_effect_probe_options(
+               wrong_b, wrong_b_options, error) ==
+               MouseEffectProbeParseStatus::INVALID,
+           "physical-b 必须拒绝 Physical A 确认令牌");
+
+    auto wrong_a = physical_b_arguments;
+    wrong_a[1] = L"physical-a";
+    MouseEffectProbeRunOptions wrong_a_options;
+    expect(parse_mouse_effect_probe_options(
+               wrong_a, wrong_a_options, error) ==
+               MouseEffectProbeParseStatus::INVALID,
+           "physical-a 必须拒绝 Physical B 确认令牌");
+}
+
 void test_parser_rejects_missing_duplicate_and_invalid_identity() {
     std::string error;
     MouseEffectProbeRunOptions options;
@@ -331,6 +369,7 @@ void test_physical_safety_ledger_distinguishes_explicit_release() {
 
 int main() {
     test_parser_separates_output_off_and_physical_authority();
+    test_parser_isolates_physical_b_authority_from_physical_a();
     test_parser_rejects_missing_duplicate_and_invalid_identity();
     test_frame_mapping_preserves_source_identity_and_quality();
     test_physical_deadman_prompt_contract();

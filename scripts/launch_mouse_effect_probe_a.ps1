@@ -8,11 +8,16 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-$confirmation = "XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT"
+$physicalAConfirmation =
+    "XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT"
+$physicalBConfirmation =
+    "XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT"
 if (-not $AllowPhysicalOutput.IsPresent -or
-    $PhysicalOutputConfirmation -ne $confirmation) {
-    throw "Physical A 会发送真实 KMBOX 输入，必须同时提供物理输出开关和固定确认令牌。"
+    $PhysicalOutputConfirmation -notin @(
+        $physicalAConfirmation, $physicalBConfirmation)) {
+    throw "Physical probe 会发送真实 KMBOX 输入，必须同时提供物理输出开关和与 task 匹配的固定确认令牌。"
 }
+$confirmation = $PhysicalOutputConfirmation
 
 function Get-FileSha256([string]$Path) {
     $algorithm = [Security.Cryptography.SHA256]::Create()
@@ -233,13 +238,26 @@ $isA2S1Task =
     [int]$task.schema_version -eq 3 -and
     [string]$task.evidence_type -eq "mouse_effect_probe_a2_s1_task" -and
     [string]$task.profile -like "dependency_calibration_a2_s1_*"
-if ((-not $isA1Task -and -not $isA2Task -and -not $isA2S1Task) -or
+$isBTask =
+    [int]$task.schema_version -eq 4 -and
+    [string]$task.evidence_type -eq "mouse_effect_probe_b_task" -and
+    [string]$task.profile -eq "physical_b_prbs_primary"
+$expectedDispatchMode = if ($isBTask) { "physical_b" } else { "physical_a" }
+$expectedConfirmation = if ($isBTask) {
+    $physicalBConfirmation
+} else {
+    $physicalAConfirmation
+}
+if ((-not $isA1Task -and -not $isA2Task -and -not $isA2S1Task -and
+        -not $isBTask) -or
     [string]$task.status -ne "PREPARED" -or
-    [string]$task.dispatch_mode -ne "physical_a" -or
+    [string]$task.dispatch_mode -ne $expectedDispatchMode -or
     -not [bool]$task.physical_output_capability -or
     [string]$task.run_directory -ne $resolvedRun -or
-    [string]$task.physical_output_confirmation -ne $confirmation) {
-    throw "Physical A task 身份或授权合同无效"
+    [string]$task.physical_output_confirmation -ne
+        $expectedConfirmation -or
+    $confirmation -ne $expectedConfirmation) {
+    throw "Physical probe task 身份或授权合同无效"
 }
 if ($isA2Task) {
     $expectedProfile = if ([string]$task.run_role -eq "p-cal") {
@@ -274,6 +292,25 @@ if ($isA2S1Task) {
         throw "Physical A2 S1 role/profile/liveness policy 合同无效"
     }
 }
+if ($isBTask) {
+    if ([string]$task.run_role -ne "primary" -or
+        [string]$task.profile -ne "physical_b_prbs_primary" -or
+        [uint64]$task.sequence_sample_count -ne 416 -or
+        [uint64]$task.expected_nonzero_transition_count -eq 0 -or
+        [uint64]$task.max_abs_prefix_x_counts -ne 1 -or
+        -not [bool]$task.requires_user_frontend_launch -or
+        [bool]$task.cross_run_holdout_prepare_authorized -or
+        [bool]$task.safety.cross_run_holdout_prepare_authorized -or
+        [string]$task.f0.identification_input_definition -ne
+            "cumulative_position_counts" -or
+        [string]$task.f0.actuator_audit_input -ne
+            "completed_command_dx_counts" -or
+        [bool]$task.f0.holdout_used_for_tuning -or
+        -not [bool]$task.f0.input_forced_validation_required -or
+        -not [bool]$task.f0.output_free_run_validation_required) {
+        throw "Physical B Primary role/F0/holdout 安全合同无效"
+    }
+}
 
 $fileEntries = @(
         [pscustomobject]@{ value = $task.files.launch_script; name = "Launch script" },
@@ -300,8 +337,43 @@ if ($isA2S1Task) {
         [pscustomobject]@{ value = $task.files.sequence_executable; name = "sequence executable" },
         [pscustomobject]@{ value = $task.files.dependency_calibrator; name = "dependency calibrator" })
 }
+if ($isBTask) {
+    $fileEntries += @(
+        [pscustomobject]@{ value = $task.files.sequence_executable; name = "sequence executable" },
+        [pscustomobject]@{ value = $task.files.prbs_designer; name = "PRBS designer" },
+        [pscustomobject]@{ value = $task.files.physical_b_analyzer; name = "Physical B analyzer" },
+        [pscustomobject]@{ value = $task.files.primary_f0; name = "Primary F0" },
+        [pscustomobject]@{ value = $task.files.offline_design; name = "offline design" },
+        [pscustomobject]@{ value = $task.files.a2_dependency_decision; name = "A2 decision" })
+}
 foreach ($entry in $fileEntries) {
     Assert-FileEvidence $entry.value $entry.name
+}
+if ($isBTask) {
+    $primaryF0 = Get-Content -LiteralPath `
+        ([string]$task.files.primary_f0.path) -Raw -Encoding utf8 |
+        ConvertFrom-Json
+    if ([string]$primaryF0.evidence_type -ne
+            "mouse_effect_probe_physical_b_primary_f0" -or
+        [string]$primaryF0.status -ne
+            "READY_FOR_PHYSICAL_B_PRIMARY_PREPARE" -or
+        [bool]$primaryF0.physical_output_capability -or
+        [bool]$primaryF0.physical_b_launch_authorized -or
+        [bool]$primaryF0.production_aim_changed -or
+        -not [bool]$primaryF0.physical_b_primary_prepare_gate.ready -or
+        [bool]$primaryF0.cross_run_holdout.prepare_allowed -or
+        [string]$primaryF0.analyzer.file_sha256 -ne
+            [string]$task.files.physical_b_analyzer.sha256 -or
+        [string]$primaryF0.analysis_contract.contract_semantic_sha256 -ne
+            [string]$task.f0.analysis_contract_semantic_sha256 -or
+        [string]$primaryF0.f0_semantic_sha256 -ne
+            [string]$task.f0.semantic_sha256 -or
+        [string]$primaryF0.source_offline_design.file_sha256 -ne
+            [string]$task.files.offline_design.sha256 -or
+        [string]$primaryF0.source_a2_dependency_decision.file_sha256 -ne
+            [string]$task.files.a2_dependency_decision.sha256) {
+        throw "Physical B Primary F0 内容或源 artifact 绑定无效"
+    }
 }
 if ((Get-FileSha256 $PSCommandPath) -ne
         [string]$task.files.launch_script.sha256) {
@@ -312,7 +384,7 @@ $forbiddenProcesses = @(
     Get-Process -Name Xen, XenLauncher, XenMouseBenchmark, XenMouseEffectProbe `
         -ErrorAction SilentlyContinue)
 if ($forbiddenProcesses.Count -ne 0) {
-    throw "Physical A 要求正常 Aim 与其他 Mouse 工具关闭"
+        throw "Physical probe 要求正常 Aim 与其他 Mouse 工具关闭"
 }
 
 $pixelOutput = Join-Path $resolvedRun "pixel-evidence"
@@ -385,7 +457,7 @@ try {
     }
 
     $probeArguments = @(
-        "--mode", "physical-a",
+        "--mode", $expectedDispatchMode.Replace("_", "-"),
         "--config", [string]$task.files.config.path,
         "--sequence", [string]$task.files.sequence.path,
         "--binding", [string]$task.files.probe_binding.path,
@@ -622,12 +694,48 @@ try {
         [string]$manifest.source_binding.sha256 -ne
             [string]$task.files.probe_binding.sha256 -or
         [string]$report.run_uuid -ne [string]$task.run_uuid -or
-        [string]$report.dispatch_mode -ne "physical_a" -or
+        [string]$report.dispatch_mode -ne $expectedDispatchMode -or
         [string]$report.profile -ne [string]$task.profile -or
         [string]$sequence.profile -ne [string]$task.profile -or
         [string]$report.sequence_sha256 -ne
             [string]$task.sequence_sha256) {
-        throw "Physical A manifest/report 顶层身份无效"
+        throw "Physical probe manifest/report 顶层身份无效"
+    }
+    if ($isBTask) {
+        $sequenceBlocks = @($sequence.blocks)
+        $blockRoles = @($sequenceBlocks | ForEach-Object {
+            [string]$_.role
+        })
+        $blockPolarities = @($sequenceBlocks | ForEach-Object {
+            [string]$_.polarity
+        })
+        if ([int]$sequence.schema -ne 4 -or
+            [string]$sequence.profile -ne "physical_b_prbs_primary" -or
+            [string]$sequence.request.offline_sequence_semantic_sha256 -ne
+                [string]$task.offline_sequence_semantic_sha256 -or
+            [uint64]$sequence.request.guard_sample_count -ne 32 -or
+            [uint64]$sequence.request.lfsr_order -ne 6 -or
+            [uint64]$sequence.request.feedback_mask -ne 39 -or
+            [uint64]$sequence.request.seed -ne 1 -or
+            [uint64]$sequence.request.phase -ne 49 -or
+            $samples.Count -ne 416 -or
+            $sequenceBlocks.Count -ne 4 -or
+            [int64]$sequence.summary.net_x_counts -ne 0 -or
+            [uint64]$sequence.summary.max_abs_prefix_x_counts -ne 1 -or
+            ($blockRoles -join ",") -ne
+                "estimation,estimation,within_run_validation,within_run_validation" -or
+            ($blockPolarities -join ",") -ne
+                "normal,inverted,normal,inverted" -or
+            @($sequenceBlocks | Where-Object {
+                [uint64]$_.period_sample_count -ne 63 -or
+                [uint64]$_.sample_count -ne 64
+            }).Count -ne 0 -or
+            @($samples | Where-Object {
+                [int]$_.dx_counts -lt -1 -or [int]$_.dx_counts -gt 1 -or
+                [int]$_.dy_counts -ne 0
+            }).Count -ne 0) {
+            throw "Physical B Primary sequence/F0/whole-block 合同无效"
+        }
     }
 
     $frameTimestamps = [Collections.Generic.HashSet[int64]]::new()
@@ -651,7 +759,17 @@ try {
 
     $matchedEvents = 0
     $unmatchedBaselineEvents = 0
-    $maxUnmatchedBaselineEvents = if ($isA2S1Task) { 0 } else { 1 }
+    $maxUnmatchedBaselineEvents = if ($isA2S1Task -or $isBTask) {
+        0
+    } else {
+        1
+    }
+    $allowUnmatchedBaseline = $isA1Task -or $isA2Task
+    $baselineSampleCount = if ($allowUnmatchedBaseline) {
+        [uint64]$sequence.request.baseline_sample_count
+    } else {
+        [uint64]0
+    }
     $completedPulses = 0
     foreach ($event in $events) {
         $sampleIndex = [int]$event.sample_index
@@ -668,8 +786,8 @@ try {
             throw "Physical A event 的序列/timing/零 Y 合同无效"
         }
         $coverage = Get-PhysicalEventFrameCoverage `
-            $event $sample $frameTimestamps (-not $isA2S1Task) `
-            ([uint64]$sequence.request.baseline_sample_count)
+            $event $sample $frameTimestamps $allowUnmatchedBaseline `
+            $baselineSampleCount
         if ([bool]$coverage.required_source_frame_missing) {
             throw "Physical A event 缺少必须的同 source timestamp sidecar frame"
         }
@@ -699,7 +817,7 @@ try {
         throw "Physical A baseline 的未观测零事件超过预注册上限"
     }
 
-    $expectedPulseCount = if ($isA2Task -or $isA2S1Task) {
+    $expectedPulseCount = if ($isA2Task -or $isA2S1Task -or $isBTask) {
         [uint64]$task.expected_nonzero_transition_count
     } else {
         [uint64]4
@@ -718,11 +836,21 @@ try {
         [int64]$report.result.cumulative_requested_x_counts -eq 0 -and
         [int64]$report.result.cumulative_backend_completed_x_counts -eq 0
     $summary = [ordered]@{
-        schema_version = if ($isA2S1Task) { 3 } elseif ($isA2Task) { 2 } else { 1 }
+        schema_version = if ($isBTask) {
+            4
+        } elseif ($isA2S1Task) {
+            3
+        } elseif ($isA2Task) {
+            2
+        } else {
+            1
+        }
         evidence_type = if ($isA2S1Task) {
             "mouse_effect_probe_a2_s1_launch"
         } elseif ($isA2Task) {
             "mouse_effect_probe_a2_launch"
+        } elseif ($isBTask) {
+            "mouse_effect_probe_b_launch"
         } else {
             "mouse_effect_probe_a_launch"
         }
@@ -774,13 +902,13 @@ try {
         visible_effect_analyzed = $false
         human_observation_received = $false
     }
-    if ($isA2Task -or $isA2S1Task) {
+    if ($isA2Task -or $isA2S1Task -or $isBTask) {
         $summary.run_role = [string]$task.run_role
         $summary.scope_id = [string]$task.scope_id
     }
     Write-NewUtf8Json $launchSummaryPath $summary
     if (-not $executionComplete) {
-        throw "Physical A 已停止且未补偿：stop_reason=$($report.result.stop_reason)"
+        throw "Physical probe 已停止且未补偿：stop_reason=$($report.result.stop_reason)"
     }
     if ($isA2S1Task) {
         $request = $sequence.request

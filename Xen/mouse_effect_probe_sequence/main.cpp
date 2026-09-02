@@ -61,7 +61,11 @@ void print_usage() {
            "--profile s1-liveness-a2 --run-role <primary|validation> "
            "--challenge-pulses <n> --challenge-stride-samples <n> "
            "[--peak-hold-samples <n>] --settle-samples <n> "
-           "--baseline-samples <n>\n";
+           "--baseline-samples <n>\n"
+        << "  XenMouseEffectProbeSequence --output <new-json> "
+           "--profile physical-b-primary --guard-samples <n> "
+           "--lfsr-order <n> --feedback-mask <decimal> --seed <n> "
+           "--phase <n> --offline-sequence-semantic-sha256 <sha256>\n";
 }
 
 } // namespace
@@ -79,6 +83,8 @@ int wmain(int argc, wchar_t* argv[]) {
     mouse_effect_probe::DependencyCalibrationSequenceRequest
         dependency_request;
     mouse_effect_probe::S1LivenessSequenceRequest s1_liveness_request;
+    mouse_effect_probe::PhysicalBPrimarySequenceRequest
+        physical_b_primary_request;
     std::wstring profile = L"sparse-pulse-a";
     std::wstring run_role;
     bool seen_output = false;
@@ -92,6 +98,11 @@ int wmain(int argc, wchar_t* argv[]) {
     bool seen_challenge_stride = false;
     bool seen_peak_hold = false;
     bool seen_settle = false;
+    bool seen_lfsr_order = false;
+    bool seen_feedback_mask = false;
+    bool seen_seed = false;
+    bool seen_phase = false;
+    bool seen_offline_sequence_sha = false;
     for (int index = 1; index < argc; ++index) {
         if (index + 1 >= argc) {
             std::cerr << "参数缺少值。\n";
@@ -115,7 +126,8 @@ int wmain(int argc, wchar_t* argv[]) {
         } else if (argument == L"--profile" && !seen_profile &&
                    (value == L"sparse-pulse-a" ||
                     value == L"dependency-calibration-a2" ||
-                    value == L"s1-liveness-a2")) {
+                    value == L"s1-liveness-a2" ||
+                    value == L"physical-b-primary")) {
             profile.assign(value);
             seen_profile = true;
         } else if (argument == L"--blocks" && !seen_blocks &&
@@ -145,6 +157,37 @@ int wmain(int argc, wchar_t* argv[]) {
                    parse_u64(value,
                        s1_liveness_request.settle_sample_count)) {
             seen_settle = true;
+        } else if (argument == L"--lfsr-order" && !seen_lfsr_order) {
+            std::uint64_t parsed = 0;
+            if (!parse_u64(value, parsed) ||
+                parsed > std::numeric_limits<std::uint32_t>::max()) {
+                std::cerr << "lfsr-order 非法。\n";
+                return 2;
+            }
+            physical_b_primary_request.lfsr_order =
+                static_cast<std::uint32_t>(parsed);
+            seen_lfsr_order = true;
+        } else if (argument == L"--feedback-mask" && !seen_feedback_mask) {
+            std::uint64_t parsed = 0;
+            if (!parse_u64(value, parsed) ||
+                parsed > std::numeric_limits<std::uint32_t>::max()) {
+                std::cerr << "feedback-mask 非法。\n";
+                return 2;
+            }
+            physical_b_primary_request.feedback_mask =
+                static_cast<std::uint32_t>(parsed);
+            seen_feedback_mask = true;
+        } else if (argument == L"--seed" && !seen_seed &&
+                   parse_u64(value, physical_b_primary_request.seed)) {
+            seen_seed = true;
+        } else if (argument == L"--phase" && !seen_phase &&
+                   parse_u64(value, physical_b_primary_request.phase)) {
+            seen_phase = true;
+        } else if (argument == L"--offline-sequence-semantic-sha256" &&
+                   !seen_offline_sequence_sha &&
+                   wide_to_utf8(value, physical_b_primary_request.
+                       offline_sequence_semantic_sha256)) {
+            seen_offline_sequence_sha = true;
         } else {
             std::cerr << "未知、重复或非法参数。\n";
             print_usage();
@@ -154,23 +197,39 @@ int wmain(int argc, wchar_t* argv[]) {
     const bool dependency_profile =
         profile == L"dependency-calibration-a2";
     const bool s1_liveness_profile = profile == L"s1-liveness-a2";
-    const bool common_valid = seen_output && seen_baseline &&
+    const bool physical_b_profile = profile == L"physical-b-primary";
+    const bool common_valid = seen_output &&
         !output_path.empty() && output_path.is_absolute();
     const bool sparse_valid = !dependency_profile && !s1_liveness_profile &&
+        !physical_b_profile && seen_baseline &&
         seen_response && seen_guard && !seen_blocks && !seen_run_role &&
         !seen_challenge_pulses && !seen_challenge_stride &&
-        !seen_peak_hold && !seen_settle;
+        !seen_peak_hold && !seen_settle && !seen_lfsr_order &&
+        !seen_feedback_mask && !seen_seed && !seen_phase &&
+        !seen_offline_sequence_sha;
     const bool dependency_valid = dependency_profile && seen_response &&
-        seen_guard && seen_blocks && seen_run_role &&
+        seen_baseline && seen_guard && seen_blocks && seen_run_role &&
         (run_role == L"p-cal" || run_role == L"p-holdout") &&
         !seen_challenge_pulses && !seen_challenge_stride &&
-        !seen_peak_hold && !seen_settle;
+        !seen_peak_hold && !seen_settle && !seen_lfsr_order &&
+        !seen_feedback_mask && !seen_seed && !seen_phase &&
+        !seen_offline_sequence_sha;
     const bool s1_liveness_valid = s1_liveness_profile &&
+        seen_baseline &&
         !seen_response && !seen_guard && !seen_blocks && seen_run_role &&
         (run_role == L"primary" || run_role == L"validation") &&
-        seen_challenge_pulses && seen_challenge_stride && seen_settle;
+        seen_challenge_pulses && seen_challenge_stride && seen_settle &&
+        !seen_lfsr_order && !seen_feedback_mask && !seen_seed &&
+        !seen_phase && !seen_offline_sequence_sha;
+    const bool physical_b_valid = physical_b_profile &&
+        !seen_baseline && !seen_response && seen_guard && !seen_blocks &&
+        !seen_run_role && !seen_challenge_pulses &&
+        !seen_challenge_stride && !seen_peak_hold && !seen_settle &&
+        seen_lfsr_order && seen_feedback_mask && seen_seed && seen_phase &&
+        seen_offline_sequence_sha;
     if (!common_valid ||
-        (!sparse_valid && !dependency_valid && !s1_liveness_valid)) {
+        (!sparse_valid && !dependency_valid && !s1_liveness_valid &&
+         !physical_b_valid)) {
         std::cerr << "缺少必填参数，且 output 必须是绝对路径。\n";
         print_usage();
         return 2;
@@ -179,7 +238,12 @@ int wmain(int argc, wchar_t* argv[]) {
     mouse_effect_probe::MouseEffectProbeSequence sequence;
     std::string error;
     bool generated = false;
-    if (dependency_profile) {
+    if (physical_b_profile) {
+        physical_b_primary_request.guard_sample_count =
+            request.guard_sample_count;
+        generated = mouse_effect_probe::make_physical_b_primary_sequence(
+            physical_b_primary_request, sequence, error);
+    } else if (dependency_profile) {
         dependency_request.run_role = run_role == L"p-cal"
             ? mouse_effect_probe::DependencyCalibrationRunRole::P_CAL
             : mouse_effect_probe::DependencyCalibrationRunRole::P_HOLDOUT;

@@ -18,6 +18,9 @@ enum class ProbeSamplePhase {
     RESPONSE,
     HOLD,
     GUARD,
+    PERIOD,
+    INVERTED_PERIOD,
+    RETURN_TO_ZERO,
 };
 
 struct SparsePulseSequenceRequest {
@@ -54,6 +57,15 @@ struct S1LivenessSequenceRequest {
     S1LivenessRunRole run_role = S1LivenessRunRole::PRIMARY;
 };
 
+struct PhysicalBPrimarySequenceRequest {
+    std::uint64_t guard_sample_count = 0;
+    std::uint32_t lfsr_order = 0;
+    std::uint32_t feedback_mask = 0;
+    std::uint64_t seed = 0;
+    std::uint64_t phase = 0;
+    std::string offline_sequence_semantic_sha256;
+};
+
 struct ProbeSequenceSample {
     std::uint64_t sample_index = 0;
     std::uint64_t block_id = 0;
@@ -62,9 +74,26 @@ struct ProbeSequenceSample {
     int dy_counts = 0;
 };
 
+enum class ProbeSequenceBlockRole {
+    UNSPECIFIED,
+    ESTIMATION,
+    WITHIN_RUN_VALIDATION,
+};
+
+enum class ProbeSequenceBlockPolarity {
+    UNSPECIFIED,
+    NORMAL,
+    INVERTED,
+};
+
 struct ProbeSequenceBlock {
     std::uint64_t block_id = 0;
+    std::uint64_t pair_index = 0;
+    ProbeSequenceBlockRole role = ProbeSequenceBlockRole::UNSPECIFIED;
+    ProbeSequenceBlockPolarity polarity =
+        ProbeSequenceBlockPolarity::UNSPECIFIED;
     std::uint64_t first_sample_index = 0;
+    std::uint64_t period_sample_count = 0;
     std::uint64_t sample_count = 0;
     int first_pulse_dx_counts = 0;
     int second_pulse_dx_counts = 0;
@@ -76,6 +105,7 @@ struct MouseEffectProbeSequence {
     SparsePulseSequenceRequest request;
     DependencyCalibrationSequenceRequest dependency_calibration_request;
     S1LivenessSequenceRequest s1_liveness_request;
+    PhysicalBPrimarySequenceRequest physical_b_primary_request;
     std::vector<ProbeSequenceBlock> blocks;
     std::vector<ProbeSequenceSample> samples;
     std::int64_t net_x_counts = 0;
@@ -107,6 +137,14 @@ bool make_s1_liveness_sequence(
     MouseEffectProbeSequence& sequence,
     std::string& error) noexcept;
 
+// Physical B Primary 只生成 F0 已冻结的 cumulative-position m-sequence：
+// 两个完整 normal/inverted pair，实际差分命令为 X-only {-1,0,+1}，
+// 每个 block 显式回零且 guard 独立；当前接口不提供 cross-Run holdout。
+bool make_physical_b_primary_sequence(
+    const PhysicalBPrimarySequenceRequest& request,
+    MouseEffectProbeSequence& sequence,
+    std::string& error) noexcept;
+
 bool validate_mouse_effect_probe_sequence(
     const MouseEffectProbeSequence& sequence,
     std::string& error) noexcept;
@@ -126,6 +164,10 @@ const char* probe_sample_phase_name(ProbeSamplePhase phase) noexcept;
 const char* dependency_calibration_run_role_name(
     DependencyCalibrationRunRole role) noexcept;
 const char* s1_liveness_run_role_name(S1LivenessRunRole role) noexcept;
+const char* probe_sequence_block_role_name(
+    ProbeSequenceBlockRole role) noexcept;
+const char* probe_sequence_block_polarity_name(
+    ProbeSequenceBlockPolarity polarity) noexcept;
 
 enum class ProbeExecutionState {
     IDLE,
@@ -139,6 +181,8 @@ enum class ProbeDispatchMode {
     OUTPUT_OFF_REHEARSAL,
     // A 级稀疏脉冲物理执行；仍需独占 owner、双重授权和安全门。
     PHYSICAL_A,
+    // B 级冻结 PRBS Primary；使用独立确认令牌，不与 A 级权限复用。
+    PHYSICAL_B,
 };
 
 enum class ProbeStopReason {

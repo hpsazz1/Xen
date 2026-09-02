@@ -27,11 +27,19 @@
 
 namespace {
 
-constexpr std::wstring_view kPhysicalConfirmation =
+constexpr std::wstring_view kPhysicalAConfirmation =
     L"XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT";
+constexpr std::wstring_view kPhysicalBConfirmation =
+    L"XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT";
 constexpr std::size_t kMaximumSafetyObservationCount = 8192U;
 constexpr std::size_t kMaximumMonitorPacketCount = 8192U;
 std::atomic<bool> stop_requested{false};
+
+bool is_physical_dispatch(
+        mouse_effect_probe::ProbeDispatchMode mode) noexcept {
+    return mode == mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A ||
+           mode == mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B;
+}
 
 void set_error(std::string& output, std::string_view value) noexcept {
     try {
@@ -741,6 +749,7 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
         bool seen_max_seconds = false;
         bool seen_allow_physical = false;
         bool seen_confirmation = false;
+        std::wstring physical_confirmation;
 
         const auto duplicate = [&](bool& seen, std::string_view name) {
             if (seen) {
@@ -779,6 +788,9 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                 } else if (value == L"physical-a") {
                     options.dispatch_mode =
                         mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A;
+                } else if (value == L"physical-b") {
+                    options.dispatch_mode =
+                        mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B;
                 } else {
                     set_error(error, "--mode 非法");
                     return MouseEffectProbeParseStatus::INVALID;
@@ -861,14 +873,13 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                 }
             } else if (argument == L"--confirm-physical-output") {
                 if (duplicate(seen_confirmation,
-                              "--confirm-physical-output") ||
-                    value != kPhysicalConfirmation) {
+                              "--confirm-physical-output")) {
                     if (error.empty()) {
-                        set_error(error, "物理输出确认令牌不匹配");
+                        set_error(error, "物理输出确认令牌重复");
                     }
                     return MouseEffectProbeParseStatus::INVALID;
                 }
-                options.physical_output_confirmed = true;
+                physical_confirmation.assign(value);
             } else {
                 set_error(error, "未知参数");
                 return MouseEffectProbeParseStatus::INVALID;
@@ -890,18 +901,23 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
             set_error(error, "缺少必填参数或路径不是绝对路径");
             return MouseEffectProbeParseStatus::INVALID;
         }
-        if (options.dispatch_mode ==
-                mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
+        if (is_physical_dispatch(options.dispatch_mode)) {
+            const auto expected_confirmation = options.dispatch_mode ==
+                    mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A
+                ? kPhysicalAConfirmation : kPhysicalBConfirmation;
             if (!options.allow_physical_output ||
-                !options.physical_output_confirmed) {
-                set_error(error, "physical A 缺少双重物理输出授权");
+                !seen_confirmation ||
+                physical_confirmation != expected_confirmation) {
+                set_error(error,
+                    "physical mode 缺少双重授权或确认令牌不匹配");
                 return MouseEffectProbeParseStatus::INVALID;
             }
+            options.physical_output_confirmed = true;
             if (!seen_safety_ledger ||
                 options.safety_ledger_path.empty() ||
                 !options.safety_ledger_path.is_absolute()) {
                 set_error(error,
-                    "physical A 缺少绝对 safety ledger 发布路径");
+                    "physical mode 缺少绝对 safety ledger 发布路径");
                 return MouseEffectProbeParseStatus::INVALID;
             }
         } else if (seen_allow_physical || seen_confirmation ||
@@ -937,7 +953,12 @@ std::string mouse_effect_probe_usage() {
         "--safety-ledger <new-json> "
         "--confirm-physical-output "
         "XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT\n"
-        "physical A 会发送真实 KMBOX ±1 X 输入；只能由用户前台启动。\n";
+        "physical B 额外要求:\n"
+        "  --mode physical-b --allow-physical-output "
+        "--safety-ledger <new-json> "
+        "--confirm-physical-output "
+        "XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT\n"
+        "physical A/B 会发送真实 KMBOX X 输入；只能由用户前台启动。\n";
 }
 
 bool make_mouse_effect_probe_source_frame_event(
@@ -1015,8 +1036,7 @@ bool run_mouse_effect_probe(
     stop_requested.store(false, std::memory_order_release);
     try {
         if (std::filesystem::exists(options.report_path) ||
-            (options.dispatch_mode ==
-                 mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A &&
+            (is_physical_dispatch(options.dispatch_mode) &&
              std::filesystem::exists(options.safety_ledger_path))) {
             set_error(error,
                 "command report 或 safety ledger 已存在，拒绝开始 probe");
@@ -1028,6 +1048,19 @@ bool run_mouse_effect_probe(
         mouse_effect_probe::MouseEffectProbeSequence sequence;
         if (!mouse_effect_probe::read_mouse_effect_probe_sequence(
                 options.sequence_path, sequence, error)) {
+            return false;
+        }
+        const bool physical_b_sequence =
+            sequence.schema == 4U &&
+            sequence.profile == "physical_b_prbs_primary";
+        if ((options.dispatch_mode ==
+                 mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
+             !physical_b_sequence) ||
+            (options.dispatch_mode ==
+                 mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A &&
+             physical_b_sequence)) {
+            set_error(error,
+                "physical dispatch mode 与 sequence schema/profile 不一致");
             return false;
         }
         AppConfig app_config;
@@ -1061,10 +1094,10 @@ bool run_mouse_effect_probe(
             monitor_packet_observer;
         MouseOutputOwnerLease rehearsal_owner_guard;
         std::shared_ptr<IMouseController> mouse;
-        if (options.dispatch_mode ==
-                mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
+        if (is_physical_dispatch(options.dispatch_mode)) {
             if (app_config.mouse.backend != MouseBackend::KMBOX_NET) {
-                set_error(error, "physical A 当前只接受 KMBOX NET backend");
+                set_error(error,
+                    "physical mode 当前只接受 KMBOX NET backend");
                 return false;
             }
             monitor_packet_observer =
@@ -1072,7 +1105,7 @@ bool run_mouse_effect_probe(
             if (!mouse::detail::install_kmbox_monitor_packet_observer(
                     monitor_packet_observer)) {
                 set_error(error,
-                    "physical A 无法独占 KMBOX monitor packet observer");
+                    "physical mode 无法独占 KMBOX monitor packet observer");
                 return false;
             }
             app_config.mouse.allow_send_input = true;
@@ -1105,8 +1138,7 @@ bool run_mouse_effect_probe(
             result.execution = executor.result();
             result.safety_ledger = safety_ledger;
             bool safety_ledger_published = true;
-            if (options.dispatch_mode ==
-                    mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
+            if (is_physical_dispatch(options.dispatch_mode)) {
                 std::string safety_ledger_error;
                 safety_ledger_published =
                     write_mouse_effect_probe_safety_ledger(
@@ -1147,8 +1179,7 @@ bool run_mouse_effect_probe(
             return false;
         }
 
-        if (options.dispatch_mode ==
-                mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
+        if (is_physical_dispatch(options.dispatch_mode)) {
             std::cout << mouse_effect_probe_deadman_arming_prompt() << '\n'
                       << std::flush;
             const auto arming_deadline = std::chrono::steady_clock::now() +
@@ -1207,7 +1238,7 @@ bool run_mouse_effect_probe(
             if (!armed) {
                 publish_report();
                 error = execution_error.empty()
-                    ? "physical A 未完成 deadman 武装" : execution_error;
+                    ? "physical mode 未完成 deadman 武装" : execution_error;
                 return false;
             }
         }
@@ -1260,8 +1291,7 @@ bool run_mouse_effect_probe(
             }
 
             bool safety_allowed = false;
-            if (options.dispatch_mode ==
-                    mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
+            if (is_physical_dispatch(options.dispatch_mode)) {
                 const auto safety = poll_physical_safety(
                     mouse, MouseEffectProbeSafetyPhase::ACTIVE,
                     safety_ledger);
