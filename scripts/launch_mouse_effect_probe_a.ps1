@@ -224,7 +224,11 @@ if ($isA2S1Task) {
     }
     if ([string]$task.profile -ne $expectedProfile -or
         [uint64]$task.expected_nonzero_transition_count -eq 0 -or
+        [string]$task.liveness_policy.policy_id -ne
+            "a2-s1-kmbox-bracket-peak-hold-v1" -or
+        [uint64]$task.liveness_policy.peak_hold_sample_count -eq 0 -or
         [bool]$task.liveness_policy.challenge_frames_eligible_for_estimands -or
+        [bool]$task.liveness_policy.peak_hold_frames_eligible_for_estimands -or
         [bool]$task.liveness_policy.settle_frames_eligible_for_estimands -or
         [bool]$task.liveness_policy.fixed_pixel_speed_used_as_gate) {
         throw "Physical A2 S1 role/profile/liveness policy 合同无效"
@@ -321,7 +325,7 @@ if ([bool]$capture.require_frame_metadata) {
 }
 
 $probeLabel = if ($isA2S1Task) {
-    "A2 S1 $([string]$task.run_role) 固定 cadence X-only 活性 bracket"
+    "A2 S1 $([string]$task.run_role) 固定 cadence X-only 活性 bracket（含峰值零命令停留）"
 } elseif ($isA2Task) {
     "A2 依赖校准 $([string]$task.run_role) ±1 X probe"
 } else {
@@ -705,18 +709,44 @@ try {
         $policy = $task.liveness_policy
         $challengePulseCount = [uint64]$request.challenge_pulse_count
         $challengeStride = [uint64]$request.challenge_stride_sample_count
+        $peakHoldCount = [uint64]$request.peak_hold_sample_count
         $settleCount = [uint64]$request.settle_sample_count
         $baselineCount = [uint64]$request.baseline_sample_count
-        $challengeCount = 2 * $challengePulseCount * $challengeStride
+        $challengeCount =
+            2 * $challengePulseCount * $challengeStride + $peakHoldCount
         $expectedSamples = 2 * $challengeCount + $settleCount + $baselineCount
         if ($challengePulseCount -ne
                 [uint64]$policy.challenge_pulse_count -or
             $challengeStride -ne
                 [uint64]$policy.challenge_stride_sample_count -or
+            $peakHoldCount -eq 0 -or
+            $peakHoldCount -ne [uint64]$policy.peak_hold_sample_count -or
+            [bool]$policy.peak_hold_frames_eligible_for_estimands -or
             $settleCount -ne [uint64]$policy.settle_sample_count -or
             $baselineCount -ne [uint64]$policy.baseline_frame_count -or
             $expectedSamples -ne $samples.Count) {
             throw "Physical A2 S1 sequence/request/policy 容量不守恒"
+        }
+
+        $holdSamples = @($samples | Where-Object {
+            [string]$_.phase -eq "hold"
+        })
+        if ($holdSamples.Count -ne 2 * $peakHoldCount) {
+            throw "Physical A2 S1 peak hold sample_count 不守恒"
+        }
+        foreach ($holdSample in $holdSamples) {
+            $holdIndex = [int]$holdSample.sample_index
+            $holdEvent = $events[$holdIndex]
+            if ([int]$holdSample.dx_counts -ne 0 -or
+                [int]$holdSample.dy_counts -ne 0 -or
+                [int]$holdEvent.sample_index -ne $holdIndex -or
+                [int]$holdEvent.nominal_dx_counts -ne 0 -or
+                [int]$holdEvent.requested_dx_counts -ne 0 -or
+                [bool]$holdEvent.dispatch_attempted -or
+                [bool]$holdEvent.backend_succeeded -or
+                [bool]$holdEvent.protocol_ack_received) {
+                throw "Physical A2 S1 peak hold 不是未 dispatch 的精确零命令平台"
+            }
         }
 
         $phaseDefinitions = @(
@@ -790,7 +820,9 @@ try {
                 baseline_frame_count = $baselineCount
                 challenge_pulse_count = $challengePulseCount
                 challenge_stride_sample_count = $challengeStride
+                peak_hold_sample_count = $peakHoldCount
                 challenge_frames_eligible_for_estimands = $false
+                peak_hold_frames_eligible_for_estimands = $false
                 settle_frames_eligible_for_estimands = $false
             }
             phases = $phaseDefinitions
@@ -810,6 +842,7 @@ try {
             baseline_actual_command_zero = $true
             automated_kmbox_challenge = $true
             challenge_frames_excluded_from_estimands = $true
+            peak_hold_frames_excluded_from_estimands = $true
             aim_off = $true
             run_uuid = [string]$task.run_uuid
             run_role = [string]$task.run_role

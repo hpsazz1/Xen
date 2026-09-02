@@ -133,6 +133,7 @@ def _make_bracketed_static_s1_session(
     source_start_ns: int,
     *,
     post_challenge_changes: bool = True,
+    peak_hold_count: int = 0,
 ) -> pathlib.Path:
     run = root / role
     frame_root = run / "pixel-evidence" / "frames"
@@ -144,15 +145,23 @@ def _make_bracketed_static_s1_session(
         # witness 内容仍属于同一 scope。
         base[0, 0, 0] = np.uint8((int(base[0, 0, 0]) + 1) % 256)
 
-    pre_count = 8
+    pre_count = 8 + peak_hold_count
     settle_count = 4
     baseline_count = 32
-    post_count = 8
-    pre_shifts = [0.0, 0.4, 0.8, 0.4, 0.0, -0.4, 0.0, 0.0]
+    post_count = 8 + peak_hold_count
+    pre_shifts = [
+        0.0, 0.4, 0.8, 0.4,
+        *([0.8] * peak_hold_count),
+        0.0, -0.4, 0.0, 0.0,
+    ]
     settle_shifts = [0.0] * settle_count
     baseline_shifts = [0.0] * baseline_count
     post_shifts = (
-        [0.0, -0.4, -0.8, -0.4, 0.0, 0.4, 0.0, 0.0]
+        [
+            0.0, -0.4, -0.8, -0.4,
+            *([-0.8] * peak_hold_count),
+            0.0, 0.4, 0.0, 0.0,
+        ]
         if post_challenge_changes else [0.0] * post_count
     )
     shifts = pre_shifts + settle_shifts + baseline_shifts + post_shifts
@@ -197,12 +206,16 @@ def _make_bracketed_static_s1_session(
     post_first = baseline_last + 1
     post_last = len(frames) - 1
     role_sign = 1 if role == "primary" else -1
-    pre_dx = [
-        role_sign, 0, role_sign, 0, -role_sign, 0, -role_sign, 0
-    ]
-    post_dx = [
-        -role_sign, 0, -role_sign, 0, role_sign, 0, role_sign, 0
-    ]
+    pre_dx = (
+        [role_sign, 0, role_sign, 0]
+        + [0] * peak_hold_count
+        + [-role_sign, 0, -role_sign, 0]
+    )
+    post_dx = (
+        [-role_sign, 0, -role_sign, 0]
+        + [0] * peak_hold_count
+        + [role_sign, 0, role_sign, 0]
+    )
     dx_values = (
         pre_dx + [0] * settle_count + [0] * baseline_count + post_dx
     )
@@ -216,7 +229,10 @@ def _make_bracketed_static_s1_session(
     for index, (frame, dx) in enumerate(zip(frames, dx_values, strict=True)):
         if index <= pre_last:
             block_id = 1
-            phase = "pulse" if dx else "response"
+            phase = (
+                "hold" if 4 <= index < 4 + peak_hold_count
+                else "pulse" if dx else "response"
+            )
         elif index <= settle_last:
             block_id = 0
             phase = "guard"
@@ -225,7 +241,11 @@ def _make_bracketed_static_s1_session(
             phase = "baseline"
         else:
             block_id = 2
-            phase = "pulse" if dx else "response"
+            post_index = index - post_first
+            phase = (
+                "hold" if 4 <= post_index < 4 + peak_hold_count
+                else "pulse" if dx else "response"
+            )
         cumulative += dx
         samples.append(
             {
@@ -295,6 +315,8 @@ def _make_bracketed_static_s1_session(
         },
         "sequence_sha256": sequence_sha,
     }
+    if peak_hold_count > 0:
+        sequence["request"]["peak_hold_sample_count"] = peak_hold_count
     sequence_path = run / "sequence.json"
     _write_json(sequence_path, sequence)
     sequence_file_sha = hashlib.sha256(sequence_path.read_bytes()).hexdigest()
@@ -359,6 +381,11 @@ def _make_bracketed_static_s1_session(
             },
         ],
     }
+    if peak_hold_count > 0:
+        bracket["policy"]["peak_hold_sample_count"] = peak_hold_count
+        bracket["policy"][
+            "peak_hold_frames_eligible_for_estimands"
+        ] = False
     bracket_path = run / "s1-liveness-bracket.json"
     _write_json(bracket_path, bracket)
     bracket_sha = hashlib.sha256(bracket_path.read_bytes()).hexdigest()
@@ -583,6 +610,7 @@ def test_s1_accepts_bracketed_resolution_censored_static_baseline() -> None:
             "11111111-2222-4333-8444-555555555555",
             "shared-clock-epoch",
             10_000_000_000,
+            peak_hold_count=2,
         )
         validation = _make_bracketed_static_s1_session(
             root,
@@ -590,6 +618,7 @@ def test_s1_accepts_bracketed_resolution_censored_static_baseline() -> None:
             "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
             "shared-clock-epoch",
             20_000_000_000,
+            peak_hold_count=2,
         )
         result, rows = MODULE.analyze_zero_input_sessions(
             primary,
@@ -646,6 +675,47 @@ def test_s1_accepts_bracketed_resolution_censored_static_baseline() -> None:
                "plan 必须使用 null interval，不得偷称 nondegenerate noise")
 
 
+def test_s1_legacy_bracket_without_peak_hold_remains_readable() -> None:
+    with tempfile.TemporaryDirectory(prefix="xen-a2-s1-legacy-") as directory:
+        root = pathlib.Path(directory)
+        primary = _make_bracketed_static_s1_session(
+            root,
+            "primary",
+            "11111111-2222-4333-8444-555555555555",
+            "shared-clock-epoch",
+            10_000_000_000,
+        )
+        validation = _make_bracketed_static_s1_session(
+            root,
+            "validation",
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "shared-clock-epoch",
+            20_000_000_000,
+        )
+        result, _ = MODULE.analyze_zero_input_sessions(
+            primary,
+            validation,
+            (16, 16, 80, 96),
+            (160, 16, 80, 96),
+            block_count=4,
+        )
+        legacy_sequence = json.loads(
+            (primary / "sequence.json").read_text(encoding="utf-8")
+        )
+        legacy_bracket = json.loads(
+            (primary / "s1-liveness-bracket.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        expect(
+            result["status"] == "VALID"
+            and "peak_hold_sample_count"
+            not in legacy_sequence["request"]
+            and "peak_hold_sample_count" not in legacy_bracket["policy"],
+            "缺少 peak hold 字段的历史 schema 3/bracket policy 必须继续可读",
+        )
+
+
 def test_s1_bracket_rejects_missing_post_change_and_baseline_command() -> None:
     with tempfile.TemporaryDirectory(prefix="xen-a2-s1-bracket-red-") as directory:
         root = pathlib.Path(directory)
@@ -656,6 +726,7 @@ def test_s1_bracket_rejects_missing_post_change_and_baseline_command() -> None:
             "shared-clock-epoch",
             10_000_000_000,
             post_challenge_changes=False,
+            peak_hold_count=2,
         )
         validation = _make_bracketed_static_s1_session(
             root,
@@ -663,6 +734,7 @@ def test_s1_bracket_rejects_missing_post_change_and_baseline_command() -> None:
             "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
             "shared-clock-epoch",
             20_000_000_000,
+            peak_hold_count=2,
         )
         result, _ = MODULE.analyze_zero_input_sessions(
             primary,
@@ -680,7 +752,7 @@ def test_s1_bracket_rejects_missing_post_change_and_baseline_command() -> None:
 
         report_path = validation / "command-report.json"
         report = json.loads(report_path.read_text(encoding="utf-8"))
-        baseline_event = report["result"]["events"][12]
+        baseline_event = report["result"]["events"][14]
         baseline_event["nominal_dx_counts"] = 1
         baseline_event["requested_dx_counts"] = 1
         baseline_event["dispatch_attempted"] = True
@@ -719,5 +791,6 @@ if __name__ == "__main__":
     test_s1_rejects_reused_or_degenerate_frames_without_epsilon()
     test_s1_allows_separate_timing_observations_of_the_same_clock_epoch()
     test_s1_accepts_bracketed_resolution_censored_static_baseline()
+    test_s1_legacy_bracket_without_peak_hold_remains_readable()
     test_s1_bracket_rejects_missing_post_change_and_baseline_command()
     print("Mouse Effect Probe A2 dependency calibration 测试全部通过。")

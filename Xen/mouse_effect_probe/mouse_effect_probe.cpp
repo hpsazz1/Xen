@@ -152,6 +152,11 @@ bool expected_s1_liveness_sample_count(
         return false;
     }
     std::uint64_t total = one_direction * 4U;
+    if (request.peak_hold_sample_count >
+            (std::numeric_limits<std::uint64_t>::max() - total) / 2U) {
+        return false;
+    }
+    total += request.peak_hold_sample_count * 2U;
     if (!checked_add(total, request.settle_sample_count, total) ||
         !checked_add(total, request.baseline_sample_count, total) ||
         total > kMaximumS1LivenessSamples) {
@@ -245,7 +250,7 @@ void append_s1_liveness_challenge(
     block.first_sample_index = sequence.samples.size();
     block.first_pulse_dx_counts = first_direction;
     block.second_pulse_dx_counts = -first_direction;
-    for (const int direction : {first_direction, -first_direction}) {
+    const auto append_direction = [&](int direction) {
         for (std::uint64_t pulse = 0;
              pulse < request.challenge_pulse_count; ++pulse) {
             append_sample(sequence, block_id, ProbeSamplePhase::PULSE,
@@ -254,7 +259,11 @@ void append_s1_liveness_challenge(
                 sequence, block_id, ProbeSamplePhase::RESPONSE,
                 request.challenge_stride_sample_count - 1U);
         }
-    }
+    };
+    append_direction(first_direction);
+    append_zeros(sequence, block_id, ProbeSamplePhase::HOLD,
+                 request.peak_hold_sample_count);
+    append_direction(-first_direction);
     block.sample_count = sequence.samples.size() - block.first_sample_index;
     sequence.blocks.push_back(block);
 }
@@ -346,7 +355,7 @@ bool build_s1_liveness_sequence(
     std::uint64_t sample_count = 0;
     if (!expected_s1_liveness_sample_count(request, sample_count)) {
         set_error(error,
-            "A2 S1 challenge/stride/settle/baseline 必须为正，单段幅度和总样本必须在安全容量内");
+            "A2 S1 challenge/stride/hold/settle/baseline 必须满足固定安全容量");
         return false;
     }
     sequence = {};
@@ -422,13 +431,17 @@ nlohmann::ordered_json canonical_payload(
              sequence.s1_liveness_request.challenge_pulse_count},
             {"challenge_stride_sample_count",
              sequence.s1_liveness_request.challenge_stride_sample_count},
-            {"settle_sample_count",
-             sequence.s1_liveness_request.settle_sample_count},
-            {"baseline_sample_count",
-             sequence.s1_liveness_request.baseline_sample_count},
-            {"run_role", s1_liveness_run_role_name(
-                sequence.s1_liveness_request.run_role)},
         };
+        if (sequence.s1_liveness_request.peak_hold_sample_count != 0) {
+            request["peak_hold_sample_count"] =
+                sequence.s1_liveness_request.peak_hold_sample_count;
+        }
+        request["settle_sample_count"] =
+            sequence.s1_liveness_request.settle_sample_count;
+        request["baseline_sample_count"] =
+            sequence.s1_liveness_request.baseline_sample_count;
+        request["run_role"] = s1_liveness_run_role_name(
+            sequence.s1_liveness_request.run_role);
     }
     return {
         {"schema", sequence.schema},
@@ -535,6 +548,7 @@ bool same_s1_liveness_request(
     return first.challenge_pulse_count == second.challenge_pulse_count &&
            first.challenge_stride_sample_count ==
                second.challenge_stride_sample_count &&
+           first.peak_hold_sample_count == second.peak_hold_sample_count &&
            first.settle_sample_count == second.settle_sample_count &&
            first.baseline_sample_count == second.baseline_sample_count &&
            first.run_role == second.run_role;
@@ -613,6 +627,8 @@ bool parse_phase(std::string_view value, ProbeSamplePhase& output) noexcept {
         output = ProbeSamplePhase::PULSE;
     } else if (value == "response") {
         output = ProbeSamplePhase::RESPONSE;
+    } else if (value == "hold") {
+        output = ProbeSamplePhase::HOLD;
     } else if (value == "guard") {
         output = ProbeSamplePhase::GUARD;
     } else {
@@ -743,16 +759,26 @@ bool parse_document(const nlohmann::ordered_json& document,
         }
     } else if (s1_liveness_profile) {
         std::string run_role;
-        if (!has_exact_keys(request,
+        const bool legacy_request = has_exact_keys(request,
                 {"challenge_pulse_count",
                  "challenge_stride_sample_count", "settle_sample_count",
-                 "baseline_sample_count", "run_role"}) ||
+                 "baseline_sample_count", "run_role"});
+        const bool peak_hold_request = has_exact_keys(request,
+                {"challenge_pulse_count",
+                 "challenge_stride_sample_count", "peak_hold_sample_count",
+                 "settle_sample_count", "baseline_sample_count",
+                 "run_role"});
+        if ((!legacy_request && !peak_hold_request) ||
             !read_u64(request, "challenge_pulse_count",
                       candidate.s1_liveness_request.
                           challenge_pulse_count) ||
             !read_u64(request, "challenge_stride_sample_count",
                       candidate.s1_liveness_request.
                           challenge_stride_sample_count) ||
+            (peak_hold_request &&
+             !read_u64(request, "peak_hold_sample_count",
+                       candidate.s1_liveness_request.
+                           peak_hold_sample_count)) ||
             !read_u64(request, "settle_sample_count",
                       candidate.s1_liveness_request.settle_sample_count) ||
             !read_u64(request, "baseline_sample_count",
@@ -852,6 +878,7 @@ const char* probe_sample_phase_name(ProbeSamplePhase phase) noexcept {
         case ProbeSamplePhase::BASELINE: return "baseline";
         case ProbeSamplePhase::PULSE: return "pulse";
         case ProbeSamplePhase::RESPONSE: return "response";
+        case ProbeSamplePhase::HOLD: return "hold";
         case ProbeSamplePhase::GUARD: return "guard";
     }
     return "unknown";

@@ -16,6 +16,7 @@ enum class ProbeSamplePhase {
     BASELINE,
     PULSE,
     RESPONSE,
+    HOLD,
     GUARD,
 };
 
@@ -47,6 +48,7 @@ enum class S1LivenessRunRole {
 struct S1LivenessSequenceRequest {
     std::uint64_t challenge_pulse_count = 0;
     std::uint64_t challenge_stride_sample_count = 0;
+    std::uint64_t peak_hold_sample_count = 0;
     std::uint64_t settle_sample_count = 0;
     std::uint64_t baseline_sample_count = 0;
     S1LivenessRunRole run_role = S1LivenessRunRole::PRIMARY;
@@ -97,8 +99,9 @@ bool make_dependency_calibration_sequence(
     std::string& error) noexcept;
 
 // S1 活性序列只为静态数字 baseline 提供前后正控制。两段挑战以固定
-// source-frame cadence 发送 X-only 单 count 并各自回锚；settle 与 baseline
-// 全零，challenge/settle 永远不得进入零扰动或分辨率估计。
+// source-frame cadence 发送 X-only 单 count；可在原幅度峰值插入不 dispatch
+// 的零命令 hold，随后各自回锚。hold/settle/baseline 全零，challenge、hold
+// 与 settle 永远不得进入零扰动或分辨率估计。
 bool make_s1_liveness_sequence(
     const S1LivenessSequenceRequest& request,
     MouseEffectProbeSequence& sequence,

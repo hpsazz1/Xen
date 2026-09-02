@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -260,6 +261,7 @@ void test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline() {
     const mouse_effect_probe::S1LivenessSequenceRequest primary_request{
         .challenge_pulse_count = 2,
         .challenge_stride_sample_count = 3,
+        .peak_hold_sample_count = 5,
         .settle_sample_count = 4,
         .baseline_sample_count = 8,
         .run_role = S1LivenessRunRole::PRIMARY,
@@ -287,10 +289,18 @@ void test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline() {
                    "dependency_calibration_a2_s1_validation" &&
                primary.sequence_sha256 != validation.sequence_sha256,
            "A2 S1 两个角色必须有独立 profile 与规范语义 SHA");
-    expect(primary.samples.size() == 36 && primary.blocks.size() == 2 &&
+    expect(primary.samples.size() == 46 && primary.blocks.size() == 2 &&
                primary.net_x_counts == 0 &&
                primary.max_abs_prefix_x_counts == 2,
-           "A2 S1 序列必须是两段回锚挑战夹住 settle 与 baseline");
+           "A2 S1 序列必须在两段回锚挑战峰值插入精确零命令停留");
+    auto legacy_request = primary_request;
+    legacy_request.peak_hold_sample_count = 0;
+    mouse_effect_probe::MouseEffectProbeSequence legacy;
+    expect(mouse_effect_probe::make_s1_liveness_sequence(
+               legacy_request, legacy, error) &&
+               legacy.samples.size() == 36,
+           "没有 peak hold 的历史 schema 3 序列必须继续可生成和验证: " +
+               error);
 
     std::vector<int> primary_pulses;
     std::vector<int> validation_pulses;
@@ -310,13 +320,25 @@ void test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline() {
                validation_pulses ==
                std::vector<int>({-1, -1, 1, 1, 1, 1, -1, -1}),
            "validation 必须镜像 primary，且每段挑战正常完成都回到 anchor");
-    for (std::size_t index = 12; index < 16; ++index) {
+    for (std::size_t index = 6; index < 11; ++index) {
+        expect(primary.samples[index].phase ==
+                   mouse_effect_probe::ProbeSamplePhase::HOLD &&
+                   primary.samples[index].dx_counts == 0,
+               "pre challenge 达峰后必须保持预注册零命令平台");
+    }
+    for (std::size_t index = 35; index < 40; ++index) {
+        expect(primary.samples[index].phase ==
+                   mouse_effect_probe::ProbeSamplePhase::HOLD &&
+                   primary.samples[index].dx_counts == 0,
+               "post challenge 达峰后必须保持预注册零命令平台");
+    }
+    for (std::size_t index = 17; index < 21; ++index) {
         expect(primary.samples[index].phase ==
                    mouse_effect_probe::ProbeSamplePhase::GUARD &&
                    primary.samples[index].dx_counts == 0,
                "pre challenge 后必须有预注册零命令 settle");
     }
-    for (std::size_t index = 16; index < 24; ++index) {
+    for (std::size_t index = 21; index < 29; ++index) {
         expect(primary.samples[index].phase ==
                    mouse_effect_probe::ProbeSamplePhase::BASELINE &&
                    primary.samples[index].dx_counts == 0,
@@ -333,8 +355,24 @@ void test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline() {
                path, round_trip, error) &&
                round_trip.sequence_sha256 == primary.sequence_sha256 &&
                round_trip.s1_liveness_request.challenge_pulse_count == 2 &&
+               round_trip.s1_liveness_request.peak_hold_sample_count == 5 &&
                round_trip.s1_liveness_request.baseline_sample_count == 8,
            "A2 S1 活性序列必须经生产 reader 精确 round-trip: " + error);
+    const auto legacy_path = temporary.path() / "s1-liveness-legacy.json";
+    expect(mouse_effect_probe::write_mouse_effect_probe_sequence(
+               legacy_path, legacy, error),
+           "历史 A2 S1 序列应继续原子发布: " + error);
+    std::ifstream legacy_file(legacy_path, std::ios::binary);
+    const std::string legacy_text{
+        std::istreambuf_iterator<char>(legacy_file),
+        std::istreambuf_iterator<char>()};
+    mouse_effect_probe::MouseEffectProbeSequence legacy_round_trip;
+    expect(legacy_text.find("peak_hold_sample_count") == std::string::npos &&
+               mouse_effect_probe::read_mouse_effect_probe_sequence(
+                   legacy_path, legacy_round_trip, error) &&
+               legacy_round_trip.samples.size() == 36,
+           "历史 schema 3 request 必须保持无新增字段并可由生产 reader 读取: " +
+               error);
 
     auto mouse = std::make_shared<FakeMouseController>();
     mouse_effect_probe::MouseEffectProbeExecutor executor;
@@ -350,13 +388,22 @@ void test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline() {
                executor.result().cumulative_requested_x_counts == 0 &&
                executor.result().cumulative_backend_completed_x_counts == 0,
            "A2 S1 正常完成必须有完整 ACK 命令账本并净 X=0");
-    for (std::size_t index = 16; index < 24; ++index) {
+    for (std::size_t index = 21; index < 29; ++index) {
         const auto& event = executor.result().events[index];
         expect(event.nominal_dx_counts == 0 && !event.dispatch_attempted &&
                    event.requested_dx_counts == 0 &&
                    !event.backend_succeeded &&
                    !event.protocol_ack_received,
                "A2 S1 baseline event 必须证明 Probe 未发送命令");
+    }
+    for (const auto index : {6U, 7U, 8U, 9U, 10U,
+                             35U, 36U, 37U, 38U, 39U}) {
+        const auto& event = executor.result().events[index];
+        expect(event.nominal_dx_counts == 0 && !event.dispatch_attempted &&
+                   event.requested_dx_counts == 0 &&
+                   !event.backend_succeeded &&
+                   !event.protocol_ack_received,
+               "A2 S1 peak hold event 必须证明零命令且未触发 backend/ACK");
     }
 }
 

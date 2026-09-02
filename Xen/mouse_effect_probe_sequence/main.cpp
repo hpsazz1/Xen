@@ -60,7 +60,8 @@ void print_usage() {
         << "  XenMouseEffectProbeSequence --output <new-json> "
            "--profile s1-liveness-a2 --run-role <primary|validation> "
            "--challenge-pulses <n> --challenge-stride-samples <n> "
-           "--settle-samples <n> --baseline-samples <n>\n";
+           "[--peak-hold-samples <n>] --settle-samples <n> "
+           "--baseline-samples <n>\n";
 }
 
 } // namespace
@@ -89,6 +90,7 @@ int wmain(int argc, wchar_t* argv[]) {
     bool seen_run_role = false;
     bool seen_challenge_pulses = false;
     bool seen_challenge_stride = false;
+    bool seen_peak_hold = false;
     bool seen_settle = false;
     for (int index = 1; index < argc; ++index) {
         if (index + 1 >= argc) {
@@ -134,6 +136,11 @@ int wmain(int argc, wchar_t* argv[]) {
                    parse_u64(value,
                        s1_liveness_request.challenge_stride_sample_count)) {
             seen_challenge_stride = true;
+        } else if (argument == L"--peak-hold-samples" &&
+                   !seen_peak_hold &&
+                   parse_u64(value,
+                       s1_liveness_request.peak_hold_sample_count)) {
+            seen_peak_hold = true;
         } else if (argument == L"--settle-samples" && !seen_settle &&
                    parse_u64(value,
                        s1_liveness_request.settle_sample_count)) {
@@ -151,11 +158,13 @@ int wmain(int argc, wchar_t* argv[]) {
         !output_path.empty() && output_path.is_absolute();
     const bool sparse_valid = !dependency_profile && !s1_liveness_profile &&
         seen_response && seen_guard && !seen_blocks && !seen_run_role &&
-        !seen_challenge_pulses && !seen_challenge_stride && !seen_settle;
+        !seen_challenge_pulses && !seen_challenge_stride &&
+        !seen_peak_hold && !seen_settle;
     const bool dependency_valid = dependency_profile && seen_response &&
         seen_guard && seen_blocks && seen_run_role &&
         (run_role == L"p-cal" || run_role == L"p-holdout") &&
-        !seen_challenge_pulses && !seen_challenge_stride && !seen_settle;
+        !seen_challenge_pulses && !seen_challenge_stride &&
+        !seen_peak_hold && !seen_settle;
     const bool s1_liveness_valid = s1_liveness_profile &&
         !seen_response && !seen_guard && !seen_blocks && seen_run_role &&
         (run_role == L"primary" || run_role == L"validation") &&

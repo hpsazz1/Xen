@@ -16,6 +16,8 @@
     [uint64]$ChallengePulseCount = 16,
     [ValidateRange(1, 64)]
     [uint64]$ChallengeStrideSampleCount = 4,
+    [ValidateRange(1, 1024)]
+    [uint64]$PeakHoldSampleCount = 64,
     [ValidateRange(32, 1024)]
     [uint64]$SettleSampleCount = 128,
     [ValidateRange(32, 1600)]
@@ -194,6 +196,7 @@ function Parse-Roi([string]$Text, [string]$Name) {
 
 $sequenceSampleCount =
     4 * $ChallengePulseCount * $ChallengeStrideSampleCount +
+    2 * $PeakHoldSampleCount +
     $SettleSampleCount + $BaselineSampleCount
 if ($sequenceSampleCount -gt 2400 -or
     $sequenceSampleCount -ge $SidecarFrames) {
@@ -313,6 +316,7 @@ $sequencePath = Join-Path $stagingDirectory "sequence.json"
     --run-role $RunRole `
     --challenge-pulses $ChallengePulseCount `
     --challenge-stride-samples $ChallengeStrideSampleCount `
+    --peak-hold-samples $PeakHoldSampleCount `
     --settle-samples $SettleSampleCount `
     --baseline-samples $BaselineSampleCount
 if ($LASTEXITCODE -ne 0) {
@@ -333,6 +337,8 @@ $actualFirstDirections = @($sequence.blocks | ForEach-Object {
 })
 if ([int]$sequence.schema -ne 3 -or
     [string]$sequence.profile -ne $expectedProfile -or
+    [uint64]$sequence.request.peak_hold_sample_count -ne
+        $PeakHoldSampleCount -or
     [int64]$sequence.summary.net_x_counts -ne 0 -or
     [uint64]$sequence.summary.max_abs_prefix_x_counts -ne
         $ChallengePulseCount -or
@@ -345,6 +351,15 @@ if ([int]$sequence.schema -ne 3 -or
     ($actualFirstDirections -join ",") -ne
         ($expectedFirstDirections -join ",")) {
     throw "A2 S1 sequence 与 role/X-only/net/prefix 合同不一致"
+}
+$holdSamples = @($samples | Where-Object {
+    [string]$_.phase -eq "hold"
+})
+if ($holdSamples.Count -ne 2 * $PeakHoldSampleCount -or
+    @($holdSamples | Where-Object {
+        [int]$_.dx_counts -ne 0 -or [int]$_.dy_counts -ne 0
+    }).Count -ne 0) {
+    throw "A2 S1 peak hold 不是两段预注册的连续零命令平台"
 }
 $baselineSamples = @($samples | Where-Object {
     [string]$_.phase -eq "baseline"
@@ -381,6 +396,7 @@ $scope = [ordered]@{
     right_witness_roi = $RightWitnessRoi
     challenge_pulse_count = $ChallengePulseCount
     challenge_stride_sample_count = $ChallengeStrideSampleCount
+    peak_hold_sample_count = $PeakHoldSampleCount
     settle_sample_count = $SettleSampleCount
     baseline_sample_count = $BaselineSampleCount
     require_source_timing = $true
@@ -412,6 +428,7 @@ $binding = [ordered]@{
     max_abs_pulse_counts = 1
     max_abs_prefix_x_counts = $ChallengePulseCount
     challenge_and_settle_eligible_for_estimands = $false
+    peak_hold_frames_eligible_for_estimands = $false
 }
 Write-NewUtf8Json $bindingPath $binding
 $bindingIdentity = Get-PublishedIdentity `
@@ -480,8 +497,8 @@ $task = [ordered]@{
     sidecar = [ordered]@{
         frames = $SidecarFrames
         max_seconds = $MaxSeconds
-        # 2400 帧 PNG/双哈希在辅机实测可超过 24 秒；与采集窗分离，
-        # 复用正式 Aim sidecar 的 60 秒原子发布终局。
+        # PNG/双哈希 publishing 与采集窗分离；继续使用正式 Aim
+        # sidecar 的 60 秒原子发布终局。
         publishing_max_seconds = 60
         physical_output_capability = $false
         left_witness_roi = $LeftWitnessRoi
@@ -489,12 +506,14 @@ $task = [ordered]@{
         require_source_timing = $true
     }
     liveness_policy = [ordered]@{
-        policy_id = "a2-s1-kmbox-bracket-v1"
+        policy_id = "a2-s1-kmbox-bracket-peak-hold-v1"
         challenge_pulse_count = $ChallengePulseCount
         challenge_stride_sample_count = $ChallengeStrideSampleCount
+        peak_hold_sample_count = $PeakHoldSampleCount
         settle_sample_count = $SettleSampleCount
         baseline_frame_count = $BaselineSampleCount
         challenge_frames_eligible_for_estimands = $false
+        peak_hold_frames_eligible_for_estimands = $false
         settle_frames_eligible_for_estimands = $false
         fixed_pixel_speed_used_as_gate = $false
     }
@@ -507,6 +526,7 @@ $task = [ordered]@{
         max_abs_prefix_x_counts = $ChallengePulseCount
         manual_mouse_motion_or_wasd_forbidden = $true
         no_runtime_amplitude_or_repetition_change = $true
+        no_runtime_peak_hold_change = $true
     }
 }
 Write-NewUtf8Json (Join-Path $stagingDirectory "task.json") $task
@@ -522,7 +542,8 @@ $taskMarkdown = @(
     "",
     "- Run UUID：``$runUuid``；scope：``$scopeId``",
     "- 自动挑战：每 $ChallengeStrideSampleCount 个 source frame 发送 1 count，单向累计 $ChallengePulseCount counts；前后挑战均回锚，整段净 X=0、Y=0",
-    "- 零基线：settle=$SettleSampleCount samples 后连续 baseline=$BaselineSampleCount samples；challenge/settle 全部排除",
+    "- 峰值停留=$PeakHoldSampleCount source samples：到达原 $ChallengePulseCount-count 峰值后只消费 source frame、不发送 Mouse command；实际毫秒数以后生 source timestamp 为准",
+    "- 零基线：settle=$SettleSampleCount samples 后连续 baseline=$BaselineSampleCount samples；challenge/hold/settle 全部排除",
     "- 固定 command cadence 只作 decoded-image 活性正控制，不作为像素速度阈值，也不进入 noise/tail/gain/resolution",
     "- 启动命令时保持右键松开；看到 probe 提示 monitor 已就绪后，在 5 秒内按住右键并持续保持，直到出现 probe 时间线完成或未正常完成的终局提示后再松开；sidecar publishing 不是松键信号",
     "- 除右键 deadman 外，不要移动物理鼠标、不要按 WASD；视角变化由 KMBOX 序列自动完成",
@@ -562,6 +583,7 @@ $summary = [ordered]@{
     sequence_sha256 = [string]$sequence.sequence_sha256
     sequence_sample_count = [uint64]$samples.Count
     expected_nonzero_transition_count = [uint64]$pulses.Count
+    peak_hold_sample_count = $PeakHoldSampleCount
     physical_launch_executed = $false
 }
 Write-NewUtf8Json `

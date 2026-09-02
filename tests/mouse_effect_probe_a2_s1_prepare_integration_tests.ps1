@@ -118,19 +118,34 @@ foreach ($role in @("primary", "validation")) {
         [string]$task.status -ne "PREPARED" -or
         [string]$task.profile -ne $expectedProfile -or
         [string]$task.run_role -ne $role -or
-        [uint64]$task.sequence_sample_count -ne 120 -or
+        [uint64]$task.sequence_sample_count -ne 248 -or
         [uint64]$task.expected_nonzero_transition_count -ne 8 -or
+        [string]$task.liveness_policy.policy_id -ne
+            "a2-s1-kmbox-bracket-peak-hold-v1" -or
         [uint64]$task.sidecar.publishing_max_seconds -ne 60 -or
+        [uint64]$task.liveness_policy.peak_hold_sample_count -ne 64 -or
         [bool]$task.liveness_policy.challenge_frames_eligible_for_estimands -or
+        [bool]$task.liveness_policy.peak_hold_frames_eligible_for_estimands -or
         [bool]$task.liveness_policy.settle_frames_eligible_for_estimands -or
         [bool]$task.liveness_policy.fixed_pixel_speed_used_as_gate -or
         [int]$sequence.schema -ne 3 -or
         [string]$sequence.profile -ne $expectedProfile -or
+        [uint64]$sequence.request.peak_hold_sample_count -ne 64 -or
         [int64]$sequence.summary.net_x_counts -ne 0 -or
         [uint64]$sequence.summary.max_abs_prefix_x_counts -ne 2 -or
         [string]$summary.status -ne "PREPARED_NOT_LAUNCHED" -or
+        [uint64]$summary.peak_hold_sample_count -ne 64 -or
         [bool]$summary.physical_launch_executed) {
         throw "A2 S1 $role task/sequence/Prepare 身份不闭合"
+    }
+    $holdSamples = @($sequence.samples | Where-Object {
+        [string]$_.phase -eq "hold"
+    })
+    if ($holdSamples.Count -ne 128 -or
+        @($holdSamples | Where-Object {
+            [int]$_.dx_counts -ne 0 -or [int]$_.dy_counts -ne 0
+        }).Count -ne 0) {
+        throw "A2 S1 $role peak hold 必须是两个 64-sample 零命令平台"
     }
     foreach ($property in $task.files.PSObject.Properties) {
         Assert-FileIdentity $property.Value "A2 S1 $role $($property.Name)"
@@ -149,6 +164,7 @@ foreach ($role in @("primary", "validation")) {
     if (-not $taskMarkdown.Contains("-AllowPhysicalOutput") -or
         -not $taskMarkdown.Contains(
             "XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT") -or
+        -not $taskMarkdown.Contains("峰值停留=64 source samples") -or
         -not $taskMarkdown.Contains("不要按 WASD")) {
         throw "A2 S1 $role TASK.md 缺少用户授权/自动挑战边界"
     }

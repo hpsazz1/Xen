@@ -362,6 +362,7 @@ def _load_liveness_bracket(run: pathlib.Path, session: dict) -> dict:
         or int(policy.get("baseline_frame_count", 0)) <= 0
         or int(policy.get("challenge_pulse_count", 0)) <= 0
         or int(policy.get("challenge_stride_sample_count", 0)) <= 0
+        or int(policy.get("peak_hold_sample_count", 0)) < 0
         or policy.get("challenge_frames_eligible_for_estimands") is not False
         or policy.get("settle_frames_eligible_for_estimands") is not False
         or not isinstance(phases, list)
@@ -375,6 +376,13 @@ def _load_liveness_bracket(run: pathlib.Path, session: dict) -> dict:
         != int(policy.get("challenge_pulse_count", -1))
         or int(request.get("challenge_stride_sample_count", 0))
         != int(policy.get("challenge_stride_sample_count", -1))
+        or int(request.get("peak_hold_sample_count", 0))
+        != int(policy.get("peak_hold_sample_count", 0))
+        or (
+            int(request.get("peak_hold_sample_count", 0)) > 0
+            and policy.get("peak_hold_frames_eligible_for_estimands")
+            is not False
+        )
         or int(request.get("baseline_sample_count", 0))
         != int(policy.get("baseline_frame_count", -1))
         or report.get("evidence_type")
@@ -418,32 +426,49 @@ def _load_liveness_bracket(run: pathlib.Path, session: dict) -> dict:
 
     pulse_count = int(request["challenge_pulse_count"])
     stride = int(request["challenge_stride_sample_count"])
+    peak_hold_count = int(request.get("peak_hold_sample_count", 0))
     settle_count = int(request["settle_sample_count"])
     baseline_count = int(request["baseline_sample_count"])
 
-    def challenge_dx(first_direction: int) -> list[int]:
+    def challenge_contract(first_direction: int) -> tuple[list[int], list[str]]:
         values: list[int] = []
-        for direction in (first_direction, -first_direction):
+        phases: list[str] = []
+        for direction_index, direction in enumerate(
+            (first_direction, -first_direction)
+        ):
             for _ in range(pulse_count):
                 values.append(direction)
+                phases.append("pulse")
                 values.extend([0] * (stride - 1))
-        return values
+                phases.extend(["response"] * (stride - 1))
+            if direction_index == 0:
+                values.extend([0] * peak_hold_count)
+                phases.extend(["hold"] * peak_hold_count)
+        return values, phases
 
     role_sign = 1 if role == "primary" else -1
+    pre_dx, pre_phases = challenge_contract(role_sign)
+    post_dx, post_phases = challenge_contract(-role_sign)
     expected_dx = (
-        challenge_dx(role_sign)
+        pre_dx
         + [0] * settle_count
         + [0] * baseline_count
-        + challenge_dx(-role_sign)
+        + post_dx
     )
-    if len(expected_dx) != len(samples):
+    expected_phases = (
+        pre_phases
+        + ["guard"] * settle_count
+        + ["baseline"] * baseline_count
+        + post_phases
+    )
+    if len(expected_dx) != len(samples) or len(expected_phases) != len(samples):
         raise ValueError("S1 liveness sequence sample_count 与 request 不守恒")
 
     normalized_events: list[dict] = []
     cumulative = 0
     source_timestamps: set[int] = set()
-    for index, (sample, event, expected) in enumerate(
-        zip(samples, events, expected_dx, strict=True)
+    for index, (sample, event, expected, expected_phase) in enumerate(
+        zip(samples, events, expected_dx, expected_phases, strict=True)
     ):
         if not isinstance(sample, dict) or not isinstance(event, dict):
             raise ValueError("S1 liveness sample/event 不是 object")
@@ -459,6 +484,7 @@ def _load_liveness_bracket(run: pathlib.Path, session: dict) -> dict:
             or int(event.get("block_id", -1))
             != int(sample.get("block_id", -2))
             or dx != expected
+            or sample.get("phase") != expected_phase
             or dy != 0
             or int(event.get("nominal_dx_counts", 2)) != dx
             or int(event.get("nominal_dy_counts", 1)) != 0
