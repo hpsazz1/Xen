@@ -273,6 +273,7 @@ if ($forbiddenProcesses.Count -ne 0) {
 
 $pixelOutput = Join-Path $resolvedRun "pixel-evidence"
 $reportPath = Join-Path $resolvedRun "command-report.json"
+$safetyLedgerPath = Join-Path $resolvedRun "safety-ledger.json"
 $launchSummaryPath = Join-Path $resolvedRun "launch-summary.json"
 $s1BracketPath = Join-Path $resolvedRun "s1-liveness-bracket.json"
 $s1SessionPath = Join-Path $resolvedRun "s1-session.json"
@@ -280,7 +281,7 @@ $sidecarLifecyclePath = Join-Path $resolvedRun "sidecar-lifecycle.json"
 $sidecarStdout = Join-Path $resolvedRun "pixel-sidecar.stdout.log"
 $sidecarStderr = Join-Path $resolvedRun "pixel-sidecar.stderr.log"
 foreach ($path in @(
-        $pixelOutput, $reportPath, $launchSummaryPath,
+        $pixelOutput, $reportPath, $safetyLedgerPath, $launchSummaryPath,
         $s1BracketPath, $s1SessionPath,
         $sidecarLifecyclePath,
         $sidecarStdout, $sidecarStderr)) {
@@ -326,7 +327,7 @@ $probeLabel = if ($isA2S1Task) {
 } else {
     "A 级稀疏 ±1 X probe"
 }
-Write-Host "即将执行 $probeLabel。启动命令时请先保持右键松开；probe 提示 monitor 已就绪后，再在 5 秒内按住右键并持续保持。随后松开右键、End 或 F8 会立即停发，且不会补偿。"
+Write-Host "即将执行 $probeLabel。启动命令时请先保持右键松开；probe 提示 monitor 已就绪后，再在 5 秒内按住右键并持续保持，直到出现 probe 时间线完成或未正常完成的终局提示后再松开；sidecar publishing 不是松键信号。松开右键、End 或 F8 会立即停发，且不会补偿。"
 $sidecarProcess = Start-Process -FilePath `
     ([string]$task.files.sidecar_executable.path) `
     -WorkingDirectory (Split-Path -Parent `
@@ -355,6 +356,7 @@ try {
         "--sidecar-pid", [string]$sidecarProcess.Id,
         "--sidecar-incoming", $incoming,
         "--report", $reportPath,
+        "--safety-ledger", $safetyLedgerPath,
         "--run-uuid", [string]$task.run_uuid,
         "--activation-epoch", [string]$task.activation_epoch,
         "--max-seconds", [string]$task.sidecar.max_seconds,
@@ -448,6 +450,20 @@ try {
         ConvertFrom-Json
     $report = Get-Content -LiteralPath $reportPath -Raw -Encoding utf8 |
         ConvertFrom-Json
+    if (-not (Test-Path -LiteralPath $safetyLedgerPath -PathType Leaf)) {
+        throw "Physical A 缺少 safety monitor ledger"
+    }
+    $safetyLedger = Get-Content -LiteralPath $safetyLedgerPath `
+        -Raw -Encoding utf8 | ConvertFrom-Json
+    $safetyObservations = @($safetyLedger.observations)
+    if ([uint64]$safetyLedger.schema_version -ne 1 -or
+        [string]$safetyLedger.evidence_type -ne
+            "mouse_effect_probe_safety_monitor_ledger" -or
+        [bool]$safetyLedger.physical_output_capability -or
+        [string]$safetyLedger.run_uuid -ne [string]$task.run_uuid -or
+        [string]$safetyLedger.input_backend -ne "kmbox_net") {
+        throw "Physical A safety monitor ledger 身份无效"
+    }
     $sequence = Get-Content -LiteralPath `
         ([string]$task.files.sequence.path) -Raw -Encoding utf8 |
         ConvertFrom-Json
@@ -539,6 +555,9 @@ try {
         [string]$report.result.stop_reason -eq "normal_completion" -and
         $events.Count -eq $samples.Count -and
         $completedPulses -eq $expectedPulseCount -and
+        -not [bool]$safetyLedger.recording_failed -and
+        [uint64]$safetyLedger.dropped_observation_count -eq 0 -and
+        $safetyObservations.Count -gt 0 -and
         [int64]$report.result.cumulative_requested_x_counts -eq 0 -and
         [int64]$report.result.cumulative_backend_completed_x_counts -eq 0
     $summary = [ordered]@{
@@ -561,6 +580,15 @@ try {
         profile = [string]$task.profile
         expected_nonzero_transition_count = $expectedPulseCount
         command_report_sha256 = [string]$report.report_sha256
+        safety_ledger_sha256 = Get-FileSha256 $safetyLedgerPath
+        safety_monitor_terminal_decision =
+            [string]$safetyLedger.terminal_decision
+        safety_monitor_observation_count =
+            [uint64]$safetyObservations.Count
+        safety_monitor_dropped_observation_count =
+            [uint64]$safetyLedger.dropped_observation_count
+        safety_monitor_recording_failed =
+            [bool]$safetyLedger.recording_failed
         sidecar_manifest_sha256 = Get-FileSha256 $manifestPath
         sidecar_lifecycle_sha256 = Get-FileSha256 $sidecarLifecyclePath
         stop_reason = [string]$report.result.stop_reason

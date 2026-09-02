@@ -459,7 +459,7 @@ $taskMarkdown = @(
     "- 唯一变量：独立 X-only ±1 count 外生脉冲；正常 Aim 必须关闭，Y 永远为 0",
     "- sidecar：$SidecarFrames 帧、source timing 必须 VALID、physical_output_capability=false",
     "- witness：left=``$LeftWitnessRoi``；right=``$RightWitnessRoi``；正 X count 预注册为背景向左（负 shift）",
-    "- 安全：进入静止、无人物/Overlay 的高对比背景；执行命令时保持右键松开，看到 probe 提示 monitor 已就绪后，再在 5 秒内按住右键并持续保持；随后松开右键、End、F8、Mouse/ACK/source/sidecar 任一失败都会立即停发且不补偿",
+    "- 安全：进入静止、无人物/Overlay 的高对比背景；执行命令时保持右键松开，看到 probe 提示 monitor 已就绪后，再在 5 秒内按住右键并持续保持，直到出现 probe 时间线完成或未正常完成的终局提示后再松开；sidecar publishing 不是松键信号；松开右键、End、F8、Mouse/ACK/source/sidecar 任一失败都会立即停发且不补偿",
     "",
     "下面命令会发送真实 KMBOX 输入，只能由用户在本机前台执行：",
     "",

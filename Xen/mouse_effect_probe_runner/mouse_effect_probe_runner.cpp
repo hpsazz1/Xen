@@ -10,11 +10,14 @@
 
 #include "config/config.h"
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -24,6 +27,7 @@ namespace {
 
 constexpr std::wstring_view kPhysicalConfirmation =
     L"XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT";
+constexpr std::size_t kMaximumSafetyObservationCount = 8192U;
 std::atomic<bool> stop_requested{false};
 
 void set_error(std::string& output, std::string_view value) noexcept {
@@ -101,6 +105,39 @@ bool valid_sha256(std::string_view value) noexcept {
 
 bool finite_nonnegative(double value) noexcept {
     return std::isfinite(value) && value >= 0.0;
+}
+
+const char* input_monitor_status_name(InputMonitorStatus status) noexcept {
+    switch (status) {
+    case InputMonitorStatus::CLOSED: return "CLOSED";
+    case InputMonitorStatus::UNVERIFIED: return "UNVERIFIED";
+    case InputMonitorStatus::WAITING: return "WAITING";
+    case InputMonitorStatus::READY: return "READY";
+    case InputMonitorStatus::STALE: return "STALE";
+    case InputMonitorStatus::FAILURE: return "FAILURE";
+    }
+    return "UNKNOWN";
+}
+
+const char* safety_phase_name(
+        MouseEffectProbeSafetyPhase phase) noexcept {
+    switch (phase) {
+    case MouseEffectProbeSafetyPhase::ARMING: return "arming";
+    case MouseEffectProbeSafetyPhase::ACTIVE: return "active";
+    }
+    return "unknown";
+}
+
+const char* safety_decision_name(
+        MouseEffectProbeSafetyDecision decision) noexcept {
+    switch (decision) {
+    case MouseEffectProbeSafetyDecision::READY: return "ready";
+    case MouseEffectProbeSafetyDecision::WAITING: return "waiting";
+    case MouseEffectProbeSafetyDecision::RELEASED: return "released";
+    case MouseEffectProbeSafetyDecision::USER_STOP: return "user_stop";
+    case MouseEffectProbeSafetyDecision::FAILURE: return "failure";
+    }
+    return "unknown";
 }
 
 bool path_to_utf8(const std::filesystem::path& path,
@@ -215,38 +252,214 @@ private:
     std::filesystem::path copied_binding_path_;
 };
 
-enum class SafetyPollResult {
-    READY,
-    WAITING,
-    RELEASED,
-    USER_STOP,
-    FAILURE,
-};
-
-SafetyPollResult poll_physical_safety(
-        const std::shared_ptr<IMouseController>& mouse) noexcept {
-    if (!mouse) return SafetyPollResult::FAILURE;
+MouseEffectProbeSafetyDecision poll_physical_safety(
+        const std::shared_ptr<IMouseController>& mouse,
+        MouseEffectProbeSafetyPhase phase,
+        MouseEffectProbeSafetyLedger& ledger) noexcept {
     InputSnapshot snapshot;
-    if (!mouse->poll_input(snapshot) ||
-        snapshot.status == InputMonitorStatus::FAILURE ||
-        snapshot.status == InputMonitorStatus::CLOSED) {
-        return SafetyPollResult::FAILURE;
-    }
-    if (!snapshot.state_valid ||
-        snapshot.status != InputMonitorStatus::READY) {
-        return SafetyPollResult::WAITING;
-    }
-    if (snapshot.virtual_keys[0x23] || snapshot.virtual_keys[0x77]) {
-        return SafetyPollResult::USER_STOP;
-    }
-    return snapshot.virtual_keys[0x02]
-        ? SafetyPollResult::READY : SafetyPollResult::RELEASED;
+    const bool poll_succeeded = mouse && mouse->poll_input(snapshot);
+    return record_mouse_effect_probe_safety_observation(
+        phase, poll_succeeded, snapshot, ledger);
 }
 
 } // namespace
 
 std::string_view mouse_effect_probe_deadman_arming_prompt() noexcept {
-    return "KMBOX monitor 已就绪；不要提前按住。请在 5 秒内按住右键并持续保持。";
+    return "KMBOX monitor 已就绪；不要提前按住。请在 5 秒内按住右键并"
+           "持续保持，直到出现“Mouse Effect Probe 时间线完成”或"
+           "“Mouse Effect Probe 未正常完成”后再松开；sidecar publishing "
+           "不是松键信号。";
+}
+
+MouseEffectProbeSafetyDecision record_mouse_effect_probe_safety_observation(
+        MouseEffectProbeSafetyPhase phase,
+        bool poll_succeeded,
+        const InputSnapshot& snapshot,
+        MouseEffectProbeSafetyLedger& ledger) noexcept {
+    MouseEffectProbeSafetyDecision decision =
+        MouseEffectProbeSafetyDecision::FAILURE;
+    if (poll_succeeded &&
+        snapshot.status != InputMonitorStatus::FAILURE &&
+        snapshot.status != InputMonitorStatus::CLOSED) {
+        if (!snapshot.state_valid ||
+            snapshot.status != InputMonitorStatus::READY) {
+            decision = MouseEffectProbeSafetyDecision::WAITING;
+        } else if (snapshot.virtual_keys[0x23] ||
+                   snapshot.virtual_keys[0x77]) {
+            decision = MouseEffectProbeSafetyDecision::USER_STOP;
+        } else {
+            decision = snapshot.virtual_keys[0x02]
+                ? MouseEffectProbeSafetyDecision::READY
+                : MouseEffectProbeSafetyDecision::RELEASED;
+        }
+    }
+
+    try {
+        MouseEffectProbeSafetyObservation observation;
+        observation.observed_at_steady_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        observation.phase = phase;
+        observation.poll_succeeded = poll_succeeded;
+        observation.monitor_status = snapshot.status;
+        observation.state_valid = snapshot.state_valid;
+        observation.monitor_sequence = snapshot.sequence;
+        observation.right_button_pressed = snapshot.virtual_keys[0x02];
+        observation.end_pressed = snapshot.virtual_keys[0x23];
+        observation.f8_pressed = snapshot.virtual_keys[0x77];
+        observation.decision = decision;
+
+        const auto same_as_last = [&](const auto& previous) {
+            return previous.phase == observation.phase &&
+                   previous.poll_succeeded == observation.poll_succeeded &&
+                   previous.monitor_status == observation.monitor_status &&
+                   previous.state_valid == observation.state_valid &&
+                   previous.monitor_sequence == observation.monitor_sequence &&
+                   previous.right_button_pressed ==
+                       observation.right_button_pressed &&
+                   previous.end_pressed == observation.end_pressed &&
+                   previous.f8_pressed == observation.f8_pressed &&
+                   previous.decision == observation.decision;
+        };
+        if (!ledger.observations.empty() &&
+            same_as_last(ledger.observations.back())) {
+            return decision;
+        }
+        if (ledger.observations.size() < kMaximumSafetyObservationCount) {
+            ledger.observations.push_back(observation);
+        } else {
+            ++ledger.dropped_observation_count;
+            ledger.observations.back() = observation;
+        }
+    } catch (...) {
+        ledger.recording_failed = true;
+    }
+    return decision;
+}
+
+bool write_mouse_effect_probe_safety_ledger(
+        const std::filesystem::path& path,
+        std::string_view run_uuid,
+        mouse_effect_probe::ProbeStopReason stop_reason,
+        const MouseEffectProbeSafetyLedger& ledger,
+        std::string& file_sha256,
+        std::string& error) noexcept {
+    file_sha256.clear();
+    std::filesystem::path temporary_path;
+    try {
+        if (path.empty() || !path.is_absolute() ||
+            !valid_uuid(run_uuid)) {
+            set_error(error, "safety ledger 路径或 Run UUID 非法");
+            return false;
+        }
+        const auto final_path = std::filesystem::absolute(path);
+        if (std::filesystem::exists(final_path)) {
+            set_error(error, "safety ledger 发布目标已存在，拒绝覆盖");
+            return false;
+        }
+        std::error_code directory_error;
+        std::filesystem::create_directories(
+            final_path.parent_path(), directory_error);
+        if (directory_error || !std::filesystem::is_directory(
+                                   final_path.parent_path())) {
+            set_error(error, "safety ledger 发布目录创建失败");
+            return false;
+        }
+
+        nlohmann::ordered_json observations =
+            nlohmann::ordered_json::array();
+        for (const auto& observation : ledger.observations) {
+            observations.push_back({
+                {"observed_at_steady_ns",
+                 observation.observed_at_steady_ns},
+                {"phase", safety_phase_name(observation.phase)},
+                {"poll_succeeded", observation.poll_succeeded},
+                {"monitor_status",
+                 input_monitor_status_name(observation.monitor_status)},
+                {"state_valid", observation.state_valid},
+                {"monitor_sequence", observation.monitor_sequence},
+                {"right_button_pressed",
+                 observation.right_button_pressed},
+                {"end_pressed", observation.end_pressed},
+                {"f8_pressed", observation.f8_pressed},
+                {"decision", safety_decision_name(observation.decision)},
+            });
+        }
+        const auto terminal_decision = ledger.observations.empty()
+            ? "none"
+            : safety_decision_name(ledger.observations.back().decision);
+        const nlohmann::ordered_json document = {
+            {"schema_version", 1},
+            {"evidence_type", "mouse_effect_probe_safety_monitor_ledger"},
+            {"physical_output_capability", false},
+            {"run_uuid", run_uuid},
+            {"input_backend", "kmbox_net"},
+            {"timebase", {
+                {"name", "steady_clock_nanoseconds_since_epoch"},
+                {"ticks_per_second", 1'000'000'000ULL},
+            }},
+            {"probe_stop_reason",
+             mouse_effect_probe::probe_stop_reason_name(stop_reason)},
+            {"terminal_decision", terminal_decision},
+            {"recording_failed", ledger.recording_failed},
+            {"dropped_observation_count",
+             ledger.dropped_observation_count},
+            {"observations", std::move(observations)},
+        };
+        const std::string content = document.dump(2) + '\n';
+        temporary_path = final_path;
+        temporary_path += L".pending-" +
+            std::to_wstring(GetCurrentProcessId()) + L"-" +
+            std::to_wstring(GetTickCount64());
+        if (std::filesystem::exists(temporary_path)) {
+            set_error(error,
+                "safety ledger 临时发布目标已存在，拒绝覆盖");
+            temporary_path.clear();
+            return false;
+        }
+        std::ofstream output(
+            temporary_path, std::ios::binary | std::ios::trunc);
+        output.write(content.data(), static_cast<std::streamsize>(
+            content.size()));
+        output.flush();
+        const bool written = output.good();
+        output.close();
+        if (!written) {
+            set_error(error, "safety ledger 临时文件写入失败");
+            std::error_code ignored;
+            std::filesystem::remove(temporary_path, ignored);
+            temporary_path.clear();
+            return false;
+        }
+        if (!MoveFileExW(temporary_path.c_str(), final_path.c_str(),
+                         MOVEFILE_WRITE_THROUGH)) {
+            const auto win32_error = GetLastError();
+            set_error(error, "safety ledger 原子发布失败，Win32Error=" +
+                             std::to_string(win32_error));
+            std::error_code ignored;
+            std::filesystem::remove(temporary_path, ignored);
+            temporary_path.clear();
+            return false;
+        }
+        temporary_path.clear();
+        if (!mouse_effect_probe::calculate_mouse_effect_probe_file_sha256(
+                final_path, file_sha256, error)) {
+            return false;
+        }
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        set_error(error, std::string("发布 safety ledger 异常: ") +
+                         exception.what());
+    } catch (...) {
+        set_error(error, "发布 safety ledger 时发生未知异常");
+    }
+    if (!temporary_path.empty()) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary_path, ignored);
+    }
+    file_sha256.clear();
+    return false;
 }
 
 MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
@@ -263,6 +476,7 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
         bool seen_sidecar_pid = false;
         bool seen_sidecar_incoming = false;
         bool seen_report = false;
+        bool seen_safety_ledger = false;
         bool seen_run_uuid = false;
         bool seen_activation_epoch = false;
         bool seen_max_seconds = false;
@@ -354,6 +568,13 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                     return MouseEffectProbeParseStatus::INVALID;
                 }
                 options.report_path = std::filesystem::path(value);
+            } else if (argument == L"--safety-ledger") {
+                if (duplicate(seen_safety_ledger,
+                              "--safety-ledger")) {
+                    return MouseEffectProbeParseStatus::INVALID;
+                }
+                options.safety_ledger_path =
+                    std::filesystem::path(value);
             } else if (argument == L"--run-uuid") {
                 if (duplicate(seen_run_uuid, "--run-uuid") ||
                     !wide_to_utf8(value, options.run_uuid) ||
@@ -417,8 +638,17 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                 set_error(error, "physical A 缺少双重物理输出授权");
                 return MouseEffectProbeParseStatus::INVALID;
             }
-        } else if (seen_allow_physical || seen_confirmation) {
-            set_error(error, "output-off rehearsal 禁止物理输出授权参数");
+            if (!seen_safety_ledger ||
+                options.safety_ledger_path.empty() ||
+                !options.safety_ledger_path.is_absolute()) {
+                set_error(error,
+                    "physical A 缺少绝对 safety ledger 发布路径");
+                return MouseEffectProbeParseStatus::INVALID;
+            }
+        } else if (seen_allow_physical || seen_confirmation ||
+                   seen_safety_ledger) {
+            set_error(error,
+                "output-off rehearsal 禁止物理输出授权或 safety ledger 参数");
             return MouseEffectProbeParseStatus::INVALID;
         }
         stop_requested.store(false, std::memory_order_release);
@@ -445,6 +675,7 @@ std::string mouse_effect_probe_usage() {
         "--run-uuid <uuid> --activation-epoch <n> [--max-seconds <1..60>]\n\n"
         "physical A 额外要求:\n"
         "  --mode physical-a --allow-physical-output "
+        "--safety-ledger <new-json> "
         "--confirm-physical-output "
         "XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT\n"
         "physical A 会发送真实 KMBOX ±1 X 输入；只能由用户前台启动。\n";
@@ -524,8 +755,12 @@ bool run_mouse_effect_probe(
     result = {};
     stop_requested.store(false, std::memory_order_release);
     try {
-        if (std::filesystem::exists(options.report_path)) {
-            set_error(error, "command report 已存在，拒绝开始 probe");
+        if (std::filesystem::exists(options.report_path) ||
+            (options.dispatch_mode ==
+                 mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A &&
+             std::filesystem::exists(options.safety_ledger_path))) {
+            set_error(error,
+                "command report 或 safety ledger 已存在，拒绝开始 probe");
             return false;
         }
         SidecarWitness sidecar;
@@ -593,13 +828,37 @@ bool run_mouse_effect_probe(
             options.run_uuid,
             app_config.capture.ndi_source_name,
         };
+        MouseEffectProbeSafetyLedger safety_ledger;
         const auto publish_report = [&]() {
             result.execution = executor.result();
+            result.safety_ledger = safety_ledger;
+            bool safety_ledger_published = true;
+            if (options.dispatch_mode ==
+                    mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
+                std::string safety_ledger_error;
+                safety_ledger_published =
+                    write_mouse_effect_probe_safety_ledger(
+                        options.safety_ledger_path, options.run_uuid,
+                        result.execution.stop_reason, safety_ledger,
+                        result.safety_ledger_sha256,
+                        safety_ledger_error);
+                if (!safety_ledger_published) {
+                    if (execution_error.empty()) {
+                        execution_error = "safety ledger 发布失败: " +
+                            safety_ledger_error;
+                    } else {
+                        execution_error += "; safety ledger 发布失败: " +
+                            safety_ledger_error;
+                    }
+                }
+            }
             std::string report_error;
-            if (!mouse_effect_probe::write_mouse_effect_probe_report(
+            const bool report_published =
+                mouse_effect_probe::write_mouse_effect_probe_report(
                     options.report_path, execution_options, sequence,
                     report_binding, result.execution,
-                    result.report_sha256, report_error)) {
+                    result.report_sha256, report_error);
+            if (!report_published) {
                 if (execution_error.empty()) {
                     execution_error = "command report 发布失败: " +
                         report_error;
@@ -607,9 +866,8 @@ bool run_mouse_effect_probe(
                     execution_error += "; command report 发布失败: " +
                         report_error;
                 }
-                return false;
             }
-            return true;
+            return safety_ledger_published && report_published;
         };
         if (!started) {
             publish_report();
@@ -644,18 +902,20 @@ bool run_mouse_effect_probe(
                     }
                     break;
                 }
-                const auto safety = poll_physical_safety(mouse);
-                if (safety == SafetyPollResult::READY) {
+                const auto safety = poll_physical_safety(
+                    mouse, MouseEffectProbeSafetyPhase::ARMING,
+                    safety_ledger);
+                if (safety == MouseEffectProbeSafetyDecision::READY) {
                     armed = true;
                     break;
                 }
-                if (safety == SafetyPollResult::USER_STOP) {
+                if (safety == MouseEffectProbeSafetyDecision::USER_STOP) {
                     executor.request_stop(
                         mouse_effect_probe::ProbeStopReason::USER_STOP,
                         execution_error);
                     break;
                 }
-                if (safety == SafetyPollResult::FAILURE) {
+                if (safety == MouseEffectProbeSafetyDecision::FAILURE) {
                     executor.request_stop(
                         mouse_effect_probe::ProbeStopReason::MOUSE_FAILURE,
                         execution_error);
@@ -730,21 +990,23 @@ bool run_mouse_effect_probe(
             bool safety_allowed = false;
             if (options.dispatch_mode ==
                     mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
-                const auto safety = poll_physical_safety(mouse);
-                if (safety == SafetyPollResult::USER_STOP) {
+                const auto safety = poll_physical_safety(
+                    mouse, MouseEffectProbeSafetyPhase::ACTIVE,
+                    safety_ledger);
+                if (safety == MouseEffectProbeSafetyDecision::USER_STOP) {
                     executor.request_stop(
                         mouse_effect_probe::ProbeStopReason::USER_STOP,
                         execution_error);
                     break;
                 }
-                if (safety == SafetyPollResult::RELEASED ||
-                    safety == SafetyPollResult::WAITING) {
+                if (safety == MouseEffectProbeSafetyDecision::RELEASED ||
+                    safety == MouseEffectProbeSafetyDecision::WAITING) {
                     executor.request_stop(
                         mouse_effect_probe::ProbeStopReason::SAFETY_RELEASED,
                         execution_error);
                     break;
                 }
-                if (safety == SafetyPollResult::FAILURE) {
+                if (safety == MouseEffectProbeSafetyDecision::FAILURE) {
                     executor.request_stop(
                         mouse_effect_probe::ProbeStopReason::MOUSE_FAILURE,
                         execution_error);

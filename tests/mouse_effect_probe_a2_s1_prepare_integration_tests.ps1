@@ -136,7 +136,7 @@ foreach ($role in @("primary", "validation")) {
         Assert-FileIdentity $property.Value "A2 S1 $role $($property.Name)"
     }
     foreach ($forbidden in @(
-            "command-report.json", "launch-summary.json",
+            "command-report.json", "safety-ledger.json", "launch-summary.json",
             "s1-liveness-bracket.json", "s1-session.json",
             "sidecar-lifecycle.json",
             "pixel-evidence")) {

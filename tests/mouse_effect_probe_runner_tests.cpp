@@ -1,6 +1,8 @@
 #include "mouse_effect_probe_runner/mouse_effect_probe_runner.h"
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -61,6 +63,14 @@ void test_parser_separates_output_off_and_physical_authority() {
     physical_arguments.push_back(L"--confirm-physical-output");
     physical_arguments.push_back(
         L"XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT");
+    MouseEffectProbeRunOptions missing_ledger;
+    expect(parse_mouse_effect_probe_options(
+               physical_arguments, missing_ledger, error) ==
+               MouseEffectProbeParseStatus::INVALID &&
+               error.find("safety ledger") != std::string::npos,
+           "physical A 必须独立报告缺失的只读 safety ledger 路径");
+    physical_arguments.push_back(L"--safety-ledger");
+    physical_arguments.push_back(L"E:\\run\\safety-ledger.json");
     MouseEffectProbeRunOptions physical;
     expect(parse_mouse_effect_probe_options(
                physical_arguments, physical, error) ==
@@ -68,7 +78,9 @@ void test_parser_separates_output_off_and_physical_authority() {
                physical.dispatch_mode ==
                    mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A &&
                physical.allow_physical_output &&
-               physical.physical_output_confirmed,
+               physical.physical_output_confirmed &&
+               physical.safety_ledger_path ==
+                   std::filesystem::path(L"E:\\run\\safety-ledger.json"),
            "带固定令牌的 physical A 参数应解析成功: " + error);
 
     auto forbidden = common_arguments();
@@ -155,8 +167,88 @@ void test_physical_deadman_prompt_contract() {
     expect(prompt.find("monitor 已就绪") != std::string_view::npos &&
                prompt.find("5 秒内") != std::string_view::npos &&
                prompt.find("按住右键") != std::string_view::npos &&
-               prompt.find("不要提前按住") != std::string_view::npos,
-           "Physical A 必须在 monitor 打开后提示新鲜右键按下，不能要求提前按住");
+               prompt.find("不要提前按住") != std::string_view::npos &&
+               prompt.find("时间线完成") != std::string_view::npos &&
+               prompt.find("未正常完成") != std::string_view::npos &&
+               prompt.find("sidecar") != std::string_view::npos,
+           "Physical A 必须说明新鲜右键按下与唯一松键终局，不能把 sidecar publishing 当松键信号");
+}
+
+void test_physical_safety_ledger_distinguishes_explicit_release() {
+    MouseEffectProbeSafetyLedger ledger;
+
+    InputSnapshot waiting;
+    waiting.status = InputMonitorStatus::WAITING;
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ARMING,
+               true, waiting, ledger) ==
+               MouseEffectProbeSafetyDecision::WAITING &&
+               ledger.observations.size() == 1U &&
+               !ledger.observations.back().state_valid,
+           "账本必须把 monitor 尚无有效事实记录为 WAITING，而不是明确 release");
+
+    InputSnapshot pressed;
+    pressed.status = InputMonitorStatus::READY;
+    pressed.state_valid = true;
+    pressed.virtual_keys[0x02] = true;
+    pressed.sequence = 41;
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ARMING,
+               true, pressed, ledger) ==
+               MouseEffectProbeSafetyDecision::READY &&
+               ledger.observations.size() == 2U &&
+               ledger.observations.back().right_button_pressed &&
+               ledger.observations.back().monitor_sequence == 41U,
+           "账本必须保留完成武装的右键按下事实与 monitor sequence");
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ARMING,
+               true, pressed, ledger) ==
+               MouseEffectProbeSafetyDecision::READY &&
+               ledger.observations.size() == 2U,
+           "相同 phase/sequence/键态的高频 poll 不得膨胀账本");
+
+    InputSnapshot released = pressed;
+    released.virtual_keys[0x02] = false;
+    released.sequence = 42;
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ACTIVE,
+               true, released, ledger) ==
+               MouseEffectProbeSafetyDecision::RELEASED &&
+               ledger.observations.size() == 3U &&
+               ledger.observations.back().state_valid &&
+               !ledger.observations.back().right_button_pressed &&
+               ledger.observations.back().monitor_sequence == 42U,
+           "账本必须把 READY 有效快照中的右键清零与 WAITING 分开记录");
+
+    const auto root = std::filesystem::temp_directory_path() /
+        ("xen-mouse-effect-probe-safety-ledger-test-" +
+         std::to_string(std::chrono::steady_clock::now()
+                            .time_since_epoch().count()));
+    const auto path = root / "safety-ledger.json";
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    std::filesystem::create_directories(root, ignored);
+    std::string sha256;
+    std::string error;
+    expect(write_mouse_effect_probe_safety_ledger(
+               path, "11111111-2222-4333-8444-555555555555",
+               mouse_effect_probe::ProbeStopReason::SAFETY_RELEASED,
+               ledger, sha256, error) && sha256.size() == 64U,
+           "只读 safety ledger 必须原子发布并返回文件 SHA-256: " + error);
+    std::ifstream input(path, std::ios::binary);
+    const std::string content(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    expect(content.find("\"physical_output_capability\": false") !=
+               std::string::npos &&
+               content.find("\"monitor_sequence\": 42") !=
+                   std::string::npos &&
+               content.find("\"right_button_pressed\": false") !=
+                   std::string::npos &&
+               content.find("\"decision\": \"released\"") !=
+                   std::string::npos,
+           "持久账本必须保存可独立判别 explicit release 的原始字段");
+    std::filesystem::remove_all(root, ignored);
 }
 
 } // namespace
@@ -166,6 +258,7 @@ int main() {
     test_parser_rejects_missing_duplicate_and_invalid_identity();
     test_frame_mapping_preserves_source_identity_and_quality();
     test_physical_deadman_prompt_contract();
+    test_physical_safety_ledger_distinguishes_explicit_release();
     if (failures != 0) {
         std::cerr << "Mouse Effect Probe Runner 测试失败数: "
                   << failures << '\n';

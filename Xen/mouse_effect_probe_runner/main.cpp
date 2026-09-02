@@ -60,6 +60,11 @@ int wmain(int argc, wchar_t* argv[]) {
         if (!result.report_sha256.empty()) {
             std::cerr << ", report=" << options.report_path;
         }
+        if (!result.safety_ledger_sha256.empty()) {
+            std::cerr << ", safety_ledger=" << options.safety_ledger_path
+                      << ", safety_ledger_sha256="
+                      << result.safety_ledger_sha256;
+        }
         std::cerr << '\n';
         return 1;
     }
@@ -74,7 +79,13 @@ int wmain(int argc, wchar_t* argv[]) {
         << ", backend_completed_x_counts="
         << result.execution.cumulative_backend_completed_x_counts
         << ", report=" << options.report_path
-        << ", report_sha256=" << result.report_sha256 << '\n'
+        << ", report_sha256=" << result.report_sha256;
+    if (!result.safety_ledger_sha256.empty()) {
+        std::cout << ", safety_ledger=" << options.safety_ledger_path
+                  << ", safety_ledger_sha256="
+                  << result.safety_ledger_sha256;
+    }
+    std::cout << '\n'
         << "该结果不声明 visible physical effect；必须与 sidecar manifest/"
            "背景 witness 离线对齐后再判断。\n";
     return 0;

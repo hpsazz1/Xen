@@ -515,7 +515,7 @@ $taskMarkdown = @(
     "- 序列：samples=$($samples.Count)，transitions=$($pulses.Count)，每个 block 均为 pre-zero → ±1 → hold → return → post-zero",
     "- 硬边界：X-only、Y=0、净 X=0、最大前缀=1 count；运行期不加幅、不加测、不补偿",
     "- 场景：真实游戏静止高纹理背景；左右 witness 全支持域不得含人物、HUD、Overlay、遮挡或独立动画",
-    "- 安全：启动命令时右键松开；看到 probe 提示 monitor 已就绪后在 5 秒内按住并持续保持；松键、End、F8 或任何失败立即停发",
+    "- 安全：启动命令时右键松开；看到 probe 提示 monitor 已就绪后在 5 秒内按住并持续保持，直到出现 probe 时间线完成或未正常完成的终局提示后再松开；sidecar publishing 不是松键信号；松键、End、F8 或任何失败立即停发",
     "- P-HOLDOUT 不得用于回调 nuisance/noise/tail/mask/mapping/gain；失败即 A2 red",
     "",
     "下面命令会发送真实 KMBOX 输入，只能由用户在本机前台执行：",

@@ -50,6 +50,10 @@ foreach ($required in @(
         'publishing_max_seconds',
         'PUBLISHING',
         'sidecar-lifecycle.json',
+        'safety-ledger.json',
+        '"--safety-ledger"',
+        'safety_ledger_sha256',
+        'safety_monitor_terminal_decision',
         'publishedFramesDirectory',
         'png_count_at_completion')) {
     if (-not $launch.Contains($required)) {

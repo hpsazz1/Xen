@@ -174,6 +174,8 @@ foreach ($role in @("p-cal", "p-holdout")) {
     if ((Test-Path -LiteralPath (
                 Join-Path $runDirectory "command-report.json")) -or
         (Test-Path -LiteralPath (
+                Join-Path $runDirectory "safety-ledger.json")) -or
+        (Test-Path -LiteralPath (
                 Join-Path $runDirectory "pixel-evidence"))) {
         throw "A2 $role Prepare 不得产生 Launch/Physical 产物"
     }
