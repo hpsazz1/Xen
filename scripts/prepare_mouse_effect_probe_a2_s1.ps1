@@ -545,7 +545,7 @@ $taskMarkdown = @(
     "- 峰值停留=$PeakHoldSampleCount source samples：到达原 $ChallengePulseCount-count 峰值后只消费 source frame、不发送 Mouse command；实际毫秒数以后生 source timestamp 为准",
     "- 零基线：settle=$SettleSampleCount samples 后连续 baseline=$BaselineSampleCount samples；challenge/hold/settle 全部排除",
     "- 固定 command cadence 只作 decoded-image 活性正控制，不作为像素速度阈值，也不进入 noise/tail/gain/resolution",
-    "- 启动命令时保持右键松开；看到 probe 提示 monitor 已就绪后，在 5 秒内按住右键并持续保持，直到出现 probe 时间线完成或未正常完成的终局提示后再松开；sidecar publishing 不是松键信号",
+    '- 操作只看四个提示：【准备】保持右键松开；【按住右键】后 5 秒内按住并保持；【现在松开右键】立即松开；【记录完成】后回传观察',
     "- 除右键 deadman 外，不要移动物理鼠标、不要按 WASD；视角变化由 KMBOX 序列自动完成",
     "- 松开右键、End、F8、sidecar/ACK/source 任一失败都会立即停发且不补偿",
     "",

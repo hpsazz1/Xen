@@ -48,6 +48,19 @@ function Quote-NativeArgument([string]$Value) {
     return '"' + $Value + '"'
 }
 
+function ConvertTo-PhysicalProbeOperatorCue([string]$Line) {
+    if ($Line.StartsWith("KMBOX monitor 已就绪")) {
+        return '【按住右键】5 秒内按住并持续保持；直到看到“现在松开右键”。'
+    }
+    if ($Line.StartsWith("Mouse Effect Probe 时间线完成")) {
+        return "【现在松开右键】命令阶段完成；正在整理证据。"
+    }
+    if ($Line.StartsWith("Mouse Effect Probe 未正常完成")) {
+        return "【现在松开右键】命令阶段停止；正在整理证据。"
+    }
+    return $null
+}
+
 function Wait-SidecarIncoming(
         [Diagnostics.Process]$Process,
         [string]$Parent,
@@ -125,8 +138,6 @@ function Wait-SidecarCompletion(
                 $phase = "PUBLISHING"
                 $publishingStartedMilliseconds =
                     [int64]$watch.ElapsedMilliseconds
-                Write-Host ("sidecar 已录满并进入 PNG/哈希 publishing；" +
-                    "继续等待原子发布完成。")
             }
             $phaseElapsedMilliseconds = if ($phase -eq "PUBLISHING") {
                 [int64]$watch.ElapsedMilliseconds -
@@ -324,14 +335,7 @@ if ([bool]$capture.require_frame_metadata) {
     $sidecarArguments += "--require-frame-metadata"
 }
 
-$probeLabel = if ($isA2S1Task) {
-    "A2 S1 $([string]$task.run_role) 固定 cadence X-only 活性 bracket（含峰值零命令停留）"
-} elseif ($isA2Task) {
-    "A2 依赖校准 $([string]$task.run_role) ±1 X probe"
-} else {
-    "A 级稀疏 ±1 X probe"
-}
-Write-Host "即将执行 $probeLabel。启动命令时请先保持右键松开；probe 提示 monitor 已就绪后，再在 5 秒内按住右键并持续保持，直到出现 probe 时间线完成或未正常完成的终局提示后再松开；sidecar publishing 不是松键信号。松开右键、End 或 F8 会立即停发，且不会补偿。"
+Write-Host '【准备】保持右键松开；等待“按住右键”。'
 $sidecarProcess = Start-Process -FilePath `
     ([string]$task.files.sidecar_executable.path) `
     -WorkingDirectory (Split-Path -Parent `
@@ -367,8 +371,35 @@ try {
         "--allow-physical-output",
         "--confirm-physical-output", $confirmation
     )
-    & ([string]$task.files.probe_executable.path) @probeArguments
+    $operatorState = @{
+        monitor_seen = $false
+        terminal_seen = $false
+    }
+    & ([string]$task.files.probe_executable.path) @probeArguments 2>&1 | ForEach-Object {
+        $nativeLine = [string]$_
+        $cue = ConvertTo-PhysicalProbeOperatorCue $nativeLine
+        if (-not [string]::IsNullOrWhiteSpace($cue)) {
+            $isMonitorCue = $nativeLine.StartsWith("KMBOX monitor 已就绪")
+            $isTerminalCue =
+                $nativeLine.StartsWith("Mouse Effect Probe 时间线完成") -or
+                $nativeLine.StartsWith("Mouse Effect Probe 未正常完成")
+            if (($isMonitorCue -and -not $operatorState.monitor_seen) -or
+                ($isTerminalCue -and -not $operatorState.terminal_seen)) {
+                Write-Host $cue
+            }
+            if ($isMonitorCue) {
+                $operatorState.monitor_seen = $true
+            }
+            if ($isTerminalCue) {
+                $operatorState.terminal_seen = $true
+            }
+        }
+    }
     $probeExitCode = $LASTEXITCODE
+    if (-not $operatorState.terminal_seen) {
+        Write-Host "【现在松开右键】命令阶段已结束；正在核对证据。"
+        $operatorState.terminal_seen = $true
+    }
 
     $recordingShutdownGraceSeconds = 15
     $discoverySeconds = [int][Math]::Ceiling(
@@ -862,10 +893,7 @@ try {
         }
         Write-NewUtf8Json $s1SessionPath $session
     }
-    Write-Host ("Physical A 已完整记录：pulse/backend/ACK=" +
-        "$completedPulses/$expectedPulseCount/$expectedPulseCount；" +
-        "sidecar=$($frames.Count)/$($frames.Count)；尚未分析 visible effect。")
-    Write-Host "请松开右键，并把方向/可见性/异常或急停情况直接发回当前对话。"
+    Write-Host "【记录完成】本次尚未分析可见效果。请反馈：是否看到视角偏移；是否移动鼠标/WASD；是否异常或急停。"
 } finally {
     if ($null -ne $sidecarProcess) {
         $sidecarProcess.Refresh()

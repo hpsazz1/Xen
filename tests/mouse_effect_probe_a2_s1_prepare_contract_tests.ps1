@@ -37,6 +37,9 @@ foreach ($required in @(
         'peak_hold_sample_count',
         'peak_hold_frames_eligible_for_estimands',
         'a2-s1-kmbox-bracket-peak-hold-v1',
+        '【准备】保持右键松开',
+        '【按住右键】',
+        '【现在松开右键】',
         '.ProviderPath',
         'PREPARED_NOT_LAUNCHED',
         'physical_launch_executed = $false',
@@ -68,6 +71,12 @@ foreach ($required in @(
         'monitor_sequence_after',
         'safety_monitor_packet_count',
         'safety_monitor_packet_identity_complete',
+        'ConvertTo-PhysicalProbeOperatorCue',
+        '【准备】保持右键松开；等待“按住右键”。',
+        '【按住右键】5 秒内按住并持续保持；直到看到“现在松开右键”。',
+        '【现在松开右键】命令阶段完成；正在整理证据。',
+        '【记录完成】本次尚未分析可见效果。',
+        '2>&1 | ForEach-Object',
         'publishedFramesDirectory',
         'png_count_at_completion')) {
     if (-not $launch.Contains($required)) {
@@ -81,6 +90,15 @@ if ($prepare.Contains('& $launchScript.path') -or
     $prepare.Contains('Start-Process -FilePath $launchScript')) {
     throw "A2 S1 Prepare must not execute its Physical Launch script"
 }
+foreach ($verbose in @(
+        '即将执行 $probeLabel',
+        'sidecar 已录满并进入 PNG/哈希 publishing',
+        'Physical A 已完整记录：pulse/backend/ACK=',
+        '请松开右键，并把方向/可见性/异常或急停情况直接发回当前对话。')) {
+    if ($launch.Contains($verbose)) {
+        throw "A2 S1 Launch 不得继续显示冗长操作文本：$verbose"
+    }
+}
 
 # 只提取纯等待函数，用无物理能力的睡眠进程覆盖 RECORDING、PUBLISHING
 # 及原子发布前的 PNG 计数；测试不得执行 Launch 主体。
@@ -91,6 +109,7 @@ $launchAst = [Management.Automation.Language.Parser]::ParseFile(
     [ref]$launchTokens,
     [ref]$launchErrors)
 foreach ($functionName in @(
+        'ConvertTo-PhysicalProbeOperatorCue',
         'Test-SidecarPublishingStarted',
         'Get-SidecarPngCount',
         'Wait-SidecarCompletion')) {
@@ -103,6 +122,24 @@ foreach ($functionName in @(
         throw "A2 S1 Launch 缺少可测试的 sidecar 函数：$functionName"
     }
     . ([scriptblock]::Create($functionAst.Extent.Text))
+}
+
+$monitorCue = ConvertTo-PhysicalProbeOperatorCue `
+    'KMBOX monitor 已就绪；不要提前按住。'
+$successCue = ConvertTo-PhysicalProbeOperatorCue `
+    'Mouse Effect Probe 时间线完成: report="C:\detail.json"'
+$failureCue = ConvertTo-PhysicalProbeOperatorCue `
+    'Mouse Effect Probe 未正常完成: stop_reason=safety_released'
+$ignoredCue = ConvertTo-PhysicalProbeOperatorCue `
+    'report_sha256=0123456789abcdef'
+if ($monitorCue -ne
+        '【按住右键】5 秒内按住并持续保持；直到看到“现在松开右键”。' -or
+    $successCue -ne
+        '【现在松开右键】命令阶段完成；正在整理证据。' -or
+    $failureCue -ne
+        '【现在松开右键】命令阶段停止；正在整理证据。' -or
+    $null -ne $ignoredCue) {
+    throw 'A2 S1 native transcript 未精确映射为三个简洁操作提示'
 }
 
 function Start-SleepProcess([string]$Command) {
