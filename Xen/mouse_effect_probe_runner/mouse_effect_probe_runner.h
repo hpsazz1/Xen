@@ -18,6 +18,13 @@ enum class MouseEffectProbeParseStatus {
     INVALID,
 };
 
+enum class MouseEffectProbePhysicalAuthorization {
+    NONE,
+    PHYSICAL_A,
+    PHYSICAL_B_PRIMARY,
+    PHYSICAL_B_HOLDOUT,
+};
+
 enum class MouseEffectProbeSafetyPhase {
     ARMING,
     ACTIVE,
@@ -100,6 +107,8 @@ struct MouseEffectProbeRunOptions {
     std::uint64_t max_seconds = 15;
     bool allow_physical_output = false;
     bool physical_output_confirmed = false;
+    MouseEffectProbePhysicalAuthorization physical_authorization =
+        MouseEffectProbePhysicalAuthorization::NONE;
     MouseOutputOwnerScope owner_scope = MouseOutputOwnerScope::PRODUCTION;
 };
 
@@ -116,6 +125,13 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
     std::string& error) noexcept;
 
 std::string mouse_effect_probe_usage();
+
+// 物理 B 的 Primary 与 cross-Run Holdout 使用不同确认令牌；只有读取到
+// exact sequence profile 后才能完成最终授权，且必须早于 Mouse/KMBOX 打开。
+bool validate_mouse_effect_probe_sequence_authorization(
+    const MouseEffectProbeRunOptions& options,
+    const mouse_effect_probe::MouseEffectProbeSequence& sequence,
+    std::string& error) noexcept;
 
 // KMBOX monitor 仅在物理输入变化时发布新事实；因此 Physical A/B 必须
 // 在 monitor 打开后提示用户产生一次新的右键按下，不能要求提前按住。

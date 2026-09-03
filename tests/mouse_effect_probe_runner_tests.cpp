@@ -130,6 +130,73 @@ void test_parser_isolates_physical_b_authority_from_physical_a() {
            "physical-a 必须拒绝 Physical B 确认令牌");
 }
 
+void test_parser_recognizes_physical_b_holdout_authority() {
+    std::string error;
+    auto arguments = common_arguments();
+    arguments[1] = L"physical-b";
+    arguments.push_back(L"--allow-physical-output");
+    arguments.push_back(L"--confirm-physical-output");
+    arguments.push_back(
+        L"XEN_MOUSE_EFFECT_PROBE_B_HOLDOUT_SENDS_REAL_KMBOX_INPUT");
+    arguments.push_back(L"--safety-ledger");
+    arguments.push_back(L"E:\\run\\safety-ledger.json");
+
+    MouseEffectProbeRunOptions options;
+    expect(parse_mouse_effect_probe_options(arguments, options, error) ==
+               MouseEffectProbeParseStatus::READY &&
+               options.dispatch_mode ==
+                   mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
+               options.allow_physical_output &&
+               options.physical_output_confirmed,
+           "physical-b 必须识别独立 Holdout 确认令牌: " + error);
+}
+
+void test_physical_b_authority_is_bound_to_sequence_profile() {
+    std::string error;
+    auto primary_arguments = common_arguments();
+    primary_arguments[1] = L"physical-b";
+    primary_arguments.push_back(L"--allow-physical-output");
+    primary_arguments.push_back(L"--confirm-physical-output");
+    primary_arguments.push_back(
+        L"XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT");
+    primary_arguments.push_back(L"--safety-ledger");
+    primary_arguments.push_back(L"E:\\run\\safety-ledger.json");
+    MouseEffectProbeRunOptions primary_options;
+    expect(parse_mouse_effect_probe_options(
+               primary_arguments, primary_options, error) ==
+               MouseEffectProbeParseStatus::READY,
+           "Primary B 参数必须先通过 parser: " + error);
+
+    auto holdout_arguments = primary_arguments;
+    holdout_arguments[holdout_arguments.size() - 3U] =
+        L"XEN_MOUSE_EFFECT_PROBE_B_HOLDOUT_SENDS_REAL_KMBOX_INPUT";
+    MouseEffectProbeRunOptions holdout_options;
+    expect(parse_mouse_effect_probe_options(
+               holdout_arguments, holdout_options, error) ==
+               MouseEffectProbeParseStatus::READY,
+           "Holdout B 参数必须先通过 parser: " + error);
+
+    mouse_effect_probe::MouseEffectProbeSequence primary_sequence;
+    primary_sequence.schema = 5U;
+    primary_sequence.profile = "physical_b_prbs_primary";
+    mouse_effect_probe::MouseEffectProbeSequence holdout_sequence;
+    holdout_sequence.schema = 5U;
+    holdout_sequence.profile = "physical_b_prbs_holdout";
+
+    expect(validate_mouse_effect_probe_sequence_authorization(
+               primary_options, primary_sequence, error),
+           "Primary token 必须只授权 Primary sequence: " + error);
+    expect(!validate_mouse_effect_probe_sequence_authorization(
+               primary_options, holdout_sequence, error),
+           "Primary token 不得授权 Holdout sequence");
+    expect(validate_mouse_effect_probe_sequence_authorization(
+               holdout_options, holdout_sequence, error),
+           "Holdout token 必须只授权 Holdout sequence: " + error);
+    expect(!validate_mouse_effect_probe_sequence_authorization(
+               holdout_options, primary_sequence, error),
+           "Holdout token 不得授权 Primary sequence");
+}
+
 void test_parser_rejects_missing_duplicate_and_invalid_identity() {
     std::string error;
     MouseEffectProbeRunOptions options;
@@ -370,6 +437,8 @@ void test_physical_safety_ledger_distinguishes_explicit_release() {
 int main() {
     test_parser_separates_output_off_and_physical_authority();
     test_parser_isolates_physical_b_authority_from_physical_a();
+    test_parser_recognizes_physical_b_holdout_authority();
+    test_physical_b_authority_is_bound_to_sequence_profile();
     test_parser_rejects_missing_duplicate_and_invalid_identity();
     test_frame_mapping_preserves_source_identity_and_quality();
     test_physical_deadman_prompt_contract();

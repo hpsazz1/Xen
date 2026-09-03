@@ -31,6 +31,8 @@ constexpr std::wstring_view kPhysicalAConfirmation =
     L"XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT";
 constexpr std::wstring_view kPhysicalBConfirmation =
     L"XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT";
+constexpr std::wstring_view kPhysicalBHoldoutConfirmation =
+    L"XEN_MOUSE_EFFECT_PROBE_B_HOLDOUT_SENDS_REAL_KMBOX_INPUT";
 constexpr std::size_t kMaximumSafetyObservationCount = 8192U;
 constexpr std::size_t kMaximumMonitorPacketCount = 8192U;
 std::atomic<bool> stop_requested{false};
@@ -902,17 +904,35 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
             return MouseEffectProbeParseStatus::INVALID;
         }
         if (is_physical_dispatch(options.dispatch_mode)) {
-            const auto expected_confirmation = options.dispatch_mode ==
-                    mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A
-                ? kPhysicalAConfirmation : kPhysicalBConfirmation;
+            MouseEffectProbePhysicalAuthorization authorization =
+                MouseEffectProbePhysicalAuthorization::NONE;
+            if (options.dispatch_mode ==
+                    mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A &&
+                physical_confirmation == kPhysicalAConfirmation) {
+                authorization =
+                    MouseEffectProbePhysicalAuthorization::PHYSICAL_A;
+            } else if (options.dispatch_mode ==
+                           mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
+                       physical_confirmation == kPhysicalBConfirmation) {
+                authorization = MouseEffectProbePhysicalAuthorization::
+                    PHYSICAL_B_PRIMARY;
+            } else if (options.dispatch_mode ==
+                           mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
+                       physical_confirmation ==
+                           kPhysicalBHoldoutConfirmation) {
+                authorization = MouseEffectProbePhysicalAuthorization::
+                    PHYSICAL_B_HOLDOUT;
+            }
             if (!options.allow_physical_output ||
                 !seen_confirmation ||
-                physical_confirmation != expected_confirmation) {
+                authorization ==
+                    MouseEffectProbePhysicalAuthorization::NONE) {
                 set_error(error,
                     "physical mode 缺少双重授权或确认令牌不匹配");
                 return MouseEffectProbeParseStatus::INVALID;
             }
             options.physical_output_confirmed = true;
+            options.physical_authorization = authorization;
             if (!seen_safety_ledger ||
                 options.safety_ledger_path.empty() ||
                 !options.safety_ledger_path.is_absolute()) {
@@ -939,6 +959,61 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
     }
 }
 
+bool validate_mouse_effect_probe_sequence_authorization(
+        const MouseEffectProbeRunOptions& options,
+        const mouse_effect_probe::MouseEffectProbeSequence& sequence,
+        std::string& error) noexcept {
+    try {
+        if (!is_physical_dispatch(options.dispatch_mode)) {
+            error.clear();
+            return true;
+        }
+        if (!options.allow_physical_output ||
+            !options.physical_output_confirmed) {
+            set_error(error, "physical sequence 缺少已确认的物理输出授权");
+            return false;
+        }
+
+        const bool physical_b_primary_sequence =
+            sequence.schema == 5U &&
+            sequence.profile == "physical_b_prbs_primary";
+        const bool physical_b_holdout_sequence =
+            sequence.schema == 5U &&
+            sequence.profile == "physical_b_prbs_holdout";
+        if (options.dispatch_mode ==
+                mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
+            if (options.physical_authorization !=
+                    MouseEffectProbePhysicalAuthorization::PHYSICAL_A ||
+                physical_b_primary_sequence ||
+                physical_b_holdout_sequence) {
+                set_error(error,
+                    "Physical A 授权与 sequence schema/profile 不一致");
+                return false;
+            }
+            error.clear();
+            return true;
+        }
+
+        const auto expected_authorization = physical_b_primary_sequence
+            ? MouseEffectProbePhysicalAuthorization::PHYSICAL_B_PRIMARY
+            : physical_b_holdout_sequence
+                ? MouseEffectProbePhysicalAuthorization::PHYSICAL_B_HOLDOUT
+                : MouseEffectProbePhysicalAuthorization::NONE;
+        if (expected_authorization ==
+                MouseEffectProbePhysicalAuthorization::NONE ||
+            options.physical_authorization != expected_authorization) {
+            set_error(error,
+                "Physical B 确认令牌与 sequence profile 不一致");
+            return false;
+        }
+        error.clear();
+        return true;
+    } catch (...) {
+        set_error(error, "验证 physical sequence 授权时发生未知异常");
+        return false;
+    }
+}
+
 std::string mouse_effect_probe_usage() {
     return
         "XenMouseEffectProbe 建立 backend-completed command → visible "
@@ -958,6 +1033,11 @@ std::string mouse_effect_probe_usage() {
         "--safety-ledger <new-json> "
         "--confirm-physical-output "
         "XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT\n"
+        "physical B cross-Run Holdout 使用独立确认令牌:\n"
+        "  --mode physical-b --allow-physical-output "
+        "--safety-ledger <new-json> "
+        "--confirm-physical-output "
+        "XEN_MOUSE_EFFECT_PROBE_B_HOLDOUT_SENDS_REAL_KMBOX_INPUT\n"
         "physical A/B 会发送真实 KMBOX X 输入；只能由用户前台启动。\n";
 }
 
@@ -1050,19 +1130,8 @@ bool run_mouse_effect_probe(
                 options.sequence_path, sequence, error)) {
             return false;
         }
-        const bool physical_b_sequence =
-            sequence.schema == 5U &&
-            sequence.profile == "physical_b_prbs_primary";
-        if ((options.dispatch_mode ==
-                 mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
-             !physical_b_sequence) ||
-            (options.dispatch_mode ==
-                 mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A &&
-             physical_b_sequence)) {
-            set_error(error,
-                "physical dispatch mode 与 sequence schema/profile 不一致");
-            return false;
-        }
+        if (!validate_mouse_effect_probe_sequence_authorization(
+                options, sequence, error)) return false;
         AppConfig app_config;
         std::string config_path;
         if (!path_to_utf8(options.config_path, config_path) ||
