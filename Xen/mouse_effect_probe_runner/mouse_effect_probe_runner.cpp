@@ -1051,7 +1051,7 @@ bool run_mouse_effect_probe(
             return false;
         }
         const bool physical_b_sequence =
-            sequence.schema == 4U &&
+            sequence.schema == 5U &&
             sequence.profile == "physical_b_prbs_primary";
         if ((options.dispatch_mode ==
                  mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&

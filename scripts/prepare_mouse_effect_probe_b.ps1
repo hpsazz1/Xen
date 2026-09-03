@@ -311,7 +311,8 @@ try {
     }
     $f0 = Get-Content -LiteralPath $f0Path -Raw -Encoding utf8 |
         ConvertFrom-Json
-    if ([string]$f0.evidence_type -ne
+    if ([int]$f0.schema_version -ne 2 -or
+        [string]$f0.evidence_type -ne
             "mouse_effect_probe_physical_b_primary_f0" -or
         [string]$f0.status -ne "READY_FOR_PHYSICAL_B_PRIMARY_PREPARE" -or
         [bool]$f0.physical_output_capability -or
@@ -319,6 +320,12 @@ try {
         [bool]$f0.production_aim_changed -or
         -not [bool]$f0.physical_b_primary_prepare_gate.ready -or
         [bool]$f0.cross_run_holdout.prepare_allowed -or
+        [int]$f0.model_contract.core_delay_samples -ne 4 -or
+        (@($f0.model_contract.tail_lengths) -join ",") -ne "0,1,2,4,8" -or
+        [string]$f0.model_contract.nuisance_fit_rows -ne
+            "exact_dedicated_pre_guard_only" -or
+        -not [bool]$f0.model_contract.selection_used_for_single_refit -or
+        [bool]$f0.model_contract.confirmation_used_for_refit -or
         [string]$f0.analyzer.file_sha256 -ne [string]$analyzer.sha256 -or
         [string]$f0.analyzer.contract_semantic_sha256 -ne
             [string]$f0.analysis_contract.contract_semantic_sha256 -or
@@ -363,17 +370,18 @@ try {
     $transitions = @($samples | Where-Object { [int]$_.dx_counts -ne 0 })
     $blockRoles = @($blocks | ForEach-Object { [string]$_.role })
     $blockPolarities = @($blocks | ForEach-Object { [string]$_.polarity })
-    if ([int]$sequence.schema -ne 4 -or
+    if ([int]$sequence.schema -ne 5 -or
         [string]$sequence.profile -ne "physical_b_prbs_primary" -or
         [string]$sequence.request.offline_sequence_semantic_sha256 -ne
             [string]$request.offline_sequence_semantic_sha256 -or
         $samples.Count -ne [uint64]$request.sample_count -or
-        $blocks.Count -ne 4 -or
+        $blocks.Count -ne 6 -or
         [int64]$sequence.summary.net_x_counts -ne 0 -or
         [uint64]$sequence.summary.max_abs_prefix_x_counts -ne 1 -or
         ($blockRoles -join ",") -ne
-            "estimation,estimation,within_run_validation,within_run_validation" -or
-        ($blockPolarities -join ",") -ne "normal,inverted,normal,inverted" -or
+            "estimation,estimation,selection,selection,confirmation,confirmation" -or
+        ($blockPolarities -join ",") -ne
+            "normal,inverted,normal,inverted,normal,inverted" -or
         @($samples | Where-Object {
             [int]$_.dx_counts -lt -1 -or [int]$_.dx_counts -gt 1 -or
             [int]$_.dy_counts -ne 0
@@ -452,7 +460,7 @@ try {
 
     $taskPath = Join-Path $stagingDirectory "task.json"
     $task = [ordered]@{
-        schema_version = 4
+        schema_version = 5
         evidence_type = "mouse_effect_probe_b_task"
         status = "PREPARED"
         experiment = "physical_b_primary_system_identification"
@@ -494,14 +502,18 @@ try {
         f0 = [ordered]@{
             semantic_sha256 = [string]$f0.f0_semantic_sha256
             file_sha256 = [string]$f0Identity.sha256
-            eligible_horizons = @($f0.acceptance_eligible_horizons)
-            deletion_control_horizons = @($f0.deletion_control_horizons)
             identification_input_definition =
                 [string]$f0.model_contract.identification_input_definition
             actuator_audit_input =
                 [string]$f0.model_contract.actuator_audit_input
+            core_delay_samples = [uint64]$f0.model_contract.core_delay_samples
+            tail_lengths = @($f0.model_contract.tail_lengths)
+            nuisance_fit_rows = [string]$f0.model_contract.nuisance_fit_rows
+            selection_used_for_single_refit =
+                [bool]$f0.model_contract.selection_used_for_single_refit
+            confirmation_used_for_refit =
+                [bool]$f0.model_contract.confirmation_used_for_refit
             input_forced_validation_required = $true
-            output_free_run_validation_required = $true
             holdout_used_for_tuning = $false
             analysis_contract_semantic_sha256 =
                 [string]$f0.analysis_contract.contract_semantic_sha256
@@ -571,8 +583,10 @@ try {
         "",
         "- Run UUID：``$runUuid``；scope：``$($task.scope_id)``",
         "- 输入：累计位置用于辨识；完成的相对 X 命令用于 ACK/净零/前缀审计",
-        "- 序列：416 samples；完整 estimation pair + within-Run validation pair；Y=0、净 X=0、最大前缀=1 count",
-        "- 本 Run 不包含 cross-Run holdout；不得改 recurrence、phase、H、幅度、重复数或 guard",
+        "- 序列：800 samples；完整 estimation/selection/confirmation pairs；各 block pre/post guard 不共享；Y=0、净 X=0、最大前缀=1 count",
+        "- F0 v2：delay=4 static-gain core；T={0,1,2,4,8} relative-command tail",
+        "- 数据边界：nuisance 仅拟合独立 pre-guard；confirmation 不参与重拟合",
+        "- 本 Run 不包含 cross-Run holdout；不得改 recurrence、phase、delay、T、幅度、重复数或 guard",
         '- 安全：启动时右键松开；看到“按住右键”后在 5 秒内按住并保持，直到看到“现在松开右键”；松键、End、F8 或任何失败立即停发且不补偿',
         "",
         "下面命令会发送真实 KMBOX 输入，只能由用户在本机前台执行：",

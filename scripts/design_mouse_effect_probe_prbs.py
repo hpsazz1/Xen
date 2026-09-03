@@ -150,15 +150,18 @@ def build_candidate_sequence(
             "sample_count": len(samples) - first_sample_index,
         })
 
-    append_guard(0)
     block_id = 1
     for pair_index in range(1, pair_repetitions + 1):
+        append_guard(pair_index)
         append_period(pair_index, block_id, inverted=False)
         block_id += 1
+        append_guard(pair_index)
         append_guard(pair_index)
         append_period(pair_index, block_id, inverted=True)
         block_id += 1
         append_guard(pair_index)
+    # 末尾 guard 仅为非 wrap 时间负控提供未来输入索引，不进入 block 分数。
+    append_guard(0)
 
     if position_x != 0:
         raise ValueError("完整正/反相周期未回到零位置")
@@ -350,10 +353,7 @@ def _exact_schedule_audit(sequence: dict, horizons: list[int]) -> dict:
         for block in sequence["blocks"]:
             first = block["first_sample_index"]
             block_end = first + block["sample_count"]
-            output_end = block_end
-            while output_end < len(samples) and \
-                    samples[output_end]["phase"] == "guard":
-                output_end += 1
+            output_end = block_end + int(sequence["guard_sample_count"])
             output_indices = list(range(first, output_end))
             unknown_prehistory = max(0, horizon - first)
             if unknown_prehistory:
@@ -429,6 +429,8 @@ def _exact_schedule_audit(sequence: dict, horizons: list[int]) -> dict:
             "U_H[row,lag-1]=exact_identification_input[k_row-lag]; "
             "lag starts at 1; rows cover period/return plus exact post-guard"
         ),
+        "purpose": "legacy_recurrence_selection_audit_not_acceptance_model",
+        "acceptance_model_used": False,
         "unknown_prehistory_zero_padding_allowed": False,
         "all_input_matrices_full_column_rank": all_input_full_rank,
         "all_augmented_designs_identifiable": all_augmented_identifiable,
@@ -649,7 +651,7 @@ def _select_recurrences_for_family(
             horizons=horizons,
             guard_sample_count=guard_sample_count,
             observed_lag=observed_lag,
-            pair_roles=["estimation", "within_run_validation"],
+            pair_roles=["estimation", "selection", "confirmation"],
         )
         if not candidate["all_horizons_full_rank"]:
             continue
@@ -666,7 +668,7 @@ def _select_recurrences_for_family(
     primary_entry = ranked[0]
     holdout_entry = ranked[1]
     primary = primary_entry[2]
-    primary["role"] = "primary_estimation_and_within_run_validation"
+    primary["role"] = "primary_estimation_selection_confirmation"
     cross_run = _audit_candidate(
         lfsr=holdout_entry[1],
         input_definition=input_definition,
@@ -754,7 +756,7 @@ def _physical_a_contract(analysis: dict) -> tuple[int, float, float, list[str]]:
 def design_physical_b_candidates(
         physical_a_analysis: dict,
         orders: list[int],
-        horizons: list[int],
+        recurrence_audit_horizons: list[int],
         guard_sample_count: int) -> dict:
     """比较两种输入定义并生成不含 Physical 执行能力的 exact 候选。"""
     observed_lag, run_local_gain_max, image_edge_margin, blockers = \
@@ -762,6 +764,7 @@ def design_physical_b_candidates(
     if len(orders) < 2 or len(set(orders)) != len(orders) or \
             orders != sorted(orders):
         raise ValueError("orders 必须递增、唯一且至少包含两个候选")
+    horizons = recurrence_audit_horizons
     if len(horizons) < 2 or len(set(horizons)) != len(horizons) or \
             horizons != sorted(horizons) or \
             any(horizon < observed_lag for horizon in horizons):
@@ -786,7 +789,7 @@ def design_physical_b_candidates(
                 horizons=horizons,
                 guard_sample_count=guard_sample_count,
                 observed_lag=observed_lag,
-                pair_roles=["estimation", "within_run_validation"],
+                pair_roles=["estimation", "selection", "confirmation"],
             ))
 
     eligible = [
@@ -817,8 +820,10 @@ def design_physical_b_candidates(
     selected_prefix = selected["sequence"]["summary"][
         "max_abs_position_x_counts"]
     run_local_displacement = selected_prefix * run_local_gain_max
+    model_rank_audit = _physical_b_sequence_rank_audit(
+        selected["sequence"])
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "mouse_effect_probe_physical_b_offline_design",
         "status": "VALID_OFFLINE_DESIGN",
         "physical_output_capability": False,
@@ -838,18 +843,18 @@ def design_physical_b_candidates(
                 "witness_state_summary", {}).get(
                     "statistical_independence_claimed"),
         },
-        "candidate_horizons": horizons,
+        "recurrence_audit_horizons": horizons,
         "guard": {
             "candidate_sample_count": guard_sample_count,
             "covers_observed_lag": guard_sample_count >= observed_lag,
-            "covers_candidate_horizon_envelope":
+            "covers_recurrence_audit_horizon_envelope":
                 guard_sample_count >= max(horizons),
             "tail_support_proven":
                 "INDEPENDENT_TAIL_SUPPORT_MISSING" not in blockers,
             "semantics": "offline_candidate_not_physical_tail_acceptance",
         },
         "selection_rule": [
-            "all_candidate_horizons_full_column_rank",
+            "all_recurrence_audit_horizons_full_column_rank",
             "minimum_max_abs_physical_position_prefix",
             "shortest_complete_period",
             "enumerate_all_selected_order_recurrence_phase_variants",
@@ -859,11 +864,13 @@ def design_physical_b_candidates(
         "candidates": candidates,
         "recurrence_selection": recurrence_selection,
         "selected_candidate": selected,
+        "physical_b_v2_model_rank_audit": model_rank_audit,
         "cross_run_holdout_candidate": cross_run,
         "holdout_contract": {
             "random_frame_split_allowed": False,
             "estimation": "first complete normal/inverted pair",
-            "within_run_validation": "second complete normal/inverted pair",
+            "selection": "second complete normal/inverted pair",
+            "confirmation": "third complete normal/inverted pair",
             "cross_run_validation": (
                 "independent Run with a different maximum-length recurrence"
             ),
@@ -905,7 +912,7 @@ def _canonical_semantic_sha256(value: dict, field: str) -> str:
     ).encode("utf-8")).hexdigest()
 
 
-def _physical_b_analysis_contract() -> tuple[dict, dict]:
+def _load_physical_b_analyzer() -> tuple[pathlib.Path, object]:
     analyzer_path = pathlib.Path(__file__).resolve().with_name(
         "analyze_mouse_effect_probe_b.py")
     if not analyzer_path.is_file():
@@ -916,6 +923,11 @@ def _physical_b_analysis_contract() -> tuple[dict, dict]:
         raise ValueError("Physical B analyzer 无法加载")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return analyzer_path, module
+
+
+def _physical_b_analysis_contract() -> tuple[dict, dict]:
+    analyzer_path, module = _load_physical_b_analyzer()
     contract = module.physical_b_analysis_contract()
     if not isinstance(contract, dict) or \
             contract.get("contract_semantic_sha256") != \
@@ -930,6 +942,15 @@ def _physical_b_analysis_contract() -> tuple[dict, dict]:
         "numpy_version": np.__version__,
         "opencv_version": module.cv2.__version__,
     }
+
+
+def _physical_b_sequence_rank_audit(sequence: dict) -> dict:
+    _, module = _load_physical_b_analyzer()
+    audit = module.audit_physical_b_sequence_design(sequence)
+    if audit.get("all_required_matrices_full_column_rank") is not True or \
+            audit.get("failure_labels") != []:
+        raise ValueError("Physical B v2 冻结 sequence 存在非满秩所需矩阵")
+    return audit
 
 
 def _require_sha256(value: object, description: str) -> str:
@@ -1012,7 +1033,7 @@ def bind_physical_b_primary_prepare_plan(
         "A2 dependency decision",
     )
 
-    if offline_design.get("schema_version") != 1 or \
+    if offline_design.get("schema_version") != 2 or \
             offline_design.get("evidence_type") != \
             "mouse_effect_probe_physical_b_offline_design" or \
             offline_design.get("status") != "VALID_OFFLINE_DESIGN":
@@ -1030,11 +1051,22 @@ def bind_physical_b_primary_prepare_plan(
     if claimed_design_sha != _canonical_semantic_sha256(
             offline_design, "design_semantic_sha256"):
         raise ValueError("Physical B offline design 规范语义 SHA-256 不匹配")
-    if offline_design.get("candidate_horizons") != [4, 8, 16, 32]:
-        raise ValueError("Physical B candidate H 集合已漂移")
+    if offline_design.get("recurrence_audit_horizons") != [4, 8, 16, 32]:
+        raise ValueError("Physical B recurrence 历史审计集合已漂移")
+    model_rank_audit = offline_design.get(
+        "physical_b_v2_model_rank_audit", {})
+    if model_rank_audit.get("schema_version") != 2 or \
+            model_rank_audit.get("evidence_type") != \
+            "mouse_effect_probe_physical_b_v2_model_rank_audit" or \
+            model_rank_audit.get(
+            "all_required_matrices_full_column_rank") is not True or \
+            model_rank_audit.get("failure_labels") != [] or \
+            int(model_rank_audit.get("required_matrix_count", 0)) != 951 or \
+            len(model_rank_audit.get("matrices", [])) != 951:
+        raise ValueError("Physical B v2 所需 sequence 矩阵秩审计未闭合")
     guard = offline_design["guard"]
     if int(guard.get("candidate_sample_count", 0)) != 32 or \
-            guard.get("covers_candidate_horizon_envelope") is not True:
+            guard.get("covers_recurrence_audit_horizon_envelope") is not True:
         raise ValueError("Physical B guard 合同已漂移")
     expected_legacy_blockers = {
         "INDEPENDENT_NONDEGENERATE_NOISE_MISSING",
@@ -1051,12 +1083,12 @@ def bind_physical_b_primary_prepare_plan(
     selected = offline_design["selected_candidate"]
     cross_run = offline_design["cross_run_holdout_candidate"]
     if selected.get("role") != \
-            "primary_estimation_and_within_run_validation" or \
+            "primary_estimation_selection_confirmation" or \
             selected.get("input_definition") != \
             "cumulative_position_counts" or \
             selected.get("all_horizons_full_rank") is not True or \
             selected["sequence"].get("pair_roles") != \
-            ["estimation", "within_run_validation"]:
+            ["estimation", "selection", "confirmation"]:
         raise ValueError("Physical B Primary candidate 角色或输入定义非法")
     if cross_run.get("role") != "cross_run_holdout" or \
             cross_run.get("input_definition") != \
@@ -1067,6 +1099,8 @@ def bind_physical_b_primary_prepare_plan(
         raise ValueError("Physical B cross-Run candidate 角色非法")
     primary_sequence = _rebuild_frozen_sequence(selected)
     holdout_sequence = _rebuild_frozen_sequence(cross_run)
+    if model_rank_audit != _physical_b_sequence_rank_audit(primary_sequence):
+        raise ValueError("Physical B v2 sequence 矩阵秩审计无法由 exact sequence 重建")
     if int(selected["lfsr"]["feedback_mask"]) == \
             int(cross_run["lfsr"]["feedback_mask"]):
         raise ValueError("cross-Run holdout 必须使用不同 recurrence")
@@ -1147,25 +1181,20 @@ def bind_physical_b_primary_prepare_plan(
             actual_prefix > allowed_prefix or \
             allowed_prefix > holdout_allowed_prefix:
         raise ValueError("A2 tail/guard/prefix 未闭合 Physical B Primary F0")
-    eligible_horizons = [
-        horizon for horizon in offline_design["candidate_horizons"]
-        if horizon >= tail_upper
-    ]
-    deletion_horizons = [
-        horizon for horizon in offline_design["candidate_horizons"]
-        if horizon < tail_upper
-    ]
-    if eligible_horizons != [8, 16, 32] or deletion_horizons != [4]:
-        raise ValueError("A2 tail 对 Physical B H 集合的裁决异常")
-
     analysis_contract, analyzer = _physical_b_analysis_contract()
+    model = analysis_contract["model"]
+    if int(model.get("core_delay_samples", -1)) != 4 or \
+            model.get("tail_lengths") != [0, 1, 2, 4, 8] or \
+            analysis_contract.get("alternative_core_delays") != \
+            [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]:
+        raise ValueError("Physical B F0 v2 delay/tail deletion 合同已漂移")
     mapping_uncertainty_upper_px = float(
         comparisons["mapping_uncertainty"]["candidate_upper_px"])
     if not math.isfinite(mapping_uncertainty_upper_px) or \
             mapping_uncertainty_upper_px < 0.0:
         raise ValueError("A2 mapping uncertainty upper 非有限或为负")
     plan = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "mouse_effect_probe_physical_b_primary_f0",
         "status": "READY_FOR_PHYSICAL_B_PRIMARY_PREPARE",
         "physical_output_capability": False,
@@ -1187,22 +1216,36 @@ def bind_physical_b_primary_prepare_plan(
             "identification_input_definition":
                 "cumulative_position_counts",
             "actuator_audit_input": "completed_command_dx_counts",
-            "model_boundary":
-                "commanded_cumulative_position_to_visible_displacement",
-            "strictly_causal_lag_origin": 1,
+            "model_boundary": (
+                "completed_relative_command_to_cumulative_position_to_"
+                "visible_displacement"
+            ),
+            "family": model["family"],
+            "core_delay_samples": model["core_delay_samples"],
+            "tail_lengths": list(model["tail_lengths"]),
+            "tail_lag_origin": model["tail_lag_origin"],
+            "expected_background_gain_sign":
+                model["expected_background_gain_sign"],
             "whole_block_only": True,
             "random_frame_split_allowed": False,
             "input_forced_validation_required": True,
-            "output_free_run_validation_required": True,
-            "one_step_prediction_acceptance_allowed": False,
+            "nuisance_fit_rows": "exact_dedicated_pre_guard_only",
+            "selection_used_for_single_refit": True,
+            "confirmation_used_for_refit": False,
         },
         "analysis_contract": analysis_contract,
         "analyzer": analyzer,
-        "candidate_horizons": list(offline_design["candidate_horizons"]),
-        "deletion_control_horizons": deletion_horizons,
-        "acceptance_eligible_horizons": eligible_horizons,
+        "sequence_model_rank_audit": {
+            "all_required_matrices_full_column_rank": True,
+            "required_matrix_count":
+                model_rank_audit["required_matrix_count"],
+            "failure_labels": [],
+            "worst_condition_number":
+                model_rank_audit["worst_condition_number"],
+            "bound_by_source_offline_design_sha256": design_file_sha256,
+        },
         "primary_sequence": {
-            "schema": 4,
+            "schema": 5,
             "profile": "physical_b_prbs_primary",
             "offline_sequence_semantic_sha256":
                 primary_sequence["sequence_semantic_sha256"],
@@ -1282,8 +1325,9 @@ def _parse_arguments(arguments: list[str] | None) -> argparse.Namespace:
         help="递增、唯一的 LFSR order 候选，例如 5,6,7",
     )
     parser.add_argument(
-        "--horizons", type=_parse_positive_integer_list, required=True,
-        help="递增、唯一的 causal H 候选，例如 4,8,16,32",
+        "--recurrence-audit-horizons", type=_parse_positive_integer_list,
+        required=True,
+        help="仅用于复算冻结 recurrence 的历史 H 审计，例如 4,8,16,32",
     )
     parser.add_argument(
         "--guard-samples", type=int, required=True,
@@ -1407,7 +1451,7 @@ def _bind_primary_main(arguments: list[str]) -> int:
         "Physical B Primary F0 已生成: "
         f"output={options.output}, "
         f"sequence={plan['primary_sequence']['offline_sequence_semantic_sha256']}, "
-        f"eligible_h={plan['acceptance_eligible_horizons']}, "
+        f"tail_lengths={plan['model_contract']['tail_lengths']}, "
         "launch_authorized=false"
     )
     return 0
@@ -1425,7 +1469,7 @@ def main(arguments: list[str] | None = None) -> int:
         design = design_physical_b_candidates(
             analysis,
             orders=options.orders,
-            horizons=options.horizons,
+            recurrence_audit_horizons=options.recurrence_audit_horizons,
             guard_sample_count=options.guard_samples,
         )
         design["source_physical_a"].update({

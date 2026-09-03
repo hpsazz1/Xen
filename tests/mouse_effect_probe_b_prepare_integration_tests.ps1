@@ -128,7 +128,7 @@ $offlineDesignPath = Join-Path $inputRoot "offline-design.json"
     --physical-a-analysis $physicalAPath `
     --output $offlineDesignPath `
     --orders 5,6,7 `
-    --horizons 4,8,16,32 `
+    --recurrence-audit-horizons 4,8,16,32 `
     --guard-samples 32
 if ($LASTEXITCODE -ne 0) {
     throw "测试 offline design 生成失败，ExitCode=$LASTEXITCODE"
@@ -229,7 +229,7 @@ $sequence = Get-Content -Raw -Encoding utf8 -LiteralPath (
     Join-Path $runDirectory "sequence.json") | ConvertFrom-Json
 $f0 = Get-Content -Raw -Encoding utf8 -LiteralPath (
     Join-Path $runDirectory "f0-primary.json") | ConvertFrom-Json
-if ([int]$task.schema_version -ne 4 -or
+if ([int]$task.schema_version -ne 5 -or
     [string]$task.evidence_type -ne "mouse_effect_probe_b_task" -or
     [string]$task.status -ne "PREPARED" -or
     [string]$task.dispatch_mode -ne "physical_b" -or
@@ -238,11 +238,15 @@ if ([int]$task.schema_version -ne 4 -or
     [string]$task.physical_output_confirmation -ne
         "XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT" -or
     [bool]$task.cross_run_holdout_prepare_authorized -or
-    [uint64]$task.sequence_sample_count -ne 416 -or
+    [uint64]$task.sequence_sample_count -ne 800 -or
     [uint64]$task.max_abs_prefix_x_counts -ne 1 -or
-    [int]$sequence.schema -ne 4 -or
-    @($sequence.blocks).Count -ne 4 -or
-    @($sequence.samples).Count -ne 416 -or
+    [int]$sequence.schema -ne 5 -or
+    @($sequence.blocks).Count -ne 6 -or
+    @($sequence.samples).Count -ne 800 -or
+    [int]$f0.schema_version -ne 2 -or
+    [int]$f0.model_contract.core_delay_samples -ne 4 -or
+    (@($f0.model_contract.tail_lengths) -join ",") -ne "0,1,2,4,8" -or
+    [bool]$f0.model_contract.confirmation_used_for_refit -or
     [string]$f0.status -ne "READY_FOR_PHYSICAL_B_PRIMARY_PREPARE" -or
     [bool]$f0.physical_b_launch_authorized) {
     throw "Physical B Primary task/F0/sequence 身份或安全合同不闭合"

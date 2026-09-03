@@ -239,7 +239,7 @@ $isA2S1Task =
     [string]$task.evidence_type -eq "mouse_effect_probe_a2_s1_task" -and
     [string]$task.profile -like "dependency_calibration_a2_s1_*"
 $isBTask =
-    [int]$task.schema_version -eq 4 -and
+    [int]$task.schema_version -eq 5 -and
     [string]$task.evidence_type -eq "mouse_effect_probe_b_task" -and
     [string]$task.profile -eq "physical_b_prbs_primary"
 $expectedDispatchMode = if ($isBTask) { "physical_b" } else { "physical_a" }
@@ -295,7 +295,7 @@ if ($isA2S1Task) {
 if ($isBTask) {
     if ([string]$task.run_role -ne "primary" -or
         [string]$task.profile -ne "physical_b_prbs_primary" -or
-        [uint64]$task.sequence_sample_count -ne 416 -or
+        [uint64]$task.sequence_sample_count -ne 800 -or
         [uint64]$task.expected_nonzero_transition_count -eq 0 -or
         [uint64]$task.max_abs_prefix_x_counts -ne 1 -or
         -not [bool]$task.requires_user_frontend_launch -or
@@ -305,9 +305,14 @@ if ($isBTask) {
             "cumulative_position_counts" -or
         [string]$task.f0.actuator_audit_input -ne
             "completed_command_dx_counts" -or
+        [uint64]$task.f0.core_delay_samples -ne 4 -or
+        (@($task.f0.tail_lengths) -join ",") -ne "0,1,2,4,8" -or
+        [string]$task.f0.nuisance_fit_rows -ne
+            "exact_dedicated_pre_guard_only" -or
+        -not [bool]$task.f0.selection_used_for_single_refit -or
+        [bool]$task.f0.confirmation_used_for_refit -or
         [bool]$task.f0.holdout_used_for_tuning -or
-        -not [bool]$task.f0.input_forced_validation_required -or
-        -not [bool]$task.f0.output_free_run_validation_required) {
+        -not [bool]$task.f0.input_forced_validation_required) {
         throw "Physical B Primary role/F0/holdout 安全合同无效"
     }
 }
@@ -709,7 +714,7 @@ try {
         $blockPolarities = @($sequenceBlocks | ForEach-Object {
             [string]$_.polarity
         })
-        if ([int]$sequence.schema -ne 4 -or
+        if ([int]$sequence.schema -ne 5 -or
             [string]$sequence.profile -ne "physical_b_prbs_primary" -or
             [string]$sequence.request.offline_sequence_semantic_sha256 -ne
                 [string]$task.offline_sequence_semantic_sha256 -or
@@ -718,14 +723,14 @@ try {
             [uint64]$sequence.request.feedback_mask -ne 39 -or
             [uint64]$sequence.request.seed -ne 1 -or
             [uint64]$sequence.request.phase -ne 49 -or
-            $samples.Count -ne 416 -or
-            $sequenceBlocks.Count -ne 4 -or
+            $samples.Count -ne 800 -or
+            $sequenceBlocks.Count -ne 6 -or
             [int64]$sequence.summary.net_x_counts -ne 0 -or
             [uint64]$sequence.summary.max_abs_prefix_x_counts -ne 1 -or
             ($blockRoles -join ",") -ne
-                "estimation,estimation,within_run_validation,within_run_validation" -or
+                "estimation,estimation,selection,selection,confirmation,confirmation" -or
             ($blockPolarities -join ",") -ne
-                "normal,inverted,normal,inverted" -or
+                "normal,inverted,normal,inverted,normal,inverted" -or
             @($sequenceBlocks | Where-Object {
                 [uint64]$_.period_sample_count -ne 63 -or
                 [uint64]$_.sample_count -ne 64

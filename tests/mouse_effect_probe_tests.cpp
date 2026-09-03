@@ -416,7 +416,7 @@ void test_physical_b_primary_sequence_is_frozen_complete_and_bounded() {
     request.seed = 1;
     request.phase = 49;
     request.offline_sequence_semantic_sha256 =
-        "2132219c011c0aab75b30c246c37375496a46b4cd83b2455d9756c2f9c9c31e2";
+        "b69917ffdbf32061644c1531913371590e81719ee5b2440eb0609fba2c9c0b2d";
     mouse_effect_probe::MouseEffectProbeSequence sequence;
     std::string error;
     expect(mouse_effect_probe::make_physical_b_primary_sequence(
@@ -425,10 +425,10 @@ void test_physical_b_primary_sequence_is_frozen_complete_and_bounded() {
     expect(mouse_effect_probe::validate_mouse_effect_probe_sequence(
                sequence, error),
            "Physical B Primary sequence 必须通过公开 validator: " + error);
-    expect(sequence.schema == 4 &&
+    expect(sequence.schema == 5 &&
                sequence.profile == "physical_b_prbs_primary" &&
-               sequence.samples.size() == 416U &&
-               sequence.blocks.size() == 4U &&
+               sequence.samples.size() == 800U &&
+               sequence.blocks.size() == 6U &&
                sequence.net_x_counts == 0 &&
                sequence.max_abs_prefix_x_counts == 1U &&
                sequence.sequence_sha256.size() == 64U,
@@ -459,14 +459,18 @@ void test_physical_b_primary_sequence_is_frozen_complete_and_bounded() {
                "C++ recurrence/difference schedule 必须与冻结 offline Primary 开头一致");
     }
 
-    const std::array<mouse_effect_probe::ProbeSequenceBlockRole, 4> roles{
+    const std::array<mouse_effect_probe::ProbeSequenceBlockRole, 6> roles{
         mouse_effect_probe::ProbeSequenceBlockRole::ESTIMATION,
         mouse_effect_probe::ProbeSequenceBlockRole::ESTIMATION,
-        mouse_effect_probe::ProbeSequenceBlockRole::WITHIN_RUN_VALIDATION,
-        mouse_effect_probe::ProbeSequenceBlockRole::WITHIN_RUN_VALIDATION,
+        mouse_effect_probe::ProbeSequenceBlockRole::SELECTION,
+        mouse_effect_probe::ProbeSequenceBlockRole::SELECTION,
+        mouse_effect_probe::ProbeSequenceBlockRole::CONFIRMATION,
+        mouse_effect_probe::ProbeSequenceBlockRole::CONFIRMATION,
     };
-    const std::array<mouse_effect_probe::ProbeSequenceBlockPolarity, 4>
+    const std::array<mouse_effect_probe::ProbeSequenceBlockPolarity, 6>
         polarities{
+            mouse_effect_probe::ProbeSequenceBlockPolarity::NORMAL,
+            mouse_effect_probe::ProbeSequenceBlockPolarity::INVERTED,
             mouse_effect_probe::ProbeSequenceBlockPolarity::NORMAL,
             mouse_effect_probe::ProbeSequenceBlockPolarity::INVERTED,
             mouse_effect_probe::ProbeSequenceBlockPolarity::NORMAL,
@@ -495,7 +499,7 @@ void test_physical_b_primary_sequence_is_frozen_complete_and_bounded() {
                round_trip.physical_b_primary_request.
                    offline_sequence_semantic_sha256 ==
                request.offline_sequence_semantic_sha256,
-            "Physical B Primary schema 4 必须精确 round-trip: " + error);
+            "Physical B Primary schema 5 必须精确 round-trip: " + error);
 
     auto options = execution_options();
     options.dispatch_mode =
@@ -512,7 +516,7 @@ void test_physical_b_primary_sequence_is_frozen_complete_and_bounded() {
     expect(executor.result().complete &&
                executor.result().dispatch_mode ==
                    mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
-               executor.result().events.size() == 416U &&
+               executor.result().events.size() == 800U &&
                !mouse->commands().empty() &&
                executor.result().cumulative_requested_x_counts == 0 &&
                executor.result().cumulative_backend_completed_x_counts == 0,

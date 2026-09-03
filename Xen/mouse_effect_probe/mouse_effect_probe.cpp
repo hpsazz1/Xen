@@ -25,7 +25,7 @@ namespace {
 constexpr std::uint32_t kSequenceSchema = 1;
 constexpr std::uint32_t kDependencyCalibrationSequenceSchema = 2;
 constexpr std::uint32_t kS1LivenessSequenceSchema = 3;
-constexpr std::uint32_t kPhysicalBPrimarySequenceSchema = 4;
+constexpr std::uint32_t kPhysicalBPrimarySequenceSchema = 5;
 constexpr std::string_view kSparsePulseProfile = "sparse_pulse_a";
 constexpr std::string_view kDependencyCalibrationPrimaryProfile =
     "dependency_calibration_a2_p_cal";
@@ -43,7 +43,7 @@ constexpr std::uint32_t kPhysicalBPrimaryFeedbackMask = 0x27;
 constexpr std::uint64_t kPhysicalBPrimarySeed = 1;
 constexpr std::uint64_t kPhysicalBPrimaryPhase = 49;
 constexpr std::string_view kPhysicalBPrimaryOfflineSequenceSha256 =
-    "2132219c011c0aab75b30c246c37375496a46b4cd83b2455d9756c2f9c9c31e2";
+    "b69917ffdbf32061644c1531913371590e81719ee5b2440eb0609fba2c9c0b2d";
 constexpr std::uint64_t kMaximumSequenceSamples = 1'000'000;
 constexpr std::uint64_t kMaximumDependencyCalibrationBlocks = 64;
 constexpr std::uint64_t kMaximumS1LivenessSamples = 2'400;
@@ -498,11 +498,12 @@ bool build_physical_b_primary_sequence(
     if (!generate_physical_b_primary_period(request, bits, error)) {
         return false;
     }
-    constexpr std::uint64_t kPairCount = 2;
+    constexpr std::uint64_t kPairCount = 3;
     const std::uint64_t per_block = bits.size() + 1U;
     const std::uint64_t expected_sample_count =
-        request.guard_sample_count + kPairCount * 2U *
-            (per_block + request.guard_sample_count);
+        kPairCount * 2U *
+            (per_block + request.guard_sample_count * 2U) +
+        request.guard_sample_count;
     if (expected_sample_count > kMaximumSequenceSamples) {
         set_error(error, "Physical B Primary sample count 超出固定容量");
         return false;
@@ -513,9 +514,7 @@ bool build_physical_b_primary_sequence(
     sequence.profile = kPhysicalBPrimaryProfile;
     sequence.physical_b_primary_request = request;
     sequence.samples.reserve(static_cast<std::size_t>(expected_sample_count));
-    sequence.blocks.reserve(4U);
-    append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
-                 request.guard_sample_count);
+    sequence.blocks.reserve(6U);
 
     int position_x = 0;
     std::uint64_t block_id = 1;
@@ -523,10 +522,16 @@ bool build_physical_b_primary_sequence(
          pair_index <= kPairCount; ++pair_index) {
         const auto role = pair_index == 1U
             ? ProbeSequenceBlockRole::ESTIMATION
-            : ProbeSequenceBlockRole::WITHIN_RUN_VALIDATION;
+            : pair_index == 2U
+                ? ProbeSequenceBlockRole::SELECTION
+                : ProbeSequenceBlockRole::CONFIRMATION;
+        append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                     request.guard_sample_count);
         append_physical_b_primary_block(
             sequence, block_id++, pair_index, role,
             ProbeSequenceBlockPolarity::NORMAL, bits, position_x);
+        append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                     request.guard_sample_count);
         append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
                      request.guard_sample_count);
         append_physical_b_primary_block(
@@ -535,6 +540,8 @@ bool build_physical_b_primary_sequence(
         append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
                      request.guard_sample_count);
     }
+    append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
     summarize_sequence(sequence);
     if (position_x != 0 ||
         sequence.samples.size() != expected_sample_count ||
@@ -849,8 +856,12 @@ bool parse_probe_sequence_block_role(
         output = ProbeSequenceBlockRole::ESTIMATION;
         return true;
     }
-    if (value == "within_run_validation") {
-        output = ProbeSequenceBlockRole::WITHIN_RUN_VALIDATION;
+    if (value == "selection") {
+        output = ProbeSequenceBlockRole::SELECTION;
+        return true;
+    }
+    if (value == "confirmation") {
+        output = ProbeSequenceBlockRole::CONFIRMATION;
         return true;
     }
     return false;
@@ -1066,7 +1077,7 @@ bool parse_document(const nlohmann::ordered_json& document,
     const auto& blocks = document.at("blocks");
     const std::size_t maximum_blocks =
         sparse_profile || s1_liveness_profile ? 2U :
-        physical_b_primary_profile ? 4U :
+        physical_b_primary_profile ? 6U :
         static_cast<std::size_t>(kMaximumDependencyCalibrationBlocks);
     if (!blocks.is_array() || blocks.size() > maximum_blocks) {
         set_error(error, "序列 blocks 必须是固定容量数组");
@@ -1197,8 +1208,8 @@ const char* probe_sequence_block_role_name(
     switch (role) {
         case ProbeSequenceBlockRole::UNSPECIFIED: return "unspecified";
         case ProbeSequenceBlockRole::ESTIMATION: return "estimation";
-        case ProbeSequenceBlockRole::WITHIN_RUN_VALIDATION:
-            return "within_run_validation";
+        case ProbeSequenceBlockRole::SELECTION: return "selection";
+        case ProbeSequenceBlockRole::CONFIRMATION: return "confirmation";
     }
     return "unknown";
 }

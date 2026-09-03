@@ -77,7 +77,8 @@ struct ProbeSequenceSample {
 enum class ProbeSequenceBlockRole {
     UNSPECIFIED,
     ESTIMATION,
-    WITHIN_RUN_VALIDATION,
+    SELECTION,
+    CONFIRMATION,
 };
 
 enum class ProbeSequenceBlockPolarity {
@@ -138,8 +139,9 @@ bool make_s1_liveness_sequence(
     std::string& error) noexcept;
 
 // Physical B Primary 只生成 F0 已冻结的 cumulative-position m-sequence：
-// 两个完整 normal/inverted pair，实际差分命令为 X-only {-1,0,+1}，
-// 每个 block 显式回零且 guard 独立；当前接口不提供 cross-Run holdout。
+// 三个完整 normal/inverted pair 分别用于 estimation/selection/confirmation，
+// 实际差分命令为 X-only {-1,0,+1}；每个 block 的 pre/post guard 不共享，
+// 当前接口不提供 cross-Run holdout。
 bool make_physical_b_primary_sequence(
     const PhysicalBPrimarySequenceRequest& request,
     MouseEffectProbeSequence& sequence,

@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import hashlib
 import json
@@ -266,12 +267,14 @@ def test_design_selects_bounded_position_input_and_keeps_prepare_blocked() -> No
     design = MODULE.design_physical_b_candidates(
         analysis,
         orders=[5, 6, 7],
-        horizons=[4, 8, 16, 32],
+        recurrence_audit_horizons=[4, 8, 16, 32],
         guard_sample_count=32,
     )
 
     selected = design["selected_candidate"]
-    expect(selected["input_definition"] == "cumulative_position_counts" and
+    expect(design["schema_version"] == 2 and
+           design["recurrence_audit_horizons"] == [4, 8, 16, 32] and
+           selected["input_definition"] == "cumulative_position_counts" and
            selected["lfsr"]["order"] == 6 and
            selected["lfsr"]["period_sample_count"] == 63 and
            selected["lfsr"]["feedback_mask"] == 0x27 and
@@ -279,8 +282,20 @@ def test_design_selects_bounded_position_input_and_keeps_prepare_blocked() -> No
            "安全/短周期优先后必须穷举 order=6 recurrence/phase 并按 exact schedule 择优")
     expect(selected["sequence"]["summary"]["max_abs_position_x_counts"] == 1 and
            selected["sequence"]["summary"]["net_command_dx_counts"] == 0 and
+           selected["sequence"]["summary"]["sample_count"] == 800 and
+           selected["sequence"]["pair_roles"] ==
+           ["estimation", "selection", "confirmation"] and
            len(selected["sequence"]["sequence_semantic_sha256"]) == 64,
            "选中候选必须前缀 1 count、完整回零并绑定 exact sequence SHA")
+    model_rank = design["physical_b_v2_model_rank_audit"]
+    expect(model_rank["all_required_matrices_full_column_rank"] is True and
+           model_rank["required_matrix_count"] == 951 and
+           model_rank["failure_labels"] == [] and
+           all(entry["full_column_rank"] and
+               entry["condition_number"] is not None and
+               len(entry["singular_values"]) == entry["shape"][1]
+               for entry in model_rank["matrices"]),
+           "Prepare 前必须逐项证明真实、time/phase 与 deletion-specific 矩阵秩")
 
     order5 = next(candidate for candidate in design["candidates"]
                   if candidate["input_definition"] ==
@@ -390,7 +405,7 @@ def test_cli_binds_source_and_refuses_artifact_overwrite() -> None:
             "--physical-a-analysis", str(source),
             "--output", str(output),
             "--orders", "5,6,7",
-            "--horizons", "4,8,16,32",
+            "--recurrence-audit-horizons", "4,8,16,32",
             "--guard-samples", "32",
         ]
         expect(MODULE.main(arguments) == 0 and output.is_file(),
@@ -432,7 +447,7 @@ def test_primary_prepare_plan_binds_frozen_design_and_a2_green() -> None:
     design = MODULE.design_physical_b_candidates(
         valid_physical_a_analysis(),
         orders=[5, 6, 7],
-        horizons=[4, 8, 16, 32],
+        recurrence_audit_horizons=[4, 8, 16, 32],
         guard_sample_count=32,
     )
     design["design_semantic_sha256"] = semantic_sha256(
@@ -459,21 +474,24 @@ def test_primary_prepare_plan_binds_frozen_design_and_a2_green() -> None:
            plan["physical_b_launch_authorized"] is False and
            plan["production_aim_changed"] is False,
            "F0 只能授权后续 Primary Prepare，不能携带 Launch 或生产 Aim 能力")
-    expect(plan["model_contract"]["identification_input_definition"] ==
+    expect(plan["schema_version"] == 2 and
+           plan["model_contract"]["identification_input_definition"] ==
            "cumulative_position_counts" and
            plan["model_contract"]["actuator_audit_input"] ==
            "completed_command_dx_counts" and
-           plan["candidate_horizons"] == [4, 8, 16, 32] and
-           plan["deletion_control_horizons"] == [4] and
-           plan["acceptance_eligible_horizons"] == [8, 16, 32],
-           "A2 tail=7 必须只排除 H=4，不能事后重选输入定义或 recurrence")
+           plan["model_contract"]["core_delay_samples"] == 4 and
+           plan["model_contract"]["tail_lengths"] == [0, 1, 2, 4, 8] and
+           plan["model_contract"]["confirmation_used_for_refit"] is False,
+           "F0 v2 必须冻结 delay+gain core、可删除 command tail 与三段拟合边界")
     expect(plan["analysis_contract"]["contract_semantic_sha256"] ==
            plan["analyzer"]["contract_semantic_sha256"] and
            plan["analyzer"]["file"] ==
            "analyze_mouse_effect_probe_b.py" and
            len(plan["analyzer"]["file_sha256"]) == 64 and
            plan["analysis_contract"]["selection"]
-               ["selected_must_strictly_beat_h4"] is True and
+               ["delay_4_must_strictly_beat_all_alternatives"] is True and
+           plan["analysis_contract"]["negative_controls"]
+               ["phase_rotations"] == list(range(13, 51)) and
            plan["physical_b_primary_prepare_gate"]
                ["mapping_uncertainty_upper_px"] == 1.342895110591,
            "F0 必须绑定可执行 analyzer、精确 selection 规则和 A2 mapping budget")
@@ -481,10 +499,11 @@ def test_primary_prepare_plan_binds_frozen_design_and_a2_green() -> None:
            sequence["offline_sequence_semantic_sha256"] ==
            design["selected_candidate"]["sequence"]
                  ["sequence_semantic_sha256"] and
-           sequence["sample_count"] == 416 and
+           sequence["schema"] == 5 and
+           sequence["sample_count"] == 800 and
            sequence["max_abs_prefix_x_counts"] == 1 and
            sequence["pair_roles"] ==
-           ["estimation", "within_run_validation"] and
+           ["estimation", "selection", "confirmation"] and
            sequence["lfsr"]["feedback_mask"] == 0x27 and
            sequence["lfsr"]["phase"] == 49,
            "Primary F0 必须原样绑定已冻结 exact sequence 与整 pair 角色")
@@ -522,12 +541,33 @@ def test_primary_prepare_plan_binds_frozen_design_and_a2_green() -> None:
         rejected = True
     expect(rejected, "使用 holdout 调参的 A2 decision 必须 fail closed")
 
+    incomplete_rank = copy.deepcopy(design)
+    rank_audit = incomplete_rank["physical_b_v2_model_rank_audit"]
+    rank_audit["required_matrix_count"] = 501
+    rank_audit["matrices"] = rank_audit["matrices"][:501]
+    incomplete_rank["design_semantic_sha256"] = semantic_sha256(
+        incomplete_rank, "design_semantic_sha256")
+    incomplete_content = json_bytes(incomplete_rank)
+    rejected = False
+    try:
+        MODULE.bind_physical_b_primary_prepare_plan(
+            incomplete_rank,
+            incomplete_content,
+            hashlib.sha256(incomplete_content).hexdigest(),
+            decision,
+            decision_content,
+            hashlib.sha256(decision_content).hexdigest(),
+        )
+    except ValueError:
+        rejected = True
+    expect(rejected, "F0 必须重算并拒绝不完整的 v2 矩阵秩审计")
+
 
 def test_primary_prepare_plan_cli_is_bound_and_refuses_overwrite() -> None:
     design = MODULE.design_physical_b_candidates(
         valid_physical_a_analysis(),
         orders=[5, 6, 7],
-        horizons=[4, 8, 16, 32],
+        recurrence_audit_horizons=[4, 8, 16, 32],
         guard_sample_count=32,
     )
     design["design_semantic_sha256"] = semantic_sha256(

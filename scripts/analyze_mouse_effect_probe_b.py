@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Physical B Primary 的预注册整块 FIR 选择与 F1 证据生成。"""
+"""Physical B Primary v2 的 core/tail deletion 与 F1 证据生成。"""
 
 from __future__ import annotations
 
 import argparse
-import copy
 import csv
 import hashlib
 import io
@@ -21,8 +20,18 @@ import numpy as np
 
 _METRIC_ROUND_DECIMAL_PLACES = 12
 _EXPECTED_PRIMARY_SEQUENCE_SHA256 = (
-    "2132219c011c0aab75b30c246c37375496a46b4cd83b2455d9756c2f9c9c31e2"
+    "b69917ffdbf32061644c1531913371590e81719ee5b2440eb0609fba2c9c0b2d"
 )
+_CORE_DELAY_SAMPLES = 4
+_TAIL_LENGTHS = (0, 1, 2, 4, 8)
+_ALTERNATIVE_CORE_DELAYS = (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+_TIME_SHIFTS = (-16, -15, -14, -13, 13, 14, 15, 16)
+_PHASE_ROTATIONS = tuple(range(13, 51))
+_GUARD_SAMPLE_COUNT = 32
+_PERIOD_SAMPLE_COUNT = 63
+_BLOCK_SAMPLE_COUNT = 64
+_BLOCK_OUTPUT_SAMPLE_COUNT = 96
+_PRIMARY_SAMPLE_COUNT = 800
 
 
 def canonical_semantic_sha256(value: dict, field: str) -> str:
@@ -40,7 +49,7 @@ def canonical_semantic_sha256(value: dict, field: str) -> str:
 def physical_b_analysis_contract() -> dict:
     """返回数据到来前必须冻结的 Primary/F1 分析语义。"""
     contract = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "mouse_effect_probe_physical_b_analysis_contract",
         "physical_output_capability": False,
         "production_aim_changed": False,
@@ -55,71 +64,103 @@ def physical_b_analysis_contract() -> dict:
             "missing_or_duplicate_join_allowed": False,
         },
         "model": {
-            "family": "strictly_causal_fir",
+            "family": (
+                "delayed_static_gain_with_optional_relative_command_tail"
+            ),
             "identification_input": "cumulative_position_counts",
+            "tail_input": "completed_command_dx_counts",
             "actuator_audit_input": "completed_command_dx_counts",
             "outputs": ["left_witness_dx_px", "right_witness_dx_px"],
-            "lag_origin": 1,
+            "core_delay_samples": 4,
+            "tail_lengths": [0, 1, 2, 4, 8],
+            "tail_lag_origin": 4,
+            "expected_background_gain_sign": "negative",
             "output_feedback_used": False,
             "dtype": "float64",
             "column_scaling": "none",
             "solver": "svd_minimum_norm_full_column_rank",
             "rank_tolerance": "max(rows,cols)*sigma_max*float64_eps",
             "nuisance_columns_per_block": [
-                "constant_1", "linear_block_fraction_0_to_1"
+                "constant_1", "sample_offset_from_last_pre_guard"
             ],
         },
-        "candidate_horizons": [4, 8, 16, 32],
-        "deletion_control_horizons": [4],
-        "acceptance_eligible_horizons": [8, 16, 32],
+        "alternative_core_delays": [
+            1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+        ],
         "split": {
             "estimation_pair_index": 1,
-            "within_run_validation_pair_index": 2,
+            "selection_pair_index": 2,
+            "confirmation_pair_index": 3,
+            "pair_roles": ["estimation", "selection", "confirmation"],
             "whole_block_only": True,
             "random_frame_split_allowed": False,
             "rows_may_cross_block_boundary": False,
+            "guard_rows_shared_between_blocks": False,
+            "nuisance_fit_rows": "exact_dedicated_pre_guard_only",
+            "plant_fit_rows": "complete_period_return_plus_exact_post_guard",
+            "selection_used_for_single_refit": True,
+            "confirmation_used_for_refit": False,
         },
         "validation": {
             "input_forced_required": True,
-            "output_free_run_required": True,
-            "output_free_run_equivalent_for_fir": True,
-            "validation_nuisance_rule": (
-                "fit_only_frozen_constant_and_linear_columns_per_whole_block; "
-                "never_refit_fir_coefficients"
+            "confirmation_nuisance_rule": (
+                "fit_constant_and_linear_only_on_each_exact_pre_guard; "
+                "extrapolate_without_consuming_response_or_post_guard"
             ),
             "metrics": [
                 "rmse_px", "mae_px", "max_abs_error_px",
-                "max_abs_residual_past_input_correlation",
+                "worst_witness_rmse_px", "worst_block_rmse_px",
             ],
-            "residual_input_lags": "1_through_maximum_preregistered_horizon_32",
+            "residual_diagnostics": {
+                "inputs": [
+                    "completed_command_dx_counts",
+                    "cumulative_position_counts",
+                ],
+                "lags": list(range(13)),
+                "automatic_gate": False,
+            },
             "numerical_zero_residual_rule": (
                 "l2_norm<=sqrt(rows)*max(rows,cols,1)*float64_eps"
             ),
+        },
+        "negative_controls": {
+            "time_shifts": [-16, -15, -14, -13, 13, 14, 15, 16],
+            "time_shift_wrap_allowed": False,
+            "phase_rotations": list(range(13, 51)),
+            "phase_rotation_period_samples": 63,
+            "phase_rotation_rebuilds_command_from_position": True,
+            "rank_fraction": "1/39_engineering_control_not_p_value",
+        },
+        "deletion_tests": {
+            "core_vs_nuisance": "DT-N",
+            "delay_specificity": "DT-D",
+            "conditional_gain": "DT-G",
+            "tail": "DT-T",
+            "time_alignment": "DT-TIME",
+            "phase_alignment": "DT-PHASE",
+            "tail_failure_falls_back_to_core": True,
         },
         "selection": {
             "metric_round_decimal_places": _METRIC_ROUND_DECIMAL_PLACES,
             "tie_break": [
                 "lowest_rounded_worst_witness_rmse_px",
                 "lowest_rounded_worst_block_rmse_px",
-                "lowest_rounded_max_abs_residual_past_input_correlation",
-                "lowest_horizon",
+                "lowest_tail_length",
             ],
-            "selected_must_strictly_beat_h4": True,
-            "selected_must_strictly_beat_nuisance_only": True,
-            "selected_residual_input_correlation_must_not_exceed_h4": True,
+            "selection_pair_grants_acceptance": False,
+            "core_must_strictly_beat_nuisance_on_confirmation": True,
+            "delay_4_must_strictly_beat_all_alternatives": True,
             "strict_comparison_tolerance": (
-                "max(1,abs(lhs),abs(rhs))*float64_eps*max_validation_rows"
+                "max(1,abs(lhs),abs(rhs))*float64_eps*comparison_rows"
             ),
         },
         "f1": {
             "bind_primary_artifact_hashes": True,
-            "freeze_selected_h_and_all_witness_fir_coefficients": True,
-            "freeze_h4_deletion_control_coefficients": True,
+            "freeze_delay_tail_gain_and_tail_coefficients": True,
+            "confirmation_rows_used_for_refit": False,
             "cross_run_holdout_used_for_tuning": False,
-            "cross_run_selected_must_beat_fixed_h4": True,
-            "cross_run_selected_must_beat_nuisance_only": True,
             "cross_run_error_budget_rule": (
-                "primary_within_run_metric_plus_frozen_a2_mapping_uncertainty_px"
+                "primary_confirmation_metric_plus_frozen_a2_mapping_uncertainty_px"
             ),
         },
         "failure_semantics": {
@@ -185,25 +226,24 @@ def _svd_least_squares(matrix: np.ndarray, output: np.ndarray) -> tuple[np.ndarr
 
 def _validate_sequence_and_measurements(
         sequence: dict,
-        measurements: dict[str, Sequence[float]],
-        candidate_horizons: Sequence[int],
-        acceptance_eligible_horizons: Sequence[int]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        measurements: dict[str, Sequence[float]]) -> tuple[
+            np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     samples = sequence.get("samples")
     blocks = sequence.get("blocks")
     if not isinstance(samples, list) or not isinstance(blocks, list) or \
-            len(samples) != 416 or len(blocks) != 4:
-        raise ValueError("Physical B Primary sequence 容量必须为 416/4")
+            len(samples) != _PRIMARY_SAMPLE_COUNT or len(blocks) != 6:
+        raise ValueError("Physical B Primary v2 sequence 容量必须为 800/6")
     if sequence.get("input_definition") != "cumulative_position_counts" or \
             sequence.get("sequence_semantic_sha256") != \
             _EXPECTED_PRIMARY_SEQUENCE_SHA256 or \
             sequence.get("pair_roles") != [
-                "estimation", "within_run_validation"]:
-        raise ValueError("Physical B Primary exact sequence 身份非法")
-    if list(candidate_horizons) != [4, 8, 16, 32] or \
-            list(acceptance_eligible_horizons) != [8, 16, 32]:
-        raise ValueError("Physical B H 候选或 A2 tail 裁决已漂移")
+                "estimation", "selection", "confirmation"] or \
+            int(sequence.get("guard_sample_count", -1)) != \
+            _GUARD_SAMPLE_COUNT:
+        raise ValueError("Physical B Primary v2 exact sequence 身份非法")
 
     position = 0
+    commands: list[int] = []
     positions: list[int] = []
     for index, sample in enumerate(samples):
         if int(sample.get("sample_index", -1)) != index or \
@@ -216,23 +256,43 @@ def _validate_sequence_and_measurements(
         if position != int(sample.get("position_x_counts", 999)) or \
                 position != int(sample.get("identification_input_x_counts", 999)):
             raise ValueError("Physical B cumulative-position input 无法由 command 重建")
+        commands.append(command)
         positions.append(position)
     if position != 0 or max(abs(value) for value in positions) != 1:
         raise ValueError("Physical B sequence 未满足净零/最大前缀 1")
 
     expected_roles = [
-        "estimation", "estimation",
-        "within_run_validation", "within_run_validation",
+        "estimation", "estimation", "selection", "selection",
+        "confirmation", "confirmation",
     ]
-    expected_polarities = ["normal", "inverted", "normal", "inverted"]
+    expected_polarities = ["normal", "inverted"] * 3
+    pre_guard_rows: set[int] = set()
+    output_rows: set[int] = set()
     for index, block in enumerate(blocks):
+        first = int(block.get("first_sample_index", -1))
+        expected_first = _GUARD_SAMPLE_COUNT + index * (
+            _GUARD_SAMPLE_COUNT + _BLOCK_SAMPLE_COUNT +
+            _GUARD_SAMPLE_COUNT)
         if int(block.get("block_id", -1)) != index + 1 or \
                 int(block.get("pair_index", -1)) != index // 2 + 1 or \
                 block.get("role") != expected_roles[index] or \
                 block.get("polarity") != expected_polarities[index] or \
-                int(block.get("period_sample_count", -1)) != 63 or \
-                int(block.get("sample_count", -1)) != 64:
+                first != expected_first or \
+                int(block.get("period_sample_count", -1)) != \
+                _PERIOD_SAMPLE_COUNT or \
+                int(block.get("sample_count", -1)) != _BLOCK_SAMPLE_COUNT:
             raise ValueError("Physical B whole-block role/polarity 合同非法")
+        pre = set(range(first - _GUARD_SAMPLE_COUNT, first))
+        output = set(range(first, first + _BLOCK_OUTPUT_SAMPLE_COUNT))
+        if pre & output or pre_guard_rows & output or output_rows & pre:
+            raise ValueError("Physical B pre-guard 与 block 输出行发生共享")
+        if any(samples[row].get("phase") != "guard" for row in pre) or \
+                any(samples[row].get("phase") != "guard" for row in
+                    range(first + _BLOCK_SAMPLE_COUNT,
+                          first + _BLOCK_OUTPUT_SAMPLE_COUNT)):
+            raise ValueError("Physical B dedicated pre/post guard 合同非法")
+        pre_guard_rows.update(pre)
+        output_rows.update(output)
 
     arrays: dict[str, np.ndarray] = {}
     if set(measurements) != {"left", "right"}:
@@ -242,74 +302,30 @@ def _validate_sequence_and_measurements(
         if array.shape != (len(samples),) or not np.all(np.isfinite(array)):
             raise ValueError(f"{witness} witness 输出容量或数值非法")
         arrays[witness] = array
-    return np.asarray(positions, dtype=np.float64), arrays
+    return (
+        np.asarray(commands, dtype=np.float64),
+        np.asarray(positions, dtype=np.float64),
+        arrays,
+    )
 
 
 def _block_output_indices(sequence: dict, block: dict) -> np.ndarray:
-    samples = sequence["samples"]
     first = int(block["first_sample_index"])
-    end = first + int(block["sample_count"])
-    while end < len(samples) and samples[end]["phase"] == "guard":
-        end += 1
+    end = first + int(block["sample_count"]) + _GUARD_SAMPLE_COUNT
     indices = np.arange(first, end, dtype=np.int64)
-    if indices.size != 96 or first < 32:
+    if indices.size != _BLOCK_OUTPUT_SAMPLE_COUNT or \
+            first < _GUARD_SAMPLE_COUNT:
         raise ValueError("Physical B block 必须是 64 response + 32 exact post-guard")
     return indices
 
 
-def _block_design(
-        positions: np.ndarray,
-        indices: np.ndarray,
-        horizon: int) -> tuple[np.ndarray, np.ndarray]:
-    if int(indices[0]) < horizon:
-        raise ValueError("Physical B block prehistory 不足，禁止补零")
-    row_count = int(indices.size)
-    denominator = max(row_count - 1, 1)
-    nuisance = np.asarray([
-        [1.0, row / denominator] for row in range(row_count)
-    ], dtype=np.float64)
-    inputs = np.asarray([
-        [positions[index - lag] for lag in range(1, horizon + 1)]
-        for index in indices
-    ], dtype=np.float64)
-    return nuisance, inputs
-
-
-def _fit_estimation_witness(
-        sequence: dict,
-        positions: np.ndarray,
-        output: np.ndarray,
-        horizon: int) -> dict:
-    blocks = [
-        block for block in sequence["blocks"]
-        if block["role"] == "estimation"
-    ]
-    if len(blocks) != 2:
-        raise ValueError("Primary estimation 必须是完整 normal/inverted pair")
-    row_matrices: list[np.ndarray] = []
-    outputs: list[np.ndarray] = []
-    for block_index, block in enumerate(blocks):
-        indices = _block_output_indices(sequence, block)
-        nuisance, inputs = _block_design(positions, indices, horizon)
-        block_nuisance = np.zeros((indices.size, 4), dtype=np.float64)
-        block_nuisance[:, block_index * 2:block_index * 2 + 2] = nuisance
-        row_matrices.append(np.hstack((block_nuisance, inputs)))
-        outputs.append(output[indices])
-    matrix = np.vstack(row_matrices)
-    observed = np.concatenate(outputs)
-    coefficients, metrics = _svd_least_squares(matrix, observed)
-    predicted = matrix @ coefficients
-    residual = observed - predicted
-    return {
-        "fir_coefficients": [float(value) for value in coefficients[-horizon:]],
-        "nuisance_coefficients_by_estimation_block": [
-            [float(value) for value in coefficients[0:2]],
-            [float(value) for value in coefficients[2:4]],
-        ],
-        "design_matrix": metrics,
-        "fit_rmse_px": float(np.sqrt(np.mean(residual * residual))),
-        "fit_max_abs_error_px": float(np.max(np.abs(residual))),
-    }
+def _block_pre_guard_indices(block: dict) -> np.ndarray:
+    first = int(block["first_sample_index"])
+    indices = np.arange(
+        first - _GUARD_SAMPLE_COUNT, first, dtype=np.int64)
+    if indices.size != _GUARD_SAMPLE_COUNT or int(indices[0]) < 0:
+        raise ValueError("Physical B block 缺少 exact dedicated pre-guard")
+    return indices
 
 
 def _residual_input_correlation(
@@ -347,78 +363,6 @@ def _error_metrics(
     }
 
 
-def _validate_candidate(
-        sequence: dict,
-        positions: np.ndarray,
-        outputs: dict[str, np.ndarray],
-        horizon: int,
-        estimation: dict[str, dict] | None,
-        residual_audit_horizon: int) -> tuple[dict, dict]:
-    blocks = [
-        block for block in sequence["blocks"]
-        if block["role"] == "within_run_validation"
-    ]
-    if len(blocks) != 2:
-        raise ValueError("within-Run validation 必须是完整 normal/inverted pair")
-    witness_results: dict[str, dict] = {}
-    nuisance_results: dict[str, dict] = {}
-    for witness, output in outputs.items():
-        fir = np.zeros(horizon, dtype=np.float64) if estimation is None else \
-            np.asarray(estimation[witness]["fir_coefficients"], dtype=np.float64)
-        block_results: list[dict] = []
-        nuisance_block_results: list[dict] = []
-        all_residuals: list[np.ndarray] = []
-        all_inputs: list[np.ndarray] = []
-        all_nuisance_residuals: list[np.ndarray] = []
-        for block in blocks:
-            indices = _block_output_indices(sequence, block)
-            nuisance, inputs = _block_design(positions, indices, horizon)
-            _, residual_audit_inputs = _block_design(
-                positions, indices, residual_audit_horizon)
-            observed = output[indices]
-            forced = inputs @ fir
-            nuisance_coefficients, nuisance_matrix_metrics = \
-                _svd_least_squares(nuisance, observed - forced)
-            predicted = forced + nuisance @ nuisance_coefficients
-            residual = observed - predicted
-            metrics = _error_metrics(residual, residual_audit_inputs)
-            block_results.append({
-                "block_id": int(block["block_id"]),
-                "polarity": str(block["polarity"]),
-                "nuisance_coefficients": [
-                    float(value) for value in nuisance_coefficients
-                ],
-                "nuisance_matrix": nuisance_matrix_metrics,
-                **metrics,
-            })
-            all_residuals.append(residual)
-            all_inputs.append(residual_audit_inputs)
-
-            null_coefficients, _ = _svd_least_squares(nuisance, observed)
-            null_residual = observed - nuisance @ null_coefficients
-            nuisance_block_results.append({
-                "block_id": int(block["block_id"]),
-                "polarity": str(block["polarity"]),
-                "nuisance_coefficients": [
-                    float(value) for value in null_coefficients
-                ],
-                **_error_metrics(null_residual, residual_audit_inputs),
-            })
-            all_nuisance_residuals.append(null_residual)
-        aggregate_residual = np.concatenate(all_residuals)
-        aggregate_inputs = np.vstack(all_inputs)
-        witness_results[witness] = {
-            "blocks": block_results,
-            "aggregate": _error_metrics(aggregate_residual, aggregate_inputs),
-        }
-        nuisance_residual = np.concatenate(all_nuisance_residuals)
-        nuisance_results[witness] = {
-            "blocks": nuisance_block_results,
-            "aggregate": _error_metrics(nuisance_residual, aggregate_inputs),
-        }
-    return witness_results, nuisance_results
-
-
 def _validation_summary(witness_results: dict[str, dict]) -> dict:
     witness_rmse = {
         witness: float(result["aggregate"]["rmse_px"])
@@ -447,109 +391,849 @@ def _validation_summary(witness_results: dict[str, dict]) -> dict:
     }
 
 
-def _selection_key(candidate: dict) -> tuple[float, float, float, int]:
-    validation = candidate["validation"]
-    return (
-        round(float(validation["worst_witness_rmse_px"]),
-              _METRIC_ROUND_DECIMAL_PLACES),
-        round(float(validation["worst_block_rmse_px"]),
-              _METRIC_ROUND_DECIMAL_PLACES),
-        round(float(validation[
-            "max_abs_residual_past_input_correlation"]),
-            _METRIC_ROUND_DECIMAL_PLACES),
-        int(candidate["horizon"]),
-    )
-
-
 def _strictly_lower(first: float, second: float, row_count: int) -> bool:
     tolerance = max(1.0, abs(first), abs(second)) * \
         np.finfo(np.float64).eps * max(row_count, 1)
-    return first < second - tolerance
+    return bool(first < second - tolerance)
+
+
+def _nuisance_basis(indices: np.ndarray, first: int) -> np.ndarray:
+    offsets = indices.astype(np.float64) - float(first - 1)
+    return np.column_stack((np.ones(indices.size, dtype=np.float64), offsets))
+
+
+def _fit_nuisance_predictions(
+        sequence: dict,
+        outputs: dict[str, np.ndarray]) -> tuple[dict, dict]:
+    public: dict[str, dict] = {}
+    predictions: dict[str, dict[int, np.ndarray]] = {}
+    for witness, output in outputs.items():
+        public[witness] = {}
+        predictions[witness] = {}
+        for block in sequence["blocks"]:
+            block_id = int(block["block_id"])
+            first = int(block["first_sample_index"])
+            pre = _block_pre_guard_indices(block)
+            scored = _block_output_indices(sequence, block)
+            coefficients, matrix = _svd_least_squares(
+                _nuisance_basis(pre, first), output[pre])
+            predicted = _nuisance_basis(scored, first) @ coefficients
+            if not np.all(np.isfinite(predicted)):
+                raise ValueError("Physical B nuisance 外推产生非有限值")
+            predictions[witness][block_id] = predicted
+            public[witness][str(block_id)] = {
+                "block_id": block_id,
+                "pair_index": int(block["pair_index"]),
+                "role": str(block["role"]),
+                "polarity": str(block["polarity"]),
+                "fit_source": "exact_dedicated_pre_guard_only",
+                "fit_sample_indices": [int(value) for value in pre],
+                "coefficients": [float(value) for value in coefficients],
+                "design_matrix": matrix,
+            }
+    return public, predictions
+
+
+def _plant_matrix(
+        sequence: dict,
+        block: dict,
+        indices: np.ndarray,
+        positions: np.ndarray,
+        commands: np.ndarray,
+        delay: int,
+        tail_length: int,
+        include_core: bool,
+        include_tail: bool,
+        input_shift: int) -> np.ndarray:
+    columns: list[np.ndarray] = []
+    source_indices: list[np.ndarray] = []
+    if include_core:
+        source = indices - delay + input_shift
+        columns.append(positions[source])
+        source_indices.append(source)
+    if include_tail:
+        for lag in range(tail_length):
+            source = indices - delay - lag + input_shift
+            columns.append(commands[source])
+            source_indices.append(source)
+    if not columns:
+        raise ValueError("Physical B plant 至少需要一个冻结 regressor")
+    first = int(block["first_sample_index"])
+    allowed_first = first - _GUARD_SAMPLE_COUNT
+    allowed_end = first + _BLOCK_OUTPUT_SAMPLE_COUNT + _GUARD_SAMPLE_COUNT
+    if any(int(np.min(source)) < allowed_first or
+           int(np.max(source)) >= allowed_end for source in source_indices):
+        raise ValueError("Physical B time control 需要跨 block、丢行或补零")
+    return np.column_stack(columns).astype(np.float64, copy=False)
+
+
+def _fit_plant(
+        sequence: dict,
+        outputs: dict[str, np.ndarray],
+        nuisance_predictions: dict[str, dict[int, np.ndarray]],
+        positions: np.ndarray,
+        commands: np.ndarray,
+        roles: Sequence[str],
+        *,
+        delay: int,
+        tail_length: int,
+        include_core: bool = True,
+        include_tail: bool = True,
+        input_shift: int = 0) -> dict:
+    role_set = set(roles)
+    blocks = [
+        block for block in sequence["blocks"]
+        if block["role"] in role_set
+    ]
+    if len(blocks) != len(role_set) * 2:
+        raise ValueError("Physical B plant fit 必须使用完整 normal/inverted pair")
+    by_witness: dict[str, dict] = {}
+    for witness, output in outputs.items():
+        matrices: list[np.ndarray] = []
+        observed: list[np.ndarray] = []
+        for block in blocks:
+            indices = _block_output_indices(sequence, block)
+            matrices.append(_plant_matrix(
+                sequence, block, indices, positions, commands, delay,
+                tail_length, include_core, include_tail, input_shift))
+            observed.append(
+                output[indices] -
+                nuisance_predictions[witness][int(block["block_id"])]
+            )
+        matrix = np.vstack(matrices)
+        values = np.concatenate(observed)
+        coefficients, metrics = _svd_least_squares(matrix, values)
+        offset = 1 if include_core else 0
+        by_witness[witness] = {
+            "coefficients": [float(value) for value in coefficients],
+            "gain": float(coefficients[0]) if include_core else None,
+            "tail_coefficients": [
+                float(value) for value in coefficients[offset:]
+            ],
+            "design_matrix": metrics,
+        }
+    return {
+        "delay_samples": int(delay),
+        "tail_length": int(tail_length if include_tail else 0),
+        "include_core": bool(include_core),
+        "include_tail": bool(include_tail and tail_length > 0),
+        "input_shift_samples": int(input_shift),
+        "fit_roles": list(roles),
+        "confirmation_used_for_refit": False,
+        "by_witness": by_witness,
+    }
+
+
+def _diagnostic_correlations(
+        residual: np.ndarray,
+        indices: np.ndarray,
+        commands: np.ndarray,
+        positions: np.ndarray) -> dict:
+    result: dict[str, list[float] | bool] = {"automatic_gate": False}
+    for name, signal in (
+            ("completed_command_dx_counts", commands),
+            ("cumulative_position_counts", positions)):
+        matrix = np.column_stack([
+            signal[indices - lag] for lag in range(13)
+        ]).astype(np.float64, copy=False)
+        correlations, _ = _residual_input_correlation(residual, matrix)
+        result[name] = [float(value) for value in correlations]
+    return result
+
+
+def _evaluate_model(
+        sequence: dict,
+        outputs: dict[str, np.ndarray],
+        nuisance_predictions: dict[str, dict[int, np.ndarray]],
+        positions: np.ndarray,
+        commands: np.ndarray,
+        role: str,
+        model: dict | None,
+        *,
+        diagnostics: bool = False) -> dict:
+    blocks = [
+        block for block in sequence["blocks"] if block["role"] == role
+    ]
+    if len(blocks) != 2:
+        raise ValueError("Physical B evaluation 必须使用完整 normal/inverted pair")
+    witness_results: dict[str, dict] = {}
+    for witness, output in outputs.items():
+        block_results: list[dict] = []
+        residuals: list[np.ndarray] = []
+        for block in blocks:
+            indices = _block_output_indices(sequence, block)
+            nuisance = nuisance_predictions[witness][int(block["block_id"])]
+            forced = np.zeros(indices.size, dtype=np.float64)
+            if model is not None:
+                matrix = _plant_matrix(
+                    sequence, block, indices, positions, commands,
+                    int(model["delay_samples"]), int(model["tail_length"]),
+                    bool(model["include_core"]), bool(model["include_tail"]),
+                    int(model["input_shift_samples"]),
+                )
+                coefficients = np.asarray(
+                    model["by_witness"][witness]["coefficients"],
+                    dtype=np.float64,
+                )
+                forced = matrix @ coefficients
+            residual = output[indices] - nuisance - forced
+            metrics = _error_metrics(
+                residual,
+                np.column_stack([positions[indices]]),
+            )
+            entry = {
+                "block_id": int(block["block_id"]),
+                "polarity": str(block["polarity"]),
+                "nuisance_prediction_frozen_from_pre_guard": True,
+                **metrics,
+            }
+            if diagnostics:
+                entry["residual_input_diagnostics"] = \
+                    _diagnostic_correlations(
+                        residual, indices, commands, positions)
+            block_results.append(entry)
+            residuals.append(residual)
+        aggregate = _error_metrics(
+            np.concatenate(residuals),
+            np.column_stack([
+                positions[np.concatenate([
+                    _block_output_indices(sequence, block)
+                    for block in blocks
+                ])]
+            ]),
+        )
+        witness_results[witness] = {
+            "blocks": block_results,
+            "aggregate": aggregate,
+        }
+    summary = _validation_summary(witness_results)
+    summary["role"] = role
+    return summary
+
+
+def _v2_selection_key(candidate: dict) -> tuple[float, float, int]:
+    selection = candidate["selection"]
+    return (
+        round(float(selection["worst_witness_rmse_px"]),
+              _METRIC_ROUND_DECIMAL_PLACES),
+        round(float(selection["worst_block_rmse_px"]),
+              _METRIC_ROUND_DECIMAL_PLACES),
+        int(candidate["tail_length"]),
+    )
+
+
+def _score_key(evaluation: dict) -> tuple[float, float]:
+    return (
+        round(float(evaluation["worst_witness_rmse_px"]),
+              _METRIC_ROUND_DECIMAL_PLACES),
+        round(float(evaluation["worst_block_rmse_px"]),
+              _METRIC_ROUND_DECIMAL_PLACES),
+    )
+
+
+def _blockwise_improvement(
+        preferred: dict,
+        deleted: dict,
+        *,
+        require_aggregate: bool = True) -> dict:
+    comparisons: list[dict] = []
+    passed = True
+    for witness, preferred_witness in preferred["witnesses"].items():
+        deleted_blocks = {
+            int(block["block_id"]): block
+            for block in deleted["witnesses"][witness]["blocks"]
+        }
+        for block in preferred_witness["blocks"]:
+            deleted_block = deleted_blocks[int(block["block_id"])]
+            preferred_rmse = float(block["rmse_px"])
+            deleted_rmse = float(deleted_block["rmse_px"])
+            block_passed = _strictly_lower(
+                preferred_rmse, deleted_rmse, int(block["sample_count"]))
+            passed = passed and block_passed
+            comparisons.append({
+                "witness": witness,
+                "block_id": int(block["block_id"]),
+                "polarity": str(block["polarity"]),
+                "preferred_rmse_px": preferred_rmse,
+                "deleted_rmse_px": deleted_rmse,
+                "improvement_px": deleted_rmse - preferred_rmse,
+                "passed": block_passed,
+            })
+    aggregate_passed = _strictly_lower(
+        float(preferred["worst_witness_rmse_px"]),
+        float(deleted["worst_witness_rmse_px"]),
+        2 * _BLOCK_OUTPUT_SAMPLE_COUNT,
+    )
+    if require_aggregate:
+        passed = passed and aggregate_passed
+    return {
+        "passed": passed,
+        "aggregate_passed": aggregate_passed,
+        "minimum_block_improvement_px": min(
+            item["improvement_px"] for item in comparisons),
+        "comparisons": comparisons,
+    }
+
+
+def _control_comparison(real: dict, control: dict) -> dict:
+    blockwise = _blockwise_improvement(real, control)
+    score_passed = _score_key(real) < _score_key(control)
+    return {
+        "passed": bool(blockwise["passed"] and score_passed),
+        "real_score": list(_score_key(real)),
+        "control_score": list(_score_key(control)),
+        "blockwise": blockwise,
+    }
+
+
+def _select_tail_pipeline(
+        sequence: dict,
+        outputs: dict[str, np.ndarray],
+        nuisance_predictions: dict[str, dict[int, np.ndarray]],
+        positions: np.ndarray,
+        commands: np.ndarray,
+        *,
+        input_shift: int = 0) -> dict:
+    candidates: dict[str, dict] = {}
+    for tail_length in _TAIL_LENGTHS:
+        estimation_model = _fit_plant(
+            sequence, outputs, nuisance_predictions, positions, commands,
+            ["estimation"], delay=_CORE_DELAY_SAMPLES,
+            tail_length=tail_length, include_tail=tail_length > 0,
+            input_shift=input_shift)
+        selection = _evaluate_model(
+            sequence, outputs, nuisance_predictions, positions, commands,
+            "selection", estimation_model)
+        candidate = {
+            "tail_length": tail_length,
+            "estimation_model": estimation_model,
+            "selection": selection,
+        }
+        candidate["selection_key"] = list(_v2_selection_key(candidate))
+        candidates[str(tail_length)] = candidate
+    selected = min(candidates.values(), key=_v2_selection_key)
+    selected_tail = int(selected["tail_length"])
+    refit = _fit_plant(
+        sequence, outputs, nuisance_predictions, positions, commands,
+        ["estimation", "selection"], delay=_CORE_DELAY_SAMPLES,
+        tail_length=selected_tail, include_tail=selected_tail > 0,
+        input_shift=input_shift)
+    confirmation = _evaluate_model(
+        sequence, outputs, nuisance_predictions, positions, commands,
+        "confirmation", refit)
+    return {
+        "selected_tail_length": selected_tail,
+        "candidates": candidates,
+        "refit_model": refit,
+        "confirmation": confirmation,
+    }
+
+
+def _phase_rotated_signals(
+        sequence: dict,
+        rotation: int) -> tuple[np.ndarray, np.ndarray]:
+    positions = np.zeros(len(sequence["samples"]), dtype=np.float64)
+    commands = np.zeros(len(sequence["samples"]), dtype=np.float64)
+    original = np.asarray([
+        sample["identification_input_x_counts"]
+        for sample in sequence["samples"]
+    ], dtype=np.float64)
+    for block in sequence["blocks"]:
+        first = int(block["first_sample_index"])
+        levels = np.roll(
+            original[first:first + _PERIOD_SAMPLE_COUNT], -rotation)
+        previous = 0.0
+        for offset, level in enumerate(levels):
+            positions[first + offset] = level
+            commands[first + offset] = level - previous
+            previous = level
+        commands[first + _PERIOD_SAMPLE_COUNT] = -previous
+    if np.any(np.abs(commands) > 1.0) or \
+            not np.allclose(np.cumsum(commands), positions, atol=0.0):
+        raise ValueError("Physical B phase control 未保持差分/积分/回零合同")
+    return positions, commands
+
+
+def audit_physical_b_sequence_design(sequence: dict) -> dict:
+    """在任何 Physical 数据前审计 F0 v2 所需的全部冻结设计矩阵。"""
+    zeros = [0.0] * len(sequence.get("samples", []))
+    commands, positions, _ = _validate_sequence_and_measurements(
+        sequence, {"left": zeros, "right": zeros})
+    matrices: list[dict] = []
+
+    def append_nuisance(block: dict) -> None:
+        first = int(block["first_sample_index"])
+        metrics = _matrix_metrics(_nuisance_basis(
+            _block_pre_guard_indices(block), first))
+        matrices.append({
+            "control_family": "real",
+            "model": "nuisance",
+            "roles": [str(block["role"])],
+            "block_id": int(block["block_id"]),
+            **metrics,
+        })
+
+    def append_plant(
+            control_family: str,
+            control_value: int,
+            signal_positions: np.ndarray,
+            signal_commands: np.ndarray,
+            roles: Sequence[str],
+            delay: int,
+            tail_length: int,
+            include_core: bool,
+            include_tail: bool,
+            input_shift: int = 0) -> None:
+        role_set = set(roles)
+        blocks = [
+            block for block in sequence["blocks"]
+            if block["role"] in role_set
+        ]
+        matrix = np.vstack([
+            _plant_matrix(
+                sequence, block, _block_output_indices(sequence, block),
+                signal_positions, signal_commands, delay, tail_length,
+                include_core, include_tail, input_shift)
+            for block in blocks
+        ])
+        metrics = _matrix_metrics(matrix)
+        matrices.append({
+            "control_family": control_family,
+            "control_value": int(control_value),
+            "model": "core_tail" if include_core and include_tail else
+                "core" if include_core else "tail_without_gain",
+            "roles": list(roles),
+            "delay_samples": int(delay),
+            "tail_length": int(tail_length if include_tail else 0),
+            **metrics,
+        })
+
+    for block in sequence["blocks"]:
+        append_nuisance(block)
+    for tail_length in _TAIL_LENGTHS:
+        for roles in (["estimation"], ["estimation", "selection"]):
+            append_plant(
+                "real", 0, positions, commands, roles,
+                _CORE_DELAY_SAMPLES, tail_length, True, tail_length > 0)
+        if tail_length > 0:
+            append_plant(
+                "real_gain_deletion", 0, positions, commands,
+                ["estimation", "selection"], _CORE_DELAY_SAMPLES,
+                tail_length, False, True)
+    for delay in _ALTERNATIVE_CORE_DELAYS:
+        append_plant(
+            "alternative_delay", delay, positions, commands,
+            ["estimation", "selection"], delay, 0, True, False)
+
+    for shift in _TIME_SHIFTS:
+        for tail_length in _TAIL_LENGTHS:
+            for roles in (["estimation"], ["estimation", "selection"]):
+                append_plant(
+                    "time_shift", shift, positions, commands, roles,
+                    _CORE_DELAY_SAMPLES, tail_length, True,
+                    tail_length > 0, shift)
+
+    for rotation in _PHASE_ROTATIONS:
+        rotated_positions, rotated_commands = _phase_rotated_signals(
+            sequence, rotation)
+        for tail_length in _TAIL_LENGTHS:
+            for roles in (["estimation"], ["estimation", "selection"]):
+                append_plant(
+                    "phase_rotation", rotation,
+                    rotated_positions, rotated_commands, roles,
+                    _CORE_DELAY_SAMPLES, tail_length, True,
+                    tail_length > 0)
+        for tail_length in _TAIL_LENGTHS[1:]:
+            append_plant(
+                "gain_phase_rotation", rotation,
+                rotated_positions, commands,
+                ["estimation", "selection"], _CORE_DELAY_SAMPLES,
+                tail_length, True, True)
+            append_plant(
+                "gain_phase_rotation_deletion", rotation,
+                rotated_positions, commands,
+                ["estimation", "selection"], _CORE_DELAY_SAMPLES,
+                tail_length, False, True)
+            append_plant(
+                "tail_phase_rotation", rotation,
+                positions, rotated_commands,
+                ["estimation", "selection"], _CORE_DELAY_SAMPLES,
+                tail_length, True, True)
+
+    failures = [
+        f"{entry['control_family']}:{entry.get('control_value', 0)}:"
+        f"{entry['model']}:T{entry.get('tail_length', 0)}"
+        for entry in matrices if not entry["full_column_rank"]
+    ]
+    conditions = [
+        float(entry["condition_number"])
+        for entry in matrices if entry["condition_number"] is not None
+    ]
+    return {
+        "schema_version": 2,
+        "evidence_type": "mouse_effect_probe_physical_b_v2_model_rank_audit",
+        "all_required_matrices_full_column_rank": not failures,
+        "required_matrix_count": len(matrices),
+        "failure_labels": failures,
+        "worst_condition_number": max(conditions) if conditions else None,
+        "matrices": matrices,
+    }
+
+
+def _fit_core_pipeline(
+        sequence: dict,
+        outputs: dict[str, np.ndarray],
+        nuisance_predictions: dict[str, dict[int, np.ndarray]],
+        positions: np.ndarray,
+        commands: np.ndarray,
+        *,
+        delay: int = _CORE_DELAY_SAMPLES,
+        input_shift: int = 0,
+        diagnostics: bool = False) -> tuple[dict, dict]:
+    model = _fit_plant(
+        sequence, outputs, nuisance_predictions, positions, commands,
+        ["estimation", "selection"], delay=delay, tail_length=0,
+        include_tail=False, input_shift=input_shift)
+    confirmation = _evaluate_model(
+        sequence, outputs, nuisance_predictions, positions, commands,
+        "confirmation", model, diagnostics=diagnostics)
+    return model, confirmation
+
+
+def _differential_leakage_gate(
+        sequence: dict,
+        outputs: dict[str, np.ndarray],
+        positions: np.ndarray,
+        commands: np.ndarray) -> dict:
+    differential = {"differential": outputs["left"] - outputs["right"]}
+    _, nuisance = _fit_nuisance_predictions(sequence, differential)
+    nuisance_confirmation = _evaluate_model(
+        sequence, differential, nuisance, positions, commands,
+        "confirmation", None)
+    _, real_confirmation = _fit_core_pipeline(
+        sequence, differential, nuisance, positions, commands)
+    real = _blockwise_improvement(
+        real_confirmation, nuisance_confirmation)
+    surrogate_improvements: list[dict] = []
+    for rotation in _PHASE_ROTATIONS:
+        rotated_positions, rotated_commands = _phase_rotated_signals(
+            sequence, rotation)
+        _, confirmation = _fit_core_pipeline(
+            sequence, differential, nuisance,
+            rotated_positions, rotated_commands)
+        comparison = _blockwise_improvement(
+            confirmation, nuisance_confirmation)
+        surrogate_improvements.append({
+            "rotation": rotation,
+            "minimum_block_improvement_px":
+                comparison["minimum_block_improvement_px"],
+        })
+    envelope = max(
+        item["minimum_block_improvement_px"]
+        for item in surrogate_improvements)
+    real_improvement = float(real["minimum_block_improvement_px"])
+    leaked = bool(real["passed"] and _strictly_lower(
+        envelope, real_improvement, 2 * _BLOCK_OUTPUT_SAMPLE_COUNT))
+    return {
+        "passed": not leaked,
+        "real_minimum_block_improvement_px": real_improvement,
+        "phase_surrogate_envelope_px": envelope,
+        "phase_surrogates": surrogate_improvements,
+    }
+
+
+def _deletion_surrogate_envelope(
+        sequence: dict,
+        outputs: dict[str, np.ndarray],
+        nuisance_predictions: dict[str, dict[int, np.ndarray]],
+        positions: np.ndarray,
+        commands: np.ndarray,
+        *,
+        delete: str) -> dict:
+    improvements: list[dict] = []
+    for rotation in _PHASE_ROTATIONS:
+        rotated_positions, rotated_commands = _phase_rotated_signals(
+            sequence, rotation)
+        if delete == "gain":
+            pipeline_positions = rotated_positions
+            pipeline_commands = commands
+        elif delete == "tail":
+            pipeline_positions = positions
+            pipeline_commands = rotated_commands
+        else:
+            raise ValueError("未知 Physical B deletion surrogate")
+        pipeline = _select_tail_pipeline(
+            sequence, outputs, nuisance_predictions,
+            pipeline_positions, pipeline_commands)
+        tail_length = int(pipeline["selected_tail_length"])
+        if tail_length == 0:
+            improvement = 0.0
+        else:
+            if delete == "gain":
+                deleted_model = _fit_plant(
+                    sequence, outputs, nuisance_predictions,
+                    pipeline_positions, pipeline_commands,
+                    ["estimation", "selection"],
+                    delay=_CORE_DELAY_SAMPLES, tail_length=tail_length,
+                    include_core=False, include_tail=True)
+            else:
+                deleted_model, _ = _fit_core_pipeline(
+                    sequence, outputs, nuisance_predictions,
+                    pipeline_positions, pipeline_commands)
+            deleted_confirmation = _evaluate_model(
+                sequence, outputs, nuisance_predictions,
+                pipeline_positions, pipeline_commands,
+                "confirmation", deleted_model)
+            comparison = _blockwise_improvement(
+                pipeline["confirmation"], deleted_confirmation)
+            improvement = float(
+                comparison["minimum_block_improvement_px"])
+        improvements.append({
+            "rotation": rotation,
+            "selected_tail_length": tail_length,
+            "minimum_block_improvement_px": improvement,
+        })
+    return {
+        "maximum_surrogate_minimum_block_improvement_px": max(
+            item["minimum_block_improvement_px"] for item in improvements),
+        "surrogates": improvements,
+    }
 
 
 def fit_primary_models(
         sequence: dict,
-        measurements: dict[str, Sequence[float]],
-        candidate_horizons: Sequence[int],
-        acceptance_eligible_horizons: Sequence[int]) -> dict:
-    """用 pair 1 拟合并只用完整 pair 2 选择单一 F1 candidate。"""
-    positions, outputs = _validate_sequence_and_measurements(
-        sequence, measurements, candidate_horizons,
-        acceptance_eligible_horizons)
-    candidates: dict[str, dict] = {}
-    nuisance_only: dict | None = None
-    for horizon in candidate_horizons:
-        estimation = {
-            witness: _fit_estimation_witness(
-                sequence, positions, output, int(horizon))
-            for witness, output in outputs.items()
-        }
-        forced_by_witness, nuisance_by_witness = _validate_candidate(
-            sequence, positions, outputs, int(horizon), estimation,
-            max(int(value) for value in candidate_horizons))
-        validation = _validation_summary(forced_by_witness)
-        validation["input_forced"] = copy.deepcopy(forced_by_witness)
-        validation["output_free_run"] = copy.deepcopy(forced_by_witness)
-        candidate = {
-            "horizon": int(horizon),
-            "acceptance_eligible": int(horizon) in
-                acceptance_eligible_horizons,
-            "estimation": estimation,
-            "validation": validation,
-        }
-        candidate["selection_key"] = list(_selection_key(candidate))
-        candidates[str(horizon)] = candidate
-        if nuisance_only is None:
-            nuisance_only = _validation_summary(nuisance_by_witness)
+        measurements: dict[str, Sequence[float]]) -> dict:
+    """按冻结的三-pair F0 v2 完成 core/tail 分层 deletion tests。"""
+    commands, positions, outputs = _validate_sequence_and_measurements(
+        sequence, measurements)
+    nuisance_public, nuisance_predictions = _fit_nuisance_predictions(
+        sequence, outputs)
+    nuisance_confirmation = _evaluate_model(
+        sequence, outputs, nuisance_predictions, positions, commands,
+        "confirmation", None, diagnostics=True)
+    core_model, core_confirmation = _fit_core_pipeline(
+        sequence, outputs, nuisance_predictions, positions, commands,
+        diagnostics=True)
+    selection = _select_tail_pipeline(
+        sequence, outputs, nuisance_predictions, positions, commands)
 
-    eligible = [
-        candidates[str(horizon)] for horizon in acceptance_eligible_horizons
+    core_invalid: list[str] = []
+    dt_n = _blockwise_improvement(
+        core_confirmation, nuisance_confirmation)
+    if not dt_n["passed"]:
+        core_invalid.append("CORE_DOES_NOT_BEAT_NUISANCE")
+
+    delay_controls: list[dict] = []
+    for delay in _ALTERNATIVE_CORE_DELAYS:
+        _, confirmation = _fit_core_pipeline(
+            sequence, outputs, nuisance_predictions,
+            positions, commands, delay=delay)
+        comparison = _control_comparison(core_confirmation, confirmation)
+        delay_controls.append({
+            "delay_samples": delay,
+            "confirmation": confirmation,
+            **comparison,
+        })
+    if not all(control["passed"] for control in delay_controls):
+        core_invalid.append("DELAY_4_NOT_REPLICATED")
+
+    time_controls: list[dict] = []
+    for shift in _TIME_SHIFTS:
+        _, confirmation = _fit_core_pipeline(
+            sequence, outputs, nuisance_predictions,
+            positions, commands, input_shift=shift)
+        comparison = _control_comparison(core_confirmation, confirmation)
+        time_controls.append({
+            "shift_samples": shift,
+            "confirmation": confirmation,
+            **comparison,
+        })
+    if not all(control["passed"] for control in time_controls):
+        core_invalid.append("REAL_ALIGNMENT_NOT_BETTER_THAN_TIME_CONTROLS")
+
+    phase_controls: list[dict] = []
+    phase_tail_pipelines: dict[int, dict] = {}
+    for rotation in _PHASE_ROTATIONS:
+        rotated_positions, rotated_commands = _phase_rotated_signals(
+            sequence, rotation)
+        _, confirmation = _fit_core_pipeline(
+            sequence, outputs, nuisance_predictions,
+            rotated_positions, rotated_commands)
+        comparison = _control_comparison(core_confirmation, confirmation)
+        phase_controls.append({
+            "rotation": rotation,
+            "confirmation": confirmation,
+            **comparison,
+        })
+        phase_tail_pipelines[rotation] = _select_tail_pipeline(
+            sequence, outputs, nuisance_predictions,
+            rotated_positions, rotated_commands)
+    if not all(control["passed"] for control in phase_controls):
+        core_invalid.append("REAL_ALIGNMENT_NOT_BETTER_THAN_PHASE_CONTROLS")
+
+    gains = [
+        float(core_model["by_witness"][witness]["gain"])
+        for witness in ("left", "right")
     ]
-    selected = min(eligible, key=_selection_key)
-    deletion = candidates["4"]
-    assert nuisance_only is not None
-    selected_metrics = selected["validation"]
-    deletion_metrics = deletion["validation"]
-    invalid_reasons: list[str] = []
-    validation_rows = 2 * 96
-    if not _strictly_lower(
-            float(selected_metrics["worst_witness_rmse_px"]),
-            float(deletion_metrics["worst_witness_rmse_px"]),
-            validation_rows):
-        invalid_reasons.append("SELECTED_MODEL_DOES_NOT_BEAT_H4")
-    if not _strictly_lower(
-            float(selected_metrics["worst_witness_rmse_px"]),
-            float(nuisance_only["worst_witness_rmse_px"]),
-            validation_rows):
-        invalid_reasons.append("SELECTED_MODEL_DOES_NOT_BEAT_NUISANCE_ONLY")
-    correlation_tolerance = np.finfo(np.float64).eps * validation_rows
-    if float(selected_metrics[
-            "max_abs_residual_past_input_correlation"]) > \
-            float(deletion_metrics[
-                "max_abs_residual_past_input_correlation"]) + \
-            correlation_tolerance:
-        invalid_reasons.append("SELECTED_RESIDUAL_INPUT_CORRELATION_EXCEEDS_H4")
+    direction_gate = {
+        "expected_background_gain_sign": "negative",
+        "gains": gains,
+        "passed": all(value < 0.0 for value in gains),
+    }
+    if not direction_gate["passed"]:
+        core_invalid.append("GAIN_DIRECTION_MISMATCH")
 
+    differential_gate = _differential_leakage_gate(
+        sequence, outputs, positions, commands)
+    if not differential_gate["passed"]:
+        core_invalid.append("WITNESS_DIFFERENTIAL_COMMAND_LEAKAGE")
+
+    selected_tail = int(selection["selected_tail_length"])
+    selected_model = selection["refit_model"]
+    selected_confirmation = selection["confirmation"]
+    tail_reasons: list[str] = []
+    tail_tests: dict[str, dict] = {}
+    if selected_tail > 0:
+        no_gain_model = _fit_plant(
+            sequence, outputs, nuisance_predictions, positions, commands,
+            ["estimation", "selection"], delay=_CORE_DELAY_SAMPLES,
+            tail_length=selected_tail, include_core=False, include_tail=True)
+        no_gain_confirmation = _evaluate_model(
+            sequence, outputs, nuisance_predictions, positions, commands,
+            "confirmation", no_gain_model)
+        dt_g = _blockwise_improvement(
+            selected_confirmation, no_gain_confirmation)
+        dt_t = _blockwise_improvement(
+            selected_confirmation, core_confirmation)
+
+        gain_surrogates = _deletion_surrogate_envelope(
+            sequence, outputs, nuisance_predictions, positions, commands,
+            delete="gain")
+        tail_surrogates = _deletion_surrogate_envelope(
+            sequence, outputs, nuisance_predictions, positions, commands,
+            delete="tail")
+        gain_phase_passed = _strictly_lower(
+            float(gain_surrogates[
+                "maximum_surrogate_minimum_block_improvement_px"]),
+            float(dt_g["minimum_block_improvement_px"]),
+            2 * _BLOCK_OUTPUT_SAMPLE_COUNT)
+        tail_phase_passed = _strictly_lower(
+            float(tail_surrogates[
+                "maximum_surrogate_minimum_block_improvement_px"]),
+            float(dt_t["minimum_block_improvement_px"]),
+            2 * _BLOCK_OUTPUT_SAMPLE_COUNT)
+
+        tail_time_controls: list[dict] = []
+        for shift in _TIME_SHIFTS:
+            pipeline = _select_tail_pipeline(
+                sequence, outputs, nuisance_predictions,
+                positions, commands, input_shift=shift)
+            comparison = _control_comparison(
+                selected_confirmation, pipeline["confirmation"])
+            tail_time_controls.append({
+                "shift_samples": shift,
+                "selected_tail_length": pipeline["selected_tail_length"],
+                **comparison,
+            })
+        tail_phase_controls: list[dict] = []
+        for control in phase_controls:
+            rotation = int(control["rotation"])
+            pipeline = phase_tail_pipelines[rotation]
+            comparison = _control_comparison(
+                selected_confirmation, pipeline["confirmation"])
+            tail_phase_controls.append({
+                "rotation": rotation,
+                "selected_tail_length": pipeline["selected_tail_length"],
+                **comparison,
+            })
+
+        if not dt_g["passed"] or not gain_phase_passed:
+            tail_reasons.append("CONDITIONAL_GAIN_DELETION_NOT_SUPPORTED")
+        if not dt_t["passed"] or not tail_phase_passed:
+            tail_reasons.append("TAIL_DELETION_NOT_SUPPORTED")
+        if not all(item["passed"] for item in tail_time_controls):
+            tail_reasons.append("TAIL_NOT_BETTER_THAN_TIME_CONTROLS")
+        if not all(item["passed"] for item in tail_phase_controls):
+            tail_reasons.append("TAIL_NOT_BETTER_THAN_PHASE_CONTROLS")
+        tail_tests = {
+            "DT-G": dt_g,
+            "DT-T": dt_t,
+            "NC-GAIN-PHASE": {
+                "passed": gain_phase_passed,
+                **gain_surrogates,
+            },
+            "NC-TAIL-PHASE": {
+                "passed": tail_phase_passed,
+                **tail_surrogates,
+            },
+            "DT-TIME": tail_time_controls,
+            "DT-PHASE": tail_phase_controls,
+        }
+    else:
+        tail_reasons.append("TAIL_NOT_SELECTED")
+
+    core_passed = not core_invalid
+    tail_retained = core_passed and selected_tail > 0 and not tail_reasons
+    provisional_tail_selection = {
+        "selected_tail_length": selected_tail,
+        "refit_model": selected_model,
+        "confirmation": selected_confirmation,
+    }
+    if tail_retained:
+        frozen_tail_length = selected_tail
+        frozen_model = selected_model
+        frozen_confirmation = selected_confirmation
+    else:
+        frozen_tail_length = 0
+        frozen_model = core_model
+        frozen_confirmation = core_confirmation
+    if not core_passed:
+        status = "PRIMARY_RED"
+        f1_kind = "NO_F1"
+    elif tail_retained:
+        status = "PRIMARY_CORE_PLUS_TAIL"
+        f1_kind = "F1_CORE_TAIL"
+    else:
+        status = "PRIMARY_CORE_ONLY"
+        f1_kind = "F1_CORE"
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "mouse_effect_probe_physical_b_primary_model_selection",
-        "status": "PRIMARY_MODEL_SELECTED" if not invalid_reasons else
-            "PRIMARY_RED",
+        "status": status,
+        "f1_kind": f1_kind,
         "physical_output_capability": False,
         "production_aim_changed": False,
         "analysis_contract_semantic_sha256":
             physical_b_analysis_contract()["contract_semantic_sha256"],
-        "candidate_horizons": [int(value) for value in candidate_horizons],
-        "acceptance_eligible_horizons": [
-            int(value) for value in acceptance_eligible_horizons
-        ],
-        "selected_horizon": int(selected["horizon"]),
-        "candidates": candidates,
-        "nuisance_only_validation": nuisance_only,
+        "selected_tail_length": frozen_tail_length,
+        "provisional_tail_selection": provisional_tail_selection,
+        "tail_candidates": selection["candidates"],
+        "nuisance_by_witness": nuisance_public,
+        "nuisance_only_confirmation": nuisance_confirmation,
+        "core_model": core_model,
+        "core_confirmation": core_confirmation,
+        "selected_model": frozen_model,
+        "selected_confirmation": frozen_confirmation,
+        "core_gate": {
+            "passed": core_passed,
+            "invalid_reasons": core_invalid,
+            "DT-N": dt_n,
+            "DT-D": delay_controls,
+            "DT-TIME": time_controls,
+            "DT-PHASE": phase_controls,
+            "gain_direction": direction_gate,
+            "witness_differential": differential_gate,
+        },
+        "tail_gate": {
+            "retained": tail_retained,
+            "invalid_reasons": tail_reasons,
+            "tests": tail_tests,
+        },
         "primary_gate": {
-            "ready_for_f1": not invalid_reasons,
-            "invalid_reasons": invalid_reasons,
+            "ready_for_f1": core_passed,
+            "invalid_reasons": core_invalid,
             "whole_block_only": True,
+            "confirmation_used_for_refit": False,
             "holdout_used_for_tuning": False,
         },
     }
@@ -662,7 +1346,7 @@ def _validate_primary_artifacts(
         paths["launch_summary"], "Physical B launch summary")
     observation = _observation_fields(paths["observation"])
 
-    if int(task.get("schema_version", 0)) != 4 or \
+    if int(task.get("schema_version", 0)) != 5 or \
             task.get("evidence_type") != "mouse_effect_probe_b_task" or \
             task.get("status") != "PREPARED" or \
             task.get("dispatch_mode") != "physical_b" or \
@@ -670,7 +1354,8 @@ def _validate_primary_artifacts(
             task.get("run_role") != "primary" or \
             task.get("cross_run_holdout_prepare_authorized") is not False:
         raise ValueError("Physical B Primary task 身份或 holdout 边界非法")
-    if f0.get("evidence_type") != \
+    if f0.get("schema_version") != 2 or \
+            f0.get("evidence_type") != \
             "mouse_effect_probe_physical_b_primary_f0" or \
             f0.get("status") != "READY_FOR_PHYSICAL_B_PRIMARY_PREPARE" or \
             f0.get("physical_output_capability") is not False or \
@@ -732,7 +1417,8 @@ def _validate_primary_artifacts(
             result.get("state") != "completed" or \
             result.get("complete") is not True or \
             result.get("stop_reason") != "normal_completion" or \
-            int(result.get("consumed_sample_count", -1)) != 416 or \
+            int(result.get("consumed_sample_count", -1)) != \
+            _PRIMARY_SAMPLE_COUNT or \
             int(result.get("cumulative_requested_x_counts", 1)) != 0 or \
             int(result.get("cumulative_backend_completed_x_counts", 1)) != 0:
         raise ValueError("Physical B command report 不是完整净零 Primary")
@@ -763,8 +1449,10 @@ def _validate_primary_artifacts(
             launch_summary.get("run_role") != "primary" or \
             launch_summary.get("status") != "RECORDED_UNANALYZED" or \
             launch_summary.get("stop_reason") != "normal_completion" or \
-            int(launch_summary.get("command_event_count", -1)) != 416 or \
-            int(launch_summary.get("source_timestamp_matched_event_count", -1)) != 416 or \
+            int(launch_summary.get("command_event_count", -1)) != \
+            _PRIMARY_SAMPLE_COUNT or \
+            int(launch_summary.get("source_timestamp_matched_event_count", -1)) != \
+            _PRIMARY_SAMPLE_COUNT or \
             int(launch_summary.get("source_timestamp_unmatched_baseline_event_count", -1)) != 0:
         raise ValueError("Physical B launch summary 不是完整 Primary")
     if observation["manual_mouse_or_wasd_used"] or \
@@ -789,7 +1477,7 @@ def _validate_primary_artifacts(
 
 def _frame_index(manifest: dict) -> dict[int, tuple[int, dict]]:
     frames = manifest.get("frames")
-    if not isinstance(frames, list) or len(frames) < 416:
+    if not isinstance(frames, list) or len(frames) < _PRIMARY_SAMPLE_COUNT:
         raise ValueError("Physical B sidecar frames 容量不足")
     result: dict[int, tuple[int, dict]] = {}
     for index, frame in enumerate(frames):
@@ -816,8 +1504,9 @@ def _match_primary_events(
     events = loaded["report"].get("result", {}).get("events")
     samples = loaded["sequence"].get("samples")
     if not isinstance(events, list) or not isinstance(samples, list) or \
-            len(events) != 416 or len(samples) != 416:
-        raise ValueError("Physical B event/sample 容量必须为 416")
+            len(events) != _PRIMARY_SAMPLE_COUNT or \
+            len(samples) != _PRIMARY_SAMPLE_COUNT:
+        raise ValueError("Physical B event/sample 容量必须为 800")
     matched: list[tuple[dict, dict, dict, int]] = []
     previous_manifest_index = -1
     requested_x = 0
@@ -930,7 +1619,9 @@ def _measure_primary_witnesses(
     for block in offline_sequence["blocks"]:
         first = int(block["first_sample_index"])
         anchor_index = first - 1
-        indices = _block_output_indices(offline_sequence, block)
+        pre_guard_indices = _block_pre_guard_indices(block)
+        output_indices = _block_output_indices(offline_sequence, block)
+        indices = np.concatenate((pre_guard_indices, output_indices))
         anchor_bgr = frame_bgr(anchor_index)
         anchor_gray = cv2.cvtColor(
             anchor_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -955,6 +1646,9 @@ def _measure_primary_witnesses(
                 "pair_index": int(block["pair_index"]),
                 "role": str(block["role"]),
                 "polarity": str(block["polarity"]),
+                "analysis_region": "nuisance_pre_guard"
+                    if int(sample_index) < first else
+                    "response_or_post_guard",
                 "phase": str(offline_sequence["samples"][sample_index]["phase"]),
                 "identification_input_x_counts": int(
                     offline_sequence["samples"][sample_index]
@@ -1015,28 +1709,30 @@ def _write_new_text(path: pathlib.Path, content: str) -> None:
 def _build_f1(loaded: dict, selection: dict, geometry: dict) -> dict | None:
     if selection["primary_gate"]["ready_for_f1"] is not True:
         return None
-    selected = selection["candidates"][str(selection["selected_horizon"])]
-    deletion = selection["candidates"]["4"]
+    selected = selection["selected_model"]
+    confirmation = selection["selected_confirmation"]
     mapping_budget = float(
         loaded["f0"]["physical_b_primary_prepare_gate"]
         ["mapping_uncertainty_upper_px"])
     f1 = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "mouse_effect_probe_physical_b_f1",
-        "status": "F1_FROZEN_READY_FOR_HOLDOUT_REVIEW",
+        "status": selection["f1_kind"],
         "physical_output_capability": False,
         "cross_run_holdout_prepare_authorized": False,
         "production_aim_changed": False,
         "scope_id": loaded["task"]["scope_id"],
         "analysis_contract_semantic_sha256":
             selection["analysis_contract_semantic_sha256"],
-        "selected_horizon": selection["selected_horizon"],
-        "selected_model_by_witness": selected["estimation"],
-        "h4_deletion_control_by_witness": deletion["estimation"],
-        "primary_within_run_validation": selected["validation"],
-        "primary_h4_validation": deletion["validation"],
-        "primary_nuisance_only_validation":
-            selection["nuisance_only_validation"],
+        "core_delay_samples": _CORE_DELAY_SAMPLES,
+        "selected_tail_length": selection["selected_tail_length"],
+        "selected_model": selected,
+        "core_model": selection["core_model"],
+        "primary_confirmation": confirmation,
+        "primary_core_confirmation": selection["core_confirmation"],
+        "primary_nuisance_only_confirmation":
+            selection["nuisance_only_confirmation"],
+        "confirmation_used_for_refit": False,
         "geometry": geometry,
         "holdout": {
             "used_for_tuning": False,
@@ -1045,18 +1741,18 @@ def _build_f1(loaded: dict, selection: dict, geometry: dict) -> dict | None:
             "sequence_semantic_sha256":
                 loaded["f0"]["cross_run_holdout"]
                 ["sequence_semantic_sha256"],
-            "selected_must_beat_fixed_h4": True,
-            "selected_must_beat_nuisance_only": True,
+            "delay_and_tail_are_frozen": True,
+            "confirmation_used_for_tuning": False,
             "mapping_uncertainty_upper_px": mapping_budget,
             "max_worst_witness_rmse_px":
-                float(selected["validation"]["worst_witness_rmse_px"]) +
+                float(confirmation["worst_witness_rmse_px"]) +
                 mapping_budget,
             "max_worst_block_rmse_px":
-                float(selected["validation"]["worst_block_rmse_px"]) +
+                float(confirmation["worst_block_rmse_px"]) +
                 mapping_budget,
             "max_worst_witness_max_abs_error_px":
-                float(selected["validation"]
-                      ["worst_witness_max_abs_error_px"]) + mapping_budget,
+                float(confirmation[
+                    "worst_witness_max_abs_error_px"]) + mapping_budget,
             "holdout_used_for_tuning": False,
         },
         "bindings": {
@@ -1100,9 +1796,6 @@ def analyze_primary_run(
     selection = fit_primary_models(
         loaded["offline_sequence"],
         measurements,
-        candidate_horizons=loaded["f0"]["candidate_horizons"],
-        acceptance_eligible_horizons=
-            loaded["f0"]["acceptance_eligible_horizons"],
     )
     if not rows:
         raise ValueError("Physical B Primary 没有 whole-block 输出行")
@@ -1114,9 +1807,9 @@ def analyze_primary_run(
     csv_sha256 = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
     f1 = _build_f1(loaded, selection, geometry)
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "mouse_effect_probe_physical_b_primary_analysis",
-        "status": "F1_FROZEN" if f1 is not None else "PRIMARY_RED",
+        "status": selection["status"],
         "physical_output_capability": False,
         "production_aim_changed": False,
         "human_physical_acceptance": "NOT_INFERRED_BY_ANALYZER",
@@ -1127,7 +1820,11 @@ def analyze_primary_run(
         "analysis_contract": physical_b_analysis_contract(),
         "geometry": geometry,
         "source_timestamp_matched_event_count": len(matched),
-        "whole_block_output_row_count": len(rows),
+        "samples_csv_row_count": len(rows),
+        "nuisance_pre_guard_row_count":
+            6 * _GUARD_SAMPLE_COUNT,
+        "whole_block_output_row_count":
+            6 * _BLOCK_OUTPUT_SAMPLE_COUNT,
         "observation": loaded["observation"],
         "model_selection": selection,
         "f1": f1,
@@ -1164,7 +1861,7 @@ def analyze_primary_run(
 
 def _parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Physical B Primary 整块像素 FIR 选择并生成 F1")
+        description="Physical B Primary v2 core/tail deletion 分析并生成 F1")
     parser.add_argument("--primary-run", type=pathlib.Path, required=True)
     parser.add_argument("--f0", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
@@ -1197,12 +1894,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
         )
         print(
             "Physical B Primary analysis "
-            f"{result['status']}: selected_h="
-            f"{result['model_selection']['selected_horizon']}, "
+            f"{result['status']}: selected_tail="
+            f"{result['model_selection']['selected_tail_length']}, "
+            f"f1={None if result['f1'] is None else result['f1']['status']}, "
             f"matched={result['source_timestamp_matched_event_count']}, "
             f"output={options.output}"
         )
-        return 0 if result["status"] == "F1_FROZEN" else 1
+        return 0 if result["f1"] is not None else 1
     except (OSError, ValueError, KeyError, TypeError, cv2.error) as exception:
         print(f"Physical B Primary analysis 失败: {exception}", file=sys.stderr)
         return 1
