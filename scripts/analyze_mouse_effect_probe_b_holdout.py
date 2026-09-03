@@ -62,7 +62,7 @@ def canonical_semantic_sha256(value: dict, field: str) -> str:
 
 def holdout_evaluation_contract() -> dict:
     contract = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "mouse_effect_probe_physical_b_holdout_contract",
         "physical_output_capability": False,
         "production_aim_changed": False,
@@ -82,7 +82,11 @@ def holdout_evaluation_contract() -> dict:
         "missing_or_duplicate_rows_allowed": False,
         "different_run_uuid_required": True,
         "different_activation_epoch_required": True,
-        "different_source_clock_session_required": True,
+        "different_timing_observation_required": True,
+        "different_source_clock_session_required": False,
+        "same_source_clock_session_allowed": True,
+        "nonoverlapping_source_time_ranges_required": True,
+        "event_frame_source_clock_session_match_required": True,
         "automatic_green_is_human_acceptance": False,
     }
     contract["contract_semantic_sha256"] = canonical_semantic_sha256(
@@ -115,6 +119,122 @@ def _exact_hash(path: pathlib.Path, expected: str, description: str) -> str:
     if actual != expected.lower():
         raise ValueError(f"{description} 文件 SHA-256 不匹配")
     return actual
+
+
+def _source_timing_observation(
+        events: Sequence[dict],
+        description: str) -> dict:
+    if not events:
+        raise ValueError(f"{description} event 为空")
+    sessions: set[str] = set()
+    steady_times: list[int] = []
+    source_timestamps: list[int] = []
+    for event in events:
+        session = str(event.get("source_clock_session_id", ""))
+        steady_time = int(event.get("source_time_at_steady_ns", 0))
+        source_timestamp = int(event.get("source_timestamp", 0))
+        if not session or steady_time <= 0 or source_timestamp <= 0:
+            raise ValueError(f"{description} source timing 身份或时间非法")
+        sessions.add(session)
+        steady_times.append(steady_time)
+        source_timestamps.append(source_timestamp)
+    if len(sessions) != 1:
+        raise ValueError(f"{description} source clock session 不唯一")
+    if any(current <= previous for previous, current in zip(
+            steady_times, steady_times[1:])) or \
+            any(current <= previous for previous, current in zip(
+                source_timestamps, source_timestamps[1:])):
+        raise ValueError(f"{description} source timing 顺序不严格递增")
+    return {
+        "identity_basis": "run_uuid_activation_epoch_source_time_range",
+        "source_clock_session_id": next(iter(sessions)),
+        "source_time_at_steady_ns": {
+            "first": steady_times[0],
+            "last": steady_times[-1],
+        },
+        "source_timestamp": {
+            "first": source_timestamps[0],
+            "last": source_timestamps[-1],
+        },
+    }
+
+
+def validate_cross_run_timing_observation(
+        primary: dict,
+        holdout_run_uuid: str,
+        holdout_activation_epoch: int,
+        holdout_events: Sequence[dict]) -> dict:
+    primary_run_uuid = str(primary.get("run_uuid", ""))
+    primary_activation_epoch = int(primary.get("activation_epoch", 0))
+    holdout_run_uuid = str(holdout_run_uuid)
+    holdout_activation_epoch = int(holdout_activation_epoch)
+    primary_observation = primary.get("timing_observation")
+    if not primary_run_uuid or not holdout_run_uuid or \
+            primary_activation_epoch <= 0 or holdout_activation_epoch <= 0 or \
+            not isinstance(primary_observation, dict):
+        raise ValueError("cross-Run timing observation 身份不完整")
+    if primary_run_uuid == holdout_run_uuid or \
+            primary_activation_epoch == holdout_activation_epoch:
+        raise ValueError("holdout 未使用独立 Run UUID/activation")
+    if primary_observation.get("identity_basis") != \
+            "run_uuid_activation_epoch_source_time_range" or \
+            str(primary_observation.get("source_clock_session_id", "")) != \
+            str(primary.get("source_clock_session_id", "")):
+        raise ValueError("Primary timing observation 与 plan 身份不一致")
+
+    def read_range(name: str) -> tuple[int, int]:
+        value = primary_observation.get(name)
+        if not isinstance(value, dict):
+            raise ValueError(f"Primary timing observation 缺少 {name}")
+        first = int(value.get("first", 0))
+        last = int(value.get("last", 0))
+        if first <= 0 or last < first:
+            raise ValueError(f"Primary timing observation {name} 非法")
+        return first, last
+
+    primary_steady = read_range("source_time_at_steady_ns")
+    primary_timestamp = read_range("source_timestamp")
+    holdout_observation = _source_timing_observation(
+        holdout_events, "Holdout command report")
+    holdout_steady_value = holdout_observation["source_time_at_steady_ns"]
+    holdout_timestamp_value = holdout_observation["source_timestamp"]
+    holdout_steady = (
+        int(holdout_steady_value["first"]),
+        int(holdout_steady_value["last"]),
+    )
+    holdout_timestamp = (
+        int(holdout_timestamp_value["first"]),
+        int(holdout_timestamp_value["last"]),
+    )
+
+    def ranges_overlap(
+            primary_range: tuple[int, int],
+            holdout_range: tuple[int, int]) -> bool:
+        return not (
+            primary_range[1] < holdout_range[0] or
+            holdout_range[1] < primary_range[0]
+        )
+
+    steady_overlap = ranges_overlap(primary_steady, holdout_steady)
+    timestamp_overlap = ranges_overlap(primary_timestamp, holdout_timestamp)
+    if steady_overlap or timestamp_overlap:
+        raise ValueError("Primary/Holdout source timing observation 时间窗重叠")
+    different_session = (
+        str(primary_observation["source_clock_session_id"]) !=
+        str(holdout_observation["source_clock_session_id"])
+    )
+    return {
+        "identity_basis": "run_uuid_activation_epoch_source_time_range",
+        "different_run_uuid": True,
+        "different_activation_epoch": True,
+        "different_timing_observation": True,
+        "different_source_clock_session": different_session,
+        "same_source_clock_session_allowed": True,
+        "source_time_ranges_overlap": False,
+        "source_timestamp_ranges_overlap": False,
+        "primary": copy.deepcopy(primary_observation),
+        "holdout": holdout_observation,
+    }
 
 
 def _validate_f1(f1: dict) -> tuple[dict, dict]:
@@ -377,12 +497,9 @@ def build_holdout_plan(
             int(analysis.get("activation_epoch", -2)) or \
             not isinstance(events, list) or not events:
         raise ValueError("Primary command report 与 analysis 身份不一致")
-    sessions = {
-        str(event.get("source_clock_session_id", "")) for event in events
-    }
-    if len(sessions) != 1 or "" in sessions:
-        raise ValueError("Primary source clock session 不唯一")
-    primary_session = next(iter(sessions))
+    timing_observation = _source_timing_observation(
+        events, "Primary command report")
+    primary_session = timing_observation["source_clock_session_id"]
 
     if offline.get("schema_version") != 2 or \
             offline.get("evidence_type") != \
@@ -406,7 +523,7 @@ def build_holdout_plan(
     _validate_holdout_sequence(sequence)
 
     plan = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "mouse_effect_probe_physical_b_holdout_plan",
         "status": "READY_FOR_PHYSICAL_B_HOLDOUT_PREPARE",
         "physical_output_capability": False,
@@ -420,6 +537,7 @@ def build_holdout_plan(
             "activation_epoch": int(analysis["activation_epoch"]),
             "scope_id": str(analysis["scope_id"]),
             "source_clock_session_id": primary_session,
+            "timing_observation": timing_observation,
             "analysis_status": str(analysis["status"]),
             "analysis_semantic_sha256":
                 str(analysis["analysis_semantic_sha256"]),
@@ -461,7 +579,7 @@ def build_holdout_plan(
 
 
 def _validate_plan(plan: dict) -> None:
-    if plan.get("schema_version") != 1 or \
+    if plan.get("schema_version") != 2 or \
             plan.get("evidence_type") != \
             "mouse_effect_probe_physical_b_holdout_plan" or \
             plan.get("status") != "READY_FOR_PHYSICAL_B_HOLDOUT_PREPARE" or \
@@ -541,7 +659,7 @@ def _validate_holdout_artifacts(
     launch = _load_json(paths["launch_summary"], "holdout launch summary")
     observation = _observation_fields(paths["observation"])
     _validate_plan(plan)
-    if task.get("schema_version") != 6 or \
+    if task.get("schema_version") != 7 or \
             task.get("evidence_type") != "mouse_effect_probe_b_task" or \
             task.get("status") != "PREPARED" or \
             task.get("experiment") != "physical_b_cross_run_holdout" or \
@@ -561,6 +679,15 @@ def _validate_holdout_artifacts(
             int(task.get("activation_epoch", -1)) == \
             int(primary["activation_epoch"]):
         raise ValueError("holdout 未使用独立 Run UUID/activation 或 scope 漂移")
+    task_primary = task.get("primary", {})
+    task_holdout = task.get("holdout", {})
+    if task_primary.get("timing_observation") != \
+            primary.get("timing_observation") or \
+            task_primary.get("source_clock_session_id") != \
+            primary.get("source_clock_session_id") or \
+            task_holdout.get("independence_contract_semantic_sha256") != \
+            plan.get("contract", {}).get("contract_semantic_sha256"):
+        raise ValueError("holdout task/plan timing observation 合同漂移")
     files = task.get("files", {})
     for key, path_key in (
             ("sequence", "sequence"),
@@ -594,10 +721,14 @@ def _validate_holdout_artifacts(
             int(result.get("cumulative_backend_completed_x_counts", 1)) != 0 or \
             not isinstance(events, list) or len(events) != _HOLDOUT_SAMPLE_COUNT:
         raise ValueError("Physical B holdout command report 不完整或非净零")
-    sessions = {str(event.get("source_clock_session_id", "")) for event in events}
-    if len(sessions) != 1 or "" in sessions or \
-            next(iter(sessions)) == primary["source_clock_session_id"]:
-        raise ValueError("holdout source session 未独立于 Primary")
+    independence = validate_cross_run_timing_observation(
+        primary,
+        str(task["run_uuid"]),
+        int(task["activation_epoch"]),
+        events,
+    )
+    holdout_session = str(
+        independence["holdout"]["source_clock_session_id"])
     if ledger.get("run_uuid") != task.get("run_uuid") or \
             ledger.get("probe_stop_reason") != "normal_completion" or \
             ledger.get("recording_failed") is not False or \
@@ -614,7 +745,8 @@ def _validate_holdout_artifacts(
             manifest.get("source_binding", {}).get("sha256") != \
             files.get("probe_binding", {}).get("sha256"):
         raise ValueError("Physical B holdout sidecar manifest 非法")
-    if launch.get("evidence_type") != "mouse_effect_probe_b_launch" or \
+    if launch.get("schema_version") != 5 or \
+            launch.get("evidence_type") != "mouse_effect_probe_b_launch" or \
             launch.get("run_uuid") != task.get("run_uuid") or \
             launch.get("run_role") != "cross_run_holdout" or \
             launch.get("status") != "RECORDED_UNANALYZED" or \
@@ -622,7 +754,8 @@ def _validate_holdout_artifacts(
             int(launch.get("command_event_count", -1)) != \
             _HOLDOUT_SAMPLE_COUNT or \
             int(launch.get("source_timestamp_matched_event_count", -1)) != \
-            _HOLDOUT_SAMPLE_COUNT:
+            _HOLDOUT_SAMPLE_COUNT or \
+            launch.get("cross_run_independence") != independence:
         raise ValueError("Physical B holdout launch summary 不完整")
     if observation["manual_mouse_or_wasd_used"] or \
             observation["occlusion_or_scene_cut_reported"] or \
@@ -640,7 +773,8 @@ def _validate_holdout_artifacts(
         "manifest": manifest,
         "launch_summary": launch,
         "observation": observation,
-        "source_clock_session_id": next(iter(sessions)),
+        "source_clock_session_id": holdout_session,
+        "cross_run_independence": independence,
     }
 
 
@@ -649,6 +783,7 @@ def _frame_index(manifest: dict) -> dict[int, tuple[int, dict]]:
     if not isinstance(frames, list) or len(frames) < _HOLDOUT_SAMPLE_COUNT:
         raise ValueError("Physical B holdout sidecar frames 容量不足")
     result: dict[int, tuple[int, dict]] = {}
+    sessions: set[str] = set()
     for index, frame in enumerate(frames):
         if not isinstance(frame, dict) or \
                 int(frame.get("index", -1)) != index or \
@@ -661,9 +796,13 @@ def _frame_index(manifest: dict) -> dict[int, tuple[int, dict]]:
                 int(frame.get("transport_invalid_packets", -1)) != 0:
             raise ValueError("Physical B holdout sidecar timing/drop 合同非法")
         timestamp = int(frame.get("source_timestamp", 0))
-        if timestamp <= 0 or timestamp in result:
-            raise ValueError("Physical B holdout sidecar timestamp 非正或重复")
+        session = str(frame.get("source_clock_session_id", ""))
+        if timestamp <= 0 or timestamp in result or not session:
+            raise ValueError("Physical B holdout sidecar timestamp/session 非法或重复")
+        sessions.add(session)
         result[timestamp] = (index, frame)
+    if len(sessions) != 1:
+        raise ValueError("Physical B holdout sidecar source session 不唯一")
     return result
 
 
@@ -749,7 +888,7 @@ def analyze_holdout_run(
     writer.writerows(rows)
     csv_content = csv_buffer.getvalue()
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "mouse_effect_probe_physical_b_holdout_analysis",
         "status": evaluation["status"],
         "physical_output_capability": False,
@@ -762,6 +901,7 @@ def analyze_holdout_run(
         "profile": _HOLDOUT_PROFILE,
         "run_role": "cross_run_holdout",
         "source_clock_session_id": loaded["source_clock_session_id"],
+        "cross_run_independence": loaded["cross_run_independence"],
         "primary": loaded["plan"]["primary"],
         "contract": holdout_evaluation_contract(),
         "geometry": geometry,

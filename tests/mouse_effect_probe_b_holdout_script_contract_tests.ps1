@@ -41,7 +41,7 @@ foreach ($required in @(
 }
 foreach ($required in @(
         '$isBHoldoutTask',
-        'schema_version -eq 6',
+        'schema_version -eq 7',
         'physical_b_prbs_holdout',
         'cross_run_holdout',
         'XEN_MOUSE_EFFECT_PROBE_B_HOLDOUT_SENDS_REAL_KMBOX_INPUT',
@@ -49,10 +49,16 @@ foreach ($required in @(
         'feedback_mask -ne 51',
         'phase -ne 21',
         'samples.Count -ne 288',
-        'different source clock session')) {
+        'same stable source clock session is allowed',
+        'source_time_ranges_overlap',
+        'source_timestamp_ranges_overlap',
+        'event/frame source session')) {
     if (-not $launch.Contains($required)) {
         throw "Holdout Launch is missing contract text: $required"
     }
+}
+if ($launch.Contains('different source clock session')) {
+    throw 'Holdout Launch must not require a different source-clock server epoch.'
 }
 $holdoutFileEntry = $launch.IndexOf(
     '$task.files.holdout_analyzer; name = "holdout analyzer"',

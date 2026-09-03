@@ -124,8 +124,16 @@ def main() -> int:
         "run_uuid": f1["bindings"]["run_uuid"],
         "activation_epoch": f1["bindings"]["activation_epoch"],
         "result": {"events": [
-            {"source_clock_session_id": "primary-source-session"},
-            {"source_clock_session_id": "primary-source-session"},
+            {
+                "source_clock_session_id": "primary-source-session",
+                "source_time_at_steady_ns": 1000,
+                "source_timestamp": 10000,
+            },
+            {
+                "source_clock_session_id": "primary-source-session",
+                "source_time_at_steady_ns": 2000,
+                "source_timestamp": 20000,
+            },
         ]},
     }
     report_path = inputs / "command-report.json"
@@ -195,10 +203,12 @@ def main() -> int:
     task = json.loads((run / "task.json").read_text(encoding="utf-8-sig"))
     plan = json.loads((run / "holdout-plan.json").read_text(encoding="utf-8-sig"))
     generated = json.loads((run / "sequence.json").read_text(encoding="utf-8-sig"))
+    binding = json.loads((run / "probe-binding.json").read_text(
+        encoding="utf-8-sig"))
     summary = json.loads((run / "prepare-summary.json").read_text(
         encoding="utf-8-sig"))
     if not (
-            task["schema_version"] == 6 and
+            task["schema_version"] == 7 and
             task["status"] == "PREPARED" and
             task["profile"] == "physical_b_prbs_holdout" and
             task["run_role"] == "cross_run_holdout" and
@@ -210,9 +220,23 @@ def main() -> int:
             task["expected_nonzero_transition_count"] == 68 and
             task["run_uuid"] != plan["primary"]["run_uuid"] and
             task["activation_epoch"] != plan["primary"]["activation_epoch"] and
+            plan["schema_version"] == 2 and
             plan["status"] == "READY_FOR_PHYSICAL_B_HOLDOUT_PREPARE" and
             plan["primary"]["source_clock_session_id"] ==
             "primary-source-session" and
+            plan["primary"]["timing_observation"] == {
+                "identity_basis":
+                    "run_uuid_activation_epoch_source_time_range",
+                "source_clock_session_id": "primary-source-session",
+                "source_time_at_steady_ns": {"first": 1000, "last": 2000},
+                "source_timestamp": {"first": 10000, "last": 20000},
+            } and
+            task["primary"]["timing_observation"] ==
+            plan["primary"]["timing_observation"] and
+            binding["primary_timing_observation"] ==
+            plan["primary"]["timing_observation"] and
+            task["holdout"]["independence_contract_semantic_sha256"] ==
+            plan["contract"]["contract_semantic_sha256"] and
             task["files"]["physical_b_analyzer"]["sha256"] ==
             plan["bindings"]["primary_analyzer_file_sha256"] and
             task["files"]["primary_command_report"]["sha256"] ==
@@ -221,6 +245,8 @@ def main() -> int:
             len(generated["samples"]) == 288 and
             len(generated["blocks"]) == 2 and
             summary["status"] == "PREPARED_NOT_LAUNCHED" and
+            summary["independence_contract_semantic_sha256"] ==
+            plan["contract"]["contract_semantic_sha256"] and
             summary["physical_launch_executed"] is False):
         raise AssertionError("holdout task/plan/sequence/summary 合同不闭合")
     for name, identity in task["files"].items():

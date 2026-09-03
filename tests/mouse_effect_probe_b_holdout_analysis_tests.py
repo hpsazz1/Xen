@@ -167,7 +167,12 @@ def test_contract_and_frozen_model_green_red() -> None:
     expect(contract["holdout_used_for_tuning"] is False and
            contract["predictions"] == ["input_forced", "output_free_run"] and
            contract["output_feedback_used"] is False and
-           contract["threshold_source"] == "frozen_f1_holdout_budget",
+           contract["threshold_source"] == "frozen_f1_holdout_budget" and
+           contract["different_source_clock_session_required"] is False and
+           contract["same_source_clock_session_allowed"] is True and
+           contract["different_timing_observation_required"] is True and
+           contract["nonoverlapping_source_time_ranges_required"] is True and
+           contract["event_frame_source_clock_session_match_required"] is True,
            "holdout 评估必须同时冻结 no-tuning、两种预测与 F1 预算")
     sequence = frozen_holdout_sequence()
     f1 = frozen_f1()
@@ -192,7 +197,7 @@ def test_contract_and_frozen_model_green_red() -> None:
            "超预算 holdout 必须判红且不得改变冻结模型")
 
 
-def test_plan_binds_primary_f1_recurrence_and_source_session() -> None:
+def test_plan_binds_primary_f1_recurrence_and_timing_observation() -> None:
     sequence = frozen_holdout_sequence()
     f1 = frozen_f1()
     with tempfile.TemporaryDirectory(prefix="xen-probe-b-holdout-plan-") as text:
@@ -201,8 +206,16 @@ def test_plan_binds_primary_f1_recurrence_and_source_session() -> None:
             "run_uuid": f1["bindings"]["run_uuid"],
             "activation_epoch": f1["bindings"]["activation_epoch"],
             "result": {"events": [
-                {"source_clock_session_id": "primary-source-session"},
-                {"source_clock_session_id": "primary-source-session"},
+                {
+                    "source_clock_session_id": "primary-source-session",
+                    "source_time_at_steady_ns": 1000,
+                    "source_timestamp": 10000,
+                },
+                {
+                    "source_clock_session_id": "primary-source-session",
+                    "source_time_at_steady_ns": 2000,
+                    "source_timestamp": 20000,
+                },
             ]},
         }
         report_path = root / "command-report.json"
@@ -257,6 +270,13 @@ def test_plan_binds_primary_f1_recurrence_and_source_session() -> None:
         expect(plan["status"] == "READY_FOR_PHYSICAL_B_HOLDOUT_PREPARE" and
                plan["primary"]["source_clock_session_id"] ==
                "primary-source-session" and
+               plan["primary"]["timing_observation"] == {
+                   "identity_basis":
+                       "run_uuid_activation_epoch_source_time_range",
+                   "source_clock_session_id": "primary-source-session",
+                   "source_time_at_steady_ns": {"first": 1000, "last": 2000},
+                   "source_timestamp": {"first": 10000, "last": 20000},
+               } and
                plan["primary"]["run_uuid"] == f1["bindings"]["run_uuid"] and
                plan["sequence"]["sequence_semantic_sha256"] ==
                sequence["sequence_semantic_sha256"] and
@@ -272,9 +292,137 @@ def test_plan_binds_primary_f1_recurrence_and_source_session() -> None:
         expect(rejected, "Primary analysis 文件身份漂移必须 fail closed")
 
 
+def test_cross_run_timing_observation_allows_same_clock_epoch() -> None:
+    primary = {
+        "run_uuid": "11111111-1111-4111-8111-111111111111",
+        "activation_epoch": 100,
+        "source_clock_session_id": "stable-source-clock-epoch",
+        "timing_observation": {
+            "identity_basis":
+                "run_uuid_activation_epoch_source_time_range",
+            "source_clock_session_id": "stable-source-clock-epoch",
+            "source_time_at_steady_ns": {"first": 1000, "last": 2000},
+            "source_timestamp": {"first": 10000, "last": 20000},
+        },
+    }
+    holdout_events = [
+        {
+            "source_clock_session_id": "stable-source-clock-epoch",
+            "source_time_at_steady_ns": 3000,
+            "source_timestamp": 30000,
+        },
+        {
+            "source_clock_session_id": "stable-source-clock-epoch",
+            "source_time_at_steady_ns": 4000,
+            "source_timestamp": 40000,
+        },
+    ]
+    audit = HOLDOUT.validate_cross_run_timing_observation(
+        primary,
+        "22222222-2222-4222-8222-222222222222",
+        200,
+        holdout_events,
+    )
+    expect(audit["different_run_uuid"] is True and
+           audit["different_activation_epoch"] is True and
+           audit["different_timing_observation"] is True and
+           audit["different_source_clock_session"] is False and
+           audit["same_source_clock_session_allowed"] is True and
+           audit["source_time_ranges_overlap"] is False and
+           audit["source_timestamp_ranges_overlap"] is False,
+           "稳定 clock epoch 不得被误作复用的 capture/timing observation")
+
+    deletion_cases = []
+    deletion_cases.append((
+        "复用 Run UUID",
+        primary["run_uuid"],
+        200,
+        holdout_events,
+    ))
+    deletion_cases.append((
+        "复用 activation",
+        "22222222-2222-4222-8222-222222222222",
+        primary["activation_epoch"],
+        holdout_events,
+    ))
+    steady_overlap = copy.deepcopy(holdout_events)
+    steady_overlap[0]["source_time_at_steady_ns"] = 1500
+    deletion_cases.append((
+        "mapped steady 时间窗重叠",
+        "22222222-2222-4222-8222-222222222222",
+        200,
+        steady_overlap,
+    ))
+    source_overlap = copy.deepcopy(holdout_events)
+    source_overlap[0]["source_timestamp"] = 15000
+    deletion_cases.append((
+        "source timestamp 时间窗重叠",
+        "22222222-2222-4222-8222-222222222222",
+        200,
+        source_overlap,
+    ))
+    mixed_session = copy.deepcopy(holdout_events)
+    mixed_session[1]["source_clock_session_id"] = "other-source-clock-epoch"
+    deletion_cases.append((
+        "Run 内混杂 clock epoch",
+        "22222222-2222-4222-8222-222222222222",
+        200,
+        mixed_session,
+    ))
+    empty_session = copy.deepcopy(holdout_events)
+    empty_session[0]["source_clock_session_id"] = ""
+    deletion_cases.append((
+        "空 clock epoch",
+        "22222222-2222-4222-8222-222222222222",
+        200,
+        empty_session,
+    ))
+    for description, run_uuid, activation_epoch, events in deletion_cases:
+        rejected = False
+        try:
+            HOLDOUT.validate_cross_run_timing_observation(
+                primary, run_uuid, activation_epoch, events)
+        except ValueError:
+            rejected = True
+        expect(rejected, f"{description} 必须 fail closed")
+
+
+def test_sidecar_frame_sessions_must_be_unique_and_nonempty() -> None:
+    frames = [
+        {
+            "index": index,
+            "source_timestamp_valid": True,
+            "source_time_timing_valid": True,
+            "source_clock_status": "VALID",
+            "source_time_basis": "NDI_SDK_SUBMISSION",
+            "source_dropped_frames": 0,
+            "transport_dropped_frames": 0,
+            "transport_invalid_packets": 0,
+            "source_timestamp": 10000 + index,
+            "source_clock_session_id": "stable-source-clock-epoch",
+        }
+        for index in range(288)
+    ]
+    expect(len(HOLDOUT._frame_index({"frames": frames})) == 288,
+           "单一非空 sidecar clock epoch 应通过")
+    for description, replacement in (
+            ("混杂 sidecar clock epoch", "other-source-clock-epoch"),
+            ("空 sidecar clock epoch", "")):
+        invalid = copy.deepcopy(frames)
+        invalid[-1]["source_clock_session_id"] = replacement
+        rejected = False
+        try:
+            HOLDOUT._frame_index({"frames": invalid})
+        except ValueError:
+            rejected = True
+        expect(rejected, f"{description} 必须 fail closed")
+
+
 def main() -> int:
     test_contract_and_frozen_model_green_red()
-    test_plan_binds_primary_f1_recurrence_and_source_session()
+    test_plan_binds_primary_f1_recurrence_and_timing_observation()
+    test_cross_run_timing_observation_allows_same_clock_epoch()
+    test_sidecar_frame_sessions_must_be_unique_and_nonempty()
     print("Physical B holdout analysis tests passed.")
     return 0
 

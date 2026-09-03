@@ -246,7 +246,7 @@ $isBPrimaryTask =
     [string]$task.evidence_type -eq "mouse_effect_probe_b_task" -and
     [string]$task.profile -eq "physical_b_prbs_primary"
 $isBHoldoutTask =
-    [int]$task.schema_version -eq 6 -and
+    [int]$task.schema_version -eq 7 -and
     [string]$task.evidence_type -eq "mouse_effect_probe_b_task" -and
     [string]$task.profile -eq "physical_b_prbs_holdout"
 $isBTask = $isBPrimaryTask -or $isBHoldoutTask
@@ -340,6 +340,8 @@ if ($isBTask) {
         -not [bool]$task.holdout.input_forced_required -or
         -not [bool]$task.holdout.output_free_run_required -or
         -not [bool]$task.holdout.delay_and_tail_are_frozen -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$task.holdout.independence_contract_semantic_sha256) -or
         [uint64]$task.holdout.recurrence_feedback_mask -ne 51 -or
         [uint64]$task.holdout.recurrence_phase -ne 21 -or
         [string]$task.run_uuid -eq [string]$task.primary.run_uuid -or
@@ -426,7 +428,7 @@ if ($isBHoldoutTask) {
     $holdoutPlan = Get-Content -LiteralPath `
         ([string]$task.files.holdout_plan.path) -Raw -Encoding utf8 |
         ConvertFrom-Json
-    if ([int]$holdoutPlan.schema_version -ne 1 -or
+    if ([int]$holdoutPlan.schema_version -ne 2 -or
         [string]$holdoutPlan.evidence_type -ne
             "mouse_effect_probe_physical_b_holdout_plan" -or
         [string]$holdoutPlan.status -ne
@@ -435,6 +437,14 @@ if ($isBHoldoutTask) {
         [bool]$holdoutPlan.physical_b_launch_authorized -or
         [bool]$holdoutPlan.production_aim_changed -or
         [bool]$holdoutPlan.holdout_used_for_tuning -or
+        [int]$holdoutPlan.contract.schema_version -ne 2 -or
+        [bool]$holdoutPlan.contract.different_source_clock_session_required -or
+        -not [bool]$holdoutPlan.contract.same_source_clock_session_allowed -or
+        -not [bool]$holdoutPlan.contract.different_timing_observation_required -or
+        -not [bool]$holdoutPlan.contract.nonoverlapping_source_time_ranges_required -or
+        -not [bool]$holdoutPlan.contract.event_frame_source_clock_session_match_required -or
+        [string]$holdoutPlan.contract.contract_semantic_sha256 -ne
+            [string]$task.holdout.independence_contract_semantic_sha256 -or
         [string]$holdoutPlan.bindings.holdout_analyzer_file_sha256 -ne
             [string]$task.files.holdout_analyzer.sha256 -or
         [string]$holdoutPlan.bindings.primary_analyzer_file_sha256 -ne
@@ -451,6 +461,20 @@ if ($isBHoldoutTask) {
             [uint64]$task.primary.activation_epoch -or
         [string]$holdoutPlan.primary.source_clock_session_id -ne
             [string]$task.primary.source_clock_session_id -or
+        [string]$holdoutPlan.primary.timing_observation.identity_basis -ne
+            "run_uuid_activation_epoch_source_time_range" -or
+        [string]$holdoutPlan.primary.timing_observation.identity_basis -ne
+            [string]$task.primary.timing_observation.identity_basis -or
+        [string]$holdoutPlan.primary.timing_observation.source_clock_session_id -ne
+            [string]$task.primary.timing_observation.source_clock_session_id -or
+        [int64]$holdoutPlan.primary.timing_observation.source_time_at_steady_ns.first -ne
+            [int64]$task.primary.timing_observation.source_time_at_steady_ns.first -or
+        [int64]$holdoutPlan.primary.timing_observation.source_time_at_steady_ns.last -ne
+            [int64]$task.primary.timing_observation.source_time_at_steady_ns.last -or
+        [int64]$holdoutPlan.primary.timing_observation.source_timestamp.first -ne
+            [int64]$task.primary.timing_observation.source_timestamp.first -or
+        [int64]$holdoutPlan.primary.timing_observation.source_timestamp.last -ne
+            [int64]$task.primary.timing_observation.source_timestamp.last -or
         [string]$holdoutPlan.primary.f1_semantic_sha256 -ne
             [string]$task.primary.f1_semantic_sha256 -or
         [string]$holdoutPlan.sequence.profile -ne
@@ -866,6 +890,9 @@ try {
     }
 
     $frameTimestamps = [Collections.Generic.HashSet[int64]]::new()
+    $frameSourceSessions = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal)
+    $frameSessionByTimestamp = @{}
     $pngVerified = 0
     foreach ($frame in $frames) {
         if (-not [bool]$frame.source_timestamp_valid -or
@@ -876,12 +903,23 @@ try {
             [uint64]$frame.transport_invalid_packets -ne 0) {
             throw "Physical A sidecar 存在无效 source timing/drop frame"
         }
-        [void]$frameTimestamps.Add([int64]$frame.source_timestamp)
+        $frameTimestamp = [int64]$frame.source_timestamp
+        $frameSession = [string]$frame.source_clock_session_id
+        if ($frameTimestamp -le 0 -or
+            -not $frameTimestamps.Add($frameTimestamp) -or
+            [string]::IsNullOrWhiteSpace($frameSession)) {
+            throw "Physical A sidecar source timestamp/session 非法或重复"
+        }
+        [void]$frameSourceSessions.Add($frameSession)
+        $frameSessionByTimestamp[$frameTimestamp] = $frameSession
         $pngPath = Join-Path $pixelOutput ([string]$frame.file)
         if ((Get-FileSha256 $pngPath) -ne [string]$frame.png_sha256) {
             throw "Physical A sidecar PNG SHA 不匹配：$pngPath"
         }
         $pngVerified++
+    }
+    if ($isBHoldoutTask -and $frameSourceSessions.Count -ne 1) {
+        throw "Physical B holdout sidecar source session 不唯一"
     }
 
     $matchedEvents = 0
@@ -898,6 +936,13 @@ try {
         [uint64]0
     }
     $completedPulses = 0
+    $crossRunIndependence = $null
+    $holdoutSourceSessions = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal)
+    $holdoutFirstSteadyNs = [int64]0
+    $holdoutLastSteadyNs = [int64]0
+    $holdoutFirstSourceTimestamp = [int64]0
+    $holdoutLastSourceTimestamp = [int64]0
     foreach ($event in $events) {
         $sampleIndex = [int]$event.sample_index
         if ($sampleIndex -lt 0 -or $sampleIndex -ge $samples.Count) {
@@ -923,6 +968,30 @@ try {
         } elseif ([bool]$coverage.unmatched_baseline_allowed) {
             $unmatchedBaselineEvents++
         }
+        if ($isBHoldoutTask) {
+            $eventSession = [string]$event.source_clock_session_id
+            $eventSteadyNs = [int64]$event.source_time_at_steady_ns
+            $eventSourceTimestamp = [int64]$event.source_timestamp
+            if ([string]::IsNullOrWhiteSpace($eventSession) -or
+                $eventSteadyNs -le 0 -or $eventSourceTimestamp -le 0 -or
+                ($holdoutLastSteadyNs -gt 0 -and
+                    $eventSteadyNs -le $holdoutLastSteadyNs) -or
+                ($holdoutLastSourceTimestamp -gt 0 -and
+                    $eventSourceTimestamp -le $holdoutLastSourceTimestamp) -or
+                -not $frameSessionByTimestamp.ContainsKey(
+                    $eventSourceTimestamp) -or
+                [string]$frameSessionByTimestamp[$eventSourceTimestamp] -ne
+                    $eventSession) {
+                throw "Physical B holdout event/frame source session 或时间顺序无效"
+            }
+            if ($holdoutFirstSteadyNs -eq 0) {
+                $holdoutFirstSteadyNs = $eventSteadyNs
+                $holdoutFirstSourceTimestamp = $eventSourceTimestamp
+            }
+            $holdoutLastSteadyNs = $eventSteadyNs
+            $holdoutLastSourceTimestamp = $eventSourceTimestamp
+            [void]$holdoutSourceSessions.Add($eventSession)
+        }
         if ([int]$sample.dx_counts -eq 0) {
             if ([bool]$event.dispatch_attempted -or
                 [int]$event.requested_dx_counts -ne 0 -or
@@ -944,15 +1013,69 @@ try {
         throw "Physical A baseline 的未观测零事件超过预注册上限"
     }
     if ($isBHoldoutTask) {
-        # different source clock session 是 cross-Run holdout 的硬边界。
-        $holdoutSourceSessions = @($events |
-            ForEach-Object { [string]$_.source_clock_session_id } |
-            Sort-Object -Unique)
+        # same stable source clock session is allowed；它是 server epoch，
+        # cross-Run 独立性由 Run/activation 与两种 source 时间窗共同证明。
         if ($holdoutSourceSessions.Count -ne 1 -or
-            [string]::IsNullOrWhiteSpace($holdoutSourceSessions[0]) -or
-            $holdoutSourceSessions[0] -eq
-                [string]$task.primary.source_clock_session_id) {
-            throw "Physical B holdout different source clock session 合同无效"
+            $frameSourceSessions.Count -ne 1) {
+            throw "Physical B holdout Run 内 source session 不唯一"
+        }
+        $holdoutSourceSession = @($holdoutSourceSessions)[0]
+        if ($holdoutSourceSession -ne @($frameSourceSessions)[0]) {
+            throw "Physical B holdout event/frame source session 不一致"
+        }
+        $primaryObservation = $task.primary.timing_observation
+        $primaryFirstSteadyNs =
+            [int64]$primaryObservation.source_time_at_steady_ns.first
+        $primaryLastSteadyNs =
+            [int64]$primaryObservation.source_time_at_steady_ns.last
+        $primaryFirstSourceTimestamp =
+            [int64]$primaryObservation.source_timestamp.first
+        $primaryLastSourceTimestamp =
+            [int64]$primaryObservation.source_timestamp.last
+        if ([string]$primaryObservation.identity_basis -ne
+                "run_uuid_activation_epoch_source_time_range" -or
+            [string]$primaryObservation.source_clock_session_id -ne
+                [string]$task.primary.source_clock_session_id -or
+            $primaryFirstSteadyNs -le 0 -or
+            $primaryLastSteadyNs -lt $primaryFirstSteadyNs -or
+            $primaryFirstSourceTimestamp -le 0 -or
+            $primaryLastSourceTimestamp -lt $primaryFirstSourceTimestamp) {
+            throw "Physical B holdout Primary timing observation 无效"
+        }
+        $sourceTimeRangesOverlap = -not (
+            $primaryLastSteadyNs -lt $holdoutFirstSteadyNs -or
+            $holdoutLastSteadyNs -lt $primaryFirstSteadyNs)
+        $sourceTimestampRangesOverlap = -not (
+            $primaryLastSourceTimestamp -lt $holdoutFirstSourceTimestamp -or
+            $holdoutLastSourceTimestamp -lt $primaryFirstSourceTimestamp)
+        if ($sourceTimeRangesOverlap -or $sourceTimestampRangesOverlap) {
+            throw "Physical B holdout source timing observation 时间窗重叠"
+        }
+        $holdoutObservation = [ordered]@{
+            identity_basis = "run_uuid_activation_epoch_source_time_range"
+            source_clock_session_id = $holdoutSourceSession
+            source_time_at_steady_ns = [ordered]@{
+                first = $holdoutFirstSteadyNs
+                last = $holdoutLastSteadyNs
+            }
+            source_timestamp = [ordered]@{
+                first = $holdoutFirstSourceTimestamp
+                last = $holdoutLastSourceTimestamp
+            }
+        }
+        $crossRunIndependence = [ordered]@{
+            identity_basis = "run_uuid_activation_epoch_source_time_range"
+            different_run_uuid = $true
+            different_activation_epoch = $true
+            different_timing_observation = $true
+            different_source_clock_session =
+                $holdoutSourceSession -ne
+                    [string]$task.primary.source_clock_session_id
+            same_source_clock_session_allowed = $true
+            source_time_ranges_overlap = $false
+            source_timestamp_ranges_overlap = $false
+            primary = $primaryObservation
+            holdout = $holdoutObservation
         }
     }
 
@@ -975,7 +1098,9 @@ try {
         [int64]$report.result.cumulative_requested_x_counts -eq 0 -and
         [int64]$report.result.cumulative_backend_completed_x_counts -eq 0
     $summary = [ordered]@{
-        schema_version = if ($isBTask) {
+        schema_version = if ($isBHoldoutTask) {
+            5
+        } elseif ($isBTask) {
             4
         } elseif ($isA2S1Task) {
             3
@@ -1044,6 +1169,9 @@ try {
     if ($isA2Task -or $isA2S1Task -or $isBTask) {
         $summary.run_role = [string]$task.run_role
         $summary.scope_id = [string]$task.scope_id
+    }
+    if ($isBHoldoutTask) {
+        $summary.cross_run_independence = $crossRunIndependence
     }
     Write-NewUtf8Json $launchSummaryPath $summary
     if (-not $executionComplete) {

@@ -321,7 +321,7 @@ try {
     }
     $plan = Get-Content -LiteralPath $planPath -Raw -Encoding utf8 |
         ConvertFrom-Json
-    if ([int]$plan.schema_version -ne 1 -or
+    if ([int]$plan.schema_version -ne 2 -or
         [string]$plan.evidence_type -ne
             "mouse_effect_probe_physical_b_holdout_plan" -or
         [string]$plan.status -ne
@@ -330,6 +330,12 @@ try {
         [bool]$plan.physical_b_launch_authorized -or
         [bool]$plan.production_aim_changed -or
         [bool]$plan.holdout_used_for_tuning -or
+        [int]$plan.contract.schema_version -ne 2 -or
+        [bool]$plan.contract.different_source_clock_session_required -or
+        -not [bool]$plan.contract.same_source_clock_session_allowed -or
+        -not [bool]$plan.contract.different_timing_observation_required -or
+        -not [bool]$plan.contract.nonoverlapping_source_time_ranges_required -or
+        -not [bool]$plan.contract.event_frame_source_clock_session_match_required -or
         [string]$plan.bindings.primary_analysis_file_sha256 -ne
             [string]$primaryCopy.sha256 -or
         [string]$plan.bindings.primary_command_report_file_sha256 -ne
@@ -451,6 +457,9 @@ try {
         primary_activation_epoch = [uint64]$plan.primary.activation_epoch
         primary_source_clock_session_id =
             [string]$plan.primary.source_clock_session_id
+        primary_timing_observation = $plan.primary.timing_observation
+        holdout_independence_contract_semantic_sha256 =
+            [string]$plan.contract.contract_semantic_sha256
         primary_analysis = $primaryCopy
         capture_source_name = $ndiSource
         config = $configCopy
@@ -472,7 +481,7 @@ try {
 
     $taskPath = Join-Path $stagingDirectory "task.json"
     $task = [ordered]@{
-        schema_version = 6
+        schema_version = 7
         evidence_type = "mouse_effect_probe_b_task"
         status = "PREPARED"
         experiment = "physical_b_cross_run_holdout"
@@ -518,6 +527,7 @@ try {
             activation_epoch = [uint64]$plan.primary.activation_epoch
             source_clock_session_id =
                 [string]$plan.primary.source_clock_session_id
+            timing_observation = $plan.primary.timing_observation
             analysis_semantic_sha256 =
                 [string]$plan.primary.analysis_semantic_sha256
             f1_semantic_sha256 = [string]$plan.primary.f1_semantic_sha256
@@ -525,6 +535,8 @@ try {
         holdout = [ordered]@{
             plan_semantic_sha256 =
                 [string]$plan.holdout_plan_semantic_sha256
+            independence_contract_semantic_sha256 =
+                [string]$plan.contract.contract_semantic_sha256
             recurrence_feedback_mask = [uint64]$request.lfsr.feedback_mask
             recurrence_phase = [uint64]$request.lfsr.phase
             input_forced_required = $true
@@ -637,6 +649,8 @@ try {
         f1_semantic_sha256 = [string]$plan.primary.f1_semantic_sha256
         holdout_plan_semantic_sha256 =
             [string]$plan.holdout_plan_semantic_sha256
+        independence_contract_semantic_sha256 =
+            [string]$plan.contract.contract_semantic_sha256
         sequence_sha256 = [string]$sequence.sequence_sha256
         sequence_sample_count = [uint64]$samples.Count
         expected_nonzero_transition_count = [uint64]$transitions.Count
