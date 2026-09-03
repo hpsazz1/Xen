@@ -12,9 +12,12 @@ $physicalAConfirmation =
     "XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT"
 $physicalBConfirmation =
     "XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT"
+$physicalBHoldoutConfirmation =
+    "XEN_MOUSE_EFFECT_PROBE_B_HOLDOUT_SENDS_REAL_KMBOX_INPUT"
 if (-not $AllowPhysicalOutput.IsPresent -or
     $PhysicalOutputConfirmation -notin @(
-        $physicalAConfirmation, $physicalBConfirmation)) {
+        $physicalAConfirmation, $physicalBConfirmation,
+        $physicalBHoldoutConfirmation)) {
     throw "Physical probe 会发送真实 KMBOX 输入，必须同时提供物理输出开关和与 task 匹配的固定确认令牌。"
 }
 $confirmation = $PhysicalOutputConfirmation
@@ -238,12 +241,19 @@ $isA2S1Task =
     [int]$task.schema_version -eq 3 -and
     [string]$task.evidence_type -eq "mouse_effect_probe_a2_s1_task" -and
     [string]$task.profile -like "dependency_calibration_a2_s1_*"
-$isBTask =
+$isBPrimaryTask =
     [int]$task.schema_version -eq 5 -and
     [string]$task.evidence_type -eq "mouse_effect_probe_b_task" -and
     [string]$task.profile -eq "physical_b_prbs_primary"
+$isBHoldoutTask =
+    [int]$task.schema_version -eq 6 -and
+    [string]$task.evidence_type -eq "mouse_effect_probe_b_task" -and
+    [string]$task.profile -eq "physical_b_prbs_holdout"
+$isBTask = $isBPrimaryTask -or $isBHoldoutTask
 $expectedDispatchMode = if ($isBTask) { "physical_b" } else { "physical_a" }
-$expectedConfirmation = if ($isBTask) {
+$expectedConfirmation = if ($isBHoldoutTask) {
+    $physicalBHoldoutConfirmation
+} elseif ($isBPrimaryTask) {
     $physicalBConfirmation
 } else {
     $physicalAConfirmation
@@ -293,7 +303,8 @@ if ($isA2S1Task) {
     }
 }
 if ($isBTask) {
-    if ([string]$task.run_role -ne "primary" -or
+    if ($isBPrimaryTask -and (
+        [string]$task.run_role -ne "primary" -or
         [string]$task.profile -ne "physical_b_prbs_primary" -or
         [uint64]$task.sequence_sample_count -ne 800 -or
         [uint64]$task.expected_nonzero_transition_count -eq 0 -or
@@ -312,8 +323,29 @@ if ($isBTask) {
         -not [bool]$task.f0.selection_used_for_single_refit -or
         [bool]$task.f0.confirmation_used_for_refit -or
         [bool]$task.f0.holdout_used_for_tuning -or
-        -not [bool]$task.f0.input_forced_validation_required) {
+        -not [bool]$task.f0.input_forced_validation_required)) {
         throw "Physical B Primary role/F0/holdout 安全合同无效"
+    }
+    if ($isBHoldoutTask -and (
+        [string]$task.run_role -ne "cross_run_holdout" -or
+        [string]$task.profile -ne "physical_b_prbs_holdout" -or
+        [uint64]$task.sequence_sample_count -ne 288 -or
+        [uint64]$task.expected_nonzero_transition_count -ne 68 -or
+        [uint64]$task.max_abs_prefix_x_counts -ne 1 -or
+        -not [bool]$task.requires_user_frontend_launch -or
+        -not [bool]$task.cross_run_holdout_prepare_authorized -or
+        -not [bool]$task.safety.cross_run_holdout_prepare_authorized -or
+        [bool]$task.holdout_used_for_tuning -or
+        [bool]$task.holdout.holdout_used_for_tuning -or
+        -not [bool]$task.holdout.input_forced_required -or
+        -not [bool]$task.holdout.output_free_run_required -or
+        -not [bool]$task.holdout.delay_and_tail_are_frozen -or
+        [uint64]$task.holdout.recurrence_feedback_mask -ne 51 -or
+        [uint64]$task.holdout.recurrence_phase -ne 21 -or
+        [string]$task.run_uuid -eq [string]$task.primary.run_uuid -or
+        [uint64]$task.activation_epoch -eq
+            [uint64]$task.primary.activation_epoch)) {
+        throw "Physical B cross-Run holdout role/F1/independence 安全合同无效"
     }
 }
 
@@ -342,7 +374,7 @@ if ($isA2S1Task) {
         [pscustomobject]@{ value = $task.files.sequence_executable; name = "sequence executable" },
         [pscustomobject]@{ value = $task.files.dependency_calibrator; name = "dependency calibrator" })
 }
-if ($isBTask) {
+if ($isBPrimaryTask) {
     $fileEntries += @(
         [pscustomobject]@{ value = $task.files.sequence_executable; name = "sequence executable" },
         [pscustomobject]@{ value = $task.files.prbs_designer; name = "PRBS designer" },
@@ -351,10 +383,20 @@ if ($isBTask) {
         [pscustomobject]@{ value = $task.files.offline_design; name = "offline design" },
         [pscustomobject]@{ value = $task.files.a2_dependency_decision; name = "A2 decision" })
 }
+if ($isBHoldoutTask) {
+    $fileEntries += @(
+        [pscustomobject]@{ value = $task.files.sequence_executable; name = "sequence executable" },
+        [pscustomobject]@{ value = $task.files.physical_b_analyzer; name = "Primary analyzer" },
+        [pscustomobject]@{ value = $task.files.holdout_analyzer; name = "holdout analyzer" },
+        [pscustomobject]@{ value = $task.files.holdout_plan; name = "holdout plan" },
+        [pscustomobject]@{ value = $task.files.primary_analysis; name = "Primary analysis" },
+        [pscustomobject]@{ value = $task.files.primary_command_report; name = "Primary command report" },
+        [pscustomobject]@{ value = $task.files.offline_design; name = "offline design" })
+}
 foreach ($entry in $fileEntries) {
     Assert-FileEvidence $entry.value $entry.name
 }
-if ($isBTask) {
+if ($isBPrimaryTask) {
     $primaryF0 = Get-Content -LiteralPath `
         ([string]$task.files.primary_f0.path) -Raw -Encoding utf8 |
         ConvertFrom-Json
@@ -378,6 +420,49 @@ if ($isBTask) {
         [string]$primaryF0.source_a2_dependency_decision.file_sha256 -ne
             [string]$task.files.a2_dependency_decision.sha256) {
         throw "Physical B Primary F0 内容或源 artifact 绑定无效"
+    }
+}
+if ($isBHoldoutTask) {
+    $holdoutPlan = Get-Content -LiteralPath `
+        ([string]$task.files.holdout_plan.path) -Raw -Encoding utf8 |
+        ConvertFrom-Json
+    if ([int]$holdoutPlan.schema_version -ne 1 -or
+        [string]$holdoutPlan.evidence_type -ne
+            "mouse_effect_probe_physical_b_holdout_plan" -or
+        [string]$holdoutPlan.status -ne
+            "READY_FOR_PHYSICAL_B_HOLDOUT_PREPARE" -or
+        [bool]$holdoutPlan.physical_output_capability -or
+        [bool]$holdoutPlan.physical_b_launch_authorized -or
+        [bool]$holdoutPlan.production_aim_changed -or
+        [bool]$holdoutPlan.holdout_used_for_tuning -or
+        [string]$holdoutPlan.bindings.holdout_analyzer_file_sha256 -ne
+            [string]$task.files.holdout_analyzer.sha256 -or
+        [string]$holdoutPlan.bindings.primary_analyzer_file_sha256 -ne
+            [string]$task.files.physical_b_analyzer.sha256 -or
+        [string]$holdoutPlan.bindings.primary_analysis_file_sha256 -ne
+            [string]$task.files.primary_analysis.sha256 -or
+        [string]$holdoutPlan.bindings.primary_command_report_file_sha256 -ne
+            [string]$task.files.primary_command_report.sha256 -or
+        [string]$holdoutPlan.bindings.offline_design_file_sha256 -ne
+            [string]$task.files.offline_design.sha256 -or
+        [string]$holdoutPlan.primary.run_uuid -ne
+            [string]$task.primary.run_uuid -or
+        [uint64]$holdoutPlan.primary.activation_epoch -ne
+            [uint64]$task.primary.activation_epoch -or
+        [string]$holdoutPlan.primary.source_clock_session_id -ne
+            [string]$task.primary.source_clock_session_id -or
+        [string]$holdoutPlan.primary.f1_semantic_sha256 -ne
+            [string]$task.primary.f1_semantic_sha256 -or
+        [string]$holdoutPlan.sequence.profile -ne
+            "physical_b_prbs_holdout" -or
+        [uint64]$holdoutPlan.sequence.sample_count -ne 288 -or
+        [uint64]$holdoutPlan.sequence.block_count -ne 2 -or
+        [uint64]$holdoutPlan.sequence.expected_nonzero_transition_count -ne 68 -or
+        [uint64]$holdoutPlan.sequence.lfsr.feedback_mask -ne 51 -or
+        [uint64]$holdoutPlan.sequence.lfsr.phase -ne 21 -or
+        [string]$holdoutPlan.holdout_plan_semantic_sha256 -ne
+            [string]$task.holdout.plan_semantic_sha256) {
+        throw "Physical B holdout plan/F1/source artifact 绑定无效"
     }
 }
 if ((Get-FileSha256 $PSCommandPath) -ne
@@ -706,7 +791,7 @@ try {
             [string]$task.sequence_sha256) {
         throw "Physical probe manifest/report 顶层身份无效"
     }
-    if ($isBTask) {
+    if ($isBPrimaryTask) {
         $sequenceBlocks = @($sequence.blocks)
         $blockRoles = @($sequenceBlocks | ForEach-Object {
             [string]$_.role
@@ -740,6 +825,43 @@ try {
                 [int]$_.dy_counts -ne 0
             }).Count -ne 0) {
             throw "Physical B Primary sequence/F0/whole-block 合同无效"
+        }
+    }
+    if ($isBHoldoutTask) {
+        $sequenceBlocks = @($sequence.blocks)
+        $blockRoles = @($sequenceBlocks | ForEach-Object {
+            [string]$_.role
+        })
+        $blockPolarities = @($sequenceBlocks | ForEach-Object {
+            [string]$_.polarity
+        })
+        if ([int]$sequence.schema -ne 5 -or
+            [string]$sequence.profile -ne "physical_b_prbs_holdout" -or
+            [string]$sequence.request.offline_sequence_semantic_sha256 -ne
+                [string]$task.offline_sequence_semantic_sha256 -or
+            [uint64]$sequence.request.guard_sample_count -ne 32 -or
+            [uint64]$sequence.request.lfsr_order -ne 6 -or
+            [uint64]$sequence.request.feedback_mask -ne 51 -or
+            [uint64]$sequence.request.seed -ne 1 -or
+            [uint64]$sequence.request.phase -ne 21 -or
+            $samples.Count -ne 288 -or
+            $sequenceBlocks.Count -ne 2 -or
+            [int64]$sequence.summary.net_x_counts -ne 0 -or
+            [uint64]$sequence.summary.max_abs_prefix_x_counts -ne 1 -or
+            ($blockRoles -join ",") -ne
+                "cross_run_holdout,cross_run_holdout" -or
+            ($blockPolarities -join ",") -ne "normal,inverted" -or
+            [uint64]$sequenceBlocks[0].first_sample_index -ne 32 -or
+            [uint64]$sequenceBlocks[1].first_sample_index -ne 160 -or
+            @($sequenceBlocks | Where-Object {
+                [uint64]$_.period_sample_count -ne 63 -or
+                [uint64]$_.sample_count -ne 64
+            }).Count -ne 0 -or
+            @($samples | Where-Object {
+                [int]$_.dx_counts -lt -1 -or [int]$_.dx_counts -gt 1 -or
+                [int]$_.dy_counts -ne 0
+            }).Count -ne 0) {
+            throw "Physical B holdout sequence/F1/whole-block 合同无效"
         }
     }
 
@@ -820,6 +942,18 @@ try {
     }
     if ($unmatchedBaselineEvents -gt $maxUnmatchedBaselineEvents) {
         throw "Physical A baseline 的未观测零事件超过预注册上限"
+    }
+    if ($isBHoldoutTask) {
+        # different source clock session 是 cross-Run holdout 的硬边界。
+        $holdoutSourceSessions = @($events |
+            ForEach-Object { [string]$_.source_clock_session_id } |
+            Sort-Object -Unique)
+        if ($holdoutSourceSessions.Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace($holdoutSourceSessions[0]) -or
+            $holdoutSourceSessions[0] -eq
+                [string]$task.primary.source_clock_session_id) {
+            throw "Physical B holdout different source clock session 合同无效"
+        }
     }
 
     $expectedPulseCount = if ($isA2Task -or $isA2S1Task -or $isBTask) {

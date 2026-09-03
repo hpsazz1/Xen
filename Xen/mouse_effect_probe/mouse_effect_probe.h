@@ -66,6 +66,15 @@ struct PhysicalBPrimarySequenceRequest {
     std::string offline_sequence_semantic_sha256;
 };
 
+struct PhysicalBHoldoutSequenceRequest {
+    std::uint64_t guard_sample_count = 0;
+    std::uint32_t lfsr_order = 0;
+    std::uint32_t feedback_mask = 0;
+    std::uint64_t seed = 0;
+    std::uint64_t phase = 0;
+    std::string offline_sequence_semantic_sha256;
+};
+
 struct ProbeSequenceSample {
     std::uint64_t sample_index = 0;
     std::uint64_t block_id = 0;
@@ -79,6 +88,7 @@ enum class ProbeSequenceBlockRole {
     ESTIMATION,
     SELECTION,
     CONFIRMATION,
+    CROSS_RUN_HOLDOUT,
 };
 
 enum class ProbeSequenceBlockPolarity {
@@ -107,6 +117,7 @@ struct MouseEffectProbeSequence {
     DependencyCalibrationSequenceRequest dependency_calibration_request;
     S1LivenessSequenceRequest s1_liveness_request;
     PhysicalBPrimarySequenceRequest physical_b_primary_request;
+    PhysicalBHoldoutSequenceRequest physical_b_holdout_request;
     std::vector<ProbeSequenceBlock> blocks;
     std::vector<ProbeSequenceSample> samples;
     std::int64_t net_x_counts = 0;
@@ -141,9 +152,17 @@ bool make_s1_liveness_sequence(
 // Physical B Primary 只生成 F0 已冻结的 cumulative-position m-sequence：
 // 三个完整 normal/inverted pair 分别用于 estimation/selection/confirmation，
 // 实际差分命令为 X-only {-1,0,+1}；每个 block 的 pre/post guard 不共享，
-// 当前接口不提供 cross-Run holdout。
+// Primary 接口不接受 cross-Run holdout recurrence。
 bool make_physical_b_primary_sequence(
     const PhysicalBPrimarySequenceRequest& request,
+    MouseEffectProbeSequence& sequence,
+    std::string& error) noexcept;
+
+// Physical B holdout 只生成 F1 已冻结且未参与拟合的独立 recurrence：一个
+// normal/inverted pair，仍使用 cumulative-position 输入与 X-only {-1,0,+1}
+// 差分命令；不得借此接口回改 Primary/F1 或追加样本。
+bool make_physical_b_holdout_sequence(
+    const PhysicalBHoldoutSequenceRequest& request,
     MouseEffectProbeSequence& sequence,
     std::string& error) noexcept;
 

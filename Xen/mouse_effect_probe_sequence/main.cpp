@@ -65,6 +65,10 @@ void print_usage() {
         << "  XenMouseEffectProbeSequence --output <new-json> "
            "--profile physical-b-primary --guard-samples <n> "
            "--lfsr-order <n> --feedback-mask <decimal> --seed <n> "
+           "--phase <n> --offline-sequence-semantic-sha256 <sha256>\n"
+        << "  XenMouseEffectProbeSequence --output <new-json> "
+           "--profile physical-b-holdout --guard-samples <n> "
+           "--lfsr-order <n> --feedback-mask <decimal> --seed <n> "
            "--phase <n> --offline-sequence-semantic-sha256 <sha256>\n";
 }
 
@@ -125,9 +129,10 @@ int wmain(int argc, wchar_t* argv[]) {
             seen_guard = true;
         } else if (argument == L"--profile" && !seen_profile &&
                    (value == L"sparse-pulse-a" ||
-                    value == L"dependency-calibration-a2" ||
-                    value == L"s1-liveness-a2" ||
-                    value == L"physical-b-primary")) {
+                     value == L"dependency-calibration-a2" ||
+                     value == L"s1-liveness-a2" ||
+                     value == L"physical-b-primary" ||
+                     value == L"physical-b-holdout")) {
             profile.assign(value);
             seen_profile = true;
         } else if (argument == L"--blocks" && !seen_blocks &&
@@ -197,7 +202,12 @@ int wmain(int argc, wchar_t* argv[]) {
     const bool dependency_profile =
         profile == L"dependency-calibration-a2";
     const bool s1_liveness_profile = profile == L"s1-liveness-a2";
-    const bool physical_b_profile = profile == L"physical-b-primary";
+    const bool physical_b_primary_profile =
+        profile == L"physical-b-primary";
+    const bool physical_b_holdout_profile =
+        profile == L"physical-b-holdout";
+    const bool physical_b_profile =
+        physical_b_primary_profile || physical_b_holdout_profile;
     const bool common_valid = seen_output &&
         !output_path.empty() && output_path.is_absolute();
     const bool sparse_valid = !dependency_profile && !s1_liveness_profile &&
@@ -241,8 +251,25 @@ int wmain(int argc, wchar_t* argv[]) {
     if (physical_b_profile) {
         physical_b_primary_request.guard_sample_count =
             request.guard_sample_count;
-        generated = mouse_effect_probe::make_physical_b_primary_sequence(
-            physical_b_primary_request, sequence, error);
+        if (physical_b_primary_profile) {
+            generated = mouse_effect_probe::make_physical_b_primary_sequence(
+                physical_b_primary_request, sequence, error);
+        } else {
+            mouse_effect_probe::PhysicalBHoldoutSequenceRequest
+                holdout_request;
+            holdout_request.guard_sample_count =
+                physical_b_primary_request.guard_sample_count;
+            holdout_request.lfsr_order =
+                physical_b_primary_request.lfsr_order;
+            holdout_request.feedback_mask =
+                physical_b_primary_request.feedback_mask;
+            holdout_request.seed = physical_b_primary_request.seed;
+            holdout_request.phase = physical_b_primary_request.phase;
+            holdout_request.offline_sequence_semantic_sha256 =
+                physical_b_primary_request.offline_sequence_semantic_sha256;
+            generated = mouse_effect_probe::make_physical_b_holdout_sequence(
+                holdout_request, sequence, error);
+        }
     } else if (dependency_profile) {
         dependency_request.run_role = run_role == L"p-cal"
             ? mouse_effect_probe::DependencyCalibrationRunRole::P_CAL

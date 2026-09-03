@@ -44,6 +44,15 @@ constexpr std::uint64_t kPhysicalBPrimarySeed = 1;
 constexpr std::uint64_t kPhysicalBPrimaryPhase = 49;
 constexpr std::string_view kPhysicalBPrimaryOfflineSequenceSha256 =
     "b69917ffdbf32061644c1531913371590e81719ee5b2440eb0609fba2c9c0b2d";
+constexpr std::string_view kPhysicalBHoldoutProfile =
+    "physical_b_prbs_holdout";
+constexpr std::uint64_t kPhysicalBHoldoutGuardSamples = 32;
+constexpr std::uint32_t kPhysicalBHoldoutLfsrOrder = 6;
+constexpr std::uint32_t kPhysicalBHoldoutFeedbackMask = 0x33;
+constexpr std::uint64_t kPhysicalBHoldoutSeed = 1;
+constexpr std::uint64_t kPhysicalBHoldoutPhase = 21;
+constexpr std::string_view kPhysicalBHoldoutOfflineSequenceSha256 =
+    "e0dffb8b72d6326803a84a2ca37a9cb5d016c9bcddd14728b9e736547e1082f4";
 constexpr std::uint64_t kMaximumSequenceSamples = 1'000'000;
 constexpr std::uint64_t kMaximumDependencyCalibrationBlocks = 64;
 constexpr std::uint64_t kMaximumS1LivenessSamples = 2'400;
@@ -198,6 +207,29 @@ bool valid_physical_b_primary_request(
            request.phase == kPhysicalBPrimaryPhase &&
            request.offline_sequence_semantic_sha256 ==
                kPhysicalBPrimaryOfflineSequenceSha256;
+}
+
+bool same_physical_b_holdout_request(
+        const PhysicalBHoldoutSequenceRequest& first,
+        const PhysicalBHoldoutSequenceRequest& second) noexcept {
+    return first.guard_sample_count == second.guard_sample_count &&
+           first.lfsr_order == second.lfsr_order &&
+           first.feedback_mask == second.feedback_mask &&
+           first.seed == second.seed &&
+           first.phase == second.phase &&
+           first.offline_sequence_semantic_sha256 ==
+               second.offline_sequence_semantic_sha256;
+}
+
+bool valid_physical_b_holdout_request(
+        const PhysicalBHoldoutSequenceRequest& request) noexcept {
+    return request.guard_sample_count == kPhysicalBHoldoutGuardSamples &&
+           request.lfsr_order == kPhysicalBHoldoutLfsrOrder &&
+           request.feedback_mask == kPhysicalBHoldoutFeedbackMask &&
+           request.seed == kPhysicalBHoldoutSeed &&
+           request.phase == kPhysicalBHoldoutPhase &&
+           request.offline_sequence_semantic_sha256 ==
+               kPhysicalBHoldoutOfflineSequenceSha256;
 }
 
 void append_sample(MouseEffectProbeSequence& sequence,
@@ -458,6 +490,50 @@ bool generate_physical_b_primary_period(
     return true;
 }
 
+bool generate_physical_b_holdout_period(
+        const PhysicalBHoldoutSequenceRequest& request,
+        std::vector<int>& bits,
+        std::string& error) {
+    if (!valid_physical_b_holdout_request(request)) {
+        set_error(error,
+            "Physical B holdout request 与冻结 F1 recurrence/guard/SHA 不一致");
+        return false;
+    }
+    const std::uint64_t expected_period =
+        (std::uint64_t{1} << request.lfsr_order) - 1U;
+    std::uint64_t state = request.seed;
+    std::vector<bool> seen(
+        static_cast<std::size_t>(std::uint64_t{1} << request.lfsr_order),
+        false);
+    std::vector<int> unshifted;
+    unshifted.reserve(static_cast<std::size_t>(expected_period));
+    for (std::uint64_t index = 0; index < expected_period; ++index) {
+        if (state == 0 || seen[static_cast<std::size_t>(state)]) {
+            set_error(error,
+                "Physical B holdout recurrence 未覆盖完整非零状态周期");
+            return false;
+        }
+        seen[static_cast<std::size_t>(state)] = true;
+        unshifted.push_back(static_cast<int>(state & 1U));
+        const auto feedback = static_cast<std::uint64_t>(
+            std::popcount(state & request.feedback_mask) & 1U);
+        state = (state >> 1U) |
+            (feedback << (request.lfsr_order - 1U));
+    }
+    if (state != request.seed) {
+        set_error(error, "Physical B holdout recurrence 未回到冻结 seed");
+        return false;
+    }
+    const auto offset = static_cast<std::size_t>(
+        request.phase % expected_period);
+    bits.clear();
+    bits.reserve(unshifted.size());
+    bits.insert(bits.end(), unshifted.begin() + offset, unshifted.end());
+    bits.insert(bits.end(), unshifted.begin(), unshifted.begin() + offset);
+    error.clear();
+    return true;
+}
+
 void append_physical_b_primary_block(
         MouseEffectProbeSequence& sequence,
         std::uint64_t block_id,
@@ -488,6 +564,60 @@ void append_physical_b_primary_block(
     position_x = 0;
     block.sample_count = sequence.samples.size() - block.first_sample_index;
     sequence.blocks.push_back(block);
+}
+
+bool build_physical_b_holdout_sequence(
+        const PhysicalBHoldoutSequenceRequest& request,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) {
+    std::vector<int> bits;
+    if (!generate_physical_b_holdout_period(request, bits, error)) {
+        return false;
+    }
+    const std::uint64_t per_block = bits.size() + 1U;
+    const std::uint64_t expected_sample_count =
+        2U * (per_block + request.guard_sample_count * 2U) +
+        request.guard_sample_count;
+    if (expected_sample_count > kMaximumSequenceSamples) {
+        set_error(error, "Physical B holdout sample count 超出固定容量");
+        return false;
+    }
+
+    sequence = {};
+    sequence.schema = kPhysicalBPrimarySequenceSchema;
+    sequence.profile = kPhysicalBHoldoutProfile;
+    sequence.physical_b_holdout_request = request;
+    sequence.samples.reserve(static_cast<std::size_t>(expected_sample_count));
+    sequence.blocks.reserve(2U);
+
+    int position_x = 0;
+    append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
+    append_physical_b_primary_block(
+        sequence, 1U, 1U, ProbeSequenceBlockRole::CROSS_RUN_HOLDOUT,
+        ProbeSequenceBlockPolarity::NORMAL, bits, position_x);
+    append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
+    append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
+    append_physical_b_primary_block(
+        sequence, 2U, 1U, ProbeSequenceBlockRole::CROSS_RUN_HOLDOUT,
+        ProbeSequenceBlockPolarity::INVERTED, bits, position_x);
+    append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
+    append_zeros(sequence, 0U, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
+    summarize_sequence(sequence);
+    if (position_x != 0 ||
+        sequence.samples.size() != expected_sample_count ||
+        sequence.net_x_counts != 0 ||
+        sequence.max_abs_prefix_x_counts != 1U) {
+        set_error(error,
+            "Physical B holdout exact schedule 未满足 sample/net/prefix 合同");
+        return false;
+    }
+    error.clear();
+    return true;
 }
 
 bool build_physical_b_primary_sequence(
@@ -630,7 +760,7 @@ nlohmann::ordered_json canonical_payload(
             sequence.s1_liveness_request.baseline_sample_count;
         request["run_role"] = s1_liveness_run_role_name(
             sequence.s1_liveness_request.run_role);
-    } else {
+    } else if (sequence.profile == kPhysicalBPrimaryProfile) {
         request = {
             {"guard_sample_count",
              sequence.physical_b_primary_request.guard_sample_count},
@@ -642,6 +772,20 @@ nlohmann::ordered_json canonical_payload(
             {"phase", sequence.physical_b_primary_request.phase},
             {"offline_sequence_semantic_sha256",
              sequence.physical_b_primary_request.
+                 offline_sequence_semantic_sha256},
+        };
+    } else {
+        request = {
+            {"guard_sample_count",
+             sequence.physical_b_holdout_request.guard_sample_count},
+            {"lfsr_order",
+             sequence.physical_b_holdout_request.lfsr_order},
+            {"feedback_mask",
+             sequence.physical_b_holdout_request.feedback_mask},
+            {"seed", sequence.physical_b_holdout_request.seed},
+            {"phase", sequence.physical_b_holdout_request.phase},
+            {"offline_sequence_semantic_sha256",
+             sequence.physical_b_holdout_request.
                  offline_sequence_semantic_sha256},
         };
     }
@@ -864,6 +1008,10 @@ bool parse_probe_sequence_block_role(
         output = ProbeSequenceBlockRole::CONFIRMATION;
         return true;
     }
+    if (value == "cross_run_holdout") {
+        output = ProbeSequenceBlockRole::CROSS_RUN_HOLDOUT;
+        return true;
+    }
     return false;
 }
 
@@ -964,6 +1112,9 @@ bool parse_document(const nlohmann::ordered_json& document,
     const bool physical_b_primary_profile =
         candidate.schema == kPhysicalBPrimarySequenceSchema &&
         candidate.profile == kPhysicalBPrimaryProfile;
+    const bool physical_b_holdout_profile =
+        candidate.schema == kPhysicalBPrimarySequenceSchema &&
+        candidate.profile == kPhysicalBHoldoutProfile;
     if (sparse_profile) {
         if (!has_exact_keys(request,
                 {"baseline_sample_count", "response_sample_count",
@@ -1069,6 +1220,35 @@ bool parse_document(const nlohmann::ordered_json& document,
         candidate.physical_b_primary_request.
             offline_sequence_semantic_sha256 = request.at(
                 "offline_sequence_semantic_sha256").get<std::string>();
+    } else if (physical_b_holdout_profile) {
+        std::uint64_t lfsr_order = 0;
+        std::uint64_t feedback_mask = 0;
+        if (!has_exact_keys(request,
+                {"guard_sample_count", "lfsr_order", "feedback_mask",
+                 "seed", "phase", "offline_sequence_semantic_sha256"}) ||
+            !read_u64(request, "guard_sample_count",
+                      candidate.physical_b_holdout_request.
+                          guard_sample_count) ||
+            !read_u64(request, "lfsr_order", lfsr_order) ||
+            lfsr_order > std::numeric_limits<std::uint32_t>::max() ||
+            !read_u64(request, "feedback_mask", feedback_mask) ||
+            feedback_mask > std::numeric_limits<std::uint32_t>::max() ||
+            !read_u64(request, "seed",
+                      candidate.physical_b_holdout_request.seed) ||
+            !read_u64(request, "phase",
+                      candidate.physical_b_holdout_request.phase) ||
+            !request.at("offline_sequence_semantic_sha256").is_string()) {
+            set_error(error,
+                "Physical B holdout request 字段集合或类型非法");
+            return false;
+        }
+        candidate.physical_b_holdout_request.lfsr_order =
+            static_cast<std::uint32_t>(lfsr_order);
+        candidate.physical_b_holdout_request.feedback_mask =
+            static_cast<std::uint32_t>(feedback_mask);
+        candidate.physical_b_holdout_request.
+            offline_sequence_semantic_sha256 = request.at(
+                "offline_sequence_semantic_sha256").get<std::string>();
     } else {
         set_error(error, "序列 schema/profile 组合不受支持");
         return false;
@@ -1078,6 +1258,7 @@ bool parse_document(const nlohmann::ordered_json& document,
     const std::size_t maximum_blocks =
         sparse_profile || s1_liveness_profile ? 2U :
         physical_b_primary_profile ? 6U :
+        physical_b_holdout_profile ? 2U :
         static_cast<std::size_t>(kMaximumDependencyCalibrationBlocks);
     if (!blocks.is_array() || blocks.size() > maximum_blocks) {
         set_error(error, "序列 blocks 必须是固定容量数组");
@@ -1086,7 +1267,7 @@ bool parse_document(const nlohmann::ordered_json& document,
     candidate.blocks.reserve(blocks.size());
     for (const auto& value : blocks) {
         ProbeSequenceBlock block;
-        if (physical_b_primary_profile) {
+        if (physical_b_primary_profile || physical_b_holdout_profile) {
             if (!has_exact_keys(value,
                     {"block_id", "pair_index", "role", "polarity",
                      "first_sample_index", "period_sample_count",
@@ -1106,7 +1287,7 @@ bool parse_document(const nlohmann::ordered_json& document,
                           block.period_sample_count) ||
                 !read_u64(value, "sample_count", block.sample_count)) {
                 set_error(error,
-                    "Physical B Primary block 字段集合或类型非法");
+                    "Physical B block 字段集合或类型非法");
                 return false;
             }
         } else {
@@ -1210,6 +1391,8 @@ const char* probe_sequence_block_role_name(
         case ProbeSequenceBlockRole::ESTIMATION: return "estimation";
         case ProbeSequenceBlockRole::SELECTION: return "selection";
         case ProbeSequenceBlockRole::CONFIRMATION: return "confirmation";
+        case ProbeSequenceBlockRole::CROSS_RUN_HOLDOUT:
+            return "cross_run_holdout";
     }
     return "unknown";
 }
@@ -1331,6 +1514,36 @@ bool make_physical_b_primary_sequence(
     }
 }
 
+bool make_physical_b_holdout_sequence(
+        const PhysicalBHoldoutSequenceRequest& request,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) noexcept {
+    try {
+        MouseEffectProbeSequence candidate;
+        if (!build_physical_b_holdout_sequence(request, candidate, error)) {
+            sequence = {};
+            return false;
+        }
+        const std::string payload = canonical_payload(candidate).dump();
+        if (!sha256(payload, candidate.sequence_sha256, error)) {
+            sequence = {};
+            return false;
+        }
+        sequence = std::move(candidate);
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        sequence = {};
+        set_error(error, std::string("生成 Physical B holdout 序列异常: ") +
+                         exception.what());
+        return false;
+    } catch (...) {
+        sequence = {};
+        set_error(error, "生成 Physical B holdout 序列时发生未知异常");
+        return false;
+    }
+}
+
 bool validate_mouse_effect_probe_sequence(
         const MouseEffectProbeSequence& sequence,
         std::string& error) noexcept {
@@ -1349,6 +1562,9 @@ bool validate_mouse_effect_probe_sequence(
         const bool physical_b_primary =
             sequence.schema == kPhysicalBPrimarySequenceSchema &&
             sequence.profile == kPhysicalBPrimaryProfile;
+        const bool physical_b_holdout =
+            sequence.schema == kPhysicalBPrimarySequenceSchema &&
+            sequence.profile == kPhysicalBHoldoutProfile;
         if (sparse) {
             if (!make_sparse_pulse_sequence(
                     sequence.request, expected, error)) {
@@ -1370,6 +1586,11 @@ bool validate_mouse_effect_probe_sequence(
                     sequence.physical_b_primary_request, expected, error)) {
                 return false;
             }
+        } else if (physical_b_holdout) {
+            if (!make_physical_b_holdout_sequence(
+                    sequence.physical_b_holdout_request, expected, error)) {
+                return false;
+            }
         } else {
             set_error(error, "序列 schema/profile 组合不受支持");
             return false;
@@ -1387,6 +1608,9 @@ bool validate_mouse_effect_probe_sequence(
             (physical_b_primary && !same_physical_b_primary_request(
                 sequence.physical_b_primary_request,
                 expected.physical_b_primary_request)) ||
+            (physical_b_holdout && !same_physical_b_holdout_request(
+                sequence.physical_b_holdout_request,
+                expected.physical_b_holdout_request)) ||
             sequence.net_x_counts != expected.net_x_counts ||
             sequence.max_abs_prefix_x_counts !=
                 expected.max_abs_prefix_x_counts ||

@@ -70,9 +70,11 @@ $destination = Join-Path $resolvedTestRoot "remote"
 
 foreach ($name in @(
         "prepare_mouse_effect_probe_b.ps1",
+        "prepare_mouse_effect_probe_b_holdout.ps1",
         "launch_mouse_effect_probe_a.ps1",
         "design_mouse_effect_probe_prbs.py",
-        "analyze_mouse_effect_probe_b.py")) {
+        "analyze_mouse_effect_probe_b.py",
+        "analyze_mouse_effect_probe_b_holdout.py")) {
     Write-Utf8NoBom (Join-Path $scripts $name) "fixture:$name`n"
 }
 foreach ($name in @(
@@ -140,9 +142,18 @@ Assert-True ([int]$manifest.schema_version -eq 1 -and
              [bool]$manifest.source_tracked_clean -and
              -not [bool]$manifest.physical_run_included -and
              -not [bool]$manifest.physical_launch_executed -and
-             [int]$manifest.file_count -eq 11 -and
-             @($manifest.files).Count -eq 11) `
+             [bool]$manifest.cross_run_holdout_tooling_included -and
+             -not [bool]$manifest.cross_run_holdout_included -and
+             [int]$manifest.file_count -eq 13 -and
+             @($manifest.files).Count -eq 13) `
     "Physical B manifest 身份、clean/Launch 边界或文件数错误"
+$manifestNames = @($manifest.files | ForEach-Object { [string]$_.name })
+foreach ($requiredName in @(
+        "prepare_mouse_effect_probe_b_holdout.ps1",
+        "analyze_mouse_effect_probe_b_holdout.py")) {
+    Assert-True ($manifestNames -contains $requiredName) `
+        "Physical B 发布包缺少 Holdout 工具：$requiredName"
+}
 Assert-True ((Get-FileHash -LiteralPath $localManifestPath -Algorithm SHA256).Hash -eq
              (Get-FileHash -LiteralPath $remoteManifestPath -Algorithm SHA256).Hash) `
     "本地与辅机模拟 manifest SHA-256 必须一致"

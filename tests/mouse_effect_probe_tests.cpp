@@ -542,6 +542,92 @@ void test_physical_b_primary_sequence_is_frozen_complete_and_bounded() {
            "当前 Primary seam 必须拒绝未授权 phase/recurrence 漂移");
 }
 
+void test_physical_b_holdout_sequence_is_frozen_independent_and_bounded() {
+    mouse_effect_probe::PhysicalBHoldoutSequenceRequest request;
+    request.guard_sample_count = 32;
+    request.lfsr_order = 6;
+    request.feedback_mask = 0x33;
+    request.seed = 1;
+    request.phase = 21;
+    request.offline_sequence_semantic_sha256 =
+        "e0dffb8b72d6326803a84a2ca37a9cb5d016c9bcddd14728b9e736547e1082f4";
+    mouse_effect_probe::MouseEffectProbeSequence sequence;
+    std::string error;
+    expect(mouse_effect_probe::make_physical_b_holdout_sequence(
+               request, sequence, error),
+           "冻结 Physical B holdout recurrence 必须可生成: " + error);
+    expect(mouse_effect_probe::validate_mouse_effect_probe_sequence(
+               sequence, error),
+           "Physical B holdout sequence 必须通过公开 validator: " + error);
+    expect(sequence.schema == 5 &&
+               sequence.profile == "physical_b_prbs_holdout" &&
+               sequence.samples.size() == 288U &&
+               sequence.blocks.size() == 2U &&
+               sequence.net_x_counts == 0 &&
+               sequence.max_abs_prefix_x_counts == 1U &&
+               sequence.sequence_sha256.size() == 64U,
+           "Physical B holdout 必须固定 schema/profile/sample/block/net/prefix");
+
+    const std::array<int, 16> expected_first_commands{
+        1, -1, 1, -1, 1, 0, 0, 0,
+        0, 0, -1, 1, 0, -1, 1, -1,
+    };
+    for (std::size_t index = 0; index < sequence.samples.size(); ++index) {
+        const auto& sample = sequence.samples[index];
+        expect(sample.sample_index == index &&
+                   sample.dx_counts >= -1 && sample.dx_counts <= 1 &&
+                   sample.dy_counts == 0,
+               "Physical B holdout sample 必须连续、X-only 且不超过 1 count");
+    }
+    for (std::size_t index = 0; index < expected_first_commands.size(); ++index) {
+        expect(sequence.samples[32U + index].dx_counts ==
+                   expected_first_commands[index] &&
+                   sequence.samples[160U + index].dx_counts ==
+                   -expected_first_commands[index],
+               "holdout recurrence/difference 必须与冻结离线序列及反相块一致");
+    }
+    expect(sequence.blocks[0].block_id == 1U &&
+               sequence.blocks[0].pair_index == 1U &&
+               sequence.blocks[0].role ==
+                   mouse_effect_probe::ProbeSequenceBlockRole::
+                       CROSS_RUN_HOLDOUT &&
+               sequence.blocks[0].polarity ==
+                   mouse_effect_probe::ProbeSequenceBlockPolarity::NORMAL &&
+               sequence.blocks[0].first_sample_index == 32U &&
+               sequence.blocks[0].period_sample_count == 63U &&
+               sequence.blocks[0].sample_count == 64U &&
+               sequence.blocks[1].block_id == 2U &&
+               sequence.blocks[1].pair_index == 1U &&
+               sequence.blocks[1].role ==
+                   mouse_effect_probe::ProbeSequenceBlockRole::
+                       CROSS_RUN_HOLDOUT &&
+               sequence.blocks[1].polarity ==
+                   mouse_effect_probe::ProbeSequenceBlockPolarity::INVERTED &&
+               sequence.blocks[1].first_sample_index == 160U &&
+               sequence.blocks[1].period_sample_count == 63U &&
+               sequence.blocks[1].sample_count == 64U,
+           "holdout 必须只有一个独立 normal/inverted pair");
+
+    TemporaryDirectory temporary;
+    const auto path = temporary.path() / "physical-b-holdout.json";
+    expect(mouse_effect_probe::write_mouse_effect_probe_sequence(
+               path, sequence, error),
+           "Physical B holdout sequence 必须可原子发布: " + error);
+    mouse_effect_probe::MouseEffectProbeSequence round_trip;
+    expect(mouse_effect_probe::read_mouse_effect_probe_sequence(
+               path, round_trip, error) &&
+               round_trip.sequence_sha256 == sequence.sequence_sha256 &&
+               round_trip.physical_b_holdout_request.feedback_mask == 0x33U &&
+               round_trip.physical_b_holdout_request.phase == 21U,
+           "Physical B holdout schema 5 必须精确 round-trip: " + error);
+
+    auto drifted = request;
+    drifted.feedback_mask = 0x27;
+    expect(!mouse_effect_probe::make_physical_b_holdout_sequence(
+               drifted, sequence, error),
+           "holdout seam 必须拒绝 Primary recurrence 或其他未授权漂移");
+}
+
 void test_sequence_file_round_trip_rejects_overwrite_and_tampering() {
     TemporaryDirectory temporary;
     mouse_effect_probe::MouseEffectProbeSequence sequence;
@@ -1042,6 +1128,7 @@ int main() {
     test_a2_dependency_calibration_sequences_are_balanced_and_independent();
     test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline();
     test_physical_b_primary_sequence_is_frozen_complete_and_bounded();
+    test_physical_b_holdout_sequence_is_frozen_independent_and_bounded();
     test_sequence_file_round_trip_rejects_overwrite_and_tampering();
     test_executor_consumes_one_sample_per_frame_and_never_catches_up();
     test_executor_failure_stops_without_compensation();

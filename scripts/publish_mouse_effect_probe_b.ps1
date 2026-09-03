@@ -164,8 +164,10 @@ function Assert-Package(
         -not [bool]$Manifest.source_tracked_clean -or
         [bool]$Manifest.physical_run_included -or
         [bool]$Manifest.physical_launch_executed -or
+        -not [bool]$Manifest.cross_run_holdout_tooling_included -or
+        [bool]$Manifest.cross_run_holdout_included -or
         [int]$Manifest.file_count -ne @($Manifest.files).Count -or
-        @($Manifest.files).Count -ne 11) {
+        @($Manifest.files).Count -ne 13) {
         throw "Physical B 工具包 manifest 身份或安全边界无效"
     }
     $declared = [Collections.Generic.HashSet[string]]::new(
@@ -217,9 +219,11 @@ if ($commit -notmatch '^[0-9a-f]{40}$') {
 
 $scriptNames = @(
     "prepare_mouse_effect_probe_b.ps1",
+    "prepare_mouse_effect_probe_b_holdout.ps1",
     "launch_mouse_effect_probe_a.ps1",
     "design_mouse_effect_probe_prbs.py",
-    "analyze_mouse_effect_probe_b.py")
+    "analyze_mouse_effect_probe_b.py",
+    "analyze_mouse_effect_probe_b_holdout.py")
 $sourceFiles = @()
 foreach ($name in $scriptNames) {
     $path = Resolve-RequiredFile (Join-Path $sourceRoot $name) `
@@ -312,6 +316,7 @@ try {
         physical_run_included = $false
         physical_launch_executed = $false
         launch_requires_user_frontend_action = $true
+        cross_run_holdout_tooling_included = $true
         cross_run_holdout_included = $false
         files = @($files)
     }
