@@ -15,6 +15,7 @@ from typing import Any
 
 
 RESPONSE_ROWS = 49
+SOURCE_SESSION = "5808209070696154636"
 
 
 def file_sha256(path: pathlib.Path) -> str:
@@ -134,7 +135,7 @@ def make_recorded_run(module: Any, root: pathlib.Path) -> None:
     run_uuid = "12345678-1234-4234-8234-123456789abc"
     activation_epoch = 123456789
     scope_id = "a" * 64
-    source_session = "fixture-clock-session"
+    source_session = SOURCE_SESSION
     sequence = make_sequence()
     sequence_path = root / "sequence.json"
     write_json(sequence_path, sequence)
@@ -393,8 +394,7 @@ def main() -> int:
         expect(len(measured) == 20 and
                [row["command_dx_counts"] for row in measured[:4]] ==
                    [1, -1, -1, 1] and
-               identity["source_clock_session_id"] ==
-                   "fixture-clock-session" and
+               identity["source_clock_session_id"] == SOURCE_SESSION and
                measured_f1 == {"left": -0.39, "right": -0.41},
                "完整 Run fixture 必须闭合 source/event/PNG/pulse 身份")
         output_path = recorded_root / "analysis.json"
@@ -410,6 +410,26 @@ def main() -> int:
                published["new_production_gain_claimed"] is False and
                len(published["pulse_measurements"]) == 20,
                "分析输出不得携带 Physical/生产能力且必须保留 whole pulses")
+        manifest_path = recorded_root / "pixel-evidence" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for frame in manifest["frames"]:
+            frame["source_clock_session_id"] = int(SOURCE_SESSION)
+        write_json(manifest_path, manifest)
+        launch_path = recorded_root / "launch-summary.json"
+        launch = json.loads(launch_path.read_text(encoding="utf-8"))
+        launch["sidecar_manifest_sha256"] = file_sha256(manifest_path)
+        write_json(launch_path, launch)
+        numeric_session_output = recorded_root / "numeric-session-analysis.json"
+        expect(module.main([
+                   "--run-directory", str(recorded_root),
+                   "--output", str(numeric_session_output),
+               ]) == 0 and numeric_session_output.is_file(),
+               "同值 source clock session 的字符串/整数 JSON 编码必须闭合")
+        numeric_session = json.loads(
+            numeric_session_output.read_text(encoding="utf-8"))
+        expect(numeric_session["primary"]["source_clock_session_id"] ==
+                   SOURCE_SESSION,
+               "分析身份必须规范化保存 source clock session")
         write_json(
             recorded_root / "safety-ledger.json",
             {"terminal_decision": "tampered"})

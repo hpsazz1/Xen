@@ -603,7 +603,7 @@ def _measure_primary(root: pathlib.Path) -> tuple[
                 timestamp <= last_source_timestamp or \
                 steady_ns <= last_source_steady_ns or \
                 frame is None or not session or \
-                frame.get("source_clock_session_id") != session:
+                str(frame.get("source_clock_session_id", "")) != session:
             raise ValueError("Primary event/frame exact join 或 session 无效")
         matched.append(frame)
         sessions.add(session)
