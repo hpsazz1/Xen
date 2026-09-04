@@ -783,6 +783,22 @@ target_include_directories(aim PUBLIC
     ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(aim PUBLIC log ${OpenCV_LIBS})
 
+# Production red producer 只运行公开 Aim 接口和确定性模拟 backend/plant；
+# 构建图刻意不链接 mouse，保证工具本身不具备物理输出能力。
+add_library(aim_production_red STATIC
+    Xen/aim_production_red/aim_production_red.cpp)
+target_include_directories(aim_production_red PUBLIC
+    ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(aim_production_red
+    PUBLIC aim
+    PRIVATE config nlohmann_json::nlohmann_json bcrypt)
+
+add_executable(xen_aim_production_red_producer
+    Xen/aim_production_red/main.cpp)
+target_link_libraries(xen_aim_production_red_producer PRIVATE
+    aim_production_red)
+xen_deploy_runtime_dlls(xen_aim_production_red_producer OPENCV)
+
 add_library(aim_landmark STATIC
     Xen/aim_landmark/aim_landmark.cpp)
 target_include_directories(aim_landmark PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -1127,6 +1143,20 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(aim_tests OPENCV)
     add_test(NAME aim_tests COMMAND aim_tests)
 
+    add_executable(aim_production_red_producer_tests
+        tests/aim_production_red_producer_tests.cpp)
+    target_link_libraries(aim_production_red_producer_tests PRIVATE
+        aim_production_red config nlohmann_json::nlohmann_json)
+    xen_deploy_runtime_dlls(aim_production_red_producer_tests OPENCV)
+    add_test(NAME aim_production_red_producer_tests
+        COMMAND aim_production_red_producer_tests)
+    add_test(NAME aim_production_red_producer_integration_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/aim_production_red_producer_integration_tests.py"
+            --producer "$<TARGET_FILE:xen_aim_production_red_producer>"
+            --evaluator "${PROJECT_SOURCE_DIR}/scripts/evaluate_aim_production_red.py"
+            --test-root "${CMAKE_BINARY_DIR}/aim-production-red-producer-integration")
+
     add_executable(aim_landmark_tests
         tests/aim_landmark_tests.cpp)
     target_link_libraries(aim_landmark_tests PRIVATE aim_landmark)
@@ -1242,6 +1272,15 @@ if(BUILD_TESTING)
     add_test(NAME aim_production_red_evaluator_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/aim_production_red_evaluator_tests.py")
+    add_test(NAME aim_production_red_plan_builder_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/aim_production_red_plan_builder_tests.py"
+            --builder
+                "${PROJECT_SOURCE_DIR}/scripts/build_aim_production_red_dbed788b_plan.py"
+            --fixture-header
+                "${PROJECT_SOURCE_DIR}/tests/aim_x_latest_pixel_holdout_fixture.h"
+            --test-root
+                "${CMAKE_BINARY_DIR}/aim-production-red-plan-builder-tests")
     # 固定 powershell.exe 仍会继承调用方的 PSModulePath。统一清除该变量，
     # 让 Windows PowerShell 5 按自身 PSHOME 重建系统模块路径；cmake -E env
     # 只改变测试子进程，不修改调用 CTest 的父环境。
