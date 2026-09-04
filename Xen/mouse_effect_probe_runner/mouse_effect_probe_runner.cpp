@@ -33,6 +33,10 @@ constexpr std::wstring_view kPhysicalBConfirmation =
     L"XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT";
 constexpr std::wstring_view kPhysicalBHoldoutConfirmation =
     L"XEN_MOUSE_EFFECT_PROBE_B_HOLDOUT_SENDS_REAL_KMBOX_INPUT";
+constexpr std::wstring_view kPhysicalBMagnitudePrimaryConfirmation =
+    L"XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_PRIMARY_SENDS_REAL_KMBOX_INPUT";
+constexpr std::wstring_view kPhysicalBMagnitudeHoldoutConfirmation =
+    L"XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_HOLDOUT_SENDS_REAL_KMBOX_INPUT";
 constexpr std::size_t kMaximumSafetyObservationCount = 8192U;
 constexpr std::size_t kMaximumMonitorPacketCount = 8192U;
 std::atomic<bool> stop_requested{false};
@@ -922,6 +926,18 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                            kPhysicalBHoldoutConfirmation) {
                 authorization = MouseEffectProbePhysicalAuthorization::
                     PHYSICAL_B_HOLDOUT;
+            } else if (options.dispatch_mode ==
+                           mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
+                       physical_confirmation ==
+                           kPhysicalBMagnitudePrimaryConfirmation) {
+                authorization = MouseEffectProbePhysicalAuthorization::
+                    PHYSICAL_B_MAGNITUDE_PRIMARY;
+            } else if (options.dispatch_mode ==
+                           mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
+                       physical_confirmation ==
+                           kPhysicalBMagnitudeHoldoutConfirmation) {
+                authorization = MouseEffectProbePhysicalAuthorization::
+                    PHYSICAL_B_MAGNITUDE_HOLDOUT;
             }
             if (!options.allow_physical_output ||
                 !seen_confirmation ||
@@ -980,12 +996,20 @@ bool validate_mouse_effect_probe_sequence_authorization(
         const bool physical_b_holdout_sequence =
             sequence.schema == 5U &&
             sequence.profile == "physical_b_prbs_holdout";
+        const bool physical_b_magnitude_primary_sequence =
+            sequence.schema == 6U &&
+            sequence.profile == "physical_b_command_magnitude_primary";
+        const bool physical_b_magnitude_holdout_sequence =
+            sequence.schema == 6U &&
+            sequence.profile == "physical_b_command_magnitude_holdout";
         if (options.dispatch_mode ==
                 mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
             if (options.physical_authorization !=
                     MouseEffectProbePhysicalAuthorization::PHYSICAL_A ||
                 physical_b_primary_sequence ||
-                physical_b_holdout_sequence) {
+                physical_b_holdout_sequence ||
+                physical_b_magnitude_primary_sequence ||
+                physical_b_magnitude_holdout_sequence) {
                 set_error(error,
                     "Physical A 授权与 sequence schema/profile 不一致");
                 return false;
@@ -998,6 +1022,12 @@ bool validate_mouse_effect_probe_sequence_authorization(
             ? MouseEffectProbePhysicalAuthorization::PHYSICAL_B_PRIMARY
             : physical_b_holdout_sequence
                 ? MouseEffectProbePhysicalAuthorization::PHYSICAL_B_HOLDOUT
+                : physical_b_magnitude_primary_sequence
+                    ? MouseEffectProbePhysicalAuthorization::
+                        PHYSICAL_B_MAGNITUDE_PRIMARY
+                    : physical_b_magnitude_holdout_sequence
+                        ? MouseEffectProbePhysicalAuthorization::
+                            PHYSICAL_B_MAGNITUDE_HOLDOUT
                 : MouseEffectProbePhysicalAuthorization::NONE;
         if (expected_authorization ==
                 MouseEffectProbePhysicalAuthorization::NONE ||
@@ -1038,6 +1068,16 @@ std::string mouse_effect_probe_usage() {
         "--safety-ledger <new-json> "
         "--confirm-physical-output "
         "XEN_MOUSE_EFFECT_PROBE_B_HOLDOUT_SENDS_REAL_KMBOX_INPUT\n"
+        "physical B command-magnitude Primary 使用独立确认令牌:\n"
+        "  --mode physical-b --allow-physical-output "
+        "--safety-ledger <new-json> "
+        "--confirm-physical-output "
+        "XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_PRIMARY_SENDS_REAL_KMBOX_INPUT\n"
+        "physical B command-magnitude Holdout 使用独立确认令牌:\n"
+        "  --mode physical-b --allow-physical-output "
+        "--safety-ledger <new-json> "
+        "--confirm-physical-output "
+        "XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_HOLDOUT_SENDS_REAL_KMBOX_INPUT\n"
         "physical A/B 会发送真实 KMBOX X 输入；只能由用户前台启动。\n";
 }
 

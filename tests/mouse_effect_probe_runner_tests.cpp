@@ -197,6 +197,56 @@ void test_physical_b_authority_is_bound_to_sequence_profile() {
            "Holdout token 不得授权 Primary sequence");
 }
 
+void test_physical_b_magnitude_authority_is_isolated_by_run_role() {
+    std::string error;
+    auto primary_arguments = common_arguments();
+    primary_arguments[1] = L"physical-b";
+    primary_arguments.push_back(L"--allow-physical-output");
+    primary_arguments.push_back(L"--confirm-physical-output");
+    primary_arguments.push_back(
+        L"XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_PRIMARY_SENDS_REAL_KMBOX_INPUT");
+    primary_arguments.push_back(L"--safety-ledger");
+    primary_arguments.push_back(L"E:\\run\\safety-ledger.json");
+    MouseEffectProbeRunOptions primary_options;
+    expect(parse_mouse_effect_probe_options(
+               primary_arguments, primary_options, error) ==
+               MouseEffectProbeParseStatus::READY,
+           "多幅值 Primary 独立令牌必须通过 parser: " + error);
+
+    auto holdout_arguments = primary_arguments;
+    holdout_arguments[holdout_arguments.size() - 3U] =
+        L"XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_HOLDOUT_SENDS_REAL_KMBOX_INPUT";
+    MouseEffectProbeRunOptions holdout_options;
+    expect(parse_mouse_effect_probe_options(
+               holdout_arguments, holdout_options, error) ==
+               MouseEffectProbeParseStatus::READY,
+           "多幅值 Holdout 独立令牌必须通过 parser: " + error);
+
+    mouse_effect_probe::MouseEffectProbeSequence primary_sequence;
+    primary_sequence.schema = 6U;
+    primary_sequence.profile = "physical_b_command_magnitude_primary";
+    mouse_effect_probe::MouseEffectProbeSequence holdout_sequence;
+    holdout_sequence.schema = 6U;
+    holdout_sequence.profile = "physical_b_command_magnitude_holdout";
+    mouse_effect_probe::MouseEffectProbeSequence prbs_sequence;
+    prbs_sequence.schema = 5U;
+    prbs_sequence.profile = "physical_b_prbs_primary";
+
+    expect(validate_mouse_effect_probe_sequence_authorization(
+               primary_options, primary_sequence, error),
+           "多幅值 Primary token 必须授权且只授权 Primary profile: " + error);
+    expect(!validate_mouse_effect_probe_sequence_authorization(
+               primary_options, holdout_sequence, error) &&
+           !validate_mouse_effect_probe_sequence_authorization(
+               primary_options, prbs_sequence, error),
+           "多幅值 Primary token 不得扩权到 Holdout 或旧 PRBS");
+    expect(validate_mouse_effect_probe_sequence_authorization(
+               holdout_options, holdout_sequence, error) &&
+           !validate_mouse_effect_probe_sequence_authorization(
+               holdout_options, primary_sequence, error),
+           "多幅值 Holdout token 必须与 Primary 隔离");
+}
+
 void test_parser_rejects_missing_duplicate_and_invalid_identity() {
     std::string error;
     MouseEffectProbeRunOptions options;
@@ -439,6 +489,7 @@ int main() {
     test_parser_isolates_physical_b_authority_from_physical_a();
     test_parser_recognizes_physical_b_holdout_authority();
     test_physical_b_authority_is_bound_to_sequence_profile();
+    test_physical_b_magnitude_authority_is_isolated_by_run_role();
     test_parser_rejects_missing_duplicate_and_invalid_identity();
     test_frame_mapping_preserves_source_identity_and_quality();
     test_physical_deadman_prompt_contract();

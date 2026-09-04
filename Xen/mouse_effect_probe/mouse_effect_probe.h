@@ -57,6 +57,18 @@ struct S1LivenessSequenceRequest {
     S1LivenessRunRole run_role = S1LivenessRunRole::PRIMARY;
 };
 
+enum class CommandMagnitudeRunRole {
+    PRIMARY,
+    HOLDOUT,
+};
+
+struct CommandMagnitudeSequenceRequest {
+    std::uint64_t baseline_sample_count = 0;
+    std::uint64_t response_sample_count = 0;
+    std::uint64_t guard_sample_count = 0;
+    CommandMagnitudeRunRole run_role = CommandMagnitudeRunRole::PRIMARY;
+};
+
 struct PhysicalBPrimarySequenceRequest {
     std::uint64_t guard_sample_count = 0;
     std::uint32_t lfsr_order = 0;
@@ -106,6 +118,7 @@ struct ProbeSequenceBlock {
     std::uint64_t first_sample_index = 0;
     std::uint64_t period_sample_count = 0;
     std::uint64_t sample_count = 0;
+    int amplitude_counts = 0;
     int first_pulse_dx_counts = 0;
     int second_pulse_dx_counts = 0;
 };
@@ -116,6 +129,7 @@ struct MouseEffectProbeSequence {
     SparsePulseSequenceRequest request;
     DependencyCalibrationSequenceRequest dependency_calibration_request;
     S1LivenessSequenceRequest s1_liveness_request;
+    CommandMagnitudeSequenceRequest command_magnitude_request;
     PhysicalBPrimarySequenceRequest physical_b_primary_request;
     PhysicalBHoldoutSequenceRequest physical_b_holdout_request;
     std::vector<ProbeSequenceBlock> blocks;
@@ -146,6 +160,15 @@ bool make_dependency_calibration_sequence(
 // 与 settle 永远不得进入零扰动或分辨率估计。
 bool make_s1_liveness_sequence(
     const S1LivenessSequenceRequest& request,
+    MouseEffectProbeSequence& sequence,
+    std::string& error) noexcept;
+
+// Physical B 多幅值序列用隔离的外出/回锚命令辨识相对命令幅值和尾迹；
+// Primary 的 {1,4,13} pair 只用于拟合，{2,8} pair 只用于 confirmation。
+// Holdout 固定不同 pair/极性顺序且不得回改 Primary。两者均为 X-only、
+// 每 block 独立 pre/post guard、净 X=0，最大前缀不超过 13 counts。
+bool make_command_magnitude_sequence(
+    const CommandMagnitudeSequenceRequest& request,
     MouseEffectProbeSequence& sequence,
     std::string& error) noexcept;
 
@@ -185,6 +208,8 @@ const char* probe_sample_phase_name(ProbeSamplePhase phase) noexcept;
 const char* dependency_calibration_run_role_name(
     DependencyCalibrationRunRole role) noexcept;
 const char* s1_liveness_run_role_name(S1LivenessRunRole role) noexcept;
+const char* command_magnitude_run_role_name(
+    CommandMagnitudeRunRole role) noexcept;
 const char* probe_sequence_block_role_name(
     ProbeSequenceBlockRole role) noexcept;
 const char* probe_sequence_block_polarity_name(

@@ -71,10 +71,12 @@ $destination = Join-Path $resolvedTestRoot "remote"
 foreach ($name in @(
         "prepare_mouse_effect_probe_b.ps1",
         "prepare_mouse_effect_probe_b_holdout.ps1",
+        "prepare_mouse_effect_probe_b_command_magnitude.ps1",
         "launch_mouse_effect_probe_a.ps1",
         "design_mouse_effect_probe_prbs.py",
         "analyze_mouse_effect_probe_b.py",
-        "analyze_mouse_effect_probe_b_holdout.py")) {
+        "analyze_mouse_effect_probe_b_holdout.py",
+        "analyze_mouse_effect_probe_b_command_magnitude.py")) {
     Write-Utf8NoBom (Join-Path $scripts $name) "fixture:$name`n"
 }
 foreach ($name in @(
@@ -144,13 +146,18 @@ Assert-True ([int]$manifest.schema_version -eq 1 -and
              -not [bool]$manifest.physical_launch_executed -and
              [bool]$manifest.cross_run_holdout_tooling_included -and
              -not [bool]$manifest.cross_run_holdout_included -and
-             [int]$manifest.file_count -eq 13 -and
-             @($manifest.files).Count -eq 13) `
+             [bool]$manifest.command_magnitude_primary_tooling_included -and
+             -not [bool]$manifest.command_magnitude_holdout_prepare_included -and
+             -not [bool]$manifest.command_magnitude_run_included -and
+             [int]$manifest.file_count -eq 15 -and
+             @($manifest.files).Count -eq 15) `
     "Physical B manifest 身份、clean/Launch 边界或文件数错误"
 $manifestNames = @($manifest.files | ForEach-Object { [string]$_.name })
 foreach ($requiredName in @(
         "prepare_mouse_effect_probe_b_holdout.ps1",
-        "analyze_mouse_effect_probe_b_holdout.py")) {
+        "analyze_mouse_effect_probe_b_holdout.py",
+        "prepare_mouse_effect_probe_b_command_magnitude.ps1",
+        "analyze_mouse_effect_probe_b_command_magnitude.py")) {
     Assert-True ($manifestNames -contains $requiredName) `
         "Physical B 发布包缺少 Holdout 工具：$requiredName"
 }

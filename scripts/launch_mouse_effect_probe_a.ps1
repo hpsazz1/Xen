@@ -14,10 +14,16 @@ $physicalBConfirmation =
     "XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT"
 $physicalBHoldoutConfirmation =
     "XEN_MOUSE_EFFECT_PROBE_B_HOLDOUT_SENDS_REAL_KMBOX_INPUT"
+$physicalBMagnitudePrimaryConfirmation =
+    "XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_PRIMARY_SENDS_REAL_KMBOX_INPUT"
+$physicalBMagnitudeHoldoutConfirmation =
+    "XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_HOLDOUT_SENDS_REAL_KMBOX_INPUT"
 if (-not $AllowPhysicalOutput.IsPresent -or
     $PhysicalOutputConfirmation -notin @(
         $physicalAConfirmation, $physicalBConfirmation,
-        $physicalBHoldoutConfirmation)) {
+        $physicalBHoldoutConfirmation,
+        $physicalBMagnitudePrimaryConfirmation,
+        $physicalBMagnitudeHoldoutConfirmation)) {
     throw "Physical probe 会发送真实 KMBOX 输入，必须同时提供物理输出开关和与 task 匹配的固定确认令牌。"
 }
 $confirmation = $PhysicalOutputConfirmation
@@ -249,9 +255,27 @@ $isBHoldoutTask =
     [int]$task.schema_version -eq 7 -and
     [string]$task.evidence_type -eq "mouse_effect_probe_b_task" -and
     [string]$task.profile -eq "physical_b_prbs_holdout"
-$isBTask = $isBPrimaryTask -or $isBHoldoutTask
+$isBMagnitudePrimaryTask =
+    [int]$task.schema_version -eq 8 -and
+    [string]$task.evidence_type -eq
+        "mouse_effect_probe_b_command_magnitude_task" -and
+    [string]$task.profile -eq
+        "physical_b_command_magnitude_primary"
+$isBMagnitudeHoldoutTask =
+    [int]$task.schema_version -eq 9 -and
+    [string]$task.evidence_type -eq
+        "mouse_effect_probe_b_command_magnitude_task" -and
+    [string]$task.profile -eq
+        "physical_b_command_magnitude_holdout"
+$isBMagnitudeTask =
+    $isBMagnitudePrimaryTask -or $isBMagnitudeHoldoutTask
+$isBTask = $isBPrimaryTask -or $isBHoldoutTask -or $isBMagnitudeTask
 $expectedDispatchMode = if ($isBTask) { "physical_b" } else { "physical_a" }
-$expectedConfirmation = if ($isBHoldoutTask) {
+$expectedConfirmation = if ($isBMagnitudeHoldoutTask) {
+    $physicalBMagnitudeHoldoutConfirmation
+} elseif ($isBMagnitudePrimaryTask) {
+    $physicalBMagnitudePrimaryConfirmation
+} elseif ($isBHoldoutTask) {
     $physicalBHoldoutConfirmation
 } elseif ($isBPrimaryTask) {
     $physicalBConfirmation
@@ -349,6 +373,33 @@ if ($isBTask) {
             [uint64]$task.primary.activation_epoch)) {
         throw "Physical B cross-Run holdout role/F1/independence 安全合同无效"
     }
+    if ($isBMagnitudePrimaryTask -and (
+        [string]$task.run_role -ne "primary" -or
+        [uint64]$task.sequence_sample_count -ne 1684 -or
+        [uint64]$task.expected_nonzero_transition_count -ne 20 -or
+        [uint64]$task.max_abs_prefix_x_counts -ne 13 -or
+        -not [bool]$task.requires_user_frontend_launch -or
+        [string]$task.dynamics_policy.policy_id -ne
+            "b-command-magnitude-primary-v1" -or
+        [string]$task.dynamics_policy.input_definition -ne
+            "backend_completed_relative_command_dx_counts" -or
+        (@($task.dynamics_policy.primary_estimation_amplitudes) -join ",") -ne
+            "1,4,13" -or
+        (@($task.dynamics_policy.within_run_confirmation_amplitudes) -join ",") -ne
+            "2,8" -or
+        [bool]$task.dynamics_policy.validation_used_for_refit -or
+        [bool]$task.dynamics_policy.new_production_gain_claimed -or
+        -not [bool]$task.dynamics_policy.
+            cross_run_holdout_required_before_candidate -or
+        [bool]$task.dynamics_policy.fixed_pixel_speed_used_as_gate -or
+        [uint64]$task.safety.max_abs_pulse_counts -ne 13 -or
+        [uint64]$task.safety.max_abs_prefix_x_counts -ne 13 -or
+        -not [bool]$task.safety.manual_mouse_motion_or_wasd_forbidden)) {
+        throw "Physical B command-magnitude Primary 合同无效"
+    }
+    if ($isBMagnitudeHoldoutTask) {
+        throw "Physical B command-magnitude Holdout 尚无已发布 Prepare 合同"
+    }
 }
 
 $fileEntries = @(
@@ -395,8 +446,38 @@ if ($isBHoldoutTask) {
         [pscustomobject]@{ value = $task.files.primary_command_report; name = "Primary command report" },
         [pscustomobject]@{ value = $task.files.offline_design; name = "offline design" })
 }
+if ($isBMagnitudeTask) {
+    $fileEntries += @(
+        [pscustomobject]@{ value = $task.files.sequence_executable; name = "sequence executable" },
+        [pscustomobject]@{ value = $task.files.magnitude_analyzer; name = "magnitude analyzer" },
+        [pscustomobject]@{ value = $task.files.a2_magnitude_analysis; name = "A2 magnitude analysis" },
+        [pscustomobject]@{ value = $task.files.b0_fidelity_evaluation; name = "B0 fidelity evaluation" })
+}
 foreach ($entry in $fileEntries) {
     Assert-FileEvidence $entry.value $entry.name
+}
+if ($isBMagnitudePrimaryTask) {
+    $a2Magnitude = Get-Content -LiteralPath `
+        ([string]$task.files.a2_magnitude_analysis.path) `
+        -Raw -Encoding utf8 | ConvertFrom-Json
+    $b0Fidelity = Get-Content -LiteralPath `
+        ([string]$task.files.b0_fidelity_evaluation.path) `
+        -Raw -Encoding utf8 | ConvertFrom-Json
+    if ([string]$a2Magnitude.status -ne
+            "F1_OUTSIDE_A2_MAGNITUDE_DOMAIN" -or
+        [bool]$a2Magnitude.physical_output_capability -or
+        [int]$a2Magnitude.physical_dispatch_count -ne 0 -or
+        [bool]$a2Magnitude.production_aim_changed -or
+        -not [bool]$a2Magnitude.evaluation.
+            f1_deleted_for_magnitude_domain -or
+        [bool]$a2Magnitude.evaluation.new_production_gain_claimed -or
+        [string]$b0Fidelity.status -ne
+            "BASELINE_REPLAY_FIDELITY_INVALID" -or
+        [bool]$b0Fidelity.physical_output_capability -or
+        [int]$b0Fidelity.physical_dispatch_count -ne 0 -or
+        [bool]$b0Fidelity.production_aim_changed) {
+        throw "Physical B command-magnitude 输入证据合同无效"
+    }
 }
 if ($isBPrimaryTask) {
     $primaryF0 = Get-Content -LiteralPath `
@@ -888,6 +969,62 @@ try {
             throw "Physical B holdout sequence/F1/whole-block 合同无效"
         }
     }
+    if ($isBMagnitudePrimaryTask) {
+        $sequenceBlocks = @($sequence.blocks)
+        $blockRoles = @($sequenceBlocks | ForEach-Object {
+            [string]$_.role
+        })
+        $blockPolarities = @($sequenceBlocks | ForEach-Object {
+            [string]$_.polarity
+        })
+        $amplitudeOrder = @($sequenceBlocks | ForEach-Object {
+            [int]$_.amplitude_counts
+        })
+        if ([int]$sequence.schema -ne 6 -or
+            [string]$sequence.profile -ne
+                "physical_b_command_magnitude_primary" -or
+            [string]$sequence.request.run_role -ne "primary" -or
+            [uint64]$sequence.request.baseline_sample_count -ne 64 -or
+            [uint64]$sequence.request.response_sample_count -ne 48 -or
+            [uint64]$sequence.request.guard_sample_count -ne 32 -or
+            $samples.Count -ne 1684 -or
+            $sequenceBlocks.Count -ne 10 -or
+            [int64]$sequence.summary.net_x_counts -ne 0 -or
+            [uint64]$sequence.summary.max_abs_prefix_x_counts -ne 13 -or
+            ($amplitudeOrder -join ",") -ne
+                "1,1,4,4,13,13,2,2,8,8" -or
+            ($blockRoles -join ",") -ne
+                "estimation,estimation,estimation,estimation,estimation,estimation,confirmation,confirmation,confirmation,confirmation" -or
+            ($blockPolarities -join ",") -ne
+                "normal,inverted,normal,inverted,normal,inverted,normal,inverted,normal,inverted" -or
+            @($samples | Where-Object {
+                [int]$_.dy_counts -ne 0 -or
+                ([math]::Abs([int]$_.dx_counts) -notin
+                    @(0, 1, 2, 4, 8, 13))
+            }).Count -ne 0) {
+            throw "Physical B command-magnitude sequence 合同无效"
+        }
+        for ($blockIndex = 0;
+             $blockIndex -lt $sequenceBlocks.Count;
+             $blockIndex++) {
+            $block = $sequenceBlocks[$blockIndex]
+            $first = 64 + 162 * $blockIndex
+            $direction = if ([string]$block.polarity -eq "normal") {
+                1
+            } else {
+                -1
+            }
+            $amplitude = [int]$block.amplitude_counts
+            if ([uint64]$block.first_sample_index -ne $first -or
+                [uint64]$block.sample_count -ne 162 -or
+                [int]$samples[$first + 32].dx_counts -ne
+                    $direction * $amplitude -or
+                [int]$samples[$first + 81].dx_counts -ne
+                    -$direction * $amplitude) {
+                throw "Physical B command-magnitude block/pulse/return 边界无效"
+            }
+        }
+    }
 
     $frameTimestamps = [Collections.Generic.HashSet[int64]]::new()
     $frameSourceSessions = [Collections.Generic.HashSet[string]]::new(
@@ -1098,7 +1235,9 @@ try {
         [int64]$report.result.cumulative_requested_x_counts -eq 0 -and
         [int64]$report.result.cumulative_backend_completed_x_counts -eq 0
     $summary = [ordered]@{
-        schema_version = if ($isBHoldoutTask) {
+        schema_version = if ($isBMagnitudeTask) {
+            6
+        } elseif ($isBHoldoutTask) {
             5
         } elseif ($isBTask) {
             4
@@ -1109,7 +1248,9 @@ try {
         } else {
             1
         }
-        evidence_type = if ($isA2S1Task) {
+        evidence_type = if ($isBMagnitudeTask) {
+            "mouse_effect_probe_b_command_magnitude_launch"
+        } elseif ($isA2S1Task) {
             "mouse_effect_probe_a2_s1_launch"
         } elseif ($isA2Task) {
             "mouse_effect_probe_a2_launch"
@@ -1169,6 +1310,10 @@ try {
     if ($isA2Task -or $isA2S1Task -or $isBTask) {
         $summary.run_role = [string]$task.run_role
         $summary.scope_id = [string]$task.scope_id
+    }
+    if ($isBMagnitudeTask) {
+        $summary.validation_used_for_refit = $false
+        $summary.new_production_gain_claimed = $false
     }
     if ($isBHoldoutTask) {
         $summary.cross_run_independence = $crossRunIndependence

@@ -628,6 +628,130 @@ void test_physical_b_holdout_sequence_is_frozen_independent_and_bounded() {
            "holdout seam 必须拒绝 Primary recurrence 或其他未授权漂移");
 }
 
+void test_physical_b_command_magnitude_sequences_are_fixed_and_bounded() {
+    mouse_effect_probe::CommandMagnitudeSequenceRequest request;
+    request.baseline_sample_count = 64;
+    request.response_sample_count = 48;
+    request.guard_sample_count = 32;
+    request.run_role =
+        mouse_effect_probe::CommandMagnitudeRunRole::PRIMARY;
+    mouse_effect_probe::MouseEffectProbeSequence primary;
+    std::string error;
+    expect(mouse_effect_probe::make_command_magnitude_sequence(
+               request, primary, error),
+           "Physical B 多幅值 Primary 固定序列必须可生成: " + error);
+    expect(mouse_effect_probe::validate_mouse_effect_probe_sequence(
+               primary, error),
+           "Physical B 多幅值 Primary 必须通过公开 validator: " + error);
+    expect(primary.schema == 6U &&
+               primary.profile ==
+                   "physical_b_command_magnitude_primary" &&
+               primary.samples.size() == 1684U &&
+               primary.blocks.size() == 10U &&
+               primary.net_x_counts == 0 &&
+               primary.max_abs_prefix_x_counts == 13U &&
+               primary.sequence_sha256.size() == 64U,
+           "多幅值 Primary 必须固定 schema/profile/sample/block/net/prefix");
+
+    const std::array<int, 10> primary_amplitudes{
+        1, 1, 4, 4, 13, 13, 2, 2, 8, 8,
+    };
+    std::size_t nonzero_count = 0;
+    for (std::size_t index = 0; index < primary.samples.size(); ++index) {
+        const auto& sample = primary.samples[index];
+        const int magnitude = std::abs(sample.dx_counts);
+        expect(sample.sample_index == index && sample.dy_counts == 0 &&
+                   (magnitude == 0 || magnitude == 1 || magnitude == 2 ||
+                    magnitude == 4 || magnitude == 8 || magnitude == 13),
+               "多幅值 Primary 必须连续、X-only 且只含预注册幅值");
+        if (magnitude != 0) ++nonzero_count;
+    }
+    expect(nonzero_count == 20U,
+           "多幅值 Primary 每个独立 block 必须恰有外出/回锚两个命令");
+    for (std::size_t index = 0; index < primary.blocks.size(); ++index) {
+        const auto& block = primary.blocks[index];
+        const auto expected_polarity = index % 2U == 0U
+            ? mouse_effect_probe::ProbeSequenceBlockPolarity::NORMAL
+            : mouse_effect_probe::ProbeSequenceBlockPolarity::INVERTED;
+        const auto expected_role = index < 6U
+            ? mouse_effect_probe::ProbeSequenceBlockRole::ESTIMATION
+            : mouse_effect_probe::ProbeSequenceBlockRole::CONFIRMATION;
+        const std::size_t first = 64U + index * 162U;
+        const int direction = expected_polarity ==
+                mouse_effect_probe::ProbeSequenceBlockPolarity::NORMAL
+            ? 1 : -1;
+        expect(block.block_id == index + 1U &&
+                   block.pair_index == index / 2U + 1U &&
+                   block.role == expected_role &&
+                   block.polarity == expected_polarity &&
+                   block.amplitude_counts == primary_amplitudes[index] &&
+                   block.first_sample_index == first &&
+                   block.sample_count == 162U &&
+                   primary.samples[first + 32U].dx_counts ==
+                       direction * primary_amplitudes[index] &&
+                   primary.samples[first + 81U].dx_counts ==
+                       -direction * primary_amplitudes[index],
+               "多幅值 Primary 必须固定 fit/confirmation、极性及回锚边界");
+    }
+
+    TemporaryDirectory temporary;
+    const auto path = temporary.path() / "physical-b-magnitude-primary.json";
+    expect(mouse_effect_probe::write_mouse_effect_probe_sequence(
+               path, primary, error),
+           "多幅值 Primary 必须可原子发布: " + error);
+    mouse_effect_probe::MouseEffectProbeSequence round_trip;
+    expect(mouse_effect_probe::read_mouse_effect_probe_sequence(
+               path, round_trip, error) &&
+               round_trip.sequence_sha256 == primary.sequence_sha256 &&
+               round_trip.command_magnitude_request.run_role ==
+                   mouse_effect_probe::CommandMagnitudeRunRole::PRIMARY,
+           "多幅值 Primary schema 6 必须精确 round-trip: " + error);
+
+    request.run_role =
+        mouse_effect_probe::CommandMagnitudeRunRole::HOLDOUT;
+    mouse_effect_probe::MouseEffectProbeSequence holdout;
+    expect(mouse_effect_probe::make_command_magnitude_sequence(
+               request, holdout, error) &&
+               mouse_effect_probe::validate_mouse_effect_probe_sequence(
+                   holdout, error),
+           "多幅值 cross-Run Holdout 固定序列必须可生成并回读: " + error);
+    const std::array<int, 10> holdout_amplitudes{
+        8, 8, 2, 2, 13, 13, 1, 1, 4, 4,
+    };
+    expect(holdout.schema == 6U &&
+               holdout.profile ==
+                   "physical_b_command_magnitude_holdout" &&
+               holdout.samples.size() == 1684U &&
+               holdout.blocks.size() == 10U &&
+               holdout.net_x_counts == 0 &&
+               holdout.max_abs_prefix_x_counts == 13U,
+           "多幅值 Holdout 必须同容量、不同固定顺序且保持净零");
+    for (std::size_t index = 0; index < holdout.blocks.size(); ++index) {
+        const auto expected_polarity = index % 2U == 0U
+            ? mouse_effect_probe::ProbeSequenceBlockPolarity::INVERTED
+            : mouse_effect_probe::ProbeSequenceBlockPolarity::NORMAL;
+        expect(holdout.blocks[index].role ==
+                   mouse_effect_probe::ProbeSequenceBlockRole::
+                       CROSS_RUN_HOLDOUT &&
+                   holdout.blocks[index].polarity == expected_polarity &&
+                   holdout.blocks[index].amplitude_counts ==
+                       holdout_amplitudes[index],
+               "多幅值 Holdout 必须预注册不同 pair 顺序/极性且禁止拟合角色");
+    }
+
+    auto drifted = request;
+    drifted.response_sample_count = 47;
+    expect(!mouse_effect_probe::make_command_magnitude_sequence(
+               drifted, holdout, error),
+           "多幅值序列 seam 必须拒绝 guard/response/幅值计划漂移");
+    drifted = request;
+    drifted.run_role =
+        static_cast<mouse_effect_probe::CommandMagnitudeRunRole>(255);
+    expect(!mouse_effect_probe::make_command_magnitude_sequence(
+               drifted, holdout, error),
+           "多幅值序列 seam 必须拒绝未知 run_role");
+}
+
 void test_sequence_file_round_trip_rejects_overwrite_and_tampering() {
     TemporaryDirectory temporary;
     mouse_effect_probe::MouseEffectProbeSequence sequence;
@@ -1129,6 +1253,7 @@ int main() {
     test_a2_s1_liveness_sequences_bracket_an_exact_zero_baseline();
     test_physical_b_primary_sequence_is_frozen_complete_and_bounded();
     test_physical_b_holdout_sequence_is_frozen_independent_and_bounded();
+    test_physical_b_command_magnitude_sequences_are_fixed_and_bounded();
     test_sequence_file_round_trip_rejects_overwrite_and_tampering();
     test_executor_consumes_one_sample_per_frame_and_never_catches_up();
     test_executor_failure_stops_without_compensation();

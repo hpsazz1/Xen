@@ -69,7 +69,11 @@ void print_usage() {
         << "  XenMouseEffectProbeSequence --output <new-json> "
            "--profile physical-b-holdout --guard-samples <n> "
            "--lfsr-order <n> --feedback-mask <decimal> --seed <n> "
-           "--phase <n> --offline-sequence-semantic-sha256 <sha256>\n";
+           "--phase <n> --offline-sequence-semantic-sha256 <sha256>\n"
+        << "  XenMouseEffectProbeSequence --output <new-json> "
+           "--profile physical-b-command-magnitude "
+           "--run-role <primary|holdout> --baseline-samples 64 "
+           "--response-samples 48 --guard-samples 32\n";
 }
 
 } // namespace
@@ -132,7 +136,8 @@ int wmain(int argc, wchar_t* argv[]) {
                      value == L"dependency-calibration-a2" ||
                      value == L"s1-liveness-a2" ||
                      value == L"physical-b-primary" ||
-                     value == L"physical-b-holdout")) {
+                     value == L"physical-b-holdout" ||
+                     value == L"physical-b-command-magnitude")) {
             profile.assign(value);
             seen_profile = true;
         } else if (argument == L"--blocks" && !seen_blocks &&
@@ -140,7 +145,8 @@ int wmain(int argc, wchar_t* argv[]) {
             seen_blocks = true;
         } else if (argument == L"--run-role" && !seen_run_role &&
                    (value == L"p-cal" || value == L"p-holdout" ||
-                    value == L"primary" || value == L"validation")) {
+                    value == L"primary" || value == L"validation" ||
+                    value == L"holdout")) {
             run_role.assign(value);
             seen_run_role = true;
         } else if (argument == L"--challenge-pulses" &&
@@ -208,10 +214,12 @@ int wmain(int argc, wchar_t* argv[]) {
         profile == L"physical-b-holdout";
     const bool physical_b_profile =
         physical_b_primary_profile || physical_b_holdout_profile;
+    const bool command_magnitude_profile =
+        profile == L"physical-b-command-magnitude";
     const bool common_valid = seen_output &&
         !output_path.empty() && output_path.is_absolute();
     const bool sparse_valid = !dependency_profile && !s1_liveness_profile &&
-        !physical_b_profile && seen_baseline &&
+        !physical_b_profile && !command_magnitude_profile && seen_baseline &&
         seen_response && seen_guard && !seen_blocks && !seen_run_role &&
         !seen_challenge_pulses && !seen_challenge_stride &&
         !seen_peak_hold && !seen_settle && !seen_lfsr_order &&
@@ -237,9 +245,16 @@ int wmain(int argc, wchar_t* argv[]) {
         !seen_challenge_stride && !seen_peak_hold && !seen_settle &&
         seen_lfsr_order && seen_feedback_mask && seen_seed && seen_phase &&
         seen_offline_sequence_sha;
+    const bool command_magnitude_valid = command_magnitude_profile &&
+        seen_baseline && seen_response && seen_guard && !seen_blocks &&
+        seen_run_role && (run_role == L"primary" || run_role == L"holdout") &&
+        !seen_challenge_pulses && !seen_challenge_stride &&
+        !seen_peak_hold && !seen_settle && !seen_lfsr_order &&
+        !seen_feedback_mask && !seen_seed && !seen_phase &&
+        !seen_offline_sequence_sha;
     if (!common_valid ||
         (!sparse_valid && !dependency_valid && !s1_liveness_valid &&
-         !physical_b_valid)) {
+         !physical_b_valid && !command_magnitude_valid)) {
         std::cerr << "缺少必填参数，且 output 必须是绝对路径。\n";
         print_usage();
         return 2;
@@ -270,6 +285,19 @@ int wmain(int argc, wchar_t* argv[]) {
             generated = mouse_effect_probe::make_physical_b_holdout_sequence(
                 holdout_request, sequence, error);
         }
+    } else if (command_magnitude_profile) {
+        mouse_effect_probe::CommandMagnitudeSequenceRequest
+            magnitude_request;
+        magnitude_request.baseline_sample_count =
+            request.baseline_sample_count;
+        magnitude_request.response_sample_count =
+            request.response_sample_count;
+        magnitude_request.guard_sample_count = request.guard_sample_count;
+        magnitude_request.run_role = run_role == L"primary"
+            ? mouse_effect_probe::CommandMagnitudeRunRole::PRIMARY
+            : mouse_effect_probe::CommandMagnitudeRunRole::HOLDOUT;
+        generated = mouse_effect_probe::make_command_magnitude_sequence(
+            magnitude_request, sequence, error);
     } else if (dependency_profile) {
         dependency_request.run_role = run_role == L"p-cal"
             ? mouse_effect_probe::DependencyCalibrationRunRole::P_CAL

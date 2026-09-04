@@ -79,7 +79,50 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $invalid)) `
         'An invalid recurrence must not leave an output file.'
 
-    Write-Host 'Mouse Effect Probe sequence CLI holdout contract passed.'
+    $magnitudeOutput = Join-Path $resolvedTestRoot `
+        'physical-b-command-magnitude-primary.json'
+    & $resolvedExecutable `
+        --output $magnitudeOutput `
+        --profile physical-b-command-magnitude `
+        --run-role primary `
+        --baseline-samples 64 `
+        --response-samples 48 `
+        --guard-samples 32
+    Assert-True ($LASTEXITCODE -eq 0) `
+        'The command-magnitude Primary CLI should generate its fixed sequence.'
+    $magnitude = Get-Content -LiteralPath $magnitudeOutput -Raw |
+        ConvertFrom-Json
+    Assert-True ($magnitude.schema -eq 6 -and
+                 $magnitude.profile -eq
+                    'physical_b_command_magnitude_primary' -and
+                 $magnitude.samples.Count -eq 1684 -and
+                 $magnitude.blocks.Count -eq 10 -and
+                 $magnitude.summary.net_x_counts -eq 0 -and
+                 $magnitude.summary.max_abs_prefix_x_counts -eq 13) `
+        'The command-magnitude Primary CLI contract did not match.'
+    Assert-True ((@($magnitude.blocks | ForEach-Object {
+                    [int]$_.amplitude_counts }) -join ',') -eq
+                    '1,1,4,4,13,13,2,2,8,8') `
+        'The command-magnitude Primary amplitude order must stay frozen.'
+
+    $invalidMagnitude = Join-Path $resolvedTestRoot `
+        'invalid-command-magnitude.json'
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $resolvedExecutable `
+        --output $invalidMagnitude `
+        --profile physical-b-command-magnitude `
+        --run-role primary `
+        --baseline-samples 64 `
+        --response-samples 47 `
+        --guard-samples 32 2>&1 | Out-Null
+    $invalidMagnitudeExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $savedErrorActionPreference
+    Assert-True ($invalidMagnitudeExitCode -ne 0 -and
+                 -not (Test-Path -LiteralPath $invalidMagnitude)) `
+        'The command-magnitude CLI must reject response-window drift.'
+
+    Write-Host 'Mouse Effect Probe sequence CLI contracts passed.'
 }
 finally {
     if (Test-Path -LiteralPath $resolvedTestRoot) {

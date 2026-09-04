@@ -26,6 +26,7 @@ constexpr std::uint32_t kSequenceSchema = 1;
 constexpr std::uint32_t kDependencyCalibrationSequenceSchema = 2;
 constexpr std::uint32_t kS1LivenessSequenceSchema = 3;
 constexpr std::uint32_t kPhysicalBPrimarySequenceSchema = 5;
+constexpr std::uint32_t kCommandMagnitudeSequenceSchema = 6;
 constexpr std::string_view kSparsePulseProfile = "sparse_pulse_a";
 constexpr std::string_view kDependencyCalibrationPrimaryProfile =
     "dependency_calibration_a2_p_cal";
@@ -53,6 +54,13 @@ constexpr std::uint64_t kPhysicalBHoldoutSeed = 1;
 constexpr std::uint64_t kPhysicalBHoldoutPhase = 21;
 constexpr std::string_view kPhysicalBHoldoutOfflineSequenceSha256 =
     "e0dffb8b72d6326803a84a2ca37a9cb5d016c9bcddd14728b9e736547e1082f4";
+constexpr std::string_view kCommandMagnitudePrimaryProfile =
+    "physical_b_command_magnitude_primary";
+constexpr std::string_view kCommandMagnitudeHoldoutProfile =
+    "physical_b_command_magnitude_holdout";
+constexpr std::uint64_t kCommandMagnitudeBaselineSamples = 64;
+constexpr std::uint64_t kCommandMagnitudeResponseSamples = 48;
+constexpr std::uint64_t kCommandMagnitudeGuardSamples = 32;
 constexpr std::uint64_t kMaximumSequenceSamples = 1'000'000;
 constexpr std::uint64_t kMaximumDependencyCalibrationBlocks = 64;
 constexpr std::uint64_t kMaximumS1LivenessSamples = 2'400;
@@ -186,6 +194,17 @@ bool expected_s1_liveness_sample_count(
     return true;
 }
 
+bool valid_command_magnitude_request(
+        const CommandMagnitudeSequenceRequest& request) noexcept {
+    return request.baseline_sample_count ==
+               kCommandMagnitudeBaselineSamples &&
+           request.response_sample_count ==
+               kCommandMagnitudeResponseSamples &&
+           request.guard_sample_count == kCommandMagnitudeGuardSamples &&
+           (request.run_role == CommandMagnitudeRunRole::PRIMARY ||
+            request.run_role == CommandMagnitudeRunRole::HOLDOUT);
+}
+
 bool same_physical_b_primary_request(
         const PhysicalBPrimarySequenceRequest& first,
         const PhysicalBPrimarySequenceRequest& second) noexcept {
@@ -219,6 +238,15 @@ bool same_physical_b_holdout_request(
            first.phase == second.phase &&
            first.offline_sequence_semantic_sha256 ==
                second.offline_sequence_semantic_sha256;
+}
+
+bool same_command_magnitude_request(
+        const CommandMagnitudeSequenceRequest& first,
+        const CommandMagnitudeSequenceRequest& second) noexcept {
+    return first.baseline_sample_count == second.baseline_sample_count &&
+           first.response_sample_count == second.response_sample_count &&
+           first.guard_sample_count == second.guard_sample_count &&
+           first.run_role == second.run_role;
 }
 
 bool valid_physical_b_holdout_request(
@@ -442,6 +470,109 @@ bool build_s1_liveness_sequence(
                  request.baseline_sample_count);
     append_s1_liveness_challenge(sequence, 2U, -role_sign, request);
     summarize_sequence(sequence);
+    error.clear();
+    return true;
+}
+
+void append_command_magnitude_block(
+        MouseEffectProbeSequence& sequence,
+        std::uint64_t block_id,
+        std::uint64_t pair_index,
+        ProbeSequenceBlockRole role,
+        ProbeSequenceBlockPolarity polarity,
+        int amplitude_counts,
+        const CommandMagnitudeSequenceRequest& request) {
+    ProbeSequenceBlock block;
+    block.block_id = block_id;
+    block.pair_index = pair_index;
+    block.role = role;
+    block.polarity = polarity;
+    block.first_sample_index = sequence.samples.size();
+    block.amplitude_counts = amplitude_counts;
+    const int direction = polarity == ProbeSequenceBlockPolarity::NORMAL
+        ? 1 : -1;
+    append_zeros(sequence, block_id, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
+    append_sample(sequence, block_id, ProbeSamplePhase::PULSE,
+                  direction * amplitude_counts);
+    append_zeros(sequence, block_id, ProbeSamplePhase::RESPONSE,
+                 request.response_sample_count);
+    append_sample(sequence, block_id, ProbeSamplePhase::PULSE,
+                  -direction * amplitude_counts);
+    append_zeros(sequence, block_id, ProbeSamplePhase::RESPONSE,
+                 request.response_sample_count);
+    append_zeros(sequence, block_id, ProbeSamplePhase::GUARD,
+                 request.guard_sample_count);
+    block.sample_count = sequence.samples.size() - block.first_sample_index;
+    sequence.blocks.push_back(block);
+}
+
+bool build_command_magnitude_sequence(
+        const CommandMagnitudeSequenceRequest& request,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) {
+    if (!valid_command_magnitude_request(request)) {
+        set_error(error,
+            "Physical B 多幅值 request 必须保持 baseline/response/guard=64/48/32");
+        return false;
+    }
+    constexpr std::array<int, 5> primary_amplitudes{1, 4, 13, 2, 8};
+    constexpr std::array<int, 5> holdout_amplitudes{8, 2, 13, 1, 4};
+    constexpr std::uint64_t kPairCount = primary_amplitudes.size();
+    constexpr std::uint64_t kBlockCount = kPairCount * 2U;
+    constexpr std::uint64_t kBlockSampleCount =
+        kCommandMagnitudeGuardSamples * 2U +
+        kCommandMagnitudeResponseSamples * 2U + 2U;
+    constexpr std::uint64_t kExpectedSampleCount =
+        kCommandMagnitudeBaselineSamples +
+        kBlockCount * kBlockSampleCount;
+    static_assert(kExpectedSampleCount == 1684U);
+
+    sequence = {};
+    sequence.schema = kCommandMagnitudeSequenceSchema;
+    sequence.profile = request.run_role == CommandMagnitudeRunRole::PRIMARY
+        ? kCommandMagnitudePrimaryProfile
+        : kCommandMagnitudeHoldoutProfile;
+    sequence.command_magnitude_request = request;
+    sequence.samples.reserve(static_cast<std::size_t>(kExpectedSampleCount));
+    sequence.blocks.reserve(static_cast<std::size_t>(kBlockCount));
+    append_zeros(sequence, 0U, ProbeSamplePhase::BASELINE,
+                 request.baseline_sample_count);
+
+    const auto& amplitudes = request.run_role ==
+            CommandMagnitudeRunRole::PRIMARY
+        ? primary_amplitudes : holdout_amplitudes;
+    std::uint64_t block_id = 1U;
+    for (std::size_t pair = 0; pair < amplitudes.size(); ++pair) {
+        const auto role = request.run_role == CommandMagnitudeRunRole::HOLDOUT
+            ? ProbeSequenceBlockRole::CROSS_RUN_HOLDOUT
+            : pair < 3U
+                ? ProbeSequenceBlockRole::ESTIMATION
+                : ProbeSequenceBlockRole::CONFIRMATION;
+        const auto first_polarity = request.run_role ==
+                CommandMagnitudeRunRole::PRIMARY
+            ? ProbeSequenceBlockPolarity::NORMAL
+            : ProbeSequenceBlockPolarity::INVERTED;
+        const auto second_polarity = first_polarity ==
+                ProbeSequenceBlockPolarity::NORMAL
+            ? ProbeSequenceBlockPolarity::INVERTED
+            : ProbeSequenceBlockPolarity::NORMAL;
+        append_command_magnitude_block(
+            sequence, block_id++, pair + 1U, role, first_polarity,
+            amplitudes[pair], request);
+        append_command_magnitude_block(
+            sequence, block_id++, pair + 1U, role, second_polarity,
+            amplitudes[pair], request);
+    }
+    summarize_sequence(sequence);
+    if (sequence.samples.size() != kExpectedSampleCount ||
+        sequence.blocks.size() != kBlockCount ||
+        sequence.net_x_counts != 0 ||
+        sequence.max_abs_prefix_x_counts != 13U) {
+        set_error(error,
+            "Physical B 多幅值 exact schedule 未满足 sample/net/prefix 合同");
+        return false;
+    }
     error.clear();
     return true;
 }
@@ -700,6 +831,17 @@ nlohmann::ordered_json canonical_payload(
                 {"period_sample_count", block.period_sample_count},
                 {"sample_count", block.sample_count},
             });
+        } else if (sequence.schema == kCommandMagnitudeSequenceSchema) {
+            blocks.push_back({
+                {"block_id", block.block_id},
+                {"pair_index", block.pair_index},
+                {"role", probe_sequence_block_role_name(block.role)},
+                {"polarity", probe_sequence_block_polarity_name(
+                    block.polarity)},
+                {"amplitude_counts", block.amplitude_counts},
+                {"first_sample_index", block.first_sample_index},
+                {"sample_count", block.sample_count},
+            });
         } else {
             blocks.push_back({
                 {"block_id", block.block_id},
@@ -760,6 +902,17 @@ nlohmann::ordered_json canonical_payload(
             sequence.s1_liveness_request.baseline_sample_count;
         request["run_role"] = s1_liveness_run_role_name(
             sequence.s1_liveness_request.run_role);
+    } else if (sequence.schema == kCommandMagnitudeSequenceSchema) {
+        request = {
+            {"baseline_sample_count",
+             sequence.command_magnitude_request.baseline_sample_count},
+            {"response_sample_count",
+             sequence.command_magnitude_request.response_sample_count},
+            {"guard_sample_count",
+             sequence.command_magnitude_request.guard_sample_count},
+            {"run_role", command_magnitude_run_role_name(
+             sequence.command_magnitude_request.run_role)},
+        };
     } else if (sequence.profile == kPhysicalBPrimaryProfile) {
         request = {
             {"guard_sample_count",
@@ -909,6 +1062,7 @@ bool same_block(const ProbeSequenceBlock& first,
            first.first_sample_index == second.first_sample_index &&
            first.period_sample_count == second.period_sample_count &&
            first.sample_count == second.sample_count &&
+           first.amplitude_counts == second.amplitude_counts &&
            first.first_pulse_dx_counts == second.first_pulse_dx_counts &&
            first.second_pulse_dx_counts == second.second_pulse_dx_counts;
 }
@@ -1057,6 +1211,20 @@ bool parse_s1_liveness_run_role(
     return false;
 }
 
+bool parse_command_magnitude_run_role(
+        std::string_view value,
+        CommandMagnitudeRunRole& output) noexcept {
+    if (value == "primary") {
+        output = CommandMagnitudeRunRole::PRIMARY;
+        return true;
+    }
+    if (value == "holdout") {
+        output = CommandMagnitudeRunRole::HOLDOUT;
+        return true;
+    }
+    return false;
+}
+
 bool valid_run_uuid(std::string_view value) noexcept {
     if (value.size() != 36U) return false;
     for (std::size_t index = 0; index < value.size(); ++index) {
@@ -1115,6 +1283,10 @@ bool parse_document(const nlohmann::ordered_json& document,
     const bool physical_b_holdout_profile =
         candidate.schema == kPhysicalBPrimarySequenceSchema &&
         candidate.profile == kPhysicalBHoldoutProfile;
+    const bool command_magnitude_profile =
+        candidate.schema == kCommandMagnitudeSequenceSchema &&
+        (candidate.profile == kCommandMagnitudePrimaryProfile ||
+         candidate.profile == kCommandMagnitudeHoldoutProfile);
     if (sparse_profile) {
         if (!has_exact_keys(request,
                 {"baseline_sample_count", "response_sample_count",
@@ -1191,6 +1363,35 @@ bool parse_document(const nlohmann::ordered_json& document,
             set_error(error, "A2 S1 活性序列 run_role 非法");
             return false;
         }
+    } else if (command_magnitude_profile) {
+        std::string run_role;
+        if (!has_exact_keys(request,
+                {"baseline_sample_count", "response_sample_count",
+                 "guard_sample_count", "run_role"}) ||
+            !read_u64(request, "baseline_sample_count",
+                      candidate.command_magnitude_request.
+                          baseline_sample_count) ||
+            !read_u64(request, "response_sample_count",
+                      candidate.command_magnitude_request.
+                          response_sample_count) ||
+            !read_u64(request, "guard_sample_count",
+                      candidate.command_magnitude_request.
+                          guard_sample_count) ||
+            !request.at("run_role").is_string()) {
+            set_error(error,
+                "Physical B 多幅值 request 字段集合或类型非法");
+            return false;
+        }
+        run_role = request.at("run_role").get<std::string>();
+        if (!parse_command_magnitude_run_role(
+                run_role, candidate.command_magnitude_request.run_role) ||
+            (candidate.profile == kCommandMagnitudePrimaryProfile) !=
+                (candidate.command_magnitude_request.run_role ==
+                 CommandMagnitudeRunRole::PRIMARY)) {
+            set_error(error,
+                "Physical B 多幅值 profile/run_role 组合非法");
+            return false;
+        }
     } else if (physical_b_primary_profile) {
         std::uint64_t lfsr_order = 0;
         std::uint64_t feedback_mask = 0;
@@ -1259,6 +1460,7 @@ bool parse_document(const nlohmann::ordered_json& document,
         sparse_profile || s1_liveness_profile ? 2U :
         physical_b_primary_profile ? 6U :
         physical_b_holdout_profile ? 2U :
+        command_magnitude_profile ? 10U :
         static_cast<std::size_t>(kMaximumDependencyCalibrationBlocks);
     if (!blocks.is_array() || blocks.size() > maximum_blocks) {
         set_error(error, "序列 blocks 必须是固定容量数组");
@@ -1288,6 +1490,29 @@ bool parse_document(const nlohmann::ordered_json& document,
                 !read_u64(value, "sample_count", block.sample_count)) {
                 set_error(error,
                     "Physical B block 字段集合或类型非法");
+                return false;
+            }
+        } else if (command_magnitude_profile) {
+            if (!has_exact_keys(value,
+                    {"block_id", "pair_index", "role", "polarity",
+                     "amplitude_counts", "first_sample_index",
+                     "sample_count"}) ||
+                !value.at("role").is_string() ||
+                !value.at("polarity").is_string() ||
+                !read_u64(value, "block_id", block.block_id) ||
+                !read_u64(value, "pair_index", block.pair_index) ||
+                !parse_probe_sequence_block_role(
+                    value.at("role").get<std::string>(), block.role) ||
+                !parse_probe_sequence_block_polarity(
+                    value.at("polarity").get<std::string>(),
+                    block.polarity) ||
+                !read_int(value, "amplitude_counts",
+                          block.amplitude_counts) ||
+                !read_u64(value, "first_sample_index",
+                          block.first_sample_index) ||
+                !read_u64(value, "sample_count", block.sample_count)) {
+                set_error(error,
+                    "Physical B 多幅值 block 字段集合或类型非法");
                 return false;
             }
         } else {
@@ -1380,6 +1605,15 @@ const char* s1_liveness_run_role_name(S1LivenessRunRole role) noexcept {
     switch (role) {
         case S1LivenessRunRole::PRIMARY: return "primary";
         case S1LivenessRunRole::VALIDATION: return "validation";
+    }
+    return "unknown";
+}
+
+const char* command_magnitude_run_role_name(
+        CommandMagnitudeRunRole role) noexcept {
+    switch (role) {
+        case CommandMagnitudeRunRole::PRIMARY: return "primary";
+        case CommandMagnitudeRunRole::HOLDOUT: return "holdout";
     }
     return "unknown";
 }
@@ -1484,6 +1718,37 @@ bool make_s1_liveness_sequence(
     }
 }
 
+bool make_command_magnitude_sequence(
+        const CommandMagnitudeSequenceRequest& request,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) noexcept {
+    try {
+        MouseEffectProbeSequence candidate;
+        if (!build_command_magnitude_sequence(request, candidate, error)) {
+            sequence = {};
+            return false;
+        }
+        const std::string payload = canonical_payload(candidate).dump();
+        if (!sha256(payload, candidate.sequence_sha256, error)) {
+            sequence = {};
+            return false;
+        }
+        sequence = std::move(candidate);
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        sequence = {};
+        set_error(error,
+            std::string("生成 Physical B 多幅值序列异常: ") +
+            exception.what());
+        return false;
+    } catch (...) {
+        sequence = {};
+        set_error(error, "生成 Physical B 多幅值序列时发生未知异常");
+        return false;
+    }
+}
+
 bool make_physical_b_primary_sequence(
         const PhysicalBPrimarySequenceRequest& request,
         MouseEffectProbeSequence& sequence,
@@ -1565,6 +1830,10 @@ bool validate_mouse_effect_probe_sequence(
         const bool physical_b_holdout =
             sequence.schema == kPhysicalBPrimarySequenceSchema &&
             sequence.profile == kPhysicalBHoldoutProfile;
+        const bool command_magnitude =
+            sequence.schema == kCommandMagnitudeSequenceSchema &&
+            (sequence.profile == kCommandMagnitudePrimaryProfile ||
+             sequence.profile == kCommandMagnitudeHoldoutProfile);
         if (sparse) {
             if (!make_sparse_pulse_sequence(
                     sequence.request, expected, error)) {
@@ -1579,6 +1848,11 @@ bool validate_mouse_effect_probe_sequence(
         } else if (s1_liveness) {
             if (!make_s1_liveness_sequence(
                     sequence.s1_liveness_request, expected, error)) {
+                return false;
+            }
+        } else if (command_magnitude) {
+            if (!make_command_magnitude_sequence(
+                    sequence.command_magnitude_request, expected, error)) {
                 return false;
             }
         } else if (physical_b_primary) {
@@ -1605,6 +1879,9 @@ bool validate_mouse_effect_probe_sequence(
             (s1_liveness && !same_s1_liveness_request(
                 sequence.s1_liveness_request,
                 expected.s1_liveness_request)) ||
+            (command_magnitude && !same_command_magnitude_request(
+                sequence.command_magnitude_request,
+                expected.command_magnitude_request)) ||
             (physical_b_primary && !same_physical_b_primary_request(
                 sequence.physical_b_primary_request,
                 expected.physical_b_primary_request)) ||

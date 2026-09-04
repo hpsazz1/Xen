@@ -23,6 +23,8 @@ enum class MouseEffectProbePhysicalAuthorization {
     PHYSICAL_A,
     PHYSICAL_B_PRIMARY,
     PHYSICAL_B_HOLDOUT,
+    PHYSICAL_B_MAGNITUDE_PRIMARY,
+    PHYSICAL_B_MAGNITUDE_HOLDOUT,
 };
 
 enum class MouseEffectProbeSafetyPhase {

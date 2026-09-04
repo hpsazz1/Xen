@@ -1281,6 +1281,23 @@ if(BUILD_TESTING)
                 "${PROJECT_SOURCE_DIR}/tests/aim_x_latest_pixel_holdout_fixture.h"
             --test-root
                 "${CMAKE_BINARY_DIR}/aim-production-red-plan-builder-tests")
+    add_test(NAME aim_production_red_fidelity_plan_builder_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/aim_production_red_fidelity_plan_builder_tests.py"
+            --builder
+                "${PROJECT_SOURCE_DIR}/scripts/build_aim_production_red_dbed788b_fidelity_plan.py"
+            --test-root
+                "${CMAKE_BINARY_DIR}/aim-production-red-fidelity-plan-builder-tests")
+    add_test(NAME mouse_effect_probe_a2_magnitude_domain_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_a2_magnitude_domain_tests.py"
+            --analyzer
+                "${PROJECT_SOURCE_DIR}/scripts/analyze_mouse_effect_probe_a2_magnitude_domain.py")
+    add_test(NAME mouse_effect_probe_b_command_magnitude_analysis_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_command_magnitude_analysis_tests.py"
+            --analyzer
+                "${PROJECT_SOURCE_DIR}/scripts/analyze_mouse_effect_probe_b_command_magnitude.py")
     # 固定 powershell.exe 仍会继承调用方的 PSModulePath。统一清除该变量，
     # 让 Windows PowerShell 5 按自身 PSHOME 重建系统模块路径；cmake -E env
     # 只改变测试子进程，不修改调用 CTest 的父环境。
@@ -1381,6 +1398,21 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_b_holdout.ps1"
         -LaunchScript
             "${PROJECT_SOURCE_DIR}/scripts/launch_mouse_effect_probe_a.ps1")
+    xen_add_windows_powershell_test(
+        mouse_effect_probe_b_command_magnitude_script_contract_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_command_magnitude_script_contract_tests.ps1"
+        -PrepareScript
+            "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_b_command_magnitude.ps1"
+        -LaunchScript
+            "${PROJECT_SOURCE_DIR}/scripts/launch_mouse_effect_probe_a.ps1")
+    xen_add_windows_powershell_test(
+        mouse_effect_probe_b_command_magnitude_prepare_integration_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_command_magnitude_prepare_integration_tests.ps1"
+        -PrepareScript
+            "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_b_command_magnitude.ps1"
+        -ToolRoot "$<TARGET_FILE_DIR:xen_mouse_effect_probe>"
+        -TestRoot
+            "${CMAKE_BINARY_DIR}/mouse-effect-probe-b-command-magnitude-prepare-integration-tests")
     xen_add_windows_powershell_test(
         mouse_effect_probe_b_publish_tests
         "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_publish_tests.ps1"
