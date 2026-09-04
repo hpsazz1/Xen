@@ -67,7 +67,7 @@ def _schema_semantic_sha256() -> str:
         "evidence_type":
             "mouse_effect_probe_b_composite_phase_calibration",
         "run_role": "CALIBRATION_DELETION",
-        "phase_policy_id": "b-meas-phase-d1-v1",
+        "phase_policy_id": "b-meas-phase-d1-v2",
         "counterbalance_design": "WILLIAMS_4X4_FIRST_ORDER",
         "timestamp_boundary": "NDI_SDK_SUBMISSION_UTC_NOT_EXPOSURE",
     })
@@ -192,12 +192,15 @@ def _validate_header(evidence: dict[str, Any]) -> str:
             "EVIDENCE_HEADER_INVALID", "calibration seal 缺失")
     assert isinstance(seal, dict)
     frozen_at = _exact_int(
-        seal.get("frozen_at_steady_ns"), "seal frozen time")
+        seal.get("frozen_at_utc_unix_ns"), "seal frozen UTC time")
+    accepted_at = _exact_int(
+        seal.get("plan_accepted_at_qpc"), "plan accepted QPC")
     acquired_at = _exact_int(
-        seal.get("acquisition_started_at_steady_ns"),
-        "acquisition start time")
+        seal.get("acquisition_started_at_qpc"),
+        "acquisition start QPC")
     revealed_at = _exact_int(
-        seal.get("revealed_at_steady_ns"), "response reveal time")
+        seal.get("revealed_at_qpc"), "response reveal QPC")
+    scheduler_clock = seal.get("scheduler_clock")
     _reject(seal.get("schema_semantic_sha256") !=
                 _schema_semantic_sha256() or
             seal.get("evaluator_file_sha256") !=
@@ -205,7 +208,16 @@ def _validate_header(evidence: dict[str, Any]) -> str:
             not _is_sha256(seal.get("order_manifest_sha256")) or
             seal.get("model_semantic_sha256") is not None or
             seal.get("response_revealed_before_freeze") is not False or
-            frozen_at < 0 or not frozen_at < acquired_at < revealed_at,
+            frozen_at <= 0 or
+            not isinstance(scheduler_clock, dict) or
+            scheduler_clock.get("clock_kind") != "WINDOWS_QPC" or
+            not isinstance(scheduler_clock.get("clock_session_id"), str) or
+            not scheduler_clock.get("clock_session_id") or
+            _exact_int(scheduler_clock.get("frequency_hz"),
+                       "scheduler QPC frequency") <= 0 or
+            _exact_int(scheduler_clock.get("producer_process_id"),
+                       "scheduler process") <= 0 or
+            not 0 <= accepted_at < acquired_at < revealed_at,
             "EVIDENCE_HEADER_INVALID",
             "schema/evaluator/order/time seal 无效")
     run_uuid = evidence.get("run_uuid")
@@ -245,7 +257,7 @@ def _validate_phase_policy(evidence: dict[str, Any]) -> int:
     repeats = _exact_int(
         policy.get("minimum_repeats_per_phase_and_sign"),
         "minimum repeats", "PHASE_CELL_CONTRACT_INVALID")
-    _reject(policy.get("policy_id") != "b-meas-phase-d1-v1" or
+    _reject(policy.get("policy_id") != "b-meas-phase-d1-v2" or
             policy.get("phase_scale") != "Q0.32_CYCLE" or
             policy.get("phase_cells") != expected_cells or
             tolerance != Q32 // 16 or repeats != 4 or
@@ -272,6 +284,24 @@ def _valid_positive_geometry(value: Any, count: int) -> bool:
 
 def _validate_capture_binding(evidence: dict[str, Any]) -> tuple[
         str, str, str, str]:
+    policy = evidence.get("capture_policy")
+    _reject(not isinstance(policy, dict),
+            "CAPTURE_BINDING_INVALID", "capture policy 缺失")
+    assert isinstance(policy, dict)
+    policy_semantic = policy.get("semantic_sha256")
+    policy_input = dict(policy)
+    policy_input.pop("semantic_sha256", None)
+    _reject(not _is_sha256(policy_semantic) or
+            policy_semantic != _canonical_sha256(policy_input),
+            "CAPTURE_BINDING_INVALID", "capture policy semantic 无效")
+    dynamic_fields = {
+        "capture_policy_semantic_sha256", "clock_mapping_evidence_sha256",
+        "clock_mapping_stale", "completion_clock_session_id",
+        "submission_clock_session_id", "mapping_segment_id",
+    }
+    _reject(any(field in policy for field in dynamic_fields),
+            "CAPTURE_BINDING_INVALID",
+            "capture policy 不得包含采集后动态 session/mapping")
     binding = evidence.get("capture_binding")
     _reject(not isinstance(binding, dict),
             "CAPTURE_BINDING_INVALID", "capture binding 缺失")
@@ -282,6 +312,15 @@ def _validate_capture_binding(evidence: dict[str, Any]) -> tuple[
     _reject(not _is_sha256(semantic) or
             semantic != _canonical_sha256(semantic_input),
             "CAPTURE_BINDING_INVALID", "capture binding semantic 无效")
+    _reject(binding.get("capture_policy_semantic_sha256") !=
+                policy_semantic,
+            "CAPTURE_BINDING_INVALID", "capture binding 未绑定 policy")
+    for field, expected in policy.items():
+        if field == "semantic_sha256":
+            continue
+        _reject(binding.get(field) != expected,
+                "CAPTURE_BINDING_INVALID",
+                f"actual capture binding 的 {field} 与 policy 不符")
 
     source_geometry = binding.get("source_geometry")
     roi_geometry = binding.get("roi_geometry")
@@ -452,7 +491,7 @@ def _validate_phase_interval(value: Any, phase_cell: str,
     upper = _exact_int(value.get("upper_closed"), "phase interval upper",
                        "PHASE_CELL_CONTRACT_INVALID")
     center = PHASE_NUMERATORS[phase_cell] * Q32 // 8
-    _reject(lower < 0 or upper >= Q32 or lower > center or upper < center or
+    _reject(lower < 0 or upper >= Q32 or lower > upper or
             lower < center - tolerance or upper > center + tolerance,
             "PHASE_CELL_CONTRACT_INVALID",
             "completion phase interval 超出预注册 cell")

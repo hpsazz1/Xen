@@ -69,6 +69,32 @@ struct CommandMagnitudeSequenceRequest {
     CommandMagnitudeRunRole run_role = CommandMagnitudeRunRole::PRIMARY;
 };
 
+// Composite-phase calibration 的序列和调度参数全部由版本化生成器固定。
+// predictor sample 只提供下一 NDI submission boundary 的预测锚；真正进入
+// capture ledger 的是它之后连续六个 source event。
+struct CompositePhaseSequenceRequest {
+    std::uint64_t predictor_sample_count = 0;
+    std::uint64_t window_sample_count = 0;
+    int single_magnitude_counts = 0;
+    std::int64_t issue_lead_ns = 0;
+    std::uint64_t target_tolerance_q32 = 0;
+    std::uint64_t active_guard_ns = 0;
+    std::uint64_t max_wake_lateness_ns = 0;
+    std::uint64_t max_event_interval_width_ns = 0;
+    std::uint64_t max_active_wait_ns_per_event = 0;
+    std::uint64_t max_active_wait_ns_total = 0;
+    std::string timer_mode;
+};
+
+struct CompositePhaseWindow {
+    std::uint64_t window_ordinal = 0;
+    std::string window_id;
+    std::string phase_cell;
+    bool negative_control = false;
+    std::uint64_t first_sample_index = 0;
+    std::uint64_t sample_count = 0;
+};
+
 struct PhysicalBPrimarySequenceRequest {
     std::uint64_t guard_sample_count = 0;
     std::uint32_t lfsr_order = 0;
@@ -130,9 +156,11 @@ struct MouseEffectProbeSequence {
     DependencyCalibrationSequenceRequest dependency_calibration_request;
     S1LivenessSequenceRequest s1_liveness_request;
     CommandMagnitudeSequenceRequest command_magnitude_request;
+    CompositePhaseSequenceRequest composite_phase_request;
     PhysicalBPrimarySequenceRequest physical_b_primary_request;
     PhysicalBHoldoutSequenceRequest physical_b_holdout_request;
     std::vector<ProbeSequenceBlock> blocks;
+    std::vector<CompositePhaseWindow> composite_phase_windows;
     std::vector<ProbeSequenceSample> samples;
     std::int64_t net_x_counts = 0;
     std::uint64_t max_abs_prefix_x_counts = 0;
@@ -169,6 +197,13 @@ bool make_s1_liveness_sequence(
 // 每 block 独立 pre/post guard、净 X=0，最大前缀不超过 13 counts。
 bool make_command_magnitude_sequence(
     const CommandMagnitudeSequenceRequest& request,
+    MouseEffectProbeSequence& sequence,
+    std::string& error) noexcept;
+
+// 生成 1 个 warmup 与 42 个预注册 phase window。每个 window 为一个
+// predictor/schedule sample 加六个 response source event；38 个 X-only
+// 单 count pulse 净 X=0，四个 control 不产生 Mouse/KMBOX event。
+bool make_composite_phase_calibration_sequence(
     MouseEffectProbeSequence& sequence,
     std::string& error) noexcept;
 
@@ -243,6 +278,7 @@ enum class ProbeStopReason {
     SAFETY_RELEASED,
     MOUSE_FAILURE,
     PROTOCOL_ACK_MISSING,
+    SCHEDULER_TIMING_INVALID,
     RUN_TIMEOUT,
     USER_STOP,
 };
@@ -266,6 +302,7 @@ struct ProbeSourceFrameEvent {
     std::string source_clock_session_id;
     double source_clock_uncertainty_ms = 0.0;
     double source_clock_rtt_ms = 0.0;
+    double source_clock_rate = 0.0;
     double source_clock_mapping_age_ms = 0.0;
     std::uint64_t source_clock_sample_count = 0;
     std::uint64_t source_dropped_frames = 0;
@@ -291,6 +328,7 @@ struct ProbeCommandEvent {
     std::string source_clock_session_id;
     double source_clock_uncertainty_ms = 0.0;
     double source_clock_rtt_ms = 0.0;
+    double source_clock_rate = 0.0;
     double source_clock_mapping_age_ms = 0.0;
     std::uint64_t source_clock_sample_count = 0;
     std::uint64_t source_dropped_frames = 0;

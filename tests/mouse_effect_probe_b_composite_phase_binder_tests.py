@@ -68,7 +68,7 @@ def schema_semantic_sha256() -> str:
         "evidence_type":
             "mouse_effect_probe_b_composite_phase_calibration",
         "run_role": "CALIBRATION_DELETION",
-        "phase_policy_id": "b-meas-phase-d1-v1",
+        "phase_policy_id": "b-meas-phase-d1-v2",
         "counterbalance_design": "WILLIAMS_4X4_FIRST_ORDER",
         "timestamp_boundary": "NDI_SDK_SUBMISSION_UTC_NOT_EXPOSURE",
     })
@@ -103,18 +103,22 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
         "source_clock_uncertainty_ns": 10_000,
         "qpc_quantization_ns": 100,
         "read_access_interval_ns": 1_000,
-        "maximum_fit_residual_ns": 2_000,
-        "ntp_offset_interval_ns": [-3_000, 3_000],
-        "ntp_round_trip_delay_ns": 4_000,
-        "ntp_dispersion_ns": 2_000,
-        "ntp_jitter_ns": 1_000,
-        "calibration_samples_sha256": "9" * 64,
+        "source_clock_round_trip_max_ns": 4_000,
+        "source_clock_mapping_age_max_ns": 5_000_000,
+        "source_clock_sample_count_min": 8,
+        "source_clock_rate_interval_q32": {
+            "lower_closed": Q32 - 1_000,
+            "upper_closed": Q32 + 1_000,
+        },
+        "uncertainty_includes_mapping_fit_and_transport": True,
+        "raw_ntp_statistics_exported": False,
+        "source_timing_evidence_sha256": "9" * 64,
         "policy_sha256": "8" * 64,
         "stale": False,
     }
     seal_semantic(mapping, "semantic_sha256")
 
-    binding: dict[str, Any] = {
+    capture_policy: dict[str, Any] = {
         "source_name": "synthetic-ndi-source",
         "source_geometry": [2560, 1440],
         "roi_geometry": [1120, 560, 320, 320],
@@ -131,6 +135,15 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
         "boundary_is_capture_or_exposure": False,
         "ndi_frame_sync_used": False,
         "clock_mapping_policy_id": mapping["policy_id"],
+        "scene_binding_sha256": "c" * 64,
+        "left_witness_roi": [16, 48, 96, 224],
+        "right_witness_roi": [208, 48, 96, 224],
+    }
+    seal_semantic(capture_policy, "semantic_sha256")
+    binding: dict[str, Any] = {
+        **capture_policy,
+        "capture_policy_semantic_sha256":
+            capture_policy["semantic_sha256"],
         "clock_mapping_evidence_sha256": mapping["semantic_sha256"],
         "clock_mapping_stale": False,
         "completion_clock_session_id":
@@ -138,10 +151,8 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
         "submission_clock_session_id":
             mapping["submission_clock_session_id"],
         "mapping_segment_id": mapping["mapping_segment_id"],
-        "scene_binding_sha256": "c" * 64,
-        "left_witness_roi": [16, 48, 96, 224],
-        "right_witness_roi": [208, 48, 96, 224],
     }
+    binding.pop("semantic_sha256")
     seal_semantic(binding, "semantic_sha256")
 
     tolerance = Q32 // 16
@@ -237,13 +248,15 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
         "physical_dispatch_count": 0,
         "production_aim_changed": False,
         "new_production_gain_claimed": False,
-        "frozen_at_steady_ns": 1_000_000_000,
+        # Prepare host UTC provenance is intentionally not compared with the
+        # auxiliary host QPC epoch.
+        "frozen_at_utc_unix_ns": 9_000_000_000_000,
         "seen_diagnosis_denylist": {
             "run_uuids": [SEEN_RUN_UUID],
             "artifact_sha256s": list(SEEN_ARTIFACT_SHA256),
         },
         "phase_policy": {
-            "policy_id": "b-meas-phase-d1-v1",
+            "policy_id": "b-meas-phase-d1-v2",
             "phase_scale": "Q0.32_CYCLE",
             "phase_cells": [
                 {"phase_cell": cell, "center_numerator": numerator,
@@ -269,7 +282,7 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
             "plant_nonlinearity_claimed": False,
             "unique_delay_or_measurement_model_claimed": False,
         },
-        "capture_binding": binding,
+        "capture_policy": capture_policy,
         "command_policy": {
             "single_magnitude_counts": 1,
             "zero_y_required": True,
@@ -282,7 +295,40 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
             "settled_sample": "LAST_QUALIFIED_SOURCE_EVENT",
             "window_sample_count": 6,
             "phase_interval_arithmetic":
-                "CONSERVATIVE_INTEGER_Q0_32_FROM_ADJACENT_BOUNDARIES",
+                "CONSERVATIVE_INTEGER_Q0_32_FROM_SOURCE_TIMESTAMP_RATE_AND_BOUNDARY_OFFSET",
+        },
+        "sequence_binding": {
+            "sequence_schema": 7,
+            "sequence_profile":
+                "physical_b_composite_phase_calibration",
+            "sequence_file_sha256": "d" * 64,
+            "sequence_semantic_sha256": "e" * 64,
+            "sample_count": 295,
+            "window_count": 42,
+            "window_order": window_order,
+        },
+        "scheduler_policy": {
+            "clock_kind": "WINDOWS_QPC",
+            "timer_mode": "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL",
+            "deadline_basis":
+                "PREDICTOR_NEXT_NDI_SUBMISSION_BOUNDARY",
+            "issue_lead_ns": 400_000,
+            "issue_lead_applies_to": "NONZERO_PULSE_ONLY",
+            "negative_control_marker_lead_ns": 0,
+            "target_tolerance_q32": Q32 // 16,
+            "active_guard_ns": 300_000,
+            "max_wake_lateness_ns": 150_000,
+            "max_event_interval_width_ns": 100_000,
+            "max_active_wait_ns_per_event": 350_000,
+            "max_active_wait_ns_total": 42 * 350_000,
+            "preflight_required": True,
+            "preflight_file_sha256": "f" * 64,
+            "per_event_tuning_allowed": False,
+            "process_priority": "NORMAL",
+            "thread_priority": "NORMAL",
+            "cpu_affinity_used": False,
+            "time_begin_period_used": False,
+            "periodic_timer_used": False,
         },
         "pulses": pulses,
         "negative_controls": controls,
@@ -291,6 +337,8 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
             "schema_semantic_sha256": schema_semantic_sha256(),
             "evaluator_file_sha256": file_sha256(evaluator),
             "binder_file_sha256": file_sha256(binder),
+            "producer_file_sha256": "a" * 64,
+            "report_verifier_file_sha256": "b" * 64,
             "order_manifest_sha256": canonical_sha256(order_manifest),
             "model_semantic_sha256": None,
             "response_revealed_before_freeze": False,
@@ -312,6 +360,7 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
             "receiver_sequence": source_sequence,
             "window_id": window_id,
             "sample_index": sample_index,
+            "source_timestamp_100ns": boundary_ns // 100,
             "submission_clock_session_id":
                 mapping["submission_clock_session_id"],
             "mapping_segment_id": mapping["mapping_segment_id"],
@@ -422,10 +471,27 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
         "status": "CAPTURE_COMPLETE",
         "physical_output_capability": False,
         "physical_dispatch_count": 0,
+        "plan_semantic_sha256": plan["plan_semantic_sha256"],
+        "capture_policy_semantic_sha256":
+            capture_policy["semantic_sha256"],
+        "capture_binding": binding,
         "capture_binding_semantic_sha256": binding["semantic_sha256"],
-        "acquisition_started_at_steady_ns": 2_000_000_000,
-        "revealed_at_steady_ns": 3_000_000_000,
+        "scheduler_clock": {
+            "clock_kind": "WINDOWS_QPC",
+            "clock_session_id": "fixture-scheduler-clock-session",
+            "frequency_hz": 10_000_000,
+            "producer_process_id": 4242,
+        },
+        "plan_accepted_at_qpc": 10_000_000,
+        "acquisition_started_at_qpc": 20_000_000,
+        "acquisition_finished_at_qpc": 30_000_000,
+        "revealed_at_qpc": 30_000_000,
         "clock_mapping": mapping,
+        "human_assessment_semantic_sha256": "1" * 64,
+        "schedule_ledger_semantic_sha256": "2" * 64,
+        "command_report_semantic_sha256": "3" * 64,
+        "report_verifier_file_sha256":
+            plan["seal"]["report_verifier_file_sha256"],
         "frames": frames,
     }
     seal_semantic(capture, "capture_semantic_sha256")
@@ -441,6 +507,9 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
         "ledger_is_read_only_record": True,
         "binder_physical_output_capability": False,
         "binder_physical_dispatch_count": 0,
+        "plan_semantic_sha256": plan["plan_semantic_sha256"],
+        "capture_policy_semantic_sha256":
+            capture_policy["semantic_sha256"],
         "capture_binding_semantic_sha256": binding["semantic_sha256"],
         "clock_mapping_semantic_sha256": mapping["semantic_sha256"],
         "source_dispatch_count": len(events),
@@ -558,6 +627,24 @@ def main() -> int:
                "binder 输出必须保持 output-off 与 pre-capture seal")
         bound_plan = json.loads(paths[0].read_text(encoding="utf-8"))
         bound_capture = json.loads(paths[1].read_text(encoding="utf-8"))
+        dynamic_capture_fields = {
+            "clock_mapping_evidence_sha256", "clock_mapping_stale",
+            "completion_clock_session_id", "submission_clock_session_id",
+            "mapping_segment_id",
+        }
+        expect(not dynamic_capture_fields.intersection(
+                   bound_plan["capture_policy"]) and
+               bound_capture["capture_binding"][
+                   "capture_policy_semantic_sha256"] ==
+                   bound_plan["capture_policy"]["semantic_sha256"] and
+               evidence["capture_policy"] == bound_plan["capture_policy"] and
+               evidence["capture_binding"] ==
+                   bound_capture["capture_binding"] and
+               evidence["seal"]["plan_accepted_at_qpc"] == 10_000_000 and
+               evidence["seal"]["acquisition_started_at_qpc"] ==
+                   20_000_000 and
+               evidence["seal"]["revealed_at_qpc"] == 30_000_000,
+               "Prepare 只冻结 policy；实际 session/binding 与 QPC 顺序必须由辅机账本提供")
         expect(evidence["measurement_policy"] ==
                    bound_plan["measurement_policy"] and
                evidence["acquisition_summary"] == {
@@ -570,9 +657,12 @@ def main() -> int:
                    "clock_mapping_semantic_sha256":
                        bound_capture["clock_mapping"]["semantic_sha256"],
                }, "evidence 必须自包含 measurement 与 acquisition 摘要")
-        expected_lower = (985_000 * Q32) // 8_020_000
+        period_lower = 8_000_000 * (Q32 - 1_000) // Q32
+        period_upper = (
+            8_000_000 * (Q32 + 1_000) + Q32 - 1) // Q32
+        expected_lower = (985_000 * Q32) // period_upper
         expected_upper = (
-            1_015_000 * Q32 + 7_980_000 - 1) // 7_980_000
+            1_015_000 * Q32 + period_lower - 1) // period_lower
         first = evidence["pulses"][0]
         expect(first["completion_phase_interval_q32"] == {
                    "lower_closed": expected_lower,
@@ -656,6 +746,37 @@ def main() -> int:
                    "upper_closed": 21_015_000,
                }, "binder 产物必须被冻结 evaluator 直接接受")
 
+        plan, capture, commands = build_inputs(binder, evaluator)
+        late_phase_window = next(
+            pulse["pulse_id"] for pulse in plan["pulses"]
+            if pulse["phase_cell"] == "P7_8")
+        for frame in capture["frames"]:
+            if frame["window_id"] == late_phase_window:
+                boundary = frame["boundary_time_interval_ns"]
+                center = (boundary["lower_closed"] +
+                          boundary["upper_closed"]) // 2
+                boundary["lower_closed"] = center - 180_000
+                boundary["upper_closed"] = center + 180_000
+        capture["clock_mapping"]["source_clock_uncertainty_ns"] = 180_000
+        seal_semantic(capture["clock_mapping"], "semantic_sha256")
+        capture["capture_binding"]["clock_mapping_evidence_sha256"] = \
+            capture["clock_mapping"]["semantic_sha256"]
+        seal_semantic(capture["capture_binding"], "semantic_sha256")
+        capture["capture_binding_semantic_sha256"] = \
+            capture["capture_binding"]["semantic_sha256"]
+        commands["capture_binding_semantic_sha256"] = \
+            capture["capture_binding"]["semantic_sha256"]
+        commands["clock_mapping_semantic_sha256"] = \
+            capture["clock_mapping"]["semantic_sha256"]
+        seal_semantic(capture, "capture_semantic_sha256")
+        seal_semantic(commands, "command_semantic_sha256")
+        completed, realistic_uncertainty, _ = invoke_binder(
+            binder, root, "late-phase-realistic-uncertainty",
+            plan, capture, commands)
+        expect(completed.returncode == 0 and
+               realistic_uncertainty is not None,
+               "同 mapping segment 的 source period 不得把公共 offset 不确定度重复计入分母")
+
         first_bytes = paths[3].read_bytes()
         collided = subprocess.run([
             sys.executable, str(binder),
@@ -667,6 +788,20 @@ def main() -> int:
         expect(collided.returncode == 3 and
                paths[3].read_bytes() == first_bytes,
                "binder 不得覆盖既有 evidence")
+
+        plan, capture, commands = build_inputs(binder, evaluator)
+        plan.pop("sequence_binding")
+        seal_semantic(plan, "plan_semantic_sha256")
+        expect_rejected(
+            binder, root, "missing-sequence-binding",
+            plan, capture, commands, "PLAN_SEAL_INVALID")
+
+        plan, capture, commands = build_inputs(binder, evaluator)
+        plan.pop("scheduler_policy")
+        seal_semantic(plan, "plan_semantic_sha256")
+        expect_rejected(
+            binder, root, "missing-scheduler-policy",
+            plan, capture, commands, "PLAN_SEAL_INVALID")
 
         plan, capture, commands = build_inputs(binder, evaluator)
         plan["status"] = "MUTATED_AFTER_FREEZE"
@@ -734,6 +869,35 @@ def main() -> int:
             "INPUT_IDENTITY_MISMATCH")
 
         plan, capture, commands = build_inputs(binder, evaluator)
+        capture["plan_accepted_at_qpc"] = \
+            capture["acquisition_started_at_qpc"]
+        seal_semantic(capture, "capture_semantic_sha256")
+        expect_rejected(
+            binder, root, "plan-accepted-after-acquisition",
+            plan, capture, commands, "PLAN_SEAL_INVALID")
+
+        plan, capture, commands = build_inputs(binder, evaluator)
+        capture["capture_binding"]["source_name"] = "different-source"
+        seal_semantic(capture["capture_binding"], "semantic_sha256")
+        capture["capture_binding_semantic_sha256"] = \
+            capture["capture_binding"]["semantic_sha256"]
+        commands["capture_binding_semantic_sha256"] = \
+            capture["capture_binding"]["semantic_sha256"]
+        seal_semantic(capture, "capture_semantic_sha256")
+        seal_semantic(commands, "command_semantic_sha256")
+        expect_rejected(
+            binder, root, "actual-capture-policy-mismatch",
+            plan, capture, commands, "CAPTURE_BINDING_INVALID")
+
+        plan, capture, commands = build_inputs(binder, evaluator)
+        plan["capture_policy"]["mapping_segment_id"] = "future-session"
+        seal_semantic(plan["capture_policy"], "semantic_sha256")
+        seal_semantic(plan, "plan_semantic_sha256")
+        expect_rejected(
+            binder, root, "dynamic-session-precommitted",
+            plan, capture, commands, "CAPTURE_BINDING_INVALID")
+
+        plan, capture, commands = build_inputs(binder, evaluator)
         plan["run_uuid"] = SEEN_RUN_UUID
         capture["run_uuid"] = SEEN_RUN_UUID
         commands["run_uuid"] = SEEN_RUN_UUID
@@ -782,6 +946,35 @@ def main() -> int:
         expect_rejected(
             binder, root, "stale-clock-mapping", plan, capture, commands,
             "CLOCK_MAPPING_STALE")
+
+        plan, capture, commands = build_inputs(binder, evaluator)
+        capture["clock_mapping"]["source_clock_rate_interval_q32"] = {
+            "lower_closed": Q32,
+            "upper_closed": 2 * Q32,
+        }
+        seal_semantic(capture["clock_mapping"], "semantic_sha256")
+        capture["capture_binding"]["clock_mapping_evidence_sha256"] = \
+            capture["clock_mapping"]["semantic_sha256"]
+        seal_semantic(capture["capture_binding"], "semantic_sha256")
+        capture["capture_binding_semantic_sha256"] = \
+            capture["capture_binding"]["semantic_sha256"]
+        commands["capture_binding_semantic_sha256"] = \
+            capture["capture_binding"]["semantic_sha256"]
+        commands["clock_mapping_semantic_sha256"] = \
+            capture["clock_mapping"]["semantic_sha256"]
+        seal_semantic(capture, "capture_semantic_sha256")
+        seal_semantic(commands, "command_semantic_sha256")
+        expect_rejected(
+            binder, root, "source-clock-rate-outside-contract",
+            plan, capture, commands, "CLOCK_MAPPING_INCOMPLETE")
+
+        plan, capture, commands = build_inputs(binder, evaluator)
+        capture["clock_mapping"]["raw_ntp_statistics_exported"] = True
+        seal_semantic(capture["clock_mapping"], "semantic_sha256")
+        seal_semantic(capture, "capture_semantic_sha256")
+        expect_rejected(
+            binder, root, "invented-raw-ntp-statistics", plan, capture,
+            commands, "CLOCK_MAPPING_INCOMPLETE")
 
         plan, capture, commands = build_inputs(binder, evaluator)
         capture["frames"][0]["boundary_time_interval_ns"][
@@ -840,10 +1033,24 @@ def main() -> int:
             plan, capture, commands, "PHASE_CELL_AMBIGUOUS")
 
         plan, capture, commands = build_inputs(binder, evaluator)
+        commands["events"][0]["completion_time_interval_ns"] = {
+            "lower_closed": 10_001_095_000,
+            "upper_closed": 10_001_105_000,
+        }
+        seal_semantic(commands, "command_semantic_sha256")
+        completed, off_center, _ = invoke_binder(
+            binder, root, "within-cell-off-center", plan, capture, commands)
+        expect(completed.returncode == 0 and off_center is not None and
+               off_center["pulses"][0]["completion_phase_interval_q32"]
+                   ["lower_closed"] > Q32 // 8,
+               "actual phase 只需完整落在预注册 cell，不得要求精确包含中心")
+
+        plan, capture, commands = build_inputs(binder, evaluator)
         capture["frames"][1]["boundary_time_interval_ns"] = {
             "lower_closed": 10_009_990_000,
             "upper_closed": 10_010_010_000,
         }
+        capture["frames"][1]["source_timestamp_100ns"] = 100_100_000
         commands["events"][0]["completion_time_interval_ns"] = {
             "lower_closed": 10_001_245_000,
             "upper_closed": 10_001_255_000,
@@ -852,15 +1059,19 @@ def main() -> int:
         seal_semantic(commands, "command_semantic_sha256")
         completed, irregular, _ = invoke_binder(
             binder, root, "irregular-cadence", plan, capture, commands)
-        irregular_lower = (1_235_000 * Q32) // 10_020_000
+        irregular_period_lower = 10_000_000 * (Q32 - 1_000) // Q32
+        irregular_period_upper = (
+            10_000_000 * (Q32 + 1_000) + Q32 - 1) // Q32
+        irregular_lower = (1_235_000 * Q32) // irregular_period_upper
         irregular_upper = (
-            1_265_000 * Q32 + 9_980_000 - 1) // 9_980_000
+            1_265_000 * Q32 + irregular_period_lower - 1) // \
+            irregular_period_lower
         expect(completed.returncode == 0 and irregular is not None and
                irregular["pulses"][0][
                    "completion_phase_interval_q32"] == {
                        "lower_closed": irregular_lower,
                        "upper_closed": irregular_upper,
-                   }, "irregular cadence 必须按 boundary 时间区间计算 phase")
+                   }, "irregular cadence 必须按 source timestamp/rate 与 boundary offset 计算 phase")
 
         plan, capture, commands = build_inputs(binder, evaluator)
         first_window = plan["pulses"][0]["pulse_id"]

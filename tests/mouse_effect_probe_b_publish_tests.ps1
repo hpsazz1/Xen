@@ -72,17 +72,23 @@ foreach ($name in @(
         "prepare_mouse_effect_probe_b.ps1",
         "prepare_mouse_effect_probe_b_holdout.ps1",
         "prepare_mouse_effect_probe_b_command_magnitude.ps1",
+        "prepare_mouse_effect_probe_b_composite_phase.ps1",
         "launch_mouse_effect_probe_a.ps1",
         "design_mouse_effect_probe_prbs.py",
         "analyze_mouse_effect_probe_b.py",
         "analyze_mouse_effect_probe_b_holdout.py",
-        "analyze_mouse_effect_probe_b_command_magnitude.py")) {
+        "analyze_mouse_effect_probe_b_command_magnitude.py",
+        "freeze_mouse_effect_probe_b_composite_phase_plan.py",
+        "produce_mouse_effect_probe_b_composite_phase_ledgers.py",
+        "bind_mouse_effect_probe_b_composite_phase_calibration.py",
+        "evaluate_mouse_effect_probe_b_composite_phase.py")) {
     Write-Utf8NoBom (Join-Path $scripts $name) "fixture:$name`n"
 }
 foreach ($name in @(
         "XenMouseEffectProbe.exe",
         "XenCaptureEvidence.exe",
         "XenMouseEffectProbeSequence.exe",
+        "XenMouseEffectProbeCompositeSeal.exe",
         "opencv_world4140.dll",
         "Processing.NDI.Lib.x64.dll",
         "Processing.NDI.Lib.Licenses.txt")) {
@@ -149,15 +155,23 @@ Assert-True ([int]$manifest.schema_version -eq 1 -and
              [bool]$manifest.command_magnitude_primary_tooling_included -and
              -not [bool]$manifest.command_magnitude_holdout_prepare_included -and
              -not [bool]$manifest.command_magnitude_run_included -and
-             [int]$manifest.file_count -eq 15 -and
-             @($manifest.files).Count -eq 15) `
+             [bool]$manifest.composite_phase_tooling_included -and
+             -not [bool]$manifest.composite_phase_run_included -and
+             [int]$manifest.file_count -eq 21 -and
+             @($manifest.files).Count -eq 21) `
     "Physical B manifest 身份、clean/Launch 边界或文件数错误"
 $manifestNames = @($manifest.files | ForEach-Object { [string]$_.name })
 foreach ($requiredName in @(
         "prepare_mouse_effect_probe_b_holdout.ps1",
         "analyze_mouse_effect_probe_b_holdout.py",
         "prepare_mouse_effect_probe_b_command_magnitude.ps1",
-        "analyze_mouse_effect_probe_b_command_magnitude.py")) {
+        "analyze_mouse_effect_probe_b_command_magnitude.py",
+        "prepare_mouse_effect_probe_b_composite_phase.ps1",
+        "XenMouseEffectProbeCompositeSeal.exe",
+        "freeze_mouse_effect_probe_b_composite_phase_plan.py",
+        "produce_mouse_effect_probe_b_composite_phase_ledgers.py",
+        "bind_mouse_effect_probe_b_composite_phase_calibration.py",
+        "evaluate_mouse_effect_probe_b_composite_phase.py")) {
     Assert-True ($manifestNames -contains $requiredName) `
         "Physical B 发布包缺少 Holdout 工具：$requiredName"
 }

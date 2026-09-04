@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import hashlib
 import json
 import pathlib
@@ -63,7 +64,7 @@ def schema_semantic_sha256() -> str:
         "evidence_type":
             "mouse_effect_probe_b_composite_phase_calibration",
         "run_role": "CALIBRATION_DELETION",
-        "phase_policy_id": "b-meas-phase-d1-v1",
+        "phase_policy_id": "b-meas-phase-d1-v2",
         "counterbalance_design": "WILLIAMS_4X4_FIRST_ORDER",
         "timestamp_boundary": "NDI_SDK_SUBMISSION_UTC_NOT_EXPOSURE",
     })
@@ -134,6 +135,20 @@ def build_evidence() -> dict[str, Any]:
     if EVALUATOR_UNDER_TEST is None:
         raise RuntimeError("evaluator identity 尚未绑定")
     binding = capture_binding()
+    dynamic_capture_fields = {
+        "clock_mapping_evidence_sha256", "clock_mapping_stale",
+        "completion_clock_session_id", "submission_clock_session_id",
+        "mapping_segment_id", "semantic_sha256",
+    }
+    capture_policy = {
+        key: value for key, value in binding.items()
+        if key not in dynamic_capture_fields
+    }
+    capture_policy["semantic_sha256"] = canonical_sha256(capture_policy)
+    binding["capture_policy_semantic_sha256"] = \
+        capture_policy["semantic_sha256"]
+    binding.pop("semantic_sha256", None)
+    binding["semantic_sha256"] = canonical_sha256(binding)
     tolerance = Q32 // 16
     phase_interval_half_width = Q32 // 64
     pulses: list[dict[str, Any]] = []
@@ -262,9 +277,16 @@ def build_evidence() -> dict[str, Any]:
             "evaluator_file_sha256": file_sha256(EVALUATOR_UNDER_TEST),
             "order_manifest_sha256": canonical_sha256(order_manifest),
             "model_semantic_sha256": None,
-            "frozen_at_steady_ns": 1_000_000_000,
-            "acquisition_started_at_steady_ns": 2_000_000_000,
-            "revealed_at_steady_ns": 3_000_000_000,
+            "frozen_at_utc_unix_ns": 1_000_000_000,
+            "scheduler_clock": {
+                "clock_kind": "WINDOWS_QPC",
+                "clock_session_id": "fixture-scheduler-qpc",
+                "frequency_hz": 10_000_000,
+                "producer_process_id": 4242,
+            },
+            "plan_accepted_at_qpc": 10_000_000,
+            "acquisition_started_at_qpc": 20_000_000,
+            "revealed_at_qpc": 30_000_000,
             "response_revealed_before_freeze": False,
         },
         "seen_diagnosis_denylist": {
@@ -272,7 +294,7 @@ def build_evidence() -> dict[str, Any]:
             "artifact_sha256s": list(SEEN_ARTIFACT_SHA256),
         },
         "phase_policy": {
-            "policy_id": "b-meas-phase-d1-v1",
+            "policy_id": "b-meas-phase-d1-v2",
             "phase_scale": "Q0.32_CYCLE",
             "phase_cells": [
                 {"phase_cell": cell_id, "center_numerator": numerator,
@@ -298,6 +320,7 @@ def build_evidence() -> dict[str, Any]:
             "plant_nonlinearity_claimed": False,
             "unique_delay_or_measurement_model_claimed": False,
         },
+        "capture_policy": capture_policy,
         "capture_binding": binding,
         "command_policy": {
             "single_magnitude_counts": 1,
@@ -334,6 +357,13 @@ def reseal_evidence(evidence: dict[str, Any],
 
 def reseal_capture_binding(evidence: dict[str, Any]) -> None:
     binding = evidence["capture_binding"]
+    policy = evidence["capture_policy"]
+    for field in tuple(policy):
+        if field != "semantic_sha256" and field in binding:
+            policy[field] = copy.deepcopy(binding[field])
+    policy.pop("semantic_sha256", None)
+    policy["semantic_sha256"] = canonical_sha256(policy)
+    binding["capture_policy_semantic_sha256"] = policy["semantic_sha256"]
     binding.pop("semantic_sha256", None)
     binding["semantic_sha256"] = canonical_sha256(binding)
     for pulse in evidence["pulses"]:
@@ -558,7 +588,7 @@ def main() -> int:
             "order-manifest-drift", "EVIDENCE_HEADER_INVALID")
 
         revealed_before_freeze = build_evidence()
-        revealed_before_freeze["seal"]["revealed_at_steady_ns"] = 500_000_000
+        revealed_before_freeze["seal"]["revealed_at_qpc"] = 15_000_000
         reseal_evidence(revealed_before_freeze)
         expect_incomplete(
             evaluator, revealed_before_freeze, root,

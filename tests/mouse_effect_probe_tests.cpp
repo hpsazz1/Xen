@@ -1,5 +1,6 @@
 #include "mouse_effect_probe/mouse_effect_probe.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <chrono>
@@ -110,6 +111,7 @@ mouse_effect_probe::ProbeSourceFrameEvent source_frame(
     frame.source_clock_session_id = "test-clock-session";
     frame.source_clock_uncertainty_ms = 0.1;
     frame.source_clock_rtt_ms = 0.2;
+    frame.source_clock_rate = 1.0;
     frame.source_clock_mapping_age_ms = 0.3;
     frame.source_clock_sample_count = 8;
     frame.source_timing_valid = true;
@@ -752,6 +754,73 @@ void test_physical_b_command_magnitude_sequences_are_fixed_and_bounded() {
            "多幅值序列 seam 必须拒绝未知 run_role");
 }
 
+void test_physical_b_composite_phase_sequence_is_precommitted() {
+    mouse_effect_probe::MouseEffectProbeSequence sequence;
+    std::string error;
+    expect(mouse_effect_probe::make_composite_phase_calibration_sequence(
+               sequence, error),
+           "Physical B composite-phase 序列应生成成功: " + error);
+    expect(mouse_effect_probe::validate_mouse_effect_probe_sequence(
+               sequence, error),
+           "composite-phase 序列必须通过同一 reader/validator: " + error);
+    expect(sequence.schema == 7 &&
+               sequence.profile ==
+                   "physical_b_composite_phase_calibration" &&
+               sequence.samples.size() == 295 &&
+               sequence.composite_phase_windows.size() == 42 &&
+               sequence.net_x_counts == 0 &&
+               sequence.max_abs_prefix_x_counts == 1,
+           "序列必须是 1 warmup + 42*(predictor+6 frames)，且 X 净零/前缀为 1");
+
+    const std::array<std::string, 4> cells{
+        "P1_8", "P3_8", "P5_8", "P7_8"};
+    std::array<int, 4> pulse_counts{};
+    std::array<int, 4> control_counts{};
+    std::size_t nonzero = 0;
+    for (const auto& window : sequence.composite_phase_windows) {
+        const auto cell = std::find(
+            cells.begin(), cells.end(), window.phase_cell);
+        expect(cell != cells.end(), "每个 window 必须绑定一个冻结 phase cell");
+        if (cell == cells.end()) continue;
+        const auto cell_index = static_cast<std::size_t>(
+            std::distance(cells.begin(), cell));
+        expect(window.sample_count == 7 &&
+                   window.first_sample_index > 0 &&
+                   sequence.samples[window.first_sample_index].phase ==
+                       mouse_effect_probe::ProbeSamplePhase::PULSE,
+               "每个 window 必须以 predictor/schedule sample 开始并跟随六帧 witness");
+        if (window.negative_control) {
+            ++control_counts[cell_index];
+            expect(sequence.samples[window.first_sample_index].dx_counts == 0,
+                   "negative control predictor 不得产生 Mouse/KMBOX command");
+        } else {
+            ++pulse_counts[cell_index];
+            expect(std::abs(sequence.samples[
+                       window.first_sample_index].dx_counts) == 1,
+                   "pulse predictor 必须恰为 X-only 单 count");
+            ++nonzero;
+        }
+        for (std::uint64_t offset = 1; offset < window.sample_count; ++offset) {
+            const auto& sample = sequence.samples[
+                window.first_sample_index + offset];
+            expect(sample.dx_counts == 0 && sample.dy_counts == 0 &&
+                       sample.phase ==
+                           mouse_effect_probe::ProbeSamplePhase::RESPONSE,
+                   "window 的六个 witness sample 必须严格 output-zero");
+        }
+    }
+    expect(nonzero == 38 && pulse_counts == std::array<int, 4>{14, 8, 8, 8} &&
+               control_counts == std::array<int, 4>{1, 1, 1, 1},
+           "32 regular + 6 P1/8 sentinel 与四个 no-command controls 必须完整");
+    expect(sequence.composite_phase_request.window_sample_count == 6 &&
+               sequence.composite_phase_request.predictor_sample_count == 1 &&
+               sequence.composite_phase_request.single_magnitude_counts == 1 &&
+               sequence.composite_phase_request.issue_lead_ns == 400'000 &&
+               sequence.composite_phase_request.target_tolerance_q32 ==
+                   (std::uint64_t{1} << 28),
+            "scheduler phase、lead 与 window 合同必须在 sequence 中预注册");
+}
+
 void test_sequence_file_round_trip_rejects_overwrite_and_tampering() {
     TemporaryDirectory temporary;
     mouse_effect_probe::MouseEffectProbeSequence sequence;
@@ -1254,6 +1323,7 @@ int main() {
     test_physical_b_primary_sequence_is_frozen_complete_and_bounded();
     test_physical_b_holdout_sequence_is_frozen_independent_and_bounded();
     test_physical_b_command_magnitude_sequences_are_fixed_and_bounded();
+    test_physical_b_composite_phase_sequence_is_precommitted();
     test_sequence_file_round_trip_rejects_overwrite_and_tampering();
     test_executor_consumes_one_sample_per_frame_and_never_catches_up();
     test_executor_failure_stops_without_compensation();

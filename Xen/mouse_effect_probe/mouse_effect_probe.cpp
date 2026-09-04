@@ -27,6 +27,7 @@ constexpr std::uint32_t kDependencyCalibrationSequenceSchema = 2;
 constexpr std::uint32_t kS1LivenessSequenceSchema = 3;
 constexpr std::uint32_t kPhysicalBPrimarySequenceSchema = 5;
 constexpr std::uint32_t kCommandMagnitudeSequenceSchema = 6;
+constexpr std::uint32_t kCompositePhaseSequenceSchema = 7;
 constexpr std::string_view kSparsePulseProfile = "sparse_pulse_a";
 constexpr std::string_view kDependencyCalibrationPrimaryProfile =
     "dependency_calibration_a2_p_cal";
@@ -58,9 +59,25 @@ constexpr std::string_view kCommandMagnitudePrimaryProfile =
     "physical_b_command_magnitude_primary";
 constexpr std::string_view kCommandMagnitudeHoldoutProfile =
     "physical_b_command_magnitude_holdout";
+constexpr std::string_view kCompositePhaseProfile =
+    "physical_b_composite_phase_calibration";
 constexpr std::uint64_t kCommandMagnitudeBaselineSamples = 64;
 constexpr std::uint64_t kCommandMagnitudeResponseSamples = 48;
 constexpr std::uint64_t kCommandMagnitudeGuardSamples = 32;
+constexpr std::uint64_t kCompositePhasePredictorSamples = 1;
+constexpr std::uint64_t kCompositePhaseWindowSamples = 6;
+constexpr int kCompositePhaseMagnitudeCounts = 1;
+constexpr std::int64_t kCompositePhaseIssueLeadNs = 400'000;
+constexpr std::uint64_t kCompositePhaseTargetToleranceQ32 =
+    std::uint64_t{1} << 28U;
+constexpr std::uint64_t kCompositePhaseActiveGuardNs = 300'000;
+constexpr std::uint64_t kCompositePhaseMaxWakeLatenessNs = 150'000;
+constexpr std::uint64_t kCompositePhaseMaxEventIntervalWidthNs = 100'000;
+constexpr std::uint64_t kCompositePhaseMaxActiveWaitPerEventNs = 350'000;
+constexpr std::uint64_t kCompositePhaseMaxActiveWaitTotalNs =
+    42U * kCompositePhaseMaxActiveWaitPerEventNs;
+constexpr std::string_view kCompositePhaseTimerMode =
+    "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL";
 constexpr std::uint64_t kMaximumSequenceSamples = 1'000'000;
 constexpr std::uint64_t kMaximumDependencyCalibrationBlocks = 64;
 constexpr std::uint64_t kMaximumS1LivenessSamples = 2'400;
@@ -577,6 +594,128 @@ bool build_command_magnitude_sequence(
     return true;
 }
 
+bool build_composite_phase_calibration_sequence(
+        MouseEffectProbeSequence& sequence,
+        std::string& error) {
+    struct PlannedWindow {
+        std::string id;
+        std::string phase_cell;
+        bool negative_control = false;
+        int dx_counts = 0;
+    };
+    struct PlannedPulse {
+        std::string id;
+        std::string phase_cell;
+        int dx_counts = 0;
+    };
+
+    constexpr std::array<std::array<std::string_view, 4>, 4> rows{{
+        {{"P1_8", "P3_8", "P7_8", "P5_8"}},
+        {{"P3_8", "P5_8", "P1_8", "P7_8"}},
+        {{"P5_8", "P7_8", "P3_8", "P1_8"}},
+        {{"P7_8", "P1_8", "P5_8", "P3_8"}},
+    }};
+    std::vector<PlannedPulse> pulses;
+    pulses.reserve(38U);
+    const auto append_pair = [&](std::string block_id,
+                                 std::string_view phase_cell,
+                                 bool positive_first) {
+        const int first = positive_first ? 1 : -1;
+        pulses.push_back({block_id + "-1", std::string(phase_cell), first});
+        pulses.push_back({block_id + "-2", std::string(phase_cell), -first});
+    };
+
+    append_pair("S-BEGIN", "P1_8", true);
+    for (std::size_t row_index = 0; row_index < rows.size(); ++row_index) {
+        if (row_index == 2U) {
+            append_pair("S-MIDDLE", "P1_8", false);
+        }
+        for (std::size_t position = 0; position < rows[row_index].size();
+             ++position) {
+            const std::string block_id = "R" + std::to_string(row_index) +
+                "-" + std::to_string(position) + "-" +
+                std::string(rows[row_index][position]);
+            append_pair(block_id, rows[row_index][position],
+                        (row_index + position) % 2U == 0U);
+        }
+    }
+    append_pair("S-END", "P1_8", true);
+    if (pulses.size() != 38U) {
+        set_error(error, "composite-phase pulse 设计内部数量漂移");
+        return false;
+    }
+
+    constexpr std::array<std::size_t, 4> control_after{{9U, 17U, 27U, 35U}};
+    constexpr std::array<std::string_view, 4> control_cells{{
+        "P1_8", "P3_8", "P5_8", "P7_8"}};
+    std::vector<PlannedWindow> windows;
+    windows.reserve(42U);
+    for (std::size_t index = 0; index < pulses.size(); ++index) {
+        windows.push_back({pulses[index].id, pulses[index].phase_cell,
+                           false, pulses[index].dx_counts});
+        const auto match = std::find(
+            control_after.begin(), control_after.end(), index);
+        if (match != control_after.end()) {
+            const auto control_index = static_cast<std::size_t>(
+                std::distance(control_after.begin(), match));
+            const std::string phase_cell(control_cells[control_index]);
+            windows.push_back({"NC-" + phase_cell, phase_cell, true, 0});
+        }
+    }
+    if (windows.size() != 42U) {
+        set_error(error, "composite-phase window 设计内部数量漂移");
+        return false;
+    }
+
+    sequence = {};
+    sequence.schema = kCompositePhaseSequenceSchema;
+    sequence.profile = kCompositePhaseProfile;
+    sequence.composite_phase_request = {
+        .predictor_sample_count = kCompositePhasePredictorSamples,
+        .window_sample_count = kCompositePhaseWindowSamples,
+        .single_magnitude_counts = kCompositePhaseMagnitudeCounts,
+        .issue_lead_ns = kCompositePhaseIssueLeadNs,
+        .target_tolerance_q32 = kCompositePhaseTargetToleranceQ32,
+        .active_guard_ns = kCompositePhaseActiveGuardNs,
+        .max_wake_lateness_ns = kCompositePhaseMaxWakeLatenessNs,
+        .max_event_interval_width_ns =
+            kCompositePhaseMaxEventIntervalWidthNs,
+        .max_active_wait_ns_per_event =
+            kCompositePhaseMaxActiveWaitPerEventNs,
+        .max_active_wait_ns_total = kCompositePhaseMaxActiveWaitTotalNs,
+        .timer_mode = std::string(kCompositePhaseTimerMode),
+    };
+    sequence.samples.reserve(1U + windows.size() * 7U);
+    sequence.composite_phase_windows.reserve(windows.size());
+    append_zeros(sequence, 0U, ProbeSamplePhase::BASELINE, 1U);
+    for (std::size_t index = 0; index < windows.size(); ++index) {
+        const auto& planned = windows[index];
+        const std::uint64_t block_id = index + 1U;
+        CompositePhaseWindow window;
+        window.window_ordinal = index;
+        window.window_id = planned.id;
+        window.phase_cell = planned.phase_cell;
+        window.negative_control = planned.negative_control;
+        window.first_sample_index = sequence.samples.size();
+        window.sample_count = 1U + kCompositePhaseWindowSamples;
+        append_sample(sequence, block_id, ProbeSamplePhase::PULSE,
+                      planned.dx_counts);
+        append_zeros(sequence, block_id, ProbeSamplePhase::RESPONSE,
+                     kCompositePhaseWindowSamples);
+        sequence.composite_phase_windows.push_back(std::move(window));
+    }
+    summarize_sequence(sequence);
+    if (sequence.samples.size() != 295U ||
+        sequence.composite_phase_windows.size() != 42U ||
+        sequence.net_x_counts != 0 ||
+        sequence.max_abs_prefix_x_counts != 1U) {
+        set_error(error, "composite-phase exact schedule 未满足 sample/net/prefix 合同");
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 bool generate_physical_b_primary_period(
         const PhysicalBPrimarySequenceRequest& request,
         std::vector<int>& bits,
@@ -862,6 +1001,17 @@ nlohmann::ordered_json canonical_payload(
             {"dy_counts", sample.dy_counts},
         });
     }
+    nlohmann::ordered_json windows = nlohmann::ordered_json::array();
+    for (const auto& window : sequence.composite_phase_windows) {
+        windows.push_back({
+            {"window_ordinal", window.window_ordinal},
+            {"window_id", window.window_id},
+            {"phase_cell", window.phase_cell},
+            {"negative_control", window.negative_control},
+            {"first_sample_index", window.first_sample_index},
+            {"sample_count", window.sample_count},
+        });
+    }
     nlohmann::ordered_json request;
     if (sequence.schema == kSequenceSchema &&
         sequence.profile == kSparsePulseProfile) {
@@ -913,6 +1063,30 @@ nlohmann::ordered_json canonical_payload(
             {"run_role", command_magnitude_run_role_name(
              sequence.command_magnitude_request.run_role)},
         };
+    } else if (sequence.schema == kCompositePhaseSequenceSchema) {
+        request = {
+            {"predictor_sample_count",
+             sequence.composite_phase_request.predictor_sample_count},
+            {"window_sample_count",
+             sequence.composite_phase_request.window_sample_count},
+            {"single_magnitude_counts",
+             sequence.composite_phase_request.single_magnitude_counts},
+            {"issue_lead_ns",
+             sequence.composite_phase_request.issue_lead_ns},
+            {"target_tolerance_q32",
+             sequence.composite_phase_request.target_tolerance_q32},
+            {"active_guard_ns",
+             sequence.composite_phase_request.active_guard_ns},
+            {"max_wake_lateness_ns",
+             sequence.composite_phase_request.max_wake_lateness_ns},
+            {"max_event_interval_width_ns",
+             sequence.composite_phase_request.max_event_interval_width_ns},
+            {"max_active_wait_ns_per_event",
+             sequence.composite_phase_request.max_active_wait_ns_per_event},
+            {"max_active_wait_ns_total",
+             sequence.composite_phase_request.max_active_wait_ns_total},
+            {"timer_mode", sequence.composite_phase_request.timer_mode},
+        };
     } else if (sequence.profile == kPhysicalBPrimaryProfile) {
         request = {
             {"guard_sample_count",
@@ -942,7 +1116,7 @@ nlohmann::ordered_json canonical_payload(
                  offline_sequence_semantic_sha256},
         };
     }
-    return {
+    nlohmann::ordered_json document = {
         {"schema", sequence.schema},
         {"profile", sequence.profile},
         {"request", std::move(request)},
@@ -954,6 +1128,10 @@ nlohmann::ordered_json canonical_payload(
              sequence.max_abs_prefix_x_counts},
         }},
     };
+    if (sequence.schema == kCompositePhaseSequenceSchema) {
+        document["windows"] = std::move(windows);
+    }
+    return document;
 }
 
 bool sha256(std::string_view input,
@@ -1065,6 +1243,35 @@ bool same_block(const ProbeSequenceBlock& first,
            first.amplitude_counts == second.amplitude_counts &&
            first.first_pulse_dx_counts == second.first_pulse_dx_counts &&
            first.second_pulse_dx_counts == second.second_pulse_dx_counts;
+}
+
+bool same_composite_phase_request(
+        const CompositePhaseSequenceRequest& first,
+        const CompositePhaseSequenceRequest& second) noexcept {
+    return first.predictor_sample_count == second.predictor_sample_count &&
+           first.window_sample_count == second.window_sample_count &&
+           first.single_magnitude_counts == second.single_magnitude_counts &&
+           first.issue_lead_ns == second.issue_lead_ns &&
+           first.target_tolerance_q32 == second.target_tolerance_q32 &&
+           first.active_guard_ns == second.active_guard_ns &&
+           first.max_wake_lateness_ns == second.max_wake_lateness_ns &&
+           first.max_event_interval_width_ns ==
+               second.max_event_interval_width_ns &&
+           first.max_active_wait_ns_per_event ==
+               second.max_active_wait_ns_per_event &&
+           first.max_active_wait_ns_total ==
+               second.max_active_wait_ns_total &&
+           first.timer_mode == second.timer_mode;
+}
+
+bool same_composite_phase_window(const CompositePhaseWindow& first,
+                                 const CompositePhaseWindow& second) noexcept {
+    return first.window_ordinal == second.window_ordinal &&
+           first.window_id == second.window_id &&
+           first.phase_cell == second.phase_cell &&
+           first.negative_control == second.negative_control &&
+           first.first_sample_index == second.first_sample_index &&
+           first.sample_count == second.sample_count;
 }
 
 bool same_sample(const ProbeSequenceSample& first,
@@ -1245,9 +1452,13 @@ bool valid_run_uuid(std::string_view value) noexcept {
 bool parse_document(const nlohmann::ordered_json& document,
                     MouseEffectProbeSequence& sequence,
                     std::string& error) {
-    if (!has_exact_keys(document,
-            {"schema", "profile", "request", "blocks", "samples",
-             "summary", "sequence_sha256"}) ||
+    const bool base_root = has_exact_keys(document,
+        {"schema", "profile", "request", "blocks", "samples",
+         "summary", "sequence_sha256"});
+    const bool windows_root = has_exact_keys(document,
+        {"schema", "profile", "request", "blocks", "samples",
+         "summary", "windows", "sequence_sha256"});
+    if ((!base_root && !windows_root) ||
         !document.at("schema").is_number_unsigned() ||
         !document.at("profile").is_string() ||
         !document.at("sequence_sha256").is_string()) {
@@ -1287,6 +1498,13 @@ bool parse_document(const nlohmann::ordered_json& document,
         candidate.schema == kCommandMagnitudeSequenceSchema &&
         (candidate.profile == kCommandMagnitudePrimaryProfile ||
          candidate.profile == kCommandMagnitudeHoldoutProfile);
+    const bool composite_phase_profile =
+        candidate.schema == kCompositePhaseSequenceSchema &&
+        candidate.profile == kCompositePhaseProfile;
+    if (composite_phase_profile != windows_root) {
+        set_error(error, "composite-phase sequence windows 根字段无效");
+        return false;
+    }
     if (sparse_profile) {
         if (!has_exact_keys(request,
                 {"baseline_sample_count", "response_sample_count",
@@ -1392,6 +1610,48 @@ bool parse_document(const nlohmann::ordered_json& document,
                 "Physical B 多幅值 profile/run_role 组合非法");
             return false;
         }
+    } else if (composite_phase_profile) {
+        if (!has_exact_keys(request,
+                {"predictor_sample_count", "window_sample_count",
+                 "single_magnitude_counts", "issue_lead_ns",
+                 "target_tolerance_q32", "active_guard_ns",
+                 "max_wake_lateness_ns", "max_event_interval_width_ns",
+                 "max_active_wait_ns_per_event",
+                 "max_active_wait_ns_total", "timer_mode"}) ||
+            !read_u64(request, "predictor_sample_count",
+                      candidate.composite_phase_request.
+                          predictor_sample_count) ||
+            !read_u64(request, "window_sample_count",
+                      candidate.composite_phase_request.window_sample_count) ||
+            !read_int(request, "single_magnitude_counts",
+                      candidate.composite_phase_request.
+                          single_magnitude_counts) ||
+            !read_i64(request, "issue_lead_ns",
+                      candidate.composite_phase_request.issue_lead_ns) ||
+            !read_u64(request, "target_tolerance_q32",
+                      candidate.composite_phase_request.
+                          target_tolerance_q32) ||
+            !read_u64(request, "active_guard_ns",
+                      candidate.composite_phase_request.active_guard_ns) ||
+            !read_u64(request, "max_wake_lateness_ns",
+                      candidate.composite_phase_request.
+                          max_wake_lateness_ns) ||
+            !read_u64(request, "max_event_interval_width_ns",
+                      candidate.composite_phase_request.
+                          max_event_interval_width_ns) ||
+            !read_u64(request, "max_active_wait_ns_per_event",
+                      candidate.composite_phase_request.
+                          max_active_wait_ns_per_event) ||
+            !read_u64(request, "max_active_wait_ns_total",
+                      candidate.composite_phase_request.
+                          max_active_wait_ns_total) ||
+            !request.at("timer_mode").is_string()) {
+            set_error(error,
+                "Physical B composite-phase request 字段集合或类型非法");
+            return false;
+        }
+        candidate.composite_phase_request.timer_mode =
+            request.at("timer_mode").get<std::string>();
     } else if (physical_b_primary_profile) {
         std::uint64_t lfsr_order = 0;
         std::uint64_t feedback_mask = 0;
@@ -1461,6 +1721,7 @@ bool parse_document(const nlohmann::ordered_json& document,
         physical_b_primary_profile ? 6U :
         physical_b_holdout_profile ? 2U :
         command_magnitude_profile ? 10U :
+        composite_phase_profile ? 0U :
         static_cast<std::size_t>(kMaximumDependencyCalibrationBlocks);
     if (!blocks.is_array() || blocks.size() > maximum_blocks) {
         set_error(error, "序列 blocks 必须是固定容量数组");
@@ -1532,6 +1793,40 @@ bool parse_document(const nlohmann::ordered_json& document,
             }
         }
         candidate.blocks.push_back(block);
+    }
+
+    if (composite_phase_profile) {
+        const auto& windows = document.at("windows");
+        if (!windows.is_array() || windows.size() != 42U) {
+            set_error(error,
+                "Physical B composite-phase windows 必须恰为 42 个");
+            return false;
+        }
+        candidate.composite_phase_windows.reserve(windows.size());
+        for (const auto& value : windows) {
+            CompositePhaseWindow window;
+            if (!has_exact_keys(value,
+                    {"window_ordinal", "window_id", "phase_cell",
+                     "negative_control", "first_sample_index",
+                     "sample_count"}) ||
+                !read_u64(value, "window_ordinal",
+                          window.window_ordinal) ||
+                !value.at("window_id").is_string() ||
+                !value.at("phase_cell").is_string() ||
+                !value.at("negative_control").is_boolean() ||
+                !read_u64(value, "first_sample_index",
+                          window.first_sample_index) ||
+                !read_u64(value, "sample_count", window.sample_count)) {
+                set_error(error,
+                    "Physical B composite-phase window 字段集合或类型非法");
+                return false;
+            }
+            window.window_id = value.at("window_id").get<std::string>();
+            window.phase_cell = value.at("phase_cell").get<std::string>();
+            window.negative_control =
+                value.at("negative_control").get<bool>();
+            candidate.composite_phase_windows.push_back(std::move(window));
+        }
     }
 
     const auto& samples = document.at("samples");
@@ -1749,6 +2044,37 @@ bool make_command_magnitude_sequence(
     }
 }
 
+bool make_composite_phase_calibration_sequence(
+        MouseEffectProbeSequence& sequence,
+        std::string& error) noexcept {
+    try {
+        MouseEffectProbeSequence candidate;
+        if (!build_composite_phase_calibration_sequence(candidate, error)) {
+            sequence = {};
+            return false;
+        }
+        const std::string payload = canonical_payload(candidate).dump();
+        if (!sha256(payload, candidate.sequence_sha256, error)) {
+            sequence = {};
+            return false;
+        }
+        sequence = std::move(candidate);
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        sequence = {};
+        set_error(error,
+            std::string("生成 Physical B composite-phase 序列异常: ") +
+            exception.what());
+        return false;
+    } catch (...) {
+        sequence = {};
+        set_error(error,
+            "生成 Physical B composite-phase 序列时发生未知异常");
+        return false;
+    }
+}
+
 bool make_physical_b_primary_sequence(
         const PhysicalBPrimarySequenceRequest& request,
         MouseEffectProbeSequence& sequence,
@@ -1834,6 +2160,9 @@ bool validate_mouse_effect_probe_sequence(
             sequence.schema == kCommandMagnitudeSequenceSchema &&
             (sequence.profile == kCommandMagnitudePrimaryProfile ||
              sequence.profile == kCommandMagnitudeHoldoutProfile);
+        const bool composite_phase =
+            sequence.schema == kCompositePhaseSequenceSchema &&
+            sequence.profile == kCompositePhaseProfile;
         if (sparse) {
             if (!make_sparse_pulse_sequence(
                     sequence.request, expected, error)) {
@@ -1853,6 +2182,11 @@ bool validate_mouse_effect_probe_sequence(
         } else if (command_magnitude) {
             if (!make_command_magnitude_sequence(
                     sequence.command_magnitude_request, expected, error)) {
+                return false;
+            }
+        } else if (composite_phase) {
+            if (!make_composite_phase_calibration_sequence(
+                    expected, error)) {
                 return false;
             }
         } else if (physical_b_primary) {
@@ -1882,6 +2216,9 @@ bool validate_mouse_effect_probe_sequence(
             (command_magnitude && !same_command_magnitude_request(
                 sequence.command_magnitude_request,
                 expected.command_magnitude_request)) ||
+            (composite_phase && !same_composite_phase_request(
+                sequence.composite_phase_request,
+                expected.composite_phase_request)) ||
             (physical_b_primary && !same_physical_b_primary_request(
                 sequence.physical_b_primary_request,
                 expected.physical_b_primary_request)) ||
@@ -1892,6 +2229,8 @@ bool validate_mouse_effect_probe_sequence(
             sequence.max_abs_prefix_x_counts !=
                 expected.max_abs_prefix_x_counts ||
             sequence.blocks.size() != expected.blocks.size() ||
+            sequence.composite_phase_windows.size() !=
+                expected.composite_phase_windows.size() ||
             sequence.samples.size() != expected.samples.size()) {
             set_error(error, "Mouse Effect Probe 序列结构或汇总不符合固定合同");
             return false;
@@ -1899,6 +2238,16 @@ bool validate_mouse_effect_probe_sequence(
         for (std::size_t index = 0; index < sequence.blocks.size(); ++index) {
             if (!same_block(sequence.blocks[index], expected.blocks[index])) {
                 set_error(error, "Mouse Effect Probe block 边界或方向非法");
+                return false;
+            }
+        }
+        for (std::size_t index = 0;
+             index < sequence.composite_phase_windows.size(); ++index) {
+            if (!same_composite_phase_window(
+                    sequence.composite_phase_windows[index],
+                    expected.composite_phase_windows[index])) {
+                set_error(error,
+                    "Mouse Effect Probe composite-phase window 合同非法");
                 return false;
             }
         }
@@ -2203,6 +2552,8 @@ bool MouseEffectProbeExecutor::consume_source_frame(
             frame.source_clock_uncertainty_ms < 0.0 ||
             !std::isfinite(frame.source_clock_rtt_ms) ||
             frame.source_clock_rtt_ms < 0.0 ||
+            !std::isfinite(frame.source_clock_rate) ||
+            frame.source_clock_rate <= 0.0 ||
             !std::isfinite(frame.source_clock_mapping_age_ms) ||
             frame.source_clock_mapping_age_ms < 0.0 ||
             frame.source_clock_sample_count == 0) {
@@ -2280,6 +2631,7 @@ bool MouseEffectProbeExecutor::consume_source_frame(
         event.source_clock_uncertainty_ms =
             frame.source_clock_uncertainty_ms;
         event.source_clock_rtt_ms = frame.source_clock_rtt_ms;
+        event.source_clock_rate = frame.source_clock_rate;
         event.source_clock_mapping_age_ms =
             frame.source_clock_mapping_age_ms;
         event.source_clock_sample_count =
@@ -2411,6 +2763,7 @@ bool MouseEffectProbeExecutor::request_stop(
         case ProbeStopReason::SAFETY_RELEASED:
         case ProbeStopReason::MOUSE_FAILURE:
         case ProbeStopReason::PROTOCOL_ACK_MISSING:
+        case ProbeStopReason::SCHEDULER_TIMING_INVALID:
         case ProbeStopReason::RUN_TIMEOUT:
         case ProbeStopReason::USER_STOP:
             impl_->stop(reason);
@@ -2505,6 +2858,8 @@ bool validate_report_inputs(
             event.source_clock_uncertainty_ms < 0.0 ||
             !std::isfinite(event.source_clock_rtt_ms) ||
             event.source_clock_rtt_ms < 0.0 ||
+            !std::isfinite(event.source_clock_rate) ||
+            event.source_clock_rate <= 0.0 ||
             !std::isfinite(event.source_clock_mapping_age_ms) ||
             event.source_clock_mapping_age_ms < 0.0 ||
             event.source_clock_sample_count == 0 ||
@@ -2652,6 +3007,7 @@ nlohmann::ordered_json report_event_json(const ProbeCommandEvent& event) {
         {"source_clock_uncertainty_ms",
          event.source_clock_uncertainty_ms},
         {"source_clock_rtt_ms", event.source_clock_rtt_ms},
+        {"source_clock_rate", event.source_clock_rate},
         {"source_clock_mapping_age_ms",
          event.source_clock_mapping_age_ms},
         {"source_clock_sample_count", event.source_clock_sample_count},
@@ -3007,6 +3363,8 @@ const char* probe_stop_reason_name(ProbeStopReason reason) noexcept {
         case ProbeStopReason::MOUSE_FAILURE: return "mouse_failure";
         case ProbeStopReason::PROTOCOL_ACK_MISSING:
             return "protocol_ack_missing";
+        case ProbeStopReason::SCHEDULER_TIMING_INVALID:
+            return "scheduler_timing_invalid";
         case ProbeStopReason::RUN_TIMEOUT: return "run_timeout";
         case ProbeStopReason::USER_STOP: return "user_stop";
     }

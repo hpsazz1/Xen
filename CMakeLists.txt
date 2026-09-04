@@ -975,6 +975,15 @@ set_target_properties(xen_mouse_effect_probe_sequence
 target_link_libraries(xen_mouse_effect_probe_sequence
     PRIVATE mouse_effect_probe)
 
+# 只执行 QPC/one-shot timer preflight 并封存 plan；不链接 Capture、
+# Runtime、Aim、Mouse 或 Keyboard，因而不具备发送真实输入的能力。
+add_executable(xen_mouse_effect_probe_composite_seal
+    Xen/mouse_effect_probe_composite_seal/main.cpp)
+set_target_properties(xen_mouse_effect_probe_composite_seal PROPERTIES
+    OUTPUT_NAME XenMouseEffectProbeCompositeSeal)
+target_link_libraries(xen_mouse_effect_probe_composite_seal PRIVATE
+    nlohmann_json::nlohmann_json bcrypt)
+
 # ─── 测试 ───────────────────────────────────────────────
 
 include(CTest)
@@ -1315,6 +1324,32 @@ if(BUILD_TESTING)
                 "${PROJECT_SOURCE_DIR}/scripts/bind_mouse_effect_probe_b_composite_phase_calibration.py"
             --evaluator
                 "${PROJECT_SOURCE_DIR}/scripts/evaluate_mouse_effect_probe_b_composite_phase.py")
+    add_test(NAME mouse_effect_probe_b_composite_phase_plan_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_composite_phase_plan_tests.py"
+            --generator
+                "${PROJECT_SOURCE_DIR}/scripts/freeze_mouse_effect_probe_b_composite_phase_plan.py"
+            --sequence-executable
+                "$<TARGET_FILE:xen_mouse_effect_probe_sequence>"
+            --binder
+                "${PROJECT_SOURCE_DIR}/scripts/bind_mouse_effect_probe_b_composite_phase_calibration.py"
+            --evaluator
+                "${PROJECT_SOURCE_DIR}/scripts/evaluate_mouse_effect_probe_b_composite_phase.py"
+            --producer
+                "${PROJECT_SOURCE_DIR}/scripts/produce_mouse_effect_probe_b_composite_phase_ledgers.py"
+            --seal-executable
+                "$<TARGET_FILE:xen_mouse_effect_probe_composite_seal>")
+    add_test(NAME mouse_effect_probe_b_composite_phase_producer_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_composite_phase_producer_tests.py"
+            --producer
+                "${PROJECT_SOURCE_DIR}/scripts/produce_mouse_effect_probe_b_composite_phase_ledgers.py"
+            --binder
+                "${PROJECT_SOURCE_DIR}/scripts/bind_mouse_effect_probe_b_composite_phase_calibration.py"
+            --evaluator
+                "${PROJECT_SOURCE_DIR}/scripts/evaluate_mouse_effect_probe_b_composite_phase.py"
+            --report-verifier
+                "$<TARGET_FILE:xen_mouse_effect_probe_composite_seal>")
     # 固定 powershell.exe 仍会继承调用方的 PSModulePath。统一清除该变量，
     # 让 Windows PowerShell 5 按自身 PSHOME 重建系统模块路径；cmake -E env
     # 只改变测试子进程，不修改调用 CTest 的父环境。
@@ -1430,6 +1465,22 @@ if(BUILD_TESTING)
         -ToolRoot "$<TARGET_FILE_DIR:xen_mouse_effect_probe>"
         -TestRoot
             "${CMAKE_BINARY_DIR}/mouse-effect-probe-b-command-magnitude-prepare-integration-tests")
+    xen_add_windows_powershell_test(
+        mouse_effect_probe_b_composite_phase_script_contract_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_composite_phase_script_contract_tests.ps1"
+        -PrepareScript
+            "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_b_composite_phase.ps1"
+        -LaunchScript
+            "${PROJECT_SOURCE_DIR}/scripts/launch_mouse_effect_probe_a.ps1")
+    xen_add_windows_powershell_test(
+        mouse_effect_probe_b_composite_phase_prepare_integration_tests
+        "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_composite_phase_prepare_integration_tests.ps1"
+        -PrepareScript
+            "${PROJECT_SOURCE_DIR}/scripts/prepare_mouse_effect_probe_b_composite_phase.ps1"
+        -ToolRoot "$<TARGET_FILE_DIR:xen_mouse_effect_probe>"
+        -PythonExecutable "${XEN_PYTHON_EXECUTABLE}"
+        -TestRoot
+            "${CMAKE_BINARY_DIR}/mouse-effect-probe-b-composite-phase-prepare-integration-tests")
     xen_add_windows_powershell_test(
         mouse_effect_probe_b_publish_tests
         "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_publish_tests.ps1"

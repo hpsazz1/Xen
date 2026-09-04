@@ -73,7 +73,9 @@ void print_usage() {
         << "  XenMouseEffectProbeSequence --output <new-json> "
            "--profile physical-b-command-magnitude "
            "--run-role <primary|holdout> --baseline-samples 64 "
-           "--response-samples 48 --guard-samples 32\n";
+           "--response-samples 48 --guard-samples 32\n"
+        << "  XenMouseEffectProbeSequence --output <new-json> "
+           "--profile physical-b-composite-phase-calibration\n";
 }
 
 } // namespace
@@ -137,7 +139,8 @@ int wmain(int argc, wchar_t* argv[]) {
                      value == L"s1-liveness-a2" ||
                      value == L"physical-b-primary" ||
                      value == L"physical-b-holdout" ||
-                     value == L"physical-b-command-magnitude")) {
+                     value == L"physical-b-command-magnitude" ||
+                     value == L"physical-b-composite-phase-calibration")) {
             profile.assign(value);
             seen_profile = true;
         } else if (argument == L"--blocks" && !seen_blocks &&
@@ -216,10 +219,13 @@ int wmain(int argc, wchar_t* argv[]) {
         physical_b_primary_profile || physical_b_holdout_profile;
     const bool command_magnitude_profile =
         profile == L"physical-b-command-magnitude";
+    const bool composite_phase_profile =
+        profile == L"physical-b-composite-phase-calibration";
     const bool common_valid = seen_output &&
         !output_path.empty() && output_path.is_absolute();
     const bool sparse_valid = !dependency_profile && !s1_liveness_profile &&
-        !physical_b_profile && !command_magnitude_profile && seen_baseline &&
+        !physical_b_profile && !command_magnitude_profile &&
+        !composite_phase_profile && seen_baseline &&
         seen_response && seen_guard && !seen_blocks && !seen_run_role &&
         !seen_challenge_pulses && !seen_challenge_stride &&
         !seen_peak_hold && !seen_settle && !seen_lfsr_order &&
@@ -252,9 +258,16 @@ int wmain(int argc, wchar_t* argv[]) {
         !seen_peak_hold && !seen_settle && !seen_lfsr_order &&
         !seen_feedback_mask && !seen_seed && !seen_phase &&
         !seen_offline_sequence_sha;
+    const bool composite_phase_valid = composite_phase_profile &&
+        !seen_baseline && !seen_response && !seen_guard && !seen_blocks &&
+        !seen_run_role && !seen_challenge_pulses &&
+        !seen_challenge_stride && !seen_peak_hold && !seen_settle &&
+        !seen_lfsr_order && !seen_feedback_mask && !seen_seed &&
+        !seen_phase && !seen_offline_sequence_sha;
     if (!common_valid ||
         (!sparse_valid && !dependency_valid && !s1_liveness_valid &&
-         !physical_b_valid && !command_magnitude_valid)) {
+         !physical_b_valid && !command_magnitude_valid &&
+         !composite_phase_valid)) {
         std::cerr << "缺少必填参数，且 output 必须是绝对路径。\n";
         print_usage();
         return 2;
@@ -263,7 +276,11 @@ int wmain(int argc, wchar_t* argv[]) {
     mouse_effect_probe::MouseEffectProbeSequence sequence;
     std::string error;
     bool generated = false;
-    if (physical_b_profile) {
+    if (composite_phase_profile) {
+        generated =
+            mouse_effect_probe::make_composite_phase_calibration_sequence(
+                sequence, error);
+    } else if (physical_b_profile) {
         physical_b_primary_request.guard_sample_count =
             request.guard_sample_count;
         if (physical_b_primary_profile) {

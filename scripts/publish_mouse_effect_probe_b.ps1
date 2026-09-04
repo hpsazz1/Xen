@@ -169,8 +169,10 @@ function Assert-Package(
         -not [bool]$Manifest.command_magnitude_primary_tooling_included -or
         [bool]$Manifest.command_magnitude_holdout_prepare_included -or
         [bool]$Manifest.command_magnitude_run_included -or
+        -not [bool]$Manifest.composite_phase_tooling_included -or
+        [bool]$Manifest.composite_phase_run_included -or
         [int]$Manifest.file_count -ne @($Manifest.files).Count -or
-        @($Manifest.files).Count -ne 15) {
+        @($Manifest.files).Count -ne 21) {
         throw "Physical B 工具包 manifest 身份或安全边界无效"
     }
     $declared = [Collections.Generic.HashSet[string]]::new(
@@ -224,11 +226,16 @@ $scriptNames = @(
     "prepare_mouse_effect_probe_b.ps1",
     "prepare_mouse_effect_probe_b_holdout.ps1",
     "prepare_mouse_effect_probe_b_command_magnitude.ps1",
+    "prepare_mouse_effect_probe_b_composite_phase.ps1",
     "launch_mouse_effect_probe_a.ps1",
     "design_mouse_effect_probe_prbs.py",
     "analyze_mouse_effect_probe_b.py",
     "analyze_mouse_effect_probe_b_holdout.py",
-    "analyze_mouse_effect_probe_b_command_magnitude.py")
+    "analyze_mouse_effect_probe_b_command_magnitude.py",
+    "freeze_mouse_effect_probe_b_composite_phase_plan.py",
+    "produce_mouse_effect_probe_b_composite_phase_ledgers.py",
+    "bind_mouse_effect_probe_b_composite_phase_calibration.py",
+    "evaluate_mouse_effect_probe_b_composite_phase.py")
 $sourceFiles = @()
 foreach ($name in $scriptNames) {
     $path = Resolve-RequiredFile (Join-Path $sourceRoot $name) `
@@ -255,6 +262,7 @@ $buildNames = @(
     "XenMouseEffectProbe.exe",
     "XenCaptureEvidence.exe",
     "XenMouseEffectProbeSequence.exe",
+    "XenMouseEffectProbeCompositeSeal.exe",
     "opencv_world4140.dll",
     "Processing.NDI.Lib.x64.dll",
     "Processing.NDI.Lib.Licenses.txt")
@@ -326,6 +334,8 @@ try {
         command_magnitude_primary_tooling_included = $true
         command_magnitude_holdout_prepare_included = $false
         command_magnitude_run_included = $false
+        composite_phase_tooling_included = $true
+        composite_phase_run_included = $false
         files = @($files)
     }
     $localManifest = Join-Path $localIncoming "manifest.json"

@@ -25,6 +25,7 @@ enum class MouseEffectProbePhysicalAuthorization {
     PHYSICAL_B_HOLDOUT,
     PHYSICAL_B_MAGNITUDE_PRIMARY,
     PHYSICAL_B_MAGNITUDE_HOLDOUT,
+    PHYSICAL_B_COMPOSITE_PHASE_CALIBRATION,
 };
 
 enum class MouseEffectProbeSafetyPhase {
@@ -104,6 +105,9 @@ struct MouseEffectProbeRunOptions {
     std::filesystem::path sidecar_incoming_directory;
     std::filesystem::path report_path;
     std::filesystem::path safety_ledger_path;
+    std::filesystem::path composite_plan_path;
+    std::string expected_composite_plan_sha256;
+    std::filesystem::path composite_schedule_ledger_path;
     std::string run_uuid;
     std::uint64_t activation_epoch = 0;
     std::uint64_t max_seconds = 15;
@@ -114,11 +118,46 @@ struct MouseEffectProbeRunOptions {
     MouseOutputOwnerScope owner_scope = MouseOutputOwnerScope::PRODUCTION;
 };
 
+struct CompositePhaseDeadlineRequest {
+    std::int64_t predictor_source_time_at_steady_ns = 0;
+    std::int64_t source_period_ns = 0;
+    std::uint32_t phase_numerator = 0;
+    std::uint32_t phase_denominator = 0;
+    std::int64_t issue_lead_ns = 0;
+    bool command_dispatch = true;
+};
+
+struct CompositePhaseDeadline {
+    std::int64_t predicted_next_boundary_steady_ns = 0;
+    std::int64_t target_completion_steady_ns = 0;
+    std::int64_t issue_deadline_steady_ns = 0;
+};
+
+// 只计算冻结的整数 absolute deadline，不等待、不打开 Mouse。所有除法
+// 向下取整；actual completion phase 仍由后续 ledger/binder 区间重算。
+bool calculate_composite_phase_deadline(
+    const CompositePhaseDeadlineRequest& request,
+    CompositePhaseDeadline& deadline,
+    std::string& error) noexcept;
+
+// 同一 source-clock mapping 内，相邻 submission 的公共 offset 不确定度
+// 只进入 event-to-boundary 分子；source period 由 timestamp delta 与记录的
+// clock rate 推导，避免把同一 offset 在分母两端重复计算。
+bool calculate_composite_phase_interval_q32(
+    const mouse_effect_probe::ProbeSourceFrameEvent& previous_boundary,
+    const mouse_effect_probe::ProbeSourceFrameEvent& following_boundary,
+    std::int64_t event_time_steady_ns,
+    std::int64_t qpc_frequency,
+    std::uint64_t& lower,
+    std::uint64_t& upper,
+    std::string& error) noexcept;
+
 struct MouseEffectProbeRunResult {
     mouse_effect_probe::ProbeExecutionResult execution;
     std::string report_sha256;
     MouseEffectProbeSafetyLedger safety_ledger;
     std::string safety_ledger_sha256;
+    std::string composite_schedule_ledger_sha256;
 };
 
 MouseEffectProbeParseStatus parse_mouse_effect_probe_options(

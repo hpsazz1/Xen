@@ -122,6 +122,30 @@ try {
                  -not (Test-Path -LiteralPath $invalidMagnitude)) `
         'The command-magnitude CLI must reject response-window drift.'
 
+    $compositeOutput = Join-Path $resolvedTestRoot `
+        'physical-b-composite-phase-calibration.json'
+    & $resolvedExecutable `
+        --output $compositeOutput `
+        --profile physical-b-composite-phase-calibration
+    Assert-True ($LASTEXITCODE -eq 0) `
+        'The composite-phase calibration CLI should generate its fixed sequence.'
+    $composite = Get-Content -LiteralPath $compositeOutput -Raw |
+        ConvertFrom-Json
+    Assert-True ($composite.schema -eq 7 -and
+                 $composite.profile -eq
+                    'physical_b_composite_phase_calibration' -and
+                 $composite.samples.Count -eq 295 -and
+                 $composite.windows.Count -eq 42 -and
+                 $composite.blocks.Count -eq 0 -and
+                 $composite.summary.net_x_counts -eq 0 -and
+                 $composite.summary.max_abs_prefix_x_counts -eq 1) `
+        'The composite-phase CLI sample/window/net contract did not match.'
+    Assert-True (@($composite.windows | Where-Object {
+                    [bool]$_.negative_control }).Count -eq 4 -and
+                 @($composite.samples | Where-Object {
+                    [int]$_.dx_counts -ne 0 }).Count -eq 38) `
+        'The composite-phase CLI must freeze 38 pulses and four controls.'
+
     Write-Host 'Mouse Effect Probe sequence CLI contracts passed.'
 }
 finally {

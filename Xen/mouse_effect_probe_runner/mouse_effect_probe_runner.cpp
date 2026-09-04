@@ -13,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -23,7 +24,9 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
+#include <utility>
 
 namespace {
 
@@ -37,9 +40,237 @@ constexpr std::wstring_view kPhysicalBMagnitudePrimaryConfirmation =
     L"XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_PRIMARY_SENDS_REAL_KMBOX_INPUT";
 constexpr std::wstring_view kPhysicalBMagnitudeHoldoutConfirmation =
     L"XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_HOLDOUT_SENDS_REAL_KMBOX_INPUT";
+constexpr std::wstring_view kPhysicalBCompositePhaseConfirmation =
+    L"XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT";
 constexpr std::size_t kMaximumSafetyObservationCount = 8192U;
 constexpr std::size_t kMaximumMonitorPacketCount = 8192U;
 std::atomic<bool> stop_requested{false};
+std::mutex stop_event_mutex;
+HANDLE active_stop_event = nullptr;
+
+struct CompositeScheduleState {
+    bool enabled = false;
+    std::string plan_sha256;
+    std::string qpc_clock_session_id;
+    std::int64_t qpc_frequency = 0;
+    std::int64_t plan_accepted_qpc = 0;
+    std::int64_t acquisition_started_qpc = 0;
+    std::int64_t acquisition_finished_qpc = 0;
+    std::uint64_t active_wait_total_ns = 0;
+    nlohmann::ordered_json events = nlohmann::ordered_json::array();
+    std::optional<mouse_effect_probe::ProbeSourceFrameEvent>
+        first_response_boundary;
+    std::optional<std::size_t> pending_event_index;
+};
+
+bool query_qpc(std::int64_t& value) noexcept {
+    LARGE_INTEGER counter{};
+    if (!QueryPerformanceCounter(&counter) || counter.QuadPart <= 0) {
+        value = 0;
+        return false;
+    }
+    value = counter.QuadPart;
+    return true;
+}
+
+bool nanoseconds_to_qpc_ticks(std::uint64_t nanoseconds,
+                              std::int64_t frequency,
+                              std::int64_t& ticks) noexcept {
+    if (frequency <= 0) return false;
+    const auto unsigned_frequency = static_cast<std::uint64_t>(frequency);
+    const auto whole_seconds = nanoseconds / 1'000'000'000ULL;
+    const auto remainder = nanoseconds % 1'000'000'000ULL;
+    if (whole_seconds > static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max()) /
+            unsigned_frequency ||
+        remainder > std::numeric_limits<std::uint64_t>::max() /
+            unsigned_frequency) {
+        return false;
+    }
+    const auto whole_ticks = whole_seconds * unsigned_frequency;
+    const auto partial_product = remainder * unsigned_frequency;
+    const auto partial_ticks = partial_product / 1'000'000'000ULL +
+        (partial_product % 1'000'000'000ULL == 0 ? 0U : 1U);
+    if (whole_ticks > static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max()) - partial_ticks) {
+        return false;
+    }
+    ticks = static_cast<std::int64_t>(whole_ticks + partial_ticks);
+    return true;
+}
+
+std::uint64_t qpc_ticks_to_nanoseconds_ceil(
+        std::int64_t ticks, std::int64_t frequency) noexcept {
+    if (ticks <= 0 || frequency <= 0) return 0;
+    const auto value = static_cast<std::uint64_t>(ticks);
+    const auto divisor = static_cast<std::uint64_t>(frequency);
+    const auto whole = value / divisor;
+    const auto remainder = value % divisor;
+    if (whole > std::numeric_limits<std::uint64_t>::max() /
+            1'000'000'000ULL ||
+        remainder > std::numeric_limits<std::uint64_t>::max() /
+            1'000'000'000ULL) {
+        return std::numeric_limits<std::uint64_t>::max();
+    }
+    const auto partial_product = remainder * 1'000'000'000ULL;
+    return whole * 1'000'000'000ULL + partial_product / divisor +
+        (partial_product % divisor == 0 ? 0U : 1U);
+}
+
+std::uint32_t phase_numerator(std::string_view phase_cell) noexcept {
+    if (phase_cell == "P1_8") return 1U;
+    if (phase_cell == "P3_8") return 3U;
+    if (phase_cell == "P5_8") return 5U;
+    if (phase_cell == "P7_8") return 7U;
+    return 0U;
+}
+
+std::int64_t steady_now_nanoseconds() noexcept {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool qpc_ticks_to_relative_due_time(std::int64_t ticks,
+                                    std::int64_t frequency,
+                                    LARGE_INTEGER& due_time) noexcept {
+    if (ticks <= 0 || frequency <= 0) return false;
+    const auto nanoseconds = qpc_ticks_to_nanoseconds_ceil(
+        ticks, frequency);
+    if (nanoseconds == std::numeric_limits<std::uint64_t>::max()) {
+        return false;
+    }
+    const auto units_100ns = nanoseconds / 100U +
+        (nanoseconds % 100U == 0 ? 0U : 1U);
+    if (units_100ns == 0 ||
+        units_100ns > static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max())) {
+        return false;
+    }
+    due_time.QuadPart = -static_cast<std::int64_t>(units_100ns);
+    return true;
+}
+
+const mouse_effect_probe::CompositePhaseWindow*
+find_composite_window_for_sample(
+        const mouse_effect_probe::MouseEffectProbeSequence& sequence,
+        std::uint64_t sample_index) noexcept {
+    for (const auto& window : sequence.composite_phase_windows) {
+        if (sample_index >= window.first_sample_index &&
+            sample_index < window.first_sample_index + window.sample_count) {
+            return &window;
+        }
+    }
+    return nullptr;
+}
+
+bool calculate_actual_phase_interval_q32_impl(
+        const mouse_effect_probe::ProbeSourceFrameEvent& first_boundary,
+        const mouse_effect_probe::ProbeSourceFrameEvent& second_boundary,
+        std::int64_t event_time_steady_ns,
+        std::int64_t qpc_frequency,
+        std::uint64_t& lower,
+        std::uint64_t& upper) noexcept {
+    lower = 0;
+    upper = 0;
+    if (event_time_steady_ns <= 0 || qpc_frequency <= 0 ||
+        first_boundary.source_timestamp <= 0 ||
+        second_boundary.source_timestamp <=
+            first_boundary.source_timestamp ||
+        !std::isfinite(first_boundary.source_clock_rate) ||
+        !std::isfinite(second_boundary.source_clock_rate) ||
+        first_boundary.source_clock_rate < 0.99 ||
+        first_boundary.source_clock_rate > 1.01 ||
+        second_boundary.source_clock_rate < 0.99 ||
+        second_boundary.source_clock_rate > 1.01 ||
+        second_boundary.source_time_at_steady_ns <=
+            first_boundary.source_time_at_steady_ns) {
+        return false;
+    }
+    const auto uncertainty_ns = [](double milliseconds,
+                                   std::int64_t& output) noexcept {
+        if (!std::isfinite(milliseconds) || milliseconds < 0.0 ||
+            milliseconds > static_cast<double>(
+                std::numeric_limits<std::int64_t>::max()) / 1'000'000.0) {
+            return false;
+        }
+        output = static_cast<std::int64_t>(
+            std::ceil(milliseconds * 1'000'000.0));
+        return true;
+    };
+    std::int64_t first_uncertainty = 0;
+    std::int64_t second_uncertainty = 0;
+    if (!uncertainty_ns(first_boundary.source_clock_uncertainty_ms,
+                        first_uncertainty) ||
+        !uncertainty_ns(second_boundary.source_clock_uncertainty_ms,
+                        second_uncertainty)) {
+        return false;
+    }
+    const auto event_uncertainty = static_cast<std::int64_t>(
+        qpc_ticks_to_nanoseconds_ceil(1, qpc_frequency));
+    const auto first_lower = first_boundary.source_time_at_steady_ns -
+        first_uncertainty;
+    const auto first_upper = first_boundary.source_time_at_steady_ns +
+        first_uncertainty;
+    const auto second_lower = second_boundary.source_time_at_steady_ns -
+        second_uncertainty;
+    const auto second_upper = second_boundary.source_time_at_steady_ns +
+        second_uncertainty;
+    const auto event_lower = event_time_steady_ns - event_uncertainty;
+    const auto event_upper = event_time_steady_ns + event_uncertainty;
+    const auto numerator_lower = event_lower - first_upper;
+    const auto numerator_upper = event_upper - first_lower;
+    const auto mapped_period_lower = second_lower - first_upper;
+    const auto mapped_period_upper = second_upper - first_lower;
+    const auto source_delta_100ns = static_cast<std::uint64_t>(
+        second_boundary.source_timestamp - first_boundary.source_timestamp);
+    if (source_delta_100ns >
+            std::numeric_limits<std::uint64_t>::max() / 100U) {
+        return false;
+    }
+    const auto source_period_ns = source_delta_100ns * 100U;
+    const auto rate_lower = std::min(
+        first_boundary.source_clock_rate,
+        second_boundary.source_clock_rate);
+    const auto rate_upper = std::max(
+        first_boundary.source_clock_rate,
+        second_boundary.source_clock_rate);
+    const auto period_lower_value = std::floor(
+        static_cast<long double>(source_period_ns) * rate_lower);
+    const auto period_upper_value = std::ceil(
+        static_cast<long double>(source_period_ns) * rate_upper);
+    if (!std::isfinite(period_lower_value) ||
+        !std::isfinite(period_upper_value) || period_lower_value <= 0.0L ||
+        period_upper_value > static_cast<long double>(
+            std::numeric_limits<std::uint64_t>::max())) {
+        return false;
+    }
+    const auto period_lower = static_cast<std::uint64_t>(
+        period_lower_value);
+    const auto period_upper = static_cast<std::uint64_t>(
+        period_upper_value);
+    constexpr std::uint64_t kQ32 = std::uint64_t{1} << 32U;
+    if (numerator_lower <= 0 || mapped_period_lower <= 0 ||
+        mapped_period_upper <= 0 || period_lower == 0 ||
+        period_upper < period_lower ||
+        period_upper < static_cast<std::uint64_t>(mapped_period_lower) ||
+        period_lower > static_cast<std::uint64_t>(mapped_period_upper) ||
+        static_cast<std::uint64_t>(numerator_upper) >= period_lower ||
+        static_cast<std::uint64_t>(numerator_lower) >
+            std::numeric_limits<std::uint64_t>::max() / kQ32 ||
+        static_cast<std::uint64_t>(numerator_upper) >
+            std::numeric_limits<std::uint64_t>::max() / kQ32) {
+        return false;
+    }
+    const auto lower_product =
+        static_cast<std::uint64_t>(numerator_lower) * kQ32;
+    const auto upper_product =
+        static_cast<std::uint64_t>(numerator_upper) * kQ32;
+    lower = lower_product / period_upper;
+    const auto denominator = period_lower;
+    upper = upper_product / denominator +
+        (upper_product % denominator == 0 ? 0U : 1U);
+    return lower <= upper && upper < kQ32;
+}
 
 bool is_physical_dispatch(
         mouse_effect_probe::ProbeDispatchMode mode) noexcept {
@@ -183,6 +414,252 @@ bool sha256_payload(std::span<const std::uint8_t> payload,
     }
 }
 
+bool write_composite_schedule_ledger(
+        const MouseEffectProbeRunOptions& options,
+        const mouse_effect_probe::MouseEffectProbeSequence& sequence,
+        const mouse_effect_probe::ProbeExecutionResult& execution,
+        const CompositeScheduleState& state,
+        std::string_view command_report_sha256,
+        std::string_view safety_ledger_sha256,
+        std::string& file_sha256,
+        std::string& error) noexcept {
+    std::filesystem::path temporary_path;
+    try {
+        if (!state.enabled || state.qpc_frequency <= 0 ||
+            state.plan_accepted_qpc <= 0 ||
+            state.acquisition_started_qpc <= state.plan_accepted_qpc ||
+            state.acquisition_finished_qpc < state.acquisition_started_qpc ||
+            options.composite_schedule_ledger_path.empty() ||
+            !options.composite_schedule_ledger_path.is_absolute() ||
+            !valid_sha256(state.plan_sha256) ||
+            !valid_sha256(command_report_sha256) ||
+            !valid_sha256(safety_ledger_sha256)) {
+            set_error(error, "composite schedule ledger 终态身份无效");
+            return false;
+        }
+        nlohmann::ordered_json document = {
+            {"schema_version", 1},
+            {"evidence_type",
+             "mouse_effect_probe_b_composite_phase_raw_schedule_ledger"},
+            {"status", execution.complete
+                ? "ACQUISITION_COMPLETE" : "ACQUISITION_STOPPED"},
+            {"ledger_physical_output_capability", false},
+            {"ledger_physical_dispatch_count", 0},
+            {"run_uuid", options.run_uuid},
+            {"activation_epoch", options.activation_epoch},
+            {"composite_plan_file_sha256", state.plan_sha256},
+            {"probe_binding_sha256", options.expected_binding_sha256},
+            {"sequence_semantic_sha256", sequence.sequence_sha256},
+            {"command_report_file_sha256", command_report_sha256},
+            {"safety_ledger_file_sha256", safety_ledger_sha256},
+            {"scheduler_clock", {
+                {"clock_kind", "WINDOWS_QPC"},
+                {"clock_session_id", state.qpc_clock_session_id},
+                {"frequency_hz", state.qpc_frequency},
+                {"producer_process_id", GetCurrentProcessId()},
+            }},
+            {"timer_mode", sequence.composite_phase_request.timer_mode},
+            {"plan_accepted_at_qpc", state.plan_accepted_qpc},
+            {"acquisition_started_at_qpc",
+             state.acquisition_started_qpc},
+            {"acquisition_finished_at_qpc",
+             state.acquisition_finished_qpc},
+            {"revealed_at_qpc", state.acquisition_finished_qpc},
+            {"active_wait_total_ns", state.active_wait_total_ns},
+            {"source_dispatch_count",
+             std::count_if(execution.events.begin(), execution.events.end(),
+                [](const auto& event) { return event.dispatch_attempted; })},
+            {"events", state.events},
+        };
+        const nlohmann::json canonical_document = document;
+        const auto semantic_input = canonical_document.dump();
+        std::string semantic_sha256;
+        if (!sha256_payload(std::span<const std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(semantic_input.data()),
+                semantic_input.size()), semantic_sha256)) {
+            set_error(error, "composite schedule semantic SHA-256 失败");
+            return false;
+        }
+        document["ledger_semantic_sha256"] = semantic_sha256;
+        const std::string content = document.dump(2) + "\n";
+        const auto final_path = options.composite_schedule_ledger_path;
+        temporary_path = final_path;
+        temporary_path += L".pending-" +
+            std::to_wstring(GetCurrentProcessId());
+        if (std::filesystem::exists(final_path) ||
+            std::filesystem::exists(temporary_path)) {
+            set_error(error,
+                "composite schedule ledger 已存在，拒绝覆盖");
+            temporary_path.clear();
+            return false;
+        }
+        std::ofstream output(
+            temporary_path, std::ios::binary | std::ios::trunc);
+        output.write(content.data(), static_cast<std::streamsize>(
+            content.size()));
+        output.flush();
+        const bool written = output.good();
+        output.close();
+        if (!written || !MoveFileExW(
+                temporary_path.c_str(), final_path.c_str(),
+                MOVEFILE_WRITE_THROUGH)) {
+            const auto code = GetLastError();
+            std::error_code ignored;
+            std::filesystem::remove(temporary_path, ignored);
+            temporary_path.clear();
+            set_error(error,
+                "composite schedule ledger 原子发布失败，Win32Error=" +
+                std::to_string(code));
+            return false;
+        }
+        temporary_path.clear();
+        return mouse_effect_probe::calculate_mouse_effect_probe_file_sha256(
+            final_path, file_sha256, error);
+    } catch (const std::exception& exception) {
+        set_error(error,
+            std::string("发布 composite schedule ledger 异常: ") +
+            exception.what());
+    } catch (...) {
+        set_error(error,
+            "发布 composite schedule ledger 时发生未知异常");
+    }
+    if (!temporary_path.empty()) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary_path, ignored);
+    }
+    file_sha256.clear();
+    return false;
+}
+
+bool validate_composite_plan(
+        const MouseEffectProbeRunOptions& options,
+        const mouse_effect_probe::MouseEffectProbeSequence& sequence,
+        std::string& error) noexcept {
+    try {
+        std::error_code filesystem_error;
+        const auto byte_count = std::filesystem::file_size(
+            options.composite_plan_path, filesystem_error);
+        if (filesystem_error || byte_count == 0 || byte_count > 1'048'576U) {
+            set_error(error, "composite plan 大小合同无效");
+            return false;
+        }
+        std::ifstream input(options.composite_plan_path, std::ios::binary);
+        const std::string content((std::istreambuf_iterator<char>(input)),
+                                  std::istreambuf_iterator<char>());
+        if ((!input.good() && !input.eof()) || content.empty()) {
+            set_error(error, "composite plan 无法完整读取");
+            return false;
+        }
+        auto document = nlohmann::json::parse(content);
+        if (!document.is_object() ||
+            document.value("schema_version", 0) != 1 ||
+            document.value("evidence_type", std::string{}) !=
+                "mouse_effect_probe_b_composite_phase_calibration_plan" ||
+            document.value("status", std::string{}) !=
+                "FROZEN_BEFORE_CAPTURE" ||
+            document.value("run_uuid", std::string{}) != options.run_uuid ||
+            document.value("activation_epoch", std::uint64_t{0}) !=
+                options.activation_epoch ||
+            document.value("physical_output_capability", true) ||
+            document.value("physical_dispatch_count", -1) != 0) {
+            set_error(error, "composite plan header/Run/output-off 合同无效");
+            return false;
+        }
+        const auto claimed_semantic = document.value(
+            "plan_semantic_sha256", std::string{});
+        document.erase("plan_semantic_sha256");
+        const auto semantic_payload = document.dump();
+        std::string actual_semantic;
+        if (!valid_sha256(claimed_semantic) ||
+            !sha256_payload(std::span<const std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(
+                    semantic_payload.data()), semantic_payload.size()),
+                actual_semantic) ||
+            actual_semantic != claimed_semantic) {
+            set_error(error, "composite plan semantic SHA-256 漂移");
+            return false;
+        }
+        const auto& binding = document.at("sequence_binding");
+        std::string sequence_file_sha256;
+        if (!binding.is_object() ||
+            binding.value("sequence_schema", 0) != 7 ||
+            binding.value("sequence_profile", std::string{}) !=
+                sequence.profile ||
+            binding.value("sequence_semantic_sha256", std::string{}) !=
+                sequence.sequence_sha256 ||
+            binding.value("sample_count", std::uint64_t{0}) !=
+                sequence.samples.size() ||
+            binding.value("window_count", std::uint64_t{0}) !=
+                sequence.composite_phase_windows.size() ||
+            !mouse_effect_probe::calculate_mouse_effect_probe_file_sha256(
+                options.sequence_path, sequence_file_sha256, error) ||
+            binding.value("sequence_file_sha256", std::string{}) !=
+                sequence_file_sha256) {
+            if (error.empty()) {
+                set_error(error, "composite plan sequence binding 漂移");
+            }
+            return false;
+        }
+        std::vector<std::string> expected_window_order;
+        expected_window_order.reserve(
+            sequence.composite_phase_windows.size());
+        for (const auto& window : sequence.composite_phase_windows) {
+            expected_window_order.push_back(window.window_id);
+        }
+        if (binding.value("window_order", std::vector<std::string>{}) !=
+                expected_window_order) {
+            set_error(error, "composite plan window order 与 sequence 漂移");
+            return false;
+        }
+        const auto& policy = document.at("scheduler_policy");
+        const auto& request = sequence.composite_phase_request;
+        if (!policy.is_object() ||
+            policy.value("clock_kind", std::string{}) != "WINDOWS_QPC" ||
+            policy.value("timer_mode", std::string{}) != request.timer_mode ||
+            policy.value("deadline_basis", std::string{}) !=
+                "PREDICTOR_NEXT_NDI_SUBMISSION_BOUNDARY" ||
+            policy.value("issue_lead_ns", std::int64_t{0}) !=
+                request.issue_lead_ns ||
+            policy.value("issue_lead_applies_to", std::string{}) !=
+                "NONZERO_PULSE_ONLY" ||
+            policy.value("negative_control_marker_lead_ns",
+                         std::int64_t{-1}) != 0 ||
+            policy.value("target_tolerance_q32", std::uint64_t{0}) !=
+                request.target_tolerance_q32 ||
+            policy.value("active_guard_ns", std::uint64_t{0}) !=
+                request.active_guard_ns ||
+            policy.value("max_wake_lateness_ns", std::uint64_t{0}) !=
+                request.max_wake_lateness_ns ||
+            policy.value("max_event_interval_width_ns", std::uint64_t{0}) !=
+                request.max_event_interval_width_ns ||
+            policy.value("max_active_wait_ns_per_event", std::uint64_t{0}) !=
+                request.max_active_wait_ns_per_event ||
+            policy.value("max_active_wait_ns_total", std::uint64_t{0}) !=
+                request.max_active_wait_ns_total ||
+            !policy.value("preflight_required", false) ||
+            !valid_sha256(policy.value(
+                "preflight_file_sha256", std::string{})) ||
+            policy.value("per_event_tuning_allowed", true) ||
+            policy.value("process_priority", std::string{}) != "NORMAL" ||
+            policy.value("thread_priority", std::string{}) != "NORMAL" ||
+            policy.value("cpu_affinity_used", true) ||
+            policy.value("time_begin_period_used", true) ||
+            policy.value("periodic_timer_used", true)) {
+            set_error(error, "composite scheduler policy 与冻结 sequence 漂移");
+            return false;
+        }
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        set_error(error, std::string("验证 composite plan 异常: ") +
+                         exception.what());
+        return false;
+    } catch (...) {
+        set_error(error, "验证 composite plan 时发生未知异常");
+        return false;
+    }
+}
+
 const char* input_monitor_status_name(InputMonitorStatus status) noexcept {
     switch (status) {
     case InputMonitorStatus::CLOSED: return "CLOSED";
@@ -220,6 +697,66 @@ bool path_to_utf8(const std::filesystem::path& path,
                   std::string& output) noexcept {
     return wide_to_utf8(path.native(), output);
 }
+
+class RegisteredStopEvent {
+public:
+    bool open(std::string& error) noexcept {
+        handle_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!handle_) {
+            set_error(error, "无法创建 composite scheduler stop event");
+            return false;
+        }
+        std::lock_guard lock(stop_event_mutex);
+        if (active_stop_event != nullptr) {
+            CloseHandle(handle_);
+            handle_ = nullptr;
+            set_error(error, "已有 composite scheduler stop event");
+            return false;
+        }
+        active_stop_event = handle_;
+        if (stop_requested.load(std::memory_order_acquire)) {
+            SetEvent(handle_);
+        }
+        error.clear();
+        return true;
+    }
+
+    ~RegisteredStopEvent() {
+        if (!handle_) return;
+        {
+            std::lock_guard lock(stop_event_mutex);
+            if (active_stop_event == handle_) active_stop_event = nullptr;
+        }
+        CloseHandle(handle_);
+    }
+
+    HANDLE get() const noexcept { return handle_; }
+
+private:
+    HANDLE handle_ = nullptr;
+};
+
+class OwnedHandle {
+public:
+    OwnedHandle() = default;
+    explicit OwnedHandle(HANDLE handle) noexcept : handle_(handle) {}
+    ~OwnedHandle() { if (handle_) CloseHandle(handle_); }
+    OwnedHandle(const OwnedHandle&) = delete;
+    OwnedHandle& operator=(const OwnedHandle&) = delete;
+    OwnedHandle(OwnedHandle&& other) noexcept
+        : handle_(std::exchange(other.handle_, nullptr)) {}
+    OwnedHandle& operator=(OwnedHandle&& other) noexcept {
+        if (this == &other) return *this;
+        if (handle_) CloseHandle(handle_);
+        handle_ = std::exchange(other.handle_, nullptr);
+        return *this;
+    }
+    HANDLE get() const noexcept { return handle_; }
+    explicit operator bool() const noexcept { return handle_ != nullptr; }
+
+private:
+    HANDLE handle_ = nullptr;
+};
 
 class SidecarWitness {
 public:
@@ -750,6 +1287,9 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
         bool seen_sidecar_incoming = false;
         bool seen_report = false;
         bool seen_safety_ledger = false;
+        bool seen_composite_plan = false;
+        bool seen_composite_plan_sha = false;
+        bool seen_composite_schedule_ledger = false;
         bool seen_run_uuid = false;
         bool seen_activation_epoch = false;
         bool seen_max_seconds = false;
@@ -852,6 +1392,30 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                 }
                 options.safety_ledger_path =
                     std::filesystem::path(value);
+            } else if (argument == L"--composite-plan") {
+                if (duplicate(seen_composite_plan, "--composite-plan")) {
+                    return MouseEffectProbeParseStatus::INVALID;
+                }
+                options.composite_plan_path = std::filesystem::path(value);
+            } else if (argument == L"--composite-plan-sha256") {
+                if (duplicate(seen_composite_plan_sha,
+                              "--composite-plan-sha256") ||
+                    !wide_to_utf8(
+                        value, options.expected_composite_plan_sha256) ||
+                    !valid_sha256(
+                        options.expected_composite_plan_sha256)) {
+                    if (error.empty()) {
+                        set_error(error, "--composite-plan-sha256 非法");
+                    }
+                    return MouseEffectProbeParseStatus::INVALID;
+                }
+            } else if (argument == L"--composite-schedule-ledger") {
+                if (duplicate(seen_composite_schedule_ledger,
+                              "--composite-schedule-ledger")) {
+                    return MouseEffectProbeParseStatus::INVALID;
+                }
+                options.composite_schedule_ledger_path =
+                    std::filesystem::path(value);
             } else if (argument == L"--run-uuid") {
                 if (duplicate(seen_run_uuid, "--run-uuid") ||
                     !wide_to_utf8(value, options.run_uuid) ||
@@ -938,6 +1502,12 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                            kPhysicalBMagnitudeHoldoutConfirmation) {
                 authorization = MouseEffectProbePhysicalAuthorization::
                     PHYSICAL_B_MAGNITUDE_HOLDOUT;
+            } else if (options.dispatch_mode ==
+                           mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B &&
+                       physical_confirmation ==
+                           kPhysicalBCompositePhaseConfirmation) {
+                authorization = MouseEffectProbePhysicalAuthorization::
+                    PHYSICAL_B_COMPOSITE_PHASE_CALIBRATION;
             }
             if (!options.allow_physical_output ||
                 !seen_confirmation ||
@@ -956,8 +1526,24 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                     "physical mode 缺少绝对 safety ledger 发布路径");
                 return MouseEffectProbeParseStatus::INVALID;
             }
+            const bool composite_authority = authorization ==
+                MouseEffectProbePhysicalAuthorization::
+                    PHYSICAL_B_COMPOSITE_PHASE_CALIBRATION;
+            const bool complete_composite_paths =
+                seen_composite_plan && seen_composite_plan_sha &&
+                seen_composite_schedule_ledger &&
+                !options.composite_plan_path.empty() &&
+                options.composite_plan_path.is_absolute() &&
+                !options.composite_schedule_ledger_path.empty() &&
+                options.composite_schedule_ledger_path.is_absolute();
+            if (composite_authority != complete_composite_paths) {
+                set_error(error,
+                    "composite-phase token 必须且只能携带绝对 plan/schedule-ledger 路径与 SHA");
+                return MouseEffectProbeParseStatus::INVALID;
+            }
         } else if (seen_allow_physical || seen_confirmation ||
-                   seen_safety_ledger) {
+                   seen_safety_ledger || seen_composite_plan ||
+                   seen_composite_plan_sha || seen_composite_schedule_ledger) {
             set_error(error,
                 "output-off rehearsal 禁止物理输出授权或 safety ledger 参数");
             return MouseEffectProbeParseStatus::INVALID;
@@ -1002,6 +1588,9 @@ bool validate_mouse_effect_probe_sequence_authorization(
         const bool physical_b_magnitude_holdout_sequence =
             sequence.schema == 6U &&
             sequence.profile == "physical_b_command_magnitude_holdout";
+        const bool physical_b_composite_phase_sequence =
+            sequence.schema == 7U &&
+            sequence.profile == "physical_b_composite_phase_calibration";
         if (options.dispatch_mode ==
                 mouse_effect_probe::ProbeDispatchMode::PHYSICAL_A) {
             if (options.physical_authorization !=
@@ -1009,7 +1598,8 @@ bool validate_mouse_effect_probe_sequence_authorization(
                 physical_b_primary_sequence ||
                 physical_b_holdout_sequence ||
                 physical_b_magnitude_primary_sequence ||
-                physical_b_magnitude_holdout_sequence) {
+                physical_b_magnitude_holdout_sequence ||
+                physical_b_composite_phase_sequence) {
                 set_error(error,
                     "Physical A 授权与 sequence schema/profile 不一致");
                 return false;
@@ -1028,6 +1618,9 @@ bool validate_mouse_effect_probe_sequence_authorization(
                     : physical_b_magnitude_holdout_sequence
                         ? MouseEffectProbePhysicalAuthorization::
                             PHYSICAL_B_MAGNITUDE_HOLDOUT
+                    : physical_b_composite_phase_sequence
+                        ? MouseEffectProbePhysicalAuthorization::
+                            PHYSICAL_B_COMPOSITE_PHASE_CALIBRATION
                 : MouseEffectProbePhysicalAuthorization::NONE;
         if (expected_authorization ==
                 MouseEffectProbePhysicalAuthorization::NONE ||
@@ -1078,6 +1671,13 @@ std::string mouse_effect_probe_usage() {
         "--safety-ledger <new-json> "
         "--confirm-physical-output "
         "XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_HOLDOUT_SENDS_REAL_KMBOX_INPUT\n"
+        "physical B composite-phase calibration 使用独立确认令牌与 sealed plan:\n"
+        "  --mode physical-b --allow-physical-output "
+        "--safety-ledger <new-json> --composite-plan <sealed-json> "
+        "--composite-plan-sha256 <sha256> "
+        "--composite-schedule-ledger <new-json> "
+        "--confirm-physical-output "
+        "XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT\n"
         "physical A/B 会发送真实 KMBOX X 输入；只能由用户前台启动。\n";
 }
 
@@ -1095,9 +1695,11 @@ bool make_mouse_effect_probe_source_frame_event(
             timing.source_clock_status != SourceClockStatus::VALID ||
             !timing.source_time_timing_valid ||
             timing.source_time_at.time_since_epoch().count() <= 0 ||
-            !finite_nonnegative(timing.source_clock_uncertainty_ms) ||
-            !finite_nonnegative(timing.source_clock_round_trip_ms) ||
-            !finite_nonnegative(timing.source_clock_mapping_age_ms) ||
+             !finite_nonnegative(timing.source_clock_uncertainty_ms) ||
+             !finite_nonnegative(timing.source_clock_round_trip_ms) ||
+             !std::isfinite(timing.source_clock_rate) ||
+             timing.source_clock_rate <= 0.0 ||
+             !finite_nonnegative(timing.source_clock_mapping_age_ms) ||
             timing.source_clock_sample_count == 0 ||
             timing.source_clock_session_id == 0) {
             set_error(error, "Capture frame 缺少 VALID NDI source timing");
@@ -1118,6 +1720,7 @@ bool make_mouse_effect_probe_source_frame_event(
         event.source_clock_uncertainty_ms =
             timing.source_clock_uncertainty_ms;
         event.source_clock_rtt_ms = timing.source_clock_round_trip_ms;
+        event.source_clock_rate = timing.source_clock_rate;
         event.source_clock_mapping_age_ms =
             timing.source_clock_mapping_age_ms;
         event.source_clock_sample_count =
@@ -1144,8 +1747,90 @@ bool make_mouse_effect_probe_source_frame_event(
     }
 }
 
+bool calculate_composite_phase_deadline(
+        const CompositePhaseDeadlineRequest& request,
+        CompositePhaseDeadline& deadline,
+        std::string& error) noexcept {
+    deadline = {};
+    try {
+        const bool known_phase = request.phase_numerator == 1U ||
+            request.phase_numerator == 3U ||
+            request.phase_numerator == 5U ||
+            request.phase_numerator == 7U;
+        if (request.predictor_source_time_at_steady_ns <= 0 ||
+            request.source_period_ns <= 0 || !known_phase ||
+            request.phase_denominator != 8U || request.issue_lead_ns <= 0 ||
+            request.issue_lead_ns >= request.source_period_ns ||
+            request.source_period_ns >
+                std::numeric_limits<std::int64_t>::max() /
+                    static_cast<std::int64_t>(request.phase_numerator)) {
+            set_error(error,
+                "composite-phase deadline 输入不满足冻结整数合同");
+            return false;
+        }
+        const auto phase_offset =
+            request.source_period_ns *
+                static_cast<std::int64_t>(request.phase_numerator) /
+            static_cast<std::int64_t>(request.phase_denominator);
+        const auto maximum = std::numeric_limits<std::int64_t>::max();
+        if (request.predictor_source_time_at_steady_ns >
+                maximum - request.source_period_ns) {
+            set_error(error, "composite-phase next boundary 溢出");
+            return false;
+        }
+        deadline.predicted_next_boundary_steady_ns =
+            request.predictor_source_time_at_steady_ns +
+            request.source_period_ns;
+        if (deadline.predicted_next_boundary_steady_ns >
+                maximum - phase_offset) {
+            deadline = {};
+            set_error(error, "composite-phase completion deadline 溢出");
+            return false;
+        }
+        deadline.target_completion_steady_ns =
+            deadline.predicted_next_boundary_steady_ns + phase_offset;
+        deadline.issue_deadline_steady_ns = request.command_dispatch
+            ? deadline.target_completion_steady_ns - request.issue_lead_ns
+            : deadline.target_completion_steady_ns;
+        if (deadline.issue_deadline_steady_ns <=
+                request.predictor_source_time_at_steady_ns) {
+            deadline = {};
+            set_error(error,
+                "composite-phase issue deadline 未晚于 predictor");
+            return false;
+        }
+        error.clear();
+        return true;
+    } catch (...) {
+        deadline = {};
+        set_error(error, "计算 composite-phase deadline 时发生未知异常");
+        return false;
+    }
+}
+
+bool calculate_composite_phase_interval_q32(
+        const mouse_effect_probe::ProbeSourceFrameEvent& previous_boundary,
+        const mouse_effect_probe::ProbeSourceFrameEvent& following_boundary,
+        std::int64_t event_time_steady_ns,
+        std::int64_t qpc_frequency,
+        std::uint64_t& lower,
+        std::uint64_t& upper,
+        std::string& error) noexcept {
+    if (!calculate_actual_phase_interval_q32_impl(
+            previous_boundary, following_boundary,
+            event_time_steady_ns, qpc_frequency, lower, upper)) {
+        set_error(error,
+            "composite-phase source timestamp/rate/boundary interval 无效");
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 void request_mouse_effect_probe_stop() noexcept {
     stop_requested.store(true, std::memory_order_release);
+    std::lock_guard lock(stop_event_mutex);
+    if (active_stop_event) SetEvent(active_stop_event);
 }
 
 bool run_mouse_effect_probe(
@@ -1172,6 +1857,63 @@ bool run_mouse_effect_probe(
         }
         if (!validate_mouse_effect_probe_sequence_authorization(
                 options, sequence, error)) return false;
+        const bool composite_phase = sequence.schema == 7U &&
+            sequence.profile == "physical_b_composite_phase_calibration";
+        CompositeScheduleState composite_schedule;
+        RegisteredStopEvent scheduler_stop_event;
+        OwnedHandle scheduler_timer;
+        if (composite_phase) {
+            if (std::filesystem::exists(
+                    options.composite_schedule_ledger_path)) {
+                set_error(error,
+                    "composite schedule ledger 已存在，拒绝开始 probe");
+                return false;
+            }
+            std::string actual_plan_sha256;
+            if (!std::filesystem::is_regular_file(
+                    options.composite_plan_path) ||
+                !mouse_effect_probe::
+                    calculate_mouse_effect_probe_file_sha256(
+                        options.composite_plan_path, actual_plan_sha256,
+                        error) ||
+                actual_plan_sha256 !=
+                    options.expected_composite_plan_sha256) {
+                if (error.empty()) {
+                    set_error(error,
+                        "composite plan 文件缺失或 SHA-256 漂移");
+                }
+                return false;
+            }
+            if (!validate_composite_plan(options, sequence, error)) {
+                return false;
+            }
+            LARGE_INTEGER frequency{};
+            if (!QueryPerformanceFrequency(&frequency) ||
+                frequency.QuadPart <= 0 ||
+                !scheduler_stop_event.open(error)) {
+                if (error.empty()) {
+                    set_error(error, "composite scheduler QPC 初始化失败");
+                }
+                return false;
+            }
+            scheduler_timer = OwnedHandle(CreateWaitableTimerExW(
+                nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS));
+            if (!scheduler_timer) {
+                set_error(error,
+                    "composite scheduler 高分辨率 one-shot timer 不可用");
+                return false;
+            }
+            composite_schedule.enabled = true;
+            composite_schedule.plan_sha256 = actual_plan_sha256;
+            composite_schedule.qpc_frequency = frequency.QuadPart;
+            composite_schedule.qpc_clock_session_id =
+                options.run_uuid + "-qpc";
+            if (!query_qpc(composite_schedule.plan_accepted_qpc)) {
+                set_error(error, "composite plan accept QPC 读取失败");
+                return false;
+            }
+        }
         AppConfig app_config;
         std::string config_path;
         if (!path_to_utf8(options.config_path, config_path) ||
@@ -1280,7 +2022,41 @@ bool run_mouse_effect_probe(
                         report_error;
                 }
             }
-            return safety_ledger_published && report_published;
+            bool schedule_ledger_published = true;
+            if (composite_schedule.enabled &&
+                composite_schedule.acquisition_started_qpc > 0) {
+                if (composite_schedule.acquisition_finished_qpc <=
+                        composite_schedule.acquisition_started_qpc) {
+                    query_qpc(
+                        composite_schedule.acquisition_finished_qpc);
+                }
+                std::string schedule_error;
+                schedule_ledger_published = report_published &&
+                    safety_ledger_published &&
+                    write_composite_schedule_ledger(
+                        options, sequence, result.execution,
+                        composite_schedule, result.report_sha256,
+                        result.safety_ledger_sha256,
+                        result.composite_schedule_ledger_sha256,
+                        schedule_error);
+                if (!schedule_ledger_published) {
+                    if (schedule_error.empty()) {
+                        schedule_error =
+                            "command/safety ledger 未完整发布";
+                    }
+                    if (execution_error.empty()) {
+                        execution_error =
+                            "composite schedule ledger 发布失败: " +
+                            schedule_error;
+                    } else {
+                        execution_error +=
+                            "; composite schedule ledger 发布失败: " +
+                            schedule_error;
+                    }
+                }
+            }
+            return safety_ledger_published && report_published &&
+                schedule_ledger_published;
         };
         if (!started) {
             publish_report();
@@ -1368,9 +2144,25 @@ bool run_mouse_effect_probe(
             error = execution_error;
             return false;
         }
+        if (composite_phase &&
+            (!query_qpc(composite_schedule.acquisition_started_qpc) ||
+             composite_schedule.acquisition_started_qpc <=
+                 composite_schedule.plan_accepted_qpc)) {
+            executor.request_stop(
+                mouse_effect_probe::ProbeStopReason::
+                    SCHEDULER_TIMING_INVALID,
+                execution_error);
+            execution_error = "composite acquisition start QPC 无效";
+            capture->close();
+            publish_report();
+            error = execution_error;
+            return false;
+        }
 
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::seconds(options.max_seconds);
+        std::optional<mouse_effect_probe::ProbeSourceFrameEvent>
+            previous_source_event;
         while (executor.result().state ==
                    mouse_effect_probe::ProbeExecutionState::RUNNING) {
             if (stop_requested.load(std::memory_order_acquire)) {
@@ -1458,12 +2250,470 @@ bool run_mouse_effect_probe(
                 execution_error = frame_error;
                 break;
             }
-            if (!executor.consume_source_frame(source_event, frame_error)) {
+            const auto sample_index =
+                executor.result().consumed_sample_count;
+            const auto* composite_window = composite_phase
+                ? find_composite_window_for_sample(sequence, sample_index)
+                : nullptr;
+            if (composite_phase && sample_index != 0U &&
+                !composite_window) {
+                executor.request_stop(
+                    mouse_effect_probe::ProbeStopReason::
+                        SCHEDULER_TIMING_INVALID,
+                    execution_error);
+                execution_error =
+                    "composite sample 未归属冻结 window";
+                break;
+            }
+
+            bool consumed = false;
+            if (composite_window &&
+                sample_index == composite_window->first_sample_index) {
+                nlohmann::ordered_json schedule_event = {
+                    {"window_ordinal", composite_window->window_ordinal},
+                    {"window_id", composite_window->window_id},
+                    {"phase_cell", composite_window->phase_cell},
+                    {"negative_control",
+                     composite_window->negative_control},
+                    {"predictor_sample_index", sample_index},
+                    {"predictor_source_frame_sequence",
+                     source_event.source_frame_sequence},
+                    {"predictor_source_timestamp",
+                     source_event.source_timestamp},
+                    {"predictor_source_time_at_steady_ns",
+                     source_event.source_time_at_steady_ns},
+                    {"dispatch_attempted", false},
+                    {"status", "PENDING"},
+                };
+                const auto stop_before_dispatch = [&]
+                        (mouse_effect_probe::ProbeStopReason reason,
+                         std::string_view message) {
+                    schedule_event["status"] =
+                        "REJECTED_BEFORE_DISPATCH";
+                    schedule_event["failure_reason"] = message;
+                    composite_schedule.events.push_back(schedule_event);
+                    std::string stop_error;
+                    executor.request_stop(reason, stop_error);
+                    execution_error.assign(message);
+                    if (!stop_error.empty()) {
+                        execution_error += "; stop 失败: " + stop_error;
+                    }
+                };
+                if (!previous_source_event.has_value()) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        "composite predictor 缺少前一 source boundary");
+                    break;
+                }
+                const auto source_period_ns =
+                    source_event.source_time_at_steady_ns -
+                    previous_source_event->source_time_at_steady_ns;
+                const auto numerator = phase_numerator(
+                    composite_window->phase_cell);
+                CompositePhaseDeadline phase_deadline;
+                const CompositePhaseDeadlineRequest deadline_request{
+                    .predictor_source_time_at_steady_ns =
+                        source_event.source_time_at_steady_ns,
+                    .source_period_ns = source_period_ns,
+                    .phase_numerator = numerator,
+                    .phase_denominator = 8U,
+                    .issue_lead_ns = sequence.composite_phase_request.
+                        issue_lead_ns,
+                    .command_dispatch =
+                        !composite_window->negative_control,
+                };
+                if (!calculate_composite_phase_deadline(
+                        deadline_request, phase_deadline, frame_error)) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        frame_error);
+                    break;
+                }
+                schedule_event["source_period_ns"] = source_period_ns;
+                schedule_event["source_timestamp_delta_100ns"] =
+                    source_event.source_timestamp -
+                    previous_source_event->source_timestamp;
+                schedule_event["predicted_next_boundary_steady_ns"] =
+                    phase_deadline.predicted_next_boundary_steady_ns;
+                schedule_event["target_completion_steady_ns"] =
+                    phase_deadline.target_completion_steady_ns;
+                schedule_event["issue_deadline_steady_ns"] =
+                    phase_deadline.issue_deadline_steady_ns;
+
+                const auto steady_anchor = steady_now_nanoseconds();
+                std::int64_t qpc_anchor = 0;
+                const auto steady_delta =
+                    phase_deadline.issue_deadline_steady_ns -
+                    steady_anchor;
+                std::int64_t deadline_delta_ticks = 0;
+                if (steady_delta <= 0 || !query_qpc(qpc_anchor) ||
+                    !nanoseconds_to_qpc_ticks(
+                        static_cast<std::uint64_t>(steady_delta),
+                        composite_schedule.qpc_frequency,
+                        deadline_delta_ticks) ||
+                    qpc_anchor > std::numeric_limits<std::int64_t>::max() -
+                        deadline_delta_ticks) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        "composite absolute deadline 已迟到或溢出");
+                    break;
+                }
+                const auto deadline_qpc = qpc_anchor +
+                    deadline_delta_ticks;
+                std::int64_t active_guard_ticks = 0;
+                if (!nanoseconds_to_qpc_ticks(
+                        sequence.composite_phase_request.active_guard_ns,
+                        composite_schedule.qpc_frequency,
+                        active_guard_ticks) ||
+                    active_guard_ticks <= 0 ||
+                    deadline_qpc <= active_guard_ticks) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        "composite active guard 转换失败");
+                    break;
+                }
+                const auto active_start_target_qpc =
+                    deadline_qpc - active_guard_ticks;
+                std::int64_t now_qpc = 0;
+                if (!query_qpc(now_qpc)) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        "composite coarse-wait QPC 读取失败");
+                    break;
+                }
+                schedule_event["deadline_qpc"] = deadline_qpc;
+                schedule_event["active_start_target_qpc"] =
+                    active_start_target_qpc;
+                schedule_event["coarse_wait_started_qpc"] = now_qpc;
+                bool coarse_wait_used = false;
+                if (now_qpc < active_start_target_qpc) {
+                    LARGE_INTEGER due_time{};
+                    if (!qpc_ticks_to_relative_due_time(
+                            active_start_target_qpc - now_qpc,
+                            composite_schedule.qpc_frequency, due_time) ||
+                        !SetWaitableTimer(scheduler_timer.get(), &due_time,
+                                          0, nullptr, nullptr, FALSE)) {
+                        stop_before_dispatch(
+                            mouse_effect_probe::ProbeStopReason::
+                                SCHEDULER_TIMING_INVALID,
+                            "composite high-resolution one-shot 设置失败");
+                        break;
+                    }
+                    coarse_wait_used = true;
+                    const HANDLE handles[]{scheduler_stop_event.get(),
+                                           scheduler_timer.get()};
+                    const auto wait = WaitForMultipleObjects(
+                        2U, handles, FALSE, INFINITE);
+                    if (wait == WAIT_OBJECT_0) {
+                        stop_before_dispatch(
+                            mouse_effect_probe::ProbeStopReason::USER_STOP,
+                            "composite scheduler 收到用户停止");
+                        break;
+                    }
+                    if (wait != WAIT_OBJECT_0 + 1U) {
+                        stop_before_dispatch(
+                            mouse_effect_probe::ProbeStopReason::
+                                SCHEDULER_TIMING_INVALID,
+                            "composite high-resolution one-shot wait 失败");
+                        break;
+                    }
+                }
+                if (!query_qpc(now_qpc)) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        "composite coarse wake QPC 读取失败");
+                    break;
+                }
+                schedule_event["coarse_wait_used"] = coarse_wait_used;
+                schedule_event["coarse_wake_qpc"] = now_qpc;
+                const auto active_enter_qpc = now_qpc;
+                std::uint64_t active_read_count = 0;
+                while (now_qpc < deadline_qpc) {
+                    ++active_read_count;
+                    if (stop_requested.load(std::memory_order_acquire)) {
+                        stop_before_dispatch(
+                            mouse_effect_probe::ProbeStopReason::USER_STOP,
+                            "composite active wait 收到用户停止");
+                        break;
+                    }
+                    const auto active_safety = poll_physical_safety(
+                        mouse, MouseEffectProbeSafetyPhase::ACTIVE,
+                        safety_ledger);
+                    if (active_safety !=
+                            MouseEffectProbeSafetyDecision::READY) {
+                        stop_before_dispatch(
+                            active_safety ==
+                                MouseEffectProbeSafetyDecision::USER_STOP
+                                ? mouse_effect_probe::ProbeStopReason::
+                                      USER_STOP
+                                : active_safety ==
+                                      MouseEffectProbeSafetyDecision::FAILURE
+                                    ? mouse_effect_probe::ProbeStopReason::
+                                          MOUSE_FAILURE
+                                    : mouse_effect_probe::ProbeStopReason::
+                                          SAFETY_RELEASED,
+                            "composite active wait 安全门已释放或失效");
+                        break;
+                    }
+                    if (!query_qpc(now_qpc)) {
+                        stop_before_dispatch(
+                            mouse_effect_probe::ProbeStopReason::
+                                SCHEDULER_TIMING_INVALID,
+                            "composite active wait QPC 读取失败");
+                        break;
+                    }
+                    const auto active_ns = qpc_ticks_to_nanoseconds_ceil(
+                        now_qpc - active_enter_qpc,
+                        composite_schedule.qpc_frequency);
+                    if (active_ns > sequence.composite_phase_request.
+                            max_active_wait_ns_per_event ||
+                        composite_schedule.active_wait_total_ns >
+                            sequence.composite_phase_request.
+                                max_active_wait_ns_total -
+                            std::min(active_ns,
+                                sequence.composite_phase_request.
+                                    max_active_wait_ns_total)) {
+                        stop_before_dispatch(
+                            mouse_effect_probe::ProbeStopReason::
+                                SCHEDULER_TIMING_INVALID,
+                            "composite active wait budget 超限");
+                        break;
+                    }
+                }
+                if (executor.result().state !=
+                        mouse_effect_probe::ProbeExecutionState::RUNNING) {
+                    break;
+                }
+                const auto final_safety = poll_physical_safety(
+                    mouse, MouseEffectProbeSafetyPhase::ACTIVE,
+                    safety_ledger);
+                if (final_safety != MouseEffectProbeSafetyDecision::READY) {
+                    stop_before_dispatch(
+                        final_safety ==
+                            MouseEffectProbeSafetyDecision::USER_STOP
+                            ? mouse_effect_probe::ProbeStopReason::USER_STOP
+                            : final_safety ==
+                                  MouseEffectProbeSafetyDecision::FAILURE
+                                ? mouse_effect_probe::ProbeStopReason::
+                                      MOUSE_FAILURE
+                                : mouse_effect_probe::ProbeStopReason::
+                                      SAFETY_RELEASED,
+                        "composite dispatch 前安全门已释放或失效");
+                    break;
+                }
+                std::string sidecar_error;
+                if (!sidecar.recording(sidecar_error)) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SIDECAR_UNAVAILABLE,
+                        sidecar_error.empty()
+                            ? "composite dispatch 前 sidecar 已退出"
+                            : sidecar_error);
+                    break;
+                }
+                std::int64_t marker_before_qpc = 0;
+                std::int64_t marker_after_qpc = 0;
+                if (!query_qpc(marker_before_qpc)) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        "composite marker 起点 QPC 读取失败");
+                    break;
+                }
+                const auto marker_steady_ns = steady_now_nanoseconds();
+                if (!query_qpc(marker_after_qpc) ||
+                    marker_after_qpc < marker_before_qpc) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        "composite marker 终点 QPC 读取失败");
+                    break;
+                }
+                const auto marker_width_ns = qpc_ticks_to_nanoseconds_ceil(
+                    marker_after_qpc - marker_before_qpc,
+                    composite_schedule.qpc_frequency);
+                const auto lateness_ns = marker_before_qpc > deadline_qpc
+                    ? qpc_ticks_to_nanoseconds_ceil(
+                          marker_before_qpc - deadline_qpc,
+                          composite_schedule.qpc_frequency)
+                    : 0U;
+                const auto active_wait_ns =
+                    marker_before_qpc > active_enter_qpc
+                    ? qpc_ticks_to_nanoseconds_ceil(
+                          marker_before_qpc - active_enter_qpc,
+                          composite_schedule.qpc_frequency)
+                    : 0U;
+                if (marker_width_ns > sequence.composite_phase_request.
+                        max_event_interval_width_ns ||
+                    lateness_ns > sequence.composite_phase_request.
+                        max_wake_lateness_ns ||
+                    active_wait_ns > sequence.composite_phase_request.
+                        max_active_wait_ns_per_event ||
+                    composite_schedule.active_wait_total_ns >
+                        sequence.composite_phase_request.
+                            max_active_wait_ns_total -
+                        std::min(active_wait_ns,
+                            sequence.composite_phase_request.
+                                max_active_wait_ns_total)) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        "composite marker lateness/width/active budget 超限");
+                    break;
+                }
+                composite_schedule.active_wait_total_ns += active_wait_ns;
+                schedule_event["active_enter_qpc"] = active_enter_qpc;
+                schedule_event["active_read_count"] = active_read_count;
+                schedule_event["active_wait_ns"] = active_wait_ns;
+                schedule_event["marker_before_qpc"] = marker_before_qpc;
+                schedule_event["marker_after_qpc"] = marker_after_qpc;
+                schedule_event["marker_width_ns"] = marker_width_ns;
+                schedule_event["deadline_lateness_ns"] = lateness_ns;
+                schedule_event["marker_time_steady_ns"] =
+                    marker_steady_ns;
+
+                source_event.safety_allowed = true;
+                const auto report_event_index =
+                    executor.result().events.size();
+                const bool consume_succeeded =
+                    executor.consume_source_frame(source_event, frame_error);
+                const auto& execution_after = executor.result();
+                if (report_event_index >= execution_after.events.size()) {
+                    stop_before_dispatch(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        "composite predictor 未生成 command report event");
+                    break;
+                }
+                const auto& report_event =
+                    execution_after.events[report_event_index];
+                const auto event_time_steady_ns =
+                    composite_window->negative_control
+                    ? marker_steady_ns
+                    : report_event.backend_completed_at_steady_ns;
+                schedule_event["report_event_index"] = report_event_index;
+                schedule_event["report_sample_index"] =
+                    report_event.sample_index;
+                schedule_event["nominal_dx_counts"] =
+                    report_event.nominal_dx_counts;
+                schedule_event["nominal_dy_counts"] =
+                    report_event.nominal_dy_counts;
+                schedule_event["dispatch_attempted"] =
+                    report_event.dispatch_attempted;
+                schedule_event["backend_succeeded"] =
+                    report_event.backend_succeeded;
+                schedule_event["backend_completed_at_steady_ns"] =
+                    report_event.backend_completed_at_steady_ns;
+                schedule_event["protocol_ack_received"] =
+                    report_event.protocol_ack_received;
+                schedule_event["protocol_ack_received_at_steady_ns"] =
+                    report_event.protocol_ack_received_at_steady_ns;
+                schedule_event["actual_event_time_steady_ns"] =
+                    event_time_steady_ns;
+                schedule_event["status"] = consume_succeeded
+                    ? "DISPATCHED_AWAITING_PHASE_CHECK"
+                    : "DISPATCH_FAILED";
+                composite_schedule.events.push_back(
+                    std::move(schedule_event));
+                if (!consume_succeeded) {
+                    execution_error = frame_error;
+                    break;
+                }
+                composite_schedule.pending_event_index =
+                    composite_schedule.events.size() - 1U;
+                composite_schedule.first_response_boundary.reset();
+                consumed = true;
+            }
+
+            if (!consumed && !executor.consume_source_frame(
+                    source_event, frame_error)) {
                 execution_error = frame_error;
                 break;
             }
+
+            if (composite_window &&
+                sample_index == composite_window->first_sample_index + 1U) {
+                composite_schedule.first_response_boundary = source_event;
+            } else if (composite_window &&
+                       sample_index ==
+                           composite_window->first_sample_index + 2U) {
+                if (!composite_schedule.first_response_boundary.has_value() ||
+                    !composite_schedule.pending_event_index.has_value() ||
+                    *composite_schedule.pending_event_index >=
+                        composite_schedule.events.size()) {
+                    executor.request_stop(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        execution_error);
+                    execution_error =
+                        "composite phase check 缺少 event/boundary";
+                    break;
+                }
+                auto& schedule_event = composite_schedule.events[
+                    *composite_schedule.pending_event_index];
+                std::uint64_t phase_lower = 0;
+                std::uint64_t phase_upper = 0;
+                const auto event_time = schedule_event.value(
+                    "actual_event_time_steady_ns", std::int64_t{0});
+                const auto center = static_cast<std::uint64_t>(
+                    phase_numerator(composite_window->phase_cell)) *
+                    (std::uint64_t{1} << 32U) / 8U;
+                const auto tolerance = sequence.composite_phase_request.
+                    target_tolerance_q32;
+                const bool interval_valid =
+                    calculate_composite_phase_interval_q32(
+                        *composite_schedule.first_response_boundary,
+                        source_event, event_time,
+                        composite_schedule.qpc_frequency,
+                        phase_lower, phase_upper, frame_error) &&
+                    phase_lower >= center - tolerance &&
+                    phase_upper <= center + tolerance;
+                schedule_event["first_response_source_frame_sequence"] =
+                    composite_schedule.first_response_boundary->
+                        source_frame_sequence;
+                schedule_event["second_response_source_frame_sequence"] =
+                    source_event.source_frame_sequence;
+                schedule_event["actual_phase_interval_q32"] = {
+                    {"lower_closed", phase_lower},
+                    {"upper_closed", phase_upper},
+                };
+                schedule_event["status"] = interval_valid
+                    ? "PHASE_CONFIRMED" : "PHASE_REJECTED";
+                composite_schedule.first_response_boundary.reset();
+                composite_schedule.pending_event_index.reset();
+                if (!interval_valid) {
+                    executor.request_stop(
+                        mouse_effect_probe::ProbeStopReason::
+                            SCHEDULER_TIMING_INVALID,
+                        execution_error);
+                    execution_error =
+                        "composite actual completion/marker phase 超出冻结 cell";
+                    break;
+                }
+            }
+            previous_source_event = source_event;
         }
         capture->close();
+        if (composite_phase &&
+            !query_qpc(composite_schedule.acquisition_finished_qpc)) {
+            if (executor.result().state ==
+                    mouse_effect_probe::ProbeExecutionState::RUNNING) {
+                executor.request_stop(
+                    mouse_effect_probe::ProbeStopReason::
+                        SCHEDULER_TIMING_INVALID,
+                    execution_error);
+            }
+            if (execution_error.empty()) {
+                execution_error =
+                    "composite acquisition finish QPC 读取失败";
+            }
+        }
         const bool report_published = publish_report();
         const bool completed = result.execution.state ==
             mouse_effect_probe::ProbeExecutionState::COMPLETED;

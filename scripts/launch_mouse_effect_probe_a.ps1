@@ -18,12 +18,15 @@ $physicalBMagnitudePrimaryConfirmation =
     "XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_PRIMARY_SENDS_REAL_KMBOX_INPUT"
 $physicalBMagnitudeHoldoutConfirmation =
     "XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_HOLDOUT_SENDS_REAL_KMBOX_INPUT"
+$physicalBCompositeConfirmation =
+    "XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT"
 if (-not $AllowPhysicalOutput.IsPresent -or
     $PhysicalOutputConfirmation -notin @(
         $physicalAConfirmation, $physicalBConfirmation,
         $physicalBHoldoutConfirmation,
         $physicalBMagnitudePrimaryConfirmation,
-        $physicalBMagnitudeHoldoutConfirmation)) {
+        $physicalBMagnitudeHoldoutConfirmation,
+        $physicalBCompositeConfirmation)) {
     throw "Physical probe 会发送真实 KMBOX 输入，必须同时提供物理输出开关和与 task 匹配的固定确认令牌。"
 }
 $confirmation = $PhysicalOutputConfirmation
@@ -267,12 +270,21 @@ $isBMagnitudeHoldoutTask =
         "mouse_effect_probe_b_command_magnitude_task" -and
     [string]$task.profile -eq
         "physical_b_command_magnitude_holdout"
+$isBCompositeTask =
+    [int]$task.schema_version -eq 10 -and
+    [string]$task.evidence_type -eq
+        "mouse_effect_probe_b_composite_phase_task" -and
+    [string]$task.profile -eq
+        "physical_b_composite_phase_calibration"
 $isBMagnitudeTask =
     $isBMagnitudePrimaryTask -or $isBMagnitudeHoldoutTask
-$isBTask = $isBPrimaryTask -or $isBHoldoutTask -or $isBMagnitudeTask
+$isBTask = $isBPrimaryTask -or $isBHoldoutTask -or $isBMagnitudeTask -or
+    $isBCompositeTask
 $expectedDispatchMode = if ($isBTask) { "physical_b" } else { "physical_a" }
 $expectedConfirmation = if ($isBMagnitudeHoldoutTask) {
     $physicalBMagnitudeHoldoutConfirmation
+} elseif ($isBCompositeTask) {
+    $physicalBCompositeConfirmation
 } elseif ($isBMagnitudePrimaryTask) {
     $physicalBMagnitudePrimaryConfirmation
 } elseif ($isBHoldoutTask) {
@@ -400,6 +412,38 @@ if ($isBTask) {
     if ($isBMagnitudeHoldoutTask) {
         throw "Physical B command-magnitude Holdout 尚无已发布 Prepare 合同"
     }
+    if ($isBCompositeTask -and (
+        [string]$task.run_role -ne "calibration_deletion" -or
+        [uint64]$task.sequence_sample_count -ne 295 -or
+        [uint64]$task.window_count -ne 42 -or
+        [uint64]$task.negative_control_count -ne 4 -or
+        [uint64]$task.expected_nonzero_transition_count -ne 38 -or
+        [uint64]$task.max_abs_prefix_x_counts -ne 1 -or
+        [uint64]$task.sidecar.minimum_coverage_frames -ne 1735 -or
+        [uint64]$task.sidecar.frames -lt
+            [uint64]$task.sidecar.minimum_coverage_frames -or
+        [string]$task.sidecar.coverage_basis -ne
+            "ARMING_5S_PLUS_295_SOURCE_EVENTS_PLUS_1S_MARGIN" -or
+        -not [bool]$task.requires_user_frontend_launch -or
+        [string]$task.composite_policy.policy_id -ne
+            "b-composite-phase-calibration-v1" -or
+        [string]$task.composite_policy.plan_seed_status -ne
+            "AWAITING_AUXILIARY_PREFLIGHT" -or
+        -not [bool]$task.composite_policy.
+            final_plan_frozen_on_auxiliary_before_sidecar -or
+        -not [bool]$task.composite_policy.
+            same_auxiliary_host_preflight_required -or
+        [bool]$task.composite_policy.response_revealed_before_final_plan -or
+        [bool]$task.composite_policy.binder_physical_output_capability -or
+        [bool]$task.composite_policy.production_aim_changed -or
+        [bool]$task.composite_policy.new_production_gain_claimed -or
+        [bool]$task.composite_policy.fixed_pixel_speed_used_as_gate -or
+        [uint64]$task.safety.max_abs_pulse_counts -ne 1 -or
+        [uint64]$task.safety.max_abs_prefix_x_counts -ne 1 -or
+        -not [bool]$task.safety.manual_mouse_motion_or_wasd_forbidden -or
+        -not [bool]$task.safety.no_runtime_phase_or_schedule_tuning)) {
+        throw "Physical B composite-phase task/plan/safety 合同无效"
+    }
 }
 
 $fileEntries = @(
@@ -452,6 +496,18 @@ if ($isBMagnitudeTask) {
         [pscustomobject]@{ value = $task.files.magnitude_analyzer; name = "magnitude analyzer" },
         [pscustomobject]@{ value = $task.files.a2_magnitude_analysis; name = "A2 magnitude analysis" },
         [pscustomobject]@{ value = $task.files.b0_fidelity_evaluation; name = "B0 fidelity evaluation" })
+}
+if ($isBCompositeTask) {
+    $fileEntries += @(
+        [pscustomobject]@{ value = $task.files.sequence_executable; name = "sequence executable" },
+        [pscustomobject]@{ value = $task.files.composite_seal_executable; name = "composite seal executable" },
+        [pscustomobject]@{ value = $task.files.plan_generator; name = "plan generator" },
+        [pscustomobject]@{ value = $task.files.ledger_producer; name = "ledger producer" },
+        [pscustomobject]@{ value = $task.files.binder; name = "composite binder" },
+        [pscustomobject]@{ value = $task.files.evaluator; name = "composite evaluator" },
+        [pscustomobject]@{ value = $task.files.obs_log; name = "OBS capture log" },
+        [pscustomobject]@{ value = $task.files.capture_policy; name = "capture policy" },
+        [pscustomobject]@{ value = $task.files.plan_seed; name = "composite plan seed" })
 }
 foreach ($entry in $fileEntries) {
     Assert-FileEvidence $entry.value $entry.name
@@ -570,6 +626,51 @@ if ($isBHoldoutTask) {
         throw "Physical B holdout plan/F1/source artifact 绑定无效"
     }
 }
+if ($isBCompositeTask) {
+    $planSeed = Get-Content -LiteralPath `
+        ([string]$task.files.plan_seed.path) -Raw -Encoding utf8 |
+        ConvertFrom-Json
+    $capturePolicy = Get-Content -LiteralPath `
+        ([string]$task.files.capture_policy.path) -Raw -Encoding utf8 |
+        ConvertFrom-Json
+    if ([int]$planSeed.schema_version -ne 1 -or
+        [string]$planSeed.evidence_type -ne
+            "mouse_effect_probe_b_composite_phase_calibration_plan" -or
+        [string]$planSeed.status -ne "AWAITING_AUXILIARY_PREFLIGHT" -or
+        [bool]$planSeed.physical_output_capability -or
+        [int]$planSeed.physical_dispatch_count -ne 0 -or
+        [bool]$planSeed.production_aim_changed -or
+        [bool]$planSeed.new_production_gain_claimed -or
+        [string]$planSeed.run_uuid -ne [string]$task.run_uuid -or
+        [uint64]$planSeed.activation_epoch -ne
+            [uint64]$task.activation_epoch -or
+        [string]$planSeed.scope_id -ne [string]$task.scope_id -or
+        $null -ne $planSeed.frozen_at_utc_unix_ns -or
+        [string]$planSeed.sequence_binding.sequence_profile -ne
+            "physical_b_composite_phase_calibration" -or
+        [uint64]$planSeed.sequence_binding.sample_count -ne 295 -or
+        [uint64]$planSeed.sequence_binding.window_count -ne 42 -or
+        [string]$planSeed.sequence_binding.sequence_file_sha256 -ne
+            [string]$task.files.sequence.sha256 -or
+        [string]$planSeed.sequence_binding.sequence_semantic_sha256 -ne
+            [string]$task.sequence_sha256 -or
+        $null -ne $planSeed.scheduler_policy.preflight_file_sha256 -or
+        [string]$planSeed.scheduler_policy.timer_mode -ne
+            "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" -or
+        [string]$planSeed.capture_policy.semantic_sha256 -ne
+            [string]$capturePolicy.semantic_sha256 -or
+        [string]$planSeed.seal.binder_file_sha256 -ne
+            [string]$task.files.binder.sha256 -or
+        [string]$planSeed.seal.evaluator_file_sha256 -ne
+            [string]$task.files.evaluator.sha256 -or
+        [string]$planSeed.seal.producer_file_sha256 -ne
+            [string]$task.files.ledger_producer.sha256 -or
+        [string]$planSeed.seal.report_verifier_file_sha256 -ne
+            [string]$task.files.composite_seal_executable.sha256 -or
+        [bool]$planSeed.seal.response_revealed_before_freeze) {
+        throw "Physical B composite-phase plan/tooling seal 无效"
+    }
+}
 if ((Get-FileSha256 $PSCommandPath) -ne
         [string]$task.files.launch_script.sha256) {
     throw "当前 Launch script 不是 Prepare 固化的精确字节"
@@ -591,14 +692,73 @@ $s1SessionPath = Join-Path $resolvedRun "s1-session.json"
 $sidecarLifecyclePath = Join-Path $resolvedRun "sidecar-lifecycle.json"
 $sidecarStdout = Join-Path $resolvedRun "pixel-sidecar.stdout.log"
 $sidecarStderr = Join-Path $resolvedRun "pixel-sidecar.stderr.log"
+$schedulerPreflightPath = Join-Path $resolvedRun "scheduler-preflight.json"
+$compositePlanPath = Join-Path $resolvedRun "composite-phase-plan.json"
+$compositeSchedulePath = Join-Path $resolvedRun "composite-schedule-ledger.json"
 foreach ($path in @(
         $pixelOutput, $reportPath, $safetyLedgerPath, $launchSummaryPath,
         $s1BracketPath, $s1SessionPath,
         $sidecarLifecyclePath,
-        $sidecarStdout, $sidecarStderr)) {
+        $sidecarStdout, $sidecarStderr,
+        $schedulerPreflightPath, $compositePlanPath,
+        $compositeSchedulePath)) {
     if (Test-Path -LiteralPath $path) {
         throw "Physical A 输出已存在，拒绝重复 Launch：$path"
     }
+}
+
+$compositePlanFileSha256 = ""
+if ($isBCompositeTask) {
+    $sealExecutablePath =
+        [string]$task.files.composite_seal_executable.path
+    if ((Split-Path -Leaf $sealExecutablePath) -ne
+            "XenMouseEffectProbeCompositeSeal.exe") {
+        throw "composite seal executable 文件名无效"
+    }
+    Write-Host "【预检】保持右键松开；正在本辅机封存 scheduler/plan。"
+    $sealOutput = @(& $sealExecutablePath `
+        --plan-seed ([string]$task.files.plan_seed.path) `
+        --sequence ([string]$task.files.sequence.path) `
+        --preflight-output $schedulerPreflightPath `
+        --plan-output $compositePlanPath `
+        --run-uuid ([string]$task.run_uuid) `
+        --activation-epoch ([string]$task.activation_epoch) 2>&1)
+    $sealExitCode = $LASTEXITCODE
+    if ($sealExitCode -ne 0 -or
+        -not (Test-Path -LiteralPath $schedulerPreflightPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $compositePlanPath -PathType Leaf)) {
+        $sealTail = @($sealOutput | Select-Object -Last 1) -join " "
+        if ([string]::IsNullOrWhiteSpace($sealTail)) { $sealTail = "<empty>" }
+        throw "composite scheduler preflight/plan 未通过：ExitCode=$sealExitCode；$sealTail"
+    }
+    $schedulerPreflight = Get-Content -LiteralPath $schedulerPreflightPath `
+        -Raw -Encoding utf8 | ConvertFrom-Json
+    $compositePlan = Get-Content -LiteralPath $compositePlanPath `
+        -Raw -Encoding utf8 | ConvertFrom-Json
+    $compositePlanFileSha256 = Get-FileSha256 $compositePlanPath
+    if ([string]$schedulerPreflight.status -ne "PASS" -or
+        [bool]$schedulerPreflight.physical_output_capability -or
+        [int]$schedulerPreflight.physical_dispatch_count -ne 0 -or
+        [string]$schedulerPreflight.run_uuid -ne [string]$task.run_uuid -or
+        [uint64]$schedulerPreflight.activation_epoch -ne
+            [uint64]$task.activation_epoch -or
+        [string]$schedulerPreflight.plan_seed_semantic_sha256 -ne
+            [string]$planSeed.plan_seed_semantic_sha256 -or
+        [string]$schedulerPreflight.sequence_semantic_sha256 -ne
+            [string]$task.sequence_sha256 -or
+        [string]$compositePlan.status -ne "FROZEN_BEFORE_CAPTURE" -or
+        [string]$compositePlan.run_uuid -ne [string]$task.run_uuid -or
+        [uint64]$compositePlan.activation_epoch -ne
+            [uint64]$task.activation_epoch -or
+        [string]$compositePlan.scope_id -ne [string]$task.scope_id -or
+        [int64]$compositePlan.frozen_at_utc_unix_ns -le 0 -or
+        [string]$compositePlan.scheduler_policy.preflight_file_sha256 -ne
+            (Get-FileSha256 $schedulerPreflightPath) -or
+        [string]$compositePlan.sequence_binding.sequence_semantic_sha256 -ne
+            [string]$task.sequence_sha256) {
+        throw "composite scheduler preflight/final plan 身份无效"
+    }
+    Write-Host "【预检通过】最终 plan 已在 sidecar 启动前封存。"
 }
 
 $capture = $task.capture
@@ -667,6 +827,12 @@ try {
         "--allow-physical-output",
         "--confirm-physical-output", $confirmation
     )
+    if ($isBCompositeTask) {
+        $probeArguments += @(
+            "--composite-plan", $compositePlanPath,
+            "--composite-plan-sha256", $compositePlanFileSha256,
+            "--composite-schedule-ledger", $compositeSchedulePath)
+    }
     $operatorState = @{
         monitor_seen = $false
         terminal_seen = $false
@@ -777,6 +943,10 @@ try {
         -not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
         throw "Physical A 缺少 sidecar manifest 或 command report"
     }
+    if ($isBCompositeTask -and
+        -not (Test-Path -LiteralPath $compositeSchedulePath -PathType Leaf)) {
+        throw "Physical B composite-phase 缺少 raw schedule ledger"
+    }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 |
         ConvertFrom-Json
     $report = Get-Content -LiteralPath $reportPath -Raw -Encoding utf8 |
@@ -786,6 +956,10 @@ try {
     }
     $safetyLedger = Get-Content -LiteralPath $safetyLedgerPath `
         -Raw -Encoding utf8 | ConvertFrom-Json
+    $compositeSchedule = if ($isBCompositeTask) {
+        Get-Content -LiteralPath $compositeSchedulePath `
+            -Raw -Encoding utf8 | ConvertFrom-Json
+    } else { $null }
     $safetyObservations = @($safetyLedger.observations)
     $safetyMonitorPackets = @($safetyLedger.monitor_packets)
     if ([uint64]$safetyLedger.schema_version -ne 2 -or
@@ -895,6 +1069,52 @@ try {
         [string]$report.sequence_sha256 -ne
             [string]$task.sequence_sha256) {
         throw "Physical probe manifest/report 顶层身份无效"
+    }
+    if ($isBCompositeTask) {
+        $scheduleEvents = @($compositeSchedule.events)
+        $plannedWindows = @($compositePlan.window_order)
+        if ([int]$compositeSchedule.schema_version -ne 1 -or
+            [string]$compositeSchedule.evidence_type -ne
+                "mouse_effect_probe_b_composite_phase_raw_schedule_ledger" -or
+            [string]$compositeSchedule.status -ne "ACQUISITION_COMPLETE" -or
+            [bool]$compositeSchedule.ledger_physical_output_capability -or
+            [int]$compositeSchedule.ledger_physical_dispatch_count -ne 0 -or
+            [string]$compositeSchedule.run_uuid -ne [string]$task.run_uuid -or
+            [uint64]$compositeSchedule.activation_epoch -ne
+                [uint64]$task.activation_epoch -or
+            [string]$compositeSchedule.composite_plan_file_sha256 -ne
+                $compositePlanFileSha256 -or
+            [string]$compositeSchedule.probe_binding_sha256 -ne
+                [string]$task.files.probe_binding.sha256 -or
+            [string]$compositeSchedule.sequence_semantic_sha256 -ne
+                [string]$task.sequence_sha256 -or
+            [string]$compositeSchedule.command_report_file_sha256 -ne
+                (Get-FileSha256 $reportPath) -or
+            [string]$compositeSchedule.safety_ledger_file_sha256 -ne
+                (Get-FileSha256 $safetyLedgerPath) -or
+            [string]$compositeSchedule.timer_mode -ne
+                "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" -or
+            [string]$compositeSchedule.scheduler_clock.clock_kind -ne
+                "WINDOWS_QPC" -or
+            [int64]$compositeSchedule.scheduler_clock.frequency_hz -le 0 -or
+            [int64]$compositeSchedule.plan_accepted_at_qpc -le 0 -or
+            [int64]$compositeSchedule.acquisition_started_at_qpc -le
+                [int64]$compositeSchedule.plan_accepted_at_qpc -or
+            [int64]$compositeSchedule.acquisition_finished_at_qpc -le
+                [int64]$compositeSchedule.acquisition_started_at_qpc -or
+            [int64]$compositeSchedule.revealed_at_qpc -ne
+                [int64]$compositeSchedule.acquisition_finished_at_qpc -or
+            [uint64]$compositeSchedule.source_dispatch_count -ne 38 -or
+            $scheduleEvents.Count -ne 42 -or
+            ($scheduleEvents.window_id -join ",") -ne
+                ($plannedWindows -join ",") -or
+            @($scheduleEvents | Where-Object {
+                [string]$_.status -ne "PHASE_CONFIRMED"
+            }).Count -ne 0 -or
+            [string]$compositeSchedule.ledger_semantic_sha256 -notmatch
+                '^[0-9a-f]{64}$') {
+            throw "Physical B composite-phase raw schedule/plan/report 合同无效"
+        }
     }
     if ($isBPrimaryTask) {
         $sequenceBlocks = @($sequence.blocks)
@@ -1022,6 +1242,66 @@ try {
                 [int]$samples[$first + 81].dx_counts -ne
                     -$direction * $amplitude) {
                 throw "Physical B command-magnitude block/pulse/return 边界无效"
+            }
+        }
+    }
+    if ($isBCompositeTask) {
+        $sequenceWindows = @($sequence.windows)
+        $sequencePulses = @($samples | Where-Object {
+            [int]$_.dx_counts -ne 0
+        })
+        $sequenceControls = @($sequenceWindows | Where-Object {
+            [bool]$_.negative_control
+        })
+        if ([int]$sequence.schema -ne 7 -or
+            [string]$sequence.profile -ne
+                "physical_b_composite_phase_calibration" -or
+            $samples.Count -ne 295 -or
+            $sequenceWindows.Count -ne 42 -or
+            $sequencePulses.Count -ne 38 -or
+            $sequenceControls.Count -ne 4 -or
+            [int64]$sequence.summary.net_x_counts -ne 0 -or
+            [uint64]$sequence.summary.max_abs_prefix_x_counts -ne 1 -or
+            [uint64]$sequence.request.predictor_sample_count -ne 1 -or
+            [uint64]$sequence.request.window_sample_count -ne 6 -or
+            [uint64]$sequence.request.single_magnitude_counts -ne 1 -or
+            [uint64]$sequence.request.issue_lead_ns -ne 400000 -or
+            [uint64]$sequence.request.target_tolerance_q32 -ne 268435456 -or
+            [uint64]$sequence.request.active_guard_ns -ne 300000 -or
+            [uint64]$sequence.request.max_wake_lateness_ns -ne 150000 -or
+            [uint64]$sequence.request.max_event_interval_width_ns -ne
+                100000 -or
+            [uint64]$sequence.request.max_active_wait_ns_per_event -ne
+                350000 -or
+            [uint64]$sequence.request.max_active_wait_ns_total -ne
+                14700000 -or
+            [string]$sequence.request.timer_mode -ne
+                "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" -or
+            ($sequenceWindows.window_id -join ",") -ne
+                ($compositePlan.window_order -join ",") -or
+            @($samples | Where-Object {
+                [int]$_.dy_counts -ne 0 -or
+                [math]::Abs([int]$_.dx_counts) -gt 1
+            }).Count -ne 0) {
+            throw "Physical B composite-phase sequence/scheduler 合同无效"
+        }
+        for ($windowIndex = 0;
+             $windowIndex -lt $sequenceWindows.Count;
+             $windowIndex++) {
+            $window = $sequenceWindows[$windowIndex]
+            $first = 1 + 7 * $windowIndex
+            $windowSamples = @($samples[$first..($first + 6)])
+            if ([uint64]$window.window_ordinal -ne $windowIndex -or
+                [uint64]$window.first_sample_index -ne $first -or
+                [uint64]$window.sample_count -ne 7 -or
+                [string]$windowSamples[0].phase -ne "pulse" -or
+                @($windowSamples[1..6] | Where-Object {
+                    [string]$_.phase -ne "response" -or
+                    [int]$_.dx_counts -ne 0 -or [int]$_.dy_counts -ne 0
+                }).Count -ne 0 -or
+                ([bool]$window.negative_control -ne
+                    ([int]$windowSamples[0].dx_counts -eq 0))) {
+                throw "Physical B composite-phase window/sample 边界无效"
             }
         }
     }
@@ -1235,7 +1515,9 @@ try {
         [int64]$report.result.cumulative_requested_x_counts -eq 0 -and
         [int64]$report.result.cumulative_backend_completed_x_counts -eq 0
     $summary = [ordered]@{
-        schema_version = if ($isBMagnitudeTask) {
+        schema_version = if ($isBCompositeTask) {
+            7
+        } elseif ($isBMagnitudeTask) {
             6
         } elseif ($isBHoldoutTask) {
             5
@@ -1248,7 +1530,9 @@ try {
         } else {
             1
         }
-        evidence_type = if ($isBMagnitudeTask) {
+        evidence_type = if ($isBCompositeTask) {
+            "mouse_effect_probe_b_composite_phase_launch"
+        } elseif ($isBMagnitudeTask) {
             "mouse_effect_probe_b_command_magnitude_launch"
         } elseif ($isA2S1Task) {
             "mouse_effect_probe_a2_s1_launch"
@@ -1313,6 +1597,20 @@ try {
     }
     if ($isBMagnitudeTask) {
         $summary.validation_used_for_refit = $false
+        $summary.new_production_gain_claimed = $false
+    }
+    if ($isBCompositeTask) {
+        $summary.scheduler_preflight_sha256 =
+            Get-FileSha256 $schedulerPreflightPath
+        $summary.composite_plan_sha256 = $compositePlanFileSha256
+        $summary.composite_plan_semantic_sha256 =
+            [string]$compositePlan.plan_semantic_sha256
+        $summary.composite_schedule_ledger_sha256 =
+            Get-FileSha256 $compositeSchedulePath
+        $summary.composite_schedule_semantic_sha256 =
+            [string]$compositeSchedule.ledger_semantic_sha256
+        $summary.calibration_evidence_bound = $false
+        $summary.production_aim_changed = $false
         $summary.new_production_gain_claimed = $false
     }
     if ($isBHoldoutTask) {
@@ -1480,7 +1778,11 @@ try {
         }
         Write-NewUtf8Json $s1SessionPath $session
     }
-    Write-Host "【记录完成】本次尚未分析可见效果。请反馈：是否看到视角偏移；是否移动鼠标/WASD；是否异常或急停。"
+    if ($isBCompositeTask) {
+        Write-Host "【记录完成】尚未离线绑定。请反馈：视角偏移；是否移动鼠标/WASD；正负方向左右一致性；遮挡/scene cut；异常或急停。"
+    } else {
+        Write-Host "【记录完成】本次尚未分析可见效果。请反馈：是否看到视角偏移；是否移动鼠标/WASD；是否异常或急停。"
+    }
 } finally {
     if ($null -ne $sidecarProcess) {
         $sidecarProcess.Refresh()

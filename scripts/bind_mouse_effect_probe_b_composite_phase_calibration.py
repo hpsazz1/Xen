@@ -14,6 +14,8 @@ from typing import Any
 
 
 Q32 = 1 << 32
+MIN_SOURCE_CLOCK_RATE_Q32 = 99 * Q32 // 100
+MAX_SOURCE_CLOCK_RATE_Q32 = (101 * Q32 + 99) // 100
 PHASE_CELLS = ("P1_8", "P3_8", "P5_8", "P7_8")
 PHASE_NUMERATORS = dict(zip(PHASE_CELLS, (1, 3, 5, 7)))
 WILLIAMS_ROWS = (
@@ -69,7 +71,7 @@ def _schema_semantic_sha256() -> str:
         "evidence_type":
             "mouse_effect_probe_b_composite_phase_calibration",
         "run_role": "CALIBRATION_DELETION",
-        "phase_policy_id": "b-meas-phase-d1-v1",
+        "phase_policy_id": "b-meas-phase-d1-v2",
         "counterbalance_design": "WILLIAMS_4X4_FIRST_ORDER",
         "timestamp_boundary": "NDI_SDK_SUBMISSION_UTC_NOT_EXPOSURE",
     })
@@ -168,9 +170,9 @@ def _order_manifest_sha256(pulses: list[Any]) -> str:
     ])
 
 
-def _validate_capture_binding(binding: Any) -> str:
+def _validate_capture_policy(binding: Any) -> str:
     _reject(not isinstance(binding, dict), "CAPTURE_BINDING_INVALID",
-            "capture binding 缺失")
+            "capture policy 缺失")
     assert isinstance(binding, dict)
     semantic = _verify_semantic(
         binding, "semantic_sha256", "CAPTURE_BINDING_INVALID")
@@ -209,25 +211,26 @@ def _validate_capture_binding(binding: Any) -> str:
                 "use_exact_selected_semantic_only" or
             binding.get("boundary_is_capture_or_exposure") is not False or
             binding.get("ndi_frame_sync_used") is not False or
-            binding.get("clock_mapping_stale") is not False or
             binding.get("pixel_format") != "CPU_BGR" or
             not isinstance(binding.get("source_name"), str) or
             not binding.get("source_name"),
             "CAPTURE_BINDING_INVALID",
             "capture provenance 不是冻结的 submission-only 合同")
-    for field in ("clock_mapping_evidence_sha256",
-                  "scene_binding_sha256"):
+    for field in ("scene_binding_sha256",):
         _reject(not _is_sha256(binding.get(field)),
                 "CAPTURE_BINDING_INVALID", f"{field} 无效")
-    for field in ("clock_mapping_policy_id",
-                  "completion_clock_session_id",
-                  "submission_clock_session_id", "mapping_segment_id"):
+    for field in ("clock_mapping_policy_id",):
         _reject(not isinstance(binding.get(field), str) or
                 not binding.get(field), "CAPTURE_BINDING_INVALID",
                 f"{field} 缺失")
-    _reject(binding["completion_clock_session_id"] ==
-                binding["submission_clock_session_id"],
-            "CAPTURE_BINDING_INVALID", "completion/submission clock 混同")
+    dynamic_fields = {
+        "capture_policy_semantic_sha256", "clock_mapping_evidence_sha256",
+        "clock_mapping_stale", "completion_clock_session_id",
+        "submission_clock_session_id", "mapping_segment_id",
+    }
+    _reject(any(field in binding for field in dynamic_fields),
+            "CAPTURE_BINDING_INVALID",
+            "Prepare capture policy 不得预填辅机动态 session/mapping")
     for field in ("left_witness_roi", "right_witness_roi"):
         witness = binding.get(field)
         _reject(not isinstance(witness, list) or len(witness) != 4 or
@@ -245,6 +248,47 @@ def _validate_capture_binding(binding: Any) -> str:
                max(left[1], right[1]) <
                min(left[1] + left[3], right[1] + right[3]))
     _reject(overlap, "CAPTURE_BINDING_INVALID", "witness ROI 重叠")
+    return semantic
+
+
+def _validate_capture_binding(binding: Any,
+                              policy: dict[str, Any]) -> str:
+    _reject(not isinstance(binding, dict), "CAPTURE_BINDING_INVALID",
+            "actual capture binding 缺失")
+    assert isinstance(binding, dict)
+    semantic = _verify_semantic(
+        binding, "semantic_sha256", "CAPTURE_BINDING_INVALID")
+    policy_semantic = policy["semantic_sha256"]
+    _reject(binding.get("capture_policy_semantic_sha256") !=
+                policy_semantic,
+            "CAPTURE_BINDING_INVALID", "actual binding 未绑定冻结 policy")
+    for field, expected in policy.items():
+        if field == "semantic_sha256":
+            continue
+        _reject(binding.get(field) != expected,
+                "CAPTURE_BINDING_INVALID",
+                f"actual capture binding 的 {field} 与冻结 policy 不符")
+    dynamic_fields = (
+        "clock_mapping_evidence_sha256", "clock_mapping_stale",
+        "completion_clock_session_id", "submission_clock_session_id",
+        "mapping_segment_id",
+    )
+    _reject(set(binding) !=
+                ((set(policy) - {"semantic_sha256"}) |
+                 set(dynamic_fields) |
+                 {"capture_policy_semantic_sha256", "semantic_sha256"}),
+            "CAPTURE_BINDING_INVALID", "actual capture binding 字段集合漂移")
+    _reject(not _is_sha256(binding.get("clock_mapping_evidence_sha256")) or
+            binding.get("clock_mapping_stale") is not False,
+            "CAPTURE_BINDING_INVALID", "actual clock mapping identity 无效")
+    for field in ("completion_clock_session_id",
+                  "submission_clock_session_id", "mapping_segment_id"):
+        _reject(not isinstance(binding.get(field), str) or
+                not binding.get(field), "CAPTURE_BINDING_INVALID",
+                f"actual {field} 缺失")
+    _reject(binding["completion_clock_session_id"] ==
+                binding["submission_clock_session_id"],
+            "CAPTURE_BINDING_INVALID", "completion/submission clock 混同")
     return semantic
 
 
@@ -285,21 +329,23 @@ def _validate_plan(plan: dict[str, Any], binder_path: pathlib.Path,
             denylist.get("artifact_sha256s") !=
                 list(SEEN_ARTIFACT_SHA256),
             "INPUT_IDENTITY_MISMATCH", "plan identity/deny-list 无效")
-    _validate_capture_binding(plan.get("capture_binding"))
+    _validate_capture_policy(plan.get("capture_policy"))
 
     seal = plan.get("seal")
     _reject(not isinstance(seal, dict), "PLAN_SEAL_INVALID", "plan seal 缺失")
     assert isinstance(seal, dict)
     frozen = _exact_int(
-        plan.get("frozen_at_steady_ns"), "plan frozen time",
+        plan.get("frozen_at_utc_unix_ns"), "plan frozen UTC time",
         "PLAN_SEAL_INVALID")
-    _reject(frozen < 0 or
+    _reject(frozen <= 0 or
             seal.get("schema_semantic_sha256") !=
                 _schema_semantic_sha256() or
-            seal.get("evaluator_file_sha256") !=
-                _file_sha256(evaluator_path) or
-            seal.get("binder_file_sha256") != _file_sha256(binder_path) or
-            seal.get("model_semantic_sha256") is not None or
+             seal.get("evaluator_file_sha256") !=
+                 _file_sha256(evaluator_path) or
+             seal.get("binder_file_sha256") != _file_sha256(binder_path) or
+             not _is_sha256(seal.get("producer_file_sha256")) or
+             not _is_sha256(seal.get("report_verifier_file_sha256")) or
+             seal.get("model_semantic_sha256") is not None or
             seal.get("response_revealed_before_freeze") is not False,
             "PLAN_SEAL_INVALID", "schema/evaluator/binder/time seal 无效")
 
@@ -310,7 +356,7 @@ def _validate_plan(plan: dict[str, Any], binder_path: pathlib.Path,
         for cell, numerator in zip(PHASE_CELLS, (1, 3, 5, 7))
     ]
     _reject(not isinstance(phase, dict) or
-            phase.get("policy_id") != "b-meas-phase-d1-v1" or
+            phase.get("policy_id") != "b-meas-phase-d1-v2" or
             phase.get("phase_scale") != "Q0.32_CYCLE" or
             phase.get("phase_cells") != expected_cells or
             phase.get("target_tolerance_q32") != Q32 // 16 or
@@ -334,7 +380,7 @@ def _validate_plan(plan: dict[str, Any], binder_path: pathlib.Path,
                 "settled_sample": "LAST_QUALIFIED_SOURCE_EVENT",
                 "window_sample_count": 6,
                 "phase_interval_arithmetic":
-                    "CONSERVATIVE_INTEGER_Q0_32_FROM_ADJACENT_BOUNDARIES",
+                    "CONSERVATIVE_INTEGER_Q0_32_FROM_SOURCE_TIMESTAMP_RATE_AND_BOUNDARY_OFFSET",
             }, "PLAN_SEAL_INVALID", "measurement policy 无效")
 
     model = plan.get("model_policy")
@@ -497,6 +543,47 @@ def _validate_plan(plan: dict[str, Any], binder_path: pathlib.Path,
     _reject(window_order != expected_window_order,
             "DESIGN_BALANCE_INVALID",
             "pulse/control acquisition window order 无效")
+    sequence_binding = plan.get("sequence_binding")
+    _reject(not isinstance(sequence_binding, dict) or
+            sequence_binding.get("sequence_schema") != 7 or
+            sequence_binding.get("sequence_profile") !=
+                "physical_b_composite_phase_calibration" or
+            not _is_sha256(sequence_binding.get("sequence_file_sha256")) or
+            not _is_sha256(
+                sequence_binding.get("sequence_semantic_sha256")) or
+            sequence_binding.get("sample_count") != 295 or
+            sequence_binding.get("window_count") != 42 or
+            sequence_binding.get("window_order") != expected_window_order,
+            "PLAN_SEAL_INVALID", "sequence binding 未按冻结合同注册")
+    scheduler = plan.get("scheduler_policy")
+    _reject(not isinstance(scheduler, dict) or
+            scheduler != {
+                "clock_kind": "WINDOWS_QPC",
+                "timer_mode": "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL",
+                "deadline_basis":
+                    "PREDICTOR_NEXT_NDI_SUBMISSION_BOUNDARY",
+                "issue_lead_ns": 400_000,
+                "issue_lead_applies_to": "NONZERO_PULSE_ONLY",
+                "negative_control_marker_lead_ns": 0,
+                "target_tolerance_q32": Q32 // 16,
+                "active_guard_ns": 300_000,
+                "max_wake_lateness_ns": 150_000,
+                "max_event_interval_width_ns": 100_000,
+                "max_active_wait_ns_per_event": 350_000,
+                "max_active_wait_ns_total": 42 * 350_000,
+                "preflight_required": True,
+                "preflight_file_sha256":
+                    scheduler.get("preflight_file_sha256")
+                    if isinstance(scheduler, dict) else None,
+                "per_event_tuning_allowed": False,
+                "process_priority": "NORMAL",
+                "thread_priority": "NORMAL",
+                "cpu_affinity_used": False,
+                "time_begin_period_used": False,
+                "periodic_timer_used": False,
+            } or
+            not _is_sha256(scheduler.get("preflight_file_sha256")),
+            "PLAN_SEAL_INVALID", "scheduler policy 未按冻结合同注册")
     return plan_semantic, pulses, controls, expected_window_order
 
 
@@ -531,31 +618,34 @@ def _validate_mapping(mapping: Any, binding: dict[str, Any]) -> tuple[
             valid_from < 0 or valid_from >= valid_through or uncertainty < 0,
             "CLOCK_MAPPING_INCOMPLETE", "clock mapping identity/window 无效")
     for field in ("qpc_quantization_ns", "read_access_interval_ns",
-                  "maximum_fit_residual_ns", "ntp_round_trip_delay_ns",
-                  "ntp_dispersion_ns", "ntp_jitter_ns"):
+                  "source_clock_round_trip_max_ns",
+                  "source_clock_mapping_age_max_ns"):
         _reject(_exact_int(mapping.get(field), field,
                            "CLOCK_MAPPING_INCOMPLETE") < 0,
                 "CLOCK_MAPPING_INCOMPLETE", f"{field} 不得为负")
-    ntp_offset = mapping.get("ntp_offset_interval_ns")
-    _reject(not isinstance(ntp_offset, list) or len(ntp_offset) != 2,
-            "CLOCK_MAPPING_INCOMPLETE", "NTP offset interval 无效")
-    if isinstance(ntp_offset, list) and len(ntp_offset) == 2:
-        offset_lower = _exact_int(
-            ntp_offset[0], "NTP offset lower", "CLOCK_MAPPING_INCOMPLETE")
-        offset_upper = _exact_int(
-            ntp_offset[1], "NTP offset upper", "CLOCK_MAPPING_INCOMPLETE")
-        _reject(offset_lower > offset_upper, "CLOCK_MAPPING_INCOMPLETE",
-                "NTP offset interval 倒置")
-    _reject(not _is_sha256(mapping.get("calibration_samples_sha256")) or
-            not _is_sha256(mapping.get("policy_sha256")),
-            "CLOCK_MAPPING_INCOMPLETE", "clock mapping source seal 缺失")
+    sample_count = _exact_int(
+        mapping.get("source_clock_sample_count_min"),
+        "source clock sample count", "CLOCK_MAPPING_INCOMPLETE")
+    rate_lower, rate_upper = _interval(
+        mapping.get("source_clock_rate_interval_q32"),
+        "source clock rate interval", "CLOCK_MAPPING_INCOMPLETE")
+    _reject(sample_count <= 0 or rate_lower <= 0 or
+            rate_lower < MIN_SOURCE_CLOCK_RATE_Q32 or
+            rate_upper > MAX_SOURCE_CLOCK_RATE_Q32 or
+            mapping.get("uncertainty_includes_mapping_fit_and_transport")
+                is not True or
+            mapping.get("raw_ntp_statistics_exported") is not False or
+            not _is_sha256(mapping.get("source_timing_evidence_sha256")) or
+             not _is_sha256(mapping.get("policy_sha256")),
+            "CLOCK_MAPPING_INCOMPLETE",
+            "clock mapping 可导出来源/保守上界 seal 缺失")
     return semantic, valid_from, valid_through, uncertainty
 
 
 def _validate_capture(
         capture: dict[str, Any], plan: dict[str, Any],
         expected_windows: list[str]) -> tuple[
-            str, str, int, int, int,
+            str, str, int, int, int, dict[str, Any],
             dict[str, list[dict[str, Any]]]]:
     semantic = _verify_semantic(
         capture, "capture_semantic_sha256", "CAPTURE_LEDGER_INVALID")
@@ -567,24 +657,51 @@ def _validate_capture(
             capture.get("physical_output_capability") is not False or
             capture.get("physical_dispatch_count") != 0,
             "CAPTURE_LEDGER_INVALID", "capture ledger header 无效")
-    binding = plan["capture_binding"]
-    capture_binding_semantic = binding["semantic_sha256"]
+    policy = plan["capture_policy"]
+    policy_semantic = policy["semantic_sha256"]
+    _reject(capture.get("plan_semantic_sha256") !=
+                plan["plan_semantic_sha256"] or
+            capture.get("capture_policy_semantic_sha256") !=
+                policy_semantic or
+            capture.get("report_verifier_file_sha256") !=
+                plan["seal"]["report_verifier_file_sha256"] or
+            not _is_sha256(capture.get("human_assessment_semantic_sha256")) or
+            not _is_sha256(capture.get("schedule_ledger_semantic_sha256")) or
+            not _is_sha256(capture.get("command_report_semantic_sha256")),
+            "INPUT_IDENTITY_MISMATCH", "capture plan/policy identity 漂移")
+    binding = capture.get("capture_binding")
+    capture_binding_semantic = _validate_capture_binding(binding, policy)
+    assert isinstance(binding, dict)
     _reject(capture.get("capture_binding_semantic_sha256") !=
                 capture_binding_semantic,
             "INPUT_IDENTITY_MISMATCH", "capture binding identity 漂移")
     mapping_semantic, valid_from, valid_through, uncertainty = \
         _validate_mapping(capture.get("clock_mapping"), binding)
+    scheduler_clock = capture.get("scheduler_clock")
+    _reject(not isinstance(scheduler_clock, dict) or
+            scheduler_clock.get("clock_kind") != "WINDOWS_QPC" or
+            not isinstance(scheduler_clock.get("clock_session_id"), str) or
+            not scheduler_clock.get("clock_session_id") or
+            _exact_int(scheduler_clock.get("frequency_hz"),
+                       "scheduler QPC frequency", "PLAN_SEAL_INVALID") <= 0 or
+            _exact_int(scheduler_clock.get("producer_process_id"),
+                       "scheduler producer process", "PLAN_SEAL_INVALID") <= 0,
+            "PLAN_SEAL_INVALID", "辅机 scheduler QPC session 无效")
+    accepted = _exact_int(
+        capture.get("plan_accepted_at_qpc"), "plan accepted QPC",
+        "PLAN_SEAL_INVALID")
     acquired = _exact_int(
-        capture.get("acquisition_started_at_steady_ns"),
-        "acquisition start", "PLAN_SEAL_INVALID")
+        capture.get("acquisition_started_at_qpc"),
+        "acquisition start QPC", "PLAN_SEAL_INVALID")
+    finished = _exact_int(
+        capture.get("acquisition_finished_at_qpc"),
+        "acquisition finish QPC", "PLAN_SEAL_INVALID")
     revealed = _exact_int(
-        capture.get("revealed_at_steady_ns"), "response reveal",
+        capture.get("revealed_at_qpc"), "response reveal QPC",
         "PLAN_SEAL_INVALID")
-    frozen = _exact_int(
-        plan.get("frozen_at_steady_ns"), "plan freeze",
-        "PLAN_SEAL_INVALID")
-    _reject(not frozen < acquired < revealed, "PLAN_SEAL_INVALID",
-            "必须先 freeze、再 acquisition、最后 reveal")
+    _reject(not 0 < accepted < acquired < finished or revealed != finished,
+            "PLAN_SEAL_INVALID",
+            "必须在同一辅机 QPC session 先 accept plan、再 acquisition、最后 reveal")
 
     frames = capture.get("frames")
     _reject(not isinstance(frames, list) or not frames,
@@ -593,6 +710,7 @@ def _validate_capture(
     windows: dict[str, list[dict[str, Any]]] = {}
     event_ids: set[str] = set()
     previous_upper: int | None = None
+    previous_source_timestamp: int | None = None
     for expected_sequence, frame in enumerate(frames):
         _reject(not isinstance(frame, dict), "FRAME_LEDGER_INVALID",
                 "frame 必须是 object")
@@ -616,11 +734,17 @@ def _validate_capture(
         lower, upper = _interval(
             frame.get("boundary_time_interval_ns"), "frame boundary",
             "FRAME_LEDGER_INVALID")
+        source_timestamp = _exact_int(
+            frame.get("source_timestamp_100ns"), "source timestamp",
+            "FRAME_LEDGER_INVALID")
         _reject(lower < valid_from or upper > valid_through or
                 (previous_upper is not None and
-                 previous_upper >= lower),
+                 previous_upper >= lower) or source_timestamp <= 0 or
+                (previous_source_timestamp is not None and
+                 previous_source_timestamp >= source_timestamp),
                 "FRAME_LEDGER_INVALID", "frame boundary 缺失/重复/乱序")
         previous_upper = upper
+        previous_source_timestamp = source_timestamp
         for field in ("full_bgr_sha256", "left_roi_bgr_sha256",
                       "right_roi_bgr_sha256"):
             _reject(not _is_sha256(frame.get(field)),
@@ -647,18 +771,18 @@ def _validate_capture(
                 "FRAME_LEDGER_INVALID",
                 f"{window_id} capture 长度/sample index 无效")
     return (semantic, mapping_semantic, valid_from, valid_through,
-            uncertainty, windows)
+            uncertainty, binding, windows)
 
 
 def _validate_commands(
         commands: dict[str, Any], plan: dict[str, Any],
         pulses: list[dict[str, Any]], controls: list[dict[str, Any]],
+        binding: dict[str, Any],
         mapping_semantic: str, valid_from: int, valid_through: int) -> tuple[
             str, dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     semantic = _verify_semantic(
         commands, "command_semantic_sha256", "COMMAND_LEDGER_INVALID")
     _validate_identity(commands, plan, "command ledger")
-    binding = plan["capture_binding"]
     _reject(commands.get("schema_version") != 1 or
             commands.get("evidence_type") !=
                 "mouse_effect_probe_b_composite_phase_command_ledger" or
@@ -667,7 +791,11 @@ def _validate_commands(
             commands.get("binder_physical_output_capability") is not False or
             commands.get("binder_physical_dispatch_count") != 0,
             "COMMAND_LEDGER_INVALID", "command ledger header 无效")
-    _reject(commands.get("capture_binding_semantic_sha256") !=
+    _reject(commands.get("plan_semantic_sha256") !=
+                plan["plan_semantic_sha256"] or
+            commands.get("capture_policy_semantic_sha256") !=
+                plan["capture_policy"]["semantic_sha256"] or
+            commands.get("capture_binding_semantic_sha256") !=
                 binding["semantic_sha256"] or
             commands.get("clock_mapping_semantic_sha256") !=
                 mapping_semantic,
@@ -766,6 +894,7 @@ def _validate_commands(
 
 
 def _phase_interval(frames: list[dict[str, Any]], time_interval: Any,
+                    mapping: dict[str, Any],
                     context: str) -> tuple[
                         dict[str, int], dict[str, Any]]:
     completion_lower, completion_upper = _interval(
@@ -788,15 +917,32 @@ def _phase_interval(frames: list[dict[str, Any]], time_interval: Any,
         previous["boundary_time_interval_ns"], "previous boundary")
     following_lower, following_upper = _interval(
         following["boundary_time_interval_ns"], "following boundary")
+    previous_source_timestamp = _exact_int(
+        previous.get("source_timestamp_100ns"),
+        "previous source timestamp", "FRAME_LEDGER_INVALID")
+    following_source_timestamp = _exact_int(
+        following.get("source_timestamp_100ns"),
+        "following source timestamp", "FRAME_LEDGER_INVALID")
+    source_delta_100ns = following_source_timestamp - \
+        previous_source_timestamp
+    rate_lower, rate_upper = _interval(
+        mapping.get("source_clock_rate_interval_q32"),
+        "source clock rate interval", "CLOCK_MAPPING_INCOMPLETE")
+    source_period_ns = source_delta_100ns * 100
+    period_lower = source_period_ns * rate_lower // Q32
+    period_upper = _ceil_ratio(source_period_ns * rate_upper, Q32)
     numerator_lower = completion_lower - previous_upper
     numerator_upper = completion_upper - previous_lower
-    denominator_lower = following_lower - previous_upper
-    denominator_upper = following_upper - previous_lower
-    _reject(numerator_lower <= 0 or denominator_lower <= 0 or
-            numerator_upper >= denominator_lower,
+    mapped_period_lower = following_lower - previous_upper
+    mapped_period_upper = following_upper - previous_lower
+    _reject(source_delta_100ns <= 0 or period_lower <= 0 or
+            period_upper < period_lower or
+            period_upper < mapped_period_lower or
+            period_lower > mapped_period_upper or
+            numerator_lower <= 0 or numerator_upper >= period_lower,
             "PHASE_CELL_AMBIGUOUS", "phase uncertainty 跨 source boundary")
-    lower = numerator_lower * Q32 // denominator_upper
-    upper = _ceil_ratio(numerator_upper * Q32, denominator_lower)
+    lower = numerator_lower * Q32 // period_upper
+    upper = _ceil_ratio(numerator_upper * Q32, period_lower)
     _reject(lower < 0 or upper >= Q32 or lower > upper,
             "PHASE_CELL_AMBIGUOUS", "phase interval 超出一个 cycle")
     return (
@@ -816,8 +962,7 @@ def _validate_assigned_phase(interval: dict[str, int], phase_cell: str,
     _reject(
         interval["lower_closed"] < center - tolerance or
         interval["upper_closed"] > center + tolerance or
-        interval["lower_closed"] > center or
-        interval["upper_closed"] < center,
+        interval["lower_closed"] > interval["upper_closed"],
         "PHASE_CELL_AMBIGUOUS",
         "实际 phase interval 超出预分配 cell")
 
@@ -905,19 +1050,19 @@ def bind_calibration(
             "INPUT_IDENTITY_MISMATCH",
             "当前 seen diagnosis artifact 不得作为 calibration 输入")
     (capture_semantic, mapping_semantic, valid_from, valid_through,
-     uncertainty, windows) = _validate_capture(
+     uncertainty, binding, windows) = _validate_capture(
          capture, plan, expected_windows)
     command_semantic, events, control_events = _validate_commands(
-        commands, plan, pulses, controls, mapping_semantic,
+        commands, plan, pulses, controls, binding, mapping_semantic,
         valid_from, valid_through)
 
-    binding = plan["capture_binding"]
     bound_pulses: list[dict[str, Any]] = []
     for pulse in pulses:
         event = events[pulse["pulse_id"]]
         window = windows[pulse["pulse_id"]]
         phase_interval, phase_boundaries = _phase_interval(
             window, event["completion_time_interval_ns"],
+            capture["clock_mapping"],
             "completion time")
         tolerance = plan["phase_policy"]["target_tolerance_q32"]
         _validate_assigned_phase(
@@ -958,6 +1103,7 @@ def bind_calibration(
         control_event = control_events[control["control_id"]]
         scheduled_phase, scheduled_boundaries = _phase_interval(
             window, control_event["scheduled_marker_time_interval_ns"],
+            capture["clock_mapping"],
             "control schedule marker")
         _validate_assigned_phase(
             scheduled_phase, control["phase_cell"],
@@ -1022,16 +1168,21 @@ def bind_calibration(
             "order_manifest_sha256":
                 plan["seal"]["order_manifest_sha256"],
             "model_semantic_sha256": None,
-            "frozen_at_steady_ns": plan["frozen_at_steady_ns"],
-            "acquisition_started_at_steady_ns":
-                capture["acquisition_started_at_steady_ns"],
-            "revealed_at_steady_ns": capture["revealed_at_steady_ns"],
+            "frozen_at_utc_unix_ns": plan["frozen_at_utc_unix_ns"],
+            "scheduler_clock": capture["scheduler_clock"],
+            "plan_accepted_at_qpc": capture["plan_accepted_at_qpc"],
+            "acquisition_started_at_qpc":
+                capture["acquisition_started_at_qpc"],
+            "revealed_at_qpc": capture["revealed_at_qpc"],
             "response_revealed_before_freeze": False,
         },
         "seen_diagnosis_denylist": plan["seen_diagnosis_denylist"],
         "phase_policy": plan["phase_policy"],
         "model_policy": plan["model_policy"],
         "measurement_policy": plan["measurement_policy"],
+        "sequence_binding": plan["sequence_binding"],
+        "scheduler_policy": plan["scheduler_policy"],
+        "capture_policy": plan["capture_policy"],
         "capture_binding": binding,
         "command_policy": plan["command_policy"],
         "acquisition_summary": {

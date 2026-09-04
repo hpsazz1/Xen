@@ -247,6 +247,95 @@ void test_physical_b_magnitude_authority_is_isolated_by_run_role() {
            "多幅值 Holdout token 必须与 Primary 隔离");
 }
 
+void test_composite_phase_authority_and_deadline_are_isolated() {
+    std::string error;
+    auto arguments = common_arguments();
+    arguments[1] = L"physical-b";
+    arguments.push_back(L"--allow-physical-output");
+    arguments.push_back(L"--confirm-physical-output");
+    arguments.push_back(
+        L"XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT");
+    arguments.push_back(L"--safety-ledger");
+    arguments.push_back(L"E:\\run\\safety-ledger.json");
+    arguments.push_back(L"--composite-plan");
+    arguments.push_back(L"E:\\run\\composite-phase-plan.json");
+    arguments.push_back(L"--composite-plan-sha256");
+    arguments.push_back(
+        L"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    arguments.push_back(L"--composite-schedule-ledger");
+    arguments.push_back(L"E:\\run\\composite-schedule-ledger.json");
+    MouseEffectProbeRunOptions options;
+    expect(parse_mouse_effect_probe_options(arguments, options, error) ==
+               MouseEffectProbeParseStatus::READY &&
+               options.physical_authorization ==
+                   MouseEffectProbePhysicalAuthorization::
+                       PHYSICAL_B_COMPOSITE_PHASE_CALIBRATION &&
+               options.expected_composite_plan_sha256 ==
+                   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+           "composite-phase 必须使用独立 token 与 plan/schedule-ledger 参数: " +
+               error);
+
+    mouse_effect_probe::MouseEffectProbeSequence composite;
+    composite.schema = 7;
+    composite.profile = "physical_b_composite_phase_calibration";
+    mouse_effect_probe::MouseEffectProbeSequence magnitude;
+    magnitude.schema = 6;
+    magnitude.profile = "physical_b_command_magnitude_primary";
+    expect(validate_mouse_effect_probe_sequence_authorization(
+               options, composite, error) &&
+               !validate_mouse_effect_probe_sequence_authorization(
+                   options, magnitude, error),
+           "composite token 必须且只能授权 schema 7 calibration profile");
+
+    CompositePhaseDeadline deadline;
+    const CompositePhaseDeadlineRequest early{
+        .predictor_source_time_at_steady_ns = 1'000'000'000,
+        .source_period_ns = 4'000'000,
+        .phase_numerator = 1,
+        .phase_denominator = 8,
+        .issue_lead_ns = 400'000,
+    };
+    expect(calculate_composite_phase_deadline(early, deadline, error) &&
+               deadline.predicted_next_boundary_steady_ns == 1'004'000'000 &&
+               deadline.target_completion_steady_ns == 1'004'500'000 &&
+               deadline.issue_deadline_steady_ns == 1'004'100'000,
+           "P1/8 deadline 必须由 predictor 的下一 boundary 绝对推导: " + error);
+    auto control = early;
+    control.command_dispatch = false;
+    expect(calculate_composite_phase_deadline(control, deadline, error) &&
+               deadline.target_completion_steady_ns == 1'004'500'000 &&
+               deadline.issue_deadline_steady_ns == 1'004'500'000,
+           "零命令 control marker 必须落在 phase center，不能扣除 KMBOX lead");
+    auto late = early;
+    late.phase_numerator = 7;
+    expect(calculate_composite_phase_deadline(late, deadline, error) &&
+               deadline.target_completion_steady_ns == 1'007'500'000 &&
+               deadline.issue_deadline_steady_ns == 1'007'100'000,
+           "P7/8 deadline 不得从前一实际 dispatch 累加");
+    auto invalid = early;
+    invalid.phase_numerator = 2;
+    expect(!calculate_composite_phase_deadline(invalid, deadline, error),
+           "非预注册 phase numerator 必须 fail closed");
+
+    mouse_effect_probe::ProbeSourceFrameEvent previous;
+    previous.source_timestamp = 10'000'000;
+    previous.source_time_at_steady_ns = 2'000'000'000;
+    previous.source_clock_rate = 1.0;
+    previous.source_clock_uncertainty_ms = 0.18;
+    auto following = previous;
+    following.source_timestamp += 80'000;
+    following.source_time_at_steady_ns += 8'000'000;
+    std::uint64_t phase_lower = 0;
+    std::uint64_t phase_upper = 0;
+    expect(calculate_composite_phase_interval_q32(
+               previous, following, 2'007'000'000, 10'000'000,
+               phase_lower, phase_upper, error) &&
+               phase_lower >= 13U * (std::uint64_t{1} << 32U) / 16U &&
+               phase_upper <= 15U * (std::uint64_t{1} << 32U) / 16U,
+           "同 mapping segment 的 P7/8 phase 不得把公共 offset 不确定度重复计入 source period: " +
+               error);
+}
+
 void test_parser_rejects_missing_duplicate_and_invalid_identity() {
     std::string error;
     MouseEffectProbeRunOptions options;
@@ -288,6 +377,7 @@ void test_frame_mapping_preserves_source_identity_and_quality() {
         std::chrono::nanoseconds(987654321));
     timing.source_clock_uncertainty_ms = 0.15;
     timing.source_clock_round_trip_ms = 0.25;
+    timing.source_clock_rate = 1.000001;
     timing.source_clock_mapping_age_ms = 0.35;
     timing.source_clock_sample_count = 9;
     timing.source_clock_session_id = 77;
@@ -304,6 +394,7 @@ void test_frame_mapping_preserves_source_identity_and_quality() {
                event.source_clock_session_id == "77" &&
                event.source_clock_uncertainty_ms == 0.15 &&
                event.source_clock_rtt_ms == 0.25 &&
+               event.source_clock_rate == 1.000001 &&
                event.source_clock_mapping_age_ms == 0.35 &&
                event.source_clock_sample_count == 9 &&
                event.sidecar_recording && !event.safety_allowed,
@@ -490,6 +581,7 @@ int main() {
     test_parser_recognizes_physical_b_holdout_authority();
     test_physical_b_authority_is_bound_to_sequence_profile();
     test_physical_b_magnitude_authority_is_isolated_by_run_role();
+    test_composite_phase_authority_and_deadline_are_isolated();
     test_parser_rejects_missing_duplicate_and_invalid_identity();
     test_frame_mapping_preserves_source_identity_and_quality();
     test_physical_deadman_prompt_contract();
