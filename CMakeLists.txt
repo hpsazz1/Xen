@@ -1298,6 +1298,11 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_command_magnitude_analysis_tests.py"
             --analyzer
                 "${PROJECT_SOURCE_DIR}/scripts/analyze_mouse_effect_probe_b_command_magnitude.py")
+    add_test(NAME mouse_effect_probe_b_completion_phase_analysis_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_completion_phase_analysis_tests.py"
+            --analyzer
+                "${PROJECT_SOURCE_DIR}/scripts/analyze_mouse_effect_probe_b_completion_phase.py")
     # 固定 powershell.exe 仍会继承调用方的 PSModulePath。统一清除该变量，
     # 让 Windows PowerShell 5 按自身 PSHOME 重建系统模块路径；cmake -E env
     # 只改变测试子进程，不修改调用 CTest 的父环境。
