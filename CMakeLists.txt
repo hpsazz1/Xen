@@ -997,6 +997,22 @@ if(BUILD_TESTING)
     if(NOT XEN_PYTHON_EXECUTABLE)
         message(FATAL_ERROR "Python executable not found: python or python3")
     endif()
+    # 离线像素专项依赖可加载的本地扩展；模块存在不等于同一解释器可以导入。
+    execute_process(
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 -c
+            "import sys, numpy, cv2; print('Python ' + sys.version.split()[0] + ', NumPy ' + numpy.__version__ + ', OpenCV ' + cv2.__version__)"
+        RESULT_VARIABLE XEN_PYTHON_MODULES_RESULT
+        OUTPUT_VARIABLE XEN_PYTHON_MODULES_OUTPUT
+        ERROR_VARIABLE XEN_PYTHON_MODULES_ERROR
+        TIMEOUT 30
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_STRIP_TRAILING_WHITESPACE)
+    if(NOT XEN_PYTHON_MODULES_RESULT STREQUAL "0")
+        message(FATAL_ERROR
+            "测试 Python 无法加载 NumPy/OpenCV：${XEN_PYTHON_EXECUTABLE}\n"
+            "退出结果：${XEN_PYTHON_MODULES_RESULT}\n${XEN_PYTHON_MODULES_ERROR}")
+    endif()
+    message(STATUS "测试 Python：${XEN_PYTHON_EXECUTABLE} (${XEN_PYTHON_MODULES_OUTPUT})")
     add_executable(log_tests
         tests/log_tests.cpp)
     # 生产消费者只依赖 log.h；本测试额外验证 Xen 不触碰外部 spdlog registry。
@@ -1314,6 +1330,19 @@ if(BUILD_TESTING)
     add_test(NAME mouse_effect_probe_b_holdout_analysis_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_holdout_analysis_tests.py")
+    # 只分析合成数组和本轮 fixture；禁写源码缓存，统一 CTest 管道中的中文编码。
+    add_test(NAME mouse_effect_probe_a2_calibration_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_a2_calibration_tests.py")
+    add_test(NAME mouse_effect_probe_a2_physical_analysis_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_a2_physical_analysis_tests.py")
+    add_test(NAME mouse_effect_probe_physical_analysis_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_physical_analysis_tests.py")
+    add_test(NAME mouse_effect_probe_pixel_analysis_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_pixel_analysis_tests.py")
     # Production red evaluator 只消费 hash-bound 离线 trace；不加载 Aim、
     # Mouse 或任何真实输出后端。
     add_test(NAME aim_production_red_evaluator_tests
@@ -1400,6 +1429,11 @@ if(BUILD_TESTING)
                 -NoProfile -ExecutionPolicy Bypass
                 -File "${script_path}" ${ARGN})
     endfunction()
+
+    xen_add_windows_powershell_test(path_safety_tests
+        "${PROJECT_SOURCE_DIR}/tests/path_safety_tests.ps1"
+        -PathSafetyScript "${PROJECT_SOURCE_DIR}/scripts/invoke_path_safety.ps1"
+        -RepositoryRoot "${PROJECT_SOURCE_DIR}")
 
     add_test(NAME test_root_owner_cli_tests
         COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath --

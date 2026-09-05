@@ -35,10 +35,14 @@ Capture → Detector → Aim → Runtime SafetyGate → Mouse
 - CMake 3.18 或更高版本
 - 与目标 Provider 匹配的 ONNX Runtime SDK
 - OpenCV
+- 开启 `BUILD_TESTING`：PowerShell 7，以及能导入 NumPy 和 OpenCV（`cv2`）的 Python 3
 - 可选：CUDA、TensorRT、cuDNN、DirectML、NDI SDK
 
 依赖版本和导入关系以 [CMakeLists.txt](CMakeLists.txt) 与实际构建报告为准；不要只替换一个 GPU
 SDK 后沿用旧构建目录。
+
+测试配置会先解析解释器，再用同一个 Python 实际导入 NumPy/`cv2`；缺失或加载失败会明确终止配置。
+需要指定解释器时传入 `-DXEN_PYTHON_EXECUTABLE="C:\path\to\python.exe"`，测试使用该绝对路径。
 
 ### 最小 Release 构建
 
