@@ -721,6 +721,7 @@ bool produce_output_off_bundle(
     result = {};
     error.clear();
     std::filesystem::path incoming;
+    bool owns_incoming = false;
     try {
         if (options.output_directory.empty()) {
             throw std::runtime_error("output_directory 不得为空");
@@ -729,8 +730,14 @@ bool produce_output_off_bundle(
             options.output_directory).lexically_normal();
         incoming = output;
         incoming += ".incoming";
-        if (std::filesystem::exists(output) ||
-            std::filesystem::exists(incoming)) {
+        if (std::filesystem::exists(output)) {
+            throw std::runtime_error("拒绝覆盖既有 output 或 incoming");
+        }
+        std::filesystem::create_directories(output.parent_path());
+        // 只有本次原子新建的目录才归本次调用清理；既有目录返回 false，
+        // 不能用先 exists 再无条件置 owner 的方式接管其他调用的产物。
+        owns_incoming = std::filesystem::create_directory(incoming);
+        if (!owns_incoming) {
             throw std::runtime_error("拒绝覆盖既有 output 或 incoming");
         }
         std::filesystem::create_directories(incoming / "sources");
@@ -871,7 +878,6 @@ bool produce_output_off_bundle(
         }
 
         write_json(incoming / "manifest.json", manifest);
-        std::filesystem::create_directories(output.parent_path());
         std::string rename_error;
         if (!detail::rename_directory_with_retry(
                 incoming, output, 5, std::chrono::milliseconds(50),
@@ -883,6 +889,7 @@ bool produce_output_off_bundle(
             throw std::runtime_error(
                 "原子发布目录失败: " + rename_error);
         }
+        owns_incoming = false;
         result.manifest_path = output / "manifest.json";
         result.trace_count = manifest["traces"].size();
         result.sample_count = total_samples;
@@ -892,7 +899,7 @@ bool produce_output_off_bundle(
     } catch (...) {
         error = "output-off producer 发生未知错误";
     }
-    if (!incoming.empty()) {
+    if (owns_incoming) {
         std::error_code ignored;
         std::filesystem::remove_all(incoming, ignored);
     }

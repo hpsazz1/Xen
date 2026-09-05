@@ -8,9 +8,10 @@ import csv
 import hashlib
 import json
 import pathlib
-import shutil
 import subprocess
 import sys
+
+from xen_owned_test_directory import owned_test_directory
 
 
 WINDOWS = ((40, 340), (700, 1000), (1400, 1700), (2099, 2399))
@@ -65,12 +66,14 @@ def main() -> int:
     parser.add_argument("--builder", required=True, type=pathlib.Path)
     parser.add_argument("--fixture-header", required=True, type=pathlib.Path)
     parser.add_argument("--test-root", required=True, type=pathlib.Path)
+    parser.add_argument("--powershell-executable", required=True, type=pathlib.Path)
     arguments = parser.parse_args()
+    with owned_test_directory(
+            arguments.test_root, arguments.powershell_executable) as root:
+        return run_contract(arguments, root)
 
-    root = arguments.test_root.resolve()
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+
+def run_contract(arguments: argparse.Namespace, root: pathlib.Path) -> int:
     measured_path = root / "measured-runtime.csv"
     output_path = root / "plan.json"
     write_measured_runtime(measured_path)

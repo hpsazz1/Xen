@@ -6,9 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
-import shutil
 import subprocess
 import sys
+
+from xen_owned_test_directory import owned_test_directory
 
 
 def expect(condition: bool, message: str) -> None:
@@ -86,12 +87,14 @@ def main() -> int:
     parser.add_argument("--producer", required=True, type=pathlib.Path)
     parser.add_argument("--evaluator", required=True, type=pathlib.Path)
     parser.add_argument("--test-root", required=True, type=pathlib.Path)
+    parser.add_argument("--powershell-executable", required=True, type=pathlib.Path)
     arguments = parser.parse_args()
+    with owned_test_directory(
+            arguments.test_root, arguments.powershell_executable) as root:
+        return run_contract(arguments, root)
 
-    root = arguments.test_root.resolve()
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+
+def run_contract(arguments: argparse.Namespace, root: pathlib.Path) -> int:
     plan_path = root / "plan.json"
     config_path = root / "config.ini"
     measured_path = root / "measured.csv"

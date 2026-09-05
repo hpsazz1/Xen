@@ -254,6 +254,7 @@ function Resolve-XenDirectChildPath(
 }
 
 Export-ModuleMember -Function @(
+    'Assert-XenNoReparsePathChain',
     'New-XenOwnedTestDirectory',
     'Remove-XenOwnedTestDirectory',
     'Resolve-XenDirectChildPath')

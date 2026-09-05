@@ -14,6 +14,7 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot "path_safety.psm1") -Force
 
 function Resolve-RequiredDirectory(
         [string]$Path,
@@ -108,16 +109,13 @@ function Assert-OwnedIncomingPath(
         [string]$Prefix) {
     $fullPath = [IO.Path]::GetFullPath($Path)
     $fullParent = [IO.Path]::GetFullPath($Parent).TrimEnd('\', '/')
-    $expectedParentPrefix =
-        $fullParent + [IO.Path]::DirectorySeparatorChar
-    if (-not $fullPath.StartsWith(
-            $expectedParentPrefix,
-            [StringComparison]::OrdinalIgnoreCase) -or
+    if ((Split-Path -Parent $fullPath) -ine $fullParent -or
         -not (Split-Path -Leaf $fullPath).StartsWith(
             $Prefix, [StringComparison]::Ordinal)) {
         throw "incoming 清理路径越界：$fullPath"
     }
-    return $fullPath
+    return Resolve-XenDirectChildPath -RootPath $Parent `
+        -Name (Split-Path -Leaf $fullPath) -Description "Owned incoming"
 }
 
 function Copy-Payload(
@@ -130,7 +128,8 @@ function Copy-Payload(
     if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$') {
         throw "Physical B payload 文件名非法：$Name"
     }
-    $destination = Join-Path $DestinationRoot $Name
+    $destination = Resolve-XenDirectChildPath -RootPath $DestinationRoot `
+        -Name $Name -Description "Payload destination"
     if (Test-Path -LiteralPath $destination) {
         throw "Physical B payload 目标已存在：$destination"
     }
@@ -157,6 +156,8 @@ function Assert-Package(
         [string]$Root,
         [object]$Manifest,
         [string]$ExpectedPackageName) {
+    Assert-XenNoReparsePathChain $Root "Package verification root" `
+        -RequireExistingLeaf
     if ([int]$Manifest.schema_version -ne 1 -or
         [string]$Manifest.evidence_type -ne
             "mouse_effect_probe_b_tool_package" -or
@@ -251,6 +252,12 @@ $identityPath = Resolve-RequiredFile `
     (Join-Path $buildRoot "xen-build-identity.json") "构建身份"
 $identity = Get-Content -LiteralPath $identityPath -Raw -Encoding utf8 |
     ConvertFrom-Json
+$dirtyProperty = $identity.PSObject.Properties["git_dirty"]
+if ($null -eq $dirtyProperty -or
+    $dirtyProperty.Value -isnot [bool] -or
+    $dirtyProperty.Value) {
+    throw "Physical B 构建身份必须包含布尔值为false的git_dirty"
+}
 if ([int]$identity.schema -ne 1 -or
     [string]$identity.git_commit -ne $commit -or
     [string]$identity.runtime -ne "nvidia" -or
@@ -280,12 +287,33 @@ $buildFiles += [pscustomobject]@{
 }
 
 $packageName = "MouseEffectProbe-B-$($commit.Substring(0, 7))"
+Assert-XenNoReparsePathChain $PackageOutputRoot "Package output root"
+# 所有目的根先验证，避免在后续发现辅机目的根非法前已写入本地包。
+if (-not $SkipRemotePublish.IsPresent) {
+    Assert-XenNoReparsePathChain $DestinationRoot "Destination root" `
+        -RequireExistingLeaf
+    $destination = Resolve-RequiredDirectory $DestinationRoot "辅机 XenLab 共享"
+    $remoteReleaseRoot = Resolve-XenDirectChildPath -RootPath $destination `
+        -Name "releases" -Description "Remote releases directory"
+    if ((Test-Path -LiteralPath $remoteReleaseRoot) -and
+        -not (Test-Path -LiteralPath $remoteReleaseRoot -PathType Container)) {
+        throw "辅机releases路径不是目录：$remoteReleaseRoot"
+    }
+    foreach ($name in @($packageName, ".incoming-$packageName")) {
+        $path = Join-Path $remoteReleaseRoot $name
+        Assert-XenNoReparsePathChain $path "Remote package destination"
+        if (Test-Path -LiteralPath $path) {
+            throw "Physical B 辅机正式包或 incoming 已存在：$packageName"
+        }
+    }
+}
 $packageParent = [IO.Path]::GetFullPath($PackageOutputRoot)
 if (-not (Test-Path -LiteralPath $packageParent -PathType Container)) {
     [void](New-Item -ItemType Directory -Path $packageParent -Force)
 }
 $packageParent = Resolve-RequiredDirectory $packageParent "本地工具包目录"
-$localFinal = Join-Path $packageParent $packageName
+$localFinal = Resolve-XenDirectChildPath -RootPath $packageParent `
+    -Name $packageName -Description "Local package directory"
 $localPrefix = ".incoming-$packageName-"
 $existingLocalIncoming = @(
     Get-ChildItem -LiteralPath $packageParent -Directory |
@@ -295,9 +323,11 @@ if ((Test-Path -LiteralPath $localFinal) -or
     $existingLocalIncoming.Count -ne 0) {
     throw "Physical B 本地正式包或 incoming 已存在：$packageName"
 }
-$localIncoming = Join-Path $packageParent (
-    "$localPrefix$([guid]::NewGuid().ToString('N'))")
+$localIncoming = Resolve-XenDirectChildPath -RootPath $packageParent `
+    -Name "$localPrefix$([guid]::NewGuid().ToString('N'))" `
+    -Description "Local incoming directory"
 [void](New-Item -ItemType Directory -Path $localIncoming)
+$localOwned = $true
 
 $manifest = $null
 $manifestHash = ""
@@ -338,15 +368,21 @@ try {
         composite_phase_run_included = $false
         files = @($files)
     }
-    $localManifest = Join-Path $localIncoming "manifest.json"
+    $localManifest = Resolve-XenDirectChildPath -RootPath $localIncoming `
+        -Name "manifest.json" -Description "Local manifest"
     Write-NewUtf8Json $localManifest $manifest
     Assert-Package $localIncoming $manifest $packageName
+    $localIncoming = Assert-OwnedIncomingPath `
+        $localIncoming $packageParent $localPrefix
+    $localFinal = Resolve-XenDirectChildPath -RootPath $packageParent `
+        -Name $packageName -Description "Local package before publish"
     Rename-Item -LiteralPath $localIncoming -NewName $packageName
+    $localOwned = $false
     Assert-Package $localFinal $manifest $packageName
     $manifestHash = Get-FileSha256 (Join-Path $localFinal "manifest.json")
 } catch {
     $failure = $_
-    if (Test-Path -LiteralPath $localIncoming -PathType Container) {
+    if ($localOwned -and (Test-Path -LiteralPath $localIncoming -PathType Container)) {
         $owned = Assert-OwnedIncomingPath `
             $localIncoming $packageParent $localPrefix
         Remove-Item -LiteralPath $owned -Recurse -Force
@@ -356,27 +392,32 @@ try {
 
 $published = ""
 if (-not $SkipRemotePublish.IsPresent) {
-    $destination = Resolve-RequiredDirectory `
-        $DestinationRoot "辅机 XenLab 共享"
-    $remoteReleaseRoot = Join-Path $destination "releases"
+    $remoteReleaseRoot = Resolve-XenDirectChildPath -RootPath $destination `
+        -Name "releases" -Description "Remote releases before creation"
     if (-not (Test-Path -LiteralPath $remoteReleaseRoot -PathType Container)) {
         [void](New-Item -ItemType Directory -Path $remoteReleaseRoot)
     }
     $remoteReleaseRoot = Resolve-RequiredDirectory `
         $remoteReleaseRoot "辅机 releases 目录"
-    $published = Join-Path $remoteReleaseRoot $packageName
+    $published = Resolve-XenDirectChildPath -RootPath $remoteReleaseRoot `
+        -Name $packageName -Description "Remote published package"
     $remoteIncomingName = ".incoming-$packageName"
-    $remoteIncoming = Join-Path $remoteReleaseRoot $remoteIncomingName
+    $remoteIncoming = Resolve-XenDirectChildPath -RootPath $remoteReleaseRoot `
+        -Name $remoteIncomingName -Description "Remote incoming directory"
     if ((Test-Path -LiteralPath $published) -or
         (Test-Path -LiteralPath $remoteIncoming)) {
         throw "Physical B 辅机正式包或 incoming 已存在：$packageName"
     }
+    $remoteOwned = $false
     try {
         [void](New-Item -ItemType Directory -Path $remoteIncoming)
+        $remoteOwned = $true
         foreach ($file in @(Get-ChildItem -LiteralPath $localFinal -File)) {
+            $remoteFile = Resolve-XenDirectChildPath -RootPath $remoteIncoming `
+                -Name $file.Name -Description "Remote payload destination"
             [IO.File]::Copy(
                 $file.FullName,
-                (Join-Path $remoteIncoming $file.Name),
+                $remoteFile,
                 $false)
         }
         Assert-Package $remoteIncoming $manifest $packageName
@@ -385,10 +426,16 @@ if (-not $SkipRemotePublish.IsPresent) {
         if ($remoteManifestHash -ne $manifestHash) {
             throw "Physical B 辅机 manifest SHA-256 回读不一致"
         }
+        $remoteIncoming = Assert-OwnedIncomingPath `
+            $remoteIncoming $remoteReleaseRoot $remoteIncomingName
+        $published = Resolve-XenDirectChildPath -RootPath $remoteReleaseRoot `
+            -Name $packageName -Description "Remote package before publish"
         Rename-Item -LiteralPath $remoteIncoming -NewName $packageName
+        $remoteOwned = $false
     } catch {
         $failure = $_
-        if (Test-Path -LiteralPath $remoteIncoming -PathType Container) {
+        if ($remoteOwned -and
+            (Test-Path -LiteralPath $remoteIncoming -PathType Container)) {
             $owned = Assert-OwnedIncomingPath `
                 $remoteIncoming $remoteReleaseRoot $remoteIncomingName
             Remove-Item -LiteralPath $owned -Recurse -Force

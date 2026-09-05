@@ -40,23 +40,14 @@ if (-not (Test-Path -LiteralPath $PublishScript -PathType Leaf)) {
     throw "Physical B 发布脚本不存在：$PublishScript"
 }
 
-$resolvedTestRoot = [IO.Path]::GetFullPath($TestRoot)
-$testParent = Split-Path -Parent $resolvedTestRoot
-$testLeaf = Split-Path -Leaf $resolvedTestRoot
-if ([string]::IsNullOrWhiteSpace($testParent) -or
-    $testLeaf -notlike "mouse-effect-probe-b-publish-tests*") {
-    throw "测试根目录不符合专用前缀：$resolvedTestRoot"
-}
-if (Test-Path -LiteralPath $resolvedTestRoot) {
-    $existing = (Resolve-Path -LiteralPath $resolvedTestRoot).ProviderPath
-    if (-not [string]::Equals(
-            $existing, $resolvedTestRoot,
-            [StringComparison]::OrdinalIgnoreCase)) {
-        throw "测试清理路径发生变化：$existing"
-    }
-    Remove-Item -LiteralPath $existing -Recurse -Force
-}
-[void](New-Item -ItemType Directory -Path $resolvedTestRoot)
+$sourceScripts = Split-Path -Parent ([IO.Path]::GetFullPath($PublishScript))
+$sourceRepository = Split-Path -Parent $sourceScripts
+Import-Module (Join-Path $sourceScripts "path_safety.psm1") -Force
+$owned = New-XenOwnedTestDirectory -BasePath $TestRoot `
+    -RepositoryRoot $sourceRepository
+$resolvedTestRoot = $owned.RootPath
+
+try {
 
 $repository = Join-Path $resolvedTestRoot "repository"
 $scripts = Join-Path $repository "scripts"
@@ -121,6 +112,132 @@ $identity = [ordered]@{
 Write-Utf8NoBom (Join-Path $build "xen-build-identity.json") `
     (($identity | ConvertTo-Json -Depth 8) + "`n")
 
+foreach ($dirtyCase in @(
+        @{ Name = "true"; Value = $true },
+        @{ Name = "null"; Value = $null },
+        @{ Name = "zero"; Value = 0 },
+        @{ Name = "string-false"; Value = "false" },
+        @{ Name = "empty-string"; Value = "" },
+        @{ Name = "missing" })) {
+    if ($dirtyCase.ContainsKey("Value")) {
+        $identity.git_dirty = $dirtyCase.Value
+    } else {
+        $identity.Remove("git_dirty")
+    }
+    Write-Utf8NoBom (Join-Path $build "xen-build-identity.json") `
+        (($identity | ConvertTo-Json -Depth 8) + "`n")
+    $dirtyIdentityOutput = Join-Path $resolvedTestRoot (
+        "dirty-identity-" + $dirtyCase.Name)
+    $dirtyIdentityRejected = $false
+    try {
+        & $PublishScript -BuildDirectory $build -RepositoryRoot $repository `
+            -SourceScriptRoot $scripts -GitExecutable $GitExecutable `
+            -PackageOutputRoot $dirtyIdentityOutput -SkipRemotePublish
+    } catch {
+        $dirtyIdentityRejected = $_.Exception.Message -like "*构建身份*"
+    }
+    Assert-True ($dirtyIdentityRejected -and
+                 -not (Test-Path -LiteralPath $dirtyIdentityOutput)) `
+        "非法构建身份必须在任何发布目录写入前拒绝：$($dirtyCase.Name)"
+}
+$identity.git_dirty = $false
+Write-Utf8NoBom (Join-Path $build "xen-build-identity.json") `
+    (($identity | ConvertTo-Json -Depth 8) + "`n")
+
+$junctionDestination = Join-Path $resolvedTestRoot "junction-destination"
+$junctionOutside = Join-Path $resolvedTestRoot "junction-outside"
+$junctionOutput = Join-Path $resolvedTestRoot "junction-packages"
+[void](New-Item -ItemType Directory -Path $junctionDestination)
+[void](New-Item -ItemType Directory -Path $junctionOutside)
+$junctionSentinel = Join-Path $junctionOutside "keep.txt"
+Write-Utf8NoBom $junctionSentinel "保留声明目的根外的原始内容"
+$junctionSentinelHash = (Get-FileHash -LiteralPath $junctionSentinel).Hash
+$junctionPath = Join-Path $junctionDestination "releases"
+[void](New-Item -ItemType Junction -Path $junctionPath -Target $junctionOutside)
+try {
+    $junctionRejected = $false
+    try {
+        & $PublishScript -BuildDirectory $build -RepositoryRoot $repository `
+            -SourceScriptRoot $scripts -GitExecutable $GitExecutable `
+            -PackageOutputRoot $junctionOutput `
+            -DestinationRoot $junctionDestination
+    } catch {
+        $junctionRejected = $_.Exception.Message -like "*reparse*"
+    }
+    Assert-True ($junctionRejected -and
+                 -not (Test-Path -LiteralPath $junctionOutput) -and
+                 @(Get-ChildItem -LiteralPath $junctionOutside -Force).Count -eq 1 -and
+                 (Get-FileHash -LiteralPath $junctionSentinel).Hash -eq $junctionSentinelHash) `
+        "目的releases祖先junction必须在任何发布写入前拒绝且保留外部哨兵"
+} finally {
+    # 只移除本轮明确创建的junction入口，不递归访问其目标。
+    [IO.Directory]::Delete($junctionPath, $false)
+}
+
+$packageName = "MouseEffectProbe-B-$($commit.Substring(0, 7))"
+foreach ($pathCase in @("local-ancestor", "destination-root",
+        "destination-ancestor", "remote-incoming", "remote-final")) {
+    $caseRoot = Join-Path $resolvedTestRoot $pathCase
+    $outsideRoot = Join-Path $caseRoot "outside"
+    $caseDestination = Join-Path $caseRoot "destination"
+    $caseOutput = Join-Path $caseRoot "packages"
+    [void][IO.Directory]::CreateDirectory($outsideRoot)
+    [void][IO.Directory]::CreateDirectory((Join-Path $caseDestination "releases"))
+    $sentinel = Join-Path $outsideRoot "keep.bin"
+    [IO.File]::WriteAllBytes($sentinel, [byte[]](0, 255, 12, 43))
+    $link = Join-Path $caseRoot "link"
+    switch ($pathCase) {
+        "local-ancestor" { $caseOutput = Join-Path $link "not-created" }
+        "destination-root" { $caseDestination = $link }
+        "destination-ancestor" {
+            [void][IO.Directory]::CreateDirectory((Join-Path $outsideRoot "child"))
+            $caseDestination = Join-Path $link "child"
+        }
+        "remote-incoming" {
+            $link = Join-Path (Join-Path $caseDestination "releases") ".incoming-$packageName"
+        }
+        "remote-final" {
+            $link = Join-Path (Join-Path $caseDestination "releases") $packageName
+        }
+    }
+    $beforeCount = @(Get-ChildItem -LiteralPath $outsideRoot -Force -Recurse).Count
+    [void](New-Item -ItemType Junction -Path $link -Target $outsideRoot)
+    try {
+        $pathRejected = $false
+        try {
+            & $PublishScript -BuildDirectory $build -RepositoryRoot $repository `
+                -SourceScriptRoot $scripts -GitExecutable $GitExecutable `
+                -PackageOutputRoot $caseOutput -DestinationRoot $caseDestination
+        } catch {
+            $pathRejected = $_.Exception.Message -like "*reparse*"
+        }
+        Assert-True ($pathRejected -and -not (Test-Path -LiteralPath $caseOutput) -and
+                     @(Get-ChildItem -LiteralPath $outsideRoot -Force -Recurse).Count -eq $beforeCount -and
+                     [Convert]::ToBase64String([IO.File]::ReadAllBytes($sentinel)) -ceq "AP8MKw==") `
+            "非法发布路径必须在写入前拒绝并保留原bytes：$pathCase"
+    } finally {
+        [IO.Directory]::Delete($link, $false)
+    }
+}
+
+# 第二个payload的共享锁让实际File.Copy失败，验证已取得的incoming被清理。
+$failedCopyRoot = Join-Path $resolvedTestRoot "failed-copy-packages"
+$lockedSource = [IO.File]::Open((Join-Path $release "XenCaptureEvidence.exe"),
+    [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+try {
+    $copyFailed = $false
+    try {
+        & $PublishScript -BuildDirectory $build -RepositoryRoot $repository `
+            -SourceScriptRoot $scripts -GitExecutable $GitExecutable `
+            -PackageOutputRoot $failedCopyRoot -SkipRemotePublish
+    } catch { $copyFailed = $true }
+    Assert-True ($copyFailed -and (Test-Path -LiteralPath $failedCopyRoot -PathType Container) -and
+                 @(Get-ChildItem -LiteralPath $failedCopyRoot -Force).Count -eq 0) `
+        "实际复制失败必须清理本轮incoming且不发布正式包"
+} finally {
+    $lockedSource.Dispose()
+}
+
 & $PublishScript `
     -BuildDirectory $build `
     -RepositoryRoot $repository `
@@ -132,7 +249,6 @@ if ($LASTEXITCODE -ne 0) {
     throw "Physical B 发布集成测试失败，ExitCode=$LASTEXITCODE"
 }
 
-$packageName = "MouseEffectProbe-B-$($commit.Substring(0, 7))"
 $localPackage = Join-Path $packages $packageName
 $remotePackage = Join-Path (Join-Path $destination "releases") $packageName
 $localManifestPath = Join-Path $localPackage "manifest.json"
@@ -198,6 +314,29 @@ try {
 }
 Assert-True $overwriteRejected "既有本地/辅机包必须拒绝覆盖"
 
+$localBefore = (Get-FileHash -LiteralPath $localManifestPath).Hash
+$localOverwriteRejected = $false
+try {
+    & $PublishScript -BuildDirectory $build -RepositoryRoot $repository `
+        -SourceScriptRoot $scripts -GitExecutable $GitExecutable `
+        -PackageOutputRoot $packages -SkipRemotePublish
+} catch { $localOverwriteRejected = $_.Exception.Message -like "*已存在*" }
+Assert-True ($localOverwriteRejected -and
+             (Get-FileHash -LiteralPath $localManifestPath).Hash -eq $localBefore) `
+    "仅本地发布也必须拒绝覆盖并保留既有manifest"
+$remoteBefore = (Get-FileHash -LiteralPath $remoteManifestPath).Hash
+$remoteOnlyOutput = Join-Path $resolvedTestRoot "remote-only-packages"
+$remoteOverwriteRejected = $false
+try {
+    & $PublishScript -BuildDirectory $build -RepositoryRoot $repository `
+        -SourceScriptRoot $scripts -GitExecutable $GitExecutable `
+        -PackageOutputRoot $remoteOnlyOutput -DestinationRoot $destination
+} catch { $remoteOverwriteRejected = $_.Exception.Message -like "*已存在*" }
+Assert-True ($remoteOverwriteRejected -and
+             -not (Test-Path -LiteralPath $remoteOnlyOutput) -and
+             (Get-FileHash -LiteralPath $remoteManifestPath).Hash -eq $remoteBefore) `
+    "仅辅机模拟包已存在时须在本地写入前拒绝并保留既有manifest"
+
 Write-Utf8NoBom (Join-Path $scripts "prepare_mouse_effect_probe_b.ps1") `
     "tracked dirty`n"
 $dirtyRejected = $false
@@ -216,3 +355,8 @@ try {
 Assert-True $dirtyRejected "存在可跟踪差异时必须在复制前 fail closed"
 
 Write-Host "Mouse Effect Probe Physical B 原子发布测试全部通过。"
+} finally {
+    Remove-XenOwnedTestDirectory -RootPath $owned.RootPath `
+        -BasePath $owned.BasePath -RepositoryRoot $sourceRepository `
+        -OwnerId $owned.OwnerId
+}

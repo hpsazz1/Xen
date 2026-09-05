@@ -8,6 +8,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot '..\scripts\path_safety.psm1') -Force
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -17,15 +19,10 @@ function Assert-True {
 }
 
 $resolvedExecutable = (Resolve-Path -LiteralPath $Executable).Path
-$resolvedParent = (Resolve-Path -LiteralPath (Split-Path -Parent $TestRoot)).Path
-$leaf = Split-Path -Leaf $TestRoot
-Assert-True ($leaf -eq 'mouse-effect-probe-sequence-cli-tests') `
-    'Unexpected isolated test directory name.'
-$resolvedTestRoot = Join-Path $resolvedParent $leaf
-if (Test-Path -LiteralPath $resolvedTestRoot) {
-    Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force
-}
-New-Item -ItemType Directory -Path $resolvedTestRoot | Out-Null
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$ownedTest = New-XenOwnedTestDirectory -BasePath $TestRoot `
+    -RepositoryRoot $repositoryRoot
+$resolvedTestRoot = $ownedTest.RootPath
 
 try {
     $output = Join-Path $resolvedTestRoot 'physical-b-holdout.json'
@@ -149,7 +146,7 @@ try {
     Write-Host 'Mouse Effect Probe sequence CLI contracts passed.'
 }
 finally {
-    if (Test-Path -LiteralPath $resolvedTestRoot) {
-        Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force
-    }
+    Remove-XenOwnedTestDirectory -RootPath $resolvedTestRoot `
+        -BasePath $ownedTest.BasePath -RepositoryRoot $repositoryRoot `
+        -OwnerId $ownedTest.OwnerId
 }

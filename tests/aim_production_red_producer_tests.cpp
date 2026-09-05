@@ -4,10 +4,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include <windows.h>
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
 
@@ -28,6 +31,80 @@ void write_text(const std::filesystem::path& path, std::string_view text) {
     stream << text;
     if (!stream) throw std::runtime_error("写入测试文件失败");
 }
+
+std::string read_text(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return {};
+    return {std::istreambuf_iterator<char>(stream),
+            std::istreambuf_iterator<char>()};
+}
+
+void require_plain_path_chain(const std::filesystem::path& path) {
+    for (auto current = path; !current.empty();) {
+        const DWORD attributes = GetFileAttributesW(current.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            throw std::runtime_error("测试路径不存在或包含 reparse point");
+        }
+        const auto parent = current.parent_path();
+        if (parent == current) break;
+        current = parent;
+    }
+}
+
+class OwnedTestDirectory {
+public:
+    OwnedTestDirectory() {
+        parent_ = std::filesystem::absolute(
+            std::filesystem::temp_directory_path()).lexically_normal();
+        if (parent_ != parent_.root_path() && parent_.filename().empty()) {
+            parent_ = parent_.parent_path();
+        }
+        require_plain_path_chain(parent_);
+        static unsigned int sequence = 0;
+        const auto unique = std::to_string(GetCurrentProcessId()) + "-" +
+            std::to_string(std::chrono::steady_clock::now()
+                               .time_since_epoch().count()) + "-" +
+            std::to_string(++sequence);
+        root_ = parent_ / ("xen-aim-production-red-producer-" + unique);
+        if (!std::filesystem::create_directory(root_)) {
+            throw std::runtime_error("未取得测试目录所有权");
+        }
+        std::cout << "自有测试目录: " << root_.string() << '\n';
+    }
+
+    ~OwnedTestDirectory() noexcept {
+        try {
+            // 只清理本构造函数原子创建的直属子目录；整条路径和目录树不得跳转。
+            if (!root_.is_absolute() || root_.lexically_normal() != root_ ||
+                root_.parent_path() != parent_) {
+                throw std::runtime_error("测试清理路径越过自有目录边界");
+            }
+            require_plain_path_chain(root_);
+            for (const auto& entry :
+                 std::filesystem::recursive_directory_iterator(root_)) {
+                const DWORD attributes = GetFileAttributesW(entry.path().c_str());
+                if (attributes == INVALID_FILE_ATTRIBUTES ||
+                    (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                    throw std::runtime_error("测试目录树包含 reparse point");
+                }
+            }
+            std::filesystem::remove_all(root_);
+        } catch (const std::exception& exception) {
+            expect(false, "拒绝或未能清理自有测试目录: " +
+                   std::string(exception.what()));
+        }
+    }
+
+    OwnedTestDirectory(const OwnedTestDirectory&) = delete;
+    OwnedTestDirectory& operator=(const OwnedTestDirectory&) = delete;
+
+    const std::filesystem::path& path() const noexcept { return root_; }
+
+private:
+    std::filesystem::path parent_;
+    std::filesystem::path root_;
+};
 
 json make_plan() {
     json samples = json::array();
@@ -94,11 +171,8 @@ json make_plan() {
 }
 
 void test_producer_records_native_source_and_completed_ledgers() {
-    const auto unique = std::to_string(
-        std::chrono::steady_clock::now().time_since_epoch().count());
-    const auto root = std::filesystem::temp_directory_path() /
-        ("xen-aim-production-red-producer-" + unique);
-    std::filesystem::create_directories(root);
+    const OwnedTestDirectory directory;
+    const auto& root = directory.path();
     const auto plan_path = root / "plan.json";
     const auto config_path = root / "config.ini";
     const auto reference_path = root / "measured.csv";
@@ -187,8 +261,106 @@ void test_producer_records_native_source_and_completed_ledgers() {
                "backend failure 必须保留 issued，但 completed/actual/plant 归零");
     }
 
-    std::error_code ignored;
-    std::filesystem::remove_all(root, ignored);
+}
+
+void test_producer_preserves_existing_incoming() {
+    const OwnedTestDirectory directory;
+    const auto output = directory.path() / "bundle";
+    const auto incoming = directory.path() / "bundle.incoming";
+    std::filesystem::create_directories(incoming / "nested");
+    const auto sentinel = incoming / "nested" / "sentinel.bin";
+    const std::string original_bytes("existing\0incoming\r\n", 19);
+    write_text(sentinel, original_bytes);
+
+    aim_production_red::ProduceResult result;
+    std::string error;
+    const bool produced = aim_production_red::produce_output_off_bundle(
+        {{}, {}, {}, {}, output}, result, error);
+    expect(!produced && !error.empty() && result.manifest_path.empty() &&
+               result.trace_count == 0 && result.sample_count == 0 &&
+               !std::filesystem::exists(output) &&
+               std::filesystem::is_directory(incoming) &&
+               read_text(sentinel) == original_bytes,
+           "拒绝既有 incoming 必须保留目录及原始 bytes，且不得发布 output");
+}
+
+void test_producer_preserves_existing_output_and_incoming() {
+    const OwnedTestDirectory directory;
+    const auto output = directory.path() / "bundle";
+    const auto incoming = directory.path() / "bundle.incoming";
+    std::filesystem::create_directory(output);
+    std::filesystem::create_directory(incoming);
+    const auto output_sentinel = output / "output.bin";
+    const auto incoming_sentinel = incoming / "incoming.bin";
+    write_text(output_sentinel, "existing published bytes\r\n");
+    write_text(incoming_sentinel, "existing incoming bytes\r\n");
+
+    aim_production_red::ProduceResult result{output / "stale.json", 9, 99};
+    std::string error;
+    const bool produced = aim_production_red::produce_output_off_bundle(
+        {{}, {}, {}, {}, output}, result, error);
+    expect(!produced && !error.empty() && result.manifest_path.empty() &&
+               result.trace_count == 0 && result.sample_count == 0 &&
+               read_text(output_sentinel) == "existing published bytes\r\n" &&
+               read_text(incoming_sentinel) == "existing incoming bytes\r\n",
+           "output 和 incoming 均存在时必须拒绝覆盖并保留双方原始 bytes");
+}
+
+void test_producer_preserves_file_at_incoming_path() {
+    const OwnedTestDirectory directory;
+    const auto output = directory.path() / "bundle";
+    const auto incoming = directory.path() / "bundle.incoming";
+    const std::string original_bytes("incoming\0file\r\n", 15);
+    write_text(incoming, original_bytes);
+
+    aim_production_red::ProduceResult result;
+    std::string error;
+    const bool produced = aim_production_red::produce_output_off_bundle(
+        {{}, {}, {}, {}, output}, result, error);
+    expect(!produced && !error.empty() && result.manifest_path.empty() &&
+               result.trace_count == 0 && result.sample_count == 0 &&
+               !std::filesystem::exists(output) &&
+               std::filesystem::is_regular_file(incoming) &&
+               read_text(incoming) == original_bytes,
+           "incoming 位置已有普通文件时必须拒绝创建并保留原始 bytes，且不得发布 output");
+}
+
+void test_producer_preserves_parent_when_incoming_creation_fails() {
+    const OwnedTestDirectory directory;
+    const auto blocked_parent = directory.path() / "parent.bin";
+    write_text(blocked_parent, "parent is a file\r\n");
+
+    aim_production_red::ProduceResult result;
+    std::string error;
+    const bool produced = aim_production_red::produce_output_off_bundle(
+        {{}, {}, {}, {}, blocked_parent / "bundle"}, result, error);
+    expect(!produced && !error.empty() && result.manifest_path.empty() &&
+               result.trace_count == 0 && result.sample_count == 0 &&
+               std::filesystem::is_regular_file(blocked_parent) &&
+               read_text(blocked_parent) == "parent is a file\r\n" &&
+               std::distance(std::filesystem::directory_iterator(directory.path()),
+                             std::filesystem::directory_iterator()) == 1,
+           "incoming 无法创建时必须保留阻挡父路径的原始文件，且不留发布产物");
+}
+
+void test_producer_cleans_only_owned_incoming_after_failure() {
+    const OwnedTestDirectory directory;
+    const auto output = directory.path() / "bundle";
+    const auto incoming = directory.path() / "bundle.incoming";
+    const auto sibling = directory.path() / "unrelated.bin";
+    write_text(sibling, "unrelated original bytes\r\n");
+
+    aim_production_red::ProduceResult result;
+    std::string error;
+    const bool produced = aim_production_red::produce_output_off_bundle(
+        {directory.path() / "missing-plan.json", {}, {}, {}, output},
+        result, error);
+    expect(!produced && !error.empty() && result.manifest_path.empty() &&
+               result.trace_count == 0 && result.sample_count == 0 &&
+               !std::filesystem::exists(output) &&
+               !std::filesystem::exists(incoming) &&
+               read_text(sibling) == "unrelated original bytes\r\n",
+           "新建 incoming 后输入失败只可清理本次目录，必须保留同级既有文件");
 }
 
 void test_atomic_publish_retries_transient_access_denied() {
@@ -216,6 +388,11 @@ void test_atomic_publish_retries_transient_access_denied() {
 
 int main() {
     test_producer_records_native_source_and_completed_ledgers();
+    test_producer_preserves_existing_incoming();
+    test_producer_preserves_existing_output_and_incoming();
+    test_producer_preserves_file_at_incoming_path();
+    test_producer_preserves_parent_when_incoming_creation_fails();
+    test_producer_cleans_only_owned_incoming_after_failure();
     test_atomic_publish_retries_transient_access_denied();
     if (failures != 0) {
         std::cerr << failures << " 个 Aim production red producer 测试失败\n";

@@ -988,6 +988,15 @@ target_link_libraries(xen_mouse_effect_probe_composite_seal PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
+    # 测试解释器必须先于任何命令登记解析，不能依赖第二次配置留下的缓存。
+    find_program(XEN_POWERSHELL7_EXECUTABLE NAMES pwsh)
+    if(NOT XEN_POWERSHELL7_EXECUTABLE)
+        message(FATAL_ERROR "PowerShell 7 executable not found: pwsh")
+    endif()
+    find_program(XEN_PYTHON_EXECUTABLE NAMES python python3)
+    if(NOT XEN_PYTHON_EXECUTABLE)
+        message(FATAL_ERROR "Python executable not found: python or python3")
+    endif()
     add_executable(log_tests
         tests/log_tests.cpp)
     # 生产消费者只依赖 log.h；本测试额外验证 Xen 不触碰外部 spdlog registry。
@@ -1164,6 +1173,7 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/tests/aim_production_red_producer_integration_tests.py"
             --producer "$<TARGET_FILE:xen_aim_production_red_producer>"
             --evaluator "${PROJECT_SOURCE_DIR}/scripts/evaluate_aim_production_red.py"
+            --powershell-executable "${XEN_POWERSHELL7_EXECUTABLE}"
             --test-root "${CMAKE_BINARY_DIR}/aim-production-red-producer-integration")
 
     add_executable(aim_landmark_tests
@@ -1259,14 +1269,6 @@ if(BUILD_TESTING)
         message(FATAL_ERROR
             "Windows PowerShell 5 executable not found: ${XEN_WINDOWS_POWERSHELL}")
     endif()
-    find_program(XEN_POWERSHELL7_EXECUTABLE NAMES pwsh)
-    if(NOT XEN_POWERSHELL7_EXECUTABLE)
-        message(FATAL_ERROR "PowerShell 7 executable not found: pwsh")
-    endif()
-    find_program(XEN_PYTHON_EXECUTABLE NAMES python python3)
-    if(NOT XEN_PYTHON_EXECUTABLE)
-        message(FATAL_ERROR "Python executable not found: python or python3")
-    endif()
     add_test(NAME mouse_effect_probe_prbs_design_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_prbs_design_tests.py")
@@ -1288,6 +1290,7 @@ if(BUILD_TESTING)
                 "${PROJECT_SOURCE_DIR}/scripts/build_aim_production_red_dbed788b_plan.py"
             --fixture-header
                 "${PROJECT_SOURCE_DIR}/tests/aim_x_latest_pixel_holdout_fixture.h"
+            --powershell-executable "${XEN_POWERSHELL7_EXECUTABLE}"
             --test-root
                 "${CMAKE_BINARY_DIR}/aim-production-red-plan-builder-tests")
     add_test(NAME aim_production_red_fidelity_plan_builder_tests
@@ -1295,6 +1298,7 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/tests/aim_production_red_fidelity_plan_builder_tests.py"
             --builder
                 "${PROJECT_SOURCE_DIR}/scripts/build_aim_production_red_dbed788b_fidelity_plan.py"
+            --powershell-executable "${XEN_POWERSHELL7_EXECUTABLE}"
             --test-root
                 "${CMAKE_BINARY_DIR}/aim-production-red-fidelity-plan-builder-tests")
     add_test(NAME mouse_effect_probe_a2_magnitude_domain_tests
@@ -1360,6 +1364,21 @@ if(BUILD_TESTING)
                 -NoProfile -ExecutionPolicy Bypass
                 -File "${script_path}" ${ARGN})
     endfunction()
+
+    add_test(NAME test_root_owner_cli_tests
+        COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath --
+            "${XEN_POWERSHELL7_EXECUTABLE}"
+            -NoProfile -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/tests/test_root_owner_cli_tests.ps1"
+            -PythonExecutable "${XEN_PYTHON_EXECUTABLE}"
+            -PowerShellExecutable "${XEN_POWERSHELL7_EXECUTABLE}"
+            -ProducerExecutable "$<TARGET_FILE:xen_aim_production_red_producer>"
+            -SequenceExecutable "$<TARGET_FILE:xen_mouse_effect_probe_sequence>"
+            -GitExecutable "${GIT_EXECUTABLE}"
+            -PublisherTestsScript
+                "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_publish_tests.ps1"
+            -PublishScript "${PROJECT_SOURCE_DIR}/scripts/publish_mouse_effect_probe_b.ps1"
+            -TestRoot "${CMAKE_BINARY_DIR}/test-root-owner-cli-tests")
 
     xen_add_windows_powershell_test(powershell_module_path_tests
         "${PROJECT_SOURCE_DIR}/tests/powershell_module_path_tests.ps1"
