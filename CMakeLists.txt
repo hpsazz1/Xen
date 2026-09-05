@@ -1601,6 +1601,23 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(io_tests OPENCV NDI)
     add_test(NAME io_tests COMMAND io_tests)
 
+    if(XEN_HAS_NDI)
+        # 注入 SDK/外部时钟，仍经真实接收线程、发布与公开 grab；不初始化 NDI 实网。
+        add_executable(ndi_capture_contract_tests
+            tests/ndi_capture_contract_tests.cpp)
+        target_link_libraries(ndi_capture_contract_tests PRIVATE capture)
+        xen_deploy_runtime_dlls(ndi_capture_contract_tests OPENCV NDI)
+        add_test(NAME ndi_capture_contract_tests COMMAND ndi_capture_contract_tests)
+
+        # 同一 NDI 系统夹具继续进入 Runtime 生产队列/时钟和 Aim；不启动 Detector/Mouse。
+        add_executable(ndi_runtime_timing_tests
+            tests/ndi_runtime_timing_tests.cpp
+            Xen/runtime/runtime_queue.cpp)
+        target_link_libraries(ndi_runtime_timing_tests PRIVATE capture aim)
+        xen_deploy_runtime_dlls(ndi_runtime_timing_tests OPENCV NDI)
+        add_test(NAME ndi_runtime_timing_tests COMMAND ndi_runtime_timing_tests)
+    endif()
+
     add_executable(clock_sync_tests
         tests/clock_sync_tests.cpp)
     target_link_libraries(clock_sync_tests PRIVATE clock_sync ws2_32)

@@ -8,6 +8,10 @@
 #endif
 #include <Windows.h>
 
+#if XEN_HAS_NDI
+#include <Processing.NDI.Lib.h>
+#endif
+
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 
@@ -15,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thread>
 
@@ -379,6 +384,227 @@ void test_required_source_timing_rejects_invalid_frames() {
     }
 }
 
+void test_required_source_timing_rejects_missing_timestamp_fact() {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), "必须创建源时间戳事实测试临时目录");
+    const CaptureEvidenceConfig config = test_config(temporary, 1);
+    capture_evidence::CaptureEvidenceRecorder recorder;
+    std::string error;
+    expect(recorder.start(config, error),
+           "源时间戳事实测试必须先正常启动：" + error);
+
+    CapturedFrame frame = test_frame(1, 1);
+    frame.timing.source_timestamp_valid = false;
+    expect(!recorder.record(frame, error) && !error.empty() &&
+               recorder.recorded_frame_count() == 0,
+           "require_source_timing 必须拒绝 timestamp_valid=false 的帧");
+    expect(!recorder.finish(error) &&
+               !std::filesystem::exists(config.output_directory),
+           "缺少时间戳事实的帧不得形成正式证据目录");
+}
+
+void expect_required_timing_rejection(const CapturedFrame& frame,
+                                      const std::string& case_name) {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), case_name + " 必须创建临时目录");
+    const CaptureEvidenceConfig config = test_config(temporary, 1);
+    capture_evidence::CaptureEvidenceRecorder recorder;
+    std::string error;
+    expect(recorder.start(config, error),
+           case_name + " 必须先正常启动：" + error);
+    expect(!recorder.record(frame, error) && !error.empty() &&
+               recorder.recorded_frame_count() == 0,
+           "require_source_timing 必须拒绝 " + case_name);
+    expect(!recorder.finish(error) &&
+               !std::filesystem::exists(config.output_directory),
+           case_name + " 不得形成正式证据目录");
+}
+
+void test_required_source_timing_rejects_unsupported_basis() {
+    CapturedFrame unavailable = test_frame(1, 1);
+    unavailable.timing.source_time_basis = SourceTimeBasis::UNAVAILABLE;
+    expect_required_timing_rejection(unavailable, "basis=UNAVAILABLE 的帧");
+
+    CapturedFrame unknown = test_frame(1, 1);
+    unknown.timing.source_time_basis = static_cast<SourceTimeBasis>(999);
+    expect_required_timing_rejection(unknown, "未知 basis 的帧");
+}
+
+void test_required_source_timing_rejects_unmappable_timestamp() {
+    constexpr std::int64_t kUndefinedTimestamp =
+        std::numeric_limits<std::int64_t>::max();
+#if XEN_HAS_NDI
+    static_assert(kUndefinedTimestamp == NDIlib_recv_timestamp_undefined);
+#endif
+    const struct {
+        std::int64_t timestamp;
+        const char* name;
+    } cases[] = {
+        {0, "timestamp=0 的帧"},
+        {-1, "timestamp<0 的帧"},
+        {kUndefinedTimestamp, "NDI undefined timestamp 的帧"},
+        {kUndefinedTimestamp / 100 + 1, "timestamp 乘 100 溢出的帧"},
+    };
+    for (const auto& test : cases) {
+        CapturedFrame frame = test_frame(1, 1);
+        frame.timing.source_timestamp = test.timestamp;
+        expect_required_timing_rejection(frame, test.name);
+    }
+}
+
+void expect_required_timing_publication(const CapturedFrame& frame,
+                                        const std::string& case_name) {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), case_name + " 必须创建临时目录");
+    const CaptureEvidenceConfig config = test_config(temporary, 1);
+    capture_evidence::CaptureEvidenceRecorder recorder;
+    std::string error;
+    expect(recorder.start(config, error),
+           case_name + " 必须先正常启动：" + error);
+    expect(recorder.record(frame, error) &&
+               recorder.recorded_frame_count() == 1,
+           "require_source_timing 必须接受 " + case_name + "：" + error);
+    expect(recorder.finish(error) &&
+               std::filesystem::is_regular_file(
+                   config.output_directory / "manifest.json"),
+           case_name + " 必须形成正式证据目录：" + error);
+}
+
+void test_required_source_timing_accepts_timestamp_range_edges() {
+    CapturedFrame first = test_frame(1, 1);
+    first.timing.source_timestamp = 1;
+    expect_required_timing_publication(first, "可表示 timestamp 下界的帧");
+
+    CapturedFrame last = test_frame(1, 1);
+    last.timing.source_timestamp =
+        std::numeric_limits<std::int64_t>::max() / 100;
+    expect_required_timing_publication(last, "可表示 timestamp 上界的帧");
+}
+
+void test_required_source_timing_rejects_invalid_mapped_time() {
+    CapturedFrame missing = test_frame(1, 1);
+    missing.timing.source_time_at = {};
+    expect_required_timing_rejection(missing, "缺少 source_time_at 的帧");
+
+    CapturedFrame negative = test_frame(1, 1);
+    negative.timing.source_time_at = std::chrono::steady_clock::time_point(
+        std::chrono::nanoseconds(-1));
+    expect_required_timing_rejection(negative, "source_time_at 为负的帧");
+
+    CapturedFrame future = test_frame(1, 1);
+    future.timing.source_time_at = future.timing.captured_at +
+        std::chrono::nanoseconds(1);
+    expect_required_timing_rejection(future, "source_time_at 晚于采集的帧");
+}
+
+void test_required_source_timing_accepts_capture_time_boundary() {
+    CapturedFrame frame = test_frame(1, 1);
+    frame.timing.source_time_at = frame.timing.captured_at;
+    expect_required_timing_publication(
+        frame, "source_time_at 等于 captured_at 的帧");
+}
+
+void test_required_source_timing_rejects_missing_clock_session() {
+    CapturedFrame frame = test_frame(1, 1);
+    frame.timing.source_clock_session_id = 0;
+    expect_required_timing_rejection(frame, "缺少 source clock session 的帧");
+}
+
+void test_required_source_timing_rejects_missing_clock_sample() {
+    CapturedFrame frame = test_frame(1, 1);
+    frame.timing.source_clock_sample_count = 0;
+    expect_required_timing_rejection(frame, "缺少 source clock sample 的帧");
+}
+
+void test_required_source_timing_does_not_duplicate_sample_policy() {
+    CapturedFrame frame = test_frame(1, 1);
+    frame.timing.source_clock_sample_count = 1;
+    expect_required_timing_publication(frame, "具有一个 source clock sample 的帧");
+}
+
+void test_optional_source_timing_preserves_missing_and_stale_facts() {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), "必须创建 optional timing 测试临时目录");
+    CaptureEvidenceConfig config = test_config(temporary, 2);
+    config.require_source_timing = false;
+    capture_evidence::CaptureEvidenceRecorder recorder;
+    std::string error;
+    expect(recorder.start(config, error),
+           "optional timing 录制必须启动：" + error);
+
+    CapturedFrame missing = test_frame(1, 1);
+    const auto captured_at = missing.timing.captured_at;
+    missing.timing = {};
+    missing.timing.sequence = 1;
+    missing.timing.captured_at = captured_at;
+    expect(recorder.record(missing, error),
+           "optional timing 必须允许保存缺失源时钟事实：" + error);
+
+    CapturedFrame stale = test_frame(2, 2);
+    stale.timing.source_clock_status = SourceClockStatus::STALE;
+    stale.timing.source_time_timing_valid = false;
+    stale.timing.source_time_at = {};
+    expect(recorder.record(stale, error) &&
+               recorder.recorded_frame_count() == 2,
+           "optional timing 必须允许保存 STALE 状态：" + error);
+    expect(recorder.finish(error),
+           "optional timing 录满后必须发布：" + error);
+
+    cv::FileStorage manifest(
+        (config.output_directory / "manifest.json").string(),
+        cv::FileStorage::READ | cv::FileStorage::FORMAT_JSON);
+    expect(manifest.isOpened(), "optional timing 必须发布可读 manifest");
+    if (!manifest.isOpened()) return;
+    const cv::FileNode frames = manifest["frames"];
+    expect(static_cast<int>(
+               manifest["capture_config"]["require_source_timing"]) == 0 &&
+               frames.isSeq() && frames.size() == 2 &&
+               static_cast<int>(frames[0]["source_timestamp_valid"]) == 0 &&
+               static_cast<std::string>(frames[0]["source_time_basis"]) ==
+                   "UNAVAILABLE" &&
+               static_cast<std::string>(frames[0]["source_clock_status"]) ==
+                   "UNSYNCHRONIZED" &&
+               static_cast<int>(frames[0]["source_time_timing_valid"]) == 0 &&
+               static_cast<std::string>(frames[1]["source_clock_status"]) ==
+                   "STALE" &&
+               static_cast<int>(frames[1]["source_time_timing_valid"]) == 0,
+           "optional manifest 必须原样保留缺失和 STALE，不能伪装为有效时钟");
+}
+
+void test_required_source_timing_recovers_after_rejected_frame() {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), "必须创建 timing 拒绝恢复测试临时目录");
+    const CaptureEvidenceConfig config = test_config(temporary, 1);
+    capture_evidence::CaptureEvidenceRecorder recorder;
+    std::string error;
+    expect(recorder.start(config, error),
+           "timing 拒绝恢复测试必须启动：" + error);
+
+    CapturedFrame invalid = test_frame(1, 1);
+    invalid.timing.source_timestamp_valid = false;
+    expect(!recorder.record(invalid, error) &&
+               recorder.recorded_frame_count() == 0,
+           "恢复测试中的坏 timing 不得计入录制数量");
+    expect(!recorder.finish(error) &&
+               !std::filesystem::exists(config.output_directory),
+           "拒绝坏帧后未录满不能发布");
+    expect(recorder.record(test_frame(2, 2), error) &&
+               recorder.recorded_frame_count() == 1,
+           "失败 finish 后必须仍可补入完整 timing 帧：" + error);
+    expect(recorder.finish(error),
+           "补入合法帧后必须可正常发布：" + error);
+
+    cv::FileStorage manifest(
+        (config.output_directory / "manifest.json").string(),
+        cv::FileStorage::READ | cv::FileStorage::FORMAT_JSON);
+    expect(manifest.isOpened(), "恢复后必须发布可读 manifest");
+    if (!manifest.isOpened()) return;
+    const cv::FileNode frames = manifest["frames"];
+    expect(frames.isSeq() && frames.size() == 1 &&
+               static_cast<int>(frames[0]["sequence"]) == 2,
+           "恢复后的正式证据只能包含后来接收的合法帧");
+}
+
 void test_multi_second_directory_rename_lock_is_retried() {
     TemporaryDirectory temporary;
     expect(temporary.valid(), "必须创建 transient rename 测试临时目录");
@@ -595,6 +821,17 @@ int main() {
     test_lossless_atomic_publication_and_identity();
     test_invalid_or_incomplete_capture_never_publishes();
     test_required_source_timing_rejects_invalid_frames();
+    test_required_source_timing_rejects_missing_timestamp_fact();
+    test_required_source_timing_rejects_unsupported_basis();
+    test_required_source_timing_rejects_unmappable_timestamp();
+    test_required_source_timing_accepts_timestamp_range_edges();
+    test_required_source_timing_rejects_invalid_mapped_time();
+    test_required_source_timing_accepts_capture_time_boundary();
+    test_required_source_timing_rejects_missing_clock_session();
+    test_required_source_timing_rejects_missing_clock_sample();
+    test_required_source_timing_does_not_duplicate_sample_policy();
+    test_optional_source_timing_preserves_missing_and_stale_facts();
+    test_required_source_timing_recovers_after_rejected_frame();
     test_multi_second_directory_rename_lock_is_retried();
     test_directory_publish_retry_never_overwrites_appearing_final();
     test_completed_incoming_survives_publish_failure();

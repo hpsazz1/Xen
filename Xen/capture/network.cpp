@@ -306,6 +306,7 @@ bool resolve_network_frame_geometry(
               encoded_height == metadata->roi_height) ||
              (encoded_width == metadata->source_width &&
               encoded_height == metadata->source_height))) {
+            resolved.metadata_applied = true;
             resolved.source_width = metadata->source_width;
             resolved.source_height = metadata->source_height;
             resolved.source_roi_x = metadata->roi_x;

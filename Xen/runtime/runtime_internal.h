@@ -19,6 +19,32 @@
 
 namespace runtime::detail {
 
+// 同一生产入口维护 observation 时间基准及连续性；不重新判定 Capture 的映射质量。
+class RuntimeObservationClock {
+public:
+    bool apply(const FrameTiming& timing, AimFrame& frame) noexcept {
+        frame.sequence = timing.sequence;
+        frame.captured_at = timing.source_time_timing_valid
+            ? timing.source_time_at : timing.captured_at;
+        const bool basis_changed = timing.source_time_timing_valid != uses_source_time_ ||
+            (timing.source_time_timing_valid &&
+             timing.source_clock_session_id != source_clock_session_id_);
+        const bool time_not_increasing =
+            last_observation_at_ != std::chrono::steady_clock::time_point{} &&
+            frame.captured_at <= last_observation_at_;
+        uses_source_time_ = timing.source_time_timing_valid;
+        source_clock_session_id_ = uses_source_time_
+            ? timing.source_clock_session_id : 0;
+        last_observation_at_ = frame.captured_at;
+        return basis_changed || time_not_increasing;
+    }
+
+private:
+    bool uses_source_time_ = false;
+    std::uint64_t source_clock_session_id_ = 0;
+    std::chrono::steady_clock::time_point last_observation_at_{};
+};
+
 inline bool class_id_configured(
         std::span<const int> class_ids, int class_id) noexcept {
     return std::find(class_ids.begin(), class_ids.end(), class_id) !=

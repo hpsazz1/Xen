@@ -13,6 +13,11 @@
 #include <string_view>
 #include <vector>
 
+#if XEN_HAS_NDI
+#include "clock_sync/clock_sync.h"
+#include <Processing.NDI.Lib.h>
+#endif
+
 namespace capture::detail {
 
 // receiver 句柄创建成功只代表已发起连接，不能推进此状态机。
@@ -149,6 +154,48 @@ NdiReceiveLoopDecision advance_ndi_receive_loop(
 
 std::unique_ptr<ICapture> create_ndi_capture(
     const CaptureConfig& config) noexcept;
+
+#if XEN_HAS_NDI
+// 只隔离外部 SDK 与源机时钟输入；帧解析、发布和消费仍属于真实 NdiCapture。
+// 帧借用到对应 free；源字符串借用到下次 source 快照或 Finder destroy。
+class INdiCaptureSystem {
+public:
+    virtual ~INdiCaptureSystem() = default;
+    virtual CaptureStatus open(const clock_sync::ClientConfig& config,
+                               std::string& error) noexcept = 0;
+    virtual void close() noexcept = 0;
+    virtual NDIlib_find_instance_t find_create(
+        const NDIlib_find_create_t* settings) noexcept = 0;
+    virtual void find_destroy(NDIlib_find_instance_t finder) noexcept = 0;
+    virtual bool find_wait(NDIlib_find_instance_t finder,
+                           std::uint32_t timeout_ms) noexcept = 0;
+    virtual const NDIlib_source_t* find_sources(
+        NDIlib_find_instance_t finder, std::uint32_t* count) noexcept = 0;
+    virtual NDIlib_recv_instance_t recv_create(
+        const NDIlib_recv_create_v3_t* settings) noexcept = 0;
+    virtual void recv_destroy(NDIlib_recv_instance_t receiver) noexcept = 0;
+    virtual int recv_connections(NDIlib_recv_instance_t receiver) noexcept = 0;
+    virtual NDIlib_frame_type_e recv_capture(
+        NDIlib_recv_instance_t receiver, NDIlib_video_frame_v2_t* video,
+        NDIlib_metadata_frame_t* metadata, std::uint32_t timeout_ms) noexcept = 0;
+    virtual void recv_free_video(NDIlib_recv_instance_t receiver,
+                                 NDIlib_video_frame_v2_t* video) noexcept = 0;
+    virtual void recv_free_metadata(NDIlib_recv_instance_t receiver,
+                                    NDIlib_metadata_frame_t* metadata) noexcept = 0;
+    virtual void recv_performance(
+        NDIlib_recv_instance_t receiver, NDIlib_recv_performance_t* total,
+        NDIlib_recv_performance_t* dropped) noexcept = 0;
+    virtual void recv_queue(NDIlib_recv_instance_t receiver,
+                             NDIlib_recv_queue_t* queue) noexcept = 0;
+    virtual clock_sync::MappingResult map_source_timestamp(
+        std::int64_t timestamp,
+        std::chrono::steady_clock::time_point now) const noexcept = 0;
+};
+
+std::unique_ptr<ICapture> create_ndi_capture(
+    const CaptureConfig& config,
+    std::unique_ptr<INdiCaptureSystem> system) noexcept;
+#endif
 
 } // namespace capture::detail
 

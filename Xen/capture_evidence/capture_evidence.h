@@ -18,6 +18,10 @@ struct CaptureEvidenceConfig {
     std::uint64_t requested_frame_count = 0;
 };
 
+// required 录制与 CLI 等待有效帧共用 NDI submission 映射完整性合同。
+// 质量决策仍由 mapper 的 VALID 表示；optional 仍保留缺失或无效时钟事实。
+bool has_required_source_timing(const FrameTiming& timing) noexcept;
+
 class CaptureEvidenceRecorder {
 public:
     CaptureEvidenceRecorder() noexcept;

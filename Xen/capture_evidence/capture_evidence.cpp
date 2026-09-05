@@ -452,6 +452,21 @@ bool CaptureEvidenceRecorder::start(
     }
 }
 
+bool has_required_source_timing(const FrameTiming& timing) noexcept {
+    // 数值范围与正域沿用当前 mapper 的可表示合同，不另设时钟质量阈值。
+    return timing.source_timestamp_valid &&
+        timing.source_time_basis == SourceTimeBasis::NDI_SDK_SUBMISSION &&
+        timing.source_timestamp > 0 &&
+        timing.source_timestamp <=
+            std::numeric_limits<std::int64_t>::max() / 100 &&
+        timing.source_time_timing_valid &&
+        timing.source_clock_status == SourceClockStatus::VALID &&
+        timing.source_time_at > std::chrono::steady_clock::time_point{} &&
+        timing.source_time_at <= timing.captured_at &&
+        timing.source_clock_session_id != 0 &&
+        timing.source_clock_sample_count != 0;
+}
+
 bool CaptureEvidenceRecorder::record(
         const CapturedFrame& frame, std::string& error) noexcept {
     try {
@@ -465,10 +480,9 @@ bool CaptureEvidenceRecorder::record(
             return false;
         }
         if (impl_->config.require_source_timing &&
-            (!frame.timing.source_time_timing_valid ||
-             frame.timing.source_clock_status != SourceClockStatus::VALID)) {
+            !has_required_source_timing(frame.timing)) {
             set_error(error,
-                "Capture evidence 要求每帧具备 VALID source timing");
+                "Capture evidence 要求每帧具备完整且 VALID 的 source timing");
             return false;
         }
         if (frame.storage != CapturedFrameStorage::CPU_BGR ||

@@ -37,6 +37,8 @@ struct NetworkFrameGeometry {
     int source_height = 0;
     double source_pixels_per_pixel_x = 1.0;
     double source_pixels_per_pixel_y = 1.0;
+    // 仅表示本次采用 Xen XML metadata 支路，配置 fallback 成功不会置位。
+    bool metadata_applied = false;
 };
 
 struct NetworkGeometryConfig {

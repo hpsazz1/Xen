@@ -388,8 +388,7 @@ int wmain(int argc, wchar_t* argv[]) {
         const CaptureStatus status = capture->grab(frame);
         if (status == CaptureStatus::FRAME) {
             if (options.require_source_timing &&
-                (!frame.timing.source_time_timing_valid ||
-                 frame.timing.source_clock_status != SourceClockStatus::VALID)) {
+                !capture_evidence::has_required_source_timing(frame.timing)) {
                 ++timing_rejected_frames;
                 continue;
             }

@@ -558,9 +558,7 @@ struct Runtime::Impl {
 
     void pipeline_loop() noexcept {
         std::uint64_t last_sequence = 0;
-        bool aim_uses_source_time = false;
-        std::uint64_t aim_source_clock_session_id = 0;
-        std::chrono::steady_clock::time_point last_aim_observation_at{};
+        runtime::detail::RuntimeObservationClock observation_clock;
         const bool probes_enabled = config.runtime.enable_performance_probes;
         while (!stop_requested.load(std::memory_order_acquire)) {
             std::uint64_t overwritten_frames_at_consume = 0;
@@ -624,33 +622,12 @@ struct Runtime::Impl {
             bool mouse_sent = false;
             double mouse_elapsed_ms = 0.0;
             if (profile.detector.status == DetectionStatus::SUCCESS) {
-                aim_frame.sequence = frame->timing.sequence;
-                aim_frame.captured_at =
-                    frame->timing.source_time_timing_valid
-                        ? frame->timing.source_time_at
-                        : frame->timing.captured_at;
-                const bool source_time_basis_changed =
-                    frame->timing.source_time_timing_valid !=
-                        aim_uses_source_time ||
-                    (frame->timing.source_time_timing_valid &&
-                     frame->timing.source_clock_session_id !=
-                         aim_source_clock_session_id);
-                const bool observation_time_not_increasing =
-                    last_aim_observation_at !=
-                        std::chrono::steady_clock::time_point{} &&
-                    aim_frame.captured_at <= last_aim_observation_at;
                 // WARMING→VALID 会从辅机 frame-ready 切到更早的 NDI
                 // submission 时刻；source session 重启或拟合更新也可能让
                 // 映射跳回。跨时间基准的旧轨迹不能混算 dt，先重置再消费。
-                if (source_time_basis_changed ||
-                    observation_time_not_increasing) {
+                if (observation_clock.apply(frame->timing, aim_frame)) {
                     aim->reset();
                 }
-                aim_uses_source_time =
-                    frame->timing.source_time_timing_valid;
-                aim_source_clock_session_id = aim_uses_source_time
-                    ? frame->timing.source_clock_session_id : 0;
-                last_aim_observation_at = aim_frame.captured_at;
                 aim_frame.control_at = std::chrono::steady_clock::now();
                 profile.control_timing_valid = true;
                 profile.capture_to_control_ms =

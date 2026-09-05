@@ -345,12 +345,102 @@ private:
     bool acquired_ = false;
 };
 
+class NativeNdiCaptureSystem final : public INdiCaptureSystem {
+public:
+    ~NativeNdiCaptureSystem() override { close(); }
+
+    CaptureStatus open(const clock_sync::ClientConfig& config,
+                       std::string& error) noexcept override {
+        try {
+            if (!clock_client_.open(config)) {
+                error = clock_client_.last_error();
+                return CaptureStatus::INVALID_CONFIG;
+            }
+            library_ = std::make_unique<NdiLibraryLease>();
+            if (!library_->acquired()) {
+                close();
+                error = "NDI Runtime 初始化失败";
+                return CaptureStatus::FAILURE;
+            }
+            return CaptureStatus::READY;
+        } catch (...) {
+            close();
+            return CaptureStatus::FAILURE;
+        }
+    }
+    void close() noexcept override {
+        library_.reset();
+        clock_client_.close();
+    }
+    NDIlib_find_instance_t find_create(
+            const NDIlib_find_create_t* settings) noexcept override {
+        return NDIlib_find_create_v2(settings);
+    }
+    void find_destroy(NDIlib_find_instance_t finder) noexcept override {
+        NDIlib_find_destroy(finder);
+    }
+    bool find_wait(NDIlib_find_instance_t finder,
+                    std::uint32_t timeout_ms) noexcept override {
+        return NDIlib_find_wait_for_sources(finder, timeout_ms);
+    }
+    const NDIlib_source_t* find_sources(
+            NDIlib_find_instance_t finder, std::uint32_t* count) noexcept override {
+        return NDIlib_find_get_current_sources(finder, count);
+    }
+    NDIlib_recv_instance_t recv_create(
+            const NDIlib_recv_create_v3_t* settings) noexcept override {
+        return NDIlib_recv_create_v3(settings);
+    }
+    void recv_destroy(NDIlib_recv_instance_t receiver) noexcept override {
+        NDIlib_recv_destroy(receiver);
+    }
+    int recv_connections(NDIlib_recv_instance_t receiver) noexcept override {
+        return NDIlib_recv_get_no_connections(receiver);
+    }
+    NDIlib_frame_type_e recv_capture(
+            NDIlib_recv_instance_t receiver, NDIlib_video_frame_v2_t* video,
+            NDIlib_metadata_frame_t* metadata,
+            std::uint32_t timeout_ms) noexcept override {
+        return NDIlib_recv_capture_v2(receiver, video, nullptr, metadata, timeout_ms);
+    }
+    void recv_free_video(NDIlib_recv_instance_t receiver,
+                         NDIlib_video_frame_v2_t* video) noexcept override {
+        NDIlib_recv_free_video_v2(receiver, video);
+    }
+    void recv_free_metadata(NDIlib_recv_instance_t receiver,
+                            NDIlib_metadata_frame_t* metadata) noexcept override {
+        NDIlib_recv_free_metadata(receiver, metadata);
+    }
+    void recv_performance(
+            NDIlib_recv_instance_t receiver, NDIlib_recv_performance_t* total,
+            NDIlib_recv_performance_t* dropped) noexcept override {
+        NDIlib_recv_get_performance(receiver, total, dropped);
+    }
+    void recv_queue(NDIlib_recv_instance_t receiver,
+                    NDIlib_recv_queue_t* queue) noexcept override {
+        NDIlib_recv_get_queue(receiver, queue);
+    }
+    clock_sync::MappingResult map_source_timestamp(
+            std::int64_t timestamp,
+            std::chrono::steady_clock::time_point now) const noexcept override {
+        return clock_client_.map_utc_100ns(timestamp, now);
+    }
+
+private:
+    std::unique_ptr<NdiLibraryLease> library_;
+    clock_sync::Client clock_client_;
+};
+
 } // namespace
 
 class NdiCapture final : public ICapture {
 public:
     explicit NdiCapture(CaptureConfig config)
-        : config_(std::move(config)) {}
+        : NdiCapture(std::move(config),
+                     std::make_unique<NativeNdiCaptureSystem>()) {}
+
+    NdiCapture(CaptureConfig config, std::unique_ptr<INdiCaptureSystem> system)
+        : config_(std::move(config)), system_(std::move(system)) {}
 
     ~NdiCapture() override { close(); }
 
@@ -370,16 +460,12 @@ public:
                 config_.ndi_clock_sync_timeout_ms;
             clock_config.maximum_mapping_age_ms =
                 config_.ndi_clock_mapping_max_age_ms;
-            if (!clock_client_.open(clock_config)) {
-                return fail(CaptureStatus::INVALID_CONFIG,
-                            clock_client_.last_error());
-            }
-            library_ = std::make_unique<NdiLibraryLease>();
-            if (!library_ || !library_->acquired()) {
-                library_.reset();
-                clock_client_.close();
-                return fail(CaptureStatus::FAILURE,
-                            "NDI Runtime 初始化失败");
+            std::string system_error;
+            const auto system_status = system_->open(clock_config, system_error);
+            if (system_status != CaptureStatus::READY) {
+                system_->close();
+                return fail(system_status, system_error.empty()
+                    ? "打开 NDI Capture 时发生未知异常" : system_error);
             }
             frames_.reset();
             last_metadata_.reset();
@@ -405,7 +491,8 @@ public:
                      NetworkFrameLayoutName(config_.ndi_frame_layout));
             return true;
         } catch (...) {
-            clock_client_.close();
+            // 工作线程可能已启动；先回收线程，再释放其借用的 SDK 资源。
+            close();
             return fail(CaptureStatus::FAILURE,
                         "打开 NDI Capture 时发生未知异常");
         }
@@ -465,8 +552,7 @@ public:
         last_metadata_.reset();
         published_sequence_.store(0, std::memory_order_release);
         status_.store(CaptureStatus::CLOSED, std::memory_order_release);
-        library_.reset();
-        clock_client_.close();
+        system_->close();
     }
 
     CaptureStatus status() const noexcept override {
@@ -531,14 +617,14 @@ private:
 
     void destroy_receiver() noexcept {
         if (receiver_) {
-            NDIlib_recv_destroy(receiver_);
+            system_->recv_destroy(receiver_);
             receiver_ = nullptr;
         }
     }
 
     void destroy_finder() noexcept {
         if (finder_) {
-            NDIlib_find_destroy(finder_);
+            system_->find_destroy(finder_);
             finder_ = nullptr;
         }
     }
@@ -547,10 +633,10 @@ private:
         if (receiver_ || !finder_) return receiver_ != nullptr;
         const std::uint32_t wait_ms = static_cast<std::uint32_t>(
             std::min(config_.ndi_discovery_timeout_ms, 250));
-        NDIlib_find_wait_for_sources(finder_, wait_ms);
+        system_->find_wait(finder_, wait_ms);
         std::uint32_t count = 0;
         const NDIlib_source_t* sources =
-            NDIlib_find_get_current_sources(finder_, &count);
+            system_->find_sources(finder_, &count);
         std::vector<NdiSourceView> source_views;
         if (sources) {
             source_views.reserve(count);
@@ -578,7 +664,7 @@ private:
         settings.bandwidth = NDIlib_recv_bandwidth_highest;
         settings.allow_video_fields = false;
         settings.p_ndi_recv_name = "Xen NDI Capture";
-        receiver_ = NDIlib_recv_create_v3(&settings);
+        receiver_ = system_->recv_create(&settings);
         session_state_.record_receiver_created(receiver_ != nullptr);
         if (!receiver_) {
             return false;
@@ -604,7 +690,7 @@ private:
         last_connection_probe_at_ = now;
         const int previous =
             session_state_.snapshot().receiver_active_connections;
-        const int current = NDIlib_recv_get_no_connections(receiver_);
+        const int current = system_->recv_connections(receiver_);
         if (!session_state_.record_active_connections(current)) return;
         if (previous <= 0 && current > 0) {
             LOG_INFO("capture", "NDI 活动连接已建立: source={}",
@@ -642,17 +728,16 @@ private:
                 : std::chrono::steady_clock::time_point{};
             NetworkFrameGeometry geometry;
             const NetworkGeometryConfig config = geometry_config(config_);
-            const bool metadata_geometry = metadata &&
-                resolve_network_frame_geometry(
-                    config, video.xres, video.yres, geometry, metadata);
-            if (!metadata_geometry && config_.ndi_require_frame_metadata) {
+            const bool geometry_valid = resolve_network_frame_geometry(
+                config, video.xres, video.yres, geometry, metadata);
+            if (config_.ndi_require_frame_metadata &&
+                (!geometry_valid || !geometry.metadata_applied)) {
                 fail(CaptureStatus::INVALID_CONFIG,
                      "NDI 帧缺少合法 Xen 主机坐标 metadata");
                 frames_.record_drop();
                 return false;
             }
-            if (!metadata_geometry && !resolve_network_frame_geometry(
-                    config, video.xres, video.yres, geometry)) {
+            if (!geometry_valid) {
                 fail(CaptureStatus::INVALID_CONFIG,
                      "NDI 解码尺寸与主机 FOV 几何配置不兼容");
                 frames_.record_drop();
@@ -679,6 +764,8 @@ private:
                 frames_.record_drop();
                 return true;
             }
+            // 槽位和 Mat 跨帧复用，源时钟与其他标量只属于当前这一帧。
+            write_slot->timing = {};
             cv::Mat bgra(video.yres, video.xres, CV_8UC4,
                          video.p_data, static_cast<std::size_t>(stride));
             const cv::Mat bgra_roi = bgra(cv::Rect(
@@ -713,7 +800,7 @@ private:
             if (write_slot->timing.source_timestamp_valid) {
                 write_slot->timing.source_time_basis =
                     SourceTimeBasis::NDI_SDK_SUBMISSION;
-                const auto mapped = clock_client_.map_utc_100ns(
+                const auto mapped = system_->map_source_timestamp(
                     video.timestamp, finished);
                 write_slot->timing.source_clock_status =
                     source_clock_status(mapped.status);
@@ -744,7 +831,7 @@ private:
                 const auto query_started = capture_stages.ndi_valid
                     ? std::chrono::steady_clock::now()
                     : std::chrono::steady_clock::time_point{};
-                NDIlib_recv_get_performance(receiver_, &total, &dropped);
+                system_->recv_performance(receiver_, &total, &dropped);
                 if (capture_stages.ndi_valid) {
                     capture_stages.performance_query_sampled = true;
                     capture_stages.performance_query_ms =
@@ -763,7 +850,7 @@ private:
                     probe_started - last_queue_probe_at_ >=
                         kQueueProbeInterval) {
                     NDIlib_recv_queue_t queued{};
-                    NDIlib_recv_get_queue(receiver_, &queued);
+                    system_->recv_queue(receiver_, &queued);
                     capture_stages.queue_depth_sampled = true;
                     capture_stages.queue_query_ms =
                         std::chrono::duration<double, std::milli>(
@@ -816,7 +903,7 @@ private:
     void receive_loop_impl() {
         NDIlib_find_create_t finder_settings{};
         finder_settings.show_local_sources = true;
-        finder_ = NDIlib_find_create_v2(&finder_settings);
+        finder_ = system_->find_create(&finder_settings);
         if (!finder_) {
             fail(CaptureStatus::FAILURE, "创建 NDI mDNS 发现器失败");
             return;
@@ -843,8 +930,8 @@ private:
             NDIlib_video_frame_v2_t video{};
             NDIlib_metadata_frame_t metadata_frame{};
             const auto received_at = std::chrono::steady_clock::now();
-            const NDIlib_frame_type_e type = NDIlib_recv_capture_v2(
-                receiver_, &video, nullptr, &metadata_frame,
+            const NDIlib_frame_type_e type = system_->recv_capture(
+                receiver_, &video, &metadata_frame,
                 static_cast<std::uint32_t>(config_.ndi_receive_timeout_ms));
             CaptureStageTiming capture_stages;
             capture_stages.ndi_valid = config_.enable_performance_probes;
@@ -869,7 +956,7 @@ private:
                         parsed_metadata);
                     if (metadata_valid) last_metadata_ = parsed_metadata;
                 }
-                NDIlib_recv_free_metadata(receiver_, &metadata_frame);
+                system_->recv_free_metadata(receiver_, &metadata_frame);
             }
 
             if (type == NDIlib_frame_type_video) {
@@ -894,7 +981,7 @@ private:
                     video, received_at,
                     metadata_valid ? &parsed_metadata : nullptr,
                     capture_stages);
-                NDIlib_recv_free_video_v2(receiver_, &video);
+                system_->recv_free_video(receiver_, &video);
                 if (terminal_status(status_.load(std::memory_order_acquire))) {
                     return;
                 }
@@ -958,8 +1045,7 @@ private:
     }
 
     CaptureConfig config_;
-    std::unique_ptr<NdiLibraryLease> library_;
-    clock_sync::Client clock_client_;
+    std::unique_ptr<INdiCaptureSystem> system_;
     NDIlib_find_instance_t finder_ = nullptr;
     NDIlib_recv_instance_t receiver_ = nullptr;
     NdiSessionState session_state_;
@@ -1018,5 +1104,19 @@ std::unique_ptr<ICapture> create_ndi_capture(
         return nullptr;
     }
 }
+
+#if XEN_HAS_NDI
+std::unique_ptr<ICapture> create_ndi_capture(
+    const CaptureConfig& config,
+    std::unique_ptr<INdiCaptureSystem> system) noexcept {
+    if (!system) return nullptr;
+    try {
+        return std::make_unique<NdiCapture>(config, std::move(system));
+    } catch (...) {
+        LOG_ERROR("capture", "创建带外部输入的 NDI Capture 实例失败");
+        return nullptr;
+    }
+}
+#endif
 
 } // namespace capture::detail
