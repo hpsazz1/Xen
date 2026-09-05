@@ -809,7 +809,7 @@ add_library(mouse STATIC
     Xen/mouse/kmbox_net.cpp
     Xen/mouse/makcu.cpp)
 target_include_directories(mouse PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
-target_link_libraries(mouse PUBLIC log PRIVATE user32 ws2_32)
+target_link_libraries(mouse PUBLIC log PRIVATE user32 ws2_32 shell32 ole32 uuid)
 
 add_library(keyboard STATIC
     Xen/keyboard/keyboard.cpp)
@@ -1216,6 +1216,18 @@ if(BUILD_TESTING)
         tests/mouse_tests.cpp)
     target_link_libraries(mouse_tests PRIVATE mouse log ws2_32)
     add_test(NAME mouse_tests COMMAND mouse_tests)
+
+    # 子进程仅调用公开 lease，不创建后端；分别设置 TMP/TEMP 验证生产独占。
+    add_executable(mouse_output_owner_lease_tests
+        tests/mouse_output_owner_lease_tests.cpp)
+    target_link_libraries(mouse_output_owner_lease_tests PRIVATE mouse)
+    add_test(NAME mouse_output_owner_lease_tests
+        COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath --
+            "${XEN_POWERSHELL7_EXECUTABLE}"
+            -NoProfile -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/tests/mouse_output_owner_lease_tests.ps1"
+            -LeaseExecutable "$<TARGET_FILE:mouse_output_owner_lease_tests>"
+            -TestRoot "${CMAKE_BINARY_DIR}/mouse-output-owner-lease-tests")
 
     add_executable(mouse_benchmark_tests
         tests/mouse_benchmark_tests.cpp)

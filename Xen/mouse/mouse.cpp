@@ -9,6 +9,7 @@
 #include "log/log.h"
 
 #include <Windows.h>
+#include <ShlObj.h>
 
 #ifdef ERROR
 #undef ERROR
@@ -33,9 +34,9 @@ void set_output_owner_error(std::string& output,
     }
 }
 
-bool output_owner_lock_path(MouseOutputOwnerScope scope,
-                            std::filesystem::path& path,
-                            std::string& error) noexcept {
+bool output_owner_temp_lock_path(MouseOutputOwnerScope scope,
+                                 std::filesystem::path& path,
+                                 std::string& error) noexcept {
     try {
         std::array<wchar_t, 32768> buffer{};
         const DWORD length = GetTempPathW(
@@ -62,6 +63,35 @@ bool output_owner_lock_path(MouseOutputOwnerScope scope,
     } catch (...) {
         set_output_owner_error(error,
             "解析 Mouse owner 临时锁路径时发生未知异常");
+        return false;
+    }
+}
+
+bool output_owner_lock_path(MouseOutputOwnerScope scope,
+                            std::filesystem::path& path,
+                            std::string& error) noexcept {
+    if (scope != MouseOutputOwnerScope::PRODUCTION) {
+        return output_owner_temp_lock_path(scope, path, error);
+    }
+    try {
+        PWSTR raw_path = nullptr;
+        const HRESULT result = SHGetKnownFolderPath(
+            FOLDERID_LocalAppData, 0, nullptr, &raw_path);
+        const std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> known_path(
+            raw_path, &CoTaskMemFree);
+        if (FAILED(result) || !known_path || known_path.get()[0] == L'\0') {
+            set_output_owner_error(error,
+                "无法解析当前用户的 Mouse owner 固定锁目录");
+            return false;
+        }
+        // 新版进程共享用户 profile 下的稳定身份，不随各自 TMP/TEMP 分裂。
+        path = std::filesystem::path(known_path.get()) /
+            L"Xen-mouse-output-owner-v2.lock";
+        error.clear();
+        return true;
+    } catch (...) {
+        set_output_owner_error(error,
+            "解析 Mouse owner 固定锁路径时发生未知异常");
         return false;
     }
 }
@@ -242,11 +272,19 @@ private:
 
 class MouseOutputOwnerLease::Impl {
 public:
-    ~Impl() {
+    ~Impl() { release(); }
+
+    void release() noexcept {
+        if (legacy_handle != INVALID_HANDLE_VALUE) CloseHandle(legacy_handle);
+        legacy_handle = INVALID_HANDLE_VALUE;
         if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+        handle = INVALID_HANDLE_VALUE;
+        path.clear();
+        owner.clear();
     }
 
     HANDLE handle = INVALID_HANDLE_VALUE;
+    HANDLE legacy_handle = INVALID_HANDLE_VALUE;
     std::filesystem::path path;
     std::string owner;
 };
@@ -275,26 +313,41 @@ bool MouseOutputOwnerLease::acquire(
     }
     std::filesystem::path lock_path;
     if (!output_owner_lock_path(scope, lock_path, error)) return false;
-    const HANDLE handle = CreateFileW(
-        lock_path.c_str(), GENERIC_READ | GENERIC_WRITE,
-        0, nullptr, OPEN_ALWAYS,
-        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
-        nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        const DWORD code = GetLastError();
-        set_output_owner_error(error,
-            "Mouse 输出已由另一 owner 独占或锁文件不可用，Win32Error=" +
-            std::to_string(code));
+    std::filesystem::path legacy_path;
+    if (scope == MouseOutputOwnerScope::PRODUCTION &&
+        !output_owner_temp_lock_path(scope, legacy_path, error)) return false;
+    const auto acquire_file = [&error](const std::filesystem::path& path,
+                                       HANDLE& handle) {
+        handle = CreateFileW(
+            path.c_str(), GENERIC_READ | GENERIC_WRITE,
+            0, nullptr, OPEN_ALWAYS,
+            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
+            nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            const DWORD code = GetLastError();
+            try {
+                set_output_owner_error(error,
+                    "Mouse 输出已由另一 owner 独占或锁文件不可用，Win32Error=" +
+                    std::to_string(code));
+            } catch (...) {
+                set_output_owner_error(error, "Mouse owner 锁文件不可用");
+            }
+            return false;
+        }
+        return true;
+    };
+    if (!acquire_file(lock_path, impl_->handle)) return false;
+    // 先稳定仲裁，再保留同 TEMP 旧版的共享冲突；任一步失败均回滚本轮句柄。
+    if (scope == MouseOutputOwnerScope::PRODUCTION &&
+        !acquire_file(legacy_path, impl_->legacy_handle)) {
+        impl_->release();
         return false;
     }
-    impl_->handle = handle;
     impl_->path = std::move(lock_path);
     try {
         impl_->owner = owner;
     } catch (...) {
-        CloseHandle(impl_->handle);
-        impl_->handle = INVALID_HANDLE_VALUE;
-        impl_->path.clear();
+        impl_->release();
         set_output_owner_error(error, "记录 Mouse owner 名称失败");
         return false;
     }
@@ -303,11 +356,7 @@ bool MouseOutputOwnerLease::acquire(
 }
 
 void MouseOutputOwnerLease::release() noexcept {
-    if (!impl_ || impl_->handle == INVALID_HANDLE_VALUE) return;
-    CloseHandle(impl_->handle);
-    impl_->handle = INVALID_HANDLE_VALUE;
-    impl_->path.clear();
-    impl_->owner.clear();
+    if (impl_) impl_->release();
 }
 
 bool MouseOutputOwnerLease::held() const noexcept {

@@ -54,8 +54,9 @@ enum class MouseOutputOwnerScope {
     CURRENT_PROCESS_TEST,
 };
 
-// 跨进程独占 Mouse 输出所有权。生产 scope 使用同一用户临时目录的固定
-// 文件共享锁；进程异常退出时 Windows 自动释放句柄，不发送任何清理命令。
+// 跨进程独占 Mouse 输出所有权。生产 scope 使用当前用户 LocalAppData 固定
+// 文件共享锁，并保留当前临时目录的旧版锁；旧版不同 TMP 的进程不参与新仲裁。
+// 进程异常退出时 Windows 自动释放句柄，不发送任何清理命令。
 class MouseOutputOwnerLease {
 public:
     MouseOutputOwnerLease() noexcept;

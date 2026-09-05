@@ -412,7 +412,8 @@ public:
             }
             keyboard_keys_.fill(false);
             mouse_buttons_ = 0;
-            input_received_ = false;
+            mouse_input_received_ = false;
+            keyboard_input_received_ = false;
             input_sequence_ = 0;
             status_.store(config_.allow_send_input
                               ? MouseStatus::READY : MouseStatus::DISABLED,
@@ -524,12 +525,14 @@ public:
             }
             handle_stream_frame(frame);
         }
-        if (!input_received_) {
+        if (!mouse_input_received_ || !keyboard_input_received_) {
             snapshot.status = InputMonitorStatus::WAITING;
             return true;
         }
-        if (std::chrono::steady_clock::now() - input_received_at_ >
-            std::chrono::milliseconds(700)) {
+        const auto now = std::chrono::steady_clock::now();
+        // 完整快照同时借用两类事实；任一流不能替另一流补首包或续期。
+        if (now - mouse_input_received_at_ > std::chrono::milliseconds(700) ||
+            now - keyboard_input_received_at_ > std::chrono::milliseconds(700)) {
             snapshot.status = InputMonitorStatus::STALE;
             return true;
         }
@@ -620,16 +623,18 @@ private:
         if (frame.size == kMouseStreamFrameBytes &&
             frame.bytes[1] == 0x0cU) {
             mouse_buttons_ = frame.bytes[4];
+            mouse_input_received_ = true;
+            mouse_input_received_at_ = std::chrono::steady_clock::now();
         } else if (frame.size == kKeyboardStreamFrameBytes &&
                    frame.bytes[1] == 0xa5U) {
             mouse::detail::apply_hid_keyboard_report(
                 frame.bytes[4], frame.bytes.data() + 5U, 14U,
                 keyboard_keys_);
+            keyboard_input_received_ = true;
+            keyboard_input_received_at_ = std::chrono::steady_clock::now();
         } else {
             return;
         }
-        input_received_ = true;
-        input_received_at_ = std::chrono::steady_clock::now();
         ++input_sequence_;
     }
 
@@ -748,9 +753,11 @@ private:
     bool connected_ = false;
     std::array<bool, 256> keyboard_keys_{};
     std::uint8_t mouse_buttons_ = 0;
-    bool input_received_ = false;
+    bool mouse_input_received_ = false;
+    bool keyboard_input_received_ = false;
     std::uint64_t input_sequence_ = 0;
-    std::chrono::steady_clock::time_point input_received_at_{};
+    std::chrono::steady_clock::time_point mouse_input_received_at_{};
+    std::chrono::steady_clock::time_point keyboard_input_received_at_{};
     mutable std::mutex io_mutex_;
     std::atomic<MouseStatus> status_{MouseStatus::CLOSED};
     mutable std::mutex error_mutex_;

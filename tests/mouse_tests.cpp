@@ -1014,10 +1014,70 @@ void test_makcu_interleaved_input_streams() {
     std::this_thread::sleep_for(std::chrono::milliseconds(720));
     expect(mouse && mouse->poll_input(snapshot) &&
                snapshot.status == InputMonitorStatus::STALE &&
-               !snapshot.virtual_keys[0x02] &&
-               !snapshot.virtual_keys[0x23] &&
-               !snapshot.virtual_keys[0x77],
-           "MAKCU 输入流陈旧后必须失败关闭为全释放");
+               !snapshot.state_valid,
+           "MAKCU 输入流陈旧后必须报告无有效键态，不声明物理释放");
+}
+
+void test_makcu_single_stream_first_report_is_incomplete(bool mouse_first) {
+    auto state = std::make_shared<FakeMakcuState>();
+    state->responses = {
+        makcu_baud_response(4000000U),
+        makcu_stream_response(0x0cU),
+        makcu_stream_response(0xa5U),
+    };
+    auto config = make_makcu_config();
+    config.allow_send_input = false;
+    auto mouse = make_fake_makcu(config, state);
+    expect(mouse && mouse->open(),
+           "MAKCU 单流首包测试必须完成假串口监听握手");
+    InputSnapshot snapshot;
+    expect(mouse && mouse->poll_input(snapshot) &&
+               snapshot.status == InputMonitorStatus::WAITING &&
+               !snapshot.state_valid,
+           "MAKCU 监听 ACK 不能建立任何完整物理输入事实");
+    state->responses.push_back(mouse_first
+        ? makcu_mouse_stream(0x02U) : makcu_keyboard_stream({0x4dU}));
+    expect(mouse && mouse->poll_input(snapshot) &&
+               snapshot.status == InputMonitorStatus::WAITING &&
+               !snapshot.state_valid,
+           mouse_first
+               ? "MAKCU mouse-only 首包不能把尚无键盘事实的快照标为 READY"
+               : "MAKCU keyboard-only 首包不能把尚无鼠标事实的快照标为 READY");
+}
+
+void test_makcu_single_stream_cannot_renew_the_other(bool keyboard_continues) {
+    auto state = std::make_shared<FakeMakcuState>();
+    state->responses = {
+        makcu_baud_response(4000000U),
+        makcu_stream_response(0x0cU),
+        makcu_stream_response(0xa5U),
+    };
+    auto config = make_makcu_config();
+    config.allow_send_input = false;
+    auto mouse = make_fake_makcu(config, state);
+    expect(mouse && mouse->open(),
+           "MAKCU 单流停更测试必须完成假串口监听握手");
+    state->responses.push_back(makcu_mouse_stream(0x02U));
+    state->responses.push_back(makcu_keyboard_stream({}));
+    InputSnapshot snapshot;
+    expect(mouse && mouse->poll_input(snapshot) && snapshot.state_valid &&
+               snapshot.status == InputMonitorStatus::READY &&
+               snapshot.virtual_keys[0x02],
+           "MAKCU 双方事实齐全后必须先建立真实右键按下");
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(760);
+    do {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        state->responses.push_back(keyboard_continues
+            ? makcu_keyboard_stream({}) : makcu_mouse_stream(0x02U));
+        expect(mouse && mouse->poll_input(snapshot),
+               "MAKCU 持续单流报告必须通过公开 poll 读取");
+    } while (std::chrono::steady_clock::now() < deadline);
+    expect(snapshot.status == InputMonitorStatus::STALE &&
+               !snapshot.state_valid,
+           keyboard_continues
+               ? "MAKCU 新鲜 keyboard 流不得为超过 700 ms 的旧 mouse 按下续期"
+               : "MAKCU 新鲜 mouse 流不得为超过 700 ms 的旧 keyboard 事实续期");
 }
 
 void test_mouse_output_owner_lease_is_process_exclusive_and_recoverable() {
@@ -1099,6 +1159,10 @@ int main() {
     test_makcu_invalid_config_and_commands();
     test_makcu_response_failures();
     test_makcu_interleaved_input_streams();
+    test_makcu_single_stream_first_report_is_incomplete(true);
+    test_makcu_single_stream_first_report_is_incomplete(false);
+    test_makcu_single_stream_cannot_renew_the_other(true);
+    test_makcu_single_stream_cannot_renew_the_other(false);
     test_mouse_output_owner_lease_is_process_exclusive_and_recoverable();
     test_factory_adapter_owns_output_lease_for_open_lifetime();
 
