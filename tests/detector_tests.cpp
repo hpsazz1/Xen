@@ -652,8 +652,9 @@ void test_preprocess_contract() {
            "固定输入尺寸不应重复分配前处理缓冲区");
 
     cv::Mat prepared_bgr;
+    cv::Mat padding_buffer;
     expect(detector::detail::letterbox_bgr_reuse(
-               larger, prepared_bgr, resize_buffer, 2, 2, info),
+               larger, prepared_bgr, resize_buffer, padding_buffer, 2, 2, info),
            "CUDA 路径的 uint8 BGR LetterBox 应成功");
     expect(prepared_bgr.type() == CV_8UC3 &&
                prepared_bgr.cols == 2 && prepared_bgr.rows == 2 &&
@@ -662,7 +663,7 @@ void test_preprocess_contract() {
 
     cv::Mat tall(2, 1, CV_8UC3, cv::Scalar(10, 20, 30));
     expect(detector::detail::letterbox_bgr_reuse(
-               tall, prepared_bgr, resize_buffer, 4, 4, info),
+               tall, prepared_bgr, resize_buffer, padding_buffer, 4, 4, info),
            "带填充的 uint8 BGR LetterBox 应成功");
     expect(info.scale == 2.0f && info.pad_x == 1.0f &&
                info.pad_y == 0.0f &&
@@ -689,6 +690,94 @@ void test_tensorrt_cache_defaults() {
            "启用 TensorRT 缓存时默认目录不能为空");
 }
 
+void test_bgr_letterbox_preserves_previous_input() {
+    cv::Mat full_frame(4, 4, CV_8UC3, cv::Scalar(11, 22, 33));
+    full_frame.at<cv::Vec3b>(3, 3) = cv::Vec3b(44, 55, 66);
+    const cv::Mat full_frame_before = full_frame.clone();
+    cv::Mat narrow_frame(4, 2, CV_8UC3, cv::Scalar(7, 8, 9));
+    const cv::Mat narrow_frame_before = narrow_frame.clone();
+    cv::Mat prepared_bgr;
+    cv::Mat resize_buffer;
+    cv::Mat padding_buffer;
+    detector::detail::LetterBoxInfo info;
+
+    expect(detector::detail::letterbox_bgr_reuse(
+               full_frame, prepared_bgr, resize_buffer, padding_buffer,
+               4, 4, info),
+           "同目标尺寸的首帧前处理应成功");
+    expect(prepared_bgr.data == full_frame.data,
+           "无 resize 或 padding 的输入应保留浅引用路径");
+    expect(detector::detail::letterbox_bgr_reuse(
+               narrow_frame, prepared_bgr, resize_buffer, padding_buffer,
+               4, 4, info),
+           "同目标尺寸的后续窄帧前处理应成功");
+    expect(cv::norm(full_frame, full_frame_before, cv::NORM_INF) == 0.0,
+           "后续 padding 写入不得修改上一帧调用方输入的任何字节");
+    expect(cv::norm(narrow_frame, narrow_frame_before, cv::NORM_INF) == 0.0,
+           "padding 不得修改当前调用方输入");
+    expect(info.scale == 1.0f && info.pad_x == 1.0f &&
+               info.pad_y == 0.0f && info.orig_w == 2 && info.orig_h == 4 &&
+               prepared_bgr.cols == 4 && prepared_bgr.rows == 4,
+           "宽2高4输入到4×4目标的几何应保持不变");
+    if (prepared_bgr.cols == 4 && prepared_bgr.rows == 4) {
+        for (int row = 0; row < 4; ++row) {
+            expect(prepared_bgr.at<cv::Vec3b>(row, 0) ==
+                       cv::Vec3b(114, 114, 114) &&
+                   prepared_bgr.at<cv::Vec3b>(row, 1) ==
+                       cv::Vec3b(7, 8, 9) &&
+                   prepared_bgr.at<cv::Vec3b>(row, 2) ==
+                       cv::Vec3b(7, 8, 9) &&
+                   prepared_bgr.at<cv::Vec3b>(row, 3) ==
+                       cv::Vec3b(114, 114, 114),
+                   "后续窄帧应输出两侧114填充和原始BGR像素");
+        }
+    }
+
+    // 保留分配的引用，避免 release 后分配器偶然返回同一地址让复用检查假阳性。
+    const cv::Mat first_padded_storage = prepared_bgr;
+    cv::Mat wide_frame(2, 4, CV_8UC3, cv::Scalar(70, 80, 90));
+    const cv::Mat wide_frame_before = wide_frame.clone();
+    expect(detector::detail::letterbox_bgr_reuse(
+               wide_frame, prepared_bgr, resize_buffer, padding_buffer,
+               4, 4, info),
+           "连续宽4高2输入的上下padding前处理应成功");
+    expect(prepared_bgr.data == first_padded_storage.data,
+           "连续不同方向padding必须复用同目标尺寸的分配");
+    expect(info.scale == 1.0f && info.pad_x == 0.0f &&
+               info.pad_y == 1.0f && info.orig_w == 4 && info.orig_h == 2,
+           "宽4高2输入到4×4目标的几何应保持不变");
+    if (prepared_bgr.cols == 4 && prepared_bgr.rows == 4) {
+        for (int column = 0; column < 4; ++column) {
+            expect(prepared_bgr.at<cv::Vec3b>(0, column) ==
+                       cv::Vec3b(114, 114, 114) &&
+                   prepared_bgr.at<cv::Vec3b>(1, column) ==
+                       cv::Vec3b(70, 80, 90) &&
+                   prepared_bgr.at<cv::Vec3b>(2, column) ==
+                       cv::Vec3b(70, 80, 90) &&
+                   prepared_bgr.at<cv::Vec3b>(3, column) ==
+                       cv::Vec3b(114, 114, 114),
+                   "后续宽帧应输出上下114填充和新BGR像素");
+        }
+    }
+
+    expect(detector::detail::letterbox_bgr_reuse(
+               full_frame, prepared_bgr, resize_buffer, padding_buffer,
+               4, 4, info),
+           "padding之后恢复同尺寸输入应成功");
+    expect(prepared_bgr.data == full_frame.data,
+           "恢复无padding输入时仍应返回浅引用");
+    expect(detector::detail::letterbox_bgr_reuse(
+               wide_frame, prepared_bgr, resize_buffer, padding_buffer,
+               4, 4, info),
+           "浅引用输入之后再次padding应成功");
+    expect(prepared_bgr.data == first_padded_storage.data,
+           "无padding帧不得释放先前可复用的padding分配");
+    expect(cv::norm(full_frame, full_frame_before, cv::NORM_INF) == 0.0 &&
+               cv::norm(narrow_frame, narrow_frame_before, cv::NORM_INF) == 0.0 &&
+               cv::norm(wide_frame, wide_frame_before, cv::NORM_INF) == 0.0,
+           "交替浅引用和两个方向padding后所有输入字节都应保留");
+}
+
 } // namespace
 
 int main() {
@@ -701,6 +790,7 @@ int main() {
     test_obb_decode_and_probabilistic_nms();
     test_scale_and_nms();
     test_preprocess_contract();
+    test_bgr_letterbox_preserves_previous_input();
     test_tensorrt_cache_defaults();
     test_detection_status_names();
 

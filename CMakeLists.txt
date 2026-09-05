@@ -1049,6 +1049,30 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(detector_tests OPENCV)
     add_test(NAME detector_tests COMMAND detector_tests)
 
+    # 公有加载入口仍使用真实 ORT；仅在独立测试进程观察 SDK 借用生命周期。
+    # MANUAL_INIT 必须覆盖所有消费 ORT C++ API 的 TU，不能混链普通 detector。
+    add_executable(detector_typeinfo_lifetime_tests
+        tests/detector_typeinfo_lifetime_tests.cpp
+        Xen/detector/detector.cpp
+        Xen/detector/session.cpp
+        Xen/detector/preprocess.cpp
+        Xen/detector/postprocess.cpp)
+    target_include_directories(detector_typeinfo_lifetime_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/Xen
+        ${ONNXRUNTIME_INCLUDE_DIR}
+        ${OpenCV_INCLUDE_DIRS})
+    target_compile_definitions(detector_typeinfo_lifetime_tests PRIVATE
+        ORT_API_MANUAL_INIT
+        XEN_HAS_CUDA_RUNTIME=0
+        XEN_HAS_DIRECTML_INTEROP=0
+        XEN_HAS_OPENVINO_PROVIDER=0)
+    target_link_libraries(detector_typeinfo_lifetime_tests PRIVATE
+        ${ONNXRUNTIME_LIB} ${OpenCV_LIBS} ${CMAKE_DL_LIBS} log Threads::Threads)
+    xen_deploy_runtime_dlls(detector_typeinfo_lifetime_tests OPENCV ORT)
+    add_test(NAME detector_typeinfo_lifetime_tests
+        COMMAND detector_typeinfo_lifetime_tests
+            "${PROJECT_SOURCE_DIR}/tests/fixtures/detector_typeinfo_segmentation.onnx")
+
     # 分割真实模型测试独立于私有 detect 模型。只有模型与包含实例的真实图像
     # 同时显式配置时才加入构建图，避免默认测试下载权重或依赖外部数据。
     set(XEN_TEST_SEGMENTATION_MODEL "" CACHE FILEPATH
@@ -1648,6 +1672,10 @@ if(BUILD_TESTING)
         if(XEN_ONNXRUNTIME_HAS_CUDA AND
            XEN_ONNXRUNTIME_HAS_TENSORRT AND
            XEN_TENSORRT_ROOT)
+            add_test(NAME detector_tensorrt_model_test
+                COMMAND detector_model_test "${XEN_TEST_MODEL}" tensorrt
+                    "${CMAKE_BINARY_DIR}/cache/tensorrt/detector-model-test"
+                    --gpu-preprocess on)
             add_executable(d3d11_cuda_interop_tests
                 tests/d3d11_cuda_interop_tests.cpp)
             target_link_libraries(d3d11_cuda_interop_tests PRIVATE

@@ -1877,6 +1877,48 @@ int main(int argc, char* argv[]) {
             std::cerr << "TensorRT Graph on/off 输出不一致\n";
             return 1;
         }
+
+        // 同一模型目标尺寸下，在浅引用输入与横/竖 padding 之间往返。
+        // 所有调用方输入持续存活；后续帧不能覆写前一帧的存储。
+        const int width = detector.input_width();
+        const int height = detector.input_height();
+        const std::vector<cv::Mat> ownership_inputs{
+            cv::Mat(height, width, CV_8UC3, cv::Scalar(7, 29, 83)),
+            cv::Mat(std::max(1, height / 2), width,
+                    CV_8UC3, cv::Scalar(61, 113, 197)),
+            cv::Mat(height, std::max(1, width / 2),
+                    CV_8UC3, cv::Scalar(211, 43, 17))};
+        std::vector<cv::Mat> original_inputs;
+        for (const auto& input : ownership_inputs) {
+            original_inputs.push_back(input.clone());
+        }
+        for (const std::size_t index : {0U, 1U, 2U, 0U, 1U}) {
+            const auto actual = detector.detect(ownership_inputs[index]);
+            const auto actual_profile = detector.profile();
+            for (std::size_t i = 0; i < ownership_inputs.size(); ++i) {
+                if (cv::norm(ownership_inputs[i], original_inputs[i],
+                             cv::NORM_INF) != 0.0) {
+                    std::cerr << "连续推理修改了调用方图像，frame=" << index
+                              << ", input=" << i << '\n';
+                    return 1;
+                }
+            }
+            const auto reference = no_graph_detector.detect(original_inputs[index]);
+            const auto reference_profile = no_graph_detector.profile();
+            if (actual_profile.status != DetectionStatus::SUCCESS ||
+                reference_profile.status != DetectionStatus::SUCCESS ||
+                !actual_profile.explicit_device_copy ||
+                actual_profile.gpu_preprocess != config.enable_gpu_preprocess ||
+                reference_profile.explicit_device_copy ||
+                reference_profile.gpu_preprocess ||
+                actual_profile.output_fingerprint != reference_profile.output_fingerprint ||
+                !detections_match(actual, reference)) {
+                std::cerr << "变化长宽比输入的 Graph on/off 合同不一致，frame="
+                          << index << '\n';
+                return 1;
+            }
+        }
+        std::cout << "连续五帧输入所有权与 Graph on/off 输出一致性通过\n";
     }
 
     detector.detect(cv::Mat{});

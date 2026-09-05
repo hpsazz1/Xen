@@ -246,6 +246,7 @@ struct Detector::Impl {
     cv::Mat input_blob;
     cv::Mat prepared_bgr;
     cv::Mat resize_buffer;
+    cv::Mat padding_buffer;
     std::vector<Detection> candidate_detections;
     std::vector<detector::detail::SegmentationCandidate>
         segmentation_candidates;
@@ -855,7 +856,7 @@ struct Detector::Impl {
         const bool use_gpu_preprocess = session.gpu_preprocess_enabled();
         if (use_gpu_preprocess) {
             if (!detector::detail::letterbox_bgr_reuse(
-                    bgr_image, prepared_bgr, resize_buffer,
+                    bgr_image, prepared_bgr, resize_buffer, padding_buffer,
                     static_cast<int>(width), static_cast<int>(height),
                     letterbox_info) ||
                 !session.stage_gpu_input(prepared_bgr)) {

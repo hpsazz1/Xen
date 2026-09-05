@@ -574,8 +574,9 @@ bool Session::load(const std::string& path) {
                 impl_->output_names_allocated.back().get());
         }
 
-        const auto tensor_info = impl_->session->GetInputTypeInfo(0)
-            .GetTensorTypeAndShapeInfo();
+        // Tensor 信息是 TypeInfo 的借用视图；owner 必须覆盖 shape/type 复制。
+        const auto input_type_info = impl_->session->GetInputTypeInfo(0);
+        const auto tensor_info = input_type_info.GetTensorTypeAndShapeInfo();
         impl_->input_shape = tensor_info.GetShape();
         impl_->input_type = tensor_info.GetElementType();
 
@@ -586,8 +587,8 @@ bool Session::load(const std::string& path) {
         impl_->output_shapes.reserve(output_count);
         impl_->output_types.reserve(output_count);
         for (size_t i = 0; i < output_count; ++i) {
-            const auto output_info = impl_->session->GetOutputTypeInfo(i)
-                .GetTensorTypeAndShapeInfo();
+            const auto output_type_info = impl_->session->GetOutputTypeInfo(i);
+            const auto output_info = output_type_info.GetTensorTypeAndShapeInfo();
             impl_->output_shapes.push_back(output_info.GetShape());
             impl_->output_types.push_back(output_info.GetElementType());
         }

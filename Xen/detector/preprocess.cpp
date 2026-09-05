@@ -118,7 +118,7 @@ bool letterbox_reuse(const cv::Mat& src, cv::Mat& dst,
 }
 
 bool letterbox_bgr_reuse(const cv::Mat& src, cv::Mat& dst,
-                         cv::Mat& resize_buffer,
+                         cv::Mat& resize_buffer, cv::Mat& padding_buffer,
                          int target_w, int target_h,
                          LetterBoxInfo& info) noexcept {
     info = {};
@@ -166,9 +166,12 @@ bool letterbox_bgr_reuse(const cv::Mat& src, cv::Mat& dst,
             return true;
         }
 
-        dst.create(target_h, target_w, CV_8UC3);
-        dst.setTo(cv::Scalar(114, 114, 114));
-        resized->copyTo(dst(cv::Rect(left, top, nw, nh)));
+        // dst 可能仍借用上一帧输入；只向独立持有的 padding 缓冲写入，
+        // 避免同尺寸 create 复用借用存储，同时保留固定目标尺寸的跨帧分配。
+        padding_buffer.create(target_h, target_w, CV_8UC3);
+        padding_buffer.setTo(cv::Scalar(114, 114, 114));
+        resized->copyTo(padding_buffer(cv::Rect(left, top, nw, nh)));
+        dst = padding_buffer;
         return true;
     } catch (...) {
         dst.release();
