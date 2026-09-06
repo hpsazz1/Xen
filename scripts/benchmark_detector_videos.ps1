@@ -633,6 +633,7 @@ $sceneDifference = @(Compare-Object `
 if ($sceneDifference.Count -ne 0) {
     throw "Detector 视频基准场景集合与视频清单不一致：$($sceneDifference -join '; ')"
 }
+$aimReportSchemas = [System.Collections.Generic.HashSet[int]]::new()
 if ($useAimReports) {
     foreach ($video in $videoFiles) {
         $jsonPath = Join-Path $AimReportDirectory `
@@ -642,7 +643,7 @@ if ($useAimReports) {
         $expectedFrames = [long](
             $reportRows | Where-Object scene -eq $video.BaseName |
                 Select-Object -ExpandProperty frames)
-        if ([int]$runtimeReport.schema -ne 17 -or
+        if ([int]$runtimeReport.schema -notin @(17, 18) -or
             [long]$runtimeReport.sample_count -ne $expectedFrames -or
             [long]$runtimeReport.successful_samples -ne $expectedFrames -or
             [long]$runtimeReport.failed_samples -ne 0 -or
@@ -660,6 +661,7 @@ if ($useAimReports) {
                 -ne 0) {
             throw "Aim 逐帧报告未完整保持无物理输出回放契约：$jsonPath"
         }
+        [void]$aimReportSchemas.Add([int]$runtimeReport.schema)
     }
 }
 $sampleFrames = 0L
@@ -1248,7 +1250,10 @@ $manifest = [ordered]@{
                 directory = if ($useAimReports) {
                     $AimReportDirectory
                 } else { $null }
-                schema_version = if ($useAimReports) { 17 } else { $null }
+                schema_version = if ($aimReportSchemas.Count -eq 1) {
+                    @($aimReportSchemas)[0]
+                } else { $null }
+                schema_versions = @($aimReportSchemas | Sort-Object)
                 capture_backend = if ($useAimReports) {
                     "VIDEO_REPLAY"
                 } else { $null }

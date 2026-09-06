@@ -1,12 +1,21 @@
-﻿$ErrorActionPreference = "Stop"
+﻿param(
+    [Parameter(Mandatory = $true)]
+    [string]$ModelPath
+)
+
+$ErrorActionPreference = "Stop"
 
 $repositoryRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot ".."))
-$workflow = Join-Path $PSScriptRoot "invoke_live_game_acceptance.ps1"
 $testRoot = Join-Path $repositoryRoot (
     "cache\live-game-workflow-test-{0}" -f [guid]::NewGuid().ToString("N"))
-$fixedModel = Join-Path $repositoryRoot `
-    "build-matrix-final-cpu\Release\models\14wv11.onnx"
+$fixtureRoot = Join-Path $testRoot "repository"
+$fixtureScripts = Join-Path $fixtureRoot "scripts"
+$fixtureBuild = Join-Path $fixtureRoot "build-matrix-final-cpu"
+$fixtureOutput = Join-Path $fixtureBuild "Release"
+$workflow = Join-Path $fixtureScripts "invoke_live_game_acceptance.ps1"
+$fixedModel = Join-Path $fixtureOutput "models\14wv11.onnx"
+$modelSource = (Resolve-Path -LiteralPath $ModelPath -ErrorAction Stop).Path
 $failures = 0
 
 . (Join-Path $PSScriptRoot "aim_report.ps1")
@@ -119,6 +128,22 @@ Expect (-not [bool]$invalidDelaySummary.contract_valid -and
     "延迟补偿点与基础点加补偿向量不一致时必须拒绝"
 
 try {
+    # 本专项只 Prepare/Collect；身份文件位于本轮独占根，不能启动真实 Worker。
+    New-Item -ItemType Directory -Path $fixtureScripts -Force | Out-Null
+    New-Item -ItemType Directory -Path (Split-Path -Parent $fixedModel) `
+        -Force | Out-Null
+    foreach ($name in @("invoke_live_game_acceptance.ps1", "aim_report.ps1")) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) `
+            -Destination (Join-Path $fixtureScripts $name)
+    }
+    Copy-Item -LiteralPath $modelSource -Destination $fixedModel
+    [System.IO.File]::WriteAllText(
+        (Join-Path $fixtureOutput "Xen.exe"), "identity-only test fixture")
+    [System.IO.File]::WriteAllText(
+        (Join-Path $fixtureOutput "xen-runtime-deployment.json"),
+        '{"schema":1,"configuration":"Release","files":[]}')
+    [System.IO.File]::WriteAllText(
+        (Join-Path $fixtureBuild "CMakeCache.txt"), "XEN_TEST_FIXTURE:BOOL=ON")
     $observationRun = Join-Path $testRoot "observation"
     & $workflow -Mode Prepare -Stage DetectionStatic `
         -RunDirectory $observationRun | Out-Null
@@ -127,8 +152,9 @@ try {
     $task = Get-Content -LiteralPath (
         Join-Path $observationRun "task.json") -Raw -Encoding UTF8 |
         ConvertFrom-Json
-    $config = Get-Content -LiteralPath (
-        Join-Path $observationRun "config.ini") -Raw -Encoding UTF8
+    $config = (Get-Content -LiteralPath (
+        Join-Path $observationRun "config.ini") -Raw -Encoding UTF8).
+        Replace("`r`n", "`n")
     Expect ($task.stage -eq "DetectionStatic" -and
             -not [bool]$task.physical_output) `
         "静止检测任务必须禁用物理输出"
@@ -197,8 +223,9 @@ try {
         -RunDirectory $controlRun -AllowPhysicalOutput `
         -PhysicalOutputConfirmation `
             XEN_LIVE_GAME_ACCEPTANCE_SENDS_REAL_INPUT | Out-Null
-    $controlConfig = Get-Content -LiteralPath (
-        Join-Path $controlRun "config.ini") -Raw -Encoding UTF8
+    $controlConfig = (Get-Content -LiteralPath (
+        Join-Path $controlRun "config.ini") -Raw -Encoding UTF8).
+        Replace("`r`n", "`n")
     Expect ($controlConfig -match '(?m)^allow_send_input=true$') `
         "完成双重授权的控制任务才允许生成物理输出配置"
 
@@ -329,6 +356,18 @@ try {
         -Raw -Encoding UTF8 | ConvertFrom-Json
     Expect ([bool]$schema16Summary.automatic_complete) `
         "Collect 必须兼容已存在的 schema 16 Run"
+    $synthetic.schema = 18
+    [System.IO.File]::WriteAllText(
+        $reportPath, (($synthetic | ConvertTo-Json -Depth 8) + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    & $workflow -Mode Collect -Stage DetectionStatic `
+        -RunDirectory $observationRun | Out-Null
+    $schema18Summary = Get-Content -LiteralPath (
+        Join-Path $observationRun "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    Expect ([bool]$schema18Summary.automatic_complete -and
+            [bool]$schema18Summary.aim_observability.contract_valid) `
+        "Collect 必须接受 additive schema 18 并继续执行 Aim 门禁"
     $synthetic.schema = 17
 
     $synthetic.samples[0].aim_base_point_inside_box = $false
@@ -359,7 +398,7 @@ try {
         -Raw -Encoding UTF8 | ConvertFrom-Json
     Expect (-not [bool]$oldSchemaSummary.automatic_complete -and
             ($oldSchemaSummary.failures -join "`n") -match
-                '报告 schema 不是 16 或 17') `
+                '报告 schema 不是 16、17 或 18') `
         "旧 schema 报告必须拒绝自动通过"
     $synthetic.schema = 17
 

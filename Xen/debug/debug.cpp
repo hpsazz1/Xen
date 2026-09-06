@@ -1038,8 +1038,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v17\n"
+        csv << "# Xen Runtime Debug Report v18\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
+            << "# steady_clock_basis,STD_CHRONO_STEADY_CLOCK_SESSION_LOCAL\n"
             << "# model_path," << csv_escape(config_.model_path) << '\n'
             << "# provider," << csv_escape(config_.provider) << '\n'
             << "# capture_backend," << csv_escape(config_.capture_backend)
@@ -1269,7 +1270,14 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "source_to_capture_ms,source_to_control_ms,"
                "source_clock_uncertainty_ms,source_clock_round_trip_ms,"
                "source_clock_rate,source_clock_mapping_age_ms,"
-               "source_clock_sample_count,source_clock_session_id\n";
+               "source_clock_sample_count,source_clock_session_id,"
+               "source_sequence,source_sequence_valid,"
+               "source_timecode,source_timecode_valid,"
+               "source_timestamp,source_timestamp_valid,"
+               "source_time_steady_ns,source_time_steady_ns_valid,"
+               "capture_steady_ns,capture_steady_ns_valid,"
+               "aim_observation_steady_ns,aim_observation_steady_ns_valid,"
+               "control_steady_ns,control_steady_ns_valid\n";
         csv << std::setprecision(9);
         for (const auto& sample : samples_) {
             csv << sample.sequence << ',' << sample.profile.capture_ms << ','
@@ -1535,12 +1543,27 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.profile.source_clock_rate << ','
                 << sample.profile.source_clock_mapping_age_ms << ','
                 << sample.profile.source_clock_sample_count << ','
-                << sample.profile.source_clock_session_id << '\n';
+                << sample.profile.source_clock_session_id << ','
+                << sample.frame_timing.source_sequence << ','
+                << bool_name(sample.frame_timing.source_sequence_valid) << ','
+                << sample.frame_timing.source_timecode << ','
+                << bool_name(sample.frame_timing.source_timecode_valid) << ','
+                << sample.frame_timing.source_timestamp << ','
+                << bool_name(sample.frame_timing.source_timestamp_valid) << ','
+                << sample.frame_timing.source_steady_ns << ','
+                << bool_name(sample.frame_timing.source_steady_valid) << ','
+                << sample.frame_timing.capture_steady_ns << ','
+                << bool_name(sample.frame_timing.capture_steady_valid) << ','
+                << sample.frame_timing.observation_steady_ns << ','
+                << bool_name(sample.frame_timing.observation_steady_valid) << ','
+                << sample.frame_timing.control_steady_ns << ','
+                << bool_name(sample.frame_timing.control_steady_valid) << '\n';
         }
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 17,\n"
+             << "{\n  \"schema\": 18,\n"
+             << "  \"steady_clock_basis\": \"STD_CHRONO_STEADY_CLOCK_SESSION_LOCAL\",\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
              << json_escape(config_.model_path) << "\",\n"
@@ -2083,8 +2106,37 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << sample.profile.source_clock_mapping_age_ms
                  << ", \"source_clock_sample_count\": "
                  << sample.profile.source_clock_sample_count
-                 << ", \"source_clock_session_id\": "
-                 << sample.profile.source_clock_session_id << "}"
+                 // 身份和绝对时刻可能超过2^53，JSON字符串避免读取器先经double舍入。
+                 << ", \"source_clock_session_id\": \""
+                 << sample.profile.source_clock_session_id << "\""
+                 << ", \"source_sequence\": \""
+                 << sample.frame_timing.source_sequence << "\""
+                 << ", \"source_sequence_valid\": "
+                 << bool_name(sample.frame_timing.source_sequence_valid)
+                 << ", \"source_timecode\": \""
+                 << sample.frame_timing.source_timecode << "\""
+                 << ", \"source_timecode_valid\": "
+                 << bool_name(sample.frame_timing.source_timecode_valid)
+                 << ", \"source_timestamp\": \""
+                 << sample.frame_timing.source_timestamp << "\""
+                 << ", \"source_timestamp_valid\": "
+                 << bool_name(sample.frame_timing.source_timestamp_valid)
+                 << ", \"source_time_steady_ns\": \""
+                 << sample.frame_timing.source_steady_ns << "\""
+                 << ", \"source_time_steady_ns_valid\": "
+                 << bool_name(sample.frame_timing.source_steady_valid)
+                 << ", \"capture_steady_ns\": \""
+                 << sample.frame_timing.capture_steady_ns << "\""
+                 << ", \"capture_steady_ns_valid\": "
+                 << bool_name(sample.frame_timing.capture_steady_valid)
+                 << ", \"aim_observation_steady_ns\": \""
+                 << sample.frame_timing.observation_steady_ns << "\""
+                 << ", \"aim_observation_steady_ns_valid\": "
+                 << bool_name(sample.frame_timing.observation_steady_valid)
+                 << ", \"control_steady_ns\": \""
+                 << sample.frame_timing.control_steady_ns << "\""
+                 << ", \"control_steady_ns_valid\": "
+                 << bool_name(sample.frame_timing.control_steady_valid) << "}"
                  << (index + 1 == samples_.size() ? '\n' : ',');
         }
         json << "  ]\n}\n";

@@ -360,6 +360,7 @@ struct Runtime::Impl {
                                   std::uint64_t sample_overwritten_frames,
                                   const AimResult& aim_result,
                                   std::span<const Detection> detections,
+                                  const AimFrame& aim_frame,
                                   float aim_control_center_x,
                                   float aim_control_center_y,
                                   MouseStatus mouse_status,
@@ -410,6 +411,8 @@ struct Runtime::Impl {
             : std::chrono::steady_clock::time_point{};
         RuntimePipelineSample sample;
         sample.sequence = frame.timing.sequence;
+        sample.frame_timing = runtime::detail::make_frame_timing_evidence(
+            frame.timing, aim_frame, profile.control_timing_valid);
         sample.geometry.encoded_width = frame.encoded_width;
         sample.geometry.encoded_height = frame.encoded_height;
         sample.geometry.source_width = frame.source_width;
@@ -799,7 +802,7 @@ struct Runtime::Impl {
             }
             SnapshotUpdateResult snapshot_result = update_pipeline_snapshot(
                 *frame, profile, service, overwritten_frames_at_consume,
-                aim_result, preview_detections,
+                aim_result, preview_detections, aim_frame,
                 aim_frame.control_center_x, aim_frame.control_center_y,
                 mouse->status(), mouse_sent, aim_frame.lock_active);
             if (probes_enabled) {

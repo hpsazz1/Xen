@@ -94,28 +94,32 @@ Assert-True ($networkReceiverText -match
     $networkReceiverText -match
         'summary\s*=\s*\$environment\.report\.aim' -and
     $networkReceiverText -match
-        'if \(\[int\]\$report\.schema -ne 17\)') `
-    "网络接收脚本必须把 Aim 参数和 schema 17 汇总传入正式报告。"
+        'if \(\[int\]\$report\.schema -notin @\(17, 18\)\)') `
+    "网络接收脚本必须把 Aim 参数和 schema 17/18 汇总传入正式报告。"
 
 $runtimeBenchmarkText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/benchmark_runtime.ps1"))
 Assert-True ($runtimeBenchmarkText -match
-    'if \(\$report\.schema -ne 17\)' -and
+    'if \(\[int\]\$report\.schema -notin @\(17, 18\)\)' -and
     $runtimeBenchmarkText -match 'Get-XenAimReportSummary' -and
     $runtimeBenchmarkText -match
         'prediction_point_outside_box_frames' -and
     $runtimeBenchmarkText -match 'Get-XenRuntimeSequenceValues' -and
     $runtimeBenchmarkText -notmatch
         '@\(\$report\.samples\)\[\$csvIndex\]') `
-    "Runtime 正式入口必须消费 schema 17，并把预测出框作为观测而非违规。"
+    "Runtime 正式入口必须消费 schema 17/18，并把预测出框作为观测而非违规。"
 
 $detectorVideoBenchmarkText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/benchmark_detector_videos.ps1"))
 Assert-True ($detectorVideoBenchmarkText -match
-        'if \(\[int\]\$runtimeReport\.schema -ne 17' -and
+        'if \(\[int\]\$runtimeReport\.schema -notin @\(17, 18\)' -and
     $detectorVideoBenchmarkText -match
-        'schema_version\s*=\s*if \(\$useAimReports\) \{ 17 \}') `
-    "Detector 视频回放新产物必须严格发布 schema 17。"
+        '\$aimReportSchemas\.Add\(\[int\]\$runtimeReport\.schema\)' -and
+    $detectorVideoBenchmarkText -match
+        'schema_version\s*=\s*if \(\$aimReportSchemas\.Count -eq 1\)' -and
+    $detectorVideoBenchmarkText -match
+        'schema_versions\s*=\s*@\(\$aimReportSchemas \| Sort-Object\)') `
+    "Detector 视频回放必须接受 schema 17/18，并按实际报告保留版本。"
 
 $detectorModelTestText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "tests/detector_model_test.cpp"))
@@ -346,9 +350,9 @@ Assert-True ($aimManualText -match
     $aimManualText -match 'pixel_evidence\s*=\s*\$pixelEvidenceSummary' -and
     $aimManualText -match 'aim_lock_active_samples' -and
     $aimManualText -match
-        '\$reportSchema\s*-notin\s*@\(13, 14, 15, 16, 17\)' -and
+        '\$reportSchema\s*-notin\s*@\(13, 14, 15, 16, 17, 18\)' -and
     $aimManualText -match '(?m)^\s*schema\s*=\s*2\s*$') `
-    "Aim 人工入口必须兼容 schema 13 至 17，并把控制诊断和锁定帧计数写入自动汇总。"
+    "Aim 人工入口必须兼容 schema 13 至 18，并把控制诊断和锁定帧计数写入自动汇总。"
 
 & (Join-Path $RepositoryRoot "scripts/test_benchmark_report_scale.ps1") `
     -SyntheticSampleCount 72002 -LegacyProbeCount 5000 -Quiet

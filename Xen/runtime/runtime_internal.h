@@ -45,6 +45,36 @@ private:
     std::chrono::steady_clock::time_point last_observation_at_{};
 };
 
+inline RuntimeFrameTimingEvidence make_frame_timing_evidence(
+        const FrameTiming& timing, const AimFrame& aim_frame,
+        bool control_timing_valid) noexcept {
+    RuntimeFrameTimingEvidence evidence;
+    evidence.source_sequence = timing.source_sequence;
+    evidence.source_sequence_valid = timing.source_sequence_valid;
+    evidence.source_timecode = timing.source_timecode;
+    evidence.source_timecode_valid = timing.source_timecode_valid;
+    evidence.source_timestamp = timing.source_timestamp;
+    evidence.source_timestamp_valid = timing.source_timestamp_valid;
+    const auto set_time = [](auto at, bool available,
+                             std::int64_t& value, bool& valid) {
+        valid = available && at != std::chrono::steady_clock::time_point{};
+        if (valid) {
+            value = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                at.time_since_epoch()).count();
+        }
+    };
+    set_time(timing.source_time_at, timing.source_time_timing_valid,
+             evidence.source_steady_ns, evidence.source_steady_valid);
+    set_time(timing.captured_at, true,
+             evidence.capture_steady_ns, evidence.capture_steady_valid);
+    // 检测失败时AimFrame没有被消费，不能把source/capture时刻冒充Aim输入。
+    set_time(aim_frame.captured_at, control_timing_valid,
+             evidence.observation_steady_ns, evidence.observation_steady_valid);
+    set_time(aim_frame.control_at, control_timing_valid,
+             evidence.control_steady_ns, evidence.control_steady_valid);
+    return evidence;
+}
+
 inline bool class_id_configured(
         std::span<const int> class_ids, int class_id) noexcept {
     return std::find(class_ids.begin(), class_ids.end(), class_id) !=

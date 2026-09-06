@@ -2444,6 +2444,89 @@ namespace XenAimManualPixelFixture {
         throw "schema 17 Recover 必须保留 SuperJump/Static 场景和固定场景分析要求。"
     }
 
+    # schema 18 的源标识和时刻保持十进制字符串，Recover 不得浮点化原件。
+    $schema18Identity = [ordered]@{
+        source_sequence = "18446744073709551614"
+        source_timecode = "-9223372036854775807"
+        source_timestamp = "9223372036854775806"
+        source_time_steady_ns = "9007199254740993"
+        capture_steady_ns = "9007199254741993"
+        aim_observation_steady_ns = "9007199254742993"
+        control_steady_ns = "9007199254743993"
+    }
+    foreach ($field in $schema18Identity.Keys) {
+        $schema17Sample[$field] = $schema18Identity[$field]
+        $schema17Sample["${field}_valid"] = $true
+    }
+    $schema17Sample["source_clock_session_id"] = "18446744073709551615"
+    $schema18SecondSample = [ordered]@{}
+    foreach ($field in $schema17Sample.Keys) {
+        $schema18SecondSample[$field] = $schema17Sample[$field]
+    }
+    $schema18SecondSample.sequence = 542
+    $schema18SecondSample.source_sequence = "18446744073709551615"
+    $schema18SecondSample.source_timestamp = "9223372036854775807"
+    $schema13Report.schema = 18
+    $schema13Report.session_id = "schema18"
+    $schema13Report.sample_count = 2
+    $schema13Report.successful_samples = 2
+    $schema13Report.samples = @($schema17Sample, $schema18SecondSample)
+    $schema18Path = Join-Path $automaticRoot "schema13.json"
+    Write-Utf8 (Join-Path $automaticRoot "schema13.csv") `
+        "sequence,success`n541,true`n542,true`n"
+    Write-Utf8 $schema18Path `
+        (($schema13Report | ConvertTo-Json -Depth 10) + "`n")
+    $schema18OriginalHash = (Get-FileHash -LiteralPath $schema18Path `
+        -Algorithm SHA256).Hash
+    $schema18RecoverOutput = @(& powershell.exe -NoProfile `
+        -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -Smoothing 0.50 `
+        -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 `
+        -MaxCountsPerFrame 14.0 `
+        -EnableDelayCompensation -ControlDelayMs 7.5 `
+        -MaxDelayCompensationMs 18.0 -MaxDelayCompensationPercent 12.0 `
+        -PackageRoot $published -RunDirectory $trackingRoot 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $schema18RecoverOutput | ForEach-Object { Write-Host $_ }
+        throw "schema 18 离线回收失败。"
+    }
+    $schema18Summary = Get-Content -LiteralPath `
+        (Join-Path $trackingRoot "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$schema18Summary.collection_mode -ne "Recover" -or
+        @($schema18Summary.runtime_report_schemas).Count -ne 1 -or
+        [int]@($schema18Summary.runtime_report_schemas)[0] -ne 18 -or
+        -not [bool]$schema18Summary.automatic_complete -or
+        [uint64]$schema18Summary.sample_count -ne 2 -or
+        [uint64]$schema18Summary.mouse_physical_effect_samples -ne 0 -or
+        (Get-FileHash -LiteralPath $schema18Path -Algorithm SHA256).Hash -ne
+            $schema18OriginalHash) {
+        throw "schema 18 Recover 必须保留原件和独立物理效果证据边界。"
+    }
+    $schema18Preserved = Get-Content -LiteralPath $schema18Path `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($field in $schema18Identity.Keys) {
+        $value = $schema18Preserved.samples[0].$field
+        if ($value -isnot [string] -or $value -cne $schema18Identity[$field]) {
+            throw "schema 18 Recover 丢失 64 位标识/时刻字符串：$field"
+        }
+    }
+    foreach ($sample in $schema18Preserved.samples) {
+        if ($sample.source_clock_session_id -isnot [string] -or
+            $sample.source_clock_session_id -cne "18446744073709551615") {
+            throw "schema 18 Recover 丢失超过浮点精度的 clock session 字符串。"
+        }
+    }
+    if ($schema18Preserved.samples[1].source_timestamp -isnot [string] -or
+        $schema18Preserved.samples[1].source_timestamp -cne "9223372036854775807" -or
+        ([int64]$schema18Preserved.samples[1].source_timestamp -
+            [int64]$schema18Preserved.samples[0].source_timestamp) -ne 1) {
+        throw "schema 18 Recover 合并了相邻的 64 位 source timestamp。"
+    }
+
     $manifestBytes = [System.IO.File]::ReadAllBytes($publishedManifest)
     try {
         [System.IO.File]::AppendAllText(

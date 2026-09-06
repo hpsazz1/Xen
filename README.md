@@ -137,6 +137,11 @@ mapping age、sample count 和 source session；映射未就绪、过期或回�
 观测能力，因此不能由 API 返回或 ACK 推导真实鼠标已经移动。Mouse Benchmark schema 2 另行绑定
 run UUID、completion semantic 与 peer/test boundary；正式脚本只在完整聚合键一致时复制 timing，
 loopback/in-memory fake 不与真实设备报告合并，并始终显式记录 `physical_effect_observed=false`。
+Runtime 报告 schema 18 将原始 source sequence/timecode/timestamp、映射后的 source、capture、
+Aim observation 和 control 时刻及各自有效性绑定到实际处理帧；缺失值保持无效，不用本地序号补齐。
+这些 64 位标识、绝对时刻和 source clock session 在 JSON 中使用十进制字符串，CSV 保留整数文本，
+避免解析器经过浮点数时损失相邻帧身份。`steady_ns` 只可在当前 Runtime 会话内比较；原始源时间
+沿用 Capture 单位，源时钟 session 不等于 NDI 发送端身份，以上字段不提供曝光或设备应用位移证据。
 Win32 的 execution boundary 内生为 `local_os_api`；KMBOX/MAKCU 不再从 endpoint 或脚本默认值推断
 外部设备，必须显式传入 `ConfiguredExternalDevicePeer`，127/8 KMBOX fake 则必须显式传入
 `LoopbackUdpFake`，且在创建报告目录或打开设备前完成拒绝。

@@ -3,12 +3,14 @@
 #include "log/log.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -503,8 +505,8 @@ void test_report_summary_and_atomic_files() {
         sample_header_end + 1, sample_row_end - sample_header_end - 1);
     expect(std::count(sample_header.begin(), sample_header.end(), ',') ==
                std::count(sample_row.begin(), sample_row.end(), ','),
-           "schema 17 CSV 样本头与数据行必须保持完全相同的列数");
-    expect(csv_text.find("Xen Runtime Debug Report v17") !=
+           "schema 18 CSV 样本头与数据行必须保持完全相同的列数");
+    expect(csv_text.find("Xen Runtime Debug Report v18") !=
                    std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
@@ -574,7 +576,7 @@ void test_report_summary_and_atomic_files() {
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 17") != std::string::npos &&
+    expect(json_text.find("\"schema\": 18") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -681,7 +683,7 @@ void test_report_summary_and_atomic_files() {
                    std::string::npos &&
                json_text.find("\"source_clock_status\": \"VALID\"") !=
                    std::string::npos &&
-               json_text.find("\"source_clock_session_id\": 99") !=
+               json_text.find("\"source_clock_session_id\": \"99\"") !=
                    std::string::npos &&
                 json_text.find("\"aim_active_range_radius\": 72") !=
                     std::string::npos &&
@@ -1034,6 +1036,190 @@ void test_disabled_probes_are_not_reported_as_zero_cost_samples() {
     std::filesystem::remove_all(root, ignored);
 }
 
+void test_report_preserves_same_frame_source_timing_fields() {
+    OwnedDebugPairTestRoot owned_root;
+    std::string error;
+    const bool root_created = create_owned_debug_pair_test_root(
+        owned_root, error);
+    expect(root_created, "同帧时间证据测试应建立本轮独占临时根: " + error);
+    if (!root_created) return;
+
+    DebugReportConfig config;
+    config.csv_path = (owned_root.path / "runtime.csv").string();
+    config.json_path = (owned_root.path / "runtime.json").string();
+    config.session_id = "same-frame-source-timing";
+    config.max_samples = 3;
+    std::array<RuntimePipelineSample, 3> samples{
+        make_sample(101, 1.0, true),
+        make_sample(102, 1.0, true),
+        make_sample(103, 1.0, true)};
+    auto& first = samples[0].frame_timing;
+    first.source_sequence = 18446744073709551613ULL;
+    first.source_sequence_valid = true;
+    first.source_timecode = -9007199254740993LL;
+    first.source_timecode_valid = true;
+    first.source_timestamp = 9007199254740993LL;
+    first.source_timestamp_valid = true;
+    first.source_steady_ns = 18014398509481983LL;
+    first.source_steady_valid = true;
+    first.capture_steady_ns = 18014398509492987LL;
+    first.capture_steady_valid = true;
+    first.observation_steady_ns = 18014398509481983LL;
+    first.observation_steady_valid = true;
+    first.control_steady_ns = 18014398509503991LL;
+    first.control_steady_valid = true;
+    samples[0].profile.source_clock_session_id = 18446744073709551611ULL;
+
+    // 第二帧保留相邻大整数；源序号和映射无效时不能借本地序号或上一帧补齐。
+    auto& second = samples[1].frame_timing;
+    second.source_timecode = -9007199254740992LL;
+    second.source_timecode_valid = true;
+    second.source_timestamp = 9007199254740994LL;
+    second.source_timestamp_valid = true;
+    second.capture_steady_ns = 18014398509492988LL;
+    second.capture_steady_valid = true;
+    second.observation_steady_ns = 18014398509492988LL;
+    second.observation_steady_valid = true;
+    second.control_steady_ns = 18014398509503992LL;
+    second.control_steady_valid = true;
+    samples[1].profile.source_timing_valid = false;
+    samples[1].profile.source_clock_session_id = 18446744073709551612ULL;
+    // 第三帧全部时间证据缺席，默认零值必须与显式 false 一起导出。
+    samples[2].profile.source_timing_valid = false;
+    samples[2].profile.source_clock_session_id = 0;
+    {
+        DebugReport report;
+        const bool started = report.start(config, error);
+        expect(started, "同帧时间证据报告应通过公有接口启动: " + error);
+        if (started) {
+            report.ingest(samples);
+            RuntimeSnapshot final_snapshot;
+            final_snapshot.source_sequence = 777;
+            final_snapshot.source_sequence_valid = true;
+            final_snapshot.source_timecode = -888;
+            final_snapshot.source_timecode_valid = true;
+            final_snapshot.source_timestamp = 999;
+            final_snapshot.source_timestamp_valid = true;
+            final_snapshot.last_profile.source_clock_session_id = 444;
+            expect(report.finalize(final_snapshot, error),
+                   "同帧时间证据报告应通过公有接口发布: " + error);
+        }
+    }
+
+    std::ifstream csv(config.csv_path, std::ios::binary);
+    std::ifstream json(config.json_path, std::ios::binary);
+    const std::string csv_text(
+        (std::istreambuf_iterator<char>(csv)),
+        std::istreambuf_iterator<char>());
+    const std::string json_text(
+        (std::istreambuf_iterator<char>(json)),
+        std::istreambuf_iterator<char>());
+    csv.close();
+    json.close();
+    const auto split_csv_row = [](std::string_view row) {
+        std::vector<std::string> cells;
+        std::string cell;
+        bool quoted = false;
+        for (std::size_t index = 0; index < row.size(); ++index) {
+            const char character = row[index];
+            if (character == '"') {
+                if (quoted && index + 1 < row.size() && row[index + 1] == '"') {
+                    cell += '"';
+                    ++index;
+                } else {
+                    quoted = !quoted;
+                }
+            } else if (character == ',' && !quoted) {
+                cells.push_back(cell);
+                cell.clear();
+            } else if (character != '\r') {
+                cell += character;
+            }
+        }
+        cells.push_back(cell);
+        return cells;
+    };
+    std::vector<std::string> header;
+    std::vector<std::vector<std::string>> csv_rows;
+    std::istringstream csv_lines(csv_text);
+    std::string line;
+    while (std::getline(csv_lines, line)) {
+        if (line.starts_with("sequence,capture_ms")) {
+            header = split_csv_row(line);
+        } else if (!header.empty() && !line.empty() && line[0] != '#') {
+            csv_rows.push_back(split_csv_row(line));
+        }
+    }
+    // 样本边界由对象起始标记确定，不依赖 JSON 排版或最终快照中的值。
+    std::vector<std::string> json_rows;
+    const auto samples_begin = json_text.find("\"samples\": [");
+    auto sample_begin = samples_begin == std::string::npos
+        ? std::string::npos
+        : json_text.find("{\"sequence\":", samples_begin);
+    while (sample_begin != std::string::npos) {
+        const auto next_sample = json_text.find("{\"sequence\":", sample_begin + 1);
+        json_rows.push_back(json_text.substr(sample_begin, next_sample - sample_begin));
+        sample_begin = next_sample;
+    }
+    const auto json_scalar = [](const std::string& row, std::string_view name) {
+        const std::string key = "\"" + std::string(name) + "\":";
+        const auto position = row.find(key);
+        if (position == std::string::npos) return std::string{};
+        const auto begin = row.find_first_not_of(" \t", position + key.size());
+        if (begin == std::string::npos) return std::string{};
+        const auto delimiter = row.find_first_of(",}", begin);
+        const auto end = row.find_last_not_of(" \t\r", delimiter - 1);
+        return row.substr(begin, end - begin + 1);
+    };
+    struct ExpectedField {
+        std::string_view name;
+        std::array<std::string_view, 3> values;
+        bool json_quoted;
+    };
+    const ExpectedField fields[]{
+        {"sequence", {"101", "102", "103"}, false},
+        {"source_sequence", {"18446744073709551613", "0", "0"}, true},
+        {"source_sequence_valid", {"true", "false", "false"}, false},
+        {"source_timecode", {"-9007199254740993", "-9007199254740992", "0"}, true},
+        {"source_timecode_valid", {"true", "true", "false"}, false},
+        {"source_timestamp", {"9007199254740993", "9007199254740994", "0"}, true},
+        {"source_timestamp_valid", {"true", "true", "false"}, false},
+        {"source_time_steady_ns", {"18014398509481983", "0", "0"}, true},
+        {"source_time_steady_ns_valid", {"true", "false", "false"}, false},
+        {"capture_steady_ns", {"18014398509492987", "18014398509492988", "0"}, true},
+        {"capture_steady_ns_valid", {"true", "true", "false"}, false},
+        {"aim_observation_steady_ns", {"18014398509481983", "18014398509492988", "0"}, true},
+        {"aim_observation_steady_ns_valid", {"true", "true", "false"}, false},
+        {"control_steady_ns", {"18014398509503991", "18014398509503992", "0"}, true},
+        {"control_steady_ns_valid", {"true", "true", "false"}, false},
+        {"source_clock_session_id", {"18446744073709551611", "18446744073709551612", "0"}, true}};
+    expect(csv_rows.size() == samples.size() && json_rows.size() == samples.size(),
+           "CSV/JSON 必须分别导出三条同帧时间证据样本");
+    for (std::size_t index = 0; index < samples.size(); ++index) {
+        if (index >= csv_rows.size() || index >= json_rows.size()) break;
+        expect(csv_rows[index].size() == header.size(),
+               "同帧时间证据 CSV 每行列数必须与样本头一致");
+        for (const auto& field : fields) {
+            const auto found = std::find(header.begin(), header.end(), field.name);
+            const auto column = static_cast<std::size_t>(found - header.begin());
+            const std::string expected(field.values[index]);
+            const std::string context = "，样本=" + std::to_string(index + 101) +
+                "，字段=" + std::string(field.name);
+            expect(found != header.end() && column < csv_rows[index].size() &&
+                       csv_rows[index][column] == expected,
+                   "CSV 必须精确保留该样本的整数和有效性，不能取最终快照" + context);
+            const std::string expected_json = field.json_quoted
+                ? "\"" + expected + "\"" : expected;
+            expect(json_scalar(json_rows[index], field.name) == expected_json,
+                   "JSON 必须逐样本保留整数字符串和布尔有效性，不能发生浮点舍入" + context);
+        }
+    }
+
+    error.clear();
+    expect(cleanup_owned_debug_pair_test_root(owned_root, error),
+           "同帧时间证据测试只能清理本轮独占临时根: " + error);
+}
+
 void test_shared_success_semantics() {
     RuntimePipelineSample disabled_mouse = make_sample(1, 1.0, true);
     disabled_mouse.mouse_status = MouseStatus::DISABLED;
@@ -1061,6 +1247,7 @@ int main() {
     test_report_rejects_invalid_capacity();
     test_aim_lock_active_marker_lifecycle();
     test_disabled_probes_are_not_reported_as_zero_cost_samples();
+    test_report_preserves_same_frame_source_timing_fields();
     test_shared_success_semantics();
     Log::shutdown();
     if (failures != 0) {

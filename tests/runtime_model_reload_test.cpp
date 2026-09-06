@@ -300,10 +300,21 @@ int main(int argc, char** argv) {
                "Runtime 必须允许取出热重载后的诊断样本");
         std::vector<double> successful_total_ms;
         bool landmark_contract_valid = true;
+        bool processed_timing_valid = true;
         for (const auto& sample : profile_samples) {
             if (sample.detection_status == DetectionStatus::SUCCESS &&
                 sample.aim_status == AimStatus::SUCCESS) {
                 successful_total_ms.push_back(sample.profile.total_ms);
+                const auto& timing = sample.frame_timing;
+                processed_timing_valid = processed_timing_valid &&
+                    timing.capture_steady_valid && timing.observation_steady_valid &&
+                    timing.control_steady_valid && !timing.source_steady_valid &&
+                    !timing.source_sequence_valid && !timing.source_timestamp_valid &&
+                    timing.observation_steady_ns == timing.capture_steady_ns &&
+                    timing.control_steady_ns >= timing.capture_steady_ns &&
+                    std::fabs(static_cast<double>(
+                        timing.control_steady_ns - timing.capture_steady_ns) /
+                            1000000.0 - sample.profile.capture_to_control_ms) < 1e-6;
                 landmark_contract_valid = landmark_contract_valid &&
                     sample.aim_landmark.sequence == sample.sequence &&
                     sample.aim_landmark.status !=
@@ -313,6 +324,8 @@ int main(int argc, char** argv) {
         }
         expect(landmark_contract_valid,
                "Runtime 成功样本必须发布同 sequence 且不可接控制的 landmark");
+        expect(processed_timing_valid,
+               "关闭输出的UDP真实Pipeline必须保存同帧Capture/Aim时间，缺少源时钟时保持无效");
         expect(successful_total_ms.size() >= 128,
                "端到端分位数必须排除失败帧并保留至少 128 个成功样本");
         if (!successful_total_ms.empty()) {

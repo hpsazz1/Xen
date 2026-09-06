@@ -893,8 +893,8 @@ $expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
 } else {
     $captureBackendNames[$ExpectedCaptureBackend]
 }
-if ($report.schema -ne 17) {
-    throw "报告 schema 不是 17：$($report.schema)"
+if ([int]$report.schema -notin @(17, 18)) {
+    throw "报告 schema 不是 17 或 18：$($report.schema)"
 }
 $retention = Get-XenRuntimeReportRetention `
     -Report $report -RetentionCapacity $reportRetentionCapacity

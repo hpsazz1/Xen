@@ -126,11 +126,32 @@ struct RuntimeFrameGeometry {
 
 inline constexpr std::size_t kRuntimeReportedClassCount = 16;
 
+// 原始源标识与单调时刻绑定实际处理帧，不从异步更新的最新捕获快照补齐。
+// 原始时间码/时间戳沿用Capture单位；steady_ns只在当前Runtime会话内比较，
+// 不代表曝光、游戏采样或鼠标实际生效。无效值不得补作本地sequence或零时延。
+struct RuntimeFrameTimingEvidence {
+    std::uint64_t source_sequence = 0;
+    bool source_sequence_valid = false;
+    std::int64_t source_timecode = 0;
+    bool source_timecode_valid = false;
+    std::int64_t source_timestamp = 0;
+    bool source_timestamp_valid = false;
+    std::int64_t source_steady_ns = 0;
+    bool source_steady_valid = false;
+    std::int64_t capture_steady_ns = 0;
+    bool capture_steady_valid = false;
+    std::int64_t observation_steady_ns = 0;
+    bool observation_steady_valid = false;
+    std::int64_t control_steady_ns = 0;
+    bool control_steady_valid = false;
+};
+
 // Runtime 每处理一帧发布一个固定大小的诊断样本。该样本只包含数值和枚举，
 // 不持有图像、模型或设备资源，便于在主线程锁外写入报告。
 struct RuntimePipelineSample {
     std::uint64_t sequence = 0;
     RuntimeFrameGeometry geometry;
+    RuntimeFrameTimingEvidence frame_timing;
     PipelineProfile profile;
     CaptureStageTiming capture_stages;
     RuntimeServiceProfile service;

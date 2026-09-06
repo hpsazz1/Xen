@@ -81,6 +81,63 @@ void publish(runtime::detail::LatestFrameQueue& queue,
            "合法 CPU 帧应显式报告发布成功");
 }
 
+void test_processed_frame_timing_evidence_preserves_raw_identity() {
+    using Clock = std::chrono::steady_clock;
+    const auto at = [](std::int64_t ns) {
+        return Clock::time_point(std::chrono::duration_cast<Clock::duration>(
+            std::chrono::nanoseconds(ns)));
+    };
+    FrameTiming timing;
+    timing.sequence = 41;
+    timing.source_sequence = 9007199254740993ULL;
+    timing.source_sequence_valid = false;
+    timing.source_timecode = 0;
+    timing.source_timecode_valid = true;
+    timing.source_timestamp = 17900000000000001LL;
+    timing.source_timestamp_valid = true;
+    timing.source_time_timing_valid = true;
+    timing.source_time_at = at(9007199254741000LL);
+    timing.captured_at = at(9007199255741000LL);
+    AimFrame aim_frame;
+    aim_frame.sequence = timing.sequence;
+    aim_frame.captured_at = timing.source_time_at;
+    aim_frame.control_at = at(9007199257741000LL);
+    const auto first = runtime::detail::make_frame_timing_evidence(
+        timing, aim_frame, true);
+    timing.source_timestamp += 1;
+    timing.captured_at += std::chrono::milliseconds(4);
+    const auto second = runtime::detail::make_frame_timing_evidence(
+        timing, AimFrame{}, false);
+    expect(first.source_timestamp == 17900000000000001LL &&
+               second.source_timestamp == first.source_timestamp + 1 &&
+               first.source_timestamp_valid && second.source_timestamp_valid,
+           "已处理帧必须保留自己的原始timestamp，后帧不能覆盖或经double舍入");
+    expect(first.source_sequence == 9007199254740993ULL &&
+               !first.source_sequence_valid && first.source_timecode == 0 &&
+               first.source_timecode_valid,
+           "源序号无效不能补本地sequence；合法零timecode仍保留有效");
+    expect(first.source_steady_valid && first.capture_steady_valid &&
+               first.observation_steady_valid && first.control_steady_valid &&
+               first.source_steady_ns == 9007199254741000LL &&
+               first.capture_steady_ns == 9007199255741000LL &&
+               first.observation_steady_ns == first.source_steady_ns &&
+               first.control_steady_ns == 9007199257741000LL,
+           "四时刻必须分别保存输入源、捕获完成、Aim观测与实际控制时刻");
+    expect(second.capture_steady_valid && !second.observation_steady_valid &&
+               !second.control_steady_valid && second.observation_steady_ns == 0 &&
+               second.control_steady_ns == 0,
+           "检测失败时保留当前Capture事实，不冒充执行过Aim");
+    timing.source_time_timing_valid = false;
+    aim_frame.captured_at = timing.captured_at;
+    const auto fallback = runtime::detail::make_frame_timing_evidence(
+        timing, aim_frame, true);
+    expect(!fallback.source_steady_valid && fallback.source_steady_ns == 0 &&
+               fallback.observation_steady_valid &&
+               fallback.observation_steady_ns == fallback.capture_steady_ns &&
+               fallback.source_timestamp_valid,
+           "映射不可用不抹掉原始timestamp；Aim回退Capture时刻必须如实分开");
+}
+
 void test_malformed_capture_frame_is_not_counted_as_published() {
     runtime::detail::LatestFrameQueue queue;
     runtime::detail::CaptureFramePublisher publisher(queue);
@@ -559,6 +616,7 @@ void test_runtime_preview_held_slots_and_reset() {
 } // namespace
 
 int main() {
+    test_processed_frame_timing_evidence_preserves_raw_identity();
     test_latest_frame_queue();
     test_malformed_capture_frame_is_not_counted_as_published();
     test_detection_observability_preserves_team_classes();
