@@ -65,6 +65,61 @@ function Quote-NativeArgument([string]$Value) {
     return '"' + $Value + '"'
 }
 
+function Invoke-CompositeSeal(
+        [string]$Executable,
+        [string]$PlanSeed,
+        [string]$Sequence,
+        [string]$PreflightOutput,
+        [string]$PlanOutput,
+        [string]$RunUuid,
+        [string]$ActivationEpoch) {
+    # Seal 的 UTF-8 stderr 是诊断文本；PS5 不应先将它提升为 NativeCommandError。
+    $sealArguments = @(
+        '--plan-seed', $PlanSeed,
+        '--sequence', $Sequence,
+        '--preflight-output', $PreflightOutput,
+        '--plan-output', $PlanOutput,
+        '--run-uuid', $RunUuid,
+        '--activation-epoch', $ActivationEpoch)
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Executable
+    $start.Arguments = ($sealArguments | ForEach-Object {
+        Quote-NativeArgument ([string]$_)
+    }) -join ' '
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    try {
+        try {
+            if (-not $process.Start()) { throw '未创建 Seal 进程' }
+        } catch {
+            throw "composite seal 启动失败：$($_.Exception.Message)"
+        }
+        # 两条管道都先开始读取，避免等待退出或顺序读流时被满管道阻塞。
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $sealExitCode = $process.ExitCode
+        $sealStdout = $stdoutTask.GetAwaiter().GetResult()
+        $sealStderr = $stderrTask.GetAwaiter().GetResult()
+    } finally {
+        $process.Dispose()
+    }
+    if ($sealExitCode -ne 0 -or
+        -not (Test-Path -LiteralPath $PreflightOutput -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $PlanOutput -PathType Leaf)) {
+        $sealDetail = (@($sealStderr.Trim(), $sealStdout.Trim()) |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+        if ([string]::IsNullOrWhiteSpace($sealDetail)) { $sealDetail = '<empty>' }
+        throw "composite scheduler preflight/plan 未通过：ExitCode=$sealExitCode；$sealDetail"
+    }
+}
+
 function ConvertTo-PhysicalProbeOperatorCue([string]$Line) {
     if ($Line.StartsWith("KMBOX monitor 已就绪")) {
         return '【按住右键】5 秒内按住并持续保持；直到看到“现在松开右键”。'
@@ -716,21 +771,13 @@ if ($isBCompositeTask) {
         throw "composite seal executable 文件名无效"
     }
     Write-Host "【预检】保持右键松开；正在本辅机封存 scheduler/plan。"
-    $sealOutput = @(& $sealExecutablePath `
-        --plan-seed ([string]$task.files.plan_seed.path) `
-        --sequence ([string]$task.files.sequence.path) `
-        --preflight-output $schedulerPreflightPath `
-        --plan-output $compositePlanPath `
-        --run-uuid ([string]$task.run_uuid) `
-        --activation-epoch ([string]$task.activation_epoch) 2>&1)
-    $sealExitCode = $LASTEXITCODE
-    if ($sealExitCode -ne 0 -or
-        -not (Test-Path -LiteralPath $schedulerPreflightPath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $compositePlanPath -PathType Leaf)) {
-        $sealTail = @($sealOutput | Select-Object -Last 1) -join " "
-        if ([string]::IsNullOrWhiteSpace($sealTail)) { $sealTail = "<empty>" }
-        throw "composite scheduler preflight/plan 未通过：ExitCode=$sealExitCode；$sealTail"
-    }
+    Invoke-CompositeSeal -Executable $sealExecutablePath `
+        -PlanSeed ([string]$task.files.plan_seed.path) `
+        -Sequence ([string]$task.files.sequence.path) `
+        -PreflightOutput $schedulerPreflightPath `
+        -PlanOutput $compositePlanPath `
+        -RunUuid ([string]$task.run_uuid) `
+        -ActivationEpoch ([string]$task.activation_epoch)
     $schedulerPreflight = Get-Content -LiteralPath $schedulerPreflightPath `
         -Raw -Encoding utf8 | ConvertFrom-Json
     $compositePlan = Get-Content -LiteralPath $compositePlanPath `
