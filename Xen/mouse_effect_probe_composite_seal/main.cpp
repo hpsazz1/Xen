@@ -17,6 +17,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -32,6 +33,7 @@ constexpr std::uintmax_t kMaximumJsonBytes = 16U * 1024U * 1024U;
 
 enum class Mode {
     PREFLIGHT_AND_SEAL,
+    DIAGNOSE_SCHEDULER,
     REPORT_SEMANTIC_SHA256,
     VERIFY_REPORT,
 };
@@ -39,6 +41,7 @@ enum class Mode {
 struct Options {
     Mode mode = Mode::PREFLIGHT_AND_SEAL;
     std::filesystem::path report;
+    std::filesystem::path diagnostic_output;
     std::filesystem::path plan_seed;
     std::filesystem::path sequence;
     std::filesystem::path preflight_output;
@@ -46,6 +49,66 @@ struct Options {
     std::string run_uuid;
     std::uint64_t activation_epoch = 0;
 };
+
+// 固定容量标量记录只供独立诊断使用，避免在计时循环中构造 JSON。
+struct TraceValue {
+    std::int64_t value;
+    bool valid;
+};
+
+struct Win32Failure {
+    const char* api;
+    DWORD code;
+};
+
+struct SchedulerEventTrace {
+    TraceValue deadline;
+    TraceValue coarse_target;
+    TraceValue due_base;
+    TraceValue relative_due;
+    TraceValue set_before;
+    TraceValue set_after;
+    TraceValue set_result;
+    TraceValue wait_result;
+    TraceValue wait_return;
+    TraceValue active_last;
+    TraceValue marker_before;
+    TraceValue marker_after;
+    TraceValue active_reads;
+    TraceValue lateness;
+    TraceValue marker_width;
+    TraceValue active_wait;
+    std::uint64_t active_total_before;
+    const char* last_stage;
+    bool completed;
+};
+
+struct SchedulerTrace {
+    std::array<SchedulerEventTrace, kPreflightEventCount> events;
+    std::size_t reached_count;
+    std::size_t completed_count;
+    std::int64_t frequency;
+    std::int64_t anchor;
+    const char* stage;
+    Win32Failure win32_failure;
+};
+
+static_assert(std::is_trivial_v<SchedulerTrace> &&
+              std::is_standard_layout_v<SchedulerTrace>);
+
+void record_value(TraceValue& field, std::int64_t value) noexcept {
+    field.value = value;
+    field.valid = true;
+}
+
+void record_win32_failure(Win32Failure* failure, const char* api) noexcept {
+    // 必须紧接失败 API，先于其他 Win32 调用或诊断处理。
+    if (failure) {
+        const auto code = GetLastError();
+        failure->code = code;
+        failure->api = api;
+    }
+}
 
 class Handle {
 public:
@@ -187,6 +250,26 @@ bool parse_unsigned(std::wstring_view text, std::uint64_t& output) {
 
 bool parse_options(int argc, wchar_t* argv[], Options& options,
                    std::string& error) {
+    if (argc == 3 &&
+        std::wstring_view(argv[1]) == L"--diagnose-scheduler") {
+        options.mode = Mode::DIAGNOSE_SCHEDULER;
+        options.diagnostic_output = std::filesystem::path(argv[2]);
+        std::error_code filesystem_error;
+        if (options.diagnostic_output.empty() ||
+            !options.diagnostic_output.is_absolute() ||
+            std::filesystem::exists(options.diagnostic_output,
+                                    filesystem_error) || filesystem_error) {
+            error = "scheduler 诊断输出必须是绝对新路径，拒绝覆盖";
+            return false;
+        }
+        return true;
+    }
+    for (int index = 1; index < argc; ++index) {
+        if (std::wstring_view(argv[index]) == L"--diagnose-scheduler") {
+            error = "scheduler 诊断模式不接受其他参数";
+            return false;
+        }
+    }
     if (argc == 3 &&
         (std::wstring_view(argv[1]) == L"--report-semantic-sha256" ||
          std::wstring_view(argv[1]) == L"--verify-report")) {
@@ -340,11 +423,13 @@ bool relative_due(std::int64_t ticks, std::int64_t frequency,
     return true;
 }
 
-bool query_qpc(std::int64_t& value) {
+bool query_qpc(std::int64_t& value, Win32Failure* failure = nullptr) {
     LARGE_INTEGER counter{};
-    if (!QueryPerformanceCounter(&counter) || counter.QuadPart <= 0) {
+    if (!QueryPerformanceCounter(&counter)) {
+        record_win32_failure(failure, "QueryPerformanceCounter");
         return false;
     }
+    if (counter.QuadPart <= 0) return false;
     value = counter.QuadPart;
     return true;
 }
@@ -457,35 +542,55 @@ bool validate_seed(const Options& options, nlohmann::json& seed,
 
 bool run_preflight(const Options& options, std::string_view seed_semantic,
                    std::string_view sequence_semantic,
-                   nlohmann::json& document, std::string& error) {
+                   nlohmann::json& document, std::string& error,
+                   SchedulerTrace* trace = nullptr) {
+    auto* failure = trace ? &trace->win32_failure : nullptr;
+    if (trace) trace->stage = "QPC_FREQUENCY";
     LARGE_INTEGER frequency_value{};
-    if (!QueryPerformanceFrequency(&frequency_value) ||
-        frequency_value.QuadPart <= 0) {
+    if (!QueryPerformanceFrequency(&frequency_value)) {
+        record_win32_failure(failure, "QueryPerformanceFrequency");
+        error = "QPC frequency 不可用";
+        return false;
+    }
+    if (frequency_value.QuadPart <= 0) {
         error = "QPC frequency 不可用";
         return false;
     }
     const auto frequency = frequency_value.QuadPart;
+    if (trace) {
+        trace->frequency = frequency;
+        trace->stage = "CREATE_TIMER";
+    }
     Handle timer(CreateWaitableTimerExW(
         nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
         TIMER_ALL_ACCESS));
     if (!timer) {
+        record_win32_failure(failure, "CreateWaitableTimerExW");
         error = "高分辨率 one-shot timer 不可用";
         return false;
     }
     std::int64_t interval_ticks = 0;
     std::int64_t guard_ticks = 0;
     std::int64_t anchor = 0;
+    if (trace) trace->stage = "QPC_SETUP";
     if (!ns_to_ticks(kPreflightIntervalNs, frequency, interval_ticks) ||
         !ns_to_ticks(kActiveGuardNs, frequency, guard_ticks) ||
-        !query_qpc(anchor)) {
+        !query_qpc(anchor, failure)) {
         error = "preflight QPC 单位转换失败";
         return false;
     }
-    nlohmann::json events = nlohmann::json::array();
+    if (trace) trace->anchor = anchor;
+    nlohmann::json events = trace ? nlohmann::json{} : nlohmann::json::array();
     std::uint64_t total_active_ns = 0;
     std::uint64_t maximum_lateness_ns = 0;
     std::uint64_t maximum_marker_width_ns = 0;
     for (std::size_t index = 0; index < kPreflightEventCount; ++index) {
+        auto* event = trace ? &trace->events[index] : nullptr;
+        if (event) {
+            trace->reached_count = index + 1U;
+            trace->stage = event->last_stage = "DEADLINE";
+            event->active_total_before = total_active_ns;
+        }
         if (interval_ticks <= 0 ||
             static_cast<std::uint64_t>(index + 1U) >
                 static_cast<std::uint64_t>(
@@ -497,13 +602,68 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
         const auto deadline = anchor +
             static_cast<std::int64_t>(index + 1U) * interval_ticks;
         const auto active_target = deadline - guard_ticks;
+        if (event) {
+            record_value(event->deadline, deadline);
+            record_value(event->coarse_target, active_target);
+            trace->stage = event->last_stage = "DUE_BASE_QPC";
+        }
         std::int64_t now = 0;
-        if (!query_qpc(now) || now >= active_target) {
+        const auto due_base_valid = query_qpc(now, failure);
+        if (event && due_base_valid) record_value(event->due_base, now);
+        if (!due_base_valid || now >= active_target) {
+            if (event && due_base_valid) {
+                trace->stage = event->last_stage = "COARSE_DEADLINE";
+            }
             error = "preflight coarse deadline 已迟到";
             return false;
         }
         LARGE_INTEGER due{};
-        if (!relative_due(active_target - now, frequency, due) ||
+        if (event) trace->stage = event->last_stage = "RELATIVE_DUE";
+        if (!relative_due(active_target - now, frequency, due)) {
+            error = "preflight one-shot wait 失败";
+            return false;
+        }
+        if (event) {
+            record_value(event->relative_due, due.QuadPart);
+            trace->stage = event->last_stage = "SET_TIMER_BEFORE_QPC";
+            std::int64_t observed = 0;
+            if (!query_qpc(observed, failure)) {
+                error = "诊断 SetWaitableTimer 前 QPC 失败";
+                return false;
+            }
+            record_value(event->set_before, observed);
+            trace->stage = event->last_stage = "SET_TIMER";
+            const auto set_result = SetWaitableTimer(
+                timer.get(), &due, 0, nullptr, nullptr, FALSE);
+            if (!set_result) record_win32_failure(failure, "SetWaitableTimer");
+            record_value(event->set_result, set_result ? 1 : 0);
+            if (!set_result) {
+                error = "preflight one-shot wait 失败";
+                return false;
+            }
+            trace->stage = event->last_stage = "SET_TIMER_AFTER_QPC";
+            if (!query_qpc(observed, failure)) {
+                error = "诊断 SetWaitableTimer 后 QPC 失败";
+                return false;
+            }
+            record_value(event->set_after, observed);
+            trace->stage = event->last_stage = "WAIT";
+            const auto wait_result = WaitForSingleObject(timer.get(), INFINITE);
+            if (wait_result == WAIT_FAILED) {
+                record_win32_failure(failure, "WaitForSingleObject");
+            }
+            record_value(event->wait_result, wait_result);
+            if (wait_result != WAIT_OBJECT_0) {
+                error = "preflight one-shot wait 失败";
+                return false;
+            }
+            trace->stage = event->last_stage = "WAIT_RETURN_QPC";
+            if (!query_qpc(now, failure)) {
+                error = "preflight one-shot wait 失败";
+                return false;
+            }
+            record_value(event->wait_return, now);
+        } else if (
             !SetWaitableTimer(timer.get(), &due, 0, nullptr, nullptr, FALSE) ||
             WaitForSingleObject(timer.get(), INFINITE) != WAIT_OBJECT_0 ||
             !query_qpc(now)) {
@@ -512,22 +672,61 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
         }
         const auto active_enter = now;
         std::uint64_t reads = 0;
+        if (event) {
+            trace->stage = event->last_stage = "ACTIVE_WAIT";
+            record_value(event->active_last, now);
+            record_value(event->active_reads, 0);
+        }
         while (now < deadline) {
             ++reads;
-            if (!query_qpc(now)) {
+            if (!query_qpc(now, failure)) {
+                if (event) {
+                    record_value(event->active_last, now);
+                    record_value(event->active_reads,
+                                 static_cast<std::int64_t>(reads));
+                    trace->stage = event->last_stage = "ACTIVE_WAIT_QPC";
+                }
                 error = "preflight active wait QPC 失败";
                 return false;
             }
             const auto active_ns = ticks_to_ns_ceil(
                 now - active_enter, frequency);
             if (active_ns > kMaxActiveWaitPerEventNs) {
+                if (event) {
+                    record_value(event->active_last, now);
+                    record_value(event->active_reads,
+                                 static_cast<std::int64_t>(reads));
+                    record_value(event->active_wait,
+                                 static_cast<std::int64_t>(active_ns));
+                    trace->stage = event->last_stage = "ACTIVE_WAIT_BUDGET";
+                }
                 error = "preflight 单事件 active wait 超限";
                 return false;
             }
         }
         std::int64_t marker_before = 0;
         std::int64_t marker_after = 0;
-        if (!query_qpc(marker_before) || !query_qpc(marker_after) ||
+        if (event) {
+            record_value(event->active_last, now);
+            record_value(event->active_reads, static_cast<std::int64_t>(reads));
+            trace->stage = event->last_stage = "MARKER_BEFORE_QPC";
+            if (!query_qpc(marker_before, failure)) {
+                error = "preflight marker bracket 失败";
+                return false;
+            }
+            record_value(event->marker_before, marker_before);
+            trace->stage = event->last_stage = "MARKER_AFTER_QPC";
+            if (!query_qpc(marker_after, failure)) {
+                error = "preflight marker bracket 失败";
+                return false;
+            }
+            record_value(event->marker_after, marker_after);
+            if (marker_after < marker_before) {
+                trace->stage = event->last_stage = "MARKER_ORDER";
+                error = "preflight marker bracket 失败";
+                return false;
+            }
+        } else if (!query_qpc(marker_before) || !query_qpc(marker_after) ||
             marker_after < marker_before) {
             error = "preflight marker bracket 失败";
             return false;
@@ -538,6 +737,14 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
             marker_after - marker_before, frequency);
         const auto active_ns = marker_before > active_enter
             ? ticks_to_ns_ceil(marker_before - active_enter, frequency) : 0U;
+        if (event) {
+            record_value(event->lateness, static_cast<std::int64_t>(lateness));
+            record_value(event->marker_width,
+                         static_cast<std::int64_t>(marker_width));
+            record_value(event->active_wait,
+                         static_cast<std::int64_t>(active_ns));
+            trace->stage = event->last_stage = "EVENT_BUDGETS";
+        }
         if (lateness > kMaxWakeLatenessNs ||
             marker_width > kMaxEventIntervalWidthNs ||
             active_ns > kMaxActiveWaitPerEventNs ||
@@ -554,7 +761,12 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
         maximum_lateness_ns = std::max(maximum_lateness_ns, lateness);
         maximum_marker_width_ns = std::max(
             maximum_marker_width_ns, marker_width);
-        events.push_back({
+        if (event) {
+            event->completed = true;
+            trace->stage = event->last_stage = "COMPLETE";
+            ++trace->completed_count;
+        } else {
+            events.push_back({
             {"event_ordinal", index},
             {"deadline_qpc", deadline},
             {"active_enter_qpc", active_enter},
@@ -564,8 +776,11 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
             {"active_wait_ns", active_ns},
             {"deadline_lateness_ns", lateness},
             {"marker_width_ns", marker_width},
-        });
+            });
+        }
     }
+    // 诊断跳过正式 preflight 的 JSON/semantic；原模式保留逐事件记账。
+    if (trace) return true;
     document = {
         {"schema_version", 1},
         {"evidence_type",
@@ -610,6 +825,116 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
     return true;
 }
 
+nlohmann::json diagnostic_context() {
+    const auto process_id = GetCurrentProcessId();
+    const auto thread_id = GetCurrentThreadId();
+    DWORD session_id = 0;
+    const auto session_valid = ProcessIdToSessionId(process_id, &session_id);
+    const auto session_error = session_valid ? 0U : GetLastError();
+    const auto priority_class = GetPriorityClass(GetCurrentProcess());
+    const auto priority_class_error = priority_class ? 0U : GetLastError();
+    const auto thread_priority = GetThreadPriority(GetCurrentThread());
+    const auto thread_priority_valid =
+        thread_priority != THREAD_PRIORITY_ERROR_RETURN;
+    const auto thread_priority_error = thread_priority_valid ? 0U : GetLastError();
+    return {
+        {"process_id", process_id},
+        {"thread_id", thread_id},
+        {"session_id", session_valid ? nlohmann::json(session_id) : nullptr},
+        {"session_id_query_error", session_valid ? nullptr :
+            nlohmann::json(session_error)},
+        {"process_priority_class", priority_class ?
+            nlohmann::json(priority_class) : nullptr},
+        {"process_priority_class_query_error", priority_class ? nullptr :
+            nlohmann::json(priority_class_error)},
+        {"thread_priority", thread_priority_valid ?
+            nlohmann::json(thread_priority) : nullptr},
+        {"thread_priority_query_error", thread_priority_valid ? nullptr :
+            nlohmann::json(thread_priority_error)},
+        {"sampled_before_preflight", true},
+    };
+}
+
+nlohmann::json diagnostic_document(
+        const SchedulerTrace& trace, nlohmann::json context,
+        bool measured, std::string_view error) {
+    auto events = nlohmann::json::array();
+    for (std::size_t index = 0; index < trace.reached_count; ++index) {
+        const auto& event = trace.events[index];
+        nlohmann::json value = {
+            {"event_ordinal", index},
+            {"completed", event.completed},
+            {"last_stage", event.last_stage},
+            {"active_total_before_ns", event.active_total_before},
+            {"valid", nlohmann::json::object()},
+        };
+        const auto field = [&](const char* name, const TraceValue& observation) {
+            value[name] = observation.valid ?
+                nlohmann::json(observation.value) : nullptr;
+            value["valid"][name] = observation.valid;
+        };
+        field("deadline_qpc", event.deadline);
+        field("coarse_target_qpc", event.coarse_target);
+        field("due_base_qpc", event.due_base);
+        field("relative_due_100ns", event.relative_due);
+        field("set_timer_before_qpc", event.set_before);
+        field("set_timer_after_qpc", event.set_after);
+        field("set_timer_result", event.set_result);
+        field("wait_result", event.wait_result);
+        field("wait_return_qpc", event.wait_return);
+        field("active_enter_qpc", event.wait_return);
+        field("active_last_qpc", event.active_last);
+        field("marker_before_qpc", event.marker_before);
+        field("marker_after_qpc", event.marker_after);
+        field("active_read_count", event.active_reads);
+        field("deadline_lateness_ns", event.lateness);
+        field("marker_width_ns", event.marker_width);
+        field("active_wait_ns", event.active_wait);
+        events.push_back(std::move(value));
+    }
+    return {
+        {"schema_version", 1},
+        {"evidence_type", "mouse_effect_probe_scheduler_phase_diagnostic"},
+        {"status", measured ? "MEASURED_WITHIN_BUDGETS" : "REJECTED"},
+        {"diagnostic_only", true},
+        {"instrumented", true},
+        {"timing_perturbed", true},
+        {"timing_loop_json_bookkeeping", false},
+        {"normal_preflight_timing_loop_json_bookkeeping", true},
+        {"additional_qpc_reads_per_completed_event", 2},
+        {"physical_output_capability", false},
+        {"physical_dispatch_count", 0},
+        {"formal_preflight_published", false},
+        {"final_plan_published", false},
+        {"context", std::move(context)},
+        {"clock_kind", "WINDOWS_QPC"},
+        {"qpc_frequency_hz", trace.frequency > 0 ?
+            nlohmann::json(trace.frequency) : nullptr},
+        {"anchor_qpc", trace.anchor > 0 ? nlohmann::json(trace.anchor) : nullptr},
+        {"timing_policy", {
+            {"event_capacity", kPreflightEventCount},
+            {"preflight_interval_ns", kPreflightIntervalNs},
+            {"active_guard_ns", kActiveGuardNs},
+            {"max_wake_lateness_ns", kMaxWakeLatenessNs},
+            {"max_event_interval_width_ns", kMaxEventIntervalWidthNs},
+            {"max_active_wait_ns_per_event", kMaxActiveWaitPerEventNs},
+            {"max_active_wait_ns_total", kMaxActiveWaitTotalNs},
+            {"timer_mode", "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL"},
+        }},
+        {"reached_event_count", trace.reached_count},
+        {"completed_event_count", trace.completed_count},
+        {"failure_event", trace.reached_count > trace.completed_count ?
+            nlohmann::json(trace.reached_count - 1U) : nullptr},
+        {"failure_stage", measured ? nullptr : nlohmann::json(trace.stage)},
+        {"failure_reason", error},
+        {"win32_failure", trace.win32_failure.api ? nlohmann::json{
+            {"api", trace.win32_failure.api},
+            {"code", trace.win32_failure.code},
+        } : nullptr},
+        {"events", std::move(events)},
+    };
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t* argv[]) {
@@ -624,12 +949,36 @@ int wmain(int argc, wchar_t* argv[]) {
                "--plan-output <new-json> --run-uuid <uuid> "
                "--activation-epoch <n>\n"
             << "XenMouseEffectProbeCompositeSeal "
+               "--diagnose-scheduler <absolute-new-json>\n"
+            << "XenMouseEffectProbeCompositeSeal "
                "--report-semantic-sha256 <report-json>\n"
             << "XenMouseEffectProbeCompositeSeal "
                "--verify-report <report-json>\n";
         return error.empty() ? 0 : 2;
     }
     try {
+        if (options.mode == Mode::DIAGNOSE_SCHEDULER) {
+            // 固定记录和实际元数据在 anchor 前准备；只生成独立诊断产物。
+            SchedulerTrace trace{};
+            auto context = diagnostic_context();
+            nlohmann::json unused_preflight;
+            const auto measured = run_preflight(
+                options, {}, {}, unused_preflight, error, &trace);
+            const auto diagnostic = diagnostic_document(
+                trace, std::move(context), measured, error);
+            std::string publish_error;
+            if (!write_json_atomic(
+                    options.diagnostic_output, diagnostic, publish_error)) {
+                std::cerr << "scheduler 诊断发布失败: " << publish_error << '\n';
+                return 4;
+            }
+            if (!measured) {
+                std::cerr << "scheduler 诊断拒绝: " << error << '\n';
+                return 3;
+            }
+            std::cout << "本次独立阶段测量满足预算；未封存正式 preflight/plan\n";
+            return 0;
+        }
         if (options.mode != Mode::PREFLIGHT_AND_SEAL) {
             std::string claimed;
             std::string actual;

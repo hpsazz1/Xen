@@ -40,6 +40,185 @@ def load_fixture_module(path: pathlib.Path) -> Any:
     return module
 
 
+def validate_scheduler_raw_counts(diagnostic: dict[str, Any]) -> None:
+    """用原始整数计数独立重算记录，不启动进程或重复采样。"""
+    frequency = diagnostic["qpc_frequency_hz"]
+    policy = diagnostic["timing_policy"]
+
+    def ns_to_ticks(nanoseconds: int) -> int:
+        return (nanoseconds * frequency + 999_999_999) // 1_000_000_000
+
+    def ticks_to_ns(ticks: int) -> int:
+        return 0 if ticks <= 0 else (
+            ticks * 1_000_000_000 + frequency - 1) // frequency
+
+    active_total = 0
+    for event in diagnostic["events"]:
+        ordinal = event["event_ordinal"]
+        deadline = event["deadline_qpc"]
+        coarse = event["coarse_target_qpc"]
+        due_base = event["due_base_qpc"]
+        due = event["relative_due_100ns"]
+        if deadline is not None:
+            expect(deadline == diagnostic["anchor_qpc"] +
+                   (ordinal + 1) * ns_to_ticks(policy["preflight_interval_ns"]),
+                   "记录的 deadline 必须来自原始 anchor 与 ordinal")
+        if coarse is not None:
+            expect(coarse == deadline - ns_to_ticks(policy["active_guard_ns"]),
+                   "记录的 coarse target 必须保持冻结 guard")
+        if due is not None:
+            expect(due_base < coarse and
+                   due == -((ticks_to_ns(coarse - due_base) + 99) // 100),
+                   "记录的 relative due 必须与原始差值及双层向上取整一致")
+        expect(event["wait_return_qpc"] == event["active_enter_qpc"],
+               "Wait 后第一次 QPC 必须复用为 active enter")
+        ordered = [event[field] for field in (
+            "due_base_qpc", "set_timer_before_qpc", "set_timer_after_qpc",
+            "wait_return_qpc", "active_last_qpc", "marker_before_qpc",
+            "marker_after_qpc") if event[field] is not None]
+        expect(ordered == sorted(ordered), "已取得的同线程 QPC 不得倒退")
+        before = event["marker_before_qpc"]
+        after = event["marker_after_qpc"]
+        if event["deadline_lateness_ns"] is not None:
+            expect(event["deadline_lateness_ns"] == ticks_to_ns(before - deadline),
+                   "lateness 必须由保存的 marker/deadline 原始计数重算")
+        if event["marker_width_ns"] is not None:
+            expect(event["marker_width_ns"] == ticks_to_ns(after - before),
+                   "marker width 必须由保存的 bracket 原始计数重算")
+        if event["active_wait_ns"] is not None:
+            active_end = before if before is not None else event["active_last_qpc"]
+            expect(event["active_wait_ns"] == ticks_to_ns(
+                active_end - event["active_enter_qpc"]),
+                "active wait 必须由有效终点和同次 active enter 重算")
+        expect(event["active_total_before_ns"] == active_total,
+               "累计 active 仅包含先前已完成事件")
+        if event["completed"]:
+            active_total += event["active_wait_ns"]
+
+
+def test_scheduler_diagnostic(seal_executable: pathlib.Path,
+                              root: pathlib.Path) -> pathlib.Path:
+    """只进行一次有界诊断；其余负例必须在进入计时内核前拒绝。"""
+    diagnostic_root = root / "scheduler diagnostic 中文"
+    diagnostic_root.mkdir()
+    diagnostic_path = diagnostic_root / "diagnostic.json"
+    extra_path = diagnostic_root / "not-a-plan.json"
+    invalid_commands = [
+        ["--diagnose-scheduler"],
+        ["--diagnose-scheduler", "relative-diagnostic.json"],
+        ["--diagnose-scheduler", str(diagnostic_path),
+         "--plan-output", str(extra_path)],
+        ["--plan-seed", str(extra_path),
+         "--diagnose-scheduler", str(diagnostic_path)],
+        ["--diagnose-scheduler", str(diagnostic_path),
+         "--diagnose-scheduler", str(diagnostic_path)],
+        ["--diagnose-scheduler", str(diagnostic_path),
+         "--verify-report", str(extra_path)],
+        ["--report-semantic-sha256", str(extra_path),
+         "--diagnose-scheduler", str(diagnostic_path)],
+        ["--help", "--diagnose-scheduler", str(diagnostic_path)],
+    ]
+    for arguments in invalid_commands:
+        rejected = subprocess.run(
+            [str(seal_executable), *arguments], cwd=diagnostic_root,
+            check=False, capture_output=True, text=True, encoding="utf-8")
+        expect(rejected.returncode == 2 and
+               not list(diagnostic_root.iterdir()),
+               "诊断必须在计时前拒绝相对路径、混合模式和重复参数")
+
+    measured = subprocess.run([
+        str(seal_executable), "--diagnose-scheduler", str(diagnostic_path),
+    ], check=False, capture_output=True, text=True, encoding="utf-8")
+    expect(measured.returncode in (0, 3) and diagnostic_path.is_file(),
+           "独立诊断必须对本次完整测量或拒绝都保存原始阶段证据："
+           f"exit={measured.returncode}; stderr={measured.stderr}")
+    diagnostic_bytes = diagnostic_path.read_bytes()
+    diagnostic = json.loads(diagnostic_bytes)
+    validate_scheduler_raw_counts(diagnostic)
+    expect(diagnostic["evidence_type"] ==
+               "mouse_effect_probe_scheduler_phase_diagnostic" and
+           diagnostic["diagnostic_only"] is True and
+           diagnostic["instrumented"] is True and
+           diagnostic["physical_output_capability"] is False and
+           diagnostic["physical_dispatch_count"] == 0 and
+           diagnostic["formal_preflight_published"] is False and
+           diagnostic["final_plan_published"] is False and
+           diagnostic["status"] != "PASS" and
+           "run_uuid" not in diagnostic and
+           "preflight_semantic_sha256" not in diagnostic and
+           "plan_semantic_sha256" not in diagnostic,
+           "阶段诊断必须独立于可消费的正式 preflight/plan 合同")
+    context = diagnostic["context"]
+    expect(context["process_id"] > 0 and context["thread_id"] > 0 and
+           isinstance(context["session_id"], int) and
+           context["session_id"] >= 0 and
+           context["process_priority_class"] > 0 and
+           isinstance(context["thread_priority"], int) and
+           diagnostic["qpc_frequency_hz"] > 0,
+           "诊断必须记录实际进程、线程、session、优先级及 QPC frequency")
+    policy = diagnostic["timing_policy"]
+    expect(policy == {
+        "event_capacity": 42, "preflight_interval_ns": 5_000_000,
+        "active_guard_ns": 300_000, "max_wake_lateness_ns": 150_000,
+        "max_event_interval_width_ns": 100_000,
+        "max_active_wait_ns_per_event": 350_000,
+        "max_active_wait_ns_total": 14_700_000,
+        "timer_mode": "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL",
+    }, "独立诊断不得更改冻结计时常量或 timer 模式")
+    events = diagnostic["events"]
+    expect(len(events) == diagnostic["reached_event_count"] and
+           0 <= len(events) <= 42,
+           "诊断只保存固定容量内实际到达的事件")
+    raw_fields = [
+        "deadline_qpc", "coarse_target_qpc", "due_base_qpc",
+        "relative_due_100ns", "set_timer_before_qpc",
+        "set_timer_after_qpc", "wait_return_qpc", "active_last_qpc",
+        "marker_before_qpc", "marker_after_qpc", "active_read_count",
+        "deadline_lateness_ns", "marker_width_ns", "active_wait_ns",
+    ]
+    for ordinal, event in enumerate(events):
+        expect(event["event_ordinal"] == ordinal,
+               "诊断事件 ordinal 必须连续且从零开始")
+        for field in raw_fields:
+            expect((event[field] is not None) == event["valid"][field],
+                   f"未到达阶段必须显式为空而非伪造零值：{field}")
+        if event["relative_due_100ns"] is not None:
+            expect(event["relative_due_100ns"] < 0,
+                   "one-shot 相对 due 必须保留原始负 100ns 单位")
+        if event["completed"]:
+            expect(all(event["valid"].values()) and
+                   event["deadline_lateness_ns"] <= 150_000 and
+                   event["marker_width_ns"] <= 100_000 and
+                   event["active_wait_ns"] <= 350_000,
+                   "已完成事件必须保留全部阶段且满足原计时预算")
+    completed = sum(event["completed"] for event in events)
+    expect(completed == diagnostic["completed_event_count"],
+           "完整事件计数必须来自保存的原始事件")
+    if measured.returncode == 0:
+        expect(diagnostic["status"] == "MEASURED_WITHIN_BUDGETS" and
+               completed == 42 and diagnostic["failure_event"] is None and
+               diagnostic["failure_reason"] == "",
+               "退出零仅表示本次有界诊断测量满足预算")
+    else:
+        expect(diagnostic["status"] == "REJECTED" and
+               bool(diagnostic["failure_reason"]) and completed < 42 and
+               (diagnostic["failure_event"] is None or
+                diagnostic["failure_event"] == len(events) - 1),
+               "拒绝必须保留失败原因与实际到达的失败事件")
+    expect(list(diagnostic_root.iterdir()) == [diagnostic_path],
+           "诊断不得发布正式 preflight、final plan 或遗留 pending")
+    collided = subprocess.run([
+        str(seal_executable), "--diagnose-scheduler", str(diagnostic_path),
+    ], check=False, capture_output=True, text=True, encoding="utf-8")
+    expect(collided.returncode == 2 and
+           diagnostic_path.read_bytes() == diagnostic_bytes,
+           "诊断必须在计时前拒绝覆盖既有结果")
+    print("独立阶段诊断合同通过：" + diagnostic["status"], flush=True)
+    print("SCHEDULER_DIAGNOSTIC_JSON=" + json.dumps(
+        diagnostic, ensure_ascii=False, separators=(",", ":")), flush=True)
+    return diagnostic_path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generator", required=True, type=pathlib.Path)
@@ -68,6 +247,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(
             prefix="xen-composite-phase-plan-") as temporary:
         root = pathlib.Path(temporary)
+        diagnostic_path = test_scheduler_diagnostic(seal_executable, root)
         sequence_path = root / "sequence.json"
         generated = subprocess.run([
             str(sequence_executable), "--output", str(sequence_path),
@@ -99,6 +279,14 @@ def main() -> int:
         expect(seed_result.returncode == 0 and seed_path.is_file(),
                f"plan seed 生成失败: {seed_result.stderr}")
         seed = json.loads(seed_path.read_text(encoding="utf-8"))
+        rejected_diagnostic = subprocess.run(common + [
+            "--preflight", str(diagnostic_path),
+            "--frozen-at-utc-unix-ns", "9000000000000",
+            "--output", str(root / "diagnostic-cannot-freeze-plan.json"),
+        ], check=False, capture_output=True, text=True, encoding="utf-8")
+        expect(rejected_diagnostic.returncode == 2 and
+               not (root / "diagnostic-cannot-freeze-plan.json").exists(),
+               "正式 plan freezer 必须拒绝把诊断结果消费为 preflight")
         semantic_input = dict(seed)
         claimed_seed = semantic_input.pop("plan_seed_semantic_sha256")
         expect(seed["status"] == "AWAITING_AUXILIARY_PREFLIGHT" and
