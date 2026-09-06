@@ -4,9 +4,11 @@
 #include <bcrypt.h>
 
 #include <nlohmann/json.hpp>
+#include "scheduler_study_internal.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -34,6 +36,7 @@ constexpr std::uintmax_t kMaximumJsonBytes = 16U * 1024U * 1024U;
 enum class Mode {
     PREFLIGHT_AND_SEAL,
     DIAGNOSE_SCHEDULER,
+    STUDY_SCHEDULER,
     REPORT_SEMANTIC_SHA256,
     VERIFY_REPORT,
 };
@@ -92,6 +95,26 @@ struct SchedulerTrace {
     const char* stage;
     Win32Failure win32_failure;
 };
+
+// 只供独立 study 使用；正式封存不接收主机候选参数。
+struct StudyRun {
+    std::uint64_t guard_ns;
+    bool characterize;
+    HANDLE stop_event;
+    std::int64_t deadline_qpc;
+};
+
+std::atomic<HANDLE> study_stop_event{nullptr};
+
+BOOL WINAPI stop_study(DWORD signal) {
+    const auto stop = study_stop_event.load();
+    if ((signal == CTRL_C_EVENT || signal == CTRL_BREAK_EVENT) &&
+        stop) {
+        SetEvent(stop);
+        return TRUE;
+    }
+    return FALSE;
+}
 
 static_assert(std::is_trivial_v<SchedulerTrace> &&
               std::is_standard_layout_v<SchedulerTrace>);
@@ -251,8 +274,10 @@ bool parse_unsigned(std::wstring_view text, std::uint64_t& output) {
 bool parse_options(int argc, wchar_t* argv[], Options& options,
                    std::string& error) {
     if (argc == 3 &&
-        std::wstring_view(argv[1]) == L"--diagnose-scheduler") {
-        options.mode = Mode::DIAGNOSE_SCHEDULER;
+        (std::wstring_view(argv[1]) == L"--diagnose-scheduler" ||
+         std::wstring_view(argv[1]) == L"--study-scheduler")) {
+        options.mode = std::wstring_view(argv[1]) == L"--study-scheduler"
+            ? Mode::STUDY_SCHEDULER : Mode::DIAGNOSE_SCHEDULER;
         options.diagnostic_output = std::filesystem::path(argv[2]);
         std::error_code filesystem_error;
         if (options.diagnostic_output.empty() ||
@@ -265,7 +290,8 @@ bool parse_options(int argc, wchar_t* argv[], Options& options,
         return true;
     }
     for (int index = 1; index < argc; ++index) {
-        if (std::wstring_view(argv[index]) == L"--diagnose-scheduler") {
+        if (std::wstring_view(argv[index]) == L"--diagnose-scheduler" ||
+            std::wstring_view(argv[index]) == L"--study-scheduler") {
             error = "scheduler 诊断模式不接受其他参数";
             return false;
         }
@@ -543,7 +569,8 @@ bool validate_seed(const Options& options, nlohmann::json& seed,
 bool run_preflight(const Options& options, std::string_view seed_semantic,
                    std::string_view sequence_semantic,
                    nlohmann::json& document, std::string& error,
-                   SchedulerTrace* trace = nullptr) {
+                   SchedulerTrace* trace = nullptr,
+                   const StudyRun* study = nullptr) {
     auto* failure = trace ? &trace->win32_failure : nullptr;
     if (trace) trace->stage = "QPC_FREQUENCY";
     LARGE_INTEGER frequency_value{};
@@ -574,7 +601,8 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
     std::int64_t anchor = 0;
     if (trace) trace->stage = "QPC_SETUP";
     if (!ns_to_ticks(kPreflightIntervalNs, frequency, interval_ticks) ||
-        !ns_to_ticks(kActiveGuardNs, frequency, guard_ticks) ||
+        !ns_to_ticks(study ? study->guard_ns : kActiveGuardNs,
+                     frequency, guard_ticks) ||
         !query_qpc(anchor, failure)) {
         error = "preflight QPC 单位转换失败";
         return false;
@@ -610,6 +638,18 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
         std::int64_t now = 0;
         const auto due_base_valid = query_qpc(now, failure);
         if (event && due_base_valid) record_value(event->due_base, now);
+        if (study && due_base_valid && (now < anchor ||
+                (index > 0 && now < trace->events[index - 1].marker_after.value))) {
+            trace->stage = event->last_stage = "STUDY_QPC_ORDER";
+            error = "study due-base QPC 倒退";
+            return false;
+        }
+        if (study && (WaitForSingleObject(study->stop_event, 0) != WAIT_TIMEOUT ||
+                      now >= study->deadline_qpc)) {
+            trace->stage = event->last_stage = "STUDY_STOP_OR_TIMEOUT";
+            error = "study 停止或整体经过时间超限";
+            return false;
+        }
         if (!due_base_valid || now >= active_target) {
             if (event && due_base_valid) {
                 trace->stage = event->last_stage = "COARSE_DEADLINE";
@@ -632,6 +672,10 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
                 return false;
             }
             record_value(event->set_before, observed);
+            if (study && observed < now) {
+                error = "study Set 前 QPC 倒退";
+                return false;
+            }
             trace->stage = event->last_stage = "SET_TIMER";
             const auto set_result = SetWaitableTimer(
                 timer.get(), &due, 0, nullptr, nullptr, FALSE);
@@ -647,13 +691,28 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
                 return false;
             }
             record_value(event->set_after, observed);
+            if (study && observed < event->set_before.value) {
+                error = "study Set 后 QPC 倒退";
+                return false;
+            }
             trace->stage = event->last_stage = "WAIT";
-            const auto wait_result = WaitForSingleObject(timer.get(), INFINITE);
+            DWORD wait_result = 0;
+            if (study) {
+                const HANDLE handles[]{study->stop_event, timer.get()};
+                const auto remaining_ns = ticks_to_ns_ceil(
+                    study->deadline_qpc - observed, frequency);
+                const auto remaining_ms = std::min<std::uint64_t>(1000,
+                    remaining_ns / 1'000'000U + (remaining_ns % 1'000'000U != 0));
+                wait_result = WaitForMultipleObjects(2, handles, FALSE,
+                    static_cast<DWORD>(remaining_ms));
+            } else {
+                wait_result = WaitForSingleObject(timer.get(), INFINITE);
+            }
             if (wait_result == WAIT_FAILED) {
-                record_win32_failure(failure, "WaitForSingleObject");
+                record_win32_failure(failure, study ? "WaitForMultipleObjects" : "WaitForSingleObject");
             }
             record_value(event->wait_result, wait_result);
-            if (wait_result != WAIT_OBJECT_0) {
+            if (wait_result != (study ? WAIT_OBJECT_0 + 1 : WAIT_OBJECT_0)) {
                 error = "preflight one-shot wait 失败";
                 return false;
             }
@@ -663,6 +722,12 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
                 return false;
             }
             record_value(event->wait_return, now);
+            if (study && (now >= study->deadline_qpc || now < event->set_after.value)) {
+                trace->stage = event->last_stage = now < event->set_after.value
+                    ? "STUDY_QPC_ORDER" : "STUDY_TIMEOUT";
+                error = "study Wait 返回 QPC 倒退或整体经过时间超限";
+                return false;
+            }
         } else if (
             !SetWaitableTimer(timer.get(), &due, 0, nullptr, nullptr, FALSE) ||
             WaitForSingleObject(timer.get(), INFINITE) != WAIT_OBJECT_0 ||
@@ -678,7 +743,17 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
             record_value(event->active_reads, 0);
         }
         while (now < deadline) {
+            if (study && WaitForSingleObject(study->stop_event, 0) != WAIT_TIMEOUT) {
+                record_value(event->active_last, now);
+                record_value(event->active_reads, static_cast<std::int64_t>(reads));
+                record_value(event->active_wait, static_cast<std::int64_t>(
+                    ticks_to_ns_ceil(now - active_enter, frequency)));
+                trace->stage = event->last_stage = "STUDY_STOP";
+                error = "study 已停止";
+                return false;
+            }
             ++reads;
+            const auto previous = now;
             if (!query_qpc(now, failure)) {
                 if (event) {
                     record_value(event->active_last, now);
@@ -691,7 +766,16 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
             }
             const auto active_ns = ticks_to_ns_ceil(
                 now - active_enter, frequency);
-            if (active_ns > kMaxActiveWaitPerEventNs) {
+            if (study && now < previous) {
+                record_value(event->active_last, now);
+                record_value(event->active_reads, static_cast<std::int64_t>(reads));
+                trace->stage = event->last_stage = "STUDY_QPC_ORDER";
+                error = "study active QPC 倒退";
+                return false;
+            }
+            if (active_ns > kMaxActiveWaitPerEventNs ||
+                (study && (total_active_ns > kMaxActiveWaitTotalNs - active_ns ||
+                           now >= study->deadline_qpc))) {
                 if (event) {
                     record_value(event->active_last, now);
                     record_value(event->active_reads,
@@ -715,6 +799,10 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
                 return false;
             }
             record_value(event->marker_before, marker_before);
+            if (study && marker_before < now) {
+                error = "study marker 前 QPC 倒退";
+                return false;
+            }
             trace->stage = event->last_stage = "MARKER_AFTER_QPC";
             if (!query_qpc(marker_after, failure)) {
                 error = "preflight marker bracket 失败";
@@ -745,10 +833,16 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
                          static_cast<std::int64_t>(active_ns));
             trace->stage = event->last_stage = "EVENT_BUDGETS";
         }
-        if (lateness > kMaxWakeLatenessNs ||
+        const bool budgets_failed = lateness > kMaxWakeLatenessNs ||
             marker_width > kMaxEventIntervalWidthNs ||
             active_ns > kMaxActiveWaitPerEventNs ||
-            total_active_ns > kMaxActiveWaitTotalNs - active_ns) {
+            total_active_ns > kMaxActiveWaitTotalNs - active_ns;
+        const auto study_disposition = study
+            ? xen::scheduler_study::detail::classify_event(
+                lateness, marker_width, active_ns, total_active_ns)
+            : xen::scheduler_study::detail::EventDisposition::ACCEPT;
+        if (budgets_failed && (!study || !study->characterize ||
+            study_disposition == xen::scheduler_study::detail::EventDisposition::ABORT)) {
             error = "preflight lateness/width/total active budget 超限: event=" +
                 std::to_string(index) + ", lateness_ns=" +
                 std::to_string(lateness) + ", marker_width_ns=" +
@@ -925,7 +1019,7 @@ nlohmann::json diagnostic_document(
         {"completed_event_count", trace.completed_count},
         {"failure_event", trace.reached_count > trace.completed_count ?
             nlohmann::json(trace.reached_count - 1U) : nullptr},
-        {"failure_stage", measured ? nullptr : nlohmann::json(trace.stage)},
+        {"failure_stage", measured || !trace.stage ? nullptr : nlohmann::json(trace.stage)},
         {"failure_reason", error},
         {"win32_failure", trace.win32_failure.api ? nlohmann::json{
             {"api", trace.win32_failure.api},
@@ -933,6 +1027,233 @@ nlohmann::json diagnostic_document(
         } : nullptr},
         {"events", std::move(events)},
     };
+}
+
+int run_scheduler_study(const Options& options, std::string& error) {
+    using xen::scheduler_study::detail::protocol;
+    using xen::scheduler_study::detail::select_candidate;
+    const auto policy = protocol();
+    const auto directory = options.diagnostic_output;
+    // 单一新目录同时承担消耗标记；中止后保留所有已取得记录，不接受续跑。
+    if (!std::filesystem::create_directory(directory)) {
+        std::cerr << "study 目录创建失败或已经存在\n";
+        return 2;
+    }
+    const auto publish = [&](const char* name, const nlohmann::json& value) {
+        if (!write_json_atomic(directory / name, value, error)) {
+            throw std::runtime_error(error);
+        }
+        std::string written;
+        if (!read_file(directory / name, written, error, kMaximumJsonBytes) ||
+            written != value.dump(2) + "\n") {
+            throw std::runtime_error("study 产物回读不一致");
+        }
+    };
+    const auto hash_file = [&](const char* name) {
+        std::string hash;
+        std::string content;
+        if (!read_file(directory / name, content, error, kMaximumJsonBytes) ||
+            !sha256_text(content, hash)) {
+            throw std::runtime_error(error);
+        }
+        return hash;
+    };
+    const auto base_context = diagnostic_context();
+    if (base_context["process_priority_class"] != NORMAL_PRIORITY_CLASS ||
+        base_context["thread_priority"] != THREAD_PRIORITY_NORMAL ||
+        base_context["session_id"].is_null()) {
+        publish("result.json", {{"status", "ABORTED"},
+            {"reason", "实际 session/priority 不满足诊断协议"},
+            {"physical_dispatch_count", 0}, {"final_plan_published", false}});
+        return 3;
+    }
+    auto context = base_context;
+    std::array<wchar_t, MAX_COMPUTERNAME_LENGTH + 1> computer{};
+    DWORD computer_size = static_cast<DWORD>(computer.size());
+    std::array<wchar_t, 32768> executable{};
+    const auto executable_size = GetModuleFileNameW(nullptr, executable.data(),
+        static_cast<DWORD>(executable.size()));
+    FILETIME created{}, exited{}, kernel{}, user{};
+    LARGE_INTEGER frequency{};
+    std::int64_t campaign_start = 0;
+    if (!GetComputerNameW(computer.data(), &computer_size) ||
+        executable_size == 0 || executable_size >= executable.size() ||
+        !GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user) ||
+        !QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0 ||
+        !query_qpc(campaign_start)) {
+        throw std::runtime_error("study 主机/进程/时钟身份不可用");
+    }
+    std::string executable_hash;
+    if (!file_sha256(std::filesystem::path(executable.data()), executable_hash, error)) {
+        throw std::runtime_error(error);
+    }
+    std::string computer_utf8;
+    const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+        computer.data(), static_cast<int>(computer_size), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) throw std::runtime_error("study 主机名编码失败");
+    computer_utf8.resize(size);
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, computer.data(),
+        static_cast<int>(computer_size), computer_utf8.data(), size, nullptr, nullptr) != size) {
+        throw std::runtime_error("study 主机名编码失败");
+    }
+    context["computer_name"] = computer_utf8;
+    context["process_creation_filetime"] =
+        (static_cast<std::uint64_t>(created.dwHighDateTime) << 32U) | created.dwLowDateTime;
+    context["executable_sha256"] = executable_hash;
+    context["qpc_frequency_hz"] = frequency.QuadPart;
+    context["campaign_start_qpc"] = campaign_start;
+    context["uptime_ms_before_campaign"] = GetTickCount64();
+    context["same_process_same_boot_required"] = true;
+    std::int64_t timeout_ticks = 0;
+    if (!ns_to_ticks(policy["campaign_timeout_ns"].get<std::uint64_t>(),
+                     frequency.QuadPart, timeout_ticks) ||
+        campaign_start > std::numeric_limits<std::int64_t>::max() - timeout_ticks) {
+        throw std::runtime_error("study 整体超时转换失败");
+    }
+    Handle stop_event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!stop_event) throw std::runtime_error("study stop event 创建失败");
+    study_stop_event = stop_event.get();
+    if (!SetConsoleCtrlHandler(stop_study, TRUE)) {
+        study_stop_event = nullptr;
+        throw std::runtime_error("study Ctrl+C handler 注册失败");
+    }
+    struct StopRegistration {
+        ~StopRegistration() {
+            SetConsoleCtrlHandler(stop_study, FALSE);
+            study_stop_event = nullptr;
+        }
+    } registration;
+    publish("protocol.json", {{"protocol", policy}, {"context", context},
+        {"status", "FROZEN_BEFORE_MEASUREMENT"},
+        {"diagnostic_only", true}, {"physical_output_capability", false},
+        {"physical_dispatch_count", 0}, {"final_plan_published", false}});
+    const auto protocol_hash = hash_file("protocol.json");
+    const auto check_context = [&](std::int64_t* observed = nullptr) {
+        std::int64_t now = 0;
+        const auto current = diagnostic_context();
+        const auto clock_valid = query_qpc(now);
+        if (observed) *observed = now;
+        return current == base_context && clock_valid && now >= campaign_start &&
+            now < campaign_start + timeout_ticks &&
+            WaitForSingleObject(stop_event.get(), 0) == WAIT_TIMEOUT;
+    };
+    const auto make_raw = [&](const char* type) {
+        return nlohmann::json{{"schema_version", 1}, {"evidence_type", type},
+            {"protocol", policy}, {"context", context}, {"status", "ABORTED"},
+            {"protocol_file_sha256", protocol_hash},
+            {"blocks", nlohmann::json::array()}, {"diagnostic_only", true},
+            {"physical_output_capability", false}, {"physical_dispatch_count", 0},
+            {"formal_preflight_published", false}, {"final_plan_published", false}};
+    };
+    std::uint64_t recorded_active_ns = 0;
+    std::size_t attempted_batches = 0;
+    const auto collect = [&](std::size_t index, std::size_t guard_index,
+                              std::uint64_t guard, bool characterize) {
+        SchedulerTrace trace{};
+        std::string reason;
+        nlohmann::json unused;
+        const StudyRun run{guard, characterize, stop_event.get(), campaign_start + timeout_ticks};
+        const auto before_valid = check_context();
+        trace.stage = "STUDY_CONTEXT_BEFORE_BATCH";
+        const auto measured = before_valid && run_preflight(options, {}, {}, unused, reason, &trace, &run);
+        const auto after_valid = check_context();
+        ++attempted_batches;
+        for (std::size_t ordinal = 0; ordinal < trace.reached_count; ++ordinal) {
+            const auto& event = trace.events[ordinal];
+            if (event.active_wait.valid) recorded_active_ns += event.active_wait.value;
+            else if (event.wait_return.valid && event.active_last.valid) {
+                recorded_active_ns += ticks_to_ns_ceil(
+                    event.active_last.value - event.wait_return.value, trace.frequency);
+            }
+        }
+        if (!before_valid || !after_valid) reason = "study 身份漂移、停止或整体经过时间超限";
+        auto diagnostic = diagnostic_document(trace, context, measured, reason);
+        diagnostic["evidence_type"] = "mouse_effect_probe_scheduler_study_batch";
+        diagnostic["study_phase"] = characterize ? "CHARACTERIZATION" : "VALIDATION";
+        diagnostic["status"] = measured && after_valid ? "COMPLETE" : "ABORTED";
+        diagnostic["timing_policy"]["active_guard_ns"] = guard;
+        diagnostic["completed_means"] = "RAW_SAMPLE_COMPLETE_NOT_QUALITY_PASS";
+        diagnostic["study_stop_polling"] = true;
+        diagnostic["study_wait_timeout_ms"] = 1000;
+        return nlohmann::json{{"round_index", index}, {"guard_index", guard_index},
+            {"diagnostic", std::move(diagnostic)}};
+    };
+    auto characterization = make_raw("mouse_effect_probe_scheduler_study_characterization");
+    const auto guards = policy["guard_grid_ns"].get<std::vector<std::uint64_t>>();
+    bool complete = true;
+    for (std::size_t round = 0; complete && round < policy["round_count"].get<std::size_t>(); ++round) {
+        for (std::size_t slot = 0; complete && slot < guards.size(); ++slot) {
+            const auto index = (round + slot) % guards.size();
+            auto block = collect(round, index, guards[index], true);
+            complete = block["diagnostic"]["status"] == "COMPLETE";
+            characterization["blocks"].push_back(std::move(block));
+        }
+    }
+    characterization["status"] = complete ? "COMPLETE" : "ABORTED";
+    publish("characterization.json", characterization);
+    const auto characterization_hash = hash_file("characterization.json");
+    auto result = nlohmann::json{{"status", "ABORTED"}, {"diagnostic_only", true},
+        {"physical_output_capability", false}, {"physical_dispatch_count", 0},
+        {"formal_preflight_published", false}, {"final_plan_published", false},
+        {"protocol_file_sha256", protocol_hash},
+        {"characterization_file_sha256", characterization_hash},
+        {"candidate_file_sha256", nullptr}, {"validation_file_sha256", nullptr}};
+    const auto finish = [&](const char* status) {
+        std::int64_t finished = 0;
+        const auto final_status = check_context(&finished) ? status : "ABORTED";
+        result["status"] = final_status;
+        result["attempted_batch_count"] = attempted_batches;
+        result["recorded_active_wait_ns"] = recorded_active_ns;
+        result["campaign_max_active_wait_ns"] = policy["campaign_max_active_wait_ns"];
+        if (finished > 0) {
+            result["finished_qpc"] = finished;
+            result["elapsed_ns"] = ticks_to_ns_ceil(finished - campaign_start, frequency.QuadPart);
+        }
+        result["context_after"] = diagnostic_context();
+        publish("result.json", result);
+        std::cout << "scheduler study: " << final_status << "; 只生成诊断证据，未封存正式 plan\n";
+        return std::string_view(final_status) == "STUDY_VALIDATED" ? 0 : 3;
+    };
+    if (!complete || !check_context()) return finish("ABORTED");
+    auto candidate = select_candidate(characterization);
+    candidate["protocol_file_sha256"] = protocol_hash;
+    candidate["characterization_file_sha256"] = characterization_hash;
+    candidate["context"] = context;
+    candidate["diagnostic_only"] = true;
+    candidate["formal_preflight_published"] = false;
+    candidate["final_plan_published"] = false;
+    candidate["physical_output_capability"] = false;
+    candidate["physical_dispatch_count"] = 0;
+    publish("candidate.json", candidate);
+    const auto candidate_hash = hash_file("candidate.json");
+    result["candidate_file_sha256"] = candidate_hash;
+    std::int64_t candidate_frozen_qpc = 0;
+    if (!query_qpc(candidate_frozen_qpc)) return finish("ABORTED");
+    result["candidate_frozen_qpc"] = candidate_frozen_qpc;
+    if (!check_context() || hash_file("protocol.json") != protocol_hash ||
+        hash_file("characterization.json") != characterization_hash) return finish("ABORTED");
+    if (candidate["status"] == "NO_CANDIDATE") return finish("NO_CANDIDATE");
+    const auto guard = candidate["selected_guard_ns"].get<std::uint64_t>();
+    const auto found = std::find(guards.begin(), guards.end(), guard);
+    if (found == guards.end()) throw std::runtime_error("study candidate 不在预注册集合中");
+    auto validation = make_raw("mouse_effect_probe_scheduler_study_validation");
+    validation["candidate_file_sha256"] = candidate_hash;
+    validation["candidate_frozen_qpc"] = candidate_frozen_qpc;
+    validation["characterization_file_sha256"] = characterization_hash;
+    validation["not_used_for_candidate_selection"] = true;
+    validation["statistical_independence_claimed"] = false;
+    for (std::size_t round = 0; complete && round < policy["validation_batch_count"].get<std::size_t>(); ++round) {
+        auto block = collect(round, static_cast<std::size_t>(found - guards.begin()), guard, false);
+        complete = block["diagnostic"]["status"] == "COMPLETE";
+        validation["blocks"].push_back(std::move(block));
+    }
+    validation["status"] = complete ? "COMPLETE" : "ABORTED";
+    publish("validation.json", validation);
+    result["validation_file_sha256"] = hash_file("validation.json");
+    if (!check_context() || hash_file("protocol.json") != protocol_hash ||
+        hash_file("characterization.json") != characterization_hash ||
+        hash_file("candidate.json") != candidate_hash) return finish("ABORTED");
+    return finish(complete ? "STUDY_VALIDATED" : "VALIDATION_REJECTED");
 }
 
 } // namespace
@@ -951,12 +1272,17 @@ int wmain(int argc, wchar_t* argv[]) {
             << "XenMouseEffectProbeCompositeSeal "
                "--diagnose-scheduler <absolute-new-json>\n"
             << "XenMouseEffectProbeCompositeSeal "
+               "--study-scheduler <absolute-new-directory>\n"
+            << "XenMouseEffectProbeCompositeSeal "
                "--report-semantic-sha256 <report-json>\n"
             << "XenMouseEffectProbeCompositeSeal "
                "--verify-report <report-json>\n";
         return error.empty() ? 0 : 2;
     }
     try {
+        if (options.mode == Mode::STUDY_SCHEDULER) {
+            return run_scheduler_study(options, error);
+        }
         if (options.mode == Mode::DIAGNOSE_SCHEDULER) {
             // 固定记录和实际元数据在 anchor 前准备；只生成独立诊断产物。
             SchedulerTrace trace{};

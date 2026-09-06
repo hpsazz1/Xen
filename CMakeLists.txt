@@ -1408,6 +1408,28 @@ if(BUILD_TESTING)
                 "${PROJECT_SOURCE_DIR}/scripts/produce_mouse_effect_probe_b_composite_phase_ledgers.py"
             --seal-executable
                 "$<TARGET_FILE:xen_mouse_effect_probe_composite_seal>")
+    add_executable(mouse_effect_probe_scheduler_study_tests
+        tests/mouse_effect_probe_scheduler_study_tests.cpp)
+    target_include_directories(mouse_effect_probe_scheduler_study_tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/Xen")
+    target_link_libraries(mouse_effect_probe_scheduler_study_tests PRIVATE
+        nlohmann_json::nlohmann_json)
+    add_test(NAME mouse_effect_probe_scheduler_study_tests
+        COMMAND mouse_effect_probe_scheduler_study_tests)
+    add_executable(mouse_effect_probe_scheduler_study_driver_tests
+        tests/mouse_effect_probe_scheduler_study_driver_tests.cpp)
+    target_include_directories(mouse_effect_probe_scheduler_study_driver_tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/Xen")
+    target_link_libraries(mouse_effect_probe_scheduler_study_driver_tests PRIVATE
+        nlohmann_json::nlohmann_json bcrypt)
+    add_test(NAME mouse_effect_probe_scheduler_study_driver_tests
+        COMMAND mouse_effect_probe_scheduler_study_driver_tests)
+    add_test(NAME mouse_effect_probe_scheduler_study_cli_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_scheduler_study_cli_tests.py"
+            --seal-executable "$<TARGET_FILE:xen_mouse_effect_probe_composite_seal>"
+            --selector-executable "$<TARGET_FILE:mouse_effect_probe_scheduler_study_tests>"
+            --evidence-root "${CMAKE_BINARY_DIR}/scheduler-study-test-evidence")
     add_test(NAME mouse_effect_probe_b_composite_phase_producer_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_composite_phase_producer_tests.py"
