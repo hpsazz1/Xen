@@ -369,13 +369,31 @@ function Quote-NativeArgument([string]$Value) {
     return '"' + $Value + '"'
 }
 
-function Read-RuntimeAlignmentMarker([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "Runtime aim-lock 标记不存在：$Path"
+function Read-RuntimeAlignmentMarkerSnapshot([string]$Path) {
+    $stream = $null
+    $buffer = [System.IO.MemoryStream]::new()
+    try {
+        # marker 会被原子替换/删除。短时读句柄允许删除，避免采证反过来
+        # 阻挡 Runtime 心跳；内容、长度和哈希全部来自这一份原始 bytes。
+        $stream = [System.IO.FileStream]::new(
+            $Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+            ([System.IO.FileShare]::Read -bor [System.IO.FileShare]::Delete))
+        $stream.CopyTo($buffer)
+        $bytes = $buffer.ToArray()
+    } catch [System.IO.IOException] {
+        # 尚未建立任何采集绑定；枚举后缺席或短暂读冲突只表示本次无候选。
+        return $null
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        $buffer.Dispose()
     }
     try {
-        $marker = Get-Content -LiteralPath $Path -Raw -Encoding utf8 |
-            ConvertFrom-Json
+        $markerText = [System.Text.UTF8Encoding]::new($false, $true).
+            GetString($bytes)
+        if ($markerText.Length -gt 0 -and $markerText[0] -eq [char]0xFEFF) {
+            $markerText = $markerText.Substring(1)
+        }
+        $marker = $markerText | ConvertFrom-Json
     } catch {
         throw "Runtime aim-lock 标记不是有效 JSON：$Path；$($_.Exception.Message)"
     }
@@ -391,7 +409,17 @@ function Read-RuntimeAlignmentMarker([string]$Path) {
         [uint64]$marker.activation_epoch -lt 1) {
         throw "Runtime aim-lock 标记合同无效：$Path"
     }
-    return $marker
+    [void][uint64]$marker.sequence
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $evidence = [ordered]@{
+            path = [System.IO.Path]::GetFullPath($Path)
+            length = [long]$bytes.LongLength
+            sha256 = ([BitConverter]::ToString(
+                $hasher.ComputeHash($bytes))).Replace('-', '')
+        }
+    } finally { $hasher.Dispose() }
+    return [pscustomobject]@{ marker = $marker; evidence = $evidence }
 }
 
 function Get-RuntimeAlignmentMarkerProbe(
@@ -2188,15 +2216,27 @@ if ($Mode -eq "Launch") {
                         throw "同一 Launch 发现多个新 Runtime aim-lock 标记，拒绝选择。"
                     }
                     if ($runtimeMarkers.Count -eq 1) {
-                        $runtimeMarker = Read-RuntimeAlignmentMarker `
+                        $runtimeSnapshot = Read-RuntimeAlignmentMarkerSnapshot `
                             $runtimeMarkers[0].FullName
-                        if (-not (Test-RuntimeAlignmentMarkerActive `
-                                $runtimeMarkers[0].FullName `
-                                ([string]$runtimeMarker.session_id) `
-                                ([uint64]$runtimeMarker.activation_epoch))) {
+                        if ($null -eq $runtimeSnapshot) {
                             [void]$process.WaitForExit(100)
                             continue
                         }
+                        $runtimeMarker = $runtimeSnapshot.marker
+                        $runtimeProbe = Get-RuntimeAlignmentMarkerProbeWithRetry `
+                                $runtimeMarkers[0].FullName `
+                                ([string]$runtimeMarker.session_id) `
+                                ([uint64]$runtimeMarker.activation_epoch)
+                        if (-not [bool]$runtimeProbe.active) {
+                            [void]$process.WaitForExit(100)
+                            continue
+                        }
+                        if ([uint64]$runtimeProbe.sequence -lt
+                                [uint64]$runtimeMarker.sequence) {
+                            throw "Runtime aim-lock 标记序号回退，拒绝启动 sidecar。"
+                        }
+                        # 完整内容证据与现有实时门都通过后才提交初始绑定，
+                        # 不再重读动态路径取文件证据，也不把快照当后续 lease。
                         $pixelEvidenceRuntimeMarkerPath =
                             $runtimeMarkers[0].FullName
                         $pixelEvidenceRuntimeAlignment.session_id =
@@ -2204,7 +2244,7 @@ if ($Mode -eq "Launch") {
                         $pixelEvidenceRuntimeAlignment.activation_epoch =
                             [uint64]$runtimeMarker.activation_epoch
                         $pixelEvidenceRuntimeAlignment.marker =
-                            Get-FileEvidence $pixelEvidenceRuntimeMarkerPath
+                            $runtimeSnapshot.evidence
                         Write-Host ("已观察到 Runtime aim-lock：session=" +
                             "$($runtimeMarker.session_id)；开始同步像素采集。")
                         $pixelEvidenceAttemptState =

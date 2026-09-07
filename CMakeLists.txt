@@ -1626,6 +1626,10 @@ if(BUILD_TESTING)
     xen_add_windows_powershell_test(aim_analysis_import_scope_tests
         "${PROJECT_SOURCE_DIR}/tests/aim_analysis_import_scope_tests.ps1"
         -ScriptsRoot "${PROJECT_SOURCE_DIR}/scripts")
+    xen_add_windows_powershell_test(aim_marker_snapshot_tests
+        "${PROJECT_SOURCE_DIR}/scripts/test_aim_marker_snapshot.ps1"
+        -SourcePath "${PROJECT_SOURCE_DIR}/scripts/invoke_aim_manual_acceptance.ps1"
+        -TestRoot "${CMAKE_BINARY_DIR}/aim-marker-snapshot-tests")
     xen_add_windows_powershell_test(powershell_host_contract_tests
         "${PROJECT_SOURCE_DIR}/tests/powershell_host_contract_tests.ps1"
         -PowerShell7Executable "${XEN_POWERSHELL7_EXECUTABLE}"
