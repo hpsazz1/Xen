@@ -119,6 +119,7 @@ struct AimControlDiagnostics {
     float feedforward_x_counts = 0.0f;
     float desired_before_reverse_x_counts = 0.0f;
     float desired_x_counts = 0.0f;
+    // 本帧参与输出的滤波份额；tracking X 的内部死区记忆不直接暴露为请求。
     float filtered_x_counts = 0.0f;
     float shaped_x_counts = 0.0f;
     float residual_before_quantization_x_counts = 0.0f;

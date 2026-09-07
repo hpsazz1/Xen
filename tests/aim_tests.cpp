@@ -18,6 +18,7 @@
 #include "aim_x_plant_replay_fixture.h"
 #include "aim_x_two_dof_holdout_fixture.h"
 #include "aim_x_current_observation_fixture.h"
+#include "aim_x_deadzone_state_replay_fixture.h"
 
 #include <algorithm>
 #include <array>
@@ -5592,7 +5593,232 @@ void test_integral_tracks_constant_velocity_with_bounded_error() {
                std::to_string(real_demand.mean_error));
 }
 
-void test_delayed_closed_loop_holds_moving_base_point() {
+void test_current_deadzone_crossing_preserves_x_maintenance_state() {
+    using namespace aim_x_deadzone_state_replay_fixture;
+    const auto replay = [](const auto& samples, bool perturb_one_sample) {
+        AimConfig config;
+        config.person_class_ids = {0, 2};
+        config.head_class_ids = {1, 3};
+        config.high_confidence = 0.25f;
+        config.low_confidence = 0.10f;
+        config.min_confirmed_hits = 2;
+        config.max_lost_frames = 8;
+        config.min_iou = 0.10f;
+        config.max_center_distance = 0.25f;
+        config.switch_margin = 0.20f;
+        config.switch_confirm_frames = 3;
+        config.switch_cooldown_frames = 5;
+        config.acquisition_range_percent = 90.0f;
+        config.body_aim_height_ratio = 0.35f;
+        config.body_aim_range_percent = 50.0f;
+        config.deadzone_pixels = 1.5f;
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.425f;
+        config.counts_per_pixel_y = 0.400f;
+        config.max_counts_per_frame = 14.0f;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        config.max_delay_compensation_percent = 15.0f;
+        config.enable_prediction = false;
+        config.max_prediction_lead_percent = 35.0f;
+        config.predicted_gain = 0.5f;
+        Aim aim(config);
+        const auto base = std::chrono::steady_clock::time_point(
+            std::chrono::seconds(100));
+        const auto duration = [](std::int64_t nanoseconds) {
+            return std::chrono::duration_cast<
+                std::chrono::steady_clock::duration>(
+                    std::chrono::nanoseconds(nanoseconds));
+        };
+        std::vector<AimResult> trace;
+        for (const auto& sample : samples) {
+            AimFrame frame = make_frame(
+                sample.sequence, base + duration(sample.observation_ns));
+            frame.control_at = base + duration(sample.control_ns);
+            frame.lock_active = true;
+            for (int index = 0; index < sample.detection_count; ++index) {
+                auto detection = sample.detections[
+                    static_cast<std::size_t>(index)];
+                // 成对负控只改变一次源观测的 X，幅度取既有 deadzone。
+                // 后续时间、原观测、Y、模型参数完全相同；它是噪声敏感性
+                // 合同，不是宣称该合成观测真实发生过或预测实际相机轨迹。
+                if (perturb_one_sample && sample.pixel == 2237) {
+                    detection.x1 -= config.deadzone_pixels;
+                    detection.x2 -= config.deadzone_pixels;
+                }
+                frame.detections.push_back(detection);
+            }
+            const auto result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS &&
+                       (result.has_target ||
+                        sample.sequence == samples.front().sequence),
+                   "当前真实前缀首帧完成冷启动后必须逐帧保持目标");
+            if (result.has_command) {
+                // 原没有回执的帧 offset 为零，只确认本次软件请求；
+                // 不将改变后的 counts 冒充原 Run 的真实后端完成量。
+                expect(aim.record_backend_completed_command(
+                           frame.sequence,
+                           frame.control_at + duration(sample.backend_offset_ns),
+                           result.command.dx_counts, result.command.dy_counts),
+                       "当前 X 状态回归必须只确认本次生成的整数请求");
+            }
+            trace.push_back(result);
+        }
+        return trace;
+    };
+    const auto primary = replay(kPrimary, false);
+    const auto reference = replay(kPrimary, true);
+    int command_deficit = 0;
+    int last_request_before_crossing = 0;
+    for (std::size_t index = 0; index < kPrimary.size(); ++index) {
+        const auto& sample = kPrimary[index];
+        const auto& actual = primary[index];
+        const auto& comparison = reference[index];
+        if (sample.pixel == 2236) {
+            last_request_before_crossing = std::abs(actual.command.dx_counts);
+        }
+        if (sample.pixel == 2237) {
+            expect(std::fabs(actual.target.base_aim_x - 160.0f) < 1.5f &&
+                       std::fabs(comparison.target.base_aim_x - 160.0f) < 1.5f &&
+                       (actual.target.base_aim_x - 160.0f) *
+                           (comparison.target.base_aim_x - 160.0f) < 0.0f,
+                   "成对单帧扰动必须只在既有 X deadzone 内改变位置符号");
+            expect(!actual.control.quantization_zero_x &&
+                       actual.control.filtered_x_counts == 0.0f &&
+                       actual.control.modelled_response_x_counts == 0.0f,
+                   "当前方向不接受的滤波状态不得冒充量化空洞或运动追加");
+        }
+        if (sample.pixel < 2238) continue;
+        command_deficit += actual.command.dx_counts -
+            comparison.command.dx_counts;
+        expect(actual.command.dx_counts *
+                       (actual.target.base_aim_x - 160.0f) >= 0.0f &&
+                   actual.command.dy_counts == sample.expected_dy &&
+                   actual.command.dy_counts == comparison.command.dy_counts &&
+                   std::hypot(static_cast<float>(actual.command.dx_counts),
+                              static_cast<float>(actual.command.dy_counts)) <= 14.0f,
+               "死区状态保留不得改变当前方向、Y 或二维 14-count 合同");
+        expect(std::abs(actual.command.dx_counts) <= last_request_before_crossing,
+               "近中心恢复不得新增超过穿零前已存在请求的运动预算");
+    }
+    expect(std::abs(command_deficit) <= 1,
+           "单帧 deadzone 内换侧不得清掉同一真实前缀随后三帧的 X 维持能力；"
+           "与成对观测的累计整数差=" + std::to_string(command_deficit));
+
+    const auto slowing = replay(kSlowing, false);
+    int reverse_request_sum = 0;
+    for (std::size_t index = 0; index < kSlowing.size(); ++index) {
+        if (kSlowing[index].pixel < 451) continue;
+        const auto& result = slowing[index];
+        expect(result.command.dx_counts * (result.target.base_aim_x - 160.0f) >= 0.0f &&
+                   result.command.dy_counts == kSlowing[index].expected_dy,
+               "451 减速与后继反侧必须保留当前方向和 Y");
+        if (kSlowing[index].pixel >= 453) {
+            reverse_request_sum += std::max(0, result.command.dx_counts);
+        }
+    }
+    expect(reverse_request_sum <= 30,
+           "当前减速后继不得增加原有反侧纠正请求总量，实际=" +
+               std::to_string(reverse_request_sum));
+    const auto rebound = replay(kRebound, false);
+    int request_before_rebound = 0;
+    for (std::size_t index = 0; index < kRebound.size(); ++index) {
+        const auto& sample = kRebound[index];
+        const auto& result = rebound[index];
+        if (sample.pixel == 2255) {
+            request_before_rebound = std::abs(result.command.dx_counts);
+        }
+        if (sample.pixel < 2257) continue;
+        expect(result.command.dx_counts * (result.target.base_aim_x - 160.0f) >= 0.0f &&
+                   result.command.dy_counts == sample.expected_dy,
+               "2257 短暂回到原侧及随后的真实换侧不得放出旧方向命令或改变 Y");
+        if (sample.pixel == 2257) {
+            expect(std::abs(result.command.dx_counts) <= request_before_rebound,
+                   "2257 不得借死区保留状态释放整份 observer 维持预算");
+        }
+    }
+    std::cout << "6970875 deadzone 状态成对回归: 后继三帧整数差="
+              << command_deficit << "，减速反侧请求总量="
+              << reverse_request_sum << '\n';
+}
+
+void test_deadzone_state_settles_with_noise_and_release() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.acquisition_range_percent = 100.0f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.4f;
+    config.max_counts_per_frame = 14.0f;
+    config.deadzone_pixels = 1.5f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.body_aim_height_ratio = 0.5f;
+    for (int direction : {-1, 1}) {
+        Aim aim(config);
+        std::array<int, 4> delayed_commands{};
+        float world_x = 24.0f * direction;
+        float camera_x = 0.0f;
+        int tail_commands = 0;
+        float tail_max_error = 0.0f;
+        const auto base = std::chrono::steady_clock::time_point(
+            std::chrono::seconds(100));
+        for (int index = 0; index < 900; ++index) {
+            const auto slot = static_cast<std::size_t>(index % 4);
+            // 固定的既有测试模型，实际像素由候选自己的请求驱动。
+            // 它仅约束停止/噪声稳定性，不代表真实 KMBOX 的响应模型。
+            camera_x += delayed_commands[slot] /
+                config.counts_per_pixel_x * 0.20f;
+            delayed_commands[slot] = 0;
+            if (index < 120) {
+                world_x += direction * (320.0f * 0.75f) / 240.0f;
+            }
+            const float noise = index >= 120
+                ? (index % 2 == 0 ? 1.0f : -1.0f) *
+                      config.deadzone_pixels * 0.25f
+                : 0.0f;
+            auto frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(index * 4167LL));
+            frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+            frame.lock_active = !(index >= 720 && index < 780);
+            frame.detections = {body_box(
+                160.0f + world_x - camera_x + noise, 160.0f, 44.8f, 89.6f)};
+            const auto result = aim.process(frame);
+            expect(result.has_target, "死区噪声及松键重锁必须保留目标");
+            const int dx = result.has_command ? result.command.dx_counts : 0;
+            if (result.has_command) {
+                expect(aim.record_backend_completed_command(
+                           frame.sequence,
+                           frame.control_at + std::chrono::microseconds(100),
+                           frame.lock_active ? dx : 0,
+                           frame.lock_active ? result.command.dy_counts : 0),
+                       "松键时只能确认未应用零量，锁键时只确认本次请求");
+            }
+            expect(dx * (result.target.base_aim_x - 160.0f) >= 0.0f &&
+                       result.command.dy_counts == 0 &&
+                       std::abs(dx) <= 14,
+                   "死区噪声状态不得生成反向、跨轴或超上限请求");
+            // 与 Runtime 的锁键执行边界相同：预计算结果不等于已应用量。
+            if (frame.lock_active) delayed_commands[slot] = dx;
+            if (index >= 540) {
+                tail_commands += std::abs(delayed_commands[slot]);
+                tail_max_error = std::max(
+                    tail_max_error, std::fabs(world_x - camera_x));
+            }
+        }
+        expect(tail_commands == 0 && tail_max_error <= config.deadzone_pixels,
+               "保留的 X 状态必须在停止、持续死区噪声、松键与重锁后安静收敛；"
+               "尾部请求/误差=" + std::to_string(tail_commands) + "/" +
+                   std::to_string(tail_max_error));
+    }
+}
+
+void test_delayed_closed_loop_holds_moving_base_point(bool record_completion = false) {
     constexpr float kFrameSeconds = 1.0f / 240.0f;
     constexpr int kActuationDelayFrames = 4;
     AimConfig config;
@@ -5639,6 +5865,13 @@ void test_delayed_closed_loop_holds_moving_base_point() {
         frame.lock_active = true;
         frame.detections = {body(160.0f + observed_error, 160.0f)};
         const AimResult result = aim.process(frame);
+        if (record_completion && result.has_command) {
+            expect(aim.record_backend_completed_command(
+                       frame.sequence,
+                       frame.control_at + std::chrono::microseconds(100),
+                       result.command.dx_counts, result.command.dy_counts),
+                   "带完成库存的周期变速镜像必须只确认本次请求");
+        }
         const int horizontal_command = result.has_command
             ? result.command.dx_counts : 0;
         expect(previous_horizontal_command * horizontal_command >= 0,
@@ -9001,7 +9234,8 @@ void test_tracking_derivative_separates_in_box_reference_from_common_translation
                std::to_string(faster_common.current.command.dy_counts));
 }
 
-void test_delayed_partial_visibility_closed_loop_preserves_real_reversals() {
+void test_delayed_partial_visibility_closed_loop_preserves_real_reversals(
+        bool record_completion = false) {
     constexpr int kFrameCount = 240;
     constexpr int kSegmentFrameCount = 80;
     constexpr int kActuationDelayFrames = 4;
@@ -9122,6 +9356,13 @@ void test_delayed_partial_visibility_closed_loop_preserves_real_reversals() {
             const AimResult result = aim.process(frame);
             expect(result.status == AimStatus::SUCCESS && result.has_target,
                    "左右半身、完整框恢复及真实反转闭环必须逐帧保留目标");
+            if (record_completion && result.has_command) {
+                expect(aim.record_backend_completed_command(
+                           frame.sequence,
+                           frame.control_at + std::chrono::microseconds(100),
+                           result.command.dx_counts, result.command.dy_counts),
+                       "带完成库存的半身反转镜像必须只确认本次请求");
+            }
             if (!result.has_target) continue;
             if (track_id == 0) track_id = result.target.track_id;
             if (result.target.track_id != track_id) ++trace.identity_changes;
@@ -14882,6 +15123,9 @@ int main() {
     test_control_trajectory_never_moves_away_from_target();
     test_integral_tracks_constant_velocity_with_bounded_error();
     test_delayed_closed_loop_holds_moving_base_point();
+    test_delayed_closed_loop_holds_moving_base_point(true);
+    test_current_deadzone_crossing_preserves_x_maintenance_state();
+    test_deadzone_state_settles_with_noise_and_release();
     test_delayed_pose_closed_loop_keeps_tracking_pi_continuous();
     test_vertical_shape_noise_does_not_stutter_horizontal_tracking();
     test_backend_completed_command_feedback_contract();
@@ -14905,6 +15149,7 @@ int main() {
     test_actual_game_semantic_landmark_does_not_gain_base_x_phase();
     test_tracking_derivative_separates_in_box_reference_from_common_translation();
     test_delayed_partial_visibility_closed_loop_preserves_real_reversals();
+    test_delayed_partial_visibility_closed_loop_preserves_real_reversals(true);
     test_delayed_left_motion_quantizes_from_world_feedforward();
     test_tracking_pi_is_separate_from_prediction_projection();
     test_base_tracking_quantization_has_no_speed_threshold();

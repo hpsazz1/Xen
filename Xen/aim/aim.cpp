@@ -3988,11 +3988,12 @@ struct Aim::Impl {
                 controller_dt) *
             pending_alignment_weight;
 
-        // 积分只消费当前图像特征误差。误差在死区外真实换边时，旧积分
-        // 表示上一方向的扰动而不再有效，直接从零重建；这不是等待证据的
-        // 换向门，当前比例项同一帧即可输出新方向。
+        // X 的积分包含已学到的维持量。当前点在 deadzone 内换侧并不
+        // 证明这份运动已经消失；保留其真实时间泄漏，把本帧能否输出交给
+        // 后面的方向投影。死区外换侧仍从零重建，Y 保持原清零合同。
         if (feedforward_x != 0.0f &&
-            error_x * feedforward_x <= 0.0f) {
+            error_x * feedforward_x <= 0.0f &&
+            x_error_magnitude > config.deadzone_pixels) {
             feedforward_x = 0.0f;
         }
         if (feedforward_y != 0.0f &&
@@ -4119,7 +4120,16 @@ struct Aim::Impl {
                 filtered + (desired - filtered) * config.smoothing;
             filtered = candidate * desired < 0.0f ? 0.0f : candidate;
         };
-        filter_axis(desired_x, error_x, filtered_x);
+        // 与积分保持同一状态寿命：死区内仅抑制不朝当前点的实际请求，
+        // 不清除滤波记忆后又从零爬升。否则一次亚像素换侧即使没有改变
+        // 目标运动，也会同时丢掉积分与已经平滑好的维持量。
+        if (x_error_magnitude <= config.deadzone_pixels) {
+            filtered_x = controller_initialized
+                ? filtered_x + (desired_x - filtered_x) * config.smoothing
+                : desired_x;
+        } else {
+            filter_axis(desired_x, error_x, filtered_x);
+        }
         filter_axis(desired_y, error_y, filtered_y);
         controller_initialized = true;
         clamp_tracking_vector_preserving_y(
@@ -4140,13 +4150,18 @@ struct Aim::Impl {
                     integral_x_toward_target * (1.0f - opening_x_weight)));
         const float target_motion_request_x =
             x_error_direction * target_motion_request_magnitude_x;
-        float motion_compensated_x = filtered_x + target_motion_request_x;
+        // 内部滤波状态可以保留旧符号，本帧的输出份额仍必须朝当前 X
+        // 误差；精确零点输出零，不借状态保留释放 observer 的位置封顶。
+        const float eligible_filtered_x = x_error_direction * std::max(
+            0.0f, x_error_direction * filtered_x);
+        float motion_compensated_x =
+            eligible_filtered_x + target_motion_request_x;
         float motion_compensated_y = filtered_y;
         clamp_tracking_vector_preserving_y(
             motion_compensated_x, motion_compensated_y,
             config.max_counts_per_frame);
         diagnostics.modelled_response_x_counts =
-            motion_compensated_x - filtered_x;
+            motion_compensated_x - eligible_filtered_x;
         // 导数状态不回写 PI、anti-windup 或既有 smoothing。只消费朝零
         // closing slope，并从当前误差同向的 X 请求中连续扣减；扣减预算
         // 不超过该同向余量，因此滤波残留不能自行产生反向命令。
@@ -4175,7 +4190,7 @@ struct Aim::Impl {
         shaper_initialized = true;
         residual_y = 0.0f;
         diagnostics.desired_x_counts = shaped_x;
-        diagnostics.filtered_x_counts = filtered_x;
+        diagnostics.filtered_x_counts = eligible_filtered_x;
         diagnostics.shaped_x_counts = shaped_x;
 
         command.sequence = frame.sequence;
@@ -4220,7 +4235,7 @@ struct Aim::Impl {
             ? quantized_x - static_cast<float>(quantized_command_x)
             : 0.0f;
         diagnostics.quantization_zero_x =
-            command.dx_counts == 0 && std::fabs(desired_x) > 0.001f;
+            command.dx_counts == 0 && std::fabs(shaped_x) > 0.001f;
         diagnostics.deadzone_quiet =
             x_error_magnitude <= config.deadzone_pixels &&
             vertical_error_magnitude <= config.deadzone_pixels &&
