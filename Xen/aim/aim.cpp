@@ -3945,10 +3945,16 @@ struct Aim::Impl {
                 tracking_plant_pixels_per_count_x / controller_dt;
             const float target_motion_alpha = controller_dt /
                 (kTrackingTargetMotionFilterTimeSeconds + controller_dt);
-            tracking_target_velocity_counts_per_second_x +=
-                target_motion_alpha *
-                (target_velocity_measurement_counts_per_second_x -
-                 tracking_target_velocity_counts_per_second_x);
+            // 两边异向形变时，共同平移提取没有可用结果，不能把返回的零
+            // 当作世界目标静止来撤销已有运动。仅跳过这次速度校正，后续
+            // 位置纠偏、方向和预算仍正常更新；零边位移保持原更新语义。
+            if (track.horizontal_raw_left_motion_x *
+                    track.horizontal_raw_right_motion_x >= 0.0f) {
+                tracking_target_velocity_counts_per_second_x +=
+                    target_motion_alpha *
+                    (target_velocity_measurement_counts_per_second_x -
+                     tracking_target_velocity_counts_per_second_x);
+            }
         } else {
             tracking_target_velocity_counts_per_second_x = 0.0f;
         }

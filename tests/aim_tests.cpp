@@ -20,6 +20,7 @@
 #include "aim_x_current_observation_fixture.h"
 #include "aim_x_deadzone_state_replay_fixture.h"
 #include "aim_x_current_response_replay_fixture.h"
+#include "aim_x_opposed_edge_replay_fixture.h"
 
 #include <algorithm>
 #include <array>
@@ -3291,6 +3292,196 @@ void test_current_x_response_inside_deadzone() {
     }
     std::cout << "051df1c 实际 X 响应回归：软件首请求=" << first_response[0]
               << "/" << first_response[1] << "，不代表物理验收\n";
+}
+
+
+void test_current_opposed_edges_preserve_x_motion_request() {
+    using namespace aim_x_opposed_edge_replay_fixture;
+    AimConfig config;
+    config.person_class_ids = {0, 2};
+    config.head_class_ids = {1, 3};
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.1f;
+    config.min_confirmed_hits = 2;
+    config.max_lost_frames = 8;
+    config.min_iou = 0.1f;
+    config.max_center_distance = 0.25f;
+    config.switch_margin = 0.2f;
+    config.switch_confirm_frames = 3;
+    config.switch_cooldown_frames = 5;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.4f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    config.max_prediction_lead_percent = 35.0f;
+    config.predicted_gain = 0.5f;
+    Aim aim(config);
+    const auto at = [](std::int64_t ns) {
+        return std::chrono::steady_clock::time_point(
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::nanoseconds(ns)));
+    };
+    int window_rows = 0;
+    float previous_error = 0.0f;
+    std::int64_t previous_observation_ns = 0;
+    for (const auto& sample : kSamples) {
+        if (sample.clock_reset) aim.reset();
+        auto frame = make_frame(sample.sequence, at(sample.observation_ns));
+        frame.control_at = at(sample.control_ns);
+        frame.lock_active = sample.lock_active;
+        frame.source_pixels_per_roi_pixel_x = 1.0f;
+        frame.source_pixels_per_roi_pixel_y = 1.0f;
+        for (int index = 0; index < sample.detection_count; ++index) {
+            frame.detections.push_back(sample.detections[static_cast<std::size_t>(index)]);
+        }
+        const auto result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "新实际异号边前缀必须正常处理每个公开输入");
+        if (result.has_command) {
+            // 只确认本次请求；原 offset 为零的帧不代表真实设备即时响应。
+            expect(aim.record_backend_completed_command(
+                       frame.sequence, at(sample.control_ns + sample.backend_offset_ns),
+                       frame.lock_active ? result.command.dx_counts : 0,
+                       frame.lock_active ? result.command.dy_counts : 0),
+                   "实际异号边回归必须成功确认本分支自身请求");
+        }
+        if (sample.pixel_matched) {
+            expect(result.command.dy_counts == sample.expected_dy,
+                   "精确像素前缀必须保持原 Y 请求");
+        }
+        const float error = result.target.base_aim_x - frame.control_center_x;
+        expect((!result.has_target || result.command.dx_counts * error >= 0.0f) &&
+                   std::hypot(static_cast<float>(result.command.dx_counts),
+                              static_cast<float>(result.command.dy_counts)) <= 14.0f,
+               "实际异号边响应不得违反当前方向或既有二维上限");
+        if (sample.sequence < 1482 || sample.sequence > 1485) continue;
+        expect(frame.lock_active && result.control.evaluated &&
+                   result.has_target && error < 0.0f &&
+                   (window_rows == 0 || error < previous_error) &&
+                   sample.observation_ns > previous_observation_ns &&
+                   result.control.reverse_translation_raw_left_x_roi_pixels *
+                       result.control.reverse_translation_raw_right_x_roi_pixels < 0.0f,
+               "实际窗口必须保持新鲜异号边与同向位置误差持续增长的前提");
+        // 这四帧的离线背景位移支持目标持续同向；背景不传入 Aim。
+        // 检查公开运动追加没有耗尽，不预设内部 observer 值或整数输出额度。
+        expect(result.control.modelled_response_x_counts * error > 0.0f,
+               "该实际四帧窗口不得把已有同向运动请求耗为零");
+        ++window_rows;
+        previous_error = error;
+        previous_observation_ns = sample.observation_ns;
+    }
+    expect(window_rows == 4, "实际异号边响应窗口必须完整覆盖四个原始输入");
+}
+
+void test_opposed_width_stop_and_release() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.acquisition_range_percent = 100.0f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.4f;
+    config.max_counts_per_frame = 14.0f;
+    config.deadzone_pixels = 1.5f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.body_aim_height_ratio = 0.5f;
+    for (int direction : {-1, 1}) {
+        Aim aim(config);
+        std::array<int, 4> delayed_commands{};
+        float world_x = 24.0f * direction;
+        float camera_x = 0.0f;
+        int tail_commands = 0;
+        bool established_motion = false;
+        std::uint64_t stable_track_id = 0;
+        int opposed_before_release = 0;
+        float tail_max_error = 0.0f;
+        const auto base = std::chrono::steady_clock::time_point(
+            std::chrono::seconds(100));
+        for (int index = 0; index < 900; ++index) {
+            const auto slot = static_cast<std::size_t>(index % 4);
+            // 固定的既有测试模型，实际像素由候选自己的请求驱动。
+            // 它仅约束停止/噪声稳定性，不代表真实 KMBOX 的响应模型。
+            camera_x += delayed_commands[slot] /
+                config.counts_per_pixel_x * 0.20f;
+            delayed_commands[slot] = 0;
+            if (index < 120) {
+                world_x += direction * (320.0f * 0.75f) / 240.0f;
+            }
+            const float noise = index >= 120
+                ? (index % 2 == 0 ? 1.0f : -1.0f) *
+                      config.deadzone_pixels * 0.25f
+                : 0.0f;
+            auto frame = make_frame(
+                static_cast<std::uint64_t>(index + 1),
+                base + std::chrono::microseconds(index * 4167LL));
+            frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+            frame.lock_active = !(index >= 720 && index < 780);
+            frame.detections = {body_box(
+                160.0f + world_x - camera_x, 160.0f, 44.8f, 89.6f)};
+            frame.detections.front().x1 -= noise;
+            frame.detections.front().x2 += noise;
+            const auto result = aim.process(frame);
+            if (index >= 540 && index < 720 &&
+                result.control.reverse_translation_raw_left_x_roi_pixels *
+                    result.control.reverse_translation_raw_right_x_roi_pixels < 0.0f) {
+                ++opposed_before_release;
+            }
+
+            expect(result.status == AimStatus::SUCCESS && result.has_target,
+                   "宽度噪声及松键重锁必须保留合法目标");
+            if (stable_track_id == 0) stable_track_id = result.target.track_id;
+            if (index < 720) {
+                expect(result.target.track_id == stable_track_id,
+                       "停止前后不能靠更换目标清除待验证的运动历史");
+            }
+            if (index < 120 &&
+                direction * result.control.modelled_response_x_counts > 0.0f) {
+                established_motion = true;
+            }
+            const int dx = result.has_command ? result.command.dx_counts : 0;
+            if (result.has_command) {
+                expect(aim.record_backend_completed_command(
+                           frame.sequence,
+                           frame.control_at + std::chrono::microseconds(100),
+                           frame.lock_active ? dx : 0,
+                           frame.lock_active ? result.command.dy_counts : 0),
+                       "松键时只能确认未应用零量，锁键时只确认本次请求");
+            }
+            expect(dx * (result.target.base_aim_x - 160.0f) >= 0.0f &&
+                       result.command.dy_counts == 0 &&
+                       std::abs(dx) <= 14,
+                   "死区噪声状态不得生成反向、跨轴或超上限请求");
+            // 与 Runtime 的锁键执行边界相同：预计算结果不等于已应用量。
+            if (frame.lock_active) delayed_commands[slot] = dx;
+            if (index >= 540) {
+                tail_commands += std::abs(delayed_commands[slot]);
+                tail_max_error = std::max(
+                    tail_max_error, std::fabs(world_x - camera_x));
+            }
+        }
+        expect(established_motion, "停止前必须确实建立同向运动请求");
+        expect(opposed_before_release == 180,
+               "无 reset 的停止尾段必须确实覆盖持续异号形变");
+        std::cout << "width-stop direction=" << direction << " tail_commands=" << tail_commands
+                  << " tail_max_error=" << tail_max_error << " opposed_before_release="
+                  << opposed_before_release << "\n";
+        expect(tail_commands == 0 && tail_max_error <= config.deadzone_pixels,
+               "保留的 X 状态必须在停止、持续死区噪声、松键与重锁后安静收敛；"
+               "尾部请求/误差=" + std::to_string(tail_commands) + "/" +
+                   std::to_string(tail_max_error));
+    }
 }
 
 
@@ -15489,6 +15680,8 @@ int main() {
     test_head_only_width_change_skips_body_partial_guard();
     test_partial_visibility_persistent_geometry_recovers_track_width();
     test_current_x_response_inside_deadzone();
+    test_current_opposed_edges_preserve_x_motion_request();
+    test_opposed_width_stop_and_release();
     test_partial_body_reference_obeys_current_visible_window();
     test_partial_body_reference_does_not_replace_other_geometry();
     test_partial_body_reference_clears_after_gap_and_reset();
