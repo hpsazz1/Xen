@@ -1086,6 +1086,9 @@ struct Aim::Impl {
     int switch_cooldown = 0;
     std::uint64_t controller_track_id = 0;
     float filtered_x = 0.0f;
+    // 进入 PI 请求的积分份额，经历与总请求相同的缩放和滤波。
+    // 它不等于 anti-windup 回写后的积分状态，也不作为新的运动估计。
+    float tracking_filtered_integral_x = 0.0f;
     float filtered_y = 0.0f;
     float shaped_x = 0.0f;
     float shaped_y = 0.0f;
@@ -3164,6 +3167,7 @@ struct Aim::Impl {
 
     void reset_controller() noexcept {
         controller_track_id = 0;
+        tracking_filtered_integral_x = 0.0f;
         filtered_x = 0.0f;
         filtered_y = 0.0f;
         shaped_x = 0.0f;
@@ -3877,6 +3881,7 @@ struct Aim::Impl {
             feedforward_x *= leak;
             feedforward_y *= leak;
             filtered_x *= leak;
+            tracking_filtered_integral_x *= leak;
             filtered_y *= leak;
             shaped_x = filtered_x;
             shaped_y = filtered_y;
@@ -4100,6 +4105,9 @@ struct Aim::Impl {
         diagnostics.observer_phase_command_x_counts =
             source_phase_request_x;
 
+        // 保存本帧实际进入线性请求的 I；后续 back-calculation 回写积分
+        // 状态但不追溯改变当前滤波输入；回写值仍按原路径用于本帧运动去重。
+        float tracking_integral_input_x = feedforward_x;
         const float unconstrained_x =
             proportional_x + feedforward_x + source_phase_request_x;
         const float unconstrained_y = proportional_y + feedforward_y;
@@ -4107,6 +4115,10 @@ struct Aim::Impl {
         float desired_y = unconstrained_y;
         clamp_tracking_vector_preserving_y(
             desired_x, desired_y, config.max_counts_per_frame);
+        if (unconstrained_x != 0.0f) {
+            tracking_integral_input_x *= desired_x / unconstrained_x;
+        }
+        const float tracking_before_history_x = desired_x;
         // Åström/Rundqwist 的 tracking anti-windup：执行器实际可接受向量与
         // 线性 PI 请求之差连续回写状态。这里唯一硬上限就是既有物理向量
         // 上限，不再另建 pending、probe、相位或速度门。
@@ -4149,6 +4161,9 @@ struct Aim::Impl {
                 desired_x = history_adjusted_x;
             }
         }
+        if (tracking_before_history_x != 0.0f) {
+            tracking_integral_input_x *= desired_x / tracking_before_history_x;
+        }
         diagnostics.proportional_x_counts = proportional_x;
         diagnostics.feedforward_x_counts = feedforward_x;
         diagnostics.desired_before_reverse_x_counts = unconstrained_x;
@@ -4160,6 +4175,7 @@ struct Aim::Impl {
 
         // 分轴一阶滤波保留用户 smoothing。旧二维方向重排会把既有 Y 模长
         // 瞬时搬到 X；这里每轴独立按自身零点连续通过，不再共享模长。
+        enum class FilterUpdate { Reset, Initialize, Smooth };
         const auto filter_axis = [&](float desired, float error,
                                      float& filtered) {
             // 原始图像误差已经过零时，即使还落在软死区、比例项为零，也
@@ -4167,38 +4183,73 @@ struct Aim::Impl {
             // 反侧走出死区才释放，形成可见的小幅往返。
             if (filtered != 0.0f && filtered * error <= 0.0f) {
                 filtered = 0.0f;
-                return;
+                return FilterUpdate::Reset;
             }
             if (!controller_initialized) {
                 filtered = desired;
-                return;
+                return FilterUpdate::Initialize;
             }
             const float candidate =
                 filtered + (desired - filtered) * config.smoothing;
-            filtered = candidate * desired < 0.0f ? 0.0f : candidate;
+            if (candidate * desired < 0.0f) {
+                filtered = 0.0f;
+                return FilterUpdate::Reset;
+            }
+            filtered = candidate;
+            return FilterUpdate::Smooth;
         };
         // 与积分保持同一状态寿命：死区内仅抑制不朝当前点的实际请求，
         // 不清除滤波记忆后又从零爬升。否则一次亚像素换侧即使没有改变
         // 目标运动，也会同时丢掉积分与已经平滑好的维持量。
+        FilterUpdate x_filter_update;
         if (x_error_magnitude <= config.deadzone_pixels) {
             filtered_x = controller_initialized
                 ? filtered_x + (desired_x - filtered_x) * config.smoothing
                 : desired_x;
+            x_filter_update = controller_initialized
+                ? FilterUpdate::Smooth : FilterUpdate::Initialize;
         } else {
-            filter_axis(desired_x, error_x, filtered_x);
+            x_filter_update = filter_axis(desired_x, error_x, filtered_x);
+        }
+        // 份额复用实际滤波转移结果，避免另写一套过零/reset 判据。
+        switch (x_filter_update) {
+        case FilterUpdate::Reset:
+            tracking_filtered_integral_x = 0.0f;
+            break;
+        case FilterUpdate::Initialize:
+            tracking_filtered_integral_x = tracking_integral_input_x;
+            break;
+        case FilterUpdate::Smooth:
+            tracking_filtered_integral_x +=
+                (tracking_integral_input_x - tracking_filtered_integral_x) *
+                    config.smoothing;
+            break;
         }
         filter_axis(desired_y, error_y, filtered_y);
         controller_initialized = true;
+        const float tracking_before_filter_cap_x = filtered_x;
         clamp_tracking_vector_preserving_y(
             filtered_x, filtered_y, config.max_counts_per_frame);
+        if (tracking_before_filter_cap_x != 0.0f) {
+            tracking_filtered_integral_x *=
+                filtered_x / tracking_before_filter_cap_x;
+        }
         // PI 校正图像特征位置残差，目标运动观察器提供目标运动维持量。
         // 未见 opening 时，同向积分可能已学习到同一扰动，继续只补二者
         // 缺口，避免重复支付；当前左右边共同位移仍让误差增大时，则按既有
         // opening 连续证据保留相同比例的积分残差，不再每帧把观察器维持量
-        // 全部抵消。位置余量只限制新增运动请求，不保证整数输出或物理
+        // 全部抵消。下方分别约束位置尾部与新增运动请求，不保证整数输出或物理
         // 位移恰好封顶于误差；组合输出仍经过原二维 counts 上限。
-        const float eligible_filtered_x = x_error_direction * std::max(
-            0.0f, x_error_direction * filtered_x);
+        // 已有积分输入份额承担持续维持，不能因近中心位置扰动整体裁掉。
+        // 仅限制超出当前几何额度及该份额的位置/phase 尾部；对原净请求
+        // 取 min 保留异号份额的抵消，不会凭分解增加输出。H 仍是软件额度，
+        // 不把它声明为已验证的物理位移上限，也不改后续运动追加去重。
+        const float preserved_integral_magnitude_x = std::max(
+            0.0f, x_error_direction * tracking_filtered_integral_x);
+        const float eligible_filtered_x = x_error_direction * std::min(
+            std::max(0.0f, x_error_direction * filtered_x),
+            std::max(target_motion_position_headroom_x,
+                     preserved_integral_magnitude_x));
         // PI 保留自己的维持量；运动追加只使用尚未被同向 PI 占用的位置
         // 额度。死区约束位置纠偏，不抹掉当前仍有几何余量的运动响应。
         const float remaining_position_headroom_x = std::max(
@@ -4343,6 +4394,8 @@ struct Aim::Impl {
                 frame, track, base_x, base_y,
                 current_controller_at, diagnostics, command);
         }
+        // 此份额只属于 tracking PI，不能跨入另一控制路径继续消费。
+        tracking_filtered_integral_x = 0.0f;
         // 轨迹估计继续严格使用 captured_at；控制滤波、泄漏、slew 与
         // 命令库存统一使用 process() 解析出的同一控制时刻。
         if (track.predicted && !config.enable_prediction) {

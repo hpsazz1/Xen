@@ -21,6 +21,7 @@
 #include "aim_x_deadzone_state_replay_fixture.h"
 #include "aim_x_current_response_replay_fixture.h"
 #include "aim_x_opposed_edge_replay_fixture.h"
+#include "aim_x_position_tail_replay_fixture.h"
 
 #include <algorithm>
 #include <array>
@@ -15635,6 +15636,197 @@ void test_latest_physical_pixel_holdout_rejects_regressive_x_candidates() {
                std::to_string(vertical_command_frames));
 }
 
+void test_current_nearcenter_position_tail_preserves_maintenance() {
+    using namespace aim_x_position_tail_replay_fixture;
+    AimConfig config;
+    config.person_class_ids = {0, 2};
+    config.head_class_ids = {1, 3};
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.1f;
+    config.min_confirmed_hits = 2;
+    config.max_lost_frames = 8;
+    config.min_iou = 0.1f;
+    config.max_center_distance = 0.25f;
+    config.switch_margin = 0.2f;
+    config.switch_confirm_frames = 3;
+    config.switch_cooldown_frames = 5;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.4f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    config.max_prediction_lead_percent = 35.0f;
+    config.predicted_gain = 0.5f;
+    Aim aim(config);
+    const auto at = [](std::int64_t ns) {
+        return std::chrono::steady_clock::time_point(
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::nanoseconds(ns)));
+    };
+    float prior_integral_peak = 0.0f;
+    int history_rows = 0, opening_rows = 0, nearcenter_rows = 0;
+    for (const auto& sample : kSamples) {
+        if (sample.clock_reset) aim.reset();
+        auto frame = make_frame(sample.sequence, at(sample.observation_ns));
+        frame.control_at = at(sample.control_ns);
+        frame.lock_active = sample.lock_active;
+        frame.source_pixels_per_roi_pixel_x = 1.0f;
+        frame.source_pixels_per_roi_pixel_y = 1.0f;
+        for (int index = 0; index < sample.detection_count; ++index) {
+            frame.detections.push_back(sample.detections[static_cast<std::size_t>(index)]);
+        }
+        const auto result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "当前实际位置尾部前缀必须正常处理每个公开输入");
+        if (result.has_command) {
+            expect(aim.record_backend_completed_command(
+                       frame.sequence, at(sample.control_ns + sample.backend_offset_ns),
+                       frame.lock_active ? result.command.dx_counts : 0,
+                       frame.lock_active ? result.command.dy_counts : 0),
+                   "当前位置尾部回归只确认本分支自身请求");
+        }
+        if (sample.pixel_matched) {
+            expect(result.command.dy_counts == sample.expected_dy,
+                   "当前位置尾部回归必须保持精确像素范围原Y请求");
+        }
+        const float error = result.target.base_aim_x - frame.control_center_x;
+        expect((!result.has_target || result.command.dx_counts * error >= 0.0f) &&
+                   std::hypot(static_cast<float>(result.command.dx_counts),
+                              static_cast<float>(result.command.dy_counts)) <= 14.0f,
+               "位置尾部回归不得违反当前方向或既有二维上限");
+        if (sample.sequence >= 3318 && sample.sequence <= 3322) {
+            expect(frame.lock_active && result.control.evaluated &&
+                       result.target.track_id != 0 && error < -config.deadzone_pixels &&
+                       result.control.feedforward_x_counts < 0.0f,
+                   "进入近中心前必须已有同方向的积分维持预算");
+            prior_integral_peak = std::max(prior_integral_peak,
+                std::fabs(result.control.feedforward_x_counts));
+            ++history_rows;
+        }
+        if (sample.sequence == 3318 || sample.sequence == 3320 || sample.sequence == 3321) {
+            const float left = result.control.reverse_translation_raw_left_x_roi_pixels;
+            const float right = result.control.reverse_translation_raw_right_x_roi_pixels;
+            expect(left < 0.0f && right < 0.0f &&
+                       result.control.proportional_x_counts < 0.0f && error < 0.0f,
+                   "位置负控必须仍有同向共同位移和新的P校正输入");
+            expect(result.command.dx_counts == sample.expected_dx,
+                   "当前P仍在追赶的真实负控不得削减原同方向整数请求");
+            ++opening_rows;
+        }
+        if (sample.sequence != 3323) continue;
+        ++nearcenter_rows;
+        expect(history_rows == 5 && prior_integral_peak > 0.0f &&
+                   frame.lock_active && result.control.evaluated &&
+                   error < 0.0f && std::fabs(error) <= config.deadzone_pixels &&
+                   result.control.proportional_x_counts == 0.0f &&
+                   result.control.observer_phase_command_x_counts == 0.0f &&
+                   result.control.feedforward_x_counts < 0.0f &&
+                   result.control.desired_before_reverse_x_counts ==
+                       result.control.feedforward_x_counts,
+               "实际近中心窗必须只有当帧积分输入，不能用新P/phase冒充历史尾部");
+        // 界限来自同一前缀已存在的公开积分范围，不复制内部预算公式或固定q。
+        expect(std::fabs(result.control.filtered_x_counts) <= prior_integral_peak,
+               "新位置输入已归零时，不应继续保留超出既有积分维持范围的位置尾部");
+        expect(result.has_command && result.command.dx_counts * error > 0.0f,
+               "缩减旧位置尾部仍须保留同方向整数维持请求");
+        std::cout << "3dda近中心：历史积分峰值=" << prior_integral_peak
+                  << " 当前filtered=" << result.control.filtered_x_counts
+                  << " q=" << result.command.dx_counts << "\n";
+    }
+    expect(history_rows == 5 && opening_rows == 3 && nearcenter_rows == 1,
+           "真实位置尾部回归必须完整覆盖历史、opening负控与近中心窗");
+}
+
+void test_position_tail_lifecycle_matches_fresh_tracking() {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.max_lost_frames = 3;
+    config.acquisition_range_percent = 100.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.4f;
+    config.max_counts_per_frame = 14.0f;
+    config.body_aim_height_ratio = 0.5f;
+    config.enable_prediction = false;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    const auto base = std::chrono::steady_clock::time_point(std::chrono::seconds(100));
+    const auto confirm = [](Aim& aim, const AimFrame& frame, const AimResult& result) {
+        if (result.has_command) {
+            expect(aim.record_backend_completed_command(frame.sequence,
+                       frame.control_at + std::chrono::microseconds(100),
+                       result.command.dx_counts, result.command.dy_counts),
+                   "生命周期对照只确认本实例请求");
+        }
+    };
+    // reset、配置重建与完整丢失分别和新实例对照；不读取任何私有积分状态。
+    for (int transition = 0; transition < 3; ++transition) {
+        Aim used(config);
+        bool integral_seen = false;
+        for (int index = 0; index < 40; ++index) {
+            auto frame = make_frame(index + 1, base + std::chrono::milliseconds(index * 4));
+            frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+            frame.lock_active = true;
+            frame.detections = {body(140.0f, 160.0f)};
+            const auto result = used.process(frame);
+            integral_seen = integral_seen || result.control.feedforward_x_counts < 0.0f;
+            confirm(used, frame, result);
+        }
+        expect(integral_seen, "状态切换前必须先建立积分维持历史");
+        AimConfig active_config = config;
+        if (transition == 0) {
+            used.reset();
+        } else if (transition == 1) {
+            // Aim无原位配置变更接口；Runtime通过重建实例应用新配置。
+            active_config.enable_delay_compensation = false;
+            used = Aim(active_config);
+        } else {
+            for (int index = 0; index <= config.max_lost_frames; ++index) {
+                auto empty = make_frame(50 + index,
+                    base + std::chrono::milliseconds(200 + index * 4));
+                empty.control_at = empty.captured_at + std::chrono::milliseconds(1);
+                empty.lock_active = true;
+                const auto result = used.process(empty);
+                expect(!result.has_command,
+                       "预测关闭的丢帧段不得释放旧位置或积分请求");
+                if (index == config.max_lost_frames) {
+                    expect(!result.has_target, "完整丢失对照必须确实走到目标移除");
+                }
+            }
+        }
+        Aim fresh(active_config);
+        for (int index = 0; index < 32; ++index) {
+            auto frame = make_frame(100 + index,
+                base + std::chrono::seconds(2) + std::chrono::milliseconds(index * 4));
+            frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+            frame.lock_active = true;
+            frame.detections = {body(index < 8 ? 148.0f : 159.0f, 160.0f)};
+            const auto after = used.process(frame);
+            const auto reference = fresh.process(frame);
+            confirm(used, frame, after);
+            confirm(fresh, frame, reference);
+            expect(after.has_target == reference.has_target &&
+                       after.has_command == reference.has_command &&
+                       after.command.dx_counts == reference.command.dx_counts &&
+                       after.command.dy_counts == reference.command.dy_counts &&
+                       after.control.filtered_x_counts == reference.control.filtered_x_counts &&
+                       after.control.feedforward_x_counts == reference.control.feedforward_x_counts &&
+                       after.control.modelled_response_x_counts == reference.control.modelled_response_x_counts,
+                   "reset/配置重建/完整丢失后的位置尾部状态必须与新实例逐帧等价，transition=" +
+                       std::to_string(transition) + " frame=" + std::to_string(index));
+        }
+    }
+}
+
 int main() {
     test_status_transition_logs_are_limited();
 
@@ -15644,6 +15836,8 @@ int main() {
     log_config.enable_ringbuf = false;
     Log::init(log_config);
 
+    test_current_nearcenter_position_tail_preserves_maintenance();
+    test_position_tail_lifecycle_matches_fresh_tracking();
     test_invalid_input();
     test_frame_order_contract();
     test_head_body_merge_and_confirmation();
