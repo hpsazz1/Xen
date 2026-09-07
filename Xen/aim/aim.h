@@ -197,7 +197,10 @@ struct AimTargetSnapshot {
     float matched_observation_y2 = 0.0f;
     bool matched_observation_head_only = false;
     bool matched_observation_aim_from_head = false;
-    // base_aim_x 是当前 Track 框内的归一化锚点，不消费历史 X reference；
+    // base_aim_x 通常是当前 Track 框内的归一化锚点；部分身体观测使用
+    // 当前稳定边与遮挡前宽度重建的身体比例点，并投影到当前可见安全窗。
+    // 与 Track 内窗不相交时以当前可见窗为准；头部引导保持原比例语义。
+    // 不消费历史 OLS X reference，也不读取 matched_observation 诊断副本。
     // base_aim_y 保留现有状态估计并始终位于目标框内。延迟补偿点只用于
     // 基础 tracking 的已测控制延迟；aim_* 是再应用 prediction 后的最终点。
     float base_aim_x = 0.0f;

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -96,6 +97,14 @@ struct HorizontalDirectionHistory {
     AxisMotionEvidence motion_y{};
 };
 
+// 只在当前匹配的身体观测上有效。参考点与可见窗口分开保存，历史宽度
+// 只能重建身体位置，不能扩大本帧允许瞄准的可见区域。
+struct CurrentBodyAnchor {
+    float x = 0.0f;
+    float visible_min_x = 0.0f;
+    float visible_max_x = 0.0f;
+};
+
 struct Track {
     std::uint64_t id = 0;
     TrackState state = TrackState::TENTATIVE;
@@ -170,6 +179,7 @@ struct Track {
     float matched_observation_y2 = 0.0f;
     bool matched_observation_head_only = false;
     bool matched_observation_aim_from_head = false;
+    std::optional<CurrentBodyAnchor> current_body_anchor;
 };
 
 struct IssuedCommand {
@@ -846,6 +856,7 @@ std::pair<float, float> point_from_ratio(
 }
 
 float current_horizontal_aim_x(const Track& track) noexcept {
+    if (track.current_body_anchor) return track.current_body_anchor->x;
     return track.x1 + (track.x2 - track.x1) *
         std::clamp(track.aim_ratio_x, 0.0f, 1.0f);
 }
@@ -1336,6 +1347,7 @@ struct Aim::Impl {
     void predict_tracks(std::chrono::steady_clock::time_point now,
                         float diagonal) noexcept {
         for (auto& track : tracks) {
+            track.current_body_anchor.reset();
             track.matched_observation_valid = false;
             track.matched_observation_x1 = 0.0f;
             track.matched_observation_y1 = 0.0f;
@@ -1391,6 +1403,8 @@ struct Aim::Impl {
         // 下它与原始中心完全相同，不增加候选、驻留或放行状态。
         float horizontal_trend_observation_center_x_ratio =
             observation_center_x_ratio;
+        float current_body_reference_x1 = 0.0f;
+        float current_body_reference_width = 0.0f;
         const float observation_center_y =
             (observation.y1 + observation.y2) * 0.5f;
         const float observation_center_y_ratio =
@@ -1682,6 +1696,9 @@ struct Aim::Impl {
                 const float canonical_center_x = partial_side < 0.0f
                     ? observation.x2 - reference_width * 0.5f
                     : observation.x1 + reference_width * 0.5f;
+                current_body_reference_x1 = partial_side < 0.0f
+                    ? observation.x2 - reference_width : observation.x1;
+                current_body_reference_width = reference_width;
                 horizontal_trend_observation_center_x_ratio =
                     canonical_center_x / roi_width;
                 preserve_horizontal_box = track.partial_visibility_x_frames <
@@ -1745,6 +1762,12 @@ struct Aim::Impl {
                 observation_width <=
                     track.accepted_partial_visibility_x_width * 1.10f;
             if (accepted_partial_visibility_x) {
+                current_body_reference_width =
+                    track.partial_visibility_x_reference_width;
+                current_body_reference_x1 =
+                    track.accepted_partial_visibility_x_side < 0.0f
+                        ? observation.x2 - current_body_reference_width
+                        : observation.x1;
                 const float canonical_center_x =
                     track.accepted_partial_visibility_x_side < 0.0f
                         ? observation.x2 -
@@ -1765,6 +1788,7 @@ struct Aim::Impl {
                 minimum_x_edge_residual / maximum_x_edge_residual <=
                     kTrackPartialVisibilityStableEdgeMaximumResidualRatio;
             if (full_visibility_recovery_x) {
+                current_body_reference_width = 0.0f;
                 // 已接受的单侧半框恢复为完整框时，两种中心语义不能混进
                 // 同一 OLS。以首个完整框重新播种；满五点前既不消费原始
                 // 中心残差，也不把扩边误当成人物速度。
@@ -2507,6 +2531,22 @@ struct Aim::Impl {
         track.last_observation_at = track.state_at;
         track.horizontal_observation_initialized = true;
         track.last_observation_head_only = observation.head_only;
+        if (current_body_reference_width > 0.0f && !track.head_only &&
+            !track.aim_from_head && !observation.head_only &&
+            !observation.aim_from_head) {
+            const float observation_width = observation.x2 - observation.x1;
+            const float half_range = config.body_aim_range_percent / 200.0f;
+            const float visible_min_x = observation.x1 + observation_width *
+                (0.5f - half_range);
+            const float visible_max_x = observation.x1 + observation_width *
+                (0.5f + half_range);
+            const float reference_x = current_body_reference_x1 +
+                current_body_reference_width *
+                    std::clamp(track.aim_ratio_x, 0.0f, 1.0f);
+            track.current_body_anchor = CurrentBodyAnchor{
+                std::clamp(reference_x, visible_min_x, visible_max_x),
+                visible_min_x, visible_max_x};
+        }
         track.matched_observation_valid = true;
         track.matched_observation_x1 = observation.x1;
         track.matched_observation_y1 = observation.y1;
@@ -3168,13 +3208,24 @@ struct Aim::Impl {
         const AimFrame& frame,
         const Track& track,
         std::chrono::steady_clock::time_point control_at) noexcept {
-        // 当前基础 X 只由同帧 Track 框与配置比例导出。历史 OLS reference
-        // 仍可服务速度/prediction，但不得在这里冒充 current feature。
+        // 部分身体沿用当前稳定边所确定的身体参考位置，其余仍使用 Track
+        // 比例点；历史 OLS reference 不参与当前基础点计算。
         const float half_range = config.body_aim_range_percent / 200.0f;
-        const float range_min_x = track.x1 + (track.x2 - track.x1) *
+        float range_min_x = track.x1 + (track.x2 - track.x1) *
             (0.5f - half_range);
-        const float range_max_x = track.x1 + (track.x2 - track.x1) *
+        float range_max_x = track.x1 + (track.x2 - track.x1) *
             (0.5f + half_range);
+        if (track.current_body_anchor) {
+            const auto& anchor = *track.current_body_anchor;
+            range_min_x = std::max(range_min_x, anchor.visible_min_x);
+            range_max_x = std::min(range_max_x, anchor.visible_max_x);
+            if (range_min_x > range_max_x) {
+                // 旧 Track 内窗与当前可见窗不相交时，以新观测为准；不能
+                // 把失效交集传给 clamp，也不能投回已经不可见的旧框区域。
+                range_min_x = anchor.visible_min_x;
+                range_max_x = anchor.visible_max_x;
+            }
+        }
         // 配置范围只作几何安全投影；prediction 层仍独立处理提前量。
         const float base_x = std::clamp(
             current_horizontal_aim_x(track),
@@ -3979,7 +4030,7 @@ struct Aim::Impl {
         // 避免把两份维持量直接相加。
         const float target_motion_position_headroom_x = std::max(
             0.0f,
-            (x_error_magnitude - config.deadzone_pixels) /
+            x_error_magnitude /
                 tracking_plant_pixels_per_count_x);
         const float target_motion_maintenance_magnitude_x = std::max(
             0.0f,
@@ -4138,12 +4189,19 @@ struct Aim::Impl {
         // 未见 opening 时，同向积分可能已学习到同一扰动，继续只补二者
         // 缺口，避免重复支付；当前左右边共同位移仍让误差增大时，则按既有
         // opening 连续证据保留相同比例的积分残差，不再每帧把观察器维持量
-        // 全部抵消。该职责分配没有速度阈值、档位或新状态，且位置余量仍
-        // 使用同一独立 plant，所以不会越过可见误差或二维物理上限。
+        // 全部抵消。位置余量只限制新增运动请求，不保证整数输出或物理
+        // 位移恰好封顶于误差；组合输出仍经过原二维 counts 上限。
+        const float eligible_filtered_x = x_error_direction * std::max(
+            0.0f, x_error_direction * filtered_x);
+        // PI 保留自己的维持量；运动追加只使用尚未被同向 PI 占用的位置
+        // 额度。死区约束位置纠偏，不抹掉当前仍有几何余量的运动响应。
+        const float remaining_position_headroom_x = std::max(
+            0.0f, target_motion_position_headroom_x -
+                std::max(0.0f, x_error_direction * eligible_filtered_x));
         const float integral_x_toward_target = std::max(
             0.0f, x_error_direction * feedforward_x);
         const float target_motion_request_magnitude_x = std::min(
-            target_motion_position_headroom_x,
+            remaining_position_headroom_x,
             std::max(
                 0.0f,
                 target_motion_maintenance_magnitude_x -
@@ -4152,8 +4210,6 @@ struct Aim::Impl {
             x_error_direction * target_motion_request_magnitude_x;
         // 内部滤波状态可以保留旧符号，本帧的输出份额仍必须朝当前 X
         // 误差；精确零点输出零，不借状态保留释放 observer 的位置封顶。
-        const float eligible_filtered_x = x_error_direction * std::max(
-            0.0f, x_error_direction * filtered_x);
         float motion_compensated_x =
             eligible_filtered_x + target_motion_request_x;
         float motion_compensated_y = filtered_y;
@@ -4200,7 +4256,8 @@ struct Aim::Impl {
         float quantized_x = shaped_x;
         const bool quantization_residual_eligible_x =
             frame.lock_active &&
-            x_error_magnitude > config.deadzone_pixels &&
+            (x_error_magnitude > config.deadzone_pixels ||
+             target_motion_request_magnitude_x > 0.0f) &&
             std::fabs(shaped_x) > 0.001f;
         if (quantization_residual_eligible_x) {
             diagnostics.residual_before_quantization_x_counts = residual_x;

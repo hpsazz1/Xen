@@ -19,6 +19,7 @@
 #include "aim_x_two_dof_holdout_fixture.h"
 #include "aim_x_current_observation_fixture.h"
 #include "aim_x_deadzone_state_replay_fixture.h"
+#include "aim_x_current_response_replay_fixture.h"
 
 #include <algorithm>
 #include <array>
@@ -50,6 +51,47 @@ void expect_current_horizontal_base(const AimResult& result,
            context + "：base X 必须等于当前 Track 归一化锚点，base/Track=" +
                std::to_string(result.target.base_aim_x) + "/" +
                std::to_string(track_center_x));
+}
+
+// 从公开 Track、原始可见框和夹具已知的完整身体位置构造合同。
+// 不读取 partial 标记、内部参考宽或历史拟合值来决定是否应当通过。
+float visible_body_reference(const AimResult& result,
+                             const Detection& observation,
+                             float full_body_reference_x,
+                             float range_percent) {
+    const float inset = (1.0f - range_percent / 100.0f) * 0.5f;
+    const float track_width = result.target.x2 - result.target.x1;
+    const float visible_width = observation.x2 - observation.x1;
+    const float track_min = result.target.x1 + track_width * inset;
+    const float track_max = result.target.x2 - track_width * inset;
+    const float visible_min = observation.x1 + visible_width * inset;
+    const float visible_max = observation.x2 - visible_width * inset;
+    const float common_min = std::max(track_min, visible_min);
+    const float common_max = std::min(track_max, visible_max);
+    // 两安全窗不相交时当前可见窗优先，不能以旧 Track 窗把点推入遮挡。
+    return common_min <= common_max
+        ? std::clamp(full_body_reference_x, common_min, common_max)
+        : std::clamp(full_body_reference_x, visible_min, visible_max);
+}
+
+void expect_visible_body_reference(const AimResult& result,
+                                   const Detection& observation,
+                                   float full_body_reference_x,
+                                   float range_percent,
+                                   float tolerance,
+                                   const std::string& context) {
+    if (!result.has_target) return;
+    const float expected_x = visible_body_reference(
+        result, observation, full_body_reference_x, range_percent);
+    const float inset = (1.0f - range_percent / 100.0f) * 0.5f;
+    const float width = observation.x2 - observation.x1;
+    expect(result.target.base_aim_x >= observation.x1 + width * inset - 0.001f &&
+               result.target.base_aim_x <= observation.x2 - width * inset + 0.001f,
+           context + "：参考点必须位于本帧原始可见身体安全窗");
+    expect(std::fabs(result.target.base_aim_x - expected_x) <= tolerance,
+           context + "：部分遮挡身体点须为完整输入参考在当前安全窗的投影，"
+               "base/expected=" + std::to_string(result.target.base_aim_x) +
+               "/" + std::to_string(expected_x));
 }
 
 bool contains_log_text(const std::vector<std::string>& lines,
@@ -2382,8 +2424,19 @@ void test_sparse_center_outliers_preserve_velocity_and_current_base() {
                                reference_result.status == AimStatus::SUCCESS &&
                                reference_result.has_target,
                            "各姿态相位的稀疏框中心异常必须保留确认轨迹");
-                    expect_current_horizontal_base(
-                        result, "稀疏框中心异常回归");
+                    if (horizontal_partial_frame) {
+                        // 夹具的宽形变幅度为 +/- .8，单帧中心步长为
+                        // .20 + 6/17；允许这段原输入的不确定性，安全窗仍精确检查。
+                        const float input_uncertainty = 0.8f + 0.20f + 6.0f / 17.0f;
+                        expect_visible_body_reference(
+                            result, frame.detections.front(),
+                            true_x + pose_phase * 3.0f,
+                            config.body_aim_range_percent, input_uncertainty,
+                            "稀疏水平裁切回归");
+                    } else {
+                        expect_current_horizontal_base(
+                            result, "稀疏整框/纵向裁切及恢复回归");
+                    }
                     expect_current_horizontal_base(
                         reference_result, "稀疏框中心固定对照");
                     if (!result.has_target || !reference_result.has_target) {
@@ -2533,7 +2586,7 @@ void test_sparse_center_outliers_preserve_velocity_and_current_base() {
                maximum_vertical_velocity_delta <= 8.0f &&
                delayed_boundary_frames == 0 && partial_box_edge_frames == 0,
            "半身框各姿态相位的单/双帧中心异常不得污染速度与身份；当前 "
-           "base 显式跟随 Track，不再以不可观测物理锚位置作合同，"
+           "非部分框 base 跟随 Track，水平裁切点遵守可见安全投影，"
            "位置P95/速度P95/二阶P99/异常邻域最大位置误差/"
            "最大速度误差/增长窗最大位置差/最大速度差/"
            "事件相对对照最大位置差/速度差/最大二阶/"
@@ -2609,11 +2662,26 @@ void test_horizontal_partial_visibility_isolates_small_transients() {
                     if (track_id == 0) track_id = result.target.track_id;
                     expect(result.target.track_id == track_id,
                            "小框单/双帧截断不得切换轨迹身份");
+                    const float reference_x = partial
+                        ? visible_body_reference(
+                              result, frame.detections.front(),
+                              reference_result.target.base_aim_x,
+                              config.body_aim_range_percent)
+                        : reference_result.target.base_aim_x;
+                    if (partial) {
+                        expect_visible_body_reference(
+                            result, frame.detections.front(), true_x,
+                            config.body_aim_range_percent, 0.25f,
+                            "单/双帧当前可见安全投影");
+                    } else {
+                        expect_current_horizontal_base(
+                            result, "单/双帧裁切撤回后的当前锚点");
+                    }
                     if (index >= 58 && index <= 70) {
                         maximum_position_delta = std::max(
                             maximum_position_delta,
                             std::fabs(result.target.base_aim_x -
-                                      reference_result.target.base_aim_x));
+                                      reference_x));
                         maximum_velocity_delta = std::max(
                             maximum_velocity_delta,
                             std::fabs(result.target.velocity_x -
@@ -2628,8 +2696,7 @@ void test_horizontal_partial_visibility_isolates_small_transients() {
                         recovered_width = result.target.x2 - result.target.x1;
                     }
                     base_points.push_back(result.target.base_aim_x);
-                    reference_base_points.push_back(
-                        reference_result.target.base_aim_x);
+                    reference_base_points.push_back(reference_x);
                     if (base_points.size() >= 3 && index >= 58 && index <= 70) {
                         const std::size_t size = base_points.size();
                         const float second_difference =
@@ -2652,7 +2719,7 @@ void test_horizontal_partial_visibility_isolates_small_transients() {
                            maximum_position_delta <= 0.25f &&
                            maximum_velocity_delta <= 2.0f &&
                            maximum_second_difference_delta <= 0.25f,
-                       "小目标单/双帧裁切必须隔离中心样本并保留规范框，"
+                       "小目标单/双帧裁切必须保留规范框，并与可见窗投影对照一致，"
                        "原宽/side/帧数/最小宽/恢复宽/最大位置差/速度差/"
                        "二阶差=" +
                            std::to_string(normal_width) + "/" +
@@ -2718,8 +2785,15 @@ void test_partial_visibility_exact_three_recovers_track_width() {
                                reference_result.status == AimStatus::SUCCESS &&
                                reference_result.has_target,
                            "恰好三帧单侧截断及完整框对照必须逐帧保留目标");
-                    expect_current_horizontal_base(
-                        result, "三帧单侧截断回归");
+                    if (partial) {
+                        expect_visible_body_reference(
+                            result, frame.detections.front(), true_x,
+                            config.body_aim_range_percent, 0.25f,
+                            "三帧单侧截断回归");
+                    } else {
+                        expect_current_horizontal_base(
+                            result, "三帧截断前及完整恢复回归");
+                    }
                     expect_current_horizontal_base(
                         reference_result, "三帧单侧截断完整框对照");
                     if (!result.has_target || !reference_result.has_target) {
@@ -2770,7 +2844,7 @@ void test_partial_visibility_exact_three_recovers_track_width() {
                         ratio_after_three_full >= 0.30f &&
                         ratio_after_three_full <= 0.70f,
                     "恰好三帧截断必须确认一次并恢复 Track 宽度；当前 base "
-                    "跟随可见 Track，不再重建不可观测的裁切前物理锚，"
+                    "恢复当前 Track 比例点，部分期遵守可见安全投影，"
                     "原宽/置信度/side/第二帧宽/确认宽/恢复宽/恢复ratio/"
                     "前两帧位置差/恢复位置差/末端位置差/最大二阶=" +
                         std::to_string(normal_width) + "/" +
@@ -3004,8 +3078,15 @@ void test_partial_visibility_persistent_geometry_recovers_track_width() {
                            reference_result.status == AimStatus::SUCCESS &&
                            reference_result.has_target,
                        "持续单侧半身框及完整框对照必须逐帧保留目标");
-                expect_current_horizontal_base(
-                    result, "持续单侧半身框回归");
+                if (persistent_partial) {
+                    expect_visible_body_reference(
+                        result, frame.detections.front(), true_x,
+                        config.body_aim_range_percent, 0.25f,
+                        "持续单侧半身框回归");
+                } else {
+                    expect_current_horizontal_base(
+                        result, "持续部分框前及完整恢复回归");
+                }
                 expect_current_horizontal_base(
                     reference_result, "持续单侧半身框完整框对照");
                 if (!result.has_target || !reference_result.has_target)
@@ -3093,7 +3174,7 @@ void test_partial_visibility_persistent_geometry_recovers_track_width() {
                     stable_partial_boundary_frames <= 5 &&
                     stable_velocity_delta_p95 <= 24.0f,
                 "左右持续截断应在第三帧接受并保持身份、宽度与速度连续；"
-                "当前 base 跟随可见 Track，不再声称重建裁切前物理锚，"
+                "部分期身体参考受可见窗限制，恢复后回到当前 Track 比例点，"
                 "原宽/side/确认前宽/第三帧宽/持续宽/恢复宽/"
                 "前两帧位置差/速度差/"
                 "过渡贴边/稳定贴边/稳定中心误差P95/速度差P95/恢复位置差/"
@@ -3112,6 +3193,277 @@ void test_partial_visibility_persistent_geometry_recovers_track_width() {
                     std::to_string(maximum_recovery_position_delta) + "/" +
                     std::to_string(final_recovery_position_delta) + "/" +
                     std::to_string(maximum_transition_second_difference));
+        }
+    }
+}
+
+// 已知完整输入位置是测试真值；不使用生产的 partial/canonical 诊断字段。
+void test_current_x_response_inside_deadzone() {
+    using namespace aim_x_current_response_replay_fixture;
+    AimConfig config;
+    config.person_class_ids = {0, 2};
+    config.head_class_ids = {1, 3};
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.1f;
+    config.min_confirmed_hits = 2;
+    config.max_lost_frames = 8;
+    config.min_iou = 0.1f;
+    config.max_center_distance = 0.25f;
+    config.switch_margin = 0.2f;
+    config.switch_confirm_frames = 3;
+    config.switch_cooldown_frames = 5;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.4f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    config.max_prediction_lead_percent = 35.0f;
+    config.predicted_gain = 0.5f;
+    Aim aim(config);
+    const auto at = [](std::int64_t ns) {
+        return std::chrono::steady_clock::time_point(
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::nanoseconds(ns)));
+    };
+    std::array<int, 2> sample_counts{};
+    std::array<int, 2> response_counts{};
+    std::array<std::uint64_t, 2> first_response{};
+    for (const auto& sample : kSamples) {
+        if (sample.clock_reset) aim.reset();
+        AimFrame frame;
+        frame.sequence = sample.sequence;
+        frame.captured_at = at(sample.observation_ns);
+        frame.control_at = at(sample.control_ns);
+        frame.roi_width = 320;
+        frame.roi_height = 320;
+        frame.control_center_x = 160.0f;
+        frame.control_center_y = 160.0f;
+        frame.source_pixels_per_roi_pixel_x = 1.0f;
+        frame.source_pixels_per_roi_pixel_y = 1.0f;
+        frame.lock_active = sample.lock_active;
+        for (int index = 0; index < sample.detection_count; ++index) {
+            frame.detections.push_back(sample.detections[static_cast<std::size_t>(index)]);
+        }
+        const auto result = aim.process(frame);
+        expect(result.status == AimStatus::SUCCESS,
+               "当前真实响应前缀必须正常处理每个公开输入");
+        if (result.has_command) {
+            // 原完成 offset 只提供软件反馈时间；变更后的 counts 并非原设备回执。
+            expect(aim.record_backend_completed_command(
+                       frame.sequence, at(sample.control_ns + sample.backend_offset_ns),
+                       frame.lock_active ? result.command.dx_counts : 0,
+                       frame.lock_active ? result.command.dy_counts : 0),
+                   "当前响应回归必须成功确认本分支自身请求");
+        }
+        expect(result.command.dy_counts == sample.expected_dy &&
+                   (!result.has_target || result.command.dx_counts *
+                       (result.target.base_aim_x - 160.0f) >= 0.0f) &&
+                   std::hypot(static_cast<float>(result.command.dx_counts),
+                              static_cast<float>(result.command.dy_counts)) <= 14.0f,
+               "当前 X 响应修复必须保留整个真实前缀的 Y、当前方向与二维上限");
+        for (std::size_t index = 0; index < 2; ++index) {
+            const std::uint64_t first = index == 0 ? 1569 : 1907;
+            const std::uint64_t last = index == 0 ? 1576 : 1914;
+            const int direction = index == 0 ? 1 : -1;
+            if (sample.sequence < first || sample.sequence > last) continue;
+            ++sample_counts[index];
+            const float error = direction * (result.target.base_aim_x - 160.0f);
+            expect(result.has_target && error > 0.0f && error <= config.deadzone_pixels,
+                   "真实响应窗口必须保持已同新向的 deadzone 内位置前提");
+            if (direction * result.command.dx_counts > 0) {
+                ++response_counts[index];
+                if (first_response[index] == 0) first_response[index] = sample.sequence;
+            }
+        }
+    }
+    for (std::size_t index = 0; index < 2; ++index) {
+        expect(sample_counts[index] == 8 && response_counts[index] > 0,
+               "真实 X 换向后必须在该 deadzone 窗口结束前发出至少一次同向整数，窗口=" +
+                   std::to_string(index));
+    }
+    std::cout << "051df1c 实际 X 响应回归：软件首请求=" << first_response[0]
+              << "/" << first_response[1] << "，不代表物理验收\n";
+}
+
+
+void test_partial_body_reference_obeys_current_visible_window() {
+    const auto base = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    for (const float scale : {1.0f, 2.0f}) {
+        for (const float side : {-1.0f, 1.0f}) {
+            for (const float visible_fraction : {0.50f, 0.70f}) {
+                for (const float range_percent : {25.0f, 50.0f}) {
+                    for (const float height_ratio : {0.25f, 0.65f}) {
+                        AimConfig config;
+                        config.min_confirmed_hits = 1;
+                        config.acquisition_range_percent = 150.0f;
+                        config.body_aim_range_percent = range_percent;
+                        config.body_aim_height_ratio = height_ratio;
+                        Aim aim(config);
+                        std::uint64_t track_id = 0;
+                        int partial_checks = 0;
+                        float first_partial_base = 0.0f;
+                        float last_partial_base = 0.0f;
+                        for (int index = 0; index < 72; ++index) {
+                            const bool partial = index >= 36 && index < 52;
+                            const float true_x = (110.0f +
+                                std::clamp(index - 35, 0, 16) * 0.25f) * scale;
+                            const float full_width = 40.0f * scale;
+                            AimFrame frame = make_frame(index + 1,
+                                base + std::chrono::microseconds(index * 4167));
+                            frame.roi_width = frame.roi_height =
+                                static_cast<int>(320.0f * scale);
+                            frame.control_center_x = frame.control_center_y =
+                                160.0f * scale;
+                            frame.detections = {body_box(
+                                true_x + (partial ? side * full_width *
+                                    (1.0f - visible_fraction) * 0.5f : 0.0f),
+                                160.0f * scale,
+                                full_width * (partial ? visible_fraction : 1.0f),
+                                80.0f * scale)};
+                            const AimResult result = aim.process(frame);
+                            expect(result.has_target,
+                                   "身体参考可见投影：原完整/裁切/恢复输入均须保留目标");
+                            if (!result.has_target) continue;
+                            if (track_id == 0) track_id = result.target.track_id;
+                            expect(result.target.track_id == track_id,
+                                   "身体参考可见投影不得通过换身份重建状态");
+                            if (partial) {
+                                expect_visible_body_reference(
+                                    result, frame.detections.front(), true_x,
+                                    range_percent, 0.001f * scale,
+                                    "已知恒宽身体的当前参考（含确认前两帧）");
+                                ++partial_checks;
+                                if (index == 36)
+                                    first_partial_base = result.target.base_aim_x;
+                                if (index == 51)
+                                    last_partial_base = result.target.base_aim_x;
+                            } else {
+                                expect_current_horizontal_base(
+                                    result, "完整身体及首帧恢复不得残留部分参考");
+                            }
+                            const float expected_y = result.target.y1 +
+                                (result.target.y2 - result.target.y1) * height_ratio;
+                            expect(std::fabs(result.target.base_aim_y - expected_y) <=
+                                       0.001f * scale,
+                                   "部分身体 X 参考不得替换配置的 Y 身体比例");
+                        }
+                        expect(partial_checks == 16 &&
+                                   last_partial_base - first_partial_base > scale,
+                               "身体参考必须随当前可见边移动，不得冻结历史完整框位置");
+                    }
+                }
+            }
+        }
+    }
+}
+
+void test_partial_body_reference_does_not_replace_other_geometry() {
+    const auto base = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    // 对称缩宽、整框共同平移、只有纵向裁切都没有同一身体的单侧缺失。
+    // 后两项分别验证 head-only 和带头部关联的身体路径保留原比例语义。
+    for (int geometry = 0; geometry < 6; ++geometry) {
+        for (const float side : {-1.0f, 1.0f}) {
+            AimConfig config;
+            config.min_confirmed_hits = 1;
+            config.acquisition_range_percent = 150.0f;
+            config.body_aim_height_ratio = 0.65f;
+            Aim aim(config);
+            std::uint64_t track_id = 0;
+            for (int index = 0; index < 72; ++index) {
+                const bool changed = index >= 36 && index < 52;
+                AimFrame frame = make_frame(index + 1,
+                    base + std::chrono::microseconds(index * 4167));
+                float center_x = 110.0f;
+                float width = 40.0f;
+                float center_y = 160.0f;
+                float height = 80.0f;
+                if (changed && geometry == 0) width *= 0.5f;
+                if (changed && geometry == 1) center_x += side * 4.0f;
+                if (changed && geometry == 2) {
+                    center_y += side * 20.0f;
+                    height *= 0.5f;
+                }
+                if (changed && geometry == 5) {
+                    // 每帧更换被裁侧，不能拼成持续同侧的已确认窄框。
+                    center_x += side * ((index % 2) == 0 ? 10.0f : -10.0f);
+                    width *= 0.5f;
+                }
+                if (geometry == 3) {
+                    frame.detections = {head_box(
+                        center_x + (changed ? side * 3.5f : 0.0f),
+                        center_y, changed ? 7.0f : 14.0f, 14.0f)};
+                } else {
+                    if (changed && geometry == 4) {
+                        center_x += side * 10.0f;
+                        width *= 0.5f;
+                    }
+                    frame.detections = {body_box(center_x, center_y, width, height)};
+                    if (geometry == 4 && index < 44) {
+                        // 半框建立后让头部消失，仍保留已有头部引导比例。
+                        frame.detections.push_back(head(center_x, center_y - 24.0f));
+                    }
+                }
+                const AimResult result = aim.process(frame);
+                expect(result.has_target, "非部分身体几何反证必须保留目标");
+                if (!result.has_target) continue;
+                if (track_id == 0) track_id = result.target.track_id;
+                expect(result.target.track_id == track_id,
+                       "非部分身体几何反证不得换身份规避当前点检查");
+                if (changed && geometry == 5) {
+                    expect_visible_body_reference(
+                        result, frame.detections.front(), 110.0f,
+                        config.body_aim_range_percent, 0.001f,
+                        "交替裁侧只能使用当前参考与当前可见安全窗");
+                    expect(result.target.x2 - result.target.x1 >= 36.0f,
+                           "交替裁侧不得累计成持续窄框确认");
+                } else {
+                    expect_current_horizontal_base(result,
+                        "对称/共同平移/纵向/头部几何不得误用部分身体参考，case=" +
+                            std::to_string(geometry));
+                }
+            }
+        }
+    }
+}
+
+void test_partial_body_reference_clears_after_gap_and_reset() {
+    const auto base = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    for (const bool reset : {false, true}) {
+        for (const float side : {-1.0f, 1.0f}) {
+            AimConfig config;
+            config.min_confirmed_hits = 1;
+            config.acquisition_range_percent = 150.0f;
+            Aim aim(config);
+            int reacquired_checks = 0;
+            for (int index = 0; index < 64; ++index) {
+                if (reset && index == 44) aim.reset();
+                AimFrame frame = make_frame(index + 1,
+                    base + std::chrono::microseconds(index * 4167));
+                const bool partial = index >= 36;
+                if (index != 44) {
+                    frame.detections = {body_box(
+                        110.0f + (partial ? side * 6.0f : 0.0f),
+                        160.0f, partial ? 28.0f : 40.0f, 80.0f)};
+                }
+                const AimResult result = aim.process(frame);
+                if (index < 45) continue;
+                expect(result.has_target,
+                       "gap/reset 后继续相同可见身体必须重新建立当前目标");
+                if (!result.has_target) continue;
+                expect_current_horizontal_base(result,
+                    "gap/reset 后缺少完整宽证据不得复用前段身体参考");
+                ++reacquired_checks;
+            }
+            expect(reacquired_checks == 19,
+                   "gap/reset 身体参考清理必须覆盖全部后继原输入");
         }
     }
 }
@@ -9124,8 +9476,12 @@ void test_tracking_derivative_separates_in_box_reference_from_common_translation
         AimResult current;
         int valid_frames = 0;
         int completed_frames = 0;
+        int requested_frames = 0;
+        int unapplied_frames = 0;
+        std::vector<std::array<std::int64_t, 4>> applied_history;
     };
-    const auto run_common_case = [&](bool faster_closing) {
+    const auto run_common_case = [&](bool faster_closing,
+                                     bool controlled_history) {
         Aim aim(config);
         CommonSample sample;
         for (int index = 0; index < kCommonFrameCount; ++index) {
@@ -9154,84 +9510,118 @@ void test_tracking_derivative_separates_in_box_reference_from_common_translation
                 sample.current = result;
                 continue;
             }
-            if (result.has_command && aim.record_backend_completed_command(
-                    frame.sequence,
-                    frame.control_at + std::chrono::microseconds(100),
-                    result.command.dx_counts,
-                    result.command.dy_counts)) {
-                ++sample.completed_frames;
+            if (result.has_command) ++sample.requested_frames;
+            // 自然分支始终确认自身请求。隔离 closing 的受控分支只在
+            // 分叉帧明确模拟未应用；不修改或覆盖该帧公开请求。
+            const bool unapplied = controlled_history &&
+                index == kCommonPreviousFrame;
+            if (result.has_command || unapplied) {
+                const auto completed_at = frame.control_at +
+                    std::chrono::microseconds(100);
+                const int applied_x = unapplied ? 0 : result.command.dx_counts;
+                const int applied_y = unapplied ? 0 : result.command.dy_counts;
+                const bool confirmed = aim.record_backend_completed_command(
+                    frame.sequence, completed_at, applied_x, applied_y);
+                expect(confirmed, "common 每条请求必须按本支执行政策成功确认");
+                if (confirmed) {
+                    ++sample.completed_frames;
+                    sample.applied_history.push_back({
+                        static_cast<std::int64_t>(frame.sequence),
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            completed_at - base).count(),
+                        applied_x, applied_y});
+                    if (unapplied) ++sample.unapplied_frames;
+                }
             }
+        }
+        if (!controlled_history) {
+            expect(sample.unapplied_frames == 0 &&
+                       sample.completed_frames == sample.requested_frames &&
+                       sample.applied_history.size() ==
+                           static_cast<std::size_t>(sample.requested_frames),
+                   "common 自然分支不能漏确认、补零或丢弃自身请求");
         }
         return sample;
     };
 
-    const CommonSample stationary_common = run_common_case(false);
-    const CommonSample faster_common = run_common_case(true);
-    const float stationary_common_previous_error =
-        stationary_common.previous.target.base_aim_x - 178.5f;
-    const float faster_common_previous_error =
-        faster_common.previous.target.base_aim_x - 178.5f;
-    const float stationary_common_current_error =
-        stationary_common.current.target.base_aim_x - 178.5f;
-    const float faster_common_current_error =
-        faster_common.current.target.base_aim_x - 178.5f;
-    const float stationary_common_damping =
-        stationary_common.current.control.filtered_x_counts -
-        stationary_common.current.control.desired_x_counts;
-    const float faster_common_damping =
-        faster_common.current.control.filtered_x_counts -
-        faster_common.current.control.desired_x_counts;
+    // 同历史是 closing 隔离比较的前提。独立运动追加可以使自然分支
+    // 产生不同请求数，因此两种执行政策分别覆盖，不能拿受控结果
+    // 代替自然行为。原几何、closing 数值、Y 和物理上限在两支均检查。
+    for (const bool controlled_history : {false, true}) {
+        const CommonSample stationary_common = run_common_case(false, controlled_history);
+        const CommonSample faster_common = run_common_case(true, controlled_history);
+        if (controlled_history) {
+            expect(stationary_common.completed_frames == faster_common.completed_frames &&
+                       stationary_common.completed_frames > 0 &&
+                       stationary_common.unapplied_frames == 1 &&
+                       faster_common.unapplied_frames == 1 &&
+                       stationary_common.applied_history == faster_common.applied_history,
+                   "common 受控分支必须逐条保持相同序号、时刻与实际应用 counts");
+        }
+        const float stationary_common_previous_error =
+            stationary_common.previous.target.base_aim_x - 178.5f;
+        const float faster_common_previous_error =
+            faster_common.previous.target.base_aim_x - 178.5f;
+        const float stationary_common_current_error =
+            stationary_common.current.target.base_aim_x - 178.5f;
+        const float faster_common_current_error =
+            faster_common.current.target.base_aim_x - 178.5f;
+        const float stationary_common_damping =
+            stationary_common.current.control.filtered_x_counts -
+            stationary_common.current.control.desired_x_counts;
+        const float faster_common_damping =
+            faster_common.current.control.filtered_x_counts -
+            faster_common.current.control.desired_x_counts;
 
-    expect(stationary_common.valid_frames == kCommonFrameCount &&
-               faster_common.valid_frames == kCommonFrameCount &&
-               stationary_common.completed_frames ==
-                   faster_common.completed_frames &&
-               stationary_common.completed_frames > 0 &&
-               std::fabs(reference_x(stationary_common.previous)) < 0.0001f &&
-               std::fabs(reference_x(faster_common.previous)) < 0.0001f &&
-               std::fabs(reference_x(stationary_common.current)) < 0.0001f &&
-               std::fabs(reference_x(faster_common.current)) < 0.0001f &&
-               std::fabs(track_center_x(stationary_common.current) -
-                         track_center_x(faster_common.current)) < 0.001f &&
-               std::fabs(stationary_common_current_error -
-                         faster_common_current_error) < 0.001f &&
-               std::fabs(stationary_common_current_error -
-                         kCurrentError) < 0.001f &&
-               faster_common_previous_error >
-                   stationary_common_previous_error + 0.50f &&
-               faster_common_previous_error <= config.deadzone_pixels,
-           "common-translation 成对夹具必须保持框内 reference 与当前完整"
-           "误差相同，只让 Track 更快朝零，prev/current/ref=" +
-               std::to_string(stationary_common_previous_error) + "/" +
-               std::to_string(faster_common_previous_error) + "/" +
-               std::to_string(stationary_common_current_error) + "/" +
-               std::to_string(faster_common_current_error) + "/" +
-               std::to_string(reference_x(faster_common.previous)) + "/" +
-               std::to_string(reference_x(faster_common.current)));
-    expect(faster_common_damping > stationary_common_damping + 0.001f &&
-               faster_common.current.control.desired_x_counts >= 0.0f &&
-               faster_common.current.control.desired_x_counts <
-                   stationary_common.current.control.desired_x_counts &&
-               faster_common.current.command.dy_counts ==
-                   stationary_common.current.command.dy_counts &&
-               std::hypot(
-                   static_cast<float>(faster_common.current.command.dx_counts),
-                   static_cast<float>(faster_common.current.command.dy_counts)) <=
-                   config.max_counts_per_frame,
-           "框内 reference 不变时，更快 Track closing 必须连续减小同号 X，"
-           "不得反向、改变 Y 或提高 14-count 上限，damping/request/cmd=" +
-               std::to_string(stationary_common_damping) + "/" +
-               std::to_string(faster_common_damping) + "/" +
-               std::to_string(stationary_common.current.control.
-                                  desired_x_counts) + "/" +
-               std::to_string(faster_common.current.control.
-                                  desired_x_counts) + "/" +
-               std::to_string(stationary_common.current.command.dx_counts) +
-               "/" +
-               std::to_string(faster_common.current.command.dx_counts) + "/" +
-               std::to_string(stationary_common.current.command.dy_counts) +
-               "/" +
-               std::to_string(faster_common.current.command.dy_counts));
+        expect(stationary_common.valid_frames == kCommonFrameCount &&
+                   faster_common.valid_frames == kCommonFrameCount &&
+                   stationary_common.completed_frames > 0 &&
+                   std::fabs(reference_x(stationary_common.previous)) < 0.0001f &&
+                   std::fabs(reference_x(faster_common.previous)) < 0.0001f &&
+                   std::fabs(reference_x(stationary_common.current)) < 0.0001f &&
+                   std::fabs(reference_x(faster_common.current)) < 0.0001f &&
+                   std::fabs(track_center_x(stationary_common.current) -
+                             track_center_x(faster_common.current)) < 0.001f &&
+                   std::fabs(stationary_common_current_error -
+                             faster_common_current_error) < 0.001f &&
+                   std::fabs(stationary_common_current_error -
+                             kCurrentError) < 0.001f &&
+                   faster_common_previous_error >
+                       stationary_common_previous_error + 0.50f &&
+                   faster_common_previous_error <= config.deadzone_pixels,
+               "common-translation 成对夹具必须保持框内 reference 与当前完整"
+               "误差相同，只让 Track 更快朝零，prev/current/ref=" +
+                   std::to_string(stationary_common_previous_error) + "/" +
+                   std::to_string(faster_common_previous_error) + "/" +
+                   std::to_string(stationary_common_current_error) + "/" +
+                   std::to_string(faster_common_current_error) + "/" +
+                   std::to_string(reference_x(faster_common.previous)) + "/" +
+                   std::to_string(reference_x(faster_common.current)));
+        expect(faster_common_damping > stationary_common_damping + 0.001f &&
+                   faster_common.current.control.desired_x_counts >= 0.0f &&
+                   faster_common.current.control.desired_x_counts <
+                       stationary_common.current.control.desired_x_counts &&
+                   faster_common.current.command.dy_counts ==
+                       stationary_common.current.command.dy_counts &&
+                   std::hypot(
+                       static_cast<float>(faster_common.current.command.dx_counts),
+                       static_cast<float>(faster_common.current.command.dy_counts)) <=
+                       config.max_counts_per_frame,
+               "框内 reference 不变时，更快 Track closing 必须连续减小同号 X，"
+               "不得反向、改变 Y 或提高 14-count 上限，damping/request/cmd=" +
+                   std::to_string(stationary_common_damping) + "/" +
+                   std::to_string(faster_common_damping) + "/" +
+                   std::to_string(stationary_common.current.control.
+                                      desired_x_counts) + "/" +
+                   std::to_string(faster_common.current.control.
+                                      desired_x_counts) + "/" +
+                   std::to_string(stationary_common.current.command.dx_counts) +
+                   "/" +
+                   std::to_string(faster_common.current.command.dx_counts) + "/" +
+                   std::to_string(stationary_common.current.command.dy_counts) +
+                   "/" +
+                   std::to_string(faster_common.current.command.dy_counts));
+    }
 }
 
 void test_delayed_partial_visibility_closed_loop_preserves_real_reversals(
@@ -15098,6 +15488,10 @@ int main() {
     test_horizontal_partial_rebuild_does_not_inject_velocity();
     test_head_only_width_change_skips_body_partial_guard();
     test_partial_visibility_persistent_geometry_recovers_track_width();
+    test_current_x_response_inside_deadzone();
+    test_partial_body_reference_obeys_current_visible_window();
+    test_partial_body_reference_does_not_replace_other_geometry();
+    test_partial_body_reference_clears_after_gap_and_reset();
     test_vertical_jump_pose_protection_keeps_configured_aim_height();
     test_body_aim_range_is_static_safe_and_motion_bounded();
     test_multi_target_crossing_keeps_selected_identity();
