@@ -1410,7 +1410,6 @@ struct Aim::Impl {
             observation_center_x_ratio;
         bool robust_horizontal_velocity_valid = false;
         bool robust_horizontal_trend_center_valid = false;
-        bool horizontal_raw_motion_outlier = false;
         float horizontal_prediction_correction_x = 0.0f;
         float horizontal_prediction_unsupported_blend = 0.0f;
         float horizontal_trend_unsupported_blend = 0.0f;
@@ -1559,7 +1558,6 @@ struct Aim::Impl {
                         kTrackHorizontalTrendChangePointMaximumRoiWidthRatio) {
                         // 中值只为把三个真实时间间隔的共同边测量对齐；门限
                         // 在换回本帧位移并除以 ROI 后判断，不比较 px/s。
-                        horizontal_raw_motion_outlier = true;
                         isolate_horizontal_trend_observation = true;
                         track.horizontal_trend_observation_isolation_frames =
                             kTrackHorizontalTrendObservationIsolationFrames - 1;
@@ -2294,24 +2292,9 @@ struct Aim::Impl {
                 const float dx = horizontal_box_motion_residual_x * alpha;
                 track.x1 += dx;
                 track.x2 += dx;
-            } else if (horizontal_raw_motion_outlier &&
-                       horizontal_maneuver_active &&
-                       robust_horizontal_trend_center_valid) {
-                // 已确认机动中的单步共同边脉冲不能再以 high alpha 平移身份
-                // 框，否则即使趋势点已替换，公开内窗仍会随 raw 框跳动。
-                // 中心改用 ROI 鲁棒替代点；宽度仍消费本帧观测，避免把正常
-                // 姿态尺度变化误当成需要冻结的中心异常。
-                const float center_residual =
-                    robust_horizontal_trend_center_x_ratio * roi_width -
-                    track_center_x;
-                const float current_width = track.x2 - track.x1;
-                const float observation_width = observation.x2 - observation.x1;
-                const float half_width_delta =
-                    (observation_width - current_width) * alpha * 0.5f;
-                const float center_delta = center_residual * alpha;
-                track.x1 += center_delta - half_width_delta;
-                track.x2 += center_delta + half_width_delta;
             } else {
+                // 历史趋势的异常隔离不替代当前身份框位置；已匹配的框仍
+                // 消费本帧观测，避免把真实共同跃迁变成额外滞后。
                 track.x1 += (observation.x1 - track.x1) * alpha;
                 track.x2 += (observation.x2 - track.x2) * alpha;
             }

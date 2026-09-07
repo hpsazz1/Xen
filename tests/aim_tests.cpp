@@ -17,6 +17,7 @@
 #include "aim_x_latest_pixel_holdout_fixture.h"
 #include "aim_x_plant_replay_fixture.h"
 #include "aim_x_two_dof_holdout_fixture.h"
+#include "aim_x_current_observation_fixture.h"
 
 #include <algorithm>
 #include <array>
@@ -1877,6 +1878,113 @@ void test_horizontal_maneuver_accepts_coherent_second_reversal() {
                std::to_string(late_wrong_direction_frames) + "/" +
                std::to_string(recovered_error_p95) + "，轨迹=" +
                reversal_trace);
+}
+
+void test_current_horizontal_observation_updates_position_during_maneuver() {
+    // 真实窗口中，共同边单步跃迁会同时触发趋势抗噪与当前身份框更新。
+    // 趋势可以隔离该样本，但当前框必须向本帧观测收敛，不能被历史趋势
+    // 留在旧位置或推过当前观测。通过公开 Aim 输入冷启，不注入 Track 状态。
+    const auto run_window = [](const auto& observations,
+                               std::uint64_t event_sequence,
+                               float roi_scale) {
+        AimConfig config;
+        config.person_class_ids = {0, 2};
+        config.head_class_ids = {1, 3};
+        config.smoothing = 0.475f;
+        config.counts_per_pixel_x = 0.425f;
+        config.counts_per_pixel_y = 0.400f;
+        config.max_counts_per_frame = 14.0f;
+        config.enable_delay_compensation = true;
+        config.control_delay_ms = 15.0f;
+        config.max_delay_compensation_ms = 44.0f;
+        Aim aim(config);
+        const auto as_time = [](std::int64_t ns) {
+            return std::chrono::steady_clock::time_point(
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::nanoseconds(ns)));
+        };
+        const auto scaled = [roi_scale](Detection detection) {
+            detection.x1 *= roi_scale;
+            detection.x2 *= roi_scale;
+            detection.y1 *= roi_scale;
+            detection.y2 *= roi_scale;
+            return detection;
+        };
+        AimResult previous;
+        std::int64_t previous_ns = 0;
+        std::uint64_t track_id = 0;
+        int checked_frames = 0;
+        for (const auto& observation : observations) {
+            AimFrame frame = make_frame(
+                observation.sequence, as_time(observation.observation_ns));
+            frame.control_at = as_time(observation.control_ns);
+            frame.roi_width = static_cast<int>(320.0f * roi_scale);
+            frame.roi_height = frame.roi_width;
+            frame.control_center_x = 160.0f * roi_scale;
+            frame.control_center_y = 160.0f * roi_scale;
+            frame.lock_active = true;
+            frame.detections = {scaled(observation.body)};
+            if (observation.has_head) {
+                frame.detections.push_back(scaled(observation.head));
+            }
+            const AimResult result = aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS,
+                   "真实 X 观测窗口必须逐帧处理成功");
+            if (result.has_command) {
+                // 测试仅检查观测到 Track 的责任，不伪造设备或相机响应。
+                expect(aim.record_backend_completed_command(
+                           frame.sequence, frame.control_at, 0, 0),
+                       "离线请求的零完成必须可记录");
+            }
+            if (result.has_target) {
+                if (track_id == 0) track_id = result.target.track_id;
+                expect(result.target.track_id == track_id &&
+                           !result.target.predicted,
+                       "真实完整检测窗口不得换目标或退为预测框");
+                expect_current_horizontal_base(result, "当前观测位置回归");
+            }
+            if (observation.sequence >= event_sequence) {
+                expect(previous.has_target && result.has_target,
+                       "真实共同边跃迁及其后继帧必须保留目标");
+                if (previous.has_target && result.has_target) {
+                    const float dt = static_cast<float>(
+                        observation.observation_ns - previous_ns) * 1e-9f;
+                    const float predicted_center = previous.target.base_aim_x +
+                        previous.target.velocity_x * dt;
+                    const float measured_center =
+                        (frame.detections.front().x1 +
+                         frame.detections.front().x2) * 0.5f;
+                    const float current_center = result.target.base_aim_x;
+                    const float tolerance = 0.0001f * roi_scale;
+                    expect(current_center >=
+                               std::min(predicted_center, measured_center) -
+                                   tolerance &&
+                               current_center <=
+                               std::max(predicted_center, measured_center) +
+                                   tolerance &&
+                               std::fabs(current_center - measured_center) <=
+                               std::fabs(predicted_center - measured_center) *
+                                   0.5f + tolerance,
+                           "高置信当前框须关闭至少一半位置误差且不越过观测；"
+                           "sequence/ROI/预测/观测/base=" +
+                               std::to_string(observation.sequence) + "/" +
+                               std::to_string(frame.roi_width) + "/" +
+                               std::to_string(predicted_center) + "/" +
+                               std::to_string(measured_center) + "/" +
+                               std::to_string(current_center));
+                    ++checked_frames;
+                }
+            }
+            previous = result;
+            previous_ns = observation.observation_ns;
+        }
+        expect(checked_frames == 2,
+               "每个真实冷启窗口必须检查事件及其后继帧");
+    };
+    for (float scale : {1.0f, 2.0f}) {
+        run_window(aim_x_current_observation_fixture::kLeftLag, 935, scale);
+        run_window(aim_x_current_observation_fixture::kRightOvershoot, 2354, scale);
+    }
 }
 
 void test_horizontal_maneuver_outliers_preserve_velocity() {
@@ -14741,6 +14849,7 @@ int main() {
     test_horizontal_persistent_innovation_keeps_velocity_and_delay_continuous();
     test_horizontal_maneuver_accepts_coherent_second_reversal();
     test_horizontal_maneuver_outliers_preserve_velocity();
+    test_current_horizontal_observation_updates_position_during_maneuver();
     test_horizontal_pose_trend_recovers_after_body_semantic_loss();
     test_sparse_center_outliers_preserve_velocity_and_current_base();
     test_horizontal_partial_visibility_isolates_small_transients();
