@@ -22,6 +22,7 @@
 #include "aim_x_current_response_replay_fixture.h"
 #include "aim_x_opposed_edge_replay_fixture.h"
 #include "aim_x_position_tail_replay_fixture.h"
+#include "aim_x_edge_continuity_replay_fixture.h"
 
 #include <algorithm>
 #include <array>
@@ -15636,6 +15637,276 @@ void test_latest_physical_pixel_holdout_rejects_regressive_x_candidates() {
                std::to_string(vertical_command_frames));
 }
 
+// 公共结果逐成员比较；profile仅为非确定的程序运行耗时，不参与控制合同。
+bool same_current_edge_public_output(const AimResult& a, const AimResult& b) {
+    return
+        a.status == b.status &&
+        a.has_target == b.has_target &&
+        a.has_command == b.has_command &&
+        a.acquisition_range_radius == b.acquisition_range_radius &&
+        a.active_range_radius == b.active_range_radius &&
+        a.range_locked == b.range_locked &&
+        a.range_allows_control == b.range_allows_control &&
+        a.target.track_id == b.target.track_id &&
+        a.target.state == b.target.state &&
+        a.target.x1 == b.target.x1 &&
+        a.target.y1 == b.target.y1 &&
+        a.target.x2 == b.target.x2 &&
+        a.target.y2 == b.target.y2 &&
+        a.target.matched_observation_valid == b.target.matched_observation_valid &&
+        a.target.matched_observation_x1 == b.target.matched_observation_x1 &&
+        a.target.matched_observation_y1 == b.target.matched_observation_y1 &&
+        a.target.matched_observation_x2 == b.target.matched_observation_x2 &&
+        a.target.matched_observation_y2 == b.target.matched_observation_y2 &&
+        a.target.matched_observation_head_only == b.target.matched_observation_head_only &&
+        a.target.matched_observation_aim_from_head == b.target.matched_observation_aim_from_head &&
+        a.target.base_aim_x == b.target.base_aim_x &&
+        a.target.base_aim_y == b.target.base_aim_y &&
+        a.target.delay_compensated_aim_x == b.target.delay_compensated_aim_x &&
+        a.target.delay_compensated_aim_y == b.target.delay_compensated_aim_y &&
+        a.target.prediction_aim_x == b.target.prediction_aim_x &&
+        a.target.prediction_aim_y == b.target.prediction_aim_y &&
+        a.target.aim_x == b.target.aim_x &&
+        a.target.aim_y == b.target.aim_y &&
+        a.target.velocity_x == b.target.velocity_x &&
+        a.target.velocity_y == b.target.velocity_y &&
+        a.target.lead_x == b.target.lead_x &&
+        a.target.lead_y == b.target.lead_y &&
+        a.target.delay_compensation_x == b.target.delay_compensation_x &&
+        a.target.delay_compensation_y == b.target.delay_compensation_y &&
+        a.target.delay_compensation_ms_x == b.target.delay_compensation_ms_x &&
+        a.target.delay_compensation_ms_y == b.target.delay_compensation_ms_y &&
+        a.target.delay_compensation_ms == b.target.delay_compensation_ms &&
+        a.target.observation_age_ms == b.target.observation_age_ms &&
+        a.target.confidence == b.target.confidence &&
+        a.target.lead_active == b.target.lead_active &&
+        a.target.delay_compensation_active == b.target.delay_compensation_active &&
+        a.target.predicted == b.target.predicted &&
+        a.control.evaluated == b.control.evaluated &&
+        a.control.controller_dt_ms == b.control.controller_dt_ms &&
+        a.control.proportional_x_counts == b.control.proportional_x_counts &&
+        a.control.feedforward_x_counts == b.control.feedforward_x_counts &&
+        a.control.desired_before_reverse_x_counts == b.control.desired_before_reverse_x_counts &&
+        a.control.desired_x_counts == b.control.desired_x_counts &&
+        a.control.filtered_x_counts == b.control.filtered_x_counts &&
+        a.control.shaped_x_counts == b.control.shaped_x_counts &&
+        a.control.residual_before_quantization_x_counts == b.control.residual_before_quantization_x_counts &&
+        a.control.delayed_command_x_counts == b.control.delayed_command_x_counts &&
+        a.control.pending_net_x_counts == b.control.pending_net_x_counts &&
+        a.control.pending_absolute_x_counts == b.control.pending_absolute_x_counts &&
+        a.control.modelled_response_x_counts == b.control.modelled_response_x_counts &&
+        a.control.observer_phase_command_x_counts == b.control.observer_phase_command_x_counts &&
+        a.control.observer_consistency_weight_x == b.control.observer_consistency_weight_x &&
+        a.control.reverse_output_direction_x == b.control.reverse_output_direction_x &&
+        a.control.reverse_evidence_ratio_seconds_x == b.control.reverse_evidence_ratio_seconds_x &&
+        a.control.reverse_position_ratio_seconds_x == b.control.reverse_position_ratio_seconds_x &&
+        a.control.reverse_position_peak_error_x == b.control.reverse_position_peak_error_x &&
+        a.control.reverse_translation_seconds_x == b.control.reverse_translation_seconds_x &&
+        a.control.reverse_translation_raw_left_x_roi_pixels == b.control.reverse_translation_raw_left_x_roi_pixels &&
+        a.control.reverse_translation_raw_right_x_roi_pixels == b.control.reverse_translation_raw_right_x_roi_pixels &&
+        a.control.reverse_translation_raw_common_x_roi_pixels == b.control.reverse_translation_raw_common_x_roi_pixels &&
+        a.control.reverse_translation_control_evidence_x == b.control.reverse_translation_control_evidence_x &&
+        a.control.reverse_translation_gap_seconds_x == b.control.reverse_translation_gap_seconds_x &&
+        a.control.reverse_deformation_seconds_x == b.control.reverse_deformation_seconds_x &&
+        a.control.reverse_required_evidence_ratio_seconds_x == b.control.reverse_required_evidence_ratio_seconds_x &&
+        a.control.reverse_required_position_ratio_seconds_x == b.control.reverse_required_position_ratio_seconds_x &&
+        a.control.reverse_probe_direction_x == b.control.reverse_probe_direction_x &&
+        a.control.reverse_probe_age_ms_x == b.control.reverse_probe_age_ms_x &&
+        a.control.reverse_translation_reset_reason_x == b.control.reverse_translation_reset_reason_x &&
+        a.control.pending_positive_x == b.control.pending_positive_x &&
+        a.control.pending_negative_x == b.control.pending_negative_x &&
+        a.control.reverse_candidate_x == b.control.reverse_candidate_x &&
+        a.control.reverse_previous_direction_pending_x == b.control.reverse_previous_direction_pending_x &&
+        a.control.reverse_partial_semantics_transition_x == b.control.reverse_partial_semantics_transition_x &&
+        a.control.reverse_deformation_active_x == b.control.reverse_deformation_active_x &&
+        a.control.reverse_evidence_ready_x == b.control.reverse_evidence_ready_x &&
+        a.control.reverse_translation_fresh_evidence_x == b.control.reverse_translation_fresh_evidence_x &&
+        a.control.reverse_translation_ready_x == b.control.reverse_translation_ready_x &&
+        a.control.reverse_position_ready_x == b.control.reverse_position_ready_x &&
+        a.control.reverse_position_improvement_reset_x == b.control.reverse_position_improvement_reset_x &&
+        a.control.reverse_gate_blocked_x == b.control.reverse_gate_blocked_x &&
+        a.control.reverse_probe_active_x == b.control.reverse_probe_active_x &&
+        a.control.reverse_probe_limited_x == b.control.reverse_probe_limited_x &&
+        a.control.pending_inventory_hold_blocked_x == b.control.pending_inventory_hold_blocked_x &&
+        a.control.deadzone_quiet == b.control.deadzone_quiet &&
+        a.control.shaper_direction_reset_x == b.control.shaper_direction_reset_x &&
+        a.control.post_alignment_sign_change_blocked_x == b.control.post_alignment_sign_change_blocked_x &&
+        a.control.post_alignment_growth_limited_x == b.control.post_alignment_growth_limited_x &&
+        a.control.closing_response_tapered_x == b.control.closing_response_tapered_x &&
+        a.control.integer_direction_blocked_x == b.control.integer_direction_blocked_x &&
+        a.control.command_sign_change_blocked_x == b.control.command_sign_change_blocked_x &&
+        a.control.quantization_zero_x == b.control.quantization_zero_x &&
+        a.command.sequence == b.command.sequence &&
+        a.command.captured_at == b.command.captured_at &&
+        a.command.dx_counts == b.command.dx_counts &&
+        a.command.dy_counts == b.command.dy_counts;
+}
+
+void test_current_same_center_edge_perturbation_preserves_x_maintenance() {
+    using namespace aim_x_edge_continuity_replay_fixture;
+    AimConfig config;
+    config.person_class_ids = {0, 2};
+    config.head_class_ids = {1, 3};
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.100000001f;
+    config.min_confirmed_hits = 2;
+    config.max_lost_frames = 8;
+    config.min_iou = 0.100000001f;
+    config.max_center_distance = 0.25f;
+    config.switch_margin = 0.200000003f;
+    config.switch_confirm_frames = 3;
+    config.switch_cooldown_frames = 5;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.349999994f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.474999994f;
+    config.counts_per_pixel_x = 0.425000012f;
+    config.counts_per_pixel_y = 0.400000006f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    config.max_prediction_lead_percent = 35.0f;
+    config.predicted_gain = 0.5f;
+    Aim original(config), opposed(config), zero(config);
+    std::array<Aim*, 3> branches{&original, &opposed, &zero};
+    const auto at = [](std::int64_t ns) {
+        return std::chrono::steady_clock::time_point(
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::nanoseconds(ns)));
+    };
+    const auto same_detection = [](const Detection& a, const Detection& b) {
+        return a.x1 == b.x1 && a.y1 == b.y1 && a.x2 == b.x2 &&
+               a.y2 == b.y2 && a.confidence == b.confidence && a.class_id == b.class_id;
+    };
+    int prefix_rows = 0, edge_rows = 0;
+    float previous_body_left = 0.0f;
+    bool previous_body_valid = false;
+    for (const auto& sample : kSamples) {
+        if (sample.clock_reset) for (Aim* branch : branches) branch->reset();
+        AimFrame frame;
+        frame.sequence = sample.sequence;
+        frame.captured_at = at(sample.observation_ns);
+        frame.control_at = at(sample.control_ns);
+        frame.roi_width = 320; frame.roi_height = 320;
+        frame.control_center_x = 160.0f; frame.control_center_y = 160.0f;
+        frame.source_pixels_per_roi_pixel_x = 1.0f;
+        frame.source_pixels_per_roi_pixel_y = 1.0f;
+        frame.lock_active = sample.lock_active;
+        int body_index = -1;
+        for (int i = 0; i < sample.detection_count; ++i) {
+            const Detection& detection = sample.detections[static_cast<std::size_t>(i)];
+            frame.detections.push_back(detection);
+            if (detection.class_id == 0 || detection.class_id == 2) body_index = i;
+        }
+        std::array<AimFrame, 3> frames{frame, frame, frame};
+        if (sample.sequence == 2012) {
+            ++edge_rows;
+            expect(previous_body_valid && body_index >= 0,
+                   "实际微扰窗必须具有相邻原body观测");
+            if (!previous_body_valid || body_index < 0) return;
+            const auto bi = static_cast<std::size_t>(body_index);
+            const Detection& body = frame.detections[bi];
+            const float delta = body.x1 - previous_body_left;
+            expect(delta > 0.0f && 2.0f * delta < 0.001f,
+                   "原左边正位移与反事实扰动均须小于千分之一像素");
+            for (std::size_t branch = 1; branch < frames.size(); ++branch) {
+                Detection& changed = frames[branch].detections[bi];
+                const float shift = (branch == 1 ? 2.0f : 1.0f) * delta;
+                changed.x1 -= shift;
+                changed.x2 += shift;
+                expect(std::fabs(changed.x1 - body.x1) < 0.001f &&
+                           std::fabs(changed.x2 - body.x2) < 0.001f &&
+                           changed.x1 + changed.x2 == body.x1 + body.x2 &&
+                           changed.y1 == body.y1 && changed.y2 == body.y2 &&
+                           changed.confidence == body.confidence && changed.class_id == body.class_id,
+                       "微扰仅改变body两条横边且中心、纵向、置信和类别保持");
+                for (std::size_t i = 0; i < frame.detections.size(); ++i) {
+                    if (i != bi) expect(same_detection(frame.detections[i], frames[branch].detections[i]),
+                                        "头部及其它检测必须逐字段保持原输入");
+                }
+            }
+            expect(frames[1].detections[bi].x1 < previous_body_left &&
+                       frames[2].detections[bi].x1 == previous_body_left,
+                   "浮点输入须分别构成负边与精确零边");
+        }
+        std::array<AimResult, 3> results;
+        for (std::size_t branch = 0; branch < branches.size(); ++branch) {
+            results[branch] = branches[branch]->process(frames[branch]);
+            const auto& result = results[branch];
+            expect(result.status == AimStatus::SUCCESS,
+                   "实际边缘前缀每个公开输入均须成功处理");
+            if (result.has_command) {
+                expect(branches[branch]->record_backend_completed_command(sample.sequence,
+                           at(sample.control_ns + sample.backend_offset_ns),
+                           sample.lock_active ? result.command.dx_counts : 0,
+                           sample.lock_active ? result.command.dy_counts : 0),
+                       "每支仅确认自身请求，不借原counts伪造历史");
+            }
+            if (sample.pixel_matched) expect(result.command.dy_counts == sample.expected_dy,
+                                            "实际微扰前缀保持精确像素范围原Y请求");
+            const float error = result.target.base_aim_x - frame.control_center_x;
+            expect((!result.has_target || result.command.dx_counts * error >= 0.0f) &&
+                       std::hypot(static_cast<float>(result.command.dx_counts),
+                                  static_cast<float>(result.command.dy_counts)) <= 14.0f,
+                   "实际微扰前缀不得违反当前方向或二维14上限");
+        }
+        if (sample.sequence < 2012) {
+            ++prefix_rows;
+            expect(same_current_edge_public_output(results[0], results[1]) &&
+                       same_current_edge_public_output(results[0], results[2]),
+                   "微扰前完整公开输出必须保持相同真实历史");
+        } else {
+            const auto& a = results[0];
+            expect(a.control.reverse_translation_raw_left_x_roi_pixels > 0.0f &&
+                       results[1].control.reverse_translation_raw_left_x_roi_pixels < 0.0f &&
+                       results[2].control.reverse_translation_raw_left_x_roi_pixels == 0.0f,
+                   "公开原始边必须分别进入正、负和精确零端点");
+            for (std::size_t branch = 0; branch < results.size(); ++branch) {
+                const auto& b = results[branch];
+                expect(b.has_target && !b.target.predicted && b.control.evaluated &&
+                           b.target.track_id == a.target.track_id &&
+                           b.control.reverse_translation_raw_right_x_roi_pixels > 0.0f &&
+                           b.control.modelled_response_x_counts > 0.0f,
+                       "实际窗口保持有效同一目标、右边正向和非零同向维护");
+                expect(b.target.base_aim_x == a.target.base_aim_x &&
+                           b.target.base_aim_y == a.target.base_aim_y &&
+                           b.target.y1 == a.target.y1 && b.target.y2 == a.target.y2 &&
+                           std::fabs(b.target.x1-a.target.x1) < 0.001f &&
+                           std::fabs(b.target.x2-a.target.x2) < 0.001f &&
+                           b.command.dx_counts == a.command.dx_counts &&
+                           b.command.dy_counts == a.command.dy_counts,
+                       "当前base和纵向保持，输出框仅有微小宽度扰动，整数不冒称提前");
+                expect(b.control.delayed_command_x_counts == 0.0f &&
+                           b.control.pending_net_x_counts == a.control.pending_net_x_counts &&
+                           b.control.pending_absolute_x_counts == a.control.pending_absolute_x_counts &&
+                           b.control.residual_before_quantization_x_counts == a.control.residual_before_quantization_x_counts,
+                       "当前相机输入须为零，库存和量化历史须相同");
+                expect(std::fabs(b.control.proportional_x_counts-a.control.proportional_x_counts) < 0.0001f &&
+                           std::fabs(b.control.feedforward_x_counts-a.control.feedforward_x_counts) < 0.0001f &&
+                           std::fabs(b.control.filtered_x_counts-a.control.filtered_x_counts) < 0.0001f &&
+                           std::fabs(b.control.desired_before_reverse_x_counts-a.control.desired_before_reverse_x_counts) < 0.0001f,
+                       "当前PI差须远小于维护连续性宽容界限");
+            }
+            // .01counts冻结自原公开微扰诊断，非候选区间/私有速度公式。
+            expect(std::fabs(a.control.modelled_response_x_counts-results[1].control.modelled_response_x_counts) <= 0.01f,
+                   "微小同中心正负边扰动不得产生有限维护跳变");
+            expect(std::fabs(a.control.modelled_response_x_counts-results[2].control.modelled_response_x_counts) <= 0.01f,
+                   "微小同中心正零边扰动不得产生有限维护跳变");
+            std::cout << "当前边缘F 正/负/零=" << a.control.modelled_response_x_counts << "/"
+                      << results[1].control.modelled_response_x_counts << "/"
+                      << results[2].control.modelled_response_x_counts << " q=" << a.command.dx_counts << '\n';
+        }
+        previous_body_valid = body_index >= 0;
+        if (previous_body_valid) previous_body_left = frame.detections[static_cast<std::size_t>(body_index)].x1;
+    }
+    expect(prefix_rows == 1975 && edge_rows == 1,
+           "须完整消费1976行真实前缀并唯一覆盖微扰窗，禁止空覆盖");
+}
+
 void test_current_nearcenter_position_tail_preserves_maintenance() {
     using namespace aim_x_position_tail_replay_fixture;
     AimConfig config;
@@ -15836,6 +16107,7 @@ int main() {
     log_config.enable_ringbuf = false;
     Log::init(log_config);
 
+    test_current_same_center_edge_perturbation_preserves_x_maintenance();
     test_current_nearcenter_position_tail_preserves_maintenance();
     test_position_tail_lifecycle_matches_fresh_tracking();
     test_invalid_input();

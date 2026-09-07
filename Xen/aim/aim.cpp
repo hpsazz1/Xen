@@ -3943,8 +3943,29 @@ struct Aim::Impl {
                 -delayed_command_x * tracking_plant_pixels_per_count_x;
             const float camera_motion_evidence_weight =
                 std::sqrt(std::sqrt(current_common_consistency));
+            // 两条横边提供当前位移范围；把同一模型的先验相对位移投影
+            // 到范围内，避免近零单边把仍有依据的维护运动强拉向零。
+            // 只用于 observer 测量，不改变位置/相位使用的共同边位移。
+            float observer_common_motion_x = current_common_motion_x;
+            if (track.horizontal_raw_left_motion_x *
+                    track.horizontal_raw_right_motion_x >= 0.0f) {
+                const float raw_left_motion_x =
+                    track.horizontal_raw_left_motion_x *
+                        frame.source_pixels_per_roi_pixel_x;
+                const float raw_right_motion_x =
+                    track.horizontal_raw_right_motion_x *
+                        frame.source_pixels_per_roi_pixel_x;
+                const float prior_relative_motion_x =
+                    tracking_plant_pixels_per_count_x * controller_dt *
+                        tracking_target_velocity_counts_per_second_x +
+                    modelled_camera_motion_x * camera_motion_evidence_weight;
+                observer_common_motion_x = std::clamp(
+                    prior_relative_motion_x,
+                    std::min(raw_left_motion_x, raw_right_motion_x),
+                    std::max(raw_left_motion_x, raw_right_motion_x));
+            }
             const float target_velocity_measurement_counts_per_second_x =
-                (current_common_motion_x -
+                (observer_common_motion_x -
                  modelled_camera_motion_x *
                      camera_motion_evidence_weight) /
                 tracking_plant_pixels_per_count_x / controller_dt;
@@ -3952,7 +3973,8 @@ struct Aim::Impl {
                 (kTrackingTargetMotionFilterTimeSeconds + controller_dt);
             // 两边异向形变时，共同平移提取没有可用结果，不能把返回的零
             // 当作世界目标静止来撤销已有运动。仅跳过这次速度校正，后续
-            // 位置纠偏、方向和预算仍正常更新；零边位移保持原更新语义。
+            // 位置纠偏、方向和预算仍正常更新；单零边包含在观测范围中，
+            // 双零或刚体等边退化为原单点测量。
             if (track.horizontal_raw_left_motion_x *
                     track.horizontal_raw_right_motion_x >= 0.0f) {
                 tracking_target_velocity_counts_per_second_x +=
