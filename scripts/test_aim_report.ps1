@@ -388,4 +388,73 @@ foreach ($invalidCase in @('missing_pair', 'rounded_epoch', 'wrong_time', 'inval
     Assert-Condition $rejected "背景报告完整性必须拒绝 $invalidCase，不得以消费计数判定物理通过。"
 }
 
+function New-TrackingRequestContractSample {
+    $value = New-BackgroundContractSample
+    $value.aim_history_adjusted_x_counts = -2.0
+    $value.aim_pre_eligibility_filtered_x_counts = -1.5
+    $value.aim_filtered_integral_x_counts = -0.25
+    $value.aim_target_motion_maintenance_x_counts = -3.0
+    $value.aim_error_derivative_x_source_pixels_per_second = -12.5
+    $value.aim_filter_reset_x = $false
+    $value.aim_opening_weight_x = 0.5
+    return $value
+}
+
+$requestNumericFields = @(
+    'aim_history_adjusted_x_counts', 'aim_pre_eligibility_filtered_x_counts',
+    'aim_filtered_integral_x_counts', 'aim_target_motion_maintenance_x_counts',
+    'aim_error_derivative_x_source_pixels_per_second', 'aim_opening_weight_x')
+foreach ($reset in @($false, $true)) {
+    foreach ($weight in @(0.0, 0.5, 1.0)) {
+        $requestSample = New-TrackingRequestContractSample
+        $requestSample.aim_filter_reset_x = $reset
+        $requestSample.aim_opening_weight_x = $weight
+        Assert-XenAimBackgroundReportFields -Report @{ schema = 20; samples = @($requestSample) }
+        # JSON 读取后的 PSCustomObject 也必须经过同一个统一入口。
+        $jsonReport = @{ schema = 20; samples = @($requestSample) } |
+            ConvertTo-Json -Depth 8 | ConvertFrom-Json
+        Assert-XenAimBackgroundReportFields -Report $jsonReport
+    }
+}
+foreach ($name in @($requestNumericFields + @('aim_filter_reset_x'))) {
+    $requestSample = New-TrackingRequestContractSample
+    $requestSample.Remove($name)
+    $rejected = $false
+    try { Assert-XenAimBackgroundReportFields -Report @{ schema = 20; samples = @($requestSample) } }
+    catch { $rejected = $_.Exception.Message -like '*schema 20*' }
+    Assert-Condition $rejected "schema20统一入口必须拒绝缺失请求字段 $name。"
+}
+foreach ($name in $requestNumericFields) {
+    foreach ($invalidValue in @($null, '1.0', $true, [double]::NaN, [double]::PositiveInfinity)) {
+        $requestSample = New-TrackingRequestContractSample
+        $requestSample[$name] = $invalidValue
+        $rejected = $false
+        try { Assert-XenAimBackgroundReportFields -Report @{ schema = 20; samples = @($requestSample) } }
+        catch { $rejected = $_.Exception.Message -like '*schema 20*' }
+        Assert-Condition $rejected "schema20必须拒绝数值字段 $name 的非数值或非有限输入。"
+    }
+}
+foreach ($invalidValue in @($null, 0, 1, 'false')) {
+    $requestSample = New-TrackingRequestContractSample
+    $requestSample.aim_filter_reset_x = $invalidValue
+    $rejected = $false
+    try { Assert-XenAimBackgroundReportFields -Report @{ schema = 20; samples = @($requestSample) } }
+    catch { $rejected = $_.Exception.Message -like '*schema 20*' }
+    Assert-Condition $rejected 'schema20的filter_reset必须为真正布尔值。'
+}
+foreach ($invalidValue in @(-0.01, 1.01)) {
+    $requestSample = New-TrackingRequestContractSample
+    $requestSample.aim_opening_weight_x = $invalidValue
+    $rejected = $false
+    try { Assert-XenAimBackgroundReportFields -Report @{ schema = 20; samples = @($requestSample) } }
+    catch { $rejected = $_.Exception.Message -like '*schema 20*' }
+    Assert-Condition $rejected 'schema20的opening权重必须在闭区间内。'
+}
+$requestSample = New-TrackingRequestContractSample
+$requestSample.Remove('aim_background_sequence')
+$rejected = $false
+try { Assert-XenAimBackgroundReportFields -Report @{ schema = 20; samples = @($requestSample) } }
+catch { $rejected = $_.Exception.Message -like '*schema 19*' }
+Assert-Condition $rejected 'schema20仍须保留schema19背景完整性断言。'
+
 Write-Host "Aim report and control-diagnostics tests passed."

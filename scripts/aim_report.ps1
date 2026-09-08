@@ -77,9 +77,44 @@ function Get-XenAimSampleField([object]$Sample, [string]$Name) {
     return $Sample.PSObject.Properties[$Name].Value
 }
 
+function Assert-XenAimTrackingRequestReportFields {
+    param([Parameter(Mandatory = $true)][object]$Report)
+
+    if ([int]$Report.schema -lt 20) { return }
+    $numericFields = @(
+        'aim_history_adjusted_x_counts', 'aim_pre_eligibility_filtered_x_counts',
+        'aim_filtered_integral_x_counts', 'aim_target_motion_maintenance_x_counts',
+        'aim_error_derivative_x_source_pixels_per_second', 'aim_opening_weight_x')
+    $numericTypes = @('SByte', 'Byte', 'Int16', 'UInt16', 'Int32', 'UInt32',
+        'Int64', 'UInt64', 'Single', 'Double', 'Decimal')
+    foreach ($sample in @($Report.samples)) {
+        foreach ($name in @($numericFields + @('aim_filter_reset_x'))) {
+            if (-not (Test-XenAimSampleField $sample $name)) {
+                throw "schema 20 X 请求合同缺少逐帧字段：$name"
+            }
+        }
+        foreach ($name in $numericFields) {
+            $value = Get-XenAimSampleField $sample $name
+            if ($null -eq $value -or
+                [Type]::GetTypeCode($value.GetType()).ToString() -notin $numericTypes) {
+                throw "schema 20 X 请求数值字段类型无效：$name"
+            }
+            $null = ConvertTo-XenAimFiniteDouble $value "schema 20 $name"
+        }
+        if ((Get-XenAimSampleField $sample 'aim_filter_reset_x') -isnot [bool]) {
+            throw 'schema 20 aim_filter_reset_x 必须为布尔值。'
+        }
+        $weight = [double](Get-XenAimSampleField $sample 'aim_opening_weight_x')
+        if ($weight -lt 0.0 -or $weight -gt 1.0) {
+            throw 'schema 20 aim_opening_weight_x 必须位于 [0, 1]。'
+        }
+    }
+}
+
 function Assert-XenAimBackgroundReportFields {
     param([Parameter(Mandatory = $true)][object]$Report)
 
+    Assert-XenAimTrackingRequestReportFields -Report $Report
     if ([int]$Report.schema -lt 19) { return }
     $identityFields = @(
         'aim_observation_epoch', 'aim_background_previous_sequence',

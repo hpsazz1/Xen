@@ -443,7 +443,7 @@ try {
         -Raw -Encoding UTF8 | ConvertFrom-Json
     Expect (-not [bool]$oldSchemaSummary.automatic_complete -and
             ($oldSchemaSummary.failures -join "`n") -match
-                '报告 schema 不是 16、17、18 或 19') `
+                '报告 schema 不是 16、17、18、19 或 20') `
         "旧 schema 报告必须拒绝自动通过"
     $synthetic.schema = 17
 

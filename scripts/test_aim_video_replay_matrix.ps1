@@ -134,6 +134,33 @@ try {
     $after[0] | Add-Member -NotePropertyName aim_background_sequence -NotePropertyValue '0'
     Write-ReplayReport (Join-Path $current '静止.mp4.aim-runtime.json') $after -Schema 19
 
+    $requestFields = [ordered]@{
+        aim_history_adjusted_x_counts = 0.0
+        aim_pre_eligibility_filtered_x_counts = 0.0
+        aim_filtered_integral_x_counts = 0.0
+        aim_target_motion_maintenance_x_counts = 0.0
+        aim_error_derivative_x_source_pixels_per_second = 0.0
+        aim_filter_reset_x = $false
+        aim_opening_weight_x = 0.0
+    }
+    foreach ($item in $after) {
+        foreach ($name in $requestFields.Keys) {
+            $item | Add-Member -NotePropertyName $name -NotePropertyValue $requestFields[$name]
+        }
+    }
+    Write-ReplayReport (Join-Path $current '静止.mp4.aim-runtime.json') $after -Schema 20
+    $schema20Matrix = Get-XenAimVideoReplayMatrix -CurrentDirectory $current -BeforeDirectory $baseline
+    Assert-Condition ($schema20Matrix.scene_count -eq 2 -and -not $schema20Matrix.physical_output) `
+        '矩阵必须支持schema20追加X请求诊断，保持旧版本和无物理输出合同。'
+    $after[0].PSObject.Properties.Remove('aim_pre_eligibility_filtered_x_counts')
+    Write-ReplayReport (Join-Path $current '静止.mp4.aim-runtime.json') $after -Schema 20
+    $rejected = $false
+    try { Get-XenAimVideoReplayMatrix -CurrentDirectory $current | Out-Null }
+    catch { $rejected = $_.Exception.Message -like '*schema 20 X 请求合同缺少*' }
+    Assert-Condition $rejected 'schema20矩阵必须通过统一入口拒绝缺失内部请求字段。'
+    $after[0] | Add-Member -NotePropertyName aim_pre_eligibility_filtered_x_counts -NotePropertyValue 0.0
+    Write-ReplayReport (Join-Path $current '静止.mp4.aim-runtime.json') $after -Schema 20
+
     Write-ReplayReport (Join-Path $current `
         "拒绝武装.mp4.aim-runtime.json") $after -OutputArmed $true
     $rejected = $false

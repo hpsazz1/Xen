@@ -4285,6 +4285,15 @@ struct Aim::Impl {
         diagnostics.pending_positive_x = pending.has_positive_x;
         diagnostics.pending_negative_x = pending.has_negative_x;
 
+        // 记录库存整形后的实际滤波输入；desired_before_reverse 是更早的
+        // 线性请求，而 desired_x_counts 在末段会被最终整形值覆盖。
+        diagnostics.history_adjusted_x_counts = desired_x;
+        diagnostics.target_motion_maintenance_x_counts =
+            x_error_direction * target_motion_maintenance_magnitude_x;
+        diagnostics.error_derivative_x_source_pixels_per_second =
+            tracking_error_derivative_x;
+        diagnostics.opening_weight_x = opening_x_weight;
+
         // 分轴一阶滤波保留用户 smoothing。旧二维方向重排会把既有 Y 模长
         // 瞬时搬到 X；这里每轴独立按自身零点连续通过，不再共享模长。
         enum class FilterUpdate { Reset, Initialize, Smooth };
@@ -4346,6 +4355,9 @@ struct Aim::Impl {
             tracking_filtered_integral_x *=
                 filtered_x / tracking_before_filter_cap_x;
         }
+        diagnostics.filter_reset_x = x_filter_update == FilterUpdate::Reset;
+        diagnostics.pre_eligibility_filtered_x_counts = filtered_x;
+        diagnostics.filtered_integral_x_counts = tracking_filtered_integral_x;
         // PI 校正图像特征位置残差，目标运动观察器提供目标运动维持量。
         // 未见 opening 时，同向积分可能已学习到同一扰动，继续只补二者
         // 缺口，避免重复支付；当前左右边共同位移仍让误差增大时，则按既有

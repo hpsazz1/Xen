@@ -1041,7 +1041,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v19\n"
+        csv << "# Xen Runtime Debug Report v20\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# steady_clock_basis,STD_CHRONO_STEADY_CLOCK_SESSION_LOCAL\n"
             << "# model_path," << csv_escape(config_.model_path) << '\n'
@@ -1291,6 +1291,11 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "aim_background_usable_patch_count,aim_background_motion_use_x,"
                "aim_observer_camera_motion_x_source_pixels,"
                "aim_observer_target_velocity_x_counts_per_second,"
+               "aim_history_adjusted_x_counts,aim_filtered_integral_x_counts,"
+               "aim_pre_eligibility_filtered_x_counts,"
+               "aim_target_motion_maintenance_x_counts,"
+               "aim_error_derivative_x_source_pixels_per_second,"
+               "aim_filter_reset_x,aim_opening_weight_x,"
                "background_motion_ms\n";
         csv << std::setprecision(9);
         for (const auto& sample : samples_) {
@@ -1588,12 +1593,19 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << AimBackgroundMotionUseName(sample.aim_control.background_motion_use_x) << ','
                 << sample.aim_control.observer_camera_motion_x_source_pixels << ','
                 << sample.aim_control.observer_target_velocity_x_counts_per_second << ','
+                << sample.aim_control.history_adjusted_x_counts << ','
+                << sample.aim_control.filtered_integral_x_counts << ','
+                << sample.aim_control.pre_eligibility_filtered_x_counts << ','
+                << sample.aim_control.target_motion_maintenance_x_counts << ','
+                << sample.aim_control.error_derivative_x_source_pixels_per_second << ','
+                << (sample.aim_control.filter_reset_x ? "true" : "false") << ','
+                << sample.aim_control.opening_weight_x << ','
                 << sample.profile.background_motion_ms << '\n';
         }
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 19,\n"
+             << "{\n  \"schema\": 20,\n"
              << "  \"steady_clock_basis\": \"STD_CHRONO_STEADY_CLOCK_SESSION_LOCAL\",\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
@@ -2198,6 +2210,20 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << sample.aim_control.observer_camera_motion_x_source_pixels
                  << ", \"aim_observer_target_velocity_x_counts_per_second\": "
                  << sample.aim_control.observer_target_velocity_x_counts_per_second
+                 << ", \"aim_history_adjusted_x_counts\": "
+                 << sample.aim_control.history_adjusted_x_counts
+                 << ", \"aim_filtered_integral_x_counts\": "
+                 << sample.aim_control.filtered_integral_x_counts
+                 << ", \"aim_pre_eligibility_filtered_x_counts\": "
+                 << sample.aim_control.pre_eligibility_filtered_x_counts
+                 << ", \"aim_target_motion_maintenance_x_counts\": "
+                 << sample.aim_control.target_motion_maintenance_x_counts
+                 << ", \"aim_error_derivative_x_source_pixels_per_second\": "
+                 << sample.aim_control.error_derivative_x_source_pixels_per_second
+                 << ", \"aim_filter_reset_x\": "
+                 << (sample.aim_control.filter_reset_x ? "true" : "false")
+                 << ", \"aim_opening_weight_x\": "
+                 << sample.aim_control.opening_weight_x
                  << ", \"background_motion_ms\": " << sample.profile.background_motion_ms << "}"
                  << (index + 1 == samples_.size() ? '\n' : ',');
         }

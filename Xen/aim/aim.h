@@ -157,6 +157,16 @@ struct AimControlDiagnostics {
     float desired_x_counts = 0.0f;
     // 本帧参与输出的滤波份额；tracking X 的内部死区记忆不直接暴露为请求。
     float filtered_x_counts = 0.0f;
+    // X 请求账本：按控制阶段只读快照，不参与决策。位置裁剪前总量与
+    // 其中积分份额分开，避免把 eligible_filtered 误认为完整滤波状态。
+    float history_adjusted_x_counts = 0.0f;
+    float pre_eligibility_filtered_x_counts = 0.0f;
+    float filtered_integral_x_counts = 0.0f;
+    float target_motion_maintenance_x_counts = 0.0f;
+    // source_pixels 只表示位移单位；现有斜率仍按原控制步长更新。
+    float error_derivative_x_source_pixels_per_second = 0.0f;
+    float opening_weight_x = 0.0f;
+    bool filter_reset_x = false;
     float shaped_x_counts = 0.0f;
     float residual_before_quantization_x_counts = 0.0f;
     float delayed_command_x_counts = 0.0f;

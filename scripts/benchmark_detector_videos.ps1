@@ -644,7 +644,7 @@ if ($useAimReports) {
         $expectedFrames = [long](
             $reportRows | Where-Object scene -eq $video.BaseName |
                 Select-Object -ExpandProperty frames)
-        if ([int]$runtimeReport.schema -notin @(17, 18, 19) -or
+        if ([int]$runtimeReport.schema -notin @(17, 18, 19, 20) -or
             [long]$runtimeReport.sample_count -ne $expectedFrames -or
             [long]$runtimeReport.successful_samples -ne $expectedFrames -or
             [long]$runtimeReport.failed_samples -ne 0 -or

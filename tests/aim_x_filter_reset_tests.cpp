@@ -53,6 +53,14 @@ void actual_crossing(bool mirror) {
             static_cast<int>(s.patches)};
         const auto r = aim.process(f);
         expect(r.status == AimStatus::SUCCESS, "实际最小化输入须正常处理");
+        expect(std::isfinite(r.control.history_adjusted_x_counts) &&
+                   std::isfinite(r.control.pre_eligibility_filtered_x_counts) &&
+                   std::isfinite(r.control.filtered_integral_x_counts) &&
+                   std::isfinite(r.control.target_motion_maintenance_x_counts) &&
+                   std::isfinite(r.control.error_derivative_x_source_pixels_per_second) &&
+                   r.control.opening_weight_x >= 0.0f &&
+                   r.control.opening_weight_x <= 1.0f,
+               "实际换向账本必须输出有限分阶段标量");
         if (r.has_command) {
             expect(aim.record_backend_completed_command(
                 f.sequence, at(s.backend_ns), r.command.dx_counts, r.command.dy_counts),
@@ -75,9 +83,17 @@ void actual_crossing(bool mirror) {
                    "过零后须有新鲜同帧背景与死区外反侧误差");
             if (s.sequence == 7626) {
                 expect(r.command.dx_counts == 0, "清理旧向记忆当帧仍必须经过零输出");
+                expect(r.control.filter_reset_x &&
+                           r.control.pre_eligibility_filtered_x_counts == 0.0f &&
+                           r.control.filtered_integral_x_counts == 0.0f &&
+                           direction * r.control.history_adjusted_x_counts > 0.0f,
+                       "账本区分合法滤波输入、清理当帧零状态与末段下一步seed");
             } else {
                 expect(direction * r.command.dx_counts > 0,
                        "已清理旧向记忆后不得丢弃首帧更新而再次空发");
+                expect(!r.control.filter_reset_x &&
+                           direction * r.control.pre_eligibility_filtered_x_counts > 0.0f,
+                       "账本必须在下一帧显示新向滤波状态，不沿用清理帧标记");
             }
         }
         std::cout << "mirror=" << mirror << " seq=" << s.sequence

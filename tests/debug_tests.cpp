@@ -505,8 +505,8 @@ void test_report_summary_and_atomic_files() {
         sample_header_end + 1, sample_row_end - sample_header_end - 1);
     expect(std::count(sample_header.begin(), sample_header.end(), ',') ==
                std::count(sample_row.begin(), sample_row.end(), ','),
-           "schema 19 CSV 样本头与数据行必须保持完全相同的列数");
-    expect(csv_text.find("Xen Runtime Debug Report v19") !=
+           "schema 20 CSV 样本头与数据行必须保持完全相同的列数");
+    expect(csv_text.find("Xen Runtime Debug Report v20") !=
                    std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
@@ -576,7 +576,7 @@ void test_report_summary_and_atomic_files() {
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 19") != std::string::npos &&
+    expect(json_text.find("\"schema\": 20") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -1087,6 +1087,14 @@ void test_report_preserves_same_frame_source_timing_fields() {
     samples[0].aim_control.background_motion_use_x = AimBackgroundMotionUse::CONSUMED;
     samples[0].aim_control.observer_camera_motion_x_source_pixels = 0.0f;
     samples[0].aim_control.observer_target_velocity_x_counts_per_second = 12.5f;
+    // 独立份额哨兵防止误导出相邻阶段，第三帧继续检验缺席默认值。
+    samples[0].aim_control.history_adjusted_x_counts = -6.25f;
+    samples[0].aim_control.filtered_integral_x_counts = 1.75f;
+    samples[0].aim_control.pre_eligibility_filtered_x_counts = -7.625f;
+    samples[0].aim_control.target_motion_maintenance_x_counts = 8.5f;
+    samples[0].aim_control.error_derivative_x_source_pixels_per_second = -91.125f;
+    samples[0].aim_control.filter_reset_x = true;
+    samples[0].aim_control.opening_weight_x = 0.375f;
     samples[0].profile.background_motion_ms = 0.125;
 
     // 第二帧保留相邻大整数；源序号和映射无效时不能借本地序号或上一帧补齐。
@@ -1119,6 +1127,13 @@ void test_report_preserves_same_frame_source_timing_fields() {
     samples[1].aim_control.background_motion_use_x = AimBackgroundMotionUse::INVALID;
     samples[1].aim_control.observer_camera_motion_x_source_pixels = -1.25f;
     samples[1].aim_control.observer_target_velocity_x_counts_per_second = -3.5f;
+    samples[1].aim_control.history_adjusted_x_counts = 2.125f;
+    samples[1].aim_control.filtered_integral_x_counts = -4.75f;
+    samples[1].aim_control.pre_eligibility_filtered_x_counts = 9.875f;
+    samples[1].aim_control.target_motion_maintenance_x_counts = 3.25f;
+    samples[1].aim_control.error_derivative_x_source_pixels_per_second = 47.875f;
+    samples[1].aim_control.filter_reset_x = false;
+    samples[1].aim_control.opening_weight_x = 0.625f;
     samples[1].profile.background_motion_ms = 0.25;
     // 第三帧全部时间证据缺席，默认零值必须与显式 false 一起导出。
     samples[2].profile.source_timing_valid = false;
@@ -1247,6 +1262,13 @@ void test_report_preserves_same_frame_source_timing_fields() {
         {"aim_background_motion_use_x", {"CONSUMED", "INVALID", "NOT_EVALUATED"}, true},
         {"aim_observer_camera_motion_x_source_pixels", {"0", "-1.25", "0"}, false},
         {"aim_observer_target_velocity_x_counts_per_second", {"12.5", "-3.5", "0"}, false},
+        {"aim_history_adjusted_x_counts", {"-6.25", "2.125", "0"}, false},
+        {"aim_filtered_integral_x_counts", {"1.75", "-4.75", "0"}, false},
+        {"aim_pre_eligibility_filtered_x_counts", {"-7.625", "9.875", "0"}, false},
+        {"aim_target_motion_maintenance_x_counts", {"8.5", "3.25", "0"}, false},
+        {"aim_error_derivative_x_source_pixels_per_second", {"-91.125", "47.875", "0"}, false},
+        {"aim_filter_reset_x", {"true", "false", "false"}, false},
+        {"aim_opening_weight_x", {"0.375", "0.625", "0"}, false},
         {"background_motion_ms", {"0.125", "0.25", "0"}, false}};
     expect(csv_rows.size() == samples.size() && json_rows.size() == samples.size(),
            "CSV/JSON 必须分别导出三条同帧时间证据样本");

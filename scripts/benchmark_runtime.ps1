@@ -893,8 +893,8 @@ $expectedCaptureName = if ($ExpectedCaptureBackend -eq "auto") {
 } else {
     $captureBackendNames[$ExpectedCaptureBackend]
 }
-if ([int]$report.schema -notin @(17, 18, 19)) {
-    throw "报告 schema 不是 17、18 或 19：$($report.schema)"
+if ([int]$report.schema -notin @(17, 18, 19, 20)) {
+    throw "报告 schema 不是 17、18、19 或 20：$($report.schema)"
 }
 Assert-XenAimBackgroundReportFields -Report $report
 $retention = Get-XenRuntimeReportRetention `
