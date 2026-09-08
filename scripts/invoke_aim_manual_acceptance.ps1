@@ -430,6 +430,12 @@ function Get-RuntimeAlignmentMarkerProbe(
     $file = $null
     try {
         $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+        # 路径在枚举与属性读取间被替换时，FileInfo 可返回 1601 缺席哨兵。
+        # 它不是有效心跳时间；只使用既有重读/lease，不延长最后有效心跳。
+        $lastWriteUtc = $file.LastWriteTimeUtc
+        if ($lastWriteUtc -eq [DateTime]::FromFileTimeUtc(0)) {
+            throw [System.IO.IOException]::new("Runtime aim-lock 标记元数据暂不可用。")
+        }
     } catch {
         $pathStillExists = try {
             Test-Path -LiteralPath $Path -PathType Leaf -ErrorAction Stop
@@ -445,14 +451,14 @@ function Get-RuntimeAlignmentMarkerProbe(
             sequence = [uint64]0
         }
     }
-    $ageMs = ($observedUtc - $file.LastWriteTimeUtc).TotalMilliseconds
+    $ageMs = ($observedUtc - $lastWriteUtc).TotalMilliseconds
     if ($ageMs -lt -250) {
         return [pscustomobject][ordered]@{
             active = $false
             recoverable = $false
             reason = "CLOCK_SKEW"
             observed_utc = $observedUtc
-            last_write_utc = $file.LastWriteTimeUtc
+            last_write_utc = $lastWriteUtc
             age_ms = $ageMs
             sequence = [uint64]0
         }
@@ -463,7 +469,7 @@ function Get-RuntimeAlignmentMarkerProbe(
             recoverable = $false
             reason = "STALE"
             observed_utc = $observedUtc
-            last_write_utc = $file.LastWriteTimeUtc
+            last_write_utc = $lastWriteUtc
             age_ms = $ageMs
             sequence = [uint64]0
         }
@@ -477,7 +483,7 @@ function Get-RuntimeAlignmentMarkerProbe(
             recoverable = $true
             reason = "READ_ERROR"
             observed_utc = $observedUtc
-            last_write_utc = $file.LastWriteTimeUtc
+            last_write_utc = $lastWriteUtc
             age_ms = $ageMs
             sequence = [uint64]0
         }
@@ -511,7 +517,7 @@ function Get-RuntimeAlignmentMarkerProbe(
             recoverable = $false
             reason = "CONTRACT_INVALID"
             observed_utc = $observedUtc
-            last_write_utc = $file.LastWriteTimeUtc
+            last_write_utc = $lastWriteUtc
             age_ms = $ageMs
             sequence = $markerSequence
         }
@@ -522,7 +528,7 @@ function Get-RuntimeAlignmentMarkerProbe(
             recoverable = $false
             reason = "SESSION_MISMATCH"
             observed_utc = $observedUtc
-            last_write_utc = $file.LastWriteTimeUtc
+            last_write_utc = $lastWriteUtc
             age_ms = $ageMs
             sequence = $markerSequence
         }
@@ -533,7 +539,7 @@ function Get-RuntimeAlignmentMarkerProbe(
             recoverable = $false
             reason = "ACTIVATION_EPOCH_MISMATCH"
             observed_utc = $observedUtc
-            last_write_utc = $file.LastWriteTimeUtc
+            last_write_utc = $lastWriteUtc
             age_ms = $ageMs
             sequence = $markerSequence
         }
@@ -543,7 +549,7 @@ function Get-RuntimeAlignmentMarkerProbe(
         recoverable = $false
         reason = "ACTIVE"
         observed_utc = $observedUtc
-        last_write_utc = $file.LastWriteTimeUtc
+        last_write_utc = $lastWriteUtc
         age_ms = $ageMs
         sequence = $markerSequence
     }

@@ -18,7 +18,9 @@ $functionNames = @(
     'Read-RuntimeAlignmentMarkerSnapshot',
     'Get-RuntimeAlignmentMarkerProbe',
     'Get-RuntimeAlignmentMarkerProbeWithRetry',
-    'Test-RuntimeAlignmentMarkerActive')
+    'Test-RuntimeAlignmentMarkerActive',
+    'ConvertTo-RuntimeAlignmentMarkerProbeEvidence',
+    'Confirm-RuntimeAlignmentMarkerActive')
 $snapshotAvailable = $false
 foreach ($functionName in $functionNames) {
     $functionNode = $sourceAst.Find({
@@ -62,6 +64,21 @@ $script:afterSnapshotMutation = ''
 $script:evidenceDeletePending = $false
 $script:fileEvidenceCalls = 0
 $script:passedCount = 0
+$script:metadataMissingReads = 0
+$script:metadataMissingPath = Join-Path $ownedRoot 'never-created-marker.json'
+
+function Get-Item {
+    param([string]$LiteralPath, [string]$ErrorAction)
+    if ($script:metadataMissingReads -ne 0) {
+        if ($script:metadataMissingReads -gt 0) { --$script:metadataMissingReads }
+        # 真正 FileInfo 的缺席元数据，不伪造 LastWriteTimeUtc 数值。
+        # 模拟目录枚举成功之后，属性快照撞上 Runtime 原子替换。
+        $missingFile = [System.IO.FileInfo]::new($script:metadataMissingPath)
+        $missingFile.Refresh()
+        return $missingFile
+    }
+    return Microsoft.PowerShell.Management\Get-Item -LiteralPath $LiteralPath -ErrorAction Stop
+}
 
 function New-MarkerBytes(
         [string]$SessionId = 'fixture-session',
@@ -284,8 +301,70 @@ try {
         [uint64]$snapshot.marker.activation_epoch -eq 1 -and
         [uint64]$snapshot.marker.sequence -eq 101) 'snapshot 解析和文件证据必须绑定同一 bytes，不能随后重读路径。'
     ++$script:passedCount
+    # 以下直接调用正式运行中 Probe/Confirm；测试禁止进程启动。
+    $metadataPath = Join-Path $ownedRoot 'metadata-marker.json'
+    [System.IO.File]::WriteAllBytes($metadataPath, (New-MarkerBytes -Sequence 916))
+    $pixelEvidenceRuntimeMarkerMaxAgeMs = 1000
+    $script:metadataMissingReads = 1
+    $missingMetadata = Get-RuntimeAlignmentMarkerProbe $metadataPath 'fixture-session' 1
+    Assert-Condition (-not $missingMetadata.active -and $missingMetadata.recoverable -and
+        $missingMetadata.reason -ne 'STALE') '1601 缺席元数据必须是可恢复读取失败，不是真实旧心跳。'
+    ++$script:passedCount
+
+    $script:metadataMissingReads = 1
+    $recoveredMetadata = Get-RuntimeAlignmentMarkerProbeWithRetry $metadataPath 'fixture-session' 1
+    Assert-Condition ($recoveredMetadata.active -and $recoveredMetadata.sequence -eq 916) '一次元数据缺席必须由既有重读恢复。'
+    ++$script:passedCount
+
+    $state = [pscustomobject]@{
+        runtime_marker_last_valid_write_utc = $null
+        runtime_marker_last_valid_sequence = [uint64]0
+        runtime_marker_transient_failure_count = 0
+        runtime_marker_last_transient_failure = $null
+    }
+    $script:metadataMissingReads = -1
+    $unboundMetadata = Confirm-RuntimeAlignmentMarkerActive $state $metadataPath 'fixture-session' 1
+    Assert-Condition (-not $unboundMetadata.active -and
+        $null -eq $state.runtime_marker_last_valid_write_utc) '没有 last-valid 的缺席元数据不得形成有效绑定。'
+    ++$script:passedCount
+
+    $state.runtime_marker_last_valid_write_utc = [DateTime]::UtcNow.AddMilliseconds(-850)
+    $state.runtime_marker_last_valid_sequence = [uint64]915
+    $leaseOrigin = $state.runtime_marker_last_valid_write_utc
+    $expiredMetadata = Confirm-RuntimeAlignmentMarkerActive $state $metadataPath 'fixture-session' 1
+    Assert-Condition (-not $expiredMetadata.active -and -not $expiredMetadata.recoverable -and
+        $expiredMetadata.reason.EndsWith('_LEASE_EXPIRED') -and
+        $expiredMetadata.age_ms -ge $pixelEvidenceRuntimeMarkerMaxAgeMs -and
+        $state.runtime_marker_last_valid_write_utc -eq $leaseOrigin -and
+        $state.runtime_marker_last_valid_sequence -eq 915) '持久缺席必须在原 last-valid lease 到期后终止，不得刷新或扩大 lease。'
+    ++$script:passedCount
+    $script:metadataMissingReads = 0
+
+    foreach ($timeCase in @(
+        [pscustomobject]@{ seconds = -10; reason = 'STALE' },
+        [pscustomobject]@{ seconds = 10; reason = 'CLOCK_SKEW' })) {
+        [System.IO.File]::SetLastWriteTimeUtc($metadataPath, [DateTime]::UtcNow.AddSeconds($timeCase.seconds))
+        $timeProbe = Get-RuntimeAlignmentMarkerProbeWithRetry $metadataPath 'fixture-session' 1
+        Assert-Condition (-not $timeProbe.active -and -not $timeProbe.recoverable -and
+            $timeProbe.reason -eq $timeCase.reason) '真实旧时间或未来时钟仍必须立即拒绝。'
+        ++$script:passedCount
+    }
+
+    foreach ($identityCase in @(
+        [pscustomobject]@{ epoch = 2; sequence = 916; reason = 'ACTIVATION_EPOCH_MISMATCH' },
+        [pscustomobject]@{ epoch = 1; sequence = 914; reason = 'SEQUENCE_REGRESSED' })) {
+        [System.IO.File]::WriteAllBytes($metadataPath, (New-MarkerBytes -Epoch $identityCase.epoch -Sequence $identityCase.sequence))
+        $state.runtime_marker_last_valid_write_utc = [DateTime]::UtcNow
+        $script:metadataMissingReads = 1
+        $identityProbe = Confirm-RuntimeAlignmentMarkerActive $state $metadataPath 'fixture-session' 1
+        Assert-Condition (-not $identityProbe.active -and -not $identityProbe.recoverable -and
+            $identityProbe.reason -eq $identityCase.reason -and
+            $state.runtime_marker_last_valid_sequence -eq 915) '元数据重读之后仍须拒绝 epoch 切换或 sequence 回退。'
+        ++$script:passedCount
+    }
     Write-Host "Aim marker snapshot 专项通过：$script:passedCount 个用例；physical_output_capability=false。"
 } finally {
+    $script:metadataMissingReads = 0
     # 只清理本脚本新建的 GUID 目录；解析绝对范围并拒绝 reparse point。
     $cleanupPath = [System.IO.Path]::GetFullPath($ownedRoot)
     $expectedPrefix = $resolvedTestBase + [System.IO.Path]::DirectorySeparatorChar
