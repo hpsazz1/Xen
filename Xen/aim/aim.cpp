@@ -4428,7 +4428,9 @@ struct Aim::Impl {
         float motion_compensated_x =
             eligible_filtered_x + applied_maintenance_request_x;
         // 同源双边与observer支持的运动职责不随位置误差换侧而改变。
-        // 非Reset时，两侧统一使用当前共同位移与observer本步预算交集；
+        // 非Reset时，两侧统一按当前共同位移支付本步维护，observer确认方向。
+        // 若再与低通幅度逐帧取小，会裁掉交替观测的峰值却不补谷值，
+        // 使已确认同向运动持续少付；减速仍由当前位移立即收回额度。
         // 缺测、无共同方向和精确零误差仍沿用上方原路径。
         // PI中实际输出的同向积分可承担维护，扣除该交集后只补剩余额度；
         // 未输出的积分不能抵扣，反向PI也不能抵扣，避免重复支付或少付。
@@ -4445,9 +4447,8 @@ struct Aim::Impl {
                 const float current_supported_motion = std::fabs(world_common) *
                     frame.source_pixels_per_roi_pixel_x / tracking_plant_pixels_per_count_x *
                     controller_dt / observation_dt;
-                const float supported_maintenance = std::copysign(std::min(
-                    std::fabs(tracking_target_velocity_counts_per_second_x * controller_dt),
-                    current_supported_motion), world_common);
+                const float supported_maintenance = std::copysign(
+                    current_supported_motion, world_common);
                 if (std::isfinite(current_supported_motion)) {
                     const float maintenance_direction = std::copysign(1.0f, supported_maintenance);
                     const float integral_credit = std::min(

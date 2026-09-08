@@ -90,13 +90,12 @@ void actual_integral_tail(bool mirror, bool ambiguous_motion = false) {
             f.background_motion_x.captured_at - f.background_motion_x.previous_captured_at).count();
         const float current_bound = std::min(std::fabs(world_left), std::fabs(world_right)) /
             (0.2216375f / config.counts_per_pixel_x) * r.control.controller_dt_ms / 1000.0f / observation_dt;
-        const float observer_bound = std::fabs(r.control.observer_target_velocity_x_counts_per_second) *
-            r.control.controller_dt_ms / 1000.0f;
         if (!ambiguous_motion && r.control.target_motion_maintenance_x_counts * error < 0.0f)
             expect(world_left * world_right > 0.0f &&
                        std::fabs(r.control.target_motion_maintenance_x_counts) <= current_bound + .0003f &&
-                       std::fabs(r.control.target_motion_maintenance_x_counts) <= observer_bound + .0003f,
-                   "实际逆误差维护不得超过当前双边及observer各自步预算");
+                       r.control.target_motion_maintenance_x_counts *
+                           r.control.observer_target_velocity_x_counts_per_second > 0.0f,
+                   "实际逆误差维护须与observer同向且不得超过当前双边步预算");
         expect(r.control.evaluated && r.target.matched_observation_valid &&
                    r.control.background_motion_use_x == AimBackgroundMotionUse::CONSUMED,
                "真实回归必须消费同帧背景和有效目标");

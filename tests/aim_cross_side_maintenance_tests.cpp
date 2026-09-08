@@ -127,8 +127,6 @@ void actual_cross_side(bool mirror, int mode) {
             const float current_bound = std::min(std::fabs(left), std::fabs(right)) *
                 f.source_pixels_per_roi_pixel_x / (0.2216375f / config.counts_per_pixel_x) *
                 (c.controller_dt_ms / 1000.0f) / observation_dt;
-            const float observer_bound = std::fabs(c.observer_target_velocity_x_counts_per_second) *
-                c.controller_dt_ms / 1000.0f;
             expect(c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
                        direction * left < 0.0f && direction * right < 0.0f,
                    "逆误差维护必须有同帧双边一致的运动支持");
@@ -136,8 +134,9 @@ void actual_cross_side(bool mirror, int mode) {
                        direction * r.command.dx_counts < 0,
                    "目标仍在移动时，误差换侧不得整项丢掉受支持的维护");
             expect(std::fabs(c.target_motion_maintenance_x_counts) <= current_bound + 0.0003f &&
-                       std::fabs(c.target_motion_maintenance_x_counts) <= observer_bound + 0.0003f,
-                   "维护同时受当前双边位移和observer步预算限制");
+                       c.target_motion_maintenance_x_counts *
+                           c.observer_target_velocity_x_counts_per_second > 0.0f,
+                   "维护须与observer同向且受当前双边步预算限制");
             expect(std::fabs(c.shaped_x_counts - c.filtered_x_counts -
                        c.modelled_response_x_counts) < 0.0003f,
                    "位置和维护按原净请求合成，不分别执行两个整数");

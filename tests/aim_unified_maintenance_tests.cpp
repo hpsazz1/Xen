@@ -128,18 +128,33 @@ void actual_unified(bool mirror, int mode) {
         const float current_budget = std::min(std::fabs(left), std::fabs(right)) *
             f.source_pixels_per_roi_pixel_x / (0.2216375f / config.counts_per_pixel_x) *
             (c.controller_dt_ms / 1000.0f) / observation_dt;
-        const float observer_budget = std::fabs(c.observer_target_velocity_x_counts_per_second) *
-            c.controller_dt_ms / 1000.0f;
-        const float budget = std::min(current_budget, observer_budget);
+        expect(direction * c.observer_target_velocity_x_counts_per_second > 0.0f,
+               "当前维护仍须获得observer方向支持");
+        const float budget = current_budget;
         const float integral_credit = std::min(
             std::max(0.0f, direction * c.filtered_integral_x_counts),
             std::max(0.0f, direction * c.filtered_x_counts));
         const float remaining = std::max(0.0f, budget - integral_credit);
         expect(integral_credit <= std::fabs(c.filtered_x_counts) + .0003f,
                "只扣实际eligible PI内的同向积分份额");
-        // 该真实窗口未触及14，model_add为D阻尼之前的实际维护追加。
-        expect(std::fabs(direction * c.modelled_response_x_counts - remaining) < .001f,
-               "同侧与跨侧必须按同一当前预算减实际积分份额支付维护");
+        expect(std::fabs(direction * c.target_motion_maintenance_x_counts - budget) < .001f,
+               "诊断须记录当前双边步预算，不把物理饱和后的追加当预算");
+        const float before_cap = c.filtered_x_counts + direction * remaining;
+        if (std::fabs(before_cap) <= config.max_counts_per_frame) {
+            expect(std::fabs(direction * c.modelled_response_x_counts - remaining) < .001f,
+                   "未饱和时同侧与跨侧须按当前预算减实际积分份额支付维护");
+        } else {
+            // 当前幅度使2158首次触及14；公有Y仅有整数，利用原舍入区间验证保Y裁剪。
+            const float y_lower = std::max(0.0f, std::fabs(static_cast<float>(r.command.dy_counts)) - 0.5f);
+            const float y_upper = std::fabs(static_cast<float>(r.command.dy_counts)) + 0.5f;
+            const float cap_lower = std::sqrt(std::max(0.0f, 196.0f - y_upper * y_upper));
+            const float cap_upper = std::sqrt(std::max(0.0f, 196.0f - y_lower * y_lower));
+            const float actual_before_damping = std::fabs(c.filtered_x_counts + c.modelled_response_x_counts);
+            expect(actual_before_damping >= cap_lower - .001f &&
+                       actual_before_damping <= cap_upper + .001f &&
+                       direction * c.modelled_response_x_counts <= remaining + .001f,
+                   "饱和只能按原Y剩余额度裁剪追加，不能扩大维护或错误丢弃位置");
+        }
         if (s.sequence == 2158 || s.sequence == 2161) {
             expect(direction * error > 0.0f && c.opening_weight_x == 0.0f &&
                        direction * c.reverse_translation_raw_left_x_roi_pixels < 0.0f &&
@@ -165,8 +180,81 @@ void actual_unified(bool mirror, int mode) {
            "松键须清除观察器维护及余数，不将预计算位置请求误认为实发");
 
 }
+void alternating_displacement(bool mirror, std::int64_t interval_ns) {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.counts_per_pixel_x = 0.2216375f;
+    config.deadzone_pixels = 1.5f;
+    config.body_aim_height_ratio = 1.0f / 3.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.enable_prediction = false;
+    config.max_counts_per_frame = 14.0f;
+    Aim aim(config);
+    const float direction = mirror ? -1.0f : 1.0f;
+    float budget_sum = 0.0f, shaped_sum = 0.0f;
+    float first_residual = 0.0f, last_residual = 0.0f;
+    int issued_sum = 0;
+    // 固定图像基点与等间隔观测，背景平移给出6/2像素交替的同向运动。
+    // 此处plant为1；40帧测得总位移160，不按实现的滤波公式生成期望。
+    for (int i = 0; i < 70; ++i) {
+        const float displacement = direction * (i >= 60 ? 0.25f : (i % 2 ? 6.0f : 2.0f));
+        AimFrame f;
+        f.sequence = 100 + i;
+        f.observation_epoch = 17;
+        f.captured_at = at(10000000000LL + interval_ns * i);
+        f.control_at = f.captured_at + std::chrono::milliseconds(12);
+        f.roi_width = f.roi_height = 320;
+        f.control_center_x = f.control_center_y = 160;
+        f.lock_active = true;
+        f.detections.push_back({140.0f + direction * 0.25f, 140.0f,
+            180.0f + direction * 0.25f, 200.0f, 0.95f, 0});
+        f.background_motion_x = {AimBackgroundMotionStatus::VALID, f.sequence - 1, f.sequence,
+            f.captured_at - std::chrono::nanoseconds(interval_ns), f.captured_at, 17,
+            -displacement, 0.9f, 0.0f, 2};
+        const auto r = aim.process(f);
+        const auto& c = r.control;
+        if (i >= 20) {
+            expect(c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
+                       !c.filter_reset_x && direction * c.observer_target_velocity_x_counts_per_second > 0.0f,
+                   "交替与减速段须持续同源同向且无Reset");
+            expect(std::fabs(r.target.base_aim_x - f.control_center_x) < config.deadzone_pixels &&
+                       std::fabs(c.proportional_x_counts) < 0.0003f,
+                   "固定死区内位置不产生追赶比例份额");
+            expect(r.command.dy_counts == 0 && std::abs(r.command.dx_counts) <= 14 &&
+                       std::isfinite(c.shaped_x_counts) && std::isfinite(c.target_motion_maintenance_x_counts),
+                   "合成仍保持Y、14上限及有限值");
+            if (i < 60) {
+                if (i == 20) first_residual = c.residual_before_quantization_x_counts;
+                budget_sum += direction * c.target_motion_maintenance_x_counts;
+                shaped_sum += c.shaped_x_counts;
+                issued_sum += r.command.dx_counts;
+                last_residual = c.shaped_x_counts + c.residual_before_quantization_x_counts -
+                    static_cast<float>(r.command.dx_counts);
+            } else {
+                expect(std::fabs(c.target_motion_maintenance_x_counts - displacement) < 0.0003f,
+                       "减速当帧必须撤回旧observer幅度，只保留本帧小位移预算");
+            }
+        }
+        if (r.has_command)
+            expect(aim.record_backend_completed_command(f.sequence, f.control_at,
+                       r.command.dx_counts, r.command.dy_counts),
+                   "交替分支只确认自己的命令");
+    }
+    expect(std::fabs(budget_sum - 160.0f) < 0.01f,
+           "交替同向位移不能因低通与当前值取小而持续丢失累计维护预算");
+    expect(std::fabs(static_cast<float>(issued_sum) - shaped_sum - first_residual + last_residual) < 0.001f &&
+               std::fabs(last_residual) <= 0.5003f,
+           "净请求沿用单余数累计守恒，不要求每帧独立整数维护");
+}
+
 }
 int main() {
+    for (const std::int64_t interval_ns : {4166667LL, 8000000LL}) {
+        alternating_displacement(false, interval_ns);
+        alternating_displacement(true, interval_ns);
+    }
     for (int mode = 0; mode < 3; ++mode) { actual_unified(false, mode); actual_unified(true, mode); }
     std::cout << "失败数：" << failures << '\n';
     return failures == 0 ? 0 : 1;

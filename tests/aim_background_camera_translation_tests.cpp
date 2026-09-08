@@ -242,9 +242,25 @@ void actual_camera_domain(bool mirror) {
         expect(std::hypot(static_cast<float>(r.command.dx_counts),
                           static_cast<float>(r.command.dy_counts)) <= 14.0f,
                "维护更新不得突破二维14上限");
-        if (r.command.dx_counts != 0)
-            expect(r.command.dx_counts * (r.target.base_aim_x - f.control_center_x) > 0.0f,
-                   "非零X请求必须朝当前固定base误差方向");
+        const float error = r.target.base_aim_x - f.control_center_x;
+        expect(c.filtered_x_counts * error >= 0.0f,
+               "位置PI仍须朝当前固定base误差方向");
+        if (error == 0.0f)
+            expect(r.command.dx_counts == 0, "精确零误差不产生X命令");
+        if (r.command.dx_counts * error < 0.0f) {
+            const float left = c.reverse_translation_raw_left_x_roi_pixels -
+                f.background_motion_x.dx_roi_pixels;
+            const float right = c.reverse_translation_raw_right_x_roi_pixels -
+                f.background_motion_x.dx_roi_pixels;
+            expect(c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
+                       !c.filter_reset_x && f.background_motion_x.sequence == f.sequence &&
+                       f.background_motion_x.captured_at == f.captured_at &&
+                       f.background_motion_x.previous_sequence == s.previous_sequence &&
+                       left * right > 0.0f && left * r.command.dx_counts > 0.0f &&
+                       c.observer_target_velocity_x_counts_per_second * r.command.dx_counts > 0.0f &&
+                       c.modelled_response_x_counts * r.command.dx_counts > 0.0f,
+                   "净请求跨误差侧必须有同源双边及observer支持的实际维护，不能绕过PI保护");
+        }
         if (r.has_command)
             expect(aim.record_backend_completed_command(f.sequence, at(s.backend_ns),
                        r.command.dx_counts, r.command.dy_counts),
@@ -379,9 +395,25 @@ void actual_world_interval(bool mirror) {
         expect(std::hypot(static_cast<float>(r.command.dx_counts),
                           static_cast<float>(r.command.dy_counts)) <= 14.0f,
                "维护更新不得突破二维14上限");
-        if (r.command.dx_counts != 0)
-            expect(r.command.dx_counts * (r.target.base_aim_x - f.control_center_x) > 0.0f,
-                   "非零X请求必须朝当前固定base误差方向");
+        const float error = r.target.base_aim_x - f.control_center_x;
+        expect(c.filtered_x_counts * error >= 0.0f,
+               "位置PI仍须朝当前固定base误差方向");
+        if (error == 0.0f)
+            expect(r.command.dx_counts == 0, "精确零误差不产生X命令");
+        if (r.command.dx_counts * error < 0.0f) {
+            const float left = c.reverse_translation_raw_left_x_roi_pixels -
+                f.background_motion_x.dx_roi_pixels;
+            const float right = c.reverse_translation_raw_right_x_roi_pixels -
+                f.background_motion_x.dx_roi_pixels;
+            expect(c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
+                       !c.filter_reset_x && f.background_motion_x.sequence == f.sequence &&
+                       f.background_motion_x.captured_at == f.captured_at &&
+                       f.background_motion_x.previous_sequence == s.previous_sequence &&
+                       left * right > 0.0f && left * r.command.dx_counts > 0.0f &&
+                       c.observer_target_velocity_x_counts_per_second * r.command.dx_counts > 0.0f &&
+                       c.modelled_response_x_counts * r.command.dx_counts > 0.0f,
+                   "净请求跨误差侧必须有同源双边及observer支持的实际维护，不能绕过PI保护");
+        }
         if (r.has_command)
             expect(aim.record_backend_completed_command(f.sequence, at(s.backend_ns),
                        r.command.dx_counts, r.command.dy_counts),
