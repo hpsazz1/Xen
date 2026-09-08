@@ -116,11 +116,20 @@ void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
             expect(c.opening_weight_x == 0.0f,
                    "图像收拢的原opening判定不受世界运动维护改变");
             if (ambiguous_motion) {
+                std::cout << "closing mirror=" << mirror << " q=" << r.command.dx_counts
+                          << " pi=" << c.filtered_x_counts << " add=" << c.modelled_response_x_counts
+                          << " shaped=" << c.shaped_x_counts << " residual=" << c.residual_before_quantization_x_counts
+                          << " error=" << r.target.base_aim_x - f.control_center_x << '\n';
                 expect((c.reverse_translation_raw_left_x_roi_pixels - f.background_motion_x.dx_roi_pixels) *
                            (c.reverse_translation_raw_right_x_roi_pixels - f.background_motion_x.dx_roi_pixels) <= 0.0f,
                        "负控必须实际消除校正双边的共同方向");
-                expect(direction * r.command.dx_counts == -3,
-                       "缺少当前世界共同运动支持时保留原收拢额度输出");
+                const float position_headroom = std::fabs(r.target.base_aim_x - f.control_center_x) *
+                    f.source_pixels_per_roi_pixel_x / (0.2216375f / config.counts_per_pixel_x);
+                expect(direction * r.command.dx_counts < 0 &&
+                           std::fabs(c.filtered_x_counts + c.modelled_response_x_counts) <= position_headroom + 0.0003f &&
+                           std::fabs(r.command.dx_counts - c.shaped_x_counts -
+                               c.residual_before_quantization_x_counts) <= 0.5003f,
+                       "无当前共同运动时仍受原位置额度约束，净整数只含本分支舍入余额");
             } else {
                 const float left = c.reverse_translation_raw_left_x_roi_pixels -
                     f.background_motion_x.dx_roi_pixels;

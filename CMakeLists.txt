@@ -1278,6 +1278,10 @@ if(BUILD_TESTING)
     target_link_libraries(aim_unified_maintenance_tests PRIVATE aim log)
     xen_deploy_runtime_dlls(aim_unified_maintenance_tests OPENCV)
     add_test(NAME aim_unified_maintenance_tests COMMAND aim_unified_maintenance_tests)
+    add_executable(aim_world_observation_gap_tests tests/aim_world_observation_gap_tests.cpp)
+    target_link_libraries(aim_world_observation_gap_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_world_observation_gap_tests OPENCV)
+    add_test(NAME aim_world_observation_gap_tests COMMAND aim_world_observation_gap_tests)
 
     add_executable(aim_background_camera_translation_tests
         tests/aim_background_camera_translation_tests.cpp)

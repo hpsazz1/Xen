@@ -1106,6 +1106,7 @@ struct Aim::Impl {
     float tracking_error_derivative_x = 0.0f;
     bool tracking_error_derivative_initialized = false;
     float tracking_target_velocity_counts_per_second_x = 0.0f;
+    bool tracking_world_motion_observed_x = false;
     float world_motion_measurement_x = 0.0f;
     float world_motion_measurement_y = 0.0f;
     // 独立 prediction 状态使用 counts/second；基础控制器前馈仍保持
@@ -3199,6 +3200,7 @@ struct Aim::Impl {
         tracking_error_derivative_x = 0.0f;
         tracking_error_derivative_initialized = false;
         tracking_target_velocity_counts_per_second_x = 0.0f;
+        tracking_world_motion_observed_x = false;
         world_motion_measurement_x = 0.0f;
         world_motion_measurement_y = 0.0f;
         prediction_world_velocity_x = 0.0f;
@@ -3912,6 +3914,7 @@ struct Aim::Impl {
             tracking_error_derivative_x = 0.0f;
             tracking_error_derivative_initialized = false;
             tracking_target_velocity_counts_per_second_x = 0.0f;
+            tracking_world_motion_observed_x = false;
             diagnostics.feedforward_x_counts = feedforward_x;
             diagnostics.filtered_x_counts = filtered_x;
             diagnostics.shaped_x_counts = shaped_x;
@@ -4064,13 +4067,17 @@ struct Aim::Impl {
             }
             diagnostics.observer_camera_motion_x_source_pixels =
                 modelled_camera_motion_x * camera_motion_evidence_weight;
-            // 同源camera校正后支持同向运动的区间已完成投影，应更新估计；
-            // 不可再按校正前raw是否跨零丢掉它。缺测/歧义回退仍跳过raw
-            // 异向的速度校正，不能将共同平移提取的零误作目标静止。
-            // 单零边包含在区间中，双零或刚体等边退化为原单点测量。
+            // 已取得同源world观测后，缺测仅保留常速度预测；命令模型
+            // 不是新的世界运动观测，不能因背景失效又回写污染已有估计。
+            // 尚未取得world观测时保留原模型启动路径及raw异向保护。
+            // 有效零仍是测量，照常校正；不把相同图像一律当作缺测。
             if (use == AimBackgroundMotionUse::CONSUMED ||
-                track.horizontal_raw_left_motion_x *
-                    track.horizontal_raw_right_motion_x >= 0.0f) {
+                (!tracking_world_motion_observed_x &&
+                 track.horizontal_raw_left_motion_x *
+                     track.horizontal_raw_right_motion_x >= 0.0f)) {
+                if (use == AimBackgroundMotionUse::CONSUMED) {
+                    tracking_world_motion_observed_x = true;
+                }
                 tracking_target_velocity_counts_per_second_x +=
                     target_motion_alpha *
                     (target_velocity_measurement_counts_per_second_x -
@@ -4078,6 +4085,7 @@ struct Aim::Impl {
             }
         } else {
             tracking_target_velocity_counts_per_second_x = 0.0f;
+            tracking_world_motion_observed_x = false;
         }
         diagnostics.observer_target_velocity_x_counts_per_second =
             tracking_target_velocity_counts_per_second_x;
