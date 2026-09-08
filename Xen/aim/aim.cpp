@@ -4396,15 +4396,23 @@ struct Aim::Impl {
             std::max(0.0f, x_error_direction * filtered_x),
             std::max(target_motion_position_headroom_x,
                      preserved_integral_magnitude_x));
-        // PI 保留自己的维持量；运动追加只使用尚未被同向 PI 占用的位置
-        // 额度。死区约束位置纠偏，不抹掉当前仍有几何余量的运动响应。
-        const float remaining_position_headroom_x = std::max(
-            0.0f, target_motion_position_headroom_x -
+        // 误差仍在同向扩大时，仅用当前位置额度支付维护量会保留跟随误差。
+        // 复用既有opening权重，让本帧总额度从H靠近max(H,M)；只释放
+        // 已有同源运动预算，不额外造维护请求。收拢、缺测和Reset沿用H，
+        // PI自身额度与下方积分去重、二维上限保持不变。
+        const float opening_motion_headroom_x =
+            diagnostics.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
+                x_filter_update != FilterUpdate::Reset
+            ? opening_x_weight * std::max(0.0f,
+                  eligible_target_motion_magnitude_x - target_motion_position_headroom_x)
+            : 0.0f;
+        const float remaining_motion_headroom_x = std::max(
+            0.0f, target_motion_position_headroom_x + opening_motion_headroom_x -
                 std::max(0.0f, x_error_direction * eligible_filtered_x));
         const float integral_x_toward_target = std::max(
             0.0f, x_error_direction * feedforward_x);
         const float target_motion_request_magnitude_x = std::min(
-            remaining_position_headroom_x,
+            remaining_motion_headroom_x,
             std::max(
                 0.0f,
                 eligible_target_motion_magnitude_x -
