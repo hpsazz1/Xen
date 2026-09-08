@@ -4424,16 +4424,17 @@ struct Aim::Impl {
         float applied_maintenance_request_x = target_motion_request_x;
         float motion_compensated_x =
             eligible_filtered_x + applied_maintenance_request_x;
-        // 相机跟随可能让位置误差暂时换侧，而世界目标仍同向移动。
-        // 仅非Reset且当前同源双边、observer方向一致时允许跨侧维护；
-        // 幅度取当前共同位移与observer本步预算的交集，不直接放行全幅。
-        // 此时eligible PI与维护反向，无同向维护份额需要再次去重。
+        // 同源双边与observer支持的运动职责不随位置误差换侧而改变。
+        // 非Reset时，两侧统一使用当前共同位移与observer本步预算交集；
+        // 缺测、无共同方向和精确零误差仍沿用上方原路径。
+        // PI中实际输出的同向积分可承担维护，扣除该交集后只补剩余额度；
+        // 未输出的积分不能抵扣，反向PI也不能抵扣，避免重复支付或少付。
         if (diagnostics.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
                 x_filter_update != FilterUpdate::Reset) {
             const float world_common = common_edge_motion(
                 track.horizontal_raw_left_motion_x - frame.background_motion_x.dx_roi_pixels,
                 track.horizontal_raw_right_motion_x - frame.background_motion_x.dx_roi_pixels);
-            if (world_common * error_x < 0.0f &&
+            if (world_common * error_x != 0.0f &&
                 world_common * tracking_target_velocity_counts_per_second_x > 0.0f) {
                 const float observation_dt = std::chrono::duration<float>(
                     frame.background_motion_x.captured_at -
@@ -4445,7 +4446,12 @@ struct Aim::Impl {
                     std::fabs(tracking_target_velocity_counts_per_second_x * controller_dt),
                     current_supported_motion), world_common);
                 if (std::isfinite(current_supported_motion)) {
-                    applied_maintenance_request_x = supported_maintenance;
+                    const float maintenance_direction = std::copysign(1.0f, supported_maintenance);
+                    const float integral_credit = std::min(
+                        std::max(0.0f, maintenance_direction * tracking_filtered_integral_x),
+                        std::max(0.0f, maintenance_direction * eligible_filtered_x));
+                    applied_maintenance_request_x = maintenance_direction * std::max(
+                        0.0f, std::fabs(supported_maintenance) - integral_credit);
                     motion_compensated_x = eligible_filtered_x + applied_maintenance_request_x;
                     diagnostics.target_motion_maintenance_x_counts = supported_maintenance;
                 }

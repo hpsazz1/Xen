@@ -129,15 +129,19 @@ void actual_crossing(bool mirror, bool ambiguous_motion = false) {
                                direction * r.control.modelled_response_x_counts >= 0.0f,
                            "无共同运动支持时，原首新向纠偏不得被丢弃或无据抵消");
                 } else {
-                    // 新合同允许受支持的运动与位置纠偏抵消；净输出不是PI状态证据。
-                    expect(direction * r.control.modelled_response_x_counts < 0.0f &&
+                    // 前缀自身命令会改变模型回退状态；维护按本分支实际观察器
+                    // 方向验证。位置seed由上方独立断言，不拿固定净整数代替。
+                    expect(r.control.modelled_response_x_counts *
+                               r.control.observer_target_velocity_x_counts_per_second >= 0.0f &&
                                std::fabs(r.control.modelled_response_x_counts -
                                    r.control.target_motion_maintenance_x_counts) < 0.0003f &&
                                std::fabs(r.control.shaped_x_counts -
                                    r.control.filtered_x_counts -
                                    r.control.modelled_response_x_counts) < 0.0003f &&
-                               r.command.dx_counts == 0,
-                           "实际反向维护按净请求合成舍入，不强行执行独立PI整数");
+                               r.command.dx_counts * r.control.shaped_x_counts >= 0.0f &&
+                               std::fabs(r.command.dx_counts - r.control.shaped_x_counts -
+                                   r.control.residual_before_quantization_x_counts) <= 0.5003f,
+                           "实际维护按本分支方向净合成舍入，不强行执行独立PI整数");
                 }
                 expect(!r.control.filter_reset_x &&
                            direction * r.control.pre_eligibility_filtered_x_counts > 0.0f,
@@ -145,7 +149,12 @@ void actual_crossing(bool mirror, bool ambiguous_motion = false) {
             }
         }
         std::cout << "mirror=" << mirror << " seq=" << s.sequence
-                  << " error=" << error << " q=" << r.command.dx_counts << '\n';
+                  << " error=" << error << " q=" << r.command.dx_counts
+                  << " pi=" << r.control.filtered_x_counts
+                  << " m=" << r.control.target_motion_maintenance_x_counts
+                  << " add=" << r.control.modelled_response_x_counts
+                  << " shaped=" << r.control.shaped_x_counts
+                  << " residual=" << r.control.residual_before_quantization_x_counts << '\n';
     }
     expect(checked == 3, "必须完整覆盖过零前、零帧与后续新向更新");
 }

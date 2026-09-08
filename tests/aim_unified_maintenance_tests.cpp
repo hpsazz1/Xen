@@ -1,5 +1,5 @@
 #include "aim/aim.h"
-#include "aim_opening_maintenance_fixture.h"
+#include "aim_unified_maintenance_fixture.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -15,7 +15,7 @@ auto at(std::int64_t ns) {
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::nanoseconds(ns))};
 }
-void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
+void actual_unified(bool mirror, int mode) {
     AimConfig config;
     config.person_class_ids = {0, 2};
     config.head_class_ids = {1, 3};
@@ -47,7 +47,8 @@ void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
     const int direction = mirror ? -1 : 1;
     int checked = 0;
     float previous_left = 0.0f, previous_right = 0.0f;
-    for (const auto& s : aim_opening_maintenance_fixture::kSamples) {
+    AimFrame last;
+    for (const auto& s : aim_unified_maintenance_fixture::kSamples) {
         if (s.observation_clock_reset) aim.reset();
         AimFrame f;
         f.sequence = s.sequence;
@@ -73,15 +74,18 @@ void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
         f.background_motion_x = {s.status, s.previous_sequence, s.background_sequence,
             at(s.previous_ns), at(s.background_ns), s.background_epoch,
             mirror ? -s.bg_dx : s.bg_dx, s.response, s.disagreement, s.patches};
-        if (ambiguous_motion && s.sequence == 3171) {
-            f.background_motion_x.dx_roi_pixels = ((f.detections[0].x1 - previous_left) +
-                (f.detections[0].x2 - previous_right)) * 0.5f;
+        {
+            if (mode == 1) f.background_motion_x = {};
+            if (mode == 2) f.background_motion_x.dx_roi_pixels =
+                ((f.detections[0].x1 - previous_left) +
+                 (f.detections[0].x2 - previous_right)) * 0.5f;
         }
         previous_left = f.detections[0].x1;
         previous_right = f.detections[0].x2;
+        last = f;
         const auto r = aim.process(f);
         const auto& c = r.control;
-        expect(r.status == AimStatus::SUCCESS, "实际15帧最小输入须正常处理");
+        expect(r.status == AimStatus::SUCCESS, "实际22帧短前缀输入须正常处理");
         const float scalars[] = {c.proportional_x_counts, c.feedforward_x_counts,
             c.desired_before_reverse_x_counts, c.filtered_x_counts,
             c.modelled_response_x_counts, c.shaped_x_counts,
@@ -99,63 +103,71 @@ void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
         expect(std::hypot(static_cast<float>(r.command.dx_counts),
                           static_cast<float>(r.command.dy_counts)) <= 14.0f,
                "维护更新不得突破二维14上限");
-        if (r.command.dx_counts != 0)
-            expect(r.command.dx_counts * (r.target.base_aim_x - f.control_center_x) > 0.0f,
-                   "非零X请求必须朝当前固定base误差方向");
         if (r.has_command)
             expect(aim.record_backend_completed_command(f.sequence, at(s.backend_ns),
                        r.command.dx_counts, r.command.dy_counts),
                    "每个分支只能确认自身产生的命令");
-        if (s.sequence != 3171 && s.sequence != 3172) continue;
+        if (s.sequence < 2158) continue;
         ++checked;
-        expect(c.evaluated && r.target.matched_observation_valid &&
-                   c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
-                   !c.filter_reset_x,
-               "实际主窗须有同源观测且不是Reset");
-        if (s.sequence == 3171) {
-            expect(c.opening_weight_x == 0.0f,
-                   "图像收拢的原opening判定不受世界运动维护改变");
-            if (ambiguous_motion) {
-                expect((c.reverse_translation_raw_left_x_roi_pixels - f.background_motion_x.dx_roi_pixels) *
-                           (c.reverse_translation_raw_right_x_roi_pixels - f.background_motion_x.dx_roi_pixels) <= 0.0f,
-                       "负控必须实际消除校正双边的共同方向");
-                expect(direction * r.command.dx_counts == -3,
-                       "缺少当前世界共同运动支持时保留原收拢额度输出");
-            } else {
-                const float left = c.reverse_translation_raw_left_x_roi_pixels -
-                    f.background_motion_x.dx_roi_pixels;
-                const float right = c.reverse_translation_raw_right_x_roi_pixels -
-                    f.background_motion_x.dx_roi_pixels;
-                const float dt = std::chrono::duration<float>(
-                    f.background_motion_x.captured_at -
-                    f.background_motion_x.previous_captured_at).count();
-                const float bound = std::min(std::fabs(left), std::fabs(right)) *
-                    f.source_pixels_per_roi_pixel_x / (0.2216375f / config.counts_per_pixel_x) *
-                    c.controller_dt_ms / 1000.0f / dt;
-                expect(direction * left < 0.0f && direction * right < 0.0f &&
-                           direction * c.target_motion_maintenance_x_counts < 0.0f &&
-                           std::fabs(c.target_motion_maintenance_x_counts) <= bound + 0.0003f,
-                       "图像收拢但世界目标仍同向时，维护由当前双边幅度支持");
-                expect(direction * c.filtered_x_counts < 0.0f &&
-                           direction * r.command.dx_counts < -3,
-                       "位置纠偏保持方向，同向维护不能仍被收拢位置额度压掉");
-            }
-        } else {
-            expect(c.opening_weight_x > 0.0f &&
-                       direction * c.target_motion_maintenance_x_counts < 0.0f,
-                   "实际误差扩大且目标维护方向一致");
-            expect(direction * r.command.dx_counts <= -3,
-                   "3172同向追赶不能仍被纯位置额度压在两个counts以内");
+        const float error = r.target.base_aim_x - f.control_center_x;
+        expect(c.filtered_x_counts * error >= 0.0f,
+               "位置PI仍只能朝当前误差，维护不改PI保护");
+        if (mode != 0) {
+            expect(r.command.dx_counts == direction * s.fallback_x[mode - 1],
+                   "无BG或无共同运动沿用冻结基线回退，不要求全部零");
+            continue;
+        }
+        expect(c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
+                   !c.filter_reset_x, "核心须为同源非Reset观测");
+        const float left = c.reverse_translation_raw_left_x_roi_pixels - f.background_motion_x.dx_roi_pixels;
+        const float right = c.reverse_translation_raw_right_x_roi_pixels - f.background_motion_x.dx_roi_pixels;
+        expect(direction * left > 0.0f && direction * right > 0.0f,
+               "实际双边证据必须支持同一世界方向");
+        const float observation_dt = std::chrono::duration<float>(
+            f.background_motion_x.captured_at - f.background_motion_x.previous_captured_at).count();
+        const float current_budget = std::min(std::fabs(left), std::fabs(right)) *
+            f.source_pixels_per_roi_pixel_x / (0.2216375f / config.counts_per_pixel_x) *
+            (c.controller_dt_ms / 1000.0f) / observation_dt;
+        const float observer_budget = std::fabs(c.observer_target_velocity_x_counts_per_second) *
+            c.controller_dt_ms / 1000.0f;
+        const float budget = std::min(current_budget, observer_budget);
+        const float integral_credit = std::min(
+            std::max(0.0f, direction * c.filtered_integral_x_counts),
+            std::max(0.0f, direction * c.filtered_x_counts));
+        const float remaining = std::max(0.0f, budget - integral_credit);
+        expect(integral_credit <= std::fabs(c.filtered_x_counts) + .0003f,
+               "只扣实际eligible PI内的同向积分份额");
+        // 该真实窗口未触及14，model_add为D阻尼之前的实际维护追加。
+        expect(std::fabs(direction * c.modelled_response_x_counts - remaining) < .001f,
+               "同侧与跨侧必须按同一当前预算减实际积分份额支付维护");
+        if (s.sequence == 2158 || s.sequence == 2161) {
+            expect(direction * error > 0.0f && c.opening_weight_x == 0.0f &&
+                       direction * c.reverse_translation_raw_left_x_roi_pixels < 0.0f &&
+                       direction * c.reverse_translation_raw_right_x_roi_pixels < 0.0f,
+                   "真实主帧同误差侧但图像closing，世界运动仍同向");
+            expect(direction * c.modelled_response_x_counts > 1.0f,
+                   "足够当前维护预算不能被位置H压成近零追加");
         }
     }
-    expect(checked == 2, "必须覆盖收拢负控和同向追赶主帧");
+    expect(checked == 4, "必须覆盖四帧同侧跨侧转换与回退");
+    ++last.sequence;
+    last.captured_at += std::chrono::milliseconds(10);
+    last.control_at = last.captured_at + std::chrono::milliseconds(3);
+    last.lock_active = false;
+    const auto released = aim.process(last);
+    // Aim松键时仍可预计算位置/Y请求；实际发送由Runtime锁键门控制。
+    // 本单元仅验证松键不能保留运动维护与量化记忆。
+    expect(released.control.observer_target_velocity_x_counts_per_second == 0.0f &&
+               released.control.target_motion_maintenance_x_counts == 0.0f &&
+               released.control.modelled_response_x_counts == 0.0f &&
+               released.control.residual_before_quantization_x_counts == 0.0f &&
+               released.control.background_motion_use_x != AimBackgroundMotionUse::CONSUMED,
+           "松键须清除观察器维护及余数，不将预计算位置请求误认为实发");
+
 }
 }
 int main() {
-    actual_opening_maintenance(false);
-    actual_opening_maintenance(true);
-    actual_opening_maintenance(false, true);
-    actual_opening_maintenance(true, true);
+    for (int mode = 0; mode < 3; ++mode) { actual_unified(false, mode); actual_unified(true, mode); }
     std::cout << "失败数：" << failures << '\n';
     return failures == 0 ? 0 : 1;
 }
