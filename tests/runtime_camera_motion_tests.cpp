@@ -14,9 +14,9 @@ void expect(bool value, const std::string& message) {
 using Status = AimBackgroundMotionStatus;
 using Estimator = runtime::detail::CameraMotionEstimator;
 
-cv::Mat texture() {
+cv::Mat texture(std::uint64_t seed = 241099) {
     cv::Mat gray(320, 320, CV_8UC1);
-    cv::RNG random(241099);
+    cv::RNG random(seed);
     random.fill(gray, cv::RNG::UNIFORM, 0, 256);
     cv::GaussianBlur(gray, gray, cv::Size(3, 3), 0.6);
     cv::Mat bgr;
@@ -75,6 +75,51 @@ void test_translation_zero_and_owned_history() {
                "测量保留实际帧对及epoch");
         expect(result.motion.usable_patch_count == 2 && result.elapsed_ms >= 0,
                "两空间patch及耗时必须实际产生");
+    }
+}
+void test_exact_patch_identity() {
+    // 新提交且图像内容相同仍是有效零观测，不是重复帧身份，也不能跳过测量更新。
+    for (std::uint64_t seed : {46ULL, 48ULL, 131ULL, 154ULL, 241099ULL}) {
+        const auto original = texture(seed);
+        for (bool center_changed : {false, true}) {
+            Estimator estimator;
+            const auto first = capture(original, 100);
+            estimator.observe(first, input(first));
+            auto current = original.clone();
+            if (center_changed) current(cv::Rect(120, 60, 80, 120)).setTo(cv::Scalar(20, 80, 170));
+            const auto second = capture(current, 101);
+            auto frame = input(second);
+            if (center_changed) {
+                Detection center;
+                center.x1 = 125; center.x2 = 195; center.y1 = 70; center.y2 = 170;
+                frame.detections.push_back(center);
+            }
+            const auto result = estimator.observe(second, frame);
+            expect(result.motion.status == Status::VALID && result.motion.usable_patch_count == 2,
+                   "固定纹理同背景patch仍须通过原置信与有效性检查");
+            expect(result.motion.dx_roi_pixels == 0.0f,
+                   "完全相同背景patch的位移必须严格为零，seed=" + std::to_string(seed));
+            expect(result.motion.previous_sequence == 100 && result.motion.sequence == 101,
+                   "同内容不能替换真实提交帧对或停止推进源时间");
+        }
+    }
+    // 仅一侧相同不能将整对测量抹零；另一侧小平移仍按两patch原一致性规则输出。
+    const auto original = texture();
+    for (double displacement : {-0.25, 0.25}) {
+        Estimator estimator;
+        const auto first = capture(original, 200);
+        estimator.observe(first, input(first));
+        auto current = original.clone();
+        const auto moved = translated(original, displacement);
+        const cv::Rect right(208, 48, 96, 160);
+        moved(right).copyTo(current(right));
+        const auto second = capture(current, 201);
+        const auto result = estimator.observe(second, input(second));
+        expect(result.motion.status == Status::VALID && result.motion.usable_patch_count == 2,
+               "单patch恒等不应改变另一侧小平移的原有效性");
+        expect(result.motion.dx_roi_pixels * displacement > 0.0 &&
+                   std::fabs(result.motion.dx_roi_pixels) < std::fabs(displacement),
+               "单patch恒等仍保留另一侧真实非零位移及双patch平均");
     }
 }
 void test_quality_and_foreground() {
@@ -209,6 +254,7 @@ void test_stride_and_repeated_phase_inputs() {
 
 int main() {
     test_translation_zero_and_owned_history();
+    test_exact_patch_identity();
     test_quality_and_foreground();
     test_pair_geometry_reset_and_unsupported();
     test_stride_and_repeated_phase_inputs();

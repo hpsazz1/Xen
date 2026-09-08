@@ -158,6 +158,13 @@ CameraMotionMeasurement CameraMotionEstimator::observe(
                         std::isfinite(shifts[index].y) &&
                         std::fabs(shifts[index].x) < patch_width * 0.5 &&
                         std::fabs(shifts[index].y) < patch_height * 0.5) {
+                        // 相同灰度输入的观测位移严格为零，避免加窗相关的
+                        // 浮点残差携带虚假方向；不按速度或位移容差归零。
+                        // 保留原响应/有效性检查，仍按真实帧对消费有效零观测。
+                        if (cv::norm(previous_gray_[index], current_gray_[index],
+                                     cv::NORM_INF) == 0.0) {
+                            shifts[index] = cv::Point2d{};
+                        }
                         ++motion.usable_patch_count;
                     }
                 }
