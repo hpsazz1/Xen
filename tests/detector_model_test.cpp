@@ -552,6 +552,9 @@ RuntimePipelineSample make_aim_replay_sample(
     sample.mouse_status = MouseStatus::CLOSED;
     sample.mouse_sent = false;
     sample.aim_lock_active = aim_frame.lock_active;
+    // 此既有视频 seam 未运行背景测量时保留输入默认 MISSING，不借模拟相机造 VALID。
+    sample.aim_observation_epoch = aim_frame.observation_epoch;
+    sample.background_motion_x = aim_frame.background_motion_x;
     sample.aim_control_center_x = aim_frame.control_center_x;
     sample.aim_control_center_y = aim_frame.control_center_y;
     sample.aim_acquisition_range_radius =

@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 function Import-XenAimReportTestModule(
@@ -338,5 +338,54 @@ Assert-Condition (-not [bool]$legacyControlSummary.reverse_probe_diagnostics_ava
         -not [bool]$legacyControlSummary.reverse_position_improvement_diagnostics_available -and
         $legacyControlSummary.x.nonzero_direction_reversals -eq 2) `
     "Schema 8/9/10 control diagnostics must remain backward-compatible."
+
+function New-BackgroundContractSample {
+    $value = New-AimSample
+    $value.sequence = 102
+    $value.aim_control_evaluated = $true
+    $value.aim_observation_steady_ns = '9007199254741993'
+    $value.aim_observation_epoch = '18446744073709551611'
+    $value.aim_background_motion_status_x = 'MISSING'
+    $value.aim_background_previous_sequence = '101'
+    $value.aim_background_sequence = '102'
+    $value.aim_background_previous_captured_at_ns = '9007199254740993'
+    $value.aim_background_captured_at_ns = '9007199254741993'
+    $value.aim_background_observation_epoch = '18446744073709551611'
+    $value.aim_background_dx_roi_pixels = 0.0
+    $value.aim_background_min_response = 0.75
+    $value.aim_background_disagreement_roi_pixels = 0.125
+    $value.aim_background_usable_patch_count = 2
+    $value.aim_background_motion_use_x = 'MISSING'
+    $value.aim_observer_camera_motion_x_source_pixels = 0.0
+    $value.aim_observer_target_velocity_x_counts_per_second = 12.5
+    $value.background_motion_ms = 0.125
+    return $value
+}
+
+Assert-XenAimBackgroundReportFields -Report @{ schema = 18; samples = @(@{}) }
+$backgroundSample = New-BackgroundContractSample
+Assert-XenAimBackgroundReportFields -Report @{ schema = 19; samples = @($backgroundSample) }
+foreach ($use in @('CONSUMED', 'OBSERVATION_UNAVAILABLE')) {
+    $backgroundSample.aim_background_motion_status_x = 'VALID'
+    $backgroundSample.aim_background_motion_use_x = $use
+    Assert-XenAimBackgroundReportFields -Report @{ schema = 19; samples = @($backgroundSample) }
+}
+foreach ($invalidCase in @('missing_pair', 'rounded_epoch', 'wrong_time', 'invalid_status', 'nonfinite')) {
+    $backgroundSample = New-BackgroundContractSample
+    $backgroundSample.aim_background_motion_status_x = 'VALID'
+    $backgroundSample.aim_background_motion_use_x = 'CONSUMED'
+    switch ($invalidCase) {
+        'missing_pair' { $backgroundSample.Remove('aim_background_previous_sequence') }
+        'rounded_epoch' { $backgroundSample.aim_observation_epoch = [double]18446744073709551611 }
+        'wrong_time' { $backgroundSample.aim_background_captured_at_ns = '9007199254741994' }
+        'invalid_status' { $backgroundSample.aim_background_motion_status_x = 'MISSING' }
+        'nonfinite' { $backgroundSample.aim_background_dx_roi_pixels = [double]::NaN }
+    }
+    $rejected = $false
+    try {
+        Assert-XenAimBackgroundReportFields -Report @{ schema = 19; samples = @($backgroundSample) }
+    } catch { $rejected = $_.Exception.Message -like '*schema 19*' }
+    Assert-Condition $rejected "背景报告完整性必须拒绝 $invalidCase，不得以消费计数判定物理通过。"
+}
 
 Write-Host "Aim report and control-diagnostics tests passed."

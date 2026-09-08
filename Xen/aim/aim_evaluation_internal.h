@@ -73,6 +73,12 @@ struct AimEvaluationConfig {
 
 struct AimEvaluationFrame {
     std::size_t frame_index = 0;
+    // 有背景消费诊断时必须一并提供原始输入身份，不能只复制一个 VALID 标志。
+    std::uint64_t sequence = 0;
+    std::chrono::steady_clock::time_point captured_at{};
+    std::uint64_t observation_epoch = 0;
+    AimBackgroundMotionX background_motion_x;
+    AimControlDiagnostics control;
     int source_width = 0;
     int source_height = 0;
     float source_roi_x = 0.0f;

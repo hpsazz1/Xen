@@ -12,11 +12,13 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -247,6 +249,100 @@ std::string text(const json& object,
             std::string(context) + " 缺少字符串字段 " + std::string(field));
     }
     return iterator->get<std::string>();
+}
+
+// 帧对身份不经过 double，兼容 Runtime 报告的十进制整数字符串。
+std::uint64_t background_integer(const json& object, std::string_view field) {
+    const auto iterator = object.find(field);
+    if (iterator != object.end()) {
+        if (iterator->is_number_unsigned()) return iterator->get<std::uint64_t>();
+        if (iterator->is_number_integer()) {
+            const auto value = iterator->get<std::int64_t>();
+            if (value >= 0) return static_cast<std::uint64_t>(value);
+        }
+        if (iterator->is_string()) {
+            const auto value = iterator->get<std::string>();
+            std::uint64_t parsed = 0;
+            const auto result = std::from_chars(
+                value.data(), value.data() + value.size(), parsed);
+            if (result.ec == std::errc{} && result.ptr == value.data() + value.size()) {
+                return parsed;
+            }
+        }
+    }
+    throw std::runtime_error("background motion 字段必须是无损非负整数: " +
+                             std::string(field));
+}
+
+std::chrono::steady_clock::time_point background_time(
+        const json& object, std::string_view field) {
+    const auto value = background_integer(object, field);
+    if (value > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())) {
+        throw std::runtime_error("background motion 时间超出 steady nanoseconds 范围");
+    }
+    return std::chrono::steady_clock::time_point(
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::nanoseconds(static_cast<std::int64_t>(value))));
+}
+
+AimBackgroundMotionX parse_background_motion(const json& sample) {
+    AimBackgroundMotionX result;
+    const auto found = sample.find("background_motion_x");
+    if (found == sample.end()) return result; // 旧 plan 没有背景测量，保持 MISSING。
+    if (!found->is_object()) throw std::runtime_error("background_motion_x 必须是对象");
+    const auto status = text(*found, "status", "background_motion_x");
+    bool known_status = false;
+    for (const auto value : {AimBackgroundMotionStatus::MISSING,
+            AimBackgroundMotionStatus::WARMING, AimBackgroundMotionStatus::UNSUPPORTED,
+            AimBackgroundMotionStatus::INVALID_PAIR, AimBackgroundMotionStatus::INVALID_GEOMETRY,
+            AimBackgroundMotionStatus::FOREGROUND, AimBackgroundMotionStatus::LOW_TEXTURE,
+            AimBackgroundMotionStatus::INCONSISTENT, AimBackgroundMotionStatus::VALID,
+            AimBackgroundMotionStatus::ESTIMATION_FAILED}) {
+        if (status == AimBackgroundMotionStatusName(value)) {
+            result.status = value;
+            known_status = true;
+            break;
+        }
+    }
+    if (!known_status) throw std::runtime_error("background_motion_x.status 无效");
+    result.previous_sequence = background_integer(*found, "previous_sequence");
+    result.sequence = background_integer(*found, "sequence");
+    result.previous_captured_at = background_time(*found, "previous_captured_at_ns");
+    result.captured_at = background_time(*found, "captured_at_ns");
+    result.observation_epoch = background_integer(*found, "observation_epoch");
+    const auto number = [&](std::string_view key) {
+        const double value = finite_number(*found, key, "background_motion_x");
+        if (std::abs(value) > (std::numeric_limits<float>::max)()) {
+            throw std::runtime_error("background motion 数值超出 float 范围");
+        }
+        return static_cast<float>(value);
+    };
+    result.dx_roi_pixels = number("dx_roi_pixels");
+    result.min_response = number("min_response");
+    result.disagreement_roi_pixels = number("disagreement_roi_pixels");
+    const auto count = integer(*found, "usable_patch_count", "background_motion_x");
+    if (count < 0 || count > (std::numeric_limits<int>::max)()) {
+        throw std::runtime_error("background motion patch count 无效");
+    }
+    result.usable_patch_count = static_cast<int>(count);
+    return result;
+}
+
+json background_motion_json(const AimBackgroundMotionX& background) {
+    const auto nanoseconds = [](auto time) {
+        return std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            time.time_since_epoch()).count());
+    };
+    return {{"status", AimBackgroundMotionStatusName(background.status)},
+        {"previous_sequence", std::to_string(background.previous_sequence)},
+        {"sequence", std::to_string(background.sequence)},
+        {"previous_captured_at_ns", nanoseconds(background.previous_captured_at)},
+        {"captured_at_ns", nanoseconds(background.captured_at)},
+        {"observation_epoch", std::to_string(background.observation_epoch)},
+        {"dx_roi_pixels", background.dx_roi_pixels},
+        {"min_response", background.min_response},
+        {"disagreement_roi_pixels", background.disagreement_roi_pixels},
+        {"usable_patch_count", background.usable_patch_count}};
 }
 
 std::array<double, 2> vector2(const json& object,
@@ -516,6 +612,10 @@ std::vector<json> run_trace(
         frame.control_center_x = static_cast<float>(control_center[0]);
         frame.control_center_y = static_cast<float>(control_center[1]);
         frame.lock_active = lock_active;
+        if (sample.contains("observation_epoch")) {
+            frame.observation_epoch = background_integer(sample, "observation_epoch");
+        }
+        frame.background_motion_x = parse_background_motion(sample);
         if (visible) {
             frame.detections.push_back({
                 static_cast<float>(observed_box[0]),
@@ -593,6 +693,9 @@ std::vector<json> run_trace(
 
         rows.push_back({
             {"red_schema", kRedSchemaVersion},
+            {"background_motion_schema", 1},
+            {"observation_epoch", std::to_string(frame.observation_epoch)},
+            {"background_motion_x", background_motion_json(frame.background_motion_x)},
             {"asset_id", plan.at("asset_id")},
             {"source_relative_path", "sources/plan.json"},
             {"source_sha256", plan_sha256},
@@ -640,6 +743,12 @@ std::vector<json> run_trace(
             {"control_center", json::array(
                 {control_center[0], control_center[1]})},
             {"controller_x", {
+                {"background_motion_use", AimBackgroundMotionUseName(
+                    aim_result.control.background_motion_use_x)},
+                {"observer_camera_motion_source_pixels",
+                 aim_result.control.observer_camera_motion_x_source_pixels},
+                {"observer_target_velocity_counts_per_second",
+                 aim_result.control.observer_target_velocity_x_counts_per_second},
                 {"proportional_counts",
                  aim_result.control.proportional_x_counts},
                 {"feedforward_counts",

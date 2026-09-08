@@ -79,6 +79,7 @@ struct DebugReportSummary {
     DebugTimingSummary execution;
     DebugTimingSummary d2h;
     DebugTimingSummary postprocess;
+    DebugTimingSummary background_motion;
     DebugTimingSummary aim;
     DebugTimingSummary mouse;
     DebugTimingSummary total;

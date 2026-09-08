@@ -155,6 +155,12 @@ struct Track {
     float last_observation_x2 = 0.0f;
     float last_observation_aim_x = 0.0f;
     std::chrono::steady_clock::time_point last_observation_at{};
+    std::uint64_t last_observation_sequence = 0;
+    std::uint64_t last_observation_epoch = 0;
+    std::uint64_t raw_previous_sequence = 0;
+    std::uint64_t raw_previous_epoch = 0;
+    std::chrono::steady_clock::time_point raw_previous_at{};
+    bool raw_observation_pair_valid = false;
     bool horizontal_observation_initialized = false;
     bool last_observation_head_only = false;
     bool horizontal_trend_rebuilding_from_partial = false;
@@ -1462,6 +1468,11 @@ struct Aim::Impl {
         track.horizontal_raw_left_motion_x = 0.0f;
         track.horizontal_raw_right_motion_x = 0.0f;
 
+        track.raw_observation_pair_valid = false;
+        track.raw_previous_sequence = track.last_observation_sequence;
+        track.raw_previous_epoch = track.last_observation_epoch;
+        track.raw_previous_at = track.last_observation_at;
+
         // 趋势窗口只接收连续的身体框中心。原始 head 框是否出现不会改变
         // 身体坐标系；真正切到 head-only 或轨迹丢帧才重建窗口，避免把两种
         // 框尺度的切换写成水平运动。
@@ -1490,6 +1501,7 @@ struct Aim::Impl {
         }
         if (track.horizontal_observation_initialized &&
             track.last_observation_head_only == observation.head_only) {
+            track.raw_observation_pair_valid = true;
             // 世界运动观察器读取相邻原始框的两边共同位移，而不是已被 vx
             // 预测抵消后的残差。这里显式使用“上一原始观测”的语义，不能
             // 使用保留身体坐标系的 track.head_only：连续只剩 head 框时，
@@ -2697,8 +2709,13 @@ struct Aim::Impl {
                         observation_matched);
 
         for (std::size_t index = 0; index < tracks.size(); ++index) {
-            if (track_matched[index]) continue;
+            if (track_matched[index]) {
+                tracks[index].last_observation_sequence = frame.sequence;
+                tracks[index].last_observation_epoch = frame.observation_epoch;
+                continue;
+            }
             Track& track = tracks[index];
+            track.raw_observation_pair_valid = false;
             // 没有相邻观测时不能跨缺帧沿用形变保持；重新匹配后必须从
             // 新的连续观测重新建立宽高与中心创新证据。
             track.shape_deformation_x_frames = 0;
@@ -2769,6 +2786,8 @@ struct Aim::Impl {
             created_track.last_observation_x2 = observation.x2;
             created_track.last_observation_aim_x = observation.aim_x;
             created_track.last_observation_at = frame.captured_at;
+            created_track.last_observation_sequence = frame.sequence;
+            created_track.last_observation_epoch = frame.observation_epoch;
             created_track.horizontal_observation_initialized = true;
             created_track.last_observation_head_only = observation.head_only;
             created_track.matched_observation_valid = true;
@@ -3939,38 +3958,107 @@ struct Aim::Impl {
         // 未按锁键时 Runtime 不会执行本帧预计算命令，清空状态，避免再次
         // 按下时消费一段从未闭环控制过的历史运动。
         if (frame.lock_active && config.control_delay_ms > 0.0f) {
-            const float modelled_camera_motion_x =
+            float modelled_camera_motion_x =
                 -delayed_command_x * tracking_plant_pixels_per_count_x;
-            const float camera_motion_evidence_weight =
+            const auto& background = frame.background_motion_x;
+            auto& use = diagnostics.background_motion_use_x;
+            if (background.status == AimBackgroundMotionStatus::MISSING) {
+                use = AimBackgroundMotionUse::MISSING;
+            } else if (background.status != AimBackgroundMotionStatus::VALID ||
+                       !std::isfinite(background.dx_roi_pixels) ||
+                       !std::isfinite(background.min_response) ||
+                       !std::isfinite(background.disagreement_roi_pixels) ||
+                       !std::isfinite(background.dx_roi_pixels *
+                           frame.source_pixels_per_roi_pixel_x) ||
+                       background.min_response < 0.0f ||
+                       background.disagreement_roi_pixels < 0.0f ||
+                       background.usable_patch_count < 2 ||
+                       background.observation_epoch == 0) {
+                use = AimBackgroundMotionUse::INVALID;
+            } else if (!track.raw_observation_pair_valid) {
+                use = AimBackgroundMotionUse::SEMANTICS_MISMATCH;
+            } else if (background.sequence != frame.sequence ||
+                       background.previous_sequence != track.raw_previous_sequence ||
+                       background.captured_at != frame.captured_at ||
+                       background.previous_captured_at != track.raw_previous_at ||
+                       background.previous_captured_at >= background.captured_at ||
+                       background.previous_sequence >= background.sequence ||
+                       background.observation_epoch != frame.observation_epoch ||
+                       background.observation_epoch != track.raw_previous_epoch) {
+                use = AimBackgroundMotionUse::PAIR_MISMATCH;
+            } else if (track.horizontal_raw_left_motion_x *
+                           track.horizontal_raw_right_motion_x < 0.0f) {
+                use = AimBackgroundMotionUse::OBSERVATION_UNAVAILABLE;
+            } else {
+                // 同帧对图像已直接测得 camera 位移，单位只从 ROI 换到 FOV；
+                // 不再乘 plant、延迟或事件数量；测量与模型的权重在下方分别处理。
+                modelled_camera_motion_x = background.dx_roi_pixels *
+                    frame.source_pixels_per_roi_pixel_x;
+                use = AimBackgroundMotionUse::CONSUMED;
+            }
+            const float model_camera_evidence_weight =
                 std::sqrt(std::sqrt(current_common_consistency));
+            // 同帧对实测camera是坐标平移，不能再按目标形变缩小位移；
+            // 否则共同相机运动会残留为虚假的世界运动。模型回退保留原权重。
+            float camera_motion_evidence_weight =
+                use == AimBackgroundMotionUse::CONSUMED
+                ? 1.0f : model_camera_evidence_weight;
             // 两条横边提供当前位移范围；把同一模型的先验相对位移投影
             // 到范围内，避免近零单边把仍有依据的维护运动强拉向零。
             // 只用于 observer 测量，不改变位置/相位使用的共同边位移。
-            float observer_common_motion_x = current_common_motion_x;
-            if (track.horizontal_raw_left_motion_x *
-                    track.horizontal_raw_right_motion_x >= 0.0f) {
-                const float raw_left_motion_x =
-                    track.horizontal_raw_left_motion_x *
-                        frame.source_pixels_per_roi_pixel_x;
-                const float raw_right_motion_x =
-                    track.horizontal_raw_right_motion_x *
-                        frame.source_pixels_per_roi_pixel_x;
-                const float prior_relative_motion_x =
-                    tracking_plant_pixels_per_count_x * controller_dt *
-                        tracking_target_velocity_counts_per_second_x +
-                    modelled_camera_motion_x * camera_motion_evidence_weight;
-                observer_common_motion_x = std::clamp(
-                    prior_relative_motion_x,
-                    std::min(raw_left_motion_x, raw_right_motion_x),
-                    std::max(raw_left_motion_x, raw_right_motion_x));
+            // 有效背景与 raw 位移属于同一观测帧对，速度估计按该帧对的
+            // 时间推进。控制步时长仍由下游 PI、M 和输出独立使用。
+            float observer_dt = use == AimBackgroundMotionUse::CONSUMED
+                ? std::chrono::duration<float>(
+                      background.captured_at - background.previous_captured_at).count()
+                : controller_dt;
+            const auto measure_camera = [&](float camera_motion_x, float dt) {
+                float observer_common_motion_x = current_common_motion_x;
+                if (track.horizontal_raw_left_motion_x *
+                        track.horizontal_raw_right_motion_x >= 0.0f) {
+                    const float raw_left_motion_x =
+                        track.horizontal_raw_left_motion_x *
+                            frame.source_pixels_per_roi_pixel_x;
+                    const float raw_right_motion_x =
+                        track.horizontal_raw_right_motion_x *
+                            frame.source_pixels_per_roi_pixel_x;
+                    const float prior_relative_motion_x =
+                        tracking_plant_pixels_per_count_x * dt *
+                            tracking_target_velocity_counts_per_second_x +
+                        camera_motion_x * camera_motion_evidence_weight;
+                    observer_common_motion_x = std::clamp(
+                        prior_relative_motion_x,
+                        std::min(raw_left_motion_x, raw_right_motion_x),
+                        std::max(raw_left_motion_x, raw_right_motion_x));
+                }
+                return (observer_common_motion_x -
+                        camera_motion_x * camera_motion_evidence_weight) /
+                    tracking_plant_pixels_per_count_x / dt;
+            };
+            float target_velocity_measurement_counts_per_second_x =
+                measure_camera(modelled_camera_motion_x, observer_dt);
+            float target_motion_alpha = observer_dt /
+                (kTrackingTargetMotionFilterTimeSeconds + observer_dt);
+            // 有限输入仍可能在单位换算或更新时溢出；拒绝该测量并重算原
+            // 模型，不能先污染状态再用任意速度上限补救。
+            if (use == AimBackgroundMotionUse::CONSUMED &&
+                (!std::isfinite(target_velocity_measurement_counts_per_second_x) ||
+                 !std::isfinite(tracking_target_velocity_counts_per_second_x +
+                    target_motion_alpha * (target_velocity_measurement_counts_per_second_x -
+                        tracking_target_velocity_counts_per_second_x)))) {
+                use = AimBackgroundMotionUse::INVALID;
+                modelled_camera_motion_x =
+                    -delayed_command_x * tracking_plant_pixels_per_count_x;
+                // 回退必须还原相机、几何权重、时间和更新权重整个元组。
+                camera_motion_evidence_weight = model_camera_evidence_weight;
+                observer_dt = controller_dt;
+                target_velocity_measurement_counts_per_second_x =
+                    measure_camera(modelled_camera_motion_x, observer_dt);
+                target_motion_alpha = observer_dt /
+                    (kTrackingTargetMotionFilterTimeSeconds + observer_dt);
             }
-            const float target_velocity_measurement_counts_per_second_x =
-                (observer_common_motion_x -
-                 modelled_camera_motion_x *
-                     camera_motion_evidence_weight) /
-                tracking_plant_pixels_per_count_x / controller_dt;
-            const float target_motion_alpha = controller_dt /
-                (kTrackingTargetMotionFilterTimeSeconds + controller_dt);
+            diagnostics.observer_camera_motion_x_source_pixels =
+                modelled_camera_motion_x * camera_motion_evidence_weight;
             // 两边异向形变时，共同平移提取没有可用结果，不能把返回的零
             // 当作世界目标静止来撤销已有运动。仅跳过这次速度校正，后续
             // 位置纠偏、方向和预算仍正常更新；单零边包含在观测范围中，
@@ -3985,6 +4073,8 @@ struct Aim::Impl {
         } else {
             tracking_target_velocity_counts_per_second_x = 0.0f;
         }
+        diagnostics.observer_target_velocity_x_counts_per_second =
+            tracking_target_velocity_counts_per_second_x;
         const bool use_current_common_motion_x =
             current_common_motion_x != 0.0f &&
             current_common_consistency > 0.0f;
@@ -5111,6 +5201,35 @@ struct Aim::Impl {
         reset_controller();
     }
 };
+
+const char* AimBackgroundMotionStatusName(AimBackgroundMotionStatus status) noexcept {
+    switch (status) {
+        case AimBackgroundMotionStatus::MISSING: return "MISSING";
+        case AimBackgroundMotionStatus::WARMING: return "WARMING";
+        case AimBackgroundMotionStatus::UNSUPPORTED: return "UNSUPPORTED";
+        case AimBackgroundMotionStatus::INVALID_PAIR: return "INVALID_PAIR";
+        case AimBackgroundMotionStatus::INVALID_GEOMETRY: return "INVALID_GEOMETRY";
+        case AimBackgroundMotionStatus::FOREGROUND: return "FOREGROUND";
+        case AimBackgroundMotionStatus::LOW_TEXTURE: return "LOW_TEXTURE";
+        case AimBackgroundMotionStatus::INCONSISTENT: return "INCONSISTENT";
+        case AimBackgroundMotionStatus::VALID: return "VALID";
+        case AimBackgroundMotionStatus::ESTIMATION_FAILED: return "ESTIMATION_FAILED";
+    }
+    return "UNKNOWN";
+}
+
+const char* AimBackgroundMotionUseName(AimBackgroundMotionUse use) noexcept {
+    switch (use) {
+        case AimBackgroundMotionUse::NOT_EVALUATED: return "NOT_EVALUATED";
+        case AimBackgroundMotionUse::MISSING: return "MISSING";
+        case AimBackgroundMotionUse::INVALID: return "INVALID";
+        case AimBackgroundMotionUse::PAIR_MISMATCH: return "PAIR_MISMATCH";
+        case AimBackgroundMotionUse::SEMANTICS_MISMATCH: return "SEMANTICS_MISMATCH";
+        case AimBackgroundMotionUse::OBSERVATION_UNAVAILABLE: return "OBSERVATION_UNAVAILABLE";
+        case AimBackgroundMotionUse::CONSUMED: return "CONSUMED";
+    }
+    return "UNKNOWN";
+}
 
 const char* AimStatusName(AimStatus status) noexcept {
     switch (status) {

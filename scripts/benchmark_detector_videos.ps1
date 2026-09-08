@@ -634,6 +634,7 @@ if ($sceneDifference.Count -ne 0) {
     throw "Detector 视频基准场景集合与视频清单不一致：$($sceneDifference -join '; ')"
 }
 $aimReportSchemas = [System.Collections.Generic.HashSet[int]]::new()
+. (Join-Path $PSScriptRoot "aim_report.ps1")
 if ($useAimReports) {
     foreach ($video in $videoFiles) {
         $jsonPath = Join-Path $AimReportDirectory `
@@ -643,7 +644,7 @@ if ($useAimReports) {
         $expectedFrames = [long](
             $reportRows | Where-Object scene -eq $video.BaseName |
                 Select-Object -ExpandProperty frames)
-        if ([int]$runtimeReport.schema -notin @(17, 18) -or
+        if ([int]$runtimeReport.schema -notin @(17, 18, 19) -or
             [long]$runtimeReport.sample_count -ne $expectedFrames -or
             [long]$runtimeReport.successful_samples -ne $expectedFrames -or
             [long]$runtimeReport.failed_samples -ne 0 -or
@@ -662,6 +663,7 @@ if ($useAimReports) {
             throw "Aim 逐帧报告未完整保持无物理输出回放契约：$jsonPath"
         }
         [void]$aimReportSchemas.Add([int]$runtimeReport.schema)
+        Assert-XenAimBackgroundReportFields -Report $runtimeReport
     }
 }
 $sampleFrames = 0L

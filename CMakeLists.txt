@@ -847,7 +847,8 @@ target_include_directories(app_startup PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 
 add_library(runtime STATIC
     Xen/runtime/runtime.cpp
-    Xen/runtime/runtime_queue.cpp)
+    Xen/runtime/runtime_queue.cpp
+    Xen/runtime/camera_motion.cpp)
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
     PUBLIC detector capture aim aim_landmark mouse keyboard config log
@@ -946,6 +947,15 @@ endif()
 
 add_executable(xen_benchmark
     Xen/benchmark/main.cpp)
+
+# 原图离线验证不实例化 Capture/Mouse；复用实际 Detector、背景生产者和 Aim。
+add_executable(camera_motion_benchmark
+    Xen/benchmark/camera_motion_benchmark.cpp
+    Xen/runtime/camera_motion.cpp)
+target_include_directories(camera_motion_benchmark PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(camera_motion_benchmark PRIVATE
+    detector aim config nlohmann_json::nlohmann_json)
+xen_deploy_runtime_dlls(camera_motion_benchmark OPENCV ORT)
 set_target_properties(xen_benchmark PROPERTIES OUTPUT_NAME XenBenchmark)
 target_link_libraries(xen_benchmark PRIVATE benchmark)
 if(WIN32)
@@ -1227,6 +1237,42 @@ if(BUILD_TESTING)
     target_link_libraries(aim_evaluation_tests PRIVATE aim log)
     xen_deploy_runtime_dlls(aim_evaluation_tests OPENCV)
     add_test(NAME aim_evaluation_tests COMMAND aim_evaluation_tests)
+
+    add_executable(aim_background_motion_tests tests/aim_background_motion_tests.cpp)
+    target_link_libraries(aim_background_motion_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_background_motion_tests OPENCV)
+    add_test(NAME aim_background_motion_tests COMMAND aim_background_motion_tests)
+
+    add_executable(aim_background_observation_time_tests
+        tests/aim_background_observation_time_tests.cpp)
+    target_link_libraries(aim_background_observation_time_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_background_observation_time_tests OPENCV)
+    add_test(NAME aim_background_observation_time_tests
+        COMMAND aim_background_observation_time_tests)
+
+    add_executable(aim_background_camera_translation_tests
+        tests/aim_background_camera_translation_tests.cpp)
+    target_link_libraries(aim_background_camera_translation_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_background_camera_translation_tests OPENCV)
+    add_test(NAME aim_background_camera_translation_tests
+        COMMAND aim_background_camera_translation_tests)
+
+    add_executable(runtime_camera_motion_tests
+        tests/runtime_camera_motion_tests.cpp
+        Xen/runtime/camera_motion.cpp)
+    target_include_directories(runtime_camera_motion_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(runtime_camera_motion_tests PRIVATE aim ${OpenCV_LIBS})
+    xen_deploy_runtime_dlls(runtime_camera_motion_tests OPENCV)
+    add_test(NAME runtime_camera_motion_tests COMMAND runtime_camera_motion_tests)
+
+    add_executable(runtime_aim_frame_tests
+        tests/runtime_aim_frame_tests.cpp Xen/runtime/camera_motion.cpp)
+    target_include_directories(runtime_aim_frame_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(runtime_aim_frame_tests PRIVATE aim ${OpenCV_LIBS})
+    xen_deploy_runtime_dlls(runtime_aim_frame_tests OPENCV)
+    add_test(NAME runtime_aim_frame_tests COMMAND runtime_aim_frame_tests)
 
     add_executable(mouse_tests
         tests/mouse_tests.cpp)

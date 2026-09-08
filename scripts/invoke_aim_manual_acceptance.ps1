@@ -2755,10 +2755,11 @@ foreach ($file in $jsonReports) {
         ConvertFrom-Json
     if ($null -eq $report.samples) { continue }
     $reportSchema = [int]$report.schema
-    if ($reportSchema -notin @(13, 14, 15, 16, 17, 18)) {
+    if ($reportSchema -notin @(13, 14, 15, 16, 17, 18, 19)) {
         throw "Aim 人工任务 Runtime 报告 schema 不受支持：$reportSchema；$($file.FullName)"
     }
     [void]$reportSchemas.Add($reportSchema)
+    Assert-XenAimBackgroundReportFields -Report $report
     $samples = @($report.samples)
     $allSamples += $samples
     $sampleCount += [uint64]$report.sample_count

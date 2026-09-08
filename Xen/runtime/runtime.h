@@ -55,6 +55,8 @@ struct PipelineProfile {
     double queue_ms = 0.0;
     InferenceProfile detector;
     AimProfile aim;
+    // 同帧 CPU 背景观测的完整计算耗时；计入真实 control_at 之前的等待。
+    double background_motion_ms = 0.0;
     double mouse_ms = 0.0;
     double total_ms = 0.0;
     SourceTimeBasis source_time_basis = SourceTimeBasis::UNAVAILABLE;
@@ -150,6 +152,8 @@ struct RuntimeFrameTimingEvidence {
 // 不持有图像、模型或设备资源，便于在主线程锁外写入报告。
 struct RuntimePipelineSample {
     std::uint64_t sequence = 0;
+    std::uint64_t aim_observation_epoch = 0;
+    AimBackgroundMotionX background_motion_x;
     RuntimeFrameGeometry geometry;
     RuntimeFrameTimingEvidence frame_timing;
     PipelineProfile profile;

@@ -106,6 +106,34 @@ try {
                 -eq 0.0) `
         "X-only 夹具必须证明矩阵中的 Y A/B 不变。"
 
+    $backgroundFields = [ordered]@{
+        aim_observation_epoch = '0'; aim_background_motion_status_x = 'MISSING'
+        aim_background_previous_sequence = '0'; aim_background_sequence = '0'
+        aim_background_previous_captured_at_ns = '0'; aim_background_captured_at_ns = '0'
+        aim_background_observation_epoch = '0'; aim_background_dx_roi_pixels = 0.0
+        aim_background_min_response = 0.0; aim_background_disagreement_roi_pixels = 0.0
+        aim_background_usable_patch_count = 0; aim_background_motion_use_x = 'MISSING'
+        aim_observer_camera_motion_x_source_pixels = 0.0
+        aim_observer_target_velocity_x_counts_per_second = 0.0; background_motion_ms = 0.0
+    }
+    foreach ($item in $after) {
+        foreach ($name in $backgroundFields.Keys) {
+            $item | Add-Member -NotePropertyName $name -NotePropertyValue $backgroundFields[$name]
+        }
+    }
+    Write-ReplayReport (Join-Path $current '静止.mp4.aim-runtime.json') $after -Schema 19
+    $schema19Matrix = Get-XenAimVideoReplayMatrix -CurrentDirectory $current -BeforeDirectory $baseline
+    Assert-Condition ($schema19Matrix.scene_count -eq 2 -and -not $schema19Matrix.physical_output) `
+        '矩阵必须兼容含完整MISSING背景合同的schema19，不能将来源字段当成物理效果。'
+    $after[0].PSObject.Properties.Remove('aim_background_sequence')
+    Write-ReplayReport (Join-Path $current '静止.mp4.aim-runtime.json') $after -Schema 19
+    $rejected = $false
+    try { Get-XenAimVideoReplayMatrix -CurrentDirectory $current | Out-Null }
+    catch { $rejected = $_.Exception.Message -like '*schema 19 背景合同缺少*' }
+    Assert-Condition $rejected 'schema19矩阵必须拒绝漏掉背景pair身份的报告。'
+    $after[0] | Add-Member -NotePropertyName aim_background_sequence -NotePropertyValue '0'
+    Write-ReplayReport (Join-Path $current '静止.mp4.aim-runtime.json') $after -Schema 19
+
     Write-ReplayReport (Join-Path $current `
         "拒绝武装.mp4.aim-runtime.json") $after -OutputArmed $true
     $rejected = $false

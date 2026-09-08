@@ -368,6 +368,51 @@ try {
     Expect ([bool]$schema18Summary.automatic_complete -and
             [bool]$schema18Summary.aim_observability.contract_valid) `
         "Collect 必须接受 additive schema 18 并继续执行 Aim 门禁"
+    $backgroundFields = [ordered]@{
+        aim_observation_epoch = '0'
+        aim_background_motion_status_x = 'MISSING'
+        aim_background_previous_sequence = '0'
+        aim_background_sequence = '0'
+        aim_background_previous_captured_at_ns = '0'
+        aim_background_captured_at_ns = '0'
+        aim_background_observation_epoch = '0'
+        aim_background_dx_roi_pixels = 0.0
+        aim_background_min_response = 0.0
+        aim_background_disagreement_roi_pixels = 0.0
+        aim_background_usable_patch_count = 0
+        aim_background_motion_use_x = 'MISSING'
+        aim_observer_camera_motion_x_source_pixels = 0.0
+        aim_observer_target_velocity_x_counts_per_second = 0.0
+        background_motion_ms = 0.0
+    }
+    foreach ($item in $synthetic.samples) {
+        foreach ($name in $backgroundFields.Keys) { $item[$name] = $backgroundFields[$name] }
+    }
+    $synthetic.schema = 19
+    [System.IO.File]::WriteAllText(
+        $reportPath, (($synthetic | ConvertTo-Json -Depth 8) + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    & $workflow -Mode Collect -Stage DetectionStatic `
+        -RunDirectory $observationRun | Out-Null
+    $schema19Summary = Get-Content -LiteralPath (
+        Join-Path $observationRun "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    Expect ([bool]$schema19Summary.automatic_complete -and
+            [bool]$schema19Summary.aim_observability.contract_valid) `
+        "schema 19 完整MISSING字段只表示回退，不能用背景消费次数替代原Aim门禁"
+    $synthetic.samples[0].Remove('aim_background_previous_sequence')
+    [System.IO.File]::WriteAllText(
+        $reportPath, (($synthetic | ConvertTo-Json -Depth 8) + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    & $workflow -Mode Collect -Stage DetectionStatic `
+        -RunDirectory $observationRun | Out-Null
+    $incompleteBackground = Get-Content -LiteralPath (
+        Join-Path $observationRun "automatic-summary.json") `
+        -Raw -Encoding UTF8 | ConvertFrom-Json
+    Expect (-not [bool]$incompleteBackground.automatic_complete -and
+            ($incompleteBackground.failures -join "`n") -match 'schema 19 背景合同缺少') `
+        "schema 19 不完整pair必须报告数据缺失，不能静默按旧schema处理"
+    $synthetic.samples[0]['aim_background_previous_sequence'] = '0'
     $synthetic.schema = 17
 
     $synthetic.samples[0].aim_base_point_inside_box = $false
@@ -398,7 +443,7 @@ try {
         -Raw -Encoding UTF8 | ConvertFrom-Json
     Expect (-not [bool]$oldSchemaSummary.automatic_complete -and
             ($oldSchemaSummary.failures -join "`n") -match
-                '报告 schema 不是 16、17 或 18') `
+                '报告 schema 不是 16、17、18 或 19') `
         "旧 schema 报告必须拒绝自动通过"
     $synthetic.schema = 17
 

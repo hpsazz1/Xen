@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -232,6 +233,10 @@ void test_producer_records_native_source_and_completed_ledgers() {
             expect(row["physical_dispatch_count"] == 0 &&
                        row["protocol_acknowledged"] == false,
                    "模拟 backend 不得伪造 physical dispatch 或 protocol ACK");
+            expect(row["background_motion_schema"] == 1 &&
+                       row["background_motion_x"]["status"] == "MISSING" &&
+                       row["observation_epoch"] == "0",
+                   "旧 plan 缺席背景字段必须保留 MISSING，不能使用模拟 plant 冒充像素输入");
             expect(row["aim_actual_history_dx"] ==
                            row["backend_completed_dx"] &&
                        row["aim_actual_history_dy"] ==
@@ -261,6 +266,105 @@ void test_producer_records_native_source_and_completed_ledgers() {
                "backend failure 必须保留 issued，但 completed/actual/plant 归零");
     }
 
+}
+
+void test_producer_roundtrips_background_pair_and_consumption() {
+    const OwnedTestDirectory directory;
+    const auto& root = directory.path();
+    const auto plan_path = root / "background-plan.json";
+    const auto config_path = root / "config.ini";
+    const auto reference_path = root / "measured.csv";
+    const auto binary_path = root / "producer.exe";
+    auto plan = make_plan();
+    auto& samples = plan["blocks"][0]["samples"];
+    constexpr std::string_view epoch = "18446744073709551611";
+    for (std::size_t index = 0; index < samples.size(); ++index) {
+        auto& sample = samples[index];
+        sample["observation_epoch"] = epoch;
+        sample["background_motion_x"] = {
+            {"status", index == 0 ? "WARMING" : index == 6 ? "LOW_TEXTURE" : "VALID"},
+            {"previous_sequence", std::to_string(99 + index)},
+            {"sequence", std::to_string(100 + index)},
+            {"previous_captured_at_ns", std::to_string(995833300LL + index * 4166700LL)},
+            {"captured_at_ns", std::to_string(1000000000LL + index * 4166700LL)},
+            {"observation_epoch", index == 4 ? "18446744073709551612" : epoch},
+            {"dx_roi_pixels", index == 2 ? 0.0 : -0.25},
+            {"min_response", 0.75},
+            {"disagreement_roi_pixels", 0.125},
+            {"usable_patch_count", 2},
+        };
+    }
+    // 两边相反的观测不能因背景有效就宣称 observer 已消费；同一原目标只改宽度。
+    samples[3]["box_width"] = 60.0;
+    samples[5]["background_motion_x"]["sequence"] = "9007199254740993";
+    samples[7]["background_motion_x"]["captured_at_ns"] =
+        std::to_string(1000000000LL + 7 * 4166700LL + 1);
+    AppConfig config;
+    config.aim.min_confirmed_hits = 1;
+    config.aim.max_counts_per_frame = 14.0f;
+    config.aim.enable_delay_compensation = true;
+    config.aim.control_delay_ms = 15.0f;
+    config.aim.max_delay_compensation_ms = 44.0f;
+    config.aim.enable_prediction = false;
+    std::string error;
+    expect(save_app_config(config_path.string(), config, error),
+           "背景 roundtrip 配置必须可写: " + error);
+    write_text(reference_path, "independent background test reference\n");
+    write_text(binary_path, "producer background test identity\n");
+    write_text(plan_path, plan.dump(2) + "\n");
+    aim_production_red::ProduceResult result;
+    const bool produced = aim_production_red::produce_output_off_bundle(
+        {plan_path, config_path, reference_path, binary_path, root / "bundle"}, result, error);
+    expect(produced, "逐帧背景输入必须可通过公开 producer: " + error);
+    if (!produced) return;
+    const json manifest = json::parse(read_text(result.manifest_path));
+    std::istringstream trace(read_text(root / "bundle" /
+        manifest["traces"][0]["relative_path"].get<std::string>()));
+    std::string line;
+    std::size_t index = 0;
+    while (std::getline(trace, line)) {
+        const json row = json::parse(line);
+        expect(row["background_motion_x"] == samples[index]["background_motion_x"] &&
+                   row["observation_epoch"].get<std::string>() == epoch &&
+                   row["physical_dispatch_count"] == 0,
+               "背景状态/质量/真零/原pair/大整数epoch必须完整roundtrip，不得改写原输入");
+        const auto& control = row["controller_x"];
+        if (index == 1) {
+            expect(control["background_motion_use"] == "CONSUMED" &&
+                       std::fabs(control["observer_camera_motion_source_pixels"].get<double>() + 0.25) < 0.00001,
+                   "逐帧非零背景dx必须真正传到公开Aim消费，不能只保留报告回显");
+        }
+        if (index == 2) {
+            expect(control["background_motion_use"] == "CONSUMED" &&
+                       control["observer_camera_motion_source_pixels"] == 0.0 &&
+                       std::fabs(control["observer_target_velocity_counts_per_second"].get<double>()) > 0.0,
+                   "VALID 真零必须真正进入公开 Aim，不能仅报告回显或当成 MISSING");
+        }
+        if (index == 3) {
+            expect(control["background_motion_use"] == "OBSERVATION_UNAVAILABLE",
+                   "左右边异向时不能把有效背景标记为 observer 已消费");
+        }
+        if (index == 4 || index == 5 || index == 7) {
+            expect(control["background_motion_use"] == "PAIR_MISMATCH",
+                   "背景跨epoch、sequence或1ns不同pair时间必须由公开Aim拒绝消费");
+        }
+        if (index == 6) {
+            expect(control["background_motion_use"] == "INVALID",
+                   "LOW_TEXTURE 状态必须保留并由Aim回退原模型");
+        }
+        expect(control["observer_target_velocity_counts_per_second"].is_number() &&
+                   std::isfinite(control["observer_target_velocity_counts_per_second"].get<double>()),
+               "producer 必须保存 Aim 的实际 observer 后态，不能漏诊断字段");
+        ++index;
+    }
+    expect(index == samples.size(), "背景roundtrip必须覆盖每一条原plan帧");
+
+    auto invalid_plan = plan;
+    invalid_plan["blocks"][0]["samples"][2]["background_motion_x"].erase("captured_at_ns");
+    write_text(plan_path, invalid_plan.dump(2) + "\n");
+    expect(!aim_production_red::produce_output_off_bundle(
+               {plan_path, config_path, reference_path, binary_path, root / "incomplete"}, result, error),
+           "显式背景对象缺少pair时间必须拒绝，不能按旧schema静默回退MISSING");
 }
 
 void test_producer_preserves_existing_incoming() {
@@ -388,6 +492,7 @@ void test_atomic_publish_retries_transient_access_denied() {
 
 int main() {
     test_producer_records_native_source_and_completed_ledgers();
+    test_producer_roundtrips_background_pair_and_consumption();
     test_producer_preserves_existing_incoming();
     test_producer_preserves_existing_output_and_incoming();
     test_producer_preserves_file_at_incoming_path();

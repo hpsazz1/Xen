@@ -39,6 +39,7 @@ struct TimingValues {
     std::vector<double> execution;
     std::vector<double> d2h;
     std::vector<double> postprocess;
+    std::vector<double> background_motion;
     std::vector<double> aim;
     std::vector<double> mouse;
     std::vector<double> total;
@@ -143,6 +144,7 @@ void collect_timing(TimingValues& values,
     values.execution.push_back(sample.profile.detector.execution_ms);
     values.d2h.push_back(sample.profile.detector.d2h_ms);
     values.postprocess.push_back(sample.profile.detector.postprocess_ms);
+    values.background_motion.push_back(sample.profile.background_motion_ms);
     values.aim.push_back(sample.profile.aim.total_ms);
     values.mouse.push_back(sample.profile.mouse_ms);
     values.total.push_back(sample.profile.total_ms);
@@ -264,6 +266,7 @@ DebugReportSummary make_summary(
     result.d2h = summarize(values.d2h);
     result.postprocess = summarize(values.postprocess);
     result.aim = summarize(values.aim);
+    result.background_motion = summarize(values.background_motion);
     result.mouse = summarize(values.mouse);
     result.total = summarize(values.total);
     result.source_to_capture = summarize(values.source_to_capture);
@@ -1038,7 +1041,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             final_snapshot.debug_samples_dropped);
         if (coverage) summary_.coverage = *coverage;
         std::ostringstream csv;
-        csv << "# Xen Runtime Debug Report v18\n"
+        csv << "# Xen Runtime Debug Report v19\n"
             << "# session_id," << csv_escape(config_.session_id) << '\n'
             << "# steady_clock_basis,STD_CHRONO_STEADY_CLOCK_SESSION_LOCAL\n"
             << "# model_path," << csv_escape(config_.model_path) << '\n'
@@ -1073,6 +1076,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_csv_timing(csv, "d2h", summary_.d2h);
         append_csv_timing(csv, "postprocess", summary_.postprocess);
         append_csv_timing(csv, "aim", summary_.aim);
+        append_csv_timing(csv, "background_motion", summary_.background_motion);
         append_csv_timing(csv, "mouse", summary_.mouse);
         append_csv_timing(csv, "total", summary_.total);
         append_csv_timing(
@@ -1277,7 +1281,17 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "source_time_steady_ns,source_time_steady_ns_valid,"
                "capture_steady_ns,capture_steady_ns_valid,"
                "aim_observation_steady_ns,aim_observation_steady_ns_valid,"
-               "control_steady_ns,control_steady_ns_valid\n";
+               "control_steady_ns,control_steady_ns_valid,"
+               "aim_observation_epoch,aim_background_motion_status_x,"
+               "aim_background_previous_sequence,aim_background_sequence,"
+               "aim_background_previous_captured_at_ns,"
+               "aim_background_captured_at_ns,aim_background_observation_epoch,"
+               "aim_background_dx_roi_pixels,aim_background_min_response,"
+               "aim_background_disagreement_roi_pixels,"
+               "aim_background_usable_patch_count,aim_background_motion_use_x,"
+               "aim_observer_camera_motion_x_source_pixels,"
+               "aim_observer_target_velocity_x_counts_per_second,"
+               "background_motion_ms\n";
         csv << std::setprecision(9);
         for (const auto& sample : samples_) {
             csv << sample.sequence << ',' << sample.profile.capture_ms << ','
@@ -1557,12 +1571,29 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.frame_timing.observation_steady_ns << ','
                 << bool_name(sample.frame_timing.observation_steady_valid) << ','
                 << sample.frame_timing.control_steady_ns << ','
-                << bool_name(sample.frame_timing.control_steady_valid) << '\n';
+                << bool_name(sample.frame_timing.control_steady_valid) << ','
+                << sample.aim_observation_epoch << ','
+                << AimBackgroundMotionStatusName(sample.background_motion_x.status) << ','
+                << sample.background_motion_x.previous_sequence << ','
+                << sample.background_motion_x.sequence << ','
+                << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       sample.background_motion_x.previous_captured_at.time_since_epoch()).count() << ','
+                << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       sample.background_motion_x.captured_at.time_since_epoch()).count() << ','
+                << sample.background_motion_x.observation_epoch << ','
+                << sample.background_motion_x.dx_roi_pixels << ','
+                << sample.background_motion_x.min_response << ','
+                << sample.background_motion_x.disagreement_roi_pixels << ','
+                << sample.background_motion_x.usable_patch_count << ','
+                << AimBackgroundMotionUseName(sample.aim_control.background_motion_use_x) << ','
+                << sample.aim_control.observer_camera_motion_x_source_pixels << ','
+                << sample.aim_control.observer_target_velocity_x_counts_per_second << ','
+                << sample.profile.background_motion_ms << '\n';
         }
 
         std::ostringstream json;
         json << std::setprecision(9)
-             << "{\n  \"schema\": 18,\n"
+             << "{\n  \"schema\": 19,\n"
              << "  \"steady_clock_basis\": \"STD_CHRONO_STEADY_CLOCK_SESSION_LOCAL\",\n"
              << "  \"session_id\": \"" << json_escape(config_.session_id)
              << "\",\n  \"model_path\": \""
@@ -1602,6 +1633,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         append_json_timing(json, "d2h", summary_.d2h, false);
         append_json_timing(json, "postprocess", summary_.postprocess, false);
         append_json_timing(json, "aim", summary_.aim, false);
+        append_json_timing(json, "background_motion", summary_.background_motion, false);
         append_json_timing(json, "mouse", summary_.mouse, false);
         append_json_timing(json, "total", summary_.total, false);
         append_json_timing(
@@ -2136,7 +2168,37 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << ", \"control_steady_ns\": \""
                  << sample.frame_timing.control_steady_ns << "\""
                  << ", \"control_steady_ns_valid\": "
-                 << bool_name(sample.frame_timing.control_steady_valid) << "}"
+                 << bool_name(sample.frame_timing.control_steady_valid)
+                 << ", \"aim_observation_epoch\": \"" << sample.aim_observation_epoch << "\""
+                 << ", \"aim_background_motion_status_x\": \""
+                 << AimBackgroundMotionStatusName(sample.background_motion_x.status) << "\""
+                 << ", \"aim_background_previous_sequence\": \""
+                 << sample.background_motion_x.previous_sequence << "\""
+                 << ", \"aim_background_sequence\": \""
+                 << sample.background_motion_x.sequence << "\""
+                 << ", \"aim_background_previous_captured_at_ns\": \""
+                 << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        sample.background_motion_x.previous_captured_at.time_since_epoch()).count() << "\""
+                 << ", \"aim_background_captured_at_ns\": \""
+                 << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        sample.background_motion_x.captured_at.time_since_epoch()).count() << "\""
+                 << ", \"aim_background_observation_epoch\": \""
+                 << sample.background_motion_x.observation_epoch << "\""
+                 << ", \"aim_background_dx_roi_pixels\": "
+                 << sample.background_motion_x.dx_roi_pixels
+                 << ", \"aim_background_min_response\": "
+                 << sample.background_motion_x.min_response
+                 << ", \"aim_background_disagreement_roi_pixels\": "
+                 << sample.background_motion_x.disagreement_roi_pixels
+                 << ", \"aim_background_usable_patch_count\": "
+                 << sample.background_motion_x.usable_patch_count
+                 << ", \"aim_background_motion_use_x\": \""
+                 << AimBackgroundMotionUseName(sample.aim_control.background_motion_use_x) << "\""
+                 << ", \"aim_observer_camera_motion_x_source_pixels\": "
+                 << sample.aim_control.observer_camera_motion_x_source_pixels
+                 << ", \"aim_observer_target_velocity_x_counts_per_second\": "
+                 << sample.aim_control.observer_target_velocity_x_counts_per_second
+                 << ", \"background_motion_ms\": " << sample.profile.background_motion_ms << "}"
                  << (index + 1 == samples_.size() ? '\n' : ',');
         }
         json << "  ]\n}\n";

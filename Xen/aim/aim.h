@@ -82,6 +82,36 @@ struct AimConfig {
     float predicted_gain = 0.50f;
 };
 
+// 背景测量只表示一对原始图像的 ROI 像素位移；真零与未测得严格分开。
+enum class AimBackgroundMotionStatus {
+    MISSING, WARMING, UNSUPPORTED, INVALID_PAIR, INVALID_GEOMETRY,
+    FOREGROUND, LOW_TEXTURE, INCONSISTENT, VALID, ESTIMATION_FAILED,
+};
+
+const char* AimBackgroundMotionStatusName(AimBackgroundMotionStatus status) noexcept;
+
+enum class AimBackgroundMotionUse {
+    NOT_EVALUATED, MISSING, INVALID, PAIR_MISMATCH, SEMANTICS_MISMATCH,
+    OBSERVATION_UNAVAILABLE, CONSUMED,
+};
+
+const char* AimBackgroundMotionUseName(AimBackgroundMotionUse use) noexcept;
+
+struct AimBackgroundMotionX {
+    AimBackgroundMotionStatus status = AimBackgroundMotionStatus::MISSING;
+    std::uint64_t previous_sequence = 0;
+    std::uint64_t sequence = 0;
+    std::chrono::steady_clock::time_point previous_captured_at{};
+    std::chrono::steady_clock::time_point captured_at{};
+    // Runtime 在时间基准、源会话或 ROI 几何改变时更换 epoch。
+    // Aim 只接受与目标原始边差分完全相同的帧对及 epoch。
+    std::uint64_t observation_epoch = 0;
+    float dx_roi_pixels = 0.0f;
+    float min_response = 0.0f;
+    float disagreement_roi_pixels = 0.0f;
+    int usable_patch_count = 0;
+};
+
 struct AimFrame {
     std::uint64_t sequence = 0;
     std::chrono::steady_clock::time_point captured_at{};
@@ -101,6 +131,8 @@ struct AimFrame {
     // 观测、跟踪、预选和命令计算，只是不启用锁定后的动态收缩范围。
     bool lock_active = false;
     std::vector<Detection> detections;
+    std::uint64_t observation_epoch = 0;
+    AimBackgroundMotionX background_motion_x;
 };
 
 struct AimCommand {
@@ -114,6 +146,10 @@ struct AimCommand {
 // 单位统一为 counts、秒或毫秒；该结构不参与控制决策，也不持有动态资源。
 struct AimControlDiagnostics {
     bool evaluated = false;
+    AimBackgroundMotionUse background_motion_use_x =
+        AimBackgroundMotionUse::NOT_EVALUATED;
+    float observer_camera_motion_x_source_pixels = 0.0f;
+    float observer_target_velocity_x_counts_per_second = 0.0f;
     float controller_dt_ms = 0.0f;
     float proportional_x_counts = 0.0f;
     float feedforward_x_counts = 0.0f;

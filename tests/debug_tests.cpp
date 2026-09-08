@@ -505,8 +505,8 @@ void test_report_summary_and_atomic_files() {
         sample_header_end + 1, sample_row_end - sample_header_end - 1);
     expect(std::count(sample_header.begin(), sample_header.end(), ',') ==
                std::count(sample_row.begin(), sample_row.end(), ','),
-           "schema 18 CSV 样本头与数据行必须保持完全相同的列数");
-    expect(csv_text.find("Xen Runtime Debug Report v18") !=
+           "schema 19 CSV 样本头与数据行必须保持完全相同的列数");
+    expect(csv_text.find("Xen Runtime Debug Report v19") !=
                    std::string::npos &&
                csv_text.find("sequence,capture_ms") != std::string::npos &&
                csv_text.find("d3d11_to_cuda_ms") != std::string::npos &&
@@ -576,7 +576,7 @@ void test_report_summary_and_atomic_files() {
                csv_text.find(",1,2,") != std::string::npos &&
                csv_text.find("\"1;2;0;0;") != std::string::npos,
            "CSV 必须包含 schema、分类置信度、失败状态、预览状态和最终几何");
-    expect(json_text.find("\"schema\": 18") != std::string::npos &&
+    expect(json_text.find("\"schema\": 19") != std::string::npos &&
                json_text.find("\"timing\"") != std::string::npos &&
                json_text.find("\"explicit_device_copy\": true") !=
                    std::string::npos &&
@@ -1069,6 +1069,25 @@ void test_report_preserves_same_frame_source_timing_fields() {
     first.control_steady_ns = 18014398509503991LL;
     first.control_steady_valid = true;
     samples[0].profile.source_clock_session_id = 18446744073709551611ULL;
+    samples[0].aim_observation_epoch = 18446744073709551611ULL;
+    auto& first_background = samples[0].background_motion_x;
+    first_background.status = AimBackgroundMotionStatus::VALID;
+    first_background.previous_sequence = 100;
+    first_background.sequence = 101;
+    first_background.previous_captured_at = std::chrono::steady_clock::time_point(
+        std::chrono::nanoseconds(18014398509471983LL));
+    first_background.captured_at = std::chrono::steady_clock::time_point(
+        std::chrono::nanoseconds(18014398509481983LL));
+    first_background.observation_epoch = samples[0].aim_observation_epoch;
+    // VALID 真零不能被报告成未测得；质量和消费状态与数值独立保存。
+    first_background.dx_roi_pixels = 0.0f;
+    first_background.min_response = 0.75f;
+    first_background.disagreement_roi_pixels = 0.125f;
+    first_background.usable_patch_count = 2;
+    samples[0].aim_control.background_motion_use_x = AimBackgroundMotionUse::CONSUMED;
+    samples[0].aim_control.observer_camera_motion_x_source_pixels = 0.0f;
+    samples[0].aim_control.observer_target_velocity_x_counts_per_second = 12.5f;
+    samples[0].profile.background_motion_ms = 0.125;
 
     // 第二帧保留相邻大整数；源序号和映射无效时不能借本地序号或上一帧补齐。
     auto& second = samples[1].frame_timing;
@@ -1084,6 +1103,23 @@ void test_report_preserves_same_frame_source_timing_fields() {
     second.control_steady_valid = true;
     samples[1].profile.source_timing_valid = false;
     samples[1].profile.source_clock_session_id = 18446744073709551612ULL;
+    samples[1].aim_observation_epoch = 18446744073709551612ULL;
+    auto& second_background = samples[1].background_motion_x;
+    second_background.status = AimBackgroundMotionStatus::INVALID_PAIR;
+    second_background.previous_sequence = 9007199254740993ULL;
+    second_background.sequence = 9007199254740994ULL;
+    second_background.previous_captured_at = first_background.captured_at;
+    second_background.captured_at = std::chrono::steady_clock::time_point(
+        std::chrono::nanoseconds(18014398509492988LL));
+    second_background.observation_epoch = samples[1].aim_observation_epoch;
+    second_background.dx_roi_pixels = -2.5f;
+    second_background.min_response = 0.5f;
+    second_background.disagreement_roi_pixels = 0.25f;
+    second_background.usable_patch_count = 2;
+    samples[1].aim_control.background_motion_use_x = AimBackgroundMotionUse::INVALID;
+    samples[1].aim_control.observer_camera_motion_x_source_pixels = -1.25f;
+    samples[1].aim_control.observer_target_velocity_x_counts_per_second = -3.5f;
+    samples[1].profile.background_motion_ms = 0.25;
     // 第三帧全部时间证据缺席，默认零值必须与显式 false 一起导出。
     samples[2].profile.source_timing_valid = false;
     samples[2].profile.source_clock_session_id = 0;
@@ -1103,6 +1139,10 @@ void test_report_preserves_same_frame_source_timing_fields() {
             final_snapshot.last_profile.source_clock_session_id = 444;
             expect(report.finalize(final_snapshot, error),
                    "同帧时间证据报告应通过公有接口发布: " + error);
+            expect(report.summary().background_motion.sample_count == 3 &&
+                       report.summary().background_motion.mean_ms == 0.125 &&
+                       report.summary().background_motion.max_ms == 0.25,
+                   "背景测量耗时必须进入同一公开报告的独立统计，不能并入Aim或遗漏");
         }
     }
 
@@ -1192,7 +1232,22 @@ void test_report_preserves_same_frame_source_timing_fields() {
         {"aim_observation_steady_ns_valid", {"true", "true", "false"}, false},
         {"control_steady_ns", {"18014398509503991", "18014398509503992", "0"}, true},
         {"control_steady_ns_valid", {"true", "true", "false"}, false},
-        {"source_clock_session_id", {"18446744073709551611", "18446744073709551612", "0"}, true}};
+        {"source_clock_session_id", {"18446744073709551611", "18446744073709551612", "0"}, true},
+        {"aim_observation_epoch", {"18446744073709551611", "18446744073709551612", "0"}, true},
+        {"aim_background_motion_status_x", {"VALID", "INVALID_PAIR", "MISSING"}, true},
+        {"aim_background_previous_sequence", {"100", "9007199254740993", "0"}, true},
+        {"aim_background_sequence", {"101", "9007199254740994", "0"}, true},
+        {"aim_background_previous_captured_at_ns", {"18014398509471983", "18014398509481983", "0"}, true},
+        {"aim_background_captured_at_ns", {"18014398509481983", "18014398509492988", "0"}, true},
+        {"aim_background_observation_epoch", {"18446744073709551611", "18446744073709551612", "0"}, true},
+        {"aim_background_dx_roi_pixels", {"0", "-2.5", "0"}, false},
+        {"aim_background_min_response", {"0.75", "0.5", "0"}, false},
+        {"aim_background_disagreement_roi_pixels", {"0.125", "0.25", "0"}, false},
+        {"aim_background_usable_patch_count", {"2", "2", "0"}, false},
+        {"aim_background_motion_use_x", {"CONSUMED", "INVALID", "NOT_EVALUATED"}, true},
+        {"aim_observer_camera_motion_x_source_pixels", {"0", "-1.25", "0"}, false},
+        {"aim_observer_target_velocity_x_counts_per_second", {"12.5", "-3.5", "0"}, false},
+        {"background_motion_ms", {"0.125", "0.25", "0"}, false}};
     expect(csv_rows.size() == samples.size() && json_rows.size() == samples.size(),
            "CSV/JSON 必须分别导出三条同帧时间证据样本");
     for (std::size_t index = 0; index < samples.size(); ++index) {

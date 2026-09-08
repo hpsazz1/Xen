@@ -250,7 +250,35 @@ bool valid_matched_observation(const AimTargetSnapshot& target) noexcept {
                      target.matched_observation_y2);
 }
 
+bool valid_background_consumption(const AimEvaluationFrame& frame) noexcept {
+    const auto& control = frame.control;
+    if (!std::isfinite(control.observer_camera_motion_x_source_pixels) ||
+        !std::isfinite(control.observer_target_velocity_x_counts_per_second)) {
+        return false;
+    }
+    if (control.background_motion_use_x != AimBackgroundMotionUse::CONSUMED) {
+        return true; // 旧评价输入默认 NOT_EVALUATED，不把缺失背景当成真零。
+    }
+    const auto& background = frame.background_motion_x;
+    return control.evaluated && frame.has_target && !frame.target.predicted &&
+        frame.target.matched_observation_valid &&
+        background.status == AimBackgroundMotionStatus::VALID &&
+        frame.sequence != 0 && frame.observation_epoch != 0 &&
+        background.sequence == frame.sequence &&
+        background.previous_sequence != 0 &&
+        background.previous_sequence < background.sequence &&
+        background.observation_epoch == frame.observation_epoch &&
+        background.captured_at == frame.captured_at &&
+        background.previous_captured_at != std::chrono::steady_clock::time_point{} &&
+        background.previous_captured_at < background.captured_at &&
+        std::isfinite(background.dx_roi_pixels) &&
+        std::isfinite(background.min_response) && background.min_response >= 0.0f &&
+        std::isfinite(background.disagreement_roi_pixels) &&
+        background.disagreement_roi_pixels >= 0.0f && background.usable_patch_count >= 2;
+}
+
 bool valid_aim_output_contract(const AimEvaluationFrame& frame) noexcept {
+    if (!valid_background_consumption(frame)) return false;
     return !((frame.aim_status == AimStatus::SUCCESS &&
               (!std::isfinite(frame.acquisition_range_radius) ||
                !std::isfinite(frame.active_range_radius) ||

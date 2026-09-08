@@ -9,6 +9,7 @@ Set-StrictMode -Version Latest
 
 $requestedOutputPath = $OutputPath
 . (Join-Path $PSScriptRoot "aim_fixed_scene_analysis.ps1")
+. (Join-Path $PSScriptRoot "aim_report.ps1")
 
 function Get-XenAimVideoReplayReportSet([string]$Directory) {
     $resolved = (Resolve-Path -LiteralPath $Directory).Path
@@ -22,7 +23,7 @@ function Get-XenAimVideoReplayReportSet([string]$Directory) {
     foreach ($file in $files) {
         $report = Get-Content -LiteralPath $file.FullName -Raw `
             -Encoding utf8 | ConvertFrom-Json
-        if ([int]$report.schema -notin @(16, 17, 18) -or
+        if ([int]$report.schema -notin @(16, 17, 18, 19) -or
             $report.capture_backend -ne "VIDEO_REPLAY" -or
             $report.mouse_backend -ne "SIMULATED_BACKEND_COMPLETION" -or
             [long]$report.sample_count -ne @($report.samples).Count -or
@@ -44,6 +45,7 @@ function Get-XenAimVideoReplayReportSet([string]$Directory) {
             throw "Aim 视频回放报告不满足完整无物理输出契约：$($file.FullName)"
         }
         $suffix = ".aim-runtime.json"
+        Assert-XenAimBackgroundReportFields -Report $report
         $scenario = $file.Name.Substring(0, $file.Name.Length - $suffix.Length)
         $reports[$file.Name] = [ordered]@{
             scenario = $scenario

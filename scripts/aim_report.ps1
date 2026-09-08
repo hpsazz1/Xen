@@ -77,6 +77,78 @@ function Get-XenAimSampleField([object]$Sample, [string]$Name) {
     return $Sample.PSObject.Properties[$Name].Value
 }
 
+function Assert-XenAimBackgroundReportFields {
+    param([Parameter(Mandatory = $true)][object]$Report)
+
+    if ([int]$Report.schema -lt 19) { return }
+    $identityFields = @(
+        'aim_observation_epoch', 'aim_background_previous_sequence',
+        'aim_background_sequence', 'aim_background_previous_captured_at_ns',
+        'aim_background_captured_at_ns', 'aim_background_observation_epoch')
+    $numericFields = @(
+        'aim_background_dx_roi_pixels', 'aim_background_min_response',
+        'aim_background_disagreement_roi_pixels', 'aim_background_usable_patch_count',
+        'aim_observer_camera_motion_x_source_pixels',
+        'aim_observer_target_velocity_x_counts_per_second', 'background_motion_ms')
+    $statusValues = @('MISSING', 'WARMING', 'UNSUPPORTED', 'INVALID_PAIR',
+        'INVALID_GEOMETRY', 'FOREGROUND', 'LOW_TEXTURE', 'INCONSISTENT', 'VALID', 'ESTIMATION_FAILED')
+    $useValues = @('NOT_EVALUATED', 'MISSING', 'INVALID', 'PAIR_MISMATCH',
+        'SEMANTICS_MISMATCH', 'OBSERVATION_UNAVAILABLE', 'CONSUMED')
+    foreach ($sample in @($Report.samples)) {
+        foreach ($name in @($identityFields + $numericFields + @(
+                'aim_background_motion_status_x', 'aim_background_motion_use_x'))) {
+            if (-not (Test-XenAimSampleField $sample $name)) {
+                throw "schema 19 背景合同缺少逐帧字段：$name"
+            }
+        }
+        foreach ($name in $identityFields) {
+            $value = Get-XenAimSampleField $sample $name
+            [uint64]$parsed = 0
+            if ($value -isnot [string] -or $value -notmatch '^[0-9]+$' -or
+                -not [uint64]::TryParse($value, [ref]$parsed)) {
+                throw "schema 19 背景身份必须为无损整数字符串：$name"
+            }
+        }
+        foreach ($name in $numericFields) {
+            $value = Get-XenAimSampleField $sample $name
+            if ($null -eq $value -or $value -is [string] -or $value -is [bool]) {
+                throw "schema 19 背景数值字段类型无效：$name"
+            }
+            $null = ConvertTo-XenAimFiniteDouble $value "schema 19 $name"
+        }
+        if ($sample.aim_background_motion_status_x -notin $statusValues -or
+            $sample.aim_background_motion_use_x -notin $useValues -or
+            [double]$sample.background_motion_ms -lt 0 -or
+            [double]$sample.aim_background_usable_patch_count -lt 0 -or
+            [double]$sample.aim_background_usable_patch_count -ne
+                [Math]::Truncate([double]$sample.aim_background_usable_patch_count)) {
+            throw 'schema 19 背景状态、patch数或耗时无效。'
+        }
+        # 只检查报告消费声明自洽；缺席、无效和未消费均不是物理验收失败或成功。
+        if ($sample.aim_background_motion_use_x -eq 'CONSUMED') {
+            if ($sample.aim_background_motion_status_x -ne 'VALID' -or
+                -not [bool]$sample.aim_control_evaluated -or
+                -not [bool]$sample.aim_matched_observation_valid -or
+                [bool]$sample.aim_track_predicted -or
+                [uint64]$sample.aim_observation_epoch -eq 0 -or
+                [uint64]$sample.aim_background_observation_epoch -ne
+                    [uint64]$sample.aim_observation_epoch -or
+                [uint64]$sample.aim_background_sequence -ne [uint64]$sample.sequence -or
+                [uint64]$sample.aim_background_previous_sequence -ge
+                    [uint64]$sample.aim_background_sequence -or
+                [uint64]$sample.aim_background_captured_at_ns -ne
+                    [uint64]$sample.aim_observation_steady_ns -or
+                [uint64]$sample.aim_background_previous_captured_at_ns -ge
+                    [uint64]$sample.aim_background_captured_at_ns -or
+                [double]$sample.aim_background_usable_patch_count -lt 2 -or
+                [double]$sample.aim_background_min_response -lt 0 -or
+                [double]$sample.aim_background_disagreement_roi_pixels -lt 0) {
+                throw 'schema 19 背景 CONSUMED 声明与当前帧对、epoch或质量不一致。'
+            }
+        }
+    }
+}
+
 function Get-XenSourceTimingEvidence {
     param(
         [Parameter(Mandatory = $true)][object[]]$Samples

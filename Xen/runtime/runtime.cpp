@@ -2,6 +2,7 @@
 
 #include "log/log.h"
 #include "runtime/runtime_internal.h"
+#include "runtime/aim_frame_internal.h"
 
 #include <algorithm>
 #include <atomic>
@@ -411,6 +412,8 @@ struct Runtime::Impl {
             : std::chrono::steady_clock::time_point{};
         RuntimePipelineSample sample;
         sample.sequence = frame.timing.sequence;
+        sample.aim_observation_epoch = aim_frame.observation_epoch;
+        sample.background_motion_x = aim_frame.background_motion_x;
         sample.frame_timing = runtime::detail::make_frame_timing_evidence(
             frame.timing, aim_frame, profile.control_timing_valid);
         sample.geometry.encoded_width = frame.encoded_width;
@@ -562,6 +565,7 @@ struct Runtime::Impl {
     void pipeline_loop() noexcept {
         std::uint64_t last_sequence = 0;
         runtime::detail::RuntimeObservationClock observation_clock;
+        runtime::detail::CameraMotionEstimator camera_motion;
         const bool probes_enabled = config.runtime.enable_performance_probes;
         while (!stop_requested.load(std::memory_order_acquire)) {
             std::uint64_t overwritten_frames_at_consume = 0;
@@ -604,6 +608,7 @@ struct Runtime::Impl {
                 if (aim_reset_requested.exchange(
                         false, std::memory_order_acq_rel)) {
                     aim->reset();
+                    camera_motion.reset();
                 }
                 if (frame->storage == CapturedFrameStorage::D3D11_BGRA8 ||
                     frame->storage ==
@@ -628,10 +633,14 @@ struct Runtime::Impl {
                 // WARMING→VALID 会从辅机 frame-ready 切到更早的 NDI
                 // submission 时刻；source session 重启或拟合更新也可能让
                 // 映射跳回。跨时间基准的旧轨迹不能混算 dt，先重置再消费。
-                if (observation_clock.apply(frame->timing, aim_frame)) {
+                auto prepared = runtime::detail::prepare_aim_frame(
+                    *frame, std::move(detections), observation_clock,
+                    camera_motion, safety_gate.can_dispatch());
+                if (prepared.reset_aim) {
                     aim->reset();
                 }
-                aim_frame.control_at = std::chrono::steady_clock::now();
+                aim_frame = std::move(prepared.frame);
+                profile.background_motion_ms = prepared.background_motion_ms;
                 profile.control_timing_valid = true;
                 profile.capture_to_control_ms =
                     std::chrono::duration<double, std::milli>(
@@ -643,20 +652,6 @@ struct Runtime::Impl {
                             aim_frame.control_at -
                             frame->timing.source_time_at).count();
                 }
-                aim_frame.roi_width = frame->width;
-                aim_frame.roi_height = frame->height;
-                aim_frame.control_center_x = static_cast<float>(
-                    (frame->source_width * 0.5 - frame->roi_x) /
-                    frame->source_pixels_per_pixel_x);
-                aim_frame.control_center_y = static_cast<float>(
-                    (frame->source_height * 0.5 - frame->roi_y) /
-                    frame->source_pixels_per_pixel_y);
-                aim_frame.source_pixels_per_roi_pixel_x =
-                    static_cast<float>(frame->source_pixels_per_pixel_x);
-                aim_frame.source_pixels_per_roi_pixel_y =
-                    static_cast<float>(frame->source_pixels_per_pixel_y);
-                aim_frame.lock_active = safety_gate.can_dispatch();
-                aim_frame.detections = std::move(detections);
                 aim_result = aim->process(aim_frame);
                 profile.aim = aim_result.profile;
 
@@ -760,6 +755,7 @@ struct Runtime::Impl {
                 }
             } else {
                 aim_result.status = AimStatus::NOT_RUN;
+                camera_motion.reset();
                 aim_reset_requested.store(true, std::memory_order_release);
             }
             const auto finished = std::chrono::steady_clock::now();

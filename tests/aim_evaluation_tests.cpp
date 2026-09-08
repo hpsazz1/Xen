@@ -733,6 +733,58 @@ void test_snapshot_schema_contract_rejections() {
            "Observation 标志有效却没有合法框时必须拒绝且不得修改评价指标");
 }
 
+void test_background_consumption_requires_original_pair() {
+    AimGroundTruthAnnotation annotation;
+    std::string error;
+    expect(aim::detail::parse_aim_ground_truth_annotation(
+               valid_json(), expectation(), annotation, error),
+           "背景消费合同测试必须先解析原真值");
+    auto valid = output_frame(0, 10, 60, 40, 100, 120);
+    valid.sequence = 102;
+    valid.captured_at = std::chrono::steady_clock::time_point(std::chrono::milliseconds(8));
+    valid.observation_epoch = 9007199254740993ULL;
+    valid.target.matched_observation_valid = true;
+    valid.target.matched_observation_x1 = 60;
+    valid.target.matched_observation_y1 = 40;
+    valid.target.matched_observation_x2 = 100;
+    valid.target.matched_observation_y2 = 120;
+    valid.control.evaluated = true;
+    valid.control.background_motion_use_x = AimBackgroundMotionUse::CONSUMED;
+    valid.background_motion_x.status = AimBackgroundMotionStatus::VALID;
+    valid.background_motion_x.previous_sequence = 101;
+    valid.background_motion_x.sequence = valid.sequence;
+    valid.background_motion_x.previous_captured_at =
+        std::chrono::steady_clock::time_point(std::chrono::milliseconds(4));
+    valid.background_motion_x.captured_at = valid.captured_at;
+    valid.background_motion_x.observation_epoch = valid.observation_epoch;
+    valid.background_motion_x.min_response = 0.75f;
+    valid.background_motion_x.usable_patch_count = 2;
+    AimEvaluationMetrics metrics;
+    expect(aim::detail::record_aim_evaluation(
+               annotation, AimEvaluationConfig{}, valid, metrics, error),
+           "当前帧对 VALID 真零背景应允许评价，不能要求非零 dx: " + error);
+    auto invalid = valid;
+    invalid.background_motion_x = {};
+    expect(rejects_without_metrics_mutation(annotation, invalid, error),
+           "只复制 CONSUMED 却漏接原背景输入必须拒绝，不得污染指标");
+    invalid = valid;
+    ++invalid.background_motion_x.observation_epoch;
+    expect(rejects_without_metrics_mutation(annotation, invalid, error),
+           "背景跨 epoch 却标记 CONSUMED 必须拒绝");
+    invalid = valid;
+    ++invalid.background_motion_x.sequence;
+    expect(rejects_without_metrics_mutation(annotation, invalid, error),
+           "背景当前 sequence 不同却标记 CONSUMED 必须拒绝");
+    invalid = valid;
+    invalid.background_motion_x.captured_at += std::chrono::nanoseconds(1);
+    expect(rejects_without_metrics_mutation(annotation, invalid, error),
+           "背景当前 observation 时间不同却标记 CONSUMED 必须拒绝");
+    invalid = valid;
+    invalid.background_motion_x.usable_patch_count = 0;
+    expect(rejects_without_metrics_mutation(annotation, invalid, error),
+           "未测得可用背景 patch 却标记 CONSUMED 必须拒绝");
+}
+
 void test_sequence_and_annotation_set() {
     AimGroundTruthAnnotation annotation;
     std::string error;
@@ -784,6 +836,7 @@ int main() {
     test_control_continuity_metrics();
     test_control_contract_rejections();
     test_snapshot_schema_contract_rejections();
+    test_background_consumption_requires_original_pair();
     test_sequence_and_annotation_set();
 
     if (failures != 0) {

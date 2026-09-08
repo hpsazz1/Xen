@@ -846,8 +846,8 @@ function Collect-Reports {
         }
         $report = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-Json
-        if ([int]$report.schema -notin @(16, 17, 18)) {
-            $failures += "报告 schema 不是 16、17 或 18：$path"
+        if ([int]$report.schema -notin @(16, 17, 18, 19)) {
+            $failures += "报告 schema 不是 16、17、18 或 19：$path"
         }
         if (@($report.PSObject.Properties.Name) -notcontains
                 "performance_probes_enabled" -or
@@ -879,6 +879,7 @@ function Collect-Reports {
         }
         $aimSummary = $null
         try {
+            Assert-XenAimBackgroundReportFields -Report $report
             $reportSamples = @($report.samples)
             if ($reportSamples.Count -ne [int]$report.sample_count) {
                 throw "JSON 样本数组长度与 sample_count 不一致"
@@ -896,7 +897,7 @@ function Collect-Reports {
             }
             $aimObservability = $aimSummary
         } catch {
-            $failures += "Aim schema 16/17/18 样本无效：$($_.Exception.Message)；$path"
+            $failures += "Aim schema 16/17/18/19 样本无效：$($_.Exception.Message)；$path"
         }
         if ($report.provider -ne $expectedProvider -or
             $report.final_snapshot.provider -ne $expectedProvider) {

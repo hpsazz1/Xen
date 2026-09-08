@@ -2527,6 +2527,60 @@ namespace XenAimManualPixelFixture {
         throw "schema 18 Recover 合并了相邻的 64 位 source timestamp。"
     }
 
+    # additive schema 19 必须保留背景原pair/epoch/真零及fallback，不改写原文件。
+    $background19 = [ordered]@{
+        aim_observation_epoch = '18446744073709551615'
+        aim_background_motion_status_x = 'MISSING'
+        aim_background_previous_sequence = '9007199254740993'
+        aim_background_sequence = '9007199254740994'
+        aim_background_previous_captured_at_ns = '9223372036854774806'
+        aim_background_captured_at_ns = '9223372036854774807'
+        aim_background_observation_epoch = '18446744073709551615'
+        aim_background_dx_roi_pixels = 0.0
+        aim_background_min_response = 0.0
+        aim_background_disagreement_roi_pixels = 0.0
+        aim_background_usable_patch_count = 0
+        aim_background_motion_use_x = 'MISSING'
+        aim_observer_camera_motion_x_source_pixels = -1.25
+        aim_observer_target_velocity_x_counts_per_second = 12.5
+        background_motion_ms = 0.125
+    }
+    foreach ($sample in $schema13Report.samples) {
+        foreach ($field in $background19.Keys) { $sample[$field] = $background19[$field] }
+    }
+    $schema13Report.schema = 19
+    $schema13Report.session_id = 'schema19'
+    Write-Utf8 $schema18Path (($schema13Report | ConvertTo-Json -Depth 10) + "`n")
+    $schema19OriginalHash = (Get-FileHash -LiteralPath $schema18Path -Algorithm SHA256).Hash
+    $schema19RecoverOutput = @(& powershell.exe -NoProfile `
+        -ExecutionPolicy Bypass -File `
+        (Join-Path $published "tools\invoke_aim_manual_acceptance.ps1") `
+        -TaskId AIM-SUPERJUMP-ACCEPT-001 `
+        -Mode Recover -Scenario SuperJump -SuperJumpCase Static `
+        -Profile tracking -Smoothing 0.50 `
+        -CountsPerPixelX 0.45 -CountsPerPixelY 0.40 -MaxCountsPerFrame 14.0 `
+        -EnableDelayCompensation -ControlDelayMs 7.5 `
+        -MaxDelayCompensationMs 18.0 -MaxDelayCompensationPercent 12.0 `
+        -PackageRoot $published -RunDirectory $trackingRoot 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $schema19RecoverOutput | ForEach-Object { Write-Host $_ }
+        throw 'schema 19 离线回收失败。'
+    }
+    $schema19Summary = Get-Content -LiteralPath `
+        (Join-Path $trackingRoot 'automatic-summary.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([int]@($schema19Summary.runtime_report_schemas)[0] -ne 19 -or
+        -not [bool]$schema19Summary.automatic_complete -or
+        [uint64]$schema19Summary.mouse_physical_effect_samples -ne 0 -or
+        (Get-FileHash -LiteralPath $schema18Path -Algorithm SHA256).Hash -ne $schema19OriginalHash) {
+        throw 'schema 19 Recover 必须保持原件与既有物理证据边界，MISSING不是自动物理通过。'
+    }
+    $schema19Preserved = Get-Content -LiteralPath $schema18Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($field in $background19.Keys) {
+        if ($schema19Preserved.samples[0].$field -cne $background19[$field]) {
+            throw "schema 19 Recover 丢失背景原字段：$field"
+        }
+    }
+
     $manifestBytes = [System.IO.File]::ReadAllBytes($publishedManifest)
     try {
         [System.IO.File]::AppendAllText(
