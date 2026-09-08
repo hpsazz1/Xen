@@ -166,6 +166,29 @@ struct MouseEffectProbeRunResult {
     std::string composite_schedule_ledger_sha256;
 };
 
+// 仅含已结束采集的账本数据；不持有 timer、Mouse 或未决 event 状态。
+struct MouseEffectProbeCompositeScheduleLedger {
+    std::string plan_sha256;
+    std::string qpc_clock_session_id;
+    std::int64_t qpc_frequency = 0;
+    std::int64_t plan_accepted_qpc = 0;
+    std::int64_t acquisition_started_qpc = 0;
+    std::int64_t acquisition_finished_qpc = 0;
+    std::uint64_t active_wait_total_ns = 0;
+    std::string_view events_json;
+};
+
+// 无设备输出的原子发布边界；events_json 必须是 JSON 数组。
+// command report 身份直接取已发布 options.report_path 的文件字节 SHA。
+bool write_mouse_effect_probe_composite_schedule_ledger(
+    const MouseEffectProbeRunOptions& options,
+    const mouse_effect_probe::MouseEffectProbeSequence& sequence,
+    const mouse_effect_probe::ProbeExecutionResult& execution,
+    const MouseEffectProbeCompositeScheduleLedger& ledger,
+    std::string_view safety_ledger_sha256,
+    std::string& file_sha256,
+    std::string& error) noexcept;
+
 MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
     std::span<const std::wstring_view> arguments,
     MouseEffectProbeRunOptions& options,

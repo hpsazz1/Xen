@@ -878,6 +878,80 @@ void test_physical_safety_ledger_distinguishes_explicit_release() {
     std::filesystem::remove_all(root, ignored);
 }
 
+void test_composite_schedule_binds_published_report_file_bytes() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("xen-composite-report-identity-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code filesystem_error;
+    const bool created = std::filesystem::create_directory(root, filesystem_error);
+    expect(created && !filesystem_error, "报告身份 fixture 必须使用独立新目录");
+    if (!created || filesystem_error) return;
+
+    MouseEffectProbeRunOptions options;
+    options.run_uuid = "11111111-2222-4333-8444-555555555555";
+    options.activation_epoch = 7;
+    options.expected_binding_sha256 = std::string(64, 'a');
+    options.report_path = root / "command-report.json";
+    options.composite_schedule_ledger_path = root / "schedule.json";
+    mouse_effect_probe::MouseEffectProbeSequence sequence;
+    std::string error;
+    expect(mouse_effect_probe::make_composite_phase_calibration_sequence(sequence, error),
+           "报告身份 fixture 的正式 composite 序列必须有效: " + error);
+    mouse_effect_probe::ProbeExecutionOptions execution_options;
+    execution_options.run_uuid = options.run_uuid;
+    execution_options.activation_epoch = options.activation_epoch;
+    execution_options.dispatch_mode = mouse_effect_probe::ProbeDispatchMode::OUTPUT_OFF_REHEARSAL;
+    mouse_effect_probe::ProbeExecutionResult execution;
+    execution.dispatch_mode = execution_options.dispatch_mode;
+    execution.state = mouse_effect_probe::ProbeExecutionState::STOPPED;
+    execution.stop_reason = mouse_effect_probe::ProbeStopReason::USER_STOP;
+    const mouse_effect_probe::ProbeEvidenceBinding binding{
+        options.expected_binding_sha256, options.run_uuid, "fixture-source"};
+    std::string report_semantic_sha256;
+    expect(mouse_effect_probe::write_mouse_effect_probe_report(
+               options.report_path, execution_options, sequence, binding, execution,
+               report_semantic_sha256, error) &&
+               mouse_effect_probe::verify_mouse_effect_probe_report(options.report_path, error),
+           "真实发布的 output-off report 必须通过语义校验: " + error);
+    std::string report_file_sha256;
+    expect(mouse_effect_probe::calculate_mouse_effect_probe_file_sha256(
+               options.report_path, report_file_sha256, error) &&
+               report_file_sha256 != report_semantic_sha256,
+           "实际格式化报告文件 SHA 必须与内嵌规范化语义 SHA 不同");
+    std::string safety_file_sha256;
+    expect(write_mouse_effect_probe_safety_ledger(root / "safety.json", options.run_uuid,
+               execution.stop_reason, {}, safety_file_sha256, error),
+           "只读 safety ledger 必须能实际发布: " + error);
+    const MouseEffectProbeCompositeScheduleLedger ledger{
+        std::string(64, 'b'), "fixture-qpc", 10'000'000, 1, 2, 3, 0, "[]"};
+    std::string schedule_file_sha256;
+    expect(write_mouse_effect_probe_composite_schedule_ledger(options, sequence, execution,
+               ledger, safety_file_sha256, schedule_file_sha256, error),
+           "无设备 schedule 发布入口必须生成实际账本: " + error);
+    std::ifstream schedule_input(options.composite_schedule_ledger_path, std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(schedule_input)),
+                              std::istreambuf_iterator<char>());
+    schedule_input.close();
+    expect(content.find("\"command_report_file_sha256\": \"" + report_file_sha256 + "\"") !=
+               std::string::npos && content.find(report_semantic_sha256) == std::string::npos,
+           "schedule 的 command_report_file_sha256 必须绑定实际文件，不能误填 report semantic SHA");
+    std::string actual_schedule_sha256;
+    expect(mouse_effect_probe::calculate_mouse_effect_probe_file_sha256(
+               options.composite_schedule_ledger_path, actual_schedule_sha256, error) &&
+               actual_schedule_sha256 == schedule_file_sha256,
+           "schedule 发布返回值仍须是实际账本文件 SHA");
+
+    options.report_path = root / "missing-report.json";
+    options.composite_schedule_ledger_path = root / "must-not-exist.json";
+    schedule_file_sha256 = std::string(64, 'f');
+    expect(!write_mouse_effect_probe_composite_schedule_ledger(options, sequence, execution,
+               ledger, safety_file_sha256, schedule_file_sha256, error) &&
+               !std::filesystem::exists(options.composite_schedule_ledger_path) &&
+               schedule_file_sha256.empty(),
+           "报告文件缺失必须在账本发布前失败关闭，不能仅凭语义 SHA 字符串发布");
+    std::filesystem::remove_all(root, filesystem_error);
+}
+
 } // namespace
 
 int main() {
@@ -895,6 +969,7 @@ int main() {
     test_frame_mapping_preserves_source_identity_and_quality();
     test_physical_deadman_prompt_contract();
     test_physical_safety_ledger_distinguishes_explicit_release();
+    test_composite_schedule_binds_published_report_file_bytes();
     if (failures != 0) {
         std::cerr << "Mouse Effect Probe Runner 测试失败数: "
                   << failures << '\n';

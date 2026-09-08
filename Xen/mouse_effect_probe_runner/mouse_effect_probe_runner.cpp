@@ -414,27 +414,40 @@ bool sha256_payload(std::span<const std::uint8_t> payload,
     }
 }
 
-bool write_composite_schedule_ledger(
+} // namespace
+
+bool write_mouse_effect_probe_composite_schedule_ledger(
         const MouseEffectProbeRunOptions& options,
         const mouse_effect_probe::MouseEffectProbeSequence& sequence,
         const mouse_effect_probe::ProbeExecutionResult& execution,
-        const CompositeScheduleState& state,
-        std::string_view command_report_sha256,
+        const MouseEffectProbeCompositeScheduleLedger& state,
         std::string_view safety_ledger_sha256,
         std::string& file_sha256,
         std::string& error) noexcept {
+    file_sha256.clear();
     std::filesystem::path temporary_path;
     try {
-        if (!state.enabled || state.qpc_frequency <= 0 ||
+        if (state.qpc_frequency <= 0 ||
             state.plan_accepted_qpc <= 0 ||
             state.acquisition_started_qpc <= state.plan_accepted_qpc ||
             state.acquisition_finished_qpc < state.acquisition_started_qpc ||
             options.composite_schedule_ledger_path.empty() ||
             !options.composite_schedule_ledger_path.is_absolute() ||
             !valid_sha256(state.plan_sha256) ||
-            !valid_sha256(command_report_sha256) ||
             !valid_sha256(safety_ledger_sha256)) {
             set_error(error, "composite schedule ledger 终态身份无效");
+            return false;
+        }
+        // write_mouse_effect_probe_report 返回规范化语义 SHA；账本字段
+        // 声明的是文件身份，必须从已原子发布的报告字节独立计算。
+        std::string command_report_file_sha256;
+        if (!mouse_effect_probe::calculate_mouse_effect_probe_file_sha256(
+                options.report_path, command_report_file_sha256, error)) {
+            return false;
+        }
+        const auto events = nlohmann::ordered_json::parse(state.events_json);
+        if (!events.is_array()) {
+            set_error(error, "composite schedule ledger events 必须是数组");
             return false;
         }
         nlohmann::ordered_json document = {
@@ -450,7 +463,7 @@ bool write_composite_schedule_ledger(
             {"composite_plan_file_sha256", state.plan_sha256},
             {"probe_binding_sha256", options.expected_binding_sha256},
             {"sequence_semantic_sha256", sequence.sequence_sha256},
-            {"command_report_file_sha256", command_report_sha256},
+            {"command_report_file_sha256", command_report_file_sha256},
             {"safety_ledger_file_sha256", safety_ledger_sha256},
             {"scheduler_clock", {
                 {"clock_kind", "WINDOWS_QPC"},
@@ -469,7 +482,7 @@ bool write_composite_schedule_ledger(
             {"source_dispatch_count",
              std::count_if(execution.events.begin(), execution.events.end(),
                 [](const auto& event) { return event.dispatch_attempted; })},
-            {"events", state.events},
+            {"events", events},
         };
         const nlohmann::json canonical_document = document;
         const auto semantic_input = canonical_document.dump();
@@ -530,6 +543,8 @@ bool write_composite_schedule_ledger(
     file_sha256.clear();
     return false;
 }
+
+namespace {
 
 bool validate_composite_plan(
         const MouseEffectProbeRunOptions& options,
@@ -2108,11 +2123,22 @@ bool run_mouse_effect_probe(
                         composite_schedule.acquisition_finished_qpc);
                 }
                 std::string schedule_error;
+                const auto events_json = composite_schedule.events.dump();
+                const MouseEffectProbeCompositeScheduleLedger ledger{
+                    composite_schedule.plan_sha256,
+                    composite_schedule.qpc_clock_session_id,
+                    composite_schedule.qpc_frequency,
+                    composite_schedule.plan_accepted_qpc,
+                    composite_schedule.acquisition_started_qpc,
+                    composite_schedule.acquisition_finished_qpc,
+                    composite_schedule.active_wait_total_ns,
+                    events_json,
+                };
                 schedule_ledger_published = report_published &&
                     safety_ledger_published &&
-                    write_composite_schedule_ledger(
+                    write_mouse_effect_probe_composite_schedule_ledger(
                         options, sequence, result.execution,
-                        composite_schedule, result.report_sha256,
+                        ledger,
                         result.safety_ledger_sha256,
                         result.composite_schedule_ledger_sha256,
                         schedule_error);
