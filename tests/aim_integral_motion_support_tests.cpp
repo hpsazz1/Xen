@@ -1,5 +1,6 @@
 #include "aim/aim.h"
 #include "aim_integral_motion_support_fixture.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -14,7 +15,7 @@ auto at(std::int64_t ns) {
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::nanoseconds(ns))};
 }
-void actual_integral_tail(bool mirror) {
+void actual_integral_tail(bool mirror, bool ambiguous_motion = false) {
     AimConfig config;
     config.person_class_ids = {0, 2};
     config.head_class_ids = {1, 3};
@@ -28,6 +29,7 @@ void actual_integral_tail(bool mirror) {
     config.enable_prediction = false;
     Aim aim(config);
     int checked = 0;
+    float previous_left = 0.0f, previous_right = 0.0f;
     const int direction = mirror ? 1 : -1;
     for (const auto& s : aim_integral_motion_support_fixture::kSamples) {
         AimFrame f;
@@ -51,6 +53,13 @@ void actual_integral_tail(bool mirror) {
             at(s.previous_ns), f.captured_at, s.epoch,
             mirror ? -s.bg_dx : s.bg_dx, s.response, s.disagreement,
             static_cast<int>(s.patches)};
+        if (ambiguous_motion && s.sequence == 1974) {
+            f.background_motion_x.dx_roi_pixels =
+                ((f.detections[0].x1 - previous_left) +
+                 (f.detections[0].x2 - previous_right)) * 0.5f;
+        }
+        previous_left = f.detections[0].x1;
+        previous_right = f.detections[0].x2;
         const auto r = aim.process(f);
         expect(r.status == AimStatus::SUCCESS, "实际最小化输入须正常处理");
         expect(std::isfinite(r.control.history_adjusted_x_counts) &&
@@ -73,6 +82,21 @@ void actual_integral_tail(bool mirror) {
         if (s.sequence != 1974 && s.sequence != 1976) continue;
         ++checked;
         const float error = r.target.base_aim_x - f.control_center_x;
+        const float world_left = r.control.reverse_translation_raw_left_x_roi_pixels -
+            f.background_motion_x.dx_roi_pixels;
+        const float world_right = r.control.reverse_translation_raw_right_x_roi_pixels -
+            f.background_motion_x.dx_roi_pixels;
+        const float observation_dt = std::chrono::duration<float>(
+            f.background_motion_x.captured_at - f.background_motion_x.previous_captured_at).count();
+        const float current_bound = std::min(std::fabs(world_left), std::fabs(world_right)) /
+            (0.2216375f / config.counts_per_pixel_x) * r.control.controller_dt_ms / 1000.0f / observation_dt;
+        const float observer_bound = std::fabs(r.control.observer_target_velocity_x_counts_per_second) *
+            r.control.controller_dt_ms / 1000.0f;
+        if (!ambiguous_motion && r.control.target_motion_maintenance_x_counts * error < 0.0f)
+            expect(world_left * world_right > 0.0f &&
+                       std::fabs(r.control.target_motion_maintenance_x_counts) <= current_bound + .0003f &&
+                       std::fabs(r.control.target_motion_maintenance_x_counts) <= observer_bound + .0003f,
+                   "实际逆误差维护不得超过当前双边及observer各自步预算");
         expect(r.control.evaluated && r.target.matched_observation_valid &&
                    r.control.background_motion_use_x == AimBackgroundMotionUse::CONSUMED,
                "真实回归必须消费同帧背景和有效目标");
@@ -80,11 +104,26 @@ void actual_integral_tail(bool mirror) {
             expect(direction * error < 0.0f && std::fabs(error) < config.deadzone_pixels &&
                        direction * r.control.observer_target_velocity_x_counts_per_second > 0.0f &&
                        direction * r.control.filtered_integral_x_counts < 0.0f &&
-                       r.control.proportional_x_counts == 0.0f &&
-                       r.control.target_motion_maintenance_x_counts == 0.0f,
+                       r.control.proportional_x_counts == 0.0f,
                    "旧侧积分与当前运动估计相反，不能把位置残留当同向维护");
-            expect(r.command.dx_counts == 0,
-                   "没有同向运动支持的旧积分不得越过当前几何额度继续补一count");
+            expect(direction * r.control.filtered_x_counts <= 0.0f &&
+                       std::fabs(r.control.filtered_x_counts) < 0.5f &&
+                       std::fabs(r.control.filtered_x_counts) <=
+                           std::fabs(error) / (0.2216375f / config.counts_per_pixel_x) + .0003f,
+                   "旧向积分尾部仍受当前位置额度限制，不能独自补一count");
+            if (ambiguous_motion) {
+                expect(r.command.dx_counts == 0 &&
+                           r.control.target_motion_maintenance_x_counts == 0.0f &&
+                           r.control.modelled_response_x_counts == 0.0f,
+                       "无共同运动支持时保持原零输出保护");
+            } else {
+                expect(direction * r.control.target_motion_maintenance_x_counts > 0.0f &&
+                           direction * r.command.dx_counts > 0 &&
+                           std::fabs(r.control.shaped_x_counts -
+                               r.control.filtered_x_counts -
+                               r.control.modelled_response_x_counts) < 0.0003f,
+                       "实际反向维护必须来自fresh运动预算，与受限PI净合成");
+            }
         } else {
             expect(direction * error > config.deadzone_pixels,
                    "下一纠正须有死区外新侧误差");
@@ -100,6 +139,8 @@ void actual_integral_tail(bool mirror) {
 int main() {
     actual_integral_tail(false);
     actual_integral_tail(true);
+    actual_integral_tail(false, true);
+    actual_integral_tail(true, true);
     std::cout << "失败数：" << failures << '\n';
     return failures == 0 ? 0 : 1;
 }

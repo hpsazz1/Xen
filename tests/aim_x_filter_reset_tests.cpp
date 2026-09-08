@@ -1,5 +1,6 @@
 #include "aim/aim.h"
 #include "aim_x_filter_reset_fixture.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -14,7 +15,7 @@ auto at(std::int64_t ns) {
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::nanoseconds(ns))};
 }
-void actual_crossing(bool mirror) {
+void actual_crossing(bool mirror, bool ambiguous_motion = false) {
     AimConfig config;
     config.person_class_ids = {0, 2};
     config.head_class_ids = {1, 3};
@@ -28,6 +29,8 @@ void actual_crossing(bool mirror) {
     config.enable_prediction = false;
     Aim aim(config);
     int checked = 0;
+    float reset_request = 0.0f;
+    float previous_left = 0.0f, previous_right = 0.0f;
     const int direction = mirror ? 1 : -1;
     for (const auto& s : aim_x_filter_reset_fixture::kSamples) {
         AimFrame f;
@@ -51,6 +54,14 @@ void actual_crossing(bool mirror) {
             at(s.previous_ns), f.captured_at, s.epoch,
             mirror ? -s.bg_dx : s.bg_dx, s.response, s.disagreement,
             static_cast<int>(s.patches)};
+        if (ambiguous_motion && s.sequence == 7627) {
+            // 相同前缀，仅令末帧校正后的双边跨零，撤销共同运动证据。
+            f.background_motion_x.dx_roi_pixels =
+                ((f.detections[0].x1 - previous_left) +
+                 (f.detections[0].x2 - previous_right)) * 0.5f;
+        }
+        previous_left = f.detections[0].x1;
+        previous_right = f.detections[0].x2;
         const auto r = aim.process(f);
         expect(r.status == AimStatus::SUCCESS, "实际最小化输入须正常处理");
         expect(std::isfinite(r.control.history_adjusted_x_counts) &&
@@ -73,6 +84,21 @@ void actual_crossing(bool mirror) {
         if (s.sequence < 7625 || s.sequence > 7627) continue;
         ++checked;
         const float error = r.target.base_aim_x - f.control_center_x;
+        const float world_left = r.control.reverse_translation_raw_left_x_roi_pixels -
+            f.background_motion_x.dx_roi_pixels;
+        const float world_right = r.control.reverse_translation_raw_right_x_roi_pixels -
+            f.background_motion_x.dx_roi_pixels;
+        const float observation_dt = std::chrono::duration<float>(
+            f.background_motion_x.captured_at - f.background_motion_x.previous_captured_at).count();
+        const float current_bound = std::min(std::fabs(world_left), std::fabs(world_right)) /
+            (0.2216375f / config.counts_per_pixel_x) * r.control.controller_dt_ms / 1000.0f / observation_dt;
+        const float observer_bound = std::fabs(r.control.observer_target_velocity_x_counts_per_second) *
+            r.control.controller_dt_ms / 1000.0f;
+        if (!ambiguous_motion && r.control.target_motion_maintenance_x_counts * error < 0.0f)
+            expect(world_left * world_right > 0.0f &&
+                       std::fabs(r.control.target_motion_maintenance_x_counts) <= current_bound + .0003f &&
+                       std::fabs(r.control.target_motion_maintenance_x_counts) <= observer_bound + .0003f,
+                   "实际逆误差维护不得超过当前双边及observer各自步预算");
         if (s.sequence == 7625) {
             expect(direction * r.command.dx_counts < 0,
                    "过零前须存在旧向命令，不能退化成无历史夹具");
@@ -82,6 +108,7 @@ void actual_crossing(bool mirror) {
                        direction * error > config.deadzone_pixels,
                    "过零后须有新鲜同帧背景与死区外反侧误差");
             if (s.sequence == 7626) {
+                reset_request = r.control.history_adjusted_x_counts;
                 expect(r.command.dx_counts == 0, "清理旧向记忆当帧仍必须经过零输出");
                 expect(r.control.filter_reset_x &&
                            r.control.pre_eligibility_filtered_x_counts == 0.0f &&
@@ -89,8 +116,29 @@ void actual_crossing(bool mirror) {
                            direction * r.control.history_adjusted_x_counts > 0.0f,
                        "账本区分合法滤波输入、清理当帧零状态与末段下一步seed");
             } else {
-                expect(direction * r.command.dx_counts > 0,
-                       "已清理旧向记忆后不得丢弃首帧更新而再次空发");
+                const float expected_filtered =
+                    reset_request * config.smoothing * (1.0f - config.smoothing) +
+                    r.control.history_adjusted_x_counts * config.smoothing;
+                expect(std::fabs(r.control.pre_eligibility_filtered_x_counts -
+                                 expected_filtered) < 0.0003f,
+                       "Reset当帧的合法输入必须完整进入下一帧滤波，不得丢掉seed");
+                expect(direction * r.control.filtered_x_counts > 0.0f,
+                       "位置纠偏份额仍须朝新侧误差");
+                if (ambiguous_motion) {
+                    expect(direction * r.command.dx_counts > 0 &&
+                               direction * r.control.modelled_response_x_counts >= 0.0f,
+                           "无共同运动支持时，原首新向纠偏不得被丢弃或无据抵消");
+                } else {
+                    // 新合同允许受支持的运动与位置纠偏抵消；净输出不是PI状态证据。
+                    expect(direction * r.control.modelled_response_x_counts < 0.0f &&
+                               std::fabs(r.control.modelled_response_x_counts -
+                                   r.control.target_motion_maintenance_x_counts) < 0.0003f &&
+                               std::fabs(r.control.shaped_x_counts -
+                                   r.control.filtered_x_counts -
+                                   r.control.modelled_response_x_counts) < 0.0003f &&
+                               r.command.dx_counts == 0,
+                           "实际反向维护按净请求合成舍入，不强行执行独立PI整数");
+                }
                 expect(!r.control.filter_reset_x &&
                            direction * r.control.pre_eligibility_filtered_x_counts > 0.0f,
                        "账本必须在下一帧显示新向滤波状态，不沿用清理帧标记");
@@ -105,6 +153,8 @@ void actual_crossing(bool mirror) {
 int main() {
     actual_crossing(false);
     actual_crossing(true);
+    actual_crossing(false, true);
+    actual_crossing(true, true);
     std::cout << "失败数：" << failures << '\n';
     return failures == 0 ? 0 : 1;
 }

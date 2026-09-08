@@ -4419,10 +4419,38 @@ struct Aim::Impl {
                     integral_x_toward_target * (1.0f - opening_x_weight)));
         const float target_motion_request_x =
             x_error_direction * target_motion_request_magnitude_x;
-        // 内部滤波状态可以保留旧符号，本帧的输出份额仍必须朝当前 X
-        // 误差；精确零点输出零，不借状态保留释放 observer 的位置封顶。
+        // 位置纠偏仍投影到当前误差；运动维护另按当前同源证据授权。
+        // 两者净合成后只经过一次二维限幅和量化，不分别执行两个整数。
+        float applied_maintenance_request_x = target_motion_request_x;
         float motion_compensated_x =
-            eligible_filtered_x + target_motion_request_x;
+            eligible_filtered_x + applied_maintenance_request_x;
+        // 相机跟随可能让位置误差暂时换侧，而世界目标仍同向移动。
+        // 仅非Reset且当前同源双边、observer方向一致时允许跨侧维护；
+        // 幅度取当前共同位移与observer本步预算的交集，不直接放行全幅。
+        // 此时eligible PI与维护反向，无同向维护份额需要再次去重。
+        if (diagnostics.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
+                x_filter_update != FilterUpdate::Reset) {
+            const float world_common = common_edge_motion(
+                track.horizontal_raw_left_motion_x - frame.background_motion_x.dx_roi_pixels,
+                track.horizontal_raw_right_motion_x - frame.background_motion_x.dx_roi_pixels);
+            if (world_common * error_x < 0.0f &&
+                world_common * tracking_target_velocity_counts_per_second_x > 0.0f) {
+                const float observation_dt = std::chrono::duration<float>(
+                    frame.background_motion_x.captured_at -
+                    frame.background_motion_x.previous_captured_at).count();
+                const float current_supported_motion = std::fabs(world_common) *
+                    frame.source_pixels_per_roi_pixel_x / tracking_plant_pixels_per_count_x *
+                    controller_dt / observation_dt;
+                const float supported_maintenance = std::copysign(std::min(
+                    std::fabs(tracking_target_velocity_counts_per_second_x * controller_dt),
+                    current_supported_motion), world_common);
+                if (std::isfinite(current_supported_motion)) {
+                    applied_maintenance_request_x = supported_maintenance;
+                    motion_compensated_x = eligible_filtered_x + applied_maintenance_request_x;
+                    diagnostics.target_motion_maintenance_x_counts = supported_maintenance;
+                }
+            }
+        }
         float motion_compensated_y = filtered_y;
         clamp_tracking_vector_preserving_y(
             motion_compensated_x, motion_compensated_y,
@@ -4465,10 +4493,15 @@ struct Aim::Impl {
         const int independently_rounded_x =
             static_cast<int>(std::lround(shaped_x));
         float quantized_x = shaped_x;
+        // PI清理边界不继承上一段净请求的舍入差；本帧合法维护仍正常
+        // 舍入并留下自己的新余数，下一步不再次丢失这份新请求。
+        if (x_filter_update == FilterUpdate::Reset) {
+            residual_x = 0.0f;
+        }
         const bool quantization_residual_eligible_x =
             frame.lock_active &&
             (x_error_magnitude > config.deadzone_pixels ||
-             target_motion_request_magnitude_x > 0.0f) &&
+             applied_maintenance_request_x != 0.0f) &&
             std::fabs(shaped_x) > 0.001f;
         if (quantization_residual_eligible_x) {
             diagnostics.residual_before_quantization_x_counts = residual_x;
@@ -4476,7 +4509,7 @@ struct Aim::Impl {
             command.dx_counts = static_cast<int>(std::lround(quantized_x));
             // 最近整数残余可能与新一帧请求异号，但它只是在同一连续请求中
             // 补回上一帧的舍入差。只有它将生成反向整数命令时才丢弃旧残余，
-            // 并按当前请求从零重新累计，避免跨过基础点后补发旧方向命令。
+            // 并按当前净请求从零累计，避免旧余数单独造出反向命令。
             if (command.dx_counts != 0 &&
                 command.dx_counts * shaped_x < 0.0f) {
                 residual_x = 0.0f;
@@ -4485,8 +4518,8 @@ struct Aim::Impl {
                 command.dx_counts = independently_rounded_x;
             }
         } else {
-            // 未按键、进入 deadzone 或浮点请求归零时立即清掉旧余数；后续
-            // 不得凭历史舍入差单独生成物理命令。
+            // 未按键、无有效纠偏/维护或浮点净请求归零时清掉余数；
+            // 后续不得凭历史舍入差单独生成物理命令。
             residual_x = 0.0f;
             diagnostics.residual_before_quantization_x_counts = 0.0f;
             command.dx_counts = independently_rounded_x;

@@ -45,6 +45,7 @@ void actual_motion_reversal(bool mirror) {
     Aim aim(config);
     const int direction = mirror ? -1 : 1;
     int checked = 0;
+    float reset_shaped_x = 0.0f;
     for (const auto& s : aim_motion_inventory_fixture::kSamples) {
         if (s.observation_clock_reset) aim.reset();
         AimFrame f;
@@ -121,7 +122,12 @@ void actual_motion_reversal(bool mirror) {
             // 仅约束这条实际Reset样本，不宣称所有Reset都必须把M或总输出置零。
             expect(c.filter_reset_x && r.command.dx_counts == 0,
                    "2510必须保持原实际Reset零X结果");
+            expect(c.residual_before_quantization_x_counts == 0.0f,
+                   "Reset是量化累计区间边界，不继承旧净请求的舍入余额");
+            reset_shaped_x = c.shaped_x_counts;
         } else {
+            expect(std::fabs(c.residual_before_quantization_x_counts - reset_shaped_x) < 0.0003f,
+                   "Reset帧合法维护的新余数必须保留到下一步，不能连续清除");
             expect(!c.filter_reset_x && direction * error > config.deadzone_pixels &&
                        direction * r.command.dx_counts > 0,
                    "2511须继续正常新向纠正，不得在Reset之后再次停发");

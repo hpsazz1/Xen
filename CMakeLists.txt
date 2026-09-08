@@ -1270,6 +1270,10 @@ if(BUILD_TESTING)
     target_link_libraries(aim_opening_maintenance_tests PRIVATE aim log)
     xen_deploy_runtime_dlls(aim_opening_maintenance_tests OPENCV)
     add_test(NAME aim_opening_maintenance_tests COMMAND aim_opening_maintenance_tests)
+    add_executable(aim_cross_side_maintenance_tests tests/aim_cross_side_maintenance_tests.cpp)
+    target_link_libraries(aim_cross_side_maintenance_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_cross_side_maintenance_tests OPENCV)
+    add_test(NAME aim_cross_side_maintenance_tests COMMAND aim_cross_side_maintenance_tests)
 
     add_executable(aim_background_camera_translation_tests
         tests/aim_background_camera_translation_tests.cpp)
