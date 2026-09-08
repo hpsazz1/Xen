@@ -4159,8 +4159,7 @@ struct Aim::Impl {
             0.0f,
             x_error_direction *
                 tracking_target_velocity_counts_per_second_x *
-                controller_dt) *
-            pending_alignment_weight;
+                controller_dt);
 
         // X 的积分包含已学到的维持量。当前点在 deadzone 内换侧并不
         // 证明这份运动已经消失；保留其真实时间泄漏，把本帧能否输出交给
@@ -4288,8 +4287,6 @@ struct Aim::Impl {
         // 记录库存整形后的实际滤波输入；desired_before_reverse 是更早的
         // 线性请求，而 desired_x_counts 在末段会被最终整形值覆盖。
         diagnostics.history_adjusted_x_counts = desired_x;
-        diagnostics.target_motion_maintenance_x_counts =
-            x_error_direction * target_motion_maintenance_magnitude_x;
         diagnostics.error_derivative_x_source_pixels_per_second =
             tracking_error_derivative_x;
         diagnostics.opening_weight_x = opening_x_weight;
@@ -4358,6 +4355,16 @@ struct Aim::Impl {
         diagnostics.filter_reset_x = x_filter_update == FilterUpdate::Reset;
         diagnostics.pre_eligibility_filtered_x_counts = filtered_x;
         diagnostics.filtered_integral_x_counts = tracking_filtered_integral_x;
+        // 同帧背景支持的同向运动在非清理帧仍需维护，旧向命令库存不能
+        // 整项撤销这份请求。清理帧与缺测沿用原库存策略；后续位置额度、
+        // 积分去重和二维上限保持不变，不把预算直接当作最终输出。
+        const float eligible_target_motion_magnitude_x =
+            diagnostics.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
+                x_filter_update != FilterUpdate::Reset
+            ? target_motion_maintenance_magnitude_x
+            : target_motion_maintenance_magnitude_x * pending_alignment_weight;
+        diagnostics.target_motion_maintenance_x_counts =
+            x_error_direction * eligible_target_motion_magnitude_x;
         // PI 校正图像特征位置残差，目标运动观察器提供目标运动维持量。
         // 未见 opening 时，同向积分可能已学习到同一扰动，继续只补二者
         // 缺口，避免重复支付；当前左右边共同位移仍让误差增大时，则按既有
@@ -4394,7 +4401,7 @@ struct Aim::Impl {
             remaining_position_headroom_x,
             std::max(
                 0.0f,
-                target_motion_maintenance_magnitude_x -
+                eligible_target_motion_magnitude_x -
                     integral_x_toward_target * (1.0f - opening_x_weight)));
         const float target_motion_request_x =
             x_error_direction * target_motion_request_magnitude_x;

@@ -1262,6 +1262,11 @@ if(BUILD_TESTING)
     add_test(NAME aim_integral_motion_support_tests
         COMMAND aim_integral_motion_support_tests)
 
+    add_executable(aim_motion_inventory_tests tests/aim_motion_inventory_tests.cpp)
+    target_link_libraries(aim_motion_inventory_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_motion_inventory_tests OPENCV)
+    add_test(NAME aim_motion_inventory_tests COMMAND aim_motion_inventory_tests)
+
     add_executable(aim_background_camera_translation_tests
         tests/aim_background_camera_translation_tests.cpp)
     target_link_libraries(aim_background_camera_translation_tests PRIVATE aim log)
