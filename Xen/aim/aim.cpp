@@ -3987,7 +3987,11 @@ struct Aim::Impl {
                        background.observation_epoch != track.raw_previous_epoch) {
                 use = AimBackgroundMotionUse::PAIR_MISMATCH;
             } else if (track.horizontal_raw_left_motion_x *
-                           track.horizontal_raw_right_motion_x < 0.0f) {
+                           track.horizontal_raw_right_motion_x < 0.0f &&
+                       (track.horizontal_raw_left_motion_x - background.dx_roi_pixels) *
+                           (track.horizontal_raw_right_motion_x - background.dx_roi_pixels) < 0.0f) {
+                // raw异向可能只是共同camera平移跨过零点；校正后的两边
+                // 仍异向才缺少同向运动证据。模型回退保持原raw合同。
                 use = AimBackgroundMotionUse::OBSERVATION_UNAVAILABLE;
             } else {
                 // 同帧对图像已直接测得 camera 位移，单位只从 ROI 换到 FOV；
@@ -4014,7 +4018,8 @@ struct Aim::Impl {
                 : controller_dt;
             const auto measure_camera = [&](float camera_motion_x, float dt) {
                 float observer_common_motion_x = current_common_motion_x;
-                if (track.horizontal_raw_left_motion_x *
+                if (use == AimBackgroundMotionUse::CONSUMED ||
+                    track.horizontal_raw_left_motion_x *
                         track.horizontal_raw_right_motion_x >= 0.0f) {
                     const float raw_left_motion_x =
                         track.horizontal_raw_left_motion_x *
@@ -4059,11 +4064,12 @@ struct Aim::Impl {
             }
             diagnostics.observer_camera_motion_x_source_pixels =
                 modelled_camera_motion_x * camera_motion_evidence_weight;
-            // 两边异向形变时，共同平移提取没有可用结果，不能把返回的零
-            // 当作世界目标静止来撤销已有运动。仅跳过这次速度校正，后续
-            // 位置纠偏、方向和预算仍正常更新；单零边包含在观测范围中，
-            // 双零或刚体等边退化为原单点测量。
-            if (track.horizontal_raw_left_motion_x *
+            // 同源camera校正后支持同向运动的区间已完成投影，应更新估计；
+            // 不可再按校正前raw是否跨零丢掉它。缺测/歧义回退仍跳过raw
+            // 异向的速度校正，不能将共同平移提取的零误作目标静止。
+            // 单零边包含在区间中，双零或刚体等边退化为原单点测量。
+            if (use == AimBackgroundMotionUse::CONSUMED ||
+                track.horizontal_raw_left_motion_x *
                     track.horizontal_raw_right_motion_x >= 0.0f) {
                 tracking_target_velocity_counts_per_second_x +=
                     target_motion_alpha *
