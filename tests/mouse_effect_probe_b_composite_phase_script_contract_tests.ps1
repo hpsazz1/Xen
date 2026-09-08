@@ -284,6 +284,42 @@ try {
         }
         Write-Host "Launch bounded 自动取证合同通过：$($case.name)"
     }
+    $eventMonitorFunction = $launchAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-BoundedCompositeEventMonitor'
+    }, $true)
+    if ($null -eq $eventMonitorFunction) { throw 'Launch 缺少独立事件监控授权入口' }
+    . ([scriptblock]::Create($eventMonitorFunction.Extent.Text))
+    $eventMonitorCalls = @($launchAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Get-BoundedCompositeEventMonitor'
+    }, $true))
+    if ($eventMonitorCalls.Count -ne 1 -or $eventMonitorCalls[0].Extent.StartOffset -ge $seedConsumer.Extent.StartOffset) {
+        throw '事件监控授权必须在 seed/Seal/sidecar 前消费'
+    }
+    foreach ($case in @(
+            @{ name = 'legacy-missing'; flag = $null; auto = $false; composite = $true; expected = $false; reject = $false },
+            @{ name = 'auto-missing'; flag = $null; auto = $true; composite = $true; expected = $false; reject = $false },
+            @{ name = 'explicit-false'; flag = $false; auto = $true; composite = $true; expected = $false; reject = $false },
+            @{ name = 'event'; flag = $true; auto = $true; composite = $true; expected = $true; reject = $false },
+            @{ name = 'no-auto'; flag = $true; auto = $false; composite = $true; expected = $false; reject = $true },
+            @{ name = 'other-profile'; flag = $true; auto = $true; composite = $false; expected = $false; reject = $true },
+            @{ name = 'string-true'; flag = 'true'; auto = $true; composite = $true; expected = $false; reject = $true },
+            @{ name = 'number-true'; flag = 1; auto = $true; composite = $true; expected = $false; reject = $true },
+            @{ name = 'string-false'; flag = 'false'; auto = $true; composite = $true; expected = $false; reject = $true })) {
+        $safety = @{}
+        if ($null -ne $case.flag) { $safety.bounded_composite_event_monitor = $case.flag }
+        $eventTask = @{ safety = $safety } | ConvertTo-Json -Depth 4 | ConvertFrom-Json
+        $rejected = $false; $enabled = $false
+        try { $enabled = Get-BoundedCompositeEventMonitor $eventTask $case.composite $case.auto }
+        catch { $rejected = $true }
+        if ($rejected -ne $case.reject -or (-not $rejected -and $enabled -ne $case.expected)) {
+            throw "独立事件监控授权消费无效：$($case.name)"
+        }
+        Write-Host "Launch 事件监控授权合同通过：$($case.name)"
+    }
     $argumentConsumer = $launchAst.Find({
         param($node)
         $node -is [Management.Automation.Language.IfStatementAst] -and
@@ -293,6 +329,7 @@ try {
     if ($null -eq $argumentConsumer) { throw 'Launch 缺少 composite 原生参数消费块' }
     $compositePlanPath = 'plan'; $compositePlanFileSha256 = 'plan-hash'; $compositeSchedulePath = 'schedule'
     foreach ($enabled in @($false, $true)) {
+        $boundedCompositeEventMonitor = $false
         $boundedCompositeAutoArm = $enabled
         $isBCompositeTask = $true
         $probeArguments = @()
@@ -301,6 +338,13 @@ try {
             $probeArguments.Count -ne (6 + [int]$enabled)) {
             throw 'Launch 必须只为显式自动模式传一次无值 bounded flag'
         }
+    }
+    $isBCompositeTask = $true; $boundedCompositeAutoArm = $true; $boundedCompositeEventMonitor = $true; $probeArguments = @()
+    . ([scriptblock]::Create($argumentConsumer.Extent.Text))
+    if ($probeArguments.Count -ne 8 -or
+        @($probeArguments | Where-Object { $_ -ceq '--bounded-composite-auto-arm' }).Count -ne 1 -or
+        @($probeArguments | Where-Object { $_ -ceq '--bounded-composite-event-monitor' }).Count -ne 1) {
+        throw '独立事件监控必须同时传两个显式无值开关，且各一次'
     }
     $isBCompositeTask = $false; $boundedCompositeAutoArm = $true; $probeArguments = @()
     . ([scriptblock]::Create($argumentConsumer.Extent.Text))
@@ -320,6 +364,122 @@ try {
         (ConvertTo-PhysicalProbeOperatorCue 'KMBOX monitor 已就绪') -cne
             '【按住右键】5 秒内按住并持续保持；直到看到“现在松开右键”。') {
         throw '自动取证提示必须明确免按右键，旧默认提示保持原样'
+    }
+    if ((ConvertTo-PhysicalProbeOperatorCue '有限composite事件订阅：首态未知时按显式策略开始；真实键态与故障照常检查。' $true $true) -cne
+            '【事件监控有限取证】首态未知按 UNKNOWN 记录；已收到的 End/F8 事件可急停。' -or
+        (ConvertTo-PhysicalProbeOperatorCue 'Mouse Effect Probe 时间线完成' $true $true) -cne
+            '【命令阶段结束】正在整理事件监控有限取证证据。') {
+        throw '事件监控提示必须明确 UNKNOWN 与已收到事件，不得复用完整 monitor 就绪声明'
+    }
+
+    $armingEvidenceFunction = $launchAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-CompositeArmingEvidence'
+    }, $true)
+    if ($null -eq $armingEvidenceFunction) { throw 'Launch 缺少事件策略与零包未知事实的独立消费入口' }
+    . ([scriptblock]::Create($armingEvidenceFunction.Extent.Text))
+    $armingEvidenceCalls = @($launchAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Get-CompositeArmingEvidence'
+    }, $true))
+    if ($armingEvidenceCalls.Count -ne 1 -or
+        $armingEvidenceCalls[0].Extent.StartOffset -ge $launch.IndexOf('    $executionComplete =')) {
+        throw '完成判断必须消费实际 safety ledger 的独立事件策略'
+    }
+    $eventLedgerFixture = @{
+        arming_policy = 'BOUNDED_COMPOSITE_SUBSCRIBED_EVENT_MONITOR'
+        bounded_composite_event_monitor = $true; input_state_ever_observed = $false
+        recording_failed = $false; dropped_observation_count = 0
+        monitor_packet_recording_failed = $false; dropped_monitor_packet_count = 0
+        terminal_decision = 'bounded_ready_without_input_state'; probe_stop_reason = 'normal_completion'
+        monitor_packets = @()
+        observations = @(@{
+            observed_at_steady_ns = 1; phase = 'arming'; poll_succeeded = $true
+            monitor_status = 'WAITING'; state_valid = $false; monitor_sequence = 0
+            right_button_pressed = $false; end_pressed = $false; f8_pressed = $false
+            decision = 'bounded_ready_without_input_state'
+        }, @{
+            observed_at_steady_ns = 2; phase = 'active'; poll_succeeded = $true
+            monitor_status = 'WAITING'; state_valid = $false; monitor_sequence = 0
+            right_button_pressed = $false; end_pressed = $false; f8_pressed = $false
+            decision = 'bounded_ready_without_input_state'
+        })
+    } | ConvertTo-Json -Depth 8
+    foreach ($case in @('event-zero', 'old-manual-zero', 'old-auto-zero', 'wrong-policy', 'missing-policy',
+            'false-event-flag', 'string-event-flag', 'missing-ever-observed', 'forged-ever-observed',
+            'observation-drop', 'packet-drop', 'recording-failed', 'packet-recording-failed',
+            'poll-failure', 'fake-ready', 'fake-sequence', 'fake-right-button', 'received-end',
+            'received-f8', 'ordinary-ready-decision', 'empty-observations', 'unexpected-packet',
+            'noninteger-observation-drop', 'boolean-packet-drop', 'noninteger-sequence')) {
+        $ledger = $eventLedgerFixture | ConvertFrom-Json
+        $auto = $true; $eventMode = $true; $reject = $false; $zeroComplete = $false
+        switch ($case) {
+            'event-zero' { $zeroComplete = $true }
+            'old-manual-zero' {
+                $auto = $false; $eventMode = $false
+                $ledger.PSObject.Properties.Remove('arming_policy')
+                $ledger.PSObject.Properties.Remove('bounded_composite_event_monitor')
+                $ledger.PSObject.Properties.Remove('input_state_ever_observed')
+                foreach ($observation in $ledger.observations) { $observation.decision = 'waiting' }
+            }
+            'old-auto-zero' {
+                $eventMode = $false; $ledger.arming_policy = 'BOUNDED_COMPOSITE_AUTO_ARM'
+                $ledger.bounded_composite_event_monitor = $false
+                foreach ($observation in $ledger.observations) { $observation.decision = 'waiting' }
+            }
+            'wrong-policy' { $ledger.arming_policy = 'BOUNDED_COMPOSITE_AUTO_ARM'; $reject = $true }
+            'missing-policy' { $ledger.PSObject.Properties.Remove('arming_policy'); $reject = $true }
+            'false-event-flag' { $ledger.bounded_composite_event_monitor = $false; $reject = $true }
+            'string-event-flag' { $ledger.bounded_composite_event_monitor = 'true'; $reject = $true }
+            'missing-ever-observed' { $ledger.PSObject.Properties.Remove('input_state_ever_observed'); $reject = $true }
+            'forged-ever-observed' { $ledger.input_state_ever_observed = $true; $reject = $true }
+            'observation-drop' { $ledger.dropped_observation_count = 1 }
+            'packet-drop' { $ledger.dropped_monitor_packet_count = 1 }
+            'recording-failed' { $ledger.recording_failed = $true }
+            'packet-recording-failed' { $ledger.monitor_packet_recording_failed = $true }
+            'poll-failure' { $ledger.observations[0].poll_succeeded = $false }
+            'fake-ready' { $ledger.observations[0].monitor_status = 'READY' }
+            'fake-sequence' { $ledger.observations[0].monitor_sequence = 1 }
+            'fake-right-button' { $ledger.observations[0].right_button_pressed = $true }
+            'received-end' { $ledger.observations[0].end_pressed = $true }
+            'received-f8' { $ledger.observations[0].f8_pressed = $true }
+            'ordinary-ready-decision' { $ledger.observations[0].decision = 'ready' }
+            'empty-observations' { $ledger.observations = @() }
+            'unexpected-packet' { $ledger.monitor_packets = @(@{ unexpected = $true }) }
+            'noninteger-observation-drop' { $ledger.dropped_observation_count = [double]0.0 }
+            'boolean-packet-drop' { $ledger.dropped_monitor_packet_count = $false }
+            'noninteger-sequence' { $ledger.observations[0].monitor_sequence = [double]0.0 }
+        }
+        $caught = $false; $evidence = $null
+        try { $evidence = Get-CompositeArmingEvidence $ledger $auto $eventMode }
+        catch { $caught = $true }
+        if ($caught -ne $reject -or
+            (-not $caught -and $evidence.zero_packet_unknown_complete -ne $zeroComplete)) {
+            throw "事件策略/零包未知证据判断无效：$case"
+        }
+        Write-Host "Launch 事件监控证据合同通过：$case"
+    }
+    $executionConsumer = $launchAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$executionComplete'
+    }, $true)
+    # 只改变 monitor 这一维；其余实际完成表达式输入是满足旧合同的合成值。
+    $probeExitCode = 0
+    $report = @{ result = @{ state = 'completed'; complete = $true; stop_reason = 'normal_completion'
+        cumulative_requested_x_counts = 0; cumulative_backend_completed_x_counts = 0 } } |
+        ConvertTo-Json | ConvertFrom-Json
+    $events = @(1); $samples = @(1); $completedPulses = 38; $expectedPulseCount = 38
+    $safetyLedger = $eventLedgerFixture | ConvertFrom-Json; $safetyObservations = @($safetyLedger.observations)
+    foreach ($eventMode in @($false, $true)) {
+        $monitorPacketIdentityComplete = $false
+        $compositeArmingEvidence = [pscustomobject]@{ zero_packet_unknown_complete = $eventMode }
+        . ([scriptblock]::Create($executionConsumer.Extent.Text))
+        if ($executionComplete -ne $eventMode -or $monitorPacketIdentityComplete) {
+            throw '仅独立事件策略能完成零包取证，普通 packet identity 必须仍为 false'
+        }
     }
 
     $fixtureExecutable = Join-Path $fixtureRoot 'Seal fixture 中文.exe'
@@ -484,6 +644,7 @@ public static class CompositeSealCallerFixture
         $probeArguments = @('--probe-fixture', $name)
         $boundedProbeOutputPath = Join-Path $caseRoot 'probe-output.json'
         $boundedCompositeAutoArm = $true
+        $boundedCompositeEventMonitor = $false
         $operatorState = @{ monitor_seen = $false; terminal_seen = $false }
         $probeExitCode = -1
         $caught = $null

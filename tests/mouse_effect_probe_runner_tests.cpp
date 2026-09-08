@@ -398,6 +398,191 @@ void test_bounded_composite_auto_arm_parser() {
            "自动武装必须拒绝output-off及无授权调用");
 }
 
+std::vector<std::wstring_view> event_monitor_arguments() {
+    auto arguments = common_arguments();
+    arguments[1] = L"physical-b";
+    const std::vector<std::wstring_view> extra{
+        L"--allow-physical-output", L"--confirm-physical-output",
+        L"XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT",
+        L"--safety-ledger", L"E:\\run\\safety.json",
+        L"--composite-plan", L"E:\\run\\plan.json",
+        L"--composite-plan-sha256",
+        L"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        L"--composite-schedule-ledger", L"E:\\run\\schedule.json",
+        L"--bounded-composite-auto-arm", L"--bounded-composite-event-monitor"};
+    arguments.insert(arguments.end(), extra.begin(), extra.end());
+    return arguments;
+}
+
+void test_bounded_composite_event_monitor_parser() {
+    MouseEffectProbeRunOptions options;
+    std::string error;
+    const auto arguments = event_monitor_arguments();
+    expect(parse_mouse_effect_probe_options(arguments, options, error) ==
+               MouseEffectProbeParseStatus::READY,
+           "显式有限composite事件订阅模式必须被公开CLI接受: " + error);
+    expect(options.bounded_composite_auto_arm && options.bounded_composite_event_monitor,
+           "事件订阅模式必须保留两个独立显式选择");
+    const auto authorized = options;
+    for (const auto policy : {mouse_effect_probe::CompositePhaseSchedulerPolicy::LEGACY,
+                             mouse_effect_probe::CompositePhaseSchedulerPolicy::ACTIVE_1MS_V1}) {
+        mouse_effect_probe::MouseEffectProbeSequence sequence;
+        expect(mouse_effect_probe::make_composite_phase_calibration_sequence(
+                   policy, sequence, error) &&
+                   validate_mouse_effect_probe_sequence_authorization(authorized, sequence, error),
+               "事件订阅仅接受完整固定composite序列: " + error);
+        auto altered = sequence;
+        altered.samples.front().dx_counts = 2;
+        expect(!validate_mouse_effect_probe_sequence_authorization(authorized, altered, error),
+               "事件订阅不得借profile放行额外脉冲");
+        altered = sequence;
+        altered.samples.front().dy_counts = 1;
+        expect(!validate_mouse_effect_probe_sequence_authorization(authorized, altered, error),
+               "事件订阅不得带入Y命令");
+        for (int invalid_case = 0; invalid_case < 4; ++invalid_case) {
+            auto invalid = authorized;
+            if (invalid_case == 0) invalid.bounded_composite_auto_arm = false;
+            if (invalid_case == 1) invalid.max_seconds = 16;
+            if (invalid_case == 2) invalid.physical_output_confirmed = false;
+            if (invalid_case == 3) invalid.physical_authorization =
+                MouseEffectProbePhysicalAuthorization::PHYSICAL_B_PRIMARY;
+            expect(!validate_mouse_effect_probe_sequence_authorization(invalid, sequence, error),
+                   "直接调用事件订阅仍须满足auto/token/时长/输出授权");
+        }
+    }
+    auto missing_auto = arguments;
+    std::erase(missing_auto, L"--bounded-composite-auto-arm");
+    expect(parse_mouse_effect_probe_options(missing_auto, options, error) ==
+               MouseEffectProbeParseStatus::INVALID,
+           "事件订阅不能单独选择");
+    auto duplicate = arguments;
+    duplicate.push_back(L"--bounded-composite-event-monitor");
+    expect(parse_mouse_effect_probe_options(duplicate, options, error) ==
+               MouseEffectProbeParseStatus::INVALID,
+           "事件订阅重复参数必须拒绝");
+    auto overlong = arguments;
+    for (std::size_t index = 0; index + 1 < overlong.size(); ++index)
+        if (overlong[index] == L"--max-seconds") overlong[index + 1] = L"16";
+    expect(parse_mouse_effect_probe_options(overlong, options, error) ==
+               MouseEffectProbeParseStatus::INVALID,
+           "事件订阅不得扩展到16秒");
+    auto wrong_authority = arguments;
+    for (std::size_t index = 0; index + 1 < wrong_authority.size(); ++index)
+        if (wrong_authority[index] == L"--confirm-physical-output")
+            wrong_authority[index + 1] = L"XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT";
+    expect(parse_mouse_effect_probe_options(wrong_authority, options, error) ==
+               MouseEffectProbeParseStatus::INVALID,
+           "非composite令牌不得启用事件订阅");
+    auto output_off = common_arguments();
+    output_off.push_back(L"--bounded-composite-event-monitor");
+    expect(parse_mouse_effect_probe_options(output_off, options, error) ==
+               MouseEffectProbeParseStatus::INVALID,
+           "无输出模式不得携带事件订阅参数");
+}
+
+void test_bounded_composite_event_monitor_preserves_unknown_state() {
+    const auto fresh_ledger = [] {
+        MouseEffectProbeSafetyLedger ledger;
+        ledger.bounded_composite_auto_arm = true;
+        ledger.bounded_composite_event_monitor = true;
+        return ledger;
+    };
+    InputSnapshot waiting;
+    waiting.status = InputMonitorStatus::WAITING;
+    auto ledger = fresh_ledger();
+    for (const auto phase : {MouseEffectProbeSafetyPhase::ARMING,
+                             MouseEffectProbeSafetyPhase::ACTIVE}) {
+        expect(record_mouse_effect_probe_safety_observation(phase, true, waiting, ledger) ==
+                   MouseEffectProbeSafetyDecision::BOUNDED_READY_WITHOUT_INPUT_STATE &&
+                   ledger.observations.back().monitor_status == InputMonitorStatus::WAITING &&
+                   !ledger.observations.back().state_valid &&
+                   ledger.observations.back().monitor_sequence == 0 &&
+                   !ledger.observations.back().right_button_pressed &&
+                   !ledger.input_state_ever_observed,
+               "订阅模式须以独立决策开始且如实保留未知首态，不能伪造READY");
+    }
+    const auto path = std::filesystem::temp_directory_path() /
+        ("xen-event-monitor-ledger-" + std::to_string(std::chrono::steady_clock::now()
+            .time_since_epoch().count()) + ".json");
+    std::string sha256, error;
+    expect(write_mouse_effect_probe_safety_ledger(path,
+               "11111111-2222-4333-8444-555555555555",
+               mouse_effect_probe::ProbeStopReason::NORMAL_COMPLETION,
+               ledger, sha256, error), "事件订阅实际未知首态账本应能发布: " + error);
+    std::ifstream input(path, std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(input)),
+                              std::istreambuf_iterator<char>());
+    expect(content.find("\"arming_policy\": \"BOUNDED_COMPOSITE_SUBSCRIBED_EVENT_MONITOR\"") !=
+               std::string::npos &&
+               content.find("\"decision\": \"bounded_ready_without_input_state\"") !=
+               std::string::npos &&
+               content.find("\"state_valid\": false") != std::string::npos &&
+               content.find("\"monitor_packets\": []") != std::string::npos,
+           "事件订阅账本必须保留独立策略、决策、无首态和零包事实");
+    auto without_auto = fresh_ledger();
+    without_auto.bounded_composite_auto_arm = false;
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ARMING, true, waiting, without_auto) ==
+               MouseEffectProbeSafetyDecision::WAITING,
+           "孤立事件订阅ledger标志不得放行");
+    for (const auto status : {InputMonitorStatus::READY, InputMonitorStatus::UNVERIFIED,
+                              InputMonitorStatus::STALE, InputMonitorStatus::FAILURE,
+                              InputMonitorStatus::CLOSED}) {
+        auto invalid = waiting;
+        invalid.status = status;
+        auto candidate = fresh_ledger();
+        const auto decision = record_mouse_effect_probe_safety_observation(
+            MouseEffectProbeSafetyPhase::ACTIVE, true, invalid, candidate);
+        expect(decision == (status == InputMonitorStatus::FAILURE ||
+                            status == InputMonitorStatus::CLOSED
+                                ? MouseEffectProbeSafetyDecision::FAILURE
+                                : MouseEffectProbeSafetyDecision::WAITING),
+               "新模式只能接纳首态WAITING，不得提升其他无效monitor状态");
+    }
+    auto candidate = fresh_ledger();
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ACTIVE, false, waiting, candidate) ==
+               MouseEffectProbeSafetyDecision::FAILURE,
+           "事件订阅不能覆盖poll失败");
+    auto inconsistent = waiting;
+    inconsistent.sequence = 1;
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ACTIVE, true, inconsistent, candidate) ==
+               MouseEffectProbeSafetyDecision::WAITING,
+           "未知首态放行必须严格要求sequence零");
+    for (const auto key : {0x23, 0x77}) {
+        auto stop = waiting;
+        stop.virtual_keys[key] = true;
+        auto stop_ledger = fresh_ledger();
+        expect(record_mouse_effect_probe_safety_observation(
+                   MouseEffectProbeSafetyPhase::ACTIVE, true, stop, stop_ledger) ==
+                   MouseEffectProbeSafetyDecision::USER_STOP,
+               "事件订阅无首态决策也不得覆盖End/F8");
+    }
+    auto valid = waiting;
+    valid.status = InputMonitorStatus::READY;
+    valid.state_valid = true;
+    valid.sequence = 1;
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ACTIVE, true, valid, ledger) ==
+               MouseEffectProbeSafetyDecision::READY && ledger.input_state_ever_observed &&
+               ledger.observations.back().state_valid &&
+               !ledger.observations.back().right_button_pressed,
+           "首个真实有效快照后须正常记录有效状态和未按右键事实");
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ACTIVE, true, waiting, ledger) ==
+               MouseEffectProbeSafetyDecision::WAITING && ledger.input_state_ever_observed,
+           "曾有真实快照后不得退回未知首态继续输出");
+    for (const auto key : {0x23, 0x77}) {
+        auto stop = valid;
+        stop.virtual_keys[key] = true;
+        expect(record_mouse_effect_probe_safety_observation(
+                   MouseEffectProbeSafetyPhase::ACTIVE, true, stop, ledger) ==
+                   MouseEffectProbeSafetyDecision::USER_STOP,
+               "真实首态后的End/F8仍立即终止");
+    }
+}
+
 void test_bounded_composite_auto_arm_preserves_monitor_and_stop() {
     MouseEffectProbeSafetyLedger ledger;
     ledger.bounded_composite_auto_arm = true;
@@ -703,6 +888,8 @@ int main() {
     test_physical_b_magnitude_authority_is_isolated_by_run_role();
     test_composite_phase_authority_and_deadline_are_isolated();
     test_bounded_composite_auto_arm_parser();
+    test_bounded_composite_event_monitor_parser();
+    test_bounded_composite_event_monitor_preserves_unknown_state();
     test_bounded_composite_auto_arm_preserves_monitor_and_stop();
     test_parser_rejects_missing_duplicate_and_invalid_identity();
     test_frame_mapping_preserves_source_identity_and_quality();

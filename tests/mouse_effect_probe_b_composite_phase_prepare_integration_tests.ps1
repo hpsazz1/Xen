@@ -226,6 +226,10 @@ Assert-PackageRejected "wrong-manifest" @{
 } "manifest SHA-256"
 Assert-PackageRejected "unknown-policy" @{ SchedulerPolicy = "active-2ms-v1" } "SchedulerPolicy"
 Assert-PackageRejected "auto-overlong" @{ BoundedCompositeAutoArm = $true; MaxSeconds = 16 } "15"
+Assert-PackageRejected "event-without-auto" @{ BoundedCompositeEventMonitor = $true } "BoundedCompositeAutoArm"
+Assert-PackageRejected "event-overlong" @{
+    BoundedCompositeAutoArm = $true; BoundedCompositeEventMonitor = $true; MaxSeconds = 16
+} "15"
 
 $launcherBytes = [IO.File]::ReadAllBytes($fixtureLauncher)
 $oldLauncherPath = Join-Path $ToolRoot "launch_mouse_effect_probe_a.ps1"
@@ -344,6 +348,7 @@ if ([int]$task.schema_version -ne 10 -or
     [bool]$task.composite_policy.production_aim_changed -or
     -not [bool]$task.safety.right_button_deadman_required -or
     [bool]$task.safety.bounded_composite_auto_arm -or
+    [bool]$task.safety.bounded_composite_event_monitor -or
     [int]$sequence.schema -ne 7 -or
     @($sequence.samples).Count -ne 295 -or
     @($sequence.windows).Count -ne 42 -or
@@ -415,6 +420,7 @@ foreach ($autoArm in @($false, $true)) {
         [string]$newSummary.status -cne 'PREPARED_NOT_LAUNCHED' -or
         [bool]$newSummary.scheduler_preflight_executed -or [bool]$newSummary.physical_launch_executed -or
         [bool]$newTask.safety.bounded_composite_auto_arm -ne $autoArm -or
+        [bool]$newTask.safety.bounded_composite_event_monitor -or
         [bool]$newTask.safety.right_button_deadman_required -eq $autoArm -or
         [bool]$newTask.requires_user_frontend_launch -eq $autoArm -or
         [uint64]$newTask.safety.max_abs_pulse_counts -ne 1 -or
@@ -440,6 +446,44 @@ foreach ($autoArm in @($false, $true)) {
             $newMarkdown.Contains('只能由用户在辅机前台执行'))) -or
         (-not $autoArm -and -not $newMarkdown.Contains('只能由用户在辅机前台执行'))) {
         throw '新 TASK 必须如实说明显式策略和自动/人工有限取证授权'
+    }
+}
+
+$eventRun = Join-Path $caseRoot 'active-events'
+$eventArguments = @{} + $arguments
+$eventArguments.RunDirectory = $eventRun
+$eventArguments.PublishedRunDirectory = $eventRun
+$eventArguments.SchedulerPolicy = 'active-1ms-v1'
+$eventArguments.BoundedCompositeAutoArm = $true
+$eventArguments.BoundedCompositeEventMonitor = $true
+& $PrepareScript @eventArguments
+$eventTask = Get-Content -LiteralPath (Join-Path $eventRun 'task.json') -Raw -Encoding utf8 | ConvertFrom-Json
+$eventSequence = Get-Content -LiteralPath (Join-Path $eventRun 'sequence.json') -Raw -Encoding utf8 | ConvertFrom-Json
+$eventMarkdown = Get-Content -LiteralPath (Join-Path $eventRun 'TASK.md') -Raw -Encoding utf8
+if ($eventTask.safety.bounded_composite_event_monitor -isnot [bool] -or
+    -not $eventTask.safety.bounded_composite_event_monitor -or
+    -not $eventTask.safety.bounded_composite_auto_arm -or
+    $eventTask.safety.right_button_deadman_required -or $eventTask.requires_user_frontend_launch -or
+    $eventTask.sidecar.max_seconds -gt 15 -or
+    $eventTask.sequence_sample_count -ne 295 -or $eventTask.window_count -ne 42 -or
+    $eventTask.expected_nonzero_transition_count -ne 38 -or
+    $eventTask.safety.max_abs_pulse_counts -ne 1 -or $eventTask.safety.max_abs_prefix_x_counts -ne 1 -or
+    (@($eventTask.safety.emergency_virtual_keys) -join ',') -ne '35,119' -or
+    $eventSequence.request.timer_mode -cne 'HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1' -or
+    -not $eventMarkdown.Contains('monitor 配置 ACK') -or
+    -not $eventMarkdown.Contains('UNKNOWN') -or
+    -not $eventMarkdown.Contains('已收到的 End/F8') -or
+    -not $eventMarkdown.Contains('不证明全部监控事件已投递') -or
+    $eventMarkdown.Contains('System.Object[]')) {
+    throw '显式事件监控必须保留有限取证范围并说明首态未知和已收到的急停事件'
+}
+foreach ($property in $eventTask.files.PSObject.Properties) {
+    Assert-Identity $property.Value "event task.files.$($property.Name)"
+}
+foreach ($forbidden in @('scheduler-preflight.json', 'composite-phase-plan.json',
+        'composite-schedule-ledger.json', 'command-report.json', 'safety-ledger.json', 'launch-summary.json', 'pixel-evidence')) {
+    if (Test-Path -LiteralPath (Join-Path $eventRun $forbidden)) {
+        throw "事件模式 Prepare 不得执行采集：$forbidden"
     }
 }
 

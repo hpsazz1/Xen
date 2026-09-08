@@ -437,18 +437,33 @@ def test_versioned_scheduler_chain(
         safety = json.loads(inputs["safety"].read_text(encoding="utf-8"))
         for ordinal, policy in enumerate(("RIGHT_BUTTON_DEADMAN",
                                          "BOUNDED_COMPOSITE_AUTO_ARM",
+                                         "BOUNDED_COMPOSITE_SUBSCRIBED_EVENT_MONITOR",
+                                         "BOUNDED_COMPOSITE_SUBSCRIBED_EVENT_MONITOR_V2",
                                          "UNKNOWN", None, True, [])):
             changed_safety = dict(safety)
             changed_safety["arming_policy"] = policy
+            if policy == "BOUNDED_COMPOSITE_SUBSCRIBED_EVENT_MONITOR":
+                changed_safety["terminal_decision"] = "bounded_ready_without_input_state"
+                changed_safety["observations"] = [{
+                    "observed_at_steady_ns": 9_000_000_000,
+                    "phase": "arming", "poll_succeeded": True,
+                    "monitor_status": "WAITING", "state_valid": False,
+                    "monitor_sequence": 0, "right_button_pressed": False,
+                    "end_pressed": False, "f8_pressed": False,
+                    "decision": "bounded_ready_without_input_state",
+                }]
             write_json(inputs["safety"], changed_safety)
+            safety_bytes = inputs["safety"].read_bytes()
             update_schedule_for_files(inputs)
             result, result_capture, result_commands = invoke(
                 producer, inputs, case_root, f"arming-policy-{ordinal}")
-            accepted = ordinal < 2
+            accepted = ordinal < 3
             expect(result.returncode == (0 if accepted else 2) and
                    result_capture.exists() is accepted and
                    result_commands.exists() is accepted,
                    f"arming_policy={policy!r} 接受边界错误: {result.stderr}")
+            expect(inputs["safety"].read_bytes() == safety_bytes,
+                   "producer 不得把原始 WAITING/无首态记录改写为 READY")
         write_json(inputs["safety"], safety)
         update_schedule_for_files(inputs)
 

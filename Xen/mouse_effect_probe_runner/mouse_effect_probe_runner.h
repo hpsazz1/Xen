@@ -35,6 +35,7 @@ enum class MouseEffectProbeSafetyPhase {
 
 enum class MouseEffectProbeSafetyDecision {
     READY,
+    BOUNDED_READY_WITHOUT_INPUT_STATE,
     WAITING,
     RELEASED,
     USER_STOP,
@@ -87,6 +88,8 @@ struct MouseEffectProbeMonitorPacketIdentity {
 
 struct MouseEffectProbeSafetyLedger {
     bool bounded_composite_auto_arm = false;
+    bool bounded_composite_event_monitor = false;
+    bool input_state_ever_observed = false;
     std::vector<MouseEffectProbeSafetyObservation> observations;
     std::uint64_t dropped_observation_count = 0;
     bool recording_failed = false;
@@ -115,6 +118,7 @@ struct MouseEffectProbeRunOptions {
     bool allow_physical_output = false;
     bool physical_output_confirmed = false;
     bool bounded_composite_auto_arm = false;
+    bool bounded_composite_event_monitor = false;
     MouseEffectProbePhysicalAuthorization physical_authorization =
         MouseEffectProbePhysicalAuthorization::NONE;
     MouseOutputOwnerScope owner_scope = MouseOutputOwnerScope::PRODUCTION;
@@ -181,7 +185,7 @@ bool validate_mouse_effect_probe_sequence_authorization(
 std::string_view mouse_effect_probe_deadman_arming_prompt() noexcept;
 
 // 将原始 monitor 快照与安全判定共同记录；只压缩完全相同的高频 poll，
-// 旧默认要求右键；有限composite自动武装仍如实记录键态并检查monitor和急停。
+// 旧默认要求右键；显式事件订阅模式可记录独立未知首态决策，但不伪造有效键态。
 MouseEffectProbeSafetyDecision record_mouse_effect_probe_safety_observation(
     MouseEffectProbeSafetyPhase phase,
     bool poll_succeeded,

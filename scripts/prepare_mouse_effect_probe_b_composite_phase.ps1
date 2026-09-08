@@ -26,12 +26,16 @@
     [ValidateSet('legacy', 'active-1ms-v1')]
     [string]$SchedulerPolicy = 'legacy',
     [switch]$BoundedCompositeAutoArm,
+    [switch]$BoundedCompositeEventMonitor,
     [string]$LeftWitnessRoi = "16,48,96,224",
     [string]$RightWitnessRoi = "208,48,96,224"
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+if ($BoundedCompositeEventMonitor.IsPresent -and -not $BoundedCompositeAutoArm.IsPresent) {
+    throw "BoundedCompositeEventMonitor 必须同时指定 BoundedCompositeAutoArm"
+}
 if ($BoundedCompositeAutoArm.IsPresent -and $MaxSeconds -gt 15) {
     throw "自动有限 composite 取证最多允许 15 秒"
 }
@@ -779,6 +783,7 @@ $task = [ordered]@{
         emergency_virtual_keys = @(35, 119)
         right_button_deadman_required = -not $BoundedCompositeAutoArm.IsPresent
         bounded_composite_auto_arm = $BoundedCompositeAutoArm.IsPresent
+        bounded_composite_event_monitor = $BoundedCompositeEventMonitor.IsPresent
         any_failure_stops_without_compensation = $true
         zero_y_required = $true
         max_abs_pulse_counts = 1
@@ -794,7 +799,11 @@ $launchCommand = ('powershell.exe -NoProfile -ExecutionPolicy Bypass ' +
     '-PhysicalOutputConfirmation {2}') -f
     $launchScript.path, $resolvedPublishedRun,
     "XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT"
-$operatorInstructions = if ($BoundedCompositeAutoArm.IsPresent) {
+$operatorInstructions = if ($BoundedCompositeEventMonitor.IsPresent) {
+    @('- 本 Run 已显式选择自动有限事件监控取证：monitor 配置 ACK 成功且其余采集门禁就绪后无需等首份键态、无需按住右键；最多 15 秒，仅上述固定 ±1 X 序列',
+      '- 首份有效键态收到前如实记录 UNKNOWN；不将未知状态称为 READY，不证明全部监控事件已投递',
+      '- 不要移动物理鼠标或按 WASD；保留 poll/socket 错误、已收到的 End/F8 事件急停、源/sidecar/范围检查，失败停发且不补偿；不模拟按键')
+} elseif ($BoundedCompositeAutoArm.IsPresent) {
     @('- 本 Run 已显式选择自动有限取证：monitor 与所有采集门禁就绪后自动 arm，无需按住右键；最多 15 秒，仅上述固定 ±1 X 序列',
       '- 不要移动物理鼠标或按 WASD；End、F8、monitor/sidecar 失效或任一失败仍停发且不补偿；真实右键状态照常记入证据，不模拟按键')
 } else {

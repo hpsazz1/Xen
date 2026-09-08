@@ -199,6 +199,89 @@ function Get-BoundedCompositeAutoArm([object]$Task, [bool]$IsComposite) {
     return $enabled
 }
 
+function Get-BoundedCompositeEventMonitor(
+        [object]$Task, [bool]$IsComposite, [bool]$BoundedCompositeAutoArm) {
+    $property = $Task.safety.PSObject.Properties['bounded_composite_event_monitor']
+    if ($null -eq $property) { return $false }
+    if ($property.Value -isnot [bool]) { throw "bounded composite 事件监控标志必须是 bool" }
+    if ($property.Value -and (-not $IsComposite -or -not $BoundedCompositeAutoArm)) {
+        throw "事件监控只允许显式 bounded composite 自动有限取证"
+    }
+    return $property.Value
+}
+
+function Get-CompositeArmingEvidence(
+        [object]$Ledger, [bool]$BoundedCompositeAutoArm, [bool]$BoundedCompositeEventMonitor) {
+    $expectedPolicy = if ($BoundedCompositeEventMonitor) {
+        'BOUNDED_COMPOSITE_SUBSCRIBED_EVENT_MONITOR'
+    } elseif ($BoundedCompositeAutoArm) { 'BOUNDED_COMPOSITE_AUTO_ARM' }
+    else { 'RIGHT_BUTTON_DEADMAN' }
+    $policy = $Ledger.PSObject.Properties['arming_policy']
+    if (($null -eq $policy -and $BoundedCompositeAutoArm) -or
+        ($null -ne $policy -and ($policy.Value -isnot [string] -or $policy.Value -cne $expectedPolicy))) {
+        throw 'composite safety ledger arming_policy 与 task 显式授权不一致'
+    }
+    $eventFlag = $Ledger.PSObject.Properties['bounded_composite_event_monitor']
+    if (($null -eq $eventFlag -and $BoundedCompositeEventMonitor) -or
+        ($null -ne $eventFlag -and ($eventFlag.Value -isnot [bool] -or
+            $eventFlag.Value -ne $BoundedCompositeEventMonitor))) {
+        throw 'composite safety ledger 事件监控标志与 task 不一致'
+    }
+    $observations = @($Ledger.observations)
+    $stateEverObserved = @($observations | Where-Object {
+        $_.state_valid -is [bool] -and $_.state_valid
+    }).Count -gt 0
+    if ($BoundedCompositeEventMonitor) {
+        $ever = $Ledger.PSObject.Properties['input_state_ever_observed']
+        if ($null -eq $ever -or $ever.Value -isnot [bool] -or $ever.Value -ne $stateEverObserved) {
+            throw '事件监控 input_state_ever_observed 与实际 observation 不一致'
+        }
+    }
+    $zeroPacketUnknownComplete = $BoundedCompositeEventMonitor -and
+        $observations.Count -gt 0 -and @($Ledger.monitor_packets).Count -eq 0 -and
+        -not $stateEverObserved -and
+        $Ledger.recording_failed -is [bool] -and -not $Ledger.recording_failed -and
+        $Ledger.monitor_packet_recording_failed -is [bool] -and -not $Ledger.monitor_packet_recording_failed -and
+        $Ledger.dropped_observation_count -eq 0 -and $Ledger.dropped_monitor_packet_count -eq 0 -and
+        $Ledger.terminal_decision -ceq 'bounded_ready_without_input_state' -and
+        $Ledger.probe_stop_reason -ceq 'normal_completion'
+    if ($BoundedCompositeEventMonitor) {
+        foreach ($count in @($Ledger.dropped_observation_count, $Ledger.dropped_monitor_packet_count)) {
+            if (($count -isnot [int] -and $count -isnot [long] -and
+                 $count -isnot [uint32] -and $count -isnot [uint64]) -or $count -ne 0) {
+                $zeroPacketUnknownComplete = $false
+            }
+        }
+    }
+    $armingObserved = $false; $activeObserved = $false
+    foreach ($observation in $observations) {
+        if (-not $BoundedCompositeEventMonitor -and
+            $observation.decision -ceq 'bounded_ready_without_input_state') {
+            throw '旧 arming policy 不允许首态未知的独立事件决策'
+        }
+        if (-not $zeroPacketUnknownComplete) { continue }
+        if ($observation.poll_succeeded -isnot [bool] -or -not $observation.poll_succeeded -or
+            $observation.state_valid -isnot [bool] -or $observation.state_valid -or
+            $observation.monitor_status -cne 'WAITING' -or $observation.monitor_sequence -ne 0 -or
+            ($observation.monitor_sequence -isnot [int] -and $observation.monitor_sequence -isnot [long] -and
+             $observation.monitor_sequence -isnot [uint32] -and $observation.monitor_sequence -isnot [uint64]) -or
+            $observation.right_button_pressed -isnot [bool] -or $observation.right_button_pressed -or
+            $observation.end_pressed -isnot [bool] -or $observation.end_pressed -or
+            $observation.f8_pressed -isnot [bool] -or $observation.f8_pressed -or
+            $observation.decision -cne 'bounded_ready_without_input_state' -or
+            $observation.phase -cnotin @('arming', 'active')) {
+            $zeroPacketUnknownComplete = $false
+        }
+        if ($observation.phase -ceq 'arming') { $armingObserved = $true }
+        if ($observation.phase -ceq 'active') { $activeObserved = $true }
+    }
+    return [pscustomobject]@{
+        arming_policy = $expectedPolicy
+        input_state_ever_observed = $stateEverObserved
+        zero_packet_unknown_complete = [bool]($zeroPacketUnknownComplete -and $armingObserved -and $activeObserved)
+    }
+}
+
 function Invoke-BoundedCompositeProbe(
         [string]$Executable,
         [string[]]$NativeArguments,
@@ -209,7 +292,18 @@ function Invoke-BoundedCompositeProbe(
 }
 
 function ConvertTo-PhysicalProbeOperatorCue(
-        [string]$Line, [bool]$BoundedCompositeAutoArm = $false) {
+        [string]$Line, [bool]$BoundedCompositeAutoArm = $false,
+        [bool]$BoundedCompositeEventMonitor = $false) {
+    if ($BoundedCompositeAutoArm -and $BoundedCompositeEventMonitor) {
+        if ($Line.StartsWith("有限composite事件订阅：")) {
+            return '【事件监控有限取证】首态未知按 UNKNOWN 记录；已收到的 End/F8 事件可急停。'
+        }
+        if ($Line.StartsWith("Mouse Effect Probe 时间线完成") -or
+            $Line.StartsWith("Mouse Effect Probe 未正常完成")) {
+            return '【命令阶段结束】正在整理事件监控有限取证证据。'
+        }
+        return ""
+    }
     if ($BoundedCompositeAutoArm) {
         if ($Line.StartsWith("KMBOX monitor 已就绪") -or
             $Line.StartsWith("有限composite自动武装：")) {
@@ -461,6 +555,7 @@ if ((-not $isA1Task -and -not $isA2Task -and -not $isA2S1Task -and
     throw "Physical probe task 身份或授权合同无效"
 }
 $boundedCompositeAutoArm = Get-BoundedCompositeAutoArm $task $isBCompositeTask
+$boundedCompositeEventMonitor = Get-BoundedCompositeEventMonitor $task $isBCompositeTask $boundedCompositeAutoArm
 if ($isA2Task) {
     $expectedProfile = if ([string]$task.run_role -eq "p-cal") {
         "dependency_calibration_a2_p_cal"
@@ -945,7 +1040,9 @@ if ([bool]$capture.require_frame_metadata) {
     $sidecarArguments += "--require-frame-metadata"
 }
 
-if ($boundedCompositeAutoArm) {
+if ($boundedCompositeEventMonitor) {
+    Write-Host '【准备】事件监控有限取证；monitor 配置 ACK 后不等首态，未知按 UNKNOWN 记录；已收到的 End/F8 事件可急停。'
+} elseif ($boundedCompositeAutoArm) {
     Write-Host '【准备】自动有限 composite 取证；无需按住右键，End/F8 可急停。'
 } else {
     Write-Host '【准备】保持右键松开；等待“按住右键”。'
@@ -993,6 +1090,9 @@ try {
         if ($boundedCompositeAutoArm) {
             $probeArguments += "--bounded-composite-auto-arm"
         }
+        if ($boundedCompositeEventMonitor) {
+            $probeArguments += "--bounded-composite-event-monitor"
+        }
     }
     $operatorState = @{
         monitor_seen = $false
@@ -1007,9 +1107,10 @@ try {
             if (-not [string]::IsNullOrEmpty($stream)) { Write-Host $stream }
         }
         foreach ($nativeLine in ($boundedOutput.stdout -split '[\r\n]+')) {
-            $cue = ConvertTo-PhysicalProbeOperatorCue $nativeLine $true
+            $cue = ConvertTo-PhysicalProbeOperatorCue $nativeLine $true $boundedCompositeEventMonitor
             if (-not [string]::IsNullOrEmpty($cue)) { Write-Host $cue }
-            if ($nativeLine.StartsWith("有限composite自动武装：") -or
+            if ($nativeLine.StartsWith("有限composite事件订阅：") -or
+                $nativeLine.StartsWith("有限composite自动武装：") -or
                 $nativeLine.StartsWith("KMBOX monitor 已就绪")) { $operatorState.monitor_seen = $true }
             if ($nativeLine.StartsWith("Mouse Effect Probe 时间线完成") -or
                 $nativeLine.StartsWith("Mouse Effect Probe 未正常完成")) { $operatorState.terminal_seen = $true }
@@ -1152,6 +1253,10 @@ try {
         [string]$safetyLedger.run_uuid -ne [string]$task.run_uuid -or
         [string]$safetyLedger.input_backend -ne "kmbox_net") {
         throw "Physical A safety monitor ledger 身份无效"
+    }
+    $compositeArmingEvidence = [pscustomobject]@{ zero_packet_unknown_complete = $false }
+    if ($isBCompositeTask) {
+        $compositeArmingEvidence = Get-CompositeArmingEvidence $safetyLedger $boundedCompositeAutoArm $boundedCompositeEventMonitor
     }
     $acceptedMonitorSequences =
         [Collections.Generic.HashSet[uint64]]::new()
@@ -1684,7 +1789,7 @@ try {
         -not [bool]$safetyLedger.recording_failed -and
         [uint64]$safetyLedger.dropped_observation_count -eq 0 -and
         $safetyObservations.Count -gt 0 -and
-        $monitorPacketIdentityComplete -and
+        ($monitorPacketIdentityComplete -or $compositeArmingEvidence.zero_packet_unknown_complete) -and
         [int64]$report.result.cumulative_requested_x_counts -eq 0 -and
         [int64]$report.result.cumulative_backend_completed_x_counts -eq 0
     $summary = [ordered]@{
@@ -1767,6 +1872,12 @@ try {
     if ($isA2Task -or $isA2S1Task -or $isBTask) {
         $summary.run_role = [string]$task.run_role
         $summary.scope_id = [string]$task.scope_id
+    }
+    if ($isBCompositeTask) {
+        $summary.safety_arming_policy = $compositeArmingEvidence.arming_policy
+        $summary.bounded_composite_event_monitor = $boundedCompositeEventMonitor
+        $summary.safety_input_state_ever_observed = $compositeArmingEvidence.input_state_ever_observed
+        $summary.safety_zero_packet_unknown_evidence_complete = $compositeArmingEvidence.zero_packet_unknown_complete
     }
     if ($isBMagnitudeTask) {
         $summary.validation_used_for_refit = $false
