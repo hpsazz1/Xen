@@ -4267,9 +4267,30 @@ struct Aim::Impl {
                 -request_direction * pending.backend_completed_weighted_x);
             if (opposed_completed_x > 0.0f) {
                 const float requested_magnitude = std::fabs(desired_x);
-                const float history_adjusted_x = desired_x *
+                float history_adjusted_x = desired_x *
                     requested_magnitude /
                     (requested_magnitude + opposed_completed_x);
+                if (diagnostics.background_motion_use_x == AimBackgroundMotionUse::CONSUMED) {
+                    // 当前同源观测的 P 只承担位置纠偏；完成库存并非已验证的
+                    // 未来位移，不能仅因旧维护请求增多就继续压低这份反馈。
+                    // 保留原扣减量，但最多扣除本次限幅后实际同向非 P 份额。
+                    const float proportional_after_cap_x = unconstrained_x != 0.0f
+                        ? proportional_x * tracking_before_history_x / unconstrained_x
+                        : 0.0f;
+                    const float extra_request_x = desired_x - proportional_after_cap_x;
+                    const float available_extra = std::max(
+                        0.0f, request_direction * extra_request_x);
+                    const float history_reduction = requested_magnitude - std::fabs(history_adjusted_x);
+                    const float applied_history_reduction = std::min(
+                        history_reduction, available_extra);
+                    history_adjusted_x = desired_x - request_direction * applied_history_reduction;
+                    if (available_extra > 0.0f) {
+                        // P 被单独保留后，总请求比例不再代表实际 I 的缩放。
+                        // 非 P 按同一真实扣减比例缩放，后续维护信用只扣已输出 I。
+                        tracking_integral_input_x *=
+                            1.0f - applied_history_reduction / available_extra;
+                    }
+                }
                 // 复用现有 30/s tracking time constant，把历史整形造成的
                 // 请求差连续回写 X 积分；上方饱和 back-calculation 保持原样。
                 feedforward_x +=
@@ -4281,7 +4302,8 @@ struct Aim::Impl {
                 desired_x = history_adjusted_x;
             }
         }
-        if (tracking_before_history_x != 0.0f) {
+        if (tracking_before_history_x != 0.0f &&
+            diagnostics.background_motion_use_x != AimBackgroundMotionUse::CONSUMED) {
             tracking_integral_input_x *= desired_x / tracking_before_history_x;
         }
         diagnostics.proportional_x_counts = proportional_x;

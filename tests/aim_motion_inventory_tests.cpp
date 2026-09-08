@@ -1,8 +1,10 @@
 #include "aim/aim.h"
 #include "aim_motion_inventory_fixture.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <vector>
 
 namespace {
 int failures = 0;
@@ -137,10 +139,136 @@ void actual_motion_reversal(bool mirror) {
     }
     expect(checked == 4, "必须覆盖旧向请求、新向维护、原Reset和后续纠正");
 }
+
+// 独立位置职责反例：Y几何固定，首次保Y向量cap可由公开X请求精确还原。
+// 此处模拟观测只用于检验软件份额，不能当作改变命令后的物理闭环。
+void observed_position_share(bool background, bool mirror,
+                             float amplitude, float maximum_counts) {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.4f;
+    config.smoothing = 0.475f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.enable_prediction = false;
+    config.body_aim_height_ratio = 1.0f / 3.0f;
+    config.max_counts_per_frame = maximum_counts;
+    config.acquisition_range_percent = 100.0f;
+    Aim aim(config);
+    struct Completed {
+        std::chrono::steady_clock::time_point at;
+        float x;
+    };
+    std::vector<Completed> completed;
+    int position_frames = 0;
+    int capped_position_frames = 0;
+    int position_violations = 0;
+    int reduced_extra_frames = 0;
+    int zero_position_frames = 0;
+    int fallback_frames = 0;
+    const auto base = at(10000000000LL);
+    for (int index = 0; index < 480; ++index) {
+        AimFrame frame;
+        frame.sequence = static_cast<std::uint64_t>(index + 1);
+        frame.observation_epoch = 1;
+        frame.captured_at = base + std::chrono::microseconds(4167 * index);
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.roi_width = frame.roi_height = 320;
+        frame.control_center_x = frame.control_center_y = 160.0f;
+        frame.lock_active = true;
+        const float error = (mirror ? -1.0f : 1.0f) * amplitude *
+            std::sin(static_cast<float>(index) * 0.20943951f);
+        frame.detections.push_back({140.0f + error, 140.0f,
+            180.0f + error, 200.0f, 0.95f, 0});
+        if (background && index > 0) {
+            frame.background_motion_x = {AimBackgroundMotionStatus::VALID,
+                frame.sequence - 1, frame.sequence,
+                frame.captured_at - std::chrono::microseconds(4167),
+                frame.captured_at, 1, 0.0f, 0.9f, 0.0f, 2};
+        }
+        const auto result = aim.process(frame);
+        const auto& control = result.control;
+        expect(result.status == AimStatus::SUCCESS,
+               "位置职责公有输入须正常处理");
+        expect(result.command.dy_counts == 0,
+               "固定Y几何及零初始积分不得产生Y请求");
+        const float request = std::clamp(control.desired_before_reverse_x_counts,
+            -maximum_counts, maximum_counts);
+        const float actual_position = control.desired_before_reverse_x_counts != 0.0f
+            ? control.proportional_x_counts * request /
+                control.desired_before_reverse_x_counts : 0.0f;
+        const float direction = request > 0.0f ? 1.0f :
+            (request < 0.0f ? -1.0f : 0.0f);
+        // 只由本测试确认过的命令与公开时间计算库存，不读取Aim私有状态。
+        float inventory = 0.0f;
+        for (const auto& entry : completed) {
+            const float age = std::chrono::duration<float>(
+                frame.control_at - entry.at).count();
+            if (age >= 0.0f && age < 0.015f)
+                inventory += entry.x * (1.0f - age / 0.015f);
+        }
+        const float opposed = std::max(0.0f, -direction * inventory);
+        if (opposed > 0.0001f && std::fabs(request) > 0.0001f) {
+            const float original_history = request * std::fabs(request) /
+                (std::fabs(request) + opposed);
+            const float actual = control.history_adjusted_x_counts;
+            const bool fresh = control.background_motion_use_x ==
+                AimBackgroundMotionUse::CONSUMED;
+            if (fresh && direction * actual_position > 0.0f &&
+                direction * (request - actual_position) >= 0.0f) {
+                ++position_frames;
+                if (std::fabs(control.desired_before_reverse_x_counts) >
+                    maximum_counts + 0.0001f)
+                    ++capped_position_frames;
+                if (direction * actual + 0.0003f < direction * actual_position)
+                    ++position_violations;
+            }
+            if (fresh && direction * (request - actual_position) > 0.0001f &&
+                std::fabs(actual) + 0.0001f < std::fabs(request))
+                ++reduced_extra_frames;
+            if (std::fabs(actual_position) < 0.000001f) {
+                ++zero_position_frames;
+                expect(std::fabs(actual - original_history) < 0.0003f,
+                       "P为零时仍须保持原历史缩减，不能凭新职责增加请求");
+            }
+            if (!fresh) {
+                ++fallback_frames;
+                expect(std::fabs(actual - original_history) < 0.0003f,
+                       "缺少同帧背景时须保持原历史公式");
+            }
+        }
+        if (result.has_command) {
+            const auto completed_at = frame.control_at + std::chrono::microseconds(100);
+            expect(aim.record_backend_completed_command(frame.sequence, completed_at,
+                       result.command.dx_counts, result.command.dy_counts),
+                   "位置职责分支只能记录自身backend命令");
+            completed.push_back({completed_at, static_cast<float>(result.command.dx_counts)});
+        }
+    }
+    if (background) {
+        expect(position_frames > 0, "必须覆盖fresh反向历史与当前位置份额");
+        expect(position_violations == 0, "反向完成历史不得压低当前实际P份额");
+        expect(reduced_extra_frames > 0, "非P份额仍须受到历史缩减");
+        if (maximum_counts == 2.0f)
+            expect(capped_position_frames > 0, "必须覆盖实际cap后的P份额");
+        else
+            expect(zero_position_frames > 0, "必须覆盖P为零的历史负控");
+    } else {
+        expect(fallback_frames > 0, "必须实际覆盖无背景回退");
+    }
+}
+
 }
 int main() {
     actual_motion_reversal(false);
     actual_motion_reversal(true);
+    for (const bool mirror : {false, true}) {
+        observed_position_share(true, mirror, 12.0f, 14.0f);
+        observed_position_share(true, mirror, 60.0f, 2.0f);
+        observed_position_share(false, mirror, 12.0f, 14.0f);
+    }
     std::cout << "失败数：" << failures << '\n';
     return failures == 0 ? 0 : 1;
 }
