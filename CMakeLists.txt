@@ -1255,6 +1255,13 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(aim_x_filter_reset_tests OPENCV)
     add_test(NAME aim_x_filter_reset_tests COMMAND aim_x_filter_reset_tests)
 
+    add_executable(aim_integral_motion_support_tests
+        tests/aim_integral_motion_support_tests.cpp)
+    target_link_libraries(aim_integral_motion_support_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_integral_motion_support_tests OPENCV)
+    add_test(NAME aim_integral_motion_support_tests
+        COMMAND aim_integral_motion_support_tests)
+
     add_executable(aim_background_camera_translation_tests
         tests/aim_background_camera_translation_tests.cpp)
     target_link_libraries(aim_background_camera_translation_tests PRIVATE aim log)

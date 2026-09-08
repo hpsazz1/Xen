@@ -4364,12 +4364,21 @@ struct Aim::Impl {
         // opening 连续证据保留相同比例的积分残差，不再每帧把观察器维持量
         // 全部抵消。下方分别约束位置尾部与新增运动请求，不保证整数输出或物理
         // 位移恰好封顶于误差；组合输出仍经过原二维 counts 上限。
-        // 已有积分输入份额承担持续维持，不能因近中心位置扰动整体裁掉。
-        // 仅限制超出当前几何额度及该份额的位置/phase 尾部；对原净请求
+        // 积分中受到运动证据支持的份额可承担持续维持，不能因近中心扰动整体裁掉。
+        // 仅限制超出当前几何额度及受支持份额的位置/phase 尾部；对原净请求
         // 取 min 保留异号份额的抵消，不会凭分解增加输出。H 仍是软件额度，
         // 不把它声明为已验证的物理位移上限，也不改后续运动追加去重。
-        const float preserved_integral_magnitude_x = std::max(
+        const float same_direction_integral_x = std::max(
             0.0f, x_error_direction * tracking_filtered_integral_x);
+        // 积分也可能积累位置纠偏，不能一概称为目标运动维护而绕过几何额度。
+        // 同帧背景可用时，仅让当前运动估计支持的部分保留该豁免；缺测沿用原合同。
+        // 库存已在实际滤波输入中处理，这里不重复乘 pending alignment。
+        const float preserved_integral_magnitude_x =
+            diagnostics.background_motion_use_x == AimBackgroundMotionUse::CONSUMED
+            ? std::min(same_direction_integral_x, std::max(0.0f,
+                  x_error_direction * tracking_target_velocity_counts_per_second_x *
+                      controller_dt))
+            : same_direction_integral_x;
         const float eligible_filtered_x = x_error_direction * std::min(
             std::max(0.0f, x_error_direction * filtered_x),
             std::max(target_motion_position_headroom_x,
