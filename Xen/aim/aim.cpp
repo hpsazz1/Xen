@@ -4466,6 +4466,13 @@ struct Aim::Impl {
             x_error_magnitude <= config.deadzone_pixels &&
             vertical_error_magnitude <= config.deadzone_pixels &&
             command.dx_counts == 0 && command.dy_counts == 0;
+        // 换向清理仍保留本帧原输出决议；但本帧已经形成的新向请求
+        // 需要进入下一控制步的滤波状态，不能把合法更新连同旧记忆丢弃。
+        if (x_filter_update == FilterUpdate::Reset) {
+            filtered_x = desired_x * config.smoothing;
+            tracking_filtered_integral_x =
+                tracking_integral_input_x * config.smoothing;
+        }
         previous_command_x = static_cast<float>(command.dx_counts);
         previous_command_y = static_cast<float>(command.dy_counts);
         record_issued_command(
