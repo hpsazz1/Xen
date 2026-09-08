@@ -2,6 +2,12 @@
     [Parameter(Mandatory = $true)]
     [string]$ToolRoot,
     [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{40}$')]
+    [string]$ExpectedToolCommit,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$ExpectedToolManifestSha256,
+    [Parameter(Mandatory = $true)]
     [string]$ConfigPath,
     [Parameter(Mandatory = $true)]
     [string]$ObsSourceBindingPath,
@@ -77,6 +83,101 @@ function Get-PublishedIdentity(
         path = [IO.Path]::GetFullPath($PublishedPath)
         size = $identity.size
         sha256 = $identity.sha256
+    }
+}
+
+function Assert-ToolPackageFile(
+        [string]$Path,
+        [object]$Record,
+        [string]$Description) {
+    $identity = Get-FileIdentity $Path $Description
+    if ([string]$Record.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [uint64]$identity.size -ne [uint64]$Record.size -or
+        [string]$identity.sha256 -cne [string]$Record.sha256) {
+        throw "工具包文件身份不一致：$Description"
+    }
+    return $identity
+}
+
+function Get-SelectedToolPackage(
+        [string]$Root,
+        [string]$PreparePath,
+        [string]$ExpectedCommit,
+        [string]$ExpectedManifestSha256) {
+    $manifestPath = Join-Path $Root "manifest.json"
+    $manifestIdentity = Get-FileIdentity $manifestPath "tool package manifest"
+    if ($manifestIdentity.sha256 -cne $ExpectedManifestSha256.ToLowerInvariant()) {
+        throw "工具包 manifest SHA-256 与本轮选定值不一致"
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 |
+        ConvertFrom-Json
+    if ((Get-FileSha256 $manifestPath) -cne $manifestIdentity.sha256) {
+        throw "工具包 manifest 在读取期间发生变化"
+    }
+    $commit = $ExpectedCommit.ToLowerInvariant()
+    if ([string]$manifest.git_commit -cne $commit) {
+        throw "工具包 commit 与本轮选定值不一致"
+    }
+    if ([int]$manifest.schema_version -ne 1 -or
+        [string]$manifest.evidence_type -ne "mouse_effect_probe_b_tool_package" -or
+        [string]$manifest.package_name -cne ("MouseEffectProbe-B-" + $commit.Substring(0, 7)) -or
+        $manifest.source_tracked_clean -isnot [bool] -or
+        -not $manifest.source_tracked_clean -or
+        $manifest.build_identity_git_dirty -isnot [bool] -or
+        $manifest.build_identity_git_dirty -or
+        [string]$manifest.runtime -ne "nvidia" -or
+        $manifest.physical_run_included -isnot [bool] -or
+        $manifest.physical_run_included -or
+        $manifest.physical_launch_executed -isnot [bool] -or
+        $manifest.physical_launch_executed -or
+        $manifest.launch_requires_user_frontend_action -isnot [bool] -or
+        -not $manifest.launch_requires_user_frontend_action -or
+        $manifest.composite_phase_tooling_included -isnot [bool] -or
+        -not $manifest.composite_phase_tooling_included -or
+        $manifest.composite_phase_run_included -isnot [bool] -or
+        $manifest.composite_phase_run_included -or
+        [int]$manifest.file_count -ne 21 -or @($manifest.files).Count -ne 21) {
+        throw "工具包 manifest header 无效"
+    }
+    $records = @{}
+    foreach ($record in @($manifest.files)) {
+        $name = [string]$record.name
+        if ($name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$' -or
+            $records.ContainsKey($name)) {
+            throw "工具包 manifest 文件名非法或重复：$name"
+        }
+        $records[$name] = $record
+    }
+    # 只校验本次实际复制的 12 项及当前 Prepare；完整包发布另有全文件校验。
+    $requiredNames = @(
+        "prepare_mouse_effect_probe_b_composite_phase.ps1",
+        "XenMouseEffectProbe.exe", "XenCaptureEvidence.exe",
+        "XenMouseEffectProbeSequence.exe", "XenMouseEffectProbeCompositeSeal.exe",
+        "opencv_world4140.dll", "Processing.NDI.Lib.x64.dll",
+        "Processing.NDI.Lib.Licenses.txt", "launch_mouse_effect_probe_a.ps1",
+        "freeze_mouse_effect_probe_b_composite_phase_plan.py",
+        "produce_mouse_effect_probe_b_composite_phase_ledgers.py",
+        "bind_mouse_effect_probe_b_composite_phase_calibration.py",
+        "evaluate_mouse_effect_probe_b_composite_phase.py")
+    foreach ($name in $requiredNames) {
+        if (-not $records.ContainsKey($name)) {
+            throw "工具包 manifest 缺少本次所需文件：$name"
+        }
+        if ([string]$records[$name].provenance.git_commit -cne $commit) {
+            throw "工具包文件来源 commit 不一致：$name"
+        }
+        [void](Assert-ToolPackageFile (Join-Path $Root $name) $records[$name] $name)
+    }
+    $prepareIdentity = Assert-ToolPackageFile $PreparePath `
+        $records["prepare_mouse_effect_probe_b_composite_phase.ps1"] "当前 Prepare 调用者"
+    return [ordered]@{
+        records = $records
+        provenance = [ordered]@{
+            package_name = [string]$manifest.package_name
+            git_commit = $commit
+            manifest = $manifestIdentity
+            prepare_script = $prepareIdentity
+        }
     }
 }
 
@@ -191,6 +292,10 @@ foreach ($candidate in @($resolvedRun, $resolvedPublishedRun)) {
         throw "Physical B composite-phase RunDirectory 不能是根目录"
     }
 }
+
+$resolvedToolRoot = (Resolve-Path -LiteralPath $ToolRoot).ProviderPath
+$selectedToolPackage = Get-SelectedToolPackage $resolvedToolRoot $PSCommandPath `
+    $ExpectedToolCommit $ExpectedToolManifestSha256
 
 $sourceConfig = Get-FileIdentity $ConfigPath "composite-phase config.ini"
 $sourceObsBinding = Get-FileIdentity `
@@ -324,20 +429,19 @@ $inputDirectory = Join-Path $stagingDirectory "inputs"
 [void](New-Item -ItemType Directory -Path $inputDirectory)
 
 try {
-$resolvedToolRoot = (Resolve-Path -LiteralPath $ToolRoot).ProviderPath
 $publishedTool = Join-Path $resolvedPublishedRun "tool"
 $publishedInputs = Join-Path $resolvedPublishedRun "inputs"
 function Copy-Tool([string]$Name, [string]$Description) {
-    return Copy-NewPublishedFile `
+    $identity = Copy-NewPublishedFile `
         (Join-Path $resolvedToolRoot $Name) `
         (Join-Path $toolDirectory $Name) `
         (Join-Path $publishedTool $Name) $Description
-}
-function Copy-Script([string]$Name, [string]$Description) {
-    return Copy-NewPublishedFile `
-        (Join-Path $PSScriptRoot $Name) `
-        (Join-Path $toolDirectory $Name) `
-        (Join-Path $publishedTool $Name) $Description
+    $record = $selectedToolPackage.records[$Name]
+    if ([uint64]$identity.size -ne [uint64]$record.size -or
+        [string]$identity.sha256 -cne [string]$record.sha256) {
+        throw "工具包复制后身份不一致：$Name"
+    }
+    return $identity
 }
 $probeExecutable = Copy-Tool `
     "XenMouseEffectProbe.exe" "composite-phase probe executable"
@@ -353,18 +457,18 @@ $ndiRuntime = Copy-Tool `
     "Processing.NDI.Lib.x64.dll" "composite-phase NDI runtime"
 $ndiLicense = Copy-Tool `
     "Processing.NDI.Lib.Licenses.txt" "composite-phase NDI license"
-$launchScript = Copy-Script `
+$launchScript = Copy-Tool `
     "launch_mouse_effect_probe_a.ps1" "composite-phase Launch script"
-$planGenerator = Copy-Script `
+$planGenerator = Copy-Tool `
     "freeze_mouse_effect_probe_b_composite_phase_plan.py" `
     "composite-phase plan generator"
-$ledgerProducer = Copy-Script `
+$ledgerProducer = Copy-Tool `
     "produce_mouse_effect_probe_b_composite_phase_ledgers.py" `
     "composite-phase ledger producer"
-$binder = Copy-Script `
+$binder = Copy-Tool `
     "bind_mouse_effect_probe_b_composite_phase_calibration.py" `
     "composite-phase binder"
-$evaluator = Copy-Script `
+$evaluator = Copy-Tool `
     "evaluate_mouse_effect_probe_b_composite_phase.py" `
     "composite-phase evaluator"
 $configCopy = Copy-NewPublishedFile `
@@ -537,6 +641,7 @@ $task = [ordered]@{
     schema_version = 10
     evidence_type = "mouse_effect_probe_b_composite_phase_task"
     status = "PREPARED"
+    tool_package = $selectedToolPackage.provenance
     experiment = "physical_b_composite_phase_calibration"
     run_role = "calibration_deletion"
     run_directory = $resolvedPublishedRun
@@ -678,6 +783,7 @@ $summary = [ordered]@{
     schema_version = 1
     evidence_type = "mouse_effect_probe_b_composite_phase_prepare"
     status = "PREPARED_NOT_LAUNCHED"
+    tool_package = $selectedToolPackage.provenance
     run_uuid = $runUuid
     run_role = "calibration_deletion"
     profile = "physical_b_composite_phase_calibration"

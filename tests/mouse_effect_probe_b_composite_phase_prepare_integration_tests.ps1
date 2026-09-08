@@ -45,6 +45,63 @@ $caseRoot = Join-Path $resolvedRoot (
 $inputRoot = Join-Path $caseRoot "inputs"
 [void](New-Item -ItemType Directory -Path $inputRoot -Force)
 
+# 这是测试自建的模拟包；借用 Release 二进制只执行无输出的 Sequence，
+# 不把 fixture manifest 当作正式发布或真实采集身份。
+$fixtureToolRoot = Join-Path $caseRoot "tool-package"
+[void](New-Item -ItemType Directory -Path $fixtureToolRoot)
+$sourceScriptRoot = Split-Path -Parent $PrepareScript
+$nativeNames = @(
+    "XenMouseEffectProbe.exe", "XenCaptureEvidence.exe",
+    "XenMouseEffectProbeSequence.exe", "XenMouseEffectProbeCompositeSeal.exe",
+    "opencv_world4140.dll", "Processing.NDI.Lib.x64.dll",
+    "Processing.NDI.Lib.Licenses.txt")
+$scriptNames = @(
+    "prepare_mouse_effect_probe_b.ps1", "prepare_mouse_effect_probe_b_holdout.ps1",
+    "prepare_mouse_effect_probe_b_command_magnitude.ps1",
+    "prepare_mouse_effect_probe_b_composite_phase.ps1",
+    "launch_mouse_effect_probe_a.ps1", "design_mouse_effect_probe_prbs.py",
+    "analyze_mouse_effect_probe_b.py", "analyze_mouse_effect_probe_b_holdout.py",
+    "analyze_mouse_effect_probe_b_command_magnitude.py",
+    "freeze_mouse_effect_probe_b_composite_phase_plan.py",
+    "produce_mouse_effect_probe_b_composite_phase_ledgers.py",
+    "bind_mouse_effect_probe_b_composite_phase_calibration.py",
+    "evaluate_mouse_effect_probe_b_composite_phase.py")
+foreach ($name in $nativeNames) {
+    Copy-Item -LiteralPath (Join-Path $ToolRoot $name) -Destination $fixtureToolRoot
+}
+foreach ($name in $scriptNames) {
+    Copy-Item -LiteralPath (Join-Path $sourceScriptRoot $name) -Destination $fixtureToolRoot
+}
+$fixtureCommit = "1" * 40
+Write-NewUtf8Json (Join-Path $fixtureToolRoot "xen-build-identity.json") ([ordered]@{
+    schema = 1; git_commit = $fixtureCommit; git_dirty = $false
+    runtime = "nvidia"; components = @("fixture_only")
+})
+$fixtureLauncher = Join-Path $fixtureToolRoot "launch_mouse_effect_probe_a.ps1"
+[IO.File]::AppendAllText(
+    $fixtureLauncher, "`n# TEST_FIXTURE_SELECTED_PACKAGE`n", [Text.UTF8Encoding]::new($false))
+$fixtureFiles = @()
+foreach ($name in @($nativeNames) + @("xen-build-identity.json") + @($scriptNames)) {
+    $path = Join-Path $fixtureToolRoot $name
+    $fixtureFiles += [ordered]@{
+        name = $name; size = (Get-Item -LiteralPath $path).Length
+        sha256 = Get-LowerSha256 $path
+        provenance = [ordered]@{ kind = "test_fixture"; git_commit = $fixtureCommit }
+    }
+}
+$fixtureManifestPath = Join-Path $fixtureToolRoot "manifest.json"
+$fixtureManifest = [ordered]@{
+    schema_version = 1; evidence_type = "mouse_effect_probe_b_tool_package"
+    package_name = "MouseEffectProbe-B-1111111"; git_commit = $fixtureCommit
+    source_tracked_clean = $true; source_untracked_files_excluded = $true
+    build_identity_git_dirty = $false; runtime = "nvidia"; file_count = 21
+    physical_run_included = $false; physical_launch_executed = $false
+    launch_requires_user_frontend_action = $true
+    composite_phase_tooling_included = $true; composite_phase_run_included = $false
+    files = $fixtureFiles
+}
+Write-NewUtf8Json $fixtureManifestPath $fixtureManifest
+
 $configPath = Join-Path $inputRoot "config.ini"
 $config = @(
     "[capture]",
@@ -126,7 +183,9 @@ Write-NewUtf8Json $obsPath ([ordered]@{
 
 $runDirectory = Join-Path $caseRoot "prepared"
 $arguments = @{
-    ToolRoot = $ToolRoot
+    ToolRoot = $fixtureToolRoot
+    ExpectedToolCommit = $fixtureCommit
+    ExpectedToolManifestSha256 = Get-LowerSha256 $fixtureManifestPath
     ConfigPath = $configPath
     ObsSourceBindingPath = $obsPath
     ObsLogPath = $logPath
@@ -135,7 +194,106 @@ $arguments = @{
     PublishedRunDirectory = $runDirectory
     MaxSeconds = 15
 }
+
+function Assert-PackageRejected(
+        [string]$Name,
+        [hashtable]$Overrides,
+        [string]$ExpectedDetail) {
+    $badRun = Join-Path $caseRoot $Name
+    $badArguments = @{} + $arguments
+    $badArguments.RunDirectory = $badRun
+    $badArguments.PublishedRunDirectory = $badRun
+    foreach ($key in $Overrides.Keys) { $badArguments[$key] = $Overrides[$key] }
+    $failure = ""
+    try {
+        & $PrepareScript @badArguments
+    } catch {
+        $failure = $_.Exception.Message
+    }
+    if (-not $failure.Contains($ExpectedDetail) -or
+        (Test-Path -LiteralPath $badRun) -or
+        @(Get-ChildItem -LiteralPath $caseRoot -Directory -Filter ".$Name.incoming-*").Count -ne 0) {
+        throw "Prepare did not reject $Name before creating Run: $failure"
+    }
+    Write-Host "Package rejection passed: $Name"
+}
+
+Assert-PackageRejected "wrong-commit" @{
+    ExpectedToolCommit = "2" * 40
+} "commit"
+Assert-PackageRejected "wrong-manifest" @{
+    ExpectedToolManifestSha256 = "0" * 64
+} "manifest SHA-256"
+
+$launcherBytes = [IO.File]::ReadAllBytes($fixtureLauncher)
+$oldLauncherPath = Join-Path $ToolRoot "launch_mouse_effect_probe_a.ps1"
+$oldLauncherBytes = if (Test-Path -LiteralPath $oldLauncherPath -PathType Leaf) {
+    [IO.File]::ReadAllBytes($oldLauncherPath)
+} else {
+    # CTest 的输入通常仅含构建产物；此处用旧调用形式作不执行的替换字节。
+    [Text.Encoding]::UTF8.GetBytes('$sealOutput = @(& $sealExecutablePath 2>&1)')
+}
+try {
+    [IO.File]::WriteAllBytes($fixtureLauncher, $oldLauncherBytes)
+    Assert-PackageRejected "mixed-old-launcher" @{} "launch_mouse_effect_probe_a.ps1"
+} finally {
+    [IO.File]::WriteAllBytes($fixtureLauncher, $launcherBytes)
+}
+
+$packagePreparePath = Join-Path $fixtureToolRoot "prepare_mouse_effect_probe_b_composite_phase.ps1"
+$prepareBytes = [IO.File]::ReadAllBytes($packagePreparePath)
+$prepareRecord = $fixtureManifest.files | Where-Object {
+    $_.name -eq "prepare_mouse_effect_probe_b_composite_phase.ps1"
+}
+$prepareSize = $prepareRecord.size
+$prepareSha256 = $prepareRecord.sha256
+try {
+    [IO.File]::AppendAllText(
+        $packagePreparePath, "`n# DIFFERENT_PACKAGE_CALLER`n", [Text.UTF8Encoding]::new($false))
+    $prepareRecord.size = (Get-Item -LiteralPath $packagePreparePath).Length
+    $prepareRecord.sha256 = Get-LowerSha256 $packagePreparePath
+    Write-NewUtf8Json $fixtureManifestPath $fixtureManifest
+    Assert-PackageRejected "caller-drift" @{
+        ExpectedToolManifestSha256 = Get-LowerSha256 $fixtureManifestPath
+    } "Prepare"
+} finally {
+    [IO.File]::WriteAllBytes($packagePreparePath, $prepareBytes)
+    $prepareRecord.size = $prepareSize
+    $prepareRecord.sha256 = $prepareSha256
+    Write-NewUtf8Json $fixtureManifestPath $fixtureManifest
+}
+
+$sealRecord = $fixtureManifest.files | Where-Object {
+    $_.name -eq "XenMouseEffectProbeCompositeSeal.exe"
+}
+try {
+    $sealRecord.name = "unselected-fixture.exe"
+    Write-NewUtf8Json $fixtureManifestPath $fixtureManifest
+    Assert-PackageRejected "missing-required-entry" @{
+        ExpectedToolManifestSha256 = Get-LowerSha256 $fixtureManifestPath
+    } "XenMouseEffectProbeCompositeSeal.exe"
+} finally {
+    $sealRecord.name = "XenMouseEffectProbeCompositeSeal.exe"
+    Write-NewUtf8Json $fixtureManifestPath $fixtureManifest
+}
+
+try {
+    $fixtureManifest.composite_phase_tooling_included = $false
+    Write-NewUtf8Json $fixtureManifestPath $fixtureManifest
+    Assert-PackageRejected "invalid-package-header" @{
+        ExpectedToolManifestSha256 = Get-LowerSha256 $fixtureManifestPath
+    } "header"
+} finally {
+    $fixtureManifest.composite_phase_tooling_included = $true
+    Write-NewUtf8Json $fixtureManifestPath $fixtureManifest
+}
+
 & $PrepareScript @arguments
+
+if ((Get-LowerSha256 (Join-Path $runDirectory "tool\launch_mouse_effect_probe_a.ps1")) -ne
+        (Get-LowerSha256 $fixtureLauncher)) {
+    throw "Prepare copied Launcher from outside the explicitly selected ToolRoot"
+}
 
 $task = Get-Content -LiteralPath (Join-Path $runDirectory "task.json") `
     -Raw -Encoding utf8 | ConvertFrom-Json
@@ -150,6 +308,16 @@ $policy = Get-Content -LiteralPath (
 $summary = Get-Content -LiteralPath (
     Join-Path $runDirectory "prepare-summary.json") `
     -Raw -Encoding utf8 | ConvertFrom-Json
+foreach ($document in @($task, $summary)) {
+    if ([string]$document.tool_package.git_commit -cne $fixtureCommit -or
+        [string]$document.tool_package.package_name -cne $fixtureManifest.package_name -or
+        [string]$document.tool_package.manifest.sha256 -cne $arguments.ExpectedToolManifestSha256 -or
+        [string]$document.tool_package.prepare_script.sha256 -cne (Get-LowerSha256 $PrepareScript)) {
+        throw "Prepared tool package provenance does not match the selected fixture"
+    }
+    Assert-Identity $document.tool_package.manifest "selected manifest"
+    Assert-Identity $document.tool_package.prepare_script "selected caller"
+}
 if ([int]$task.schema_version -ne 10 -or
     [string]$task.evidence_type -ne
         "mouse_effect_probe_b_composite_phase_task" -or
