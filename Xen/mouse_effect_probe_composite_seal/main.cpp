@@ -37,6 +37,7 @@ enum class Mode {
     PREFLIGHT_AND_SEAL,
     DIAGNOSE_SCHEDULER,
     STUDY_SCHEDULER,
+    STUDY_SCHEDULER_RESOURCE,
     REPORT_SEMANTIC_SHA256,
     VERIFY_REPORT,
 };
@@ -102,6 +103,8 @@ struct StudyRun {
     bool characterize;
     HANDLE stop_event;
     std::int64_t deadline_qpc;
+    xen::scheduler_study::detail::StudyPolicy policy =
+        xen::scheduler_study::detail::StudyPolicy::LEGACY_GRID;
 };
 
 std::atomic<HANDLE> study_stop_event{nullptr};
@@ -275,8 +278,10 @@ bool parse_options(int argc, wchar_t* argv[], Options& options,
                    std::string& error) {
     if (argc == 3 &&
         (std::wstring_view(argv[1]) == L"--diagnose-scheduler" ||
-         std::wstring_view(argv[1]) == L"--study-scheduler")) {
-        options.mode = std::wstring_view(argv[1]) == L"--study-scheduler"
+         std::wstring_view(argv[1]) == L"--study-scheduler" ||
+         std::wstring_view(argv[1]) == L"--study-scheduler-resource")) {
+        options.mode = std::wstring_view(argv[1]) == L"--study-scheduler-resource"
+            ? Mode::STUDY_SCHEDULER_RESOURCE : std::wstring_view(argv[1]) == L"--study-scheduler"
             ? Mode::STUDY_SCHEDULER : Mode::DIAGNOSE_SCHEDULER;
         options.diagnostic_output = std::filesystem::path(argv[2]);
         std::error_code filesystem_error;
@@ -291,7 +296,8 @@ bool parse_options(int argc, wchar_t* argv[], Options& options,
     }
     for (int index = 1; index < argc; ++index) {
         if (std::wstring_view(argv[index]) == L"--diagnose-scheduler" ||
-            std::wstring_view(argv[index]) == L"--study-scheduler") {
+            std::wstring_view(argv[index]) == L"--study-scheduler" ||
+            std::wstring_view(argv[index]) == L"--study-scheduler-resource") {
             error = "scheduler 诊断模式不接受其他参数";
             return false;
         }
@@ -571,6 +577,12 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
                    nlohmann::json& document, std::string& error,
                    SchedulerTrace* trace = nullptr,
                    const StudyRun* study = nullptr) {
+    const auto active_per_event = study
+        ? xen::scheduler_study::detail::active_limits(study->policy).per_event_ns
+        : kMaxActiveWaitPerEventNs;
+    const auto active_per_batch = study
+        ? xen::scheduler_study::detail::active_limits(study->policy).per_batch_ns
+        : kMaxActiveWaitTotalNs;
     auto* failure = trace ? &trace->win32_failure : nullptr;
     if (trace) trace->stage = "QPC_FREQUENCY";
     LARGE_INTEGER frequency_value{};
@@ -773,8 +785,8 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
                 error = "study active QPC 倒退";
                 return false;
             }
-            if (active_ns > kMaxActiveWaitPerEventNs ||
-                (study && (total_active_ns > kMaxActiveWaitTotalNs - active_ns ||
+            if (active_ns > active_per_event ||
+                (study && (total_active_ns > active_per_batch - active_ns ||
                            now >= study->deadline_qpc))) {
                 if (event) {
                     record_value(event->active_last, now);
@@ -835,11 +847,11 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
         }
         const bool budgets_failed = lateness > kMaxWakeLatenessNs ||
             marker_width > kMaxEventIntervalWidthNs ||
-            active_ns > kMaxActiveWaitPerEventNs ||
-            total_active_ns > kMaxActiveWaitTotalNs - active_ns;
+            active_ns > active_per_event ||
+            total_active_ns > active_per_batch - active_ns;
         const auto study_disposition = study
             ? xen::scheduler_study::detail::classify_event(
-                lateness, marker_width, active_ns, total_active_ns)
+                lateness, marker_width, active_ns, total_active_ns, study->policy)
             : xen::scheduler_study::detail::EventDisposition::ACCEPT;
         if (budgets_failed && (!study || !study->characterize ||
             study_disposition == xen::scheduler_study::detail::EventDisposition::ABORT)) {
@@ -1032,7 +1044,10 @@ nlohmann::json diagnostic_document(
 int run_scheduler_study(const Options& options, std::string& error) {
     using xen::scheduler_study::detail::protocol;
     using xen::scheduler_study::detail::select_candidate;
-    const auto policy = protocol();
+    using xen::scheduler_study::detail::StudyPolicy;
+    const auto study_policy = options.mode == Mode::STUDY_SCHEDULER_RESOURCE
+        ? StudyPolicy::RESOURCE_1MS : StudyPolicy::LEGACY_GRID;
+    const auto policy = protocol(study_policy);
     const auto directory = options.diagnostic_output;
     // 单一新目录同时承担消耗标记；中止后保留所有已取得记录，不接受续跑。
     if (!std::filesystem::create_directory(directory)) {
@@ -1152,7 +1167,7 @@ int run_scheduler_study(const Options& options, std::string& error) {
         SchedulerTrace trace{};
         std::string reason;
         nlohmann::json unused;
-        const StudyRun run{guard, characterize, stop_event.get(), campaign_start + timeout_ticks};
+        const StudyRun run{guard, characterize, stop_event.get(), campaign_start + timeout_ticks, study_policy};
         const auto before_valid = check_context();
         trace.stage = "STUDY_CONTEXT_BEFORE_BATCH";
         const auto measured = before_valid && run_preflight(options, {}, {}, unused, reason, &trace, &run);
@@ -1171,7 +1186,7 @@ int run_scheduler_study(const Options& options, std::string& error) {
         diagnostic["evidence_type"] = "mouse_effect_probe_scheduler_study_batch";
         diagnostic["study_phase"] = characterize ? "CHARACTERIZATION" : "VALIDATION";
         diagnostic["status"] = measured && after_valid ? "COMPLETE" : "ABORTED";
-        diagnostic["timing_policy"]["active_guard_ns"] = guard;
+        diagnostic["timing_policy"] = xen::scheduler_study::detail::batch_timing_policy(guard, study_policy);
         diagnostic["completed_means"] = "RAW_SAMPLE_COMPLETE_NOT_QUALITY_PASS";
         diagnostic["study_stop_polling"] = true;
         diagnostic["study_wait_timeout_ms"] = 1000;
@@ -1198,9 +1213,15 @@ int run_scheduler_study(const Options& options, std::string& error) {
         {"protocol_file_sha256", protocol_hash},
         {"characterization_file_sha256", characterization_hash},
         {"candidate_file_sha256", nullptr}, {"validation_file_sha256", nullptr}};
+    if (study_policy == StudyPolicy::RESOURCE_1MS)
+        result["policy_id"] = "scheduler-resource-1ms-v1";
     const auto finish = [&](const char* status) {
         std::int64_t finished = 0;
-        const auto final_status = check_context(&finished) ? status : "ABORTED";
+        const auto context_valid = check_context(&finished);
+        const auto final_status = context_valid &&
+            attempted_batches <= policy["campaign_max_batches"].get<std::size_t>() &&
+            recorded_active_ns <= policy["campaign_max_active_wait_ns"].get<std::uint64_t>()
+            ? status : "ABORTED";
         result["status"] = final_status;
         result["attempted_batch_count"] = attempted_batches;
         result["recorded_active_wait_ns"] = recorded_active_ns;
@@ -1215,7 +1236,7 @@ int run_scheduler_study(const Options& options, std::string& error) {
         return std::string_view(final_status) == "STUDY_VALIDATED" ? 0 : 3;
     };
     if (!complete || !check_context()) return finish("ABORTED");
-    auto candidate = select_candidate(characterization);
+    auto candidate = select_candidate(characterization, study_policy);
     candidate["protocol_file_sha256"] = protocol_hash;
     candidate["characterization_file_sha256"] = characterization_hash;
     candidate["context"] = context;
@@ -1274,13 +1295,15 @@ int wmain(int argc, wchar_t* argv[]) {
             << "XenMouseEffectProbeCompositeSeal "
                "--study-scheduler <absolute-new-directory>\n"
             << "XenMouseEffectProbeCompositeSeal "
+               "--study-scheduler-resource <absolute-new-directory>\n"
+            << "XenMouseEffectProbeCompositeSeal "
                "--report-semantic-sha256 <report-json>\n"
             << "XenMouseEffectProbeCompositeSeal "
                "--verify-report <report-json>\n";
         return error.empty() ? 0 : 2;
     }
     try {
-        if (options.mode == Mode::STUDY_SCHEDULER) {
+        if (options.mode == Mode::STUDY_SCHEDULER || options.mode == Mode::STUDY_SCHEDULER_RESOURCE) {
             return run_scheduler_study(options, error);
         }
         if (options.mode == Mode::DIAGNOSE_SCHEDULER) {

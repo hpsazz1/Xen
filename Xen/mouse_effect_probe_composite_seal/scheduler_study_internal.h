@@ -10,11 +10,24 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace xen::scheduler_study::detail {
 
-inline nlohmann::json protocol() {
-    return {{"schema_version", 1}, {"guard_grid_ns", {300000, 325000, 350000}},
+enum class StudyPolicy { LEGACY_GRID, RESOURCE_1MS };
+
+struct ActiveLimits {
+    std::uint64_t per_event_ns;
+    std::uint64_t per_batch_ns;
+};
+
+inline constexpr ActiveLimits active_limits(StudyPolicy policy) noexcept {
+    return policy == StudyPolicy::RESOURCE_1MS ? ActiveLimits{1000000, 42000000}
+                                              : ActiveLimits{350000, 14700000};
+}
+
+inline nlohmann::json protocol(StudyPolicy policy = StudyPolicy::LEGACY_GRID) {
+    nlohmann::json value{{"schema_version", 1}, {"guard_grid_ns", {300000, 325000, 350000}},
             {"round_count", 10}, {"validation_batch_count", 10},
             {"event_count", 42}, {"interval_ns", 5000000},
             {"max_wake_lateness_ns", 150000},
@@ -30,15 +43,28 @@ inline nlohmann::json protocol() {
             {"validation_stop_on_first_failure", true},
             {"validation_not_used_for_selection", true},
             {"statistical_independence_claimed", false}};
+    if (policy == StudyPolicy::RESOURCE_1MS) {
+        value["schema_version"] = 2;
+        value["policy_id"] = "scheduler-resource-1ms-v1";
+        value["guard_grid_ns"] = {1000000};
+        value["max_active_wait_ns_per_event"] = active_limits(policy).per_event_ns;
+        value["max_active_wait_ns_total"] = active_limits(policy).per_batch_ns;
+        value["campaign_max_batches"] = 20;
+        value["campaign_max_active_wait_ns"] = 840000000;
+        value["round_order"] = "guard_index=0";
+    }
+    return value;
 }
 
 enum class EventDisposition { ACCEPT, QUALITY_FAILURE, ABORT };
 
 inline EventDisposition classify_event(std::uint64_t lateness,
         std::uint64_t width, std::uint64_t active,
-        std::uint64_t total_before) noexcept {
+        std::uint64_t total_before,
+        StudyPolicy policy = StudyPolicy::LEGACY_GRID) noexcept {
     // 硬上限优先；先检查单事件，避免总额减法下溢。
-    if (active > 350000U || total_before > 14700000U - active)
+    const auto limits = active_limits(policy);
+    if (active > limits.per_event_ns || total_before > limits.per_batch_ns - active)
         return EventDisposition::ABORT;
     if (lateness > 150000U || width > 100000U)
         return EventDisposition::QUALITY_FAILURE;
@@ -111,13 +137,18 @@ inline std::uint64_t scale_ceil(std::uint64_t value, std::uint64_t scale,
                                          remainder % divisor != 0 ? 1U : 0U));
 }
 
-inline nlohmann::json batch_timing_policy(std::uint64_t guard) {
-    return {{"event_capacity", 42}, {"preflight_interval_ns", 5000000},
+inline nlohmann::json batch_timing_policy(std::uint64_t guard,
+        StudyPolicy policy = StudyPolicy::LEGACY_GRID) {
+    const auto limits = active_limits(policy);
+    nlohmann::json value{{"event_capacity", 42}, {"preflight_interval_ns", 5000000},
             {"active_guard_ns", guard}, {"max_wake_lateness_ns", 150000},
             {"max_event_interval_width_ns", 100000},
-            {"max_active_wait_ns_per_event", 350000},
-            {"max_active_wait_ns_total", 14700000},
+            {"max_active_wait_ns_per_event", limits.per_event_ns},
+            {"max_active_wait_ns_total", limits.per_batch_ns},
             {"timer_mode", "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL"}};
+    if (policy == StudyPolicy::RESOURCE_1MS)
+        value["study_policy_id"] = "scheduler-resource-1ms-v1";
+    return value;
 }
 
 inline void validate_context(const nlohmann::json& context) {
@@ -165,29 +196,31 @@ inline void validate_output_boundary(const nlohmann::json& document) {
             "study 必须保持独立无物理输出诊断");
 }
 
-inline nlohmann::json select_candidate(const nlohmann::json& characterization) {
+inline nlohmann::json select_candidate(const nlohmann::json& characterization,
+        StudyPolicy policy = StudyPolicy::LEGACY_GRID) {
     try {
         require(unsigned_integer(characterization.at("schema_version")) == 1 &&
                 characterization.at("evidence_type") ==
                     "mouse_effect_probe_scheduler_study_characterization" &&
                 characterization.at("status") == "COMPLETE",
                 "study characterization 类型/完成状态无效");
-        require(strictly_equal(protocol(), characterization.at("protocol")),
+        const auto frozen_protocol = protocol(policy);
+        require(strictly_equal(frozen_protocol, characterization.at("protocol")),
                 "study 冻结协议漂移");
         validate_output_boundary(characterization);
         const auto& context = characterization.at("context");
         validate_context(context);
         const auto& blocks = characterization.at("blocks");
-        require(blocks.is_array() && blocks.size() == 30,
-                "study 必须包含固定 30 块，拒绝缺样本或增补尝试");
-        constexpr std::array<std::uint64_t, 3> guards{300000, 325000, 350000};
+        const auto guards = frozen_protocol.at("guard_grid_ns").get<std::vector<std::uint64_t>>();
+        require(blocks.is_array() && blocks.size() == 10U * guards.size(),
+                "study 必须包含冻结协议的完整批数，拒绝缺样本或增补尝试");
         std::array<std::uint64_t, 3> quality_failures{}, failed_batches{}, maxima{}, widths{};
         const auto frequency = unsigned_integer(context.at("qpc_frequency_hz"));
         const auto campaign_start = unsigned_integer(context.at("campaign_start_qpc"));
         std::uint64_t previous_end = campaign_start;
         for (std::size_t block_index = 0; block_index < blocks.size(); ++block_index) {
-            const auto round = block_index / 3U;
-            const auto guard_index = (round + block_index % 3U) % 3U;
+            const auto round = block_index / guards.size();
+            const auto guard_index = (round + block_index % guards.size()) % guards.size();
             const auto& block = blocks[block_index];
             require(unsigned_integer(block.at("round_index")) == round &&
                     unsigned_integer(block.at("guard_index")) == guard_index,
@@ -199,7 +232,7 @@ inline nlohmann::json select_candidate(const nlohmann::json& characterization) {
                     batch.at("study_phase") == "CHARACTERIZATION",
                     "study 批次类型/阶段/完成状态无效");
             require(strictly_equal(context, batch.at("context")) &&
-                    strictly_equal(batch_timing_policy(guards[guard_index]), batch.at("timing_policy")),
+                    strictly_equal(batch_timing_policy(guards[guard_index], policy), batch.at("timing_policy")),
                     "study 批次身份或计时参数漂移");
             validate_output_boundary(batch);
             require(batch.at("instrumented") == true &&
@@ -280,7 +313,7 @@ inline nlohmann::json select_candidate(const nlohmann::json& characterization) {
                         raw("active_wait_ns") == active &&
                         unsigned_integer(event.at("active_total_before_ns")) == total_active,
                         "study 派生指标与原始 QPC/累计 active 不一致");
-                const auto disposition = classify_event(lateness, width, active, total_active);
+                const auto disposition = classify_event(lateness, width, active, total_active, policy);
                 require(disposition != EventDisposition::ABORT, "study 证据触犯 active 硬上限");
                 if (disposition == EventDisposition::QUALITY_FAILURE) {
                     ++quality_failures[guard_index];
@@ -306,8 +339,11 @@ inline nlohmann::json select_candidate(const nlohmann::json& characterization) {
                 {"quality_failed_batch_count", failed_batches[index]}, {"eligible", eligible},
                 {"observed_max_lateness_ns", maxima[index]}, {"observed_max_marker_width_ns", widths[index]}});
         }
-        return {{"status", selected.is_null() ? "NO_CANDIDATE" : "CANDIDATE_SELECTED"},
+        nlohmann::json selection{{"status", selected.is_null() ? "NO_CANDIDATE" : "CANDIDATE_SELECTED"},
                 {"selected_guard_ns", selected}, {"guard_results", std::move(results)}};
+        if (policy == StudyPolicy::RESOURCE_1MS)
+            selection["policy_id"] = "scheduler-resource-1ms-v1";
+        return selection;
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(std::string("study JSON 契约无效: ") + error.what());
     }

@@ -10,8 +10,10 @@
 #include <nlohmann/json.hpp>
 
 namespace study_fixture {
-enum class Scenario { SUCCESS, STOP_BEFORE, QUALITY, HARD_ACTIVE, VALIDATION_FAILURE, HASH_DRIFT };
+enum class Scenario { SUCCESS, STOP_BEFORE, QUALITY, HARD_ACTIVE, VALIDATION_FAILURE, HASH_DRIFT,
+                      ACTIVE_EQUAL, WAIT_FAILURE, TIMEOUT };
 Scenario scenario = Scenario::SUCCESS;
+bool resource_mode = false;
 constexpr LONGLONG kInitialQpc = 1000000000000000;
 LONGLONG clock = kInitialQpc, due_at = 0;
 unsigned waits = 0, batches = 0, reads_after_wait = 0;
@@ -20,7 +22,9 @@ std::filesystem::path directory;
 
 BOOL WINAPI query_counter(LARGE_INTEGER* value) {
     const bool active_jump = scenario == Scenario::HARD_ACTIVE && waits == 1 && reads_after_wait == 1;
-    clock += active_jump ? 3501 : 1;
+    const bool exact_active = resource_mode && scenario == Scenario::ACTIVE_EQUAL &&
+        waits == 1 && reads_after_wait == 1;
+    clock += active_jump ? (resource_mode ? 10001 : 3501) : exact_active ? 9999 : 1;
     if (waits) ++reads_after_wait;
     value->QuadPart = clock;
     return TRUE;
@@ -29,7 +33,7 @@ BOOL WINAPI query_frequency(LARGE_INTEGER* value) { value->QuadPart = 10000000; 
 HANDLE WINAPI create_timer(LPSECURITY_ATTRIBUTES, LPCWSTR, DWORD, DWORD) {
     const unsigned index = batches++;
     constexpr std::uint64_t guards[]{300000, 325000, 350000};
-    guard_ns = index < 30 ? guards[(index / 3 + index % 3) % 3] :
+    guard_ns = resource_mode ? 1000000 : index < 30 ? guards[(index / 3 + index % 3) % 3] :
         (scenario == Scenario::QUALITY ? 325000 : 300000);
     // 只借真实 Event 的句柄生命周期；从不创建或武装真实 timer。
     return CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -46,11 +50,13 @@ DWORD WINAPI wait_multiple(DWORD count, const HANDLE*, BOOL all, DWORD timeout) 
         throw std::runtime_error("fixture 发现study Wait合同漂移");
     ++waits;
     reads_after_wait = 0;
+    if (scenario == Scenario::WAIT_FAILURE) { SetLastError(ERROR_INVALID_HANDLE); return WAIT_FAILED; }
+    if (scenario == Scenario::TIMEOUT) { clock += 300000000; return WAIT_OBJECT_0 + 1; }
     const bool late = (scenario == Scenario::QUALITY && waits == 5) ||
-        (scenario == Scenario::VALIDATION_FAILURE && waits == 1264);
+        (scenario == Scenario::VALIDATION_FAILURE && waits == (resource_mode ? 424U : 1264U));
     // due_base与Set前QPC相差1tick；再扣除后续Wait/marker两次QPC，得到精确176100ns。
-    clock = late ? due_at + static_cast<LONGLONG>(guard_ns / 100) - 1 + 1759 : due_at;
-    if (scenario == Scenario::HASH_DRIFT && waits == 1261)
+    clock = late ? due_at + static_cast<LONGLONG>(guard_ns / 100) - 1 + (resource_mode ? 1838 : 1759) : due_at;
+    if (scenario == Scenario::HASH_DRIFT && waits == (resource_mode ? 421U : 1261U))
         std::ofstream(directory / "candidate.json", std::ios::binary | std::ios::app) << '\n';
     return WAIT_OBJECT_0 + 1;
 }
@@ -100,6 +106,7 @@ void verify_hashes(const std::filesystem::path& path, const json& result) {
 void run_case(const std::filesystem::path& root, const char* name, study_fixture::Scenario mode) {
     using S = study_fixture::Scenario;
     study_fixture::scenario = mode;
+    study_fixture::resource_mode = false;
     study_fixture::clock = study_fixture::kInitialQpc;
     study_fixture::due_at = 0;
     study_fixture::waits = study_fixture::batches = study_fixture::reads_after_wait = 0;
@@ -157,6 +164,81 @@ void run_case(const std::filesystem::path& root, const char* name, study_fixture
         }
     }
 }
+
+void run_resource_case(const std::filesystem::path& root, const char* name,
+                       study_fixture::Scenario scenario) {
+    using S = study_fixture::Scenario;
+    study_fixture::resource_mode = true;
+    study_fixture::scenario = scenario;
+    study_fixture::clock = study_fixture::kInitialQpc;
+    study_fixture::due_at = 0;
+    study_fixture::waits = study_fixture::batches = study_fixture::reads_after_wait = 0;
+    study_fixture::directory = root / name;
+    auto path = study_fixture::directory.wstring();
+    wchar_t executable[] = L"fixture";
+    wchar_t mode[] = L"--study-scheduler-resource";
+    wchar_t* arguments[]{executable, mode, path.data()};
+    Options options;
+    std::string error;
+    check(parse_options(3, arguments, options, error), "新 resource CLI 必须路由独立 study mode");
+    const auto code = run_scheduler_study(options, error);
+    const auto result = read(study_fixture::directory / "result.json");
+    const auto raw = read(study_fixture::directory / "characterization.json");
+    check(raw.at("protocol").at("schema_version") == 2 &&
+          raw.at("protocol").at("policy_id") == "scheduler-resource-1ms-v1" &&
+          raw.at("protocol").at("guard_grid_ns") == json::array({1000000}) &&
+          raw.at("protocol").at("campaign_max_batches") == 20 &&
+          raw.at("protocol").at("campaign_max_active_wait_ns") == 840000000 &&
+          result.at("policy_id") == "scheduler-resource-1ms-v1",
+          "resource 必须冻结唯一 1ms 与 20批840ms 派生预算身份");
+    check(result.at("physical_dispatch_count") == 0 && result.at("formal_preflight_published") == false &&
+          result.at("final_plan_published") == false, "resource 不得封存正式产物或触发物理输出");
+    if (scenario != S::HASH_DRIFT) verify_hashes(study_fixture::directory, result);
+    if (scenario == S::HARD_ACTIVE || scenario == S::STOP_BEFORE ||
+        scenario == S::WAIT_FAILURE || scenario == S::TIMEOUT) {
+        check(code == 3 && result.at("status") == "ABORTED" &&
+              raw.at("blocks").size() == 1 && !std::filesystem::exists(study_fixture::directory / "candidate.json"),
+              "resource 硬预算/停止/API/30s超时必须立即中止无候选");
+        const auto& batch = raw.at("blocks")[0].at("diagnostic");
+        check(batch.at("completed_event_count") == 0, "resource 硬失败不得标记事件完成");
+        if (scenario == S::HARD_ACTIVE)
+            check(batch.at("events")[0].at("active_wait_ns") == 1000100 && study_fixture::waits == 1,
+                  "1000100ns active 必须在首事件立即拒绝");
+        return;
+    }
+    check(raw.at("status") == "COMPLETE" && raw.at("blocks").size() == 10,
+          "resource characterization 必须完整10批");
+    const auto candidate = read(study_fixture::directory / "candidate.json");
+    if (scenario == S::QUALITY) {
+        check(code == 3 && result.at("status") == "NO_CANDIDATE" &&
+              candidate.at("selected_guard_ns").is_null() && study_fixture::waits == 420 &&
+              raw.at("blocks")[0].at("diagnostic").at("events")[4].at("deadline_lateness_ns") == 184000 &&
+              raw.at("blocks").back().at("diagnostic").at("completed_event_count") == 42 &&
+              !std::filesystem::exists(study_fixture::directory / "validation.json"),
+              "184us质量失败必须保留10x42尾部并整候选拒绝，无替补验证");
+        return;
+    }
+    const auto validation = read(study_fixture::directory / "validation.json");
+    check(candidate.at("selected_guard_ns") == 1000000 &&
+          validation.at("blocks")[0].at("diagnostic").at("anchor_qpc") > validation.at("candidate_frozen_qpc"),
+          "resource 验证必须发生在唯一候选真实文件hash冻结之后");
+    if (scenario == S::VALIDATION_FAILURE) {
+        check(code == 3 && result.at("status") == "VALIDATION_REJECTED" &&
+              study_fixture::waits == 424 && validation.at("blocks").size() == 1 &&
+              validation.at("blocks")[0].at("diagnostic").at("completed_event_count") == 3,
+              "resource 验证首失败保留partial，不能换候选");
+    } else if (scenario == S::HASH_DRIFT) {
+        check(code == 3 && result.at("status") == "ABORTED" && study_fixture::waits == 840,
+              "resource candidate文件漂移必须拒绝");
+    } else {
+        check(code == 0 && result.at("status") == "STUDY_VALIDATED" &&
+              study_fixture::waits == 840 && validation.at("blocks").size() == 10,
+              "resource 必须执行且仅执行10+10批");
+        if (scenario == S::ACTIVE_EQUAL)
+            check(raw.at("blocks")[0].at("diagnostic").at("events")[0].at("active_wait_ns") == 1000000,
+                  "active恰好1ms边界应通过，不能采用大于等于拒绝");
+    }
+}
 } // namespace
 
 int main() {
@@ -172,6 +254,15 @@ int main() {
         run_case(root, "hard-active", S::HARD_ACTIVE);
         run_case(root, "validation-failure", S::VALIDATION_FAILURE);
         run_case(root, "hash-drift", S::HASH_DRIFT);
+        run_resource_case(root, "resource-success", S::SUCCESS);
+        run_resource_case(root, "resource-quality", S::QUALITY);
+        run_resource_case(root, "resource-hard", S::HARD_ACTIVE);
+        run_resource_case(root, "resource-equal", S::ACTIVE_EQUAL);
+        run_resource_case(root, "resource-stop", S::STOP_BEFORE);
+        run_resource_case(root, "resource-wait-error", S::WAIT_FAILURE);
+        run_resource_case(root, "resource-timeout", S::TIMEOUT);
+        run_resource_case(root, "resource-validation", S::VALIDATION_FAILURE);
+        run_resource_case(root, "resource-hash", S::HASH_DRIFT);
         std::cout << "scheduler study 生产编排确定性测试全部通过；无真实计时测量。\n";
         return 0;
     } catch (const std::exception& error) {

@@ -29,7 +29,7 @@ void expect_rejected(Function function, const std::string& message) {
     }
 }
 
-json fixture() {
+json fixture(study::StudyPolicy policy = study::StudyPolicy::LEGACY_GRID) {
     const json context{{"process_id", 1234}, {"thread_id", 5678}, {"session_id", 1},
         {"process_priority_class", 32}, {"thread_priority", 0},
         {"session_id_query_error", nullptr}, {"process_priority_class_query_error", nullptr},
@@ -40,15 +40,15 @@ json fixture() {
         {"uptime_ms_before_campaign", 1000}, {"same_process_same_boot_required", true}};
     json document{{"schema_version", 1},
         {"evidence_type", "mouse_effect_probe_scheduler_study_characterization"},
-        {"status", "COMPLETE"}, {"protocol", study::protocol()}, {"context", context},
+        {"status", "COMPLETE"}, {"protocol", study::protocol(policy)}, {"context", context},
         {"diagnostic_only", true}, {"physical_output_capability", false},
         {"physical_dispatch_count", 0}, {"formal_preflight_published", false},
         {"final_plan_published", false},
         {"blocks", json::array()}};
-    const std::array<std::uint64_t, 3> guards{300000, 325000, 350000};
-    for (std::size_t block = 0; block < 30; ++block) {
-        const auto round = block / 3;
-        const auto guard_index = (round + block % 3) % 3;
+    const auto guards = study::protocol(policy)["guard_grid_ns"].get<std::vector<std::uint64_t>>();
+    for (std::size_t block = 0; block < 10 * guards.size(); ++block) {
+        const auto round = block / guards.size();
+        const auto guard_index = (round + block % guards.size()) % guards.size();
         const std::uint64_t anchor = 1000000U + block * 3000000U;
         json batch{{"schema_version", 1}, {"evidence_type", "mouse_effect_probe_scheduler_study_batch"},
             {"status", "COMPLETE"}, {"study_phase", "CHARACTERIZATION"},
@@ -61,7 +61,7 @@ json fixture() {
             {"formal_preflight_published", false}, {"final_plan_published", false},
             {"context", context}, {"clock_kind", "WINDOWS_QPC"},
             {"qpc_frequency_hz", 10000000}, {"anchor_qpc", anchor},
-            {"timing_policy", study::batch_timing_policy(guards[guard_index])},
+            {"timing_policy", study::batch_timing_policy(guards[guard_index], policy)},
             {"reached_event_count", 42}, {"completed_event_count", 42},
             {"failure_event", nullptr}, {"failure_stage", nullptr}, {"failure_reason", ""},
             {"win32_failure", nullptr}, {"events", json::array()}};
@@ -230,24 +230,86 @@ void test_rejection() {
     check("拒绝拿validation反向选择", [](auto& d) { d["blocks"][0]["diagnostic"]["study_phase"] = "VALIDATION"; });
 }
 
+void test_resource_policy() {
+    constexpr auto policy = study::StudyPolicy::RESOURCE_1MS;
+    using D = study::EventDisposition;
+    expect(study::classify_event(150000, 100000, 1000000, 41000000, policy) == D::ACCEPT &&
+           study::classify_event(0, 0, 1000001, 0, policy) == D::ABORT &&
+           study::classify_event(0, 0, 1, 42000000, policy) == D::ABORT,
+           "resource 的1ms/event和42ms/batch边界必须严格且防下溢");
+    expect(study::classify_event(184000, 100, 0, 0, policy) == D::QUALITY_FAILURE &&
+           study::classify_event(0, 100001, 0, 0, policy) == D::QUALITY_FAILURE,
+           "resource 不放宽184us迟到或100us宽度质量合同");
+    auto data = fixture(policy);
+    auto selection = study::select_candidate(data, policy);
+    expect(selection["selected_guard_ns"] == 1000000 && selection["guard_results"].size() == 1 &&
+           selection["guard_results"][0]["sample_count"] == 420 &&
+           selection["policy_id"] == "scheduler-resource-1ms-v1",
+           "resource 仅允许完整10x42的单一1ms候选");
+    expect_rejected([&] { (void)study::select_candidate(fixture(), policy); },
+                    "旧350us数据不能用于resource选择");
+    expect_rejected([&] { (void)study::select_candidate(data); },
+                    "resource数据不能改变旧selector默认合同");
+    auto& batch = data["blocks"][0]["diagnostic"];
+    auto& event = batch["events"][0];
+    const auto marker = event["marker_before_qpc"].get<std::uint64_t>();
+    event["wait_return_qpc"] = marker - 10000;
+    event["active_enter_qpc"] = marker - 10000;
+    event["active_wait_ns"] = 1000000;
+    refresh_batch(batch);
+    expect(study::select_candidate(data, policy)["selected_guard_ns"] == 1000000,
+           "原始QPC严格重算的1ms active边界可通过");
+    event["wait_return_qpc"] = marker - 10001;
+    event["active_enter_qpc"] = marker - 10001;
+    event["active_wait_ns"] = 1000100;
+    refresh_batch(batch);
+    expect_rejected([&] { (void)study::select_candidate(data, policy); },
+                    "原始QPC完整但1000100ns硬失败也必须拒绝");
+    data = fixture(policy);
+    set_lateness(data["blocks"][9]["diagnostic"], 41, 184000);
+    selection = study::select_candidate(data, policy);
+    expect(selection["status"] == "NO_CANDIDATE" && selection["selected_guard_ns"].is_null() &&
+           selection["guard_results"][0]["quality_failure_count"] == 1,
+           "单个末批尾部184us失败必须否决整候选，无替补");
+    const auto reject_mutation = [&](const char* message, auto mutate) {
+        auto changed = fixture(policy);
+        mutate(changed);
+        expect_rejected([&] { (void)study::select_candidate(changed, policy); }, message);
+    };
+    reject_mutation("拒绝resource协议schema冒充旧值", [](auto& d) { d["protocol"]["schema_version"] = 1; });
+    reject_mutation("拒绝resource新增候选", [](auto& d) { d["protocol"]["guard_grid_ns"].push_back(1100000); });
+    reject_mutation("拒绝resource缺第10批", [](auto& d) { d["blocks"].erase(9); });
+    reject_mutation("拒绝resource增补第11批", [](auto& d) { d["blocks"].push_back(d["blocks"][0]); });
+    reject_mutation("拒绝resource回退旧batch预算", [](auto& d) {
+        d["blocks"][0]["diagnostic"]["timing_policy"]["max_active_wait_ns_total"] = 14700000;
+    });
+    reject_mutation("拒绝resource漂移policy身份", [](auto& d) {
+        d["blocks"][0]["diagnostic"]["timing_policy"]["study_policy_id"] = "legacy";
+    });
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t* argv[]) {
     try {
-        if (argc == 3 && std::wstring_view(argv[1]) == L"--characterization") {
+        if (argc == 3 && (std::wstring_view(argv[1]) == L"--characterization" ||
+                         std::wstring_view(argv[1]) == L"--resource-characterization")) {
             const std::filesystem::path path(argv[2]);
             if (!path.is_absolute() || !std::filesystem::is_regular_file(path) ||
                 std::filesystem::file_size(path) > 16U * 1024U * 1024U)
                 throw std::runtime_error("离线 characterization 必须是不超过16MiB的绝对文件路径");
             std::ifstream input(path, std::ios::binary);
             const auto document = json::parse(input);
-            std::cout << study::select_candidate(document).dump(2) << '\n';
+            const auto policy = std::wstring_view(argv[1]) == L"--resource-characterization"
+                ? study::StudyPolicy::RESOURCE_1MS : study::StudyPolicy::LEGACY_GRID;
+            std::cout << study::select_candidate(document, policy).dump(2) << '\n';
             return 0;
         }
-        if (argc != 1) throw std::runtime_error("仅接受 --characterization <absolute-json>");
+        if (argc != 1) throw std::runtime_error("仅接受 --characterization 或 --resource-characterization <absolute-json>");
         test_classification();
         test_fixed_selection();
         test_rejection();
+        test_resource_policy();
         if (failures != 0) {
             std::cerr << "scheduler study 离线测试失败数: " << failures << '\n';
             return 1;
