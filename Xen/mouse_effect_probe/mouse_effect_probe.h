@@ -2,6 +2,7 @@
 #define MOUSE_EFFECT_PROBE_H
 
 #include "mouse/mouse.h"
+#include "composite_scheduler_policy.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -204,6 +205,11 @@ bool make_command_magnitude_sequence(
 // predictor/schedule sample 加六个 response source event；38 个 X-only
 // 单 count pulse 净 X=0，四个 control 不产生 Mouse/KMBOX event。
 bool make_composite_phase_calibration_sequence(
+    MouseEffectProbeSequence& sequence,
+    std::string& error) noexcept;
+
+bool make_composite_phase_calibration_sequence(
+    CompositePhaseSchedulerPolicy scheduler_policy,
     MouseEffectProbeSequence& sequence,
     std::string& error) noexcept;
 

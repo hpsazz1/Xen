@@ -970,7 +970,7 @@ MouseEffectProbeSafetyDecision record_mouse_effect_probe_safety_observation(
                    snapshot.virtual_keys[0x77]) {
             decision = MouseEffectProbeSafetyDecision::USER_STOP;
         } else {
-            decision = snapshot.virtual_keys[0x02]
+            decision = snapshot.virtual_keys[0x02] || ledger.bounded_composite_auto_arm
                 ? MouseEffectProbeSafetyDecision::READY
                 : MouseEffectProbeSafetyDecision::RELEASED;
         }
@@ -1199,6 +1199,8 @@ bool write_mouse_effect_probe_safety_ledger(
             {"physical_output_capability", false},
             {"run_uuid", run_uuid},
             {"input_backend", "kmbox_net"},
+            {"arming_policy", ledger.bounded_composite_auto_arm
+                ? "BOUNDED_COMPOSITE_AUTO_ARM" : "RIGHT_BUTTON_DEADMAN"},
             {"timebase", {
                 {"name", "steady_clock_nanoseconds_since_epoch"},
                 {"ticks_per_second", 1'000'000'000ULL},
@@ -1295,6 +1297,7 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
         bool seen_max_seconds = false;
         bool seen_allow_physical = false;
         bool seen_confirmation = false;
+        bool seen_bounded_auto_arm = false;
         std::wstring physical_confirmation;
 
         const auto duplicate = [&](bool& seen, std::string_view name) {
@@ -1317,6 +1320,14 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                     return MouseEffectProbeParseStatus::INVALID;
                 }
                 options.allow_physical_output = true;
+                continue;
+            }
+            if (argument == L"--bounded-composite-auto-arm") {
+                if (duplicate(seen_bounded_auto_arm,
+                              "--bounded-composite-auto-arm")) {
+                    return MouseEffectProbeParseStatus::INVALID;
+                }
+                options.bounded_composite_auto_arm = true;
                 continue;
             }
             if (index + 1U >= arguments.size()) {
@@ -1541,9 +1552,15 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                     "composite-phase token 必须且只能携带绝对 plan/schedule-ledger 路径与 SHA");
                 return MouseEffectProbeParseStatus::INVALID;
             }
+            if (options.bounded_composite_auto_arm &&
+                (!composite_authority || options.max_seconds > 15)) {
+                set_error(error, "自动武装仅允许15秒内的已授权有限composite取证");
+                return MouseEffectProbeParseStatus::INVALID;
+            }
         } else if (seen_allow_physical || seen_confirmation ||
                    seen_safety_ledger || seen_composite_plan ||
-                   seen_composite_plan_sha || seen_composite_schedule_ledger) {
+                   seen_composite_plan_sha || seen_composite_schedule_ledger ||
+                   seen_bounded_auto_arm) {
             set_error(error,
                 "output-off rehearsal 禁止物理输出授权或 safety ledger 参数");
             return MouseEffectProbeParseStatus::INVALID;
@@ -1566,6 +1583,18 @@ bool validate_mouse_effect_probe_sequence_authorization(
         const mouse_effect_probe::MouseEffectProbeSequence& sequence,
         std::string& error) noexcept {
     try {
+        if (options.bounded_composite_auto_arm &&
+            (options.dispatch_mode != mouse_effect_probe::ProbeDispatchMode::PHYSICAL_B ||
+             options.physical_authorization != MouseEffectProbePhysicalAuthorization::
+                 PHYSICAL_B_COMPOSITE_PHASE_CALIBRATION ||
+             !options.allow_physical_output || !options.physical_output_confirmed ||
+             options.max_seconds == 0 || options.max_seconds > 15 ||
+             sequence.schema != 7U ||
+             sequence.profile != "physical_b_composite_phase_calibration" ||
+             !mouse_effect_probe::validate_mouse_effect_probe_sequence(sequence, error))) {
+            set_error(error, "自动武装需要已授权、15秒内且完整验证的固定有限composite序列");
+            return false;
+        }
         if (!is_physical_dispatch(options.dispatch_mode)) {
             error.clear();
             return true;
@@ -1678,7 +1707,9 @@ std::string mouse_effect_probe_usage() {
         "--composite-schedule-ledger <new-json> "
         "--confirm-physical-output "
         "XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT\n"
-        "physical A/B 会发送真实 KMBOX X 输入；只能由用户前台启动。\n";
+        "  可选 --bounded-composite-auto-arm 仅适用于上述有限composite，max-seconds不得超过15；"
+        "显式授权后由脚本武装，不要求右键，End/F8和monitor检查保持。\n"
+        "physical A/B 会发送真实 KMBOX X 输入；其他模式保持用户前台右键武装。\n";
 }
 
 bool make_mouse_effect_probe_source_frame_event(
@@ -1941,6 +1972,7 @@ bool run_mouse_effect_probe(
         execution_options.require_protocol_ack = true;
 
         MouseEffectProbeSafetyLedger safety_ledger;
+        safety_ledger.bounded_composite_auto_arm = options.bounded_composite_auto_arm;
         std::shared_ptr<PhysicalKmboxMonitorPacketObserver>
             monitor_packet_observer;
         MouseOutputOwnerLease rehearsal_owner_guard;
@@ -2065,7 +2097,9 @@ bool run_mouse_effect_probe(
         }
 
         if (is_physical_dispatch(options.dispatch_mode)) {
-            std::cout << mouse_effect_probe_deadman_arming_prompt() << '\n'
+            std::cout << (options.bounded_composite_auto_arm
+                ? "有限composite自动武装：等待有效monitor，End/F8可急停。"
+                : mouse_effect_probe_deadman_arming_prompt()) << '\n'
                       << std::flush;
             const auto arming_deadline = std::chrono::steady_clock::now() +
                 std::chrono::seconds(5);
@@ -2117,7 +2151,9 @@ bool run_mouse_effect_probe(
                     mouse_effect_probe::ProbeStopReason::SAFETY_RELEASED,
                     execution_error);
                 if (execution_error.empty()) {
-                    execution_error = "deadman 未在有界武装窗内进入 READY";
+                    execution_error = options.bounded_composite_auto_arm
+                        ? "自动武装未在有界窗口取得有效monitor"
+                        : "deadman 未在有界武装窗内进入 READY";
                 }
             }
             if (!armed) {

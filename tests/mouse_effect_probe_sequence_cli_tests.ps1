@@ -143,6 +143,64 @@ try {
                     [int]$_.dx_counts -ne 0 }).Count -eq 38) `
         'The composite-phase CLI must freeze 38 pulses and four controls.'
 
+    Assert-True ($composite.request.timer_mode -ceq 'HIGH_RESOLUTION_ONE_SHOT_OR_FAIL' -and
+                 $composite.request.active_guard_ns -eq 300000 -and
+                 $composite.request.max_wake_lateness_ns -eq 150000 -and
+                 $composite.request.max_event_interval_width_ns -eq 100000 -and
+                 $composite.request.max_active_wait_ns_per_event -eq 350000 -and
+                 $composite.request.max_active_wait_ns_total -eq 14700000) `
+        'The omitted scheduler policy must preserve the complete legacy tuple.'
+    $resourceOutput = Join-Path $resolvedTestRoot 'composite-active-1ms.json'
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $resolvedExecutable --output $resourceOutput `
+        --profile physical-b-composite-phase-calibration `
+        --scheduler-policy active-1ms-v1 2>&1 | Out-Null
+    $resourceExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $savedErrorActionPreference
+    Assert-True ($resourceExitCode -eq 0 -and
+                 (Test-Path -LiteralPath $resourceOutput -PathType Leaf)) `
+        'The explicit active-1ms-v1 CLI must publish its distinct fixed sequence.'
+    $resource = Get-Content -LiteralPath $resourceOutput -Raw | ConvertFrom-Json
+    Assert-True ($resource.schema -eq 7 -and
+                 $resource.request.timer_mode -ceq 'HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1' -and
+                 $resource.request.active_guard_ns -eq 1000000 -and
+                 $resource.request.max_wake_lateness_ns -eq 150000 -and
+                 $resource.request.max_event_interval_width_ns -eq 100000 -and
+                 $resource.request.max_active_wait_ns_per_event -eq 1000000 -and
+                 $resource.request.max_active_wait_ns_total -eq 42000000 -and
+                 $resource.sequence_sha256 -cne $composite.sequence_sha256 -and
+                 ($resource.samples | ConvertTo-Json -Depth 10 -Compress) -ceq
+                    ($composite.samples | ConvertTo-Json -Depth 10 -Compress) -and
+                 ($resource.windows | ConvertTo-Json -Depth 10 -Compress) -ceq
+                    ($composite.windows | ConvertTo-Json -Depth 10 -Compress)) `
+        'The new resource tuple must change identity while preserving commands and phase cells.'
+    $explicitLegacy = Join-Path $resolvedTestRoot 'composite-legacy.json'
+    & $resolvedExecutable --output $explicitLegacy `
+        --profile physical-b-composite-phase-calibration --scheduler-policy legacy
+    Assert-True ($LASTEXITCODE -eq 0 -and
+        (Get-Content -LiteralPath $explicitLegacy -Raw) -ceq
+            (Get-Content -LiteralPath $compositeOutput -Raw)) `
+        'Explicit legacy must preserve the default sequence bytes and semantic hash.'
+    $invalidPolicies = @(
+        @{ name = 'unknown'; profile = 'physical-b-composite-phase-calibration'; arguments = @('--scheduler-policy', 'active-2ms-v1') },
+        @{ name = 'duplicate'; profile = 'physical-b-composite-phase-calibration'; arguments = @('--scheduler-policy', 'legacy', '--scheduler-policy', 'active-1ms-v1') },
+        @{ name = 'other-profile'; profile = 'physical-b-command-magnitude'; arguments = @('--scheduler-policy', 'active-1ms-v1') },
+        @{ name = 'other-profile-legacy'; profile = 'physical-b-command-magnitude'; arguments = @('--scheduler-policy', 'legacy') }
+    )
+    foreach ($case in $invalidPolicies) {
+        $invalidPolicyOutput = Join-Path $resolvedTestRoot ($case.name + '.json')
+        $caseArguments = @('--output', $invalidPolicyOutput, '--profile', $case.profile) + $case.arguments
+        $savedErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & $resolvedExecutable @caseArguments 2>&1 | Out-Null
+        $invalidPolicyExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $savedErrorActionPreference
+        Assert-True ($invalidPolicyExitCode -ne 0 -and
+                     -not (Test-Path -LiteralPath $invalidPolicyOutput)) `
+            "Invalid scheduler policy must fail without output: $($case.name)"
+    }
+
     Write-Host 'Mouse Effect Probe sequence CLI contracts passed.'
 }
 finally {

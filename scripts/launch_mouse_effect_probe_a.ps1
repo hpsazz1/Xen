@@ -31,6 +31,42 @@ if (-not $AllowPhysicalOutput.IsPresent -or
 }
 $confirmation = $PhysicalOutputConfirmation
 
+function Assert-CompositeSchedulerPolicy(
+        [object]$Policy,
+        [string]$ExpectedTimerMode = "") {
+    if ($null -eq $Policy) { throw "composite scheduler policy 缺失" }
+    $modeProperty = $Policy.PSObject.Properties['timer_mode']
+    if ($null -eq $modeProperty -or $modeProperty.Value -isnot [string]) {
+        throw "composite scheduler policy timer_mode 无效"
+    }
+    $mode = [string]$modeProperty.Value
+    $limits = switch -CaseSensitive ($mode) {
+        "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" {
+            @(300000, 150000, 100000, 350000, 14700000); break
+        }
+        "HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1" {
+            @(1000000, 150000, 100000, 1000000, 42000000); break
+        }
+        default { throw "composite scheduler policy timer_mode 未知：$mode" }
+    }
+    $fields = @('active_guard_ns', 'max_wake_lateness_ns',
+        'max_event_interval_width_ns', 'max_active_wait_ns_per_event',
+        'max_active_wait_ns_total')
+    for ($index = 0; $index -lt $fields.Count; ++$index) {
+        $property = $Policy.PSObject.Properties[$fields[$index]]
+        if ($null -eq $property -or
+            ($property.Value -isnot [int] -and $property.Value -isnot [long] -and
+             $property.Value -isnot [uint32] -and $property.Value -isnot [uint64]) -or
+            $property.Value -ne $limits[$index]) {
+            throw "composite scheduler policy 固定预算无效：$($fields[$index])"
+        }
+    }
+    if ($ExpectedTimerMode -ne "" -and $mode -cne $ExpectedTimerMode) {
+        throw "composite scheduler policy 与 sequence 选择不一致"
+    }
+    return $mode
+}
+
 function Get-FileSha256([string]$Path) {
     $algorithm = [Security.Cryptography.SHA256]::Create()
     $stream = [IO.File]::Open(
@@ -65,25 +101,14 @@ function Quote-NativeArgument([string]$Value) {
     return '"' + $Value + '"'
 }
 
-function Invoke-CompositeSeal(
+function Invoke-Utf8NativeProcess(
         [string]$Executable,
-        [string]$PlanSeed,
-        [string]$Sequence,
-        [string]$PreflightOutput,
-        [string]$PlanOutput,
-        [string]$RunUuid,
-        [string]$ActivationEpoch) {
-    # Seal 的 UTF-8 stderr 是诊断文本；PS5 不应先将它提升为 NativeCommandError。
-    $sealArguments = @(
-        '--plan-seed', $PlanSeed,
-        '--sequence', $Sequence,
-        '--preflight-output', $PreflightOutput,
-        '--plan-output', $PlanOutput,
-        '--run-uuid', $RunUuid,
-        '--activation-epoch', $ActivationEpoch)
+        [string[]]$NativeArguments,
+        [string]$Description) {
+    # UTF-8 stderr 是诊断文本；PS5 不应先将它提升为 NativeCommandError。
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Executable
-    $start.Arguments = ($sealArguments | ForEach-Object {
+    $start.Arguments = ($NativeArguments | ForEach-Object {
         Quote-NativeArgument ([string]$_)
     }) -join ' '
     $start.UseShellExecute = $false
@@ -96,20 +121,43 @@ function Invoke-CompositeSeal(
     $process.StartInfo = $start
     try {
         try {
-            if (-not $process.Start()) { throw '未创建 Seal 进程' }
+            if (-not $process.Start()) { throw '未创建原生进程' }
         } catch {
-            throw "composite seal 启动失败：$($_.Exception.Message)"
+            throw "$Description 启动失败：$($_.Exception.Message)"
         }
         # 两条管道都先开始读取，避免等待退出或顺序读流时被满管道阻塞。
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
-        $sealExitCode = $process.ExitCode
-        $sealStdout = $stdoutTask.GetAwaiter().GetResult()
-        $sealStderr = $stderrTask.GetAwaiter().GetResult()
+        return [pscustomobject]@{
+            exit_code = $process.ExitCode
+            stdout = $stdoutTask.GetAwaiter().GetResult()
+            stderr = $stderrTask.GetAwaiter().GetResult()
+        }
     } finally {
         $process.Dispose()
     }
+}
+
+function Invoke-CompositeSeal(
+        [string]$Executable,
+        [string]$PlanSeed,
+        [string]$Sequence,
+        [string]$PreflightOutput,
+        [string]$PlanOutput,
+        [string]$RunUuid,
+        [string]$ActivationEpoch) {
+    $sealArguments = @(
+        '--plan-seed', $PlanSeed,
+        '--sequence', $Sequence,
+        '--preflight-output', $PreflightOutput,
+        '--plan-output', $PlanOutput,
+        '--run-uuid', $RunUuid,
+        '--activation-epoch', $ActivationEpoch)
+    $result = Invoke-Utf8NativeProcess $Executable $sealArguments 'composite seal'
+    $sealExitCode = $result.exit_code
+    $sealStdout = $result.stdout
+    $sealStderr = $result.stderr
     if ($sealExitCode -ne 0 -or
         -not (Test-Path -LiteralPath $PreflightOutput -PathType Leaf) -or
         -not (Test-Path -LiteralPath $PlanOutput -PathType Leaf)) {
@@ -120,7 +168,59 @@ function Invoke-CompositeSeal(
     }
 }
 
-function ConvertTo-PhysicalProbeOperatorCue([string]$Line) {
+function Get-BoundedCompositeAutoArm([object]$Task, [bool]$IsComposite) {
+    $property = $Task.safety.PSObject.Properties['bounded_composite_auto_arm']
+    $enabled = $false
+    if ($null -ne $property) {
+        if ($property.Value -isnot [bool]) {
+            throw "bounded composite 自动取证标志必须是 bool"
+        }
+        $enabled = $property.Value
+    }
+    if (-not $IsComposite) {
+        if ($enabled) { throw "自动有限取证只允许 composite profile" }
+        return $false
+    }
+    $deadman = $Task.safety.PSObject.Properties['right_button_deadman_required']
+    $frontend = $Task.PSObject.Properties['requires_user_frontend_launch']
+    if ($null -eq $deadman -or $deadman.Value -isnot [bool] -or
+        $null -eq $frontend -or $frontend.Value -isnot [bool] -or
+        $deadman.Value -eq $enabled -or $frontend.Value -eq $enabled) {
+        throw "composite 自动取证与右键/用户前台授权必须严格互斥"
+    }
+    if ($enabled) {
+        $seconds = $Task.sidecar.max_seconds
+        if (($seconds -isnot [int] -and $seconds -isnot [long] -and
+             $seconds -isnot [uint32] -and $seconds -isnot [uint64]) -or
+            $seconds -lt 1 -or $seconds -gt 15) {
+            throw "自动有限 composite 取证最多允许 15 秒"
+        }
+    }
+    return $enabled
+}
+
+function Invoke-BoundedCompositeProbe(
+        [string]$Executable,
+        [string[]]$NativeArguments,
+        [string]$OutputPath) {
+    $result = Invoke-Utf8NativeProcess $Executable $NativeArguments 'bounded composite probe'
+    Write-NewUtf8Json $OutputPath $result
+    return $result
+}
+
+function ConvertTo-PhysicalProbeOperatorCue(
+        [string]$Line, [bool]$BoundedCompositeAutoArm = $false) {
+    if ($BoundedCompositeAutoArm) {
+        if ($Line.StartsWith("KMBOX monitor 已就绪") -or
+            $Line.StartsWith("有限composite自动武装：")) {
+            return '【自动有限取证】无需按住右键；End/F8 可急停。'
+        }
+        if ($Line.StartsWith("Mouse Effect Probe 时间线完成") -or
+            $Line.StartsWith("Mouse Effect Probe 未正常完成")) {
+            return '【命令阶段结束】正在整理自动有限取证证据。'
+        }
+        return ""
+    }
     if ($Line.StartsWith("KMBOX monitor 已就绪")) {
         return '【按住右键】5 秒内按住并持续保持；直到看到“现在松开右键”。'
     }
@@ -360,6 +460,7 @@ if ((-not $isA1Task -and -not $isA2Task -and -not $isA2S1Task -and
     $confirmation -ne $expectedConfirmation) {
     throw "Physical probe task 身份或授权合同无效"
 }
+$boundedCompositeAutoArm = Get-BoundedCompositeAutoArm $task $isBCompositeTask
 if ($isA2Task) {
     $expectedProfile = if ([string]$task.run_role -eq "p-cal") {
         "dependency_calibration_a2_p_cal"
@@ -479,7 +580,7 @@ if ($isBTask) {
             [uint64]$task.sidecar.minimum_coverage_frames -or
         [string]$task.sidecar.coverage_basis -ne
             "ARMING_5S_PLUS_295_SOURCE_EVENTS_PLUS_1S_MARGIN" -or
-        -not [bool]$task.requires_user_frontend_launch -or
+        ([bool]$task.requires_user_frontend_launch -eq $boundedCompositeAutoArm) -or
         [string]$task.composite_policy.policy_id -ne
             "b-composite-phase-calibration-v1" -or
         [string]$task.composite_policy.plan_seed_status -ne
@@ -685,6 +786,11 @@ if ($isBCompositeTask) {
     $planSeed = Get-Content -LiteralPath `
         ([string]$task.files.plan_seed.path) -Raw -Encoding utf8 |
         ConvertFrom-Json
+    $compositeSequence = Get-Content -LiteralPath `
+        ([string]$task.files.sequence.path) -Raw -Encoding utf8 |
+        ConvertFrom-Json
+    $compositeTimerMode = Assert-CompositeSchedulerPolicy $compositeSequence.request
+    [void](Assert-CompositeSchedulerPolicy $planSeed.scheduler_policy $compositeTimerMode)
     $capturePolicy = Get-Content -LiteralPath `
         ([string]$task.files.capture_policy.path) -Raw -Encoding utf8 |
         ConvertFrom-Json
@@ -710,8 +816,6 @@ if ($isBCompositeTask) {
         [string]$planSeed.sequence_binding.sequence_semantic_sha256 -ne
             [string]$task.sequence_sha256 -or
         $null -ne $planSeed.scheduler_policy.preflight_file_sha256 -or
-        [string]$planSeed.scheduler_policy.timer_mode -ne
-            "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" -or
         [string]$planSeed.capture_policy.semantic_sha256 -ne
             [string]$capturePolicy.semantic_sha256 -or
         [string]$planSeed.seal.binder_file_sha256 -ne
@@ -741,6 +845,7 @@ if ($forbiddenProcesses.Count -ne 0) {
 $pixelOutput = Join-Path $resolvedRun "pixel-evidence"
 $reportPath = Join-Path $resolvedRun "command-report.json"
 $safetyLedgerPath = Join-Path $resolvedRun "safety-ledger.json"
+$boundedProbeOutputPath = Join-Path $resolvedRun "bounded-composite-process-output.json"
 $launchSummaryPath = Join-Path $resolvedRun "launch-summary.json"
 $s1BracketPath = Join-Path $resolvedRun "s1-liveness-bracket.json"
 $s1SessionPath = Join-Path $resolvedRun "s1-session.json"
@@ -751,7 +856,7 @@ $schedulerPreflightPath = Join-Path $resolvedRun "scheduler-preflight.json"
 $compositePlanPath = Join-Path $resolvedRun "composite-phase-plan.json"
 $compositeSchedulePath = Join-Path $resolvedRun "composite-schedule-ledger.json"
 foreach ($path in @(
-        $pixelOutput, $reportPath, $safetyLedgerPath, $launchSummaryPath,
+        $pixelOutput, $reportPath, $safetyLedgerPath, $launchSummaryPath, $boundedProbeOutputPath,
         $s1BracketPath, $s1SessionPath,
         $sidecarLifecyclePath,
         $sidecarStdout, $sidecarStderr,
@@ -782,6 +887,8 @@ if ($isBCompositeTask) {
         -Raw -Encoding utf8 | ConvertFrom-Json
     $compositePlan = Get-Content -LiteralPath $compositePlanPath `
         -Raw -Encoding utf8 | ConvertFrom-Json
+    [void](Assert-CompositeSchedulerPolicy $schedulerPreflight $compositeTimerMode)
+    [void](Assert-CompositeSchedulerPolicy $compositePlan.scheduler_policy $compositeTimerMode)
     $compositePlanFileSha256 = Get-FileSha256 $compositePlanPath
     if ([string]$schedulerPreflight.status -ne "PASS" -or
         [bool]$schedulerPreflight.physical_output_capability -or
@@ -838,7 +945,11 @@ if ([bool]$capture.require_frame_metadata) {
     $sidecarArguments += "--require-frame-metadata"
 }
 
-Write-Host '【准备】保持右键松开；等待“按住右键”。'
+if ($boundedCompositeAutoArm) {
+    Write-Host '【准备】自动有限 composite 取证；无需按住右键，End/F8 可急停。'
+} else {
+    Write-Host '【准备】保持右键松开；等待“按住右键”。'
+}
 $sidecarProcess = Start-Process -FilePath `
     ([string]$task.files.sidecar_executable.path) `
     -WorkingDirectory (Split-Path -Parent `
@@ -879,34 +990,59 @@ try {
             "--composite-plan", $compositePlanPath,
             "--composite-plan-sha256", $compositePlanFileSha256,
             "--composite-schedule-ledger", $compositeSchedulePath)
+        if ($boundedCompositeAutoArm) {
+            $probeArguments += "--bounded-composite-auto-arm"
+        }
     }
     $operatorState = @{
         monitor_seen = $false
         terminal_seen = $false
     }
-    & ([string]$task.files.probe_executable.path) @probeArguments 2>&1 | ForEach-Object {
-        $nativeLine = [string]$_
-        $cue = ConvertTo-PhysicalProbeOperatorCue $nativeLine
-        if (-not [string]::IsNullOrWhiteSpace($cue)) {
-            $isMonitorCue = $nativeLine.StartsWith("KMBOX monitor 已就绪")
-            $isTerminalCue =
-                $nativeLine.StartsWith("Mouse Effect Probe 时间线完成") -or
-                $nativeLine.StartsWith("Mouse Effect Probe 未正常完成")
-            if (($isMonitorCue -and -not $operatorState.monitor_seen) -or
-                ($isTerminalCue -and -not $operatorState.terminal_seen)) {
-                Write-Host $cue
-            }
-            if ($isMonitorCue) {
-                $operatorState.monitor_seen = $true
-            }
-            if ($isTerminalCue) {
-                $operatorState.terminal_seen = $true
+    if ($boundedCompositeAutoArm) {
+        $boundedOutput = Invoke-BoundedCompositeProbe `
+            ([string]$task.files.probe_executable.path) $probeArguments $boundedProbeOutputPath
+        $probeExitCode = $boundedOutput.exit_code
+        Write-Host "【自动有限取证】Probe ExitCode=$probeExitCode"
+        foreach ($stream in @($boundedOutput.stdout, $boundedOutput.stderr)) {
+            if (-not [string]::IsNullOrEmpty($stream)) { Write-Host $stream }
+        }
+        foreach ($nativeLine in ($boundedOutput.stdout -split '[\r\n]+')) {
+            $cue = ConvertTo-PhysicalProbeOperatorCue $nativeLine $true
+            if (-not [string]::IsNullOrEmpty($cue)) { Write-Host $cue }
+            if ($nativeLine.StartsWith("有限composite自动武装：") -or
+                $nativeLine.StartsWith("KMBOX monitor 已就绪")) { $operatorState.monitor_seen = $true }
+            if ($nativeLine.StartsWith("Mouse Effect Probe 时间线完成") -or
+                $nativeLine.StartsWith("Mouse Effect Probe 未正常完成")) { $operatorState.terminal_seen = $true }
+        }
+    } else {
+        & ([string]$task.files.probe_executable.path) @probeArguments 2>&1 | ForEach-Object {
+            $nativeLine = [string]$_
+            $cue = ConvertTo-PhysicalProbeOperatorCue $nativeLine $boundedCompositeAutoArm
+            if (-not [string]::IsNullOrWhiteSpace($cue)) {
+                $isMonitorCue = $nativeLine.StartsWith("KMBOX monitor 已就绪")
+                $isTerminalCue =
+                    $nativeLine.StartsWith("Mouse Effect Probe 时间线完成") -or
+                    $nativeLine.StartsWith("Mouse Effect Probe 未正常完成")
+                if (($isMonitorCue -and -not $operatorState.monitor_seen) -or
+                    ($isTerminalCue -and -not $operatorState.terminal_seen)) {
+                    Write-Host $cue
+                }
+                if ($isMonitorCue) {
+                    $operatorState.monitor_seen = $true
+                }
+                if ($isTerminalCue) {
+                    $operatorState.terminal_seen = $true
+                }
             }
         }
+        $probeExitCode = $LASTEXITCODE
     }
-    $probeExitCode = $LASTEXITCODE
     if (-not $operatorState.terminal_seen) {
-        Write-Host "【现在松开右键】命令阶段已结束；正在核对证据。"
+        if ($boundedCompositeAutoArm) {
+            Write-Host '【命令阶段结束】正在核对自动有限取证证据。'
+        } else {
+            Write-Host "【现在松开右键】命令阶段已结束；正在核对证据。"
+        }
         $operatorState.terminal_seen = $true
     }
 
@@ -1139,8 +1275,7 @@ try {
                 (Get-FileSha256 $reportPath) -or
             [string]$compositeSchedule.safety_ledger_file_sha256 -ne
                 (Get-FileSha256 $safetyLedgerPath) -or
-            [string]$compositeSchedule.timer_mode -ne
-                "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" -or
+            [string]$compositeSchedule.timer_mode -cne $compositeTimerMode -or
             [string]$compositeSchedule.scheduler_clock.clock_kind -ne
                 "WINDOWS_QPC" -or
             [int64]$compositeSchedule.scheduler_clock.frequency_hz -le 0 -or
@@ -1294,6 +1429,7 @@ try {
     }
     if ($isBCompositeTask) {
         $sequenceWindows = @($sequence.windows)
+        [void](Assert-CompositeSchedulerPolicy $sequence.request $compositeTimerMode)
         $sequencePulses = @($samples | Where-Object {
             [int]$_.dx_counts -ne 0
         })
@@ -1314,16 +1450,6 @@ try {
             [uint64]$sequence.request.single_magnitude_counts -ne 1 -or
             [uint64]$sequence.request.issue_lead_ns -ne 400000 -or
             [uint64]$sequence.request.target_tolerance_q32 -ne 268435456 -or
-            [uint64]$sequence.request.active_guard_ns -ne 300000 -or
-            [uint64]$sequence.request.max_wake_lateness_ns -ne 150000 -or
-            [uint64]$sequence.request.max_event_interval_width_ns -ne
-                100000 -or
-            [uint64]$sequence.request.max_active_wait_ns_per_event -ne
-                350000 -or
-            [uint64]$sequence.request.max_active_wait_ns_total -ne
-                14700000 -or
-            [string]$sequence.request.timer_mode -ne
-                "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" -or
             ($sequenceWindows.window_id -join ",") -ne
                 ($compositePlan.window_order -join ",") -or
             @($samples | Where-Object {

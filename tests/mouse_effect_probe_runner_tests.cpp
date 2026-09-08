@@ -336,6 +336,126 @@ void test_composite_phase_authority_and_deadline_are_isolated() {
                error);
 }
 
+void test_bounded_composite_auto_arm_parser() {
+    auto arguments = common_arguments();
+    arguments[1] = L"physical-b";
+    const std::vector<std::wstring_view> extra{
+        L"--allow-physical-output", L"--confirm-physical-output",
+        L"XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT",
+        L"--safety-ledger", L"E:\\run\\safety.json",
+        L"--composite-plan", L"E:\\run\\plan.json",
+        L"--composite-plan-sha256",
+        L"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        L"--composite-schedule-ledger", L"E:\\run\\schedule.json",
+        L"--bounded-composite-auto-arm"};
+    arguments.insert(arguments.end(), extra.begin(), extra.end());
+    MouseEffectProbeRunOptions options;
+    std::string error;
+    expect(parse_mouse_effect_probe_options(arguments, options, error) ==
+               MouseEffectProbeParseStatus::READY,
+           "已授权且15秒内的有限composite应接受显式自动武装: " + error);
+    const auto authorized = options;
+    mouse_effect_probe::MouseEffectProbeSequence sequence;
+    expect(mouse_effect_probe::make_composite_phase_calibration_sequence(sequence, error) &&
+               validate_mouse_effect_probe_sequence_authorization(authorized, sequence, error),
+           "自动武装必须通过公开生成器的完整固定序列验证: " + error);
+    auto altered = sequence;
+    altered.samples.front().dx_counts = 2;
+    expect(!validate_mouse_effect_probe_sequence_authorization(authorized, altered, error),
+           "自动武装不能只看profile放行超过单计数的序列");
+    altered = sequence;
+    altered.samples.front().dy_counts = 1;
+    expect(!validate_mouse_effect_probe_sequence_authorization(authorized, altered, error),
+           "自动武装不得带入Y命令");
+    auto invalid_authority = authorized;
+    invalid_authority.physical_authorization =
+        MouseEffectProbePhysicalAuthorization::PHYSICAL_B_MAGNITUDE_PRIMARY;
+    expect(!validate_mouse_effect_probe_sequence_authorization(invalid_authority, sequence, error),
+           "直接调用也必须拒绝多幅值授权借用自动武装");
+    invalid_authority = authorized;
+    invalid_authority.max_seconds = 16;
+    expect(!validate_mouse_effect_probe_sequence_authorization(invalid_authority, sequence, error),
+           "直接调用也必须拒绝超15秒自动武装");
+    invalid_authority = authorized;
+    invalid_authority.allow_physical_output = false;
+    expect(!validate_mouse_effect_probe_sequence_authorization(invalid_authority, sequence, error),
+           "自动武装不得替代既有明确输出授权");
+    auto duplicate = arguments;
+    duplicate.push_back(L"--bounded-composite-auto-arm");
+    expect(parse_mouse_effect_probe_options(duplicate, options, error) ==
+               MouseEffectProbeParseStatus::INVALID,
+           "自动武装参数重复必须拒绝");
+    auto overlong = arguments;
+    for (std::size_t index = 0; index + 1 < overlong.size(); ++index)
+        if (overlong[index] == L"--max-seconds") overlong[index + 1] = L"16";
+    expect(parse_mouse_effect_probe_options(overlong, options, error) ==
+               MouseEffectProbeParseStatus::INVALID,
+           "自动武装不得扩展到超过15秒的运行");
+    auto output_off = common_arguments();
+    output_off.push_back(L"--bounded-composite-auto-arm");
+    expect(parse_mouse_effect_probe_options(output_off, options, error) ==
+               MouseEffectProbeParseStatus::INVALID,
+           "自动武装必须拒绝output-off及无授权调用");
+}
+
+void test_bounded_composite_auto_arm_preserves_monitor_and_stop() {
+    MouseEffectProbeSafetyLedger ledger;
+    ledger.bounded_composite_auto_arm = true;
+    InputSnapshot snapshot;
+    snapshot.status = InputMonitorStatus::WAITING;
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ARMING, true, snapshot, ledger) ==
+               MouseEffectProbeSafetyDecision::WAITING,
+           "自动武装仍需等待真实有效monitor");
+    snapshot.status = InputMonitorStatus::READY;
+    snapshot.state_valid = true;
+    snapshot.sequence = 1;
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ARMING, true, snapshot, ledger) ==
+               MouseEffectProbeSafetyDecision::READY &&
+               !ledger.observations.back().right_button_pressed,
+           "有限自动武装应允许无右键，账本不得伪造按键");
+    for (const auto key : {0x23, 0x77}) {
+        snapshot.virtual_keys[key] = true;
+        expect(record_mouse_effect_probe_safety_observation(
+                   MouseEffectProbeSafetyPhase::ACTIVE, true, snapshot, ledger) ==
+                   MouseEffectProbeSafetyDecision::USER_STOP,
+               "自动武装后End/F8任一急停必须优先于READY");
+        snapshot.virtual_keys[key] = false;
+    }
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ACTIVE, false, snapshot, ledger) ==
+               MouseEffectProbeSafetyDecision::FAILURE,
+           "自动武装后poll失败仍立即失败");
+    snapshot.status = InputMonitorStatus::FAILURE;
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ACTIVE, true, snapshot, ledger) ==
+               MouseEffectProbeSafetyDecision::FAILURE,
+           "自动武装不能覆盖设备失败");
+    snapshot.status = InputMonitorStatus::READY;
+    snapshot.state_valid = false;
+    expect(record_mouse_effect_probe_safety_observation(
+               MouseEffectProbeSafetyPhase::ACTIVE, true, snapshot, ledger) ==
+               MouseEffectProbeSafetyDecision::WAITING,
+           "自动武装不能用无效快照继续输出");
+    const auto path = std::filesystem::temp_directory_path() /
+        ("xen-auto-arm-ledger-" + std::to_string(std::chrono::steady_clock::now()
+            .time_since_epoch().count()) + ".json");
+    std::string sha256, error;
+    expect(write_mouse_effect_probe_safety_ledger(path,
+               "11111111-2222-4333-8444-555555555555",
+               mouse_effect_probe::ProbeStopReason::USER_STOP,
+               ledger, sha256, error),
+           "自动武装实际键态账本应能发布: " + error);
+    std::ifstream input(path, std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(input)),
+                              std::istreambuf_iterator<char>());
+    expect(content.find("\"arming_policy\": \"BOUNDED_COMPOSITE_AUTO_ARM\"") !=
+               std::string::npos &&
+               content.find("\"right_button_pressed\": false") != std::string::npos,
+           "账本必须明确标识自动武装并保留真实键态");
+}
+
 void test_parser_rejects_missing_duplicate_and_invalid_identity() {
     std::string error;
     MouseEffectProbeRunOptions options;
@@ -582,6 +702,8 @@ int main() {
     test_physical_b_authority_is_bound_to_sequence_profile();
     test_physical_b_magnitude_authority_is_isolated_by_run_role();
     test_composite_phase_authority_and_deadline_are_isolated();
+    test_bounded_composite_auto_arm_parser();
+    test_bounded_composite_auto_arm_preserves_monitor_and_stop();
     test_parser_rejects_missing_duplicate_and_invalid_identity();
     test_frame_mapping_preserves_source_identity_and_quality();
     test_physical_deadman_prompt_contract();

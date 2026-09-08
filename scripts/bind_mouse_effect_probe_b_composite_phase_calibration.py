@@ -14,6 +14,17 @@ from typing import Any
 
 
 Q32 = 1 << 32
+SCHEDULER_BUDGET_FIELDS = (
+    "active_guard_ns", "max_wake_lateness_ns",
+    "max_event_interval_width_ns", "max_active_wait_ns_per_event",
+    "max_active_wait_ns_total",
+)
+SCHEDULER_BUDGETS = {
+    "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL": (
+        300_000, 150_000, 100_000, 350_000, 14_700_000),
+    "HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1": (
+        1_000_000, 150_000, 100_000, 1_000_000, 42_000_000),
+}
 MIN_SOURCE_CLOCK_RATE_Q32 = 99 * Q32 // 100
 MAX_SOURCE_CLOCK_RATE_Q32 = (101 * Q32 + 99) // 100
 PHASE_CELLS = ("P1_8", "P3_8", "P5_8", "P7_8")
@@ -556,32 +567,33 @@ def _validate_plan(plan: dict[str, Any], binder_path: pathlib.Path,
             sequence_binding.get("window_order") != expected_window_order,
             "PLAN_SEAL_INVALID", "sequence binding 未按冻结合同注册")
     scheduler = plan.get("scheduler_policy")
-    _reject(not isinstance(scheduler, dict) or
-            scheduler != {
-                "clock_kind": "WINDOWS_QPC",
-                "timer_mode": "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL",
-                "deadline_basis":
-                    "PREDICTOR_NEXT_NDI_SUBMISSION_BOUNDARY",
-                "issue_lead_ns": 400_000,
-                "issue_lead_applies_to": "NONZERO_PULSE_ONLY",
-                "negative_control_marker_lead_ns": 0,
-                "target_tolerance_q32": Q32 // 16,
-                "active_guard_ns": 300_000,
-                "max_wake_lateness_ns": 150_000,
-                "max_event_interval_width_ns": 100_000,
-                "max_active_wait_ns_per_event": 350_000,
-                "max_active_wait_ns_total": 42 * 350_000,
-                "preflight_required": True,
-                "preflight_file_sha256":
-                    scheduler.get("preflight_file_sha256")
-                    if isinstance(scheduler, dict) else None,
-                "per_event_tuning_allowed": False,
-                "process_priority": "NORMAL",
-                "thread_priority": "NORMAL",
-                "cpu_affinity_used": False,
-                "time_begin_period_used": False,
-                "periodic_timer_used": False,
-            } or
+    timer_mode = (scheduler.get("timer_mode")
+                  if isinstance(scheduler, dict) else None)
+    _reject(not isinstance(timer_mode, str) or
+            timer_mode not in SCHEDULER_BUDGETS,
+            "PLAN_SEAL_INVALID", "scheduler timer_mode 未注册")
+    assert isinstance(scheduler, dict) and isinstance(timer_mode, str)
+    expected_scheduler = {
+        "clock_kind": "WINDOWS_QPC",
+        "timer_mode": timer_mode,
+        "deadline_basis": "PREDICTOR_NEXT_NDI_SUBMISSION_BOUNDARY",
+        "issue_lead_ns": 400_000,
+        "issue_lead_applies_to": "NONZERO_PULSE_ONLY",
+        "negative_control_marker_lead_ns": 0,
+        "target_tolerance_q32": Q32 // 16,
+        **dict(zip(SCHEDULER_BUDGET_FIELDS, SCHEDULER_BUDGETS[timer_mode])),
+        "preflight_required": True,
+        "preflight_file_sha256": scheduler.get("preflight_file_sha256"),
+        "per_event_tuning_allowed": False,
+        "process_priority": "NORMAL",
+        "thread_priority": "NORMAL",
+        "cpu_affinity_used": False,
+        "time_begin_period_used": False,
+        "periodic_timer_used": False,
+    }
+    _reject(scheduler != expected_scheduler or
+            any(type(scheduler[field]) is not type(value)
+                for field, value in expected_scheduler.items()) or
             not _is_sha256(scheduler.get("preflight_file_sha256")),
             "PLAN_SEAL_INVALID", "scheduler policy 未按冻结合同注册")
     return plan_semantic, pulses, controls, expected_window_order

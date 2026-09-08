@@ -41,6 +41,17 @@ ORDER_FIELDS = (
     "sentinel_position", "pulse_ordinal", "command_dx_counts",
     "command_dy_counts",
 )
+SCHEDULER_FIELDS = (
+    "active_guard_ns", "max_wake_lateness_ns",
+    "max_event_interval_width_ns", "max_active_wait_ns_per_event",
+    "max_active_wait_ns_total",
+)
+SCHEDULER_POLICIES = {
+    "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL": (
+        300_000, 150_000, 100_000, 350_000, 14_700_000),
+    "HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1": (
+        1_000_000, 150_000, 100_000, 1_000_000, 42_000_000),
+}
 
 
 def expect(condition: bool, message: str) -> None:
@@ -89,7 +100,8 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("ascii")).hexdigest()
 
 
-def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
+def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path,
+                 timer_mode: str = "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL") -> tuple[
         dict[str, Any], dict[str, Any], dict[str, Any]]:
     mapping: dict[str, Any] = {
         "policy_id": "fixture-source-clock-v1",
@@ -344,6 +356,14 @@ def build_inputs(binder: pathlib.Path, evaluator: pathlib.Path) -> tuple[
             "response_revealed_before_freeze": False,
         },
     }
+    plan["scheduler_policy"].update(
+        zip(SCHEDULER_FIELDS, SCHEDULER_POLICIES[timer_mode]))
+    plan["scheduler_policy"]["timer_mode"] = timer_mode
+    if timer_mode != "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL":
+        plan["sequence_binding"]["sequence_file_sha256"] = sha256_text(
+            f"fixture-sequence-file-{timer_mode}")
+        plan["sequence_binding"]["sequence_semantic_sha256"] = sha256_text(
+            f"fixture-sequence-{timer_mode}")
     seal_semantic(plan, "plan_semantic_sha256")
 
     frames: list[dict[str, Any]] = []
@@ -579,6 +599,56 @@ def run_evaluator(evaluator: pathlib.Path, evidence_path: pathlib.Path,
     return completed, report
 
 
+def test_versioned_scheduler_policy(
+        binder: pathlib.Path, evaluator: pathlib.Path,
+        root: pathlib.Path) -> None:
+    for ordinal, mode in enumerate(SCHEDULER_POLICIES):
+        plan, capture, commands = build_inputs(binder, evaluator, mode)
+        completed, evidence, paths = invoke_binder(
+            binder, root, f"scheduler-{ordinal}-valid", plan, capture, commands)
+        expect(completed.returncode == 0 and evidence is not None and
+               evidence["scheduler_policy"] == plan["scheduler_policy"],
+               f"完整版本 {mode} 必须通过 binder: {completed.stderr}")
+        evaluated, report = run_evaluator(
+            evaluator, paths[3], root / f"scheduler-{ordinal}-evaluation.json")
+        expect(evaluated.returncode == 0 and
+               report["status"] == "READY_FOR_SEALED_PHASE_VALIDATION" and
+               report["evaluation"]["global_completion_interval_ns"] == {
+                   "lower_open": 18_985_000, "upper_closed": 21_015_000},
+               "scheduler 资源版本不得改变原始 completion-to-image 测量")
+
+    for ordinal, mode in enumerate(SCHEDULER_POLICIES):
+        other_mode = next(other for other in SCHEDULER_POLICIES if other != mode)
+        mutations: list[tuple[str, str, Any]] = [
+            ("unknown", "timer_mode", "UNKNOWN_TIMER_MODE"),
+            ("mixed-mode", "timer_mode", other_mode),
+            ("non-string-mode", "timer_mode", [mode]),
+        ]
+        for field, value in zip(SCHEDULER_FIELDS, SCHEDULER_POLICIES[mode]):
+            mutations.extend((
+                (f"{field}-changed", field, value + 1),
+                (f"{field}-float", field, float(value)),
+                (f"{field}-bool", field, True),
+            ))
+            other_value = dict(zip(
+                SCHEDULER_FIELDS, SCHEDULER_POLICIES[other_mode]))[field]
+            if other_value != value:
+                mutations.append((f"{field}-mixed", field, other_value))
+        for label, field, value in mutations:
+            bad_plan, bad_capture, bad_commands = build_inputs(
+                binder, evaluator, mode)
+            bad_plan["scheduler_policy"][field] = value
+            seal_semantic(bad_plan, "plan_semantic_sha256")
+            for ledger, semantic_field in (
+                    (bad_capture, "capture_semantic_sha256"),
+                    (bad_commands, "command_semantic_sha256")):
+                ledger["plan_semantic_sha256"] = bad_plan["plan_semantic_sha256"]
+                seal_semantic(ledger, semantic_field)
+            expect_rejected(
+                binder, root, f"scheduler-{ordinal}-{label}",
+                bad_plan, bad_capture, bad_commands, "PLAN_SEAL_INVALID")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binder", required=True, type=pathlib.Path)
@@ -615,6 +685,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(
             prefix="xen-composite-phase-binder-") as temporary:
         root = pathlib.Path(temporary)
+        test_versioned_scheduler_policy(binder, evaluator, root)
         completed, evidence, paths = run_binder(
             binder, evaluator, root, "valid")
         expect(completed.returncode == 0 and evidence is not None,

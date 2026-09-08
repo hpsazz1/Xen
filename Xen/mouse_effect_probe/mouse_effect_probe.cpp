@@ -70,14 +70,6 @@ constexpr int kCompositePhaseMagnitudeCounts = 1;
 constexpr std::int64_t kCompositePhaseIssueLeadNs = 400'000;
 constexpr std::uint64_t kCompositePhaseTargetToleranceQ32 =
     std::uint64_t{1} << 28U;
-constexpr std::uint64_t kCompositePhaseActiveGuardNs = 300'000;
-constexpr std::uint64_t kCompositePhaseMaxWakeLatenessNs = 150'000;
-constexpr std::uint64_t kCompositePhaseMaxEventIntervalWidthNs = 100'000;
-constexpr std::uint64_t kCompositePhaseMaxActiveWaitPerEventNs = 350'000;
-constexpr std::uint64_t kCompositePhaseMaxActiveWaitTotalNs =
-    42U * kCompositePhaseMaxActiveWaitPerEventNs;
-constexpr std::string_view kCompositePhaseTimerMode =
-    "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL";
 constexpr std::uint64_t kMaximumSequenceSamples = 1'000'000;
 constexpr std::uint64_t kMaximumDependencyCalibrationBlocks = 64;
 constexpr std::uint64_t kMaximumS1LivenessSamples = 2'400;
@@ -595,8 +587,14 @@ bool build_command_magnitude_sequence(
 }
 
 bool build_composite_phase_calibration_sequence(
+        CompositePhaseSchedulerPolicy scheduler_policy,
         MouseEffectProbeSequence& sequence,
         std::string& error) {
+    detail::CompositeSchedulerParameters scheduler{};
+    if (!detail::composite_scheduler_parameters(scheduler_policy, scheduler)) {
+        set_error(error, "composite-phase scheduler policy 不受支持");
+        return false;
+    }
     struct PlannedWindow {
         std::string id;
         std::string phase_cell;
@@ -676,14 +674,14 @@ bool build_composite_phase_calibration_sequence(
         .single_magnitude_counts = kCompositePhaseMagnitudeCounts,
         .issue_lead_ns = kCompositePhaseIssueLeadNs,
         .target_tolerance_q32 = kCompositePhaseTargetToleranceQ32,
-        .active_guard_ns = kCompositePhaseActiveGuardNs,
-        .max_wake_lateness_ns = kCompositePhaseMaxWakeLatenessNs,
+        .active_guard_ns = scheduler.active_guard_ns,
+        .max_wake_lateness_ns = scheduler.max_wake_lateness_ns,
         .max_event_interval_width_ns =
-            kCompositePhaseMaxEventIntervalWidthNs,
+            scheduler.max_event_interval_width_ns,
         .max_active_wait_ns_per_event =
-            kCompositePhaseMaxActiveWaitPerEventNs,
-        .max_active_wait_ns_total = kCompositePhaseMaxActiveWaitTotalNs,
-        .timer_mode = std::string(kCompositePhaseTimerMode),
+            scheduler.max_active_wait_ns_per_event,
+        .max_active_wait_ns_total = scheduler.max_active_wait_ns_total,
+        .timer_mode = std::string(scheduler.timer_mode),
     };
     sequence.samples.reserve(1U + windows.size() * 7U);
     sequence.composite_phase_windows.reserve(windows.size());
@@ -2047,9 +2045,17 @@ bool make_command_magnitude_sequence(
 bool make_composite_phase_calibration_sequence(
         MouseEffectProbeSequence& sequence,
         std::string& error) noexcept {
+    return make_composite_phase_calibration_sequence(
+        CompositePhaseSchedulerPolicy::LEGACY, sequence, error);
+}
+
+bool make_composite_phase_calibration_sequence(
+        CompositePhaseSchedulerPolicy scheduler_policy,
+        MouseEffectProbeSequence& sequence,
+        std::string& error) noexcept {
     try {
         MouseEffectProbeSequence candidate;
-        if (!build_composite_phase_calibration_sequence(candidate, error)) {
+        if (!build_composite_phase_calibration_sequence(scheduler_policy, candidate, error)) {
             sequence = {};
             return false;
         }
@@ -2185,8 +2191,14 @@ bool validate_mouse_effect_probe_sequence(
                 return false;
             }
         } else if (composite_phase) {
+            CompositePhaseSchedulerPolicy scheduler_policy{};
+            if (!detail::parse_composite_scheduler_timer_mode(
+                    sequence.composite_phase_request.timer_mode, scheduler_policy)) {
+                set_error(error, "composite-phase timer_mode 不受支持");
+                return false;
+            }
             if (!make_composite_phase_calibration_sequence(
-                    expected, error)) {
+                    scheduler_policy, expected, error)) {
                 return false;
             }
         } else if (physical_b_primary) {

@@ -313,6 +313,8 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
                 "mouse_effect_probe_safety_monitor_ledger" or
             safety.get("physical_output_capability") is not False or
             safety.get("run_uuid") != run_uuid or
+            safety.get("arming_policy", "RIGHT_BUTTON_DEADMAN") not in (
+                "RIGHT_BUTTON_DEADMAN", "BOUNDED_COMPOSITE_AUTO_ARM") or
             safety.get("probe_stop_reason") != "normal_completion" or
             safety.get("recording_failed") is not False or
             safety.get("monitor_packet_recording_failed") is not False or

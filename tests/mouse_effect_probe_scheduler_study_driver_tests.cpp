@@ -14,6 +14,8 @@ enum class Scenario { SUCCESS, STOP_BEFORE, QUALITY, HARD_ACTIVE, VALIDATION_FAI
                       ACTIVE_EQUAL, WAIT_FAILURE, TIMEOUT };
 Scenario scenario = Scenario::SUCCESS;
 bool resource_mode = false;
+bool formal_mode = false;
+std::uint64_t formal_guard_ns = 300000;
 constexpr LONGLONG kInitialQpc = 1000000000000000;
 LONGLONG clock = kInitialQpc, due_at = 0;
 unsigned waits = 0, batches = 0, reads_after_wait = 0;
@@ -33,7 +35,7 @@ BOOL WINAPI query_frequency(LARGE_INTEGER* value) { value->QuadPart = 10000000; 
 HANDLE WINAPI create_timer(LPSECURITY_ATTRIBUTES, LPCWSTR, DWORD, DWORD) {
     const unsigned index = batches++;
     constexpr std::uint64_t guards[]{300000, 325000, 350000};
-    guard_ns = resource_mode ? 1000000 : index < 30 ? guards[(index / 3 + index % 3) % 3] :
+    guard_ns = formal_mode ? formal_guard_ns : resource_mode ? 1000000 : index < 30 ? guards[(index / 3 + index % 3) % 3] :
         (scenario == Scenario::QUALITY ? 325000 : 300000);
     // 只借真实 Event 的句柄生命周期；从不创建或武装真实 timer。
     return CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -61,6 +63,10 @@ DWORD WINAPI wait_multiple(DWORD count, const HANDLE*, BOOL all, DWORD timeout) 
     return WAIT_OBJECT_0 + 1;
 }
 DWORD WINAPI wait_single(HANDLE, DWORD timeout) {
+    if (formal_mode && timeout == INFINITE) {
+        const auto result = wait_multiple(2, nullptr, FALSE, 1000);
+        return result == WAIT_OBJECT_0 + 1 ? WAIT_OBJECT_0 : result;
+    }
     if (timeout != 0) throw std::runtime_error("fixture 不允许真实或无限等待");
     return scenario == Scenario::STOP_BEFORE ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
 }
@@ -239,6 +245,99 @@ void run_resource_case(const std::filesystem::path& root, const char* name,
                   "active恰好1ms边界应通过，不能采用大于等于拒绝");
     }
 }
+
+void test_formal_seed_scheduler_binding(const std::filesystem::path& root) {
+    const auto directory = root / "formal-seed-policy";
+    check(std::filesystem::create_directory(directory), "formal seed fixture目录创建失败");
+    const json legacy{{"timer_mode", "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL"},
+        {"active_guard_ns", 300000}, {"max_wake_lateness_ns", 150000},
+        {"max_event_interval_width_ns", 100000},
+        {"max_active_wait_ns_per_event", 350000}, {"max_active_wait_ns_total", 14700000}};
+    const json resource{{"timer_mode", "HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1"},
+        {"active_guard_ns", 1000000}, {"max_wake_lateness_ns", 150000},
+        {"max_event_interval_width_ns", 100000},
+        {"max_active_wait_ns_per_event", 1000000}, {"max_active_wait_ns_total", 42000000}};
+    Options options;
+    options.sequence = directory / "sequence.json";
+    options.plan_seed = directory / "seed.json";
+    options.run_uuid = "79ca21ff-6eff-427d-96b3-3a651805222d";
+    options.activation_epoch = 1788813319325ULL;
+    const auto validate = [&](const json& request, const json& scheduler) {
+        const json sequence{{"schema", 7}, {"profile", "physical_b_composite_phase_calibration"},
+            {"sequence_sha256", std::string(64, 'a')}, {"request", request}};
+        const auto sequence_text = sequence.dump();
+        std::ofstream(options.sequence, std::ios::binary) << sequence_text;
+        std::string file_hash, semantic_hash;
+        check(sha256_text(sequence_text, file_hash), "fixture sequence hash失败");
+        json seed{{"status", "AWAITING_AUXILIARY_PREFLIGHT"}, {"run_uuid", options.run_uuid},
+            {"activation_epoch", options.activation_epoch}, {"frozen_at_utc_unix_ns", nullptr},
+            {"physical_output_capability", false}, {"physical_dispatch_count", 0},
+            {"sequence_binding", {{"sequence_file_sha256", file_hash},
+                                  {"sequence_semantic_sha256", std::string(64, 'a')}}},
+            {"scheduler_policy", scheduler}};
+        seed["scheduler_policy"]["preflight_file_sha256"] = nullptr;
+        check(sha256_text(seed.dump(), semantic_hash), "fixture seed hash失败");
+        seed["plan_seed_semantic_sha256"] = semantic_hash;
+        std::ofstream(options.plan_seed, std::ios::binary) << seed.dump();
+        json parsed;
+        std::string sequence_semantic, error;
+        return validate_seed(options, parsed, sequence_semantic, error);
+    };
+    check(validate(legacy, legacy), "旧合法seed仍须接受");
+    check(validate(resource, resource), "新1ms正式seed与sequence完整tuple须接受");
+    check(!validate(resource, legacy) && !validate(legacy, resource), "新旧seed/sequence交叉混配必须在timer前拒绝");
+    for (const auto* key : {"active_guard_ns", "max_wake_lateness_ns", "max_event_interval_width_ns",
+                           "max_active_wait_ns_per_event", "max_active_wait_ns_total"}) {
+        auto changed = resource;
+        changed[key] = changed[key].get<std::uint64_t>() + 1;
+        check(!validate(changed, changed), "自洽但偏离固定tuple的预算必须拒绝");
+    }
+    auto unknown = resource;
+    unknown["timer_mode"] = "UNKNOWN_TIMER";
+    check(!validate(unknown, unknown), "未知timer策略不能按大预算兜底");
+    auto non_integer = resource;
+    non_integer["active_guard_ns"] = 1000000.0;
+    check(!validate(non_integer, non_integer), "正式tuple不能把float隐式转换为整数");
+}
+
+void test_formal_preflight_consumes_selected_policy() {
+    using Policy = mouse_effect_probe::CompositePhaseSchedulerPolicy;
+    using S = study_fixture::Scenario;
+    const auto run = [&](Policy policy, S scenario) {
+        study_fixture::formal_mode = true;
+        study_fixture::resource_mode = policy == Policy::ACTIVE_1MS_V1;
+        study_fixture::formal_guard_ns = policy == Policy::ACTIVE_1MS_V1 ? 1000000 : 300000;
+        study_fixture::scenario = scenario;
+        study_fixture::clock = study_fixture::kInitialQpc;
+        study_fixture::due_at = 0;
+        study_fixture::waits = study_fixture::batches = study_fixture::reads_after_wait = 0;
+        Options options;
+        options.run_uuid = "formal-fixture";
+        json report;
+        std::string error;
+        const auto passed = run_preflight(options, std::string(64, 'b'), std::string(64, 'a'),
+            report, error, nullptr, nullptr, policy);
+        study_fixture::formal_mode = false;
+        return std::pair{passed, report};
+    };
+    const auto [legacy_ok, legacy] = run(Policy::LEGACY, S::SUCCESS);
+    check(legacy_ok && legacy.at("timer_mode") == "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" &&
+          legacy.at("active_guard_ns") == 300000 && legacy.at("max_active_wait_ns_total") == 14700000,
+          "正式旧默认预算与报告必须保留");
+    const auto [resource_ok, resource] = run(Policy::ACTIVE_1MS_V1, S::SUCCESS);
+    check(resource_ok && resource.at("timer_mode") == "HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1" &&
+          resource.at("active_guard_ns") == 1000000 && resource.at("max_active_wait_ns_total") == 42000000 &&
+          resource.at("max_active_wait_ns_per_event") == 1000000 && resource.at("events").size() == 42 &&
+          resource.at("observed_active_wait_total_ns").get<std::uint64_t>() > 14700000 &&
+          resource.at("events")[0].at("active_wait_ns").get<std::uint64_t>() > 350000,
+          "正式1ms必须在真实生产等待分支消费新预算并报告完整42项");
+    const auto [late_ok, late] = run(Policy::ACTIVE_1MS_V1, S::QUALITY);
+    check(!late_ok && late.is_null() && study_fixture::waits == 5,
+          "正式路径184us仍须当场拒绝，不保留study质量尾部语义");
+    const auto [hard_ok, hard] = run(Policy::ACTIVE_1MS_V1, S::HARD_ACTIVE);
+    check(!hard_ok && hard.is_null() && study_fixture::waits == 1,
+          "正式1ms单事件超限必须立即拒绝");
+}
 } // namespace
 
 int main() {
@@ -263,6 +362,8 @@ int main() {
         run_resource_case(root, "resource-timeout", S::TIMEOUT);
         run_resource_case(root, "resource-validation", S::VALIDATION_FAILURE);
         run_resource_case(root, "resource-hash", S::HASH_DRIFT);
+        test_formal_seed_scheduler_binding(root);
+        test_formal_preflight_consumes_selected_policy();
         std::cout << "scheduler study 生产编排确定性测试全部通过；无真实计时测量。\n";
         return 0;
     } catch (const std::exception& error) {

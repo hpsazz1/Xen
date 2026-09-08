@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 #include "scheduler_study_internal.h"
+#include "../mouse_effect_probe/composite_scheduler_policy.h"
 
 #include <algorithm>
 #include <array>
@@ -506,8 +507,25 @@ bool write_json_atomic(const std::filesystem::path& path,
     }
 }
 
+bool matches_composite_scheduler(const nlohmann::json& document,
+        const mouse_effect_probe::detail::CompositeSchedulerParameters& scheduler) {
+    if (!document.is_object() || document.value("timer_mode", std::string{}) != scheduler.timer_mode)
+        return false;
+    for (const auto& [name, expected] : std::array<std::pair<const char*, std::uint64_t>, 5>{{
+        {"active_guard_ns", scheduler.active_guard_ns},
+        {"max_wake_lateness_ns", scheduler.max_wake_lateness_ns},
+        {"max_event_interval_width_ns", scheduler.max_event_interval_width_ns},
+        {"max_active_wait_ns_per_event", scheduler.max_active_wait_ns_per_event},
+        {"max_active_wait_ns_total", scheduler.max_active_wait_ns_total}}}) {
+        if (!document.contains(name) || !document.at(name).is_number_integer() ||
+            document.at(name) != expected) return false;
+    }
+    return true;
+}
+
 bool validate_seed(const Options& options, nlohmann::json& seed,
-                   std::string& sequence_semantic, std::string& error) {
+                   std::string& sequence_semantic, std::string& error,
+                   mouse_effect_probe::CompositePhaseSchedulerPolicy* validated_policy = nullptr) {
     std::string seed_content;
     std::string sequence_content;
     if (!read_file(options.plan_seed, seed_content, error) ||
@@ -515,6 +533,16 @@ bool validate_seed(const Options& options, nlohmann::json& seed,
     try {
         seed = nlohmann::json::parse(seed_content);
         const auto sequence = nlohmann::json::parse(sequence_content);
+        mouse_effect_probe::CompositePhaseSchedulerPolicy scheduler_policy{};
+        mouse_effect_probe::detail::CompositeSchedulerParameters scheduler{};
+        if (!mouse_effect_probe::detail::parse_composite_scheduler_timer_mode(
+                sequence.at("request").value("timer_mode", std::string{}), scheduler_policy) ||
+            !mouse_effect_probe::detail::composite_scheduler_parameters(scheduler_policy, scheduler) ||
+            !matches_composite_scheduler(sequence.at("request"), scheduler) ||
+            !matches_composite_scheduler(seed.at("scheduler_policy"), scheduler)) {
+            error = "sequence request/plan seed 必须绑定同一已知完整 scheduler tuple";
+            return false;
+        }
         const auto claimed = seed.value(
             "plan_seed_semantic_sha256", std::string{});
         auto semantic_input = seed;
@@ -542,28 +570,12 @@ bool validate_seed(const Options& options, nlohmann::json& seed,
                 "sequence_semantic_sha256", std::string{}) !=
                 sequence.value("sequence_sha256", std::string{}) ||
             !seed["scheduler_policy"][
-                "preflight_file_sha256"].is_null() ||
-            seed["scheduler_policy"].value(
-                "timer_mode", std::string{}) !=
-                "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" ||
-            seed["scheduler_policy"].value(
-                "active_guard_ns", std::uint64_t{0}) != kActiveGuardNs ||
-            seed["scheduler_policy"].value(
-                "max_wake_lateness_ns", std::uint64_t{0}) !=
-                kMaxWakeLatenessNs ||
-            seed["scheduler_policy"].value(
-                "max_event_interval_width_ns", std::uint64_t{0}) !=
-                kMaxEventIntervalWidthNs ||
-            seed["scheduler_policy"].value(
-                "max_active_wait_ns_per_event", std::uint64_t{0}) !=
-                kMaxActiveWaitPerEventNs ||
-            seed["scheduler_policy"].value(
-                "max_active_wait_ns_total", std::uint64_t{0}) !=
-                kMaxActiveWaitTotalNs) {
+                "preflight_file_sha256"].is_null()) {
             if (error.empty()) error = "plan seed/sequence/scheduler 合同漂移";
             return false;
         }
         sequence_semantic = sequence["sequence_sha256"].get<std::string>();
+        if (validated_policy) *validated_policy = scheduler_policy;
         return true;
     } catch (const std::exception& exception) {
         error = std::string("plan seed/sequence JSON 无效: ") +
@@ -576,13 +588,21 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
                    std::string_view sequence_semantic,
                    nlohmann::json& document, std::string& error,
                    SchedulerTrace* trace = nullptr,
-                   const StudyRun* study = nullptr) {
+                   const StudyRun* study = nullptr,
+                   mouse_effect_probe::CompositePhaseSchedulerPolicy formal_policy =
+                       mouse_effect_probe::CompositePhaseSchedulerPolicy::LEGACY) {
+    mouse_effect_probe::detail::CompositeSchedulerParameters scheduler{};
+    if (!mouse_effect_probe::detail::composite_scheduler_parameters(formal_policy, scheduler) ||
+        (study && formal_policy != mouse_effect_probe::CompositePhaseSchedulerPolicy::LEGACY)) {
+        error = "formal scheduler policy 非法或与独立 study 混用";
+        return false;
+    }
     const auto active_per_event = study
         ? xen::scheduler_study::detail::active_limits(study->policy).per_event_ns
-        : kMaxActiveWaitPerEventNs;
+        : scheduler.max_active_wait_ns_per_event;
     const auto active_per_batch = study
         ? xen::scheduler_study::detail::active_limits(study->policy).per_batch_ns
-        : kMaxActiveWaitTotalNs;
+        : scheduler.max_active_wait_ns_total;
     auto* failure = trace ? &trace->win32_failure : nullptr;
     if (trace) trace->stage = "QPC_FREQUENCY";
     LARGE_INTEGER frequency_value{};
@@ -613,7 +633,7 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
     std::int64_t anchor = 0;
     if (trace) trace->stage = "QPC_SETUP";
     if (!ns_to_ticks(kPreflightIntervalNs, frequency, interval_ticks) ||
-        !ns_to_ticks(study ? study->guard_ns : kActiveGuardNs,
+        !ns_to_ticks(study ? study->guard_ns : scheduler.active_guard_ns,
                      frequency, guard_ticks) ||
         !query_qpc(anchor, failure)) {
         error = "preflight QPC 单位转换失败";
@@ -845,8 +865,8 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
                          static_cast<std::int64_t>(active_ns));
             trace->stage = event->last_stage = "EVENT_BUDGETS";
         }
-        const bool budgets_failed = lateness > kMaxWakeLatenessNs ||
-            marker_width > kMaxEventIntervalWidthNs ||
+        const bool budgets_failed = lateness > scheduler.max_wake_lateness_ns ||
+            marker_width > scheduler.max_event_interval_width_ns ||
             active_ns > active_per_event ||
             total_active_ns > active_per_batch - active_ns;
         const auto study_disposition = study
@@ -904,7 +924,7 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
             {"frequency_hz", frequency},
             {"producer_process_id", GetCurrentProcessId()},
         }},
-        {"timer_mode", "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL"},
+        {"timer_mode", scheduler.timer_mode},
         {"process_priority", "NORMAL"},
         {"thread_priority", "NORMAL"},
         {"cpu_affinity_used", false},
@@ -912,11 +932,11 @@ bool run_preflight(const Options& options, std::string_view seed_semantic,
         {"periodic_timer_used", false},
         {"event_count", kPreflightEventCount},
         {"preflight_interval_ns", kPreflightIntervalNs},
-        {"active_guard_ns", kActiveGuardNs},
-        {"max_wake_lateness_ns", kMaxWakeLatenessNs},
-        {"max_event_interval_width_ns", kMaxEventIntervalWidthNs},
-        {"max_active_wait_ns_per_event", kMaxActiveWaitPerEventNs},
-        {"max_active_wait_ns_total", kMaxActiveWaitTotalNs},
+        {"active_guard_ns", scheduler.active_guard_ns},
+        {"max_wake_lateness_ns", scheduler.max_wake_lateness_ns},
+        {"max_event_interval_width_ns", scheduler.max_event_interval_width_ns},
+        {"max_active_wait_ns_per_event", active_per_event},
+        {"max_active_wait_ns_total", active_per_batch},
         {"observed_max_wake_lateness_ns", maximum_lateness_ns},
         {"observed_max_marker_width_ns", maximum_marker_width_ns},
         {"observed_active_wait_total_ns", total_active_ns},
@@ -1346,8 +1366,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         nlohmann::json seed;
         std::string sequence_semantic;
+        mouse_effect_probe::CompositePhaseSchedulerPolicy scheduler_policy{};
         if (!validate_seed(
-                options, seed, sequence_semantic, error)) {
+                options, seed, sequence_semantic, error, &scheduler_policy)) {
             std::cerr << "seal 前置校验失败: " << error << '\n';
             return 2;
         }
@@ -1355,7 +1376,7 @@ int wmain(int argc, wchar_t* argv[]) {
             "plan_seed_semantic_sha256"].get<std::string>();
         nlohmann::json preflight;
         if (!run_preflight(options, seed_semantic, sequence_semantic,
-                           preflight, error)) {
+                           preflight, error, nullptr, nullptr, scheduler_policy)) {
             std::cerr << "scheduler preflight 失败: " << error << '\n';
             return 3;
         }

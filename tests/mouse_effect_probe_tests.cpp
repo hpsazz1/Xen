@@ -821,6 +821,56 @@ void test_physical_b_composite_phase_sequence_is_precommitted() {
             "scheduler phase、lead 与 window 合同必须在 sequence 中预注册");
 }
 
+void test_composite_scheduler_policy_preserves_legacy_and_is_exact() {
+    using Policy = mouse_effect_probe::CompositePhaseSchedulerPolicy;
+    using Sequence = mouse_effect_probe::MouseEffectProbeSequence;
+    Sequence legacy, explicit_legacy, resource;
+    std::string error;
+    expect(mouse_effect_probe::make_composite_phase_calibration_sequence(legacy, error) &&
+           mouse_effect_probe::make_composite_phase_calibration_sequence(Policy::LEGACY, explicit_legacy, error),
+           "默认与显式legacy都必须生成");
+    expect(legacy.sequence_sha256 == "a4e3f00dd5dcfeb91ecda474f04ad0de4f535297ff01409f9d26330e61290c1c" &&
+           explicit_legacy.sequence_sha256 == legacy.sequence_sha256,
+           "旧合法序列的canonical hash不得随新策略漂移");
+    expect(mouse_effect_probe::make_composite_phase_calibration_sequence(Policy::ACTIVE_1MS_V1, resource, error) &&
+           mouse_effect_probe::validate_mouse_effect_probe_sequence(resource, error),
+           "新策略必须经公开生成器和validator闭合: " + error);
+    const auto& request = resource.composite_phase_request;
+    expect(request.timer_mode == "HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1" &&
+           request.active_guard_ns == 1000000 && request.max_wake_lateness_ns == 150000 &&
+           request.max_event_interval_width_ns == 100000 &&
+           request.max_active_wait_ns_per_event == 1000000 && request.max_active_wait_ns_total == 42000000 &&
+           resource.sequence_sha256 != legacy.sequence_sha256 && resource.samples.size() == 295 &&
+           resource.composite_phase_windows.size() == 42 && resource.net_x_counts == 0 &&
+           resource.max_abs_prefix_x_counts == 1,
+           "1ms固定tuple改变身份但保留原受控序列几何");
+    TemporaryDirectory temporary;
+    const auto path = temporary.path() / "resource-sequence.json";
+    Sequence loaded;
+    expect(mouse_effect_probe::write_mouse_effect_probe_sequence(path, resource, error) &&
+           mouse_effect_probe::read_mouse_effect_probe_sequence(path, loaded, error) &&
+           loaded.sequence_sha256 == resource.sequence_sha256,
+           "新资源序列必须通过文件reader原样回读: " + error);
+    auto mixed = resource;
+    mixed.composite_phase_request.timer_mode = legacy.composite_phase_request.timer_mode;
+    expect(!mouse_effect_probe::validate_mouse_effect_probe_sequence(mixed, error), "旧mode配新预算必须拒绝");
+    mixed = legacy;
+    mixed.composite_phase_request.timer_mode = request.timer_mode;
+    expect(!mouse_effect_probe::validate_mouse_effect_probe_sequence(mixed, error), "新mode配旧预算必须拒绝");
+    for (auto member : {&mouse_effect_probe::CompositePhaseSequenceRequest::active_guard_ns,
+                        &mouse_effect_probe::CompositePhaseSequenceRequest::max_wake_lateness_ns,
+                        &mouse_effect_probe::CompositePhaseSequenceRequest::max_event_interval_width_ns,
+                        &mouse_effect_probe::CompositePhaseSequenceRequest::max_active_wait_ns_per_event,
+                        &mouse_effect_probe::CompositePhaseSequenceRequest::max_active_wait_ns_total}) {
+        mixed = resource;
+        ++(mixed.composite_phase_request.*member);
+        expect(!mouse_effect_probe::validate_mouse_effect_probe_sequence(mixed, error),
+               "局部预算漂移不能以新mode放宽准入");
+    }
+    expect(!mouse_effect_probe::make_composite_phase_calibration_sequence(
+               static_cast<Policy>(99), mixed, error), "未知生成器策略枚举必须拒绝");
+}
+
 void test_sequence_file_round_trip_rejects_overwrite_and_tampering() {
     TemporaryDirectory temporary;
     mouse_effect_probe::MouseEffectProbeSequence sequence;
@@ -1324,6 +1374,7 @@ int main() {
     test_physical_b_holdout_sequence_is_frozen_independent_and_bounded();
     test_physical_b_command_magnitude_sequences_are_fixed_and_bounded();
     test_physical_b_composite_phase_sequence_is_precommitted();
+    test_composite_scheduler_policy_preserves_legacy_and_is_exact();
     test_sequence_file_round_trip_rejects_overwrite_and_tampering();
     test_executor_consumes_one_sample_per_frame_and_never_catches_up();
     test_executor_failure_stops_without_compensation();

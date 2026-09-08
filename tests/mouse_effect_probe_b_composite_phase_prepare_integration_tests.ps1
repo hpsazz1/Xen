@@ -224,6 +224,8 @@ Assert-PackageRejected "wrong-commit" @{
 Assert-PackageRejected "wrong-manifest" @{
     ExpectedToolManifestSha256 = "0" * 64
 } "manifest SHA-256"
+Assert-PackageRejected "unknown-policy" @{ SchedulerPolicy = "active-2ms-v1" } "SchedulerPolicy"
+Assert-PackageRejected "auto-overlong" @{ BoundedCompositeAutoArm = $true; MaxSeconds = 16 } "15"
 
 $launcherBytes = [IO.File]::ReadAllBytes($fixtureLauncher)
 $oldLauncherPath = Join-Path $ToolRoot "launch_mouse_effect_probe_a.ps1"
@@ -340,6 +342,8 @@ if ([int]$task.schema_version -ne 10 -or
     -not [bool]$task.composite_policy.same_auxiliary_host_preflight_required -or
     [bool]$task.composite_policy.response_revealed_before_final_plan -or
     [bool]$task.composite_policy.production_aim_changed -or
+    -not [bool]$task.safety.right_button_deadman_required -or
+    [bool]$task.safety.bounded_composite_auto_arm -or
     [int]$sequence.schema -ne 7 -or
     @($sequence.samples).Count -ne 295 -or
     @($sequence.windows).Count -ne 42 -or
@@ -353,6 +357,16 @@ if ([int]$task.schema_version -ne 10 -or
     [bool]$summary.final_plan_frozen -or
     [bool]$summary.physical_launch_executed) {
     throw "Prepared composite-phase identities do not close"
+}
+foreach ($scheduler in @($sequence.request, $seed.scheduler_policy)) {
+    if ([string]$scheduler.timer_mode -cne "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" -or
+        [uint64]$scheduler.active_guard_ns -ne 300000 -or
+        [uint64]$scheduler.max_wake_lateness_ns -ne 150000 -or
+        [uint64]$scheduler.max_event_interval_width_ns -ne 100000 -or
+        [uint64]$scheduler.max_active_wait_ns_per_event -ne 350000 -or
+        [uint64]$scheduler.max_active_wait_ns_total -ne 14700000) {
+        throw "Prepare 默认 legacy 必须保留完整原合同"
+    }
 }
 foreach ($property in $task.files.PSObject.Properties) {
     Assert-Identity $property.Value "task.files.$($property.Name)"
@@ -371,6 +385,62 @@ if (-not $taskMarkdown.Contains("-AllowPhysicalOutput") -or
     -not $taskMarkdown.Contains(
         "XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT")) {
     throw "TASK.md lacks the exact user-only Launch command"
+}
+
+foreach ($autoArm in @($false, $true)) {
+    $newRun = Join-Path $caseRoot $(if ($autoArm) { 'active-auto' } else { 'active-manual' })
+    $newArguments = @{} + $arguments
+    $newArguments.RunDirectory = $newRun
+    $newArguments.PublishedRunDirectory = $newRun
+    $newArguments.SchedulerPolicy = 'active-1ms-v1'
+    $newArguments.BoundedCompositeAutoArm = $autoArm
+    & $PrepareScript @newArguments
+    $newTask = Get-Content -LiteralPath (Join-Path $newRun 'task.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    $newSequence = Get-Content -LiteralPath (Join-Path $newRun 'sequence.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    $newSeed = Get-Content -LiteralPath (Join-Path $newRun 'composite-phase-plan-seed.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    $newSummary = Get-Content -LiteralPath (Join-Path $newRun 'prepare-summary.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    foreach ($scheduler in @($newSequence.request, $newSeed.scheduler_policy)) {
+        if ([string]$scheduler.timer_mode -cne 'HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1' -or
+            [uint64]$scheduler.active_guard_ns -ne 1000000 -or
+            [uint64]$scheduler.max_wake_lateness_ns -ne 150000 -or
+            [uint64]$scheduler.max_event_interval_width_ns -ne 100000 -or
+            [uint64]$scheduler.max_active_wait_ns_per_event -ne 1000000 -or
+            [uint64]$scheduler.max_active_wait_ns_total -ne 42000000) {
+            throw '显式新 Prepare 没有贯通 Sequence 和 seed 的完整固定策略'
+        }
+    }
+    if ([string]$newTask.scope_id -ceq [string]$task.scope_id -or
+        [string]$newSequence.sequence_sha256 -ceq [string]$sequence.sequence_sha256 -or
+        [string]$newSeed.sequence_binding.sequence_semantic_sha256 -cne [string]$newSequence.sequence_sha256 -or
+        [string]$newSummary.status -cne 'PREPARED_NOT_LAUNCHED' -or
+        [bool]$newSummary.scheduler_preflight_executed -or [bool]$newSummary.physical_launch_executed -or
+        [bool]$newTask.safety.bounded_composite_auto_arm -ne $autoArm -or
+        [bool]$newTask.safety.right_button_deadman_required -eq $autoArm -or
+        [bool]$newTask.requires_user_frontend_launch -eq $autoArm -or
+        [uint64]$newTask.safety.max_abs_pulse_counts -ne 1 -or
+        [uint64]$newTask.safety.max_abs_prefix_x_counts -ne 1 -or
+        (@($newTask.safety.emergency_virtual_keys) -join ',') -ne '35,119' -or
+        [string]$newTask.tool_package.manifest.sha256 -cne $arguments.ExpectedToolManifestSha256) {
+        throw '新 Prepare 必须取得新 scope/sequence 身份并严格限定授权模式'
+    }
+    foreach ($property in $newTask.files.PSObject.Properties) {
+        Assert-Identity $property.Value "new task.files.$($property.Name)"
+    }
+    foreach ($forbidden in @('scheduler-preflight.json', 'composite-phase-plan.json',
+            'composite-schedule-ledger.json', 'command-report.json', 'safety-ledger.json', 'launch-summary.json', 'pixel-evidence')) {
+        if (Test-Path -LiteralPath (Join-Path $newRun $forbidden)) {
+            throw "新 Prepare 不得执行采集：$forbidden"
+        }
+    }
+    $newMarkdown = Get-Content -LiteralPath (Join-Path $newRun 'TASK.md') -Raw -Encoding utf8
+    if ($newMarkdown.Contains('System.Object[]') -or
+        -not $newMarkdown.Contains('active-1ms-v1') -or
+        -not $newMarkdown.Contains('-AllowPhysicalOutput') -or
+        ($autoArm -and (-not $newMarkdown.Contains('自动有限取证') -or
+            $newMarkdown.Contains('只能由用户在辅机前台执行'))) -or
+        (-not $autoArm -and -not $newMarkdown.Contains('只能由用户在辅机前台执行'))) {
+        throw '新 TASK 必须如实说明显式策略和自动/人工有限取证授权'
+    }
 }
 
 [IO.File]::AppendAllText(

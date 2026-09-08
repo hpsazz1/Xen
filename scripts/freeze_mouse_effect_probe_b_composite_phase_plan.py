@@ -14,6 +14,17 @@ from typing import Any
 
 
 Q32 = 1 << 32
+SCHEDULER_BUDGET_FIELDS = (
+    "active_guard_ns", "max_wake_lateness_ns",
+    "max_event_interval_width_ns", "max_active_wait_ns_per_event",
+    "max_active_wait_ns_total",
+)
+SCHEDULER_BUDGETS = {
+    "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL": (
+        300_000, 150_000, 100_000, 350_000, 14_700_000),
+    "HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1": (
+        1_000_000, 150_000, 100_000, 1_000_000, 42_000_000),
+}
 PHASE_CELLS = ("P1_8", "P3_8", "P5_8", "P7_8")
 PHASE_NUMERATORS = dict(zip(PHASE_CELLS, (1, 3, 5, 7)))
 WILLIAMS_ROWS = (
@@ -178,23 +189,24 @@ def validate_sequence(sequence: dict[str, Any], order: list[str],
     windows = sequence.get("windows")
     samples = sequence.get("samples")
     summary = sequence.get("summary")
+    timer_mode = request.get("timer_mode") if isinstance(request, dict) else None
+    if not isinstance(timer_mode, str) or timer_mode not in SCHEDULER_BUDGETS:
+        raise PlanError("sequence scheduler timer_mode 未注册")
     expected_request = {
         "predictor_sample_count": 1,
         "window_sample_count": 6,
         "single_magnitude_counts": 1,
         "issue_lead_ns": 400_000,
         "target_tolerance_q32": Q32 // 16,
-        "active_guard_ns": 300_000,
-        "max_wake_lateness_ns": 150_000,
-        "max_event_interval_width_ns": 100_000,
-        "max_active_wait_ns_per_event": 350_000,
-        "max_active_wait_ns_total": 42 * 350_000,
-        "timer_mode": "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL",
+        **dict(zip(SCHEDULER_BUDGET_FIELDS, SCHEDULER_BUDGETS[timer_mode])),
+        "timer_mode": timer_mode,
     }
     if (sequence.get("schema") != 7 or
             sequence.get("profile") !=
             "physical_b_composite_phase_calibration" or
-            request != expected_request or not is_sha256(
+            request != expected_request or
+            any(type(request[field]) is not type(value)
+                for field, value in expected_request.items()) or not is_sha256(
                 sequence.get("sequence_sha256")) or
             not isinstance(windows, list) or len(windows) != 42 or
             not isinstance(samples, list) or len(samples) != 295 or
@@ -282,6 +294,10 @@ def build_plan(options: argparse.Namespace) -> dict[str, Any]:
                 preflight.get("physical_output_capability") is not False or
                 preflight.get("physical_dispatch_count") != 0):
             raise PlanError("scheduler preflight identity/result 无效")
+        if any(type(preflight.get(field)) is not type(sequence["request"][field]) or
+               preflight.get(field) != sequence["request"][field]
+               for field in ("timer_mode", *SCHEDULER_BUDGET_FIELDS)):
+            raise PlanError("scheduler preflight policy 与 sequence request 不一致")
         preflight_hash = file_sha256(preflight_path)
         if options.frozen_at_utc_unix_ns is None or \
                 options.frozen_at_utc_unix_ns <= 0:

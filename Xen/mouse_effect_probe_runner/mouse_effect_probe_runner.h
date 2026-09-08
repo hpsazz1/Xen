@@ -86,6 +86,7 @@ struct MouseEffectProbeMonitorPacketIdentity {
 };
 
 struct MouseEffectProbeSafetyLedger {
+    bool bounded_composite_auto_arm = false;
     std::vector<MouseEffectProbeSafetyObservation> observations;
     std::uint64_t dropped_observation_count = 0;
     bool recording_failed = false;
@@ -113,6 +114,7 @@ struct MouseEffectProbeRunOptions {
     std::uint64_t max_seconds = 15;
     bool allow_physical_output = false;
     bool physical_output_confirmed = false;
+    bool bounded_composite_auto_arm = false;
     MouseEffectProbePhysicalAuthorization physical_authorization =
         MouseEffectProbePhysicalAuthorization::NONE;
     MouseOutputOwnerScope owner_scope = MouseOutputOwnerScope::PRODUCTION;
@@ -179,7 +181,7 @@ bool validate_mouse_effect_probe_sequence_authorization(
 std::string_view mouse_effect_probe_deadman_arming_prompt() noexcept;
 
 // 将原始 monitor 快照与安全判定共同记录；只压缩完全相同的高频 poll，
-// 不改变 deadman 的 fail-closed 决策。
+// 旧默认要求右键；有限composite自动武装仍如实记录键态并检查monitor和急停。
 MouseEffectProbeSafetyDecision record_mouse_effect_probe_safety_observation(
     MouseEffectProbeSafetyPhase phase,
     bool poll_succeeded,

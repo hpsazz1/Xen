@@ -75,7 +75,8 @@ void print_usage() {
            "--run-role <primary|holdout> --baseline-samples 64 "
            "--response-samples 48 --guard-samples 32\n"
         << "  XenMouseEffectProbeSequence --output <new-json> "
-           "--profile physical-b-composite-phase-calibration\n";
+           "--profile physical-b-composite-phase-calibration "
+           "[--scheduler-policy legacy|active-1ms-v1]\n";
 }
 
 } // namespace
@@ -97,6 +98,8 @@ int wmain(int argc, wchar_t* argv[]) {
         physical_b_primary_request;
     std::wstring profile = L"sparse-pulse-a";
     std::wstring run_role;
+    auto scheduler_policy = mouse_effect_probe::CompositePhaseSchedulerPolicy::LEGACY;
+    bool seen_scheduler_policy = false;
     bool seen_output = false;
     bool seen_baseline = false;
     bool seen_response = false;
@@ -124,6 +127,12 @@ int wmain(int argc, wchar_t* argv[]) {
         if (argument == L"--output" && !seen_output) {
             output_path = std::filesystem::path(value);
             seen_output = true;
+        } else if (argument == L"--scheduler-policy" && !seen_scheduler_policy &&
+                   (value == L"legacy" || value == L"active-1ms-v1")) {
+            scheduler_policy = value == L"legacy"
+                ? mouse_effect_probe::CompositePhaseSchedulerPolicy::LEGACY
+                : mouse_effect_probe::CompositePhaseSchedulerPolicy::ACTIVE_1MS_V1;
+            seen_scheduler_policy = true;
         } else if (argument == L"--baseline-samples" && !seen_baseline &&
                    parse_u64(value, request.baseline_sample_count)) {
             seen_baseline = true;
@@ -264,7 +273,7 @@ int wmain(int argc, wchar_t* argv[]) {
         !seen_challenge_stride && !seen_peak_hold && !seen_settle &&
         !seen_lfsr_order && !seen_feedback_mask && !seen_seed &&
         !seen_phase && !seen_offline_sequence_sha;
-    if (!common_valid ||
+    if (!common_valid || (seen_scheduler_policy && !composite_phase_profile) ||
         (!sparse_valid && !dependency_valid && !s1_liveness_valid &&
          !physical_b_valid && !command_magnitude_valid &&
          !composite_phase_valid)) {
@@ -279,7 +288,7 @@ int wmain(int argc, wchar_t* argv[]) {
     if (composite_phase_profile) {
         generated =
             mouse_effect_probe::make_composite_phase_calibration_sequence(
-                sequence, error);
+                scheduler_policy, sequence, error);
     } else if (physical_b_profile) {
         physical_b_primary_request.guard_sample_count =
             request.guard_sample_count;

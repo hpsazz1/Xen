@@ -23,12 +23,54 @@
     [uint64]$SidecarFrames = 2400,
     [ValidateRange(8, 60)]
     [uint64]$MaxSeconds = 15,
+    [ValidateSet('legacy', 'active-1ms-v1')]
+    [string]$SchedulerPolicy = 'legacy',
+    [switch]$BoundedCompositeAutoArm,
     [string]$LeftWitnessRoi = "16,48,96,224",
     [string]$RightWitnessRoi = "208,48,96,224"
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+if ($BoundedCompositeAutoArm.IsPresent -and $MaxSeconds -gt 15) {
+    throw "自动有限 composite 取证最多允许 15 秒"
+}
+
+function Assert-CompositeSchedulerPolicy(
+        [object]$Policy,
+        [string]$ExpectedTimerMode = "") {
+    if ($null -eq $Policy) { throw "composite scheduler policy 缺失" }
+    $modeProperty = $Policy.PSObject.Properties['timer_mode']
+    if ($null -eq $modeProperty -or $modeProperty.Value -isnot [string]) {
+        throw "composite scheduler policy timer_mode 无效"
+    }
+    $mode = [string]$modeProperty.Value
+    $limits = switch -CaseSensitive ($mode) {
+        "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" {
+            @(300000, 150000, 100000, 350000, 14700000); break
+        }
+        "HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1" {
+            @(1000000, 150000, 100000, 1000000, 42000000); break
+        }
+        default { throw "composite scheduler policy timer_mode 未知：$mode" }
+    }
+    $fields = @('active_guard_ns', 'max_wake_lateness_ns',
+        'max_event_interval_width_ns', 'max_active_wait_ns_per_event',
+        'max_active_wait_ns_total')
+    for ($index = 0; $index -lt $fields.Count; ++$index) {
+        $property = $Policy.PSObject.Properties[$fields[$index]]
+        if ($null -eq $property -or
+            ($property.Value -isnot [int] -and $property.Value -isnot [long] -and
+             $property.Value -isnot [uint32] -and $property.Value -isnot [uint64]) -or
+            $property.Value -ne $limits[$index]) {
+            throw "composite scheduler policy 固定预算无效：$($fields[$index])"
+        }
+    }
+    if ($ExpectedTimerMode -ne "" -and $mode -cne $ExpectedTimerMode) {
+        throw "composite scheduler policy 与 sequence 选择不一致"
+    }
+    return $mode
+}
 
 function Get-FileSha256([string]$Path) {
     $algorithm = [Security.Cryptography.SHA256]::Create()
@@ -486,12 +528,17 @@ $obsLogCopy = Copy-NewPublishedFile `
 $sequencePath = Join-Path $stagingDirectory "sequence.json"
 & (Join-Path $toolDirectory "XenMouseEffectProbeSequence.exe") `
     --output $sequencePath `
-    --profile physical-b-composite-phase-calibration
+    --profile physical-b-composite-phase-calibration `
+    --scheduler-policy $SchedulerPolicy
 if ($LASTEXITCODE -ne 0) {
     throw "composite-phase sequence tool 失败，ExitCode=$LASTEXITCODE"
 }
 $sequence = Get-Content -LiteralPath $sequencePath -Raw -Encoding utf8 |
     ConvertFrom-Json
+$selectedTimerMode = if ($SchedulerPolicy -eq 'active-1ms-v1') {
+    'HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1'
+} else { 'HIGH_RESOLUTION_ONE_SHOT_OR_FAIL' }
+[void](Assert-CompositeSchedulerPolicy $sequence.request $selectedTimerMode)
 $samples = @($sequence.samples)
 $windows = @($sequence.windows)
 $pulses = @($samples | Where-Object { [int]$_.dx_counts -ne 0 })
@@ -506,8 +553,6 @@ if ([int]$sequence.schema -ne 7 -or
     [uint64]$sequence.request.predictor_sample_count -ne 1 -or
     [uint64]$sequence.request.window_sample_count -ne 6 -or
     [uint64]$sequence.request.single_magnitude_counts -ne 1 -or
-    [string]$sequence.request.timer_mode -ne
-        "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL" -or
     @($samples | Where-Object {
         [int]$_.dy_counts -ne 0 -or [math]::Abs([int]$_.dx_counts) -gt 1
     }).Count -ne 0) {
@@ -591,6 +636,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 $planSeed = Get-Content -LiteralPath $planSeedPath -Raw -Encoding utf8 |
     ConvertFrom-Json
+[void](Assert-CompositeSchedulerPolicy $planSeed.scheduler_policy $selectedTimerMode)
 if ([string]$planSeed.status -ne "AWAITING_AUXILIARY_PREFLIGHT" -or
     [string]$planSeed.run_uuid -ne $runUuid -or
     [uint64]$planSeed.activation_epoch -ne $activationEpoch -or
@@ -657,7 +703,7 @@ $task = [ordered]@{
     expected_nonzero_transition_count = 38
     max_abs_prefix_x_counts = 1
     physical_output_capability = $true
-    requires_user_frontend_launch = $true
+    requires_user_frontend_launch = -not $BoundedCompositeAutoArm.IsPresent
     physical_output_confirmation =
         "XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT"
     files = [ordered]@{
@@ -731,7 +777,8 @@ $task = [ordered]@{
     safety = [ordered]@{
         normal_aim_must_be_closed = $true
         emergency_virtual_keys = @(35, 119)
-        right_button_deadman_required = $true
+        right_button_deadman_required = -not $BoundedCompositeAutoArm.IsPresent
+        bounded_composite_auto_arm = $BoundedCompositeAutoArm.IsPresent
         any_failure_stops_without_compensation = $true
         zero_y_required = $true
         max_abs_pulse_counts = 1
@@ -747,6 +794,16 @@ $launchCommand = ('powershell.exe -NoProfile -ExecutionPolicy Bypass ' +
     '-PhysicalOutputConfirmation {2}') -f
     $launchScript.path, $resolvedPublishedRun,
     "XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT"
+$operatorInstructions = if ($BoundedCompositeAutoArm.IsPresent) {
+    @('- 本 Run 已显式选择自动有限取证：monitor 与所有采集门禁就绪后自动 arm，无需按住右键；最多 15 秒，仅上述固定 ±1 X 序列',
+      '- 不要移动物理鼠标或按 WASD；End、F8、monitor/sidecar 失效或任一失败仍停发且不补偿；真实右键状态照常记入证据，不模拟按键')
+} else {
+    @('- 操作只看提示：【预检】时保持右键松开；【按住右键】后 5 秒内按住并保持；【现在松开右键】立即松开；【记录完成】后回传观察',
+      '- 除右键 deadman 外，不要移动物理鼠标、不要按 WASD；松开右键、End、F8 或任一失败会立即停发且不补偿')
+}
+$launchAuthority = if ($BoundedCompositeAutoArm.IsPresent) {
+    '下面命令会发送真实 KMBOX 输入；仅用于当轮已明确授权的自动有限 composite 取证，不授权生产 Aim 自动实测：'
+} else { '下面命令会发送真实 KMBOX 输入，只能由用户在辅机前台执行：' }
 $taskMarkdown = @(
     "# Mouse Effect Probe Physical B Composite-Phase Calibration",
     "",
@@ -754,10 +811,10 @@ $taskMarkdown = @(
     "- 固定序列：295 samples、42 windows（38 个 ±1 X pulse + 4 个零命令 control）；净 X=0、Y=0、最大前缀=1 count",
     "- Launch 先在本辅机执行 output-off scheduler preflight，并在 sidecar/响应揭示前封存最终 plan；preflight 失败不会启动 sidecar 或 KMBOX",
     "- 本 Run 只校准 composite completion→NDI submission phase；不修改生产 Aim/F1/Y/prediction，不声明新 gain",
-    '- 操作只看提示：【预检】时保持右键松开；【按住右键】后 5 秒内按住并保持；【现在松开右键】立即松开；【记录完成】后回传观察',
-    "- 除右键 deadman 外，不要移动物理鼠标、不要按 WASD；松开右键、End、F8 或任一失败会立即停发且不补偿",
+    "- Scheduler policy：``$SchedulerPolicy``；timer mode：``$selectedTimerMode``",
+    ($operatorInstructions -join [Environment]::NewLine),
     "",
-    "下面命令会发送真实 KMBOX 输入，只能由用户在辅机前台执行：",
+    $launchAuthority,
     "",
     "``````powershell",
     $launchCommand,

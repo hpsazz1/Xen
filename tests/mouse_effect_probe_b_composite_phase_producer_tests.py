@@ -69,8 +69,9 @@ def load_fixture(path: pathlib.Path) -> Any:
 def build_raw(root: pathlib.Path, fixture: Any,
               binder: pathlib.Path, evaluator: pathlib.Path,
               producer: pathlib.Path,
-              verifier: pathlib.Path) -> dict[str, pathlib.Path]:
-    plan, _, _ = fixture.build_inputs(binder, evaluator)
+              verifier: pathlib.Path,
+              timer_mode: str = "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL") -> dict[str, pathlib.Path]:
+    plan, _, _ = fixture.build_inputs(binder, evaluator, timer_mode)
     plan["seal"]["producer_file_sha256"] = file_sha256(producer)
     plan["seal"]["report_verifier_file_sha256"] = file_sha256(verifier)
     policy = plan["capture_policy"]
@@ -290,7 +291,7 @@ def build_raw(root: pathlib.Path, fixture: Any,
             "frequency_hz": 10_000_000,
             "producer_process_id": 4242,
         },
-        "timer_mode": "HIGH_RESOLUTION_ONE_SHOT_OR_FAIL",
+        "timer_mode": plan["scheduler_policy"]["timer_mode"],
         "plan_accepted_at_qpc": 10_000_000,
         "acquisition_started_at_qpc": 20_000_000,
         "acquisition_finished_at_qpc": 30_000_000,
@@ -379,6 +380,79 @@ def update_schedule_for_files(inputs: dict[str, pathlib.Path]) -> None:
     write_json(inputs["schedule"], schedule)
 
 
+def test_versioned_scheduler_chain(
+        root: pathlib.Path, fixture: Any, binder: pathlib.Path,
+        evaluator: pathlib.Path, producer: pathlib.Path,
+        verifier: pathlib.Path, legacy_inputs: dict[str, pathlib.Path],
+        legacy_verdict: dict[str, Any]) -> None:
+    new_root = root / "active-1ms"
+    new_root.mkdir()
+    new_mode = "HIGH_RESOLUTION_ONE_SHOT_ACTIVE_1MS_V1"
+    new_inputs = build_raw(
+        new_root, fixture, binder, evaluator, producer, verifier, new_mode)
+    safety = json.loads(new_inputs["safety"].read_text(encoding="utf-8"))
+    safety["arming_policy"] = "BOUNDED_COMPOSITE_AUTO_ARM"
+    write_json(new_inputs["safety"], safety)
+    update_schedule_for_files(new_inputs)
+    produced, capture, commands = invoke(
+        producer, new_inputs, new_root, "positive")
+    expect(produced.returncode == 0 and capture.is_file() and commands.is_file(),
+           f"1ms 原始账本必须由原 producer 消费: {produced.stderr}")
+    evidence_path = new_root / "evidence.json"
+    bound = subprocess.run([
+        sys.executable, str(binder), "--plan", str(new_inputs["plan"]),
+        "--capture", str(capture), "--commands", str(commands),
+        "--output", str(evidence_path),
+    ], check=False, capture_output=True, text=True, encoding="utf-8")
+    expect(bound.returncode == 0 and evidence_path.is_file(),
+           f"1ms producer-to-binder 断裂: {bound.stderr}")
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    evaluated, verdict = fixture.run_evaluator(
+        evaluator, evidence_path, new_root / "evaluation.json")
+    expect(evaluated.returncode == 0 and
+           verdict["status"] == "READY_FOR_SEALED_PHASE_VALIDATION" and
+           evidence["scheduler_policy"]["timer_mode"] == new_mode and
+           verdict["evaluation"]["global_completion_interval_ns"] ==
+           legacy_verdict["evaluation"]["global_completion_interval_ns"],
+           "新 scheduler/激活策略不得改变相同原始证据的 completion-to-image 结果")
+
+    for inputs, case_root in ((legacy_inputs, root), (new_inputs, new_root)):
+        schedule = json.loads(inputs["schedule"].read_text(encoding="utf-8"))
+        mutations = [(f"mode-{mode}", "timer_mode", mode) for mode in
+                     ("UNKNOWN", next(other for other in fixture.SCHEDULER_POLICIES
+                                      if other != schedule["timer_mode"]))]
+        mutations += [("sequence-version", "sequence_semantic_sha256", "d" * 64),
+                      ("plan-file", "composite_plan_file_sha256", "d" * 64)]
+        for label, field, value in mutations:
+            bad_schedule = dict(schedule)
+            bad_schedule[field] = value
+            seal(bad_schedule, "ledger_semantic_sha256")
+            write_json(inputs["schedule"], bad_schedule)
+            rejected, bad_capture, bad_commands = invoke(
+                producer, inputs, case_root, f"mixed-schedule-{label}")
+            expect(rejected.returncode == 2 and not bad_capture.exists() and
+                   not bad_commands.exists(),
+                   "重算文件 seal 后的跨版本/hash 漂移 schedule 仍必须拒绝")
+        write_json(inputs["schedule"], schedule)
+        safety = json.loads(inputs["safety"].read_text(encoding="utf-8"))
+        for ordinal, policy in enumerate(("RIGHT_BUTTON_DEADMAN",
+                                         "BOUNDED_COMPOSITE_AUTO_ARM",
+                                         "UNKNOWN", None, True, [])):
+            changed_safety = dict(safety)
+            changed_safety["arming_policy"] = policy
+            write_json(inputs["safety"], changed_safety)
+            update_schedule_for_files(inputs)
+            result, result_capture, result_commands = invoke(
+                producer, inputs, case_root, f"arming-policy-{ordinal}")
+            accepted = ordinal < 2
+            expect(result.returncode == (0 if accepted else 2) and
+                   result_capture.exists() is accepted and
+                   result_commands.exists() is accepted,
+                   f"arming_policy={policy!r} 接受边界错误: {result.stderr}")
+        write_json(inputs["safety"], safety)
+        update_schedule_for_files(inputs)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--producer", required=True, type=pathlib.Path)
@@ -423,6 +497,8 @@ def main() -> int:
         expect(evaluated.returncode == 0 and
                verdict["status"] == "READY_FOR_SEALED_PHASE_VALIDATION",
                f"完整合成链未形成预期 verdict: {evaluated.stderr} {verdict}")
+        test_versioned_scheduler_chain(
+            root, fixture, binder, evaluator, producer, verifier, inputs, verdict)
 
         report = json.loads(inputs["report"].read_text(encoding="utf-8"))
         report["binding"]["probe_binding_sha256"] = "3" * 64

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
@@ -38,6 +39,145 @@ def load_fixture_module(path: pathlib.Path) -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def build_sequence_fixture(plan: dict[str, Any], fixture: Any) -> dict[str, Any]:
+    """纯文件 fixture；不启动 Sequence/Seal 或真实 scheduler。"""
+    request = {
+        "predictor_sample_count": 1, "window_sample_count": 6,
+        "single_magnitude_counts": 1, "issue_lead_ns": 400_000,
+        "target_tolerance_q32": (1 << 32) // 16,
+        **{field: plan["scheduler_policy"][field]
+           for field in ("timer_mode", *fixture.SCHEDULER_FIELDS)},
+    }
+    windows = []
+    samples = [{"phase": "baseline", "dx_counts": 0, "dy_counts": 0}]
+    pulse_by_id = {pulse["pulse_id"]: pulse for pulse in plan["pulses"]}
+    for ordinal, window_id in enumerate(plan["window_order"]):
+        pulse = pulse_by_id.get(window_id)
+        windows.append({
+            "window_ordinal": ordinal, "window_id": window_id,
+            "first_sample_index": len(samples), "sample_count": 7,
+            "phase_cell": pulse["phase_cell"] if pulse else window_id[3:],
+            "negative_control": pulse is None,
+        })
+        samples.append({"phase": "pulse", "dy_counts": 0,
+                        "dx_counts": pulse["command_dx_counts"] if pulse else 0})
+        samples.extend({"phase": "response", "dx_counts": 0, "dy_counts": 0}
+                       for _ in range(6))
+    sequence = {
+        "schema": 7, "profile": "physical_b_composite_phase_calibration",
+        "request": request, "windows": windows, "samples": samples,
+        "summary": {"net_x_counts": 0, "max_abs_prefix_x_counts": 1},
+    }
+    fixture.seal_semantic(sequence, "sequence_sha256")
+    return sequence
+
+
+def test_versioned_scheduler_policy(
+        generator: pathlib.Path, binder: pathlib.Path,
+        evaluator: pathlib.Path, producer: pathlib.Path,
+        root: pathlib.Path) -> None:
+    fixture = load_fixture_module(pathlib.Path(__file__).with_name(
+        "mouse_effect_probe_b_composite_phase_binder_tests.py"))
+    for ordinal, mode in enumerate(fixture.SCHEDULER_POLICIES):
+        case_root = root / f"versioned-scheduler-{ordinal}"
+        case_root.mkdir()
+        plan, capture, commands = fixture.build_inputs(binder, evaluator, mode)
+        sequence = build_sequence_fixture(plan, fixture)
+        sequence_path = case_root / "sequence.json"
+        capture_policy_path = case_root / "capture-policy.json"
+        preflight_path = case_root / "preflight.json"
+        write_json(sequence_path, sequence)
+        write_json(capture_policy_path, plan["capture_policy"])
+        preflight = {
+            "schema_version": 1,
+            "evidence_type": "mouse_effect_probe_b_composite_phase_scheduler_preflight",
+            "status": "PASS", "physical_output_capability": False,
+            "physical_dispatch_count": 0, "run_uuid": plan["run_uuid"],
+            "activation_epoch": plan["activation_epoch"],
+            "sequence_semantic_sha256": sequence["sequence_sha256"],
+            **{field: sequence["request"][field]
+               for field in ("timer_mode", *fixture.SCHEDULER_FIELDS)},
+        }
+        write_json(preflight_path, preflight)
+        common = [sys.executable, str(generator),
+                  "--sequence", str(sequence_path), "--binder", str(binder),
+                  "--evaluator", str(evaluator), "--producer", str(producer),
+                  "--report-verifier", str(binder),
+                  "--capture-policy", str(capture_policy_path),
+                  "--run-uuid", plan["run_uuid"], "--activation-epoch",
+                  str(plan["activation_epoch"]), "--scope-id", plan["scope_id"]]
+
+        def invoke(stem: str, final: bool = True) -> tuple[
+                subprocess.CompletedProcess[str], pathlib.Path]:
+            output = case_root / f"{stem}.json"
+            argv = common + ["--output", str(output)]
+            if final:
+                argv += ["--preflight", str(preflight_path),
+                         "--frozen-at-utc-unix-ns", "9000000000000"]
+            return subprocess.run(argv, check=False, capture_output=True,
+                                  text=True, encoding="utf-8"), output
+
+        for final in (False, True):
+            completed, output = invoke("final" if final else "seed", final)
+            expect(completed.returncode == 0 and output.is_file(),
+                   f"合法版本 {mode} 必须冻结: {completed.stderr}")
+        frozen = json.loads(output.read_text(encoding="utf-8"))
+        expect(frozen["scheduler_policy"]["timer_mode"] == mode and
+               frozen["sequence_binding"]["sample_count"] == 295 and
+               frozen["sequence_binding"]["window_count"] == 42 and
+               frozen["phase_policy"]["policy_id"] == "b-meas-phase-d1-v2",
+               "资源版本不得改变已冻结 phase/295/42 合同")
+        for ledger, semantic_field in ((capture, "capture_semantic_sha256"),
+                                       (commands, "command_semantic_sha256")):
+            ledger["plan_semantic_sha256"] = frozen["plan_semantic_sha256"]
+            if ledger is capture:
+                ledger["report_verifier_file_sha256"] = fixture.file_sha256(binder)
+            fixture.seal_semantic(ledger, semantic_field)
+        bound, evidence, paths = fixture.invoke_binder(
+            binder, case_root, "bound", frozen, capture, commands)
+        expect(bound.returncode == 0 and evidence is not None,
+               f"新旧最终 plan 都必须被 binder 消费: {bound.stderr}")
+        evaluated, verdict = fixture.run_evaluator(
+            evaluator, paths[3], case_root / "evaluation.json")
+        expect(evaluated.returncode == 0 and
+               verdict["status"] == "READY_FOR_SEALED_PHASE_VALIDATION",
+               "freeze-to-binder-to-evaluator 合同断裂")
+
+        fields = ("timer_mode", *fixture.SCHEDULER_FIELDS)
+        for source in ("sequence", "preflight"):
+            for field in fields:
+                original = (sequence["request"] if source == "sequence" else preflight)[field]
+                alternatives = (["UNKNOWN", [mode], next(
+                    other for other in fixture.SCHEDULER_POLICIES if other != mode)]
+                    if field == "timer_mode" else [original + 1, float(original), True, None])
+                if field != "timer_mode":
+                    other_mode = next(other for other in fixture.SCHEDULER_POLICIES
+                                      if other != mode)
+                    other_value = dict(zip(fixture.SCHEDULER_FIELDS,
+                        fixture.SCHEDULER_POLICIES[other_mode]))[field]
+                    if other_value != original:
+                        alternatives.append(other_value)
+                for index, replacement in enumerate(alternatives):
+                    changed_sequence = copy.deepcopy(sequence)
+                    changed_preflight = copy.deepcopy(preflight)
+                    target = (changed_sequence["request"] if source == "sequence"
+                              else changed_preflight)
+                    if replacement is None:
+                        target.pop(field)
+                    else:
+                        target[field] = replacement
+                    if source == "sequence":
+                        fixture.seal_semantic(changed_sequence, "sequence_sha256")
+                        changed_preflight["sequence_semantic_sha256"] = changed_sequence["sequence_sha256"]
+                    write_json(sequence_path, changed_sequence)
+                    write_json(preflight_path, changed_preflight)
+                    rejected, rejected_path = invoke(f"{source}-{field}-{index}")
+                    expect(rejected.returncode == 2 and not rejected_path.exists(),
+                           f"{mode} {source}.{field}={replacement!r} 必须拒绝: {rejected.stderr}")
+        write_json(sequence_path, sequence)
+        write_json(preflight_path, preflight)
 
 
 def validate_scheduler_raw_counts(diagnostic: dict[str, Any]) -> None:
@@ -247,6 +387,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(
             prefix="xen-composite-phase-plan-") as temporary:
         root = pathlib.Path(temporary)
+        test_versioned_scheduler_policy(generator, binder, evaluator, producer, root)
         diagnostic_path = test_scheduler_diagnostic(seal_executable, root)
         sequence_path = root / "sequence.json"
         generated = subprocess.run([
@@ -312,6 +453,8 @@ def main() -> int:
             "sequence_semantic_sha256":
                 json.loads(sequence_path.read_text(encoding="utf-8"))[
                     "sequence_sha256"],
+            **{field: seed["scheduler_policy"][field] for field in
+               ("timer_mode", *fixture.SCHEDULER_FIELDS)},
         }
         write_json(preflight_path, preflight)
         final_path = root / "plan.json"
