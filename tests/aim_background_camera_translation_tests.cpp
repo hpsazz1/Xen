@@ -1,5 +1,6 @@
 #include "aim/aim.h"
 #include "aim_camera_domain_fixture.h"
+#include "aim_world_interval_fixture.h"
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -264,15 +265,151 @@ void actual_camera_domain(bool mirror) {
     expect(checked == 2, "必须覆盖实际旧先验和反向证据帧");
 }
 
+void interval_covariance() {
+    for (float half_width : {.2f, 2.0f}) {
+        for (int direction : {1, -1}) {
+            std::array<std::array<float, 4>, 2> velocities{};
+            for (int branch = 0; branch < 2; ++branch) {
+                Aim aim(config());
+                seed(aim, direction);
+                float left = 150.0f + 16 * direction;
+                float right = 190.0f + 16 * direction;
+                const float camera = branch ? 3.0f : 0.0f;
+                for (int j = 0; j < 4; ++j) {
+                    left += -half_width + camera;
+                    right += half_width + camera;
+                    const auto r = aim.process(frame(17 + j, left, right, camera));
+                    row("interval", j, camera, r);
+                    close(r.control.reverse_translation_raw_left_x_roi_pixels - camera,
+                          -half_width, "两分支世界左界相同");
+                    close(r.control.reverse_translation_raw_right_x_roi_pixels - camera,
+                          half_width, "两分支世界右界相同");
+                    valid(r, "区间观测", AimBackgroundMotionUse::CONSUMED);
+                    if (half_width == 2.0f)
+                        close(v(r), direction * 124.998093f, "区间包含先验时必须保留前态");
+                    if (half_width == .2f)
+                        expect(std::fabs(v(r)) < 100.0f, "区间排除先验时必须收缩旧幅度");
+                    expect(r.control.modelled_response_x_counts *
+                               (r.target.base_aim_x - 160.0f) >= -.0001f,
+                           "跨零区间不授权无共同证据的逆误差维护");
+                    velocities[branch][j] = v(r);
+                    expect(direction * v(r) > 0 && std::fabs(v(r)) < 125.0f,
+                           "歧义区间只约束旧向幅度，不凭空宣布世界已反向");
+                }
+            }
+            for (int j = 0; j < 4; ++j)
+                close(velocities[0][j], velocities[1][j],
+                      "同世界区间不得按raw是否跨零选择更新");
+        }
+    }
+}
+void actual_world_interval(bool mirror) {
+    AimConfig config;
+    config.person_class_ids = {0, 2};
+    config.head_class_ids = {1, 3};
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.1f;
+    config.min_confirmed_hits = 2;
+    config.max_lost_frames = 8;
+    config.min_iou = 0.1f;
+    config.max_center_distance = 0.25f;
+    config.switch_margin = 0.2f;
+    config.switch_confirm_frames = 3;
+    config.switch_cooldown_frames = 5;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.4f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    config.max_prediction_lead_percent = 35.0f;
+    config.predicted_gain = 0.5f;
+    Aim aim(config);
+    int checked = 0;
+    for (const auto& s : aim_world_interval_fixture::kSamples) {
+        if (s.observation_clock_reset) aim.reset();
+        AimFrame f;
+        f.sequence = s.sequence;
+        f.captured_at = at(s.source_ns);
+        f.control_at = at(s.control_ns);
+        f.roi_width = s.roi_width;
+        f.roi_height = s.roi_height;
+        f.control_center_x = s.center_x;
+        f.control_center_y = s.center_y;
+        f.source_pixels_per_roi_pixel_x = s.scale_x;
+        f.source_pixels_per_roi_pixel_y = s.scale_y;
+        f.lock_active = s.lock_active;
+        f.observation_epoch = s.epoch;
+        for (int i = 0; i < s.count; ++i) {
+            auto d = s.detections[static_cast<std::size_t>(i)];
+            if (mirror) {
+                const float left = d.x1;
+                d.x1 = 2.0f * s.center_x - d.x2;
+                d.x2 = 2.0f * s.center_x - left;
+            }
+            f.detections.push_back(d);
+        }
+        f.background_motion_x = {s.status, s.previous_sequence, s.background_sequence,
+            at(s.previous_ns), at(s.background_ns), s.background_epoch,
+            mirror ? -s.bg_dx : s.bg_dx, s.response, s.disagreement, s.patches};
+        const auto r = aim.process(f);
+        const auto& c = r.control;
+        expect(r.status == AimStatus::SUCCESS, "实际38帧短前缀输入须正常处理");
+        const float scalars[] = {c.proportional_x_counts, c.feedforward_x_counts,
+            c.desired_before_reverse_x_counts, c.filtered_x_counts,
+            c.modelled_response_x_counts, c.shaped_x_counts,
+            c.pending_net_x_counts, c.pending_absolute_x_counts,
+            c.residual_before_quantization_x_counts,
+            c.history_adjusted_x_counts, c.pre_eligibility_filtered_x_counts,
+            c.filtered_integral_x_counts, c.target_motion_maintenance_x_counts,
+            c.observer_target_velocity_x_counts_per_second,
+            c.error_derivative_x_source_pixels_per_second, c.opening_weight_x};
+        for (const float value : scalars)
+            expect(std::isfinite(value), "原字段和分阶段维护诊断必须有限");
+        expect(c.opening_weight_x >= 0.0f && c.opening_weight_x <= 1.0f,
+               "opening权重保持有效范围");
+        expect(r.command.dy_counts == s.expected_y, "原向与镜像都必须保持原Y输出");
+        expect(std::hypot(static_cast<float>(r.command.dx_counts),
+                          static_cast<float>(r.command.dy_counts)) <= 14.0f,
+               "维护更新不得突破二维14上限");
+        if (r.command.dx_counts != 0)
+            expect(r.command.dx_counts * (r.target.base_aim_x - f.control_center_x) > 0.0f,
+                   "非零X请求必须朝当前固定base误差方向");
+        if (r.has_command)
+            expect(aim.record_backend_completed_command(f.sequence, at(s.backend_ns),
+                       r.command.dx_counts, r.command.dy_counts),
+                   "每个分支只能确认自身产生的命令");
+        if (s.sequence >= 1546 && s.sequence <= 1550) {
+            const float left = c.reverse_translation_raw_left_x_roi_pixels - f.background_motion_x.dx_roi_pixels;
+            const float right = c.reverse_translation_raw_right_x_roi_pixels - f.background_motion_x.dx_roi_pixels;
+            expect(left * right < 0.0f, "实际1546..50须保持世界双边跨零歧义");
+            expect(c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED,
+                   "有效背景和有限区间不能因raw跨零被丢弃");
+            expect(c.modelled_response_x_counts * (r.target.base_aim_x - f.control_center_x) >= -.0001f,
+                   "真实歧义区间不能虚构有共同支持的逆误差维护");
+            ++checked;
+        }
+    }
+    expect(checked == 5, "实际1546..50五帧区间信息必须全部覆盖");
+}
+
 void opposed_guard() {
     Aim aim(config());const float before=seed(aim,1);
     const auto r=aim.process(frame(17,165,207,-.89f));
-    valid(r,"opposed",AimBackgroundMotionUse::OBSERVATION_UNAVAILABLE);
-    close(v(r),before,"raw异向时仍保持observer前态");row("opposed",0,-.89f,r);
+    valid(r,"opposed",AimBackgroundMotionUse::CONSUMED);
+    close(v(r),before,"世界区间包含先验时仍保持observer前态");row("opposed",0,-.89f,r);
 }
 }
 int main() {
     std::cout<<std::setprecision(9)<<"scenario,row,input_bg,use,velocity,effective_camera,raw_left,raw_right,evidence,delayed_q,control_dt_ms,qx,qy\n";
+    interval_covariance();actual_world_interval(false);actual_world_interval(true);
     covariance();fallback_contract();opposed_guard();reversed_world_covariance();actual_camera_domain(false);actual_camera_domain(true);
     std::cout<<"failures,"<<failures<<'\n';return failures?1:0;
 }

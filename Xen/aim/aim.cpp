@@ -3989,13 +3989,6 @@ struct Aim::Impl {
                        background.observation_epoch != frame.observation_epoch ||
                        background.observation_epoch != track.raw_previous_epoch) {
                 use = AimBackgroundMotionUse::PAIR_MISMATCH;
-            } else if (track.horizontal_raw_left_motion_x *
-                           track.horizontal_raw_right_motion_x < 0.0f &&
-                       (track.horizontal_raw_left_motion_x - background.dx_roi_pixels) *
-                           (track.horizontal_raw_right_motion_x - background.dx_roi_pixels) < 0.0f) {
-                // raw异向可能只是共同camera平移跨过零点；校正后的两边
-                // 仍异向才缺少同向运动证据。模型回退保持原raw合同。
-                use = AimBackgroundMotionUse::OBSERVATION_UNAVAILABLE;
             } else {
                 // 同帧对图像已直接测得 camera 位移，单位只从 ROI 换到 FOV；
                 // 不再乘 plant、延迟或事件数量；测量与模型的权重在下方分别处理。
@@ -4012,6 +4005,8 @@ struct Aim::Impl {
                 ? 1.0f : model_camera_evidence_weight;
             // 两条横边提供当前位移范围；把同一模型的先验相对位移投影
             // 到范围内，避免近零单边把仍有依据的维护运动强拉向零。
+            // 区间跨零仍能约束旧估计的幅度，不能因相机平移改变 raw
+            // 符号就丢弃它；区间内先验保持，运动方向授权仍由下游判断。
             // 只用于 observer 测量，不改变位置/相位使用的共同边位移。
             // 有效背景与 raw 位移属于同一观测帧对，速度估计按该帧对的
             // 时间推进。控制步时长仍由下游 PI、M 和输出独立使用。
