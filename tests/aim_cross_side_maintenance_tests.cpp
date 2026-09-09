@@ -124,7 +124,7 @@ void actual_cross_side(bool mirror, int mode) {
             const float observation_dt = std::chrono::duration<float>(
                 f.background_motion_x.captured_at -
                 f.background_motion_x.previous_captured_at).count();
-            const float current_bound = std::min(std::fabs(left), std::fabs(right)) *
+            const float current_bound = std::fabs(0.5f * (left + right)) *
                 f.source_pixels_per_roi_pixel_x / (0.2216375f / config.counts_per_pixel_x) *
                 (c.controller_dt_ms / 1000.0f) / observation_dt;
             expect(c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
@@ -136,7 +136,7 @@ void actual_cross_side(bool mirror, int mode) {
             expect(std::fabs(c.target_motion_maintenance_x_counts) <= current_bound + 0.0003f &&
                        c.target_motion_maintenance_x_counts *
                            c.observer_target_velocity_x_counts_per_second > 0.0f,
-                   "维护须与observer同向且受当前双边步预算限制");
+                   "维护须与observer同向且受当前同向中心步预算限制");
             expect(std::fabs(c.shaped_x_counts - c.filtered_x_counts -
                        c.modelled_response_x_counts) < 0.0003f,
                    "位置和维护按原净请求合成，不分别执行两个整数");

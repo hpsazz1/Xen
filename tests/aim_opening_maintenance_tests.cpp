@@ -138,13 +138,13 @@ void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
                 const float dt = std::chrono::duration<float>(
                     f.background_motion_x.captured_at -
                     f.background_motion_x.previous_captured_at).count();
-                const float bound = std::min(std::fabs(left), std::fabs(right)) *
+                const float bound = std::fabs(0.5f * (left + right)) *
                     f.source_pixels_per_roi_pixel_x / (0.2216375f / config.counts_per_pixel_x) *
                     c.controller_dt_ms / 1000.0f / dt;
                 expect(direction * left < 0.0f && direction * right < 0.0f &&
                            direction * c.target_motion_maintenance_x_counts < 0.0f &&
                            std::fabs(c.target_motion_maintenance_x_counts) <= bound + 0.0003f,
-                       "图像收拢但世界目标仍同向时，维护由当前双边幅度支持");
+                       "图像收拢但世界目标仍同向时，维护由当前同向中心幅度支持");
                 expect(direction * c.filtered_x_counts < 0.0f &&
                            direction * r.command.dx_counts < -3,
                        "位置纠偏保持方向，同向维护不能仍被收拢位置额度压掉");

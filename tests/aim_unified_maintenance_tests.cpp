@@ -125,7 +125,7 @@ void actual_unified(bool mirror, int mode) {
                "实际双边证据必须支持同一世界方向");
         const float observation_dt = std::chrono::duration<float>(
             f.background_motion_x.captured_at - f.background_motion_x.previous_captured_at).count();
-        const float current_budget = std::min(std::fabs(left), std::fabs(right)) *
+        const float current_budget = std::fabs(0.5f * (left + right)) *
             f.source_pixels_per_roi_pixel_x / (0.2216375f / config.counts_per_pixel_x) *
             (c.controller_dt_ms / 1000.0f) / observation_dt;
         expect(direction * c.observer_target_velocity_x_counts_per_second > 0.0f,
@@ -138,7 +138,7 @@ void actual_unified(bool mirror, int mode) {
         expect(integral_credit <= std::fabs(c.filtered_x_counts) + .0003f,
                "只扣实际eligible PI内的同向积分份额");
         expect(std::fabs(direction * c.target_motion_maintenance_x_counts - budget) < .001f,
-               "诊断须记录当前双边步预算，不把物理饱和后的追加当预算");
+               "诊断须记录当前同向中心步预算，不把物理饱和后的追加当预算");
         const float before_cap = c.filtered_x_counts + direction * remaining;
         if (std::fabs(before_cap) <= config.max_counts_per_frame) {
             expect(std::fabs(direction * c.modelled_response_x_counts - remaining) < .001f,
@@ -180,7 +180,7 @@ void actual_unified(bool mirror, int mode) {
            "松键须清除观察器维护及余数，不将预计算位置请求误认为实发");
 
 }
-void alternating_displacement(bool mirror, std::int64_t interval_ns) {
+void alternating_displacement(bool mirror, std::int64_t interval_ns, bool alternating_width = false) {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.counts_per_pixel_x = 0.2216375f;
@@ -199,7 +199,11 @@ void alternating_displacement(bool mirror, std::int64_t interval_ns) {
     // 固定图像基点与等间隔观测，背景平移给出6/2像素交替的同向运动。
     // 此处plant为1；40帧测得总位移160，不按实现的滤波公式生成期望。
     for (int i = 0; i < 70; ++i) {
-        const float displacement = direction * (i >= 60 ? 0.25f : (i % 2 ? 6.0f : 2.0f));
+        const float displacement = direction * (i >= 60 ? 0.25f :
+            (alternating_width ? 4.0f : (i % 2 ? 6.0f : 2.0f)));
+        // 中心平移保持4，宽度往返只改变双边形变，不应累计扣除平移。
+        // 减速前一帧结束形变，使减速检查独立于双边异号回退合同。
+        const float width_change = alternating_width && i < 59 && i % 2 ? 1.0f : 0.0f;
         AimFrame f;
         f.sequence = 100 + i;
         f.observation_epoch = 17;
@@ -208,8 +212,8 @@ void alternating_displacement(bool mirror, std::int64_t interval_ns) {
         f.roi_width = f.roi_height = 320;
         f.control_center_x = f.control_center_y = 160;
         f.lock_active = true;
-        f.detections.push_back({140.0f + direction * 0.25f, 140.0f,
-            180.0f + direction * 0.25f, 200.0f, 0.95f, 0});
+        f.detections.push_back({140.0f + direction * 0.25f - width_change, 140.0f,
+            180.0f + direction * 0.25f + width_change, 200.0f, 0.95f, 0});
         f.background_motion_x = {AimBackgroundMotionStatus::VALID, f.sequence - 1, f.sequence,
             f.captured_at - std::chrono::nanoseconds(interval_ns), f.captured_at, 17,
             -displacement, 0.9f, 0.0f, 2};
@@ -243,7 +247,9 @@ void alternating_displacement(bool mirror, std::int64_t interval_ns) {
                    "交替分支只确认自己的命令");
     }
     expect(std::fabs(budget_sum - 160.0f) < 0.01f,
-           "交替同向位移不能因低通与当前值取小而持续丢失累计维护预算");
+           alternating_width
+               ? "对称宽度往返不能侵蚀已知中心平移的累计维护预算"
+               : "交替同向位移不能因低通与当前值取小而持续丢失累计维护预算");
     expect(std::fabs(static_cast<float>(issued_sum) - shaped_sum - first_residual + last_residual) < 0.001f &&
                std::fabs(last_residual) <= 0.5003f,
            "净请求沿用单余数累计守恒，不要求每帧独立整数维护");
@@ -254,6 +260,8 @@ int main() {
     for (const std::int64_t interval_ns : {4166667LL, 8000000LL}) {
         alternating_displacement(false, interval_ns);
         alternating_displacement(true, interval_ns);
+        alternating_displacement(false, interval_ns, true);
+        alternating_displacement(true, interval_ns, true);
     }
     for (int mode = 0; mode < 3; ++mode) { actual_unified(false, mode); actual_unified(true, mode); }
     std::cout << "失败数：" << failures << '\n';
