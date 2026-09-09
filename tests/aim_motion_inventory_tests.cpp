@@ -169,7 +169,9 @@ void observed_position_share(bool background, bool mirror,
     int zero_position_frames = 0;
     int fallback_frames = 0;
     const auto base = at(10000000000LL);
-    for (int index = 0; index < 480; ++index) {
+    // 保留原周期输入，再显式建立旧向库存并切到死区外的新位置。
+    // 反馈强度变化可以改变周期输入的库存交集，不能因此丢失P保护覆盖。
+    for (int index = 0; index < 512; ++index) {
         AimFrame frame;
         frame.sequence = static_cast<std::uint64_t>(index + 1);
         frame.observation_epoch = 1;
@@ -179,7 +181,9 @@ void observed_position_share(bool background, bool mirror,
         frame.control_center_x = frame.control_center_y = 160.0f;
         frame.lock_active = true;
         const float error = (mirror ? -1.0f : 1.0f) * amplitude *
-            std::sin(static_cast<float>(index) * 0.20943951f);
+            (index < 480
+                ? std::sin(static_cast<float>(index) * 0.20943951f)
+                : (index < 496 ? -1.0f : 1.0f / 3.0f));
         frame.detections.push_back({140.0f + error, 140.0f,
             180.0f + error, 200.0f, 0.95f, 0});
         if (background && index > 0) {

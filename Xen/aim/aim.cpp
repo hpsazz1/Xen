@@ -4127,10 +4127,10 @@ struct Aim::Impl {
                 0.0f,
                 1.0f - config.deadzone_pixels / x_error_magnitude)
             : 0.0f;
-        // 共同边与当前误差同向时，目标正在把 X 误差拉大；只在这一追赶
-        // 相位按既有刚体一致性从 cubic 连续靠近 quadratic。当前控制窗
-        // 中若仍混有反向命令，则按其方向构成连续减小增强量；这不把 ACK
-        // 当物理效果，也不改变后续既有库存整形。
+        // 共同边与当前误差同向时，目标正在把 X 误差拉大。opening权重
+        // 继续服务源相位请求；模型回退还用它让cubic连续靠近quadratic。
+        // 当前控制窗若混有反向命令，按方向构成连续减小权重；这不把ACK
+        // 当物理效果，也不改变后续库存整形。有效背景的位置反馈在下方独立处理。
         const float x_error_direction = error_x > 0.0f
             ? 1.0f : (error_x < 0.0f ? -1.0f : 0.0f);
         const float pending_alignment_weight = pending.absolute_x > 0.0f
@@ -4146,10 +4146,15 @@ struct Aim::Impl {
             ? current_common_consistency * current_common_consistency *
                   pending_alignment_weight
             : 0.0f;
+        // 已消费同帧背景时，世界运动由独立维护量承担，位置反馈只扣一次
+        // 既有死区。额外幂次会把持续近中心残差的纠偏压低，而同向积分又被
+        // 维护抵扣，导致反馈停留在死区外。缺测及模型回退保留原正则路径。
         const float regularized_x_error_scale =
-            active_x_error_scale * active_x_error_scale *
-            (active_x_error_scale +
-             opening_x_weight * (1.0f - active_x_error_scale));
+            diagnostics.background_motion_use_x == AimBackgroundMotionUse::CONSUMED
+            ? active_x_error_scale
+            : active_x_error_scale * active_x_error_scale *
+                (active_x_error_scale +
+                 opening_x_weight * (1.0f - active_x_error_scale));
         const float proportional_x = error_x * regularized_x_error_scale *
             config.counts_per_pixel_x;
         const float proportional_y = error_y * regularized_error_scale *
