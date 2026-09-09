@@ -93,6 +93,12 @@ void rigid_contract(bool variable) {
     const auto jitter=rigid(name+"_jitter",variable,true);
     for (int i=1;i<=16;++i)
         close(velocity(jitter[i]),velocity(constant[i]),name+" observer 不受调度延迟污染 row"+std::to_string(i));
+    // 两条输入只有到达时刻不同；同一源位移的斜率不能跟随调度抖动。
+    // 控制间隔、积分和命令仍按各自控制时刻推进，不要求完整输出相同。
+    for (int i=1;i<=16;++i)
+        close(jitter[i].control.error_derivative_x_source_pixels_per_second,
+              constant[i].control.error_derivative_x_source_pixels_per_second,
+              name+" 同源位移的误差斜率不受到达抖动污染 row"+std::to_string(i));
     const std::array<float,4> golden=variable
         ?std::array<float,4>{125.0f/3,275.0f/3,325.0f/3,1075.0f/9}
         :std::array<float,4>{62.5f,93.75f,109.375f,117.1875f};

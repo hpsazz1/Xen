@@ -4096,11 +4096,18 @@ struct Aim::Impl {
                 ? current_common_motion_x * current_common_consistency *
                       current_common_consistency
                 : track_center_motion_x;
+            // 已配对的位移属于源观测区间；到达抖动不能改变这段图像的斜率。
+            // 只修正该观测滤波的时基，积分、库存及命令维护仍用控制时刻。
+            const float derivative_dt =
+                diagnostics.background_motion_use_x == AimBackgroundMotionUse::CONSUMED
+                ? std::chrono::duration<float>(frame.background_motion_x.captured_at -
+                      frame.background_motion_x.previous_captured_at).count()
+                : controller_dt;
             tracking_error_derivative_x =
                 (kTrackingErrorDerivativeFilterTimeSeconds *
                      tracking_error_derivative_x +
                  derivative_motion_x) /
-                (kTrackingErrorDerivativeFilterTimeSeconds + controller_dt);
+                (kTrackingErrorDerivativeFilterTimeSeconds + derivative_dt);
         } else {
             tracking_error_derivative_x = 0.0f;
             tracking_error_derivative_initialized = true;
