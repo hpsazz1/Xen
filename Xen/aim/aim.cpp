@@ -1095,6 +1095,8 @@ struct Aim::Impl {
     // 进入 PI 请求的积分份额，经历与总请求相同的缩放和滤波。
     // 它不等于 anti-windup 回写后的积分状态，也不作为新的运动估计。
     float tracking_filtered_integral_x = 0.0f;
+    // 比例纠偏的滤波份额仅用于移除旧位置记忆，不承担积分或相位状态。
+    float tracking_filtered_proportional_x = 0.0f;
     float filtered_y = 0.0f;
     float shaped_x = 0.0f;
     float shaped_y = 0.0f;
@@ -3188,6 +3190,7 @@ struct Aim::Impl {
     void reset_controller() noexcept {
         controller_track_id = 0;
         tracking_filtered_integral_x = 0.0f;
+        tracking_filtered_proportional_x = 0.0f;
         filtered_x = 0.0f;
         filtered_y = 0.0f;
         shaped_x = 0.0f;
@@ -3903,6 +3906,7 @@ struct Aim::Impl {
             feedforward_y *= leak;
             filtered_x *= leak;
             tracking_filtered_integral_x *= leak;
+            tracking_filtered_proportional_x *= leak;
             filtered_y *= leak;
             shaped_x = filtered_x;
             shaped_y = filtered_y;
@@ -4233,6 +4237,7 @@ struct Aim::Impl {
         // 保存本帧实际进入线性请求的 I；后续 back-calculation 回写积分
         // 状态但不追溯改变当前滤波输入；回写值仍按原路径用于本帧运动去重。
         float tracking_integral_input_x = feedforward_x;
+        float tracking_proportional_input_x = proportional_x;
         const float unconstrained_x =
             proportional_x + feedforward_x + source_phase_request_x;
         const float unconstrained_y = proportional_y + feedforward_y;
@@ -4242,6 +4247,7 @@ struct Aim::Impl {
             desired_x, desired_y, config.max_counts_per_frame);
         if (unconstrained_x != 0.0f) {
             tracking_integral_input_x *= desired_x / unconstrained_x;
+            tracking_proportional_input_x *= desired_x / unconstrained_x;
         }
         const float tracking_before_history_x = desired_x;
         // Åström/Rundqwist 的 tracking anti-windup：执行器实际可接受向量与
@@ -4310,6 +4316,7 @@ struct Aim::Impl {
         if (tracking_before_history_x != 0.0f &&
             diagnostics.background_motion_use_x != AimBackgroundMotionUse::CONSUMED) {
             tracking_integral_input_x *= desired_x / tracking_before_history_x;
+            tracking_proportional_input_x *= desired_x / tracking_before_history_x;
         }
         diagnostics.proportional_x_counts = proportional_x;
         diagnostics.feedforward_x_counts = feedforward_x;
@@ -4369,13 +4376,18 @@ struct Aim::Impl {
         switch (x_filter_update) {
         case FilterUpdate::Reset:
             tracking_filtered_integral_x = 0.0f;
+            tracking_filtered_proportional_x = 0.0f;
             break;
         case FilterUpdate::Initialize:
             tracking_filtered_integral_x = tracking_integral_input_x;
+            tracking_filtered_proportional_x = tracking_proportional_input_x;
             break;
         case FilterUpdate::Smooth:
             tracking_filtered_integral_x +=
                 (tracking_integral_input_x - tracking_filtered_integral_x) *
+                    config.smoothing;
+            tracking_filtered_proportional_x +=
+                (tracking_proportional_input_x - tracking_filtered_proportional_x) *
                     config.smoothing;
             break;
         }
@@ -4386,6 +4398,8 @@ struct Aim::Impl {
             filtered_x, filtered_y, config.max_counts_per_frame);
         if (tracking_before_filter_cap_x != 0.0f) {
             tracking_filtered_integral_x *=
+                filtered_x / tracking_before_filter_cap_x;
+            tracking_filtered_proportional_x *=
                 filtered_x / tracking_before_filter_cap_x;
         }
         diagnostics.filter_reset_x = x_filter_update == FilterUpdate::Reset;
@@ -4422,8 +4436,15 @@ struct Aim::Impl {
                   x_error_direction * tracking_target_velocity_counts_per_second_x *
                       controller_dt))
             : same_direction_integral_x;
+        // 已配对的当前观测直接支付当前位置纠偏；积分和相位继续原滤波，
+        // 内部总滤波状态保留，避免改变 Reset 和余数保护。
+        const float current_position_filtered_x =
+            diagnostics.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
+                x_filter_update != FilterUpdate::Reset
+            ? filtered_x - tracking_filtered_proportional_x + tracking_proportional_input_x
+            : filtered_x;
         const float eligible_filtered_x = x_error_direction * std::min(
-            std::max(0.0f, x_error_direction * filtered_x),
+            std::max(0.0f, x_error_direction * current_position_filtered_x),
             std::max(target_motion_position_headroom_x,
                      preserved_integral_magnitude_x));
         // 误差仍在同向扩大时，仅用当前位置额度支付维护量会保留跟随误差。
@@ -4587,6 +4608,8 @@ struct Aim::Impl {
             filtered_x = desired_x * config.smoothing;
             tracking_filtered_integral_x =
                 tracking_integral_input_x * config.smoothing;
+            tracking_filtered_proportional_x =
+                tracking_proportional_input_x * config.smoothing;
         }
         previous_command_x = static_cast<float>(command.dx_counts);
         previous_command_y = static_cast<float>(command.dy_counts);
@@ -4630,6 +4653,7 @@ struct Aim::Impl {
         }
         // 此份额只属于 tracking PI，不能跨入另一控制路径继续消费。
         tracking_filtered_integral_x = 0.0f;
+        tracking_filtered_proportional_x = 0.0f;
         // 轨迹估计继续严格使用 captured_at；控制滤波、泄漏、slew 与
         // 命令库存统一使用 process() 解析出的同一控制时刻。
         if (track.predicted && !config.enable_prediction) {
