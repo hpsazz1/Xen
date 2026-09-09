@@ -109,16 +109,16 @@ void test_current_code_defaults() {
     expect(config.aim.person_class_ids == std::vector<int>({0, 2}) &&
                config.aim.head_class_ids == std::vector<int>({1, 3}) &&
                config.aim.smoothing == 0.475f &&
-               config.aim.counts_per_pixel_x == 0.40f &&
+               config.aim.counts_per_pixel_x == 0.425f &&
                config.aim.counts_per_pixel_y == 0.40f &&
-               config.aim.max_counts_per_frame == 12.0f &&
+               config.aim.max_counts_per_frame == 14.0f &&
                config.aim.enable_delay_compensation &&
-               config.aim.control_delay_ms == 40.0f &&
+               config.aim.control_delay_ms == 15.0f &&
                config.aim.max_delay_compensation_ms == 44.0f &&
-               config.aim.enable_prediction &&
+               !config.aim.enable_prediction &&
                config.aim.max_prediction_lead_percent == 35.0f &&
                config.aim.predicted_gain == 0.50f,
-           "代码 Aim 默认值应匹配当前 prediction 配置");
+           "代码 Aim 默认值应匹配已接受的分轴 tracking 配置");
     expect(config.mouse.backend == MouseBackend::KMBOX_NET &&
                !config.mouse.allow_send_input &&
                config.mouse.kmbox_ip == "192.168.2.188" &&
@@ -165,7 +165,13 @@ void test_load_or_create_default_config() {
     expect(load_app_config(path.string(), loaded, error) &&
                loaded.detector.backend == BackendType::TENSORRT &&
                loaded.capture.backend == CaptureBackend::NDI &&
-               loaded.aim.enable_prediction &&
+               !loaded.aim.enable_prediction &&
+               loaded.aim.enable_delay_compensation &&
+               loaded.aim.smoothing == 0.475f &&
+               loaded.aim.counts_per_pixel_x == 0.425f &&
+               loaded.aim.counts_per_pixel_y == 0.40f &&
+               loaded.aim.max_counts_per_frame == 14.0f &&
+               loaded.aim.control_delay_ms == 15.0f &&
                loaded.mouse.backend == MouseBackend::KMBOX_NET &&
                !loaded.mouse.allow_send_input,
            "生成的默认配置应可回读且不得开启物理输出: " + error);
@@ -947,12 +953,44 @@ void test_d3d11_directml_interop_config() {
            "CUDA 与 DirectML 互操作开关不得同时启用");
 }
 
+void test_feature_combinations_round_trip() {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "xen_feature_combinations.ini";
+    for (const bool delay : {false, true}) {
+        for (const bool prediction : {false, true}) {
+            AppConfig source;
+            source.aim.enable_delay_compensation = delay;
+            source.aim.enable_prediction = prediction;
+            // 模拟独立调参，关闭功能的保存值仍应保留供下次开启。
+            source.aim.counts_per_pixel_x = 0.375f;
+            source.aim.counts_per_pixel_y = 0.525f;
+            source.aim.smoothing = 0.625f;
+            std::string error;
+            expect(save_app_config(path.string(), source, error),
+                   "四组合应允许保存独立参数: " + error);
+            AppConfig loaded;
+            expect(load_app_config(path.string(), loaded, error) &&
+                       loaded.aim.enable_delay_compensation == delay &&
+                       loaded.aim.enable_prediction == prediction &&
+                       loaded.aim.counts_per_pixel_x == 0.375f &&
+                       loaded.aim.counts_per_pixel_y == 0.525f &&
+                       loaded.aim.smoothing == 0.625f &&
+                       loaded.aim.control_delay_ms == 15.0f &&
+                       loaded.aim.max_prediction_lead_percent == 35.0f,
+                   "四组合保存回读不得重置开关或合并分轴参数: " + error);
+        }
+    }
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+}
+
 } // namespace
 
 int main() {
     test_current_code_defaults();
     test_load_or_create_default_config();
     test_round_trip();
+    test_feature_combinations_round_trip();
     test_removed_observe_only_control_config();
     test_log_defaults_and_invalid_level();
     test_existing_file_rejects_malformed_typed_values();

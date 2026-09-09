@@ -64,13 +64,13 @@ struct AppConfig {
         value.person_class_ids = {0, 2};
         value.head_class_ids = {1, 3};
         value.smoothing = 0.475f;
-        value.counts_per_pixel_x = 0.40f;
+        value.counts_per_pixel_x = 0.425f;
         value.counts_per_pixel_y = 0.40f;
-        value.max_counts_per_frame = 12.0f;
+        value.max_counts_per_frame = 14.0f;
         value.enable_delay_compensation = true;
-        value.control_delay_ms = 40.0f;
+        value.control_delay_ms = 15.0f;
         value.max_delay_compensation_ms = 44.0f;
-        value.enable_prediction = true;
+        value.enable_prediction = false;
         return value;
     }();
     MouseConfig mouse = [] {

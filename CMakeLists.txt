@@ -1294,6 +1294,11 @@ if(BUILD_TESTING)
     add_test(NAME aim_background_camera_translation_tests
         COMMAND aim_background_camera_translation_tests)
 
+    add_executable(aim_feature_combinations_tests tests/aim_feature_combinations_tests.cpp)
+    target_link_libraries(aim_feature_combinations_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_feature_combinations_tests OPENCV)
+    add_test(NAME aim_feature_combinations_tests COMMAND aim_feature_combinations_tests)
+
     add_executable(runtime_camera_motion_tests
         tests/runtime_camera_motion_tests.cpp
         Xen/runtime/camera_motion.cpp)

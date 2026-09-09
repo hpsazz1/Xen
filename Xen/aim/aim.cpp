@@ -2178,9 +2178,12 @@ struct Aim::Impl {
                             ? horizontal_trend.velocity_ratio * roi_width
                             : track.vx);
                 if (unsupported_weight > 0.0f) {
+                    // 关闭延迟补偿后，该功能保存的参数不能继续改变基础轨迹
+                    // 的释放时长；保留原观测步长，开启路径仍使用既有延迟。
                     const float ramp_seconds = std::max(
                         track.prediction_dt,
-                        config.control_delay_ms / 1000.0f);
+                        config.enable_delay_compensation
+                            ? config.control_delay_ms / 1000.0f : 0.0f);
                     track.horizontal_prediction_unsupported_seconds =
                         std::min(
                             ramp_seconds,

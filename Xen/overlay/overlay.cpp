@@ -2975,6 +2975,8 @@ struct Overlay::Impl {
     }
 
     void render_aim_config(AppConfig& app_config, bool can_edit) {
+        ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
         ImGui::BeginDisabled(!can_edit);
         render_basic_aim_form(app_config);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
@@ -2983,8 +2985,8 @@ struct Overlay::Impl {
     }
 
     void render_basic_aim_form(AppConfig& app_config) {
-        begin_config_panel("basic_aim_panel", "基础瞄准", 236.0f);
-        if (begin_form("basic_aim_form", 126.0f)) {
+        begin_config_panel("basic_aim_panel", "基础瞄准", 344.0f);
+        if (begin_form("basic_aim_form", 170.0f)) {
             form_row(
                 "目标置信度",
                 "Aim 接受新目标的最低置信度；弱观测阈值、确认帧、丢失窗口、关联门槛和多目标切换迟滞由内部自动处理。");
@@ -3018,18 +3020,29 @@ struct Overlay::Impl {
                 &app_config.aim.body_aim_range_percent,
                 1.0f, 100.0f, "%.0f%%");
             form_row(
-                "移动强度",
-                "把主机 FOV 像素误差换算为相对鼠标 counts；界面统一水平和垂直比例，内部自动完成平滑、提前和相邻帧变化约束。");
-            float movement_strength = std::sqrt(
-                app_config.aim.counts_per_pixel_x *
-                app_config.aim.counts_per_pixel_y);
-            if (slider_float_control(
-                    "counts_per_pixel",
-                    &movement_strength,
-                    0.01f, 4.0f, "%.2f")) {
-                app_config.aim.counts_per_pixel_x = movement_strength;
-                app_config.aim.counts_per_pixel_y = movement_strength;
-            }
+                "X 移动比例",
+                "水平主机 FOV 像素误差到鼠标 counts 的比例，单位 counts/px；仅修改 X，不覆盖 Y。数值越大，同等误差对应的控制请求越大。");
+            slider_float_control(
+                "counts_per_pixel_x", &app_config.aim.counts_per_pixel_x,
+                0.01f, 4.0f, "%.3f");
+            form_row(
+                "Y 移动比例",
+                "垂直主机 FOV 像素误差到鼠标 counts 的比例，单位 counts/px；仅修改 Y，不覆盖 X。数值越大，同等误差对应的控制请求越大。");
+            slider_float_control(
+                "counts_per_pixel_y", &app_config.aim.counts_per_pixel_y,
+                0.01f, 4.0f, "%.3f");
+            form_row(
+                "平滑更新比例",
+                "控制滤波每次更新采用当前请求的比例，范围 0～1；越大越快跟随当前请求，越小保留更多历史滤波值。它不改变当前控制路径的保护与输出上限。");
+            slider_float_control(
+                "smoothing", &app_config.aim.smoothing,
+                0.0f, 1.0f, "%.3f");
+            form_row(
+                "中心死区 / px",
+                "接近控制中心时用于衰减误差控制的范围，单位为主机 FOV 像素；也参与几何运动证据判定。不是强制停止全部运动的开关，目标运动维持仍按当前控制路径处理。");
+            slider_float_control(
+                "deadzone_pixels", &app_config.aim.deadzone_pixels,
+                0.0f, 50.0f, "%.2f");
             form_row(
                 "最大步长",
                 "限制每帧二维相对移动总 counts。基础追踪点始终在当前模型框内；启用预测时可移动到框外提前点，但历史动量不得背离当前控制点或越过它。");
@@ -3043,11 +3056,11 @@ struct Overlay::Impl {
     }
 
     void render_prediction_form(AppConfig& app_config) {
-        begin_config_panel("prediction_panel", "预测与延迟补偿", 254.0f);
-        if (begin_form("prediction_form", 278.0f)) {
+        begin_config_panel("prediction_panel", "预测与延迟补偿", 272.0f);
+        if (begin_form("prediction_form", 170.0f)) {
             form_row(
                 "启用延迟补偿",
-                "只把已测的截图到输入完成延迟乘以当前确认轨迹速度，生成基础 tracking 补偿点；不移动原始检测框。可与 prediction 同时开启，顺序为基础瞄点、延迟补偿、prediction。新生成的 App 配置默认开启。 ");
+                "新生成的 App 配置默认开启。开启后使用控制延迟处理运动与在途请求；仅开启延迟补偿时基础瞄点保持当前目标点，同时开启预测时再生成延迟投影与预测提前点。关闭后仍有常规误差反馈控制。");
             toggle_switch(
                 "##enable_delay_compensation",
                 &app_config.aim.enable_delay_compensation);
@@ -3059,32 +3072,36 @@ struct Overlay::Impl {
                 0.0f, 100.0f, "%.1f ms");
             form_row(
                 "最大补偿延迟",
-                "观测年龄与固定控制延迟之和的硬上限，单位 ms，用于阻止异常帧龄或设备卡顿产生无界提前。 ");
+                "控制路径采用的观测年龄与固定控制延迟之和的上限，单位 ms；不得小于控制延迟。关闭延迟补偿时不生效。");
             slider_float_control(
                 "max_delay_compensation_ms",
                 &app_config.aim.max_delay_compensation_ms,
                 0.0f, 100.0f, "%.1f ms");
             form_row(
                 "最大补偿距离",
-                "延迟补偿向量相对目标框对角线的上限；只限制延迟补偿，不改变 prediction 最大提前距离。 ");
+                "生成延迟投影点时，限制投影向量相对目标框对角线的比例；仅开启延迟补偿的基础追踪路径不生成该投影点，也不因此改变基础点。");
             slider_float_control(
                 "max_delay_compensation_percent",
                 &app_config.aim.max_delay_compensation_percent,
                 1.0f, 50.0f, "%.0f%%");
             form_row(
                 "启用预测",
-                "在延迟补偿后的 tracking 点上叠加运动提前量和丢失轨迹控制。关闭时只执行基础点与延迟补偿；开启后仅在目标相对准星持续向外运动且距离足够时提前，越过准星、反向或回到收敛区会先撤销预测并归位。");
+                "开启运动提前与短时丢失轨迹控制；与延迟补偿组合决定控制路径。关闭时公有瞄点保持基础点。开启后仍须满足当前运动证据与几何约束，不是无条件提前。");
             toggle_switch(
                 "##enable_prediction", &app_config.aim.enable_prediction);
             form_row(
                 "最大提前距离",
-                "预测提前向量相对当前目标框对角线的最大比例；提前点允许位于目标框外，但高速、低速或加速度变化都不能越过该距离门禁。预测关闭时此项不生效。");
-            ImGui::BeginDisabled(!app_config.aim.enable_prediction);
+                "预测提前向量相对当前目标框对角线的最大比例；提前点允许位于目标框外，但不能越过该距离上限。预测关闭时可预先编辑，此项不生效。");
             slider_float_control(
                 "max_prediction_lead_percent",
                 &app_config.aim.max_prediction_lead_percent,
                 1.0f, 50.0f, "%.0f%%");
-            ImGui::EndDisabled();
+            form_row(
+                "丢失轨迹控制比例",
+                "目标短时丢失并由预测轨迹继续控制时，缩放该轨迹的控制请求，范围 0～1；正常观测下的运动提前不使用此比例。预测关闭时可预先编辑，但不执行丢失轨迹输出。");
+            slider_float_control(
+                "predicted_gain", &app_config.aim.predicted_gain,
+                0.0f, 1.0f, "%.2f");
             ImGui::EndTable();
         }
         end_config_panel();
