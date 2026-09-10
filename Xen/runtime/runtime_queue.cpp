@@ -473,9 +473,13 @@ bool SafetyGate::reset_emergency() noexcept {
 }
 
 bool SafetyGate::can_dispatch() const noexcept {
+    return can_dispatch_auxiliary() &&
+           hold_active_.load(std::memory_order_acquire);
+}
+
+bool SafetyGate::can_dispatch_auxiliary() const noexcept {
     return input_healthy_.load(std::memory_order_acquire) &&
            armed_.load(std::memory_order_acquire) &&
-           hold_active_.load(std::memory_order_acquire) &&
            !emergency_stopped_.load(std::memory_order_acquire);
 }
 

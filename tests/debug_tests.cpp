@@ -1368,6 +1368,24 @@ void test_report_captures_optional_aim_startup_config() {
         RuntimeSnapshot snapshot;
         snapshot.auto_stop.status = AutoStopStatus::AWAITING_VALIDATION;
         snapshot.auto_stop.device_protocol_available = true;
+        snapshot.auto_stop.telemetry_available = mode > 0 && mode < 4;
+        if (mode == 2 || mode == 3) {
+            snapshot.auto_stop.status = AutoStopStatus::ESTIMATED;
+            snapshot.auto_stop.request_id = 71;
+            snapshot.auto_stop.requests = 3;
+            snapshot.auto_stop.completed = 1;
+            snapshot.auto_stop.canceled = 2;
+            snapshot.auto_stop.aim_skips = 4;
+            snapshot.auto_stop.acknowledged_commands = 5;
+            snapshot.auto_stop.cleanup_attempts = 2;
+            snapshot.auto_stop.cleanup_failures = 1;
+            snapshot.auto_stop.release_commands = 2;
+            snapshot.auto_stop.arbiter_wait_samples = 6;
+            snapshot.auto_stop.cleanup_unknown = true;
+            snapshot.auto_stop.max_release_overshoot_ns = mode == 2 ? 12000 : 0;
+            snapshot.auto_stop.max_ack_wait_ns = mode == 2 ? 34000 : 0;
+            snapshot.auto_stop.max_arbiter_wait_ns = mode == 2 ? 56000 : 0;
+        }
         expect(report.finalize(snapshot, error), "Aim启动快照须随报告成功落盘");
         std::ifstream json_file(config.json_path, std::ios::binary);
         std::ifstream csv_file(config.csv_path, std::ios::binary);
@@ -1384,11 +1402,32 @@ void test_report_captures_optional_aim_startup_config() {
                    "未提供快照的调用者不得误报默认或前会话Aim配置");
             continue;
         }
-        expect(json.find("\"auto_stop\": {\"schema\":1,\"enabled\":true,\"activation_virtual_key\":5") != std::string::npos &&
-                   json.find("\"status\":\"AWAITING_VALIDATION\"") != std::string::npos &&
+        expect(json.find("\"auto_stop\": {\"schema\":2,\"enabled\":true,\"activation_virtual_key\":5") != std::string::npos &&
                    json.find("\"stop_evidence_available\":false,\"fire_permitted\":false") != std::string::npos &&
                    csv.find("# auto_stop,") != std::string::npos,
                "辅助元数据须冻结启动配置且区分协议能力与停稳证据，CSV/JSON同时留档");
+        if (mode == 0) {
+            expect(json.find("\"telemetry_available\":false,\"request_id\":null,\"requests\":null") != std::string::npos &&
+                       json.find("\"cleanup_unknown\":null") != std::string::npos &&
+                       csv.find("\"\"requests\"\":null") != std::string::npos,
+                   "没有执行采集时必须报告未知，不能把默认零计数当实测");
+        } else if (mode == 1) {
+            expect(json.find("\"telemetry_available\":true,\"request_id\":null,\"requests\":0") != std::string::npos &&
+                       json.find("\"max_release_overshoot_ns\":null,\"max_ack_wait_ns\":null,\"max_arbiter_wait_ns\":null") != std::string::npos,
+                   "已采集但无请求可记录零计数，没有耗时样本仍须为null");
+        } else {
+            expect(json.find("\"status\":\"ESTIMATED\"") != std::string::npos &&
+                       json.find("\"request_id\":71,\"requests\":3,\"completed\":1,\"canceled\":2,\"aim_skips\":4") != std::string::npos &&
+                       json.find("\"acknowledged_commands\":5,\"cleanup_attempts\":2,\"cleanup_failures\":1,\"release_commands\":2,\"arbiter_wait_samples\":6") != std::string::npos &&
+                       json.find("\"cleanup_unknown\":true") != std::string::npos &&
+                       csv.find("\"\"cleanup_unknown\"\":true") != std::string::npos,
+                   "schema2必须保留实际计数和清理未知状态，预计完成不能变成停稳或开火许可");
+            const std::string durations = mode == 2
+                ? "\"max_release_overshoot_ns\":12000,\"max_ack_wait_ns\":34000,\"max_arbiter_wait_ns\":56000"
+                : "\"max_release_overshoot_ns\":0,\"max_ack_wait_ns\":0,\"max_arbiter_wait_ns\":0";
+            expect(json.find(durations) != std::string::npos,
+                   "有样本的最大耗时须原样保存，真实零值不能与未采集混淆");
+        }
         const auto begin = json.find("\"aim_config\": {");
         const auto end = json.find('}', begin);
         const std::string captured = begin == std::string::npos ? "" :

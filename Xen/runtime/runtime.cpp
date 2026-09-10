@@ -3,6 +3,7 @@
 #include "log/log.h"
 #include "runtime/runtime_internal.h"
 #include "runtime/aim_frame_internal.h"
+#include "auto_stop/auto_stop_worker.h"
 
 #include <algorithm>
 #include <atomic>
@@ -52,7 +53,9 @@ struct Runtime::Impl {
     mutable std::mutex detector_mutex;
     AppConfig config;
     RuntimeSnapshot current_snapshot;
-    AutoStopSnapshot auto_stop_unpaused;
+    std::shared_ptr<AutoStopOutputArbiter> output_arbiter;
+    // 公有控制入口可与停止并发；原子共享引用保证清理期间对象仍存活。
+    std::atomic<std::shared_ptr<AutoStopWorker>> auto_stop_worker;
     runtime::detail::LatestFrameQueue frame_queue;
     runtime::detail::RuntimePreviewChannel preview_channel;
     runtime::detail::SafetyGate safety_gate;
@@ -123,6 +126,7 @@ struct Runtime::Impl {
         // 执行颜色转换的旧帧重新发布，但保留用户开关和已分配的大缓冲。
         const auto preview_stats = preview_channel.finish_session();
         safety_gate.emergency_stop();
+        if (auto worker = auto_stop_worker.load()) worker->cancel();
         stop_requested.store(true, std::memory_order_release);
         frame_queue.stop();
         try {
@@ -246,7 +250,6 @@ struct Runtime::Impl {
             current_snapshot.auto_stop = assess_auto_stop_availability(
                 config.auto_stop, config.mouse.backend == MouseBackend::KMBOX_NET,
                 mouse->supports_wasd_keyboard(), false);
-            auto_stop_unpaused = current_snapshot.auto_stop;
             current_snapshot.provider = detector->backend_name();
             current_snapshot.active_model_path = config.detector.model_path;
             current_snapshot.detector_generation = 1;
@@ -266,7 +269,22 @@ struct Runtime::Impl {
         fps_frame_count = 0;
         if (config.auto_stop.enabled) {
             Log::register_module("auto_stop", LogLevel::INFO);
-            LOG_INFO("auto_stop", "自动急停待设备与制动验证，本次会话不执行键盘制动");
+            if (config.mouse.backend == MouseBackend::KMBOX_NET &&
+                mouse->supports_wasd_keyboard()) {
+                output_arbiter = std::make_shared<AutoStopOutputArbiter>();
+                auto worker = std::make_shared<AutoStopWorker>(mouse, output_arbiter,
+                    [this] {
+                        return config.mouse.allow_send_input &&
+                            !stop_requested.load(std::memory_order_acquire) &&
+                            safety_gate.can_dispatch_auxiliary();
+                    });
+                if (!worker->start(config.auto_stop, config.mouse.kmbox_command_timeout_ms)) {
+                    set_error("启动自动急停调度失败");
+                    return false;
+                }
+                auto_stop_worker.store(std::move(worker));
+            }
+            LOG_INFO("auto_stop", "自动急停已接入请求接口；允许键不生成请求，预测不授予开火");
         }
         return true;
     }
@@ -669,8 +687,13 @@ struct Runtime::Impl {
                     const MouseMoveCommand command{
                         aim_result.command.dx_counts,
                         aim_result.command.dy_counts};
-                    const bool dispatch_allowed =
-                        safety_gate.can_dispatch();
+                    bool dispatch_allowed = safety_gate.can_dispatch();
+                    std::unique_lock<std::timed_mutex> output_guard;
+                    if (dispatch_allowed && output_arbiter) {
+                        output_guard = output_arbiter->try_enter_aim();
+                        dispatch_allowed = output_guard.owns_lock() &&
+                            safety_gate.can_dispatch();
+                    }
                     auto mouse_backend_completed =
                         std::chrono::steady_clock::now();
                     MouseMoveReceipt mouse_receipt;
@@ -841,6 +864,13 @@ struct Runtime::Impl {
     }
 
     void release_modules() noexcept {
+        if (auto worker = auto_stop_worker.exchange(
+                std::shared_ptr<AutoStopWorker>{})) {
+            worker->stop();
+            std::lock_guard<std::mutex> lock(snapshot_mutex);
+            current_snapshot.auto_stop = worker->snapshot();
+        }
+        output_arbiter.reset();
         if (mouse && owns_mouse) mouse->close();
         // CUDA registration 持有 D3D11 资源引用。先销毁 Detector/registration，
         // 再关闭 Capture 的 D3D11 设备，保持跨 API 释放顺序可解释。
@@ -933,6 +963,7 @@ void Runtime::stop() noexcept {
     if (!impl_) return;
     std::lock_guard<std::mutex> lifecycle_lock(impl_->lifecycle_mutex);
     impl_->safety_gate.emergency_stop();
+    if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
     impl_->set_state(RuntimeState::STOPPING);
     impl_->stop_requested.store(true, std::memory_order_release);
     impl_->frame_queue.stop();
@@ -1154,9 +1185,13 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
             break;
         case RuntimeIntentType::DISARM_OUTPUT:
             impl_->safety_gate.disarm();
+            if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
             break;
         case RuntimeIntentType::INPUT_HEALTH_CHANGED:
             impl_->safety_gate.set_input_health(intent.active);
+            if (!intent.active) {
+                if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
+            }
             break;
         case RuntimeIntentType::AIM_HOLD_CHANGED:
             impl_->safety_gate.set_hold(intent.active);
@@ -1165,23 +1200,16 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
             break;
         case RuntimeIntentType::EMERGENCY_STOP:
             impl_->safety_gate.emergency_stop();
+            if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
             impl_->aim_reset_requested.store(true, std::memory_order_release);
             break;
         case RuntimeIntentType::RESET_EMERGENCY:
             if (!impl_->safety_gate.reset_emergency()) return false;
             break;
         case RuntimeIntentType::SET_AUTO_STOP_PAUSED: {
-            std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
-            if (impl_->current_snapshot.state != RuntimeState::RUNNING ||
-                impl_->auto_stop_unpaused.status == AutoStopStatus::DISABLED) return false;
-            const auto before = impl_->current_snapshot.auto_stop.status;
-            impl_->current_snapshot.auto_stop = impl_->auto_stop_unpaused;
-            if (intent.active)
-                impl_->current_snapshot.auto_stop.status = AutoStopStatus::PAUSED;
-            if (before != impl_->current_snapshot.auto_stop.status) {
-                LOG_INFO("auto_stop", "自动急停会话{}，不恢复旧制动请求",
-                         intent.active ? "暂停" : "恢复待命");
-            }
+            auto worker = impl_->auto_stop_worker.load();
+            if (!worker) return false;
+            worker->set_paused(intent.active);
             return true;
         }
         case RuntimeIntentType::START:
@@ -1204,11 +1232,31 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
     return true;
 }
 
+bool Runtime::request_auto_stop(std::uint64_t request_id) noexcept {
+    if (!impl_ || !impl_->safety_gate.can_dispatch_auxiliary() ||
+        impl_->stop_requested.load(std::memory_order_acquire)) return false;
+    {
+        std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
+        if (impl_->current_snapshot.state != RuntimeState::RUNNING) return false;
+    }
+    auto worker = impl_->auto_stop_worker.load();
+    return worker && worker->request(request_id);
+}
+
+void Runtime::cancel_auto_stop(std::uint64_t request_id) noexcept {
+    if (!impl_) return;
+    if (auto worker = impl_->auto_stop_worker.load()) worker->cancel(request_id);
+}
+
 RuntimeSnapshot Runtime::snapshot() const noexcept {
     if (!impl_) return {};
     try {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
-        return impl_->current_snapshot;
+        auto result = impl_->current_snapshot;
+        if (auto worker = impl_->auto_stop_worker.load()) {
+            result.auto_stop = worker->snapshot();
+        }
+        return result;
     } catch (...) {
         return {};
     }

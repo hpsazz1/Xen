@@ -814,6 +814,10 @@ add_library(mouse STATIC
 target_include_directories(mouse PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(mouse PUBLIC log PRIVATE user32 ws2_32 shell32 ole32 uuid)
 
+add_library(auto_stop_worker STATIC Xen/auto_stop/auto_stop_worker.cpp)
+target_include_directories(auto_stop_worker PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(auto_stop_worker PUBLIC auto_stop mouse PRIVATE Threads::Threads)
+
 add_library(keyboard STATIC
     Xen/keyboard/keyboard.cpp)
 target_include_directories(keyboard PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -854,7 +858,7 @@ add_library(runtime STATIC
     Xen/runtime/camera_motion.cpp)
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
-    PUBLIC detector capture aim aim_landmark auto_stop mouse keyboard config log
+    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker mouse keyboard config log
     PRIVATE Threads::Threads)
 
 add_library(app_input STATIC
@@ -1366,6 +1370,10 @@ if(BUILD_TESTING)
     add_executable(auto_stop_tests tests/auto_stop_tests.cpp)
     target_link_libraries(auto_stop_tests PRIVATE auto_stop)
     add_test(NAME auto_stop_tests COMMAND auto_stop_tests)
+
+    add_executable(auto_stop_worker_tests tests/auto_stop_worker_tests.cpp)
+    target_link_libraries(auto_stop_worker_tests PRIVATE auto_stop_worker)
+    add_test(NAME auto_stop_worker_tests COMMAND auto_stop_worker_tests)
 
     add_executable(auto_stop_probe_tests tests/auto_stop_probe_tests.cpp)
     target_include_directories(auto_stop_probe_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)

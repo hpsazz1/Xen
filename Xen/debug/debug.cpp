@@ -359,14 +359,40 @@ const char* bool_name(bool value) noexcept {
 std::string auto_stop_metadata_json(const AutoStopConfig& config,
                                     const AutoStopSnapshot& snapshot) {
     std::ostringstream output;
-    output << "{\"schema\":1,\"enabled\":" << bool_name(config.enabled)
+    output << "{\"schema\":2,\"enabled\":" << bool_name(config.enabled)
            << ",\"activation_virtual_key\":" << config.activation_virtual_key
            << ",\"status\":\"" << AutoStopStatusName(snapshot.status)
            << "\",\"device_protocol_available\":"
            << bool_name(snapshot.device_protocol_available)
            << ",\"stop_evidence_available\":"
            << bool_name(snapshot.stop_evidence_available)
-           << ",\"fire_permitted\":" << bool_name(snapshot.fire_permitted) << '}';
+           << ",\"fire_permitted\":" << bool_name(snapshot.fire_permitted)
+           << ",\"telemetry_available\":" << bool_name(snapshot.telemetry_available);
+    const auto metric = [&](const char* name, auto value, bool measured) {
+        output << ",\"" << name << "\":";
+        if (snapshot.telemetry_available && measured) output << value;
+        else output << "null";
+    };
+    metric("request_id", snapshot.request_id, snapshot.requests != 0);
+    metric("requests", snapshot.requests, true);
+    metric("completed", snapshot.completed, true);
+    metric("canceled", snapshot.canceled, true);
+    metric("aim_skips", snapshot.aim_skips, true);
+    metric("acknowledged_commands", snapshot.acknowledged_commands, true);
+    metric("cleanup_attempts", snapshot.cleanup_attempts, true);
+    metric("cleanup_failures", snapshot.cleanup_failures, true);
+    metric("release_commands", snapshot.release_commands, true);
+    metric("arbiter_wait_samples", snapshot.arbiter_wait_samples, true);
+    metric("max_release_overshoot_ns", snapshot.max_release_overshoot_ns,
+           snapshot.release_commands != 0);
+    metric("max_ack_wait_ns", snapshot.max_ack_wait_ns,
+           snapshot.acknowledged_commands != 0);
+    metric("max_arbiter_wait_ns", snapshot.max_arbiter_wait_ns,
+           snapshot.arbiter_wait_samples != 0);
+    output << ",\"cleanup_unknown\":";
+    if (snapshot.telemetry_available) output << bool_name(snapshot.cleanup_unknown);
+    else output << "null";
+    output << '}';
     return output.str();
 }
 

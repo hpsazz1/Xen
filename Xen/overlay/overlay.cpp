@@ -2987,20 +2987,20 @@ struct Overlay::Impl {
         ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         begin_config_panel("auto_stop_panel", "自动急停", 300.0f);
-        ImGui::TextWrapped("待设备与制动验证，当前不执行急停。");
+        ImGui::TextWrapped("由自动扳机接口请求制动；开启开关或按住允许键都不会单独触发急停。");
         ImGui::TextWrapped("面向单方向及相邻双键移动；自动急停与物理输出安全急停相互独立。");
         ImGui::BeginDisabled(!can_edit);
         const auto key_active = current_virtual_key_state();
         if (can_edit) process_hotkey_capture(app_config, actions, key_active);
         if (begin_form("auto_stop_form", 126.0f)) {
-            form_row("启用自动急停", "仅支持 KMBOX NET；保存启用状态不会自动武装，也不代表设备或停稳证据已验证。");
+            form_row("启用自动急停", "仅支持 KMBOX NET；保存启用状态不会触发制动，预计完成不等于角色已停稳。");
             ImGui::BeginDisabled(app_config.mouse.backend != MouseBackend::KMBOX_NET &&
                                  !app_config.auto_stop.enabled);
             toggle_switch("##auto_stop_enabled", &app_config.auto_stop.enabled);
             ImGui::EndDisabled();
             const int key = app_config.auto_stop.activation_virtual_key;
             render_hotkey_row("允许键（按住）", "##auto_stop_activation_key",
-                "单一允许键；禁止 WASD，不能与运行启停、瞄准输出或安全急停绑定重复。Esc 清空。",
+                "仅授予制动许可，仍需自动扳机接口请求；禁止 WASD，不能与运行启停、瞄准输出或安全急停重复。Esc 清空。",
                 HotkeyBindingTarget::AUTO_STOP,
                 key == 0 ? std::vector<int>{} : std::vector<int>{key}, key_active);
             ImGui::EndTable();
@@ -3020,7 +3020,7 @@ struct Overlay::Impl {
                 {RuntimeIntentType::SET_AUTO_STOP_PAUSED, !paused});
         }
         ImGui::EndDisabled();
-        show_help_tooltip("仅调整本次会话；恢复后仍需完成设备与制动验证，当前不会执行急停或允许开火。");
+        show_help_tooltip("仅调整本次会话；暂停会取消当前请求，恢复不会重放旧请求。预计完成不代表停稳或允许开火。");
         const char* status = "已关闭";
         switch (snapshot.auto_stop.status) {
             case AutoStopStatus::DISABLED: status = "已关闭"; break;
@@ -3028,8 +3028,28 @@ struct Overlay::Impl {
             case AutoStopStatus::UNBOUND: status = "未绑定允许键"; break;
             case AutoStopStatus::AWAITING_VALIDATION: status = "待设备与制动验证"; break;
             case AutoStopStatus::PAUSED: status = "已暂停"; break;
+            case AutoStopStatus::READY: status = "待自动扳机请求"; break;
+            case AutoStopStatus::WAITING_INPUT: status = "等待有效输入"; break;
+            case AutoStopStatus::BRAKING: status = "制动中"; break;
+            case AutoStopStatus::ESTIMATED: status = "预计完成，待归还控制"; break;
+            case AutoStopStatus::CANCELED: status = "已取消"; break;
+            case AutoStopStatus::FAULT: status = "故障，需检查清理状态"; break;
         }
         ImGui::TextWrapped("会话：%s", status);
+        if (snapshot.auto_stop.telemetry_available) {
+            ImGui::Text("请求 %llu | 预计完成 %llu | 取消 %llu",
+                static_cast<unsigned long long>(snapshot.auto_stop.requests),
+                static_cast<unsigned long long>(snapshot.auto_stop.completed),
+                static_cast<unsigned long long>(snapshot.auto_stop.canceled));
+            ImGui::Text("清理尝试 %llu | 未确认 %llu",
+                static_cast<unsigned long long>(snapshot.auto_stop.cleanup_attempts),
+                static_cast<unsigned long long>(snapshot.auto_stop.cleanup_failures));
+            if (snapshot.auto_stop.cleanup_unknown)
+                ImGui::TextWrapped("设备清理尚未确认；控制状态未知。");
+        } else {
+            ImGui::TextWrapped("本次会话暂无制动执行记录。");
+        }
+        ImGui::TextWrapped("预计完成仅表示制动计划结束，不代表实测停稳或允许开火。");
         end_config_panel();
     }
 

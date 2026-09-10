@@ -323,9 +323,12 @@ void test_safety_gate() {
     gate.set_input_health(true);
     expect(gate.input_healthy() && gate.arm(),
            "输入健康且无急停时允许物理武装");
+    expect(gate.can_dispatch_auxiliary() && !gate.can_dispatch(),
+           "辅助许可不能错误依赖 Aim 按住键");
     gate.set_hold(true);
     expect(gate.can_dispatch(), "物理武装且按住热键时允许派发");
     gate.set_input_health(false);
+    expect(!gate.can_dispatch_auxiliary(), "输入丢失必须关闭辅助许可");
     expect(!gate.can_dispatch() && !gate.output_armed() &&
                gate.hold_active() && !gate.emergency_stopped(),
            "输入健康失败必须解除武装并保留按住和急停事实");
@@ -335,6 +338,7 @@ void test_safety_gate() {
     expect(gate.arm() && gate.can_dispatch(),
            "恢复后只允许显式重新武装");
     gate.emergency_stop();
+    expect(!gate.can_dispatch_auxiliary(), "End 急停必须关闭辅助许可");
     expect(!gate.can_dispatch() && !gate.output_armed(),
            "急停必须原子解除武装并拒绝后续命令");
     expect(!gate.reset_emergency(),

@@ -320,6 +320,10 @@ public:
     // 仅在 RUNNING 状态接受请求。候选模型异步加载，失败不替换旧模型。
     bool reload_detector(const DetectorConfig& config) noexcept;
     bool post_intent(const RuntimeIntent& intent) noexcept;
+    // 自动扳机的窄接口；允许键只授予许可，本接口才创建制动请求。
+    // 请求编号在一次会话中严格递增。预计完成不等于已停稳或允许开火。
+    bool request_auto_stop(std::uint64_t request_id) noexcept;
+    void cancel_auto_stop(std::uint64_t request_id) noexcept;
     RuntimeSnapshot snapshot() const noexcept;
     // 诊断预览默认关闭；启用时最多 10 FPS，最长边 512，且只保留最新同帧图像与标注。
     bool set_preview_enabled(bool enabled) noexcept;

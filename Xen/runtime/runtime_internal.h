@@ -373,6 +373,8 @@ public:
     void emergency_stop() noexcept;
     bool reset_emergency() noexcept;
     bool can_dispatch() const noexcept;
+    // 辅助请求不依赖 Aim 按住键，但仍必须经过同一全局武装与输入门。
+    bool can_dispatch_auxiliary() const noexcept;
     bool input_healthy() const noexcept;
     bool output_armed() const noexcept;
     bool hold_active() const noexcept;
