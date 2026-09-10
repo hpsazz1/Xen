@@ -639,6 +639,109 @@ void test_auto_stop_config() {
     std::filesystem::remove(path, ignored);
 }
 
+void test_trigger_and_source_context_config() {
+    AppConfig config;
+    std::string error;
+    expect(!config.trigger.enabled && config.trigger.hold_virtual_key == 0 && !config.source_context.enabled,
+        "扳机与源端状态默认关闭，扳机默认未绑定");
+    const auto directory = make_temp_test_directory("trigger_context");
+    expect(!directory.empty(), "扳机配置测试应创建隔离目录");
+    if (directory.empty()) return;
+    const auto path = directory / "config.ini";
+    config.trigger.enabled = true;
+    config.trigger.hold_virtual_key = config.keyboard.aim_hold_virtual_keys.front();
+    config.trigger.head_width_percent = 73.0f;
+    config.trigger.head_height_percent = 61.0f;
+    config.trigger.body_width_percent = 42.0f;
+    config.trigger.body_height_percent = 58.0f;
+    config.trigger.general_width_percent = 33.0f;
+    config.trigger.general_height_percent = 44.0f;
+    config.trigger.min_confidence = 0.75f;
+    config.trigger.fire_delay_ms = 31;
+    config.trigger.shot_interval_ms = 143;
+    config.trigger.press_duration_ms = 27;
+    config.trigger.max_hold_ms = 333;
+    config.trigger.max_observation_age_ms = 67;
+    config.trigger.fire_mode = TriggerFireMode::AUTOMATIC;
+    config.source_context.enabled = true;
+    config.source_context.host = "127.0.0.1";
+    config.source_context.port = 5017;
+    config.source_context.process_name = "source-game.exe";
+    config.source_context.ttl_ms = 350;
+    config.source_context.token = "synthetic-test-marker-never-persist";
+    expect(validate_app_config(config, error), "扳机允许与Aim共享许可键，源端字段可独立配置");
+    expect(save_app_config(path.string(), config, error), "扳机与源端配置应原子保存");
+    AppConfig loaded;
+    expect(load_app_config(path.string(), loaded, error), "扳机与源端配置应加载");
+    expect(loaded.trigger.enabled && loaded.trigger.hold_virtual_key == config.trigger.hold_virtual_key &&
+        loaded.trigger.head_width_percent == 73.0f && loaded.trigger.head_height_percent == 61.0f &&
+        loaded.trigger.body_width_percent == 42.0f && loaded.trigger.body_height_percent == 58.0f &&
+        loaded.trigger.general_width_percent == 33.0f && loaded.trigger.general_height_percent == 44.0f &&
+        loaded.trigger.min_confidence == 0.75f && loaded.trigger.fire_delay_ms == 31 &&
+        loaded.trigger.shot_interval_ms == 143 && loaded.trigger.press_duration_ms == 27 &&
+        loaded.trigger.max_hold_ms == 333 && loaded.trigger.max_observation_age_ms == 67 &&
+        loaded.trigger.fire_mode == TriggerFireMode::AUTOMATIC,
+        "扳机几何、模式和全部时序往返不能丢失或交叉覆盖");
+    expect(loaded.source_context.enabled && loaded.source_context.host == "127.0.0.1" &&
+        loaded.source_context.port == 5017 && loaded.source_context.process_name == "source-game.exe" &&
+        loaded.source_context.ttl_ms == 350 && loaded.source_context.token.empty(), "源端配置往返不持久化认证值");
+    {
+        std::ifstream saved(path, std::ios::binary);
+        const std::string bytes{std::istreambuf_iterator<char>(saved), std::istreambuf_iterator<char>()};
+        expect(bytes.find(config.source_context.token) == std::string::npos, "配置文件不能包含源端认证内容");
+    }
+    for (int key : {-1, 256, 1, int('W'), int('A'), int('S'), int('D'), 0x23, 0x77}) {
+        auto candidate = config;
+        candidate.trigger.hold_virtual_key = key;
+        expect(!validate_app_config(candidate, error), "非法或安全/移动键不得成为扳机许可");
+    }
+    {
+        auto candidate = config;
+        candidate.keyboard.emergency_virtual_keys = {0x79};
+        candidate.keyboard.runtime_toggle_virtual_keys = {0x7A};
+        for (int key : {0x23, 0x77, 0x79, 0x7A}) {
+            candidate.trigger.hold_virtual_key = key;
+            expect(!validate_app_config(candidate, error), "改绑后仍保留End/F8禁用并检查实际安全键冲突");
+        }
+    }
+    {
+        auto candidate = config;
+        candidate.trigger.require_stop = true;
+        expect(!validate_app_config(candidate, error), "强依赖急停不能在急停关闭时启用");
+        candidate.auto_stop.enabled = true;
+        candidate.auto_stop.activation_virtual_key = 0x76;
+        candidate.trigger.hold_virtual_key = 0x76;
+        expect(validate_app_config(candidate, error), "扳机可与独立急停许可同键");
+        expect(save_app_config(path.string(), candidate, error) && load_app_config(path.string(), loaded, error) &&
+            loaded.trigger.require_stop, "急停依赖必须往返保留");
+    }
+    for (int variant = 0; variant < 7; ++variant) {
+        auto candidate = config;
+        switch (variant) {
+            case 0: candidate.trigger.head_width_percent = 0.0f; break;
+            case 1: candidate.trigger.body_height_percent = std::numeric_limits<float>::quiet_NaN(); break;
+            case 2: candidate.trigger.fire_delay_ms = -1; break;
+            case 3: candidate.trigger.fire_mode = static_cast<TriggerFireMode>(9); break;
+            case 4: candidate.source_context.ttl_ms = 19; break;
+            case 5: candidate.source_context.port = 0; break;
+            case 6: candidate.source_context.process_name.clear(); break;
+        }
+        expect(!validate_app_config(candidate, error), "几何、时间、模式与源端缺项均应拒绝");
+    }
+    expect(write_file_bytes(path, "[detector]\nmodel_path=model.onnx\n"), "写入无新节的旧配置");
+    expect(load_app_config(path.string(), loaded, error) && !loaded.trigger.enabled &&
+        loaded.trigger.hold_virtual_key == 0 && !loaded.source_context.enabled && loaded.source_context.token.empty(),
+        "旧配置必须清除调用方遗留的启用和绑定状态");
+    for (const char* text : {"[trigger]\nenabled=perhaps\n", "[trigger]\nfire_delay_ms=1.5\n",
+            "[trigger]\nfire_mode=999999999999999999999\n", "[trigger]\nhead_width_percent=nan\n",
+            "[source_context]\nport=65536\n", "[source_context]\nttl_ms=1.5\n"}) {
+        expect(write_file_bytes(path, text), "写入畸形配置夹具");
+        expect(!load_app_config(path.string(), loaded, error), "新配置节须严格解析而非静默截断");
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
 void test_legacy_keyboard_config() {
     const auto path = std::filesystem::temp_directory_path() /
                       "xen_legacy_keyboard_config.ini";
@@ -1045,6 +1148,7 @@ int main() {
     test_atomic_save_preserves_existing_file_on_write_failure();
     test_atomic_save_preserves_existing_file_on_replace_failure();
     test_auto_stop_config();
+    test_trigger_and_source_context_config();
     test_legacy_keyboard_config();
     test_invalid_config();
     test_complete_aim_config_validation();

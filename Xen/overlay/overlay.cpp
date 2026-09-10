@@ -94,6 +94,7 @@ enum class HotkeyBindingTarget {
     AIM_HOLD,
     EMERGENCY,
     AUTO_STOP,
+    TRIGGER,
 };
 
 std::array<bool, 256> current_virtual_key_state() noexcept {
@@ -3051,6 +3052,111 @@ struct Overlay::Impl {
         }
         ImGui::TextWrapped("预计完成仅表示制动计划结束，不代表实测停稳或允许开火。");
         end_config_panel();
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        render_trigger_config(snapshot, app_config, can_edit, key_active);
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        render_source_context_config(snapshot, app_config, can_edit);
+    }
+
+    void render_trigger_config(const RuntimeSnapshot& snapshot, AppConfig& app_config,
+            bool can_edit, const std::array<bool, 256>& key_active) {
+        auto& trigger = app_config.trigger;
+        begin_config_panel("trigger_panel", "自动扳机", 300.0f);
+        ImGui::TextWrapped("准星进入任一有效头部或人体内域即可计时；不等待瞄准首选部位。框内域不保证弹道命中。");
+        ImGui::BeginDisabled(!can_edit);
+        if (begin_form("trigger_form", 150.0f)) {
+            form_row("启用自动扳机", "默认关闭；启用后仍需全局武装、按住绑定键、健康输入、源端焦点与有效图像。仅支持 KMBOX NET。");
+            ImGui::BeginDisabled(app_config.mouse.backend != MouseBackend::KMBOX_NET && !trigger.enabled);
+            toggle_switch("##trigger_enabled", &trigger.enabled);
+            ImGui::EndDisabled();
+            render_hotkey_row("开火许可（按住）", "##trigger_hold_key",
+                "可以与瞄准键共用；禁止左键、WASD、安全急停和运行启停键。恢复或重新启动后须先松开再按下。Esc 清空。",
+                HotkeyBindingTarget::TRIGGER,
+                trigger.hold_virtual_key == 0 ? std::vector<int>{} : std::vector<int>{trigger.hold_virtual_key}, key_active);
+            form_row("头部内域宽 / %", "检测头框中心椭圆的宽占比；只影响扳机准星命中判断，不改变瞄准点。");
+            slider_float_control("trigger_head_width", &trigger.head_width_percent, 1.0f, 100.0f, "%.0f");
+            form_row("头部内域高 / %", "检测头框中心椭圆的高占比；缺头类别时不从人体框虚构头部。");
+            slider_float_control("trigger_head_height", &trigger.head_height_percent, 1.0f, 100.0f, "%.0f");
+            form_row("人体内域宽 / %", "检测人体或身体框中心椭圆的宽占比；范围越大越容易触发，也可能包含更多背景。");
+            slider_float_control("trigger_body_width", &trigger.body_width_percent, 1.0f, 100.0f, "%.0f");
+            form_row("人体内域高 / %", "检测人体或身体框中心椭圆的高占比；被画面边界截断的检测框不用于开火。");
+            slider_float_control("trigger_body_height", &trigger.body_height_percent, 1.0f, 100.0f, "%.0f");
+            form_row("最低置信度", "在检测器过滤后进一步筛选；不能恢复已被检测器剔除的框。类别映射沿用瞄准页的模型类别设置。");
+            slider_float_control("trigger_confidence", &trigger.min_confidence, 0.0f, 1.0f, "%.2f");
+            form_row("开火延迟 / ms", "准星连续位于同一人物有效内域的最短时间；离域或身份歧义重计，与急停等待并行。");
+            slider_int_control("trigger_delay", &trigger.fire_delay_ms, 0, 1000);
+            form_row("射击模式", "点射循环会主动松开；连续按住由武器自己决定射速，不能把按键间隔当游戏真实射速。");
+            int mode = static_cast<int>(trigger.fire_mode);
+            const char* modes[] = {"点射循环", "连续按住"};
+            if (ImGui::Combo("##trigger_mode", &mode, modes, 2)) trigger.fire_mode = static_cast<TriggerFireMode>(mode);
+            form_row("再次按下间隔 / ms", "两次已确认按下的最小间隔；松键或换目标不清除冷却。点射间隔须不小于按下时长。");
+            slider_int_control("trigger_interval", &trigger.shot_interval_ms, 1, 2000);
+            form_row("点射按下时长 / ms", "点射从按下回执起算；松许可键、失焦或出域时提前发起释放，不等待此时长结束。");
+            slider_int_control("trigger_press", &trigger.press_duration_ms, 1, 500);
+            form_row("连续持键上限 / ms", "连续按住模式每段的动作上限；到期主动释放，下一段仍需新图像与完整资格。不保证故障时物理释放期限。");
+            slider_int_control("trigger_hold", &trigger.max_hold_ms, 1, 1000);
+            form_row("图像有效期 / ms", "源图像年龄加时钟不确定性必须小于此值；无图也按原期限释放，重复读取旧帧不会续期。");
+            slider_int_control("trigger_age", &trigger.max_observation_age_ms, 1, 5000);
+            form_row("要求急停联动", "开启后停稳证据成为强依赖；当前预计制动完成不放行开火。关闭仅做几何扳机，不保证角色已停稳。");
+            toggle_switch("##trigger_require_stop", &trigger.require_stop);
+            ImGui::EndTable();
+        }
+        ImGui::EndDisabled();
+        if (trigger.require_stop) ImGui::TextWrapped("联动要求急停允许键也有效；预计完成仍会等待停稳证据，不会静默降级。");
+        const char* reason = "待命";
+        switch (snapshot.trigger.reason) {
+            case TriggerReason::NONE: reason = "当前条件满足"; break;
+            case TriggerReason::DISABLED: reason = "已关闭"; break;
+            case TriggerReason::INVALID_CONFIG: reason = "配置无效"; break;
+            case TriggerReason::WAIT_RELEASE: reason = "请先松开许可键再按下"; break;
+            case TriggerReason::PERMISSION: reason = "输入、焦点或武装许可未满足"; break;
+            case TriggerReason::INVALID_OBSERVATION: reason = "图像版本或坐标无效"; break;
+            case TriggerReason::TIMING_UNAVAILABLE: reason = "缺少有效源图像时序"; break;
+            case TriggerReason::STALE: reason = "图像已过期"; break;
+            case TriggerReason::NO_CANDIDATE: reason = "准星未进入有效内域"; break;
+            case TriggerReason::TARGET_CHANGED: reason = "目标改变，重新计时"; break;
+            case TriggerReason::DELAY: reason = "等待连续命中时间"; break;
+            case TriggerReason::COOLDOWN: reason = "等待再次按下间隔"; break;
+            case TriggerReason::WAIT_NEW_FRAME: reason = "等待新图像"; break;
+            case TriggerReason::STOP_UNVERIFIED: reason = "停稳证据未就绪"; break;
+            case TriggerReason::STOP_EXPIRED: reason = "停稳资格或制动期限已失效"; break;
+            case TriggerReason::COMMAND_PENDING: reason = "等待设备回执"; break;
+            case TriggerReason::RELEASED: reason = "已发起释放或等待按下"; break;
+            case TriggerReason::UNKNOWN_RECEIPT: reason = "设备结果未知，检查释放状态"; break;
+            case TriggerReason::CANCELED: reason = "已取消"; break;
+            case TriggerReason::COUNTER_EXHAUSTED: reason = "会话序号耗尽，需重新启动"; break;
+        }
+        ImGui::TextWrapped("扳机会话：%s", reason);
+        if (snapshot.trigger.button_may_be_down) ImGui::TextWrapped("软件左键可能仍按下；以释放回执与设备实际状态为准。");
+        if (snapshot.trigger.faulted) ImGui::TextWrapped("故障已锁存；完成设备清理并停止会话后再启动。");
+        end_config_panel();
+    }
+
+    void render_source_context_config(const RuntimeSnapshot& snapshot, AppConfig& app_config, bool can_edit) {
+        begin_config_panel("source_context_panel", "源端焦点", 300.0f);
+        ImGui::TextWrapped("焦点必须来自游戏所在机器；接收机窗口或持续收到画面不代表游戏在前台。");
+        ImGui::BeginDisabled(!can_edit);
+        auto& context = app_config.source_context;
+        if (begin_form("source_context_form", 150.0f)) {
+            form_row("启用源端状态", "连接独立源端状态服务，只有可信且未过期的目标进程前台事实才授予扳机焦点许可。");
+            toggle_switch("##source_context_enabled", &context.enabled);
+            form_row("源端 IPv4", "游戏源端状态服务的 IPv4 地址；应与实际服务绑定地址及网络可达性一致。");
+            ImGui::InputText("##source_context_host", &context.host);
+            form_row("源端端口", "状态服务端口，范围 1～65535；0 表示尚未配置，启用前必须设置。");
+            int port = context.port;
+            if (ImGui::InputInt("##source_context_port", &port)) context.port = static_cast<std::uint16_t>(std::clamp(port, 0, 65535));
+            form_row("目标进程名", "填写游戏源端实际进程名；只匹配该进程的前台状态，不用接收端 Xen 窗口代替。");
+            ImGui::InputText("##source_context_process", &context.process_name);
+            form_row("状态有效期 / ms", "源端状态超过有效期立即失去许可；范围 20～2000 ms，恢复后仍需新的许可键按下边沿。");
+            slider_int_control("source_context_ttl", &context.ttl_ms, 20, 2000);
+            ImGui::EndTable();
+        }
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("认证由环境变量 XEN_SOURCE_CONTEXT_TOKEN 提供；界面和配置文件不显示认证值。");
+        ImGui::TextWrapped("源端状态：%s", !snapshot.source_context.available ? "未就绪或已过期" :
+            snapshot.source_context.focused ? "目标进程在前台" : "目标进程不在前台");
+        if (snapshot.source_context.age_ms >= 0) ImGui::Text("状态年龄：%d ms", snapshot.source_context.age_ms);
+        end_config_panel();
     }
 
     void render_aim_config(AppConfig& app_config, bool can_edit) {
@@ -3380,6 +3486,7 @@ struct Overlay::Impl {
             case HotkeyBindingTarget::EMERGENCY:
                 return &app_config.keyboard.emergency_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP:
+            case HotkeyBindingTarget::TRIGGER:
             case HotkeyBindingTarget::NONE:
                 return nullptr;
         }
@@ -3394,7 +3501,9 @@ struct Overlay::Impl {
             &app_config.keyboard.runtime_toggle_virtual_keys,
             &app_config.keyboard.aim_hold_virtual_keys,
             &app_config.keyboard.emergency_virtual_keys}};
-        return (current_binding != nullptr &&
+        return (current_binding != nullptr && current_binding != &app_config.keyboard.aim_hold_virtual_keys &&
+                app_config.trigger.hold_virtual_key == virtual_key) ||
+            (current_binding != nullptr &&
                 app_config.auto_stop.activation_virtual_key == virtual_key) ||
             std::any_of(
             bindings.begin(), bindings.end(),
@@ -3452,7 +3561,24 @@ struct Overlay::Impl {
         if (capture_result.type !=
                 overlay::detail::HotkeyCaptureResultType::NONE) {
             std::vector<int>* binding = hotkey_binding(app_config);
-            if (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP) {
+            if (hotkey_binding_target == HotkeyBindingTarget::TRIGGER) {
+                if (capture_result.type == overlay::detail::HotkeyCaptureResultType::CLEARED) {
+                    app_config.trigger.hold_virtual_key = 0;
+                    hotkey_capture_message = "扳机许可键已清空";
+                } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
+                    const int key = capture_result.virtual_key;
+                    const auto assigned = [key](const std::vector<int>& keys) {
+                        return std::find(keys.begin(), keys.end(), key) != keys.end();
+                    };
+                    if (key == 1 || key == VK_END || key == VK_F8 || key == 'W' || key == 'A' || key == 'S' || key == 'D' ||
+                        assigned(app_config.keyboard.emergency_virtual_keys) || assigned(app_config.keyboard.runtime_toggle_virtual_keys)) {
+                        hotkey_capture_message = "扳机许可键不能使用左键、WASD、安全急停或运行启停键";
+                    } else {
+                        app_config.trigger.hold_virtual_key = key;
+                        hotkey_capture_message = "扳机许可键已设置，可与瞄准共用";
+                    }
+                }
+            } else if (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP) {
                 if (capture_result.type ==
                         overlay::detail::HotkeyCaptureResultType::CLEARED) {
                     app_config.auto_stop.activation_virtual_key = 0;
@@ -3603,7 +3729,7 @@ struct Overlay::Impl {
              snapshot.detector_reload_state !=
                  DetectorReloadState::LOADING);
         const WorkspacePage capture_page =
-            hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP
+            (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP || hotkey_binding_target == HotkeyBindingTarget::TRIGGER)
                 ? WorkspacePage::AUXILIARY : WorkspacePage::INPUT;
         if (hotkey_capture_state.active &&
             (active_page != capture_page || !can_edit || show_log_panel)) {

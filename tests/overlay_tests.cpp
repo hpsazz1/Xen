@@ -290,6 +290,35 @@ void test_hotkey_capture_state_machine() {
            "捕获期间按 Esc 必须清空绑定并退出捕获");
 }
 
+void test_auxiliary_capture_requires_fresh_edge_and_cancel_wins() {
+    using namespace overlay::detail;
+    HotkeyCaptureState state;
+    std::array<bool, 256> keys{};
+    // 用户按住共享Aim/Trigger键进入绑定页，不能把现有按住状态再次选为新绑定。
+    keys[0x05] = true;
+    begin_hotkey_capture(state, keys);
+    expect(update_hotkey_capture(state, keys).type == HotkeyCaptureResultType::NONE,
+        "辅助绑定捕获不得把进入时已按住的许可键当新边沿");
+    keys[0x05] = false;
+    update_hotkey_capture(state, keys);
+    keys[0x05] = true;
+    const auto fresh = update_hotkey_capture(state, keys);
+    expect(fresh.type == HotkeyCaptureResultType::ASSIGNED && fresh.virtual_key == 0x05,
+        "完整释放后的新共享键边沿可绑定");
+    expect(update_hotkey_capture(state, keys).type == HotkeyCaptureResultType::NONE,
+        "一次绑定只能消费一次，不得持续重放");
+    keys.fill(false);
+    begin_hotkey_capture(state, keys);
+    keys[0x1B] = keys[0x01] = true;
+    expect(update_hotkey_capture(state, keys).type == HotkeyCaptureResultType::CLEARED && !state.active,
+        "Esc与鼠标点击同时到达时取消优先，不能误绑定开火键");
+    begin_hotkey_capture(state, keys);
+    state = {}; // 页面切换或运行状态变化使用的同一取消操作。
+    keys[0x06] = true;
+    expect(update_hotkey_capture(state, keys).type == HotkeyCaptureResultType::NONE,
+        "离开可编辑页面后不得消费延迟到达的按键");
+}
+
 void test_output_arm_requires_input_health() {
     using overlay::detail::output_arm_available;
     expect(output_arm_available(true, false, true, true, false),
@@ -409,6 +438,7 @@ int main() {
     test_detached_preview_refresh_state();
     test_detection_role_mapping();
     test_hotkey_capture_state_machine();
+    test_auxiliary_capture_requires_fresh_edge_and_cancel_wins();
     test_output_arm_requires_input_health();
     test_delay_compensation_tooltip_contract_rejects_ambiguous_pairing();
     test_delay_compensation_tooltip_states_new_app_default();

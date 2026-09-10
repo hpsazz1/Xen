@@ -241,6 +241,9 @@ struct RuntimePreviewFrame {
 
 struct RuntimeSnapshot {
     AutoStopSnapshot auto_stop;
+    TriggerSnapshot trigger;
+    bool trigger_telemetry_available = false;
+    source_context::SourceContextSnapshot source_context;
     RuntimeState state = RuntimeState::STOPPED;
     CaptureStatus capture_status = CaptureStatus::CLOSED;
     DetectionStatus detection_status = DetectionStatus::NOT_RUN;

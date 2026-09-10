@@ -12,6 +12,9 @@
 class AutoStopOutputArbiter {
 public:
     std::unique_lock<std::timed_mutex> try_enter_aim() noexcept;
+    // 撤销本owner既有按钮债务不受普通发送门禁阻挡。
+    std::unique_lock<std::timed_mutex> try_enter_cleanup() noexcept;
+    void latch_output_fault() noexcept { faulted_.store(true, std::memory_order_release); }
     std::uint64_t aim_skips() const noexcept { return aim_skips_.load(std::memory_order_relaxed); }
 private:
     friend class AutoStopWorker;

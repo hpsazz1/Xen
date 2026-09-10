@@ -1454,6 +1454,105 @@ void test_report_captures_optional_aim_startup_config() {
            "Aim快照测试仅清理本轮owned临时根");
 }
 
+void test_trigger_startup_and_final_metadata() {
+    OwnedDebugPairTestRoot owned;
+    std::string error;
+    expect(create_owned_debug_pair_test_root(owned, error), "Trigger报告创建独立临时根");
+    if (owned.path.empty() || !std::filesystem::exists(owned.owner_path)) return;
+    DebugReportConfig config;
+    config.csv_path = (owned.path / "trigger.csv").string();
+    config.json_path = (owned.path / "trigger.json").string();
+    for (int mode = 0; mode < 5; ++mode) {
+        config.trigger_config.reset();
+        if (mode != 0) {
+            TriggerConfig trigger;
+            trigger.enabled = true;
+            trigger.fire_mode = TriggerFireMode::AUTOMATIC;
+            trigger.head_width_percent = 37.5f;
+            trigger.body_height_percent = 72.0f;
+            trigger.fire_delay_ms = 43;
+            trigger.shot_interval_ms = 157;
+            trigger.person_class_ids = {0, 2};
+            trigger.head_class_ids = {1, 3};
+            config.trigger_config = trigger;
+        }
+        DebugReport report;
+        expect(report.start(config, error), "Trigger报告启动");
+        if (config.trigger_config) config.trigger_config->fire_delay_ms = 999;
+        RuntimeSnapshot snapshot;
+        snapshot.trigger_telemetry_available = mode >= 2;
+        if (mode >= 3) {
+            snapshot.trigger.phase = TriggerPhase::FAULT;
+            snapshot.trigger.reason = TriggerReason::UNKNOWN_RECEIPT;
+            snapshot.trigger.region = TriggerRegion::BODY;
+            snapshot.trigger.command_id = 73;
+            snapshot.trigger.candidate_id = 9;
+            snapshot.trigger.observation_epoch = 2;
+            snapshot.trigger.observation_sequence = 81;
+            snapshot.trigger.stop_request_id = 62;
+            snapshot.trigger.normalized_margin = 0.25f;
+            snapshot.trigger.faulted = true;
+            snapshot.trigger.button_may_be_down = true;
+            snapshot.source_context.available = mode == 3;
+            snapshot.source_context.focused = mode == 3;
+            snapshot.source_context.session_id = 91;
+            snapshot.source_context.sequence = 14;
+            snapshot.source_context.age_ms = mode == 3 ? 20 : 201;
+        }
+        expect(report.finalize(snapshot, error), "Trigger报告封口");
+        std::ifstream json_file(config.json_path, std::ios::binary);
+        std::ifstream csv_file(config.csv_path, std::ios::binary);
+        const std::string json((std::istreambuf_iterator<char>(json_file)), {});
+        const std::string csv((std::istreambuf_iterator<char>(csv_file)), {});
+        expect(json.find("\"schema\": 20") != std::string::npos, "Trigger不改变frame schema20");
+        if (mode == 0) {
+            expect(json.find("\"trigger\":") == std::string::npos && csv.find("# trigger,") == std::string::npos,
+                   "没有启动配置不推断默认Trigger元数据");
+            continue;
+        }
+        const auto begin = json.find("\"trigger\": ");
+        expect(begin != std::string::npos, "JSON独立Trigger元数据存在");
+        if (begin == std::string::npos) continue;
+        const auto object_begin = begin + std::string("\"trigger\": ").size();
+        const auto object_end = json.find(",\n", object_begin);
+        const auto metadata = json.substr(object_begin, object_end - object_begin);
+        std::string escaped;
+        for (const char c : metadata) { escaped += c; if (c == '"') escaped += '"'; }
+        expect(csv.find("# trigger,\"" + escaped + "\"") != std::string::npos,
+               "CSV和JSON输出同一份完整Trigger元数据");
+        expect(metadata.find("\"schema\":1") != std::string::npos &&
+               metadata.find("\"fire_delay_ms\":43") != std::string::npos &&
+               metadata.find("\"shot_interval_ms\":157") != std::string::npos &&
+               metadata.find("\"head_width_percent\":37.5") != std::string::npos &&
+               metadata.find("\"body_height_percent\":72") != std::string::npos &&
+               metadata.find("\"fire_mode\":\"AUTOMATIC\"") != std::string::npos &&
+               metadata.find("\"head_class_ids\":[1,3]") != std::string::npos,
+               "报告绑定真实启动范围、时序、模式、类别，不跟随后续config修改");
+        expect(metadata.find("token") == std::string::npos && metadata.find("host") == std::string::npos,
+               "源状态元数据不含认证或网络身份字段");
+        if (mode == 1) {
+            expect(metadata.find("\"telemetry_available\":false,\"final\":null") != std::string::npos &&
+                   metadata.find("\"focused\":null") != std::string::npos && metadata.find("\"age_ms\":null") != std::string::npos,
+                   "缺测不能假装已测DISABLED、无故障或零年龄");
+        } else if (mode == 2) {
+            expect(metadata.find("\"command_id\":null") != std::string::npos &&
+                   metadata.find("\"normalized_margin\":null") != std::string::npos &&
+                   metadata.find("\"faulted\":false") != std::string::npos,
+                   "已测但没有命令/候选时只保留实际状态，不捏造事件id");
+        } else {
+            expect(metadata.find("\"command_id\":73") != std::string::npos &&
+                   metadata.find("\"stop_request_id\":62") != std::string::npos &&
+                   metadata.find("\"reason\":\"UNKNOWN_RECEIPT\"") != std::string::npos &&
+                   metadata.find("\"button_may_be_down\":true") != std::string::npos &&
+                   metadata.find("\"session_id\":91") != std::string::npos,
+                   "最终未知ACK、可能按下与源会话必须保留，不推断已清理");
+            expect(metadata.find(mode == 3 ? "\"focused\":true" : "\"focused\":null") != std::string::npos,
+                   "源状态过期后不把历史前台当当前焦点");
+        }
+    }
+    expect(cleanup_owned_debug_pair_test_root(owned, error), "Trigger测试只清理本轮owned根");
+}
+
 } // namespace
 
 int main() {
@@ -1470,6 +1569,7 @@ int main() {
     test_report_preserves_same_frame_source_timing_fields();
     test_shared_success_semantics();
     test_report_captures_optional_aim_startup_config();
+    test_trigger_startup_and_final_metadata();
     Log::shutdown();
     if (failures != 0) {
         std::cerr << "Debug 测试失败数: " << failures << '\n';

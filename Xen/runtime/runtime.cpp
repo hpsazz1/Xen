@@ -4,6 +4,8 @@
 #include "runtime/runtime_internal.h"
 #include "runtime/aim_frame_internal.h"
 #include "auto_stop/auto_stop_worker.h"
+#include "trigger/trigger_worker.h"
+#include <cstdlib>
 
 #include <algorithm>
 #include <atomic>
@@ -56,6 +58,9 @@ struct Runtime::Impl {
     std::shared_ptr<AutoStopOutputArbiter> output_arbiter;
     // 公有控制入口可与停止并发；原子共享引用保证清理期间对象仍存活。
     std::atomic<std::shared_ptr<AutoStopWorker>> auto_stop_worker;
+    std::atomic<std::shared_ptr<TriggerWorker>> trigger_worker;
+    source_context::SourceContextClient source_context_client;
+    std::atomic<std::uint64_t> stop_request_watermark{0};
     runtime::detail::LatestFrameQueue frame_queue;
     runtime::detail::RuntimePreviewChannel preview_channel;
     runtime::detail::SafetyGate safety_gate;
@@ -127,6 +132,7 @@ struct Runtime::Impl {
         const auto preview_stats = preview_channel.finish_session();
         safety_gate.emergency_stop();
         if (auto worker = auto_stop_worker.load()) worker->cancel();
+        if (auto trigger = trigger_worker.load()) trigger->cancel();
         stop_requested.store(true, std::memory_order_release);
         frame_queue.stop();
         try {
@@ -267,11 +273,12 @@ struct Runtime::Impl {
         debug_samples.reset();
         fps_started = std::chrono::steady_clock::now();
         fps_frame_count = 0;
+        if (config.auto_stop.enabled || config.trigger.enabled) output_arbiter = std::make_shared<AutoStopOutputArbiter>();
         if (config.auto_stop.enabled) {
             Log::register_module("auto_stop", LogLevel::INFO);
             if (config.mouse.backend == MouseBackend::KMBOX_NET &&
                 mouse->supports_wasd_keyboard()) {
-                output_arbiter = std::make_shared<AutoStopOutputArbiter>();
+
                 auto worker = std::make_shared<AutoStopWorker>(mouse, output_arbiter,
                     [this] {
                         return config.mouse.allow_send_input &&
@@ -285,6 +292,42 @@ struct Runtime::Impl {
                 auto_stop_worker.store(std::move(worker));
             }
             LOG_INFO("auto_stop", "自动急停已接入请求接口；允许键不生成请求，预测不授予开火");
+        }
+        if (config.trigger.enabled) {
+            Log::register_module("trigger", LogLevel::INFO);
+            if (config.source_context.enabled) {
+                auto context_config = config.source_context;
+                char* token = nullptr; std::size_t token_size = 0;
+                if (_dupenv_s(&token, &token_size, "XEN_SOURCE_CONTEXT_TOKEN") == 0 && token) {
+                    context_config.token = token;
+                    std::free(token);
+                }
+                if (!source_context_client.start(context_config)) {
+                    set_error("源状态桥接启动失败，请核对配置和认证环境变量"); return false;
+                }
+            }
+            auto trigger_config = config.trigger;
+            trigger_config.person_class_ids = config.aim.person_class_ids;
+            trigger_config.head_class_ids = config.aim.head_class_ids;
+            auto worker = std::make_shared<TriggerWorker>(mouse, output_arbiter,
+                [this] { return config.mouse.allow_send_input && !stop_requested.load() && safety_gate.can_dispatch_auxiliary(); },
+                [this, previous_session = std::uint64_t{0} ]() mutable {
+                    const auto source = source_context_client.snapshot();
+                    if (!source.available || !source.focused) { previous_session = 0; return false; }
+                    if (source.session_id != previous_session) { previous_session = source.session_id; return false; }
+                    return true;
+                },
+                [this] { const auto id = stop_request_watermark.load(); return id == UINT64_MAX ? 0 : id + 1; },
+                [this](std::uint64_t id) {
+                    if (!safety_gate.can_dispatch_auxiliary() || stop_requested.load() || id == 0) return false;
+                    auto previous = stop_request_watermark.load();
+                    do { if (id <= previous) return false; } while (!stop_request_watermark.compare_exchange_weak(previous, id));
+                    auto stop = auto_stop_worker.load();
+                    return stop && stop->request(id);
+                },
+                [this](std::uint64_t id) { if (auto stop = auto_stop_worker.load()) stop->cancel(id); });
+            if (!worker->start(trigger_config)) { set_error("自动扳机启动失败或设备不支持左键"); return false; }
+            trigger_worker.store(std::move(worker));
         }
         return true;
     }
@@ -652,6 +695,9 @@ struct Runtime::Impl {
                 }
                 profile.detector = detector->profile();
             }
+            if (profile.detector.status != DetectionStatus::SUCCESS) {
+                if (auto trigger = trigger_worker.load()) trigger->publish(std::make_shared<TriggerObservation>());
+            }
             AimResult aim_result;
             AimFrame aim_frame;
             bool mouse_sent = false;
@@ -678,6 +724,24 @@ struct Runtime::Impl {
                         std::chrono::duration<double, std::milli>(
                             aim_frame.control_at -
                             frame->timing.source_time_at).count();
+                }
+                if (auto trigger = trigger_worker.load()) {
+                    auto observation = std::make_shared<TriggerObservation>();
+                    observation->detections = aim_frame.detections;
+                    observation->center_x = aim_frame.control_center_x;
+                    observation->center_y = aim_frame.control_center_y;
+                    observation->roi_width = aim_frame.roi_width;
+                    observation->roi_height = aim_frame.roi_height;
+                    observation->epoch = aim_frame.observation_epoch;
+                    observation->sequence = aim_frame.sequence;
+                    observation->observed_at = frame->timing.source_time_at;
+                    observation->timing_valid = frame->timing.source_time_timing_valid &&
+                        std::isfinite(frame->timing.source_clock_uncertainty_ms) && frame->timing.source_clock_uncertainty_ms >= 0.0 &&
+                        frame->timing.source_clock_uncertainty_ms <= config.trigger.max_observation_age_ms;
+                    if (observation->timing_valid) observation->uncertainty = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::duration<double, std::milli>(frame->timing.source_clock_uncertainty_ms));
+                    observation->valid = true;
+                    trigger->publish(std::move(observation));
                 }
                 aim_result = aim->process(aim_frame);
                 profile.aim = aim_result.profile;
@@ -864,6 +928,13 @@ struct Runtime::Impl {
     }
 
     void release_modules() noexcept {
+        if (auto worker = trigger_worker.exchange(std::shared_ptr<TriggerWorker>{})) {
+            worker->stop();
+            std::lock_guard lock(snapshot_mutex);
+            current_snapshot.trigger = worker->snapshot();
+            current_snapshot.trigger_telemetry_available = true;
+        }
+        source_context_client.stop();
         if (auto worker = auto_stop_worker.exchange(
                 std::shared_ptr<AutoStopWorker>{})) {
             worker->stop();
@@ -964,6 +1035,7 @@ void Runtime::stop() noexcept {
     std::lock_guard<std::mutex> lifecycle_lock(impl_->lifecycle_mutex);
     impl_->safety_gate.emergency_stop();
     if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
+            if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
     impl_->set_state(RuntimeState::STOPPING);
     impl_->stop_requested.store(true, std::memory_order_release);
     impl_->frame_queue.stop();
@@ -1186,11 +1258,13 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
         case RuntimeIntentType::DISARM_OUTPUT:
             impl_->safety_gate.disarm();
             if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
+            if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
             break;
         case RuntimeIntentType::INPUT_HEALTH_CHANGED:
             impl_->safety_gate.set_input_health(intent.active);
             if (!intent.active) {
                 if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
+            if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
             }
             break;
         case RuntimeIntentType::AIM_HOLD_CHANGED:
@@ -1201,6 +1275,7 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
         case RuntimeIntentType::EMERGENCY_STOP:
             impl_->safety_gate.emergency_stop();
             if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
+            if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
             impl_->aim_reset_requested.store(true, std::memory_order_release);
             break;
         case RuntimeIntentType::RESET_EMERGENCY:
@@ -1239,6 +1314,9 @@ bool Runtime::request_auto_stop(std::uint64_t request_id) noexcept {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
         if (impl_->current_snapshot.state != RuntimeState::RUNNING) return false;
     }
+    if (request_id == 0) return false;
+    auto previous = impl_->stop_request_watermark.load();
+    do { if (request_id <= previous) return false; } while (!impl_->stop_request_watermark.compare_exchange_weak(previous, request_id));
     auto worker = impl_->auto_stop_worker.load();
     return worker && worker->request(request_id);
 }
@@ -1253,6 +1331,10 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
     try {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
         auto result = impl_->current_snapshot;
+        if (auto trigger = impl_->trigger_worker.load()) {
+            result.trigger = trigger->snapshot(); result.trigger_telemetry_available = true;
+        }
+        result.source_context = impl_->source_context_client.snapshot();
         if (auto worker = impl_->auto_stop_worker.load()) {
             result.auto_stop = worker->snapshot();
         }

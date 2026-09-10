@@ -5,6 +5,8 @@
 
 #include "aim/aim.h"
 #include "auto_stop/auto_stop.h"
+#include "trigger/trigger.h"
+#include "source_context/source_context.h"
 #include "capture/capture.h"
 #include "detector/detector.h"
 #include "keyboard/keyboard.h"
@@ -84,6 +86,8 @@ struct AppConfig {
     }();
     KeyboardConfig keyboard;
     AutoStopConfig auto_stop;
+    TriggerConfig trigger;
+    source_context::SourceContextConfig source_context;
     LogConfig log = [] {
         LogConfig value;
         value.global_level = LogLevel::INFO;

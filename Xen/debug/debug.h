@@ -25,6 +25,7 @@ struct DebugReportConfig {
     std::optional<AimConfig> aim_config;
     // 仅由启动会话提供。缺省时报告不捏造辅助功能的配置或验证结论。
     std::optional<AutoStopConfig> auto_stop_config;
+    std::optional<TriggerConfig> trigger_config;
 };
 
 struct DebugTimingSummary {

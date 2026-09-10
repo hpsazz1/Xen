@@ -27,6 +27,12 @@ std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_aim() noexce
     return lock;
 }
 
+std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_cleanup() noexcept {
+    std::unique_lock<std::timed_mutex> lock(mutex_, std::defer_lock);
+    (void)lock.try_lock_for(std::chrono::milliseconds(20));
+    return lock;
+}
+
 class AutoStopWorker::Impl {
 public:
     Impl(std::shared_ptr<IMouseController> device, std::shared_ptr<AutoStopOutputArbiter> gate,

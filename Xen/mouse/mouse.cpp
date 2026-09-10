@@ -241,6 +241,19 @@ public:
     bool supports_wasd_keyboard() const noexcept override {
         return inner_ && output_owner_.held() && inner_->supports_wasd_keyboard();
     }
+    bool supports_left_button() const noexcept override {
+        return inner_ && output_owner_.held() && inner_->supports_left_button();
+    }
+    bool left_button_faulted() const noexcept override {
+        return inner_ && inner_->left_button_faulted();
+    }
+    bool left_button_cleanup_required() const noexcept override {
+        return inner_ && inner_->left_button_cleanup_required();
+    }
+    ButtonReceipt set_left_button(bool down) noexcept override {
+        if (!inner_ || !output_owner_.held()) return {ButtonDisposition::REJECTED};
+        return inner_->set_left_button(down);
+    }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
         if (!inner_ || !output_owner_.held()) return {KeyboardDisposition::REJECTED};
         return inner_->set_wasd_keyboard(mask);

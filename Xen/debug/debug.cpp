@@ -396,6 +396,102 @@ std::string auto_stop_metadata_json(const AutoStopConfig& config,
     return output.str();
 }
 
+std::string trigger_metadata_json(const TriggerConfig& config,
+                                  const RuntimeSnapshot& runtime) {
+    std::ostringstream output;
+    output << std::setprecision(9) << std::boolalpha;
+    output << "{\"schema\":1,\"config\":{\"enabled\":" << config.enabled;
+    const auto field = [&](const char* name, auto value) {
+        output << ",\"" << name << "\":";
+        if constexpr (std::is_floating_point_v<decltype(value)>) {
+            if (!std::isfinite(value)) { output << "null"; return; }
+        }
+        output << value;
+    };
+    const auto ids = [&](const char* name, const std::vector<int>& values) {
+        output << ",\"" << name << "\":[";
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (i) output << ',';
+            output << values[i];
+        }
+        output << ']';
+    };
+    field("hold_virtual_key", config.hold_virtual_key);
+    field("require_stop", config.require_stop);
+    field("fire_delay_ms", config.fire_delay_ms);
+    field("shot_interval_ms", config.shot_interval_ms);
+    field("press_duration_ms", config.press_duration_ms);
+    field("max_hold_ms", config.max_hold_ms);
+    field("max_observation_age_ms", config.max_observation_age_ms);
+    field("head_width_percent", config.head_width_percent);
+    field("head_height_percent", config.head_height_percent);
+    field("body_width_percent", config.body_width_percent);
+    field("body_height_percent", config.body_height_percent);
+    field("general_width_percent", config.general_width_percent);
+    field("general_height_percent", config.general_height_percent);
+    field("min_confidence", config.min_confidence);
+    ids("person_class_ids", config.person_class_ids);
+    ids("head_class_ids", config.head_class_ids);
+    ids("general_class_ids", config.general_class_ids);
+    output << ",\"fire_mode\":\"" << (config.fire_mode == TriggerFireMode::SINGLE ? "SINGLE" :
+        config.fire_mode == TriggerFireMode::AUTOMATIC ? "AUTOMATIC" : "UNKNOWN") << "\"}";
+    const auto& snapshot = runtime.trigger;
+    output << ",\"telemetry_available\":" << runtime.trigger_telemetry_available << ",\"final\":";
+    const auto nullable_id = [&](const char* name, std::uint64_t value) {
+        output << ",\"" << name << "\":";
+        if (value) output << value; else output << "null";
+    };
+    if (!runtime.trigger_telemetry_available) output << "null";
+    else {
+        const auto phase = [&]() {
+            switch (snapshot.phase) {
+                case TriggerPhase::DISABLED: return "DISABLED";
+                case TriggerPhase::WAITING: return "WAITING";
+                case TriggerPhase::QUALIFYING: return "QUALIFYING";
+                case TriggerPhase::WAIT_STOP: return "WAIT_STOP";
+                case TriggerPhase::DOWN_PENDING: return "DOWN_PENDING";
+                case TriggerPhase::HELD: return "HELD";
+                case TriggerPhase::UP_PENDING: return "UP_PENDING";
+                case TriggerPhase::COOLDOWN: return "COOLDOWN";
+                case TriggerPhase::FAULT: return "FAULT";
+            }
+            return "UNKNOWN";
+        };
+        const auto region = [&]() {
+            switch (snapshot.region) {
+                case TriggerRegion::NONE: return "NONE";
+                case TriggerRegion::HEAD: return "HEAD";
+                case TriggerRegion::BODY: return "BODY";
+                case TriggerRegion::GENERAL: return "GENERAL";
+            }
+            return "UNKNOWN";
+        };
+        output << "{\"phase\":\"" << phase() << "\",\"reason\":\"" << TriggerReasonName(snapshot.reason)
+               << "\",\"region\":\"" << region() << '"';
+        nullable_id("candidate_id", snapshot.candidate_id);
+        nullable_id("observation_epoch", snapshot.observation_epoch);
+        nullable_id("observation_sequence", snapshot.observation_sequence);
+        nullable_id("command_id", snapshot.command_id);
+        nullable_id("stop_request_id", snapshot.stop_request_id);
+        output << ",\"normalized_margin\":";
+        if (snapshot.region != TriggerRegion::NONE && std::isfinite(snapshot.normalized_margin)) output << snapshot.normalized_margin;
+        else output << "null";
+        field("faulted", snapshot.faulted);
+        field("button_may_be_down", snapshot.button_may_be_down);
+        output << '}';
+    }
+    // 只读取公开状态；报告接口不接触源端token、host或环境变量。
+    const auto& source = runtime.source_context;
+    output << ",\"source_context\":{\"available\":" << source.available << ",\"focused\":";
+    if (source.available) output << source.focused; else output << "null";
+    nullable_id("session_id", source.session_id);
+    nullable_id("sequence", source.sequence);
+    output << ",\"age_ms\":";
+    if (source.age_ms >= 0) output << source.age_ms; else output << "null";
+    output << "}}";
+    return output.str();
+}
+
 std::string aim_config_json(const AimConfig& config) {
     std::ostringstream output;
     output << std::setprecision(9) << std::boolalpha << '{';
@@ -1160,6 +1256,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             csv << "# auto_stop," << csv_escape(auto_stop_metadata_json(
                 *config_.auto_stop_config, final_snapshot.auto_stop)) << '\n';
         }
+        if (config_.trigger_config) {
+            csv << "# trigger," << csv_escape(trigger_metadata_json(*config_.trigger_config, final_snapshot)) << '\n';
+        }
         append_csv_snapshot(csv, final_snapshot);
         append_csv_coverage(csv, summary_.coverage);
         append_csv_timing(csv, "capture", summary_.capture);
@@ -1745,6 +1844,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         if (config_.auto_stop_config) {
             json << "  \"auto_stop\": " << auto_stop_metadata_json(
                 *config_.auto_stop_config, final_snapshot.auto_stop) << ",\n";
+        }
+        if (config_.trigger_config) {
+            json << "  \"trigger\": " << trigger_metadata_json(*config_.trigger_config, final_snapshot) << ",\n";
         }
         append_json_coverage(json, summary_.coverage);
         append_json_queue_depth(json, summary_.ndi_video_queue_depth);

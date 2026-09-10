@@ -123,6 +123,15 @@ struct KeyboardReceipt {
     std::chrono::steady_clock::time_point backend_completed_at{};
     std::chrono::steady_clock::time_point protocol_ack_received_at{};
 };
+// 软件左键状态独立于物理 monitor；ACK 仅证明协议响应，不证明游戏开火。
+enum class ButtonDisposition { UNSUPPORTED, REJECTED, ACKNOWLEDGED, APPLICATION_UNKNOWN };
+struct ButtonReceipt {
+    ButtonDisposition disposition = ButtonDisposition::UNSUPPORTED;
+    bool datagram_sent = false;
+    std::chrono::steady_clock::time_point backend_completed_at{};
+    std::chrono::steady_clock::time_point protocol_ack_received_at{};
+    bool cleanup_required = false;
+};
 // 接收时间/本机序号只能排序收到的事实，不能证明UDP未丢包或游戏停稳。
 // 反向同时按键保留原始mask；HID错误保留上次mask并使state_valid=false。
 struct WasdEvent {
@@ -158,6 +167,10 @@ public:
     virtual bool output_owner_exclusive() const noexcept { return false; }
     // 协议能力不是固件/游戏停稳验证。生产调用必须另有上层验收与许可。
     virtual bool supports_wasd_keyboard() const noexcept { return false; }
+    virtual bool supports_left_button() const noexcept { return false; }
+    virtual bool left_button_faulted() const noexcept { return false; }
+    virtual bool left_button_cleanup_required() const noexcept { return false; }
+    virtual ButtonReceipt set_left_button(bool) noexcept { return {}; }
     virtual KeyboardReceipt set_wasd_keyboard(std::uint8_t) noexcept { return {}; }
     virtual KeyboardReceipt set_wasd_mask(std::uint8_t, bool) noexcept { return {}; }
     virtual KeyboardReceipt cleanup_wasd_keyboard() noexcept { return {}; }

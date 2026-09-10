@@ -578,6 +578,14 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"mouse", "makcu_connect_timeout_ms"},
         {"mouse", "makcu_command_timeout_ms"},
         {"auto_stop", "activation_virtual_key"},
+        {"trigger", "hold_virtual_key"},
+        {"trigger", "fire_delay_ms"},
+        {"trigger", "shot_interval_ms"},
+        {"trigger", "press_duration_ms"},
+        {"trigger", "max_hold_ms"},
+        {"trigger", "max_observation_age_ms"},
+        {"trigger", "fire_mode"},
+        {"source_context", "port"}, {"source_context", "ttl_ms"},
         {"keyboard", "aim_hold_virtual_key"},
         {"keyboard", "emergency_virtual_key"},
         {"keyboard", "runtime_toggle_virtual_key"},
@@ -612,6 +620,13 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"aim", "max_delay_compensation_percent"},
         {"aim", "max_prediction_lead_percent"},
         {"aim", "predicted_gain"},
+        {"trigger", "head_width_percent"},
+        {"trigger", "head_height_percent"},
+        {"trigger", "body_width_percent"},
+        {"trigger", "body_height_percent"},
+        {"trigger", "general_width_percent"},
+        {"trigger", "general_height_percent"},
+        {"trigger", "min_confidence"},
     };
     for (const auto& key : kNumberKeys) {
         if (has_strict_number(ini, key)) continue;
@@ -634,6 +649,8 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"aim", "enable_delay_compensation"},
         {"aim", "enable_prediction"},
         {"auto_stop", "enabled"},
+        {"trigger", "enabled"}, {"trigger", "require_stop"},
+        {"source_context", "enabled"},
         {"mouse", "allow_send_input"},
         {"ui", "enable_vsync"},
         {"ui", "open_detached_preview_on_start"},
@@ -938,6 +955,26 @@ bool validate_app_config(const AppConfig& config,
             error = "自动急停仅支持 KMBOX NET 后端";
             return false;
         }
+        if (config.source_context.ttl_ms < 20 || config.source_context.ttl_ms > 2000 ||
+            (config.source_context.enabled && (config.source_context.host.empty() || config.source_context.port == 0 || config.source_context.process_name.empty()))) {
+            error = "源状态桥接参数不完整或有效期非法"; return false;
+        }
+        auto trigger_config = config.trigger;
+        trigger_config.person_class_ids = config.aim.person_class_ids;
+        trigger_config.head_class_ids = config.aim.head_class_ids;
+        const int trigger_key = config.trigger.hold_virtual_key;
+        const auto trigger_conflict = [trigger_key](const std::vector<int>& keys) {
+            return trigger_key != 0 && std::find(keys.begin(), keys.end(), trigger_key) != keys.end();
+        };
+        if (!valid_trigger_config(trigger_config) || trigger_key == 1 || trigger_key == 0x23 || trigger_key == 0x77 ||
+            trigger_key == 'W' || trigger_key == 'A' || trigger_key == 'S' || trigger_key == 'D' ||
+            trigger_conflict(config.keyboard.emergency_virtual_keys) ||
+            trigger_conflict(config.keyboard.runtime_toggle_virtual_keys) ||
+            (config.trigger.enabled && config.mouse.backend != MouseBackend::KMBOX_NET) ||
+            (config.trigger.enabled && config.trigger.require_stop && !config.auto_stop.enabled)) {
+            error = "自动扳机参数、绑定键、后端或急停依赖非法";
+            return false;
+        }
         const bool physical_keyboard_invalid =
             config.mouse.allow_send_input &&
             (config.keyboard.aim_hold_virtual_keys.empty() ||
@@ -979,6 +1016,31 @@ bool load_app_config(const std::string& path,
         candidate.auto_stop.enabled = ini.GetBoolValue("auto_stop", "enabled", false);
         candidate.auto_stop.activation_virtual_key = static_cast<int>(
             ini.GetLongValue("auto_stop", "activation_virtual_key", 0));
+        candidate.source_context = {};
+        candidate.source_context.enabled = ini.GetBoolValue("source_context", "enabled", false);
+        candidate.source_context.host = ini.GetValue("source_context", "host", "");
+        const auto context_port = ini.GetLongValue("source_context", "port", 0);
+        if (context_port < 0 || context_port > 65535) { error = "源状态端口非法"; return false; }
+        candidate.source_context.port = static_cast<std::uint16_t>(context_port);
+        candidate.source_context.process_name = ini.GetValue("source_context", "process_name", "");
+        candidate.source_context.ttl_ms = static_cast<int>(ini.GetLongValue("source_context", "ttl_ms", 200));
+        candidate.trigger = TriggerConfig{};
+        candidate.trigger.enabled = ini.GetBoolValue("trigger", "enabled", false);
+        candidate.trigger.require_stop = ini.GetBoolValue("trigger", "require_stop", false);
+        candidate.trigger.hold_virtual_key = static_cast<int>(ini.GetLongValue("trigger", "hold_virtual_key", candidate.trigger.hold_virtual_key));
+        candidate.trigger.fire_delay_ms = static_cast<int>(ini.GetLongValue("trigger", "fire_delay_ms", candidate.trigger.fire_delay_ms));
+        candidate.trigger.shot_interval_ms = static_cast<int>(ini.GetLongValue("trigger", "shot_interval_ms", candidate.trigger.shot_interval_ms));
+        candidate.trigger.press_duration_ms = static_cast<int>(ini.GetLongValue("trigger", "press_duration_ms", candidate.trigger.press_duration_ms));
+        candidate.trigger.max_hold_ms = static_cast<int>(ini.GetLongValue("trigger", "max_hold_ms", candidate.trigger.max_hold_ms));
+        candidate.trigger.max_observation_age_ms = static_cast<int>(ini.GetLongValue("trigger", "max_observation_age_ms", candidate.trigger.max_observation_age_ms));
+        candidate.trigger.fire_mode = static_cast<TriggerFireMode>(ini.GetLongValue("trigger", "fire_mode", 0));
+        candidate.trigger.head_width_percent = static_cast<float>(ini.GetDoubleValue("trigger", "head_width_percent", candidate.trigger.head_width_percent));
+        candidate.trigger.head_height_percent = static_cast<float>(ini.GetDoubleValue("trigger", "head_height_percent", candidate.trigger.head_height_percent));
+        candidate.trigger.body_width_percent = static_cast<float>(ini.GetDoubleValue("trigger", "body_width_percent", candidate.trigger.body_width_percent));
+        candidate.trigger.body_height_percent = static_cast<float>(ini.GetDoubleValue("trigger", "body_height_percent", candidate.trigger.body_height_percent));
+        candidate.trigger.general_width_percent = static_cast<float>(ini.GetDoubleValue("trigger", "general_width_percent", candidate.trigger.general_width_percent));
+        candidate.trigger.general_height_percent = static_cast<float>(ini.GetDoubleValue("trigger", "general_height_percent", candidate.trigger.general_height_percent));
+        candidate.trigger.min_confidence = static_cast<float>(ini.GetDoubleValue("trigger", "min_confidence", candidate.trigger.min_confidence));
         const char* configured_log_level = ini.GetValue(
             "log", "global_level", nullptr);
         if (!parse_log_level(configured_log_level,
@@ -1418,6 +1480,27 @@ bool save_app_config(const std::string& path,
                          config.mouse.makcu_connect_timeout_ms);
         ini.SetLongValue("mouse", "makcu_command_timeout_ms",
                          config.mouse.makcu_command_timeout_ms);
+        ini.SetBoolValue("source_context", "enabled", config.source_context.enabled);
+        ini.SetValue("source_context", "host", config.source_context.host.c_str());
+        ini.SetLongValue("source_context", "port", config.source_context.port);
+        ini.SetValue("source_context", "process_name", config.source_context.process_name.c_str());
+        ini.SetLongValue("source_context", "ttl_ms", config.source_context.ttl_ms);
+        ini.SetBoolValue("trigger", "enabled", config.trigger.enabled);
+        ini.SetBoolValue("trigger", "require_stop", config.trigger.require_stop);
+        ini.SetLongValue("trigger", "hold_virtual_key", config.trigger.hold_virtual_key);
+        ini.SetLongValue("trigger", "fire_delay_ms", config.trigger.fire_delay_ms);
+        ini.SetLongValue("trigger", "shot_interval_ms", config.trigger.shot_interval_ms);
+        ini.SetLongValue("trigger", "press_duration_ms", config.trigger.press_duration_ms);
+        ini.SetLongValue("trigger", "max_hold_ms", config.trigger.max_hold_ms);
+        ini.SetLongValue("trigger", "max_observation_age_ms", config.trigger.max_observation_age_ms);
+        ini.SetLongValue("trigger", "fire_mode", static_cast<long>(config.trigger.fire_mode));
+        ini.SetDoubleValue("trigger", "head_width_percent", config.trigger.head_width_percent);
+        ini.SetDoubleValue("trigger", "head_height_percent", config.trigger.head_height_percent);
+        ini.SetDoubleValue("trigger", "body_width_percent", config.trigger.body_width_percent);
+        ini.SetDoubleValue("trigger", "body_height_percent", config.trigger.body_height_percent);
+        ini.SetDoubleValue("trigger", "general_width_percent", config.trigger.general_width_percent);
+        ini.SetDoubleValue("trigger", "general_height_percent", config.trigger.general_height_percent);
+        ini.SetDoubleValue("trigger", "min_confidence", config.trigger.min_confidence);
         ini.SetBoolValue("auto_stop", "enabled", config.auto_stop.enabled);
         ini.SetLongValue("auto_stop", "activation_virtual_key",
                          config.auto_stop.activation_virtual_key);

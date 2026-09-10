@@ -818,6 +818,15 @@ add_library(auto_stop_worker STATIC Xen/auto_stop/auto_stop_worker.cpp)
 target_include_directories(auto_stop_worker PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(auto_stop_worker PUBLIC auto_stop mouse PRIVATE Threads::Threads)
 
+add_library(trigger STATIC Xen/trigger/trigger.cpp)
+target_include_directories(trigger PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
+add_library(trigger_worker STATIC Xen/trigger/trigger_worker.cpp)
+target_link_libraries(trigger_worker PUBLIC trigger auto_stop_worker mouse log PRIVATE Threads::Threads)
+add_library(source_context STATIC Xen/source_context/source_context.cpp)
+target_include_directories(source_context PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(source_context PRIVATE ws2_32 bcrypt user32 Threads::Threads)
+add_executable(xen_source_context Xen/source_context_host/main.cpp)
+target_link_libraries(xen_source_context PRIVATE source_context)
 add_library(keyboard STATIC
     Xen/keyboard/keyboard.cpp)
 target_include_directories(keyboard PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -831,7 +840,7 @@ target_include_directories(config
         ${OpenCV_INCLUDE_DIRS}
     PRIVATE
         ${simpleini_SOURCE_DIR})
-target_link_libraries(config PUBLIC log)
+target_link_libraries(config PUBLIC log trigger source_context)
 
 add_library(app_release STATIC
     Xen/app/release_contract.cpp)
@@ -858,7 +867,7 @@ add_library(runtime STATIC
     Xen/runtime/camera_motion.cpp)
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
-    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker mouse keyboard config log
+    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker trigger_worker source_context mouse keyboard config log
     PRIVATE Threads::Threads)
 
 add_library(app_input STATIC
@@ -871,7 +880,7 @@ add_library(xen_debug STATIC
 target_include_directories(xen_debug PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(xen_debug PUBLIC log aim aim_landmark mouse auto_stop)
+target_link_libraries(xen_debug PUBLIC log aim aim_landmark mouse auto_stop trigger)
 
 add_library(benchmark STATIC
     Xen/benchmark/benchmark.cpp)
@@ -1367,6 +1376,18 @@ if(BUILD_TESTING)
     target_link_libraries(mouse_tests PRIVATE mouse log ws2_32)
     add_test(NAME mouse_tests COMMAND mouse_tests)
 
+    add_executable(trigger_tests tests/trigger_tests.cpp)
+    target_link_libraries(trigger_tests PRIVATE trigger)
+    add_test(NAME trigger_tests COMMAND trigger_tests)
+    add_executable(trigger_worker_tests tests/trigger_worker_tests.cpp)
+    target_link_libraries(trigger_worker_tests PRIVATE trigger_worker)
+    add_test(NAME trigger_worker_tests COMMAND trigger_worker_tests)
+    add_executable(kmbox_button_tests tests/kmbox_button_tests.cpp)
+    target_link_libraries(kmbox_button_tests PRIVATE mouse ws2_32)
+    add_test(NAME kmbox_button_tests COMMAND kmbox_button_tests)
+    add_executable(source_context_tests tests/source_context_tests.cpp)
+    target_link_libraries(source_context_tests PRIVATE source_context bcrypt ws2_32)
+    add_test(NAME source_context_tests COMMAND source_context_tests)
     add_executable(auto_stop_tests tests/auto_stop_tests.cpp)
     target_link_libraries(auto_stop_tests PRIVATE auto_stop)
     add_test(NAME auto_stop_tests COMMAND auto_stop_tests)

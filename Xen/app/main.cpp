@@ -204,6 +204,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     std::string debug_run_id;
     std::optional<AimConfig> debug_aim_config;
     std::optional<AutoStopConfig> debug_auto_stop_config;
+    std::optional<TriggerConfig> debug_trigger_config;
     std::uint64_t debug_segment = 0;
     std::vector<RuntimePipelineSample> pending_debug_samples;
     Overlay overlay;
@@ -250,6 +251,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         report_config.mouse_backend = MouseBackendName(config.mouse.backend);
         report_config.aim_config = debug_aim_config;
         report_config.auto_stop_config = debug_auto_stop_config;
+        report_config.trigger_config = debug_trigger_config;
         std::string report_error;
         debug_session_active = debug_report.start(
             report_config, report_error);
@@ -280,6 +282,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             std::to_string(GetTickCount64());
         debug_aim_config = runtime_config.aim;
         debug_auto_stop_config = runtime_config.auto_stop;
+        debug_trigger_config = runtime_config.trigger;
+        // Runtime 的扳机使用启动时 Aim 类别映射；保存有效值，不保存 UI 后续编辑值。
+        debug_trigger_config->person_class_ids = runtime_config.aim.person_class_ids;
+        debug_trigger_config->head_class_ids = runtime_config.aim.head_class_ids;
         debug_segment = 0;
         detector_reload_pending = false;
         debug_session_active = start_debug_report(runtime.snapshot());
