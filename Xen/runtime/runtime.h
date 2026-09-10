@@ -10,6 +10,7 @@
 
 #include "aim/aim.h"
 #include "auto_stop/auto_stop.h"
+#include "recoil/recoil_worker.h"
 #include "aim_landmark/aim_landmark.h"
 #include "capture/capture.h"
 #include "config/config.h"
@@ -244,6 +245,11 @@ struct RuntimeSnapshot {
     TriggerSnapshot trigger;
     bool trigger_telemetry_available = false;
     source_context::SourceContextSnapshot source_context;
+    RecoilSnapshot recoil;
+    bool recoil_telemetry_available = false;
+    RecoilExecutionLog recoil_execution_log;
+    weapon::WeaponSnapshot weapon_snapshot;
+    std::string recoil_profile_status;
     RuntimeState state = RuntimeState::STOPPED;
     CaptureStatus capture_status = CaptureStatus::CLOSED;
     DetectionStatus detection_status = DetectionStatus::NOT_RUN;
@@ -327,6 +333,7 @@ public:
     // 请求编号在一次会话中严格递增。预计完成不等于已停稳或允许开火。
     bool request_auto_stop(std::uint64_t request_id) noexcept;
     void cancel_auto_stop(std::uint64_t request_id) noexcept;
+    RecoilExecutionLog recoil_execution_log() const;
     RuntimeSnapshot snapshot() const noexcept;
     // 诊断预览默认关闭；启用时最多 10 FPS，最长边 512，且只保留最新同帧图像与标注。
     bool set_preview_enabled(bool enabled) noexcept;

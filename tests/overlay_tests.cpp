@@ -9,6 +9,7 @@
 #endif
 
 #include "overlay/overlay_internal.h"
+#include "recoil/recoil.h"
 
 #include <array>
 #include <cmath>
@@ -319,6 +320,27 @@ void test_auxiliary_capture_requires_fresh_edge_and_cancel_wins() {
         "离开可编辑页面后不得消费延迟到达的按键");
 }
 
+void test_recoil_editor_preview_uses_production_curve_without_mutating_base() {
+    RecoilProfile base;
+    base.id = "editor-fixture"; base.weapon_id = "synthetic"; base.revision = 7;
+    base.points = {{0, 0, 0}, {20, 2, 4}, {60, -2, 8}, {100, 0, 12}};
+    RecoilTuning edit;
+    edit.x_strength = 0.5; edit.y_strength = 1.5; edit.start_offset_ms = 5; edit.time_scale = 2;
+    RecoilProfile preview;
+    std::string error;
+    expect(compile_recoil_profile(base, edit, preview, error), "编辑草稿应通过生产曲线编译入口");
+    expect(base.revision == 7 && base.points.back().time_ms == 100 && base.points.back().y_counts == 12,
+        "编辑器预览不能改变已加载执行基线");
+    expect(preview.revision == 8 && preview.state == RecoilProfileState::SCHEMA_VALID &&
+        preview.points.back().time_ms == 185 && preview.points.back().y_counts == 18,
+        "时序和强度编译成独立候选，不能继承人工接受状态");
+    const auto middle = sample_recoil_profile(preview, 65);
+    expect(std::abs(middle.x_counts) < 1e-9 && std::abs(middle.y_counts - 9) < 1e-9,
+        "预览在同一生产插值器中保持原有X换向和Y累计意义");
+    edit.start_offset_ms = -100;
+    expect(!compile_recoil_profile(base, edit, preview, error), "草稿把节点移到射击事件前必须拒绝，而非仅在图上隐藏");
+}
+
 void test_output_arm_requires_input_health() {
     using overlay::detail::output_arm_available;
     expect(output_arm_available(true, false, true, true, false),
@@ -439,6 +461,7 @@ int main() {
     test_detection_role_mapping();
     test_hotkey_capture_state_machine();
     test_auxiliary_capture_requires_fresh_edge_and_cancel_wins();
+    test_recoil_editor_preview_uses_production_curve_without_mutating_base();
     test_output_arm_requires_input_health();
     test_delay_compensation_tooltip_contract_rejects_ambiguous_pairing();
     test_delay_compensation_tooltip_states_new_app_default();

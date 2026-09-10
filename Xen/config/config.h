@@ -7,6 +7,8 @@
 #include "auto_stop/auto_stop.h"
 #include "trigger/trigger.h"
 #include "source_context/source_context.h"
+#include "recoil/recoil_config.h"
+#include "weapon/weapon.h"
 #include "capture/capture.h"
 #include "detector/detector.h"
 #include "keyboard/keyboard.h"
@@ -88,6 +90,8 @@ struct AppConfig {
     AutoStopConfig auto_stop;
     TriggerConfig trigger;
     source_context::SourceContextConfig source_context;
+    RecoilConfig recoil;
+    weapon::GsiConfig gsi;
     LogConfig log = [] {
         LogConfig value;
         value.global_level = LogLevel::INFO;

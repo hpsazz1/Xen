@@ -827,6 +827,20 @@ target_include_directories(source_context PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(source_context PRIVATE ws2_32 bcrypt user32 Threads::Threads)
 add_executable(xen_source_context Xen/source_context_host/main.cpp)
 target_link_libraries(xen_source_context PRIVATE source_context)
+add_library(weapon STATIC Xen/weapon/weapon.cpp)
+target_include_directories(weapon PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(weapon PUBLIC nlohmann_json::nlohmann_json PRIVATE ws2_32 Threads::Threads)
+add_library(recoil STATIC Xen/recoil/recoil.cpp Xen/recoil/recoil_store.cpp Xen/recoil/motion_ledger.cpp)
+target_include_directories(recoil PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(recoil PUBLIC nlohmann_json::nlohmann_json)
+add_library(recoil_worker STATIC Xen/recoil/recoil_worker.cpp)
+target_link_libraries(recoil_worker PUBLIC recoil trigger_worker mouse PRIVATE Threads::Threads)
+add_library(recoil_tuner STATIC Xen/recoil_tuner/recoil_tuner.cpp Xen/recoil_tuner/recoil_tuner_io.cpp Xen/recoil_tuner/image_measurement.cpp)
+target_include_directories(recoil_tuner PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(recoil_tuner PUBLIC recoil nlohmann_json::nlohmann_json ${OpenCV_LIBS})
+add_executable(xen_recoil_tuner Xen/recoil_tuner_cli/main.cpp)
+target_link_libraries(xen_recoil_tuner PRIVATE recoil_tuner recoil)
+xen_deploy_runtime_dlls(xen_recoil_tuner OPENCV)
 add_library(keyboard STATIC
     Xen/keyboard/keyboard.cpp)
 target_include_directories(keyboard PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -840,7 +854,7 @@ target_include_directories(config
         ${OpenCV_INCLUDE_DIRS}
     PRIVATE
         ${simpleini_SOURCE_DIR})
-target_link_libraries(config PUBLIC log trigger source_context)
+target_link_libraries(config PUBLIC log trigger source_context weapon recoil)
 
 add_library(app_release STATIC
     Xen/app/release_contract.cpp)
@@ -867,7 +881,7 @@ add_library(runtime STATIC
     Xen/runtime/camera_motion.cpp)
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
-    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker trigger_worker source_context mouse keyboard config log
+    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker trigger_worker source_context recoil_worker weapon mouse keyboard config log
     PRIVATE Threads::Threads)
 
 add_library(app_input STATIC
@@ -876,11 +890,11 @@ target_include_directories(app_input PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(app_input PUBLIC runtime)
 
 add_library(xen_debug STATIC
-    Xen/debug/debug.cpp)
+    Xen/debug/debug.cpp Xen/debug/recoil_report.cpp)
 target_include_directories(xen_debug PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(xen_debug PUBLIC log aim aim_landmark mouse auto_stop trigger)
+target_link_libraries(xen_debug PUBLIC log aim aim_landmark mouse auto_stop trigger recoil weapon recoil_tuner)
 
 add_library(benchmark STATIC
     Xen/benchmark/benchmark.cpp)
@@ -912,11 +926,11 @@ target_link_libraries(mouse_effect_probe_runner
     PRIVATE config nlohmann_json::nlohmann_json bcrypt)
 
 add_library(overlay STATIC
-    Xen/overlay/overlay.cpp)
+    Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(overlay
     PUBLIC runtime config
-    PRIVATE imgui d3d11 dxgi dwmapi)
+    PRIVATE imgui recoil_tuner recoil d3d11 dxgi dwmapi)
 
 add_executable(xen_app WIN32
     Xen/app/main.cpp
@@ -1027,6 +1041,33 @@ target_link_libraries(xen_mouse_effect_probe_composite_seal PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(weapon_tests tests/weapon_tests.cpp)
+    target_link_libraries(weapon_tests PRIVATE weapon)
+    add_test(NAME weapon_tests COMMAND weapon_tests)
+    foreach(test_name recoil_tests recoil_store_tests motion_ledger_tests)
+        add_executable(${test_name} tests/${test_name}.cpp)
+        target_link_libraries(${test_name} PRIVATE recoil)
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    endforeach()
+    add_executable(recoil_worker_tests tests/recoil_worker_tests.cpp)
+    target_link_libraries(recoil_worker_tests PRIVATE recoil_worker)
+    add_test(NAME recoil_worker_tests COMMAND recoil_worker_tests)
+    add_executable(recoil_tuner_tests tests/recoil_tuner_tests.cpp)
+    target_link_libraries(recoil_tuner_tests PRIVATE recoil_tuner recoil)
+    xen_deploy_runtime_dlls(recoil_tuner_tests OPENCV)
+    add_test(NAME recoil_tuner_tests COMMAND recoil_tuner_tests)
+    add_executable(recoil_config_tests tests/recoil_config_tests.cpp)
+    target_link_libraries(recoil_config_tests PRIVATE config)
+    xen_deploy_runtime_dlls(recoil_config_tests OPENCV)
+    add_test(NAME recoil_config_tests COMMAND recoil_config_tests)
+    add_executable(aim_external_motion_tests tests/aim_external_motion_tests.cpp)
+    target_link_libraries(aim_external_motion_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_external_motion_tests OPENCV)
+    add_test(NAME aim_external_motion_tests COMMAND aim_external_motion_tests)
+    add_executable(recoil_report_tests tests/recoil_report_tests.cpp)
+    target_link_libraries(recoil_report_tests PRIVATE xen_debug)
+    xen_deploy_runtime_dlls(recoil_report_tests OPENCV)
+    add_test(NAME recoil_report_tests COMMAND recoil_report_tests)
     # 测试解释器必须先于任何命令登记解析，不能依赖第二次配置留下的缓存。
     find_program(XEN_POWERSHELL7_EXECUTABLE NAMES pwsh)
     if(NOT XEN_POWERSHELL7_EXECUTABLE)
@@ -1052,6 +1093,10 @@ if(BUILD_TESTING)
             "退出结果：${XEN_PYTHON_MODULES_RESULT}\n${XEN_PYTHON_MODULES_ERROR}")
     endif()
     message(STATUS "测试 Python：${XEN_PYTHON_EXECUTABLE} (${XEN_PYTHON_MODULES_OUTPUT})")
+    add_test(NAME recoil_dataset_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 "${PROJECT_SOURCE_DIR}/tests/recoil_dataset_tests.py")
+    add_test(NAME recoil_cli_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 "${PROJECT_SOURCE_DIR}/tests/recoil_cli_tests.py" "$<TARGET_FILE:xen_recoil_tuner>")
     add_executable(log_tests
         tests/log_tests.cpp)
     # 生产消费者只依赖 log.h；本测试额外验证 Xen 不触碰外部 spdlog registry。
@@ -1461,6 +1506,7 @@ if(BUILD_TESTING)
     add_executable(overlay_tests
         tests/overlay_tests.cpp)
     target_include_directories(overlay_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    target_link_libraries(overlay_tests PRIVATE recoil)
     add_test(NAME overlay_tests COMMAND overlay_tests)
 
     # 只初始化 Overlay；没有设备/Runtime 实例，供实际窗口布局复核。

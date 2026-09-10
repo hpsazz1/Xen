@@ -21,6 +21,7 @@ public:
     std::condition_variable wake;
     std::thread thread;
     TriggerSnapshot state;
+    TriggerFiringSignal firing;
     std::uint64_t reserved_stop_id = 0, deferred_cancel_id = 0;
     unsigned cleanup_attempts = 0;
     TriggerTime cleanup_due{};
@@ -69,6 +70,7 @@ public:
             }
             if (decision.button_action == TriggerButtonAction::NONE) break;
             const bool down = decision.button_action == TriggerButtonAction::DOWN;
+            if (!down) { std::lock_guard state_lock(mutex); firing.confirmed_down = false; }
             auto lock = down ? arbiter->try_enter_aim() : arbiter->try_enter_cleanup();
             TriggerReceipt receipt;
             receipt.command_id = decision.command_id;
@@ -96,6 +98,10 @@ public:
                 lock.unlock();
             }
             receipt.completed_at = TriggerClock::now();
+            if (down && receipt.status == TriggerReceiptStatus::ACKNOWLEDGED) {
+                std::lock_guard state_lock(mutex);
+                firing = {true, receipt.command_id, receipt.completed_at};
+            }
             decision = controller.acknowledge(receipt, receipt.completed_at);
             if (!down) {
                 ++cleanup_attempts;
@@ -178,6 +184,7 @@ public:
             auto lock = arbiter->try_enter_cleanup();
             if (lock.owns_lock()) mouse->set_left_button(false);
             std::lock_guard state_lock(mutex);
+            firing.confirmed_down = false;
             state.faulted = true;
             state.phase = TriggerPhase::FAULT;
             state.reason = TriggerReason::UNKNOWN_RECEIPT;
@@ -216,10 +223,20 @@ bool TriggerWorker::start(const TriggerConfig& config, int cleanup_budget_ms) no
 void TriggerWorker::publish(std::shared_ptr<const TriggerObservation> value) noexcept {
     impl_->latest.store(std::move(value)); impl_->wake.notify_one();
 }
-void TriggerWorker::cancel() noexcept { impl_->canceled.store(true); impl_->wake.notify_one(); }
+void TriggerWorker::cancel() noexcept {
+    impl_->canceled.store(true);
+    { std::lock_guard lock(impl_->mutex); impl_->firing.confirmed_down = false; }
+    impl_->wake.notify_one();
+}
 void TriggerWorker::stop() noexcept {
     impl_->stopping.store(true); impl_->wake.notify_one();
     if (impl_->thread.joinable()) impl_->thread.join();
+}
+TriggerFiringSignal TriggerWorker::firing_signal() const noexcept {
+    std::lock_guard lock(impl_->mutex);
+    auto value = impl_->firing;
+    if (impl_->stopping.load() || impl_->canceled.load()) value.confirmed_down = false;
+    return value;
 }
 TriggerSnapshot TriggerWorker::snapshot() const noexcept {
     std::lock_guard lock(impl_->mutex); return impl_->state;

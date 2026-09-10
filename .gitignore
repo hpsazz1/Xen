@@ -15,6 +15,9 @@ cache/
 # 本地运行日志。
 logs/
 
+# 用户本地弹道、活动引用与校准结果，不随源码再分发。
+recoil_profiles/
+
 # Python 专项工具的字节码缓存。
 __pycache__/
 *.pyc

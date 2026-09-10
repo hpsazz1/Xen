@@ -3208,6 +3208,29 @@ struct Aim::Impl {
         return inventory;
     }
 
+    PendingIssuedCommandInventory execution_command_inventory(
+            const AimFrame& frame, std::chrono::steady_clock::time_point at) const noexcept {
+        auto inventory = pending_issued_command_inventory(at);
+        if (!frame.external_motion.enabled || config.control_delay_ms <= 0.0f) return inventory;
+        const float delay_seconds = config.control_delay_ms / 1000.0f;
+        const auto cutoff = at - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<float>(delay_seconds));
+        // process已验证该区间完整。这里只合成物理执行库存视图；外部
+        // 回执不进入issued_commands，不能被Aim的零回执或reset改写。
+        for (const auto& event : frame.external_motion.events) {
+            if (event.completed_at <= cutoff || event.completed_at > at) continue;
+            const float x = static_cast<float>(event.dx_counts);
+            const float y = static_cast<float>(event.dy_counts);
+            const float age = std::chrono::duration<float>(at - event.completed_at).count();
+            inventory.net_x += x; inventory.net_y += y;
+            inventory.absolute_x += std::fabs(x); inventory.absolute_y += std::fabs(y);
+            inventory.backend_completed_weighted_x += x * std::clamp(1.0f - age / delay_seconds, 0.0f, 1.0f);
+            inventory.has_positive_x = inventory.has_positive_x || x > 0.0f;
+            inventory.has_negative_x = inventory.has_negative_x || x < 0.0f;
+        }
+        return inventory;
+    }
+
     struct PredictionBackgroundPairX {
         float world_left_dx_roi = 0.0f;
         float world_right_dx_roi = 0.0f;
@@ -3705,7 +3728,7 @@ struct Aim::Impl {
             projection.delay_y = track.vy * projection.delay_seconds_y;
             if (controller_track_id == track.id) {
                 const auto pending =
-                    pending_issued_command_inventory(control_at);
+                    execution_command_inventory(frame, control_at);
                 projection.delay_x -= pending.net_x *
                     kControllerPendingCommandResponse /
                     config.counts_per_pixel_x /
@@ -4380,7 +4403,16 @@ struct Aim::Impl {
             : controller_dt;
         const float current_common_motion_x = context.current_common_motion_x;
         const float current_common_consistency = context.current_common_consistency;
-        const float delayed_command_x = source_pair_command_sum_x(frame, track,
+        const auto external_delay = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<float>(config.control_delay_ms / 1000.0f));
+        const auto external_pair = track.raw_observation_pair_valid
+            ? external_motion_sum(frame.external_motion,
+                track.raw_previous_at - external_delay, frame.captured_at - external_delay)
+            : std::optional<std::pair<double, double>>{std::pair{0.0, 0.0}};
+        // 不完整外部区间不更新模型；实测背景已包含所有相机运动，可以独立消费。
+        if (!external_pair && paired_background_use_x(frame, track) != AimBackgroundMotionUse::CONSUMED) return;
+        const float external_x = external_pair ? static_cast<float>(external_pair->first) : 0.0f;
+        const float delayed_command_x = external_x + source_pair_command_sum_x(frame, track,
             config.control_delay_ms, issued_commands, issued_command_next,
             issued_command_count, zero_anchor_history).value_or(
                 delayed_issued_command(frame.captured_at).first);
@@ -4453,7 +4485,9 @@ struct Aim::Impl {
             // 仅在原模型假设下用同源零位移重锚，不授予独立世界预测资格。
             const bool zero_model_interval = source_pair_has_proven_zero_commands(
                 frame, track, config.control_delay_ms, issued_commands,
-                issued_command_next, issued_command_count, zero_anchor_history);
+                issued_command_next, issued_command_count, zero_anchor_history) &&
+                external_motion_proven_zero_x(frame.external_motion,
+                    track.raw_previous_at - external_delay, frame.captured_at - external_delay);
             // 验证与提交共用同一候选计算；独立来源用双线性，模型回退保留原运算。
             const auto proposed_observer_velocity = [&]() -> double {
                 if (!std::isfinite(observer_dt) || observer_dt <= 0.0f ||
@@ -4682,7 +4716,7 @@ struct Aim::Impl {
         tracking_previous_error_x = track_center_error_x;
         tracking_previous_control_center_x = frame.control_center_x;
         const auto pending =
-            pending_issued_command_inventory(current_controller_at);
+            execution_command_inventory(frame, current_controller_at);
         // Y 保留 fdf6b00 已经实机通过的径向 deadzone 输入。公开/current
         // base X 的语义变化不得借共享模长改写 Y；内部历史 reference 在此
         // 只作为冻结的 Y 尺度输入，不回到 X base、选择或 closing 路径。
@@ -4797,6 +4831,8 @@ struct Aim::Impl {
                 if (effective_at <= cutoff) continue;
                 if (effective_at <= current_controller_at) unseen_counts += entry.dx_counts;
             }
+            if (const auto external = external_motion_sum(frame.external_motion, cutoff, current_controller_at))
+                unseen_counts += external->first;
             diagnostic_world_preview = config.enable_delay_compensation && background_role
                 ? static_cast<double>(tracking_target_velocity_counts_per_second_x) * horizon_seconds : 0.0;
             diagnostic_unseen = unseen_counts;
@@ -4947,6 +4983,8 @@ struct Aim::Impl {
             tracking_proportional_input_x *= desired_x / unconstrained_x;
         }
         const float tracking_before_history_x = desired_x;
+        // 外部已执行位移不属于Aim请求：只在总执行库存/相机模型扣账，不把
+        // 它作为Aim的已接受输出回写积分；共享arbiter拒绝仍确认Aim零命令。
         // Åström/Rundqwist 的 tracking anti-windup：执行器实际可接受向量与
         // 线性 PI 请求之差连续回写状态。这里唯一硬上限就是既有物理向量
         // 上限，不再另建 pending、probe、相位或速度门。
@@ -5246,6 +5284,8 @@ struct Aim::Impl {
                 if(stamp<=cutoff) continue;
                 if(stamp<=current_controller_at) unseen_y+=entry.dy_counts;
             }
+            if (const auto external = external_motion_sum(frame.external_motion, cutoff, current_controller_at))
+                unseen_y += static_cast<float>(external->second);
             const float direction_y = error_y > 0.0f ? 1.0f : -1.0f;
             const float remaining_y_counts=std::max(0.0f,
                 std::fabs(error_y)*config.counts_per_pixel_y/kControllerPendingCommandResponse -
@@ -5436,7 +5476,19 @@ struct Aim::Impl {
         if (!frame_prediction_enabled) return;
         const float controller_dt = controller_at == std::chrono::steady_clock::time_point{}
             ? track.prediction_dt : clamp_delta_seconds(std::chrono::duration<double>(at-controller_at).count());
-        const auto delayed = delayed_issued_command(at);
+        auto delayed = delayed_issued_command(at);
+        if (frame.external_motion.enabled && track.raw_observation_pair_valid) {
+            const auto delay = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<float>(config.control_delay_ms / 1000.0f));
+            const auto external = external_motion_sum(frame.external_motion,
+                track.raw_previous_at - delay, frame.captured_at - delay);
+            if (!external) return;
+            const float source_dt = std::chrono::duration<float>(frame.captured_at - track.raw_previous_at).count();
+            if (!std::isfinite(source_dt) || source_dt <= 0.0f) return;
+            // 下方measurement单位为单controller_dt的counts；外部积分属于
+            // 完整raw源帧对，先转为该控制步的等效量，不能混淆两个时域。
+            delayed.second += static_cast<float>(external->second) * controller_dt / source_dt;
+        }
         const float hold_band = std::max(kControllerIntegralMinimumErrorPixels, config.deadzone_pixels * 1.5f);
         const auto update_feedforward = [&](float base_error,
                                             float relative_velocity,
@@ -5727,6 +5779,12 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
                frame.source_pixels_per_roi_pixel_x <= 0.0f ||
                frame.source_pixels_per_roi_pixel_y <= 0.0f) {
         invalid_reason = "ROI 到 source 的像素比例非法";
+    } else if (frame.external_motion.enabled && !external_motion_sum(frame.external_motion,
+            frame.captured_at - std::max(
+                std::chrono::duration_cast<clock::duration>(std::chrono::duration<float>(impl_->config.control_delay_ms / 1000.0f)),
+                std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(static_cast<double>(impl_->config.control_delay_ms) / 1000.0))),
+            control_at)) {
+        invalid_reason = "外部位移账本缺失或覆盖不足";
     } else if (!impl_->valid_frame_order(frame, control_at)) {
         invalid_reason = "帧序号或时间未严格递增";
     }
@@ -5752,6 +5810,17 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
         result.range_allows_control = impl_->range_allows_control;
         const auto selected = clock::now();
 
+        if (target && frame.external_motion.enabled && target->raw_observation_pair_valid &&
+            !external_motion_sum(frame.external_motion,
+                target->raw_previous_at - std::chrono::duration_cast<clock::duration>(
+                    std::chrono::duration<float>(impl_->config.control_delay_ms / 1000.0f)),
+                frame.captured_at)) {
+            // 当前执行库存覆盖不等于原始观测帧对覆盖。缺历史时不能让
+            // observer跳过更新而继续以旧模型输出，X背景也不能补足Y账本。
+            result.status = AimStatus::INVALID_INPUT;
+            impl_->log_status_transition(result.status, frame.sequence, "外部位移原始帧对覆盖不足");
+            return result;
+        }
         if (target) {
             const bool same_prediction_reference = impl_->config.enable_prediction &&
                 frame.lock_active &&

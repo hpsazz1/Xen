@@ -3,6 +3,7 @@
 
 #include "overlay/overlay.h"
 #include "overlay/overlay_internal.h"
+#include "overlay/recoil_panel.h"
 
 #include "log/log.h"
 
@@ -95,6 +96,7 @@ enum class HotkeyBindingTarget {
     EMERGENCY,
     AUTO_STOP,
     TRIGGER,
+    RECOIL,
 };
 
 std::array<bool, 256> current_virtual_key_state() noexcept {
@@ -702,6 +704,8 @@ struct Overlay::Impl {
     std::uint64_t history_sequence = 0;
     bool history_runtime_active = false;
     HotkeyBindingTarget hotkey_binding_target = HotkeyBindingTarget::NONE;
+    RecoilPanel recoil_panel;
+    int trigger_general_class = 0;
     overlay::detail::HotkeyCaptureState hotkey_capture_state;
     std::string hotkey_capture_message;
 
@@ -3056,6 +3060,19 @@ struct Overlay::Impl {
         render_trigger_config(snapshot, app_config, can_edit, key_active);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_source_context_config(snapshot, app_config, can_edit);
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        begin_config_panel("recoil_permission_panel", "压枪许可", 300.0f);
+        ImGui::BeginDisabled(!can_edit);
+        if (begin_form("recoil_permission_form", 150.0f)) {
+            const int key = app_config.recoil.hold_virtual_key;
+            render_hotkey_row("额外许可键（可选）", "##recoil_hold_key",
+                "可与瞄准或扳机共用；未绑定时仍需真实射击事实与完整公共许可。禁止左键、WASD、End、F8和实际安全键。",
+                HotkeyBindingTarget::RECOIL, key == 0 ? std::vector<int>{} : std::vector<int>{key}, key_active);
+            ImGui::EndTable();
+        }
+        ImGui::EndDisabled();
+        end_config_panel();
+        recoil_panel.render(snapshot, app_config, can_edit);
     }
 
     void render_trigger_config(const RuntimeSnapshot& snapshot, AppConfig& app_config,
@@ -3081,6 +3098,25 @@ struct Overlay::Impl {
             slider_float_control("trigger_body_width", &trigger.body_width_percent, 1.0f, 100.0f, "%.0f");
             form_row("人体内域高 / %", "检测人体或身体框中心椭圆的高占比；被画面边界截断的检测框不用于开火。");
             slider_float_control("trigger_body_height", &trigger.body_height_percent, 1.0f, 100.0f, "%.0f");
+            form_row("通用类别（可选）", "仅将明确添加的模型类别纳入通用内域；不得与头部或人体类别重复，空列表不会默认接受全部类别。");
+            ImGui::SetNextItemWidth(80);
+            ImGui::InputInt("##trigger_general_class", &trigger_general_class, 0, 0);
+            ImGui::SameLine();
+            if (ImGui::Button("添加类别")) {
+                const auto contains = [&](const std::vector<int>& ids) { return std::find(ids.begin(), ids.end(), trigger_general_class) != ids.end(); };
+                if (trigger_general_class < 0 || contains(app_config.aim.person_class_ids) || contains(app_config.aim.head_class_ids) || contains(trigger.general_class_ids))
+                    hotkey_capture_message = "通用类别必须非负且不与已有头部、人体或通用类别重复";
+                else trigger.general_class_ids.push_back(trigger_general_class);
+            }
+            for (std::size_t i = 0; i < trigger.general_class_ids.size(); ++i) {
+                ImGui::Text("类别 %d", trigger.general_class_ids[i]); ImGui::SameLine(); ImGui::PushID(static_cast<int>(i));
+                const bool remove = ImGui::SmallButton("移除"); ImGui::PopID();
+                if (remove) { trigger.general_class_ids.erase(trigger.general_class_ids.begin() + i); break; }
+            }
+            form_row("通用内域宽 / %", "只作用于上方显式通用类别；空类别列表时无效，不改变头部或人体内域。");
+            slider_float_control("trigger_general_width", &trigger.general_width_percent, 1.0f, 100.0f, "%.0f");
+            form_row("通用内域高 / %", "通用检测框中心椭圆的高占比，不能从未知类别推断头身身份。");
+            slider_float_control("trigger_general_height", &trigger.general_height_percent, 1.0f, 100.0f, "%.0f");
             form_row("最低置信度", "在检测器过滤后进一步筛选；不能恢复已被检测器剔除的框。类别映射沿用瞄准页的模型类别设置。");
             slider_float_control("trigger_confidence", &trigger.min_confidence, 0.0f, 1.0f, "%.2f");
             form_row("开火延迟 / ms", "准星连续位于同一人物有效内域的最短时间；离域或身份歧义重计，与急停等待并行。");
@@ -3487,6 +3523,7 @@ struct Overlay::Impl {
                 return &app_config.keyboard.emergency_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP:
             case HotkeyBindingTarget::TRIGGER:
+            case HotkeyBindingTarget::RECOIL:
             case HotkeyBindingTarget::NONE:
                 return nullptr;
         }
@@ -3502,7 +3539,7 @@ struct Overlay::Impl {
             &app_config.keyboard.aim_hold_virtual_keys,
             &app_config.keyboard.emergency_virtual_keys}};
         return (current_binding != nullptr && current_binding != &app_config.keyboard.aim_hold_virtual_keys &&
-                app_config.trigger.hold_virtual_key == virtual_key) ||
+                (app_config.trigger.hold_virtual_key == virtual_key || app_config.recoil.hold_virtual_key == virtual_key)) ||
             (current_binding != nullptr &&
                 app_config.auto_stop.activation_virtual_key == virtual_key) ||
             std::any_of(
@@ -3561,7 +3598,18 @@ struct Overlay::Impl {
         if (capture_result.type !=
                 overlay::detail::HotkeyCaptureResultType::NONE) {
             std::vector<int>* binding = hotkey_binding(app_config);
-            if (hotkey_binding_target == HotkeyBindingTarget::TRIGGER) {
+            if (hotkey_binding_target == HotkeyBindingTarget::RECOIL) {
+                if (capture_result.type == overlay::detail::HotkeyCaptureResultType::CLEARED) {
+                    app_config.recoil.hold_virtual_key = 0; hotkey_capture_message = "压枪额外许可键已清空";
+                } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
+                    const int key = capture_result.virtual_key;
+                    const auto assigned = [key](const std::vector<int>& keys) { return std::find(keys.begin(), keys.end(), key) != keys.end(); };
+                    if (key == 1 || key == VK_END || key == VK_F8 || key == 'W' || key == 'A' || key == 'S' || key == 'D' ||
+                        assigned(app_config.keyboard.emergency_virtual_keys) || assigned(app_config.keyboard.runtime_toggle_virtual_keys))
+                        hotkey_capture_message = "压枪许可键不能使用左键、WASD、安全急停或运行启停键";
+                    else { app_config.recoil.hold_virtual_key = key; hotkey_capture_message = "压枪许可键已设置，可与瞄准或扳机共用"; }
+                }
+            } else if (hotkey_binding_target == HotkeyBindingTarget::TRIGGER) {
                 if (capture_result.type == overlay::detail::HotkeyCaptureResultType::CLEARED) {
                     app_config.trigger.hold_virtual_key = 0;
                     hotkey_capture_message = "扳机许可键已清空";
@@ -3729,7 +3777,8 @@ struct Overlay::Impl {
              snapshot.detector_reload_state !=
                  DetectorReloadState::LOADING);
         const WorkspacePage capture_page =
-            (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP || hotkey_binding_target == HotkeyBindingTarget::TRIGGER)
+            (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP || hotkey_binding_target == HotkeyBindingTarget::TRIGGER ||
+             hotkey_binding_target == HotkeyBindingTarget::RECOIL)
                 ? WorkspacePage::AUXILIARY : WorkspacePage::INPUT;
         if (hotkey_capture_state.active &&
             (active_page != capture_page || !can_edit || show_log_panel)) {

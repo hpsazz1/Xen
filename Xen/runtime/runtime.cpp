@@ -5,6 +5,9 @@
 #include "runtime/aim_frame_internal.h"
 #include "auto_stop/auto_stop_worker.h"
 #include "trigger/trigger_worker.h"
+#include "recoil/recoil_worker.h"
+#include "recoil/recoil_store.h"
+#include <unordered_map>
 #include <cstdlib>
 
 #include <algorithm>
@@ -60,6 +63,11 @@ struct Runtime::Impl {
     std::atomic<std::shared_ptr<AutoStopWorker>> auto_stop_worker;
     std::atomic<std::shared_ptr<TriggerWorker>> trigger_worker;
     source_context::SourceContextClient source_context_client;
+    weapon::GsiReceiver gsi_receiver;
+    std::atomic<std::shared_ptr<RecoilWorker>> recoil_worker;
+    std::shared_ptr<MotionLedger> motion_ledger;
+    std::unordered_map<std::string, std::shared_ptr<const RecoilProfile>> recoil_profiles;
+    std::atomic<std::int64_t> recoil_observation_ns{0};
     std::atomic<std::uint64_t> stop_request_watermark{0};
     runtime::detail::LatestFrameQueue frame_queue;
     runtime::detail::RuntimePreviewChannel preview_channel;
@@ -133,6 +141,7 @@ struct Runtime::Impl {
         safety_gate.emergency_stop();
         if (auto worker = auto_stop_worker.load()) worker->cancel();
         if (auto trigger = trigger_worker.load()) trigger->cancel();
+        if (auto recoil = recoil_worker.load()) recoil->cancel();
         stop_requested.store(true, std::memory_order_release);
         frame_queue.stop();
         try {
@@ -273,7 +282,7 @@ struct Runtime::Impl {
         debug_samples.reset();
         fps_started = std::chrono::steady_clock::now();
         fps_frame_count = 0;
-        if (config.auto_stop.enabled || config.trigger.enabled) output_arbiter = std::make_shared<AutoStopOutputArbiter>();
+        if (config.auto_stop.enabled || config.trigger.enabled || config.recoil.enabled) output_arbiter = std::make_shared<AutoStopOutputArbiter>();
         if (config.auto_stop.enabled) {
             Log::register_module("auto_stop", LogLevel::INFO);
             if (config.mouse.backend == MouseBackend::KMBOX_NET &&
@@ -293,9 +302,7 @@ struct Runtime::Impl {
             }
             LOG_INFO("auto_stop", "自动急停已接入请求接口；允许键不生成请求，预测不授予开火");
         }
-        if (config.trigger.enabled) {
-            Log::register_module("trigger", LogLevel::INFO);
-            if (config.source_context.enabled) {
+        if ((config.trigger.enabled || config.recoil.enabled) && config.source_context.enabled) {
                 auto context_config = config.source_context;
                 char* token = nullptr; std::size_t token_size = 0;
                 if (_dupenv_s(&token, &token_size, "XEN_SOURCE_CONTEXT_TOKEN") == 0 && token) {
@@ -306,6 +313,16 @@ struct Runtime::Impl {
                     set_error("源状态桥接启动失败，请核对配置和认证环境变量"); return false;
                 }
             }
+        if (config.gsi.enabled) {
+            auto gsi_config = config.gsi;
+            char* token = nullptr; std::size_t token_size = 0;
+            if (_dupenv_s(&token, &token_size, "XEN_GSI_TOKEN") == 0 && token) {
+                gsi_config.token = token; std::free(token);
+            }
+            if (!gsi_receiver.start(gsi_config)) { set_error("GSI接收启动失败，请核对身份/地址/认证环境变量"); return false; }
+        }
+        if (config.trigger.enabled) {
+            Log::register_module("trigger", LogLevel::INFO);
             auto trigger_config = config.trigger;
             trigger_config.person_class_ids = config.aim.person_class_ids;
             trigger_config.head_class_ids = config.aim.head_class_ids;
@@ -328,6 +345,56 @@ struct Runtime::Impl {
                 [this](std::uint64_t id) { if (auto stop = auto_stop_worker.load()) stop->cancel(id); });
             if (!worker->start(trigger_config)) { set_error("自动扳机启动失败或设备不支持左键"); return false; }
             trigger_worker.store(std::move(worker));
+        }
+        if (config.recoil.enabled) {
+            motion_ledger = std::make_shared<MotionLedger>();
+            motion_ledger->reset(config.aim.max_counts_per_frame, config.recoil.budget_window_ms, RecoilClock::now());
+            recoil_profiles.clear(); recoil_observation_ns.store(0);
+            RecoilStore store(config.recoil.profile_directory);
+            std::vector<RecoilStoredProfile> profiles;
+            std::string error;
+            if (!store.list(profiles, error)) { set_error("弹道目录读取失败：" + error); return false; }
+            for (const auto& entry : profiles) {
+                const auto& id = entry.profile->weapon_id;
+                if (auto resolved = store.resolve(config.recoil, id, error)) recoil_profiles[id] = std::move(resolved);
+                else {
+                    std::lock_guard lock(snapshot_mutex);
+                    current_snapshot.recoil_profile_status = id + "：" + error;
+                }
+            }
+            if (profiles.empty()) {
+                std::lock_guard lock(snapshot_mutex);
+                current_snapshot.recoil_profile_status = "尚无弹道，请先导入并校准";
+            }
+            auto worker = std::make_shared<RecoilWorker>(mouse, output_arbiter, motion_ledger,
+                [this, previous_weapon = std::string{}, previous_epoch = std::uint64_t{0}, generation = std::uint64_t{1},
+                    focus_session = std::uint64_t{0}]() mutable {
+                    RecoilInput input;
+                    const auto weapon = gsi_receiver.snapshot();
+                    const auto focus = source_context_client.snapshot();
+                    if (weapon.canonical_id != previous_weapon || weapon.source_epoch != previous_epoch) {
+                        previous_weapon = weapon.canonical_id; previous_epoch = weapon.source_epoch; ++generation;
+                    }
+                    input.device_epoch = 1; input.weapon_generation = generation;
+                    const auto found = recoil_profiles.find(weapon.canonical_id);
+                    if (found != recoil_profiles.end()) input.profile = found->second;
+                    input.profile_conditions_match = weapon.valid && weapon.identity_match &&
+                        weapon.state == weapon::WeaponState::ACTIVE && weapon.ammo_clip && *weapon.ammo_clip > 0 &&
+                        weapon.valid_until > RecoilClock::now() && input.profile != nullptr;
+                    input.focused = focus.available && focus.focused && focus.session_id == focus_session;
+                    focus_session = focus.available && focus.focused ? focus.session_id : 0;
+                    input.permission = config.mouse.allow_send_input && !stop_requested.load() && safety_gate.can_dispatch_auxiliary();
+                    if (config.recoil.mixed_aim) {
+                        const auto stamp = RecoilTime(std::chrono::nanoseconds(recoil_observation_ns.load()));
+                        const auto now = RecoilClock::now();
+                        input.permission = input.permission && stamp != RecoilTime{} && stamp <= now &&
+                            now - stamp < std::chrono::milliseconds(config.recoil.max_observation_age_ms);
+                    }
+                    return input;
+                },
+                [this] { if (auto trigger = trigger_worker.load()) return trigger->firing_signal(); return TriggerFiringSignal{}; });
+            if (!worker->start(config.recoil)) { set_error("压枪调度启动失败"); return false; }
+            recoil_worker.store(std::move(worker));
         }
         return true;
     }
@@ -697,6 +764,8 @@ struct Runtime::Impl {
             }
             if (profile.detector.status != DetectionStatus::SUCCESS) {
                 if (auto trigger = trigger_worker.load()) trigger->publish(std::make_shared<TriggerObservation>());
+                recoil_observation_ns.store(0);
+                if (config.recoil.mixed_aim) if (auto recoil = recoil_worker.load()) recoil->cancel();
             }
             AimResult aim_result;
             AimFrame aim_frame;
@@ -710,6 +779,7 @@ struct Runtime::Impl {
                     *frame, std::move(detections), observation_clock,
                     camera_motion, safety_gate.can_dispatch());
                 if (prepared.reset_aim) {
+                    if (auto recoil = recoil_worker.load()) recoil->cancel();
                     aim->reset();
                 }
                 aim_frame = std::move(prepared.frame);
@@ -743,7 +813,24 @@ struct Runtime::Impl {
                     observation->valid = true;
                     trigger->publish(std::move(observation));
                 }
+                std::int64_t candidate_recoil_observation_ns = 0;
+                if (config.recoil.enabled) {
+                    if (!config.recoil.mixed_aim) aim_frame.lock_active = false;
+                    else aim_frame.external_motion = motion_ledger->snapshot(RecoilClock::now());
+                    const bool fresh_source = frame->timing.source_time_timing_valid &&
+                        std::isfinite(frame->timing.source_clock_uncertainty_ms) && frame->timing.source_clock_uncertainty_ms >= 0 &&
+                        frame->timing.source_clock_uncertainty_ms < config.recoil.max_observation_age_ms;
+                    candidate_recoil_observation_ns = fresh_source ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        (frame->timing.source_time_at - std::chrono::duration_cast<RecoilClock::duration>(
+                            std::chrono::duration<double, std::milli>(frame->timing.source_clock_uncertainty_ms))).time_since_epoch()).count() : 0;
+                }
                 aim_result = aim->process(aim_frame);
+                if (config.recoil.enabled && aim_result.status == AimStatus::SUCCESS)
+                    recoil_observation_ns.store(candidate_recoil_observation_ns);
+                if (config.recoil.mixed_aim && aim_result.status != AimStatus::SUCCESS) {
+                    recoil_observation_ns.store(0);
+                    if (auto recoil = recoil_worker.load()) recoil->cancel();
+                }
                 profile.aim = aim_result.profile;
 
                 if (aim_result.status == AimStatus::SUCCESS &&
@@ -751,12 +838,16 @@ struct Runtime::Impl {
                     const MouseMoveCommand command{
                         aim_result.command.dx_counts,
                         aim_result.command.dy_counts};
-                    bool dispatch_allowed = safety_gate.can_dispatch();
+                    bool dispatch_allowed = safety_gate.can_dispatch() && (!config.recoil.enabled || config.recoil.mixed_aim);
                     std::unique_lock<std::timed_mutex> output_guard;
                     if (dispatch_allowed && output_arbiter) {
                         output_guard = output_arbiter->try_enter_aim();
                         dispatch_allowed = output_guard.owns_lock() &&
                             safety_gate.can_dispatch();
+                    }
+                    if (dispatch_allowed && config.recoil.enabled) {
+                        dispatch_allowed = motion_ledger->revision() == aim_frame.external_motion.revision &&
+                            motion_ledger->permits(command, RecoilClock::now());
                     }
                     auto mouse_backend_completed =
                         std::chrono::steady_clock::now();
@@ -765,6 +856,9 @@ struct Runtime::Impl {
                         const auto mouse_started = mouse_backend_completed;
                         mouse_receipt = mouse->move(command);
                         mouse_sent = mouse_receipt.succeeded;
+                        if (config.recoil.enabled) {
+                            if (!motion_ledger->record(command, mouse_receipt, false)) output_arbiter->latch_output_fault();
+                        }
                         mouse_backend_completed =
                             mouse_receipt.backend_completed_at ==
                                 std::chrono::steady_clock::time_point{}
@@ -934,6 +1028,14 @@ struct Runtime::Impl {
             current_snapshot.trigger = worker->snapshot();
             current_snapshot.trigger_telemetry_available = true;
         }
+        if (auto worker = recoil_worker.exchange(std::shared_ptr<RecoilWorker>{})) {
+            worker->stop();
+            std::lock_guard lock(snapshot_mutex);
+            current_snapshot.recoil = worker->snapshot(); current_snapshot.recoil_telemetry_available = true;
+            current_snapshot.recoil_execution_log = worker->execution_log();
+        }
+        { std::lock_guard lock(snapshot_mutex); current_snapshot.weapon_snapshot = gsi_receiver.snapshot(); }
+        gsi_receiver.stop();
         source_context_client.stop();
         if (auto worker = auto_stop_worker.exchange(
                 std::shared_ptr<AutoStopWorker>{})) {
@@ -1036,6 +1138,7 @@ void Runtime::stop() noexcept {
     impl_->safety_gate.emergency_stop();
     if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
             if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
+            if (auto recoil = impl_->recoil_worker.load()) recoil->cancel();
     impl_->set_state(RuntimeState::STOPPING);
     impl_->stop_requested.store(true, std::memory_order_release);
     impl_->frame_queue.stop();
@@ -1259,12 +1362,14 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
             impl_->safety_gate.disarm();
             if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
             if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
+            if (auto recoil = impl_->recoil_worker.load()) recoil->cancel();
             break;
         case RuntimeIntentType::INPUT_HEALTH_CHANGED:
             impl_->safety_gate.set_input_health(intent.active);
             if (!intent.active) {
                 if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
             if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
+            if (auto recoil = impl_->recoil_worker.load()) recoil->cancel();
             }
             break;
         case RuntimeIntentType::AIM_HOLD_CHANGED:
@@ -1276,6 +1381,7 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
             impl_->safety_gate.emergency_stop();
             if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
             if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
+            if (auto recoil = impl_->recoil_worker.load()) recoil->cancel();
             impl_->aim_reset_requested.store(true, std::memory_order_release);
             break;
         case RuntimeIntentType::RESET_EMERGENCY:
@@ -1335,6 +1441,11 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
             result.trigger = trigger->snapshot(); result.trigger_telemetry_available = true;
         }
         result.source_context = impl_->source_context_client.snapshot();
+        if (impl_->recoil_worker.load() || impl_->trigger_worker.load() || result.state == RuntimeState::RUNNING)
+            result.weapon_snapshot = impl_->gsi_receiver.snapshot();
+        if (auto recoil = impl_->recoil_worker.load()) {
+            result.recoil = recoil->snapshot(); result.recoil_telemetry_available = true;
+        }
         if (auto worker = impl_->auto_stop_worker.load()) {
             result.auto_stop = worker->snapshot();
         }
@@ -1373,4 +1484,11 @@ bool Runtime::drain_pipeline_samples(
         std::vector<RuntimePipelineSample>& samples) noexcept {
     if (!impl_) return false;
     return impl_->debug_samples.drain(samples);
+}
+
+RecoilExecutionLog Runtime::recoil_execution_log() const {
+    if (!impl_) return {};
+    if (auto worker = impl_->recoil_worker.load()) return worker->execution_log();
+    std::lock_guard lock(impl_->snapshot_mutex);
+    return impl_->current_snapshot.recoil_execution_log;
 }

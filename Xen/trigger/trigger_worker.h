@@ -4,6 +4,11 @@
 #include <functional>
 #include <memory>
 #include "trigger/trigger.h"
+struct TriggerFiringSignal {
+    bool confirmed_down = false;
+    std::uint64_t id = 0;
+    TriggerTime started_at{};
+};
 #include "auto_stop/auto_stop_worker.h"
 
 // 单owner执行器；图像发布不等待网络，取消/按键释放不等待下一图像。
@@ -22,6 +27,7 @@ public:
     void cancel() noexcept;
     void stop() noexcept;
     TriggerSnapshot snapshot() const noexcept;
+    TriggerFiringSignal firing_signal() const noexcept;
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

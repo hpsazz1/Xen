@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/ArtanisInc/Artanis-RCS",
+  "commit": "7387d399aa11fec5b26b8cd63953b4cde37f8987",
+  "local_repository_commit": "0861455384f5b63dc3e7263aa2e9f6312c8e87db",
+  "redistribution_verified": false,
+  "profiles": [
+    {
+      "id": "ak47",
+      "file": "ak47.csv",
+      "sha256": "c0de331f41ccb582339ec861a76eb59ddb1acdc734f8274769c796a975e850bf",
+      "multiple": 6,
+      "sleep_divider": 6,
+      "sleep_suber_ms": -0.1,
+      "legacy_length": 30,
+      "canonical_weapon_id": "ak47"
+    },
+    {
+      "id": "m4a4",
+      "file": "m4a4.csv",
+      "sha256": "14c02eccb91327e89a8fc3c25db93d85c56602082003bce5a8880118e7c8a741",
+      "multiple": 4,
+      "sleep_divider": 4,
+      "sleep_suber_ms": -0.5,
+      "legacy_length": 30,
+      "canonical_weapon_id": "m4a4"
+    },
+    {
+      "id": "m4a1",
+      "file": "m4a1.csv",
+      "sha256": "fdd24537efdc28a3329e19bccfecad16bd683b91c14406fab9bc12022323ab3e",
+      "multiple": 4,
+      "sleep_divider": 4,
+      "sleep_suber_ms": -0.6,
+      "legacy_length": 25,
+      "canonical_weapon_id": "m4a1_s"
+    },
+    {
+      "id": "galil",
+      "file": "galil.csv",
+      "sha256": "4384277022553aa82f44a5a1a568532dd4a12f7f475cd6afc028239f5a673862",
+      "multiple": 4,
+      "sleep_divider": 4,
+      "sleep_suber_ms": -0.8,
+      "legacy_length": 35,
+      "canonical_weapon_id": "galil"
+    },
+    {
+      "id": "famas",
+      "file": "famas.csv",
+      "sha256": "cb3d931fff131952c49c40a6d2005935ff0c7b67d2131e592239f6490b04ddb1",
+      "multiple": 4,
+      "sleep_divider": 4,
+      "sleep_suber_ms": -0.4,
+      "legacy_length": 25,
+      "canonical_weapon_id": "famas"
+    },
+    {
+      "id": "sg553",
+      "file": "sg553.csv",
+      "sha256": "ceff701eea790d3723464bcda48392df63ad28c0405ab5f7f17da6069304083f",
+      "multiple": 4,
+      "sleep_divider": 4,
+      "sleep_suber_ms": -0.9,
+      "legacy_length": 30,
+      "canonical_weapon_id": "sg553"
+    },
+    {
+      "id": "aug",
+      "file": "aug.csv",
+      "sha256": "f0c1f54c33381a5390a04fc2e137fbb0b115e7f1ebed60a58b404532f40bf8bb",
+      "multiple": 4,
+      "sleep_divider": 4,
+      "sleep_suber_ms": -0.9,
+      "legacy_length": 30,
+      "canonical_weapon_id": "aug"
+    },
+    {
+      "id": "p90",
+      "file": "p90.csv",
+      "sha256": "75a53b6bfcb4c37484dbc56a78672b89a6ca6b74e95f4821d92167d056ef918a",
+      "multiple": 3,
+      "sleep_divider": 3,
+      "sleep_suber_ms": -0.7,
+      "legacy_length": 50,
+      "canonical_weapon_id": "p90"
+    },
+    {
+      "id": "bizon",
+      "file": "bizon.csv",
+      "sha256": "bea9df727ca976d13cf3f757612870a54defd7e85972563b1defaf0409ddcd2b",
+      "multiple": 3,
+      "sleep_divider": 3,
+      "sleep_suber_ms": 0.9,
+      "legacy_length": 64,
+      "canonical_weapon_id": "bizon"
+    },
+    {
+      "id": "ump45",
+      "file": "ump45.csv",
+      "sha256": "dfbb81dd6642bcfef7312482637e1f50022f86a2817bde2ef5ab4b39413ac27e",
+      "multiple": 3,
+      "sleep_divider": 3,
+      "sleep_suber_ms": -0.4,
+      "legacy_length": 25,
+      "canonical_weapon_id": "ump45"
+    },
+    {
+      "id": "mac10",
+      "file": "mac10.csv",
+      "sha256": "28529b797143763e15af560144476493123bfcd8d3d5e991ef902177a8f73cae",
+      "multiple": 3,
+      "sleep_divider": 3,
+      "sleep_suber_ms": -2.2,
+      "legacy_length": 30,
+      "canonical_weapon_id": "mac10"
+    },
+    {
+      "id": "mp5sd",
+      "file": "mp5sd.csv",
+      "sha256": "df3396cda24d1ee30d7418044277877c7562b0639dc03dd083dc858dbb007bf4",
+      "multiple": 3,
+      "sleep_divider": 3,
+      "sleep_suber_ms": 0,
+      "legacy_length": 30,
+      "canonical_weapon_id": "mp5sd"
+    },
+    {
+      "id": "mp7",
+      "file": "mp7.csv",
+      "sha256": "df3396cda24d1ee30d7418044277877c7562b0639dc03dd083dc858dbb007bf4",
+      "multiple": 3,
+      "sleep_divider": 3,
+      "sleep_suber_ms": 0.1,
+      "legacy_length": 30,
+      "canonical_weapon_id": "mp7"
+    },
+    {
+      "id": "mp9",
+      "file": "mp9.csv",
+      "sha256": "9227a6bce1cb8ac9682a18ff0766d868151dfcb47583f115365dead739a6d8b7",
+      "multiple": 3,
+      "sleep_divider": 3,
+      "sleep_suber_ms": -0.3,
+      "legacy_length": 30,
+      "canonical_weapon_id": "mp9"
+    },
+    {
+      "id": "m249",
+      "file": "m249.csv",
+      "sha256": "7609ccdd46c7fb0c4411cb3541e448bfd919b43428704d9e40aed0e14ff0523a",
+      "multiple": 3,
+      "sleep_divider": 3,
+      "sleep_suber_ms": -1,
+      "legacy_length": 100,
+      "canonical_weapon_id": "m249"
+    },
+    {
+      "id": "negev",
+      "file": "negev.csv",
+      "sha256": "7e7e5c33e958886904bea6ad63f7818a42a3df9d07059f9a57e677c4052c3147",
+      "multiple": 3,
+      "sleep_divider": 3,
+      "sleep_suber_ms": -1.5,
+      "legacy_length": 150,
+      "canonical_weapon_id": "negev"
+    },
+    {
+      "id": "cz75",
+      "file": "cz75.csv",
+      "sha256": "70eb409dbf459ab653321b8dd5cc6739e5e0b150f3005c22c2bef062e568e400",
+      "multiple": 3,
+      "sleep_divider": 3,
+      "sleep_suber_ms": -3,
+      "legacy_length": 12,
+      "canonical_weapon_id": "cz75"
+    }
+  ]
+}

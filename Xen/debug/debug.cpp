@@ -8,6 +8,7 @@
 #endif
 
 #include "debug/debug.h"
+#include "debug/recoil_report.h"
 
 #include "log/log.h"
 
@@ -1256,6 +1257,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             csv << "# auto_stop," << csv_escape(auto_stop_metadata_json(
                 *config_.auto_stop_config, final_snapshot.auto_stop)) << '\n';
         }
+        if (config_.recoil_config) csv << "# recoil," << csv_escape(recoil_metadata_json(*config_.recoil_config, final_snapshot)) << '\n';
         if (config_.trigger_config) {
             csv << "# trigger," << csv_escape(trigger_metadata_json(*config_.trigger_config, final_snapshot)) << '\n';
         }
@@ -1845,6 +1847,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             json << "  \"auto_stop\": " << auto_stop_metadata_json(
                 *config_.auto_stop_config, final_snapshot.auto_stop) << ",\n";
         }
+        if (config_.recoil_config) json << "  \"recoil\": " << recoil_metadata_json(*config_.recoil_config, final_snapshot) << ",\n";
         if (config_.trigger_config) {
             json << "  \"trigger\": " << trigger_metadata_json(*config_.trigger_config, final_snapshot) << ",\n";
         }

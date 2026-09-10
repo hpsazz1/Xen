@@ -586,6 +586,8 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"trigger", "max_observation_age_ms"},
         {"trigger", "fire_mode"},
         {"source_context", "port"}, {"source_context", "ttl_ms"},
+        {"recoil", "hold_virtual_key"}, {"recoil", "budget_window_ms"}, {"recoil", "max_observation_age_ms"},
+        {"gsi", "port"}, {"gsi", "ttl_ms"}, {"gsi", "request_timeout_ms"},
         {"keyboard", "aim_hold_virtual_key"},
         {"keyboard", "emergency_virtual_key"},
         {"keyboard", "runtime_toggle_virtual_key"},
@@ -626,7 +628,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"trigger", "body_height_percent"},
         {"trigger", "general_width_percent"},
         {"trigger", "general_height_percent"},
-        {"trigger", "min_confidence"},
+        {"trigger", "min_confidence"}, {"recoil", "sensitivity"},
     };
     for (const auto& key : kNumberKeys) {
         if (has_strict_number(ini, key)) continue;
@@ -650,7 +652,8 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"aim", "enable_prediction"},
         {"auto_stop", "enabled"},
         {"trigger", "enabled"}, {"trigger", "require_stop"},
-        {"source_context", "enabled"},
+        {"source_context", "enabled"}, {"gsi", "enabled"},
+        {"recoil", "enabled"}, {"recoil", "mixed_aim"}, {"recoil", "use_trial"},
         {"mouse", "allow_send_input"},
         {"ui", "enable_vsync"},
         {"ui", "open_detached_preview_on_start"},
@@ -727,6 +730,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         return false;
     }
     constexpr TypedConfigKey kOptionalListKeys[]{
+        {"trigger", "general_class_ids"},
         {"keyboard", "aim_hold_virtual_keys"},
         {"keyboard", "emergency_virtual_keys"},
         {"keyboard", "runtime_toggle_virtual_keys"},
@@ -975,6 +979,29 @@ bool validate_app_config(const AppConfig& config,
             error = "自动扳机参数、绑定键、后端或急停依赖非法";
             return false;
         }
+        const auto& recoil = config.recoil;
+        const int recoil_key = recoil.hold_virtual_key;
+        const bool recoil_key_conflict = recoil_key == 1 || recoil_key == 'W' || recoil_key == 'A' ||
+            recoil_key == 'S' || recoil_key == 'D' || recoil_key == 0x23 || recoil_key == 0x77 ||
+            std::find(config.keyboard.emergency_virtual_keys.begin(), config.keyboard.emergency_virtual_keys.end(), recoil_key) != config.keyboard.emergency_virtual_keys.end() ||
+            std::find(config.keyboard.runtime_toggle_virtual_keys.begin(), config.keyboard.runtime_toggle_virtual_keys.end(), recoil_key) != config.keyboard.runtime_toggle_virtual_keys.end();
+        if (recoil_key < 0 || recoil_key > 255 || (recoil_key != 0 && recoil_key_conflict) ||
+            recoil.budget_window_ms < 1 || recoil.budget_window_ms > 100 ||
+            recoil.max_observation_age_ms < 1 || recoil.max_observation_age_ms > 500 || recoil.input_path != "kmbox_net" ||
+            !std::isfinite(recoil.sensitivity) || recoil.sensitivity < 0 ||
+            recoil.fire_mode != "automatic" ||
+            (recoil.enabled && (config.mouse.backend != MouseBackend::KMBOX_NET ||
+                !config.gsi.enabled || !config.source_context.enabled || recoil.sensitivity <= 0 ||
+                recoil.game_build.empty() || recoil.conditions.empty() || recoil.profile_directory.empty() ||
+                (recoil.use_trial && recoil.trial_file.empty())))) {
+            error = "压枪配置需要有效热键、GSI、源焦点和明确校准条件"; return false;
+        }
+        auto gsi_validation = config.gsi;
+        // 凭据只在启动时从环境注入；配置检查不读取/保存秘密。
+        gsi_validation.token.assign(32, 'x');
+        if (config.gsi.enabled && !weapon::valid_config(gsi_validation)) {
+            error = "GSI绑定、来源限制或玩家身份配置非法"; return false;
+        }
         const bool physical_keyboard_invalid =
             config.mouse.allow_send_input &&
             (config.keyboard.aim_hold_virtual_keys.empty() ||
@@ -1016,6 +1043,29 @@ bool load_app_config(const std::string& path,
         candidate.auto_stop.enabled = ini.GetBoolValue("auto_stop", "enabled", false);
         candidate.auto_stop.activation_virtual_key = static_cast<int>(
             ini.GetLongValue("auto_stop", "activation_virtual_key", 0));
+        candidate.recoil = {}; candidate.gsi = {};
+        candidate.gsi.request_timeout_ms = static_cast<int>(ini.GetLongValue("gsi", "request_timeout_ms", 1000));
+        candidate.recoil.max_observation_age_ms = static_cast<int>(ini.GetLongValue("recoil", "max_observation_age_ms", 50));
+        candidate.recoil.input_path = ini.GetValue("recoil", "input_path", "kmbox_net");
+        candidate.recoil.hold_virtual_key = static_cast<decltype(candidate.recoil.hold_virtual_key)>(ini.GetLongValue("recoil", "hold_virtual_key", candidate.recoil.hold_virtual_key));
+        candidate.recoil.budget_window_ms = static_cast<decltype(candidate.recoil.budget_window_ms)>(ini.GetLongValue("recoil", "budget_window_ms", candidate.recoil.budget_window_ms));
+        candidate.gsi.ttl_ms = static_cast<decltype(candidate.gsi.ttl_ms)>(ini.GetLongValue("gsi", "ttl_ms", candidate.gsi.ttl_ms));
+        candidate.recoil.enabled = static_cast<decltype(candidate.recoil.enabled)>(ini.GetBoolValue("recoil", "enabled", candidate.recoil.enabled));
+        candidate.recoil.mixed_aim = static_cast<decltype(candidate.recoil.mixed_aim)>(ini.GetBoolValue("recoil", "mixed_aim", candidate.recoil.mixed_aim));
+        candidate.recoil.use_trial = static_cast<decltype(candidate.recoil.use_trial)>(ini.GetBoolValue("recoil", "use_trial", candidate.recoil.use_trial));
+        candidate.gsi.enabled = static_cast<decltype(candidate.gsi.enabled)>(ini.GetBoolValue("gsi", "enabled", candidate.gsi.enabled));
+        candidate.recoil.profile_directory = ini.GetValue("recoil", "profile_directory", candidate.recoil.profile_directory.c_str());
+        candidate.recoil.game_build = ini.GetValue("recoil", "game_build", candidate.recoil.game_build.c_str());
+        candidate.recoil.conditions = ini.GetValue("recoil", "conditions", candidate.recoil.conditions.c_str());
+        candidate.recoil.fire_mode = ini.GetValue("recoil", "fire_mode", candidate.recoil.fire_mode.c_str());
+        candidate.recoil.trial_file = ini.GetValue("recoil", "trial_file", candidate.recoil.trial_file.c_str());
+        candidate.gsi.bind_address = ini.GetValue("gsi", "bind_address", candidate.gsi.bind_address.c_str());
+        candidate.gsi.expected_player_id = ini.GetValue("gsi", "expected_player_id", candidate.gsi.expected_player_id.c_str());
+        candidate.gsi.allowed_peer_ipv4 = ini.GetValue("gsi", "allowed_peer_ipv4", candidate.gsi.allowed_peer_ipv4.c_str());
+        const auto gsi_port = ini.GetLongValue("gsi", "port", 5013);
+        if (gsi_port < 1 || gsi_port > 65535) { error = "GSI端口非法"; return false; }
+        candidate.gsi.port = static_cast<std::uint16_t>(gsi_port);
+        candidate.recoil.sensitivity = ini.GetDoubleValue("recoil", "sensitivity", 0);
         candidate.source_context = {};
         candidate.source_context.enabled = ini.GetBoolValue("source_context", "enabled", false);
         candidate.source_context.host = ini.GetValue("source_context", "host", "");
@@ -1025,6 +1075,7 @@ bool load_app_config(const std::string& path,
         candidate.source_context.process_name = ini.GetValue("source_context", "process_name", "");
         candidate.source_context.ttl_ms = static_cast<int>(ini.GetLongValue("source_context", "ttl_ms", 200));
         candidate.trigger = TriggerConfig{};
+        candidate.trigger.general_class_ids = parse_int_list(ini.GetValue("trigger", "general_class_ids"), {});
         candidate.trigger.enabled = ini.GetBoolValue("trigger", "enabled", false);
         candidate.trigger.require_stop = ini.GetBoolValue("trigger", "require_stop", false);
         candidate.trigger.hold_virtual_key = static_cast<int>(ini.GetLongValue("trigger", "hold_virtual_key", candidate.trigger.hold_virtual_key));
@@ -1480,11 +1531,32 @@ bool save_app_config(const std::string& path,
                          config.mouse.makcu_connect_timeout_ms);
         ini.SetLongValue("mouse", "makcu_command_timeout_ms",
                          config.mouse.makcu_command_timeout_ms);
+        ini.SetLongValue("recoil", "max_observation_age_ms", config.recoil.max_observation_age_ms);
+        ini.SetValue("recoil", "input_path", config.recoil.input_path.c_str());
+        ini.SetLongValue("recoil", "hold_virtual_key", config.recoil.hold_virtual_key);
+        ini.SetLongValue("recoil", "budget_window_ms", config.recoil.budget_window_ms);
+        ini.SetLongValue("gsi", "ttl_ms", config.gsi.ttl_ms);
+        ini.SetBoolValue("recoil", "enabled", config.recoil.enabled);
+        ini.SetBoolValue("recoil", "mixed_aim", config.recoil.mixed_aim);
+        ini.SetBoolValue("recoil", "use_trial", config.recoil.use_trial);
+        ini.SetBoolValue("gsi", "enabled", config.gsi.enabled);
+        ini.SetValue("recoil", "profile_directory", config.recoil.profile_directory.c_str());
+        ini.SetValue("recoil", "game_build", config.recoil.game_build.c_str());
+        ini.SetValue("recoil", "conditions", config.recoil.conditions.c_str());
+        ini.SetValue("recoil", "fire_mode", config.recoil.fire_mode.c_str());
+        ini.SetValue("recoil", "trial_file", config.recoil.trial_file.c_str());
+        ini.SetValue("gsi", "bind_address", config.gsi.bind_address.c_str());
+        ini.SetValue("gsi", "expected_player_id", config.gsi.expected_player_id.c_str());
+        ini.SetValue("gsi", "allowed_peer_ipv4", config.gsi.allowed_peer_ipv4.c_str());
+        ini.SetLongValue("gsi", "request_timeout_ms", config.gsi.request_timeout_ms);
+        ini.SetLongValue("gsi", "port", config.gsi.port);
+        ini.SetDoubleValue("recoil", "sensitivity", config.recoil.sensitivity);
         ini.SetBoolValue("source_context", "enabled", config.source_context.enabled);
         ini.SetValue("source_context", "host", config.source_context.host.c_str());
         ini.SetLongValue("source_context", "port", config.source_context.port);
         ini.SetValue("source_context", "process_name", config.source_context.process_name.c_str());
         ini.SetLongValue("source_context", "ttl_ms", config.source_context.ttl_ms);
+        ini.SetValue("trigger", "general_class_ids", format_int_list(config.trigger.general_class_ids).c_str());
         ini.SetBoolValue("trigger", "enabled", config.trigger.enabled);
         ini.SetBoolValue("trigger", "require_stop", config.trigger.require_stop);
         ini.SetLongValue("trigger", "hold_virtual_key", config.trigger.hold_virtual_key);

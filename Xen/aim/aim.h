@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "detector/detector.h"
+#include "aim/external_motion.h"
 
 enum class AimStatus {
     NOT_RUN,
@@ -134,6 +135,10 @@ struct AimFrame {
     std::vector<Detection> detections;
     std::uint64_t observation_epoch = 0;
     AimBackgroundMotionX background_motion_x;
+    // 完整后端完成事件快照：必须覆盖本次执行库存及选中目标的raw源帧对。
+    // 调用方在唯一输出arbiter内复核revision后才可发送本帧命令；发生变化
+    // 必须确认Aim零输出。外部事件不可再作为Aim自身command的完成回执。
+    ExternalMotionWindow external_motion;
 };
 
 struct AimCommand {

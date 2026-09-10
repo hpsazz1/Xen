@@ -205,6 +205,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     std::optional<AimConfig> debug_aim_config;
     std::optional<AutoStopConfig> debug_auto_stop_config;
     std::optional<TriggerConfig> debug_trigger_config;
+    std::optional<RecoilConfig> debug_recoil_config;
+    std::uint64_t debug_recoil_after_command = 0;
     std::uint64_t debug_segment = 0;
     std::vector<RuntimePipelineSample> pending_debug_samples;
     Overlay overlay;
@@ -227,8 +229,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         drain_debug_samples();
         if (!debug_session_active) return;
         std::string report_error;
-        if (!debug_report.finalize(
-                runtime.snapshot(), report_error)) {
+        auto final_snapshot = runtime.snapshot();
+        final_snapshot.recoil_execution_log = runtime.recoil_execution_log();
+        auto& recoil_records = final_snapshot.recoil_execution_log.records;
+        // 模型重载会分段写Debug；同一执行记录只归入一个报告，不能变成两份留出。
+        std::erase_if(recoil_records, [&](const auto& record) { return record.intent.command_id <= debug_recoil_after_command; });
+        if (!recoil_records.empty()) debug_recoil_after_command = recoil_records.back().intent.command_id;
+        if (!debug_report.finalize(final_snapshot, report_error)) {
             LOG_WARN("app", "Debug 报告生成失败: {}", report_error);
         }
         debug_session_active = false;
@@ -252,6 +259,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         report_config.aim_config = debug_aim_config;
         report_config.auto_stop_config = debug_auto_stop_config;
         report_config.trigger_config = debug_trigger_config;
+        report_config.recoil_config = debug_recoil_config;
         std::string report_error;
         debug_session_active = debug_report.start(
             report_config, report_error);
@@ -283,10 +291,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         debug_aim_config = runtime_config.aim;
         debug_auto_stop_config = runtime_config.auto_stop;
         debug_trigger_config = runtime_config.trigger;
+        debug_recoil_config = runtime_config.recoil;
         // Runtime 的扳机使用启动时 Aim 类别映射；保存有效值，不保存 UI 后续编辑值。
         debug_trigger_config->person_class_ids = runtime_config.aim.person_class_ids;
         debug_trigger_config->head_class_ids = runtime_config.aim.head_class_ids;
         debug_segment = 0;
+        debug_recoil_after_command = 0;
         detector_reload_pending = false;
         debug_session_active = start_debug_report(runtime.snapshot());
         app_message = debug_session_active
