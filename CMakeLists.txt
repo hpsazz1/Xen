@@ -804,6 +804,9 @@ add_library(aim_landmark STATIC
 target_include_directories(aim_landmark PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(aim_landmark PUBLIC aim)
 
+add_library(auto_stop STATIC Xen/auto_stop/auto_stop.cpp)
+target_include_directories(auto_stop PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+
 add_library(mouse STATIC
     Xen/mouse/mouse.cpp
     Xen/mouse/kmbox_net.cpp
@@ -851,7 +854,7 @@ add_library(runtime STATIC
     Xen/runtime/camera_motion.cpp)
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
-    PUBLIC detector capture aim aim_landmark mouse keyboard config log
+    PUBLIC detector capture aim aim_landmark auto_stop mouse keyboard config log
     PRIVATE Threads::Threads)
 
 add_library(app_input STATIC
@@ -864,7 +867,7 @@ add_library(xen_debug STATIC
 target_include_directories(xen_debug PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(xen_debug PUBLIC log aim aim_landmark mouse)
+target_link_libraries(xen_debug PUBLIC log aim aim_landmark mouse auto_stop)
 
 add_library(benchmark STATIC
     Xen/benchmark/benchmark.cpp)
@@ -1347,6 +1350,14 @@ if(BUILD_TESTING)
     target_link_libraries(mouse_tests PRIVATE mouse log ws2_32)
     add_test(NAME mouse_tests COMMAND mouse_tests)
 
+    add_executable(auto_stop_tests tests/auto_stop_tests.cpp)
+    target_link_libraries(auto_stop_tests PRIVATE auto_stop)
+    add_test(NAME auto_stop_tests COMMAND auto_stop_tests)
+
+    add_executable(kmbox_keyboard_tests tests/kmbox_keyboard_tests.cpp)
+    target_link_libraries(kmbox_keyboard_tests PRIVATE mouse ws2_32)
+    add_test(NAME kmbox_keyboard_tests COMMAND kmbox_keyboard_tests)
+
     # 子进程仅调用公开 lease，不创建后端；分别设置 TMP/TEMP 验证生产独占。
     add_executable(mouse_output_owner_lease_tests
         tests/mouse_output_owner_lease_tests.cpp)
@@ -1401,6 +1412,11 @@ if(BUILD_TESTING)
         tests/overlay_tests.cpp)
     target_include_directories(overlay_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
     add_test(NAME overlay_tests COMMAND overlay_tests)
+
+    # 只初始化 Overlay；没有设备/Runtime 实例，供实际窗口布局复核。
+    add_executable(auxiliary_ui_preview tests/auxiliary_ui_preview.cpp)
+    target_link_libraries(auxiliary_ui_preview PRIVATE overlay)
+    xen_deploy_runtime_dlls(auxiliary_ui_preview OPENCV ORT NDI)
 
     # 模型目录测试只验证 App 的路径、枚举和安全边界，不创建 Overlay 或 ORT Session。
     add_executable(model_catalog_tests

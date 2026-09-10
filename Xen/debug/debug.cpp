@@ -356,6 +356,20 @@ const char* bool_name(bool value) noexcept {
     return value ? "true" : "false";
 }
 
+std::string auto_stop_metadata_json(const AutoStopConfig& config,
+                                    const AutoStopSnapshot& snapshot) {
+    std::ostringstream output;
+    output << "{\"schema\":1,\"enabled\":" << bool_name(config.enabled)
+           << ",\"activation_virtual_key\":" << config.activation_virtual_key
+           << ",\"status\":\"" << AutoStopStatusName(snapshot.status)
+           << "\",\"device_protocol_available\":"
+           << bool_name(snapshot.device_protocol_available)
+           << ",\"stop_evidence_available\":"
+           << bool_name(snapshot.stop_evidence_available)
+           << ",\"fire_permitted\":" << bool_name(snapshot.fire_permitted) << '}';
+    return output.str();
+}
+
 std::string aim_config_json(const AimConfig& config) {
     std::ostringstream output;
     output << std::setprecision(9) << std::boolalpha << '{';
@@ -1116,6 +1130,10 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         if (config_.aim_config) {
             csv << "# aim_config," << csv_escape(aim_config_json(*config_.aim_config)) << '\n';
         }
+        if (config_.auto_stop_config) {
+            csv << "# auto_stop," << csv_escape(auto_stop_metadata_json(
+                *config_.auto_stop_config, final_snapshot.auto_stop)) << '\n';
+        }
         append_csv_snapshot(csv, final_snapshot);
         append_csv_coverage(csv, summary_.coverage);
         append_csv_timing(csv, "capture", summary_.capture);
@@ -1697,6 +1715,10 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
              << summary_.runtime_samples_dropped << ",\n";
         if (config_.aim_config) {
             json << "  \"aim_config\": " << aim_config_json(*config_.aim_config) << ",\n";
+        }
+        if (config_.auto_stop_config) {
+            json << "  \"auto_stop\": " << auto_stop_metadata_json(
+                *config_.auto_stop_config, final_snapshot.auto_stop) << ",\n";
         }
         append_json_coverage(json, summary_.coverage);
         append_json_queue_depth(json, summary_.ndi_video_queue_depth);

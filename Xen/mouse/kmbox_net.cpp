@@ -175,6 +175,14 @@ public:
                 return false;
             }
 
+            // 上次 ACK 丢失的清理责任跨关闭/重开保留；新连接必须先完成
+            // 清理，才能报告 READY 或接纳新命令。
+            if ((keyboard_dirty_ || owned_masks_) &&
+                cleanup_keyboard_locked().disposition != KeyboardDisposition::ACKNOWLEDGED) {
+                close_locked(false);
+                return false;
+            }
+
             monitor_socket_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
             if (monitor_socket_ == INVALID_SOCKET) {
                 set_winsock_error("KMBOX NET monitor socket 创建失败",
@@ -307,6 +315,55 @@ public:
         }
     }
 
+    bool supports_wasd_keyboard() const noexcept override { return true; }
+
+    KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        return keyboard_locked(mask);
+    }
+    KeyboardReceipt set_wasd_mask(std::uint8_t key, bool masked) noexcept override {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        return mask_locked(key, masked);
+    }
+    KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        return cleanup_keyboard_locked();
+    }
+    bool set_wasd_event_subscription(bool enabled) noexcept override {
+        std::lock_guard<std::mutex> lock(monitor_mutex_);
+        if (wasd_subscribed_ == enabled) return true;
+        wasd_subscribed_ = enabled;
+        ++wasd_epoch_;
+        wasd_sequence_ = 0;
+        // 订阅以未知态开始：历史快照不能冒充新边沿。
+        return true;
+    }
+    bool read_wasd_events(WasdEventCursor& cursor, WasdEventBatch& batch) noexcept override {
+        std::lock_guard<std::mutex> lock(monitor_mutex_);
+        batch = {};
+        batch.subscribed = wasd_subscribed_;
+        if (!wasd_subscribed_) return true;
+        if (cursor.epoch != wasd_epoch_) {
+            batch.gap = cursor.epoch != 0;
+            cursor = {wasd_epoch_, 0};
+        }
+        if (cursor.sequence > wasd_sequence_) {
+            batch.gap = true;
+            cursor.sequence = 0;
+        }
+        const auto oldest = wasd_sequence_ > wasd_events_.size()
+            ? wasd_sequence_ - wasd_events_.size() + 1 : 1;
+        if (cursor.sequence + 1 < oldest) {
+            batch.gap = true;
+            cursor.sequence = oldest - 1;
+        }
+        while (cursor.sequence < wasd_sequence_ && batch.count < batch.events.size()) {
+            ++cursor.sequence;
+            batch.events[batch.count++] = wasd_events_[(cursor.sequence - 1) % wasd_events_.size()];
+        }
+        return true;
+    }
+
     bool poll_input(InputSnapshot& snapshot) noexcept override {
         snapshot = {};
         std::lock_guard<std::mutex> lock(monitor_mutex_);
@@ -326,7 +383,7 @@ public:
         snapshot.status = monitor_failed_
             ? InputMonitorStatus::FAILURE
             : InputMonitorStatus::READY;
-        snapshot.state_valid = true;
+        snapshot.state_valid = monitor_keyboard_valid_;
         snapshot.virtual_keys = keyboard_keys_;
         snapshot.virtual_keys[0x01] = (mouse_buttons_ & 0x01U) != 0;
         snapshot.virtual_keys[0x02] = (mouse_buttons_ & 0x02U) != 0;
@@ -353,6 +410,79 @@ public:
     }
 
 private:
+    static std::uint8_t wasd_usage(std::uint8_t key) noexcept {
+        switch (key) { case 1: return 0x1a; case 2: return 0x04;
+            case 4: return 0x16; case 8: return 0x07; default: return 0; }
+    }
+    KeyboardReceipt keyboard_packet_locked(std::uint8_t* packet, std::size_t size,
+                                           std::uint32_t command) noexcept {
+        KeyboardReceipt result;
+        result.disposition = KeyboardDisposition::REJECTED;
+        if (!config_.allow_send_input || socket_ == INVALID_SOCKET || !winsock_started_) return result;
+        std::chrono::steady_clock::time_point ack{};
+        const bool acknowledged = send_and_wait_ack(packet, size, command, sequence_,
+            config_.kmbox_command_timeout_ms, &ack, &result.datagram_sent);
+        result.backend_completed_at = std::chrono::steady_clock::now();
+        result.protocol_ack_received_at = ack;
+        result.disposition = acknowledged ? KeyboardDisposition::ACKNOWLEDGED
+            : (result.datagram_sent ? KeyboardDisposition::APPLICATION_UNKNOWN : KeyboardDisposition::REJECTED);
+        return result;
+    }
+    KeyboardReceipt keyboard_locked(std::uint8_t mask) noexcept {
+        if (mask > 15 || !config_.allow_send_input || socket_ == INVALID_SOCKET)
+            return {KeyboardDisposition::REJECTED};
+        constexpr std::uint32_t command = 0x123c2c2fU;
+        std::array<std::uint8_t, 28> packet{};
+        write_header(packet.data(), command, ++sequence_);
+        std::size_t index = 18;
+        for (std::uint8_t bit = 1; bit <= 8; bit <<= 1)
+            if (mask & bit) packet[index++] = wasd_usage(bit);
+        auto result = keyboard_packet_locked(packet.data(), packet.size(), command);
+        if (result.datagram_sent) keyboard_dirty_ = true;
+        if (result.disposition == KeyboardDisposition::ACKNOWLEDGED && mask == 0) keyboard_dirty_ = false;
+        return result;
+    }
+    KeyboardReceipt mask_locked(std::uint8_t key, bool masked) noexcept {
+        const auto usage = wasd_usage(key);
+        if (!usage || !config_.allow_send_input || socket_ == INVALID_SOCKET)
+            return {KeyboardDisposition::REJECTED};
+        // 只解除本连接可能安装的屏蔽，禁止全局解除屏蔽。
+        if (!masked && !(owned_masks_ & key)) return {KeyboardDisposition::REJECTED};
+        const std::uint32_t command = masked ? 0x23234343U : 0x23344343U;
+        std::array<std::uint8_t, 16> packet{};
+        write_header(packet.data(), command, ++sequence_);
+        write_u32_le(packet.data() + 4, static_cast<std::uint32_t>(usage) << 8);
+        auto result = keyboard_packet_locked(packet.data(), packet.size(), command);
+        if (masked && result.datagram_sent) owned_masks_ |= key;
+        if (!masked && result.disposition == KeyboardDisposition::ACKNOWLEDGED) owned_masks_ &= ~key;
+        return result;
+    }
+    KeyboardReceipt cleanup_keyboard_locked() noexcept {
+        KeyboardReceipt result{KeyboardDisposition::ACKNOWLEDGED};
+        if (keyboard_dirty_) {
+            result = keyboard_locked(0);
+            // 软件键释放尚未确认时，不恢复物理键直通。
+            if (result.disposition != KeyboardDisposition::ACKNOWLEDGED) return result;
+        }
+        for (std::uint8_t bit = 1; bit <= 8; bit <<= 1) {
+            if (!(owned_masks_ & bit)) continue;
+            auto step = mask_locked(bit, false);
+            if (step.disposition != KeyboardDisposition::ACKNOWLEDGED) result = step;
+        }
+        return result;
+    }
+    void publish_wasd_locked(bool valid, std::int64_t timestamp) noexcept {
+        if (!wasd_subscribed_) return;
+        std::uint8_t mask = 0;
+        if (keyboard_keys_['W']) mask |= 1;
+        if (keyboard_keys_['A']) mask |= 2;
+        if (keyboard_keys_['S']) mask |= 4;
+        if (keyboard_keys_['D']) mask |= 8;
+        ++wasd_sequence_;
+        wasd_events_[(wasd_sequence_ - 1) % wasd_events_.size()] =
+            {mask, valid, wasd_epoch_, wasd_sequence_, timestamp};
+    }
+
     bool validate_config() noexcept {
         if (config_.kmbox_ip.empty()) {
             set_error("KMBOX NET IP 不能为空");
@@ -402,7 +532,9 @@ private:
                            std::uint32_t sequence,
                            int timeout_ms,
                            std::chrono::steady_clock::time_point*
-                               acknowledged_at = nullptr) noexcept {
+                               acknowledged_at = nullptr,
+                           bool* datagram_sent = nullptr) noexcept {
+        if (datagram_sent) *datagram_sent = false;
         const int sent = sendto(
             socket_, reinterpret_cast<const char*>(packet),
             static_cast<int>(packet_size), 0,
@@ -415,6 +547,7 @@ private:
             return false;
         }
 
+        if (datagram_sent) *datagram_sent = true;
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::milliseconds(timeout_ms);
         bool saw_invalid_response = false;
@@ -500,7 +633,18 @@ private:
         return false;
     }
 
-    void close_locked() noexcept {
+    void close_locked(bool attempt_keyboard_cleanup = true) noexcept {
+        if (attempt_keyboard_cleanup && (keyboard_dirty_ || owned_masks_)) {
+            const auto cleanup = cleanup_keyboard_locked();
+            if (cleanup.disposition != KeyboardDisposition::ACKNOWLEDGED)
+                LOG_ERROR("mouse", "KMBOX WASD 清理未确认，设备状态未知");
+        }
+        {
+            std::lock_guard<std::mutex> lock(monitor_mutex_);
+            wasd_subscribed_ = false;
+            ++wasd_epoch_;
+            wasd_sequence_ = 0;
+        }
         if (monitor_configured_ && socket_ != INVALID_SOCKET) {
             std::array<std::uint8_t, kHeaderBytes> disable_packet{};
             write_header(disable_packet.data(), kMonitorCommand, ++sequence_);
@@ -540,6 +684,9 @@ private:
                 if (!monitor_stop_.load(std::memory_order_acquire)) {
                     std::lock_guard<std::mutex> lock(monitor_mutex_);
                     monitor_failed_ = true;
+                    if (wasd_subscribed_) publish_wasd_locked(false,
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count());
                 }
                 break;
             }
@@ -606,13 +753,23 @@ private:
                 observation.monitor_sequence_before = monitor_sequence_;
                 if (observation.accepted_as_monitor_state) {
                     mouse_buttons_ = packet[1];
-                    mouse::detail::apply_hid_keyboard_report(
-                        packet[9], packet.data() + 10U, 10U,
-                        keyboard_keys_);
+                    bool keyboard_valid = true;
+                    for (std::size_t i = 10; i < 20; ++i)
+                        if (packet[i] >= 1 && packet[i] <= 3) keyboard_valid = false;
+                    if (keyboard_valid) {
+                        mouse::detail::apply_hid_keyboard_report(
+                            packet[9], packet.data() + 10U, 10U, keyboard_keys_);
+                    }
+                    monitor_keyboard_valid_ = keyboard_valid;
+                    publish_wasd_locked(keyboard_valid && observation.exact_monitor_packet_size &&
+                        observation.source_endpoint_valid, observation.received_at_steady_ns);
                     monitor_received_ = true;
                     ++monitor_sequence_;
                     observation.monitor_sequence = monitor_sequence_;
                 }
+                if (!observation.accepted_as_monitor_state &&
+                    observation.source_ip_matches_configured_device)
+                    publish_wasd_locked(false, observation.received_at_steady_ns);
                 observation.monitor_sequence_after = monitor_sequence_;
             }
             publish_kmbox_monitor_packet_observation(
@@ -652,6 +809,13 @@ private:
     mutable std::mutex monitor_mutex_;
     std::array<bool, 256> keyboard_keys_{};
     std::uint8_t mouse_buttons_ = 0;
+    bool wasd_subscribed_ = false;
+    std::uint64_t wasd_epoch_ = 1;
+    std::uint64_t wasd_sequence_ = 0;
+    std::array<WasdEvent, 256> wasd_events_{};
+    bool keyboard_dirty_ = false;
+    std::uint8_t owned_masks_ = 0;
+    bool monitor_keyboard_valid_ = false;
     bool monitor_received_ = false;
     bool monitor_failed_ = false;
     bool monitor_configured_ = false;

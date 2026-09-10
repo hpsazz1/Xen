@@ -1339,7 +1339,9 @@ void test_report_captures_optional_aim_startup_config() {
     config.json_path = (owned.path / "aim.json").string();
     for (int mode = 0; mode < 5; ++mode) {
         config.aim_config.reset();
+        config.auto_stop_config.reset();
         if (mode < 4) {
+            config.auto_stop_config = AutoStopConfig{true, 0x05};
             AimConfig aim;
             aim.enable_delay_compensation = (mode & 1) != 0;
             aim.enable_prediction = (mode & 2) != 0;
@@ -1357,11 +1359,15 @@ void test_report_captures_optional_aim_startup_config() {
         if (!report.active()) continue;
         // start必须值拷贝；后续编辑UI候选不能改写已运行会话的报告。
         if (config.aim_config) {
+            config.auto_stop_config->enabled = false;
+            config.auto_stop_config->activation_virtual_key = 0;
             config.aim_config->enable_prediction = !(mode & 2);
             config.aim_config->counts_per_pixel_x = 9.0f;
             config.aim_config->person_class_ids = {9};
         }
         RuntimeSnapshot snapshot;
+        snapshot.auto_stop.status = AutoStopStatus::AWAITING_VALIDATION;
+        snapshot.auto_stop.device_protocol_available = true;
         expect(report.finalize(snapshot, error), "Aim启动快照须随报告成功落盘");
         std::ifstream json_file(config.json_path, std::ios::binary);
         std::ifstream csv_file(config.csv_path, std::ios::binary);
@@ -1370,11 +1376,19 @@ void test_report_captures_optional_aim_startup_config() {
         expect(json.find("\"schema\": 20") != std::string::npos,
                "可选Aim配置只作schema20增量元数据");
         if (mode == 4) {
+            expect(json.find("\"auto_stop\"") == std::string::npos &&
+                       csv.find("# auto_stop,") == std::string::npos,
+                   "未提供辅助配置时不得虚构默认值或前会话配置");
             expect(json.find("\"aim_config\"") == std::string::npos &&
                        csv.find("# aim_config,") == std::string::npos,
                    "未提供快照的调用者不得误报默认或前会话Aim配置");
             continue;
         }
+        expect(json.find("\"auto_stop\": {\"schema\":1,\"enabled\":true,\"activation_virtual_key\":5") != std::string::npos &&
+                   json.find("\"status\":\"AWAITING_VALIDATION\"") != std::string::npos &&
+                   json.find("\"stop_evidence_available\":false,\"fire_permitted\":false") != std::string::npos &&
+                   csv.find("# auto_stop,") != std::string::npos,
+               "辅助元数据须冻结启动配置且区分协议能力与停稳证据，CSV/JSON同时留档");
         const auto begin = json.find("\"aim_config\": {");
         const auto end = json.find('}', begin);
         const std::string captured = begin == std::string::npos ? "" :

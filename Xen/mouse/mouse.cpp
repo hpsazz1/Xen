@@ -238,6 +238,29 @@ public:
         return inner_->poll_input(snapshot);
     }
 
+    bool supports_wasd_keyboard() const noexcept override {
+        return inner_ && output_owner_.held() && inner_->supports_wasd_keyboard();
+    }
+    KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
+        if (!inner_ || !output_owner_.held()) return {KeyboardDisposition::REJECTED};
+        return inner_->set_wasd_keyboard(mask);
+    }
+    KeyboardReceipt set_wasd_mask(std::uint8_t key, bool masked) noexcept override {
+        if (!inner_ || !output_owner_.held()) return {KeyboardDisposition::REJECTED};
+        return inner_->set_wasd_mask(key, masked);
+    }
+    KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
+        if (!inner_ || !output_owner_.held()) return {KeyboardDisposition::REJECTED};
+        return inner_->cleanup_wasd_keyboard();
+    }
+    bool set_wasd_event_subscription(bool enabled) noexcept override {
+        return inner_ && output_owner_.held() && inner_->set_wasd_event_subscription(enabled);
+    }
+    bool read_wasd_events(WasdEventCursor& cursor, WasdEventBatch& batch) noexcept override {
+        if (!inner_ || !output_owner_.held()) { batch = {}; return false; }
+        return inner_->read_wasd_events(cursor, batch);
+    }
+
     bool output_owner_exclusive() const noexcept override {
         return output_owner_.held();
     }

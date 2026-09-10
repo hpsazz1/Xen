@@ -83,6 +83,7 @@ enum class WorkspacePage {
     OVERVIEW,
     DETECTION,
     AIM,
+    AUXILIARY,
     INPUT,
     SETTINGS,
 };
@@ -92,6 +93,7 @@ enum class HotkeyBindingTarget {
     RUNTIME_TOGGLE,
     AIM_HOLD,
     EMERGENCY,
+    AUTO_STOP,
 };
 
 std::array<bool, 256> current_virtual_key_state() noexcept {
@@ -309,6 +311,7 @@ const char* page_title(WorkspacePage page) noexcept {
         case WorkspacePage::OVERVIEW: return "概览";
         case WorkspacePage::DETECTION: return "检测与采集";
         case WorkspacePage::AIM: return "瞄准控制";
+        case WorkspacePage::AUXILIARY: return "辅助";
         case WorkspacePage::INPUT: return "输入安全";
         case WorkspacePage::SETTINGS: return "偏好设置";
     }
@@ -320,6 +323,7 @@ const char* page_context(WorkspacePage page) noexcept {
         case WorkspacePage::OVERVIEW: return "P0 / 本地闭环";
         case WorkspacePage::DETECTION: return "模型与画面";
         case WorkspacePage::AIM: return "追踪与控制";
+        case WorkspacePage::AUXILIARY: return "移动与辅助";
         case WorkspacePage::INPUT: return "输出与急停";
         case WorkspacePage::SETTINGS: return "运行与窗口";
     }
@@ -1568,6 +1572,9 @@ struct Overlay::Impl {
         nav_item(
             "瞄准", WorkspacePage::AIM,
             "配置轨迹确认、目标切换、瞄点位置和相对鼠标移动控制参数。");
+        nav_item(
+            "辅助", WorkspacePage::AUXILIARY,
+            "配置自动急停与本次会话暂停状态。");
         nav_item(
             "输入", WorkspacePage::INPUT,
             "配置物理鼠标后端、安全门和全局快捷键，并在急停后执行受控复位。");
@@ -2974,6 +2981,58 @@ struct Overlay::Impl {
         end_config_panel();
     }
 
+    void render_auxiliary_config(
+            const RuntimeSnapshot& snapshot, AppConfig& app_config,
+            bool can_edit, OverlayActions& actions) {
+        ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        begin_config_panel("auto_stop_panel", "自动急停", 300.0f);
+        ImGui::TextWrapped("待设备与制动验证，当前不执行急停。");
+        ImGui::TextWrapped("面向单方向及相邻双键移动；自动急停与物理输出安全急停相互独立。");
+        ImGui::BeginDisabled(!can_edit);
+        const auto key_active = current_virtual_key_state();
+        if (can_edit) process_hotkey_capture(app_config, actions, key_active);
+        if (begin_form("auto_stop_form", 126.0f)) {
+            form_row("启用自动急停", "仅支持 KMBOX NET；保存启用状态不会自动武装，也不代表设备或停稳证据已验证。");
+            ImGui::BeginDisabled(app_config.mouse.backend != MouseBackend::KMBOX_NET &&
+                                 !app_config.auto_stop.enabled);
+            toggle_switch("##auto_stop_enabled", &app_config.auto_stop.enabled);
+            ImGui::EndDisabled();
+            const int key = app_config.auto_stop.activation_virtual_key;
+            render_hotkey_row("允许键（按住）", "##auto_stop_activation_key",
+                "单一允许键；禁止 WASD，不能与运行启停、瞄准输出或安全急停绑定重复。Esc 清空。",
+                HotkeyBindingTarget::AUTO_STOP,
+                key == 0 ? std::vector<int>{} : std::vector<int>{key}, key_active);
+            ImGui::EndTable();
+        }
+        ImGui::EndDisabled();
+        if (!hotkey_capture_message.empty()) {
+            ImGui::TextWrapped("%s", hotkey_capture_message.c_str());
+        }
+        if (app_config.mouse.backend != MouseBackend::KMBOX_NET) {
+            ImGui::TextWrapped("需要 KMBOX NET；当前后端不可启用自动急停。");
+        }
+        const bool paused = snapshot.auto_stop.status == AutoStopStatus::PAUSED;
+        ImGui::BeginDisabled(snapshot.state != RuntimeState::RUNNING ||
+                             !app_config.auto_stop.enabled);
+        if (ImGui::Button(paused ? "恢复本次会话" : "暂停本次会话")) {
+            actions.runtime_intents.push_back(
+                {RuntimeIntentType::SET_AUTO_STOP_PAUSED, !paused});
+        }
+        ImGui::EndDisabled();
+        show_help_tooltip("仅调整本次会话；恢复后仍需完成设备与制动验证，当前不会执行急停或允许开火。");
+        const char* status = "已关闭";
+        switch (snapshot.auto_stop.status) {
+            case AutoStopStatus::DISABLED: status = "已关闭"; break;
+            case AutoStopStatus::UNSUPPORTED_BACKEND: status = "需要 KMBOX NET"; break;
+            case AutoStopStatus::UNBOUND: status = "未绑定允许键"; break;
+            case AutoStopStatus::AWAITING_VALIDATION: status = "待设备与制动验证"; break;
+            case AutoStopStatus::PAUSED: status = "已暂停"; break;
+        }
+        ImGui::TextWrapped("会话：%s", status);
+        end_config_panel();
+    }
+
     void render_aim_config(AppConfig& app_config, bool can_edit) {
         ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
@@ -3060,7 +3119,7 @@ struct Overlay::Impl {
         if (begin_form("prediction_form", 170.0f)) {
             form_row(
                 "启用延迟补偿",
-                "开启目标运动的延迟提前。关闭后，基础控制仍核算已发出但尚未反映到画面的命令，避免重复纠偏；控制延迟参数仍然生效。是否显示预测提前点由预测开关控制。");
+                "新生成的 App 配置默认开启。开启目标运动的延迟提前。关闭后，基础控制仍核算已发出但尚未反映到画面的命令，避免重复纠偏；控制延迟参数仍然生效。是否显示预测提前点由预测开关控制。");
             toggle_switch(
                 "##enable_delay_compensation",
                 &app_config.aim.enable_delay_compensation);
@@ -3300,6 +3359,7 @@ struct Overlay::Impl {
                 return &app_config.keyboard.aim_hold_virtual_keys;
             case HotkeyBindingTarget::EMERGENCY:
                 return &app_config.keyboard.emergency_virtual_keys;
+            case HotkeyBindingTarget::AUTO_STOP:
             case HotkeyBindingTarget::NONE:
                 return nullptr;
         }
@@ -3314,7 +3374,9 @@ struct Overlay::Impl {
             &app_config.keyboard.runtime_toggle_virtual_keys,
             &app_config.keyboard.aim_hold_virtual_keys,
             &app_config.keyboard.emergency_virtual_keys}};
-        return std::any_of(
+        return (current_binding != nullptr &&
+                app_config.auto_stop.activation_virtual_key == virtual_key) ||
+            std::any_of(
             bindings.begin(), bindings.end(),
             [&](const std::vector<int>* binding) {
                 return binding != current_binding &&
@@ -3360,10 +3422,9 @@ struct Overlay::Impl {
         show_help_tooltip(help);
     }
 
-    void render_keyboard_form(
-            AppConfig& app_config,
-            OverlayActions& actions) {
-        const auto key_active = current_virtual_key_state();
+    void process_hotkey_capture(
+            AppConfig& app_config, OverlayActions& actions,
+            const std::array<bool, 256>& key_active) {
         const bool capture_was_active = hotkey_capture_state.active;
         const auto capture_result = overlay::detail::update_hotkey_capture(
             hotkey_capture_state, key_active);
@@ -3371,7 +3432,24 @@ struct Overlay::Impl {
         if (capture_result.type !=
                 overlay::detail::HotkeyCaptureResultType::NONE) {
             std::vector<int>* binding = hotkey_binding(app_config);
-            if (binding && capture_result.type ==
+            if (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP) {
+                if (capture_result.type ==
+                        overlay::detail::HotkeyCaptureResultType::CLEARED) {
+                    app_config.auto_stop.activation_virtual_key = 0;
+                    hotkey_capture_message = "允许键已清空";
+                } else if (capture_result.type ==
+                        overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
+                    const int key = capture_result.virtual_key;
+                    if (key == 'W' || key == 'A' || key == 'S' || key == 'D') {
+                        hotkey_capture_message = "允许键不能使用 WASD";
+                    } else if (virtual_key_assigned_elsewhere(app_config, nullptr, key)) {
+                        hotkey_capture_message = "该按键已被其他功能占用";
+                    } else {
+                        app_config.auto_stop.activation_virtual_key = key;
+                        hotkey_capture_message = "允许键已设置";
+                    }
+                }
+            } else if (binding && capture_result.type ==
                     overlay::detail::HotkeyCaptureResultType::CLEARED) {
                 binding->clear();
                 hotkey_capture_message = "绑定已清空，该功能已禁用";
@@ -3392,6 +3470,14 @@ struct Overlay::Impl {
             }
             hotkey_binding_target = HotkeyBindingTarget::NONE;
         }
+
+    }
+
+    void render_keyboard_form(
+            AppConfig& app_config,
+            OverlayActions& actions) {
+        const auto key_active = current_virtual_key_state();
+        process_hotkey_capture(app_config, actions, key_active);
 
         begin_config_panel("keyboard_panel", "全局按键", 148.0f);
         if (begin_form("keyboard_form", 126.0f)) {
@@ -3496,9 +3582,11 @@ struct Overlay::Impl {
              snapshot.state == RuntimeState::RUNNING &&
              snapshot.detector_reload_state !=
                  DetectorReloadState::LOADING);
+        const WorkspacePage capture_page =
+            hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP
+                ? WorkspacePage::AUXILIARY : WorkspacePage::INPUT;
         if (hotkey_capture_state.active &&
-            (active_page != WorkspacePage::INPUT || !can_edit ||
-             show_log_panel)) {
+            (active_page != capture_page || !can_edit || show_log_panel)) {
             hotkey_capture_state = {};
             hotkey_binding_target = HotkeyBindingTarget::NONE;
             hotkey_capture_message.clear();
@@ -3533,6 +3621,9 @@ struct Overlay::Impl {
                     break;
                 case WorkspacePage::AIM:
                     render_aim_config(app_config, can_edit);
+                    break;
+                case WorkspacePage::AUXILIARY:
+                    render_auxiliary_config(snapshot, app_config, can_edit, actions);
                     break;
                 case WorkspacePage::INPUT:
                     render_input_config(

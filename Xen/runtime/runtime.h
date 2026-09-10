@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "aim/aim.h"
+#include "auto_stop/auto_stop.h"
 #include "aim_landmark/aim_landmark.h"
 #include "capture/capture.h"
 #include "config/config.h"
@@ -43,6 +44,7 @@ enum class RuntimeIntentType {
     AIM_HOLD_CHANGED,
     EMERGENCY_STOP,
     RESET_EMERGENCY,
+    SET_AUTO_STOP_PAUSED,
 };
 
 struct RuntimeIntent {
@@ -238,6 +240,7 @@ struct RuntimePreviewFrame {
 };
 
 struct RuntimeSnapshot {
+    AutoStopSnapshot auto_stop;
     RuntimeState state = RuntimeState::STOPPED;
     CaptureStatus capture_status = CaptureStatus::CLOSED;
     DetectionStatus detection_status = DetectionStatus::NOT_RUN;

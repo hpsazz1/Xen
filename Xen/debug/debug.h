@@ -23,6 +23,8 @@ struct DebugReportConfig {
     bool performance_probes_enabled = false;
     // 调用者明确提供的本次 Runtime 启动快照；缺省不推断 Aim 默认值。
     std::optional<AimConfig> aim_config;
+    // 仅由启动会话提供。缺省时报告不捏造辅助功能的配置或验证结论。
+    std::optional<AutoStopConfig> auto_stop_config;
 };
 
 struct DebugTimingSummary {

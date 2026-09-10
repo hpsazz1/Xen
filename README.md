@@ -73,6 +73,22 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 
 ## 运行
 
+### 自动急停基础模块
+
+独立“辅助”菜单提供自动急停配置、启用键及会话暂停状态，配置保存到 `[auto_stop]`。
+默认关闭，只支持 KMBOX NET。当前已接入键盘协议、有界 WASD 输入历史及日志元数据；
+四个单键和八条有序相邻双键路径均保留各轴按下时间。
+
+本阶段界面显示“待设备与制动验证”，不会执行制动或许可开枪。实际制动仍需确认目标固件的
+屏蔽/归还行为与停稳证据，再接入 Runtime 调度。自动扳机、压枪尚未实现。
+调试报告新增 `auto_stop` 元数据，记录本次配置和可用状态，不把协议 ACK 当作停稳。
+
+仅检查界面时可构建 `auxiliary_ui_preview` 目标，运行
+`build/Release/auxiliary_ui_preview.exe`（可加 `--minimum`、`--dark`）。该入口只创建窗口，
+不创建 Runtime 或设备，保存仅保留在内存中。
+
+### 启动应用
+
 1. 启动一次 `build/Release/Xen.exe`。程序会在同目录创建 `models/` 和默认 `config.ini`。
 2. 把 ONNX 模型放入 `models/` 根目录，在“检测”页刷新、选择并应用模型。
 3. 配置 Capture 与 Provider，启动 Runtime；先保持物理输出关闭，确认预览、日志和 Provider 状态。

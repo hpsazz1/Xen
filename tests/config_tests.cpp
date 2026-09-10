@@ -591,6 +591,54 @@ void test_atomic_save_preserves_existing_file_on_replace_failure() {
     std::filesystem::remove_all(directory, ignored);
 }
 
+void test_auto_stop_config() {
+    AppConfig config;
+    std::string error;
+    expect(!config.auto_stop.enabled && config.auto_stop.activation_virtual_key == 0,
+           "自动急停默认关闭且未绑定");
+    const auto path = std::filesystem::temp_directory_path() / "xen_auto_stop_config.ini";
+    config.auto_stop.enabled = true;
+    config.auto_stop.activation_virtual_key = 0x76;
+    expect(save_app_config(path.string(), config, error), "自动急停独立节应可保存");
+    AppConfig loaded;
+    expect(load_app_config(path.string(), loaded, error) && loaded.auto_stop.enabled &&
+               loaded.auto_stop.activation_virtual_key == 0x76,
+           "自动急停开关和允许键必须往返保留");
+    for (int key : {-1, 256, int('W'), int('A'), int('S'), int('D'), 0x02, 0x23, 0x77}) {
+        config.auto_stop.activation_virtual_key = key;
+        expect(!validate_app_config(config, error), "非法、移动或已占用允许键必须拒绝");
+    }
+    config.auto_stop.activation_virtual_key = 0;
+    expect(validate_app_config(config, error), "允许保存尚未绑定的配置，由状态明确未绑定");
+    config.mouse.makcu_port = "COM3";
+    for (auto backend : {MouseBackend::WIN32_SEND_INPUT, MouseBackend::MAKCU}) {
+        config.mouse.backend = backend;
+        expect(!validate_app_config(config, error), "非 KMBOX 后端不能启用自动急停");
+        config.auto_stop.enabled = false;
+        expect(validate_app_config(config, error), "关闭自动急停时兼容其他后端");
+        config.auto_stop.enabled = true;
+    }
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << "[detector]\nmodel_path=model.onnx\n";
+    }
+    loaded.auto_stop.enabled = true;
+    loaded.auto_stop.activation_virtual_key = 0x76;
+    expect(load_app_config(path.string(), loaded, error) && !loaded.auto_stop.enabled &&
+               loaded.auto_stop.activation_virtual_key == 0,
+           "旧配置必须清除已开启的调用方状态");
+    for (const char* value : {"enabled=perhaps", "activation_virtual_key=1.5",
+                              "activation_virtual_key=999999999999999999999999"}) {
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << "[auto_stop]\n" << value << "\n";
+        }
+        expect(!load_app_config(path.string(), loaded, error), "自动急停节应严格检查类型");
+    }
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+}
+
 void test_legacy_keyboard_config() {
     const auto path = std::filesystem::temp_directory_path() /
                       "xen_legacy_keyboard_config.ini";
@@ -996,6 +1044,7 @@ int main() {
     test_existing_file_rejects_malformed_typed_values();
     test_atomic_save_preserves_existing_file_on_write_failure();
     test_atomic_save_preserves_existing_file_on_replace_failure();
+    test_auto_stop_config();
     test_legacy_keyboard_config();
     test_invalid_config();
     test_complete_aim_config_validation();

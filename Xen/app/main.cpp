@@ -203,6 +203,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     bool release_restart_requested = false;
     std::string debug_run_id;
     std::optional<AimConfig> debug_aim_config;
+    std::optional<AutoStopConfig> debug_auto_stop_config;
     std::uint64_t debug_segment = 0;
     std::vector<RuntimePipelineSample> pending_debug_samples;
     Overlay overlay;
@@ -248,6 +249,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             CaptureBackendName(config.capture.backend);
         report_config.mouse_backend = MouseBackendName(config.mouse.backend);
         report_config.aim_config = debug_aim_config;
+        report_config.auto_stop_config = debug_auto_stop_config;
         std::string report_error;
         debug_session_active = debug_report.start(
             report_config, report_error);
@@ -277,6 +279,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             std::to_string(GetCurrentProcessId()) + "-" +
             std::to_string(GetTickCount64());
         debug_aim_config = runtime_config.aim;
+        debug_auto_stop_config = runtime_config.auto_stop;
         debug_segment = 0;
         detector_reload_pending = false;
         debug_session_active = start_debug_report(runtime.snapshot());

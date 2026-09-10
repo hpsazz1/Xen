@@ -577,6 +577,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"mouse", "makcu_baud_rate"},
         {"mouse", "makcu_connect_timeout_ms"},
         {"mouse", "makcu_command_timeout_ms"},
+        {"auto_stop", "activation_virtual_key"},
         {"keyboard", "aim_hold_virtual_key"},
         {"keyboard", "emergency_virtual_key"},
         {"keyboard", "runtime_toggle_virtual_key"},
@@ -632,6 +633,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"capture", "center_roi"},
         {"aim", "enable_delay_compensation"},
         {"aim", "enable_prediction"},
+        {"auto_stop", "enabled"},
         {"mouse", "allow_send_input"},
         {"ui", "enable_vsync"},
         {"ui", "open_detached_preview_on_start"},
@@ -918,6 +920,24 @@ bool validate_app_config(const AppConfig& config,
             error = "Mouse 配置非法";
             return false;
         }
+        const int stop_key = config.auto_stop.activation_virtual_key;
+        const auto contains_stop_key = [stop_key](const std::vector<int>& keys) {
+            return std::find(keys.begin(), keys.end(), stop_key) != keys.end();
+        };
+        if (stop_key < 0 || stop_key > 0xFF || stop_key == 'W' ||
+            stop_key == 'A' || stop_key == 'S' || stop_key == 'D' ||
+            (stop_key != 0 &&
+             (contains_stop_key(config.keyboard.aim_hold_virtual_keys) ||
+              contains_stop_key(config.keyboard.emergency_virtual_keys) ||
+              contains_stop_key(config.keyboard.runtime_toggle_virtual_keys)))) {
+            error = "自动急停允许键非法、使用 WASD 或与其他功能冲突";
+            return false;
+        }
+        if (config.auto_stop.enabled &&
+            config.mouse.backend != MouseBackend::KMBOX_NET) {
+            error = "自动急停仅支持 KMBOX NET 后端";
+            return false;
+        }
         const bool physical_keyboard_invalid =
             config.mouse.allow_send_input &&
             (config.keyboard.aim_hold_virtual_keys.empty() ||
@@ -955,6 +975,10 @@ bool load_app_config(const std::string& path,
         if (!validate_typed_config_values(ini, error)) return false;
 
         AppConfig candidate = config;
+        // 旧配置无独立节时必须关闭，不能继承调用方已经开启的状态。
+        candidate.auto_stop.enabled = ini.GetBoolValue("auto_stop", "enabled", false);
+        candidate.auto_stop.activation_virtual_key = static_cast<int>(
+            ini.GetLongValue("auto_stop", "activation_virtual_key", 0));
         const char* configured_log_level = ini.GetValue(
             "log", "global_level", nullptr);
         if (!parse_log_level(configured_log_level,
@@ -1394,6 +1418,9 @@ bool save_app_config(const std::string& path,
                          config.mouse.makcu_connect_timeout_ms);
         ini.SetLongValue("mouse", "makcu_command_timeout_ms",
                          config.mouse.makcu_command_timeout_ms);
+        ini.SetBoolValue("auto_stop", "enabled", config.auto_stop.enabled);
+        ini.SetLongValue("auto_stop", "activation_virtual_key",
+                         config.auto_stop.activation_virtual_key);
         ini.SetValue(
             "keyboard", "aim_hold_virtual_keys",
             format_int_list(config.keyboard.aim_hold_virtual_keys).c_str());

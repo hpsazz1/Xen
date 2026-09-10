@@ -115,6 +115,31 @@ struct MouseMoveReceipt {
     operator bool() const noexcept { return succeeded; }
 };
 
+// KMBOX 专用：W=1, A=2, S=4, D=8。ACK 不代表游戏角色已停稳。
+enum class KeyboardDisposition { UNSUPPORTED, REJECTED, ACKNOWLEDGED, APPLICATION_UNKNOWN };
+struct KeyboardReceipt {
+    KeyboardDisposition disposition = KeyboardDisposition::UNSUPPORTED;
+    bool datagram_sent = false;
+    std::chrono::steady_clock::time_point backend_completed_at{};
+    std::chrono::steady_clock::time_point protocol_ack_received_at{};
+};
+// 接收时间/本机序号只能排序收到的事实，不能证明UDP未丢包或游戏停稳。
+// 反向同时按键保留原始mask；HID错误保留上次mask并使state_valid=false。
+struct WasdEvent {
+    std::uint8_t held_mask = 0;
+    bool state_valid = false;
+    std::uint64_t epoch = 0;
+    std::uint64_t sequence = 0;
+    std::int64_t received_at_steady_ns = 0;
+};
+struct WasdEventCursor { std::uint64_t epoch = 0; std::uint64_t sequence = 0; };
+struct WasdEventBatch {
+    std::array<WasdEvent, 64> events{};
+    std::size_t count = 0;
+    bool gap = false;
+    bool subscribed = false;
+};
+
 class IMouseController {
 public:
     virtual ~IMouseController() = default;
@@ -131,6 +156,15 @@ public:
     // 仅 MouseDeviceFactory 的跨进程 lease adapter 在成功 open 后返回 true；
     // 测试 fake 默认 false，不能用调用方布尔声明冒充生产独占事实。
     virtual bool output_owner_exclusive() const noexcept { return false; }
+    // 协议能力不是固件/游戏停稳验证。生产调用必须另有上层验收与许可。
+    virtual bool supports_wasd_keyboard() const noexcept { return false; }
+    virtual KeyboardReceipt set_wasd_keyboard(std::uint8_t) noexcept { return {}; }
+    virtual KeyboardReceipt set_wasd_mask(std::uint8_t, bool) noexcept { return {}; }
+    virtual KeyboardReceipt cleanup_wasd_keyboard() noexcept { return {}; }
+    virtual bool set_wasd_event_subscription(bool) noexcept { return false; }
+    virtual bool read_wasd_events(WasdEventCursor&, WasdEventBatch& batch) noexcept {
+        batch = {}; return false;
+    }
     virtual void close() noexcept = 0;
     virtual MouseStatus status() const noexcept = 0;
     virtual std::string last_error() const = 0;

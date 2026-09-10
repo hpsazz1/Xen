@@ -4,6 +4,7 @@
 #include <string>
 
 #include "aim/aim.h"
+#include "auto_stop/auto_stop.h"
 #include "capture/capture.h"
 #include "detector/detector.h"
 #include "keyboard/keyboard.h"
@@ -22,7 +23,7 @@ enum class UiTheme {
     DARK,
 };
 
-// 五页紧凑布局在该尺寸下仍能保证安全按钮、表单和状态信息不互相遮挡。
+// 六页紧凑布局在该尺寸下仍能保证安全按钮、表单和状态信息不互相遮挡。
 inline constexpr int kMinimumUiWidth = 820;
 inline constexpr int kMinimumUiHeight = 600;
 
@@ -82,6 +83,7 @@ struct AppConfig {
         return value;
     }();
     KeyboardConfig keyboard;
+    AutoStopConfig auto_stop;
     LogConfig log = [] {
         LogConfig value;
         value.global_level = LogLevel::INFO;

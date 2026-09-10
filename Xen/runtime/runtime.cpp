@@ -52,6 +52,7 @@ struct Runtime::Impl {
     mutable std::mutex detector_mutex;
     AppConfig config;
     RuntimeSnapshot current_snapshot;
+    AutoStopSnapshot auto_stop_unpaused;
     runtime::detail::LatestFrameQueue frame_queue;
     runtime::detail::RuntimePreviewChannel preview_channel;
     runtime::detail::SafetyGate safety_gate;
@@ -242,6 +243,10 @@ struct Runtime::Impl {
             current_snapshot.state = RuntimeState::STARTING;
             current_snapshot.capture_status = capture->status();
             current_snapshot.mouse_status = mouse->status();
+            current_snapshot.auto_stop = assess_auto_stop_availability(
+                config.auto_stop, config.mouse.backend == MouseBackend::KMBOX_NET,
+                mouse->supports_wasd_keyboard(), false);
+            auto_stop_unpaused = current_snapshot.auto_stop;
             current_snapshot.provider = detector->backend_name();
             current_snapshot.active_model_path = config.detector.model_path;
             current_snapshot.detector_generation = 1;
@@ -259,6 +264,10 @@ struct Runtime::Impl {
         debug_samples.reset();
         fps_started = std::chrono::steady_clock::now();
         fps_frame_count = 0;
+        if (config.auto_stop.enabled) {
+            Log::register_module("auto_stop", LogLevel::INFO);
+            LOG_INFO("auto_stop", "自动急停待设备与制动验证，本次会话不执行键盘制动");
+        }
         return true;
     }
 
@@ -1161,6 +1170,20 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
         case RuntimeIntentType::RESET_EMERGENCY:
             if (!impl_->safety_gate.reset_emergency()) return false;
             break;
+        case RuntimeIntentType::SET_AUTO_STOP_PAUSED: {
+            std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
+            if (impl_->current_snapshot.state != RuntimeState::RUNNING ||
+                impl_->auto_stop_unpaused.status == AutoStopStatus::DISABLED) return false;
+            const auto before = impl_->current_snapshot.auto_stop.status;
+            impl_->current_snapshot.auto_stop = impl_->auto_stop_unpaused;
+            if (intent.active)
+                impl_->current_snapshot.auto_stop.status = AutoStopStatus::PAUSED;
+            if (before != impl_->current_snapshot.auto_stop.status) {
+                LOG_INFO("auto_stop", "自动急停会话{}，不恢复旧制动请求",
+                         intent.active ? "暂停" : "恢复待命");
+            }
+            return true;
+        }
         case RuntimeIntentType::START:
         case RuntimeIntentType::STOP:
             return false;
