@@ -967,6 +967,19 @@ endif()
 
 add_executable(xen_mouse_benchmark
     Xen/mouse_benchmark/main.cpp)
+
+# 有界 WASD 设备试验独立于生产 Runtime；真实运行须显式确认。
+add_executable(auto_stop_probe Xen/auto_stop_probe/main.cpp)
+target_include_directories(auto_stop_probe PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(auto_stop_probe PRIVATE config mouse nlohmann_json::nlohmann_json)
+
+# 本机 HUD 观测入口只连接 DXGI，不具备任何输入能力。
+add_executable(xen_auto_stop_capture Xen/auto_stop_capture/main.cpp)
+set_target_properties(xen_auto_stop_capture PROPERTIES OUTPUT_NAME XenAutoStopCapture)
+target_link_libraries(xen_auto_stop_capture PRIVATE capture)
+if(WIN32)
+    xen_deploy_runtime_dlls(xen_auto_stop_capture OPENCV NDI)
+endif()
 set_target_properties(
     xen_mouse_benchmark PROPERTIES OUTPUT_NAME XenMouseBenchmark)
 target_link_libraries(xen_mouse_benchmark PRIVATE mouse_benchmark)
@@ -1353,6 +1366,14 @@ if(BUILD_TESTING)
     add_executable(auto_stop_tests tests/auto_stop_tests.cpp)
     target_link_libraries(auto_stop_tests PRIVATE auto_stop)
     add_test(NAME auto_stop_tests COMMAND auto_stop_tests)
+
+    add_executable(auto_stop_probe_tests tests/auto_stop_probe_tests.cpp)
+    target_include_directories(auto_stop_probe_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    target_link_libraries(auto_stop_probe_tests PRIVATE mouse nlohmann_json::nlohmann_json)
+    add_test(NAME auto_stop_probe_tests COMMAND auto_stop_probe_tests)
+    add_test(NAME auto_stop_hud_analysis_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/auto_stop_hud_analysis_tests.py")
 
     add_executable(kmbox_keyboard_tests tests/kmbox_keyboard_tests.cpp)
     target_link_libraries(kmbox_keyboard_tests PRIVATE mouse ws2_32)

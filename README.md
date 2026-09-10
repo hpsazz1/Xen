@@ -87,6 +87,33 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 `build/Release/auxiliary_ui_preview.exe`（可加 `--minimum`、`--dark`）。该入口只创建窗口，
 不创建 Runtime 或设备，保存仅保留在内存中。
 
+设备实验使用独立 `auto_stop_probe` 目标。它复用生产 KMBOX owner，但不创建 Aim/Runtime，
+仅接受 WASD 单键或相邻组合；每步最多 2 秒、每计划最多 15 秒，支持 End 取消与退出清理。
+计划格式为 `{"steps":[{"held_mask":1,"hold_ms":150},{"held_mask":0,"hold_ms":1500}]}`，
+W/A/S/D 对应位值 1/2/4/8。`--plan <计划> --output <新报告> --dry-run` 只校验计划，不连接设备。
+实际执行另需 `--config <配置>`、`--allow-physical-output --confirm AUTO_STOP_WASD_PHYSICAL`。
+无需人工按 Ctrl 初始化。默认在设备连接与独占 owner 确认后执行有界计划；尚未收到物理报告时
+键态仍为未知，报告 `monitor_initial_state_known=false`。首个 End 报告即可取消；已收到有效键态后
+监听失效会取消。`--monitor-ready-timeout-ms` 默认 0，显式设置 1～30000 只增加有界观察时间。
+
+连续实验可用 `--session-dir <新目录> --session-seconds <1～600>` 替代单计划参数，复用同一连接。
+按序原子放入 `001.plan.json`、`002.plan.json` 等请求，工具生成同序号结果和 `session.status.json`；
+目录中的 `STOP`、End 或时限结束会清理并关闭。空闲不发送运动，失败终止整次会话。
+设备 ACK、实际命令间隔和释放结果均写入报告，不能据此宣称角色停稳。
+`--mask-check --config <配置> --output <新报告>` 是独立实体 W 检查模式，仍要求上述物理授权参数。
+它等待有效的实体 W 持有报告，150 毫秒后仅屏蔽 W，保持 1500 毫秒后解除，再观察 250 毫秒；
+不会合成非零软件键，也不需要 Ctrl。屏蔽期间正常松开/重按 W 可取证新的物理报告；
+开始观察的时间不冒充 W 实际按下时刻。其它方向、End、监听异常或回执未知均取消并清理。
+
+只读画面取证使用 `xen_auto_stop_capture` 目标，输出 `XenAutoStopCapture.exe`，支持
+`--output <新目录> --seconds <1～30> --fps <1～240>`；默认采样左侧 650×310 HUD 区域，
+可通过 `--roi-x/--roi-y/--roi-width/--roi-height` 调整。PNG 与 `frames.csv` 保留实际帧时间，
+请求 FPS 不代表实际采样率。该工具没有物理输出能力，不改变生产采集 ROI。
+`scripts/read_auto_stop_hud.ps1` 使用 Windows PowerShell 5.1 的本地 WinRT OCR，保留原文和缺失值；
+`scripts/analyze_auto_stop_hud.py` 分析客户端可见运动、零显示与位置稳定区间，
+不将两台机器时钟直接相减，不将 HUD 括号中的 3 秒峰值当作当前速度。
+这些实验工具不等于生产急停已完成；持续物理持键时的屏蔽、归还及共享调度仍需分别验证。
+
 ### 启动应用
 
 1. 启动一次 `build/Release/Xen.exe`。程序会在同目录创建 `models/` 和默认 `config.ini`。
