@@ -1250,6 +1250,24 @@ if(BUILD_TESTING)
     add_test(NAME aim_background_observation_time_tests
         COMMAND aim_background_observation_time_tests)
 
+    add_executable(aim_observer_numeric_tests tests/aim_observer_numeric_tests.cpp)
+    target_link_libraries(aim_observer_numeric_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_observer_numeric_tests OPENCV)
+    add_test(NAME aim_observer_numeric_tests COMMAND aim_observer_numeric_tests)
+
+    add_executable(aim_prediction_recovery_tests tests/aim_prediction_recovery_tests.cpp)
+    target_link_libraries(aim_prediction_recovery_tests PRIVATE aim log nlohmann_json::nlohmann_json)
+    target_compile_definitions(aim_prediction_recovery_tests PRIVATE
+        XEN_AIM_PREDICTION_RECOVERY_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/aim_combo_prediction_recovery.json")
+    xen_deploy_runtime_dlls(aim_prediction_recovery_tests OPENCV)
+    add_test(NAME aim_prediction_recovery_tests COMMAND aim_prediction_recovery_tests)
+
+    add_executable(aim_combo_dynamics_tests tests/aim_combo_dynamics_tests.cpp)
+    target_link_libraries(aim_combo_dynamics_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_combo_dynamics_tests OPENCV)
+    add_test(NAME aim_combo_dynamics_tests COMMAND aim_combo_dynamics_tests)
+    add_test(NAME aim_long_delay_tests COMMAND aim_combo_dynamics_tests --long-delay)
+
     add_executable(aim_x_filter_reset_tests tests/aim_x_filter_reset_tests.cpp)
     target_link_libraries(aim_x_filter_reset_tests PRIVATE aim log)
     xen_deploy_runtime_dlls(aim_x_filter_reset_tests OPENCV)

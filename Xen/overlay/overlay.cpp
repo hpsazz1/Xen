@@ -3060,33 +3060,33 @@ struct Overlay::Impl {
         if (begin_form("prediction_form", 170.0f)) {
             form_row(
                 "启用延迟补偿",
-                "新生成的 App 配置默认开启。开启后使用控制延迟处理运动与在途请求；仅开启延迟补偿时基础瞄点保持当前目标点，同时开启预测时再生成延迟投影与预测提前点。关闭后仍有常规误差反馈控制。");
+                "开启目标运动的延迟提前。关闭后，基础控制仍核算已发出但尚未反映到画面的命令，避免重复纠偏；控制延迟参数仍然生效。是否显示预测提前点由预测开关控制。");
             toggle_switch(
                 "##enable_delay_compensation",
                 &app_config.aim.enable_delay_compensation);
             form_row(
                 "控制延迟",
-                "Aim 控制时刻之后未包含在观测年龄中的固定延迟，单位 ms；应由 Runtime 端到端控制报告和真实设备测量确定，范围 0～100 ms。 ");
+                "控制时刻之后的固定延迟，单位 ms。所有开关组合均用它核算已发命令；应按实际设备测量设置，关闭目标提前时也不要将它改为零。");
             slider_float_control(
                 "control_delay_ms", &app_config.aim.control_delay_ms,
                 0.0f, 100.0f, "%.1f ms");
             form_row(
                 "最大补偿延迟",
-                "控制路径采用的观测年龄与固定控制延迟之和的上限，单位 ms；不得小于控制延迟。关闭延迟补偿时不生效。");
+                "目标提前采用的最大补偿时长，单位 ms；不得小于控制延迟。它不截短基础控制对已发命令的记账时长。");
             slider_float_control(
                 "max_delay_compensation_ms",
                 &app_config.aim.max_delay_compensation_ms,
                 0.0f, 100.0f, "%.1f ms");
             form_row(
                 "最大补偿距离",
-                "生成延迟投影点时，限制投影向量相对目标框对角线的比例；仅开启延迟补偿的基础追踪路径不生成该投影点，也不因此改变基础点。");
+                "用于限制延迟补偿模式下的预测提前距离，以目标框对角线的百分比表示。预测关闭时不改变基础瞄点。");
             slider_float_control(
                 "max_delay_compensation_percent",
                 &app_config.aim.max_delay_compensation_percent,
                 1.0f, 50.0f, "%.0f%%");
             form_row(
                 "启用预测",
-                "开启运动提前与短时丢失轨迹控制；与延迟补偿组合决定控制路径。关闭时公有瞄点保持基础点。开启后仍须满足当前运动证据与几何约束，不是无条件提前。");
+                "根据可靠背景与人物运动证据生成提前点；证据不足时回到基础追踪。当前背景观测只支持X轴提前，Y轴仍进行基础纠偏。关闭预测时瞄点保持基础点。");
             toggle_switch(
                 "##enable_prediction", &app_config.aim.enable_prediction);
             form_row(

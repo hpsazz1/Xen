@@ -19,6 +19,7 @@
 #include <iomanip>
 #include <numeric>
 #include <sstream>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -353,6 +354,59 @@ std::string json_escape(const std::string& value) {
 
 const char* bool_name(bool value) noexcept {
     return value ? "true" : "false";
+}
+
+std::string aim_config_json(const AimConfig& config) {
+    std::ostringstream output;
+    output << std::setprecision(9) << std::boolalpha << '{';
+    bool first = true;
+    const auto field = [&](const char* name, auto value) {
+        if (!first) output << ',';
+        first = false;
+        output << '"' << name << "\":";
+        if constexpr (std::is_floating_point_v<decltype(value)>) {
+            if (!std::isfinite(value)) { output << "null"; return; }
+        }
+        output << value;
+    };
+    const auto classes = [&](const char* name, const std::vector<int>& values) {
+        if (!first) output << ',';
+        first = false;
+        output << '"' << name << "\":[";
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            if (index != 0) output << ',';
+            output << values[index];
+        }
+        output << ']';
+    };
+    classes("person_class_ids", config.person_class_ids);
+    classes("head_class_ids", config.head_class_ids);
+    field("high_confidence", config.high_confidence);
+    field("low_confidence", config.low_confidence);
+    field("min_confirmed_hits", config.min_confirmed_hits);
+    field("max_lost_frames", config.max_lost_frames);
+    field("min_iou", config.min_iou);
+    field("max_center_distance", config.max_center_distance);
+    field("switch_margin", config.switch_margin);
+    field("switch_confirm_frames", config.switch_confirm_frames);
+    field("switch_cooldown_frames", config.switch_cooldown_frames);
+    field("acquisition_range_percent", config.acquisition_range_percent);
+    field("body_aim_height_ratio", config.body_aim_height_ratio);
+    field("body_aim_range_percent", config.body_aim_range_percent);
+    field("deadzone_pixels", config.deadzone_pixels);
+    field("smoothing", config.smoothing);
+    field("counts_per_pixel_x", config.counts_per_pixel_x);
+    field("counts_per_pixel_y", config.counts_per_pixel_y);
+    field("max_counts_per_frame", config.max_counts_per_frame);
+    field("enable_delay_compensation", config.enable_delay_compensation);
+    field("control_delay_ms", config.control_delay_ms);
+    field("max_delay_compensation_ms", config.max_delay_compensation_ms);
+    field("max_delay_compensation_percent", config.max_delay_compensation_percent);
+    field("enable_prediction", config.enable_prediction);
+    field("max_prediction_lead_percent", config.max_prediction_lead_percent);
+    field("predicted_gain", config.predicted_gain);
+    output << '}';
+    return output.str();
 }
 
 const char* track_state_name(TrackState state) noexcept {
@@ -1059,6 +1113,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 summary_.report_samples_dropped << '\n'
             << "# runtime_samples_dropped," <<
                 summary_.runtime_samples_dropped << '\n';
+        if (config_.aim_config) {
+            csv << "# aim_config," << csv_escape(aim_config_json(*config_.aim_config)) << '\n';
+        }
         append_csv_snapshot(csv, final_snapshot);
         append_csv_coverage(csv, summary_.coverage);
         append_csv_timing(csv, "capture", summary_.capture);
@@ -1202,7 +1259,13 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 "aim_command_dx_counts,"
                 "aim_command_dy_counts,"
                 "aim_control_evaluated,aim_controller_dt_ms,"
-                "aim_proportional_x_counts,aim_feedforward_x_counts,"
+                "aim_proportional_x_counts,"
+                "aim_execution_proportional_x_counts,"
+                "aim_residual_role_x,"
+                "aim_residual_background_role_x,"
+                "aim_execution_world_preview_x_counts,"
+                "aim_execution_unseen_command_x_counts,"
+                "aim_feedforward_x_counts,"
                 "aim_desired_before_reverse_x_counts,aim_desired_x_counts,"
                 "aim_filtered_x_counts,aim_shaped_x_counts,"
                 "aim_residual_before_quantization_x_counts,"
@@ -1406,6 +1469,13 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << bool_name(sample.aim_control.evaluated) << ','
                 << sample.aim_control.controller_dt_ms << ','
                 << sample.aim_control.proportional_x_counts << ','
+                << sample.aim_control.execution_proportional_x_counts << ','
+                << bool_name(sample.aim_control.residual_role_x) << ','
+                << bool_name(sample.aim_control.residual_background_role_x) << ','
+                << std::setprecision(17)
+                << sample.aim_control.execution_world_preview_x_counts << ','
+                << sample.aim_control.execution_unseen_command_x_counts << ','
+                << std::setprecision(9)
                 << sample.aim_control.feedforward_x_counts << ','
                 << sample.aim_control.desired_before_reverse_x_counts << ','
                 << sample.aim_control.desired_x_counts << ','
@@ -1625,6 +1695,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
              << summary_.report_samples_dropped << ",\n"
              << "  \"runtime_samples_dropped\": "
              << summary_.runtime_samples_dropped << ",\n";
+        if (config_.aim_config) {
+            json << "  \"aim_config\": " << aim_config_json(*config_.aim_config) << ",\n";
+        }
         append_json_coverage(json, summary_.coverage);
         append_json_queue_depth(json, summary_.ndi_video_queue_depth);
         append_json_snapshot(json, final_snapshot);
@@ -1891,6 +1964,18 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << sample.aim_control.controller_dt_ms
                  << ", \"aim_proportional_x_counts\": "
                  << sample.aim_control.proportional_x_counts
+                 << ", \"aim_execution_proportional_x_counts\": "
+                 << sample.aim_control.execution_proportional_x_counts
+                 << ", \"aim_residual_role_x\": "
+                 << bool_name(sample.aim_control.residual_role_x)
+                 << ", \"aim_residual_background_role_x\": "
+                 << bool_name(sample.aim_control.residual_background_role_x)
+                 << std::setprecision(17)
+                 << ", \"aim_execution_world_preview_x_counts\": "
+                 << sample.aim_control.execution_world_preview_x_counts
+                 << ", \"aim_execution_unseen_command_x_counts\": "
+                 << sample.aim_control.execution_unseen_command_x_counts
+                 << std::setprecision(9)
                  << ", \"aim_feedforward_x_counts\": "
                  << sample.aim_control.feedforward_x_counts
                  << ", \"aim_desired_before_reverse_x_counts\": "

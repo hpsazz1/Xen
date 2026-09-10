@@ -1088,6 +1088,12 @@ void test_report_preserves_same_frame_source_timing_fields() {
     samples[0].aim_control.observer_camera_motion_x_source_pixels = 0.0f;
     samples[0].aim_control.observer_target_velocity_x_counts_per_second = 12.5f;
     // 独立份额哨兵防止误导出相邻阶段，第三帧继续检验缺席默认值。
+    // 执行角色为报告快照；大于 float 精确范围的 double 哨兵禁止窄化。
+    samples[0].aim_control.execution_proportional_x_counts = -2.125f;
+    samples[0].aim_control.residual_role_x = true;
+    samples[0].aim_control.residual_background_role_x = true;
+    samples[0].aim_control.execution_world_preview_x_counts = 16777217.125;
+    samples[0].aim_control.execution_unseen_command_x_counts = -16777219.375;
     samples[0].aim_control.history_adjusted_x_counts = -6.25f;
     samples[0].aim_control.filtered_integral_x_counts = 1.75f;
     samples[0].aim_control.pre_eligibility_filtered_x_counts = -7.625f;
@@ -1127,6 +1133,11 @@ void test_report_preserves_same_frame_source_timing_fields() {
     samples[1].aim_control.background_motion_use_x = AimBackgroundMotionUse::INVALID;
     samples[1].aim_control.observer_camera_motion_x_source_pixels = -1.25f;
     samples[1].aim_control.observer_target_velocity_x_counts_per_second = -3.5f;
+    samples[1].aim_control.execution_proportional_x_counts = 4.875f;
+    samples[1].aim_control.residual_role_x = true;
+    samples[1].aim_control.residual_background_role_x = false;
+    samples[1].aim_control.execution_world_preview_x_counts = -3.625;
+    samples[1].aim_control.execution_unseen_command_x_counts = 5.125;
     samples[1].aim_control.history_adjusted_x_counts = 2.125f;
     samples[1].aim_control.filtered_integral_x_counts = -4.75f;
     samples[1].aim_control.pre_eligibility_filtered_x_counts = 9.875f;
@@ -1262,6 +1273,11 @@ void test_report_preserves_same_frame_source_timing_fields() {
         {"aim_background_motion_use_x", {"CONSUMED", "INVALID", "NOT_EVALUATED"}, true},
         {"aim_observer_camera_motion_x_source_pixels", {"0", "-1.25", "0"}, false},
         {"aim_observer_target_velocity_x_counts_per_second", {"12.5", "-3.5", "0"}, false},
+        {"aim_execution_proportional_x_counts", {"-2.125", "4.875", "0"}, false},
+        {"aim_residual_role_x", {"true", "true", "false"}, false},
+        {"aim_residual_background_role_x", {"true", "false", "false"}, false},
+        {"aim_execution_world_preview_x_counts", {"16777217.125", "-3.625", "0"}, false},
+        {"aim_execution_unseen_command_x_counts", {"-16777219.375", "5.125", "0"}, false},
         {"aim_history_adjusted_x_counts", {"-6.25", "2.125", "0"}, false},
         {"aim_filtered_integral_x_counts", {"1.75", "-4.75", "0"}, false},
         {"aim_pre_eligibility_filtered_x_counts", {"-7.625", "9.875", "0"}, false},
@@ -1311,6 +1327,80 @@ void test_shared_success_semantics() {
            "Detector 或 Aim 失败不得进入成功耗时分位数");
 }
 
+void test_report_captures_optional_aim_startup_config() {
+    OwnedDebugPairTestRoot owned;
+    std::string error;
+    expect(create_owned_debug_pair_test_root(owned, error),
+           "Aim快照测试须创建本轮独立临时根");
+    if (owned.path.empty() || !std::filesystem::exists(owned.owner_path)) return;
+    DebugReport report;
+    DebugReportConfig config;
+    config.csv_path = (owned.path / "aim.csv").string();
+    config.json_path = (owned.path / "aim.json").string();
+    for (int mode = 0; mode < 5; ++mode) {
+        config.aim_config.reset();
+        if (mode < 4) {
+            AimConfig aim;
+            aim.enable_delay_compensation = (mode & 1) != 0;
+            aim.enable_prediction = (mode & 2) != 0;
+            aim.smoothing = 0.375f;
+            aim.counts_per_pixel_x = 0.125f;
+            aim.counts_per_pixel_y = 0.75f;
+            aim.control_delay_ms = 15.0f;
+            aim.max_delay_compensation_ms = 44.0f;
+            aim.max_counts_per_frame = 14.0f;
+            aim.person_class_ids = {0, 2};
+            aim.head_class_ids = {1, 3};
+            config.aim_config = aim;
+        }
+        expect(report.start(config, error), "四组合及未提供快照均可启动报告");
+        if (!report.active()) continue;
+        // start必须值拷贝；后续编辑UI候选不能改写已运行会话的报告。
+        if (config.aim_config) {
+            config.aim_config->enable_prediction = !(mode & 2);
+            config.aim_config->counts_per_pixel_x = 9.0f;
+            config.aim_config->person_class_ids = {9};
+        }
+        RuntimeSnapshot snapshot;
+        expect(report.finalize(snapshot, error), "Aim启动快照须随报告成功落盘");
+        std::ifstream json_file(config.json_path, std::ios::binary);
+        std::ifstream csv_file(config.csv_path, std::ios::binary);
+        const std::string json((std::istreambuf_iterator<char>(json_file)), {});
+        const std::string csv((std::istreambuf_iterator<char>(csv_file)), {});
+        expect(json.find("\"schema\": 20") != std::string::npos,
+               "可选Aim配置只作schema20增量元数据");
+        if (mode == 4) {
+            expect(json.find("\"aim_config\"") == std::string::npos &&
+                       csv.find("# aim_config,") == std::string::npos,
+                   "未提供快照的调用者不得误报默认或前会话Aim配置");
+            continue;
+        }
+        const auto begin = json.find("\"aim_config\": {");
+        const auto end = json.find('}', begin);
+        const std::string captured = begin == std::string::npos ? "" :
+            json.substr(begin, end - begin + 1);
+        const std::string delay = (mode & 1) ? "true" : "false";
+        const std::string prediction = (mode & 2) ? "true" : "false";
+        expect(captured.find("\"enable_delay_compensation\":" + delay) != std::string::npos &&
+                   captured.find("\"enable_prediction\":" + prediction) != std::string::npos &&
+                   captured.find("\"counts_per_pixel_x\":0.125") != std::string::npos &&
+                   captured.find("\"counts_per_pixel_y\":0.75") != std::string::npos &&
+                   captured.find("\"smoothing\":0.375") != std::string::npos &&
+                   captured.find("\"max_counts_per_frame\":14") != std::string::npos &&
+                   captured.find("\"control_delay_ms\":15") != std::string::npos &&
+                   captured.find("\"max_delay_compensation_ms\":44") != std::string::npos &&
+                   captured.find("\"person_class_ids\":[0,2]") != std::string::npos &&
+                   captured.find("\"head_class_ids\":[1,3]") != std::string::npos,
+               "保存再读取必须保留本次启动的四组合、分轴值和分类数组");
+        expect(csv.find("# aim_config,") != std::string::npos &&
+                   csv.find("\"\"enable_prediction\"\":" + prediction) != std::string::npos &&
+                   captured.find("mouse") == std::string::npos,
+               "CSV注释对应同一快照且Aim配置不包含Mouse身份");
+    }
+    expect(cleanup_owned_debug_pair_test_root(owned, error),
+           "Aim快照测试仅清理本轮owned临时根");
+}
+
 } // namespace
 
 int main() {
@@ -1326,6 +1416,7 @@ int main() {
     test_disabled_probes_are_not_reported_as_zero_cost_samples();
     test_report_preserves_same_frame_source_timing_fields();
     test_shared_success_semantics();
+    test_report_captures_optional_aim_startup_config();
     Log::shutdown();
     if (failures != 0) {
         std::cerr << "Debug 测试失败数: " << failures << '\n';

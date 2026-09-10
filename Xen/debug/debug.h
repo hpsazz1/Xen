@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -20,6 +21,8 @@ struct DebugReportConfig {
     std::string mouse_backend;
     std::size_t max_samples = 10000;
     bool performance_probes_enabled = false;
+    // 调用者明确提供的本次 Runtime 启动快照；缺省不推断 Aim 默认值。
+    std::optional<AimConfig> aim_config;
 };
 
 struct DebugTimingSummary {

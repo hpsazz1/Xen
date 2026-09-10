@@ -65,11 +65,12 @@ struct AimConfig {
     float counts_per_pixel_x = 0.50f;
     float counts_per_pixel_y = 0.50f;
     float max_counts_per_frame = 50.0f;
-    // 基础 tracking 的延迟补偿可与 prediction 同时开启；它只补偿从截图到输入完成的
-    // 已测控制延迟，不改变检测框、轨迹关联或丢失状态。处理顺序固定为基础瞄点、
-    // 延迟补偿点、prediction 提前点。
+    // 控制目标运动的延迟提前，可与 prediction 同时开启；不改变检测框或轨迹关联。
+    // 关闭时基础控制仍按 control_delay_ms 核算已发命令的预计作用，不重复追赶旧画面。
+    // 命令完成记录不是物理生效证明，基础记账仍依赖配置延迟与响应模型。
     bool enable_delay_compensation = false;
-    // Aim 控制时刻之后仍未包含在 observation age 中的固定控制延迟，单位 ms。
+    // Aim 控制时刻之后未包含在 observation age 中的固定控制延迟，单位 ms。
+    // 四种开关组合均使用此值核算自身命令；关闭目标提前不会将物理延迟视为零。
     float control_delay_ms = 0.0f;
     // observation age 与固定控制延迟之和的硬上限，单位 ms。
     float max_delay_compensation_ms = 16.0f;
@@ -151,11 +152,23 @@ struct AimControlDiagnostics {
     float observer_camera_motion_x_source_pixels = 0.0f;
     float observer_target_velocity_x_counts_per_second = 0.0f;
     float controller_dt_ms = 0.0f;
+    // 源观测误差产生的比例请求，也是残差积分的驱动。
     float proportional_x_counts = 0.0f;
+    // 当前实际提交的执行时域比例请求，滤波、限幅和抗饱和之前，单位 counts。
+    float execution_proportional_x_counts = 0.0f;
+    // 本帧完整数值元组通过且实际使用残差角色；不是上一帧状态。
+    bool residual_role_x = false;
+    bool residual_background_role_x = false;
+    // 本次执行误差实际使用的整段世界预览/未见命令库存，单位 counts。
+    // 不等于本控制步长的维护请求，角色无效时两项均为零。
+    double execution_world_preview_x_counts = 0.0;
+    double execution_unseen_command_x_counts = 0.0;
+    // 残差角色下为本帧抗饱和前的真实 R 请求；旧路径/早退仍保留旧积分快照语义。
     float feedforward_x_counts = 0.0f;
     float desired_before_reverse_x_counts = 0.0f;
     float desired_x_counts = 0.0f;
-    // 本帧参与输出的滤波份额；tracking X 的内部死区记忆不直接暴露为请求。
+    // 本帧实际参与输出的 PI 份额：总量限幅后、导数扣减前。
+    // 残差角色不再报告未消费的旧 eligibility 路径。
     float filtered_x_counts = 0.0f;
     // X 请求账本：按控制阶段只读快照，不参与决策。位置裁剪前总量与
     // 其中积分份额分开，避免把 eligible_filtered 误认为完整滤波状态。
@@ -172,11 +185,12 @@ struct AimControlDiagnostics {
     float delayed_command_x_counts = 0.0f;
     float pending_net_x_counts = 0.0f;
     float pending_absolute_x_counts = 0.0f;
-    // tracking X 连续延迟诊断：modelled response 是扣除独立 plant 响应后
-    // 实际加入输出的当前目标运动请求；phase command 仍是 source-time
+    // tracking X 连续延迟诊断：modelled response 是总量限幅后实际采用的
+    // 运动维护 M；与 filtered 相加得到导数扣减前总请求。phase command 是 source-time
     // opening 相位请求；consistency weight 为兼容旧 schema 保留。三者都
     // 不改写公开基础瞄点几何。
     float modelled_response_x_counts = 0.0f;
+    // 当前线性请求实际消费的源相位项；残差角色不消费时为零。
     float observer_phase_command_x_counts = 0.0f;
     float observer_consistency_weight_x = 0.0f;
     // 以下 reverse_* 字段为报告 schema 兼容保留。反向门已由连续延迟
