@@ -3610,7 +3610,8 @@ struct Aim::Impl {
             prediction_policy_epoch != frame.observation_epoch;
         if (enabled != frame_prediction_enabled || lifecycle_changed ||
             (config.enable_delay_compensation && !frame.lock_active)) {
-            // 来源暂缺只撤销当前估计与公开偏移，不把重入伪装成首次启动。
+            // 来源暂缺撤销估计与请求；已提交参考在公开出口按原预算回收。
+            // 重入仍属于同一次激活，不能伪装成首次启动。
             const bool same_activation_lifecycle = !lifecycle_changed &&
                 config.enable_prediction &&
                 (frame.lock_active || !config.enable_delay_compensation);
@@ -3682,8 +3683,8 @@ struct Aim::Impl {
             projection.final_x = base_x + prediction_offset_x;
             projection.final_y = base_y + prediction_offset_y;
         };
+        // 独立预测仍使用配置的物理时域；可选延迟补偿不拥有预测资格。
         if (frame_prediction_enabled &&
-            config.enable_delay_compensation &&
             track.state == TrackState::CONFIRMED && !track.predicted) {
             const float requested_delay_seconds =
                 projection.observation_age_seconds +
@@ -3731,7 +3732,7 @@ struct Aim::Impl {
         }
         // 单一 tracking 已消费真实延迟和在途库存。预测层只提供独立前探；
         // 保留原预测时域，公开 delay 点表示本层实际施加的零位移。
-        if (frame_prediction_enabled && config.enable_delay_compensation) {
+        if (frame_prediction_enabled) {
             projection.delay_x = 0.0f;
             projection.delay_y = 0.0f;
             projection.delay_compensated_x = base_x;
@@ -3843,8 +3844,7 @@ struct Aim::Impl {
             return projection;
         }
 
-        if (config.enable_delay_compensation &&
-            config.control_delay_ms > 0.0f && !track.predicted) {
+        if (config.control_delay_ms > 0.0f && !track.predicted) {
             // 真实失败 Run 证明：延迟向量长度会被 prediction 命令造成的镜头
             // 反馈从 P50 2.878 px 放大到 8.099 px，再乘固定倍率会构成正反馈。
             // 因此延迟点只是叠加起点；额外位移由独立世界运动速度在 1.5 个
@@ -4164,8 +4164,7 @@ struct Aim::Impl {
             return projection;
         }
 
-        // 未启用延迟补偿时保留原有的准星闭环迟滞语义。此分支没有可
-        // 复用的延迟向量，只能按相对速度和观测年龄做保守预测。
+        // 零配置时域保留原有的准星闭环迟滞语义；正时域已走独立世界预测。
         lead_timing.delay_candidate.reset();
         delay_lead_scale = 0.0f;
         prediction_pullback_hold_x = false;
@@ -5754,6 +5753,12 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
         const auto selected = clock::now();
 
         if (target) {
+            const bool same_prediction_reference = impl_->config.enable_prediction &&
+                frame.lock_active &&
+                impl_->prediction_policy_track_id == target->id &&
+                impl_->prediction_policy_epoch == frame.observation_epoch;
+            const float previous_prediction_offset_x = impl_->prediction_offset_x;
+            const float previous_prediction_offset_y = impl_->prediction_offset_y;
             impl_->prepare_prediction_policy(frame, *target);
             auto projection = impl_->projected_aim_point(frame, *target, control_at);
             if (impl_->config.enable_delay_compensation && impl_->frame_prediction_enabled &&
@@ -5763,6 +5768,27 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
                 projection.final_y = projection.delay_compensated_y = projection.base_y;
                 projection.delay_x = projection.delay_y = 0.0f;
                 projection.active = projection.delay_active = false;
+            }
+            if (same_prediction_reference) {
+                // 来源估计可以失效；已公开参考仍须按原偏移预算回到当前基础点。
+                // 统一提交覆盖资格撤销、重入和反向的提前返回，不延续旧世界运动。
+                float committed_offset_x = previous_prediction_offset_x;
+                float committed_offset_y = previous_prediction_offset_y;
+                aim::detail::slew_prediction_offset(
+                    projection.final_x - projection.base_x,
+                    projection.final_y - projection.base_y,
+                    projection.delay_x, projection.delay_y,
+                    std::hypot(target->x2 - target->x1, target->y2 - target->y1),
+                    impl_->config.max_prediction_lead_percent,
+                    kPredictionOffsetMaximumSlewDiagonalsPerSecond,
+                    target->prediction_dt, committed_offset_x, committed_offset_y);
+                impl_->prediction_offset_x = committed_offset_x;
+                impl_->prediction_offset_y = committed_offset_y;
+                projection.final_x = projection.base_x + committed_offset_x;
+                projection.final_y = projection.base_y + committed_offset_y;
+                projection.active = std::hypot(committed_offset_x - projection.delay_x,
+                    committed_offset_y - projection.delay_y) > 0.001f;
+                impl_->prediction_forecast_applied = projection.active;
             }
             impl_->update_prediction_y_observer(frame, *target, control_at);
             result.has_target = true;

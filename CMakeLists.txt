@@ -1262,6 +1262,14 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(aim_prediction_recovery_tests OPENCV)
     add_test(NAME aim_prediction_recovery_tests COMMAND aim_prediction_recovery_tests)
 
+    add_executable(aim_prediction_source_loss_tests tests/aim_prediction_source_loss_tests.cpp)
+    target_link_libraries(aim_prediction_source_loss_tests PRIVATE aim log nlohmann_json::nlohmann_json)
+    target_compile_definitions(aim_prediction_source_loss_tests PRIVATE
+        XEN_AIM_PREDICTION_SOURCE_LOSS_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/aim_prediction_source_loss.json"
+        XEN_AIM_PREDICTION_INDEPENDENT_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/aim_prediction_independent.json")
+    xen_deploy_runtime_dlls(aim_prediction_source_loss_tests OPENCV)
+    add_test(NAME aim_prediction_source_loss_tests COMMAND aim_prediction_source_loss_tests)
+
     add_executable(aim_combo_dynamics_tests tests/aim_combo_dynamics_tests.cpp)
     target_link_libraries(aim_combo_dynamics_tests PRIVATE aim log)
     xen_deploy_runtime_dlls(aim_combo_dynamics_tests OPENCV)
