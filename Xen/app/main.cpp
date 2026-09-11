@@ -353,6 +353,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             break;
         }
 
+        if (actions.log_level_changed) {
+            Log::set_global_level(config.log.global_level);
+            app_message = config.log.global_level == LogLevel::OFF
+                ? "已停止新增日志；已有记录保留。保存配置后保留此设置。"
+                : "日志输出等级已立即更新。保存配置后保留此设置。";
+        }
+
         const auto keyboard_routing = app::detail::route_keyboard_events(
             runtime, keyboard_poll, actions.hotkey_capture_consumed);
         const bool emergency_pressed =

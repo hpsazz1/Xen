@@ -8,6 +8,10 @@
 #endif
 #include <Windows.h>
 
+#ifdef ERROR
+#undef ERROR
+#endif
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -438,6 +442,37 @@ void test_log_defaults_and_invalid_level() {
                error.find("detector") != std::string::npos,
            "未知模块日志等级必须明确拒绝并返回模块名");
     std::filesystem::remove(invalid_module_path, ignored);
+}
+
+void test_log_output_levels_round_trip() {
+    const auto directory = make_temp_test_directory("log_output_levels");
+    expect(!directory.empty(), "日志等级往返测试临时目录必须创建成功");
+    if (directory.empty()) return;
+    const auto path = directory / "config.ini";
+    for (const auto level : {
+             LogLevel::OFF, LogLevel::ERROR, LogLevel::WARN, LogLevel::INFO}) {
+        AppConfig source;
+        source.log.global_level = level;
+        source.log.module_levels.emplace("capture", LogLevel::WARN);
+        std::string error;
+        expect(save_app_config(path.string(), source, error),
+               "日志输出四档必须可保存: " + error);
+        AppConfig loaded;
+        // 与写入值不同，避免加载失败或漏字段被默认值掩盖。
+        loaded.log.global_level = level == LogLevel::OFF
+            ? LogLevel::INFO : LogLevel::OFF;
+        expect(load_app_config(path.string(), loaded, error) &&
+                   loaded.log.global_level == level &&
+                   loaded.log.enable_console == source.log.enable_console &&
+                   loaded.log.enable_file == source.log.enable_file &&
+                   loaded.log.enable_debug_file == source.log.enable_debug_file &&
+                   loaded.log.enable_ringbuf == source.log.enable_ringbuf &&
+                   loaded.log.module_levels == source.log.module_levels,
+               "日志输出四档必须准确往返，OFF 不得丢失输出目的地与模块配置: " + error);
+    }
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    std::filesystem::remove(directory, ignored);
 }
 
 void test_existing_file_rejects_malformed_typed_values() {
@@ -1144,6 +1179,7 @@ int main() {
     test_feature_combinations_round_trip();
     test_removed_observe_only_control_config();
     test_log_defaults_and_invalid_level();
+    test_log_output_levels_round_trip();
     test_existing_file_rejects_malformed_typed_values();
     test_atomic_save_preserves_existing_file_on_write_failure();
     test_atomic_save_preserves_existing_file_on_replace_failure();

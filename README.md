@@ -213,6 +213,18 @@ Win32 的 execution boundary 内生为 `local_os_api`；KMBOX/MAKCU 不再从 en
 外部设备，必须显式传入 `ConfiguredExternalDevicePeer`，127/8 KMBOX fake 则必须显式传入
 `LoopbackUdpFake`，且在创建报告目录或打开设备前完成拒绝。
 
+## 日志输出设置
+
+设置页的“日志输出”提供无（不输出）、错误、警告及以上、信息及以上四档。
+切换立即生效，Runtime 运行中也可调整；停止运行后点击“保存配置”，下次启动沿用
+`[log].global_level`。默认仍为 INFO，已有 INI 的模块等级和输出目的地设置保持有效。
+
+“无”停止接收新日志，不清除已有记录，异步队列中已接收的消息仍可能完成写入。
+最近日志/控制台可显示 INFO 及以上，常规轮转日志文件只收 WARN/ERROR，前提是对应输出已启用。
+默认 Release 中 TRACE/DEBUG 宏已裁剪，设置页不提供无效的详细日志档位；开发者需启用相应
+编译选项，再通过 INI 设置全局及模块等级。
+Debug CSV/JSON 运行报告与崩溃诊断独立于 Log，不随此开关关闭。
+
 ## 源码结构
 
 ```text

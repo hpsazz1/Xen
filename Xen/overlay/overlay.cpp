@@ -3701,7 +3701,11 @@ struct Overlay::Impl {
         end_config_panel();
     }
 
-    void render_settings(AppConfig& app_config, bool can_edit) {
+    void render_settings(AppConfig& app_config, bool can_edit,
+                         OverlayActions& actions) {
+        // 日志阈值可以在运行中调整，不属于设备/控制配置的编辑锁。
+        render_log_settings(app_config, actions);
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
         ImGui::BeginDisabled(!can_edit);
         const bool two_columns =
             ImGui::GetContentRegionAvail().x >= 650.0f;
@@ -3720,6 +3724,47 @@ struct Overlay::Impl {
             render_ui_settings(app_config);
         }
         ImGui::EndDisabled();
+    }
+
+    void render_log_settings(AppConfig& app_config, OverlayActions& actions) {
+        constexpr std::array notes{
+            "立即生效；保存配置后保留。运行中也可切换。",
+            "最近日志 / 控制台显示信息及以上，常规日志文件记录警告及以上（需已启用对应输出）。",
+            "Release 不启用 TRACE / DEBUG；Debug 运行报告和崩溃报告独立保留。"};
+        const float text_width = std::max(1.0f, ImGui::GetContentRegionAvail().x - 24.0f);
+        float panel_height = ImGui::GetFrameHeightWithSpacing() + 24.0f;
+        for (const auto* note : notes) {
+            panel_height += ImGui::CalcTextSize(note, nullptr, false, text_width).y +
+                ImGui::GetStyle().ItemSpacing.y;
+        }
+        begin_config_panel("log_panel", "日志输出", panel_height);
+        if (begin_form("log_form", 126.0f)) {
+            form_row(
+                "输出等级",
+                "选择最低输出等级，包含更严重的日志；无会停止接收新日志，已有记录保留。切换立即生效，停止运行后点击保存配置可保留。模块单独设定的更严格等级仍然有效。");
+            constexpr std::array levels{
+                LogLevel::OFF, LogLevel::ERROR, LogLevel::WARN, LogLevel::INFO};
+            constexpr std::array labels{
+                "无（不输出）", "错误（ERROR）", "警告及以上（WARN）", "信息及以上（INFO）"};
+            const char* selected_label = "开发配置（TRACE / DEBUG）";
+            for (std::size_t i = 0; i < levels.size(); ++i) {
+                if (app_config.log.global_level == levels[i]) selected_label = labels[i];
+            }
+            if (ImGui::BeginCombo("##log_level", selected_label)) {
+                for (std::size_t i = 0; i < levels.size(); ++i) {
+                    const bool selected = app_config.log.global_level == levels[i];
+                    if (ImGui::Selectable(labels[i], selected)) {
+                        app_config.log.global_level = levels[i];
+                        actions.log_level_changed = true;
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::EndTable();
+        }
+        for (const auto* note : notes) ImGui::TextWrapped("%s", note);
+        end_config_panel();
     }
 
     void render_runtime_settings(AppConfig& app_config) {
@@ -3825,7 +3870,7 @@ struct Overlay::Impl {
                         snapshot, app_config, can_edit, actions);
                     break;
                 case WorkspacePage::SETTINGS:
-                    render_settings(app_config, can_edit);
+                    render_settings(app_config, can_edit, actions);
                     break;
             }
         }

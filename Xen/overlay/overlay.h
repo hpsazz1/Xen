@@ -14,6 +14,7 @@ struct OverlayActions {
     bool reload_detector_requested = false;
     bool refresh_models_requested = false;
     bool save_config_requested = false;
+    bool log_level_changed = false;
     bool preview_enabled_changed = false;
     bool preview_enabled = false;
     bool hotkey_capture_consumed = false;

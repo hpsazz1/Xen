@@ -474,6 +474,50 @@ void test_global_level_applies_to_later_modules() {
     Log::shutdown();
 }
 
+void test_runtime_output_level_switching() {
+    Log::shutdown();
+    Log::init(ring_only_config());
+    Log::register_module("settings", LogLevel::INFO);
+    LOG_INFO("settings", "切换前保留记录");
+
+    Log::set_global_level(LogLevel::OFF);
+    Log::register_module("settings-late", LogLevel::TRACE);
+    int argument_evaluations = 0;
+    LOG_ERROR("settings", "关闭时错误 {}", ++argument_evaluations);
+    LOG_WARN("settings", "关闭时警告 {}", ++argument_evaluations);
+    LOG_INFO("settings", "关闭时信息 {}", ++argument_evaluations);
+    LOG_ERROR("settings-late", "关闭后注册 {}", ++argument_evaluations);
+    expect(argument_evaluations == 0,
+           "关闭日志必须在宏参数求值前过滤全部等级及后注册模块");
+    expect(Log::get_ring_buffer().size() == 1 &&
+               contains_text(Log::get_ring_buffer(), "切换前保留记录"),
+           "关闭日志必须停止新增记录并保留已有记录");
+
+    Log::set_global_level(LogLevel::ERROR);
+    LOG_INFO("settings", "错误档信息 {}", ++argument_evaluations);
+    LOG_WARN("settings", "错误档警告 {}", ++argument_evaluations);
+    LOG_ERROR("settings", "错误档保留 {}", ++argument_evaluations);
+    LOG_ERROR("settings-late", "后注册模块恢复 {}", ++argument_evaluations);
+    expect(argument_evaluations == 2 && Log::get_ring_buffer().size() == 3,
+           "错误档必须只恢复 ERROR，且后注册模块无需重新注册即可恢复");
+
+    Log::set_global_level(LogLevel::WARN);
+    LOG_INFO("settings", "警告档信息 {}", ++argument_evaluations);
+    LOG_WARN("settings", "警告档保留 {}", ++argument_evaluations);
+    LOG_ERROR("settings", "警告档错误保留 {}", ++argument_evaluations);
+    expect(argument_evaluations == 4 && Log::get_ring_buffer().size() == 5,
+           "警告档必须输出 WARN 和 ERROR 并过滤 INFO 参数求值");
+
+    Log::set_global_level(LogLevel::INFO);
+    LOG_INFO("settings", "信息档恢复 {}", ++argument_evaluations);
+    LOG_WARN("settings", "信息档警告保留 {}", ++argument_evaluations);
+    LOG_ERROR("settings", "信息档错误保留 {}", ++argument_evaluations);
+    expect(argument_evaluations == 7 && Log::get_ring_buffer().size() == 8 &&
+               contains_text(Log::get_ring_buffer(), "信息档恢复 5"),
+           "信息档必须恢复 INFO、WARN、ERROR，整个切换无需重新初始化");
+    Log::shutdown();
+}
+
 void test_configured_global_level_is_applied() {
     Log::shutdown();
     auto config = ring_only_config();
@@ -641,6 +685,7 @@ int main() {
         test_concurrent_init_shutdown_serialization();
         test_shutdown_waits_for_inflight_ring_read();
         test_global_level_applies_to_later_modules();
+        test_runtime_output_level_switching();
         test_configured_global_level_is_applied();
         test_configured_module_levels_are_applied();
         test_spdlog_global_registry_is_untouched();
