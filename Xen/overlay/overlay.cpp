@@ -3578,16 +3578,45 @@ struct Overlay::Impl {
         const bool idle = !workspace.job_running && !workspace.collection.active;
         const bool stopped = runtime.state == RuntimeState::STOPPED;
         ImGui::TextWrapped("流程：检查素材 → 自动预标注 → CVAT / 外部审核 → 导入标签 → 导出数据集 → 训练 → 评估候选。未审核、失败、未知样本不能作为空标签训练。");
+        if (ImGui::CollapsingHeader("训练环境", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::BeginDisabled(!idle);
+            if (begin_form("training_environment", 156.0f)) {
+                form_row("基础 Python", "填写用于创建独立训练环境的 Python 可执行文件完整路径；安装流程不会修改该基础环境。");
+                ImGui::InputText("##training_base_python", &settings.base_python_executable);
+                form_row("专用环境根目录", "安装或修复时在此目录内创建新的独立环境，保留旧环境；需要可写磁盘空间和联网下载依赖。");
+                ImGui::InputText("##training_environment_root", &settings.environment_root);
+                form_row("训练 Python", "当前执行训练作业的解释器。安装成功后切换为专用环境中的 Python；也可填写已有环境后点击检查环境验证依赖。");
+                ImGui::InputText("##training_python", &settings.python_executable);
+                form_row("可训练权重 / .pt", "填写来源明确的 PyTorch .pt 权重。用于训练初始化与 PT 检查；现有 ONNX 不能当作 .pt 恢复训练。修改路径后需重新确认来源。");
+                if (ImGui::InputText("##training_weights", &settings.weights_path)) settings.trusted_weights = false;
+                form_row("确认 PT 来源可信", "仅对你信任的权重勾选；PT 加载可能执行序列化内容。此确认不代表类别兼容或训练通过，检查 PT 无需先确认采集类别。");
+                ImGui::Checkbox("##training_trusted_weights", &settings.trusted_weights);
+                ImGui::EndTable();
+            }
+            ImGui::EndDisabled();
+            workspace_button("检查环境", "停止 Runtime 后检查当前训练 Python 与依赖，结果显示在下方；检查或合成验证成功不代表真实数据训练成功。", Action::ENV_CHECK,
+                idle && stopped, actions);
+            ImGui::SameLine();
+            workspace_button("安装 / 修复环境", "将联网下载训练依赖，在专用环境根目录创建新的独立环境并保留旧环境；需要 Runtime 停止且没有采集或后台作业。", Action::ENV_INSTALL,
+                idle && stopped, actions);
+            ImGui::SameLine();
+            const auto& weights = settings.weights_path;
+            const bool pt_selected = weights.size() >= 3 && weights[weights.size() - 3] == '.' &&
+                (weights[weights.size() - 2] == 'p' || weights[weights.size() - 2] == 'P') &&
+                (weights.back() == 't' || weights.back() == 'T');
+            workspace_button("检查 PT", "加载可训练权重字段中已确认来源的 .pt，检查可加载性与模型信息；不要求采集类别已确认，不启动真实训练或设备。", Action::PT_CHECK,
+                idle && stopped && settings.trusted_weights && pt_selected, actions);
+            ImGui::TextWrapped("环境检查：%s", workspace.environment_ready ? "已通过检查" : "未就绪 / 待检查");
+            ImGui::TextWrapped("%s", workspace.environment_message.c_str());
+            ImGui::TextWrapped("PT 检查：%s", workspace.weights_ready ? "已通过检查" : "未就绪 / 待检查");
+            ImGui::TextWrapped("%s", workspace.weights_message.c_str());
+        }
         ImGui::BeginDisabled(!idle);
         if (begin_form("training_tools", 156.0f)) {
-            form_row("Python 可执行文件", "填写已安装训练依赖的 python.exe 完整路径；工具不会替你安装依赖。点击检查素材可查看明确错误。");
-            ImGui::InputText("##training_python", &settings.python_executable);
             form_row("工具脚本", "填写仓库提供的模型数据流程 Python 脚本完整路径；后台作业通过该脚本执行，并在作业目录记录状态。");
             ImGui::InputText("##training_script", &settings.script_path);
             form_row("数据根目录", "与采集页共享的素材根目录；检查与预标注从这里读取素材。");
             ImGui::InputText("##training_root", &settings.root_directory);
-            form_row("可训练权重 / .pt", "填写类别兼容且来源明确的 PyTorch .pt 权重，只用于训练初始化；现有 ONNX 不能当作 .pt 恢复训练。");
-            ImGui::InputText("##training_weights", &settings.weights_path);
             form_row("数据集目录", "填写导出的版本目录，目录内必须包含 data.yaml、dataset.json 和 dataset_identity.json；不要填写 YAML 文件本身。训练和评估校验已冻结的分组划分。");
             ImGui::InputText("##training_dataset", &settings.dataset_path);
             form_row("评估 / 预标注模型", "填写用于预标注或评估的 .onnx / .pt 完整路径；类别顺序必须兼容。检查素材可读取 ONNX metadata；只有评估通过兼容检查的 ONNX 可导入候选。");
@@ -3625,7 +3654,7 @@ struct Overlay::Impl {
             }
             ImGui::EndDisabled();
             workspace_button("开始训练", "使用已填写的 .pt 和数据集版本目录启动离线训练；必须停止 Runtime、结束采集且没有其他作业。不会自动替换生产模型。", Action::TRAIN,
-                idle && stopped && !settings.weights_path.empty() && !settings.dataset_path.empty(), actions);
+                idle && stopped && settings.trusted_weights && !settings.weights_path.empty() && !settings.dataset_path.empty(), actions);
             ImGui::SameLine();
             workspace_button("取消后台作业", "请求终止当前后台作业；保留作业状态和已有产物用于排查，不把取消结果视为成功。", Action::CANCEL_JOB, workspace.job_running, actions);
         }

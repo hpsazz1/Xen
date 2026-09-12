@@ -160,6 +160,9 @@ int wmain(int argc, wchar_t** argv) {
         model_workspace::Settings settings;
         settings.root_directory = "E:/示例素材/person-dataset";
         settings.python_executable = "C:/Python/python.exe";
+        settings.base_python_executable = "C:/Python/python.exe";
+        settings.environment_root = "E:/示例训练环境";
+        settings.trusted_weights = false;
         settings.script_path = "E:/Xen/scripts/model_data_pipeline.py";
         settings.class_names = "class_0,class_1,class_2,class_3";
         settings.weights_path = "E:/示例模型/teacher.pt";
@@ -167,6 +170,10 @@ int wmain(int argc, wchar_t** argv) {
         model_workspace::Snapshot workspace;
         workspace.message = "无设备窗口验收：仅使用停止快照，所有动作均不执行。";
         workspace.job_state = "NOT_STARTED";
+        workspace.environment_ready = false;
+        workspace.weights_ready = false;
+        workspace.environment_message = "示例状态：尚未检查环境，未安装任何依赖。";
+        workspace.weights_message = "示例状态：尚未确认权重来源，未读取 PT。";
         OverlayActions actions;
         UiInput input;
         ImGuiContextHook hook;
@@ -204,7 +211,7 @@ int wmain(int argc, wchar_t** argv) {
         require_page_table("collection_settings");
         save_window(capture, output / "collection.png");
         select_page(3);
-        require_page_table("training_tools");
+        require_page_table("training_environment");
         save_window(capture, output / "training-top.png");
         input.position = ImVec2(700.0f, 650.0f);
         input.wheel = -20.0f;

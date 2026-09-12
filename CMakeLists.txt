@@ -930,6 +930,7 @@ add_custom_target(model_workspace_tools
     COMMAND ${CMAKE_COMMAND} -E make_directory "${XEN_MODEL_TOOLS_OUTPUT}/scripts"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/scripts/model_data_pipeline.py"
+        "${PROJECT_SOURCE_DIR}/scripts/model_training_environment.py"
         "${PROJECT_SOURCE_DIR}/scripts/model_training_requirements.txt"
         "${XEN_MODEL_TOOLS_OUTPUT}/scripts"
     VERBATIM)
@@ -1435,6 +1436,9 @@ if(BUILD_TESTING)
     add_test(NAME model_data_pipeline_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_data_pipeline_tests.py")
+    add_test(NAME model_training_environment_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+        "${PROJECT_SOURCE_DIR}/tests/model_training_environment_tests.py")
     add_test(NAME model_data_integration_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_data_integration_tests.py"

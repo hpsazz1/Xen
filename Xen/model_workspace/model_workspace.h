@@ -14,12 +14,15 @@ enum class Action {
     STOP_COLLECTION, MARK_SAMPLE, INSPECT_DATA, PRELABEL,
     EXPORT_REVIEW, IMPORT_LABELS, EXPORT_DATASET, TRAIN,
     CANCEL_JOB, EVALUATE, IMPORT_CANDIDATE, OPEN_DATA_DIRECTORY,
-    SAVE_SETTINGS, OPEN_JOB_DIRECTORY
+    SAVE_SETTINGS, OPEN_JOB_DIRECTORY, ENV_CHECK, ENV_INSTALL, PT_CHECK
 };
 
 struct Settings {
     std::string root_directory;
     std::string python_executable;
+    std::string base_python_executable;
+    std::string environment_root;
+    bool trusted_weights = false;
     std::string script_path;
     // 按 class_id 顺序使用英文逗号分隔；必须由用户核对原模型语义。
     std::string class_names;
@@ -51,6 +54,10 @@ struct Snapshot {
     std::string job_message;
     std::string message;
     std::string candidate_path;
+    std::string environment_message;
+    bool environment_ready = false;
+    std::string weights_message;
+    bool weights_ready = false;
 };
 
 // App 持有此模块，Overlay 只渲染快照和产生动作，不访问磁盘或创建进程。

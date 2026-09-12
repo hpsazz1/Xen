@@ -131,6 +131,44 @@ int main(int argc, char** argv) {
     view = wait(workspace);
     expect(!view.job_running && view.job_state == "CANCELLED" && fs::exists(job_path / "cancel.flag"),
            "取消有文件事实且不会被成功状态覆盖");
+    const auto fixture_scripts = root / "scripts";
+    fs::create_directory(fixture_scripts);
+    fs::copy_file(fs::u8path(argv[2]), fixture_scripts / "model_training_environment.py");
+    settings.script_path = utf8(fixture_scripts / "model_data_pipeline.py");
+    settings.base_python_executable = argv[1];
+    expect(workspace.execute(Action::ENV_CHECK, settings, false, false, ""),
+           "环境检查通过基础解释器和独立脚本启动");
+    wait(workspace);
+    workspace.poll(&settings);
+    expect(workspace.poll().environment_ready, "只有GPU自检成功结果回填环境可用");
+    const auto weights = root / "fixture-only.pt";
+    { std::ofstream file(weights); file << "仅验证权重身份协议"; }
+    settings.weights_path = utf8(weights);
+    settings.class_schema_confirmed = false;
+    expect(!workspace.execute(Action::PT_CHECK, settings, false, false, ""),
+           "PT来源未确认不能加载pickle模型");
+    settings.trusted_weights = true;
+    expect(workspace.execute(Action::PT_CHECK, settings, false, false, ""),
+           "PT检查无需先确认类别，发送实际文件哈希");
+    wait(workspace);
+    workspace.poll(&settings);
+    expect(workspace.poll().weights_ready && !settings.class_schema_confirmed,
+           "PT检查成功不代替类别语义人工确认");
+    settings.device = "1";
+    expect(!workspace.poll(&settings).environment_ready && !workspace.poll().weights_ready,
+           "切换GPU同时失效环境和权重检查");
+    settings.device = "0";
+    expect(workspace.execute(Action::PT_CHECK, settings, false, false, ""), "重做PT兼容检查");
+    wait(workspace); workspace.poll(&settings);
+    settings.trusted_weights = false;
+    expect(!workspace.execute(Action::PT_CHECK, settings, false, false, "") &&
+           !workspace.poll().weights_ready, "再次检查在启动前失败不得残留已通过");
+    settings.class_schema_confirmed = true;
+    expect(!workspace.execute(Action::TRAIN, settings, false, false, ""),
+           "训练入口不能绕过PT来源确认");
+    settings.weights_path += ".changed";
+    expect(!workspace.poll(&settings).weights_ready, "换权重路径不沿用旧兼容标记");
+    settings.script_path = argv[2];
     settings.python_executable = utf8(root / "missing.exe");
     expect(!workspace.execute(Action::INSPECT_DATA, settings, false, false, ""),
            "缺失Python显式失败");

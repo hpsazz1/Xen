@@ -20,6 +20,7 @@
 #include <fstream>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <stdexcept>
 #include <vector>
 
@@ -183,6 +184,8 @@ const char* operation_for(Action action) {
 Json settings_json(const Settings& value) {
     return {{"schema_version", 1}, {"root_directory", value.root_directory},
         {"python_executable", value.python_executable}, {"script_path", value.script_path},
+        {"base_python_executable", value.base_python_executable},
+        {"environment_root", value.environment_root},
         {"class_names", value.class_names}, {"class_schema_confirmed", value.class_schema_confirmed},
         {"schema_model_path", value.schema_model_path}, {"schema_model_sha256", value.schema_model_sha256},
         {"resume_training", value.resume_training},
@@ -213,6 +216,11 @@ struct Workspace::Impl {
     std::uint64_t sequence = 0;
     bool cancellation_requested = false;
     bool result_applied = false;
+    std::string checked_python;
+    std::string checked_weights;
+    std::string checked_environment_device;
+    std::string checked_weights_device;
+    int checked_image_size = 0;
 
     void cancel() {
         if (!process.valid()) return;
@@ -340,6 +348,12 @@ struct Workspace::Impl {
         } else if (last_result.is_object()) {
             view.candidate_path = last_result.value("candidate", view.candidate_path);
         }
+        if (view.job_state != "SUCCEEDED") {
+            if (view.job_operation == "env_install" || view.job_operation == "env_check")
+                view.environment_message = "环境未通过检查；请查看作业状态和日志。";
+            if (view.job_operation == "pt_check")
+                view.weights_message = "PT未通过检查；请查看作业状态和日志。";
+        }
     }
 };
 
@@ -356,6 +370,7 @@ bool Workspace::initialize(const fs::path& data_root, Settings& settings,
         impl_->workspace_root = checked_path(impl_->data_root / "cache" / "model-workspace");
         fs::create_directories(impl_->workspace_root);
         settings.root_directory = utf8(impl_->data_root / "cache" / "datasets");
+        settings.environment_root = utf8(impl_->data_root / "cache" / "training-environments");
         std::array<wchar_t, 32768> executable{};
         const auto size = GetModuleFileNameW(nullptr, executable.data(), executable.size());
         check(size > 0 && size < executable.size(), "无法定位训练工具目录");
@@ -365,12 +380,14 @@ bool Workspace::initialize(const fs::path& data_root, Settings& settings,
         const auto found = SearchPathW(nullptr, L"python.exe", nullptr,
                                       python.size(), python.data(), nullptr);
         if (found > 0 && found < python.size()) settings.python_executable = utf8(python.data());
+        settings.base_python_executable = settings.python_executable;
         const auto file = impl_->workspace_root / "settings.json";
         if (fs::exists(file)) {
             const auto saved = read_json(file);
             check(saved.value("schema_version", 0) == 1, "工作区设置版本不兼容");
 #define XEN_DATA_SETTING(field) settings.field = saved.value(#field, settings.field)
             XEN_DATA_SETTING(root_directory); XEN_DATA_SETTING(python_executable);
+            XEN_DATA_SETTING(base_python_executable); XEN_DATA_SETTING(environment_root);
             XEN_DATA_SETTING(script_path); XEN_DATA_SETTING(class_names);
             XEN_DATA_SETTING(schema_model_path); XEN_DATA_SETTING(schema_model_sha256);
             XEN_DATA_SETTING(class_schema_confirmed); XEN_DATA_SETTING(weights_path);
@@ -396,6 +413,31 @@ Snapshot Workspace::poll(Settings* settings) noexcept {
         if (settings && !impl_->result_applied && !impl_->view.job_running &&
             impl_->view.job_state == "SUCCEEDED" && impl_->last_result.is_object()) {
             const auto& result = impl_->last_result;
+            if (impl_->view.job_operation == "env_install" || impl_->view.job_operation == "env_check") {
+                check(result.value("ready", false), "环境作业未通过GPU自检");
+                const auto python = checked_path(path_from(result.at("python_executable").get<std::string>()));
+                check(fs::is_regular_file(python), "自检解释器已不存在");
+                settings->python_executable = utf8(python);
+                impl_->checked_python = settings->python_executable;
+                impl_->checked_environment_device = result.value("device_requested", settings->device);
+                impl_->view.environment_ready = true;
+                impl_->view.environment_message = "GPU环境自检通过；结果与依赖记录见当前作业目录。";
+                impl_->view.weights_ready = false;
+                impl_->view.weights_message = "环境已检查，请重新检查PT兼容性。";
+                write_json(impl_->workspace_root / "settings.json", settings_json(*settings));
+            }
+            if (impl_->view.job_operation == "pt_check") {
+                check(result.value("ready", false) && result.value("synthetic_compatibility_only", false),
+                      "PT作业未完成合成输入兼容检查");
+                check(fs::equivalent(path_from(result.value("weights", settings->weights_path)),
+                                     path_from(settings->weights_path)), "权重路径已变化，请重新检查");
+                impl_->checked_weights = settings->weights_path;
+                impl_->checked_python = settings->python_executable;
+                impl_->checked_weights_device = result.value("device_requested", settings->device);
+                impl_->checked_image_size = result.value("input_size", settings->image_size);
+                impl_->view.weights_ready = true;
+                impl_->view.weights_message = "PT加载与合成输入反向传播通过；仍需真实审核数据训练和评价。";
+            }
             settings->dataset_path = result.value("dataset", settings->dataset_path);
             settings->review_manifest = result.value("review_manifest", settings->review_manifest);
             settings->prelabels_path = result.value("prelabels", settings->prelabels_path);
@@ -407,7 +449,7 @@ Snapshot Workspace::poll(Settings* settings) noexcept {
                 settings->schema_model_path = result.at("model").get<std::string>();
                 settings->schema_model_sha256 = inspected_hash;
             }
-            if (impl_->view.job_operation == "inspect" &&
+            if ((impl_->view.job_operation == "inspect" || impl_->view.job_operation == "pt_check") &&
                 result.contains("model_class_names") && result["model_class_names"].is_array() &&
                 !result["model_class_names"].empty()) {
                 std::string names;
@@ -422,6 +464,27 @@ Snapshot Workspace::poll(Settings* settings) noexcept {
                 impl_->view.message = "已读取模型类别，请到采集页核对名称与ID顺序并确认。";
             }
             impl_->result_applied = true;
+        }
+        if (settings) {
+            if (settings->python_executable != impl_->checked_python) {
+                impl_->view.environment_ready = false;
+                impl_->view.environment_message.clear();
+                impl_->view.weights_ready = false;
+                impl_->view.weights_message.clear();
+            }
+            if (settings->weights_path != impl_->checked_weights) {
+                impl_->view.weights_ready = false;
+                impl_->view.weights_message.clear();
+            }
+            if (settings->device != impl_->checked_environment_device) {
+                impl_->view.environment_ready = false;
+                impl_->view.environment_message.clear();
+            }
+            if (settings->device != impl_->checked_weights_device ||
+                settings->image_size != impl_->checked_image_size) {
+                impl_->view.weights_ready = false;
+                impl_->view.weights_message.clear();
+            }
         }
         if (impl_->collector) impl_->view.collection = impl_->collector->snapshot();
         return impl_->view;
@@ -493,6 +556,37 @@ bool Workspace::execute(Action action, const Settings& settings,
             return true;
         }
         check(!runtime_running, "请先停止Runtime，再执行离线标注、训练或候选管理");
+        if (action == Action::ENV_INSTALL || action == Action::ENV_CHECK || action == Action::PT_CHECK) {
+            const bool install = action == Action::ENV_INSTALL;
+            const bool weights = action == Action::PT_CHECK;
+            if (weights) {
+                impl_->view.weights_ready = false;
+                impl_->view.weights_message = "PT尚未通过本次检查；状态或失败原因见作业提示。";
+            } else {
+                impl_->view.environment_ready = false;
+                impl_->view.weights_ready = false;
+                impl_->view.environment_message = "环境尚未通过本次检查；状态或失败原因见作业提示。";
+                impl_->view.weights_message.clear();
+            }
+            if (weights) check(settings.trusted_weights, "请确认PT来自你信任的训练来源，再执行模型检查");
+            Settings bootstrap = settings;
+            bootstrap.python_executable = settings.base_python_executable.empty()
+                ? settings.python_executable : settings.base_python_executable;
+            bootstrap.script_path = utf8(path_from(settings.script_path).parent_path() /
+                                          "model_training_environment.py");
+            Json job{{"operation", install ? "env_install" : weights ? "pt_check" : "env_check"},
+                {"environment_root", utf8(checked_path(path_from(settings.environment_root)))},
+                {"python_executable", settings.python_executable}, {"weights", settings.weights_path},
+                {"trusted_weights", settings.trusted_weights}, {"device", settings.device},
+                {"imgsz", settings.image_size}};
+            if (weights) {
+                const auto path = checked_path(path_from(settings.weights_path));
+                check(_wcsicmp(path.extension().c_str(), L".pt") == 0, "模型兼容检查需要本地.pt文件");
+                job["expected_sha256"] = sha256(path);
+            }
+            impl_->launch(job, bootstrap);
+            return true;
+        }
         if (action == Action::IMPORT_CANDIDATE) {
             check(impl_->view.job_operation == "evaluate" && impl_->view.job_state == "SUCCEEDED" &&
                   impl_->last_result.value("passed_compatibility", false) &&
@@ -558,6 +652,20 @@ bool Workspace::execute(Action action, const Settings& settings,
             job["prelabels"] = settings.prelabels_path;
         if (action == Action::EVALUATE && !active_model_path.empty() &&
             settings.model_path != active_model_path) job["baseline_model"] = active_model_path;
+        for (const auto* field : {"weights", "model", "baseline_model"}) {
+            const bool used = (action == Action::TRAIN && std::string_view(field) == "weights") ||
+                ((action == Action::PRELABEL || action == Action::EVALUATE) && std::string_view(field) != "weights");
+            if (!used || !job.contains(field)) continue;
+            const auto model = path_from(job.at(field).get<std::string>());
+            if (_wcsicmp(model.extension().c_str(), L".pt") != 0) continue;
+            check(settings.trusted_weights, "加载PT前请确认可训练权重的来源可信");
+            const auto trusted = checked_path(path_from(settings.weights_path));
+            check(fs::equivalent(checked_path(model), trusted),
+                  "预标注或评价PT需与已确认来源的可训练权重为同一文件");
+            job["trusted_weights"] = true;
+            job["trusted_weights_path"] = utf8(trusted);
+            job["expected_weights_sha256"] = sha256(trusted);
+        }
         impl_->launch(job, settings);
         return true;
     } catch (const std::exception& exception) { impl_->view.message = exception.what(); }

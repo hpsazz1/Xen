@@ -44,6 +44,9 @@ class PipelineTests(unittest.TestCase):
     def job(self, operation, **kwargs):
         return dict(operation=operation, root=str(self.root), class_names=self.names, **kwargs)
 
+    def trust(self, path):
+        return dict(trusted_weights=True, trusted_weights_path=str(Path(path).resolve()), expected_weights_sha256=pipeline.sha256(path))
+
     def context(self, operation, **kwargs):
         return pipeline.Context(self.job(operation, **kwargs))
 
@@ -159,9 +162,45 @@ class PipelineTests(unittest.TestCase):
         weight.write_bytes(b"fake")
         with patch.dict(sys.modules, {"torch": None}):
             with self.assertRaisesRegex(pipeline.PipelineError, "DEPENDENCY_MISSING"):
-                pipeline.load_yolo(weight, training=True)
+                pipeline.load_yolo(weight, training=True, job=self.trust(weight))
         with self.assertRaisesRegex(pipeline.PipelineError, "本地"):
             pipeline.load_yolo(self.base / "missing.pt", training=True)
+
+    def test_user_pt_trust_is_enforced_before_framework_loading(self):
+        weight = self.base / "confirmed.pt"
+        other = self.base / "other.pt"
+        onnx = self.base / "candidate.onnx"
+        weight.write_bytes(b"trusted-identity-fixture")
+        other.write_bytes(weight.read_bytes())
+        onnx.write_bytes(b"onnx-identity-fixture")
+        authorization = self.trust(weight)
+        changed = dict(authorization, expected_weights_sha256="0" * 64)
+        cases = (
+            ("unconfirmed", {}, weight),
+            ("different_file", authorization, other),
+            ("changed_hash", changed, weight),
+            ("missing_hash", dict(trusted_weights=True, trusted_weights_path=str(weight.resolve())), weight),
+        )
+        for reason, trust, target in cases:
+            for operation, inputs in (
+                ("train", dict(weights=str(target))),
+                ("prelabel", dict(model=str(target))),
+                ("evaluate", dict(model=str(target))),
+                ("evaluate", dict(model=str(onnx), baseline_model=str(target))),
+            ):
+                with self.subTest(reason=reason, operation=operation, inputs=inputs):
+                    status = self.base / "refused.json"
+                    with patch.object(pipeline, "load_yolo", side_effect=AssertionError("不得加载任何框架模型")) as loader:
+                        code = pipeline.execute(self.job(operation, **inputs, **trust), status)
+                    self.assertEqual(code, 1)
+                    self.assertEqual(pipeline.read_json(status)["state"], "FAILED")
+                    self.assertIn("PT", pipeline.read_json(status)["message"])
+                    loader.assert_not_called()
+        # 明确确认后的文件替换必须在真正加载入口重新校验，不能复用旧检查结果。
+        weight.write_bytes(b"replaced-after-confirmation")
+        with patch.dict(sys.modules, {"torch": None}):
+            with self.assertRaisesRegex(pipeline.PipelineError, "SHA-256"):
+                pipeline.load_yolo(weight, training=True, job=authorization)
 
     def test_output_never_overwrites_existing(self):
         self.approve()
@@ -224,8 +263,8 @@ class PipelineTests(unittest.TestCase):
 
         status = self.base / "status.json"
         output = self.base / "training"
-        with patch.object(pipeline, "load_yolo", side_effect=lambda path, training=False: FakeModel(path)), patch.object(pipeline, "onnx_contract", return_value=dict(input_shape=[1, 3, 640, 640], output_shape=[1, 5, 8400], detector_runtime="NOT_EXECUTED")):
-            self.assertEqual(pipeline.execute(self.job("train", dataset=str(dataset), weights=str(weight), output=str(output)), status), 0)
+        with patch.object(pipeline, "load_yolo", side_effect=lambda path, training=False, **kwargs: FakeModel(path)), patch.object(pipeline, "onnx_contract", return_value=dict(input_shape=[1, 3, 640, 640], output_shape=[1, 5, 8400], detector_runtime="NOT_EXECUTED")):
+            self.assertEqual(pipeline.execute(self.job("train", dataset=str(dataset), weights=str(weight), output=str(output), **self.trust(weight)), status), 0)
             result = pipeline.read_json(status)["result"]
             self.assertTrue(Path(result["candidate"]).is_file())
             card = pipeline.read_json(result["candidate_card"])
@@ -280,7 +319,7 @@ class PipelineTests(unittest.TestCase):
         status = self.base / "status.json"
         output = self.base / "training"
         with patch.object(pipeline, "load_yolo", return_value=FakeModel()):
-            code = pipeline.execute(self.job("train", dataset=str(dataset), weights=str(weight), output=str(output)), status, flag)
+            code = pipeline.execute(self.job("train", dataset=str(dataset), weights=str(weight), output=str(output), **self.trust(weight)), status, flag)
         self.assertEqual(code, 2)
         self.assertEqual(pipeline.read_json(status)["state"], "CANCELLED")
         self.assertTrue((output / "run" / "weights" / "last.pt").is_file())
@@ -347,8 +386,8 @@ class PipelineTests(unittest.TestCase):
                 return path
 
         output = self.base / "resumed"
-        with patch.object(pipeline, "load_yolo", side_effect=lambda path, training=False: Model(path)), patch.object(pipeline, "detection_trainer_class", return_value=NativeTrainer), patch.object(pipeline, "onnx_contract", return_value={}):
-            result = pipeline.train(self.context("train", weights=str(last), dataset=str(dataset), output=str(output), resume=True, epochs=3))
+        with patch.object(pipeline, "load_yolo", side_effect=lambda path, training=False, **kwargs: Model(path)), patch.object(pipeline, "detection_trainer_class", return_value=NativeTrainer), patch.object(pipeline, "onnx_contract", return_value={}):
+            result = pipeline.train(self.context("train", weights=str(last), dataset=str(dataset), output=str(output), resume=True, epochs=3, **self.trust(last)))
         self.assertTrue(observed["resume"])
         self.assertTrue(observed["native_check_resume"])
         self.assertEqual(observed["optimizer"], {"state": "kept"})

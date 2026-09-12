@@ -444,11 +444,30 @@ def validate_dataset(path):
     return manifest
 
 
-def load_yolo(model_path, training=False):
+def check_pt_trust(model_path, job):
+    """只确认当前作业明确指定的文件；ONNX 不经过 PT 反序列化门禁。"""
+    path = Path(model_path).resolve()
+    if path.suffix.lower() != ".pt":
+        return
+    if not isinstance(job, dict) or job.get("trusted_weights") is not True:
+        raise PipelineError("PT 来源尚未明确确认可信，拒绝加载")
+    confirmed = job.get("trusted_weights_path")
+    if not isinstance(confirmed, str) or not confirmed or not Path(confirmed).is_absolute() or Path(confirmed).resolve() != path:
+        raise PipelineError("当前 PT 与明确确认的可信文件不同，拒绝加载")
+    expected = job.get("expected_weights_sha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+        raise PipelineError("可信 PT 缺少有效 expected_weights_sha256")
+    if not path.is_file() or sha256(path) != expected.lower():
+        raise PipelineError("可信 PT 的 SHA-256 已变化或文件缺失，拒绝加载")
+
+
+def load_yolo(model_path, training=False, *, job=None, internal_training_output=False):
     path = Path(model_path).resolve()
     allowed = {".pt"} if training else {".pt", ".onnx"}
     if not path.is_file() or path.suffix.lower() not in allowed:
         raise PipelineError("必须提供已存在的本地 .pt 权重" if training else "必须提供已存在的本地 .pt/.onnx 模型")
+    if not internal_training_output:
+        check_pt_trust(path, job)
     # 禁止训练器自动补依赖或下载示例权重；权重只从显式本地路径读取。
     os.environ["YOLO_AUTOINSTALL"] = "false"
     os.environ["YOLO_OFFLINE"] = "true"
@@ -477,8 +496,9 @@ def model_names(model):
 
 
 def prelabel(ctx):
+    check_pt_trust(ctx.job.get("model", ""), ctx.job)
     names, samples = load_samples(ctx)
-    model = load_yolo(ctx.job.get("model", ""))
+    model = load_yolo(ctx.job.get("model", ""), job=ctx.job)
     if model_names(model) != names:
         raise PipelineError("预标注模型类别名称与采集 schema 不一致")
     output = ctx.output()
@@ -574,6 +594,7 @@ def detection_trainer_class():
 
 
 def train(ctx):
+    check_pt_trust(ctx.job.get("weights", ""), ctx.job)
     dataset = Path(ctx.job["dataset"]).resolve()
     manifest = validate_dataset(dataset)
     if ctx.job.get("class_names") and ctx.job["class_names"] != manifest["class_names"]:
@@ -590,7 +611,7 @@ def train(ctx):
     device = str(ctx.job.get("device", "cpu"))
     if device != "cpu" and not re.fullmatch(r"\d+", device):
         raise PipelineError("首版只支持 cpu 或一个 GPU ID，避免多进程取消失配")
-    model = load_yolo(ctx.job.get("weights", ""), training=True)
+    model = load_yolo(ctx.job.get("weights", ""), training=True, job=ctx.job)
     if getattr(model.model, "end2end", False) or getattr(model.model.model[-1], "end2end", False):
         raise PipelineError("首版拒绝 end-to-end 检测头；需要经核验的外部 NMS 输出")
     if source:
@@ -643,7 +664,8 @@ def train(ctx):
         raise PipelineError("训练器没有生成 best.pt/last.pt")
     metrics = {str(k): float(v) for k, v in result.results_dict.items()}
     write_json(output / "validation_metrics.json", metrics)
-    candidate = load_yolo(best, training=True)
+    # 同一作业刚生成并核验的 best.pt 是本次已授权训练的内部产物。
+    candidate = load_yolo(best, training=True, internal_training_output=True)
     if model_names(candidate) != manifest["class_names"]:
         raise PipelineError("训练后类别 schema 与数据集不一致")
     ctx.report("RUNNING", "训练完成，正在导出与核验候选 ONNX")
@@ -656,6 +678,9 @@ def train(ctx):
 
 
 def evaluate(ctx):
+    for key in ("model", "baseline_model"):
+        if ctx.job.get(key):
+            check_pt_trust(ctx.job[key], ctx.job)
     dataset = Path(ctx.job["dataset"]).resolve()
     manifest = validate_dataset(dataset)
     split = ctx.job.get("split", "test")
@@ -674,7 +699,7 @@ def evaluate(ctx):
 
     def measure(model_path, name):
         ctx.check()
-        model = load_yolo(model_path)
+        model = load_yolo(model_path, job=ctx.job)
         if model_names(model) != manifest["class_names"]:
             raise PipelineError("评价模型 class_names 与真值不一致")
         def check_batch(_validator):

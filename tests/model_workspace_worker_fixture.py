@@ -29,6 +29,13 @@ if spec['operation'] == 'train':
             raise SystemExit(2)
         time.sleep(0.025)
 result = {'root': spec.get('root', '')}
+if spec['operation'] in {'env_check', 'env_install'}:
+    result.update(ready=True, python_executable=spec['python_executable'], environment_report='fixture-only')
+if spec['operation'] == 'pt_check':
+    assert spec['trusted_weights'] is True
+    assert spec['expected_sha256'] == hashlib.sha256(Path(spec['weights']).read_bytes()).hexdigest()
+    result.update(ready=True, synthetic_compatibility_only=True,
+                  weights_sha256=spec['expected_sha256'], model_class_names=['person', 'head'])
 if spec['operation'] in {'inspect', 'evaluate'} and spec.get('model'):
     model = Path(spec['model']).resolve()
     result.update(model=str(model), model_sha256=hashlib.sha256(model.read_bytes()).hexdigest(),

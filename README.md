@@ -107,23 +107,27 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 不混入实时推理的 INI。默认素材目录为程序数据根下的 `cache/datasets/`，作业日志与结果位于
 `cache/model-workspace/jobs/`。页面提供素材目录和当前作业目录的打开按钮。
 
-1. 在训练页检查当前 ONNX，读取可用的类别 metadata；到采集页核对按 ID 排列的类别名称并确认。
+1. 在训练页“训练环境”选择基础 Python 3.12 x64，点击“安装 / 修复环境”。工具联网获取固定依赖，
+   在专用环境根目录建立新 venv，保留旧环境；GPU 自检通过后自动填写训练 Python。
+   已有环境可直接填写并点击“检查环境”。选定可信本地 `.pt`、确认来源后点击“检查 PT”，验证
+   加载、类别及合成输入反向传播；不会更新或覆盖原权重，也不代表真实数据训练和模型效果已通过。
+2. 检查当前 ONNX，读取可用的类别 metadata；到采集页核对按 ID 排列的类别名称并确认。
    metadata 不完整时对照原训练配置填写，不猜测敌我或头部/身体语义。
-2. 用户启动 CPU 图像路径的 Runtime 后，在采集页点击开始。系统按变化、疑难、随机探索保存原图，
+3. 用户启动 CPU 图像路径的 Runtime 后，在采集页点击开始。系统按变化、疑难、随机探索保存原图，
    可标记下一帧、暂停或结束；达到数量/磁盘预算会暂停。GPU-only 纹理路径暂不支持，不会偷偷回读。
    采集期间不能切换模型；停止 Runtime 同时结束采集。
-3. 结束采集并停止 Runtime 后，导出审核包。采集时的检测框已经是预标注；可另选本地模型进行离线
+4. 结束采集并停止 Runtime 后，导出审核包。采集时的检测框已经是预标注；可另选本地模型进行离线
    复检，结果自动回填预标注路径。将审核包 `cvat_yolo.zip` 导入 CVAT，修正全部目标后把对应 YOLO
    标签放回包内路径；填写 `review.json` 的 `reviewer`，逐张设置 `VERIFIED_POSITIVE`、
    `VERIFIED_NEGATIVE` 或 `EXCLUDED`，然后在训练页导入审核清单。`UNKNOWN` 不会被导入训练。
-4. 导出训练数据集，输出目录自动填入训练页。至少需要三组独立会话的已审核素材；同一对局应保持
+5. 导出训练数据集，输出目录自动填入训练页。至少需要三组独立会话的已审核素材；同一对局应保持
    同一会话或在作业中显式归组。相邻帧和近重复图片不能跨训练、验证、测试集。首次划分后保留
    `split_registry.json`，后续新增会话默认进入训练，避免旧测试集回流。
-5. 指定本地可训练 `.pt`、输入尺寸、轮数和设备后启动训练。新数据默认是新微调实验；恢复未完成
+6. 指定本地可训练 `.pt`、输入尺寸、轮数和设备后启动训练。新数据默认是新微调实验；恢复未完成
    训练时勾选恢复，并选择本工具未完成作业的 `last.pt`，保持原数据版本、总轮数和输入尺寸。
    恢复在新目录进行，原作业不改写。取消请求等待当前 epoch 保存；直接退出应用会终止剩余进程，
    仅已落盘且通过身份核验的检查点可恢复。
-6. 训练产出候选 ONNX 后在固定数据集上评估，可与当前选择的生产模型比较。检查指标和兼容结果后
+7. 训练产出候选 ONNX 后在固定数据集上评估，可与当前选择的生产模型比较。检查指标和兼容结果后
    显式导入候选；在检测页刷新并选择才会应用，旧模型保留以便回退。静态兼容和离线指标不代表
    本机 Provider 性能或真实游戏效果已通过。
 
@@ -139,7 +143,11 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 & 'C:\path\to\training-env\Scripts\python.exe' -m pip install -r .\scripts\model_training_requirements.txt
 ```
 
-随后在训练菜单选择该解释器。工具不自动安装依赖或下载权重；缺少依赖/本地权重会显式失败。
+RTX 50 系列的受管理环境明确使用官方 PyTorch 2.8.0 / torchvision 0.23.0 的 CUDA 12.8 wheel，
+然后安装其余固定依赖并运行 GPU 卷积前后向自检。安装/检查报告与完整依赖版本留在作业目录；
+基础 Python 须保留，移动到其他电脑时重建 venv。环境安装需要网络和足够磁盘空间。
+手动配置时还须选择兼容的 PyTorch CUDA wheel，随后在训练菜单选择该解释器并检查环境。
+普通训练作业不临时安装依赖或下载权重；缺少依赖/本地权重会显式失败。
 Ultralytics 与预训练权重按其 AGPL-3.0/Enterprise 等实际许可使用，独立进程或 ONNX 导出不消除
 许可要求。模型、数据和权重不自动上传或加入 Git。
 
@@ -152,6 +160,15 @@ python -B -X utf8 .\scripts\model_data_pipeline.py --job job.json --status statu
 支持 `inspect`、`prelabel`、`review_export`、`import_labels`、`export`、`train`（可选 `resume=true`）
 和 `evaluate`。数据作业的 `root` 指向采集会话根目录，`class_names` 是已确认的有序数组；输出
 `output` 必须是新目录。训练/评价的 `dataset` 指向含 `dataset.json` 和 `data.yaml` 的冻结目录。
+CLI加载用户PT时还须提供 `trusted_weights=true`、`trusted_weights_path` 绝对路径及
+`expected_weights_sha256`；确认仅适用于该文件。界面预标注/评价选择PT时，须与已确认来源的
+可训练权重为同一文件。ONNX不使用PT信任确认。旧外部PT用新微调入口，不能直接当作Xen自身作业恢复。
+
+环境入口 `scripts/model_training_environment.py` 使用相同 `--job/--status/--cancel` 参数，
+支持 `env_install`、`env_check`、`pt_check`。环境安装使用基础Python运行，`environment_root`
+指定版本目录的父目录；检查使用 `python_executable` 指定目标解释器，`device` 为GPU编号。
+PT检查另需 `weights`、`trusted_weights=true` 和可选 `expected_sha256`，输入 `imgsz` 默认为320。
+就绪结果只代表该次环境/合成兼容检查，换设备、解释器、权重或输入尺寸后应重新检查。
 
 ## 可执行目标
 
