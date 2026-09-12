@@ -290,13 +290,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             app_message = model_error;
             return;
         }
-        if (!runtime.start(runtime_config, input_device)) {
-            app_message = "Runtime 启动失败。";
-            return;
-        }
         debug_run_id =
             std::to_string(GetCurrentProcessId()) + "-" +
             std::to_string(GetTickCount64());
+        std::optional<RecoilArchiveConfig> archive;
+        if (runtime_config.recoil.enabled) {
+            archive.emplace();
+            archive->acquisition_run_id = debug_run_id;
+            archive->directory = std::filesystem::path("cache/runtime") / (debug_run_id + "-recoil-batches");
+            archive->recoil = runtime_config.recoil;
+        }
+        if (!runtime.start(runtime_config, input_device, std::move(archive))) {
+            app_message = "Runtime 启动失败。";
+            return;
+        }
         debug_aim_config = runtime_config.aim;
         debug_auto_stop_config = runtime_config.auto_stop;
         debug_trigger_config = runtime_config.trigger;

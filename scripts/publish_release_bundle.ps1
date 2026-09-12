@@ -84,6 +84,9 @@ function Assert-BuildIdentity(
     $releaseDirectory = Join-Path $BuildDirectory "Release"
     $worker = Join-Path $releaseDirectory "Xen.exe"
     $launcher = Join-Path $releaseDirectory "XenLauncher.exe"
+    # UI从当前Worker目录定位校准工具；每个runtime必须随包携带同构建产物。
+    $calibration = Resolve-ExistingNonEmptyFile `
+        (Join-Path $releaseDirectory "xen_recoil_calibration.exe") "独立校准工具"
     $deployment = Join-Path $releaseDirectory "xen-runtime-deployment.json"
     foreach ($required in @($worker, $launcher, $deployment)) {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
@@ -161,6 +164,7 @@ function Assert-BuildIdentity(
         ReleaseDirectory = $releaseDirectory
         Worker = $worker
         Launcher = $launcher
+        Calibration = $calibration
         DeploymentPath = $deployment
         Deployment = $report
         Components = @($components)
@@ -311,6 +315,8 @@ try {
         $runtimePrefix = "runtimes/$($build.Runtime)"
         Copy-VerifiedFile $build.Worker "$runtimePrefix/Xen.exe" `
             $build.Runtime $build.Worker $incoming $manifestFiles
+        Copy-VerifiedFile $build.Calibration "$runtimePrefix/xen_recoil_calibration.exe" `
+            $build.Runtime $build.Calibration $incoming $manifestFiles
         Copy-VerifiedFile $build.DeploymentPath `
             "$runtimePrefix/xen-runtime-deployment.json" `
             $build.Runtime $build.DeploymentPath $incoming $manifestFiles

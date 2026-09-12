@@ -11,6 +11,7 @@
 #include "aim/aim.h"
 #include "auto_stop/auto_stop.h"
 #include "recoil/recoil_worker.h"
+#include "recoil/recoil_archive.h"
 #include "aim_landmark/aim_landmark.h"
 #include "capture/capture.h"
 #include "config/config.h"
@@ -251,6 +252,7 @@ struct RuntimeSnapshot {
     RecoilSnapshot recoil;
     bool recoil_telemetry_available = false;
     RecoilExecutionLog recoil_execution_log;
+    RecoilArchiveStatus recoil_archive;
     weapon::WeaponSnapshot weapon_snapshot;
     std::string recoil_profile_status;
     RuntimeState state = RuntimeState::STOPPED;
@@ -327,7 +329,8 @@ public:
 
     bool start(const AppConfig& config) noexcept;
     bool start(const AppConfig& config,
-               std::shared_ptr<IMouseController> input_device) noexcept;
+               std::shared_ptr<IMouseController> input_device,
+               std::optional<RecoilArchiveConfig> archive = {}) noexcept;
     void stop() noexcept;
     // 仅在 RUNNING 状态接受请求。候选模型异步加载，失败不替换旧模型。
     bool reload_detector(const DetectorConfig& config) noexcept;

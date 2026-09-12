@@ -36,11 +36,15 @@ function New-FakeBuild(
         [string]$Runtime,
         [string]$Commit,
         [string[]]$RuntimeFiles,
-        [string[]]$Components) {
+        [string[]]$Components,
+        [bool]$IncludeCalibration = $true) {
     $release = Join-Path $Root "Release"
     New-Item -ItemType Directory -Path $release -Force | Out-Null
     Write-Utf8 (Join-Path $release "Xen.exe") "worker-$Runtime"
     Write-Utf8 (Join-Path $release "XenLauncher.exe") "launcher"
+    if ($IncludeCalibration) {
+        Write-Utf8 (Join-Path $release "xen_recoil_calibration.exe") "calibration-$Runtime"
+    }
     $files = @()
     foreach ($name in $RuntimeFiles) {
         $path = Join-Path $release $name
@@ -120,6 +124,48 @@ try {
         $licenseEvidenceByComponent[$component] = "$component=$path"
     }
     $licenseEvidence = @($licenseEvidenceByComponent.Values)
+
+    # 使用独立合成构建目录制造缺失，避免改动真实构建或删除既有夹具。
+    foreach ($runtime in @("nvidia", "directml", "openvino")) {
+        $originalBuild = switch ($runtime) {
+            "nvidia" { $nvidia }
+            "directml" { $directml }
+            "openvino" { $openvino }
+        }
+        $originalIdentity = Get-Content -LiteralPath (Join-Path $originalBuild "xen-build-identity.json") -Raw | ConvertFrom-Json
+        $originalDeployment = Get-Content -LiteralPath (Join-Path $originalBuild "Release/xen-runtime-deployment.json") -Raw | ConvertFrom-Json
+        $missingBuild = Join-Path $root "missing-calibration-$runtime"
+        New-FakeBuild $missingBuild $runtime $commit @($originalDeployment.files | ForEach-Object { $_.name }) `
+            @($originalIdentity.components) $false
+        $invalidParent = Join-Path $root "calibration-invalid-$runtime"
+        $arguments = @{
+            NvidiaBuildDirectory = $nvidia
+            DirectMlBuildDirectory = $directml
+            OpenVinoBuildDirectory = $openvino
+            ModelPath = $model
+            LicenseEvidence = $licenseEvidence
+            RepositoryRoot = $repository
+            GitExecutable = $GitExecutable
+            OutputDirectory = (Join-Path $invalidParent "Xen-release")
+        }
+        $key = switch ($runtime) {
+            "nvidia" { "NvidiaBuildDirectory" }
+            "directml" { "DirectMlBuildDirectory" }
+            "openvino" { "OpenVinoBuildDirectory" }
+        }
+        $arguments[$key] = $missingBuild
+        $missingResult = Invoke-Publisher $arguments
+        if ($missingResult.ExitCode -eq 0 -or $missingResult.Output -notmatch "xen_recoil_calibration.exe" -or
+            (Test-Path -LiteralPath $invalidParent)) {
+            throw "缺失校准工具必须在创建发布目录前拒绝：$runtime；$($missingResult.Output)"
+        }
+        [IO.File]::WriteAllBytes((Join-Path $missingBuild "Release/xen_recoil_calibration.exe"), [byte[]]@())
+        $emptyResult = Invoke-Publisher $arguments
+        if ($emptyResult.ExitCode -eq 0 -or $emptyResult.Output -notmatch "ordinary non-empty file" -or
+            (Test-Path -LiteralPath $invalidParent)) {
+            throw "空校准工具必须在创建发布目录前拒绝：$runtime；$($emptyResult.Output)"
+        }
+    }
 
     $nvidiaReportPath = Join-Path $nvidia `
         "Release\xen-runtime-deployment.json"
@@ -324,6 +370,17 @@ try {
     $manifestEvidence = @($manifest.files | Where-Object {
         ([string]$_.path) -like 'licenses/*'
     })
+    foreach ($runtime in @("nvidia", "directml", "openvino")) {
+        $relative = "runtimes/$runtime/xen_recoil_calibration.exe"
+        $records = @($manifest.files | Where-Object { $_.path -eq $relative })
+        $packed = Join-Path $output $relative
+        if ($records.Count -ne 1 -or -not (Test-Path -LiteralPath $packed -PathType Leaf) -or
+            $records[0].runtime -ne $runtime -or
+            (Get-FileHash -LiteralPath $packed -Algorithm SHA256).Hash -ne $records[0].sha256 -or
+            (Get-Content -LiteralPath $packed -Raw).Trim() -ne "calibration-$runtime") {
+            throw "各runtime必须在Worker同目录包含对应校准工具及准确清单：$runtime"
+        }
+    }
     if ($manifest.schema -ne 1 -or $manifest.git_commit -ne $commit -or
         @($manifest.PSObject.Properties).Count -ne 5 -or
         @($manifest.runtimes).Count -ne 3 -or

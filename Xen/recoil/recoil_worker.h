@@ -4,6 +4,7 @@
 #include <memory>
 #include "recoil/recoil.h"
 #include "recoil/recoil_config.h"
+#include "recoil/recoil_calibration.h"
 #include "recoil/motion_ledger.h"
 #include "trigger/trigger_worker.h"
 
@@ -11,7 +12,7 @@ enum class RecoilFiringSource { UNKNOWN, INPUT_ESTIMATED, COMMAND_ESTIMATED };
 enum class RecoilDispatchRejection {
     NONE, ARBITER_LOCK_BUSY, ARBITER_AUXILIARY_PENDING, ARBITER_OUTPUT_FAULT,
     CONTEXT_CHANGED, DISABLED, NOT_HELD, INPUT_UNHEALTHY, PERMISSION_DENIED,
-    NOT_FOCUSED, PROFILE_MISMATCH, EXPIRED, BUDGET_EXCEEDED, CANCELED, STOPPING
+    NOT_FOCUSED, PROFILE_MISMATCH, EXPIRED, BUDGET_EXCEEDED, CANCELED, STOPPING, CALIBRATION_BUDGET
 };
 inline const char* RecoilDispatchRejectionName(RecoilDispatchRejection reason) noexcept {
     switch (reason) {
@@ -30,6 +31,7 @@ inline const char* RecoilDispatchRejectionName(RecoilDispatchRejection reason) n
     case RecoilDispatchRejection::BUDGET_EXCEEDED: return "BUDGET_EXCEEDED";
     case RecoilDispatchRejection::CANCELED: return "CANCELED";
     case RecoilDispatchRejection::STOPPING: return "STOPPING";
+    case RecoilDispatchRejection::CALIBRATION_BUDGET: return "CALIBRATION_BUDGET";
     }
     return "UNKNOWN";
 }
@@ -59,6 +61,7 @@ struct RecoilExecutionLog {
     std::uint64_t dropped_count = 0;
 };
 
+struct RecoilEventSlice;
 class RecoilWorker {
 public:
     RecoilWorker(std::shared_ptr<IMouseController> mouse,
@@ -66,12 +69,16 @@ public:
         std::function<RecoilInput()> context, std::function<TriggerFiringSignal()> firing);
     ~RecoilWorker();
     bool start(const RecoilConfig& config) noexcept;
+    bool start_calibration(const RecoilConfig& config, std::shared_ptr<const RecoilCalibrationPermit> permit) noexcept;
     void cancel() noexcept;
     void stop() noexcept;
     RecoilSnapshot snapshot() const noexcept;
     // 冷快照；最多2048条，dropped_count非零表示此前会话证据已不完整。
     RecoilExecutionLog execution_log() const;
+    RecoilEventSlice read_execution_events(std::uint64_t after_sequence, std::size_t max_events = 256) const;
+    RecoilCalibrationBudgetSnapshot calibration_snapshot() const noexcept;
 private:
+    bool start_impl(const RecoilConfig& config) noexcept;
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

@@ -830,9 +830,9 @@ target_link_libraries(xen_source_context PRIVATE source_context)
 add_library(weapon STATIC Xen/weapon/weapon.cpp)
 target_include_directories(weapon PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(weapon PUBLIC nlohmann_json::nlohmann_json PRIVATE ws2_32 Threads::Threads)
-add_library(recoil STATIC Xen/recoil/recoil.cpp Xen/recoil/recoil_store.cpp Xen/recoil/motion_ledger.cpp)
+add_library(recoil STATIC Xen/recoil/recoil.cpp Xen/recoil/recoil_store.cpp Xen/recoil/motion_ledger.cpp Xen/recoil/recoil_calibration.cpp)
 target_include_directories(recoil PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
-target_link_libraries(recoil PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(recoil PUBLIC nlohmann_json::nlohmann_json PRIVATE bcrypt)
 add_library(recoil_worker STATIC Xen/recoil/recoil_worker.cpp)
 target_link_libraries(recoil_worker PUBLIC recoil trigger_worker mouse PRIVATE Threads::Threads)
 add_library(recoil_tuner STATIC Xen/recoil_tuner/recoil_tuner.cpp Xen/recoil_tuner/recoil_tuner_io.cpp Xen/recoil_tuner/image_measurement.cpp)
@@ -841,6 +841,8 @@ target_link_libraries(recoil_tuner PUBLIC recoil nlohmann_json::nlohmann_json ${
 add_executable(xen_recoil_tuner Xen/recoil_tuner_cli/main.cpp)
 target_link_libraries(xen_recoil_tuner PRIVATE recoil_tuner recoil)
 xen_deploy_runtime_dlls(xen_recoil_tuner OPENCV)
+add_library(recoil_archive STATIC Xen/recoil/recoil_archive.cpp)
+target_link_libraries(recoil_archive PUBLIC recoil_worker PRIVATE recoil_tuner Threads::Threads)
 add_library(keyboard STATIC
     Xen/keyboard/keyboard.cpp)
 target_include_directories(keyboard PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -855,6 +857,11 @@ target_include_directories(config
     PRIVATE
         ${simpleini_SOURCE_DIR})
 target_link_libraries(config PUBLIC log trigger source_context weapon recoil)
+add_library(recoil_calibration_io STATIC Xen/recoil/recoil_calibration_io.cpp)
+target_link_libraries(recoil_calibration_io PUBLIC recoil config)
+add_executable(xen_recoil_calibration Xen/recoil_calibration_cli/main.cpp)
+target_link_libraries(xen_recoil_calibration PRIVATE recoil_calibration_io recoil_worker recoil_archive weapon source_context)
+xen_deploy_runtime_dlls(xen_recoil_calibration OPENCV)
 
 add_library(app_release STATIC
     Xen/app/release_contract.cpp)
@@ -881,7 +888,7 @@ add_library(runtime STATIC
     Xen/runtime/camera_motion.cpp)
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
-    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker trigger_worker source_context recoil_worker weapon mouse keyboard config log
+    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker trigger_worker source_context recoil_worker recoil_archive weapon mouse keyboard config log
     PRIVATE Threads::Threads)
 
 add_library(app_input STATIC
@@ -930,13 +937,14 @@ add_library(overlay STATIC
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(overlay
     PUBLIC runtime config
-    PRIVATE imgui recoil_tuner recoil d3d11 dxgi dwmapi)
+    PRIVATE imgui recoil_tuner recoil recoil_calibration_io d3d11 dxgi dwmapi)
 
 add_executable(xen_app WIN32
     Xen/app/main.cpp
     Xen/app/model_catalog.cpp
     Xen/app/xen.rc)
 set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
+add_dependencies(xen_app xen_recoil_calibration)
 target_link_libraries(xen_app PRIVATE
     overlay app_input app_startup runtime xen_debug config crash log app_release)
 if(WIN32)
@@ -1052,6 +1060,14 @@ if(BUILD_TESTING)
     add_executable(recoil_worker_tests tests/recoil_worker_tests.cpp)
     target_link_libraries(recoil_worker_tests PRIVATE recoil_worker)
     add_test(NAME recoil_worker_tests COMMAND recoil_worker_tests)
+    add_executable(recoil_calibration_tests tests/recoil_calibration_tests.cpp)
+    target_link_libraries(recoil_calibration_tests PRIVATE recoil_calibration_io)
+    xen_deploy_runtime_dlls(recoil_calibration_tests OPENCV)
+    add_test(NAME recoil_calibration_tests COMMAND recoil_calibration_tests)
+    add_executable(recoil_archive_tests tests/recoil_archive_tests.cpp)
+    target_link_libraries(recoil_archive_tests PRIVATE recoil_archive)
+    xen_deploy_runtime_dlls(recoil_archive_tests OPENCV)
+    add_test(NAME recoil_archive_tests COMMAND recoil_archive_tests)
     add_executable(recoil_tuner_tests tests/recoil_tuner_tests.cpp)
     target_link_libraries(recoil_tuner_tests PRIVATE recoil_tuner recoil)
     xen_deploy_runtime_dlls(recoil_tuner_tests OPENCV)
@@ -1095,6 +1111,12 @@ if(BUILD_TESTING)
     message(STATUS "测试 Python：${XEN_PYTHON_EXECUTABLE} (${XEN_PYTHON_MODULES_OUTPUT})")
     add_test(NAME recoil_dataset_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 "${PROJECT_SOURCE_DIR}/tests/recoil_dataset_tests.py")
+    add_test(NAME recoil_batch_dataset_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 "${PROJECT_SOURCE_DIR}/tests/recoil_batch_dataset_tests.py")
+    add_test(NAME recoil_archive_dataset_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 "${PROJECT_SOURCE_DIR}/tests/recoil_archive_dataset_tests.py" "$<TARGET_FILE:recoil_archive_tests>")
+    add_test(NAME recoil_calibration_cli_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 "${PROJECT_SOURCE_DIR}/tests/recoil_calibration_cli_tests.py" "$<TARGET_FILE:xen_recoil_calibration>")
     add_test(NAME recoil_cli_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 "${PROJECT_SOURCE_DIR}/tests/recoil_cli_tests.py" "$<TARGET_FILE:xen_recoil_tuner>")
     add_executable(log_tests

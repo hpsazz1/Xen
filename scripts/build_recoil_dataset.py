@@ -14,6 +14,8 @@ source_run必须等于Debug根session_id，路径相对manifest所在目录解�
 响应变化必须逐节点符合terminal_smoothstep_v1。counts、曲线身份、相位限制、
 时钟与回执只从Debug取得；测量必须明确提供人工证据，不从GSI或counts推造。
 completed是人工确认项：尾段为零时，仅凭回执闭合不能证明自然结束。
+schema2批次文件另需完整BEGIN/END与连续事件序号；自然耗尽仍不代替人工测量。
+同一次采集Run的不同批次或模型分段不能用作独立训练与留出。
 不使用游戏、网络、设备或活动配置。跨代留出用途由Tuner登记表负责。
 """
 import argparse
@@ -25,6 +27,7 @@ import os
 from pathlib import Path
 
 MAX_BYTES = 16 * 1024 * 1024
+MAX_BATCH_RECORDS = 32768
 
 
 def require(ok, message):
@@ -158,20 +161,60 @@ class Builder:
     def debug(self, filename):
         root, digest = load_json(self.directory / text(filename, "Debug路径"))
         recoil = root["recoil"]
-        require(type(recoil["schema"]) is int and recoil["schema"] == 1 and recoil["config"]["enabled"] is True and
-                recoil["config"]["mixed_aim"] is False, "必须是已启用独立压枪Debug schema1")
+        require(type(recoil["schema"]) is int and recoil["schema"] in (1, 2) and recoil["config"]["enabled"] is True and
+                recoil["config"]["mixed_aim"] is False, "必须是已启用独立压枪Debug schema1或完整批次schema2")
         execution = recoil["execution"]
-        require(execution["clock_domain"] == "local_steady" and
-                type(execution["dropped_count"]) is int and execution["dropped_count"] == 0,
-                "执行记录缺失、丢弃或时钟域未知")
-        require(type(execution["records"]) is list and 1 <= len(execution["records"]) <= 2048,
-                "完整有界执行记录缺失")
+        require(execution["clock_domain"] == "local_steady", "执行时钟域未知")
+        if recoil["schema"] == 1:
+            # 旧报告不具有批次边界，不能用新语义放宽其全局覆盖拒绝。
+            require(type(execution["dropped_count"]) is int and execution["dropped_count"] == 0,
+                    "执行记录缺失或丢弃")
+            require(type(execution["records"]) is list and 1 <= len(execution["records"]) <= 2048,
+                    "完整有界执行记录缺失")
+        else:
+            require(text(root["acquisition_run_id"], "原始采集Run") == text(root["session_id"], "批次Run"),
+                    "批次文件不能把模型分段或文件名作为新的采集Run")
+            self.complete_batch(execution)
         profiles = {}
         for p in execution["profiles"]:
             key = text(p["id"], "profile id") + ":" + str(integer(p["revision"], "revision", 1))
             require(key not in profiles, "Debug重复profile key")
             profiles[key] = p
         return root, recoil, profiles, digest
+
+    @staticmethod
+    def complete_batch(execution):
+        records, batch = execution["records"], execution["batch"]
+        require(type(records) is list and 1 <= len(records) <= MAX_BATCH_RECORDS,
+                "批次需要有界非空命令；零命令批次不能提供优化回执")
+        require(batch["coverage_complete"] is True and batch["end_reason"] == "EXHAUSTED",
+                "批次覆盖缺口、取消或未知结束不可用于优化")
+        require(batch.get("missing_sequence_ranges", []) == [] and batch.get("incomplete_reason", "") == "",
+                "批次完整标记与缺口或不完整原因矛盾")
+        begin = integer(batch["begin_sequence"], "BEGIN序号", 1)
+        end = integer(batch["end_sequence"], "END序号", 1)
+        count = integer(batch["records_count"], "批次命令数", 1, MAX_BATCH_RECORDS)
+        require(count == len(records) and end - begin - 1 == count, "批次BEGIN/END或命令序号存在缺口")
+        begin_at = integer(batch["begin_at_steady_ns"], "BEGIN时间", 1)
+        end_at = integer(batch["end_at_steady_ns"], "END时间", 1)
+        started = integer(batch["firing_started_at_steady_ns"], "批次起点", 1)
+        require(started <= begin_at <= end_at, "批次开始结束时序无效")
+        identity = (integer(batch["firing_id"], "批次firing id", 1), text(batch["profile"], "批次profile"),
+                    integer(batch["weapon_generation"], "批次武器代际", 1),
+                    integer(batch["device_epoch"], "批次设备代际", 1), started)
+        source = text(batch["firing_source"], "批次射击来源")
+        require(source in ("INPUT_ESTIMATED", "COMMAND_ESTIMATED"), "批次射击来源未知")
+        for index, record in enumerate(records):
+            require(integer(record["event_sequence"], "命令事件序号", 1) == begin + index + 1,
+                    "批次事件缺失、重复或乱序")
+            current = (integer(record["firing_id"], "命令firing id", 1), record["profile"],
+                       integer(record["weapon_generation"], "命令武器代际", 1),
+                       integer(record["device_epoch"], "命令设备代际", 1),
+                       integer(record["firing_started_at_steady_ns"], "命令射击起点", 1))
+            require(current == identity and record["firing_source"] == source,
+                    "批次边界与命令的身份、代际、来源或起点不一致")
+            require(integer(record["completed_at_steady_ns"], "批次命令完成时间", 1) <= end_at,
+                    "END早于命令完成")
 
     def trial(self, entry, use=None):
         keys = {"id", "debug_report", "source_run", "firing_id", "completed", "independent_recoil",
@@ -217,6 +260,12 @@ class Builder:
         source = selected[0]["firing_source"]
         require(source in ("INPUT_ESTIMATED", "COMMAND_ESTIMATED"), "射击事件来源未知")
         phase = profile["phase_tolerance_ms"]
+        if recoil["schema"] == 2:
+            batch = recoil["execution"]["batch"]
+            require(batch["firing_id"] == firing and batch["profile"] == profile_key,
+                    "所选firing与归档批次不一致")
+            require(start + points[-1][0] * 1e6 <= batch["end_at_steady_ns"] <= measured,
+                    "自然结束时间未覆盖曲线或晚于人工测量")
         envelope = PhaseEnvelope(points, phase)
         counts, receipts = [0, 0], []
         vertex = 0
@@ -265,7 +314,8 @@ class Builder:
                  "environment_fingerprint": profile["environment_fingerprint"], "executed_profile_revision": str(profile["revision"]),
                  "measurement_source": str(evidence_path), "measurement_evidence_sha256": evidence_hash,
                  "use": use or "fit", "previously_used_generation": previous,
-                 "completed": True, "completion_evidence": "human_confirmation_and_receipt_closure",
+                 "completed": True, "completion_evidence": "controller_exhausted_and_human_confirmation_and_receipt_closure"
+                 if recoil["schema"] == 2 else "human_confirmation_and_receipt_closure",
                  "independent_recoil": True, "timing_valid": True, "reference_confirmed": True,
                  "measurement_ms": measurement_ms, "timing_uncertainty_ms": uncertainty,
                  "residual": residual, "noise": noise, "executed_counts": counts, "receipts": receipts}

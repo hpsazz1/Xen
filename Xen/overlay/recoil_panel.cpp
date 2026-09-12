@@ -1,5 +1,6 @@
 #include "overlay/recoil_panel.h"
 #include "recoil/recoil_store.h"
+#include "recoil/recoil_calibration_io.h"
 #include "recoil_tuner/recoil_tuner.h"
 
 #include <imgui.h>
@@ -11,6 +12,10 @@
 #include <filesystem>
 #include <future>
 #include <limits>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 namespace {
 struct DisabledScope { explicit DisabledScope(bool disabled) { ImGui::BeginDisabled(disabled); } ~DisabledScope() { ImGui::EndDisabled(); } };
@@ -95,6 +100,72 @@ struct RecoilPanel::Impl {
     recoil_tuner::Request request;
     std::optional<recoil_tuner::Report> report;
     std::future<recoil_tuner::Report> job;
+    RecoilCalibrationPrepareRequest calibration_request;
+    std::string calibration_config = "config.ini", calibration_output, calibration_request_file, calibration_command;
+    std::string calibration_prepared_identity;
+
+    void prepare_panel(const AppConfig& config) {
+        if (!ImGui::TreeNode("校准此版本")) return;
+        ImGui::TextWrapped("对象：%s。准备使用磁盘上的已保存候选，不包含未保存草稿。", selected_file.c_str());
+        ImGui::TextWrapped("只准备一次弹序的独立会话。退出应用释放设备后，由你在前台执行生成的命令；结果不会自动发布。");
+        ImGui::InputText("已保存应用配置", &calibration_config);
+        ImGui::InputText("新的校准目录", &calibration_output);
+        if (ImGui::Button("带入当前环境声明")) {
+            calibration_request.environment = {base.weapon_id, config.recoil.game_build, config.recoil.input_path,
+                config.recoil.conditions, config.recoil.sensitivity};
+            calibration_request.hold_virtual_key = config.recoil.hold_virtual_key;
+        }
+        if (ImGui::TreeNode("环境与一次性预算")) {
+            auto& e = calibration_request.environment; auto& l = calibration_request.limits;
+            ImGui::TextWrapped("预算必须按本次试验明确填写；命令相位预算仅约束发送时限，不是已验证的物理相位容差。");
+            ImGui::InputText("武器标识", &e.weapon_id); ImGui::InputText("游戏版本", &e.game_build);
+            ImGui::InputText("输入路径", &e.input_path); ImGui::InputText("适用条件", &e.conditions);
+            ImGui::InputDouble("灵敏度", &e.sensitivity);
+            ImGui::InputInt("保持键 / VK", &calibration_request.hold_virtual_key);
+            ImGui::InputInt("取消键 / VK", &calibration_request.cancel_virtual_key);
+            ImGui::InputInt("会话总时长上限 / ms", &l.max_session_duration_ms);
+            ImGui::InputInt("单次弹序最长 / ms", &l.max_firing_duration_ms);
+            ImGui::InputScalar("累计绝对位移上限 / counts", ImGuiDataType_U64, &l.max_sent_l1_counts);
+            ImGui::InputInt("单命令绝对位移上限 / counts", &l.max_command_l1_counts);
+            ImGui::InputInt("滚动窗口 / ms", &l.rolling_window_ms);
+            ImGui::InputDouble("窗口位移上限 / counts", &l.rolling_window_counts);
+            ImGui::InputDouble("命令相位预算 / ms", &l.command_phase_budget_ms);
+            ImGui::InputText("可复用请求 JSON", &calibration_request_file);
+            if (ImGui::Button("载入已有环境与预算")) {
+                RecoilCalibrationPrepareRequest loaded_request;
+                if (load_recoil_calibration_request(calibration_request_file, loaded_request, status))
+                    calibration_request = std::move(loaded_request);
+            }
+            ImGui::TreePop();
+        }
+        ImGui::BeginDisabled(selected_file.empty() || calibration_output.empty());
+        if (ImGui::Button("准备独立校准会话")) {
+            calibration_command.clear();
+            wchar_t executable[32768]{};
+            const auto length = GetModuleFileNameW(nullptr, executable, 32768);
+            if (length == 0 || length == 32768) status = "无法定位独立校准工具。";
+            else {
+                auto request = calibration_request;
+                request.profile_path = std::filesystem::path(config.recoil.profile_directory) / selected_file;
+                request.config_path = calibration_config; request.output_directory = calibration_output;
+                request.executable_path = std::filesystem::path(executable).parent_path() / "xen_recoil_calibration.exe";
+                RecoilCalibrationPrepared prepared;
+                if (prepare_recoil_calibration(request, prepared, status)) {
+                    calibration_command = prepared.launch_command;
+                    calibration_prepared_identity = selected_file + " / " + prepared.manifest.session_id +
+                        " / " + prepared.manifest.profile_file_sha256;
+                    status = "校准会话已准备；尚未启动设备，也未声明校准通过。";
+                }
+            }
+        }
+        ImGui::EndDisabled();
+        if (!calibration_command.empty()) {
+            ImGui::TextWrapped("以下命令固定绑定已准备对象：%s。修改上方选项不会改变它，需要重新准备。", calibration_prepared_identity.c_str());
+            ImGui::InputTextMultiline("前台命令", &calibration_command, {-1, 90}, ImGuiInputTextFlags_ReadOnly);
+            if (ImGui::Button("复制前台命令")) ImGui::SetClipboardText(calibration_command.c_str());
+        }
+        ImGui::TreePop();
+    }
 
     void set_draft(const RecoilProfile& profile) {
         report.reset();
@@ -235,6 +306,7 @@ struct RecoilPanel::Impl {
             if (store.save_new(candidate, selected_file, status)) { refresh(config.recoil); status = "候选已另存；未校准、未激活。"; }
         }
         ImGui::EndDisabled();
+        prepare_panel(config);
         if (ImGui::TreeNode("人工校准证据与版本发布")) {
             ImGui::TextWrapped("只填写已完成实机的真实证据；输入字段不会产生实测，修改草稿后需重新确认。");
             ImGui::InputText("校准游戏版本", &calibration.game_build); ImGui::InputText("校准输入路径", &calibration.input_path);
@@ -320,6 +392,12 @@ void RecoilPanel::render(const RuntimeSnapshot& snapshot, AppConfig& config, boo
         if (impl_->job.valid() && impl_->job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) impl_->report = impl_->job.get();
         ImGui::Separator(); ImGui::TextUnformatted("压枪与弹道优化");
         ImGui::TextWrapped("运行中不能编辑或发布；GSI自动匹配活动曲线，下面的草稿不会热改执行版本。");
+        if (!snapshot.recoil_archive.acquisition_run_id.empty()) {
+            const auto& a = snapshot.recoil_archive;
+            ImGui::TextWrapped("射击归档：%s；完整 %llu / 不完整 %llu；%s", a.available ? "可用" : "不可用",
+                static_cast<unsigned long long>(a.complete_batches), static_cast<unsigned long long>(a.incomplete_batches), a.directory.c_str());
+            if (!a.error.empty()) ImGui::TextWrapped("归档错误：%s", a.error.c_str());
+        }
         { DisabledScope disabled(!can_edit || impl_->job.valid());
         impl_->settings(snapshot, config);
         ImGui::Checkbox("打开弹道编辑与优化", &impl_->show_editor);

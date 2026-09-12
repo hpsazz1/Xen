@@ -90,13 +90,23 @@ struct RecoilReceipt {
     RecoilTime completed_at{};
 };
 // 单线程纯计算；没有设备、线程或隐式全局时钟。每次只有一个未决意图。
+class RecoilCalibrationPermit;
 class RecoilController {
 public:
+    RecoilController() = default;
+    explicit RecoilController(std::shared_ptr<const RecoilCalibrationPermit> permit);
+    RecoilController(const RecoilController&) = delete;
+    RecoilController& operator=(const RecoilController&) = delete;
+    RecoilController(RecoilController&&) noexcept = default;
+    RecoilController& operator=(RecoilController&&) noexcept = default;
     RecoilDecision advance(const RecoilInput& input, RecoilTime now) noexcept;
     RecoilDecision acknowledge(const RecoilReceipt& receipt, RecoilTime now) noexcept;
     RecoilDecision cancel(RecoilReason reason, RecoilTime now) noexcept;
     RecoilSnapshot snapshot() const noexcept { return state_; }
 private:
+    double phase_budget_ms() const noexcept;
+    std::shared_ptr<const RecoilCalibrationPermit> calibration_permit_;
+    bool calibration_claimed_ = false;
     RecoilDecision result() const noexcept;
     RecoilSnapshot state_;
     std::shared_ptr<const RecoilProfile> profile_;

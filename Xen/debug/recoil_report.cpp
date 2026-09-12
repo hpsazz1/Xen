@@ -14,6 +14,12 @@ std::string recoil_metadata_json(const RecoilConfig& config, const RuntimeSnapsh
         {"max_observation_age_ms",config.max_observation_age_ms}}}};
     result["final"] = nullptr; result["execution"] = nullptr;
     result["output_arbitration"] = Json::parse(output_arbitration_json(snapshot));
+    const auto& archive = snapshot.recoil_archive;
+    result["batch_archive"] = {{"schema",2},{"available",archive.available},{"running",archive.running},
+        {"acquisition_run_id",archive.acquisition_run_id},{"directory",archive.directory},{"error",archive.error},
+        {"last_sequence",std::to_string(archive.last_sequence)},{"files_written",archive.files_written},
+        {"complete_batches",archive.complete_batches},{"incomplete_batches",archive.incomplete_batches},
+        {"total_bytes",archive.total_bytes}};
     if (snapshot.recoil_telemetry_available) {
         const auto& state = snapshot.recoil;
         result["final"] = {{"phase",static_cast<int>(state.phase)}, {"reason",RecoilReasonName(state.reason)},

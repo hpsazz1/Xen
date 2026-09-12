@@ -65,6 +65,8 @@ struct Runtime::Impl {
     source_context::SourceContextClient source_context_client;
     weapon::GsiReceiver gsi_receiver;
     std::atomic<std::shared_ptr<RecoilWorker>> recoil_worker;
+    std::optional<RecoilArchiveConfig> recoil_archive_config;
+    std::atomic<std::shared_ptr<RecoilBatchArchive>> recoil_archive;
     std::shared_ptr<MotionLedger> motion_ledger;
     std::unordered_map<std::string, std::shared_ptr<const RecoilProfile>> recoil_profiles;
     // 只在启动时写入，并受snapshot_mutex保护；就绪提示按当前武器查询。
@@ -399,7 +401,17 @@ struct Runtime::Impl {
                 },
                 [this] { if (auto trigger = trigger_worker.load()) return trigger->firing_signal(); return TriggerFiringSignal{}; });
             if (!worker->start(config.recoil)) { set_error("压枪调度启动失败"); return false; }
-            recoil_worker.store(std::move(worker));
+            recoil_worker.store(worker);
+            if (recoil_archive_config) {
+                auto archive = std::make_shared<RecoilBatchArchive>();
+                recoil_archive.store(archive);
+                if (!archive->start(*recoil_archive_config, [worker](std::uint64_t after, std::size_t maximum) {
+                        return worker->read_execution_events(after, maximum);
+                    })) {
+                    set_error("压枪归档启动失败：" + archive->snapshot().error);
+                    return false;
+                }
+            }
         }
         return true;
     }
@@ -1040,6 +1052,12 @@ struct Runtime::Impl {
             current_snapshot.recoil = worker->snapshot(); current_snapshot.recoil_telemetry_available = true;
             current_snapshot.recoil_execution_log = worker->execution_log();
         }
+        // 先停止事件生产，再读尽最终边界；磁盘工作始终在输出锁外。
+        if (auto archive = recoil_archive.exchange(std::shared_ptr<RecoilBatchArchive>{})) {
+            archive->stop();
+            std::lock_guard lock(snapshot_mutex);
+            current_snapshot.recoil_archive = archive->snapshot();
+        }
         {
             std::lock_guard lock(snapshot_mutex);
             current_snapshot.weapon_snapshot = gsi_receiver.snapshot();
@@ -1112,7 +1130,8 @@ bool Runtime::start(const AppConfig& config) noexcept {
 }
 
 bool Runtime::start(const AppConfig& config,
-                    std::shared_ptr<IMouseController> input_device) noexcept {
+                    std::shared_ptr<IMouseController> input_device,
+                    std::optional<RecoilArchiveConfig> archive) noexcept {
     if (!impl_) return false;
     std::lock_guard<std::mutex> lifecycle_lock(impl_->lifecycle_mutex);
     // 上次失败可能留下已退出但仍 joinable 的线程，先完整回收。
@@ -1131,6 +1150,9 @@ bool Runtime::start(const AppConfig& config,
     }
     impl_->set_state(RuntimeState::STARTING);
     try {
+        // 证据配置只取实际执行配置，调用者只能提供归档身份与资源位置。
+        if (archive) archive->recoil = config.recoil;
+        impl_->recoil_archive_config = std::move(archive);
         if (!impl_->initialize(config, std::move(input_device))) {
             impl_->release_modules();
             impl_->set_state(RuntimeState::FAILED);
@@ -1457,6 +1479,7 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
     try {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
         auto result = impl_->current_snapshot;
+        if (auto archive = impl_->recoil_archive.load()) result.recoil_archive = archive->snapshot();
         if (auto trigger = impl_->trigger_worker.load()) {
             result.trigger = trigger->snapshot(); result.trigger_telemetry_available = true;
         }

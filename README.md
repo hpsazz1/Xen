@@ -80,7 +80,7 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、Open
 分别结束反向按键。允许键只授予许可；开关或按键本身不触发制动。
 
 Runtime 已提供 `request_auto_stop(request_id)` / `cancel_auto_stop(request_id)` 供后续自动扳机调用，
-请求编号在会话中严格递增。自动扳机、压枪尚未实现，因此正常应用当前没有自动制动请求来源。
+请求编号在会话中严格递增。自动扳机可请求制动；估算完成不等于已有独立停稳观察。
 独立调度在没有图像或目标时仍推进释放；暂停、End、输入异常、改向与请求到期均取消并清理。
 每请求最多保持 500 毫秒后开始归还；已在途设备应答可能推迟实际清理，不能视作硬实时保证。
 
@@ -307,10 +307,33 @@ GSI 只用于武器、弹药及换弹上下文，不能提供弹道曲线、逐�
 实体左键与自动扳机按下都可建立估计起点；失焦、换枪、数据过期、未知回执后须重新释放和按下。
 曲线耗尽不循环，恢复时间未经校准时不自动接续下一段。
 
+未校准候选通过编辑器“校准此版本”准备独立会话：选定已保存版本，填写已保存配置路径、
+新目录及一次性环境/预算，准备后复制完整前台命令。先退出应用释放设备，再由用户执行该命令。
+准备不启动设备；独立工具仅接受人工保持键和实体左键，不启动 Aim、自动扳机或自动急停。
+保持键与取消键必须不同且不能使用鼠标键或 WASD。每次准备绑定曲线与配置摘要，只允许一次弹序；
+取消、超时、上下文失效或未知回执后不能续跑。命令相位预算只约束发送时限，不代表实测校准结果。
+
+命令行离线入口为 `xen_recoil_calibration.exe prepare PROFILE CONFIG REQUEST NEW_DIR` 和
+`xen_recoil_calibration.exe inspect SESSION`。`REQUEST` JSON 包含 `environment`
+（`weapon_id`, `game_build`, `input_path`, `conditions`, `sensitivity`）、`hold_virtual_key`、
+`cancel_virtual_key` 和 `limits`。后者必须明确填写 `max_firing_sessions`（仅 1）、
+`max_session_duration_ms`、`max_firing_duration_ms`、`max_sent_l1_counts`、`max_command_l1_counts`、
+`rolling_window_ms`、`rolling_window_counts`、`command_phase_budget_ms`。
+生成目录中的 `TASK.md` 给出唯一绑定命令；不要自行省略物理输出标志和确认串。
+结果保存原候选、预算和原始执行记录，`calibration_result` 与 `physical_acceptance` 保持空值；
+人工完成真实测量后再另存校准版本并显式发布。
+
+正常应用开启压枪后，后台将每次射击的 BEGIN/COMMAND/END 独立归档至
+`cache/runtime/<采集Run>-recoil-batches`。这不依赖普通 Log 等级，模型重载仍沿用同一采集身份。
+单批上限 32768 条记录、16 MiB；单会话上限 4096 个文件、256 MiB。覆盖、缺边界、写入失败和
+超限会显式标记，辅助页和 Debug 报告显示归档状态。后台磁盘写入不占用设备输出锁。
+
 “弹道自动优化”独立于实时输出。导入已结束的 Run 和测量后，模块检查环境/曲线/回执时序、
 响应标定是否可辨识，再用稳健拟合生成有界候选，并显示留出数据的离线预测对比。
-候选不会覆盖活动版；预测改善不等于新候选已取得实测改善。原始报告记录独立 `recoil.schema1`、
-会话起点、逐命令回执、实际曲线版本及记录缺口，便于持续积累可复核的数据。
+候选不会覆盖活动版；预测改善不等于新候选已取得实测改善。保留旧 Debug `recoil.schema1` 兼容，
+新的逐次射击文件使用 `recoil.schema2`，包含会话起点、完整边界、逐命令回执与实际曲线版本。
+数据集仅接收自然结束、完整且已校准的批次；同一采集 Run 不能拆作独立留出。
+未校准候选的原始校准记录不能直接进入优化拟合，命令相位预算也不能冒充已验证相位容差。
 
 命令行也可独立分析：
 

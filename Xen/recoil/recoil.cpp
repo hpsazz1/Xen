@@ -1,4 +1,5 @@
 #include "recoil/recoil.h"
+#include "recoil/recoil_calibration.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -176,10 +177,16 @@ const char* RecoilReasonName(RecoilReason r) noexcept {
     case RecoilReason::LIMIT:return "limit";
     }return "invalid";
 }
+RecoilController::RecoilController(std::shared_ptr<const RecoilCalibrationPermit> permit)
+    : calibration_permit_(std::move(permit)), calibration_claimed_(calibration_permit_&&calibration_permit_->try_claim_controller()) {}
+double RecoilController::phase_budget_ms() const noexcept {
+    if(calibration_permit_)return calibration_permit_->limits().command_phase_budget_ms;
+    return profile_ ? profile_->phase_tolerance_ms.value_or(0) : 0;
+}
 RecoilDecision RecoilController::result() const noexcept {
     RecoilDecision decision;decision.snapshot=state_;
-    if(active_&&profile_&&profile_->phase_tolerance_ms)
-        decision.next_deadline=after(last_sample_at_,*profile_->phase_tolerance_ms);
+    if(active_&&profile_&&phase_budget_ms()>0)
+        decision.next_deadline=after(last_sample_at_,phase_budget_ms());
     return decision;
 }
 RecoilDecision RecoilController::cancel(RecoilReason reason,RecoilTime now) noexcept {
@@ -206,7 +213,14 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
         profile_valid_=profile_&&validate_recoil_profile(*profile_,error);
     }
     if(!profile_valid_)return cancel(RecoilReason::INVALID_PROFILE,now);
-    if(!execution_profile(*profile_))return cancel(RecoilReason::UNCALIBRATED,now);
+    if(calibration_permit_) {
+        if(!calibration_claimed_ || !calibration_permit_->matches(profile_) || now<calibration_permit_->armed_at() || now>=calibration_permit_->expires_at())
+            return cancel(RecoilReason::UNCALIBRATED,now);
+        // 一次授权只允许一个弹序；不得借释放或recovery_qualified再次起压。
+        if(has_fired_&&!active_)return cancel(RecoilReason::EXHAUSTED,now);
+        if(active_&&elapsed(now,started_at_)>=calibration_permit_->limits().max_firing_duration_ms)
+            return cancel(RecoilReason::LIMIT,now);
+    } else if(!execution_profile(*profile_))return cancel(RecoilReason::UNCALIBRATED,now);
     if(!input.healthy||!input.focused||!input.permission||!input.profile_conditions_match||!weapon_generation_||!device_epoch_)
         return cancel(RecoilReason::CONTEXT,now);
     if(state_.faulted)return result();
@@ -225,14 +239,14 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
             elapsed(now,released_at_)>=*profile_->recovery_ms);
         if(!recovered)return cancel(RecoilReason::RESET_UNVERIFIED,now);
         const auto start=input.firing_started_at==RecoilTime{}?now:input.firing_started_at;
-        if(start>now||elapsed(now,start)>*profile_->phase_tolerance_ms)return cancel(RecoilReason::LATE,now);
+        if(start>now||elapsed(now,start)>phase_budget_ms())return cancel(RecoilReason::LATE,now);
         if(state_.session_id==std::numeric_limits<std::uint64_t>::max())return cancel(RecoilReason::LIMIT,now);
         ++state_.session_id;active_=has_fired_=true;released_since_firing_=false;release_seen_=false;
         sampled_={};started_at_=last_sample_at_=start;
         state_.phase=RecoilPhase::FIRING;state_.reason=RecoilReason::NONE;
         if(now==start)return result();
     }
-    if(elapsed(now,last_sample_at_)>*profile_->phase_tolerance_ms)return cancel(RecoilReason::LATE,now);
+    if(elapsed(now,last_sample_at_)>phase_budget_ms())return cancel(RecoilReason::LATE,now);
     auto sample=sample_recoil_profile(*profile_,elapsed(now,started_at_));
     const double x=sample.x_counts-sampled_.x_counts+state_.remainder_x;
     const double y=sample.y_counts-sampled_.y_counts+state_.remainder_y;
@@ -248,7 +262,7 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
     }
     if(next_command_id_==std::numeric_limits<std::uint64_t>::max())return cancel(RecoilReason::LIMIT,now);
     pending_={++next_command_id_,state_.session_id,profile_->revision,weapon_generation_,device_epoch_,
-        now,after(now,*profile_->phase_tolerance_ms),dx,dy};
+        now,after(now,phase_budget_ms()),dx,dy};
     pending_sample_=sample;pending_remainder_x_=x-dx;pending_remainder_y_=y-dy;
     state_.remainder_x=state_.remainder_y=0;
     state_.command_id=pending_.command_id;state_.pending=true;state_.phase=RecoilPhase::PENDING;

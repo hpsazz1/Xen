@@ -27,6 +27,15 @@ int main() {
         check(json["execution"]["records"][0]["source_firing_id"].is_null() &&
               json["execution"]["records"][0]["firing_command_interval_ns"].is_null(), "未知开火来源和命令区间不得伪造零值");
         check(json["config"]["conditions"] == "synthetic" && json.dump().find("token") == std::string::npos, "配置绑定且不带认证");
+        snapshot.recoil_archive.acquisition_run_id = "one-run";
+        snapshot.recoil_archive.directory = "cache/runtime/one-run-recoil-batches";
+        snapshot.recoil_archive.available = false;
+        snapshot.recoil_archive.error = "write_failed";
+        snapshot.recoil_archive.incomplete_batches = 1;
+        json = nlohmann::json::parse(recoil_metadata_json(config, snapshot));
+        check(json["batch_archive"]["acquisition_run_id"] == "one-run" &&
+            json["batch_archive"]["error"] == "write_failed" && json["batch_archive"]["incomplete_batches"] == 1,
+            "报告保留独立采集身份与归档故障");
         LogConfig logging; logging.global_level = LogLevel::OFF;
         logging.enable_console = false; logging.enable_file = false; logging.enable_debug_file = false;
         Log::init(logging);
